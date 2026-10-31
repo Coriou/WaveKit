@@ -2,7 +2,10 @@
 // link without reconnecting, decoders wait ("source-paused") and the waterfall stops on its last rows. The feed
 // state is the newest of what the source rows said (GET /api/sources, `source:status`) and what the last pause
 // or resume answered here. The controller remembers every feed a row carries, so a `source:status` without
-// `feed` (an older core's socket) keeps the one known, and a connected source is never shown paused.
+// `feed` (an older core's socket) keeps the one known, and a connected source is never shown paused. Feeds
+// with the same `since` (resuming then live within one millisecond) are told apart by arrival: socket and REST
+// deliveries arrive in order, so the later one wins. A 200 answer with `persisted: false` changed the feed but
+// did not save it; the entry keeps that until a repeated call (which retries the write) saves it.
 import type {
 	DecoderInfo,
 	ExtendedSourceStatus,
@@ -23,6 +26,8 @@ export interface FeedEntry {
 	readonly pending: FeedOp | null
 	/** Why the last call failed (other than a failed resume, which the feed itself says). */
 	readonly error: string | null
+	/** The call whose change the core could not save (`persisted: false`): repeating it retries the write. */
+	readonly unsaved: FeedOp | null
 }
 
 export interface FeedState {
@@ -34,15 +39,32 @@ export interface FeedResult {
 	/** True when the call changed the feed (false for a repeated pause or resume). */
 	readonly changed: boolean
 	readonly feed: SourceFeed | null
-	/** Safe words for a failure; null on success. */
+	/** False when the core changed the feed but could not save it (it will not survive a restart). */
+	readonly persisted: boolean
+	/** Safe words for a failure or an unsaved change; null on success. `ok` is false for both. */
 	readonly error: string | null
 }
 
 /** What the receiver shows: "live", "paused", "resuming" or "error" (a resume failed; still paused). */
 export type FeedView = SourceFeed["state"]
 
-const EMPTY: FeedEntry = { feed: null, pending: null, error: null }
+const EMPTY: FeedEntry = {
+	feed: null,
+	pending: null,
+	error: null,
+	unsaved: null,
+}
 
+/** What an unsaved pause or resume says: it holds now, a core restart undoes it. */
+export const FEED_UNSAVED_TEXT: Readonly<Record<FeedOp, string>> = {
+	pause: "Paused, but not saved — it will not survive a restart",
+	resume: "Resumed, but not saved — the receiver starts paused after a restart",
+}
+
+/**
+ * The newer of two feeds, `b` the later to arrive: the later `since` wins, and on equal times `b` (a feed
+ * reaches the same `since` only through a quick transition, resuming then live, sent in that order).
+ */
 function newer(a: SourceFeed | null, b: SourceFeed | null): SourceFeed | null {
 	if (a === null) return b
 	if (b === null) return a
@@ -50,7 +72,7 @@ function newer(a: SourceFeed | null, b: SourceFeed | null): SourceFeed | null {
 	const tb = Date.parse(b.since)
 	if (Number.isNaN(ta)) return b
 	if (Number.isNaN(tb)) return a
-	return tb > ta ? b : a
+	return tb >= ta ? b : a
 }
 
 function isFeed(value: unknown): value is SourceFeed {
@@ -66,8 +88,8 @@ function isFeed(value: unknown): value is SourceFeed {
 }
 
 /**
- * The feed to show for a source: the newest of the source's own `feed` and the one known here. A recording
- * (no feed anywhere) reads null. A source the core reports connected is live whatever is cached: the cache can
+ * The feed to show for a source: the newest of the source's own `feed` and the one known here (the one known
+ * here on equal times: it took in every row, so it arrived last). A recording (no feed anywhere) reads null. A source the core reports connected is live whatever is cached: the cache can
  * only lag (another browser resumed it), never a paused source stream.
  */
 export function feedOf(
@@ -98,6 +120,18 @@ export function pausedDecoders(
 			d.suspended === true &&
 			d.suspension?.reasonCode === "source-paused",
 	)
+}
+
+/** The unsaved call to offer again while the feed still reads what it set; null otherwise. */
+export function unsavedOp(
+	entry: FeedEntry | undefined,
+	feed: SourceFeed | null,
+): FeedOp | null {
+	const op = entry?.unsaved ?? null
+	if (op === null || feed === null) return null
+	if (op === "pause" ? feed.state === "paused" : feed.state === "live")
+		return op
+	return null
 }
 
 /** "Paused 14:02" style: the local time the feed entered its state, or null when unknown. */
@@ -143,8 +177,8 @@ export class FeedController extends Store<FeedState> {
 	}
 
 	/**
-	 * Keeps the newest feed each row carries, so a later row without `feed` (an older core's
-	 * `source:status`) does not lose it. Such a row never changes the cache: a connected one already
+	 * Keeps the newest feed each row carries (the row on equal times: it arrived later), so a later row
+	 * without `feed` (an older core's `source:status`) does not lose it. Such a row never changes the cache: a connected one already
 	 * reads live in `feedOf`, and one sent before a pause may arrive after its answer.
 	 */
 	remember(rows: readonly Pick<ExtendedSourceStatus, "id" | "feed">[]): void {
@@ -191,6 +225,7 @@ export class FeedController extends Store<FeedState> {
 				ok: false,
 				changed: false,
 				feed: this.entry(sourceId).feed,
+				persisted: true,
 				error: busy === "pause" ? "Already pausing" : "Already resuming",
 			}
 		this.patch(sourceId, { pending: op, error: null })
@@ -199,8 +234,17 @@ export class FeedController extends Store<FeedState> {
 				`/api/sources/${encodeURIComponent(sourceId)}/${op}`,
 			)
 			const feed = isFeed(answer?.feed) ? answer.feed : null
-			this.patch(sourceId, { pending: null, feed })
-			return { ok: true, changed: answer?.changed === true, feed, error: null }
+			// an older core leaves `persisted` out: only an explicit false is unsaved
+			const persisted = answer?.persisted !== false
+			this.patch(sourceId, {
+				pending: null,
+				feed,
+				unsaved: persisted ? null : op,
+			})
+			const changed = answer?.changed === true
+			return persisted
+				? { ok: true, changed, feed, persisted, error: null }
+				: { ok: false, changed, feed, persisted, error: FEED_UNSAVED_TEXT[op] }
 		} catch (error) {
 			// 503 SOURCE_RESUME_FAILED carries the feed ("error"): the source stays paused, resume retries
 			if (isApiError(error) && error.code === "SOURCE_RESUME_FAILED") {
@@ -217,6 +261,7 @@ export class FeedController extends Store<FeedState> {
 					ok: false,
 					changed: true,
 					feed,
+					persisted: true,
 					error: feed.error ?? SOURCE_RESUME_FAILED_MESSAGE,
 				}
 			}
@@ -226,6 +271,7 @@ export class FeedController extends Store<FeedState> {
 				ok: false,
 				changed: false,
 				feed: this.entry(sourceId).feed,
+				persisted: true,
 				error: text,
 			}
 		}

@@ -21,6 +21,7 @@ import {
 	receiverSlot,
 } from "../../src/features/receiver/ReceiverIsland.tsx"
 import {
+	FEED_UNSAVED_TEXT,
 	feedControllerFor,
 	feedOf,
 	feedTarget,
@@ -144,12 +145,20 @@ describe("receiver feed: what is shown", () => {
 				fc.option(arbFeed, { nil: null }),
 				fc.boolean(),
 				(own, cached, connected) => {
-					const entry: FeedEntry = { feed: cached, pending: null, error: null }
+					const entry: FeedEntry = {
+						feed: cached,
+						pending: null,
+						error: null,
+						unsaved: null,
+					}
 					const source = own ? { connected, feed: own } : { connected }
 					const shown = feedOf(source, entry)
 					if (!own && !cached) return shown === null
 					if (!own && cached && connected && cached.state !== "live")
 						return shown?.state === "live"
+					// equal times: the cache took in every row, so it is the later to arrive
+					if (own && cached && own.since === cached.since)
+						return shown === cached
 					const candidates = [own, cached].filter(
 						(f): f is SourceFeed => f !== undefined && f !== null,
 					)
@@ -245,6 +254,96 @@ describe("receiver feed: pause and resume", () => {
 		const r = await feedControllerFor(services.data).pause("nope")
 		expect(r).toMatchObject({ ok: false, error: "The receiver is gone" })
 		await close()
+	})
+
+	it("warns when a pause is not saved, and a repeated pause saves it", async () => {
+		// Validates: HTTP 200 with persisted:false is not shown as plain success
+		const { services, server, refresh, close } = await loaded()
+		const feeds = feedControllerFor(services.data)
+		server.feed.failNextSaves(1)
+		const unsaved = await feeds.pause("rtl-0")
+		expect(unsaved).toMatchObject({
+			ok: false,
+			changed: true,
+			persisted: false,
+			feed: { state: "paused" },
+			error: FEED_UNSAVED_TEXT.pause,
+		})
+		expect(feeds.entry("rtl-0")).toMatchObject({
+			unsaved: "pause",
+			error: null,
+		})
+		await refresh()
+		let html = panel(services)
+		expect(html).toContain("Receiver paused")
+		expect(html).toContain('data-unsaved="pause"')
+		expect(html).toContain(FEED_UNSAVED_TEXT.pause)
+		expect(html).toMatch(/data-unsaved="pause"[^]*>Retry<\/button>/)
+		// Retry repeats the pause: the core changes nothing and saves it this time
+		const saved = await feeds.pause("rtl-0")
+		expect(saved).toMatchObject({
+			ok: true,
+			changed: false,
+			persisted: true,
+			error: null,
+		})
+		expect(feeds.entry("rtl-0").unsaved).toBeNull()
+		html = panel(services)
+		expect(html).not.toContain(FEED_UNSAVED_TEXT.pause)
+		expect(html).toContain("Receiver paused")
+		await close()
+	})
+
+	it("warns when a resume is not saved, and drops the warning once the feed moves on", async () => {
+		const { services, server, refresh, close } = await loaded()
+		const feeds = feedControllerFor(services.data)
+		await feeds.pause("rtl-0")
+		server.feed.failNextSaves(1)
+		const r = await feeds.resume("rtl-0")
+		expect(r).toMatchObject({
+			ok: false,
+			persisted: false,
+			feed: { state: "live" },
+			error: FEED_UNSAVED_TEXT.resume,
+		})
+		await refresh()
+		expect(panel(services)).toContain(FEED_UNSAVED_TEXT.resume)
+		// the palette says so too, with no Undo
+		server.feed.failNextSaves(1)
+		const palette = await runAction(
+			services,
+			{ kind: "feed", op: "pause", sourceId: "rtl-0" },
+			"Receiver paused",
+		)
+		expect(palette).toMatchObject({
+			text: FEED_UNSAVED_TEXT.pause,
+			tone: "warn",
+		})
+		expect(palette.undo).toBeUndefined()
+		// the receiver is paused now: the unsaved resume no longer applies, the unsaved pause does
+		await refresh()
+		const html = panel(services)
+		expect(html).not.toContain(FEED_UNSAVED_TEXT.resume)
+		expect(html).toContain(FEED_UNSAVED_TEXT.pause)
+		await close()
+	})
+
+	it("reads an answer without persisted (an older core) as saved", async () => {
+		const feeds = feedControllerFor({
+			api: {
+				post: async () => ({
+					id: "s",
+					changed: true,
+					feed: { state: "paused", since: "2027-01-01T00:00:00.000Z" },
+				}),
+			} as never,
+		})
+		expect(await feeds.pause("s")).toMatchObject({
+			ok: true,
+			persisted: true,
+			error: null,
+		})
+		expect(feeds.entry("s").unsaved).toBeNull()
 	})
 
 	it("toggles the tuner's receiver (the P key)", async () => {
@@ -406,11 +505,20 @@ describe("receiver feed: the island", () => {
 		await close()
 	})
 
-	it("learns the feed from source rows: the newest wins and a row without feed changes nothing", () => {
-		// Validates: FeedController.remember keeps the newest feed any row carried
+	it("learns the feed from source rows: the newest wins, the later on equal times, and a row without feed changes nothing", () => {
+		// Validates: FeedController.remember keeps the newest feed any row carried; ties go to arrival order
+		// a few times only, so equal `since` values (with different states) are common
+		const arbTied = fc.record({
+			state: fc.constantFrom(...STATES),
+			since: fc
+				.integer({ min: 0, max: 3 })
+				.map(t => new Date(1_800_000_000_000 + t).toISOString()),
+		})
 		fc.assert(
 			fc.property(
-				fc.array(fc.option(arbFeed, { nil: undefined }), { maxLength: 8 }),
+				fc.array(fc.option(fc.oneof(arbFeed, arbTied), { nil: undefined }), {
+					maxLength: 8,
+				}),
 				rows => {
 					const feeds = feedControllerFor({ api: {} as never })
 					for (const feed of rows)
@@ -419,11 +527,52 @@ describe("receiver feed: the island", () => {
 					const known = feeds.entry("s").feed
 					if (seen.length === 0) return known === null
 					const newest = Math.max(...seen.map(f => Date.parse(f.since)))
-					return known !== null && Date.parse(known.since) === newest
+					const last = seen.filter(f => Date.parse(f.since) === newest).at(-1)
+					return known === last
 				},
 			),
 			{ numRuns: 200 },
 		)
+	})
+
+	it("follows ordered source:status rows with equal times: resuming then live reads live", async () => {
+		// Validates: a resume that reconnects within the same millisecond does not strand "Resuming…"
+		const { services, close } = await loaded()
+		const { data } = services
+		const feeds = feedControllerFor(data)
+		const row = data.sources.byId("rtl-0")
+		if (!row) throw new Error("no source")
+		const since = "2027-01-01T00:00:00.000Z"
+		const push = (state: SourceFeedState, connected: boolean) =>
+			data.sources.set({
+				...data.sources.get(),
+				sources: [{ ...row, connected, feed: { state, since } }],
+			})
+		push("paused", false)
+		expect(feedTarget(data)?.feed.state).toBe("paused")
+		push("resuming", false)
+		expect(feedTarget(data)?.feed.state).toBe("resuming")
+		push("live", true)
+		expect(feeds.entry("rtl-0").feed?.state).toBe("live")
+		expect(feedTarget(data)?.feed).toEqual({ state: "live", since })
+		expect(head(services)).not.toContain("Resuming")
+		expect(toggleFeed(data)?.op).toBe("pause")
+		await close()
+	})
+
+	it("takes the later of two equal-time feeds whatever their states", () => {
+		const feeds = feedControllerFor({ api: {} as never })
+		const since = "2027-01-01T00:00:00.000Z"
+		feeds.remember([{ id: "s", feed: { state: "live", since } }])
+		feeds.remember([{ id: "s", feed: { state: "resuming", since } }])
+		expect(feeds.entry("s").feed?.state).toBe("resuming")
+		// the source's own row is older in arrival than the cache on equal times
+		expect(
+			feedOf(
+				{ connected: false, feed: { state: "live", since } },
+				feeds.entry("s"),
+			)?.state,
+		).toBe("resuming")
 	})
 
 	it("keeps the pause it was told about when a status arrives without a feed", async () => {

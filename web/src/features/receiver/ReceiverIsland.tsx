@@ -49,12 +49,14 @@ import {
 	overloadHintText,
 } from "./gain.ts"
 import {
+	FEED_UNSAVED_TEXT,
 	feedControllerFor,
 	feedLabel,
 	feedOf,
 	isPaused,
 	pausedDecoders,
 	sinceText,
+	unsavedOp,
 } from "./feed.ts"
 import { receiverSummary, sourceTitle } from "./summary.ts"
 import { ratePolicyNote } from "./notices.ts"
@@ -149,18 +151,43 @@ function FeedControl() {
 	const waiting = pausedDecoders(list, id).length
 	const since = sinceText(feed)
 	const failure = feedEntry?.error ?? null
-	const note = failure && (
-		<span className="wkf-warn wkf-rx-error" role="alert">
-			<span className="wkf-grow">{failure}</span>
-			<button
-				type="button"
-				className="wkf-rx-dismiss"
-				aria-label="Dismiss"
-				onClick={() => feeds.dismiss(id)}
-			>
-				<Icon name="close" size={14} />
-			</button>
-		</span>
+	// a change the core holds but could not save: Retry repeats the call, which retries the write
+	const unsaved = unsavedOp(feedEntry, feed)
+	const note = (
+		<>
+			{unsaved && (
+				<span
+					className="wkf-warn wkf-rx-error"
+					role="alert"
+					data-unsaved={unsaved}
+				>
+					<span className="wkf-grow">{FEED_UNSAVED_TEXT[unsaved]}</span>
+					<Button
+						size="sm"
+						variant="outline"
+						disabled={readOnly || pending !== null}
+						onClick={() =>
+							void (unsaved === "pause" ? feeds.pause(id) : feeds.resume(id))
+						}
+					>
+						{pending === unsaved ? "Saving…" : "Retry"}
+					</Button>
+				</span>
+			)}
+			{failure && (
+				<span className="wkf-warn wkf-rx-error" role="alert">
+					<span className="wkf-grow">{failure}</span>
+					<button
+						type="button"
+						className="wkf-rx-dismiss"
+						aria-label="Dismiss"
+						onClick={() => feeds.dismiss(id)}
+					>
+						<Icon name="close" size={14} />
+					</button>
+				</span>
+			)}
+		</>
 	)
 	if (!paused)
 		return (

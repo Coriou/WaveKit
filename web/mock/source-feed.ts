@@ -2,7 +2,7 @@
  * Receiver feed pause / resume for the mock core, kept apart from server.ts:
  * POST /api/sources/:id/pause and /resume as src/api/routes/sources.ts answers them (200 with
  * `{ id, feed, changed }`, idempotent `changed: false`, 404 `SOURCE_NOT_FOUND`, 503
- * `SOURCE_RESUME_FAILED` with the feed in `error`). Like SourceManager: pause from `paused` is a
+ * `SOURCE_RESUME_FAILED` with the feed in `error`, `persisted: false` when saving failed). Like SourceManager: pause from `paused` is a
  * no-op, pause from `error` changes to `paused`, resume reads `resuming` while it dials, then `live`
  * or `error`. server.ts reads `feed()` into every source status, suspends the source's decoders with
  * reason `source-paused` and sends no spectrum frames while it is not live.
@@ -23,6 +23,11 @@ export interface SourceFeedMockOptions {
 	resumeMs?: number
 	/** The next this many resumes fail (WAVEKIT_MOCK_RESUME_FAILURES), to try the retry. */
 	resumeFailures?: number
+	/**
+	 * The next this many 200 answers say `persisted: false` (WAVEKIT_MOCK_PERSIST_FAILURES): the change holds
+	 * but its save failed; a repeated call retries the save, as SourceManager.persistFeeds.
+	 */
+	persistFailures?: number
 	/** After every feed change: re-send the source and decoder statuses. */
 	onChange: () => void
 }
@@ -33,6 +38,8 @@ export interface SourceFeedMock {
 	paused(): boolean
 	/** Makes the next `n` resumes fail (tests). */
 	failNextResumes(n: number): void
+	/** Makes the next `n` saves fail: those answers say `persisted: false` (tests). */
+	failNextSaves(n: number): void
 }
 
 export function registerSourceFeedMock(
@@ -41,6 +48,7 @@ export function registerSourceFeedMock(
 ): SourceFeedMock {
 	const resumeMs = options.resumeMs ?? 400
 	let failures = Math.max(0, options.resumeFailures ?? 0)
+	let saveFailures = Math.max(0, options.persistFailures ?? 0)
 	let feed: SourceFeed = { state: "live", since: new Date().toISOString() }
 	let busy: Promise<unknown> = Promise.resolve()
 
@@ -99,7 +107,12 @@ export function registerSourceFeedMock(
 						id,
 						feed: result.feed,
 					})
-				const body: SourceFeedResponse = { id, ...result }
+				let persisted = true
+				if (saveFailures > 0) {
+					saveFailures -= 1
+					persisted = false
+				}
+				const body: SourceFeedResponse = { id, ...result, persisted }
 				return body
 			},
 		)
@@ -109,6 +122,9 @@ export function registerSourceFeedMock(
 		paused: () => feed.state !== "live",
 		failNextResumes: n => {
 			failures = Math.max(0, n)
+		},
+		failNextSaves: n => {
+			saveFailures = Math.max(0, n)
 		},
 	}
 }

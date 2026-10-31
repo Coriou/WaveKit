@@ -147,6 +147,8 @@ export interface MockServerOptions {
 	resumeMs?: number
 	/** The next this many receiver resumes fail with 503 (WAVEKIT_MOCK_RESUME_FAILURES). Default 0. */
 	resumeFailures?: number
+	/** The next this many receiver pauses / resumes answer `persisted: false` (WAVEKIT_MOCK_PERSIST_FAILURES). */
+	persistFailures?: number
 	/**
 	 * `source:status` on the socket leaves `feed` out, as a core older than the pause feature's socket
 	 * field (WAVEKIT_MOCK_SOCKET_OMITS_FEED=1); `GET /api/sources` still carries it.
@@ -1709,6 +1711,9 @@ export async function buildMockServer(
 		...(options.resumeFailures !== undefined
 			? { resumeFailures: options.resumeFailures }
 			: {}),
+		...(options.persistFailures !== undefined
+			? { persistFailures: options.persistFailures }
+			: {}),
 		onChange: () => {
 			broadcast("sources", "source:status", sourceStatusEvent())
 			for (const d of decoders())
@@ -2583,6 +2588,7 @@ async function main(): Promise<void> {
 	const activityStoreEnv = env["WAVEKIT_MOCK_ACTIVITY_STORE"]
 	const activityOpenEnv = env["WAVEKIT_MOCK_ACTIVITY_OPEN_MS"]
 	const resumeFailuresEnv = env["WAVEKIT_MOCK_RESUME_FAILURES"]
+	const persistFailuresEnv = env["WAVEKIT_MOCK_PERSIST_FAILURES"]
 	const server = await buildMockServer({
 		host: env["WAVEKIT_MOCK_HOST"] ?? "127.0.0.1",
 		port,
@@ -2607,6 +2613,9 @@ async function main(): Promise<void> {
 		activityFloods: env["WAVEKIT_MOCK_ACTIVITY_FLOODS"] !== "0",
 		...(resumeFailuresEnv !== undefined
 			? { resumeFailures: Number(resumeFailuresEnv) }
+			: {}),
+		...(persistFailuresEnv !== undefined
+			? { persistFailures: Number(persistFailuresEnv) }
 			: {}),
 		...(env["WAVEKIT_MOCK_SOCKET_OMITS_FEED"] === "1"
 			? { socketOmitsFeed: true }

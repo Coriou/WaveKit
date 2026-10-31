@@ -136,7 +136,8 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   decoders wait (their status reads paused because the receiver is paused) and the tuner
   controls are locked until you resume. The island shows `Receiver paused · since 14:02 ·
 waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads `Paused`. The
-  pause survives a core restart. **Resume** reconnects once and restores the tuning; if the
+  pause survives a core restart; if the core could not save it, the island warns `Paused, but not
+  saved — it will not survive a restart` with **Retry**, which saves it again. **Resume** reconnects once and restores the tuning; if the
   receiver cannot be reached, the island says `Resume failed` with the reason and a **Retry**
   button, and the receiver stays paused. In the ⌘K palette, **Pause receiver** (while live) or
   **Resume receiver** (while paused) does the same, and the `P` key toggles it from anywhere; a
