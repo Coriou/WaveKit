@@ -7,7 +7,9 @@ import type {
 	DecoderVerdict,
 	DecoderVerdictAction,
 	DecoderVerdictCode,
+	ScanRange,
 } from "@wavekit/api-types"
+import { SCANNER_BANDPLANS } from "./data.ts"
 
 /** The core's decoding window: output in the last minute reads "decoding". */
 const DECODING_WINDOW_MS = 60_000
@@ -219,6 +221,50 @@ export const MOCK_TUNED_REACH_HZ = 200_000
 const positive = (n: unknown): n is number =>
 	typeof n === "number" && Number.isFinite(n) && n > 0
 
+/** The core's DECODER_PROTOCOLS (src/decoders/enablement/contract.ts): the band plan protocols a decoder type decodes. */
+export const MOCK_DECODER_PROTOCOLS: Readonly<
+	Record<string, readonly string[]>
+> = {
+	"dsd-fme": [
+		"dmr",
+		"p25p1",
+		"p25p2",
+		"ysf",
+		"dstar",
+		"nxdn48",
+		"nxdn96",
+		"dpmr",
+	],
+	"multimon-ng": ["pocsag", "flex"],
+}
+
+/**
+ * The core's built-in band plan ranges for EU (builtinBandplansFor("EU")): SCANNER_BANDPLANS without the canvas's
+ * synthetic `pager-431` (the core has no such built-in), plus the French paging supplement of
+ * src/core/bandplans/builtin-supplement.ts. The mock is an EU receiver, so any region code reads these.
+ */
+export const MOCK_PLAN_RANGES: readonly ScanRange[] = [
+	...SCANNER_BANDPLANS.filter(plan => plan.id !== "pager-431").flatMap(
+		plan => plan.ranges,
+	),
+	{
+		startHz: 466_025_000,
+		endHz: 466_230_000,
+		rasters: [{ spacingHz: 12_500, firstChannelHz: 466_025_000 }],
+		obwHz: [12_000],
+		protocols: ["pocsag"],
+		bandplanId: "pager-fr",
+	},
+	{
+		startHz: 446_532_500 - 6250,
+		endHz: 446_532_500 + 6250,
+		rasters: [{ spacingHz: 12_500, firstChannelHz: 446_532_500 }],
+		obwHz: [12_000],
+		protocols: ["pocsag"],
+		bandplanId: "pager-fr",
+	},
+]
+
 /** The core's tuned-band rule (bandContainsTuned) over one band; malformed values never match. */
 function bandHolds(
 	targetsHz: readonly unknown[],
@@ -247,14 +293,14 @@ function bandHolds(
 /**
  * The core's decoderCoversHz over the band assessment: within MOCK_TUNED_REACH_HZ of a target, between the
  * lowest and highest target, or inside a range widened by the reach. Without an assessed band (before the first
- * source capabilities) the same rule runs over the configured targets. The core's built-in band-plan fallback for
- * a decoder with neither is not mirrored: here no band reads false. Scanner probes never cover; malformed values
- * never match.
+ * source capabilities) the same rule runs over the configured targets. A decoder with neither covers `hz` only
+ * when a built-in band plan range there lists one of its protocols (MOCK_DECODER_PROTOCOLS over
+ * MOCK_PLAN_RANGES). Scanner probes never cover; malformed values never match.
  */
 export function mockCoversHz(
 	d: Pick<
 		DecoderInfo,
-		"owner" | "ephemeral" | "bandAssessment" | "targetFrequenciesHz"
+		"type" | "owner" | "ephemeral" | "bandAssessment" | "targetFrequenciesHz"
 	>,
 	hz: number,
 ): boolean {
@@ -264,7 +310,17 @@ export function mockCoversHz(
 	const ranges = d.bandAssessment?.rangesHz ?? []
 	if (targets.length > 0 || ranges.length > 0)
 		return bandHolds(targets, ranges, hz)
-	return bandHolds(d.targetFrequenciesHz ?? [], [], hz)
+	const configured = (d.targetFrequenciesHz ?? []).filter(positive)
+	if (configured.length > 0) return bandHolds(configured, [], hz)
+	const protocols = Object.hasOwn(MOCK_DECODER_PROTOCOLS, d.type)
+		? MOCK_DECODER_PROTOCOLS[d.type]!
+		: []
+	return MOCK_PLAN_RANGES.some(
+		r =>
+			hz >= r.startHz &&
+			hz <= r.endHz &&
+			(r.protocols ?? []).some(p => protocols.includes(p)),
+	)
 }
 
 /**

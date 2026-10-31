@@ -237,7 +237,11 @@ describe("mock failures, names and coverage match the core's", () => {
 					...(b.owner ? { owner: b.owner } : {}),
 					bandAssessment: { verdict: "in-band" as const, ...b },
 				}
-				expect({ b, hz, covers: mockCoversHz(d, hz) }).toEqual({
+				expect({
+					b,
+					hz,
+					covers: mockCoversHz({ type: "readsb", ...d }, hz),
+				}).toEqual({
 					b,
 					hz,
 					covers: decoderCoversHz({ type: "readsb", ...d }, hz),
@@ -265,11 +269,52 @@ describe("mock failures, names and coverage match the core's", () => {
 			for (const hz of [
 				1_090_000_000, 1_090_200_000, 1_090_200_001, 466_012_500, 466_225_001,
 			])
-				expect({ d, hz, covers: mockCoversHz(d, hz) }).toEqual({
+				expect({
+					d,
+					hz,
+					covers: mockCoversHz({ type: "readsb", ...d }, hz),
+				}).toEqual({
 					d,
 					hz,
 					covers: decoderCoversHz({ type: "readsb", ...d }, hz),
 				})
+	})
+
+	it("falls back to the built-in band plan for a decoder with no known band, as the core does", async () => {
+		const { decoderCoversHz } = await coreSummary()
+		// The repro: a pager decoder with no target frequency, tuned to 150 MHz (pager-vhf, pocsag/flex).
+		const pager = {
+			type: "multimon-ng",
+			bandAssessment: {
+				verdict: "unknown" as const,
+				reasonCode: "no-target-frequency" as const,
+			},
+		}
+		expect(decoderCoversHz(pager, 150_000_000)).toBe(true)
+		expect(mockCoversHz(pager, 150_000_000)).toBe(true)
+
+		const region = { code: "EU" as const, source: "default" as const }
+		const probes = [
+			150_000_000, 137_000_000, 136_999_999, 169_400_000, 169_450_000,
+			174_000_000, 174_000_001, 431_100_000, 433_920_000, 446_100_000,
+			446_532_500, 466_100_000, 466_230_001, 1_090_000_000, 0,
+		]
+		for (const type of ["multimon-ng", "dsd-fme", "readsb", "something-new"])
+			for (const hz of probes) {
+				const d = {
+					type,
+					bandAssessment: {
+						verdict: "unknown" as const,
+						reasonCode: "no-target-frequency" as const,
+						region,
+					},
+				}
+				expect({ type, hz, covers: mockCoversHz(d, hz) }).toEqual({
+					type,
+					hz,
+					covers: decoderCoversHz(d, hz),
+				})
+			}
 	})
 })
 
