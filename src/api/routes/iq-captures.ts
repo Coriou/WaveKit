@@ -5,9 +5,10 @@
  * every route (browser CSRF included) and a revocable lease for the capture and the download.
  *
  * Data streams chunk by chunk to `<name>.cu8.partial`, renamed to `<name>.cu8` when complete;
- * the metadata (`<name>.json`) is written last, so a listed capture is always whole. Partial
- * files are removed on any failure, abort or shutdown; at the first use after a crash they
- * are removed with any data or metadata file that is not part of a whole capture.
+ * the metadata (`<name>.json`, through `<name>.json.partial`) is written last, so a listed
+ * capture is always whole. Partial files are removed on any failure, abort or shutdown; at
+ * the first use after a crash only the exact names the store writes are removed: those two
+ * partial files and data without metadata beside it. Any other file is never touched.
  * Admission and commit are serialized, so the quota and the free-space floor count every
  * stored and running capture from one consistent state.
  * Bodies and logs carry fixed text: never a submitted name, a path or a parser message.
@@ -140,6 +141,13 @@ function missing(err: unknown): boolean {
 	)
 }
 
+/** The capture name of `entry` when it is exactly `<name><suffix>` with a valid name. */
+function captureName(entry: string, suffix: string): string | null {
+	if (!entry.endsWith(suffix)) return null
+	const name = entry.slice(0, -suffix.length)
+	return IQ_CAPTURE_NAME.test(name) ? name : null
+}
+
 /** The private capture directory. Every path it builds comes from a checked name. */
 export class IqCaptureStore {
 	#ready: Promise<void> | undefined
@@ -169,24 +177,24 @@ export class IqCaptureStore {
 		// The directory is dedicated to captures: make it private if it is not.
 		if ((st.mode & 0o077) !== 0) await chmod(this.dir, 0o700)
 		// No capture can be in progress before the first one starts, and every route waits for
-		// this step: partial files, and data or metadata that is not a whole capture (a crash
-		// between the data rename and the metadata publication), are leftovers. Removing them
-		// here keeps the listing, the quota and name reuse in agreement with the disk.
+		// this step. Only names the store itself writes are leftovers: `<name>.cu8.partial` and
+		// `<name>.json.partial`, and `<name>.cu8` with no `<name>.json` beside it (a crash
+		// between the data rename and the metadata publication). Every other file is left
+		// alone, a metadata file that fails validation included: it is not listed, its name
+		// stays taken and its data counts toward the quota (see usage()).
 		const entries = await readdir(this.dir)
-		for (const entry of entries)
-			if (entry.endsWith(PARTIAL)) await this.#removeFile(entry)
-		const names = new Set<string>()
-		for (const entry of entries)
-			for (const suffix of [DATA, META])
-				if (entry.endsWith(suffix)) {
-					const name = entry.slice(0, -suffix.length)
-					if (IQ_CAPTURE_NAME.test(name)) names.add(name)
-				}
-		for (const name of names)
-			if ((await this.read(name)) === null) {
-				await this.#removeFile(`${name}${META}`)
-				await this.#removeFile(`${name}${DATA}`)
+		const present = new Set(entries)
+		for (const entry of entries) {
+			const name =
+				captureName(entry, `${DATA}${PARTIAL}`) ??
+				captureName(entry, `${META}${PARTIAL}`)
+			if (name !== null) await this.#removeFile(entry)
+			else {
+				const dataName = captureName(entry, DATA)
+				if (dataName !== null && !present.has(`${dataName}${META}`))
+					await this.#removeFile(entry)
 			}
+		}
 	}
 
 	/** Removes a leftover file or link; a directory under a capture name is left alone. */
@@ -211,6 +219,10 @@ export class IqCaptureStore {
 
 	meta(name: string): string {
 		return join(this.dir, `${name}${META}`)
+	}
+
+	metaPartial(name: string): string {
+		return join(this.dir, `${name}${META}${PARTIAL}`)
 	}
 
 	async exists(name: string): Promise<boolean> {
@@ -243,24 +255,42 @@ export class IqCaptureStore {
 		}
 	}
 
-	/** Whole captures, newest first, at most IQ_CAPTURES_MAX_COUNT read. */
-	async list(): Promise<IqCapture[]> {
+	/**
+	 * Whole captures, newest first, at most IQ_CAPTURES_MAX_COUNT read, and `unlistedBytes`:
+	 * the regular data files beside metadata that fails validation. The store never writes
+	 * such a pair, so it is not removed, but its bytes are on the disk under a taken name:
+	 * the quota counts them (refusing more, never less) until that name is deleted.
+	 */
+	async usage(): Promise<{ captures: IqCapture[]; unlistedBytes: number }> {
 		const entries = (await readdir(this.dir)).slice(0, LIST_MAX_ENTRIES)
 		const names = entries
-			.filter(entry => entry.endsWith(META))
-			.map(entry => entry.slice(0, -META.length))
-			.filter(name => IQ_CAPTURE_NAME.test(name))
+			.map(entry => captureName(entry, META))
+			.filter(name => name !== null)
 			.sort()
-		const out: IqCapture[] = []
+		const captures: IqCapture[] = []
+		let unlistedBytes = 0
 		for (const name of names) {
-			// Foreign files past the count still occupy space; the quota counts what is listed.
-			if (out.length >= IQ_CAPTURES_MAX_COUNT) break
+			// Foreign files past the count still occupy space; the quota counts what is read.
+			if (captures.length >= IQ_CAPTURES_MAX_COUNT) break
 			const capture = await this.read(name)
-			if (capture) out.push(capture)
+			if (capture) captures.push(capture)
+			else unlistedBytes += await this.#dataSize(name)
 		}
-		return out.sort((a, b) =>
+		captures.sort((a, b) =>
 			a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0,
 		)
+		return { captures, unlistedBytes }
+	}
+
+	/** Size of a regular data file, 0 when there is none. */
+	async #dataSize(name: string): Promise<number> {
+		try {
+			const st = await lstat(this.data(name))
+			return st.isFile() ? st.size : 0
+		} catch (err) {
+			if (missing(err)) return 0
+			throw err
+		}
 	}
 
 	/**
@@ -275,7 +305,7 @@ export class IqCaptureStore {
 		const name = capture.name
 		if (!wanted()) return false
 		await rename(this.partial(name), this.data(name))
-		const temp = `${this.meta(name)}${PARTIAL}`
+		const temp = this.metaPartial(name)
 		let published = false
 		try {
 			if (wanted()) {
@@ -517,10 +547,11 @@ export const iqCaptureRoutes: FastifyPluginAsync<IqCaptureOptions> = async (
 		if (!authorize(request, reply)) return reply
 		try {
 			await store.ready()
-			const captures = await store.list()
+			const { captures, unlistedBytes } = await store.usage()
 			const body: IqCaptureList = {
 				captures,
-				usedBytes: captures.reduce((sum, c) => sum + c.bytes, 0),
+				usedBytes:
+					captures.reduce((sum, c) => sum + c.bytes, 0) + unlistedBytes,
 				quotaBytes: IQ_CAPTURES_QUOTA_BYTES,
 				maxCount: IQ_CAPTURES_MAX_COUNT,
 			}
@@ -682,10 +713,11 @@ export const iqCaptureRoutes: FastifyPluginAsync<IqCaptureOptions> = async (
 				const refusal = await serialized(async () => {
 					if (closing) return "closing" as const
 					if (await store.exists(name)) return "exists" as const
-					const stored = await store.list()
+					const { captures: stored, unlistedBytes } = await store.usage()
 					const reservations = [...running.values()]
 					const used =
 						stored.reduce((sum, c) => sum + c.bytes, 0) +
+						unlistedBytes +
 						reservations.reduce((sum, r) => sum + r.bytes, 0)
 					if (
 						used > IQ_CAPTURES_QUOTA_BYTES ||

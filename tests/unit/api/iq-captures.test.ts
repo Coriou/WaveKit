@@ -1,6 +1,7 @@
 import { EventEmitter, once } from "node:events"
 import { createWriteStream, writeFileSync } from "node:fs"
 import {
+	mkdir,
 	mkdtemp,
 	readdir,
 	readFile,
@@ -539,12 +540,12 @@ it("removes the partial file on shutdown and partial files left by a crash", asy
 	expect(await readdir(dir)).toEqual([])
 })
 
-it("removes data and metadata a crash left between rename and publication at first use", async () => {
+it("removes data a crash left between rename and publication at first use", async () => {
 	await app.inject({ method: "GET", url })
 	for (let i = 0; i < 7; i++) await plant(`full-${i}`, IQ_CAPTURE_MAX_BYTES)
 	await plant("rest", IQ_CAPTURE_MAX_BYTES - 2000)
-	// The crash state: renamed data without metadata, a temp metadata file, and metadata
-	// whose data is gone.
+	// The crash state: renamed data without metadata and a temp metadata file. Metadata whose
+	// data is gone is not something the store writes: it stays, unlisted, with no bytes.
 	await writeFile(join(dir, "first.cu8"), "")
 	await truncate(join(dir, "first.cu8"), IQ_CAPTURE_MAX_BYTES)
 	await writeFile(join(dir, "first.json.partial"), "{")
@@ -570,9 +571,10 @@ it("removes data and metadata a crash left between rename and publication at fir
 		"rest",
 	])
 	expect((await readdir(dir)).sort()).toEqual(
-		[...listed.captures.map(c => c.name)]
-			.flatMap(name => [`${name}.cu8`, `${name}.json`])
-			.sort(),
+		[
+			...listed.captures.flatMap(c => [`${c.name}.cu8`, `${c.name}.json`]),
+			"lost.json",
+		].sort(),
 	)
 	// The orphan name is free again, and the quota is exactly full with it stored:
 	// 7 × 64,000,000 + (64,000,000 − 2000) + 2000 = 512,000,000.
@@ -586,6 +588,80 @@ it("removes data and metadata a crash left between rename and publication at fir
 	})
 	expect(refused.statusCode).toBe(507)
 	expect(refused.json()).toMatchObject({ code: "IQ_CAPTURE_QUOTA" })
+})
+
+it("leaves every file the store does not write alone at first use", async () => {
+	await mkdir(dir, { recursive: true, mode: 0o700 })
+	const foreign = [
+		"notes.json",
+		"backup.partial",
+		"README",
+		"x.cu8.partial.bak",
+		"Upper.cu8",
+		"Upper.cu8.partial",
+		".hidden.json.partial",
+	]
+	for (const entry of foreign)
+		await writeFile(join(dir, entry), entry === "notes.json" ? "{}" : "x")
+	// Exactly the store's own leftovers go: both partial names and data without metadata.
+	await writeFile(join(dir, "gone.cu8.partial"), "x")
+	await writeFile(join(dir, "gone.json.partial"), "{")
+	await writeFile(join(dir, "orphan.cu8"), "x")
+	const res = await app.inject({ method: "GET", url })
+	expect(res.json()).toMatchObject({ captures: [], usedBytes: 0 })
+	expect((await readdir(dir)).sort()).toEqual([...foreign].sort())
+	// The metadata name is taken although it is not listed.
+	const taken = await app.inject({
+		method: "POST",
+		url,
+		payload: { name: "notes", seconds: 1 },
+	})
+	expect(taken.statusCode).toBe(409)
+	expect(taken.json()).toMatchObject({ code: "IQ_CAPTURE_EXISTS" })
+})
+
+it("keeps malformed metadata with its data: unlisted, name taken, bytes counted", async () => {
+	await app.inject({ method: "GET", url })
+	for (let i = 0; i < 7; i++) await plant(`full-${i}`, IQ_CAPTURE_MAX_BYTES)
+	await plant("rest", IQ_CAPTURE_MAX_BYTES - 3000)
+	await writeFile(join(dir, "broken.json"), "{}")
+	await writeFile(join(dir, "broken.cu8"), Buffer.alloc(1000))
+	await rebuild()
+	const listed = (await app.inject({ method: "GET", url })).json<{
+		captures: IqCapture[]
+		usedBytes: number
+	}>()
+	expect(listed.captures.map(c => c.name)).not.toContain("broken")
+	expect(listed.captures).toHaveLength(8)
+	// 7 × 64,000,000 + (64,000,000 − 3000) + 1000 unlisted = 512,000,000 − 2000.
+	expect(listed.usedBytes).toBe(IQ_CAPTURES_QUOTA_BYTES - 2000)
+	expect(await readdir(dir)).toEqual(
+		expect.arrayContaining(["broken.json", "broken.cu8"]),
+	)
+	const taken = await app.inject({
+		method: "POST",
+		url,
+		payload: { name: "broken", seconds: 1 },
+	})
+	expect(taken.statusCode).toBe(409)
+	expect(taken.json()).toMatchObject({ code: "IQ_CAPTURE_EXISTS" })
+	// At the bound: the 2000-byte capture fills the quota exactly.
+	const { pending } = await start()
+	input.write(Buffer.alloc(2000))
+	expect((await pending).statusCode).toBe(201)
+	// One byte past it: free that capture, grow the unlisted data by one byte.
+	await app.inject({ method: "DELETE", url: `${url}/first` })
+	await truncate(join(dir, "broken.cu8"), 1001)
+	const refused = await app.inject({
+		method: "POST",
+		url,
+		payload: { name: "late", seconds: 1 },
+	})
+	expect(refused.statusCode).toBe(507)
+	expect(refused.json()).toMatchObject({ code: "IQ_CAPTURE_QUOTA" })
+	expect(await readdir(dir)).toEqual(
+		expect.arrayContaining(["broken.json", "broken.cu8"]),
+	)
 })
 
 it("ignores incomplete or foreign entries when listing", async () => {
@@ -805,13 +881,13 @@ it("admits against one consistent quota state while another capture completes", 
 		// The 4000-byte request on `b` stalls inside its listing.
 		const listing = gate()
 		const hold = gate()
-		const list = IqCaptureStore.prototype.list
-		vi.spyOn(IqCaptureStore.prototype, "list").mockImplementation(
+		const usage = IqCaptureStore.prototype.usage
+		vi.spyOn(IqCaptureStore.prototype, "usage").mockImplementation(
 			async function (this: IqCaptureStore) {
-				const captures = await list.call(this)
+				const stored = await usage.call(this)
 				listing.open()
 				await hold.opened
-				return captures
+				return stored
 			},
 		)
 		const second = app

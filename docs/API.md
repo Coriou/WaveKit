@@ -158,8 +158,12 @@ disk, past that the capture stops. A source change (retune, rate change, also wh
 changed caps right before the first stored sample), disconnect or
 removal, a silent source (twice the requested duration), fanout congestion, client
 disconnect, lease revocation or shutdown also stop it: the partial file is removed and the
-answer, when one can still be sent, is 503 `IQ_CAPTURE_INTERRUPTED`. Partial files left by a
-crash are removed at the first use after restart.
+answer, when one can still be sent, is 503 `IQ_CAPTURE_INTERRUPTED`. At the first use after a
+restart WaveKit removes only what a crash of its own leaves: `<name>.cu8.partial`,
+`<name>.json.partial`, and `<name>.cu8` with no `<name>.json` beside it. Other files in the
+capture directory are never touched. A `<name>.json` that is not valid capture metadata is
+not listed, but its name stays taken (409 `IQ_CAPTURE_EXISTS`) and the size of its
+`<name>.cu8` counts in `usedBytes` and toward the quota until you delete that name.
 
 `GET /api/iq/captures` lists whole captures newest first:
 `{ captures, usedBytes, quotaBytes, maxCount }`. `GET /api/iq/captures/:name` downloads the
