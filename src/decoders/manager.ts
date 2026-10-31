@@ -578,10 +578,18 @@ export function startupBuffer(
 }
 
 /**
+ * LoRa centre passband in channel bandwidths: the bw slot plus bw/4 of carrier
+ * offset on each side. The demod has no frequency shift, so a slot 200 kHz off
+ * a 250 kHz channel fails; bw/4 is the offset assumed safe within gr-lora_sdr's
+ * CFO estimate.
+ */
+const LORA_CENTRE_PASSBAND_FACTOR = 1.5
+
+/**
  * LoRa decodes the capture centre (requirement 3.2, `centre` reach): its
  * region slot is the configured channel (frequency ± bw/2, the centre itself
- * with followCenter) and its passband the decimated span bw × oversampling,
- * bounded by the source's usable window. Unparseable options yield no reach.
+ * with followCenter) and its passband the slot plus a bw/4 carrier-offset tolerance
+ * per side (no shift stage, so only a near-centred slot decodes), bounded by the source's usable window. Unparseable options yield no reach.
  */
 function loraCentreReach(
 	options: Record<string, unknown>,
@@ -606,7 +614,9 @@ function loraCentreReach(
 			minHz: frequency - parsed.bw / 2,
 			maxHz: frequency + parsed.bw / 2,
 		},
-		passbandHz: Math.min(parsed.effectiveTargetRate, usable),
+		// Centre-only demodulation (no shift stage): the slot plus the carrier
+		// offset tolerance on each side, bw + 2 × bw/4 = 1.5 × bw (375 kHz for 250 kHz).
+		passbandHz: Math.min(parsed.bw * LORA_CENTRE_PASSBAND_FACTOR, usable),
 	}
 }
 
