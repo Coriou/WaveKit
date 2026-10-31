@@ -4,6 +4,10 @@
 Reads interleaved cu8 IQ from stdin, converts it to complex float samples,
 demodulates LoRa frames with gr-lora_sdr, decrypts Meshtastic payloads, and
 emits one JSON object per decoded packet on stdout.
+
+The frame parsing, CRC gate and decryption below the flowgraph are pure Python
+(stdlib, `cryptography`, the vendored `mesh_pb2`), so they are unit-testable
+without gnuradio: tests/unit/decoders/test_lora_meshtastic_decode.py.
 """
 
 from __future__ import annotations
@@ -11,16 +15,24 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
 import signal
+import struct
 import sys
-from typing import Any
+import time
+from typing import Any, Callable
 
-# Hoisted module-top so decrypt_payload doesn't re-resolve symbols per packet.
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+# Guarded so --help and the pure header/assembler code work without it; main()
+# refuses to start when it is missing.
+try:
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+except ImportError:  # pragma: no cover - exercised only on hosts without it
+    Cipher = None  # type: ignore[assignment,misc]
 
 DEFAULT_CHANNEL_PSK = bytes(
     [
@@ -28,6 +40,36 @@ DEFAULT_CHANNEL_PSK = bytes(
         0xF0, 0xBC, 0xFF, 0xAB, 0xCF, 0x4E, 0x69, 0x01,
     ]
 )
+
+# On-air Meshtastic PacketHeader (firmware RadioInterface.h), little-endian:
+# to u32, from u32, id u32, flags u8, channel hash u8, next_hop u8, relay_node u8.
+ONAIR_HEADER = struct.Struct("<IIIBBBB")
+ONAIR_HEADER_LEN = ONAIR_HEADER.size  # 16 bytes
+FLAG_HOP_LIMIT_MASK = 0x07
+FLAG_WANT_ACK = 0x08
+FLAG_VIA_MQTT = 0x10
+FLAG_HOP_START_SHIFT = 5
+
+# The LoRa explicit header carries the payload length in one byte, so no frame
+# exceeds 255 bytes; a frame_info tag claiming more is corrupt.
+MAX_LORA_PAYLOAD_LEN = 255
+
+# PortNum is a protobuf enum in 0..511 (256..511 are private apps); 0 is
+# UNKNOWN_APP, which a real sender never transmits. A plaintext that parses
+# outside 1..511 is a wrong-key or garbage decrypt.
+MAX_PORTNUM = 511
+
+# At most one drop-summary line per minute on stderr, whatever the drop rate;
+# a final summary is written at exit.
+DROP_SUMMARY_INTERVAL_S = 60.0
+
+
+class FrameError(ValueError):
+    """A frame that cannot become a packet. `reason` is a fixed drop code."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def add_proto_paths() -> None:
@@ -109,96 +151,284 @@ def build_nonce(from_node: int, packet_id: int) -> bytes:
     )
 
 
-def packet_from_node(packet: Any) -> int:
-    # protoc renames `from` to `from_` in Python output to avoid the keyword
-    # clash. Fall back to getattr for older generators that kept `from`.
-    if hasattr(packet, "from_"):
-        return int(packet.from_)
-    return int(getattr(packet, "from"))
+@dataclass(frozen=True)
+class OnAirHeader:
+    to: int
+    from_node: int
+    packet_id: int
+    flags: int
+    channel_hash: int
+    next_hop: int
+    relay_node: int
+
+    @property
+    def hop_limit(self) -> int:
+        return self.flags & FLAG_HOP_LIMIT_MASK
+
+    @property
+    def hop_start(self) -> int:
+        return (self.flags >> FLAG_HOP_START_SHIFT) & FLAG_HOP_LIMIT_MASK
+
+    @property
+    def want_ack(self) -> bool:
+        return bool(self.flags & FLAG_WANT_ACK)
+
+    @property
+    def via_mqtt(self) -> bool:
+        return bool(self.flags & FLAG_VIA_MQTT)
 
 
-def decrypt_payload(mesh_pb2: Any, packet: Any, channel_key: bytes) -> Any:
-    payload_variant = packet.WhichOneof("payload_variant")
-    if payload_variant == "decoded":
-        return packet.decoded
-    if payload_variant != "encrypted":
-        raise ValueError("packet has no decoded or encrypted payload")
-    if packet.pki_encrypted:
-        raise ValueError("PKI encrypted packets are not supported")
+def parse_onair_header(frame: bytes) -> OnAirHeader:
+    """Unpacks the 16-byte header that precedes the encrypted Data payload.
 
-    nonce = build_nonce(packet_from_node(packet), packet.id)
-    decryptor = Cipher(algorithms.AES(channel_key), modes.CTR(nonce)).decryptor()
-    plaintext = decryptor.update(bytes(packet.encrypted)) + decryptor.finalize()
-    data = mesh_pb2.Data()
-    data.ParseFromString(plaintext)
-    return data
+    An on-air frame is this header plus AES-CTR ciphertext, not a serialized
+    MeshPacket protobuf.
+    """
+    if len(frame) < ONAIR_HEADER_LEN:
+        raise FrameError("short_frame")
+    return OnAirHeader(*ONAIR_HEADER.unpack_from(frame, 0))
 
 
-def emit_packet(
-    mesh_pb2: Any,
+def aes_ctr(channel_key: bytes, nonce: bytes, data: bytes) -> bytes:
+    if Cipher is None:
+        raise FrameError("no_crypto")
+    cipher = Cipher(algorithms.AES(channel_key), modes.CTR(nonce)).decryptor()
+    return cipher.update(data) + cipher.finalize()
+
+
+@dataclass(frozen=True)
+class DecodedFrame:
+    header: OnAirHeader
+    portnum: int
+    payload: bytes
+
+
+def decode_frame(
     frame: bytes,
+    channel_key: bytes,
+    data_factory: Callable[[], Any],
+) -> DecodedFrame:
+    """Header parse, channel-PSK decrypt and Data protobuf parse of one frame.
+
+    `data_factory` builds an empty `mesh_pb2.Data`. Raises FrameError with a
+    fixed reason; never echoes frame bytes.
+    """
+    header = parse_onair_header(frame)
+    ciphertext = frame[ONAIR_HEADER_LEN:]
+    if not ciphertext:
+        raise FrameError("empty_payload")
+    plaintext = aes_ctr(
+        channel_key, build_nonce(header.from_node, header.packet_id), ciphertext
+    )
+    data = data_factory()
+    try:
+        data.ParseFromString(plaintext)
+    except Exception as exc:  # protobuf raises DecodeError, a plain Exception
+        raise FrameError("data_parse") from exc
+    portnum = int(data.portnum)
+    if not 1 <= portnum <= MAX_PORTNUM:
+        raise FrameError("bad_portnum")
+    return DecodedFrame(header=header, portnum=portnum, payload=bytes(data.payload))
+
+
+def packet_event(
+    decoded: DecodedFrame,
+    *,
+    frequency: int,
+    bw: int,
+    sf: int,
+    cr: int,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """The adapter's JSONL wire shape (lora-meshtastic.ts PacketWireSchema)."""
+    header = decoded.header
+    rx_time = (now or datetime.now(UTC)).astimezone(UTC)
+    event: dict[str, Any] = {
+        "from": header.from_node,
+        "to": header.to,
+        "id": header.packet_id,
+        "channel": header.channel_hash,
+        "hop_limit": header.hop_limit,
+        "hop_start": header.hop_start,
+        "want_ack": header.want_ack,
+        "portnum": decoded.portnum,
+        "payload_b64": base64.b64encode(decoded.payload).decode("ascii"),
+        "payload_len": len(decoded.payload),
+        # gr-lora_sdr does not report RSSI/SNR per frame: 0 means unavailable.
+        "rx_rssi": 0,
+        "rx_snr": 0.0,
+        "rx_time": rx_time.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "frequency": int(frequency),
+        "bw": int(bw),
+        "sf": int(sf),
+        "cr": int(cr),
+    }
+    if header.via_mqtt:
+        event["via_mqtt"] = True
+    return event
+
+
+@dataclass(frozen=True)
+class AssembledFrame:
+    payload: bytes
+    # crc_verif's verdict from the frame_info tag; None when the tag lacked it.
+    crc_valid: bool | None
+
+
+class FrameAssembler:
+    """Cuts crc_verif's byte stream into frames using its frame_info tags.
+
+    crc_verif writes each frame's payload (CRC bytes stripped) to its output
+    stream and tags the first byte with frame_info {pay_len, crc_valid, ...}.
+    Reading bytes off the stream is binary-safe, unlike its `msg` port, whose
+    pmt symbol UTF-8-decodes in Python and fails on any byte >= 0x80.
+    """
+
+    def __init__(self, on_drop: Callable[[str], None]) -> None:
+        self._on_drop = on_drop
+        self._buffer = bytearray()
+        self._expected = 0
+        self._crc_valid: bool | None = None
+        self._active = False
+
+    def feed(
+        self,
+        data: bytes,
+        tags: list[tuple[int, int | None, bool | None]],
+    ) -> list[AssembledFrame]:
+        """`tags` holds (relative offset, pay_len, crc_valid), offsets in 0..len(data)."""
+        frames: list[AssembledFrame] = []
+        cursor = 0
+        for offset, pay_len, crc_valid in sorted(tags, key=lambda t: t[0]):
+            offset = max(cursor, min(offset, len(data)))
+            self._take(data[cursor:offset], frames)
+            cursor = offset
+            if self._active:
+                self._on_drop("truncated")
+            self._start(pay_len, crc_valid)
+        self._take(data[cursor:], frames)
+        return frames
+
+    def _start(self, pay_len: int | None, crc_valid: bool | None) -> None:
+        self._buffer.clear()
+        if pay_len is None or not 1 <= pay_len <= MAX_LORA_PAYLOAD_LEN:
+            self._active = False
+            self._on_drop("bad_frame_info")
+            return
+        self._expected = pay_len
+        self._crc_valid = crc_valid
+        self._active = True
+
+    def _take(self, chunk: bytes, frames: list[AssembledFrame]) -> None:
+        # Bytes outside an active frame (before the first tag, after a bad
+        # frame_info) are skipped, never parsed.
+        if not self._active or not chunk:
+            return
+        need = self._expected - len(self._buffer)
+        self._buffer.extend(chunk[:need])
+        if len(self._buffer) == self._expected:
+            frames.append(AssembledFrame(bytes(self._buffer), self._crc_valid))
+            self._buffer.clear()
+            self._active = False
+
+
+class DropCounter:
+    """Counts dropped frames by fixed reason and writes rate-limited summaries."""
+
+    def __init__(
+        self,
+        log: Callable[..., None] = log_stderr,
+        clock: Callable[[], float] = time.monotonic,
+        interval_s: float = DROP_SUMMARY_INTERVAL_S,
+    ) -> None:
+        self._log = log
+        self._clock = clock
+        self._interval_s = interval_s
+        self._last_log = clock()
+        self.total: Counter[str] = Counter()
+        self._since_log: Counter[str] = Counter()
+        self.decoded = 0
+
+    def drop(self, reason: str) -> None:
+        self.total[reason] += 1
+        self._since_log[reason] += 1
+        self.maybe_log()
+
+    def maybe_log(self) -> None:
+        now = self._clock()
+        if not self._since_log or now - self._last_log < self._interval_s:
+            return
+        self._log(
+            "frame_drops",
+            drops=dict(sorted(self._since_log.items())),
+            decoded_total=self.decoded,
+            interval_s=round(now - self._last_log, 1),
+        )
+        self._since_log.clear()
+        self._last_log = now
+
+    def final_summary(self) -> None:
+        self._log(
+            "frame_drop_summary",
+            drops=dict(sorted(self.total.items())),
+            decoded_total=self.decoded,
+        )
+
+
+def process_frame(
+    frame: AssembledFrame,
+    channel_key: bytes,
+    data_factory: Callable[[], Any],
+    drops: DropCounter,
+    event_fields: dict[str, int],
+) -> dict[str, Any] | None:
+    """CRC gate then decode; returns the JSON event or None (counted as a drop)."""
+    if frame.crc_valid is None:
+        drops.drop("crc_unverified")
+        return None
+    if not frame.crc_valid:
+        drops.drop("crc_bad")
+        return None
+    try:
+        decoded = decode_frame(frame.payload, channel_key, data_factory)
+    except FrameError as exc:
+        drops.drop(exc.reason)
+        return None
+    drops.decoded += 1
+    return packet_event(decoded, **event_fields)
+
+
+def frame_info_fields(pmt: Any, value: Any) -> tuple[int | None, bool | None]:
+    """Reads pay_len and crc_valid from a frame_info pmt dict, tolerating gaps."""
+    if not pmt.is_dict(value):
+        return None, None
+    pay_len_pmt = pmt.dict_ref(value, pmt.intern("pay_len"), pmt.PMT_NIL)
+    crc_pmt = pmt.dict_ref(value, pmt.intern("crc_valid"), pmt.PMT_NIL)
+    pay_len = int(pmt.to_long(pay_len_pmt)) if pmt.is_integer(pay_len_pmt) else None
+    crc_valid = bool(pmt.to_bool(crc_pmt)) if pmt.is_bool(crc_pmt) else None
+    return pay_len, crc_valid
+
+
+def build_flowgraph(
     args: argparse.Namespace,
     channel_key: bytes,
-) -> None:
-    packet = mesh_pb2.MeshPacket()
-    packet.ParseFromString(frame)
-    data = decrypt_payload(mesh_pb2, packet, channel_key)
-    payload = bytes(data.payload)
+    drops: DropCounter,
+) -> Any:
+    # gnuradio and numpy are heavy imports; defer to keep --help fast.
+    import numpy
+    import pmt
+    from gnuradio import gr
+    import gnuradio.lora_sdr as lora_sdr
 
-    event: dict[str, Any] = {
-        "from": packet_from_node(packet),
-        "to": int(packet.to),
-        "id": int(packet.id),
-        "channel": int(packet.channel),
-        "hop_limit": int(packet.hop_limit),
-        "hop_start": int(packet.hop_start),
-        "want_ack": bool(packet.want_ack),
-        "portnum": int(data.portnum),
-        "payload_b64": base64.b64encode(payload).decode("ascii"),
-        "payload_len": len(payload),
-        "rx_rssi": int(packet.rx_rssi),
-        "rx_snr": float(packet.rx_snr),
-        "rx_time": datetime.now(UTC)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z"),
+    add_proto_paths()
+    import mesh_pb2
+
+    event_fields = {
         "frequency": int(args.frequency),
         "bw": int(args.bw),
         "sf": int(args.sf),
         "cr": int(args.cr),
     }
-    if packet.via_mqtt:
-        event["via_mqtt"] = True
-    if packet.priority:
-        event["priority"] = int(packet.priority)
-
-    print(json.dumps(event, separators=(",", ":")), flush=True)
-
-
-def pmt_to_bytes(pmt: Any, message: Any) -> bytes:
-    value = pmt.to_python(message)
-    if isinstance(value, bytes):
-        return value
-    if isinstance(value, bytearray):
-        return bytes(value)
-    if isinstance(value, (tuple, list)):
-        return bytes(value)
-    if isinstance(value, str):
-        # crc_verif (gr-lora_sdr) publishes payloads as pmt::mp(message_str)
-        # built from raw u8 bytes; on the Python side this lands as a str.
-        # latin-1 round-trips 0..255 cleanly, restoring the original bytes.
-        return value.encode("latin-1")
-    raise ValueError(f"unsupported PMT message type: {type(value).__name__}")
-
-
-def build_flowgraph(args: argparse.Namespace, channel_key: bytes) -> Any:
-    # gnuradio and numpy are heavy imports; defer to keep --help fast.
-    import numpy
-    import pmt
-    from gnuradio import blocks, gr
-    import gnuradio.lora_sdr as lora_sdr
-
-    add_proto_paths()
-    import mesh_pb2
 
     class Cu8StdinSource(gr.sync_block):
         def __init__(self, fd: int, chunk_bytes: int = 65536) -> None:
@@ -240,23 +470,38 @@ def build_flowgraph(args: argparse.Namespace, channel_key: bytes) -> Any:
             self.pending = data[used:] if used < len(data) else b""
             return sample_count
 
-    class MeshtasticSink(gr.basic_block):
+    class MeshtasticFrameSink(gr.sync_block):
+        """Consumes crc_verif's payload stream; CRC-valid frames become JSON."""
+
         def __init__(self) -> None:
-            gr.basic_block.__init__(
+            gr.sync_block.__init__(
                 self,
-                name="meshtastic_packet_sink",
-                in_sig=None,
+                name="meshtastic_frame_sink",
+                in_sig=[numpy.uint8],
                 out_sig=None,
             )
-            self.message_port_register_in(pmt.intern("in"))
-            self.set_msg_handler(pmt.intern("in"), self.handle_message)
+            self.assembler = FrameAssembler(drops.drop)
+            self.frame_info = pmt.intern("frame_info")
 
-        def handle_message(self, message: Any) -> None:
-            try:
-                frame = pmt_to_bytes(pmt, message)
-                emit_packet(mesh_pb2, frame, args, channel_key)
-            except Exception as exc:
-                log_stderr("frame_drop", error=str(exc), error_type=type(exc).__name__)
+        def work(self, input_items: list[Any], output_items: list[Any]) -> int:
+            del output_items
+            data = input_items[0]
+            count = len(data)
+            base = self.nitems_read(0)
+            tags = []
+            for tag in self.get_tags_in_window(0, 0, count):
+                if not pmt.eq(tag.key, self.frame_info):
+                    continue
+                pay_len, crc_valid = frame_info_fields(pmt, tag.value)
+                tags.append((int(tag.offset - base), pay_len, crc_valid))
+            for frame in self.assembler.feed(data.tobytes(), tags):
+                event = process_frame(
+                    frame, channel_key, mesh_pb2.Data, drops, event_fields
+                )
+                if event is not None:
+                    print(json.dumps(event, separators=(",", ":")), flush=True)
+            drops.maybe_log()
+            return count
 
     top = gr.top_block("wavekit_lora_meshtastic", catch_exceptions=True)
     source = Cu8StdinSource(sys.stdin.buffer.fileno())
@@ -298,12 +543,13 @@ def build_flowgraph(args: argparse.Namespace, channel_key: bytes) -> Any:
         print_header,
     )
     dewhitening = lora_sdr.dewhitening()
+    # Output 0 carries each frame's payload, its first byte tagged frame_info
+    # with crc_valid; the bool output (output_crc_check) is not needed and the
+    # `msg` port is left unconnected (its str payload is not binary-safe).
     crc_verif = lora_sdr.crc_verif(print_payload, False)
-    packet_sink = MeshtasticSink()
-    null_sink = blocks.null_sink(gr.sizeof_char)
+    frame_sink = MeshtasticFrameSink()
 
     top.msg_connect((header_decoder, "frame_info"), (frame_sync, "frame_info"))
-    top.msg_connect((crc_verif, "msg"), (packet_sink, "in"))
     top.connect((source, 0), (frame_sync, 0))
     top.connect((frame_sync, 0), (fft_demod, 0))
     top.connect((fft_demod, 0), (gray_mapping, 0))
@@ -312,7 +558,7 @@ def build_flowgraph(args: argparse.Namespace, channel_key: bytes) -> Any:
     top.connect((hamming_dec, 0), (header_decoder, 0))
     top.connect((header_decoder, 0), (dewhitening, 0))
     top.connect((dewhitening, 0), (crc_verif, 0))
-    top.connect((crc_verif, 0), (null_sink, 0))
+    top.connect((crc_verif, 0), (frame_sink, 0))
 
     log_stderr(
         "flowgraph_start",
@@ -326,7 +572,7 @@ def build_flowgraph(args: argparse.Namespace, channel_key: bytes) -> Any:
     # Retain Python block wrappers while the scheduler uses their C++ trampolines.
     top._wavekit_blocks = (source, frame_sync, fft_demod, gray_mapping,
                            deinterleaver, hamming_dec, header_decoder,
-                           dewhitening, crc_verif, packet_sink, null_sink)
+                           dewhitening, crc_verif, frame_sink)
     return top
 
 
@@ -338,8 +584,13 @@ def main(argv: list[str] | None = None) -> int:
         log_stderr("invalid_channel_key", error=str(exc))
         return 2
 
+    if Cipher is None:
+        log_stderr("startup_error", error="python3 cryptography module is missing")
+        return 1
+
+    drops = DropCounter()
     try:
-        top = build_flowgraph(args, channel_key)
+        top = build_flowgraph(args, channel_key, drops)
     except Exception as exc:
         log_stderr("startup_error", error=str(exc), error_type=type(exc).__name__)
         return 1
@@ -367,6 +618,7 @@ def main(argv: list[str] | None = None) -> int:
         if not stopping:
             top.stop()
             top.wait()
+        drops.final_summary()
     return 0
 
 

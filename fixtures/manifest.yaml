@@ -484,25 +484,50 @@ candidates:
         "hosting URL returns 404 on 2026-10-09; not downloaded (539 MB Wayback copy only)",
         "WAV rate and centre unverified",
       ]
-  - id: lora_meshtastic_placeholder
+  # Committed synthetic fixtures (scripts/fixtures/gen_lora.py, fixed seeds); checksums in
+  # fixtures/lora/SHA256SUMS, checked by tests/unit/decoders/lora-meshtastic-wrapper.test.ts.
+  - id: lora_longfast_dc_snr10
     decoder: lora-meshtastic
     url: null
-    license: null
+    license: "synthetic (WaveKit, AGPL-3.0-or-later)"
     blockers:
       [
-        "fixtures/lora/meshtastic-sample.cu8 is a 12-byte placeholder",
-        "LoRa is excluded from channelizer migration",
+        "manifest v2 fixtures must name a gitignored raw/ file; this one is committed at fixtures/lora/lora_longfast_dc_snr10.cu8",
+        "LoRa is excluded from channelizer migration; the full chain runs only in the core image (tests/integration/lora-meshtastic.test.ts, WAVEKIT_LORA_CHAIN=1)",
       ]
+    notes: "cu8, 1024000 Hz, centre 869525000 (= channel), 0.91 s, SNR +10 dB in 250 kHz; sha256 914b13dbf572d3c26d8e0da386f26662d921886744be23c2540c8bd91d4229bc. Expected: one packet from 169552957 id 305419896 portnum 1 payload_b64 aGVsbG8gd2F2ZWtpdA== (LongFast, EU_868, AQ==)."
+  - id: lora_longfast_dc_snrm5
+    decoder: lora-meshtastic
+    url: null
+    license: "synthetic (WaveKit, AGPL-3.0-or-later)"
+    blockers:
+      [
+        "manifest v2 fixtures must name a gitignored raw/ file; this one is committed at fixtures/lora/lora_longfast_dc_snrm5.cu8",
+        "LoRa is excluded from channelizer migration; the full chain runs only in the core image (tests/integration/lora-meshtastic.test.ts, WAVEKIT_LORA_CHAIN=1)",
+      ]
+    notes: "Same frame as lora_longfast_dc_snr10 at SNR -5 dB; sha256 3cbf64b1d3d4d31f508275a9b300feba52158a51c57f93d8f7ab233897026651."
+  # Committed synthetic fixtures (scripts/fixtures/gen_aprs.py, gen_packets, fixed seeds);
+  # checksums in fixtures/aprs/SHA256SUMS.
+  - id: aprs_144800_c144600_cnr20
+    decoder: direwolf
+    url: null
+    license: "synthetic (WaveKit, AGPL-3.0-or-later; audio rendered with direwolf gen_packets)"
+    blockers:
+      [
+        "manifest v2 fixtures must name a gitignored raw/ file; this one is committed at fixtures/aprs/aprs_144800_c144600_cnr20.cu8",
+        "1024000 Hz, below the 2048000 Hz channelizer-golden floor; decoded only in an image bench so far",
+      ]
+    notes: "cu8, 1024000 Hz, centre 144600000, APRS at +200 kHz (decoder_options offsetHz 200000), 0.92 s, CNR 20 dB in 12.5 kHz; sha256 ea4aa8b1e9474a530ec0050de2cb002d4885c9124ed444dbf4421349c3e15617. Expected: N0CALL-1>APRS,WIDE1-1 position frame."
   - id: direwolf_generated
     decoder: direwolf
     url: null
-    license: null
+    license: "synthetic (WaveKit, AGPL-3.0-or-later; rendered with direwolf gen_packets)"
     blockers:
       [
-        "generated locally with direwolf's gen_packets as audio WAV, not IQ: parser-transcript or tail-golden at most",
-        "generator command line and packet list not recorded yet",
+        "generated with direwolf's gen_packets as audio WAV, not IQ: parser-transcript or tail-golden at most",
+        "manifest v2 fixtures must name a gitignored raw/ file; this one is committed at fixtures/aprs/aprs_afsk1200_48k.wav",
       ]
-    notes: "Kept from v1 (format: generated, generator: gen_packets). The only deterministic APRS source; no download needed."
+    notes: "gen_packets -r 48000 -a 100 on fixtures/aprs/aprs_msg.txt (scripts/fixtures/gen_aprs.py); 48 kHz mono s16 WAV; sha256 aa89ff165e8269fcf3734ab14bd76cdfe466b0a0ef906c523f28f3e13582bf6b."
   # Demoted from fixtures at the 2026-10-10 quiet-host record: decodes 0 on the raw path.
   - id: rtl433_olympia_9571_2048k
     decoder: rtl433
