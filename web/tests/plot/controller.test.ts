@@ -195,6 +195,13 @@ describe("PlotController", () => {
 			setOffset: () => Promise.resolve(),
 		})
 		expect(await empty.tuneTo(161_000_000)).toBe(false)
+		// A recentre with no source to retune is skipped: it did not land.
+		const sourceless = new PlotController({
+			retune: () => Promise.resolve(),
+			setOffset: () => Promise.resolve(),
+		})
+		sourceless.setContext({ ...context, sourceId: null })
+		expect(await sourceless.tuneTo(156_800_000)).toBe(false)
 	})
 
 	it("tuning outside the capture recentres the hardware and zeroes the offset", async () => {

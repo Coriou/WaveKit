@@ -262,12 +262,12 @@ export class PlotController {
 		this.cancelFollow()
 		const shown = this.visibleSpan()
 		this.store.update(s => ({ ...s, pendingHz: Math.round(hz) }))
-		const go = (): Promise<unknown> => this.sendTune(hz, shown)
+		const go = (): Promise<boolean> => this.sendTune(hz, shown)
 		const run = inFlight ? inFlight.then(go) : go()
 		return run.then(
-			() => {
+			landed => {
 				this.settle(seq)
-				return seq === this.seq
+				return landed && seq === this.seq
 			},
 			() => {
 				this.settle(seq)
@@ -279,11 +279,13 @@ export class PlotController {
 	private sendTune(
 		hz: number,
 		shown: SpectrumViewSpan | null,
-	): Promise<unknown> {
+	): Promise<boolean> {
 		const { capture, sourceId } = this.ctx
 		const centreHz = this.centreHz()
 		const hardware = this.hardwareCapture()
-		if (!capture || !hardware || centreHz === null) return Promise.resolve()
+		// A tune skipped for want of a capture, hardware or source did not land (Listen must not play).
+		if (!capture || !hardware || centreHz === null)
+			return Promise.resolve(false)
 		const action: ReturnType<typeof tuneAction> =
 			this.ctx.scanHasReceiver || this.ctx.centreTuning
 				? { kind: "retune", centreHz: Math.round(hz) }
@@ -303,13 +305,14 @@ export class PlotController {
 				this.armRelease()
 				return this.actions
 					.setOffset(action.offsetHz)
+					.then(() => true)
 					.finally(() => this.captureChanged())
 			}
 			this.store.setView(followHz(this.store.get().view, capture, hz))
-			return this.actions.setOffset(action.offsetHz)
+			return this.actions.setOffset(action.offsetHz).then(() => true)
 		}
 		this.dropFree()
-		if (sourceId === null) return Promise.resolve()
+		if (sourceId === null) return Promise.resolve(false)
 		// Recentre: the channel goes back to the middle, the view keeps its zoom around it, and the
 		// picture slides there at once (hatched until frames at the new centre arrive).
 		this.store.setView({ ...this.store.get().view, centreOffsetHz: 0 })
@@ -321,7 +324,7 @@ export class PlotController {
 		return this.actions
 			.retune(action.centreHz, sourceId)
 			.then(
-				() => this.actions.setOffset(0),
+				() => this.actions.setOffset(0).then(() => true),
 				(err: unknown) => {
 					this.commanded = null
 					throw err
