@@ -454,6 +454,10 @@ three rows); the demod tooling image is a separate `demod` group.
 
 The registry and tag come from the `REGISTRY` and `TAG` variables in `docker/bake.hcl`.
 
+These images are published to GHCR only when a `v*` release tag is pushed, and no release has been
+tagged yet, so `docker pull` does not find them for now. Build them locally with the commands below:
+the local images get the same names, so the examples on this page work unchanged.
+
 ```bash
 # Build the default group
 make docker-build
