@@ -18,7 +18,7 @@ import { createReadStream, existsSync } from "node:fs"
 import { resolve } from "node:path"
 import { createInterface } from "node:readline"
 import pino from "pino"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, onTestFinished } from "vitest"
 import {
 	LoraMeshtasticDecoder,
 	WRAPPER_SCRIPT_PATH,
@@ -55,7 +55,25 @@ async function decodeCapture(file: string): Promise<DecoderOutput[]> {
 		pino({ level: "silent" }),
 	)
 	const { command, args } = decoder.command()
-	const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] })
+	// The command is a shell pipeline; its own process group lets the cleanup kill every stage.
+	const child = spawn(command, args, {
+		stdio: ["pipe", "pipe", "pipe"],
+		detached: true,
+	})
+	// The group, not just the shell: a stage can outlive the shell and hold stdout open.
+	const kill = (): void => {
+		if (child.pid === undefined) return
+		try {
+			process.kill(-child.pid, "SIGKILL")
+		} catch {
+			// The group is already gone.
+		}
+	}
+	// Runs after the test whatever its result, including a timeout.
+	onTestFinished(kill)
+	child.stdin.on("error", () => {
+		// EPIPE when the chain exits before reading the whole capture.
+	})
 	child.stderr.resume()
 	const outputs: DecoderOutput[] = []
 	const lines = createInterface({ input: child.stdout })
@@ -63,12 +81,16 @@ async function decodeCapture(file: string): Promise<DecoderOutput[]> {
 		const out = decoder.parse(line)
 		if (out) outputs.push(out)
 	})
-	createReadStream(resolve("fixtures/lora", file)).pipe(child.stdin)
-	await new Promise<void>((done, fail) => {
-		child.once("error", fail)
-		child.once("close", () => done())
-	})
-	return outputs
+	try {
+		createReadStream(resolve("fixtures/lora", file)).pipe(child.stdin)
+		await new Promise<void>((done, fail) => {
+			child.once("error", fail)
+			child.once("close", () => done())
+		})
+		return outputs
+	} finally {
+		kill()
+	}
 }
 
 describe.skipIf(!runChain)("lora-meshtastic full chain (opt-in)", () => {

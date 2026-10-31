@@ -59,8 +59,9 @@ const PORT_DIRECTIVE_RE = /^\s*(KISSPORT|AGWPORT)(\s|$)/i
  * The per-instance direwolf config: the base config without its port lines, then this
  * instance's KISSPORT and AGWPORT. direwolf has no CLI flag for either port (`-p` enables a
  * KISS pseudo terminal and takes no value; `-a N` is the audio statistics interval), so the
- * ports must come from the config file. Direwolf 1.7 opens one more KISS port per KISSPORT
- * line, hence the base lines are removed rather than overridden.
+ * ports must come from the config file. Direwolf 1.8.x opens one more KISS port per KISSPORT
+ * line and still opens the default 8001 beside a configured one unless `KISSPORT 0` comes
+ * first, hence the base lines are removed and `KISSPORT 0` precedes this instance's port.
  */
 export function renderDirewolfConfig(
 	base: string,
@@ -71,7 +72,7 @@ export function renderDirewolfConfig(
 		.filter(line => !PORT_DIRECTIVE_RE.test(line))
 		.join("\n")
 		.replace(/\n*$/, "\n")
-	return `${kept}# WaveKit per-instance ports\nKISSPORT ${ports.kissPort}\nAGWPORT ${ports.agwPort}\n`
+	return `${kept}# WaveKit per-instance ports\nKISSPORT 0\nKISSPORT ${ports.kissPort}\nAGWPORT ${ports.agwPort}\n`
 }
 
 /**

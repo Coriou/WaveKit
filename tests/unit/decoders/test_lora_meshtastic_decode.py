@@ -160,6 +160,34 @@ class DropCounterTest(unittest.TestCase):
         self.assertEqual(lines[-1][1]["drops"], {"crc_bad": 500, "data_parse": 1})
 
 
+class ChannelKeyTest(unittest.TestCase):
+    def test_accepted_sizes(self):
+        self.assertEqual(len(DEFAULT_KEY), 16)
+        self.assertEqual(wrapper.decode_channel_key("Ag==")[15], (DEFAULT_KEY[15] + 1) & 0xFF)
+        for n in (16, 32):
+            key = bytes(range(n))
+            self.assertEqual(wrapper.decode_channel_key(base64.b64encode(key).decode()), key)
+
+    def test_rejected_sizes(self):
+        for n in (0, 2, 15, 17, 24, 31, 33, 64):
+            with self.assertRaises(ValueError, msg=n):
+                wrapper.decode_channel_key(base64.b64encode(bytes(n)).decode())
+        with self.assertRaises(ValueError):
+            wrapper.decode_channel_key("AA==")
+        with self.assertRaises(ValueError):
+            wrapper.decode_channel_key("not base64!")
+
+
+def encrypt_frame(frame, key):
+    """Re-encrypts `frame`'s Data payload under `key` (AES-CTR, same nonce)."""
+    header = wrapper.parse_onair_header(frame)
+    nonce = wrapper.build_nonce(header.from_node, header.packet_id)
+    plaintext = wrapper.aes_ctr(DEFAULT_KEY, nonce, frame[wrapper.ONAIR_HEADER_LEN :])
+    encryptor = wrapper.Cipher(wrapper.algorithms.AES(key), wrapper.modes.CTR(nonce)).encryptor()
+    ciphertext = encryptor.update(plaintext) + encryptor.finalize()
+    return frame[: wrapper.ONAIR_HEADER_LEN] + ciphertext
+
+
 @unittest.skipUnless(HAS_DECRYPT, "cryptography or protobuf missing")
 class DecryptTest(unittest.TestCase):
     def process(self, payload, crc_valid=True, key=DEFAULT_KEY):
@@ -184,6 +212,19 @@ class DecryptTest(unittest.TestCase):
         self.assertIs(event["want_ack"], False)
         self.assertNotIn("via_mqtt", event)
         self.assertEqual(drops.decoded, 1)
+
+    def test_aes256_key_round_trip(self):
+        key_b64 = base64.b64encode(bytes(range(100, 132))).decode()
+        key = wrapper.decode_channel_key(key_b64)
+        self.assertEqual(len(key), 32)
+        frame = encrypt_frame(FRAME, key)
+        self.assertNotEqual(frame, FRAME)
+        event, drops = self.process(frame, key=key)
+        self.assertIsNotNone(event)
+        self.assertEqual(base64.b64decode(event["payload_b64"]), b"hello wavekit")
+        self.assertEqual(drops.decoded, 1)
+        # The default key cannot read it.
+        self.assertIsNone(self.process(frame)[0])
 
     def test_bad_crc_is_dropped(self):
         event, drops = self.process(FRAME, crc_valid=False)

@@ -26,6 +26,7 @@ import struct
 import sys
 import time
 from typing import Any, Callable
+import warnings
 
 # Guarded so --help and the pure header/assembler code work without it; main()
 # refuses to start when it is missing.
@@ -125,6 +126,7 @@ def decode_channel_key(value: str) -> bytes:
     #   - 1 byte 0x00      = encryption disabled (not supported in v1)
     #   - 1 byte 0x01..FF  = defaultpsk with psk[15] += (idx - 1)
     #   - 16 bytes         = explicit AES-128 PSK
+    #   - 32 bytes         = explicit AES-256 PSK
     if len(decoded) == 1:
         idx = decoded[0]
         if idx == 0:
@@ -135,10 +137,10 @@ def decode_channel_key(value: str) -> bytes:
         psk = bytearray(DEFAULT_CHANNEL_PSK)
         psk[15] = (psk[15] + idx - 1) & 0xFF
         return bytes(psk)
-    if len(decoded) != 16:
+    if len(decoded) not in (16, 32):
         raise ValueError(
-            "channel key must decode to a single shorthand byte (0x01..0xFF) "
-            "or exactly 16 bytes for a custom AES-128 PSK"
+            "channel key must decode to a single shorthand byte (0x01..0xFF), "
+            "16 bytes for a custom AES-128 PSK or 32 bytes for AES-256"
         )
     return decoded
 
@@ -222,7 +224,10 @@ def decode_frame(
     )
     data = data_factory()
     try:
-        data.ParseFromString(plaintext)
+        # Garbage plaintext can make protobuf warn (RuntimeWarning) on stderr per frame.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            data.ParseFromString(plaintext)
     except Exception as exc:  # protobuf raises DecodeError, a plain Exception
         raise FrameError("data_parse") from exc
     portnum = int(data.portnum)

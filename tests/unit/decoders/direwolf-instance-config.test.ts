@@ -77,7 +77,7 @@ describe("renderDirewolfConfig", () => {
 			{ kissPort: 8002, agwPort: 8010 },
 		)
 		expect(text).toBe(
-			"MYCALL N0CALL\nKISSPORTX keep\nCHANNEL 0\n# WaveKit per-instance ports\nKISSPORT 8002\nAGWPORT 8010\n",
+			"MYCALL N0CALL\nKISSPORTX keep\nCHANNEL 0\n# WaveKit per-instance ports\nKISSPORT 0\nKISSPORT 8002\nAGWPORT 8010\n",
 		)
 	})
 })
@@ -96,7 +96,10 @@ describe("direwolf instance config", () => {
 		await decoder.write()
 		const text = await readFile(decoder.path(), "utf8")
 		expect(text).toContain("MYCALL N0CALL\nADEVICE stdin null\n")
-		expect(text.match(/^KISSPORT .*$/gm)).toEqual(["KISSPORT 8002"])
+		expect(text.match(/^KISSPORT .*$/gm)).toEqual([
+			"KISSPORT 0",
+			"KISSPORT 8002",
+		])
 		expect(text.match(/^AGWPORT .*$/gim)).toEqual(["AGWPORT 8010"])
 		expect((await stat(decoder.path())).mode & 0o777).toBe(0o600)
 		expect((await stat(dirname(decoder.path()))).mode & 0o777).toBe(0o700)
@@ -108,7 +111,7 @@ describe("direwolf instance config", () => {
 		const decoder = new ConfigDirewolf({}, root, join(root, "missing.conf"))
 		await decoder.write()
 		expect(await readFile(decoder.path(), "utf8")).toBe(
-			"MYCALL N0CALL\nADEVICE stdin null\nCHANNEL 0\n# WaveKit per-instance ports\nKISSPORT 8001\nAGWPORT 8000\n",
+			"MYCALL N0CALL\nADEVICE stdin null\nCHANNEL 0\n# WaveKit per-instance ports\nKISSPORT 0\nKISSPORT 8001\nAGWPORT 8000\n",
 		)
 	})
 

@@ -684,9 +684,10 @@ direwolf has no command-line option for its KISS TCP or AGW port. WaveKit theref
 writes a config file for each instance before it starts direwolf, and passes it with
 `-c`. The file is created in an owner-only directory under the OS temp dir and removed
 when the decoder stops. It holds the image's `/etc/direwolf.conf` (`MYCALL`, `ADEVICE`,
-`CHANNEL`) without any `KISSPORT`/`AGWPORT` lines, then `KISSPORT <kissPort>` and
-`AGWPORT <agwPort>` from the decoder options (defaults 8001 and 8000). WaveKit connects
-to the same `kissPort`. Two direwolf instances need different `kissPort` and `agwPort`
+`CHANNEL`) without any `KISSPORT`/`AGWPORT` lines, then `KISSPORT 0`, `KISSPORT <kissPort>`
+and `AGWPORT <agwPort>` from the decoder options (defaults 8001 and 8000). direwolf 1.8.x
+still opens its default KISS port 8001 beside a configured one; `KISSPORT 0` turns that
+off, so only the configured ports open. WaveKit connects to the same `kissPort`. Two direwolf instances need different `kissPort` and `agwPort`
 values, or the second cannot bind its ports.
 
 ### High CPU usage
