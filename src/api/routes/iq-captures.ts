@@ -235,23 +235,40 @@ export class IqCaptureStore {
 		)
 	}
 
-	/** Moves the finished data into place, then publishes the metadata. */
-	async commit(capture: IqCapture): Promise<void> {
+	/**
+	 * Moves the finished data into place, then publishes the metadata. `wanted` is asked
+	 * again after every await: once it answers false nothing is published and the moved
+	 * data is removed (false is returned; the caller removes the partial file).
+	 */
+	async commit(
+		capture: IqCapture,
+		wanted: () => boolean = () => true,
+	): Promise<boolean> {
 		const name = capture.name
+		if (!wanted()) return false
 		await rename(this.partial(name), this.data(name))
 		const temp = `${this.meta(name)}${PARTIAL}`
+		let published = false
 		try {
-			await writeFile(temp, JSON.stringify(capture), {
-				mode: 0o600,
-				flag: "wx",
-				flush: true,
-			})
-			await rename(temp, this.meta(name))
-		} catch (err) {
-			await rm(temp, { force: true })
-			await rm(this.data(name), { force: true })
-			throw err
+			if (wanted()) {
+				await writeFile(temp, JSON.stringify(capture), {
+					mode: 0o600,
+					flag: "wx",
+					flush: true,
+				})
+				// The metadata rename is the publication: the last point a revocation can stop.
+				if (wanted()) {
+					await rename(temp, this.meta(name))
+					published = true
+				}
+			}
+		} finally {
+			if (!published) {
+				await rm(temp, { force: true })
+				await rm(this.data(name), { force: true })
+			}
 		}
+		return published
 	}
 
 	/** Metadata first, so a half-removed capture is never listed. */
@@ -403,8 +420,11 @@ type Outcome =
 interface Running {
 	/** Counted against the quota until the capture is stored or removed. */
 	bytes: number
-	/** Not yet written, so not yet seen by statfs: counted against the free-space floor. */
-	remaining: number
+	/**
+	 * Not yet acknowledged by the file's write callback, so possibly not yet seen by statfs:
+	 * counted against the free-space floor. Bytes queued in the stream still count.
+	 */
+	unwritten: number
 }
 
 export const iqCaptureRoutes: FastifyPluginAsync<IqCaptureOptions> = async (
@@ -426,6 +446,8 @@ export const iqCaptureRoutes: FastifyPluginAsync<IqCaptureOptions> = async (
 	const inflight = new Set<Promise<void>>()
 	/** The source watch of each source's capture, from admission until it ends. */
 	const watchers = new Map<string, () => void>()
+	/** Set when shutdown starts: an admission still pending then never starts its capture. */
+	let closing = false
 
 	/**
 	 * Admission and commit run one at a time, so the stored listing, the running reservations
@@ -449,6 +471,7 @@ export const iqCaptureRoutes: FastifyPluginAsync<IqCaptureOptions> = async (
 	})
 
 	app.addHook("preClose", async () => {
+		closing = true
 		await Promise.all([...active.values()].map(abort => abort()))
 		await Promise.all([...inflight])
 	})
@@ -599,7 +622,7 @@ export const iqCaptureRoutes: FastifyPluginAsync<IqCaptureOptions> = async (
 		// Whole seconds at a rate ≤ 3,200,000: at most 10 × 3,200,000 × 2 = IQ_CAPTURE_MAX_BYTES.
 		const bytes = seconds * sampleRate * 2
 		const id = randomUUID()
-		const job: Running = { bytes, remaining: bytes }
+		const job: Running = { bytes, unwritten: bytes }
 		// Claimed and watched before the first await, so a concurrent request sees this capture
 		// and a source change during the disk checks is never missed.
 		busySources.add(sourceId)
@@ -629,6 +652,7 @@ export const iqCaptureRoutes: FastifyPluginAsync<IqCaptureOptions> = async (
 			try {
 				await store.ready()
 				const refusal = await serialized(async () => {
+					if (closing) return "closing" as const
 					if (await store.exists(name)) return "exists" as const
 					const stored = await store.list()
 					const reservations = [...running.values()]
@@ -642,7 +666,7 @@ export const iqCaptureRoutes: FastifyPluginAsync<IqCaptureOptions> = async (
 						return "quota" as const
 					// Every running capture's unwritten bytes, this one's included, must leave the floor.
 					const unwritten = reservations.reduce(
-						(sum, r) => sum + r.remaining,
+						(sum, r) => sum + r.unwritten,
 						0,
 					)
 					if (
@@ -658,6 +682,8 @@ export const iqCaptureRoutes: FastifyPluginAsync<IqCaptureOptions> = async (
 					return sendError(reply, 507, "IQ_CAPTURE_QUOTA")
 				if (refusal === "disk")
 					return sendError(reply, 507, "IQ_CAPTURE_DISK_FULL")
+				if (refusal === "closing")
+					return sendError(reply, 503, "IQ_CAPTURES_UNAVAILABLE")
 			} catch (err) {
 				request.log.warn(
 					{ err: safeErrorFields(err) },
@@ -676,6 +702,9 @@ export const iqCaptureRoutes: FastifyPluginAsync<IqCaptureOptions> = async (
 			if (lease.kind === "rejected")
 				return sendLeaseRejected(request, reply, lease.reason)
 			if (!lease.active()) return reply
+			// Checked in the same turn the capture registers its abort, so shutdown's abort
+			// snapshot either holds this capture or shutdown began before it and it never starts.
+			if (closing) return sendError(reply, 503, "IQ_CAPTURES_UNAVAILABLE")
 			const outcome = await capture(fn => {
 				stop = fn
 			})
@@ -696,8 +725,9 @@ export const iqCaptureRoutes: FastifyPluginAsync<IqCaptureOptions> = async (
 				outcome.kind === "complete" && lease.active()
 					? await serialized(async () => {
 							try {
-								await store.commit(result)
-								return true
+								// The lease may be revoked while the commit waits for the lock or
+								// between its file steps: it is asked again before each one.
+								return await store.commit(result, () => lease.active())
 							} catch (err) {
 								request.log.warn(
 									{ err: safeErrorFields(err) },
@@ -755,6 +785,7 @@ export const iqCaptureRoutes: FastifyPluginAsync<IqCaptureOptions> = async (
 					return
 				}
 				let startedAt: string | undefined
+				let remaining = bytes
 				let writeError = false
 				let settled: Promise<void> | undefined
 				let branch: Readable | undefined
@@ -801,10 +832,13 @@ export const iqCaptureRoutes: FastifyPluginAsync<IqCaptureOptions> = async (
 					// The tuning is checked again right before the first stored sample.
 					if (startedAt === undefined && !unchanged()) return interrupted()
 					startedAt ??= new Date().toISOString()
-					const part = chunk.subarray(0, job.remaining)
-					job.remaining -= part.length
-					out.write(part)
-					if (job.remaining === 0)
+					const part = chunk.subarray(0, remaining)
+					remaining -= part.length
+					// Reserved until the file acknowledges the bytes, not when they are queued.
+					out.write(part, err => {
+						if (!err) job.unwritten -= part.length
+					})
+					if (remaining === 0)
 						return void finish({ kind: "complete", startedAt })
 					// A disk slower than the source fails the capture; the source never waits.
 					if (out.writableLength > IQ_CAPTURE_MAX_BUFFERED_BYTES) interrupted()

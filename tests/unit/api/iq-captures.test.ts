@@ -849,3 +849,126 @@ it("interrupts when the tuning changed silently before the first sample", async 
 	await rebuild()
 	expect(await readdir(dir)).toEqual([])
 })
+
+it("keeps unflushed bytes reserved against the free-space floor until the file acknowledges them", async () => {
+	// Every write callback is held, so the capture's bytes are queued but not on disk.
+	const held: (() => void)[] = []
+	const holding = (path: string) => {
+		writeFileSync(path, "", { flag: "wx", mode: 0o600 })
+		return new Writable({
+			write: (chunk: Buffer, _encoding, callback) => {
+				held.push(() => {
+					writeFileSync(path, chunk, { flag: "a" })
+					callback()
+				})
+			},
+		})
+	}
+	const { dispose } = await twoSources({ createPartial: holding })
+	try {
+		available = IQ_CAPTURES_MIN_FREE_BYTES + 2000
+		const { pending } = await start({
+			name: "first",
+			seconds: 1,
+			sourceId: "a",
+		})
+		input.write(Buffer.alloc(2000))
+		while (held.length === 0) await delay(1)
+		// statfs has not seen the 2000 bytes yet: a second 2000-byte capture breaches the floor.
+		const refused = await app.inject({
+			method: "POST",
+			url,
+			payload: { name: "second", seconds: 1, sourceId: "b" },
+		})
+		expect(refused.statusCode).toBe(507)
+		expect(refused.json()).toMatchObject({ code: "IQ_CAPTURE_DISK_FULL" })
+		for (const release of held.splice(0)) release()
+		expect((await pending).statusCode).toBe(201)
+	} finally {
+		for (const release of held.splice(0)) release()
+		dispose()
+	}
+})
+
+it("removes a finished capture whose lease is revoked while its commit waits for the lock", async () => {
+	let reads = 0
+	const checking = gate()
+	const hold = gate()
+	const closing = gate()
+	const { inputB, dispose } = await twoSources({
+		availableBytes: async () => {
+			// The second admission (source b) holds the lock inside its free-space read.
+			if (++reads === 2) {
+				checking.open()
+				await hold.opened
+			}
+			return available
+		},
+		createPartial: path => {
+			const real = createWriteStream(path, { flags: "wx", mode: 0o600 })
+			if (path.includes("first")) real.once("close", closing.open)
+			return real
+		},
+	})
+	try {
+		const { pending: first } = await start({
+			name: "first",
+			seconds: 1,
+			sourceId: "a",
+		})
+		const revokeFirst = invalidate
+		const second = app
+			.inject({
+				method: "POST",
+				url,
+				payload: { name: "second", seconds: 1, sourceId: "b" },
+			})
+			.then(r => r)
+		await checking.opened
+		input.write(Buffer.alloc(2000))
+		await closing.opened
+		// After the close the capture resolves and queues its commit behind the held admission.
+		await new Promise(resolve => setImmediate(resolve))
+		await delay(10)
+		revokeFirst?.()
+		hold.open()
+		await first.catch(() => undefined)
+		inputB.write(Buffer.alloc(2000))
+		expect((await second).statusCode).toBe(201)
+		const entries = await readdir(dir)
+		expect(entries).not.toContain("first.cu8")
+		expect(entries).not.toContain("first.json")
+		expect(entries).not.toContain("first.cu8.partial")
+	} finally {
+		dispose()
+	}
+})
+
+it("refuses a capture whose admission is still pending when shutdown starts", async () => {
+	const checking = gate()
+	const hold = gate()
+	await rebuild({
+		availableBytes: async () => {
+			checking.open()
+			await hold.opened
+			return available
+		},
+	})
+	const added = vi.fn()
+	fanout.on("branch-added", added)
+	const pending = app
+		.inject({ method: "POST", url, payload: { name: "first", seconds: 1 } })
+		.then(r => r)
+	await checking.opened
+	const closed = app.close()
+	// Shutdown's abort snapshot is taken (no capture registered yet) while admission holds.
+	await delay(20)
+	hold.open()
+	const res = await pending
+	await closed
+	expect(res.statusCode).toBe(503)
+	expect(res.json()).toMatchObject({ code: "IQ_CAPTURES_UNAVAILABLE" })
+	expect(added).not.toHaveBeenCalled()
+	expect(await readdir(dir)).toEqual([])
+	app = Fastify()
+})
