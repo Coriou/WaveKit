@@ -364,7 +364,7 @@ curl http://localhost:9000/api/live-audio/presets
 
 Configuration via YAML (`config/default.yaml`) or environment variables:
 
-Decoders without a configured frequency get a built-in band per `region` and are suspended while it is out of view (see [API.md, Band check and band suspension](API.md#band-check-and-band-suspension)). multimon-ng's band is the union of its modes' ranges in the region (POCSAG/FLEX paging, AFSK1200 APRS, DTMF analog-FM voice, FSK9600 amateur 2 m/70 cm, EAS US/CA weather radio); a list with no range in the region is out of band everywhere, and explicit channel pins keep the band unknown. With a channelizer it covers the paging raster channels in view, the busiest first while the scanner ranks channel activity (see [DECODER-GUIDE.md](DECODER-GUIDE.md)).
+Decoders without a configured frequency get a built-in band per `region` and are suspended while it is out of view (see [API.md, Band check and band suspension](API.md#band-check-and-band-suspension)). multimon-ng's band is the union of its modes' ranges in the region (POCSAG/FLEX paging incl. US/CA 929–932 MHz, AFSK1200 APRS plus amateur 2 m/70 cm and ISS/satellite packet, DTMF analog-FM voice, FSK9600 amateur 2 m/70 cm with ITU-wide fallback ranges, EAS US/CA weather radio); a mode whose service has no band data in the region leaves the band unknown (it follows the VFO), and explicit channel pins keep the band unknown. With a channelizer it covers the paging raster channels in view, the busiest first while the scanner ranks channel activity (see [DECODER-GUIDE.md](DECODER-GUIDE.md)).
 
 ```yaml
 # Sources: an rtl_tcp or rtlmux receiver, such as the Pi SDR host

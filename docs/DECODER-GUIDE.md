@@ -566,20 +566,23 @@ describe("HfdlDecoder", () => {
    band-plan channel is chosen yet ([API](API.md) lists every reason).
 5. multimon-ng with only paging modes (POCSAG512, POCSAG1200, POCSAG2400, FLEX; the default
    when `modes` is unset) runs only where a paging band of your region is in the capture (the
-   band catalogue's VHF paging plan, plus 466.025–466.230 MHz in the EU for French paging),
-   so it is `frequency-out-of-band` at 1090 MHz or 433 MHz. With EAS, AFSK1200, FSK9600 or DTMF
-   among its modes its band is the union of the band-plan ranges where each mode's service exists in
-   your region: paging ranges for POCSAG and FLEX, APRS ranges for AFSK1200 (the national
-   2 m APRS channel: 144.800 MHz in the EU, 144.390 MHz in the US and Canada, 145.175 MHz in
-   Australia, 144.575 MHz in New Zealand, 144.660 MHz in Japan (144.640 MHz there is the
-   9600-baud channel), 144.640 MHz in China, plus the 2 m band
-   where the region's plan lists APRS on it), analog FM voice ranges for DTMF (PMR446,
-   land mobile, marine, amateur 2 m / 70 cm, CB), the amateur 2 m and 70 cm bands for
-   FSK9600 (EU 144–146 and 430–440 MHz, US and Canada 144–148 and 420–450 MHz; none in
-   other regions) and the NOAA Weather Radio / Weatheradio Canada band for EAS
-   (162.400–162.550 MHz in the US and Canada; none elsewhere). A mode whose service has no range in your
-   region adds nothing; when none of its modes has one the decoder is out of band everywhere,
-   never left with an unknown band. Elsewhere it is suspended with `frequency-out-of-band`
+   band catalogue's VHF paging plan, plus 466.025–466.230 MHz in the EU for French paging and
+   929.0–932.0 MHz in the US and Canada for 900 MHz paging), so it is `frequency-out-of-band`
+   at 1090 MHz or 433 MHz. With EAS, AFSK1200, FSK9600 or DTMF among its modes its band is
+   the union of the ranges where each mode's service exists in your region: paging ranges for
+   POCSAG and FLEX; for AFSK1200 the national 2 m APRS channel (144.800 MHz in the EU,
+   144.390 MHz in the US and Canada, 145.175 MHz in Australia, 144.575 MHz in New Zealand,
+   144.660 MHz in Japan, 144.640 MHz in China), the amateur 2 m and 70 cm bands, the ISS
+   packet channel (145.825 MHz ± 12.5 kHz) and the 70 cm satellite packet channel
+   (437.775–437.825 MHz) in every region; analog FM voice ranges for DTMF (PMR446, land
+   mobile, marine, amateur 2 m / 70 cm, CB); the amateur 2 m and 70 cm bands for FSK9600
+   (EU 144–146 and 430–440 MHz, US and Canada 144–148 and 420–450 MHz, and the ITU-wide
+   144–146 and 430–440 MHz in Australia, New Zealand, Japan and China, whose band plans list
+   no amateur bands yet); and the NOAA Weather Radio / Weatheradio Canada band for EAS
+   (162.400–162.550 MHz in the US and Canada; SAME is not broadcast elsewhere, so EAS adds
+   nothing there). When a mode's service has no band data in your region at all, the band
+   stays unknown and the decoder follows the VFO, so missing data never stops a working
+   decode. Elsewhere it is suspended with `frequency-out-of-band`
    ("waiting: the tuned frequency is outside its band"): at 1090 MHz in every region, and
    in the EU also in the 863–870 MHz ISM band. In the US and Canada 851–869 MHz is land
    mobile, so with DTMF among its modes it runs at 868.95 MHz there. Any of `channelHz`, `channelsHz`, `offsetHz`,

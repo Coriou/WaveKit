@@ -118,6 +118,7 @@ describe("built-in catalogue (legacy plans plus the supplement)", () => {
 		expect(BUILTIN_SUPPLEMENT.map(s => s.plan.id)).toEqual([
 			"pager-fr",
 			...LMR_IDS,
+			...LMR_IDS,
 			"aprs",
 			"aprs",
 			"aprs",
@@ -146,6 +147,8 @@ describe("built-in catalogue (legacy plans plus the supplement)", () => {
 		for (const region of ["US", "CA"] as const) {
 			LMR_IDS.forEach((id, i) => {
 				const plan = resolveBuiltinBandplan(id, region)
+				// Each region's catalogue carries its own copy, tagged with that region.
+				expect(plan?.region).toBe(region)
 				// One contiguous range per plan, tagged with its own plan id.
 				expect(plan?.ranges).toHaveLength(1)
 				expect(plan?.ranges[0]?.bandplanId).toBe(id)
@@ -158,6 +161,16 @@ describe("built-in catalogue (legacy plans plus the supplement)", () => {
 						expect(Number.isInteger(x.firstChannelHz)).toBe(true)
 			})
 		}
+		for (const id of LMR_IDS)
+			expect(resolveBuiltinBandplan(id, "CA")).not.toBe(
+				resolveBuiltinBandplan(id, "US"),
+			)
+		// No supplement plan is served to a region other than its own (or "all").
+		for (const region of REGIONS)
+			for (const plan of builtinBandplansFor(region).filter(p =>
+				BUILTIN_SUPPLEMENT.some(s => s.plan === p),
+			))
+				expect(plan.region).toBe(region)
 		for (const region of ["EU", "AU", "NZ", "JP", "CN"] as const)
 			for (const id of LMR_IDS)
 				expect(resolveBuiltinBandplan(id, region)).toBeUndefined()

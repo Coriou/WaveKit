@@ -438,13 +438,13 @@ it.each([
 )
 
 // R3: EAS is heard on the US/Canadian weather radio band and FSK9600 on the
-// amateur 2 m / 70 cm plans; a known mode is never left with an unknown band.
+// amateur 2 m / 70 cm plans (ITU-wide ranges where the catalogue has none).
 it.each([
 	[["EAS"], 1_090_000_000, "US"],
 	[["EAS"], 162_475_000, "EU"],
 	[["EAS"], 1_090_000_000, "JP"],
 	[["FSK9600"], 1_090_000_000, "EU"],
-	[["FSK9600"], 144_660_000, "JP"],
+	[["FSK9600"], 162_475_000, "JP"],
 	[["EAS", "DTMF"], 868_950_000, "EU"],
 	[["AFSK1200", "EAS"], 1_090_000_000, "US"],
 ] as const)(
@@ -463,6 +463,10 @@ it.each([
 	[["EAS"], 162_550_000, "CA"],
 	[["FSK9600"], 432_500_000, "EU"],
 	[["FSK9600"], 145_050_000, "US"],
+	[["FSK9600"], 144_660_000, "JP"],
+	[["AFSK1200"], 145_825_000, "AU"],
+	[["AFSK1200"], 437_800_000, "EU"],
+	[["POCSAG1200", "AFSK1200"], 931_000_000, "US"],
 	[["AFSK1200", "EAS"], 162_400_000, "US"],
 ] as const)(
 	"multimon-ng with modes %j is admitted in band at %d Hz in %s",
@@ -474,12 +478,12 @@ it.each([
 	},
 )
 
-// R3: AFSK1200 is heard on APRS ranges, DTMF on analog FM voice ranges and
+// R3: AFSK1200 is heard on APRS, amateur and satellite packet ranges, DTMF on analog FM voice ranges and
 // POCSAG/FLEX on paging ranges; elsewhere the decoder is out of band.
 it.each([
 	[["AFSK1200"], 1_090_000_000],
 	[["AFSK1200"], 868_950_000],
-	[["AFSK1200"], 432_500_000],
+	[["AFSK1200"], 162_475_000],
 	[["DTMF"], 1_090_000_000],
 	[["DTMF"], 868_950_000],
 	[["AFSK1200", "DTMF"], 868_950_000],

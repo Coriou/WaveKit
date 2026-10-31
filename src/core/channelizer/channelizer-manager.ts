@@ -65,6 +65,14 @@ export const WEDGE_MS = 2000
  * within WEDGE_MS + 250 ms of the write. Four timer turns per second per running generation.
  */
 const WATCH_EVERY_MS = 250
+/**
+ * A watchdog verdict taken more than one watch period after its timer was due means this process (and with it the
+ * child) did not run meanwhile: a host or VM pause, laptop sleep, a memory stall. Normal timer lateness is a few ms, so
+ * one period (250 ms) is far above it and far below WEDGE_MS. While input flows it is always owed, so the frozen time
+ * would otherwise count as silence and retire a healthy process; the verdict instead restarts the window
+ * (heardAt = owedSince = now). A real wedge is still retired WEDGE_MS after the stall ends.
+ */
+const HOST_STALL_MS = WATCH_EVERY_MS
 const BUSY_BACKOFF_MS = [25, 50, 100, 200, 400] as const
 const MAX_OPEN_SENDS = BUSY_BACKOFF_MS.length + 1
 const SAMPLE_BYTES = { cu8: 2, cf32: 8 } as const
@@ -163,6 +171,11 @@ interface SourceChannelizer {
 	inputWritten: number
 	/** The largest `inputBytes` a `progress` line of this generation reported: stdin bytes the process finished. */
 	inputAcked: number
+	/**
+	 * This generation wrote at least one `progress` line. Until it has, unacknowledged input is not owed work: a binary
+	 * older than the `progress` event never acknowledges input and would otherwise be retired one window after start.
+	 */
+	sawProgress: boolean
 	/** `openNow()` when the last event line of this generation arrived: the watchdog's liveness mark. */
 	heardAt: number
 	/** `openNow()` since when work is continuously owed; undefined while none is. */
@@ -1131,7 +1144,7 @@ export class ChannelizerManager
 		if (
 			s.closing.size > 0 ||
 			s.retuning.size > 0 ||
-			s.inputWritten > s.inputAcked
+			(s.sawProgress && s.inputWritten > s.inputAcked)
 		)
 			return true
 		for (const attempt of s.waiters.values()) if (attempt.pending) return true
@@ -1143,10 +1156,13 @@ export class ChannelizerManager
 	 * from the later of its last line and the moment work became owed (an idle process is silent by design, so silence
 	 * before anything was owed does not count). Nothing owed: never retired. The verdict runs after this loop turn's
 	 * I/O (setImmediate): after an event-loop stall the timer phase runs before the poll phase, which would read lines
-	 * the process wrote long ago.
+	 * the process wrote long ago. A verdict more than HOST_STALL_MS past its due time follows a host stall that froze the
+	 * process too: the late part is not counted as silence, but on-time silence still accrues across late checks.
 	 */
 	private watch(s: SourceChannelizer): void {
+		let dueAt = 0
 		const arm = (ms: number) => {
+			dueAt = this.openNow() + ms
 			s.watchdog = setTimeout(() => {
 				s.watchdog = undefined
 				s.watchdogVerdict = setImmediate(judge)
@@ -1162,6 +1178,18 @@ export class ChannelizerManager
 				return
 			}
 			const now = this.openNow()
+			const lateMs = now - dueAt
+			if (lateMs > HOST_STALL_MS) {
+				// Excuse only the late part: the silence accrued before the check fell due still counts, so repeated
+				// late checks cannot hide a real wedge (each check still adds its on-time period to the silence).
+				this.log.info(
+					{ sourceId: s.sourceId, generation: s.generation, lateMs },
+					"Channelizer watchdog ran late (host stall); not counting the late time as silence",
+				)
+				s.heardAt = Math.min(now, s.heardAt + lateMs)
+				if (s.owedSince !== undefined)
+					s.owedSince = Math.min(now, s.owedSince + lateMs)
+			}
 			s.owedSince ??= now
 			const silent = now - Math.max(s.heardAt, s.owedSince)
 			if (silent < WEDGE_MS) {
@@ -1348,6 +1376,7 @@ export class ChannelizerManager
 			sawInputEof: false,
 			inputWritten: 0,
 			inputAcked: 0,
+			sawProgress: false,
 			heardAt: this.openNow(),
 			owedSince: undefined,
 			watchdog: undefined,
@@ -1507,6 +1536,7 @@ export class ChannelizerManager
 				)
 				break
 			case "progress":
+				s.sawProgress = true
 				// Liveness is recorded above. The ack only grows and never passes what was written: a smaller count never
 				// un-owes input, and a count past it cannot hide input written later.
 				s.inputAcked = Math.max(

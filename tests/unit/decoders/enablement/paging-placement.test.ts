@@ -220,7 +220,9 @@ describe("paging raster placement (3.18)", () => {
 		expect(table(["DTMF", "FLEX"])).toBe(table(["FLEX", "DTMF", "bogus"]))
 		expect(verdict(["AFSK1200"], 144_800_000)).toBe("in-band")
 		expect(verdict(["AFSK1200"], 144_390_000, "US")).toBe("in-band")
-		expect(verdict(["AFSK1200"], 433_920_000)).toBe("out-of-band")
+		// The amateur 70 cm band holds 1200 Bd packet too; weather radio does not.
+		expect(verdict(["AFSK1200"], 433_920_000)).toBe("in-band")
+		expect(verdict(["AFSK1200"], 162_475_000)).toBe("out-of-band")
 		expect(verdict(["DTMF"], 446_050_000)).toBe("in-band")
 		expect(verdict(["DTMF"], 156_800_000)).toBe("in-band")
 		// 868.95 MHz is EU ISM but US 851-869 MHz land mobile (analog FM).
@@ -305,9 +307,16 @@ describe("paging raster placement (3.18)", () => {
 		expect(verdict(["FSK9600"], "EU", 435_000_000).verdict).toBe("in-band")
 		expect(verdict(["FSK9600"], "EU", 162_475_000).verdict).toBe("out-of-band")
 		expect(verdict(["FSK9600"], "US", 146_520_000).verdict).toBe("in-band")
-		// The catalogue has no amateur plan there: FSK9600 alone is nowhere.
-		for (const code of ["AU", "NZ", "JP", "CN"] as const)
-			expect(resolve(["FSK9600"], code)).toMatchObject({ nowhere: true })
+		// The catalogue has no amateur plan there: the ITU-wide 2 m and 70 cm ranges.
+		for (const code of ["AU", "NZ", "JP", "CN"] as const) {
+			expect(resolve(["FSK9600"], code)?.rangesHz).toEqual([
+				{ minHz: 144_000_000, maxHz: 146_000_000 },
+				{ minHz: 430_000_000, maxHz: 440_000_000 },
+			])
+			expect(verdict(["FSK9600"], code, 1_090_000_000).verdict).toBe(
+				"out-of-band",
+			)
+		}
 	})
 
 	it("R3: a mixed list's band is the union of its modes' ranges", () => {
@@ -325,14 +334,18 @@ describe("paging raster placement (3.18)", () => {
 				}).requirements,
 				{ centerHz, sampleRateHz: 1_024_000 },
 			).verdict
-		// AFSK1200 + EAS: APRS channel and weather radio, nothing else.
+		// AFSK1200 + EAS: APRS and amateur packet plus weather radio, nothing else.
 		expect(verdict(["AFSK1200", "EAS"], "US", 144_390_000)).toBe("in-band")
 		expect(verdict(["AFSK1200", "EAS"], "US", 162_475_000)).toBe("in-band")
-		expect(verdict(["AFSK1200", "EAS"], "US", 433_920_000)).toBe("out-of-band")
+		expect(verdict(["AFSK1200", "EAS"], "US", 433_920_000)).toBe("in-band")
 		expect(verdict(["AFSK1200", "EAS"], "US", 868_950_000)).toBe("out-of-band")
-		// In the EU EAS adds nothing: AFSK1200's channel alone.
+		expect(verdict(["AFSK1200", "EAS"], "US", 1_090_000_000)).toBe(
+			"out-of-band",
+		)
+		// In the EU EAS adds nothing: AFSK1200's packet ranges alone.
 		expect(verdict(["AFSK1200", "EAS"], "EU", 144_800_000)).toBe("in-band")
-		expect(verdict(["AFSK1200", "EAS"], "EU", 435_000_000)).toBe("out-of-band")
+		expect(verdict(["AFSK1200", "EAS"], "EU", 435_000_000)).toBe("in-band")
+		expect(verdict(["AFSK1200", "EAS"], "EU", 162_475_000)).toBe("out-of-band")
 		// POCSAG + EAS: paging plus weather radio; FSK9600 adds 70 cm.
 		expect(verdict(["POCSAG1200", "EAS"], "EU", 466_100_000)).toBe("in-band")
 		expect(verdict(["POCSAG1200", "EAS"], "EU", 435_000_000)).toBe(
@@ -408,9 +421,144 @@ describe("paging raster placement (3.18)", () => {
 		}
 	})
 
-	it("R3: a known mode with no range in the region is out of band, never unknown", () => {
+	it("R3: a service with no data in the region leaves the band unknown, whatever the other modes", () => {
+		const range = { minHz: 136_000_000, maxHz: 174_000_000 }
+		// No data for aprs: unknown (follow the VFO), alone or beside a service with data.
+		expect(multimonServiceBand("AU", false, ["aprs"], () => undefined)).toEqual(
+			{},
+		)
+		expect(
+			multimonServiceBand("AU", false, ["aprs", "analog-fm"], (_r, p) =>
+				p === "aprs" ? undefined : [range],
+			),
+		).toEqual({})
+		expect(multimonServiceBand("EU", true, ["aprs"], () => undefined)).toEqual(
+			{},
+		)
+		const table = {
+			...BAND_DEFAULTS,
+			"multimon-ng": {
+				scope: "region" as const,
+				byRegion: Object.fromEntries(
+					BAND_REGIONS.map(code => [
+						code,
+						multimonServiceBand(code, false, ["aprs"], () => undefined),
+					]),
+				) as Record<(typeof BAND_REGIONS)[number], ModeBandDefault>,
+			},
+		}
+		const resolved = resolveDecoderBand({
+			type: "multimon-ng",
+			declaration: {},
+			region: { code: "JP", source: "configured" },
+			table,
+		})
+		expect(resolved.requirements).toBeUndefined()
+		expect(
+			assessDecoderBand(resolved.requirements, {
+				centerHz: 1_090_000_000,
+				sampleRateHz: 2_400_000,
+			}).verdict,
+		).toBe("unknown")
+	})
+
+	it("R3: every region has data for every mode service: 1090 MHz is out of band for each mode alone", () => {
+		for (const code of BAND_REGIONS)
+			for (const mode of [
+				"POCSAG1200",
+				"FLEX",
+				"AFSK1200",
+				"DTMF",
+				"FSK9600",
+				"EAS",
+			]) {
+				const requirements = resolveDecoderBand({
+					type: "multimon-ng",
+					declaration: {},
+					region: { code, source: "configured" },
+					table: decoderBandTable("multimon-ng", { modes: [mode] }),
+				}).requirements
+				expect(requirements).toBeDefined()
+				expect(
+					assessDecoderBand(requirements, {
+						centerHz: 1_090_000_000,
+						sampleRateHz: 2_400_000,
+					}).verdict,
+				).toBe("out-of-band")
+			}
+	})
+
+	it("R3: AFSK1200 hears APRS, amateur 2 m / 70 cm, the ISS and 70 cm satellite packet in every region", () => {
+		const verdict = (
+			modes: string[],
+			code: (typeof BAND_REGIONS)[number],
+			centerHz: number,
+		) =>
+			assessDecoderBand(
+				resolveDecoderBand({
+					type: "multimon-ng",
+					declaration: {},
+					region: { code, source: "configured" },
+					table: decoderBandTable("multimon-ng", { modes }),
+				}).requirements,
+				{ centerHz, sampleRateHz: 240_000 },
+			).verdict
+		for (const code of BAND_REGIONS) {
+			// The ISS packet channel and the 70 cm satellite packet channel.
+			expect(verdict(["AFSK1200"], code, 145_825_000)).toBe("in-band")
+			expect(verdict(["AFSK1200"], code, 437_800_000)).toBe("in-band")
+			expect(verdict(["AFSK1200"], code, 1_090_000_000)).toBe("out-of-band")
+		}
+		expect(verdict(["AFSK1200"], "AU", 145_825_000)).toBe("in-band")
+		expect(verdict(["AFSK1200"], "EU", 437_800_000)).toBe("in-band")
+		expect(verdict(["FSK9600"], "JP", 144_660_000)).toBe("in-band")
+		expect(verdict(["AFSK1200"], "JP", 144_660_000)).toBe("in-band")
+		// Outside every amateur range and APRS channel.
+		expect(verdict(["AFSK1200"], "EU", 162_475_000)).toBe("out-of-band")
+	})
+
+	it("R3: US and Canadian 900 MHz paging (929-932 MHz) is a POCSAG/FLEX band, mixed lists included", () => {
+		const verdict = (
+			modes: string[],
+			code: (typeof BAND_REGIONS)[number],
+			centerHz: number,
+		) =>
+			assessDecoderBand(
+				resolveDecoderBand({
+					type: "multimon-ng",
+					declaration: {},
+					region: { code, source: "configured" },
+					table: decoderBandTable("multimon-ng", { modes }),
+				}).requirements,
+				{ centerHz, sampleRateHz: 240_000 },
+			).verdict
+		for (const code of ["US", "CA"] as const) {
+			expect(pagingRasterRanges(code)).toContainEqual({
+				minHz: 929_000_000,
+				maxHz: 932_000_000,
+				spacingHz: 25_000,
+				firstChannelHz: 929_012_500,
+			})
+			expect(verdict(["POCSAG1200"], code, 931_000_000)).toBe("in-band")
+			expect(verdict(["POCSAG1200", "AFSK1200"], code, 931_000_000)).toBe(
+				"in-band",
+			)
+			expect(verdict(["FLEX", "EAS"], code, 929_500_000)).toBe("in-band")
+		}
+		// 120 channels: 929.0125 MHz to 931.9875 MHz on 25 kHz.
+		const us900 = pagingRasterRanges("US").filter(r => r.minHz === 929_000_000)
+		const channels = rasterChannelsBetween(us900, 929_000_000, 932_000_000)
+		expect(channels).toHaveLength(120)
+		expect([channels[0], channels.at(-1)]).toEqual([929_012_500, 931_987_500])
+		expect(rasterChannelsBetween(us900, 932_000_001, 940_000_000)).toEqual([])
+		expect(verdict(["POCSAG1200", "AFSK1200"], "EU", 931_000_000)).toBe(
+			"out-of-band",
+		)
+	})
+
+	it("R3: a known mode with no range in the region is out of band", () => {
 		const none = () => []
-		// No service range and no paging: the band is nowhere.
+		// Every service known to be empty and no paging: the band is nowhere.
 		expect(multimonServiceBand("AU", false, ["aprs"], none)).toEqual({
 			nowhere: true,
 		})

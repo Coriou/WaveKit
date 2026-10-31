@@ -625,7 +625,8 @@ it("probation failures back off five, ten, twenty, thirty and thirty minutes", a
 		)
 		expect(gate.admit).toHaveBeenCalledTimes(calls)
 		await vi.advanceTimersByTimeAsync(2501)
-		expect(gate.admit).toHaveBeenCalledTimes(calls + 2)
+		// The due re-check, then the start's fresh decision before and after wiring.
+		expect(gate.admit).toHaveBeenCalledTimes(calls + 3)
 	}
 	await vi.advanceTimersByTimeAsync(31_000)
 	await f.manager.stopDecoder("dec")

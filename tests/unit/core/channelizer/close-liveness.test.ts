@@ -62,6 +62,8 @@ const WATCH_EVERY_MS = 250
 class Proc extends EventEmitter implements ChannelizerProcessLike {
 	/** False: the main loop stops (wedged): no job completes, nothing is written. */
 	reading = true
+	/** True: a binary older than the `progress` event: it works and answers, but never writes `progress`. */
+	legacy = false
 	/** 1 MiB per 10 ms turn: far faster than any feed. */
 	readPerTick = 1 << 20
 	/** Unread bytes the OS pipe holds: a write whose end fits completes, read or not. */
@@ -165,6 +167,7 @@ class Proc extends EventEmitter implements ChannelizerProcessLike {
 	private maybeProgress() {
 		const now = Date.now()
 		if (
+			this.legacy ||
 			this.work === this.progressWork ||
 			now - this.lastProgress < PROGRESS_EVERY_MS
 		)
@@ -236,8 +239,12 @@ afterEach(async () => {
 	rmSync(dir, { recursive: true, force: true })
 })
 
-/** `feed: false`: the test drives every input byte through `fanout.distribute`. */
-function setup(feed = true, openTimeoutMs?: number) {
+/** `feed: false`: the test drives every input byte through `fanout.distribute`. `openNow`: the manager's clock. */
+function setup(
+	feed = true,
+	openTimeoutMs?: number,
+	openNow: () => number = Date.now,
+) {
 	const sources = Object.assign(new EventEmitter(), { getCaps: () => caps })
 	const fanout = new FanoutManager(logger)
 	const processes: Proc[] = []
@@ -246,7 +253,7 @@ function setup(feed = true, openTimeoutMs?: number) {
 		routing: { getFanout: () => fanout, releaseUnused: () => {} },
 		config: ChannelizerConfigSchema.parse({ enabled: true, socketDir: dir }),
 		logger,
-		openNow: Date.now,
+		openNow,
 		...(openTimeoutMs !== undefined ? { openTimeoutMs } : {}),
 		connect: () => Promise.resolve(new PassThrough()),
 		createProcess: (o: ChannelizerProcessOptions) => {
@@ -500,6 +507,98 @@ it("a reply read in the same loop turn as a late watchdog timer (event-loop stal
 	await run(WATCH_EVERY_MS)
 	expect(invalidations).toEqual([])
 	expect(processes).toHaveLength(1)
+})
+
+it("a host stall that freezes core and process 5 s with input owed restarts the window; a later wedge still retires", async () => {
+	// Laptop sleep, a VM pause or a memory stall freezes both processes: no timer fires and no line is written, while
+	// the clock moves on. On resume the watchdog's timer fires 5 s late, before the resumed process wrote anything.
+	let frozenMs = 0
+	const { processes, invalidations, acquire } = setup(
+		true,
+		undefined,
+		() => Date.now() + frozenMs,
+	)
+	const steady = await acquire("steady")
+	await run(200) // working: input flows, so input is always owed
+	const proc = processes[0]!
+	expect(proc.progressAt.length).toBeGreaterThan(0)
+	proc.reading = false // frozen with the host
+	frozenMs = 5000
+	// Resume: the timers due during the stall fire in one turn; the process has not run yet.
+	await vi.advanceTimersByTimeAsync(WATCH_EVERY_MS)
+	await flushImmediates()
+	proc.reading = true
+	await run(3 * WEDGE_MS)
+	expect(invalidations).toEqual([])
+	expect(steady.stream.destroyed).toBe(false)
+	// A real wedge after the stall: retired one window after its last line, as without a stall.
+	proc.reading = false
+	const wedgedAt = Date.now()
+	await run(WEDGE_MS + WATCH_EVERY_MS + 20, () => invalidations.length > 0)
+	expect(invalidations).toEqual([["rtl", 1, ["steady-g1"], "unresponsive"]])
+	expect(Date.now() - wedgedAt).toBeGreaterThanOrEqual(
+		WEDGE_MS - PROGRESS_EVERY_MS,
+	)
+})
+
+it("repeatedly late watchdog checks cannot hide a wedge: on-time silence still accrues", async () => {
+	let skipped = 0
+	const { processes, invalidations, acquire } = setup(
+		true,
+		undefined,
+		() => Date.now() + skipped,
+	)
+	await acquire("steady")
+	await run(200)
+	const proc = processes[0]!
+	expect(proc.progressAt.length).toBeGreaterThan(0)
+	proc.reading = false
+	// Every check runs 300 ms late (past HOST_STALL_MS); each still adds its on-time WATCH_EVERY_MS to the silence,
+	// so the wedge is retired within WEDGE_MS / WATCH_EVERY_MS + 1 late checks.
+	const bound = WEDGE_MS / WATCH_EVERY_MS + 1
+	let checks = 0
+	while (invalidations.length === 0 && checks < 120) {
+		skipped += 300
+		await vi.advanceTimersByTimeAsync(WATCH_EVERY_MS)
+		await flushImmediates()
+		checks++
+	}
+	expect(invalidations).toEqual([["rtl", 1, ["steady-g1"], "unresponsive"]])
+	expect(checks).toBeLessThanOrEqual(bound)
+})
+
+it("a host stall shorter than one watch period is not one: a wedge owing input is retired on time", async () => {
+	let frozenMs = 0
+	const { processes, invalidations, acquire } = setup(
+		true,
+		undefined,
+		() => Date.now() + frozenMs,
+	)
+	await acquire("steady")
+	await run(200)
+	processes[0]!.reading = false
+	frozenMs = WATCH_EVERY_MS // a timer at most this late is ordinary lateness
+	const wedgedAt = Date.now()
+	await run(WEDGE_MS + WATCH_EVERY_MS + 20, () => invalidations.length > 0)
+	expect(invalidations).toEqual([["rtl", 1, ["steady-g1"], "unresponsive"]])
+	expect(Date.now() - wedgedAt).toBeLessThanOrEqual(WEDGE_MS)
+})
+
+it("a binary that never writes `progress` is not retired for unacknowledged input, but still for an unanswered close", async () => {
+	const { m, processes, invalidations, acquire } = setup()
+	const steady = await acquire("steady")
+	const slot = await acquire("slot")
+	const proc = processes[0]!
+	proc.legacy = true
+	await run(5 * WEDGE_MS)
+	expect(proc.progressAt).toEqual([])
+	expect(proc.inputBytes).toBeGreaterThan(0)
+	expect(invalidations).toEqual([])
+	expect(steady.stream.destroyed).toBe(false)
+	proc.reading = false
+	void m.releaseChannel(slot.channelId)
+	await run(WEDGE_MS + WATCH_EVERY_MS, () => invalidations.length > 0)
+	expect(invalidations).toEqual([["rtl", 1, ["steady-g1"], "unresponsive"]])
 })
 
 it("a slow reader inside one large pending stdin write keeps its generation (Node's writableLength stays flat)", async () => {

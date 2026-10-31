@@ -110,7 +110,7 @@ const RASTER_12K5 = (firstMhz: number) => [
 	{ spacingHz: 12_500, firstMhz },
 	{ spacingHz: 6250, firstMhz: firstMhz - 0.003125 },
 ]
-/** One land mobile allocation as its own plan (one contiguous range). */
+/** One land mobile allocation as its own plan (one contiguous range), for the US. */
 function landMobilePlan(
 	id: string,
 	name: string,
@@ -130,7 +130,7 @@ const LMR_ANALOG: readonly ScannerProtocol[] = [
 	...LAND_MOBILE_DIGITAL,
 	"analog-fm",
 ]
-/** The 700/800/900 MHz land mobile plans in frequency order. */
+/** The 700/800/900 MHz land mobile plans in frequency order (region "US"; LAND_MOBILE_700_900_CA for Canada). */
 export const LAND_MOBILE_700_900: readonly Bandplan[] = Object.freeze([
 	landMobilePlan(
 		"land-mobile-700-base",
@@ -182,6 +182,11 @@ export const LAND_MOBILE_700_900: readonly Bandplan[] = Object.freeze([
 	),
 ])
 
+/** The same plans served to Canada: copies carrying region "CA", so a CA catalogue never shows a US plan. */
+export const LAND_MOBILE_700_900_CA: readonly Bandplan[] = Object.freeze(
+	LAND_MOBILE_700_900.map(plan => ({ ...plan, region: "CA" as const })),
+)
+
 /** One 2 m APRS channel: ±8 kHz around the carrier, 16 kHz FM (the legacy APRS shape). */
 function aprsPlan(region: BandRegion, mhz: number): Bandplan {
 	return {
@@ -216,7 +221,12 @@ const APRS_CN = aprsPlan("CN", 144.64)
 export const BUILTIN_SUPPLEMENT: readonly SupplementPlan[] = Object.freeze([
 	{ regions: ["EU"], before: "pmr446", plan: PAGER_FR },
 	...LAND_MOBILE_700_900.map(plan => ({
-		regions: ["US", "CA"] as const,
+		regions: ["US"] as const,
+		before: "amateur-2m",
+		plan,
+	})),
+	...LAND_MOBILE_700_900_CA.map(plan => ({
+		regions: ["CA"] as const,
 		before: "amateur-2m",
 		plan,
 	})),

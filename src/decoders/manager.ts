@@ -307,8 +307,6 @@ interface DecoderState {
 	loggedSuspension?: string | null
 	/** R5: the input rate last warned about as suboptimal, so each rate warns once. */
 	suboptimalRateWarned?: number
-	/** R4: an efficiency re-check's admission, the next start's preflight. */
-	efficiencyPreflight?: AdmissionDecision
 	parentId?: string
 	placement?: WantedPlacement
 	unplaced?: DecoderSuspensionReasonCode
@@ -5653,12 +5651,7 @@ export class DecoderManager extends EventEmitter {
 					this.emitStatusChanged(state)
 				else this.publishIfRateChanged(state, before)
 			} else if (eligibility.blockedBy === null) {
-				try {
-					await this.resume(state, plan)
-				} finally {
-					// Consumed by this resume's start, or never: not a later start's.
-					delete state.efficiencyPreflight
-				}
+				await this.resume(state, plan)
 			} else if (state.transition === "suspending") {
 				await this.suspend(state, eligibility) // retry a failed stop
 			} else {
@@ -5688,10 +5681,10 @@ export class DecoderManager extends EventEmitter {
 	/**
 	 * R4: re-asks the gate for a decoder suspended for efficiency whose
 	 * refusal fell due, before resuming it. A refusal is kept as the new
-	 * admission (the suspension stays); an admission stands in for the
-	 * resume's preflight only, so the start's final decision
-	 * (startPlacementNow) still governs the run and the gate is asked no
-	 * more often than before.
+	 * admission (the suspension stays). An admission only lets the resume
+	 * proceed: it is not counted as running, so startPlacementNow asks the
+	 * gate afresh (two resumes admitted here against the same headroom must
+	 * not both start).
 	 */
 	private efficiencyStillRefused(state: DecoderState): boolean {
 		const gate = this.config.enablement?.gate
@@ -5708,10 +5701,7 @@ export class DecoderManager extends EventEmitter {
 			this.runningPlacements(),
 			performance.now(),
 		)
-		if (decision.admit) {
-			state.efficiencyPreflight = decision
-			return false
-		}
+		if (decision.admit) return false
 		state.admission = decision
 		this.scheduleEfficiencyEvaluation()
 		return true
@@ -6394,19 +6384,18 @@ export class DecoderManager extends EventEmitter {
 		const generation = state.rateGeneration
 		// YAML placements keep today's behaviour: admitted without a verdict.
 		const exempt = this.gateExempt(state)
-		const preflight = state.efficiencyPreflight
-		delete state.efficiencyPreflight
 		if (gate && state.placement) {
 			delete state.admission
 			delete state.admittedAtMs
+			// Always a fresh decision: an R4 re-check's admission was not counted
+			// as running, so another resume may have taken its headroom since.
 			state.admission = exempt
 				? { admit: true }
-				: (preflight ??
-					gate.admit(
+				: gate.admit(
 						state.placement,
 						this.runningPlacements(),
 						performance.now(),
-					))
+					)
 			if (!state.admission.admit) {
 				await this.suspend(state, this.assessEligibility(state))
 				this.scheduleEfficiencyEvaluation()
