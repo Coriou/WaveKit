@@ -251,9 +251,18 @@ describe("TunerState.unknownFields", () => {
 			expect(state.frequency).toBe(162_000_000)
 			expect(state.sampleRate).toBe(2_400_000)
 			expect(state.declaredOnlyFields ?? []).toEqual([])
+			// Caps describe what was written back, not the startup baseline.
+			expect(current).toMatchObject({
+				centerFreq: 162_000_000,
+				sampleRate: 2_400_000,
+			})
 			// A later dropout is no resume: the inferred values fall back as before (WG5 R2).
 			expect(controller.synchronizeOnConnect("rtl").commands).toEqual([])
 			expect(controller.getState("rtl")!.frequency).toBe(1_090_000_000)
+			expect(current).toMatchObject({
+				centerFreq: 1_090_000_000,
+				sampleRate: 2_048_000,
+			})
 		})
 
 		it("a resumed paused feed restores a relay client's centre and rate", () => {
@@ -267,6 +276,10 @@ describe("TunerState.unknownFields", () => {
 				}).commands,
 			).toEqual(["set-sample-rate", "set-frequency"])
 			expect(controller.getState("rtl")!.frequency).toBe(162_000_000)
+			expect(current).toMatchObject({
+				centerFreq: 162_000_000,
+				sampleRate: 2_400_000,
+			})
 		})
 
 		it("a resumed paused feed replays an accepted centre once, not again as inferred", async () => {
@@ -279,6 +292,7 @@ describe("TunerState.unknownFields", () => {
 				}).commands,
 			).toEqual(["set-frequency"])
 			expect(controller.getState("rtl")!.frequency).toBe(162_025_000)
+			expect(current.centerFreq).toBe(162_025_000)
 		})
 
 		it("a restore reconnect replays an accepted centre and keeps it proven", async () => {

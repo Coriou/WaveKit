@@ -1995,6 +1995,11 @@ export class TunerController extends EventEmitter {
 		const forgotTuning = options.resumed
 			? false
 			: this.forgetInferredTuning(sourceId, state, desired)
+		// The fields this session restores; caps are reconciled against the same set, so a
+		// resumed inferred centre or rate is described to DSP and decoders as it is sent.
+		const replay = options.resumed
+			? this.withInferredTuning(sourceId, desired)
+			: desired
 
 		// WG11 req 4.2, 4.3: configured fields not held by the operator, before the
 		// restore; a failed configured write stops the restore too (today's failure).
@@ -2002,7 +2007,7 @@ export class TunerController extends EventEmitter {
 			? this.writeConfiguredTuning(sourceId, state)
 			: undefined
 		if (configured?.error !== undefined) {
-			const capsChanged = this.reconcileCaps(sourceId, state)
+			const capsChanged = this.reconcileCaps(sourceId, state, replay)
 			if (configured.attempted || capsChanged || forgotTuning)
 				this.emitStateChanged(sourceId)
 			return {
@@ -2015,9 +2020,6 @@ export class TunerController extends EventEmitter {
 
 		const written: Array<{ value: number; name: string }> = []
 		let failure: Error | undefined
-		const replay = options.resumed
-			? this.withInferredTuning(sourceId, desired)
-			: desired
 		const plan = replay ? this.buildReplayPlan(state, replay) : []
 		for (const [cmd, value] of plan) {
 			try {
@@ -2046,7 +2048,7 @@ export class TunerController extends EventEmitter {
 			delete state.lastError
 		}
 
-		const capsChanged = this.reconcileCaps(sourceId, state)
+		const capsChanged = this.reconcileCaps(sourceId, state, replay)
 
 		const replayed = written.map(entry => entry.name)
 		const commands = [...(configured?.commands ?? []), ...replayed]
@@ -2088,9 +2090,17 @@ export class TunerController extends EventEmitter {
 	 * Align source caps with what the tuner state backs: accepted values for
 	 * commanded fields, otherwise the configured baseline. One caps-changed at
 	 * most, and none when metadata already matches (no decoder restart storm).
+	 * `backed` overrides the accepted set with the fields a restore replays (a resumed
+	 * paused feed adds its inferred centre and rate), so caps follow what was sent.
 	 */
-	private reconcileCaps(sourceId: string, state: TunerState): boolean {
-		const desired = this.desiredFields.get(sourceId)
+	private reconcileCaps(
+		sourceId: string,
+		state: TunerState,
+		backed:
+			| ReadonlyMap<DesiredField, number>
+			| undefined = this.desiredFields.get(sourceId),
+	): boolean {
+		const desired = backed
 		const baseline = this.baselineCaps.get(sourceId)
 		const current = this.sourceManager.getCaps(sourceId)
 		if (!current) return false

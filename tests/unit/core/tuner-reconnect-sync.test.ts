@@ -191,6 +191,78 @@ describe("TunerController reconnect synchronization", () => {
 		])
 	})
 
+	describe("a resumed paused feed (inferred centre and rate replayed)", () => {
+		const resume = () => {
+			transport.frames.length = 0
+			transport.capsChanges.length = 0
+			return controller.synchronizeOnConnect("rtl-1", {
+				policy: "restore",
+				resumed: true,
+			})
+		}
+
+		it("keeps caps on the replayed inferred tuning instead of the baseline", async () => {
+			controller.initializeSource(
+				"rtl-1",
+				{ ...transport.caps, centerFreq: 1_090_000_000 },
+				"rtl_tcp",
+			)
+			await controller.setFrequency("rtl-1", 162_000_000, { accept: false })
+			await controller.setSampleRate("rtl-1", 2_400_000, { accept: false })
+			const result = resume()
+			expect(result.commands).toEqual(["set-sample-rate", "set-frequency"])
+			expect(transport.frames).toEqual([
+				[0x02, 2_400_000],
+				[0x01, 162_000_000],
+			])
+			expect(controller.getState("rtl-1")).toMatchObject({
+				frequency: 162_000_000,
+				sampleRate: 2_400_000,
+			})
+			expect(transport.caps).toMatchObject({
+				centerFreq: 162_000_000,
+				sampleRate: 2_400_000,
+			})
+			expect(transport.capsChanges).toEqual([])
+		})
+
+		it("reconciles stale caps to the replayed inferred tuning", async () => {
+			await controller.setFrequency("rtl-1", 162_000_000, { accept: false })
+			await controller.setSampleRate("rtl-1", 2_400_000, { accept: false })
+			transport.caps.sampleRate = 2_048_000
+			transport.caps.centerFreq = 100_000_000
+			resume()
+			expect(transport.capsChanges).toEqual([
+				{ sampleRate: 2_400_000, centerFreq: 162_000_000 },
+			])
+		})
+
+		it("keeps caps on the inferred tuning the state still shows when a configured write fails", async () => {
+			controller.setConfiguredTuning("rtl-1", {
+				gainMode: "manual",
+				gainDb: 30,
+			})
+			await controller.setFrequency("rtl-1", 162_000_000, { accept: false })
+			controller.noteSourceConnected("rtl-1")
+			controller.on("error", () => {})
+			transport.failAfterWrites(0)
+			const result = resume()
+			expect(result.error).toBeDefined()
+			expect(controller.getState("rtl-1")!.frequency).toBe(162_000_000)
+			expect(transport.caps.centerFreq).toBe(162_000_000)
+			expect(transport.capsChanges).toEqual([])
+		})
+
+		it("a normal dropout still returns caps to the baseline", async () => {
+			await controller.setFrequency("rtl-1", 162_000_000, { accept: false })
+			expect(transport.caps.centerFreq).toBe(162_000_000)
+			expect(reconnect().commands).toEqual([])
+			expect(transport.capsChanges).toEqual([
+				{ sampleRate: 2_048_000, centerFreq: 100_000_000 },
+			])
+		})
+	})
+
 	it("replays relay-client state while an SDR++ client holds control", () => {
 		controller.syncExternalControl("rtl-1", true)
 		controller.applyExternalCommand("rtl-1", 0x02, 1_024_000)
