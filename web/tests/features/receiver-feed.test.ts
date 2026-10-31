@@ -26,6 +26,8 @@ import {
 	feedOf,
 	feedTarget,
 	pausedDecoders,
+	receiverSourceId,
+	shownSourceFor,
 	toggleFeed,
 	type FeedEntry,
 } from "../../src/features/receiver/feed.ts"
@@ -64,23 +66,35 @@ const badge = (services: AppServices) =>
 	)
 
 async function loaded(
-	options: { socketOmitsFeed?: boolean; socket?: boolean } = {},
+	options: {
+		socketOmitsFeed?: boolean
+		socket?: boolean
+		secondSource?: boolean
+		/** Runs against the mock before the app loads anything (another client's earlier calls). */
+		before?: (server: MockServer) => Promise<void>
+	} = {},
 ): Promise<{
 	services: AppServices
 	server: MockServer
 	refresh: () => Promise<void>
 	close: () => Promise<void>
+	/** Every request the app sent ("METHOD url"). */
+	requests: string[]
 }> {
 	const server = await buildMockServer({
 		port: 0,
 		resumeMs: 0,
 		...(options.socketOmitsFeed === true ? { socketOmitsFeed: true } : {}),
+		...(options.secondSource === true ? { secondSource: true } : {}),
 	})
 	await server.app.ready()
+	await options.before?.(server)
+	const requests: string[] = []
 	// a real socket to the in-process mock (ephemeral port) when the test reads `source:status`
 	const port = options.socket === true ? (await server.listen()).port : null
 	const services = createServices({
 		fetch: async (input, init) => {
+			requests.push(`${init?.method ?? "GET"} ${String(input)}`)
 			const res = await server.app.inject({
 				method: (init?.method ?? "GET") as "GET" | "POST",
 				url: input,
@@ -116,6 +130,7 @@ async function loaded(
 		services,
 		server,
 		refresh,
+		requests,
 		close: async () => {
 			services.dispose()
 			await server.close()
@@ -360,6 +375,58 @@ describe("receiver feed: pause and resume", () => {
 		const resume = toggleFeed(services.data)
 		expect(resume?.op).toBe("resume")
 		expect((await resume?.result)?.feed?.state).toBe("live")
+		await close()
+	})
+
+	it("acts on the receiver the plot shows when it is not the first tuner's (two receivers)", async () => {
+		// rtl-0 booted paused, so the plot shows rtl-1, the first connected source; the island, the palette's
+		// receiver commands and the P key follow it, not the first tuner (rtl-0)
+		const { services, server, refresh, requests, close } = await loaded({
+			secondSource: true,
+			before: async s => {
+				await s.app.inject({ method: "POST", url: "/api/sources/rtl-0/pause" })
+			},
+		})
+		const { data } = services
+		expect(data.tuner.defaultSourceId).toBe("rtl-0")
+		expect(shownSourceFor(data).get()).toBe("rtl-1")
+		expect(receiverSourceId(data)).toBe("rtl-1")
+		expect(head(services)).toContain("Rtl 1")
+		expect(feedTarget(data)).toMatchObject({
+			sourceId: "rtl-1",
+			feed: { state: "live" },
+		})
+
+		requests.length = 0
+		await runAction(services, { kind: "gain", tenthsDb: 197 }, null)
+		expect(requests.some(r => r.includes("/api/tuner/rtl-1"))).toBe(true)
+		expect(requests.some(r => r.includes("/api/tuner/rtl-0"))).toBe(false)
+
+		// P pauses rtl-1; the plot stays on it (frozen) and so does the receiver
+		const pause = toggleFeed(data)
+		expect(pause).toMatchObject({ op: "pause", sourceId: "rtl-1" })
+		await pause?.result
+		await refresh()
+		expect(server.feed.feed("rtl-1").state).toBe("paused")
+		expect(server.feed.feed("rtl-0").state).toBe("paused")
+		expect(shownSourceFor(data).get()).toBe("rtl-1")
+		// rtl-0 resumed elsewhere: still rtl-1 on screen, and P resumes rtl-1
+		await server.app.inject({
+			method: "POST",
+			url: "/api/sources/rtl-0/resume",
+		})
+		await refresh()
+		expect(shownSourceFor(data).get()).toBe("rtl-1")
+		expect(toggleFeed(data)).toMatchObject({ op: "resume", sourceId: "rtl-1" })
+		await close()
+	})
+
+	it("lists one receiver unless the mock's second source is asked for", async () => {
+		const { services, close } = await loaded()
+		expect(services.data.sources.get().sources.map(s => s.id)).toEqual([
+			"rtl-0",
+		])
+		expect(Object.keys(services.data.tuner.get().bySource)).toEqual(["rtl-0"])
 		await close()
 	})
 

@@ -1,13 +1,14 @@
 /**
  * An IQ snapshot and a paused receiver feed (SourceManager.pause): a pause mid-snapshot detaches
  * the capture and frees the process slot (the core keeps no failed state), a snapshot while
- * paused is refused 503, and after resume a snapshot completes with its exact bytes.
+ * paused is refused 503 SOURCE_PAUSED with a resume hint, and after resume a snapshot completes with its exact bytes.
  * Real SourceManager on a fake rtl_tcp server (ephemeral loopback port).
  */
 import * as net from "node:net"
 import Fastify, { type FastifyInstance } from "fastify"
 import pino from "pino"
 import { afterEach, expect, it } from "vitest"
+import { SOURCE_PAUSED_MESSAGE } from "@wavekit/api-types"
 import { iqSnapshotRoutes } from "../../../src/api/routes/iq-snapshot.js"
 import { FanoutManager } from "../../../src/core/fanout-manager.js"
 import { SourceManager } from "../../../src/core/source-manager.js"
@@ -123,8 +124,9 @@ const snapshot = (app: FastifyInstance, seconds: number) =>
 				bytes: r.rawPayload.length,
 				code:
 					r.statusCode === 200 ? null : (r.json() as { code?: string }).code,
+				body: r.statusCode === 200 ? null : (r.json() as unknown),
 			}),
-			() => ({ status: 0, bytes: 0, code: null }),
+			() => ({ status: 0, bytes: 0, code: null, body: null }),
 		)
 
 it("a pause mid-snapshot detaches it; paused refuses; after resume a snapshot completes", async () => {
@@ -139,7 +141,12 @@ it("a pause mid-snapshot detaches it; paused refuses; after resume a snapshot co
 
 	expect(await snapshot(app, 0.1)).toMatchObject({
 		status: 503,
-		code: "SOURCE_DISCONNECTED",
+		code: "SOURCE_PAUSED",
+		body: {
+			error: "ServiceUnavailable",
+			code: "SOURCE_PAUSED",
+			message: SOURCE_PAUSED_MESSAGE,
+		},
 	})
 	expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
 
@@ -150,5 +157,6 @@ it("a pause mid-snapshot detaches it; paused refuses; after resume a snapshot co
 		status: 200,
 		bytes: 2000,
 		code: null,
+		body: null,
 	})
 })

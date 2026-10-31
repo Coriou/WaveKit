@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { plotSourceId } from "../../src/plot/Plot.tsx"
+import { plotSourceId } from "../../src/plot/plot-source.ts"
 
 interface Row {
 	id: string

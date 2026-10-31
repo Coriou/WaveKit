@@ -633,6 +633,31 @@ describe("LiveDemodulator", () => {
 		})
 	})
 
+	it("keeps its live-audio clients connected across a pause and resume", async () => {
+		await liveDemod.start()
+		const client = new ClientTransport(false)
+		internals().registerClient(client as unknown as http.ServerResponse, "c")
+		expect(liveDemod.getStatus().clientCount).toBe(1)
+
+		sourceManager.setFeedPaused(true)
+		await waitFor(() => liveDemod.getStatus().pipelineHealth === "stopped")
+		expect(liveDemod.getStatus()).toMatchObject({
+			clientCount: 1,
+			suspendedReason: "source-paused",
+		})
+		expect(client.writableEnded).toBe(false)
+		expect(client.destroyed).toBe(false)
+
+		sourceManager.setFeedPaused(false)
+		await waitFor(() => liveDemod.getStatus().pipelineHealth === "running")
+		expect(liveDemod.getStatus().clientCount).toBe(1)
+		expect(client.writableEnded).toBe(false)
+		// The resumed pipeline's audio reaches the same client.
+		const before = client.received().length
+		internals().handleAudioData(Buffer.alloc(960, 1))
+		await waitFor(() => client.received().length > before)
+	})
+
 	it("starts with no pipeline on a paused feed and runs once it is live", async () => {
 		sourceManager.paused = true
 		await liveDemod.start()

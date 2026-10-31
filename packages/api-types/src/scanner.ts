@@ -494,6 +494,8 @@ export type PauseReason =
 	| "core-restart"
 	| "resume-blocked"
 export type FailReason = "source-removed" | "tuner-unavailable" | "invalid"
+/** Why a job was cancelled by the core rather than the operator: the receiver feed was paused. */
+export type CancelReason = "source-paused"
 
 export interface MonitorChannelSpec {
 	frequencyHz?: number
@@ -808,7 +810,7 @@ export interface ScanJob {
 	id: string
 	name: string | null
 	state: JobState
-	reason?: PauseReason | FailReason
+	reason?: PauseReason | FailReason | CancelReason
 	passive: boolean
 	spec: NormalisedJobSpec
 	plan: HopPlan

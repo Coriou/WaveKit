@@ -77,7 +77,10 @@ current center frequency; otherwise the response is 409
 `IQ_SNAPSHOT_CENTER_MISMATCH`. This captures the next arriving IQ window without
 retuning. The source must be connected with known center, IQ kind and `U8_IQ`
 format. Unsupported sources return 409; missing sources 404; disconnected sources
-503; invalid bodies 400. Authorization matches recording downloads and scanner
+503 `SOURCE_DISCONNECTED`; a source whose receiver feed is paused (or still resuming)
+503 `SOURCE_PAUSED` with `message` "The receiver feed is paused; resume it first"
+(see [pause and resume](#post-apisourcesidpause-and-post-apisourcesidresume));
+invalid bodies 400. Authorization matches recording downloads and scanner
 captures: protected admission, mutation authorization for this POST (including
 browser CSRF), and a revocable download lease. Missing credentials return 401;
 forbidden requests return 403.
@@ -794,13 +797,14 @@ curl -X POST http://localhost:9000/api/sources/rtl-pi/resume
 retry, no stall watchdog. The source keeps its registration, caps, stream and decoder
 assignments. Decoders on it are suspended with reason `source-paused`, running and
 starting scanner jobs wait in `paused` (reason `source-down`) as after a dropout of a
-running job (a starting job is not failed), the channelizer drops its channels as on a
+running job (a starting job is not failed), an identify job (starting or running) ends
+`cancelled` with reason `source-paused` and the results so far (never `failed`), the channelizer drops its channels as on a
 disconnect, and live audio releases its pipeline (status `pipelineHealth: "stopped"`,
 `suspendedReason: "source-paused"`, no automatic restart) while keeping its settings and
 its listeners.
 New scanner jobs, identify requests and job resumes on a paused source answer
 `409 SOURCE_PAUSED`; an IQ snapshot running at the pause ends early, and a new one answers
-`503 SOURCE_DISCONNECTED`. The pause is saved in `<stateDir>/source-feed.json`, so after a
+`503 SOURCE_PAUSED` (`message`: "The receiver feed is paused; resume it first"). The pause is saved in `<stateDir>/source-feed.json`, so after a
 core restart the source registers without connecting and its log says it is paused.
 
 **Resume** makes one connection attempt. On success the feed is live again and the accepted
@@ -808,7 +812,9 @@ tuning (frequency, sample rate, gain mode and gain) is restored on the first pay
 whatever `tuner.reconnectPolicy` says: the pause was the operator's, so even `reset` does
 not drop it (a later dropout follows the policy again). Scanner leases and band gains are
 recovered as on any reconnect. Suspended decoders, waiting scanner jobs and live audio
-(with the same frequency, mode and squelch) then continue. If the
+(with the same frequency, mode and squelch) then continue. A centre and rate the core
+knew without having accepted them (a written-but-not-accepted value, such as a scanner hop)
+are written back too, so the receiver returns to where it was when paused. If the
 receiver cannot be reached the answer is `503 SOURCE_RESUME_FAILED`, the feed reads
 `error` and the source stays paused (also across a restart); call resume again to retry.
 
@@ -3402,7 +3408,8 @@ curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 `reason` is set while `paused` (`operator`, `preempted-operator`,
 `preempted-relay`, `preempted-job`, `source-down`, `core-restart`,
 `resume-blocked`) or `failed` (`source-removed`, `tuner-unavailable`,
-`invalid`). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
+`invalid`), and on a `cancelled` identify job the core ended because the receiver
+feed was paused (`source-paused`; absent when the operator cancelled). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
 carry `identify` (see `POST /api/scanner/identify`). A probe's `transport` is
 `offset`, `channel` or `replay`: a probe fed from an IQ capture rather than
 the live stream ([IQ capture on detection](#iq-capture-on-detection)). Its
@@ -7195,21 +7202,21 @@ the status code.
 
 ### Error Codes
 
-| Code                       | HTTP Status | Description                                                                       |
-| -------------------------- | ----------- | --------------------------------------------------------------------------------- |
-| `DECODER_NOT_FOUND`        | 404         | Decoder ID doesn't exist                                                          |
-| `SOURCE_NOT_FOUND`         | 404         | Source ID doesn't exist                                                           |
-| `DECODER_ALREADY_RUNNING`  | 409         | Decoder is already running                                                        |
-| `DECODER_NOT_RUNNING`      | 409         | Decoder is not running                                                            |
-| `INVALID_CONFIG`           | 400         | Invalid configuration provided                                                    |
-| `SOURCE_CONNECTION_ERROR`  | 503         | Cannot connect to source                                                          |
-| `INTERNAL_ERROR`           | 500         | Internal server error                                                             |
-| Activity codes             |             | See [Activity](#activity)                                                         |
-| `DECODER_OWNED_BY_SCANNER` | 409         | start/stop/restart or band edit on a scanner probe (`owner: "scanner"`)           |
-| `SOURCE_HELD_BY_SCANNER`   | 409         | start/restart of a decoder whose source a scanner sweep holds (`tuner-scanning`)  |
-| `SOURCE_PAUSED`            | 409         | new scanner job, identify request or job resume on a source whose feed is paused  |
-| `SOURCE_RESUME_FAILED`     | 503         | `POST /api/sources/:id/resume` could not reach the receiver (feed `error`; retry) |
-| `SOURCE_FEED_UNSUPPORTED`  | 409         | pause or resume of a recording source                                             |
+| Code                       | HTTP Status | Description                                                                                                   |
+| -------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------- |
+| `DECODER_NOT_FOUND`        | 404         | Decoder ID doesn't exist                                                                                      |
+| `SOURCE_NOT_FOUND`         | 404         | Source ID doesn't exist                                                                                       |
+| `DECODER_ALREADY_RUNNING`  | 409         | Decoder is already running                                                                                    |
+| `DECODER_NOT_RUNNING`      | 409         | Decoder is not running                                                                                        |
+| `INVALID_CONFIG`           | 400         | Invalid configuration provided                                                                                |
+| `SOURCE_CONNECTION_ERROR`  | 503         | Cannot connect to source                                                                                      |
+| `INTERNAL_ERROR`           | 500         | Internal server error                                                                                         |
+| Activity codes             |             | See [Activity](#activity)                                                                                     |
+| `DECODER_OWNED_BY_SCANNER` | 409         | start/stop/restart or band edit on a scanner probe (`owner: "scanner"`)                                       |
+| `SOURCE_HELD_BY_SCANNER`   | 409         | start/restart of a decoder whose source a scanner sweep holds (`tuner-scanning`)                              |
+| `SOURCE_PAUSED`            | 409 / 503   | 409: new scanner job, identify request or job resume on a source whose feed is paused; 503: IQ snapshot on it |
+| `SOURCE_RESUME_FAILED`     | 503         | `POST /api/sources/:id/resume` could not reach the receiver (feed `error`; retry)                             |
+| `SOURCE_FEED_UNSUPPORTED`  | 409         | pause or resume of a recording source                                                                         |
 
 ### Scanner and spectrum codes
 

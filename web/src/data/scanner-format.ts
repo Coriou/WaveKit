@@ -256,7 +256,9 @@ export function jobStateLine(
 		case "completed":
 			return "Finished"
 		case "cancelled":
-			return "Stopped"
+			return job.reason === "source-paused"
+				? "Stopped · receiver paused"
+				: "Stopped"
 		case "failed":
 			if (job.reason === "source-removed") return "Failed · source removed"
 			if (job.reason === "tuner-unavailable") return "Failed · no tuner control"

@@ -1931,11 +1931,13 @@ export class TunerController extends EventEmitter {
 	 * back, so stale metadata is never kept silently. Success means "written",
 	 * never "applied": rtl_tcp has no acknowledgement or readback.
 	 * `options.policy` overrides the configured policy for this connection (a resume of a
-	 * paused feed always restores).
+	 * paused feed always restores). `options.resumed` marks the session of a resumed paused
+	 * feed: a centre and rate inferred from relay commands (SDR++ driving the dongle) are kept
+	 * and written back with the restore, so the resume returns the receiver to where it was.
 	 */
 	synchronizeOnConnect(
 		sourceId: string,
-		options: { policy?: TunerReconnectPolicy } = {},
+		options: { policy?: TunerReconnectPolicy; resumed?: boolean } = {},
 	): TunerConnectSyncResult {
 		const policy = options.policy ?? this.config.reconnectPolicy ?? "restore"
 		const state = this.tunerStates.get(sourceId)
@@ -1987,8 +1989,12 @@ export class TunerController extends EventEmitter {
 
 		// An inferred (written, not accepted) centre or rate is never replayed, so after a
 		// reconnect the receiver may be elsewhere: drop its proof and, unless an accepted
-		// value is replayed below, return it to the baseline (WG5 R2).
-		const forgotTuning = this.forgetInferredTuning(sourceId, state, desired)
+		// value is replayed below, return it to the baseline (WG5 R2). A resumed paused feed
+		// is no dropout: the operator's pause interrupted what was tuned, so the inferred
+		// centre and rate stay known and are replayed with the accepted fields.
+		const forgotTuning = options.resumed
+			? false
+			: this.forgetInferredTuning(sourceId, state, desired)
 
 		// WG11 req 4.2, 4.3: configured fields not held by the operator, before the
 		// restore; a failed configured write stops the restore too (today's failure).
@@ -2009,7 +2015,10 @@ export class TunerController extends EventEmitter {
 
 		const written: Array<{ value: number; name: string }> = []
 		let failure: Error | undefined
-		const plan = desired ? this.buildReplayPlan(state, desired) : []
+		const replay = options.resumed
+			? this.withInferredTuning(sourceId, desired)
+			: desired
+		const plan = replay ? this.buildReplayPlan(state, replay) : []
 		for (const [cmd, value] of plan) {
 			try {
 				this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
@@ -2415,6 +2424,24 @@ export class TunerController extends EventEmitter {
 
 	private decodeSignedInt32(value: number): number {
 		return value > 0x7fffffff ? value - 0x100000000 : value
+	}
+
+	/**
+	 * The replay set of a resumed paused feed: the accepted fields plus an inferred centre and
+	 * rate (no acceptance order is needed: their replay phase is not ordered by acceptance).
+	 */
+	private withInferredTuning(
+		sourceId: string,
+		desired: ReadonlyMap<DesiredField, number> | undefined,
+	): ReadonlyMap<DesiredField, number> | undefined {
+		const inferred = this.inferredFields.get(sourceId)
+		const extra = (["frequency", "sampleRate"] as const).filter(
+			field => inferred?.has(field) === true && desired?.has(field) !== true,
+		)
+		if (extra.length === 0) return desired
+		const replay = new Map(desired ?? [])
+		for (const field of extra) replay.set(field, 0)
+		return replay
 	}
 
 	/** Drops inferred frequency/sampleRate proof; true when one was dropped. */

@@ -184,6 +184,10 @@ export const SOURCE_FEED_STATES = [
 export const SOURCE_RESUME_FAILED_MESSAGE =
 	"The receiver could not be reached; resume again to retry"
 
+/** Fixed text of a `SOURCE_PAUSED` refusal: the request needs the feed, which the operator paused. */
+export const SOURCE_PAUSED_MESSAGE =
+	"The receiver feed is paused; resume it first"
+
 /** What a decoder held back by a paused feed reads, with its Resume action. */
 export const SOURCE_PAUSED_TEXT = "Receiver paused — Resume"
 

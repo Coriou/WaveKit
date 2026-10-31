@@ -467,6 +467,7 @@ describe("palette: single-key shortcuts", () => {
 })
 
 describe("palette: running rows", async () => {
+	const { Store } = await import("../../src/data/store.ts")
 	const { runAction, applyPreview } =
 		await import("../../src/features/palette/actions.ts")
 	const { shellStore } = await import("../../src/shell/store.ts")
@@ -482,9 +483,17 @@ describe("palette: running rows", async () => {
 		let step: number | null = null
 		let volume = 0.5
 		const tuner = { sourceId: "rtl-0", gainMode: "manual", gain: 280 }
+		// the receiver commands act on the source the plot shows (receiverSourceId)
+		const sources = new Store({
+			sources: [{ id: "rtl-0", connected: true }],
+			loaded: true,
+			error: null,
+		})
 		const services = {
 			data: {
-				tuner: { state: () => tuner },
+				api: {},
+				sources,
+				tuner: { state: () => tuner, defaultSourceId: "rtl-0" },
 				liveAudio: {
 					get: () => ({ status: { config: config() } }),
 					setConfig: async (p: unknown) => void calls.push(["audio", p]),

@@ -39,6 +39,9 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   warning's Retry.
   `WAVEKIT_MOCK_SOCKET_OMITS_FEED=1` (`socketOmitsFeed`) leaves `feed` out of `source:status`, as
   an older core's socket did, while `GET /api/sources` keeps it.
+  `WAVEKIT_MOCK_SECOND_SOURCE=1` (`secondSource`) lists a second receiver, `rtl-1`, after `rtl-0`:
+  its source row, tuner state and its own pause / resume only (no decoders, spectrum or tuner writes),
+  to try which receiver the plot, the Receiver island, the palette and `P` act on.
 - Legacy core: `GET /api/access/bootstrap` is not mounted (404).
 - Exception: operator data (`operator-data.ts`) is served as a protected core serves it, so the
   saved frequencies show: `GET /api/operator-data`, saved-frequency create / replace / delete with

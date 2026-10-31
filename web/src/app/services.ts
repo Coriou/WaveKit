@@ -5,7 +5,7 @@ import type { PreferencesState } from "../data/preferences-store.ts"
 import type { ReadableStore } from "../data/store.ts"
 import { ActivityController } from "../features/activity/controller.ts"
 import { ListenController } from "../features/listen/controller.ts"
-import { feedControllerFor } from "../features/receiver/feed.ts"
+import { feedControllerFor, shownSourceFor } from "../features/receiver/feed.ts"
 import { displayStore, type DisplayStore } from "../features/display.ts"
 import { DecodersFeed } from "../features/tuned/decoders.ts"
 import { TunedActivity } from "../features/tuned/feed.ts"
@@ -41,6 +41,8 @@ export function createServices(options: DataLayerOptions = {}): AppServices {
 	const data = createDataLayer(options)
 	// before the first source rows, so every feed they carry is remembered whatever renders first
 	feedControllerFor(data)
+	// the plotted source (also the island's, palette's and P key's receiver) follows the rows from the start
+	shownSourceFor(data)
 	const decoders = new DecodersFeed(data)
 	const listen = new ListenController(data.liveAudio)
 	const activity = new ActivityController(data)

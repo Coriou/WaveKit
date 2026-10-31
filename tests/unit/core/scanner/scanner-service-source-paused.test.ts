@@ -1,12 +1,14 @@
 /**
  * Scanner jobs and a paused receiver feed (SourceManager.pause / resume): a running sweep waits in
- * paused(source-down) through the pause and runs again on resume, never failing; new, identify and
- * resumed jobs on a paused feed are refused with 409 SOURCE_PAUSED.
+ * paused(source-down) through the pause and runs again on resume, never failing; an identify job,
+ * starting or running, ends cancelled(source-paused); new, identify and resumed jobs on a paused
+ * feed are refused with 409 SOURCE_PAUSED.
  */
 import { describe, expect, it } from "vitest"
 import type { ScanJob } from "@wavekit/api-types"
 import type { ScannerSettings } from "../../../../src/core/scanner/types.js"
 import {
+	CENTRE,
 	feedTone,
 	serviceHarness,
 	settled,
@@ -151,6 +153,73 @@ describe("scanner jobs on a paused feed", () => {
 		await settled(h.service)
 		expect(h.service.getJob(job.id)?.state).toBe("running")
 		await h.service.cancelJob(job.id)
+		await h.service.stop()
+	})
+
+	it("an identify job still starting ends cancelled(source-paused) on a pause, not failed", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		const feed = pausable(h)
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		// No samples: identify waits for its first epoch in `starting`.
+		const job = await h.service.identify({
+			sourceId: "rtl",
+			target: { frequencyHz: CENTRE + 100_000 },
+		})
+		expect(h.service.getJob(job.id)?.state).toBe("starting")
+
+		feed.pause("rtl")
+		await settled(h.service)
+		expect(h.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "cancelled",
+			reason: "source-paused",
+		})
+		expect(h.decoders.held.size).toBe(0)
+		await h.service.stop()
+	})
+
+	it("a running identify job ends cancelled(source-paused) on a pause with its results so far", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		const feed = pausable(h)
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		const job = await h.service.identify({
+			sourceId: "rtl",
+			target: { frequencyHz: CENTRE + 100_000 },
+			timeoutMs: 60_000,
+			record: false,
+		})
+		await untilRunning(h, job.id)
+		expect(h.service.getJob(job.id)?.state).toBe("running")
+
+		feed.pause("rtl")
+		await settled(h.service)
+		const ended = h.service.getJob(job.id)
+		expect(ended).toMatchObject<Partial<ScanJob>>({
+			state: "cancelled",
+			reason: "source-paused",
+		})
+		// The target reports what it had: ended, not left open.
+		expect(ended?.identify?.targets[0]?.state).toBe("unidentified")
+		await h.service.stop()
+	})
+
+	it("a dropout of a running identify job still ends it completed (no pause)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		pausable(h)
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		const job = await h.service.identify({
+			sourceId: "rtl",
+			target: { frequencyHz: CENTRE + 100_000 },
+			timeoutMs: 60_000,
+			record: false,
+		})
+		await untilRunning(h, job.id)
+		h.sources.emit("disconnected", "rtl")
+		await settled(h.service)
+		expect(h.service.getJob(job.id)?.state).toBe("completed")
+		expect(h.service.getJob(job.id)?.reason).toBeUndefined()
 		await h.service.stop()
 	})
 })

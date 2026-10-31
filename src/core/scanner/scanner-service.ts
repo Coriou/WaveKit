@@ -57,7 +57,10 @@ import type {
 	ScannerTrialOutcome,
 	DiscoveryTrialMemory,
 } from "@wavekit/api-types"
-import { SCANNER_DISCOVERY_HOLDS_KEPT_CODE } from "@wavekit/api-types"
+import {
+	SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
+	SOURCE_PAUSED_MESSAGE,
+} from "@wavekit/api-types"
 import type {
 	RecordingProtection,
 	ScannerRecordingDeleter,
@@ -2376,12 +2379,9 @@ export class ScannerService extends EventEmitter {
 	private assertFeedLive(sourceId: string): void {
 		// Optional call: test doubles of the source manager predate pause / resume.
 		if (this.deps.sources.isPaused?.(sourceId) !== true) return
-		throw new ScannerApiError(
-			"The receiver feed is paused; resume it first",
-			"SOURCE_PAUSED",
-			409,
-			{ reason: "source-paused" },
-		)
+		throw new ScannerApiError(SOURCE_PAUSED_MESSAGE, "SOURCE_PAUSED", 409, {
+			reason: "source-paused",
+		})
 	}
 
 	async cancelJob(id: string): Promise<ScanJob> {
@@ -6135,7 +6135,8 @@ export class ScannerService extends EventEmitter {
 		if (!this.started) return
 		for (const o of this.live.values())
 			if (o.sourceId === sourceId) delete o.acceptedIdentity
-		// A paused feed (not a dropout): a starting sweep waits for resume instead of failing.
+		// A paused feed (not a dropout): a starting sweep waits for resume instead of failing, and an
+		// identify job (starting or running) ends cancelled(source-paused).
 		const feedPaused = this.deps.sources.isPaused?.(sourceId) === true
 		for (const d of this.driversOn(sourceId)) {
 			if (
@@ -6144,10 +6145,10 @@ export class ScannerService extends EventEmitter {
 				d.record.state === "holding"
 			)
 				d.dispatch(
-					d.record.state !== "starting"
-						? { type: "source-down" }
-						: feedPaused
-							? { type: "source-down", feedPaused: true }
+					feedPaused
+						? { type: "source-down", feedPaused: true }
+						: d.record.state !== "starting"
+							? { type: "source-down" }
 							: { type: "engine-failed" },
 				).catch((err: unknown) =>
 					this.log.warn({ err, jobId: d.record.id }, "source-down failed"),

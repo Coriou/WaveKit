@@ -6,7 +6,7 @@
  * In-process fakes only: a fake rtl_tcp server on an ephemeral loopback port.
  */
 import * as net from "node:net"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Writable } from "node:stream"
@@ -377,6 +377,53 @@ describe("SourceManager feed pause / resume", () => {
 		15_000,
 	)
 
+	it("resume writes back an inferred (not accepted) centre and rate", async () => {
+		const { upstream, manager } = await started()
+		const tuner = new TunerController(pino({ level: "silent" }), manager, {})
+		wireTunerControl({
+			log: pino({ level: "silent" }),
+			sourceManager: manager,
+			tunerController: tuner,
+			tunerRelay: new TunerRelay(
+				pino({ level: "silent" }),
+				manager,
+				new FanoutManager(pino({ level: "silent" })),
+				{
+					enabled: false,
+					host: "127.0.0.1",
+					port: 0,
+					sourceId: "rtl",
+					controlPolicy: "exclusive",
+				},
+			),
+			relayEnabled: false,
+		})
+		await manager.connect(config(upstream.port))
+		await waitFor(
+			() => manager.getStatus("rtl")?.activity.state === "streaming",
+		)
+		await tuner.setSampleRate("rtl", 2_400_000, { accept: false })
+		await tuner.setFrequency("rtl", 145_000_000, { accept: false })
+		await waitFor(() => upstream.connections[0]!.frames.length === 2)
+
+		await manager.pause("rtl")
+		await waitFor(() => upstream.connections[0]!.closed)
+		await manager.resume("rtl")
+		await waitFor(() => upstream.connections.length === 2)
+		const second = upstream.connections[1]!
+		await waitFor(() => second.frames.length >= 2)
+		expect(second.frames).toEqual(
+			expect.arrayContaining([
+				[0x02, 2_400_000],
+				[0x01, 145_000_000],
+			]),
+		)
+		expect(tuner.getState("rtl")).toMatchObject({
+			sampleRate: 2_400_000,
+			frequency: 145_000_000,
+		})
+	})
+
 	it("retries a failed state-file write on a repeated pause or resume and reports it", async () => {
 		const feeds = new MemoryFeeds()
 		const { upstream, manager, messages } = await started({ feeds })
@@ -413,6 +460,69 @@ describe("SourceManager feed pause / resume", () => {
 		expect(again).toMatchObject({ changed: false, persisted: true })
 		expect(feeds.saved.at(-1)).toEqual([])
 		expect(await feeds.load()).toEqual(new Set())
+	})
+
+	it("announces the live feed before the state-file write of a resume settles", async () => {
+		const feeds = new MemoryFeeds()
+		const { upstream, manager, feedEvents } = await started({ feeds })
+		await manager.connect(config(upstream.port))
+		await waitFor(
+			() => manager.getStatus("rtl")?.activity.state === "streaming",
+		)
+		await manager.pause("rtl")
+		// Hold the resume's write (a slow fsync) until the test releases it.
+		let release: (ok: boolean) => void = () => undefined
+		const save = vi
+			.spyOn(feeds, "save")
+			.mockImplementationOnce(
+				() => new Promise<boolean>(resolve => (release = resolve)),
+			)
+		let settled = false
+		const resumed = manager.resume("rtl").then(r => {
+			settled = true
+			return r
+		})
+		await waitFor(() => save.mock.calls.length === 1)
+		expect(feedEvents.at(-1)).toEqual(["rtl", "live"])
+		expect(settled).toBe(false)
+		release(false)
+		// The answer still reports the write's outcome.
+		expect(await resumed).toMatchObject({
+			changed: true,
+			persisted: false,
+			feed: { state: "live" },
+		})
+		expect(feedEvents.filter(([, state]) => state === "live")).toHaveLength(1)
+	})
+
+	it("drops saved pauses of sources no longer configured and rewrites the file", async () => {
+		const stateDir = await mkdtemp(join(tmpdir(), "wk-feed-"))
+		cleanups.push(() => rm(stateDir, { recursive: true, force: true }))
+		const file = join(stateDir, SOURCE_FEED_FILE_NAME)
+		await writeFile(
+			file,
+			JSON.stringify({ version: 1, paused: ["gone", "rtl", "added"] }),
+		)
+		const upstream = await startFakeRtlTcp()
+		cleanups.push(() => upstream.close())
+		const manager = new SourceManager(pino({ level: "silent" }), { stateDir })
+		cleanups.push(() => manager.disconnectAll())
+		await manager.connect(config(upstream.port))
+		// Registered at runtime, not in the config: its pause stays.
+		await manager.connect(config(upstream.port, "added"))
+
+		expect(await manager.pruneFeeds(["rtl"])).toBe(true)
+		expect(JSON.parse(await readFile(file, "utf8"))).toEqual({
+			version: 1,
+			paused: ["rtl", "added"],
+		})
+		expect(manager.isPaused("rtl")).toBe(true)
+		expect(upstream.connections).toHaveLength(0)
+
+		// Nothing stale: no rewrite.
+		const before = await stat(file)
+		expect(await manager.pruneFeeds(["rtl"])).toBe(true)
+		expect((await stat(file)).mtimeMs).toBe(before.mtimeMs)
 	})
 
 	it("restart while paused: the persisted pause is honoured and nothing connects", async () => {

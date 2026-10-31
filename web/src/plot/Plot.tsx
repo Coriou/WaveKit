@@ -75,6 +75,7 @@ import {
 	feedControllerFor,
 	feedOf,
 	isPaused as feedPaused,
+	shownSourceFor,
 } from "../features/receiver/feed.ts"
 import { scanHasReceiver as scanHasReceiverOf } from "../features/tuning.ts"
 import { HandleController, squelchLineDbfs } from "./handle-controller.ts"
@@ -149,10 +150,9 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 			),
 		)
 	// the shown source sticks through a pause (its waterfall freezes under the paused label) and is
-	// only replaced once it is gone or neither connected nor paused (plotSourceId)
-	const [shownId, setShownId] = useState<string | null>(null)
-	const sourceId = plotSourceId(sources, isPausedSource, shownId)
-	if (sourceId !== shownId) setShownId(sourceId)
+	// only replaced once it is gone or neither connected nor paused (plotSourceId); the Receiver island,
+	// the palette and the P key act on the same one (shownSourceFor)
+	const sourceId = useStore(shownSourceFor(data))
 	const receiverPaused = sourceId !== null && isPausedSource(sourceId)
 	const tuner = useStore(data.tuner, s =>
 		sourceId === null ? undefined : s.bySource[sourceId],
@@ -572,25 +572,6 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 				/>
 			)}
 		</div>
-	)
-}
-
-/**
- * The source the plot shows. The one shown before stays while it is listed and connected or paused, so pausing
- * it freezes its waterfall instead of switching to another receiver (which would reset the history); otherwise
- * the first connected source, else the first paused one (a core that booted paused), else none.
- */
-export function plotSourceId(
-	sources: readonly { id: string; connected: boolean }[],
-	isPaused: (id: string) => boolean,
-	shown: string | null,
-): string | null {
-	const kept = shown === null ? undefined : sources.find(s => s.id === shown)
-	if (kept && (kept.connected || isPaused(kept.id))) return kept.id
-	return (
-		sources.find(s => s.connected)?.id ??
-		sources.find(s => isPaused(s.id))?.id ??
-		null
 	)
 }
 

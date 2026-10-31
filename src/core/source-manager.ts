@@ -2425,6 +2425,28 @@ export class SourceManager extends EventEmitter {
 		return saved
 	}
 
+	/**
+	 * Drops persisted pauses of sources that are neither configured nor registered (a source
+	 * removed from the config while paused) and rewrites the state file when one went. Call it
+	 * once after the configured sources registered. Resolves true when nothing was owed or the
+	 * rewrite succeeded; never rejects. A registered source added at runtime keeps its pause.
+	 */
+	async pruneFeeds(configuredIds: Iterable<string>): Promise<boolean> {
+		if (this.feedPersistence === null) return true
+		await this.loadFeeds()
+		const keep = new Set(configuredIds)
+		const stale = [...this.pausedIds].filter(
+			id => !keep.has(id) && !this.sources.has(id),
+		)
+		if (stale.length === 0) return true
+		for (const id of stale) this.pausedIds.delete(id)
+		this.logger.info(
+			{ dropped: stale.length },
+			"Dropped saved pauses of sources no longer configured",
+		)
+		return this.persistFeeds()
+	}
+
 	private feedOf(state: SourceState): SourceFeed {
 		return {
 			state: state.feed.state,
@@ -2599,10 +2621,11 @@ export class SourceManager extends EventEmitter {
 			// The attempt's connect handler makes the feed live (TS still sees the narrowing above).
 			if (this.isLive(state)) {
 				this.pausedIds.delete(id)
-				const persisted = await this.persistFeeds()
-				if (this.isCurrent(state))
-					this.emit("feed-changed", id, this.feedOf(state))
+				// Announce the live feed before the state-file write (fsync) settles: the write
+				// only decides `persisted` in this answer, never when consumers hear of the resume.
+				this.emit("feed-changed", id, this.feedOf(state))
 				this.logger.info({ sourceId: id }, "Source feed resumed")
+				const persisted = await this.persistFeeds()
 				return { feed: this.feedOf(state), changed: true, persisted }
 			}
 			// Still resuming (a pause cannot interleave): the receiver was not reached.

@@ -459,6 +459,10 @@ describe("paused receiver feed across a core restart", () => {
 				components: { source: { status: "up", metrics: { paused: 1 } } },
 			},
 		})
+		// /api/status carries the feed too (its response schema must not strip it).
+		expect(feedOf((status.body as { sources: unknown }).sources, "rtl")).toBe(
+			"paused",
+		)
 		expect((await http(secondApi, "GET", "/health/ready")).status).toBe(200)
 
 		const resumed = await http(secondApi, "POST", "/api/sources/rtl/resume")

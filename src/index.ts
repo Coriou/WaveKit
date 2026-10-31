@@ -3010,6 +3010,8 @@ async function main(): Promise<void> {
 				)
 			}
 		}
+		// Drop saved pauses of sources no longer configured (never rejects)
+		void sourceManager.pruneFeeds(config.sources.map(s => s.id))
 
 		// Step 14b: Start live demodulator (if enabled)
 		checkpoint()

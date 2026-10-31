@@ -72,6 +72,7 @@ import {
 	DEFAULT_CENTER_HZ,
 	MOCK_MESSAGES,
 	MOCK_SAVED_FREQUENCIES,
+	MOCK_SECOND_SOURCE_ID,
 	MOCK_SOURCE_ID,
 	MOCK_TRANSMISSIONS,
 	NOISE_FLOOR_DBFS,
@@ -154,6 +155,11 @@ export interface MockServerOptions {
 	 * field (WAVEKIT_MOCK_SOCKET_OMITS_FEED=1); `GET /api/sources` still carries it.
 	 */
 	socketOmitsFeed?: boolean
+	/**
+	 * A second receiver, `rtl-1`, after `rtl-0` (WAVEKIT_MOCK_SECOND_SOURCE=1): its source row, tuner state and
+	 * pause / resume only (no decoders, spectrum or tuner writes), to try which receiver the UI acts on.
+	 */
+	secondSource?: boolean
 	/**
 	 * The Activity store is not open yet: Activity reads answer the core's 503 and
 	 * `GET /api/activity/status` reports `opening` (WAVEKIT_MOCK_ACTIVITY_STORE=opening) or
@@ -519,6 +525,15 @@ export async function buildMockServer(
 		lastCommandAt: new Date(startedAt).toISOString(),
 		commandCount: 3,
 	}
+	const secondTuner: TunerState | null = options.secondSource
+		? {
+				...tuner,
+				sourceId: MOCK_SECOND_SOURCE_ID,
+				frequency: DEFAULT_CENTER_HZ + 10_000_000,
+				gain: 197,
+				commandCount: 0,
+			}
+		: null
 	let epoch = 1
 	/** Starts the retune sweep scenario (once; a no-op without it). */
 	let startSweep: () => void = () => undefined
@@ -819,6 +834,51 @@ export async function buildMockServer(
 		void _feed
 		return rest
 	}
+	/** The opt-in second receiver's row: streaming unless its feed is held, no consumers. */
+	const secondStatus = (): ExtendedSourceStatus | null => {
+		if (!secondTuner) return null
+		const held = feedMock?.paused(MOCK_SECOND_SOURCE_ID) ?? false
+		const now = Date.now()
+		return {
+			id: MOCK_SECOND_SOURCE_ID,
+			type: "rtl_tcp",
+			url: "tcp://receiver-2.local:1234",
+			connected: !held,
+			activity: held
+				? {
+						state: "disconnected",
+						lastSampleAt: null,
+						sampleAgeMs: null,
+						timeoutMs: 5000,
+					}
+				: {
+						state: "streaming",
+						lastSampleAt: new Date(now - 12).toISOString(),
+						sampleAgeMs: 12,
+						timeoutMs: 5000,
+					},
+			consumers: 0,
+			bytesReceived: 0,
+			dataRate: held ? 0 : (secondTuner.sampleRate * 2) / 1024,
+			reconnectAttempts: 0,
+			caps: {
+				kind: "iq",
+				sampleRate: secondTuner.sampleRate,
+				format: "U8_IQ",
+				centerFreq: secondTuner.frequency,
+				exclusive: false,
+			},
+			assignments: [],
+			available: true,
+			...(feedMock ? { feed: feedMock.feed(MOCK_SECOND_SOURCE_ID) } : {}),
+		}
+	}
+	/** Every source row, the main one first. */
+	const sourceStatuses = (): ExtendedSourceStatus[] => {
+		const second = secondStatus()
+		return second ? [sourceStatus(), second] : [sourceStatus()]
+	}
+
 	const sourceStatus = (): ExtendedSourceStatus => {
 		const now = Date.now()
 		const bytes = Math.round(((now - startedAt) / 1000) * SAMPLE_RATE_HZ * 2)
@@ -1539,7 +1599,7 @@ export async function buildMockServer(
 			status: "healthy",
 			uptime,
 			version: MOCK_VERSION,
-			sources: [sourceStatus()],
+			sources: sourceStatuses(),
 			decoders: list,
 			audio: { outputPort: 3103, clientsConnected: 0 },
 			health: {
@@ -1578,7 +1638,7 @@ export async function buildMockServer(
 	const recordings = registerRecordingsMock(app)
 	// GET /api/access/bootstrap is deliberately not mounted: a legacy core answers it with 404.
 
-	app.get("/api/sources", async () => [sourceStatus()])
+	app.get("/api/sources", async () => sourceStatuses())
 	// The core has no GET /api/sources/:id (it answers the route-not-found 404 below).
 
 	app.get("/api/decoders", async () => decoders())
@@ -1664,13 +1724,17 @@ export async function buildMockServer(
 			message: `Tuner source not found: ${sourceId}`,
 		})
 
-	app.get("/api/tuner", async () => [tuner])
+	app.get("/api/tuner", async () =>
+		secondTuner ? [tuner, secondTuner] : [tuner],
+	)
 	app.get<{ Params: { sourceId: string } }>(
 		"/api/tuner/:sourceId",
 		async (request, reply) =>
 			request.params.sourceId === MOCK_SOURCE_ID
 				? tuner
-				: tunerNotFound(reply, request.params.sourceId),
+				: secondTuner && request.params.sourceId === MOCK_SECOND_SOURCE_ID
+					? secondTuner
+					: tunerNotFound(reply, request.params.sourceId),
 	)
 	app.post<{ Params: { sourceId: string }; Body: { hz: number } }>(
 		"/api/tuner/:sourceId/frequency",
@@ -1707,6 +1771,7 @@ export async function buildMockServer(
 	// --- Receiver feed (./source-feed.ts): pause / resume; decoders wait with reason source-paused. ---
 	const feed = registerSourceFeedMock(app, {
 		sourceId: MOCK_SOURCE_ID,
+		...(secondTuner ? { extraSourceIds: [MOCK_SECOND_SOURCE_ID] } : {}),
 		...(options.resumeMs !== undefined ? { resumeMs: options.resumeMs } : {}),
 		...(options.resumeFailures !== undefined
 			? { resumeFailures: options.resumeFailures }
@@ -1714,7 +1779,12 @@ export async function buildMockServer(
 		...(options.persistFailures !== undefined
 			? { persistFailures: options.persistFailures }
 			: {}),
-		onChange: () => {
+		onChange: sourceId => {
+			if (sourceId !== MOCK_SOURCE_ID) {
+				const second = secondStatus()
+				if (second) broadcast("sources", "source:status", second)
+				return
+			}
 			broadcast("sources", "source:status", sourceStatusEvent())
 			for (const d of decoders())
 				if (d.sourceId === MOCK_SOURCE_ID)
@@ -2619,6 +2689,9 @@ async function main(): Promise<void> {
 			: {}),
 		...(env["WAVEKIT_MOCK_SOCKET_OMITS_FEED"] === "1"
 			? { socketOmitsFeed: true }
+			: {}),
+		...(env["WAVEKIT_MOCK_SECOND_SOURCE"] === "1"
+			? { secondSource: true }
 			: {}),
 		...(activityStoreEnv === "opening" || activityStoreEnv === "retrying"
 			? {

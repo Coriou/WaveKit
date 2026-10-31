@@ -238,6 +238,49 @@ describe("TunerState.unknownFields", () => {
 			expect(state.declaredOnlyFields).toEqual(["frequency", "sampleRate"])
 		})
 
+		it("a resumed paused feed keeps an inferred centre and rate and writes them back", async () => {
+			// Written but not accepted (a scanner hop, for one): known, never replayed on a dropout.
+			await controller.setFrequency("rtl", 162_000_000, { accept: false })
+			await controller.setSampleRate("rtl", 2_400_000, { accept: false })
+			const result = controller.synchronizeOnConnect("rtl", {
+				policy: "restore",
+				resumed: true,
+			})
+			expect(result.commands).toEqual(["set-sample-rate", "set-frequency"])
+			const state = controller.getState("rtl")!
+			expect(state.frequency).toBe(162_000_000)
+			expect(state.sampleRate).toBe(2_400_000)
+			expect(state.declaredOnlyFields ?? []).toEqual([])
+			// A later dropout is no resume: the inferred values fall back as before (WG5 R2).
+			expect(controller.synchronizeOnConnect("rtl").commands).toEqual([])
+			expect(controller.getState("rtl")!.frequency).toBe(1_090_000_000)
+		})
+
+		it("a resumed paused feed restores a relay client's centre and rate", () => {
+			// SDR++ through the relay: its writes are accepted and replayed on any restore.
+			controller.applyExternalCommand("rtl", 0x01, 162_000_000)
+			controller.applyExternalCommand("rtl", 0x02, 2_400_000)
+			expect(
+				controller.synchronizeOnConnect("rtl", {
+					policy: "restore",
+					resumed: true,
+				}).commands,
+			).toEqual(["set-sample-rate", "set-frequency"])
+			expect(controller.getState("rtl")!.frequency).toBe(162_000_000)
+		})
+
+		it("a resumed paused feed replays an accepted centre once, not again as inferred", async () => {
+			await controller.setFrequency("rtl", 162_000_000)
+			await controller.setFrequency("rtl", 162_025_000, { accept: false })
+			expect(
+				controller.synchronizeOnConnect("rtl", {
+					policy: "restore",
+					resumed: true,
+				}).commands,
+			).toEqual(["set-frequency"])
+			expect(controller.getState("rtl")!.frequency).toBe(162_025_000)
+		})
+
 		it("a restore reconnect replays an accepted centre and keeps it proven", async () => {
 			await controller.setFrequency("rtl", 162_000_000)
 			await controller.setFrequency("rtl", 162_025_000, { accept: false })

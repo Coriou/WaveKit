@@ -16,6 +16,7 @@ import { SOURCE_RESUME_FAILED_MESSAGE } from "@wavekit/api-types"
 
 import type { DataLayer } from "../../data/index.ts"
 import { errorMessage, isApiError, Store } from "../../data/index.ts"
+import { plotSourceId } from "../../plot/plot-source.ts"
 
 export type FeedOp = "pause" | "resume"
 
@@ -303,15 +304,81 @@ export function feedControllerFor(data: FeedData): FeedController {
 	return c
 }
 
-/** The receiver the palette and the P key act on (the tuner's source, else the first) and its feed. */
+type ShownData = Pick<DataLayer, "api" | "sources">
+
+/**
+ * The source the plot shows (plotSourceId), kept current from the source rows and the feeds, so the plot, the
+ * Receiver island, the palette and the P key read one answer. Sticky: the shown source stays through a pause.
+ */
+export class ShownSource extends Store<string | null> {
+	private readonly data: ShownData
+
+	constructor(data: ShownData) {
+		super(null)
+		this.data = data
+		const refresh = () => this.refresh()
+		data.sources.subscribe(refresh)
+		feedControllerFor(data).subscribe(refresh)
+		this.refresh()
+	}
+
+	/** Re-applies the rule to the current rows and feeds; returns the shown source. */
+	refresh(): string | null {
+		const rows = this.data.sources.get().sources
+		const feeds = feedControllerFor(this.data).get().bySource
+		const paused = (id: string) =>
+			isPaused(
+				feedOf(
+					rows.find(r => r.id === id),
+					feeds[id],
+				),
+			)
+		this.set(plotSourceId(rows, paused, this.get()))
+		return this.get()
+	}
+}
+
+const shownSources = new WeakMap<object, ShownSource>()
+
+/** The app's one shown-source store (per data layer, as feedControllerFor). */
+export function shownSourceFor(data: ShownData): ShownSource {
+	let s = shownSources.get(data)
+	if (!s) {
+		s = new ShownSource(data)
+		shownSources.set(data, s)
+	}
+	return s
+}
+
+/**
+ * The receiver the Receiver island, the palette's receiver commands and the P key act on: the source the plot
+ * shows; with none shown (every source down), the first tuner's source, else the first source.
+ */
+export function receiverSourceIdOf(
+	shown: string | null,
+	firstTuner: string | null,
+	firstSource: string | null,
+): string | null {
+	return shown ?? firstTuner ?? firstSource
+}
+
+/** receiverSourceIdOf for the current data (outside React). */
+export function receiverSourceId(
+	data: Pick<DataLayer, "api" | "sources" | "tuner">,
+): string | null {
+	return receiverSourceIdOf(
+		shownSourceFor(data).refresh(),
+		data.tuner.defaultSourceId,
+		data.sources.get().sources[0]?.id ?? null,
+	)
+}
+
+/** The receiver the palette and the P key act on (receiverSourceId) and its feed. */
 export function feedTarget(
 	data: Pick<DataLayer, "api" | "sources" | "tuner">,
 ): { readonly sourceId: string; readonly feed: SourceFeed } | null {
-	const tunerSource = data.tuner.state()?.sourceId
-	const source =
-		tunerSource !== undefined
-			? data.sources.byId(tunerSource)
-			: data.sources.get().sources[0]
+	const id = receiverSourceId(data)
+	const source = id === null ? undefined : data.sources.byId(id)
 	if (!source) return null
 	const feed = feedOf(source, feedControllerFor(data).entry(source.id))
 	return feed === null ? null : { sourceId: source.id, feed }

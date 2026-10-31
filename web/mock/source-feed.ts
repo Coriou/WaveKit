@@ -19,6 +19,8 @@ import type {
 
 export interface SourceFeedMockOptions {
 	sourceId: string
+	/** More sources with their own feed (the opt-in second receiver); resume failures and saves are shared. */
+	extraSourceIds?: readonly string[]
 	/** How long a resume dials before it answers (ms; default 400, as a real reconnect). */
 	resumeMs?: number
 	/** The next this many resumes fail (WAVEKIT_MOCK_RESUME_FAILURES), to try the retry. */
@@ -29,13 +31,14 @@ export interface SourceFeedMockOptions {
 	 */
 	persistFailures?: number
 	/** After every feed change: re-send the source and decoder statuses. */
-	onChange: () => void
+	onChange: (sourceId: string) => void
 }
 
 export interface SourceFeedMock {
-	feed(): SourceFeed
+	/** The feed of `sourceId` (default: the main source). */
+	feed(sourceId?: string): SourceFeed
 	/** Anything but live: the source is held back. */
-	paused(): boolean
+	paused(sourceId?: string): boolean
 	/** Makes the next `n` resumes fail (tests). */
 	failNextResumes(n: number): void
 	/** Makes the next `n` saves fail: those answers say `persisted: false` (tests). */
@@ -49,42 +52,56 @@ export function registerSourceFeedMock(
 	const resumeMs = options.resumeMs ?? 400
 	let failures = Math.max(0, options.resumeFailures ?? 0)
 	let saveFailures = Math.max(0, options.persistFailures ?? 0)
-	let feed: SourceFeed = { state: "live", since: new Date().toISOString() }
-	let busy: Promise<unknown> = Promise.resolve()
+	interface Machine {
+		feed: SourceFeed
+		busy: Promise<unknown>
+	}
+	const machines = new Map<string, Machine>()
+	for (const id of [options.sourceId, ...(options.extraSourceIds ?? [])])
+		machines.set(id, {
+			feed: { state: "live", since: new Date().toISOString() },
+			busy: Promise.resolve(),
+		})
 
-	const set = (state: SourceFeedState) => {
-		feed = {
+	const set = (id: string, m: Machine, state: SourceFeedState) => {
+		m.feed = {
 			state,
 			since: new Date().toISOString(),
 			...(state === "error" ? { error: SOURCE_RESUME_FAILED_MESSAGE } : {}),
 		}
-		options.onChange()
+		options.onChange(id)
 	}
 
 	/** One feed call at a time per source, as SourceManager.serialFeed. */
-	const serial = <T>(fn: () => Promise<T>): Promise<T> => {
-		const next = busy.then(fn, fn)
-		busy = next.catch(() => undefined)
+	const serial = <T>(m: Machine, fn: () => Promise<T>): Promise<T> => {
+		const next = m.busy.then(fn, fn)
+		m.busy = next.catch(() => undefined)
 		return next
 	}
 
-	const pause = (): Promise<{ feed: SourceFeed; changed: boolean }> =>
-		serial(async () => {
-			const changed = feed.state !== "paused"
-			if (changed) set("paused")
-			return { feed, changed }
+	const pause = (
+		id: string,
+		m: Machine,
+	): Promise<{ feed: SourceFeed; changed: boolean }> =>
+		serial(m, async () => {
+			const changed = m.feed.state !== "paused"
+			if (changed) set(id, m, "paused")
+			return { feed: m.feed, changed }
 		})
 
-	const resume = (): Promise<{ feed: SourceFeed; changed: boolean }> =>
-		serial(async () => {
-			if (feed.state === "live") return { feed, changed: false }
-			set("resuming")
+	const resume = (
+		id: string,
+		m: Machine,
+	): Promise<{ feed: SourceFeed; changed: boolean }> =>
+		serial(m, async () => {
+			if (m.feed.state === "live") return { feed: m.feed, changed: false }
+			set(id, m, "resuming")
 			if (resumeMs > 0) await new Promise(r => setTimeout(r, resumeMs))
 			if (failures > 0) {
 				failures -= 1
-				set("error")
-			} else set("live")
-			return { feed, changed: true }
+				set(id, m, "error")
+			} else set(id, m, "live")
+			return { feed: m.feed, changed: true }
 		})
 
 	for (const action of ["pause", "resume"] as const)
@@ -92,13 +109,15 @@ export function registerSourceFeedMock(
 			`/api/sources/:id/${action}`,
 			async (request, reply) => {
 				const { id } = request.params
-				if (id !== options.sourceId)
+				const m = machines.get(id)
+				if (!m)
 					return reply.code(404).send({
 						error: "NotFound",
 						code: "SOURCE_NOT_FOUND",
 						message: `Source with id '${id}' not found`,
 					})
-				const result = action === "pause" ? await pause() : await resume()
+				const result =
+					action === "pause" ? await pause(id, m) : await resume(id, m)
 				if (result.feed.state === "error")
 					return reply.code(503).send({
 						error: "ServiceUnavailable",
@@ -117,9 +136,14 @@ export function registerSourceFeedMock(
 			},
 		)
 
+	const machine = (id = options.sourceId): Machine => {
+		const m = machines.get(id)
+		if (!m) throw new Error(`No feed for source ${id}`)
+		return m
+	}
 	return {
-		feed: () => feed,
-		paused: () => feed.state !== "live",
+		feed: id => machine(id).feed,
+		paused: id => machine(id).feed.state !== "live",
 		failNextResumes: n => {
 			failures = Math.max(0, n)
 		},

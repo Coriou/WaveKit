@@ -25,7 +25,7 @@ import { Label } from "../../ui/Label.tsx"
 import { Seg } from "../../ui/Seg.tsx"
 import { Switch } from "../../ui/Switch.tsx"
 import { formatDb, formatMHz, formatRate } from "../format.ts"
-import { useTunerState } from "../hooks.ts"
+import { useReceiverSourceId } from "../hooks.ts"
 import {
 	capsNote,
 	controlAvailability,
@@ -69,10 +69,13 @@ function shown<T>(status: ControlStatus | undefined, core: T): T {
 
 function useReceiver() {
 	const { data } = useServices()
-	const tuner = useTunerState()
-	const sourceId = tuner?.sourceId ?? null
+	// the source the plot shows (one rule with the palette and the P key)
+	const sourceId = useReceiverSourceId()
+	const tuner = useStore(data.tuner, s =>
+		sourceId === null ? undefined : s.bySource[sourceId],
+	)
 	const source = useStore(data.sources, s =>
-		tuner ? s.sources.find(x => x.id === tuner.sourceId) : s.sources[0],
+		sourceId === null ? undefined : s.sources.find(x => x.id === sourceId),
 	)
 	const capsEntry = useStore(data.receiver, s =>
 		sourceId === null ? undefined : s.caps[sourceId],

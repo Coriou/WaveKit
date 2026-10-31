@@ -423,6 +423,8 @@ export type PauseReason =
 	| "core-restart"
 	| "resume-blocked"
 export type FailReason = "source-removed" | "tuner-unavailable" | "invalid"
+/** Why a job was cancelled by the core rather than the operator: the receiver feed was paused. */
+export type CancelReason = "source-paused"
 
 /** § 10.6; exactly one of `channels` / `fromDiscoveries` (enforced by the REST schema). */
 export interface MonitorChannelSpec {

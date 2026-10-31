@@ -7,12 +7,13 @@ import {
 } from "../../../../src/core/scanner/job-state.js"
 import type { JobEvent } from "../../../../src/core/scanner/job-state.js"
 import type {
+	CancelReason,
 	FailReason,
 	JobState,
 	PauseReason,
 } from "../../../../src/core/scanner/types.js"
 
-type S = { state: JobState; reason?: PauseReason | FailReason }
+type S = { state: JobState; reason?: PauseReason | FailReason | CancelReason }
 const label = (s: S): string =>
 	s.reason !== undefined ? `${s.state}(${s.reason})` : s.state
 const PAUSED: PauseReason[] = [
@@ -487,6 +488,18 @@ describe("job transition table (§ 10.1)", () => {
 			reason: "source-down",
 			actions: ["stop-probes"],
 		})
+	})
+
+	it("carries a core cancel reason (source-paused) and none for the operator's cancel", () => {
+		expect(
+			transition(
+				{ state: "starting" },
+				{ type: "cancel", reason: "source-paused" },
+			),
+		).toMatchObject({ state: "cancelled", reason: "source-paused" })
+		expect(
+			transition({ state: "running" }, { type: "cancel" }),
+		).not.toHaveProperty("reason")
 	})
 
 	it("resends the hop after a reconnect and restores the persisted lease at boot", () => {

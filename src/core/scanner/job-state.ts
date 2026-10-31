@@ -2,7 +2,13 @@
  * Scan job lifecycle (spec § 10.1) as a pure transition function. Actions are those of a sweep;
  * in-window jobs run the same table without the lease rows (`actionsForMode`).
  */
-import type { FailReason, JobState, PauseReason, ScanMode } from "./types.js"
+import type {
+	CancelReason,
+	FailReason,
+	JobState,
+	PauseReason,
+	ScanMode,
+} from "./types.js"
 
 export type JobEvent =
 	| { type: "start" }
@@ -22,7 +28,8 @@ export type JobEvent =
 	| { type: "source-up" }
 	| { type: "preemptor-idle"; impactGrew: boolean }
 	| { type: "resume"; takeover: boolean }
-	| { type: "cancel" }
+	/** `reason`: the core cancelled it (an identify on a paused feed); absent for the operator. */
+	| { type: "cancel"; reason?: CancelReason }
 	| { type: "stop-condition" }
 	| { type: "source-removed" }
 	| { type: "boot" }
@@ -38,9 +45,10 @@ export type JobAction =
 	| "resend-hop"
 	| "report-impact"
 
-type From = { state: JobState; reason?: PauseReason | FailReason }
+type JobReason = PauseReason | FailReason | CancelReason
+type From = { state: JobState; reason?: JobReason }
 type Result =
-	| { state: JobState; reason?: PauseReason | FailReason; actions: JobAction[] }
+	| { state: JobState; reason?: JobReason; actions: JobAction[] }
 	| { invalid: true }
 
 const INVALID: Result = { invalid: true }
@@ -72,11 +80,7 @@ export function actionsForMode(
 		: actions.filter(a => !LEASE_ACTIONS.has(a))
 }
 
-function to(
-	state: JobState,
-	actions: JobAction[],
-	reason?: PauseReason | FailReason,
-): Result {
+function to(state: JobState, actions: JobAction[], reason?: JobReason): Result {
 	return reason === undefined ? { state, actions } : { state, reason, actions }
 }
 
@@ -244,7 +248,7 @@ export function transition(
 				return to("running", ["acquire-lease", "hold-decoders", "resend-hop"])
 			return INVALID
 		case "cancel":
-			return to("cancelled", endActions(s))
+			return to("cancelled", endActions(s), e.reason)
 		case "stop-condition":
 			return active ? to("completed", endActions(s)) : INVALID
 		case "source-removed": {

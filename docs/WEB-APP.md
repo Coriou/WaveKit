@@ -144,7 +144,11 @@ waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads
   **Resume receiver** (while paused) does the same, and the `P` key toggles it from anywhere; a
   pause from the palette or the key offers Undo. Read-only browsers cannot pause. While paused,
   the tuned card's decoders read "waiting: Receiver paused — Resume" with a **Resume** button and
-  Settings › Decoders reads `Paused · the receiver is paused`. See
+  Settings › Decoders reads `Paused · the receiver is paused`. A scanner identify running when you
+  pause ends with what it found so far and reads `Stopped · receiver paused`. With more than one
+  receiver, the Receiver island, the palette's receiver commands (pause, resume, gain, sample rate,
+  bias tee, RTL AGC) and `P` act on the receiver the waterfall shows: the first connected one, which
+  stays on screen through its own pause (else the first paused one). See
   [pause and resume](API.md#post-apisourcesidpause-and-post-apisourcesidresume).
 
   ![The receiver paused: the waterfall frozen under the Receiver paused label, the Receiver island with Resume, and the tuned card's decoders waiting with Resume buttons](assets/screenshots/receiver-paused.png)

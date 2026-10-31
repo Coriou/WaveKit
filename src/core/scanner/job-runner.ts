@@ -44,6 +44,7 @@ import type {
 	BandPlanSkipRange,
 	Classification,
 	DecodeEvidence,
+	CancelReason,
 	FailReason,
 	Hop,
 	HopPlan,
@@ -79,7 +80,7 @@ export interface JobRecord {
 	impact: Impact | null
 	consentedImpact: Impact | null
 	state: JobState
-	reason?: PauseReason | FailReason
+	reason?: PauseReason | FailReason | CancelReason
 	createdAt: number
 	updatedAt: number
 	startedAt?: number
@@ -1082,7 +1083,7 @@ export class JobRunner implements JobDriver {
 		before: { lease: boolean; holding: boolean; engine: boolean },
 		prev: {
 			state: JobState
-			reason?: PauseReason | FailReason
+			reason?: PauseReason | FailReason | CancelReason
 			startedAt?: number
 		},
 	): Promise<void> {

@@ -53,7 +53,7 @@ export function wireTunerControl(deps: TunerWiringDeps): void {
 		const resumed = sourceManager.isResumedSession?.(sourceId) === true
 		const result = tunerController.synchronizeOnConnect(
 			sourceId,
-			resumed ? { policy: "restore" } : {},
+			resumed ? { policy: "restore", resumed: true } : {},
 		)
 		if (result.error) {
 			log.warn(
