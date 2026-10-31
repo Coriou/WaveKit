@@ -182,7 +182,9 @@ shape suggests (a narrow FSK-looking signal included) or an analog trial: these 
 way a protocol with a prior of 0 is, not listed. readsb is still named and, as anywhere, listed
 in the skipped trials (`no-probe-mode`) because it has no replay input. An Identify there with no
 decode anchor runs no probe or analog trial; its only trial is readsb's ambient one when a
-running readsb covers the target. The rule applies when either the requested frequency or the
+running readsb covers the target. A protocol the Identify names explicitly (Decode as) is listed
+there as `unsupported` with reason `adsb-window` and never run, so the answer says why nothing
+tried it. The rule applies when either the requested frequency or the
 centre of the signal it resolves to (which may lie up to the target tolerance away, and is where
 probes tune) is inside the window, so a request just outside the window for a signal centred
 inside it runs only readsb too. An IQ capture whose own centre is inside the window is never

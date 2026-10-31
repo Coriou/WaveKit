@@ -5,6 +5,7 @@ import pino from "pino"
 import fc from "fast-check"
 import { createActivityIngress } from "../../../../src/core/activity/ingress.js"
 import type { DecodeEnvelope } from "../../../../src/core/activity/types.js"
+import { decoderSummary } from "../../../../src/api/routes/decoder-summary.js"
 import { DecoderManager } from "../../../../src/decoders/manager.js"
 import type { DecoderManagerConfig } from "../../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../../src/decoders/registry.js"
@@ -1162,6 +1163,40 @@ it("a hung crash restart releases the caps queue within the request bound", asyn
 	expect(decoder.stops).toBeGreaterThan(stops)
 	expect(decoder.running).toBe(false)
 	expect(decoder.starts).toBe(2)
+})
+
+it("reports a restart in flight while a hung crash restart outlives its bound", async () => {
+	const f = setup("rate-test", crashGate())
+	f.create("dec")
+	const worker = f.place("dec", 162_025_000, false)
+	f.plan([f.place("dec", 162_000_000), worker])
+	await f.manager.startAll()
+	expect(f.manager.getStatus("dec")?.restartInFlight).toBeUndefined()
+	const decoder = f.instances.get(worker.key)!
+	const start = deferred()
+	decoder.startGate = start
+	decoder.crash()
+	await vi.advanceTimersByTimeAsync(0)
+	expect(f.manager.getStatus("dec")?.restartInFlight).toBe(true)
+	await vi.advanceTimersByTimeAsync(2000)
+	expect(decoder.starts).toBe(2)
+	expect(f.manager.getStatus(worker.key)?.nextRestartAt).toBeUndefined()
+	expect(f.manager.getStatus("dec")?.restartInFlight).toBe(true)
+	// Past the bound the worker reads faulted while its start is still pending.
+	await vi.advanceTimersByTimeAsync(5000)
+	const faulted = f.manager.getStatus(worker.key)!
+	expect(faulted).toMatchObject({ health: "faulted", running: false })
+	expect(faulted.restartInFlight).toBe(true)
+	expect(f.manager.getStatus("dec")?.restartInFlight).toBe(true)
+	expect(decoderSummary(faulted, Date.now()).verdict).toMatchObject({
+		code: "failed",
+		actions: [],
+	})
+	start.resolve()
+	await vi.advanceTimersByTimeAsync(0)
+	expect(decoder.running).toBe(true)
+	expect(f.manager.getStatus(worker.key)?.restartInFlight).toBeUndefined()
+	expect(f.manager.getStatus("dec")?.restartInFlight).toBeUndefined()
 })
 
 it.each(["retry", "stop in backoff", "restart in backoff", "stop in start"])(

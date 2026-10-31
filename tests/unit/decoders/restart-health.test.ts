@@ -14,6 +14,7 @@ import {
 import { DecoderRegistry } from "../../../src/decoders/registry.js"
 import { FanoutManager } from "../../../src/core/fanout-manager.js"
 import { toApiDecoderStatus } from "../../../src/api/serializers/decoder-status.js"
+import { decoderSummary } from "../../../src/api/routes/decoder-summary.js"
 import type {
 	Decoder,
 	DecoderCaps,
@@ -36,9 +37,11 @@ class CrashingDecoder extends EventEmitter implements Decoder {
 	running = false
 	starts = 0
 	failStart = false
+	startGate: Promise<void> | null = null
 	private startedAt = 0
 	async start() {
 		this.starts++
+		if (this.startGate) await this.startGate
 		if (this.failStart) throw new Error("spawn failed")
 		this.running = true
 		this.startedAt = Date.now()
@@ -261,6 +264,52 @@ describe("health on unexpected exit", () => {
 		await vi.advanceTimersByTimeAsync(20) // spawn fails: 3
 		expect(manager.getStatus("acars")?.health).toBe("faulted")
 		expect(manager.getStatus("acars")?.nextRestartAt).toBeDefined()
+	})
+
+	it("flags a crash-loop respawn in flight after its timer fires, until it ends", async () => {
+		setup({ faultAfterFailures: 1 })
+		await manager.startDecoder("acars")
+		expect(manager.getStatus("acars")?.restartInFlight).toBeUndefined()
+		let release!: () => void
+		decoder.startGate = new Promise<void>(resolve => {
+			release = resolve
+		})
+		decoder.crash()
+		expect(manager.getStatus("acars")?.restartInFlight).toBe(true)
+		// The timer fired: nextRestartAt is gone while the respawn is under way.
+		await vi.advanceTimersByTimeAsync(10)
+		const respawning = manager.getStatus("acars")!
+		expect(respawning).toMatchObject({ health: "faulted", running: false })
+		expect(respawning.nextRestartAt).toBeUndefined()
+		expect(respawning.restartInFlight).toBe(true)
+		expect(toApiDecoderStatus(respawning).restartInFlight).toBe(true)
+		expect(decoderSummary(respawning, Date.now()).verdict).toMatchObject({
+			code: "failed",
+			text: "Decoder failed: restarting on its own",
+			actions: [],
+		})
+		decoder.startGate = null
+		release()
+		await vi.advanceTimersByTimeAsync(0)
+		expect(manager.getStatus("acars")?.running).toBe(true)
+		expect(manager.getStatus("acars")?.restartInFlight).toBeUndefined()
+		expect(toApiDecoderStatus(manager.getStatus("acars")!)).not.toHaveProperty(
+			"restartInFlight",
+		)
+	})
+
+	it("a failed respawn clears the in-flight flag only for a terminal fault", async () => {
+		setup({ maxRestarts: 1, faultAfterFailures: 1 })
+		await manager.startDecoder("acars")
+		decoder.failStart = true
+		decoder.crash()
+		await vi.advanceTimersByTimeAsync(10) // the one retry fails: budget spent
+		const terminal = manager.getStatus("acars")!
+		expect(terminal).toMatchObject({ health: "faulted", running: false })
+		expect(terminal.restartInFlight).toBeUndefined()
+		expect(decoderSummary(terminal, Date.now()).verdict.actions).toEqual([
+			"restart",
+		])
 	})
 
 	it("explicit stop cancels the retry and clears restarting; explicit start resets a fault", async () => {

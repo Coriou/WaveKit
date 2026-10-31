@@ -1187,7 +1187,9 @@ export interface ScannerIdentifyTrial {
 	 * `unsupported` so clients with a closed outcome list keep parsing. WG10: `no-live-audio` for
 	 * an analog trial when live audio was not running or not tuned to the target for the whole
 	 * window; `decoder-unavailable` also when the probe pool remembers the decoder type as
-	 * unavailable (PROBE_UNAVAILABLE_MEMO_MS) and the trial is not spawned.
+	 * unavailable (PROBE_UNAVAILABLE_MEMO_MS) and the trial is not spawned. `adsb-window` for a
+	 * protocol the request names explicitly inside the ADS-B window (1089 to 1091 MHz), where only
+	 * readsb is eligible: listed, never run.
 	 */
 	reason?:
 		| "no-decoder"
@@ -1196,6 +1198,7 @@ export interface ScannerIdentifyTrial {
 		| "no-ambient-decoder"
 		| "decoder-unavailable"
 		| "no-live-audio"
+		| "adsb-window"
 }
 /** WG7 req 1.2: decoder types whose running instances name ambient-only protocols. */
 export type ScannerAmbientDecoderType =

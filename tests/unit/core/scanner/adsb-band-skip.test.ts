@@ -125,7 +125,12 @@ const AIS_COVERAGE: AmbientCoverageLike = {
  * An anchorless identify at `hz` (no decode anchor) with ambient coverage and analog evidence
  * wired in; the FSK track it resolves is centred at `trackHz` (default `hz`).
  */
-async function identifyAt(hz: number, anchor?: Discovery, trackHz = hz) {
+async function identifyAt(
+	hz: number,
+	anchor?: Discovery,
+	trackHz = hz,
+	protocols: readonly ScannerProtocol[] = [],
+) {
 	const settings = testSettings()
 	// the engine window and its summary moved so the target sits 25 kHz above centre, as the
 	// fakes' TARGET_HZ does at 446.1 MHz
@@ -155,6 +160,7 @@ async function identifyAt(hz: number, anchor?: Discovery, trackHz = hz) {
 				: { frequencyHz: hz },
 			record: false,
 			timeoutMs: 5000,
+			...(protocols.length > 0 ? { protocols: [...protocols] } : {}),
 		}),
 		inner,
 		probes: pool.pool,
@@ -330,12 +336,18 @@ const ownCapture = (
 	...over,
 })
 
-async function identifyTrialsAt(hz: number, trackHz = hz) {
-	const { last } = await identifyAt(hz, undefined, trackHz)
+async function identifyTrialsAt(
+	hz: number,
+	trackHz = hz,
+	protocols: readonly ScannerProtocol[] = [],
+) {
+	const { last } = await identifyAt(hz, undefined, trackHz, protocols)
 	return (last?.trials ?? []).map(t => ({
 		protocol: t.protocol,
 		decoder: t.decoder,
 		transport: t.transport,
+		...(t.reason !== undefined ? { reason: t.reason } : {}),
+		...(t.outcome === "unsupported" ? { outcome: t.outcome } : {}),
 	}))
 }
 
@@ -473,6 +485,34 @@ describe("built-in ADS-B band skip", () => {
 				expect(await identifyTrialsAt(hz)).toEqual([
 					{ protocol: "adsb", decoder: "readsb", transport: "ambient" },
 				])
+		})
+
+		it("an explicit Decode as names its skip reason inside the window, and runs as elsewhere outside", async () => {
+			for (const hz of [LOW, ADSB_HZ, HIGH])
+				expect(
+					await identifyTrialsAt(hz, hz, ["dmr", "analog-fm", "adsb"]),
+				).toEqual([
+					{ protocol: "adsb", decoder: "readsb", transport: "ambient" },
+					{
+						protocol: "dmr",
+						decoder: "dsd-fme",
+						transport: null,
+						reason: "adsb-window",
+						outcome: "unsupported",
+					},
+					{
+						protocol: "analog-fm",
+						decoder: null,
+						transport: null,
+						reason: "adsb-window",
+						outcome: "unsupported",
+					},
+				])
+			for (const hz of OUTSIDE) {
+				const trials = await identifyTrialsAt(hz, hz, ["dmr"])
+				expect(trials.map(t => t.protocol)).toContain("dmr")
+				expect(trials.some(t => t.reason === "adsb-window")).toBe(false)
+			}
 		})
 
 		it("a decode-anchored identify at 1090 MHz still answers ADS-B from the anchor, no trial", async () => {

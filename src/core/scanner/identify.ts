@@ -1820,6 +1820,23 @@ export class IdentifyRunner implements JobDriver {
 				},
 			).filter(p => !adsbOnly || p.protocol === "adsb"),
 		)
+		// An explicit request ("Decode as") for another protocol inside the window is listed with
+		// its reason, never run: the operator sees why nothing tried it.
+		if (adsbOnly)
+			for (const protocol of requested)
+				if (
+					protocol !== "adsb" &&
+					!plan.trials.some(p => p.protocol === protocol)
+				)
+					plan.trials.push({
+						protocol,
+						score: 0,
+						decoder: PROTOCOL_DECODER[protocol],
+						mode: null,
+						transport: null,
+						reason: "adsb-window",
+						run: null,
+					})
 		if (
 			!adsbOnly &&
 			(this.deps.analogEvidence || this.deps.analogTrial?.runLive)

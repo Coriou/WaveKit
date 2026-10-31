@@ -104,7 +104,7 @@ function tunedCase(c: Omit<TunedCase, "summary">): TunedCase {
 }
 
 const ADSB_HZ = 1_090_062_000
-const ADSB_BAND = { name: "ADS-B 1090", mode: "raw" }
+const ADSB_BAND = { name: "ADS-B (1090 MHz)", mode: "raw" }
 
 export const TUNED_CASES: readonly TunedCase[] = [
 	tunedCase({

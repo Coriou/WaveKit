@@ -50,9 +50,10 @@ import {
 	bandTable,
 	cardIdentity,
 	DATA_BAND_LINE,
-	LIVE_STATES,
+	decodersLine,
+	skipLine,
 } from "./band-table.ts"
-import { decodersHere } from "./decoders.ts"
+import { decodersHere, decodersOnChannel } from "./decoders.ts"
 import {
 	DECODE_AS,
 	discoveryCard,
@@ -360,6 +361,8 @@ export function TunedCard() {
 		hz === null
 			? []
 			: decodersHere(decoders, new Set(bandRows.map(r => r.id)), hz)
+	// of those, the ones on the tuned channel itself (a fixed target within the channel): what decodes this signal
+	const onChannel = hz === null ? [] : decodersOnChannel(here, hz, tolerance)
 	const types = here.map(d => d.type)
 	const fleet = fleetHere(types)
 
@@ -465,8 +468,9 @@ export function TunedCard() {
 			onIt,
 			heldByScan,
 			transmitting: squelchOpen,
+			// channel-level: a band that only spans the frequency does not say what this carrier is;
 			// while the core's answer for this frequency is on its way, it may yet name a decoder
-			decodersHere: pending ? Math.max(1, here.length) : here.length,
+			decodersHere: pending ? Math.max(1, onChannel.length) : onChannel.length,
 			identifyShown: id.targetHz !== null,
 			known: known !== null,
 			triedHz: autoTried.current,
@@ -533,22 +537,22 @@ export function TunedCard() {
 		here.length === 0 && !pending
 			? "No decoder runs on this frequency, so nothing here is decoded live."
 			: ""
-	const liveRows = bandRows.filter(r => LIVE_STATES.has(r.state))
-	const names = (rows: readonly { name: string }[]) =>
-		[...new Set(rows.map(r => r.name))].join(", ")
-	const plainLine = liveRows.length
-		? `Decoded here by ${names(liveRows)}. Nothing heard yet.`
-		: bandRows.length
-			? `${names(bandRows)} ${bandRows.length === 1 ? "covers" : "cover"} this frequency but ${bandRows.length === 1 ? "is" : "are"} not decoding now.`
-			: pending
-				? "Checking which decoders cover this frequency…"
-				: named && known
-					? `Identified as ${named.proto} at ${clockText(known.at)}. ${notLive}`
-					: heardBefore
-						? `Heard before: ${heardBefore}. ${notLive}`
-						: bandSays && !noAudio
+	// "Decoded here by" names only decoders on this channel; one whose band merely spans it decodes elsewhere
+	const coverLine = decodersLine(bandRows, new Set(onChannel.map(d => d.id)))
+	// a data band the plan leaves to another decoder (ADS-B: "Decoded elsewhere · readsb") says so
+	const skipReason = skipLine(bandMode, band?.band.skip)
+	const plainLine =
+		coverLine ??
+		(pending
+			? "Checking which decoders cover this frequency…"
+			: named && known
+				? `Identified as ${named.proto} at ${clockText(known.at)}. ${notLive}`
+				: heardBefore
+					? `Heard before: ${heardBefore}. ${notLive}`
+					: (skipReason ??
+						(bandSays && !noAudio
 							? `Nothing decodes this frequency. The band plan says ${modeSpec(bandMode).label}.`
-							: "Nothing decodes this frequency. Identify finds out what it is."
+							: "Nothing decodes this frequency. Identify finds out what it is.")))
 	const { proto, sub: protoSub } = cardIdentity({
 		heard: now.protocol,
 		named: named ? { proto: named.proto, sub: named.sub } : null,

@@ -173,6 +173,8 @@ describe("mock failures, names and coverage match the core's", () => {
 				nextRestartAt: "2026-10-31T10:00:05Z",
 			},
 			{ health: "faulted" as const, running: false },
+			// a crash-loop respawn under way, or a placement start past its bound
+			{ health: "faulted" as const, running: false, restartInFlight: true },
 		]
 		for (const r of retry) {
 			const f = { ...fields({ health: "failed", running: r.running }), ...r }
@@ -186,7 +188,10 @@ describe("mock failures, names and coverage match the core's", () => {
 				"failed",
 				r.running,
 			)
-			expect({ r, verdict: mockVerdict(f as DecoderInfo, "failed") }).toEqual({
+			expect({
+				r,
+				verdict: mockVerdict(f as unknown as DecoderInfo, "failed"),
+			}).toEqual({
 				r,
 				verdict: core,
 			})
@@ -420,6 +425,15 @@ describe("mock GET /api/decoders/summary", () => {
 				url: `/api/decoders/summary?hz=${bad}`,
 			})
 			expect(res.statusCode, bad).toBe(400)
+			expect(res.json(), bad).toEqual({
+				error: "ValidationError",
+				code: "VALIDATION_ERROR",
+				message:
+					"Invalid query parameter: hz: number (> 0, <= 100000000000), Hz",
+				fields: [
+					{ field: "hz", expected: "number (> 0, <= 100000000000), Hz" },
+				],
+			})
 		}
 		expect((await summary()).every(i => !Object.hasOwn(i, "coversHz"))).toBe(
 			true,

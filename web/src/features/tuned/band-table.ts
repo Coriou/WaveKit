@@ -377,6 +377,37 @@ export function bandStateLine(rows: readonly BandTableRow[]): string | null {
 	return `${first.name} · ${first.stateWord}${more}`
 }
 
+/**
+ * The header's plain line about the decoders whose band holds the frequency (`rows`): "Decoded here by …" names
+ * only live ones on the tuned channel (`onChannel`, decodersOnChannel ids); live ones whose band merely spans it
+ * decode the band, not this channel; otherwise they cover it but are not decoding. Null without rows.
+ */
+export function decodersLine(
+	rows: readonly BandTableRow[],
+	onChannel: ReadonlySet<string>,
+): string | null {
+	const names = (list: readonly BandTableRow[]) =>
+		[...new Set(list.map(r => r.name))].join(", ")
+	const one = (list: readonly BandTableRow[], single: string, many: string) =>
+		list.length === 1 ? single : many
+	const live = rows.filter(r => LIVE_STATES.has(r.state))
+	const here = live.filter(r => onChannel.has(r.id))
+	if (here.length) return `Decoded here by ${names(here)}. Nothing heard yet.`
+	if (live.length)
+		return `${names(live)} ${one(live, "decodes", "decode")} this band, not this channel. Identify finds out what it is.`
+	if (rows.length)
+		return `${names(rows)} ${one(rows, "covers", "cover")} this frequency but ${one(rows, "is", "are")} not decoding now.`
+	return null
+}
+
+/** A data band (mode RAW) the band plan leaves to another decoder says why: its skip reason. Else null. */
+export function skipLine(
+	bandMode: string | null,
+	skip: { reason: string } | null | undefined,
+): string | null {
+	return bandMode === "raw" && skip ? skip.reason : null
+}
+
 /** Where the foot's "Decoder settings" link lands: the first row's decoder page, else the decoders group. */
 export function settingsTarget(rows: readonly BandTableRow[]): string {
 	const needs = rows.find(r => r.state === "off") ?? rows[0]

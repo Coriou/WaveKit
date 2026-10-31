@@ -25,6 +25,7 @@ import {
 	DecoderVerdictsFeed,
 	itemsFor,
 	pendingFor,
+	VERDICTS_FOLLOW_MS,
 	VERDICTS_SETTLE_MS,
 } from "../../src/features/tuned/verdicts.ts"
 
@@ -475,6 +476,50 @@ describe("verdicts feed", () => {
 		feed.follow(Number.NaN)
 		await vi.waitFor(() => expect(paths.at(-1)).toBe("/api/decoders/summary"))
 		detach()
+	})
+
+	it("reads a new frequency once the card rests on it VERDICTS_FOLLOW_MS", async () => {
+		vi.useFakeTimers()
+		expect(VERDICTS_FOLLOW_MS).toBe(150)
+		const paths: string[] = []
+		const get = vi.fn(async (path: string) => {
+			paths.push(path)
+			return [
+				{
+					id: "readsb",
+					protocol: "readsb",
+					verdict: { code: "decoding", text: "ADS-B decoding", actions: [] },
+					coversHz: false,
+				},
+			]
+		})
+		const { data } = fakeData(get)
+		const feed = new DecoderVerdictsFeed(data)
+		const detach = feed.attach()
+		await vi.advanceTimersByTimeAsync(0)
+		expect(paths).toEqual(["/api/decoders/summary"])
+		// a sweep of the dial: each step restarts the wait
+		feed.follow(466_000_000)
+		await vi.advanceTimersByTimeAsync(VERDICTS_FOLLOW_MS - 1)
+		feed.follow(466_012_500)
+		await vi.advanceTimersByTimeAsync(VERDICTS_FOLLOW_MS - 1)
+		expect(paths).toHaveLength(1)
+		expect(pendingFor(feed.get(), 466_012_500)).toBe(true)
+		// at the bound: one read, for the frequency it rested on
+		await vi.advanceTimersByTimeAsync(1)
+		expect(paths).toEqual([
+			"/api/decoders/summary",
+			"/api/decoders/summary?hz=466012500",
+		])
+		expect(pendingFor(feed.get(), 466_012_500)).toBe(false)
+		// past the bound nothing more is read
+		await vi.advanceTimersByTimeAsync(VERDICTS_FOLLOW_MS * 2)
+		expect(paths).toHaveLength(2)
+		// a change pending at detach is never read
+		feed.follow(433_920_000)
+		detach()
+		await vi.advanceTimersByTimeAsync(VERDICTS_FOLLOW_MS * 2)
+		expect(paths).toHaveLength(2)
 	})
 
 	it("stops asking a core without the summary route", async () => {

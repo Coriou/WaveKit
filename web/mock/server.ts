@@ -14,7 +14,6 @@ import Fastify from "fastify"
 import type { FastifyError, FastifyInstance, FastifyReply } from "fastify"
 import type { WebSocket } from "ws"
 import {
-	DECODER_SUMMARY_MAX_HZ,
 	LIVE_AUDIO_NOISE_QUIETING_DB,
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
 } from "@wavekit/api-types"
@@ -45,6 +44,7 @@ import { floodEvents } from "./activity-floods.ts"
 import { createAudioServer } from "./audio.ts"
 import {
 	buildDecoderSummaries,
+	SUMMARY_HZ_EXPECTED,
 	summaryHzQuery,
 	withAdsbBudget,
 } from "./decoder-summary.ts"
@@ -1551,7 +1551,8 @@ export async function buildMockServer(
 				return reply.code(400).send({
 					error: "ValidationError",
 					code: "VALIDATION_ERROR",
-					message: `Invalid query parameter: hz must be a positive finite number up to ${DECODER_SUMMARY_MAX_HZ} Hz`,
+					message: `Invalid query parameter: hz: ${SUMMARY_HZ_EXPECTED}`,
+					fields: [{ field: "hz", expected: SUMMARY_HZ_EXPECTED }],
 				})
 			return buildDecoderSummaries(decoders(), Date.now(), hz)
 		},

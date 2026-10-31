@@ -252,6 +252,8 @@ interface DecoderState {
 	restartTimer: ReturnType<typeof setTimeout> | null
 	/** When restartTimer fires; null when no automatic restart is pending */
 	nextRestartAt: Date | null
+	/** An automatic restart fired and its respawn has not finished yet. */
+	restartRunning?: boolean
 	/** Unstable runs (or failed restarts) since the last stable run or explicit start */
 	consecutiveFailures: number
 	intentionallyStopped: boolean
@@ -3830,6 +3832,7 @@ export class DecoderManager extends EventEmitter {
 			...(state.ratePlan ? { rateAssessment: state.ratePlan } : {}),
 			...(state.bandPlan ? { bandAssessment: state.bandPlan } : {}),
 			...(state.nextRestartAt ? { nextRestartAt: state.nextRestartAt } : {}),
+			...(this.restartInFlight(state) ? { restartInFlight: true } : {}),
 			desiredRunning: state.desiredRunning,
 			suspended: state.suspension !== null,
 			...(this.config.enablement && suspension
@@ -3981,6 +3984,25 @@ export class DecoderManager extends EventEmitter {
 	 *
 	 * @returns Array of DecoderStatus for all decoders
 	 */
+	/**
+	 * An automatic restart of the decoder or one of its placement workers is under
+	 * way: a restart timer is set, a fired restart has not finished its respawn, or
+	 * a placement start is still pending.
+	 */
+	private restartInFlight(parent: DecoderState): boolean {
+		for (const state of this.decoders.values()) {
+			if (state !== parent && state.parentId !== parent.config.id) continue
+			if (
+				state.restartTimer !== null ||
+				state.restartRunning === true ||
+				(state.lifecycle?.pending === true &&
+					state.lifecycle.actual === "starting")
+			)
+				return true
+		}
+		return false
+	}
+
 	getAllStatus(): DecoderStatus[] {
 		return this.getAllDecoders().map(decoder => this.getStatus(decoder.id)!)
 	}
@@ -4496,6 +4518,7 @@ export class DecoderManager extends EventEmitter {
 			if (!retryCurrent()) return
 			state.restartTimer = null
 			state.nextRestartAt = null
+			state.restartRunning = true
 
 			// Use void to handle the promise without blocking
 			const restart = async () => {
@@ -4608,11 +4631,15 @@ export class DecoderManager extends EventEmitter {
 					}
 				}
 			}
+			const tracked = () =>
+				restart().finally(() => {
+					state.restartRunning = false
+				})
 			if (state.placement && this.config.enablement?.gate) {
-				this.capsWork = this.capsWork.then(restart)
+				this.capsWork = this.capsWork.then(tracked)
 				void this.capsWork
 			} else {
-				void restart()
+				void tracked()
 			}
 		}, delay)
 

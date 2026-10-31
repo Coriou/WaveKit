@@ -123,7 +123,13 @@ Identify or a proven discovery named, the decoder whose band holds the frequency
 plan's band. A decoder that is off names it only where the band plan has no band there, and says
 so ("Pager (off)"). A decoder whose channel only follows the tuner (the pager decoder listening to the
 live audio, say) never names a frequency outside its band, and the card never says "Nothing decodes
-this frequency" while a decoder's band holds it. On a data band (the band plan's mode is RAW, such
+this frequency" while a decoder's band holds it. "Decoded here by" names only a decoder on the tuned
+channel itself, one of its fixed frequencies within the channel (ADS-B anywhere readsb covers, its
+signal fills 1089 to 1091 MHz). A decoder whose band merely spans the frequency, such as the ISM
+decoder at 434.000 MHz with its channel at 433.920 MHz, reads "ISM decodes this band, not this
+channel", and **Identify on its own** still identifies a transmission there. Elsewhere in the ADS-B
+band, past readsb's 200 kHz reach, the card gives the band plan's reason: "Decoded elsewhere ·
+readsb". On a data band (the band plan's mode is RAW, such
 as ADS-B at 1090 MHz) or with the receiver set to RAW, the card shows **No audio (data band)**
 instead of the demodulator and "Quiet".
 

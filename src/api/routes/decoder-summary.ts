@@ -22,6 +22,7 @@ import { VFO_CHANNEL_TYPES } from "../../decoders/enablement/placement.js"
 import { bandContainsTuned } from "../../decoders/enablement/tuned-band.js"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderStatus } from "../../decoders/types.js"
+import { zodValidationBody } from "../validation-errors.js"
 
 /** 60 seconds × 1,000 milliseconds; inclusive at the last millisecond. */
 export const DECODING_WINDOW_MS = 60 * 1_000
@@ -192,11 +193,14 @@ export function decoderName(type: string): string {
 
 /**
  * A failed decoder the manager is already bringing back: an automatic restart
- * is scheduled, or a crash-loop retry runs on probation. Restarting it by hand
- * would only race that, so its verdict offers no action.
+ * is scheduled or under way (restartInFlight: a crash-loop respawn, or a
+ * placement start that outlived its timeout), or a crash-loop retry runs on
+ * probation. Restarting it by hand would only race that, so its verdict
+ * offers no action.
  */
 function retrying(status: DecoderStatus, running: boolean): boolean {
 	return (
+		status.restartInFlight === true ||
 		status.nextRestartAt !== undefined ||
 		status.health === "restarting" ||
 		(status.health === "faulted" && running)
@@ -429,11 +433,11 @@ export const decoderSummaryRoutes: FastifyPluginAsync<{
 		async (request, reply) => {
 			const query = SummaryQuerySchema.safeParse(request.query ?? {})
 			if (!query.success)
-				return reply.code(400).send({
-					error: "ValidationError",
-					code: "VALIDATION_ERROR",
-					message: `Invalid query parameter: hz must be a positive finite number up to ${DECODER_SUMMARY_MAX_HZ} Hz`,
-				})
+				return reply.code(400).send(
+					zodValidationBody(query.error, SummaryQuerySchema, {
+						part: "query",
+					}),
+				)
 			const now = Date.now()
 			const { hz } = query.data
 			return decoderManager

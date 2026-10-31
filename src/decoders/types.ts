@@ -346,6 +346,8 @@ export interface DecoderStatus {
 	idleTimeoutMs?: number | undefined
 	/** When the scheduled automatic restart fires; absent when none is pending. */
 	nextRestartAt?: Date | undefined
+	/** True while an automatic restart is scheduled or its respawn is under way; else absent. */
+	restartInFlight?: boolean | undefined
 	/** Operator intent (start recorded, not stopped); set by the manager. */
 	desiredRunning?: boolean | undefined
 	/** Wanted but held back (unusable rate or no target in band); set by the manager. */

@@ -11,6 +11,8 @@ import { parseSummary, summaryPath, type SummaryItem } from "./band-table.ts"
 export const VERDICTS_POLL_MS = 15_000
 /** Statuses arrive in bursts on a retune: one read after they settle. */
 export const VERDICTS_SETTLE_MS = 400
+/** A new frequency is read once the card has rested on it this long: a sweep of the dial asks once, not per step. */
+export const VERDICTS_FOLLOW_MS = 150
 
 export interface VerdictsState {
 	verdicts: ReadonlyMap<string, BandVerdict> | null
@@ -46,6 +48,7 @@ export class DecoderVerdictsFeed extends Store<VerdictsState> {
 	private attached = 0
 	private cleanup: (() => void)[] = []
 	private settle: ReturnType<typeof setTimeout> | null = null
+	private following: ReturnType<typeof setTimeout> | null = null
 	private poll: ReturnType<typeof setInterval> | null = null
 	private unavailable = false
 	private seq = 0
@@ -62,12 +65,20 @@ export class DecoderVerdictsFeed extends Store<VerdictsState> {
 		this.data = data
 	}
 
-	/** Asks for the decoders covering `hz` from now on; a new frequency is read at once while attached. */
+	/**
+	 * Asks for the decoders covering `hz` from now on; while attached, a new frequency is read VERDICTS_FOLLOW_MS
+	 * after the last change (each change restarts the wait). Until then the new frequency reads as pending.
+	 */
 	follow(hz: number | null): void {
 		const next = hz !== null && Number.isFinite(hz) && hz > 0 ? hz : null
 		if (next === this.hz) return
 		this.hz = next
-		if (this.attached > 0) void this.load()
+		if (this.attached === 0) return
+		if (this.following !== null) clearTimeout(this.following)
+		this.following = setTimeout(() => {
+			this.following = null
+			void this.load()
+		}, VERDICTS_FOLLOW_MS)
 	}
 
 	/** Starts reading while someone shows verdicts; returns the detach. */
@@ -148,8 +159,10 @@ export class DecoderVerdictsFeed extends Store<VerdictsState> {
 	private stop(): void {
 		for (const fn of this.cleanup.splice(0)) fn()
 		if (this.settle !== null) clearTimeout(this.settle)
+		if (this.following !== null) clearTimeout(this.following)
 		if (this.poll !== null) clearInterval(this.poll)
 		this.settle = null
+		this.following = null
 		this.poll = null
 		this.seq += 1
 	}

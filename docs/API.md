@@ -2601,7 +2601,8 @@ an empty value or a value past the bound) answers 400:
 {
 	"error": "ValidationError",
 	"code": "VALIDATION_ERROR",
-	"message": "Invalid query parameter: hz must be a positive finite number up to 100000000000 Hz"
+	"message": "Invalid query parameter: hz: number (> 0, <= 100000000000), Hz",
+	"fields": [{ "field": "hz", "expected": "number (> 0, <= 100000000000), Hz" }]
 }
 ```
 
@@ -6841,7 +6842,9 @@ most 1/s per (job, target); the latest state is always delivered.
   `pending`, `running`, `decoded`, `no-sync`, `crc-errors`, `timeout`,
   `skipped-budget`, `unsupported` (with `reason`: `no-decoder`,
   `needs-channelizer`, `unsupported-format`, `no-ambient-decoder`,
-  `decoder-unavailable`, `no-live-audio`; `mode` and `transport` null),
+  `decoder-unavailable`, `no-live-audio`, `adsb-window`: a protocol the request
+  names in `protocols` inside the ADS-B window, where only readsb is eligible;
+  `mode` and `transport` null),
   `not-needed` (an earlier trial decoded and `exhaustive` is false; an analog
   match no longer causes it, since 2026-10-18), `cancelled` and `heard` (a `live-audio`
   trial whose matching transmission carried no CTCSS tone or DCS code; `decoded`

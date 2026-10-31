@@ -126,11 +126,16 @@ export type VerdictInput = Pick<
 	| "placements"
 	| "health"
 	| "nextRestartAt"
+	| "restartInFlight"
 >
 
-/** The core's "failed: restarting on its own": a restart is scheduled or a crash-loop retry runs on probation. */
+/**
+ * The core's "failed: restarting on its own": a restart is scheduled or under way (`restartInFlight`), or a
+ * crash-loop retry runs on probation.
+ */
 function retrying(d: VerdictInput): boolean {
 	return (
+		d.restartInFlight === true ||
 		d.nextRestartAt !== undefined ||
 		d.health === "restarting" ||
 		(d.health === "faulted" && d.running)
@@ -307,6 +312,9 @@ export function mockCoversHz(
 	if (configured.length > 0) return bandHolds(configured, [], hz)
 	return planListsHz(d.type, MOCK_PLAN_RANGES, hz)
 }
+
+/** What the core's 400 says `hz` accepts (its Zod description of the query). */
+export const SUMMARY_HZ_EXPECTED = `number (> 0, <= ${DECODER_SUMMARY_MAX_HZ}), Hz`
 
 /**
  * The core's `?hz=` reading: a positive finite number up to DECODER_SUMMARY_MAX_HZ, absent when not given,

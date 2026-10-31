@@ -2,6 +2,7 @@
 import type { DecoderInfo } from "@wavekit/api-types"
 import type { DataLayer } from "../../data/index.ts"
 import { errorMessage, Store } from "../../data/index.ts"
+import { fixedTargetsHz } from "./decoder-protocols.ts"
 
 /** Running or wanted decoders with a target within `toleranceHz` of `hz`, nearest first. */
 export function decodersAt(
@@ -14,6 +15,46 @@ export function decodersAt(
 	return decoders
 		.filter(d => dist(d) <= toleranceHz)
 		.sort((a, b) => dist(a) - dist(b))
+}
+
+/** A decoder's fixed channel targets: its band assessment's, else its configured ones that do not follow the tuner. */
+function channelTargetsHz(d: DecoderInfo): number[] {
+	const band = d.bandAssessment?.targetsHz
+	return Array.isArray(band) && band.length > 0 ? band : fixedTargetsHz(d)
+}
+
+/**
+ * Half the width of the signal a wideband decoder reads around its target, when wider than a channel: ADS-B fills
+ * the core's ADS-B window, 1090 MHz ±1 MHz, so anywhere readsb covers is its channel.
+ */
+const SIGNAL_HALF_WIDTH_HZ: Readonly<Record<string, number>> = {
+	readsb: 1_000_000,
+}
+
+/**
+ * Of the decoders whose band holds the frequency (`here`, decodersHere), those that decode the tuned channel itself:
+ * a fixed target within `toleranceHz`, or within a wideband decoder's signal (decodersAt), in `here`'s order. A band
+ * that merely spans the frequency is not enough: an FM carrier at 434.000 MHz inside rtl433's 433 MHz band is not on
+ * its 433.920 MHz channel.
+ */
+export function decodersOnChannel(
+	here: readonly DecoderInfo[],
+	hz: number,
+	toleranceHz: number,
+): DecoderInfo[] {
+	return here.filter(
+		d =>
+			decodersAt(
+				[{ ...d, targetFrequenciesHz: channelTargetsHz(d) }],
+				hz,
+				Math.max(
+					toleranceHz,
+					Object.hasOwn(SIGNAL_HALF_WIDTH_HZ, d.type)
+						? SIGNAL_HALF_WIDTH_HZ[d.type]!
+						: 0,
+				),
+			).length > 0,
+	)
 }
 
 /**

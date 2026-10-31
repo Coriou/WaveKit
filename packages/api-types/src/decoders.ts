@@ -274,6 +274,13 @@ export interface DecoderStatus {
 	idleTimeoutMs?: number
 	/** ISO-8601 time of the scheduled automatic restart; present only while one is pending. */
 	nextRestartAt?: string
+	/**
+	 * True while the core is bringing the decoder back on its own: an automatic
+	 * restart is scheduled, its respawn is under way, or a placement start is
+	 * still pending. Absent otherwise and from older cores. A Restart offered
+	 * now would only race it.
+	 */
+	restartInFlight?: boolean
 	/** Operator intent: true after start/restart, false after stop. Always sent by current cores. */
 	desiredRunning?: boolean
 	/**

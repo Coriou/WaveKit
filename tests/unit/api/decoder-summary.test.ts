@@ -135,6 +135,13 @@ it.each([
 		"failed",
 		[],
 	],
+	// a crash-loop respawn after its timer fired, or a placement start past its bound
+	[{ health: "faulted", running: false, restartInFlight: true }, "failed", []],
+	[
+		{ health: "faulted", running: false, restartInFlight: false },
+		"failed",
+		["restart"],
+	],
 	[
 		{
 			running: false,
@@ -597,7 +604,17 @@ describe("which decoders cover a frequency", () => {
 					`/api/decoders/summary?hz=${encodeURIComponent(bad)}`,
 				)
 				expect(res.statusCode, bad).toBe(400)
-				expect(res.json()).toMatchObject({ code: "VALIDATION_ERROR" })
+				expect(res.json()).toEqual({
+					error: "ValidationError",
+					code: "VALIDATION_ERROR",
+					message: `Invalid query parameter: hz: number (> 0, <= ${DECODER_SUMMARY_MAX_HZ}), Hz`,
+					fields: [
+						{
+							field: "hz",
+							expected: `number (> 0, <= ${DECODER_SUMMARY_MAX_HZ}), Hz`,
+						},
+					],
+				})
 			}
 		} finally {
 			await app.close()

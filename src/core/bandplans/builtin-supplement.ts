@@ -9,6 +9,7 @@
  * Pure data and pure helpers. General public band-plan knowledge; no regulatory citation.
  */
 import type { BandRegion } from "@wavekit/api-types"
+import { BAND_REGIONS } from "../../decoders/band-region.js"
 import { bandplansFor } from "../scanner/bandplan/index.js"
 import type { Bandplan } from "../scanner/bandplan/index.js"
 
@@ -85,19 +86,15 @@ const ADSB: Bandplan = {
 	],
 }
 
-const ALL_REGIONS = [
-	"EU",
-	"US",
-	"CA",
-	"AU",
-	"NZ",
-	"JP",
-	"CN",
-] as const satisfies readonly BandRegion[]
+/**
+ * Built-in plans that exist only to be skipped: no scan protocol, projected with a band-plan
+ * skip (builtin-packs.ts BUILTIN_SKIPS) because another decoder covers them. Never a scan preset.
+ */
+export const SKIP_ONLY_PLAN_IDS: ReadonlySet<string> = new Set([ADSB.id])
 
 export const BUILTIN_SUPPLEMENT: readonly SupplementPlan[] = Object.freeze([
 	{ regions: ["EU"], before: "pmr446", plan: PAGER_FR },
-	{ regions: ALL_REGIONS, before: "", plan: ADSB },
+	{ regions: BAND_REGIONS, before: "", plan: ADSB },
 ])
 
 const cache = new Map<BandRegion, readonly Bandplan[]>()

@@ -100,6 +100,7 @@ export function toApiDecoderStatus(
 		...(status.nextRestartAt !== undefined
 			? { nextRestartAt: status.nextRestartAt.toISOString() }
 			: {}),
+		...(status.restartInFlight === true ? { restartInFlight: true } : {}),
 		...(status.desiredRunning !== undefined
 			? { desiredRunning: status.desiredRunning }
 			: {}),
