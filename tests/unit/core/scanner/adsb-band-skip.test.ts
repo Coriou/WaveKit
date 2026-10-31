@@ -10,11 +10,14 @@
  * analog protocol plans no other replay trial (readsb alone, reported skipped), and an
  * anchorless identify runs readsb's ambient trial alone (no probe, no analog trial). Just
  * outside the window (1 088 999 000 and 1 091 001 000 Hz) the plan is the one any other
- * frequency gets. The decode-anchored ADS-B answer is unchanged.
+ * frequency gets. The decode-anchored ADS-B answer is unchanged. An identify outside the window
+ * never claims or replays an IQ capture whose own centre is inside it (near the edges a capture
+ * lies within the target tolerance), also after a restart; an outside capture replays as before.
  */
 import { rm } from "node:fs/promises"
+import { PassThrough } from "node:stream"
 import pino from "pino"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import type {
 	BandRegion,
 	ResolvedBandPlanView,
@@ -30,6 +33,8 @@ import {
 	type IdentifyTrackView,
 } from "../../../../src/core/scanner/identify.js"
 import type { IqCaptureView } from "../../../../src/core/scanner/iq-capture-contract.js"
+import { offsetTransport } from "../../../../src/core/scanner/probes/probe-pool.js"
+import { createReplayTransport } from "../../../../src/core/scanner/probes/replay-transport.js"
 import { bandPlanSkipSources } from "../../../../src/core/scanner/plan/bandplan-skips.js"
 import {
 	ADSB_REPLAY_HIGH_HZ,
@@ -187,6 +192,142 @@ async function identifyAt(hz: number, anchor?: Discovery, trackHz = hz) {
 	await runner.dispose()
 	return { last, record }
 }
+
+/**
+ * An anchorless identify at `hz` (track centred at `hz`) with an IQ capture port and the replay
+ * transport. `captures` are finished captures `near` returns; `requested` appears once the
+ * identify ends the capture it requested; `restart` changes the epoch once the first capture is
+ * claimed and swaps in `retained` (epoch 2) with a fresh epoch-2 track.
+ */
+async function identifyWithCaptures(
+	hz: number,
+	opts: {
+		captures?: IqCaptureView[]
+		requested?: IqCaptureView
+		restart?: { retained: IqCaptureView[] }
+	},
+) {
+	const settings = testSettings()
+	const centreHz = hz - 25_000
+	const captures = [...(opts.captures ?? [])]
+	const claimed: string[] = []
+	const port = {
+		near: vi.fn(() => captures.slice(0, 5)),
+		capture: vi.fn((_req: unknown) => ({ captureId: "requested-1" })),
+		end: vi.fn((_id: string) => {
+			if (opts.requested && !captures.includes(opts.requested))
+				captures.push(opts.requested)
+		}),
+		claim: vi.fn((id: string, _holder: string) => {
+			if (claimed.includes(id)) return false
+			claimed.push(id)
+			return true
+		}),
+		settle: vi.fn((_id: string, _holder: string) => {}),
+		confirmLive: vi.fn((_s: string, _o: string) => 0),
+		openReplay: vi.fn((_id: string, _type: string): PassThrough | null => {
+			const s = new PassThrough()
+			s.end()
+			return s
+		}),
+	}
+	const engine = new FakeEngineView({ centreHz })
+	const pool = poolHarness({
+		settings,
+		cpuPercent: null,
+		engines: [engine],
+		transports: [offsetTransport, createReplayTransport(port)],
+	})
+	const base = summaryOf()
+	const summary = {
+		...base,
+		centreHz,
+		startHz: base.startHz + (centreHz - base.centreHz),
+		masks: { ...base.masks, dcHz: centreHz },
+	}
+	const record = identifyRecord()
+	const tracks: IdentifyTrackView[] = []
+	const events: ScannerIdentifyEventData[] = []
+	const runner = new IdentifyRunner({
+		record,
+		identify: normaliseIdentify({
+			target: { frequencyHz: hz },
+			record: false,
+			timeoutMs: 60_000,
+		}),
+		inner: fakeInner(record, () => pool.clock.now),
+		probes: pool.pool,
+		engine: () => pool.engine,
+		artefactAt: () => Promise.resolve(null),
+		liveTracks: () => tracks,
+		lastSummary: () => summary,
+		discoveryOf: () => undefined,
+		priorsAt: () => ({}),
+		format: () => "U8_IQ",
+		channelizer: () => false,
+		settings: () => settings,
+		emit: d => events.push(structuredClone(d)),
+		logger: pino({ level: "silent" }),
+		now: () => pool.clock.now,
+		iqCapture: port,
+	})
+	const exited = new Set<string>()
+	const advance = async (ms: number): Promise<void> => {
+		pool.clock.now += ms
+		runner.tick(pool.clock.now)
+		pool.pool.pump()
+		await flushAsync()
+		await flushAsync()
+		for (const [id, d] of pool.decoders.created) {
+			if (exited.has(id) || d.config.options["inputIqFormat"] !== "cf32")
+				continue
+			exited.add(id)
+			d.emit("exit", 0, null)
+			await new Promise(r => setTimeout(r, 300))
+			await flushAsync()
+		}
+	}
+	const until = async (stop: () => boolean, steps = 120): Promise<void> => {
+		for (let i = 0; i < steps && !stop(); i++) await advance(1000)
+	}
+	const replayed = () => port.openReplay.mock.calls.map(([id]) => id)
+	await runner.start()
+	tracks.push(viewOf(fskTrack(hz)))
+	if (opts.restart) {
+		// restart once the first capture is claimed, before the job can end
+		await until(() => port.claim.mock.calls.length > 0)
+		expect(record.state).toBe("running")
+		engine.setEpoch(2, centreHz)
+		await pool.pool.onEpoch("rtl", 2, centreHz)
+		await flushAsync()
+		await advance(100)
+		captures.length = 0
+		captures.push(...opts.restart.retained)
+		tracks.length = 0
+		tracks.push(viewOf({ ...fskTrack(hz), trackId: "t2", epoch: 2 }))
+	}
+	await until(() => record.state === "completed")
+	await runner.dispose()
+	await pool.pool.destroy()
+	return {
+		claimed: port.claim.mock.calls.map(([id]) => id),
+		replayed: replayed(),
+		requested: port.capture.mock.calls.length,
+		state: record.state,
+	}
+}
+
+/** A finished capture of the target's own transmission (epoch 1, trusted) at `rfHz`. */
+const ownCapture = (
+	captureId: string,
+	rfHz: number,
+	over: Partial<IqCaptureView> = {},
+): IqCaptureView => ({
+	...captureAt(rfHz),
+	captureId,
+	observationId: "o_t1",
+	...over,
+})
 
 async function identifyTrialsAt(hz: number, trackHz = hz) {
 	const { last } = await identifyAt(hz, undefined, trackHz)
@@ -381,6 +522,73 @@ describe("built-in ADS-B band skip", () => {
 				[1_091_001_000, 1_091_001_500],
 			] as const)
 				expect(await identifyTrialsAt(hz, trackHz)).toEqual(base)
+		})
+	})
+
+	describe("IQ captures inside the window are never replayed outside it", () => {
+		// target and resolved centre just outside; the capture 1 kHz away, inside (within tolerance)
+		const EDGES = [
+			[1_088_999_000, LOW],
+			[1_091_001_000, HIGH],
+		] as const
+
+		it("a nearby capture inside the window is not claimed or replayed, at either edge", async () => {
+			for (const [hz, inside] of EDGES) {
+				const r = await identifyWithCaptures(hz, {
+					captures: [ownCapture("in", inside)],
+				})
+				expect(r.state).toBe("completed")
+				expect(r.claimed).not.toContain("in")
+				expect(r.replayed).not.toContain("in")
+			}
+		})
+
+		it("a requested capture that finished inside the window is not claimed", async () => {
+			for (const [hz, inside] of EDGES) {
+				const r = await identifyWithCaptures(hz, {
+					requested: ownCapture("requested-1", inside),
+				})
+				expect(r.requested).toBe(1)
+				expect(r.claimed).toEqual([])
+				expect(r.replayed).toEqual([])
+			}
+		})
+
+		it("after a restart a retained capture inside the window is not claimed", async () => {
+			for (const [hz, inside] of EDGES) {
+				const r = await identifyWithCaptures(hz, {
+					captures: [ownCapture("out", hz)],
+					restart: {
+						retained: [
+							ownCapture("out", hz),
+							ownCapture("in", inside, { epoch: 2, observationId: "o_t2" }),
+						],
+					},
+				})
+				expect(r.claimed).toContain("out")
+				expect(r.claimed).not.toContain("in")
+				expect(r.replayed).not.toContain("in")
+			}
+		})
+
+		it("a capture outside the window still replays as before", async () => {
+			for (const [hz] of EDGES) {
+				const r = await identifyWithCaptures(hz, {
+					captures: [ownCapture("out", hz)],
+				})
+				const base = await identifyWithCaptures(NEUTRAL_HZ, {
+					captures: [ownCapture("out", NEUTRAL_HZ)],
+				})
+				expect(r.claimed).toEqual(["out"])
+				expect(r.replayed.length).toBeGreaterThan(0)
+				expect(r.replayed).toEqual(base.replayed)
+			}
+		})
+
+		it("an identify inside the window requests no capture", async () => {
+			const r = await identifyWithCaptures(ADSB_HZ, {})
+			expect(r.requested).toBe(0)
+			expect(r.claimed).toEqual([])
 		})
 	})
 

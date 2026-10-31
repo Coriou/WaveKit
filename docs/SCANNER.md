@@ -185,8 +185,11 @@ decode anchor runs no probe or analog trial; its only trial is readsb's ambient 
 running readsb covers the target. The rule applies when either the requested frequency or the
 centre of the signal it resolves to (which may lie up to the target tolerance away, and is where
 probes tune) is inside the window, so a request just outside the window for a signal centred
-inside it runs only readsb too. Outside the window, with both frequencies from 1 088 999 999 Hz
-down or 1 091 000 001 Hz up, the plans are unchanged.
+inside it runs only readsb too. An IQ capture whose own centre is inside the window is never
+claimed or replayed by any Identify, even one just outside the window whose tolerance reaches it
+(also after the Identify restarts on an epoch change), and an Identify inside the window requests
+no capture. Outside the window, with both frequencies from 1 088 999 999 Hz down or
+1 091 000 001 Hz up, the plans and the replay of captures centred outside are unchanged.
 
 The band-plan stack under `/api/bandplans` (see [API.md](API.md#band-plans))
 selects which built-in plans the scanner uses: each enabled built-in pack, in

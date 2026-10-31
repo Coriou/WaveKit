@@ -3079,6 +3079,8 @@ export class IdentifyRunner implements JobDriver {
 			const near = this.claimNear(t, view)
 			if (near > 0 || t.replay.asked) return
 			t.replay.asked = true
+			// Inside the ADS-B window only readsb is eligible, and readsb has no replay input.
+			if (inAdsbWindow(view.track.centreHz)) return
 			const req: IqCaptureRequest = {
 				sourceId: this.sourceId,
 				observationId: view.observationId,
@@ -3133,7 +3135,9 @@ export class IdentifyRunner implements JobDriver {
 					c.observationId === view.observationId
 				) ||
 				// the target's own transmission only: its epoch, or its observation.
-				!(c.epoch === view.epoch || c.observationId === view.observationId)
+				!(c.epoch === view.epoch || c.observationId === view.observationId) ||
+				// IQ inside the ADS-B window is readsb's alone: never replayed, whatever the target.
+				inAdsbWindow(c.rfHz)
 			)
 				continue
 			if (port.claim(c.captureId, this.record.id)) {
@@ -3167,21 +3171,22 @@ export class IdentifyRunner implements JobDriver {
 		try {
 			if (!stopProbes && rp.requested !== null) {
 				const id = rp.requested
-				const done =
+				const finished =
 					rp.reserved && port.view
-						? port.view(id) !== null
+						? port.view(id)
 						: port
 								.near(this.sourceId, t.view.track.centreHz, t.toleranceHz, {
 									observationId: t.view.observationId,
 									limit: IDENTIFY_REPLAY_MAX_CAPTURES + 1,
 								})
-								.some(c => c.captureId === id)
-				if (done) {
+								.find(c => c.captureId === id)
+				if (finished) {
 					const reserved = rp.reserved
 					rp.requested = null
 					rp.reserved = false
 					if (
 						rp.claimed.length < IDENTIFY_REPLAY_MAX_CAPTURES &&
+						!inAdsbWindow(finished.rfHz) &&
 						port.claim(id, this.record.id)
 					) {
 						rp.claimed.push(id)
