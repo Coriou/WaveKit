@@ -6,6 +6,7 @@ import {
 	decoderSummaryRoutes,
 	DECODING_WINDOW_MS,
 } from "../../../src/api/routes/decoder-summary.js"
+import type { DecoderPlacementView } from "@wavekit/api-types"
 import type { DecoderStatus } from "../../../src/decoders/types.js"
 import fc from "fast-check"
 import {
@@ -405,6 +406,62 @@ describe("which decoders cover a frequency", () => {
 		})
 		expect(decoderCoversHz(pager, 1_090_062_000)).toBe(false)
 		expect(decoderCoversHz(pager, 466_012_500)).toBe(true)
+	})
+
+	it("never counts a configured target that only follows the tuner when no band is assessed", () => {
+		const place = (
+			patch: Partial<DecoderPlacementView>,
+		): DecoderPlacementView => ({
+			sourceId: "synthetic",
+			running: true,
+			reach: "channel",
+			origin: "vfo",
+			primary: true,
+			costCores: 0,
+			...patch,
+		})
+		const unknown = {
+			verdict: "unknown" as const,
+			reasonCode: "no-target-frequency" as const,
+		}
+		// the repro: a pager tuned to 1090 MHz, its VFO channel on the tuned centre
+		for (const placement of [
+			place({ channelHz: ADSB_HZ }),
+			place({ channelHz: ADSB_HZ, origin: "fallback" }),
+			// a VFO type's "configured" channel sits on the centre when none is configured
+			place({ channelHz: ADSB_HZ, origin: "configured" }),
+			place({ reach: "centre", origin: "band" }),
+		])
+			expect(
+				decoderCoversHz(
+					status({
+						type: "multimon-ng",
+						targetFrequenciesHz: [ADSB_HZ],
+						placements: [placement],
+						bandAssessment: unknown,
+					}),
+					ADSB_HZ,
+				),
+			).toBe(false)
+		// a band plan channel of the same decoder is a fixed frequency and still covers
+		const raster = status({
+			type: "multimon-ng",
+			targetFrequenciesHz: [ADSB_HZ, 466_025_000],
+			placements: [
+				place({ channelHz: ADSB_HZ }),
+				place({ channelHz: 466_025_000, origin: "bandplan", primary: false }),
+			],
+			bandAssessment: unknown,
+		})
+		expect(decoderCoversHz(raster, ADSB_HZ)).toBe(false)
+		expect(decoderCoversHz(raster, 466_025_000)).toBe(true)
+		// readsb's raw placement keeps its declared 1090 MHz target
+		const readsb = status({
+			type: "readsb",
+			targetFrequenciesHz: [ADSB_HZ],
+			placements: [place({ reach: "raw", origin: "configured" })],
+		})
+		expect(decoderCoversHz(readsb, ADSB_HZ)).toBe(true)
 	})
 
 	it("reads a range widened by 200 kHz", () => {

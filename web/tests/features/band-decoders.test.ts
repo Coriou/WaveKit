@@ -105,6 +105,54 @@ describe("decoders on the tuned band", () => {
 		expect(onBand(configured, 1_090_062_000)).toBe(false)
 	})
 
+	it("never counts a configured target that only follows the tuner, as the core does", () => {
+		// the repro: a pager's VFO channel on the tuned 1090 MHz centre, no assessed band
+		const pager = decoder({
+			id: "pager",
+			type: "multimon-ng",
+			targetFrequenciesHz: [1_090_062_000, 466_025_000],
+			bandAssessment: { verdict: "unknown", reasonCode: "no-target-frequency" },
+			placements: [
+				{
+					sourceId: "synthetic",
+					channelHz: 1_090_062_000,
+					reach: "channel",
+					origin: "vfo",
+					primary: true,
+					running: true,
+					costCores: 0,
+				},
+				{
+					sourceId: "synthetic",
+					channelHz: 466_025_000,
+					reach: "channel",
+					origin: "bandplan",
+					primary: false,
+					running: true,
+					costCores: 0,
+				},
+			],
+		})
+		expect(onBand(pager, 1_090_062_000)).toBe(false)
+		expect(onBand(pager, 466_025_000)).toBe(true)
+		const readsb = decoder({
+			id: "readsb",
+			type: "readsb",
+			targetFrequenciesHz: [1_090_000_000],
+			placements: [
+				{
+					sourceId: "synthetic",
+					reach: "raw",
+					origin: "configured",
+					primary: true,
+					running: true,
+					costCores: 0,
+				},
+			],
+		})
+		expect(onBand(readsb, 1_090_000_000)).toBe(true)
+	})
+
 	it("covers a decoder with no band of its own where the band plan lists its protocols", () => {
 		const pager = decoder({
 			id: "pager",

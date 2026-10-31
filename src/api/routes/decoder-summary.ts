@@ -6,6 +6,7 @@ import {
 import type {
 	BandRegion,
 	DecoderBandRange,
+	DecoderPlacementView,
 	DecoderSummary,
 	DecoderVerdict,
 	DecoderVerdictAction,
@@ -17,6 +18,7 @@ import { builtinBandplansFor } from "../../core/bandplans/builtin-supplement.js"
 import type { ScanRange } from "../../core/scanner/types.js"
 import { BAND_REGIONS } from "../../decoders/band-region.js"
 import { DECODER_PROTOCOLS } from "../../decoders/enablement/contract.js"
+import { VFO_CHANNEL_TYPES } from "../../decoders/enablement/placement.js"
 import { bandContainsTuned } from "../../decoders/enablement/tuned-band.js"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderStatus } from "../../decoders/types.js"
@@ -281,13 +283,47 @@ function planListsAt(
 }
 
 /**
+ * The fixed frequencies among a decoder's configured targets. targetFrequenciesHz
+ * also carries placement frequencies that only follow the tuner: a VFO or
+ * fallback channel, a centre-reach placement (the source centre) and, for a
+ * single-channel audio type (VFO_CHANNEL_TYPES), a "configured" channel, which
+ * sits on the VFO or the centre when no channel is configured. Without
+ * placements the targets are the config's; with only fixed placements of a
+ * wideband type they are too (channels plus declared frequencies). Otherwise
+ * only band, band plan and activity channels (and a wideband type's configured
+ * ones) count.
+ */
+function fixedTargetsHz(status: DecoderStatus): number[] {
+	const raw: unknown = status.targetFrequenciesHz
+	const declared = Array.isArray(raw) ? (raw as unknown[]).filter(positive) : []
+	const rawPlacements: unknown = status.placements
+	const placements = Array.isArray(rawPlacements)
+		? (rawPlacements as DecoderPlacementView[])
+		: []
+	if (placements.length === 0) return declared
+	const audio = VFO_CHANNEL_TYPES.includes(status.type)
+	const fixed = (p: DecoderPlacementView): boolean =>
+		p != null &&
+		p.reach !== "centre" &&
+		(p.origin === "band" ||
+			p.origin === "bandplan" ||
+			p.origin === "activity" ||
+			(p.origin === "configured" && !audio))
+	if (!audio && placements.every(fixed)) return declared
+	return placements
+		.filter(fixed)
+		.flatMap(p => (positive(p.channelHz) ? [p.channelHz] : []))
+}
+
+/**
  * Whether the decoder's own band holds `hz`: the core's tuned-band rule
  * (bandContainsTuned) over its band assessment's targets and ranges. Before
  * the first assessment (no source capabilities yet, at boot) or when it names
- * no band, the same rule runs over the configured targets. A decoder with no
- * known band either covers `hz` only when a built-in band plan range there
- * lists one of its protocols. Placements (a channel that follows the tuner)
- * never count; scanner probes never cover; anything malformed reads false.
+ * no band, the same rule runs over the fixed configured targets (fixedTargetsHz).
+ * A decoder with neither covers `hz` only when a built-in band plan range there
+ * lists one of its protocols. A frequency that only follows the tuner (a VFO,
+ * fallback or centre placement) never counts; scanner probes never cover;
+ * anything malformed reads false.
  */
 export function decoderCoversHz(status: DecoderStatus, hz: number): boolean {
 	if (!positive(hz)) return false
@@ -304,10 +340,7 @@ export function decoderCoversHz(status: DecoderStatus, hz: number): boolean {
 			{ basis: band?.basis ?? "configured", targetsHz, rangesHz },
 			hz,
 		)
-	const rawConfigured: unknown = status.targetFrequenciesHz
-	const configured = Array.isArray(rawConfigured)
-		? (rawConfigured as unknown[]).filter(positive)
-		: []
+	const configured = fixedTargetsHz(status)
 	if (configured.length > 0)
 		return bandContainsTuned(
 			{ basis: "configured", targetsHz: configured, rangesHz: [] },

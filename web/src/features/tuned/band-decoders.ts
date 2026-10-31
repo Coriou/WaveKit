@@ -17,7 +17,7 @@ import type {
 } from "@wavekit/api-types"
 
 import { formatMHz } from "../format.ts"
-import { planListsHz } from "./decoder-protocols.ts"
+import { fixedTargetsHz, planListsHz } from "./decoder-protocols.ts"
 import { decoderLabel } from "./signal.ts"
 
 /** The core's tuned-band reach (TUNED_TARGET_TOLERANCE_HZ): within 200 kHz of a target, of the span between targets, or of a band range. */
@@ -113,8 +113,8 @@ export function bandHoldsHz(
 /**
  * True when the decoder's own band holds `hz`, for cores whose summary has no `coversHz` and while the summary
  * cannot be read: the core's decoderCoversHz (src/api/routes/decoder-summary.ts). The band assessment's targets
- * and ranges decide when it names any; else the configured targets (at boot, before the first assessment, or an
- * assessment that names no band); else a decoder with no band of its own (a pager, digital voice) covers `hz`
+ * and ranges decide when it names any; else the fixed configured targets (fixedTargetsHz: at boot, before the first
+ * assessment, or an assessment that names no band; a frequency that only follows the tuner never counts); else a decoder with no band of its own (a pager, digital voice) covers `hz`
  * where a band plan range there lists one of its protocols (planListsHz). `planRanges` is the core's band plan as
  * GET /api/scanner/bandplans serves it (the effective region's plan); null while not loaded, when only the first
  * two apply. Scanner probes and ephemeral decoders never cover.
@@ -132,9 +132,7 @@ export function onBand(
 	const ranges = Array.isArray(band?.rangesHz) ? band.rangesHz : []
 	if (targets.length > 0 || ranges.length > 0)
 		return bandHoldsHz(targets, ranges, hz)
-	const configured = Array.isArray(d.targetFrequenciesHz)
-		? d.targetFrequenciesHz.filter(positive)
-		: []
+	const configured = fixedTargetsHz(d)
 	if (configured.length > 0) return bandHoldsHz(configured, undefined, hz)
 	return planListsHz(d.type, planRanges ?? [], hz)
 }

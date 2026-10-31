@@ -280,6 +280,74 @@ describe("mock failures, names and coverage match the core's", () => {
 				})
 	})
 
+	it("never counts a configured target that only follows the tuner, as the core does", async () => {
+		const { decoderCoversHz } = await coreSummary()
+		const place = (
+			reach: "channel" | "raw" | "centre",
+			origin:
+				| "configured"
+				| "band"
+				| "vfo"
+				| "bandplan"
+				| "fallback"
+				| "activity",
+			channelHz?: number,
+		) => ({
+			sourceId: "synthetic",
+			...(channelHz !== undefined ? { channelHz } : {}),
+			reach,
+			origin,
+			primary: true,
+			running: true,
+			costCores: 0,
+		})
+		const unknown = {
+			verdict: "unknown" as const,
+			reasonCode: "no-target-frequency" as const,
+		}
+		const placementSets = [
+			[place("channel", "vfo", 1_090_000_000)],
+			[place("channel", "fallback", 1_090_000_000)],
+			[place("channel", "configured", 1_090_000_000)],
+			[place("raw", "configured")],
+			[place("centre", "band")],
+			[
+				place("channel", "vfo", 1_090_000_000),
+				place("channel", "bandplan", 466_025_000),
+				place("channel", "activity", 466_050_000),
+			],
+			[place("channel", "band", 1_090_000_000), place("centre", "band")],
+			[],
+		]
+		for (const type of ["multimon-ng", "readsb"])
+			for (const placements of placementSets)
+				for (const hz of [
+					1_090_000_000, 466_025_000, 466_050_000, 150_000_000,
+				]) {
+					const d = {
+						type,
+						targetFrequenciesHz: [1_090_000_000, 466_025_000, 466_050_000],
+						placements,
+						bandAssessment: unknown,
+					}
+					expect({ type, placements, hz, covers: mockCoversHz(d, hz) }).toEqual(
+						{ type, placements, hz, covers: decoderCoversHz(d, hz) },
+					)
+				}
+		// the repro: a pager's VFO channel at 1090 MHz never covers it
+		expect(
+			mockCoversHz(
+				{
+					type: "multimon-ng",
+					targetFrequenciesHz: [1_090_000_000],
+					placements: [place("channel", "vfo", 1_090_000_000)],
+					bandAssessment: unknown,
+				},
+				1_090_000_000,
+			),
+		).toBe(false)
+	})
+
 	it("falls back to the built-in band plan for a decoder with no known band, as the core does", async () => {
 		const { decoderCoversHz } = await coreSummary()
 		// The repro: a pager decoder with no target frequency, tuned to 150 MHz (pager-vhf, pocsag/flex).

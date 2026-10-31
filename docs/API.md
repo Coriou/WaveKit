@@ -2474,12 +2474,15 @@ carries `coversHz`, a boolean that says whether the decoder's own band holds tha
 frequency; without it the field is absent. The band is the decoder's band
 assessment (its targets and ranges); before the first assessment (at boot, before
 the source reports its capabilities) or when the assessment names no band, the
-decoder's configured target frequencies. A band holds `hz` within 200 kHz of a
+decoder's fixed target frequencies: its configured targets, minus any that only
+follow the tuner (a VFO, fallback or centre placement, or the default channel of a
+single-channel audio decoder such as multimon-ng, which sits on the VFO or the
+tuned centre). A band holds `hz` within 200 kHz of a
 target, anywhere between its lowest and highest target, or inside one of its
 ranges widened by 200 kHz. A decoder with no band at all covers `hz` only when a
-built-in band plan range holding `hz` lists one of its protocols. A channel that
-only follows the tuner (a VFO placement) never makes a decoder cover a frequency,
-and scanner probes never cover. `hz` must be a positive finite number up to
+built-in band plan range holding `hz` lists one of its protocols. A frequency that
+only follows the tuner never makes a decoder cover it, and scanner probes never
+cover. `hz` must be a positive finite number up to
 `DECODER_SUMMARY_MAX_HZ` (100 GHz, 100,000,000,000 Hz, inclusive, exported from
 `@wavekit/api-types`). Anything else (zero, a negative number, `Infinity`, text,
 an empty value or a value past the bound) answers 400:

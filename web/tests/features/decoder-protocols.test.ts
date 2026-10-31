@@ -2,14 +2,20 @@ import { describe, expect, it } from "vitest"
 import type { ScanRange } from "@wavekit/api-types"
 
 import { DECODER_PROTOCOLS as CORE_DECODER_PROTOCOLS } from "../../../src/decoders/enablement/contract.ts"
+import { VFO_CHANNEL_TYPES as CORE_VFO_CHANNEL_TYPES } from "../../../src/decoders/enablement/placement.ts"
 import {
 	DECODER_PROTOCOLS,
+	VFO_CHANNEL_TYPES,
 	planListsHz,
 } from "../../src/features/tuned/decoder-protocols.ts"
 
 describe("decoder band plan protocols", () => {
 	it("are the core's DECODER_PROTOCOLS", () => {
 		expect(DECODER_PROTOCOLS).toEqual(CORE_DECODER_PROTOCOLS)
+	})
+
+	it("name the core's VFO_CHANNEL_TYPES", () => {
+		expect(VFO_CHANNEL_TYPES).toEqual(CORE_VFO_CHANNEL_TYPES)
 	})
 
 	it("cover a frequency only inside a range listing one of the type's protocols", () => {

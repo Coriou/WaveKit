@@ -9,7 +9,10 @@ import type {
 	DecoderVerdictCode,
 	ScanRange,
 } from "@wavekit/api-types"
-import { planListsHz } from "../src/features/tuned/decoder-protocols.ts"
+import {
+	fixedTargetsHz,
+	planListsHz,
+} from "../src/features/tuned/decoder-protocols.ts"
 import { SCANNER_BANDPLANS } from "./data.ts"
 
 /** The core's decoding window: output in the last minute reads "decoding". */
@@ -277,14 +280,20 @@ function bandHolds(
 /**
  * The core's decoderCoversHz over the band assessment: within MOCK_TUNED_REACH_HZ of a target, between the
  * lowest and highest target, or inside a range widened by the reach. Without an assessed band (before the first
- * source capabilities) the same rule runs over the configured targets. A decoder with neither covers `hz` only
+ * source capabilities) the same rule runs over the fixed configured targets (fixedTargetsHz: a frequency that only
+ * follows the tuner never counts). A decoder with neither covers `hz` only
  * when a built-in band plan range there lists one of its protocols (planListsHz over
  * MOCK_PLAN_RANGES, the protocol map the web's status fallback shares). Scanner probes never cover; malformed values never match.
  */
 export function mockCoversHz(
 	d: Pick<
 		DecoderInfo,
-		"type" | "owner" | "ephemeral" | "bandAssessment" | "targetFrequenciesHz"
+		| "type"
+		| "owner"
+		| "ephemeral"
+		| "bandAssessment"
+		| "targetFrequenciesHz"
+		| "placements"
 	>,
 	hz: number,
 ): boolean {
@@ -294,7 +303,7 @@ export function mockCoversHz(
 	const ranges = d.bandAssessment?.rangesHz ?? []
 	if (targets.length > 0 || ranges.length > 0)
 		return bandHolds(targets, ranges, hz)
-	const configured = (d.targetFrequenciesHz ?? []).filter(positive)
+	const configured = fixedTargetsHz(d)
 	if (configured.length > 0) return bandHolds(configured, [], hz)
 	return planListsHz(d.type, MOCK_PLAN_RANGES, hz)
 }
