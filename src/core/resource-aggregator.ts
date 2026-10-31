@@ -181,6 +181,9 @@ export class ResourceAggregator extends EventEmitter {
 			sourceId,
 			message: `Link capacity: payload ${advisory.payloadBytesPerSecond} B/s, sustained ${advisory.sustainedBytesPerSecond ?? "unknown"} B/s, shortfall ${advisory.shortfallPercent ?? "unknown"}%, upstream drops ${advisory.upstreamDropBytesPerSecond ?? "unknown"} B/s`,
 			timestamp: new Date().toISOString(),
+			...(advisory.lossReason === undefined
+				? {}
+				: { lossReason: advisory.lossReason }),
 		} satisfies ResourceAlert)
 	}
 

@@ -421,7 +421,7 @@ describe("activity fold keys", () => {
 		const p = row(0, ENTITY.pager)
 		const q = row(SIMULCAST_MS + 1, {
 			...ENTITY.pager,
-			frequencyHz: 466_075_000,
+			frequencyHz: 431_075_000,
 		})
 		expect(foldActivity([p, q])).toHaveLength(2)
 		// the same channel to 1 kHz
@@ -508,26 +508,26 @@ describe("activity fold keys", () => {
 			})
 		expect(SIMULCAST_MS).toBe(2000)
 		const a = page(0, 160_450_000)
-		const at = foldActivity([a, page(SIMULCAST_MS, 466_075_000)])
+		const at = foldActivity([a, page(SIMULCAST_MS, 431_075_000)])
 		expect(at).toHaveLength(1)
-		expect(at[0]?.channelsHz).toEqual([160_450_000, 466_075_000])
-		expect(at[0] && channelsText(at[0])).toBe("On 160.450 · 466.075 MHz")
+		expect(at[0]?.channelsHz).toEqual([160_450_000, 431_075_000])
+		expect(at[0] && channelsText(at[0])).toBe("On 160.450 · 431.075 MHz")
 		// one ms past the window: the other channel is its own stack again
-		const past = foldActivity([a, page(SIMULCAST_MS + 1, 466_075_000)])
+		const past = foldActivity([a, page(SIMULCAST_MS + 1, 431_075_000)])
 		expect(past).toHaveLength(2)
 		expect(past.every(s => s.channelsHz.length === 1)).toBe(true)
 		expect(past[0] && channelsText(past[0])).toBeNull()
 		// another text or another class never folds across channels
 		expect(
-			foldActivity([a, page(500, 466_075_000, "Other call")]),
+			foldActivity([a, page(500, 431_075_000, "Other call")]),
 		).toHaveLength(2)
-		const tone = row(500, { ...ENTITY.pager, frequencyHz: 466_075_000 })
+		const tone = row(500, { ...ENTITY.pager, frequencyHz: 431_075_000 })
 		expect(foldActivity([a, tone])).toHaveLength(2)
 		// two beacons on two channels, never within 2 s of each other: two stacks, as before
 		const beacons = [0, 20_000, 45_000, 65_000, 90_000, 110_000].map((t, i) =>
 			row(t, {
 				...ENTITY.pager,
-				frequencyHz: i % 2 === 0 ? 160_450_000 : 466_075_000,
+				frequencyHz: i % 2 === 0 ? 160_450_000 : 431_075_000,
 			}),
 		)
 		const two = foldActivity(beacons)
@@ -536,12 +536,12 @@ describe("activity fold keys", () => {
 	})
 
 	it("names a decode's own channel and lists the stack's other channels apart", () => {
-		const channels = [160_450_000, 466_075_000, 169_650_000]
-		expect(otherChannels(channels, 466_075_000)).toEqual([
+		const channels = [160_450_000, 431_075_000, 169_650_000]
+		expect(otherChannels(channels, 431_075_000)).toEqual([
 			160_450_000, 169_650_000,
 		])
 		// matched to the kHz, as the stack keys its channels
-		expect(otherChannels(channels, 466_075_200)).toEqual([
+		expect(otherChannels(channels, 431_075_200)).toEqual([
 			160_450_000, 169_650_000,
 		])
 		expect(otherChannels([160_450_000], 160_450_000)).toEqual([])
@@ -556,7 +556,7 @@ describe("activity fold keys", () => {
 
 	it("lets a simulcast association expire: a later copy on one channel alone is that channel's again", () => {
 		const A = 160_450_000
-		const B = 466_075_000
+		const B = 431_075_000
 		const page = (at: number, hz: number) =>
 			row(at, {
 				...ENTITY.pager,
@@ -620,7 +620,7 @@ describe("activity fold keys", () => {
 
 	it("keeps the simulcast look-ahead linear on a dense burst of one channel", () => {
 		const A = 160_450_000
-		const B = 466_075_000
+		const B = 431_075_000
 		const page = (at: number, hz: number) =>
 			row(at, {
 				...ENTITY.pager,
@@ -1175,7 +1175,7 @@ describe("activity incremental folding", () => {
 		}),
 	)
 
-	const PAGER_CHANNELS = [160_450_000, 466_075_000, 169_650_000] as const
+	const PAGER_CHANNELS = [160_450_000, 431_075_000, 169_650_000] as const
 
 	// Feature: activity-folding, Property 8: an incremental fold equals a full fold
 	// Validates: Requirements R1, R3, MAJOR 1 (multi-channel pages too, copies in alternating order)

@@ -54,6 +54,8 @@ export function reachableAudioUrl(
 
 /** The live stream as this page plays it: raw PCM (`httpUrl`) and the WAV fallback (`wavUrl`). */
 export interface AudioStreamSource {
+	/** The core route it plays: `/auto` (auto-listen-route) or the live `/stream`; absent counts as `/stream`. */
+	route?: "auto" | "stream"
 	httpUrl: string | null
 	wavUrl: string | null
 	format: PcmFormat
@@ -114,6 +116,7 @@ export function autoRouteSource(
 	const wavUrl = reachableAudioUrl(route.wavUrl, base)
 	if (!httpUrl && !wavUrl) return null
 	return {
+		route: "auto",
 		httpUrl,
 		wavUrl,
 		format: "s16le",

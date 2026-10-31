@@ -74,15 +74,15 @@ function feed(
 }
 
 const AT_155: Window = { centreHz: 155e6, rateHz: 2.4e6, epoch: 11 }
-const AT_466: Window = { centreHz: 466.078e6, rateHz: 1.024e6, epoch: 12 }
+const AT_PARK: Window = { centreHz: 431.0125e6, rateHz: 1.024e6, epoch: 12 }
 
 describe("label gate across a retune", () => {
 	it("drops every chip of the old window at once, without a fading one", () => {
 		let s = feed(EMPTY_LABEL_GATE, frame(AT_155, [154.2, 154.975]), 0, 1000)
 		expect(gatedSignals(s).filter(g => !g.leaving)).toHaveLength(2)
-		s = stepLabelGate(s, frame(AT_466, [465.8, 466.2]), 1100, ALL)
+		s = stepLabelGate(s, frame(AT_PARK, [430.8, 431.2]), 1100, ALL)
 		const hz = gatedSignals(s).map(g => g.hz)
-		expect(hz.every(h => h > 465e6 && h < 467e6)).toBe(true)
+		expect(hz.every(h => h > 430e6 && h < 432e6)).toBe(true)
 		expect(gatedSignals(s).some(g => g.leaving)).toBe(false)
 	})
 
@@ -105,27 +105,27 @@ describe("label gate across a retune", () => {
 		expect(before.find(g => g.hz === 154.975e6)?.leaving).toBe(true)
 		expect(before.find(g => g.hz === 154.2e6)?.leaving).toBe(false)
 		const old = new Set(before.map(g => g.id))
-		s = stepLabelGate(s, frame(AT_466, [466.2]), 2700, ALL)
+		s = stepLabelGate(s, frame(AT_PARK, [431.2]), 2700, ALL)
 		expect(gatedSignals(s).some(g => old.has(g.id))).toBe(false)
 	})
 
 	it("drops the old window's chips on an overlapping retune, even for a signal in both windows", () => {
-		const a: Window = { centreHz: 466.1e6, rateHz: 2.4e6, epoch: 5 }
-		const b: Window = { centreHz: 466.078e6, rateHz: 1.024e6, epoch: 6 }
-		let s = feed(EMPTY_LABEL_GATE, frame(a, [465.8, 466.2, 467]), 0, 1000)
+		const a: Window = { centreHz: 431.1e6, rateHz: 2.4e6, epoch: 5 }
+		const b: Window = { centreHz: 431.0125e6, rateHz: 1.024e6, epoch: 6 }
+		let s = feed(EMPTY_LABEL_GATE, frame(a, [430.8, 431.2, 432]), 0, 1000)
 		const old = new Set(gatedSignals(s).map(g => g.id))
-		s = stepLabelGate(s, frame(b, [465.8, 466.2]), 1100, ALL)
+		s = stepLabelGate(s, frame(b, [430.8, 431.2]), 1100, ALL)
 		const now = gatedSignals(s)
 		expect(now.some(g => old.has(g.id))).toBe(false)
 		expect(now.some(g => g.leaving)).toBe(false)
 	})
 
 	it("drops the old window's chips on an epoch-only change (same centre and rate)", () => {
-		let s = feed(EMPTY_LABEL_GATE, frame(AT_466, [465.8, 466.2]), 0, 1000)
+		let s = feed(EMPTY_LABEL_GATE, frame(AT_PARK, [430.8, 431.2]), 0, 1000)
 		const old = new Set(gatedSignals(s).map(g => g.id))
 		s = stepLabelGate(
 			s,
-			frame({ ...AT_466, epoch: AT_466.epoch + 1 }, [465.8, 466.2]),
+			frame({ ...AT_PARK, epoch: AT_PARK.epoch + 1 }, [430.8, 431.2]),
 			1100,
 			ALL,
 		)
@@ -133,7 +133,7 @@ describe("label gate across a retune", () => {
 	})
 
 	it("never follows a track outside the frame's span (a stale track on the payload)", () => {
-		const f = frame(AT_466, [466.2])
+		const f = frame(AT_PARK, [431.2])
 		const stale = frame(AT_155, [154.975]).tracks[0] as Track
 		const s = feed(
 			EMPTY_LABEL_GATE,
@@ -141,33 +141,38 @@ describe("label gate across a retune", () => {
 			0,
 			1000,
 		)
-		expect(gatedSignals(s).map(g => g.hz)).toEqual([466.2e6])
+		expect(gatedSignals(s).map(g => g.hz)).toEqual([431.2e6])
 	})
 
 	it("keeps ids unique across a reset, so a new chip never takes an old chip's key", () => {
 		const s = feed(EMPTY_LABEL_GATE, frame(AT_155, [154.2, 154.975]), 0, 1000)
 		const old = new Set(gatedSignals(s).map(g => g.id))
-		const r = feed(resetLabelGate(s), frame(AT_466, [465.8, 466.2]), 2000, 1000)
+		const r = feed(
+			resetLabelGate(s),
+			frame(AT_PARK, [430.8, 431.2]),
+			2000,
+			1000,
+		)
 		expect(gatedSignals(r).some(g => old.has(g.id))).toBe(false)
-		expect(r.axis).toBe(frameAxisKey(frame(AT_466, [])))
+		expect(r.axis).toBe(frameAxisKey(frame(AT_PARK, [])))
 	})
 
 	it("still fades a chip whose signal ends within one window", () => {
-		let s = feed(EMPTY_LABEL_GATE, frame(AT_466, [465.8, 466.2]), 0, 1000)
-		s = feed(s, frame(AT_466, [466.2]), 1100, 1600)
-		expect(gatedSignals(s).find(g => g.hz === 465.8e6)?.leaving).toBe(true)
+		let s = feed(EMPTY_LABEL_GATE, frame(AT_PARK, [430.8, 431.2]), 0, 1000)
+		s = feed(s, frame(AT_PARK, [431.2]), 1100, 1600)
+		expect(gatedSignals(s).find(g => g.hz === 430.8e6)?.leaving).toBe(true)
 	})
 })
 
 describe("fading chips", () => {
-	const view = { startHz: 465.67e6, endHz: 466.49e6 }
+	const view = { startHz: 430.6025e6, endHz: 431.4225e6 }
 	const W = 1000
 
 	it("places a leaving chip at its frequency in this view, not at its stored x", () => {
 		const last = new Map([[7, { x: 487, hz: 154.975e6, top: 40 }]])
-		const out = fadingChips([{ id: 7, hz: 466.2e6 }], last, view, W)
+		const out = fadingChips([{ id: 7, hz: 431.2e6 }], last, view, W)
 		expect(out).toHaveLength(1)
-		expect(out[0]?.x).toBeCloseTo(chipX(466.2e6, view, W) ?? -1, 6)
+		expect(out[0]?.x).toBeCloseTo(chipX(431.2e6, view, W) ?? -1, 6)
 	})
 
 	it("does not draw a leaving chip from another band", () => {

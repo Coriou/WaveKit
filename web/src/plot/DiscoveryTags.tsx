@@ -1,5 +1,5 @@
 // Scanner discovery tags on the plot's discovery row (docs/web/canvas/Spectrum.dc.html `discTags`): a third, quieter
-// tier under the saved-frequency tags; click tunes. The tags read `layer.scanner` discoveries (byId), which a debounced
+// tier under the saved-frequency tags; click opens what the tag is and how we know (docs/WEB-APP.md "Spectrum tags"). The tags read `layer.scanner` discoveries (byId), which a debounced
 // fetch fills for the visible span; they re-render when the discoveries, the active set, the view, the width or the
 // saved list change, and once a minute for the last-hour tier (never per spectrum frame).
 import "./discovery-tags.css"
@@ -13,20 +13,30 @@ import {
 	useRef,
 	useState,
 	type KeyboardEvent,
+	type RefObject,
 } from "react"
 
+import { useServices } from "../app/context.ts"
 import type { DataLayer } from "../data/index.ts"
 import { useStore } from "../data/index.ts"
 import type { ScannerStore } from "../data/scanner-store.ts"
 import { whatIsThis } from "../data/scanner-format.ts"
 import { useNow } from "../features/hooks.ts"
+import { listenTo } from "../features/scanner/drawer/actions.ts"
+import { openDiscovery } from "../features/scanner/ui-store.ts"
+import { shellStore } from "../shell/store.ts"
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
 import {
 	discoveryFetchSpan,
 	type DiscoveryTagFilter,
+	discoveryTuneHz,
 	discoveryRowLayout,
 	hasTaggable,
+	lastActivityEventId,
+	tagDetail,
 	tagPopoverRows,
+	tagState,
+	TAG_CLOCK_MS,
 	TriggerFocus,
 	type FetchedSpan,
 	type OutsideSide,
@@ -110,6 +120,9 @@ export function useDiscoveryFetch(
 	}, [scanner, up, startHz, endHz, epoch])
 }
 
+/** The open popover's own clock: "live" means heard in the last HEARD_LIVE_MS (30 s), so a minute tick is too slow. */
+const DETAIL_CLOCK_MS = 5_000
+
 /** Popovers and confirms of the discovery row: the plot's pointer, wheel and menu handlers leave them alone. */
 export const DISCOVERY_POP_CLASS = "wk-plot-disc-pop"
 
@@ -137,8 +150,8 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 	const byId = useStore(data.scanner, s => s.discoveries.byId)
 	const activeNow = useStore(data.scanner, s => s.activeNow)
 	const saved = useStore(data.savedFrequencies, s => s.items)
-	// the last-hour tier moves on slowly: a minute is fine
-	const now = useNow(true, 60_000)
+	// the holds and the last-hour tier move on slowly: one tick a minute (TAG_CLOCK_MS) is fine
+	const now = useNow(true, TAG_CLOCK_MS)
 	const savedHz = useMemo(() => saved.map(f => f.frequencyHz), [saved])
 	const row = useMemo(
 		() =>
@@ -202,6 +215,28 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 		close(false)
 		void controller.tuneTo(hz)
 	}
+	const services = useServices()
+	const actions: DetailActions = {
+		tune,
+		listen: d => {
+			close(false)
+			// the drawer's Listen, synchronous in the click (audio unlocks before it awaits the tune): the same
+			// frequency, the same "Could not tune" warning, and the core's audio stopped again if the receiver moves
+			void listenTo(services, d)
+		},
+		scanner: id => {
+			close(false)
+			openDiscovery(id)
+			shellStore.openDrawer("scanner")
+		},
+		activity: d => {
+			close(false)
+			// the core's last event for it opens directly; older cores: what was heard on its frequency
+			const id = lastActivityEventId(d)
+			if (id) services.activity.showEvent(id)
+			else services.activity.showFrequency(d.frequencyHz, d.bandwidthHz)
+		},
+	}
 	const shown =
 		open?.kind === "tag" ? placed.find(t => t.id === open.id) : undefined
 	const edge =
@@ -222,18 +257,21 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 							type="button"
 							className="wk-plot-disc"
 							data-tier={t.tier}
+							data-state={t.state}
 							data-heard={t.heard || undefined}
 							data-group={n > 1 || undefined}
 							style={{ left: t.x, maxWidth: t.width }}
 							aria-label={
-								n > 1 ? t.title : `Discovery: ${t.title}${likelySuffix(t.rep)}`
+								n > 1
+									? t.title
+									: `Discovery, ${STATE_WORD[t.state]}: ${t.title}${likelySuffix(t.rep)}`
 							}
 							aria-haspopup="dialog"
 							aria-expanded={shown?.id === t.id}
 							title={
 								n > 1
 									? `${t.title} · ${t.label}`
-									: `${t.title}${likelySuffix(t.rep)}`
+									: `${STATE_WORD[t.state]} · ${t.title}${likelySuffix(t.rep)}`
 							}
 							onClick={e => toggle({ kind: "tag", id: t.id }, e.currentTarget)}
 						>
@@ -270,7 +308,15 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 					</button>
 				)
 			})}
-			{shown && <TagPopover tag={shown} widthPx={widthPx} onTune={tune} />}
+			{shown && (
+				<TagPopover
+					tag={shown}
+					widthPx={widthPx}
+					activeNow={activeNow}
+					now={now}
+					actions={actions}
+				/>
+			)}
 			{edge?.at && (
 				<EdgeConfirm
 					side={edge.side}
@@ -290,58 +336,212 @@ function likelySuffix(d: Discovery): string {
 
 const POP_W = 300
 
+const STATE_WORD = {
+	proven: "Proven",
+	likely: "Likely",
+	heard: "Heard",
+} as const
+
+/** What a tag is, under every popover (R1): the in-app legend. */
+const LEGEND =
+	"A tag is a scanner discovery: Heard, Likely, or Proven once a decoder checked it. Burst-only signals stay lit between bursts once proven; an unidentified carrier stays grey."
+
+interface DetailActions {
+	tune: (hz: number) => void
+	listen: (d: Discovery) => void
+	scanner: (id: string) => void
+	/** Last call (the core's last Activity event for it), else Search Activity on its frequency. */
+	activity: (d: Discovery) => void
+}
+
 /**
- * A tag's "what is this" (req 1.1, 1.3), for one discovery or every member of a group in frequency order:
- * protocol or label, the muted hint, the next step, and a Tune action (nothing tunes on the tag's click).
+ * A tag's popover. One discovery: what it is and how we know (proof, evidence, first and last heard, airtime, calls)
+ * with Tune, Listen, Open in Scanner and its Activity. A group: every member in frequency order with its state, its
+ * "what is this" and a Tune action (req 1.1, 1.3). Nothing tunes on the tag's click.
  */
 function TagPopover({
 	tag,
 	widthPx,
-	onTune,
+	activeNow,
+	now,
+	actions,
 }: {
 	tag: PlacedDiscoveryTag
 	widthPx: number
-	onTune: (hz: number) => void
+	activeNow: ReadonlySet<string>
+	now: number
+	actions: DetailActions
 }) {
 	const left = Math.max(4, Math.min(widthPx - POP_W - 4, tag.x))
 	const first = useRef<HTMLButtonElement>(null)
 	useEffect(() => first.current?.focus({ preventScroll: true }), [tag.id])
-	const rows = tagPopoverRows(tag)
+	const single = tag.members.length === 1
 	return (
 		<div
 			className={`${DISCOVERY_POP_CLASS} wk-menu`}
 			role="dialog"
-			aria-label={
-				tag.members.length > 1 ? tag.title : `What is this: ${tag.title}`
-			}
+			aria-label={single ? `What is this: ${tag.title}` : tag.title}
 			style={{ left, width: POP_W }}
 		>
-			<div className="wk-plot-disc-pop-head">{tag.title}</div>
-			<ul className="wk-plot-disc-pop-list">
-				{rows.map((r, i) => (
-					<li key={r.id} className="wk-plot-disc-member">
-						<span className="wk-plot-disc-member-freq">{r.freq}</span>
-						<span className="wk-plot-disc-member-what">
-							<b>{r.name}</b>
-							{r.protocol && <span>{r.protocol}</span>}
-							{r.likely && (
-								<span className="wk-plot-disc-likely">{r.likely}</span>
-							)}
-							{r.next && <span className="wk-plot-disc-next">{r.next}</span>}
-						</span>
+			{single ? (
+				<TagDetailView
+					d={tag.rep}
+					activeNow={activeNow}
+					now={now}
+					actions={actions}
+					firstRef={first}
+				/>
+			) : (
+				<>
+					<div className="wk-plot-disc-pop-head">{tag.title}</div>
+					<ul className="wk-plot-disc-pop-list">
+						{tagPopoverRows(tag).map((r, i) => {
+							const d = tag.members[i]
+							return (
+								<li key={r.id} className="wk-plot-disc-member">
+									<span className="wk-plot-disc-member-freq">{r.freq}</span>
+									<span className="wk-plot-disc-member-what">
+										<b>{r.name}</b>
+										{d && (
+											<span
+												className="wk-plot-disc-state"
+												data-state={tagState(d)}
+											>
+												{STATE_WORD[tagState(d)]}
+											</span>
+										)}
+										{r.protocol && <span>{r.protocol}</span>}
+										{r.likely && (
+											<span className="wk-plot-disc-likely">{r.likely}</span>
+										)}
+										{r.next && (
+											<span className="wk-plot-disc-next">{r.next}</span>
+										)}
+									</span>
+									<button
+										ref={i === 0 ? first : undefined}
+										type="button"
+										className="wk-btn wk-plot-disc-tune"
+										data-size="sm"
+										aria-label={`Tune to ${r.freq} MHz`}
+										onClick={() => actions.tune(r.tuneHz)}
+									>
+										Tune
+									</button>
+								</li>
+							)
+						})}
+					</ul>
+				</>
+			)}
+			<p className="wk-plot-disc-legend">{LEGEND}</p>
+		</div>
+	)
+}
+
+function TagDetailView({
+	d,
+	activeNow,
+	now,
+	actions,
+	firstRef,
+}: {
+	d: Discovery
+	activeNow: ReadonlySet<string>
+	now: number
+	actions: DetailActions
+	firstRef: RefObject<HTMLButtonElement | null>
+}) {
+	// the row's minute clock places the tags; the popover's "live" and "ago" follow a 5 s one while it is open
+	const fresh = useNow(true, DETAIL_CLOCK_MS)
+	const v = tagDetail(d, activeNow, Math.max(now, fresh))
+	const what = whatIsThis(d)
+	const next = v.state === "proven" ? null : what.next
+	return (
+		<div className="wk-plot-disc-detail">
+			<div className="wk-plot-disc-detail-head">
+				<b>{v.name}</b>
+				<span className="wk-plot-disc-state" data-state={v.state}>
+					{v.stateText}
+				</span>
+			</div>
+			<div className="wk-plot-disc-detail-freq">
+				{v.freq} MHz{v.live ? " · live" : ""}
+			</div>
+			<p className="wk-plot-disc-how">{v.howWeKnow}</p>
+			{v.checkCalls && <p className="wk-plot-disc-how">{v.checkCalls}</p>}
+			{v.coreSummary && (
+				<p className="wk-plot-disc-likely">Core: {v.coreSummary}</p>
+			)}
+			{what.likely && v.state !== "proven" && (
+				<p className="wk-plot-disc-likely">{what.likely}</p>
+			)}
+			<dl className="wk-plot-disc-facts">
+				<dt>Evidence</dt>
+				<dd>{v.evidence}</dd>
+				<dt>First heard</dt>
+				<dd>{v.firstSeen}</dd>
+				<dt>Last heard</dt>
+				<dd>{v.lastSeen}</dd>
+				<dt>Airtime</dt>
+				<dd>{v.airtime}</dd>
+			</dl>
+			{v.noCalls && <p className="wk-plot-disc-next">{v.noCalls}</p>}
+			{v.checkNote && <p className="wk-plot-disc-likely">{v.checkNote}</p>}
+			{next && <p className="wk-plot-disc-next">{next}</p>}
+			<div className="wk-plot-disc-actions">
+				<button
+					ref={firstRef}
+					type="button"
+					className="wk-btn"
+					data-size="sm"
+					data-variant="primary"
+					aria-label={`Tune to ${v.freq} MHz`}
+					onClick={() => actions.tune(discoveryTuneHz(d))}
+				>
+					Tune
+				</button>
+				<button
+					type="button"
+					className="wk-btn"
+					data-size="sm"
+					aria-label={`Listen to ${v.freq} MHz`}
+					onClick={() => actions.listen(d)}
+				>
+					Listen
+				</button>
+				<button
+					type="button"
+					className="wk-btn"
+					data-size="sm"
+					onClick={() => actions.scanner(d.id)}
+				>
+					Open in Scanner
+				</button>
+				{v.lastEventId !== null ? (
+					<button
+						type="button"
+						className="wk-btn"
+						data-size="sm"
+						title="The last call heard here, in Activity"
+						onClick={() => actions.activity(d)}
+					>
+						Last call
+					</button>
+				) : (
+					(v.calls || (v.noCalls === null && v.state === "proven")) && (
 						<button
-							ref={i === 0 ? first : undefined}
 							type="button"
-							className="wk-btn wk-plot-disc-tune"
+							className="wk-btn"
 							data-size="sm"
-							aria-label={`Tune to ${r.freq} MHz`}
-							onClick={() => onTune(r.tuneHz)}
+							title="Search Activity on this frequency"
+							onClick={() => actions.activity(d)}
 						>
-							Tune
+							Search Activity
 						</button>
-					</li>
-				))}
-			</ul>
+					)
+				)}
+			</div>
 		</div>
 	)
 }

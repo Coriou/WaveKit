@@ -188,8 +188,37 @@ export class ListenController extends Store<ListenState> {
 		}
 	}
 
-	/** Stops playing here; stops the core's live audio when no other client listens. */
+	/**
+	 * User gesture, no playback: creates or resumes the audio context so a start() after an awaited tune may
+	 * sound. Call it synchronously in the click. A player that cannot start is reported by start() later.
+	 */
+	unlock(): void {
+		try {
+			this.player?.unlock(
+				this.liveAudio.get().status?.effectiveSampleRate ?? null,
+			)
+		} catch {
+			// start() unlocks again and shows the failure
+		}
+	}
+
+	/**
+	 * Undoes an unlock() whose Listen never started (its tune failed): the audio context is suspended again.
+	 * Does nothing while Listen is on here (it may have been started meanwhile).
+	 */
+	suspend(): void {
+		if (this.get().wanted) return
+		try {
+			this.player?.stop()
+		} catch {
+			// nothing was playing: the context stays as it is
+		}
+	}
+
+	/** Stops playing here; stops the core's live audio when a fresh status shows no other client listening. */
 	async stop(): Promise<void> {
+		const mine =
+			this.attachedKey !== null ? (this.source?.route ?? "stream") : null
 		this.endRecording()
 		this.clearTimer()
 		this.detach()
@@ -200,8 +229,21 @@ export class ListenController extends Store<ListenState> {
 			error: null,
 			latencyMs: null,
 		})
-		const status = this.liveAudio.get().status
-		if (status?.running && status.clientCount <= 1) {
+		// The stop is shared by every client: decide on a fresh status (a failed read leaves it running) and
+		// count /stream and /auto (the web default) listeners alike. This client may still be counted on the
+		// route it played (it just closed); every other listener keeps the audio on.
+		await this.liveAudio.load()
+		const { status, error } = this.liveAudio.get()
+		if (error !== null || !status?.running) return
+		const stream = status.clientCount
+		const auto = status.autoRoute?.clientCount ?? 0
+		const others =
+			mine === "auto"
+				? stream + Math.max(0, auto - 1)
+				: mine === "stream"
+					? auto + Math.max(0, stream - 1)
+					: stream + auto
+		if (others === 0) {
 			try {
 				await this.liveAudio.stop()
 			} catch (error) {

@@ -32,7 +32,8 @@ function status(over: Partial<LiveAudioStatus> = {}, offsetHz = 0) {
 function setup(initial: LiveAudioStatus, credentials = false) {
 	let current = initial
 	const liveAudio = {
-		get: () => ({ status: current }),
+		get: vi.fn(() => ({ status: current, error: null })),
+		load: vi.fn(() => Promise.resolve()),
 		start: vi.fn(() => Promise.resolve()),
 		stop: vi.fn(() => Promise.resolve()),
 	} as unknown as LiveAudioStore
@@ -60,7 +61,13 @@ function setup(initial: LiveAudioStatus, credentials = false) {
 		c.setSource(audioAttachKey(src), src)
 	}
 	feed(initial)
-	return { c, calls, feed, events: () => events as unknown as PcmPlayerEvents }
+	return {
+		c,
+		calls,
+		feed,
+		liveAudio,
+		events: () => events as unknown as PcmPlayerEvents,
+	}
 }
 
 describe("ListenController (Web Audio path)", () => {
@@ -73,6 +80,24 @@ describe("ListenController (Web Audio path)", () => {
 			"play http://localhost:3102/stream s16le 16000",
 		])
 		expect(c.get().phase).toBe("connecting")
+	})
+
+	it("unlock() only unlocks: no playback, no core start, state unchanged", () => {
+		const { c, calls } = setup(status({ running: false }))
+		const before = c.get()
+		c.unlock()
+		expect(calls).toEqual(["unlock 16000"])
+		expect(c.get()).toBe(before)
+	})
+
+	it("unlock() swallows a player that cannot start (start() reports it)", () => {
+		const { c } = setup(status())
+		const failing = c as unknown as { player: ListenPlayer }
+		failing.player.unlock = () => {
+			throw new Error("no audio")
+		}
+		expect(() => c.unlock()).not.toThrow()
+		expect(c.get().phase).toBe("off")
 	})
 
 	it("shows an error instead of connecting forever when the player cannot start", async () => {
@@ -135,6 +160,64 @@ describe("ListenController (Web Audio path)", () => {
 		expect(c.get()).toMatchObject({ wanted: false, phase: "off" })
 	})
 
+	it("never stops the core's audio while an /auto listener remains (fresh status)", async () => {
+		const { c, feed, liveAudio } = setup(status())
+		await c.start()
+		// the cached status still says one /stream client; the fresh read shows one /auto listener elsewhere
+		vi.mocked(liveAudio.load).mockImplementation(() => {
+			feed(
+				status({
+					clientCount: 0,
+					autoRoute: { clientCount: 1 },
+				} as Partial<LiveAudioStatus>),
+			)
+			return Promise.resolve()
+		})
+		await c.stop()
+		expect(liveAudio.load).toHaveBeenCalled()
+		expect(liveAudio.stop).not.toHaveBeenCalled()
+	})
+
+	it("an /auto listener here counts itself once: stops when the fresh status shows only it", async () => {
+		const { c, liveAudio } = setup(status())
+		c.setSource("auto", {
+			route: "auto",
+			httpUrl: "http://localhost:3102/auto",
+			wavUrl: null,
+			format: "s16le",
+			rate: 48_000,
+			credentials: false,
+		})
+		await c.start()
+		vi.mocked(liveAudio.get).mockReturnValue({
+			status: status({
+				clientCount: 0,
+				autoRoute: { clientCount: 1 },
+			} as Partial<LiveAudioStatus>),
+			error: null,
+		} as unknown as ReturnType<LiveAudioStore["get"]>)
+		await c.stop()
+		expect(liveAudio.stop).toHaveBeenCalledTimes(1)
+	})
+
+	it("never stops when the fresh status read fails", async () => {
+		const { c, liveAudio } = setup(status())
+		await c.start()
+		vi.mocked(liveAudio.get).mockReturnValue({
+			status: status(),
+			error: "offline",
+		} as unknown as ReturnType<LiveAudioStore["get"]>)
+		await c.stop()
+		expect(liveAudio.stop).not.toHaveBeenCalled()
+	})
+
+	it("stops the core's audio when the fresh status shows only this listener", async () => {
+		const { c, liveAudio } = setup(status())
+		await c.start()
+		await c.stop()
+		expect(liveAudio.stop).toHaveBeenCalledTimes(1)
+	})
+
 	it("asks for a gesture when the context stays suspended", async () => {
 		const { c, calls, events } = setup(status())
 		await c.start()
@@ -185,7 +268,8 @@ describe("ListenController recording", () => {
 			outputLatencyMs: () => 20,
 		}
 		const liveAudio = {
-			get: () => ({ status: status() }),
+			get: () => ({ status: status(), error: null }),
+			load: vi.fn(() => Promise.resolve()),
 			start: vi.fn(() => Promise.resolve()),
 			stop: vi.fn(() => Promise.resolve()),
 		} as unknown as LiveAudioStore

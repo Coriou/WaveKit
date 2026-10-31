@@ -1,7 +1,20 @@
 // Signal chips over the trace (band inspection UX req 1.1, extended to the live-signal layer): co-located
 // signals share one chip ("+n-1"), a leaving chip never lands on another, and the number of chips is
 // capped. Pure: no DOM, no stores.
+import type { Discovery, SpectrumFrameTrackScanner } from "@wavekit/api-types"
+
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
+import {
+	closestNear,
+	type DiscoveryIndex,
+	identifiedAt,
+	identifiesChip,
+	type NearPick,
+	tagName,
+	tagState,
+	tagTier,
+	unidentifiedLabel,
+} from "./discovery-tags.ts"
 import type { PlacedLabel, SignalInfo } from "./maths.ts"
 
 /** Two signals closer than this on screen share one chip. */
@@ -131,4 +144,104 @@ export function fadingChips<T extends Pick<PlacedLabel, "x" | "hz">>(
 		out.push({ ...last, hz: g.hz, x, id: g.id })
 	}
 	return out
+}
+
+/** The tolerance of a chip's discovery lookups: max(3 kHz, half the signal's width). */
+function chipTol(widthHz: number): number {
+	return Math.max(3000, Number.isFinite(widthHz) ? widthHz / 2 : 0)
+}
+
+const pickProvenLive: NearPick<ReadonlySet<string>, number> = (
+	d,
+	activeNow,
+	now,
+) =>
+	!d.operator?.lockout &&
+	tagState(d) === "proven" &&
+	tagTier(d, activeNow, now) === "active"
+
+/**
+ * The proven discovery on a signal whose tag is live (tagTier active: heard now or within PROVEN_LIVE_HOLD_MS),
+ * or null: its chip holds between bursts like the tag (label-gate.ts provenLive). `now` is the wall clock. The
+ * closest within max(3 kHz, half the width); Ignored ones never. Pass a DiscoveryIndex on the per-frame path.
+ */
+export function provenLiveAt(
+	items: Iterable<Discovery> | DiscoveryIndex,
+	hz: number,
+	widthHz: number,
+	activeNow: ReadonlySet<string>,
+	now: number,
+): Discovery | null {
+	return closestNear(
+		items,
+		hz,
+		chipTol(widthHz),
+		pickProvenLive,
+		activeNow,
+		now,
+	)
+}
+
+const pickWeak: NearPick<unknown, unknown> = d =>
+	!d.operator?.lockout && tagState(d) !== "proven"
+
+/**
+ * The discovery a chip says it is not proven yet (likely or only heard), or null: an unknown chip near one reads
+ * the tag's name ("Likely DMR", "Unidentified · 4FSK ~9 kHz") instead of the bare frequency.
+ */
+export function weakDiscoveryAt(
+	items: Iterable<Discovery> | DiscoveryIndex,
+	hz: number,
+	widthHz: number,
+): Discovery | null {
+	return closestNear(items, hz, chipTol(widthHz), pickWeak, null, null)
+}
+
+/**
+ * What a chip near a not-proven discovery says: the tag's own name (tagName: "Likely DMR", "DMR?", an operator
+ * label) and, only when nothing was guessed (heard), the quiet unidentified style. A decode anchor or a heard
+ * signal with no name of its own reads "Unidentified · …".
+ */
+export function weakChip(d: Discovery): {
+	label: string
+	state: "likely" | "unidentified"
+} {
+	if (tagState(d) === "likely") return { label: tagName(d), state: "likely" }
+	const name = tagName(d)
+	return {
+		label: name === "Heard" ? unidentifiedLabel(d) : name,
+		state: "unidentified",
+	}
+}
+
+/**
+ * What names a signal's chip: the discovery its frame track links to when that one identifies it (identifiesChip),
+ * else the closest identified one (identifiedAt), else the track's own "decoded" only when no linked discovery near
+ * the signal contradicts it (a weak or non-proving decoded, or an Ignored one, names nothing). A link to a discovery
+ * elsewhere (a stale link right after a retune) counts as no link (band inspection UX req 1.2).
+ */
+export function chipIdentity(
+	discoveries: ReadonlyMap<string, Discovery>,
+	scanner: SpectrumFrameTrackScanner | null,
+	hz: number,
+	widthHz: number,
+	/** The same discoveries by frequency (discoveryIndex), on the per-frame path. */
+	index: DiscoveryIndex | null = null,
+): { discovery: Discovery | null; trackDecoded: boolean } {
+	const linked = scanner ? discoveries.get(scanner.discoveryId) : undefined
+	const own =
+		linked && Math.abs(linked.frequencyHz - hz) <= Math.max(3000, widthHz / 2)
+			? linked
+			: undefined
+	const discovery =
+		own && identifiesChip(own)
+			? own
+			: identifiedAt(index ?? discoveries.values(), hz, widthHz)
+	return {
+		discovery,
+		trackDecoded:
+			discovery === null &&
+			scanner?.confidence === "decoded" &&
+			own === undefined,
+	}
 }

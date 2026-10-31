@@ -40,12 +40,77 @@ The app has three views, picked from the dock at the bottom: **Spectrum**, **Map
 - When found signals lie outside the visible span, a marker at that edge shows how many, with an
   arrow (its tooltip reads `3 signals outside view →`). Clicking it asks "Tune to … MHz?" for the
   nearest of them first; it never retunes on its own.
-- Click a tag to see what it is: the protocol (`DMR` once verified; before that `Likely DMR`,
-  `Maybe DMR` or `Heard`), a muted `likely <kind>` hint (for example `likely ISM device`) when nothing has been verified
-  yet, the next step from the decoders that cover its frequency (for example "Listen to check",
-  "Widen the capture so … fits" or "No decoder covers this frequency; run identify") and a
+- Click a tag to see what it is (see [Spectrum tags](#spectrum-tags)). A group lists each signal
+  with its state, the protocol (`DMR` once verified; before that `Likely DMR`, `Maybe DMR` or
+  `Heard`), a muted `likely <kind>` hint (for example `likely ISM device`) when nothing has been
+  verified yet, the next step from the decoders that cover its frequency (for example "Listen to
+  check", "Widen the capture so … fits" or "No decoder covers this frequency; run identify") and a
   **Tune** button. Clicking a tag never tunes by itself. The same `likely …` hint and next step
   appear beside unverified rows in the Scanner lists.
+
+#### Spectrum tags
+
+There are two kinds of label on the spectrum. The labels over the peaks follow what is on the air
+now (a proven one waits between bursts, see below). The tags in the row under the band ruler are the scanner's **discoveries**: frequencies it
+has heard and kept, with what it has learnt about each.
+
+A tag is in one of three states:
+
+- **Heard**: something transmits there and nothing has identified it. The tag stays grey and says
+  what was measured, for example `Unidentified · 4FSK ~9 kHz`.
+- **Likely**: the signal's shape suggests a protocol (`Likely DMR`, `Maybe FM voice`), but no
+  decoder has checked it.
+- **Proven**: a decoder checked it (`DMR · CC 1`), or an analog proof such as a CTCSS tone. The dot
+  is filled and the tag has an outline while it is live.
+
+A tag is bright while its discovery is live. A proven tag stays lit for 5 minutes after it was last
+heard, and any other tag for 90 seconds, so a signal that only sends short bursts (a DMR control
+channel, a pager) does not flash with every burst. A continuous carrier is on the air all the
+time, so its tag never goes away. If nothing identifies it, it stays quiet and grey.
+
+The labels over the peaks use the same evidence:
+
+- A label on a proven discovery has a filled dot and an outline, like its tag. While that tag is
+  lit, the label stays between bursts, so a DMR control channel shows one steady `DMR · CC 1`
+  instead of flashing. Once the tag dims, the label goes the next time the signal is quiet.
+- A label names a protocol only when its discovery is proven. A discovery marked decoded whose
+  evidence says weak (or whose proof does not prove it) is not proven, so its label reads
+  `Unidentified · …` instead of `DMR`.
+- An unnamed peak near a likely discovery reads as its tag does, for example `Likely DMR`. Near
+  a discovery that was only heard it says what was measured, for example
+  `Unidentified · 4FSK ~9 kHz` with its frequency, and has a grey ring for a dot. Any other
+  unnamed peak shows its frequency.
+- A held proven label moves to a new burst only when that burst is the same signal: its centre
+  within a quarter of the label's width (or the spectrum's resolution, if wider) and its width at
+  most 1.5 times the label's or the other way round. A narrower neighbour one channel away gets
+  its own label.
+- Any other label stays a few seconds after its signal goes quiet, as before.
+- Hover over a label that sits on a discovery to see how we know (the tag's first detail line).
+  Clicking a label tunes there. For the full detail, click the tag in the row below.
+
+Click a single tag for its detail:
+
+- **How we know**: for example `DMR decoded: checked control bursts, colour code 7`, or
+  `Not proven: heard on the air, not identified`. The core's own proof summary shows as a
+  `Core:` line only when it says something the line above does not.
+- **live** after the frequency means it was heard in the last 30 seconds. The tag itself stays
+  lit longer (see above).
+- **Evidence** (`Proven`, `Weak`, or `Not reported` by an older core), **First heard**, **Last
+  heard** and **Airtime**.
+- **Calls**: the scanner checks a channel by decoding it for a moment. When that check saw calls,
+  the detail names them, for example `Talkgroup 1, source 12 seen by the scanner's check` (at most
+  three of each, then `+n more`). Calls the scanner's check decoded are not Activity rows: Activity
+  lists what the decoders heard, so it may have nothing on that frequency yet, and the detail says
+  so. A proven digital voice channel with no call in it says `No calls heard yet — control
+channel only`. **Last call** shows only when the core names the discovery's last Activity event,
+  and opens it. Otherwise **Search Activity** opens Activity on that frequency.
+- **Tune** and **Listen** go to the discovery's measured frequency, as the Scanner drawer does.
+  **Listen** is the drawer's Listen: it tunes there, then starts live audio once the tune has
+  landed. If the tune fails, nothing plays and a `Could not tune: …` warning says why. If the
+  receiver is tuned elsewhere meanwhile, nothing plays here. The core's live audio is left
+  running, because other browsers may be listening to it. Turning Listen off stops the core's
+  live audio only when a fresh status shows no other listener on either stream.
+  **Open in Scanner** opens the discovery in the Scanner drawer.
 
 ### The tuned card
 
@@ -138,6 +203,10 @@ scanner tunes` (or `· for your tuning` with the switch on). It shows the gain t
   frequency; turning the switch on shows nothing until your next retune. When the scanner sees broadband
   blanking rise at a manual gain, the line `Front end may be overloaded at this gain (49.6 dB,
 7.5 % of frames blanked)` suggests a lower gain; it is a hint, not a measurement.
+- When samples are lost on the way from the receiver to WaveKit, a notice at the bottom says
+  `Receiver link dropping samples — lower the sample rate`. It shows only for loss on the receiver
+  link. Samples dropped inside WaveKit, or a link that has not yet shown it can carry the rate,
+  raise no notice.
 
 ### Activity folding
 
@@ -178,7 +247,7 @@ decoded joins the call that follows it on the same talkgroup and channel (or, wi
 gap, the call before it) instead of becoming a stack of its own. A capcode is one stack per channel,
 except that the same page (same capcode, kind and text) heard within 2 s of one of the stack's
 decodes on another channel is a simulcast copy and joins the stack: the row lists the channels it
-was heard on (`On 160.450 · 466.075 MHz`), and the detail shows the decode's own Frequency with the
+was heard on (`On 160.450 · 431.075 MHz`), and the detail shows the decode's own Frequency with the
 stack's other channels under Also heard on (simulcast). The copies may arrive in either order: a
 repeat whose first copy lands on the other channel joins the stack that already heard both channels,
 so a beacon repeated on two channels stays one stack however its copies interleave. A channel stays

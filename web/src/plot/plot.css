@@ -159,6 +159,19 @@
 		box-shadow: none;
 		border-color: rgba(var(--wk-line-rgb), 0.3);
 	}
+	/* Proven (discovery-tags.css): a filled dot, burst or not, and a steady accent outline, apart from a guess */
+	.wk-plot-sig[data-proven] > button {
+		box-shadow: inset 0 0 0 1px rgba(var(--wk-accent-rgb), 0.45);
+	}
+	.wk-plot-sig[data-proven] .wk-plot-sig-dot {
+		background: var(--wk-accent);
+		box-shadow: none;
+	}
+	/* Unidentified near a discovery: a quiet grey ring, never the accent (an only-heard tag) */
+	.wk-plot-sig[data-unidentified] .wk-plot-sig-dot {
+		background: transparent;
+		box-shadow: inset 0 0 0 1.5px var(--wk-text-4);
+	}
 
 	/* Zoom control: solid */
 	/* Frequency axis */

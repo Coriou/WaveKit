@@ -13,9 +13,13 @@ import {
 	discoveryTitle,
 	errorMessage,
 	isApiError,
+	type ReadableStore,
 } from "../../../data/index.ts"
 import { dismissAppToast, showAppToast } from "../../../shell/toast.ts"
 import { formatMHz } from "../../format.ts"
+import { listenAfterTune, tuneFailedText } from "../../listen/after-tune.ts"
+import { discoveryTuneHz } from "../../../plot/discovery-tags.ts"
+import type { TuningState } from "../../tuning.ts"
 import { skipPatch, unskipPatch } from "../../tuner/scan-hold.ts"
 import { defaultGroup } from "../../tuner/saved.ts"
 import { modeSpec, type Modulation } from "../../tuner/modes.ts"
@@ -82,34 +86,87 @@ const f3 = (hz: number) => formatMHz(hz)
 
 /**
  * Listen: the core retargets live audio when the discovery is in the current window; otherwise the
- * receiver tunes there first (which pauses a running sweep), then the core is asked again.
+ * receiver tunes there first (which pauses a running sweep), then the core is asked again. Call it
+ * synchronously from the click: audio unlocks in the gesture and plays only once the tune landed. The
+ * spectrum tag's Listen runs it too, so both go to the same frequency and show the same warnings.
  */
 export async function listenTo(
-	services: AppServices,
+	services: Pick<AppServices, "data" | "tuning" | "listen">,
 	d: Discovery,
 ): Promise<void> {
-	const { data, tuning, listen } = services
-	if (!listen.get().wanted) void listen.start()
+	const listening = await listenAfterTune(
+		Math.round(discoveryTuneHz(d)),
+		() => retarget(services, d),
+		services.listen,
+	)
+	if (listening) showToast(`Listening to ${f3(d.frequencyHz)}`)
+}
+
+/**
+ * Points live audio at the discovery, tuning the receiver there when it is out of the window. True once it landed.
+ * When the receiver moves away during the retarget it is false and the core's live audio is left running.
+ */
+async function retarget(
+	services: Pick<AppServices, "data" | "tuning">,
+	d: Discovery,
+): Promise<boolean> {
+	const { data, tuning } = services
 	try {
 		await data.scanner.listenDiscovery(d.id)
+		return true
 	} catch (error) {
 		if (!isApiError(error) || error.code !== "OUT_OF_WINDOW") {
 			showToast(`Could not listen: ${errorMessage(error)}`, { tone: "warn" })
-			return
-		}
-		await tuning.tune(d.frequencyHz + d.measuredOffsetHz)
-		const tuneError = tuning.get().error
-		if (tuneError) {
-			showToast(`Could not tune: ${tuneError}`, { tone: "warn" })
-			return
-		}
-		try {
-			await data.scanner.listenDiscovery(d.id)
-		} catch {
-			// tuned there: live audio follows the tuned frequency anyway
+			return false
 		}
 	}
-	showToast(`Listening to ${f3(d.frequencyHz)}`)
+	const hz = Math.round(discoveryTuneHz(d))
+	void tuning.tune(hz)
+	if (!(await tuneLanded(tuning, hz))) {
+		showToast(tuneFailedText(tuning.get().error), { tone: "warn" })
+		return false
+	}
+	// A tune started while the retarget request is out moves the receiver away: audio must not follow it.
+	let moved = false
+	const off = tuning.subscribe(st => {
+		if (st.targetHz !== null) moved = true
+	})
+	try {
+		await data.scanner.listenDiscovery(d.id)
+	} catch {
+		// tuned there: live audio follows the tuned frequency anyway
+	} finally {
+		off()
+	}
+	if (moved) {
+		// The core's live audio is left as it is: its stop is shared by every client (/stream and /auto), and
+		// this one cannot know nobody else listens; a demodulator running for nobody is the lesser harm.
+		showToast(tuneFailedText(null), { tone: "warn" })
+		return false
+	}
+	return true
+}
+
+/**
+ * Resolves once the tuning controller settles after `tune(hz)`: true when it landed without an error,
+ * false on an error or when a later target replaced `hz` (a tune queued behind one in flight waits for it).
+ */
+export function tuneLanded(
+	tuning: ReadableStore<TuningState>,
+	hz: number,
+): Promise<boolean> {
+	return new Promise(resolve => {
+		const settled = (s: TuningState): boolean => {
+			if (s.targetHz === null) resolve(s.error === null)
+			else if (s.targetHz !== hz) resolve(false)
+			else return false
+			return true
+		}
+		if (settled(tuning.get())) return
+		const off = tuning.subscribe(s => {
+			if (settled(s)) off()
+		})
+	})
 }
 
 /** The saved frequency at the discovery's frequency, if any. */

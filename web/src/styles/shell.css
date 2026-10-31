@@ -516,14 +516,17 @@
 		}
 	}
 
-	/* the app toast: bottom centre, above the dock (or the phone's bottom row) */
+	/* the app toast: bottom centre, above the dock (or the phone's bottom row). Its own text width
+	   (max-content), not the half width left of `left: 50%`, so a long line is not wrapped into a box
+	   wider than its lines, which read off-centre; 560 px holds about 70 characters at 14 px. */
 	.wk-shell-toast {
 		position: absolute;
 		left: 50%;
 		bottom: 80px;
 		translate: -50% 0;
 		z-index: 12;
-		max-width: calc(100% - 32px);
+		width: max-content;
+		max-width: min(560px, calc(100% - 32px));
 		height: auto;
 		min-height: var(--wk-h-touch);
 	}
@@ -537,6 +540,9 @@
 		min-width: 0;
 		padding: 8px 0;
 		line-height: 1.4;
+		/* a wrapped toast keeps even, centred lines */
+		text-align: center;
+		text-wrap: balance;
 	}
 
 	/* palette: a solid sheet over the Palette board's scrim */

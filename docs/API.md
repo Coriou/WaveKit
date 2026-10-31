@@ -611,6 +611,10 @@ Link-burst additions are optional and additive; older cores omit them:
   `dropping`), `branch-congestion` when every byte arrived and an internal fanout
   branch dropped them after an arrival gap (the link itself is not at fault).
   Absent when nothing was lost.
+- `ResourceAlert.lossReason` (`resources:alert` of type `link-capacity` only): the
+  advisory's `lossReason`, with the same values; absent when the advisory has none.
+  Clients treat only `source` as loss on the receiver link; without the field they
+  fall back to `severity` (`critical` is a `dropping` link).
 - `DecoderEfficiencySourceView.attribution` (`DropAttribution`) and `lateDrops`
   (`DecoderLateDropsView`): `condemningWindows`, `windows`, nullable ISO
   `cooldownUntil`, `sheddable`, and `held` (`nothing-sheddable`, `link-or-unknown`, or
@@ -3622,6 +3626,16 @@ Pass `nextCursor` as `cursor` for the next page; `null` ends the list.
 
 Current cores add `storeEpoch` and `storeRevision` to the page and `revision` to each
 item; see [Discovery revisions](#discovery-revisions).
+
+#### Discovery last activity
+
+`lastActivity` (optional, additive) names the latest Activity event attributed to a
+discovery: `eventId` (read it with [`GET /api/activity/:eventId`](#get-apiactivityeventid),
+which answers 404 once the event expired) and `producedAt` (ISO time). It is absent when no
+event is attributed and on cores that do not attribute Activity events to discoveries. The
+field is optional and not yet populated by the current core: clients must not expect it, and
+fall back to Activity filtered by the discovery's frequency. Talkgroups and sources in
+`metadata` can come from the scanner's own decode check, so they need not match any Activity event.
 
 #### Discovery revisions
 

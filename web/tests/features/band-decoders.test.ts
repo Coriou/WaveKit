@@ -48,7 +48,7 @@ const PAGER = decoder({
 	suspended: true,
 	bandAssessment: {
 		verdict: "out-of-band",
-		rangesHz: [{ minHz: 466_000_000, maxHz: 466_300_000 }],
+		rangesHz: [{ minHz: 431_000_000, maxHz: 431_300_000 }],
 	},
 })
 const PROBE = decoder({
@@ -72,8 +72,8 @@ describe("decoders on the tuned band", () => {
 		expect(onBand(ADSB, 1_090_150_000)).toBe(true)
 		expect(onBand(ADSB, 1_090_250_000)).toBe(false)
 		expect(onBand(ACARS, 131_600_000)).toBe(true)
-		expect(onBand(PAGER, 466_200_000)).toBe(true)
-		expect(onBand(PAGER, 466_600_000)).toBe(false)
+		expect(onBand(PAGER, 431_200_000)).toBe(true)
+		expect(onBand(PAGER, 431_600_000)).toBe(false)
 		expect(onBand(PROBE, 1_090_000_000)).toBe(false)
 	})
 
@@ -114,7 +114,7 @@ describe("decoders on the tuned band", () => {
 	})
 
 	it("reads statuses without verdicts (an older core) and offers no action", () => {
-		const rows = bandDecoders([PAGER], null, 466_100_000, NO_SCAN)
+		const rows = bandDecoders([PAGER], null, 431_100_000, NO_SCAN)
 		expect(rows).toEqual([
 			{
 				id: "pager",

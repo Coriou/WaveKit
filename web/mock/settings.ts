@@ -265,7 +265,7 @@ const DECODER_CONFIG: Readonly<Record<string, Record<string, unknown>>> = {
 	},
 	"multimon-ng": {
 		modes: ["POCSAG512", "POCSAG1200", "POCSAG2400", "FLEX"],
-		frequencies: [160_450_000, 466_025_000],
+		frequencies: [160_450_000, 431_025_000],
 	},
 	direwolf: { frequency: 144_800_000, callsign: "F4XYZ-10" },
 	"rtl433-433": { frequency: 433_920_000 },

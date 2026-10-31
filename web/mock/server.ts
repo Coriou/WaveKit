@@ -123,7 +123,7 @@ export interface MockServerOptions {
 	/** Seeds the band inspection UX discoveries (./band-fixtures.ts; WAVEKIT_MOCK_BAND_FIXTURES=1). */
 	bandFixtures?: boolean
 	/**
-	 * Retunes through the multi-band sequence of ./retune-sweep.ts, then parks at 466.078 MHz at
+	 * Retunes through the multi-band sequence of ./retune-sweep.ts, then parks at 431.0125 MHz at
 	 * 1.024 MS/s; frames follow the tuner's sample rate (WAVEKIT_MOCK_RETUNE_SWEEP=1).
 	 */
 	retuneSweep?: boolean
@@ -1598,6 +1598,14 @@ export async function buildMockServer(
 		...(options.bandFixtures ? { bandFixtures: true } : {}),
 		...(options.retuneSweep ? { retuneSweep: true } : {}),
 		...(options.overloadHint ? { overloadHint: true } : {}),
+		lastActivity: hz => {
+			for (let i = activity.length - 1; i >= 0; i--) {
+				const a = activity[i]
+				if (a?.kind === "decoder-reception" && a.frequencyHz === hz)
+					return { eventId: a.eventId, producedAt: a.producedAt }
+			}
+			return null
+		},
 		liveListen: offsetHz => {
 			live.config = { ...live.config, offsetHz, sourceId: MOCK_SOURCE_ID }
 			broadcast("live-audio", "live-audio:config", liveStatus().config)

@@ -518,7 +518,7 @@ export function toggleControls(
 	return expanded ? foldsId : undefined
 }
 
-/** "160.450 · 466.075 MHz": the channels a simulcast stack was heard on; null for one channel. */
+/** "160.450 · 431.075 MHz": the channels a simulcast stack was heard on; null for one channel. */
 export function channelsText(stack: ActivityStack | undefined): string | null {
 	if (!stack || stack.channelsHz.length < 2) return null
 	return `On ${stack.channelsHz.map(hz => formatMHz(hz)).join(" · ")} MHz`

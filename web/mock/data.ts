@@ -172,6 +172,10 @@ export const MOCK_SIGNALS: readonly MockSignal[] = [
 		name: "DMR · TG 2081",
 		sub: "Tier II · slot 1 · CC 1",
 	}),
+	// Synthesised tag cases (docs/WEB-APP.md "Spectrum tags"): a DMR control channel heard only in short
+	// bursts, proven by its colour code with no call yet, and a weak continuous 4FSK carrier nobody identified
+	sig(161.3125, 9e3, -66, "tdma", { on: 0.6, per: 14, ph: 3 }),
+	sig(161.7375, 9e3, -78, "steady"),
 	sig(161.425, 11e3, -76, "voice", {
 		on: 3,
 		per: 9,
@@ -224,9 +228,10 @@ export const MOCK_SIGNALS: readonly MockSignal[] = [
 	}),
 	sig(446.03125, 11e3, -71, "voice", { on: 4, per: 27, ph: 9 }),
 	sig(446.09375, 11e3, -77, "voice", { on: 2, per: 33, ph: 15 }),
-	// DMR on a frequency no decoder follows (Ben's 446.926, 2026-10-18): Identify names it, on its own while listening
-	sig(446.925, 9e3, -58, "tdma", { on: 5, per: 9, ph: 2 }),
-	sig(466.025, 12.5e3, -62, "burst", { on: 1.2, per: 10, ph: 3 }),
+	// DMR on a frequency no decoder follows (a synthetic channel): Identify names it, on its own while listening
+	sig(431.6125, 9e3, -58, "tdma", { on: 5, per: 9, ph: 2 }),
+	// a synthetic pager channel (the mock's `pager-431` block)
+	sig(431.025, 12.5e3, -62, "burst", { on: 1.2, per: 10, ph: 3 }),
 	// SRD 868
 	sig(868.1, 125e3, -80, "burst", { on: 0.2, per: 8, ph: 5 }),
 	sig(868.3, 50e3, -70, "burst", {
@@ -354,7 +359,7 @@ export const IDENTIFY_PLANS: Readonly<Record<number, IdentifyPlan>> = {
 		identity: { kind: "p25-nac", value: "293" },
 		metadata: { talkgroups: ["1201"], sources: ["4410022"] },
 	},
-	446925000: {
+	431612500: {
 		state: "identified",
 		class: "tdma-ms",
 		protocol: "dmr",
@@ -362,6 +367,20 @@ export const IDENTIFY_PLANS: Readonly<Record<number, IdentifyPlan>> = {
 			{ protocol: "dmr", decoder: "dsd-fme", mode: "auto", outcome: "decoded" },
 		],
 		identity: { kind: "dmr-cc", value: "0" },
+	},
+	161312500: {
+		state: "identified",
+		class: "tdma-ms",
+		protocol: "dmr",
+		trials: [
+			{ protocol: "dmr", decoder: "dsd-fme", mode: "auto", outcome: "decoded" },
+		],
+		identity: { kind: "dmr-cc", value: "7" },
+	},
+	161737500: {
+		state: "unidentified",
+		class: "fsk4-12k5",
+		trials: DIGITAL_NO_SYNC,
 	},
 	160450000: {
 		state: "identified",
@@ -438,7 +457,7 @@ export const IDENTIFY_PLANS: Readonly<Record<number, IdentifyPlan>> = {
 		identity: { kind: "ism-model", value: "Wireless-MBus" },
 		metadata: { ismModels: ["Wireless-MBus"] },
 	},
-	466025000: {
+	431025000: {
 		state: "candidate",
 		class: "fsk2-wide",
 		protocol: "flex",
@@ -587,7 +606,7 @@ export const DECODER_SEEDS: readonly DecoderSeed[] = [
 	{
 		id: "multimon-ng",
 		type: "multimon-ng",
-		targetsHz: [160450000, 466025000],
+		targetsHz: [160450000, 431025000],
 		input: "audio_pcm",
 		output: "text",
 		pattern: "pure_consumer",
@@ -1012,12 +1031,12 @@ export const BAND_SEEDS: readonly BandSeed[] = [
 		channels: pmrChannels,
 	},
 	{
-		id: "pg466",
-		name: "Pagers 466 (e*Message)",
+		id: "pg431",
+		name: "Pagers 431 (synthetic)",
 		group: "pagers",
 		parent: "lmu",
-		a: 466.025,
-		b: 466.23,
+		a: 431.025,
+		b: 431.23,
 		mode: "nfm",
 		step: 12500,
 		bw: 12500,
@@ -1826,8 +1845,8 @@ const LAND_MOBILE: ScannerProtocol[] = [
 
 /**
  * The core's built-in bandplans for region EU (src/core/scanner/bandplan/builtin.ts through
- * bandplansFor("EU"), same order and values), plus `pager-466`: the French 466 MHz paging block
- * of the canvas band plan (`pg466`), which the core has no built-in for.
+ * bandplansFor("EU"), same order and values), plus `pager-431`: a synthetic paging block
+ * of the canvas band plan (`pg431`), which the core has no built-in for.
  */
 export const SCANNER_BANDPLANS: readonly Bandplan[] = [
 	{
@@ -2076,17 +2095,17 @@ export const SCANNER_BANDPLANS: readonly Bandplan[] = [
 		],
 	},
 	{
-		id: "pager-466",
+		id: "pager-431",
 		region: "EU",
-		name: "Pagers 466 MHz (e*Message)",
+		name: "Pagers 431 MHz (synthetic)",
 		ranges: [
 			{
-				startHz: MHZ(466.025),
-				endHz: MHZ(466.23),
-				rasters: [{ spacingHz: 12_500, firstChannelHz: MHZ(466.025) }],
+				startHz: MHZ(431.025),
+				endHz: MHZ(431.23),
+				rasters: [{ spacingHz: 12_500, firstChannelHz: MHZ(431.025) }],
 				obwHz: [12_000],
 				protocols: ["pocsag", "flex"],
-				bandplanId: "pager-466",
+				bandplanId: "pager-431",
 			},
 		],
 	},
@@ -2114,10 +2133,14 @@ export interface DiscoverySeed {
 	observations: number
 	/** Also heard by the seeded marine sweep (MOCK_SWEEP_JOB_ID). */
 	swept?: boolean
+	/** A fixed id (a seed moved to another frequency keeps the id it had); default from its index and frequency. */
+	id?: string
 }
 
 /** The id of seeded discovery `index` (the scanner mock and the recordings mock share it). */
 export function seedDiscoveryId(index: number, hz: number): string {
+	const fixed = DISCOVERY_SEEDS[index]?.id
+	if (fixed !== undefined) return fixed
 	return `d_01JBRZSEED${String(index).padStart(2, "0")}${hz.toString(36).toUpperCase()}`
 }
 
@@ -2157,7 +2180,9 @@ export const DISCOVERY_SEEDS: readonly DiscoverySeed[] = [
 		observations: 960,
 	},
 	{
-		mhz: 466.025,
+		// moved to a synthetic channel: it keeps the id it was seeded with
+		id: "d_01JBRZSEED037PGJ6W",
+		mhz: 431.025,
 		protocol: "flex",
 		confidence: "candidate",
 		class: "fsk2-wide",
@@ -2402,6 +2427,27 @@ export const DISCOVERY_SEEDS: readonly DiscoverySeed[] = [
 		agoMin: 7,
 		firstDays: 10,
 		observations: 210,
+	},
+	// Synthesised tag cases (appended: earlier seeds keep their ids). A DMR control channel proven by its
+	// colour code, no talkgroup or source yet (no Activity rows); a continuous 4FSK carrier, weak, never identified.
+	{
+		mhz: 161.3125,
+		protocol: "dmr",
+		confidence: "decoded",
+		class: "tdma-ms",
+		identity: { kind: "dmr-cc", value: "7" },
+		agoMin: 1,
+		firstDays: 2,
+		observations: 640,
+	},
+	{
+		mhz: 161.7375,
+		protocol: "unknown",
+		confidence: "activity",
+		class: "fsk4-12k5",
+		agoMin: 1,
+		firstDays: 2,
+		observations: 96,
 	},
 ]
 

@@ -514,8 +514,8 @@ describe("Decoder pages", () => {
 		const rows = decoderRows(snapshot(), a)
 		const f = byId(rows, "dec.pocsag-1.frequenciesHz")
 		if (f.widget.kind !== "text") throw new Error("text")
-		expect(f.widget.parse("160.450, 466.075")).toEqual({
-			value: [160_450_000, 466_075_000],
+		expect(f.widget.parse("160.450, 431.075")).toEqual({
+			value: [160_450_000, 431_075_000],
 		})
 		expect("error" in f.widget.parse("abc")).toBe(true)
 		await f.write?.([160_450_000])
