@@ -121,6 +121,23 @@ describe("activity search", () => {
 })
 
 describe("activity rows", () => {
+	it("names an aircraft row from the live fleet: callsign for a bare address, airline and type below", () => {
+		const row = at("2026-10-17T08:00:00Z", {
+			protocol: "adsb",
+			category: "aircraft",
+			entityKey: "icao:0A0B31",
+			title: "0A0B31",
+		})
+		const v = rowView(row, { name: "ZZ0131", about: "WaveKit Air · A320 214" })
+		expect(v.title).toBe("ZZ0131")
+		expect(v.subtitle).toBe("ADSB · WaveKit Air · A320 214")
+		// a row already titled by its callsign keeps it; no fleet entry: as before
+		expect(
+			rowView({ ...row, title: "ZZ0132" }, { name: "N0WK01", about: "" }).title,
+		).toBe("ZZ0132")
+		expect(rowView(row).title).toBe("0A0B31")
+	})
+
 	it("shows a pager message in full and the protocol in the subtitle", () => {
 		const v = rowView(
 			at("2026-10-17T08:00:00Z", {

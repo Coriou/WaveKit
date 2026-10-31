@@ -10,6 +10,9 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   with seeded copies, and the decoder message rate by `n` (`load` in `buildMockServer()`).
   `WAVEKIT_MOCK_ADSB_RATE=<r>` sends `r` `aircraft:update` per aircraft per second, as a core on
   SBS output does (one per decoded message; `adsbRate`).
+- Aircraft details: AFR1234 (photo, route CDG → JFK, airline), HOP47MJ (route BES → ORY, no photo)
+  and FNY03 (military flag) carry the core's enrichment fields; the photos are drawn inline SVG,
+  so the mock never reaches Planespotters.
 - Spectrum limits: `GET /api/spectrum` serves `limits.bins.max` 2048, like the shipped config.
   `WAVEKIT_MOCK_SPECTRUM_BINS=<n>` (512–8192) raises the summary budget (`spectrumSummaryBins`), so
   Settings › FFT size offers 4096 and 8192 (`spectrumBins` in `buildMockServer()`).
@@ -121,6 +124,9 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   out (rtl_433 extras, APRS weather, an unknown `Generic-Remote` model). Entity keys follow the
   core's formats (`talkgroup:`, `capcode:`, `callsign:`, `sensor:<model>-<id>`, `reg:`, `node:`,
   `icao:`, `mmsi:`), and AFR1234 and F4ABC-9 sit where the Map's fleets put them.
+- Stored trails: `GET /api/activity/trails` keeps `categories` (comma-separated) like the core.
+  Besides the fleets' tracks, the first aircraft reports a position over VDL2 every 10 minutes of
+  its lap, rounded to 0.1° (`aviation-data`), for the Map's ACARS layer.
 - Activity floods (`activity-floods.ts`, `activityFloods` in `buildMockServer()`, on for `pnpm mock`,
   off with `WAVEKIT_MOCK_ACTIVITY_FLOODS=0`, off by default in tests): the repeats a live receiver
   makes, so Activity's folding can be seen. A synthetic aircraft (ICAO `ABC123`, callsign `WKT101`

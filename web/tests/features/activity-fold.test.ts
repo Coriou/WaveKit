@@ -116,6 +116,14 @@ const ENTITY: Record<
 		protocol: "meshtastic",
 		category: "mesh",
 	},
+	link: {
+		entityKey: "icao:0A0B01",
+		protocol: "vdl2",
+		category: "aviation-data",
+		frequencyHz: 136_975_000,
+		title: "0A0B01 · Link supervision",
+		fields: [{ key: "kind", label: "Kind", value: "Link" }],
+	},
 	other: {
 		entityKey: null,
 		protocol: "analog",

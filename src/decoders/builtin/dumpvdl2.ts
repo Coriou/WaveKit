@@ -34,7 +34,13 @@ import {
 	type NumericOptionWarn,
 } from "../option-values.js"
 import { DUMPVDL2_BOUNDS } from "../options/dumpvdl2.js"
-import type { ACARSMessage } from "./acarsdec.js"
+import {
+	acarsDirectionFromBlockId,
+	readLibacarsPayload,
+	type ACARSMessage,
+	type AcarsDirection,
+} from "./acarsdec.js"
+import { z } from "zod"
 import { safeErrorFields } from "../safe-error-fields.js"
 
 /**
@@ -81,7 +87,10 @@ export interface VDL2Message {
 	frequency: number
 	/** Ground station identifier */
 	station?: string | undefined
-	/** Aircraft ICAO address */
+	/**
+	 * Aircraft 24-bit ICAO address: the end of the frame whose address type is "Aircraft".
+	 * Absent when neither end is an aircraft or dumpvdl2 printed no address types.
+	 */
 	icao?: string | undefined
 	/** Destination address */
 	toaddr?: string | undefined
@@ -99,6 +108,128 @@ export interface VDL2Message {
 	noiseFloor?: number | undefined
 	/** Frame type */
 	frameType?: string | undefined
+	/** What the AVLC source address names (dumpvdl2 `src.type`); absent when not printed. */
+	srcType?: Vdl2AddressType | undefined
+	/** What the AVLC destination address names (dumpvdl2 `dst.type`). */
+	dstType?: Vdl2AddressType | undefined
+	/**
+	 * Downlink when the aircraft sent the frame, uplink when a ground station did. Derived from
+	 * the address types only; absent when neither end is an aircraft and a ground station.
+	 */
+	direction?: AcarsDirection | undefined
+	/** Ground station address of the frame, whichever end it is (absent when none). */
+	groundAddress?: string | undefined
+	/** Aircraft reported itself airborne (true) or on the ground (false); absent if unknown. */
+	airborne?: boolean | undefined
+	/** Fields read from an XID frame (link management), when the frame is one. */
+	xid?: Vdl2Xid | undefined
+}
+
+/**
+ * dumpvdl2 address types (`addrtype_descr` in avlc.c): "Aircraft", "Ground station",
+ * "All stations", "reserved". Matched without regard to case.
+ */
+export type Vdl2AddressType = "aircraft" | "ground" | "all" | "reserved"
+
+/** One coordinate pair from an XID parameter, in degrees. */
+export interface Vdl2Location {
+	lat: number
+	lon: number
+}
+
+/**
+ * The XID parameters WaveKit reads. dumpvdl2 rounds XID positions to 0.1 degree (12-bit
+ * fields, xid.c `loc_parse`) and aircraft altitude to 1000 ft, so they locate an aircraft
+ * approximately and never replace an ADS-B position.
+ */
+export interface Vdl2Xid {
+	/** XID type code (`GSIF`, `LCR`, `LE`, …). */
+	type?: string | undefined
+	/** dumpvdl2's description of the type. */
+	typeDescr?: string | undefined
+	/** `ac_location`: the aircraft's own approximate position and altitude in feet. */
+	acLocation?: (Vdl2Location & { altFt?: number | undefined }) | undefined
+	/** `gs_location`: the ground station position from a Ground Station Information Frame. */
+	gsLocation?: Vdl2Location | undefined
+	/** `dst_airport`: the destination airport the aircraft announced. */
+	dstAirport?: string | undefined
+	/** `airport_coverage`: airports the ground station serves. */
+	airportCoverage?: string | undefined
+	/** dumpvdl2 flagged the XID as malformed. */
+	err?: boolean | undefined
+}
+
+const xidParamSchema = z.object({ name: z.string(), value: z.unknown() })
+const xidSchema = z
+	.object({
+		err: z.boolean().optional(),
+		type: z.string().optional(),
+		type_descr: z.string().optional(),
+		pub_params: z.array(xidParamSchema).optional(),
+		vdl_params: z.array(xidParamSchema).optional(),
+	})
+	.passthrough()
+const locationSchema = z.object({
+	lat: z.number().finite().min(-90).max(90),
+	lon: z.number().finite().min(-180).max(180),
+})
+const locAltSchema = z.object({
+	loc: locationSchema,
+	alt: z.number().finite().optional(),
+})
+const asciiParamSchema = z.string().trim().min(1).max(64)
+
+/** Lower-cased dumpvdl2 address type, or undefined for anything it never prints. */
+export function readVdl2AddressType(raw: unknown): Vdl2AddressType | undefined {
+	if (typeof raw !== "string") return undefined
+	const type = raw.trim().toLowerCase()
+	if (type === "aircraft") return "aircraft"
+	if (type === "ground station" || type === "ground") return "ground"
+	if (type === "all stations" || type === "all") return "all"
+	if (type === "reserved") return "reserved"
+	return undefined
+}
+
+/** Reads the XID parameters WaveKit uses; unknown or malformed parameters are skipped. */
+export function readVdl2Xid(raw: unknown): Vdl2Xid | undefined {
+	const parsed = xidSchema.safeParse(raw)
+	if (!parsed.success) return undefined
+	const xid: Vdl2Xid = {}
+	if (parsed.data.type !== undefined) xid.type = parsed.data.type
+	if (parsed.data.type_descr !== undefined)
+		xid.typeDescr = parsed.data.type_descr
+	if (parsed.data.err === true) xid.err = true
+	const params = [
+		...(parsed.data.pub_params ?? []),
+		...(parsed.data.vdl_params ?? []),
+	]
+	for (const param of params) {
+		if (param.name === "ac_location" && xid.acLocation === undefined) {
+			const value = locAltSchema.safeParse(param.value)
+			if (!value.success) continue
+			const { lat, lon } = value.data.loc
+			if (lat === 0 && lon === 0) continue
+			xid.acLocation =
+				value.data.alt === undefined
+					? { lat, lon }
+					: { lat, lon, altFt: value.data.alt }
+		} else if (param.name === "gs_location" && xid.gsLocation === undefined) {
+			const value = locationSchema.safeParse(param.value)
+			if (!value.success) continue
+			if (value.data.lat === 0 && value.data.lon === 0) continue
+			xid.gsLocation = { lat: value.data.lat, lon: value.data.lon }
+		} else if (param.name === "dst_airport" && xid.dstAirport === undefined) {
+			const value = asciiParamSchema.safeParse(param.value)
+			if (value.success) xid.dstAirport = value.data
+		} else if (
+			param.name === "airport_coverage" &&
+			xid.airportCoverage === undefined
+		) {
+			const value = asciiParamSchema.safeParse(param.value)
+			if (value.success) xid.airportCoverage = value.data
+		}
+	}
+	return xid
 }
 
 /**
@@ -131,7 +262,8 @@ interface Dumpvdl2JsonOutput {
 			poll?: boolean
 			final?: boolean
 			acars?: AcarsEmbedded
-			xid?: XidData
+			/** XID frame; validated by `readVdl2Xid`. */
+			xid?: unknown
 		}
 	}
 }
@@ -152,15 +284,8 @@ interface AcarsEmbedded {
 	msg_num?: string
 	msg_num_seq?: string
 	msg_text?: string
-}
-
-/**
- * XID data in VDL2 messages.
- */
-interface XidData {
-	type?: string
-	type_descr?: string
-	params?: Record<string, unknown>
+	sublabel?: string
+	mfi?: string
 }
 
 /**
@@ -624,10 +749,43 @@ export function parseDumpvdl2Json(
 	if (avlc?.acars) {
 		msgType = "acars"
 	} else if (avlc?.xid) {
-		msgType = avlc.xid.type_descr ?? avlc.xid.type ?? "xid"
+		const head = readVdl2Xid(avlc.xid)
+		msgType = head?.typeDescr ?? head?.type ?? "xid"
 	} else if (frameType) {
 		msgType = frameType
 	}
+
+	const srcType = readVdl2AddressType(avlc?.src?.type)
+	const dstType = readVdl2AddressType(avlc?.dst?.type)
+	// The aircraft end of the frame is the 24-bit ICAO address; a ground station's address is
+	// never an aircraft (dumpvdl2 prints the type of both ends).
+	const icao =
+		srcType === "aircraft"
+			? srcAddr
+			: dstType === "aircraft"
+				? dstAddr
+				: undefined
+	// Both ends must be known: aircraft to ground station is a downlink; ground station to
+	// aircraft, or a ground station's broadcast to all stations (its GSIF), is an uplink.
+	let direction: AcarsDirection | undefined
+	if (srcType === "aircraft" && dstType === "ground") direction = "downlink"
+	else if (
+		srcType === "ground" &&
+		(dstType === "aircraft" || dstType === "all")
+	)
+		direction = "uplink"
+	const groundAddress =
+		srcType === "ground" ? srcAddr : dstType === "ground" ? dstAddr : undefined
+	const status = srcType === "aircraft" ? avlc?.src?.status : undefined
+	const statusText =
+		typeof status === "string" ? status.trim().toLowerCase() : ""
+	const airborne =
+		statusText === "airborne"
+			? true
+			: statusText === "on ground" || statusText === "on_ground"
+				? false
+				: undefined
+	const xid = avlc?.xid === undefined ? undefined : readVdl2Xid(avlc.xid)
 
 	// Parse embedded ACARS if present
 	let acars: ACARSMessage | undefined
@@ -648,13 +806,26 @@ export function parseDumpvdl2Json(
 			msgno: acarsData.msg_num,
 			text: acarsData.msg_text,
 		}
+		const acarsDirection =
+			direction ?? acarsDirectionFromBlockId(acarsData.blk_id)
+		if (acarsDirection !== undefined) acars.direction = acarsDirection
+		if (typeof acarsData.sublabel === "string" && acarsData.sublabel !== "")
+			acars.sublabel = acarsData.sublabel
+		if (typeof acarsData.mfi === "string" && acarsData.mfi !== "")
+			acars.mfi = acarsData.mfi
+		const lib = readLibacarsPayload(
+			acarsData as unknown as Record<string, unknown>,
+		)
+		if (lib.payload !== undefined) acars.libacars = lib.payload
+		if (lib.dropped) acars.libacarsDropped = true
+		if (acarsData.crc_ok === false) acars.crcOk = false
 	}
 
 	return {
 		timestamp,
 		frequency,
 		station: vdl2.station,
-		icao: srcAddr,
+		icao,
 		toaddr: dstAddr,
 		fromaddr: srcAddr,
 		msgType,
@@ -662,6 +833,12 @@ export function parseDumpvdl2Json(
 		level: vdl2.sig_level,
 		noiseFloor: vdl2.noise_level,
 		frameType,
+		...(srcType === undefined ? {} : { srcType }),
+		...(dstType === undefined ? {} : { dstType }),
+		...(direction === undefined ? {} : { direction }),
+		...(groundAddress === undefined ? {} : { groundAddress }),
+		...(airborne === undefined ? {} : { airborne }),
+		...(xid === undefined ? {} : { xid }),
 	}
 }
 

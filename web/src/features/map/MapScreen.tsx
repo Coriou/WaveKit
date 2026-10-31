@@ -10,6 +10,7 @@ import {
 	useCallback,
 	useEffect,
 	useLayoutEffect,
+	useMemo,
 	useRef,
 	useState,
 	useSyncExternalStore,
@@ -41,6 +42,9 @@ import {
 } from "./items.ts"
 import { altStep, type MapPalette } from "./palette.ts"
 import type { Rect } from "./placement.ts"
+import { rowView, timeText } from "../activity/rows.ts"
+import { useDatalinkStory, type DatalinkStory } from "./datalink.ts"
+import { latestReports, ReportedPositionsStore } from "./reported.ts"
 import { BASEMAP } from "./style.ts"
 import {
 	MapUi,
@@ -215,6 +219,11 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 	const gl = useRef<HTMLDivElement>(null)
 	const overlay = useRef<HTMLCanvasElement>(null)
 	const [ui] = useState(() => new MapUi())
+	// positions reported over ACARS and VDL2, kept apart from the ADS-B tracks (reported.ts)
+	const reported = useMemo(
+		() => new ReportedPositionsStore(data.api, data.events),
+		[data],
+	)
 	const [engine, setEngine] = useState<MapEngine | null>(null)
 	const [width, setWidth] = useState(() =>
 		typeof window === "undefined" ? 1440 : window.innerWidth,
@@ -237,11 +246,12 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 			f.mesh.attach(),
 			data.coverage.attach(),
 			data.trailHistory.attach(),
+			reported.attach(),
 		]
 		return () => {
 			for (const off of offs) off()
 		}
-	}, [data])
+	}, [data, reported])
 
 	// ---- the engine
 	useLayoutEffect(() => {
@@ -256,6 +266,7 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 			fleets: data.fleets,
 			coverage: data.coverage,
 			trailHistory: data.trailHistory,
+			reported,
 			station: data.station,
 			ui,
 			themeScope: el,
@@ -268,7 +279,7 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 			e.dispose()
 			setEngine(null)
 		}
-	}, [data, ui, tiles])
+	}, [data, ui, tiles, reported])
 
 	// "Open on map" from a message card: select and follow, now or when the request arrives
 	useEffect(() => {
@@ -403,6 +414,12 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 	useEffect(() => () => cancelAnimationFrame(hoverRaf.current), [])
 
 	const s = useStore(ui)
+	// follows live reports, and ticks each minute so reports older than an hour leave the count
+	const { trails: reportedTrails, now: reportedNow } = useStore(reported)
+	const reportedCount = useMemo(
+		() => latestReports(reportedTrails, reportedNow).length,
+		[reportedTrails, reportedNow],
+	)
 	const wide = width >= RAIL_WIDE_MIN
 	const railW = wide ? RAIL_W.wide : RAIL_W.narrow
 	const sideRight = insets.right + railW + 10
@@ -447,6 +464,7 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 					railW={railW}
 					sideRight={sideRight}
 					chipBottom={chipBottom}
+					reportedCount={reportedCount}
 					onActivity={it => {
 						activity.setSearch([activityTokenOf(it)], null)
 						shellStore.openDrawer("activity")
@@ -466,6 +484,7 @@ interface ChromeProps {
 	readonly railW: number
 	readonly sideRight: number
 	readonly chipBottom: number
+	readonly reportedCount: number
 	readonly onActivity: (it: MapItem) => void
 }
 
@@ -490,6 +509,7 @@ function MapChrome(props: ChromeProps) {
 				right={insets.right}
 				wide={wide}
 				width={railW}
+				reportedCount={props.reportedCount}
 			/>
 			{s.overlaysOpen && (
 				<OverlaysMenu
@@ -674,6 +694,8 @@ function Rail(props: {
 	right: number
 	wide: boolean
 	width: number
+	/** Aircraft with a position reported over ACARS or VDL2 in the last hour. */
+	reportedCount: number
 }) {
 	const { engine, ui, s, v, pal, wide } = props
 	const ovCount = OVERLAY_IDS.filter(o => s.overlays[o]).length
@@ -721,17 +743,20 @@ function Rail(props: {
 					type="button"
 					className="wk-row"
 					data-size="dense"
-					aria-disabled="true"
-					disabled
-					title="ACARS and VDL2 position reports are not on the map yet: this WaveKit does not serve them"
-					aria-label="ACARS, not available"
+					aria-pressed={s.reported}
+					onClick={() => ui.toggleReported()}
+					title="Positions aircraft reported over ACARS and VDL2 (ADS-C, link frames to 0.1°), drawn apart from their ADS-B tracks"
+					aria-label={`ACARS, ${props.reportedCount}${s.reported ? ", shown" : ", hidden"}`}
 					style={{ justifyContent: just }}
 				>
-					<Svg paths={LAYER_ICONS.acars} stroke="var(--wk-text-5)" />
+					<Svg
+						paths={LAYER_ICONS.acars}
+						stroke={s.reported ? pal.data.acars : "var(--wk-text-5)"}
+					/>
 					{wide && (
 						<>
 							<span className="wkm-grow">ACARS</span>
-							<span className="wkm-cnt">—</span>
+							<span className="wkm-cnt">{props.reportedCount}</span>
 						</>
 					)}
 				</button>
@@ -932,6 +957,9 @@ function Selection(props: {
 		"map-selected",
 	)
 	const record = useActivityRecord(latest ? latest.eventId : null)
+	const story = useDatalinkStory(
+		it?.source.kind === "aircraft" ? it.source.value.icao : null,
+	)
 	if (!it) return null
 	const info = selectionInfo(it, engine.stationPoint(), now)
 	const icon = LAYER_ICONS[it.layer]
@@ -947,6 +975,9 @@ function Selection(props: {
 				maxHeight: `calc(100% - ${props.top + props.bottomGap}px)`,
 			}}
 		>
+			{info.aircraft?.photo && (
+				<AircraftPhoto key={info.aircraft.photo.src} {...info.aircraft.photo} />
+			)}
 			<div className="wkm-sel-head">
 				<span className="wk-tile" style={{ color: itemColour(it, props.pal) }}>
 					<Svg paths={icon} size={18} />
@@ -965,7 +996,15 @@ function Selection(props: {
 					<Svg paths={CLOSE} />
 				</button>
 			</div>
+			{info.aircraft?.military && (
+				<div className="wkm-tags">
+					<span className="wk-tag" data-size="md" data-variant="amber">
+						Military
+					</span>
+				</div>
+			)}
 			{info.note && <p className="wkm-note">{info.note}</p>}
+			{info.aircraft?.route && <PlannedRoute {...info.aircraft.route} />}
 			<div className="wkm-fields">
 				{info.fields.map(([k, val]) => (
 					<div key={k}>
@@ -974,6 +1013,22 @@ function Selection(props: {
 					</div>
 				))}
 			</div>
+			{info.aircraft && info.aircraft.ident.length > 0 && (
+				<section className="wkm-ident" aria-label="Aircraft">
+					<h3 className="wk-label">Aircraft</h3>
+					<dl>
+						{info.aircraft.ident.map(([k, val]) => (
+							<div key={k}>
+								<dt>{k}</dt>
+								<dd className="wkm-ellipsis">{val}</dd>
+							</div>
+						))}
+					</dl>
+				</section>
+			)}
+			{story && (story.messages.length > 0 || story.linkCount > 0) && (
+				<Datalink story={story} />
+			)}
 			<span className="wkm-seen">{info.seen}</span>
 			<div className="wkm-actions">
 				<button
@@ -1007,6 +1062,111 @@ function Selection(props: {
 				</section>
 			)}
 		</aside>
+	)
+}
+
+/** The airframe's photo; the credit links back to the photo page, as Planespotters' terms require. */
+function AircraftPhoto(props: {
+	src: string
+	credit: string | null
+	link: string | null
+}) {
+	const [state, setState] = useState<"loading" | "ok" | "failed">("loading")
+	if (state === "failed") return null
+	return (
+		<figure className="wkm-photo" data-state={state}>
+			<img
+				src={props.src}
+				alt=""
+				loading="lazy"
+				decoding="async"
+				referrerPolicy="no-referrer"
+				onLoad={() => setState("ok")}
+				onError={() => setState("failed")}
+			/>
+			{props.credit &&
+				(props.link ? (
+					<a href={props.link} target="_blank" rel="noopener noreferrer">
+						{props.credit}
+					</a>
+				) : (
+					<figcaption>{props.credit}</figcaption>
+				))}
+		</figure>
+	)
+}
+
+/** The callsign's planned route (crowd-sourced, so labelled as planned). */
+function PlannedRoute(props: {
+	from: string
+	fromName: string
+	to: string
+	toName: string
+}) {
+	return (
+		<div
+			className="wkm-route"
+			aria-label={`Planned route from ${props.fromName} to ${props.toName}`}
+		>
+			<div className="wkm-route-ends">
+				<span>
+					<b className="wk-h3">{props.from}</b>
+					<span className="wkm-dim wkm-ellipsis">{props.fromName}</span>
+				</span>
+				<svg width="44" height="12" viewBox="0 0 44 12" aria-hidden="true">
+					<path d="M1 6h40M36 2l5 4-5 4" />
+				</svg>
+				<span data-end="">
+					<b className="wk-h3">{props.to}</b>
+					<span className="wkm-dim wkm-ellipsis">{props.toName}</span>
+				</span>
+			</div>
+			<span className="wkm-dim">
+				Planned route · from the callsign, may differ
+			</span>
+		</div>
+	)
+}
+
+/** What the selected aircraft said over ACARS and VDL2 (datalink.ts), newest first. */
+function Datalink({
+	story,
+}: {
+	story: DatalinkStory & { linkedBy: string | null }
+}) {
+	const more = story.messageCount - story.messages.length
+	return (
+		<section className="wkm-story" aria-label="Datalink">
+			<h3 className="wk-label">Datalink</h3>
+			{story.messages.length > 0 && (
+				<ol>
+					{story.messages.map(m => {
+						const v = rowView(m)
+						return (
+							<li key={m.eventId}>
+								<span className="wkm-dim">{timeText(m.producedAt)}</span>
+								<b className="wkm-ellipsis">{v.title}</b>
+								<span />
+								<span className="wkm-dim wkm-ellipsis">{v.subtitle}</span>
+							</li>
+						)
+					})}
+				</ol>
+			)}
+			{(more > 0 || story.linkCount > 0) && (
+				<span className="wkm-dim">
+					{[
+						more > 0 ? `${more} more in Activity` : null,
+						story.linkCount > 0
+							? `${story.linkCount} link frame${story.linkCount === 1 ? "" : "s"} folded`
+							: null,
+					]
+						.filter(Boolean)
+						.join(" · ")}
+				</span>
+			)}
+			{story.linkedBy && <span className="wkm-dim">{story.linkedBy}</span>}
+		</section>
 	)
 }
 

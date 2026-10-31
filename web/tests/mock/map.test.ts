@@ -34,6 +34,88 @@ describe("mock map routes", () => {
 	})
 	const get = (url: string) => server.app.inject({ method: "GET", url })
 
+	it("answers aircraft identity like the core, with fictional conflict data", async () => {
+		const afr = (await get("/api/aircraft-identity/icao/3944ef")).json<{
+			icao: string | null
+			resolvedBy: string | null
+			links: { evidence: string; source: string; expiresAt: string }[]
+			entityKeys: string[]
+		}>()
+		expect(afr).toMatchObject({ icao: "3944EF", resolvedBy: "self" })
+		expect(afr.entityKeys).toEqual(["icao:3944EF", "reg:F-HBNA"])
+		expect(afr.links.map(l => l.evidence).sort()).toEqual([
+			"database",
+			"observed",
+		])
+		// a registration heard with two addresses resolves to nothing and belongs to neither
+		const reg = (await get("/api/aircraft-identity/reg/.n0wk01")).json<{
+			icao: string | null
+			conflict: boolean
+			entityKeys: string[]
+		}>()
+		expect(reg).toMatchObject({
+			icao: null,
+			conflict: true,
+			entityKeys: ["reg:N0WK01"],
+		})
+		const own = (await get("/api/aircraft-identity/icao/0A0B01")).json<{
+			entityKeys: string[]
+		}>()
+		expect(own.entityKeys).toEqual(["icao:0A0B01"])
+		const callsign = (
+			await get("/api/aircraft-identity/callsign/AFR1234")
+		).json<{
+			icao: string | null
+		}>()
+		expect(callsign.icao).toBeNull()
+		const bad = await get("/api/aircraft-identity/icao/XYZ")
+		expect(bad.statusCode).toBe(400)
+		expect(bad.json()).toEqual({ error: "Not a valid identifier of that kind" })
+		expect((await get("/api/aircraft-identity/tail/N0WK01")).statusCode).toBe(
+			400,
+		)
+	})
+
+	it("keeps online lookups off by default and takes { online } and nothing else", async () => {
+		expect((await get("/api/aircraft/info")).json()).toMatchObject({
+			online: false,
+			onlineFrom: "config",
+		})
+		const put = (payload: Record<string, unknown>) =>
+			server.app.inject({ method: "PUT", url: "/api/aircraft/info", payload })
+		expect((await put({ online: true, extra: 1 })).statusCode).toBe(400)
+		expect((await put({ online: "yes" })).statusCode).toBe(400)
+		expect((await put({})).statusCode).toBe(400)
+		const ok = await put({ online: true })
+		expect(ok.statusCode).toBe(200)
+		expect(ok.json()).toMatchObject({ online: true, onlineFrom: "ui" })
+		await put({ online: false })
+	})
+
+	it("sends airframe photos only while online lookups are on", async () => {
+		const photos = async () =>
+			(await get("/api/aircraft"))
+				.json<{
+					aircraft: Array<{ identification?: Record<string, unknown> }>
+				}>()
+				.aircraft.filter(
+					a =>
+						a.identification?.["photo"] !== undefined ||
+						a.identification?.["imageUrl"] !== undefined,
+				).length
+		const put = (online: boolean) =>
+			server.app.inject({
+				method: "PUT",
+				url: "/api/aircraft/info",
+				payload: { online },
+			})
+		expect(await photos()).toBe(0)
+		await put(true)
+		expect(await photos()).toBeGreaterThan(0)
+		await put(false)
+		expect(await photos()).toBe(0)
+	})
+
 	it("lists the board's aircraft in the core's shape, with a track history", async () => {
 		const body = (await get("/api/aircraft")).json<{
 			aircraft: unknown[]

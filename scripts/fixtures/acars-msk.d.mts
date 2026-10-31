@@ -7,6 +7,10 @@ export interface AcarsBlock {
 	flight?: string
 	text?: string
 }
+/** Fictional blocks for `--message`: the default H1 downlink, a `_d` link test, an uplink. */
+export const ACARS_PRESETS: Readonly<
+	Record<"h1" | "link-test" | "uplink", AcarsBlock>
+>
 export function oddParity(c: number): number
 export function acarsCrc(bytes: readonly number[]): number
 export function acarsBytes(options?: AcarsBlock): number[]

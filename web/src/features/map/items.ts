@@ -11,6 +11,7 @@ import type {
 	Vessel,
 } from "../../data/index.ts"
 import { withHistory } from "../../data/index.ts"
+import { aircraftAbout, aircraftName } from "../aircraft.ts"
 import { token, type SearchToken } from "../activity/search.ts"
 import {
 	altitudeText,
@@ -125,7 +126,7 @@ function aircraftItem(e: FleetEntry<Aircraft>): MapItem | null {
 		speedKn: speed,
 		altFt: alt,
 		moving: course !== null && speed !== null && speed > 0,
-		name: a.callsign?.trim() || a.icao,
+		name: aircraftName(a),
 		trail: e.trail,
 		trailFromCore: e.trailFromCore,
 		source: { kind: "aircraft", value: a },
@@ -538,6 +539,101 @@ export interface SelectionInfo {
 	readonly fields: readonly (readonly [string, string])[]
 	/** Source decoder, freshness and the position. */
 	readonly seen: string
+	/** An aircraft's details from the core's enrichment (photo, route, identity), null for other items. */
+	readonly aircraft?: AircraftDetails | null
+}
+
+/** docs/ADSB.md "Aircraft Enrichment": everything optional, shown only when known. */
+export interface AircraftDetails {
+	/** Photo with the credit and link back its source requires. */
+	readonly photo: {
+		readonly src: string
+		readonly credit: string | null
+		readonly link: string | null
+	} | null
+	readonly military: boolean
+	/** Planned route of the callsign; null when unknown or the track disagrees. */
+	readonly route: {
+		readonly from: string
+		readonly fromName: string
+		readonly to: string
+		readonly toName: string
+	} | null
+	/** Registration, type, operator, country, address, year. */
+	readonly ident: readonly (readonly [string, string])[]
+}
+
+const PHOTO_SOURCE: Readonly<Record<string, string>> = {
+	planespotters: "Planespotters",
+	"airport-data": "airport-data.com",
+	hexdb: "hexdb.io",
+}
+
+const httpsOnly = (url: string | undefined): string | null =>
+	url && /^https:\/\//.test(url) ? url : null
+/** A photo the page may load: https, or an inline image (the mock's drawn stand-ins). */
+const imageUrl = (url: string | undefined): string | null =>
+	httpsOnly(url) ?? (url && /^data:image\//.test(url) ? url : null)
+
+function airportCode(a: { iata?: string | undefined; icao: string }): string {
+	return a.iata ?? a.icao
+}
+
+/**
+ * The route belongs to the callsign and comes from a crowd-sourced database: the core marks it
+ * `plausible: false` when the track disagrees (a stale or wrong route) and it is hidden then.
+ */
+export function aircraftDetails(a: Aircraft): AircraftDetails {
+	const id = a.identification
+	const photoSrc =
+		imageUrl(id?.photo?.largeUrl) ?? imageUrl(id?.photo?.thumbnailUrl)
+	const photo =
+		id?.photo && photoSrc
+			? {
+					src: photoSrc,
+					credit:
+						[
+							id.photo.photographer ? `© ${id.photo.photographer}` : null,
+							id.photo.source
+								? (PHOTO_SOURCE[id.photo.source] ?? id.photo.source)
+								: null,
+						]
+							.filter(Boolean)
+							.join(" · ") || null,
+					link: httpsOnly(id.photo.link),
+				}
+			: null
+	const r = id?.route
+	const route =
+		r &&
+		r.callsign.toUpperCase() === (a.callsign ?? "").trim().toUpperCase() &&
+		r.plausible !== false
+			? {
+					from: airportCode(r.origin),
+					fromName: r.origin.city ?? r.origin.name,
+					to: airportCode(r.destination),
+					toName: r.destination.city ?? r.destination.name,
+				}
+			: null
+	// "A320 214" already says A320; "Dassault Rafale M" needs RFAL beside it
+	const code = id?.typeCode
+	const desc = id?.typeDescription
+	const type =
+		code && desc && !desc.toUpperCase().startsWith(code.toUpperCase())
+			? `${code} · ${desc}`
+			: (desc ?? code)
+	const ident: (readonly [string, string])[] = []
+	const add = (k: string, v: string | null | undefined) => {
+		if (v) ident.push([k, v])
+	}
+	add("Registration", id?.registration)
+	add("Type", type)
+	add("Manufacturer", id?.manufacturer)
+	add("Operator", id?.operator)
+	add("Country", id?.country)
+	add("ICAO address", a.icao)
+	add("Built", id?.year ? String(id.year) : null)
+	return { photo, military: id?.flags?.military === true, route, ident }
 }
 
 const feet = (ft: number) => altitudeText(ft)
@@ -559,16 +655,14 @@ export function selectionInfo(
 			const a = s.value
 			const vs = a.altitude?.baroRate ?? a.altitude?.geomRate
 			const id = a.identification
+			const details = aircraftDetails(a)
 			return {
 				title: it.name,
-				sub: [
-					id?.typeDescription ?? id?.typeCode,
-					`ICAO ${a.icao}`,
-					id?.registration,
-					id?.operator,
-				]
-					.filter(Boolean)
-					.join(" · "),
+				sub:
+					// who flies it and what it is; the full identity is in the details below
+					aircraftAbout(a) ||
+					[`ICAO ${a.icao}`, id?.registration].filter(Boolean).join(" · "),
+				aircraft: details,
 				note:
 					a.emergency && a.emergency !== "none"
 						? `Emergency: ${a.emergency}`

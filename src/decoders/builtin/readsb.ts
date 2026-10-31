@@ -932,6 +932,26 @@ export function parseRawAircraft(
 	if (typeof json["t"] === "string") result.t = json["t"]
 	if (typeof json["desc"] === "string") result.desc = json["desc"]
 
+	// SBS and Beast output arrive as AircraftData (parseSbsLine, parseBeastMessage), which names
+	// the same values differently: without this, an SBS core (the default) lost callsign,
+	// altitude, ground speed and vertical rate, and kept only track, squawk and position.
+	if (result.flight === undefined && typeof json["callsign"] === "string") {
+		const trimmed = json["callsign"].trim()
+		if (trimmed) result.flight = trimmed
+	}
+	if (result.alt_baro === undefined) {
+		if (json["onGround"] === true) result.alt_baro = "ground"
+		else if (typeof json["altitude"] === "number")
+			result.alt_baro = json["altitude"]
+	}
+	if (result.gs === undefined && typeof json["groundSpeed"] === "number")
+		result.gs = json["groundSpeed"]
+	if (
+		result.baro_rate === undefined &&
+		typeof json["verticalRate"] === "number"
+	)
+		result.baro_rate = json["verticalRate"]
+
 	// Signal quality
 	if (typeof json["rssi"] === "number") result.rssi = json["rssi"]
 	if (typeof json["seen"] === "number") result.seen = json["seen"]

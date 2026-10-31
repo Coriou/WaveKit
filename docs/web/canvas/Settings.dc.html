@@ -1130,6 +1130,7 @@ const R = [
 	S('map.online', 'map', 'Beyond the offline map', { kind: 'seg', opts: [['online', 'Online tiles'], ['none', 'Blank']], def: 'online', sub: 'Online tiles come from OpenFreeMap, which then sees the area you look at', alias: 'tiles openfreemap offline without' }), // polish 2026-10-11
 	S('map.trails', 'map', 'Trail length', { kind: 'sel', opts: [[5, '5 min'], [15, '15 min'], [60, '1 hour']], def: 15, init: 60, alias: 'history track' }),
 	S('map.coverage', 'map', 'Record coverage', { kind: 'sw', def: true, sub: 'Furthest reception per bearing, for ADS-B and AIS', alias: 'range polar' }),
+	S('map.aircraftOnline', 'map', 'Online aircraft lookups', { kind: 'sw', def: false, sub: 'Photos, routes and airlines come from adsbdb, hexdb and Planespotters, which see the aircraft this station receives', alias: 'aircraft photo airline route planespotters privacy' }), // aircraft info lot 3, 2026-10-31
 	S('map.labels', 'map', 'Labels', { kind: 'seg', opts: [['few', 'Few'], ['normal', 'Normal'], ['many', 'Many']], def: 'normal', more: true }),
 	S('map.area', 'map', 'Offline map area', { kind: 'sel', opts: [[200, '200 km · 110 MB'], [400, '400 km · 412 MB'], [800, '800 km · 1.5 GB']], def: 400, more: true, sub: 'Around the station' }),
 

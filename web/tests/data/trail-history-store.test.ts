@@ -60,7 +60,9 @@ describe("TrailHistoryStore", () => {
 		})
 		const detach = store.attach()
 		await vi.waitFor(() => expect(store.get().status).toBe("ready"))
-		expect(calls.map(c => c.url)).toEqual(["/api/activity/trails"])
+		expect(calls.map(c => c.url)).toEqual([
+			"/api/activity/trails?categories=aircraft,marine,voice,paging,aprs,sensors,mesh,other",
+		])
 		expect(store.get().trails.get("mmsi:227300410")).toEqual([
 			{ lat: 48.7, lon: -4, at: LOCAL_NOW - 120_000 },
 			{ lat: 48.71, lon: -3.99, at: LOCAL_NOW - 60_000 },

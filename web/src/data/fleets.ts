@@ -59,6 +59,15 @@ function lostKeyOf(field: string): (data: unknown) => string | null {
 
 // ---- aircraft
 
+const airportSchema = z.object({
+	icao: z.string(),
+	iata: z.string().optional(),
+	name: z.string(),
+	city: z.string().optional(),
+	lat: num,
+	lon: num,
+})
+
 export const aircraftSchema = z.object({
 	icao: z.string(),
 	callsign: z.string().optional(),
@@ -86,7 +95,51 @@ export const aircraftSchema = z.object({
 			registration: z.string().optional(),
 			typeCode: z.string().optional(),
 			typeDescription: z.string().optional(),
+			manufacturer: z.string().optional(),
 			operator: z.string().optional(),
+			country: z.string().optional(),
+			countryIso: z.string().optional(),
+			year: optNum,
+			// Enrichment from the core (docs/ADSB.md "Aircraft Enrichment"); a malformed part is dropped,
+			// never the aircraft.
+			flags: z
+				.object({
+					military: z.boolean().optional(),
+					interesting: z.boolean().optional(),
+					pia: z.boolean().optional(),
+					ladd: z.boolean().optional(),
+				})
+				.optional()
+				.catch(undefined),
+			airline: z
+				.object({
+					name: z.string(),
+					icao: z.string(),
+					iata: z.string().optional(),
+					callsign: z.string().optional(),
+				})
+				.optional()
+				.catch(undefined),
+			route: z
+				.object({
+					callsign: z.string(),
+					origin: airportSchema,
+					destination: airportSchema,
+					// the core's verdict on the track (false: hide); absent from older cores
+					plausible: z.boolean().optional().catch(undefined),
+				})
+				.optional()
+				.catch(undefined),
+			photo: z
+				.object({
+					thumbnailUrl: z.string(),
+					largeUrl: z.string().optional(),
+					photographer: z.string().optional(),
+					link: z.string().optional(),
+					source: z.string().optional(),
+				})
+				.optional()
+				.catch(undefined),
 		})
 		.optional(),
 	signalQuality: z.object({ rssi: optNum }).optional(),

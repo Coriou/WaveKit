@@ -271,11 +271,18 @@ RUN git clone --no-checkout https://github.com/merbanan/rtl_433.git repo && \
 
 # ============================================================================
 # Stage: acarsdec-build
-# Purpose: Build acarsdec (ACARSDEC_REF). ACARS aircraft data link.
+# Purpose: Build acarsdec (ACARSDEC_REF) with libacars (built in dumpvdl2-build at
+#          LIBACARS_REF), so ACARS heard on VHF gets ADS-C, CPDLC, MIAM and media
+#          advisory decoding like VDL2 does. ACARS aircraft data link.
 # ============================================================================
 FROM base-build AS acarsdec-build
 
 ARG ACARSDEC_REF
+
+# libacars headers, library and pkg-config file, from the stage that builds it once.
+COPY --from=dumpvdl2-build /usr/local/include/libacars-2 /usr/local/include/libacars-2
+COPY --from=dumpvdl2-build /usr/local/lib/libacars* /usr/local/lib/
+COPY --from=dumpvdl2-build /usr/local/lib/pkgconfig/libacars-2.pc /usr/local/lib/pkgconfig/
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -288,15 +295,22 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libcjson-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Ends with a smoke check: the installed binary links libacars and every library it
+# needs resolves (a silent non-libacars build would lose ADS-C/CPDLC decoding).
 RUN git clone --no-checkout https://github.com/f00b4r0/acarsdec.git repo && \
     cd repo && \
     git fetch --depth 1 origin "${ACARSDEC_REF}" && \
     git checkout --detach FETCH_HEAD && \
     mkdir build && cd build && \
     pkg-config --exists libcjson && \
-    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    ldconfig && \
+    pkg-config --exists 'libacars-2 >= 2.0.0' && \
+    cmake -DCMAKE_BUILD_TYPE=Release -DLIBACARS=ON .. && \
     make -j"$(nproc)" && \
-    make install
+    make install && \
+    ldconfig && \
+    ldd "$(command -v acarsdec)" | grep -q libacars-2 && \
+    ! ldd "$(command -v acarsdec)" | grep -q 'not found'
 
 # ============================================================================
 # Stage: ais-catcher-build
@@ -548,7 +562,7 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
     CI=true pnpm prune --prod \
         --config.enable-global-virtual-store=false
 
-RUN ls -la dist/ && head -1 dist/index.js && test -f dist/spectrum-worker.js && test -f dist/activity-writer-worker.js && test -f dist/activity-query-worker.js && test -f dist/snapshot-worker.js
+RUN ls -la dist/ && head -1 dist/index.js && test -f dist/spectrum-worker.js && test -f dist/activity-writer-worker.js && test -f dist/activity-query-worker.js && test -f dist/snapshot-worker.js && test -f dist/aircraft-db-worker.js
 
 # ============================================================================
 # Stage: chan-build
@@ -654,6 +668,8 @@ RUN echo "Verifying decoder installations..." && \
     command -v multimon-ng && \
     rtl_433 -V && \
     command -v acarsdec && \
+    ldd "$(command -v acarsdec)" | grep -q libacars-2 && \
+    ! ldd "$(command -v acarsdec)" | grep -q 'not found' && \
     command -v AIS-catcher && \
     command -v direwolf && \
     dumpvdl2 --version && \

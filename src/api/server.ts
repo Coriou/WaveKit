@@ -89,7 +89,10 @@ import { liveAudioRoutes } from "./routes/live-audio.js"
 import { digitalVoiceRoutes } from "./routes/digital-voice.js"
 import { resourceRoutes } from "./routes/resources.js"
 import { aircraftRoutes } from "./routes/aircraft.js"
+import type { AircraftRoutesOptions } from "./routes/aircraft.js"
 import { vesselRoutes } from "./routes/vessels.js"
+import { aircraftIdentityRoutes } from "./routes/aircraft-identity.js"
+import type { AircraftIdentityManager } from "../core/aircraft-identity/manager.js"
 import { meshRoutes } from "./routes/mesh.js"
 import { coverageRoutes } from "./routes/coverage.js"
 import { fastifyValidationBody, isBodyParseError } from "./validation-errors.js"
@@ -210,8 +213,12 @@ export interface ApiServerDependencies {
 	digitalVoice?: DigitalVoiceService | undefined
 	resourceAggregator?: ResourceAggregator | undefined
 	aircraftTracker?: AircraftTracker | undefined
+	/** Aircraft enrichment settings (GET/PUT /api/aircraft/info). */
+	aircraftInfo?: AircraftRoutesOptions["info"] | undefined
 	/** AIS vessel current state (WG1 req 6). */
 	vesselTracker?: VesselTracker | undefined
+	/** Aircraft identity links from ADS-B, VDL2 and ACARS (GET /api/aircraft-identity). */
+	aircraftIdentity?: Pick<AircraftIdentityManager, "resolve"> | undefined
 	/** Meshtastic node current state (WG2 req 6). */
 	meshTracker?: MeshTracker | undefined
 	/** ADS-B and AIS coverage per bearing (WG3 req 7). */
@@ -306,7 +313,11 @@ export class ApiServer {
 	private readonly digitalVoice?: DigitalVoiceService | undefined
 	private readonly resourceAggregator?: ResourceAggregator | undefined
 	private readonly aircraftTracker?: AircraftTracker | undefined
+	private readonly aircraftInfo?: AircraftRoutesOptions["info"] | undefined
 	private readonly vesselTracker?: VesselTracker | undefined
+	private readonly aircraftIdentity?:
+		| Pick<AircraftIdentityManager, "resolve">
+		| undefined
 	/** Detaches the vessel tracker listeners; the tracker outlives the server. */
 	private vesselWiring: (() => void) | null = null
 	private readonly meshTracker?: MeshTracker | undefined
@@ -370,7 +381,9 @@ export class ApiServer {
 		this.digitalVoice = dependencies.digitalVoice
 		this.resourceAggregator = dependencies.resourceAggregator
 		this.aircraftTracker = dependencies.aircraftTracker
+		this.aircraftInfo = dependencies.aircraftInfo
 		this.vesselTracker = dependencies.vesselTracker
+		this.aircraftIdentity = dependencies.aircraftIdentity
 		this.meshTracker = dependencies.meshTracker
 		this.coverage = dependencies.coverage
 		this.aprsTracker = dependencies.aprsTracker
@@ -1575,6 +1588,19 @@ export class ApiServer {
 		if (this.aircraftTracker) {
 			await this.app.register(aircraftRoutes, {
 				tracker: this.aircraftTracker,
+				...(this.aircraftInfo ? { info: this.aircraftInfo } : {}),
+				...(this.accessController
+					? {
+							authorizeMutation: request =>
+								this.accessController!.authorizeMetadataMutation(request),
+						}
+					: {}),
+			})
+		}
+
+		if (this.aircraftIdentity) {
+			await this.app.register(aircraftIdentityRoutes, {
+				identity: this.aircraftIdentity,
 			})
 		}
 

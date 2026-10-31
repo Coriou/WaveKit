@@ -209,6 +209,34 @@ export class AircraftTracker extends EventEmitter<AircraftTrackerEvents> {
 	}
 
 	/**
+	 * Merges enrichment fields into a tracked aircraft's identification and emits
+	 * `aircraft:update` so clients see them without waiting for the next message.
+	 * `undefined` values clear a field (a route that no longer matches the callsign).
+	 * Returns false when the aircraft is no longer tracked.
+	 */
+	applyIdentification(
+		icao: string,
+		patch: {
+			[K in keyof AircraftIdentification]?:
+				| AircraftIdentification[K]
+				| undefined
+		},
+	): boolean {
+		const state = this.aircraft.get(icao.toUpperCase())
+		if (!state) return false
+		const next: AircraftIdentification = { ...state.identification }
+		for (const [key, value] of Object.entries(patch) as Array<
+			[keyof AircraftIdentification, unknown]
+		>) {
+			if (value === undefined) delete next[key]
+			else (next as Record<string, unknown>)[key] = value
+		}
+		state.identification = next
+		this.emit("aircraft:update", state)
+		return true
+	}
+
+	/**
 	 * Start the tracker (begin cleanup and stats timers).
 	 */
 	start(): void {

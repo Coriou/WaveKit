@@ -4725,16 +4725,72 @@ below 1 or above 168 h) are rejected first with 400 `VALIDATION_ERROR`.
 
 ### Aircraft
 
-ADS-B aircraft that readsb currently tracks, enriched with registration and type where known.
-Field meanings are in [ADS-B](ADSB.md#field-reference).
+ADS-B aircraft that readsb currently tracks. `identification` adds what is known about the
+airframe and flight: registration, type, operator, country, database flags, the airline and
+planned route of the current callsign (with `route.plausible`, false when the track disagrees),
+and a photo with its photographer credit. It fills in
+after the aircraft first appears and arrives as an `aircraft:update`. Field meanings are in
+[ADS-B](ADSB.md#field-reference); sources and caching in
+[ADS-B, Aircraft Enrichment](ADSB.md#aircraft-enrichment).
 
 - `GET /api/aircraft`: `{ aircraft, stats, timestamp }` for every tracked aircraft.
 - `GET /api/aircraft/stats`: the tracker statistics only.
 - `GET /api/aircraft/:icao`: one aircraft by its 24-bit ICAO address in hex (`4B1808`); 404
   when it is not tracked.
+- `GET /api/aircraft/info`: how the core enriches aircraft:
+  `{ enabled, online, onlineFrom, persistent, localDb: { enabled, aircraft, updatedAt } }`.
+  `onlineFrom` is `config` (from `aircraftInfo.online`) or `ui` (set with PUT). `aircraft` is
+  the number of airframes in the local database (null without a store), `updatedAt` the ISO
+  time of its last download (null before the first).
+- `PUT /api/aircraft/info` with `{ "online": true }` turns the free online lookups on (or
+  `false`: off again) without a restart; they are off by default, and off also stops lookups
+  and a database download already under way. It answers the same body as GET. The choice is kept in
+  `<stateDir>/aircraft-info.sqlite` and wins over the config until changed again. In protected
+  mode it needs a signed-in device like other metadata changes; any other body is a 400.
 
 The `aircraft` WebSocket channel pushes `aircraft:new`, `aircraft:update`, `aircraft:lost`
 and `aircraft:stats`.
+
+### Aircraft identity
+
+`GET /api/aircraft-identity/:kind/:value` says which identifiers name the same aircraft. `kind` is
+`icao`, `reg`, `callsign` or `flight`; a value that cannot be one of that kind answers 400. DTOs in
+`packages/api-types/src/aircraft-identity.ts`; the rules are in
+[Aircraft data link](AIRCRAFT-DATALINK.md#linking-aircraft).
+
+```json
+{
+	"query": { "kind": "reg", "value": "N0WK01" },
+	"icao": "0A0B01",
+	"resolvedBy": "observed",
+	"conflict": false,
+	"links": [
+		{
+			"a": { "kind": "icao", "value": "0A0B01" },
+			"b": { "kind": "reg", "value": "N0WK01" },
+			"evidence": "observed",
+			"source": "vdl2",
+			"firstSeen": "2026-01-01T00:00:00.000Z",
+			"lastSeen": "2026-01-01T00:20:00.000Z",
+			"expiresAt": "2026-01-31T00:20:00.000Z",
+			"count": 12
+		}
+	],
+	"entityKeys": ["icao:0A0B01", "reg:N0WK01"],
+	"timestamp": 1767226800000
+}
+```
+
+- `icao` is set only for an ICAO address (`resolvedBy: "self"`) or a registration with one live
+  link to an ICAO address: an `observed` one first, else a `database` one (`resolvedBy` says
+  which). A callsign or a flight number always answers `icao: null` with its links.
+- `database` links come from aircraft enrichment: the local aircraft database or an online airframe
+  lookup gave the ICAO address that registration (`source: "database"`).
+- `conflict` is true when a registration has live links to two ICAO addresses; `icao` is then null.
+- `entityKeys` are the Activity entity keys of the aircraft (`GET /api/activity?entityKey=…`). A
+  registration that resolves to another address, or to none because of a conflict, is not among an
+  address's keys.
+- In memory only: links are learnt again after a restart.
 
 ### Vessels
 

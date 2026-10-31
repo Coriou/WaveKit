@@ -213,6 +213,7 @@ import { SourceBackpressureTracker } from "./core/source-backpressure-tracker.js
 import { ResourceAggregator } from "./core/resource-aggregator.js"
 import { AircraftTrackingManager } from "./core/aircraft-tracking-manager.js"
 import { VesselTrackingManager } from "./core/vessel-tracking-manager.js"
+import { AircraftIdentityManager } from "./core/aircraft-identity/manager.js"
 import { MeshTrackingManager } from "./core/mesh-tracking-manager.js"
 import { AprsTrackingManager } from "./core/aprs-tracking-manager.js"
 import { createStationEstimator } from "./core/station-estimate/provider.js"
@@ -2316,10 +2317,12 @@ async function main(): Promise<void> {
 		)
 
 		// Step 8c: Initialize aircraft enrichment service (ADS-B specific)
+		// Local tar1090-db + free online sources, cached in <stateDir>/aircraft-info.sqlite.
 		const aircraftEnrichmentService = new AircraftEnrichmentService(
 			{
-				cacheTtlMs: 24 * 60 * 60 * 1000, // 24 hours
-				maxCacheSize: 10000,
+				online: config.aircraftInfo.online,
+				stateDir: config.stateDir,
+				localDb: config.aircraftInfo.localDb,
 				rateLimitMs: 1000, // 1 request per second
 				enabled: true,
 			},
@@ -2346,6 +2349,19 @@ async function main(): Promise<void> {
 		)
 		own(20, () => {
 			vesselTrackingManager.stop()
+		})
+
+		// Aircraft identity links between ADS-B, VDL2 and ACARS identifiers
+		const aircraftIdentity = new AircraftIdentityManager(decoderManager, logger)
+		// A registration from the local database or an online lookup is a database link:
+		// weaker than one seen on the air, and never made from a callsign or flight number.
+		aircraftEnrichmentService.on(
+			"identity:registration",
+			(icao, registration) =>
+				aircraftIdentity.observeDatabase(icao, registration),
+		)
+		own(20, () => {
+			aircraftIdentity.stop()
 		})
 
 		// Step 8d': ADS-B and AIS coverage per bearing from the station (WG3 req 7);
@@ -2533,7 +2549,9 @@ async function main(): Promise<void> {
 				digitalVoice,
 				resourceAggregator,
 				aircraftTracker: aircraftTrackingManager.getTracker(),
+				aircraftInfo: aircraftEnrichmentService,
 				vesselTracker: vesselTrackingManager.getTracker(),
+				aircraftIdentity,
 				coverage: coverageManager,
 				meshTracker: meshTrackingManager.getTracker(),
 				aprsTracker: aprsTrackingManager.getTracker(),
@@ -2976,8 +2994,14 @@ async function main(): Promise<void> {
 
 		// Start aircraft tracking manager and enrichment service
 		aircraftTrackingManager.start()
-		aircraftEnrichmentService.start()
+		void aircraftEnrichmentService.start().catch((err: unknown) => {
+			log.warn(
+				{ err: err instanceof Error ? err.message : String(err) },
+				"Aircraft enrichment failed to start",
+			)
+		})
 		vesselTrackingManager.start()
+		aircraftIdentity.start()
 		coverageManager.start()
 		meshTrackingManager.start()
 		aprsTrackingManager.start()

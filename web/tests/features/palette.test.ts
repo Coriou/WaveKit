@@ -236,6 +236,45 @@ describe("palette: ranking", () => {
 	})
 })
 
+describe("palette: find aircraft", () => {
+	const aircraft = [
+		{
+			icao: "0A0B31",
+			name: "ZZ0131",
+			callsign: "ZZ0131",
+			registration: "N0WK01",
+			about: "WaveKit Air · A320 214",
+			airline: "WaveKit Air",
+		},
+		{
+			icao: "0A0B32",
+			name: "N0WK02",
+			callsign: null,
+			registration: "N0WK02",
+			about: "",
+			airline: null,
+		},
+	]
+	it("finds a tracked aircraft by callsign, registration, address or airline and opens the Map on it", () => {
+		const find = (q: string) =>
+			flatten(new PaletteModel(ctx({ aircraft })).build(null, q)).filter(x =>
+				x.id.startsWith("air:"),
+			)
+		const [hit] = find("zz01")
+		expect(hit).toMatchObject({
+			title: "Show ZZ0131 on the map",
+			sub: "WaveKit Air · A320 214 · N0WK01 · ICAO 0A0B31",
+			action: { kind: "mapFocus", id: "a:0A0B31" },
+		})
+		expect(find("n0-wk02").map(x => x.id)).toEqual(["air:0A0B32"])
+		expect(find("0a0b3").length).toBe(2)
+		expect(find("kit air").map(x => x.id)).toEqual(["air:0A0B31"])
+		expect(find("w")).toEqual([])
+		const g = new PaletteModel(ctx({ aircraft })).build(null, "ZZ0131")
+		expect(g.map(x => x.label)).toContain("Aircraft")
+	})
+})
+
 describe("palette: rows", () => {
 	it("opens on Suggested, Saved and All commands with Tune first", () => {
 		const g = new PaletteModel(ctx()).build(null, "")

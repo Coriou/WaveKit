@@ -65,6 +65,7 @@ import {
 import { sourceTitle } from "../receiver/summary.ts"
 import { STEPS } from "../tuner/prefs.ts"
 import type { EfficiencyBudgetState } from "./efficiency-budget.ts"
+import type { AircraftInfoState } from "./aircraft-info.ts"
 import { decoderRows } from "./decoder-rows.ts"
 import { bandGainRow } from "./BandGainRow.tsx"
 import { ratePolicyNote } from "../receiver/notices.ts"
@@ -111,6 +112,8 @@ export interface SettingsSnapshot {
 	/** False: this core keeps no decoder settings (legacy access mode). */
 	readonly decoderSettings: boolean
 	readonly efficiencyBudget: EfficiencyBudgetState
+	/** The core's aircraft enrichment switch (GET /api/aircraft/info); settings null: no row. */
+	readonly aircraftInfo?: AircraftInfoState
 	readonly version: string | null
 	readonly accessMode: "legacy" | "protected" | null
 	/** Remembered devices (protected core, this browser paired); null until loaded or without a session. */
@@ -136,6 +139,7 @@ export interface SettingsActions {
 	): Promise<SettingWriteResult>
 	decoder(id: string, patch: DecoderSettingsUpdate): Promise<SettingWriteResult>
 	efficiencyBudget(value: EfficiencyBudgetValue): Promise<SettingWriteResult>
+	aircraftOnline?(on: boolean): Promise<SettingWriteResult>
 	openTuner(): void
 	openShortcuts(): void
 	openBandPlans(): void
@@ -1397,7 +1401,7 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 	return rows
 }
 
-// ---- map (this browser: the core keeps no map settings yet)
+// ---- map (this browser, except Online aircraft lookups: the core's aircraftInfo.online)
 
 const TILE_OPTS = opts([
 	["online", "Online tiles"],
@@ -1463,6 +1467,42 @@ function mapRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 			text: optionText(LABEL_OPTS, d.mapLabels),
 			def: { value: "normal", text: "Normal" },
 			write: v => local(() => a.setDevice({ mapLabels: v as MapLabels })),
+		},
+		...aircraftRows(s, a),
+	]
+}
+
+/** The core looks aircraft up in free online sources unless this is off (aircraftInfo.online). */
+function aircraftRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
+	const info = s.aircraftInfo?.settings
+	if (!info || !info.enabled) return []
+	const db = info.localDb
+	const local =
+		db.enabled && db.aircraft !== null && db.aircraft > 0
+			? `the local database (${db.aircraft.toLocaleString("en-GB").replace(/,/g, " ")} aircraft)`
+			: "the local database"
+	const write = a.aircraftOnline
+	return [
+		{
+			id: "map.aircraftOnline",
+			group: "map",
+			label: "Online aircraft lookups",
+			help: info.online
+				? "Photos, routes and airlines come from adsbdb, hexdb and Planespotters, which see the aircraft this station receives"
+				: `Only ${local}: no photos or routes`,
+			keys: words(
+				"aircraft planes photo photos airline route registration adsbdb planespotters online lookups privacy offline",
+			),
+			widget: { kind: "switch" },
+			value: info.online,
+			text: info.online ? "On" : "Off",
+			// lookups are off until the user opts in, so Reset turns them off
+			def: { value: false, text: "Off" },
+			...(s.aircraftInfo?.error ? { error: s.aircraftInfo.error } : {}),
+			...(s.aircraftInfo?.busy ? { busy: true } : {}),
+			...(s.readOnly || !write
+				? {}
+				: { write: (v: SettingValue) => write(v === true) }),
 		},
 	]
 }

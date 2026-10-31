@@ -59,6 +59,7 @@ function actions(): SettingsActions & { calls: unknown[][] } {
 		preference: rec("preference"),
 		decoder: rec("decoder"),
 		efficiencyBudget: rec("efficiencyBudget"),
+		aircraftOnline: rec("aircraftOnline"),
 		openTuner: () => void calls.push(["openTuner"]),
 		openShortcuts: () => void calls.push(["openShortcuts"]),
 		openBandPlans: () => void calls.push(["openBandPlans"]),
@@ -257,6 +258,17 @@ function snapshot(over: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
 		decoderTypes: TYPES,
 		decoderViews: { "pocsag-1": VIEW },
 		decoderSettings: true,
+		aircraftInfo: {
+			settings: {
+				enabled: true,
+				online: true,
+				onlineFrom: "config",
+				persistent: true,
+				localDb: { enabled: true, aircraft: 600_000, updatedAt: null },
+			},
+			error: null,
+			busy: false,
+		},
 		efficiencyBudget: EMPTY_BUDGET,
 		version: "0.14.2",
 		accessMode: "protected",
@@ -741,7 +753,13 @@ describe("Settings items", () => {
 			["map.online", true, "Online tiles"],
 			["map.trails", true, "15 min"],
 			["map.labels", true, "Normal"],
+			["map.aircraftOnline", undefined, "On"],
 		])
+		// Reset turns online lookups off: the default is opt-in
+		expect(byId(list, "map.aircraftOnline").def).toEqual({
+			value: false,
+			text: "Off",
+		})
 		expect(byId(list, "map.online").help).toContain("OpenFreeMap")
 		await byId(list, "map.online").write?.("blank")
 		await byId(list, "map.trails").write?.("60")
@@ -757,6 +775,41 @@ describe("Settings items", () => {
 			a,
 		)
 		expect(byId(blank, "map.online").help).toContain("No tiles are fetched")
+	})
+
+	it("turns the core's online aircraft lookups on and off", async () => {
+		const a = actions()
+		const row = byId(buildRows(snapshot(), a), "map.aircraftOnline")
+		expect(row.help).toContain("Planespotters")
+		await row.write?.(false)
+		expect(a.calls).toContainEqual(["aircraftOnline", false])
+		const info = snapshot().aircraftInfo!
+		const off = byId(
+			buildRows(
+				snapshot({
+					aircraftInfo: {
+						...info,
+						settings: { ...info.settings!, online: false },
+					},
+				}),
+				a,
+			),
+			"map.aircraftOnline",
+		)
+		expect(off.text).toBe("Off")
+		expect(off.help).toBe(
+			"Only the local database (600 000 aircraft): no photos or routes",
+		)
+		// read-only core, or a core without ADS-B: no switch, or no row
+		expect(
+			byId(buildRows(snapshot({ readOnly: true }), a), "map.aircraftOnline")
+				.write,
+		).toBeUndefined()
+		const none = buildRows(
+			snapshot({ aircraftInfo: { settings: null, error: null, busy: false } }),
+			a,
+		)
+		expect(none.some(r => r.id === "map.aircraftOnline")).toBe(false)
 	})
 
 	it("keeps Signal labels on this device, after the FFT size", async () => {

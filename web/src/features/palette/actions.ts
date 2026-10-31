@@ -15,6 +15,7 @@ import { presetOn, presetsFrom, togglePreset } from "../scanner/planner/plan.ts"
 import { updateDraft } from "../scanner/planner/draft-store.ts"
 import { openPlan } from "../scanner/ui-store.ts"
 import { focusSetting } from "../settings/registry.ts"
+import { showOnMap } from "../map/focus.ts"
 import { feedControllerFor, receiverSourceId } from "../receiver/feed.ts"
 import { modeSpec } from "../tuner/modes.ts"
 import { recallSaved, saveInput } from "../tuner/saved.ts"
@@ -284,6 +285,9 @@ export async function runAction(
 			}
 			case "view":
 				shellStore.setView(action.id)
+				return { text: null }
+			case "mapFocus":
+				showOnMap(action.id)
 				return { text: null }
 			case "drawer":
 				shellStore.openDrawer(action.id)

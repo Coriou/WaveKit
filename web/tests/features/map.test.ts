@@ -5,7 +5,11 @@ import fc from "fast-check"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import type { FleetEntry, FleetState } from "../../src/data/fleet-store.ts"
-import { trailsSchema } from "../../src/data/trail-history-store.ts"
+import {
+	TRACK_CATEGORIES,
+	trailsPath,
+	trailsSchema,
+} from "../../src/data/trail-history-store.ts"
 import {
 	aircraftSchema,
 	aprsSchema,
@@ -52,6 +56,7 @@ import {
 	predict,
 	pushInterval,
 	selectionInfo,
+	aircraftDetails,
 	stationOf,
 	wantsLabel,
 	withinRange,
@@ -229,6 +234,12 @@ describe("items from the mock's fleets", () => {
 	beforeAll(async () => {
 		server = await buildMockServer({ port: 0 })
 		await server.app.ready()
+		// photos come only while online lookups are on, as in the core
+		await server.app.inject({
+			method: "PUT",
+			url: "/api/aircraft/info",
+			payload: { online: true },
+		})
 		const get = async (url: string) =>
 			(await server.app.inject({ method: "GET", url })).json<
 				Record<string, unknown[]>
@@ -287,9 +298,11 @@ describe("items from the mock's fleets", () => {
 	it("finds every moving item's stored trail by its Activity entity key and puts it in front", async () => {
 		const res = await server.app.inject({
 			method: "GET",
-			url: "/api/activity/trails",
+			url: trailsPath(TRACK_CATEGORIES),
 		})
-		const body = trailsSchema.parse(res.json())
+		const raw = res.json() as { trails: { category: string }[] }
+		expect(raw.trails.some(t => t.category === "aviation-data")).toBe(false)
+		const body = trailsSchema.parse(raw)
 		const history = new Map(
 			body.trails.map(t => [
 				t.entityKey,
@@ -326,6 +339,20 @@ describe("items from the mock's fleets", () => {
 		expect(afr?.trail.length).toBeGreaterThan(1)
 		const times = afr?.trail.map(p => p.at) ?? []
 		expect([...times].sort((x, y) => x - y)).toEqual(times)
+	})
+
+	it("serves positions reported over datalink only to the ACARS layer, to 0.1°", async () => {
+		const res = await server.app.inject({
+			method: "GET",
+			url: trailsPath(["aviation-data"]),
+		})
+		const body = trailsSchema.parse(res.json())
+		expect(body.trails.length).toBeGreaterThan(0)
+		for (const t of body.trails)
+			for (const [, lat, lon] of t.points) {
+				expect(Math.round(lat * 10) / 10).toBe(lat)
+				expect(Math.round(lon * 10) / 10).toBe(lon)
+			}
 	})
 
 	it("chooses the board's glyphs", () => {
@@ -366,6 +393,87 @@ describe("items from the mock's fleets", () => {
 					f => f[0] === "From station",
 				)?.[1],
 		).toBe("—")
+	})
+
+	it("shows an aircraft's photo, planned route and identity from the core's enrichment", () => {
+		const afr = items.find(i => i.name === "AFR1234")
+		expect(afr).toBeDefined()
+		const info = selectionInfo(afr!, STATION, NOW)
+		expect(info.sub).toBe("Air France · A320 214")
+		expect(info.aircraft?.photo).toMatchObject({
+			credit: "© Mock photographer · Planespotters",
+			link: "https://www.planespotters.net/",
+		})
+		expect(info.aircraft?.photo?.src).toMatch(/^data:image\/svg\+xml/)
+		expect(info.aircraft?.route).toEqual({
+			from: "CDG",
+			fromName: "Paris",
+			to: "JFK",
+			toName: "New York",
+		})
+		expect(info.aircraft?.ident).toContainEqual(["Registration", "F-HBNA"])
+		expect(info.aircraft?.ident).toContainEqual(["Type", "A320 214"])
+		expect(info.aircraft?.ident).toContainEqual(["ICAO address", "3944EF"])
+		const navy = items.find(i => i.name === "FNY03")
+		expect(navy && selectionInfo(navy, STATION, NOW).aircraft?.military).toBe(
+			true,
+		)
+		expect(navy && selectionInfo(navy, STATION, NOW).aircraft?.photo).toBeNull()
+	})
+
+	it("hides a planned route the core marks implausible, or that belongs to another callsign", () => {
+		const afr = aircraft.find(a => a.callsign === "AFR1234")!
+		const route = afr.identification!.route!
+		expect(aircraftDetails(afr).route).not.toBeNull()
+		// older cores send no verdict: shown
+		const unjudged = { ...route }
+		delete unjudged.plausible
+		const old = {
+			...afr,
+			identification: { ...afr.identification, route: unjudged },
+		}
+		expect(aircraftDetails(old).route).not.toBeNull()
+		const stale = {
+			...afr,
+			identification: {
+				...afr.identification,
+				route: { ...route, plausible: false },
+			},
+		}
+		expect(aircraftDetails(stale).route).toBeNull()
+		const renamed = { ...afr, callsign: "ZZ0999" }
+		expect(aircraftDetails(renamed).route).toBeNull()
+	})
+
+	it("names an aircraft by callsign, else registration, else ICAO address", () => {
+		const a = aircraft.find(x => x.callsign === "AFR1234")!
+		const named = (v: Aircraft) =>
+			itemsOf({
+				aircraft: fleet(
+					[v],
+					x => x.icao,
+					() => true,
+				),
+				vessels: fleet(
+					[],
+					(v: Vessel) => v.mmsi,
+					() => true,
+				),
+				aprs: fleet(
+					[],
+					(s: Aprs) => s.key,
+					() => true,
+				),
+				mesh: fleet(
+					[],
+					(m: Mesh) => m.nodeId,
+					() => true,
+				),
+			})[0]?.name
+		expect(named(a)).toBe("AFR1234")
+		expect(named({ ...a, callsign: undefined })).toBe("F-HBNA")
+		const { identification: _, ...bare } = a
+		expect(named({ ...bare, callsign: undefined })).toBe("3944EF")
 	})
 
 	it("opens Activity with the existing search tokens", () => {

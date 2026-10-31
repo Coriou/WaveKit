@@ -22,6 +22,14 @@ const shipped = () =>
 const baseConfig = {
 	sources: [],
 	decoders: [],
+	aircraftInfo: {
+		online: false,
+		localDb: {
+			enabled: true,
+			url: "https://github.com/wiedehopf/tar1090-db/raw/refs/heads/csv/aircraft.csv.gz",
+			refreshDays: 7,
+		},
+	},
 	audio: {
 		tcpPort: 8080,
 		format: "S16LE",

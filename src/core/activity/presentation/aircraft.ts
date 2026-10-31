@@ -38,6 +38,12 @@ const aircraftPayload = objectSchema({
 	baro_rate: asNumber,
 	lat: asNumber,
 	lon: asNumber,
+	// Comm-B (Mode S EHS/ELS replies, BDS 4,0 / 5,0 / 6,0), as readsb decoded them
+	nav_altitude_mcp: asNumber,
+	ias: asNumber,
+	mach: asNumber,
+	mag_heading: asNumber,
+	nav_qnh: asNumber,
 })
 
 function callsignOf(
@@ -95,6 +101,37 @@ export function presentAircraft(data: unknown): DecodePresentation | undefined {
 						label: "Vertical rate",
 						unit: "ft/min",
 						value: firstNumber(payload, ["verticalRate", "baro_rate"]),
+					},
+					// Comm-B fills the fields the position report leaves free: what the crew
+					// selected and what the aircraft measured, never more than six fields
+					{
+						key: "selectedAltitude",
+						label: "Selected altitude",
+						unit: "ft",
+						value: firstNumber(payload, ["nav_altitude_mcp"]),
+					},
+					{
+						key: "ias",
+						label: "Airspeed (IAS)",
+						unit: "kt",
+						value: firstNumber(payload, ["ias"]),
+					},
+					{
+						key: "mach",
+						label: "Mach",
+						value: firstNumber(payload, ["mach"]),
+					},
+					{
+						key: "magHeading",
+						label: "Heading (magnetic)",
+						unit: "deg",
+						value: firstNumber(payload, ["mag_heading"]),
+					},
+					{
+						key: "qnh",
+						label: "QNH",
+						unit: "hPa",
+						value: firstNumber(payload, ["nav_qnh"]),
 					},
 				],
 				{ title, omitKeys: callsign === undefined ? [] : ["callsign"] },

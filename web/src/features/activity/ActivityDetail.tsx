@@ -32,6 +32,11 @@ import {
 } from "./fold.ts"
 import { fieldText, rowView } from "./rows.ts"
 import { pagerDetailItem } from "./pager-detail.ts"
+import {
+	aircraftKey,
+	useAircraftFleet,
+	useRowAircraft,
+} from "./row-aircraft.ts"
 
 const RELATED = 6
 /** Folded rows listed in the detail; a longer stack says how many more (the list expands them all). */
@@ -219,7 +224,9 @@ export function ActivityDetail({
 		}
 	}
 
-	const v = item ? rowView(item) : null
+	const aircraft = useRowAircraft(item?.entityKey)
+	useAircraftFleet(aircraftKey(item?.entityKey))
+	const v = item ? rowView(item, aircraft) : null
 	const hz = item?.frequencyHz ?? null
 	const alsoHeard = stack ? otherChannels(stack.channelsHz, hz) : []
 	const provenance =
