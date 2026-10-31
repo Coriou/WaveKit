@@ -1,6 +1,8 @@
 /** dumpvdl2 ambient interpreter (WG7 req 1.3): frequency in Hz, source address identity. */
-import type { DecoderOutputLike } from "./double-match.js"
+import type { DecodeEvidence } from "../../types.js"
+import type { DecoderOutputLike, InterpreterState } from "./double-match.js"
 import {
+	acceptAmbient,
 	asRecord,
 	interpretWith,
 	nearTarget,
@@ -67,3 +69,43 @@ export function parseVdl2(
 }
 
 export const interpretVdl2 = interpretWith(parseVdl2)
+
+/**
+ * A 24-bit VDL2 address one replayed frame may stand on: six hex digits, never 000000 (no
+ * station) nor FFFFFF (the all-stations broadcast address, a destination only).
+ */
+export function plausibleVdl2Address(value: string): boolean {
+	return /^[0-9A-F]{6}$/.test(value) && value !== "000000" && value !== "FFFFFF"
+}
+
+/**
+ * A replayed IQ capture of one VDL2 channel (dumpvdl2 given the capture's channel, so every frame
+ * it prints names that channel). ONE frame proves, as one clean block does for ACARS
+ * (`interpretAcarsReplay`): dumpvdl2 prints a frame only after its burst header CRC, its
+ * Reed-Solomon FEC and the AVLC frame check sequence (CRC-16 over the whole frame) all passed, so
+ * a printed source address is checked content as strong as an ACARS block's CRC-16. A replay
+ * holds at most 4 s (IQ_CAPTURE_MAX_MS) and pairs identities only within itself; one VDL2 burst
+ * lasts tens of ms and an aircraft rarely sends two in 4 s, so the two-frame rule would leave a
+ * replay almost never proven. An unclean frame (`vdl2FrameClean`: an embedded ACARS block that
+ * failed its CRC) or one without a plausible address is evidence without identity (the replay
+ * verdict reads it: crc-errors or timeout); a frame at another channel is nothing. Live and
+ * ambient decodes keep the two-frame rule.
+ */
+export function interpretVdl2Replay(
+	out: DecoderOutputLike,
+	state: InterpreterState,
+	channelHz: number,
+): DecodeEvidence[] {
+	if (!Number.isFinite(channelHz) || channelHz <= 0) return []
+	const parsed = parseVdl2(out, { targetsHz: [channelHz], channelHz })
+	if (!parsed) return []
+	const value = parsed.identity.value
+	// Unclean or address-less output still counts as output (the replay's verdict), never as an identity.
+	const proves =
+		parsed.crcClean && value !== undefined && plausibleVdl2Address(value)
+	if (proves) state.match.markAccepted(parsed.identity.key, value)
+	const evidence = proves
+		? parsed
+		: { ...parsed, identity: { ...parsed.identity, value: undefined } }
+	return acceptAmbient(state, evidence).map(({ hz: _hz, ...ev }) => ev)
+}

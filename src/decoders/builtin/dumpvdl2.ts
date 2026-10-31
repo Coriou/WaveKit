@@ -529,7 +529,10 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 			this.decoderRateHz() === 105_000 &&
 			!this.options.extraArgs?.length
 		)
-			return buildDumpvdl2ReplayArgs(this.options.inputCenterFreq)
+			return buildDumpvdl2ReplayArgs(
+				this.options.inputCenterFreq,
+				replayChannelOf(this.options.inputCenterFreq, this.options.frequencies),
+			)
 		const args: string[] = []
 
 		// Use stdin input (Requirement 25.4)
@@ -864,15 +867,52 @@ export const DUMPVDL2_CAPS: DecoderCaps = {
 	integrationPattern: "pure_consumer",
 }
 
-/** One replay channel at DC, U8 at 105000 × oversample 1. The capture retains
- * ±12.5 kHz of VDL2; its 48 kHz Nyquist edge leaves 11.5 kHz of guard. */
-export function buildDumpvdl2ReplayArgs(centerHz: number): string[] {
-	if (
-		!Number.isSafeInteger(centerHz) ||
-		centerHz < DUMPVDL2_BOUNDS.frequencyHz.min ||
-		centerHz > DUMPVDL2_BOUNDS.frequencyHz.max
-	)
+/**
+ * Largest replay channel offset from the capture centre: 12 500 Hz replay passband half-width
+ * (probeReplayShapes: 25 000 Hz) − 8 400 Hz VDL2 occupied half-width (10 500 sym/s × 1.6 / 2) =
+ * 4 100 Hz, so the whole burst stays inside the filtered capture. Mirrors
+ * VDL2_REPLAY_MAX_OFFSET_HZ (src/core/scanner/replay-channel.ts; equality is tested).
+ */
+export const DUMPVDL2_REPLAY_MAX_OFFSET_HZ = 4_100
+
+/**
+ * The channel a 105 kHz replay decodes: its one target frequency (the replay transport sets the
+ * capture's raster channel there) when it lies within DUMPVDL2_REPLAY_MAX_OFFSET_HZ of the centre,
+ * else the centre itself.
+ */
+export function replayChannelOf(
+	centerHz: number,
+	frequencies: readonly number[],
+): number {
+	const [only] = frequencies
+	return frequencies.length === 1 &&
+		only !== undefined &&
+		Number.isSafeInteger(only) &&
+		Math.abs(only - centerHz) <= DUMPVDL2_REPLAY_MAX_OFFSET_HZ
+		? only
+		: centerHz
+}
+
+/** One replay channel, U8 at 105000 × oversample 1, the capture centre at DC. The capture
+ * retains ±12.5 kHz of VDL2; its 48 kHz Nyquist edge leaves 11.5 kHz of guard. `channelHz`
+ * (default: the centre) is the channel dumpvdl2 decodes and reports: dumpvdl2 mixes it from
+ * `--centerfreq` itself, so a capture centred a little off its raster channel decodes at the
+ * channel, at most DUMPVDL2_REPLAY_MAX_OFFSET_HZ away (inclusive). */
+export function buildDumpvdl2ReplayArgs(
+	centerHz: number,
+	channelHz: number = centerHz,
+): string[] {
+	const valid = (hz: number): boolean =>
+		Number.isSafeInteger(hz) &&
+		hz >= DUMPVDL2_BOUNDS.frequencyHz.min &&
+		hz <= DUMPVDL2_BOUNDS.frequencyHz.max
+	if (!valid(centerHz))
 		throw new WaveKitError("Invalid VDL2 replay center", "VDL2_REPLAY_INVALID")
+	if (
+		!valid(channelHz) ||
+		Math.abs(channelHz - centerHz) > DUMPVDL2_REPLAY_MAX_OFFSET_HZ
+	)
+		throw new WaveKitError("Invalid VDL2 replay channel", "VDL2_REPLAY_INVALID")
 	return [
 		"--iq-file",
 		"-",
@@ -884,6 +924,6 @@ export function buildDumpvdl2ReplayArgs(centerHz: number): string[] {
 		String(centerHz),
 		"--output",
 		"decoded:json:file:path=-",
-		String(centerHz),
+		String(channelHz),
 	]
 }

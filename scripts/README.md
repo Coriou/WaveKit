@@ -106,3 +106,23 @@ that holds a machine bearer.
 ## Directories
 
 - **`debug_audio/`**: Local storage for captured IQ files and demodulated WAVs. (Gitignored)
+
+### `decode-snapshot.ts`
+
+Decodes a stored CU8 snapshot (`POST /api/sources/:sourceId/iq-snapshot`) offline through the
+scanner's own replay chain: `wavekit-iqcap run` cuts a 48 kHz capture per channel and 4 s
+window, `wavekit-iqcap replay` filters it to the decoder's channel, and acarsdec or dumpvdl2
+runs with the replay transport's configuration. Every decoder line is printed with the
+scanner's verdict (CRC-clean or not, identity), then one result per channel. See
+[Decode a stored snapshot offline](../docs/SCANNER.md#iq-capture-on-detection).
+
+**Usage** (bundle first; run where `wavekit-iqcap` and the decoder are on `PATH`, for example
+inside the core image):
+
+```bash
+node scripts/build-file.mjs scripts/decode-snapshot.ts   # writes dist/decode-snapshot.js
+node dist/decode-snapshot.js --file /abs/iq0.cu8 --rate 1024000 --centre 131600000 \
+  --channel 131550000 --channel 131725000 --decoder acarsdec [--plan-only]
+```
+
+Exit codes: 0 done (decoded or not), 1 a step failed, 2 bad arguments, 3 a program is missing.

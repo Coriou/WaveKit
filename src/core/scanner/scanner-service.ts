@@ -4,6 +4,7 @@ import {
 	DECODE_ANCHOR_PROTOCOLS,
 	decodeAnchorKey,
 } from "./store/decode-anchor.js"
+import { rasterChannelOf } from "./replay-channel.js"
 import { narrowestPriors, withScannerOverlays } from "./classify/priors.js"
 import { judgeAnalogResult } from "../iq-capture/analog-result.js"
 import { AnalogAdmission } from "./analog-admission.js"
@@ -5928,6 +5929,12 @@ export class ScannerService extends EventEmitter {
 				? this.store.discoveryIdOf(result.observationId)
 				: undefined) ??
 			null
+		if (
+			ownDiscovery === null &&
+			rfHz !== null &&
+			this.applyReplayAtChannel(result, rfHz, live)
+		)
+			return
 		// Attribution by frequency: an observation that left live/recent without a discovery
 		// (a pending capture) gives its decode to the one stored discovery on its channel.
 		const byFrequency =
@@ -6020,6 +6027,72 @@ export class ScannerService extends EventEmitter {
 					: "no-sync"
 			this.markUndecoded(live, reason)
 		}
+	}
+
+	/**
+	 * A decoded ACARS or VDL2 replay whose observation holds no discovery of its own lands at its
+	 * raster channel (rasterChannelOf) as a live channel decode does (store.anchorDecode): it proves
+	 * the one spectrum discovery at the channel, else the channel anchor, so no second discovery
+	 * opens beside an anchor. An observation still live goes this way only when an anchor of the
+	 * decoded protocol already holds the channel (otherwise its own admission is the discovery at
+	 * the channel). The capture's tuning trust is the trust (canAnchor fails closed without it).
+	 * False when it did not apply: the caller's path runs.
+	 */
+	private applyReplayAtChannel(
+		result: IqReplayResult,
+		rfHz: number,
+		live: LiveObservation | undefined,
+	): boolean {
+		const decoded = result.decoded
+		if (!decoded || !CHANNEL_ANCHOR_PROTOCOLS.includes(decoded.protocol))
+			return false
+		const channelHz = rasterChannelOf(decoded.protocol, rfHz)
+		if (channelHz === null) return false
+		if (live) {
+			const anchor = this.store.decodeAnchorFor(result.sourceId, channelHz)
+			if (anchor?.anchor !== "decode" || anchor.protocol !== decoded.protocol)
+				return false
+		}
+		let trust: TuningTrust | undefined
+		try {
+			trust = this.deps.iqCapture?.view(result.captureId)?.tuningTrust
+		} catch {
+			trust = undefined
+		}
+		const ev: DecodeEvidence = {
+			protocol: decoded.protocol,
+			identity: decoded.identity,
+			metadata: {},
+			crcClean: true,
+			at: this.replayEvidenceAt(result.captureId, live, result.observationId),
+			epoch: result.epoch,
+			origin: "probe",
+			transport: "replay",
+		}
+		const anchored = this.store.anchorDecode(
+			result.sourceId,
+			channelHz,
+			ev,
+			trust,
+		)
+		const id = anchored.discoveryId
+		if (id === null) return false
+		this.dirty = true
+		const d = this.store.get(id)
+		if (
+			d &&
+			d.anchor !== "decode" &&
+			d.confidence === "decoded" &&
+			d.protocol === decoded.protocol
+		) {
+			this.knownProtocols.recordDecode(id)
+			this.noteDecoded(id, result.sourceId, decoded.protocol)
+			this.lastConfirm.set(id, this.now())
+		}
+		this.rememberReplayTrials(result, live, id)
+		this.replayPlans.delete(result.captureId)
+		this.replayOrders.delete(result.captureId)
+		return true
 	}
 
 	/** The captured channel: the result's own frequency, else the capture's view. */

@@ -79,7 +79,9 @@ function anchorIdentityOk(protocol: ScannerProtocol, value: string): boolean {
 /**
  * Only a confirmed, CRC-clean, trusted ambient decode with a well-formed identity anchors. The
  * identity is the confirm interpreters' H2 acceptance: an energy reading, a decoder line without
- * a checked CRC, or one occurrence alone never reaches here with an identity.
+ * a checked CRC, or one occurrence alone never reaches here with an identity. A replayed capture's
+ * ACARS or VDL2 decode (origin probe, transport replay) also anchors at its channel: its identity
+ * is one CRC-checked block or frame (interpretAcarsReplay, interpretVdl2Replay).
  */
 export function canAnchor(
 	ev: DecodeEvidence,
@@ -89,7 +91,10 @@ export function canAnchor(
 	return (
 		anchorHzOf(ev.protocol, hz) !== undefined &&
 		isTrusted(trust) &&
-		ev.origin === "ambient" &&
+		(ev.origin === "ambient" ||
+			(ev.origin === "probe" &&
+				ev.transport === "replay" &&
+				CHANNEL_ANCHOR_PROTOCOLS.includes(ev.protocol))) &&
 		ev.crcClean === true &&
 		Number.isFinite(ev.at) &&
 		ev.identity !== undefined &&

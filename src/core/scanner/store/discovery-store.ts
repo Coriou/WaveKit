@@ -915,6 +915,11 @@ export class DiscoveryStore
 	 * its next confirmed decode is published.
 	 */
 	private readonly anchorIdentity = new Map<string, Identity>()
+	/**
+	 * How the published identity was decoded: "replay" for a replayed capture's block or frame,
+	 * else ambient (absent). Set and cleared with anchorIdentity; the proof names it.
+	 */
+	private readonly anchorReplayed = new Set<string>()
 	/** Latest confirmations stay private until publishAnchor commits a revision. */
 	private readonly anchorPending = new Map<
 		string,
@@ -925,6 +930,8 @@ export class DiscoveryStore
 			trust: "commanded" | "relay"
 			/** A channel anchor's latest checked identity, staged with the confirmation. */
 			identity?: Identity
+			/** The staged identity came from a replayed capture. */
+			replayed?: boolean
 		}
 	>()
 	private readonly anchorPublished = new Map<
@@ -1201,7 +1208,11 @@ export class DiscoveryStore
 			d.lastSeenAt = pending.seen
 			d.observationCount = pending.observations
 			d.tuningTrust = pending.trust
-			if (pending.identity) this.anchorIdentity.set(id, { ...pending.identity })
+			if (pending.identity) {
+				this.anchorIdentity.set(id, { ...pending.identity })
+				if (pending.replayed) this.anchorReplayed.add(id)
+				else this.anchorReplayed.delete(id)
+			}
 			const observation = this.observationIndex.get(`decode:${id}`)
 			if (observation) observation.endedAt = pending.seen
 			this.invalidateLabel(id)
@@ -1382,6 +1393,7 @@ export class DiscoveryStore
 			...(ev.protocol !== "adsb"
 				? {
 						identity: { kind: ev.identity.kind, value: ev.identity.value },
+						...(ev.origin === "probe" ? { replayed: true } : {}),
 					}
 				: {}),
 		})
@@ -2932,6 +2944,7 @@ export class DiscoveryStore
 		this.decodeAnchors.clear()
 		this.anchorWindows.clear()
 		this.anchorIdentity.clear()
+		this.anchorReplayed.clear()
 		this.anchorPending.clear()
 		this.anchorPublished.clear()
 		this.observationIndex.clear()
@@ -5275,7 +5288,9 @@ export class DiscoveryStore
 		const bare = {
 			kind: "decoded" as const,
 			protocol: d.protocol,
-			transport: "ambient" as const,
+			transport: this.anchorReplayed.has(d.id)
+				? ("replay" as const)
+				: ("ambient" as const),
 			at: d.lastSeenAt,
 			observationId: `decode:${d.id}`,
 			tried: [],
@@ -5506,6 +5521,7 @@ export class DiscoveryStore
 		// The outer delete/merge journals removal; publishing here would nest a commit.
 		this.anchorWindows.delete(id)
 		this.anchorIdentity.delete(id)
+		this.anchorReplayed.delete(id)
 		this.anchorPending.delete(id)
 		this.anchorPublished.delete(id)
 		this.discoveries.delete(id)

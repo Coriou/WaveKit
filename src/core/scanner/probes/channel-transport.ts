@@ -11,6 +11,10 @@ import { admitChannel } from "../../channelizer/admission.js"
 import type { DecoderChannelRequest } from "../../channelizer/types.js"
 import { probeCores } from "../plan/cost.js"
 import {
+	ACARS_REPLAY_BANDWIDTH_HZ,
+	ACARS_REPLAY_TRANSITION_HZ,
+} from "../replay-channel.js"
+import {
 	offsetTransport,
 	type ProbeDecoderType,
 	type TransportStrategy,
@@ -54,10 +58,13 @@ export const PROBE_CHANNEL_REQUESTS: Readonly<
 	direwolf: requestShape(
 		audioChannelRequest({ ...audioDefault, filterTransition: 0.012 }, input),
 	),
-	// Replay only: the ACARS channel (shape of the replay filter).
-	acarsdec: requestShape(
-		audioChannelRequest(acarsdecDemodConfig(input.sampleRateHz), input),
-	),
+	// Replay only: the ACARS channel (shape of the replay filter), wide enough for a capture
+	// centred up to the raster snap off its channel (replay-channel.ts).
+	acarsdec: requestShape({
+		...audioChannelRequest(acarsdecDemodConfig(input.sampleRateHz), input),
+		bandwidthHz: ACARS_REPLAY_BANDWIDTH_HZ,
+		transitionHz: ACARS_REPLAY_TRANSITION_HZ,
+	}),
 	rtl433: requestShape(
 		iqChannelRequest(
 			{
