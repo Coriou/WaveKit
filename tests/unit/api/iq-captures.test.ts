@@ -667,8 +667,11 @@ it("keeps malformed metadata with its data: unlisted, name taken, bytes counted"
 it("counts unlisted data past any number of foreign entries and refuses past the name bound", async () => {
 	await app.inject({ method: "GET", url })
 	// 1,100 foreign names sort before the malformed pair; they are not capture metadata.
-	for (let i = 0; i < 1100; i++)
-		await writeFile(join(dir, `a${String(i).padStart(4, "0")}.txt`), "x")
+	await Promise.all(
+		Array.from({ length: 1100 }, (_, i) =>
+			writeFile(join(dir, `a${String(i).padStart(4, "0")}.txt`), "x"),
+		),
+	)
 	await writeFile(join(dir, "z.json"), "{}")
 	await writeFile(join(dir, "z.cu8"), Buffer.alloc(1000))
 	await rebuild()
@@ -677,8 +680,11 @@ it("counts unlisted data past any number of foreign entries and refuses past the
 	}>()
 	expect(listed.usedBytes).toBe(1000)
 	// At the bound: 1,024 capture names (z plus 1,023 malformed) are all read.
-	for (let i = 0; i < 1023; i++)
-		await writeFile(join(dir, `m${String(i).padStart(4, "0")}.json`), "{}")
+	await Promise.all(
+		Array.from({ length: 1023 }, (_, i) =>
+			writeFile(join(dir, `m${String(i).padStart(4, "0")}.json`), "{}"),
+		),
+	)
 	const atBound = await start()
 	input.write(Buffer.alloc(2000))
 	expect((await atBound.pending).statusCode).toBe(201)
@@ -690,7 +696,8 @@ it("counts unlisted data past any number of foreign entries and refuses past the
 	})
 	expect(refused.statusCode).toBe(507)
 	expect(refused.json()).toMatchObject({ code: "IQ_CAPTURE_QUOTA" })
-})
+	// About 2,100 files and two 1,024-name scans: under 1 s idle, several seconds under host load.
+}, 30_000)
 
 it("ignores incomplete or foreign entries when listing", async () => {
 	await app.inject({ method: "GET", url })
