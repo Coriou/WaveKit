@@ -20,6 +20,7 @@ import {
 } from "../../../../src/decoders/enablement/placement.js"
 import { createVfoTracker } from "../../../../src/decoders/enablement/channel-sources.js"
 import { FakeSources, RateDecoder, iqCaps } from "../../../mocks/rate-fakes.js"
+import type { BandRegion } from "@wavekit/api-types"
 
 let manager: DecoderManager | undefined
 afterEach(async () => {
@@ -34,12 +35,14 @@ function setup({
 	vfo = 446_056_000,
 	options = {},
 	useChannelizer = false,
+	bandRegion,
 }: {
 	type?: string
 	channelizer?: boolean
 	vfo?: number | null
 	options?: Record<string, unknown>
 	useChannelizer?: boolean
+	bandRegion?: BandRegion
 } = {}) {
 	vi.useFakeTimers()
 	const logger = pino({ level: "silent" })
@@ -96,6 +99,9 @@ function setup({
 		vfo === null ? null : { sourceId: "rtl", frequencyHz: vfo }
 	manager = new DecoderManager(registry, new FanoutManager(logger), logger, {
 		validateVersions: false,
+		...(bandRegion
+			? { bandRegion: { code: bandRegion, source: "configured" as const } }
+			: {}),
 		enablement: {
 			planner: planPlacements,
 			gate,
@@ -391,11 +397,13 @@ async function multimonAt(
 	hz: number,
 	modes: readonly string[] | undefined,
 	rate = 2_400_000,
+	bandRegion?: BandRegion,
 ) {
 	const f = setup({
 		type: "multimon-ng",
 		vfo: hz,
 		...(modes ? { options: { modes: [...modes] } } : {}),
+		...(bandRegion ? { bandRegion } : {}),
 	})
 	f.sources.caps.set("rtl", { ...iqCaps(rate), centerFreq: hz })
 	f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: hz })
@@ -485,14 +493,51 @@ it.each([
 	},
 )
 
-it.each([false, true])(
-	"an explicit channel pin overrides the mode band check at 868.95 MHz (configured band: %s)",
-	async withBand => {
+// R3: every region publishes a 2 m APRS channel, so AFSK1200 is in band there
+// and suspended at 1090 MHz everywhere (never an unknown band).
+it.each([
+	["EU", 144_800_000],
+	["US", 144_390_000],
+	["CA", 144_390_000],
+	["AU", 145_175_000],
+	["NZ", 144_575_000],
+	["JP", 144_640_000],
+	["CN", 144_640_000],
+] as const)(
+	"multimon-ng AFSK1200 in %s: in band at %d Hz, out of band at 1090 MHz",
+	async (region, aprsHz) => {
+		const away = await multimonAt(
+			1_090_000_000,
+			["AFSK1200"],
+			2_400_000,
+			region,
+		)
+		expect(away.status?.running).toBe(false)
+		expect(away.status?.bandAssessment?.verdict).toBe("out-of-band")
+		expect(away.status?.bandAssessment?.region?.code).toBe(region)
+		expect(away.status?.suspension?.reasonCode).toBe("frequency-out-of-band")
+		await manager?.destroy()
+		manager = undefined
+		const home = await multimonAt(aprsHz, ["AFSK1200"], 2_400_000, region)
+		expect(home.status?.running).toBe(true)
+		expect(home.status?.bandAssessment?.verdict).toBe("in-band")
+	},
+)
+
+it.each([
+	[["AFSK1200", "DTMF"], false],
+	[["AFSK1200", "DTMF"], true],
+	[["POCSAG1200"], false],
+	[["POCSAG1200"], true],
+	[undefined, false],
+] as const)(
+	"an explicit channel pin overrides the mode band check of %j at 868.95 MHz (configured band: %s)",
+	async (modes, withBand) => {
 		const hz = 868_950_000
 		const f = setup({
 			type: "multimon-ng",
 			vfo: hz,
-			options: { modes: ["AFSK1200", "DTMF"], channelHz: hz },
+			options: { ...(modes ? { modes: [...modes] } : {}), channelHz: hz },
 		})
 		if (withBand) f.decoder().band = { targetsHz: [hz], basis: "configured" }
 		f.sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: hz })

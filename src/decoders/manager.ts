@@ -96,15 +96,12 @@ import { assessDecoderBand, USABLE_WINDOW_FRACTION } from "./band-resolver.js"
 import { parseLoraMeshtasticOptions } from "./builtin/lora-meshtastic.js"
 import { multimonHasPaging } from "./builtin/multimon-ng.js"
 import type { LoraMeshtasticOptions } from "./builtin/lora-meshtastic.js"
-import {
-	normalizeBandOverride,
-	resolveBandRequirements,
-	type ResolvedBand,
-} from "./band-defaults.js"
+import { normalizeBandOverride, type ResolvedBand } from "./band-defaults.js"
 import { BandOverrideStore } from "./band-override-store.js"
 import {
 	decoderBandTable,
 	pagingRasterRanges,
+	resolveDecoderBand,
 } from "./enablement/paging-plan.js"
 import {
 	createDecoderExitError,
@@ -6525,7 +6522,7 @@ export class DecoderManager extends EventEmitter {
 	 */
 	private resolveBand(state: DecoderState): ResolvedBand {
 		const slots = this.catalogueLoraSlotsOf(state)
-		return resolveBandRequirements({
+		return resolveDecoderBand({
 			type: state.config.type,
 			// 3.17: the catalogue LoRa decoder declares every regional slot.
 			declaration: slots
@@ -6540,7 +6537,8 @@ export class DecoderManager extends EventEmitter {
 			apiOverride: this.bandOverrides.get(state.parentId ?? state.config.id),
 			region: this.config.bandRegion,
 			// 3.18: a paging-only multimon-ng adds its paging band to the table;
-			// R3: other mode lists their services' bands. Read the configured
+			// R3: other mode lists their services' bands, out of band where
+			// none has one (resolveDecoderBand). Read the configured
 			// options (the parent's for a placement), never placement-applied ones.
 			table: decoderBandTable(
 				state.config.type,

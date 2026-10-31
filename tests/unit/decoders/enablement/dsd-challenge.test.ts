@@ -44,9 +44,20 @@ describe("R2: dsd-fme activity slots only in digital-voice band plans", () => {
 		["EU", 870_000_000, false],
 		["EU", 870_000_001, false],
 		["EU", 1_090_000_000, false],
-		["US", 868_950_000, false],
 		["US", 915_000_000, false],
 		["US", 446_000_000, true],
+		// US/CA 700/800/900 MHz land mobile, inclusive edges.
+		["US", 768_999_999, false],
+		["US", 769_000_000, true],
+		["US", 805_000_000, true],
+		["US", 805_000_001, false],
+		["US", 851_150_000, true],
+		["US", 868_950_000, true],
+		["US", 869_000_000, true],
+		["US", 869_000_001, false],
+		["CA", 935_000_000, true],
+		["CA", 940_000_001, false],
+		["AU", 851_150_000, false],
 	] as const)("%s %d Hz allowed: %s", (region, hz, allowed) => {
 		expect(dsdActivitySlotAllowed(region, hz)).toBe(allowed)
 	})

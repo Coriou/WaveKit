@@ -11,6 +11,7 @@
 import type { BandRegion } from "@wavekit/api-types"
 import { bandplansFor } from "../scanner/bandplan/index.js"
 import type { Bandplan } from "../scanner/bandplan/index.js"
+import type { ScannerProtocol, ScanRange } from "../scanner/types.js"
 
 interface SupplementPlan {
 	/** Regions whose catalogue carries the plan. */
@@ -49,8 +50,151 @@ const PAGER_FR: Bandplan = {
 	],
 }
 
+const MHz = (x: number): number => Math.round(x * 1e6)
+
+/** The legacy land mobile occupied bandwidths (12.5 kHz FM, 12.5 kHz digital, 6.25 kHz digital). */
+const LAND_MOBILE_OBW: readonly number[] = [9000, 11_000, 4500]
+/** dsd-fme's land mobile protocols plus P25 phase 2 (TDMA trunking in these bands). */
+const LAND_MOBILE_DIGITAL: readonly ScannerProtocol[] = [
+	"dmr",
+	"p25p1",
+	"p25p2",
+	"nxdn48",
+	"nxdn96",
+]
+
+/** One paired land mobile segment (inclusive MHz edges) on a 12.5 / 6.25 kHz raster. */
+function landMobile(
+	id: string,
+	startMhz: number,
+	endMhz: number,
+	protocols: readonly ScannerProtocol[],
+	rasters: readonly { spacingHz: number; firstMhz: number }[],
+): ScanRange {
+	return {
+		startHz: MHz(startMhz),
+		endHz: MHz(endMhz),
+		rasters: rasters.map(r => ({
+			spacingHz: r.spacingHz,
+			firstChannelHz: MHz(r.firstMhz),
+		})),
+		obwHz: [...LAND_MOBILE_OBW],
+		protocols: [...protocols],
+		bandplanId: id,
+	}
+}
+
+/**
+ * US and Canadian 700/800/900 MHz land mobile (public safety, business and trunked LMR), the
+ * published allocations: FCC 47 CFR Part 90 (subpart R §90.531 for 700 MHz, §90.613 for the
+ * 800 and 900 MHz channel tables) and the ISED Canada band plans that mirror the same edges.
+ * - 700 MHz public safety narrowband: 769-775 MHz (base) and 799-805 MHz (mobile), 6.25 kHz
+ *   channels from 769.003125 / 799.003125 MHz (§90.531), aggregable to 12.5 kHz. Narrowband
+ *   700 MHz equipment must carry one voice path per 6.25 kHz, so no analog FM is listed.
+ * - 800 MHz: 806-824 MHz (mobile) and 851-869 MHz (base), channels on 12.5 kHz steps from
+ *   806.0125 / 851.0125 MHz (25 kHz channels plus 12.5 kHz interstitials), and the two
+ *   6.25 kHz carriers inside each 12.5 kHz channel (±3.125 kHz).
+ * - 900 MHz: 896-901 MHz (mobile) and 935-940 MHz (base), 12.5 kHz channels from
+ *   896.0125 / 935.0125 MHz.
+ */
+const LMR_700_900_ID = "land-mobile-700-900"
+/** 6.25 kHz channels from `firstMhz`; their 12.5 kHz pairs centre 3.125 kHz higher. */
+const RASTER_6K25 = (firstMhz: number) => [
+	{ spacingHz: 6250, firstMhz },
+	{ spacingHz: 12_500, firstMhz: firstMhz + 0.003125 },
+]
+/** 12.5 kHz channels from `firstMhz`; each one's lower 6.25 kHz half centres 3.125 kHz lower. */
+const RASTER_12K5 = (firstMhz: number) => [
+	{ spacingHz: 12_500, firstMhz },
+	{ spacingHz: 6250, firstMhz: firstMhz - 0.003125 },
+]
+const LMR_700_900: Bandplan = {
+	id: LMR_700_900_ID,
+	region: "US",
+	name: "Land mobile 700 / 800 / 900 MHz",
+	ranges: [
+		landMobile(
+			LMR_700_900_ID,
+			769,
+			775,
+			LAND_MOBILE_DIGITAL,
+			RASTER_6K25(769.003125),
+		),
+		landMobile(
+			LMR_700_900_ID,
+			799,
+			805,
+			LAND_MOBILE_DIGITAL,
+			RASTER_6K25(799.003125),
+		),
+		landMobile(
+			LMR_700_900_ID,
+			806,
+			824,
+			[...LAND_MOBILE_DIGITAL, "analog-fm"],
+			RASTER_12K5(806.0125),
+		),
+		landMobile(
+			LMR_700_900_ID,
+			851,
+			869,
+			[...LAND_MOBILE_DIGITAL, "analog-fm"],
+			RASTER_12K5(851.0125),
+		),
+		landMobile(
+			LMR_700_900_ID,
+			896,
+			901,
+			[...LAND_MOBILE_DIGITAL, "analog-fm"],
+			RASTER_12K5(896.0125),
+		),
+		landMobile(
+			LMR_700_900_ID,
+			935,
+			940,
+			[...LAND_MOBILE_DIGITAL, "analog-fm"],
+			RASTER_12K5(935.0125),
+		),
+	],
+}
+
+/** One 2 m APRS channel: ±8 kHz around the carrier, 16 kHz FM (the legacy APRS shape). */
+function aprsPlan(region: BandRegion, mhz: number): Bandplan {
+	return {
+		id: "aprs",
+		region,
+		name: `APRS ${mhz.toFixed(3)}`,
+		ranges: [
+			{
+				startHz: MHz(mhz) - 8000,
+				endHz: MHz(mhz) + 8000,
+				rasters: [{ spacingHz: 25_000, firstChannelHz: MHz(mhz) }],
+				obwHz: [16_000],
+				protocols: ["aprs"],
+				bandplanId: "aprs",
+			},
+		],
+	}
+}
+
+/**
+ * National 2 m APRS frequencies of the regions the legacy table lacks, as each national
+ * amateur society publishes them: Australia 145.175 MHz (WIA), New Zealand 144.575 MHz
+ * (NZART), Japan 144.640 MHz (JARL), China 144.640 MHz (CRAC). The EU (144.800 MHz) and
+ * US/CA (144.390 MHz) channels are in the legacy table.
+ */
+const APRS_AU = aprsPlan("AU", 145.175)
+const APRS_NZ = aprsPlan("NZ", 144.575)
+const APRS_JP = aprsPlan("JP", 144.64)
+const APRS_CN = aprsPlan("CN", 144.64)
+
 export const BUILTIN_SUPPLEMENT: readonly SupplementPlan[] = Object.freeze([
 	{ regions: ["EU"], before: "pmr446", plan: PAGER_FR },
+	{ regions: ["US", "CA"], before: "amateur-2m", plan: LMR_700_900 },
+	{ regions: ["AU"], before: "pager-vhf", plan: APRS_AU },
+	{ regions: ["NZ"], before: "pager-vhf", plan: APRS_NZ },
+	{ regions: ["JP"], before: "pager-vhf", plan: APRS_JP },
+	{ regions: ["CN"], before: "pager-vhf", plan: APRS_CN },
 ])
 
 const cache = new Map<BandRegion, readonly Bandplan[]>()

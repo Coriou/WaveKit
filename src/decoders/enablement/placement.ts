@@ -172,9 +172,10 @@ const bandFree = (d: PlannerDecoder): boolean =>
 	d.startMode === "operator" ||
 	d.bandSuspension === false
 
-/** The band has at least one target or range (otherwise unknown). */
+/** The band has at least one target or range, or is known to be nowhere (otherwise unknown). */
 function bandKnown(d: PlannerDecoder): boolean {
 	return (
+		d.band?.nowhere === true ||
 		(Array.isArray(d.band?.targetsHz) && d.band.targetsHz.length > 0) ||
 		(Array.isArray(d.band?.rangesHz) && d.band.rangesHz.length > 0)
 	)

@@ -369,6 +369,64 @@ describe("activity ranking: slots and order", () => {
 		expect(out).not.toContain(433_100_000)
 	})
 
+	// US/CA 700/800/900 MHz land mobile is a digital-voice range: a P25
+	// candidate next to the VFO keeps its slot.
+	it.each([
+		[851_100_000, 851_150_000, "US"],
+		[851_100_000, 851_150_000, "CA"],
+		[770_000_000, 770_012_500, "US"],
+		[936_000_000, 936_012_500, "CA"],
+	] as const)(
+		"keeps an observed centre near VFO %d Hz at %d Hz in %s land mobile",
+		(vfoHz, candidateHz, bandRegion) => {
+			const input = base(
+				[dsd({ bandRegion, protocols: ["p25p1"] })],
+				[source({ centreHz: vfoHz, sampleRateHz: 2_400_000 })],
+				{ vfo: { sourceId: "s", frequencyHz: vfoHz } },
+			)
+			const act = {
+				...activity(),
+				observed: [{ epoch: EPOCH, channelsHz: [candidateHz] }],
+			}
+			const hot = new Map([
+				[candidateHz, { state: "hot" as const, score: 102, live: true }],
+			])
+			const out = planWith(input, act, hot)
+			expect(channels(out, "dsd")).toEqual([vfoHz, candidateHz])
+			expect(
+				out.wanted.some(
+					p => p.origin === "activity" && p.channelHz === candidateHz,
+				),
+			).toBe(true)
+		},
+	)
+
+	it("land mobile 800 MHz edges: 869 MHz is in, one 6.25 kHz step past it and the EU are out", () => {
+		const centreHz = 869_000_000
+		const plan = (bandRegion: "US" | "EU", candidateHz: number) =>
+			channels(
+				planWith(
+					base(
+						[dsd({ bandRegion, protocols: ["p25p1"] })],
+						[source({ centreHz, sampleRateHz: 2_400_000 })],
+						{ vfo: { sourceId: "s", frequencyHz: 868_987_500 } },
+					),
+					{
+						...activity(),
+						observed: [{ epoch: EPOCH, channelsHz: [candidateHz] }],
+					},
+					new Map([
+						[candidateHz, { state: "hot" as const, score: 102, live: true }],
+					]),
+				),
+				"dsd",
+			)
+		expect(plan("US", 869_000_000)).toContain(869_000_000)
+		expect(plan("US", 869_006_250)).not.toContain(869_006_250)
+		// The EU has no 851-869 MHz land mobile range (and 863-870 MHz is ISM).
+		expect(plan("EU", 869_000_000)).not.toContain(869_000_000)
+	})
+
 	it("filters observed centres by epoch, band, reach, explicit channels and budget", () => {
 		const far = 466_037_500
 		const input = base(

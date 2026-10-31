@@ -37,6 +37,7 @@ const BUILTIN_GROUPS: Readonly<Record<string, DisplayGroup>> = Object.freeze({
 	"pager-fr": "pagers",
 	"vhf-land-mobile": "land-mobile",
 	"uhf-land-mobile": "land-mobile",
+	"land-mobile-700-900": "land-mobile",
 	"amateur-2m": "amateur",
 	"amateur-70cm": "amateur",
 	aprs: "amateur",

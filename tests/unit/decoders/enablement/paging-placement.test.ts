@@ -14,6 +14,9 @@ import {
 	pagingRasterRanges,
 	rasterChannelsBetween,
 	PAGING_MAX_RASTER_POINTS,
+	multimonServiceBand,
+	resolveDecoderBand,
+	type ModeBandDefault,
 	type PagingRasterRange,
 } from "../../../../src/decoders/enablement/paging-plan.js"
 import type {
@@ -166,7 +169,7 @@ describe("paging raster placement (3.18)", () => {
 			["AFSK1200", "FSK9600"],
 		])
 			expect(table(modes)).toBe(BAND_DEFAULTS)
-		// An explicit channel pin keeps a mode band unknown; paging-only is unchanged.
+		// An explicit channel pin keeps the band unknown, paging-only lists included.
 		for (const key of [
 			"channelHz",
 			"channelsHz",
@@ -179,7 +182,8 @@ describe("paging raster placement (3.18)", () => {
 			).toBe(BAND_DEFAULTS)
 			expect(
 				decoderBandTable("multimon-ng", { modes: ["POCSAG1200"], [key]: 1 }),
-			).toBe(DECODER_BAND_TABLE)
+			).toBe(BAND_DEFAULTS)
+			expect(decoderBandTable("multimon-ng", { [key]: 1 })).toBe(BAND_DEFAULTS)
 		}
 		expect(decoderBandTable("dsd-fme", {})).toBe(BAND_DEFAULTS)
 	})
@@ -236,6 +240,140 @@ describe("paging raster placement (3.18)", () => {
 				sampleRateHz: 2_400_000,
 			}).verdict,
 		).toBe("in-band")
+	})
+
+	it("R3: a pinned paging-only list is not suspended off the paging band (868.95 MHz)", () => {
+		const assessment = assessDecoderBand(
+			resolveDecoderBand({
+				type: "multimon-ng",
+				declaration: {},
+				region: { code: "EU", source: "configured" },
+				table: decoderBandTable("multimon-ng", {
+					modes: ["POCSAG1200"],
+					channelHz: 868_950_000,
+				}),
+			}).requirements,
+			{ centerHz: 868_950_000, sampleRateHz: 2_400_000 },
+		)
+		expect(assessment.verdict).toBe("unknown")
+	})
+
+	it("R3: AFSK1200 takes each region's 2 m APRS channel and is out of band at 1090 MHz", () => {
+		const aprs: Record<(typeof BAND_REGIONS)[number], number> = {
+			EU: 144_800_000,
+			US: 144_390_000,
+			CA: 144_390_000,
+			AU: 145_175_000,
+			NZ: 144_575_000,
+			JP: 144_640_000,
+			CN: 144_640_000,
+		}
+		const table = decoderBandTable("multimon-ng", { modes: ["AFSK1200"] })
+		for (const code of BAND_REGIONS) {
+			const requirements = resolveDecoderBand({
+				type: "multimon-ng",
+				declaration: {},
+				region: { code, source: "configured" },
+				table,
+			}).requirements
+			expect(requirements?.rangesHz).toContainEqual({
+				minHz: aprs[code] - 8000,
+				maxHz: aprs[code] + 8000,
+			})
+			const at = (centerHz: number) =>
+				assessDecoderBand(requirements, { centerHz, sampleRateHz: 2_400_000 })
+			expect(at(1_090_000_000)).toMatchObject({
+				verdict: "out-of-band",
+				reasonCode: "frequency-out-of-band",
+			})
+			expect(at(aprs[code]).verdict).toBe("in-band")
+		}
+	})
+
+	it("R3: a known mode with no range in the region is out of band, never unknown", () => {
+		const none = () => []
+		// No service range and no paging: the band is nowhere.
+		expect(multimonServiceBand("AU", false, ["aprs"], none)).toEqual({
+			nowhere: true,
+		})
+		// One mode without a range adds nothing; the others still count.
+		expect(
+			multimonServiceBand("AU", false, ["aprs", "analog-fm"], (_r, p) =>
+				p === "aprs" ? [] : [{ minHz: 136_000_000, maxHz: 174_000_000 }],
+			),
+		).toEqual({ rangesHz: [{ minHz: 136_000_000, maxHz: 174_000_000 }] })
+		const byRegion = Object.fromEntries(
+			BAND_REGIONS.map(code => [
+				code,
+				multimonServiceBand(code, false, [], none),
+			]),
+		) as Record<(typeof BAND_REGIONS)[number], ModeBandDefault>
+		const table = {
+			...BAND_DEFAULTS,
+			"multimon-ng": { scope: "region" as const, byRegion },
+		}
+		const region = { code: "JP" as const, source: "configured" as const }
+		const resolved = resolveDecoderBand({
+			type: "multimon-ng",
+			declaration: {},
+			region,
+			table,
+		})
+		expect(resolved.requirements).toEqual({
+			nowhere: true,
+			basis: "region-default",
+			region,
+		})
+		for (const centerHz of [1_090_000_000, 144_640_000])
+			expect(
+				assessDecoderBand(resolved.requirements, {
+					centerHz,
+					sampleRateHz: 2_400_000,
+				}),
+			).toEqual({
+				verdict: "out-of-band",
+				reasonCode: "frequency-out-of-band",
+				basis: "region-default",
+				region,
+				captureCenterHz: centerHz,
+			})
+		// Configured targets, overrides and an own tuner still win over nowhere.
+		const winning = [
+			{
+				configured: { targetsHz: [144_640_000], basis: "configured" as const },
+			},
+			{ ownTuning: true as const },
+			{ ownSource: true as const },
+		]
+		for (const declaration of winning)
+			expect(
+				resolveDecoderBand({ type: "multimon-ng", declaration, region, table })
+					.requirements?.nowhere,
+			).toBeUndefined()
+		expect(
+			resolveDecoderBand({
+				type: "multimon-ng",
+				declaration: {},
+				region,
+				table,
+				apiOverride: {
+					rangesHz: [{ minHz: 144_000_000, maxHz: 146_000_000 }],
+				},
+			}).requirements?.basis,
+		).toBe("override")
+		// The planner treats a nowhere band as known: out of band, not unknown.
+		const plan = planPlacements({
+			...input(
+				pager({
+					band: { nowhere: true, basis: "region-default" },
+					pagingRaster: [],
+				}),
+				[capture()],
+			),
+			vfo: { sourceId: "s", frequencyHz: CENTRE },
+		})
+		expect(plan.wanted).toEqual([])
+		expect(plan.unplaced.get("pager")).toBe("frequency-out-of-band")
 	})
 
 	it("config-origin without channels places every French channel in the window, not the VFO", () => {
