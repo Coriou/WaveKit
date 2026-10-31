@@ -515,16 +515,19 @@ describe("SourceFeedStore", () => {
 				},
 			},
 		})
-		// At the bound (16) everything is kept; past it (17) the oldest goes.
+		// At the bound (16) everything is kept; past it (17) the oldest goes and the save reports false.
 		const ids = Array.from({ length: 17 }, (_, i) => `s${i}`)
 		expect(await store.save(new Set(ids.slice(0, 16)))).toBe(true)
 		expect(
 			(JSON.parse(written.at(-1)!) as { paused: string[] }).paused,
 		).toHaveLength(16)
-		expect(await store.save(new Set(ids))).toBe(true)
+		expect(await store.save(new Set(ids))).toBe(false)
 		expect(
 			(JSON.parse(written.at(-1)!) as { paused: string[] }).paused,
 		).toEqual(ids.slice(1))
+		// An id past the length bound (128) is not persisted either: the save reports false.
+		expect(await store.save(new Set(["x".repeat(128)]))).toBe(true)
+		expect(await store.save(new Set(["x".repeat(129)]))).toBe(false)
 		fail = true
 		expect(await store.save(new Set(["a"]))).toBe(false)
 	})

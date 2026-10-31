@@ -13,7 +13,7 @@ import { atomicWrite } from "./scanner/store/atomic-write.js"
 
 export const SOURCE_FEED_FILE_NAME = "source-feed.json"
 const FILE_VERSION = 1
-/** One core runs far fewer sources; past this the oldest pauses are not persisted. */
+/** One core runs far fewer sources; past this the oldest pauses are not persisted (save reports false). */
 export const SOURCE_FEED_MAX_SOURCES = 16
 export const SOURCE_FEED_ID_MAX_LENGTH = 128
 /**
@@ -42,7 +42,7 @@ export interface SourceFeedFs {
 export interface SourceFeedPersistence {
 	/** The paused source ids; never rejects (a bad file reads as none paused). */
 	load(): Promise<ReadonlySet<string>>
-	/** Persists exactly `paused`; serialised, never rejects: false when the write failed. */
+	/** Persists `paused`; serialised, never rejects: false when the write failed or an id was dropped. */
 	save(paused: ReadonlySet<string>): Promise<boolean>
 }
 
@@ -132,14 +132,16 @@ export class SourceFeedStore implements SourceFeedPersistence {
 			ids.shift()
 			text = serialise()
 		}
-		if (ids.length < paused.size)
+		// A dropped id is a pause that will not survive a restart: report the save as failed.
+		const complete = ids.length === paused.size
+		if (!complete)
 			this.log.warn(
 				{ kept: ids.length, paused: paused.size },
 				"Paused feeds past the file bound; the oldest were not persisted",
 			)
 		const run = this.chain.then(() =>
 			this.fs.atomicWrite(this.file, text).then(
-				() => true,
+				() => complete,
 				(err: unknown) => {
 					this.log.warn(
 						{ code: errorCode(err) },
