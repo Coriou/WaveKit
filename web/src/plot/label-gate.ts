@@ -135,6 +135,29 @@ export const LEAVE_MS = 240
 const PEAK_DECAY_DB_PER_S = 3
 const PEAK_STEP_DB = 3
 
+/**
+ * A held proven chip (its track gone) is taken over by a burst under a new track id only when that burst is the
+ * same emission: its centre within max(tol, widthHz / 4) of the chip's, and its width compatible, the wider of the
+ * two at most ADOPT_WIDTH_RATIO times the narrower. A 12.5 kHz DMR chip (say 9 kHz measured) and a 6.25 kHz
+ * neighbour one channel up: the centre is 6250 Hz off, past max(1000, 9000 / 4) = 2250 Hz, and the widths
+ * 9000 / 4500 = 2 > 1.5, so the neighbour gets its own chip.
+ */
+export const ADOPT_WIDTH_RATIO = 1.5
+
+/** Whether track `t` may adopt the held proven chip `f` (ADOPT_WIDTH_RATIO). */
+export function adoptable(
+	f: Pick<Followed, "hz" | "widthHz">,
+	t: Pick<Track, "startHz" | "endHz">,
+	tolHz: number,
+): boolean {
+	const hz = (t.startHz + t.endHz) / 2
+	const widthHz = t.endHz - t.startHz
+	if (Math.abs(hz - f.hz) > Math.max(tolHz, f.widthHz / 4)) return false
+	const lo = Math.min(widthHz, f.widthHz)
+	const hi = Math.max(widthHz, f.widthHz)
+	return lo > 0 && hi <= ADOPT_WIDTH_RATIO * lo
+}
+
 function near(f: Followed, t: Track, tolHz: number): number | null {
 	const lo = f.hz - f.widthHz / 2 - tolHz
 	const hi = f.hz + f.widthHz / 2 + tolHz
@@ -175,9 +198,16 @@ export function stepLabelGate(
 	const seen = new Set<Followed>()
 	const byKey = new Map<string, Followed>()
 	for (const f of followed) if (f.key !== null) byKey.set(f.key, f)
-	const frameKeys = new Set<string>()
-	for (const t of frame.tracks)
-		if (t.trackId !== undefined) frameKeys.add(`${frame.sourceId}/${t.trackId}`)
+	// the frame's track keys, built only when a held proven chip may be adopted (most frames never need them)
+	let frameKeys: Set<string> | null = null
+	const keysOf = (): Set<string> => {
+		if (frameKeys) return frameKeys
+		frameKeys = new Set<string>()
+		for (const t of frame.tracks)
+			if (t.trackId !== undefined)
+				frameKeys.add(`${frame.sourceId}/${t.trackId}`)
+		return frameKeys
+	}
 	// strongest tracks first, so a split emission keeps its strongest part
 	const tracks = [...frame.tracks]
 		.filter(
@@ -198,13 +228,11 @@ export function stepLabelGate(
 			let bestD = Infinity
 			for (const f of followed) {
 				if (seen.has(f)) continue
-				if (
-					key !== null &&
-					f.key !== null &&
-					f.key !== key &&
-					!(f.proven && !frameKeys.has(f.key))
-				)
-					continue
+				if (key !== null && f.key !== null && f.key !== key) {
+					// another emission, unless it is a held proven chip this burst is the same signal as
+					if (!f.proven || keysOf().has(f.key) || !adoptable(f, t, tol))
+						continue
+				}
 				const d = near(f, t, tol)
 				if (d !== null && d < bestD) {
 					best = f

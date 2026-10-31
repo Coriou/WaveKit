@@ -229,7 +229,7 @@ export const MOCK_SIGNALS: readonly MockSignal[] = [
 	sig(446.03125, 11e3, -71, "voice", { on: 4, per: 27, ph: 9 }),
 	sig(446.09375, 11e3, -77, "voice", { on: 2, per: 33, ph: 15 }),
 	// DMR on a frequency no decoder follows (a synthetic channel): Identify names it, on its own while listening
-	sig(431.925, 9e3, -58, "tdma", { on: 5, per: 9, ph: 2 }),
+	sig(431.6125, 9e3, -58, "tdma", { on: 5, per: 9, ph: 2 }),
 	// a synthetic pager channel (the mock's `pager-431` block)
 	sig(431.025, 12.5e3, -62, "burst", { on: 1.2, per: 10, ph: 3 }),
 	// SRD 868
@@ -359,7 +359,7 @@ export const IDENTIFY_PLANS: Readonly<Record<number, IdentifyPlan>> = {
 		identity: { kind: "p25-nac", value: "293" },
 		metadata: { talkgroups: ["1201"], sources: ["4410022"] },
 	},
-	431925000: {
+	431612500: {
 		state: "identified",
 		class: "tdma-ms",
 		protocol: "dmr",

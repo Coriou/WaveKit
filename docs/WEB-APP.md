@@ -76,9 +76,14 @@ The labels over the peaks use the same evidence:
 - A label names a protocol only when its discovery is proven. A discovery marked decoded whose
   evidence says weak (or whose proof does not prove it) is not proven, so its label reads
   `Unidentified · …` instead of `DMR`.
-- An unnamed peak near a discovery that is not proven says what was measured, for example
+- An unnamed peak near a likely discovery reads as its tag does, for example `Likely DMR`. Near
+  a discovery that was only heard it says what was measured, for example
   `Unidentified · 4FSK ~9 kHz` with its frequency, and has a grey ring for a dot. Any other
   unnamed peak shows its frequency.
+- A held proven label moves to a new burst only when that burst is the same signal: its centre
+  within a quarter of the label's width (or the spectrum's resolution, if wider) and its width at
+  most 1.5 times the label's or the other way round. A narrower neighbour one channel away gets
+  its own label.
 - Any other label stays a few seconds after its signal goes quiet, as before.
 - Hover over a label that sits on a discovery to see how we know (the tag's first detail line).
   Clicking a label tunes there. For the full detail, click the tag in the row below.
@@ -86,16 +91,24 @@ The labels over the peaks use the same evidence:
 Click a single tag for its detail:
 
 - **How we know**: for example `DMR decoded: checked control bursts, colour code 7`, or
-  `Not proven: heard on the air, not identified`.
+  `Not proven: heard on the air, not identified`. The core's own proof summary shows as a
+  `Core:` line only when it says something the line above does not.
+- **live** after the frequency means it was heard in the last 30 seconds. The tag itself stays
+  lit longer (see above).
 - **Evidence** (`Proven`, `Weak`, or `Not reported` by an older core), **First heard**, **Last
   heard** and **Airtime**.
-- **Calls**: Activity lists calls (a talkgroup or a source) and messages, not bare control
-  traffic. A proven digital voice channel with no call in it says `No calls heard yet — control
-channel only`, which is why it has no Activity rows. Once calls are heard, **Last calls** opens
-  Activity on that frequency; when the core names the discovery's last Activity event, **Last
-  call** opens that event instead.
-- **Tune**, **Listen** (tunes there, then starts live audio once the tune has landed; if the tune
-  fails nothing plays) and **Open in Scanner**.
+- **Calls**: the scanner checks a channel by decoding it for a moment. When that check saw calls,
+  the detail names them, for example `Talkgroup 1, source 12 seen by the scanner's check` (at most
+  three of each, then `+n more`). Calls the scanner's check decoded are not Activity rows: Activity
+  lists what the decoders heard, so it may have nothing on that frequency yet, and the detail says
+  so. A proven digital voice channel with no call in it says `No calls heard yet — control
+channel only`. **Last call** shows only when the core names the discovery's last Activity event,
+  and opens it. Otherwise **Search Activity** opens Activity on that frequency.
+- **Tune** and **Listen** go to the discovery's measured frequency, as the Scanner drawer does.
+  **Listen** is the drawer's Listen: it tunes there, then starts live audio once the tune has
+  landed. If the tune fails, nothing plays and a `Could not tune: …` warning says why. If the
+  receiver is tuned elsewhere meanwhile, live audio that Listen started is stopped again.
+  **Open in Scanner** opens the discovery in the Scanner drawer.
 
 ### The tuned card
 

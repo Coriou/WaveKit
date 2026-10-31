@@ -26,8 +26,15 @@ const outOfWindow = () =>
 		path: "/api/scanner/discoveries/d1/listen",
 	})
 
-/** Fake services: `listenDiscovery` answers from `answers` in turn; the tuner lands when `finish` is called. */
-function setup(answers: (Error | Promise<unknown> | null)[], wanted = false) {
+/**
+ * Fake services: `listenDiscovery` answers from `answers` in turn; the tuner lands when `finish` is called.
+ * `running`: the core's live audio ran before the click.
+ */
+function setup(
+	answers: (Error | Promise<unknown> | null)[],
+	wanted = false,
+	running = false,
+) {
 	const calls: string[] = []
 	const tuning = new Store<TuningState>({ targetHz: null, error: null })
 	let finish: (error: string | null) => void = () => undefined
@@ -39,6 +46,13 @@ function setup(answers: (Error | Promise<unknown> | null)[], wanted = false) {
 					const a = answers.shift() ?? null
 					if (a instanceof Promise) return a
 					return a ? Promise.reject(a) : Promise.resolve({})
+				},
+			},
+			liveAudio: {
+				get: () => ({ status: { running } }),
+				stop: () => {
+					calls.push("core stop")
+					return Promise.resolve()
 				},
 			},
 		},
@@ -56,6 +70,7 @@ function setup(answers: (Error | Promise<unknown> | null)[], wanted = false) {
 		listen: {
 			wanted,
 			unlock: () => void calls.push("unlock"),
+			suspend: () => void calls.push("suspend"),
 			get: () => ({ wanted: services.listen.wanted }),
 			start: () => {
 				calls.push("start")
@@ -114,6 +129,8 @@ describe("scanner drawer Listen", () => {
 		finish("No tuner source")
 		await done
 		expect(calls).not.toContain("start")
+		// the unlock is undone: the audio it woke sleeps again
+		expect(calls[calls.length - 1]).toBe("suspend")
 		expect(appToast.get()?.text).toBe("Could not tune: No tuner source")
 	})
 
@@ -137,15 +154,58 @@ describe("scanner drawer Listen", () => {
 		release()
 		await done
 		expect(calls).not.toContain("start")
+		// the retarget started the core's live audio for nobody: it stops again
+		expect(calls.slice(4)).toEqual(["core stop", "suspend"])
 		expect(appToast.get()?.text).toBe(
 			"Not listening: the receiver was tuned elsewhere first",
 		)
 	})
 
+	it("moved, but live audio ran before the click (another listener): the core's audio stays on", async () => {
+		let release: () => void = () => undefined
+		const held = new Promise<void>(resolve => {
+			release = resolve
+		})
+		const { services, calls, finish, tuning } = setup(
+			[outOfWindow(), held],
+			false,
+			true,
+		)
+		const done = listenTo(services, d)
+		await flush()
+		finish()
+		await flush()
+		tuning.set({ targetHz: 162_000_000, error: null })
+		release()
+		await done
+		expect(calls).not.toContain("core stop")
+		expect(calls).not.toContain("start")
+	})
+
+	it("moved while this client already listened: nothing is stopped (audio follows the tuner)", async () => {
+		let release: () => void = () => undefined
+		const held = new Promise<void>(resolve => {
+			release = resolve
+		})
+		const { services, calls, finish, tuning } = setup(
+			[outOfWindow(), held],
+			true,
+		)
+		const done = listenTo(services, d)
+		await flush()
+		finish()
+		await flush()
+		tuning.set({ targetHz: 162_000_000, error: null })
+		release()
+		await done
+		expect(calls).not.toContain("core stop")
+		expect(calls).not.toContain("suspend")
+	})
+
 	it("never plays when the core refuses", async () => {
 		const { services, calls } = setup([new Error("locked out")])
 		await listenTo(services, d)
-		expect(calls).toEqual(["unlock", "retarget d1"])
+		expect(calls).toEqual(["unlock", "retarget d1", "suspend"])
 		expect(appToast.get()?.tone).toBe("warn")
 	})
 

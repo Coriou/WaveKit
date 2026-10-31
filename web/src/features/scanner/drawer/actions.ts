@@ -17,7 +17,8 @@ import {
 } from "../../../data/index.ts"
 import { dismissAppToast, showAppToast } from "../../../shell/toast.ts"
 import { formatMHz } from "../../format.ts"
-import { listenAfterTune } from "../../listen/after-tune.ts"
+import { listenAfterTune, tuneFailedText } from "../../listen/after-tune.ts"
+import { discoveryTuneHz } from "../../../plot/discovery-tags.ts"
 import type { TuningState } from "../../tuning.ts"
 import { skipPatch, unskipPatch } from "../../tuner/scan-hold.ts"
 import { defaultGroup } from "../../tuner/saved.ts"
@@ -86,24 +87,35 @@ const f3 = (hz: number) => formatMHz(hz)
 /**
  * Listen: the core retargets live audio when the discovery is in the current window; otherwise the
  * receiver tunes there first (which pauses a running sweep), then the core is asked again. Call it
- * synchronously from the click: audio unlocks in the gesture and plays only once the tune landed.
+ * synchronously from the click: audio unlocks in the gesture and plays only once the tune landed. The
+ * spectrum tag's Listen runs it too, so both go to the same frequency and show the same warnings.
  */
 export async function listenTo(
 	services: Pick<AppServices, "data" | "tuning" | "listen">,
 	d: Discovery,
 ): Promise<void> {
+	// before the unlock: whether Listen was on here and the core's live audio ran before this click
+	const before = {
+		listening: services.listen.get().wanted,
+		running: services.data.liveAudio.get().status?.running === true,
+	}
 	const listening = await listenAfterTune(
-		d.frequencyHz + d.measuredOffsetHz,
-		() => retarget(services, d),
+		Math.round(discoveryTuneHz(d)),
+		() => retarget(services, d, before),
 		services.listen,
 	)
 	if (listening) showToast(`Listening to ${f3(d.frequencyHz)}`)
 }
 
-/** Points live audio at the discovery, tuning the receiver there when it is out of the window. True once it landed. */
+/**
+ * Points live audio at the discovery, tuning the receiver there when it is out of the window. True once it landed.
+ * When the receiver moves away during the retarget, the core's live audio this click started is stopped again
+ * (nobody here listens and it did not run before), so the core does not demodulate for nobody.
+ */
 async function retarget(
-	services: Pick<AppServices, "data" | "tuning">,
+	services: Pick<AppServices, "data" | "tuning" | "listen">,
 	d: Discovery,
+	before: { listening: boolean; running: boolean },
 ): Promise<boolean> {
 	const { data, tuning } = services
 	try {
@@ -115,16 +127,10 @@ async function retarget(
 			return false
 		}
 	}
-	const hz = Math.round(d.frequencyHz + d.measuredOffsetHz)
+	const hz = Math.round(discoveryTuneHz(d))
 	void tuning.tune(hz)
 	if (!(await tuneLanded(tuning, hz))) {
-		const tuneError = tuning.get().error
-		showToast(
-			tuneError
-				? `Could not tune: ${tuneError}`
-				: "Not listening: the receiver was tuned elsewhere first",
-			{ tone: "warn" },
-		)
+		showToast(tuneFailedText(tuning.get().error), { tone: "warn" })
 		return false
 	}
 	// A tune started while the retarget request is out moves the receiver away: audio must not follow it.
@@ -140,9 +146,10 @@ async function retarget(
 		off()
 	}
 	if (moved) {
-		showToast("Not listening: the receiver was tuned elsewhere first", {
-			tone: "warn",
-		})
+		// the retarget started the core's live audio for this click: nobody hears it, so it stops again
+		if (!before.listening && !before.running && !services.listen.get().wanted)
+			void data.liveAudio.stop().catch(() => undefined)
+		showToast(tuneFailedText(null), { tone: "warn" })
 		return false
 	}
 	return true

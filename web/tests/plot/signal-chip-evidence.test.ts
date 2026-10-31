@@ -4,12 +4,15 @@ import type { Discovery, ScannerProof } from "@wavekit/api-types"
 
 import {
 	PROVEN_LIVE_HOLD_MS,
+	discoveryIndex,
 	identifiedAt,
 	identifiesChip,
 	tagState,
 	unidentifiedLabel,
 } from "../../src/plot/discovery-tags.ts"
 import {
+	ADOPT_WIDTH_RATIO,
+	adoptable,
 	BURST_HOLD_MS,
 	EMPTY_LABEL_GATE,
 	HOLD_MS,
@@ -25,6 +28,7 @@ import {
 	chipIdentity,
 	clusterSignals,
 	provenLiveAt,
+	weakChip,
 	weakDiscoveryAt,
 } from "../../src/plot/signal-chips.ts"
 
@@ -150,15 +154,84 @@ describe("signal chips: a proven chip across bursts with new track ids", () => {
 		expect(s.followed).toHaveLength(2)
 	})
 
-	it("re-attaches only within the position tolerance: a burst past it is another signal", () => {
+	it("re-attaches only within max(tol, width / 4) of the chip's centre: a burst past it is another signal", () => {
 		const c = ctx(() => true)
 		let s = step(EMPTY_LABEL_GATE, [idTrack(1)], 0, c)
-		// tolerance max(2 bins, 1 kHz) = 1 kHz beyond the 10 kHz-wide chip's edges
-		s = step(s, [idTrack(2, 20, 11_000)], 14_000, c)
+		// tol = max(2 bins of 250 Hz, 1 kHz) = 1 kHz; the 10 kHz-wide chip: max(1000, 10000 / 4) = 2500 Hz
+		s = step(s, [idTrack(2, 20, 2500)], 14_000, c)
 		expect(s.followed).toHaveLength(1)
 		s = step(EMPTY_LABEL_GATE, [idTrack(1)], 0, c)
-		s = step(s, [idTrack(2, 20, 11_001)], 14_000, c)
+		s = step(s, [idTrack(2, 20, 2501)], 14_000, c)
 		expect(s.followed).toHaveLength(2)
+	})
+
+	/** A burst `widthHz` wide centred `offHz` from MHZ, as track id `n`. */
+	function wTrack(n: number, widthHz: number, offHz = 0): Track {
+		const hz = MHZ * 1e6 + offHz
+		return {
+			startHz: hz - widthHz / 2,
+			endHz: hz + widthHz / 2,
+			flags: { burst: true, iqImage: false, edge: false },
+			peakDb: FLOOR + 20,
+			trackId: `t${n}`,
+		}
+	}
+
+	it("a 6.25 kHz neighbour never takes a held 12.5 kHz DMR chip", () => {
+		const c = ctx(() => true)
+		const dmr = step(EMPTY_LABEL_GATE, [wTrack(1, 12_500)], 0, c)
+		// one 6.25 kHz channel up: 6250 Hz off, past max(1000, 12500 / 4) = 3125 Hz, and 12500 / 6250 = 2 > 1.5
+		const up = step(dmr, [wTrack(2, 6250, 6250)], 14_000, c)
+		expect(up.followed).toHaveLength(2)
+		expect(up.followed.find(f => f.key === "rtl/t1")?.widthHz).toBe(12_500)
+		// on the same centre but half as wide: the width rule alone keeps them apart
+		const narrow = step(dmr, [wTrack(2, 6250)], 14_000, c)
+		expect(narrow.followed).toHaveLength(2)
+		// the DMR channel's own next burst still adopts the chip
+		const same = step(dmr, [wTrack(2, 12_000, 400)], 14_000, c)
+		expect(same.followed.map(f => f.key)).toEqual(["rtl/t2"])
+	})
+
+	it("adopts at the width ratio bound, not past it", () => {
+		expect(ADOPT_WIDTH_RATIO).toBe(1.5)
+		const c = ctx(() => true)
+		const chip = step(EMPTY_LABEL_GATE, [wTrack(1, 9000)], 0, c)
+		// 9000 / 6000 = 1.5: the same emission
+		expect(step(chip, [wTrack(2, 6000)], 14_000, c).followed).toHaveLength(1)
+		// 9000 / 5999 > 1.5: another one
+		expect(step(chip, [wTrack(2, 5999)], 14_000, c).followed).toHaveLength(2)
+		// and wider: 13500 / 9000 = 1.5 adopts, 13501 does not
+		expect(step(chip, [wTrack(2, 13_500)], 14_000, c).followed).toHaveLength(1)
+		expect(step(chip, [wTrack(2, 13_501)], 14_000, c).followed).toHaveLength(2)
+	})
+
+	it("adoptable follows the centre and width rule exactly (property)", () => {
+		// Feature: spectrum tag evidence, signal chips, Property 3: held proven chip adoption bound
+		// Validates: label-gate adoption by centre within max(tol, width / 4) and width ratio at most 1.5
+		fc.assert(
+			fc.property(
+				fc.integer({ min: 1000, max: 30_000 }),
+				fc.integer({ min: 1, max: 40_000 }),
+				fc.integer({ min: -20_000, max: 20_000 }),
+				fc.integer({ min: 0, max: 4000 }),
+				(chipW, trackW, off, tol) => {
+					const f = { hz: 1e8, widthHz: chipW }
+					const t = {
+						startHz: 1e8 + off - trackW / 2,
+						endHz: 1e8 + off + trackW / 2,
+					}
+					const want =
+						Math.abs(off) <= Math.max(tol, chipW / 4) &&
+						Math.max(chipW, trackW) <= 1.5 * Math.min(chipW, trackW)
+					expect(adoptable(f, t, tol)).toBe(want)
+				},
+			),
+			{ numRuns: 300 },
+		)
+		// no width (a malformed track) never adopts
+		expect(
+			adoptable({ hz: 1e8, widthHz: 9000 }, { startHz: 1e8, endHz: 1e8 }, 1000),
+		).toBe(false)
 	})
 
 	it("never re-attaches a chip that is not proven", () => {
@@ -440,6 +513,92 @@ describe("signal chips: weakDiscoveryAt", () => {
 		const b = heard({ id: "b", frequencyHz: HZ + 1000 })
 		expect(weakDiscoveryAt([a, b], HZ, 10_000)?.id).toBe("b")
 		expect(weakDiscoveryAt([b, a], HZ, 10_000)?.id).toBe("b")
+		expect(weakDiscoveryAt(discoveryIndex([a, b]), HZ, 10_000)?.id).toBe("b")
+	})
+
+	it("a likely discovery's chip uses the tag's name; only a heard one is Unidentified", () => {
+		const likely = disc("likely", {
+			confidence: "classified",
+			evidenceLevel: "weak",
+			proof: undefined,
+			identity: undefined,
+		})
+		expect(weakChip(likely)).toEqual({ label: "Likely DMR", state: "likely" })
+		expect(weakChip(heard())).toEqual({
+			label: "Unidentified · 4FSK ~9 kHz",
+			state: "unidentified",
+		})
+		// a heard decode anchor has no measured RF: plain Unidentified, never "Heard"
+		expect(weakChip(heard({ anchor: "decode" })).label).toBe("Unidentified")
+	})
+})
+
+describe("signal chips: the per-frame frequency index", () => {
+	it("answers the lookups exactly as a scan of every discovery does (property)", () => {
+		// Feature: spectrum tag evidence, signal chips, Property 4: index lookups equal full scans
+		// Validates: discoveryIndex binary search (identifiedAt, provenLiveAt, weakDiscoveryAt) matches the O(D) scan
+		const kinds = [
+			() => disc("p"),
+			() => heard(),
+			() =>
+				disc("l", {
+					confidence: "classified",
+					evidenceLevel: "weak",
+					proof: undefined,
+				}),
+			() => disc("ig", { operator: { lockout: true } } as Over),
+			() => disc("old", { lastSeenAt: ago(PROVEN_LIVE_HOLD_MS + 1) }),
+		]
+		fc.assert(
+			fc.property(
+				fc.array(
+					fc.record({
+						kind: fc.integer({ min: 0, max: kinds.length - 1 }),
+						// 1 kHz steps keep distances distinct from each other only sometimes: ties are tested too
+						off: fc.integer({ min: -40, max: 40 }),
+					}),
+					{ maxLength: 30 },
+				),
+				fc.integer({ min: -40_000, max: 40_000 }),
+				fc.integer({ min: 0, max: 30_000 }),
+				(specs, at, width) => {
+					// distinct frequencies: on equal distance either side, the scan and the index agree on the
+					// distance, so compare distances (and identity when the closest is unique)
+					const items = specs.map((x, i) => ({
+						...(kinds[x.kind] as () => Discovery)(),
+						id: `d${i}`,
+						frequencyHz: HZ + x.off * 1000,
+					}))
+					const index = discoveryIndex(items)
+					const hz = HZ + at
+					const dist = (d: Discovery | null) =>
+						d === null ? null : Math.abs(d.frequencyHz - hz)
+					expect(dist(identifiedAt(index, hz, width))).toBe(
+						dist(identifiedAt(items, hz, width)),
+					)
+					expect(dist(weakDiscoveryAt(index, hz, width))).toBe(
+						dist(weakDiscoveryAt(items, hz, width)),
+					)
+					expect(dist(provenLiveAt(index, hz, width, NONE, NOW))).toBe(
+						dist(provenLiveAt(items, hz, width, NONE, NOW)),
+					)
+				},
+			),
+			{ numRuns: 300 },
+		)
+	})
+
+	it("skips non-finite frequencies and finds the bounds exactly", () => {
+		const a = heard({ id: "a", frequencyHz: HZ + 3000 })
+		const nan = heard({ id: "nan", frequencyHz: Number.NaN })
+		const index = discoveryIndex([nan, a])
+		expect(index.sorted.map(d => d.id)).toEqual(["a"])
+		expect(weakDiscoveryAt(index, HZ, 1000)?.id).toBe("a")
+		expect(weakDiscoveryAt(index, HZ - 1, 1000)).toBeNull()
+		expect(weakDiscoveryAt(index, HZ + 6000, 1000)?.id).toBe("a")
+		expect(weakDiscoveryAt(index, HZ + 6001, 1000)).toBeNull()
+		expect(weakDiscoveryAt(discoveryIndex([]), HZ, 1000)).toBeNull()
+		expect(weakDiscoveryAt(index, Number.NaN, 1000)).toBeNull()
 	})
 })
 

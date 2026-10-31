@@ -3632,9 +3632,10 @@ item; see [Discovery revisions](#discovery-revisions).
 `lastActivity` (optional, additive) names the latest Activity event attributed to a
 discovery: `eventId` (read it with [`GET /api/activity/:eventId`](#get-apiactivityeventid),
 which answers 404 once the event expired) and `producedAt` (ISO time). It is absent when no
-event is attributed and on cores that do not attribute Activity events to discoveries; the
-current core does not set it yet. Clients fall back to Activity filtered by the
-discovery's frequency.
+event is attributed and on cores that do not attribute Activity events to discoveries. The
+field is optional and not yet populated by the current core: clients must not expect it, and
+fall back to Activity filtered by the discovery's frequency. Talkgroups and sources in
+`metadata` can come from the scanner's own decode check, so they need not match any Activity event.
 
 #### Discovery revisions
 

@@ -228,7 +228,7 @@ describe("identifyView", () => {
 	})
 
 	it("makes the identified card from what the answer names, nothing more", () => {
-		// A synthetic DMR channel on 431.926: a colour code and nothing heard on it yet
+		// A synthetic DMR channel on 431.613: a colour code and nothing heard on it yet
 		const bare = identifiedCard(
 			result({
 				protocol: "dmr",

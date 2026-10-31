@@ -202,6 +202,19 @@ export class ListenController extends Store<ListenState> {
 		}
 	}
 
+	/**
+	 * Undoes an unlock() whose Listen never started (its tune failed): the audio context is suspended again.
+	 * Does nothing while Listen is on here (it may have been started meanwhile).
+	 */
+	suspend(): void {
+		if (this.get().wanted) return
+		try {
+			this.player?.stop()
+		} catch {
+			// nothing was playing: the context stays as it is
+		}
+	}
+
 	/** Stops playing here; stops the core's live audio when no other client listens. */
 	async stop(): Promise<void> {
 		this.endRecording()

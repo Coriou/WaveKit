@@ -18,7 +18,7 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   as on a real receiver (about 300 ms to the first frame at the new centre, ROADMAP §8).
 - Retune sweep: `WAVEKIT_MOCK_RETUNE_SWEEP=1` (`retuneSweep` in `buildMockServer()`, `retune-sweep.ts`)
   retunes, from the first spectrum subscription, through 1090, 131, 136, 119.7, 144.6, 98, 438.9,
-  446.1, 431.1, 868.9, 162 and 155 MHz every 1.5 s, then parks at 431.078 MHz at 1.024 MS/s. Each window
+  446.1, 431.1, 868.9, 162 and 155 MHz every 1.5 s, then parks at 431.0125 MHz at 1.024 MS/s. Each window
   has its own steady signals and discoveries, a saved frequency sits at 399.502 MHz, and frames follow
   the tuner's sample rate. Parked, only four signals may be labelled in the plot.
 - Activity store lifecycle: `GET /api/activity/status` reports `stats.lifecycle`. With

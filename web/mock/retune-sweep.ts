@@ -1,6 +1,6 @@
 // Retune sweep scenario (band view retune correctness, lane WB): WAVEKIT_MOCK_RETUNE_SWEEP=1 (or
 // `retuneSweep: true` in buildMockServer) retunes the mock receiver through a multi-band sequence, one
-// window every RETUNE_SWEEP_STEP_MS, then parks at 431.078 MHz at 1.024 MS/s. Each window has its own
+// window every RETUNE_SWEEP_STEP_MS, then parks at 431.0125 MHz at 1.024 MS/s. Each window has its own
 // steady signals (so the plot labels them) and discoveries (so the discovery row and the band ruler's
 // heard strip fill), and a saved frequency sits at 399.502 MHz. After the park only the four parked
 // signals may be labelled: no chip, tag or heard mark from an earlier window inside the plot.
@@ -32,7 +32,7 @@ export const RETUNE_SWEEP_STEPS: readonly RetuneSweepStep[] = [
 	{ hz: M(868.9), sampleRateHz: FULL },
 	{ hz: M(162), sampleRateHz: FULL },
 	{ hz: M(155), sampleRateHz: FULL },
-	{ hz: M(431.078), sampleRateHz: 1_024_000 },
+	{ hz: M(431.0125), sampleRateHz: 1_024_000 },
 ]
 
 export const RETUNE_SWEEP_PARK: RetuneSweepStep = RETUNE_SWEEP_STEPS[
@@ -55,7 +55,7 @@ const steady = (
 	modulation: kind === "wfm" ? "wfm" : kind === "am" ? "am" : "nfm",
 })
 
-/** The four transmissions in the parked window (431.078 MHz ± 410 kHz usable). */
+/** The four transmissions in the parked window (431.0125 MHz ± 410 kHz usable). */
 export const RETUNE_SWEEP_PARKED_SIGNALS: readonly MockSignal[] = [
 	steady(430.8, 12_500, -62),
 	steady(430.97, 12_500, -58),

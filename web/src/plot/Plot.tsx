@@ -84,11 +84,12 @@ import {
 	useDiscoveryRow,
 } from "./DiscoveryTags.tsx"
 import {
+	discoveryIndex,
+	type DiscoveryIndex,
 	discoveryTagFilter,
 	howWeKnow,
 	identifiedLabel,
 	tagState,
-	unidentifiedLabel,
 } from "./discovery-tags.ts"
 import {
 	chipIdentity,
@@ -97,6 +98,7 @@ import {
 	fadingChips,
 	layoutChips,
 	provenLiveAt,
+	weakChip,
 	weakDiscoveryAt,
 } from "./signal-chips.ts"
 import {
@@ -117,6 +119,7 @@ import {
 	resetLabelGate,
 	stepLabelGate,
 	type GatedSignal,
+	type LabelGateContext,
 	type LabelGateState,
 } from "./label-gate.ts"
 
@@ -187,6 +190,11 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 	const savedItems = useStore(data.savedFrequencies, s => s.items)
 	const discoveries = useStore(data.scanner, s => s.discoveries.byId)
 	const activeNow = useStore(data.scanner, s => s.activeNow)
+	// by frequency, once per discovery change: the per-frame chip lookups binary-search it
+	const discIndex = useMemo(
+		() => discoveryIndex(discoveries.values()),
+		[discoveries],
+	)
 
 	const bodyRef = useRef<HTMLDivElement>(null)
 	const [size, setSize] = useState({ w: 0, h: 0 })
@@ -289,6 +297,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 		plan,
 		saved: savedItems,
 		discoveries,
+		discIndex,
 		activeNow,
 	})
 	gateCtx.current = {
@@ -297,8 +306,47 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 		plan,
 		saved: savedItems,
 		discoveries,
+		discIndex,
 		activeNow,
 	}
+	// The gate's lookups, made once: they read gateCtx and the frame's wall clock, so a frame allocates no closures.
+	const wallNow = useRef(0)
+	const gateLookups = useMemo<LabelGateContext>(
+		() => ({
+			mode: "clear",
+			tunedHz: null,
+			isNamed: (hz, widthHz, scanner) => {
+				const g = gateCtx.current
+				if (
+					namedChannelAt(g.plan, hz, widthHz) ||
+					savedNear(g.saved, hz, widthHz) !== null
+				)
+					return true
+				const id = chipIdentity(
+					g.discoveries,
+					scanner,
+					hz,
+					widthHz,
+					g.discIndex,
+				)
+				return id.discovery !== null || id.trackDecoded
+			},
+			// the tag's wall clock, not the frame clock: a proven chip holds while its tag is live
+			provenLive: (hz, widthHz) => {
+				const g = gateCtx.current
+				return (
+					provenLiveAt(
+						g.discIndex,
+						hz,
+						widthHz,
+						g.activeNow,
+						wallNow.current,
+					) !== null
+				)
+			},
+		}),
+		[],
+	)
 
 	const onFrameMeta = (m: SpectrumFrameMeta) => {
 		setMeta(m)
@@ -311,28 +359,15 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 		)
 		setTracks(heldRef.current.map(h => h.track))
 		const g = gateCtx.current
-		gateRef.current = stepLabelGate(gateRef.current, m, performance.now(), {
-			mode: g.mode,
-			tunedHz: g.tunedHz,
-			isNamed: (hz, widthHz, scanner) => {
-				if (
-					namedChannelAt(g.plan, hz, widthHz) ||
-					savedNear(g.saved, hz, widthHz) !== null
-				)
-					return true
-				const id = chipIdentity(g.discoveries, scanner, hz, widthHz)
-				return id.discovery !== null || id.trackDecoded
-			},
-			// the tag's wall clock, not the frame clock: a proven chip holds while its tag is live
-			provenLive: (hz, widthHz) =>
-				provenLiveAt(
-					g.discoveries.values(),
-					hz,
-					widthHz,
-					g.activeNow,
-					Date.now(),
-				) !== null,
-		})
+		gateLookups.mode = g.mode
+		gateLookups.tunedHz = g.tunedHz
+		wallNow.current = Date.now()
+		gateRef.current = stepLabelGate(
+			gateRef.current,
+			m,
+			performance.now(),
+			gateLookups,
+		)
 		setLabelled(gatedSignals(gateRef.current))
 	}
 	const onStatus = (status: SpectrumEngineStatus) => {
@@ -427,6 +462,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 								plan={plan}
 								saved={savedItems}
 								discoveries={discoveries}
+								discIndex={discIndex}
 								view={view}
 								widthPx={size.w}
 								traceCss={layout.traceCss}
@@ -770,9 +806,9 @@ function savedNear(
 	return best
 }
 
-/** A chip's discovery: proven (styled like a proven tag), unidentified (quiet), and its "how we know" line. */
+/** A chip's discovery: proven (styled like a proven tag), likely, unidentified (quiet), and its "how we know" line. */
 interface ChipEvidence {
-	state: "proven" | "unidentified" | null
+	state: "proven" | "likely" | "unidentified" | null
 	how: string
 }
 
@@ -781,6 +817,7 @@ function SignalLabels({
 	plan,
 	saved,
 	discoveries,
+	discIndex,
 	view,
 	widthPx,
 	traceCss,
@@ -792,6 +829,7 @@ function SignalLabels({
 	plan: ResolvedBandPlanView | null
 	saved: readonly SavedFrequencyRow[]
 	discoveries: ReadonlyMap<string, Discovery>
+	discIndex: DiscoveryIndex
 	view: SpectrumViewSpan
 	widthPx: number
 	traceCss: number
@@ -823,6 +861,7 @@ function SignalLabels({
 				scanner,
 				s.hz,
 				s.widthHz,
+				discIndex,
 			)
 			const label = d
 				? identifiedLabel(d)
@@ -842,13 +881,15 @@ function SignalLabels({
 			if (savedNear(saved, s.hz, s.widthHz)) return { ...s, known: true }
 			if (s.known) return s
 			// a bare frequency near a discovery nothing has proven says what was measured there, quietly
-			const weak = weakDiscoveryAt(discoveries.values(), s.hz, s.widthHz)
+			const weak = weakDiscoveryAt(discIndex, s.hz, s.widthHz)
 			if (!weak) return s
-			how.set(s.hz, { state: "unidentified", how: howWeKnow(weak) })
-			return { ...s, label: unidentifiedLabel(weak), sub: formatMHz(s.hz, 3) }
+			// a likely one reads as its tag does ("Likely DMR"); only a heard one is "Unidentified · …"
+			const chip = weakChip(weak)
+			how.set(s.hz, { state: chip.state, how: howWeKnow(weak) })
+			return { ...s, label: chip.label, sub: formatMHz(s.hz, 3) }
 		})
 		return { signals: list, evidence: how }
-	}, [shown, plan, saved, discoveries])
+	}, [shown, plan, saved, discoveries, discIndex])
 	const placed: PlacedLabel[] = useMemo(
 		() =>
 			placeLabels(clusterSignals(signals, view, widthPx), view, {

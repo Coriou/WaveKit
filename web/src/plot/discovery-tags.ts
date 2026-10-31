@@ -484,6 +484,16 @@ export function placeDiscoveryTags(
 	return placed
 }
 
+/** Where Tune and Listen go for a discovery, as the drawer does: its frequency plus the measured offset. */
+export function discoveryTuneHz(
+	d: Pick<Discovery, "frequencyHz" | "measuredOffsetHz">,
+): number {
+	const off = d.measuredOffsetHz
+	return (
+		d.frequencyHz + (typeof off === "number" && Number.isFinite(off) ? off : 0)
+	)
+}
+
 export interface TagPopoverRow {
 	id: string
 	/** "433.9200". */
@@ -513,7 +523,7 @@ export function tagPopoverRows(
 			protocol: label ? what.protocol : null,
 			likely: what.likely,
 			next: isVerified(d) ? null : what.next,
-			tuneHz: d.frequencyHz,
+			tuneHz: discoveryTuneHz(d),
 		}
 	})
 }
@@ -540,18 +550,67 @@ function identityWords(identity: Discovery["identity"]): string {
 	}
 }
 
-function hasCalls(d: Pick<Discovery, "metadata">): boolean {
-	const m: Partial<Discovery["metadata"]> | undefined = d.metadata
-	return (
-		(Array.isArray(m?.talkgroups) && m.talkgroups.length > 0) ||
-		(Array.isArray(m?.sources) && m.sources.length > 0)
-	)
+/** At most this many talkgroups, and as many sources, are named in the scanner-check line ("+n more" after). */
+export const CHECK_IDS_MAX = 3
+/** A talkgroup or source id longer than this is malformed and never shown. */
+export const CHECK_ID_MAX_CHARS = 16
+
+/** Well-formed ids (non-empty, at most CHECK_ID_MAX_CHARS, no control characters), deduplicated, in order. */
+function checkIds(value: unknown): string[] {
+	if (!Array.isArray(value)) return []
+	const out: string[] = []
+	for (const v of value as unknown[]) {
+		const id =
+			typeof v === "string"
+				? v.trim()
+				: typeof v === "number" && Number.isFinite(v)
+					? String(v)
+					: ""
+		if (!id || id.length > CHECK_ID_MAX_CHARS) continue
+		if (/[\u0000-\u001f\u007f]/.test(id) || out.includes(id)) continue
+		out.push(id)
+	}
+	return out
+}
+
+/** "talkgroup 1", "talkgroups 1, 2, 3 +2 more"; null for none. */
+function idList(
+	one: string,
+	many: string,
+	ids: readonly string[],
+): string | null {
+	if (ids.length === 0) return null
+	const shown = ids.slice(0, CHECK_IDS_MAX).join(", ")
+	const more = ids.length - CHECK_IDS_MAX
+	return `${ids.length === 1 ? one : many} ${shown}${more > 0 ? ` +${more} more` : ""}`
 }
 
 /**
+ * The talkgroups and sources the scanner's own decode check saw (Discovery.metadata, filled by the scanner's
+ * confirm probe, not by Activity rows): "Talkgroup 1, source 12 seen by the scanner's check"; null for none.
+ */
+export function scannerCheckCalls(
+	d: Pick<Discovery, "metadata">,
+): string | null {
+	const m: Partial<Discovery["metadata"]> | undefined = d.metadata
+	const parts = [
+		idList("talkgroup", "talkgroups", checkIds(m?.talkgroups)),
+		idList("source", "sources", checkIds(m?.sources)),
+	].filter((x): x is string => x !== null)
+	if (parts.length === 0) return null
+	const text = `${parts.join(", ")} seen by the scanner's check`
+	return text.charAt(0).toUpperCase() + text.slice(1)
+}
+
+/** Why Activity may be empty for calls the scanner's check saw: they are not Activity rows. */
+export const SCANNER_CHECK_NOTE =
+	"Calls decoded by the scanner's check are not Activity rows: Activity lists what the decoders heard."
+
+/**
  * How we know what a discovery is, in one line: "DMR decoded: checked control bursts, colour code 7" for a
- * decode with no call in it, "… checked calls, …" with talkgroups or sources, the core's analog or digital
- * summary otherwise, and "Not proven: …" without a proof.
+ * decode with no call in it, "DMR decoded by the scanner's check, colour code 7" when that check saw talkgroups
+ * or sources (scannerCheckCalls names them), the core's analog or digital summary otherwise, and "Not proven: …"
+ * without a proof.
  */
 export function howWeKnow(d: Discovery): string {
 	const state = tagState(d)
@@ -561,13 +620,13 @@ export function howWeKnow(d: Discovery): string {
 		if (d.anchor === "decode") return `${confidenceText(d)}: checked decodes`
 		const what =
 			d.family === "digital-voice"
-				? hasCalls(d)
-					? "checked calls"
-					: "checked control bursts"
-				: "checked messages"
+				? scannerCheckCalls(d) !== null
+					? " by the scanner's check"
+					: ": checked control bursts"
+				: ": checked messages"
 		const id = identityWords(d.identity)
 		const enc = d.encrypted ? " (encrypted)" : ""
-		return `${protocolName(d.protocol)} decoded: ${what}${id ? `, ${id}` : ""}${enc}`
+		return `${protocolName(d.protocol)} decoded${what}${id ? `, ${id}` : ""}${enc}`
 	}
 	if (state === "proven")
 		return summary ? `Heard as ${summary}` : "Heard as analog"
@@ -576,6 +635,26 @@ export function howWeKnow(d: Discovery): string {
 	if (state === "likely")
 		return `Not proven: ${confidenceText(d)} from the signal's shape`
 	return "Not proven: heard on the air, not identified"
+}
+
+/** Words of a line, lower case, with "CC10" read as "colour code 10" (the core's summary shorthand). */
+function words(text: string): string[] {
+	return text
+		.toLowerCase()
+		.replace(/\bcc\s*(\d+)/g, "colour code $1")
+		.split(/[^a-z0-9.]+/)
+		.map(w => w.replace(/^\.+|\.+$/g, ""))
+		.filter(w => w.length > 0)
+}
+
+/**
+ * Whether the core's proof summary only repeats the how-we-know line: every one of its words (CC read as colour
+ * code) is already in it. "DMR decoded (CC10)" repeats "DMR decoded: checked control bursts, colour code 10".
+ */
+export function summaryRepeats(summary: string, how: string): boolean {
+	const have = new Set(words(how))
+	const said = words(summary)
+	return said.length > 0 && said.every(w => have.has(w))
 }
 
 /** The evidence level in words; a missing or unknown level says so (never "proven"). */
@@ -609,14 +688,32 @@ export interface TagDetail {
 	lastSeen: string
 	/** "41 s", "1 h 5 min"; "unknown" when malformed. */
 	airtime: string
-	/** Calls heard (talkgroups or sources): the Activity link shows; else `noCalls` may say why there are none. */
+	/** The scanner's check saw talkgroups or sources (scannerCheckCalls); else `noCalls` may say why there are none. */
 	calls: boolean
+	/** "Talkgroup 1, source 12 seen by the scanner's check"; null when the check saw none. */
+	checkCalls: string | null
+	/** SCANNER_CHECK_NOTE when the check saw calls and the core names no Activity event for them; else null. */
+	checkNote: string | null
 	/** "No calls heard yet — control channel only" (proven digital voice), "No calls heard yet"; null otherwise. */
 	noCalls: string | null
 	/** The core's latest Activity event for this discovery (lastActivity), when well formed: "Last call" opens it. */
 	lastEventId: string | null
-	/** Live (tagTier active): heard now or within its hold. */
+	/** Heard just now: active now, or last heard at most HEARD_LIVE_MS ago (not the tag's whole live hold). */
 	live: boolean
+}
+
+/** The popover says "live" only this long after the discovery was last heard (its tag may stay lit for longer). */
+export const HEARD_LIVE_MS = 30_000
+
+/** Active now, or heard at most HEARD_LIVE_MS ago (a time beyond the clock's slack is malformed: never). */
+export function heardLive(
+	d: Pick<Discovery, "id" | "lastSeenAt">,
+	activeNow: ReadonlySet<string>,
+	now: number,
+): boolean {
+	if (activeNow.has(d.id)) return true
+	const age = now - Date.parse(d.lastSeenAt)
+	return age >= -FUTURE_SLACK_MS && age <= HEARD_LIVE_MS
 }
 
 /** What a single tag's popover says about its discovery (R2): how we know, evidence, when, airtime, calls. */
@@ -631,7 +728,9 @@ export function tagDetail(
 	const how = howWeKnow(d)
 	const summary =
 		typeof d.proof?.summary === "string" ? d.proof.summary.trim() : ""
-	const calls = hasCalls(d)
+	const checkCalls = scannerCheckCalls(d)
+	const calls = checkCalls !== null
+	const lastEventId = lastActivityEventId(d)
 	const voice = d.family === "digital-voice" && d.anchor !== "decode"
 	const air = d.airtimeMs
 	return {
@@ -640,7 +739,7 @@ export function tagDetail(
 		name: tagName(d),
 		freq: mhz(d.frequencyHz),
 		howWeKnow: how,
-		coreSummary: summary && !how.includes(summary) ? summary : null,
+		coreSummary: summary && !summaryRepeats(summary, how) ? summary : null,
 		evidence: evidenceText(d),
 		firstSeen: agoWords(d.firstSeenAt, now),
 		lastSeen: activeNow.has(d.id) ? "active now" : agoWords(d.lastSeenAt, now),
@@ -651,14 +750,16 @@ export function tagDetail(
 					: formatWait(air)
 				: "unknown",
 		calls,
+		checkCalls,
+		checkNote: calls && lastEventId === null ? SCANNER_CHECK_NOTE : null,
 		noCalls:
 			calls || !voice
 				? null
 				: state === "proven"
 					? "No calls heard yet — control channel only"
 					: "No calls heard yet",
-		live: tagTier(d, activeNow, now) === "active",
-		lastEventId: lastActivityEventId(d),
+		live: heardLive(d, activeNow, now),
+		lastEventId,
 	}
 }
 
@@ -814,23 +915,102 @@ export function identifiesChip(d: Discovery): boolean {
 }
 
 /**
+ * Discoveries in frequency order for the per-frame chip lookups: built once per `byId` (on a discovery change,
+ * O(D log D)), then each lookup is a binary search plus the few within its tolerance, O(log D + k), instead of a
+ * scan of every discovery for every followed signal (O(F·D) a frame).
+ */
+export interface DiscoveryIndex {
+	/** Finite-frequency discoveries, by frequency then id. */
+	readonly sorted: readonly Discovery[]
+}
+
+export function discoveryIndex(items: Iterable<Discovery>): DiscoveryIndex {
+	const sorted: Discovery[] = []
+	for (const d of items) if (Number.isFinite(d.frequencyHz)) sorted.push(d)
+	sorted.sort(byFrequency)
+	return { sorted }
+}
+
+function isIndex(
+	items: Iterable<Discovery> | DiscoveryIndex,
+): items is DiscoveryIndex {
+	return "sorted" in items && Array.isArray(items.sorted)
+}
+
+/** The first position whose frequency is at least `hz`. */
+function lowerBound(sorted: readonly Discovery[], hz: number): number {
+	let lo = 0
+	let hi = sorted.length
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1
+		if ((sorted[mid] as Discovery).frequencyHz < hz) lo = mid + 1
+		else hi = mid
+	}
+	return lo
+}
+
+/** What a near lookup accepts; `a` and `b` carry its clock and active set without a closure per call. */
+export type NearPick<A, B> = (d: Discovery, a: A, b: B) => boolean
+
+/**
+ * The discovery closest to `hz` within `tolHz` that `pick` accepts, or null; ties go to the first in order
+ * (frequency order for an index). A non-finite frequency never matches (|NaN| and Infinity fail `off <= tol`).
+ */
+export function closestNear<A, B>(
+	items: Iterable<Discovery> | DiscoveryIndex,
+	hz: number,
+	tolHz: number,
+	pick: NearPick<A, B>,
+	a: A,
+	b: B,
+): Discovery | null {
+	if (!Number.isFinite(hz) || !(tolHz >= 0)) return null
+	let best: Discovery | null = null
+	let bestOff = Infinity
+	if (isIndex(items)) {
+		const sorted = items.sorted
+		const top = hz + tolHz
+		for (let i = lowerBound(sorted, hz - tolHz); i < sorted.length; i++) {
+			const d = sorted[i] as Discovery
+			if (d.frequencyHz > top) break
+			const off = Math.abs(d.frequencyHz - hz)
+			if (off <= tolHz && off < bestOff && pick(d, a, b)) {
+				best = d
+				bestOff = off
+			}
+		}
+		return best
+	}
+	for (const d of items) {
+		const off = Math.abs(d.frequencyHz - hz)
+		if (off <= tolHz && off < bestOff && pick(d, a, b)) {
+			best = d
+			bestOff = off
+		}
+	}
+	return best
+}
+
+const pickIdentified: NearPick<unknown, unknown> = d => identifiesChip(d)
+
+/**
  * The identified discovery on a spectrum signal (identifiesChip), or null: Signal labels name the signal by what
  * was identified there ("DMR · CC 1") before a saved frequency or the band plan does. The closest within
  * max(3 kHz, half the signal's width).
  */
 export function identifiedAt(
-	items: Iterable<Discovery>,
+	items: Iterable<Discovery> | DiscoveryIndex,
 	hz: number,
 	widthHz: number,
 ): Discovery | null {
-	const tol = Math.max(3000, widthHz / 2)
-	let best: Discovery | null = null
-	for (const d of items) {
-		if (!identifiesChip(d)) continue
-		const off = Math.abs(d.frequencyHz - hz)
-		if (off <= tol && (!best || off < Math.abs(best.frequencyHz - hz))) best = d
-	}
-	return best
+	return closestNear(
+		items,
+		hz,
+		Math.max(3000, widthHz / 2),
+		pickIdentified,
+		null,
+		null,
+	)
 }
 
 /** What a signal chip says for an identified signal: the decoder's words ("DMR · CC 1"), not a name someone gave it. */

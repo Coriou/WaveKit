@@ -216,7 +216,7 @@ describe("IdentifyStore", () => {
 			{ getItem: () => "1", setItem: () => undefined },
 			() => 1000,
 		)
-		await identify.start(431_926_000, { auto: true })
+		await identify.start(431_613_000, { auto: true })
 		// on its own: answers the transmission that started it, never waits on and on
 		expect(identify.get()).toMatchObject({ auto: true, waitSince: null })
 		const result = {
@@ -238,21 +238,21 @@ describe("IdentifyStore", () => {
 			channel: "scanner",
 			data: {
 				jobId: "j_2",
-				targetHz: 431_926_000,
+				targetHz: 431_613_000,
 				state: "identified",
 				trials: [],
 				result,
 			},
 		})
 		expect(identify.get().known).toEqual([
-			{ hz: 431_926_000, result, at: 1000 },
+			{ hz: 431_613_000, result, at: 1000 },
 		])
 		identify.reset()
 		expect(identify.get().known).toHaveLength(1)
-		expect(knownAt(identify.get().known, 431_930_000, 6250)?.hz).toBe(
-			431_926_000,
+		expect(knownAt(identify.get().known, 431_617_000, 6250)?.hz).toBe(
+			431_613_000,
 		)
-		expect(knownAt(identify.get().known, 431_950_000, 6250)).toBeNull()
+		expect(knownAt(identify.get().known, 431_637_000, 6250)).toBeNull()
 		identify.dispose()
 	})
 
@@ -286,7 +286,7 @@ describe("IdentifyStore", () => {
 			const identify = new IdentifyStore(api, events, storage)
 			identify.setUntilSignal(true)
 			expect(kept.get("wk.identify.untilSignal")).toBe("1")
-			await identify.start(431_925_000)
+			await identify.start(431_612_500)
 			// WG12: the core waits for the transmission itself
 			expect(bodies[0]).toMatchObject({
 				waitUntilSignal: true,
@@ -295,7 +295,7 @@ describe("IdentifyStore", () => {
 			const since = identify.get().waitSince
 			expect(since).not.toBeNull()
 			const nothing = {
-				targetHz: 431_925_000,
+				targetHz: 431_612_500,
 				state: "unidentified",
 				trials: [],
 				result: {
@@ -320,7 +320,7 @@ describe("IdentifyStore", () => {
 				channel: "scanner",
 				data: {
 					jobId: "j_2",
-					targetHz: 431_925_000,
+					targetHz: 431_612_500,
 					state: "identified",
 					trials: [],
 				},
@@ -365,7 +365,7 @@ describe("IdentifyStore", () => {
 			})
 			const identify = new IdentifyStore(api, events)
 			identify.setUntilSignal(true)
-			await identify.start(431_925_000)
+			await identify.start(431_612_500)
 			expect(bodies).toHaveLength(2)
 			expect(bodies[1]).toMatchObject({ timeoutMs: 120_000 })
 			expect(bodies[1]?.["waitUntilSignal"]).toBeUndefined()
@@ -376,7 +376,7 @@ describe("IdentifyStore", () => {
 				channel: "scanner",
 				data: {
 					jobId: "j_2",
-					targetHz: 431_925_000,
+					targetHz: 431_612_500,
 					state: "unidentified",
 					trials: [],
 					result: {
@@ -422,13 +422,13 @@ describe("IdentifyStore", () => {
 			})
 			const identify = new IdentifyStore(api, events)
 			identify.setUntilSignal(true)
-			await identify.start(431_925_000)
+			await identify.start(431_612_500)
 			last().receive({
 				type: "scanner:identify",
 				channel: "scanner",
 				data: {
 					jobId: "j_1",
-					targetHz: 431_925_000,
+					targetHz: 431_612_500,
 					state: "unidentified",
 					trials: [],
 				},

@@ -74,7 +74,7 @@ function feed(
 }
 
 const AT_155: Window = { centreHz: 155e6, rateHz: 2.4e6, epoch: 11 }
-const AT_PARK: Window = { centreHz: 431.078e6, rateHz: 1.024e6, epoch: 12 }
+const AT_PARK: Window = { centreHz: 431.0125e6, rateHz: 1.024e6, epoch: 12 }
 
 describe("label gate across a retune", () => {
 	it("drops every chip of the old window at once, without a fading one", () => {
@@ -111,7 +111,7 @@ describe("label gate across a retune", () => {
 
 	it("drops the old window's chips on an overlapping retune, even for a signal in both windows", () => {
 		const a: Window = { centreHz: 431.1e6, rateHz: 2.4e6, epoch: 5 }
-		const b: Window = { centreHz: 431.078e6, rateHz: 1.024e6, epoch: 6 }
+		const b: Window = { centreHz: 431.0125e6, rateHz: 1.024e6, epoch: 6 }
 		let s = feed(EMPTY_LABEL_GATE, frame(a, [430.8, 431.2, 432]), 0, 1000)
 		const old = new Set(gatedSignals(s).map(g => g.id))
 		s = stepLabelGate(s, frame(b, [430.8, 431.2]), 1100, ALL)
@@ -165,7 +165,7 @@ describe("label gate across a retune", () => {
 })
 
 describe("fading chips", () => {
-	const view = { startHz: 430.67e6, endHz: 431.49e6 }
+	const view = { startHz: 430.6025e6, endHz: 431.4225e6 }
 	const W = 1000
 
 	it("places a leaving chip at its frequency in this view, not at its stored x", () => {

@@ -22,13 +22,14 @@ import { useStore } from "../data/index.ts"
 import type { ScannerStore } from "../data/scanner-store.ts"
 import { whatIsThis } from "../data/scanner-format.ts"
 import { useNow } from "../features/hooks.ts"
-import { listenAfterTune } from "../features/listen/after-tune.ts"
+import { listenTo } from "../features/scanner/drawer/actions.ts"
 import { openDiscovery } from "../features/scanner/ui-store.ts"
 import { shellStore } from "../shell/store.ts"
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
 import {
 	discoveryFetchSpan,
 	type DiscoveryTagFilter,
+	discoveryTuneHz,
 	discoveryRowLayout,
 	hasTaggable,
 	lastActivityEventId,
@@ -118,6 +119,9 @@ export function useDiscoveryFetch(
 		}
 	}, [scanner, up, startHz, endHz, epoch])
 }
+
+/** The open popover's own clock: "live" means heard in the last HEARD_LIVE_MS (30 s), so a minute tick is too slow. */
+const DETAIL_CLOCK_MS = 5_000
 
 /** Popovers and confirms of the discovery row: the plot's pointer, wheel and menu handlers leave them alone. */
 export const DISCOVERY_POP_CLASS = "wk-plot-disc-pop"
@@ -214,10 +218,11 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 	const services = useServices()
 	const actions: DetailActions = {
 		tune,
-		listen: hz => {
+		listen: d => {
 			close(false)
-			// synchronous in the click: listenAfterTune unlocks audio before it awaits the tune
-			void listenAfterTune(hz, h => controller.tuneTo(h), services.listen)
+			// the drawer's Listen, synchronous in the click (audio unlocks before it awaits the tune): the same
+			// frequency, the same "Could not tune" warning, and the core's audio stopped again if the receiver moves
+			void listenTo(services, d)
 		},
 		scanner: id => {
 			close(false)
@@ -343,9 +348,9 @@ const LEGEND =
 
 interface DetailActions {
 	tune: (hz: number) => void
-	listen: (hz: number) => void
+	listen: (d: Discovery) => void
 	scanner: (id: string) => void
-	/** Last call (the core's last Activity event for it), else Activity filtered to its frequency. */
+	/** Last call (the core's last Activity event for it), else Search Activity on its frequency. */
 	activity: (d: Discovery) => void
 }
 
@@ -447,7 +452,9 @@ function TagDetailView({
 	actions: DetailActions
 	firstRef: RefObject<HTMLButtonElement | null>
 }) {
-	const v = tagDetail(d, activeNow, now)
+	// the row's minute clock places the tags; the popover's "live" and "ago" follow a 5 s one while it is open
+	const fresh = useNow(true, DETAIL_CLOCK_MS)
+	const v = tagDetail(d, activeNow, Math.max(now, fresh))
 	const what = whatIsThis(d)
 	const next = v.state === "proven" ? null : what.next
 	return (
@@ -462,6 +469,7 @@ function TagDetailView({
 				{v.freq} MHz{v.live ? " · live" : ""}
 			</div>
 			<p className="wk-plot-disc-how">{v.howWeKnow}</p>
+			{v.checkCalls && <p className="wk-plot-disc-how">{v.checkCalls}</p>}
 			{v.coreSummary && (
 				<p className="wk-plot-disc-likely">Core: {v.coreSummary}</p>
 			)}
@@ -479,6 +487,7 @@ function TagDetailView({
 				<dd>{v.airtime}</dd>
 			</dl>
 			{v.noCalls && <p className="wk-plot-disc-next">{v.noCalls}</p>}
+			{v.checkNote && <p className="wk-plot-disc-likely">{v.checkNote}</p>}
 			{next && <p className="wk-plot-disc-next">{next}</p>}
 			<div className="wk-plot-disc-actions">
 				<button
@@ -488,7 +497,7 @@ function TagDetailView({
 					data-size="sm"
 					data-variant="primary"
 					aria-label={`Tune to ${v.freq} MHz`}
-					onClick={() => actions.tune(d.frequencyHz)}
+					onClick={() => actions.tune(discoveryTuneHz(d))}
 				>
 					Tune
 				</button>
@@ -497,7 +506,7 @@ function TagDetailView({
 					className="wk-btn"
 					data-size="sm"
 					aria-label={`Listen to ${v.freq} MHz`}
-					onClick={() => actions.listen(d.frequencyHz)}
+					onClick={() => actions.listen(d)}
 				>
 					Listen
 				</button>
@@ -525,10 +534,10 @@ function TagDetailView({
 							type="button"
 							className="wk-btn"
 							data-size="sm"
-							title="What was heard on this frequency, in Activity"
+							title="Search Activity on this frequency"
 							onClick={() => actions.activity(d)}
 						>
-							{v.calls ? "Last calls" : "In Activity"}
+							Search Activity
 						</button>
 					)
 				)}

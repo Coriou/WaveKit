@@ -123,7 +123,7 @@ export interface MockServerOptions {
 	/** Seeds the band inspection UX discoveries (./band-fixtures.ts; WAVEKIT_MOCK_BAND_FIXTURES=1). */
 	bandFixtures?: boolean
 	/**
-	 * Retunes through the multi-band sequence of ./retune-sweep.ts, then parks at 431.078 MHz at
+	 * Retunes through the multi-band sequence of ./retune-sweep.ts, then parks at 431.0125 MHz at
 	 * 1.024 MS/s; frames follow the tuner's sample rate (WAVEKIT_MOCK_RETUNE_SWEEP=1).
 	 */
 	retuneSweep?: boolean
