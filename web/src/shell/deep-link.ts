@@ -10,7 +10,11 @@ import type {
 	SearchToken,
 	TokenKind,
 } from "../features/activity/search.ts"
-import { CATEGORY_CHIPS, token } from "../features/activity/search.ts"
+import {
+	CATEGORY_CHIPS,
+	decoderToken,
+	token,
+} from "../features/activity/search.ts"
 import type { PresetRangeId, TimeRange } from "../features/activity/scope.ts"
 import { ANY_TIME, TIME_RANGES } from "../features/activity/scope.ts"
 
@@ -43,6 +47,7 @@ const TOKEN_KINDS = new Set<TokenKind>([
 	"ctcss",
 	"dcs",
 	"entity",
+	"decoder",
 	"text",
 ])
 
@@ -51,7 +56,35 @@ const isDrawer = (x: string): x is DrawerId =>
 const isView = (x: string): x is ViewId =>
 	(VIEWS as readonly string[]).includes(x)
 
+/** The longest decoder display name a link carries; a longer one is left out (the chip shows the id). */
+export const DECODER_NAME_MAX = 64
+const DECODER_LABEL = "Decoder "
+
+// A decoder token is `decoder:<id>~<name>`, both percent-encoded with "~" as %7E, so an id holding "~" stays
+// unambiguous; the name is the chip's display name, left out when it adds nothing.
+const encodePart = (s: string): string =>
+	encodeURIComponent(s).replace(/~/g, "%7E")
+
+function decodePart(s: string): string | null {
+	try {
+		return decodeURIComponent(s)
+	} catch {
+		return null
+	}
+}
+
+function decoderName(t: SearchToken): string | null {
+	if (!t.label.startsWith(DECODER_LABEL)) return null
+	if (t.label === token("decoder", t.value).label) return null
+	const name = t.label.slice(DECODER_LABEL.length).trim()
+	return name !== "" && name.length <= DECODER_NAME_MAX ? name : null
+}
+
 function formatToken(t: SearchToken): string {
+	if (t.kind === "decoder") {
+		const name = decoderName(t)
+		return `decoder:${encodePart(t.value)}${name === null ? "" : `~${encodePart(name)}`}`
+	}
 	const span =
 		t.kind === "frequency" && t.spanHz !== undefined ? `~${t.spanHz}` : ""
 	return `${t.kind}:${t.value}${span}`
@@ -70,6 +103,16 @@ function parseToken(raw: string): SearchToken | null {
 		value = String(Math.round(n))
 		const s = span === undefined ? Number.NaN : Number(span)
 		return token(kind, value, Number.isFinite(s) && s > 0 ? { spanHz: s } : {})
+	}
+	if (kind === "decoder") {
+		const tilde = value.indexOf("~")
+		const id = decodePart(tilde < 0 ? value : value.slice(0, tilde))
+		if (id === null || id.trim() === "") return null
+		const name = tilde < 0 ? null : decodePart(value.slice(tilde + 1))?.trim()
+		return decoderToken(
+			id,
+			name && name.length <= DECODER_NAME_MAX ? name : undefined,
+		)
 	}
 	return token(kind, value)
 }

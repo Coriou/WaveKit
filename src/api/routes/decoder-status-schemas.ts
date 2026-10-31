@@ -133,6 +133,7 @@ export const decoderStatusExtensionProperties = {
 	},
 	idleTimeoutMs: { type: "number", minimum: 0 },
 	nextRestartAt: { type: "string", format: "date-time" },
+	restartInFlight: { type: "boolean" },
 	// Rate model B3 (reversible suspension).
 	desiredRunning: { type: "boolean" },
 	suspended: { type: "boolean" },

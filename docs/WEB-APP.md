@@ -114,35 +114,73 @@ channel only`. **Last call** shows only when the core names the discovery's last
 
 ### The tuned card
 
-The card on the left follows the frequency you are tuned to: what is heard there, the last
-transmissions, decoded content, and the actions (Activity, save, Identify, Open message).
+The card on the left follows the frequency you are tuned to. From the top it says what the signal
+is, then the frequency once, the mode and channel width, the decoders on its band, and the actions
+(Activity, save, Identify, Open message).
 
-Under the last transmissions, **On this band** lists the decoders whose band holds the tuned
-frequency (within 200 kHz of one of their frequencies or of the span between them, or inside
-their band), the ones listening first. Each line is the core's one-sentence verdict, for example
-"ADS-B decoding" or "ADS-B paused: CPU budget full", with a filled dot for a decoder that runs and
-a hollow one for one that does not. A decoder that does not run gets one button for the core's
-first suggestion:
+The header names the signal from the most specific thing known: the protocol last heard, what
+Identify or a proven discovery named, the decoder whose band holds the frequency, then the band
+plan's band. A decoder that is off names it only where the band plan has no band there, and says
+so ("Pager (off)"). A decoder whose channel only follows the tuner (the pager decoder listening to the
+live audio, say) never names a frequency outside its band, and the card never says "Nothing decodes
+this frequency" while a decoder's band holds it. "Decoded here by" names only a decoder on the tuned
+channel itself, one of its fixed frequencies within the channel (ADS-B anywhere readsb covers, its
+signal fills 1089 to 1091 MHz). A decoder whose band merely spans the frequency, such as the ISM
+decoder at 434.000 MHz with its channel at 433.920 MHz, reads "ISM decodes this band, not this
+channel", and **Identify on its own** still identifies a transmission there. Elsewhere in the ADS-B
+band, past readsb's 200 kHz reach, the card gives the band plan's reason: "Decoded elsewhere ·
+readsb". On a data band (the band plan's mode is RAW, such
+as ADS-B at 1090 MHz) or with the receiver set to RAW, the card shows **No audio (data band)**
+instead of the demodulator and "Quiet".
 
-| Suggestion                                     | Button                                     | What it does                                                                                                              |
-| ---------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| Start, restart                                 | Start, Restart                             | Starts or restarts that decoder                                                                                           |
-| Raise the CPU budget                           | Raise CPU budget                           | Adds one core to the decoder CPU budget, up to its maximum of 64 (Undo in the toast); Settings › Decoders keeps the value |
-| Pause the scanner                              | Stop the scan                              | Ends the scan, which gives the tuner and the decoders back (a paused scan keeps them)                                     |
-| Resume the receiver                            | Resume                                     | Resumes the paused receiver feed, as the Receiver's Resume does                                                           |
-| Tune to its band                               | Tune to 1090.000                           | Tunes the receiver to the decoder's frequency                                                                             |
-| Change the sample rate, check the source       | Raise sample rate, Check the receiver…     | Opens the Receiver, where you set it                                                                                      |
-| Turn on, turn off others, install, channelizer | Turn on in Settings, Decoders in Settings… | Opens the decoder's row in Settings                                                                                       |
+**On this band** is a table of the decoders whose band holds the frequency (within 200 kHz of one
+of their frequencies or of the span between them, or inside their band). The core decides which
+those are: the card asks `GET /api/decoders/summary?hz=<Hz>` and lists the items with
+`coversHz: true`, so an agent using the same endpoint sees the same list. Right after the core
+starts, before the receiver reports its capabilities, a decoder's configured frequencies stand in
+for its band, so ADS-B shows at 1090 MHz from the first moment. If that request fails (the core
+answers an error, the request times out or the network drops), the card lists the decoders from
+their statuses instead of waiting, and takes the core's answer again once a request succeeds. It
+picks them by the core's own rule: the decoder's band, else its configured frequencies (never one that
+only follows the tuner, so the pager is not listed at 1090 MHz because its channel sits there), else, for a
+decoder with no band of its own such as the pager or digital voice, the receiver's band plan ranges
+that list its protocols (POCSAG, DMR). When Settings turns a decoder off or it is stopped, its row
+says so at once, before the core's next answer arrives. Each decoder takes two lines:
 
-A decoder set to off in Settings shows "off in Settings" and only links there, whatever its last
-verdict said: turning decoders on and off stays in Settings. When the budget is already at its
-maximum, the next suggestion's button shows instead of Raise CPU budget; the card reads the budget
-again each time it refreshes the verdicts, so a budget lowered elsewhere offers the raise again. The
-raise and its Undo each change the budget only if nobody changed it since the card read it (the
-core checks this as it saves); otherwise the toast says so, names the value now set, and leaves it. Stop the
-scan shows while a scan holds the decoders: moving, holding on a hit, or paused. A verdict this app
-does not know shows as plain text without a button. With read-only access the buttons that change
-something are disabled; the links still work.
+| Column      | Shows                                                                                                          |
+| ----------- | -------------------------------------------------------------------------------------------------------------- |
+| Decoder     | Its name and program, for example ADS-B over `readsb`                                                          |
+| State       | A dot and one word: Decoding, Listening, Starting, Waiting, Paused, Failed or Off (filled dot while it runs)   |
+| Last decode | How long ago it last decoded; opens Activity on that decoder's events only. "Never" when it has not            |
+| Detail      | The second line: the reason from the core's verdict ("CPU budget full"), or how much it decoded, full width    |
+| Action      | At most one button, at the right of the detail line, only when the verdict suggests one the card can carry out |
+
+Decoders that decode come first, then those starting, failed, paused, waiting and off. In a narrow
+drawer or on a phone each decoder stacks: name, state and last decode, then the detail and its
+button. One **Decoder settings** link at the foot opens Settings › Decoders (at a decoder that is
+off, if there is one); rows never link to Settings.
+
+| Suggestion                               | Button                                 | What it does                                                                                                              |
+| ---------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Start (a stopped decoder)                | Start                                  | Starts that decoder                                                                                                       |
+| Restart (a failed decoder)               | Restart                                | Restarts that decoder                                                                                                     |
+| Raise the CPU budget                     | Raise CPU budget                       | Adds one core to the decoder CPU budget, up to its maximum of 64 (Undo in the toast); Settings › Decoders keeps the value |
+| Pause the scanner                        | Stop the scan                          | Ends the scan, which gives the tuner and the decoders back (a paused scan keeps them)                                     |
+| Resume the receiver                      | Resume                                 | Resumes the paused receiver feed, as the Receiver's Resume does                                                           |
+| Tune to its band                         | Tune to 1090.000                       | Tunes the receiver to the decoder's frequency                                                                             |
+| Change the sample rate, check the source | Raise sample rate, Check the receiver… | Opens the Receiver, where you set it                                                                                      |
+
+A decoder that is starting or waiting never offers Restart, and a failed decoder the core is
+already restarting on its own reads "Restarting on its own" without a button. Suggestions that
+belong in Settings (turn on, turn off others, install, channelizer) are left to the foot's link. When
+the budget is already at its maximum, the next suggestion's button shows instead of Raise CPU
+budget; the card reads the budget again each time it refreshes the verdicts, so a budget lowered
+elsewhere offers the raise again. The raise and its Undo each change the budget only if nobody
+changed it since the card read it (the core checks this as it saves); otherwise the toast says so,
+names the value now set, and leaves it. Stop the scan shows while a scan holds the decoders: moving,
+holding on a hit, or paused. A verdict this app does not know shows as plain text without a button.
+With read-only access the buttons that change something are disabled; the links still work. A core
+without `coversHz` is read from the decoders' own bands instead.
 
 ### Listen
 
@@ -160,6 +198,8 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
 
 - **Activity:** everything WaveKit heard, newest first. Search by talkgroup, capcode, MMSI, ICAO,
   callsign or frequency, filter by category and time range, show a list or cards, choose columns.
+  **Last decode** on the tuned card opens it on one decoder: a **Decoder ADS-B** chip in the
+  search lists only that decoder's events; remove the chip with its `×` like any other filter.
   If the core rate-limits a request, Activity retries by itself up to 3 times, unless the core asks
   for a wait over 10 s. Each wait is the one the core asked for (at least 0.25 s; 0.5, 1, then 2 s
   when it names none) plus up to 20 % random jitter, so a single wait can reach 12 s. If retrying
@@ -219,7 +259,7 @@ waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads
   **Resume receiver** (while paused) and **Resume receiver at 161.500 MHz** do the same, and the
   `P` key toggles pause and the plain resume from anywhere; a pause from the palette or the key
   offers Undo. Read-only browsers cannot pause. While paused,
-  the tuned card's decoders read "waiting: Receiver paused — Resume" with a **Resume** button and
+  the tuned card's decoders read Paused, "Receiver paused — Resume", with a **Resume** button and
   Settings › Decoders reads `Paused · the receiver is paused`. A scanner identify running when you
   pause ends with what it found so far and reads `Stopped · receiver paused`. A sweep running when
   you pause waits; **Resume at 161.500 MHz** continues it, but a plain **Resume** leaves it held so it

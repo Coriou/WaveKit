@@ -259,6 +259,8 @@ describe("WG9 contract", () => {
 				| "decoder-unavailable"
 				// WG10 req 3.2: analog trial without live audio on the target
 				| "no-live-audio"
+				// an explicit protocol inside the ADS-B window, where only readsb is eligible
+				| "adsb-window"
 			>(true),
 		).toBe(true)
 		expect(

@@ -5,6 +5,7 @@ import pino from "pino"
 import fc from "fast-check"
 import { createActivityIngress } from "../../../../src/core/activity/ingress.js"
 import type { DecodeEnvelope } from "../../../../src/core/activity/types.js"
+import { decoderSummary } from "../../../../src/api/routes/decoder-summary.js"
 import { DecoderManager } from "../../../../src/decoders/manager.js"
 import type { DecoderManagerConfig } from "../../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../../src/decoders/registry.js"
@@ -1080,6 +1081,39 @@ it.each(["stop", "restart", "normal", "superseded"])(
 	},
 )
 
+it("a crash retry cancelled when its timer fires drops its deadline and offers Restart", async () => {
+	const f = setup("rate-test", crashGate(), { faultAfterFailures: 1 })
+	f.create("dec")
+	const worker = f.place("dec", 162_025_000, false)
+	f.plan([f.place("dec", 162_000_000), worker])
+	await f.manager.startAll()
+	const decoder = f.instances.get(worker.key)!
+	const internal = f.manager as unknown as {
+		decoders: Map<string, { lifecycle: { runDecoderGeneration: number } }>
+	}
+	decoder.crash()
+	await vi.advanceTimersByTimeAsync(0)
+	expect(f.manager.getStatus(worker.key)?.nextRestartAt).toBeDefined()
+	expect(f.manager.getStatus("dec")?.restartInFlight).toBe(true)
+	// The run is superseded while its retry waits: the timer fires as a no-op.
+	internal.decoders.get(worker.key)!.lifecycle.runDecoderGeneration--
+	const seen: (boolean | undefined)[] = []
+	f.manager.on("decoder:status-changed", (id: string) => {
+		if (id === "dec") seen.push(f.manager.getStatus("dec")?.restartInFlight)
+	})
+	await vi.advanceTimersByTimeAsync(6000)
+	expect(seen.at(-1)).toBeUndefined()
+	expect(decoder.starts).toBe(1)
+	const failed = f.manager.getStatus(worker.key)!
+	expect(failed).toMatchObject({ health: "faulted", running: false })
+	expect(failed.nextRestartAt).toBeUndefined()
+	expect(failed.restartInFlight).toBeUndefined()
+	expect(f.manager.getStatus("dec")?.restartInFlight).toBeUndefined()
+	expect(decoderSummary(failed, Date.now()).verdict.actions).toEqual([
+		"restart",
+	])
+})
+
 it("a queued crash retry does not start a worker a newer restart holds", async () => {
 	const f = setup("rate-test", crashGate())
 	f.create("dec")
@@ -1162,6 +1196,87 @@ it("a hung crash restart releases the caps queue within the request bound", asyn
 	expect(decoder.stops).toBeGreaterThan(stops)
 	expect(decoder.running).toBe(false)
 	expect(decoder.starts).toBe(2)
+})
+
+it("a hung crash restart is in flight only until its bound, then offers Restart", async () => {
+	const f = setup("rate-test", crashGate())
+	f.create("dec")
+	const worker = f.place("dec", 162_025_000, false)
+	f.plan([f.place("dec", 162_000_000), worker])
+	await f.manager.startAll()
+	expect(f.manager.getStatus("dec")?.restartInFlight).toBeUndefined()
+	const decoder = f.instances.get(worker.key)!
+	const start = deferred()
+	decoder.startGate = start
+	const seen: (boolean | undefined)[] = []
+	f.manager.on("decoder:status-changed", (id: string) => {
+		if (id === "dec") seen.push(f.manager.getStatus("dec")?.restartInFlight)
+	})
+	decoder.crash()
+	await vi.advanceTimersByTimeAsync(0)
+	expect(f.manager.getStatus("dec")?.restartInFlight).toBe(true)
+	// The 2000 ms backoff fires; its start never settles.
+	await vi.advanceTimersByTimeAsync(2000)
+	expect(decoder.starts).toBe(2)
+	expect(f.manager.getStatus(worker.key)?.nextRestartAt).toBeUndefined()
+	// The restart owns the start for PLACEMENT_STOP_TIMEOUT_MS (5000 ms) after it fired.
+	await vi.advanceTimersByTimeAsync(4999)
+	const owned = f.manager.getStatus(worker.key)!
+	expect(owned.restartInFlight).toBe(true)
+	expect(decoderSummary(owned, Date.now()).verdict.actions).toEqual([])
+	seen.length = 0
+	// At the bound (2000 + 5000 ms) the worker reads faulted and Restart is offered
+	// although its start is still pending.
+	await vi.advanceTimersByTimeAsync(1)
+	const faulted = f.manager.getStatus(worker.key)!
+	expect(faulted).toMatchObject({ health: "faulted", running: false })
+	expect(faulted.restartInFlight).toBeUndefined()
+	expect(f.manager.getStatus("dec")?.restartInFlight).toBeUndefined()
+	expect(decoderSummary(faulted, Date.now()).verdict).toMatchObject({
+		code: "failed",
+		actions: ["restart"],
+	})
+	expect(seen.at(-1)).toBeUndefined()
+	// Well past the bound the hung start still does not hide Restart.
+	await vi.advanceTimersByTimeAsync(60_000)
+	const later = f.manager.getStatus(worker.key)!
+	expect(later.restartInFlight).toBeUndefined()
+	expect(decoderSummary(later, Date.now()).verdict.actions).toEqual(["restart"])
+	start.resolve()
+	await vi.advanceTimersByTimeAsync(0)
+	expect(f.manager.getStatus("dec")?.restartInFlight).toBeUndefined()
+})
+
+it("a placement manual restart is in flight through its stop and start phases", async () => {
+	const f = setup("rate-test", crashGate())
+	f.create("dec")
+	const worker = f.place("dec", 162_025_000, false)
+	f.plan([f.place("dec", 162_000_000), worker])
+	await f.manager.startAll()
+	const primary = f.instances.get("dec")!
+	const stop = primary.stop.bind(primary)
+	const primaryStop = deferred()
+	vi.spyOn(primary, "stop").mockImplementationOnce(async () => {
+		await primaryStop.promise
+		await stop()
+	})
+	const seen: (boolean | undefined)[] = []
+	f.manager.on("decoder:status-changed", (id: string) => {
+		if (id === "dec") seen.push(f.manager.getStatus("dec")?.restartInFlight)
+	})
+	const restarting = f.manager.restartDecoder("dec")
+	await vi.advanceTimersByTimeAsync(0)
+	// Stop phase: the primary has not stopped yet.
+	expect(f.manager.getStatus("dec")?.restartInFlight).toBe(true)
+	expect(
+		decoderSummary(f.manager.getStatus("dec")!, Date.now()).verdict.actions,
+	).toEqual([])
+	primaryStop.resolve()
+	await vi.advanceTimersByTimeAsync(1)
+	await expect(restarting).resolves.toBeUndefined()
+	expect(f.manager.getStatus("dec")?.running).toBe(true)
+	expect(f.manager.getStatus("dec")?.restartInFlight).toBeUndefined()
+	expect(seen.at(-1)).toBeUndefined()
 })
 
 it.each(["retry", "stop in backoff", "restart in backoff", "stop in start"])(

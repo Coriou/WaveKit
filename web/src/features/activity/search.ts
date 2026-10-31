@@ -1,7 +1,8 @@
 // Activity search: typed tokens (talkgroup, capcode, MMSI, ICAO, callsign, frequency, CTCSS, DCS, an
-// entity, plain text) and category chips, turned into one core ActivityQuery. The core searches text
-// as AND-ed whole words (src/core/activity/query/fts.ts), so typed identifiers become text terms
-// narrowed by the categories they belong to; a frequency becomes a range and an entity an exact key.
+// entity, a decoder, plain text) and category chips, turned into one core ActivityQuery. The core searches
+// text as AND-ed whole words (src/core/activity/query/fts.ts), so typed identifiers become text terms
+// narrowed by the categories they belong to; a frequency becomes a range, an entity an exact key and a
+// decoder (never typed: the tuned card's "Last decode" sets it) the core's `decoderIds`.
 import type { ActivityCategory, ActivityQuery } from "@wavekit/api-types"
 
 import { formatMHz } from "../format.ts"
@@ -16,11 +17,12 @@ export type TokenKind =
 	| "ctcss"
 	| "dcs"
 	| "entity"
+	| "decoder"
 	| "text"
 
 export interface SearchToken {
 	kind: TokenKind
-	/** The searched value: digits, a callsign, text; Hz for a frequency; the key for an entity. */
+	/** The searched value: digits, a callsign, text; Hz for a frequency; the key for an entity; a decoder's id. */
 	value: string
 	/** What the chip shows. */
 	label: string
@@ -82,6 +84,7 @@ const LABEL: Record<TokenKind, string> = {
 	ctcss: "CTCSS",
 	dcs: "DCS",
 	entity: "",
+	decoder: "Decoder",
 	text: "",
 }
 
@@ -108,6 +111,12 @@ export function frequencyToken(
 	spanHz = FREQUENCY_SPAN_HZ,
 ): SearchToken {
 	return token("frequency", String(Math.round(hz)), { spanHz })
+}
+
+/** One decoder instance's events ("Decoder ADS-B"); the chip names it, the query carries its id. */
+export function decoderToken(decoderId: string, name?: string): SearchToken {
+	const label = name?.trim() ? `Decoder ${name.trim()}` : undefined
+	return token("decoder", decoderId, label === undefined ? {} : { label })
 }
 
 const PREFIXES: readonly [RegExp, TokenKind][] = [
@@ -185,6 +194,7 @@ function textOf(t: SearchToken): string | null {
 	switch (t.kind) {
 		case "frequency":
 		case "entity":
+		case "decoder":
 			return null
 		case "dcs":
 			return t.value.replace(/[NI]$/i, "")
@@ -209,8 +219,8 @@ export function chipCategories(
 
 /**
  * One core query for the tokens and the category chip, or null when they cannot match anything
- * (two frequencies, or categories that exclude each other). `within` narrows further: each set is
- * AND-ed in (a column's own categories under the drawer's search).
+ * (two frequencies, two entities, two decoders, or categories that exclude each other). `within`
+ * narrows further: each set is AND-ed in (a column's own categories under the drawer's search).
  */
 export function buildQuery(
 	tokens: readonly SearchToken[],
@@ -233,6 +243,10 @@ export function buildQuery(
 		} else if (t.kind === "entity") {
 			if (q.entityKey !== undefined && q.entityKey !== t.value) return null
 			q.entityKey = t.value
+		} else if (t.kind === "decoder") {
+			// an event comes from one decoder: two different ones match nothing
+			if (q.decoderIds !== undefined && q.decoderIds[0] !== t.value) return null
+			q.decoderIds = [t.value]
 		}
 		const w = textOf(t)
 		if (w !== null) words.push(w)

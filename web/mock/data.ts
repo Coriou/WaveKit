@@ -1069,16 +1069,16 @@ export const BAND_SEEDS: readonly BandSeed[] = [
 	},
 	{
 		id: "adsb",
-		name: "ADS-B 1090",
+		name: "ADS-B (1090 MHz)",
 		group: "air",
 		a: 1089,
 		b: 1091,
 		mode: "raw",
 		step: null,
-		bw: 2000000,
+		bw: null,
 		from: "builtin-eu",
 		ver: true,
-		skip: "Decoded elsewhere",
+		skip: "Decoded elsewhere · readsb",
 	},
 ]
 

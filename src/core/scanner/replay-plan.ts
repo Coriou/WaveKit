@@ -25,7 +25,12 @@
  * (`orderTrialsByMemory`): remembered success, prior order, untried, failures with backoff.
  */
 import { SCANNER_AMBIENT_PROTOCOLS } from "@wavekit/api-types"
-import { builtinBandplansFor } from "../bandplans/builtin-supplement.js"
+import {
+	ADSB_WINDOW_HIGH_HZ,
+	ADSB_WINDOW_LOW_HZ,
+	builtinBandplansFor,
+	inAdsbWindow,
+} from "../bandplans/builtin-supplement.js"
 import type { BandRegionCode } from "./bandplan/index.js"
 import {
 	IDENTIFY_ANALOG_PROTOCOLS,
@@ -170,9 +175,12 @@ export interface SkippedReplayTrial {
 	reason: "no-probe-mode" | "no-replay-input" | "lora-needs-192khz"
 }
 
-/** 1090 MHz Mode S/ADS-B: the channel ±1 MHz (1 089 000 000 to 1 091 000 000 Hz inclusive). */
-export const ADSB_REPLAY_LOW_HZ = 1_089_000_000
-export const ADSB_REPLAY_HIGH_HZ = 1_091_000_000
+/**
+ * 1090 MHz Mode S/ADS-B: the channel ±1 MHz (1 089 000 000 to 1 091 000 000 Hz inclusive), the
+ * built-in ADS-B band's window (builtin-supplement.ts). Inside it only readsb is planned.
+ */
+export const ADSB_REPLAY_LOW_HZ = ADSB_WINDOW_LOW_HZ
+export const ADSB_REPLAY_HIGH_HZ = ADSB_WINDOW_HIGH_HZ
 
 /**
  * The decoders the class and band call for beyond the probe-mode table. `protocol` null = called
@@ -204,14 +212,7 @@ function extraCalled(
 	input: IqReplayPlanInput,
 	protocol: ScannerProtocol | "adsb",
 ): boolean {
-	if (protocol === "adsb") {
-		const hz = input.capture.rfHz
-		return (
-			Number.isFinite(hz) &&
-			hz >= ADSB_REPLAY_LOW_HZ &&
-			hz <= ADSB_REPLAY_HIGH_HZ
-		)
-	}
+	if (protocol === "adsb") return inAdsbWindow(input.capture.rfHz)
 	if (input.priors[protocol] === 0) return false
 	if (input.knownProtocol === protocol) return true
 	if (listed(input.priors, protocol)) return true
@@ -298,6 +299,10 @@ export function planReplayTrialsDetailed(
 	if (input.track?.flags.edge === true) return { trials: [], skipped: [] }
 	const candidates: IqReplayTrial[] = []
 	const skipped: SkippedReplayTrial[] = []
+	// Inside the ADS-B window only readsb is eligible: no known, shape-chosen, prior-named or
+	// analog trial is planned there (left out like a protocol with a prior of 0, not reported),
+	// and readsb is the only extra (reported in `skipped`, as anywhere, when it cannot run).
+	const adsbOnly = inAdsbWindow(input.capture.rfHz)
 	const add = (protocol: ScannerProtocol, known: boolean): void => {
 		const mode = replayModeOf(protocol)
 		if (mode && replayInput.has(mode.decoderType))
@@ -334,7 +339,9 @@ export function planReplayTrialsDetailed(
 			.sort(([a, pa], [b, pb]) => (pb ?? 0) - (pa ?? 0) || a.localeCompare(b))
 		for (const [protocol] of named) add(protocol, false)
 	}
+	if (adsbOnly) candidates.length = 0
 	for (const extra of REPLAY_EXTRA_TRIALS) {
+		if (adsbOnly && extra.protocol !== "adsb") continue
 		if (!extraCalled(input, extra.protocol)) continue
 		if (extra.protocol === "lora" && input.capture.rateHz !== 192_000) {
 			skipped.push({ ...extra, reason: "lora-needs-192khz" })

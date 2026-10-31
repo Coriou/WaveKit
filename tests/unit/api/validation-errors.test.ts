@@ -164,7 +164,7 @@ async function sweep(
 
 /**
  * Query parameter names the handler-parsed GET routes read (Activity search, trails,
- * bandmap and timeline; coverage). Sent to every GET route without declared parameters.
+ * bandmap and timeline; coverage; the decoder summary's `hz`). Sent to every GET route without declared parameters.
  */
 const HANDLER_QUERY_PARAMETERS = [
 	"protocol",
@@ -179,6 +179,7 @@ const HANDLER_QUERY_PARAMETERS = [
 	"order",
 	"limit",
 	"pageToken",
+	"hz",
 ] as const
 
 /** Routes that parse their query in the handler; each must refuse the sentinel with a 400. */
@@ -188,6 +189,7 @@ const HANDLER_PARSED_ROUTES = [
 	"GET /api/activity/trails",
 	"GET /api/activity/bandmap",
 	"GET /api/activity/timeline",
+	"GET /api/decoders/summary",
 	// The recordings query is parsed in core (tests/unit/core/recordings/inventory.test.ts); the
 	// fake inventory always refuses, so this entry checks only the route's static 400 mapping.
 	"GET /api/recordings",

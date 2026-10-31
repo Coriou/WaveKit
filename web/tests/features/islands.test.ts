@@ -16,10 +16,7 @@ import {
 	receiverSummary,
 	sourceTitle,
 } from "../../src/features/receiver/summary.ts"
-import {
-	decoderPausedLine,
-	decodersAt,
-} from "../../src/features/tuned/decoders.ts"
+import { decodersAt } from "../../src/features/tuned/decoders.ts"
 import { decoderLabel, signalBars } from "../../src/features/tuned/signal.ts"
 import { channelSuggestions } from "../../src/features/tuner/band.ts"
 import { modulationOf } from "../../src/features/tuner/modes.ts"
@@ -76,21 +73,6 @@ describe("tuned card helpers", () => {
 		expect(decodersAt(list, 161_975_000, 6250).map(d => d.id)).toEqual(["ais"])
 		expect(decodersAt(list, 161_980_000, 6250).map(d => d.id)).toEqual(["ais"])
 		expect(decodersAt(list, 161_150_000, 6250)).toEqual([])
-	})
-
-	it("says a decoder here waits for the paused receiver, not off band", () => {
-		const d = dec("readsb", [1_090_000_000])
-		expect(decoderPausedLine(undefined)).toBe("Decoder paused")
-		expect(decoderPausedLine({ ...d, suspended: true })).toBe(
-			"readsb paused · off band",
-		)
-		expect(
-			decoderPausedLine({
-				...d,
-				suspended: true,
-				suspension: { reasonCode: "source-paused", since: "" },
-			}),
-		).toBe("readsb paused · receiver paused")
 	})
 
 	it("lights signal bars by SNR and names decoders", () => {

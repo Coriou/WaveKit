@@ -1,5 +1,6 @@
 import { SCANNER_PROBE_DECODER_TYPES } from "@wavekit/api-types"
 import { captureRateFor } from "../iq-capture/rates.js"
+import { inAdsbWindow } from "../bandplans/builtin-supplement.js"
 /**
  * Identify mode (spec § 10.8, the primary use case): "what is this signal?" for one waterfall
  * target or every surfaced emission in the window. Never retunes. A target on an artefact mask
@@ -1792,6 +1793,14 @@ export class IdentifyRunner implements JobDriver {
 		})
 		t.known = this.knownOf(view)
 		if (t.known) scores = knownFirst(scores, t.known.protocol, priors, bounds)
+		// Inside the ADS-B window only readsb is eligible: no probe or analog trial, and of the
+		// ambient trials readsb's alone (the others are left out, not reported). Probe, replay and
+		// analog runs tune to the resolved track centre, not the requested target, and a track
+		// resolves within the target's tolerance: so the guard holds when either frequency is in
+		// the window. A restart drops the view and plans again, so a new centre is checked again.
+		const adsbOnly =
+			inAdsbWindow(t.targetHz) || inAdsbWindow(view.track.centreHz)
+		if (adsbOnly) scores = []
 		const plan = planIdentifyTrials(scores, {
 			format: this.deps.format(this.sourceId),
 			channelizer: this.deps.channelizer(),
@@ -1812,9 +1821,29 @@ export class IdentifyRunner implements JobDriver {
 					this.ambientErrorLogged = true
 					this.log.warn("Ambient coverage unavailable; no ambient trials")
 				},
-			),
+			).filter(p => !adsbOnly || p.protocol === "adsb"),
 		)
-		if (this.deps.analogEvidence || this.deps.analogTrial?.runLive)
+		// An explicit request ("Decode as") for another protocol inside the window is listed with
+		// its reason, never run: the operator sees why nothing tried it.
+		if (adsbOnly)
+			for (const protocol of requested)
+				if (
+					protocol !== "adsb" &&
+					!plan.trials.some(p => p.protocol === protocol)
+				)
+					plan.trials.push({
+						protocol,
+						score: 0,
+						decoder: PROTOCOL_DECODER[protocol],
+						mode: null,
+						transport: null,
+						reason: "adsb-window",
+						run: null,
+					})
+		if (
+			!adsbOnly &&
+			(this.deps.analogEvidence || this.deps.analogTrial?.runLive)
+		)
 			plan.trials = planAnalogTrials(plan.trials, bounds)
 		t.memoSkip = this.applyMemo(plan)
 		t.plan = plan
@@ -3084,6 +3113,9 @@ export class IdentifyRunner implements JobDriver {
 			const near = this.claimNear(t, view)
 			if (near > 0 || t.replay.asked) return
 			t.replay.asked = true
+			// Inside the ADS-B window (the target or the resolved centre, as in plan()) only readsb is eligible,
+			// and readsb has no replay input.
+			if (inAdsbWindow(t.targetHz) || inAdsbWindow(view.track.centreHz)) return
 			const req: IqCaptureRequest = {
 				sourceId: this.sourceId,
 				observationId: view.observationId,
@@ -3138,7 +3170,9 @@ export class IdentifyRunner implements JobDriver {
 					c.observationId === view.observationId
 				) ||
 				// the target's own transmission only: its epoch, or its observation.
-				!(c.epoch === view.epoch || c.observationId === view.observationId)
+				!(c.epoch === view.epoch || c.observationId === view.observationId) ||
+				// IQ inside the ADS-B window is readsb's alone: never replayed, whatever the target.
+				inAdsbWindow(c.rfHz)
 			)
 				continue
 			if (port.claim(c.captureId, this.record.id)) {
@@ -3172,21 +3206,22 @@ export class IdentifyRunner implements JobDriver {
 		try {
 			if (!stopProbes && rp.requested !== null) {
 				const id = rp.requested
-				const done =
+				const finished =
 					rp.reserved && port.view
-						? port.view(id) !== null
+						? port.view(id)
 						: port
 								.near(this.sourceId, t.view.track.centreHz, t.toleranceHz, {
 									observationId: t.view.observationId,
 									limit: IDENTIFY_REPLAY_MAX_CAPTURES + 1,
 								})
-								.some(c => c.captureId === id)
-				if (done) {
+								.find(c => c.captureId === id)
+				if (finished) {
 					const reserved = rp.reserved
 					rp.requested = null
 					rp.reserved = false
 					if (
 						rp.claimed.length < IDENTIFY_REPLAY_MAX_CAPTURES &&
+						!inAdsbWindow(finished.rfHz) &&
 						port.claim(id, this.record.id)
 					) {
 						rp.claimed.push(id)

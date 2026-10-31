@@ -1,13 +1,16 @@
 import Fastify from "fastify"
-import { expect, it } from "vitest"
+import { describe, expect, it } from "vitest"
 import {
+	decoderCoversHz,
 	decoderSummary,
 	decoderSummaryRoutes,
 	DECODING_WINDOW_MS,
 } from "../../../src/api/routes/decoder-summary.js"
+import type { DecoderPlacementView } from "@wavekit/api-types"
 import type { DecoderStatus } from "../../../src/decoders/types.js"
 import fc from "fast-check"
 import {
+	DECODER_SUMMARY_MAX_HZ,
 	DECODER_VERDICT_ACTIONS,
 	DECODER_VERDICT_CODES,
 	decoderVerdictSchema,
@@ -88,6 +91,7 @@ it("serves a compact summary and takes static precedence over decoder ids", asyn
 		expect(Object.keys(entry).sort()).toEqual(
 			[
 				"id",
+				"name",
 				"protocol",
 				"state",
 				"eventsOut",
@@ -122,7 +126,22 @@ it.each([
 	[{ mode: "off", running: false }, "off", ["turn-on"]],
 	[{ running: false, desiredRunning: false }, "stopped", ["start"]],
 	[{ running: false, desiredRunning: true }, "starting", []],
-	[{ health: "faulted" }, "failed", ["restart"]],
+	[{ health: "faulted", running: false }, "failed", ["restart"]],
+	// the manager already brings it back: no Restart to race it
+	[{ health: "faulted" }, "failed", []],
+	[{ health: "restarting", running: false }, "failed", []],
+	[
+		{ health: "faulted", running: false, nextRestartAt: new Date(now + 1) },
+		"failed",
+		[],
+	],
+	// a crash-loop respawn after its timer fired, or a placement start past its bound
+	[{ health: "faulted", running: false, restartInFlight: true }, "failed", []],
+	[
+		{ health: "faulted", running: false, restartInFlight: false },
+		"failed",
+		["restart"],
+	],
 	[
 		{
 			running: false,
@@ -355,4 +374,268 @@ it("counts a running placement worker as the decoder running", () => {
 	expect(summary.state).toBe("running")
 	expect(summary.health).toBe("decoding")
 	expect(summary.verdict.code).toBe("decoding")
+})
+
+it("says a failure the manager restarts on its own plainly", () => {
+	expect(
+		decoderSummary(status({ health: "restarting", running: false }), now)
+			.verdict.text,
+	).toBe("Pager failed: restarting on its own")
+	expect(
+		decoderSummary(status({ health: "faulted", running: false }), now).verdict
+			.text,
+	).toBe("Pager failed to run")
+})
+
+describe("which decoders cover a frequency", () => {
+	const ADSB_HZ = 1_090_000_000
+	const adsb = (patch: Partial<DecoderStatus> = {}) =>
+		status({
+			type: "readsb",
+			bandAssessment: {
+				verdict: "in-band",
+				targetsHz: [ADSB_HZ],
+				basis: "protocol",
+			},
+			...patch,
+		})
+
+	it("holds a target within 200 kHz, at the bound and not past it", () => {
+		expect(decoderCoversHz(adsb(), ADSB_HZ + 62_000)).toBe(true)
+		expect(decoderCoversHz(adsb(), ADSB_HZ + 200_000)).toBe(true)
+		expect(decoderCoversHz(adsb(), ADSB_HZ + 200_001)).toBe(false)
+		expect(decoderCoversHz(adsb(), ADSB_HZ - 200_001)).toBe(false)
+	})
+
+	it("ignores a channel that follows the tuner: only the decoder's own band counts", () => {
+		// a pager whose VFO channel sits at 1090 MHz, with a synthetic 466 MHz band
+		const pager = status({
+			type: "multimon-ng",
+			targetFrequenciesHz: [1_090_062_000],
+			placements: [
+				{
+					sourceId: "synthetic",
+					channelHz: 1_090_062_000,
+					running: true,
+					reach: "channel",
+					origin: "vfo",
+					primary: true,
+					costCores: 0,
+				},
+			],
+			bandAssessment: {
+				verdict: "in-band",
+				targetsHz: [466_000_000],
+				basis: "configured",
+			},
+		})
+		expect(decoderCoversHz(pager, 1_090_062_000)).toBe(false)
+		expect(decoderCoversHz(pager, 466_012_500)).toBe(true)
+	})
+
+	it("never counts a configured target that only follows the tuner when no band is assessed", () => {
+		const place = (
+			patch: Partial<DecoderPlacementView>,
+		): DecoderPlacementView => ({
+			sourceId: "synthetic",
+			running: true,
+			reach: "channel",
+			origin: "vfo",
+			primary: true,
+			costCores: 0,
+			...patch,
+		})
+		const unknown = {
+			verdict: "unknown" as const,
+			reasonCode: "no-target-frequency" as const,
+		}
+		// the repro: a pager tuned to 1090 MHz, its VFO channel on the tuned centre
+		for (const placement of [
+			place({ channelHz: ADSB_HZ }),
+			place({ channelHz: ADSB_HZ, origin: "fallback" }),
+			// a VFO type's "configured" channel sits on the centre when none is configured
+			place({ channelHz: ADSB_HZ, origin: "configured" }),
+			place({ reach: "centre", origin: "band" }),
+		])
+			expect(
+				decoderCoversHz(
+					status({
+						type: "multimon-ng",
+						targetFrequenciesHz: [ADSB_HZ],
+						placements: [placement],
+						bandAssessment: unknown,
+					}),
+					ADSB_HZ,
+				),
+			).toBe(false)
+		// a band plan channel of the same decoder is a fixed frequency and still covers
+		const raster = status({
+			type: "multimon-ng",
+			targetFrequenciesHz: [ADSB_HZ, 466_025_000],
+			placements: [
+				place({ channelHz: ADSB_HZ }),
+				place({ channelHz: 466_025_000, origin: "bandplan", primary: false }),
+			],
+			bandAssessment: unknown,
+		})
+		expect(decoderCoversHz(raster, ADSB_HZ)).toBe(false)
+		expect(decoderCoversHz(raster, 466_025_000)).toBe(true)
+		// readsb's raw placement keeps its declared 1090 MHz target
+		const readsb = status({
+			type: "readsb",
+			targetFrequenciesHz: [ADSB_HZ],
+			placements: [place({ reach: "raw", origin: "configured" })],
+		})
+		expect(decoderCoversHz(readsb, ADSB_HZ)).toBe(true)
+	})
+
+	it("reads a range widened by 200 kHz", () => {
+		const ranged = status({
+			type: "dsd-fme",
+			bandAssessment: {
+				verdict: "in-band",
+				rangesHz: [{ minHz: 460_000_000, maxHz: 470_000_000 }],
+				basis: "configured",
+			},
+		})
+		expect(decoderCoversHz(ranged, 470_200_000)).toBe(true)
+		expect(decoderCoversHz(ranged, 470_200_001)).toBe(false)
+	})
+
+	it("reads the configured targets before the first band assessment, with the same 200 kHz rule", () => {
+		// at boot, before any source capabilities: no assessment yet
+		const boot = status({ type: "readsb", targetFrequenciesHz: [ADSB_HZ] })
+		expect(decoderCoversHz(boot, ADSB_HZ)).toBe(true)
+		expect(decoderCoversHz(boot, ADSB_HZ + 200_000)).toBe(true)
+		expect(decoderCoversHz(boot, ADSB_HZ + 200_001)).toBe(false)
+		// an assessment that names no band reads the configured targets too
+		expect(
+			decoderCoversHz(
+				status({
+					type: "readsb",
+					targetFrequenciesHz: [ADSB_HZ],
+					bandAssessment: { verdict: "unknown" },
+				}),
+				ADSB_HZ,
+			),
+		).toBe(true)
+		// an assessed band wins over the configured targets
+		expect(
+			decoderCoversHz(
+				adsb({ targetFrequenciesHz: [466_000_000] }),
+				466_000_000,
+			),
+		).toBe(false)
+		// probes and malformed targets never cover
+		expect(decoderCoversHz({ ...boot, ephemeral: true }, ADSB_HZ)).toBe(false)
+		expect(
+			decoderCoversHz(
+				status({
+					type: "readsb",
+					targetFrequenciesHz: [Number.NaN, -1, "1090" as never],
+				}),
+				ADSB_HZ,
+			),
+		).toBe(false)
+	})
+
+	it("falls back to the built-in band plan's protocols for a decoder with no band", () => {
+		const pager = status({
+			type: "multimon-ng",
+			bandAssessment: { verdict: "unknown", reasonCode: "no-target-frequency" },
+		})
+		// VHF paging lists POCSAG and FLEX
+		expect(decoderCoversHz(pager, 150_000_000)).toBe(true)
+		// nothing there lists a paging protocol
+		expect(decoderCoversHz(pager, ADSB_HZ)).toBe(false)
+		// a type with no protocol list and no band covers nothing
+		expect(
+			decoderCoversHz(
+				status({ type: "readsb", bandAssessment: { verdict: "unknown" } }),
+				ADSB_HZ,
+			),
+		).toBe(false)
+	})
+
+	it("never covers for scanner probes or malformed input", () => {
+		expect(decoderCoversHz(adsb({ owner: "scanner" }), ADSB_HZ)).toBe(false)
+		expect(decoderCoversHz(adsb({ ephemeral: true }), ADSB_HZ)).toBe(false)
+		expect(decoderCoversHz(adsb(), Number.NaN)).toBe(false)
+		expect(decoderCoversHz(adsb(), 0)).toBe(false)
+		expect(
+			decoderCoversHz(
+				adsb({
+					bandAssessment: {
+						verdict: "in-band",
+						targetsHz: "1090" as never,
+						rangesHz: [{ minHz: 5, maxHz: 1 }],
+					},
+				}),
+				ADSB_HZ,
+			),
+		).toBe(false)
+	})
+
+	it("adds coversHz and the name only when asked, and refuses a bad hz", async () => {
+		const app = Fastify()
+		await app.register(decoderSummaryRoutes, {
+			decoderManager: {
+				getAllStatus: () => [
+					adsb({ id: "readsb" }),
+					status({
+						id: "pager",
+						bandAssessment: {
+							verdict: "in-band",
+							targetsHz: [466_000_000],
+						},
+					}),
+				],
+			},
+		})
+		try {
+			const plain = (await app.inject("/api/decoders/summary")).json()
+			expect(plain[0]).toMatchObject({ id: "readsb", name: "ADS-B" })
+			expect(plain[0]).not.toHaveProperty("coversHz")
+			const at = await app.inject("/api/decoders/summary?hz=1090062000")
+			expect(at.statusCode).toBe(200)
+			expect(
+				at
+					.json()
+					.map((i: { id: string; coversHz: boolean }) => [i.id, i.coversHz]),
+			).toEqual([
+				["readsb", true],
+				["pager", false],
+			])
+			const max = await app.inject(
+				`/api/decoders/summary?hz=${DECODER_SUMMARY_MAX_HZ}`,
+			)
+			expect(max.statusCode).toBe(200)
+			for (const bad of [
+				String(DECODER_SUMMARY_MAX_HZ + 1),
+				"0",
+				"-5",
+				"Infinity",
+				"abc",
+				"",
+			]) {
+				const res = await app.inject(
+					`/api/decoders/summary?hz=${encodeURIComponent(bad)}`,
+				)
+				expect(res.statusCode, bad).toBe(400)
+				expect(res.json()).toEqual({
+					error: "ValidationError",
+					code: "VALIDATION_ERROR",
+					message: `Invalid query parameter: hz: number (> 0, <= ${DECODER_SUMMARY_MAX_HZ}), Hz`,
+					fields: [
+						{
+							field: "hz",
+							expected: `number (> 0, <= ${DECODER_SUMMARY_MAX_HZ}), Hz`,
+						},
+					],
+				})
+			}
+		} finally {
+			await app.close()
+		}
+	})
 })

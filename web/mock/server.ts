@@ -42,7 +42,12 @@ import type {
 import type { FloodEvent } from "./activity-floods.ts"
 import { floodEvents } from "./activity-floods.ts"
 import { createAudioServer } from "./audio.ts"
-import { buildDecoderSummaries, withAdsbBudget } from "./decoder-summary.ts"
+import {
+	buildDecoderSummaries,
+	SUMMARY_HZ_EXPECTED,
+	summaryHzQuery,
+	withAdsbBudget,
+} from "./decoder-summary.ts"
 import { registerReceiverMock } from "./receiver.ts"
 import { registerSourceFeedMock, withSourcePaused } from "./source-feed.ts"
 import type { SourceFeedMock } from "./source-feed.ts"
@@ -1657,8 +1662,20 @@ export async function buildMockServer(
 
 	app.get("/api/decoders", async () => decoders())
 	// The core's one verdict per decoder (./decoder-summary.ts); ADS-B near 1090 MHz waits for CPU budget.
-	app.get("/api/decoders/summary", async () =>
-		buildDecoderSummaries(decoders(), Date.now()),
+	// `?hz=` adds `coversHz` (whose band holds that frequency), as the core does.
+	app.get<{ Querystring: { hz?: string } }>(
+		"/api/decoders/summary",
+		async (request, reply) => {
+			const hz = summaryHzQuery(request.query.hz)
+			if (hz === "invalid")
+				return reply.code(400).send({
+					error: "ValidationError",
+					code: "VALIDATION_ERROR",
+					message: `Invalid query parameter: hz: ${SUMMARY_HZ_EXPECTED}`,
+					fields: [{ field: "hz", expected: SUMMARY_HZ_EXPECTED }],
+				})
+			return buildDecoderSummaries(decoders(), Date.now(), hz)
+		},
 	)
 	app.get<{ Params: { id: string } }>(
 		"/api/decoders/:id",

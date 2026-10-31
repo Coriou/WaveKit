@@ -171,6 +171,29 @@ Stored band plans use a writer lock in the state directory. After an unclean sto
 | `ism-868`         | EU     | 863–870           | none                  | none              | ism                                   |
 | `pager-vhf`       | all    | 137–174           | 12.5 kHz              | 12                | pocsag, flex                          |
 | `marine-vhf`      | all    | 156.0–162.0125    | 25 kHz (AIS excluded) | 16                | analog-fm                             |
+| `adsb`            | all    | 1089–1091         | none                  | none              | none (readsb decodes it)              |
+
+The `adsb` band (1090 MHz ADS-B, every region) shows in the band view as an air band with
+mode `raw` and the skip `Decoded elsewhere · readsb`: a sweep with `skipBandPlanSkips` leaves
+1089 to 1091 MHz to readsb. It names no scan protocol, so it adds no identify priors or analog
+trial there, and [decode-anchored ADS-B](#decode-anchored-ads-b) works as before.
+
+Inside that window (1 089 000 000 to 1 091 000 000 Hz, both ends included) only readsb is
+eligible. An IQ capture there plans no replay trial for a known protocol, a protocol its track
+shape suggests (a narrow FSK-looking signal included) or an analog trial: these are left out the
+way a protocol with a prior of 0 is, not listed. readsb is still named and, as anywhere, listed
+in the skipped trials (`no-probe-mode`) because it has no replay input. An Identify there with no
+decode anchor runs no probe or analog trial; its only trial is readsb's ambient one when a
+running readsb covers the target. A protocol the Identify names explicitly (Decode as) is listed
+there as `unsupported` with reason `adsb-window` and never run, so the answer says why nothing
+tried it. The rule applies when either the requested frequency or the
+centre of the signal it resolves to (which may lie up to the target tolerance away, and is where
+probes tune) is inside the window, so a request just outside the window for a signal centred
+inside it runs only readsb too. An IQ capture whose own centre is inside the window is never
+claimed or replayed by any Identify, even one just outside the window whose tolerance reaches it
+(also after the Identify restarts on an epoch change), and an Identify inside the window requests
+no capture. Outside the window, with both frequencies from 1 088 999 999 Hz down or
+1 091 000 001 Hz up, the plans and the replay of captures centred outside are unchanged.
 
 The band-plan stack under `/api/bandplans` (see [API.md](API.md#band-plans))
 selects which built-in plans the scanner uses: each enabled built-in pack, in

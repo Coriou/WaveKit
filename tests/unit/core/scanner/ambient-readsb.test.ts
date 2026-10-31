@@ -29,6 +29,7 @@ import {
 	parseReadsb,
 } from "../../../../src/core/scanner/probes/confirm/readsb.js"
 import type { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
+import type { BandPlanSkipSource } from "../../../../src/core/scanner/types.js"
 import type { DecoderConfig } from "../../../../src/decoders/types.js"
 import { createDecoderProvenanceIndex } from "../../../../src/decoders/provenance-bindings.js"
 import { ambientTrustFromBinding } from "../../../../src/core/scanner/probes/ambient-trust.js"
@@ -381,11 +382,15 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			observation?: "wide" | "none" | "carrier"
 			dir?: string
 			now?: number
+			bandPlanSkips?: () => readonly BandPlanSkipSource[]
 		} = {},
 	) {
 		let provenance: ReturnType<typeof createDecoderProvenanceIndex> | undefined
 		const h = serviceHarness({
 			...(options.dir ? { dir: options.dir } : {}),
+			...(options.bandPlanSkips
+				? { bandPlanSkips: options.bandPlanSkips }
+				: {}),
 			centreHz: ADSB_HZ,
 			patch: s => {
 				s.passive.enabled = false
@@ -658,6 +663,51 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			}
 		},
 	)
+
+	it("the built-in ADS-B band skip leaves the 1090 MHz decode anchor intact", async () => {
+		const r = await serviceRig("trusted", {
+			observation: "none",
+			bandPlanSkips: () => [
+				{
+					key: "builtin-eu/adsb",
+					startHz: 1_089_000_000,
+					endHz: 1_091_000_000,
+				},
+			],
+		})
+		try {
+			// the skip view is live: a sweep over the band would leave 1089-1091 MHz to readsb
+			const preview = r.h.service.preview({
+				sourceId: "rtl",
+				mode: "sweep",
+				ranges: [{ startHz: 1_080_000_000, endHz: 1_100_000_000 }],
+				skipBandPlanSkips: true,
+				takeover: true,
+				resume: { autoAfterIdleMs: null },
+			})
+			expect(preview.bandPlanSkips).toEqual([
+				expect.objectContaining({
+					bandKeys: ["builtin-eu/adsb"],
+					applied: true,
+				}),
+			])
+			r.send(parseSbsLine(sbsLine("00:00:01.000")))
+			r.send(parseSbsLine(sbsLine("00:00:03.000")), 2000)
+			const discoveries = r.internals.store.snapshot().discoveries
+			expect(discoveries).toHaveLength(1)
+			expect(r.internals.store.get(discoveries[0]!.id)).toMatchObject({
+				anchor: "decode",
+				frequencyHz: ADSB_HZ,
+				protocol: "adsb",
+				confidence: "decoded",
+				aircraftCount: 1,
+				proof: { kind: "decoded", transport: "ambient" },
+			})
+		} finally {
+			await r.h.service.stop()
+			r.provenance.dispose()
+		}
+	})
 
 	it("records one anchor trial rather than counting accepted messages", async () => {
 		const r = await serviceRig("trusted", { observation: "none" })

@@ -2685,7 +2685,9 @@ with a key-only warning:
 
 #### GET /api/decoders/summary
 
-Returns a compact array, one entry per decoder: `id`, `protocol` (adapter type),
+Returns a compact array, one entry per decoder: `id`, `name` (the plain name of
+the decoder type, such as "ADS-B" for `readsb` or "Pager" for `multimon-ng`;
+"Decoder" for a type the core does not name), `protocol` (adapter type),
 `state` (`running` or `stopped`), `placements` (running placements only, each with
 `sourceId` and `frequencyHz`, null when unknown), `eventsOut`, `lastOutputAt`
 (ISO time or null), `suspensionReason` (reason code or null), and `health`.
@@ -2723,6 +2725,43 @@ Both sets are closed (`DECODER_VERDICT_CODES`, `DECODER_VERDICT_ACTIONS` and
 suspended (a paused feed, then efficiency detail), decoding, listening, starting. A budget
 suspension with no efficiency detail reads `efficiency-budget`; one with a detail the
 core does not recognise reads `unknown` with no action.
+
+A `failed` decoder the manager is already restarting on its own (a restart is
+scheduled, its health is `restarting`, or it faulted while still running) reads
+"<name> failed: restarting on its own" with no actions: offering a restart would
+only race the one already coming. Any other failure reads "<name> failed to run"
+with `restart`.
+
+**Query parameter `hz`** (optional): a frequency in Hz. With it, every entry also
+carries `coversHz`, a boolean that says whether the decoder's own band holds that
+frequency; without it the field is absent. The band is the decoder's band
+assessment (its targets and ranges); before the first assessment (at boot, before
+the source reports its capabilities) or when the assessment names no band, the
+decoder's fixed target frequencies: its configured targets, minus any that only
+follow the tuner (a VFO, fallback or centre placement, or the default channel of a
+single-channel audio decoder such as multimon-ng, which sits on the VFO or the
+tuned centre). A band holds `hz` within 200 kHz of a
+target, anywhere between its lowest and highest target, or inside one of its
+ranges widened by 200 kHz. A decoder with no band at all covers `hz` only when a
+built-in band plan range holding `hz` lists one of its protocols. A frequency that
+only follows the tuner never makes a decoder cover it, and scanner probes never
+cover. `hz` must be a positive finite number up to
+`DECODER_SUMMARY_MAX_HZ` (100 GHz, 100,000,000,000 Hz, inclusive, exported from
+`@wavekit/api-types`). Anything else (zero, a negative number, `Infinity`, text,
+an empty value or a value past the bound) answers 400:
+
+```json
+{
+	"error": "ValidationError",
+	"code": "VALIDATION_ERROR",
+	"message": "Invalid query parameter: hz: number (> 0, <= 100000000000), Hz",
+	"fields": [{ "field": "hz", "expected": "number (> 0, <= 100000000000), Hz" }]
+}
+```
+
+```bash
+curl "http://localhost:9000/api/decoders/summary?hz=1090000000"
+```
 
 #### GET /api/decoders/:id
 
@@ -6962,7 +7001,9 @@ most 1/s per (job, target); the latest state is always delivered.
   `pending`, `running`, `decoded`, `no-sync`, `crc-errors`, `timeout`,
   `skipped-budget`, `unsupported` (with `reason`: `no-decoder`,
   `needs-channelizer`, `unsupported-format`, `no-ambient-decoder`,
-  `decoder-unavailable`, `no-live-audio`; `mode` and `transport` null),
+  `decoder-unavailable`, `no-live-audio`, `adsb-window`: a protocol the request
+  names in `protocols` inside the ADS-B window, where only readsb is eligible;
+  `mode` and `transport` null),
   `not-needed` (an earlier trial decoded and `exhaustive` is false; an analog
   match no longer causes it, since 2026-10-18), `cancelled` and `heard` (a `live-audio`
   trial whose matching transmission carried no CTCSS tone or DCS code; `decoded`

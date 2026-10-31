@@ -32,6 +32,12 @@ const GROUPS: Record<string, DisplayGroup> = {
 	"amateur-70cm": "amateur",
 	aprs: "amateur",
 	"marine-vhf": "marine",
+	// The 1090 MHz ADS-B plan of the built-in supplement.
+	adsb: "air",
+}
+/** Built-in bands projected raw with a skip: another decoder covers them. */
+const SKIPS: Record<string, string> = {
+	adsb: "Decoded elsewhere · readsb",
 }
 
 describe("built-in pack projection", () => {
@@ -51,10 +57,11 @@ describe("built-in pack projection", () => {
 				const plan = plans[index]!
 				expect(Object.isFrozen(band)).toBe(true)
 				expect(band.name).toBe(plan.name)
-				expect(band.mode).toBeNull()
+				const skip = SKIPS[plan.id]
+				expect(band.mode).toBe(skip === undefined ? null : "raw")
 				expect(band.bandwidthHz).toBeNull()
 				expect(band.stepHz).toBeNull()
-				expect(band.skip).toBeNull()
+				expect(band.skip).toEqual(skip === undefined ? null : { reason: skip })
 				expect(band.channels).toEqual([])
 				expect(band.parentId).toBeNull()
 				expect(band.colourHint).toBeNull()
@@ -143,7 +150,7 @@ describe("built-in pack projection", () => {
 					expect(GROUPS[plan.id]).toBeDefined()
 					expect(band?.group).toBe(builtinGroupFor(plan.id))
 					expect(band?.channels).toEqual([])
-					expect(band?.mode).toBeNull()
+					expect(band?.mode).toBe(SKIPS[plan.id] === undefined ? null : "raw")
 					expect(band?.bandwidthHz).toBeNull()
 					expect(band?.stepHz).toBeNull()
 				}

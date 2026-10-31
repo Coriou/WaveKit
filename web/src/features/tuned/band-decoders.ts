@@ -1,20 +1,23 @@
-// The tuned card's "On this band": the decoders whose band holds the tuned frequency, each with the core's one-line
-// verdict (GET /api/decoders/summary) and, for one that does not run, its first suggested action as one control.
-// Pure: what an action does is decided here, the card only carries it out.
+// The tuned card's "On this band" building blocks: the core's verdicts (GET /api/decoders/summary) read leniently,
+// the tuned-band rule for cores without `coversHz`, and what each suggested action does from the card (the table's
+// rows are band-table.ts). Pure: what an action does is decided here, the card only carries it out.
 import {
 	DECODER_VERDICT_ACTIONS,
 	DECODER_VERDICT_CODES,
 	DECODER_VERDICT_TEXT_MAX_LENGTH,
 } from "@wavekit/api-types"
 import type {
+	Bandplan,
 	DecoderInfo,
 	DecoderVerdictAction,
 	DecoderVerdictCode,
 	EfficiencyBudgetResolution,
 	ScanJob,
+	ScanRange,
 } from "@wavekit/api-types"
 
 import { formatMHz } from "../format.ts"
+import { fixedTargetsHz, planListsHz } from "./decoder-protocols.ts"
 import { decoderLabel } from "./signal.ts"
 
 /** The core's tuned-band reach (TUNED_TARGET_TOLERANCE_HZ): within 200 kHz of a target, of the span between targets, or of a band range. */
@@ -72,18 +75,6 @@ function targetsOf(d: DecoderInfo): number[] {
 	return d.bandAssessment?.targetsHz ?? d.targetFrequenciesHz ?? []
 }
 
-/** Distance from `hz` to the decoder's band: 0 inside a range, else to the nearest target; Infinity without either. */
-function bandDistance(d: DecoderInfo, hz: number): number {
-	let best = Infinity
-	for (const r of d.bandAssessment?.rangesHz ?? [])
-		best = Math.min(
-			best,
-			hz < r.minHz ? r.minHz - hz : hz > r.maxHz ? hz - r.maxHz : 0,
-		)
-	for (const t of targetsOf(d)) best = Math.min(best, Math.abs(t - hz))
-	return best
-}
-
 const positive = (n: unknown): n is number =>
 	typeof n === "number" && Number.isFinite(n) && n > 0
 
@@ -119,10 +110,38 @@ export function bandHoldsHz(
 	)
 }
 
-/** True when the decoder's band holds `hz` (the core's tuned-band rule). Scanner probes are not band decoders. */
-export function onBand(d: DecoderInfo, hz: number): boolean {
-	if (d.owner === "scanner") return false
-	return bandHoldsHz(targetsOf(d), d.bandAssessment?.rangesHz, hz)
+/**
+ * True when the decoder's own band holds `hz`, for cores whose summary has no `coversHz` and while the summary
+ * cannot be read: the core's decoderCoversHz (src/api/routes/decoder-summary.ts). The band assessment's targets
+ * and ranges decide when it names any; else the fixed configured targets (fixedTargetsHz: at boot, before the first
+ * assessment, or an assessment that names no band; a frequency that only follows the tuner never counts); else a decoder with no band of its own (a pager, digital voice) covers `hz`
+ * where a band plan range there lists one of its protocols (planListsHz). `planRanges` is the core's band plan as
+ * GET /api/scanner/bandplans serves it (the effective region's plan); null while not loaded, when only the first
+ * two apply. Scanner probes and ephemeral decoders never cover.
+ */
+export function onBand(
+	d: DecoderInfo,
+	hz: number,
+	planRanges:
+		| readonly Pick<ScanRange, "startHz" | "endHz" | "protocols">[]
+		| null = null,
+): boolean {
+	if (d.owner === "scanner" || d.ephemeral === true) return false
+	const band = d.bandAssessment
+	const targets = Array.isArray(band?.targetsHz) ? band.targetsHz : []
+	const ranges = Array.isArray(band?.rangesHz) ? band.rangesHz : []
+	if (targets.length > 0 || ranges.length > 0)
+		return bandHoldsHz(targets, ranges, hz)
+	const configured = fixedTargetsHz(d)
+	if (configured.length > 0) return bandHoldsHz(configured, undefined, hz)
+	return planListsHz(d.type, planRanges ?? [], hz)
+}
+
+/** The ranges of the core's band plans (GET /api/scanner/bandplans), for onBand; null while not loaded. */
+export function planRangesOf(
+	plans: readonly Pick<Bandplan, "ranges">[] | null,
+): ScanRange[] | null {
+	return plans === null ? null : plans.flatMap(p => p.ranges)
 }
 
 /** Opens Settings on a row (`dec.<id>` opens that decoder's row). */
@@ -286,97 +305,6 @@ export function actionFor(
 						title: "The receiver is paused: resume it in the Receiver",
 					}
 	}
-}
-
-/** The verdict's one primary control: its first action the card can carry out or link to. */
-export function primaryAction(
-	verdict: BandVerdict,
-	d: DecoderInfo,
-	ctx: ActionContext,
-): BandAction | null {
-	if (verdict.code === "unknown") return null
-	for (const a of verdict.actions) {
-		const view = actionFor(a, d, ctx)
-		if (view) return view
-	}
-	return null
-}
-
-export interface BandDecoderRow {
-	id: string
-	name: string
-	/** Running on this band: decoding or listening. */
-	listening: boolean
-	/** The core's sentence, else one made from the status (cores without a summary verdict). */
-	text: string
-	action: BandAction | null
-}
-
-const LISTENING: ReadonlySet<DecoderVerdictCode> = new Set([
-	"decoding",
-	"listening",
-])
-
-/**
- * The decoders on the tuned band: listening ones first, then the rest, nearest band first. A decoder
- * without a verdict (an older core) reads from its status and offers no action. A decoder off in
- * Settings now only ever offers turning it on there, whatever its (possibly older) verdict says.
- */
-export function bandDecoders(
-	decoders: readonly DecoderInfo[],
-	verdicts: ReadonlyMap<string, BandVerdict> | null,
-	hz: number,
-	ctx: ActionContext,
-): BandDecoderRow[] {
-	const rows = decoders
-		.filter(d => onBand(d, hz))
-		.map(d => {
-			const name = decoderLabel(d.type)
-			const verdict = verdicts?.get(d.id) ?? null
-			if (d.mode === "off")
-				return {
-					row: {
-						id: d.id,
-						name,
-						listening: false,
-						text:
-							verdict?.code === "off"
-								? verdict.text
-								: `${name} off in Settings`,
-						action: actionFor("turn-on", d, ctx),
-					},
-					dist: bandDistance(d, hz),
-				}
-			if (!verdict) {
-				const runs = d.running && !d.suspended
-				return {
-					row: {
-						id: d.id,
-						name,
-						listening: runs,
-						text: `${name} ${runs ? "running" : d.suspended ? "paused" : "not running"}`,
-						action: null,
-					},
-					dist: bandDistance(d, hz),
-				}
-			}
-			const listening = LISTENING.has(verdict.code)
-			return {
-				row: {
-					id: d.id,
-					name,
-					listening,
-					text: verdict.text,
-					action: listening ? null : primaryAction(verdict, d, ctx),
-				},
-				dist: bandDistance(d, hz),
-			}
-		})
-	rows.sort(
-		(a, b) =>
-			Number(b.row.listening) - Number(a.row.listening) || a.dist - b.dist,
-	)
-	return rows.map(r => r.row)
 }
 
 /**
