@@ -403,14 +403,11 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 		},
 		async () => {
 			const consumersBySourceId = countConsumersBySource(fanoutManager)
-			return sourceManager.getAllStatus().map(status => ({
-				...toApiExtendedSourceStatus(
-					status,
-					sourceManager,
-					consumersBySourceId,
-				),
-				...(status.feed !== undefined ? { feed: status.feed } : {}),
-			}))
+			return sourceManager
+				.getAllStatus()
+				.map(status =>
+					toApiExtendedSourceStatus(status, sourceManager, consumersBySourceId),
+				)
 		},
 	)
 

@@ -64,6 +64,7 @@ first suggestion:
 | Start, restart                                 | Start, Restart                             | Starts or restarts that decoder                                                                                           |
 | Raise the CPU budget                           | Raise CPU budget                           | Adds one core to the decoder CPU budget, up to its maximum of 64 (Undo in the toast); Settings › Decoders keeps the value |
 | Pause the scanner                              | Stop the scan                              | Ends the scan, which gives the tuner and the decoders back (a paused scan keeps them)                                     |
+| Resume the receiver                            | Resume                                     | Resumes the paused receiver feed, as the Receiver's Resume does                                                           |
 | Tune to its band                               | Tune to 1090.000                           | Tunes the receiver to the decoder's frequency                                                                             |
 | Change the sample rate, check the source       | Raise sample rate, Check the receiver…     | Opens the Receiver, where you set it                                                                                      |
 | Turn on, turn off others, install, channelizer | Turn on in Settings, Decoders in Settings… | Opens the decoder's row in Settings                                                                                       |
@@ -141,8 +142,13 @@ waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads
   receiver cannot be reached, the island says `Resume failed` with the reason and a **Retry**
   button, and the receiver stays paused. In the ⌘K palette, **Pause receiver** (while live) or
   **Resume receiver** (while paused) does the same, and the `P` key toggles it from anywhere; a
-  pause from the palette or the key offers Undo. Read-only browsers cannot pause. See
+  pause from the palette or the key offers Undo. Read-only browsers cannot pause. While paused,
+  the tuned card's decoders read "waiting: Receiver paused — Resume" with a **Resume** button and
+  Settings › Decoders reads `Paused · the receiver is paused`. See
   [pause and resume](API.md#post-apisourcesidpause-and-post-apisourcesidresume).
+
+  ![The receiver paused: the waterfall frozen under the Receiver paused label, the Receiver island with Resume, and the tuned card's decoders waiting with Resume buttons](assets/screenshots/receiver-paused.png)
+
 - **Receiver** (the island at the top): under Gain, a quiet line says when the core confirms a
   band gain on the tuner, for example `Band gain 37.2 dB · 868 MHz ISM · while the
 scanner tunes` (or `· for your tuning` with the switch on). It shows the gain the tuner really

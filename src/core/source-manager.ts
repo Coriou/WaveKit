@@ -268,6 +268,17 @@ const SAMPLE_TIMEOUT_MS = 10000
  * @param attempts - Number of consecutive failed attempts
  * @returns Delay in milliseconds before next attempt
  */
+/**
+ * True while the operator holds the feed off on purpose (paused, or resuming from a pause): the
+ * source is meant to be disconnected, so health and the degraded-mode monitor leave it out. A
+ * failed resume ("error") is not held: the operator asked for the feed and it did not come back.
+ */
+export function feedHeldOffline(status: {
+	feed?: SourceFeed | undefined
+}): boolean {
+	return status.feed?.state === "paused" || status.feed?.state === "resuming"
+}
+
 export function calculateBackoffDelay(attempts: number): number {
 	const delay = Math.pow(2, attempts) * BASE_DELAY_MS
 	return Math.min(delay, MAX_DELAY_MS)
@@ -2687,12 +2698,15 @@ export class SourceManager extends EventEmitter {
 
 	/**
 	 * Checks if the SourceManager is in degraded mode (Requirement 10.3).
-	 * Degraded mode means at least one source is disconnected but not all.
+	 * Degraded mode means at least one source is disconnected but not all. A feed the operator
+	 * holds paused (feedHeldOffline) is left out: it is meant to be disconnected.
 	 *
 	 * @returns true if in degraded mode, false otherwise
 	 */
 	isDegraded(): boolean {
-		const allStatus = this.getAllStatus()
+		const allStatus = this.getAllStatus().filter(
+			s => s.connected || !feedHeldOffline(s),
+		)
 		if (allStatus.length === 0) {
 			return false // No sources configured is not degraded
 		}
@@ -2710,7 +2724,9 @@ export class SourceManager extends EventEmitter {
 	 * @returns true if all sources are disconnected, false otherwise
 	 */
 	isAllSourcesUnavailable(): boolean {
-		const allStatus = this.getAllStatus()
+		const allStatus = this.getAllStatus().filter(
+			s => s.connected || !feedHeldOffline(s),
+		)
 		if (allStatus.length === 0) {
 			return false // No sources configured
 		}
@@ -2728,13 +2744,19 @@ export class SourceManager extends EventEmitter {
 		isDegraded: boolean
 		isAllUnavailable: boolean
 		connectedSources: string[]
+		/** Disconnected sources the operator has not paused. */
 		disconnectedSources: string[]
+		/** Sources whose feed the operator holds paused (or is resuming). */
+		pausedSources: string[]
 		totalSources: number
 	} {
 		const allStatus = this.getAllStatus()
 		const connectedSources = allStatus.filter(s => s.connected).map(s => s.id)
 		const disconnectedSources = allStatus
-			.filter(s => !s.connected)
+			.filter(s => !s.connected && !feedHeldOffline(s))
+			.map(s => s.id)
+		const pausedSources = allStatus
+			.filter(s => !s.connected && feedHeldOffline(s))
 			.map(s => s.id)
 
 		return {
@@ -2742,6 +2764,7 @@ export class SourceManager extends EventEmitter {
 			isAllUnavailable: this.isAllSourcesUnavailable(),
 			connectedSources,
 			disconnectedSources,
+			pausedSources,
 			totalSources: allStatus.length,
 		}
 	}

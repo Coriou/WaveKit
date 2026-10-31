@@ -452,6 +452,21 @@ describe("receiver feed: the island", () => {
 		await close()
 	})
 
+	it("the services keep a pause from the first source rows, before anything renders", async () => {
+		// Validates: createServices makes the feed controller, so no render order loses a feed
+		const { services, server, close } = await loaded()
+		const { data } = services
+		await server.app.inject({ method: "POST", url: "/api/sources/rtl-0/pause" })
+		await data.sources.load()
+		const row = data.sources.byId("rtl-0")
+		expect(row?.feed?.state).toBe("paused")
+		// an older core's row without feed replaces it before the island or palette first render
+		const { feed: _dropped, ...withoutFeed } = row!
+		data.sources.update(s => ({ ...s, sources: [withoutFeed] }))
+		expect(feedControllerFor(data).entry("rtl-0").feed?.state).toBe("paused")
+		await close()
+	})
+
 	it("keeps a pause known only from GET /api/sources when the socket's source:status lacks feed", async () => {
 		// Validates: an already paused receiver (paused elsewhere, then this page loads) keeps Resume
 		const { services, server, close } = await loaded({

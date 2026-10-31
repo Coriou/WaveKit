@@ -444,6 +444,12 @@ with `reason` `all_decoders_down` (every configured decoder is down) or `api_dow
 `reason` `no_source_connected`, `no_decoder_running` or `api_down`. The reasons are fixed codes,
 never error messages, because `/health` is public even in protected mode.
 
+A receiver feed paused by the operator ([pause and resume](#post-apisourcesidpause-and-post-apisourcesidresume)),
+or resuming from a pause, is intentional: that source counts as neither down nor degraded (the
+source component of `GET /api/status` notes it and adds `metrics.paused`), decoders waiting for it
+count as neither down nor not running, and the degraded-mode monitor does not warn about it. A
+failed resume (feed `error`) counts as a disconnected source again.
+
 ```bash
 curl -i http://localhost:9000/health
 ```
@@ -2519,17 +2525,19 @@ Each entry also carries `verdict`: `{ code, text, actions }`. `text` is one shor
 sentence of at most 160 characters, such as "ADS-B paused: CPU budget full". `code` is
 one of `decoding`, `listening` (running, nothing decoded for 60 s), `starting`, `off`
 (mode off), `stopped` (stopped by the operator), `failed`, `out-of-band`,
-`no-channel`, `capture-too-narrow`, `source-unavailable`, `unsupported-rate`,
+`no-channel`, `capture-too-narrow`, `source-unavailable`, `source-paused` (the
+source's receiver feed is paused; text "waiting: Receiver paused — Resume"),
+`unsupported-rate`,
 `scanner-busy`, `efficiency-budget`, `efficiency-cpu`, `efficiency-drops`,
 `efficiency-late-drops`, `efficiency-waiting`, `decoder-unavailable`,
 `channelizer-unavailable` or `unknown`. `actions` lists suggestions from `turn-on`,
 `start`, `restart`, `tune-to-band`, `raise-sample-rate`, `lower-sample-rate`,
-`change-sample-rate`, `check-source`, `pause-scanner`, `raise-budget`,
+`change-sample-rate`, `check-source`, `resume-source`, `pause-scanner`, `raise-budget`,
 `turn-off-others`, `install-decoder` and `enable-channelizer`, most helpful first.
 Both sets are closed (`DECODER_VERDICT_CODES`, `DECODER_VERDICT_ACTIONS` and
 `decoderVerdictSchema` in `@wavekit/api-types`); a client treats an unknown code as
 `unknown` and ignores an unknown action. Precedence: failed, off, stopped,
-suspended (efficiency detail first), decoding, listening, starting. A budget
+suspended (a paused feed, then efficiency detail), decoding, listening, starting. A budget
 suspension with no efficiency detail reads `efficiency-budget`; one with a detail the
 core does not recognise reads `unknown` with no action.
 

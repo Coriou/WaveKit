@@ -12,6 +12,7 @@
  */
 
 import type { DecoderManager } from "../decoders/manager.js"
+import { feedHeldOffline } from "../core/source-manager.js"
 import type { SourceManager } from "../core/source-manager.js"
 import type { DecoderHealth } from "../decoders/types.js"
 
@@ -180,6 +181,22 @@ function intentionallyStoppedCatalogue(
 	)
 }
 
+/**
+ * Held back only because the operator paused its source's receiver feed: intentional, so neither
+ * down nor a reason to be unready. A fault still counts.
+ */
+function heldByFeedPause(
+	status: ReturnType<DecoderManager["getAllStatus"]>[number],
+	health: DecoderHealth | undefined,
+): boolean {
+	return (
+		status.suspension?.reasonCode === "source-paused" &&
+		!status.running &&
+		health !== "faulted" &&
+		status.health !== "faulted"
+	)
+}
+
 export function checkAllDecodersHealth(
 	decoderManager: DecoderManager,
 ): Record<string, ComponentHealth> {
@@ -194,7 +211,8 @@ export function checkAllDecodersHealth(
 				status,
 				allHealth.get(status.id),
 				decoderManager,
-			)
+			) ||
+			heldByFeedPause(status, allHealth.get(status.id))
 		)
 			continue
 		const health = allHealth.get(status.id) ?? "running"
@@ -229,12 +247,28 @@ export function checkSourceHealth(
 		}
 	}
 
-	const connectedSources = allStatus.filter(s => s.connected)
-	const totalSources = allStatus.length
+	// A feed the operator paused is meant to be disconnected: it is reported, not counted
+	const paused = allStatus.filter(s => !s.connected && feedHeldOffline(s))
+	const pausedNote =
+		paused.length > 0
+			? ` (paused by the operator: ${paused.map(s => s.id).join(", ")})`
+			: ""
+	const expected = allStatus.filter(s => s.connected || !feedHeldOffline(s))
+	const connectedSources = expected.filter(s => s.connected)
+	const totalSources = expected.length
+
+	if (totalSources === 0) {
+		return {
+			status: "up",
+			message: `All ${paused.length} source feed(s) paused by the operator`,
+			lastCheck: new Date().toISOString(),
+			metrics: { connected: 0, total: 0, paused: paused.length },
+		}
+	}
 
 	if (connectedSources.length === 0) {
 		// All sources disconnected
-		const errors = allStatus
+		const errors = expected
 			.filter(s => s.lastError)
 			.map(s => `${s.id}: ${s.lastError}`)
 			.join("; ")
@@ -252,18 +286,19 @@ export function checkSourceHealth(
 
 	if (connectedSources.length < totalSources) {
 		// Some sources disconnected
-		const disconnected = allStatus
+		const disconnected = expected
 			.filter(s => !s.connected)
 			.map(s => s.id)
 			.join(", ")
 
 		return {
 			status: "degraded",
-			message: `Some sources disconnected: ${disconnected}`,
+			message: `Some sources disconnected: ${disconnected}${pausedNote}`,
 			lastCheck: new Date().toISOString(),
 			metrics: {
 				connected: connectedSources.length,
 				total: totalSources,
+				...(paused.length > 0 ? { paused: paused.length } : {}),
 			},
 		}
 	}
@@ -271,11 +306,12 @@ export function checkSourceHealth(
 	// All sources connected
 	return {
 		status: "up",
-		message: `All ${totalSources} source(s) connected`,
+		message: `All ${totalSources} source(s) connected${pausedNote}`,
 		lastCheck: new Date().toISOString(),
 		metrics: {
 			connected: connectedSources.length,
 			total: totalSources,
+			...(paused.length > 0 ? { paused: paused.length } : {}),
 		},
 	}
 }
@@ -361,7 +397,14 @@ export function performHealthCheck(
 			s => s.id === "sdrpp" || s.caps.kind === "iq",
 		)
 
-		if (sdrppSource) {
+		if (sdrppSource && !sdrppSource.connected && feedHeldOffline(sdrppSource)) {
+			// the operator closed the connection on purpose: not checked, not down
+			components.sdrpp = {
+				status: "up",
+				message: "Receiver feed paused by the operator; SDR++ not checked",
+				lastCheck: new Date().toISOString(),
+			}
+		} else if (sdrppSource) {
 			components.sdrpp = {
 				status: sdrppSource.connected ? "up" : "down",
 				message: sdrppSource.connected
@@ -434,7 +477,8 @@ export function checkReadiness(
 					status,
 					decoderManager.getAllHealth().get(status.id),
 					decoderManager,
-				),
+				) &&
+				!heldByFeedPause(status, decoderManager.getAllHealth().get(status.id)),
 		)
 	if (decoderStatuses.length > 0) {
 		const hasRunningDecoder = decoderStatuses.some(d => d.running)

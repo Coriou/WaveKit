@@ -70,6 +70,12 @@ import { BandRuler } from "./BandRuler.tsx"
 import { isReadOnly } from "../app/context.ts"
 import { confidenceText } from "../data/scanner-format.ts"
 import { modeSpec } from "../features/tuner/modes.ts"
+import { ReceiverPausedBadge } from "../features/receiver/ReceiverIsland.tsx"
+import {
+	feedControllerFor,
+	feedOf,
+	isPaused as feedPaused,
+} from "../features/receiver/feed.ts"
 import { scanHasReceiver as scanHasReceiverOf } from "../features/tuning.ts"
 import { HandleController, squelchLineDbfs } from "./handle-controller.ts"
 import { SquelchLine, VfoEdges } from "./HandleOverlays.tsx"
@@ -133,7 +139,20 @@ const TRACK_HOLD_MS = 1500
 const DRAG_THRESHOLD_PX = 3
 
 export function Plot({ data, className, stepHz, paused }: PlotProps) {
-	const sourceId = useStore(data.sources, s => firstConnected(s.sources))
+	const connectedId = useStore(data.sources, s => firstConnected(s.sources))
+	// a paused receiver is not connected: the plot stays on it, so its waterfall freezes (no frames
+	// arrive) under the paused label instead of clearing
+	const feedSource = useStore(data.sources, s =>
+		connectedId === null
+			? s.sources[0]
+			: s.sources.find(x => x.id === connectedId),
+	)
+	const feedEntry = useStore(feedControllerFor(data), s =>
+		feedSource === undefined ? undefined : s.bySource[feedSource.id],
+	)
+	const receiverPaused = feedPaused(feedOf(feedSource, feedEntry))
+	const sourceId =
+		connectedId ?? (receiverPaused ? (feedSource?.id ?? null) : null)
 	const tuner = useStore(data.tuner, s =>
 		sourceId === null ? undefined : s.bySource[sourceId],
 	)
@@ -388,6 +407,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 					paused={paused ?? false}
 					probeRef={probeRef}
 				/>
+				<ReceiverPausedBadge data={data} sourceId={feedSource?.id ?? null} />
 				{size.w > 0 && view && (
 					<>
 						<div
@@ -526,7 +546,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 				{sourceId === null && (
 					<div className="wk-plot-note">No source connected</div>
 				)}
-				{engineError !== null && sourceId !== null && (
+				{engineError !== null && sourceId !== null && !receiverPaused && (
 					<div className="wk-plot-note" role="status">
 						{engineError}
 					</div>

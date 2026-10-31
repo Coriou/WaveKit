@@ -208,6 +208,49 @@ describe("SourceManager feed pause / resume", () => {
 		expect(feedEvents).toEqual([["rtl", "paused"]])
 	})
 
+	it("a paused feed is intentional: not degraded, not unavailable, listed as paused", async () => {
+		const { upstream, manager } = await started()
+		await manager.connect(config(upstream.port))
+		await manager.connect(config(upstream.port, "rtl2"))
+		await waitFor(() => manager.getStatus("rtl")?.connected === true)
+		await waitFor(() => manager.getStatus("rtl2")?.connected === true)
+
+		await manager.pause("rtl")
+		await waitFor(() => manager.getStatus("rtl")?.connected === false)
+		expect(manager.getDegradedInfo()).toMatchObject({
+			isDegraded: false,
+			isAllUnavailable: false,
+			disconnectedSources: [],
+			pausedSources: ["rtl"],
+		})
+		await manager.pause("rtl2")
+		await waitFor(() => manager.getStatus("rtl2")?.connected === false)
+		expect(manager.getDegradedInfo()).toMatchObject({
+			isDegraded: false,
+			isAllUnavailable: false,
+			disconnectedSources: [],
+			pausedSources: ["rtl", "rtl2"],
+		})
+	})
+
+	it("a failed resume is not intentional: the source reads disconnected and unavailable", async () => {
+		const probe = await startFakeRtlTcp()
+		const { manager } = await started()
+		const port = probe.port
+		await probe.close()
+		await expect(manager.connect(config(port))).rejects.toMatchObject({
+			name: "SourceConnectionError",
+		})
+		await manager.pause("rtl")
+		await manager.resume("rtl")
+		expect(manager.getStatus("rtl")?.feed?.state).toBe("error")
+		expect(manager.getDegradedInfo()).toMatchObject({
+			isAllUnavailable: true,
+			disconnectedSources: ["rtl"],
+			pausedSources: [],
+		})
+	})
+
 	it("pause cancels a pending backoff retry; the receiver is never dialled while paused", async () => {
 		const probe = await startFakeRtlTcp()
 		const port = probe.port

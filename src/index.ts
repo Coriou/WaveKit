@@ -1271,6 +1271,8 @@ async function main(): Promise<void> {
 		const sourceManager = new SourceManager(logger, {
 			signalFlatThresholdDbfs: config.health?.signalFlatThresholdDbfs,
 			signalFlatHoldMs: config.health?.signalFlatHoldMs,
+			// Paused feeds persist in <stateDir>/source-feed.json across restarts.
+			stateDir: config.stateDir,
 		})
 		own(100, async () => {
 			await disposeReceiverAfterApi()
@@ -2986,13 +2988,16 @@ async function main(): Promise<void> {
 			try {
 				await sourceManager.connect(sourceConfig)
 				checkpoint()
+				const paused = sourceManager.isPaused(sourceConfig.id)
 				log.info(
 					{
 						sourceId: sourceConfig.id,
 						host: sourceConfig.host,
 						port: sourceConfig.port,
 					},
-					"Connected to source",
+					paused
+						? "Source feed paused; not connecting until resumed"
+						: "Connected to source",
 				)
 			} catch (err) {
 				if (stopping) throw err

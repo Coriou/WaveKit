@@ -43,7 +43,7 @@ import { defaultGroup, defaultSaveName, saveInput } from "../tuner/saved.ts"
 import { sweepMoving } from "../tuner/scan-hold.ts"
 import { useHeld, useSweep } from "../tuner/ScanHoldRow.tsx"
 import { BandDecoders } from "./BandDecoders.tsx"
-import { decodersAt } from "./decoders.ts"
+import { decoderPausedLine, decodersAt } from "./decoders.ts"
 import {
 	DECODE_AS,
 	discoveryCard,
@@ -550,7 +550,7 @@ export function TunedCard() {
 						: active.length
 							? `Decoding · ${active.map(d => d.type).join(", ")}`
 							: here.length
-								? `${here[0]?.type ?? "Decoder"} paused${here[0]?.suspended ? " · off band" : ""}`
+								? decoderPausedLine(here[0])
 								: squelchOpen
 									? "Signal present"
 									: live

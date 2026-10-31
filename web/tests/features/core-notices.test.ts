@@ -16,6 +16,7 @@ import {
 } from "../../src/features/receiver/notices.ts"
 import {
 	decoderStatusText,
+	decoderTone,
 	efficiencyText,
 	placementsText,
 } from "../../src/features/settings/decoder-rows.ts"
@@ -179,6 +180,24 @@ describe("decoder enablement in Settings", () => {
 				efficiency: { detail: "budget", retryAt: "2026-10-22T10:05:00Z" },
 			}),
 		).toMatch(/^Waiting: over the CPU budget · tries again at /)
+	})
+
+	it("reads a receiver pause as paused, not as a fault or not running", () => {
+		const held = {
+			...base,
+			running: false,
+			desiredRunning: true,
+			suspended: true,
+			suspension: { reasonCode: "source-paused" },
+		} as unknown as DecoderInfo
+		expect(decoderStatusText(held)).toBe("Paused · the receiver is paused")
+		expect(decoderTone(held)).toBe("idle")
+		// an operator stop still reads stopped, a crash loop still a fault
+		const stopped = { ...held, desiredRunning: false } as DecoderInfo
+		expect(decoderStatusText(stopped)).toBe("Stopped")
+		expect(decoderTone(stopped)).toBe("off")
+		const faulted = { ...held, health: "faulted" } as DecoderInfo
+		expect(decoderTone(faulted)).toBe("fault")
 	})
 
 	it("lists its placements", () => {

@@ -16,6 +16,17 @@ export function decodersAt(
 		.sort((a, b) => dist(a) - dist(b))
 }
 
+/** The tuned card's line for a decoder here that is not decoding: why it waits, when known. */
+export function decoderPausedLine(d: DecoderInfo | undefined): string {
+	const why =
+		d?.suspension?.reasonCode === "source-paused"
+			? " · receiver paused"
+			: d?.suspended
+				? " · off band"
+				: ""
+	return `${d?.type ?? "Decoder"} paused${why}`
+}
+
 export interface DecodersState {
 	decoders: readonly DecoderInfo[]
 	loaded: boolean
