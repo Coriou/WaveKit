@@ -163,12 +163,14 @@ export const ChannelizerEventSchema = z.discriminatedUnion("type", [
 		})
 		.strict(),
 	// Main-loop liveness after work, at most every 100 ms (runtime.rs `maybe_progress`); the generation watchdog reads it.
+	// `inputBytes`: stdin bytes whose block the process finished (a held odd byte included), the ack of written input.
 	z
 		.object({
 			v,
 			type: z.literal("progress"),
 			generation,
 			inputSamples: count,
+			inputBytes: count,
 		})
 		.strict(),
 	z

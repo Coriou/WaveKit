@@ -374,24 +374,36 @@ exits 0.
 { v: 1, type: "stats", generation, inputSamples, channels: [{ id, outputSamples, queueHighWaterBytes, droppedSamples, saturatedSamples }] }  // every 5 s
 { v: 1, type: "closed", id, generation, reason: "requested" | "client-gone" }
 { v: 1, type: "input-eof", generation, inputSamples, discardedBytes }
-{ v: 1, type: "progress", generation, inputSamples }  // after main-loop work, at most every 100 ms
+{ v: 1, type: "progress", generation, inputSamples, inputBytes }  // after main-loop work, at most every 100 ms
 ```
 
 `progress` is main-loop liveness, not telemetry. The main loop writes it after
-it completed more work (an input block, a control line, a planner poll while an
-open is being prepared, or a reaped writer of a closed channel), at most every
-100 ms (`PROGRESS_EVERY` in `runtime.rs`); an idle process writes none.
+it completed more work (an input block, one channel's step of a block, a
+control line, a planner poll while an open is being prepared, or a reaped
+writer of a closed channel), at most every 100 ms (`PROGRESS_EVERY` in
+`runtime.rs`); an idle process writes none. A block that has run 100 ms also
+writes it between channel steps, on the serial loop and the DSP pool alike, so
+the longest silent unit is one channel's DSP over one block, not the whole
+block (16 wideband channels can take about 2.9 s for one 32 768-sample block).
+`inputBytes` counts the stdin bytes whose block the main loop finished, a held
+odd byte included; a line written mid-block still reports the bytes before
+that block.
 `close` answers `closed` without waiting for the channel's writer thread; the
 writer is joined on a later turn once it has returned (detached after 500 ms),
 and the connection's `closing` flag still stops an old writer from unlinking a
 same-id replacement's socket. Node never retires a generation because one
 `close` went unanswered: the caller waits at most 250 ms and the id stays fenced
 until `closed`. A generation watchdog retires the process only when it owes work
-(a pending open, close or retune reply, or input queued in its stdin) and wrote
-no event line of any type for 2000 ms (`WEDGE_MS` in `channelizer-manager.ts`),
-counted from the later of its last line and the moment the work became owed.
-2000 ms leaves 20 `progress` chances per window and is 4× the longest silent
-step the main loop used to take (the 500 ms writer join).
+(a pending open, close or retune reply, or stdin bytes it has not acknowledged:
+Node counts every byte it hands to stdin and compares it with the largest
+`inputBytes`, never with its own write buffers, which empty once the OS pipe
+takes the bytes) and wrote no event line of any type for 2000 ms (`WEDGE_MS` in
+`channelizer-manager.ts`), counted from the later of its last line and the
+moment the work became owed. 2000 ms leaves 20 `progress` chances per window.
+One channel step longer than that is unresponsive by design: at the default
+16 384-sample block (8 ms at 2.048 Msps) it is more than 250 times slower than
+real time, and even at the largest block (2^20 samples, 512 ms) more than 3.9
+times, so the process could never keep up with its input.
 
 The process listens on `DIR/<id>.sock` before emitting `opened`; exactly one
 client per socket; client disconnect closes the channel. `sampleIndex` is the

@@ -65,23 +65,34 @@ class BusyProcess extends EventEmitter implements ChannelizerProcessLike {
 	closes = 0
 	progressLines = 0
 	private lastProgress = -Infinity
+	/** A line still owed for input consumed inside the last 100 ms (the runtime's next idle turn writes it). */
+	private trailing: ReturnType<typeof setTimeout> | undefined
 	readonly input = new Writable({
 		write: (chunk: Buffer, _enc, done) => {
 			this.consumed += chunk.length
-			const now = Date.now()
-			if (now - this.lastProgress >= PROGRESS_EVERY_MS) {
-				this.progressLines++
-				this.lastProgress = now
-				this.event({
-					v: 1,
-					type: "progress",
-					generation: this.generation,
-					inputSamples: Math.floor(this.consumed / 2),
-				})
-			}
+			const wait = this.lastProgress + PROGRESS_EVERY_MS - Date.now()
+			if (wait <= 0) this.progress()
+			else
+				this.trailing ??= setTimeout(() => {
+					this.trailing = undefined
+					this.progress()
+				}, wait)
 			done()
 		},
 	})
+	private progress() {
+		clearTimeout(this.trailing)
+		this.trailing = undefined
+		this.progressLines++
+		this.lastProgress = Date.now()
+		this.event({
+			v: 1,
+			type: "progress",
+			generation: this.generation,
+			inputSamples: Math.floor(this.consumed / 2),
+			inputBytes: this.consumed,
+		})
+	}
 	constructor(readonly generation: number) {
 		super()
 	}
@@ -90,6 +101,7 @@ class BusyProcess extends EventEmitter implements ChannelizerProcessLike {
 		return Promise.resolve()
 	}
 	stop(): Promise<void> {
+		clearTimeout(this.trailing)
 		this.input.destroy()
 		this.emit("exit", 0, null)
 		return Promise.resolve()

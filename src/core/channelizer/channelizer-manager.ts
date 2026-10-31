@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events"
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { createConnection } from "node:net"
 import { join } from "node:path"
-import { PassThrough, type Readable, type Writable } from "node:stream"
+import { PassThrough, type Readable } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import type { ChannelizerConfig, SourceCaps } from "../../config.js"
 import { branchHighWaterMark, type FanoutManager } from "../fanout-manager.js"
@@ -48,19 +48,21 @@ export const CRASH_WINDOW_MS = 60_000
 const OPEN_TIMEOUT_MS = 5000
 const CLOSE_TIMEOUT_MS = 250
 /**
- * Generation watchdog: a process that owes work (a control reply, or input queued in its stdin) and wrote no event
- * line for this long is wedged and retired. The runtime writes `progress` after every unit of main-loop work, at most
- * every 100 ms (PROGRESS_EVERY in native/wavekit-chan/src/runtime.rs), so a live one has 2000 / 100 = 20 chances per
- * window. The longest legitimate silent step is far shorter: close no longer joins its writer (it used to wait up to
- * CLOSE_JOIN_BUDGET, 500 ms: 4× margin even against that), and one DSP block at the largest blockSamples (2^20) costs
- * ≈ 28 ns × 1 048 576 ≈ 29 ms per narrowband channel, so even 16 channels on one thread (≈ 470 ms) stay inside 4×.
+ * Generation watchdog: a process that owes work (a control reply, or stdin bytes written but not yet acknowledged) and
+ * wrote no event line for this long is wedged and retired. The runtime writes `progress` after every unit of main-loop
+ * work, at most every 100 ms (PROGRESS_EVERY in native/wavekit-chan/src/runtime.rs), so a live one has 2000 / 100 = 20
+ * chances per window. The unit is one channel's DSP step, not a whole block: a block that has run 100 ms reports
+ * between its channel steps, so 16 wideband channels at ≈ 180 ms each (≈ 2.9 s for one 32 768-sample block) stay
+ * live. One step longer than 2000 ms is unresponsive by design: at the default 16 384-sample block (8 ms at
+ * 2.048 Msps) that channel alone runs > 250× slower than real time, and even at the largest block (2^20 samples,
+ * 512 ms) > 3.9×, so the process could never keep up. Close does not join its writer (it used to wait up to 500 ms).
  * This bounds wedge detection only; no caller waits this long (a close caller still returns after CLOSE_TIMEOUT_MS).
  */
 export const WEDGE_MS = 2000
 /**
- * How often the watchdog samples whether work is owed while none is. Queued stdin is only seen by sampling, so a
- * wedge under input is retired within WEDGE_MS + 250 ms; a sent control line starts the clock at once. Four timer
- * turns per second per running generation.
+ * How often the watchdog samples whether work is owed while none is. A sent control line or a stdin write that makes
+ * input owed starts the clock at once, but the verdict is only taken at a sample, so a wedge under input is retired
+ * within WEDGE_MS + 250 ms of the write. Four timer turns per second per running generation.
  */
 const WATCH_EVERY_MS = 250
 const BUSY_BACKOFF_MS = [25, 50, 100, 200, 400] as const
@@ -153,8 +155,14 @@ interface SourceChannelizer {
 	droppedAtGap: number
 	invalidated: boolean
 	sawInputEof: boolean
-	/** The process's stdin, the branch's pipeline destination; bytes queued here are owed work. */
-	input: Writable
+	/**
+	 * Bytes handed to the process's stdin (counted as the branch emits them to the pipeline). With `inputAcked`, the
+	 * input the process owes: Node's own buffers cannot tell, since a write leaves `writableLength` once the OS pipe
+	 * took it, whether or not the process ever reads it.
+	 */
+	inputWritten: number
+	/** The largest `inputBytes` a `progress` line of this generation reported: stdin bytes the process finished. */
+	inputAcked: number
 	/** `openNow()` when the last event line of this generation arrived: the watchdog's liveness mark. */
 	heardAt: number
 	/** `openNow()` since when work is continuously owed; undefined while none is. */
@@ -1110,7 +1118,7 @@ export class ChannelizerManager
 	}
 
 	/**
-	 * Called just before a control line makes work owed. Nothing owed until now: the watchdog's clock starts here, not
+	 * Called just before a control line or a stdin write makes work owed. Nothing owed until now: the watchdog's clock starts here, not
 	 * at its next sample (which could otherwise count idle time since a sample that saw work owed earlier).
 	 */
 	private markOwed(s: SourceChannelizer): void {
@@ -1118,9 +1126,13 @@ export class ChannelizerManager
 			s.owedSince = this.openNow()
 	}
 
-	/** Work the process owes: a control reply (open, close, retune) or input bytes Node could not hand to its stdin yet. */
+	/** Work the process owes: a control reply (open, close, retune) or stdin bytes it has not acknowledged. */
 	private owesWork(s: SourceChannelizer): boolean {
-		if (s.closing.size > 0 || s.retuning.size > 0 || s.input.writableLength > 0)
+		if (
+			s.closing.size > 0 ||
+			s.retuning.size > 0 ||
+			s.inputWritten > s.inputAcked
+		)
 			return true
 		for (const attempt of s.waiters.values()) if (attempt.pending) return true
 		return false
@@ -1334,7 +1346,8 @@ export class ChannelizerManager
 			droppedAtGap: 0,
 			invalidated: false,
 			sawInputEof: false,
-			input: proc.input,
+			inputWritten: 0,
+			inputAcked: 0,
 			heardAt: this.openNow(),
 			owedSince: undefined,
 			watchdog: undefined,
@@ -1353,12 +1366,19 @@ export class ChannelizerManager
 				caps.sampleRate,
 			),
 		})
-		void pipeline(branch, s.input).catch((err: unknown) =>
+		void pipeline(branch, proc.input).catch((err: unknown) =>
 			this.log.debug(
 				{ err, sourceId, generation },
 				"Channelizer input pipeline ended",
 			),
 		)
+		// The pipeline writes each chunk the branch emits; a second listener sees the same chunks, after the pipe is set
+		// up. One addition per chunk on the input path; the owed check runs only when the process had caught up (at most
+		// once per acknowledging `progress`, ≤ 10/s), so the clock starts at the write that made input owed.
+		branch.on("data", (chunk: Buffer) => {
+			if (s.inputWritten <= s.inputAcked) this.markOwed(s)
+			s.inputWritten += chunk.length
+		})
 		fanout.on("backpressure", onBackpressure)
 		fanout.on("drain", onDrain)
 		proc.on("event", (e: ChannelizerEvent) => this.onEvent(s, e))
@@ -1487,7 +1507,13 @@ export class ChannelizerManager
 				)
 				break
 			case "progress":
-				break // liveness only, recorded above
+				// Liveness is recorded above. The ack only grows and never passes what was written: a smaller count never
+				// un-owes input, and a count past it cannot hide input written later.
+				s.inputAcked = Math.max(
+					s.inputAcked,
+					Math.min(e.inputBytes, s.inputWritten),
+				)
+				break
 			case "ready":
 				break
 		}

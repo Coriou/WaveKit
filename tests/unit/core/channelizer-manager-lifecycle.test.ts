@@ -81,6 +81,7 @@ class Process extends EventEmitter implements ChannelizerProcessLike {
 				type: "progress",
 				generation: this.generation,
 				inputSamples: 0,
+				inputBytes: 0,
 			})
 			this.live()
 		}, 100)

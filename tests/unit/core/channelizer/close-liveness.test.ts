@@ -24,9 +24,10 @@ import { FanoutManager } from "../../../../src/core/fanout-manager.js"
 
 /**
  * An unconfirmed close never retires the generation by itself: the caller returns after 250 ms and the id stays
- * fenced until `closed`. Only the generation watchdog retires a process, when it owes work (a control reply or queued
- * stdin) and wrote no event line for WEDGE_MS. The runtime writes `progress` after main-loop work at most every
- * 100 ms (runtime.rs `maybe_progress`), so a busy process is never mistaken for a wedged one.
+ * fenced until `closed`. Only the generation watchdog retires a process, when it owes work (a control reply, or stdin
+ * bytes written but not acknowledged by `progress.inputBytes`) and wrote no event line for WEDGE_MS. The runtime
+ * writes `progress` after main-loop work at most every 100 ms (runtime.rs `maybe_progress`), between channel steps
+ * once a block has run 100 ms, so a busy process is never mistaken for a wedged one.
  */
 const logger = pino({ level: "silent" })
 const caps: SourceCaps = {
@@ -51,16 +52,20 @@ const WATCH_EVERY_MS = 250
 
 /**
  * Models wavekit-chan's main loop as a sequence of jobs, each of which completes after its duration: a long work unit
- * (`units`, e.g. a DSP block), a control line (a close, answered after `closeHandlingMs` when `answerCloses`), or a
- * 10 ms input turn reading up to `readPerTick` bytes of stdin. A stdin write completes only once all of it is read, so
- * Node's `writableLength` holds bytes the process already took. After each job that did work it writes `progress` at
- * most every 100 ms, like the runtime; nothing while it does no work.
+ * (`units`, e.g. one channel's DSP step of a block), a control line (a close, answered after `closeHandlingMs` when
+ * `answerCloses`), or a 10 ms input turn reading up to `readPerTick` bytes of stdin. A stdin write completes once all
+ * but `pipeBytes` of the unread bytes up to its end are read: 0 keeps every write pending until read (Node's
+ * `writableLength` holds bytes the process already took); an OS pipe's 64 KiB completes a small write at once
+ * although nothing read it. After each job that did work it writes `progress` (with the bytes read so far) at most
+ * every 100 ms, like the runtime; nothing while it does no work.
  */
 class Proc extends EventEmitter implements ChannelizerProcessLike {
 	/** False: the main loop stops (wedged): no job completes, nothing is written. */
 	reading = true
 	/** 1 MiB per 10 ms turn: far faster than any feed. */
 	readPerTick = 1 << 20
+	/** Unread bytes the OS pipe holds: a write whose end fits completes, read or not. */
+	pipeBytes = 0
 	/** Long work units queued ahead of the next job, in ms. */
 	readonly units: number[] = []
 	/** True: the loop answers closes itself, in FIFO order after queued units. False: the test answers. */
@@ -70,7 +75,11 @@ class Proc extends EventEmitter implements ChannelizerProcessLike {
 	readonly closes: string[] = []
 	readonly progressAt: number[] = []
 	inputBytes = 0
-	private readonly writes: { left: number; done: () => void }[] = []
+	private readonly writes: {
+		left: number
+		done: () => void
+		completed: boolean
+	}[] = []
 	private readonly controls: string[] = []
 	private work = 0
 	private progressWork = 0
@@ -80,7 +89,8 @@ class Proc extends EventEmitter implements ChannelizerProcessLike {
 	readonly input = new Writable({
 		highWaterMark: 4096,
 		write: (chunk: Buffer, _enc, done) => {
-			this.writes.push({ left: chunk.length, done })
+			this.writes.push({ left: chunk.length, done, completed: false })
+			this.settle()
 		},
 	})
 	constructor(readonly generation: number) {
@@ -94,7 +104,7 @@ class Proc extends EventEmitter implements ChannelizerProcessLike {
 	stop(): Promise<void> {
 		this.stopped = true
 		clearTimeout(this.loop)
-		for (const w of this.writes.splice(0)) w.done()
+		for (const w of this.writes.splice(0)) if (!w.completed) w.done()
 		this.input.destroy()
 		this.emit("exit", 0, null)
 		return Promise.resolve()
@@ -134,10 +144,23 @@ class Proc extends EventEmitter implements ChannelizerProcessLike {
 			this.inputBytes += n
 			if (w.left === 0) {
 				this.writes.shift()
+				if (!w.completed) w.done()
+			}
+		}
+		this.settle()
+		if (budget < this.readPerTick) this.work++
+	}
+	/** Completes every write whose end is now within the pipe's unread bytes. */
+	private settle() {
+		let unread = 0
+		for (const w of this.writes) {
+			unread += w.left
+			if (unread > this.pipeBytes) break
+			if (!w.completed) {
+				w.completed = true
 				w.done()
 			}
 		}
-		if (budget < this.readPerTick) this.work++
 	}
 	private maybeProgress() {
 		const now = Date.now()
@@ -154,6 +177,7 @@ class Proc extends EventEmitter implements ChannelizerProcessLike {
 			type: "progress",
 			generation: this.generation,
 			inputSamples: Math.floor(this.inputBytes / 2),
+			inputBytes: this.inputBytes,
 		})
 	}
 	event(e: ChannelizerEvent) {
@@ -378,6 +402,80 @@ it("a wedged process with input queued in its stdin is retired within WEDGE_MS +
 		WEDGE_MS - PROGRESS_EVERY_MS,
 	)
 	expect(steady.stream.destroyed).toBe(true)
+})
+
+/** A Linux pipe's default capacity: a write that fits completes although the process never reads it. */
+const PIPE_BYTES = 65_536
+
+it("a wedged process with a final 4 KiB in its OS pipe is retired although Node's writableLength is 0", async () => {
+	const { fanout, processes, invalidations, acquire } = setup(false)
+	const steady = await acquire("steady")
+	const proc = processes[0]!
+	proc.pipeBytes = PIPE_BYTES
+	fanout.distribute(Buffer.alloc(40_960))
+	await run(200) // read and acknowledged
+	expect(proc.inputBytes).toBe(40_960)
+	proc.reading = false
+	fanout.distribute(Buffer.alloc(4096)) // the last write; nothing more is fed
+	await flushImmediates()
+	expect(proc.input.writableLength).toBe(0) // the pipe took it: Node's buffers show nothing owed
+	const wroteAt = Date.now()
+	await run(WEDGE_MS - 10)
+	expect(invalidations).toEqual([])
+	await run(WATCH_EVERY_MS + 30, () => invalidations.length > 0)
+	expect(invalidations).toEqual([["rtl", 1, ["steady-g1"], "unresponsive"]])
+	// Silence counts from when the owed bytes were first sampled, never from before the write.
+	expect(Date.now() - wroteAt).toBeGreaterThanOrEqual(WEDGE_MS)
+	expect(steady.stream.destroyed).toBe(true)
+	expect(proc.inputBytes).toBe(40_960)
+})
+
+it("a live process that drains a final 4 KiB from its OS pipe acknowledges it and is kept while idle", async () => {
+	const { m, fanout, processes, invalidations, acquire } = setup(false)
+	const steady = await acquire("steady")
+	const proc = processes[0]!
+	proc.pipeBytes = PIPE_BYTES
+	fanout.distribute(Buffer.alloc(40_960))
+	await run(200)
+	fanout.distribute(Buffer.alloc(4096))
+	await flushImmediates()
+	expect(proc.input.writableLength).toBe(0)
+	await run(10 * WEDGE_MS)
+	expect(proc.inputBytes).toBe(40_960 + 4096)
+	const s = (
+		m as unknown as {
+			active: Map<string, { inputWritten: number; inputAcked: number }>
+		}
+	).active.get("rtl")!
+	expect([s.inputWritten, s.inputAcked]).toEqual([45_056, 45_056])
+	// The acknowledgement came with the last line; idle since, owing nothing.
+	expect(proc.progressAt.at(-1)!).toBeLessThan(Date.now() - 9 * WEDGE_MS)
+	expect(invalidations).toEqual([])
+	expect(steady.stream.destroyed).toBe(false)
+})
+
+it("one block of 16 channel steps of 180 ms (2.9 s, longer than WEDGE_MS) keeps a generation that owes input", async () => {
+	// The reviewed repro: 16 wideband channels took 2.88 s for one 32 768-sample block. The runtime reports between
+	// channel steps once the block has run 100 ms, so each 180 ms step ends with a line; input stays owed meanwhile.
+	const { fanout, processes, invalidations, acquire } = setup(false)
+	const steady = await acquire("steady")
+	const proc = processes[0]!
+	proc.pipeBytes = PIPE_BYTES
+	fanout.distribute(Buffer.alloc(40_960))
+	await run(200)
+	proc.units.push(...Array<number>(16).fill(180))
+	fanout.distribute(Buffer.alloc(65_536)) // owed while the block runs
+	const start = Date.now()
+	await run(16 * 180 + 500)
+	expect(proc.units).toEqual([])
+	expect(invalidations).toEqual([])
+	// From the block's start, no line later than one step plus the 10 ms turn in flight when it began.
+	const lines = proc.progressAt.filter(t => t >= start)
+	const gaps = lines.map((t, k) => t - (k === 0 ? start : lines[k - 1]!))
+	expect(lines.length).toBeGreaterThanOrEqual(16)
+	expect(Math.max(...gaps)).toBeLessThanOrEqual(190)
+	expect(proc.inputBytes).toBe(40_960 + 65_536)
+	expect(steady.stream.destroyed).toBe(false)
 })
 
 it("an idle process that owes nothing is never retired", async () => {
