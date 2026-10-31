@@ -295,6 +295,9 @@ function pausedLine(
 		case "resume-blocked":
 			parts.push("Paused")
 			break
+		case "resumed-without-retune":
+			parts.push("Paused", "receiver resumed without retuning")
+			break
 		default:
 			parts.push("Paused")
 	}

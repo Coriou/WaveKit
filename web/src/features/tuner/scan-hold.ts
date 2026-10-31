@@ -319,6 +319,23 @@ export function holdRowModel(input: HoldRowInput): HoldRowModel {
 					]
 					break
 				}
+				case "resumed-without-retune":
+					// The receiver came back without retuning (another client may be on it): the scan
+					// hops again only on this explicit choice.
+					title = "Scan paused"
+					detail = line.detail
+					actions = [
+						{
+							id: "resume",
+							label: "Resume scan",
+							aria: "Resume scan",
+							title: "Retunes the receiver to the scan's next hop",
+							kind: "primary",
+							icon: "play",
+						},
+						STOP,
+					]
+					break
 				case "preempted-job":
 				case "source-down":
 					if (job.reason === "source-down") glyph = "plug"

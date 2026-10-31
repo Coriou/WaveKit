@@ -1,6 +1,10 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
-import type { LiveAudioConfig, SavedFrequency } from "@wavekit/api-types"
+import type {
+	LiveAudioConfig,
+	SavedFrequency,
+	ScanJob,
+} from "@wavekit/api-types"
 
 import { buildResolvedBandPlan, SCANNER_BANDPLANS } from "../../mock/data.ts"
 import { presetsOf } from "../../src/features/scanner/planner/plan.ts"
@@ -632,6 +636,38 @@ describe("palette: values from the root", () => {
 		const first = flatten(new PaletteModel(ctx()).build(null, "light"))[0]
 		expect(first?.title).toBe("Theme › Light")
 		expect(first?.action).toEqual({ kind: "theme", patch: { theme: "light" } })
+	})
+})
+
+describe("palette: scan control", () => {
+	const resumeRow = (over: Partial<ScanJob>) =>
+		flatten(
+			new PaletteModel(
+				ctx({
+					sweep: {
+						id: "j1",
+						name: "Marine",
+						state: "paused",
+						...over,
+					} as ScanJob,
+				}),
+			).build(null, "resume scan"),
+		).filter(x => x.id === "scan:resume")
+
+	it("offers Resume scan for a sweep held after a plain resume, saying it retunes", () => {
+		const [row, ...rest] = resumeRow({ reason: "resumed-without-retune" })
+		expect(rest).toHaveLength(0)
+		expect(row).toMatchObject({
+			title: "Resume scan",
+			sub: "Marine · receiver resumed without retuning",
+			action: { kind: "scanJob", op: "resume" },
+			done: "Scan resumed",
+		})
+		expect(row?.does).toMatch(/^Retunes the receiver/)
+		// a running sweep has nothing to resume
+		expect(resumeRow({ state: "running" })).toHaveLength(0)
+		// an operator pause keeps its own wording
+		expect(resumeRow({ reason: "operator" })[0]?.sub).toBe("Marine")
 	})
 })
 

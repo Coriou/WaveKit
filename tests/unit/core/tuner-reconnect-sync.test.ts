@@ -306,6 +306,29 @@ describe("TunerController reconnect synchronization", () => {
 			},
 		)
 
+		it("plain: a source config change does not lift the configured-gain hold", () => {
+			controller.setConfiguredTuning("rtl-1", {
+				gainMode: "manual",
+				gainDb: 30,
+				agcMode: false,
+			})
+			controller.noteSourceConnected("rtl-1")
+			controller.synchronizeOnConnect("rtl-1")
+			controller.noteFeedPaused("rtl-1")
+			controller.noteSourceConnected("rtl-1")
+			resume("plain")
+			// The configured gain changes (config reload, or the source's live config on connect).
+			controller.setConfiguredTuning("rtl-1", {
+				gainMode: "manual",
+				gainDb: 40,
+				agcMode: true,
+			})
+			transport.frames.length = 0
+			controller.noteSourceConnected("rtl-1")
+			expect(controller.synchronizeOnConnect("rtl-1").commands).toEqual([])
+			expect(transport.frames).toEqual([])
+		})
+
 		it("plain: a new pause before the previous resume's first payload drops that pause's relay commands", async () => {
 			await tuneAndPause()
 			controller.applyExternalCommand("rtl-1", 0x01, 162_000_000)

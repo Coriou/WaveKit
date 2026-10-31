@@ -270,6 +270,22 @@ describe("scan hold row", () => {
 		expect(ids(m)).toEqual(["resume", "stop"])
 	})
 
+	it("held after a plain resume of the receiver: says so, with Resume scan", () => {
+		const m = holdRowModel(
+			input({
+				job: job({ state: "paused", reason: "resumed-without-retune" }),
+			}),
+		)
+		expect(m).toMatchObject({ tone: "paused", title: "Scan paused" })
+		expect(m.detail).toBe(" · receiver resumed without retuning")
+		expect(ids(m)).toEqual(["resume", "stop"])
+		expect(m.actions[0]).toMatchObject({
+			label: "Resume scan",
+			kind: "primary",
+			title: "Retunes the receiver to the scan's next hop",
+		})
+	})
+
 	it("paused by another scan or a dead source: Stop only", () => {
 		const other = holdRowModel(
 			input({

@@ -1779,6 +1779,12 @@ export async function buildMockServer(
 		...(options.persistFailures !== undefined
 			? { persistFailures: options.persistFailures }
 			: {}),
+		paused: sourceId => {
+			if (sourceId === MOCK_SOURCE_ID) scanner.feedPaused()
+		},
+		resumed: (sourceId, restoreTuning) => {
+			if (sourceId === MOCK_SOURCE_ID) scanner.feedResumed(restoreTuning)
+		},
 		onChange: sourceId => {
 			if (sourceId !== MOCK_SOURCE_ID) {
 				const second = secondStatus()

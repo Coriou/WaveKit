@@ -112,7 +112,11 @@ async function pausedMidHop() {
 	const arbiter = new TunerArbiter(deps)
 	const events: string[] = []
 	arbiter.on("source-down", () => events.push("down"))
-	arbiter.on("source-up", () => events.push("up"))
+	const ups: unknown[] = []
+	arbiter.on("source-up", (_id: string, info?: unknown) => {
+		events.push("up")
+		ups.push(info)
+	})
 	const recovered: unknown[] = []
 	arbiter.on("recovered", (_id, result) => recovered.push(result))
 
@@ -154,6 +158,7 @@ async function pausedMidHop() {
 		events,
 		recovered,
 		persisted,
+		ups,
 		lease: r.lease,
 	}
 }
@@ -164,7 +169,7 @@ const tuningWrites = (tuner: ArbiterFakeTuner, from: number) =>
 
 describe("feed paused during a scanner hop", () => {
 	it("a restore resume puts the operator's gain back after a release that could not write while paused", async () => {
-		const { sources, tuner, state, arbiter, events, lease } =
+		const { sources, tuner, state, arbiter, events, ups, lease } =
 			await pausedMidHop()
 
 		// The job ends while paused: the tuner is unreachable, so the restore is re-queued.
@@ -177,6 +182,8 @@ describe("feed paused during a scanner hop", () => {
 		await waitFor(() => events.filter(e => e === "up").length === 2)
 		await waitFor(() => state.gain === 496)
 		expect(state).toMatchObject({ gainMode: "manual", gain: 496 })
+		// A restore resume is an ordinary source-up: a waiting sweep hops again.
+		expect(ups.at(-1)).toBeUndefined()
 	})
 
 	it("a plain resume settles the queued recovery without writing, and the source is free for the next job", async () => {
@@ -211,18 +218,20 @@ describe("feed paused during a scanner hop", () => {
 		expect(next.ok).toBe(true)
 	})
 
-	it("a plain resume keeps the holding job's lease (it continues) but forgets its pre-pause snapshot", async () => {
-		const { sources, tuner, state, arbiter, events, lease } =
+	it("a plain resume keeps the holding job's lease but forgets its pre-pause snapshot, and says so on source-up", async () => {
+		const { sources, tuner, state, arbiter, events, ups, lease } =
 			await pausedMidHop()
 		const sent = tuner.sent.length
 
 		await sources.resume("rtl")
 		await waitFor(() => events.filter(e => e === "up").length === 2)
 		expect(tuningWrites(tuner, sent)).toEqual([])
+		// The scanner holds the sweep in paused(resumed-without-retune) on this flag.
+		expect(ups.at(-1)).toEqual({ plainResume: true })
 		expect(arbiter.holder("rtl")).toBeDefined()
 		expect(lease.snapshot).toEqual({})
 
-		// The job's own next hop writes as usual; its release cannot put back a tuning it no
+		// Resume scan: the job's own next hop writes as usual; its release cannot put back a tuning it no
 		// longer knows, so the band gain is not followed by the pre-pause operator gain.
 		await arbiter.retune(lease, {
 			centreHz: ISM + 200_000,

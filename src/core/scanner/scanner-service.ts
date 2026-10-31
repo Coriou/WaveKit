@@ -6156,11 +6156,21 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
-	private readonly onSourceUp = (sourceId: string): void => {
+	/**
+	 * `plainResume`: the paused feed came back without retuning (another client may hold the
+	 * receiver): a sweep waits in paused(resumed-without-retune) for an explicit resume.
+	 */
+	private readonly onSourceUp = (
+		sourceId: string,
+		info?: { plainResume?: boolean },
+	): void => {
 		if (!this.started) return
+		const plain = info?.plainResume === true
 		for (const d of this.driversOn(sourceId)) {
 			if (d.record.state === "paused" && d.record.reason === "source-down")
-				d.dispatch({ type: "source-up" }).catch((err: unknown) =>
+				d.dispatch(
+					plain ? { type: "source-up", plain: true } : { type: "source-up" },
+				).catch((err: unknown) =>
 					this.log.warn({ err, jobId: d.record.id }, "source-up failed"),
 				)
 		}
@@ -6933,8 +6943,14 @@ export class ScannerService extends EventEmitter {
 		this.jobs.set(record.id, record)
 		this.drivers.set(record.id, driver)
 		if (isTerminal(record.state)) return
-		// An explicit Stay-here choice survives restart, even with onBoot enabled.
-		if (record.state === "paused" && record.reason === "operator") return
+		// An explicit Stay-here choice survives restart, even with onBoot enabled, as does a sweep
+		// held after a plain resume (it hops again only on the operator's resume).
+		if (
+			record.state === "paused" &&
+			(record.reason === "operator" ||
+				record.reason === "resumed-without-retune")
+		)
+			return
 		await driver
 			.dispatch({ type: "boot" })
 			.catch((err: unknown) =>

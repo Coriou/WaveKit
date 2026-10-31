@@ -422,6 +422,8 @@ export type PauseReason =
 	| "source-down"
 	| "core-restart"
 	| "resume-blocked"
+	/** A plain resume of the paused feed: the sweep writes no tuning until Resume scan. */
+	| "resumed-without-retune"
 export type FailReason = "source-removed" | "tuner-unavailable" | "invalid"
 /** Why a job was cancelled by the core rather than the operator: the receiver feed was paused. */
 export type CancelReason = "source-paused"

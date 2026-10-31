@@ -403,6 +403,45 @@ describe("mock scanner REST", () => {
 		expect(now.progress.hitStats).toBeDefined()
 	})
 
+	it("holds a sweep after a plain receiver resume until Resume scan; a restore resume continues it", async () => {
+		server = await buildMockServer({ port: 0, resumeMs: 0 })
+		await server.app.ready()
+		const job = (
+			await inject("POST", "/api/scanner/jobs", marineSweep)
+		).json<ScanJob>()
+		await sleep(400)
+		const jobNow = async () =>
+			(await inject("GET", `/api/scanner/jobs/${job.id}`)).json<ScanJob>()
+		const tunedHz = async () =>
+			(await inject("GET", "/api/tuner/rtl-0")).json<TunerState>().frequency
+		expect((await jobNow()).state).toBe("running")
+
+		await inject("POST", "/api/sources/rtl-0/pause")
+		expect(await jobNow()).toMatchObject({
+			state: "paused",
+			reason: "source-down",
+		})
+		await inject("POST", "/api/sources/rtl-0/resume")
+		expect(await jobNow()).toMatchObject({
+			state: "paused",
+			reason: "resumed-without-retune",
+		})
+		// no hop while held
+		const held = await tunedHz()
+		await sleep(200)
+		expect(await tunedHz()).toBe(held)
+
+		const resumed = await inject("POST", `/api/scanner/jobs/${job.id}/resume`)
+		expect(resumed.statusCode).toBe(200)
+		expect(resumed.json<ScanJob>().state).toBe("running")
+
+		// Resume at <freq>: the sweep continues at once
+		await inject("POST", "/api/sources/rtl-0/pause")
+		await inject("POST", "/api/sources/rtl-0/resume", { restoreTuning: true })
+		expect((await jobNow()).state).toBe("running")
+		await inject("POST", `/api/scanner/jobs/${job.id}/cancel`)
+	})
+
 	it("completes after stop.afterSweeps", async () => {
 		await start()
 		const job = (

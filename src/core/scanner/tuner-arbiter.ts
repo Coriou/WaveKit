@@ -1308,7 +1308,7 @@ export class TunerArbiter extends EventEmitter {
 		this.connected.add(sourceId)
 		if (this.deps.sources.resumeKind?.(sourceId) === "plain") {
 			this.settlePlainResume(sourceId)
-			this.emit("source-up", sourceId)
+			this.emit("source-up", sourceId, { plainResume: true })
 			return
 		}
 		// recover() sends TEST_MODE 0 as its first step.
@@ -1331,7 +1331,8 @@ export class TunerArbiter extends EventEmitter {
 	 * for the source is settled without writing (its snapshot is the pre-pause tuning; "recovered"
 	 * fires with every field unrestorable, so boot-resumed jobs continue), an owed gain restore is
 	 * dropped, and a held lease forgets its snapshot (its release restores nothing it cannot know).
-	 * The job holding the lease continues with its own next hop. TEST_MODE 0 still goes out
+	 * "source-up" carries `plainResume`: the job holding the lease stays paused without hopping
+	 * (paused(resumed-without-retune)) until the operator resumes it. TEST_MODE 0 still goes out
 	 * where a marker may be open: it is the scanner's own marker, not the operator's tuning.
 	 */
 	private settlePlainResume(sourceId: string): void {

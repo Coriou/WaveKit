@@ -24,6 +24,7 @@ const PAUSED: PauseReason[] = [
 	"source-down",
 	"core-restart",
 	"resume-blocked",
+	"resumed-without-retune",
 ]
 const ACTIVE = ["running", "holding"]
 const PAUSED_LABELS = PAUSED.map(r => `paused(${r})`)
@@ -38,6 +39,7 @@ const LEASED = [
 	...ACTIVE,
 	"paused(operator)",
 	"paused(source-down)",
+	"paused(resumed-without-retune)",
 ]
 /** Paused without lease or decoder hold: ending them must not release a hold another job (the preemptor) owns. */
 const UNLEASED = [
@@ -73,6 +75,7 @@ const EVENTS: Record<string, JobEvent> = {
 	"preemptor-lost": { type: "preemptor-lost" },
 	"source-down": { type: "source-down" },
 	"source-up": { type: "source-up" },
+	"source-up:plain": { type: "source-up", plain: true },
 	"preemptor-idle:same": { type: "preemptor-idle", impactGrew: false },
 	"preemptor-idle:grew": { type: "preemptor-idle", impactGrew: true },
 	"resume:plain": { type: "resume", takeover: false },
@@ -126,7 +129,11 @@ const ROWS: [string[], string, string, string[]][] = [
 	],
 	// the arbiter hands the lease over from a paused holder too (probes already stopped; the job keeps its own keyed decoder hold)
 	[
-		["paused(operator)", "paused(source-down)"],
+		[
+			"paused(operator)",
+			"paused(source-down)",
+			"paused(resumed-without-retune)",
+		],
 		"preempted-job",
 		"paused(preempted-job)",
 		["release-lease"],
@@ -172,6 +179,39 @@ const ROWS: [string[], string, string, string[]][] = [
 	[ACTIVE, "source-down", "paused(source-down)", ["stop-probes"]],
 	[PREEMPTED, "pause", "paused(operator)", ["stop-probes", "release-decoders"]],
 	[["paused(source-down)"], "source-up", "running", ["resend-hop"]],
+	// a plain resume of the feed: no hop, the configured decoders run; the lease stays held
+	[
+		["paused(source-down)"],
+		"source-up:plain",
+		"paused(resumed-without-retune)",
+		["release-decoders"],
+	],
+	// a lease lost while held after a plain resume: it stays held (never auto-resumes)
+	[
+		["paused(resumed-without-retune)"],
+		"rest-write",
+		"paused(resumed-without-retune)",
+		["release-lease"],
+	],
+	[
+		["paused(resumed-without-retune)"],
+		"relay-external",
+		"paused(resumed-without-retune)",
+		["release-lease"],
+	],
+	// Resume scan: re-holds the decoders and hops (lease and engine are re-taken when lost; see below)
+	[
+		["paused(resumed-without-retune)"],
+		"resume:plain",
+		"running",
+		["hold-decoders", "resend-hop"],
+	],
+	[
+		["paused(resumed-without-retune)"],
+		"resume:takeover",
+		"running",
+		["hold-decoders", "resend-hop"],
+	],
 	[
 		PREEMPTED,
 		"preemptor-idle:same",
@@ -253,7 +293,9 @@ const eventKey = (e: JobEvent): string =>
 		? `preemptor-idle:${e.impactGrew ? "grew" : "same"}`
 		: e.type === "resume"
 			? `resume:${e.takeover ? "takeover" : "plain"}`
-			: e.type
+			: e.type === "source-up" && e.plain === true
+				? "source-up:plain"
+				: e.type
 
 const eventArb: fc.Arbitrary<JobEvent> = fc.oneof(
 	...(
@@ -282,6 +324,7 @@ const eventArb: fc.Arbitrary<JobEvent> = fc.oneof(
 		.boolean()
 		.map((impactGrew): JobEvent => ({ type: "preemptor-idle", impactGrew })),
 	fc.boolean().map((takeover): JobEvent => ({ type: "resume", takeover })),
+	fc.constant<JobEvent>({ type: "source-up", plain: true }),
 )
 const stateArb: fc.Arbitrary<S> = fc.oneof(
 	fc.constantFrom<S>(
@@ -527,7 +570,7 @@ describe("job transition table (§ 10.1)", () => {
 	// Feature: signal-discovery-scanner, Property 9: Job transitions
 	// Validates: spec § 10.1
 	it("matches the table exactly for every state × event: listed rows with their actions, INVALID elsewhere", () => {
-		expect(ALL_STATES).toHaveLength(16)
+		expect(ALL_STATES).toHaveLength(17)
 		for (const l of ALL_STATES)
 			for (const [key, e] of Object.entries(EVENTS)) {
 				const want = EXPECTED.get(`${l}|${key}`)
@@ -601,5 +644,37 @@ describe("job transition table (§ 10.1)", () => {
 			),
 			{ numRuns: 100 },
 		)
+	})
+})
+
+describe("a sweep held after a plain resume of the feed", () => {
+	const held = { state: "paused", reason: "resumed-without-retune" } as const
+	it("Resume scan re-takes a lost lease and a closed engine before it hops", () => {
+		expect(
+			transition(
+				held,
+				{ type: "resume", takeover: false },
+				{ leaseHeld: false, engineOpened: false },
+			),
+		).toEqual({
+			state: "running",
+			actions: ["acquire-lease", "hold-decoders", "open-engine", "resend-hop"],
+		})
+		expect(
+			transition(
+				held,
+				{ type: "resume", takeover: false },
+				{ leaseHeld: true },
+			),
+		).toEqual({ state: "running", actions: ["hold-decoders", "resend-hop"] })
+	})
+
+	it("never runs again on its own: no source-up or preemptor-idle resumes it", () => {
+		for (const e of [
+			{ type: "source-up" },
+			{ type: "source-up", plain: true },
+			{ type: "preemptor-idle", impactGrew: false },
+		] as const)
+			expect(transition(held, e)).toEqual({ invalid: true })
 	})
 })

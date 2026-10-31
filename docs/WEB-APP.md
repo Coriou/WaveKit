@@ -152,7 +152,11 @@ waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads
   offers Undo. Read-only browsers cannot pause. While paused,
   the tuned card's decoders read "waiting: Receiver paused — Resume" with a **Resume** button and
   Settings › Decoders reads `Paused · the receiver is paused`. A scanner identify running when you
-  pause ends with what it found so far and reads `Stopped · receiver paused`. With more than one
+  pause ends with what it found so far and reads `Stopped · receiver paused`. A sweep running when
+  you pause waits; **Resume at 161.500 MHz** continues it, but a plain **Resume** leaves it held so it
+  does not retune the receiver away from SDR++: the scan row reads `Scan paused · receiver resumed
+  without retuning` with **Resume scan**, which retunes to the scan's next hop (also **Resume scan**
+  in the ⌘K palette). With more than one
   receiver, the Receiver island, the palette's receiver commands (pause, resume, gain, sample rate,
   bias tee, RTL AGC) and `P` act on the receiver the waterfall shows: the first connected one, which
   stays on screen through its own pause (else the first paused one). See

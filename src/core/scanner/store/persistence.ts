@@ -305,6 +305,7 @@ const PersistedJobSchema = z.object({
 			"source-down",
 			"core-restart",
 			"resume-blocked",
+			"resumed-without-retune",
 			"source-removed",
 			"tuner-unavailable",
 			"invalid",

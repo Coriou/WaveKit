@@ -2116,6 +2116,13 @@ export interface ScannerMock {
 	identifyJobs: Map<string, ScanJob>
 	/** An operator REST tuner write: a running sweep pauses (`preempted-operator`). */
 	operatorWrite(): void
+	/** The receiver feed paused: a running sweep waits in `paused(source-down)` with its lease. */
+	feedPaused(): void
+	/**
+	 * The feed resumed. Plain (`restoreTuning` false): a waiting sweep stays paused with reason
+	 * `resumed-without-retune` until an explicit resume; a restore resume continues it.
+	 */
+	feedResumed(restoreTuning: boolean): void
 	/** The sweep job holding the source's tuner, if any (identify refuses then). */
 	sweepHolder(): string | null
 	/**
@@ -3524,7 +3531,7 @@ export function registerScannerMock(
 			return
 		}
 		const holder = leaseHolder()
-		if (r.reason === "operator") {
+		if (r.reason === "operator" || r.reason === "resumed-without-retune") {
 			if (!r.lease) {
 				if (holder && holder !== r) throw sourceBusy(holder)
 				const impact = impactFor(r.spec, r.id)
@@ -3895,6 +3902,31 @@ export function registerScannerMock(
 
 	return {
 		identifyJobs,
+		feedPaused() {
+			for (const r of records.values()) {
+				if (r.spec.mode !== "sweep" || !isActive(r.state)) continue
+				pauseFor(r, "source-down", true)
+				emitJob(r)
+				emitProgress(r)
+			}
+		},
+		feedResumed(restoreTuning) {
+			for (const r of records.values()) {
+				if (
+					r.spec.mode !== "sweep" ||
+					r.state !== "paused" ||
+					r.reason !== "source-down"
+				)
+					continue
+				if (restoreTuning) {
+					resumeSweep(r)
+					continue
+				}
+				r.reason = "resumed-without-retune"
+				touch(r)
+				emitJob(r)
+			}
+		},
 		operatorWrite() {
 			for (const r of records.values()) {
 				if (r.spec.mode !== "sweep" || isTerminal(r.state)) continue

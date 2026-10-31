@@ -2,7 +2,9 @@
  * Scanner jobs and a paused receiver feed (SourceManager.pause / resume): a running sweep waits in
  * paused(source-down) through the pause and runs again on resume, never failing; an identify job,
  * starting or running, ends cancelled(source-paused); new, identify and resumed jobs on a paused
- * feed are refused with 409 SOURCE_PAUSED.
+ * feed are refused with 409 SOURCE_PAUSED. A plain resume (another client may hold the receiver)
+ * leaves the sweep in paused(resumed-without-retune), writing no tuning until the operator's
+ * Resume scan; a restore resume continues it.
  */
 import { describe, expect, it } from "vitest"
 import type { ScanJob } from "@wavekit/api-types"
@@ -37,20 +39,32 @@ const sweep = {
 /** The feed half of SourceManager on the harness's fake sources. */
 function pausable(h: Harness) {
 	const paused = new Set<string>()
-	Object.assign(h.sources, { isPaused: (id: string) => paused.has(id) })
+	const pending = new Map<string, "plain" | "restore">()
+	Object.assign(h.sources, {
+		isPaused: (id: string) => paused.has(id),
+		resumeKind: (id: string) => pending.get(id) ?? null,
+	})
 	return {
 		pause(id: string) {
 			paused.add(id)
+			pending.delete(id)
 			h.sources.emit("feed-changed", id, { state: "paused", since: "" })
 			h.sources.emit("disconnected", id)
 		},
-		resume(id: string) {
+		/** Without a kind: the resumeKind-less doubles of older tests (a dropout's return). */
+		resume(id: string, kind?: "plain" | "restore") {
 			paused.delete(id)
+			if (kind) pending.set(id, kind)
 			h.sources.emit("connected", id)
 			h.sources.emit("payload-started", id)
+			pending.delete(id)
 		},
 	}
 }
+
+/** Tuning writes (not TEST_MODE markers) sent from index `from` on. */
+const tuningWrites = (h: Harness, from: number) =>
+	h.tuner.sent.slice(from).filter(c => c.name !== "set-test-mode")
 
 async function untilRunning(h: Harness, id: string): Promise<void> {
 	for (let i = 0; i < 50 && h.service.getJob(id)?.state === "starting"; i++) {
@@ -80,6 +94,63 @@ describe("scanner jobs on a paused feed", () => {
 		feed.resume("rtl")
 		await settled(h.service)
 		expect(h.service.getJob(job.id)?.state).toBe("running")
+		await h.service.cancelJob(job.id)
+		await h.service.stop()
+	})
+
+	it("a plain resume holds the sweep in paused(resumed-without-retune) without a tuning write until Resume scan", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		const feed = pausable(h)
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		const job = await h.service.createJob(sweep)
+		await untilRunning(h, job.id)
+		expect(h.service.getJob(job.id)?.state).toBe("running")
+
+		feed.pause("rtl")
+		await settled(h.service)
+		const sent = h.tuner.sent.length
+		feed.resume("rtl", "plain")
+		await settled(h.service)
+		feedTone(h.fanout, 0.1, 0, 0, 90)
+		await settled(h.service)
+		expect(h.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "resumed-without-retune",
+		})
+		expect(tuningWrites(h, sent)).toEqual([])
+		// The configured decoders run meanwhile.
+		expect(h.decoders.held.size).toBe(0)
+
+		// Resume scan: the operator's explicit choice retunes to the sweep's hop and it runs again.
+		await h.service.resumeJob(job.id, { takeover: false })
+		await settled(h.service)
+		expect(h.service.getJob(job.id)?.state).toBe("running")
+		expect(tuningWrites(h, sent).some(c => c.name === "set-frequency")).toBe(
+			true,
+		)
+		expect(h.decoders.held.size).toBeGreaterThan(0)
+		await h.service.cancelJob(job.id)
+		await h.service.stop()
+	})
+
+	it("a restore resume continues the sweep at once, as before", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		const feed = pausable(h)
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		const job = await h.service.createJob(sweep)
+		await untilRunning(h, job.id)
+
+		feed.pause("rtl")
+		await settled(h.service)
+		const sent = h.tuner.sent.length
+		feed.resume("rtl", "restore")
+		await settled(h.service)
+		expect(h.service.getJob(job.id)?.state).toBe("running")
+		expect(tuningWrites(h, sent).some(c => c.name === "set-frequency")).toBe(
+			true,
+		)
 		await h.service.cancelJob(job.id)
 		await h.service.stop()
 	})

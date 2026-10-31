@@ -828,7 +828,8 @@ What a resume writes to the receiver depends on the body:
   are set again (through the API, the relay or a restore). The values accepted before the
   pause are no longer restored on a later dropout either, and no later dropout reconnect
   writes the configured gain until a restore resume (a value set through the API or the
-  relay afterwards is restored as usual). Relay commands are written only when they arrived
+  relay afterwards is restored as usual); changing the source's configured `tuner` gain
+  does not lift that hold either. Relay commands are written only when they arrived
   after the latest pause. When the rate-truth check then measures a sustained rate within
   1.5 % of one common rtl_tcp rate (0.25, 1.024, 1.536, 1.792, 1.92, 2.048, 2.16, 2.4, 2.56,
   2.88 or 3.2 Msps), that rate is adopted into the tuner state and the caps (it stays in
@@ -836,14 +837,17 @@ What a resume writes to the receiver depends on the body:
   settles, so a first estimate between two rates is adopted once it converges. Scanner side: a lease recovery queued for the source (a job
   that ended while the feed was paused, or a crashed sweep) is settled without writing its
   pre-pause snapshot, a gain restore owed after a lost band-gain lease is dropped, and no
-  band gain is applied; a sweep that held the source keeps its lease and continues with
-  its own next hop, but its release no longer puts back the pre-pause tuning. TEST_MODE 0
+  band gain is applied; a sweep that held the source keeps its lease but does not hop: it
+  waits in `paused(resumed-without-retune)`, with the source's decoders running, until
+  `POST /api/scanner/jobs/:id/resume` (Resume scan) sends it to its next hop, and its
+  release no longer puts back the pre-pause tuning. TEST_MODE 0
   (the scanner's own marker) is still sent when a marker may be open.
 - **Restore resume** (`restoreTuning: true`) writes the accepted pre-pause tuning back on
   the first payload, whatever `tuner.reconnectPolicy` says (even `reset`; a later dropout
   follows the policy again): the configured gain, then every accepted field (frequency,
   sample rate, gain mode, gain and the others), the scanner's queued lease recovery and
-  owed gain restore, and a band gain the receiver had before the pause. The held feed's
+  owed gain restore, and a band gain the receiver had before the pause; a sweep waiting in
+  `paused(source-down)` continues with its next hop. The held feed's
   `restoreTuning` shows what it writes.
 
 **SDR++ through the tuner relay or through rtlmux.** With the
@@ -3448,7 +3452,7 @@ curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 
 `reason` is set while `paused` (`operator`, `preempted-operator`,
 `preempted-relay`, `preempted-job`, `source-down`, `core-restart`,
-`resume-blocked`) or `failed` (`source-removed`, `tuner-unavailable`,
+`resume-blocked`, `resumed-without-retune`) or `failed` (`source-removed`, `tuner-unavailable`,
 `invalid`), and on a `cancelled` identify job the core ended because the receiver
 feed was paused (`source-paused`; absent when the operator cancelled). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
 carry `identify` (see `POST /api/scanner/identify`). A probe's `transport` is
@@ -3585,6 +3589,10 @@ Each returns the `ScanJob`. `resume` takes an optional body
   lease (a transient
   refusal, `details.reason` `releasing`, `recovery-pending` or
   `holder-starting`, leaves it `paused(operator)`);
+- from `paused(resumed-without-retune)` (a plain resume of the receiver feed held
+  the sweep): re-holds the source's decoders and retunes to the sweep's next hop;
+  without the lease (an operator or relay write took it meanwhile) it re-acquires
+  it as from `paused(operator)`, with the same 409s;
 - from `paused(core-restart)`: re-acquires the lease, re-opens the engine and
   restarts the sweep from its first hop (boot resumes with `resume.onBoot` do
   the same once the source's data starts);

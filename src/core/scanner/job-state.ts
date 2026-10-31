@@ -25,7 +25,11 @@ export type JobEvent =
 	| { type: "preemptor-lost" }
 	/** `feedPaused`: the operator paused the receiver feed (SourceManager.pause), no dropout. */
 	| { type: "source-down"; feedPaused?: boolean }
-	| { type: "source-up" }
+	/**
+	 * `plain`: a plain resume of a paused feed (SourceManager.resumeKind "plain"): another client may
+	 * have retuned the receiver, so a sweep parks in paused(resumed-without-retune) instead of hopping.
+	 */
+	| { type: "source-up"; plain?: boolean }
 	| { type: "preemptor-idle"; impactGrew: boolean }
 	| { type: "resume"; takeover: boolean }
 	/** `reason`: the core cancelled it (an identify on a paused feed); absent for the operator. */
@@ -89,7 +93,9 @@ function holdsLease(s: From): boolean {
 		return true
 	return (
 		s.state === "paused" &&
-		(s.reason === "operator" || s.reason === "source-down")
+		(s.reason === "operator" ||
+			s.reason === "source-down" ||
+			s.reason === "resumed-without-retune")
 	)
 }
 
@@ -109,8 +115,9 @@ function endActions(s: From): JobAction[] {
 
 /**
  * A lease lost while paused: the operator's pause never auto-resumes (it stays
- * `paused(operator)` without the lease); a source-down pause becomes the preemption. Probes are
- * already stopped in both.
+ * `paused(operator)` without the lease), nor does a sweep held after a plain resume (it stays
+ * `paused(resumed-without-retune)`, its decoder hold already released); a source-down pause becomes
+ * the preemption. Probes are already stopped in all three.
  */
 function pausedLeaseLost(
 	s: From,
@@ -119,6 +126,8 @@ function pausedLeaseLost(
 	if (s.state !== "paused") return INVALID
 	if (s.reason === "operator")
 		return to("paused", ["release-lease", "release-decoders"], "operator")
+	if (s.reason === "resumed-without-retune")
+		return to("paused", ["release-lease"], "resumed-without-retune")
 	if (s.reason === "source-down")
 		return to("paused", ["release-lease", "release-decoders"], lost)
 	return INVALID
@@ -197,7 +206,9 @@ export function transition(
 			if (active)
 				return to("paused", ["stop-probes", "release-lease"], "preempted-job")
 			// the arbiter hands the lease over from a paused holder too; probes are already stopped
-			return pausedFor("operator") || pausedFor("source-down")
+			return pausedFor("operator") ||
+				pausedFor("source-down") ||
+				pausedFor("resumed-without-retune")
 				? to("paused", ["release-lease"], "preempted-job")
 				: INVALID
 		case "preemptor-lost":
@@ -215,7 +226,12 @@ export function transition(
 					: to("failed", endActions(s), "tuner-unavailable")
 			return active ? to("paused", ["stop-probes"], "source-down") : INVALID
 		case "source-up":
-			return pausedFor("source-down") ? to("running", ["resend-hop"]) : INVALID
+			// After a plain resume the sweep keeps its lease (no waiter takes the tuner and hops) but
+			// writes nothing and frees the configured decoders until an explicit resume.
+			if (!pausedFor("source-down")) return INVALID
+			return e.plain === true
+				? to("paused", ["release-decoders"], "resumed-without-retune")
+				: to("running", ["resend-hop"])
 		case "preemptor-idle":
 			if (!preempted) return INVALID
 			return e.impactGrew
@@ -231,6 +247,14 @@ export function transition(
 							"resend-hop",
 						])
 					: to("running", ["resend-hop"])
+			// The operator's explicit choice to hop again after a plain resume (Resume scan).
+			if (pausedFor("resumed-without-retune"))
+				return to("running", [
+					...(ctx.leaseHeld === false ? ["acquire-lease" as const] : []),
+					"hold-decoders",
+					...(ctx.engineOpened === false ? ["open-engine" as const] : []),
+					"resend-hop",
+				])
 			if (pausedFor("resume-blocked"))
 				return e.takeover
 					? to("running", ["acquire-lease", "hold-decoders", "resend-hop"])

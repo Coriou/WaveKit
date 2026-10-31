@@ -1228,7 +1228,18 @@ export class PaletteModel {
 				does: "Keeps the receiver until you resume · never resumes on its own",
 				done: "Scan paused",
 			})
-		if (s === "paused")
+		if (s === "paused" && sweep.reason === "resumed-without-retune")
+			out.push({
+				id: "scan:resume",
+				title: "Resume scan",
+				sub: `${name} · receiver resumed without retuning`,
+				glyph: "play",
+				keys: ["continue scan", "resume sweep", "retune scan"],
+				action: { kind: "scanJob", op: "resume" },
+				does: "Retunes the receiver to the scan's next hop · the scan holds until you choose this",
+				done: "Scan resumed",
+			})
+		else if (s === "paused")
 			out.push({
 				id: "scan:resume",
 				title: "Resume scan",

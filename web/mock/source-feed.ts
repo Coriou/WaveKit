@@ -40,6 +40,10 @@ export interface SourceFeedMockOptions {
 	tuning?: (sourceId: string) => SourceFeedRestoreTuning | null
 	/** A restore resume connected: write the pre-pause tuning back. */
 	restore?: (sourceId: string, tuning: SourceFeedRestoreTuning) => void
+	/** The feed paused (a change, not an idempotent repeat): a running sweep waits. */
+	paused?: (sourceId: string) => void
+	/** A resume connected; `restoreTuning` false is a plain resume (the sweep stays held). */
+	resumed?: (sourceId: string, restoreTuning: boolean) => void
 }
 
 /** The resume body as the core's strict schema reads it; null when invalid. */
@@ -114,7 +118,9 @@ export function registerSourceFeedMock(
 	): Promise<{ feed: SourceFeed; changed: boolean }> =>
 		serial(m, async () => {
 			const changed = m.feed.state !== "paused"
+			const wasLive = m.feed.state === "live"
 			if (changed) set(id, m, "paused")
+			if (wasLive) options.paused?.(id)
 			return { feed: m.feed, changed }
 		})
 
@@ -135,6 +141,7 @@ export function registerSourceFeedMock(
 				m.before = null
 				if (restoreTuning && before) options.restore?.(id, before)
 				set(id, m, "live")
+				options.resumed?.(id, restoreTuning)
 			}
 			return { feed: m.feed, changed: true }
 		})

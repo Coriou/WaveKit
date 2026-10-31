@@ -191,6 +191,9 @@ describe("scanner-format", () => {
 			"Source down",
 		)
 		expect(
+			jobStateLine(paused({ reason: "resumed-without-retune" }), opts),
+		).toBe("Paused · receiver resumed without retuning")
+		expect(
 			jobStateLine(
 				paused({ reason: "resume-blocked", resumeHeldBy: "audio" }),
 				opts,

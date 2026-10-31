@@ -123,6 +123,7 @@ pending ─► starting ─► running ⇄ holding
 - `preempted-relay`: an SDR++ relay client took control (`control-mode-changed` → `external`).
 - `preempted-job`: a higher-priority scanner job took the lease (it keeps the original snapshot). The waiting job keeps its decoder hold while that job holds the tuner; when an operator or relay write takes it, the waiter releases the decoders too, and holds them again when the lease comes back.
 - `source-down`: the source disconnected; the job resumes on the next payload with a new epoch.
+- `resumed-without-retune`: the receiver feed was paused and then resumed plainly (without restoring its tuning; another client such as SDR++ may be using the receiver). The sweep writes no tuning and does not hop; it keeps the lease (so no waiting job takes the tuner and hops instead) but releases its decoder hold, so the source's decoders run on whatever the receiver is tuned to. It never resumes on its own, also across a restart; `resume` (Resume scan) retunes to its next hop. An operator or relay write meanwhile drops the lease without changing the reason.
 - `core-restart`: the job was running when the core stopped; it resumes only with `resume.onBoot` (passive jobs always do).
 - `resume-blocked`: auto-resume found more to disturb than was consented.
 
@@ -138,13 +139,14 @@ Explicit `resume` in the other cases:
 
 - `paused(operator)` with the lease: resumes at the same hop.
 - `paused(operator)` after an operator or relay write took the lease: re-acquires it. With a grown impact and no `takeover` it answers 409 `SCANNER_TAKEOVER_REQUIRED` (the job stays paused); while a job of equal or higher priority holds the lease it answers 409 `SCANNER_SOURCE_BUSY` and moves to `paused(resume-blocked)` (taking the lease from a lower-priority job needs consent like a takeover).
+- `paused(resumed-without-retune)`: re-holds the decoders and continues with the next hop; without the lease it re-acquires it as from `paused(operator)`.
 - `paused(core-restart)`: re-acquires the lease, re-opens the engine and restarts the sweep from its first hop.
 
 Every 409 `SCANNER_SOURCE_BUSY` carries `details.reason`: `releasing`, `recovery-pending` and `holder-starting` clear by themselves (retry); `relay` and `held` last until the relay or the holding job lets go.
 
 ### Takeover and impact
 
-A sweep that would disturb something answers 409 `SCANNER_TAKEOVER_REQUIRED` with `details.impact`: `liveAudioClients`, `digitalVoiceListeners`, `runningDecoders`, `pinnedDecoders` (started by hand), `scannerJobs` (other non-passive jobs on the source) and `unrestorable` tuner fields. Resending with `takeover: true` consents. Decoders on the source are held (`suspension.reasonCode: "tuner-scanning"`) for the whole sweep and resume afterwards; a manual start of a held decoder answers 409 `SOURCE_HELD_BY_SCANNER`. Live-audio listeners hear the sweep. Relay clients (SDR++) holding the tuner make sweeps impossible (`SCANNER_SOURCE_BUSY`). A paused receiver feed (`POST /api/sources/:id/pause`) takes no new job, identify request or job resume (409 `SOURCE_PAUSED`); jobs running or still starting at the pause wait in `paused` with reason `source-down` (a starting job is not failed, unlike a dropout during startup) and continue on resume, where the usual reconnect recovery restores a lease's tuning and band gain. Identify jobs do not wait: they end `cancelled(source-paused)`.
+A sweep that would disturb something answers 409 `SCANNER_TAKEOVER_REQUIRED` with `details.impact`: `liveAudioClients`, `digitalVoiceListeners`, `runningDecoders`, `pinnedDecoders` (started by hand), `scannerJobs` (other non-passive jobs on the source) and `unrestorable` tuner fields. Resending with `takeover: true` consents. Decoders on the source are held (`suspension.reasonCode: "tuner-scanning"`) for the whole sweep and resume afterwards; a manual start of a held decoder answers 409 `SOURCE_HELD_BY_SCANNER`. Live-audio listeners hear the sweep. Relay clients (SDR++) holding the tuner make sweeps impossible (`SCANNER_SOURCE_BUSY`). A paused receiver feed (`POST /api/sources/:id/pause`) takes no new job, identify request or job resume (409 `SOURCE_PAUSED`); jobs running or still starting at the pause wait in `paused` with reason `source-down` (a starting job is not failed, unlike a dropout during startup). A restore resume (`restoreTuning: true`, Resume at …) continues them, where the usual reconnect recovery restores a lease's tuning and band gain; a plain resume writes no tuning and leaves a waiting sweep in `paused(resumed-without-retune)` until you resume it. Identify jobs do not wait: they end `cancelled(source-paused)`.
 
 ### Tuner restore
 
