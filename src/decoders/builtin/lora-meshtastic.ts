@@ -84,14 +84,16 @@ export const PRESET_TABLE: Readonly<
 const DEFAULT_INPUT_SAMPLE_RATE = 2_048_000
 /**
  * gr-lora_sdr frame_sync takes an integer os_factor and expects
- * samp_rate = bw x os_factor. 4 is the cheapest default that keeps margin:
- * 250 kHz x 4 = 1.0 Msps, one sox step from a 1.024 Msps capture
+ * samp_rate = bw x os_factor. 2 is the lowest factor the option allows
+ * (MIN_SPS): 250 kHz x 2 = 500 kS/s, one sox step from a 1.024 Msps capture
  * (1.024 / 0.25 = 4.096 is not an integer, so the capture rate cannot be used
- * directly), and half the samples of the former 250 kHz x 8 = 2.0 Msps path.
- * frame_sync picks one sample per os_factor without filtering, so 4 still
- * gives 4 sample phases per chip for its fractional STO estimate.
+ * directly), a quarter of the samples of the former 250 kHz x 8 = 2.0 Msps
+ * path. In the core image, one CPU, 10 runs per capture, both committed
+ * captures (+10 / -5 dB SNR) decoded 10/10 at os 2, 4 and 8; os 2 cost least
+ * (sox + python CPU-s per signal-s, loaded host: os 8 0.83 / 1.98, os 4
+ * 0.75-1.42 / 1.24-1.53, os 2 0.81 / 1.05).
  */
-export const DEFAULT_OVERSAMPLING = 4
+export const DEFAULT_OVERSAMPLING = 2
 const MIN_SPS = 2
 const MAX_SPS = 32
 const BASE64_CHARS_RE = /^[A-Za-z0-9+/]*={0,2}$/
@@ -101,9 +103,10 @@ const BASE64_CHARS_RE = /^[A-Za-z0-9+/]*={0,2}$/
  * the shared `-h` (125 dB): the output is 8-bit cu8, whose quantisation floor
  * is about 6 dB x 8 = 48 dB, so the extra rejection is never seen. `-b 74`
  * (sox's narrowest passband, 74 % of the output Nyquist) still passes
- * 0.74 x 500 kHz = 370 kHz at 1.0 Msps, far above the 125 kHz half-width of a
- * 250 kHz channel, and it attenuates 370-500 kHz energy that frame_sync
- * (which decimates without filtering) would fold into the channel. sox
+ * 0.74 x 250 kHz = 185 kHz at 500 kS/s, above the 125 kHz half-width of a
+ * 250 kHz channel plus most of the bw/4 = 62.5 kHz carrier offset the planner
+ * admits, and it attenuates 185-250 kHz energy that frame_sync (which
+ * decimates without filtering) would fold into the channel. sox
  * CPU-s per signal second on the committed captures (+10 / -5 dB SNR, one loaded host): 1.024 -> 2.0 Msps
  * `-h` 0.22-0.24 / 0.56-0.60; 1.024 -> 1.0 Msps `-h` 0.14-0.18 / 0.32-0.33;
  * 1.024 -> 1.0 Msps `-m -b 74` 0.12-0.14 / 0.25.

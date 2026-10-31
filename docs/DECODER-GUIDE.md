@@ -679,12 +679,13 @@ decoded at +10 and −5 dB SNR with or without one. The fixtures and tests are d
 in `fixtures/lora/README.md`.
 
 gr-lora_sdr needs a sample rate that is a whole multiple of the LoRa bandwidth
-(`samp_rate = bw × os_factor`). The decoder runs it at `bw × 4` by default, 1.0 Msps for
+(`samp_rate = bw × os_factor`). The decoder runs it at `bw × 2` by default, 500 kS/s for
 the 250 kHz presets; the `oversampling` option changes the factor. A capture at exactly
 that rate goes straight to the wrapper. Any other rate passes once through sox
-(`rate -m -b 74`): a 1.024 Msps capture becomes 1.0 Msps, because 1.024 Msps is 4.096 ×
-250 kHz. Earlier versions resampled to `bw × 8` (2.0 Msps) at `rate -h`: twice the samples for
-gr-lora_sdr, and 1.6 to 2.4 times the sox CPU in a local measurement. The wrapper exits with an `invalid_sample_rate` line if
+(`rate -m -b 74`): a 1.024 Msps capture becomes 500 kS/s, because 1.024 Msps is 4.096 ×
+250 kHz. Earlier versions resampled to `bw × 8` (2.0 Msps) at `rate -h`: four times the samples
+for gr-lora_sdr. In the core image on one CPU, both committed captures decoded 10/10 at
+`bw × 2`, `× 4` and `× 8`, and `bw × 2` cost the least CPU. The wrapper exits with an `invalid_sample_rate` line if
 `--samp-rate` is not a whole multiple of `--bw`. To compare oversampling factors and sox
 settings on the committed captures, run `python3 scripts/fixtures/bench_lora_chain.py` in
 the core image; it prints decodes and the CPU of each stage per second of signal.

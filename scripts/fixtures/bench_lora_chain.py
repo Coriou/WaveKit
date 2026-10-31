@@ -10,7 +10,7 @@ given net of its startup (gnuradio import + flowgraph build, measured with empty
 which is a one-off cost of a long-running decoder.
 
 A variant is NAME:OS_FACTOR:SOX_RATE_OPTIONS, for example `old:8:-h` (the former
-1.024 -> 2.0 Msps path) or `new:4:-m -b 74` (the current default). An OS_FACTOR whose
+1.024 -> 2.0 Msps path) or `new:2:-m -b 74` (the current default). An OS_FACTOR whose
 rate equals --input-rate skips sox, as the decoder does. Variants come from repeated
 --variant flags, else from LORA_BENCH_VARIANTS (semicolon-separated), else old and new.
 
@@ -18,7 +18,7 @@ Needs sox, python3, gnuradio + gr-lora_sdr and the wrapper: run it inside the co
 from the repository root, never against a live receiver:
 
     python3 scripts/fixtures/bench_lora_chain.py
-    python3 scripts/fixtures/bench_lora_chain.py --variant 'os2:2:-m -b 74' --variant 'new:4:-m -b 74'
+    python3 scripts/fixtures/bench_lora_chain.py --variant 'os4:4:-m -b 74' --variant 'new:2:-m -b 74'
 
 Exit status 1 when any run decodes fewer frames than it was fed.
 """
@@ -35,7 +35,7 @@ import time
 from typing import Any, Callable
 
 FIXTURES = ["lora_longfast_dc_snr10.cu8", "lora_longfast_dc_snrm5.cu8"]
-DEFAULT_VARIANTS = ["old:8:-h", "new:4:-m -b 74"]
+DEFAULT_VARIANTS = ["old:8:-h", "new:2:-m -b 74"]
 # fixtures/lora/README.md: the frame every capture holds.
 EXPECTED_FROM = 169552957
 EXPECTED_PAYLOAD_B64 = "aGVsbG8gd2F2ZWtpdA=="

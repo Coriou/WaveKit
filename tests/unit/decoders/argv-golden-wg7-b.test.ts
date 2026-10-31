@@ -849,7 +849,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1000000 - rate -m -b 74 1000000 | python3 /usr/local/bin/lora_meshtastic_decode.py --bw 250000 --sf 11 --cr 5 --samp-rate 1000000 --frequency 869525000 --channel-key AQ== --region EU_868",
+			"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 500000 - rate -m -b 74 500000 | python3 /usr/local/bin/lora_meshtastic_decode.py --bw 250000 --sf 11 --cr 5 --samp-rate 500000 --frequency 869525000 --channel-key AQ== --region EU_868",
 		],
 		getDecoderArgs: [
 			"/usr/local/bin/lora_meshtastic_decode.py",
@@ -860,7 +860,7 @@ const GOLDEN: Row[] = [
 			"--cr",
 			"5",
 			"--samp-rate",
-			"1000000",
+			"500000",
 			"--frequency",
 			"869525000",
 			"--channel-key",

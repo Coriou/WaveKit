@@ -459,33 +459,33 @@ describe("LoRa/Meshtastic Decoder Property-Based Tests", () => {
 				testLogger,
 			).testArgs()
 
-		it("defaults to os_factor 4: 250 kHz x 4 = 1.0 Msps", () => {
-			expect(DEFAULT_OVERSAMPLING).toBe(4)
+		it("defaults to os_factor 2: 250 kHz x 2 = 500 kS/s", () => {
+			expect(DEFAULT_OVERSAMPLING).toBe(2)
 			expect(
 				parseLoraMeshtasticOptions(validOptions()).effectiveTargetRate,
-			).toBe(1_000_000)
+			).toBe(500_000)
 		})
 
-		it("resamples a 1.024 Msps capture once to 1.0 Msps with sox rate -m -b 74", () => {
+		it("resamples a 1.024 Msps capture once to 500 kS/s with sox rate -m -b 74", () => {
 			expect(chain({ inputSampleRate: 1_024_000 })).toEqual([
 				"-c",
-				"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 1024000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1000000 - rate -m -b 74 1000000 | " +
-					`${WRAPPER} --samp-rate 1000000 ${TAIL}`,
+				"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 1024000 - -t raw -e unsigned-integer -b 8 -c 2 -r 500000 - rate -m -b 74 500000 | " +
+					`${WRAPPER} --samp-rate 500000 ${TAIL}`,
 			])
 		})
 
 		it("skips sox when the capture already runs at bw x os_factor", () => {
-			expect(chain({ inputSampleRate: 1_000_000 })).toEqual([
+			expect(chain({ inputSampleRate: 500_000 })).toEqual([
 				"-c",
-				`${WRAPPER} --samp-rate 1000000 ${TAIL}`,
+				`${WRAPPER} --samp-rate 500000 ${TAIL}`,
 			])
 		})
 
-		it("follows an oversampling override: 250 kHz x 2 = 500 kHz", () => {
-			expect(chain({ inputSampleRate: 1_024_000, oversampling: 2 })).toEqual([
+		it("follows an oversampling override: 250 kHz x 4 = 1.0 Msps", () => {
+			expect(chain({ inputSampleRate: 1_024_000, oversampling: 4 })).toEqual([
 				"-c",
-				"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 1024000 - -t raw -e unsigned-integer -b 8 -c 2 -r 500000 - rate -m -b 74 500000 | " +
-					`${WRAPPER} --samp-rate 500000 ${TAIL}`,
+				"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 1024000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1000000 - rate -m -b 74 1000000 | " +
+					`${WRAPPER} --samp-rate 1000000 ${TAIL}`,
 			])
 		})
 
