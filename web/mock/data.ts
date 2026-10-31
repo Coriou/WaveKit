@@ -359,7 +359,7 @@ export const IDENTIFY_PLANS: Readonly<Record<number, IdentifyPlan>> = {
 		identity: { kind: "p25-nac", value: "293" },
 		metadata: { talkgroups: ["1201"], sources: ["4410022"] },
 	},
-	446925000: {
+	431925000: {
 		state: "identified",
 		class: "tdma-ms",
 		protocol: "dmr",

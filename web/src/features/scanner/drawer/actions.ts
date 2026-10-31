@@ -127,10 +127,23 @@ async function retarget(
 		)
 		return false
 	}
+	// A tune started while the retarget request is out moves the receiver away: audio must not follow it.
+	let moved = false
+	const off = tuning.subscribe(st => {
+		if (st.targetHz !== null) moved = true
+	})
 	try {
 		await data.scanner.listenDiscovery(d.id)
 	} catch {
 		// tuned there: live audio follows the tuned frequency anyway
+	} finally {
+		off()
+	}
+	if (moved) {
+		showToast("Not listening: the receiver was tuned elsewhere first", {
+			tone: "warn",
+		})
+		return false
 	}
 	return true
 }

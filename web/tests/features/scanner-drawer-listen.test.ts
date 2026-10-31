@@ -27,7 +27,7 @@ const outOfWindow = () =>
 	})
 
 /** Fake services: `listenDiscovery` answers from `answers` in turn; the tuner lands when `finish` is called. */
-function setup(answers: (Error | null)[], wanted = false) {
+function setup(answers: (Error | Promise<unknown> | null)[], wanted = false) {
 	const calls: string[] = []
 	const tuning = new Store<TuningState>({ targetHz: null, error: null })
 	let finish: (error: string | null) => void = () => undefined
@@ -37,6 +37,7 @@ function setup(answers: (Error | null)[], wanted = false) {
 				listenDiscovery: (id: string) => {
 					calls.push(`retarget ${id}`)
 					const a = answers.shift() ?? null
+					if (a instanceof Promise) return a
 					return a ? Promise.reject(a) : Promise.resolve({})
 				},
 			},
@@ -114,6 +115,31 @@ describe("scanner drawer Listen", () => {
 		await done
 		expect(calls).not.toContain("start")
 		expect(appToast.get()?.text).toBe("Could not tune: No tuner source")
+	})
+
+	it("never plays when the receiver is tuned elsewhere while the retarget is out", async () => {
+		let release: () => void = () => undefined
+		const held = new Promise<void>(resolve => {
+			release = resolve
+		})
+		const { services, calls, finish, tuning } = setup([outOfWindow(), held])
+		const done = listenTo(services, d)
+		await flush()
+		finish()
+		await flush()
+		expect(calls).toEqual([
+			"unlock",
+			"retarget d1",
+			"tune 161150500",
+			"retarget d1",
+		])
+		tuning.set({ targetHz: 162_000_000, error: null })
+		release()
+		await done
+		expect(calls).not.toContain("start")
+		expect(appToast.get()?.text).toBe(
+			"Not listening: the receiver was tuned elsewhere first",
+		)
 	})
 
 	it("never plays when the core refuses", async () => {
