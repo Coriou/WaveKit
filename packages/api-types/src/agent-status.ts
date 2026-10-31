@@ -4,6 +4,7 @@ import {
 	DECODER_VERDICT_CODES,
 	decoderVerdictSchema,
 } from "./decoders.js"
+import { SOURCE_FEED_STATES } from "./sources.js"
 
 /**
  * GET /api/agent/status: one compact answer to "what is the receiver doing", for
@@ -18,23 +19,27 @@ export const AGENT_STATUS_LIMITS = Object.freeze({
 	 * its byte cap, every enum at its longest member, ISO times at 27:
 	 *   envelope: keys and braces 121, `at` 29, `truncated` 5, activity 54,
 	 *             `hiddenProblems` 23                                      =   232
-	 *   tuners:     2 × 224 (sourceId 40, four numbers, owner) + 3          =   451
-	 *   sources:    2 × 171 (id 40, longest state, age, both warnings) + 3  =   345
-	 *   liveAudio:  sourceId 40, modulation 16, two numbers                 =   213
-	 *   scanner:    job id 40, name 32, reason 24, sourceId 40, one number  =   280
-	 *   decoders:   9 × 206 (id 40, protocol 24, code 23, 3 actions) + 10   = 1,864
+	 *   tuners:     2 × 216 (sourceId 32, four numbers, owner) + 3          =   435
+	 *   sources:    2 × 206 (id 32, longest state and feed, age, both
+	 *               warnings, tuningUnverified) + 3                          =   415
+	 *   liveAudio:  sourceId 32, modulation 16, two numbers                 =   205
+	 *   scanner:    job id 32, name 32, reason 24, sourceId 32, two numbers =   299
+	 *   decoders:   9 × 198 (id 32, protocol 24, code 23, 3 actions) + 10   = 1,792
 	 *   lastDecode: 9 × 74 (protocol 24, ISO time 27) + 10                  =   676
-	 * Total 4,061 < 4,096. The worst-case test builds exactly this body, checks the
+	 * Total 4,054 < 4,096. The worst-case test builds exactly this body, checks the
 	 * schema admits it and nothing one row or one byte larger, and measures it.
 	 */
 	targetBytes: 4096,
-	/** Ids (decoder, source, job) cut to 40 UTF-8 bytes of JSON; a 28-byte job id fits whole. */
-	idMaxBytes: 40,
+	/**
+	 * Ids (decoder, source, job) cut to 32 UTF-8 bytes of JSON; a 28-byte job id and a
+	 * 32-character scanner probe decoder id fit whole.
+	 */
+	idMaxBytes: 32,
 	/** Decoder protocol (type) names cut to 24 bytes; the longest built-in is 15. */
 	protocolMaxBytes: 24,
 	/** Scanner job names cut to 32 bytes here (the job route keeps up to 100 characters). */
 	jobNameMaxBytes: 32,
-	/** Pause or failure reasons cut to 24 bytes; the longest is 18. */
+	/** Pause or failure reasons cut to 24 bytes; the longest is 22 (`resumed-without-retune`). */
 	reasonMaxBytes: 24,
 	/** Live-audio modulation names cut to 16 bytes. */
 	modulationMaxBytes: 16,
@@ -133,6 +138,16 @@ export const agentSourceSchema = z
 		state: z.enum(AGENT_SOURCE_STATES),
 		sampleAgeMs: z.number().finite().nonnegative().nullable(),
 		warnings: z.array(z.enum(AGENT_SOURCE_WARNINGS)).max(2),
+		/**
+		 * The receiver feed (`feed.state` on GET /api/sources): `paused` and `resuming`
+		 * are operator holds, `error` a failed resume. `live` for sources without one.
+		 */
+		feed: z.enum(SOURCE_FEED_STATES),
+		/**
+		 * True while the source's tuner has its frequency, sample rate, gain or gain mode in
+		 * `unknownFields` (for example after a plain resume): the receiver may be tuned elsewhere.
+		 */
+		tuningUnverified: z.boolean(),
 	})
 	.strict()
 
@@ -156,7 +171,12 @@ export const agentScannerSchema = z
 	.object({
 		enabled: z.boolean(),
 		activeJobs: z.number().int().nonnegative(),
-		/** The most recently updated non-terminal job, else null. */
+		/** Sweeps paused with reason `resumed-without-retune`: each waits for a job resume. */
+		heldJobs: z.number().int().nonnegative(),
+		/**
+		 * The most recently updated job paused with reason `resumed-without-retune`, else the
+		 * most recently updated non-terminal job, else null.
+		 */
 		job: z
 			.object({
 				id,
@@ -272,6 +292,8 @@ export const agentStatusResponseSchema = strictObject({
 				type: "array",
 				items: { type: "string", enum: [...AGENT_SOURCE_WARNINGS] },
 			},
+			feed: { type: "string", enum: [...SOURCE_FEED_STATES] },
+			tuningUnverified: bool,
 		}),
 	},
 	liveAudio: {
@@ -290,6 +312,7 @@ export const agentStatusResponseSchema = strictObject({
 		...strictObject({
 			enabled: bool,
 			activeJobs: { type: "integer" },
+			heldJobs: { type: "integer" },
 			job: {
 				...strictObject({
 					id: str,
