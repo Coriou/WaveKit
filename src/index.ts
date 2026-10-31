@@ -643,9 +643,7 @@ export function composeDecoderChannelizer(
 	const channelizer = createManager({
 		...managerDeps,
 		settlementObserver: observer,
-		// Both composed modes stop an idle channelizer after the grace, so releasing then
-		// reopening a single channel reuses the running process instead of restarting it.
-		idleStopMs: CHANNELIZER_IDLE_STOP_MS,
+		...(chanMode === "auto" ? { idleStopMs: CHANNELIZER_IDLE_STOP_MS } : {}),
 	})
 	const channels = observer.bindProvider(channelizer)
 	// Preserve the optional in-place retune port across the settlement adapter.
