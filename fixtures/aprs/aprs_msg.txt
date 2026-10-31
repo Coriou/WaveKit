@@ -1,0 +1,1 @@
+N0CALL-1>APRS,WIDE1-1:!4903.50N/07201.75W-WaveKit synthetic test
