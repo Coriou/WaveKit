@@ -704,7 +704,9 @@ where gr-lora_sdr locked on it (the recentred path's less its 32-symbol delay), 
 identical copies from different paths pair when those positions agree within 4 symbols
 (33 ms for LongFast). Thread timing does not matter, and identical frames that one path
 decodes are separate receptions, all emitted. The drop lines carry a `path` field
-(`direct` or `recentred`), and a `duplicate` drop is the second copy of a frame. At exit,
+(`direct` or `recentred`), and a `duplicate` drop is the second copy of a frame. A
+`position_evicted` or `position_unaligned` count is a frame emitted without a position, so
+it is never paired: a lost pairing gives a duplicate packet, never a missing one. At exit,
 a `cfo_search_summary` line gives the number of preambles found and the last offset
 measured. `--cfo-search-hz 0` runs the direct path alone.
 
@@ -736,8 +738,8 @@ when a shift within `--target-hz` (default bw/5) or a crystal offset within
 `--crystal-target-hz` (default 20 kHz) decodes other than one packet per copy.
 
 Measured in the core image on 2 CPUs of a loaded host, with 3 copies per run at +10 and
-−5 dB SNR, before the position-based pairing above and with the default offsets then
-0 to ±30 kHz:
+−5 dB SNR, with the default offsets then 0 to ±30 kHz. These decode and CPU figures predate
+the position-based pairing above; re-measure them with the bench before relying on them.
 
 | Case | Decodes |
 | --- | --- |

@@ -141,8 +141,13 @@ DEDUPE_TOLERANCE_SYMBOLS = 4
 # after the other's, and frames are at least 20 symbols apart, so a handful
 # wait at once; older entries fall off.
 DEDUPE_KEEP = 64
-# Locks a path has confirmed (valid header) that its sink has not reached yet;
-# the same bound.
+# Locks a path has confirmed (valid header) that its sink has not reached yet.
+# A lock is confirmed 8 header symbols after frame_sync locks, and the frame
+# reaches the sink once its payload is decoded; frames are at least 20.25
+# symbols apart (above), so the 64 entries cover a sink at least 64 x 20.25 =
+# 1296 symbols behind its probe (10.6 s at SF11/250 kHz). Only a stalled sink
+# gets that far behind; an evicted lock leaves its frame unmatched
+# (FramePositions), so it is never deduped.
 LOCKS_KEEP = 64
 
 
@@ -599,36 +604,87 @@ class FramePositions:
     frame_sync tags the decoded header (is_header false), which it does only for
     a valid header. header_decoder tags the same valid headers in the same order
     and crc_verif copies those tags to the sink, so the sink's n-th frame_info tag
-    is the n-th confirmed lock; pay_len, in both tags, checks the pairing.
+    is the n-th confirmation; pay_len, in both tags, checks the pairing.
+
+    A frame whose position is unknown or doubtful gets None, so the deduper lets
+    it through: a duplicate packet is acceptable, a lost one is not. Each such
+    frame is reported to `on_unmatched` from the sink thread:
+
+    - position_evicted: its lock fell off the bounded queue. Confirmations are
+      numbered, so the frames after it still get their own locks.
+    - position_unaligned: the pairing broke (pay_len differs, or the sink has a
+      frame with no confirmation). Every frame is then unmatched and the queue is
+      emptied at each take, until two takes in a row each find exactly one lock,
+      confirmed since the previous take, with their pay_len: the sink is then on
+      the frame the probe last confirmed, and numbering restarts from there.
     """
 
-    def __init__(self, keep: int = LOCKS_KEEP) -> None:
+    def __init__(
+        self,
+        keep: int = LOCKS_KEEP,
+        on_unmatched: Callable[[str], None] | None = None,
+    ) -> None:
         self._lock = threading.Lock()
+        self._keep = keep
+        self._on_unmatched = on_unmatched
         self._pending: int | None = None
-        self._confirmed: deque[tuple[int | None, int]] = deque(maxlen=keep)
+        # (confirmation number, pay_len, position or None when no lock was seen)
+        self._confirmed: deque[tuple[int, int | None, int | None]] = deque()
+        self._confirms = 0  # confirmations so far; the next one's number
+        self._takes = 0  # aligned: the confirmation number of the sink's next frame
+        self._aligned = True
+        self._since_take = 0  # confirmations since the sink's last take
+        self._clean_takes = 0
 
     def locked(self, position: int) -> None:
         with self._lock:
             self._pending = position
 
     def confirmed(self, pay_len: int | None) -> None:
+        # A confirmation without a recorded lock is still a frame the sink will
+        # see, so it keeps its number.
         with self._lock:
-            if self._pending is not None:
-                self._confirmed.append((pay_len, self._pending))
-                self._pending = None
+            if len(self._confirmed) >= self._keep:
+                self._confirmed.popleft()
+            self._confirmed.append((self._confirms, pay_len, self._pending))
+            self._confirms += 1
+            self._since_take += 1
+            self._pending = None
 
     def take(self, pay_len: int | None) -> int | None:
-        """The oldest confirmed lock with this pay_len, dropping older unmatched ones.
-
-        None, leaving the queue as it is, when no lock matches.
-        """
+        """The lock of the sink's next frame, None when unknown or not trusted."""
         with self._lock:
-            for i, (length, position) in enumerate(self._confirmed):
-                if length == pay_len:
-                    for _ in range(i + 1):
-                        self._confirmed.popleft()
-                    return position
-            return None
+            position, reason = self._take(pay_len)
+            self._since_take = 0
+        if reason is not None and self._on_unmatched is not None:
+            self._on_unmatched(reason)
+        return position
+
+    def _take(self, pay_len: int | None) -> tuple[int | None, str | None]:
+        if not self._aligned:
+            clean = (
+                len(self._confirmed) == 1
+                and self._since_take == 1
+                and self._confirmed[0][1] == pay_len
+            )
+            self._clean_takes = self._clean_takes + 1 if clean else 0
+            self._confirmed.clear()
+            if self._clean_takes >= 2:
+                self._aligned = True
+                self._takes = self._confirms
+            return None, "position_unaligned"
+        number = self._takes
+        self._takes += 1
+        while self._confirmed and self._confirmed[0][0] < number:
+            self._confirmed.popleft()
+        if self._confirmed and self._confirmed[0][0] > number:
+            return None, "position_evicted"
+        if not self._confirmed or self._confirmed[0][1] != pay_len:
+            self._aligned = False
+            self._clean_takes = 0
+            self._confirmed.clear()
+            return None, "position_unaligned"
+        return self._confirmed.popleft()[2], None
 
 
 def base_upchirp(n: int) -> Any:
@@ -917,7 +973,9 @@ def build_flowgraph(
         else None
     )
     deduper = FrameDeduper(DEDUPE_TOLERANCE_SYMBOLS * samples_per_symbol)
-    positions = {path: FramePositions() for path in drops}
+    positions = {
+        path: FramePositions(on_unmatched=drops[path].drop) for path in drops
+    }
 
     class Cu8StdinSource(gr.sync_block):
         """cu8 stdin as complex samples on output 0; output 1, when recentring, carries

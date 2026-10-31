@@ -467,25 +467,87 @@ class FramePositionsTest(unittest.TestCase):
         self.assertEqual(positions.take(40), 300)
         self.assertIsNone(positions.take(40))
 
-    def test_unmatched_entries_are_skipped_and_misses_keep_the_queue(self):
+    def test_evicted_lock_leaves_its_frame_unmatched_not_misaligned(self):
+        # 65 frames confirmed before the sink reaches the first: the first
+        # lock falls off a 64-entry queue. Its frame must stay unmatched (so
+        # it is never deduped), not take the second frame's position.
+        reasons = Recorder()
+        positions = wrapper.FramePositions(on_unmatched=reasons)
+        for i in range(65):
+            positions.locked(i * 409_600)
+            positions.confirmed(33)
+        self.assertIsNone(positions.take(33))
+        self.assertEqual(reasons.drops, ["position_evicted"])
+        for i in range(1, 65):
+            self.assertEqual(positions.take(33), i * 409_600)
+        self.assertEqual(reasons.drops, ["position_evicted"])
+
+    def test_evicted_frame_is_never_deduped_against_a_retransmission(self):
         positions = wrapper.FramePositions()
+        for i in range(65):
+            positions.locked(i * 409_600)
+            positions.confirmed(33)
+        deduper = wrapper.FrameDeduper(tolerance=2048)
+        self.assertTrue(deduper.admit("direct", FRAME, 409_600))
+        self.assertTrue(deduper.admit("recentred", FRAME, positions.take(33)))
+
+    def test_pay_len_mismatch_unmatches_until_two_clean_takes(self):
+        reasons = Recorder()
+        positions = wrapper.FramePositions(on_unmatched=reasons)
         for at, pay_len in ((100, 10), (200, 20), (300, 30)):
             positions.locked(at)
             positions.confirmed(pay_len)
-        self.assertIsNone(positions.take(99))
-        self.assertEqual(positions.take(20), 200)  # drops the stale 10
-        self.assertEqual(positions.take(30), 300)
-        self.assertIsNone(positions.take(10))
-
-    def test_confirm_without_lock_is_ignored_and_queue_bounded(self):
-        positions = wrapper.FramePositions(keep=4)
+        self.assertIsNone(positions.take(20))  # sink's first frame is not 10
+        positions.locked(400)
+        positions.confirmed(40)
+        self.assertIsNone(positions.take(30))  # one lock queued, but not its length
+        self.assertIsNone(positions.take(40))  # nothing confirmed since
+        positions.locked(500)
+        positions.confirmed(50)
+        positions.locked(600)
+        positions.confirmed(60)
+        self.assertIsNone(positions.take(50))  # two locks queued
+        for at in (700, 800):  # two clean takes: one new lock each, same length
+            positions.locked(at)
+            positions.confirmed(33)
+            self.assertIsNone(positions.take(33))
+        positions.locked(900)
         positions.confirmed(33)
+        self.assertEqual(positions.take(33), 900)
+        self.assertEqual(reasons.drops, ["position_unaligned"] * 6)
+
+    def test_frame_without_a_confirmed_lock_unaligns(self):
+        reasons = Recorder()
+        positions = wrapper.FramePositions(on_unmatched=reasons)
         self.assertIsNone(positions.take(33))
+        for at in (100, 200):
+            positions.locked(at)
+            positions.confirmed(33)
+            self.assertIsNone(positions.take(33))
+        positions.locked(300)
+        positions.confirmed(33)
+        self.assertEqual(positions.take(33), 300)
+        self.assertEqual(reasons.drops, ["position_unaligned"] * 3)
+
+    def test_confirm_without_lock_keeps_the_count(self):
+        reasons = Recorder()
+        positions = wrapper.FramePositions(on_unmatched=reasons)
+        positions.confirmed(33)  # header tag missed: no position, still a frame
+        positions.locked(100)
+        positions.confirmed(40)
+        self.assertIsNone(positions.take(33))
+        self.assertEqual(positions.take(40), 100)
+        self.assertEqual(reasons.drops, [])
+
+    def test_queue_stays_bounded(self):
+        positions = wrapper.FramePositions(keep=4)
         for i in range(100):
             positions.locked(i)
             positions.confirmed(33)
         self.assertEqual(len(positions._confirmed), 4)
-        self.assertEqual(positions.take(33), 96)
+        for _ in range(96):
+            self.assertIsNone(positions.take(33))
+        self.assertEqual([positions.take(33) for _ in range(4)], [96, 97, 98, 99])
 
     def test_assembler_carries_the_position(self):
         asm = wrapper.FrameAssembler(Recorder())
