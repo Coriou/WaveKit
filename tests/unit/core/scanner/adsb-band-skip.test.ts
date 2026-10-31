@@ -205,6 +205,7 @@ async function identifyWithCaptures(
 		captures?: IqCaptureView[]
 		requested?: IqCaptureView
 		restart?: { retained: IqCaptureView[] }
+		trackHz?: number
 	},
 ) {
 	const settings = testSettings()
@@ -292,7 +293,7 @@ async function identifyWithCaptures(
 	}
 	const replayed = () => port.openReplay.mock.calls.map(([id]) => id)
 	await runner.start()
-	tracks.push(viewOf(fskTrack(hz)))
+	tracks.push(viewOf(fskTrack(opts.trackHz ?? hz)))
 	if (opts.restart) {
 		// restart once the first capture is claimed, before the job can end
 		await until(() => port.claim.mock.calls.length > 0)
@@ -587,6 +588,12 @@ describe("built-in ADS-B band skip", () => {
 
 		it("an identify inside the window requests no capture", async () => {
 			const r = await identifyWithCaptures(ADSB_HZ, {})
+			expect(r.requested).toBe(0)
+			expect(r.claimed).toEqual([])
+		})
+
+		it("a target inside the window with its track just outside requests no capture", async () => {
+			const r = await identifyWithCaptures(LOW, { trackHz: LOW - 1000 })
 			expect(r.requested).toBe(0)
 			expect(r.claimed).toEqual([])
 		})

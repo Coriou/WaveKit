@@ -3079,8 +3079,9 @@ export class IdentifyRunner implements JobDriver {
 			const near = this.claimNear(t, view)
 			if (near > 0 || t.replay.asked) return
 			t.replay.asked = true
-			// Inside the ADS-B window only readsb is eligible, and readsb has no replay input.
-			if (inAdsbWindow(view.track.centreHz)) return
+			// Inside the ADS-B window (the target or the resolved centre, as in plan()) only readsb is eligible,
+			// and readsb has no replay input.
+			if (inAdsbWindow(t.targetHz) || inAdsbWindow(view.track.centreHz)) return
 			const req: IqCaptureRequest = {
 				sourceId: this.sourceId,
 				observationId: view.observationId,
