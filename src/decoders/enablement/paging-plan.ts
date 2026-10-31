@@ -9,13 +9,19 @@
  */
 import type { BandRegion, DecoderBandRange } from "@wavekit/api-types"
 import { builtinBandplansFor } from "../../core/bandplans/builtin-supplement.js"
+import type { ScannerProtocol } from "../../core/scanner/types.js"
 import {
 	BAND_DEFAULTS,
 	type BandDefault,
 	type BandDefaultEntry,
 } from "../band-defaults.js"
 import { BAND_REGIONS } from "../band-region.js"
-import { multimonPagingOnly } from "../builtin/multimon-ng.js"
+import {
+	MULTIMON_PAGING_MODES,
+	effectiveMultimonModes,
+	multimonPagingOnly,
+} from "../builtin/multimon-ng.js"
+import type { MultimonMode } from "../builtin/multimon-ng.js"
 
 /** One paging range and the channel raster on it (inclusive integer Hz). */
 export interface PagingRasterRange {
@@ -122,18 +128,96 @@ export const DECODER_BAND_TABLE: Readonly<
 > = { ...BAND_DEFAULTS, "multimon-ng": PAGER_BAND_DEFAULT }
 
 /**
- * The built-in band table one decoder resolves with. multimon-ng gets the
- * paging band only when all its modes are paging modes (POCSAG, FLEX); with
- * EAS, AFSK1200, FSK9600 or DTMF among them its band stays unknown and it
- * follows the VFO on every band.
+ * The band-plan services each non-paging multimon-ng mode needs (frequency
+ * band check of VFO-following mode lists): AFSK1200 is APRS / 1200 Bd packet,
+ * DTMF is in-band signalling on analog FM voice channels. A mode missing here
+ * (EAS, FSK9600) has no service in the band plan, so its band stays unknown.
+ */
+const MODE_PROTOCOLS: Readonly<Partial<Record<MultimonMode, ScannerProtocol>>> =
+	{
+		AFSK1200: "aprs",
+		DTMF: "analog-fm",
+	}
+
+/** Catalogue ranges of a region listing `protocol` (the plan data, not a copy). */
+function serviceRanges(
+	region: BandRegion,
+	protocol: ScannerProtocol,
+): DecoderBandRange[] {
+	const out: DecoderBandRange[] = []
+	for (const plan of builtinBandplansFor(region))
+		for (const range of plan.ranges)
+			if (range.protocols?.includes(protocol))
+				out.push({ minHz: range.startHz, maxHz: range.endHz })
+	return out
+}
+
+/** Options that pin multimon-ng to explicit channels (the planner's followVfo keys). */
+const MULTIMON_PIN_OPTIONS: readonly string[] = [
+	"channelHz",
+	"channelsHz",
+	"offsetHz",
+	"frequency",
+	"frequencies",
+]
+
+/**
+ * One table per service set: paging, "aprs" and "analog-fm" give
+ * 2^3 = 8 sets at most, so the cache is bounded by the mode list itself.
+ */
+const modeTables = new Map<
+	string,
+	Readonly<Partial<Record<string, BandDefaultEntry>>>
+>()
+
+/**
+ * The built-in band table one decoder resolves with. multimon-ng's band is
+ * the union of the band-plan ranges where each of its modes' services exists
+ * in the region: paging modes (POCSAG, FLEX) their paging ranges (3.18),
+ * AFSK1200 the APRS ranges, DTMF the analog FM voice ranges. So a mode list
+ * follows the VFO only where one of its services can be heard, and is
+ * `frequency-out-of-band` at 1090 MHz or in the 868 MHz ISM band. Any mode
+ * without a service in the plan (EAS, FSK9600), or an explicit channel
+ * option, keeps the band unknown: it follows the VFO (or its channels) on
+ * every band, as before. Configured frequencies and band overrides win over
+ * this table (resolveBandRequirements).
  */
 export function decoderBandTable(
 	type: string,
 	options: Readonly<Record<string, unknown>>,
 ): Readonly<Partial<Record<string, BandDefaultEntry>>> {
-	return type === "multimon-ng" && multimonPagingOnly(options["modes"])
-		? DECODER_BAND_TABLE
-		: BAND_DEFAULTS
+	if (type !== "multimon-ng") return BAND_DEFAULTS
+	if (multimonPagingOnly(options["modes"])) return DECODER_BAND_TABLE
+	// An explicit channel pins the decoder: the mode band never suspends it.
+	if (MULTIMON_PIN_OPTIONS.some(key => Object.hasOwn(options, key)))
+		return BAND_DEFAULTS
+	const modes = effectiveMultimonModes(options["modes"])
+	const paging = modes.some(m => MULTIMON_PAGING_MODES.includes(m))
+	const services = new Set<ScannerProtocol>()
+	for (const mode of modes) {
+		if (MULTIMON_PAGING_MODES.includes(mode)) continue
+		const protocol = MODE_PROTOCOLS[mode]
+		if (protocol === undefined) return BAND_DEFAULTS
+		services.add(protocol)
+	}
+	const sorted = [...services].sort()
+	const key = `${paging ? "paging," : ""}${sorted.join(",")}`
+	const hit = modeTables.get(key)
+	if (hit) return hit
+	const byRegion = {} as Record<BandRegion, BandDefault>
+	for (const region of BAND_REGIONS)
+		byRegion[region] = {
+			rangesHz: [
+				...(paging ? pagingBandRanges(region) : []),
+				...sorted.flatMap(p => serviceRanges(region, p)),
+			],
+		}
+	const table = Object.freeze({
+		...BAND_DEFAULTS,
+		"multimon-ng": { scope: "region", byRegion } as BandDefaultEntry,
+	})
+	modeTables.set(key, table)
+	return table
 }
 
 /** Most raster points one call enumerates (a 2.4 Msps window at 1 kHz is 1 921). */

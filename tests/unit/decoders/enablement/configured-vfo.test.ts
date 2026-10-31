@@ -403,7 +403,7 @@ async function multimonAt(
 	return { f, status: f.manager.getStatus("configured") }
 }
 
-// The paging band applies only when every mode is a paging mode.
+// Paging modes plus AFSK1200 and DTMF: the union of their band-plan services.
 const MIXED = [
 	"POCSAG512",
 	"POCSAG1200",
@@ -429,15 +429,11 @@ it.each([
 	},
 )
 
+// R3: a mode without a band-plan service (EAS, FSK9600) keeps the band unknown.
 it.each([
-	[["AFSK1200"], 432_500_000],
 	[["FSK9600"], 432_500_000],
 	[["EAS"], 1_090_000_000],
-	[["DTMF"], 432_500_000],
-	[["DTMF"], 1_090_000_000],
-	[["DTMF"], 868_000_000],
-	[MIXED, 1_090_000_000],
-	[MIXED, 432_500_000],
+	[["EAS", "DTMF"], 868_950_000],
 ] as const)(
 	"multimon-ng with modes %j keeps an unknown band and follows the VFO at %d Hz",
 	async (modes, hz) => {
@@ -451,10 +447,73 @@ it.each([
 	},
 )
 
+// R3: AFSK1200 is heard on APRS ranges, DTMF on analog FM voice ranges and
+// POCSAG/FLEX on paging ranges; elsewhere the decoder is out of band.
+it.each([
+	[["AFSK1200"], 1_090_000_000],
+	[["AFSK1200"], 868_950_000],
+	[["AFSK1200"], 432_500_000],
+	[["DTMF"], 1_090_000_000],
+	[["DTMF"], 868_950_000],
+	[["AFSK1200", "DTMF"], 868_950_000],
+	[MIXED, 1_090_000_000],
+	[MIXED, 868_950_000],
+] as const)(
+	"multimon-ng with modes %j is suspended out of band at %d Hz",
+	async (modes, hz) => {
+		const { f, status } = await multimonAt(hz, modes)
+		expect(status?.running).toBe(false)
+		expect(status?.bandAssessment?.verdict).toBe("out-of-band")
+		expect(status?.suspension?.reasonCode).toBe("frequency-out-of-band")
+		expect(f.provider.requestChannel).not.toHaveBeenCalled()
+	},
+)
+
+it.each([
+	[["AFSK1200"], 144_800_000],
+	[["AFSK1200", "POCSAG1200"], 144_800_000],
+	[["DTMF"], 432_500_000],
+	[["DTMF"], 156_800_000],
+	[MIXED, 432_500_000],
+] as const)(
+	"multimon-ng with modes %j is admitted in band at %d Hz",
+	async (modes, hz) => {
+		const { status } = await multimonAt(hz, modes)
+		expect(status?.running).toBe(true)
+		expect(status?.bandAssessment?.verdict).toBe("in-band")
+		expect(status?.suspension).toBeUndefined()
+	},
+)
+
+it.each([false, true])(
+	"an explicit channel pin overrides the mode band check at 868.95 MHz (configured band: %s)",
+	async withBand => {
+		const hz = 868_950_000
+		const f = setup({
+			type: "multimon-ng",
+			vfo: hz,
+			options: { modes: ["AFSK1200", "DTMF"], channelHz: hz },
+		})
+		if (withBand) f.decoder().band = { targetsHz: [hz], basis: "configured" }
+		f.sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: hz })
+		f.manager.notifyVfoSettled({ sourceId: "rtl", frequencyHz: hz })
+		await f.manager.startAll()
+		const status = f.manager.getStatus("configured")
+		expect(status?.bandAssessment?.verdict).toBe(
+			withBand ? "in-band" : "unknown",
+		)
+		expect(status?.running).toBe(true)
+		expect(status?.suspension).toBeUndefined()
+		expect(status?.placements).toEqual([
+			expect.objectContaining({ origin: "configured", primary: true }),
+		])
+	},
+)
+
 it("a mixed mode set covers the paging raster where a paging band is in view", async () => {
 	const { f, status } = await multimonAt(466_103_300, MIXED, 1_024_000)
 	expect(status?.running).toBe(true)
-	expect(status?.bandAssessment?.verdict).toBe("unknown")
+	expect(status?.bandAssessment?.verdict).toBe("in-band")
 	const channels = (status?.placements ?? []).map(p => p.channelHz)
 	expect(channels).toHaveLength(33)
 	expect(status?.placements?.every(p => p.origin === "bandplan")).toBe(true)

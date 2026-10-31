@@ -117,6 +117,7 @@ import { VFO_CHANNEL_TYPES, activityQueries } from "./enablement/placement.js"
 import {
 	ACTIVITY_MOVE_WINDOW_MS,
 	isActivityDecoder,
+	readySnapshot,
 } from "./enablement/activity-plan.js"
 import type {
 	ActivityIncumbent,
@@ -125,6 +126,8 @@ import type {
 } from "./enablement/activity-plan.js"
 import {
 	DsdActivityDemotions,
+	DsdChallengeEvidence,
+	dsdChallengeKey,
 	dsdSyncProtectionUntil,
 	isDsdActivitySync,
 } from "./enablement/dsd-activity.js"
@@ -680,6 +683,8 @@ export class DecoderManager extends EventEmitter {
 	/** At most this long from an activity notice or deadline to its pass (contract: 250 ms). */
 	private static readonly ACTIVITY_PASS_COALESCE_MS = 100
 	private readonly dsdActivityDemotions = new DsdActivityDemotions()
+	/** R2: repeat-and-span evidence of dsd-fme challengers (bounded, same clock). */
+	private readonly dsdChallengeEvidence = new DsdChallengeEvidence()
 	private activityMoves: { sourceId: string; atMonoMs: number }[] = []
 	/** Per placement key: when it was first planned and when it was first seen running. */
 	private readonly activitySince = new Map<
@@ -2455,7 +2460,26 @@ export class DecoderManager extends EventEmitter {
 					"Channel activity snapshot failed",
 				)
 			}
-		return { ...input, activity: { ...plannerActivity, snapshots } }
+		// R2: each pass records the energy timestamps of its dsd-fme answers;
+		// only channels past the hysteresis may displace a running slot.
+		for (const query of queries) {
+			if (query.decoderType !== "dsd-fme") continue
+			const ready = readySnapshot(query, snapshots)
+			for (const channel of ready?.channels ?? [])
+				this.dsdChallengeEvidence.note(
+					dsdChallengeKey(query.decoderId, query.epoch.sourceId, channel.hz),
+					channel.lastEnergyMonoMs,
+					now,
+				)
+		}
+		return {
+			...input,
+			activity: {
+				...plannerActivity,
+				snapshots,
+				confirmedChallengers: this.dsdChallengeEvidence.snapshot(now),
+			},
+		}
 	}
 
 	/** Stage 1: one timer for the earliest activity deadline (decay, dwell, move window). */
@@ -6515,9 +6539,22 @@ export class DecoderManager extends EventEmitter {
 			configOverride: state.config.band,
 			apiOverride: this.bandOverrides.get(state.parentId ?? state.config.id),
 			region: this.config.bandRegion,
-			// 3.18: a paging-only multimon-ng adds its paging band to the table.
-			table: decoderBandTable(state.config.type, state.config.options),
+			// 3.18: a paging-only multimon-ng adds its paging band to the table;
+			// R3: other mode lists their services' bands. Read the configured
+			// options (the parent's for a placement), never placement-applied ones.
+			table: decoderBandTable(
+				state.config.type,
+				this.configuredOptionsOf(state),
+			),
 		})
+	}
+
+	/** The options the operator configured: a placement's channel options are the planner's. */
+	private configuredOptionsOf(state: DecoderState): Record<string, unknown> {
+		const parent = state.parentId ? this.decoders.get(state.parentId) : state
+		const config =
+			parent?.effectiveConfig ?? parent?.originalConfig ?? parent?.config
+		return (config ?? state.config).options
 	}
 
 	/** Regional slots of a catalogue LoRa decoder (or its placement); undefined otherwise. */

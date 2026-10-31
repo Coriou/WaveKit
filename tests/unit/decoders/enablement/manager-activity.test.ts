@@ -90,6 +90,8 @@ function setup(withActivity = true, type = "multimon-ng") {
 			score: number
 			live: boolean
 			excluded?: boolean
+			/** Scripted last energy; default now when live, else none. */
+			energyMonoMs?: number
 		}
 	>()
 	const batches: ActivityQuery[][] = []
@@ -113,7 +115,10 @@ function setup(withActivity = true, type = "multimon-ng") {
 					state: heat.get(hz)?.state ?? "cold",
 					reasons: heat.has(hz) ? ["live-energy" as const] : [],
 					live: heat.get(hz)?.live ?? false,
-					lastEnergyMonoMs: null,
+					// Energy in the latest block: a live channel's energy is now.
+					lastEnergyMonoMs:
+						heat.get(hz)?.energyMonoMs ??
+						(heat.get(hz)?.live ? nowMonoMs : null),
 					stateSinceMonoMs: 0,
 				})),
 			}))
@@ -458,7 +463,12 @@ it.each([false, true])(
 					.activity!.incumbents.find(i => i.key === incumbent.key)!
 					.dwellSinceMonoMs + 20_000
 		const now = f.inputs.at(-1)!.activity!.nowMonoMs
-		await f.advance(deadline - now - 1)
+		// A pass mid-way sees the challenger still live: its evidence spans the
+		// wait within the 120 s challenge memory (R2 hysteresis).
+		const half = Math.floor((deadline - now - 1) / 2)
+		await f.advance(half)
+		f.notify()
+		await f.advance(deadline - now - 1 - half)
 		f.notify()
 		await f.advance(0)
 		expect(f.runningHz()).toContain(oldHz)
@@ -477,6 +487,48 @@ it.each([false, true])(
 		expect(moves.some(m => m.sourceId === "rtl")).toBe(true)
 	},
 )
+
+// R2: a burst seen once never moves a dsd-fme slot; a channel heard for the
+// 10 s challenge span does, through the manager's own evidence.
+it("a one-off burst never moves a dsd-fme slot; a sustained transmission does", async () => {
+	const f = setup(true, "dsd-fme")
+	await f.m.startAll()
+	await f.advance(1000)
+	const incumbent = f.inputs.at(-1)!.activity!.incumbents.find(i => !i.primary)!
+	expect(incumbent).toBeDefined()
+	const oldHz = incumbent.hz
+	const challenger = oldHz === FAR ? CENTRE + 25_000 : FAR
+	// Past the incumbent's 20 s dwell, so only the hysteresis holds it.
+	await f.advance(25_000)
+	const pass = async () => {
+		f.notify()
+		await f.advance(500)
+	}
+	// A 9.5 s burst, seen live at a pass every 500 ms, then hot for a minute.
+	const burstStart = f.inputs.at(-1)!.activity!.nowMonoMs + 500
+	for (let i = 0; i < 19; i++) {
+		f.heat.set(challenger, { state: "hot", score: 105, live: true })
+		await pass()
+	}
+	f.heat.set(challenger, {
+		state: "hot",
+		score: 3,
+		live: false,
+		energyMonoMs: burstStart + 9_000,
+	})
+	for (let i = 0; i < 120; i++) await pass()
+	expect(f.runningHz()).toContain(oldHz)
+	expect(f.runningHz()).not.toContain(challenger)
+	expect(f.inputs.flatMap(i => i.activity?.confirmedChallengers ?? [])).toEqual(
+		[],
+	)
+	// A transmission heard for 10 s or more confirms and moves the slot.
+	f.heat.set(challenger, { state: "hot", score: 105, live: true })
+	for (let i = 0; i < 24; i++) await pass()
+	await f.advance(1_000)
+	expect(f.runningHz()).toContain(challenger)
+	expect(f.runningHz()).not.toContain(oldHz)
+})
 
 it("renewed clean evidence keeps a dsd incumbent past its original deadline", async () => {
 	const f = setup(true, "dsd-fme")

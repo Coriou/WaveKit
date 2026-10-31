@@ -567,9 +567,16 @@ describe("HfdlDecoder", () => {
 5. multimon-ng with only paging modes (POCSAG512, POCSAG1200, POCSAG2400, FLEX; the default
    when `modes` is unset) runs only where a paging band of your region is in the capture (the
    band catalogue's VHF paging plan, plus 466.025–466.230 MHz in the EU for French paging),
-   so it is `frequency-out-of-band` at 1090 MHz or 433 MHz. With EAS, AFSK1200, FSK9600 or
-   DTMF among its modes it has no built-in band and follows the VFO on every band. With at
-   least one paging mode, a paging band in view and no
+   so it is `frequency-out-of-band` at 1090 MHz or 433 MHz. With AFSK1200 or DTMF among its
+   modes its band is the union of the band-plan ranges where each mode's service exists in
+   your region: paging ranges for POCSAG and FLEX, APRS ranges for AFSK1200 (144.800 MHz in
+   the EU, 144.390 MHz in the US, the 2 m band) and analog FM voice ranges for DTMF (PMR446,
+   land mobile, marine, amateur 2 m / 70 cm, CB). Elsewhere, for example at 1090 MHz or in
+   the 868 MHz ISM band, it is suspended with `frequency-out-of-band` ("waiting: the tuned
+   frequency is outside its band"). `frequencies`, `channelHz`/`channelsHz`/`frequency` with
+   their configured band, or a band override (`band` in YAML or the API) still win. With EAS or
+   FSK9600 among its modes (no band-plan service) it has no built-in band and follows the
+   VFO on every band. With at least one paging mode, a paging band in view and no
    `channelHz`, `channelsHz`, `offsetHz` or `frequency` it listens on every paging raster
    channel inside the usable window (80 % of the sample rate), nearest the centre first and
    at most 33, each through its own 12 kHz channel filter; a VFO exactly on one of those
@@ -594,8 +601,15 @@ describe("HfdlDecoder", () => {
    and 2 extra dsd-fme channels per source on x86-64 (1 and 0 on a 4-core arm64 host), fewer
    when the CPU budget is short. A channel that becomes active replaces the least active one
    after that one has run 20 s, at most 6 times a minute per source, and never one that is
-   receiving. dsd-fme also considers scanner-observed energy centres when no explicit
-   decoder channels are configured, including channels absent from the protocol band plan.
+   receiving. A dsd-fme channel must also have been heard for at least 10 s before it may
+   replace a running one: two energy observations at least 10 s apart (one transmission of
+   10 s or more, or two transmissions 10 s apart) within the last 120 s, so a single short
+   burst never moves a slot; free slots still fill at once. dsd-fme also considers
+   scanner-observed energy centres when no explicit decoder channels are configured,
+   including channels absent from the protocol band plan, but its extra channels sit only
+   inside a digital-voice range of your region's built-in band plan (VHF and UHF land mobile,
+   PMR446 and dPMR446, amateur 2 m and 70 cm) and never in an ISM/SRD or LoRa range (433 MHz,
+   863–870 MHz). Its first channel (the VFO) is not limited this way.
    No protocol hint is required: energy selects a trial channel, and the existing checked
    decoder output rules still decide whether it is verified digital voice. Band, capture
    reach and CPU admission still apply. Observed candidate identities initially use round(Hz / 6250) × 6250 (ties upward).

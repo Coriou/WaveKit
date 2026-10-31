@@ -158,16 +158,84 @@ describe("paging raster placement (3.18)", () => {
 			["bogus"],
 		])
 			expect(table(modes)).toBe(DECODER_BAND_TABLE)
+		// A mode without a band-plan service keeps the band unknown.
 		for (const modes of [
-			["AFSK1200"],
 			["FSK9600"],
 			["EAS"],
+			["POCSAG1200", "EAS"],
+			["AFSK1200", "FSK9600"],
+		])
+			expect(table(modes)).toBe(BAND_DEFAULTS)
+		// An explicit channel pin keeps a mode band unknown; paging-only is unchanged.
+		for (const key of [
+			"channelHz",
+			"channelsHz",
+			"offsetHz",
+			"frequency",
+			"frequencies",
+		]) {
+			expect(
+				decoderBandTable("multimon-ng", { modes: ["AFSK1200"], [key]: 1 }),
+			).toBe(BAND_DEFAULTS)
+			expect(
+				decoderBandTable("multimon-ng", { modes: ["POCSAG1200"], [key]: 1 }),
+			).toBe(DECODER_BAND_TABLE)
+		}
+		expect(decoderBandTable("dsd-fme", {})).toBe(BAND_DEFAULTS)
+	})
+
+	it("R3: AFSK1200, DTMF and mixed paging modes take the band-plan ranges of their services", () => {
+		const table = (modes: string[]) =>
+			decoderBandTable("multimon-ng", { modes })
+		const verdict = (
+			modes: string[],
+			centerHz: number,
+			code: "EU" | "US" = "EU",
+		) =>
+			assessDecoderBand(
+				resolveBandRequirements({
+					type: "multimon-ng",
+					declaration: {},
+					region: { code, source: "configured" },
+					table: decoderBandTable("multimon-ng", { modes }),
+				}).requirements,
+				{ centerHz, sampleRateHz: 2_400_000 },
+			).verdict
+		for (const modes of [
+			["AFSK1200"],
 			["DTMF"],
 			["POCSAG1200", "AFSK1200"],
 			["FLEX", "DTMF", "bogus"],
-		])
-			expect(table(modes)).toBe(BAND_DEFAULTS)
-		expect(decoderBandTable("dsd-fme", {})).toBe(BAND_DEFAULTS)
+		]) {
+			expect(table(modes)).not.toBe(BAND_DEFAULTS)
+			expect(table(modes)["multimon-ng"]).not.toBe(PAGER_BAND_DEFAULT)
+			expect(verdict(modes, 1_090_000_000)).toBe("out-of-band")
+			expect(verdict(modes, 868_950_000)).toBe("out-of-band")
+		}
+		// The same service set shares one table.
+		expect(table(["DTMF", "FLEX"])).toBe(table(["FLEX", "DTMF", "bogus"]))
+		expect(verdict(["AFSK1200"], 144_800_000)).toBe("in-band")
+		expect(verdict(["AFSK1200"], 144_390_000, "US")).toBe("in-band")
+		expect(verdict(["AFSK1200"], 433_920_000)).toBe("out-of-band")
+		expect(verdict(["DTMF"], 446_050_000)).toBe("in-band")
+		expect(verdict(["DTMF"], 156_800_000)).toBe("in-band")
+		expect(verdict(["POCSAG1200", "AFSK1200"], 153_350_000)).toBe("in-band")
+		expect(verdict(["POCSAG1200", "AFSK1200"], 466_100_000)).toBe("in-band")
+		// Configured targets and overrides win over the mode band.
+		const pinned = resolveBandRequirements({
+			type: "multimon-ng",
+			declaration: {
+				configured: { targetsHz: [868_950_000], basis: "configured" },
+			},
+			region: { code: "EU", source: "configured" },
+			table: decoderBandTable("multimon-ng", { modes: ["AFSK1200"] }),
+		}).requirements
+		expect(
+			assessDecoderBand(pinned, {
+				centerHz: 868_950_000,
+				sampleRateHz: 2_400_000,
+			}).verdict,
+		).toBe("in-band")
 	})
 
 	it("config-origin without channels places every French channel in the window, not the VFO", () => {
