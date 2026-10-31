@@ -139,20 +139,21 @@ const TRACK_HOLD_MS = 1500
 const DRAG_THRESHOLD_PX = 3
 
 export function Plot({ data, className, stepHz, paused }: PlotProps) {
-	const connectedId = useStore(data.sources, s => firstConnected(s.sources))
-	// a paused receiver is not connected: the plot stays on it, so its waterfall freezes (no frames
-	// arrive) under the paused label instead of clearing
-	const feedSource = useStore(data.sources, s =>
-		connectedId === null
-			? s.sources[0]
-			: s.sources.find(x => x.id === connectedId),
-	)
-	const feedEntry = useStore(feedControllerFor(data), s =>
-		feedSource === undefined ? undefined : s.bySource[feedSource.id],
-	)
-	const receiverPaused = feedPaused(feedOf(feedSource, feedEntry))
-	const sourceId =
-		connectedId ?? (receiverPaused ? (feedSource?.id ?? null) : null)
+	const sources = useStore(data.sources, s => s.sources)
+	const feeds = useStore(feedControllerFor(data), s => s.bySource)
+	const isPausedSource = (id: string) =>
+		feedPaused(
+			feedOf(
+				sources.find(x => x.id === id),
+				feeds[id],
+			),
+		)
+	// the shown source sticks through a pause (its waterfall freezes under the paused label) and is
+	// only replaced once it is gone or neither connected nor paused (plotSourceId)
+	const [shownId, setShownId] = useState<string | null>(null)
+	const sourceId = plotSourceId(sources, isPausedSource, shownId)
+	if (sourceId !== shownId) setShownId(sourceId)
+	const receiverPaused = sourceId !== null && isPausedSource(sourceId)
 	const tuner = useStore(data.tuner, s =>
 		sourceId === null ? undefined : s.bySource[sourceId],
 	)
@@ -407,7 +408,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 					paused={paused ?? false}
 					probeRef={probeRef}
 				/>
-				<ReceiverPausedBadge data={data} sourceId={feedSource?.id ?? null} />
+				<ReceiverPausedBadge data={data} sourceId={sourceId} />
 				{size.w > 0 && view && (
 					<>
 						<div
@@ -574,10 +575,23 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 	)
 }
 
-function firstConnected(
+/**
+ * The source the plot shows. The one shown before stays while it is listed and connected or paused, so pausing
+ * it freezes its waterfall instead of switching to another receiver (which would reset the history); otherwise
+ * the first connected source, else the first paused one (a core that booted paused), else none.
+ */
+export function plotSourceId(
 	sources: readonly { id: string; connected: boolean }[],
+	isPaused: (id: string) => boolean,
+	shown: string | null,
 ): string | null {
-	return sources.find(s => s.connected)?.id ?? null
+	const kept = shown === null ? undefined : sources.find(s => s.id === shown)
+	if (kept && (kept.connected || isPaused(kept.id))) return kept.id
+	return (
+		sources.find(s => s.connected)?.id ??
+		sources.find(s => isPaused(s.id))?.id ??
+		null
+	)
 }
 
 function pct(hz: number, view: SpectrumViewSpan): number {

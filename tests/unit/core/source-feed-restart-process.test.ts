@@ -7,10 +7,24 @@
  * main() is not exported and the config schema has no API port 0, so the core runs as a child
  * process on reserved ports outside the ephemeral range. The upstream is an in-process fake
  * rtl_tcp on an ephemeral loopback port; nothing else is contacted.
+ *
+ * Isolation: the bundle lives in an OS temp dir (deleted after the run), and the child runs with
+ * its cwd in a fresh temp dir and an explicit environment only: no inherited WAVEKIT_* or DOTENV_*
+ * variable, DOTENV_CONFIG_PATH on an empty file there (src/bootstrap.ts loads dotenv/config), so
+ * neither a checkout .env nor the caller's shell can point it elsewhere. Every port is checked
+ * against the live receiver's ports before the child starts, and every source endpoint the child
+ * logs must be the fake upstream, or the child is killed and the test fails.
  */
 import { spawn } from "node:child_process"
 import type { ChildProcess } from "node:child_process"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import {
+	mkdir,
+	mkdtemp,
+	realpath,
+	rm,
+	symlink,
+	writeFile,
+} from "node:fs/promises"
 import { request } from "node:http"
 import * as net from "node:net"
 import { tmpdir } from "node:os"
@@ -27,11 +41,25 @@ const roots: string[] = []
 const children: ChildProcess[] = []
 const servers: net.Server[] = []
 
+/** The live receiver's and dev tools' ports: a test core never listens on or connects to one. */
+const FORBIDDEN_PORTS: ReadonlySet<number> = new Set([
+	15555, 15556, 18080, 9000, 5173, 8081, 8082,
+])
+const LOOPBACK = "127.0.0.1"
+
 beforeAll(async () => {
-	const agents = join(repository, ".agents")
-	await mkdir(agents, { recursive: true })
-	buildDirectory = await mkdtemp(join(agents, "source-feed-restart-build-"))
+	// the real path: src/index.ts runs main() only when argv[1] is its own resolved URL, and the
+	// macOS temp dir sits behind the /var -> /private/var link
+	buildDirectory = await realpath(
+		await mkdtemp(join(tmpdir(), "wavekit-feed-restart-build-")),
+	)
 	entry = join(buildDirectory, "index.js")
+	// packages stay external: the bundle resolves them through this link to the checkout's
+	await symlink(
+		join(repository, "node_modules"),
+		join(buildDirectory, "node_modules"),
+		"dir",
+	)
 	await build({
 		absWorkingDir: repository,
 		entryPoints: [
@@ -68,6 +96,7 @@ afterEach(async () => {
 afterAll(async () => {
 	for (const root of roots.splice(0))
 		await rm(root, { recursive: true, force: true })
+	// rm removes the node_modules link itself, never the checkout's packages behind it
 	if (buildDirectory) await rm(buildDirectory, { recursive: true, force: true })
 })
 
@@ -101,17 +130,23 @@ async function fakeRtlTcp(): Promise<{
 		for (const s of sockets) s.destroy()
 	})
 	servers.push(server)
-	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))
-	return {
-		port: (server.address() as net.AddressInfo).port,
-		connections: () => accepted,
-	}
+	await new Promise<void>(resolve => server.listen(0, LOOPBACK, resolve))
+	const port = (server.address() as net.AddressInfo).port
+	if (FORBIDDEN_PORTS.has(port))
+		throw new Error(`The fake upstream landed on a forbidden port ${port}`)
+	return { port, connections: () => accepted }
 }
 
-// Outside the OS ephemeral range, as in legacy-port-conflict.test.ts.
-async function freePort(host?: string): Promise<number> {
+/**
+ * A port in 24000–29999 (outside the OS ephemeral range and every forbidden port, as in
+ * legacy-port-conflict.test.ts) that was free when probed and is not in `taken`; it joins `taken`,
+ * so one core's ports are distinct. Another process may still take it before the core binds:
+ * bootCore retries the startup for that.
+ */
+async function freePort(taken: Set<number>, host?: string): Promise<number> {
 	for (;;) {
 		const port = 24000 + Math.floor(Math.random() * 6000)
+		if (taken.has(port) || FORBIDDEN_PORTS.has(port)) continue
 		const probe = net.createServer()
 		const error = await new Promise<string | null>(resolve => {
 			probe.once("error", (e: NodeJS.ErrnoException) =>
@@ -123,6 +158,7 @@ async function freePort(host?: string): Promise<number> {
 		})
 		if (error === null) {
 			await new Promise<void>(resolve => probe.close(() => resolve()))
+			taken.add(port)
 			return port
 		}
 	}
@@ -131,27 +167,174 @@ async function freePort(host?: string): Promise<number> {
 interface Core {
 	child: ChildProcess
 	stdout: () => string
+	/** Output on either stream, for telling a port clash from another startup failure. */
+	output: () => string
+	/** Why the endpoint guard killed the child, or null. */
+	violation: () => string | null
 	exited: Promise<number | null>
 }
 
-function runCore(configFile: string): Core {
-	const env = Object.fromEntries(
-		Object.entries(process.env).filter(([n]) => !n.startsWith("WAVEKIT_")),
+/**
+ * The child's whole environment: nothing inherited but PATH (and TMPDIR, for os.tmpdir()), so no
+ * WAVEKIT_* override, DOTENV_* setting or NODE_OPTIONS reaches it. HOME is the scratch root.
+ */
+function childEnv(root: string, configFile: string): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = {
+		PATH: process.env["PATH"] ?? "",
+		HOME: root,
+		NODE_ENV: "test",
+		WAVEKIT_CONFIG: configFile,
+		DOTENV_CONFIG_PATH: join(root, "empty.env"),
+		DOTENV_CONFIG_QUIET: "true",
+	}
+	const tmp = process.env["TMPDIR"]
+	if (tmp !== undefined) env["TMPDIR"] = tmp
+	return env
+}
+
+/**
+ * Kills the child as soon as it logs a source endpoint (a line with sourceId and host or port,
+ * as the boot log's "Connected to source" / paused line) other than the fake upstream.
+ */
+function guardEndpoints(
+	core: { child: ChildProcess; flag: (why: string) => void },
+	line: string,
+	upstreamPort: number,
+): void {
+	let record: unknown
+	try {
+		record = JSON.parse(line)
+	} catch {
+		return
+	}
+	if (typeof record !== "object" || record === null) return
+	const r = record as Record<string, unknown>
+	if (!("sourceId" in r) || (!("host" in r) && !("port" in r))) return
+	if (r["host"] === LOOPBACK && r["port"] === upstreamPort) return
+	core.flag(
+		`The core logged a source endpoint other than the fake upstream: ${String(r["host"])}:${String(r["port"])}`,
 	)
-	env["WAVEKIT_CONFIG"] = configFile
+	core.child.kill("SIGKILL")
+}
+
+function runCore(root: string, configFile: string, upstreamPort: number): Core {
+	const env = childEnv(root, configFile)
+	for (const name of Object.keys(env))
+		if (
+			(name.startsWith("WAVEKIT_") && name !== "WAVEKIT_CONFIG") ||
+			(name.startsWith("DOTENV_") &&
+				name !== "DOTENV_CONFIG_PATH" &&
+				name !== "DOTENV_CONFIG_QUIET")
+		)
+			throw new Error(`Unexpected ${name} in the child environment`)
 	const child = spawn(process.execPath, [entry], {
-		cwd: repository,
+		cwd: root,
 		env,
 		stdio: ["ignore", "pipe", "pipe"],
 	})
 	children.push(child)
 	let stdout = ""
-	child.stdout?.on("data", (c: Buffer) => (stdout += c.toString()))
-	child.stderr?.on("data", () => undefined)
+	let stderr = ""
+	let pending = ""
+	let violation: string | null = null
+	const flag = (why: string) => (violation ??= why)
+	child.stdout?.on("data", (c: Buffer) => {
+		const text = c.toString()
+		stdout += text
+		pending += text
+		const lines = pending.split("\n")
+		pending = lines.pop() ?? ""
+		for (const line of lines)
+			guardEndpoints({ child, flag }, line, upstreamPort)
+	})
+	child.stderr?.on("data", (c: Buffer) => (stderr += c.toString()))
 	const exited = new Promise<number | null>(resolve =>
 		child.once("close", code => resolve(code)),
 	)
-	return { child, stdout: () => stdout, exited }
+	return {
+		child,
+		stdout: () => stdout,
+		output: () => stdout + stderr,
+		violation: () => violation,
+		exited,
+	}
+}
+
+/** Startup attempts per core: 5 probed ports from 6000 rarely clash, three in a row means a real fault. */
+const STARTUP_ATTEMPTS = 3
+
+/**
+ * Writes the config with freshly probed, distinct ports and starts the core, again with new ports
+ * (up to STARTUP_ATTEMPTS in all) when a listener lost its port to another process (EADDRINUSE).
+ */
+async function bootCore(
+	root: string,
+	upstreamPort: number,
+	stateDir: string,
+): Promise<{ core: Core; api: number }> {
+	const configFile = join(root, "config.yaml")
+	for (let attempt = 1; ; attempt++) {
+		const taken = new Set<number>([upstreamPort])
+		const api = await freePort(taken, LOOPBACK)
+		const ports = {
+			audio: await freePort(taken),
+			relay: await freePort(taken, LOOPBACK),
+			liveDemod: await freePort(taken, LOOPBACK),
+			digitalVoice: await freePort(taken, LOOPBACK),
+		}
+		const config = {
+			sources: [
+				{
+					id: "rtl",
+					type: "rtl_tcp",
+					host: LOOPBACK,
+					port: upstreamPort,
+					caps: {
+						kind: "iq",
+						format: "U8_IQ",
+						sampleRate: 2_048_000,
+						centerFreq: 100_000_000,
+						exclusive: false,
+					},
+				},
+			],
+			decoders: [],
+			decoderPolicy: { catalogue: false },
+			stateDir,
+			scanner: { enabled: false },
+			resources: { enabled: false },
+			channelizer: { enabled: false },
+			api: { host: LOOPBACK, port: api },
+			audio: { tcpPort: ports.audio },
+			tunerRelay: { enabled: false, port: ports.relay },
+			liveDemod: { enabled: false, httpPort: ports.liveDemod },
+			digitalVoice: { enabled: false, httpPort: ports.digitalVoice },
+			logging: { level: "info" },
+			access: { mode: "legacy" },
+		}
+		const source = config.sources[0]
+		if (source?.host !== LOOPBACK || source.port !== upstreamPort)
+			throw new Error("The config's source is not the fake upstream")
+		for (const port of [upstreamPort, api, ...Object.values(ports)])
+			if (FORBIDDEN_PORTS.has(port))
+				throw new Error(`Refusing a forbidden port ${port}`)
+		await writeFile(configFile, JSON.stringify(config))
+		await writeFile(join(root, "empty.env"), "")
+
+		const core = runCore(root, configFile, upstreamPort)
+		try {
+			await started(core)
+			return { core, api }
+		} catch (error) {
+			if (core.violation() !== null) throw error
+			if (core.child.exitCode === null && core.child.signalCode === null) {
+				core.child.kill("SIGKILL")
+				await core.exited
+			} else await core.exited
+			if (!core.output().includes("EADDRINUSE") || attempt >= STARTUP_ATTEMPTS)
+				throw error
+		}
+	}
 }
 
 async function until(check: () => boolean, what: string): Promise<void> {
@@ -166,11 +349,17 @@ async function started(core: Core): Promise<void> {
 	await until(
 		() =>
 			core.stdout().includes("WaveKit started successfully") ||
-			core.child.exitCode !== null,
+			core.violation() !== null ||
+			core.child.exitCode !== null ||
+			core.child.signalCode !== null,
 		"core startup",
 	)
-	if (core.child.exitCode !== null)
-		throw new Error("The core exited before startup completed")
+	const violation = core.violation()
+	if (violation !== null) throw new Error(violation)
+	if (core.child.exitCode !== null || core.child.signalCode !== null)
+		throw new Error(
+			`The core exited before startup completed: ${core.output().slice(-1500)}`,
+		)
 }
 
 async function http(
@@ -210,6 +399,10 @@ const feedOf = (body: unknown, id: string) =>
 		s => s.id === id,
 	)?.feed?.state
 
+/** How the boot log records the source endpoint (src/index.ts logs sourceId, host, port). */
+const endpoint = (port: number) =>
+	`"sourceId":"rtl","host":"${LOOPBACK}","port":${port}`
+
 async function stop(core: Core): Promise<number | null> {
 	core.child.kill("SIGTERM")
 	return core.exited
@@ -222,54 +415,18 @@ describe("paused receiver feed across a core restart", () => {
 		roots.push(root)
 		const stateDir = join(root, "state")
 		await mkdir(stateDir, { mode: 0o700 })
-		const api = await freePort("127.0.0.1")
-		const configFile = join(root, "config.yaml")
-		await writeFile(
-			configFile,
-			JSON.stringify({
-				sources: [
-					{
-						id: "rtl",
-						type: "rtl_tcp",
-						host: "127.0.0.1",
-						port: upstream.port,
-						caps: {
-							kind: "iq",
-							format: "U8_IQ",
-							sampleRate: 2_048_000,
-							centerFreq: 100_000_000,
-							exclusive: false,
-						},
-					},
-				],
-				decoders: [],
-				decoderPolicy: { catalogue: false },
-				stateDir,
-				scanner: { enabled: false },
-				resources: { enabled: false },
-				channelizer: { enabled: false },
-				api: { host: "127.0.0.1", port: api },
-				audio: { tcpPort: await freePort() },
-				tunerRelay: { enabled: false, port: await freePort("127.0.0.1") },
-				liveDemod: {
-					enabled: false,
-					httpPort: await freePort("127.0.0.1"),
-				},
-				digitalVoice: {
-					enabled: false,
-					httpPort: await freePort("127.0.0.1"),
-				},
-				logging: { level: "info" },
-				access: { mode: "legacy" },
-			}),
-		)
-
 		// First run: connects, then the operator pauses the feed.
-		const first = runCore(configFile)
-		await started(first)
+		const { core: first, api: firstApi } = await bootCore(
+			root,
+			upstream.port,
+			stateDir,
+		)
 		expect(first.stdout()).toContain("Connected to source")
-		await until(() => upstream.connections() === 1, "first connect")
-		const paused = await http(api, "POST", "/api/sources/rtl/pause")
+		expect(first.stdout()).toContain(endpoint(upstream.port))
+		// A startup retried after a port clash may have connected before failing: count from here.
+		await until(() => upstream.connections() >= 1, "first connect")
+		const connects = upstream.connections()
+		const paused = await http(firstApi, "POST", "/api/sources/rtl/pause")
 		expect(paused.status).toBe(200)
 		expect(paused.body).toMatchObject({
 			id: "rtl",
@@ -280,33 +437,37 @@ describe("paused receiver feed across a core restart", () => {
 		expect(await stop(first)).toBe(0)
 
 		// Second run on the same state dir: paused from boot, no connection made.
-		const second = runCore(configFile)
-		await started(second)
+		const { core: second, api: secondApi } = await bootCore(
+			root,
+			upstream.port,
+			stateDir,
+		)
 		// Boot connects (or not) before "started": the count is final here.
-		expect(upstream.connections()).toBe(1)
+		expect(upstream.connections()).toBe(connects)
 		expect(second.stdout()).toContain(
 			"Source feed paused; not connecting until resumed",
 		)
 		expect(second.stdout()).not.toContain("Connected to source")
-		const listed = await http(api, "GET", "/api/sources")
+		expect(second.stdout()).toContain(endpoint(upstream.port))
+		const listed = await http(secondApi, "GET", "/api/sources")
 		expect(listed.status).toBe(200)
 		expect(feedOf(listed.body, "rtl")).toBe("paused")
-		const status = await http(api, "GET", "/api/status")
+		const status = await http(secondApi, "GET", "/api/status")
 		expect(status.body).toMatchObject({
 			status: "healthy",
 			health: {
 				components: { source: { status: "up", metrics: { paused: 1 } } },
 			},
 		})
-		expect((await http(api, "GET", "/health/ready")).status).toBe(200)
+		expect((await http(secondApi, "GET", "/health/ready")).status).toBe(200)
 
-		const resumed = await http(api, "POST", "/api/sources/rtl/resume")
+		const resumed = await http(secondApi, "POST", "/api/sources/rtl/resume")
 		expect(resumed.status).toBe(200)
 		expect(resumed.body).toMatchObject({ feed: { state: "live" } })
-		await until(() => upstream.connections() === 2, "resume connect")
-		expect(feedOf((await http(api, "GET", "/api/sources")).body, "rtl")).toBe(
-			"live",
-		)
+		await until(() => upstream.connections() === connects + 1, "resume connect")
+		expect(
+			feedOf((await http(secondApi, "GET", "/api/sources")).body, "rtl"),
+		).toBe("live")
 		expect(await stop(second)).toBe(0)
 	}, 60_000)
 })
