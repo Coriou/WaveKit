@@ -216,6 +216,24 @@ it.each([
 		"scanner-busy",
 		["pause-scanner"],
 	],
+	[
+		{
+			running: false,
+			suspension: { reasonCode: "source-paused", since: new Date(now) },
+		},
+		"source-paused",
+		["resume-source"],
+	],
+	[
+		// the operator's pause outranks a stale efficiency state
+		{
+			running: false,
+			suspension: { reasonCode: "source-paused", since: new Date(now) },
+			efficiency: { detail: "budget" },
+		},
+		"source-paused",
+		["resume-source"],
+	],
 ] as const)("gives one verdict for %j", (patch, code, actions) => {
 	const verdict = decoderSummary(
 		status(patch as Partial<DecoderStatus>),

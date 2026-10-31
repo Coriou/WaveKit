@@ -66,6 +66,10 @@ const VERDICTS: Readonly<
 		text: "waiting for the source",
 		actions: ["check-source"],
 	},
+	"source-paused": {
+		text: "waiting: Receiver paused — Resume",
+		actions: ["resume-source"],
+	},
 	"unsupported-rate": {
 		text: "paused: the sample rate does not suit it",
 		actions: ["change-sample-rate"],
@@ -171,6 +175,7 @@ function suspensionCode(reason: string | undefined): DecoderVerdictCode {
 	if (reason === "no-channel-selected") return "no-channel"
 	if (reason === "capture-too-narrow") return "capture-too-narrow"
 	if (reason === "tuner-scanning") return "scanner-busy"
+	if (reason === "source-paused") return "source-paused"
 	if (reason === "decoder-unavailable") return "decoder-unavailable"
 	if (reason === "channelizer-unavailable") return "channelizer-unavailable"
 	if (
@@ -193,7 +198,8 @@ export function mockVerdictCode(
 	if (d.desiredRunning === false && !d.running) return "stopped"
 	if (health === "suspended") {
 		const reason = d.suspension?.reasonCode
-		return reason === "efficiency-budget" || d.efficiency !== undefined
+		return reason !== "source-paused" &&
+			(reason === "efficiency-budget" || d.efficiency !== undefined)
 			? efficiencyCode(d)
 			: suspensionCode(reason)
 	}

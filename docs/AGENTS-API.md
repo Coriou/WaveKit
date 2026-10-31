@@ -61,6 +61,13 @@ id was cut; read the fuller route named in the [field table](API.md#get-apiagent
 Decoders with a problem verdict are listed first; `hiddenProblems` above 0 means more problem
 decoders than fit, so read `GET /api/decoders/summary`.
 
+`sources[].feed` reads `paused` or `resuming` while an operator holds the receiver feed off
+and `error` after a failed resume. After a plain resume, `tuningUnverified: true` means the
+receiver may have been retuned during the pause: read or set the tuning before trusting it.
+`scanner.heldJobs` counts sweeps that a plain resume parked (`reason`
+`resumed-without-retune`); `scanner.job` shows one of them before any newer job, and it
+waits for an explicit job resume.
+
 ## Tune
 
 ```sh

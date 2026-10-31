@@ -158,6 +158,7 @@ export type BandAction =
 	| { kind: "tune"; hz: number; label: string; title: string }
 	| { kind: "raise-budget"; label: string; title: string }
 	| { kind: "stop-scan"; jobId: string; label: string; title: string }
+	| { kind: "resume-source"; sourceId: string; label: string; title: string }
 	| SettingsLink
 	| { kind: "receiver"; label: string; title: string }
 
@@ -289,6 +290,20 @@ export function actionFor(
 				label: "Check the receiver",
 				title: "Opens the Receiver: its connection and sample rate",
 			}
+		case "resume-source":
+			// without the decoder's source the Receiver island holds the Resume control
+			return d.sourceId
+				? {
+						kind: "resume-source",
+						sourceId: d.sourceId,
+						label: "Resume",
+						title: "Resume the receiver feed: the decoders start again",
+					}
+				: {
+						kind: "receiver",
+						label: "Open the Receiver",
+						title: "The receiver is paused: resume it in the Receiver",
+					}
 	}
 }
 

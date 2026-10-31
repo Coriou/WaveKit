@@ -8,6 +8,7 @@ import {
 	AGENT_TUNER_OWNERS,
 	DECODER_VERDICT_ACTIONS,
 	DECODER_VERDICT_CODES,
+	SOURCE_FEED_STATES,
 	agentStatusSchema,
 	jsonStringBytes,
 	type AgentStatus,
@@ -308,6 +309,8 @@ describe("agent status", () => {
 				state: "streaming",
 				sampleAgeMs: 12,
 				warnings: ["rate-mismatch", "signal-flat"],
+				feed: "live",
+				tuningUnverified: false,
 			},
 		])
 		expect(JSON.stringify(status)).not.toContain("must not leak")
@@ -372,6 +375,97 @@ describe("agent status", () => {
 			now,
 		)
 		expect(atBound.scanner?.job?.name).toBe(longName.slice(1))
+	})
+
+	it("reports a paused feed on the source row", async () => {
+		const status = await buildAgentStatus(
+			options({
+				sourceManager: {
+					getAllStatus: () => [
+						source({
+							connected: false,
+							activity: {
+								state: "paused",
+								lastSampleAt: null,
+								sampleAgeMs: null,
+								timeoutMs: 5_000,
+							},
+							feed: { state: "paused", since: "2026-10-01T11:00:00.000Z" },
+						}),
+					],
+				},
+			}),
+			now,
+		)
+		expect(status.sources[0]).toMatchObject({
+			feed: "paused",
+			tuningUnverified: false,
+		})
+		expect(agentStatusSchema.parse(status)).toEqual(status)
+	})
+
+	it("flags a plainly resumed source whose tuning is unverified", async () => {
+		const resumed = (unknownFields: NonNullable<TunerState["unknownFields"]>) =>
+			buildAgentStatus(
+				options({
+					sourceManager: {
+						getAllStatus: () => [
+							source({
+								feed: { state: "live", since: "2026-10-01T11:59:00.000Z" },
+							}),
+							source({ id: "source-b" }),
+						],
+					},
+					tunerController: {
+						getAllStates: () => [
+							tuner({ unknownFields }),
+							tuner({ sourceId: "source-b", unknownFields: ["ppm"] }),
+						],
+					},
+				}),
+				now,
+			)
+		const status = await resumed(["frequency", "gain", "gainMode"])
+		expect(status.sources).toEqual([
+			expect.objectContaining({
+				id: "source-a",
+				state: "streaming",
+				feed: "live",
+				tuningUnverified: true,
+			}),
+			// Other unknown fields do not mean the receiver may be tuned elsewhere.
+			expect.objectContaining({ id: "source-b", tuningUnverified: false }),
+		])
+		expect((await resumed(["sampleRate"])).sources[0]?.tuningUnverified).toBe(
+			true,
+		)
+	})
+
+	it("shows a held sweep even when a newer job exists", async () => {
+		const status = await buildAgentStatus(
+			options({
+				scanner: scanner([
+					job({
+						id: "held",
+						state: "paused",
+						reason: "resumed-without-retune",
+						updatedAt: "2026-10-01T10:00:00.000Z",
+					} as Partial<ScanJob>),
+					job({ id: "newer", updatedAt: "2026-10-01T11:59:00.000Z" }),
+				]),
+			}),
+			now,
+		)
+		expect(status.scanner).toMatchObject({
+			activeJobs: 2,
+			heldJobs: 1,
+			job: { id: "held", state: "paused", reason: "resumed-without-retune" },
+		})
+		const plain = await buildAgentStatus(
+			options({ scanner: scanner([job()]) }),
+			now,
+		)
+		expect(plain.scanner?.heldJobs).toBe(0)
 	})
 
 	it.each([
@@ -443,6 +537,10 @@ describe("agent status", () => {
 				) as AgentStatus["sources"][number]["state"],
 				sampleAgeMs: unsigned,
 				warnings: [...AGENT_SOURCE_WARNINGS],
+				feed: longest(
+					SOURCE_FEED_STATES,
+				) as AgentStatus["sources"][number]["feed"],
+				tuningUnverified: false,
 			})),
 			liveAudio: {
 				running: false,
@@ -456,6 +554,7 @@ describe("agent status", () => {
 			scanner: {
 				enabled: false,
 				activeJobs: count,
+				heldJobs: count,
 				job: {
 					id: ascii("j", AGENT_STATUS_LIMITS.idMaxBytes),
 					name: ascii("n", AGENT_STATUS_LIMITS.jobNameMaxBytes),

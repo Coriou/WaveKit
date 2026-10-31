@@ -128,7 +128,9 @@ function hopTrust(state: TunerState): PendingEpoch["tuningTrust"] {
 
 export interface ArbiterDeps {
 	tuner: ArbiterTuner
-	sources: Pick<SourceManager, "on" | "off" | "isRtlTcpSource">
+	sources: Pick<SourceManager, "on" | "off" | "isRtlTcpSource"> &
+		// Optional: test doubles of the source manager predate pause / resume.
+		Partial<Pick<SourceManager, "resumeKind">>
 	epochs: (sourceId: string) => EpochClock | undefined
 	settings: () => ScannerSettings
 	/** Timer-mode settle class of the source's transport (§ 4.6). */
@@ -1304,6 +1306,11 @@ export class TunerArbiter extends EventEmitter {
 		// A payload restart is a new connection: the previous acceptance is stale.
 		this.clearVerified(sourceId)
 		this.connected.add(sourceId)
+		if (this.deps.sources.resumeKind?.(sourceId) === "plain") {
+			this.settlePlainResume(sourceId)
+			this.emit("source-up", sourceId, { plainResume: true })
+			return
+		}
 		// recover() sends TEST_MODE 0 as its first step.
 		if (
 			this.deps.sources.isRtlTcpSource(sourceId) &&
@@ -1316,6 +1323,60 @@ export class TunerArbiter extends EventEmitter {
 		if (this.deps.tuner.getState(sourceId)?.controlMode === "internal")
 			this.runGainRecovery(sourceId)
 		this.emit("source-up", sourceId)
+	}
+
+	/**
+	 * First payload after a plain resume of a paused feed: another client may have retuned the
+	 * receiver during the pause, so no centre, rate, gain mode or gain goes back. A recovery queued
+	 * for the source is settled without writing (its snapshot is the pre-pause tuning; "recovered"
+	 * fires with every field unrestorable, so boot-resumed jobs continue), an owed gain restore is
+	 * dropped, and a held lease forgets its snapshot (its release restores nothing it cannot know).
+	 * "source-up" carries `plainResume`: the job holding the lease stays paused without hopping
+	 * (paused(resumed-without-retune)) until the operator resumes it. TEST_MODE 0 still goes out
+	 * where a marker may be open: it is the scanner's own marker, not the operator's tuning.
+	 */
+	private settlePlainResume(sourceId: string): void {
+		const rtl = this.deps.sources.isRtlTcpSource(sourceId)
+		const persisted = this.recovering.get(sourceId)
+		const lease = this.leases.get(sourceId)
+		if (
+			rtl &&
+			(this.markerOpen.has(sourceId) || lease !== undefined || persisted)
+		)
+			void this.testModeOff(sourceId)
+		if (this.gainRecovery.delete(sourceId))
+			this.log.info(
+				{ sourceId },
+				"Plain resume: dropped the gain restore owed after a lost lease",
+			)
+		if (lease) {
+			for (const field of FIELDS) delete lease.snapshot[field]
+			void this.persist(lease)
+			this.log.info(
+				{ sourceId, jobId: lease.jobId },
+				"Plain resume: the held lease's pre-pause snapshot is no longer known",
+			)
+		}
+		if (!persisted || this.recoveryRunning.has(sourceId)) return
+		this.recovering.delete(sourceId)
+		const fields = [...new Set([...persisted.changedFields, "frequency"])]
+		const result = { restored: [] as string[], unrestorable: fields }
+		this.log.info(
+			{ sourceId, jobId: persisted.jobId, unrestorable: fields },
+			"Plain resume: dropped the queued lease recovery without writing its pre-pause tuning",
+		)
+		void this.deps
+			.persistLease(sourceId, null)
+			.catch((err: unknown) => {
+				this.log.warn({ err, sourceId }, "Clearing the recovered lease failed")
+			})
+			.then(() => {
+				try {
+					this.emit("recovered", sourceId, result)
+				} catch (err) {
+					this.log.error({ err, sourceId }, "A recovered listener failed")
+				}
+			})
 	}
 
 	/** Starts the pending recovery of a source; false when there is none or one is running. */

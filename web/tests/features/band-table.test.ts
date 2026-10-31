@@ -80,6 +80,31 @@ describe("tuned card cases", () => {
 		expect(row?.lastDecodeIso).not.toBeNull()
 	})
 
+	it("says the receiver is paused and offers Resume at a paused source", () => {
+		const rows = rowsOf("adsb-source-paused")
+		expect(rows).toHaveLength(1)
+		expect(rows[0]).toMatchObject({
+			state: "paused",
+			detail: "Receiver paused — Resume",
+			action: { kind: "resume-source", sourceId: "rtl-0", label: "Resume" },
+		})
+		expect(bandStateLine(rows)).toBe("ADS-B · Paused")
+		// the statuses standing in for a failed summary read say it too, with no action
+		const c = caseById("adsb-source-paused")
+		const [fallback] = bandTable(
+			null,
+			c.decoders,
+			c.hz,
+			NO_SCAN,
+			TUNED_CASE_NOW,
+		)
+		expect(fallback).toMatchObject({
+			state: "paused",
+			detail: "Receiver paused",
+			action: null,
+		})
+	})
+
 	it("says how much a decoding decoder decoded, and links its last decode to Activity", () => {
 		const [row] = rowsOf("adsb-running")
 		expect(row).toMatchObject({

@@ -27,6 +27,8 @@ import type {
 } from "@wavekit/api-types"
 
 export const MOCK_SOURCE_ID = "rtl-0"
+/** The opt-in second receiver (WAVEKIT_MOCK_SECOND_SOURCE=1): listed with its tuner and feed, nothing else. */
+export const MOCK_SECOND_SOURCE_ID = "rtl-1"
 /** Tuned.dc.html: the receiver sits at 161.500 MHz, 2.4 MS/s. */
 export const DEFAULT_CENTER_HZ = 161_500_000
 export const SAMPLE_RATE_HZ = 2_400_000

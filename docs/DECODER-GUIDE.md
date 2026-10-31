@@ -563,7 +563,8 @@ describe("HfdlDecoder", () => {
 4. Check why core suspended it: `curl -s localhost:9000/api/decoders | jq '.[] | {id, suspension}'`.
    `frequency-out-of-band` means the capture does not cover its band, `capture-too-narrow` that the
    band is in view but its channel does not fit the capture, `no-channel-selected` that no VFO or
-   band-plan channel is chosen yet ([API](API.md) lists every reason).
+   band-plan channel is chosen yet, `source-paused` that the receiver feed is paused (resume it
+   with `POST /api/sources/<id>/resume`) ([API](API.md) lists every reason).
 5. multimon-ng with only paging modes (POCSAG512, POCSAG1200, POCSAG2400, FLEX; the default
    when `modes` is unset) runs only where a paging band of your region is in the capture (the
    band catalogue's VHF paging plan, plus 466.025–466.230 MHz in the EU for French paging),

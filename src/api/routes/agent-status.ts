@@ -120,8 +120,16 @@ function tunerRow(
 	}
 }
 
+/** Tuner fields whose unknown value means the receiver may be tuned elsewhere. */
+const TUNING_FIELDS = ["frequency", "sampleRate", "gain", "gainMode"] as const
+
+/** A sweep a plain feed resume held: it waits for an explicit job resume. */
+const isHeldSweep = (job: ScanJob): boolean =>
+	job.state === "paused" && job.reason === "resumed-without-retune"
+
 function sourceRows(
 	sourceManager: AgentStatusRoutesOptions["sourceManager"],
+	unverified: ReadonlySet<string>,
 	bounds: Bounds,
 ): AgentSource[] {
 	return bounds.list(sourceManager.getAllStatus(), L.sourcesMax).map(status => {
@@ -134,6 +142,8 @@ function sourceRows(
 			state: status.activity.state,
 			sampleAgeMs: status.activity.sampleAgeMs,
 			warnings,
+			feed: status.feed?.state ?? "live",
+			tuningUnverified: unverified.has(status.id),
 		}
 	})
 }
@@ -161,14 +171,17 @@ function scannerRow(
 	bounds: Bounds,
 ): AgentScanner {
 	const live = jobs.filter(job => LIVE_JOB_STATES.has(job.state))
-	// Newest update first; ISO times of one clock compare as strings.
-	const current = live.reduce<ScanJob | undefined>(
+	const held = live.filter(isHeldSweep)
+	// A held sweep first, so a newer job never hides it; then newest update first
+	// (ISO times of one clock compare as strings).
+	const current = (held.length > 0 ? held : live).reduce<ScanJob | undefined>(
 		(best, job) => (!best || job.updatedAt > best.updatedAt ? job : best),
 		undefined,
 	)
 	return {
 		enabled,
 		activeJobs: live.length,
+		heldJobs: held.length,
 		job: current
 			? {
 					id: bounds.id(current.id),
@@ -229,10 +242,18 @@ export async function buildAgentStatus(
 	const lastDecode = [...newest]
 		.map(([protocol, at]) => ({ protocol, at }))
 		.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
+	const tunerStates = options.tunerController?.getAllStates() ?? []
 	const tuners = bounds
-		.list(options.tunerController?.getAllStates() ?? [], L.sourcesMax)
+		.list(tunerStates, L.sourcesMax)
 		.map(state => tunerRow(state, leaseHolder, bounds))
-	const sources = sourceRows(options.sourceManager, bounds)
+	const unverified = new Set(
+		tunerStates
+			.filter(state =>
+				TUNING_FIELDS.some(field => state.unknownFields?.includes(field)),
+			)
+			.map(state => state.sourceId),
+	)
+	const sources = sourceRows(options.sourceManager, unverified, bounds)
 	const liveAudio = liveAudioRow(options.liveDemod, bounds)
 	const scannerStatus = scanner
 		? scannerRow(jobs, scanner.status().enabled, bounds)

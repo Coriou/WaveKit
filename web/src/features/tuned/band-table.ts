@@ -134,6 +134,7 @@ export function stateOf(code: BandVerdict["code"]): RowState {
 			return "waiting"
 		case "unsupported-rate":
 		case "scanner-busy":
+		case "source-paused":
 		case "efficiency-budget":
 		case "efficiency-cpu":
 		case "efficiency-drops":
@@ -285,6 +286,12 @@ function statusVerdict(d: DecoderInfo): BandVerdict {
 		return { code: "off", text: `${name} off in Settings`, actions: [] }
 	if (d.health === "faulted" || d.health === "restarting")
 		return { code: "failed", text: `${name} failed to run`, actions: [] }
+	if (d.suspension?.reasonCode === "source-paused")
+		return {
+			code: "source-paused",
+			text: `${name} waiting: Receiver paused`,
+			actions: [],
+		}
 	if (d.running && !d.suspended)
 		return { code: "listening", text: `${name} running`, actions: [] }
 	if (d.suspended)

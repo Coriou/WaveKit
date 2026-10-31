@@ -143,6 +143,30 @@ export const TUNED_CASES: readonly TunedCase[] = [
 		expect: { proto: "ADS-B", rows: [["readsb", "Decoding"]] },
 	}),
 	tunedCase({
+		id: "adsb-source-paused",
+		title:
+			"1090 MHz: the operator paused the receiver feed; ADS-B waits for Resume",
+		hz: ADSB_HZ,
+		band: ADSB_BAND,
+		named: null,
+		decoders: [
+			adsb({
+				running: false,
+				suspended: true,
+				suspension: { reasonCode: "source-paused", since: ago(45_000) },
+				sourceId: "rtl-0",
+				lastOutputAt: ago(60_000),
+				stats: { bytesIn: 1, eventsOut: 1204, errors: 0 },
+			}),
+			pager(ADSB_HZ, {
+				running: false,
+				suspended: true,
+				suspension: { reasonCode: "source-paused", since: ago(45_000) },
+			}),
+		],
+		expect: { proto: "ADS-B", rows: [["readsb", "Paused"]] },
+	}),
+	tunedCase({
 		id: "pager-dmr-466",
 		title:
 			"466 MHz: pager listening and digital voice decoding; ADS-B waits off band",

@@ -12,6 +12,7 @@ import { shellStore } from "../../shell/store.ts"
 import { showAppToast } from "../../shell/toast.ts"
 import { Button } from "../../ui/Button.tsx"
 import { Icon } from "../../ui/Icon.tsx"
+import { feedControllerFor } from "../receiver/feed.ts"
 import { EfficiencyBudgetStore } from "../settings/efficiency-budget.ts"
 import { focusSetting } from "../settings/registry.ts"
 import { formatMHz } from "../format.ts"
@@ -113,7 +114,10 @@ export function BandDecoders({
 			} else if (action.kind === "tune") await tuning.tune(action.hz)
 			else if (action.kind === "stop-scan")
 				await data.scanner.cancelJob(action.jobId)
-			else
+			else if (action.kind === "resume-source") {
+				const result = await feedControllerFor(data).resume(action.sourceId)
+				if (!result.ok) failed = result.error
+			} else
 				failed = await raiseBudget(budgetWrites, showAppToast, () =>
 					feed.soon(),
 				)

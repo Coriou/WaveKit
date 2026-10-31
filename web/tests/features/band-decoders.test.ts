@@ -213,6 +213,28 @@ describe("verdict line and action", () => {
 			expect(actionFor(a, ADSB, NO_SCAN)?.kind).toBe("receiver")
 	})
 
+	it("resumes the decoder's paused receiver, or opens the Receiver without a source", () => {
+		const held = { ...ADSB, sourceId: "rtl-0" }
+		expect(actionFor("resume-source", held, NO_SCAN)).toEqual({
+			kind: "resume-source",
+			sourceId: "rtl-0",
+			label: "Resume",
+			title: "Resume the receiver feed: the decoders start again",
+		})
+		expect(actionFor("resume-source", ADSB, NO_SCAN)?.kind).toBe("receiver")
+		const v = parseVerdict({
+			code: "source-paused",
+			text: "ADS-B waiting: Receiver paused — Resume",
+			actions: ["resume-source"],
+		})
+		expect(v).toEqual({
+			code: "source-paused",
+			text: "ADS-B waiting: Receiver paused — Resume",
+			actions: ["resume-source"],
+		})
+		expect(rowAction(v!, held, NO_SCAN)?.kind).toBe("resume-source")
+	})
+
 	it("takes the first action it can carry out, never a Settings link in a row", () => {
 		const v = verdict({
 			code: "efficiency-cpu",

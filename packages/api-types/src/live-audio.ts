@@ -248,6 +248,8 @@ export interface LiveAudioStatus {
 	clientCount: number
 	bytesStreamed: number
 	pipelineHealth: "running" | "starting" | "stopped" | "error"
+	/** Present while the source's receiver feed is paused: no pipeline runs until resume. */
+	suspendedReason?: "source-paused"
 	lastError?: string
 	/** Same audio as httpUrl behind a streaming WAV header. */
 	wavUrl?: string

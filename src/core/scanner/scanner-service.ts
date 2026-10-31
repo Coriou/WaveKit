@@ -57,7 +57,10 @@ import type {
 	ScannerTrialOutcome,
 	DiscoveryTrialMemory,
 } from "@wavekit/api-types"
-import { SCANNER_DISCOVERY_HOLDS_KEPT_CODE } from "@wavekit/api-types"
+import {
+	SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
+	SOURCE_PAUSED_MESSAGE,
+} from "@wavekit/api-types"
 import type {
 	RecordingProtection,
 	ScannerRecordingDeleter,
@@ -2173,6 +2176,7 @@ export class ScannerService extends EventEmitter {
 		const preview = this.preview(spec)
 		this.rejectErrors(preview.issues)
 		const n = preview.spec
+		this.assertFeedLive(n.sourceId)
 		if (n.mode === "sweep" && !this.configLoaded) throw this.stateUnavailable()
 		if (n.mode === "sweep") {
 			const impact = this.arbiter.impact(n.sourceId, n)
@@ -2368,11 +2372,24 @@ export class ScannerService extends EventEmitter {
 
 	async resumeJob(id: string, opts: { takeover: boolean }): Promise<ScanJob> {
 		const record = this.requireJob(id)
+		this.assertFeedLive(record.spec.sourceId)
 		if (record.spec.mode === "sweep" && !this.configLoaded)
 			throw this.stateUnavailable()
 		if (record.spec.mode === "sweep" && isPreempted(record))
 			return this.resumePreempted(record, opts.takeover)
 		return this.lifecycle(id, { type: "resume", takeover: opts.takeover })
+	}
+
+	/**
+	 * A paused receiver feed takes no new or resumed job: it could not tune. Jobs running when
+	 * the feed paused wait in paused(source-down) and continue on resume, as after a dropout.
+	 */
+	private assertFeedLive(sourceId: string): void {
+		// Optional call: test doubles of the source manager predate pause / resume.
+		if (this.deps.sources.isPaused?.(sourceId) !== true) return
+		throw new ScannerApiError(SOURCE_PAUSED_MESSAGE, "SOURCE_PAUSED", 409, {
+			reason: "source-paused",
+		})
 	}
 
 	async cancelJob(id: string): Promise<ScanJob> {
@@ -2421,6 +2438,7 @@ export class ScannerService extends EventEmitter {
 		const preview = this.preview(rawSpec)
 		this.rejectErrors(preview.issues)
 		const n = preview.spec
+		this.assertFeedLive(n.sourceId)
 		// Identify never acquires a lease (in-window), so the arbiter's refusal details do not apply; the holder does.
 		const holder = this.arbiter.holder(n.sourceId)
 		if (holder) {
@@ -3377,7 +3395,7 @@ export class ScannerService extends EventEmitter {
 	): ObservationEndReason {
 		if (reason !== "retune") return reason
 		const holder = this.arbiter.holder(sourceId)
-		return holder && this.jobs.get(holder.jobId)?.spec.mode === "sweep"
+		return sweepDrivesTuner(holder ? this.jobs.get(holder.jobId) : undefined)
 			? "hop"
 			: "retune"
 	}
@@ -6125,30 +6143,71 @@ export class ScannerService extends EventEmitter {
 		if (!this.started) return
 		for (const o of this.live.values())
 			if (o.sourceId === sourceId) delete o.acceptedIdentity
+		// A paused feed (not a dropout): a starting sweep waits for resume instead of failing, and an
+		// identify job (starting or running) ends cancelled(source-paused).
+		const feedPaused = this.deps.sources.isPaused?.(sourceId) === true
 		for (const d of this.driversOn(sourceId)) {
 			if (
 				d.record.state === "starting" ||
 				d.record.state === "running" ||
 				d.record.state === "holding"
 			)
-				d.dispatch({
-					type: d.record.state === "starting" ? "engine-failed" : "source-down",
-				}).catch((err: unknown) =>
+				d.dispatch(
+					feedPaused
+						? { type: "source-down", feedPaused: true }
+						: d.record.state !== "starting"
+							? { type: "source-down" }
+							: { type: "engine-failed" },
+				).catch((err: unknown) =>
 					this.log.warn({ err, jobId: d.record.id }, "source-down failed"),
 				)
 		}
 	}
 
-	private readonly onSourceUp = (sourceId: string): void => {
+	/**
+	 * `plainResume`: the paused feed came back without retuning (another client may hold the
+	 * receiver): every sweep on it that would write tuning without the operator (paused through the
+	 * pause, a waiter that auto-resumes, a pending boot resume) waits in paused(resumed-without-retune)
+	 * for an explicit resume; a Stay-here pause stays as it is. In-window and passive jobs never tune:
+	 * they resume as after a dropout.
+	 */
+	private readonly onSourceUp = (
+		sourceId: string,
+		info?: { plainResume?: boolean },
+	): void => {
 		if (!this.started) return
+		const plain = info?.plainResume === true
+		const boot = new Set(plain ? (this.bootResume.get(sourceId) ?? []) : [])
 		for (const d of this.driversOn(sourceId)) {
-			if (d.record.state === "paused" && d.record.reason === "source-down")
-				d.dispatch({ type: "source-up" }).catch((err: unknown) =>
-					this.log.warn({ err, jobId: d.record.id }, "source-up failed"),
-				)
+			const { record } = d
+			if (record.state !== "paused") continue
+			const hold = plain && record.spec.mode === "sweep"
+			const resumes =
+				record.reason === "source-down" ||
+				(hold &&
+					(record.reason === "preempted-operator" ||
+						record.reason === "preempted-relay" ||
+						record.reason === "preempted-job" ||
+						(record.reason === "core-restart" && boot.has(record.id))))
+			if (!resumes) continue
+			d.dispatch(
+				hold ? { type: "source-up", plain: true } : { type: "source-up" },
+			).catch((err: unknown) =>
+				this.log.warn({ err, jobId: record.id }, "source-up failed"),
+			)
 		}
+		if (plain) this.holdBootResumes(sourceId)
 		if (!this.persistedLeases.has(sourceId)) this.runBootResumes(sourceId)
 		this.onSourceAvailable(sourceId)
+	}
+
+	/** A plain resume: the source's pending boot resumes of sweeps wait for the operator (onSourceUp). */
+	private holdBootResumes(sourceId: string): void {
+		const ids = this.bootResume.get(sourceId)
+		if (!ids) return
+		const rest = ids.filter(id => this.jobs.get(id)?.spec.mode !== "sweep")
+		if (rest.length > 0) this.bootResume.set(sourceId, rest)
+		else this.bootResume.delete(sourceId)
 	}
 
 	/** Boot-time caps are absent until SourceManager.connect(): the source's passive job is (re)built then. */
@@ -6916,8 +6975,14 @@ export class ScannerService extends EventEmitter {
 		this.jobs.set(record.id, record)
 		this.drivers.set(record.id, driver)
 		if (isTerminal(record.state)) return
-		// An explicit Stay-here choice survives restart, even with onBoot enabled.
-		if (record.state === "paused" && record.reason === "operator") return
+		// An explicit Stay-here choice survives restart, even with onBoot enabled, as does a sweep
+		// held after a plain resume (it hops again only on the operator's resume).
+		if (
+			record.state === "paused" &&
+			(record.reason === "operator" ||
+				record.reason === "resumed-without-retune")
+		)
+			return
 		await driver
 			.dispatch({ type: "boot" })
 			.catch((err: unknown) =>
@@ -8099,6 +8164,22 @@ function setBandPlanSkips(
 ): void {
 	if (bandPlanSkips) record.bandPlanSkips = bandPlanSkips
 	else delete record.bandPlanSkips
+}
+
+/**
+ * Whether the lease holder's retunes are the scan's own hops: a sweep, except one held after a
+ * plain resume (paused(resumed-without-retune)). That one keeps its lease but drives nothing, so a
+ * retune then is another client's (SDR++), never the scanner's.
+ */
+type DriverRecord = Pick<JobRecord, "state" | "reason"> & {
+	spec: Pick<JobRecord["spec"], "mode">
+}
+
+export function sweepDrivesTuner(record: DriverRecord | undefined): boolean {
+	if (record?.spec.mode !== "sweep") return false
+	return !(
+		record.state === "paused" && record.reason === "resumed-without-retune"
+	)
 }
 
 /** Paused by a lease loss (§ 10.1 preempted-*): waits for the lease. */
