@@ -510,6 +510,20 @@ export class LoraMeshtasticDecoder extends IqDecimateDecoder {
 		this.options = parseLoraMeshtasticOptions(config.options)
 	}
 
+	/**
+	 * The manager describes the input as its rate plus the capture centre when
+	 * the source knows it: an input update without a centre means the centre is
+	 * now unknown, so the stale one is dropped (shift unknown, search fallback)
+	 * instead of surviving the option merge as a wrong `--shift-hz`.
+	 */
+	override updateOptions(updates: Record<string, unknown>): void {
+		super.updateOptions(
+			"inputSampleRate" in updates && !("inputCenterFreq" in updates)
+				? { ...updates, inputCenterFreq: undefined }
+				: updates,
+		)
+	}
+
 	protected override onOptionsUpdated(): void {
 		this.options = parseLoraMeshtasticOptions(this.config.options)
 	}

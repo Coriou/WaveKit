@@ -606,7 +606,11 @@ export const planPlacements: PlacementPlanner = input => {
 			} else if (d.reach === "centre" && d.centreSlots?.length) {
 				// 3.17: each regional slot is a centre-reach candidate.
 				d.centreSlots.forEach((slot, index) => {
-					const one = { ...d, centreSlotHz: slot.slotHz }
+					const one = {
+						...d,
+						centreSlotHz: slot.slotHz,
+						centrePassbandHz: slot.passbandHz,
+					}
 					const mid = (slot.slotHz.minHz + slot.slotHz.maxHz) / 2
 					if (!bandFits(d, centre, bandHalf)) return
 					if (fitsReach(one, s, null))

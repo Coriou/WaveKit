@@ -236,6 +236,8 @@ export interface PlannerDecoder {
 }
 export interface PlannerCentreSlot {
 	slotHz: { minHz: number; maxHz: number }
+	/** This slot's centre passband (its crystal margin scales with its frequency). */
+	passbandHz: number
 	options: Readonly<Record<string, unknown>>
 }
 /** rtl_433 channel bounds (design 2026-10-25): narrowest accepted and target rate. */

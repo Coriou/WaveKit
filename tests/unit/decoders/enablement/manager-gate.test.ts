@@ -1669,12 +1669,12 @@ it.each([
 	[869_525_000 - 45_000, true],
 	[869_525_000 + 45_001, false],
 	[869_525_000 - 45_001, false],
-	// The EU 433.875 MHz slot shares the decoder's passband (computed at its
-	// 869.525 MHz frequency), so the same 45 kHz holds there.
-	[433_875_000 + 45_000, true],
-	[433_875_000 - 45_000, true],
-	[433_875_000 + 45_001, false],
-	[433_875_000 - 45_001, false],
+	// The EU 433.875 MHz slot has its own passband: its 23 ppm crystal margin
+	// is 9 980 Hz, so the bound is bw/5 = 50 kHz (passband 350 kHz).
+	[433_875_000 + 50_000, true],
+	[433_875_000 - 50_000, true],
+	[433_875_000 + 50_001, false],
+	[433_875_000 - 50_001, false],
 ])(
 	"catalogue LoRa (EU) is placed on a source centred at %i Hz: %s",
 	(centreHz, fits) => {
@@ -1709,6 +1709,11 @@ it.each([
 			),
 		).toBe(fits)
 		if (fits) expect(plan.unplaced.has("lora-meshtastic")).toBe(false)
+		// A 433 MHz centre places the decoder on the 433.875 MHz slot.
+		if (fits && centreHz < 500_000_000)
+			expect(
+				plan.wanted.find(p => p.decoderId === "lora-meshtastic")?.options,
+			).toMatchObject({ frequency: 433_875_000 })
 	},
 )
 

@@ -1685,7 +1685,12 @@ export class DecoderManager extends EventEmitter {
 							{ ...config.options, ...options },
 							caps,
 						)
-						if (reach) centreSlots.push({ slotHz: reach.slotHz, options })
+						if (reach)
+							centreSlots.push({
+								slotHz: reach.slotHz,
+								passbandHz: reach.passbandHz,
+								options,
+							})
 					}
 					const channelCapable = (
 						CHANNEL_CAPABLE_TYPES as readonly string[]

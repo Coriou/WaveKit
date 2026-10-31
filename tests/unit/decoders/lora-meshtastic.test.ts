@@ -578,6 +578,31 @@ describe("known placement shift", () => {
 		)
 	})
 
+	it("an input update without a centre clears the stale centre (search fallback)", () => {
+		const decoder = new TestLoraMeshtasticDecoder(
+			makeConfig(validOptions()),
+			testLogger,
+		)
+		// The manager's caps update: 869.525 MHz slot, 869.500 MHz centre.
+		decoder.updateOptions({
+			inputSampleRate: 1_024_000,
+			inputCenterFreq: 869_500_000,
+		})
+		expect(decoder.testArgs().join(" ")).toContain(
+			"--shift-hz 25000 --cfo-search-hz 0",
+		)
+		// Otherwise-identical caps that lost their centre: the shift is unknown.
+		decoder.updateOptions({ inputSampleRate: 1_024_000 })
+		expect(decoder.testArgs().join(" ")).toContain(
+			"--shift-hz 0 --cfo-search-hz 50000",
+		)
+		// A centre-only update (no input description) still keeps the rate.
+		decoder.updateOptions({ inputCenterFreq: 869_570_000 })
+		expect(decoder.testArgs().join(" ")).toContain(
+			"--shift-hz -45000 --cfo-search-hz 0",
+		)
+	})
+
 	describe("placement bound", () => {
 		const longFast = parseLoraMeshtasticOptions(validOptions())
 		it("869.525 MHz: 190 000 - 125 000 - 20 000 = 45 000 Hz, passband 340 kHz", () => {
