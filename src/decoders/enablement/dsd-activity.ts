@@ -114,8 +114,8 @@ function slotRangesFor(region: BandRegion): DsdSlotRanges {
  * Whether a dsd-fme activity slot (a ranked secondary channel, scanner energy
  * centres included) may sit at `hz`: inside a range of the region's band plan
  * catalogue that lists a protocol dsd-fme decodes (land mobile, PMR446, dPMR446,
- * amateur 2 m / 70 cm) and inside no range listing ISM or LoRa (the 433 MHz
- * and 863-870 MHz ISM/SRD bands, where LoRa and telemetry bursts would
+ * amateur 2 m / 70 cm) and inside no range listing ISM or LoRa (in the EU the
+ * 433 MHz and 863-870 MHz ISM/SRD bands, where LoRa and telemetry bursts would
  * otherwise pull slots around). Unknown region or a malformed frequency: no
  * slot (the safe answer). The configured, band and VFO channels are not
  * activity slots and are not checked here.

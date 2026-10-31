@@ -223,6 +223,13 @@ describe("paging raster placement (3.18)", () => {
 		expect(verdict(["AFSK1200"], 433_920_000)).toBe("out-of-band")
 		expect(verdict(["DTMF"], 446_050_000)).toBe("in-band")
 		expect(verdict(["DTMF"], 156_800_000)).toBe("in-band")
+		// 868.95 MHz is EU ISM but US 851-869 MHz land mobile (analog FM).
+		expect(verdict(["DTMF"], 868_950_000, "US")).toBe("in-band")
+		expect(verdict(["AFSK1200"], 868_950_000, "US")).toBe("out-of-band")
+		// The 901-935 MHz gap between the 900 MHz halves holds no land mobile.
+		expect(verdict(["DTMF"], 915_000_000, "US")).toBe("out-of-band")
+		expect(verdict(["DTMF"], 901_000_000, "US")).toBe("in-band")
+		expect(verdict(["DTMF"], 935_000_000, "US")).toBe("in-band")
 		expect(verdict(["POCSAG1200", "AFSK1200"], 153_350_000)).toBe("in-band")
 		expect(verdict(["POCSAG1200", "AFSK1200"], 466_100_000)).toBe("in-band")
 		// Configured targets and overrides win over the mode band.
@@ -265,7 +272,7 @@ describe("paging raster placement (3.18)", () => {
 			CA: 144_390_000,
 			AU: 145_175_000,
 			NZ: 144_575_000,
-			JP: 144_640_000,
+			JP: 144_660_000,
 			CN: 144_640_000,
 		}
 		const table = decoderBandTable("multimon-ng", { modes: ["AFSK1200"] })
@@ -287,6 +294,12 @@ describe("paging raster placement (3.18)", () => {
 				reasonCode: "frequency-out-of-band",
 			})
 			expect(at(aprs[code]).verdict).toBe("in-band")
+			// Japan's 144.640 MHz is the 9600-baud channel, not AFSK1200's.
+			if (code === "JP")
+				expect(requirements?.rangesHz).not.toContainEqual({
+					minHz: 144_632_000,
+					maxHz: 144_648_000,
+				})
 		}
 	})
 
@@ -324,7 +337,7 @@ describe("paging raster placement (3.18)", () => {
 			basis: "region-default",
 			region,
 		})
-		for (const centerHz of [1_090_000_000, 144_640_000])
+		for (const centerHz of [1_090_000_000, 144_660_000])
 			expect(
 				assessDecoderBand(resolved.requirements, {
 					centerHz,
@@ -340,7 +353,7 @@ describe("paging raster placement (3.18)", () => {
 		// Configured targets, overrides and an own tuner still win over nowhere.
 		const winning = [
 			{
-				configured: { targetsHz: [144_640_000], basis: "configured" as const },
+				configured: { targetsHz: [144_660_000], basis: "configured" as const },
 			},
 			{ ownTuning: true as const },
 			{ ownSource: true as const },

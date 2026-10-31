@@ -96,8 +96,10 @@ function landMobile(
  *   6.25 kHz carriers inside each 12.5 kHz channel (±3.125 kHz).
  * - 900 MHz: 896-901 MHz (mobile) and 935-940 MHz (base), 12.5 kHz channels from
  *   896.0125 / 935.0125 MHz.
+ * One plan per contiguous allocation: a plan projects to one display band spanning its
+ * ranges, so a plan holding a base and a mobile half would claim the gap between them
+ * (775-799, 824-851 and 901-935 MHz, which hold LTE, cellular and the 902-928 MHz ISM band).
  */
-const LMR_700_900_ID = "land-mobile-700-900"
 /** 6.25 kHz channels from `firstMhz`; their 12.5 kHz pairs centre 3.125 kHz higher. */
 const RASTER_6K25 = (firstMhz: number) => [
 	{ spacingHz: 6250, firstMhz },
@@ -108,55 +110,77 @@ const RASTER_12K5 = (firstMhz: number) => [
 	{ spacingHz: 12_500, firstMhz },
 	{ spacingHz: 6250, firstMhz: firstMhz - 0.003125 },
 ]
-const LMR_700_900: Bandplan = {
-	id: LMR_700_900_ID,
-	region: "US",
-	name: "Land mobile 700 / 800 / 900 MHz",
-	ranges: [
-		landMobile(
-			LMR_700_900_ID,
-			769,
-			775,
-			LAND_MOBILE_DIGITAL,
-			RASTER_6K25(769.003125),
-		),
-		landMobile(
-			LMR_700_900_ID,
-			799,
-			805,
-			LAND_MOBILE_DIGITAL,
-			RASTER_6K25(799.003125),
-		),
-		landMobile(
-			LMR_700_900_ID,
-			806,
-			824,
-			[...LAND_MOBILE_DIGITAL, "analog-fm"],
-			RASTER_12K5(806.0125),
-		),
-		landMobile(
-			LMR_700_900_ID,
-			851,
-			869,
-			[...LAND_MOBILE_DIGITAL, "analog-fm"],
-			RASTER_12K5(851.0125),
-		),
-		landMobile(
-			LMR_700_900_ID,
-			896,
-			901,
-			[...LAND_MOBILE_DIGITAL, "analog-fm"],
-			RASTER_12K5(896.0125),
-		),
-		landMobile(
-			LMR_700_900_ID,
-			935,
-			940,
-			[...LAND_MOBILE_DIGITAL, "analog-fm"],
-			RASTER_12K5(935.0125),
-		),
-	],
+/** One land mobile allocation as its own plan (one contiguous range). */
+function landMobilePlan(
+	id: string,
+	name: string,
+	startMhz: number,
+	endMhz: number,
+	protocols: readonly ScannerProtocol[],
+	rasters: readonly { spacingHz: number; firstMhz: number }[],
+): Bandplan {
+	return {
+		id,
+		region: "US",
+		name,
+		ranges: [landMobile(id, startMhz, endMhz, protocols, rasters)],
+	}
 }
+const LMR_ANALOG: readonly ScannerProtocol[] = [
+	...LAND_MOBILE_DIGITAL,
+	"analog-fm",
+]
+/** The 700/800/900 MHz land mobile plans in frequency order. */
+export const LAND_MOBILE_700_900: readonly Bandplan[] = Object.freeze([
+	landMobilePlan(
+		"land-mobile-700-base",
+		"Land mobile 700 MHz (base)",
+		769,
+		775,
+		LAND_MOBILE_DIGITAL,
+		RASTER_6K25(769.003125),
+	),
+	landMobilePlan(
+		"land-mobile-700-mobile",
+		"Land mobile 700 MHz (mobile)",
+		799,
+		805,
+		LAND_MOBILE_DIGITAL,
+		RASTER_6K25(799.003125),
+	),
+	landMobilePlan(
+		"land-mobile-800-mobile",
+		"Land mobile 800 MHz (mobile)",
+		806,
+		824,
+		LMR_ANALOG,
+		RASTER_12K5(806.0125),
+	),
+	landMobilePlan(
+		"land-mobile-800-base",
+		"Land mobile 800 MHz (base)",
+		851,
+		869,
+		LMR_ANALOG,
+		RASTER_12K5(851.0125),
+	),
+	landMobilePlan(
+		"land-mobile-900-mobile",
+		"Land mobile 900 MHz (mobile)",
+		896,
+		901,
+		LMR_ANALOG,
+		RASTER_12K5(896.0125),
+	),
+	landMobilePlan(
+		"land-mobile-900-base",
+		"Land mobile 900 MHz (base)",
+		935,
+		940,
+		LMR_ANALOG,
+		RASTER_12K5(935.0125),
+	),
+])
 
 /** One 2 m APRS channel: ±8 kHz around the carrier, 16 kHz FM (the legacy APRS shape). */
 function aprsPlan(region: BandRegion, mhz: number): Bandplan {
@@ -180,17 +204,22 @@ function aprsPlan(region: BandRegion, mhz: number): Bandplan {
 /**
  * National 2 m APRS frequencies of the regions the legacy table lacks, as each national
  * amateur society publishes them: Australia 145.175 MHz (WIA), New Zealand 144.575 MHz
- * (NZART), Japan 144.640 MHz (JARL), China 144.640 MHz (CRAC). The EU (144.800 MHz) and
- * US/CA (144.390 MHz) channels are in the legacy table.
+ * (NZART), Japan 144.660 MHz (JARL; 144.640 MHz there is the 9600-baud channel, which no
+ * scanner protocol or band-plan service maps to), China 144.640 MHz (CRAC). The EU
+ * (144.800 MHz) and US/CA (144.390 MHz) channels are in the legacy table.
  */
 const APRS_AU = aprsPlan("AU", 145.175)
 const APRS_NZ = aprsPlan("NZ", 144.575)
-const APRS_JP = aprsPlan("JP", 144.64)
+const APRS_JP = aprsPlan("JP", 144.66)
 const APRS_CN = aprsPlan("CN", 144.64)
 
 export const BUILTIN_SUPPLEMENT: readonly SupplementPlan[] = Object.freeze([
 	{ regions: ["EU"], before: "pmr446", plan: PAGER_FR },
-	{ regions: ["US", "CA"], before: "amateur-2m", plan: LMR_700_900 },
+	...LAND_MOBILE_700_900.map(plan => ({
+		regions: ["US", "CA"] as const,
+		before: "amateur-2m",
+		plan,
+	})),
 	{ regions: ["AU"], before: "pager-vhf", plan: APRS_AU },
 	{ regions: ["NZ"], before: "pager-vhf", plan: APRS_NZ },
 	{ regions: ["JP"], before: "pager-vhf", plan: APRS_JP },

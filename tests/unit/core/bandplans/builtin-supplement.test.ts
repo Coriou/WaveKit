@@ -1,13 +1,14 @@
 // The built-in catalogue: the legacy scanner plans plus the band-plan supplement (pager-fr),
 // with the legacy table untouched.
 import { describe, expect, it } from "vitest"
-import type { BandRegion } from "@wavekit/api-types"
+import type { Band, BandRegion } from "@wavekit/api-types"
 import {
 	BUILTIN_SUPPLEMENT,
 	builtinBandplansFor,
 	resolveBuiltinBandplan,
 } from "../../../../src/core/bandplans/builtin-supplement.js"
 import { projectBuiltinPacks } from "../../../../src/core/bandplans/builtin-packs.js"
+import { resolveBandPlans } from "../../../../src/core/bandplans/resolve.js"
 import { createScannerBandplanProvider } from "../../../../src/core/bandplans/scanner-feed.js"
 import {
 	bandplansFor,
@@ -25,12 +26,42 @@ const REGIONS = [
 	"CN",
 ] as const satisfies readonly BandRegion[]
 
+/** The US/CA 700/800/900 MHz land mobile plans, one per allocation, in frequency order. */
+const LMR_IDS = [
+	"land-mobile-700-base",
+	"land-mobile-700-mobile",
+	"land-mobile-800-mobile",
+	"land-mobile-800-base",
+	"land-mobile-900-mobile",
+	"land-mobile-900-base",
+]
+
+function lowerBand(id: string, startHz: number, endHz: number): Band {
+	return {
+		id,
+		name: id,
+		startHz,
+		endHz,
+		group: "other",
+		mode: null,
+		bandwidthHz: null,
+		stepHz: null,
+		skip: null,
+		channels: [],
+		parentId: null,
+		colourHint: null,
+		registryRef: null,
+		scan: null,
+		provenance: { kind: "imported" },
+	}
+}
+
 describe("built-in catalogue (legacy plans plus the supplement)", () => {
 	it("keeps every legacy plan object in order and adds each supplement plan to its regions only", () => {
 		const added: Record<(typeof REGIONS)[number], string[]> = {
 			EU: ["pager-fr"],
-			US: ["land-mobile-700-900"],
-			CA: ["land-mobile-700-900"],
+			US: [...LMR_IDS],
+			CA: [...LMR_IDS],
 			AU: ["aprs"],
 			NZ: ["aprs"],
 			JP: ["aprs"],
@@ -50,10 +81,10 @@ describe("built-in catalogue (legacy plans plus the supplement)", () => {
 			expect(new Set(ids).size).toBe(ids.length)
 			if (region === "EU")
 				expect(ids.indexOf("pager-fr")).toBe(ids.indexOf("pmr446") - 1)
-			if (region === "US" || region === "CA")
-				expect(ids.indexOf("land-mobile-700-900")).toBe(
-					ids.indexOf("amateur-2m") - 1,
-				)
+			if (region === "US" || region === "CA") {
+				const at = ids.indexOf("amateur-2m") - LMR_IDS.length
+				expect(ids.slice(at, at + LMR_IDS.length)).toEqual(LMR_IDS)
+			}
 			if (added[region].includes("aprs"))
 				expect(ids.indexOf("aprs")).toBe(ids.indexOf("pager-vhf") - 1)
 		}
@@ -86,7 +117,7 @@ describe("built-in catalogue (legacy plans plus the supplement)", () => {
 		])
 		expect(BUILTIN_SUPPLEMENT.map(s => s.plan.id)).toEqual([
 			"pager-fr",
-			"land-mobile-700-900",
+			...LMR_IDS,
 			"aprs",
 			"aprs",
 			"aprs",
@@ -94,56 +125,111 @@ describe("built-in catalogue (legacy plans plus the supplement)", () => {
 		])
 	})
 
-	it("land-mobile-700-900: the US/CA 700, 800 and 900 MHz land mobile allocations", () => {
+	it("land mobile 700/800/900: one plan per US/CA allocation", () => {
+		const digital = ["dmr", "p25p1", "p25p2", "nxdn48", "nxdn96"]
+		const r6k25 = (first: number) => [
+			{ spacingHz: 6250, firstChannelHz: first },
+			{ spacingHz: 12_500, firstChannelHz: first + 3125 },
+		]
+		const r12k5 = (first: number) => [
+			{ spacingHz: 12_500, firstChannelHz: first },
+			{ spacingHz: 6250, firstChannelHz: first - 3125 },
+		]
+		const expected = [
+			[769e6, 775e6, r6k25(769_003_125), digital],
+			[799e6, 805e6, r6k25(799_003_125), digital],
+			[806e6, 824e6, r12k5(806_012_500), [...digital, "analog-fm"]],
+			[851e6, 869e6, r12k5(851_012_500), [...digital, "analog-fm"]],
+			[896e6, 901e6, r12k5(896_012_500), [...digital, "analog-fm"]],
+			[935e6, 940e6, r12k5(935_012_500), [...digital, "analog-fm"]],
+		]
 		for (const region of ["US", "CA"] as const) {
-			const plan = resolveBuiltinBandplan("land-mobile-700-900", region)
-			expect(
-				plan?.ranges.map(r => [r.startHz, r.endHz, r.rasters, r.protocols]),
-			).toEqual([
-				[
-					769_000_000,
-					775_000_000,
-					[
-						{ spacingHz: 6250, firstChannelHz: 769_003_125 },
-						{ spacingHz: 12_500, firstChannelHz: 769_006_250 },
-					],
-					["dmr", "p25p1", "p25p2", "nxdn48", "nxdn96"],
-				],
-				[
-					799_000_000,
-					805_000_000,
-					[
-						{ spacingHz: 6250, firstChannelHz: 799_003_125 },
-						{ spacingHz: 12_500, firstChannelHz: 799_006_250 },
-					],
-					["dmr", "p25p1", "p25p2", "nxdn48", "nxdn96"],
-				],
-				...(
-					[
-						[806, 806_012_500],
-						[851, 851_012_500],
-						[896, 896_012_500],
-						[935, 935_012_500],
-					] as const
-				).map(([mhz, first]) => [
-					mhz * 1e6,
-					mhz === 806 ? 824e6 : mhz === 851 ? 869e6 : (mhz + 5) * 1e6,
-					[
-						{ spacingHz: 12_500, firstChannelHz: first },
-						{ spacingHz: 6250, firstChannelHz: first - 3125 },
-					],
-					["dmr", "p25p1", "p25p2", "nxdn48", "nxdn96", "analog-fm"],
-				]),
-			])
-			// Raster channels are whole Hz (no float residue from the MHz literals).
-			for (const r of plan?.ranges ?? [])
-				for (const x of r.rasters ?? [])
-					expect(Number.isInteger(x.firstChannelHz)).toBe(true)
+			LMR_IDS.forEach((id, i) => {
+				const plan = resolveBuiltinBandplan(id, region)
+				// One contiguous range per plan, tagged with its own plan id.
+				expect(plan?.ranges).toHaveLength(1)
+				expect(plan?.ranges[0]?.bandplanId).toBe(id)
+				expect(
+					plan?.ranges.map(r => [r.startHz, r.endHz, r.rasters, r.protocols]),
+				).toEqual([expected[i]])
+				// Raster channels are whole Hz (no float residue from the MHz literals).
+				for (const r of plan?.ranges ?? [])
+					for (const x of r.rasters ?? [])
+						expect(Number.isInteger(x.firstChannelHz)).toBe(true)
+			})
 		}
 		for (const region of ["EU", "AU", "NZ", "JP", "CN"] as const)
-			expect(
-				resolveBuiltinBandplan("land-mobile-700-900", region),
-			).toBeUndefined()
+			for (const id of LMR_IDS)
+				expect(resolveBuiltinBandplan(id, region)).toBeUndefined()
+	})
+
+	it("land mobile 700/800/900: the band view leaves the gaps between allocations free", () => {
+		const us = projectBuiltinPacks().find(p => p.id === "builtin-us")
+		const lmr = (us?.bands ?? []).filter(b => b.id.startsWith("land-mobile-"))
+		expect(lmr.map(b => [b.id, b.startHz, b.endHz])).toEqual([
+			["land-mobile-700-base", 769e6, 775e6],
+			["land-mobile-700-mobile", 799e6, 805e6],
+			["land-mobile-800-mobile", 806e6, 824e6],
+			["land-mobile-800-base", 851e6, 869e6],
+			["land-mobile-900-mobile", 896e6, 901e6],
+			["land-mobile-900-base", 935e6, 940e6],
+		])
+		// A lower-priority pack: 902-928 MHz ISM and two bands inside the
+		// 775-799 and 824-851 MHz gaps.
+		const lower = {
+			id: "imported-000000000001",
+			kind: "imported" as const,
+			name: "lower",
+			region: null,
+			provenance: { kind: "builtin" as const },
+			bands: [
+				lowerBand("ism-915", 902e6, 928e6),
+				lowerBand("gap-700", 776e6, 798e6),
+				lowerBand("gap-800", 824e6, 851e6),
+			],
+		}
+		const resolved = resolveBandPlans({
+			packs: new Map([
+				["builtin-us", us!],
+				[lower.id, lower],
+			]),
+			stack: [
+				{ packId: "builtin-us", enabled: true },
+				{ packId: lower.id, enabled: true },
+			],
+			operatorBands: [],
+			edits: [],
+		})
+		const at = (hz: number) =>
+			resolved.bands
+				.filter(b => b.segments.some(s => s.startHz <= hz && hz <= s.endHz))
+				.map(b => b.bandId)
+		// 915 MHz and the gap frequencies resolve to the lower pack's bands.
+		expect(at(915e6)).toEqual(["ism-915"])
+		expect(at(787e6)).toEqual(["gap-700"])
+		expect(at(840e6)).toEqual(["gap-800"])
+		expect(resolved.shadowed).not.toContain(`${lower.id}/ism-915`)
+		// Allocation edges are in; one Hz past them is out.
+		for (const [id, lo, hi] of [
+			["land-mobile-700-base", 769e6, 775e6],
+			["land-mobile-700-mobile", 799e6, 805e6],
+			["land-mobile-800-mobile", 806e6, 824e6],
+			["land-mobile-800-base", 851e6, 869e6],
+			["land-mobile-900-mobile", 896e6, 901e6],
+			["land-mobile-900-base", 935e6, 940e6],
+		] as const) {
+			expect(at(lo)).toContain(id)
+			expect(at(hi)).toContain(id)
+			expect(at(lo - 1)).not.toContain(id)
+			expect(at(hi + 1)).not.toContain(id)
+		}
+		// The shared 824 / 851 MHz edges go to the higher-priority built-in band.
+		expect(at(824e6)).toEqual(["land-mobile-800-mobile"])
+		expect(at(824e6 + 1)).toEqual(["gap-800"])
+		expect(at(851e6 - 1)).toEqual(["gap-800"])
+		expect(at(851e6)).toEqual(["land-mobile-800-base"])
+		expect(at(901e6 + 1)).toEqual([])
+		expect(at(902e6)).toEqual(["ism-915"])
 	})
 
 	it("aprs: each region's national 2 m APRS channel, ±8 kHz", () => {
@@ -153,7 +239,7 @@ describe("built-in catalogue (legacy plans plus the supplement)", () => {
 			CA: 144_390_000,
 			AU: 145_175_000,
 			NZ: 144_575_000,
-			JP: 144_640_000,
+			JP: 144_660_000,
 			CN: 144_640_000,
 		}
 		for (const region of REGIONS) {

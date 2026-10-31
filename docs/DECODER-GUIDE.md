@@ -571,13 +571,15 @@ describe("HfdlDecoder", () => {
    modes its band is the union of the band-plan ranges where each mode's service exists in
    your region: paging ranges for POCSAG and FLEX, APRS ranges for AFSK1200 (the national
    2 m APRS channel: 144.800 MHz in the EU, 144.390 MHz in the US and Canada, 145.175 MHz in
-   Australia, 144.575 MHz in New Zealand, 144.640 MHz in Japan and China, plus the 2 m band
+   Australia, 144.575 MHz in New Zealand, 144.660 MHz in Japan (144.640 MHz there is the
+   9600-baud channel), 144.640 MHz in China, plus the 2 m band
    where the region's plan lists APRS on it) and analog FM voice ranges for DTMF (PMR446,
    land mobile, marine, amateur 2 m / 70 cm, CB). A mode whose service has no range in your
    region adds nothing; when none of its modes has one the decoder is out of band everywhere,
-   never left with an unknown band. Elsewhere, for example at 1090 MHz or in the 868 MHz ISM
-   band, it is suspended with `frequency-out-of-band` ("waiting: the tuned frequency is
-   outside its band"), in every region. Any of `channelHz`, `channelsHz`, `offsetHz`,
+   never left with an unknown band. Elsewhere it is suspended with `frequency-out-of-band`
+   ("waiting: the tuned frequency is outside its band"): at 1090 MHz in every region, and
+   in the EU also in the 863–870 MHz ISM band. In the US and Canada 851–869 MHz is land
+   mobile, so with DTMF among its modes it runs at 868.95 MHz there. Any of `channelHz`, `channelsHz`, `offsetHz`,
    `frequency` or `frequencies` pins it to your channels: whatever its modes (paging-only
    included) it is then never suspended for being off its mode band. Top-level `frequencies`
    and a band override (`band` in YAML or the API) still win too. With EAS or FSK9600 among
@@ -616,7 +618,9 @@ describe("HfdlDecoder", () => {
    inside a digital-voice range of your region's built-in band plan (VHF and UHF land mobile,
    in the US and Canada also 700, 800 and 900 MHz land mobile: 769–775, 799–805, 806–824,
    851–869, 896–901 and 935–940 MHz; PMR446 and dPMR446, amateur 2 m and 70 cm) and never in
-   an ISM/SRD or LoRa range (433 MHz, 863–870 MHz). Its first channel (the VFO) is not limited this way.
+   an ISM/SRD or LoRa range of your region's plan (in the EU 433.05–434.79 and 863–870 MHz;
+   in the US and Canada 868.95 MHz lies in 851–869 MHz land mobile and may hold a slot). Its
+   first channel (the VFO) is not limited this way.
    No protocol hint is required: energy selects a trial channel, and the existing checked
    decoder output rules still decide whether it is verified digital voice. Band, capture
    reach and CPU admission still apply. Observed candidate identities initially use round(Hz / 6250) × 6250 (ties upward).

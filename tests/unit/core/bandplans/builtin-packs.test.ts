@@ -29,7 +29,12 @@ const GROUPS: Record<string, DisplayGroup> = {
 	"vhf-land-mobile": "land-mobile",
 	"uhf-land-mobile": "land-mobile",
 	// US/CA 700/800/900 MHz land mobile of the built-in supplement.
-	"land-mobile-700-900": "land-mobile",
+	"land-mobile-700-base": "land-mobile",
+	"land-mobile-700-mobile": "land-mobile",
+	"land-mobile-800-mobile": "land-mobile",
+	"land-mobile-800-base": "land-mobile",
+	"land-mobile-900-mobile": "land-mobile",
+	"land-mobile-900-base": "land-mobile",
 	"amateur-2m": "amateur",
 	"amateur-70cm": "amateur",
 	aprs: "amateur",

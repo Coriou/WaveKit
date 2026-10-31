@@ -501,7 +501,7 @@ it.each([
 	["CA", 144_390_000],
 	["AU", 145_175_000],
 	["NZ", 144_575_000],
-	["JP", 144_640_000],
+	["JP", 144_660_000],
 	["CN", 144_640_000],
 ] as const)(
 	"multimon-ng AFSK1200 in %s: in band at %d Hz, out of band at 1090 MHz",
