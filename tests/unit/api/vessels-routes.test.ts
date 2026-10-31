@@ -104,6 +104,8 @@ describe("vessel routes", () => {
 			expect(response.json()).toEqual({
 				error: "MMSI must be 1-9 digits",
 				code: "VALIDATION_ERROR",
+				message: "Invalid path parameter: mmsi: 1 to 9 digits (MMSI)",
+				fields: [{ field: "mmsi", expected: "1 to 9 digits (MMSI)" }],
 			})
 		}
 	})

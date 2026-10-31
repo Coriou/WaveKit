@@ -16,8 +16,9 @@ import type { DecoderSettingsService } from "../../../src/decoders/settings/cont
 const JSON_CT = "application/json; charset=utf-8"
 const NOT_FOUND = (id: string) =>
 	`{"error":"NotFound","code":"DECODER_NOT_FOUND","message":"Decoder with id '${id}' not found"}`
+// Amended once since the freeze: a validation 400 also names its fields (additive key).
 const NO_FIELDS =
-	'{"error":"BadRequest","code":"NO_UPDATE_FIELDS","message":"At least one field (enabled or options) must be provided"}'
+	'{"error":"BadRequest","code":"NO_UPDATE_FIELDS","message":"At least one field (enabled or options) must be provided","fields":[{"field":"enabled","expected":"boolean (send enabled or options)"},{"field":"options","expected":"object (send enabled or options)"}]}'
 const UNSUPPORTED =
 	'{"error":"NotImplemented","code":"DECODER_CONFIG_UPDATE_UNSUPPORTED","message":"Runtime decoder configuration updates are not implemented. Edit the YAML configuration and restart WaveKit; use the start/stop endpoints for lifecycle control."}'
 const validation = (message: string) =>

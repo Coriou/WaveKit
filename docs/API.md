@@ -5,26 +5,42 @@ WaveKit exposes a REST API and WebSocket endpoint for control and real-time moni
 ## Automation and agents
 
 Protected APIs accept the machine credential in `Authorization: Bearer <token>`.
-An administrator obtains it from `machineToken` in the private directory's
-`access-state.json`, provisioned by the existing local
-`node dist/access-command.js setup` command with the core stopped. See
-[protected local setup](LOCAL-SETUP.md#protected-mode-locally). Use the host's private
-state directory (or the host directory mounted as private state); no container shell
-is needed. Keep this file private and never put the credential into URLs or logs.
-For example, with `PRIVATE_DIRECTORY` and `API_ORIGIN` set for your installation:
+It is provisioned by the local `node dist/access-command.js setup` command with the
+core stopped (see [protected local setup](LOCAL-SETUP.md#protected-mode-locally)).
+Copy it into a file for an agent with `machine-token`, run on the host against the
+private state directory, or in a one-off container with that directory mounted
+([Docker](DOCKER-SETUP.md#protected-runtime-deployment)). No container shell is needed,
+and the core may be running:
 
 ```sh
-jq -r '.machineToken | "Authorization: Bearer \(.)"' "$PRIVATE_DIRECTORY/access-state.json" |
-  curl --fail --header @- "$API_ORIGIN/api/status"
+node dist/access-command.js machine-token --private-directory "$PRIVATE_DIRECTORY" --out "$HOME/.config/wavekit/machine-token"
+curl --fail --header "Authorization: Bearer $(cat "$HOME/.config/wavekit/machine-token")" \
+  "$API_ORIGIN/api/agent/status"
 ```
 
-There is no HTTP route that issues or exports a machine credential. Browser pairing
-issues a browser session, not a machine token. The existing local
-`node dist/access-command.js rotate-credential --private-directory ABS` command
-rotates it with the core stopped; pass `--keep-sessions` to retain remembered browsers.
-An agent without access to private host state must receive a credential securely
-from the administrator. Machine requests need the configured Host/Origin policy;
-do not send a browser cookie alongside the bearer credential.
+The command creates the file with mode `0600` and never prints the credential.
+The file's directory must already exist, must not be writable by group or others,
+and must lie outside the private directory. An existing file is refused; `--replace`
+overwrites it only when it is your own `0600` regular file (not a link). The file is
+written inside the directory the command checked, even if its path is swapped for a
+link meanwhile; if the path no longer names that directory, or names the private
+directory, the command removes what it wrote and refuses. Keep the file private and
+never put the credential into URLs or logs.
+
+There is no HTTP route that issues or exports a machine credential, and the file
+holds the same single credential as the private directory: it is not a separate
+grant. `node dist/access-command.js rotate-credential --private-directory ABS`
+(core stopped) revokes it and every copy; run `machine-token --replace` afterwards
+to refresh the agent's file. Pass `--keep-sessions` to retain remembered browsers.
+Browser pairing issues a browser session, not a machine token. An agent without
+access to private host state must receive the file securely from the administrator.
+Machine requests need the configured Host/Origin policy; do not send a browser
+cookie alongside the bearer credential.
+
+For a one-request overview of the receiver, read
+[`GET /api/agent/status`](#get-apiagentstatus).
+Task recipes (tune, gain, decoders, activity, IQ capture) are in
+[Driving WaveKit from an agent](AGENTS-API.md).
 
 ### Tuner commands during a sample-rate restart
 
@@ -106,6 +122,62 @@ headers: clients must reject incomplete bodies against `Content-Length`.
 The snapshot endpoint is mounted when protected access and source fanout routing
 are configured. An already aborted download request returns `REQUEST_ABORTED`
 (status 499 when a response is still possible), rather than an authentication error.
+
+### Named IQ captures
+
+`POST /api/iq/captures` stores whole seconds of the current tuning as a named CU8 file in the
+private state directory (`<stateDir>/iq-captures`, mode `0700`, files `0600`):
+
+```json
+{ "name": "test-capture", "seconds": 2 }
+```
+
+`name` is 1 to 64 characters of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit
+(no dot, slash or upper case, so it is never a path), and must be unused: 409
+`IQ_CAPTURE_EXISTS`. `seconds` is an integer from 1 to 10. `sourceId` is optional while one
+source is configured, required (400 naming `sourceId`) with more. The source must be connected
+(503 `SOURCE_DISCONNECTED`) and deliver `U8_IQ` with a known center at most 3,200,000
+samples per second (409 `IQ_CAPTURE_UNSUPPORTED`); missing sources are 404. One capture runs
+per source at a time: another answers 409 `IQ_CAPTURE_BUSY`. Captures never tune, pause or
+slow the source.
+
+A capture is `seconds × sampleRate × 2` bytes, at most `10 × 3,200,000 × 2 = 64,000,000`.
+Before it starts, the stored captures plus every running capture must fit
+`8 × 64,000,000 = 512,000,000` bytes and 32 captures, else 507 `IQ_CAPTURE_QUOTA`; and the
+filesystem must keep 268,435,456 bytes (256 MiB) available after it and the bytes every other
+running capture has still to write, else 507 `IQ_CAPTURE_DISK_FULL`. Admissions and completions
+are checked one at a time, so concurrent requests on different sources never overrun either
+bound. A source change (retune, rate change, disconnect) while the request is being admitted
+answers 409 `IQ_CAPTURE_SOURCE_CHANGED`: nothing was written, so retry. The answer is 201 once the file is complete, with the stored metadata:
+`name`, `sourceId`, `format` (`"cu8"`), `centerHz`, `sampleRate`, `gain` (tenths of a dB, null
+under AGC or when unknown), `startedAt` (UTC time of the first stored chunk), `durationS`
+and `bytes`.
+
+Data is written chunk by chunk; at most 4,000,000 bytes (625 ms at 3.2 Msps) wait for the
+disk, past that the capture stops. A source change (retune, rate change, also when only seen as
+changed caps right before the first stored sample), disconnect or
+removal, a silent source (twice the requested duration), fanout congestion, client
+disconnect, lease revocation or shutdown also stop it: the partial file is removed and the
+answer, when one can still be sent, is 503 `IQ_CAPTURE_INTERRUPTED`. At the first use after a
+restart WaveKit removes only what a crash of its own leaves: `<name>.cu8.partial`,
+`<name>.json.partial`, and `<name>.cu8` with no `<name>.json` beside it. Other files in the
+capture directory are never touched. A `<name>.json` that is not valid capture metadata, or
+that WaveKit cannot read (for example its permissions), is not listed, but its name stays taken (409 `IQ_CAPTURE_EXISTS`) and the size of its
+`<name>.cu8` counts in `usedBytes` and toward the quota until you delete that name.
+
+`GET /api/iq/captures` lists whole captures newest first:
+`{ captures, usedBytes, quotaBytes, maxCount }`. `GET /api/iq/captures/:name` downloads the
+file (`application/octet-stream`, `Content-Disposition: attachment; filename="<name>.cu8"`,
+`Content-Length`, `X-WaveKit-Center-Hz`, `X-WaveKit-Sample-Rate`, `X-WaveKit-Start-Time`).
+`DELETE /api/iq/captures/:name` answers 204, or 409 `IQ_CAPTURE_BUSY` while that name is being
+captured. An unknown or malformed name is 404 `IQ_CAPTURE_NOT_FOUND`. Error bodies carry
+fixed text only (`error`, `code`, `message`), never the name or a path.
+
+Authorization matches the IQ snapshot: the routes mount only with protected access, every
+route takes mutation authorization (browser CSRF included), and the capture and the download
+hold a revocable lease. Missing credentials return 401, forbidden requests 403. The DTOs are
+`IqCapture`, `IqCaptureList` and `IqCaptureRequest` in `@wavekit/api-types`; recipes are in
+[Driving WaveKit from an agent](AGENTS-API.md).
 
 ## Base URL
 
@@ -457,6 +529,44 @@ without schemas: `{ "routes": [{ "method": "GET", "path": "/api", "summary":
 "List registered routes", "tags": ["system"] }] }`. Summaries and tags come
 from the route schema; missing summaries are null and missing tags are empty.
 The index uses the same authenticated read admission as other API reads.
+
+#### GET /api/agent/status
+
+One compact answer, always under 4 KiB, to "what is the receiver doing", for agents
+and scripts. It uses the same read admission as the other API reads and never
+includes free-text errors; each field summarizes a fuller route.
+
+The size is a hard bound. Lists keep their first rows: two sources and two tuners,
+nine decoder rows and nine `lastDecode` rows. Nine is the number of built-in decoder
+types, but rows are decoder instances, so two instances of one type take two rows.
+Decoders with a problem verdict (anything but `decoding`, `listening` or `off`) come
+first, so the cut drops healthy decoders before a failed or suspended one;
+`hiddenProblems` counts the problem decoders still cut. Ids are cut to 40 bytes of
+JSON, decoder protocols to 24, job names to 32 and reasons to 24. `truncated` is
+`true` when a list or an id was cut; read the fuller route then.
+
+| Field            | Summary of                   | Content                                                                                                                                                                                                                                                                                                            |
+| ---------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `at`             |                              | ISO time of the answer                                                                                                                                                                                                                                                                                             |
+| `truncated`      |                              | `true` when a list was cut at its cap or an id was shortened (a shortened job name alone does not set it)                                                                                                                                                                                                          |
+| `tuners`         | `GET /api/tuner`             | `sourceId`, `frequencyHz`, `sampleRateHz`, `gainMode`, `gain` (tenths of a dB; null in AGC), `owner` (`wavekit`, `external` while an external client such as SDR++ controls it, `scanner` while a scanner job holds the tuner lease), `declaredOnly` (frequency or rate only from config). Unknown values are null |
+| `sources`        | `GET /api/sources`           | `id`, `connected`, `state` (the source activity state), `sampleAgeMs`, `warnings` (`rate-mismatch`, `signal-flat`)                                                                                                                                                                                                 |
+| `liveAudio`      | `GET /api/live-audio/status` | `running`, `health`, `sourceId`, `modulation`, `offsetHz`, `clients`, `squelchOpen` (null while stopped); null without live audio                                                                                                                                                                                  |
+| `scanner`        | `GET /api/scanner`           | `enabled`, `activeJobs` (not yet ended), `job` (the most recently updated of them: `id`, `name`, `kind`, `state`, `reason`, `sourceId`) or null; null without the scanner                                                                                                                                          |
+| `decoders`       | `GET /api/decoders/summary`  | one row per decoder instance, problem verdicts first, then configuration order: `id`, `protocol` (the decoder type) and the same `verdict` `code` and `actions` (at most three, most helpful first); the verdict sentence is on the summary route                                                                  |
+| `hiddenProblems` | `GET /api/decoders/summary`  | number of decoders with a problem verdict cut from `decoders` by its cap (0 when every problem shows)                                                                                                                                                                                                              |
+| `activity`       | `GET /api/activity/status`   | `state` (`disabled`, `opening`, `retrying`, `available`, `unavailable`) and `rows` (null unless available)                                                                                                                                                                                                         |
+| `lastDecode`     | `GET /api/decoders/summary`  | `{ protocol, at }` per protocol with output (over every decoder), newest first                                                                                                                                                                                                                                     |
+
+A scanner job owns a tuner only while it holds the tuner lease: passive jobs never
+take one, and a sweep the operator paused keeps it until it is released.
+
+The DTO and its Zod schema are `AgentStatus` and `agentStatusSchema` in `@wavekit/api-types`.
+
+```bash
+curl --header "Authorization: Bearer $(cat "$HOME/.config/wavekit/machine-token")" \
+  https://wavekit.example:9443/api/agent/status
+```
 
 #### GET /api/status
 
@@ -3019,13 +3129,15 @@ curl -X PATCH http://localhost:9000/api/scanner/settings \
   -d '{"passive": {"rtl-dedicated": false}, "cpuBudgetCores": 0.5}'
 ```
 
-**400** for an unknown key or a value out of bounds:
+**400** for an unknown key or a value out of bounds, naming the field and
+what it accepts ([validation errors](#validation-errors)):
 
 ```json
 {
 	"error": "ValidationError",
 	"code": "VALIDATION_ERROR",
-	"message": "Configuration validation failed:\n  - cpuBudgetCores: Value is too small (minimum: 0.1)"
+	"message": "Invalid request body: cpuBudgetCores: number (0.1 to 64)",
+	"fields": [{ "field": "cpuBudgetCores", "expected": "number (0.1 to 64)" }]
 }
 ```
 
@@ -3233,19 +3345,29 @@ curl -X POST http://localhost:9000/api/scanner/jobs \
 
 **201**: the `ScanJob` (see the job detail below).
 
-**400** `SCANNER_PLAN_INVALID` when the preview has errors:
+**400** `SCANNER_PLAN_INVALID` when the preview has errors. `fields` names the
+job field each error asks you to change. In an error answer every issue carries
+the fixed message of its `code` and no `details` (except `range-locked`, below),
+so it never repeats a range edge, bandplan id or name you sent;
+`POST /api/scanner/plan` returns the fuller issues of a preview.
 
 ```json
 {
 	"error": "ScannerApiError",
 	"code": "SCANNER_PLAN_INVALID",
-	"message": "The job spec has errors",
+	"message": "The job spec has errors; ranges: at least one range or bandplan; each range with startHz > 0 and endHz > startHz, Hz",
+	"fields": [
+		{
+			"field": "ranges",
+			"expected": "at least one range or bandplan; each range with startHz > 0 and endHz > startHz, Hz"
+		}
+	],
 	"details": {
 		"issues": [
 			{
 				"code": "range-empty",
 				"severity": "error",
-				"message": "a sweep needs at least one range or bandplan"
+				"message": "a range is empty or inverted, or the sweep has no range"
 			}
 		]
 	}
@@ -3280,7 +3402,7 @@ the error table, plus `details.holderJobId` when a job holds the source, or
 `details.issues` from the preview), 409
 `SCANNER_NO_TUNER_CONTROL` (the source has no rtl_tcp tuner control), 400
 `SCANNER_MONITOR_UNAVAILABLE` (`kind: "monitor"`, listen-scan needs the
-channelizer), 400 `SCANNER_IDENTIFY_VIA_JOBS` (`kind: "identify"`; use
+channelizer; `fields` names `kind`), 400 `SCANNER_IDENTIFY_VIA_JOBS` (`kind: "identify"`; use
 `/identify`), 503 `SCANNER_DISABLED`, 503 `SCANNER_STATE_UNAVAILABLE` (sweeps
 only).
 
@@ -3465,13 +3587,19 @@ curl -X PATCH http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7Q
 {
 	"error": "ScannerApiError",
 	"code": "SCANNER_PLAN_INVALID",
-	"message": "The job spec has errors",
+	"message": "The job spec has errors; ranges: the running job's ranges, edges and channel spacing unchanged",
+	"fields": [
+		{
+			"field": "ranges",
+			"expected": "the running job's ranges, edges and channel spacing unchanged"
+		}
+	],
 	"details": {
 		"issues": [
 			{
 				"code": "range-locked",
 				"severity": "error",
-				"message": "range 1: endHz cannot change while the job exists; stop it to change edges or channel spacing",
+				"message": "a running job's ranges cannot change; stop it to change edges or channel spacing",
 				"details": { "index": 1, "fields": ["endHz"] }
 			}
 		]
@@ -3947,8 +4075,13 @@ given, or a bound is broken:
 {
 	"error": "ValidationError",
 	"code": "VALIDATION_ERROR",
-	"message": "body/target must match exactly one schema in oneOf",
-	"details": [{ "instancePath": "/target", "keyword": "oneOf" }]
+	"message": "Invalid request body: target: object with fields frequencyHz, bandwidthHz, all; exactly one of frequencyHz or all",
+	"fields": [
+		{
+			"field": "target",
+			"expected": "object with fields frequencyHz, bandwidthHz, all; exactly one of frequencyHz or all"
+		}
+	]
 }
 ```
 
@@ -4706,6 +4839,7 @@ area with no path, such as `digital-voice-wav` without a recording dsd-fme, repo
 | ------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | `activity`          | `automatic` | The Activity store (`<stateDir>/activity`)                                                                        | Resolved `activity.retention.maxDbBytes` |
 | `scanner-evidence`  | `automatic` | Scanner evidence (`scanner.storage.dir`, default `<stateDir>/scanner`), minus any dsd-fme WAV directory inside it | `scanner.storage.maxRecordingsMb`        |
+| `iq-captures`       | `automatic` | [Named IQ captures](#named-iq-captures) (`<stateDir>/iq-captures`)                                                | The capture quota (`quotaBytes`)         |
 | `digital-voice-wav` | `other`     | Per-call WAV directories of the dsd-fme decoders that record                                                      | null                                     |
 | `bandplans`         | `state`     | Band-plan state                                                                                                   | null                                     |
 | `operator-data`     | `state`     | Operator data and the recording keep store (`recording-keeps.json`)                                               | null                                     |
@@ -7160,6 +7294,54 @@ the status code.
 }
 ```
 
+### Validation errors
+
+Every 400 for a malformed request names the failing field(s) and what each
+accepts, in `fields`, and repeats them in `message`. The text comes from the
+route's own schema: a 400 never repeats a submitted value, an unknown key you
+sent, or a parser message (so it reads the same with access configured).
+Routes with their own error code (`INVALID_START_REQUEST`,
+`INVALID_BAND_OVERRIDE`, `EFFICIENCY_BUDGET_INVALID`, `RECORDINGS_QUERY_INVALID`,
+`BANDPLANS_INVALID`, `ACTIVITY_QUERY_INVALID`, `DECODER_OPTIONS_INVALID`, …) keep
+it and add `fields`.
+
+```json
+{
+	"error": "ValidationError",
+	"code": "VALIDATION_ERROR",
+	"message": "Invalid request body: type: one of \"sdrpp-network\" | \"rtl_tcp\" | \"recording\"",
+	"fields": [
+		{
+			"field": "type",
+			"expected": "one of \"sdrpp-network\" | \"rtl_tcp\" | \"recording\""
+		}
+	]
+}
+```
+
+- `field` is a schema path (`entries.0.gain`; `*` stands for a key you
+  chose), or the request part (`body`, `query`) when the whole part is wrong:
+  not an object, malformed JSON, or an unknown key (`expected` then lists the
+  accepted fields).
+- At most 8 fields are named.
+- A value the field's type allows but a further rule refuses (a reserved
+  `delivery`, a `gainDb` with `gainMode: "agc"`, overlapping band gain
+  entries) gets that rule in fixed words after the type, for example
+  `squelchMode`: `one of "manual" | "auto" | "noise"; "noise" needs modulation
+"nfm" or "wfm"`. A rule without its own wording reads `a further rule of this
+  field refused the value sent`.
+- Scanner job refusals keep their codes: `SCANNER_PLAN_INVALID` and
+  `SCANNER_MONITOR_UNAVAILABLE` add `fields`, and each plan issue in
+  `details.issues` has the fixed message of its `code` (see the job example).
+- Tuner routes keep their message wording (`Invalid request body at gain;
+expected {...}`); their `fields` carry the unit, for example `gain`:
+  `integer, gain in tenths of a dB (0-500, ...)`, naming the deprecated alias
+  `tenthsDb`.
+- `PATCH /api/station` keeps `fields` as the list of station field names its
+  form marks; its `message` states what each accepts.
+- The regional registry and receiver-capabilities routes keep their fixed
+  bodies, and access routes answer `{ "code" }` only.
+
 ### Error Codes
 
 | Code                       | HTTP Status | Description                                                                      |
@@ -7183,9 +7365,9 @@ Scanner and spectrum routes answer with the flat body
 | Code                            | HTTP | When                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | ------------------------------- | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `VALIDATION_ERROR`              | 400  | Request schema (body, params or query, e.g. occupancy query bounds), or a settings PATCH value out of bounds / unknown key                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `SCANNER_PLAN_INVALID`          | 400  | The job preview has errors; `details.issues`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `SCANNER_MONITOR_UNAVAILABLE`   | 400  | `kind: "monitor"` (listen-scan needs the channelizer)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `SCANNER_SETTINGS_INVALID`      | 400  | A settings patch that does not merge; `details.issues`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `SCANNER_PLAN_INVALID`          | 400  | The job preview has errors; `fields`, `details.issues` (fixed messages)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `SCANNER_MONITOR_UNAVAILABLE`   | 400  | `kind: "monitor"` (listen-scan needs the channelizer); `fields`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `SCANNER_SETTINGS_INVALID`      | 400  | A settings patch that does not merge; `fields` names each failing field                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `SCANNER_IDENTIFY_VIA_JOBS`     | 400  | `kind: "identify"` on `POST /api/scanner/jobs`; use `/api/scanner/identify`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `SPECTRUM_RANGE_INVALID`        | 400  | Occupancy query: `endHz` not above `startHz`, or the span above 2 GHz                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `SCANNER_NOT_FOUND`             | 404  | Route level: the job, discovery, recording, evidence or capture in the path does not exist                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |

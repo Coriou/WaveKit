@@ -62,6 +62,9 @@ const patch = (f: Awaited<ReturnType<typeof app>>) =>
 		payload: { offsetHz: 5 },
 	})
 
+const OFFSET_EXPECTED =
+	"number, Hz from the tuned centre; the channel must stay inside the capture (|offsetHz| <= sample rate / 2 - bandwidth / 2)"
+
 function zodError(): ZodError {
 	return new ZodError([
 		{ code: "custom", path: ["gain"], message: `bad ${HOSTILE}` },
@@ -95,11 +98,12 @@ describe("live audio PATCH 400 codes (WG9 5.3)", () => {
 		expect(res.json()).toEqual({
 			error: "Bad Request",
 			code: "CHANNEL_OFFSET_OUT_OF_RANGE",
-			message: "offset out of range",
+			message: `Invalid request body: offsetHz: ${OFFSET_EXPECTED}`,
+			fields: [{ field: "offsetHz", expected: OFFSET_EXPECTED }],
 		})
 	})
 
-	it("redacts the message when access is configured and never echoes the value", async () => {
+	it("answers static field text when access is configured and never echoes the value", async () => {
 		for (const err of [
 			zodError(),
 			new WaveKitError(`offset ${HOSTILE}`, "CHANNEL_OFFSET_OUT_OF_RANGE"),
@@ -110,7 +114,10 @@ describe("live audio PATCH 400 codes (WG9 5.3)", () => {
 				}, true),
 			)
 			expect(res.statusCode).toBe(400)
-			expect(res.json().message).toBe("Request failed")
+			expect(res.json().message).toMatch(
+				/^Invalid request body: (gain|offsetHz): /,
+			)
+			expect(res.json().fields).toHaveLength(1)
 			expect(res.body).not.toContain(HOSTILE)
 		}
 	})

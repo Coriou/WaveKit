@@ -210,7 +210,12 @@ describe.each([true, false])(
 			const res = await patch(app, { name: "a" })
 			expect(res.statusCode).toBe(status)
 			expect(res.json().code).toBe(code)
-			expect(res.json().message).toBe("boom")
+			// A 400 keeps the core text (field names only) and states what each field accepts.
+			if (status === 400)
+				expect(res.json().message).toBe(
+					"boom; expected lat: number (-90 to 90) or null to clear",
+				)
+			else expect(res.json().message).toBe("boom")
 			if (fields) expect(res.json().fields).toEqual([...fields])
 			await app.close()
 		})

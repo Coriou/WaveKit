@@ -11,6 +11,7 @@ import {
 } from "./machine-client.js"
 import type { MachineAccessDevicesDto } from "./machine-devices.js"
 import { rotateLocalMachineCredential } from "./machine-rotation.js"
+import { exportMachineToken } from "./machine-token-export.js"
 import { canonicalPairingOrigin, requestPairingCode } from "./pairing-client.js"
 import { setupLocalAccess } from "./setup.js"
 
@@ -35,6 +36,12 @@ interface PairOptions {
 	externalAudioOrigins: string[]
 	timeoutMs?: number
 }
+interface MachineTokenOptions {
+	command: "machine-token"
+	directory: string
+	out: string
+	replace: boolean
+}
 interface RemoteOptions {
 	directory: string
 	apiOrigin: string
@@ -44,6 +51,7 @@ type CommandOptions =
 	| SetupOptions
 	| PairOptions
 	| { command: "rotate-credential"; directory: string; keepSessions: boolean }
+	| MachineTokenOptions
 	| ({ command: "devices-list"; json: boolean } & RemoteOptions)
 	| ({ command: "devices-revoke"; deviceId: string } & RemoteOptions)
 	| ({ command: "devices-revoke-all" } & RemoteOptions)
@@ -55,9 +63,11 @@ const help = [
 	"       node dist/access-command.js devices revoke DEVICE_ID --private-directory ABS --api-origin ORIGIN [--timeout-ms 1..30000]",
 	"       node dist/access-command.js devices revoke-all --yes --private-directory ABS --api-origin ORIGIN [--timeout-ms 1..30000]",
 	"       node dist/access-command.js rotate-credential --private-directory ABS [--keep-sessions]",
+	"       node dist/access-command.js machine-token --private-directory ABS --out ABS [--replace]",
 	"Setup runs with the core stopped. It provisions private state and prints a public access plan; it does not enable runtime protection.",
 	"Setup uses one canonical hostname and scheme for browser/API/audio origins, with explicit ports. LAN browser use requires HTTPS; HTTP is available only for explicit loopback targets.",
 	"Pair requests a one-time code from a running core with the access service mounted. Browser pairing and rolling 30-day renewal need the connected web UI.",
+	"machine-token copies the existing machine credential into a new 0600 file for an agent; it never prints the credential. The file's directory must not be writable by group or others. --replace overwrites only an existing 0600 file you own. rotate-credential revokes every copy.",
 	"Device commands use the machine credential against a running core. They never send a browser cookie. rotate-credential runs with the core stopped and replaces that credential. By default it removes remembered browser sessions; --keep-sessions keeps them.",
 ]
 const deviceIdPattern = /^device_[A-Za-z0-9_-]{43}$/
@@ -93,6 +103,7 @@ function parseArguments(input: readonly string[]): CommandOptions | undefined {
 	if (!parsed.success) return undefined
 	const [command, ...args] = parsed.data
 	if (command === "rotate-credential") return parseRotate(args)
+	if (command === "machine-token") return parseMachineToken(args)
 	if (command === "devices") return parseDevices(args)
 	if (command !== "setup" && command !== "pair") return undefined
 	const single = new Map<string, string>()
@@ -170,6 +181,33 @@ function parseRotate(args: readonly string[]): CommandOptions | undefined {
 	const directory = directoryOption(single.get("--private-directory"))
 	if (!directory) return undefined
 	return { command: "rotate-credential", directory, keepSessions }
+}
+
+function parseMachineToken(
+	args: readonly string[],
+): CommandOptions | undefined {
+	const single = new Map<string, string>()
+	let replace = false
+	for (let index = 0; index < args.length; index++) {
+		const flag = args[index]
+		if (!flag) return undefined
+		if (flag === "--replace") {
+			if (replace) return undefined
+			replace = true
+			continue
+		}
+		if (flag === "--private-directory" || flag === "--out") {
+			const value = args[++index]
+			if (!value || value.startsWith("--") || single.has(flag)) return undefined
+			single.set(flag, value)
+			continue
+		}
+		return undefined
+	}
+	const directory = directoryOption(single.get("--private-directory"))
+	const out = directoryOption(single.get("--out"))
+	if (!directory || !out) return undefined
+	return { command: "machine-token", directory, out, replace }
 }
 
 function parseDevices(args: readonly string[]): CommandOptions | undefined {
@@ -325,6 +363,21 @@ export async function runAccessCommand(
 			],
 		}
 	}
+	if (options.command === "machine-token") {
+		const exported = await exportMachineToken({
+			directory: options.directory,
+			out: options.out,
+			replace: options.replace,
+		})
+		if (exported.kind !== "written")
+			return { exitCode: 1, lines: [machineTokenFailure(exported.code)] }
+		return {
+			exitCode: 0,
+			lines: [
+				"ACCESS_TOKEN_WRITTEN: Machine credential written to the --out file with mode 0600. It is a reusable credential for every protected route: keep the file private and send it only as `Authorization: Bearer`. rotate-credential revokes it.",
+			],
+		}
+	}
 	if (options.command === "devices-revoke-all-unconfirmed")
 		return {
 			exitCode: 1,
@@ -396,6 +449,16 @@ export async function runAccessCommand(
 			`Expires in ${result.expiresInSeconds} seconds. Enter it in the connected web UI; the code is not a reusable API credential.`,
 		],
 	}
+}
+
+function machineTokenFailure(code: string): string {
+	if (code === "ACCESS_TOKEN_OUT_EXISTS")
+		return `${code}: The --out file already exists. Pass --replace to overwrite your own 0600 file.`
+	if (code === "ACCESS_TOKEN_OUT_UNSAFE")
+		return `${code}: The --out path is unsafe: use a directory not writable by group or others, outside the private directory, and replace only your own 0600 regular file.`
+	if (code === "ACCESS_CREDENTIAL_UNAVAILABLE")
+		return `${code}: The private directory has no readable machine credential. Run setup first; the directory must be yours with mode 0700. No file was written.`
+	return `${code}: The machine credential was not written.`
 }
 
 function remoteTimeout(options: RemoteOptions): { timeoutMs?: number } {

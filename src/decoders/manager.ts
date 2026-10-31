@@ -624,6 +624,18 @@ const ObservedCentresSchema = z
 	.max(ACTIVITY_MAX_OBSERVED)
 
 /**
+ * The safe efficiency detail code (budget, cpu, drops, late-drops, unknown) while the
+ * efficiency gate refuses a decoder, as a log field; nothing otherwise.
+ */
+function efficiencyDetailField(state: { admission?: AdmissionDecision }): {
+	efficiencyDetail?: Extract<AdmissionDecision, { admit: false }>["detail"]
+} {
+	return state.admission?.admit === false
+		? { efficiencyDetail: state.admission.detail }
+		: {}
+}
+
+/**
  * DecoderManager - Orchestrates decoder lifecycle and coordinates with other components.
  *
  * Handles:
@@ -1417,6 +1429,7 @@ export class DecoderManager extends EventEmitter {
 					{
 						reasonCode: "efficiency-budget",
 						detail: "late-drops",
+						efficiencyDetail: "late-drops",
 						sourceId: state.placement.sourceId,
 						decoderId: state.placement.decoderId,
 					},
@@ -1440,22 +1453,27 @@ export class DecoderManager extends EventEmitter {
 		}
 		if (verdicts.length === 0 && now - this.lastEfficiencyWarningMs >= 60_000) {
 			const view = this.efficiencyView()
-			if (
-				view.sources.some(
-					source =>
-						!running.some(
-							placement =>
-								placement.sourceId === source.sourceId &&
-								now - placement.admittedAtMs < EFFICIENCY_PROBATION_MS,
-						) &&
-						(source.drops === "dropping" ||
-							(source.cpu.percent !== null &&
-								source.cpu.percent > source.cpu.limit)),
-				)
-			) {
+			const over = view.sources.filter(
+				source =>
+					!running.some(
+						placement =>
+							placement.sourceId === source.sourceId &&
+							now - placement.admittedAtMs < EFFICIENCY_PROBATION_MS,
+					) &&
+					(source.drops === "dropping" ||
+						(source.cpu.percent !== null &&
+							source.cpu.percent > source.cpu.limit)),
+			)
+			if (over.length > 0) {
 				this.lastEfficiencyWarningMs = now
 				this.log.warn(
-					{ reasonCode: "efficiency-budget" },
+					{
+						reasonCode: "efficiency-budget",
+						// Drops outrank CPU, as in the gate's own verdicts.
+						efficiencyDetail: over.some(source => source.drops === "dropping")
+							? "drops"
+							: "cpu",
+					},
 					"Decoder efficiency drops or CPU limit exceeded",
 				)
 			}
@@ -3279,7 +3297,11 @@ export class DecoderManager extends EventEmitter {
 				}
 				if (!this.config.enablement)
 					this.log.info(
-						{ decoderId: id, reasonCode: state.suspension.reasonCode },
+						{
+							decoderId: id,
+							reasonCode: state.suspension.reasonCode,
+							...efficiencyDetailField(state),
+						},
 						"Start recorded; decoder suspended (see reasonCode)",
 					)
 				this.emitStatusChanged(state)
@@ -5677,7 +5699,11 @@ export class DecoderManager extends EventEmitter {
 			this.updateDecoderHealth(state, "running")
 		if (!this.config.enablement)
 			this.log.info(
-				{ decoderId: id, reasonCode: state.suspension.reasonCode },
+				{
+					decoderId: id,
+					reasonCode: state.suspension.reasonCode,
+					...efficiencyDetailField(state),
+				},
 				"Suspending decoder (see reasonCode)",
 			)
 		this.emitStatusChanged(state)
@@ -6248,6 +6274,7 @@ export class DecoderManager extends EventEmitter {
 				{
 					reasonCode: "efficiency-budget",
 					detail: "budget",
+					efficiencyDetail: "budget",
 					decoderId: state.placement.decoderId,
 					placement: key,
 				},
@@ -6962,7 +6989,11 @@ export class DecoderManager extends EventEmitter {
 				(state.loggedSuspension !== undefined || reasonCode !== null)
 			)
 				this.log.info(
-					{ decoderId: state.parentId ?? state.config.id, reasonCode },
+					{
+						decoderId: state.parentId ?? state.config.id,
+						reasonCode,
+						...efficiencyDetailField(state),
+					},
 					"Decoder suspension changed",
 				)
 			state.loggedSuspension = reasonCode

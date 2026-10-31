@@ -160,6 +160,9 @@ it("invalid mode value is a 400 with no echo of the value", async () => {
 				message: "mode must be auto, always, off or null",
 			},
 		],
+		fields: [
+			{ field: "mode", expected: 'one of "auto" | "always" | "off" or null' },
+		],
 	})
 	expect(response.body).not.toContain("private-mode-sentinel")
 	expect(settings.revision()).toBe(0)
@@ -175,6 +178,9 @@ it("mode of a non-string type is rejected by the shape gate", async () => {
 			code: "DECODER_OPTIONS_INVALID",
 			message:
 				"Body must be a JSON object with only enabled (boolean or null), options (object) and mode (string or null)",
+			fields: [
+				{ field: "mode", expected: 'one of "auto" | "always" | "off" or null' },
+			],
 		})
 	}
 	expect(update).not.toHaveBeenCalled()

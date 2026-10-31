@@ -188,6 +188,7 @@ describe("protected PATCH", () => {
 			error: "Bad Request",
 			code: "DECODER_OPTIONS_INVALID",
 			message: "Decoder id is required",
+			fields: [{ field: "id", expected: "a decoder id, at least 1 character" }],
 		})
 	})
 	it("deny precedes lookup, parsing and the service", async () => {
@@ -275,6 +276,13 @@ describe("protected PATCH", () => {
 			error: "Bad Request",
 			code: "DECODER_OPTIONS_INVALID",
 			message: "If-Match must be a revision",
+			fields: [
+				{
+					field: "If-Match",
+					expected:
+						'a settings revision, a non-negative integer (quoted "7" or bare 7)',
+				},
+			],
 		})
 		expectNoEcho(res.body)
 		expect(update).not.toHaveBeenCalled()
@@ -391,7 +399,28 @@ describe("protected PATCH", () => {
 		update.mockRejectedValueOnce(error)
 		const res = await patch({ options: { [SENTINEL_KEY]: SENTINEL } })
 		expect(res.statusCode).toBe(status)
-		expect(res.json()).toEqual(error.toBody())
+		// A 400 adds `fields`: option paths below options, never a submitted key.
+		const { fields, ...rest } = res.json<{ fields?: unknown }>()
+		expect(rest).toEqual(error.toBody())
+		expect(fields).toEqual(
+			status !== 400
+				? undefined
+				: error.code === "DECODER_OPTIONS_INVALID"
+					? [
+							{
+								field: "options.gain",
+								expected:
+									"a value of the documented option type and bounds (GET /api/decoders/:id/settings)",
+							},
+						]
+					: [
+							{
+								field: "options",
+								expected:
+									"only options this decoder can change at runtime (GET /api/decoders/:id/settings marks them)",
+							},
+						],
+		)
 		expectNoEcho(res.body)
 	})
 

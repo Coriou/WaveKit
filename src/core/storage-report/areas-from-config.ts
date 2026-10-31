@@ -7,6 +7,7 @@ import { join, resolve } from "node:path"
 import type { StorageActivityRetention } from "@wavekit/api-types"
 import {
 	DECODER_SETTINGS_FILE_NAME,
+	IQ_CAPTURES_QUOTA_BYTES,
 	RECORDING_KEEPS_FILE_NAME,
 } from "@wavekit/api-types"
 import type {
@@ -20,6 +21,9 @@ import { STATION_STORE_FILE } from "../station/contract.js"
 import type { StorageAreaSource } from "./contract.js"
 
 const MiB = 1024 * 1024
+
+/** Directory of the IQ capture route (`POST /api/iq-captures`) under the state dir. */
+export const IQ_CAPTURES_DIR = "iq-captures"
 
 /** Default per-call WAV directory of the dsd-fme adapter. */
 export const DSD_FME_DEFAULT_RECORDING_DIR = "/app/decoded_calls"
@@ -99,6 +103,12 @@ export function storageAreasFromConfig(
 				inputs.scannerEnabled === false
 					? null
 					: inputs.scannerStorage.maxRecordingsMb * MiB,
+		},
+		{
+			// The IQ capture route's store; its quota refuses captures past this.
+			id: "iq-captures",
+			paths: [join(stateDir, IQ_CAPTURES_DIR)],
+			capBytes: IQ_CAPTURES_QUOTA_BYTES,
 		},
 		{ id: "digital-voice-wav", paths: wavDirs, capBytes: null },
 		{ id: "bandplans", paths: [join(stateDir, "bandplans")], capBytes: null },

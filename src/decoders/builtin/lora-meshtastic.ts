@@ -96,6 +96,12 @@ function isBase64(
 	return BASE64_CHARS_RE.test(value)
 }
 
+/**
+ * Channel key sizes the wrapper accepts: the 1-byte firmware shorthand ("AQ==" and kin),
+ * an AES-128 PSK or an AES-256 PSK.
+ */
+const CHANNEL_KEY_BYTES: readonly number[] = [1, 16, 32]
+
 /** Resolved decoder options after preset and override application. */
 export interface LoraMeshtasticOptions {
 	region: LoraRegion
@@ -121,6 +127,14 @@ export const RawOptionsSchema = z
 			.refine(
 				v => isBase64(v, { allowEmpty: false }),
 				"channelKey must be a non-empty padded base64 string",
+			)
+			.refine(
+				v => CHANNEL_KEY_BYTES.includes(Buffer.from(v, "base64").length),
+				"channelKey must decode to 1 byte (shorthand), 16 bytes (AES-128) or 32 bytes (AES-256)",
+			)
+			.refine(
+				v => Buffer.from(v, "base64").toString("hex") !== "00",
+				"channelKey AA== (encryption disabled) is not supported",
 			),
 		bandwidth: z.number().int().positive().optional(),
 		spreadingFactor: z.number().int().min(6).max(12).optional(),

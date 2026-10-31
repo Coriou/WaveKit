@@ -103,6 +103,7 @@ describe("recordingRoutes", () => {
 			error: "Bad Request",
 			code: "RECORDINGS_QUERY_INVALID",
 			message: "The recordings query is invalid",
+			fields: [{ field: "limit", expected: "integer (1 to 200), one value" }],
 		})
 		expect(res.body).not.toContain("secret")
 	})

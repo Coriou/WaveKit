@@ -234,6 +234,7 @@ describe("GET /api/scanner/discoveries evidence, nearHz and toleranceHz", () => 
 				error: "ValidationError",
 				code: "VALIDATION_ERROR",
 				message: finiteMessage(path),
+				fields: [{ field: path, expected: "finite number, Hz" }],
 			})
 			expect(JSON.stringify(res.json()), url).not.toMatch(/Infinity|1e999/)
 		}
@@ -247,6 +248,10 @@ describe("GET /api/scanner/discoveries evidence, nearHz and toleranceHz", () => 
 			code: "VALIDATION_ERROR",
 			message:
 				"Invalid query parameter: nearHz must be a finite number; toleranceHz must be a finite number",
+			fields: [
+				{ field: "nearHz", expected: "finite number, Hz" },
+				{ field: "toleranceHz", expected: "finite number, Hz" },
+			],
 		})
 		expect(listDiscoveries).not.toHaveBeenCalled()
 	})
