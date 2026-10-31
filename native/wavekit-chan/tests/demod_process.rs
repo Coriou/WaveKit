@@ -123,7 +123,8 @@ impl Proc {
                 (Some(1), Some(4)),
                 "{e}"
             );
-            if e["type"] != "stats" {
+            // Telemetry: `stats` every 5 s, `progress` after work at most every 100 ms.
+            if e["type"] != "stats" && e["type"] != "progress" {
                 return e;
             }
         }

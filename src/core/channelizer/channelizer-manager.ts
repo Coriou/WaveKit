@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events"
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { createConnection } from "node:net"
 import { join } from "node:path"
-import { PassThrough, type Readable } from "node:stream"
+import { PassThrough, type Readable, type Writable } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import type { ChannelizerConfig, SourceCaps } from "../../config.js"
 import { branchHighWaterMark, type FanoutManager } from "../fanout-manager.js"
@@ -47,6 +47,22 @@ export const CRASH_LIMIT = 5
 export const CRASH_WINDOW_MS = 60_000
 const OPEN_TIMEOUT_MS = 5000
 const CLOSE_TIMEOUT_MS = 250
+/**
+ * Generation watchdog: a process that owes work (a control reply, or input queued in its stdin) and wrote no event
+ * line for this long is wedged and retired. The runtime writes `progress` after every unit of main-loop work, at most
+ * every 100 ms (PROGRESS_EVERY in native/wavekit-chan/src/runtime.rs), so a live one has 2000 / 100 = 20 chances per
+ * window. The longest legitimate silent step is far shorter: close no longer joins its writer (it used to wait up to
+ * CLOSE_JOIN_BUDGET, 500 ms: 4× margin even against that), and one DSP block at the largest blockSamples (2^20) costs
+ * ≈ 28 ns × 1 048 576 ≈ 29 ms per narrowband channel, so even 16 channels on one thread (≈ 470 ms) stay inside 4×.
+ * This bounds wedge detection only; no caller waits this long (a close caller still returns after CLOSE_TIMEOUT_MS).
+ */
+export const WEDGE_MS = 2000
+/**
+ * How often the watchdog samples whether work is owed while none is. Queued stdin is only seen by sampling, so a
+ * wedge under input is retired within WEDGE_MS + 250 ms; a sent control line starts the clock at once. Four timer
+ * turns per second per running generation.
+ */
+const WATCH_EVERY_MS = 250
 const BUSY_BACKOFF_MS = [25, 50, 100, 200, 400] as const
 const MAX_OPEN_SENDS = BUSY_BACKOFF_MS.length + 1
 const SAMPLE_BYTES = { cu8: 2, cf32: 8 } as const
@@ -137,8 +153,14 @@ interface SourceChannelizer {
 	droppedAtGap: number
 	invalidated: boolean
 	sawInputEof: boolean
-	/** `progress` lines this process has written; only grows. The wedge check's mark. */
-	progressed: number
+	/** The process's stdin, the branch's pipeline destination; bytes queued here are owed work. */
+	input: Writable
+	/** `openNow()` when the last event line of this generation arrived: the watchdog's liveness mark. */
+	heardAt: number
+	/** `openNow()` since when work is continuously owed; undefined while none is. */
+	owedSince: number | undefined
+	watchdog: ReturnType<typeof setTimeout> | undefined
+	watchdogVerdict: ReturnType<typeof setImmediate> | undefined
 	detachFanout: () => void
 	settlement?: ProcessClaim
 }
@@ -215,7 +237,7 @@ function defaultConnect(path: string, signal?: AbortSignal): Promise<Readable> {
  * channel request and stopped when its last channel is released. Every spawn is a new generation; caps changes,
  * source loss and unexpected exits invalidate the generation's channels, and nothing respawns until the next request.
  * Channel opens, closes and retunes are control lines to the running generation: a slow reply never restarts it or
- * re-creates its fanout branch (only a wedged process, one that stopped consuming input, is retired).
+ * re-creates its fanout branch (only a wedged process, one that owes work and wrote nothing for WEDGE_MS, is retired).
  */
 export class ChannelizerManager
 	extends EventEmitter
@@ -446,6 +468,7 @@ export class ChannelizerManager
 				else resolve(result)
 			}
 			const timer = setTimeout(fail, this.deps.openTimeoutMs ?? OPEN_TIMEOUT_MS)
+			this.markOwed(s)
 			s.retuning.add(channelId)
 			s.interruptions.add(fail)
 			s.process.on("event", onEvent)
@@ -717,8 +740,6 @@ export class ChannelizerManager
 		this.clearIdleTimer(s)
 		s.pending++
 		let ownedAttempt: OpenAttempt | undefined
-		// Progress lines when the last open went out: an unconfirmed close is a wedge only if the process wrote none since.
-		let sentMark = s.progressed
 		try {
 			let event: OpenedEvent
 			for (;;) {
@@ -754,9 +775,9 @@ export class ChannelizerManager
 				}
 				const reply = await this.wait<OpenReply>(s, ctx, done => {
 					attempt.reply = done
+					this.markOwed(s)
 					s.waiters.set(channelId, attempt)
 					ctx.sends++
-					sentMark = s.progressed
 					if (attempt.settlement)
 						s.process.sendObserved?.(open, attempt.settlement)
 					else s.process.send(open)
@@ -772,8 +793,6 @@ export class ChannelizerManager
 						channelId,
 						attempt.pending,
 						this.remaining(ctx),
-						reply === null ? "open-timeout" : "cancel-close-unconfirmed",
-						sentMark,
 					)
 					return reply === null
 						? this.timeout()
@@ -782,14 +801,7 @@ export class ChannelizerManager
 				if (s.invalidated) return await superseded()
 				if (ctx.signal?.aborted || this.remaining(ctx) <= 0) {
 					if (reply.type === "opened" && !attempt.closed)
-						await this.closeOwned(
-							s,
-							channelId,
-							false,
-							this.remaining(ctx),
-							ctx.signal?.aborted ? "cancel-close-unconfirmed" : "open-timeout",
-							sentMark,
-						)
+						await this.closeOwned(s, channelId, false, this.remaining(ctx))
 					return ctx.signal?.aborted
 						? unavailable(this.cancellationDetail())
 						: this.timeout()
@@ -826,14 +838,7 @@ export class ChannelizerManager
 			if (ownedAttempt?.closed)
 				return unavailable("channel closed during acquisition")
 			if (ctx.signal?.aborted || this.remaining(ctx) <= 0) {
-				await this.closeOwned(
-					s,
-					channelId,
-					false,
-					this.remaining(ctx),
-					ctx.signal?.aborted ? "cancel-close-unconfirmed" : "open-timeout",
-					sentMark,
-				)
+				await this.closeOwned(s, channelId, false, this.remaining(ctx))
 				return ctx.signal?.aborted
 					? unavailable(this.cancellationDetail())
 					: this.timeout()
@@ -896,18 +901,7 @@ export class ChannelizerManager
 				"failed" in connected
 			) {
 				if (!ownedAttempt?.closed)
-					await this.closeOwned(
-						s,
-						channelId,
-						false,
-						this.remaining(ctx),
-						connected === null
-							? "open-timeout"
-							: connected === "cancelled"
-								? "cancel-close-unconfirmed"
-								: "connect-close-unconfirmed",
-						sentMark,
-					)
+					await this.closeOwned(s, channelId, false, this.remaining(ctx))
 				if (
 					ownedAttempt?.closed &&
 					connected !== "cancelled" &&
@@ -935,14 +929,7 @@ export class ChannelizerManager
 				if (ownedAttempt?.closed)
 					return unavailable("channel closed during acquisition")
 				if (s.invalidated) return await superseded()
-				await this.closeOwned(
-					s,
-					channelId,
-					false,
-					this.remaining(ctx),
-					ctx.signal?.aborted ? "cancel-close-unconfirmed" : "open-timeout",
-					sentMark,
-				)
+				await this.closeOwned(s, channelId, false, this.remaining(ctx))
 				return ctx.signal?.aborted
 					? unavailable(this.cancellationDetail())
 					: this.timeout()
@@ -1071,28 +1058,20 @@ export class ChannelizerManager
 	}
 
 	/**
-	 * A closed line is a FIFO terminal barrier. The caller waits at most `budget` (≤ CLOSE_TIMEOUT_MS). A close
-	 * still unconfirmed then retires the generation only when the process is wedged, i.e. wrote no `progress` line
-	 * since `since` (`s.progressed` at the send). Liveness comes from the process itself, never from Node's stdin
-	 * buffers (a pending write holds bytes the process already read): while a control line waits behind other work,
-	 * the process's main loop writes `progress` every 50 ms that it did more work (PROGRESS_EVERY in
-	 * native/wavekit-chan/src/runtime.rs), so a busy process speaks in every CLOSE_TIMEOUT_MS window and a wedged
-	 * one does not. A live process applies the queued close after its current block, so the id stays fenced
-	 * (`s.closing`, same-id reuse waits for the terminal) and the check repeats every CLOSE_TIMEOUT_MS: one slow
-	 * close no longer tears down every other channel, the branch and the process.
+	 * A closed line is a FIFO terminal barrier. The caller waits at most `budget` (≤ CLOSE_TIMEOUT_MS); an unconfirmed
+	 * close never retires the generation by itself. The id stays fenced (`s.closing`: same-id reuse waits for the
+	 * terminal, bounded by its own deadline) until `closed` arrives or the generation ends, and other channels are
+	 * untouched. A process that never answers is wedged, and the generation watchdog (`watch`, WEDGE_MS) retires it:
+	 * an owed close counts as owed work.
 	 */
 	private closeOwned(
 		s: SourceChannelizer,
 		id: string,
 		pendingOpen: boolean,
 		budget = CLOSE_TIMEOUT_MS,
-		cause = "close-unconfirmed",
-		since = s.progressed,
 	): Promise<void> {
 		if (s.invalidated) return Promise.resolve()
-		const held = s.closing.get(id)
-		if (held) {
-			// A second waiter gets the same bound; the fence and its wedge check stay with the first close.
+		const bounded = (closing: Closing): Promise<void> => {
 			if (budget <= 0) return Promise.resolve()
 			return new Promise(done => {
 				const wake = () => {
@@ -1101,61 +1080,89 @@ export class ChannelizerManager
 				}
 				const t = setTimeout(
 					() => {
-						held.waiters.delete(wake)
+						closing.waiters.delete(wake)
 						done()
 					},
 					Math.min(CLOSE_TIMEOUT_MS, budget),
 				)
-				held.waiters.add(wake)
+				closing.waiters.add(wake)
 			})
 		}
-		let release = () => {}
-		const waited = new Promise<void>(done => {
-			release = done
-		})
-		let timer: ReturnType<typeof setTimeout> | undefined
-		let verdict: ReturnType<typeof setImmediate> | undefined
+		// A second waiter gets the same bound; the fence stays with the first close.
+		const held = s.closing.get(id)
+		if (held) return bounded(held)
 		const closing: Closing = {
 			pendingOpen,
 			waiters: new Set(),
 			finish: () => {
 				if (s.closing.get(id) !== closing) return
 				s.closing.delete(id)
-				if (timer !== undefined) clearTimeout(timer)
-				if (verdict !== undefined) clearImmediate(verdict)
 				const waiters = [...closing.waiters]
 				closing.waiters.clear()
 				for (const wake of waiters) wake()
-				release()
 			},
 		}
+		this.markOwed(s)
 		s.closing.set(id, closing) // before send or socket destruction
+		const waited = bounded(closing)
 		s.process.send({ v: 1, type: "close", id })
-		if (s.closing.get(id) === closing) {
-			let mark = since
-			const judge = () => {
-				timer = verdict = undefined
-				if (s.closing.get(id) !== closing) return
-				release()
-				if (s.progressed > mark && this.active.get(s.sourceId) === s) {
-					mark = s.progressed
-					timer = setTimeout(defer, CLOSE_TIMEOUT_MS)
-					return
-				}
-				if (this.active.get(s.sourceId) === s)
-					this.invalidate(s.sourceId, cause)
-				closing.finish()
-			}
-			// The verdict waits for this loop turn's I/O: after an event-loop stall the timer phase runs before the
-			// poll phase, which would read a `closed` line the process wrote long ago.
-			const defer = () => {
-				timer = undefined
-				verdict = setImmediate(judge)
-			}
-			if (budget <= 0) defer()
-			else timer = setTimeout(defer, Math.min(CLOSE_TIMEOUT_MS, budget))
-		}
 		return waited
+	}
+
+	/**
+	 * Called just before a control line makes work owed. Nothing owed until now: the watchdog's clock starts here, not
+	 * at its next sample (which could otherwise count idle time since a sample that saw work owed earlier).
+	 */
+	private markOwed(s: SourceChannelizer): void {
+		if (s.owedSince === undefined || !this.owesWork(s))
+			s.owedSince = this.openNow()
+	}
+
+	/** Work the process owes: a control reply (open, close, retune) or input bytes Node could not hand to its stdin yet. */
+	private owesWork(s: SourceChannelizer): boolean {
+		if (s.closing.size > 0 || s.retuning.size > 0 || s.input.writableLength > 0)
+			return true
+		for (const attempt of s.waiters.values()) if (attempt.pending) return true
+		return false
+	}
+
+	/**
+	 * Generation watchdog: retires the process once it owes work and has written no event line for WEDGE_MS, counted
+	 * from the later of its last line and the moment work became owed (an idle process is silent by design, so silence
+	 * before anything was owed does not count). Nothing owed: never retired. The verdict runs after this loop turn's
+	 * I/O (setImmediate): after an event-loop stall the timer phase runs before the poll phase, which would read lines
+	 * the process wrote long ago.
+	 */
+	private watch(s: SourceChannelizer): void {
+		const arm = (ms: number) => {
+			s.watchdog = setTimeout(() => {
+				s.watchdog = undefined
+				s.watchdogVerdict = setImmediate(judge)
+			}, ms)
+			s.watchdog.unref()
+		}
+		const judge = () => {
+			s.watchdogVerdict = undefined
+			if (s.invalidated || this.active.get(s.sourceId) !== s) return
+			if (!this.owesWork(s)) {
+				s.owedSince = undefined
+				arm(WATCH_EVERY_MS)
+				return
+			}
+			const now = this.openNow()
+			s.owedSince ??= now
+			const silent = now - Math.max(s.heardAt, s.owedSince)
+			if (silent < WEDGE_MS) {
+				arm(Math.min(WATCH_EVERY_MS, WEDGE_MS - silent))
+				return
+			}
+			this.log.warn(
+				{ sourceId: s.sourceId, generation: s.generation, silentMs: silent },
+				"wavekit-chan owes work and wrote nothing; retiring it as wedged",
+			)
+			this.invalidate(s.sourceId, "unresponsive")
+		}
+		arm(WATCH_EVERY_MS)
 	}
 
 	private async spawn(
@@ -1327,7 +1334,11 @@ export class ChannelizerManager
 			droppedAtGap: 0,
 			invalidated: false,
 			sawInputEof: false,
-			progressed: 0,
+			input: proc.input,
+			heardAt: this.openNow(),
+			owedSince: undefined,
+			watchdog: undefined,
+			watchdogVerdict: undefined,
 			detachFanout: () => {
 				fanout.off("backpressure", onBackpressure)
 				fanout.off("drain", onDrain)
@@ -1342,7 +1353,7 @@ export class ChannelizerManager
 				caps.sampleRate,
 			),
 		})
-		void pipeline(branch, proc.input).catch((err: unknown) =>
+		void pipeline(branch, s.input).catch((err: unknown) =>
 			this.log.debug(
 				{ err, sourceId, generation },
 				"Channelizer input pipeline ended",
@@ -1355,6 +1366,7 @@ export class ChannelizerManager
 			this.onExit(s, code, signal),
 		)
 		this.active.set(sourceId, s)
+		this.watch(s)
 		this.log.info({ sourceId, generation, dir }, "Channelizer started")
 		return s
 	}
@@ -1378,7 +1390,9 @@ export class ChannelizerManager
 		)
 			this.deps.settlementObserver?.recordTerminal(terminal, e.type)
 		if (s.invalidated || this.active.get(s.sourceId) !== s) return
-		if (e.generation !== s.generation) {
+		if (e.generation === s.generation)
+			s.heardAt = this.openNow() // any line: the main loop ran
+		else {
 			this.log.warn(
 				{ sourceId: s.sourceId, got: e.generation, want: s.generation },
 				"Ignoring event from another generation",
@@ -1473,8 +1487,7 @@ export class ChannelizerManager
 				)
 				break
 			case "progress":
-				s.progressed++ // closeOwned's wedge check
-				break
+				break // liveness only, recorded above
 			case "ready":
 				break
 		}
@@ -1616,6 +1629,9 @@ export class ChannelizerManager
 	/** Synchronous on purpose (called from event listeners); `destroy()` awaits the tracked stop. */
 	private retire(s: SourceChannelizer, cause: string): void {
 		this.clearIdleTimer(s)
+		if (s.watchdog !== undefined) clearTimeout(s.watchdog)
+		if (s.watchdogVerdict !== undefined) clearImmediate(s.watchdogVerdict)
+		s.watchdog = s.watchdogVerdict = undefined
 		s.invalidated = true
 		for (const wake of [...s.interruptions]) wake()
 		for (const closing of [...s.closing.values()]) closing.finish()

@@ -54,27 +54,23 @@ const channel = (centerHz: number): DecoderChannelRequest => ({
 })
 
 /** runtime.rs PROGRESS_EVERY. */
-const PROGRESS_EVERY_MS = 50
+const PROGRESS_EVERY_MS = 100
 
 /**
- * Answers like wavekit-chan between blocks and consumes its input continuously (a live, busy process). While a
- * close is owed it reports `progress` after more input, at most every 50 ms, like the runtime's main loop.
+ * Answers like wavekit-chan between blocks and consumes its input continuously (a live, busy process). It reports
+ * `progress` after more input, at most every 100 ms, like the runtime's main loop.
  */
 class BusyProcess extends EventEmitter implements ChannelizerProcessLike {
 	consumed = 0
 	closes = 0
-	private owed = 0
-	private owedSince = 0
+	progressLines = 0
 	private lastProgress = -Infinity
 	readonly input = new Writable({
 		write: (chunk: Buffer, _enc, done) => {
 			this.consumed += chunk.length
 			const now = Date.now()
-			if (
-				this.owed > 0 &&
-				now - this.owedSince >= PROGRESS_EVERY_MS &&
-				now - this.lastProgress >= PROGRESS_EVERY_MS
-			) {
+			if (now - this.lastProgress >= PROGRESS_EVERY_MS) {
+				this.progressLines++
 				this.lastProgress = now
 				this.event({
 					v: 1,
@@ -132,10 +128,8 @@ class BusyProcess extends EventEmitter implements ChannelizerProcessLike {
 				REPLY_MS,
 			)
 		else if (r.type === "close") {
-			if (this.owed++ === 0) this.owedSince = Date.now()
 			setTimeout(
 				() => {
-					this.owed--
 					this.event({
 						v: 1,
 						type: "closed",

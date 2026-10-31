@@ -374,7 +374,24 @@ exits 0.
 { v: 1, type: "stats", generation, inputSamples, channels: [{ id, outputSamples, queueHighWaterBytes, droppedSamples, saturatedSamples }] }  // every 5 s
 { v: 1, type: "closed", id, generation, reason: "requested" | "client-gone" }
 { v: 1, type: "input-eof", generation, inputSamples, discardedBytes }
+{ v: 1, type: "progress", generation, inputSamples }  // after main-loop work, at most every 100 ms
 ```
+
+`progress` is main-loop liveness, not telemetry. The main loop writes it after
+it completed more work (an input block, a control line, a planner poll while an
+open is being prepared, or a reaped writer of a closed channel), at most every
+100 ms (`PROGRESS_EVERY` in `runtime.rs`); an idle process writes none.
+`close` answers `closed` without waiting for the channel's writer thread; the
+writer is joined on a later turn once it has returned (detached after 500 ms),
+and the connection's `closing` flag still stops an old writer from unlinking a
+same-id replacement's socket. Node never retires a generation because one
+`close` went unanswered: the caller waits at most 250 ms and the id stays fenced
+until `closed`. A generation watchdog retires the process only when it owes work
+(a pending open, close or retune reply, or input queued in its stdin) and wrote
+no event line of any type for 2000 ms (`WEDGE_MS` in `channelizer-manager.ts`),
+counted from the later of its last line and the moment the work became owed.
+2000 ms leaves 20 `progress` chances per window and is 4× the longest silent
+step the main loop used to take (the 500 ms writer join).
 
 The process listens on `DIR/<id>.sock` before emitting `opened`; exactly one
 client per socket; client disconnect closes the channel. `sampleIndex` is the

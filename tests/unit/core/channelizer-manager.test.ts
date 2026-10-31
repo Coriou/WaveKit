@@ -917,7 +917,8 @@ describe("ChannelizerManager", () => {
 	// Validates: addendum §4, §12.12; plan A2
 	it("sends mark-gap at the seam after real branch drops", async () => {
 		process.env["FAKE_CHAN_MODE"] = "stall-input"
-		process.env["FAKE_CHAN_STALL_MS"] = "3000"
+		// Below WEDGE_MS (2000): a process that stops reading for longer while input queues is retired as wedged.
+		process.env["FAKE_CHAN_STALL_MS"] = "1000"
 		const sent: ChannelizerRequest[] = []
 		const src = new PassThrough()
 		try {
@@ -936,7 +937,7 @@ describe("ChannelizerManager", () => {
 			const gaps: unknown[][] = []
 			m.on("channel-discontinuity", (...args: unknown[]) => gaps.push(args))
 			fanout.attachSource(src)
-			// The fake reads nothing for 3 s after `opened`. The OS pipe, the child stdin and the 64 KiB branch fill up
+			// The fake reads nothing for 1 s after `opened`. The OS pipe, the child stdin and the 64 KiB branch fill up
 			// after a few hundred KiB, then FanoutManager drops. 4 MiB is far past that.
 			const chunk = 65_536
 			const chunks = 64

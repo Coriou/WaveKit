@@ -8,7 +8,10 @@ import {
 	ChannelizerConfigSchema,
 	type SourceCaps,
 } from "../../../../src/config.js"
-import { ChannelizerManager } from "../../../../src/core/channelizer/channelizer-manager.js"
+import {
+	ChannelizerManager,
+	WEDGE_MS,
+} from "../../../../src/core/channelizer/channelizer-manager.js"
 import type {
 	ChannelizerProcessLike,
 	ChannelizerProcessOptions,
@@ -20,9 +23,10 @@ import type {
 import { FanoutManager } from "../../../../src/core/fanout-manager.js"
 
 /**
- * An unconfirmed close retires the generation (every channel, the branch, the process) only when the
- * process is wedged: it wrote no event line in the window. A slow but live process keeps its generation:
- * while a control line waits behind input, its main loop reports `progress` (runtime.rs `maybe_progress`).
+ * An unconfirmed close never retires the generation by itself: the caller returns after 250 ms and the id stays
+ * fenced until `closed`. Only the generation watchdog retires a process, when it owes work (a control reply or queued
+ * stdin) and wrote no event line for WEDGE_MS. The runtime writes `progress` after main-loop work at most every
+ * 100 ms (runtime.rs `maybe_progress`), so a busy process is never mistaken for a wedged one.
  */
 const logger = pino({ level: "silent" })
 const caps: SourceCaps = {
@@ -41,26 +45,38 @@ const request = {
 }
 
 /** runtime.rs PROGRESS_EVERY. */
-const PROGRESS_EVERY_MS = 50
+const PROGRESS_EVERY_MS = 100
+/** channelizer-manager.ts WATCH_EVERY_MS: how late queued stdin can be noticed. */
+const WATCH_EVERY_MS = 250
 
 /**
- * Models wavekit-chan's main loop: every 10 ms it reads up to `readPerTick` bytes of stdin. A stdin write
- * completes only once all of it is read, so Node's `writableLength` holds bytes the process already took.
- * While a close is owed and input was read, it writes `progress` like the runtime.
+ * Models wavekit-chan's main loop as a sequence of jobs, each of which completes after its duration: a long work unit
+ * (`units`, e.g. a DSP block), a control line (a close, answered after `closeHandlingMs` when `answerCloses`), or a
+ * 10 ms input turn reading up to `readPerTick` bytes of stdin. A stdin write completes only once all of it is read, so
+ * Node's `writableLength` holds bytes the process already took. After each job that did work it writes `progress` at
+ * most every 100 ms, like the runtime; nothing while it does no work.
  */
 class Proc extends EventEmitter implements ChannelizerProcessLike {
-	/** False: the main loop stops (wedged). */
+	/** False: the main loop stops (wedged): no job completes, nothing is written. */
 	reading = true
 	/** 1 MiB per 10 ms turn: far faster than any feed. */
 	readPerTick = 1 << 20
+	/** Long work units queued ahead of the next job, in ms. */
+	readonly units: number[] = []
+	/** True: the loop answers closes itself, in FIFO order after queued units. False: the test answers. */
+	answerCloses = false
+	/** How long handling one close keeps the loop silent (the pre-fix bounded writer join). */
+	closeHandlingMs = 0
 	readonly closes: string[] = []
+	readonly progressAt: number[] = []
 	inputBytes = 0
 	private readonly writes: { left: number; done: () => void }[] = []
-	private readonly owed = new Set<string>()
-	private owedSince = 0
-	private lastProgress: number | undefined
-	private progressInput = 0
-	private loop: ReturnType<typeof setInterval> | undefined
+	private readonly controls: string[] = []
+	private work = 0
+	private progressWork = 0
+	private lastProgress = -Infinity
+	private loop: ReturnType<typeof setTimeout> | undefined
+	private stopped = false
 	readonly input = new Writable({
 		highWaterMark: 4096,
 		write: (chunk: Buffer, _enc, done) => {
@@ -71,19 +87,44 @@ class Proc extends EventEmitter implements ChannelizerProcessLike {
 		super()
 	}
 	start(): Promise<void> {
-		this.loop = setInterval(() => this.turn(), 10)
+		this.next()
 		this.event({ v: 1, type: "ready", generation: this.generation, pid: 3 })
 		return Promise.resolve()
 	}
 	stop(): Promise<void> {
-		clearInterval(this.loop)
+		this.stopped = true
+		clearTimeout(this.loop)
 		for (const w of this.writes.splice(0)) w.done()
 		this.input.destroy()
 		this.emit("exit", 0, null)
 		return Promise.resolve()
 	}
-	private turn() {
-		if (!this.reading) return
+	private next() {
+		if (this.stopped) return
+		const unit = this.units.shift()
+		const close =
+			unit === undefined && this.answerCloses
+				? this.controls.shift()
+				: undefined
+		const ms = unit ?? (close !== undefined ? this.closeHandlingMs : 10)
+		this.loop = setTimeout(() => {
+			if (!this.reading) {
+				// Wedged: this job never completes; look again later so a test may resume it.
+				if (unit !== undefined) this.units.unshift(unit)
+				if (close !== undefined) this.controls.unshift(close)
+				this.loop = setTimeout(() => this.next(), 10)
+				return
+			}
+			if (unit !== undefined) this.work++
+			else if (close !== undefined) {
+				this.work++
+				this.closed(close)
+			} else this.read()
+			this.maybeProgress()
+			this.next()
+		}, ms)
+	}
+	private read() {
 		let budget = this.readPerTick
 		while (budget > 0 && this.writes.length > 0) {
 			const w = this.writes[0]!
@@ -96,24 +137,24 @@ class Proc extends EventEmitter implements ChannelizerProcessLike {
 				w.done()
 			}
 		}
+		if (budget < this.readPerTick) this.work++
+	}
+	private maybeProgress() {
 		const now = Date.now()
-		const due = (t: number) => now - t >= PROGRESS_EVERY_MS
-		const input = Math.floor(this.inputBytes / 2)
 		if (
-			this.owed.size > 0 &&
-			due(this.owedSince) &&
-			(this.lastProgress === undefined || due(this.lastProgress)) &&
-			input > this.progressInput
-		) {
-			this.lastProgress = now
-			this.progressInput = input
-			this.event({
-				v: 1,
-				type: "progress",
-				generation: this.generation,
-				inputSamples: input,
-			})
-		}
+			this.work === this.progressWork ||
+			now - this.lastProgress < PROGRESS_EVERY_MS
+		)
+			return
+		this.lastProgress = now
+		this.progressWork = this.work
+		this.progressAt.push(now)
+		this.event({
+			v: 1,
+			type: "progress",
+			generation: this.generation,
+			inputSamples: Math.floor(this.inputBytes / 2),
+		})
 	}
 	event(e: ChannelizerEvent) {
 		this.emit("event", e)
@@ -132,14 +173,13 @@ class Proc extends EventEmitter implements ChannelizerProcessLike {
 				groupDelaySamples: 31,
 			})
 		else if (r.type === "close") {
-			// Answered by the test.
 			this.closes.push(r.id)
-			if (this.owed.size === 0) this.owedSince = Date.now()
-			this.owed.add(r.id)
+			this.controls.push(r.id)
 		}
 	}
 	closed(id: string) {
-		this.owed.delete(id)
+		const k = this.controls.indexOf(id)
+		if (k >= 0) this.controls.splice(k, 1)
 		this.event({
 			v: 1,
 			type: "closed",
@@ -173,7 +213,7 @@ afterEach(async () => {
 })
 
 /** `feed: false`: the test drives every input byte through `fanout.distribute`. */
-function setup(feed = true) {
+function setup(feed = true, openTimeoutMs?: number) {
 	const sources = Object.assign(new EventEmitter(), { getCaps: () => caps })
 	const fanout = new FanoutManager(logger)
 	const processes: Proc[] = []
@@ -183,6 +223,7 @@ function setup(feed = true) {
 		config: ChannelizerConfigSchema.parse({ enabled: true, socketDir: dir }),
 		logger,
 		openNow: Date.now,
+		...(openTimeoutMs !== undefined ? { openTimeoutMs } : {}),
 		connect: () => Promise.resolve(new PassThrough()),
 		createProcess: (o: ChannelizerProcessOptions) => {
 			const p = new Proc(o.generation)
@@ -209,6 +250,14 @@ function setup(feed = true) {
 	return { m, fanout, processes, invalidations, acquire, destroy }
 }
 
+/** Advances `ms` in 10 ms steps (a last partial step for the rest), letting each verdict's setImmediate run. */
+async function run(ms: number, stop = () => false) {
+	for (let t = 0; t < ms && !stop(); t += 10) {
+		await vi.advanceTimersByTimeAsync(Math.min(10, ms - t))
+		await flushImmediates()
+	}
+}
+
 it("a live process's slow close keeps the generation; same-id reuse waits for the real closed", async () => {
 	const { m, processes, invalidations, acquire } = setup()
 	const steady = await acquire("steady")
@@ -217,16 +266,12 @@ it("a live process's slow close keeps the generation; same-id reuse waits for th
 	void m.releaseChannel(slot.channelId).then(() => {
 		released = true
 	})
-	await vi.advanceTimersByTimeAsync(250)
-	await flushImmediates()
+	await run(250)
 	// The caller's wait is still bounded by the 250 ms budget.
 	expect(released).toBe(true)
 	const reuse = m.requestChannel("rtl", "slot", request, caps)
-	// Three more checks (750 ms) of a process that keeps consuming input.
-	for (let i = 0; i < 3; i++) {
-		await vi.advanceTimersByTimeAsync(250)
-		await flushImmediates()
-	}
+	// Well past WEDGE_MS of a process that keeps consuming input.
+	await run(2 * WEDGE_MS)
 	expect(invalidations).toEqual([])
 	expect(processes[0]!.closes).toEqual(["slot-g1"])
 	processes[0]!.closed("slot-g1")
@@ -239,50 +284,125 @@ it("a live process's slow close keeps the generation; same-id reuse waits for th
 	expect(steady.stream.destroyed).toBe(false)
 })
 
-it("a reply read in the same loop turn as a late timer (event-loop stall) never retires", async () => {
-	const { m, processes, invalidations, acquire } = setup()
-	await acquire("steady")
-	const slot = await acquire("slot")
-	// No input consumed in the window (stdin stalled first): only the reply can save it.
-	processes[0]!.reading = false
-	await vi.advanceTimersByTimeAsync(100)
-	const release = m.releaseChannel(slot.channelId)
-	// The 250 ms timer fires late, in the timers phase (synchronous advance: no turn passes).
-	vi.advanceTimersByTime(300)
-	processes[0]!.closed("slot-g1") // the `closed` line the stalled loop reads in this turn
-	await flushImmediates()
-	await release
-	expect(invalidations).toEqual([])
-	expect(processes).toHaveLength(1)
-})
-
-it("a process that stops consuming input with a close pending is retired as wedged", async () => {
+it("a close queued behind two 150 ms work units keeps the generation and is answered after them", async () => {
 	const { m, processes, invalidations, acquire } = setup()
 	const steady = await acquire("steady")
 	const slot = await acquire("slot")
+	const proc = processes[0]!
+	proc.answerCloses = true
+	await run(200) // the loop has reported progress before
+	// The close arrives just as the loop starts the first unit: no line for the first 150 ms.
+	proc.units.push(150, 150)
+	const sentAt = Date.now()
+	let closedAt: number | undefined
+	proc.on("event", (e: ChannelizerEvent) => {
+		if (e.type === "closed") closedAt = Date.now()
+	})
+	const release = m.releaseChannel(slot.channelId)
+	await run(WEDGE_MS)
+	await release
+	expect(closedAt).toBeDefined()
+	expect(closedAt! - sentAt).toBeGreaterThanOrEqual(300)
+	expect(invalidations).toEqual([])
+	expect(steady.stream.destroyed).toBe(false)
+	expect(processes).toHaveLength(1)
+})
+
+it("a close whose handling stalls the loop 300 ms with another channel open keeps both", async () => {
+	const { m, processes, invalidations, acquire } = setup()
+	const steady = await acquire("steady")
+	const slot = await acquire("slot")
+	const proc = processes[0]!
+	proc.answerCloses = true
+	proc.closeHandlingMs = 300 // the writer join the runtime used to do inside close
+	await run(200)
+	const release = m.releaseChannel(slot.channelId)
+	await run(WEDGE_MS)
+	await release
+	expect(proc.closes).toEqual(["slot-g1"])
+	expect(invalidations).toEqual([])
+	expect(steady.stream.destroyed).toBe(false)
+	expect(processes).toHaveLength(1)
+	expect(await m.requestChannel("rtl", "slot", request, caps)).toMatchObject({
+		ok: true,
+		generation: 1,
+	})
+})
+
+it("a wedged process owing a close is retired at WEDGE_MS after the send, not before", async () => {
+	const { m, processes, invalidations, acquire } = setup(false)
+	const steady = await acquire("steady")
+	const slot = await acquire("slot")
+	const proc = processes[0]!
+	proc.reading = false
+	await run(WEDGE_MS * 2) // nothing owed: silence alone is not a wedge
+	expect(invalidations).toEqual([])
 	void m.releaseChannel(slot.channelId)
-	await vi.advanceTimersByTimeAsync(250)
-	await flushImmediates()
-	expect(invalidations).toEqual([]) // alive so far
+	await run(WEDGE_MS - 1)
+	expect(invalidations).toEqual([])
+	expect(steady.stream.destroyed).toBe(false)
+	await run(1)
+	expect(invalidations).toEqual([["rtl", 1, ["steady-g1"], "unresponsive"]])
+	expect(steady.stream.destroyed).toBe(true)
+	expect(processes).toHaveLength(1) // retirement itself never respawns
+})
+
+it("a close sent right after another was answered gets its own full window", async () => {
+	const { m, processes, invalidations, acquire } = setup(false)
+	await acquire("steady")
+	const first = await acquire("first")
+	const second = await acquire("second")
+	const proc = processes[0]!
+	const release = m.releaseChannel(first.channelId)
+	await run(30)
+	proc.closed("first-g1") // answered; the watchdog has not sampled since
+	await release
+	proc.reading = false
+	await run(100) // idle and owing nothing: not part of the next window
+	void m.releaseChannel(second.channelId)
+	await run(WEDGE_MS - 1)
+	expect(invalidations).toEqual([])
+	await run(1)
+	expect(invalidations).toEqual([["rtl", 1, ["steady-g1"], "unresponsive"]])
+})
+
+it("a wedged process with input queued in its stdin is retired within WEDGE_MS + one watch period", async () => {
+	const { processes, invalidations, acquire } = setup()
+	const steady = await acquire("steady")
+	await run(200)
 	processes[0]!.reading = false
-	// Branch and stdin buffers fill, then nothing more is consumed: the next full window retires.
-	for (let i = 0; i < 4 && invalidations.length === 0; i++) {
-		await vi.advanceTimersByTimeAsync(250)
-		await flushImmediates()
-	}
-	expect(invalidations).toEqual([
-		["rtl", 1, ["steady-g1"], "close-unconfirmed"],
-	])
+	const wedgedAt = Date.now()
+	await run(WEDGE_MS + WATCH_EVERY_MS + 20, () => invalidations.length > 0)
+	expect(invalidations).toEqual([["rtl", 1, ["steady-g1"], "unresponsive"]])
+	expect(Date.now() - wedgedAt).toBeGreaterThanOrEqual(
+		WEDGE_MS - PROGRESS_EVERY_MS,
+	)
 	expect(steady.stream.destroyed).toBe(true)
 })
 
-/** Advances `ms` in 10 ms steps, letting each verdict's setImmediate run. */
-async function run(ms: number, stop = () => false) {
-	for (let t = 0; t < ms && !stop(); t += 10) {
-		await vi.advanceTimersByTimeAsync(10)
-		await flushImmediates()
-	}
-}
+it("an idle process that owes nothing is never retired", async () => {
+	const { processes, invalidations, acquire } = setup(false)
+	const steady = await acquire("steady")
+	await run(10 * WEDGE_MS)
+	expect(processes[0]!.progressAt).toEqual([]) // no work, so no line at all
+	expect(invalidations).toEqual([])
+	expect(steady.stream.destroyed).toBe(false)
+})
+
+it("a reply read in the same loop turn as a late watchdog timer (event-loop stall) never retires", async () => {
+	const { m, processes, invalidations, acquire } = setup(false)
+	await acquire("steady")
+	const slot = await acquire("slot")
+	processes[0]!.reading = false
+	void m.releaseChannel(slot.channelId)
+	// The watchdog's timers fire late, in the timers phase (synchronous advance: no turn passes).
+	vi.advanceTimersByTime(WEDGE_MS + 500)
+	processes[0]!.closed("slot-g1") // the `closed` line the stalled loop reads in this turn
+	await flushImmediates()
+	await run(WATCH_EVERY_MS)
+	expect(invalidations).toEqual([])
+	expect(processes).toHaveLength(1)
+})
 
 it("a slow reader inside one large pending stdin write keeps its generation (Node's writableLength stays flat)", async () => {
 	const { m, fanout, processes, invalidations, acquire } = setup(false)
@@ -295,9 +415,9 @@ it("a slow reader inside one large pending stdin write keeps its generation (Nod
 	const release = m.releaseChannel(slot.channelId)
 	const pendingAtSend = proc.input.writableLength
 	const readAtSend = proc.inputBytes
-	await run(400) // `closed` is delayed by 400 ms
+	await run(WEDGE_MS + 400) // `closed` is delayed past a whole watchdog window
 	// The process read input all along, yet the stdin write it is inside never completed.
-	expect(proc.inputBytes - readAtSend).toBeGreaterThanOrEqual(150_000)
+	expect(proc.inputBytes - readAtSend).toBeGreaterThanOrEqual(800_000)
 	expect(proc.input.writableLength).toBe(pendingAtSend)
 	proc.closed("slot-g1")
 	await release
@@ -309,19 +429,22 @@ it("a slow reader inside one large pending stdin write keeps its generation (Nod
 	expect(again).toMatchObject({ ok: true, generation: 1 })
 })
 
-it("property: a live reader never retires; one that stops with the close unanswered retires within two windows", async () => {
-	// Feature: channelizer close liveness, Property 1: no retire while the process reads input; retire once it stops
-	// Validates: wedge check of an unconfirmed close
+it("property: a working process is never retired, whatever its unit lengths; a wedged one owing work is, within one window", async () => {
+	// Feature: channelizer generation watchdog, Property 1: no retire while the main loop completes work units shorter than WEDGE_MS; retire once it stops with work owed
+	// Validates: generation watchdog (owed work and no event line for WEDGE_MS)
 	await fc.assert(
 		fc.asyncProperty(
 			// 512 B to 16 KiB per 10 ms turn: down to 51 200 B/s, far below the source rate.
 			fc.integer({ min: 512, max: 16_384 }),
-			// Split of the input the process reads; the first chunk always lands (empty branch).
-			fc.array(fc.integer({ min: 1, max: 262_144 }), { maxLength: 8 }),
-			// How long the process stays live with the close unanswered, then how it ends.
-			fc.integer({ min: 0, max: 1000 }),
+			// Long units queued with the close (DSP blocks, the old writer join). The last line before a unit can be up
+			// to one PROGRESS_EVERY (+ a 10 ms turn) old, so a unit stays silent-safe below WEDGE_MS - 2 × 100 = 1800 ms.
+			fc.array(fc.integer({ min: 1, max: WEDGE_MS - 2 * PROGRESS_EVERY_MS }), {
+				maxLength: 3,
+			}),
+			// How long the close waits for an answer while the process works, then how it ends.
+			fc.integer({ min: 0, max: 3000 }),
 			fc.boolean(),
-			async (readPerTick, extra, liveMs, wedge) => {
+			async (readPerTick, units, liveMs, wedge) => {
 				const ctx = setup(false)
 				const { m, fanout, processes, invalidations, acquire } = ctx
 				try {
@@ -329,24 +452,24 @@ it("property: a live reader never retires; one that stops with the close unanswe
 					const slot = await acquire("slot")
 					const proc = processes[0]!
 					proc.readPerTick = readPerTick
-					// 200 turns (2 s) of reading, past liveMs + two windows: the process never runs dry.
-					fanout.distribute(Buffer.alloc(readPerTick * 200))
-					for (const n of extra) fanout.distribute(Buffer.alloc(n))
+					// Enough to read through every unit, liveMs and a window: the process never runs dry.
+					fanout.distribute(Buffer.alloc(readPerTick * 1000))
 					await flushImmediates()
+					proc.units.push(...units)
 					void m.releaseChannel(slot.channelId)
-					await run(liveMs)
+					await run(liveMs + units.reduce((a, b) => a + b, 0))
 					expect(invalidations).toEqual([])
 					if (wedge) {
 						proc.reading = false
-						// The window in progress may still see the last progress line; the next one cannot.
-						await run(2 * 250 + 20, () => invalidations.length > 0)
+						// The close is still owed: retired one window after the last line it wrote.
+						await run(WEDGE_MS + 20, () => invalidations.length > 0)
 						expect(invalidations).toEqual([
-							["rtl", 1, ["steady-g1"], "close-unconfirmed"],
+							["rtl", 1, ["steady-g1"], "unresponsive"],
 						])
 						expect(steady.stream.destroyed).toBe(true)
 					} else {
 						proc.closed("slot-g1")
-						await run(600)
+						await run(WEDGE_MS)
 						expect(invalidations).toEqual([])
 						expect(steady.stream.destroyed).toBe(false)
 					}
@@ -358,11 +481,13 @@ it("property: a live reader never retires; one that stops with the close unanswe
 		),
 		{ numRuns: 100 },
 	)
-}, 60_000) // 100 runs of up to 1.5 s fake time each; about 2 s idle, far more on a loaded host
+}, 240_000) // 100 runs of up to 9 s fake time each in 10 ms steps; far longer on a loaded host
 
 type Internals = {
 	active: Map<string, { closing: Map<string, { waiters: Set<unknown> }> }>
 }
+const fenceOf = (m: ChannelizerManager, id: string) =>
+	(m as unknown as Internals).active.get("rtl")!.closing.get(id)!
 
 it("same-id acquisitions that give up while a close is fenced leave no waiter behind", async () => {
 	const { m, processes, invalidations, acquire } = setup()
@@ -370,9 +495,7 @@ it("same-id acquisitions that give up while a close is fenced leave no waiter be
 	const slot = await acquire("slot")
 	void m.releaseChannel(slot.channelId) // `closed` is withheld; the process stays live
 	await run(250)
-	const fence = (m as unknown as Internals).active
-		.get("rtl")!
-		.closing.get("slot-g1")!
+	const fence = fenceOf(m, "slot-g1")
 	for (let i = 0; i < 50; i++) {
 		const abort = new AbortController()
 		const r = m.requestChannel("rtl", "slot", request, caps, abort.signal)
@@ -380,6 +503,35 @@ it("same-id acquisitions that give up while a close is fenced leave no waiter be
 		expect(fence.waiters.size).toBe(1)
 		abort.abort()
 		expect(await r).toMatchObject({ ok: false })
+		expect(fence.waiters.size).toBe(0)
+	}
+	expect(invalidations).toEqual([])
+	processes[0]!.closed("slot-g1")
+	expect(await m.requestChannel("rtl", "slot", request, caps)).toMatchObject({
+		ok: true,
+		generation: 1,
+	})
+})
+
+it("same-id acquisitions whose deadline expires while a close is fenced leave no waiter behind", async () => {
+	const OPEN_TIMEOUT_MS = 1000
+	const { m, processes, invalidations, acquire } = setup(true, OPEN_TIMEOUT_MS)
+	await acquire("steady")
+	const slot = await acquire("slot")
+	void m.releaseChannel(slot.channelId) // `closed` is withheld; the process stays live
+	await run(250)
+	const fence = fenceOf(m, "slot-g1")
+	for (let i = 0; i < 3; i++) {
+		const r = m.requestChannel("rtl", "slot", request, caps)
+		await flushImmediates()
+		expect(fence.waiters.size).toBe(1)
+		await run(OPEN_TIMEOUT_MS - 10)
+		expect(fence.waiters.size).toBe(1)
+		await run(10)
+		expect(await r).toMatchObject({
+			ok: false,
+			detail: `channel request timed out after ${OPEN_TIMEOUT_MS} ms`,
+		})
 		expect(fence.waiters.size).toBe(0)
 	}
 	expect(invalidations).toEqual([])

@@ -162,7 +162,7 @@ export const ChannelizerEventSchema = z.discriminatedUnion("type", [
 			),
 		})
 		.strict(),
-	// Main-loop liveness while a control line waits behind input (runtime.rs `maybe_progress`).
+	// Main-loop liveness after work, at most every 100 ms (runtime.rs `maybe_progress`); the generation watchdog reads it.
 	z
 		.object({
 			v,

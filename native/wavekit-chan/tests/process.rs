@@ -96,7 +96,7 @@ impl Proc {
     }
 
     /// The next event that is not telemetry: `stats` (a loaded host may cross the 5 s stats tick mid-test) or
-    /// `progress` (a control line that waited behind input on a loaded host).
+    /// `progress` (main-loop liveness after work, at most every 100 ms).
     fn next(&self, generation: u64) -> Value {
         loop {
             let e = self

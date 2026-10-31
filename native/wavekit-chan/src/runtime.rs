@@ -32,19 +32,21 @@ use std::net::Shutdown;
 use std::os::fd::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const STATS_EVERY: Duration = Duration::from_secs(5);
-/// While a control line has waited behind other work this long, the main loop reports `progress` at most this often
-/// (and only after more work: an input block or a control line), so the parent tells a busy process, whose reply is
-/// queued behind work it is still doing, from a wedged one. The parent judges an unanswered close after 250 ms
-/// (`CLOSE_TIMEOUT_MS` in channelizer-manager.ts): 50 ms leaves 250 / 50 = 5 chances per window, so a process whose
-/// units of work each take under 200 ms always reports inside it. A control line answered within 50 ms (the common
-/// case) adds no line.
-const PROGRESS_EVERY: Duration = Duration::from_millis(50);
+/// The main loop writes `progress` at most this often, and only after it completed more work (an input block, a
+/// control line, a planner poll while an open is being prepared, a reaped channel writer): the parent's generation
+/// watchdog (`WEDGE_MS` = 2000 in channelizer-manager.ts) retires a process only when it owes work and wrote no line
+/// for that long, so 2000 / 100 = 20 chances per window. A busy process writes at most 10 lines/s (≈ 70 B each,
+/// ≈ 700 B/s); an idle one writes none.
+const PROGRESS_EVERY: Duration = Duration::from_millis(100);
+/// A closed channel's writer is joined from the main loop once it has returned, never waited for; one that has not
+/// returned this long after its close is detached (close shut its stream down and set `closing`, so it only has the
+/// accept poll or a failing write left). The list therefore holds at most the writers of closes from the last 500 ms.
 const CLOSE_JOIN_BUDGET: Duration = Duration::from_millis(500);
 const EOF_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 const WRITE_CHUNK: usize = 1 << 16;
@@ -205,13 +207,13 @@ pub struct Runtime {
     /// Marked gaps not yet reached by the input, in arrival order: (atInputByte, droppedInputBytes).
     pending_gaps: VecDeque<(u64, u64)>,
     last_stats: Instant,
-    /// When the main loop first saw a control line waiting; `None` while none waits.
-    control_waiting_since: Option<Instant>,
     last_progress: Option<Instant>,
-    /// Input blocks and control lines handled; only grows.
+    /// Units of main-loop work completed (see [`PROGRESS_EVERY`]); only grows.
     work: u64,
     /// `work` at the last `progress` line: one is sent only after more work.
     progress_work: u64,
+    /// Writers of closed channels, with the instant after which an unreturned one is detached ([`CLOSE_JOIN_BUDGET`]).
+    closed_writers: Vec<(thread::JoinHandle<()>, Instant)>,
     /// Writers → main, unbounded: a writer never blocks reporting its client gone.
     gone_tx: mpsc::Sender<(String, u64)>,
     gone_rx: mpsc::Receiver<(String, u64)>,
@@ -227,17 +229,6 @@ pub struct Runtime {
     /// One input block's converted I and Q, kept between blocks so `on_input` does not allocate.
     input_i: Vec<f32>,
     input_q: Vec<f32>,
-}
-
-/// Joins a writer for at most `budget`, then detaches it. A stuck writer must never block the main loop.
-fn join_bounded(w: thread::JoinHandle<()>, budget: Duration) {
-    let deadline = Instant::now() + budget;
-    while !w.is_finished() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    if w.is_finished() {
-        let _ = w.join();
-    }
 }
 
 /// An echoed request id cut to the schema's 64 (PF7). Cutting at ≤ 64 UTF-8 bytes on a char
@@ -274,10 +265,10 @@ impl Runtime {
             terminated: false,
             pending_gaps: VecDeque::new(),
             last_stats: Instant::now(),
-            control_waiting_since: None,
             last_progress: None,
             work: 0,
             progress_work: 0,
+            closed_writers: Vec::new(),
             gone_tx,
             gone_rx,
             disposal: None,
@@ -830,10 +821,40 @@ impl Runtime {
                 });
             }
         } else {
+            // Reaped by `reap_writers` on a later turn: waiting here would silence the main loop while the parent
+            // waits for this very `closed`. `closing` (set above, under the connection lock) still revokes the old
+            // writer, so it can never unlink a same-id replacement's socket.
             if let Some(w) = ch.writer.take() {
-                join_bounded(w, CLOSE_JOIN_BUDGET);
+                self.closed_writers
+                    .push((w, Instant::now() + CLOSE_JOIN_BUDGET));
             }
             self.emit(json!({"type": "closed", "id": id, "reason": reason}));
+        }
+    }
+
+    /// Joins every closed channel's writer that has returned and detaches any past its [`CLOSE_JOIN_BUDGET`]; never
+    /// waits. A join is a unit of work for `progress`.
+    pub fn reap_writers(&mut self, now: Instant) {
+        let mut k = 0;
+        while k < self.closed_writers.len() {
+            let (w, deadline) = &self.closed_writers[k];
+            if w.is_finished() {
+                let (w, _) = self.closed_writers.swap_remove(k);
+                let _ = w.join();
+                self.work += 1;
+            } else if now >= *deadline {
+                drop(self.closed_writers.swap_remove(k));
+            } else {
+                k += 1;
+            }
+        }
+    }
+
+    /// One main-loop turn polled the planner while an open waits for its preparation: the loop is alive while the
+    /// parent waits for that open's reply, even with no input flowing.
+    fn poll_planner_work(&mut self) {
+        if !self.pending.is_empty() {
+            self.work += 1;
         }
     }
 
@@ -1047,18 +1068,13 @@ impl Runtime {
         self.emit(json!({"type": "stats", "inputSamples": input, "channels": channels}));
     }
 
-    /// `progress` while a control line waits behind other work (see [`PROGRESS_EVERY`]): the main loop is alive.
-    /// Nothing while no control line waits, or when the loop did no work since the last line.
-    pub fn maybe_progress(&mut self, now: Instant, control_waiting: bool) {
-        if !control_waiting {
-            self.control_waiting_since = None;
-            return;
-        }
-        let since = *self.control_waiting_since.get_or_insert(now);
-        let due = |t: Instant| now.saturating_duration_since(t) >= PROGRESS_EVERY;
-        if !due(since)
-            || self.last_progress.is_some_and(|t| !due(t))
-            || self.work == self.progress_work
+    /// `progress` after more work, at most every [`PROGRESS_EVERY`]: the main loop is alive. Nothing when the loop did
+    /// no work since the last line (an idle process is silent; a wedged one cannot write).
+    pub fn maybe_progress(&mut self, now: Instant) {
+        if self.work == self.progress_work
+            || self
+                .last_progress
+                .is_some_and(|t| now.saturating_duration_since(t) < PROGRESS_EVERY)
         {
             return;
         }
@@ -1510,16 +1526,12 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
         let block = args.block_samples * 2;
         thread::spawn(move || read_input(std::io::stdin().lock(), block, &tx, &free_rx));
     }
-    // Control lines read but not yet taken by the main loop (counted before the blocking send).
-    let control_waiting = Arc::new(AtomicUsize::new(0));
     {
         let fd = args.control_fd;
-        let waiting = Arc::clone(&control_waiting);
         thread::spawn(move || {
             // SAFETY: the parent passes an open pipe at this fd (A1); this thread owns it from here on.
             let file = unsafe { std::fs::File::from_raw_fd(fd) };
             if let Err(e) = read_control_mode(BufReader::new(file), observed, |r| {
-                waiting.fetch_add(1, Ordering::SeqCst);
                 tx.send(Msg::Control(r)).is_ok()
             }) {
                 eprintln!("wavekit-chan: control fd {fd}: {e}");
@@ -1545,11 +1557,7 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
         } else {
             Duration::from_millis(5)
         };
-        let msg = rx.recv_timeout(wait);
-        if matches!(msg, Ok(Msg::Control(_))) {
-            control_waiting.fetch_sub(1, Ordering::SeqCst);
-        }
-        match msg {
+        match rx.recv_timeout(wait) {
             Ok(Msg::Input(b)) => {
                 rt.on_input(&b);
                 let _ = free_tx.try_send(b); // full or reader gone: the buffer is freed
@@ -1567,10 +1575,12 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        rt.poll_planner_work();
         rt.poll_prepared();
         rt.poll_client_gone(); // ≤ 250 ms after the failed write
+        rt.reap_writers(Instant::now());
         rt.maybe_stats(Instant::now());
-        rt.maybe_progress(Instant::now(), control_waiting.load(Ordering::SeqCst) > 0);
+        rt.maybe_progress(Instant::now());
         rt.poll_disposal();
     }
 }
@@ -2614,22 +2624,19 @@ mod tests {
     }
 
     #[test]
-    fn progress_only_while_a_control_line_waits_behind_work() {
+    fn progress_after_work_at_most_every_progress_every() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
         let n = ev.lock().unwrap().len();
         let t0 = Instant::now();
         let count = || ev.lock().unwrap().len();
+        // No work yet: silent, however long (an idle process writes nothing).
+        r.maybe_progress(t0);
+        r.maybe_progress(t0 + Duration::from_secs(9));
+        assert_eq!(count(), n);
+        // The first unit of work reports at once, with no control line waiting.
         r.on_input(&vec![128u8; 2 * 4096]);
-        // No control line waits: never, however long.
-        r.maybe_progress(t0, false);
-        r.maybe_progress(t0 + Duration::from_secs(9), false);
-        assert_eq!(count(), n);
-        // One starts waiting: nothing before PROGRESS_EVERY, one line at it.
-        r.maybe_progress(t0, true);
-        r.maybe_progress(t0 + PROGRESS_EVERY - Duration::from_millis(1), true);
-        assert_eq!(count(), n);
-        r.maybe_progress(t0 + PROGRESS_EVERY, true);
+        r.maybe_progress(t0);
         let e = last(&ev);
         assert_eq!(
             (
@@ -2642,34 +2649,116 @@ mod tests {
         );
         assert_eq!(count(), n + 1);
         // No work since: silent (a wedged loop reports nothing).
-        r.maybe_progress(t0 + PROGRESS_EVERY * 3, true);
+        r.maybe_progress(t0 + PROGRESS_EVERY * 3);
         assert_eq!(count(), n + 1);
-        // More input: due again, but throttled to PROGRESS_EVERY after the last line.
+        // More input: throttled to one line per PROGRESS_EVERY, then due at it.
         r.on_input(&vec![128u8; 2 * 4096]);
-        r.maybe_progress(t0 + PROGRESS_EVERY * 3, true);
+        r.maybe_progress(t0 + PROGRESS_EVERY * 3);
         assert_eq!(
             (count(), last(&ev)["inputSamples"].as_u64()),
             (n + 2, Some(8192))
         );
         r.on_input(&vec![128u8; 2 * 4096]);
-        r.maybe_progress(t0 + PROGRESS_EVERY * 3 + Duration::from_millis(49), true);
+        r.maybe_progress(t0 + PROGRESS_EVERY * 4 - Duration::from_millis(1));
         assert_eq!(count(), n + 2);
-        // The wait ends; a new one restarts the PROGRESS_EVERY grace.
-        r.maybe_progress(t0 + PROGRESS_EVERY * 5, false);
-        r.maybe_progress(t0 + PROGRESS_EVERY * 6, true);
-        assert_eq!(count(), n + 2);
-        r.maybe_progress(t0 + PROGRESS_EVERY * 7, true);
+        r.maybe_progress(t0 + PROGRESS_EVERY * 4);
         assert_eq!(
             (count(), last(&ev)["inputSamples"].as_u64()),
             (n + 3, Some(12_288))
         );
         // A control line handled (here a malformed one) is work too, with no input read.
         r.reject("x", "channel-request-invalid", "bad".into());
-        r.maybe_progress(t0 + PROGRESS_EVERY * 8, true);
+        r.maybe_progress(t0 + PROGRESS_EVERY * 5);
         assert_eq!(
             (count(), last(&ev)["type"].as_str()),
             (n + 5, Some("progress"))
         );
+        // A planner poll while an open waits for its preparation is work; one with nothing pending is not.
+        r.poll_planner_work();
+        r.maybe_progress(t0 + PROGRESS_EVERY * 6);
+        assert_eq!(count(), n + 5);
+        r.on_request(open("prep", 162e6, 4096));
+        assert!(!r.pending.is_empty());
+        let after_open = count();
+        r.poll_planner_work();
+        r.maybe_progress(t0 + PROGRESS_EVERY * 7);
+        assert_eq!(count(), after_open + 1);
+        assert_eq!(last(&ev)["type"], "progress");
+        r.on_eof_no_exit_for_test();
+    }
+
+    // A close never waits for its writer: the main loop answers `closed` at once and keeps working while the old
+    // writer is still returning, and joining it later is a unit of work. Before, close joined the writer for up to
+    // CLOSE_JOIN_BUDGET, silencing the main loop while the parent waited for that very `closed`.
+    #[test]
+    fn close_answers_before_its_writer_returns_and_reaps_it_later() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.request_and_wait(open("other", 162e6, 1 << 20));
+        r.request_and_wait(open("held", 162e6, 1 << 20));
+        let (release, gate) = mpsc::channel::<()>();
+        let (returned_tx, returned) = mpsc::channel();
+        {
+            let ch = r.channels.get_mut("held").unwrap();
+            // Retire the real accept writer; replace it with one whose return is held by the test.
+            ch.conn.lock().unwrap().closing = true;
+            ch.writer.take().unwrap().join().unwrap();
+            ch.conn.lock().unwrap().closing = false;
+            ch.writer = Some(thread::spawn(move || {
+                gate.recv_timeout(Duration::from_secs(10)).unwrap();
+                returned_tx.send(()).unwrap();
+            }));
+        }
+        r.on_request(Request::Close { id: "held".into() });
+        // Answered while the writer is still held: close did not wait for it.
+        assert_eq!(
+            (last(&ev)["type"].as_str(), last(&ev)["id"].as_str()),
+            (Some("closed"), Some("held"))
+        );
+        assert!(returned.try_recv().is_err());
+        assert_eq!(r.closed_writers.len(), 1);
+        // The loop keeps working for the other channel; an unreturned writer is not reaped.
+        r.on_input(&vec![128u8; 2 * 4096]);
+        r.reap_writers(Instant::now());
+        assert_eq!(r.closed_writers.len(), 1);
+        assert!(r.channels.contains_key("other"));
+        let work = r.work;
+        release.send(()).unwrap();
+        returned.recv_timeout(Duration::from_secs(10)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !r.closed_writers.is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "the returned writer was never reaped"
+            );
+            r.reap_writers(Instant::now());
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(r.work, work + 1);
+        r.on_eof_no_exit_for_test();
+    }
+
+    // A writer that has not returned by its CLOSE_JOIN_BUDGET is detached (not joined, not work), so the list stays
+    // bounded by the closes of the last 500 ms.
+    #[test]
+    fn an_unreturned_closed_writer_is_detached_past_its_budget() {
+        let dir = TempDir::new();
+        let (mut r, _) = rt(&dir.0);
+        let (release, gate) = mpsc::channel::<()>();
+        let t0 = Instant::now();
+        r.closed_writers.push((
+            thread::spawn(move || {
+                let _ = gate.recv_timeout(Duration::from_secs(10));
+            }),
+            t0 + CLOSE_JOIN_BUDGET,
+        ));
+        r.reap_writers(t0 + CLOSE_JOIN_BUDGET - Duration::from_millis(1));
+        assert_eq!(r.closed_writers.len(), 1);
+        let work = r.work;
+        r.reap_writers(t0 + CLOSE_JOIN_BUDGET);
+        assert!(r.closed_writers.is_empty());
+        assert_eq!(r.work, work);
+        release.send(()).unwrap();
         r.on_eof_no_exit_for_test();
     }
 
