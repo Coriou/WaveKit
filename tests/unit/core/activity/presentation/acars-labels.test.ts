@@ -79,6 +79,18 @@ describe("ACARS label table", () => {
 			family: "link",
 		})
 		expect(info?.note).toMatch(/acknowledgement/)
+		expect(info?.note).toMatch(/general response in demand mode/i)
+		expect(info?.sources).toEqual(["acarsdec", "acarshub"])
+	})
+
+	it("names Q0 a link test, from the public label list", () => {
+		expect(acarsLabelInfo("Q0")).toMatchObject({
+			label: "Q0",
+			name: "Link test",
+			family: "link",
+			basis: "listed",
+			sources: ["acarshub"],
+		})
 	})
 
 	it("treats link and ground station traffic as technical", () => {

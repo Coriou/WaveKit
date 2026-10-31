@@ -755,6 +755,11 @@ describe("Settings items", () => {
 			["map.labels", true, "Normal"],
 			["map.aircraftOnline", undefined, "On"],
 		])
+		// Reset turns online lookups off: the default is opt-in
+		expect(byId(list, "map.aircraftOnline").def).toEqual({
+			value: false,
+			text: "Off",
+		})
 		expect(byId(list, "map.online").help).toContain("OpenFreeMap")
 		await byId(list, "map.online").write?.("blank")
 		await byId(list, "map.trails").write?.("60")

@@ -12,6 +12,8 @@ import { observationsFrom } from "../../../src/core/aircraft-identity/observe.js
 import {
 	AircraftIdentityRegistry,
 	LINK_LIFETIME_MS,
+	MAX_DATABASE_LINKS,
+	MAX_OBSERVED_LINKS,
 	type IdentityObservation,
 } from "../../../src/core/aircraft-identity/registry.js"
 import type { DecoderOutput } from "../../../src/decoders/types.js"
@@ -104,6 +106,74 @@ describe("observations from decoder output", () => {
 		expect(observationsFrom(out("acars", { tail: ".N0WK01" }))).toEqual([])
 		expect(observationsFrom(out("ship", { mmsi: "1" }))).toEqual([])
 		expect(observationsFrom(out("vdl2", "nonsense"))).toEqual([])
+	})
+})
+
+describe("ACARS CRC and the cheap pre-check", () => {
+	it("a VDL2 frame whose ACARS failed its CRC links nothing; crc_ok true or absent links", () => {
+		const [first] = loadVdl2()
+		const withCrc = (crc: boolean | undefined) => {
+			const raw = structuredClone(first) as {
+				vdl2: { avlc: { acars: Record<string, unknown> } }
+			}
+			if (crc === undefined) delete raw.vdl2.avlc.acars["crc_ok"]
+			else raw.vdl2.avlc.acars["crc_ok"] = crc
+			return observationsFrom(out("vdl2", parseDumpvdl2Json(raw as never)))
+		}
+		expect(withCrc(false)).toEqual([])
+		expect(withCrc(true)).toHaveLength(2)
+		expect(withCrc(undefined)).toHaveLength(2)
+	})
+
+	it("an ACARS frame with crc_ok false or crcOk false links nothing", () => {
+		const frame = { tail: ".N0WK01", flight: "ZZ0101" }
+		expect(observationsFrom(out("acars", frame))).toHaveLength(1)
+		expect(
+			observationsFrom(out("acars", { ...frame, crc_ok: true })),
+		).toHaveLength(1)
+		expect(observationsFrom(out("acars", { ...frame, crc_ok: false }))).toEqual(
+			[],
+		)
+		expect(observationsFrom(out("acars", { ...frame, crcOk: false }))).toEqual(
+			[],
+		)
+	})
+
+	it("outputs that cannot carry a pair never reach the Zod parse", () => {
+		// Zod reads every shape key and, with passthrough, enumerates the object's own
+		// keys; the pre-check reads one or two named fields and never enumerates.
+		const probe = (data: Record<string, unknown>) => {
+			let enumerated = 0
+			let read = 0
+			const proxy = new Proxy(data, {
+				ownKeys(target) {
+					enumerated++
+					return Reflect.ownKeys(target)
+				},
+				get(target, key, receiver) {
+					read++
+					return Reflect.get(target, key, receiver) as unknown
+				},
+			})
+			return { proxy, counts: () => ({ enumerated, read }) }
+		}
+		const ship = probe({ mmsi: "1" })
+		expect(observationsFrom(out("ship", ship.proxy))).toEqual([])
+		expect(ship.counts()).toEqual({ enumerated: 0, read: 0 })
+		for (const [type, data] of [
+			["aircraft", { icao: "0A0B01" }],
+			["acars", { tail: ".N0WK01" }],
+			["vdl2", { icao: "0A0B01" }],
+			["vdl2", { icao: "0A0B01", acars: { label: "_d" } }],
+		] as const) {
+			const p = probe({ ...data })
+			expect(observationsFrom(out(type, p.proxy))).toEqual([])
+			expect(p.counts().enumerated).toBe(0)
+		}
+		// a frame that can carry a pair is parsed in full
+		const full = probe({ icao: "0A0B01", callsign: "ZZZ101" })
+		expect(observationsFrom(out("aircraft", full.proxy))).toHaveLength(1)
+		expect(full.counts().enumerated).toBeGreaterThan(0)
 	})
 })
 
@@ -221,6 +291,65 @@ describe("identity registry", () => {
 		expect(reg.size).toBe(2)
 		expect(reg.resolve(REG).icao).toBe("0A0B01")
 		expect(reg.resolve({ kind: "reg", value: "N0WK02" }).icao).toBeNull()
+	})
+
+	it("caps observed and database links separately, at and past each cap", () => {
+		expect(MAX_OBSERVED_LINKS).toBe(50_000)
+		expect(MAX_DATABASE_LINKS).toBe(50_000)
+		const reg = new AircraftIdentityRegistry(() => T0.getTime(), 2, 3)
+		const icao = (i: number) =>
+			({
+				kind: "icao",
+				value: `0A0B${i.toString(16).toUpperCase().padStart(2, "0")}`,
+			}) as const
+		const tail = (i: number) =>
+			({ kind: "reg", value: `N0WK${String(i).padStart(2, "0")}` }) as const
+		const database = (i: number): IdentityObservation => ({
+			a: icao(i),
+			b: tail(i),
+			at: T0,
+			evidence: "database",
+			source: "database",
+		})
+		reg.observe(seen(icao(1), tail(1)))
+		reg.observe(seen(icao(2), tail(2)))
+		// observed pool at its cap (2)
+		expect(reg.poolSize("observed")).toBe(2)
+		// database pool at its cap (3), then far past it: the observed links stay
+		for (let i = 10; i < 13; i++) reg.observe(database(i))
+		expect(reg.poolSize("database")).toBe(3)
+		expect(reg.poolSize("observed")).toBe(2)
+		for (let i = 13; i < 200; i++) reg.observe(database(i))
+		expect(reg.poolSize("database")).toBe(3)
+		expect(reg.poolSize("observed")).toBe(2)
+		expect(reg.size).toBe(5)
+		expect(reg.resolve(tail(1))).toMatchObject({
+			icao: "0A0B01",
+			resolvedBy: "observed",
+		})
+		expect(reg.resolve(tail(2))).toMatchObject({
+			icao: "0A0B02",
+			resolvedBy: "observed",
+		})
+		// the database pool kept its most recent three
+		expect(reg.resolve(tail(199))).toMatchObject({ resolvedBy: "database" })
+		expect(reg.resolve(tail(196)).icao).toBeNull()
+		// one observed link past its cap drops the oldest observed link, never a database one
+		reg.observe(seen(icao(3), tail(3)))
+		expect(reg.poolSize("observed")).toBe(2)
+		expect(reg.poolSize("database")).toBe(3)
+		expect(reg.resolve(tail(1)).icao).toBeNull()
+		expect(reg.resolve(tail(3)).icao).toBe("0A0B03")
+		// prune empties both pools once everything has expired
+		const later = new AircraftIdentityRegistry(
+			() => T0.getTime() + 60 * DAY,
+			2,
+			3,
+		)
+		later.observe(seen(icao(1), tail(1)))
+		later.observe(database(10))
+		expect(later.prune()).toBe(2)
+		expect(later.size).toBe(0)
 	})
 
 	// Feature: aircraft-signals, Property 3: callsigns and flight numbers never resolve

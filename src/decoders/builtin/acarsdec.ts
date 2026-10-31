@@ -108,6 +108,8 @@ export interface ACARSMessage {
 	libacars?: LibacarsPayload | undefined
 	/** The decoder printed a libacars result that was not kept (malformed or too large). */
 	libacarsDropped?: boolean | undefined
+	/** The frame failed its CRC (dumpvdl2 `crc_ok: false`); absent when it passed or was not reported. */
+	crcOk?: false | undefined
 }
 
 export type AcarsDirection = "downlink" | "uplink"

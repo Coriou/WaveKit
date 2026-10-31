@@ -818,6 +818,7 @@ export function parseDumpvdl2Json(
 		)
 		if (lib.payload !== undefined) acars.libacars = lib.payload
 		if (lib.dropped) acars.libacarsDropped = true
+		if (acarsData.crc_ok === false) acars.crcOk = false
 	}
 
 	return {

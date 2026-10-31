@@ -92,6 +92,30 @@ describe("mock map routes", () => {
 		await put({ online: false })
 	})
 
+	it("sends airframe photos only while online lookups are on", async () => {
+		const photos = async () =>
+			(await get("/api/aircraft"))
+				.json<{
+					aircraft: Array<{ identification?: Record<string, unknown> }>
+				}>()
+				.aircraft.filter(
+					a =>
+						a.identification?.["photo"] !== undefined ||
+						a.identification?.["imageUrl"] !== undefined,
+				).length
+		const put = (online: boolean) =>
+			server.app.inject({
+				method: "PUT",
+				url: "/api/aircraft/info",
+				payload: { online },
+			})
+		expect(await photos()).toBe(0)
+		await put(true)
+		expect(await photos()).toBeGreaterThan(0)
+		await put(false)
+		expect(await photos()).toBe(0)
+	})
+
 	it("lists the board's aircraft in the core's shape, with a track history", async () => {
 		const body = (await get("/api/aircraft")).json<{
 			aircraft: unknown[]

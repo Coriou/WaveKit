@@ -326,7 +326,9 @@ country, ICAO address and year built. The planned route comes from a crowd-sourc
 it is hidden when the core marks it implausible (the aircraft is clearly flying away from the
 destination). On the map, an
 aircraft is named by its callsign, else its registration, else its ICAO address. Photos load
-from the photo site, so they need internet access; everything else also works offline.
+from the photo site (Planespotters) straight into your browser, so they need internet access,
+and that site sees your browser's IP address and which aircraft you open; everything else also
+works offline. Photos appear only while online lookups are on.
 
 While the receiver tracks an aircraft, its Activity rows say who flies it and what it is
 (`ADSB · WaveKit Air · A320 214`), and a row titled only by the ICAO address takes the callsign or
@@ -334,8 +336,10 @@ registration instead. Rows of aircraft no longer tracked stay as they were store
 a callsign, registration, ICAO address or airline to find a tracked aircraft and open the Map
 on it. **Settings › Map › Online aircraft lookups** turns the core's free online sources
 (photos, routes, airline names, the local database download) on or off. While they are off
-(the default) only the local database is used, and nothing about the aircraft you receive
-leaves the station. Turning them off stops lookups already under way.
+(the default, and what **Reset** restores) only the local database is used, no photo is shown
+and your browser fetches nothing from the photo site, and nothing about the aircraft you receive
+leaves the station. Turning them off stops lookups already under way and removes the photos
+already shown.
 
 ## Keyboard
 

@@ -38,8 +38,21 @@ export const LINK_LIFETIME_MS: Readonly<Record<string, number>> = {
 /** Fallback for any other pair (none is produced today). */
 const DEFAULT_LIFETIME_MS = 2 * HOUR_MS
 
-/** Most links kept; the least recently seen go first. Each link is a few hundred bytes. */
-export const MAX_LINKS = 50_000
+/**
+ * Most links seen on the air (observed) kept; the least recently seen go first. A busy
+ * station hears about 1,500 aircraft a day. Their ICAO-registration links live 30 days, so
+ * at most 1,500 x 30 = 45,000 if every one were a new airframe (repeat visitors make it far
+ * fewer); the flight and callsign links live 2 to 6 hours, about 1,500 x 3 x 6 / 24 = 1,125
+ * at once. 50,000 holds that. Each link is a few hundred bytes: about 15 MB at the cap.
+ */
+export const MAX_OBSERVED_LINKS = 50_000
+/**
+ * Most database (and hint) links kept, in a pool of their own so that however many the
+ * aircraft databases feed in, they can never evict a link seen on the air. One database
+ * link per aircraft identified, living 30 days: the same 45,000 worst case as above, so
+ * the same cap and memory (another ~15 MB, ~30 MB for both pools).
+ */
+export const MAX_DATABASE_LINKS = 50_000
 
 export interface IdentityObservation {
 	a: AircraftIdentifier
@@ -87,19 +100,45 @@ function other(link: StoredLink, id: string): AircraftIdentifier {
 	return idKey(link.a) === id ? link.b : link.a
 }
 
+type Pool = "observed" | "database"
+
+/** Observed links in one pool; database links and hints in the other. */
+function poolOf(evidence: AircraftIdentityEvidence): Pool {
+	return evidence === "observed" ? "observed" : "database"
+}
+
 export class AircraftIdentityRegistry {
-	/** Link key to link, in least-recently-seen order (re-inserted on every sighting). */
-	private readonly links = new Map<string, StoredLink>()
+	/**
+	 * Link key to link, one map per pool, each in least-recently-seen order (re-inserted on
+	 * every sighting). A link key carries its evidence, so it is in one pool only.
+	 */
+	private readonly pools: Record<Pool, Map<string, StoredLink>> = {
+		observed: new Map(),
+		database: new Map(),
+	}
 	/** Identifier key to the link keys that touch it. */
 	private readonly byId = new Map<string, Set<string>>()
+	private readonly caps: Record<Pool, number>
 
 	constructor(
 		private readonly now: () => number = Date.now,
-		private readonly maxLinks: number = MAX_LINKS,
-	) {}
+		maxObservedLinks: number = MAX_OBSERVED_LINKS,
+		maxDatabaseLinks: number = MAX_DATABASE_LINKS,
+	) {
+		this.caps = { observed: maxObservedLinks, database: maxDatabaseLinks }
+	}
 
 	get size(): number {
-		return this.links.size
+		return this.pools.observed.size + this.pools.database.size
+	}
+
+	/** Links held in one pool. */
+	poolSize(pool: Pool): number {
+		return this.pools[pool].size
+	}
+
+	private link(key: string): StoredLink | undefined {
+		return this.pools.observed.get(key) ?? this.pools.database.get(key)
 	}
 
 	/** Records that two identifiers were seen together. Same identifiers: ignored. */
@@ -110,18 +149,20 @@ export class AircraftIdentityRegistry {
 		if (!Number.isFinite(at)) return
 		const key = `${idKey(a)}~${idKey(b)}~${observation.evidence}`
 		const lifetime = linkLifetimeMs(a.kind, b.kind)
-		const existing = this.links.get(key)
+		const pool = poolOf(observation.evidence)
+		const links = this.pools[pool]
+		const existing = links.get(key)
 		if (existing !== undefined) {
-			this.links.delete(key)
+			links.delete(key)
 			existing.lastSeen = Math.max(existing.lastSeen, at)
 			existing.firstSeen = Math.min(existing.firstSeen, at)
 			existing.expiresAt = existing.lastSeen + lifetime
 			existing.count += 1
 			existing.source = observation.source
-			this.links.set(key, existing)
+			links.set(key, existing)
 			return
 		}
-		this.links.set(key, {
+		links.set(key, {
 			a,
 			b,
 			evidence: observation.evidence,
@@ -140,8 +181,9 @@ export class AircraftIdentityRegistry {
 			}
 			set.add(key)
 		}
-		while (this.links.size > this.maxLinks) {
-			const oldest = this.links.keys().next().value
+		// only this link's own pool is trimmed: database links never push out observed ones
+		while (links.size > this.caps[pool]) {
+			const oldest = links.keys().next().value
 			if (oldest === undefined) break
 			this.remove(oldest)
 		}
@@ -151,11 +193,12 @@ export class AircraftIdentityRegistry {
 	prune(): number {
 		const now = this.now()
 		let removed = 0
-		for (const [key, link] of this.links) {
-			if (link.expiresAt > now) continue
-			this.remove(key)
-			removed++
-		}
+		for (const links of Object.values(this.pools))
+			for (const [key, link] of links) {
+				if (link.expiresAt > now) continue
+				this.remove(key)
+				removed++
+			}
 		return removed
 	}
 
@@ -246,16 +289,16 @@ export class AircraftIdentityRegistry {
 		if (keys === undefined) return []
 		const out: StoredLink[] = []
 		for (const key of keys) {
-			const link = this.links.get(key)
+			const link = this.link(key)
 			if (link !== undefined && link.expiresAt > now) out.push(link)
 		}
 		return out
 	}
 
 	private remove(key: string): void {
-		const link = this.links.get(key)
+		const link = this.link(key)
 		if (link === undefined) return
-		this.links.delete(key)
+		this.pools[poolOf(link.evidence)].delete(key)
 		for (const id of [link.a, link.b]) {
 			const k = idKey(id)
 			const set = this.byId.get(k)

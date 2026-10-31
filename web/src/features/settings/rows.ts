@@ -1496,7 +1496,8 @@ function aircraftRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 			widget: { kind: "switch" },
 			value: info.online,
 			text: info.online ? "On" : "Off",
-			def: { value: true, text: "On" },
+			// lookups are off until the user opts in, so Reset turns them off
+			def: { value: false, text: "Off" },
 			...(s.aircraftInfo?.error ? { error: s.aircraftInfo.error } : {}),
 			...(s.aircraftInfo?.busy ? { busy: true } : {}),
 			...(s.readOnly || !write

@@ -189,8 +189,11 @@ when one decoded frame carried both, and records how it knows.
 | ICAO address and callsign      | An ADS-B message whose address passed its CRC       | 2 hours   |
 | Registration and flight number | An ACARS message on VHF without errors              | 6 hours   |
 
-Each link is renewed whenever it is seen again and forgotten when its time runs out. Links are kept
-in memory and learnt again after a restart.
+A frame whose ACARS failed its CRC (`crc_ok: false`) or carried bit errors links nothing. Each
+link is renewed whenever it is seen again and forgotten when its time runs out. Links are kept in
+memory and learnt again after a restart: at most 50,000 observed links and, separately, 50,000
+database links, the least recently seen going first in each, so database links can never push
+out a link seen on the air.
 
 - **Only an ICAO address or a registration names an aircraft.** A callsign or flight number names
   a flight; it is shown beside the aircraft and never used to join two aircraft. `ZZZ123` in ADS-B

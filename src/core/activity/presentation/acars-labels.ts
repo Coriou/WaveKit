@@ -80,7 +80,7 @@ const ROWS: readonly Row[] = [
 		"link",
 		"listed",
 		["acarsdec", "acarshub"],
-		"An acknowledgement that keeps the link open. It carries no text.",
+		"A general response in demand mode: an acknowledgement that keeps the link open. It carries no text.",
 	],
 	["Q0", "Link test", "link", "listed", ["acarshub"]],
 	[

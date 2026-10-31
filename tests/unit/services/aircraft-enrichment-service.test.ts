@@ -26,13 +26,16 @@ import { CircuitBreaker } from "../../../src/services/aircraft-info/http.js"
 import {
 	ROUTE_DESTINATION_SLACK_M,
 	ROUTE_MAX_OFF_COURSE_DEG,
+	ROUTE_OFF_COURSE_MARGIN_DEG,
 	ROUTE_ORIGIN_SLACK_M,
+	ROUTE_SLACK_MARGIN_M,
 	offCourseDeg,
 	routeFits,
 	routePlausible,
 } from "../../../src/services/aircraft-info/route-fit.js"
 import type { SqliteDatabase } from "../../../src/core/activity/storage/sqlite.js"
 import { AircraftTracker } from "../../../src/core/aircraft-tracker.js"
+import { initialBearingDeg } from "../../../src/core/coverage/geo.js"
 import { createLogger } from "../../../src/utils/logger.js"
 
 const logger = createLogger({ level: "error" })
@@ -174,8 +177,9 @@ describe("AircraftEnrichmentService", () => {
 				manufacturer: "Airbus",
 				operator: "WaveKit Swiss",
 				operatorCode: "WKS",
-				country: "Switzerland",
-				countryIso: "CH",
+				// country names the ICAO address block (0A0000-0A7FFF), not the owner
+				country: "Algeria",
+				countryIso: "DZ",
 				source: "adsbdb",
 				photo: {
 					thumbnailUrl:
@@ -255,7 +259,7 @@ describe("AircraftEnrichmentService", () => {
 				typeCode: "A320",
 				typeDescription: "Airbus A-320",
 				year: 2005,
-				country: "Switzerland",
+				country: "Algeria",
 				source: "local",
 			})
 			expect(store.cached("airframe", "0A0B11")).toBeUndefined()
@@ -281,7 +285,7 @@ describe("AircraftEnrichmentService", () => {
 				registration: "ZZ-WKC",
 				operator: "ARMEE",
 				flags: { military: true },
-				country: "France",
+				country: "Algeria",
 			})
 			expect(fetch).not.toHaveBeenCalled()
 		})
@@ -319,6 +323,64 @@ describe("AircraftEnrichmentService", () => {
 				destination: { iata: "ZZZ", name: "Mock Airport" },
 			})
 			expect(updates).toContain("0A0B11")
+		})
+
+		it("shows a photo only while online lookups are on, even when one is cached", async () => {
+			const store = memoryStore()
+			service = new AircraftEnrichmentService(config, logger, {
+				fetch: fakeFetch(happy),
+				store,
+			})
+			service.wireToTracker(tracker!)
+			await service.start()
+			// switch on: the photo and its thumbnail URL reach the aircraft
+			expect(await service.lookup("0A0B11")).toMatchObject({
+				photo: { photographer: "A. Spotter" },
+				imageUrl: "https://t.plnspttrs.net/10000/1000001_0000000000_t.jpg",
+			})
+			tracker!.processUpdate({ hex: "0A0B11" })
+			await flush()
+			expect(tracker!.get("0A0B11")?.identification?.photo).toBeDefined()
+			expect(store.cached("photo", "0A0B11")).toBeDefined()
+			// switch off: the aircraft on the map drops it, lookups leave it out
+			service.setOnline(false)
+			const off = tracker!.get("0A0B11")?.identification
+			expect(off?.photo).toBeUndefined()
+			expect(off?.imageUrl).toBeUndefined()
+			expect(off?.registration).toBe("ZZ-WKA")
+			const looked = await service.lookup("0A0B11")
+			expect(looked?.registration).toBe("ZZ-WKA")
+			expect(looked).not.toHaveProperty("photo")
+			expect(looked).not.toHaveProperty("imageUrl")
+			service.identify("0A0B11")
+			expect(tracker!.get("0A0B11")?.identification).not.toHaveProperty("photo")
+			service.stop()
+			// a fresh start with lookups off and the photo still cached: none shown
+			const fetch = fakeFetch(happy)
+			service = new AircraftEnrichmentService(
+				{ ...config, online: false },
+				logger,
+				{ fetch, store },
+			)
+			tracker!.stop()
+			tracker = new AircraftTracker(
+				{ maxAge: 60, cleanupInterval: 60_000 },
+				logger,
+			)
+			service.wireToTracker(tracker)
+			await service.start()
+			tracker.processUpdate({ hex: "0A0B11" })
+			await flush()
+			const cold = tracker.get("0A0B11")?.identification
+			expect(cold?.registration).toBe("ZZ-WKA")
+			expect(cold).not.toHaveProperty("photo")
+			expect(cold).not.toHaveProperty("imageUrl")
+			expect(fetch).not.toHaveBeenCalled()
+			// back on: the cached photo is shown again
+			service.setOnline(true)
+			expect(tracker.get("0A0B11")?.identification?.imageUrl).toBe(
+				"https://t.plnspttrs.net/10000/1000001_0000000000_t.jpg",
+			)
 		})
 
 		it("uses the bundled airline offline and drops a route that no longer matches", async () => {
@@ -412,7 +474,9 @@ describe("AircraftEnrichmentService", () => {
 
 		it("parses tar1090-db lines", () => {
 			expect(
-				parseTar1090Line("0a0b11;ZZ-WKA;ZZ01;0001;WAVEKIT MOCK TYPE;2005;WaveKit Air;"),
+				parseTar1090Line(
+					"0a0b11;ZZ-WKA;ZZ01;0001;WAVEKIT MOCK TYPE;2005;WaveKit Air;",
+				),
 			).toEqual([
 				"0A0B11",
 				"ZZ-WKA",
@@ -961,6 +1025,85 @@ describe("AircraftEnrichmentService", () => {
 				routeFits({ fromOriginM: far, toDestinationM: far, offCourseDeg: off })
 			expect(at(ROUTE_MAX_OFF_COURSE_DEG)).toBe(true)
 			expect(at(ROUTE_MAX_OFF_COURSE_DEG + 1e-9)).toBe(false)
+		})
+
+		it("hysteresis: a verdict flips only past bound + margin, and back only inside bound - margin", () => {
+			expect(ROUTE_OFF_COURSE_MARGIN_DEG).toBe(10)
+			expect(ROUTE_SLACK_MARGIN_M).toBe(5_000)
+			const far = 500_000
+			const angle = (off: number, previous?: boolean) =>
+				routeFits(
+					{ fromOriginM: far, toDestinationM: far, offCourseDeg: off },
+					previous,
+				)
+			// fitting: keeps fitting up to and at 110°, stops just past it
+			expect(angle(ROUTE_MAX_OFF_COURSE_DEG + 5, true)).toBe(true)
+			expect(angle(110, true)).toBe(true)
+			expect(angle(110 + 1e-9, true)).toBe(false)
+			// not fitting: stays so down to just over 90°, fits again at 90°
+			expect(angle(ROUTE_MAX_OFF_COURSE_DEG - 5, false)).toBe(false)
+			expect(angle(90 + 1e-9, false)).toBe(false)
+			expect(angle(90, false)).toBe(true)
+			// no previous verdict: the plain bound
+			expect(angle(100)).toBe(true)
+			expect(angle(100 + 1e-9)).toBe(false)
+			const away = 180
+			const place = (
+				fromOriginM: number,
+				toDestinationM: number,
+				previous: boolean,
+			) =>
+				routeFits({ fromOriginM, toDestinationM, offCourseDeg: away }, previous)
+			// origin slack: 85 km to stop fitting, 75 km to fit again
+			expect(place(85_000 - 1, far, true)).toBe(true)
+			expect(place(85_000, far, true)).toBe(false)
+			expect(place(75_000, far, false)).toBe(false)
+			expect(place(75_000 - 1, far, false)).toBe(true)
+			// destination slack: 35 km and 25 km
+			expect(place(far, 35_000 - 1, true)).toBe(true)
+			expect(place(far, 35_000, true)).toBe(false)
+			expect(place(far, 25_000, false)).toBe(false)
+			expect(place(far, 25_000 - 1, false)).toBe(true)
+		})
+
+		it("the tracker's verdict does not flap while the course hovers near the bound", async () => {
+			tracker = new AircraftTracker(
+				{ maxAge: 60, cleanupInterval: 60_000 },
+				logger,
+			)
+			service = new AircraftEnrichmentService(config, logger, {
+				fetch: fakeFetch(happy),
+				store: memoryStore(),
+			})
+			service.wireToTracker(tracker)
+			await service.start()
+			// the fixture's airports both sit at 48.7, 2.3; the aircraft is far from both
+			const at = { lat: 47.0, lon: -8.0 }
+			const bearing = initialBearingDeg(at.lat, at.lon, 48.7, 2.3)
+			const verdicts: Array<boolean | undefined> = []
+			for (const off of [0, 105, 95, 109, 111, 105, 95, 91, 89, 95, 105]) {
+				tracker.processUpdate({
+					hex: "0A0B11",
+					flight: "WKS101",
+					...at,
+					track: (bearing + off + 360) % 360,
+				})
+				await flush()
+				verdicts.push(tracker.get("0A0B11")?.identification?.route?.plausible)
+			}
+			expect(verdicts).toEqual([
+				true, // 0°
+				true, // 105°: within 110
+				true,
+				true, // 109°
+				false, // 111°: past 110
+				false, // 105°
+				false, // 95°
+				false, // 91°
+				true, // 89°: within 90
+				true,
+				true, // 105° again: still within 110
+			])
 		})
 
 		it("the tracker carries the verdict and keeps it current as the aircraft turns", async () => {

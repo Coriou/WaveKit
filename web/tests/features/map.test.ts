@@ -234,6 +234,12 @@ describe("items from the mock's fleets", () => {
 	beforeAll(async () => {
 		server = await buildMockServer({ port: 0 })
 		await server.app.ready()
+		// photos come only while online lookups are on, as in the core
+		await server.app.inject({
+			method: "PUT",
+			url: "/api/aircraft/info",
+			payload: { online: true },
+		})
 		const get = async (url: string) =>
 			(await server.app.inject({ method: "GET", url })).json<
 				Record<string, unknown[]>

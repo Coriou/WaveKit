@@ -275,6 +275,15 @@ export interface MockAircraft {
 	>
 }
 
+/** The details without the photo: the core leaves it out while online lookups are off. */
+function withoutPhoto(
+	details: MockAircraft["details"],
+): Omit<NonNullable<MockAircraft["details"]>, "photo"> {
+	if (!details) return {}
+	const { photo: _photo, ...rest } = details
+	return rest
+}
+
 /** A drawn stand-in for an airframe photo (the mock never reaches Planespotters). */
 function mockPhoto(sky: string, ground: string): string {
 	const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 200"><rect width="300" height="116" fill="${sky}"/><rect y="116" width="300" height="84" fill="${ground}"/><path d="M40 112 L210 104 Q236 103 252 110 Q258 114 250 118 L214 124 L60 126 Z M118 108 L160 70 L176 70 L156 108 Z M120 124 L150 150 L166 150 L152 124 Z M46 112 L36 92 L48 92 L66 110 Z" fill="#eef2f6"/></svg>`
@@ -1038,6 +1047,10 @@ export function registerMapMock(
 	}
 
 	// ---- aircraft state
+	// Settings › Map › Online aircraft lookups (the mock never goes online;
+	// like the core it sends photos only while the switch is on).
+	// Off by default like the core.
+	let infoOnline: boolean | null = null
 	const aircraftState = (a: MockAircraft, at: number): AircraftState => {
 		const ts = (at - startedAt) / 1000
 		const here = aircraftAt(a, ts)
@@ -1068,8 +1081,10 @@ export function registerMapMock(
 					? { registration: a.registration }
 					: {}),
 				...(a.operator !== undefined ? { operator: a.operator } : {}),
-				...a.details,
-				...(a.details?.photo ? { imageUrl: a.details.photo.thumbnailUrl } : {}),
+				...withoutPhoto(a.details),
+				...(infoOnline === true && a.details?.photo
+					? { photo: a.details.photo, imageUrl: a.details.photo.thumbnailUrl }
+					: {}),
 				source: a.details ? "local" : "readsb",
 			},
 			signalQuality: { rssi: Math.round(a.rssi * 10) / 10 },
@@ -1333,9 +1348,6 @@ export function registerMapMock(
 		return { aircraft: list, stats: aircraftStats(list), timestamp: now() }
 	})
 	app.get("/api/aircraft/stats", async () => aircraftStats(allAircraft()))
-	// Settings › Map › Online aircraft lookups (the switch only; the mock never goes online).
-	// Off by default like the core.
-	let infoOnline: boolean | null = null
 	const aircraftInfo = () => ({
 		enabled: true,
 		online: infoOnline ?? false,

@@ -29,8 +29,30 @@ const acarsSchema = z
 		tail: text,
 		flight: text,
 		error: z.number().optional(),
+		/** WaveKit's mapped flag (dumpvdl2's embedded ACARS) and the raw decoder field. */
+		crcOk: z.boolean().optional(),
+		crc_ok: z.boolean().optional(),
 	})
 	.passthrough()
+
+/** A frame links identifiers only without bit errors and without a failed CRC. */
+function acarsClean(acars: z.infer<typeof acarsSchema>): boolean {
+	return (
+		(acars.error ?? 0) === 0 && acars.crcOk !== false && acars.crc_ok !== false
+	)
+}
+
+/**
+ * Cheap shape check before any Zod parse: this runs for every decoder output, and a
+ * frame that is not an object, or lacks the one string field a pair needs, can carry no
+ * pair. Only plausible frames pay for the full parse.
+ */
+function record(v: unknown): Record<string, unknown> | null {
+	return typeof v === "object" && v !== null
+		? (v as Record<string, unknown>)
+		: null
+}
+const isText = (v: unknown) => typeof v === "string"
 const vdl2Schema = z
 	.object({
 		icao: text,
@@ -87,8 +109,13 @@ function pair(
 
 /** The identity pairs one decoder output carried. Empty for anything else. */
 export function observationsFrom(output: DecoderOutput): IdentityObservation[] {
+	const type = output.type
+	if (type !== "aircraft" && type !== "vdl2" && type !== "acars") return []
+	const data = record(output.data)
+	if (data === null) return []
 	const at = output.timestamp
-	if (output.type === "aircraft") {
+	if (type === "aircraft") {
+		if (!isText(data["icao"]) || !isText(data["callsign"])) return []
 		const parsed = adsbSchema.safeParse(output.data)
 		if (!parsed.success || !addressProven(parsed.data.modeS)) return []
 		return pair(
@@ -98,27 +125,28 @@ export function observationsFrom(output: DecoderOutput): IdentityObservation[] {
 			at,
 		)
 	}
-	if (output.type === "vdl2") {
+	if (type === "vdl2") {
+		const embedded = record(data["acars"])
+		if (!isText(data["icao"]) || embedded === null) return []
+		if (!isText(embedded["tail"]) && !isText(embedded["flight"])) return []
 		const parsed = vdl2Schema.safeParse(output.data)
 		if (!parsed.success) return []
 		const acars = parsed.data.acars
-		if (acars === null || acars === undefined || (acars.error ?? 0) !== 0)
-			return []
+		if (acars === null || acars === undefined || !acarsClean(acars)) return []
 		const icao = icaoId(parsed.data.icao)
 		return [
 			...pair(icao, regId(acars.tail), "vdl2", at),
 			...pair(icao, codeId("flight", acars.flight), "vdl2", at),
 		]
 	}
-	if (output.type === "acars") {
-		const parsed = acarsSchema.safeParse(output.data)
-		if (!parsed.success || (parsed.data.error ?? 0) !== 0) return []
-		return pair(
-			regId(parsed.data.tail),
-			codeId("flight", parsed.data.flight),
-			"acars",
-			at,
-		)
-	}
-	return []
+	// type === "acars"
+	if (!isText(data["tail"]) || !isText(data["flight"])) return []
+	const parsed = acarsSchema.safeParse(output.data)
+	if (!parsed.success || !acarsClean(parsed.data)) return []
+	return pair(
+		regId(parsed.data.tail),
+		codeId("flight", parsed.data.flight),
+		"acars",
+		at,
+	)
 }

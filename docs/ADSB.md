@@ -242,8 +242,11 @@ download below does not run either.
    (built from the [Mictronics database](https://www.mictronics.de/aircraft-database/),
    about 8 MB, downloaded by the core 20 s after start, or 20 s after online
    lookups are turned on, and refreshed every 7 days while they stay on; turning
-   them off cancels a download in progress) gives the registration, type, year and military/interesting/PIA/LADD
-   flags. A bundled airline table from [OpenFlights](https://openflights.org/data)
+   them off cancels a download or an import in progress) gives the registration, type, year and military/interesting/PIA/LADD
+   flags. It is stored in `<stateDir>/aircraft-db.sqlite`. A worker thread
+   builds each new copy (about 500,000 aircraft) beside the current one and the
+   core swaps it in when complete, so lookups and the rest of the core keep
+   running during the import, from the previous copy until the swap. A bundled airline table from [OpenFlights](https://openflights.org/data)
    (Open Database License) maps a callsign prefix to an airline
    (`AFR1234` to Air France).
 2. **On-disk cache.** Every online answer, including "not found", is kept in
@@ -301,11 +304,21 @@ route. It is dropped as soon as the aircraft changes callsign. The core keeps
 `route.plausible` current as the aircraft moves: `false` when it flies more
 than 100° away from the bearing to the destination while more than 80 km from
 the origin and 30 km from the destination; `true` otherwise, also without a
-position or track. Hide the route when it is `false`; older cores omit it.
+position or track. Near those bounds the verdict has hysteresis, so it does not
+flicker while an aircraft turns or holds on an edge: a route shown as plausible
+turns implausible only past 110° off course and beyond 85 km from the origin and
+35 km from the destination, and turns plausible again within 90°, or within
+75 km of the origin or 25 km of the destination. Hide the route when it is
+`false`; older cores omit it.
 
 A **photo** must be shown with its photographer and a link to `photo.link`
 (Planespotters' terms). The browser loads it straight from the Planespotters
-image server.
+image server, not through the core: that server sees the IP address of the
+browser viewing the map and which airframe is looked at. `photo` and `imageUrl`
+are therefore sent only while online lookups are on. While they are off, they
+are left out even when a photo from earlier is still in the cache, and aircraft
+already on the map lose theirs when the switch goes off, so the browser fetches
+no third-party image.
 
 ### Aircraft Photos in the CLI
 

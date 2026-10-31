@@ -25,13 +25,11 @@
 
 import { EventEmitter } from "node:events"
 import { mkdir, rename, rm } from "node:fs/promises"
-import { createWriteStream, createReadStream } from "node:fs"
-import { createInterface } from "node:readline"
+import { createWriteStream } from "node:fs"
 import { join } from "node:path"
 import { Readable } from "node:stream"
 import type { ReadableStream as WebReadableStream } from "node:stream/web"
 import { pipeline } from "node:stream/promises"
-import { createGunzip } from "node:zlib"
 import type { Logger } from "@wavekit/shared"
 import { createComponentLogger } from "../utils/logger.js"
 import type { AircraftTracker } from "../core/aircraft-tracker.js"
@@ -60,6 +58,7 @@ import {
 } from "./aircraft-info/sources.js"
 import {
 	AircraftInfoStore,
+	defaultAircraftDbWorkerUrl,
 	type CacheKind,
 	type LocalAircraftRow,
 } from "./aircraft-info/store.js"
@@ -228,7 +227,7 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 	private refreshTimer: NodeJS.Timeout | undefined
 	private pruneTimer: NodeJS.Timeout | undefined
 	private refreshing: Promise<void> | null = null
-	/** Aborts the tar1090-db download when online lookups are turned off. */
+	/** Aborts the tar1090-db download and import when online lookups are turned off. */
 	private download: AbortController | null = null
 
 	constructor(
@@ -336,7 +335,10 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 			try {
 				await mkdir(this.stateDir, { recursive: true })
 				db = await openSqliteFile(join(this.stateDir, "aircraft-info.sqlite"))
-				this.store = new AircraftInfoStore(db, this.now)
+				this.store = new AircraftInfoStore(db, this.now, undefined, undefined, {
+					path: join(this.stateDir, "aircraft-db.sqlite"),
+					workerUrl: defaultAircraftDbWorkerUrl(),
+				})
 				this.store.prune()
 			} catch (err) {
 				if (this.store) this.store.close()
@@ -501,6 +503,7 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 			if (this.refreshTimer) clearTimeout(this.refreshTimer)
 			this.refreshTimer = undefined
 			this.download?.abort()
+			this.withdrawPhotos()
 		} else {
 			this.identifyTracked()
 			this.scheduleFirstRefresh()
@@ -508,6 +511,17 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 		if (this.started) this.saveOnline(on)
 		this.log.info({ online: on }, "Aircraft online lookups changed")
 		return this.settings()
+	}
+
+	/** Off: aircraft already on the map drop the photo they were given while on. */
+	private withdrawPhotos(): void {
+		if (!this.tracker) return
+		for (const aircraft of this.tracker.getAll())
+			if (aircraft.identification?.photo || aircraft.identification?.imageUrl)
+				this.tracker.applyIdentification(aircraft.icao, {
+					photo: undefined,
+					imageUrl: undefined,
+				})
 	}
 
 	private saveOnline(on: boolean): void {
@@ -648,7 +662,10 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 			if (local.pia) out.flags.pia = true
 			if (local.ladd) out.flags.ladd = true
 		}
-		const shownPhoto = photo ?? online?.photo
+		// A photo URL makes the browser fetch from the photo host, which then sees the
+		// client's IP and the airframe viewed: shown only while online lookups are on,
+		// even when an earlier answer is cached.
+		const shownPhoto = this.online ? (photo ?? online?.photo) : undefined
 		if (shownPhoto) {
 			out.photo = shownPhoto
 			out.imageUrl = shownPhoto.thumbnailUrl
@@ -708,7 +725,8 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 	private judgeRoute(aircraft: AircraftState): void {
 		const route = aircraft.identification?.route
 		if (!route) return
-		const plausible = routePlausible(route, aircraft)
+		// the shown verdict sets the hysteresis: it flips only well past a bound
+		const plausible = routePlausible(route, aircraft, route.plausible)
 		if (route.plausible === plausible) return
 		this.tracker?.applyIdentification(aircraft.icao, {
 			route: { ...route, plausible },
@@ -1003,6 +1021,7 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 		this.download = download
 		this.refreshing = (async () => {
 			const tmp = join(stateDir, "aircraft-db.csv.gz.part")
+			const file = join(stateDir, "aircraft-db.csv.gz")
 			try {
 				const response = await this.fetchImpl(this.localDb.url, {
 					headers: { "User-Agent": USER_AGENT },
@@ -1020,19 +1039,19 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 					Readable.fromWeb(response.body as WebReadableStream),
 					createWriteStream(tmp),
 				)
-				const file = join(stateDir, "aircraft-db.csv.gz")
 				await rename(tmp, file)
-				const lines = createInterface({
-					input: createReadStream(file).pipe(createGunzip()),
-					crlfDelay: Infinity,
+				// the switch going off or stop() aborts the import too
+				const { rows, offThread } = await store.importAircraftDbFile(file, {
+					signal: download.signal,
 				})
-				const rows = await store.replaceAircraftDb(lines)
 				store.setMeta("aircraft_db_updated_at", String(this.now()))
 				await rm(file, { force: true })
-				this.log.info({ rows }, "Local aircraft database updated")
+				this.log.info({ rows, offThread }, "Local aircraft database updated")
 				this.emit("localdb:updated", rows)
 			} catch (err) {
+				// a failed or aborted download or import leaves no gzip behind
 				await rm(tmp, { force: true }).catch(() => undefined)
+				await rm(file, { force: true }).catch(() => undefined)
 				this.log.warn(
 					{ err: err instanceof Error ? err.message : String(err) },
 					"Local aircraft database refresh failed; keeping the current one",

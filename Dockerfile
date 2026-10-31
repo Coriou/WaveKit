@@ -295,6 +295,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libcjson-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Ends with a smoke check: the installed binary links libacars and every library it
+# needs resolves (a silent non-libacars build would lose ADS-C/CPDLC decoding).
 RUN git clone --no-checkout https://github.com/f00b4r0/acarsdec.git repo && \
     cd repo && \
     git fetch --depth 1 origin "${ACARSDEC_REF}" && \
@@ -305,7 +307,10 @@ RUN git clone --no-checkout https://github.com/f00b4r0/acarsdec.git repo && \
     pkg-config --exists 'libacars-2 >= 2.0.0' && \
     cmake -DCMAKE_BUILD_TYPE=Release -DLIBACARS=ON .. && \
     make -j"$(nproc)" && \
-    make install
+    make install && \
+    ldconfig && \
+    ldd "$(command -v acarsdec)" | grep -q libacars-2 && \
+    ! ldd "$(command -v acarsdec)" | grep -q 'not found'
 
 # ============================================================================
 # Stage: ais-catcher-build
@@ -557,7 +562,7 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
     CI=true pnpm prune --prod \
         --config.enable-global-virtual-store=false
 
-RUN ls -la dist/ && head -1 dist/index.js && test -f dist/spectrum-worker.js && test -f dist/activity-writer-worker.js && test -f dist/activity-query-worker.js && test -f dist/snapshot-worker.js
+RUN ls -la dist/ && head -1 dist/index.js && test -f dist/spectrum-worker.js && test -f dist/activity-writer-worker.js && test -f dist/activity-query-worker.js && test -f dist/snapshot-worker.js && test -f dist/aircraft-db-worker.js
 
 # ============================================================================
 # Stage: chan-build
@@ -663,6 +668,8 @@ RUN echo "Verifying decoder installations..." && \
     command -v multimon-ng && \
     rtl_433 -V && \
     command -v acarsdec && \
+    ldd "$(command -v acarsdec)" | grep -q libacars-2 && \
+    ! ldd "$(command -v acarsdec)" | grep -q 'not found' && \
     command -v AIS-catcher && \
     command -v direwolf && \
     dumpvdl2 --version && \
