@@ -146,7 +146,10 @@ Every validation 400 names the failing field and what it accepts, never the valu
 
 Fix each entry of `fields` (`field` is the schema name, `expected` its type, range and
 unit) and resend. Routes with their own error code (for example `SCANNER_PLAN_INVALID` or
-`ACTIVITY_QUERY_INVALID`) keep that `code` and add the same `fields`.
+`ACTIVITY_QUERY_INVALID`) keep that `code` and add the same `fields`. One exception:
+`PATCH /api/station` keeps `fields` as a list of field names (`["lat"]`) for the web settings
+form; its `message` states what each named field accepts
+([validation errors](API.md#validation-errors)).
 
 ## Pause and resume
 

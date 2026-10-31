@@ -6,7 +6,8 @@
  *
  * Data streams chunk by chunk to `<name>.cu8.partial`, renamed to `<name>.cu8` when complete;
  * the metadata (`<name>.json`) is written last, so a listed capture is always whole. Partial
- * files are removed on any failure, abort or shutdown, and at the first use after a crash.
+ * files are removed on any failure, abort or shutdown; at the first use after a crash they
+ * are removed with any data or metadata file that is not part of a whole capture.
  * Admission and commit are serialized, so the quota and the free-space floor count every
  * stored and running capture from one consistent state.
  * Bodies and logs carry fixed text: never a submitted name, a path or a parser message.
@@ -145,7 +146,7 @@ export class IqCaptureStore {
 
 	constructor(readonly dir: string) {}
 
-	/** Creates the private directory once and removes partial files a crash left behind. */
+	/** Creates the private directory once and removes what a crash left behind. */
 	ready(): Promise<void> {
 		this.#ready ??= this.#prepare().catch((err: unknown) => {
 			this.#ready = undefined
@@ -167,10 +168,37 @@ export class IqCaptureStore {
 			)
 		// The directory is dedicated to captures: make it private if it is not.
 		if ((st.mode & 0o077) !== 0) await chmod(this.dir, 0o700)
-		// No capture can be in progress before the first one starts.
-		for (const entry of await readdir(this.dir))
-			if (entry.endsWith(PARTIAL))
-				await rm(join(this.dir, entry), { force: true })
+		// No capture can be in progress before the first one starts, and every route waits for
+		// this step: partial files, and data or metadata that is not a whole capture (a crash
+		// between the data rename and the metadata publication), are leftovers. Removing them
+		// here keeps the listing, the quota and name reuse in agreement with the disk.
+		const entries = await readdir(this.dir)
+		for (const entry of entries)
+			if (entry.endsWith(PARTIAL)) await this.#removeFile(entry)
+		const names = new Set<string>()
+		for (const entry of entries)
+			for (const suffix of [DATA, META])
+				if (entry.endsWith(suffix)) {
+					const name = entry.slice(0, -suffix.length)
+					if (IQ_CAPTURE_NAME.test(name)) names.add(name)
+				}
+		for (const name of names)
+			if ((await this.read(name)) === null) {
+				await this.#removeFile(`${name}${META}`)
+				await this.#removeFile(`${name}${DATA}`)
+			}
+	}
+
+	/** Removes a leftover file or link; a directory under a capture name is left alone. */
+	async #removeFile(entry: string): Promise<void> {
+		const path = join(this.dir, entry)
+		try {
+			if ((await lstat(path)).isDirectory()) return
+		} catch (err) {
+			if (missing(err)) return
+			throw err
+		}
+		await rm(path, { force: true })
 	}
 
 	data(name: string): string {

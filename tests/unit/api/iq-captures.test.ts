@@ -539,6 +539,55 @@ it("removes the partial file on shutdown and partial files left by a crash", asy
 	expect(await readdir(dir)).toEqual([])
 })
 
+it("removes data and metadata a crash left between rename and publication at first use", async () => {
+	await app.inject({ method: "GET", url })
+	for (let i = 0; i < 7; i++) await plant(`full-${i}`, IQ_CAPTURE_MAX_BYTES)
+	await plant("rest", IQ_CAPTURE_MAX_BYTES - 2000)
+	// The crash state: renamed data without metadata, a temp metadata file, and metadata
+	// whose data is gone.
+	await writeFile(join(dir, "first.cu8"), "")
+	await truncate(join(dir, "first.cu8"), IQ_CAPTURE_MAX_BYTES)
+	await writeFile(join(dir, "first.json.partial"), "{")
+	await writeFile(
+		join(dir, "lost.json"),
+		(await readFile(join(dir, "rest.json"), "utf8")).replace(
+			'"rest"',
+			'"lost"',
+		),
+	)
+	await rebuild()
+	const listed = (await app.inject({ method: "GET", url })).json<{
+		captures: IqCapture[]
+	}>()
+	expect(listed.captures.map(c => c.name).sort()).toEqual([
+		"full-0",
+		"full-1",
+		"full-2",
+		"full-3",
+		"full-4",
+		"full-5",
+		"full-6",
+		"rest",
+	])
+	expect((await readdir(dir)).sort()).toEqual(
+		[...listed.captures.map(c => c.name)]
+			.flatMap(name => [`${name}.cu8`, `${name}.json`])
+			.sort(),
+	)
+	// The orphan name is free again, and the quota is exactly full with it stored:
+	// 7 × 64,000,000 + (64,000,000 − 2000) + 2000 = 512,000,000.
+	const { pending } = await start()
+	input.write(Buffer.alloc(2000))
+	expect((await pending).statusCode).toBe(201)
+	const refused = await app.inject({
+		method: "POST",
+		url,
+		payload: { name: "late", seconds: 1 },
+	})
+	expect(refused.statusCode).toBe(507)
+	expect(refused.json()).toMatchObject({ code: "IQ_CAPTURE_QUOTA" })
+})
+
 it("ignores incomplete or foreign entries when listing", async () => {
 	await app.inject({ method: "GET", url })
 	await plant("good", 4, "2026-01-02T00:00:00.000Z")
