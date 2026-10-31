@@ -96,12 +96,15 @@ def cfo_search_hz(bw: int) -> int:
     return bw // 5
 
 
-def wrapper_argv(args: argparse.Namespace, out_rate: int) -> list[str]:
-    # Same argv as buildDecoderArgs() in src/decoders/builtin/lora-meshtastic.ts.
+def wrapper_argv(args: argparse.Namespace, out_rate: int, shift_hz: int = 0,
+                 cfo_search: int = 0) -> list[str]:
+    # Same argv as buildDecoderArgs() in src/decoders/builtin/lora-meshtastic.ts: the
+    # known placement offset (slot - capture centre) and, only when the capture
+    # centre is unknown, the opt-in search (cfo_search_hz(bw)).
     return ["python3", args.wrapper, "--bw", str(args.bw), "--sf", str(args.sf),
             "--cr", str(args.cr), "--samp-rate", str(out_rate), "--frequency", "869525000",
             "--channel-key", "AQ==", "--region", "EU_868",
-            "--cfo-search-hz", str(cfo_search_hz(args.bw))]
+            "--shift-hz", str(shift_hz), "--cfo-search-hz", str(cfo_search)]
 
 
 def reap(proc: subprocess.Popen[Any]) -> tuple[int, float]:

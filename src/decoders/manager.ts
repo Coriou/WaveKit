@@ -93,7 +93,10 @@ import {
 	type DecoderRateContext,
 } from "./rate-resolver.js"
 import { assessDecoderBand, USABLE_WINDOW_FRACTION } from "./band-resolver.js"
-import { parseLoraMeshtasticOptions } from "./builtin/lora-meshtastic.js"
+import {
+	loraCentrePassbandHz,
+	parseLoraMeshtasticOptions,
+} from "./builtin/lora-meshtastic.js"
 import { multimonHasPaging } from "./builtin/multimon-ng.js"
 import type { LoraMeshtasticOptions } from "./builtin/lora-meshtastic.js"
 import { normalizeBandOverride, type ResolvedBand } from "./band-defaults.js"
@@ -586,8 +589,9 @@ export function startupBuffer(
 /**
  * LoRa decodes the capture centre (requirement 3.2, `centre` reach): its
  * region slot is the configured channel (frequency ± bw/2, the centre itself
- * with followCenter) and its passband the slot plus the decoder's carrier-offset
- * search range per side (cfoSearchHz), bounded by the source's usable window. Unparseable options yield no reach.
+ * with followCenter) and its passband the slot plus the largest placement offset
+ * the wrapper shifts back exactly per side (loraCentrePassbandHz), bounded by the
+ * source's usable window. Unparseable options yield no reach.
  */
 function loraCentreReach(
 	options: Record<string, unknown>,
@@ -612,10 +616,10 @@ function loraCentreReach(
 			minHz: frequency - parsed.bw / 2,
 			maxHz: frequency + parsed.bw / 2,
 		},
-		// Centre-only demodulation: the slot plus the carrier-offset search range
-		// on each side, bw + 2 × bw/5 = 1.4 × bw (350 kHz for 250 kHz), so a slot
-		// sits at most bw/5 (50 kHz) off centre.
-		passbandHz: Math.min(parsed.bw + 2 * parsed.cfoSearchHz, usable),
+		// Centre-only demodulation: the slot plus the resampler room left after
+		// the crystal margin on each side (340 kHz for LongFast at 869.525 MHz,
+		// a slot at most 45 kHz off centre; arithmetic at loraMaxShiftHz).
+		passbandHz: Math.min(loraCentrePassbandHz(parsed, frequency), usable),
 	}
 }
 
@@ -1709,7 +1713,12 @@ export class DecoderManager extends EventEmitter {
 							{ ...config.options, ...options },
 							caps,
 						)
-						if (reach) centreSlots.push({ slotHz: reach.slotHz, options })
+						if (reach)
+							centreSlots.push({
+								slotHz: reach.slotHz,
+								passbandHz: reach.passbandHz,
+								options,
+							})
 					}
 					const channelCapable = (
 						CHANNEL_CAPABLE_TYPES as readonly string[]
@@ -5573,9 +5582,12 @@ export class DecoderManager extends EventEmitter {
 					!state.config.options["followCenter"])
 			// rtl_433 holds the stdin centre as `-f` (its `freq` reference): a raw
 			// placement restarts when the capture centre moves, so the running
-			// process always reports frequencies against the current centre.
+			// process always reports frequencies against the current centre. LoRa
+			// on a fixed slot holds its offset from the centre as `--shift-hz`.
 			const referenceMoved =
-				state.config.type === "rtl433" &&
+				(state.config.type === "rtl433" ||
+					(state.config.type === "lora-meshtastic" &&
+						!state.config.options["followCenter"])) &&
 				!state.channel &&
 				previous?.centerFreq !== caps.centerFreq
 			if (inputChanged || !passive || state.channelStale)

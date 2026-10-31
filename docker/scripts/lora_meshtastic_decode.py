@@ -19,6 +19,7 @@ from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -26,7 +27,7 @@ import struct
 import sys
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, TextIO
 import warnings
 
 # Guarded so --help and the pure header/assembler code work without it; main()
@@ -72,11 +73,22 @@ DROP_SUMMARY_INTERVAL_S = 60.0
 # frequency shift: a channel off the capture centre (centre placement allows it)
 # or a mistuned centre. There the false drift (5 kHz: 41 bins x 250 kHz /
 # 869.525 MHz = 0.0118 chip per symbol) moves the payload windows by half a chip
-# within a 38-symbol frame, and CR 4/5 corrects no symbol error. So two paths run
-# the same demodulator chain: "direct" on the stream as received (crystal
-# offsets), and "recentred" on the stream rotated by the CfoSearch estimate
-# (shifted offsets; frame_sync then sees ~0 CFO and corrects no drift). A frame
-# both decode is emitted once (FrameDeduper).
+# within a 38-symbol frame, and CR 4/5 corrects no symbol error.
+#
+# The placement offset is known: the adapter passes slot - capture centre as
+# --shift-hz, and a C++ rotator (blocks.rotator_cc) moves the slot to baseband
+# before the one "direct" path, so frame_sync sees only the crystal error and
+# corrects its true drift. That is the default.
+#
+# An unknown mistune (the adapter does not know the capture centre) can opt in to
+# a second path with --cfo-search-hz: "recentred" runs the same chain on the
+# stream rotated by each preamble's CfoSearch estimate (frame_sync then sees ~0
+# CFO and corrects no drift, so it suits a shift, not a crystal error), and a
+# frame both paths decode is emitted once (FrameDeduper). Its rotation stays in
+# the source block: the estimate is known 24 symbols after the rotation must
+# start, so one block must see the search input a delay line ahead of the
+# rotated output. A C++ delay and rotator run on their own threads and give no
+# such ordering.
 
 # Meshtastic transmits 16 preamble upchirps (firmware RadioInterface
 # preambleLength). The direct path needs the true length: frame_sync moves its
@@ -200,11 +212,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--region", required=True, help="Meshtastic region label")
     parser.add_argument(
+        "--shift-hz",
+        type=int,
+        default=0,
+        help="Known offset of the channel from the capture centre in Hz (channel "
+        "minus centre: positive when the channel sits above the centre); the "
+        "stream is rotated by -shift before the direct path",
+    )
+    parser.add_argument(
         "--cfo-search-hz",
         type=int,
         default=0,
-        help="Largest carrier offset in Hz the recentred path corrects, below bw/4; "
-        "0 runs the direct path alone",
+        help="Opt-in search for an unknown offset: the largest carrier offset in Hz "
+        "(placement offset plus crystal error) the recentred path corrects, below "
+        "bw/4; 0 (default) runs the direct path alone",
     )
     parser.add_argument(
         "--preamble-len",
@@ -232,6 +253,30 @@ def os_factor_for(samp_rate: float, bw: int) -> int:
             f"samp_rate {samp_rate:g} is not an integer multiple of bw {bw}"
         )
     return factor
+
+
+def shift_phase_inc(shift_hz: float, samp_rate: float) -> float:
+    """blocks.rotator_cc phase increment that moves a tone at +shift_hz to 0 Hz.
+
+    rotator_cc multiplies sample n by exp(j x phase_inc x n); a channel at
+    +shift (above the capture centre) is exp(j 2 pi shift n / fs), so
+    phase_inc = -2 pi shift / fs.
+    """
+    return -2.0 * math.pi * float(shift_hz) / float(samp_rate)
+
+
+def shift_in_passband(shift_hz: int, bw: int, samp_rate: float) -> bool:
+    """The shifted channel lies inside the delivered band: |shift| + bw/2 <= fs/2.
+
+    Past it the channel was cut (or aliased) before the wrapper, so nothing
+    decodes; the wrapper still runs and says so once on stderr.
+    """
+    return 2 * abs(shift_hz) + bw <= samp_rate
+
+
+def demod_paths(cfo_search_hz: int) -> list[str]:
+    """The demodulator paths: "direct" always, "recentred" when the search is on."""
+    return ["direct", "recentred"] if cfo_search_hz > 0 else ["direct"]
 
 
 def check_cfo_args(cfo_search_hz: int, bw: int, preamble_len: int) -> None:
@@ -859,9 +904,17 @@ class DelayedRotator:
 
     def process(self, samples: Any) -> Any:
         np = self._np
-        buf = np.concatenate((self._buf, samples))
-        self._buf = buf[len(samples) :]
-        return self._rotate(buf[: len(samples)])
+        n, held = len(samples), len(self._buf)
+        delayed = np.empty(n, dtype=np.complex64)
+        if n >= held:
+            # One copy of the block, no concatenation of the held line with it.
+            delayed[:held] = self._buf
+            delayed[held:] = samples[: n - held]
+            self._buf = np.array(samples[n - held :], dtype=np.complex64)
+        else:
+            delayed[:] = self._buf[:n]
+            self._buf = np.concatenate((self._buf[n:], samples))
+        return self._rotate(delayed)
 
     def _rotate(self, block: Any) -> Any:
         np = self._np
@@ -925,13 +978,37 @@ class FrameDeduper:
 
 # stdout lines come from both paths' sink threads; one write per line under a lock.
 _STDOUT_LOCK = threading.Lock()
+# Where JSON events go; isolate_stdout() points it at a private copy of fd 1.
+_EVENTS: TextIO | None = None
 
 
 def write_event(event: dict[str, Any]) -> None:
     line = json.dumps(event, separators=(",", ":")) + "\n"
+    out = _EVENTS or sys.stdout
     with _STDOUT_LOCK:
-        sys.stdout.write(line)
-        sys.stdout.flush()
+        out.write(line)
+        out.flush()
+
+
+def isolate_stdout() -> None:
+    """Keeps stdout for JSON events alone.
+
+    Events go to a duplicate of fd 1, and fd 1 itself becomes stderr, so a line
+    native code prints (a gnuradio `:info:` log, a library's printf) lands on
+    stderr instead of in the adapter's JSONL stream.
+    """
+    global _EVENTS
+    sys.stdout.flush()
+    _EVENTS = os.fdopen(os.dup(1), "w", encoding="utf-8")
+    os.dup2(2, 1)
+
+
+def quiet_gnuradio_logs(gr: Any) -> None:
+    """gnuradio logs at warn and above only (3.10 logging singleton)."""
+    try:
+        gr.logging().set_default_level(gr.log_levels.warn)
+    except (AttributeError, TypeError) as exc:
+        log_stderr("gr_log_level_unset", error=str(exc))
 
 
 def build_flowgraph(
@@ -941,14 +1018,16 @@ def build_flowgraph(
 ) -> tuple[Any, CfoSearch | None]:
     """The top block and, when the recentred path runs, its CfoSearch.
 
-    `drops` holds one counter per path: "direct", plus "recentred" when
-    --cfo-search-hz is above 0.
+    `drops` holds one counter per path (demod_paths): "direct", plus
+    "recentred" when --cfo-search-hz is above 0.
     """
     # gnuradio and numpy are heavy imports; defer to keep --help fast.
     import numpy
     import pmt
-    from gnuradio import gr
+    from gnuradio import blocks, gr
     import gnuradio.lora_sdr as lora_sdr
+
+    quiet_gnuradio_logs(gr)
 
     add_proto_paths()
     import mesh_pb2
@@ -1136,12 +1215,15 @@ def build_flowgraph(
     print_payload = 0
     max_log_approx = True
     sync_word = [0x2B]
-    # frame_sync forecasts one oversampled symbol plus two samples of lookahead.
-    source.set_min_output_buffer(os_factor * ((1 << int(args.sf)) + 2))
+    # frame_sync forecasts one oversampled symbol plus two samples of lookahead
+    # (2 x (2048 + 2) = 4100 items at SF11, os 2, past the 4096-item default), so
+    # every block feeding a frame_sync gets this buffer.
+    frame_sync_buffer = os_factor * ((1 << int(args.sf)) + 2)
+    source.set_min_output_buffer(frame_sync_buffer)
     gr_cr = max(1, min(4, int(args.cr) - 4))
 
     def demod_chain(
-        port: int, path: str, preamble_len: int, delay: int
+        upstream: tuple[Any, int], path: str, preamble_len: int, delay: int
     ) -> tuple[Any, ...]:
         frame_sync = lora_sdr.frame_sync(
             int(args.frequency),
@@ -1173,7 +1255,7 @@ def build_flowgraph(
         frame_sink = MeshtasticFrameSink(path)
 
         top.msg_connect((header_decoder, "frame_info"), (frame_sync, "frame_info"))
-        top.connect((source, port), (frame_sync, 0))
+        top.connect(upstream, (frame_sync, 0))
         top.connect((frame_sync, 0), (lock_probe, 0))
         top.connect((lock_probe, 0), (fft_demod, 0))
         top.connect((fft_demod, 0), (gray_mapping, 0))
@@ -1186,10 +1268,30 @@ def build_flowgraph(
         return (frame_sync, lock_probe, fft_demod, gray_mapping, deinterleaver,
                 hamming_dec, header_decoder, dewhitening, crc_verif, frame_sink)
 
-    blocks = demod_chain(0, "direct", int(args.preamble_len), 0)
+    # The direct path sees the slot at baseband: the known shift is removed in
+    # C++ (no per-sample Python work) and the rotator is skipped at shift 0.
+    shift_hz = int(args.shift_hz)
+    direct_in: tuple[Any, int] = (source, 0)
+    kept: tuple[Any, ...] = ()
+    if shift_hz:
+        rotator_block = blocks.rotator_cc(shift_phase_inc(shift_hz, args.samp_rate))
+        rotator_block.set_min_output_buffer(frame_sync_buffer)
+        top.connect((source, 0), (rotator_block, 0))
+        direct_in = (rotator_block, 0)
+        kept = (rotator_block,)
+    chain = kept + demod_chain(direct_in, "direct", int(args.preamble_len), 0)
     if recentre:
-        blocks += demod_chain(
-            1, "recentred", RECENTRED_PREAMBLE_LEN, CFO_DELAY_SYMBOLS * samples_per_symbol
+        # The search measures the whole offset (shift plus crystal) itself.
+        chain += demod_chain(
+            (source, 1), "recentred", RECENTRED_PREAMBLE_LEN,
+            CFO_DELAY_SYMBOLS * samples_per_symbol,
+        )
+    if not shift_in_passband(shift_hz, int(args.bw), float(args.samp_rate)):
+        log_stderr(
+            "shift_outside_passband",
+            shift_hz=shift_hz,
+            bw=int(args.bw),
+            samp_rate=float(args.samp_rate),
         )
 
     log_stderr(
@@ -1201,11 +1303,12 @@ def build_flowgraph(
         os_factor=os_factor,
         region=args.region,
         preamble_len=int(args.preamble_len),
+        shift_hz=shift_hz,
         cfo_search_hz=int(args.cfo_search_hz),
         paths=sorted(drops),
     )
     # Retain Python block wrappers while the scheduler uses their C++ trampolines.
-    top._wavekit_blocks = (source, *blocks)
+    top._wavekit_blocks = (source, *chain)
     return top, search
 
 
@@ -1233,8 +1336,11 @@ def main(argv: list[str] | None = None) -> int:
         log_stderr("startup_error", error="python3 cryptography module is missing")
         return 1
 
-    paths = ["direct", "recentred"] if args.cfo_search_hz > 0 else ["direct"]
-    drops = {path: DropCounter(fields={"path": path}) for path in paths}
+    drops = {
+        path: DropCounter(fields={"path": path})
+        for path in demod_paths(args.cfo_search_hz)
+    }
+    isolate_stdout()
     try:
         top, search = build_flowgraph(args, channel_key, drops)
     except Exception as exc:

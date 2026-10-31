@@ -1,43 +1,37 @@
 #!/usr/bin/env python3
-"""Bench the LoRa/Meshtastic chain against carrier offsets (CFO).
+"""Bench the LoRa/Meshtastic chain against placement shifts plus crystal errors.
 
-Each committed LongFast capture is moved off its channel in numpy at 1.024 Msps,
-re-quantised to cu8, repeated --repeat times and piped through the live chain
-(`sox ... rate -m -b 74 500000`, then the wrapper with the argv buildDecoderArgs()
-builds). A case is MODEL + PREAMBLE:
+Each committed LongFast capture gets 8 synthetic upchirps inserted before the
+frame (16, as Meshtastic sends), then a crystal error C (the matching
+sample-clock error C / 869.525 MHz by resampling, plus the carrier offset C),
+then a placement shift S (the channel S Hz above the capture centre: a pure
+frequency shift, no clock error). It is re-quantised to cu8 at 1.024 Msps,
+repeated --repeat times and piped through the live chain (`sox ... rate -m -b 74
+500000`, then the wrapper with the argv buildDecoderArgs() builds).
 
-- shift: a pure frequency shift (the channel off the capture centre, which centre
-  placement allows, or a mistuned centre). No sample-clock error.
-- crystal: a transmitter crystal error: the same shift plus the matching
-  sample-clock error (offset / 869.525 MHz), applied by resampling.
-- 8: the committed captures (8 preamble upchirps, as gen_lora.py modulates).
-- 16: 8 synthetic upchirps inserted before the frame, so 16 like Meshtastic sends.
+A variant is how the wrapper learns the shift:
 
-A variant is NAME:EXTRA_WRAPPER_ARGS. `new` is the live argv; `old` adds
-`--cfo-search-hz 0 --preamble-len 8`, the wrapper before the CFO search (one
-gr-lora_sdr path expecting 8 upchirps).
+- known: `--shift-hz S --cfo-search-hz 0`, the adapter's argv when it knows the
+  capture centre (always in the core: the source reports it). The default.
+- search: `--shift-hz 0 --cfo-search-hz bw/5`, the adapter's argv when the
+  centre is unknown (the opt-in recentred path).
+- none: `--shift-hz 0 --cfo-search-hz 0`, no offset handling but frame_sync's own.
 
 Needs sox, numpy, gnuradio + gr-lora_sdr and the wrapper: run it inside the core
-image from the repository root, never against a live receiver:
+image from the repository root, never against a live receiver. The acceptance
+command (also printed first):
 
-    python3 scripts/fixtures/bench_lora_cfo.py
-    python3 scripts/fixtures/bench_lora_cfo.py --variant old --variant new --repeat 1
+    python3 scripts/fixtures/bench_lora_cfo.py --cpu-seconds 60
 
-This is the in-image acceptance for the decoder's offset handling (the image has
-no pnpm or dev dependencies). Exit status 1 when a gating `new`-variant run decodes
-other than --repeat frames (fewer, or a duplicate the two paths both let through).
-A run gates when its offset is within the range that model must decode:
+Exit status 1 when a gating `known` run decodes other than --repeat frames
+(fewer, or a duplicate). A run gates when |S| <= --target-hz (default 45 kHz:
+loraMaxShiftHz() at 869.525 MHz, 190 000 - 125 000 - 20 000) and |C| <=
+--crystal-target-hz (default 20 kHz, 23 ppm at 869.525 MHz).
 
-- shift: --target-hz, default the search range bw/5 (50 kHz for 250 kHz), the
-  largest offset the planner places a slot off the capture centre. The recentred
-  path removes it.
-- crystal: --crystal-target-hz, default 20 kHz (23 ppm at 869.525 MHz). Only the
-  direct path (gr-lora_sdr's own clock model) decodes a large crystal offset: the
-  recentred path removes the offset but not its clock error, which drifts the
-  symbol timing by N x offset / 869.525 MHz chips per symbol, past half a chip
-  within the ~40 symbols after sync once |offset| > 0.5 x 869.525 MHz / (40 x
-  2048) = 5.3 kHz. In-image runs decoded every crystal16 copy up to +-20 kHz and
-  missed one of three at -25 kHz.
+--cpu-seconds N also measures the steady-state CPU of the default chain (known
+variant, the largest gating shift so the rotator runs) on noise alone: the CPU of
+a run of 10 + N seconds less that of a 10-second run, per signal second, so
+gnuradio's import and flowgraph startup cancel out.
 """
 from __future__ import annotations
 
@@ -45,6 +39,7 @@ import argparse
 import json
 import math
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -64,34 +59,44 @@ from bench_lora_chain import (  # noqa: E402
 )
 
 CHANNEL_HZ = 869_525_000
-DEFAULT_OFFSETS_HZ = [0, 2_000, -2_000, 5_000, -5_000, 10_000, -10_000, 15_000, -15_000,
-                      20_000, -20_000, 25_000, -25_000, 30_000, -30_000, 40_000, -40_000,
-                      50_000, -50_000]
-DEFAULT_CASES = ["shift8", "crystal16"]
-VARIANTS = {"new": [], "old": ["--cfo-search-hz", "0", "--preamble-len", "8"]}
+DEFAULT_SHIFTS_HZ = [0, 25_000, -25_000, 45_000, -45_000]
+DEFAULT_CRYSTALS_HZ = [0, 5_000, -5_000, 10_000, -10_000, 20_000, -20_000]
+VARIANTS = ["known", "search", "none"]
 # scripts/fixtures/gen_lora.py: 0.25 s of 1.024 Msps noise precede the frame.
 FRAME_START = 256_000
 INSERTED_UPCHIRPS = 8
-# Largest crystal offset a run must decode (module docstring).
+# loraMaxShiftHz() in src/decoders/builtin/lora-meshtastic.ts for LongFast at os 2
+# and 869.525 MHz: 76 % x 500 000 / 2 - 125 000 - ceil(23 x 869.525) = 45 000 Hz.
+SHIFT_TARGET_HZ = 45_000
+# Largest crystal offset a run must decode: 20 kHz, 23 ppm at 869.525 MHz
+# (LORA_CRYSTAL_MARGIN_PPM).
 CRYSTAL_TARGET_HZ = 20_000
+# The CPU baseline run's length; the measured run is this plus --cpu-seconds.
+CPU_BASE_S = 10.0
+ACCEPTANCE = "python3 scripts/fixtures/bench_lora_cfo.py --cpu-seconds 60"
+
+
+def int_list(text: str) -> list[int]:
+    return [int(o) for o in text.split(",") if o.strip()]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--fixtures", default="fixtures/lora", help="capture directory")
-    parser.add_argument("--offsets", default=",".join(str(o) for o in DEFAULT_OFFSETS_HZ),
-                        help="comma-separated carrier offsets in Hz")
-    parser.add_argument("--case", action="append", choices=["shift8", "shift16",
-                        "crystal8", "crystal16"], help=f"repeatable; default {DEFAULT_CASES}")
-    parser.add_argument("--variant", action="append", choices=sorted(VARIANTS),
-                        help="repeatable; default new")
-    parser.add_argument("--target-hz", type=int, default=None,
-                        help="exit 1 on a failed new shift run within +-this; default bw/5")
+    parser.add_argument("--shifts", default=",".join(str(o) for o in DEFAULT_SHIFTS_HZ),
+                        help="comma-separated placement shifts in Hz")
+    parser.add_argument("--crystals", default=",".join(str(o) for o in DEFAULT_CRYSTALS_HZ),
+                        help="comma-separated crystal errors in Hz")
+    parser.add_argument("--variant", action="append", choices=VARIANTS,
+                        help="repeatable; default known")
+    parser.add_argument("--target-hz", type=int, default=SHIFT_TARGET_HZ,
+                        help=f"gate shifts within +-this (default {SHIFT_TARGET_HZ})")
     parser.add_argument("--crystal-target-hz", type=int, default=CRYSTAL_TARGET_HZ,
-                        help="exit 1 on a failed new crystal run within +-this; "
-                        f"default {CRYSTAL_TARGET_HZ}")
+                        help=f"gate crystal errors within +-this (default {CRYSTAL_TARGET_HZ})")
     parser.add_argument("--repeat", type=int, default=3,
                         help="copies of each 0.91 s capture per run (default 3)")
+    parser.add_argument("--cpu-seconds", type=float, default=0.0,
+                        help="steady-state CPU over this many noise seconds; 0 skips it")
     parser.add_argument("--cpu", type=int, default=0,
                         help="CPU to pin both stages to; -1 leaves them unpinned")
     parser.add_argument("--input-rate", type=int, default=1_024_000)
@@ -104,13 +109,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sox", default="sox")
     parser.add_argument("--json", action="store_true", help="one JSON object per run")
     args = parser.parse_args()
-    args.offsets = [int(o) for o in args.offsets.split(",") if o.strip()]
-    args.case = args.case or DEFAULT_CASES
-    args.variant = args.variant or ["new"]
-    if args.target_hz is None:
-        args.target_hz = cfo_search_hz(args.bw)
+    args.shifts = int_list(args.shifts)
+    args.crystals = int_list(args.crystals)
+    args.variant = args.variant or ["known"]
     if args.repeat < 1:
         parser.error("--repeat must be at least 1")
+    if args.cpu_seconds < 0:
+        parser.error("--cpu-seconds must be at least 0")
     return args
 
 
@@ -185,24 +190,29 @@ def crystal_resample(x: np.ndarray, ratio: float) -> np.ndarray:
     return fine[i] * (1 - frac) + fine[i + 1] * frac
 
 
-def make_capture(x: np.ndarray, case: str, offset_hz: int, args: argparse.Namespace) -> np.ndarray:
+def make_capture(x: np.ndarray, shift_hz: int, crystal_hz: int,
+                 args: argparse.Namespace) -> np.ndarray:
+    """16 preamble upchirps, the crystal error (clock and carrier), then the placement shift."""
     fs = float(args.input_rate)
-    if case.endswith("16"):
-        x = insert_upchirps(x, fs, float(args.bw), 1 << args.sf)
-    if case.startswith("crystal") and offset_hz:
-        x = crystal_resample(x, 1 + offset_hz / CHANNEL_HZ)
-    if offset_hz:
-        x = x * np.exp(2j * np.pi * offset_hz * np.arange(len(x)) / fs)
+    x = insert_upchirps(x, fs, float(args.bw), 1 << args.sf)
+    if crystal_hz:
+        x = crystal_resample(x, 1 + crystal_hz / CHANNEL_HZ)
+    offset = crystal_hz + shift_hz
+    if offset:
+        x = x * np.exp(2j * np.pi * offset * np.arange(len(x)) / fs)
     return x
 
 
-def wrapper_argv(args: argparse.Namespace, out_rate: int, extra: list[str]) -> list[str]:
-    # buildDecoderArgs() in src/decoders/builtin/lora-meshtastic.ts, then the variant's
-    # extra arguments (argparse keeps the last value of a repeated option).
+def wrapper_argv(args: argparse.Namespace, out_rate: int, variant: str,
+                 shift_hz: int) -> list[str]:
+    # buildDecoderArgs() in src/decoders/builtin/lora-meshtastic.ts. The channel sits
+    # shift_hz above the capture centre, so the adapter passes slot - centre = shift_hz.
+    known = variant == "known"
+    search = cfo_search_hz(args.bw) if variant == "search" else 0
     return ["python3", args.wrapper, "--bw", str(args.bw), "--sf", str(args.sf),
             "--cr", str(args.cr), "--samp-rate", str(out_rate), "--frequency", str(CHANNEL_HZ),
             "--channel-key", "AQ==", "--region", "EU_868",
-            "--cfo-search-hz", str(cfo_search_hz(args.bw)), *extra]
+            "--shift-hz", str(shift_hz if known else 0), "--cfo-search-hz", str(search)]
 
 
 def wrapper_report(stderr: str) -> dict[str, Any]:
@@ -222,7 +232,7 @@ def wrapper_report(stderr: str) -> dict[str, Any]:
     return report
 
 
-def run_chain(args: argparse.Namespace, capture: Path, extra: list[str],
+def run_chain(args: argparse.Namespace, capture: Path, argv: list[str],
               preexec: Callable[[], None] | None) -> dict[str, Any]:
     out_rate = args.bw * args.os_factor
     started = time.monotonic()
@@ -231,7 +241,7 @@ def run_chain(args: argparse.Namespace, capture: Path, extra: list[str],
                                         args.sox_rate_opts.split()),
                                stdin=source, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, preexec_fn=preexec)
-        py = subprocess.Popen(wrapper_argv(args, out_rate, extra), stdin=sox.stdout,
+        py = subprocess.Popen(argv, stdin=sox.stdout,
                               stdout=subprocess.PIPE, stderr=py_err, preexec_fn=preexec)
         assert sox.stdout is not None and py.stdout is not None
         sox.stdout.close()
@@ -246,36 +256,72 @@ def run_chain(args: argparse.Namespace, capture: Path, extra: list[str],
             **wrapper_report(stderr), "py_stderr_tail": stderr.strip().splitlines()[-3:]}
 
 
+def noise_capture(path: Path, seconds: float, sigma: float, rate: int) -> None:
+    """Complex Gaussian noise at the captures' level, written in 1 s blocks."""
+    rng = np.random.default_rng(60)
+    left = int(seconds * rate)
+    with open(path, "wb") as out:
+        while left > 0:
+            count = min(left, rate)
+            x = sigma / math.sqrt(2) * (rng.standard_normal(count)
+                                        + 1j * rng.standard_normal(count))
+            out.write(to_cu8(x))
+            left -= count
+
+
+def steady_cpu(args: argparse.Namespace, tmp: Path, sigma: float,
+               preexec: Callable[[], None] | None) -> dict[str, Any]:
+    """CPU-s per signal second of the default chain on noise, startup excluded."""
+    shift = max((s for s in args.shifts if abs(s) <= args.target_hz), key=abs, default=0)
+    argv = wrapper_argv(args, args.bw * args.os_factor, "known", shift)
+    runs = []
+    for seconds in (CPU_BASE_S, CPU_BASE_S + args.cpu_seconds):
+        path = tmp / "noise.cu8"
+        noise_capture(path, seconds, sigma, args.input_rate)
+        runs.append(run_chain(args, path, argv, preexec))
+        path.unlink()
+    span = args.cpu_seconds
+    return {"shift_hz": shift, "noise_s": span,
+            "sox_cpu_per_signal_s": round((runs[1]["sox_cpu_s"] - runs[0]["sox_cpu_s"]) / span, 4),
+            "py_cpu_per_signal_s": round((runs[1]["py_cpu_s"] - runs[0]["py_cpu_s"]) / span, 4),
+            "py_exit": [r["py_exit"] for r in runs], "decodes": [r["decodes"] for r in runs]}
+
+
 def main() -> int:
     args = parse_args()
     preexec = pinner(args.cpu)
     failed = False
+    out_rate = args.bw * args.os_factor
     if not args.json:
+        print(f"acceptance: {ACCEPTANCE}")
+        print(f"this run:   python3 {shlex.join(sys.argv)}")
         print(f"repeat={args.repeat} cpu={args.cpu} bw={args.bw} sf={args.sf} "
-              f"os={args.os_factor} target shift +-{args.target_hz} Hz, "
-              f"crystal +-{args.crystal_target_hz} Hz")
-        print(f"{'capture':27} {'case':9} {'var':4} {'offset':>7} {'dec':>5} {'direct':>6} "
+              f"os={args.os_factor}; gating: shift +-{args.target_hz} Hz x "
+              f"crystal +-{args.crystal_target_hz} Hz, variant known")
+        print(f"{'capture':27} {'var':6} {'shift':>7} {'xtal':>7} {'dec':>5} {'direct':>6} "
               f"{'recent':>6} {'cfo est':>8} {'sox/s':>6} {'py/s':>6} {'wall s':>6}")
-    with tempfile.TemporaryDirectory(prefix="lora-cfo-bench-") as tmp:
+    sigma = 0.0
+    with tempfile.TemporaryDirectory(prefix="lora-cfo-bench-") as tmp_dir:
+        tmp = Path(tmp_dir)
         for name in FIXTURES:
             base = load_cu8(Path(args.fixtures) / name)
-            for case in args.case:
-                for offset in args.offsets:
-                    x = make_capture(base, case, offset, args)
-                    path = Path(tmp) / "capture.cu8"
+            sigma = max(sigma, float(np.std(base[: FRAME_START - 20_000])))
+            for shift in args.shifts:
+                for crystal in args.crystals:
+                    x = make_capture(base, shift, crystal, args)
+                    path = tmp / "capture.cu8"
                     path.write_bytes(to_cu8(x) * args.repeat)
-                    # cu8: 2 bytes per complex sample.
                     signal_s = len(x) * args.repeat / args.input_rate
                     for variant in args.variant:
-                        r = run_chain(args, path, VARIANTS[variant], preexec)
+                        r = run_chain(args, path, wrapper_argv(args, out_rate, variant, shift),
+                                      preexec)
                         ok = (r["decodes"] == args.repeat and r["py_exit"] == 0
                               and r["sox_exit"] == 0)
-                        target = (args.crystal_target_hz if case.startswith("crystal")
-                                  else args.target_hz)
-                        gating = variant == "new" and abs(offset) <= target
+                        gating = (variant == "known" and abs(shift) <= args.target_hz
+                                  and abs(crystal) <= args.crystal_target_hz)
                         failed = failed or (gating and not ok)
-                        row = {"capture": name, "case": case, "variant": variant,
-                               "offset_hz": offset, "expected": args.repeat, "ok": ok,
+                        row = {"capture": name, "variant": variant, "shift_hz": shift,
+                               "crystal_hz": crystal, "expected": args.repeat, "ok": ok,
                                "gating": gating, "signal_s": round(signal_s, 3),
                                "sox_cpu_per_signal_s": round(r["sox_cpu_s"] / signal_s, 4),
                                "py_cpu_per_signal_s": round(r["py_cpu_s"] / signal_s, 4),
@@ -287,7 +333,7 @@ def main() -> int:
                         paths = r["paths"]
                         cfo = "-" if r["cfo_hz"] is None else f"{r['cfo_hz']:.0f}"
                         flag = "" if ok else ("  FAIL" if gating else "  miss")
-                        print(f"{name:27} {case:9} {variant:4} {offset:>7} "
+                        print(f"{name:27} {variant:6} {shift:>7} {crystal:>7} "
                               f"{r['decodes']:>2}/{args.repeat:<2} {paths.get('direct', '-')!s:>6} "
                               f"{paths.get('recentred', '-')!s:>6} {cfo:>8} "
                               f"{row['sox_cpu_per_signal_s']:6.3f} {row['py_cpu_per_signal_s']:6.3f} "
@@ -295,6 +341,20 @@ def main() -> int:
                         if not ok and r["py_stderr_tail"]:
                             print("    wrapper stderr: " + " | ".join(r["py_stderr_tail"]),
                                   flush=True)
+        if args.cpu_seconds > 0:
+            cpu = steady_cpu(args, tmp, sigma, preexec)
+            # Noise alone must decode nothing and exit cleanly.
+            failed = failed or cpu["py_exit"] != [0, 0] or any(cpu["decodes"])
+            if args.json:
+                print(json.dumps({"steady_state": cpu}, sort_keys=True), flush=True)
+            else:
+                print(f"steady state on {cpu['noise_s']:g} s of noise (shift {cpu['shift_hz']} Hz, "
+                      f"run of {CPU_BASE_S + cpu['noise_s']:g} s less one of {CPU_BASE_S:g} s): "
+                      f"sox {cpu['sox_cpu_per_signal_s']:.3f}, wrapper "
+                      f"{cpu['py_cpu_per_signal_s']:.3f} CPU-s per signal second; "
+                      f"exits {cpu['py_exit']}, decodes {cpu['decodes']}")
+    if not args.json:
+        print("FAIL: a gating case missed" if failed else "PASS: every gating case decoded")
     return 1 if failed else 0
 
 

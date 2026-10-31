@@ -103,10 +103,9 @@ const BASE64_CHARS_RE = /^[A-Za-z0-9+/]*={0,2}$/
  * the shared `-h` (125 dB): the output is 8-bit cu8, whose quantisation floor
  * is about 6 dB x 8 = 48 dB, so the extra rejection is never seen. `-b 74`
  * (sox's narrowest passband, 74 % of the output Nyquist) still passes
- * 0.74 x 250 kHz = 185 kHz at 500 kS/s, above the 125 kHz half-width of a
- * 250 kHz channel plus the bw/5 = 50 kHz carrier offset the decoder corrects
- * ({@link LORA_CFO_SEARCH_DIVISOR}), and it attenuates 185-250 kHz energy that frame_sync (which
- * decimates without filtering) would fold into the channel. sox
+ * 0.74 x 250 kHz = 185 kHz at 500 kS/s (sox's -3 dB point; a slot placed off
+ * the capture centre may reach {@link LORA_SLOT_EDGE_PERCENT}), and it attenuates 185-250 kHz energy that frame_sync (which decimates without
+ * filtering) would fold into the channel. sox
  * CPU-s per signal second on the committed captures (+10 / -5 dB SNR, one loaded host): 1.024 -> 2.0 Msps
  * `-h` 0.22-0.24 / 0.56-0.60; 1.024 -> 1.0 Msps `-h` 0.14-0.18 / 0.32-0.33;
  * 1.024 -> 1.0 Msps `-m -b 74` 0.12-0.14 / 0.25.
@@ -152,19 +151,74 @@ export function loraResampleCommand(
 }
 
 /**
- * Carrier offset the decoder corrects, as a share of bw: the channel off the
- * capture centre (centre placement) plus the transmitter's crystal error. The
- * wrapper's recentred path finds each preamble's offset from its upchirps and
- * downchirps, which read 2 x offset modulo bw, so only +-bw/4 is unambiguous.
- * bw/5 keeps bw/4 - bw/5 = bw/20 (12.5 kHz at 250 kHz) inside that bound, and
- * the slot's far edge, bw/2 + bw/5 = 0.7 x bw, inside the 0.74 x bw sox passband
- * at os 2 ({@link LORA_SOX_RATE_OPTIONS}). LongFast: 250 kHz / 5 = 50 kHz.
+ * Highest frequency a placed slot plus its crystal margin may reach, in percent
+ * of the resampled Nyquist rate (bw x oversampling / 2). sox `rate -m -b 74`
+ * ({@link LORA_SOX_RATE_OPTIONS}) at 1.024 Msps -> 500 kS/s, tones measured with
+ * the real sox: -0.5 dB at 170 kHz, -2.7 dB at 185 kHz (74 %, the -3 dB point),
+ * -4.2 dB at 190 kHz (76 %), -6.1 dB at 195 kHz, -8.6 dB at 200 kHz. A chirp
+ * that reaches 190 kHz spends (190 - 170) / 250 = 8 % of each symbol above
+ * -0.5 dB, an average amplitude loss of 8 % x (1 - 0.75) = 2 %, about 0.2 dB.
+ * An integer, so 76 x 500 000 / 200 = 190 000 is exact.
+ */
+export const LORA_SLOT_EDGE_PERCENT = 76
+
+/**
+ * Transmitter plus receiver crystal error the slot must keep room for, in ppm of
+ * the slot frequency: the bench-proven +-20 kHz at 869.525 MHz (20 000 / 869.525
+ * = 23.0 ppm; scripts/fixtures/bench_lora_cfo.py decodes a 20 kHz crystal error on
+ * the direct path). In ppm because a crystal error scales with the carrier:
+ * 23 ppm is 10.0 kHz at 433.875 MHz.
+ */
+export const LORA_CRYSTAL_MARGIN_PPM = 23
+
+/**
+ * Carrier offset the opt-in carrier-offset search corrects, as a share of bw. It
+ * runs only when the capture centre is unknown ({@link LoraMeshtasticOptions.shiftHz}
+ * null): the wrapper's recentred path then finds each preamble's offset from its
+ * upchirps and downchirps, which read 2 x offset modulo bw, so only +-bw/4 is
+ * unambiguous. bw/5 keeps bw/4 - bw/5 = bw/20 (12.5 kHz at 250 kHz) inside that
+ * bound. LongFast: 250 kHz / 5 = 50 kHz.
  */
 export const LORA_CFO_SEARCH_DIVISOR = 5
 
 /** {@link LORA_CFO_SEARCH_DIVISOR} applied to bw, in whole Hz (the wrapper takes an integer). */
 export function loraCfoSearchHz(bw: number): number {
 	return Math.floor(bw / LORA_CFO_SEARCH_DIVISOR)
+}
+
+/**
+ * Largest placement offset |slot - capture centre| in Hz at which the slot,
+ * shifted back to baseband by the wrapper (--shift-hz), still decodes: the slot's
+ * half-width plus the crystal margin must stay below the resampler edge.
+ *
+ *     edge    = 76 % x bw x oversampling / 2  (190 000 Hz for 250 kHz at os 2)
+ *     crystal = ceil(23 x slot / 10^6)        (20 000 Hz at 869.525 MHz, 9 980 at 433.875 MHz)
+ *     shift   = edge - bw/2 - crystal         (45 000 Hz at 869.525 MHz, 55 020 at 433.875 MHz)
+ *
+ * capped at the opt-in search range bw/5 (the former bound, 50 kHz for 250 kHz),
+ * whichever is smaller, and never below 0 (the slot then sits only on the centre).
+ */
+export function loraMaxShiftHz(
+	options: Pick<LoraMeshtasticOptions, "bw" | "effectiveTargetRate">,
+	slotHz: number,
+): number {
+	const edge = (LORA_SLOT_EDGE_PERCENT * options.effectiveTargetRate) / 200
+	const crystal = Math.ceil((LORA_CRYSTAL_MARGIN_PPM * slotHz) / 1e6)
+	const shift = Math.floor(edge - options.bw / 2 - crystal)
+	return Math.max(0, Math.min(shift, loraCfoSearchHz(options.bw)))
+}
+
+/**
+ * Full width around the capture centre the slot must lie inside (the planner's
+ * centrePassbandHz): bw + 2 x {@link loraMaxShiftHz}. LongFast at os 2:
+ * 250 000 + 2 x 45 000 = 340 000 Hz at 869.525 MHz, 250 000 + 2 x 50 000 =
+ * 350 000 Hz at 433.875 MHz.
+ */
+export function loraCentrePassbandHz(
+	options: Pick<LoraMeshtasticOptions, "bw" | "effectiveTargetRate">,
+	slotHz: number,
+): number {
+	return options.bw + 2 * loraMaxShiftHz(options, slotHz)
 }
 
 /** Canonical install path of the Python wrapper inside the Docker image. */
@@ -198,7 +252,17 @@ export interface LoraMeshtasticOptions {
 	oversampling: number
 	/** Exact resampled IQ rate in Hz. */
 	effectiveTargetRate: number
-	/** Largest carrier offset the wrapper corrects, in Hz ({@link loraCfoSearchHz}). */
+	/**
+	 * Placement offset in Hz: the slot (`frequency`) minus the capture centre
+	 * (`inputCenterFreq`), positive when the slot sits above the centre. The
+	 * wrapper rotates the stream by -shiftHz so the slot lands at baseband. 0 with
+	 * followCenter (the centre is the slot); null when the centre is unknown.
+	 */
+	shiftHz: number | null
+	/**
+	 * Largest carrier offset the wrapper's opt-in search corrects, in Hz: 0 (off)
+	 * when the shift is known, {@link loraCfoSearchHz} when it is not.
+	 */
 	cfoSearchHz: number
 }
 
@@ -249,13 +313,19 @@ export const RawOptionsSchema = z
 			return z.NEVER
 		}
 
+		const follows =
+			raw.followCenter === true && raw.inputCenterFreq !== undefined
+		const shiftHz = follows
+			? 0
+			: raw.inputCenterFreq !== undefined
+				? raw.frequency - raw.inputCenterFreq
+				: null
 		return {
 			region: raw.region,
 			preset: raw.preset,
-			frequency:
-				raw.followCenter && raw.inputCenterFreq !== undefined
-					? raw.inputCenterFreq
-					: raw.frequency,
+			frequency: follows
+				? (raw.inputCenterFreq ?? raw.frequency)
+				: raw.frequency,
 			channelKey: raw.channelKey,
 			bw,
 			sf,
@@ -263,7 +333,8 @@ export const RawOptionsSchema = z
 			inputSampleRate,
 			oversampling,
 			effectiveTargetRate,
-			cfoSearchHz: loraCfoSearchHz(bw),
+			shiftHz,
+			cfoSearchHz: shiftHz === null ? loraCfoSearchHz(bw) : 0,
 		}
 	})
 
@@ -396,7 +467,12 @@ export const LORA_MESHTASTIC_CAPS: DecoderCaps = {
 	integrationPattern: "pure_consumer",
 }
 
-/** Builds the argv list passed to the Python wrapper. Exported for testing. */
+/**
+ * Builds the argv list passed to the Python wrapper. Exported for testing.
+ * `--shift-hz` is the known placement offset (0 when the centre is unknown, the
+ * opt-in search then on); the decoder restarts when the capture centre moves, so
+ * a running wrapper always has the current offset.
+ */
 export function buildDecoderArgs(options: LoraMeshtasticOptions): string[] {
 	return [
 		WRAPPER_SCRIPT_PATH,
@@ -414,6 +490,8 @@ export function buildDecoderArgs(options: LoraMeshtasticOptions): string[] {
 		options.channelKey,
 		"--region",
 		options.region,
+		"--shift-hz",
+		String(options.shiftHz ?? 0),
 		"--cfo-search-hz",
 		String(options.cfoSearchHz),
 	]
@@ -430,6 +508,20 @@ export class LoraMeshtasticDecoder extends IqDecimateDecoder {
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
 		this.options = parseLoraMeshtasticOptions(config.options)
+	}
+
+	/**
+	 * The manager describes the input as its rate plus the capture centre when
+	 * the source knows it: an input update without a centre means the centre is
+	 * now unknown, so the stale one is dropped (shift unknown, search fallback)
+	 * instead of surviving the option merge as a wrong `--shift-hz`.
+	 */
+	override updateOptions(updates: Record<string, unknown>): void {
+		super.updateOptions(
+			"inputSampleRate" in updates && !("inputCenterFreq" in updates)
+				? { ...updates, inputCenterFreq: undefined }
+				: updates,
+		)
 	}
 
 	protected override onOptionsUpdated(): void {

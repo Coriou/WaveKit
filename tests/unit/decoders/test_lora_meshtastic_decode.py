@@ -8,10 +8,17 @@ import base64
 import contextlib
 import importlib.util
 import io
+import math
 from pathlib import Path
 import random
+import subprocess
 import sys
 import unittest
+
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover - CI installs numpy
+    np = None
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "docker" / "scripts" / "lora_meshtastic_decode.py"
@@ -330,6 +337,73 @@ class CfoArgsTest(unittest.TestCase):
         self.assertEqual(wrapper.CFO_DELAY_SYMBOLS, 32)
 
 
+class ShiftArgsTest(unittest.TestCase):
+    """--shift-hz: the known placement offset, removed before the direct path."""
+
+    ARGV = CfoArgsTest.ARGV
+
+    def test_default_is_no_shift_and_no_search(self):
+        args = wrapper.parse_args(self.ARGV)
+        self.assertEqual(args.shift_hz, 0)
+        self.assertEqual(args.cfo_search_hz, 0)
+        self.assertEqual(wrapper.demod_paths(args.cfo_search_hz), ["direct"])
+
+    def test_signed_shifts_parse(self):
+        for text, value in (("25000", 25_000), ("-45000", -45_000), ("0", 0)):
+            with self.subTest(text=text):
+                args = wrapper.parse_args(self.ARGV + ["--shift-hz", text])
+                self.assertEqual(args.shift_hz, value)
+
+    def test_search_is_opt_in(self):
+        self.assertEqual(wrapper.demod_paths(0), ["direct"])
+        self.assertEqual(wrapper.demod_paths(50_000), ["direct", "recentred"])
+
+    def test_phase_increment_sign(self):
+        # A channel 25 kHz above the centre at 500 kS/s turns +0.1 pi per sample;
+        # the rotator turns it back by -0.1 pi.
+        self.assertAlmostEqual(wrapper.shift_phase_inc(25_000, 500_000), -0.1 * math.pi)
+        self.assertAlmostEqual(wrapper.shift_phase_inc(-45_000, 500_000), 0.18 * math.pi)
+        self.assertEqual(wrapper.shift_phase_inc(0, 500_000), 0.0)
+
+    @unittest.skipIf(np is None, "numpy missing")
+    def test_rotation_moves_the_channel_to_baseband(self):
+        # rotator_cc: y[n] = x[n] exp(j phase_inc n). A tone at the slot offset
+        # lands on 0 Hz, whichever side of the centre the slot is.
+        n = np.arange(4096)
+        for shift in (25_000, -25_000, 45_000, -45_000):
+            with self.subTest(shift=shift):
+                x = np.exp(2j * np.pi * shift * n / 500_000)
+                y = x * np.exp(1j * wrapper.shift_phase_inc(shift, 500_000) * n)
+                self.assertLess(float(np.max(np.abs(y - 1))), 1e-6)
+
+    def test_passband_bound(self):
+        # |shift| + bw/2 <= fs/2: 125 000 + 125 000 = 250 000 at 500 kS/s.
+        self.assertTrue(wrapper.shift_in_passband(125_000, 250_000, 500_000))
+        self.assertTrue(wrapper.shift_in_passband(-125_000, 250_000, 500_000))
+        self.assertFalse(wrapper.shift_in_passband(125_001, 250_000, 500_000))
+        self.assertFalse(wrapper.shift_in_passband(-125_001, 250_000, 500_000))
+
+
+class StdoutIsolationTest(unittest.TestCase):
+    def test_native_stdout_goes_to_stderr(self):
+        # A native write to fd 1 (a gnuradio `:info:` line) must not reach the JSONL stream.
+        code = (
+            "import importlib.util, os, sys\n"
+            f"spec = importlib.util.spec_from_file_location('w', {str(SCRIPT)!r})\n"
+            "w = importlib.util.module_from_spec(spec); sys.modules['w'] = w\n"
+            "spec.loader.exec_module(w)\n"
+            "w.isolate_stdout()\n"
+            "os.write(1, b'cu8_stdin_source :info: native\\n')\n"
+            "print('python print')\n"
+            "w.write_event({'id': 1})\n"
+        )
+        done = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True,
+                              text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout, '{"id":1}\n')
+        self.assertIn("cu8_stdin_source :info: native", done.stderr)
+        self.assertIn("python print", done.stderr)
+
 # LongFast at os 2: 4096 input samples per symbol, 2048 bins.
 SPS = 4096
 TOLERANCE = wrapper.DEDUPE_TOLERANCE_SYMBOLS * SPS
@@ -556,10 +630,6 @@ class FramePositionsTest(unittest.TestCase):
         self.assertEqual(frames, [wrapper.AssembledFrame(FRAME, True, 4242)])
 
 
-try:
-    import numpy as np
-except ImportError:  # pragma: no cover - CI installs numpy
-    np = None
 
 SYNC_WORD_SYMBOLS = (16, 88)  # 0x2B: (0x2 << 3, 0xB << 3), as frame_sync maps it
 

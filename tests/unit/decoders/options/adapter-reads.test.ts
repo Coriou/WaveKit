@@ -62,13 +62,21 @@ const UNREACHABLE_KEYS: Record<string, string[]> = {
  * Dot reads RAW_DOT_READ finds on names that are not decoder options:
  * - ais-catcher `options?.fillBits`, `options?.at`: decodeAisPayload's own
  *   DecodeAisOptions parameter.
- * - lora-meshtastic `options.bw`, `.sf`, `.cr`, `.effectiveTargetRate`, `.cfoSearchHz`:
- *   buildDecoderArgs' parameter is the parsed LoraMeshtasticOptions, whose derived
- *   keys come from the preset (its raw keys are covered by the raw schema).
+ * - lora-meshtastic `options.bw`, `.sf`, `.cr`, `.effectiveTargetRate`, `.cfoSearchHz`,
+ *   `.shiftHz`: buildDecoderArgs' and loraMaxShiftHz's parameter is the parsed
+ *   LoraMeshtasticOptions, whose derived keys come from the preset and the
+ *   capture centre (its raw keys are covered by the raw schema).
  */
 const NOT_OPTION_READS: Record<string, string[]> = {
 	"ais-catcher": ["at", "fillBits"],
-	"lora-meshtastic": ["bw", "cfoSearchHz", "cr", "effectiveTargetRate", "sf"],
+	"lora-meshtastic": [
+		"bw",
+		"cfoSearchHz",
+		"cr",
+		"effectiveTargetRate",
+		"sf",
+		"shiftHz",
+	],
 }
 
 interface AdapterCase {
