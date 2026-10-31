@@ -305,6 +305,10 @@ interface DecoderState {
 	originalConfig?: DecoderConfig
 	effectiveConfig?: DecoderConfig
 	loggedSuspension?: string | null
+	/** R5: the input rate last warned about as suboptimal, so each rate warns once. */
+	suboptimalRateWarned?: number
+	/** R4: an efficiency re-check's admission, the next start's preflight. */
+	efficiencyPreflight?: AdmissionDecision
 	parentId?: string
 	placement?: WantedPlacement
 	unplaced?: DecoderSuspensionReasonCode
@@ -5408,6 +5412,10 @@ export class DecoderManager extends EventEmitter {
 			if (this.selectedSourceId(state) !== sourceId) continue
 			// The probe pool stops and re-creates probes on every epoch (H5).
 			if (state.owner === "scanner") continue
+			// R5: a rate change re-arms the suboptimal-rate warning even while
+			// the decoder is not adapted (suspended), so a returning rate warns.
+			if (caps && state.suboptimalRateWarned !== caps.sampleRate)
+				delete state.suboptimalRateWarned
 			const adapting = await this.evaluateRate(state, caps)
 			// A decoder whose channel was invalidated is re-wired on any evaluation.
 			if (adapting && caps && (adapt || state.channelStale))
@@ -5525,7 +5533,10 @@ export class DecoderManager extends EventEmitter {
 			if (decoderCaps?.preferredSampleRates?.length) {
 				const preferred = decoderCaps.preferredSampleRates
 				const current = caps.sampleRate
-				if (!preferred.includes(current)) {
+				// R5: once per decoder and rate; a preferred rate re-arms it.
+				if (preferred.includes(current)) delete state.suboptimalRateWarned
+				else if (state.suboptimalRateWarned !== current) {
+					state.suboptimalRateWarned = current
 					this.log.warn(
 						{
 							decoderId,
@@ -5594,6 +5605,8 @@ export class DecoderManager extends EventEmitter {
 		caps: SourceCaps | null,
 	): Promise<boolean> {
 		const before = this.rateKey(state)
+		const refusedDetail =
+			state.admission?.admit === false ? state.admission.detail : undefined
 		this.clearExpiredAdmission(state)
 		const eligibility = this.assessEligibility(state, caps)
 		const plan = eligibility.rate
@@ -5625,8 +5638,27 @@ export class DecoderManager extends EventEmitter {
 				// Review Focus 5: identical caps get the same admission answer.
 				state.ratePlan = plan
 				this.publishIfRateChanged(state, before)
+			} else if (
+				eligibility.blockedBy === null &&
+				this.efficiencyStillRefused(state)
+			) {
+				// R4: a due refusal the gate repeats is not a resume; the
+				// suspension and its since stand, published only when the
+				// refusal's detail changes.
+				state.ratePlan = plan
+				if (
+					state.admission?.admit === false &&
+					state.admission.detail !== refusedDetail
+				)
+					this.emitStatusChanged(state)
+				else this.publishIfRateChanged(state, before)
 			} else if (eligibility.blockedBy === null) {
-				await this.resume(state, plan)
+				try {
+					await this.resume(state, plan)
+				} finally {
+					// Consumed by this resume's start, or never: not a later start's.
+					delete state.efficiencyPreflight
+				}
 			} else if (state.transition === "suspending") {
 				await this.suspend(state, eligibility) // retry a failed stop
 			} else {
@@ -5651,6 +5683,38 @@ export class DecoderManager extends EventEmitter {
 		state.ratePlan = plan
 		this.publishIfRateChanged(state, before)
 		return running
+	}
+
+	/**
+	 * R4: re-asks the gate for a decoder suspended for efficiency whose
+	 * refusal fell due, before resuming it. A refusal is kept as the new
+	 * admission (the suspension stays); an admission stands in for the
+	 * resume's preflight only, so the start's final decision
+	 * (startPlacementNow) still governs the run and the gate is asked no
+	 * more often than before.
+	 */
+	private efficiencyStillRefused(state: DecoderState): boolean {
+		const gate = this.config.enablement?.gate
+		if (
+			!gate ||
+			!state.placement ||
+			state.suspension?.reasonCode !== "efficiency-budget" ||
+			!this.awaitsEfficiency(state) ||
+			this.gateExempt(state)
+		)
+			return false
+		const decision = gate.admit(
+			state.placement,
+			this.runningPlacements(),
+			performance.now(),
+		)
+		if (decision.admit) {
+			state.efficiencyPreflight = decision
+			return false
+		}
+		state.admission = decision
+		this.scheduleEfficiencyEvaluation()
+		return true
 	}
 
 	/**
@@ -5771,6 +5835,9 @@ export class DecoderManager extends EventEmitter {
 		const prior = state.suspension
 		const channelRetry =
 			prior !== null && isChannelAdmissionReason(prior.reasonCode)
+		// R4: the gate admitted an efficiency hold; its resume is published
+		// once, when the start settles (every exit below publishes).
+		const quiet = prior?.reasonCode === "efficiency-budget"
 		state.suspension = null
 		state.transition = "resuming"
 		this.clearChannelRetry(this.selectedSourceId(state), true)
@@ -5784,7 +5851,7 @@ export class DecoderManager extends EventEmitter {
 				{ decoderId: id },
 				"Resuming decoder: source rate and band are usable",
 			)
-		this.emitStatusChanged(state)
+		if (!quiet) this.emitStatusChanged(state)
 
 		const abandon = async (startedProcess: boolean) => {
 			if (state.transition === "resuming") state.transition = null
@@ -6327,16 +6394,19 @@ export class DecoderManager extends EventEmitter {
 		const generation = state.rateGeneration
 		// YAML placements keep today's behaviour: admitted without a verdict.
 		const exempt = this.gateExempt(state)
+		const preflight = state.efficiencyPreflight
+		delete state.efficiencyPreflight
 		if (gate && state.placement) {
 			delete state.admission
 			delete state.admittedAtMs
 			state.admission = exempt
 				? { admit: true }
-				: gate.admit(
+				: (preflight ??
+					gate.admit(
 						state.placement,
 						this.runningPlacements(),
 						performance.now(),
-					)
+					))
 			if (!state.admission.admit) {
 				await this.suspend(state, this.assessEligibility(state))
 				this.scheduleEfficiencyEvaluation()
