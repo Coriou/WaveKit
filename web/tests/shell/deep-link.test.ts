@@ -2,8 +2,30 @@ import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 
 import type { LinkState } from "../../src/shell/deep-link.ts"
-import { formatLink, parseLink } from "../../src/shell/deep-link.ts"
-import { frequencyToken, token } from "../../src/features/activity/search.ts"
+import {
+	DECODER_NAME_MAX,
+	formatLink,
+	parseLink,
+} from "../../src/shell/deep-link.ts"
+import type { SearchToken } from "../../src/features/activity/search.ts"
+import {
+	decoderToken,
+	frequencyToken,
+	token,
+} from "../../src/features/activity/search.ts"
+
+const activityWith = (tokens: SearchToken[]): LinkState => ({
+	view: "spectrum",
+	drawer: "activity",
+	activity: {
+		tokens,
+		chip: null,
+		range: { kind: "any" },
+		audio: false,
+		openId: null,
+	},
+})
+const tokensOf = (hash: string) => parseLink(hash)?.activity?.tokens
 
 describe("deep links", () => {
 	it("names the view, the drawer and what is open in it", () => {
@@ -53,6 +75,46 @@ describe("deep links", () => {
 		})
 	})
 
+	it("keeps a decoder's display name, and an id holding ~", () => {
+		const adsb = decoderToken("adsb-1", "ADS-B")
+		const hash = formatLink(activityWith([adsb]))
+		expect(hash).toBe("#/activity?t=decoder%3Aadsb-1%7EADS-B")
+		expect(tokensOf(hash)).toEqual([adsb])
+		expect(tokensOf(hash)?.[0]?.label).toBe("Decoder ADS-B")
+		const tilde = decoderToken("a~b", "x~y %")
+		expect(tokensOf(formatLink(activityWith([tilde])))).toEqual([tilde])
+		const bare = decoderToken("a~b")
+		expect(tokensOf(formatLink(activityWith([bare])))).toEqual([bare])
+		// links made before names travelled still open
+		expect(tokensOf("#/activity?t=decoder:adsb-1")).toEqual([
+			decoderToken("adsb-1"),
+		])
+	})
+
+	it("drops a bad, empty or too long decoder name, never the decoder", () => {
+		const atMax = "n".repeat(DECODER_NAME_MAX)
+		const pastMax = "n".repeat(DECODER_NAME_MAX + 1)
+		expect(
+			tokensOf(formatLink(activityWith([decoderToken("d1", atMax)]))),
+		).toEqual([decoderToken("d1", atMax)])
+		// past the limit the link carries the id alone, and a hand-made one is read the same
+		expect(formatLink(activityWith([decoderToken("d1", pastMax)]))).toBe(
+			"#/activity?t=decoder%3Ad1",
+		)
+		const q = (raw: string) =>
+			tokensOf(`#/activity?t=${encodeURIComponent(raw)}`)
+		expect(q(`decoder:d1~${pastMax}`)).toEqual([decoderToken("d1")])
+		expect(q(`decoder:d1~${atMax}`)).toEqual([decoderToken("d1", atMax)])
+		expect(q("decoder:d1~")).toEqual([decoderToken("d1")])
+		expect(q("decoder:d1~%20%20")).toEqual([decoderToken("d1")])
+		expect(q("decoder:d1~%E0%A4%A")).toEqual([decoderToken("d1")])
+		expect(q("decoder:d1~a~b")).toEqual([decoderToken("d1", "a~b")])
+		// a bad or empty id names nothing
+		expect(q("decoder:%E0%A4%A~x")).toEqual([])
+		expect(q("decoder:~x")).toEqual([])
+		expect(q("decoder:%20~x")).toEqual([])
+	})
+
 	// Feature: web-app deep links, Property 1: a link opens the state it was made from
 	it("round-trips every state through the hash", () => {
 		const tok = fc.oneof(
@@ -75,6 +137,14 @@ describe("deep links", () => {
 						.filter(s => s.trim() !== ""),
 				)
 				.map(([k, v]) => token(k, v)),
+			fc
+				.tuple(
+					fc
+						.string({ minLength: 1, maxLength: 12 })
+						.filter(s => s.trim() !== ""),
+					fc.option(fc.string({ maxLength: DECODER_NAME_MAX })),
+				)
+				.map(([id, name]) => decoderToken(id, name ?? undefined)),
 			fc
 				.tuple(
 					fc.integer({ min: 100_000, max: 6_000_000_000 }),

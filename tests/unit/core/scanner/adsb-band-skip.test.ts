@@ -1,9 +1,13 @@
 /**
  * The built-in ADS-B band (1089-1091 MHz, builtin-supplement.ts) carries a band-plan skip
  * ("Decoded elsewhere · readsb"). Sweeps that honour band-plan skips leave the band to readsb,
- * the band names no scan protocol (no priors, no analog trial, no replay trial but readsb),
- * and the readsb decode anchor at 1090 MHz forms as before (ambient-readsb.test.ts covers the
- * anchor itself with the skip view wired in).
+ * the band names no scan protocol (no priors anywhere in it), and at 1090 MHz with those empty
+ * priors a capture with no track or a wide burst track, of unknown or adsb protocol, plans no
+ * replay trial, only reporting readsb as skipped. The readsb decode anchor at 1090 MHz forms as
+ * before (ambient-readsb.test.ts covers the anchor itself with the skip view wired in).
+ *
+ * Not covered, and not changed by the band skip: a narrow FSK-like track, or an anchorless
+ * identify, inside the band can still plan other replay or analog trials (pre-existing).
  */
 import { rm } from "node:fs/promises"
 import { afterEach, describe, expect, it } from "vitest"
@@ -79,7 +83,7 @@ describe("built-in ADS-B band skip", () => {
 		}
 	})
 
-	it("a 1090 MHz capture plans no replay trial but readsb (reported, it has no replay input)", () => {
+	it("a 1090 MHz capture with no track or a wide burst, unknown or adsb protocol, plans only readsb (reported skipped, it has no replay input)", () => {
 		const capture: IqCaptureView = {
 			captureId: "c1",
 			sourceId: "rtl",
