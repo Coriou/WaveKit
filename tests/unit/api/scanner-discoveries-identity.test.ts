@@ -55,6 +55,9 @@ function fakeService(
 	return { ...base, ...overrides }
 }
 
+const IDENTITY_EXPECTED =
+	'"kind:value": a known identity kind, a colon, then a non-empty value'
+
 describe("GET /api/scanner/discoveries identity", () => {
 	let app: FastifyInstance
 	let service: ReturnType<typeof fakeService>
@@ -109,8 +112,8 @@ describe("GET /api/scanner/discoveries identity", () => {
 		expect(res.json()).toEqual({
 			error: "ValidationError",
 			code: "VALIDATION_ERROR",
-			message:
-				"Configuration validation failed:\n  - identity: Identity value is empty",
+			message: `Invalid query parameter: identity: ${IDENTITY_EXPECTED}`,
+			fields: [{ field: "identity", expected: IDENTITY_EXPECTED }],
 		})
 		expect(service.listDiscoveries).not.toHaveBeenCalled()
 	})

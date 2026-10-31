@@ -374,6 +374,7 @@ describe("Listen › Auto listen route (/auto)", () => {
 
 	it("plays /auto at 48 kHz s16le, a loopback host following the page", () => {
 		expect(autoRouteSource(running(), "http://pi.local:3000/", true)).toEqual({
+			route: "auto",
 			httpUrl: "http://pi.local:8081/auto",
 			wavUrl: "http://pi.local:8081/auto.wav",
 			format: "s16le",

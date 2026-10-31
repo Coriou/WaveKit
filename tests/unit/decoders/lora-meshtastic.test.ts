@@ -13,11 +13,14 @@ import type {
 } from "../../../src/decoders/types.js"
 import {
 	LoraMeshtasticDecoder,
+	DEFAULT_OVERSAMPLING,
+	LORA_CFO_SEARCH_DIVISOR,
 	LORA_MESHTASTIC_CAPS,
 	LORA_PRESETS,
 	LORA_REGIONS,
 	PRESET_TABLE,
 	buildDecoderArgs,
+	loraCfoSearchHz,
 	parseLoraMeshtasticOptions,
 	parseMeshtasticPacket,
 	type LoraPreset,
@@ -31,6 +34,9 @@ const testLogger = pino({ level: "silent" })
 class TestLoraMeshtasticDecoder extends LoraMeshtasticDecoder {
 	public testParseOutput(line: string): DecoderOutput | null {
 		return this.parseOutput(line)
+	}
+	public testArgs(): string[] {
+		return this.getArgs()
 	}
 }
 
@@ -408,6 +414,111 @@ describe("LoRa/Meshtastic Decoder Property-Based Tests", () => {
 			expect(LORA_MESHTASTIC_CAPS.wantsExclusiveSource).toBe(false)
 			expect(LORA_MESHTASTIC_CAPS.output).toBe("jsonl")
 			expect(LORA_MESHTASTIC_CAPS.integrationPattern).toBe("pure_consumer")
+		})
+	})
+
+	describe("channel key size", () => {
+		const keyOf = (n: number): string =>
+			Buffer.alloc(n, 0x5a).toString("base64")
+
+		for (const n of [1, 16, 32]) {
+			it(`accepts a ${n}-byte key`, () => {
+				const opts = parseLoraMeshtasticOptions(
+					validOptions({ channelKey: keyOf(n) }),
+				)
+				expect(Buffer.from(opts.channelKey, "base64").length).toBe(n)
+			})
+		}
+
+		for (const n of [2, 15, 17, 24, 31, 33, 64]) {
+			it(`rejects a ${n}-byte key`, () => {
+				expect(() =>
+					parseLoraMeshtasticOptions(validOptions({ channelKey: keyOf(n) })),
+				).toThrow(ConfigValidationError)
+			})
+		}
+
+		it("rejects the AA== no-encryption key the wrapper refuses", () => {
+			expect(() =>
+				parseLoraMeshtasticOptions(validOptions({ channelKey: "AA==" })),
+			).toThrow(ConfigValidationError)
+		})
+
+		it("rejects an empty key", () => {
+			expect(() =>
+				parseLoraMeshtasticOptions(validOptions({ channelKey: "" })),
+			).toThrow(ConfigValidationError)
+		})
+	})
+
+	describe("resample chain arguments", () => {
+		const WRAPPER =
+			"python3 /usr/local/bin/lora_meshtastic_decode.py --bw 250000 --sf 11 --cr 5"
+		const TAIL =
+			"--frequency 869525000 --channel-key AQ== --region EU_868 --cfo-search-hz 50000"
+		const chain = (overrides: Record<string, unknown>): string[] =>
+			new TestLoraMeshtasticDecoder(
+				makeConfig(validOptions(overrides)),
+				testLogger,
+			).testArgs()
+
+		it("defaults to os_factor 2: 250 kHz x 2 = 500 kS/s", () => {
+			expect(DEFAULT_OVERSAMPLING).toBe(2)
+			expect(
+				parseLoraMeshtasticOptions(validOptions()).effectiveTargetRate,
+			).toBe(500_000)
+		})
+
+		it("resamples a 1.024 Msps capture once to 500 kS/s with sox rate -m -b 74", () => {
+			expect(chain({ inputSampleRate: 1_024_000 })).toEqual([
+				"-c",
+				"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 1024000 - -t raw -e unsigned-integer -b 8 -c 2 -r 500000 - rate -m -b 74 500000 | " +
+					`${WRAPPER} --samp-rate 500000 ${TAIL}`,
+			])
+		})
+
+		it("skips sox when the capture already runs at bw x os_factor", () => {
+			expect(chain({ inputSampleRate: 500_000 })).toEqual([
+				"-c",
+				`${WRAPPER} --samp-rate 500000 ${TAIL}`,
+			])
+		})
+
+		it("follows an oversampling override: 250 kHz x 4 = 1.0 Msps", () => {
+			expect(chain({ inputSampleRate: 1_024_000, oversampling: 4 })).toEqual([
+				"-c",
+				"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 1024000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1000000 - rate -m -b 74 1000000 | " +
+					`${WRAPPER} --samp-rate 1000000 ${TAIL}`,
+			])
+		})
+
+		// The wrapper estimates 2 x offset modulo bw, so it rejects a range of bw/4 or more.
+		it.each([
+			[250_000, 50_000],
+			[125_000, 25_000],
+			[62_500, 12_500],
+			// A bandwidth override not divisible by 5 rounds down to whole Hz.
+			[100_003, 20_000],
+		])(
+			"searches bw/5 of carrier offset: bw %i Hz -> %i Hz, below bw/4",
+			(bandwidth, searchHz) => {
+				expect(LORA_CFO_SEARCH_DIVISOR).toBe(5)
+				expect(loraCfoSearchHz(bandwidth)).toBe(searchHz)
+				expect(4 * searchHz).toBeLessThan(bandwidth)
+				const opts = parseLoraMeshtasticOptions(validOptions({ bandwidth }))
+				const args = buildDecoderArgs(opts)
+				expect(args.slice(-2)).toEqual(["--cfo-search-hz", String(searchHz)])
+			},
+		)
+
+		it("passes the wrapper a samp-rate that is an integer multiple of bw for every preset", () => {
+			for (const preset of LORA_PRESETS) {
+				const opts = parseLoraMeshtasticOptions(validOptions({ preset }))
+				const args = buildDecoderArgs(opts)
+				const sampRate = Number(args[args.indexOf("--samp-rate") + 1])
+				expect(sampRate).toBe(PRESET_TABLE[preset].bw * DEFAULT_OVERSAMPLING)
+				expect(Number.isInteger(sampRate / opts.bw)).toBe(true)
+			}
 		})
 	})
 })

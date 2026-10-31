@@ -23,6 +23,7 @@ import {
 import {
 	builtinBandplansFor,
 	resolveBuiltinBandplan,
+	SKIP_ONLY_PLAN_IDS,
 } from "../../../../src/core/bandplans/builtin-supplement.js"
 
 const REGIONS = ["EU", "US", "CA", "AU", "NZ", "JP", "CN"] as const
@@ -200,10 +201,11 @@ describe("band-plan presets", () => {
 
 	it("builds one preset per regional plan, then the fixed combinations", () => {
 		for (const region of REGIONS) {
-			const plans = builtinBandplansFor(region)
-			const before = structuredClone(plans)
+			const all = builtinBandplansFor(region)
+			const before = structuredClone(all)
 			const presets = builtinPresetsFor(region)
 			expect(builtinBandplansFor(region)).toEqual(before)
+			const plans = all.filter(plan => !SKIP_ONLY_PLAN_IDS.has(plan.id))
 			expect(presets.slice(0, plans.length).map(preset => preset.id)).toEqual(
 				plans.map(plan => `builtin-${plan.id}`),
 			)
@@ -266,6 +268,18 @@ describe("band-plan presets", () => {
 			expect(combos.map(preset => [preset.id, preset.job.bandplans])).toEqual([
 				["builtin-combo-land-mobile-marine", ["vhf-land-mobile", "marine-vhf"]],
 			])
+		}
+	})
+
+	it("offers no preset for a skip-only plan such as ADS-B", () => {
+		expect([...SKIP_ONLY_PLAN_IDS]).toEqual(["adsb"])
+		for (const region of REGIONS) {
+			expect(builtinBandplansFor(region).map(plan => plan.id)).toContain("adsb")
+			const presets = builtinPresetsFor(region)
+			expect(presets.map(preset => preset.id)).not.toContain("builtin-adsb")
+			expect(presets.flatMap(preset => preset.job.bandplans)).not.toContain(
+				"adsb",
+			)
 		}
 	})
 

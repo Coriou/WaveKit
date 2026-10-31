@@ -52,6 +52,17 @@ export function loadJsonSample(): Record<string, unknown>[] {
 /**
  * Loads the JSON sample data as raw JSONL text.
  */
+/**
+ * readsb JSON lines carrying Comm-B values (IAS, Mach, magnetic heading, selected altitude, QNH),
+ * fictional aircraft.
+ */
+export function loadCommBSample(): Record<string, unknown>[] {
+	return readFileSync(join(__dirname, "comm-b-sample.jsonl"), "utf-8")
+		.split("\n")
+		.filter(line => line.trim().length > 0)
+		.map(line => JSON.parse(line) as Record<string, unknown>)
+}
+
 export function loadJsonSampleRaw(): string {
 	return readFileSync(join(__dirname, "json-sample.jsonl"), "utf-8")
 }

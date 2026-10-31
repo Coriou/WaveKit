@@ -182,6 +182,13 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 	row("map.trails", "Map", "Trail length", "history track", SETTINGS),
 	row("map.labels", "Map", "Labels", "names callsigns clutter", SETTINGS),
 	row(
+		"map.aircraftOnline",
+		"Map",
+		"Online aircraft lookups",
+		"aircraft photo airline route adsbdb planespotters privacy",
+		SETTINGS,
+	),
+	row(
 		"dp.range",
 		"Display",
 		"Spectrum range",

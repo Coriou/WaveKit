@@ -15,6 +15,7 @@ import type {
 import {
 	builtinBandplansFor,
 	resolveBuiltinBandplan,
+	SKIP_ONLY_PLAN_IDS,
 } from "./builtin-supplement.js"
 import type {
 	BuiltinPresetsFor,
@@ -66,10 +67,13 @@ function builtinPreset(
 	return { kind: "builtin", id, name, region, job: emptyJob(bandplans) }
 }
 
+/** One preset per built-in plan a scan can run (skip-only plans are left out), then the combinations. */
 export const builtinPresetsFor: BuiltinPresetsFor = region => {
-	const presets: BuiltinScanPreset[] = builtinBandplansFor(region).map(plan =>
-		builtinPreset(region, `builtin-${plan.id}`, plan.name, [plan.id]),
-	)
+	const presets: BuiltinScanPreset[] = builtinBandplansFor(region)
+		.filter(plan => !SKIP_ONLY_PLAN_IDS.has(plan.id))
+		.map(plan =>
+			builtinPreset(region, `builtin-${plan.id}`, plan.name, [plan.id]),
+		)
 	for (const combination of COMBINATIONS) {
 		const bandplans = combination.planIds.filter(
 			id => resolveBuiltinBandplan(id, region) !== undefined,

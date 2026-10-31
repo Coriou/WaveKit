@@ -560,14 +560,14 @@ describe("planner: ruler maths", () => {
 		const two = segmentedScale(
 			[
 				{ startHz: MHZ(169.4), endHz: MHZ(169.8) },
-				{ startHz: MHZ(466.025), endHz: MHZ(466.23) },
+				{ startHz: MHZ(431.025), endHz: MHZ(431.23) },
 			],
 			800,
 		)
 		expect(two.segments).toHaveLength(2)
 		expect(two.breaks).toHaveLength(1)
 		const a = scaleX(two, MHZ(169.6)) ?? -1
-		const b = scaleX(two, MHZ(466.1)) ?? -1
+		const b = scaleX(two, MHZ(431.1)) ?? -1
 		expect(a).toBeGreaterThan(0)
 		expect(b).toBeGreaterThan(a)
 		expect(b).toBeLessThan(800)

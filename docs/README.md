@@ -16,6 +16,7 @@ the top.
 | [Native development](LOCAL-SETUP.md)                                                    | Run the core without Docker                                                |
 | [CLI dashboard](CLI.md)                                                                 | The terminal dashboard                                                     |
 | [ADS-B](ADSB.md), [digital voice](DIGITAL-VOICE.md), [scanner](SCANNER.md)              | Feature guides                                                             |
+| [Aircraft data link](AIRCRAFT-DATALINK.md)                                              | ACARS and VDL2: who sent a message, labels, linking aircraft               |
 | [Security](SECURITY.md)                                                                 | Access, pairing, version pinning                                           |
 
 ## Reference
@@ -23,6 +24,7 @@ the top.
 | Page                                | What it covers                                                                  |
 | ----------------------------------- | ------------------------------------------------------------------------------- |
 | [API](API.md)                       | REST and WebSocket contract                                                     |
+| [Agent recipes](AGENTS-API.md)      | Machine token, status, tuning, gain, decoders, activity and IQ capture by curl  |
 | [Core reference](CORE-REFERENCE.md) | Tuner control, RTL-TCP relay, live audio, configuration, RTL-SDR, Docker images |
 | [Docker setup](DOCKER-SETUP.md)     | Compose profiles and image builds                                               |
 

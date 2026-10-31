@@ -15,11 +15,19 @@ import type { DecoderConfig } from "../../../src/decoders/types.js"
 import { MultimonDecoder } from "../../../src/decoders/builtin/multimon-ng.js"
 import { Rtl433Decoder } from "../../../src/decoders/builtin/rtl433.js"
 import { DsdFmeDecoder } from "../../../src/decoders/builtin/dsd-fme.js"
-import { DirewolfDecoder } from "../../../src/decoders/builtin/direwolf.js"
+import {
+	DirewolfDecoder,
+	direwolfConfigPath,
+} from "../../../src/decoders/builtin/direwolf.js"
+import { shellCommand } from "../../../src/decoders/process-tools.js"
 import { AcarsdecDecoder } from "../../../src/decoders/builtin/acarsdec.js"
 import { Dumpvdl2Decoder } from "../../../src/decoders/builtin/dumpvdl2.js"
 import { AisCatcherDecoder } from "../../../src/decoders/builtin/ais-catcher.js"
 import { LoraMeshtasticDecoder } from "../../../src/decoders/builtin/lora-meshtastic.js"
+
+/** Every golden builds its decoder with id "g": the per-instance direwolf config path. */
+const DW_CONF = direwolfConfigPath("g")
+const DW_CONF_SH = shellCommand(DW_CONF, [])
 
 const logger = pino({ level: "silent" })
 
@@ -113,19 +121,9 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 43 0.012 | csdr fmdemod | csdr gain 3 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 47627.90697674418 -e signed -b 16 -c 1 - -t raw -r 48000 - | direwolf -c /etc/direwolf.conf - -r 48000 -p 8001 -a 8000",
+			`csdr convert -i char -o float | csdr firdecimate 43 0.012 | csdr fmdemod | csdr gain 3 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 47627.90697674418 -e signed -b 16 -c 1 - -t raw -r 48000 - | direwolf -c ${DW_CONF_SH} - -r 48000`,
 		],
-		getDecoderArgs: [
-			"-c",
-			"/etc/direwolf.conf",
-			"-",
-			"-r",
-			"48000",
-			"-p",
-			"8001",
-			"-a",
-			"8000",
-		],
+		getDecoderArgs: ["-c", DW_CONF, "-", "-r", "48000"],
 	},
 	{
 		type: "rtl433",
@@ -772,19 +770,9 @@ const GOLDEN: Row[] = [
 		options: {},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 50 0.012 | csdr fmdemod | csdr gain 3 | csdr limit | csdr convert -i float -o s16 | direwolf -c /etc/direwolf.conf - -r 48000 -p 8001 -a 8000",
+			`csdr convert -i char -o float | csdr firdecimate 50 0.012 | csdr fmdemod | csdr gain 3 | csdr limit | csdr convert -i float -o s16 | direwolf -c ${DW_CONF_SH} - -r 48000`,
 		],
-		getDecoderArgs: [
-			"-c",
-			"/etc/direwolf.conf",
-			"-",
-			"-r",
-			"48000",
-			"-p",
-			"8001",
-			"-a",
-			"8000",
-		],
+		getDecoderArgs: ["-c", DW_CONF, "-", "-r", "48000"],
 	},
 	{
 		type: "direwolf",
@@ -795,19 +783,9 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr shift -0.0041666667 | csdr firdecimate 50 0.012 | csdr fmdemod | csdr gain 3 | csdr limit | csdr convert -i float -o s16 | direwolf -c /etc/direwolf.conf - -r 48000 -p 8001 -a 8000",
+			`csdr convert -i char -o float | csdr shift -0.0041666667 | csdr firdecimate 50 0.012 | csdr fmdemod | csdr gain 3 | csdr limit | csdr convert -i float -o s16 | direwolf -c ${DW_CONF_SH} - -r 48000`,
 		],
-		getDecoderArgs: [
-			"-c",
-			"/etc/direwolf.conf",
-			"-",
-			"-r",
-			"48000",
-			"-p",
-			"8001",
-			"-a",
-			"8000",
-		],
+		getDecoderArgs: ["-c", DW_CONF, "-", "-r", "48000"],
 	},
 	{
 		type: "ais-catcher",
@@ -871,7 +849,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 2000000 - rate -h 2000000 | python3 /usr/local/bin/lora_meshtastic_decode.py --bw 250000 --sf 11 --cr 5 --samp-rate 2000000 --frequency 869525000 --channel-key AQ== --region EU_868",
+			"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 500000 - rate -m -b 74 500000 | python3 /usr/local/bin/lora_meshtastic_decode.py --bw 250000 --sf 11 --cr 5 --samp-rate 500000 --frequency 869525000 --channel-key AQ== --region EU_868 --cfo-search-hz 50000",
 		],
 		getDecoderArgs: [
 			"/usr/local/bin/lora_meshtastic_decode.py",
@@ -882,13 +860,15 @@ const GOLDEN: Row[] = [
 			"--cr",
 			"5",
 			"--samp-rate",
-			"2000000",
+			"500000",
 			"--frequency",
 			"869525000",
 			"--channel-key",
 			"AQ==",
 			"--region",
 			"EU_868",
+			"--cfo-search-hz",
+			"50000",
 		],
 	},
 ]

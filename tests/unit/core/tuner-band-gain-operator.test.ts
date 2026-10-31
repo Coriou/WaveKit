@@ -94,6 +94,7 @@ async function setup(applyToMyTuning: boolean, fs = memoryFs().fs) {
 		}),
 		isRtlTcpSource: () => true,
 		updateSourceCaps: vi.fn(),
+		getCaps: () => undefined,
 	}
 	const controller = new TunerController(
 		logger,
@@ -807,5 +808,78 @@ describe("apply to my tuning: the saved gain is a durable, superseded record", (
 		await expect(
 			s.saveOperatorGains(new Map([["y".repeat(129), null]]), "y".repeat(129)),
 		).resolves.toBe(false)
+	})
+})
+
+describe("a paused feed's resume and the band gain", () => {
+	async function bandGainThenPaused() {
+		const h = await setup(true)
+		await manual(h.controller, 496)
+		await h.controller.setFrequency("rtl", ISM, REST)
+		expect(h.controller.getState("rtl")).toMatchObject({
+			gain: 297,
+			bandGain: { tenthsDb: 297 },
+		})
+		h.controller.noteFeedPaused("rtl")
+		return { ...h, mark: h.writes.length }
+	}
+
+	it("a plain resume does not re-apply the band gain (nor any gain)", async () => {
+		const h = await bandGainThenPaused()
+		h.controller.synchronizeOnConnect("rtl", { resume: "plain" })
+		expect(h.writes.slice(h.mark)).toEqual([])
+		const state = h.controller.getState("rtl")!
+		expect(state.unknownFields).toEqual(
+			expect.arrayContaining(["gainMode", "gain"]),
+		)
+		expect(state.bandGain).toBeUndefined()
+	})
+
+	it("a plain resume drops the gain saved before the band: leaving the band later writes no gain", async () => {
+		const disk = memoryFs()
+		const h = await setup(true, disk.fs)
+		await manual(h.controller, 496)
+		await h.controller.setFrequency("rtl", ISM, REST)
+		h.controller.noteFeedPaused("rtl")
+		h.controller.synchronizeOnConnect("rtl", { resume: "plain" })
+		const mark = h.writes.length
+		await h.controller.setFrequency("rtl", UHF, REST)
+		await settle()
+		expect(h.writes.slice(mark)).toEqual([[SET_FREQUENCY, UHF]])
+		expect(h.controller.getState("rtl")?.unknownFields).toEqual(
+			expect.arrayContaining(["gainMode", "gain"]),
+		)
+		// The drop is persisted: a restart does not bring the pre-pause gain back either.
+		await h.bandGain.saveOperatorGains(new Map())
+		expect(JSON.parse(disk.files.get(SAVED_PATH) ?? "null")).toEqual({
+			version: 1,
+			sources: [],
+		})
+	})
+
+	it("a scanner band gain from before the pause never reads as the scanner's again", async () => {
+		const h = await setup(false)
+		await manual(h.controller, 100)
+		await sweepOnBand(h)
+		h.controller.noteFeedPaused("rtl")
+		h.controller.synchronizeOnConnect("rtl", { resume: "plain" })
+		expect(h.controller.getState("rtl")?.bandGain).toBeUndefined()
+		// A relay client sets the same manual gain: known again, but it is the client's gain.
+		h.controller.applyExternalCommand("rtl", SET_GAIN_MODE, 1)
+		h.controller.applyExternalCommand("rtl", SET_GAIN, 297)
+		const state = h.controller.getState("rtl")
+		expect(state).toMatchObject({ gainMode: "manual", gain: 297 })
+		expect(state?.bandGain).toBeUndefined()
+	})
+
+	it("a restore resume re-applies the band gain the receiver had before the pause", async () => {
+		const h = await bandGainThenPaused()
+		h.controller.synchronizeOnConnect("rtl", { resume: "restore" })
+		expect(h.writes.slice(h.mark)).toEqual(
+			expect.arrayContaining([
+				[SET_FREQUENCY, ISM],
+				[SET_GAIN, 297],
+			]),
+		)
 	})
 })

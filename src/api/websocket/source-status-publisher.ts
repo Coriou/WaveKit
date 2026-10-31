@@ -4,7 +4,8 @@
  *
  * Cadence (bounded; the CLI audit already saw ~35 idle WS msgs/s):
  * - Immediately on source lifecycle events (connected, disconnected, error,
- *   ended, caps-changed, rate-truth-changed, signal-flat-changed), but only
+ *   ended, caps-changed, rate-truth-changed, signal-flat-changed,
+ *   feed-changed), but only
  *   when the published state actually changed.
  * - Activity transitions (streaming/stale/waiting/paused) are time-based, not
  *   evented, so a 1 s poll compares a cheap state key and emits on change.
@@ -43,6 +44,7 @@ const LIFECYCLE_EVENTS = [
 	"caps-changed",
 	"rate-truth-changed",
 	"signal-flat-changed",
+	"feed-changed",
 ] as const
 
 export interface SourceStatusPublisherOptions {
@@ -165,6 +167,8 @@ export class SourceStatusPublisher {
 				: null,
 			// Flag identity only; levels drift every tick (heartbeat refreshes them).
 			status.signalFlat ? status.signalFlat.since.getTime() : null,
+			// Pause / resume: a client must learn a paused feed without waiting for the heartbeat.
+			status.feed ? [status.feed.state, status.feed.since] : null,
 			sourceManager.isSourceAvailable(id),
 			sourceManager.getSourceAssignments(id).map(a => a.decoderId),
 		])

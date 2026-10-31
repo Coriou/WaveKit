@@ -347,6 +347,13 @@ export interface Discovery {
 	/** Weak discoveries only: a display hint of the likely kind, never a label or filter. */
 	hint?: ScannerClass | "ism-device" | "analog-voice" | "lora"
 	/**
+	 * The latest Activity event attributed to this discovery: `eventId` names it for
+	 * `GET /api/activity/:eventId`, `producedAt` is its ISO time. Optional and additive: absent when
+	 * none is attributed, and on cores that do not attribute Activity events to discoveries yet
+	 * (clients then filter Activity by the discovery's frequency). The event may have expired.
+	 */
+	lastActivity?: { eventId: string; producedAt: string }
+	/**
 	 * Band inspection UX req 1.4: decoders whose placements cover `frequencyHz` on one of
 	 * `sourceIds`, projected at read time (never stored). Absent: unknown (no claim). `[]`:
 	 * verified no placement covers it. At most DISCOVERY_COVERAGE_MAX, running first.
@@ -493,7 +500,11 @@ export type PauseReason =
 	| "source-down"
 	| "core-restart"
 	| "resume-blocked"
+	/** The receiver feed was resumed without retuning: the sweep hops again only on resume. */
+	| "resumed-without-retune"
 export type FailReason = "source-removed" | "tuner-unavailable" | "invalid"
+/** Why a job was cancelled by the core rather than the operator: the receiver feed was paused. */
+export type CancelReason = "source-paused"
 
 export interface MonitorChannelSpec {
 	frequencyHz?: number
@@ -808,7 +819,7 @@ export interface ScanJob {
 	id: string
 	name: string | null
 	state: JobState
-	reason?: PauseReason | FailReason
+	reason?: PauseReason | FailReason | CancelReason
 	passive: boolean
 	spec: NormalisedJobSpec
 	plan: HopPlan
@@ -1180,7 +1191,9 @@ export interface ScannerIdentifyTrial {
 	 * `unsupported` so clients with a closed outcome list keep parsing. WG10: `no-live-audio` for
 	 * an analog trial when live audio was not running or not tuned to the target for the whole
 	 * window; `decoder-unavailable` also when the probe pool remembers the decoder type as
-	 * unavailable (PROBE_UNAVAILABLE_MEMO_MS) and the trial is not spawned.
+	 * unavailable (PROBE_UNAVAILABLE_MEMO_MS) and the trial is not spawned. `adsb-window` for a
+	 * protocol the request names explicitly inside the ADS-B window (1089 to 1091 MHz), where only
+	 * readsb is eligible: listed, never run.
 	 */
 	reason?:
 		| "no-decoder"
@@ -1189,6 +1202,7 @@ export interface ScannerIdentifyTrial {
 		| "no-ambient-decoder"
 		| "decoder-unavailable"
 		| "no-live-audio"
+		| "adsb-window"
 }
 /** WG7 req 1.2: decoder types whose running instances name ambient-only protocols. */
 export type ScannerAmbientDecoderType =

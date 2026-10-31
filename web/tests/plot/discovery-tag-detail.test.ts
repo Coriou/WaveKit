@@ -1,0 +1,792 @@
+import { readFileSync } from "node:fs"
+
+import { describe, expect, it } from "vitest"
+import fc from "fast-check"
+import type { Discovery, ScannerProof } from "@wavekit/api-types"
+
+import {
+	approxBandwidth,
+	CHECK_ID_MAX_CHARS,
+	CHECK_IDS_MAX,
+	discoveryTuneHz,
+	DISCOVERY_TAG_MAX_LABEL_PX,
+	FLICKER_HOLD_MS,
+	FUTURE_SLACK_MS,
+	HEARD_LIVE_MS,
+	heardLive,
+	howWeKnow,
+	LAST_ACTIVITY_ID_MAX,
+	lastActivityEventId,
+	placeDiscoveryTags,
+	PROVEN_LIVE_HOLD_MS,
+	RECENT_MS,
+	SCANNER_CHECK_NOTE,
+	scannerCheckCalls,
+	summaryRepeats,
+	tagDetail,
+	tagPopoverRows,
+	tagName,
+	tagState,
+	tagTier,
+	TAG_CLOCK_MS,
+	unidentifiedLabel,
+} from "../../src/plot/discovery-tags.ts"
+import {
+	listenAfterTune,
+	tuneFailedText,
+} from "../../src/features/listen/after-tune.ts"
+
+/** Discovery fields to override; `undefined` removes an optional one. */
+type Over = { [K in keyof Discovery]?: Discovery[K] | undefined }
+
+const NOW = Date.parse("2026-10-30T08:00:00.000Z")
+const ago = (ms: number) => new Date(NOW - ms).toISOString()
+const view = { startHz: 161_000_000, endHz: 162_000_000 }
+
+const proof = (over: Partial<ScannerProof> = {}): ScannerProof => ({
+	kind: "decoded",
+	protocol: "dmr",
+	transport: "live",
+	at: ago(60_000),
+	observationId: "o1",
+	identity: { kind: "dmr-cc", value: "7" },
+	tried: ["dmr"],
+	unavailable: [],
+	encrypted: false,
+	summary: "DMR decoded (CC7)",
+	...over,
+})
+
+/** A synthesised DMR control channel: proven by its colour code, no call in it. */
+function disc(id: string, over: Over = {}): Discovery {
+	const stats = { peakDbfs: -40, meanDbfs: -50, snrDb: 20, floorDbfs: -70 }
+	const d = {
+		id,
+		frequencyHz: 161_312_500,
+		frequencyKey: "r:161312500",
+		measuredOffsetHz: 0,
+		bandwidthHz: 9000,
+		protocol: "dmr",
+		family: "digital-voice",
+		class: "tdma-ms",
+		confidence: "decoded",
+		identity: { kind: "dmr-cc", value: "7" },
+		encrypted: false,
+		coChannel: [],
+		firstSeenAt: ago(3 * 86_400_000),
+		lastSeenAt: ago(60_000),
+		observationCount: 640,
+		airtimeMs: 384_000,
+		signal: { best: stats, last: stats },
+		metadata: {
+			talkgroups: [],
+			sources: [],
+			slots: [],
+			callsigns: [],
+			capcodes: [],
+			ismModels: [],
+		},
+		sourceIds: ["rx"],
+		jobIds: [],
+		tuningTrust: "commanded",
+		evidence: { recordings: 0, psd: true, iq: false },
+		proof: proof(),
+		evidenceLevel: "proven",
+		...over,
+	} as Discovery
+	for (const k of Object.keys(over) as (keyof Discovery)[])
+		if (over[k] === undefined) delete d[k]
+	return d
+}
+
+/** A synthesised continuous 4FSK carrier nobody identified, as a current core publishes it. */
+const carrier = (over: Over = {}) =>
+	disc("carrier", {
+		frequencyHz: 161_737_500,
+		protocol: "unknown",
+		family: "unknown",
+		class: "fsk4-12k5",
+		confidence: "activity",
+		identity: undefined,
+		proof: undefined,
+		evidenceLevel: "weak",
+		...over,
+	})
+
+const none = new Set<string>()
+
+describe("tag state", () => {
+	it("proven only with a proven decoded or analog proof, or a decoded discovery from a core without proofs", () => {
+		expect(tagState(disc("p"))).toBe("proven")
+		expect(
+			tagState(
+				disc("tone", {
+					protocol: "analog-fm",
+					proof: proof({ kind: "analog-tone", protocol: "analog-fm" }),
+				}),
+			),
+		).toBe("proven")
+		expect(
+			tagState(disc("legacy", { proof: undefined, evidenceLevel: undefined })),
+		).toBe("proven")
+	})
+
+	it("never proven on weak, malformed or name-less evidence", () => {
+		// an explicit weak level wins over `decoded`
+		expect(tagState(disc("w", { evidenceLevel: "weak" }))).toBe("likely")
+		expect(
+			tagState(
+				disc("odd", { evidenceLevel: "certain" as unknown as "proven" }),
+			),
+		).toBe("likely")
+		// a proven carrier-only or sync-only proof names nothing
+		expect(
+			tagState(
+				disc("c", {
+					protocol: "carrier",
+					proof: proof({ kind: "carrier-only", protocol: "carrier" }),
+				}),
+			),
+		).toBe("heard")
+		expect(
+			tagState(disc("s", { proof: proof({ kind: "digital-undecoded" }) })),
+		).toBe("likely")
+		expect(tagState(carrier())).toBe("heard")
+		expect(
+			tagState(
+				disc("maybe", {
+					confidence: "candidate",
+					proof: undefined,
+					evidenceLevel: undefined,
+				}),
+			),
+		).toBe("likely")
+	})
+})
+
+describe("tag state: a core without evidence levels", () => {
+	it("is proven by `decoded` only when there is no proof field at all", () => {
+		const legacy = { evidenceLevel: undefined, proof: undefined } as const
+		expect(tagState(disc("l", legacy))).toBe("proven")
+		// a proof without an evidence level is a non-proving or malformed one, never legacy proven
+		for (const kind of [
+			"digital-undecoded",
+			"carrier-only",
+			"decoded",
+			"analog-tone",
+		] as const)
+			expect(
+				tagState(
+					disc(kind, { evidenceLevel: undefined, proof: proof({ kind }) }),
+				),
+			).not.toBe("proven")
+		for (const odd of [null, {}, "decoded", { kind: "nonsense" }, 7])
+			expect(
+				tagState(
+					disc("m", {
+						evidenceLevel: undefined,
+						proof: odd as unknown as ScannerProof,
+					}),
+				),
+			).not.toBe("proven")
+	})
+
+	it("never promotes a discovery carrying any proof without an evidence level (property)", () => {
+		// Feature: spectrum tag evidence, discovery tags, Property 3: legacy proven needs no proof field at all
+		// Validates: review finding 2 (unknown → not proven)
+		fc.assert(
+			fc.property(
+				fc.oneof(
+					fc.constant(null),
+					fc.anything(),
+					fc.record({ kind: fc.string() }),
+					fc
+						.constantFrom<
+							ScannerProof["kind"]
+						>("decoded", "analog-tone", "analog-voice", "digital-undecoded", "carrier-only")
+						.map(kind => proof({ kind })),
+				),
+				fc.constantFrom<Discovery["confidence"]>(
+					"decoded",
+					"classified",
+					"candidate",
+					"activity",
+				),
+				(p, confidence) =>
+					p === undefined ||
+					tagState(
+						disc("x", {
+							evidenceLevel: undefined,
+							proof: p as ScannerProof,
+							confidence,
+						}),
+					) !== "proven",
+			),
+			{ numRuns: 200 },
+		)
+	})
+})
+
+describe("tag lifetime", () => {
+	it("a proven tag stays live up to PROVEN_LIVE_HOLD_MS after it was last heard, then is recent", () => {
+		expect(PROVEN_LIVE_HOLD_MS).toBe(5 * TAG_CLOCK_MS)
+		const at = (ms: number) =>
+			tagTier(disc("p", { lastSeenAt: ago(ms) }), none, NOW)
+		expect(at(PROVEN_LIVE_HOLD_MS)).toBe("active")
+		expect(at(PROVEN_LIVE_HOLD_MS + 1)).toBe("recent")
+		expect(at(RECENT_MS + 1)).toBe("older")
+	})
+
+	it("any other tag holds its live look for one tick plus 30 s (FLICKER_HOLD_MS)", () => {
+		expect(FLICKER_HOLD_MS).toBe(90_000)
+		const at = (ms: number) =>
+			tagTier(carrier({ lastSeenAt: ago(ms) }), none, NOW)
+		expect(at(FLICKER_HOLD_MS)).toBe("active")
+		expect(at(FLICKER_HOLD_MS + 1)).toBe("recent")
+		// the hold is the proven one's only: 2 min ago is live for a proven tag, not for a guess
+		expect(at(120_000)).toBe("recent")
+		expect(tagTier(disc("p", { lastSeenAt: ago(120_000) }), none, NOW)).toBe(
+			"active",
+		)
+	})
+
+	it("a last-heard time beyond the clock's slack, or a malformed one, is never live", () => {
+		expect(FUTURE_SLACK_MS).toBe(2 * TAG_CLOCK_MS)
+		const ahead = (ms: number) =>
+			tagTier(
+				disc("f", { lastSeenAt: new Date(NOW + ms).toISOString() }),
+				none,
+				NOW,
+			)
+		expect(ahead(FUTURE_SLACK_MS)).toBe("active")
+		expect(ahead(FUTURE_SLACK_MS + 1)).not.toBe("active")
+		expect(tagTier(disc("bad", { lastSeenAt: "soon" }), none, NOW)).toBe(
+			"older",
+		)
+		// active now is active whatever the timestamp says
+		expect(
+			tagTier(disc("bad", { lastSeenAt: "soon" }), new Set(["bad"]), NOW),
+		).toBe("active")
+	})
+
+	// Feature: spectrum-tags, Property 1: a proven tag does not flash with its bursts
+	// Validates: Requirements R3
+	it("a proven tag heard within its hold is live whether or not a burst is on now; a guess follows its own hold", () => {
+		fc.assert(
+			fc.property(
+				fc.array(
+					fc.record({
+						burst: fc.boolean(),
+						ageMs: fc.integer({ min: 0, max: RECENT_MS }),
+					}),
+					{ minLength: 1, maxLength: 40 },
+				),
+				steps => {
+					for (const { burst, ageMs } of steps) {
+						const active = burst ? new Set(["p", "carrier"]) : none
+						const p = disc("p", { lastSeenAt: ago(ageMs) })
+						const u = carrier({ lastSeenAt: ago(ageMs) })
+						const pLive = tagTier(p, active, NOW) === "active"
+						const uLive = tagTier(u, active, NOW) === "active"
+						expect(pLive).toBe(burst || ageMs <= PROVEN_LIVE_HOLD_MS)
+						expect(uLive).toBe(burst || ageMs <= FLICKER_HOLD_MS)
+					}
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
+
+	it("placed, a proven tag between bursts is live, solid and proven; the carrier is quiet and unidentified", () => {
+		const tags = placeDiscoveryTags(
+			[disc("p", { lastSeenAt: ago(150_000) }), carrier()],
+			view,
+			{ widthPx: 1000, activeNow: none, now: NOW },
+		)
+		expect(
+			tags.map(t => [t.id, t.state, t.tier, t.solid, t.heard, t.name]),
+		).toEqual([
+			["p", "proven", "active", true, false, "DMR · CC 7"],
+			["carrier", "heard", "active", false, true, "Unidentified · 4FSK ~9 kHz"],
+		])
+	})
+})
+
+describe("unidentified label", () => {
+	it("names the measured shape and width", () => {
+		expect(unidentifiedLabel(carrier())).toBe("Unidentified · 4FSK ~9 kHz")
+		expect(tagName(carrier())).toBe("Unidentified · 4FSK ~9 kHz")
+		// a class-like hint when the class is unknown
+		expect(
+			unidentifiedLabel(carrier({ class: "unknown", hint: "gmsk-narrow" })),
+		).toBe("Unidentified · GMSK ~9 kHz")
+		// a non-class hint or malformed fields say nothing they cannot back
+		expect(
+			unidentifiedLabel(
+				carrier({ class: "unknown", hint: "lora", bandwidthHz: Number.NaN }),
+			),
+		).toBe("Unidentified")
+		expect(
+			unidentifiedLabel(
+				carrier({ class: "weird" as unknown as "unknown", bandwidthHz: 0 }),
+			),
+		).toBe("Unidentified")
+		expect(unidentifiedLabel(carrier({ anchor: "decode" }))).toBe(
+			"Unidentified",
+		)
+		// an operator's label wins; DMR sync only keeps its "DMR?"
+		expect(tagName(carrier({ operator: { label: "Mystery" } }))).toBe("Mystery")
+		expect(
+			tagName(
+				carrier({ protocol: "dmr", family: "digital-voice", proof: undefined }),
+			),
+		).toBe("DMR?")
+	})
+
+	it("bandwidth words at and past each bound", () => {
+		expect(approxBandwidth(0.4)).toBeNull()
+		expect(approxBandwidth(-5)).toBeNull()
+		expect(approxBandwidth("9000")).toBeNull()
+		expect(approxBandwidth(999)).toBe("~999 Hz")
+		expect(approxBandwidth(999.6)).toBe("~1 kHz")
+		expect(approxBandwidth(1000)).toBe("~1 kHz")
+		expect(approxBandwidth(12_500)).toBe("~13 kHz")
+		expect(approxBandwidth(999_499)).toBe("~999 kHz")
+		expect(approxBandwidth(999_500)).toBe("~1.0 MHz")
+		expect(approxBandwidth(1_200_000)).toBe("~1.2 MHz")
+	})
+
+	it("the label cap holds the unidentified name whole (26 characters) and cuts at 28", () => {
+		const px = (s: string) => [...s].length * 5.9
+		expect(px("Unidentified · 4FSK ~9 kHz")).toBeLessThanOrEqual(
+			DISCOVERY_TAG_MAX_LABEL_PX,
+		)
+		expect(px("x".repeat(27))).toBeLessThanOrEqual(DISCOVERY_TAG_MAX_LABEL_PX)
+		expect(px("x".repeat(28))).toBeGreaterThan(DISCOVERY_TAG_MAX_LABEL_PX)
+	})
+})
+
+describe("tag detail", () => {
+	it("a proven control channel: how we know, and why it has no Activity rows", () => {
+		const v = tagDetail(disc("p"), none, NOW)
+		expect(v).toMatchObject({
+			state: "proven",
+			stateText: "Decoded",
+			name: "DMR · CC 7",
+			freq: "161.3125",
+			howWeKnow: "DMR decoded: checked control bursts, colour code 7",
+			// "DMR decoded (CC7)" only repeats the line above: no "Core:" line
+			coreSummary: null,
+			evidence: "Proven",
+			firstSeen: "3 d ago",
+			lastSeen: "60 s ago",
+			airtime: "6 min",
+			calls: false,
+			checkCalls: null,
+			checkNote: null,
+			noCalls: "No calls heard yet — control channel only",
+			// heard 60 s ago: the tag is lit (proven hold) but the detail does not say "live"
+			live: false,
+		})
+		expect(tagDetail(disc("p"), new Set(["p"]), NOW).lastSeen).toBe(
+			"active now",
+		)
+	})
+
+	it("calls the scanner's check saw: named as such, not as Activity calls", () => {
+		const v = tagDetail(
+			disc("p", {
+				metadata: {
+					talkgroups: ["12"],
+					sources: [],
+					slots: [1],
+					callsigns: [],
+					capcodes: [],
+					ismModels: [],
+				},
+				encrypted: true,
+			}),
+			none,
+			NOW,
+		)
+		expect(v.howWeKnow).toBe(
+			"DMR decoded by the scanner's check, colour code 7 (encrypted)",
+		)
+		expect(v.howWeKnow).not.toContain("checked calls")
+		expect(v.calls).toBe(true)
+		expect(v.checkCalls).toBe("Talkgroup 12 seen by the scanner's check")
+		expect(v.checkNote).toBe(SCANNER_CHECK_NOTE)
+		expect(v.noCalls).toBeNull()
+	})
+
+	it("the real discovery shape: a CC tag whose calls came from the scanner's check, with no Activity event", () => {
+		// mirrors a real discovery's shape (talkgroups, sources, proof, no lastActivity) on a synthetic frequency
+		const real = disc("cc10", {
+			frequencyHz: 161_412_500,
+			identity: { kind: "dmr-cc", value: "10" },
+			proof: proof({
+				identity: { kind: "dmr-cc", value: "10" },
+				summary: "DMR decoded (CC10)",
+			}),
+			metadata: {
+				talkgroups: ["1"],
+				sources: ["12"],
+				slots: [],
+				callsigns: [],
+				capcodes: [],
+				ismModels: [],
+			},
+			lastActivity: undefined,
+		})
+		const v = tagDetail(real, none, NOW)
+		expect(v).toMatchObject({
+			state: "proven",
+			name: "DMR · CC 10",
+			howWeKnow: "DMR decoded by the scanner's check, colour code 10",
+			checkCalls: "Talkgroup 1, source 12 seen by the scanner's check",
+			checkNote: SCANNER_CHECK_NOTE,
+			// the summary repeats how we know: no duplicate "Core:" line
+			coreSummary: null,
+			calls: true,
+			noCalls: null,
+			lastEventId: null,
+		})
+		expect(v.howWeKnow).not.toContain("checked calls")
+		expect(SCANNER_CHECK_NOTE).toMatch(/not Activity rows/)
+		// with the core's last event for it, the note goes (Last call opens that event)
+		const withEvent = tagDetail(
+			{
+				...real,
+				lastActivity: { eventId: "evt_9", producedAt: ago(30_000) },
+			},
+			none,
+			NOW,
+		)
+		expect(withEvent.lastEventId).toBe("evt_9")
+		expect(withEvent.checkNote).toBeNull()
+	})
+
+	it("names at most CHECK_IDS_MAX ids of each kind, then +n more; malformed ids are left out", () => {
+		const ids = (n: number) =>
+			Array.from({ length: n }, (_, i) => String(i + 1))
+		const meta = (talkgroups: string[], sources: string[] = []) => ({
+			metadata: {
+				talkgroups,
+				sources,
+				slots: [],
+				callsigns: [],
+				capcodes: [],
+				ismModels: [],
+			},
+		})
+		expect(CHECK_IDS_MAX).toBe(3)
+		expect(scannerCheckCalls(meta(ids(CHECK_IDS_MAX)))).toBe(
+			"Talkgroups 1, 2, 3 seen by the scanner's check",
+		)
+		expect(scannerCheckCalls(meta(ids(CHECK_IDS_MAX + 1)))).toBe(
+			"Talkgroups 1, 2, 3 +1 more seen by the scanner's check",
+		)
+		expect(scannerCheckCalls(meta([], ["7", "8"]))).toBe(
+			"Sources 7, 8 seen by the scanner's check",
+		)
+		expect(scannerCheckCalls(meta([]))).toBeNull()
+		// the id bound: CHECK_ID_MAX_CHARS characters pass, one more does not
+		const long = "9".repeat(CHECK_ID_MAX_CHARS)
+		expect(scannerCheckCalls(meta([long]))).toBe(
+			`Talkgroup ${long} seen by the scanner's check`,
+		)
+		expect(scannerCheckCalls(meta([`${long}9`]))).toBeNull()
+		expect(scannerCheckCalls(meta(["", " ", "a\nb", "1", "1"]))).toBe(
+			"Talkgroup 1 seen by the scanner's check",
+		)
+		expect(
+			scannerCheckCalls({ metadata: { talkgroups: "1" } as never }),
+		).toBeNull()
+		expect(scannerCheckCalls({} as never)).toBeNull()
+	})
+
+	it("live only while heard in the last HEARD_LIVE_MS, not for the tag's whole hold", () => {
+		expect(HEARD_LIVE_MS).toBe(30_000)
+		const at = (ms: number) => disc("p", { lastSeenAt: ago(ms) })
+		expect(heardLive(at(HEARD_LIVE_MS), none, NOW)).toBe(true)
+		expect(heardLive(at(HEARD_LIVE_MS + 1), none, NOW)).toBe(false)
+		expect(tagDetail(at(HEARD_LIVE_MS), none, NOW).live).toBe(true)
+		expect(tagDetail(at(HEARD_LIVE_MS + 1), none, NOW).live).toBe(false)
+		// the tag stays lit for the proven hold all the same
+		expect(tagTier(at(HEARD_LIVE_MS + 1), none, NOW)).toBe("active")
+		// active now is live whenever it was last heard; a future time past the slack never is
+		expect(heardLive(at(10 * 60_000), new Set(["p"]), NOW)).toBe(true)
+		expect(heardLive(at(-FUTURE_SLACK_MS), none, NOW)).toBe(true)
+		expect(heardLive(at(-FUTURE_SLACK_MS - 1), none, NOW)).toBe(false)
+		expect(heardLive(disc("p", { lastSeenAt: "never" }), none, NOW)).toBe(false)
+	})
+
+	it("drops the Core line only when it repeats how we know", () => {
+		expect(
+			summaryRepeats(
+				"DMR decoded (CC10)",
+				"DMR decoded: checked control bursts, colour code 10",
+			),
+		).toBe(true)
+		expect(
+			summaryRepeats(
+				"DMR decoded (CC10)",
+				"DMR decoded: checked control bursts, colour code 1",
+			),
+		).toBe(false)
+		expect(
+			summaryRepeats(
+				"DMR decoded, slot 2 voice",
+				"DMR decoded: checked messages",
+			),
+		).toBe(false)
+		expect(summaryRepeats("", "anything")).toBe(false)
+		const other = tagDetail(
+			disc("p", { proof: proof({ summary: "DMR decoded, Tier III site 4" }) }),
+			none,
+			NOW,
+		)
+		expect(other.coreSummary).toBe("DMR decoded, Tier III site 4")
+	})
+
+	it("an unidentified carrier: not proven, weak, no calls line", () => {
+		const v = tagDetail(carrier(), none, NOW)
+		expect(v).toMatchObject({
+			state: "heard",
+			stateText: "Heard",
+			name: "Unidentified · 4FSK ~9 kHz",
+			howWeKnow: "Not proven: heard on the air, not identified",
+			coreSummary: null,
+			evidence: "Weak",
+			calls: false,
+			noCalls: null,
+		})
+	})
+
+	it("weak digital voice says no calls without claiming a control channel; unknown fields stay modest", () => {
+		const sync = disc("s", {
+			confidence: "activity",
+			evidenceLevel: "weak",
+			proof: proof({
+				kind: "digital-undecoded",
+				summary: "Digital, DMR-like sync, not decoded",
+			}),
+		})
+		const v = tagDetail(sync, none, NOW)
+		expect(v.state).toBe("heard")
+		expect(v.howWeKnow).toBe("Digital, DMR-like sync, not decoded")
+		expect(v.coreSummary).toBeNull()
+		expect(v.noCalls).toBe("No calls heard yet")
+		const odd = tagDetail(
+			disc("o", {
+				evidenceLevel: undefined,
+				proof: undefined,
+				confidence: "candidate",
+				airtimeMs: Number.NaN,
+				firstSeenAt: "never",
+			}),
+			none,
+			NOW,
+		)
+		expect(odd.evidence).toBe("Not reported")
+		expect(odd.airtime).toBe("unknown")
+		expect(odd.firstSeen).toBe("unknown")
+		expect(odd.howWeKnow).toBe("Not proven: Maybe DMR from the signal's shape")
+		expect(tagDetail(disc("z", { airtimeMs: 400 }), none, NOW).airtime).toBe(
+			"under 1 s",
+		)
+	})
+
+	it("analog and carrier-only proofs in words", () => {
+		expect(
+			howWeKnow(
+				disc("a", {
+					protocol: "analog-fm",
+					family: "analog",
+					proof: proof({
+						kind: "analog-tone",
+						protocol: "analog-fm",
+						summary: "Analog FM, CTCSS 77.0",
+					}),
+				}),
+			),
+		).toBe("Heard as Analog FM, CTCSS 77.0")
+		expect(
+			howWeKnow(
+				carrier({
+					proof: proof({ kind: "carrier-only", protocol: "carrier" }),
+				}),
+			),
+		).toBe("Only a carrier: nothing to decode yet")
+	})
+})
+
+describe("tag popover layout", () => {
+	const css = readFileSync(
+		new URL("../../src/plot/discovery-tags.css", import.meta.url),
+		"utf8",
+	)
+	const rule = (sel: string) => {
+		const m = new RegExp(
+			`\\n\\s*${sel.replace(/\./g, "\\.")} \\{([^}]*)\\}`,
+		).exec(css)
+		expect(m, sel).not.toBeNull()
+		return m?.[1] ?? ""
+	}
+
+	it("scrolls a single discovery's detail inside the popover's height cap, like a group's list", () => {
+		expect(rule(".wk-plot-disc-pop")).toMatch(/max-height:\s*280px/)
+		const detail = rule(".wk-plot-disc-detail")
+		expect(detail).toMatch(/overflow-y:\s*auto/)
+		expect(detail).toMatch(/min-height:\s*0/)
+		expect(rule(".wk-plot-disc-pop-list")).toMatch(/overflow-y:\s*auto/)
+	})
+})
+
+describe("tag popover Listen", () => {
+	function fakeListen(wanted = false) {
+		const calls: string[] = []
+		const listen = {
+			wanted,
+			get: () => ({ wanted: listen.wanted }),
+			unlock: () => {
+				calls.push("unlock")
+			},
+			suspend: () => {
+				calls.push("suspend")
+			},
+			start: () => {
+				calls.push("start")
+				listen.wanted = true
+				return Promise.resolve()
+			},
+		}
+		return { listen, calls }
+	}
+
+	it("starts audio only once the tune has landed, never before", async () => {
+		const { listen, calls } = fakeListen()
+		let land: (ok: boolean) => void = () => undefined
+		const tune = (hz: number) => {
+			calls.push(`tune ${hz}`)
+			return new Promise<boolean>(resolve => {
+				land = resolve
+			})
+		}
+		const done = listenAfterTune(161_312_500, tune, listen)
+		// unlocked synchronously, still inside the click, before the tune is awaited
+		expect(calls).toEqual(["unlock", "tune 161312500"])
+		await Promise.resolve()
+		await Promise.resolve()
+		// a slow tune: nothing plays yet (it would be the previous frequency)
+		expect(calls).toEqual(["unlock", "tune 161312500"])
+		land(true)
+		expect(await done).toBe(true)
+		expect(calls).toEqual(["unlock", "tune 161312500", "start"])
+	})
+
+	it("never plays when the tune fails or is superseded", async () => {
+		const { listen, calls } = fakeListen()
+		expect(
+			await listenAfterTune(1e8, () => Promise.resolve(false), listen),
+		).toBe(false)
+		// unlocking plays nothing, and a failed tune puts the woken audio back to sleep
+		expect(calls).toEqual(["unlock", "suspend"])
+	})
+
+	it("suspends again when the tune throws, and passes the rejection on", async () => {
+		const { listen, calls } = fakeListen()
+		await expect(
+			listenAfterTune(1e8, () => Promise.reject(new Error("x")), listen),
+		).rejects.toThrow("x")
+		expect(calls).toEqual(["unlock", "suspend"])
+	})
+
+	it("never suspends audio that was already on", async () => {
+		const { listen, calls } = fakeListen(true)
+		expect(
+			await listenAfterTune(1e8, () => Promise.resolve(false), listen),
+		).toBe(false)
+		expect(calls).toEqual([])
+	})
+
+	it("words a failed tune as the drawer does", () => {
+		expect(tuneFailedText("No tuner source")).toBe(
+			"Could not tune: No tuner source",
+		)
+		expect(tuneFailedText(null)).toBe(
+			"Not listening: the receiver was tuned elsewhere first",
+		)
+	})
+
+	it("leaves audio already on alone: it follows the tune", async () => {
+		const { listen, calls } = fakeListen(true)
+		expect(
+			await listenAfterTune(1e8, () => Promise.resolve(true), listen),
+		).toBe(true)
+		expect(calls).toEqual([])
+	})
+
+	it("is what the popover's Listen runs", () => {
+		const src = readFileSync(
+			new URL("../../src/plot/DiscoveryTags.tsx", import.meta.url),
+			"utf8",
+		)
+		// the drawer's Listen: same frequency, same warnings, same stop when the receiver moves
+		expect(src).toContain("void listenTo(services, d)")
+		expect(src).not.toMatch(/void services\.listen\.start\(\)/)
+		expect(src).toContain("actions.tune(discoveryTuneHz(d))")
+	})
+
+	it("Tune and Listen go to the frequency plus the measured offset, like the drawer", () => {
+		const d = disc("o", { frequencyHz: 161_312_500, measuredOffsetHz: -700 })
+		expect(discoveryTuneHz(d)).toBe(161_311_800)
+		expect(tagPopoverRows({ members: [d] })[0]?.tuneHz).toBe(161_311_800)
+		expect(discoveryTuneHz(disc("n", { measuredOffsetHz: Number.NaN }))).toBe(
+			161_312_500,
+		)
+	})
+})
+
+describe("tag popover Last call", () => {
+	const at = { eventId: "evt_1a", producedAt: "2026-10-30T07:59:00.000Z" }
+
+	it("names the core's last Activity event when it sends one", () => {
+		expect(
+			tagDetail(disc("c", { lastActivity: at }), new Set(), NOW),
+		).toMatchObject({ lastEventId: "evt_1a" })
+		expect(lastActivityEventId({ lastActivity: at })).toBe("evt_1a")
+	})
+
+	it("falls back (null) on older cores and on a malformed id", () => {
+		expect(tagDetail(disc("c"), new Set(), NOW).lastEventId).toBeNull()
+		const bad = (eventId: unknown) =>
+			lastActivityEventId({
+				lastActivity: { eventId, producedAt: at.producedAt } as never,
+			})
+		expect(bad("")).toBeNull()
+		expect(bad(42)).toBeNull()
+		expect(bad(null)).toBeNull()
+		expect(bad("evt\n1")).toBeNull()
+		// the bound: LAST_ACTIVITY_ID_MAX characters pass, one more does not
+		expect(bad("e".repeat(LAST_ACTIVITY_ID_MAX))).toBe(
+			"e".repeat(LAST_ACTIVITY_ID_MAX),
+		)
+		expect(bad("e".repeat(LAST_ACTIVITY_ID_MAX + 1))).toBeNull()
+		expect(lastActivityEventId({ lastActivity: "x" as never })).toBeNull()
+	})
+
+	it("opens that event, else Activity on the discovery's frequency", () => {
+		const src = readFileSync(
+			new URL("../../src/plot/DiscoveryTags.tsx", import.meta.url),
+			"utf8",
+		)
+		expect(src).toMatch(
+			/const id = lastActivityEventId\(d\)\s*if \(id\) services\.activity\.showEvent\(id\)\s*else services\.activity\.showFrequency\(d\.frequencyHz, d\.bandwidthHz\)/,
+		)
+		expect(src).toContain("Last call")
+		// no lastActivity: the button searches, it never promises calls
+		expect(src).toContain("Search Activity")
+		expect(src).not.toContain("Last calls")
+	})
+})

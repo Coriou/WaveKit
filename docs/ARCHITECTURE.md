@@ -375,6 +375,8 @@ Signal discovery: finds activity on a source, confirms it with a probe decode, a
 
 **Wiring** (`src/index.ts`, step 7b): the scanner is built after the decoders and digital voice and started before any source connects, so a persisted lease is restored on the source's first data. It is always constructed: with `scanner.enabled: false` it runs no jobs, but its `SpectrumService` still serves `spectrum` subscribers and `/api/spectrum`. An unreadable state directory is handled inside `start()` (the scanner runs without the unread files and never overwrites them).
 
+**Paused feed:** `SourceManager.pause()` closes a network source's connection without reconnecting and keeps its registration; `resume()` makes one attempt and the normal reconnect path restores tuning (always with the `restore` policy: `isResumedSession()` marks that connection for `tuner-wiring`). `LiveDemodulator` releases its pipeline while paused and restarts the same configuration on `live`. While the feed is not `live`, `isPaused()` is true and decoders on the source report `suspension.reasonCode: "source-paused"` (ahead of `tuner-scanning`); `feed-changed` re-evaluates them. Paused ids persist in `<stateDir>/source-feed.json` (`SourceFeedStore`; `src/index.ts` hands `SourceManager` the configured `stateDir`), so a paused source registers at boot without connecting and the boot log says `Source feed paused; not connecting until resumed` instead of `Connected to source`. Health and the degraded-mode monitor count a `paused` or `resuming` feed as intentional (`feedHeldOffline`), not as a lost source.
+
 **Decoder hold:** while a sweep holds a source, every configured decoder on it reports `suspended: true` with `suspension.reasonCode: "tuner-scanning"`, ahead of rate and band checks, and a manual start answers 409 `SOURCE_HELD_BY_SCANNER`. Scanner probes are exempt and appear as `owner: "scanner"`, `ephemeral: true` decoders (`decoder:created` / `decoder:removed`).
 
 ### Dynamic Sample Rate Handling
@@ -526,6 +528,30 @@ and strips other control markers and C0/C1 controls while preserving decoded dat
 Empty function-zero pages carry a `tone only` label; they remain stored events,
 with compact notice presentation in the web app. Message presentation budgets
 still apply to list fields and titles.
+
+### Aircraft identity and enrichment
+
+Two services name aircraft; `src/index.ts` wires them together.
+
+- `AircraftEnrichmentService` (`src/services/aircraft-enrichment-service.ts`) listens to the
+  `AircraftTracker` and fills `identification`: the ICAO address block, the local tar1090-db table,
+  a cache in `<stateDir>/aircraft-info.sqlite` (expired rows pruned hourly, at most 100,000 rows)
+  and, only while online lookups are on, adsbdb, hexdb and Planespotters. Online lookups are off by
+  default; `start()` restores the saved Settings › Map choice before any lookup is admitted, and the
+  switch is read again before every request, the tar1090-db download included. It also keeps
+  `route.plausible` current from the aircraft's position and track, so REST and WebSocket clients
+  share one verdict on a crowd-sourced route.
+- `AircraftIdentityManager` (`src/core/aircraft-identity/`) keeps an in-memory registry of links
+  between ICAO addresses, registrations, callsigns and flight numbers. Decoder output gives
+  `observed` links (one frame carried both); every registration the enrichment service resolves
+  (`identity:registration`) becomes a weaker `database` link. Only an ICAO address or a
+  registration resolves to an aircraft; a registration linked to two addresses is a conflict and
+  belongs to neither, in `icao` and in `entityKeys`. Links expire unless seen again.
+  `GET /api/aircraft-identity/:kind/:value` serves it.
+
+Activity rows of an aircraft (`src/core/activity/presentation/aircraft.ts`) are keyed by its ICAO
+address; the web app joins datalink rows keyed by registration through the registry's
+`entityKeys`.
 
 ## Decoder Integration Patterns
 

@@ -21,6 +21,7 @@ import {
 	setActivityPaneOpen,
 } from "../../src/features/activity/pane.ts"
 import { frequencyToken, token } from "../../src/features/activity/search.ts"
+import { shellStore } from "../../src/shell/store.ts"
 import { fakeSockets } from "../data/fake-socket.ts"
 
 const col = (
@@ -216,6 +217,21 @@ describe("activity controller columns", () => {
 	})
 	afterEach(() => {
 		vi.unstubAllGlobals()
+	})
+
+	it("showEvent opens one event by id in the drawer, the search kept", () => {
+		const { c } = setup()
+		c.addToken(token("talkgroup", "2081"))
+		c.open(item(5))
+		c.showEvent("evt_last")
+		expect(c.get()).toMatchObject({
+			openId: "evt_last",
+			openItem: null,
+			view: "all",
+			editing: null,
+		})
+		expect(c.get().tokens).toHaveLength(1)
+		expect(shellStore.getState().drawer).toBe("activity")
 	})
 
 	it("pins the search as a column, clears the search and opens the pane", async () => {

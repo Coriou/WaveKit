@@ -2,15 +2,17 @@ import type { DecoderReach } from "../enablement/contract.js"
 /**
  * LoRa/Meshtastic Decoder.
  *
- * Pure-consumer decoder that extends IqDecimateDecoder. Decimates cu8 IQ to a
- * LoRa-appropriate rate via csdr, then pipes into a Python wrapper around
- * gr-lora_sdr. The wrapper demodulates, decrypts, protobuf-parses, and emits
- * one JSON object per Meshtastic packet on stdout.
+ * Pure-consumer decoder that extends IqDecimateDecoder. Resamples cu8 IQ to
+ * bw x oversampling with sox (skipped when the capture already runs at that
+ * rate), then pipes into a Python wrapper around gr-lora_sdr. The wrapper
+ * demodulates, decrypts, protobuf-parses, and emits one JSON object per
+ * Meshtastic packet on stdout.
  */
 
 import { z } from "zod"
 import {
 	IqDecimateDecoder,
+	iqDecimationRates,
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
 import type {
@@ -20,6 +22,7 @@ import type {
 	DecoderOutput,
 	DecoderRateRequirements,
 } from "../types.js"
+import { shellCommand } from "../process-tools.js"
 import { ConfigValidationError } from "../../utils/errors.js"
 import { LORA_REGION_RANGES_HZ } from "../band-defaults.js"
 import type { Logger } from "../../utils/logger.js"
@@ -79,10 +82,90 @@ export const PRESET_TABLE: Readonly<
 })
 
 const DEFAULT_INPUT_SAMPLE_RATE = 2_048_000
-const DEFAULT_OVERSAMPLING = 8
+/**
+ * gr-lora_sdr frame_sync takes an integer os_factor and expects
+ * samp_rate = bw x os_factor. 2 is the lowest factor the option allows
+ * (MIN_SPS): 250 kHz x 2 = 500 kS/s, one sox step from a 1.024 Msps capture
+ * (1.024 / 0.25 = 4.096 is not an integer, so the capture rate cannot be used
+ * directly), a quarter of the samples of the former 250 kHz x 8 = 2.0 Msps
+ * path. In the core image, one CPU, 10 runs per capture, both committed
+ * captures (+10 / -5 dB SNR) decoded 10/10 at os 2, 4 and 8; os 2 cost least
+ * (sox + python CPU-s per signal-s, loaded host: os 8 0.83 / 1.98, os 4
+ * 0.75-1.42 / 1.24-1.53, os 2 0.81 / 1.05).
+ */
+export const DEFAULT_OVERSAMPLING = 2
 const MIN_SPS = 2
 const MAX_SPS = 32
 const BASE64_CHARS_RE = /^[A-Za-z0-9+/]*={0,2}$/
+
+/**
+ * sox `rate` options for the LoRa resample. `-m` (100 dB stopband) instead of
+ * the shared `-h` (125 dB): the output is 8-bit cu8, whose quantisation floor
+ * is about 6 dB x 8 = 48 dB, so the extra rejection is never seen. `-b 74`
+ * (sox's narrowest passband, 74 % of the output Nyquist) still passes
+ * 0.74 x 250 kHz = 185 kHz at 500 kS/s, above the 125 kHz half-width of a
+ * 250 kHz channel plus the bw/5 = 50 kHz carrier offset the decoder corrects
+ * ({@link LORA_CFO_SEARCH_DIVISOR}), and it attenuates 185-250 kHz energy that frame_sync (which
+ * decimates without filtering) would fold into the channel. sox
+ * CPU-s per signal second on the committed captures (+10 / -5 dB SNR, one loaded host): 1.024 -> 2.0 Msps
+ * `-h` 0.22-0.24 / 0.56-0.60; 1.024 -> 1.0 Msps `-h` 0.14-0.18 / 0.32-0.33;
+ * 1.024 -> 1.0 Msps `-m -b 74` 0.12-0.14 / 0.25.
+ */
+export const LORA_SOX_RATE_OPTIONS: readonly string[] = ["-m", "-b", "74"]
+
+/** sox resample of cu8 IQ for the LoRa modem; argv pinned by tests. */
+export function loraResampleCommand(
+	inputRate: number,
+	outputRate: number,
+): string {
+	return shellCommand("sox", [
+		"-q",
+		"-D",
+		// stdin is an unbounded stream: never trust its stat size as a length.
+		"--ignore-length",
+		"-t",
+		"raw",
+		"-e",
+		"unsigned-integer",
+		"-b",
+		"8",
+		"-c",
+		"2",
+		"-r",
+		String(inputRate),
+		"-",
+		"-t",
+		"raw",
+		"-e",
+		"unsigned-integer",
+		"-b",
+		"8",
+		"-c",
+		"2",
+		"-r",
+		String(outputRate),
+		"-",
+		"rate",
+		...LORA_SOX_RATE_OPTIONS,
+		String(outputRate),
+	])
+}
+
+/**
+ * Carrier offset the decoder corrects, as a share of bw: the channel off the
+ * capture centre (centre placement) plus the transmitter's crystal error. The
+ * wrapper's recentred path finds each preamble's offset from its upchirps and
+ * downchirps, which read 2 x offset modulo bw, so only +-bw/4 is unambiguous.
+ * bw/5 keeps bw/4 - bw/5 = bw/20 (12.5 kHz at 250 kHz) inside that bound, and
+ * the slot's far edge, bw/2 + bw/5 = 0.7 x bw, inside the 0.74 x bw sox passband
+ * at os 2 ({@link LORA_SOX_RATE_OPTIONS}). LongFast: 250 kHz / 5 = 50 kHz.
+ */
+export const LORA_CFO_SEARCH_DIVISOR = 5
+
+/** {@link LORA_CFO_SEARCH_DIVISOR} applied to bw, in whole Hz (the wrapper takes an integer). */
+export function loraCfoSearchHz(bw: number): number {
+	return Math.floor(bw / LORA_CFO_SEARCH_DIVISOR)
+}
 
 /** Canonical install path of the Python wrapper inside the Docker image. */
 export const WRAPPER_SCRIPT_PATH = "/usr/local/bin/lora_meshtastic_decode.py"
@@ -95,6 +178,12 @@ function isBase64(
 	if (value.length % 4 !== 0) return false
 	return BASE64_CHARS_RE.test(value)
 }
+
+/**
+ * Channel key sizes the wrapper accepts: the 1-byte firmware shorthand ("AQ==" and kin),
+ * an AES-128 PSK or an AES-256 PSK.
+ */
+const CHANNEL_KEY_BYTES: readonly number[] = [1, 16, 32]
 
 /** Resolved decoder options after preset and override application. */
 export interface LoraMeshtasticOptions {
@@ -109,6 +198,8 @@ export interface LoraMeshtasticOptions {
 	oversampling: number
 	/** Exact resampled IQ rate in Hz. */
 	effectiveTargetRate: number
+	/** Largest carrier offset the wrapper corrects, in Hz ({@link loraCfoSearchHz}). */
+	cfoSearchHz: number
 }
 
 export const RawOptionsSchema = z
@@ -121,6 +212,14 @@ export const RawOptionsSchema = z
 			.refine(
 				v => isBase64(v, { allowEmpty: false }),
 				"channelKey must be a non-empty padded base64 string",
+			)
+			.refine(
+				v => CHANNEL_KEY_BYTES.includes(Buffer.from(v, "base64").length),
+				"channelKey must decode to 1 byte (shorthand), 16 bytes (AES-128) or 32 bytes (AES-256)",
+			)
+			.refine(
+				v => Buffer.from(v, "base64").toString("hex") !== "00",
+				"channelKey AA== (encryption disabled) is not supported",
 			),
 		bandwidth: z.number().int().positive().optional(),
 		spreadingFactor: z.number().int().min(6).max(12).optional(),
@@ -164,6 +263,7 @@ export const RawOptionsSchema = z
 			inputSampleRate,
 			oversampling,
 			effectiveTargetRate,
+			cfoSearchHz: loraCfoSearchHz(bw),
 		}
 	})
 
@@ -314,6 +414,8 @@ export function buildDecoderArgs(options: LoraMeshtasticOptions): string[] {
 		options.channelKey,
 		"--region",
 		options.region,
+		"--cfo-search-hz",
+		String(options.cfoSearchHz),
 	]
 }
 
@@ -405,6 +507,20 @@ export class LoraMeshtasticDecoder extends IqDecimateDecoder {
 			targetSampleRate: this.options.bw * this.options.oversampling,
 			filterTransition: 0.05,
 		}
+	}
+
+	/** sox at {@link LORA_SOX_RATE_OPTIONS} when the capture rate differs, then the wrapper. */
+	protected override buildPipelineCommand(): string {
+		const { inputSampleRate, outputRate } = iqDecimationRates(
+			this.boundedIqDecimationConfig(),
+		)
+		const decoder = shellCommand(
+			this.getDecoderCommand(),
+			this.getDecoderArgs(),
+		)
+		return inputSampleRate === outputRate
+			? decoder
+			: `${loraResampleCommand(inputSampleRate, outputRate)} | ${decoder}`
 	}
 
 	protected override getDecoderCommand(): string {

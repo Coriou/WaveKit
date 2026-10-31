@@ -667,7 +667,15 @@ function ShellToast({
 			className="wk-toast wk-shell-toast"
 			data-tone={toast.tone}
 			data-lifted={lifted || undefined}
-			style={centre === null ? undefined : { left: centre }}
+			// beside a drawer the free area is [0, 2 × centre]: 16 px from both its edges, and the CSS 560 px cap
+			style={
+				centre === null
+					? undefined
+					: {
+							left: centre,
+							maxWidth: Math.min(560, Math.max(0, 2 * centre - 32)),
+						}
+			}
 		>
 			<span className="wk-shell-toast-text">{toast.text}</span>
 			{toast.action || toast.undo ? (

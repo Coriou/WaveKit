@@ -311,6 +311,53 @@ describe("SourceStatusPublisher", () => {
 		).not.toHaveProperty("signalFlat")
 	})
 
+	it("publishes a feed pause immediately on feed-changed, and the resume too", async () => {
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		broadcaster.broadcastSourceStatus.mockClear()
+		sourceManager.statuses[0]!.feed = {
+			state: "paused",
+			since: "2026-10-09T01:00:00.000Z",
+		}
+		sourceManager.statuses[0]!.connected = false
+		sourceManager.emit("feed-changed", "rtl", sourceManager.statuses[0]!.feed)
+		expect(sentIds()).toEqual(["rtl"])
+		expect(broadcaster.broadcastSourceStatus.mock.calls[0]![0]).toMatchObject({
+			id: "rtl",
+			connected: false,
+			feed: { state: "paused", since: "2026-10-09T01:00:00.000Z" },
+		})
+		// unchanged feed: the next poll repeats nothing
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		expect(sentIds()).toEqual(["rtl"])
+		// a state change alone (no other field moves) is published
+		sourceManager.statuses[0]!.feed = {
+			state: "resuming",
+			since: "2026-10-09T01:00:05.000Z",
+		}
+		sourceManager.emit("feed-changed", "rtl", sourceManager.statuses[0]!.feed)
+		expect(sentIds()).toEqual(["rtl", "rtl"])
+		expect(broadcaster.broadcastSourceStatus.mock.calls[1]![0].feed.state).toBe(
+			"resuming",
+		)
+	})
+
+	it("publishes a feed change found by the poll even without an event", async () => {
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		broadcaster.broadcastSourceStatus.mockClear()
+		sourceManager.statuses[1]!.feed = {
+			state: "paused",
+			since: "2026-10-09T01:00:00.000Z",
+		}
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		expect(sentIds()).toEqual(["pi"])
+	})
+
+	it("stops listening to feed-changed on stop()", () => {
+		expect(sourceManager.listenerCount("feed-changed")).toBe(1)
+		publisher.stop()
+		expect(sourceManager.listenerCount("feed-changed")).toBe(0)
+	})
+
 	it("carries exactly the fields of the REST GET /api/sources item", async () => {
 		vi.useRealTimers()
 		sourceManager.statuses[0]!.lastError = "connection reset"
@@ -325,6 +372,11 @@ describe("SourceStatusPublisher", () => {
 			measuredSampleRateHz: 2_160_000,
 			deviation: 0.0547,
 			since: new Date("2026-10-09T01:00:00.000Z"),
+		}
+		sourceManager.statuses[0]!.feed = {
+			state: "error",
+			since: "2026-10-09T01:00:00.000Z",
+			error: "The receiver could not be reached; resume again to retry",
 		}
 		const app = Fastify()
 		await app.register(sourceRoutes, {
@@ -355,6 +407,11 @@ describe("SourceStatusPublisher", () => {
 				since: "2026-10-09T01:00:00.000Z",
 			},
 			signalLevelDbfs: -46.5,
+			feed: {
+				state: "error",
+				since: "2026-10-09T01:00:00.000Z",
+				error: "The receiver could not be reached; resume again to retry",
+			},
 		})
 	})
 })

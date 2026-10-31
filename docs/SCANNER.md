@@ -116,13 +116,14 @@ pending ─► starting ─► running ⇄ holding
    failed ◄── any non-terminal ──► cancelled        running/holding ──► completed (stop condition)
 ```
 
-`completed`, `cancelled` and `failed` (`source-removed`, `tuner-unavailable`, `invalid`) are terminal; only terminal jobs can be deleted. Pause reasons:
+`completed`, `cancelled` (reason `source-paused` when a paused receiver feed ended an identify job) and `failed` (`source-removed`, `tuner-unavailable`, `invalid`) are terminal; only terminal jobs can be deleted. Pause reasons:
 
 - `operator`: paused by `POST …/pause`; probes stop, the lease and the decoder hold are kept until an operator or relay write takes the tuner, which drops both (the job stays `paused(operator)`, it never auto-resumes).
 - `preempted-operator`: a REST tuner write (`origin: "rest"`) on the leased source; the lease is lost and never restored over.
 - `preempted-relay`: an SDR++ relay client took control (`control-mode-changed` → `external`).
 - `preempted-job`: a higher-priority scanner job took the lease (it keeps the original snapshot). The waiting job keeps its decoder hold while that job holds the tuner; when an operator or relay write takes it, the waiter releases the decoders too, and holds them again when the lease comes back.
 - `source-down`: the source disconnected; the job resumes on the next payload with a new epoch.
+- `resumed-without-retune`: the receiver feed was paused and then resumed plainly (without restoring its tuning; another client such as SDR++ may be using the receiver). A sweep that would otherwise take the tuner on its own gets this reason too: one paused by the feed, one waiting to auto-resume (`preempted-operator`, `preempted-relay`, `preempted-job`) and one due to resume after a restart (`resume.onBoot`); `paused(operator)` keeps its reason, and in-window and passive jobs resume as usual. The sweep writes no tuning and does not hop; one paused by the feed keeps the lease (so no waiting job takes the tuner and hops instead); each releases its decoder hold, so the source's decoders run on whatever the receiver is tuned to. It never resumes on its own, also across a restart; `resume` (Resume scan) retunes to its current hop. Its hops then run without a band gain (a job gain is still written), and nothing is restored when it ends (the pre-pause tuning and the gain saved before a band gain are forgotten). An operator or relay write, or another job taking the lease, meanwhile drops the lease without changing the reason: when that job ends, the sweep stays held.
 - `core-restart`: the job was running when the core stopped; it resumes only with `resume.onBoot` (passive jobs always do).
 - `resume-blocked`: auto-resume found more to disturb than was consented.
 
@@ -138,13 +139,14 @@ Explicit `resume` in the other cases:
 
 - `paused(operator)` with the lease: resumes at the same hop.
 - `paused(operator)` after an operator or relay write took the lease: re-acquires it. With a grown impact and no `takeover` it answers 409 `SCANNER_TAKEOVER_REQUIRED` (the job stays paused); while a job of equal or higher priority holds the lease it answers 409 `SCANNER_SOURCE_BUSY` and moves to `paused(resume-blocked)` (taking the lease from a lower-priority job needs consent like a takeover).
+- `paused(resumed-without-retune)`: re-holds the decoders and retunes to the current hop; without the lease it re-acquires it as from `paused(operator)`.
 - `paused(core-restart)`: re-acquires the lease, re-opens the engine and restarts the sweep from its first hop.
 
 Every 409 `SCANNER_SOURCE_BUSY` carries `details.reason`: `releasing`, `recovery-pending` and `holder-starting` clear by themselves (retry); `relay` and `held` last until the relay or the holding job lets go.
 
 ### Takeover and impact
 
-A sweep that would disturb something answers 409 `SCANNER_TAKEOVER_REQUIRED` with `details.impact`: `liveAudioClients`, `digitalVoiceListeners`, `runningDecoders`, `pinnedDecoders` (started by hand), `scannerJobs` (other non-passive jobs on the source) and `unrestorable` tuner fields. Resending with `takeover: true` consents. Decoders on the source are held (`suspension.reasonCode: "tuner-scanning"`) for the whole sweep and resume afterwards; a manual start of a held decoder answers 409 `SOURCE_HELD_BY_SCANNER`. Live-audio listeners hear the sweep. Relay clients (SDR++) holding the tuner make sweeps impossible (`SCANNER_SOURCE_BUSY`).
+A sweep that would disturb something answers 409 `SCANNER_TAKEOVER_REQUIRED` with `details.impact`: `liveAudioClients`, `digitalVoiceListeners`, `runningDecoders`, `pinnedDecoders` (started by hand), `scannerJobs` (other non-passive jobs on the source) and `unrestorable` tuner fields. Resending with `takeover: true` consents. Decoders on the source are held (`suspension.reasonCode: "tuner-scanning"`) for the whole sweep and resume afterwards; a manual start of a held decoder answers 409 `SOURCE_HELD_BY_SCANNER`. Live-audio listeners hear the sweep. Relay clients (SDR++) holding the tuner make sweeps impossible (`SCANNER_SOURCE_BUSY`). A paused receiver feed (`POST /api/sources/:id/pause`) takes no new job, identify request or job resume (409 `SOURCE_PAUSED`); jobs running or still starting at the pause wait in `paused` with reason `source-down` (a starting job is not failed, unlike a dropout during startup). A restore resume (`restoreTuning: true`, Resume at …) continues them, where the usual reconnect recovery restores a lease's tuning and band gain; a plain resume writes no tuning and leaves a waiting sweep in `paused(resumed-without-retune)` until you resume it. Identify jobs do not wait: they end `cancelled(source-paused)`.
 
 ### Tuner restore
 
@@ -177,6 +179,29 @@ Stored band plans use a writer lock in the state directory. After an unclean sto
 | `ism-868`                | EU     | 863–870           | none                  | none              | ism                                   |
 | `pager-vhf`              | all    | 137–174           | 12.5 kHz              | 12                | pocsag, flex                          |
 | `marine-vhf`             | all    | 156.0–162.0125    | 25 kHz (AIS excluded) | 16                | analog-fm                             |
+| `adsb`                   | all    | 1089–1091         | none                  | none              | none (readsb decodes it)              |
+
+The `adsb` band (1090 MHz ADS-B, every region) shows in the band view as an air band with
+mode `raw` and the skip `Decoded elsewhere · readsb`: a sweep with `skipBandPlanSkips` leaves
+1089 to 1091 MHz to readsb. It names no scan protocol, so it adds no identify priors or analog
+trial there, and [decode-anchored ADS-B](#decode-anchored-ads-b) works as before.
+
+Inside that window (1 089 000 000 to 1 091 000 000 Hz, both ends included) only readsb is
+eligible. An IQ capture there plans no replay trial for a known protocol, a protocol its track
+shape suggests (a narrow FSK-looking signal included) or an analog trial: these are left out the
+way a protocol with a prior of 0 is, not listed. readsb is still named and, as anywhere, listed
+in the skipped trials (`no-probe-mode`) because it has no replay input. An Identify there with no
+decode anchor runs no probe or analog trial; its only trial is readsb's ambient one when a
+running readsb covers the target. A protocol the Identify names explicitly (Decode as) is listed
+there as `unsupported` with reason `adsb-window` and never run, so the answer says why nothing
+tried it. The rule applies when either the requested frequency or the
+centre of the signal it resolves to (which may lie up to the target tolerance away, and is where
+probes tune) is inside the window, so a request just outside the window for a signal centred
+inside it runs only readsb too. An IQ capture whose own centre is inside the window is never
+claimed or replayed by any Identify, even one just outside the window whose tolerance reaches it
+(also after the Identify restarts on an epoch change), and an Identify inside the window requests
+no capture. Outside the window, with both frequencies from 1 088 999 999 Hz down or
+1 091 000 001 Hz up, the plans and the replay of captures centred outside are unchanged.
 
 The band-plan stack under `/api/bandplans` (see [API.md](API.md#band-plans))
 selects which built-in plans the scanner uses: each enabled built-in pack, in
@@ -318,7 +343,7 @@ Each job counts its hits: one per observation attributed to a discovery, per dis
 
 `POST /api/scanner/discoveries/:id/listen` retunes live audio's `offsetHz` to the discovery when it is in the current window (409 `OUT_OF_WINDOW` otherwise). Probe audio is on the digital voice server at `/decoders/<probeId>/stream`.
 
-**Identify** (`POST /api/scanner/identify`, spec § 10.8): click a signal on the waterfall and every plausible decoder tries it, in the current window and never retuning (409 `OUT_OF_WINDOW` outside it; 409 `SCANNER_SOURCE_BUSY` while a sweep holds the tuner). A click on the DC spike, a spur or comb tooth, or an IQ image is answered at once with `artefact` and no trial; broadband RFI is the answer only when nothing transmits within `timeoutMs` (15 s). Before the channelizer the trials run one at a time as offset probes with 300 ms pre-roll, each for its hold, and preempt passive probes; after it they run in parallel. The result (`identified`, `candidate` or `unidentified`) always carries the measurements and the per-protocol trial list, and the observation lands in the discovery store like any other. If the window moves off the target, the result carries `ended: "window-moved"` and open trials are `cancelled`. Identify jobs cannot be paused or edited and are not kept across restarts.
+**Identify** (`POST /api/scanner/identify`, spec § 10.8): click a signal on the waterfall and every plausible decoder tries it, in the current window and never retuning (409 `OUT_OF_WINDOW` outside it; 409 `SCANNER_SOURCE_BUSY` while a sweep holds the tuner). A click on the DC spike, a spur or comb tooth, or an IQ image is answered at once with `artefact` and no trial; broadband RFI is the answer only when nothing transmits within `timeoutMs` (15 s). Before the channelizer the trials run one at a time as offset probes with 300 ms pre-roll, each for its hold, and preempt passive probes; after it they run in parallel. The result (`identified`, `candidate` or `unidentified`) always carries the measurements and the per-protocol trial list, and the observation lands in the discovery store like any other. If the window moves off the target, the result carries `ended: "window-moved"` and open trials are `cancelled`. Identify jobs cannot be paused or edited and are not kept across restarts; pausing the receiver feed ends one (starting or running) as `cancelled` with reason `source-paused` and the results so far.
 
 **Identify for analog voice.** There is no probe decoder for analog FM or AM: the `analog-fm` and `analog-am` trials read the live demodulator's squelch-delimited transmissions (decoder `live-audio`, the latest 32 kept) on the job's source within the target's tolerance, back to 30 s before the job started. A CTCSS or DCS tone on a `commanded` or `relay` frequency makes the target `identified` (`classified`), anything else that matches `candidate`; the tone is only ever the one the transmission tracker reported. Identify never starts or retunes live audio, so the trials end `unsupported`/`no-live-audio` when live audio was not on the target for the whole window, and `no-sync` when it was but nothing keyed up. A digital decode keeps priority. Probe decoders whose program cannot run are listed in `result.decodersUnavailable` and are not respawned for 300 s. Details in [API.md](API.md#post-apiscanneridentify).
 

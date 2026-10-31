@@ -160,7 +160,7 @@ describe("mock scanner REST", () => {
 				"pmr446",
 				"uhf-land-mobile",
 				"vhf-land-mobile",
-				"pager-466",
+				"pager-431",
 				"ism-433",
 				"ism-868",
 			]),
@@ -403,6 +403,87 @@ describe("mock scanner REST", () => {
 		expect(now.progress.hitStats).toBeDefined()
 	})
 
+	it("holds a sweep after a plain receiver resume until Resume scan; a restore resume continues it", async () => {
+		server = await buildMockServer({ port: 0, resumeMs: 0 })
+		await server.app.ready()
+		const job = (
+			await inject("POST", "/api/scanner/jobs", marineSweep)
+		).json<ScanJob>()
+		await sleep(400)
+		const jobNow = async () =>
+			(await inject("GET", `/api/scanner/jobs/${job.id}`)).json<ScanJob>()
+		const tunedHz = async () =>
+			(await inject("GET", "/api/tuner/rtl-0")).json<TunerState>().frequency
+		expect((await jobNow()).state).toBe("running")
+
+		await inject("POST", "/api/sources/rtl-0/pause")
+		expect(await jobNow()).toMatchObject({
+			state: "paused",
+			reason: "source-down",
+		})
+		await inject("POST", "/api/sources/rtl-0/resume")
+		expect(await jobNow()).toMatchObject({
+			state: "paused",
+			reason: "resumed-without-retune",
+		})
+		// no hop while held
+		const held = await tunedHz()
+		await sleep(200)
+		expect(await tunedHz()).toBe(held)
+
+		const resumed = await inject("POST", `/api/scanner/jobs/${job.id}/resume`)
+		expect(resumed.statusCode).toBe(200)
+		expect(resumed.json<ScanJob>().state).toBe("running")
+
+		// Resume at <freq>: the sweep continues at once
+		await inject("POST", "/api/sources/rtl-0/pause")
+		await inject("POST", "/api/sources/rtl-0/resume", { restoreTuning: true })
+		expect((await jobNow()).state).toBe("running")
+		await inject("POST", `/api/scanner/jobs/${job.id}/cancel`)
+	})
+
+	it("a plain receiver resume forgets the sweep's pre-job tuning: cancelling restores nothing", async () => {
+		server = await buildMockServer({ port: 0, resumeMs: 0 })
+		await server.app.ready()
+		const job = (
+			await inject("POST", "/api/scanner/jobs", marineSweep)
+		).json<ScanJob>()
+		await sleep(400)
+		const tunedHz = async () =>
+			(await inject("GET", "/api/tuner/rtl-0")).json<TunerState>().frequency
+		await inject("POST", "/api/sources/rtl-0/pause")
+		await inject("POST", "/api/sources/rtl-0/resume")
+		const held = await tunedHz()
+		await inject("POST", `/api/scanner/jobs/${job.id}/cancel`)
+		expect(await tunedHz()).toBe(held)
+	})
+
+	it("a plain receiver resume holds an operator-preempted sweep: its idle timer no longer resumes it", async () => {
+		server = await buildMockServer({ port: 0, resumeMs: 0 })
+		await server.app.ready()
+		const job = (
+			await inject("POST", "/api/scanner/jobs", {
+				...marineSweep,
+				resume: { autoAfterIdleMs: 300 },
+			})
+		).json<ScanJob>()
+		await sleep(400)
+		await inject("POST", "/api/tuner/rtl-0/frequency", { hz: 162_000_000 })
+		const jobNow = async () =>
+			(await inject("GET", `/api/scanner/jobs/${job.id}`)).json<ScanJob>()
+		expect((await jobNow()).reason).toBe("preempted-operator")
+		await inject("POST", "/api/sources/rtl-0/pause")
+		await inject("POST", "/api/sources/rtl-0/resume")
+		expect(await jobNow()).toMatchObject({
+			state: "paused",
+			reason: "resumed-without-retune",
+			resumeAt: null,
+		})
+		await sleep(1_100)
+		expect((await jobNow()).reason).toBe("resumed-without-retune")
+		await inject("POST", `/api/scanner/jobs/${job.id}/cancel`)
+	})
+
 	it("completes after stop.afterSweeps", async () => {
 		await start()
 		const job = (
@@ -461,12 +542,50 @@ describe("mock scanner discoveries", () => {
 		expect(seen).toEqual([...seen].sort().reverse())
 	})
 
+	it("names the last Activity event of a discovery with calls, and the event resolves", async () => {
+		server = await buildMockServer({ port: 0 })
+		await server.app.ready()
+		const page = await list()
+		const withCalls = page.items.filter(
+			d => d.metadata.talkgroups.length > 0 || d.metadata.sources.length > 0,
+		)
+		const named = withCalls.filter(d => d.lastActivity)
+		expect(named.length).toBeGreaterThan(0)
+		// never on a discovery without calls (the 161.3125 MHz control channel)
+		expect(
+			page.items.find(d => d.frequencyHz === 161_312_500)?.lastActivity,
+		).toBeUndefined()
+		for (const d of named) {
+			const at = d.lastActivity
+			if (!at) continue
+			const record = await server.app.inject({
+				method: "GET",
+				url: `/api/activity/${encodeURIComponent(at.eventId)}`,
+			})
+			expect(record.statusCode).toBe(200)
+			expect(record.json<{ eventId: string }>().eventId).toBe(at.eventId)
+			expect(Number.isFinite(Date.parse(at.producedAt))).toBe(true)
+		}
+	})
+
 	it("filters, sorts and pages like the core's store", async () => {
 		server = await buildMockServer({ port: 0 })
 		await server.app.ready()
 		const dmr = await list("?protocol=dmr")
+		// the synthesised control channel (161.3125 MHz) is DMR too
 		expect(dmr.items.map(d => d.frequencyHz).sort()).toEqual([
-			161_150_000, 446_093_750,
+			161_150_000, 161_312_500, 446_093_750,
+		])
+		const control = dmr.items.find(d => d.frequencyHz === 161_312_500)
+		expect(control).toMatchObject({
+			identity: { kind: "dmr-cc", value: "7" },
+			evidenceLevel: "proven",
+			metadata: { talkgroups: [], sources: [] },
+		})
+		// and the unidentified 4FSK carrier is weak activity with a measured class and width
+		const weak = await list("?freqMinHz=161737000&freqMaxHz=161738000")
+		expect(weak.items.map(d => [d.protocol, d.class, d.bandwidthHz])).toEqual([
+			["unknown", "fsk4-12k5", 9000],
 		])
 		const cc = await list("?identity=dmr-cc:1")
 		expect(cc.items.map(d => d.frequencyHz)).toEqual([161_150_000])

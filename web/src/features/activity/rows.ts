@@ -124,7 +124,16 @@ export function protocolText(s: ActivitySummary): string | null {
 	return KIND_TEXT[s.kind] ?? null
 }
 
-export function rowView(s: ActivitySummary): RowView {
+/** What the live fleet says about the row's aircraft: its name (callsign or registration) and who flies what. */
+export interface RowAircraft {
+	readonly name: string
+	readonly about: string
+}
+
+export function rowView(
+	s: ActivitySummary,
+	aircraft: RowAircraft | null = null,
+): RowView {
 	if (s.kind === "ingestion-gap") {
 		const dropped = s.fields.find(f => f.key === "dropped")?.value
 		// The core titles gaps "Ingestion gap (<reason>)".
@@ -160,6 +169,7 @@ export function rowView(s: ActivitySummary): RowView {
 		}
 	}
 	if (s.kind === "analog-transmission") return analogView(s)
+	if (s.category === "aviation-data") return aviationView(s, aircraft)
 	const message = s.fields.find(
 		f =>
 			MESSAGE_KEYS.has(f.key) &&
@@ -183,6 +193,7 @@ export function rowView(s: ActivitySummary): RowView {
 	if (tone) used.add(tone.key)
 	const sub = [
 		protocolText(s),
+		aircraft?.about || null,
 		who ? `${who.label} ${fieldText(who)}` : null,
 		tone ? `${tone.label} ${fieldText(tone)}` : null,
 	].filter((p): p is string => p !== null && p.length > 0)
@@ -195,9 +206,98 @@ export function rowView(s: ActivitySummary): RowView {
 		.slice(0, 4)
 	return {
 		icon: CATEGORY_ICON[s.category],
-		title: s.title ?? s.entityKey ?? protocolText(s) ?? "Event",
+		title:
+			aircraftTitle(s, aircraft) ??
+			s.title ??
+			s.entityKey ??
+			protocolText(s) ??
+			"Event",
 		subtitle: sub.join(" · "),
 		message: message ? String(message.value) : null,
+		readings: readings.length > 0 ? readings.join(" · ") : null,
+		notice: false,
+	}
+}
+
+/** A row titled only by the ICAO address takes the fleet's callsign or registration instead. */
+function aircraftTitle(
+	s: ActivitySummary,
+	aircraft: RowAircraft | null,
+): string | null {
+	if (!aircraft || !s.entityKey) return null
+	const hex = s.entityKey.slice(s.entityKey.indexOf(":") + 1)
+	const bare =
+		s.title === null || s.title.trim().toUpperCase() === hex.toUpperCase()
+	return bare && aircraft.name.toUpperCase() !== hex.toUpperCase()
+		? aircraft.name
+		: null
+}
+
+/** Aviation datalink fields the row reads as "Label H1", "Frame S" (an identifier, not a measurement). */
+const AVIATION_NAMED = new Set(["label", "frame"])
+/** In the title already ("N0WK01 ZZ0101 · Link test") or in the subtitle. */
+const AVIATION_SKIP = new Set(["meaning", "direction"])
+
+/**
+ * A datalink title that opens with the bare ICAO address ("0A0B01 · Link supervision") takes the fleet's
+ * callsign or registration in its place, like aircraftTitle does for a title that is only the address.
+ */
+function aviationTitle(
+	s: ActivitySummary,
+	aircraft: RowAircraft | null,
+): string | null {
+	const whole = aircraftTitle(s, aircraft)
+	if (whole !== null || !aircraft || !s.entityKey || s.title === null)
+		return whole
+	const hex = s.entityKey.slice(s.entityKey.indexOf(":") + 1).toUpperCase()
+	const lead = `${hex} · `
+	if (aircraft.name.toUpperCase() === hex) return null
+	return s.title.toUpperCase().startsWith(lead)
+		? `${aircraft.name} · ${s.title.slice(lead.length)}`
+		: null
+}
+
+/**
+ * ACARS and VDL2 (core presentation acars-vdl2.ts): the title already says who and what in plain words.
+ * The subtitle says how it travelled (protocol, who flies what from the live fleet, direction, channel); the
+ * readings keep the raw label or frame beside its kind and how sure the explanation is; the message is the text
+ * when there is one.
+ */
+function aviationView(
+	s: ActivitySummary,
+	aircraft: RowAircraft | null,
+): RowView {
+	const field = (key: string) => s.fields.find(f => f.key === key)
+	const direction = field("direction")?.value
+	const message = field("text")?.value
+	const readings = s.fields
+		.filter(
+			f =>
+				!AVIATION_SKIP.has(f.key) &&
+				!MESSAGE_KEYS.has(f.key) &&
+				f.value !== null,
+		)
+		.map(f =>
+			AVIATION_NAMED.has(f.key) ? `${f.label} ${fieldText(f)}` : fieldText(f),
+		)
+		.slice(0, 4)
+	return {
+		icon: CATEGORY_ICON[s.category],
+		title:
+			aviationTitle(s, aircraft) ??
+			s.title ??
+			s.entityKey ??
+			protocolText(s) ??
+			"Datalink",
+		subtitle: [
+			protocolText(s),
+			aircraft?.about || null,
+			typeof direction === "string" ? direction : null,
+			s.frequencyHz !== null ? `${formatMHz(s.frequencyHz)} MHz` : null,
+		]
+			.filter((p): p is string => p !== null && p.length > 0)
+			.join(" · "),
+		message: typeof message === "string" && message !== "" ? message : null,
 		readings: readings.length > 0 ? readings.join(" · ") : null,
 		notice: false,
 	}

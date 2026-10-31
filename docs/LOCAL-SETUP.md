@@ -66,6 +66,17 @@ is still running, another terminal can request a new code:
 node scripts/dev-protected.mjs --pair --private-directory /path/printed/by/the/server --api-origin http://127.0.0.1:9473
 ```
 
+With `--keep`, an agent can also get the machine credential as a private file
+(mode `0600`, never printed) from that directory:
+
+```sh
+node dist/access-command.js machine-token --private-directory /path/printed/by/the/server --out "$HOME/.config/wavekit/machine-token"
+```
+
+The output directory must exist and must not be writable by group or others.
+`--replace` overwrites only your own `0600` file. See
+[Automation and agents](API.md#automation-and-agents).
+
 `--api-port`, `--analog-port`, and `--digital-port` override the default ports
 (API `9473`, analog `9474`, digital `9475`). `config/dev-protected.yaml` stores
 those three as placeholders, which the script replaces. `0` chooses an

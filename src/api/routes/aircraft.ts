@@ -12,9 +12,16 @@
  * @module src/api/routes/aircraft
  */
 
-import type { FastifyInstance, FastifyPluginOptions } from "fastify"
+import { z } from "zod"
+import type {
+	FastifyInstance,
+	FastifyPluginOptions,
+	FastifyRequest,
+} from "fastify"
+import type { DeniedAdmission } from "../../access/types.js"
 import type { AircraftTracker } from "../../core/aircraft-tracker.js"
 import type {
+	AircraftInfoSettings,
 	AircraftState,
 	AircraftTrackerStats,
 	AircraftListResponse,
@@ -28,11 +35,54 @@ import type {
 export interface AircraftRoutesOptions extends FastifyPluginOptions {
 	/** Aircraft tracker instance */
 	tracker: AircraftTracker
+	/** The enrichment settings (GET/PUT /api/aircraft/info); absent: no such route. */
+	info?: {
+		settings(): AircraftInfoSettings
+		setOnline(on: boolean): AircraftInfoSettings
+	}
+	/** Protected mode: the extra admission PUT /api/aircraft/info needs. */
+	authorizeMutation?: (request: FastifyRequest) => DeniedAdmission | undefined
 }
+
+const infoUpdateBody = z.object({ online: z.boolean() }).strict()
+
+const infoSettingsSchema = {
+	type: "object",
+	required: ["enabled", "online", "onlineFrom", "persistent", "localDb"],
+	properties: {
+		enabled: { type: "boolean" },
+		online: { type: "boolean" },
+		onlineFrom: { type: "string", enum: ["config", "ui"] },
+		persistent: { type: "boolean" },
+		localDb: {
+			type: "object",
+			required: ["enabled", "aircraft", "updatedAt"],
+			properties: {
+				enabled: { type: "boolean" },
+				aircraft: { type: ["integer", "null"] },
+				updatedAt: { type: ["string", "null"] },
+			},
+		},
+	},
+} as const
 
 // ============================================================================
 // Schema Definitions
 // ============================================================================
+
+const airportSchema = {
+	type: "object",
+	properties: {
+		icao: { type: "string" },
+		iata: { type: "string" },
+		name: { type: "string" },
+		city: { type: "string" },
+		country: { type: "string" },
+		countryIso: { type: "string" },
+		lat: { type: "number" },
+		lon: { type: "number" },
+	},
+} as const
 
 const aircraftStateSchema = {
 	type: "object",
@@ -99,6 +149,53 @@ const aircraftStateSchema = {
 				operator: { type: "string" },
 				operatorCode: { type: "string" },
 				country: { type: "string" },
+				countryIso: { type: "string" },
+				year: { type: "number" },
+				flags: {
+					type: "object",
+					properties: {
+						military: { type: "boolean" },
+						interesting: { type: "boolean" },
+						pia: { type: "boolean" },
+						ladd: { type: "boolean" },
+					},
+				},
+				airline: {
+					type: "object",
+					description: "Airline flying the current callsign",
+					properties: {
+						name: { type: "string" },
+						icao: { type: "string" },
+						iata: { type: "string" },
+						callsign: { type: "string" },
+						country: { type: "string" },
+						countryIso: { type: "string" },
+						source: { type: "string" },
+					},
+				},
+				route: {
+					type: "object",
+					description:
+						"Planned route of the current callsign (crowd-sourced, may be wrong)",
+					properties: {
+						callsign: { type: "string" },
+						origin: airportSchema,
+						destination: airportSchema,
+						source: { type: "string" },
+					},
+				},
+				photo: {
+					type: "object",
+					description: "Airframe photo; show the photographer and link back",
+					properties: {
+						thumbnailUrl: { type: "string" },
+						largeUrl: { type: "string" },
+						photographer: { type: "string" },
+						link: { type: "string" },
+						source: { type: "string" },
+					},
+				},
+				imageUrl: { type: "string" },
 				source: { type: "string" },
 			},
 		},
@@ -246,6 +343,54 @@ export async function aircraftRoutes(
 			return tracker.getStats()
 		},
 	)
+
+	// GET/PUT /api/aircraft/info - Enrichment settings (online lookups switch)
+	const info = options.info
+	if (info) {
+		fastify.get<{ Reply: AircraftInfoSettings }>(
+			"/api/aircraft/info",
+			{
+				schema: {
+					description:
+						"Aircraft enrichment settings: online lookups and the local database",
+					tags: ["aircraft"],
+					response: { 200: infoSettingsSchema },
+				},
+			},
+			async (_request, reply) => {
+				reply.header("Cache-Control", "no-store")
+				return info.settings()
+			},
+		)
+		fastify.put<{ Body: unknown; Reply: unknown }>(
+			"/api/aircraft/info",
+			{
+				bodyLimit: 1024,
+				schema: {
+					description:
+						"Turn online aircraft lookups on or off (kept across restarts)",
+					tags: ["aircraft"],
+					response: { 200: infoSettingsSchema },
+				},
+			},
+			async (request, reply) => {
+				const denied = options.authorizeMutation?.(request)
+				if (denied) {
+					for (const [name, value] of Object.entries(denied.headers))
+						reply.header(name, value)
+					return reply.status(denied.status).send({ code: denied.code })
+				}
+				const body = infoUpdateBody.safeParse(request.body)
+				if (!body.success)
+					return reply.status(400).send({
+						error: "Bad Request",
+						message: "Expected { online: boolean }",
+					})
+				reply.header("Cache-Control", "no-store")
+				return info.setOnline(body.data.online)
+			},
+		)
+	}
 
 	// GET /api/aircraft/:icao - Get specific aircraft by ICAO
 	fastify.get<{

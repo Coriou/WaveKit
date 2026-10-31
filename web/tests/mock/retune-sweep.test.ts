@@ -25,10 +25,10 @@ describe("retune sweep scenario", () => {
 	const lo = park.startHz
 	const hi = park.startHz + park.binCount * park.binHz
 
-	it("parks at 466.078 MHz, 1.024 MS/s, after the multi-band sequence", () => {
+	it("parks at 431.0125 MHz, 1.024 MS/s, after the multi-band sequence", () => {
 		expect(RETUNE_SWEEP_STEPS.length).toBeGreaterThan(10)
 		expect(RETUNE_SWEEP_PARK).toEqual({
-			hz: 466_078_000,
+			hz: 431_012_500,
 			sampleRateHz: 1_024_000,
 		})
 		expect(park.sampleRateHz).toBe(1_024_000)

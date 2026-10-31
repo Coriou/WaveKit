@@ -12,6 +12,7 @@ import type {
 export type StorageAreaId =
 	| "activity"
 	| "scanner-evidence"
+	| "iq-captures"
 	| "digital-voice-wav"
 	| "bandplans"
 	| "operator-data"
@@ -22,6 +23,7 @@ export type StorageAreaId =
 export const STORAGE_AREA_IDS: readonly StorageAreaId[] = [
 	"activity",
 	"scanner-evidence",
+	"iq-captures",
 	"digital-voice-wav",
 	"bandplans",
 	"operator-data",
@@ -41,6 +43,7 @@ export const STORAGE_AREA_CLASS: Readonly<
 > = {
 	activity: "automatic",
 	"scanner-evidence": "automatic",
+	"iq-captures": "automatic",
 	"digital-voice-wav": "other",
 	bandplans: "state",
 	"operator-data": "state",

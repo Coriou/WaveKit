@@ -2109,6 +2109,8 @@ export interface ScannerMockContext {
 	retuneSweep?: boolean
 	/** Starts with the engine's front-end overload hint shown (WAVEKIT_MOCK_OVERLOAD_HINT=1). */
 	overloadHint?: boolean
+	/** The newest Activity event heard at `hz` (seeded discoveries with calls name it as `lastActivity`). */
+	lastActivity?: (hz: number) => { eventId: string; producedAt: string } | null
 }
 
 export interface ScannerMock {
@@ -2116,6 +2118,14 @@ export interface ScannerMock {
 	identifyJobs: Map<string, ScanJob>
 	/** An operator REST tuner write: a running sweep pauses (`preempted-operator`). */
 	operatorWrite(): void
+	/** The receiver feed paused: a running sweep waits in `paused(source-down)` with its lease. */
+	feedPaused(): void
+	/**
+	 * The feed resumed. Plain (`restoreTuning` false): a waiting or auto-resuming sweep stays paused
+	 * with reason `resumed-without-retune` until an explicit resume (its lease forgets the pre-job
+	 * tuning); a restore resume continues a sweep paused by the feed.
+	 */
+	feedResumed(restoreTuning: boolean): void
 	/** The sweep job holding the source's tuner, if any (identify refuses then). */
 	sweepHolder(): string | null
 	/**
@@ -2461,6 +2471,11 @@ export function registerScannerMock(
 			}
 			if (s.identity) d.identity = { ...s.identity }
 			if (s.operator) d.operator = { ...s.operator }
+			// a discovery with calls names its last one in Activity (a tag's "Last call")
+			if (d.metadata.talkgroups.length > 0 || d.metadata.sources.length > 0) {
+				const lastActivity = ctx.lastActivity?.(hz)
+				if (lastActivity) d.lastActivity = lastActivity
+			}
 			if (s.confidence === "candidate" && PROTOCOL_DECODER[s.protocol] !== null)
 				d.undecodedReason = "no-sync"
 			const observations: Observation[] = []
@@ -3524,7 +3539,7 @@ export function registerScannerMock(
 			return
 		}
 		const holder = leaseHolder()
-		if (r.reason === "operator") {
+		if (r.reason === "operator" || r.reason === "resumed-without-retune") {
 			if (!r.lease) {
 				if (holder && holder !== r) throw sourceBusy(holder)
 				const impact = impactFor(r.spec, r.id)
@@ -3895,6 +3910,37 @@ export function registerScannerMock(
 
 	return {
 		identifyJobs,
+		feedPaused() {
+			for (const r of records.values()) {
+				if (r.spec.mode !== "sweep" || !isActive(r.state)) continue
+				pauseFor(r, "source-down", true)
+				emitJob(r)
+				emitProgress(r)
+			}
+		},
+		feedResumed(restoreTuning) {
+			for (const r of records.values()) {
+				if (r.spec.mode !== "sweep" || r.state !== "paused") continue
+				if (restoreTuning) {
+					if (r.reason === "source-down") resumeSweep(r)
+					continue
+				}
+				// Plain: every sweep that would retune on its own (a waiter's idle timer too) waits for
+				// Resume scan; the held lease forgets its snapshot, as on the core (a cancel restores nothing).
+				if (
+					r.reason !== "source-down" &&
+					r.reason !== "preempted-operator" &&
+					r.reason !== "preempted-relay" &&
+					r.reason !== "preempted-job"
+				)
+					continue
+				r.reason = "resumed-without-retune"
+				r.snapshotHz = null
+				r.resumeAt = null
+				touch(r)
+				emitJob(r)
+			}
+		},
 		operatorWrite() {
 			for (const r of records.values()) {
 				if (r.spec.mode !== "sweep" || isTerminal(r.state)) continue

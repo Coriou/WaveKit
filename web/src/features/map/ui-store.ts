@@ -16,6 +16,8 @@ export const OVERLAY_IDS: readonly OverlayId[] = [
 export interface MapUiState {
 	readonly layers: Readonly<Record<LayerId, boolean>>
 	readonly overlays: Readonly<Record<OverlayId, boolean>>
+	/** The ACARS layer: positions aircraft reported over ACARS and VDL2 (reported.ts). */
+	readonly reported: boolean
 	readonly overlaysOpen: boolean
 	readonly selected: string | null
 	readonly follow: boolean
@@ -69,7 +71,7 @@ function boolRecord<K extends string>(
 /** Stored layers and overlays; anything missing or unreadable falls back to all on. */
 export function parseStored(
 	raw: string | null,
-): Pick<MapUiState, "layers" | "overlays"> {
+): Pick<MapUiState, "layers" | "overlays" | "reported"> {
 	let data: unknown = null
 	try {
 		data = raw ? (JSON.parse(raw) as unknown) : null
@@ -87,6 +89,7 @@ export function parseStored(
 			DEFAULT_LAYERS,
 		),
 		overlays: boolRecord(OVERLAY_IDS, r["overlays"], DEFAULT_OVERLAYS),
+		reported: typeof r["reported"] === "boolean" ? r["reported"] : true,
 	}
 }
 
@@ -104,7 +107,11 @@ function writeStorage(s: MapUiState): void {
 	try {
 		window.localStorage.setItem(
 			STORAGE_KEY,
-			JSON.stringify({ layers: s.layers, overlays: s.overlays }),
+			JSON.stringify({
+				layers: s.layers,
+				overlays: s.overlays,
+				reported: s.reported,
+			}),
 		)
 	} catch {
 		// private mode or blocked storage: the choice lasts for this page only
@@ -131,6 +138,11 @@ export class MapUi extends Store<MapUiState> {
 			const layers = { ...s.layers, [id]: !s.layers[id] }
 			return { ...s, layers }
 		})
+		this.save()
+	}
+
+	toggleReported(): void {
+		this.update(s => ({ ...s, reported: !s.reported }))
 		this.save()
 	}
 

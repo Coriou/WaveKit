@@ -15,6 +15,7 @@ import {
 	sourceRateMismatchSchema,
 	sourceSignalFlatSchema,
 	sourceEndpointSchema,
+	sourceFeedSchema,
 } from "@wavekit/api-types"
 import type { SourceManager, SourceStatus } from "../../core/source-manager.js"
 import type { DecoderManager } from "../../decoders/manager.js"
@@ -251,6 +252,7 @@ const sourceStatusSchema = {
 		signalFlat: sourceSignalFlatSchema,
 		signalLevelDbfs: { type: "number" },
 		endpoint: sourceEndpointSchema,
+		feed: sourceFeedSchema,
 	},
 	required: [
 		"id",

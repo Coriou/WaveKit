@@ -185,8 +185,9 @@ export interface DecoderBandAssessment {
 }
 
 /**
- * Rate reasons, the tuned band no longer covering any target, or the
- * source held by a scanner sweep (signal discovery spec § 10.4).
+ * Rate reasons, the tuned band no longer covering any target, the source
+ * held by a scanner sweep (signal discovery spec § 10.4), or its receiver
+ * feed paused by the operator ("source-paused", see SourceFeed).
  */
 export type DecoderSuspensionReasonCode =
 	| NonNullable<DecoderRateAssessment["reasonCode"]>
@@ -194,6 +195,7 @@ export type DecoderSuspensionReasonCode =
 	| "capture-too-narrow"
 	| "no-channel-selected"
 	| "tuner-scanning"
+	| "source-paused"
 	| "efficiency-budget"
 	| "decoder-unavailable"
 	| "channelizer-unavailable"
@@ -274,6 +276,13 @@ export interface DecoderStatus {
 	idleTimeoutMs?: number
 	/** ISO-8601 time of the scheduled automatic restart; present only while one is pending. */
 	nextRestartAt?: string
+	/**
+	 * True while the core is bringing the decoder back on its own: an automatic
+	 * restart is scheduled, its respawn is under way, or a placement start is
+	 * still pending. Absent otherwise and from older cores. A Restart offered
+	 * now would only race it.
+	 */
+	restartInFlight?: boolean
 	/** Operator intent: true after start/restart, false after stop. Always sent by current cores. */
 	desiredRunning?: boolean
 	/**
@@ -486,9 +495,21 @@ export interface DecoderLateDropsView {
 	held: "nothing-sheddable" | "link-or-unknown" | null
 }
 
-/** GET /api/decoders/summary: compact output and placement diagnostics. */
+/**
+ * Largest `hz` GET /api/decoders/summary accepts: 100 GHz, above any receiver
+ * (the same bound as the discoveries `nearHz`).
+ */
+export const DECODER_SUMMARY_MAX_HZ = 100_000_000_000
+
+/**
+ * GET /api/decoders/summary: compact output and placement diagnostics.
+ * `?hz=<Hz>` (a positive finite number up to DECODER_SUMMARY_MAX_HZ) adds
+ * `coversHz` to every item; without it the field is absent.
+ */
 export interface DecoderSummary {
 	id: string
+	/** Plain name of the decoder type ("ADS-B", "Pager"); absent from older cores. */
+	name?: string
 	/** Decoder protocol family / adapter type. */
 	protocol: string
 	state: "running" | "stopped"
@@ -499,6 +520,17 @@ export interface DecoderSummary {
 	health: "decoding" | "idle" | "suspended" | "failed"
 	/** One verdict per decoder: why it does or does not decode now, and what helps. */
 	verdict: DecoderVerdict
+	/**
+	 * Only with `?hz=`: true when the decoder's own band holds that frequency
+	 * (the tuned-band rule: within 200 kHz of a target, between its lowest and
+	 * highest target, or inside a range widened by 200 kHz). The band is the
+	 * band assessment's, else (before the first assessment) the configured
+	 * targets; for a decoder with no known band, true when a built-in band plan
+	 * range at that frequency lists one of its protocols. Where a decoder's placement happens to sit
+	 * (a channel that follows the tuner) never counts, and scanner probes never
+	 * cover. Unknown or malformed bands read false.
+	 */
+	coversHz?: boolean
 }
 
 /**
@@ -516,6 +548,7 @@ export const DECODER_VERDICT_CODES = [
 	"no-channel",
 	"capture-too-narrow",
 	"source-unavailable",
+	"source-paused",
 	"unsupported-rate",
 	"scanner-busy",
 	"efficiency-budget",
@@ -539,6 +572,7 @@ export const DECODER_VERDICT_ACTIONS = [
 	"lower-sample-rate",
 	"change-sample-rate",
 	"check-source",
+	"resume-source",
 	"pause-scanner",
 	"raise-budget",
 	"turn-off-others",

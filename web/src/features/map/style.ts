@@ -49,6 +49,7 @@ export const SRC = {
 	links: "wk-links",
 	trails: "wk-trails",
 	trailHeads: "wk-trail-heads",
+	reported: "wk-reported",
 	items: "wk-items",
 } as const
 
@@ -68,6 +69,7 @@ export const LAYER = {
 	links: "wk-links",
 	trails: "wk-trails",
 	trailHeads: "wk-trail-heads",
+	reported: "wk-reported",
 	items: "wk-items",
 } as const
 
@@ -145,6 +147,7 @@ export function themedPaint(
 			"line-color",
 			["case", [">", ["get", "snr"], 5], pal.linkHi, pal.linkLo],
 		],
+		[LAYER.reported, "circle-stroke-color", pal.data.acars],
 	]
 }
 
@@ -308,6 +311,19 @@ export function buildStyle(
 		},
 		trailLayer(LAYER.trails, SRC.trails),
 		trailLayer(LAYER.trailHeads, SRC.trailHeads),
+		// ACARS and VDL2 reports (reported.ts): a hollow ring, never a plane glyph, so a report never
+		// reads as a live ADS-B position
+		{
+			id: LAYER.reported,
+			type: "circle",
+			source: SRC.reported,
+			paint: {
+				"circle-radius": 5,
+				"circle-color": "rgba(0,0,0,0)",
+				"circle-stroke-width": 1.5,
+				"circle-stroke-color": pal.data.acars,
+			},
+		},
 		{
 			id: LAYER.items,
 			type: "symbol",
@@ -349,6 +365,7 @@ function ownSources(): StyleSpecification["sources"] {
 		[SRC.links]: { type: "geojson", data: EMPTY },
 		[SRC.trails]: { type: "geojson", data: EMPTY },
 		[SRC.trailHeads]: { type: "geojson", data: EMPTY },
+		[SRC.reported]: { type: "geojson", data: EMPTY },
 		[SRC.items]: { type: "geojson", data: EMPTY },
 	}
 }

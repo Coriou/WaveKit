@@ -106,7 +106,7 @@ describe("discovery tag tiers", () => {
 		expect(placed.map(t => [t.label, t.solid, t.heard, t.labelled])).toEqual([
 			["DMR · CC 1", true, false, true],
 			["Maybe FM voice", false, false, true],
-			["Heard", false, true, true],
+			["Unidentified · 4FSK ~13 kHz", false, true, true],
 		])
 		// the dot sits on the frequency, 7 px into the chip
 		expect(placed[0]?.x).toBeCloseTo(93, 6)

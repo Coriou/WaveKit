@@ -191,6 +191,9 @@ describe("scanner-format", () => {
 			"Source down",
 		)
 		expect(
+			jobStateLine(paused({ reason: "resumed-without-retune" }), opts),
+		).toBe("Paused · receiver resumed without retuning")
+		expect(
 			jobStateLine(
 				paused({ reason: "resume-blocked", resumeHeldBy: "audio" }),
 				opts,
@@ -199,6 +202,13 @@ describe("scanner-format", () => {
 		expect(
 			jobStateLine(paused({ state: "failed", reason: "source-removed" }), opts),
 		).toBe("Failed · source removed")
+		expect(
+			jobStateLine(
+				paused({ state: "cancelled", reason: "source-paused" }),
+				opts,
+			),
+		).toBe("Stopped · receiver paused")
+		expect(jobStateLine(paused({ state: "cancelled" }), opts)).toBe("Stopped")
 		expect(jobTone({ state: "paused" })).toBe("paused")
 		expect(jobTone({ state: "holding" })).toBe("live")
 		expect(formatWait(150_000)).toBe("3 min")

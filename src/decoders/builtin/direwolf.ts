@@ -9,8 +9,12 @@
  */
 
 import { AudioDemodDecoder } from "../audio-demod-decoder.js"
+import { createHash } from "node:crypto"
 import { createConnection, type Socket } from "node:net"
 import { createSocket, type Socket as UdpSocket } from "node:dgram"
+import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { dirname, join } from "node:path"
 import type {
 	DecoderCaps,
 	DecoderConfig,
@@ -25,7 +29,11 @@ import {
 	type NumericOptionWarn,
 } from "../option-values.js"
 import { DIREWOLF_BOUNDS } from "../options/direwolf.js"
-import { NetworkConnectionError } from "../../utils/errors.js"
+import {
+	DecoderSpawnError,
+	NetworkConnectionError,
+	WaveKitError,
+} from "../../utils/errors.js"
 import { safeErrorFields } from "../safe-error-fields.js"
 import { isAx25CallsignChar } from "../ax25-callsign.js"
 
@@ -37,6 +45,44 @@ const DEFAULT_AGW_PORT = 8000
 
 /** Default sample rate for audio input */
 const DEFAULT_SAMPLE_RATE = 48000
+
+/** The image's shared direwolf config (MYCALL, ADEVICE, CHANNEL); see docker/config/direwolf.conf. */
+export const DIREWOLF_BASE_CONFIG_PATH = "/etc/direwolf.conf"
+
+/** Used when the base config is absent (a dev host without the image's /etc/direwolf.conf). */
+const FALLBACK_BASE_CONFIG = "MYCALL N0CALL\nADEVICE stdin null\nCHANNEL 0\n"
+
+/** Port directives the instance config owns; any in the base config are dropped. */
+const PORT_DIRECTIVE_RE = /^\s*(KISSPORT|AGWPORT)(\s|$)/i
+
+/**
+ * The per-instance direwolf config: the base config without its port lines, then this
+ * instance's KISSPORT and AGWPORT. direwolf has no CLI flag for either port (`-p` enables a
+ * KISS pseudo terminal and takes no value; `-a N` is the audio statistics interval), so the
+ * ports must come from the config file. Direwolf 1.8.x opens one more KISS port per KISSPORT
+ * line and still opens the default 8001 beside a configured one unless `KISSPORT 0` comes
+ * first, hence the base lines are removed and `KISSPORT 0` precedes this instance's port.
+ */
+export function renderDirewolfConfig(
+	base: string,
+	ports: { kissPort: number; agwPort: number },
+): string {
+	const kept = base
+		.split(/\r?\n/)
+		.filter(line => !PORT_DIRECTIVE_RE.test(line))
+		.join("\n")
+		.replace(/\n*$/, "\n")
+	return `${kept}# WaveKit per-instance ports\nKISSPORT 0\nKISSPORT ${ports.kissPort}\nAGWPORT ${ports.agwPort}\n`
+}
+
+/**
+ * Where an instance's config lives: an owner-only directory per WaveKit process under the
+ * OS temp dir, one file per decoder id. The id is hashed, so it never reaches the path.
+ */
+export function direwolfConfigPath(decoderId: string, root = tmpdir()): string {
+	const name = createHash("sha256").update(decoderId).digest("hex").slice(0, 16)
+	return join(root, `wavekit-direwolf-${process.pid}`, `${name}.conf`)
+}
 
 /** KISS frame special bytes */
 const KISS_FEND = 0xc0 // Frame End
@@ -175,6 +221,12 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 	protected firstConnectDelayMs = FIRST_CONNECT_DELAY
 	protected outputHost: string
 	protected outputPort: number
+	/** The base config the instance config extends; tests point it elsewhere. */
+	protected baseConfigPath = DIREWOLF_BASE_CONFIG_PATH
+	/** Parent of the per-instance config directory; tests point it elsewhere. */
+	protected configRoot = tmpdir()
+	/** The instance config this instance created, set only after a validated write. */
+	private writtenConfigPath: string | null = null
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
@@ -238,8 +290,9 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 	protected getDecoderArgs(): string[] {
 		const args: string[] = []
 
-		// Use configuration file
-		args.push("-c", "/etc/direwolf.conf")
+		// Per-instance config: the base config plus this instance's KISSPORT/AGWPORT,
+		// written by start() before the pipeline spawns
+		args.push("-c", this.instanceConfigPath())
 
 		// Input from stdin (csdr pipeline pipes here)
 		// We explicitly tell direwolf to read from stdin with "-"
@@ -248,14 +301,6 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 		// Sample rate override
 		const sampleRate = 48000 // Fixed by demod config
 		args.push("-r", sampleRate.toString())
-
-		// KISS TCP port
-		const kissPort = this.options.kissPort ?? DEFAULT_KISS_PORT
-		args.push("-p", kissPort.toString())
-
-		// AGW port
-		const agwPort = this.options.agwPort ?? DEFAULT_AGW_PORT
-		args.push("-a", agwPort.toString())
 
 		// Note: Callsign is configured in /etc/direwolf.conf (MYCALL directive)
 		// The -c flag is ONLY for config file path, not callsign
@@ -268,11 +313,97 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 		return args
 	}
 
+	/** The KISS and AGW ports this instance's direwolf listens on. */
+	protected direwolfPorts(): { kissPort: number; agwPort: number } {
+		return {
+			kissPort: this.options.kissPort ?? DEFAULT_KISS_PORT,
+			agwPort: this.options.agwPort ?? DEFAULT_AGW_PORT,
+		}
+	}
+
+	protected instanceConfigPath(): string {
+		return direwolfConfigPath(this.id, this.configRoot)
+	}
+
+	/**
+	 * Throws unless `dir` is a real directory (not a symlink) owned by this user with
+	 * mode 0700, so nothing is ever written or removed through a planted path.
+	 */
+	private async assertPrivateConfigDir(dir: string): Promise<void> {
+		const stat = await lstat(dir)
+		if (
+			!stat.isDirectory() ||
+			(stat.mode & 0o777) !== 0o700 ||
+			(process.getuid !== undefined && stat.uid !== process.getuid())
+		)
+			throw new WaveKitError(
+				"direwolf config directory is not private",
+				"DIREWOLF_CONFIG_DIR_UNSAFE",
+			)
+	}
+
+	/**
+	 * Writes the instance config. The directory must be a real directory owned by this
+	 * user with mode 0700, and the file is created fresh (`wx`, 0600), so a pre-planted
+	 * file or symlink in a shared temp dir is never followed. The directory is shared by
+	 * every instance of this process and is kept for the process lifetime.
+	 */
+	protected async writeInstanceConfig(): Promise<void> {
+		const path = this.instanceConfigPath()
+		const dir = dirname(path)
+		this.writtenConfigPath = null
+		try {
+			await mkdir(dir, { recursive: true, mode: 0o700 })
+			await this.assertPrivateConfigDir(dir)
+			let base = FALLBACK_BASE_CONFIG
+			try {
+				base = await readFile(this.baseConfigPath, "utf8")
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err
+			}
+			await rm(path, { force: true })
+			await writeFile(path, renderDirewolfConfig(base, this.direwolfPorts()), {
+				mode: 0o600,
+				flag: "wx",
+			})
+			this.writtenConfigPath = path
+		} catch (err) {
+			const error =
+				err instanceof Error
+					? err
+					: new WaveKitError(String(err), "DIREWOLF_CONFIG_WRITE")
+			throw new DecoderSpawnError(this.id, this.getDecoderCommand(), error)
+		}
+	}
+
+	/**
+	 * Removes only the file this instance wrote, after re-checking that its directory is
+	 * still private. The shared directory itself stays: another instance may be between
+	 * validating it and writing its own file.
+	 */
+	private async removeInstanceConfig(): Promise<void> {
+		const path = this.writtenConfigPath
+		if (path === null) return
+		this.writtenConfigPath = null
+		try {
+			await this.assertPrivateConfigDir(dirname(path))
+			await rm(path, { force: true })
+		} catch (err) {
+			this.logger.debug(
+				{ err: safeErrorFields(err) },
+				"Could not remove the direwolf instance config",
+			)
+		}
+	}
+
 	/**
 	 * Starts the decoder process and connects to output.
 	 */
 	override async start(): Promise<void> {
 		this.isStopping = false
+
+		// direwolf reads its ports from the instance config, so it must exist first
+		await this.writeInstanceConfig()
 
 		// Start the process (AudioDemodDecoder logic)
 		await super.start()
@@ -311,6 +442,7 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 		this.disconnectFromOutput()
 		// Stop process
 		await super.stop()
+		await this.removeInstanceConfig()
 	}
 
 	/**

@@ -73,6 +73,8 @@ const WATCH_EVERY_MS = 250
  * (heardAt = owedSince = now). A real wedge is still retired WEDGE_MS after the stall ends.
  */
 const HOST_STALL_MS = WATCH_EVERY_MS
+/** A host stall at least this late (1 s, four watch periods) is logged at info; shorter lateness at debug. */
+const HOST_STALL_INFO_MS = 1000
 const BUSY_BACKOFF_MS = [25, 50, 100, 200, 400] as const
 const MAX_OPEN_SENDS = BUSY_BACKOFF_MS.length + 1
 const SAMPLE_BYTES = { cu8: 2, cf32: 8 } as const
@@ -1182,7 +1184,9 @@ export class ChannelizerManager
 			if (lateMs > HOST_STALL_MS) {
 				// Excuse only the late part: the silence accrued before the check fell due still counts, so repeated
 				// late checks cannot hide a real wedge (each check still adds its on-time period to the silence).
-				this.log.info(
+				// Lateness under ordinary load is routine; only a stall of a second or more (sleep, VM pause) is worth info.
+				const level = lateMs >= HOST_STALL_INFO_MS ? "info" : "debug"
+				this.log[level](
 					{ sourceId: s.sourceId, generation: s.generation, lateMs },
 					"Channelizer watchdog ran late (host stall); not counting the late time as silence",
 				)

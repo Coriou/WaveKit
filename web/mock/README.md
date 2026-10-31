@@ -10,6 +10,9 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   with seeded copies, and the decoder message rate by `n` (`load` in `buildMockServer()`).
   `WAVEKIT_MOCK_ADSB_RATE=<r>` sends `r` `aircraft:update` per aircraft per second, as a core on
   SBS output does (one per decoded message; `adsbRate`).
+- Aircraft details: AFR1234 (photo, route CDG → JFK, airline), HOP47MJ (route BES → ORY, no photo)
+  and FNY03 (military flag) carry the core's enrichment fields; the photos are drawn inline SVG,
+  so the mock never reaches Planespotters.
 - Spectrum limits: `GET /api/spectrum` serves `limits.bins.max` 2048, like the shipped config.
   `WAVEKIT_MOCK_SPECTRUM_BINS=<n>` (512–8192) raises the summary budget (`spectrumSummaryBins`), so
   Settings › FFT size offers 4096 and 8192 (`spectrumBins` in `buildMockServer()`).
@@ -18,14 +21,34 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   as on a real receiver (about 300 ms to the first frame at the new centre, ROADMAP §8).
 - Retune sweep: `WAVEKIT_MOCK_RETUNE_SWEEP=1` (`retuneSweep` in `buildMockServer()`, `retune-sweep.ts`)
   retunes, from the first spectrum subscription, through 1090, 131, 136, 119.7, 144.6, 98, 438.9,
-  446.1, 466.1, 868.9, 162 and 155 MHz every 1.5 s, then parks at 466.078 MHz at 1.024 MS/s. Each window
-  has its own steady signals and discoveries, a saved frequency sits at 434.502 MHz, and frames follow
+  446.1, 431.1, 868.9, 162 and 155 MHz every 1.5 s, then parks at 431.0125 MHz at 1.024 MS/s. Each window
+  has its own steady signals and discoveries, a saved frequency sits at 399.502 MHz, and frames follow
   the tuner's sample rate. Parked, only four signals may be labelled in the plot.
 - Activity store lifecycle: `GET /api/activity/status` reports `stats.lifecycle`. With
   `WAVEKIT_MOCK_ACTIVITY_STORE=opening` (or `retrying`, next attempt every 5 s; `activityStore` in
   `buildMockServer()`) Activity reads answer the core's 503 `ACTIVITY_UNAVAILABLE` until
   `WAVEKIT_MOCK_ACTIVITY_OPEN_MS` after start (never without it), so the drawer shows
   `Activity is starting…` or `Activity store unavailable, retrying`.
+- Receiver feed (`source-feed.ts`): `POST /api/sources/rtl-0/pause` and `/resume` as the core
+  answers them (`{ id, feed, changed }`, idempotent `changed: false`, 404 `SOURCE_NOT_FOUND`).
+  `GET /api/sources` and `source:status` carry `feed`; while paused the source reads not connected,
+  no spectrum frames or decoder messages are sent (the waterfall freezes) and every wanted decoder
+  on it is suspended with reason `source-paused`, which `GET /api/decoders/summary` (`decoder-summary.ts`)
+  reports as the `source-paused` verdict with a `resume-source` action. A resume reads `resuming` for `resumeMs`
+  (default 400 ms). The held feed carries the tuning at pause time as `restoreTuning`; a plain resume
+  changes no tuning (centre, rate, gain mode and gain then read unverified in `unknownFields` until set;
+  `WAVEKIT_MOCK_MEASURED_RATE=<hz>` (`measuredRateHz`) adopts that measured rate with
+  `measuredFields: ["sampleRate"]`), `{ "restoreTuning": true }` writes it back to the mock tuner, and any other body
+  answers 400 `INVALID_RESUME_REQUEST`. `WAVEKIT_MOCK_RESUME_FAILURES=<n>` (`resumeFailures`) makes the next `n`
+  resumes answer the core's 503 `SOURCE_RESUME_FAILED` with the feed in `error`, to try Retry.
+  `WAVEKIT_MOCK_PERSIST_FAILURES=<n>` (`persistFailures`) makes the next `n` pauses or resumes
+  answer 200 with `persisted: false` (the change holds but was not saved), to try the unsaved
+  warning's Retry.
+  `WAVEKIT_MOCK_SOCKET_OMITS_FEED=1` (`socketOmitsFeed`) leaves `feed` out of `source:status`, as
+  an older core's socket did, while `GET /api/sources` keeps it.
+  `WAVEKIT_MOCK_SECOND_SOURCE=1` (`secondSource`) lists a second receiver, `rtl-1`, after `rtl-0`:
+  its source row, tuner state and its own pause / resume only (no decoders, spectrum or tuner writes),
+  to try which receiver the plot, the Receiver island, the palette and `P` act on.
 - Legacy core: `GET /api/access/bootstrap` is not mounted (404).
 - Exception: operator data (`operator-data.ts`) is served as a protected core serves it, so the
   saved frequencies show: `GET /api/operator-data`, saved-frequency create / replace / delete with
@@ -63,7 +86,7 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   current epoch, oldest first, `backfill: true`, counted in the ack's `backfillFrames`.
 - Scanner (`scanner.ts`, registered from `server.ts`): the core's `/api/scanner` routes with their
   schemas and error codes: status, settings (GET / PATCH with provenance and bounds), the EU
-  bandplans (plus a `pager-466` plan), plan previews from a port of the core's planner (hops,
+  bandplans (plus a `pager-431` plan), plan previews from a port of the core's planner (hops,
   sweep period, poi, estimates, impact naming the running mock decoders, lockouts, issues), jobs
   (create with takeover consent, pause / resume / cancel / delete, live PATCH with `range-locked`,
   hits) and discoveries (seeded from `DISCOVERY_SEEDS`, the core's filters, sort, cursor, operator
@@ -75,6 +98,11 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   `resumeAt` (60 s after the last write by default); identify results update their discovery.
   Not mocked: decoded-elsewhere and band-plan skip layers, probes, recordings, evidence, captures
   (an empty list), monitor jobs.
+- Spectrum tag cases (synthesised, in the default window): at 161.3125 MHz a DMR control channel
+  keyed 0.6 s every 14 s, decoded with colour code 7 and no talkgroup or source (a proven tag that
+  stays lit between bursts, "No calls heard yet — control channel only", no Activity rows); at
+  161.7375 MHz a continuous weak 4FSK carrier, 9 kHz wide, never identified (the quiet
+  `Unidentified · 4FSK ~9 kHz` tag).
 - `data.ts` holds the canvas data (signals, band plan, decoders, messages, identify plans),
   `spectrum.ts` the frame synthesis, `audio.ts` the audio server, `server.ts` the routes and
   `buildMockServer()` (used by `web/tests/mock`).
@@ -96,6 +124,9 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   out (rtl_433 extras, APRS weather, an unknown `Generic-Remote` model). Entity keys follow the
   core's formats (`talkgroup:`, `capcode:`, `callsign:`, `sensor:<model>-<id>`, `reg:`, `node:`,
   `icao:`, `mmsi:`), and AFR1234 and F4ABC-9 sit where the Map's fleets put them.
+- Stored trails: `GET /api/activity/trails` keeps `categories` (comma-separated) like the core.
+  Besides the fleets' tracks, the first aircraft reports a position over VDL2 every 10 minutes of
+  its lap, rounded to 0.1° (`aviation-data`), for the Map's ACARS layer.
 - Activity floods (`activity-floods.ts`, `activityFloods` in `buildMockServer()`, on for `pnpm mock`,
   off with `WAVEKIT_MOCK_ACTIVITY_FLOODS=0`, off by default in tests): the repeats a live receiver
   makes, so Activity's folding can be seen. A synthetic aircraft (ICAO `ABC123`, callsign `WKT101`
@@ -117,3 +148,10 @@ core usage (0.25 cores per running, unpaused decoder).
 codes, wording and actions as the core). Tuned within 200 kHz of 1090 MHz while the budget is
 still the default Auto, ADS-B pauses as `efficiency-budget` ("ADS-B paused: CPU budget full",
 first action `raise-budget`); saving any budget, or starting ADS-B yourself, lets it run again.
+Each item carries the core's `name`; `?hz=<Hz>` adds `coversHz` (whether the decoder's band holds
+that frequency, the core's 200 kHz rule; a decoder with no known band covers it where a built-in
+EU band plan range lists one of its protocols, as the core does) and a bad `hz` answers the core's 400. A failed decoder
+with a restart pending reads "failed: restarting on its own" without the `restart` action.
+`tuned-cases.ts` holds the tuned card's cases for tests (1090 MHz ADS-B paused, decoding and waiting at a paused receiver, with
+the pager's VFO channel there, a synthetic 466 MHz pager and DMR, a pager restarting on its own,
+an unknown frequency, a proven discovery), each built through the same summary.

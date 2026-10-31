@@ -44,6 +44,7 @@ import type {
 	BandPlanSkipRange,
 	Classification,
 	DecodeEvidence,
+	CancelReason,
 	FailReason,
 	Hop,
 	HopPlan,
@@ -79,7 +80,7 @@ export interface JobRecord {
 	impact: Impact | null
 	consentedImpact: Impact | null
 	state: JobState
-	reason?: PauseReason | FailReason
+	reason?: PauseReason | FailReason | CancelReason
 	createdAt: number
 	updatedAt: number
 	startedAt?: number
@@ -332,6 +333,15 @@ const ACTIVE: ReadonlySet<JobState> = new Set([
 	"running",
 	"holding",
 ])
+/**
+ * Pauses that hold the job until an explicit resume and may lose the lease meanwhile: a lease-less
+ * resume of one needs consent like createJob, and a refused acquire moves it to resume-blocked.
+ */
+const HELD_PAUSES: ReadonlySet<string | undefined> = new Set([
+	"operator",
+	"resumed-without-retune",
+])
+
 const LOST_EVENTS: ReadonlySet<JobEvent["type"]> = new Set([
 	"rest-write",
 	"relay-external",
@@ -1082,7 +1092,7 @@ export class JobRunner implements JobDriver {
 		before: { lease: boolean; holding: boolean; engine: boolean },
 		prev: {
 			state: JobState
-			reason?: PauseReason | FailReason
+			reason?: PauseReason | FailReason | CancelReason
 			startedAt?: number
 		},
 	): Promise<void> {
@@ -1178,7 +1188,7 @@ export class JobRunner implements JobDriver {
 			e.type === "resume" &&
 			!e.takeover &&
 			record.state === "paused" &&
-			record.reason === "operator" &&
+			HELD_PAUSES.has(record.reason) &&
 			!leaseHeld &&
 			(this.deps.arbiter.holderPriority(this.sourceId) ?? -1) <
 				record.spec.priority
@@ -1216,7 +1226,7 @@ export class JobRunner implements JobDriver {
 				if (
 					e.type === "resume" &&
 					record.state === "paused" &&
-					record.reason === "operator" &&
+					HELD_PAUSES.has(record.reason) &&
 					!leaseHeld &&
 					!TRANSIENT_REFUSALS.has(r.detail)
 				)

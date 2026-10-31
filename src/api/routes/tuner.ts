@@ -14,6 +14,16 @@ import {
 	BandGainSettingsError,
 	type BandGainSettingsService,
 } from "../../core/band-gain.js"
+import { BandGainSettingsSchema } from "../../core/band-gain-schema.js"
+import {
+	ajvValidationFields,
+	isBodyParseError,
+	requestPart,
+	routeSchemaFor,
+	validationFieldsSchema,
+	zodValidationFields,
+	type ValidationField,
+} from "../validation-errors.js"
 import type {
 	TunerController,
 	TunerWriteOptions,
@@ -86,6 +96,7 @@ const tunerStateSchema = {
 		commandCount: { type: "integer" },
 		unknownFields: { type: "array", items: { type: "string" } },
 		declaredOnlyFields: { type: "array", items: { type: "string" } },
+		measuredFields: { type: "array", items: { type: "string" } },
 		bandGain: {
 			type: "object",
 			properties: {
@@ -120,6 +131,7 @@ const errorResponseSchema = {
 		error: { type: "string" },
 		code: { type: "string" },
 		message: { type: "string" },
+		fields: validationFieldsSchema,
 	},
 	required: ["error", "code", "message"],
 } as const
@@ -156,12 +168,20 @@ export interface TunerRoutesOptions {
 
 const GAIN_EXPECTED =
 	'{"gain": integer, gain in tenths of a dB (0-500, e.g. 372 = 37.2 dB)}; the deprecated alias "tenthsDb" takes the same unit, send exactly one'
+const GAIN_FIELD_EXPECTED =
+	'integer, gain in tenths of a dB (0-500, e.g. 372 = 37.2 dB); send "gain" or the deprecated alias "tenthsDb" (same unit), not both'
 const U32 = "unsigned 32-bit"
 
 /**
  * What each tuner route expects, named in every 400 it answers (field names, types and
  * units). Static text: a 400 never echoes the submitted value.
  */
+/** Static 400 text for the band gain refinements. */
+const BAND_GAIN_RULES: Readonly<Record<string, string>> = Object.freeze({
+	"entries.*.maxHz": "above minHz",
+	"entries.*": "ranges are inclusive and must not overlap another entry",
+})
+
 const EXPECTED_BODY: Readonly<Record<string, string>> = Object.freeze({
 	"/api/tuner/:sourceId/frequency":
 		'{"hz": integer, frequency in Hz (24000000-1900000000)}',
@@ -188,6 +208,63 @@ const EXPECTED_BODY: Readonly<Record<string, string>> = Object.freeze({
 	"/api/tuner/:sourceId/config":
 		'an object of tuner fields only: "frequency" (Hz), "sampleRate" (Hz), "gain" (tenths of a dB, 0-500), "gainMode" ("manual" | "agc"), "ppm", "agcMode", "biasTee", "directSampling", "offsetTuning", "ifGain", "tunerIfGain", "testMode", "rtlXtal" (Hz), "tunerXtal" (Hz), "tunerGainIndex", "controlMode"',
 })
+
+/** Per-field text where the schema alone cannot state the unit or range (route url -> field). */
+const FIELD_EXPECTED: Readonly<
+	Record<string, Readonly<Record<string, string>>>
+> = Object.freeze({
+	"/api/tuner/:sourceId/frequency": {
+		hz: "integer, frequency in Hz (24000000-1900000000)",
+	},
+	"/api/tuner/:sourceId/gain": {
+		gain: GAIN_FIELD_EXPECTED,
+		tenthsDb: GAIN_FIELD_EXPECTED,
+	},
+	"/api/tuner/:sourceId/sample-rate": {
+		hz: "integer, sample rate in Hz (225001-300000 or 900001-3200000)",
+	},
+	"/api/tuner/:sourceId/ppm": {
+		ppm: "integer, frequency correction in ppm (-500-500)",
+	},
+	"/api/tuner/:sourceId/tuner-if-gain": {
+		stage: "integer (0-65535)",
+		gain: "integer, tenths of a dB (0-65535)",
+	},
+	"/api/tuner/:sourceId/config": {
+		frequency: "integer, frequency in Hz (24000000-1900000000)",
+		sampleRate: "integer, sample rate in Hz (225001-300000 or 900001-3200000)",
+		gain: "integer, gain in tenths of a dB (0-500)",
+		ppm: "integer, frequency correction in ppm (-500-500)",
+	},
+})
+
+/** Fields a tuner 400 names, with the route's unit-bearing text where it has one. */
+function tunerFields(
+	url: string | undefined,
+	fields: readonly ValidationField[],
+): ValidationField[] {
+	const known =
+		url !== undefined && Object.hasOwn(FIELD_EXPECTED, url)
+			? FIELD_EXPECTED[url]
+			: undefined
+	const expected = expectedFor(url)
+	return fields.map(f => {
+		const own =
+			known !== undefined && Object.hasOwn(known, f.field)
+				? known[f.field]
+				: undefined
+		if (own !== undefined)
+			return {
+				field: f.field,
+				expected: f.expected.startsWith("required; ")
+					? `required; ${own}`
+					: own,
+			}
+		if (f.field === "body" && expected !== undefined)
+			return { field: f.field, expected }
+		return f
+	})
+}
 
 function expectedFor(url: string | undefined): string | undefined {
 	return url !== undefined && Object.hasOwn(EXPECTED_BODY, url)
@@ -250,6 +327,7 @@ function handleTunerError(
 	err: unknown,
 	expected?: string,
 ): unknown {
+	const url = reply.request.routeOptions.url
 	const error = err instanceof Error ? err : new Error("Unknown error")
 	const maybeStatus = err as { statusCode?: number; code?: string }
 	if (
@@ -292,16 +370,17 @@ function handleTunerError(
 					? `Invalid tuner value${at}; expected ${expected}`
 					: `Invalid tuner value${at}`
 				: error.message,
+		...(statusCode === 400
+			? {
+					fields: tunerFields(url, [
+						{
+							field: field ?? "body",
+							expected: expected ?? "a value the tuner accepts",
+						},
+					]),
+				}
+			: {}),
 	})
-}
-
-/** Fastify body parser 400s (malformed or empty JSON body, bad content length). */
-function isBodyParseError(error: FastifyError): boolean {
-	return (
-		error.statusCode === 400 &&
-		typeof error.code === "string" &&
-		error.code.startsWith("FST_ERR_CTP_")
-	)
 }
 
 export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
@@ -321,6 +400,13 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				: "body"
 			const where = error.validation ? validationWhere(error.validation) : null
 			const at = where !== null ? ` at ${where}` : ""
+			const named = error.validation
+				? ajvValidationFields(
+						error.validation,
+						requestPart(part),
+						routeSchemaFor(request, part),
+					)
+				: []
 			return reply.status(400).send({
 				error: "ValidationError",
 				code: "VALIDATION_ERROR",
@@ -328,6 +414,12 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					expected !== undefined
 						? `Invalid request ${part}${at}; expected ${expected}`
 						: `Invalid request ${part}${at}`,
+				fields: tunerFields(
+					request.routeOptions.url,
+					named.length > 0
+						? named
+						: [{ field: "body", expected: "a JSON object" }],
+				),
 			})
 		}
 		throw error
@@ -473,6 +565,18 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					error: "ValidationError",
 					code: "VALIDATION_ERROR",
 					message: `Invalid request body at ${value === undefined ? "gain" : "gain, tenthsDb"}; expected ${GAIN_EXPECTED}`,
+					fields:
+						value === undefined
+							? [
+									{
+										field: "gain",
+										expected: `required; ${GAIN_FIELD_EXPECTED}`,
+									},
+								]
+							: [
+									{ field: "gain", expected: GAIN_FIELD_EXPECTED },
+									{ field: "tenthsDb", expected: GAIN_FIELD_EXPECTED },
+								],
 				})
 			try {
 				return await run(request.params.sourceId, async () => {
@@ -1122,12 +1226,35 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 			try {
 				return await bandGain.put(request.body)
 			} catch (err) {
-				if (err instanceof BandGainSettingsError)
+				if (err instanceof BandGainSettingsError) {
+					const parsed =
+						err.statusCode === 400
+							? BandGainSettingsSchema.safeParse(request.body)
+							: null
 					return reply.status(err.statusCode).send({
 						error: err.name,
 						code: err.code,
 						message: err.message,
+						...(err.statusCode === 400
+							? {
+									fields:
+										parsed !== null && !parsed.success
+											? zodValidationFields(
+													parsed.error,
+													BandGainSettingsSchema,
+													{ rules: BAND_GAIN_RULES },
+												)
+											: [
+													{
+														field: "body",
+														expected:
+															EXPECTED_BODY["/api/tuner-band-gain"] ?? "",
+													},
+												],
+								}
+							: {}),
 					})
+				}
 				throw err
 			}
 		},

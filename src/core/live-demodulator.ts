@@ -173,6 +173,11 @@ export interface LiveDemodStatus {
 	clientCount: number
 	bytesStreamed: number
 	pipelineHealth: "running" | "starting" | "stopped" | "error"
+	/**
+	 * Set while the source's receiver feed is paused (SourceManager.pause): no pipeline runs
+	 * and none restarts; the same configuration starts again when the feed is live.
+	 */
+	suspendedReason?: "source-paused"
 	/** Automatic pipeline restarts since the last manual start. */
 	pipelineRestarts: number
 	/** Demodulator that produced this run. `csdr` when Rust fell back or was not asked. */
@@ -506,6 +511,11 @@ export class LiveDemodulator extends EventEmitter {
 		| ((sourceId: string, caps: SourceCaps) => void)
 		| null = null
 	private capsChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null
+	/** The active source's feed is paused: the pipeline is released and never restarted. */
+	private feedSuspended = false
+	private feedChangedHandler: ((sourceId: string) => void) | null = null
+	/** Feed pause / resume handling, one at a time. */
+	private feedChain: Promise<void> = Promise.resolve()
 	/** Reused pcm announcement so a listener does not allocate per chunk. */
 	private pcmFormat: { rate: number; format: "s16le" | "f32le" } | null = null
 	private static readonly CAPS_CHANGE_DEBOUNCE_MS = 300
@@ -699,6 +709,7 @@ export class LiveDemodulator extends EventEmitter {
 			await this.rustRuns.cancelPendingStart()
 			if (this.run) await this.stopRun(this.run)
 			this.pipelineHealth = "stopped"
+			this.feedSuspended = false
 			this.detachBranch()
 			this.activeSourceId = null
 			this.audio.closeAll("stop", true)
@@ -901,6 +912,9 @@ export class LiveDemodulator extends EventEmitter {
 			clientCount: this.audio.size,
 			bytesStreamed: this.audio.bytesStreamed,
 			pipelineHealth: this.pipelineHealth,
+			...(this.feedSuspended && this.http.listening
+				? { suspendedReason: "source-paused" as const }
+				: {}),
 			pipelineRestarts: this.pipelineRestarts,
 			engine: this.run?.rust ? "rust" : "csdr",
 			...(engineFallback !== null ? { engineFallback } : {}),
@@ -1457,6 +1471,67 @@ export class LiveDemodulator extends EventEmitter {
 		}
 
 		this.sourceManager.on("caps-changed", this.capsChangedHandler)
+		this.feedChangedHandler = sourceId => {
+			if (sourceId !== this.activeSourceId) return
+			this.feedChain = this.feedChain.then(() => this.followFeed())
+		}
+		this.sourceManager.on("feed-changed", this.feedChangedHandler)
+	}
+
+	/** True while the operator holds the source's receiver feed back (paused, resuming, error). */
+	private feedPaused(sourceId: string | null): boolean {
+		// Optional call: test doubles of the source manager predate pause / resume.
+		return sourceId !== null && this.sourceManager.isPaused?.(sourceId) === true
+	}
+
+	/**
+	 * A paused feed releases the pipeline (no restart while paused); a live one starts the
+	 * same configuration again (frequency, mode, squelch). Reads the feed now, so it never
+	 * acts on a stale event. Never rejects.
+	 */
+	private async followFeed(): Promise<void> {
+		if (!this.http.listening || this.stopRequested) return
+		if (this.feedPaused(this.activeSourceId)) {
+			if (this.feedSuspended && !this.run && !this.rustRuns.hasPendingStart())
+				return
+			this.feedSuspended = true
+			this.clearRestartTimer()
+			if (this.capsChangeDebounceTimer) {
+				clearTimeout(this.capsChangeDebounceTimer)
+				this.capsChangeDebounceTimer = null
+			}
+			this.log.info("Source feed paused; live demodulation pipeline released")
+			try {
+				await this.rustRuns.cancelPendingStart()
+				if (this.run) {
+					this.resetEvidence(this.run)
+					this.resetAutoAnalog()
+					await this.stopRun(this.run)
+				}
+			} catch (err) {
+				this.log.warn(
+					{ err: safeErrorFields(err) },
+					"Releasing the live demodulation pipeline failed",
+				)
+			}
+			this.consecutiveFailures = 0
+			this.lastError = null
+			this.pipelineHealth = "stopped"
+			return
+		}
+		if (!this.feedSuspended) return
+		this.feedSuspended = false
+		if (this.run) return
+		this.log.info("Source feed live; restarting live demodulation pipeline")
+		try {
+			await this.restartPipeline("source feed resumed")
+		} catch (err) {
+			const error = err instanceof Error ? err : new Error(String(err))
+			this.lastError = error.message
+			this.pipelineHealth = "error"
+			this.emitError(error)
+			this.scheduleRestart(0)
+		}
 	}
 
 	/** WG9 req 5.6 retune floor handling (also applied by a front swap, WG10 2.3). */
@@ -1481,6 +1556,8 @@ export class LiveDemodulator extends EventEmitter {
 		caps: SourceCaps,
 	): Promise<void> {
 		if (!this.http.listening || !this.capsNeedRestart(caps)) return
+		// A paused feed's pipeline starts on resume, with the caps current then.
+		if (this.feedSuspended) return
 		if (this.restartTimer) {
 			// A crashed pipeline is backing off; that restart reads the new caps.
 			this.log.info(
@@ -1516,6 +1593,10 @@ export class LiveDemodulator extends EventEmitter {
 		if (this.capsChangedHandler) {
 			this.sourceManager.off("caps-changed", this.capsChangedHandler)
 			this.capsChangedHandler = null
+		}
+		if (this.feedChangedHandler) {
+			this.sourceManager.off("feed-changed", this.feedChangedHandler)
+			this.feedChangedHandler = null
 		}
 	}
 
@@ -1606,6 +1687,13 @@ export class LiveDemodulator extends EventEmitter {
 			)
 		}
 
+		// A paused feed starts nothing; followFeed starts this configuration on resume.
+		this.feedSuspended = this.feedPaused(this.activeSourceId)
+		if (this.feedSuspended) {
+			this.pipelineHealth = "stopped"
+			this.lastError = null
+			return
+		}
 		const planned = this.planFor(this.activeSourceId, this.config)
 		if (await this.rustRuns.tryStart(planned)) return
 		if (this.stopRequested) return
@@ -1902,6 +1990,8 @@ export class LiveDemodulator extends EventEmitter {
 
 	private scheduleRestart(lastRunMs: number): void {
 		if (!this.http.listening || this.run || this.restartTimer) return
+		// No restart loop while the feed is paused: resume starts the pipeline.
+		if (this.feedSuspended || this.feedPaused(this.activeSourceId)) return
 		if (lastRunMs >= this.options.stableRunMs) this.consecutiveFailures = 0
 		this.consecutiveFailures++
 		if (this.consecutiveFailures > this.options.maxRestartAttempts) {
@@ -1927,7 +2017,7 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	private async restartAfterFailure(): Promise<void> {
-		if (!this.http.listening || this.run) return
+		if (!this.http.listening || this.run || this.feedSuspended) return
 		this.pipelineRestarts++
 		try {
 			await this.restartPipeline("automatic restart")

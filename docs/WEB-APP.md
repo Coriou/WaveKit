@@ -40,43 +40,147 @@ The app has three views, picked from the dock at the bottom: **Spectrum**, **Map
 - When found signals lie outside the visible span, a marker at that edge shows how many, with an
   arrow (its tooltip reads `3 signals outside view →`). Clicking it asks "Tune to … MHz?" for the
   nearest of them first; it never retunes on its own.
-- Click a tag to see what it is: the protocol (`DMR` once verified; before that `Likely DMR`,
-  `Maybe DMR` or `Heard`), a muted `likely <kind>` hint (for example `likely ISM device`) when nothing has been verified
-  yet, the next step from the decoders that cover its frequency (for example "Listen to check",
-  "Widen the capture so … fits" or "No decoder covers this frequency; run identify") and a
+- Click a tag to see what it is (see [Spectrum tags](#spectrum-tags)). A group lists each signal
+  with its state, the protocol (`DMR` once verified; before that `Likely DMR`, `Maybe DMR` or
+  `Heard`), a muted `likely <kind>` hint (for example `likely ISM device`) when nothing has been
+  verified yet, the next step from the decoders that cover its frequency (for example "Listen to
+  check", "Widen the capture so … fits" or "No decoder covers this frequency; run identify") and a
   **Tune** button. Clicking a tag never tunes by itself. The same `likely …` hint and next step
   appear beside unverified rows in the Scanner lists.
 
+#### Spectrum tags
+
+There are two kinds of label on the spectrum. The labels over the peaks follow what is on the air
+now (a proven one waits between bursts, see below). The tags in the row under the band ruler are the scanner's **discoveries**: frequencies it
+has heard and kept, with what it has learnt about each.
+
+A tag is in one of three states:
+
+- **Heard**: something transmits there and nothing has identified it. The tag stays grey and says
+  what was measured, for example `Unidentified · 4FSK ~9 kHz`.
+- **Likely**: the signal's shape suggests a protocol (`Likely DMR`, `Maybe FM voice`), but no
+  decoder has checked it.
+- **Proven**: a decoder checked it (`DMR · CC 1`), or an analog proof such as a CTCSS tone. The dot
+  is filled and the tag has an outline while it is live.
+
+A tag is bright while its discovery is live. A proven tag stays lit for 5 minutes after it was last
+heard, and any other tag for 90 seconds, so a signal that only sends short bursts (a DMR control
+channel, a pager) does not flash with every burst. A continuous carrier is on the air all the
+time, so its tag never goes away. If nothing identifies it, it stays quiet and grey.
+
+The labels over the peaks use the same evidence:
+
+- A label on a proven discovery has a filled dot and an outline, like its tag. While that tag is
+  lit, the label stays between bursts, so a DMR control channel shows one steady `DMR · CC 1`
+  instead of flashing. Once the tag dims, the label goes the next time the signal is quiet.
+- A label names a protocol only when its discovery is proven. A discovery marked decoded whose
+  evidence says weak (or whose proof does not prove it) is not proven, so its label reads
+  `Unidentified · …` instead of `DMR`.
+- An unnamed peak near a likely discovery reads as its tag does, for example `Likely DMR`. Near
+  a discovery that was only heard it says what was measured, for example
+  `Unidentified · 4FSK ~9 kHz` with its frequency, and has a grey ring for a dot. Any other
+  unnamed peak shows its frequency.
+- A held proven label moves to a new burst only when that burst is the same signal: its centre
+  within a quarter of the label's width (or the spectrum's resolution, if wider) and its width at
+  most 1.5 times the label's or the other way round. A narrower neighbour one channel away gets
+  its own label.
+- Any other label stays a few seconds after its signal goes quiet, as before.
+- Hover over a label that sits on a discovery to see how we know (the tag's first detail line).
+  Clicking a label tunes there. For the full detail, click the tag in the row below.
+
+Click a single tag for its detail:
+
+- **How we know**: for example `DMR decoded: checked control bursts, colour code 7`, or
+  `Not proven: heard on the air, not identified`. The core's own proof summary shows as a
+  `Core:` line only when it says something the line above does not.
+- **live** after the frequency means it was heard in the last 30 seconds. The tag itself stays
+  lit longer (see above).
+- **Evidence** (`Proven`, `Weak`, or `Not reported` by an older core), **First heard**, **Last
+  heard** and **Airtime**.
+- **Calls**: the scanner checks a channel by decoding it for a moment. When that check saw calls,
+  the detail names them, for example `Talkgroup 1, source 12 seen by the scanner's check` (at most
+  three of each, then `+n more`). Calls the scanner's check decoded are not Activity rows: Activity
+  lists what the decoders heard, so it may have nothing on that frequency yet, and the detail says
+  so. A proven digital voice channel with no call in it says `No calls heard yet — control
+channel only`. **Last call** shows only when the core names the discovery's last Activity event,
+  and opens it. Otherwise **Search Activity** opens Activity on that frequency.
+- **Tune** and **Listen** go to the discovery's measured frequency, as the Scanner drawer does.
+  **Listen** is the drawer's Listen: it tunes there, then starts live audio once the tune has
+  landed. If the tune fails, nothing plays and a `Could not tune: …` warning says why. If the
+  receiver is tuned elsewhere meanwhile, nothing plays here. The core's live audio is left
+  running, because other browsers may be listening to it. Turning Listen off stops the core's
+  live audio only when a fresh status shows no other listener on either stream.
+  **Open in Scanner** opens the discovery in the Scanner drawer.
+
 ### The tuned card
 
-The card on the left follows the frequency you are tuned to: what is heard there, the last
-transmissions, decoded content, and the actions (Activity, save, Identify, Open message).
+The card on the left follows the frequency you are tuned to. From the top it says what the signal
+is, then the frequency once, the mode and channel width, the decoders on its band, and the actions
+(Activity, save, Identify, Open message).
 
-Under the last transmissions, **On this band** lists the decoders whose band holds the tuned
-frequency (within 200 kHz of one of their frequencies or of the span between them, or inside
-their band), the ones listening first. Each line is the core's one-sentence verdict, for example
-"ADS-B decoding" or "ADS-B paused: CPU budget full", with a filled dot for a decoder that runs and
-a hollow one for one that does not. A decoder that does not run gets one button for the core's
-first suggestion:
+The header names the signal from the most specific thing known: the protocol last heard, what
+Identify or a proven discovery named, the decoder whose band holds the frequency, then the band
+plan's band. A decoder that is off names it only where the band plan has no band there, and says
+so ("Pager (off)"). A decoder whose channel only follows the tuner (the pager decoder listening to the
+live audio, say) never names a frequency outside its band, and the card never says "Nothing decodes
+this frequency" while a decoder's band holds it. "Decoded here by" names only a decoder on the tuned
+channel itself, one of its fixed frequencies within the channel (ADS-B anywhere readsb covers, its
+signal fills 1089 to 1091 MHz). A decoder whose band merely spans the frequency, such as the ISM
+decoder at 434.000 MHz with its channel at 433.920 MHz, reads "ISM decodes this band, not this
+channel", and **Identify on its own** still identifies a transmission there. Elsewhere in the ADS-B
+band, past readsb's 200 kHz reach, the card gives the band plan's reason: "Decoded elsewhere ·
+readsb". On a data band (the band plan's mode is RAW, such
+as ADS-B at 1090 MHz) or with the receiver set to RAW, the card shows **No audio (data band)**
+instead of the demodulator and "Quiet".
 
-| Suggestion                                     | Button                                     | What it does                                                                                                              |
-| ---------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| Start, restart                                 | Start, Restart                             | Starts or restarts that decoder                                                                                           |
-| Raise the CPU budget                           | Raise CPU budget                           | Adds one core to the decoder CPU budget, up to its maximum of 64 (Undo in the toast); Settings › Decoders keeps the value |
-| Pause the scanner                              | Stop the scan                              | Ends the scan, which gives the tuner and the decoders back (a paused scan keeps them)                                     |
-| Tune to its band                               | Tune to 1090.000                           | Tunes the receiver to the decoder's frequency                                                                             |
-| Change the sample rate, check the source       | Raise sample rate, Check the receiver…     | Opens the Receiver, where you set it                                                                                      |
-| Turn on, turn off others, install, channelizer | Turn on in Settings, Decoders in Settings… | Opens the decoder's row in Settings                                                                                       |
+**On this band** is a table of the decoders whose band holds the frequency (within 200 kHz of one
+of their frequencies or of the span between them, or inside their band). The core decides which
+those are: the card asks `GET /api/decoders/summary?hz=<Hz>` and lists the items with
+`coversHz: true`, so an agent using the same endpoint sees the same list. Right after the core
+starts, before the receiver reports its capabilities, a decoder's configured frequencies stand in
+for its band, so ADS-B shows at 1090 MHz from the first moment. If that request fails (the core
+answers an error, the request times out or the network drops), the card lists the decoders from
+their statuses instead of waiting, and takes the core's answer again once a request succeeds. It
+picks them by the core's own rule: the decoder's band, else its configured frequencies (never one that
+only follows the tuner, so the pager is not listed at 1090 MHz because its channel sits there), else, for a
+decoder with no band of its own such as the pager or digital voice, the receiver's band plan ranges
+that list its protocols (POCSAG, DMR). When Settings turns a decoder off or it is stopped, its row
+says so at once, before the core's next answer arrives. Each decoder takes two lines:
 
-A decoder set to off in Settings shows "off in Settings" and only links there, whatever its last
-verdict said: turning decoders on and off stays in Settings. When the budget is already at its
-maximum, the next suggestion's button shows instead of Raise CPU budget; the card reads the budget
-again each time it refreshes the verdicts, so a budget lowered elsewhere offers the raise again. The
-raise and its Undo each change the budget only if nobody changed it since the card read it (the
-core checks this as it saves); otherwise the toast says so, names the value now set, and leaves it. Stop the
-scan shows while a scan holds the decoders: moving, holding on a hit, or paused. A verdict this app
-does not know shows as plain text without a button. With read-only access the buttons that change
-something are disabled; the links still work.
+| Column      | Shows                                                                                                          |
+| ----------- | -------------------------------------------------------------------------------------------------------------- |
+| Decoder     | Its name and program, for example ADS-B over `readsb`                                                          |
+| State       | A dot and one word: Decoding, Listening, Starting, Waiting, Paused, Failed or Off (filled dot while it runs)   |
+| Last decode | How long ago it last decoded; opens Activity on that decoder's events only. "Never" when it has not            |
+| Detail      | The second line: the reason from the core's verdict ("CPU budget full"), or how much it decoded, full width    |
+| Action      | At most one button, at the right of the detail line, only when the verdict suggests one the card can carry out |
+
+Decoders that decode come first, then those starting, failed, paused, waiting and off. In a narrow
+drawer or on a phone each decoder stacks: name, state and last decode, then the detail and its
+button. One **Decoder settings** link at the foot opens Settings › Decoders (at a decoder that is
+off, if there is one); rows never link to Settings.
+
+| Suggestion                               | Button                                 | What it does                                                                                                              |
+| ---------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Start (a stopped decoder)                | Start                                  | Starts that decoder                                                                                                       |
+| Restart (a failed decoder)               | Restart                                | Restarts that decoder                                                                                                     |
+| Raise the CPU budget                     | Raise CPU budget                       | Adds one core to the decoder CPU budget, up to its maximum of 64 (Undo in the toast); Settings › Decoders keeps the value |
+| Pause the scanner                        | Stop the scan                          | Ends the scan, which gives the tuner and the decoders back (a paused scan keeps them)                                     |
+| Resume the receiver                      | Resume                                 | Resumes the paused receiver feed, as the Receiver's Resume does                                                           |
+| Tune to its band                         | Tune to 1090.000                       | Tunes the receiver to the decoder's frequency                                                                             |
+| Change the sample rate, check the source | Raise sample rate, Check the receiver… | Opens the Receiver, where you set it                                                                                      |
+
+A decoder that is starting or waiting never offers Restart, and a failed decoder the core is
+already restarting on its own reads "Restarting on its own" without a button. Suggestions that
+belong in Settings (turn on, turn off others, install, channelizer) are left to the foot's link. When
+the budget is already at its maximum, the next suggestion's button shows instead of Raise CPU
+budget; the card reads the budget again each time it refreshes the verdicts, so a budget lowered
+elsewhere offers the raise again. The raise and its Undo each change the budget only if nobody
+changed it since the card read it (the core checks this as it saves); otherwise the toast says so,
+names the value now set, and leaves it. Stop the scan shows while a scan holds the decoders: moving,
+holding on a hit, or paused. A verdict this app does not know shows as plain text without a button.
+With read-only access the buttons that change something are disabled; the links still work. A core
+without `coversHz` is read from the decoders' own bands instead.
 
 ### Listen
 
@@ -94,6 +198,8 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
 
 - **Activity:** everything WaveKit heard, newest first. Search by talkgroup, capcode, MMSI, ICAO,
   callsign or frequency, filter by category and time range, show a list or cards, choose columns.
+  **Last decode** on the tuned card opens it on one decoder: a **Decoder ADS-B** chip in the
+  search lists only that decoder's events; remove the chip with its `×` like any other filter.
   If the core rate-limits a request, Activity retries by itself up to 3 times, unless the core asks
   for a wait over 10 s. Each wait is the one the core asked for (at least 0.25 s; 0.5, 1, then 2 s
   when it names none) plus up to 20 % random jitter, so a single wait can reach 12 s. If retrying
@@ -104,7 +210,9 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   Repeats fold into one row per thing going on (see [Activity folding](#activity-folding)).
 - **Scanner:** watch the band in view or plan a scan, see the signals found, skip the ones you do
   not care about, save presets.
-- **Recordings:** recordings kept by the core, to play, search and keep.
+- **Recordings:** recordings kept by the core, to play, search and keep. The footer line sums
+  the disk they use: what you kept, digital-voice calls, scanner evidence and named IQ captures
+  (each with its limit), then the free space.
 - **Settings:** station, receiver, decoders (each one starts **auto**, **always** or **off**), band
   plans, spectrum and waterfall, map, units and time, theme, density and motion. A paused decoder
   says why, for example `Paused · the capture is too narrow here` or `Paused · no channel selected yet`.
@@ -131,6 +239,41 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   core's own message shows under the row if it refuses the save. **Per-band gain for my tuning**
   (off by default) saves at once: on, your own retunes also set the band's gain and give yours
   back outside the bands. See [Per-band gain](API.md#per-band-gain-get-and-put-apituner-band-gain).
+- **Receiver › Pause** stops pulling IQ from the receiver without removing it: the core closes the
+  receiver connection, the waterfall stops on its last rows under a `Receiver paused` label,
+  decoders wait (their status reads paused because the receiver is paused) and the tuner
+  controls are locked until you resume. The island shows `Receiver paused · since 14:02 ·
+waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads `Paused`. The
+  pause survives a core restart; if the core could not save it, the island warns `Paused, but not
+  saved — it will not survive a restart` with **Retry**, which saves it again. **Resume** reconnects once
+  without changing the receiver's tuning: while WaveKit was paused, SDR++ may have retuned the
+  shared dongle through rtlmux, which WaveKit cannot see, so it adopts what it finds: until you set them, the island shows the centre and rate as
+  `last known … · unverified` (header and Centre row), no sample rate is selected (picking any rate,
+  the shown one too, sets it), and gain reads unknown. When the core measures a common rate from the
+  stream it adopts it and the island labels it `measured`. **Resume at 161.500 MHz** (shown when
+  the core knows the centre from before the pause) reconnects and writes the centre, rate and gain
+  from before the pause back. SDR++ connected through WaveKit's tuner relay is seen: its retunes
+  during the pause are written on either resume. If the receiver cannot be reached, the island
+  says `Resume failed` with the reason and a **Retry** button, which repeats the same kind of
+  resume, and the receiver stays paused. In the ⌘K palette, **Pause receiver** (while live),
+  **Resume receiver** (while paused) and **Resume receiver at 161.500 MHz** do the same, and the
+  `P` key toggles pause and the plain resume from anywhere; a pause from the palette or the key
+  offers Undo. Read-only browsers cannot pause. While paused,
+  the tuned card's decoders read Paused, "Receiver paused — Resume", with a **Resume** button and
+  Settings › Decoders reads `Paused · the receiver is paused`. A scanner identify running when you
+  pause ends with what it found so far and reads `Stopped · receiver paused`. A sweep running when
+  you pause waits; **Resume at 161.500 MHz** continues it, but a plain **Resume** leaves it held so it
+  does not retune the receiver away from SDR++: the scan row reads `Scan paused · receiver resumed
+  without retuning` with **Resume scan**, which retunes to the scan's current hop (also **Resume scan**
+  in the ⌘K palette). The resumed scan hops without a band gain, and when it ends nothing is put
+  back: the receiver keeps whatever it was last tuned to. With more than one
+  receiver, the Receiver island, the palette's receiver commands (pause, resume, gain, sample rate,
+  bias tee, RTL AGC) and `P` act on the receiver the waterfall shows: the first connected one, which
+  stays on screen through its own pause (else the first paused one). See
+  [pause and resume](API.md#post-apisourcesidpause-and-post-apisourcesidresume).
+
+  ![The receiver paused: the waterfall frozen under the Receiver paused label, the Receiver island with Resume, and the tuned card's decoders waiting with Resume buttons](assets/screenshots/receiver-paused.png)
+
 - **Receiver** (the island at the top): under Gain, a quiet line says when the core confirms a
   band gain on the tuner, for example `Band gain 37.2 dB · 868 MHz ISM · while the
 scanner tunes` (or `· for your tuning` with the switch on). It shows the gain the tuner really
@@ -138,6 +281,10 @@ scanner tunes` (or `· for your tuning` with the switch on). It shows the gain t
   frequency; turning the switch on shows nothing until your next retune. When the scanner sees broadband
   blanking rise at a manual gain, the line `Front end may be overloaded at this gain (49.6 dB,
 7.5 % of frames blanked)` suggests a lower gain; it is a hint, not a measurement.
+- When samples are lost on the way from the receiver to WaveKit, a notice at the bottom says
+  `Receiver link dropping samples — lower the sample rate`. It shows only for loss on the receiver
+  link. Samples dropped inside WaveKit, or a link that has not yet shown it can carry the rate,
+  raise no notice.
 
 ### Activity folding
 
@@ -171,14 +318,25 @@ bridges one):
 | Sensor                        | 5 min  | 433/868 MHz sensors send every 16-60 s; 5 × 60 s                                                                              |
 | APRS station (callsign)       | 15 min | Fixed stations beacon every 10 min; plus 50 % jitter                                                                          |
 | Mesh node                     | 30 min | Meshtastic sends position every 15 min by default; twice that                                                                 |
+| Aircraft link upkeep          | 5 min  | Link frames run seconds to minutes apart on a channel while aircraft are in range; five quiet minutes end the stack           |
 | Anything else                 | 2 min  | One exchange on one channel (analog overs are seconds apart)                                                                  |
+
+Aircraft datalink rows that only keep the radio link up (VDL2 link frames, ACARS link tests `_d`
+and ground-station squitters `SQ`: the core's **Kind** says `Link` or `Ground station`) fold per
+protocol and channel, whatever aircraft sent them, into one **Link traffic** row, so the messages
+that say something stay in view. The folded rows keep their own titles, and nothing of one aircraft
+is filled into another's. An ACARS or VDL2 row reads as the core explains it: the title says who and
+what in plain words (`N0WK01 ZZ0101 · Message to or from an onboard system`), the subtitle how it
+travelled (`ACARS · Air to ground · 131.550 MHz`), and the readings keep the raw label beside its
+kind and how sure the explanation is (`Label H1 · Onboard systems · Public label list`); see
+[AIRCRAFT-DATALINK.md](AIRCRAFT-DATALINK.md#reading-a-message).
 
 A talkgroup's calls are one stack per radio. A DMR `call_start` that arrives before its radio is
 decoded joins the call that follows it on the same talkgroup and channel (or, with none within the
 gap, the call before it) instead of becoming a stack of its own. A capcode is one stack per channel,
 except that the same page (same capcode, kind and text) heard within 2 s of one of the stack's
 decodes on another channel is a simulcast copy and joins the stack: the row lists the channels it
-was heard on (`On 160.450 · 466.075 MHz`), and the detail shows the decode's own Frequency with the
+was heard on (`On 160.450 · 431.075 MHz`), and the detail shows the decode's own Frequency with the
 stack's other channels under Also heard on (simulcast). The copies may arrive in either order: a
 repeat whose first copy lands on the other channel joins the stack that already heard both channels,
 so a beacon repeated on two channels stays one stack however its copies interleave. A channel stays
@@ -225,8 +383,41 @@ discovery sits within 12.5 kHz, and up to 50 folded rows.
 ![Map: aircraft, vessels and APRS stations around the station, with their trails and the receiver's coverage](assets/screenshots/map.png)
 
 The **Map** shows aircraft, vessels, APRS stations and mesh nodes around your station, with their
-trails and the station's coverage. **Messages** shows decoded messages as cards; open one to see its
+trails and the station's coverage.
+
+The **ACARS** layer shows where aircraft said they were over datalink: an ADS-C report decoded by
+libacars, or the rough position a VDL2 link frame carries (to 0.1°, about 10 km). Each aircraft's
+latest report of the last hour is a hollow amber ring, never a plane glyph, and it never joins the
+aircraft's ADS-B trail: trails ask `GET /api/activity/trails` for every category but
+`aviation-data`, and the layer asks for `aviation-data` alone. A selected aircraft shows a
+**Datalink** section: its last five ACARS and VDL2 messages, newest first, how many link frames
+were folded, and how its registration was tied to its address (`Registration N0WK01 heard with this
+address on VDL2`). The aircraft is found by its ICAO address and the registrations
+`GET /api/aircraft-identity` links to it, never by callsign or flight number. **Messages** shows decoded messages as cards; open one to see its
 full content or its position on the map.
+
+Select an aircraft to see what the core knows about it (see
+[ADS-B, Aircraft Enrichment](ADSB.md#aircraft-enrichment)): a photo of the airframe, credited to
+its photographer with a link to the photo's page, the airline and type, a **Military** tag, the
+planned route of its callsign, and an **Aircraft** section with registration, type, operator,
+country, ICAO address and year built. The planned route comes from a crowd-sourced database, so
+it is hidden when the core marks it implausible (the aircraft is clearly flying away from the
+destination). On the map, an
+aircraft is named by its callsign, else its registration, else its ICAO address. Photos load
+from the photo site (Planespotters) straight into your browser, so they need internet access,
+and that site sees your browser's IP address and which aircraft you open; everything else also
+works offline. Photos appear only while online lookups are on.
+
+While the receiver tracks an aircraft, its Activity rows say who flies it and what it is
+(`ADSB · WaveKit Air · A320 214`), and a row titled only by the ICAO address takes the callsign or
+registration instead. Rows of aircraft no longer tracked stay as they were stored. In ⌘K, type
+a callsign, registration, ICAO address or airline to find a tracked aircraft and open the Map
+on it. **Settings › Map › Online aircraft lookups** turns the core's free online sources
+(photos, routes, airline names, the local database download) on or off. While they are off
+(the default, and what **Reset** restores) only the local database is used, no photo is shown
+and your browser fetches nothing from the photo site, and nothing about the aircraft you receive
+leaves the station. Turning them off stops lookups already under way and removes the photos
+already shown.
 
 ## Keyboard
 
@@ -239,6 +430,7 @@ full content or its position on the map.
 | `Q`                  | Squelch                           |
 | `[` `]`              | Step down / up                    |
 | `L`                  | Listen                            |
+| `P`                  | Pause / resume the receiver       |
 | `B` / `S`            | Saved frequencies / save this one |
 | `/`                  | Search Activity                   |
 | `G` then `S` `M` `D` | Spectrum, Map, Messages           |

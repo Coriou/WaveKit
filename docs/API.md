@@ -5,26 +5,42 @@ WaveKit exposes a REST API and WebSocket endpoint for control and real-time moni
 ## Automation and agents
 
 Protected APIs accept the machine credential in `Authorization: Bearer <token>`.
-An administrator obtains it from `machineToken` in the private directory's
-`access-state.json`, provisioned by the existing local
-`node dist/access-command.js setup` command with the core stopped. See
-[protected local setup](LOCAL-SETUP.md#protected-mode-locally). Use the host's private
-state directory (or the host directory mounted as private state); no container shell
-is needed. Keep this file private and never put the credential into URLs or logs.
-For example, with `PRIVATE_DIRECTORY` and `API_ORIGIN` set for your installation:
+It is provisioned by the local `node dist/access-command.js setup` command with the
+core stopped (see [protected local setup](LOCAL-SETUP.md#protected-mode-locally)).
+Copy it into a file for an agent with `machine-token`, run on the host against the
+private state directory, or in a one-off container with that directory mounted
+([Docker](DOCKER-SETUP.md#protected-runtime-deployment)). No container shell is needed,
+and the core may be running:
 
 ```sh
-jq -r '.machineToken | "Authorization: Bearer \(.)"' "$PRIVATE_DIRECTORY/access-state.json" |
-  curl --fail --header @- "$API_ORIGIN/api/status"
+node dist/access-command.js machine-token --private-directory "$PRIVATE_DIRECTORY" --out "$HOME/.config/wavekit/machine-token"
+curl --fail --header "Authorization: Bearer $(cat "$HOME/.config/wavekit/machine-token")" \
+  "$API_ORIGIN/api/agent/status"
 ```
 
-There is no HTTP route that issues or exports a machine credential. Browser pairing
-issues a browser session, not a machine token. The existing local
-`node dist/access-command.js rotate-credential --private-directory ABS` command
-rotates it with the core stopped; pass `--keep-sessions` to retain remembered browsers.
-An agent without access to private host state must receive a credential securely
-from the administrator. Machine requests need the configured Host/Origin policy;
-do not send a browser cookie alongside the bearer credential.
+The command creates the file with mode `0600` and never prints the credential.
+The file's directory must already exist, must not be writable by group or others,
+and must lie outside the private directory. An existing file is refused; `--replace`
+overwrites it only when it is your own `0600` regular file (not a link). The file is
+written inside the directory the command checked, even if its path is swapped for a
+link meanwhile; if the path no longer names that directory, or names the private
+directory, the command removes what it wrote and refuses. Keep the file private and
+never put the credential into URLs or logs.
+
+There is no HTTP route that issues or exports a machine credential, and the file
+holds the same single credential as the private directory: it is not a separate
+grant. `node dist/access-command.js rotate-credential --private-directory ABS`
+(core stopped) revokes it and every copy; run `machine-token --replace` afterwards
+to refresh the agent's file. Pass `--keep-sessions` to retain remembered browsers.
+Browser pairing issues a browser session, not a machine token. An agent without
+access to private host state must receive the file securely from the administrator.
+Machine requests need the configured Host/Origin policy; do not send a browser
+cookie alongside the bearer credential.
+
+For a one-request overview of the receiver, read
+[`GET /api/agent/status`](#get-apiagentstatus).
+Task recipes (tune, gain, decoders, activity, IQ capture) are in
+[Driving WaveKit from an agent](AGENTS-API.md).
 
 ### Tuner commands during a sample-rate restart
 
@@ -77,7 +93,10 @@ current center frequency; otherwise the response is 409
 `IQ_SNAPSHOT_CENTER_MISMATCH`. This captures the next arriving IQ window without
 retuning. The source must be connected with known center, IQ kind and `U8_IQ`
 format. Unsupported sources return 409; missing sources 404; disconnected sources
-503; invalid bodies 400. Authorization matches recording downloads and scanner
+503 `SOURCE_DISCONNECTED`; a source whose receiver feed is paused (or still resuming)
+503 `SOURCE_PAUSED` with `message` "The receiver feed is paused; resume it first"
+(see [pause and resume](#post-apisourcesidpause-and-post-apisourcesidresume));
+invalid bodies 400. Authorization matches recording downloads and scanner
 captures: protected admission, mutation authorization for this POST (including
 browser CSRF), and a revocable download lease. Missing credentials return 401;
 forbidden requests return 403.
@@ -106,6 +125,62 @@ headers: clients must reject incomplete bodies against `Content-Length`.
 The snapshot endpoint is mounted when protected access and source fanout routing
 are configured. An already aborted download request returns `REQUEST_ABORTED`
 (status 499 when a response is still possible), rather than an authentication error.
+
+### Named IQ captures
+
+`POST /api/iq/captures` stores whole seconds of the current tuning as a named CU8 file in the
+private state directory (`<stateDir>/iq-captures`, mode `0700`, files `0600`):
+
+```json
+{ "name": "test-capture", "seconds": 2 }
+```
+
+`name` is 1 to 64 characters of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit
+(no dot, slash or upper case, so it is never a path), and must be unused: 409
+`IQ_CAPTURE_EXISTS`. `seconds` is an integer from 1 to 10. `sourceId` is optional while one
+source is configured, required (400 naming `sourceId`) with more. The source must be connected
+(503 `SOURCE_DISCONNECTED`) and deliver `U8_IQ` with a known center at most 3,200,000
+samples per second (409 `IQ_CAPTURE_UNSUPPORTED`); missing sources are 404. One capture runs
+per source at a time: another answers 409 `IQ_CAPTURE_BUSY`. Captures never tune, pause or
+slow the source.
+
+A capture is `seconds × sampleRate × 2` bytes, at most `10 × 3,200,000 × 2 = 64,000,000`.
+Before it starts, the stored captures plus every running capture must fit
+`8 × 64,000,000 = 512,000,000` bytes and 32 captures, else 507 `IQ_CAPTURE_QUOTA`; and the
+filesystem must keep 268,435,456 bytes (256 MiB) available after it and the bytes every other
+running capture has still to write, else 507 `IQ_CAPTURE_DISK_FULL`. Admissions and completions
+are checked one at a time, so concurrent requests on different sources never overrun either
+bound. A source change (retune, rate change, disconnect) while the request is being admitted
+answers 409 `IQ_CAPTURE_SOURCE_CHANGED`: nothing was written, so retry. The answer is 201 once the file is complete, with the stored metadata:
+`name`, `sourceId`, `format` (`"cu8"`), `centerHz`, `sampleRate`, `gain` (tenths of a dB, null
+under AGC or when unknown), `startedAt` (UTC time of the first stored chunk), `durationS`
+and `bytes`.
+
+Data is written chunk by chunk; at most 4,000,000 bytes (625 ms at 3.2 Msps) wait for the
+disk, past that the capture stops. A source change (retune, rate change, also when only seen as
+changed caps right before the first stored sample), disconnect or
+removal, a silent source (twice the requested duration), fanout congestion, client
+disconnect, lease revocation or shutdown also stop it: the partial file is removed and the
+answer, when one can still be sent, is 503 `IQ_CAPTURE_INTERRUPTED`. At the first use after a
+restart WaveKit removes only what a crash of its own leaves: `<name>.cu8.partial`,
+`<name>.json.partial`, and `<name>.cu8` with no `<name>.json` beside it. Other files in the
+capture directory are never touched. A `<name>.json` that is not valid capture metadata, or
+that WaveKit cannot read (for example its permissions), is not listed, but its name stays taken (409 `IQ_CAPTURE_EXISTS`) and the size of its
+`<name>.cu8` counts in `usedBytes` and toward the quota until you delete that name.
+
+`GET /api/iq/captures` lists whole captures newest first:
+`{ captures, usedBytes, quotaBytes, maxCount }`. `GET /api/iq/captures/:name` downloads the
+file (`application/octet-stream`, `Content-Disposition: attachment; filename="<name>.cu8"`,
+`Content-Length`, `X-WaveKit-Center-Hz`, `X-WaveKit-Sample-Rate`, `X-WaveKit-Start-Time`).
+`DELETE /api/iq/captures/:name` answers 204, or 409 `IQ_CAPTURE_BUSY` while that name is being
+captured. An unknown or malformed name is 404 `IQ_CAPTURE_NOT_FOUND`. Error bodies carry
+fixed text only (`error`, `code`, `message`), never the name or a path.
+
+Authorization matches the IQ snapshot: the routes mount only with protected access, every
+route takes mutation authorization (browser CSRF included), and the capture and the download
+hold a revocable lease. Missing credentials return 401, forbidden requests 403. The DTOs are
+`IqCapture`, `IqCaptureList` and `IqCaptureRequest` in `@wavekit/api-types`; recipes are in
+[Driving WaveKit from an agent](AGENTS-API.md).
 
 ## Base URL
 
@@ -444,6 +519,12 @@ with `reason` `all_decoders_down` (every configured decoder is down) or `api_dow
 `reason` `no_source_connected`, `no_decoder_running` or `api_down`. The reasons are fixed codes,
 never error messages, because `/health` is public even in protected mode.
 
+A receiver feed paused by the operator ([pause and resume](#post-apisourcesidpause-and-post-apisourcesidresume)),
+or resuming from a pause, is intentional: that source counts as neither down nor degraded (the
+source component of `GET /api/status` notes it and adds `metrics.paused`), decoders waiting for it
+count as neither down nor not running, and the degraded-mode monitor does not warn about it. A
+failed resume (feed `error`) counts as a disconnected source again.
+
 ```bash
 curl -i http://localhost:9000/health
 ```
@@ -457,6 +538,44 @@ without schemas: `{ "routes": [{ "method": "GET", "path": "/api", "summary":
 "List registered routes", "tags": ["system"] }] }`. Summaries and tags come
 from the route schema; missing summaries are null and missing tags are empty.
 The index uses the same authenticated read admission as other API reads.
+
+#### GET /api/agent/status
+
+One compact answer, always under 4 KiB, to "what is the receiver doing", for agents
+and scripts. It uses the same read admission as the other API reads and never
+includes free-text errors; each field summarizes a fuller route.
+
+The size is a hard bound. Lists keep their first rows: two sources and two tuners,
+nine decoder rows and nine `lastDecode` rows. Nine is the number of built-in decoder
+types, but rows are decoder instances, so two instances of one type take two rows.
+Decoders with a problem verdict (anything but `decoding`, `listening` or `off`) come
+first, so the cut drops healthy decoders before a failed or suspended one;
+`hiddenProblems` counts the problem decoders still cut. Ids are cut to 32 bytes of
+JSON, decoder protocols to 24, job names to 32 and reasons to 24. `truncated` is
+`true` when a list or an id was cut; read the fuller route then.
+
+| Field            | Summary of                   | Content                                                                                                                                                                                                                                                                                                                           |
+| ---------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `at`             |                              | ISO time of the answer                                                                                                                                                                                                                                                                                                            |
+| `truncated`      |                              | `true` when a list was cut at its cap or an id was shortened (a shortened job name alone does not set it)                                                                                                                                                                                                                         |
+| `tuners`         | `GET /api/tuner`             | `sourceId`, `frequencyHz`, `sampleRateHz`, `gainMode`, `gain` (tenths of a dB; null in AGC), `owner` (`wavekit`, `external` while an external client such as SDR++ controls it, `scanner` while a scanner job holds the tuner lease), `declaredOnly` (frequency or rate only from config). Unknown values are null                |
+| `sources`        | `GET /api/sources`           | `id`, `connected`, `state` (the source activity state), `sampleAgeMs`, `warnings` (`rate-mismatch`, `signal-flat`), `feed` (the receiver feed state: `live`, `paused`, `resuming`, `error`), `tuningUnverified` (`true` while the tuner's frequency, sample rate, gain or gain mode is unknown, for example after a plain resume) |
+| `liveAudio`      | `GET /api/live-audio/status` | `running`, `health`, `sourceId`, `modulation`, `offsetHz`, `clients`, `squelchOpen` (null while stopped); null without live audio                                                                                                                                                                                                 |
+| `scanner`        | `GET /api/scanner`           | `enabled`, `activeJobs` (not yet ended), `heldJobs` (sweeps paused with reason `resumed-without-retune`), `job` (the most recently updated held sweep, else the most recently updated active job: `id`, `name`, `kind`, `state`, `reason`, `sourceId`) or null; null without the scanner                                          |
+| `decoders`       | `GET /api/decoders/summary`  | one row per decoder instance, problem verdicts first, then configuration order: `id`, `protocol` (the decoder type) and the same `verdict` `code` and `actions` (at most three, most helpful first); the verdict sentence is on the summary route                                                                                 |
+| `hiddenProblems` | `GET /api/decoders/summary`  | number of decoders with a problem verdict cut from `decoders` by its cap (0 when every problem shows)                                                                                                                                                                                                                             |
+| `activity`       | `GET /api/activity/status`   | `state` (`disabled`, `opening`, `retrying`, `available`, `unavailable`) and `rows` (null unless available)                                                                                                                                                                                                                        |
+| `lastDecode`     | `GET /api/decoders/summary`  | `{ protocol, at }` per protocol with output (over every decoder), newest first                                                                                                                                                                                                                                                    |
+
+A scanner job owns a tuner only while it holds the tuner lease: passive jobs never
+take one, and a sweep the operator paused keeps it until it is released.
+
+The DTO and its Zod schema are `AgentStatus` and `agentStatusSchema` in `@wavekit/api-types`.
+
+```bash
+curl --header "Authorization: Bearer $(cat "$HOME/.config/wavekit/machine-token")" \
+  https://wavekit.example:9443/api/agent/status
+```
 
 #### GET /api/status
 
@@ -611,6 +730,10 @@ Link-burst additions are optional and additive; older cores omit them:
   `dropping`), `branch-congestion` when every byte arrived and an internal fanout
   branch dropped them after an arrival gap (the link itself is not at fault).
   Absent when nothing was lost.
+- `ResourceAlert.lossReason` (`resources:alert` of type `link-capacity` only): the
+  advisory's `lossReason`, with the same values; absent when the advisory has none.
+  Clients treat only `source` as loss on the receiver link; without the field they
+  fall back to `severity` (`critical` is a `dropping` link).
 - `DecoderEfficiencySourceView.attribution` (`DropAttribution`) and `lateDrops`
   (`DecoderLateDropsView`): `condemningWindows`, `windows`, nullable ISO
   `cooldownUntil`, `sheddable`, and `held` (`nothing-sheddable`, `link-or-unknown`, or
@@ -772,9 +895,141 @@ each [`GET /api/sources`](#get-apisources) entry adds.
 A source with the same `id` answers `409 SOURCE_EXISTS`; a failed connection answers
 `400 SOURCE_CONNECTION_ERROR` with the reason in `message`.
 
+#### POST /api/sources/:id/pause and POST /api/sources/:id/resume
+
+Stop or restart pulling the receiver's IQ without removing the source. Both are writes,
+so in protected mode they need the same admission as every other write (`401` without
+it). Pause takes no body; resume takes an optional JSON body `{ "restoreTuning": true }`
+(a boolean, default `false`; any other key or type answers `400 INVALID_RESUME_REQUEST`).
+
+```bash
+curl -X POST http://localhost:9000/api/sources/rtl-pi/pause
+curl -X POST http://localhost:9000/api/sources/rtl-pi/resume
+curl -X POST http://localhost:9000/api/sources/rtl-pi/resume \
+  -H 'content-type: application/json' -d '{"restoreTuning":true}'
+```
+
+**Pause** closes the receiver connection cleanly (the core ends the stream and waits up to
+2 s for the receiver to close its side) and never reconnects while paused: no backoff
+retry, no stall watchdog. The source keeps its registration, caps, stream and decoder
+assignments. Decoders on it are suspended with reason `source-paused`, running and
+starting scanner jobs wait in `paused` (reason `source-down`) as after a dropout of a
+running job (a starting job is not failed), an identify job (starting or running) ends
+`cancelled` with reason `source-paused` and the results so far (never `failed`), the channelizer drops its channels as on a
+disconnect, and live audio releases its pipeline (status `pipelineHealth: "stopped"`,
+`suspendedReason: "source-paused"`, no automatic restart) while keeping its settings and
+its listeners.
+New scanner jobs, identify requests and job resumes on a paused source answer
+`409 SOURCE_PAUSED`; an IQ snapshot running at the pause ends early, and a new one answers
+`503 SOURCE_PAUSED` (`message`: "The receiver feed is paused; resume it first"). The pause is saved in `<stateDir>/source-feed.json`, so after a
+core restart the source registers without connecting and its log says it is paused.
+
+**Resume** makes one connection attempt. On success the feed is live again; suspended
+decoders, waiting scanner jobs and live audio (with the same frequency, mode and squelch)
+then continue. If the receiver cannot be reached the answer is
+`503 SOURCE_RESUME_FAILED`, the feed reads `error` and the source stays paused (also
+across a restart); call resume again to retry.
+
+What a resume writes to the receiver depends on the body:
+
+- **Plain resume** (no body, or `restoreTuning: false`) writes no centre frequency, sample
+  rate, gain mode or gain, and no configured `sources[].tuner` gain, whatever
+  `tuner.reconnectPolicy` says. Pausing is how you hand a shared dongle to another client:
+  SDR++ connected through rtlmux (or straight to the receiver) can retune it while WaveKit
+  is paused, and rtl_tcp cannot report its tuning, so WaveKit adopts what it finds instead
+  of pulling the receiver back. The tuner state keeps the last known values, but
+  `frequency`, `sampleRate`, `gainMode` and `gain` are listed in `unknownFields` until they
+  are set again (through the API, the relay or a restore). The values accepted before the
+  pause are no longer restored on a later dropout either, and no later dropout reconnect
+  writes the configured gain until a restore resume (a value set through the API or the
+  relay afterwards is restored as usual); changing the source's configured `tuner` gain
+  does not lift that hold either. Under `reconnectPolicy: reset` a later dropout does not
+  return state or caps to the configured baseline either: the last known values stay, in
+  `unknownFields` (with any value the reset discards), and rate adoption goes on. Relay commands are written only when they arrived
+  after the latest pause. When the rate-truth check then measures a sustained rate within
+  1.5 % of one common rtl_tcp rate (0.25, 1.024, 1.536, 1.792, 1.92, 2.048, 2.16, 2.4, 2.56,
+  2.88 or 3.2 Msps), that rate is adopted into the tuner state and the caps (it stays in
+  `unknownFields`: measured, not commanded, and is listed in `measuredFields` while the state
+  shows it); the match is retried as the measurement
+  settles, so a first estimate between two rates is adopted once it converges. Scanner side: a lease recovery queued for the source (a job
+  that ended while the feed was paused, or a crashed sweep) is settled without writing its
+  pre-pause snapshot, a gain restore owed after a lost band-gain lease is dropped, and no
+  band gain is applied; a sweep that held the source keeps its lease but does not hop: it
+  waits in `paused(resumed-without-retune)`, with the source's decoders running, until
+  `POST /api/scanner/jobs/:id/resume` (Resume scan) sends it to its current hop, and its
+  release no longer puts back the pre-pause tuning. Its hops after Resume scan run without a
+  band gain (a job's own `tuner.gainTenthsDb` is still written), and nothing is restored when
+  it ends: the pre-pause tuning and the operator gain saved before a band gain are forgotten.
+  Another job taking its lease leaves it held, also once that job ends. So does every other sweep on the source
+  that would take the tuner on its own: one waiting to auto-resume after an operator or
+  relay write (`preempted-operator`, `preempted-relay`), one waiting for another job's lease
+  (`preempted-job`), and one due to resume after a core restart (`resume.onBoot`). A sweep
+  you paused (`paused(operator)`) stays as it is; in-window and passive jobs, which never
+  tune, resume as usual. TEST_MODE 0
+  (the scanner's own marker) is still sent when a marker may be open.
+- **Restore resume** (`restoreTuning: true`) writes the accepted pre-pause tuning back on
+  the first payload, whatever `tuner.reconnectPolicy` says (even `reset`; a later dropout
+  follows the policy again): the configured gain, then every accepted field (frequency,
+  sample rate, gain mode, gain and the others), the scanner's queued lease recovery and
+  owed gain restore, and a band gain the receiver had before the pause; a sweep waiting in
+  `paused(source-down)` continues with its next hop. The held feed's
+  `restoreTuning` shows what it writes.
+
+**SDR++ through the tuner relay or through rtlmux.** With the
+[tuner relay](#tuner-relay) enabled, SDR++ connected to the relay is seen: its commands
+become the operator's tuning even while the source is paused, and every resume, plain or
+restore, writes the commands made during the pause (the relay forwards nothing while the
+source is down). SDR++ connected through rtlmux talks to the dongle directly: WaveKit sees
+none of its commands, which is why a plain resume writes nothing.
+
+When saving `source-feed.json` fails, the answer carries `persisted: false` (the change
+holds until the core restarts, and the core logs a warning); a repeated pause or resume
+retries the write and answers `persisted: true` once it succeeds.
+
+Both are idempotent: a repeated call answers `200` with `changed: false`. An unknown id
+answers `404 SOURCE_NOT_FOUND`; a recording source answers `409 SOURCE_FEED_UNSUPPORTED`.
+
+**Response** (200 OK):
+
+```json
+{
+	"id": "rtl-pi",
+	"changed": true,
+	"persisted": true,
+	"feed": { "state": "paused", "since": "2026-10-31T09:00:00.000Z" }
+}
+```
+
+**Resume failure** (503):
+
+```json
+{
+	"error": "ServiceUnavailable",
+	"code": "SOURCE_RESUME_FAILED",
+	"message": "The receiver could not be reached; resume again to retry",
+	"id": "rtl-pi",
+	"feed": {
+		"state": "error",
+		"since": "2026-10-31T09:00:05.000Z",
+		"error": "The receiver could not be reached; resume again to retry"
+	}
+}
+```
+
+**The `feed` field.** Every network source in [`GET /api/sources`](#get-apisources) (and the
+`source` of `POST /api/sources`) carries `feed: { state, since, error?, restoreTuning? }`;
+recordings omit it. `state` is `live` (connects and reconnects as usual), `paused`,
+`resuming` (a resume is dialling) or `error` (the last resume failed; `error` holds the
+fixed message above). Any state other than `live` holds consumers back. `since` is when the
+state began. `restoreTuning` (`{ centerFreq, sampleRate?, gainMode?, gain? }`, Hz and tenths
+of a dB) appears while the feed is not `live` and the core knows an accepted centre: it is
+what a restore resume writes back (including relay commands made during the pause). It is
+absent after a restart (the pause is saved, the tuning is not) and after a plain resume left
+the tuning unverified; then only the plain resume is meaningful.
+
 #### DELETE /api/sources/:id
 
-Remove a source.
+Remove a source. A paused source's pause is forgotten: added again, it starts live.
 
 ```bash
 curl -X DELETE http://localhost:9000/api/sources/rtl-pi
@@ -1332,7 +1587,8 @@ next connection). A `config` write is not operator activity: it never preempts a
 scanner lease. Without `tuner` every connect writes exactly what it wrote before
 the 2026-10-18 core. Through a shared rtlmux every core (re)connect rewrites the configured gain,
 overwriting a gain another client (SDR++) set there; a gain set through this API
-still wins.
+still wins. After a plain resume of a paused feed no connection writes it until a
+restore resume (see [pause and resume](#post-apisourcesidpause-and-post-apisourcesidresume)).
 
 ```yaml
 sources:
@@ -1363,6 +1619,13 @@ the last reset reconnect. Absent when empty. On a source whose gain was set on t
 counts as observed (it is not replayed on reconnect). The field values keep
 their types for older clients. A reset
 reconnect makes them unknown again; the field is absent when everything is known.
+After a plain resume of a paused feed `frequency`, `sampleRate`, `gainMode` and `gain` are
+listed too, with their last known values ([pause and resume](#post-apisourcesidpause-and-post-apisourcesidresume)).
+
+**`measuredFields`** lists fields of `unknownFields` whose value is measured from the stream
+rather than last known: today only `sampleRate`, once a plain resume adopted the rate the
+receiver is measured to deliver. It is still unverified (nothing set it); setting a rate removes
+it. Absent when empty and from older cores.
 
 **`bandGain`** (`{ tenthsDb, label?, owner }`) is present only while a
 [band gain](#per-band-gain-get-and-put-apituner-band-gain) is confirmed on the tuner: the core
@@ -1653,7 +1916,9 @@ Fields:
   pipeline restarts automatically with exponential backoff (1 s doubling to 30 s,
   10 consecutive attempts; a run of 30 s resets the count). `pipelineRestarts`
   counts automatic restarts since the last manual start; after the last attempt
-  `lastError` says so and `POST /api/live-audio/start` restarts it.
+  `lastError` says so and `POST /api/live-audio/start` restarts it. While the
+  source's feed is paused the pipeline is `stopped`, never restarted, and
+  `suspendedReason` reads `source-paused`; resume starts it with the same settings.
 - `channelPowerDbfs` — smoothed channel power before demodulation, relative to a
   full-scale IQ sample (present while the pipeline runs). This is the level the
   `squelch` threshold compares against.
@@ -2110,13 +2375,13 @@ readsb, AIS-catcher, dumpvdl2 and rtl_433 report `unknown` with observed rates
 until fixture-verified requirements exist; external-input decoders report
 `external-input`.
 
-| Field            | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `desiredRunning` | Operator intent: `true` after start/restart, `false` after stop.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `suspended`      | Wanted but held back because the source rate makes this instance `unusable` or the tuned band covers none of its targets, or a scanner sweep holds its source. The decoder keeps its source reservation and `sourceId` and is never moved to another source.                                                                                                                                                                                                                                                                     |
-| `suspension`     | `{ reasonCode, since }` (ISO-8601), present only while suspended. `reasonCode` is a rate reason, `"frequency-out-of-band"`, `"capture-too-narrow"` (the band is in view but no channel of at least 250 kHz fits the capture window), `"no-channel-selected"` (the band is in view but no channel is chosen yet: no VFO and no band-plan channel), or `"tuner-scanning"` (a scanner sweep holds the source for its whole duration; a manual start answers 409 `SOURCE_HELD_BY_SCANNER`; the decoder resumes when the sweep ends). |
-| `transition`     | `"suspending"` or `"resuming"`, present only during a transition. A lasting `"suspending"` means the stop failed and the process may still run (`running` stays truthful).                                                                                                                                                                                                                                                                                                                                                       |
-| `startMode`      | `"auto"` or `"operator"`, sent while `desiredRunning` is true. `"operator"` = started by hand via `POST /api/decoders/:id/start` (never band-suspended; a rate suspension still applies). Boot starts are `"auto"`. Stop clears it, restart keeps it, a core restart returns every decoder to `"auto"`.                                                                                                                                                                                                                          |
+| Field            | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `desiredRunning` | Operator intent: `true` after start/restart, `false` after stop.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `suspended`      | Wanted but held back because the source rate makes this instance `unusable` or the tuned band covers none of its targets, or a scanner sweep holds its source. The decoder keeps its source reservation and `sourceId` and is never moved to another source.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `suspension`     | `{ reasonCode, since }` (ISO-8601), present only while suspended. `reasonCode` is a rate reason, `"frequency-out-of-band"`, `"capture-too-narrow"` (the band is in view but no channel of at least 250 kHz fits the capture window), `"no-channel-selected"` (the band is in view but no channel is chosen yet: no VFO and no band-plan channel), `"tuner-scanning"` (a scanner sweep holds the source for its whole duration; a manual start answers 409 `SOURCE_HELD_BY_SCANNER`; the decoder resumes when the sweep ends), or `"source-paused"` (the source's receiver feed is paused, see [pause and resume](#post-apisourcesidpause-and-post-apisourcesidresume); it outranks every other reason, a manual start is recorded and stays suspended, and the decoder resumes with the feed). |
+| `transition`     | `"suspending"` or `"resuming"`, present only during a transition. A lasting `"suspending"` means the stop failed and the process may still run (`running` stays truthful).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `startMode`      | `"auto"` or `"operator"`, sent while `desiredRunning` is true. `"operator"` = started by hand via `POST /api/decoders/:id/start` (never band-suspended; a rate suspension still applies). Boot starts are `"auto"`. Stop clears it, restart keeps it, a core restart returns every decoder to `"auto"`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 A decoder that is running is suspended when its source changes to an unusable
 rate and resumed when the rate becomes usable again (or the source reconnects
@@ -2420,7 +2685,9 @@ with a key-only warning:
 
 #### GET /api/decoders/summary
 
-Returns a compact array, one entry per decoder: `id`, `protocol` (adapter type),
+Returns a compact array, one entry per decoder: `id`, `name` (the plain name of
+the decoder type, such as "ADS-B" for `readsb` or "Pager" for `multimon-ng`;
+"Decoder" for a type the core does not name), `protocol` (adapter type),
 `state` (`running` or `stopped`), `placements` (running placements only, each with
 `sourceId` and `frequencyHz`, null when unknown), `eventsOut`, `lastOutputAt`
 (ISO time or null), `suspensionReason` (reason code or null), and `health`.
@@ -2443,19 +2710,58 @@ Each entry also carries `verdict`: `{ code, text, actions }`. `text` is one shor
 sentence of at most 160 characters, such as "ADS-B paused: CPU budget full". `code` is
 one of `decoding`, `listening` (running, nothing decoded for 60 s), `starting`, `off`
 (mode off), `stopped` (stopped by the operator), `failed`, `out-of-band`,
-`no-channel`, `capture-too-narrow`, `source-unavailable`, `unsupported-rate`,
+`no-channel`, `capture-too-narrow`, `source-unavailable`, `source-paused` (the
+source's receiver feed is paused; text "waiting: Receiver paused — Resume"),
+`unsupported-rate`,
 `scanner-busy`, `efficiency-budget`, `efficiency-cpu`, `efficiency-drops`,
 `efficiency-late-drops`, `efficiency-waiting`, `decoder-unavailable`,
 `channelizer-unavailable` or `unknown`. `actions` lists suggestions from `turn-on`,
 `start`, `restart`, `tune-to-band`, `raise-sample-rate`, `lower-sample-rate`,
-`change-sample-rate`, `check-source`, `pause-scanner`, `raise-budget`,
+`change-sample-rate`, `check-source`, `resume-source`, `pause-scanner`, `raise-budget`,
 `turn-off-others`, `install-decoder` and `enable-channelizer`, most helpful first.
 Both sets are closed (`DECODER_VERDICT_CODES`, `DECODER_VERDICT_ACTIONS` and
 `decoderVerdictSchema` in `@wavekit/api-types`); a client treats an unknown code as
 `unknown` and ignores an unknown action. Precedence: failed, off, stopped,
-suspended (efficiency detail first), decoding, listening, starting. A budget
+suspended (a paused feed, then efficiency detail), decoding, listening, starting. A budget
 suspension with no efficiency detail reads `efficiency-budget`; one with a detail the
 core does not recognise reads `unknown` with no action.
+
+A `failed` decoder the manager is already restarting on its own (a restart is
+scheduled, its health is `restarting`, or it faulted while still running) reads
+"<name> failed: restarting on its own" with no actions: offering a restart would
+only race the one already coming. Any other failure reads "<name> failed to run"
+with `restart`.
+
+**Query parameter `hz`** (optional): a frequency in Hz. With it, every entry also
+carries `coversHz`, a boolean that says whether the decoder's own band holds that
+frequency; without it the field is absent. The band is the decoder's band
+assessment (its targets and ranges); before the first assessment (at boot, before
+the source reports its capabilities) or when the assessment names no band, the
+decoder's fixed target frequencies: its configured targets, minus any that only
+follow the tuner (a VFO, fallback or centre placement, or the default channel of a
+single-channel audio decoder such as multimon-ng, which sits on the VFO or the
+tuned centre). A band holds `hz` within 200 kHz of a
+target, anywhere between its lowest and highest target, or inside one of its
+ranges widened by 200 kHz. A decoder with no band at all covers `hz` only when a
+built-in band plan range holding `hz` lists one of its protocols. A frequency that
+only follows the tuner never makes a decoder cover it, and scanner probes never
+cover. `hz` must be a positive finite number up to
+`DECODER_SUMMARY_MAX_HZ` (100 GHz, 100,000,000,000 Hz, inclusive, exported from
+`@wavekit/api-types`). Anything else (zero, a negative number, `Infinity`, text,
+an empty value or a value past the bound) answers 400:
+
+```json
+{
+	"error": "ValidationError",
+	"code": "VALIDATION_ERROR",
+	"message": "Invalid query parameter: hz: number (> 0, <= 100000000000), Hz",
+	"fields": [{ "field": "hz", "expected": "number (> 0, <= 100000000000), Hz" }]
+}
+```
+
+```bash
+curl "http://localhost:9000/api/decoders/summary?hz=1090000000"
+```
 
 #### GET /api/decoders/:id
 
@@ -2977,13 +3283,15 @@ curl -X PATCH http://localhost:9000/api/scanner/settings \
   -d '{"passive": {"rtl-dedicated": false}, "cpuBudgetCores": 0.5}'
 ```
 
-**400** for an unknown key or a value out of bounds:
+**400** for an unknown key or a value out of bounds, naming the field and
+what it accepts ([validation errors](#validation-errors)):
 
 ```json
 {
 	"error": "ValidationError",
 	"code": "VALIDATION_ERROR",
-	"message": "Configuration validation failed:\n  - cpuBudgetCores: Value is too small (minimum: 0.1)"
+	"message": "Invalid request body: cpuBudgetCores: number (0.1 to 64)",
+	"fields": [{ "field": "cpuBudgetCores", "expected": "number (0.1 to 64)" }]
 }
 ```
 
@@ -3191,19 +3499,29 @@ curl -X POST http://localhost:9000/api/scanner/jobs \
 
 **201**: the `ScanJob` (see the job detail below).
 
-**400** `SCANNER_PLAN_INVALID` when the preview has errors:
+**400** `SCANNER_PLAN_INVALID` when the preview has errors. `fields` names the
+job field each error asks you to change. In an error answer every issue carries
+the fixed message of its `code` and no `details` (except `range-locked`, below),
+so it never repeats a range edge, bandplan id or name you sent;
+`POST /api/scanner/plan` returns the fuller issues of a preview.
 
 ```json
 {
 	"error": "ScannerApiError",
 	"code": "SCANNER_PLAN_INVALID",
-	"message": "The job spec has errors",
+	"message": "The job spec has errors; ranges: at least one range or bandplan; each range with startHz > 0 and endHz > startHz, Hz",
+	"fields": [
+		{
+			"field": "ranges",
+			"expected": "at least one range or bandplan; each range with startHz > 0 and endHz > startHz, Hz"
+		}
+	],
 	"details": {
 		"issues": [
 			{
 				"code": "range-empty",
 				"severity": "error",
-				"message": "a sweep needs at least one range or bandplan"
+				"message": "a range is empty or inverted, or the sweep has no range"
 			}
 		]
 	}
@@ -3238,7 +3556,7 @@ the error table, plus `details.holderJobId` when a job holds the source, or
 `details.issues` from the preview), 409
 `SCANNER_NO_TUNER_CONTROL` (the source has no rtl_tcp tuner control), 400
 `SCANNER_MONITOR_UNAVAILABLE` (`kind: "monitor"`, listen-scan needs the
-channelizer), 400 `SCANNER_IDENTIFY_VIA_JOBS` (`kind: "identify"`; use
+channelizer; `fields` names `kind`), 400 `SCANNER_IDENTIFY_VIA_JOBS` (`kind: "identify"`; use
 `/identify`), 503 `SCANNER_DISABLED`, 503 `SCANNER_STATE_UNAVAILABLE` (sweeps
 only).
 
@@ -3317,8 +3635,9 @@ curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 
 `reason` is set while `paused` (`operator`, `preempted-operator`,
 `preempted-relay`, `preempted-job`, `source-down`, `core-restart`,
-`resume-blocked`) or `failed` (`source-removed`, `tuner-unavailable`,
-`invalid`). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
+`resume-blocked`, `resumed-without-retune`) or `failed` (`source-removed`, `tuner-unavailable`,
+`invalid`), and on a `cancelled` identify job the core ended because the receiver
+feed was paused (`source-paused`; absent when the operator cancelled). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
 carry `identify` (see `POST /api/scanner/identify`). A probe's `transport` is
 `offset`, `channel` or `replay`: a probe fed from an IQ capture rather than
 the live stream ([IQ capture on detection](#iq-capture-on-detection)). Its
@@ -3423,13 +3742,19 @@ curl -X PATCH http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7Q
 {
 	"error": "ScannerApiError",
 	"code": "SCANNER_PLAN_INVALID",
-	"message": "The job spec has errors",
+	"message": "The job spec has errors; ranges: the running job's ranges, edges and channel spacing unchanged",
+	"fields": [
+		{
+			"field": "ranges",
+			"expected": "the running job's ranges, edges and channel spacing unchanged"
+		}
+	],
 	"details": {
 		"issues": [
 			{
 				"code": "range-locked",
 				"severity": "error",
-				"message": "range 1: endHz cannot change while the job exists; stop it to change edges or channel spacing",
+				"message": "a running job's ranges cannot change; stop it to change edges or channel spacing",
 				"details": { "index": 1, "fields": ["endHz"] }
 			}
 		]
@@ -3453,6 +3778,10 @@ Each returns the `ScanJob`. `resume` takes an optional body
   lease (a transient
   refusal, `details.reason` `releasing`, `recovery-pending` or
   `holder-starting`, leaves it `paused(operator)`);
+- from `paused(resumed-without-retune)` (a plain resume of the receiver feed held
+  the sweep): re-holds the source's decoders and retunes to the sweep's current hop;
+  without the lease (an operator or relay write took it meanwhile) it re-acquires
+  it as from `paused(operator)`, with the same 409s;
 - from `paused(core-restart)`: re-acquires the lease, re-opens the engine and
   restarts the sweep from its first hop (boot resumes with `resume.onBoot` do
   the same once the source's data starts);
@@ -3622,6 +3951,16 @@ Pass `nextCursor` as `cursor` for the next page; `null` ends the list.
 
 Current cores add `storeEpoch` and `storeRevision` to the page and `revision` to each
 item; see [Discovery revisions](#discovery-revisions).
+
+#### Discovery last activity
+
+`lastActivity` (optional, additive) names the latest Activity event attributed to a
+discovery: `eventId` (read it with [`GET /api/activity/:eventId`](#get-apiactivityeventid),
+which answers 404 once the event expired) and `producedAt` (ISO time). It is absent when no
+event is attributed and on cores that do not attribute Activity events to discoveries. The
+field is optional and not yet populated by the current core: clients must not expect it, and
+fall back to Activity filtered by the discovery's frequency. Talkgroups and sources in
+`metadata` can come from the scanner's own decode check, so they need not match any Activity event.
 
 #### Discovery revisions
 
@@ -3895,8 +4234,13 @@ given, or a bound is broken:
 {
 	"error": "ValidationError",
 	"code": "VALIDATION_ERROR",
-	"message": "body/target must match exactly one schema in oneOf",
-	"details": [{ "instancePath": "/target", "keyword": "oneOf" }]
+	"message": "Invalid request body: target: object with fields frequencyHz, bandwidthHz, all; exactly one of frequencyHz or all",
+	"fields": [
+		{
+			"field": "target",
+			"expected": "object with fields frequencyHz, bandwidthHz, all; exactly one of frequencyHz or all"
+		}
+	]
 }
 ```
 
@@ -4381,16 +4725,72 @@ below 1 or above 168 h) are rejected first with 400 `VALIDATION_ERROR`.
 
 ### Aircraft
 
-ADS-B aircraft that readsb currently tracks, enriched with registration and type where known.
-Field meanings are in [ADS-B](ADSB.md#field-reference).
+ADS-B aircraft that readsb currently tracks. `identification` adds what is known about the
+airframe and flight: registration, type, operator, country, database flags, the airline and
+planned route of the current callsign (with `route.plausible`, false when the track disagrees),
+and a photo with its photographer credit. It fills in
+after the aircraft first appears and arrives as an `aircraft:update`. Field meanings are in
+[ADS-B](ADSB.md#field-reference); sources and caching in
+[ADS-B, Aircraft Enrichment](ADSB.md#aircraft-enrichment).
 
 - `GET /api/aircraft`: `{ aircraft, stats, timestamp }` for every tracked aircraft.
 - `GET /api/aircraft/stats`: the tracker statistics only.
 - `GET /api/aircraft/:icao`: one aircraft by its 24-bit ICAO address in hex (`4B1808`); 404
   when it is not tracked.
+- `GET /api/aircraft/info`: how the core enriches aircraft:
+  `{ enabled, online, onlineFrom, persistent, localDb: { enabled, aircraft, updatedAt } }`.
+  `onlineFrom` is `config` (from `aircraftInfo.online`) or `ui` (set with PUT). `aircraft` is
+  the number of airframes in the local database (null without a store), `updatedAt` the ISO
+  time of its last download (null before the first).
+- `PUT /api/aircraft/info` with `{ "online": true }` turns the free online lookups on (or
+  `false`: off again) without a restart; they are off by default, and off also stops lookups
+  and a database download already under way. It answers the same body as GET. The choice is kept in
+  `<stateDir>/aircraft-info.sqlite` and wins over the config until changed again. In protected
+  mode it needs a signed-in device like other metadata changes; any other body is a 400.
 
 The `aircraft` WebSocket channel pushes `aircraft:new`, `aircraft:update`, `aircraft:lost`
 and `aircraft:stats`.
+
+### Aircraft identity
+
+`GET /api/aircraft-identity/:kind/:value` says which identifiers name the same aircraft. `kind` is
+`icao`, `reg`, `callsign` or `flight`; a value that cannot be one of that kind answers 400. DTOs in
+`packages/api-types/src/aircraft-identity.ts`; the rules are in
+[Aircraft data link](AIRCRAFT-DATALINK.md#linking-aircraft).
+
+```json
+{
+	"query": { "kind": "reg", "value": "N0WK01" },
+	"icao": "0A0B01",
+	"resolvedBy": "observed",
+	"conflict": false,
+	"links": [
+		{
+			"a": { "kind": "icao", "value": "0A0B01" },
+			"b": { "kind": "reg", "value": "N0WK01" },
+			"evidence": "observed",
+			"source": "vdl2",
+			"firstSeen": "2026-01-01T00:00:00.000Z",
+			"lastSeen": "2026-01-01T00:20:00.000Z",
+			"expiresAt": "2026-01-31T00:20:00.000Z",
+			"count": 12
+		}
+	],
+	"entityKeys": ["icao:0A0B01", "reg:N0WK01"],
+	"timestamp": 1767226800000
+}
+```
+
+- `icao` is set only for an ICAO address (`resolvedBy: "self"`) or a registration with one live
+  link to an ICAO address: an `observed` one first, else a `database` one (`resolvedBy` says
+  which). A callsign or a flight number always answers `icao: null` with its links.
+- `database` links come from aircraft enrichment: the local aircraft database or an online airframe
+  lookup gave the ICAO address that registration (`source: "database"`).
+- `conflict` is true when a registration has live links to two ICAO addresses; `icao` is then null.
+- `entityKeys` are the Activity entity keys of the aircraft (`GET /api/activity?entityKey=…`). A
+  registration that resolves to another address, or to none because of a conflict, is not among an
+  address's keys.
+- In memory only: links are learnt again after a restart.
 
 ### Vessels
 
@@ -4654,6 +5054,7 @@ area with no path, such as `digital-voice-wav` without a recording dsd-fme, repo
 | ------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | `activity`          | `automatic` | The Activity store (`<stateDir>/activity`)                                                                        | Resolved `activity.retention.maxDbBytes` |
 | `scanner-evidence`  | `automatic` | Scanner evidence (`scanner.storage.dir`, default `<stateDir>/scanner`), minus any dsd-fme WAV directory inside it | `scanner.storage.maxRecordingsMb`        |
+| `iq-captures`       | `automatic` | [Named IQ captures](#named-iq-captures) (`<stateDir>/iq-captures`)                                                | The capture quota (`quotaBytes`)         |
 | `digital-voice-wav` | `other`     | Per-call WAV directories of the dsd-fme decoders that record                                                      | null                                     |
 | `bandplans`         | `state`     | Band-plan state                                                                                                   | null                                     |
 | `operator-data`     | `state`     | Operator data and the recording keep store (`recording-keeps.json`)                                               | null                                     |
@@ -6214,11 +6615,12 @@ Full source status including `activity` (sample freshness). `data` is identical
 to one `GET /api/sources` item. Cadence, per source:
 
 - on a lifecycle event (`connected`, `disconnected`, `error`, `ended`,
-  `caps-changed`, rate-truth or signal-flat flag raised/cleared) when the state
-  actually changed (a drifting `rateMismatch.measuredSampleRateHz`,
-  `signalFlat.levelDbfs` or `signalLevelDbfs` alone does not emit);
+  `caps-changed`, rate-truth or signal-flat flag raised/cleared, a `feed` pause,
+  resume or failed resume) when the state actually changed (a drifting
+  `rateMismatch.measuredSampleRateHz`, `signalFlat.levelDbfs` or
+  `signalLevelDbfs` alone does not emit);
 - within 1 s of a time-based state change (`connected`, `activity.state`,
-  `lastError`, `reconnectAttempts`, `caps`, `available`, assignments) — changes
+  `lastError`, `reconnectAttempts`, `caps`, `available`, assignments, `feed`) — changes
   in counters such as `bytesReceived` or `activity.sampleAgeMs` alone do not emit;
 - a heartbeat every 10 s (0.1 msg/s per source) refreshing counters;
 - nothing while no client subscribes to `sources`; whenever the subscriber
@@ -6655,7 +7057,9 @@ most 1/s per (job, target); the latest state is always delivered.
   `pending`, `running`, `decoded`, `no-sync`, `crc-errors`, `timeout`,
   `skipped-budget`, `unsupported` (with `reason`: `no-decoder`,
   `needs-channelizer`, `unsupported-format`, `no-ambient-decoder`,
-  `decoder-unavailable`, `no-live-audio`; `mode` and `transport` null),
+  `decoder-unavailable`, `no-live-audio`, `adsb-window`: a protocol the request
+  names in `protocols` inside the ADS-B window, where only readsb is eligible;
+  `mode` and `transport` null),
   `not-needed` (an earlier trial decoded and `exhaustive` is false; an analog
   match no longer causes it, since 2026-10-18), `cancelled` and `heard` (a `live-audio`
   trial whose matching transmission carried no CTCSS tone or DCS code; `decoded`
@@ -7108,20 +7512,71 @@ the status code.
 }
 ```
 
+### Validation errors
+
+Every 400 for a malformed request names the failing field(s) and what each
+accepts, in `fields`, and repeats them in `message`. The text comes from the
+route's own schema: a 400 never repeats a submitted value, an unknown key you
+sent, or a parser message (so it reads the same with access configured).
+Routes with their own error code (`INVALID_START_REQUEST`,
+`INVALID_BAND_OVERRIDE`, `EFFICIENCY_BUDGET_INVALID`, `RECORDINGS_QUERY_INVALID`,
+`BANDPLANS_INVALID`, `ACTIVITY_QUERY_INVALID`, `DECODER_OPTIONS_INVALID`, …) keep
+it and add `fields`.
+
+```json
+{
+	"error": "ValidationError",
+	"code": "VALIDATION_ERROR",
+	"message": "Invalid request body: type: one of \"sdrpp-network\" | \"rtl_tcp\" | \"recording\"",
+	"fields": [
+		{
+			"field": "type",
+			"expected": "one of \"sdrpp-network\" | \"rtl_tcp\" | \"recording\""
+		}
+	]
+}
+```
+
+- `field` is a schema path (`entries.0.gain`; `*` stands for a key you
+  chose), or the request part (`body`, `query`) when the whole part is wrong:
+  not an object, malformed JSON, or an unknown key (`expected` then lists the
+  accepted fields).
+- At most 8 fields are named.
+- A value the field's type allows but a further rule refuses (a reserved
+  `delivery`, a `gainDb` with `gainMode: "agc"`, overlapping band gain
+  entries) gets that rule in fixed words after the type, for example
+  `squelchMode`: `one of "manual" | "auto" | "noise"; "noise" needs modulation
+"nfm" or "wfm"`. A rule without its own wording reads `a further rule of this
+  field refused the value sent`.
+- Scanner job refusals keep their codes: `SCANNER_PLAN_INVALID` and
+  `SCANNER_MONITOR_UNAVAILABLE` add `fields`, and each plan issue in
+  `details.issues` has the fixed message of its `code` (see the job example).
+- Tuner routes keep their message wording (`Invalid request body at gain;
+expected {...}`); their `fields` carry the unit, for example `gain`:
+  `integer, gain in tenths of a dB (0-500, ...)`, naming the deprecated alias
+  `tenthsDb`.
+- `PATCH /api/station` keeps `fields` as the list of station field names its
+  form marks; its `message` states what each accepts.
+- The regional registry and receiver-capabilities routes keep their fixed
+  bodies, and access routes answer `{ "code" }` only.
+
 ### Error Codes
 
-| Code                       | HTTP Status | Description                                                                      |
-| -------------------------- | ----------- | -------------------------------------------------------------------------------- |
-| `DECODER_NOT_FOUND`        | 404         | Decoder ID doesn't exist                                                         |
-| `SOURCE_NOT_FOUND`         | 404         | Source ID doesn't exist                                                          |
-| `DECODER_ALREADY_RUNNING`  | 409         | Decoder is already running                                                       |
-| `DECODER_NOT_RUNNING`      | 409         | Decoder is not running                                                           |
-| `INVALID_CONFIG`           | 400         | Invalid configuration provided                                                   |
-| `SOURCE_CONNECTION_ERROR`  | 503         | Cannot connect to source                                                         |
-| `INTERNAL_ERROR`           | 500         | Internal server error                                                            |
-| Activity codes             |             | See [Activity](#activity)                                                        |
-| `DECODER_OWNED_BY_SCANNER` | 409         | start/stop/restart or band edit on a scanner probe (`owner: "scanner"`)          |
-| `SOURCE_HELD_BY_SCANNER`   | 409         | start/restart of a decoder whose source a scanner sweep holds (`tuner-scanning`) |
+| Code                       | HTTP Status | Description                                                                                                   |
+| -------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------- |
+| `DECODER_NOT_FOUND`        | 404         | Decoder ID doesn't exist                                                                                      |
+| `SOURCE_NOT_FOUND`         | 404         | Source ID doesn't exist                                                                                       |
+| `DECODER_ALREADY_RUNNING`  | 409         | Decoder is already running                                                                                    |
+| `DECODER_NOT_RUNNING`      | 409         | Decoder is not running                                                                                        |
+| `INVALID_CONFIG`           | 400         | Invalid configuration provided                                                                                |
+| `SOURCE_CONNECTION_ERROR`  | 503         | Cannot connect to source                                                                                      |
+| `INTERNAL_ERROR`           | 500         | Internal server error                                                                                         |
+| Activity codes             |             | See [Activity](#activity)                                                                                     |
+| `DECODER_OWNED_BY_SCANNER` | 409         | start/stop/restart or band edit on a scanner probe (`owner: "scanner"`)                                       |
+| `SOURCE_HELD_BY_SCANNER`   | 409         | start/restart of a decoder whose source a scanner sweep holds (`tuner-scanning`)                              |
+| `SOURCE_PAUSED`            | 409 / 503   | 409: new scanner job, identify request or job resume on a source whose feed is paused; 503: IQ snapshot on it |
+| `SOURCE_RESUME_FAILED`     | 503         | `POST /api/sources/:id/resume` could not reach the receiver (feed `error`; retry)                             |
+| `SOURCE_FEED_UNSUPPORTED`  | 409         | pause or resume of a recording source                                                                         |
 
 ### Scanner and spectrum codes
 
@@ -7131,9 +7586,9 @@ Scanner and spectrum routes answer with the flat body
 | Code                            | HTTP | When                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | ------------------------------- | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `VALIDATION_ERROR`              | 400  | Request schema (body, params or query, e.g. occupancy query bounds), or a settings PATCH value out of bounds / unknown key                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `SCANNER_PLAN_INVALID`          | 400  | The job preview has errors; `details.issues`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `SCANNER_MONITOR_UNAVAILABLE`   | 400  | `kind: "monitor"` (listen-scan needs the channelizer)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `SCANNER_SETTINGS_INVALID`      | 400  | A settings patch that does not merge; `details.issues`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `SCANNER_PLAN_INVALID`          | 400  | The job preview has errors; `fields`, `details.issues` (fixed messages)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `SCANNER_MONITOR_UNAVAILABLE`   | 400  | `kind: "monitor"` (listen-scan needs the channelizer); `fields`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `SCANNER_SETTINGS_INVALID`      | 400  | A settings patch that does not merge; `fields` names each failing field                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `SCANNER_IDENTIFY_VIA_JOBS`     | 400  | `kind: "identify"` on `POST /api/scanner/jobs`; use `/api/scanner/identify`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `SPECTRUM_RANGE_INVALID`        | 400  | Occupancy query: `endHz` not above `startHz`, or the span above 2 GHz                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `SCANNER_NOT_FOUND`             | 404  | Route level: the job, discovery, recording, evidence or capture in the path does not exist                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |

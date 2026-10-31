@@ -15,7 +15,13 @@
  *   and a balloon. Aids to navigation are vessel class `aton` with their type 21 fields.
  */
 import type { FastifyInstance } from "fastify"
+import { z } from "zod"
 import type {
+	AircraftIdentification,
+	AircraftIdentifier,
+	AircraftIdentifierKind,
+	AircraftIdentityLink,
+	AircraftIdentityResponse,
 	AircraftState,
 	AircraftTrackerStats,
 	AprsStation,
@@ -31,6 +37,162 @@ import type {
 	VesselState,
 	VesselTrackerStats,
 } from "@wavekit/api-types"
+
+/** PUT /api/aircraft/info body, as strict as the core's. */
+const infoUpdateBody = z.object({ online: z.boolean() }).strict()
+
+// ---- aircraft identity (GET /api/aircraft-identity/:kind/:value, as the core's registry)
+
+const HOUR_MS = 3_600_000
+/** As the core's LINK_LIFETIME_MS: an address and its registration for weeks, a callsign for one flight. */
+const MOCK_LINK_LIFETIME_MS: Readonly<Record<string, number>> = {
+	"icao|reg": 30 * 24 * HOUR_MS,
+	"callsign|icao": 2 * HOUR_MS,
+	"flight|icao": 6 * HOUR_MS,
+	"flight|reg": 6 * HOUR_MS,
+}
+
+interface MockLink {
+	readonly a: AircraftIdentifier
+	readonly b: AircraftIdentifier
+	readonly evidence: AircraftIdentityLink["evidence"]
+	readonly source: AircraftIdentityLink["source"]
+	/** How long before the request it was last seen. */
+	readonly agoMs: number
+}
+
+/** The query in the core's canonical form, or null when the value cannot be one of that kind. */
+export function mockIdentifier(
+	kind: string,
+	value: string,
+): AircraftIdentifier | null {
+	if (value.length < 1 || value.length > 16) return null
+	const v = value.trim().toUpperCase()
+	if (kind === "icao")
+		return /^[0-9A-F]{6}$/.test(v) ? { kind, value: v } : null
+	if (kind === "reg") {
+		const reg = v.replace(/\./g, "")
+		return /^[A-Z0-9-]{2,10}$/.test(reg) ? { kind, value: reg } : null
+	}
+	if (kind === "callsign" || kind === "flight")
+		return /^[A-Z0-9]{2,8}$/.test(v) ? { kind, value: v } : null
+	return null
+}
+
+/**
+ * The mock's links: each mock aircraft's registration from the database and its callsign heard on ADS-B,
+ * plus a fictional registration heard with two addresses (a conflict).
+ */
+export function mockIdentityLinks(list: readonly MockAircraft[]): MockLink[] {
+	const links: MockLink[] = []
+	for (const a of list) {
+		const icao = { kind: "icao", value: a.icao } as const
+		if (a.registration)
+			links.push({
+				a: icao,
+				b: { kind: "reg", value: a.registration },
+				evidence: "database",
+				source: "database",
+				agoMs: 60_000,
+			})
+		links.push({
+			a: { kind: "callsign", value: a.callsign },
+			b: icao,
+			evidence: "observed",
+			source: "adsb",
+			agoMs: 5_000,
+		})
+	}
+	for (const value of ["0A0B01", "0A0B02"])
+		links.push({
+			a: { kind: "icao", value },
+			b: { kind: "reg", value: "N0WK01" },
+			evidence: "observed",
+			source: "vdl2",
+			agoMs: 120_000,
+		})
+	return links
+}
+
+const idKey = (id: AircraftIdentifier) => `${id.kind}:${id.value}`
+const pairKey = (a: AircraftIdentifierKind, b: AircraftIdentifierKind) =>
+	a <= b ? `${a}|${b}` : `${b}|${a}`
+
+/** What the core's registry answers for `query` over `links` (observed beats database; conflicts resolve to nothing). */
+export function mockIdentity(
+	links: readonly MockLink[],
+	query: AircraftIdentifier,
+	at: number,
+): AircraftIdentityResponse {
+	const touching = (key: string) =>
+		links.filter(l => idKey(l.a) === key || idKey(l.b) === key)
+	const other = (l: MockLink, key: string) => (idKey(l.a) === key ? l.b : l.a)
+	const owner = (reg: string) => {
+		for (const level of ["observed", "database"] as const) {
+			const found = new Set(
+				touching(reg)
+					.filter(l => l.evidence === level)
+					.map(l => other(l, reg))
+					.filter(id => id.kind === "icao")
+					.map(id => id.value),
+			)
+			if (found.size > 1)
+				return { icao: null, resolvedBy: null, conflict: true } as const
+			const icao = [...found][0]
+			if (icao !== undefined)
+				return { icao, resolvedBy: level, conflict: false } as const
+		}
+		return { icao: null, resolvedBy: null, conflict: false } as const
+	}
+	const resolved =
+		query.kind === "icao"
+			? ({ icao: query.value, resolvedBy: "self", conflict: false } as const)
+			: query.kind === "reg"
+				? owner(idKey(query))
+				: ({ icao: null, resolvedBy: null, conflict: false } as const)
+	const around = new Set<MockLink>(touching(idKey(query)))
+	if (resolved.icao !== null)
+		for (const l of touching(`icao:${resolved.icao}`)) around.add(l)
+	const entityKeys = new Set<string>()
+	if (resolved.icao !== null) entityKeys.add(`icao:${resolved.icao}`)
+	if (query.kind === "reg") entityKeys.add(idKey(query))
+	if (resolved.icao !== null)
+		for (const l of touching(`icao:${resolved.icao}`)) {
+			const id = other(l, `icao:${resolved.icao}`)
+			if (
+				l.evidence !== "hint" &&
+				id.kind === "reg" &&
+				owner(idKey(id)).icao === resolved.icao
+			)
+				entityKeys.add(idKey(id))
+		}
+	const iso = (ms: number) => new Date(ms).toISOString()
+	return {
+		query,
+		...resolved,
+		links: [...around]
+			.sort((x, y) => x.agoMs - y.agoMs)
+			.map(l => {
+				const last = at - l.agoMs
+				return {
+					a: l.a,
+					b: l.b,
+					evidence: l.evidence,
+					source: l.source,
+					firstSeen: iso(last - 600_000),
+					lastSeen: iso(last),
+					expiresAt: iso(
+						last +
+							(MOCK_LINK_LIFETIME_MS[pairKey(l.a.kind, l.b.kind)] ??
+								2 * HOUR_MS),
+					),
+					count: 3,
+				}
+			}),
+		entityKeys: [...entityKeys],
+		timestamp: at,
+	}
+}
 
 // ---- geodesy (as the board)
 
@@ -106,7 +268,36 @@ export interface MockAircraft {
 	readonly msgs: number
 	readonly registration?: string
 	readonly operator?: string
+	/** The core's enrichment (docs/ADSB.md "Aircraft Enrichment") beyond registration and operator. */
+	readonly details?: Omit<
+		AircraftIdentification,
+		"registration" | "operator" | "typeCode" | "source"
+	>
 }
+
+/** The details without the photo: the core leaves it out while online lookups are off. */
+function withoutPhoto(
+	details: MockAircraft["details"],
+): Omit<NonNullable<MockAircraft["details"]>, "photo"> {
+	if (!details) return {}
+	const { photo: _photo, ...rest } = details
+	return rest
+}
+
+/** A drawn stand-in for an airframe photo (the mock never reaches Planespotters). */
+function mockPhoto(sky: string, ground: string): string {
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 200"><rect width="300" height="116" fill="${sky}"/><rect y="116" width="300" height="84" fill="${ground}"/><path d="M40 112 L210 104 Q236 103 252 110 Q258 114 250 118 L214 124 L60 126 Z M118 108 L160 70 L176 70 L156 108 Z M120 124 L150 150 L166 150 L152 124 Z M46 112 L36 92 L48 92 L66 110 Z" fill="#eef2f6"/></svg>`
+	return `data:image/svg+xml,${encodeURIComponent(svg)}`
+}
+
+const airport = (
+	icao: string,
+	iata: string,
+	name: string,
+	city: string,
+	lat: number,
+	lon: number,
+) => ({ icao, iata, name, city, country: "France", countryIso: "FR", lat, lon })
 
 /** The board's 34 aircraft (seeded): three named ones and 31 on the airways around the station. */
 export function makeAircraft(): MockAircraft[] {
@@ -127,6 +318,49 @@ export function makeAircraft(): MockAircraft[] {
 			msgs: 1834,
 			registration: "F-HBNA",
 			operator: "Air France",
+			details: {
+				typeDescription: "A320 214",
+				manufacturer: "Airbus",
+				country: "France",
+				countryIso: "FR",
+				year: 2010,
+				airline: {
+					name: "Air France",
+					icao: "AFR",
+					iata: "AF",
+					callsign: "AIRFRANS",
+					source: "adsbdb",
+				},
+				route: {
+					callsign: "AFR1234",
+					origin: airport(
+						"LFPG",
+						"CDG",
+						"Paris Charles de Gaulle",
+						"Paris",
+						49.0128,
+						2.55,
+					),
+					destination: {
+						icao: "KJFK",
+						iata: "JFK",
+						name: "John F Kennedy International Airport",
+						city: "New York",
+						country: "United States",
+						countryIso: "US",
+						lat: 40.6398,
+						lon: -73.7789,
+					},
+					source: "adsbdb",
+					plausible: true,
+				},
+				photo: {
+					thumbnailUrl: mockPhoto("#5d7ea6", "#6f7a68"),
+					photographer: "Mock photographer",
+					link: "https://www.planespotters.net/",
+					source: "planespotters",
+				},
+			},
 		},
 		{
 			icao: "3949F2",
@@ -143,6 +377,35 @@ export function makeAircraft(): MockAircraft[] {
 			msgs: 612,
 			registration: "F-GRGJ",
 			operator: "HOP!",
+			details: {
+				typeDescription: "ERJ-145EU",
+				manufacturer: "Embraer",
+				country: "France",
+				countryIso: "FR",
+				year: 2000,
+				airline: { name: "HOP!", icao: "HOP", iata: "A5", source: "local" },
+				route: {
+					callsign: "HOP47MJ",
+					origin: airport(
+						"LFRB",
+						"BES",
+						"Brest Bretagne Airport",
+						"Brest",
+						48.4479,
+						-4.4185,
+					),
+					destination: airport(
+						"LFPO",
+						"ORY",
+						"Paris-Orly Airport",
+						"Paris",
+						48.7233,
+						2.3794,
+					),
+					source: "adsbdb",
+					plausible: true,
+				},
+			},
 		},
 		{
 			icao: "3B7FA2",
@@ -158,6 +421,12 @@ export function makeAircraft(): MockAircraft[] {
 			rssi: -7.1,
 			msgs: 220,
 			operator: "French Navy",
+			details: {
+				typeDescription: "Dassault Rafale M",
+				country: "France",
+				countryIso: "FR",
+				flags: { military: true },
+			},
 		},
 	]
 	const PFX = [
@@ -778,6 +1047,10 @@ export function registerMapMock(
 	}
 
 	// ---- aircraft state
+	// Settings › Map › Online aircraft lookups (the mock never goes online;
+	// like the core it sends photos only while the switch is on).
+	// Off by default like the core.
+	let infoOnline: boolean | null = null
 	const aircraftState = (a: MockAircraft, at: number): AircraftState => {
 		const ts = (at - startedAt) / 1000
 		const here = aircraftAt(a, ts)
@@ -808,7 +1081,11 @@ export function registerMapMock(
 					? { registration: a.registration }
 					: {}),
 				...(a.operator !== undefined ? { operator: a.operator } : {}),
-				source: "readsb",
+				...withoutPhoto(a.details),
+				...(infoOnline === true && a.details?.photo
+					? { photo: a.details.photo, imageUrl: a.details.photo.thumbnailUrl }
+					: {}),
+				source: a.details ? "local" : "readsb",
 			},
 			signalQuality: { rssi: Math.round(a.rssi * 10) / 10 },
 			category: a.type === "AT76" || a.type === "E145" ? "A2" : "A3",
@@ -1071,6 +1348,42 @@ export function registerMapMock(
 		return { aircraft: list, stats: aircraftStats(list), timestamp: now() }
 	})
 	app.get("/api/aircraft/stats", async () => aircraftStats(allAircraft()))
+	const aircraftInfo = () => ({
+		enabled: true,
+		online: infoOnline ?? false,
+		onlineFrom: infoOnline === null ? "config" : "ui",
+		persistent: true,
+		localDb: {
+			enabled: true,
+			aircraft: 612_480,
+			updatedAt: new Date(now() - 86_400_000).toISOString(),
+		},
+	})
+	app.get("/api/aircraft/info", async () => aircraftInfo())
+	app.put("/api/aircraft/info", async (request, reply) => {
+		// strict like the core: { online: boolean } and nothing else
+		const body = infoUpdateBody.safeParse(request.body)
+		if (!body.success)
+			return reply.code(400).send({
+				error: "Bad Request",
+				message: "Expected { online: boolean }",
+			})
+		infoOnline = body.data.online
+		reply.header("Cache-Control", "no-store")
+		return aircraftInfo()
+	})
+	const identityLinks = mockIdentityLinks(aircraft)
+	app.get<{ Params: { kind: string; value: string } }>(
+		"/api/aircraft-identity/:kind/:value",
+		async (request, reply) => {
+			const query = mockIdentifier(request.params.kind, request.params.value)
+			if (query === null)
+				return reply
+					.code(400)
+					.send({ error: "Not a valid identifier of that kind" })
+			return mockIdentity(identityLinks, query, now())
+		},
+	)
 	app.get<{ Params: { icao: string } }>(
 		"/api/aircraft/:icao",
 		async (request, reply) => {
@@ -1171,66 +1484,103 @@ export function registerMapMock(
 
 	// GET /api/activity/trails (WG4): the stored positions of the last hour, one per entity per 60 s
 	// (the core's position coalescing), oldest first; an aircraft's trail starts on its current lap.
-	app.get("/api/activity/trails", async () => {
-		const at = now()
-		const from = at - 3_600_000
-		const trails: ActivityTrail[] = []
-		const add = (
-			entityKey: string,
-			category: ActivityTrail["category"],
-			protocol: string,
-			pos: (ms: number) => { lat: number; lon: number } | null,
-		) => {
-			const points: ActivityTrailPoint[] = []
-			for (let ms = at - ((at - from) % 60_000); ms >= from; ms -= 60_000) {
-				const p = pos(ms)
-				if (!p) break
-				points.push([
-					ms,
-					Math.round(p.lat * 1e5) / 1e5,
-					Math.round(p.lon * 1e5) / 1e5,
-					null,
-				])
+	app.get<{ Querystring: { categories?: string } }>(
+		"/api/activity/trails",
+		async request => {
+			const wanted = request.query.categories
+				?.split(",")
+				.map(c => c.trim())
+				.filter(c => c.length > 0)
+			const at = now()
+			const from = at - 3_600_000
+			const trails: ActivityTrail[] = []
+			const add = (
+				entityKey: string,
+				category: ActivityTrail["category"],
+				protocol: string,
+				pos: (ms: number) => { lat: number; lon: number } | null,
+			) => {
+				const points: ActivityTrailPoint[] = []
+				for (let ms = at - ((at - from) % 60_000); ms >= from; ms -= 60_000) {
+					const p = pos(ms)
+					if (!p) break
+					points.push([
+						ms,
+						Math.round(p.lat * 1e5) / 1e5,
+						Math.round(p.lon * 1e5) / 1e5,
+						null,
+					])
+				}
+				if (points.length > 0)
+					trails.push({
+						entityKey,
+						category,
+						protocol,
+						points: points.reverse(),
+						truncated: false,
+					})
 			}
-			if (points.length > 0)
-				trails.push({
-					entityKey,
-					category,
-					protocol,
-					points: points.reverse(),
-					truncated: false,
+			const ts = (ms: number) => (ms - startedAt) / 1000
+			for (const a of aircraft) {
+				const lap = aircraftAt(a, ts(at)).lap
+				add(`icao:${a.icao}`, "aircraft", "adsb", ms => {
+					const p = aircraftAt(a, ts(ms))
+					return p.lap === lap ? p : null
 				})
-		}
-		const ts = (ms: number) => (ms - startedAt) / 1000
-		for (const a of aircraft) {
-			const lap = aircraftAt(a, ts(at)).lap
-			add(`icao:${a.icao}`, "aircraft", "adsb", ms => {
-				const p = aircraftAt(a, ts(ms))
-				return p.lap === lap ? p : null
-			})
-		}
-		for (const v of vessels)
-			if (v.vesselClass !== "aton")
-				add(`mmsi:${v.mmsi}`, "marine", "ais", ms => vesselAt(v, ts(ms)))
-		for (const s of aprs)
-			add(`callsign:${s.callsign}`, "aprs", "aprs", ms => aprsAt(s, ts(ms)))
-		for (const m of mesh)
-			add(`node:${m.nodeId}`, "mesh", "meshtastic", ms => meshAt(m, ts(ms)))
-		const pointCount = trails.reduce((n, t) => n + t.points.length, 0)
-		const answer: ActivityTrails = {
-			producedFrom: HHMM(from),
-			producedTo: HHMM(at),
-			trails,
-			pointCount,
-			scannedRows: pointCount,
-			skippedRows: 0,
-			truncated: false,
-			truncation: [],
-			retentionFloor: HHMM(startedAt - 3 * 86_400_000),
-			generatedAt: HHMM(at),
-		}
-		return answer
-	})
+			}
+			for (const v of vessels)
+				if (v.vesselClass !== "aton")
+					add(`mmsi:${v.mmsi}`, "marine", "ais", ms => vesselAt(v, ts(ms)))
+			for (const s of aprs)
+				add(`callsign:${s.callsign}`, "aprs", "aprs", ms => aprsAt(s, ts(ms)))
+			for (const m of mesh)
+				add(`node:${m.nodeId}`, "mesh", "meshtastic", ms => meshAt(m, ts(ms)))
+			// positions the first aircraft reported over VDL2 (link frames, to 0.1°): one every 10 min of its lap
+			const first = aircraft[0]
+			if (first) {
+				const lap = aircraftAt(first, ts(at)).lap
+				const points: ActivityTrailPoint[] = []
+				for (let ms = at - ((at - from) % 600_000); ms >= from; ms -= 600_000) {
+					const p = aircraftAt(first, ts(ms))
+					if (p.lap !== lap) break
+					points.push([
+						ms,
+						Math.round(p.lat * 10) / 10,
+						Math.round(p.lon * 10) / 10,
+						null,
+					])
+				}
+				if (points.length > 0)
+					trails.push({
+						entityKey: `icao:${first.icao}`,
+						category: "aviation-data",
+						protocol: "vdl2",
+						points: points.reverse(),
+						truncated: false,
+					})
+			}
+			const kept =
+				wanted && wanted.length > 0
+					? trails.filter(t => wanted.includes(t.category))
+					: [...trails]
+			trails.length = 0
+			trails.push(...kept)
+			const pointCount = trails.reduce((n, t) => n + t.points.length, 0)
+			const answer: ActivityTrails = {
+				producedFrom: HHMM(from),
+				producedTo: HHMM(at),
+				trails,
+				pointCount,
+				scannedRows: pointCount,
+				skippedRows: 0,
+				truncated: false,
+				truncation: [],
+				retentionFloor: HHMM(startedAt - 3 * 86_400_000),
+				generatedAt: HHMM(at),
+			}
+			return answer
+		},
+	)
 
 	app.get<{ Querystring: { protocol?: string } }>(
 		"/api/coverage",

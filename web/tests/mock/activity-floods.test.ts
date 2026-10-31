@@ -142,6 +142,24 @@ describe("mock server with floods", () => {
 		expect(planes.items.length).toBeLessThanOrEqual(448)
 	})
 
+	it("filters by decoderIds like the core (the tuned card's Last decode)", async () => {
+		const of = async (ids: string) =>
+			(
+				await server.app.inject({
+					method: "GET",
+					url: `/api/activity?limit=500&decoderIds=${ids}`,
+				})
+			).json<ActivitySearchPage>().items
+		const readsb = await of("readsb")
+		expect(readsb.length).toBeGreaterThan(0)
+		expect(new Set(readsb.map(i => i.decoderId))).toEqual(new Set(["readsb"]))
+		const two = await of("multimon-ng,dsd-fme")
+		expect(new Set(two.map(i => i.decoderId))).toEqual(
+			new Set(["multimon-ng", "dsd-fme"]),
+		)
+		expect(await of("not-a-decoder")).toEqual([])
+	})
+
 	it("serves no floods unless asked (buildMockServer's default)", async () => {
 		const plain = await buildMockServer({ port: 0, audioPort: 0 })
 		const res = await plain.app.inject({

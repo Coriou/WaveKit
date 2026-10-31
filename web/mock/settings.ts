@@ -17,6 +17,7 @@ import {
 	CONFIG_EXPORT_FILE_NAME,
 	CONFIG_EXPORT_REDACTED,
 	CONFIG_EXPORT_ROUTE,
+	IQ_CAPTURES_QUOTA_BYTES,
 	STATION_FIELDS,
 	STORAGE_AREA_CLASS,
 	STORAGE_AREA_IDS,
@@ -265,7 +266,7 @@ const DECODER_CONFIG: Readonly<Record<string, Record<string, unknown>>> = {
 	},
 	"multimon-ng": {
 		modes: ["POCSAG512", "POCSAG1200", "POCSAG2400", "FLEX"],
-		frequencies: [160_450_000, 466_025_000],
+		frequencies: [160_450_000, 431_025_000],
 	},
 	direwolf: { frequency: 144_800_000, callsign: "F4XYZ-10" },
 	"rtl433-433": { frequency: 433_920_000 },
@@ -403,6 +404,7 @@ function storageReport(now: number, startedAt: number): StorageReport {
 	const sizes: Record<string, [bytes: number, files: number]> = {
 		activity: [118 * MIB + 412_000, 3],
 		"scanner-evidence": [412 * MIB, 1_284],
+		"iq-captures": [96 * MIB, 4],
 		"digital-voice-wav": [1.6 * GIB, 312],
 		bandplans: [18_400, 2],
 		"operator-data": [6_200, 1],
@@ -466,6 +468,7 @@ function storageReport(now: number, startedAt: number): StorageReport {
 			}
 		}
 		if (id === "scanner-evidence") area.cap = { bytes: 2 * GIB }
+		if (id === "iq-captures") area.cap = { bytes: IQ_CAPTURES_QUOTA_BYTES }
 		return area
 	})
 	return {

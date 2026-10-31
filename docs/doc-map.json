@@ -18,6 +18,23 @@
 			"docs": ["docs/API.md"]
 		},
 		{
+			"code": [
+				"src/api/routes/agent-status.ts",
+				"src/api/routes/iq-captures.ts",
+				"packages/api-types/src/agent-status.ts",
+				"packages/api-types/src/iq-captures.ts"
+			],
+			"docs": ["docs/AGENTS-API.md", "docs/API.md"]
+		},
+		{
+			"code": ["src/access/machine-token-export.ts"],
+			"docs": [
+				"docs/AGENTS-API.md",
+				"docs/DOCKER-SETUP.md",
+				"docs/LOCAL-SETUP.md"
+			]
+		},
+		{
 			"code": ["src/config.ts", "config/default.yaml"],
 			"docs": ["docs/CORE-REFERENCE.md", "docs/DOCKER-RUNTIME.md"]
 		},
@@ -53,6 +70,13 @@
 		{
 			"code": ["src/core/aircraft-", "src/services/", "src/data/"],
 			"docs": ["docs/ADSB.md"]
+		},
+		{
+			"code": [
+				"src/core/activity/presentation/acars-",
+				"src/core/aircraft-identity/"
+			],
+			"docs": ["docs/AIRCRAFT-DATALINK.md"]
 		},
 		{
 			"code": [

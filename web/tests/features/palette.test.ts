@@ -1,6 +1,10 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
-import type { LiveAudioConfig, SavedFrequency } from "@wavekit/api-types"
+import type {
+	LiveAudioConfig,
+	SavedFrequency,
+	ScanJob,
+} from "@wavekit/api-types"
 
 import { buildResolvedBandPlan, SCANNER_BANDPLANS } from "../../mock/data.ts"
 import { presetsOf } from "../../src/features/scanner/planner/plan.ts"
@@ -229,6 +233,45 @@ describe("palette: ranking", () => {
 		expect(r.ids(0)).toEqual([])
 		r.used("a", 0)
 		expect(r.ids(0)).toEqual(["a"])
+	})
+})
+
+describe("palette: find aircraft", () => {
+	const aircraft = [
+		{
+			icao: "0A0B31",
+			name: "ZZ0131",
+			callsign: "ZZ0131",
+			registration: "N0WK01",
+			about: "WaveKit Air · A320 214",
+			airline: "WaveKit Air",
+		},
+		{
+			icao: "0A0B32",
+			name: "N0WK02",
+			callsign: null,
+			registration: "N0WK02",
+			about: "",
+			airline: null,
+		},
+	]
+	it("finds a tracked aircraft by callsign, registration, address or airline and opens the Map on it", () => {
+		const find = (q: string) =>
+			flatten(new PaletteModel(ctx({ aircraft })).build(null, q)).filter(x =>
+				x.id.startsWith("air:"),
+			)
+		const [hit] = find("zz01")
+		expect(hit).toMatchObject({
+			title: "Show ZZ0131 on the map",
+			sub: "WaveKit Air · A320 214 · N0WK01 · ICAO 0A0B31",
+			action: { kind: "mapFocus", id: "a:0A0B31" },
+		})
+		expect(find("n0-wk02").map(x => x.id)).toEqual(["air:0A0B32"])
+		expect(find("0a0b3").length).toBe(2)
+		expect(find("kit air").map(x => x.id)).toEqual(["air:0A0B31"])
+		expect(find("w")).toEqual([])
+		const g = new PaletteModel(ctx({ aircraft })).build(null, "ZZ0131")
+		expect(g.map(x => x.label)).toContain("Aircraft")
 	})
 })
 
@@ -467,6 +510,7 @@ describe("palette: single-key shortcuts", () => {
 })
 
 describe("palette: running rows", async () => {
+	const { Store } = await import("../../src/data/store.ts")
 	const { runAction, applyPreview } =
 		await import("../../src/features/palette/actions.ts")
 	const { shellStore } = await import("../../src/shell/store.ts")
@@ -482,9 +526,17 @@ describe("palette: running rows", async () => {
 		let step: number | null = null
 		let volume = 0.5
 		const tuner = { sourceId: "rtl-0", gainMode: "manual", gain: 280 }
+		// the receiver commands act on the source the plot shows (receiverSourceId)
+		const sources = new Store({
+			sources: [{ id: "rtl-0", connected: true }],
+			loaded: true,
+			error: null,
+		})
 		const services = {
 			data: {
-				tuner: { state: () => tuner },
+				api: {},
+				sources,
+				tuner: { state: () => tuner, defaultSourceId: "rtl-0" },
 				liveAudio: {
 					get: () => ({ status: { config: config() } }),
 					setConfig: async (p: unknown) => void calls.push(["audio", p]),
@@ -623,5 +675,145 @@ describe("palette: values from the root", () => {
 		const first = flatten(new PaletteModel(ctx()).build(null, "light"))[0]
 		expect(first?.title).toBe("Theme › Light")
 		expect(first?.action).toEqual({ kind: "theme", patch: { theme: "light" } })
+	})
+})
+
+describe("palette: scan control", () => {
+	const resumeRow = (over: Partial<ScanJob>) =>
+		flatten(
+			new PaletteModel(
+				ctx({
+					sweep: {
+						id: "j1",
+						name: "Marine",
+						state: "paused",
+						...over,
+					} as ScanJob,
+				}),
+			).build(null, "resume scan"),
+		).filter(x => x.id === "scan:resume")
+
+	it("offers Resume scan for a sweep held after a plain resume, saying it retunes", () => {
+		const [row, ...rest] = resumeRow({ reason: "resumed-without-retune" })
+		expect(rest).toHaveLength(0)
+		expect(row).toMatchObject({
+			title: "Resume scan",
+			sub: "Marine · receiver resumed without retuning",
+			action: { kind: "scanJob", op: "resume" },
+			done: "Scan resumed",
+		})
+		expect(row?.does).toMatch(/^Retunes the receiver/)
+		// a running sweep has nothing to resume
+		expect(resumeRow({ state: "running" })).toHaveLength(0)
+		// an operator pause keeps its own wording
+		expect(resumeRow({ reason: "operator" })[0]?.sub).toBe("Marine")
+	})
+})
+
+describe("palette: receiver feed", () => {
+	const feedRow = (over: Partial<PaletteContext>) =>
+		flatten(new PaletteModel(ctx(over)).build(null, "receiver")).filter(
+			x => x.id === "tog:feed",
+		)
+	const live = { sourceId: "rtl-0", state: "live", busy: false } as const
+
+	it("offers Pause receiver while live and Resume receiver while paused, never both", () => {
+		const [pause, ...restLive] = feedRow({ feed: live })
+		expect(restLive).toHaveLength(0)
+		expect(pause).toMatchObject({
+			title: "Pause receiver",
+			kbd: ["P"],
+			action: { kind: "feed", op: "pause", sourceId: "rtl-0" },
+			done: "Receiver paused",
+		})
+		for (const state of ["paused", "error"] as const) {
+			const rows = feedRow({ feed: { ...live, state } })
+			expect(rows).toHaveLength(1)
+			expect(rows[0]).toMatchObject({
+				title: "Resume receiver",
+				action: { kind: "feed", op: "resume" },
+			})
+		}
+		expect(feedRow({ feed: { ...live, state: "error" } })[0]?.sub).toBe(
+			"The last resume failed · resume again to retry",
+		)
+	})
+
+	it("offers Resume receiver at <MHz> (restore) beside the plain resume while the centre is known", () => {
+		const restoreRow = (over: Partial<PaletteContext>) =>
+			flatten(new PaletteModel(ctx(over)).build(null, "resume")).filter(
+				x => x.id === "tog:feed-restore",
+			)
+		const paused = { ...live, state: "paused", restoreHz: 145_000_000 } as const
+		expect(restoreRow({ feed: paused })[0]).toMatchObject({
+			title: "Resume receiver at 145.000 MHz",
+			action: {
+				kind: "feed",
+				op: "resume",
+				sourceId: "rtl-0",
+				restoreTuning: true,
+			},
+			done: "Receiver resumed",
+		})
+		// the plain one stays as it was: no restoreTuning, and it keeps P
+		expect(feedRow({ feed: paused })[0]).toMatchObject({
+			title: "Resume receiver",
+			kbd: ["P"],
+			action: { kind: "feed", op: "resume", sourceId: "rtl-0" },
+		})
+		expect(feedRow({ feed: paused })[0]?.action).not.toHaveProperty(
+			"restoreTuning",
+		)
+		expect(restoreRow({ feed: { ...paused, restoreHz: null } })).toHaveLength(0)
+		expect(
+			restoreRow({ feed: { ...live, restoreHz: 145_000_000 } }),
+		).toHaveLength(0)
+		expect(restoreRow({ feed: paused, readOnly: true })[0]?.info).toBe(true)
+		expect(
+			restoreRow({ feed: { ...paused, busy: true } })[0]?.action,
+		).toBeUndefined()
+	})
+
+	it("finds them by what people call it", () => {
+		const find = (q: string, over: Partial<PaletteContext>) =>
+			flatten(new PaletteModel(ctx(over)).build(null, q)).some(
+				x => x.id === "tog:feed",
+			)
+		expect(find("pause", { feed: live })).toBe(true)
+		expect(find("freeze waterfall", { feed: live })).toBe(true)
+		expect(find("resume", { feed: { ...live, state: "paused" } })).toBe(true)
+	})
+
+	it("is a note, not a command, while read-only or a call is in flight", () => {
+		const ro = feedRow({ feed: live, readOnly: true })[0]
+		expect(ro?.info).toBe(true)
+		expect(ro?.action).toBeUndefined()
+		const busy = feedRow({ feed: { ...live, busy: true } })[0]
+		expect(busy).toMatchObject({ info: true, sub: "Pausing the receiver…" })
+		expect(busy?.action).toBeUndefined()
+		const resuming = feedRow({ feed: { ...live, state: "resuming" } })[0]
+		expect(resuming).toMatchObject({
+			title: "Resume receiver",
+			info: true,
+			sub: "Resuming the receiver…",
+		})
+	})
+
+	it("has no row without a feed (a recording, no source)", () => {
+		expect(feedRow({})).toHaveLength(0)
+		expect(feedRow({ feed: null })).toHaveLength(0)
+	})
+
+	it("lists P among the shortcuts and maps the key", () => {
+		const keys = new PaletteModel(ctx({ feed: live })).scopeItems("keys")
+		expect(keys.find(x => x.id === "tog:feed")?.kbd).toEqual(["P"])
+		const key = (k: string, typing = false) =>
+			shortcutFor(
+				{ key: k, meta: false, ctrl: false, alt: false, typing },
+				false,
+			)
+		expect(key("p")).toEqual({ kind: "feed" })
+		expect(key("P")).toEqual({ kind: "feed" })
+		expect(key("p", true)).toBeNull()
 	})
 })

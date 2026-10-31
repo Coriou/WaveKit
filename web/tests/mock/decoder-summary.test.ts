@@ -8,7 +8,11 @@ import type {
 } from "@wavekit/api-types"
 import { decoderVerdictSchema } from "@wavekit/api-types"
 
-import { mockVerdict } from "../../mock/decoder-summary.ts"
+import {
+	mockCoversHz,
+	mockDecoderName,
+	mockVerdict,
+} from "../../mock/decoder-summary.ts"
 import { buildMockServer } from "../../mock/server.ts"
 import type { MockServer } from "../../mock/server.ts"
 
@@ -31,6 +35,11 @@ const coreVerdict = async (): Promise<CoreVerdict> =>
 			decoderVerdict: CoreVerdict
 		}
 	).decoderVerdict
+const coreSummary = async () =>
+	(await import(/* @vite-ignore */ CORE_SUMMARY)) as {
+		decoderCoversHz: (status: unknown, hz: number) => boolean
+		decoderName: (type: string) => string
+	}
 
 /** Every suspension reason the core knows, plus one it does not. */
 const REASONS: readonly (string | undefined)[] = [
@@ -49,6 +58,7 @@ const REASONS: readonly (string | undefined)[] = [
 	"capture-too-narrow",
 	"no-channel-selected",
 	"tuner-scanning",
+	"source-paused",
 	"efficiency-budget",
 	"decoder-unavailable",
 	"channelizer-unavailable",
@@ -152,6 +162,236 @@ describe("mock verdicts match the core's", () => {
 	})
 })
 
+describe("mock failures, names and coverage match the core's", () => {
+	it("drops the restart while the decoder restarts on its own, as the core does", async () => {
+		const decoderVerdict = await coreVerdict()
+		const retry = [
+			{ health: "restarting" as const, running: false },
+			{ health: "faulted" as const, running: true },
+			{
+				health: "faulted" as const,
+				running: false,
+				nextRestartAt: "2026-10-31T10:00:05Z",
+			},
+			{ health: "faulted" as const, running: false },
+			// a crash-loop respawn under way, or a placement start past its bound
+			{ health: "faulted" as const, running: false, restartInFlight: true },
+		]
+		for (const r of retry) {
+			const f = { ...fields({ health: "failed", running: r.running }), ...r }
+			const core = decoderVerdict(
+				{
+					...f,
+					...(r.nextRestartAt
+						? { nextRestartAt: new Date(r.nextRestartAt) }
+						: {}),
+				},
+				"failed",
+				r.running,
+			)
+			expect({
+				r,
+				verdict: mockVerdict(f as unknown as DecoderInfo, "failed"),
+			}).toEqual({
+				r,
+				verdict: core,
+			})
+		}
+	})
+
+	it("names every decoder type as the core does", async () => {
+		const { decoderName } = await coreSummary()
+		for (const type of [
+			"readsb",
+			"ais-catcher",
+			"acarsdec",
+			"dumpvdl2",
+			"rtl433",
+			"direwolf",
+			"multimon-ng",
+			"dsd-fme",
+			"lora-meshtastic",
+			"something-new",
+		])
+			expect(mockDecoderName(type)).toBe(decoderName(type))
+	})
+
+	it("covers a frequency exactly where the core's band rule does", async () => {
+		const { decoderCoversHz } = await coreSummary()
+		const bands = [
+			{ targetsHz: [1_090_000_000] },
+			{ targetsHz: [466_000_000, 466_025_000] },
+			{ rangesHz: [{ minHz: 460_000_000, maxHz: 470_000_000 }] },
+			{ targetsHz: [1_090_000_000], owner: "scanner" as const },
+		]
+		const probes = [
+			1_090_000_000,
+			1_090_200_000,
+			1_090_200_001,
+			465_800_000,
+			465_799_999,
+			466_012_500,
+			470_200_000,
+			470_200_001,
+			0,
+			-1,
+			Number.NaN,
+		]
+		for (const b of bands)
+			for (const hz of probes) {
+				const d = {
+					...(b.owner ? { owner: b.owner } : {}),
+					bandAssessment: { verdict: "in-band" as const, ...b },
+				}
+				expect({
+					b,
+					hz,
+					covers: mockCoversHz({ type: "readsb", ...d }, hz),
+				}).toEqual({
+					b,
+					hz,
+					covers: decoderCoversHz({ type: "readsb", ...d }, hz),
+				})
+			}
+	})
+
+	it("reads configured targets before the first assessment, and never covers for a probe, as the core does", async () => {
+		const { decoderCoversHz } = await coreSummary()
+		const cases = [
+			{ targetFrequenciesHz: [1_090_000_000] },
+			{ targetFrequenciesHz: [466_000_000, 466_025_000] },
+			{ targetFrequenciesHz: [Number.NaN, -1] },
+			{ targetFrequenciesHz: [1_090_000_000], ephemeral: true as const },
+			{
+				targetFrequenciesHz: [466_000_000],
+				bandAssessment: {
+					verdict: "in-band" as const,
+					targetsHz: [1_090_000_000],
+				},
+			},
+			{},
+		]
+		for (const d of cases)
+			for (const hz of [
+				1_090_000_000, 1_090_200_000, 1_090_200_001, 466_012_500, 466_225_001,
+			])
+				expect({
+					d,
+					hz,
+					covers: mockCoversHz({ type: "readsb", ...d }, hz),
+				}).toEqual({
+					d,
+					hz,
+					covers: decoderCoversHz({ type: "readsb", ...d }, hz),
+				})
+	})
+
+	it("never counts a configured target that only follows the tuner, as the core does", async () => {
+		const { decoderCoversHz } = await coreSummary()
+		const place = (
+			reach: "channel" | "raw" | "centre",
+			origin:
+				| "configured"
+				| "band"
+				| "vfo"
+				| "bandplan"
+				| "fallback"
+				| "activity",
+			channelHz?: number,
+		) => ({
+			sourceId: "synthetic",
+			...(channelHz !== undefined ? { channelHz } : {}),
+			reach,
+			origin,
+			primary: true,
+			running: true,
+			costCores: 0,
+		})
+		const unknown = {
+			verdict: "unknown" as const,
+			reasonCode: "no-target-frequency" as const,
+		}
+		const placementSets = [
+			[place("channel", "vfo", 1_090_000_000)],
+			[place("channel", "fallback", 1_090_000_000)],
+			[place("channel", "configured", 1_090_000_000)],
+			[place("raw", "configured")],
+			[place("centre", "band")],
+			[
+				place("channel", "vfo", 1_090_000_000),
+				place("channel", "bandplan", 466_025_000),
+				place("channel", "activity", 466_050_000),
+			],
+			[place("channel", "band", 1_090_000_000), place("centre", "band")],
+			[],
+		]
+		for (const type of ["multimon-ng", "readsb"])
+			for (const placements of placementSets)
+				for (const hz of [
+					1_090_000_000, 466_025_000, 466_050_000, 150_000_000,
+				]) {
+					const d = {
+						type,
+						targetFrequenciesHz: [1_090_000_000, 466_025_000, 466_050_000],
+						placements,
+						bandAssessment: unknown,
+					}
+					expect({ type, placements, hz, covers: mockCoversHz(d, hz) }).toEqual(
+						{ type, placements, hz, covers: decoderCoversHz(d, hz) },
+					)
+				}
+		// the repro: a pager's VFO channel at 1090 MHz never covers it
+		expect(
+			mockCoversHz(
+				{
+					type: "multimon-ng",
+					targetFrequenciesHz: [1_090_000_000],
+					placements: [place("channel", "vfo", 1_090_000_000)],
+					bandAssessment: unknown,
+				},
+				1_090_000_000,
+			),
+		).toBe(false)
+	})
+
+	it("falls back to the built-in band plan for a decoder with no known band, as the core does", async () => {
+		const { decoderCoversHz } = await coreSummary()
+		// The repro: a pager decoder with no target frequency, tuned to 150 MHz (pager-vhf, pocsag/flex).
+		const pager = {
+			type: "multimon-ng",
+			bandAssessment: {
+				verdict: "unknown" as const,
+				reasonCode: "no-target-frequency" as const,
+			},
+		}
+		expect(decoderCoversHz(pager, 150_000_000)).toBe(true)
+		expect(mockCoversHz(pager, 150_000_000)).toBe(true)
+
+		const region = { code: "EU" as const, source: "default" as const }
+		const probes = [
+			150_000_000, 137_000_000, 136_999_999, 169_400_000, 169_450_000,
+			174_000_000, 174_000_001, 431_100_000, 433_920_000, 446_100_000,
+			446_532_500, 466_100_000, 466_230_001, 1_090_000_000, 0,
+		]
+		for (const type of ["multimon-ng", "dsd-fme", "readsb", "something-new"])
+			for (const hz of probes) {
+				const d = {
+					type,
+					bandAssessment: {
+						verdict: "unknown" as const,
+						reasonCode: "no-target-frequency" as const,
+						region,
+					},
+				}
+				expect({ type, hz, covers: mockCoversHz(d, hz) }).toEqual({
+					type,
+					hz,
+					covers: decoderCoversHz(d, hz),
+				})
+			}
+	})
+})
+
 describe("mock GET /api/decoders/summary", () => {
 	let server: MockServer
 	beforeAll(async () => {
@@ -169,6 +409,37 @@ describe("mock GET /api/decoders/summary", () => {
 			await server.app.inject({ method: "GET", url: "/api/decoders/summary" })
 		).json<DecoderSummary[]>()
 	const byId = async (id: string) => (await summary()).find(s => s.id === id)
+
+	it("adds coversHz for ?hz= and refuses a bad one, as the core does", async () => {
+		const at = await server.app.inject({
+			method: "GET",
+			url: "/api/decoders/summary?hz=1090062000",
+		})
+		expect(at.statusCode).toBe(200)
+		const items = at.json<DecoderSummary[]>()
+		expect(items.find(i => i.id === "readsb")?.coversHz).toBe(true)
+		expect(items.find(i => i.id === "multimon-ng")?.coversHz).toBe(false)
+		expect(items.every(i => typeof i.name === "string")).toBe(true)
+		for (const bad of ["0", "abc", "Infinity", "100000000001"]) {
+			const res = await server.app.inject({
+				method: "GET",
+				url: `/api/decoders/summary?hz=${bad}`,
+			})
+			expect(res.statusCode, bad).toBe(400)
+			expect(res.json(), bad).toEqual({
+				error: "ValidationError",
+				code: "VALIDATION_ERROR",
+				message:
+					"Invalid query parameter: hz: number (> 0, <= 100000000000), Hz",
+				fields: [
+					{ field: "hz", expected: "number (> 0, <= 100000000000), Hz" },
+				],
+			})
+		}
+		expect((await summary()).every(i => !Object.hasOwn(i, "coversHz"))).toBe(
+			true,
+		)
+	})
 
 	it("gives every decoder a valid verdict", async () => {
 		const items = await summary()

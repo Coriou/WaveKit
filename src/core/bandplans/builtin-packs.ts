@@ -47,6 +47,12 @@ const BUILTIN_GROUPS: Readonly<Record<string, DisplayGroup>> = Object.freeze({
 	"amateur-70cm": "amateur",
 	aprs: "amateur",
 	"marine-vhf": "marine",
+	adsb: "air",
+})
+
+/** Built-in bands another decoder already covers: projected raw with a skip (band-plans skip). */
+const BUILTIN_SKIPS: Readonly<Record<string, string>> = Object.freeze({
+	adsb: "Decoded elsewhere · readsb",
 })
 
 /**
@@ -144,6 +150,9 @@ function projectBand(plan: Bandplan): Band {
 		if (range.startHz < startHz) startHz = range.startHz
 		if (range.endHz > endHz) endHz = range.endHz
 	}
+	const skip = Object.hasOwn(BUILTIN_SKIPS, plan.id)
+		? BUILTIN_SKIPS[plan.id]
+		: undefined
 	const scan: BandScan = {
 		bandplanId: plan.id,
 		ranges: plan.ranges.map(copyScanRange),
@@ -154,10 +163,10 @@ function projectBand(plan: Bandplan): Band {
 		startHz,
 		endHz,
 		group: builtinGroupFor(plan.id),
-		mode: null,
+		mode: skip === undefined ? null : "raw",
 		bandwidthHz: null,
 		stepHz: null,
-		skip: null,
+		skip: skip === undefined ? null : { reason: skip },
 		channels: NO_CHANNELS,
 		parentId: null,
 		colourHint: null,

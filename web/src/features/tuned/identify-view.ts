@@ -272,6 +272,7 @@ const REASON: Readonly<
 	"no-ambient-decoder": "no decoder running here",
 	"decoder-unavailable": "decoder could not start",
 	"no-live-audio": "live audio was not on it",
+	"adsb-window": "only ADS-B decodes 1089 to 1091 MHz",
 }
 
 export function trialRow(

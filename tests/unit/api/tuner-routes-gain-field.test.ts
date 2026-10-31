@@ -117,6 +117,21 @@ describe("POST /api/tuner/:sourceId/gain field names", () => {
 		})
 	})
 
+	it("GET serialises TunerState.measuredFields (an adopted measured rate) when present", async () => {
+		const { app: a, state } = await build()
+		const plain = await a.inject({ method: "GET", url: "/api/tuner/rtl-1" })
+		expect(JSON.parse(plain.body) as TunerState).not.toHaveProperty(
+			"measuredFields",
+		)
+		state.unknownFields = ["frequency", "sampleRate"]
+		state.measuredFields = ["sampleRate"]
+		const one = await a.inject({ method: "GET", url: "/api/tuner/rtl-1" })
+		expect(JSON.parse(one.body) as TunerState).toMatchObject({
+			unknownFields: ["frequency", "sampleRate"],
+			measuredFields: ["sampleRate"],
+		})
+	})
+
 	it('keeps {"tenthsDb"} as a deprecated alias; both equal is fine', async () => {
 		const { app: a, controller } = await build()
 		expect(

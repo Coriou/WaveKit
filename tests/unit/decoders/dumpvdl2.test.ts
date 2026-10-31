@@ -403,6 +403,14 @@ const noiseLevelArb = fc.double({
  * Arbitrary for generating ICAO addresses (6 hex characters).
  */
 const icaoAddrArb = fc.stringMatching(/^[A-F0-9]{6}$/)
+/** dumpvdl2's own address type strings (avlc.c `addrtype_descr`), or none printed. */
+const addressTypeArb = fc.constantFrom(
+	"Aircraft",
+	"Ground station",
+	"All stations",
+	"reserved",
+	undefined,
+)
 
 /**
  * Arbitrary for generating ground station identifiers.
@@ -652,9 +660,11 @@ describe("VDL2 Decoder Property-Based Tests", () => {
 							avlc: fc.record({
 								src: fc.record({
 									addr: icaoAddrArb,
+									type: addressTypeArb,
 								}),
 								dst: fc.record({
 									addr: fc.oneof(icaoAddrArb, stationArb),
+									type: addressTypeArb,
 								}),
 								frame_type: frameTypeArb,
 							}),
@@ -665,10 +675,17 @@ describe("VDL2 Decoder Property-Based Tests", () => {
 
 						expect(result).not.toBeNull()
 
-						// Should extract addresses
-						expect(result!.icao).toBe(json.vdl2.avlc.src.addr)
-						expect(result!.fromaddr).toBe(json.vdl2.avlc.src.addr)
-						expect(result!.toaddr).toBe(json.vdl2.avlc.dst.addr)
+						// Addresses are kept as printed; the ICAO address is only the aircraft end.
+						const { src, dst } = json.vdl2.avlc
+						const expectedIcao =
+							src.type === "Aircraft"
+								? src.addr
+								: dst.type === "Aircraft"
+									? dst.addr
+									: undefined
+						expect(result!.icao).toBe(expectedIcao)
+						expect(result!.fromaddr).toBe(src.addr)
+						expect(result!.toaddr).toBe(dst.addr)
 
 						return true
 					},

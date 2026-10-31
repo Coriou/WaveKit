@@ -29,16 +29,21 @@ export function ratePolicyNote(tuner: TunerState | undefined): string | null {
 	return `Raised from ${formatRate(p.raisedFromHz)} by ${TUNER_ORIGINS["decoder-rate"]} for ADS-B; it goes back once ADS-B no longer needs it.`
 }
 
-/** The link advisory in words, or null when the link keeps up. */
+/** The one sample-loss notice: short, for loss on the receiver link (`lossReason: "source"`) only. */
+export const LINK_LOSS_TEXT =
+	"Receiver link dropping samples — lower the sample rate"
+
+/**
+ * The link advisory in words, or null when there is nothing to tell. Only samples lost before the core
+ * (`lossReason: "source"`, the only cause of `level: "dropping"`) are the link's fault and worth a notice; a
+ * core branch dropping them after an arrival gap (`branch-congestion`) is not, and a link that has not yet
+ * proven the rate (`unproven`) has lost nothing. A `dropping` advisory from a core without `lossReason` is
+ * source loss (the core's rule).
+ */
 export function linkText(link: LinkAdvisory | undefined): string | null {
-	if (!link || link.level === "none") return null
-	if (link.level === "unproven")
-		return "The link to the receiver has not proven it carries this rate."
-	const short =
-		link.shortfallPercent !== null
-			? ` (${Math.round(link.shortfallPercent)} % short)`
-			: ""
-	return `The link to the receiver is losing samples${short}: try a lower sample rate.`
+	if (!link || link.level !== "dropping") return null
+	if (link.lossReason !== undefined && link.lossReason !== "source") return null
+	return LINK_LOSS_TEXT
 }
 
 /** A rate-policy event as a toast, or null when there is nothing to say (already above the rate). */
@@ -70,12 +75,17 @@ export function ratePolicyToast(
 	}
 }
 
-/** The `link-capacity` resource alert as a toast; other alerts are not this module's. */
+/**
+ * The `link-capacity` resource alert as a toast; other alerts are not this module's. Its `lossReason` decides:
+ * only `source` loss is the link's fault (`branch-congestion` is the core's own). A core without `lossReason`
+ * raises it `critical` only for a `dropping` link (source loss) and `warning` for an `unproven` one, which has
+ * lost nothing: that one stays quiet.
+ */
 export function linkAlertToast(a: ResourceAlert): string | null {
 	if (a.type !== "link-capacity") return null
-	return a.severity === "critical"
-		? "Samples are being lost on the link to the receiver: try a lower sample rate"
-		: "The link to the receiver may be too slow for this sample rate"
+	if (a.lossReason !== undefined)
+		return a.lossReason === "source" ? LINK_LOSS_TEXT : null
+	return a.severity === "critical" ? LINK_LOSS_TEXT : null
 }
 
 /** A raise toast that already spoke of the link covers the alert sent with it. */

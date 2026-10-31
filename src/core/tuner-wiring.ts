@@ -48,7 +48,15 @@ export function wireTunerControl(deps: TunerWiringDeps): void {
 		tunerController.initializeSource(sourceId, sourceManager.getCaps(sourceId))
 		// The receiver may have come back at its own defaults: restore or reset
 		// accepted tuner state per tuner.reconnectPolicy and reconcile caps.
-		const result = tunerController.synchronizeOnConnect(sourceId)
+		// The first session after a paused feed's resume follows the resume instead: a plain
+		// resume writes no tuning (SDR++ may have retuned the dongle through rtlmux, unseen),
+		// a restore resume (`restoreTuning: true`) restores whatever the policy says.
+		// Optional call: test doubles of the source manager predate pause / resume.
+		const resume = sourceManager.resumeKind?.(sourceId) ?? null
+		const result = tunerController.synchronizeOnConnect(
+			sourceId,
+			resume ? { resume } : {},
+		)
 		if (result.error) {
 			log.warn(
 				{
@@ -65,6 +73,32 @@ export function wireTunerControl(deps: TunerWiringDeps): void {
 	sourceManager.on("removed", sourceId => {
 		tunerController.removeSource(sourceId)
 	})
+
+	// A pause marks where the relay commands a plain resume still writes begin; a held feed
+	// shows what a restore resume would write (SourceFeed.restoreTuning).
+	// Optional calls: test doubles of the source manager predate pause / resume.
+	sourceManager.on("feed-changed", (sourceId, feed) => {
+		if (feed.state === "paused") tunerController.noteFeedPaused(sourceId)
+	})
+	sourceManager.setPausedTuningSource?.(sourceId =>
+		tunerController.restorableTuning(sourceId),
+	)
+
+	// After a plain resume the rate is unverified: a sustained rate-truth mismatch is what the
+	// receiver delivers, so a measured common rate is adopted (adoptObservedSampleRate).
+	// A flagged mismatch keeps updating its measurement without another transition (a first
+	// estimate between two common rates settles later), so adoption is retried on each metrics
+	// interval (METRICS_INTERVAL_MS, 5 s per source, after the rate-truth check) while the rate is in doubt;
+	// otherwise the listener stops at one Set lookup.
+	const adoptMeasuredRate = (sourceId: string) => {
+		if (!tunerController.isSampleRateUnverified(sourceId)) return
+		const measured =
+			sourceManager.getStatus?.(sourceId)?.rateMismatch?.measuredSampleRateHz
+		if (measured !== undefined)
+			tunerController.adoptObservedSampleRate(sourceId, measured)
+	}
+	sourceManager.on("rate-truth-changed", adoptMeasuredRate)
+	sourceManager.on("metrics", adoptMeasuredRate)
 
 	if (!relayEnabled) return
 

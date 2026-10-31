@@ -8,6 +8,7 @@ import type {
 } from "@wavekit/api-types"
 import type { EventsClient } from "../../src/data/events-client.ts"
 import {
+	LINK_LOSS_TEXT,
 	linkAlertToast,
 	linkText,
 	ratePolicyNote,
@@ -16,6 +17,7 @@ import {
 } from "../../src/features/receiver/notices.ts"
 import {
 	decoderStatusText,
+	decoderTone,
 	efficiencyText,
 	placementsText,
 } from "../../src/features/settings/decoder-rows.ts"
@@ -60,7 +62,7 @@ describe("1090 MHz rate policy", () => {
 		).toBeNull()
 	})
 
-	it("adds the link advisory to a raise", () => {
+	it("adds the link advisory to a raise only for loss on the receiver link", () => {
 		const link = {
 			level: "dropping" as const,
 			transport: "network" as const,
@@ -68,10 +70,43 @@ describe("1090 MHz rate policy", () => {
 			sustainedBytesPerSecond: 3_600_000,
 			shortfallPercent: 25,
 			upstreamDropBytesPerSecond: 1000,
+			lossReason: "source" as const,
 		}
-		expect(linkText(link)).toContain("(25 % short)")
+		expect(linkText(link)).toBe(
+			"Receiver link dropping samples — lower the sample rate",
+		)
+		expect(linkText(link)).toBe(LINK_LOSS_TEXT)
+		// a core before lossReason: `dropping` is source loss by the core's rule
+		const { lossReason: _, ...legacy } = link
+		expect(linkText(legacy)).toBe(LINK_LOSS_TEXT)
 		expect(linkText({ ...link, level: "none" })).toBeNull()
-		expect(ratePolicyToast(policy({ link }))).toMatchObject({ warn: true })
+		// unproven: nothing was lost
+		expect(
+			linkText({ ...legacy, level: "unproven", shortfallPercent: null }),
+		).toBeNull()
+		// a core branch dropped them after an arrival gap: not the link's fault, no notice
+		expect(
+			linkText({ ...link, level: "unproven", lossReason: "branch-congestion" }),
+		).toBeNull()
+		expect(linkText({ ...link, lossReason: "branch-congestion" })).toBeNull()
+		// an unknown reason from a newer core is not shown as source loss
+		expect(
+			linkText({ ...link, lossReason: "elsewhere" as unknown as "source" }),
+		).toBeNull()
+		expect(ratePolicyToast(policy({ link }))).toEqual({
+			text: `Sample rate raised to 2.4 MS/s for ADS-B (1090 MHz). ${LINK_LOSS_TEXT}`,
+			warn: true,
+		})
+		expect(
+			ratePolicyToast(
+				policy({ link: { ...link, lossReason: "branch-congestion" } }),
+			),
+		).toMatchObject({ warn: false })
+	})
+
+	it("keeps the loss notice short enough for one toast line", () => {
+		// the 560 px toast cap at about 7.5 px a character (14 px text): under 75 characters is one line
+		expect(LINK_LOSS_TEXT.length).toBeLessThan(75)
 	})
 })
 
@@ -82,13 +117,29 @@ describe("link-capacity alert", () => {
 		message: "Link capacity: …",
 		timestamp: "2026-10-22T10:00:00Z",
 	})
-	it("labels only link-capacity", () => {
-		expect(linkAlertToast(alert("critical"))).toContain(
-			"Samples are being lost",
-		)
-		expect(linkAlertToast(alert("warning"))).toContain("may be too slow")
+	it("speaks only of loss: critical (dropping) only, link-capacity only", () => {
+		expect(linkAlertToast(alert("critical"))).toBe(LINK_LOSS_TEXT)
+		expect(linkAlertToast(alert("warning"))).toBeNull()
 		expect(
-			linkAlertToast({ ...alert("warning"), type: "upstream-drops" }),
+			linkAlertToast({ ...alert("critical"), type: "upstream-drops" }),
+		).toBeNull()
+	})
+
+	it("follows lossReason when the core sends it: source loss only", () => {
+		for (const sev of ["critical", "warning"] as const) {
+			expect(linkAlertToast({ ...alert(sev), lossReason: "source" })).toBe(
+				LINK_LOSS_TEXT,
+			)
+			expect(
+				linkAlertToast({ ...alert(sev), lossReason: "branch-congestion" }),
+			).toBeNull()
+		}
+		expect(
+			linkAlertToast({
+				...alert("critical"),
+				type: "upstream-drops",
+				lossReason: "source",
+			}),
 		).toBeNull()
 	})
 
@@ -107,15 +158,20 @@ describe("link-capacity alert", () => {
 		handlers.get("tuner:rate-policy")?.(
 			policy({
 				link: {
-					level: "unproven",
+					level: "dropping",
 					transport: "network",
 					payloadBytesPerSecond: 1,
 					sustainedBytesPerSecond: null,
 					shortfallPercent: null,
-					upstreamDropBytesPerSecond: null,
+					upstreamDropBytesPerSecond: 1000,
+					lossReason: "source",
 				},
 			}),
 		)
+		handlers.get("resources:alert")?.(alert("critical"))
+		expect(toast).toHaveBeenCalledTimes(1)
+		// an unproven link (warning) never toasts
+		t = 10_000
 		handlers.get("resources:alert")?.(alert("warning"))
 		expect(toast).toHaveBeenCalledTimes(1)
 		t = 10_000
@@ -179,6 +235,24 @@ describe("decoder enablement in Settings", () => {
 				efficiency: { detail: "budget", retryAt: "2026-10-22T10:05:00Z" },
 			}),
 		).toMatch(/^Waiting: over the CPU budget · tries again at /)
+	})
+
+	it("reads a receiver pause as paused, not as a fault or not running", () => {
+		const held = {
+			...base,
+			running: false,
+			desiredRunning: true,
+			suspended: true,
+			suspension: { reasonCode: "source-paused" },
+		} as unknown as DecoderInfo
+		expect(decoderStatusText(held)).toBe("Paused · the receiver is paused")
+		expect(decoderTone(held)).toBe("idle")
+		// an operator stop still reads stopped, a crash loop still a fault
+		const stopped = { ...held, desiredRunning: false } as DecoderInfo
+		expect(decoderStatusText(stopped)).toBe("Stopped")
+		expect(decoderTone(stopped)).toBe("off")
+		const faulted = { ...held, health: "faulted" } as DecoderInfo
+		expect(decoderTone(faulted)).toBe("fault")
 	})
 
 	it("lists its placements", () => {

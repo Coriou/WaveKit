@@ -66,6 +66,16 @@ export interface ReceiverContext {
 	readonly lockReason: string | null
 }
 
+/** The receiver feed (receiver/feed.ts): Pause receiver while live, Resume receiver while paused. */
+export interface FeedContext {
+	readonly sourceId: string
+	readonly state: "live" | "paused" | "resuming" | "error"
+	/** A pause or resume is in flight. */
+	readonly busy: boolean
+	/** The centre a restore resume writes back (held feed's restoreTuning); null when none is known. */
+	readonly restoreHz?: number | null
+}
+
 /** What the palette reads from the app, once per render. */
 export interface PaletteContext {
 	readonly tunedHz: number | null
@@ -93,6 +103,22 @@ export interface PaletteContext {
 	readonly boost: (id: string) => number
 	/** Installing as an app (pwa.ts); absent: no install row. */
 	readonly pwa?: PwaState
+	/** The receiver feed; absent or null (a recording, no source): no pause row. */
+	readonly feed?: FeedContext | null
+	/** Aircraft the receiver tracks with a position (Find aircraft); absent or empty: no rows. */
+	readonly aircraft?: readonly PaletteAircraft[]
+}
+
+/** A tracked aircraft as ⌘K finds it: by callsign, registration, ICAO address or airline. */
+export interface PaletteAircraft {
+	readonly icao: string
+	/** Callsign, else registration, else the ICAO address. */
+	readonly name: string
+	readonly callsign: string | null
+	readonly registration: string | null
+	/** "WaveKit Air · A320 214"; "" when unknown. */
+	readonly about: string
+	readonly airline: string | null
 }
 
 // ---- outputs
@@ -230,6 +256,15 @@ export interface IdentifyAction {
 	readonly protocols?: readonly ScannerProtocol[]
 }
 
+/** Pause or resume the receiver feed (receiver/feed.ts). */
+export interface FeedAction {
+	readonly kind: "feed"
+	readonly op: "pause" | "resume"
+	readonly sourceId: string
+	/** Resume only: write the pre-pause tuning back (a plain resume writes none). */
+	readonly restoreTuning?: boolean
+}
+
 export type PaletteAction =
 	| TuneAction
 	| { readonly kind: "recall"; readonly saved: SavedFrequency }
@@ -249,12 +284,15 @@ export type PaletteAction =
 	| ActivityAction
 	| { readonly kind: "scanPlan"; readonly presetId: string | null }
 	| { readonly kind: "scanJob"; readonly op: "pause" | "resume" | "stop" }
+	| FeedAction
 	| { readonly kind: "discovery"; readonly id: string }
 	| { readonly kind: "setting"; readonly entry: SettingEntry }
 	| { readonly kind: "copy"; readonly text: string; readonly label: string }
 	/** The address bar's link to what is on screen (deep-link.ts keeps it current). */
 	| { readonly kind: "copyLink" }
 	| { readonly kind: "install" }
+	/** Opens the Map on an item (`a:<ICAO>`, focus.ts). */
+	| { readonly kind: "mapFocus"; readonly id: string }
 
 /** One line of the effect bar: `Gain 28.0 dB → 32.8 dB`. */
 export interface Effect {
@@ -1206,7 +1244,18 @@ export class PaletteModel {
 				does: "Keeps the receiver until you resume · never resumes on its own",
 				done: "Scan paused",
 			})
-		if (s === "paused")
+		if (s === "paused" && sweep.reason === "resumed-without-retune")
+			out.push({
+				id: "scan:resume",
+				title: "Resume scan",
+				sub: `${name} · receiver resumed without retuning`,
+				glyph: "play",
+				keys: ["continue scan", "resume sweep", "retune scan"],
+				action: { kind: "scanJob", op: "resume" },
+				does: "Retunes the receiver to the scan's current hop · the scan holds until you choose this",
+				done: "Scan resumed",
+			})
+		else if (s === "paused")
 			out.push({
 				id: "scan:resume",
 				title: "Resume scan",
@@ -1265,6 +1314,90 @@ export class PaletteModel {
 			"Calls, messages and decodes on this frequency",
 			"activity",
 		)
+	}
+
+	/** « Pause receiver » while the feed is live, « Resume receiver » while it is paused (P on both). */
+	feedItem(): PaletteItem | null {
+		const c = this.#c
+		const f = c.feed
+		if (!f) return null
+		const paused = f.state !== "live"
+		const base = {
+			id: "tog:feed",
+			title: paused ? "Resume receiver" : "Pause receiver",
+			glyph: paused ? "play" : "pause",
+			kbd: ["P"],
+			keys: paused
+				? ["resume feed", "unpause", "start iq", "reconnect receiver"]
+				: [
+						"pause feed",
+						"stop iq",
+						"freeze waterfall",
+						"stop stream",
+						"disconnect receiver",
+					],
+		} as const
+		if (c.readOnly)
+			return {
+				...base,
+				info: true,
+				sub: "Read-only: sign in to this core to pause or resume the receiver.",
+			}
+		if (f.busy || f.state === "resuming")
+			return {
+				...base,
+				info: true,
+				sub: paused ? "Resuming the receiver…" : "Pausing the receiver…",
+			}
+		if (paused)
+			return {
+				...base,
+				...(f.state === "error"
+					? { sub: "The last resume failed · resume again to retry" }
+					: {}),
+				action: { kind: "feed", op: "resume", sourceId: f.sourceId },
+				does: "Reconnects without changing the receiver's tuning · decoders continue",
+				done: "Receiver resumed",
+			}
+		return {
+			...base,
+			action: { kind: "feed", op: "pause", sourceId: f.sourceId },
+			does: "Stops the IQ stream · the waterfall freezes and decoders wait until you resume",
+			done: "Receiver paused",
+		}
+	}
+
+	/** "Resume receiver at <MHz>": the restore resume, while paused with a known pre-pause centre. */
+	restoreFeedItem(): PaletteItem | null {
+		const c = this.#c
+		const f = c.feed
+		const hz = f?.restoreHz ?? null
+		if (!f || f.state === "live" || hz === null) return null
+		const base = {
+			id: "tog:feed-restore",
+			title: `Resume receiver at ${formatMHz(hz)} MHz`,
+			glyph: "play",
+			keys: ["resume restore tuning", "resume previous frequency"],
+		} as const
+		if (c.readOnly)
+			return {
+				...base,
+				info: true,
+				sub: "Read-only: sign in to this core to pause or resume the receiver.",
+			}
+		if (f.busy || f.state === "resuming")
+			return { ...base, info: true, sub: "Resuming the receiver…" }
+		return {
+			...base,
+			action: {
+				kind: "feed",
+				op: "resume",
+				sourceId: f.sourceId,
+				restoreTuning: true,
+			},
+			does: "Reconnects and writes back the centre, rate and gain from before the pause",
+			done: "Receiver resumed",
+		}
 	}
 
 	rootCommands(): PaletteItem[] {
@@ -1421,6 +1554,8 @@ export class PaletteModel {
 						scope: "rate",
 					}
 				: null,
+			this.feedItem(),
+			this.restoreFeedItem(),
 			rx
 				? {
 						id: "tog:biasT",
@@ -1842,6 +1977,36 @@ export class PaletteModel {
 		return out
 	}
 
+	/** Find aircraft: tracked aircraft whose callsign, registration or ICAO address starts with the text, or whose airline contains it. */
+	aircraftItems(q: string): PaletteItem[] {
+		const want = q.trim().toUpperCase().replace(/[\s-]/g, "")
+		if (want.length < 2) return []
+		const starts = (v: string | null) =>
+			v !== null && v.toUpperCase().replace(/[\s-]/g, "").startsWith(want)
+		const hits = (this.#c.aircraft ?? []).filter(
+			a =>
+				starts(a.callsign) ||
+				starts(a.registration) ||
+				starts(a.icao) ||
+				(want.length >= 3 &&
+					(a.airline ?? "").toUpperCase().replace(/[\s-]/g, "").includes(want)),
+		)
+		return hits.slice(0, 5).map(a => ({
+			id: `air:${a.icao}`,
+			title: `Show ${a.name} on the map`,
+			sub: [
+				a.about || null,
+				a.registration && a.registration !== a.name ? a.registration : null,
+				`ICAO ${a.icao}`,
+			]
+				.filter(Boolean)
+				.join(" · "),
+			glyph: "cat-aircraft",
+			action: { kind: "mapFocus", id: `a:${a.icao}` },
+			does: `Opens the Map on ${a.name}`,
+		}))
+	}
+
 	// -- the list
 
 	build(scope: ScopeId | null, query: string): PaletteGroup[] {
@@ -1953,6 +2118,7 @@ export class PaletteModel {
 				if (anchor) list.splice(i + 1, 0, { ...x, score: anchor.score })
 			}
 			push("Commands", [...exact(it.cmd), ...list.slice(0, 12)])
+			push("Aircraft", exact(this.aircraftItems(q)))
 			push(
 				"Activity",
 				it.act.map((x, i) => ({

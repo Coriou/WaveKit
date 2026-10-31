@@ -12,7 +12,10 @@ export interface AutoIdentifyInput {
 	heldByScan: boolean
 	/** The squelch is open: a transmission is on the air now. */
 	transmitting: boolean
-	/** Decoders that listen on this frequency, running or not: what it is is already known. */
+	/**
+	 * Decoders on this channel (a fixed target within it), running or not: what it is is already known. A decoder
+	 * whose band only spans the frequency does not count.
+	 */
 	decodersHere: number
 	/** An identify is under way or shown (here or elsewhere). */
 	identifyShown: boolean

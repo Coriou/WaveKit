@@ -333,6 +333,11 @@ export interface Discovery {
 	evidenceLevel?: ScannerEvidenceLevel
 	/** Scanner-redesign 3.11: weak discoveries only, computed on read, never stored. */
 	hint?: ScannerClass | "ism-device" | "analog-voice" | "lora"
+	/**
+	 * The latest Activity event attributed to this discovery (api-types `Discovery.lastActivity`).
+	 * Not set by this core yet: the Activity event id is allocated outside the scanner.
+	 */
+	lastActivity?: { eventId: string; producedAt: string }
 	/** Band inspection UX req 1.4: projected at read time by the routes, never stored. */
 	coverage?: DiscoveryCoverage[]
 	/** Detail reads only: the remembered replay trials, projected by the routes (never stored). */
@@ -422,7 +427,11 @@ export type PauseReason =
 	| "source-down"
 	| "core-restart"
 	| "resume-blocked"
+	/** A plain resume of the paused feed: the sweep writes no tuning until Resume scan. */
+	| "resumed-without-retune"
 export type FailReason = "source-removed" | "tuner-unavailable" | "invalid"
+/** Why a job was cancelled by the core rather than the operator: the receiver feed was paused. */
+export type CancelReason = "source-paused"
 
 /** § 10.6; exactly one of `channels` / `fromDiscoveries` (enforced by the REST schema). */
 export interface MonitorChannelSpec {

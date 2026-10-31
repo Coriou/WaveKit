@@ -1,5 +1,6 @@
 // Single-key shortcuts (DESIGN.md "Shortcuts shown on rows"), only when no text field has the focus: `[` `]` step,
-// T tune, M mode, Q squelch, B saved, S save, L listen, / search Activity, ? the shortcut list, and G then a letter
+// T tune, M mode, Q squelch, B saved, S save, L listen, P pause / resume the receiver, / search Activity, ? the shortcut
+// list, and G then a letter
 // for the views (S Spectrum, A Activity, M Map, D Messages, C Scanner, R Recordings). I (Identify) belongs to the tuned card.
 import type { DrawerId, ViewId } from "../../shell/store.ts"
 import type { ScopeId } from "./model.ts"
@@ -8,6 +9,8 @@ export type Shortcut =
 	| { readonly kind: "scope"; readonly scope: ScopeId }
 	| { readonly kind: "step"; readonly dir: 1 | -1 }
 	| { readonly kind: "listen" }
+	/** Pause the receiver feed, or resume it while paused. */
+	| { readonly kind: "feed" }
 	| { readonly kind: "searchActivity" }
 	| { readonly kind: "view"; readonly id: ViewId }
 	| { readonly kind: "drawer"; readonly id: DrawerId }
@@ -36,6 +39,7 @@ const SINGLE: Readonly<Record<string, Shortcut>> = {
 	"[": { kind: "step", dir: -1 },
 	"]": { kind: "step", dir: 1 },
 	l: { kind: "listen" },
+	p: { kind: "feed" },
 	"/": { kind: "searchActivity" },
 	g: { kind: "goPrefix" },
 }

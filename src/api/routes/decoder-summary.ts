@@ -1,16 +1,28 @@
 import {
+	DECODER_SUMMARY_MAX_HZ,
 	DECODER_VERDICT_TEXT_MAX_LENGTH,
 	decoderVerdictSchema,
 } from "@wavekit/api-types"
 import type {
+	BandRegion,
+	DecoderBandRange,
+	DecoderPlacementView,
 	DecoderSummary,
 	DecoderVerdict,
 	DecoderVerdictAction,
 	DecoderVerdictCode,
 } from "@wavekit/api-types"
 import type { FastifyPluginAsync } from "fastify"
+import { z } from "zod"
+import { builtinBandplansFor } from "../../core/bandplans/builtin-supplement.js"
+import type { ScanRange } from "../../core/scanner/types.js"
+import { BAND_REGIONS } from "../../decoders/band-region.js"
+import { DECODER_PROTOCOLS } from "../../decoders/enablement/contract.js"
+import { VFO_CHANNEL_TYPES } from "../../decoders/enablement/placement.js"
+import { bandContainsTuned } from "../../decoders/enablement/tuned-band.js"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderStatus } from "../../decoders/types.js"
+import { zodValidationBody } from "../validation-errors.js"
 
 /** 60 seconds × 1,000 milliseconds; inclusive at the last millisecond. */
 export const DECODING_WINDOW_MS = 60 * 1_000
@@ -90,6 +102,10 @@ const VERDICTS: Readonly<
 		text: "waiting for the source",
 		actions: ["check-source"],
 	},
+	"source-paused": {
+		text: "waiting: Receiver paused — Resume",
+		actions: ["resume-source"],
+	},
 	"unsupported-rate": {
 		text: "paused: the sample rate does not suit it",
 		actions: ["change-sample-rate"],
@@ -162,6 +178,7 @@ function suspensionCode(reason: string | undefined): DecoderVerdictCode {
 	if (reason === "no-channel-selected") return "no-channel"
 	if (reason === "capture-too-narrow") return "capture-too-narrow"
 	if (reason === "tuner-scanning") return "scanner-busy"
+	if (reason === "source-paused") return "source-paused"
 	if (reason === "decoder-unavailable") return "decoder-unavailable"
 	if (reason === "channelizer-unavailable") return "channelizer-unavailable"
 	if (
@@ -174,10 +191,35 @@ function suspensionCode(reason: string | undefined): DecoderVerdictCode {
 	return "unknown"
 }
 
+/** The plain name of a decoder type; any other type reads "Decoder". */
+export function decoderName(type: string): string {
+	return Object.hasOwn(DECODER_NAMES, type) ? DECODER_NAMES[type]! : "Decoder"
+}
+
+/**
+ * A failed decoder the manager is already bringing back: an automatic restart
+ * is scheduled or under way (restartInFlight: a crash-loop respawn, or a
+ * placement start that outlived its timeout), or a crash-loop retry runs on
+ * probation. Restarting it by hand would only race that, so its verdict
+ * offers no action.
+ */
+function retrying(status: DecoderStatus, running: boolean): boolean {
+	return (
+		status.restartInFlight === true ||
+		status.nextRestartAt !== undefined ||
+		status.health === "restarting" ||
+		(status.health === "faulted" && running)
+	)
+}
+
+/** A failed verdict's sentence while the manager restarts it on its own. */
+const RETRYING_TEXT = "failed: restarting on its own"
+
 /**
  * The decoder's one verdict. Precedence: failure, mode off, operator stop,
  * suspension (efficiency detail first), running output, a wanted start not
- * yet running; anything unrecognised reads "unknown" (the safe generic).
+ * yet running; anything unrecognised reads "unknown" (the safe generic). A
+ * failure the manager is already restarting suggests no action.
  */
 export function decoderVerdict(
 	status: DecoderStatus,
@@ -190,18 +232,21 @@ export function decoderVerdict(
 	else if (status.desiredRunning === false && !running) code = "stopped"
 	else if (health === "suspended") {
 		const reason = status.suspension?.reasonCode
+		// The operator's pause outranks a stale efficiency state.
 		code =
-			reason === "efficiency-budget" || status.efficiency !== undefined
+			reason !== "source-paused" &&
+			(reason === "efficiency-budget" || status.efficiency !== undefined)
 				? efficiencyCode(status)
 				: suspensionCode(reason)
 	} else if (health === "decoding") code = "decoding"
 	else if (running) code = "listening"
 	else if (status.desiredRunning === true) code = "starting"
 	else code = "unknown"
-	const name = Object.hasOwn(DECODER_NAMES, status.type)
-		? DECODER_NAMES[status.type]!
-		: "Decoder"
-	const entry = VERDICTS[code]
+	const name = decoderName(status.type)
+	const entry =
+		code === "failed" && retrying(status, running)
+			? { text: RETRYING_TEXT, actions: [] }
+			: VERDICTS[code]
 	const verdict = {
 		code,
 		text: `${name} ${entry.text}`.slice(0, DECODER_VERDICT_TEXT_MAX_LENGTH),
@@ -213,9 +258,120 @@ export function decoderVerdict(
 		: { code: "unknown", text: "Decoder status unknown", actions: [] }
 }
 
+const positive = (n: unknown): n is number =>
+	typeof n === "number" && Number.isFinite(n) && n > 0
+
+/** Built-in band plan ranges per region, read once (the catalogue is static data). */
+const planRanges = new Map<BandRegion, readonly ScanRange[]>()
+function rangesFor(region: BandRegion): readonly ScanRange[] {
+	let ranges = planRanges.get(region)
+	if (ranges === undefined) {
+		ranges = builtinBandplansFor(region).flatMap(plan => plan.ranges)
+		planRanges.set(region, ranges)
+	}
+	return ranges
+}
+
+/** True when a built-in band plan range holding `hz` lists one of `protocols` (the decoder's region, else any). */
+function planListsAt(
+	protocols: readonly string[],
+	hz: number,
+	region: unknown,
+): boolean {
+	const regions: readonly BandRegion[] =
+		typeof region === "string" &&
+		(BAND_REGIONS as readonly string[]).includes(region)
+			? [region as BandRegion]
+			: BAND_REGIONS
+	return regions.some(r =>
+		rangesFor(r).some(
+			range =>
+				hz >= range.startHz &&
+				hz <= range.endHz &&
+				(range.protocols ?? []).some(p => protocols.includes(p)),
+		),
+	)
+}
+
+/**
+ * The fixed frequencies among a decoder's configured targets. targetFrequenciesHz
+ * also carries placement frequencies that only follow the tuner: a VFO or
+ * fallback channel, a centre-reach placement (the source centre) and, for a
+ * single-channel audio type (VFO_CHANNEL_TYPES), a "configured" channel, which
+ * sits on the VFO or the centre when no channel is configured. Without
+ * placements the targets are the config's; with only fixed placements of a
+ * wideband type they are too (channels plus declared frequencies). Otherwise
+ * only band, band plan and activity channels (and a wideband type's configured
+ * ones) count.
+ */
+function fixedTargetsHz(status: DecoderStatus): number[] {
+	const raw: unknown = status.targetFrequenciesHz
+	const declared = Array.isArray(raw) ? (raw as unknown[]).filter(positive) : []
+	const rawPlacements: unknown = status.placements
+	const placements = Array.isArray(rawPlacements)
+		? (rawPlacements as DecoderPlacementView[])
+		: []
+	if (placements.length === 0) return declared
+	const audio = VFO_CHANNEL_TYPES.includes(status.type)
+	const fixed = (p: DecoderPlacementView): boolean =>
+		p != null &&
+		p.reach !== "centre" &&
+		(p.origin === "band" ||
+			p.origin === "bandplan" ||
+			p.origin === "activity" ||
+			(p.origin === "configured" && !audio))
+	if (!audio && placements.every(fixed)) return declared
+	return placements
+		.filter(fixed)
+		.flatMap(p => (positive(p.channelHz) ? [p.channelHz] : []))
+}
+
+/**
+ * Whether the decoder's own band holds `hz`: the core's tuned-band rule
+ * (bandContainsTuned) over its band assessment's targets and ranges. Before
+ * the first assessment (no source capabilities yet, at boot) or when it names
+ * no band, the same rule runs over the fixed configured targets (fixedTargetsHz).
+ * A decoder with neither covers `hz` only when a built-in band plan range there
+ * lists one of its protocols. A frequency that only follows the tuner (a VFO,
+ * fallback or centre placement) never counts; scanner probes never cover;
+ * anything malformed reads false.
+ */
+export function decoderCoversHz(status: DecoderStatus, hz: number): boolean {
+	if (!positive(hz)) return false
+	if (status.owner === "scanner" || status.ephemeral === true) return false
+	const band = status.bandAssessment
+	const rawTargets: unknown = band?.targetsHz
+	const rawRanges: unknown = band?.rangesHz
+	const targetsHz = Array.isArray(rawTargets) ? (rawTargets as number[]) : []
+	const rangesHz = Array.isArray(rawRanges)
+		? (rawRanges as DecoderBandRange[])
+		: []
+	if (targetsHz.length > 0 || rangesHz.length > 0)
+		return bandContainsTuned(
+			{ basis: band?.basis ?? "configured", targetsHz, rangesHz },
+			hz,
+		)
+	const configured = fixedTargetsHz(status)
+	if (configured.length > 0)
+		return bandContainsTuned(
+			{ basis: "configured", targetsHz: configured, rangesHz: [] },
+			hz,
+		)
+	const protocols = Object.hasOwn(DECODER_PROTOCOLS, status.type)
+		? DECODER_PROTOCOLS[status.type as keyof typeof DECODER_PROTOCOLS]
+		: undefined
+	if (!protocols || protocols.length === 0) return false
+	return planListsAt(protocols, hz, band?.region?.code)
+}
+
+/**
+ * One decoder's summary item. With `hz`, `coversHz` says whether its band
+ * holds that frequency (decoderCoversHz); without, the field is absent.
+ */
 export function decoderSummary(
 	status: DecoderStatus,
 	now: number,
+	hz?: number,
 ): DecoderSummary {
 	// A decoder's placement workers (instances such as `<type>#<channel>@<source>`)
 	// run for it: any running placement makes the decoder running.
@@ -228,6 +384,7 @@ export function decoderSummary(
 	const health = healthOf(aggregated, last, now)
 	return {
 		id: status.id,
+		name: decoderName(status.type),
 		protocol: status.type,
 		state: running ? "running" : "stopped",
 		placements:
@@ -255,8 +412,19 @@ export function decoderSummary(
 		suspensionReason: status.suspension?.reasonCode ?? null,
 		health,
 		verdict: decoderVerdict(status, health, running),
+		...(hz === undefined ? {} : { coversHz: decoderCoversHz(status, hz) }),
 	}
 }
+
+/** `?hz=`: a positive finite frequency up to DECODER_SUMMARY_MAX_HZ, or absent. */
+const SummaryQuerySchema = z.object({
+	hz: z.coerce
+		.number()
+		.finite()
+		.positive()
+		.max(DECODER_SUMMARY_MAX_HZ)
+		.optional(),
+})
 
 export const decoderSummaryRoutes: FastifyPluginAsync<{
 	decoderManager: Pick<DecoderManager, "getAllStatus">
@@ -269,11 +437,19 @@ export const decoderSummaryRoutes: FastifyPluginAsync<{
 				tags: ["decoders"],
 			},
 		},
-		async () => {
+		async (request, reply) => {
+			const query = SummaryQuerySchema.safeParse(request.query ?? {})
+			if (!query.success)
+				return reply.code(400).send(
+					zodValidationBody(query.error, SummaryQuerySchema, {
+						part: "query",
+					}),
+				)
 			const now = Date.now()
+			const { hz } = query.data
 			return decoderManager
 				.getAllStatus()
-				.map(status => decoderSummary(status, now))
+				.map(status => decoderSummary(status, now, hz))
 		},
 	)
 }

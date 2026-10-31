@@ -6,7 +6,7 @@
  * opening. Points are turned into this browser's clock against the answer's `generatedAt`.
  */
 import { z } from "zod/v4"
-import type { ActivityTrails } from "@wavekit/api-types"
+import type { ActivityCategory, ActivityTrails } from "@wavekit/api-types"
 
 import type { ApiClient } from "./api-client.ts"
 import { ApiError, errorMessage, validated } from "./api-client.ts"
@@ -16,6 +16,28 @@ import type { Listener, ReadableStore } from "./store.ts"
 import { Store } from "./store.ts"
 
 const PATH = "/api/activity/trails"
+
+/**
+ * What the Map's tracks are drawn from: every category but aviation-data. An aircraft reports its
+ * position over ACARS or VDL2 (ADS-C, link frames to ±0.1°) under the same entity key as its ADS-B
+ * track; the core's trails group by entity key alone, so those reports would join the ADS-B line.
+ * The Map draws them on their own (features/map/reported.ts).
+ */
+export const TRACK_CATEGORIES: readonly ActivityCategory[] = [
+	"aircraft",
+	"marine",
+	"voice",
+	"paging",
+	"aprs",
+	"sensors",
+	"mesh",
+	"other",
+]
+
+/** GET path for trails of these categories. */
+export function trailsPath(categories: readonly ActivityCategory[]): string {
+	return `${PATH}?categories=${categories.map(encodeURIComponent).join(",")}`
+}
 
 export const trailsSchema = z.object({
 	trails: z.array(
@@ -50,18 +72,24 @@ export class TrailHistoryStore implements ReadableStore<TrailHistoryState> {
 	private readonly api: ApiClient
 	private readonly events: EventsClient
 	private readonly clock: () => number
+	private readonly path: string
 	private attached = 0
 	private offReconnect: (() => void) | null = null
 	private inflight: Promise<void> | null = null
+	private offsetMs = 0
 
 	constructor(
 		api: ApiClient,
 		events: EventsClient,
-		options: { now?: () => number } = {},
+		options: {
+			now?: () => number
+			categories?: readonly ActivityCategory[]
+		} = {},
 	) {
 		this.api = api
 		this.events = events
 		this.clock = options.now ?? Date.now
+		this.path = trailsPath(options.categories ?? TRACK_CATEGORIES)
 	}
 
 	get(): TrailHistoryState {
@@ -70,6 +98,14 @@ export class TrailHistoryStore implements ReadableStore<TrailHistoryState> {
 
 	subscribe = (listener: Listener<TrailHistoryState>): (() => void) =>
 		this.state.subscribe(listener)
+
+	/**
+	 * This browser's clock minus the core's, ms, from the last answer (0 before one): what turns a
+	 * core time into this browser's clock, as the trails' points are.
+	 */
+	clockOffsetMs(): number {
+		return this.offsetMs
+	}
 
 	/** Loads now and after each reconnect while attached (reference counted). */
 	attach(): () => void {
@@ -101,11 +137,12 @@ export class TrailHistoryStore implements ReadableStore<TrailHistoryState> {
 		if (this.state.get().status !== "ready")
 			this.state.update(s => ({ ...s, status: "loading" }))
 		try {
-			const body = await this.api.get<unknown>(PATH)
-			const answer = validated(trailsSchema, body, "GET", PATH)
+			const body = await this.api.get<unknown>(this.path)
+			const answer = validated(trailsSchema, body, "GET", this.path)
 			const receivedAt = this.clock()
 			const coreNow = Date.parse(answer.generatedAt)
 			const offset = Number.isFinite(coreNow) ? receivedAt - coreNow : 0
+			this.offsetMs = offset
 			const trails = new Map<string, TrailPoint[]>()
 			for (const t of answer.trails)
 				trails.set(
