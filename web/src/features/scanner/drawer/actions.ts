@@ -95,9 +95,11 @@ export async function listenTo(
 	d: Discovery,
 ): Promise<void> {
 	// before the unlock: whether Listen was on here and the core's live audio ran before this click
+	const status = services.data.liveAudio.get().status
 	const before = {
 		listening: services.listen.get().wanted,
-		running: services.data.liveAudio.get().status?.running === true,
+		known: status != null,
+		running: status?.running === true,
 	}
 	const listening = await listenAfterTune(
 		Math.round(discoveryTuneHz(d)),
@@ -115,7 +117,7 @@ export async function listenTo(
 async function retarget(
 	services: Pick<AppServices, "data" | "tuning" | "listen">,
 	d: Discovery,
-	before: { listening: boolean; running: boolean },
+	before: { listening: boolean; known: boolean; running: boolean },
 ): Promise<boolean> {
 	const { data, tuning } = services
 	try {
@@ -147,7 +149,16 @@ async function retarget(
 	}
 	if (moved) {
 		// the retarget started the core's live audio for this click: nobody hears it, so it stops again
-		if (!before.listening && !before.running && !services.listen.get().wanted)
+		// The stop is shared by every client: only when the core's live status is known (it reported before
+		// the click and now) and no client is connected; any doubt leaves it running.
+		const now = data.liveAudio.get().status
+		if (
+			!before.listening &&
+			before.known &&
+			!before.running &&
+			now?.clientCount === 0 &&
+			!services.listen.get().wanted
+		)
 			void data.liveAudio.stop().catch(() => undefined)
 		showToast(tuneFailedText(null), { tone: "warn" })
 		return false

@@ -562,8 +562,8 @@ describe("signal chips: the per-frame frequency index", () => {
 				fc.integer({ min: -40_000, max: 40_000 }),
 				fc.integer({ min: 0, max: 30_000 }),
 				(specs, at, width) => {
-					// distinct frequencies: on equal distance either side, the scan and the index agree on the
-					// distance, so compare distances (and identity when the closest is unique)
+					// equal distances either side (and equal frequencies) are generated: the index keeps the
+					// scan's source order for ties, so the very same discovery answers
 					const items = specs.map((x, i) => ({
 						...(kinds[x.kind] as () => Discovery)(),
 						id: `d${i}`,
@@ -571,16 +571,15 @@ describe("signal chips: the per-frame frequency index", () => {
 					}))
 					const index = discoveryIndex(items)
 					const hz = HZ + at
-					const dist = (d: Discovery | null) =>
-						d === null ? null : Math.abs(d.frequencyHz - hz)
-					expect(dist(identifiedAt(index, hz, width))).toBe(
-						dist(identifiedAt(items, hz, width)),
+					const pickedId = (d: Discovery | null) => d?.id ?? null
+					expect(pickedId(identifiedAt(index, hz, width))).toBe(
+						pickedId(identifiedAt(items, hz, width)),
 					)
-					expect(dist(weakDiscoveryAt(index, hz, width))).toBe(
-						dist(weakDiscoveryAt(items, hz, width)),
+					expect(pickedId(weakDiscoveryAt(index, hz, width))).toBe(
+						pickedId(weakDiscoveryAt(items, hz, width)),
 					)
-					expect(dist(provenLiveAt(index, hz, width, NONE, NOW))).toBe(
-						dist(provenLiveAt(items, hz, width, NONE, NOW)),
+					expect(pickedId(provenLiveAt(index, hz, width, NONE, NOW))).toBe(
+						pickedId(provenLiveAt(items, hz, width, NONE, NOW)),
 					)
 				},
 			),

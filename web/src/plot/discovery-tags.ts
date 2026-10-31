@@ -922,19 +922,25 @@ export function identifiesChip(d: Discovery): boolean {
 export interface DiscoveryIndex {
 	/** Finite-frequency discoveries, by frequency then id. */
 	readonly sorted: readonly Discovery[]
+	/** Each sorted discovery's position in the source order: equal distances go to the earlier one, as a scan does. */
+	readonly rank: readonly number[]
 }
 
 export function discoveryIndex(items: Iterable<Discovery>): DiscoveryIndex {
-	const sorted: Discovery[] = []
-	for (const d of items) if (Number.isFinite(d.frequencyHz)) sorted.push(d)
-	sorted.sort(byFrequency)
-	return { sorted }
+	const entries: { d: Discovery; i: number }[] = []
+	let i = 0
+	for (const d of items) {
+		if (Number.isFinite(d.frequencyHz)) entries.push({ d, i })
+		i++
+	}
+	entries.sort((x, y) => byFrequency(x.d, y.d))
+	return { sorted: entries.map(e => e.d), rank: entries.map(e => e.i) }
 }
 
 function isIndex(
 	items: Iterable<Discovery> | DiscoveryIndex,
 ): items is DiscoveryIndex {
-	return "sorted" in items && Array.isArray(items.sorted)
+	return "sorted" in items && Array.isArray(items.sorted) && "rank" in items
 }
 
 /** The first position whose frequency is at least `hz`. */
@@ -953,8 +959,8 @@ function lowerBound(sorted: readonly Discovery[], hz: number): number {
 export type NearPick<A, B> = (d: Discovery, a: A, b: B) => boolean
 
 /**
- * The discovery closest to `hz` within `tolHz` that `pick` accepts, or null; ties go to the first in order
- * (frequency order for an index). A non-finite frequency never matches (|NaN| and Infinity fail `off <= tol`).
+ * The discovery closest to `hz` within `tolHz` that `pick` accepts, or null; ties go to the first in source
+ * order (an index keeps that order as `rank`, so it answers exactly as a scan). A non-finite frequency never matches (|NaN| and Infinity fail `off <= tol`).
  */
 export function closestNear<A, B>(
 	items: Iterable<Discovery> | DiscoveryIndex,
@@ -968,15 +974,22 @@ export function closestNear<A, B>(
 	let best: Discovery | null = null
 	let bestOff = Infinity
 	if (isIndex(items)) {
-		const sorted = items.sorted
+		const { sorted, rank } = items
 		const top = hz + tolHz
+		let bestRank = Infinity
 		for (let i = lowerBound(sorted, hz - tolHz); i < sorted.length; i++) {
 			const d = sorted[i] as Discovery
 			if (d.frequencyHz > top) break
 			const off = Math.abs(d.frequencyHz - hz)
-			if (off <= tolHz && off < bestOff && pick(d, a, b)) {
+			const r = rank[i] ?? Infinity
+			if (
+				off <= tolHz &&
+				(off < bestOff || (off === bestOff && r < bestRank)) &&
+				pick(d, a, b)
+			) {
 				best = d
 				bestOff = off
+				bestRank = r
 			}
 		}
 		return best

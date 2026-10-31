@@ -36,6 +36,10 @@ function setup(
 	running = false,
 ) {
 	const calls: string[] = []
+	/** The core's live status as this client last heard it; null before it reported. */
+	const live: { status: { running: boolean; clientCount: number } | null } = {
+		status: { running, clientCount: 0 },
+	}
 	const tuning = new Store<TuningState>({ targetHz: null, error: null })
 	let finish: (error: string | null) => void = () => undefined
 	const services = {
@@ -49,7 +53,7 @@ function setup(
 				},
 			},
 			liveAudio: {
-				get: () => ({ status: { running } }),
+				get: () => ({ status: live.status }),
 				stop: () => {
 					calls.push("core stop")
 					return Promise.resolve()
@@ -86,6 +90,7 @@ function setup(
 		>,
 		calls,
 		tuning,
+		live,
 		finish: (error: string | null = null) => finish(error),
 	}
 }
@@ -160,6 +165,42 @@ describe("scanner drawer Listen", () => {
 			"Not listening: the receiver was tuned elsewhere first",
 		)
 	})
+
+	for (const [name, change] of [
+		[
+			"another client connected while the retarget was out",
+			(live: { status: { running: boolean; clientCount: number } | null }) => {
+				live.status = { running: true, clientCount: 1 }
+			},
+		],
+		[
+			"the core's live status is unknown",
+			(live: { status: { running: boolean; clientCount: number } | null }) => {
+				live.status = null
+			},
+		],
+	] as const) {
+		it(`moved, but ${name}: the shared audio is never stopped`, async () => {
+			let release: () => void = () => undefined
+			const held = new Promise<void>(resolve => {
+				release = resolve
+			})
+			const { services, calls, finish, tuning, live } = setup([
+				outOfWindow(),
+				held,
+			])
+			const done = listenTo(services, d)
+			await flush()
+			finish()
+			await flush()
+			change(live)
+			tuning.set({ targetHz: 162_000_000, error: null })
+			release()
+			await done
+			expect(calls).not.toContain("core stop")
+			expect(calls).not.toContain("start")
+		})
+	}
 
 	it("moved, but live audio ran before the click (another listener): the core's audio stays on", async () => {
 		let release: () => void = () => undefined
