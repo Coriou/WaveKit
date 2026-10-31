@@ -30,6 +30,7 @@ import {
 	type DiscoveryTagFilter,
 	discoveryRowLayout,
 	hasTaggable,
+	listenAfterTune,
 	tagDetail,
 	tagPopoverRows,
 	tagState,
@@ -214,8 +215,7 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 		tune,
 		listen: hz => {
 			close(false)
-			void controller.tuneTo(hz)
-			void services.listen.start()
+			void listenAfterTune(hz, h => controller.tuneTo(h), services.listen)
 		},
 		scanner: id => {
 			close(false)

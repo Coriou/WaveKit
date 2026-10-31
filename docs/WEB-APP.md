@@ -73,6 +73,9 @@ The labels over the peaks use the same evidence:
 - A label on a proven discovery has a filled dot and an outline, like its tag. While that tag is
   lit, the label stays between bursts, so a DMR control channel shows one steady `DMR · CC 1`
   instead of flashing. Once the tag dims, the label goes the next time the signal is quiet.
+- A label names a protocol only when its discovery is proven. A discovery marked decoded whose
+  evidence says weak (or whose proof does not prove it) is not proven, so its label reads
+  `Unidentified · …` instead of `DMR`.
 - An unnamed peak near a discovery that is not proven says what was measured, for example
   `Unidentified · 4FSK ~9 kHz` with its frequency, and has a grey ring for a dot. Any other
   unnamed peak shows its frequency.
@@ -90,7 +93,8 @@ Click a single tag for its detail:
   traffic. A proven digital voice channel with no call in it says `No calls heard yet — control
 channel only`, which is why it has no Activity rows. Once calls are heard, **Last calls** opens
   Activity on that frequency.
-- **Tune**, **Listen** (tunes there and starts live audio) and **Open in Scanner**.
+- **Tune**, **Listen** (tunes there, then starts live audio once the tune has landed; if the tune
+  fails nothing plays) and **Open in Scanner**.
 
 ### The tuned card
 

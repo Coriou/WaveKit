@@ -86,13 +86,12 @@ import {
 import {
 	discoveryTagFilter,
 	howWeKnow,
-	identifiedAt,
-	identifiesChip,
 	identifiedLabel,
 	tagState,
 	unidentifiedLabel,
 } from "./discovery-tags.ts"
 import {
+	chipIdentity,
 	chipX,
 	clusterSignals,
 	fadingChips,
@@ -315,11 +314,15 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 		gateRef.current = stepLabelGate(gateRef.current, m, performance.now(), {
 			mode: g.mode,
 			tunedHz: g.tunedHz,
-			isNamed: (hz, widthHz, scanner) =>
-				scanner?.confidence === "decoded" ||
-				namedChannelAt(g.plan, hz, widthHz) ||
-				savedNear(g.saved, hz, widthHz) !== null ||
-				identifiedAt(g.discoveries.values(), hz, widthHz) !== null,
+			isNamed: (hz, widthHz, scanner) => {
+				if (
+					namedChannelAt(g.plan, hz, widthHz) ||
+					savedNear(g.saved, hz, widthHz) !== null
+				)
+					return true
+				const id = chipIdentity(g.discoveries, scanner, hz, widthHz)
+				return id.discovery !== null || id.trackDecoded
+			},
 			// the tag's wall clock, not the frame clock: a proven chip holds while its tag is live
 			provenLive: (hz, widthHz) =>
 				provenLiveAt(
@@ -813,21 +816,17 @@ function SignalLabels({
 			// what was identified there names the signal first, then a saved frequency, then the band plan;
 			// the core's own identity of the emission (WG11 frame tracks) wins over a match by frequency
 			const scanner = byHz.get(s.hz)?.scanner ?? null
-			const linked = scanner ? discoveries.get(scanner.discoveryId) : undefined
 			// band inspection UX req 1.2: a track's link to a discovery elsewhere (a stale link right after a
 			// retune: 145.5 MHz named on a 433.9 MHz track at the capture's edge) never names it
-			const own =
-				linked &&
-				Math.abs(linked.frequencyHz - s.hz) <= Math.max(3000, s.widthHz / 2)
-					? linked
-					: undefined
-			const d =
-				own && identifiesChip(own)
-					? own
-					: identifiedAt(discoveries.values(), s.hz, s.widthHz)
+			const { discovery: d, trackDecoded } = chipIdentity(
+				discoveries,
+				scanner,
+				s.hz,
+				s.widthHz,
+			)
 			const label = d
 				? identifiedLabel(d)
-				: scanner?.confidence === "decoded"
+				: trackDecoded && scanner
 					? confidenceText(scanner)
 					: null
 			if (label !== null) {

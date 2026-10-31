@@ -161,6 +161,42 @@ describe("PlotController", () => {
 		expect(calls).toEqual([`offset ${161_180_000 - 161_500_000}`])
 	})
 
+	it("tuneTo resolves true once the tune landed, false on failure, supersession or nothing to tune", async () => {
+		const { c, release } = setup()
+		const ok = c.tuneTo(161_000_000)
+		release()
+		expect(await ok).toBe(true)
+		const failing = new PlotController({
+			retune: () => Promise.reject(new Error("tuner busy")),
+			setOffset: () => Promise.reject(new Error("tuner busy")),
+		})
+		failing.setContext(context)
+		expect(await failing.tuneTo(161_000_000)).toBe(false)
+		expect(await failing.tuneTo(156_800_000)).toBe(false)
+		const pending: (() => void)[] = []
+		const queued = new PlotController({
+			retune: () => Promise.resolve(),
+			setOffset: () =>
+				new Promise<void>(resolve => {
+					pending.push(resolve)
+				}),
+		})
+		queued.setContext(context)
+		const first = queued.tuneTo(161_000_000)
+		const second = queued.tuneTo(161_100_000)
+		for (let i = 0; i < 20; i++) {
+			pending.shift()?.()
+			await Promise.resolve()
+		}
+		expect(await first).toBe(false)
+		expect(await second).toBe(true)
+		const empty = new PlotController({
+			retune: () => Promise.resolve(),
+			setOffset: () => Promise.resolve(),
+		})
+		expect(await empty.tuneTo(161_000_000)).toBe(false)
+	})
+
 	it("tuning outside the capture recentres the hardware and zeroes the offset", async () => {
 		const { c, calls, release } = setup()
 		const done = c.tuneTo(156_800_000)

@@ -1,10 +1,15 @@
 // Signal chips over the trace (band inspection UX req 1.1, extended to the live-signal layer): co-located
 // signals share one chip ("+n-1"), a leaving chip never lands on another, and the number of chips is
 // capped. Pure: no DOM, no stores.
-import type { Discovery } from "@wavekit/api-types"
+import type { Discovery, SpectrumFrameTrackScanner } from "@wavekit/api-types"
 
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
-import { tagState, tagTier } from "./discovery-tags.ts"
+import {
+	identifiedAt,
+	identifiesChip,
+	tagState,
+	tagTier,
+} from "./discovery-tags.ts"
 import type { PlacedLabel, SignalInfo } from "./maths.ts"
 
 /** Two signals closer than this on screen share one chip. */
@@ -184,4 +189,34 @@ export function weakDiscoveryAt(
 	widthHz: number,
 ): Discovery | null {
 	return closestDiscovery(items, hz, widthHz, d => tagState(d) !== "proven")
+}
+
+/**
+ * What names a signal's chip: the discovery its frame track links to when that one identifies it (identifiesChip),
+ * else the closest identified one (identifiedAt), else the track's own "decoded" only when no linked discovery near
+ * the signal contradicts it (a weak or non-proving decoded, or an Ignored one, names nothing). A link to a discovery
+ * elsewhere (a stale link right after a retune) counts as no link (band inspection UX req 1.2).
+ */
+export function chipIdentity(
+	discoveries: ReadonlyMap<string, Discovery>,
+	scanner: SpectrumFrameTrackScanner | null,
+	hz: number,
+	widthHz: number,
+): { discovery: Discovery | null; trackDecoded: boolean } {
+	const linked = scanner ? discoveries.get(scanner.discoveryId) : undefined
+	const own =
+		linked && Math.abs(linked.frequencyHz - hz) <= Math.max(3000, widthHz / 2)
+			? linked
+			: undefined
+	const discovery =
+		own && identifiesChip(own)
+			? own
+			: identifiedAt(discoveries.values(), hz, widthHz)
+	return {
+		discovery,
+		trackDecoded:
+			discovery === null &&
+			scanner?.confidence === "decoded" &&
+			own === undefined,
+	}
 }

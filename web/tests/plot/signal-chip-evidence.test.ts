@@ -22,6 +22,7 @@ import {
 } from "../../src/plot/label-gate.ts"
 import type { Track } from "../../src/plot/maths.ts"
 import {
+	chipIdentity,
 	clusterSignals,
 	provenLiveAt,
 	weakDiscoveryAt,
@@ -465,10 +466,139 @@ describe("signal chips: which discovery a chip states (Plot.tsx)", () => {
 		}
 	})
 
-	it("keeps a decoded discovery naming its chip, proven only when its tag is", () => {
-		const weak = disc("w", { evidenceLevel: "weak" })
-		expect(identifiesChip(weak)).toBe(true)
-		expect(tagState(weak)).not.toBe("proven")
+	it("names a decoded discovery's chip exactly when its tag is proven", () => {
+		const proven = disc("p")
+		expect(tagState(proven)).toBe("proven")
+		expect(identifiesChip(proven)).toBe(true)
+		// a core before proofs: decoded with neither an evidence level nor a proof still names it
+		const legacy = disc("old", { evidenceLevel: undefined, proof: undefined })
+		expect(tagState(legacy)).toBe("proven")
+		expect(identifiesChip(legacy)).toBe(true)
+		expect(identifiedAt([legacy], HZ, 10_000)?.id).toBe("old")
+	})
+
+	it("never names DMR for a decoded DMR whose evidence is weak with a digital-undecoded proof", () => {
+		const d = disc("dmr-weak", {
+			evidenceLevel: "weak",
+			proof: proof({ kind: "digital-undecoded", summary: "4FSK sync, no CC" }),
+		})
+		expect(d.confidence).toBe("decoded")
+		expect(identifiesChip(d)).toBe(false)
+		expect(identifiedAt([d], HZ, 10_000)).toBeNull()
+		// it takes the unidentified treatment instead
+		expect(weakDiscoveryAt([d], HZ, 10_000)?.id).toBe("dmr-weak")
+		const id = chipIdentity(
+			new Map([[d.id, d]]),
+			{ discoveryId: d.id, protocol: "dmr", confidence: "decoded" },
+			HZ,
+			10_000,
+		)
+		expect(id).toEqual({ discovery: null, trackDecoded: false })
+	})
+
+	it("never names a decoded chip whose evidence contradicts it", () => {
+		const items = [
+			disc("weak", { evidenceLevel: "weak" }),
+			disc("weak-noproof", { evidenceLevel: "weak", proof: undefined }),
+			disc("proven-noproof", { proof: undefined }),
+			disc("undecoded", {
+				proof: proof({ kind: "digital-undecoded" }),
+			}),
+			disc("carrier", { proof: proof({ kind: "carrier-only" }) }),
+			disc("proof-only", { evidenceLevel: undefined }),
+			disc("bad-kind", {
+				proof: proof({ kind: "guess" as unknown as "decoded" }),
+			}),
+			disc("bad-level", {
+				evidenceLevel: "certain" as unknown as "proven",
+			}),
+		]
+		for (const d of items) {
+			expect(d.confidence).toBe("decoded")
+			expect(identifiesChip(d)).toBe(false)
+			expect(weakDiscoveryAt([d], HZ, 10_000)?.id).toBe(d.id)
+		}
+		expect(identifiedAt(items, HZ, 10_000)).toBeNull()
+	})
+
+	it("names the chip exactly when tagState is proven and not Ignored (property)", () => {
+		// Feature: wg18-tg signal chips, Property 2: chip naming follows tagState
+		// Validates: chip naming consistent with tagState (identifiesChip, identifiedAt, weakDiscoveryAt)
+		fc.assert(
+			fc.property(
+				fc.constantFrom<Discovery["confidence"]>(
+					"decoded",
+					"classified",
+					"candidate",
+					"activity",
+				),
+				fc.constantFrom<string | undefined>(
+					"proven",
+					"weak",
+					undefined,
+					"certain",
+				),
+				fc.constantFrom<string | undefined>(
+					"decoded",
+					"analog-tone",
+					"analog-voice",
+					"digital-undecoded",
+					"carrier-only",
+					"guess",
+					undefined,
+				),
+				fc.boolean(),
+				(confidence, level, kind, lockout) => {
+					const over: Over = {
+						confidence,
+						evidenceLevel: level as Discovery["evidenceLevel"] | undefined,
+						proof:
+							kind === undefined
+								? undefined
+								: proof({ kind: kind as ScannerProof["kind"] }),
+					}
+					if (lockout)
+						over.operator = { lockout: true } as Discovery["operator"]
+					const d = disc("x", over)
+					const named = identifiesChip(d)
+					expect(named).toBe(!lockout && tagState(d) === "proven")
+					expect(identifiedAt([d], HZ, 10_000) !== null).toBe(named)
+					if (named) expect(weakDiscoveryAt([d], HZ, 10_000)).toBeNull()
+				},
+			),
+			{ numRuns: 200 },
+		)
+	})
+
+	it("lets the frame track's decoded name the chip only when no linked discovery contradicts it", () => {
+		const track = (id: string) =>
+			({ discoveryId: id, protocol: "dmr", confidence: "decoded" }) as const
+		// no discovery loaded for the link: the track's own decoded names it
+		expect(chipIdentity(new Map(), track("gone"), HZ, 10_000)).toEqual({
+			discovery: null,
+			trackDecoded: true,
+		})
+		// a stale link to a discovery elsewhere counts as no link
+		const far = disc("far", { evidenceLevel: "weak", frequencyHz: HZ + 2e6 })
+		expect(
+			chipIdentity(new Map([["far", far]]), track("far"), HZ, 10_000),
+		).toEqual({ discovery: null, trackDecoded: true })
+		// a proven linked discovery names it itself
+		const ok = disc("ok")
+		expect(
+			chipIdentity(new Map([["ok", ok]]), track("ok"), HZ, 10_000).discovery
+				?.id,
+		).toBe("ok")
+		// an Ignored one names nothing
+		const ig = disc("ig", { operator: { lockout: true } } as Over)
+		expect(
+			chipIdentity(new Map([["ig", ig]]), track("ig"), HZ, 10_000),
+		).toEqual({ discovery: null, trackDecoded: false })
+		// no track claim: nothing
+		expect(chipIdentity(new Map(), null, HZ, 10_000)).toEqual({
+			discovery: null,
+			trackDecoded: false,
+		})
 	})
 
 	it("never names the chip for weak, non-proving, malformed or ignored evidence", () => {

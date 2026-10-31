@@ -249,9 +249,12 @@ export class PlotController {
 		return capture
 	}
 
-	/** Tunes to `hz`: inside the capture the live-audio channel moves, outside the hardware recentres. */
-	tuneTo(hz: number): Promise<void> {
-		if (!this.ctx.capture || !(hz > 0)) return Promise.resolve()
+	/**
+	 * Tunes to `hz`: inside the capture the live-audio channel moves, outside the hardware recentres. Resolves true
+	 * once the tune landed, false when there was nothing to tune, it failed, or a later tune superseded it.
+	 */
+	tuneTo(hz: number): Promise<boolean> {
+		if (!this.ctx.capture || !(hz > 0)) return Promise.resolve(false)
 		const seq = ++this.seq
 		// A tune supersedes a drag's retunes still queued or in flight: none of their offsets may land
 		// after it, and it is worked out once the one in flight has answered, from the centre that one set.
@@ -262,8 +265,14 @@ export class PlotController {
 		const go = (): Promise<unknown> => this.sendTune(hz, shown)
 		const run = inFlight ? inFlight.then(go) : go()
 		return run.then(
-			() => this.settle(seq),
-			() => this.settle(seq),
+			() => {
+				this.settle(seq)
+				return seq === this.seq
+			},
+			() => {
+				this.settle(seq)
+				return false
+			},
 		)
 	}
 
@@ -336,9 +345,9 @@ export class PlotController {
 	 * A click at screen x (0–1): tunes exactly to the clicked frequency at the zoom's precision, or to a
 	 * signal's channel when the click is right on it (clickHz). The step raster is for the wheel and keys.
 	 */
-	clickAt(x: number, widthPx: number): Promise<void> {
+	clickAt(x: number, widthPx: number): Promise<boolean> {
 		const view = this.visibleSpan()
-		if (!view) return Promise.resolve()
+		if (!view) return Promise.resolve(false)
 		const hz = view.startHz + x * spanWidth(view)
 		return this.tuneTo(
 			clickHz(hz, this.ctx.tracks, view, widthPx, this.ctx.stepHz),
@@ -346,18 +355,18 @@ export class PlotController {
 	}
 
 	/** `times` tuning steps up (dir 1) or down (dir −1). */
-	step(dir: 1 | -1, times = 1): Promise<void> {
+	step(dir: 1 | -1, times = 1): Promise<boolean> {
 		const base = this.vfoHz()
-		if (base === null) return Promise.resolve()
+		if (base === null) return Promise.resolve(false)
 		const step = this.ctx.stepHz
 		return this.tuneTo(snapToStep(base + dir * times * step, step))
 	}
 
 	/** Plain wheel: accumulates travel, steps the frequency per WHEEL_STEP_PX. */
-	wheelStep(deltaPx: number): Promise<void> {
+	wheelStep(deltaPx: number): Promise<boolean> {
 		const { steps, acc } = accumulateWheel(this.wheelAcc, deltaPx)
 		this.wheelAcc = acc
-		if (steps === 0) return Promise.resolve()
+		if (steps === 0) return Promise.resolve(false)
 		return this.step(steps > 0 ? 1 : -1, Math.abs(steps))
 	}
 

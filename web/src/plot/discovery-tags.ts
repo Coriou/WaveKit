@@ -784,12 +784,27 @@ export function hasTaggable(
 }
 
 /**
- * A discovery names its signal's chip: the core decoded it, or its tag is proven (tagState: a proven analog proof
- * whose confidence stays classified or candidate). An Ignored (locked-out) one never does.
+ * A discovery names its signal's chip exactly when its tag is proven (tagState): a proven decoded or analog proof,
+ * or `decoded` from a core without proofs. A `decoded` whose evidence level or proof says otherwise (weak, a
+ * non-proving or malformed proof) names nothing. An Ignored (locked-out) one never does.
  */
 export function identifiesChip(d: Discovery): boolean {
 	if (d.operator?.lockout) return false
-	return d.confidence === "decoded" || tagState(d) === "proven"
+	return tagState(d) === "proven"
+}
+
+/**
+ * The tag popover's Listen: tunes first and starts live audio only once the tune landed, so a slow or failed
+ * tune never plays the previous frequency. Audio already on follows the tune by itself. True when it listens.
+ */
+export async function listenAfterTune(
+	hz: number,
+	tune: (hz: number) => Promise<boolean>,
+	listen: { get(): { wanted: boolean }; start(): Promise<void> },
+): Promise<boolean> {
+	if (!(await tune(hz))) return false
+	if (!listen.get().wanted) await listen.start()
+	return true
 }
 
 /**

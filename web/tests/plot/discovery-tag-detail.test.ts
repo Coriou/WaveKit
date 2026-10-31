@@ -10,6 +10,7 @@ import {
 	FLICKER_HOLD_MS,
 	FUTURE_SLACK_MS,
 	howWeKnow,
+	listenAfterTune,
 	placeDiscoveryTags,
 	PROVEN_LIVE_HOLD_MS,
 	RECENT_MS,
@@ -488,5 +489,65 @@ describe("tag popover layout", () => {
 		expect(detail).toMatch(/overflow-y:\s*auto/)
 		expect(detail).toMatch(/min-height:\s*0/)
 		expect(rule(".wk-plot-disc-pop-list")).toMatch(/overflow-y:\s*auto/)
+	})
+})
+
+describe("tag popover Listen", () => {
+	function fakeListen(wanted = false) {
+		const calls: string[] = []
+		const listen = {
+			wanted,
+			get: () => ({ wanted: listen.wanted }),
+			start: () => {
+				calls.push("start")
+				listen.wanted = true
+				return Promise.resolve()
+			},
+		}
+		return { listen, calls }
+	}
+
+	it("starts audio only once the tune has landed, never before", async () => {
+		const { listen, calls } = fakeListen()
+		let land: (ok: boolean) => void = () => undefined
+		const tune = (hz: number) => {
+			calls.push(`tune ${hz}`)
+			return new Promise<boolean>(resolve => {
+				land = resolve
+			})
+		}
+		const done = listenAfterTune(161_312_500, tune, listen)
+		await Promise.resolve()
+		await Promise.resolve()
+		// a slow tune: nothing plays yet (it would be the previous frequency)
+		expect(calls).toEqual(["tune 161312500"])
+		land(true)
+		expect(await done).toBe(true)
+		expect(calls).toEqual(["tune 161312500", "start"])
+	})
+
+	it("never plays when the tune fails or is superseded", async () => {
+		const { listen, calls } = fakeListen()
+		expect(
+			await listenAfterTune(1e8, () => Promise.resolve(false), listen),
+		).toBe(false)
+		expect(calls).toEqual([])
+	})
+
+	it("leaves audio already on alone: it follows the tune", async () => {
+		const { listen, calls } = fakeListen(true)
+		expect(
+			await listenAfterTune(1e8, () => Promise.resolve(true), listen),
+		).toBe(true)
+		expect(calls).toEqual([])
+	})
+
+	it("is what the popover's Listen runs", () => {
+		const src = readFileSync(
+			new URL("../../src/plot/DiscoveryTags.tsx", import.meta.url),
+			"utf8",
+		)
+		expect(src).toContain("listenAfterTune(hz,")
+		expect(src).not.toMatch(/void services\.listen\.start\(\)/)
 	})
 })
