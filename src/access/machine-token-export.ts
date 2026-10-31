@@ -89,6 +89,20 @@ async function assertReplaceable(out: string, uid: number): Promise<boolean> {
 	return true
 }
 
+interface Identity {
+	dev: number
+	ino: number
+}
+
+function same(a: Identity, b: Identity): boolean {
+	return a.dev === b.dev && a.ino === b.ino
+}
+
+/** Test seam: runs at the publish step's race points (no production caller passes it). */
+export interface MachineTokenExportHooks {
+	step?: (name: "before-publish" | "after-publish") => Promise<void> | void
+}
+
 /**
  * Host-side export of the existing machine credential to a private file, so an
  * agent never needs a shell inside the container. It issues nothing: the file
@@ -103,14 +117,30 @@ async function assertReplaceable(out: string, uid: number): Promise<boolean> {
  * 0600 under a temporary name (O_EXCL, O_NOFOLLOW, fchmod past the umask),
  * fsynced, then published atomically: `link` when the name must be new (fails
  * if it appeared meanwhile), `rename` with `replace`.
+ *
+ * Publication is anchored to the validated parent, not its pathname: Node has no
+ * `linkat`/`renameat`, so the command changes the working directory into the
+ * parent and checks that `.` is the directory it validated, then creates, links
+ * and renames by bare name. The working directory pins the inode, so swapping the
+ * parent path (or an ancestor) for a symlink to the private directory afterwards
+ * cannot redirect the write. The parent path's identity (dev/ino) and that it is
+ * neither the private directory nor inside it are checked immediately before and
+ * after `link`/`rename`; on any mismatch what was written is removed from the
+ * pinned directory and the export is refused. It changes the process working
+ * directory for the publish and restores it, so it runs only in the one-shot
+ * access command, never in the core.
+ *
  * An existing target is refused unless `replace` is set and it is already our
  * own 0600 regular file. Nothing returned or thrown carries the token or a path.
  */
-export async function exportMachineToken(options: {
-	directory: string
-	out: string
-	replace?: boolean
-}): Promise<MachineTokenExportResult> {
+export async function exportMachineToken(
+	options: {
+		directory: string
+		out: string
+		replace?: boolean
+	},
+	hooks: MachineTokenExportHooks = {},
+): Promise<MachineTokenExportResult> {
 	const parsed = optionsSchema.safeParse(options)
 	if (!parsed.success)
 		return { kind: "unavailable", code: "ACCESS_COMMAND_INVALID" }
@@ -122,7 +152,11 @@ export async function exportMachineToken(options: {
 		return { kind: "unavailable", code: "ACCESS_TOKEN_WRITE_FAILED" }
 	const uid = currentUid
 	const parentPath = dirname(out)
+	const name = basename(out)
 	let parent: FileHandle | undefined
+	let parentId: Identity
+	let realDirectory: string
+	let privateId: Identity | undefined
 	try {
 		const parentStat = await fs.lstat(parentPath).catch(() => {
 			throw refuse("ACCESS_TOKEN_OUT_UNSAFE")
@@ -133,13 +167,13 @@ export async function exportMachineToken(options: {
 			(parentStat.mode & 0o022) !== 0
 		)
 			throw refuse("ACCESS_TOKEN_OUT_UNSAFE")
+		parentId = parentStat
 		// The private directory admits only its own files; never write the copy
 		// there, including through a symlinked ancestor.
-		const [realParent, realDirectory] = await Promise.all([
-			fs.realpath(parentPath),
-			fs.realpath(directory).catch(() => directory),
-		])
-		if (within(realDirectory, join(realParent, basename(out))))
+		realDirectory = await fs.realpath(directory).catch(() => directory)
+		privateId = await fs.stat(realDirectory).catch(() => undefined)
+		const realParent = await fs.realpath(parentPath)
+		if (within(realDirectory, join(realParent, name)))
 			throw refuse("ACCESS_TOKEN_OUT_UNSAFE")
 		const exists = await assertReplaceable(out, uid)
 		if (exists && !replace) throw refuse("ACCESS_TOKEN_OUT_EXISTS")
@@ -147,14 +181,16 @@ export async function exportMachineToken(options: {
 			parentPath,
 			constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
 		)
-		const opened = await parent.stat()
-		if (opened.dev !== parentStat.dev || opened.ino !== parentStat.ino)
+		if (!same(await parent.stat(), parentId))
 			throw refuse("ACCESS_TOKEN_OUT_UNSAFE")
 	} catch (error) {
 		await parent?.close().catch(() => undefined)
 		return { kind: "unavailable", code: codeOf(error) }
 	}
 	const parentHandle = parent
+	const pinnedId = parentId
+	const privateDirectory = realDirectory
+	const privateIdentity = privateId
 	let failure: MachineTokenExportCode | undefined
 	try {
 		await PrivateAccessStorage.readMachineCredential({ directory }, token =>
@@ -171,11 +207,40 @@ export async function exportMachineToken(options: {
 		? { kind: "written" }
 		: { kind: "unavailable", code: failure }
 
+	/**
+	 * The parent path still names the pinned directory, `.` is that directory, and
+	 * neither is the private directory or inside it. Throws `ACCESS_TOKEN_OUT_UNSAFE`.
+	 */
+	async function assertAnchored(): Promise<void> {
+		const [path, here] = await Promise.all([
+			fs.lstat(parentPath).catch(() => undefined),
+			fs.stat(".").catch(() => undefined),
+		])
+		if (
+			!path ||
+			!here ||
+			path.isSymbolicLink() ||
+			!same(path, pinnedId) ||
+			!same(here, pinnedId) ||
+			(privateIdentity !== undefined && same(here, privateIdentity))
+		)
+			throw refuse("ACCESS_TOKEN_OUT_UNSAFE")
+		// getcwd reports where the pinned inode is now, whatever path reached it.
+		if (within(privateDirectory, join(process.cwd(), name)))
+			throw refuse("ACCESS_TOKEN_OUT_UNSAFE")
+	}
+
 	async function publish(token: string): Promise<void> {
-		const temp = join(parentPath, `.${basename(out)}-${randomUUID()}.tmp`)
+		const previous = process.cwd()
+		const temp = `.${name}-${randomUUID()}.tmp`
 		let handle: FileHandle | undefined
 		let ownedTemp = false
+		let published = false
+		let entered = false
 		try {
+			process.chdir(parentPath)
+			entered = true
+			await assertAnchored()
 			handle = await fs.open(
 				temp,
 				constants.O_WRONLY |
@@ -190,21 +255,36 @@ export async function exportMachineToken(options: {
 			await handle.sync()
 			await handle.close()
 			handle = undefined
+			if (replace) await assertReplaceable(name, uid)
+			await assertAnchored()
+			await hooks.step?.("before-publish")
 			if (replace) {
-				await assertReplaceable(out, uid)
-				await fs.rename(temp, out)
+				await fs.rename(temp, name)
 				ownedTemp = false
 			} else {
-				await fs.link(temp, out).catch((error: unknown) => {
+				await fs.link(temp, name).catch((error: unknown) => {
 					throw hasCode(error, "EEXIST")
 						? refuse("ACCESS_TOKEN_OUT_EXISTS")
 						: error
 				})
 			}
+			published = true
+			await hooks.step?.("after-publish")
+			await assertAnchored()
 			await parentHandle.sync()
+		} catch (error) {
+			// Still inside the pinned directory: these bare names cannot reach elsewhere.
+			if (published && entered) await fs.unlink(name).catch(() => undefined)
+			throw error
 		} finally {
 			if (handle) await handle.close().catch(() => undefined)
-			if (ownedTemp) await fs.unlink(temp).catch(() => undefined)
+			if (ownedTemp && entered) await fs.unlink(temp).catch(() => undefined)
+			if (entered)
+				try {
+					process.chdir(previous)
+				} catch {
+					// The caller's directory went away: stay put, nothing else uses it.
+				}
 		}
 	}
 }

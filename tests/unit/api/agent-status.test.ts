@@ -1,14 +1,23 @@
 import Fastify from "fastify"
 import { describe, expect, it } from "vitest"
 import {
+	AGENT_ACTIVITY_STATES,
+	AGENT_SOURCE_STATES,
+	AGENT_SOURCE_WARNINGS,
 	AGENT_STATUS_LIMITS,
+	AGENT_TUNER_OWNERS,
+	DECODER_VERDICT_ACTIONS,
+	DECODER_VERDICT_CODES,
 	agentStatusSchema,
+	jsonStringBytes,
+	type AgentStatus,
 	type ScanJob,
 	type TunerState,
 } from "@wavekit/api-types"
 import {
 	agentStatusRoutes,
 	buildAgentStatus,
+	clipJson,
 	type AgentStatusRoutesOptions,
 } from "../../../src/api/routes/agent-status.js"
 import { decoderSummary } from "../../../src/api/routes/decoder-summary.js"
@@ -97,6 +106,21 @@ const liveStatus = (running: boolean) =>
 		squelchOpen: true,
 	}) as unknown as ReturnType<LiveDemodulator["getStatus"]>
 
+type ScannerFake = NonNullable<AgentStatusRoutesOptions["scanner"]>
+
+/** A scanner whose tuner leases are `holders` (source id to job id), as the arbiter keeps them. */
+function scanner(
+	jobs: ScanJob[],
+	holders: Record<string, string> = {},
+	enabled = true,
+): ScannerFake {
+	return {
+		status: () => ({ enabled }) as ReturnType<ScannerFake["status"]>,
+		listJobs: () => jobs,
+		tunerLeaseHolder: sourceId => holders[sourceId] ?? null,
+	}
+}
+
 function options(
 	patch: Partial<AgentStatusRoutesOptions> = {},
 ): AgentStatusRoutesOptions {
@@ -127,7 +151,10 @@ describe("agent status", () => {
 			statuses.map(s => ({
 				id: s.id,
 				protocol: s.type,
-				verdict: decoderSummary(s, now).verdict,
+				verdict: {
+					code: decoderSummary(s, now).verdict.code,
+					actions: decoderSummary(s, now).verdict.actions,
+				},
 			})),
 		)
 	})
@@ -156,85 +183,83 @@ describe("agent status", () => {
 		])
 	})
 
-	it("names the tuner owner: external control, then a holding scanner job, else WaveKit", async () => {
+	it("names the tuner owner from lease ownership, not job state", async () => {
+		const spec = (kind: string, sourceId: string) =>
+			({ kind, sourceId }) as ScanJob["spec"]
 		const status = await buildAgentStatus(
 			options({
 				tunerController: {
 					getAllStates: () => [
 						tuner({ sourceId: "source-a" }),
 						tuner({ sourceId: "source-b", controlMode: "external" }),
-						tuner({ sourceId: "source-c" }),
-						tuner({ sourceId: "source-d" }),
 					],
 				},
-				scanner: {
-					status: () =>
-						({ enabled: true }) as ReturnType<
-							NonNullable<AgentStatusRoutesOptions["scanner"]>["status"]
-						>,
-					listJobs: () => [
-						job({
-							id: "j1",
-							spec: {
-								kind: "discover",
-								sourceId: "source-b",
-							} as ScanJob["spec"],
-						}),
+				scanner: scanner(
+					[
+						// External control wins over a lease.
+						job({ id: "j1", spec: spec("discover", "source-b") }),
+						// A running passive job never takes a lease.
 						job({
 							id: "j2",
-							spec: {
-								kind: "monitor",
-								sourceId: "source-c",
-							} as ScanJob["spec"],
-						}),
-						job({
-							id: "j3",
-							state: "paused",
-							reason: "operator",
-							spec: {
-								kind: "discover",
-								sourceId: "source-d",
-							} as ScanJob["spec"],
-						}),
-						job({
-							id: "j4",
-							state: "completed",
-							spec: {
-								kind: "discover",
-								sourceId: "source-a",
-							} as ScanJob["spec"],
+							passive: true,
+							spec: spec("discover", "source-a"),
 						}),
 					],
-				},
+					{ "source-b": "j1" },
+				),
 			}),
 			now,
 		)
 		expect(status.tuners.map(t => [t.sourceId, t.owner])).toEqual([
 			["source-a", "wavekit"],
 			["source-b", "external"],
-			["source-c", "scanner"],
-			["source-d", "wavekit"],
 		])
-		expect(status.scanner).toMatchObject({ enabled: true, activeJobs: 3 })
+		expect(status.scanner).toMatchObject({ enabled: true, activeJobs: 2 })
 	})
 
-	it("reports unknown tuner fields as null and flags config-only values", async () => {
-		const status = await buildAgentStatus(
+	it("keeps an operator-paused sweep as owner while it holds the lease", async () => {
+		const paused = job({
+			id: "j3",
+			state: "paused",
+			reason: "operator",
+			spec: { kind: "discover", sourceId: "source-a" } as ScanJob["spec"],
+		})
+		const held = await buildAgentStatus(
 			options({
-				tunerController: {
-					getAllStates: () => [
-						tuner({
-							unknownFields: ["gain"],
-							declaredOnlyFields: ["frequency"],
-						}),
-						tuner({ sourceId: "b", gainMode: "agc" }),
-						tuner({ sourceId: "c", unknownFields: ["frequency", "gainMode"] }),
-					],
-				},
+				tunerController: { getAllStates: () => [tuner()] },
+				scanner: scanner([paused], { "source-a": "j3" }),
 			}),
 			now,
 		)
-		expect(status.tuners).toEqual([
+		expect(held.tuners[0]?.owner).toBe("scanner")
+		// The same paused job once its lease is released: WaveKit owns the tuner again.
+		const released = await buildAgentStatus(
+			options({
+				tunerController: { getAllStates: () => [tuner()] },
+				scanner: scanner([paused]),
+			}),
+			now,
+		)
+		expect(released.tuners[0]?.owner).toBe("wavekit")
+	})
+
+	it("reports unknown tuner fields as null and flags config-only values", async () => {
+		const tuners = async (states: TunerState[]) =>
+			(
+				await buildAgentStatus(
+					options({ tunerController: { getAllStates: () => states } }),
+					now,
+				)
+			).tuners
+		expect(
+			await tuners([
+				tuner({
+					unknownFields: ["gain"],
+					declaredOnlyFields: ["frequency"],
+				}),
+				tuner({ sourceId: "b", gainMode: "agc" }),
+			]),
+		).toEqual([
 			{
 				sourceId: "source-a",
 				frequencyHz: 100_000_000,
@@ -245,6 +270,12 @@ describe("agent status", () => {
 				declaredOnly: true,
 			},
 			expect.objectContaining({ sourceId: "b", gainMode: "agc", gain: null }),
+		])
+		expect(
+			await tuners([
+				tuner({ sourceId: "c", unknownFields: ["frequency", "gainMode"] }),
+			]),
+		).toEqual([
 			expect.objectContaining({
 				sourceId: "c",
 				frequencyHz: null,
@@ -304,15 +335,11 @@ describe("agent status", () => {
 	})
 
 	it("picks the most recently updated live scanner job and cuts long names at the bound", async () => {
-		const longName = "x".repeat(AGENT_STATUS_LIMITS.jobNameMaxLength + 1)
+		const longName = "x".repeat(AGENT_STATUS_LIMITS.jobNameMaxBytes + 1)
 		const status = await buildAgentStatus(
 			options({
-				scanner: {
-					status: () =>
-						({ enabled: false }) as ReturnType<
-							NonNullable<AgentStatusRoutesOptions["scanner"]>["status"]
-						>,
-					listJobs: () => [
+				scanner: scanner(
+					[
 						job({ id: "old", updatedAt: "2026-10-01T10:00:00.000Z" }),
 						job({
 							id: "new",
@@ -325,23 +352,21 @@ describe("agent status", () => {
 							updatedAt: "2026-10-01T11:59:59.000Z",
 						}),
 					],
-				},
+					{},
+					false,
+				),
 			}),
 			now,
 		)
 		expect(status.scanner?.job?.id).toBe("new")
 		expect(status.scanner?.job?.name).toHaveLength(
-			AGENT_STATUS_LIMITS.jobNameMaxLength,
+			AGENT_STATUS_LIMITS.jobNameMaxBytes,
 		)
+		// A shortened name alone does not mark the answer truncated.
+		expect(status.truncated).toBe(false)
 		const atBound = await buildAgentStatus(
 			options({
-				scanner: {
-					status: () =>
-						({ enabled: true }) as ReturnType<
-							NonNullable<AgentStatusRoutesOptions["scanner"]>["status"]
-						>,
-					listJobs: () => [job({ name: longName.slice(1) })],
-				},
+				scanner: scanner([job({ name: longName.slice(1) })]),
 			}),
 			now,
 		)
@@ -382,27 +407,126 @@ describe("agent status", () => {
 		expect(status.activity).toEqual(expected)
 	})
 
-	it("serves a full configuration under the size target with a stable shape", async () => {
-		// Every built-in decoder type, two pager and two LoRa instances, each with
-		// the longest verdict (three actions) and a recent decode.
-		const types = [
-			"readsb",
-			"ais-catcher",
-			"acarsdec",
-			"dumpvdl2",
-			"rtl433",
-			"direwolf",
-			"multimon-ng",
-			"multimon-ng",
-			"dsd-fme",
-			"lora-meshtastic",
-			"lora-meshtastic",
-			"lora-meshtastic",
-		]
-		const decoders = types.map((type, index) =>
+	const longest = (values: readonly string[]) =>
+		values.reduce((a, b) => (b.length > a.length ? b : a))
+	// Every number at the longest a double serialises to (24 bytes signed, 23 unsigned).
+	const signed = -1.2345678901234567e-300
+	const unsigned = 1.2345678901234567e-300
+	const count = 1.2345678901234567e300
+	const isoMax = new Date(8.64e15).toISOString()
+	const ascii = (char: string, bytes: number) => char.repeat(bytes)
+
+	it("bounds the largest body the schema admits under the target (the limit arithmetic)", () => {
+		const actions = [...DECODER_VERDICT_ACTIONS]
+			.sort((a, b) => b.length - a.length)
+			.slice(0, AGENT_STATUS_LIMITS.actionsMax)
+		const worst: AgentStatus = {
+			at: isoMax,
+			truncated: false,
+			tuners: Array.from({ length: AGENT_STATUS_LIMITS.sourcesMax }, () => ({
+				sourceId: ascii("t", AGENT_STATUS_LIMITS.idMaxBytes),
+				frequencyHz: unsigned,
+				sampleRateHz: unsigned,
+				gainMode: "manual" as const,
+				gain: signed,
+				owner: longest(
+					AGENT_TUNER_OWNERS,
+				) as AgentStatus["tuners"][number]["owner"],
+				declaredOnly: false,
+			})),
+			sources: Array.from({ length: AGENT_STATUS_LIMITS.sourcesMax }, () => ({
+				id: ascii("s", AGENT_STATUS_LIMITS.idMaxBytes),
+				connected: false,
+				state: longest(
+					AGENT_SOURCE_STATES,
+				) as AgentStatus["sources"][number]["state"],
+				sampleAgeMs: unsigned,
+				warnings: [...AGENT_SOURCE_WARNINGS],
+			})),
+			liveAudio: {
+				running: false,
+				health: "starting",
+				sourceId: ascii("l", AGENT_STATUS_LIMITS.idMaxBytes),
+				modulation: ascii("m", AGENT_STATUS_LIMITS.modulationMaxBytes),
+				offsetHz: signed,
+				clients: count,
+				squelchOpen: false,
+			},
+			scanner: {
+				enabled: false,
+				activeJobs: count,
+				job: {
+					id: ascii("j", AGENT_STATUS_LIMITS.idMaxBytes),
+					name: ascii("n", AGENT_STATUS_LIMITS.jobNameMaxBytes),
+					kind: "identify",
+					state: "completed",
+					reason: ascii("r", AGENT_STATUS_LIMITS.reasonMaxBytes),
+					sourceId: ascii("s", AGENT_STATUS_LIMITS.idMaxBytes),
+				},
+			},
+			decoders: Array.from({ length: AGENT_STATUS_LIMITS.decodersMax }, () => ({
+				id: ascii("d", AGENT_STATUS_LIMITS.idMaxBytes),
+				protocol: ascii("p", AGENT_STATUS_LIMITS.protocolMaxBytes),
+				verdict: {
+					code: longest(
+						DECODER_VERDICT_CODES,
+					) as AgentStatus["decoders"][number]["verdict"]["code"],
+					actions,
+				},
+			})),
+			activity: {
+				state: longest(
+					AGENT_ACTIVITY_STATES,
+				) as AgentStatus["activity"]["state"],
+				rows: count,
+			},
+			lastDecode: Array.from(
+				{ length: AGENT_STATUS_LIMITS.decodersMax },
+				() => ({
+					protocol: ascii("p", AGENT_STATUS_LIMITS.protocolMaxBytes),
+					at: isoMax,
+				}),
+			),
+		}
+		expect(agentStatusSchema.parse(worst)).toEqual(worst)
+		expect(Buffer.byteLength(JSON.stringify(worst))).toBeLessThan(
+			AGENT_STATUS_LIMITS.targetBytes,
+		)
+		// One more row in any capped list, or one more byte in a string, is refused.
+		const past = (patch: Partial<AgentStatus>) =>
+			agentStatusSchema.safeParse({ ...worst, ...patch }).success
+		expect(past({ decoders: [...worst.decoders, worst.decoders[0]!] })).toBe(
+			false,
+		)
+		expect(past({ sources: [...worst.sources, worst.sources[0]!] })).toBe(false)
+		expect(past({ tuners: [...worst.tuners, worst.tuners[0]!] })).toBe(false)
+		expect(
+			past({ lastDecode: [...worst.lastDecode, worst.lastDecode[0]!] }),
+		).toBe(false)
+		expect(
+			past({
+				sources: [
+					{
+						...worst.sources[0]!,
+						id: ascii("s", AGENT_STATUS_LIMITS.idMaxBytes + 1),
+					},
+				],
+			}),
+		).toBe(false)
+		// A byte cap counts JSON bytes: a 7-character id of quotes is 14 bytes.
+		expect(
+			past({
+				sources: [{ ...worst.sources[0]!, id: '"'.repeat(21) }],
+			}),
+		).toBe(false)
+	})
+
+	/** Decoder statuses for `count` distinct protocols with `idOf(index)` ids. */
+	function decoders(total: number, idOf: (index: number) => string) {
+		return Array.from({ length: total }, (_, index) =>
 			decoder({
-				id: `${type}-decoder-${index}`,
-				type,
+				id: idOf(index),
+				type: `${"p".repeat(20)}-${String(index).padStart(3, "0")}`,
 				lastOutputAt: new Date(now - index * 1_000),
 				suspension: { reasonCode: "efficiency-budget", since: new Date(now) },
 				efficiency: { detail: "budget" } as NonNullable<
@@ -410,61 +534,126 @@ describe("agent status", () => {
 				>,
 			}),
 		)
+	}
+
+	async function serve(o: AgentStatusRoutesOptions) {
 		const app = Fastify()
-		await app.register(
-			agentStatusRoutes,
-			options({
-				decoderManager: { getAllStatus: () => decoders },
-				sourceManager: {
-					getAllStatus: () => [source(), source({ id: "source-b-audio" })],
-				},
-				tunerController: {
-					getAllStates: () => [
-						tuner(),
-						tuner({ sourceId: "source-b-audio", controlMode: "external" }),
-					],
-				},
-				liveDemod: { getStatus: () => liveStatus(true) },
-				scanner: {
-					status: () =>
-						({ enabled: true }) as ReturnType<
-							NonNullable<AgentStatusRoutesOptions["scanner"]>["status"]
-						>,
-					listJobs: () => [
-						job({ name: "y".repeat(100), reason: "preempted-operator" }),
-					],
-				},
-				activity: {
-					enabled: true,
-					stats: () => ({ rows: 123_456 }) as ActivityStoreStats,
-				},
-			}),
-		)
+		await app.register(agentStatusRoutes, o)
 		try {
 			const response = await app.inject("/api/agent/status")
 			expect(response.statusCode).toBe(200)
-			const bytes = Buffer.byteLength(response.body)
-			expect(bytes).toBeLessThan(AGENT_STATUS_LIMITS.targetBytes)
 			const body: unknown = response.json()
 			// The serialized body is exactly the DTO: the JSON schema drops nothing.
 			expect(agentStatusSchema.parse(body)).toEqual(body)
-			expect(Object.keys(body as object)).toEqual([
-				"at",
-				"tuners",
-				"sources",
-				"liveAudio",
-				"scanner",
-				"decoders",
-				"activity",
-				"lastDecode",
-			])
-			const parsed = agentStatusSchema.parse(body)
-			expect(parsed.decoders).toHaveLength(types.length)
-			expect(parsed.decoders[0]?.verdict.code).toBe("efficiency-budget")
-			expect(parsed.lastDecode).toHaveLength(new Set(types).size)
+			return {
+				bytes: Buffer.byteLength(response.body),
+				body: agentStatusSchema.parse(body),
+			}
 		} finally {
 			await app.close()
 		}
+	}
+
+	function full(
+		decoderStatuses: DecoderStatus[],
+		sourceIds: string[],
+		jobPatch: Partial<ScanJob>,
+	): AgentStatusRoutesOptions {
+		return options({
+			decoderManager: { getAllStatus: () => decoderStatuses },
+			sourceManager: {
+				getAllStatus: () => sourceIds.map(id => source({ id })),
+			},
+			tunerController: {
+				getAllStates: () => sourceIds.map(sourceId => tuner({ sourceId })),
+			},
+			liveDemod: { getStatus: () => liveStatus(true) },
+			scanner: scanner([job(jobPatch)], { [sourceIds[0] ?? ""]: "job-a" }),
+			activity: {
+				enabled: true,
+				stats: () => ({ rows: 123_456 }) as ActivityStoreStats,
+			},
+		})
+	}
+
+	it("serves a configuration at every cap whole, under the target, not truncated", async () => {
+		const max = AGENT_STATUS_LIMITS.idMaxBytes
+		const { bytes, body } = await serve(
+			full(
+				decoders(AGENT_STATUS_LIMITS.decodersMax, i =>
+					`decoder-${i}-`.padEnd(max, "d"),
+				),
+				Array.from({ length: AGENT_STATUS_LIMITS.sourcesMax }, (_, i) =>
+					`source-${i}-`.padEnd(max, "s"),
+				),
+				{
+					id: "j_".padEnd(max, "J"),
+					sourceId: "source-0-".padEnd(max, "s"),
+				} as Partial<ScanJob>,
+			),
+		)
+		expect(bytes).toBeLessThan(AGENT_STATUS_LIMITS.targetBytes)
+		expect(body.truncated).toBe(false)
+		expect(body.decoders).toHaveLength(AGENT_STATUS_LIMITS.decodersMax)
+		expect(body.decoders.every(d => d.id.length === max)).toBe(true)
+		expect(body.decoders[0]?.verdict.code).toBe("efficiency-budget")
+		expect(body.lastDecode).toHaveLength(AGENT_STATUS_LIMITS.decodersMax)
+		expect(body.tuners).toHaveLength(AGENT_STATUS_LIMITS.sourcesMax)
+		expect(body.tuners[0]?.owner).toBe("scanner")
+		expect(body.scanner?.job?.id).toHaveLength(max)
+		expect(Object.keys(body)).toEqual([
+			"at",
+			"truncated",
+			"tuners",
+			"sources",
+			"liveAudio",
+			"scanner",
+			"decoders",
+			"activity",
+			"lastDecode",
+		])
+	})
+
+	it("cuts lists and ids past their caps and says so", async () => {
+		// Escapes and multi-byte characters count at their JSON byte size.
+		const huge = (tag: string, i: number) => `${tag}${i}"\\\u0001é😀`.repeat(40)
+		const { bytes, body } = await serve(
+			full(
+				decoders(AGENT_STATUS_LIMITS.decodersMax + 3, i => huge("d", i)),
+				Array.from({ length: AGENT_STATUS_LIMITS.sourcesMax + 2 }, (_, i) =>
+					huge("s", i),
+				),
+				{
+					id: huge("j", 0),
+					name: huge("n", 0),
+					sourceId: huge("s", 0),
+				} as Partial<ScanJob>,
+			),
+		)
+		expect(bytes).toBeLessThan(AGENT_STATUS_LIMITS.targetBytes)
+		expect(body.truncated).toBe(true)
+		expect(body.decoders).toHaveLength(AGENT_STATUS_LIMITS.decodersMax)
+		expect(body.lastDecode).toHaveLength(AGENT_STATUS_LIMITS.decodersMax)
+		expect(body.sources).toHaveLength(AGENT_STATUS_LIMITS.sourcesMax)
+		expect(body.tuners).toHaveLength(AGENT_STATUS_LIMITS.sourcesMax)
+		for (const row of [...body.decoders, ...body.sources])
+			expect(jsonStringBytes(row.id)).toBeLessThanOrEqual(
+				AGENT_STATUS_LIMITS.idMaxBytes,
+			)
+		// Cut at a code point: no lone surrogate is left behind.
+		expect(body.decoders.every(d => d.id.isWellFormed())).toBe(true)
+		expect(jsonStringBytes(body.scanner?.job?.name ?? "")).toBeLessThanOrEqual(
+			AGENT_STATUS_LIMITS.jobNameMaxBytes,
+		)
+	})
+
+	it("cuts at a code point without exceeding the byte cap", () => {
+		expect(clipJson("abc", 3)).toBe("abc")
+		expect(clipJson("abcd", 3)).toBe("abc")
+		expect(clipJson("a😀", 4)).toBe("a")
+		expect(clipJson("a😀", 5)).toBe("a😀")
+		expect(clipJson('a"', 2)).toBe("a")
+		expect(clipJson("\u0001", 5)).toBe("")
 	})
 
 	it("serves a minimal configuration that also matches the schema", async () => {
@@ -481,6 +670,7 @@ describe("agent status", () => {
 			expect(response.statusCode).toBe(200)
 			expect(agentStatusSchema.parse(response.json())).toEqual({
 				at: expect.any(String),
+				truncated: false,
 				tuners: [],
 				sources: [],
 				liveAudio: null,

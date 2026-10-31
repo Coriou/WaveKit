@@ -204,6 +204,59 @@ describe("machine-token export", () => {
 		])
 	})
 
+	it.each([
+		["before-publish", true],
+		["before-publish", false],
+		["after-publish", true],
+		["after-publish", false],
+	] as const)(
+		"never lands in the private directory when the parent is swapped for a symlink to it (%s, replace %s)",
+		async (step, replace) => {
+			await provision()
+			const target = join(outDir, "access-state.json")
+			if (replace) await fs.writeFile(target, "keep\n", { mode: 0o600 })
+			const privateState = join(directory, "access-state.json")
+			const before = await fs.readFile(privateState)
+			const moved = join(root, "agent-moved")
+			const cwd = process.cwd()
+			const result = await exportMachineToken(
+				{ directory, out: target, replace },
+				{
+					step: async name => {
+						if (name !== step) return
+						await fs.rename(outDir, moved)
+						await fs.symlink(directory, outDir)
+					},
+				},
+			)
+			expect(result).toEqual({
+				kind: "unavailable",
+				code: "ACCESS_TOKEN_OUT_UNSAFE",
+			})
+			expect(await fs.readFile(privateState)).toEqual(before)
+			expect((await fs.readdir(directory)).sort()).toEqual([
+				"access-state.json",
+				"initialized",
+			])
+			// What was written went to the pinned directory and was removed again.
+			expect(await fs.readdir(moved)).toEqual([])
+			expect(process.cwd()).toBe(cwd)
+		},
+	)
+
+	it("publishes when the parent is reached through a symlinked ancestor that stays put", async () => {
+		await provision()
+		const alias = join(root, "alias")
+		await fs.symlink(root, alias)
+		expect(
+			await exportMachineToken({
+				directory,
+				out: join(alias, "agent", "machine-token"),
+			}),
+		).toEqual({ kind: "written" })
+		expect((await fs.readFile(out, "utf8")).trim()).toBe(await storedToken())
+	})
+
 	it("refuses a missing, loose or unprovisioned state directory and writes nothing", async () => {
 		const missing = await runAccessCommand(command())
 		expect(missing.exitCode).toBe(1)

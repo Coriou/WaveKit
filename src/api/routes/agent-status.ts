@@ -1,6 +1,7 @@
 import {
 	AGENT_STATUS_LIMITS,
 	agentStatusResponseSchema,
+	jsonStringBytes,
 } from "@wavekit/api-types"
 import type {
 	AgentActivity,
@@ -27,7 +28,9 @@ export interface AgentStatusRoutesOptions {
 	sourceManager: Pick<SourceManager, "getAllStatus">
 	tunerController?: Pick<TunerController, "getAllStates"> | undefined
 	liveDemod?: Pick<LiveDemodulator, "getStatus"> | undefined
-	scanner?: Pick<ScannerService, "status" | "listJobs"> | undefined
+	scanner?:
+		| Pick<ScannerService, "status" | "listJobs" | "tunerLeaseHolder">
+		| undefined
 	/** Same inputs as the Activity routes: disabled, unavailable, or the store's stats. */
 	activity: {
 		enabled: boolean
@@ -36,7 +39,7 @@ export interface AgentStatusRoutesOptions {
 	}
 }
 
-/** A job that may hold a tuner: everything before a terminal state. */
+/** A job that has not ended (it may still resume and take a tuner). */
 const LIVE_JOB_STATES: ReadonlySet<ScanJob["state"]> = new Set([
 	"pending",
 	"starting",
@@ -44,16 +47,46 @@ const LIVE_JOB_STATES: ReadonlySet<ScanJob["state"]> = new Set([
 	"holding",
 	"paused",
 ])
-/** Jobs that hold the tuner now (a paused or pending job has released it). */
-const HOLDING_JOB_STATES: ReadonlySet<ScanJob["state"]> = new Set([
-	"starting",
-	"running",
-	"holding",
-])
+
+const L = AGENT_STATUS_LIMITS
+
+/**
+ * `value` cut at a code point boundary so its JSON string body (escapes and UTF-8
+ * included) is at most `maxBytes`: the byte caps in `AGENT_STATUS_LIMITS` hold
+ * whatever characters an id carries.
+ */
+export function clipJson(value: string, maxBytes: number): string {
+	if (jsonStringBytes(value) <= maxBytes) return value
+	let bytes = 0
+	let end = 0
+	for (const char of value) {
+		bytes += jsonStringBytes(char)
+		if (bytes > maxBytes) return value.slice(0, end)
+		end += char.length
+	}
+	return value
+}
+
+/** Shortens strings and lists to their caps, remembering whether anything was cut. */
+class Bounds {
+	truncated = false
+
+	id(value: string, maxBytes: number = L.idMaxBytes): string {
+		const clipped = clipJson(value, maxBytes)
+		if (clipped !== value) this.truncated = true
+		return clipped
+	}
+
+	list<T>(items: readonly T[], max: number): T[] {
+		if (items.length > max) this.truncated = true
+		return items.slice(0, max)
+	}
+}
 
 function tunerRow(
 	state: TunerState,
-	scanning: ReadonlySet<string>,
+	leaseHolder: (sourceId: string) => string | null,
+	bounds: Bounds,
 ): AgentTuner {
 	const unknown = new Set(state.unknownFields ?? [])
 	const declared = state.declaredOnlyFields ?? []
@@ -62,16 +95,17 @@ function tunerRow(
 		!unknown.has("gain") &&
 		!unknown.has("gainMode")
 	return {
-		sourceId: state.sourceId,
+		sourceId: bounds.id(state.sourceId),
 		frequencyHz: unknown.has("frequency") ? null : state.frequency,
 		sampleRateHz: unknown.has("sampleRate") ? null : state.sampleRate,
 		gainMode: unknown.has("gainMode") ? null : state.gainMode,
 		gain: gainKnown ? state.gain : null,
 		// External control wins: WaveKit then sends no commands, the scanner included.
+		// Otherwise only a scanner tuner lease moves it (job state does not say who holds one).
 		owner:
 			state.controlMode === "external"
 				? "external"
-				: scanning.has(state.sourceId)
+				: leaseHolder(state.sourceId) !== null
 					? "scanner"
 					: "wavekit",
 		declaredOnly:
@@ -81,13 +115,14 @@ function tunerRow(
 
 function sourceRows(
 	sourceManager: AgentStatusRoutesOptions["sourceManager"],
+	bounds: Bounds,
 ): AgentSource[] {
-	return sourceManager.getAllStatus().map(status => {
+	return bounds.list(sourceManager.getAllStatus(), L.sourcesMax).map(status => {
 		const warnings: AgentSourceWarning[] = []
 		if (status.rateMismatch) warnings.push("rate-mismatch")
 		if (status.signalFlat) warnings.push("signal-flat")
 		return {
-			id: status.id,
+			id: bounds.id(status.id),
 			connected: status.connected,
 			state: status.activity.state,
 			sampleAgeMs: status.activity.sampleAgeMs,
@@ -98,21 +133,26 @@ function sourceRows(
 
 function liveAudioRow(
 	liveDemod: AgentStatusRoutesOptions["liveDemod"],
+	bounds: Bounds,
 ): AgentLiveAudio | null {
 	if (!liveDemod) return null
 	const status = liveDemod.getStatus()
 	return {
 		running: status.running,
 		health: status.pipelineHealth,
-		sourceId: status.sourceId,
-		modulation: status.config.modulation,
+		sourceId: bounds.id(status.sourceId),
+		modulation: clipJson(status.config.modulation, L.modulationMaxBytes),
 		offsetHz: status.config.offsetHz ?? 0,
 		clients: status.clientCount,
 		squelchOpen: status.running ? (status.squelchOpen ?? null) : null,
 	}
 }
 
-function scannerRow(jobs: readonly ScanJob[], enabled: boolean): AgentScanner {
+function scannerRow(
+	jobs: readonly ScanJob[],
+	enabled: boolean,
+	bounds: Bounds,
+): AgentScanner {
 	const live = jobs.filter(job => LIVE_JOB_STATES.has(job.state))
 	// Newest update first; ISO times of one clock compare as strings.
 	const current = live.reduce<ScanJob | undefined>(
@@ -124,15 +164,18 @@ function scannerRow(jobs: readonly ScanJob[], enabled: boolean): AgentScanner {
 		activeJobs: live.length,
 		job: current
 			? {
-					id: current.id,
+					id: bounds.id(current.id),
 					name:
 						current.name === null
 							? null
-							: current.name.slice(0, AGENT_STATUS_LIMITS.jobNameMaxLength),
+							: clipJson(current.name, L.jobNameMaxBytes),
 					kind: current.spec.kind,
 					state: current.state,
-					reason: current.reason ?? null,
-					sourceId: current.spec.sourceId,
+					reason:
+						current.reason === undefined
+							? null
+							: clipJson(current.reason, L.reasonMaxBytes),
+					sourceId: bounds.id(current.spec.sourceId),
 				}
 			: null,
 	}
@@ -159,43 +202,57 @@ export async function buildAgentStatus(
 	options: AgentStatusRoutesOptions,
 	now: number,
 ): Promise<AgentStatus> {
-	const jobs = options.scanner?.listJobs() ?? []
-	const scanning = new Set(
-		jobs
-			.filter(job => HOLDING_JOB_STATES.has(job.state))
-			.map(job => job.spec.sourceId),
-	)
-	const decoders = options.decoderManager.getAllStatus().map(status => {
-		const summary = decoderSummary(status, now)
-		return { id: summary.id, protocol: summary.protocol, summary }
-	})
+	const bounds = new Bounds()
+	const scanner = options.scanner
+	const jobs = scanner?.listJobs() ?? []
+	const leaseHolder = (sourceId: string): string | null =>
+		scanner?.tunerLeaseHolder(sourceId) ?? null
+	const summaries = options.decoderManager
+		.getAllStatus()
+		.map(status => decoderSummary(status, now))
+	// Newest output per protocol over every decoder, not only the rows shown.
 	const newest = new Map<string, string>()
-	for (const { summary } of decoders) {
+	for (const summary of summaries) {
 		const at = summary.lastOutputAt
 		if (at === null) continue
 		const previous = newest.get(summary.protocol)
 		if (previous === undefined || at > previous)
 			newest.set(summary.protocol, at)
 	}
+	const lastDecode = [...newest]
+		.map(([protocol, at]) => ({ protocol, at }))
+		.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
+	const tuners = bounds
+		.list(options.tunerController?.getAllStates() ?? [], L.sourcesMax)
+		.map(state => tunerRow(state, leaseHolder, bounds))
+	const sources = sourceRows(options.sourceManager, bounds)
+	const liveAudio = liveAudioRow(options.liveDemod, bounds)
+	const scannerStatus = scanner
+		? scannerRow(jobs, scanner.status().enabled, bounds)
+		: null
+	const decoders = bounds.list(summaries, L.decodersMax).map(summary => ({
+		id: bounds.id(summary.id),
+		protocol: bounds.id(summary.protocol, L.protocolMaxBytes),
+		verdict: {
+			code: summary.verdict.code,
+			actions: bounds.list(summary.verdict.actions, L.actionsMax),
+		},
+	}))
+	const lastDecodeRows = bounds.list(lastDecode, L.decodersMax).map(row => ({
+		protocol: bounds.id(row.protocol, L.protocolMaxBytes),
+		at: row.at,
+	}))
+	const activity = await activityRow(options.activity)
 	return {
 		at: new Date(now).toISOString(),
-		tuners: (options.tunerController?.getAllStates() ?? []).map(state =>
-			tunerRow(state, scanning),
-		),
-		sources: sourceRows(options.sourceManager),
-		liveAudio: liveAudioRow(options.liveDemod),
-		scanner: options.scanner
-			? scannerRow(jobs, options.scanner.status().enabled)
-			: null,
-		decoders: decoders.map(({ id, protocol, summary }) => ({
-			id,
-			protocol,
-			verdict: summary.verdict,
-		})),
-		activity: await activityRow(options.activity),
-		lastDecode: [...newest]
-			.map(([protocol, at]) => ({ protocol, at }))
-			.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)),
+		truncated: bounds.truncated,
+		tuners,
+		sources,
+		liveAudio,
+		scanner: scannerStatus,
+		decoders,
+		activity,
+		lastDecode: lastDecodeRows,
 	}
 }
 
