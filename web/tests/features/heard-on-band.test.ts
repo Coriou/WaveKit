@@ -160,6 +160,10 @@ describe("tuned card: decodes from a decoder whose band does not hold the freque
 		expect(
 			heardOnBand(items, [{ id: "custom", coversHz: null }], decoders, hz),
 		).toEqual(items)
+		// the core also answers false for a band it cannot read: that keeps it too
+		expect(
+			heardOnBand(items, [{ id: "custom", coversHz: false }], decoders, hz),
+		).toEqual(items)
 	})
 
 	it("keeps a scanner probe's and an ephemeral decoder's decodes, placed on the frequency to decode it", () => {

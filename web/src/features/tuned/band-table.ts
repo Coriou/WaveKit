@@ -277,7 +277,8 @@ function hasBand(d: DecoderInfo, planRanges: PlanRanges | null): boolean {
  * a frequency its decoder's band never covers (a pager line at 1090 MHz) never names the card or its latest. The
  * band is the core's `coversHz` for the decoder (`summary`, as relevant reads it), else its status (onBand). Kept:
  * a decode without a decoder id, from a decoder neither the summary nor the statuses know, from a scanner probe or
- * an ephemeral decoder (placed on the frequency to decode it), or from a decoder with no band to read at all.
+ * an ephemeral decoder (placed on the frequency to decode it), or from a decoder with no band to read at all (the
+ * core's coversHz is false for those too, so it only drops a decoder with a band or a band plan protocol).
  */
 export function heardOnBand(
 	items: readonly ActivitySummary[],
@@ -299,9 +300,14 @@ export function heardOnBand(
 			(decoder.owner === "scanner" || decoder.ephemeral === true)
 		)
 			return true
+		if (decoder === null) return covers.get(id) ?? true
+		// The core's coversHz is also false for a band it cannot read, so a false only drops a decoder with a band
+		// to read: one in its statuses, or a protocol the core maps to the band plan.
+		const readable =
+			hasBand(decoder, planRanges) || protocolsOf(decoder.type).length > 0
 		const said = covers.get(id)
-		if (said !== undefined) return said
-		if (decoder === null || !hasBand(decoder, planRanges)) return true
+		if (said !== undefined) return said || !readable
+		if (!hasBand(decoder, planRanges)) return true
 		return onBand(decoder, hz, planRanges)
 	})
 }
