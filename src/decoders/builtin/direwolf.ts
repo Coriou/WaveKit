@@ -12,7 +12,7 @@ import { AudioDemodDecoder } from "../audio-demod-decoder.js"
 import { createHash } from "node:crypto"
 import { createConnection, type Socket } from "node:net"
 import { createSocket, type Socket as UdpSocket } from "node:dgram"
-import { lstat, mkdir, readFile, rm, rmdir, writeFile } from "node:fs/promises"
+import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import type {
@@ -32,6 +32,7 @@ import { DIREWOLF_BOUNDS } from "../options/direwolf.js"
 import {
 	DecoderSpawnError,
 	NetworkConnectionError,
+	WaveKitError,
 } from "../../utils/errors.js"
 import { safeErrorFields } from "../safe-error-fields.js"
 import { isAx25CallsignChar } from "../ax25-callsign.js"
@@ -223,6 +224,8 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 	protected baseConfigPath = DIREWOLF_BASE_CONFIG_PATH
 	/** Parent of the per-instance config directory; tests point it elsewhere. */
 	protected configRoot = tmpdir()
+	/** The instance config this instance created, set only after a validated write. */
+	private writtenConfigPath: string | null = null
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
@@ -322,22 +325,35 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 	}
 
 	/**
+	 * Throws unless `dir` is a real directory (not a symlink) owned by this user with
+	 * mode 0700, so nothing is ever written or removed through a planted path.
+	 */
+	private async assertPrivateConfigDir(dir: string): Promise<void> {
+		const stat = await lstat(dir)
+		if (
+			!stat.isDirectory() ||
+			(stat.mode & 0o777) !== 0o700 ||
+			(process.getuid !== undefined && stat.uid !== process.getuid())
+		)
+			throw new WaveKitError(
+				"direwolf config directory is not private",
+				"DIREWOLF_CONFIG_DIR_UNSAFE",
+			)
+	}
+
+	/**
 	 * Writes the instance config. The directory must be a real directory owned by this
 	 * user with mode 0700, and the file is created fresh (`wx`, 0600), so a pre-planted
-	 * file or symlink in a shared temp dir is never followed.
+	 * file or symlink in a shared temp dir is never followed. The directory is shared by
+	 * every instance of this process and is kept for the process lifetime.
 	 */
 	protected async writeInstanceConfig(): Promise<void> {
 		const path = this.instanceConfigPath()
 		const dir = dirname(path)
+		this.writtenConfigPath = null
 		try {
 			await mkdir(dir, { recursive: true, mode: 0o700 })
-			const stat = await lstat(dir)
-			if (
-				!stat.isDirectory() ||
-				(stat.mode & 0o777) !== 0o700 ||
-				(process.getuid !== undefined && stat.uid !== process.getuid())
-			)
-				throw new Error("direwolf config directory is not private")
+			await this.assertPrivateConfigDir(dir)
 			let base = FALLBACK_BASE_CONFIG
 			try {
 				base = await readFile(this.baseConfigPath, "utf8")
@@ -349,18 +365,28 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 				mode: 0o600,
 				flag: "wx",
 			})
+			this.writtenConfigPath = path
 		} catch (err) {
-			const error = err instanceof Error ? err : new Error(String(err))
+			const error =
+				err instanceof Error
+					? err
+					: new WaveKitError(String(err), "DIREWOLF_CONFIG_WRITE")
 			throw new DecoderSpawnError(this.id, this.getDecoderCommand(), error)
 		}
 	}
 
+	/**
+	 * Removes only the file this instance wrote, after re-checking that its directory is
+	 * still private. The shared directory itself stays: another instance may be between
+	 * validating it and writing its own file.
+	 */
 	private async removeInstanceConfig(): Promise<void> {
-		const path = this.instanceConfigPath()
+		const path = this.writtenConfigPath
+		if (path === null) return
+		this.writtenConfigPath = null
 		try {
+			await this.assertPrivateConfigDir(dirname(path))
 			await rm(path, { force: true })
-			// Another instance may still use the directory: ENOTEMPTY is fine.
-			await rmdir(dirname(path)).catch(() => undefined)
 		} catch (err) {
 			this.logger.debug(
 				{ err: safeErrorFields(err) },

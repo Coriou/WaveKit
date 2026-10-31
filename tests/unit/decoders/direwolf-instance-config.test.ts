@@ -11,8 +11,9 @@ import {
 	symlink,
 	writeFile,
 } from "node:fs/promises"
+import { execFileSync } from "node:child_process"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { basename, dirname, join } from "node:path"
 import pino from "pino"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import {
@@ -24,10 +25,15 @@ import type { DecoderConfig } from "../../../src/decoders/types.js"
 import { DecoderSpawnError } from "../../../src/utils/errors.js"
 
 class ConfigDirewolf extends DirewolfDecoder {
-	constructor(options: Record<string, unknown>, root: string, base: string) {
+	constructor(
+		options: Record<string, unknown>,
+		root: string,
+		base: string,
+		id = "aprs-a",
+	) {
 		super(
 			{
-				id: "aprs-a",
+				id,
 				type: "direwolf",
 				enabled: true,
 				options,
@@ -149,6 +155,50 @@ describe("direwolf instance config", () => {
 		await decoder.write()
 		await decoder.stop()
 		await expect(stat(decoder.path())).rejects.toMatchObject({ code: "ENOENT" })
+	})
+
+	it("keeps the shared directory on stop for an instance between validating and writing", async () => {
+		const a = new ConfigDirewolf({}, root, base, "aprs-a")
+		await a.write()
+		// b's base config is a FIFO: its write validates the directory, then blocks reading
+		// the base until the test feeds it, after a has fully stopped.
+		const fifo = join(root, "base.fifo")
+		execFileSync("mkfifo", [fifo])
+		const b = new ConfigDirewolf({ kissPort: 8100 }, root, fifo, "aprs-b")
+		const writing = b.write()
+		await new Promise(resolve => setTimeout(resolve, 100))
+		await a.stop()
+		await expect(stat(a.path())).rejects.toMatchObject({ code: "ENOENT" })
+		expect((await stat(dirname(a.path()))).isDirectory()).toBe(true)
+		await writeFile(fifo, "MYCALL N0CALL\n")
+		await writing
+		expect(await readFile(b.path(), "utf8")).toContain("KISSPORT 8100")
+	})
+
+	it("never deletes through a planted directory symlink", async () => {
+		const decoder = new ConfigDirewolf({}, root, base)
+		const victimDir = join(root, "victim-dir")
+		await mkdir(victimDir, { mode: 0o700 })
+		const victim = join(victimDir, basename(decoder.path()))
+		await writeFile(victim, "untouched")
+		await mkdir(dirname(dirname(decoder.path())), { recursive: true })
+		await symlink(victimDir, dirname(decoder.path()))
+		await expect(decoder.write()).rejects.toBeInstanceOf(DecoderSpawnError)
+		await decoder.stop()
+		expect(await readFile(victim, "utf8")).toBe("untouched")
+	})
+
+	it("re-checks the directory on stop and leaves a swapped-in symlink's target alone", async () => {
+		const decoder = new ConfigDirewolf({}, root, base)
+		await decoder.write()
+		const victimDir = join(root, "victim-dir")
+		await mkdir(victimDir, { mode: 0o700 })
+		const victim = join(victimDir, basename(decoder.path()))
+		await writeFile(victim, "untouched")
+		await rm(dirname(decoder.path()), { recursive: true })
+		await symlink(victimDir, dirname(decoder.path()))
+		await decoder.stop()
+		expect(await readFile(victim, "utf8")).toBe("untouched")
 	})
 
 	it("hashes the decoder id into the file name", () => {
