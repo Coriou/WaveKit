@@ -282,7 +282,7 @@ describe("scan hold row", () => {
 		expect(m.actions[0]).toMatchObject({
 			label: "Resume scan",
 			kind: "primary",
-			title: "Retunes the receiver to the scan's next hop",
+			title: "Retunes the receiver to the scan's current hop",
 		})
 	})
 

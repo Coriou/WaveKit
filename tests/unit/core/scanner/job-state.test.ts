@@ -129,13 +129,16 @@ const ROWS: [string[], string, string, string[]][] = [
 	],
 	// the arbiter hands the lease over from a paused holder too (probes already stopped; the job keeps its own keyed decoder hold)
 	[
-		[
-			"paused(operator)",
-			"paused(source-down)",
-			"paused(resumed-without-retune)",
-		],
+		["paused(operator)", "paused(source-down)"],
 		"preempted-job",
 		"paused(preempted-job)",
+		["release-lease"],
+	],
+	// a sweep held after a plain resume is no waiter: a job taking its lease leaves it held
+	[
+		["paused(resumed-without-retune)"],
+		"preempted-job",
+		"paused(resumed-without-retune)",
 		["release-lease"],
 	],
 	// a lease lost while paused: the operator's pause stays, a source-down pause is preempted
@@ -677,5 +680,25 @@ describe("a sweep held after a plain resume of the feed", () => {
 			{ type: "preemptor-idle", impactGrew: false },
 		] as const)
 			expect(transition(held, e)).toEqual({ invalid: true })
+	})
+
+	it("stays held when a preemptor takes its lease and then ends", () => {
+		const taken = transition(held, { type: "preempted-job" })
+		expect(taken).toEqual({
+			state: "paused",
+			reason: "resumed-without-retune",
+			actions: ["release-lease"],
+		})
+		if ("invalid" in taken) return
+		const after = {
+			state: taken.state,
+			reason: "resumed-without-retune",
+		} as const
+		for (const e of [
+			{ type: "preemptor-idle", impactGrew: false },
+			{ type: "preemptor-idle", impactGrew: true },
+			{ type: "preemptor-lost" },
+		] as const)
+			expect(transition(after, e)).toEqual({ invalid: true })
 	})
 })

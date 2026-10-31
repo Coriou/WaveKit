@@ -1236,7 +1236,7 @@ export class PaletteModel {
 				glyph: "play",
 				keys: ["continue scan", "resume sweep", "retune scan"],
 				action: { kind: "scanJob", op: "resume" },
-				does: "Retunes the receiver to the scan's next hop · the scan holds until you choose this",
+				does: "Retunes the receiver to the scan's current hop · the scan holds until you choose this",
 				done: "Scan resumed",
 			})
 		else if (s === "paused")

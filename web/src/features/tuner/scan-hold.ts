@@ -329,7 +329,7 @@ export function holdRowModel(input: HoldRowInput): HoldRowModel {
 							id: "resume",
 							label: "Resume scan",
 							aria: "Resume scan",
-							title: "Retunes the receiver to the scan's next hop",
+							title: "Retunes the receiver to the scan's current hop",
 							kind: "primary",
 							icon: "play",
 						},

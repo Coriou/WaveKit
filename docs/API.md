@@ -835,14 +835,18 @@ What a resume writes to the receiver depends on the body:
   after the latest pause. When the rate-truth check then measures a sustained rate within
   1.5 % of one common rtl_tcp rate (0.25, 1.024, 1.536, 1.792, 1.92, 2.048, 2.16, 2.4, 2.56,
   2.88 or 3.2 Msps), that rate is adopted into the tuner state and the caps (it stays in
-  `unknownFields`: measured, not commanded); the match is retried as the measurement
+  `unknownFields`: measured, not commanded, and is listed in `measuredFields` while the state
+  shows it); the match is retried as the measurement
   settles, so a first estimate between two rates is adopted once it converges. Scanner side: a lease recovery queued for the source (a job
   that ended while the feed was paused, or a crashed sweep) is settled without writing its
   pre-pause snapshot, a gain restore owed after a lost band-gain lease is dropped, and no
   band gain is applied; a sweep that held the source keeps its lease but does not hop: it
   waits in `paused(resumed-without-retune)`, with the source's decoders running, until
-  `POST /api/scanner/jobs/:id/resume` (Resume scan) sends it to its next hop, and its
-  release no longer puts back the pre-pause tuning. So does every other sweep on the source
+  `POST /api/scanner/jobs/:id/resume` (Resume scan) sends it to its current hop, and its
+  release no longer puts back the pre-pause tuning. Its hops after Resume scan run without a
+  band gain (a job's own `tuner.gainTenthsDb` is still written), and nothing is restored when
+  it ends: the pre-pause tuning and the operator gain saved before a band gain are forgotten.
+  Another job taking its lease leaves it held, also once that job ends. So does every other sweep on the source
   that would take the tuner on its own: one waiting to auto-resume after an operator or
   relay write (`preempted-operator`, `preempted-relay`), one waiting for another job's lease
   (`preempted-job`), and one due to resume after a core restart (`resume.onBoot`). A sweep
@@ -1501,6 +1505,13 @@ the last reset reconnect. Absent when empty. On a source whose gain was set on t
 counts as observed (it is not replayed on reconnect). The field values keep
 their types for older clients. A reset
 reconnect makes them unknown again; the field is absent when everything is known.
+After a plain resume of a paused feed `frequency`, `sampleRate`, `gainMode` and `gain` are
+listed too, with their last known values ([pause and resume](#post-apisourcesidpause-and-post-apisourcesidresume)).
+
+**`measuredFields`** lists fields of `unknownFields` whose value is measured from the stream
+rather than last known: today only `sampleRate`, once a plain resume adopted the rate the
+receiver is measured to deliver. It is still unverified (nothing set it); setting a rate removes
+it. Absent when empty and from older cores.
 
 **`bandGain`** (`{ tenthsDb, label?, owner }`) is present only while a
 [band gain](#per-band-gain-get-and-put-apituner-band-gain) is confirmed on the tuner: the core
@@ -3597,7 +3608,7 @@ Each returns the `ScanJob`. `resume` takes an optional body
   refusal, `details.reason` `releasing`, `recovery-pending` or
   `holder-starting`, leaves it `paused(operator)`);
 - from `paused(resumed-without-retune)` (a plain resume of the receiver feed held
-  the sweep): re-holds the source's decoders and retunes to the sweep's next hop;
+  the sweep): re-holds the source's decoders and retunes to the sweep's current hop;
   without the lease (an operator or relay write took it meanwhile) it re-acquires
   it as from `paused(operator)`, with the same 409s;
 - from `paused(core-restart)`: re-acquires the lease, re-opens the engine and

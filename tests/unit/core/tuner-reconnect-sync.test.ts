@@ -485,6 +485,29 @@ describe("TunerController reconnect synchronization", () => {
 			expect(transport.caps.sampleRate).toBe(2_048_000)
 		})
 
+		it("reports an adopted rate as measured, and only while it is in doubt", async () => {
+			// The stale pre-pause rate is unverified but not measured.
+			expect(controller.getState("rtl-1")!.measuredFields).toBeUndefined()
+			expect(controller.adoptObservedSampleRate("rtl-1", 2_160_000)).toBe(true)
+			expect(controller.getState("rtl-1")).toMatchObject({
+				sampleRate: 2_160_000,
+				measuredFields: ["sampleRate"],
+			})
+			expect(controller.getState("rtl-1")!.unknownFields).toContain(
+				"sampleRate",
+			)
+			// Setting a rate ends the doubt: the value is commanded, not measured.
+			await controller.setSampleRate("rtl-1", 2_400_000)
+			expect(controller.getState("rtl-1")!.measuredFields).toBeUndefined()
+		})
+
+		it("a new plain resume forgets the measured rate", () => {
+			expect(controller.adoptObservedSampleRate("rtl-1", 2_160_000)).toBe(true)
+			controller.noteFeedPaused("rtl-1")
+			controller.synchronizeOnConnect("rtl-1", { resume: "plain" })
+			expect(controller.getState("rtl-1")!.measuredFields).toBeUndefined()
+		})
+
 		it("keeps the rate unverified when no common rate matches", () => {
 			expect(controller.adoptObservedSampleRate("rtl-1", 1_000_000)).toBe(false)
 			expect(controller.getState("rtl-1")!.unknownFields).toContain(

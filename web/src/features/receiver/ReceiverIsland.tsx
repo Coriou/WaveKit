@@ -26,7 +26,7 @@ import { Icon } from "../../ui/Icon.tsx"
 import { Label } from "../../ui/Label.tsx"
 import { Seg } from "../../ui/Seg.tsx"
 import { Switch } from "../../ui/Switch.tsx"
-import { formatDb, formatMHz, formatRate } from "../format.ts"
+import { formatDb, formatRate } from "../format.ts"
 import { useReceiverSourceId } from "../hooks.ts"
 import {
 	capsNote,
@@ -62,7 +62,13 @@ import {
 	sinceText,
 	unsavedOp,
 } from "./feed.ts"
-import { receiverSummary, sourceTitle } from "./summary.ts"
+import {
+	centreText,
+	rateDoubtNote,
+	rateText,
+	receiverSummary,
+	sourceTitle,
+} from "./summary.ts"
 import { ratePolicyNote } from "./notices.ts"
 import "./receiver.css"
 
@@ -369,10 +375,14 @@ function SampleRate({ tuner, caps, locked, status, dismiss }: SectionProps) {
 	const rate = status("sampleRate")
 	const avail = controlAvailability("sampleRate", caps)
 	const current = shown(rate, tuner.sampleRate)
+	// After a plain resume nothing backs the rate (last known, or measured from the stream): no
+	// option is selected, so picking any rate, the shown one too, writes it.
+	const unverified = isUnknownField(tuner, "sampleRate") && !rate?.pending
+	const selected = unverified ? null : current
 	const options = sampleRateOptions(caps, tuner.sampleRate)
 	const disabled = locked || !avail.enabled || rate?.pending === true
 	// a stale confirmation goes once the panel locks or the rate moved elsewhere
-	const asking = confirmHz !== null && !disabled && confirmHz !== current
+	const asking = confirmHz !== null && !disabled && confirmHz !== selected
 	const declaredOnly = tuner.declaredOnlyFields?.includes("sampleRate") ?? false
 	const warn = rateWarning(confirmHz ?? current)
 	const policy = ratePolicyNote(tuner)
@@ -383,7 +393,13 @@ function SampleRate({ tuner, caps, locked, status, dismiss }: SectionProps) {
 				<Seg
 					label="Sample rate"
 					columns={3}
-					value={String(asking ? confirmHz : current)}
+					value={
+						asking
+							? String(confirmHz)
+							: selected === null
+								? ""
+								: String(selected)
+					}
 					options={options.map(hz => ({
 						value: String(hz),
 						label: rateLabel(hz),
@@ -392,11 +408,16 @@ function SampleRate({ tuner, caps, locked, status, dismiss }: SectionProps) {
 					}))}
 					onChange={value => {
 						const hz = Number(value)
-						setConfirmHz(hz === current ? null : hz)
+						setConfirmHz(hz === selected ? null : hz)
 					}}
 				/>
 			) : (
-				<span className="wkf-quiet wkf-small">{formatRate(current)}</span>
+				<span className="wkf-quiet wkf-small">
+					{unverified ? rateText(tuner) : formatRate(current)}
+				</span>
+			)}
+			{unverified && options.length > 0 && (
+				<span className="wkf-quiet wkf-small">{rateDoubtNote(tuner)}</span>
 			)}
 			{!avail.enabled && avail.reason && (
 				<span className="wkf-quiet wkf-small">{avail.reason}</span>
@@ -789,7 +810,7 @@ function ReceiverPanel() {
 					? "—"
 					: `${formatDb(source.signalLevelDbfs)} dBFS`,
 		},
-		{ k: "Centre", v: tuner ? `${formatMHz(tuner.frequency)} MHz` : "—" },
+		{ k: "Centre", v: centreText(tuner) },
 	]
 	const note = capsNote(capsEntry)
 	const owner = controlNote(tuner, relay)

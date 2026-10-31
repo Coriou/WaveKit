@@ -206,10 +206,12 @@ export function transition(
 		case "preempted-job":
 			if (active)
 				return to("paused", ["stop-probes", "release-lease"], "preempted-job")
-			// the arbiter hands the lease over from a paused holder too; probes are already stopped
-			return pausedFor("operator") ||
-				pausedFor("source-down") ||
-				pausedFor("resumed-without-retune")
+			// the arbiter hands the lease over from a paused holder too; probes are already stopped.
+			// A sweep held after a plain resume stays held: it is no waiter, so the preemptor's end
+			// never hops it again (only the operator's Resume scan does).
+			if (pausedFor("resumed-without-retune"))
+				return to("paused", ["release-lease"], "resumed-without-retune")
+			return pausedFor("operator") || pausedFor("source-down")
 				? to("paused", ["release-lease"], "preempted-job")
 				: INVALID
 		case "preemptor-lost":

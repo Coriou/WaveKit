@@ -4,6 +4,7 @@ import {
 	type DecoderInfo,
 	type ExtendedSourceStatus,
 	type SourceFeedResponse,
+	type TunerState,
 } from "@wavekit/api-types"
 import { buildMockServer } from "../../mock/server.ts"
 import type { MockServer } from "../../mock/server.ts"
@@ -161,6 +162,43 @@ describe("mock receiver feed", () => {
 			url: "/api/tuner/rtl-0/frequency",
 			payload: { hz: DEFAULT_CENTER_HZ },
 		})
+	})
+
+	it("a plain resume leaves centre, rate and gain unverified until set, as the core", async () => {
+		const measured = await buildMockServer({
+			port: 0,
+			resumeMs: 0,
+			measuredRateHz: 2_160_000,
+		})
+		await measured.app.ready()
+		const state = async () =>
+			(await measured.app.inject({ method: "GET", url: "/api/tuner" })).json<
+				TunerState[]
+			>()[0]
+		const call = (url: string, payload?: object) =>
+			measured.app.inject({
+				method: "POST",
+				url,
+				...(payload ? { payload } : {}),
+			})
+		await call("/api/sources/rtl-0/pause")
+		await call("/api/sources/rtl-0/resume")
+		const after = await state()
+		expect(after?.unknownFields).toEqual(
+			expect.arrayContaining(["frequency", "sampleRate", "gainMode", "gain"]),
+		)
+		expect(after).toMatchObject({
+			sampleRate: 2_160_000,
+			measuredFields: ["sampleRate"],
+		})
+		// setting the rate and the centre makes them known again (no longer measured)
+		await call("/api/tuner/rtl-0/sample-rate", { hz: 2_400_000 })
+		await call("/api/tuner/rtl-0/frequency", { hz: DEFAULT_CENTER_HZ })
+		const set = await state()
+		expect(set?.measuredFields).toBeUndefined()
+		expect(set?.unknownFields ?? []).not.toContain("sampleRate")
+		expect(set?.unknownFields ?? []).not.toContain("frequency")
+		await measured.close()
 	})
 
 	it("rejects a resume body other than { restoreTuning: boolean } with 400, as the core", async () => {

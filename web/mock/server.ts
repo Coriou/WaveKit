@@ -148,6 +148,12 @@ export interface MockServerOptions {
 	resumeMs?: number
 	/** The next this many receiver resumes fail with 503 (WAVEKIT_MOCK_RESUME_FAILURES). Default 0. */
 	resumeFailures?: number
+	/**
+	 * After a plain resume the core measures this sample rate from the stream and adopts it
+	 * (WAVEKIT_MOCK_MEASURED_RATE=<hz>): the tuner state shows it with `measuredFields: ["sampleRate"]`.
+	 * Without it the rate stays at its last known value, unverified.
+	 */
+	measuredRateHz?: number
 	/** The next this many receiver pauses / resumes answer `persisted: false` (WAVEKIT_MOCK_PERSIST_FAILURES). */
 	persistFailures?: number
 	/**
@@ -197,6 +203,14 @@ export interface MockServer {
  */
 const FLOOD_HISTORY_MS = 30 * 60_000
 const FLOOD_AIRCRAFT_HISTORY_MS = 3 * 60_000
+
+/** What a plain resume of the feed leaves unverified (the core's PLAIN_RESUME_UNVERIFIED). */
+const PLAIN_RESUME_UNVERIFIED: NonNullable<TunerState["unknownFields"]> = [
+	"frequency",
+	"sampleRate",
+	"gainMode",
+	"gain",
+]
 
 /** The core's rtl_tcp frequency range (TunerValidationError beyond it). */
 const TUNER_MIN_HZ = 24_000_000
@@ -1671,6 +1685,11 @@ export async function buildMockServer(
 		// the core drops a reported band gain before every frequency write
 		delete tuner.bandGain
 		tuner.frequency = hz
+		if (tuner.unknownFields) {
+			const rest = tuner.unknownFields.filter(f => f !== "frequency")
+			if (rest.length > 0) tuner.unknownFields = rest
+			else delete tuner.unknownFields
+		}
 		tuner.commandCount += 1
 		tuner.lastCommandAt = new Date().toISOString()
 		broadcast("tuner", "tuner:command-sent", {
@@ -1783,7 +1802,27 @@ export async function buildMockServer(
 			if (sourceId === MOCK_SOURCE_ID) scanner.feedPaused()
 		},
 		resumed: (sourceId, restoreTuning) => {
-			if (sourceId === MOCK_SOURCE_ID) scanner.feedResumed(restoreTuning)
+			if (sourceId !== MOCK_SOURCE_ID) return
+			// a plain resume writes no tuning: like the core, centre, rate and gain read unverified
+			// with their last known values until set (a measured rate is adopted, still unverified)
+			if (!restoreTuning) {
+				tuner.unknownFields = [
+					...new Set([
+						...(tuner.unknownFields ?? []),
+						...PLAIN_RESUME_UNVERIFIED,
+					]),
+				]
+				delete tuner.bandGain
+				if (options.measuredRateHz !== undefined) {
+					tuner.sampleRate = options.measuredRateHz
+					tuner.measuredFields = ["sampleRate"]
+				} else delete tuner.measuredFields
+				broadcast("tuner", "tuner:state-changed", {
+					sourceId,
+					state: tuner,
+				})
+			}
+			scanner.feedResumed(restoreTuning)
 		},
 		onChange: sourceId => {
 			if (sourceId !== MOCK_SOURCE_ID) {
@@ -2689,6 +2728,7 @@ async function main(): Promise<void> {
 	const activityOpenEnv = env["WAVEKIT_MOCK_ACTIVITY_OPEN_MS"]
 	const resumeFailuresEnv = env["WAVEKIT_MOCK_RESUME_FAILURES"]
 	const persistFailuresEnv = env["WAVEKIT_MOCK_PERSIST_FAILURES"]
+	const measuredRateEnv = env["WAVEKIT_MOCK_MEASURED_RATE"]
 	const server = await buildMockServer({
 		host: env["WAVEKIT_MOCK_HOST"] ?? "127.0.0.1",
 		port,
@@ -2716,6 +2756,9 @@ async function main(): Promise<void> {
 			: {}),
 		...(persistFailuresEnv !== undefined
 			? { persistFailures: Number(persistFailuresEnv) }
+			: {}),
+		...(measuredRateEnv !== undefined
+			? { measuredRateHz: Number(measuredRateEnv) }
 			: {}),
 		...(env["WAVEKIT_MOCK_SOCKET_OMITS_FEED"] === "1"
 			? { socketOmitsFeed: true }

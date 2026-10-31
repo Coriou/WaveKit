@@ -140,8 +140,10 @@ waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads
   pause survives a core restart; if the core could not save it, the island warns `Paused, but not
   saved — it will not survive a restart` with **Retry**, which saves it again. **Resume** reconnects once
   without changing the receiver's tuning: while WaveKit was paused, SDR++ may have retuned the
-  shared dongle through rtlmux, which WaveKit cannot see, so it adopts what it finds (centre, rate
-  and gain read unknown in the island until you set them). **Resume at 161.500 MHz** (shown when
+  shared dongle through rtlmux, which WaveKit cannot see, so it adopts what it finds: until you set them, the island shows the centre and rate as
+  `last known … · unverified` (header and Centre row), no sample rate is selected (picking any rate,
+  the shown one too, sets it), and gain reads unknown. When the core measures a common rate from the
+  stream it adopts it and the island labels it `measured`. **Resume at 161.500 MHz** (shown when
   the core knows the centre from before the pause) reconnects and writes the centre, rate and gain
   from before the pause back. SDR++ connected through WaveKit's tuner relay is seen: its retunes
   during the pause are written on either resume. If the receiver cannot be reached, the island
@@ -155,8 +157,9 @@ waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads
   pause ends with what it found so far and reads `Stopped · receiver paused`. A sweep running when
   you pause waits; **Resume at 161.500 MHz** continues it, but a plain **Resume** leaves it held so it
   does not retune the receiver away from SDR++: the scan row reads `Scan paused · receiver resumed
-  without retuning` with **Resume scan**, which retunes to the scan's next hop (also **Resume scan**
-  in the ⌘K palette). With more than one
+  without retuning` with **Resume scan**, which retunes to the scan's current hop (also **Resume scan**
+  in the ⌘K palette). The resumed scan hops without a band gain, and when it ends nothing is put
+  back: the receiver keeps whatever it was last tuned to. With more than one
   receiver, the Receiver island, the palette's receiver commands (pause, resume, gain, sample rate,
   bias tee, RTL AGC) and `P` act on the receiver the waterfall shows: the first connected one, which
   stays on screen through its own pause (else the first paused one). See

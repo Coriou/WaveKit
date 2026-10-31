@@ -3387,7 +3387,7 @@ export class ScannerService extends EventEmitter {
 	): ObservationEndReason {
 		if (reason !== "retune") return reason
 		const holder = this.arbiter.holder(sourceId)
-		return holder && this.jobs.get(holder.jobId)?.spec.mode === "sweep"
+		return sweepDrivesTuner(holder ? this.jobs.get(holder.jobId) : undefined)
 			? "hop"
 			: "retune"
 	}
@@ -8156,6 +8156,22 @@ function setBandPlanSkips(
 ): void {
 	if (bandPlanSkips) record.bandPlanSkips = bandPlanSkips
 	else delete record.bandPlanSkips
+}
+
+/**
+ * Whether the lease holder's retunes are the scan's own hops: a sweep, except one held after a
+ * plain resume (paused(resumed-without-retune)). That one keeps its lease but drives nothing, so a
+ * retune then is another client's (SDR++), never the scanner's.
+ */
+type DriverRecord = Pick<JobRecord, "state" | "reason"> & {
+	spec: Pick<JobRecord["spec"], "mode">
+}
+
+export function sweepDrivesTuner(record: DriverRecord | undefined): boolean {
+	if (record?.spec.mode !== "sweep") return false
+	return !(
+		record.state === "paused" && record.reason === "resumed-without-retune"
+	)
 }
 
 /** Paused by a lease loss (§ 10.1 preempted-*): waits for the lease. */

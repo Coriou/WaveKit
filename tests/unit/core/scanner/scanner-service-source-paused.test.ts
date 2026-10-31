@@ -8,6 +8,7 @@
  */
 import { describe, expect, it, vi } from "vitest"
 import type { ScanJob } from "@wavekit/api-types"
+import { sweepDrivesTuner } from "../../../../src/core/scanner/scanner-service.js"
 import type { ScannerSettings } from "../../../../src/core/scanner/types.js"
 import {
 	CENTRE,
@@ -262,6 +263,53 @@ describe("scanner jobs on a paused feed", () => {
 		await h.service.stop()
 	})
 
+	it("a sweep held after a plain resume stays held when a preemptor takes its lease and ends", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		const feed = pausable(h)
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		const job = await h.service.createJob({
+			...sweep,
+			resume: { autoAfterIdleMs: 1000 },
+		})
+		await untilRunning(h, job.id)
+		feed.pause("rtl")
+		await settled(h.service)
+		feed.resume("rtl", "plain")
+		await settled(h.service)
+		expect(h.service.getJob(job.id)?.reason).toBe("resumed-without-retune")
+
+		const preemptor = await h.service.createJob({
+			...sweep,
+			priority: 90,
+			ranges: [{ startHz: 451_000_000, endHz: 451_200_000 }],
+		})
+		await untilRunning(h, preemptor.id)
+		expect(h.service.getJob(preemptor.id)?.state).toBe("running")
+		expect(h.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "resumed-without-retune",
+		})
+		const sent = h.tuner.sent.length
+		await h.service.cancelJob(preemptor.id)
+		await settled(h.service)
+		// No waiter takes the freed lease and hops: the held sweep waits for Resume scan.
+		expect(h.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "resumed-without-retune",
+		})
+		// (the preemptor's release may restore its own snapshot; the held sweep hops nowhere)
+		const hops = tuningWrites(h, sent).filter(
+			c =>
+				c.name === "set-frequency" &&
+				c.value >= 449_000_000 &&
+				c.value <= 451_200_000,
+		)
+		expect(hops).toEqual([])
+		await h.service.cancelJob(job.id)
+		await h.service.stop()
+	})
+
 	it("a restore resume leaves an operator-preempted sweep to its idle timeout", async () => {
 		const h = serviceHarness({ patch: noPassive })
 		let clock = Date.now()
@@ -476,5 +524,26 @@ describe("scanner jobs on a paused feed", () => {
 		expect(h.service.getJob(job.id)?.state).toBe("completed")
 		expect(h.service.getJob(job.id)?.reason).toBeUndefined()
 		await h.service.stop()
+	})
+})
+
+describe("who drives the tuner while a sweep holds the lease", () => {
+	const of = (
+		mode: "sweep" | "in-window",
+		state: ScanJob["state"],
+		reason?: ScanJob["reason"],
+	) => ({ spec: { mode }, state, ...(reason ? { reason } : {}) })
+
+	it("a sweep held after a plain resume drives nothing: a retune is not its hop", () => {
+		expect(
+			sweepDrivesTuner(of("sweep", "paused", "resumed-without-retune")),
+		).toBe(false)
+	})
+
+	it("a running or holding sweep drives the tuner; an in-window job or no holder never does", () => {
+		expect(sweepDrivesTuner(of("sweep", "running"))).toBe(true)
+		expect(sweepDrivesTuner(of("sweep", "holding"))).toBe(true)
+		expect(sweepDrivesTuner(of("in-window", "running"))).toBe(false)
+		expect(sweepDrivesTuner(undefined)).toBe(false)
 	})
 })

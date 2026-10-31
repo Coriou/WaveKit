@@ -33,7 +33,9 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   on it is suspended with reason `source-paused`, which `GET /api/decoders/summary` (`decoder-summary.ts`)
   reports as the `source-paused` verdict with a `resume-source` action. A resume reads `resuming` for `resumeMs`
   (default 400 ms). The held feed carries the tuning at pause time as `restoreTuning`; a plain resume
-  changes no tuning, `{ "restoreTuning": true }` writes it back to the mock tuner, and any other body
+  changes no tuning (centre, rate, gain mode and gain then read unverified in `unknownFields` until set;
+  `WAVEKIT_MOCK_MEASURED_RATE=<hz>` (`measuredRateHz`) adopts that measured rate with
+  `measuredFields: ["sampleRate"]`), `{ "restoreTuning": true }` writes it back to the mock tuner, and any other body
   answers 400 `INVALID_RESUME_REQUEST`. `WAVEKIT_MOCK_RESUME_FAILURES=<n>` (`resumeFailures`) makes the next `n`
   resumes answer the core's 503 `SOURCE_RESUME_FAILED` with the feed in `error`, to try Retry.
   `WAVEKIT_MOCK_PERSIST_FAILURES=<n>` (`persistFailures`) makes the next `n` pauses or resumes

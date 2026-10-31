@@ -925,6 +925,12 @@ export class TunerController extends EventEmitter {
 	 */
 	private unverifiedFields: Map<string, Set<TunerStateField>> = new Map()
 	/**
+	 * The sample rate adoptObservedSampleRate took from the stream's measured rate, per source.
+	 * Reported as `measuredFields` only while the rate is still unverified and the state still
+	 * shows this value; a new plain resume or the source's teardown forgets it.
+	 */
+	private measuredRates: Map<string, number> = new Map()
+	/**
 	 * acceptanceSeq when the source's feed was paused (noteFeedPaused): fields accepted after it
 	 * (relay commands during the pause) are written by a plain resume. Consumed by the next sync.
 	 */
@@ -1056,6 +1062,7 @@ export class TunerController extends EventEmitter {
 		this.inferredFields.delete(sourceId)
 		this.ignoredRelayFields.delete(sourceId)
 		this.unverifiedFields.delete(sourceId)
+		this.measuredRates.delete(sourceId)
 		this.pausedAtSeq.delete(sourceId)
 		this.plainResumeHold.delete(sourceId)
 		this.connectionTuningWrites.delete(sourceId)
@@ -2178,6 +2185,11 @@ export class TunerController extends EventEmitter {
 		else this.desiredFields.delete(sourceId)
 		// A pre-pause inferred value is no more proven than an accepted one.
 		this.inferredFields.delete(sourceId)
+		// The gain saved before a band gain is a pre-pause snapshot too: leaving the band later
+		// must not write it over whatever gain the receiver has now. The band gain record goes
+		// with it, so no gain on the tuner reads as the scanner's or the operator's band gain.
+		this.dropOperatorGain(sourceId)
+		this.appliedBandGain.delete(sourceId)
 		// Nothing configured is owed on this or any later connection (plainResumeHold).
 		this.plainResumeHold.add(sourceId)
 
@@ -2190,6 +2202,7 @@ export class TunerController extends EventEmitter {
 		const unverified = new Set<TunerStateField>()
 		for (const field of doubt) if (!commanded.has(field)) unverified.add(field)
 		this.unverifiedFields.set(sourceId, unverified)
+		this.measuredRates.delete(sourceId)
 
 		const written: Array<{ value: number; name: string }> = []
 		let failure: Error | undefined
@@ -2315,6 +2328,7 @@ export class TunerController extends EventEmitter {
 		)
 		const rate = matches.length === 1 ? matches[0] : undefined
 		if (rate === undefined || !isValidRtlSampleRate(rate)) return false
+		this.measuredRates.set(sourceId, rate)
 		// Retried on every measurement update (tuner-wiring): an adopted rate is no news.
 		if (
 			state.sampleRate === rate &&
@@ -2933,6 +2947,7 @@ export class TunerController extends EventEmitter {
 		const {
 			unknownFields: _stale,
 			declaredOnlyFields: _staleDeclared,
+			measuredFields: _staleMeasured,
 			...fields
 		} = state
 		const { unknownFields, declaredOnlyFields } = this.fieldProof(
@@ -2940,6 +2955,9 @@ export class TunerController extends EventEmitter {
 		)
 		const ratePolicy = this.ratePolicyRecordFor?.(state.sourceId)
 		const bandGain = this.confirmedBandGain(state, unknownFields)
+		const measured =
+			unknownFields.includes("sampleRate") &&
+			this.measuredRates.get(state.sourceId) === state.sampleRate
 		return {
 			...fields,
 			...(ratePolicy ? { ratePolicy } : {}),
@@ -2948,6 +2966,7 @@ export class TunerController extends EventEmitter {
 				: state.tunerIfGain,
 			...(unknownFields.length > 0 ? { unknownFields } : {}),
 			...(declaredOnlyFields.length > 0 ? { declaredOnlyFields } : {}),
+			...(measured ? { measuredFields: ["sampleRate" as const] } : {}),
 			...(bandGain ? { bandGain } : {}),
 		}
 	}
