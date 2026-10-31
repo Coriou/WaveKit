@@ -128,7 +128,6 @@ export async function coverageRoutes(
 				reply.status(400)
 				const fields = zodValidationFields(parsed.error, QuerySchema, {
 					part: "query",
-					input: request.query,
 				})
 				return {
 					error: `protocol must be one of: ${COVERAGE_PROTOCOLS.join(", ")}`,

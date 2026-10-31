@@ -3229,19 +3229,29 @@ curl -X POST http://localhost:9000/api/scanner/jobs \
 
 **201**: the `ScanJob` (see the job detail below).
 
-**400** `SCANNER_PLAN_INVALID` when the preview has errors:
+**400** `SCANNER_PLAN_INVALID` when the preview has errors. `fields` names the
+job field each error asks you to change. In an error answer every issue carries
+the fixed message of its `code` and no `details` (except `range-locked`, below),
+so it never repeats a range edge, bandplan id or name you sent;
+`POST /api/scanner/plan` returns the fuller issues of a preview.
 
 ```json
 {
 	"error": "ScannerApiError",
 	"code": "SCANNER_PLAN_INVALID",
-	"message": "The job spec has errors",
+	"message": "The job spec has errors; ranges: at least one range or bandplan; each range with startHz > 0 and endHz > startHz, Hz",
+	"fields": [
+		{
+			"field": "ranges",
+			"expected": "at least one range or bandplan; each range with startHz > 0 and endHz > startHz, Hz"
+		}
+	],
 	"details": {
 		"issues": [
 			{
 				"code": "range-empty",
 				"severity": "error",
-				"message": "a sweep needs at least one range or bandplan"
+				"message": "a range is empty or inverted, or the sweep has no range"
 			}
 		]
 	}
@@ -3276,7 +3286,7 @@ the error table, plus `details.holderJobId` when a job holds the source, or
 `details.issues` from the preview), 409
 `SCANNER_NO_TUNER_CONTROL` (the source has no rtl_tcp tuner control), 400
 `SCANNER_MONITOR_UNAVAILABLE` (`kind: "monitor"`, listen-scan needs the
-channelizer), 400 `SCANNER_IDENTIFY_VIA_JOBS` (`kind: "identify"`; use
+channelizer; `fields` names `kind`), 400 `SCANNER_IDENTIFY_VIA_JOBS` (`kind: "identify"`; use
 `/identify`), 503 `SCANNER_DISABLED`, 503 `SCANNER_STATE_UNAVAILABLE` (sweeps
 only).
 
@@ -3461,13 +3471,19 @@ curl -X PATCH http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7Q
 {
 	"error": "ScannerApiError",
 	"code": "SCANNER_PLAN_INVALID",
-	"message": "The job spec has errors",
+	"message": "The job spec has errors; ranges: the running job's ranges, edges and channel spacing unchanged",
+	"fields": [
+		{
+			"field": "ranges",
+			"expected": "the running job's ranges, edges and channel spacing unchanged"
+		}
+	],
 	"details": {
 		"issues": [
 			{
 				"code": "range-locked",
 				"severity": "error",
-				"message": "range 1: endHz cannot change while the job exists; stop it to change edges or channel spacing",
+				"message": "a running job's ranges cannot change; stop it to change edges or channel spacing",
 				"details": { "index": 1, "fields": ["endHz"] }
 			}
 		]
@@ -7181,6 +7197,15 @@ it and add `fields`.
   not an object, malformed JSON, or an unknown key (`expected` then lists the
   accepted fields).
 - At most 8 fields are named.
+- A value the field's type allows but a further rule refuses (a reserved
+  `delivery`, a `gainDb` with `gainMode: "agc"`, overlapping band gain
+  entries) gets that rule in fixed words after the type, for example
+  `squelchMode`: `one of "manual" | "auto" | "noise"; "noise" needs modulation
+"nfm" or "wfm"`. A rule without its own wording reads `a further rule of this
+  field refused the value sent`.
+- Scanner job refusals keep their codes: `SCANNER_PLAN_INVALID` and
+  `SCANNER_MONITOR_UNAVAILABLE` add `fields`, and each plan issue in
+  `details.issues` has the fixed message of its `code` (see the job example).
 - Tuner routes keep their message wording (`Invalid request body at gain;
 expected {...}`); their `fields` carry the unit, for example `gain`:
   `integer, gain in tenths of a dB (0-500, ...)`, naming the deprecated alias
@@ -7213,8 +7238,8 @@ Scanner and spectrum routes answer with the flat body
 | Code                            | HTTP | When                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | ------------------------------- | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `VALIDATION_ERROR`              | 400  | Request schema (body, params or query, e.g. occupancy query bounds), or a settings PATCH value out of bounds / unknown key                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `SCANNER_PLAN_INVALID`          | 400  | The job preview has errors; `details.issues`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `SCANNER_MONITOR_UNAVAILABLE`   | 400  | `kind: "monitor"` (listen-scan needs the channelizer)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `SCANNER_PLAN_INVALID`          | 400  | The job preview has errors; `fields`, `details.issues` (fixed messages)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `SCANNER_MONITOR_UNAVAILABLE`   | 400  | `kind: "monitor"` (listen-scan needs the channelizer); `fields`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `SCANNER_SETTINGS_INVALID`      | 400  | A settings patch that does not merge; `fields` names each failing field                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `SCANNER_IDENTIFY_VIA_JOBS`     | 400  | `kind: "identify"` on `POST /api/scanner/jobs`; use `/api/scanner/identify`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `SPECTRUM_RANGE_INVALID`        | 400  | Occupancy query: `endHz` not above `startHz`, or the span above 2 GHz                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |

@@ -709,64 +709,25 @@ function walkZod(
 	return { path, schema, complete: true }
 }
 
-/**
- * A refinement collects at most this many submitted values to compare its message with
- * (and walks at most MAX_INPUT_DEPTH levels): a refinement message is shown only when no
- * collected value appears in it. Past either bound the message is dropped (safe default).
- */
-const MAX_INPUT_VALUES = 256
-const MAX_INPUT_DEPTH = 6
+/** A custom refinement's issue on a field the caller gave no static rule for. */
+export const REFUSED_BY_RULE =
+	"a further rule of this field refused the value sent"
 
-/** Strings, numbers and keys of `input` (bounded); null when past a bound. */
-function submittedValues(input: unknown): string[] | null {
-	const out: string[] = []
-	const visit = (value: unknown, depth: number): boolean => {
-		if (out.length > MAX_INPUT_VALUES || depth > MAX_INPUT_DEPTH) return false
-		if (typeof value === "string" || typeof value === "number") {
-			out.push(String(value))
-			return true
-		}
-		if (typeof value !== "object" || value === null) return true
-		for (const [key, child] of Object.entries(value)) {
-			if (!Array.isArray(value)) out.push(key)
-			if (!visit(child, depth + 1)) return false
-		}
-		return true
-	}
-	return visit(input, 0) && out.length <= MAX_INPUT_VALUES ? out : null
-}
-
-/** Plain words only: no digits, quotes, brackets or markup, so no value can hide in it. */
-const PLAIN_RULE = /^[A-Za-z][A-Za-z ,.;:/()-]*$/
-
-/**
- * A custom refinement's message ("noise squelch requires nfm or wfm modulation") when it
- * reads as fixed server text: plain words (PLAIN_RULE), and no submitted string, number or
- * unknown key appears in it (case-insensitive). Some refinements interpolate a value, and a
- * merged-config refinement can quote stored state, so anything else is dropped.
- */
-function refinementRule(
-	message: string,
-	input: unknown,
-	known: ReadonlySet<string>,
-): string | null {
-	if (input === undefined || message.length > 200 || !PLAIN_RULE.test(message))
-		return null
-	const values = submittedValues(input)
-	if (values === null) return null
-	const lower = message.toLowerCase()
-	return values.some(
-		v => v.length > 0 && !known.has(v) && lower.includes(v.toLowerCase()),
-	)
-		? null
-		: message
+/** A field path with array indexes as "*" ("entries.3.maxHz" -> "entries.*.maxHz"). */
+function patternOf(path: readonly string[], part: RequestPart): string {
+	return path.length > 0
+		? path.map(s => (/^\d+$/.test(s) ? "*" : s)).join(".")
+		: part
 }
 
 /**
  * Fields for a Zod failure of `schema`, described from the schema walked along each issue
- * path. Zod's own messages are not used: some quote the received value or an unknown key.
- * A custom refinement's message is added only when `input` (the submitted value) is given
- * and none of its values appears in it. `expected` overrides the description of a field.
+ * path. Zod's own messages are never used, refinement messages included: some quote the
+ * received value or an unknown key, and no filter can prove a message static. A custom
+ * refinement's issue gets the static text `rules` gives for its field (keys as in
+ * `patternOf`: array indexes are "*"), else a note that a further rule refused the value,
+ * so the schema description is not read as a promise. `expected` replaces the whole
+ * description of a field (for a refinement that rejects values the schema lists).
  */
 export function zodValidationFields(
 	error: ZodError,
@@ -774,19 +735,18 @@ export function zodValidationFields(
 	options: {
 		part?: RequestPart
 		expected?: Readonly<Record<string, string>>
-		input?: unknown
+		rules?: Readonly<Record<string, string>>
 	} = {},
 ): ValidationField[] {
 	const part = options.part ?? "body"
 	const fields = new Map<string, string>()
-	// Schema field names a refinement may mention ("modulation"); a client's key may not.
-	const known = new Set(zodShapeNames(schema))
 	for (const issue of error.issues) {
 		if (fields.size >= MAX_VALIDATION_FIELDS) break
 		const walked = walkZod(schema, issue.path)
 		const at = walked.path.length > 0 ? walked.path.join(".") : part
 		if (fields.has(at)) continue
-		const override = options.expected?.[at]
+		const pattern = patternOf(walked.path, part)
+		const override = options.expected?.[at] ?? options.expected?.[pattern]
 		if (override !== undefined) {
 			fields.set(at, override)
 			continue
@@ -811,7 +771,7 @@ export function zodValidationFields(
 			issue.code === "invalid_type" && issue.received === "undefined"
 		const rule =
 			issue.code === "custom"
-				? refinementRule(issue.message, options.input, known)
+				? (options.rules?.[pattern] ?? REFUSED_BY_RULE)
 				: null
 		fields.set(
 			at,
@@ -832,7 +792,7 @@ export function zodValidationBody(
 	options: {
 		part?: RequestPart
 		expected?: Readonly<Record<string, string>>
-		input?: unknown
+		rules?: Readonly<Record<string, string>>
 		error?: string
 		code?: string
 	} = {},

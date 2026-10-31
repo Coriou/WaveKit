@@ -292,6 +292,14 @@ const presetsResponseSchema = {
 const OFFSET_EXPECTED =
 	"number, Hz from the tuned centre; the channel must stay inside the capture (|offsetHz| <= sample rate / 2 - bandwidth / 2)"
 
+/** Static 400 text for the live demod refinements (WG7 squelch rules, bandwidth). */
+const LIVE_DEMOD_RULES: Readonly<Record<string, string>> = Object.freeze({
+	bandwidth: 'greater than 0 unless modulation is "raw"',
+	squelchMode: '"noise" needs modulation "nfm" or "wfm"',
+	toneSquelch:
+		'a tone squelch needs modulation "nfm" and a standard CTCSS tone or DCS code',
+})
+
 export interface LiveAudioRoutesOptions {
 	liveDemod: LiveDemodulator
 	/**
@@ -580,7 +588,7 @@ export const liveAudioRoutes: FastifyPluginAsync<
 						err instanceof ZodError
 							? zodValidationBody(err, LiveDemodRuntimeConfigSchema, {
 									error: "Bad Request",
-									input: request.body,
+									rules: LIVE_DEMOD_RULES,
 								})
 							: validationErrorBody(
 									"body",

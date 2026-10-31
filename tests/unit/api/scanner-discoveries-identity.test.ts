@@ -56,7 +56,7 @@ function fakeService(
 }
 
 const IDENTITY_EXPECTED =
-	'"kind:value": a known identity kind, a colon, then a non-empty value; Identity value is empty'
+	'"kind:value": a known identity kind, a colon, then a non-empty value'
 
 describe("GET /api/scanner/discoveries identity", () => {
 	let app: FastifyInstance

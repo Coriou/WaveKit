@@ -175,6 +175,12 @@ const U32 = "unsigned 32-bit"
  * What each tuner route expects, named in every 400 it answers (field names, types and
  * units). Static text: a 400 never echoes the submitted value.
  */
+/** Static 400 text for the band gain refinements. */
+const BAND_GAIN_RULES: Readonly<Record<string, string>> = Object.freeze({
+	"entries.*.maxHz": "above minHz",
+	"entries.*": "ranges are inclusive and must not overlap another entry",
+})
+
 const EXPECTED_BODY: Readonly<Record<string, string>> = Object.freeze({
 	"/api/tuner/:sourceId/frequency":
 		'{"hz": integer, frequency in Hz (24000000-1900000000)}',
@@ -1235,7 +1241,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 											? zodValidationFields(
 													parsed.error,
 													BandGainSettingsSchema,
-													{ input: request.body },
+													{ rules: BAND_GAIN_RULES },
 												)
 											: [
 													{

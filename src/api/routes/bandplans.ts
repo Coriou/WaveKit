@@ -144,9 +144,7 @@ function readParam(request: FastifyRequest, name: string): string {
 function parseWith<T>(schema: ZodType<T>, value: unknown): T {
 	const result = schema.safeParse(value)
 	if (!result.success)
-		throw invalidWith(
-			zodValidationFields(result.error, schema, { input: value }),
-		)
+		throw invalidWith(zodValidationFields(result.error, schema))
 	return result.data
 }
 

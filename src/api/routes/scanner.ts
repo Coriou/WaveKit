@@ -4,8 +4,9 @@
  *
  * Error codes (a ScannerApiError answers with its own status):
  * - 400 `VALIDATION_ERROR` (schema or settings PATCH; `fields` names each failing field),
- *   `SCANNER_PLAN_INVALID` `{issues}`, `SCANNER_MONITOR_UNAVAILABLE`, `SCANNER_SETTINGS_INVALID`
- *   (`fields`), `SCANNER_IDENTIFY_VIA_JOBS`
+ *   `SCANNER_PLAN_INVALID` `{issues}` + `fields`, `SCANNER_MONITOR_UNAVAILABLE` (`fields`),
+ *   `SCANNER_SETTINGS_INVALID` (`fields`), `SCANNER_IDENTIFY_VIA_JOBS`. Plan issues in an
+ *   error answer are static: code, severity and the code's fixed message (scanner-plan-issues)
  * - 404 `SCANNER_NOT_FOUND`, `SCANNER_JOB_NOT_FOUND`, `SCANNER_DISCOVERY_NOT_FOUND`
  * - 409 `SCANNER_TAKEOVER_REQUIRED` `{impact}`, `SCANNER_SOURCE_BUSY` (the message carries the
  *   arbiter's detail: "holder is starting", "releasing", "recovery pending", …),
@@ -35,6 +36,7 @@ import type {
 	FastifyRequest,
 } from "fastify"
 import { z, ZodError, ZodIssueCode, type ZodIssue, type ZodTypeAny } from "zod"
+import { staticPlanIssues } from "./scanner-plan-issues.js"
 import {
 	validationErrorBody,
 	zodValidationBody,
@@ -152,12 +154,24 @@ interface DiscoveryQuery {
 }
 
 /** The schema a ZodError without its own (the discovery identity query) is named against. */
+const IDENTITY_EXPECTED =
+	'"kind:value": a known identity kind, a colon, then a non-empty value'
 const IDENTITY_QUERY_FIELDS = z.object({
-	identity: z
-		.string()
-		.describe(
-			'"kind:value": a known identity kind, a colon, then a non-empty value',
-		),
+	identity: z.string().describe(IDENTITY_EXPECTED),
+})
+
+const MONITOR_UNAVAILABLE_MESSAGE =
+	'Listen-scan jobs need the channelizer: send kind "discover"'
+const MONITOR_UNAVAILABLE_FIELD: ValidationField = {
+	field: "kind",
+	expected:
+		'"discover" ("monitor" needs the channelizer, which this receiver does not run)',
+}
+const PLAN_INVALID_MESSAGE = "The job spec has errors"
+/** The plan issue a 409 refusal with `details.issues` is raised for (its message). */
+const ISSUE_OF_REFUSAL: Readonly<Record<string, string>> = Object.freeze({
+	SCANNER_SOURCE_BUSY: "source-busy",
+	SCANNER_NO_TUNER_CONTROL: "no-tuner-control",
 })
 
 function sendError(
@@ -179,9 +193,37 @@ function sendError(
 				fields: zodValidationFields(
 					new ZodError(err.details["issues"] as ZodIssue[]),
 					ScannerSettingsPatchSchema,
-					{ input: reply.request.body },
 				),
 			})
+		if (err.code === "SCANNER_MONITOR_UNAVAILABLE")
+			return reply.code(err.statusCode).send({
+				error: err.name,
+				code: err.code,
+				message: MONITOR_UNAVAILABLE_MESSAGE,
+				fields: [MONITOR_UNAVAILABLE_FIELD],
+			})
+		// Plan issues quote the job spec (range edges, bandplan ids): answer their static form.
+		if (err.details !== undefined && Object.hasOwn(err.details, "issues")) {
+			const plan = staticPlanIssues(err.details["issues"])
+			const invalid = err.code === "SCANNER_PLAN_INVALID"
+			// A 409 refusal repeats its issue's message: answer that issue's static one.
+			const cause = ISSUE_OF_REFUSAL[err.code]
+			const refusal = plan.issues.find(
+				i => i.severity === "error" && i.code === cause,
+			)
+			return reply.code(err.statusCode).send({
+				error: err.name,
+				code: err.code,
+				message: invalid
+					? [
+							PLAN_INVALID_MESSAGE,
+							...plan.fields.map(f => `${f.field}: ${f.expected}`),
+						].join("; ")
+					: (refusal?.message ?? err.message),
+				...(invalid ? { fields: plan.fields } : {}),
+				details: { ...err.details, issues: plan.issues },
+			})
+		}
 		return reply.code(err.statusCode).send({
 			error: err.name,
 			code: err.code,
@@ -192,10 +234,14 @@ function sendError(
 	if (err instanceof ZodError) {
 		const part = schema === IDENTITY_QUERY_FIELDS ? "query" : "body"
 		return reply.code(400).send(
-			zodValidationBody(err, schema, {
-				part,
-				input: part === "query" ? reply.request.query : reply.request.body,
-			}),
+			zodValidationBody(
+				err,
+				schema,
+				// The identity checks are refinements whose description already states the rule.
+				part === "query"
+					? { part, expected: { identity: IDENTITY_EXPECTED } }
+					: { part },
+			),
 		)
 	}
 	throw err

@@ -32,6 +32,12 @@ interface ErrorResponse {
 	message: string
 }
 
+/** Static 400 text for the band override refinements. */
+const BAND_OVERRIDE_RULES: Readonly<Record<string, string>> = Object.freeze({
+	body: "at least one of rangesHz, targetsHz, region, bandSuspension (DELETE clears the override)",
+	"rangesHz.*": "minHz must not exceed maxHz",
+})
+
 const errorResponseSchema = {
 	type: "object",
 	properties: {
@@ -185,7 +191,7 @@ export const decoderBandRoutes: FastifyPluginAsync<
 				return reply.status(400).send(
 					zodValidationBody(parsed.error, DecoderBandOverrideSchema, {
 						error: "BadRequest",
-						input: request.body,
+						rules: BAND_OVERRIDE_RULES,
 						code: "INVALID_BAND_OVERRIDE",
 					}),
 				)

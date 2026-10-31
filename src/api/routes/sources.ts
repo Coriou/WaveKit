@@ -59,6 +59,19 @@ const sourceCapsSchema = {
 } as const
 
 /**
+ * Static 400 text for SourceConfigSchema fields a refinement narrows. `delivery` lists
+ * what the server accepts, not the schema enum ("channels" is in the enum but reserved).
+ */
+const SOURCE_EXPECTED: Readonly<Record<string, string>> = Object.freeze({
+	delivery:
+		'one of "raw" | "auto" (default "auto"); "channels" is reserved and refused',
+})
+const SOURCE_RULES: Readonly<Record<string, string>> = Object.freeze({
+	"tuner.gainDb":
+		'a multiple of 0.1 dB; required when tuner.gainMode is "manual", not allowed when it is "agc"',
+})
+
+/**
  * Source config schema for request validation
  */
 const sourceConfigSchema = {
@@ -415,7 +428,8 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 				return reply.status(400).send(
 					zodValidationBody(parsed.error, SourceConfigSchema, {
 						error: "BadRequest",
-						input: request.body,
+						expected: SOURCE_EXPECTED,
+						rules: SOURCE_RULES,
 					}),
 				)
 			}

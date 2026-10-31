@@ -469,7 +469,6 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 							400,
 							zodValidationBody(parsed.error, BudgetBodySchema, {
 								error: "BadRequest",
-								input: request.body,
 								code: "EFFICIENCY_BUDGET_INVALID",
 							}),
 						)
@@ -826,7 +825,6 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				return reply.status(400).send(
 					zodValidationBody(body.error, StartBodySchema, {
 						error: "BadRequest",
-						input: request.body,
 						code: "INVALID_START_REQUEST",
 					}),
 				)

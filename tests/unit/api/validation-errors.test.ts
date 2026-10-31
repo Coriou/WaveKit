@@ -25,6 +25,9 @@ import {
 import { BandGainSettingsError } from "../../../src/core/band-gain.js"
 import { StationUpdateError } from "../../../src/core/station/errors.js"
 import { RecordingInventoryError } from "../../../src/core/recordings/inventory.js"
+import { ScannerApiError } from "../../../src/core/scanner/errors.js"
+import { staticPlanIssues } from "../../../src/api/routes/scanner-plan-issues.js"
+import { BAND_GAIN_MIN_HZ } from "@wavekit/api-types"
 import { createLogger } from "../../../src/utils/logger.js"
 import {
 	ajvValidationFields,
@@ -32,6 +35,7 @@ import {
 	unitFromName,
 	zodValidationFields,
 	MAX_VALIDATION_FIELDS,
+	REFUSED_BY_RULE,
 } from "../../../src/api/validation-errors.js"
 
 const SENTINEL = "zq7-INJECTED-sentinel"
@@ -166,6 +170,203 @@ function queryProperties(schema: Route["schema"]): string[] {
 	return query?.properties ? Object.keys(query.properties) : []
 }
 
+/** Hz a test range sends: a plan issue message would quote it. */
+const SENTINEL_HZ = 7_654_321
+
+/**
+ * The scanner's semantic refusals of a schema-valid job, worded as the core words them:
+ * plan issues quote bandplan ids, range edges, the job name and the source id.
+ */
+async function rejectJob(spec: {
+	kind?: string
+	sourceId?: string
+	name?: string
+	bandplans?: string[]
+	ranges?: { startHz: number; endHz: number }[]
+}): Promise<never> {
+	if (spec.kind === "monitor")
+		throw new ScannerApiError(
+			"Listen-scan jobs need the channelizer",
+			"SCANNER_MONITOR_UNAVAILABLE",
+			400,
+		)
+	if (spec.sourceId !== undefined)
+		throw new ScannerApiError(
+			`source ${spec.sourceId} is under external (relay) control`,
+			"SCANNER_SOURCE_BUSY",
+			409,
+			{
+				reason: "relay",
+				issues: [
+					{
+						code: "source-busy",
+						severity: "error",
+						message: `source ${spec.sourceId} is under external (relay) control`,
+						details: { sourceId: spec.sourceId },
+					},
+				],
+			},
+		)
+	throw new ScannerApiError(
+		"The job spec has errors",
+		"SCANNER_PLAN_INVALID",
+		400,
+		{
+			issues: [
+				...(spec.bandplans ?? []).map(id => ({
+					code: "range-empty",
+					severity: "error",
+					message: `bandplan ${id} is not available in region EU`,
+					details: { bandplan: id },
+				})),
+				...(spec.ranges ?? []).map(r => ({
+					code: "range-empty",
+					severity: "error",
+					message: `range ${r.startHz}-${r.endHz} Hz is empty or inverted`,
+					details: { range: r },
+				})),
+				{
+					code: "poi-low",
+					severity: "warning",
+					message: `detection POI is low for ${spec.name ?? "the job"}`,
+				},
+			],
+		},
+	)
+}
+
+/**
+ * Schema-valid bodies a later rule refuses (a Zod refinement, the scanner plan preview),
+ * each carrying the sentinel where the refusal could quote it. `protectedOnly` routes
+ * mount with access configured.
+ */
+const SEMANTIC_BODIES: readonly {
+	route: string
+	request: string
+	method: "POST" | "PUT" | "PATCH"
+	url: string
+	payload: unknown
+	protectedOnly?: boolean
+}[] = [
+	{
+		route: "POST /api/scanner/jobs",
+		request: "monitor job without the channelizer",
+		method: "POST",
+		url: "/api/scanner/jobs",
+		payload: { kind: "monitor", name: SENTINEL },
+	},
+	{
+		route: "POST /api/scanner/jobs",
+		request: "unknown bandplan, inverted range",
+		method: "POST",
+		url: "/api/scanner/jobs",
+		payload: {
+			name: SENTINEL,
+			bandplans: [SENTINEL],
+			ranges: [{ startHz: SENTINEL_HZ, endHz: SENTINEL_HZ - 1 }],
+		},
+	},
+	{
+		route: "POST /api/sources",
+		request: "reserved delivery",
+		method: "POST",
+		url: "/api/sources",
+		payload: {
+			id: SENTINEL,
+			type: "rtl_tcp",
+			host: SENTINEL,
+			caps: { kind: "iq", sampleRate: 1, format: "U8_IQ", exclusive: false },
+			delivery: "channels",
+		},
+	},
+	{
+		route: "POST /api/sources",
+		request: "gain with agc",
+		method: "POST",
+		url: "/api/sources",
+		payload: {
+			id: SENTINEL,
+			type: "rtl_tcp",
+			caps: { kind: "iq", sampleRate: 1, format: "U8_IQ", exclusive: false },
+			tuner: { gainMode: "agc", gainDb: 1 },
+		},
+	},
+	{
+		route: "PATCH /api/live-audio/config",
+		request: "noise squelch on a refused modulation",
+		method: "PATCH",
+		url: "/api/live-audio/config",
+		payload: { squelchMode: "noise" },
+	},
+	{
+		route: "PUT /api/decoders/:id/band",
+		request: "empty override",
+		method: "PUT",
+		url: "/api/decoders/x1/band",
+		payload: {},
+	},
+	{
+		route: "PUT /api/decoders/:id/band",
+		request: "inverted range",
+		method: "PUT",
+		url: "/api/decoders/x1/band",
+		payload: { rangesHz: [{ minHz: SENTINEL_HZ, maxHz: SENTINEL_HZ - 1 }] },
+	},
+	{
+		route: "PUT /api/tuner-band-gain",
+		request: "overlapping and inverted entries",
+		method: "PUT",
+		url: "/api/tuner-band-gain",
+		payload: {
+			applyToMyTuning: false,
+			entries: [
+				{
+					minHz: BAND_GAIN_MIN_HZ + 10,
+					maxHz: BAND_GAIN_MIN_HZ + 20,
+					gain: "keep",
+					label: SENTINEL,
+				},
+				{
+					minHz: BAND_GAIN_MIN_HZ + 15,
+					maxHz: BAND_GAIN_MIN_HZ + 30,
+					gain: "keep",
+					label: SENTINEL,
+				},
+				{
+					minHz: BAND_GAIN_MIN_HZ + 50,
+					maxHz: BAND_GAIN_MIN_HZ + 40,
+					gain: "keep",
+				},
+			],
+		},
+		protectedOnly: true,
+	},
+]
+
+async function sendSemantic(
+	target: FastifyInstance,
+	headers: Record<string, string>,
+	protectedMode: boolean,
+): Promise<Answer[]> {
+	const out: Answer[] = []
+	for (const body of SEMANTIC_BODIES) {
+		if (body.protectedOnly === true && !protectedMode) continue
+		const res = await target.inject({
+			method: body.method,
+			url: body.url,
+			payload: JSON.stringify(body.payload),
+			headers: { ...headers, "content-type": "application/json" },
+		})
+		out.push({
+			route: body.route,
+			request: body.request,
+			status: res.statusCode,
+			body: res.body,
+		})
+	}
+	return out
+}
+
 /** A budget service whose writes are never reached by invalid bodies. */
 const efficiencyBudget = fake({ view: () => ({ cpuBudgetCores: "auto" }) })
 
@@ -227,7 +428,16 @@ function fakeDependencies(): ApiServerDependencies {
 		),
 		liveDemod: fake(
 			Object.assign(new EventEmitter(), {
-				reconfigure: async () => {
+				reconfigure: async (updates: { squelchMode?: unknown }) => {
+					// The core refinement path: a custom issue whose message could quote the value.
+					if (updates.squelchMode !== undefined)
+						throw new z.ZodError([
+							{
+								code: "custom",
+								path: ["squelchMode"],
+								message: `squelch ${String(updates.squelchMode)} needs nfm or wfm`,
+							},
+						])
 					throw new z.ZodError([
 						{
 							code: "invalid_type",
@@ -243,6 +453,7 @@ function fakeDependencies(): ApiServerDependencies {
 		scanner: fake(
 			Object.assign(new EventEmitter(), {
 				settings: () => ({ ws: { maxMessagesPerSecond: 10 } }),
+				createJob: rejectJob,
 			}),
 		),
 		spectrum: fake(),
@@ -291,6 +502,7 @@ const roots: string[] = []
 let app: FastifyInstance
 const answers: Answer[] = []
 const protectedAnswers: Answer[] = []
+const semanticAnswers: Answer[] = []
 
 const origin = "http://receiver.lan:9000"
 
@@ -301,6 +513,8 @@ beforeAll(async () => {
 	})
 	app = legacy.app
 	answers.push(...(await sweep(app, legacy.routes)))
+	semanticAnswers.push(...(await sendSemantic(app, {}, false)))
+	answers.push(...semanticAnswers)
 
 	// Access configured: the write routes that mount only in protected mode.
 	const root = await fs.mkdtemp(join(tmpdir(), "wavekit-validation-"))
@@ -390,6 +604,13 @@ beforeAll(async () => {
 	protectedAnswers.push(
 		...(await sweep(protectedServer.app, protectedServer.routes, machine)),
 	)
+	const protectedSemantic = await sendSemantic(
+		protectedServer.app,
+		machine,
+		true,
+	)
+	semanticAnswers.push(...protectedSemantic)
+	protectedAnswers.push(...protectedSemantic)
 	const recordings = await protectedServer.app.inject({
 		method: "GET",
 		url: `/api/recordings?limit=${SENTINEL}&${SENTINEL}=1`,
@@ -484,6 +705,163 @@ describe("HTTP 400 validation answers", () => {
 			.filter(a => a.status === 400 && a.body.includes(SENTINEL))
 			.map(a => `${a.route} (${a.request}): ${a.body}`)
 		expect(echoes).toEqual([])
+	})
+
+	it("refuses every schema-valid but semantically invalid body with a static 400", () => {
+		// Every body without access configured, every body again with it.
+		expect(semanticAnswers).toHaveLength(
+			2 * SEMANTIC_BODIES.length -
+				SEMANTIC_BODIES.filter(b => b.protectedOnly === true).length,
+		)
+		const wrong = semanticAnswers
+			.filter(
+				a =>
+					a.status !== 400 ||
+					a.body.includes(SENTINEL) ||
+					a.body.includes(String(SENTINEL_HZ)) ||
+					a.body.includes(String(SENTINEL_HZ - 1)),
+			)
+			.map(a => `${a.route} (${a.request}) ${a.status}: ${a.body}`)
+		expect(wrong).toEqual([])
+	})
+
+	it("a monitor job without the channelizer names kind and what it accepts", () => {
+		const answer = semanticAnswers.find(a => a.request.startsWith("monitor"))
+		expect(JSON.parse(answer?.body ?? "null")).toEqual({
+			error: "ScannerApiError",
+			code: "SCANNER_MONITOR_UNAVAILABLE",
+			message: 'Listen-scan jobs need the channelizer: send kind "discover"',
+			fields: [
+				{
+					field: "kind",
+					expected:
+						'"discover" ("monitor" needs the channelizer, which this receiver does not run)',
+				},
+			],
+		})
+	})
+
+	it("an invalid plan keeps details.issues with static messages and names the fields", () => {
+		const answer = semanticAnswers.find(a =>
+			a.request.startsWith("unknown bandplan"),
+		)
+		const body = JSON.parse(answer?.body ?? "null") as {
+			code: string
+			message: string
+			fields: { field: string; expected: string }[]
+			details: { issues: unknown[] }
+		}
+		expect(body.code).toBe("SCANNER_PLAN_INVALID")
+		// The web app reads details.issues[].code/severity/message.
+		expect(body.details.issues).toEqual([
+			{
+				code: "range-empty",
+				severity: "error",
+				message: "a requested bandplan is not available in this region",
+			},
+			{
+				code: "range-empty",
+				severity: "error",
+				message: "a range is empty or inverted, or the sweep has no range",
+			},
+			{
+				code: "poi-low",
+				severity: "warning",
+				message: "the detection probability for a typical transmission is low",
+			},
+		])
+		expect(body.fields.map(f => f.field)).toEqual(["bandplans", "ranges"])
+		expect(body.message).toMatch(/^The job spec has errors; bandplans: /)
+	})
+
+	it("a 409 refusal carrying plan issues answers their static form", async () => {
+		const res = await app.inject({
+			method: "POST",
+			url: "/api/scanner/jobs",
+			payload: { sourceId: SENTINEL },
+		})
+		expect(res.statusCode).toBe(409)
+		expect(res.json()).toEqual({
+			error: "ScannerApiError",
+			code: "SCANNER_SOURCE_BUSY",
+			message: "the source is under external (relay) control",
+			details: {
+				reason: "relay",
+				issues: [
+					{
+						code: "source-busy",
+						severity: "error",
+						message: "the source is under external (relay) control",
+					},
+				],
+			},
+		})
+	})
+
+	it("a refused enum value is not advertised as accepted", () => {
+		const answer = semanticAnswers.find(a => a.request === "reserved delivery")
+		const body = JSON.parse(answer?.body ?? "null") as {
+			fields: { field: string; expected: string }[]
+		}
+		expect(body.fields).toEqual([
+			{
+				field: "delivery",
+				expected:
+					'one of "raw" | "auto" (default "auto"); "channels" is reserved and refused',
+			},
+		])
+	})
+
+	it("refinements answer the static rule of their field", () => {
+		const fieldsOf = (request: string) =>
+			(
+				JSON.parse(
+					semanticAnswers.find(a => a.request === request)?.body ?? "null",
+				) as { fields: { field: string; expected: string }[] }
+			).fields
+		expect(fieldsOf("gain with agc")).toEqual([
+			{
+				field: "tuner.gainDb",
+				expected:
+					'number (0 to 50), dB; a multiple of 0.1 dB; required when tuner.gainMode is "manual", not allowed when it is "agc"',
+			},
+		])
+		expect(fieldsOf("noise squelch on a refused modulation")).toEqual([
+			{
+				field: "squelchMode",
+				expected: expect.stringMatching(
+					/; "noise" needs modulation "nfm" or "wfm"$/,
+				) as string,
+			},
+		])
+		expect(fieldsOf("empty override")).toEqual([
+			{
+				field: "body",
+				expected: expect.stringMatching(
+					/; at least one of rangesHz, targetsHz, region, bandSuspension/,
+				) as string,
+			},
+		])
+		expect(fieldsOf("inverted range")).toEqual([
+			{
+				field: "rangesHz.0",
+				expected: expect.stringMatching(
+					/; minHz must not exceed maxHz$/,
+				) as string,
+			},
+		])
+		expect(fieldsOf("overlapping and inverted entries")).toEqual([
+			{
+				field: "entries.2.maxHz",
+				expected: expect.stringMatching(/; above minHz$/) as string,
+			},
+			{
+				field: "entries.1",
+				expected: expect.stringMatching(
+					/; ranges are inclusive and must not overlap another entry$/,
+				) as string,
+			},
+		])
 	})
 
 	it("POST tuner gain with a wrong gain names gain and tenthsDb in tenths of a dB", async () => {
@@ -595,39 +973,134 @@ describe("validation field helpers", () => {
 		])
 	})
 
-	it("keeps a plain refinement message and drops one that could carry a value", () => {
+	it("never uses a refinement message: a static rule or a refusal note instead", () => {
 		const schema = z
-			.object({ mode: z.string(), note: z.string() })
+			.object({ mode: z.string(), note: z.string().trim() })
 			.superRefine((value, ctx) => {
 				ctx.addIssue({
 					code: "custom",
 					path: ["mode"],
 					message: "mode requires a note",
 				})
+				// Quotes the parsed (trimmed) value: no filter on the raw input could catch it.
 				ctx.addIssue({
 					code: "custom",
 					path: ["note"],
 					message: `note ${value.note} is not allowed`,
 				})
 			})
-		const input = { mode: "fm", note: SENTINEL }
-		const parsed = schema.safeParse(input)
+		const parsed = schema.safeParse({ mode: "fm", note: `  ${SENTINEL}  ` })
 		if (parsed.success) throw new Error("expected a failure")
-		expect(zodValidationFields(parsed.error, schema, { input })).toEqual([
-			{ field: "mode", expected: "string; mode requires a note" },
-			{ field: "note", expected: "string" },
-		])
-		// Without the submitted input nothing vouches for the message.
 		expect(zodValidationFields(parsed.error, schema)).toEqual([
-			{ field: "mode", expected: "string" },
-			{ field: "note", expected: "string" },
+			{ field: "mode", expected: `string; ${REFUSED_BY_RULE}` },
+			{ field: "note", expected: `string; ${REFUSED_BY_RULE}` },
 		])
-		// Digits, quotes or markup never pass, even when not from this request.
-		const stored = z.string().refine(() => false, "limit 9999 <b>")
-		const failed = stored.safeParse("x")
-		if (failed.success) throw new Error("expected a failure")
-		expect(zodValidationFields(failed.error, stored, { input: "x" })).toEqual([
-			{ field: "body", expected: "string" },
+		expect(
+			zodValidationFields(parsed.error, schema, {
+				rules: { mode: "needs a note" },
+			}),
+		).toEqual([
+			{ field: "mode", expected: "string; needs a note" },
+			{ field: "note", expected: `string; ${REFUSED_BY_RULE}` },
+		])
+		expect(
+			JSON.stringify(zodValidationFields(parsed.error, schema)),
+		).not.toContain(SENTINEL)
+	})
+
+	it("keys rules and overrides of array items by * and replaces a refused enum", () => {
+		const schema = z.object({
+			list: z.array(
+				z
+					.object({ lo: z.number(), hi: z.number() })
+					.refine(v => v.lo <= v.hi, { message: "lo above hi", path: ["hi"] }),
+			),
+			pick: z.enum(["a", "b"]).refine(v => v !== "b", "b is reserved"),
+		})
+		const parsed = schema.safeParse({
+			list: [
+				{ lo: 1, hi: 2 },
+				{ lo: 3, hi: 2 },
+			],
+			pick: "b",
+		})
+		if (parsed.success) throw new Error("expected a failure")
+		expect(
+			zodValidationFields(parsed.error, schema, {
+				rules: { "list.*.hi": "at least lo" },
+				expected: { pick: '"a" ("b" is reserved)' },
+			}),
+		).toEqual([
+			{ field: "list.1.hi", expected: "number; at least lo" },
+			{ field: "pick", expected: '"a" ("b" is reserved)' },
+		])
+	})
+
+	it("plan issues keep only the checked range-locked details", () => {
+		const { issues, fields } = staticPlanIssues([
+			{
+				code: "range-locked",
+				severity: "error",
+				message: `range 1: ${SENTINEL} cannot change`,
+				details: { index: 1, fields: ["endHz"], note: SENTINEL },
+			},
+			{
+				code: "range-locked",
+				severity: "warning",
+				message: SENTINEL,
+				details: {
+					reason: "range-live-stale",
+					dropped: [0, 2],
+					expected: 3,
+					received: 3,
+				},
+			},
+			// A field name or reason outside the fixed sets is dropped, not echoed.
+			{
+				code: "range-locked",
+				severity: "error",
+				message: SENTINEL,
+				details: { reason: SENTINEL, fields: [SENTINEL], index: -1 },
+			},
+			{ code: SENTINEL, severity: SENTINEL, message: SENTINEL },
+			SENTINEL,
+		])
+		expect(issues).toEqual([
+			{
+				code: "range-locked",
+				severity: "error",
+				message:
+					"a running job's ranges cannot change; stop it to change edges or channel spacing",
+				details: { index: 1, fields: ["endHz"] },
+			},
+			{
+				code: "range-locked",
+				severity: "warning",
+				message:
+					"a running job's ranges cannot change; stop it to change edges or channel spacing",
+				details: {
+					reason: "range-live-stale",
+					dropped: [0, 2],
+					expected: 3,
+					received: 3,
+				},
+			},
+			{
+				code: "range-locked",
+				severity: "error",
+				message:
+					"a running job's ranges cannot change; stop it to change edges or channel spacing",
+			},
+			{
+				code: "unknown",
+				severity: "error",
+				message: "the job spec has an error",
+			},
+		])
+		expect(fields.map(f => f.field)).toEqual(["ranges"])
+		expect(JSON.stringify({ issues, fields })).not.toContain(SENTINEL)
+		expect(staticPlanIssues(SENTINEL).fields.map(f => f.field)).toEqual([
+			"body",
 		])
 	})
 

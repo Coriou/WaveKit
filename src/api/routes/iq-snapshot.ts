@@ -62,11 +62,7 @@ export const iqSnapshotRoutes: FastifyPluginAsync<IqSnapshotOptions> = async (
 			}
 			const parsed = bodySchema.safeParse(request.body)
 			if (!parsed.success)
-				return reply.code(400).send(
-					zodValidationBody(parsed.error, bodySchema, {
-						input: request.body,
-					}),
-				)
+				return reply.code(400).send(zodValidationBody(parsed.error, bodySchema))
 			const { sourceId } = request.params
 			const source = options.sourceManager.getStatus(sourceId)
 			if (!source) return reply.code(404).send({ code: "SOURCE_NOT_FOUND" })
