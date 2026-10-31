@@ -120,6 +120,13 @@ export interface TunerState {
 	 */
 	declaredOnlyFields?: TunerStateField[]
 	/**
+	 * Fields listed in `unknownFields` whose value above is measured from the stream rather than
+	 * last known: today only `sampleRate`, after a plain resume of a paused feed adopted the rate
+	 * the receiver is measured to deliver. Still unverified (nothing wrote it). Absent when empty
+	 * and from older cores.
+	 */
+	measuredFields?: TunerStateField[]
+	/**
 	 * Per-band gain: present only while a band gain is confirmed on the tuner, i.e. the core
 	 * wrote it (or found it already there) for the current frequency and the tuner's known
 	 * gain mode is manual with exactly this gain. Cleared by any later gain, gain mode or
@@ -194,6 +201,7 @@ export interface TunerConfigUpdate extends Partial<
 		| "commandCount"
 		| "unknownFields"
 		| "declaredOnlyFields"
+		| "measuredFields"
 	>
 > {}
 

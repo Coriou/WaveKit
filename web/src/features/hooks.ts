@@ -4,6 +4,7 @@ import type { LiveAudioStatus, TunerState } from "@wavekit/api-types"
 import { useServices } from "../app/context.ts"
 import { tunedHz, useStore } from "../data/index.ts"
 import type { TunerStoreState } from "../data/index.ts"
+import { receiverSourceIdOf, shownSourceFor } from "./receiver/feed.ts"
 
 const firstTuner = (s: TunerStoreState): TunerState | undefined => {
 	const id = Object.keys(s.bySource)[0]
@@ -13,6 +14,21 @@ const firstTuner = (s: TunerStoreState): TunerState | undefined => {
 /** The tuner-controlled source's state (the first one). */
 export function useTunerState(): TunerState | undefined {
 	return useStore(useServices().data.tuner, firstTuner)
+}
+
+const firstTunerId = (s: TunerStoreState): string | null =>
+	Object.keys(s.bySource)[0] ?? null
+
+/**
+ * The receiver the Receiver island and the palette act on: the source the plot shows, else the first tuner's
+ * source, else the first source (receiverSourceIdOf; the P key reads the same through receiverSourceId).
+ */
+export function useReceiverSourceId(): string | null {
+	const { data } = useServices()
+	const shown = useStore(shownSourceFor(data))
+	const firstTuner = useStore(data.tuner, firstTunerId)
+	const firstSource = useStore(data.sources, s => s.sources[0]?.id ?? null)
+	return receiverSourceIdOf(shown, firstTuner, firstSource)
 }
 
 export function useLiveStatus(): LiveAudioStatus | null {

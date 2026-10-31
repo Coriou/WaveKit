@@ -114,6 +114,7 @@ const liveDemodStatusSchema = {
 			type: "string",
 			enum: ["running", "starting", "stopped", "error"],
 		},
+		suspendedReason: { type: "string", enum: ["source-paused"] },
 		lastError: { type: "string" },
 		wavUrl: { type: "string" },
 		pipelineRestarts: { type: "number" },
@@ -366,6 +367,9 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			clientCount: status.clientCount,
 			bytesStreamed: status.bytesStreamed,
 			pipelineHealth: status.pipelineHealth,
+			...(status.suspendedReason !== undefined
+				? { suspendedReason: status.suspendedReason }
+				: {}),
 			wavUrl: status.wavUrl,
 			pipelineRestarts: status.pipelineRestarts,
 			...(status.noiseFloorDbfs !== undefined

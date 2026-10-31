@@ -26,6 +26,26 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   `buildMockServer()`) Activity reads answer the core's 503 `ACTIVITY_UNAVAILABLE` until
   `WAVEKIT_MOCK_ACTIVITY_OPEN_MS` after start (never without it), so the drawer shows
   `Activity is starting…` or `Activity store unavailable, retrying`.
+- Receiver feed (`source-feed.ts`): `POST /api/sources/rtl-0/pause` and `/resume` as the core
+  answers them (`{ id, feed, changed }`, idempotent `changed: false`, 404 `SOURCE_NOT_FOUND`).
+  `GET /api/sources` and `source:status` carry `feed`; while paused the source reads not connected,
+  no spectrum frames or decoder messages are sent (the waterfall freezes) and every wanted decoder
+  on it is suspended with reason `source-paused`, which `GET /api/decoders/summary` (`decoder-summary.ts`)
+  reports as the `source-paused` verdict with a `resume-source` action. A resume reads `resuming` for `resumeMs`
+  (default 400 ms). The held feed carries the tuning at pause time as `restoreTuning`; a plain resume
+  changes no tuning (centre, rate, gain mode and gain then read unverified in `unknownFields` until set;
+  `WAVEKIT_MOCK_MEASURED_RATE=<hz>` (`measuredRateHz`) adopts that measured rate with
+  `measuredFields: ["sampleRate"]`), `{ "restoreTuning": true }` writes it back to the mock tuner, and any other body
+  answers 400 `INVALID_RESUME_REQUEST`. `WAVEKIT_MOCK_RESUME_FAILURES=<n>` (`resumeFailures`) makes the next `n`
+  resumes answer the core's 503 `SOURCE_RESUME_FAILED` with the feed in `error`, to try Retry.
+  `WAVEKIT_MOCK_PERSIST_FAILURES=<n>` (`persistFailures`) makes the next `n` pauses or resumes
+  answer 200 with `persisted: false` (the change holds but was not saved), to try the unsaved
+  warning's Retry.
+  `WAVEKIT_MOCK_SOCKET_OMITS_FEED=1` (`socketOmitsFeed`) leaves `feed` out of `source:status`, as
+  an older core's socket did, while `GET /api/sources` keeps it.
+  `WAVEKIT_MOCK_SECOND_SOURCE=1` (`secondSource`) lists a second receiver, `rtl-1`, after `rtl-0`:
+  its source row, tuner state and its own pause / resume only (no decoders, spectrum or tuner writes),
+  to try which receiver the plot, the Receiver island, the palette and `P` act on.
 - Legacy core: `GET /api/access/bootstrap` is not mounted (404).
 - Exception: operator data (`operator-data.ts`) is served as a protected core serves it, so the
   saved frequencies show: `GET /api/operator-data`, saved-frequency create / replace / delete with

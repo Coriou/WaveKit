@@ -15,6 +15,7 @@ import { presetOn, presetsFrom, togglePreset } from "../scanner/planner/plan.ts"
 import { updateDraft } from "../scanner/planner/draft-store.ts"
 import { openPlan } from "../scanner/ui-store.ts"
 import { focusSetting } from "../settings/registry.ts"
+import { feedControllerFor, receiverSourceId } from "../receiver/feed.ts"
 import { modeSpec } from "../tuner/modes.ts"
 import { recallSaved, saveInput } from "../tuner/saved.ts"
 import { modulationOf } from "../tuner/modes.ts"
@@ -66,8 +67,9 @@ function withSquelchFix(
 		: patch
 }
 
+/** The receiver the commands act on: the source the plot shows (receiverSourceId). */
 function sourceId(s: Services): string | null {
-	return s.data.tuner.state()?.sourceId ?? null
+	return receiverSourceId(s.data)
 }
 
 async function setAudio(
@@ -186,7 +188,7 @@ export async function runAction(
 				return ok(await setAudio(s, action.patch))
 			case "gain": {
 				const id = sourceId(s)
-				const tuner = s.data.tuner.state()
+				const tuner = id === null ? undefined : s.data.tuner.state(id)
 				if (id === null || !tuner) return { text: "No receiver", tone: "warn" }
 				const wasAuto = tuner.gainMode === "agc"
 				const was = tuner.gain
@@ -316,6 +318,29 @@ export async function runAction(
 				else if (action.op === "resume") await s.data.scanner.resumeJob(job.id)
 				else await s.data.scanner.cancelJob(job.id)
 				return { text: done }
+			}
+			case "feed": {
+				const feeds = feedControllerFor(s.data)
+				const r =
+					action.op === "pause"
+						? await feeds.pause(action.sourceId)
+						: await feeds.resume(action.sourceId, {
+								restoreTuning: action.restoreTuning === true,
+							})
+				if (!r.ok) return { text: r.error ?? "Not done", tone: "warn" }
+				if (!r.changed)
+					return {
+						text:
+							action.op === "pause"
+								? "The receiver was already paused"
+								: "The receiver was already live",
+					}
+				return ok({
+					text: null,
+					...(action.op === "pause"
+						? { undo: () => void feeds.resume(action.sourceId) }
+						: {}),
+				})
 			}
 			case "setting": {
 				const e = action.entry

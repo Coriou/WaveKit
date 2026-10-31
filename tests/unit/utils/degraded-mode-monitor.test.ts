@@ -8,7 +8,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { DegradedModeMonitor } from "../../../src/utils/degraded-mode-monitor.js"
 import type { DecoderManager } from "../../../src/decoders/manager.js"
-import type { SourceManager } from "../../../src/core/source-manager.js"
+import { SourceManager } from "../../../src/core/source-manager.js"
 import type { Logger } from "../../../src/utils/logger.js"
 import type { DecoderHealth } from "../../../src/decoders/types.js"
 
@@ -447,6 +447,50 @@ describe("DegradedModeMonitor", () => {
 
 			// Should not be degraded since source monitoring is disabled
 			expect(monitor.isDegraded()).toBe(false)
+		})
+	})
+
+	describe("receiver feed paused by the operator", () => {
+		/** SourceManager's real degraded-info methods over fixed status rows. */
+		const realDegradedInfo = (
+			rows: Array<{ id: string; connected: boolean; feed: string }>,
+		): SourceManager =>
+			Object.assign(Object.create(SourceManager.prototype) as SourceManager, {
+				getAllStatus: () =>
+					rows.map(r => ({ ...r, feed: { state: r.feed, since: "" } })),
+			})
+
+		it.each(["paused", "resuming"])(
+			"a %s feed is intentional: no repeated warnings",
+			feed => {
+				const monitor = new DegradedModeMonitor(
+					logger,
+					createMockDecoderManager(new Map()),
+					realDegradedInfo([
+						{ id: "a", connected: true, feed: "live" },
+						{ id: "b", connected: false, feed },
+					]),
+					{ warningInterval: 1000 },
+				)
+				monitor.start()
+				vi.advanceTimersByTime(3000)
+				expect(logger.warn).not.toHaveBeenCalled()
+				expect(monitor.isDegraded()).toBe(false)
+				monitor.stop()
+			},
+		)
+
+		it("a failed resume (error) still warns", () => {
+			const monitor = new DegradedModeMonitor(
+				logger,
+				createMockDecoderManager(new Map()),
+				realDegradedInfo([{ id: "a", connected: false, feed: "error" }]),
+				{ warningInterval: 1000 },
+			)
+			monitor.start()
+			expect(logger.warn).toHaveBeenCalledTimes(1)
+			expect(monitor.getState().disconnectedSources).toEqual(["a"])
+			monitor.stop()
 		})
 	})
 })

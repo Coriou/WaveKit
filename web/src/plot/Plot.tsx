@@ -70,6 +70,13 @@ import { BandRuler } from "./BandRuler.tsx"
 import { isReadOnly } from "../app/context.ts"
 import { confidenceText } from "../data/scanner-format.ts"
 import { modeSpec } from "../features/tuner/modes.ts"
+import { ReceiverPausedBadge } from "../features/receiver/ReceiverIsland.tsx"
+import {
+	feedControllerFor,
+	feedOf,
+	isPaused as feedPaused,
+	shownSourceFor,
+} from "../features/receiver/feed.ts"
 import { scanHasReceiver as scanHasReceiverOf } from "../features/tuning.ts"
 import { HandleController, squelchLineDbfs } from "./handle-controller.ts"
 import { SquelchLine, VfoEdges } from "./HandleOverlays.tsx"
@@ -141,7 +148,20 @@ const TRACK_HOLD_MS = 1500
 const DRAG_THRESHOLD_PX = 3
 
 export function Plot({ data, className, stepHz, paused }: PlotProps) {
-	const sourceId = useStore(data.sources, s => firstConnected(s.sources))
+	const sources = useStore(data.sources, s => s.sources)
+	const feeds = useStore(feedControllerFor(data), s => s.bySource)
+	const isPausedSource = (id: string) =>
+		feedPaused(
+			feedOf(
+				sources.find(x => x.id === id),
+				feeds[id],
+			),
+		)
+	// the shown source sticks through a pause (its waterfall freezes under the paused label) and is
+	// only replaced once it is gone or neither connected nor paused (plotSourceId); the Receiver island,
+	// the palette and the P key act on the same one (shownSourceFor)
+	const sourceId = useStore(shownSourceFor(data))
+	const receiverPaused = sourceId !== null && isPausedSource(sourceId)
 	const tuner = useStore(data.tuner, s =>
 		sourceId === null ? undefined : s.bySource[sourceId],
 	)
@@ -444,6 +464,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 					paused={paused ?? false}
 					probeRef={probeRef}
 				/>
+				<ReceiverPausedBadge data={data} sourceId={sourceId} />
 				{size.w > 0 && view && (
 					<>
 						<div
@@ -583,7 +604,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 				{sourceId === null && (
 					<div className="wk-plot-note">No source connected</div>
 				)}
-				{engineError !== null && sourceId !== null && (
+				{engineError !== null && sourceId !== null && !receiverPaused && (
 					<div className="wk-plot-note" role="status">
 						{engineError}
 					</div>
@@ -609,12 +630,6 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 			)}
 		</div>
 	)
-}
-
-function firstConnected(
-	sources: readonly { id: string; connected: boolean }[],
-): string | null {
-	return sources.find(s => s.connected)?.id ?? null
 }
 
 function pct(hz: number, view: SpectrumViewSpan): number {

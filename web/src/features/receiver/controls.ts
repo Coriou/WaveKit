@@ -102,6 +102,8 @@ export function receiverLock(input: {
 	source: ExtendedSourceStatus | undefined
 	readOnly: boolean
 	relay: TunerRelayView | null
+	/** The receiver feed is paused (feed.ts): nothing reaches the tuner until it resumes. */
+	paused?: boolean
 }): ReceiverLock {
 	const { tuner, source, readOnly, relay } = input
 	if (!tuner)
@@ -129,6 +131,12 @@ export function receiverLock(input: {
 			canReclaim: true,
 		}
 	}
+	if (input.paused === true)
+		return {
+			locked: true,
+			reason: "Receiver paused: resume it to change the tuner.",
+			canReclaim: false,
+		}
 	if (source && !source.connected)
 		return {
 			locked: true,

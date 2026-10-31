@@ -88,5 +88,6 @@ export function toApiExtendedSourceStatus(
 		...(status.signalLevelDbfs !== undefined
 			? { signalLevelDbfs: status.signalLevelDbfs }
 			: {}),
+		...(status.feed !== undefined ? { feed: { ...status.feed } } : {}),
 	}
 }

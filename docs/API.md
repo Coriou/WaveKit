@@ -93,7 +93,10 @@ current center frequency; otherwise the response is 409
 `IQ_SNAPSHOT_CENTER_MISMATCH`. This captures the next arriving IQ window without
 retuning. The source must be connected with known center, IQ kind and `U8_IQ`
 format. Unsupported sources return 409; missing sources 404; disconnected sources
-503; invalid bodies 400. Authorization matches recording downloads and scanner
+503 `SOURCE_DISCONNECTED`; a source whose receiver feed is paused (or still resuming)
+503 `SOURCE_PAUSED` with `message` "The receiver feed is paused; resume it first"
+(see [pause and resume](#post-apisourcesidpause-and-post-apisourcesidresume));
+invalid bodies 400. Authorization matches recording downloads and scanner
 captures: protected admission, mutation authorization for this POST (including
 browser CSRF), and a revocable download lease. Missing credentials return 401;
 forbidden requests return 403.
@@ -516,6 +519,12 @@ with `reason` `all_decoders_down` (every configured decoder is down) or `api_dow
 `reason` `no_source_connected`, `no_decoder_running` or `api_down`. The reasons are fixed codes,
 never error messages, because `/health` is public even in protected mode.
 
+A receiver feed paused by the operator ([pause and resume](#post-apisourcesidpause-and-post-apisourcesidresume)),
+or resuming from a pause, is intentional: that source counts as neither down nor degraded (the
+source component of `GET /api/status` notes it and adds `metrics.paused`), decoders waiting for it
+count as neither down nor not running, and the degraded-mode monitor does not warn about it. A
+failed resume (feed `error`) counts as a disconnected source again.
+
 ```bash
 curl -i http://localhost:9000/health
 ```
@@ -886,9 +895,141 @@ each [`GET /api/sources`](#get-apisources) entry adds.
 A source with the same `id` answers `409 SOURCE_EXISTS`; a failed connection answers
 `400 SOURCE_CONNECTION_ERROR` with the reason in `message`.
 
+#### POST /api/sources/:id/pause and POST /api/sources/:id/resume
+
+Stop or restart pulling the receiver's IQ without removing the source. Both are writes,
+so in protected mode they need the same admission as every other write (`401` without
+it). Pause takes no body; resume takes an optional JSON body `{ "restoreTuning": true }`
+(a boolean, default `false`; any other key or type answers `400 INVALID_RESUME_REQUEST`).
+
+```bash
+curl -X POST http://localhost:9000/api/sources/rtl-pi/pause
+curl -X POST http://localhost:9000/api/sources/rtl-pi/resume
+curl -X POST http://localhost:9000/api/sources/rtl-pi/resume \
+  -H 'content-type: application/json' -d '{"restoreTuning":true}'
+```
+
+**Pause** closes the receiver connection cleanly (the core ends the stream and waits up to
+2 s for the receiver to close its side) and never reconnects while paused: no backoff
+retry, no stall watchdog. The source keeps its registration, caps, stream and decoder
+assignments. Decoders on it are suspended with reason `source-paused`, running and
+starting scanner jobs wait in `paused` (reason `source-down`) as after a dropout of a
+running job (a starting job is not failed), an identify job (starting or running) ends
+`cancelled` with reason `source-paused` and the results so far (never `failed`), the channelizer drops its channels as on a
+disconnect, and live audio releases its pipeline (status `pipelineHealth: "stopped"`,
+`suspendedReason: "source-paused"`, no automatic restart) while keeping its settings and
+its listeners.
+New scanner jobs, identify requests and job resumes on a paused source answer
+`409 SOURCE_PAUSED`; an IQ snapshot running at the pause ends early, and a new one answers
+`503 SOURCE_PAUSED` (`message`: "The receiver feed is paused; resume it first"). The pause is saved in `<stateDir>/source-feed.json`, so after a
+core restart the source registers without connecting and its log says it is paused.
+
+**Resume** makes one connection attempt. On success the feed is live again; suspended
+decoders, waiting scanner jobs and live audio (with the same frequency, mode and squelch)
+then continue. If the receiver cannot be reached the answer is
+`503 SOURCE_RESUME_FAILED`, the feed reads `error` and the source stays paused (also
+across a restart); call resume again to retry.
+
+What a resume writes to the receiver depends on the body:
+
+- **Plain resume** (no body, or `restoreTuning: false`) writes no centre frequency, sample
+  rate, gain mode or gain, and no configured `sources[].tuner` gain, whatever
+  `tuner.reconnectPolicy` says. Pausing is how you hand a shared dongle to another client:
+  SDR++ connected through rtlmux (or straight to the receiver) can retune it while WaveKit
+  is paused, and rtl_tcp cannot report its tuning, so WaveKit adopts what it finds instead
+  of pulling the receiver back. The tuner state keeps the last known values, but
+  `frequency`, `sampleRate`, `gainMode` and `gain` are listed in `unknownFields` until they
+  are set again (through the API, the relay or a restore). The values accepted before the
+  pause are no longer restored on a later dropout either, and no later dropout reconnect
+  writes the configured gain until a restore resume (a value set through the API or the
+  relay afterwards is restored as usual); changing the source's configured `tuner` gain
+  does not lift that hold either. Under `reconnectPolicy: reset` a later dropout does not
+  return state or caps to the configured baseline either: the last known values stay, in
+  `unknownFields` (with any value the reset discards), and rate adoption goes on. Relay commands are written only when they arrived
+  after the latest pause. When the rate-truth check then measures a sustained rate within
+  1.5 % of one common rtl_tcp rate (0.25, 1.024, 1.536, 1.792, 1.92, 2.048, 2.16, 2.4, 2.56,
+  2.88 or 3.2 Msps), that rate is adopted into the tuner state and the caps (it stays in
+  `unknownFields`: measured, not commanded, and is listed in `measuredFields` while the state
+  shows it); the match is retried as the measurement
+  settles, so a first estimate between two rates is adopted once it converges. Scanner side: a lease recovery queued for the source (a job
+  that ended while the feed was paused, or a crashed sweep) is settled without writing its
+  pre-pause snapshot, a gain restore owed after a lost band-gain lease is dropped, and no
+  band gain is applied; a sweep that held the source keeps its lease but does not hop: it
+  waits in `paused(resumed-without-retune)`, with the source's decoders running, until
+  `POST /api/scanner/jobs/:id/resume` (Resume scan) sends it to its current hop, and its
+  release no longer puts back the pre-pause tuning. Its hops after Resume scan run without a
+  band gain (a job's own `tuner.gainTenthsDb` is still written), and nothing is restored when
+  it ends: the pre-pause tuning and the operator gain saved before a band gain are forgotten.
+  Another job taking its lease leaves it held, also once that job ends. So does every other sweep on the source
+  that would take the tuner on its own: one waiting to auto-resume after an operator or
+  relay write (`preempted-operator`, `preempted-relay`), one waiting for another job's lease
+  (`preempted-job`), and one due to resume after a core restart (`resume.onBoot`). A sweep
+  you paused (`paused(operator)`) stays as it is; in-window and passive jobs, which never
+  tune, resume as usual. TEST_MODE 0
+  (the scanner's own marker) is still sent when a marker may be open.
+- **Restore resume** (`restoreTuning: true`) writes the accepted pre-pause tuning back on
+  the first payload, whatever `tuner.reconnectPolicy` says (even `reset`; a later dropout
+  follows the policy again): the configured gain, then every accepted field (frequency,
+  sample rate, gain mode, gain and the others), the scanner's queued lease recovery and
+  owed gain restore, and a band gain the receiver had before the pause; a sweep waiting in
+  `paused(source-down)` continues with its next hop. The held feed's
+  `restoreTuning` shows what it writes.
+
+**SDR++ through the tuner relay or through rtlmux.** With the
+[tuner relay](#tuner-relay) enabled, SDR++ connected to the relay is seen: its commands
+become the operator's tuning even while the source is paused, and every resume, plain or
+restore, writes the commands made during the pause (the relay forwards nothing while the
+source is down). SDR++ connected through rtlmux talks to the dongle directly: WaveKit sees
+none of its commands, which is why a plain resume writes nothing.
+
+When saving `source-feed.json` fails, the answer carries `persisted: false` (the change
+holds until the core restarts, and the core logs a warning); a repeated pause or resume
+retries the write and answers `persisted: true` once it succeeds.
+
+Both are idempotent: a repeated call answers `200` with `changed: false`. An unknown id
+answers `404 SOURCE_NOT_FOUND`; a recording source answers `409 SOURCE_FEED_UNSUPPORTED`.
+
+**Response** (200 OK):
+
+```json
+{
+	"id": "rtl-pi",
+	"changed": true,
+	"persisted": true,
+	"feed": { "state": "paused", "since": "2026-10-31T09:00:00.000Z" }
+}
+```
+
+**Resume failure** (503):
+
+```json
+{
+	"error": "ServiceUnavailable",
+	"code": "SOURCE_RESUME_FAILED",
+	"message": "The receiver could not be reached; resume again to retry",
+	"id": "rtl-pi",
+	"feed": {
+		"state": "error",
+		"since": "2026-10-31T09:00:05.000Z",
+		"error": "The receiver could not be reached; resume again to retry"
+	}
+}
+```
+
+**The `feed` field.** Every network source in [`GET /api/sources`](#get-apisources) (and the
+`source` of `POST /api/sources`) carries `feed: { state, since, error?, restoreTuning? }`;
+recordings omit it. `state` is `live` (connects and reconnects as usual), `paused`,
+`resuming` (a resume is dialling) or `error` (the last resume failed; `error` holds the
+fixed message above). Any state other than `live` holds consumers back. `since` is when the
+state began. `restoreTuning` (`{ centerFreq, sampleRate?, gainMode?, gain? }`, Hz and tenths
+of a dB) appears while the feed is not `live` and the core knows an accepted centre: it is
+what a restore resume writes back (including relay commands made during the pause). It is
+absent after a restart (the pause is saved, the tuning is not) and after a plain resume left
+the tuning unverified; then only the plain resume is meaningful.
+
 #### DELETE /api/sources/:id
 
-Remove a source.
+Remove a source. A paused source's pause is forgotten: added again, it starts live.
 
 ```bash
 curl -X DELETE http://localhost:9000/api/sources/rtl-pi
@@ -1446,7 +1587,8 @@ next connection). A `config` write is not operator activity: it never preempts a
 scanner lease. Without `tuner` every connect writes exactly what it wrote before
 the 2026-10-18 core. Through a shared rtlmux every core (re)connect rewrites the configured gain,
 overwriting a gain another client (SDR++) set there; a gain set through this API
-still wins.
+still wins. After a plain resume of a paused feed no connection writes it until a
+restore resume (see [pause and resume](#post-apisourcesidpause-and-post-apisourcesidresume)).
 
 ```yaml
 sources:
@@ -1477,6 +1619,13 @@ the last reset reconnect. Absent when empty. On a source whose gain was set on t
 counts as observed (it is not replayed on reconnect). The field values keep
 their types for older clients. A reset
 reconnect makes them unknown again; the field is absent when everything is known.
+After a plain resume of a paused feed `frequency`, `sampleRate`, `gainMode` and `gain` are
+listed too, with their last known values ([pause and resume](#post-apisourcesidpause-and-post-apisourcesidresume)).
+
+**`measuredFields`** lists fields of `unknownFields` whose value is measured from the stream
+rather than last known: today only `sampleRate`, once a plain resume adopted the rate the
+receiver is measured to deliver. It is still unverified (nothing set it); setting a rate removes
+it. Absent when empty and from older cores.
 
 **`bandGain`** (`{ tenthsDb, label?, owner }`) is present only while a
 [band gain](#per-band-gain-get-and-put-apituner-band-gain) is confirmed on the tuner: the core
@@ -1767,7 +1916,9 @@ Fields:
   pipeline restarts automatically with exponential backoff (1 s doubling to 30 s,
   10 consecutive attempts; a run of 30 s resets the count). `pipelineRestarts`
   counts automatic restarts since the last manual start; after the last attempt
-  `lastError` says so and `POST /api/live-audio/start` restarts it.
+  `lastError` says so and `POST /api/live-audio/start` restarts it. While the
+  source's feed is paused the pipeline is `stopped`, never restarted, and
+  `suspendedReason` reads `source-paused`; resume starts it with the same settings.
 - `channelPowerDbfs` — smoothed channel power before demodulation, relative to a
   full-scale IQ sample (present while the pipeline runs). This is the level the
   `squelch` threshold compares against.
@@ -2224,13 +2375,13 @@ readsb, AIS-catcher, dumpvdl2 and rtl_433 report `unknown` with observed rates
 until fixture-verified requirements exist; external-input decoders report
 `external-input`.
 
-| Field            | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `desiredRunning` | Operator intent: `true` after start/restart, `false` after stop.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `suspended`      | Wanted but held back because the source rate makes this instance `unusable` or the tuned band covers none of its targets, or a scanner sweep holds its source. The decoder keeps its source reservation and `sourceId` and is never moved to another source.                                                                                                                                                                                                                                                                     |
-| `suspension`     | `{ reasonCode, since }` (ISO-8601), present only while suspended. `reasonCode` is a rate reason, `"frequency-out-of-band"`, `"capture-too-narrow"` (the band is in view but no channel of at least 250 kHz fits the capture window), `"no-channel-selected"` (the band is in view but no channel is chosen yet: no VFO and no band-plan channel), or `"tuner-scanning"` (a scanner sweep holds the source for its whole duration; a manual start answers 409 `SOURCE_HELD_BY_SCANNER`; the decoder resumes when the sweep ends). |
-| `transition`     | `"suspending"` or `"resuming"`, present only during a transition. A lasting `"suspending"` means the stop failed and the process may still run (`running` stays truthful).                                                                                                                                                                                                                                                                                                                                                       |
-| `startMode`      | `"auto"` or `"operator"`, sent while `desiredRunning` is true. `"operator"` = started by hand via `POST /api/decoders/:id/start` (never band-suspended; a rate suspension still applies). Boot starts are `"auto"`. Stop clears it, restart keeps it, a core restart returns every decoder to `"auto"`.                                                                                                                                                                                                                          |
+| Field            | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `desiredRunning` | Operator intent: `true` after start/restart, `false` after stop.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `suspended`      | Wanted but held back because the source rate makes this instance `unusable` or the tuned band covers none of its targets, or a scanner sweep holds its source. The decoder keeps its source reservation and `sourceId` and is never moved to another source.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `suspension`     | `{ reasonCode, since }` (ISO-8601), present only while suspended. `reasonCode` is a rate reason, `"frequency-out-of-band"`, `"capture-too-narrow"` (the band is in view but no channel of at least 250 kHz fits the capture window), `"no-channel-selected"` (the band is in view but no channel is chosen yet: no VFO and no band-plan channel), `"tuner-scanning"` (a scanner sweep holds the source for its whole duration; a manual start answers 409 `SOURCE_HELD_BY_SCANNER`; the decoder resumes when the sweep ends), or `"source-paused"` (the source's receiver feed is paused, see [pause and resume](#post-apisourcesidpause-and-post-apisourcesidresume); it outranks every other reason, a manual start is recorded and stays suspended, and the decoder resumes with the feed). |
+| `transition`     | `"suspending"` or `"resuming"`, present only during a transition. A lasting `"suspending"` means the stop failed and the process may still run (`running` stays truthful).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `startMode`      | `"auto"` or `"operator"`, sent while `desiredRunning` is true. `"operator"` = started by hand via `POST /api/decoders/:id/start` (never band-suspended; a rate suspension still applies). Boot starts are `"auto"`. Stop clears it, restart keeps it, a core restart returns every decoder to `"auto"`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 A decoder that is running is suspended when its source changes to an unusable
 rate and resumed when the rate becomes usable again (or the source reconnects
@@ -2557,17 +2708,19 @@ Each entry also carries `verdict`: `{ code, text, actions }`. `text` is one shor
 sentence of at most 160 characters, such as "ADS-B paused: CPU budget full". `code` is
 one of `decoding`, `listening` (running, nothing decoded for 60 s), `starting`, `off`
 (mode off), `stopped` (stopped by the operator), `failed`, `out-of-band`,
-`no-channel`, `capture-too-narrow`, `source-unavailable`, `unsupported-rate`,
+`no-channel`, `capture-too-narrow`, `source-unavailable`, `source-paused` (the
+source's receiver feed is paused; text "waiting: Receiver paused — Resume"),
+`unsupported-rate`,
 `scanner-busy`, `efficiency-budget`, `efficiency-cpu`, `efficiency-drops`,
 `efficiency-late-drops`, `efficiency-waiting`, `decoder-unavailable`,
 `channelizer-unavailable` or `unknown`. `actions` lists suggestions from `turn-on`,
 `start`, `restart`, `tune-to-band`, `raise-sample-rate`, `lower-sample-rate`,
-`change-sample-rate`, `check-source`, `pause-scanner`, `raise-budget`,
+`change-sample-rate`, `check-source`, `resume-source`, `pause-scanner`, `raise-budget`,
 `turn-off-others`, `install-decoder` and `enable-channelizer`, most helpful first.
 Both sets are closed (`DECODER_VERDICT_CODES`, `DECODER_VERDICT_ACTIONS` and
 `decoderVerdictSchema` in `@wavekit/api-types`); a client treats an unknown code as
 `unknown` and ignores an unknown action. Precedence: failed, off, stopped,
-suspended (efficiency detail first), decoding, listening, starting. A budget
+suspended (a paused feed, then efficiency detail), decoding, listening, starting. A budget
 suspension with no efficiency detail reads `efficiency-budget`; one with a detail the
 core does not recognise reads `unknown` with no action.
 
@@ -3443,8 +3596,9 @@ curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 
 `reason` is set while `paused` (`operator`, `preempted-operator`,
 `preempted-relay`, `preempted-job`, `source-down`, `core-restart`,
-`resume-blocked`) or `failed` (`source-removed`, `tuner-unavailable`,
-`invalid`). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
+`resume-blocked`, `resumed-without-retune`) or `failed` (`source-removed`, `tuner-unavailable`,
+`invalid`), and on a `cancelled` identify job the core ended because the receiver
+feed was paused (`source-paused`; absent when the operator cancelled). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
 carry `identify` (see `POST /api/scanner/identify`). A probe's `transport` is
 `offset`, `channel` or `replay`: a probe fed from an IQ capture rather than
 the live stream ([IQ capture on detection](#iq-capture-on-detection)). Its
@@ -3585,6 +3739,10 @@ Each returns the `ScanJob`. `resume` takes an optional body
   lease (a transient
   refusal, `details.reason` `releasing`, `recovery-pending` or
   `holder-starting`, leaves it `paused(operator)`);
+- from `paused(resumed-without-retune)` (a plain resume of the receiver feed held
+  the sweep): re-holds the source's decoders and retunes to the sweep's current hop;
+  without the lease (an operator or relay write took it meanwhile) it re-acquires
+  it as from `paused(operator)`, with the same 409s;
 - from `paused(core-restart)`: re-acquires the lease, re-opens the engine and
   restarts the sweep from its first hop (boot resumes with `resume.onBoot` do
   the same once the source's data starts);
@@ -6362,11 +6520,12 @@ Full source status including `activity` (sample freshness). `data` is identical
 to one `GET /api/sources` item. Cadence, per source:
 
 - on a lifecycle event (`connected`, `disconnected`, `error`, `ended`,
-  `caps-changed`, rate-truth or signal-flat flag raised/cleared) when the state
-  actually changed (a drifting `rateMismatch.measuredSampleRateHz`,
-  `signalFlat.levelDbfs` or `signalLevelDbfs` alone does not emit);
+  `caps-changed`, rate-truth or signal-flat flag raised/cleared, a `feed` pause,
+  resume or failed resume) when the state actually changed (a drifting
+  `rateMismatch.measuredSampleRateHz`, `signalFlat.levelDbfs` or
+  `signalLevelDbfs` alone does not emit);
 - within 1 s of a time-based state change (`connected`, `activity.state`,
-  `lastError`, `reconnectAttempts`, `caps`, `available`, assignments) — changes
+  `lastError`, `reconnectAttempts`, `caps`, `available`, assignments, `feed`) — changes
   in counters such as `bytesReceived` or `activity.sampleAgeMs` alone do not emit;
 - a heartbeat every 10 s (0.1 msg/s per source) refreshing counters;
 - nothing while no client subscribes to `sources`; whenever the subscriber
@@ -7306,18 +7465,21 @@ expected {...}`); their `fields` carry the unit, for example `gain`:
 
 ### Error Codes
 
-| Code                       | HTTP Status | Description                                                                      |
-| -------------------------- | ----------- | -------------------------------------------------------------------------------- |
-| `DECODER_NOT_FOUND`        | 404         | Decoder ID doesn't exist                                                         |
-| `SOURCE_NOT_FOUND`         | 404         | Source ID doesn't exist                                                          |
-| `DECODER_ALREADY_RUNNING`  | 409         | Decoder is already running                                                       |
-| `DECODER_NOT_RUNNING`      | 409         | Decoder is not running                                                           |
-| `INVALID_CONFIG`           | 400         | Invalid configuration provided                                                   |
-| `SOURCE_CONNECTION_ERROR`  | 503         | Cannot connect to source                                                         |
-| `INTERNAL_ERROR`           | 500         | Internal server error                                                            |
-| Activity codes             |             | See [Activity](#activity)                                                        |
-| `DECODER_OWNED_BY_SCANNER` | 409         | start/stop/restart or band edit on a scanner probe (`owner: "scanner"`)          |
-| `SOURCE_HELD_BY_SCANNER`   | 409         | start/restart of a decoder whose source a scanner sweep holds (`tuner-scanning`) |
+| Code                       | HTTP Status | Description                                                                                                   |
+| -------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------- |
+| `DECODER_NOT_FOUND`        | 404         | Decoder ID doesn't exist                                                                                      |
+| `SOURCE_NOT_FOUND`         | 404         | Source ID doesn't exist                                                                                       |
+| `DECODER_ALREADY_RUNNING`  | 409         | Decoder is already running                                                                                    |
+| `DECODER_NOT_RUNNING`      | 409         | Decoder is not running                                                                                        |
+| `INVALID_CONFIG`           | 400         | Invalid configuration provided                                                                                |
+| `SOURCE_CONNECTION_ERROR`  | 503         | Cannot connect to source                                                                                      |
+| `INTERNAL_ERROR`           | 500         | Internal server error                                                                                         |
+| Activity codes             |             | See [Activity](#activity)                                                                                     |
+| `DECODER_OWNED_BY_SCANNER` | 409         | start/stop/restart or band edit on a scanner probe (`owner: "scanner"`)                                       |
+| `SOURCE_HELD_BY_SCANNER`   | 409         | start/restart of a decoder whose source a scanner sweep holds (`tuner-scanning`)                              |
+| `SOURCE_PAUSED`            | 409 / 503   | 409: new scanner job, identify request or job resume on a source whose feed is paused; 503: IQ snapshot on it |
+| `SOURCE_RESUME_FAILED`     | 503         | `POST /api/sources/:id/resume` could not reach the receiver (feed `error`; retry)                             |
+| `SOURCE_FEED_UNSUPPORTED`  | 409         | pause or resume of a recording source                                                                         |
 
 ### Scanner and spectrum codes
 

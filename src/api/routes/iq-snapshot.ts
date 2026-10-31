@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import type { EventEmitter } from "node:events"
 import type { FastifyPluginAsync } from "fastify"
 import { z } from "zod"
+import { SOURCE_PAUSED_MESSAGE } from "@wavekit/api-types"
 import { zodValidationBody } from "../validation-errors.js"
 import type { SourceManager } from "../../core/source-manager.js"
 import type { FanoutManager } from "../../core/fanout-manager.js"
@@ -67,6 +68,14 @@ export const iqSnapshotRoutes: FastifyPluginAsync<IqSnapshotOptions> = async (
 			const source = options.sourceManager.getStatus(sourceId)
 			if (!source) return reply.code(404).send({ code: "SOURCE_NOT_FOUND" })
 			const { caps } = source
+			// The operator paused the feed (or a resume is still dialling / failed): say so, so the
+			// client offers Resume instead of reporting a dropout.
+			if (source.feed !== undefined && source.feed.state !== "live")
+				return reply.code(503).send({
+					error: "ServiceUnavailable",
+					code: "SOURCE_PAUSED",
+					message: SOURCE_PAUSED_MESSAGE,
+				})
 			if (!source.connected)
 				return reply.code(503).send({ code: "SOURCE_DISCONNECTED" })
 			if (

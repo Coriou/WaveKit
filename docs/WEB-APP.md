@@ -129,6 +129,7 @@ first suggestion:
 | Start, restart                                 | Start, Restart                             | Starts or restarts that decoder                                                                                           |
 | Raise the CPU budget                           | Raise CPU budget                           | Adds one core to the decoder CPU budget, up to its maximum of 64 (Undo in the toast); Settings › Decoders keeps the value |
 | Pause the scanner                              | Stop the scan                              | Ends the scan, which gives the tuner and the decoders back (a paused scan keeps them)                                     |
+| Resume the receiver                            | Resume                                     | Resumes the paused receiver feed, as the Receiver's Resume does                                                           |
 | Tune to its band                               | Tune to 1090.000                           | Tunes the receiver to the decoder's frequency                                                                             |
 | Change the sample rate, check the source       | Raise sample rate, Check the receiver…     | Opens the Receiver, where you set it                                                                                      |
 | Turn on, turn off others, install, channelizer | Turn on in Settings, Decoders in Settings… | Opens the decoder's row in Settings                                                                                       |
@@ -198,6 +199,41 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   core's own message shows under the row if it refuses the save. **Per-band gain for my tuning**
   (off by default) saves at once: on, your own retunes also set the band's gain and give yours
   back outside the bands. See [Per-band gain](API.md#per-band-gain-get-and-put-apituner-band-gain).
+- **Receiver › Pause** stops pulling IQ from the receiver without removing it: the core closes the
+  receiver connection, the waterfall stops on its last rows under a `Receiver paused` label,
+  decoders wait (their status reads paused because the receiver is paused) and the tuner
+  controls are locked until you resume. The island shows `Receiver paused · since 14:02 ·
+waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads `Paused`. The
+  pause survives a core restart; if the core could not save it, the island warns `Paused, but not
+  saved — it will not survive a restart` with **Retry**, which saves it again. **Resume** reconnects once
+  without changing the receiver's tuning: while WaveKit was paused, SDR++ may have retuned the
+  shared dongle through rtlmux, which WaveKit cannot see, so it adopts what it finds: until you set them, the island shows the centre and rate as
+  `last known … · unverified` (header and Centre row), no sample rate is selected (picking any rate,
+  the shown one too, sets it), and gain reads unknown. When the core measures a common rate from the
+  stream it adopts it and the island labels it `measured`. **Resume at 161.500 MHz** (shown when
+  the core knows the centre from before the pause) reconnects and writes the centre, rate and gain
+  from before the pause back. SDR++ connected through WaveKit's tuner relay is seen: its retunes
+  during the pause are written on either resume. If the receiver cannot be reached, the island
+  says `Resume failed` with the reason and a **Retry** button, which repeats the same kind of
+  resume, and the receiver stays paused. In the ⌘K palette, **Pause receiver** (while live),
+  **Resume receiver** (while paused) and **Resume receiver at 161.500 MHz** do the same, and the
+  `P` key toggles pause and the plain resume from anywhere; a pause from the palette or the key
+  offers Undo. Read-only browsers cannot pause. While paused,
+  the tuned card's decoders read "waiting: Receiver paused — Resume" with a **Resume** button and
+  Settings › Decoders reads `Paused · the receiver is paused`. A scanner identify running when you
+  pause ends with what it found so far and reads `Stopped · receiver paused`. A sweep running when
+  you pause waits; **Resume at 161.500 MHz** continues it, but a plain **Resume** leaves it held so it
+  does not retune the receiver away from SDR++: the scan row reads `Scan paused · receiver resumed
+  without retuning` with **Resume scan**, which retunes to the scan's current hop (also **Resume scan**
+  in the ⌘K palette). The resumed scan hops without a band gain, and when it ends nothing is put
+  back: the receiver keeps whatever it was last tuned to. With more than one
+  receiver, the Receiver island, the palette's receiver commands (pause, resume, gain, sample rate,
+  bias tee, RTL AGC) and `P` act on the receiver the waterfall shows: the first connected one, which
+  stays on screen through its own pause (else the first paused one). See
+  [pause and resume](API.md#post-apisourcesidpause-and-post-apisourcesidresume).
+
+  ![The receiver paused: the waterfall frozen under the Receiver paused label, the Receiver island with Resume, and the tuned card's decoders waiting with Resume buttons](assets/screenshots/receiver-paused.png)
+
 - **Receiver** (the island at the top): under Gain, a quiet line says when the core confirms a
   band gain on the tuner, for example `Band gain 37.2 dB · 868 MHz ISM · while the
 scanner tunes` (or `· for your tuning` with the switch on). It shows the gain the tuner really
@@ -310,6 +346,7 @@ full content or its position on the map.
 | `Q`                  | Squelch                           |
 | `[` `]`              | Step down / up                    |
 | `L`                  | Listen                            |
+| `P`                  | Pause / resume the receiver       |
 | `B` / `S`            | Saved frequencies / save this one |
 | `/`                  | Search Activity                   |
 | `G` then `S` `M` `D` | Spectrum, Map, Messages           |

@@ -71,8 +71,13 @@ export function humanKey(key: string, unit?: string): string {
 	return text.charAt(0).toUpperCase() + text.slice(1)
 }
 
+/** Held back by the operator's receiver pause (it is not running then, and that is no fault); a stop still reads stopped. */
+const heldByFeedPause = (d: DecoderInfo) =>
+	d.suspension?.reasonCode === "source-paused" && d.desiredRunning !== false
+
 export function decoderTone(d: DecoderInfo): "run" | "idle" | "fault" | "off" {
 	if (d.health === "faulted") return "fault"
+	if (heldByFeedPause(d)) return "idle"
 	if (!d.running) return d.desiredRunning === false ? "off" : "fault"
 	if (d.suspended || d.health === "idle") return "idle"
 	return d.health === "restarting" ? "fault" : "run"
@@ -105,6 +110,8 @@ function suspensionText(d: DecoderInfo): string {
 			return "needs the channelizer"
 		case "tuner-scanning":
 			return "the scanner has the receiver"
+		case "source-paused":
+			return "the receiver is paused"
 		case "capture-too-narrow":
 			return "the capture is too narrow here"
 		case "no-channel-selected":
@@ -118,6 +125,7 @@ export function decoderStatusText(d: DecoderInfo): string {
 	if (d.health === "faulted")
 		return `Stopped · ${d.lastError?.message ?? "it kept failing"}`
 	if (d.health === "restarting") return "Restarting"
+	if (heldByFeedPause(d)) return `Paused · ${suspensionText(d)}`
 	if (!d.running) return d.desiredRunning === false ? "Stopped" : "Not running"
 	if (d.suspended) return `Paused · ${suspensionText(d)}`
 	const rate = d.rateHistory?.at(-2)

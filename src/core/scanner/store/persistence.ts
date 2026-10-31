@@ -29,6 +29,7 @@ import { createComponentLogger } from "../../../utils/logger.js"
 import type { Logger } from "../../../utils/logger.js"
 import type {
 	Discovery,
+	CancelReason,
 	FailReason,
 	JobState,
 	NormalisedJobSpec,
@@ -123,7 +124,7 @@ export interface PersistedJob {
 	spec: NormalisedJobSpec
 	rawSpec: StoredScanJobSpec
 	state: JobState
-	reason?: PauseReason | FailReason
+	reason?: PauseReason | FailReason | CancelReason
 	createdAt: string
 	updatedAt: string
 	lease?: PersistedLease
@@ -304,9 +305,11 @@ const PersistedJobSchema = z.object({
 			"source-down",
 			"core-restart",
 			"resume-blocked",
+			"resumed-without-retune",
 			"source-removed",
 			"tuner-unavailable",
 			"invalid",
+			"source-paused",
 		])
 		.optional(),
 	createdAt: z.string(),

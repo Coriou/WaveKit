@@ -1418,6 +1418,9 @@ export class IdentifyRunner implements JobDriver {
 					409,
 				)
 			case "source-down":
+				// The operator paused the receiver feed: starting or running, the job is cancelled
+				// (reason source-paused) with the results so far, never failed. Identify cannot pause.
+				if (e.feedPaused === true) return this.cancelForPausedFeed()
 				// A 15 s identify does not wait for a reconnect: it ends with what it has (the stop-condition row).
 				if (this.record.state === "starting")
 					return this.failStartup({ type: "engine-failed" })
@@ -2373,6 +2376,20 @@ export class IdentifyRunner implements JobDriver {
 		await this.abort()
 		try {
 			await this.deps.inner.dispatch({ type: "stop-condition" })
+		} finally {
+			this.detach()
+		}
+	}
+
+	/** A paused receiver feed: release the probes, keep the results so far, end `cancelled(source-paused)`. */
+	private async cancelForPausedFeed(): Promise<void> {
+		if (this.phase === "finished") return
+		await this.abort()
+		try {
+			await this.deps.inner.dispatch({
+				type: "cancel",
+				reason: "source-paused",
+			})
 		} finally {
 			this.detach()
 		}
