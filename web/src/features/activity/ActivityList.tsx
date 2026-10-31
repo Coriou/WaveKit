@@ -43,6 +43,11 @@ import {
 } from "./rows.ts"
 import type { ListEntry } from "./rows.ts"
 import { prefixOffsets, virtualWindow } from "./virtual.ts"
+import {
+	aircraftKey,
+	useAircraftFleet,
+	useRowAircraft,
+} from "./row-aircraft.ts"
 import { formatMHz } from "../format.ts"
 import { Icon } from "../../ui/Icon.tsx"
 
@@ -98,6 +103,10 @@ export function ActivityList({
 	const cards = useStore(activityLayout, s => s.layout === "cards")
 	const listId = useId()
 	const readOnly = useReadOnly()
+	// aircraft rows name the airline and type from the live fleet while the list shows any
+	useAircraftFleet(
+		useStore(feed, s => s.items.some(i => aircraftKey(i.entityKey))),
+	)
 	const estimate = cards ? estimateCardHeight : estimateHeight
 
 	// Rows and cards measure differently: a layout switch starts from fresh guesses, at the top.
@@ -610,7 +619,7 @@ export const ActivityRow = memo(function ActivityRow({
 	foldsId,
 }: RowProps) {
 	useDisplay() // the time follows Settings › Display
-	const v = rowView(item)
+	const v = rowView(item, useRowAircraft(item.entityKey))
 	const stacked = stack !== undefined && stack.members.length > 1
 	const channels = channelsText(stack)
 	return (

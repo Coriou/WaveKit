@@ -399,6 +399,14 @@ tunerRelay:
   port: 1234
   sourceId: "rtl-pi"
   controlPolicy: "exclusive"
+
+# Aircraft details (registration, type, airline, route, photo): a local database plus
+# free keyless lookups, cached in <stateDir>/aircraft-info.sqlite. See ADSB.md.
+aircraftInfo:
+  online: true # false: no request leaves the core (Settings › Map can override it)
+  localDb:
+    enabled: true
+    refreshDays: 7
 ```
 
 **Environment overrides:** `WAVEKIT_` plus the key path, with `__` between nested keys and

@@ -121,7 +121,86 @@ export interface AircraftNavigation {
 // ============================================================================
 
 /** Source of enrichment data */
-export type EnrichmentSource = "readsb" | "hexdb" | "opensky" | "adsbdb"
+export type EnrichmentSource =
+	| "readsb"
+	| "local"
+	| "hexdb"
+	| "opensky"
+	| "adsbdb"
+	| "planespotters"
+	| "airport-data"
+
+/** Airline flying a callsign (from the callsign's three-letter ICAO prefix). */
+export interface AircraftAirline {
+	/** Airline name (e.g., "WaveKit Air") */
+	name: string
+	/** ICAO airline designator (e.g., "EZY") */
+	icao: string
+	/** IATA airline designator (e.g., "U2") */
+	iata?: string
+	/** Radio telephony callsign (e.g., "EASY") */
+	callsign?: string
+	/** Airline's country */
+	country?: string
+	/** ISO 3166-1 alpha-2 code of the airline's country */
+	countryIso?: string
+	/** "local" (bundled OpenFlights table) or "adsbdb" */
+	source: EnrichmentSource
+}
+
+/** An airport at one end of a flight route. */
+export interface AircraftAirport {
+	/** ICAO airport code (e.g., "LFPO") */
+	icao: string
+	/** IATA airport code (e.g., "ORY") */
+	iata?: string
+	/** Airport name */
+	name: string
+	/** City or municipality */
+	city?: string
+	/** Country name */
+	country?: string
+	/** ISO 3166-1 alpha-2 country code */
+	countryIso?: string
+	lat: number
+	lon: number
+}
+
+/**
+ * Scheduled route for a callsign. Crowd-sourced (adsbdb), so it can be stale or
+ * wrong: clients present it as the planned route and may hide it when the track
+ * disagrees.
+ */
+export interface AircraftRoute {
+	/** Callsign the route was looked up for */
+	callsign: string
+	origin: AircraftAirport
+	destination: AircraftAirport
+	source: EnrichmentSource
+}
+
+/** One photo of the airframe. Clients must show the photographer and link back. */
+export interface AircraftPhoto {
+	/** Small thumbnail (about 200 px wide) */
+	thumbnailUrl: string
+	/** Larger thumbnail (about 420 px wide), when the source has one */
+	largeUrl?: string
+	/** Photographer credit */
+	photographer?: string
+	/** Page of the photo on the source's site */
+	link?: string
+	source: EnrichmentSource
+}
+
+/** Database flags (tar1090-db / readsb dbFlags). */
+export interface AircraftFlags {
+	military?: boolean
+	interesting?: boolean
+	/** Privacy ICAO Address (rotating anonymous address) */
+	pia?: boolean
+	/** Limiting Aircraft Data Displayed (owner asked not to be shown on public sites) */
+	ladd?: boolean
+}
 
 /**
  * Aircraft identification from ICAO database enrichment.
@@ -135,15 +214,30 @@ export interface AircraftIdentification {
 	typeDescription?: string
 	/** Aircraft manufacturer (e.g., "Boeing", "Airbus") */
 	manufacturer?: string
-	/** Operator/airline name */
+	/** Registered owner or operator name */
 	operator?: string
 	/** Operator ICAO code (e.g., "BAW", "UAL") */
 	operatorCode?: string
-	/** Country of registration */
+	/** Country of registration (from the ICAO address block) */
 	country?: string
-	/** URL to aircraft image from hexdb.io (if available) */
+	/** ISO 3166-1 alpha-2 code of the country of registration */
+	countryIso?: string
+	/** Year built, when the database knows it */
+	year?: number
+	/** Database flags (military, interesting, PIA, LADD) */
+	flags?: AircraftFlags
+	/** Airline flying the current callsign */
+	airline?: AircraftAirline
+	/** Planned route of the current callsign */
+	route?: AircraftRoute
+	/** Photo of the airframe */
+	photo?: AircraftPhoto
+	/**
+	 * URL to an aircraft image (kept for older clients; equals photo.thumbnailUrl
+	 * when a photo is known).
+	 */
 	imageUrl?: string
-	/** Data source */
+	/** Main data source of the identity fields */
 	source?: EnrichmentSource
 }
 
@@ -445,4 +539,32 @@ export interface AircraftListResponse {
 export interface AircraftNotFoundResponse {
 	error: string
 	icao: string
+}
+
+// ============================================================================
+// Aircraft info settings (GET/PUT /api/aircraft/info)
+// ============================================================================
+
+/** How the core enriches aircraft, and the switch the web app can flip. */
+export interface AircraftInfoSettings {
+	/** Enrichment runs at all. */
+	enabled: boolean
+	/** Free online sources are queried (adsbdb, hexdb, Planespotters). */
+	online: boolean
+	/** `config`: from aircraftInfo.online; `ui`: set with PUT and kept across restarts. */
+	onlineFrom: "config" | "ui"
+	/** Answers are cached on disk (stateDir and node:sqlite available). */
+	persistent: boolean
+	localDb: {
+		enabled: boolean
+		/** Airframes in the local database; null without a store. */
+		aircraft: number | null
+		/** ISO time of the last download; null before the first. */
+		updatedAt: string | null
+	}
+}
+
+/** PUT /api/aircraft/info body. */
+export interface AircraftInfoUpdate {
+	online: boolean
 }

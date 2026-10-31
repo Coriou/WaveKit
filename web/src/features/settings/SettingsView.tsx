@@ -56,6 +56,7 @@ import {
 	type SettingsSnapshot,
 } from "./rows.ts"
 import { EfficiencyBudgetStore } from "./efficiency-budget.ts"
+import { AircraftInfoStore } from "./aircraft-info.ts"
 import { SettingRowView } from "./SettingRowView.tsx"
 import "./settings.css"
 import "./bandplans/bandplans.css"
@@ -81,7 +82,10 @@ const OK: SettingWriteResult = { ok: true }
 const toResult = (ok: boolean, message: string): SettingWriteResult =>
 	ok ? OK : { ok: false, message }
 
-function useSnapshot(budgetStore: EfficiencyBudgetStore): SettingsSnapshot {
+function useSnapshot(
+	budgetStore: EfficiencyBudgetStore,
+	aircraftStore: AircraftInfoStore,
+): SettingsSnapshot {
 	const services = useServices()
 	const { data } = services
 	const readOnly = useReadOnly()
@@ -111,6 +115,7 @@ function useSnapshot(budgetStore: EfficiencyBudgetStore): SettingsSnapshot {
 	const decoders = useStore(services.decoders, s => s.decoders)
 	const decoderSettings = useStore(data.decoderSettings)
 	const efficiencyBudget = useStore(budgetStore)
+	const aircraftInfo = useStore(aircraftStore)
 	const system = useStore(data.system)
 	const binsMax = useStore(data.spectrumLimits, s => s.binsMax)
 	const binsCap = useStore(data.spectrumLimits, s => s.binsCap)
@@ -148,6 +153,7 @@ function useSnapshot(budgetStore: EfficiencyBudgetStore): SettingsSnapshot {
 			decoderViews: decoderSettings.views,
 			decoderSettings: decoderSettings.available !== false,
 			efficiencyBudget,
+			aircraftInfo,
 			version: system.version,
 			accessMode: access ? access.mode : null,
 			devices,
@@ -175,6 +181,7 @@ function useSnapshot(budgetStore: EfficiencyBudgetStore): SettingsSnapshot {
 		decoders,
 		decoderSettings,
 		efficiencyBudget,
+		aircraftInfo,
 		system,
 		access,
 		devices,
@@ -185,6 +192,7 @@ function useSnapshot(budgetStore: EfficiencyBudgetStore): SettingsSnapshot {
 function useActions(
 	openPage: (page: string) => void,
 	budgetStore: EfficiencyBudgetStore,
+	aircraftStore: AircraftInfoStore,
 ): SettingsActions {
 	const services = useServices()
 	const cards = useContext(CardPlaceContext)
@@ -245,13 +253,14 @@ function useActions(
 			preference: (key, value) => data.preferences.set(key, value),
 			decoder: (id, patch) => data.decoderSettings.update(id, patch),
 			efficiencyBudget: value => budgetStore.save(value),
+			aircraftOnline: on => aircraftStore.setOnline(on),
 			openTuner: () => shellStore.openPanel("tuner"),
 			openShortcuts: () => openPalette("keys"),
 			openBandPlans: () => openPage(BANDPLANS),
 			openDevices: () => openPage(DEVICES),
 			...(canLocate() ? { locate: () => locate() } : {}),
 		}
-	}, [services, cards, openPage, budgetStore])
+	}, [services, cards, openPage, budgetStore, aircraftStore])
 }
 
 export function SettingsView({ onClose }: { onClose: () => void }) {
@@ -261,7 +270,12 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 		() => new EfficiencyBudgetStore(data.api),
 		[data.api],
 	)
-	const snapshot = useSnapshot(budgetStore)
+	const aircraftStore = useMemo(
+		() => new AircraftInfoStore(data.api),
+		[data.api],
+	)
+	useEffect(() => void aircraftStore.load(), [aircraftStore])
+	const snapshot = useSnapshot(budgetStore, aircraftStore)
 	useEffect(() => {
 		const unfollow = budgetStore.followAccess(data.access)
 		void budgetStore.load()
@@ -278,7 +292,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 		setBand(null)
 		setPage(p)
 	}, [])
-	const actions = useActions(openPage, budgetStore)
+	const actions = useActions(openPage, budgetStore, aircraftStore)
 	const rows = useMemo(() => buildRows(snapshot, actions), [snapshot, actions])
 	const byId = useMemo(() => new Map(rows.map(r => [r.id, r])), [rows])
 

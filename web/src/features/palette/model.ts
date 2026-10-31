@@ -93,6 +93,20 @@ export interface PaletteContext {
 	readonly boost: (id: string) => number
 	/** Installing as an app (pwa.ts); absent: no install row. */
 	readonly pwa?: PwaState
+	/** Aircraft the receiver tracks with a position (Find aircraft); absent or empty: no rows. */
+	readonly aircraft?: readonly PaletteAircraft[]
+}
+
+/** A tracked aircraft as ⌘K finds it: by callsign, registration, ICAO address or airline. */
+export interface PaletteAircraft {
+	readonly icao: string
+	/** Callsign, else registration, else the ICAO address. */
+	readonly name: string
+	readonly callsign: string | null
+	readonly registration: string | null
+	/** "WaveKit Air · A320 214"; "" when unknown. */
+	readonly about: string
+	readonly airline: string | null
 }
 
 // ---- outputs
@@ -255,6 +269,8 @@ export type PaletteAction =
 	/** The address bar's link to what is on screen (deep-link.ts keeps it current). */
 	| { readonly kind: "copyLink" }
 	| { readonly kind: "install" }
+	/** Opens the Map on an item (`a:<ICAO>`, focus.ts). */
+	| { readonly kind: "mapFocus"; readonly id: string }
 
 /** One line of the effect bar: `Gain 28.0 dB → 32.8 dB`. */
 export interface Effect {
@@ -1842,6 +1858,36 @@ export class PaletteModel {
 		return out
 	}
 
+	/** Find aircraft: tracked aircraft whose callsign, registration or ICAO address starts with the text, or whose airline contains it. */
+	aircraftItems(q: string): PaletteItem[] {
+		const want = q.trim().toUpperCase().replace(/[\s-]/g, "")
+		if (want.length < 2) return []
+		const starts = (v: string | null) =>
+			v !== null && v.toUpperCase().replace(/[\s-]/g, "").startsWith(want)
+		const hits = (this.#c.aircraft ?? []).filter(
+			a =>
+				starts(a.callsign) ||
+				starts(a.registration) ||
+				starts(a.icao) ||
+				(want.length >= 3 &&
+					(a.airline ?? "").toUpperCase().replace(/[\s-]/g, "").includes(want)),
+		)
+		return hits.slice(0, 5).map(a => ({
+			id: `air:${a.icao}`,
+			title: `Show ${a.name} on the map`,
+			sub: [
+				a.about || null,
+				a.registration && a.registration !== a.name ? a.registration : null,
+				`ICAO ${a.icao}`,
+			]
+				.filter(Boolean)
+				.join(" · "),
+			glyph: "cat-aircraft",
+			action: { kind: "mapFocus", id: `a:${a.icao}` },
+			does: `Opens the Map on ${a.name}`,
+		}))
+	}
+
 	// -- the list
 
 	build(scope: ScopeId | null, query: string): PaletteGroup[] {
@@ -1953,6 +1999,7 @@ export class PaletteModel {
 				if (anchor) list.splice(i + 1, 0, { ...x, score: anchor.score })
 			}
 			push("Commands", [...exact(it.cmd), ...list.slice(0, 12)])
+			push("Aircraft", exact(this.aircraftItems(q)))
 			push(
 				"Activity",
 				it.act.map((x, i) => ({

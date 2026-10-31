@@ -16,6 +16,7 @@
  */
 import type { FastifyInstance } from "fastify"
 import type {
+	AircraftIdentification,
 	AircraftState,
 	AircraftTrackerStats,
 	AprsStation,
@@ -106,7 +107,27 @@ export interface MockAircraft {
 	readonly msgs: number
 	readonly registration?: string
 	readonly operator?: string
+	/** The core's enrichment (docs/ADSB.md "Aircraft Enrichment") beyond registration and operator. */
+	readonly details?: Omit<
+		AircraftIdentification,
+		"registration" | "operator" | "typeCode" | "source"
+	>
 }
+
+/** A drawn stand-in for an airframe photo (the mock never reaches Planespotters). */
+function mockPhoto(sky: string, ground: string): string {
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 200"><rect width="300" height="116" fill="${sky}"/><rect y="116" width="300" height="84" fill="${ground}"/><path d="M40 112 L210 104 Q236 103 252 110 Q258 114 250 118 L214 124 L60 126 Z M118 108 L160 70 L176 70 L156 108 Z M120 124 L150 150 L166 150 L152 124 Z M46 112 L36 92 L48 92 L66 110 Z" fill="#eef2f6"/></svg>`
+	return `data:image/svg+xml,${encodeURIComponent(svg)}`
+}
+
+const airport = (
+	icao: string,
+	iata: string,
+	name: string,
+	city: string,
+	lat: number,
+	lon: number,
+) => ({ icao, iata, name, city, country: "France", countryIso: "FR", lat, lon })
 
 /** The board's 34 aircraft (seeded): three named ones and 31 on the airways around the station. */
 export function makeAircraft(): MockAircraft[] {
@@ -127,6 +148,48 @@ export function makeAircraft(): MockAircraft[] {
 			msgs: 1834,
 			registration: "F-HBNA",
 			operator: "Air France",
+			details: {
+				typeDescription: "A320 214",
+				manufacturer: "Airbus",
+				country: "France",
+				countryIso: "FR",
+				year: 2010,
+				airline: {
+					name: "Air France",
+					icao: "AFR",
+					iata: "AF",
+					callsign: "AIRFRANS",
+					source: "adsbdb",
+				},
+				route: {
+					callsign: "AFR1234",
+					origin: airport(
+						"LFPG",
+						"CDG",
+						"Paris Charles de Gaulle",
+						"Paris",
+						49.0128,
+						2.55,
+					),
+					destination: {
+						icao: "KJFK",
+						iata: "JFK",
+						name: "John F Kennedy International Airport",
+						city: "New York",
+						country: "United States",
+						countryIso: "US",
+						lat: 40.6398,
+						lon: -73.7789,
+					},
+					source: "adsbdb",
+				},
+				photo: {
+					thumbnailUrl: mockPhoto("#5d7ea6", "#6f7a68"),
+					photographer: "Mock photographer",
+					link: "https://www.planespotters.net/",
+					source: "planespotters",
+				},
+			},
 		},
 		{
 			icao: "3949F2",
@@ -143,6 +206,34 @@ export function makeAircraft(): MockAircraft[] {
 			msgs: 612,
 			registration: "F-GRGJ",
 			operator: "HOP!",
+			details: {
+				typeDescription: "ERJ-145EU",
+				manufacturer: "Embraer",
+				country: "France",
+				countryIso: "FR",
+				year: 2000,
+				airline: { name: "HOP!", icao: "HOP", iata: "A5", source: "local" },
+				route: {
+					callsign: "HOP47MJ",
+					origin: airport(
+						"LFRB",
+						"BES",
+						"Brest Bretagne Airport",
+						"Brest",
+						48.4479,
+						-4.4185,
+					),
+					destination: airport(
+						"LFPO",
+						"ORY",
+						"Paris-Orly Airport",
+						"Paris",
+						48.7233,
+						2.3794,
+					),
+					source: "adsbdb",
+				},
+			},
 		},
 		{
 			icao: "3B7FA2",
@@ -158,6 +249,12 @@ export function makeAircraft(): MockAircraft[] {
 			rssi: -7.1,
 			msgs: 220,
 			operator: "French Navy",
+			details: {
+				typeDescription: "Dassault Rafale M",
+				country: "France",
+				countryIso: "FR",
+				flags: { military: true },
+			},
 		},
 	]
 	const PFX = [
@@ -808,7 +905,9 @@ export function registerMapMock(
 					? { registration: a.registration }
 					: {}),
 				...(a.operator !== undefined ? { operator: a.operator } : {}),
-				source: "readsb",
+				...a.details,
+				...(a.details?.photo ? { imageUrl: a.details.photo.thumbnailUrl } : {}),
+				source: a.details ? "local" : "readsb",
 			},
 			signalQuality: { rssi: Math.round(a.rssi * 10) / 10 },
 			category: a.type === "AT76" || a.type === "E145" ? "A2" : "A3",
@@ -1071,6 +1170,32 @@ export function registerMapMock(
 		return { aircraft: list, stats: aircraftStats(list), timestamp: now() }
 	})
 	app.get("/api/aircraft/stats", async () => aircraftStats(allAircraft()))
+	// Settings › Map › Online aircraft lookups (the switch only; the mock never goes online)
+	let infoOnline: boolean | null = null
+	const aircraftInfo = () => ({
+		enabled: true,
+		online: infoOnline ?? true,
+		onlineFrom: infoOnline === null ? "config" : "ui",
+		persistent: true,
+		localDb: {
+			enabled: true,
+			aircraft: 612_480,
+			updatedAt: new Date(now() - 86_400_000).toISOString(),
+		},
+	})
+	app.get("/api/aircraft/info", async () => aircraftInfo())
+	app.put<{ Body: { online?: unknown } }>(
+		"/api/aircraft/info",
+		async (request, reply) => {
+			if (typeof request.body?.online !== "boolean")
+				return reply.code(400).send({
+					error: "Bad Request",
+					message: "Expected { online: boolean }",
+				})
+			infoOnline = request.body.online
+			return aircraftInfo()
+		},
+	)
 	app.get<{ Params: { icao: string } }>(
 		"/api/aircraft/:icao",
 		async (request, reply) => {

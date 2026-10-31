@@ -11,7 +11,12 @@ import { receiverLock, sampleRateOptions } from "../receiver/controls.ts"
 import { gainSteps } from "../receiver/gain.ts"
 import { presetsFrom } from "../scanner/planner/plan.ts"
 import { effectiveStep } from "../tuner/prefs.ts"
-import type { PaletteContext, ReceiverContext } from "./model.ts"
+import { aircraftAbout, aircraftName } from "../aircraft.ts"
+import type {
+	PaletteAircraft,
+	PaletteContext,
+	ReceiverContext,
+} from "./model.ts"
 import { RecentList } from "./rank.ts"
 
 /** The page's recent list (per browser). */
@@ -44,6 +49,51 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 	const relay = useStore(data.receiver, s => s.relay)
 	const accessMode = useStore(data.access, s => s.access?.mode ?? null)
 	const pwa = useStore(pwaState)
+	// Find aircraft: the fleet stays live while the palette is open; the list changes only with identities, not positions
+	useEffect(() => data.fleets.aircraft.attach(), [data])
+	const aircraftSig = useStore(data.fleets.aircraft, s => {
+		const rows: string[] = []
+		for (const e of s.entries.values()) {
+			const a = e.value
+			if (!a.position) continue
+			rows.push(
+				[
+					a.icao,
+					aircraftName(a),
+					a.callsign?.trim() ?? "",
+					a.identification?.registration ?? "",
+					aircraftAbout(a),
+					a.identification?.airline?.name ?? a.identification?.operator ?? "",
+				].join("\t"),
+			)
+		}
+		// the fleet keeps its order across updates: no sort needed to compare
+		return rows.join("\n")
+	})
+	const aircraft = useMemo(
+		(): PaletteAircraft[] =>
+			aircraftSig === ""
+				? []
+				: aircraftSig.split("\n").map(row => {
+						const [
+							icao = "",
+							name = "",
+							cs = "",
+							reg = "",
+							about = "",
+							airline = "",
+						] = row.split("\t")
+						return {
+							icao,
+							name,
+							callsign: cs || null,
+							registration: reg || null,
+							about,
+							airline: airline || null,
+						}
+					}),
+		[aircraftSig],
+	)
 
 	// scan presets and receiver capabilities, once
 	useEffect(() => {
@@ -101,6 +151,7 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 			recent: recentList.ids(now),
 			boost: (id: string) => recentList.boost(id, now),
 			pwa,
+			aircraft,
 		}
 		// recentVersion: the list changed (a row ran)
 	}, [
@@ -121,5 +172,6 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 		shell,
 		recentVersion,
 		pwa,
+		aircraft,
 	])
 }

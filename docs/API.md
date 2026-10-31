@@ -4395,13 +4395,26 @@ below 1 or above 168 h) are rejected first with 400 `VALIDATION_ERROR`.
 
 ### Aircraft
 
-ADS-B aircraft that readsb currently tracks, enriched with registration and type where known.
-Field meanings are in [ADS-B](ADSB.md#field-reference).
+ADS-B aircraft that readsb currently tracks. `identification` adds what is known about the
+airframe and flight: registration, type, operator, country, database flags, the airline and
+planned route of the current callsign, and a photo with its photographer credit. It fills in
+after the aircraft first appears and arrives as an `aircraft:update`. Field meanings are in
+[ADS-B](ADSB.md#field-reference); sources and caching in
+[ADS-B, Aircraft Enrichment](ADSB.md#aircraft-enrichment).
 
 - `GET /api/aircraft`: `{ aircraft, stats, timestamp }` for every tracked aircraft.
 - `GET /api/aircraft/stats`: the tracker statistics only.
 - `GET /api/aircraft/:icao`: one aircraft by its 24-bit ICAO address in hex (`4B1808`); 404
   when it is not tracked.
+- `GET /api/aircraft/info`: how the core enriches aircraft:
+  `{ enabled, online, onlineFrom, persistent, localDb: { enabled, aircraft, updatedAt } }`.
+  `onlineFrom` is `config` (from `aircraftInfo.online`) or `ui` (set with PUT). `aircraft` is
+  the number of airframes in the local database (null without a store), `updatedAt` the ISO
+  time of its last download (null before the first).
+- `PUT /api/aircraft/info` with `{ "online": false }` turns the free online lookups off (or
+  back on) without a restart, and answers the same body as GET. The choice is kept in
+  `<stateDir>/aircraft-info.sqlite` and wins over the config until changed again. In protected
+  mode it needs a signed-in device like other metadata changes; any other body is a 400.
 
 The `aircraft` WebSocket channel pushes `aircraft:new`, `aircraft:update`, `aircraft:lost`
 and `aircraft:stats`.

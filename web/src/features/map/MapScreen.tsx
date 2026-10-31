@@ -947,6 +947,9 @@ function Selection(props: {
 				maxHeight: `calc(100% - ${props.top + props.bottomGap}px)`,
 			}}
 		>
+			{info.aircraft?.photo && (
+				<AircraftPhoto key={info.aircraft.photo.src} {...info.aircraft.photo} />
+			)}
 			<div className="wkm-sel-head">
 				<span className="wk-tile" style={{ color: itemColour(it, props.pal) }}>
 					<Svg paths={icon} size={18} />
@@ -965,7 +968,15 @@ function Selection(props: {
 					<Svg paths={CLOSE} />
 				</button>
 			</div>
+			{info.aircraft?.military && (
+				<div className="wkm-tags">
+					<span className="wk-tag" data-size="md" data-variant="amber">
+						Military
+					</span>
+				</div>
+			)}
 			{info.note && <p className="wkm-note">{info.note}</p>}
+			{info.aircraft?.route && <PlannedRoute {...info.aircraft.route} />}
 			<div className="wkm-fields">
 				{info.fields.map(([k, val]) => (
 					<div key={k}>
@@ -974,6 +985,19 @@ function Selection(props: {
 					</div>
 				))}
 			</div>
+			{info.aircraft && info.aircraft.ident.length > 0 && (
+				<section className="wkm-ident" aria-label="Aircraft">
+					<h3 className="wk-label">Aircraft</h3>
+					<dl>
+						{info.aircraft.ident.map(([k, val]) => (
+							<div key={k}>
+								<dt>{k}</dt>
+								<dd className="wkm-ellipsis">{val}</dd>
+							</div>
+						))}
+					</dl>
+				</section>
+			)}
 			<span className="wkm-seen">{info.seen}</span>
 			<div className="wkm-actions">
 				<button
@@ -1007,6 +1031,69 @@ function Selection(props: {
 				</section>
 			)}
 		</aside>
+	)
+}
+
+/** The airframe's photo; the credit links back to the photo page, as Planespotters' terms require. */
+function AircraftPhoto(props: {
+	src: string
+	credit: string | null
+	link: string | null
+}) {
+	const [state, setState] = useState<"loading" | "ok" | "failed">("loading")
+	if (state === "failed") return null
+	return (
+		<figure className="wkm-photo" data-state={state}>
+			<img
+				src={props.src}
+				alt=""
+				loading="lazy"
+				decoding="async"
+				referrerPolicy="no-referrer"
+				onLoad={() => setState("ok")}
+				onError={() => setState("failed")}
+			/>
+			{props.credit &&
+				(props.link ? (
+					<a href={props.link} target="_blank" rel="noopener noreferrer">
+						{props.credit}
+					</a>
+				) : (
+					<figcaption>{props.credit}</figcaption>
+				))}
+		</figure>
+	)
+}
+
+/** The callsign's planned route (crowd-sourced, so labelled as planned). */
+function PlannedRoute(props: {
+	from: string
+	fromName: string
+	to: string
+	toName: string
+}) {
+	return (
+		<div
+			className="wkm-route"
+			aria-label={`Planned route from ${props.fromName} to ${props.toName}`}
+		>
+			<div className="wkm-route-ends">
+				<span>
+					<b className="wk-h3">{props.from}</b>
+					<span className="wkm-dim wkm-ellipsis">{props.fromName}</span>
+				</span>
+				<svg width="44" height="12" viewBox="0 0 44 12" aria-hidden="true">
+					<path d="M1 6h40M36 2l5 4-5 4" />
+				</svg>
+				<span data-end="">
+					<b className="wk-h3">{props.to}</b>
+					<span className="wkm-dim wkm-ellipsis">{props.toName}</span>
+				</span>
+			</div>
+			<span className="wkm-dim">
+				Planned route · from the callsign, may differ
+			</span>
+		</div>
 	)
 }
 

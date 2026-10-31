@@ -848,6 +848,34 @@ export const ActivityAdmissionConfigSchema = z
 	.strict()
 
 /**
+ * Aircraft identity enrichment. Every source is free and needs no API key.
+ * `online: false` keeps WaveKit fully local (no request leaves the core).
+ */
+export const AircraftInfoConfigSchema = z
+	.object({
+		/** Look aircraft up on adsbdb.com, hexdb.io and planespotters.net. */
+		online: z.boolean().default(true),
+		localDb: z
+			.object({
+				/** Download and use the tar1090-db aircraft database (about 8 MB). */
+				enabled: z.boolean().default(true),
+				/** Gzipped tar1090-db CSV (hex;reg;type;flags;desc;year;owner). */
+				url: z
+					.string()
+					.url()
+					.default(
+						"https://github.com/wiedehopf/tar1090-db/raw/refs/heads/csv/aircraft.csv.gz",
+					),
+				/** Days between database refreshes. */
+				refreshDays: z.number().int().min(1).max(365).default(7),
+			})
+			.strict()
+			.default({}),
+	})
+	.strict()
+export type AircraftInfoConfig = z.infer<typeof AircraftInfoConfigSchema>
+
+/**
  * Persistent activity store. On by default with bounded limits; an explicit
  * `enabled: false` means no database file and no worker. Retention and
  * admission stay unset here: every omitted field resolves to
@@ -950,6 +978,11 @@ export const ConfigSchema = z
 		 * retention and admission; `activity: { enabled: false }` turns it off.
 		 */
 		activity: ActivityConfigSchema.default({}),
+		/**
+		 * Aircraft identity enrichment (docs/ADSB.md "Aircraft details"): a local
+		 * aircraft database plus optional free online lookups, cached under stateDir.
+		 */
+		aircraftInfo: AircraftInfoConfigSchema.default({}),
 		/**
 		 * Directory for runtime state (API band overrides). Relative paths
 		 * resolve against the process working directory.
@@ -1125,6 +1158,14 @@ const LEGACY_ENV_MAPPINGS: Record<
 	WAVEKIT_COUNTRY: { path: ["station", "country"], type: "string" },
 	WAVEKIT_STATE_DIR: { path: ["stateDir"], type: "string" },
 	WAVEKIT_ACTIVITY__ENABLED: { path: ["activity", "enabled"], type: "boolean" },
+	WAVEKIT_AIRCRAFT_INFO__ONLINE: {
+		path: ["aircraftInfo", "online"],
+		type: "boolean",
+	},
+	WAVEKIT_AIRCRAFT_INFO__LOCAL_DB: {
+		path: ["aircraftInfo", "localDb", "enabled"],
+		type: "boolean",
+	},
 }
 
 /**

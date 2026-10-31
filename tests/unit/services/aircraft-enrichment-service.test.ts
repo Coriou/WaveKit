@@ -1,790 +1,564 @@
 /**
- * Aircraft Enrichment Service Unit Tests
- *
- * Tests for the AircraftEnrichmentService hexdb.io integration.
- * This is an ADS-B-specific component that does NOT affect other decoders.
+ * Aircraft Enrichment Service: local database, on-disk cache, free online sources
+ * (adsbdb, hexdb, planespotters) and the airline/route of a callsign.
  */
 
+import { gzipSync } from "node:zlib"
+import { DatabaseSync } from "node:sqlite"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import {
 	AircraftEnrichmentService,
+	airlinePrefix,
+	bundledAirline,
 	type AircraftEnrichmentConfig,
 } from "../../../src/services/aircraft-enrichment-service.js"
+import {
+	AircraftInfoStore,
+	parseTar1090Line,
+} from "../../../src/services/aircraft-info/store.js"
+import { CircuitBreaker } from "../../../src/services/aircraft-info/http.js"
+import type { SqliteDatabase } from "../../../src/core/activity/storage/sqlite.js"
 import { AircraftTracker } from "../../../src/core/aircraft-tracker.js"
 import { createLogger } from "../../../src/utils/logger.js"
-import type {
-	AircraftIdentification,
-	RawAircraftMessage,
-} from "@wavekit/api-types"
 
-// Create a test logger
-const testLogger = createLogger({ level: "error" })
+const logger = createLogger({ level: "error" })
 
-// Default config for tests
-const defaultConfig: AircraftEnrichmentConfig = {
-	hexdbUrl: "https://hexdb.io",
-	cacheTtlMs: 60000, // 1 minute for tests
-	maxCacheSize: 100,
-	rateLimitMs: 10, // Fast for tests
-	requestTimeoutMs: 1000,
-	enabled: true,
+const ADSBDB_AIRCRAFT = {
+	response: {
+		aircraft: {
+			type: "A320 214",
+			icao_type: "A320",
+			manufacturer: "Airbus",
+			mode_s: "0A0B11",
+			registration: "ZZ-WKA",
+			registered_owner_country_iso_name: "CH",
+			registered_owner_country_name: "Switzerland",
+			registered_owner_operator_flag_code: "WKS",
+			registered_owner: "WaveKit Swiss",
+			url_photo: "https://image.airport-data.com/aircraft/001702996.jpg",
+			url_photo_thumbnail:
+				"https://airport-data.com/images/aircraft/thumbnails/001/702/001702996.jpg",
+		},
+	},
 }
 
-// Mock fetch globally
-const mockFetch = vi.fn()
-vi.stubGlobal("fetch", mockFetch)
-
-/**
- * Helper to create a mock hexdb response
- */
-function createHexdbResponse(overrides: Record<string, string> = {}) {
-	return {
-		Registration: "N12345",
-		ICAOTypeCode: "B738",
-		Type: "Boeing 737-800",
-		Manufacturer: "Boeing",
-		RegisteredOwners: "United Airlines",
-		OperatorFlagCode: "UAL",
-		ModeS: "ABC123",
-		...overrides,
-	}
+const PLANESPOTTERS = {
+	photos: [
+		{
+			id: "1000001",
+			thumbnail: {
+				src: "https://t.plnspttrs.net/10000/1000001_0000000000_t.jpg",
+			},
+			thumbnail_large: {
+				src: "https://t.plnspttrs.net/10000/1000001_0000000000_280.jpg",
+			},
+			link: "https://www.planespotters.net/photo/1000001/zz-wka",
+			photographer: "A. Spotter",
+		},
+	],
 }
 
-/**
- * Helper to create a successful fetch response
- */
-function mockFetchSuccess(data: Record<string, unknown>) {
-	mockFetch.mockResolvedValueOnce({
-		ok: true,
-		status: 200,
-		json: () => Promise.resolve(data),
-	})
+const airport = (icao: string, iata: string, name: string) => ({
+	country_iso_name: "FR",
+	country_name: "France",
+	elevation: 291,
+	iata_code: iata,
+	icao_code: icao,
+	latitude: 48.7,
+	longitude: 2.3,
+	municipality: "Mock City",
+	name,
+})
+
+const ADSBDB_CALLSIGN = {
+	response: {
+		flightroute: {
+			callsign: "WKS101",
+			airline: {
+				name: "WaveKit Swiss",
+				icao: "WKS",
+				iata: "DS",
+				country: "Switzerland",
+				country_iso: "CH",
+				callsign: "WAVEKIT",
+			},
+			origin: airport("ZZZY", "ZZY", "Mock Origin Airport"),
+			destination: airport("ZZZZ", "ZZZ", "Mock Airport"),
+		},
+	},
 }
 
-/**
- * Helper to create a successful text (image URL) fetch response
- */
-function mockFetchTextSuccess(text: string) {
-	mockFetch.mockResolvedValueOnce({
-		ok: true,
-		status: 200,
-		text: () => Promise.resolve(text),
-	})
-}
+type Handler = (url: string) => Response | Promise<Response>
 
-/**
- * Helper to create a 404 fetch response
- */
-function mockFetch404() {
-	mockFetch.mockResolvedValueOnce({
-		ok: false,
-		status: 404,
-		statusText: "Not Found",
-	})
-}
-
-/**
- * Helper to create a 404 text response for image lookups
- */
-function mockFetch404Text() {
-	mockFetch.mockResolvedValueOnce({
-		ok: false,
-		status: 404,
-		statusText: "Not Found",
-		text: () => Promise.resolve("n/a"),
-	})
-}
-
-/**
- * Helper to create a failed fetch response
- */
-function mockFetchError(status: number, statusText: string) {
-	mockFetch.mockResolvedValueOnce({
-		ok: false,
+function json(body: unknown, status = 200): Response {
+	return new Response(JSON.stringify(body), {
 		status,
-		statusText,
+		headers: { "content-type": "application/json" },
 	})
 }
 
-/**
- * Helper to create a network error
- */
-function mockFetchNetworkError() {
-	mockFetch.mockRejectedValueOnce(new Error("Network error"))
+function fakeFetch(handler: Handler) {
+	return vi.fn((input: string, _init?: RequestInit) =>
+		Promise.resolve(handler(input)),
+	)
+}
+
+/** adsbdb + planespotters answering for ZZ-WKA, 404 for anything else. */
+const happy: Handler = url => {
+	if (url.includes("adsbdb.com/v0/aircraft/0A0B11"))
+		return json(ADSBDB_AIRCRAFT)
+	if (url.includes("planespotters.net/pub/photos/reg/ZZ-WKA"))
+		return json(PLANESPOTTERS)
+	if (url.includes("adsbdb.com/v0/callsign/WKS101"))
+		return json(ADSBDB_CALLSIGN)
+	return json({ response: "unknown" }, 404)
+}
+
+function memoryStore(now?: () => number): AircraftInfoStore {
+	return new AircraftInfoStore(
+		new DatabaseSync(":memory:") as unknown as SqliteDatabase,
+		now,
+	)
+}
+
+async function* lines(rows: string[]) {
+	for (const row of rows) yield row
+}
+
+const flush = () => new Promise(resolve => setTimeout(resolve, 20))
+
+const config: AircraftEnrichmentConfig = {
+	rateLimitMs: 0,
+	requestTimeoutMs: 500,
 }
 
 describe("AircraftEnrichmentService", () => {
-	let service: AircraftEnrichmentService
-
-	beforeEach(() => {
-		mockFetch.mockReset()
-		service = new AircraftEnrichmentService(defaultConfig, testLogger)
-	})
+	let service: AircraftEnrichmentService | undefined
+	let tracker: AircraftTracker | undefined
 
 	afterEach(() => {
-		service.stop()
+		service?.stop()
+		tracker?.stop()
+		service = undefined
+		tracker = undefined
 	})
 
-	describe("Initialization", () => {
-		it("should initialize with default config", () => {
-			const stats = service.getCacheStats()
-			expect(stats.hits).toBe(0)
-			expect(stats.misses).toBe(0)
-			expect(stats.size).toBe(0)
-		})
-
-		it("should start and stop correctly", () => {
-			service.start()
-			// Should not throw
-			service.stop()
-		})
-	})
-
-	describe("Direct Lookup", () => {
-		it("should lookup aircraft from hexdb.io", async () => {
-			mockFetchSuccess(createHexdbResponse())
-			service.start()
-
-			const result = await service.lookup("ABC123")
-
-			expect(result).toBeDefined()
-			expect(result!.registration).toBe("N12345")
-			expect(result!.typeCode).toBe("B738")
-			expect(result!.typeDescription).toBe("Boeing 737-800")
-			expect(result!.manufacturer).toBe("Boeing")
-			expect(result!.operator).toBe("United Airlines")
-			expect(result!.operatorCode).toBe("UAL")
-			expect(result!.source).toBe("hexdb")
-		})
-
-		it("should return null for 404 responses", async () => {
-			mockFetch404()
-			service.start()
-
-			const result = await service.lookup("UNKNOWN")
-
-			expect(result).toBeNull()
-		})
-
-		it("should handle API errors gracefully", async () => {
-			mockFetchError(500, "Internal Server Error")
-			service.start()
-
-			const result = await service.lookup("ABC123")
-
-			expect(result).toBeNull()
-		})
-
-		it("should handle network errors gracefully", async () => {
-			mockFetchNetworkError()
-			service.start()
-
-			const result = await service.lookup("ABC123")
-
-			expect(result).toBeNull()
-		})
-
-		it("should normalize ICAO to uppercase", async () => {
-			mockFetchSuccess(createHexdbResponse())
-			service.start()
-
-			await service.lookup("abc123")
-
-			expect(mockFetch).toHaveBeenCalledWith(
-				"https://hexdb.io/api/v1/aircraft/ABC123",
-				expect.any(Object),
-			)
-		})
-	})
-
-	describe("Caching", () => {
-		it("should cache successful lookups", async () => {
-			mockFetchSuccess(createHexdbResponse())
-			mockFetch404Text() // Image fetch
-			service.start()
-
-			// First lookup
-			await service.lookup("ABC123")
-
-			// Second lookup - should use cache
-			const result = await service.lookup("ABC123")
-
-			expect(result).toBeDefined()
-			expect(result!.registration).toBe("N12345")
-			expect(mockFetch).toHaveBeenCalledTimes(2) // Aircraft + image fetch
-		})
-
-		it("should cache 404 responses to avoid repeated lookups", async () => {
-			mockFetch404()
-			mockFetch404Text() // Image fetch also returns 404
-			service.start()
-
-			// First lookup
-			await service.lookup("UNKNOWN")
-
-			// Second lookup - should use cache (null)
-			const result = await service.lookup("UNKNOWN")
-
-			expect(result).toBeNull()
-			expect(mockFetch).toHaveBeenCalledTimes(2) // Aircraft + image fetch
-		})
-
-		it("should track cache statistics", async () => {
-			mockFetchSuccess(createHexdbResponse())
-			mockFetch404Text() // Image fetch
-			service.start()
-
-			// First lookup - miss
-			await service.lookup("ABC123")
-
-			// Second lookup - hit
-			await service.lookup("ABC123")
-
-			const stats = service.getCacheStats()
-			expect(stats.misses).toBe(1)
-			expect(stats.hits).toBe(1)
-			expect(stats.size).toBe(1)
-		})
-
-		it("should evict oldest entries when cache is full", async () => {
-			const smallCacheService = new AircraftEnrichmentService(
-				{ ...defaultConfig, maxCacheSize: 2, fetchImages: false },
-				testLogger,
-			)
-			smallCacheService.start()
-
-			// Add 3 entries to a cache with size 2
-			mockFetchSuccess(createHexdbResponse({ Registration: "N111" }))
-			await smallCacheService.lookup("ICAO1")
-
-			mockFetchSuccess(createHexdbResponse({ Registration: "N222" }))
-			await smallCacheService.lookup("ICAO2")
-
-			mockFetchSuccess(createHexdbResponse({ Registration: "N333" }))
-			await smallCacheService.lookup("ICAO3")
-
-			const stats = smallCacheService.getCacheStats()
-			expect(stats.size).toBe(2) // Should be limited to max size
-
-			smallCacheService.stop()
-		})
-
-		it("should expire cache entries after TTL", async () => {
-			const shortTtlService = new AircraftEnrichmentService(
-				{ ...defaultConfig, cacheTtlMs: 50, fetchImages: false }, // 50ms TTL, no images
-				testLogger,
-			)
-			shortTtlService.start()
-
-			mockFetchSuccess(createHexdbResponse())
-			await shortTtlService.lookup("ABC123")
-
-			// Wait for TTL to expire
-			await new Promise(resolve => setTimeout(resolve, 60))
-
-			// Should make a new request
-			mockFetchSuccess(createHexdbResponse())
-			await shortTtlService.lookup("ABC123")
-
-			expect(mockFetch).toHaveBeenCalledTimes(2)
-
-			shortTtlService.stop()
-		})
-
-		it("should clear cache when requested", async () => {
-			mockFetchSuccess(createHexdbResponse())
-			mockFetch404Text() // Image fetch
-			service.start()
-
-			await service.lookup("ABC123")
-			expect(service.getCacheStats().size).toBe(1)
-
-			service.clearCache()
-			expect(service.getCacheStats().size).toBe(0)
-		})
-	})
-
-	describe("Queue Processing", () => {
-		it("should queue lookups and process them", async () => {
-			mockFetchSuccess(createHexdbResponse())
-			mockFetch404Text() // Image fetch
-			service.start()
-
-			// Enqueue should not await
-			service.enqueue("ABC123")
-
-			// Wait for queue processing
-			await new Promise(resolve => setTimeout(resolve, 50))
-
-			expect(mockFetch).toHaveBeenCalledTimes(2) // Aircraft + image fetch
-		})
-
-		it("should not enqueue duplicate ICAOs that are still in queue", async () => {
-			// Use rate limiting to ensure items stay in queue longer
-			const slowService = new AircraftEnrichmentService(
-				{ ...defaultConfig, rateLimitMs: 200, fetchImages: false },
-				testLogger,
-			)
-			slowService.start()
-
-			// Queue first item with slow mock to keep it processing
-			mockFetchSuccess(createHexdbResponse())
-			mockFetchSuccess(createHexdbResponse())
-
-			// Enqueue same ICAO twice quickly (before first can be processed)
-			slowService.enqueue("ABC123")
-			slowService.enqueue("ABC123") // Should be ignored since it's in queue
-
-			// Wait for queue to empty (need more time due to rate limiting)
-			await new Promise(resolve => setTimeout(resolve, 100))
-
-			// Only one request should have been made
-			expect(mockFetch).toHaveBeenCalledTimes(1)
-
-			slowService.stop()
-		})
-
-		it("should skip already cached ICAOs in queue", async () => {
-			mockFetchSuccess(createHexdbResponse())
-			mockFetch404Text() // Image fetch
-			service.start()
-
-			// Direct lookup to populate cache
-			await service.lookup("ABC123")
-
-			// Enqueue same ICAO
-			service.enqueue("ABC123")
-
-			// Wait for processing
-			await new Promise(resolve => setTimeout(resolve, 50))
-
-			// Only aircraft + image fetch from direct lookup
-			expect(mockFetch).toHaveBeenCalledTimes(2)
-		})
-	})
-
-	describe("Tracker Integration", () => {
-		it("should wire to tracker and enrich on aircraft:new", async () => {
-			const tracker = new AircraftTracker(
-				{ maxAge: 60, cleanupInterval: 60000 },
-				testLogger,
-			)
-
-			mockFetchSuccess(createHexdbResponse())
-			mockFetch404Text() // Image fetch
-			service.wireToTracker(tracker)
-			service.start()
-
-			// Add new aircraft to tracker
-			const raw: RawAircraftMessage = { hex: "ABC123", flight: "UAL123" }
-			tracker.processUpdate(raw)
-
-			// Wait for enrichment
-			await new Promise(resolve => setTimeout(resolve, 50))
-
-			// Check that aircraft was enriched
-			const aircraft = tracker.get("ABC123")
-			expect(aircraft).toBeDefined()
-			expect(aircraft!.identification?.registration).toBe("N12345")
-			expect(aircraft!.identification?.source).toBe("hexdb")
-
-			tracker.stop()
-		})
-
-		it("should merge enrichment with existing identification", async () => {
-			const tracker = new AircraftTracker(
-				{ maxAge: 60, cleanupInterval: 60000 },
-				testLogger,
-			)
-
-			// Return partial enrichment (no manufacturer)
-			mockFetchSuccess({
-				Registration: "N99999",
-				ICAOTypeCode: "A320",
+	describe("online lookup", () => {
+		it("merges adsbdb identity with a Planespotters photo and credit", async () => {
+			const fetch = fakeFetch(happy)
+			service = new AircraftEnrichmentService(config, logger, {
+				fetch,
+				store: memoryStore(),
 			})
-			mockFetch404Text() // Image fetch
-			service.wireToTracker(tracker)
-			service.start()
-
-			// Add aircraft with existing identification from readsb
-			const raw: RawAircraftMessage = {
-				hex: "DEF456",
-				r: "N88888", // readsb registration
-				t: "B738", // readsb type code
-				desc: "Boeing 737-800", // readsb description
-			}
-			tracker.processUpdate(raw)
-
-			// Wait for enrichment
-			await new Promise(resolve => setTimeout(resolve, 50))
-
-			const aircraft = tracker.get("DEF456")
-			expect(aircraft).toBeDefined()
-			// hexdb data should override readsb
-			expect(aircraft!.identification?.registration).toBe("N99999")
-			expect(aircraft!.identification?.typeCode).toBe("A320")
-			// But readsb description should be preserved (hexdb didn't provide it)
-			expect(aircraft!.identification?.typeDescription).toBe("Boeing 737-800")
-
-			tracker.stop()
+			await service.start()
+			const id = await service.lookup("0a0b11")
+			expect(id).toMatchObject({
+				registration: "ZZ-WKA",
+				typeCode: "A320",
+				typeDescription: "A320 214",
+				manufacturer: "Airbus",
+				operator: "WaveKit Swiss",
+				operatorCode: "WKS",
+				country: "Switzerland",
+				countryIso: "CH",
+				source: "adsbdb",
+				photo: {
+					thumbnailUrl:
+						"https://t.plnspttrs.net/10000/1000001_0000000000_t.jpg",
+					largeUrl: "https://t.plnspttrs.net/10000/1000001_0000000000_280.jpg",
+					photographer: "A. Spotter",
+					link: "https://www.planespotters.net/photo/1000001/zz-wka",
+					source: "planespotters",
+				},
+				imageUrl: "https://t.plnspttrs.net/10000/1000001_0000000000_t.jpg",
+			})
+			const sent = fetch.mock.calls[0]?.[1] as RequestInit | undefined
+			expect(new Headers(sent?.headers).get("User-Agent")).toMatch(
+				/WaveKit\/.+https:\/\//,
+			)
 		})
 
-		it("should not enrich when service is disabled", async () => {
-			const disabledService = new AircraftEnrichmentService(
-				{ ...defaultConfig, enabled: false },
-				testLogger,
-			)
-			const tracker = new AircraftTracker(
-				{ maxAge: 60, cleanupInterval: 60000 },
-				testLogger,
-			)
+		it("answers from the cache the second time, also after a restart", async () => {
+			const store = memoryStore()
+			const fetch = fakeFetch(happy)
+			service = new AircraftEnrichmentService(config, logger, { fetch, store })
+			await service.start()
+			await service.lookup("0A0B11")
+			const calls = fetch.mock.calls.length
+			await service.lookup("0A0B11")
+			expect(fetch.mock.calls.length).toBe(calls)
 
-			disabledService.wireToTracker(tracker)
-			disabledService.start()
-
-			tracker.processUpdate({ hex: "ABC123" })
-
-			await new Promise(resolve => setTimeout(resolve, 50))
-
-			expect(mockFetch).not.toHaveBeenCalled()
-
-			disabledService.stop()
-			tracker.stop()
+			const offline = fakeFetch(() => {
+				throw new TypeError("fetch failed")
+			})
+			const restarted = new AircraftEnrichmentService(config, logger, {
+				fetch: offline,
+				store,
+			})
+			await restarted.start()
+			expect((await restarted.lookup("0A0B11"))?.registration).toBe("ZZ-WKA")
+			expect(offline).not.toHaveBeenCalled()
+			restarted.stop()
 		})
 
-		it("should not enrich when service is stopped", async () => {
-			const tracker = new AircraftTracker(
-				{ maxAge: 60, cleanupInterval: 60000 },
-				testLogger,
-			)
-
-			service.wireToTracker(tracker)
-			// Note: service not started
-
-			tracker.processUpdate({ hex: "ABC123" })
-
-			await new Promise(resolve => setTimeout(resolve, 50))
-
-			expect(mockFetch).not.toHaveBeenCalled()
-
-			tracker.stop()
-		})
-	})
-
-	describe("Events", () => {
-		it("should emit enrichment:success on successful lookup", async () => {
-			mockFetchSuccess(createHexdbResponse())
-			mockFetch404Text() // Image fetch
-			service.start()
-
-			const eventPromise = new Promise<[string, AircraftIdentification]>(
-				resolve => {
-					service.once("enrichment:success", (icao, data) => {
-						resolve([icao, data])
+		it("falls back to hexdb when adsbdb does not know the aircraft", async () => {
+			const fetch = fakeFetch(url => {
+				if (url.includes("hexdb.io/api/v1/aircraft/ABC123"))
+					return json({
+						Registration: "N12345",
+						ICAOTypeCode: "B738",
+						Type: "Boeing 737-800",
+						RegisteredOwners: "United Airlines",
 					})
+				return json({ response: "unknown aircraft" }, 404)
+			})
+			service = new AircraftEnrichmentService(config, logger, {
+				fetch,
+				store: memoryStore(),
+			})
+			await service.start()
+			expect(await service.lookup("ABC123")).toMatchObject({
+				registration: "N12345",
+				typeCode: "B738",
+				operator: "United Airlines",
+				source: "hexdb",
+			})
+		})
+
+		it("caches nothing when every source is unreachable, and keeps the local answer", async () => {
+			const store = memoryStore()
+			await store.replaceAircraftDb(
+				lines(["0A0B11;ZZ-WKA;A320;00;AIRBUS A-320;2005;;"]),
+			)
+			const fetch = fakeFetch(() => {
+				throw new TypeError("fetch failed")
+			})
+			service = new AircraftEnrichmentService(config, logger, { fetch, store })
+			await service.start()
+			expect(await service.lookup("0A0B11")).toMatchObject({
+				registration: "ZZ-WKA",
+				typeCode: "A320",
+				typeDescription: "Airbus A-320",
+				year: 2005,
+				country: "Switzerland",
+				source: "local",
+			})
+			expect(store.cached("airframe", "0A0B11")).toBeUndefined()
+			expect(store.cached("photo", "0A0B11")).toBeUndefined()
+		})
+
+		it("never goes online with online: false", async () => {
+			const store = memoryStore()
+			await store.replaceAircraftDb(
+				lines(["0A0B14;ZZ-WKC;C25B;1000;CESSNA 525B;;ARMEE;"]),
+			)
+			const fetch = fakeFetch(happy)
+			service = new AircraftEnrichmentService(
+				{ ...config, online: false },
+				logger,
+				{
+					fetch,
+					store,
 				},
 			)
-
-			await service.lookup("ABC123")
-
-			const [icao, data] = await eventPromise
-			expect(icao).toBe("ABC123")
-			expect(data.registration).toBe("N12345")
-		})
-
-		it("should emit enrichment:failed on API error", async () => {
-			mockFetchNetworkError()
-			service.start()
-
-			const eventPromise = new Promise<[string, Error]>(resolve => {
-				service.once("enrichment:failed", (icao, err) => {
-					resolve([icao, err])
-				})
+			await service.start()
+			expect(await service.lookup("0A0B14")).toMatchObject({
+				registration: "ZZ-WKC",
+				operator: "ARMEE",
+				flags: { military: true },
+				country: "France",
 			})
-
-			await service.lookup("ABC123")
-
-			const [icao, err] = await eventPromise
-			expect(icao).toBe("ABC123")
-			expect(err).toBeInstanceOf(Error)
-		})
-
-		it("should emit enrichment:cached when using cached data", async () => {
-			mockFetchSuccess(createHexdbResponse())
-			mockFetch404Text() // Image fetch
-			service.start()
-
-			// Populate cache
-			await service.lookup("ABC123")
-
-			const eventPromise = new Promise<string>(resolve => {
-				service.once("enrichment:cached", icao => {
-					resolve(icao)
-				})
-			})
-
-			// Enqueue cached ICAO
-			service.enqueue("ABC123")
-
-			const icao = await eventPromise
-			expect(icao).toBe("ABC123")
+			expect(fetch).not.toHaveBeenCalled()
 		})
 	})
 
-	describe("Rate Limiting", () => {
-		it("should respect rate limit between requests", async () => {
-			const rateLimitedService = new AircraftEnrichmentService(
-				{ ...defaultConfig, rateLimitMs: 100, fetchImages: false },
-				testLogger,
+	describe("tracker", () => {
+		beforeEach(() => {
+			tracker = new AircraftTracker(
+				{ maxAge: 60, cleanupInterval: 60_000 },
+				logger,
 			)
-			rateLimitedService.start()
+		})
 
-			mockFetchSuccess(createHexdbResponse({ Registration: "N111" }))
-			mockFetchSuccess(createHexdbResponse({ Registration: "N222" }))
+		it("applies identity, airline and route, and pushes an update", async () => {
+			service = new AircraftEnrichmentService(config, logger, {
+				fetch: fakeFetch(happy),
+				store: memoryStore(),
+			})
+			service.wireToTracker(tracker!)
+			await service.start()
+			const updates: string[] = []
+			tracker!.on("aircraft:update", a => updates.push(a.icao))
+			tracker!.processUpdate({ hex: "0A0B11", flight: "WKS101 " })
+			await flush()
+			const id = tracker!.get("0A0B11")?.identification
+			expect(id?.registration).toBe("ZZ-WKA")
+			expect(id?.photo?.photographer).toBe("A. Spotter")
+			expect(id?.airline).toMatchObject({
+				name: "WaveKit Swiss",
+				icao: "WKS",
+			})
+			expect(id?.route).toMatchObject({
+				callsign: "WKS101",
+				origin: { iata: "ZZY" },
+				destination: { iata: "ZZZ", name: "Mock Airport" },
+			})
+			expect(updates).toContain("0A0B11")
+		})
 
-			const startTime = Date.now()
+		it("uses the bundled airline offline and drops a route that no longer matches", async () => {
+			service = new AircraftEnrichmentService(config, logger, {
+				fetch: fakeFetch(happy),
+				store: memoryStore(),
+			})
+			service.wireToTracker(tracker!)
+			await service.start()
+			tracker!.processUpdate({ hex: "0A0B11", flight: "WKS101" })
+			await flush()
+			expect(tracker!.get("0A0B11")?.identification?.route).toBeDefined()
+			// New callsign with no known route: the old route goes, the airline comes
+			// from the bundled table (adsbdb learned WKS, so it stays WaveKit Swiss).
+			tracker!.processUpdate({ hex: "0A0B11", flight: "WKS99" })
+			await flush()
+			const id = tracker!.get("0A0B11")?.identification
+			expect(id?.route).toBeUndefined()
+			expect(id?.airline?.name).toBe("WaveKit Swiss")
 
-			// Enqueue two requests
-			rateLimitedService.enqueue("ICAO1")
-			rateLimitedService.enqueue("ICAO2")
-
-			// Wait for both to complete
-			await new Promise(resolve => setTimeout(resolve, 300))
-
-			const elapsed = Date.now() - startTime
-			expect(elapsed).toBeGreaterThanOrEqual(100) // Should have waited at least rateLimitMs
-
-			rateLimitedService.stop()
+			tracker!.processUpdate({ hex: "AAAAAA", flight: "AFR1234" })
+			await flush()
+			expect(tracker!.get("AAAAAA")?.identification?.airline).toMatchObject({
+				name: "Air France",
+				iata: "AF",
+				source: "local",
+			})
 		})
 	})
 
-	describe("Response Parsing", () => {
-		it("should handle empty response data", async () => {
-			mockFetchSuccess({})
-			mockFetch404Text() // Image fetch (will still run)
-			service.start()
-
-			const result = await service.lookup("ABC123")
-
-			// Should return null for empty/meaningless response
-			expect(result).toBeNull()
+	describe("local aircraft database", () => {
+		let dir: string
+		beforeEach(() => {
+			dir = mkdtempSync(join(tmpdir(), "wavekit-aircraft-"))
 		})
+		afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
-		it("should handle partial response data", async () => {
-			mockFetchSuccess({
-				Registration: "N12345",
-				// No other fields
-			})
-			mockFetch404Text() // Image fetch
-			service.start()
-
-			const result = await service.lookup("ABC123")
-
-			expect(result).toBeDefined()
-			expect(result!.registration).toBe("N12345")
-			expect(result!.typeCode).toBeUndefined()
-			expect(result!.manufacturer).toBeUndefined()
-		})
-
-		it("should handle response with only type code", async () => {
-			mockFetchSuccess({
-				ICAOTypeCode: "B738",
-			})
-			mockFetch404Text() // Image fetch
-			service.start()
-
-			const result = await service.lookup("ABC123")
-
-			expect(result).toBeDefined()
-			expect(result!.typeCode).toBe("B738")
-			expect(result!.registration).toBeUndefined()
-		})
-	})
-
-	describe("EnrichmentCacheStatsProvider Interface", () => {
-		it("should provide cache stats to tracker", async () => {
-			const tracker = new AircraftTracker(
-				{ maxAge: 60, cleanupInterval: 60000 },
-				testLogger,
+		it("downloads tar1090-db and swaps it in", async () => {
+			const gz = gzipSync(
+				"000001;;;10;;;Miscode - VARIOUS;\n0A0B11;ZZ-WKA;A320;00;AIRBUS A-320;;;\nbad line\n",
 			)
+			const fetch = fakeFetch(url =>
+				url.endsWith(".csv.gz") ? new Response(gz) : json({}, 404),
+			)
+			const store = memoryStore()
+			service = new AircraftEnrichmentService(
+				{
+					...config,
+					stateDir: dir,
+					localDb: { url: "https://example.test/db.csv.gz" },
+				},
+				logger,
+				{ fetch, store },
+			)
+			await service.start()
+			await service.refreshLocalDb()
+			expect(store.localAircraftCount()).toBe(2)
+			expect(store.localAircraft("0A0B11")?.registration).toBe("ZZ-WKA")
+			expect(store.meta("aircraft_db_updated_at")).toBeDefined()
+			// Fresh: no second download.
+			await service.refreshLocalDb()
+			expect(fetch).toHaveBeenCalledTimes(1)
+		})
 
-			mockFetchSuccess(createHexdbResponse())
-			mockFetch404Text() // Image fetch - no image
+		it("keeps the current table when the download fails", async () => {
+			const store = memoryStore()
+			await store.replaceAircraftDb(lines(["0A0B11;ZZ-WKA;A320;00;;;;"]))
+			const fetch = fakeFetch(() => new Response("nope", { status: 503 }))
+			service = new AircraftEnrichmentService(
+				{ ...config, stateDir: dir },
+				logger,
+				{ fetch, store },
+			)
+			await service.start()
+			await service.refreshLocalDb(true)
+			expect(store.localAircraft("0A0B11")?.registration).toBe("ZZ-WKA")
+		})
+
+		it("finds the ICAO address of a registration", async () => {
+			const store = memoryStore()
+			await store.replaceAircraftDb(
+				lines(["0A0B11;ZZ-WKA;A320;00;;;;", "0A0B13;ZZ-WKB;A319;00;;;;"]),
+			)
+			expect(store.hexForRegistration("zz-wka")).toBe("0A0B11")
+			expect(store.hexForRegistration(".ZZ-WKB")).toBe("0A0B13")
+			// ACARS often drops the dash
+			expect(store.hexForRegistration(".ZZWKB")).toBe("0A0B13")
+			expect(store.hexForRegistration("ZZWKA")).toBe("0A0B11")
+			expect(store.hexForRegistration("F-XXXX")).toBeUndefined()
+		})
+
+		it("parses tar1090-db lines", () => {
+			expect(
+				parseTar1090Line("0a0b11;ZZ-WKA;ZZ01;0001;WAVEKIT MOCK TYPE;2005;WaveKit Air;"),
+			).toEqual([
+				"0A0B11",
+				"ZZ-WKA",
+				"ZZ01",
+				"0001",
+				"WAVEKIT MOCK TYPE",
+				2005,
+				"WaveKit Air",
+			])
+			expect(parseTar1090Line("0A0B12;;;00;;;;")).toBeNull()
+			expect(parseTar1090Line("not-hex;X")).toBeNull()
+		})
+	})
+
+	describe("helpers", () => {
+		it("reads an airline prefix only from airline-style callsigns", () => {
+			expect(airlinePrefix("WKS45UL")).toBe("WKS")
+			expect(airlinePrefix("afr6116")).toBe("AFR")
+			expect(airlinePrefix("FHBXA")).toBeNull()
+			expect(airlinePrefix("N12345")).toBeNull()
+		})
+
+		it("knows common airlines offline", () => {
+			expect(bundledAirline("EZY")).toMatchObject({
+				name: "easyJet",
+				iata: "U2",
+				callsign: "EASY",
+			})
+			expect(bundledAirline("QZQ")).toBeNull()
+		})
+
+		it("opens the breaker after repeated failures and backs off", () => {
+			let t = 0
+			const b = new CircuitBreaker(3, 1000, 4000, () => t)
+			b.failure()
+			b.failure()
+			expect(b.allows()).toBe(true)
+			b.failure()
+			expect(b.allows()).toBe(false)
+			t = 1000
+			expect(b.allows()).toBe(true)
+			b.failure()
+			b.failure()
+			b.failure()
+			t = 2999
+			expect(b.allows()).toBe(false)
+			b.success()
+			expect(b.allows()).toBe(true)
+		})
+	})
+	describe("online switch", () => {
+		it("turns online lookups off at runtime and keeps the choice across restarts", async () => {
+			const store = memoryStore()
+			const fetch = fakeFetch(happy)
+			service = new AircraftEnrichmentService(config, logger, { fetch, store })
+			await service.start()
+			expect(service.settings()).toMatchObject({
+				enabled: true,
+				online: true,
+				onlineFrom: "config",
+				persistent: true,
+				localDb: { aircraft: 0, updatedAt: null },
+			})
+			expect(service.setOnline(false)).toMatchObject({
+				online: false,
+				onlineFrom: "ui",
+			})
+			expect((await service.lookup("0A0B11"))?.registration).toBeUndefined()
+			expect(fetch).not.toHaveBeenCalled()
+			service.stop()
+
+			service = new AircraftEnrichmentService(config, logger, { fetch, store })
+			await service.start()
+			expect(service.settings()).toMatchObject({
+				online: false,
+				onlineFrom: "ui",
+			})
+			service.setOnline(true)
+			expect((await service.lookup("0A0B11"))?.registration).toBe("ZZ-WKA")
+		})
+
+		it("looks up the aircraft already tracked when lookups come back on", async () => {
+			tracker = new AircraftTracker(
+				{ maxAge: 60, cleanupInterval: 60_000 },
+				logger,
+			)
+			const fetch = fakeFetch(happy)
+			service = new AircraftEnrichmentService(
+				{ ...config, online: false },
+				logger,
+				{ fetch, store: memoryStore() },
+			)
 			service.wireToTracker(tracker)
-			tracker.setEnrichmentCacheProvider(service)
-			service.start()
-
-			// Perform lookups to generate stats
-			await service.lookup("ABC123")
-			await service.lookup("ABC123") // Cache hit
-
-			const trackerStats = tracker.getStats()
-			expect(trackerStats.enrichmentCache.hits).toBe(1)
-			expect(trackerStats.enrichmentCache.misses).toBe(1)
-			expect(trackerStats.enrichmentCache.size).toBe(1)
-
-			tracker.stop()
+			await service.start()
+			tracker.processUpdate({ hex: "0A0B11", flight: "WKS101" })
+			await flush()
+			expect(
+				tracker.get("0A0B11")?.identification?.registration,
+			).toBeUndefined()
+			service.setOnline(true)
+			await flush()
+			const id = tracker.get("0A0B11")?.identification
+			expect(id?.registration).toBe("ZZ-WKA")
+			expect(id?.route?.callsign).toBe("WKS101")
 		})
-	})
 
-	describe("Image URL Fetching", () => {
-		it("should fetch image URL along with aircraft data", async () => {
-			// Mock aircraft API response
-			mockFetchSuccess(createHexdbResponse({ Registration: "N628TS" }))
-			// Mock image URL response
-			mockFetchTextSuccess("https://hexdb.io/static/aircraft-images/N628TS.jpg")
-			service.start()
-
-			const result = await service.lookup("A835AF")
-
-			expect(result).toBeDefined()
-			expect(result!.registration).toBe("N628TS")
-			expect(result!.imageUrl).toBe(
-				"https://hexdb.io/static/aircraft-images/N628TS.jpg",
+		it("sends a new aircraft's update only after its new event", async () => {
+			tracker = new AircraftTracker(
+				{ maxAge: 60, cleanupInterval: 60_000 },
+				logger,
 			)
-		})
-
-		it("should handle missing image gracefully (404 response)", async () => {
-			mockFetchSuccess(createHexdbResponse())
-			mockFetch404Text()
-			service.start()
-
-			const result = await service.lookup("ABC123")
-
-			expect(result).toBeDefined()
-			expect(result!.registration).toBe("N12345")
-			expect(result!.imageUrl).toBeUndefined()
-		})
-
-		it("should handle 'n/a' image response", async () => {
-			mockFetchSuccess(createHexdbResponse())
-			// Mock image fetch returning "n/a" (no image available)
-			mockFetch.mockResolvedValueOnce({
-				ok: true,
-				status: 200,
-				text: () => Promise.resolve("n/a"),
+			service = new AircraftEnrichmentService(config, logger, {
+				fetch: fakeFetch(happy),
+				store: memoryStore(),
 			})
-			service.start()
-
-			const result = await service.lookup("ABC123")
-
-			expect(result).toBeDefined()
-			expect(result!.imageUrl).toBeUndefined()
-		})
-
-		it("should handle invalid image URL response", async () => {
-			mockFetchSuccess(createHexdbResponse())
-			// Mock image fetch returning non-URL text
-			mockFetch.mockResolvedValueOnce({
-				ok: true,
-				status: 200,
-				text: () => Promise.resolve("invalid-not-a-url"),
-			})
-			service.start()
-
-			const result = await service.lookup("ABC123")
-
-			expect(result).toBeDefined()
-			expect(result!.imageUrl).toBeUndefined()
-		})
-
-		it("should not fetch images when fetchImages config is false", async () => {
-			const noImagesService = new AircraftEnrichmentService(
-				{ ...defaultConfig, fetchImages: false },
-				testLogger,
-			)
-			mockFetchSuccess(createHexdbResponse())
-			noImagesService.start()
-
-			const result = await noImagesService.lookup("ABC123")
-
-			expect(result).toBeDefined()
-			expect(result!.imageUrl).toBeUndefined()
-			// Only one fetch call (aircraft API only, no image fetch)
-			expect(mockFetch).toHaveBeenCalledTimes(1)
-
-			noImagesService.stop()
-		})
-
-		it("should fetch aircraft and image in parallel", async () => {
-			// Set up responses for parallel calls
-			mockFetchSuccess(createHexdbResponse())
-			mockFetchTextSuccess("https://hexdb.io/static/aircraft-images/N12345.jpg")
-			service.start()
-
-			await service.lookup("ABC123")
-
-			// Both calls should have been made
-			expect(mockFetch).toHaveBeenCalledTimes(2)
-
-			// Verify the URLs called
-			const calls = mockFetch.mock.calls
-			expect(calls[0]?.[0]).toContain("/api/v1/aircraft/")
-			expect(calls[1]?.[0]).toContain("/hex-image?hex=")
-		})
-
-		it("should handle image fetch network error gracefully", async () => {
-			mockFetchSuccess(createHexdbResponse())
-			// Mock image fetch network failure
-			mockFetch.mockRejectedValueOnce(new Error("Network error"))
-			service.start()
-
-			const result = await service.lookup("ABC123")
-
-			// Aircraft data should still be returned
-			expect(result).toBeDefined()
-			expect(result!.registration).toBe("N12345")
-			expect(result!.imageUrl).toBeUndefined()
-		})
-
-		it("should include imageUrl in tracker enrichment", async () => {
-			const tracker = new AircraftTracker(
-				{ maxAge: 60, cleanupInterval: 60000 },
-				testLogger,
-			)
-
-			mockFetchSuccess(createHexdbResponse())
-			mockFetchTextSuccess("https://hexdb.io/static/aircraft-images/N12345.jpg")
 			service.wireToTracker(tracker)
-			service.start()
-
-			// Add new aircraft to tracker
-			const raw: RawAircraftMessage = { hex: "ABC123", flight: "UAL123" }
-			tracker.processUpdate(raw)
-
-			// Wait for enrichment
-			await new Promise(resolve => setTimeout(resolve, 100))
-
-			// Check that aircraft was enriched with image URL
-			const aircraft = tracker.get("ABC123")
-			expect(aircraft).toBeDefined()
-			expect(aircraft!.identification?.registration).toBe("N12345")
-			expect(aircraft!.identification?.imageUrl).toBe(
-				"https://hexdb.io/static/aircraft-images/N12345.jpg",
-			)
-
-			tracker.stop()
+			await service.start()
+			const seen: string[] = []
+			tracker.on("aircraft:new", () => seen.push("new"))
+			tracker.on("aircraft:update", () => seen.push("update"))
+			tracker.processUpdate({ hex: "0A0B11", flight: "WKS101" })
+			await flush()
+			expect(seen[0]).toBe("new")
+			expect(seen).toContain("update")
 		})
 
-		it("should cache image URL with aircraft data", async () => {
-			mockFetchSuccess(createHexdbResponse())
-			mockFetchTextSuccess("https://hexdb.io/static/aircraft-images/N12345.jpg")
-			service.start()
-
-			// First lookup
-			const result1 = await service.lookup("ABC123")
-			expect(result1!.imageUrl).toBe(
-				"https://hexdb.io/static/aircraft-images/N12345.jpg",
+		it("tries a callsign again after adsbdb was unreachable", async () => {
+			let t = 1_000_000
+			let down = true
+			tracker = new AircraftTracker(
+				{ maxAge: 3600, cleanupInterval: 60_000 },
+				logger,
 			)
-
-			// Second lookup - should use cache
-			const result2 = await service.lookup("ABC123")
-			expect(result2!.imageUrl).toBe(
-				"https://hexdb.io/static/aircraft-images/N12345.jpg",
+			service = new AircraftEnrichmentService(config, logger, {
+				fetch: fakeFetch(url => {
+					if (down && url.includes("/v0/callsign/"))
+						throw new TypeError("fetch failed")
+					return happy(url)
+				}),
+				store: memoryStore(() => t),
+				now: () => t,
+			})
+			service.wireToTracker(tracker)
+			await service.start()
+			tracker.processUpdate({ hex: "0A0B11", flight: "WKS101" })
+			await flush()
+			expect(tracker.get("0A0B11")?.identification?.route).toBeUndefined()
+			down = false
+			t += 11 * 60_000
+			tracker.processUpdate({
+				hex: "0A0B11",
+				flight: "WKS101",
+				alt_baro: 30000,
+			})
+			await flush()
+			expect(tracker.get("0A0B11")?.identification?.route?.callsign).toBe(
+				"WKS101",
 			)
-
-			// Only 2 fetch calls total (1 aircraft + 1 image from first lookup)
-			expect(mockFetch).toHaveBeenCalledTimes(2)
 		})
 	})
 })

@@ -84,6 +84,7 @@ import { liveAudioRoutes } from "./routes/live-audio.js"
 import { digitalVoiceRoutes } from "./routes/digital-voice.js"
 import { resourceRoutes } from "./routes/resources.js"
 import { aircraftRoutes } from "./routes/aircraft.js"
+import type { AircraftRoutesOptions } from "./routes/aircraft.js"
 import { vesselRoutes } from "./routes/vessels.js"
 import { meshRoutes } from "./routes/mesh.js"
 import { coverageRoutes } from "./routes/coverage.js"
@@ -204,6 +205,8 @@ export interface ApiServerDependencies {
 	digitalVoice?: DigitalVoiceService | undefined
 	resourceAggregator?: ResourceAggregator | undefined
 	aircraftTracker?: AircraftTracker | undefined
+	/** Aircraft enrichment settings (GET/PUT /api/aircraft/info). */
+	aircraftInfo?: AircraftRoutesOptions["info"] | undefined
 	/** AIS vessel current state (WG1 req 6). */
 	vesselTracker?: VesselTracker | undefined
 	/** Meshtastic node current state (WG2 req 6). */
@@ -300,6 +303,7 @@ export class ApiServer {
 	private readonly digitalVoice?: DigitalVoiceService | undefined
 	private readonly resourceAggregator?: ResourceAggregator | undefined
 	private readonly aircraftTracker?: AircraftTracker | undefined
+	private readonly aircraftInfo?: AircraftRoutesOptions["info"] | undefined
 	private readonly vesselTracker?: VesselTracker | undefined
 	/** Detaches the vessel tracker listeners; the tracker outlives the server. */
 	private vesselWiring: (() => void) | null = null
@@ -364,6 +368,7 @@ export class ApiServer {
 		this.digitalVoice = dependencies.digitalVoice
 		this.resourceAggregator = dependencies.resourceAggregator
 		this.aircraftTracker = dependencies.aircraftTracker
+		this.aircraftInfo = dependencies.aircraftInfo
 		this.vesselTracker = dependencies.vesselTracker
 		this.meshTracker = dependencies.meshTracker
 		this.coverage = dependencies.coverage
@@ -1556,6 +1561,13 @@ export class ApiServer {
 		if (this.aircraftTracker) {
 			await this.app.register(aircraftRoutes, {
 				tracker: this.aircraftTracker,
+				...(this.aircraftInfo ? { info: this.aircraftInfo } : {}),
+				...(this.accessController
+					? {
+							authorizeMutation: request =>
+								this.accessController!.authorizeMetadataMutation(request),
+						}
+					: {}),
 			})
 		}
 

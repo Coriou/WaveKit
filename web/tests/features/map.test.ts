@@ -52,6 +52,8 @@ import {
 	predict,
 	pushInterval,
 	selectionInfo,
+	routeFits,
+	aircraftDetails,
 	stationOf,
 	wantsLabel,
 	withinRange,
@@ -366,6 +368,79 @@ describe("items from the mock's fleets", () => {
 					f => f[0] === "From station",
 				)?.[1],
 		).toBe("—")
+	})
+
+	it("shows an aircraft's photo, planned route and identity from the core's enrichment", () => {
+		const afr = items.find(i => i.name === "AFR1234")
+		expect(afr).toBeDefined()
+		const info = selectionInfo(afr!, STATION, NOW)
+		expect(info.sub).toBe("Air France · A320 214")
+		expect(info.aircraft?.photo).toMatchObject({
+			credit: "© Mock photographer · Planespotters",
+			link: "https://www.planespotters.net/",
+		})
+		expect(info.aircraft?.photo?.src).toMatch(/^data:image\/svg\+xml/)
+		expect(info.aircraft?.route).toEqual({
+			from: "CDG",
+			fromName: "Paris",
+			to: "JFK",
+			toName: "New York",
+		})
+		expect(info.aircraft?.ident).toContainEqual(["Registration", "F-HBNA"])
+		expect(info.aircraft?.ident).toContainEqual(["Type", "A320 214"])
+		expect(info.aircraft?.ident).toContainEqual(["ICAO address", "3944EF"])
+		const navy = items.find(i => i.name === "FNY03")
+		expect(navy && selectionInfo(navy, STATION, NOW).aircraft?.military).toBe(
+			true,
+		)
+		expect(navy && selectionInfo(navy, STATION, NOW).aircraft?.photo).toBeNull()
+	})
+
+	it("hides a planned route the track disagrees with, or that belongs to another callsign", () => {
+		const route = {
+			origin: { lat: 49.0128, lon: 2.55 }, // CDG
+			destination: { lat: 40.6398, lon: -73.7789 }, // JFK
+		}
+		const brittany = { lat: 48.81, lon: -3.87 }
+		expect(routeFits(route, brittany, 284)).toBe(true)
+		expect(routeFits(route, brittany, 100)).toBe(false)
+		expect(routeFits(route, brittany, null)).toBe(true)
+		// just after take-off any heading is fine
+		expect(routeFits(route, { lat: 49.1, lon: 2.4 }, 100)).toBe(true)
+		const afr = aircraft.find(a => a.callsign === "AFR1234")!
+		const renamed = { ...afr, callsign: "ZZ0999" }
+		expect(aircraftDetails(renamed, brittany, 284).route).toBeNull()
+	})
+
+	it("names an aircraft by callsign, else registration, else ICAO address", () => {
+		const a = aircraft.find(x => x.callsign === "AFR1234")!
+		const named = (v: Aircraft) =>
+			itemsOf({
+				aircraft: fleet(
+					[v],
+					x => x.icao,
+					() => true,
+				),
+				vessels: fleet(
+					[],
+					(v: Vessel) => v.mmsi,
+					() => true,
+				),
+				aprs: fleet(
+					[],
+					(s: Aprs) => s.key,
+					() => true,
+				),
+				mesh: fleet(
+					[],
+					(m: Mesh) => m.nodeId,
+					() => true,
+				),
+			})[0]?.name
+		expect(named(a)).toBe("AFR1234")
+		expect(named({ ...a, callsign: undefined })).toBe("F-HBNA")
+		const { identification: _, ...bare } = a
+		expect(named({ ...bare, callsign: undefined })).toBe("3944EF")
 	})
 
 	it("opens Activity with the existing search tokens", () => {

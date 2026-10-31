@@ -23,6 +23,7 @@ import {
 	READSB_CAPS,
 	type AircraftData,
 	type ReadsbOutputFormat,
+	parseRawAircraft,
 } from "../../../src/decoders/builtin/readsb.js"
 import pino from "pino"
 import type * as ChildProcess from "node:child_process"
@@ -1195,6 +1196,47 @@ describe("Readsb ADS-B Decoder Property-Based Tests", () => {
 				),
 				{ numRuns: 100 },
 			)
+		})
+	})
+
+	describe("parseRawAircraft from SBS and Beast output", () => {
+		it("keeps callsign, altitude, ground speed and vertical rate of an SBS line", () => {
+			const sbs = parseSbsLine(
+				"MSG,3,1,1,ABC123,1,2026/01/01,00:00:00.000,2026/01/01,00:00:00.000,WKT101 ,35000,420.5,231.0,48.1,-3.9,-640,1234,0,0,0,0",
+			)
+			expect(sbs).not.toBeNull()
+			const raw = parseRawAircraft(sbs as unknown as Record<string, unknown>)
+			expect(raw).toMatchObject({
+				hex: "ABC123",
+				flight: "WKT101",
+				alt_baro: 35000,
+				gs: 420.5,
+				track: 231,
+				baro_rate: -640,
+				squawk: "1234",
+				lat: 48.1,
+				lon: -3.9,
+			})
+		})
+
+		it("marks an SBS aircraft on the ground", () => {
+			const raw = parseRawAircraft({
+				icao: "ABC123",
+				onGround: true,
+				altitude: 0,
+			})
+			expect(raw?.alt_baro).toBe("ground")
+		})
+
+		it("prefers readsb JSON names when both are present", () => {
+			const raw = parseRawAircraft({
+				hex: "abc123",
+				flight: "WKT101",
+				callsign: "OTHER",
+				alt_baro: 1000,
+				altitude: 2000,
+			})
+			expect(raw).toMatchObject({ flight: "WKT101", alt_baro: 1000 })
 		})
 	})
 })

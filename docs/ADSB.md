@@ -25,7 +25,7 @@ ADS-B is a surveillance technology where aircraft automatically broadcast their 
             │
             ▼
    ┌────────────────────────┐
-   │ AircraftEnrichmentSvc  │  ← Enriches with registration, type, photos from hexdb.io
+   │ AircraftEnrichmentSvc  │  ← Registration, type, airline, route, photo (local db + free APIs)
    └────────────────────────┘
             │
             ▼
@@ -58,16 +58,16 @@ A single aircraft may send **different message types** at different intervals:
 
 ### Why Some Fields Are Missing
 
-| Observation                      | Explanation                                            |
-| -------------------------------- | ------------------------------------------------------ |
-| No registration (yellow)         | hexdb.io lookup pending or aircraft not in database    |
-| No callsign (white)              | Aircraft hasn't broadcast DF17/18 identification yet   |
-| No type code (magenta)           | hexdb.io doesn't have this aircraft's type information |
-| No speed                         | No velocity message received recently                  |
-| No position                      | No position message received recently                  |
-| No squawk                        | Aircraft hasn't broadcast status message yet           |
-| No 📷 camera icon                | hexdb.io doesn't have a photo for this aircraft        |
-| Different altitudes at same time | Different aircraft, or different altitude sources      |
+| Observation                      | Explanation                                          |
+| -------------------------------- | ---------------------------------------------------- |
+| No registration (yellow)         | Lookup pending or aircraft not in any database       |
+| No callsign (white)              | Aircraft hasn't broadcast DF17/18 identification yet |
+| No type code (magenta)           | No database knows this aircraft's type               |
+| No speed                         | No velocity message received recently                |
+| No position                      | No position message received recently                |
+| No squawk                        | Aircraft hasn't broadcast status message yet         |
+| No 📷 camera icon                | No photo of this aircraft on Planespotters or adsbdb |
+| Different altitudes at same time | Different aircraft, or different altitude sources    |
 
 ### Data Accumulation
 
@@ -89,16 +89,16 @@ The [CLI dashboard](CLI.md) displays aircraft in a compact, information-dense fo
 | 2        | `adsb`       | blue    | Decoder name                          | Config          |
 | 3        | `ADS`        | cyan    | Message type badge                    | -               |
 | 4        | `4B1808`     | cyan    | ICAO hex address (Mode S transponder) | ADS-B broadcast |
-| 5        | `D-AMAB`     | yellow  | Registration (tail number)            | hexdb.io        |
+| 5        | `D-AMAB`     | yellow  | Registration (tail number)            | enrichment      |
 | 6        | `SWR8YB`     | white   | Callsign / flight number              | ADS-B broadcast |
-| 7        | `B38M`       | magenta | ICAO type code                        | hexdb.io        |
+| 7        | `B38M`       | magenta | ICAO type code                        | enrichment      |
 | 8        | `FL380`      | white   | Flight level (altitude ÷ 100)         | ADS-B broadcast |
 | 9        | `↑` or `↓`   | cyan    | Vertical trend (climbing/descending)  | ADS-B broadcast |
 | 10       | `481kt`      | white   | Ground speed in knots                 | ADS-B broadcast |
 | 11       | `43.51,1.07` | dim     | Position (lat, lon)                   | ADS-B broadcast |
 | 12       | `NE`         | dim     | Track direction (compass)             | ADS-B broadcast |
 | 13       | `2244`       | dim     | Squawk code                           | ADS-B broadcast |
-| 14       | `📷`         | dim     | Photo available (clickable link)      | hexdb.io        |
+| 14       | `📷`         | dim     | Photo available (clickable link)      | enrichment      |
 
 ### Why No Speed Trend Arrows?
 
@@ -231,32 +231,86 @@ The type code (shown in magenta) is the ICAO aircraft type designator:
 
 ## Aircraft Enrichment
 
-WaveKit enriches aircraft data using **hexdb.io**, a free and open ICAO database:
+WaveKit fills in who an aircraft is from **free sources that need no API key**,
+in three layers:
+
+1. **Local, instant, offline.** The country comes from the ICAO address block.
+   The [tar1090-db](https://github.com/wiedehopf/tar1090-db) aircraft table
+   (built from the [Mictronics database](https://www.mictronics.de/aircraft-database/),
+   about 8 MB, downloaded by the core 20 s after start and refreshed every
+   7 days) gives the registration, type, year and military/interesting/PIA/LADD
+   flags. A bundled airline table from [OpenFlights](https://openflights.org/data)
+   (Open Database License) maps a callsign prefix to an airline
+   (`AFR1234` to Air France).
+2. **On-disk cache.** Every online answer, including "not found", is kept in
+   `<stateDir>/aircraft-info.sqlite`, so a restart or an offline core keeps
+   what it learned. Airframes are kept 30 days (7 days when unknown), photos
+   30 days, callsign routes 12 hours. Airlines learned online are kept 90 days
+   and used offline.
+3. **Online, in the background.** [adsbdb.com](https://www.adsbdb.com) for the
+   airframe and for the airline and **planned route** of a callsign,
+   [hexdb.io](https://hexdb.io) when adsbdb doesn't know the airframe, and the
+   [Planespotters.net](https://www.planespotters.net) public photo API for a
+   photo. Lookups are queued at 1 request per second. After 3 failures in a
+   row a source pauses for 5 minutes, then 10, up to an hour, and the other
+   sources keep working. An aircraft whose lookup failed is retried 10 minutes
+   later if it is still in range.
+
+Results reach clients as an `aircraft:update` event as soon as they arrive.
+The local database also maps a registration back to its ICAO address
+(`hexForRegistration`), for decoders such as ACARS that name aircraft by
+registration, with or without the dash (`.ZZWKB` finds `ZZ-WKB`). No decoder
+calls it yet.
 
 ### Enriched Fields
 
-| Field             | Example                | Source   |
-| ----------------- | ---------------------- | -------- |
-| `registration`    | `N12345`, `D-AMAB`     | hexdb.io |
-| `typeCode`        | `B738`                 | hexdb.io |
-| `typeDescription` | `Boeing 737-800`       | hexdb.io |
-| `manufacturer`    | `Boeing`               | hexdb.io |
-| `operator`        | `United Airlines`      | hexdb.io |
-| `operatorCode`    | `UAL`                  | hexdb.io |
-| `imageUrl`        | `https://hexdb.io/...` | hexdb.io |
+All fields live under `identification` and are optional.
 
-### Aircraft Photos
+| Field             | Example                                    | Source                                      |
+| ----------------- | ------------------------------------------ | ------------------------------------------- |
+| `registration`    | `ZZ-WKA`                                   | tar1090-db, else adsbdb or hexdb            |
+| `typeCode`        | `A320`                                     | tar1090-db, else adsbdb or hexdb            |
+| `typeDescription` | `A320 214`                                 | adsbdb or hexdb, else tar1090-db            |
+| `manufacturer`    | `Airbus`                                   | adsbdb or hexdb                             |
+| `operator`        | `WaveKit Swiss`                            | adsbdb or hexdb, else tar1090-db owner      |
+| `operatorCode`    | `WKS`                                      | adsbdb or hexdb                             |
+| `country`         | `Switzerland`                              | ICAO address block                          |
+| `countryIso`      | `CH`                                       | adsbdb, else ICAO address block             |
+| `year`            | `2005`                                     | tar1090-db                                  |
+| `flags`           | `{ military: true }`                       | tar1090-db                                  |
+| `airline`         | `{ name: "Air France", icao: "AFR", … }`   | adsbdb, else the bundled OpenFlights table  |
+| `route`           | `{ origin: { iata: "ORY" }, destination }` | adsbdb (crowd-sourced, see below)           |
+| `photo`           | `{ thumbnailUrl, largeUrl, photographer }` | Planespotters, else airport-data via adsbdb |
+| `imageUrl`        | `https://t.plnspttrs.net/…`                | Same as `photo.thumbnailUrl`, older clients |
+| `source`          | `local`, `adsbdb`, `hexdb`                 | Where the identity fields came from         |
 
-When available, a clickable 📷 icon appears at the end of the aircraft row. Click it (in supported terminals like iTerm2, Terminal.app, VS Code) to open the aircraft photo from hexdb.io.
+The **route** belongs to the callsign, not the airframe, and comes from a
+crowd-sourced database: it can be old or wrong. Present it as the planned
+route. It is dropped as soon as the aircraft changes callsign.
+
+A **photo** must be shown with its photographer and a link to `photo.link`
+(Planespotters' terms). The browser loads it straight from the Planespotters
+image server.
+
+### Aircraft Photos in the CLI
+
+When available, a clickable 📷 icon appears at the end of the aircraft row. Click it (in supported terminals like iTerm2, Terminal.app, VS Code) to open the aircraft photo.
 
 ### Enrichment Settings
 
-| Setting        | Default  | Description                       |
-| -------------- | -------- | --------------------------------- |
-| Cache TTL      | 24 hours | How long to cache enrichment data |
-| Cache Size     | 10,000   | Maximum cached aircraft entries   |
-| Rate Limit     | 1 req/s  | Maximum requests to hexdb.io      |
-| Image Fetching | Enabled  | Also fetch aircraft photo URLs    |
+```yaml
+aircraftInfo:
+  online: true # adsbdb, hexdb and Planespotters lookups; false keeps WaveKit fully local
+  localDb:
+    enabled: true # download and use tar1090-db
+    url: https://github.com/wiedehopf/tar1090-db/raw/refs/heads/csv/aircraft.csv.gz
+    refreshDays: 7
+```
+
+Environment overrides: `WAVEKIT_AIRCRAFT_INFO__ONLINE=false`,
+`WAVEKIT_AIRCRAFT_INFO__LOCAL_DB=false`. Without `node:sqlite` the cache stays
+in memory and the local database is off. To refresh the airline table, run
+`node scripts/aircraft-data/build-airlines.mjs`.
 
 ## API Reference
 
@@ -420,9 +474,18 @@ The CLI dashboard shows signal quality indicators when available:
 
 ### Enrichment Not Working
 
-1. **Check network**: hexdb.io must be reachable
-2. **Check cache**: First lookup takes 1+ seconds (rate limited)
-3. **Not all aircraft**: Some aircraft (especially GA) may not be in hexdb.io
+1. **Offline is fine**: registration and type still come from the local
+   database once it has been downloaded once (look for "Local aircraft
+   database updated" in the log)
+2. **Check network**: api.adsbdb.com, hexdb.io and api.planespotters.net must
+   be reachable for airline, route and photo; a source that keeps failing
+   pauses for up to an hour
+3. **Check config**: `aircraftInfo.online` and `aircraftInfo.localDb.enabled`.
+   **Settings › Map › Online aircraft lookups** in the web app (`PUT /api/aircraft/info`)
+   overrides `aircraftInfo.online` and is kept across restarts; `GET /api/aircraft/info`
+   shows which one applies (`onlineFrom`)
+4. **Not all aircraft**: Some aircraft (especially GA) are in no database, and
+   many callsigns have no known route
 
 ### Missing Fields
 

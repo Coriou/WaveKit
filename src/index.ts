@@ -2314,10 +2314,12 @@ async function main(): Promise<void> {
 		)
 
 		// Step 8c: Initialize aircraft enrichment service (ADS-B specific)
+		// Local tar1090-db + free online sources, cached in <stateDir>/aircraft-info.sqlite.
 		const aircraftEnrichmentService = new AircraftEnrichmentService(
 			{
-				cacheTtlMs: 24 * 60 * 60 * 1000, // 24 hours
-				maxCacheSize: 10000,
+				online: config.aircraftInfo.online,
+				stateDir: config.stateDir,
+				localDb: config.aircraftInfo.localDb,
 				rateLimitMs: 1000, // 1 request per second
 				enabled: true,
 			},
@@ -2531,6 +2533,7 @@ async function main(): Promise<void> {
 				digitalVoice,
 				resourceAggregator,
 				aircraftTracker: aircraftTrackingManager.getTracker(),
+				aircraftInfo: aircraftEnrichmentService,
 				vesselTracker: vesselTrackingManager.getTracker(),
 				coverage: coverageManager,
 				meshTracker: meshTrackingManager.getTracker(),
@@ -2974,7 +2977,12 @@ async function main(): Promise<void> {
 
 		// Start aircraft tracking manager and enrichment service
 		aircraftTrackingManager.start()
-		aircraftEnrichmentService.start()
+		void aircraftEnrichmentService.start().catch((err: unknown) => {
+			log.warn(
+				{ err: err instanceof Error ? err.message : String(err) },
+				"Aircraft enrichment failed to start",
+			)
+		})
 		vesselTrackingManager.start()
 		coverageManager.start()
 		meshTrackingManager.start()

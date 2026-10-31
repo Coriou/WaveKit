@@ -124,7 +124,16 @@ export function protocolText(s: ActivitySummary): string | null {
 	return KIND_TEXT[s.kind] ?? null
 }
 
-export function rowView(s: ActivitySummary): RowView {
+/** What the live fleet says about the row's aircraft: its name (callsign or registration) and who flies what. */
+export interface RowAircraft {
+	readonly name: string
+	readonly about: string
+}
+
+export function rowView(
+	s: ActivitySummary,
+	aircraft: RowAircraft | null = null,
+): RowView {
 	if (s.kind === "ingestion-gap") {
 		const dropped = s.fields.find(f => f.key === "dropped")?.value
 		// The core titles gaps "Ingestion gap (<reason>)".
@@ -183,6 +192,7 @@ export function rowView(s: ActivitySummary): RowView {
 	if (tone) used.add(tone.key)
 	const sub = [
 		protocolText(s),
+		aircraft?.about || null,
 		who ? `${who.label} ${fieldText(who)}` : null,
 		tone ? `${tone.label} ${fieldText(tone)}` : null,
 	].filter((p): p is string => p !== null && p.length > 0)
@@ -195,12 +205,31 @@ export function rowView(s: ActivitySummary): RowView {
 		.slice(0, 4)
 	return {
 		icon: CATEGORY_ICON[s.category],
-		title: s.title ?? s.entityKey ?? protocolText(s) ?? "Event",
+		title:
+			aircraftTitle(s, aircraft) ??
+			s.title ??
+			s.entityKey ??
+			protocolText(s) ??
+			"Event",
 		subtitle: sub.join(" · "),
 		message: message ? String(message.value) : null,
 		readings: readings.length > 0 ? readings.join(" · ") : null,
 		notice: false,
 	}
+}
+
+/** A row titled only by the ICAO address takes the fleet's callsign or registration instead. */
+function aircraftTitle(
+	s: ActivitySummary,
+	aircraft: RowAircraft | null,
+): string | null {
+	if (!aircraft || !s.entityKey) return null
+	const hex = s.entityKey.slice(s.entityKey.indexOf(":") + 1)
+	const bare =
+		s.title === null || s.title.trim().toUpperCase() === hex.toUpperCase()
+	return bare && aircraft.name.toUpperCase() !== hex.toUpperCase()
+		? aircraft.name
+		: null
 }
 
 /** "9 s", "1 min 12 s". */
