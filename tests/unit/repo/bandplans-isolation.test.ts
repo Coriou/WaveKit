@@ -16,8 +16,8 @@ const preserved = [
 	],
 	[
 		"src/decoders/band-defaults.ts",
-		7912,
-		"cfa8f532698a254ec51eff0e02e4c2bb5b8db0e78483dc215a89adf22fe043bd",
+		7978,
+		"f6b3c7b08bdedf96dd7fe4bd766195b9425e399b48f4bb2e9ccc6ff6095deda2",
 	],
 	[
 		"src/core/scanner/bandplan/index.ts",

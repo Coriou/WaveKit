@@ -65,7 +65,8 @@ export const BAND_DEFAULTS: Readonly<
 			CA: aprs(144.39),
 			AU: aprs(145.175),
 			NZ: aprs(144.575),
-			JP: aprs(144.64),
+			// JP: the 1200-baud channel (144.640 MHz there is 9600 baud).
+			JP: aprs(144.66),
 			CN: aprs(144.64),
 		},
 	},

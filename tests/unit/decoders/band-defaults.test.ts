@@ -63,6 +63,9 @@ describe("BAND_DEFAULTS", () => {
 			expect(direwolf.byRegion.EU.targetsHz).toEqual([144_800_000, 145_825_000])
 			expect(direwolf.byRegion.US.targetsHz).toEqual([144_390_000, 145_825_000])
 			expect(direwolf.byRegion.AU.targetsHz).toEqual([145_175_000, 145_825_000])
+			// Japan's 1200-baud channel; 144.640 MHz is its 9600-baud one.
+			expect(direwolf.byRegion.JP.targetsHz).toEqual([144_660_000, 145_825_000])
+			expect(direwolf.byRegion.CN.targetsHz).toEqual([144_640_000, 145_825_000])
 		}
 		const rtl433 = BAND_DEFAULTS["rtl433"]
 		if (rtl433?.scope === "region")
