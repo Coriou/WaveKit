@@ -71,6 +71,7 @@ import { accessBootstrapRoutes } from "./routes/access-bootstrap.js"
 import { sourceRoutes } from "./routes/sources.js"
 import { registerRouteIndex } from "./routes/route-index.js"
 import { decoderSummaryRoutes } from "./routes/decoder-summary.js"
+import { agentStatusRoutes } from "./routes/agent-status.js"
 import {
 	iqSnapshotRoutes,
 	type IqSnapshotOptions,
@@ -1625,6 +1626,22 @@ export class ApiServer {
 			...(this.activityReady && activityRuntime
 				? { stats: () => activityRuntime.stats() }
 				: {}),
+		})
+
+		// One compact read for agents, under root admission like the routes it summarizes
+		await this.app.register(agentStatusRoutes, {
+			decoderManager: this.decoderManager,
+			sourceManager: this.sourceManager,
+			tunerController: this.tunerController,
+			liveDemod: this.liveDemod,
+			scanner: this.scanner,
+			activity: {
+				enabled: this.activityReady,
+				unavailable: this.activityUnavailable !== undefined,
+				...(this.activityReady && activityRuntime
+					? { stats: () => activityRuntime.stats() }
+					: {}),
+			},
 		})
 
 		// Register WebSocket route (Requirement 10.1, 10.2, 10.3, 10.4, 10.5)

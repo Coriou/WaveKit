@@ -5,26 +5,37 @@ WaveKit exposes a REST API and WebSocket endpoint for control and real-time moni
 ## Automation and agents
 
 Protected APIs accept the machine credential in `Authorization: Bearer <token>`.
-An administrator obtains it from `machineToken` in the private directory's
-`access-state.json`, provisioned by the existing local
-`node dist/access-command.js setup` command with the core stopped. See
-[protected local setup](LOCAL-SETUP.md#protected-mode-locally). Use the host's private
-state directory (or the host directory mounted as private state); no container shell
-is needed. Keep this file private and never put the credential into URLs or logs.
-For example, with `PRIVATE_DIRECTORY` and `API_ORIGIN` set for your installation:
+It is provisioned by the local `node dist/access-command.js setup` command with the
+core stopped (see [protected local setup](LOCAL-SETUP.md#protected-mode-locally)).
+Copy it into a file for an agent with `machine-token`, run on the host against the
+private state directory, or in a one-off container with that directory mounted
+([Docker](DOCKER-SETUP.md#protected-runtime-deployment)). No container shell is needed,
+and the core may be running:
 
 ```sh
-jq -r '.machineToken | "Authorization: Bearer \(.)"' "$PRIVATE_DIRECTORY/access-state.json" |
-  curl --fail --header @- "$API_ORIGIN/api/status"
+node dist/access-command.js machine-token --private-directory "$PRIVATE_DIRECTORY" --out "$HOME/.config/wavekit/machine-token"
+curl --fail --header "Authorization: Bearer $(cat "$HOME/.config/wavekit/machine-token")" \
+  "$API_ORIGIN/api/agent/status"
 ```
 
-There is no HTTP route that issues or exports a machine credential. Browser pairing
-issues a browser session, not a machine token. The existing local
-`node dist/access-command.js rotate-credential --private-directory ABS` command
-rotates it with the core stopped; pass `--keep-sessions` to retain remembered browsers.
-An agent without access to private host state must receive a credential securely
-from the administrator. Machine requests need the configured Host/Origin policy;
-do not send a browser cookie alongside the bearer credential.
+The command creates the file with mode `0600` and never prints the credential.
+The file's directory must already exist, must not be writable by group or others,
+and must lie outside the private directory. An existing file is refused; `--replace`
+overwrites it only when it is your own `0600` regular file (not a link). Keep the
+file private and never put the credential into URLs or logs.
+
+There is no HTTP route that issues or exports a machine credential, and the file
+holds the same single credential as the private directory: it is not a separate
+grant. `node dist/access-command.js rotate-credential --private-directory ABS`
+(core stopped) revokes it and every copy; run `machine-token --replace` afterwards
+to refresh the agent's file. Pass `--keep-sessions` to retain remembered browsers.
+Browser pairing issues a browser session, not a machine token. An agent without
+access to private host state must receive the file securely from the administrator.
+Machine requests need the configured Host/Origin policy; do not send a browser
+cookie alongside the bearer credential.
+
+For a one-request overview of the receiver, read
+[`GET /api/agent/status`](#get-apiagentstatus).
 
 ### Tuner commands during a sample-rate restart
 
@@ -457,6 +468,31 @@ without schemas: `{ "routes": [{ "method": "GET", "path": "/api", "summary":
 "List registered routes", "tags": ["system"] }] }`. Summaries and tags come
 from the route schema; missing summaries are null and missing tags are empty.
 The index uses the same authenticated read admission as other API reads.
+
+#### GET /api/agent/status
+
+One compact answer (under 4 KiB with every built-in decoder configured) to "what is
+the receiver doing", for agents and scripts. It uses the same read admission as the
+other API reads and never includes free-text errors; each field summarizes a fuller
+route.
+
+| Field        | Summary of                   | Content                                                                                                                                                                                                                                                                                               |
+| ------------ | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `at`         |                              | ISO time of the answer                                                                                                                                                                                                                                                                                |
+| `tuners`     | `GET /api/tuner`             | `sourceId`, `frequencyHz`, `sampleRateHz`, `gainMode`, `gain` (tenths of a dB; null in AGC), `owner` (`wavekit`, `external` while an external client such as SDR++ controls it, `scanner` while a scanner job holds it), `declaredOnly` (frequency or rate only from config). Unknown values are null |
+| `sources`    | `GET /api/sources`           | `id`, `connected`, `state` (the source activity state), `sampleAgeMs`, `warnings` (`rate-mismatch`, `signal-flat`)                                                                                                                                                                                    |
+| `liveAudio`  | `GET /api/live-audio/status` | `running`, `health`, `sourceId`, `modulation`, `offsetHz`, `clients`, `squelchOpen` (null while stopped); null without live audio                                                                                                                                                                     |
+| `scanner`    | `GET /api/scanner`           | `enabled`, `activeJobs` (not yet ended), `job` (the most recently updated of them: `id`, `name` cut to 64 characters, `kind`, `state`, `reason`, `sourceId`) or null; null without the scanner                                                                                                        |
+| `decoders`   | `GET /api/decoders/summary`  | `id`, `protocol` and the same `verdict` (`code`, `text`, `actions`)                                                                                                                                                                                                                                   |
+| `activity`   | `GET /api/activity/status`   | `state` (`disabled`, `opening`, `retrying`, `available`, `unavailable`) and `rows` (null unless available)                                                                                                                                                                                            |
+| `lastDecode` | `GET /api/decoders/summary`  | `{ protocol, at }` per protocol with output, newest first                                                                                                                                                                                                                                             |
+
+The DTO and its Zod schema are `AgentStatus` and `agentStatusSchema` in `@wavekit/api-types`.
+
+```bash
+curl --header "Authorization: Bearer $(cat "$HOME/.config/wavekit/machine-token")" \
+  https://wavekit.example:9443/api/agent/status
+```
 
 #### GET /api/status
 

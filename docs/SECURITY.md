@@ -20,6 +20,10 @@ the RTL-TCP relay are disabled in protected mode.
   [Protected reference profile](DOCKER-SETUP.md#protected-reference-profile).
 - Configuration fields and the pairing API:
   [Protected runtime](API.md#protected-runtime-opt-in).
+- The machine credential for agents and scripts: `access-command.js machine-token`
+  copies it into a private `0600` file without a container shell and never prints it;
+  `rotate-credential` revokes every copy. See
+  [Automation and agents](API.md#automation-and-agents).
 
 ## Decoder versions
 
