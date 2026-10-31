@@ -34,6 +34,7 @@ import {
 	recordingIcon,
 	recordingMeta,
 	recordingTitle,
+	storageLine,
 	suggest,
 	timeLabel,
 } from "./model.ts"
@@ -992,27 +993,14 @@ function Footer() {
 	)
 	const unavailable = useStore(services.data.recordings, s => s.unavailable)
 	if (unavailable !== null) return null
-	const calls = storage?.areas.find(a => a.id === "digital-voice-wav")
-	const evidence = storage?.areas.find(a => a.id === "scanner-evidence")
 	const low = storage?.lowSpace.state === "low"
-	const parts = [`Kept ${formatBytes(keptBytes)}`]
-	if (calls?.exists)
-		parts.push(
-			`calls ${formatBytes(calls.bytes)}${calls.cap ? ` of ${formatBytes(calls.cap.bytes)}` : ""}`,
-		)
-	if (evidence?.exists)
-		parts.push(
-			`scanner ${formatBytes(evidence.bytes)}${evidence.cap ? ` of ${formatBytes(evidence.cap.bytes)}` : ""}`,
-		)
-	if (storage?.filesystem)
-		parts.push(`${formatBytes(storage.filesystem.availableBytes)} free`)
 	return (
 		<footer className="wkr-footer" data-tone={low ? "warn" : undefined}>
 			<span className="wkr-footer-text">
 				{low
 					? "Low on space: scanner recordings stop until some is freed · "
 					: ""}
-				{parts.join(" · ")}
+				{storageLine(storage, keptBytes)}
 			</span>
 			<button
 				type="button"

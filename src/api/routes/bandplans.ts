@@ -27,6 +27,11 @@ import type {
 import type { DeniedAdmission } from "../../access/types.js"
 import { BandPlansError } from "../../core/bandplans/contract.js"
 import type { BandPlanService } from "../../core/bandplans/contract.js"
+import {
+	describeZodSchema,
+	zodValidationFields,
+	type ValidationField,
+} from "../validation-errors.js"
 
 export interface BandPlanRoutesOptions {
 	service: BandPlanService
@@ -64,7 +69,7 @@ function knownCode(code: unknown): code is BandPlansErrorCode {
 
 function toBandPlansErrorResponse(error: unknown): {
 	statusCode: number
-	body: BandPlansErrorDto
+	body: BandPlansErrorDto & { fields?: ValidationField[] }
 } {
 	let code: BandPlansErrorCode = "BANDPLANS_UNAVAILABLE"
 	let current: ExpectedToken | undefined
@@ -81,6 +86,17 @@ function toBandPlansErrorResponse(error: unknown): {
 		current = undefined
 	}
 	const canonical = new BandPlansError(code)
+	const fields =
+		code === "BANDPLANS_INVALID"
+			? ((typeof error === "object" && error !== null
+					? invalidFields.get(error)
+					: undefined) ?? [
+					{
+						field: "body",
+						expected: "a band-plan request as documented in docs/API.md",
+					},
+				])
+			: undefined
 	return {
 		statusCode: canonical.statusCode,
 		body: {
@@ -88,6 +104,7 @@ function toBandPlansErrorResponse(error: unknown): {
 			code,
 			message: canonical.message,
 			...(current ? { details: { current } } : {}),
+			...(fields !== undefined && fields.length > 0 ? { fields } : {}),
 		},
 	}
 }
@@ -101,6 +118,18 @@ function isImportRequest(request: FastifyRequest): boolean {
 	)
 }
 
+/**
+ * The fields a BANDPLANS_INVALID names, kept beside the error: the canonical error class
+ * carries only its code, and the 400 adds `fields` (schema names and static text).
+ */
+const invalidFields = new WeakMap<object, ValidationField[]>()
+
+function invalidWith(fields: ValidationField[]): BandPlansError {
+	const error = new BandPlansError("BANDPLANS_INVALID")
+	invalidFields.set(error, fields)
+	return error
+}
+
 function readParam(request: FastifyRequest, name: string): string {
 	const params: unknown = request.params
 	const value: unknown =
@@ -108,13 +137,28 @@ function readParam(request: FastifyRequest, name: string): string {
 			? Reflect.get(params, name)
 			: undefined
 	if (typeof value !== "string" || value.length === 0)
-		throw new BandPlansError("BANDPLANS_INVALID")
+		throw invalidWith([{ field: name, expected: "non-empty string" }])
 	return value
 }
 
 function parseWith<T>(schema: ZodType<T>, value: unknown): T {
 	const result = schema.safeParse(value)
-	if (!result.success) throw new BandPlansError("BANDPLANS_INVALID")
+	if (!result.success)
+		throw invalidWith(zodValidationFields(result.error, schema))
+	return result.data
+}
+
+/** A path parameter parsed with its schema; a 400 names the parameter. */
+function parseParam<T>(
+	schema: ZodType<T>,
+	request: FastifyRequest,
+	name: string,
+): T {
+	const result = schema.safeParse(readParam(request, name))
+	if (!result.success)
+		throw invalidWith([
+			{ field: name, expected: describeZodSchema(schema, name) },
+		])
 	return result.data
 }
 
@@ -122,10 +166,16 @@ function pickBody(
 	body: unknown,
 	keys: readonly string[],
 ): Record<string, unknown> {
+	const only = [
+		{
+			field: "body",
+			expected: `a JSON object with only the fields ${keys.join(", ")}`,
+		},
+	]
 	if (typeof body !== "object" || body === null || Array.isArray(body))
-		throw new BandPlansError("BANDPLANS_INVALID")
+		throw invalidWith(only)
 	if (Object.keys(body).some(key => !keys.includes(key)))
-		throw new BandPlansError("BANDPLANS_INVALID")
+		throw invalidWith(only)
 	const input: Record<string, unknown> = {}
 	for (const key of keys)
 		if (Object.hasOwn(body, key)) input[key] = Reflect.get(body, key)
@@ -166,39 +216,36 @@ function bindPackAndBand(
 	request: FastifyRequest,
 	input: Record<string, unknown>,
 ): void {
-	input["packId"] = parseWith(stackPackIdSchema, readParam(request, "packId"))
-	input["bandId"] = parseWith(bandIdSchema, readParam(request, "bandId"))
+	input["packId"] = parseParam(stackPackIdSchema, request, "packId")
+	input["bandId"] = parseParam(bandIdSchema, request, "bandId")
 }
 
 function bindStackPack(
 	request: FastifyRequest,
 	input: Record<string, unknown>,
 ): void {
-	input["packId"] = parseWith(stackPackIdSchema, readParam(request, "packId"))
+	input["packId"] = parseParam(stackPackIdSchema, request, "packId")
 }
 
 function bindImportedPack(
 	request: FastifyRequest,
 	input: Record<string, unknown>,
 ): void {
-	input["packId"] = parseWith(
-		importedPackIdSchema,
-		readParam(request, "packId"),
-	)
+	input["packId"] = parseParam(importedPackIdSchema, request, "packId")
 }
 
 function bindOperatorBand(
 	request: FastifyRequest,
 	input: Record<string, unknown>,
 ): void {
-	input["bandId"] = parseWith(bandIdSchema, readParam(request, "bandId"))
+	input["bandId"] = parseParam(bandIdSchema, request, "bandId")
 }
 
 function bindOperatorPreset(
 	request: FastifyRequest,
 	input: Record<string, unknown>,
 ): void {
-	input["presetId"] = parseWith(uuidSchema, readParam(request, "presetId"))
+	input["presetId"] = parseParam(uuidSchema, request, "presetId")
 }
 
 type WriteMethod = "POST" | "PUT" | "PATCH" | "DELETE"
@@ -382,17 +429,14 @@ export const bandPlanRoutes: FastifyPluginAsync<BandPlanRoutesOptions> = async (
 		return reply.status(200).send(service.resolved())
 	})
 	app.get("/api/bandplans/packs/:packId", async (request, reply) => {
-		const packId = parseWith(packIdSchema, readParam(request, "packId"))
+		const packId = parseParam(packIdSchema, request, "packId")
 		return reply.status(200).send(service.pack(packId))
 	})
 	app.get("/api/bandplans/presets", async (_request, reply) => {
 		return reply.status(200).send(service.presets())
 	})
 	app.get("/api/bandplans/presets/:presetId/job", async (request, reply) => {
-		const presetId = parseWith(
-			readablePresetIdSchema,
-			readParam(request, "presetId"),
-		)
+		const presetId = parseParam(readablePresetIdSchema, request, "presetId")
 		return reply.status(200).send(service.presetJob(presetId))
 	})
 
@@ -468,7 +512,7 @@ export const bandPlanRoutes: FastifyPluginAsync<BandPlanRoutesOptions> = async (
 			url: "/api/bandplans/packs/:packId/check-update",
 			bodyLimit: BANDPLANS_LIMITS.requestBytes,
 			handler: async (request, reply) => {
-				const packId = parseWith(packIdSchema, readParam(request, "packId"))
+				const packId = parseParam(packIdSchema, request, "packId")
 				const denial = admit(request, reply)
 				if (denial) return denial
 				if (!service.checkImportUpdate)

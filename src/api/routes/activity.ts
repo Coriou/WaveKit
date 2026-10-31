@@ -25,6 +25,10 @@ import { parseDecimalInteger } from "../../core/activity/query/validate.js"
 import { withActivityClient } from "../../core/activity/query/service.js"
 import type { ActivityUnavailableState } from "../../core/activity/runtime.js"
 import { errorResponseSchema, looseObjectSchema } from "./scanner-schemas.js"
+import {
+	validationMessage,
+	type ValidationField,
+} from "../validation-errors.js"
 
 export interface ActivityAccessContext {
 	/**
@@ -146,7 +150,7 @@ function trailsRequest(params: Record<string, unknown>): ActivityTrailsQuery {
 	for (const key of Object.keys(params)) {
 		if (!TRAILS_PARAMS.has(key)) {
 			throw new ActivityQueryError(
-				`Unknown activity trails parameter ${key}`,
+				`Unknown activity trails parameter. Accepted parameters: ${[...TRAILS_PARAMS].join(", ")}`,
 				"ACTIVITY_QUERY_INVALID",
 				400,
 			)
@@ -345,6 +349,105 @@ function invalidParam(message: string): ActivityQueryError {
 	return new ActivityQueryError(message, "ACTIVITY_QUERY_INVALID", 400)
 }
 
+/** What each Activity parameter or facets body field accepts (static text for 400s). */
+const PARAM_EXPECTED: Readonly<Record<string, string>> = Object.freeze({
+	kinds: "comma-separated activity kinds (or repeat the parameter)",
+	sourceIds: "comma-separated source ids (or repeat the parameter)",
+	decoderIds: "comma-separated decoder ids (or repeat the parameter)",
+	protocols: "comma-separated protocol names (or repeat the parameter)",
+	categories: "comma-separated activity categories (or repeat the parameter)",
+	frequencyMin: "integer, Hz",
+	frequencyMax: "integer, Hz, not below frequencyMin",
+	min: "integer, Hz",
+	max: "integer, Hz, not below min",
+	frequencyHz: "object with min and max, integer Hz",
+	producedFrom: "ISO 8601 timestamp, not after producedTo",
+	producedTo: "ISO 8601 timestamp",
+	producedAt: "object with from and to, ISO 8601 timestamps",
+	from: "ISO 8601 timestamp, not after to",
+	to: "ISO 8601 timestamp",
+	entityKey: "string (repeat the parameter for several where allowed)",
+	text: "string, a full-text query",
+	refs: "comma-separated type:value references",
+	order: '"asc" or "desc"',
+	limit: "positive integer within the page limit",
+	pageToken: "the pageToken string from the previous page",
+	minHz: "integer, Hz, not above maxHz",
+	maxHz: "integer, Hz",
+	bucketHz: "positive integer, Hz",
+	bucketMs: "positive integer, milliseconds",
+	dimensions: "non-empty array of unique facet dimensions",
+	query: "object of activity query fields",
+	eventId: "an activity event id",
+})
+
+/** Accepted query parameters per route (for an unknown-parameter 400). */
+function acceptedParams(url: string | undefined): ReadonlySet<string> | null {
+	switch (url) {
+		case "/api/activity":
+			return SEARCH_PARAMS
+		case "/api/activity/trails":
+			return TRAILS_PARAMS
+		case "/api/activity/bandmap":
+			return BANDMAP_PARAMS
+		case "/api/activity/timeline":
+			return TIMELINE_PARAMS
+		default:
+			return null
+	}
+}
+
+/**
+ * The field an Activity 400 names. The message leads with a schema path ("producedTo must
+ * be a string", "frequencyHz.min: ..."); only a path made of known names is taken. Core
+ * messages can carry a Zod message that quotes the value, so the 400 never repeats them.
+ */
+function activityField(message: string): string | null {
+	const lead = /^([A-Za-z][\w.]*)/.exec(message)?.[1]
+	if (lead === undefined) return null
+	const segments = lead.split(".").filter(segment => !/^\d+$/.test(segment))
+	return segments.length > 0 &&
+		segments.every(segment => Object.hasOwn(PARAM_EXPECTED, segment))
+		? lead
+		: null
+}
+
+function activityFields(
+	error: ActivityQueryError,
+	request: FastifyRequest,
+): { message: string; fields: ValidationField[] } {
+	const part = request.method === "POST" ? "body" : "query"
+	const field = activityField(error.message)
+	const accepted = acceptedParams(request.routeOptions.url)
+	const fields: ValidationField[] =
+		field !== null
+			? [
+					{
+						field,
+						expected:
+							PARAM_EXPECTED[field.split(".").at(-1) ?? field] ??
+							"a valid value",
+					},
+				]
+			: [
+					{
+						field: part,
+						expected:
+							accepted !== null
+								? `only the parameters ${[...accepted].join(", ")}`
+								: part === "body"
+									? "a JSON object with query (activity query fields) and dimensions (facet dimensions)"
+									: "valid activity query parameters",
+					},
+				]
+	// The route's own unknown-parameter message is static and lists the accepted names.
+	const message =
+		field === null && error.message.startsWith("Unknown activity")
+			? error.message
+			: validationMessage(part, fields)
+	return { message, fields }
+}
+
 /** Shared aggregate params: times, categories and protocols (comma lists or repeated). */
 function aggregateBase(
 	params: Record<string, unknown>,
@@ -358,7 +461,9 @@ function aggregateBase(
 } {
 	for (const key of Object.keys(params)) {
 		if (!allowed.has(key)) {
-			throw invalidParam(`Unknown activity ${label} parameter ${key}`)
+			throw invalidParam(
+				`Unknown activity ${label} parameter. Accepted parameters: ${[...allowed].join(", ")}`,
+			)
 		}
 	}
 	const request: {
@@ -446,6 +551,7 @@ function sendError(
 		error: string
 		code: string
 		message: string
+		fields?: ValidationField[]
 		reason?: string
 		correlationId?: string
 	} = {
@@ -453,6 +559,14 @@ function sendError(
 		code: error.code,
 		message: error.message,
 	}
+	if (error.code === "ACTIVITY_QUERY_INVALID") {
+		const named = activityFields(error, request)
+		body.message = named.message
+		body.fields = named.fields
+	} else if (error.code === "ACTIVITY_CURSOR_INVALID")
+		body.fields = [
+			{ field: "pageToken", expected: PARAM_EXPECTED["pageToken"] ?? "" },
+		]
 	if (error.reason !== undefined) body.reason = error.reason
 	const correlationId = correlationOf(request)
 	if (correlationId !== undefined) body.correlationId = correlationId
@@ -537,7 +651,7 @@ function queryFromParams(params: Record<string, unknown>): ActivityQuery {
 	for (const key of Object.keys(params)) {
 		if (!SEARCH_PARAMS.has(key)) {
 			throw new ActivityQueryError(
-				`Unknown activity query parameter ${key}. Accepted parameters: ${[...SEARCH_PARAMS].join(", ")}`,
+				`Unknown activity query parameter. Accepted parameters: ${[...SEARCH_PARAMS].join(", ")}`,
 				"ACTIVITY_QUERY_INVALID",
 				400,
 			)

@@ -9,6 +9,8 @@ import { AprsTracker } from "../../../src/core/aprs-tracker.js"
 import { createLogger } from "../../../src/utils/logger.js"
 
 const logger = createLogger({ level: "error" })
+const KEY_EXPECTED =
+	'"callsign:<CALL[-SSID]>", "aprs-object:<name>" or "aprs-item:<name>"; names 1 to 9 characters without ":" or control characters'
 
 const KEY =
 	/^(callsign:[A-Z0-9]{1,6}(-[0-9]{1,2})?|aprs-(object|item):[^:\u0000-\u001f]{1,9})$/
@@ -221,6 +223,8 @@ describe("aprs routes", () => {
 			expect(response.json()).toEqual({
 				error: "APRS station key is outside the allowed grammar",
 				code: "VALIDATION_ERROR",
+				message: `Invalid path parameter: key: ${KEY_EXPECTED}`,
+				fields: [{ field: "key", expected: KEY_EXPECTED }],
 			})
 		}
 	})

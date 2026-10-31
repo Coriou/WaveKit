@@ -684,6 +684,25 @@ docker compose -f compose.yaml --profile protected run --rm --no-deps \
   'exec node /app/dist/access-command.js rotate-credential --private-directory /var/lib/wavekit/access --keep-sessions'
 ```
 
+Give an agent the machine credential without a shell in the core container.
+`machine-token` reads it from the private volume (the core may be running) and
+writes a new `0600` file into a host directory mounted for it; it never prints
+the credential. The directory must not be writable by group or others:
+
+```bash
+mkdir -m 700 agent-secrets
+docker compose -f compose.yaml --profile protected run --rm --no-deps \
+  -v "$PWD/agent-secrets:/agent" \
+  --entrypoint sh wavekit-protected -c \
+  'exec node /app/dist/access-command.js machine-token --private-directory /var/lib/wavekit/access --out /agent/machine-token'
+sudo chown "$(id -u):$(id -g)" agent-secrets/machine-token
+```
+
+The file belongs to the container user (root in the published image) until the
+`chown`, which keeps mode `0600`. An existing file is refused; after a
+`rotate-credential`, which revokes every copy, delete the old file and run the
+command again. See [Automation and agents](API.md#automation-and-agents).
+
 Exposure audit checklist for this profile. The static items are visible in
 `docker compose -f compose.yaml --profile protected config` and the files
 linked above. Live reachability stays with deployment acceptance.

@@ -11,7 +11,7 @@ import type {
 	StationUpdateResult,
 	StorageReport,
 } from "@wavekit/api-types"
-import { STORAGE_AREA_IDS } from "@wavekit/api-types"
+import { IQ_CAPTURES_QUOTA_BYTES, STORAGE_AREA_IDS } from "@wavekit/api-types"
 import { buildMockServer } from "../../mock/server.ts"
 import type { MockServer } from "../../mock/server.ts"
 
@@ -324,6 +324,11 @@ describe("mock settings routes", () => {
 			"fair-share",
 		)
 		expect(report.lowSpace.state).toBe("ok")
+		// The capture store reports the route's quota as its cap, like the core.
+		expect(report.areas.find(a => a.id === "iq-captures")).toMatchObject({
+			class: "automatic",
+			cap: { bytes: IQ_CAPTURES_QUOTA_BYTES },
+		})
 
 		const exported = await inject("GET", "/api/config/export")
 		expect(exported.headers["content-type"]).toMatch(/application\/yaml/)

@@ -4,6 +4,8 @@
 import type {
 	RecordingInventoryItem,
 	RecordingInventoryKind,
+	StorageAreaId,
+	StorageReport,
 } from "@wavekit/api-types"
 
 import { parseFrequency } from "../activity/search.ts"
@@ -68,6 +70,34 @@ export function formatBytes(b: number): string {
 	if (b >= 1e6)
 		return `${b >= 1e8 ? Math.round(b / 1e6) : (b / 1e6).toFixed(1)} MB`
 	return `${Math.max(1, Math.round(b / 1e3))} kB`
+}
+
+/** Storage areas the footer line names, in order, with their short label. */
+const FOOTER_AREAS: readonly (readonly [StorageAreaId, string])[] = [
+	["digital-voice-wav", "calls"],
+	["scanner-evidence", "scanner"],
+	["iq-captures", "IQ captures"],
+]
+
+/**
+ * The drawer's footer line: what is kept, each recording area that exists (with its cap),
+ * then the free space.
+ */
+export function storageLine(
+	storage: StorageReport | null | undefined,
+	keptBytes: number,
+): string {
+	const parts = [`Kept ${formatBytes(keptBytes)}`]
+	for (const [id, label] of FOOTER_AREAS) {
+		const area = storage?.areas.find(a => a.id === id)
+		if (area?.exists)
+			parts.push(
+				`${label} ${formatBytes(area.bytes)}${area.cap ? ` of ${formatBytes(area.cap.bytes)}` : ""}`,
+			)
+	}
+	if (storage?.filesystem)
+		parts.push(`${formatBytes(storage.filesystem.availableBytes)} free`)
+	return parts.join(" · ")
 }
 
 /**

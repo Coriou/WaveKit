@@ -2245,6 +2245,14 @@ export class ScannerService extends EventEmitter {
 		return dto
 	}
 
+	/**
+	 * The job holding the source's tuner lease, else null. Only a lease moves the tuner:
+	 * passive and in-window jobs never take one, and an operator pause keeps it.
+	 */
+	tunerLeaseHolder(sourceId: string): string | null {
+		return this.arbiter.holder(sourceId)?.jobId ?? null
+	}
+
 	listJobs(): ScanJob[] {
 		return [...this.jobs.values()].map(r => this.toDto(r))
 	}

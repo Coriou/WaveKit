@@ -14,6 +14,7 @@ import type {
 	VesselState,
 	VesselTrackerStats,
 } from "@wavekit/api-types"
+import { validationFieldsSchema } from "../validation-errors.js"
 
 export interface VesselRoutesOptions extends FastifyPluginOptions {
 	tracker: VesselTracker
@@ -161,6 +162,8 @@ const validationErrorSchema = {
 	properties: {
 		error: { type: "string" },
 		code: { type: "string", const: "VALIDATION_ERROR" },
+		message: { type: "string" },
+		fields: validationFieldsSchema,
 	},
 	required: ["error", "code"],
 } as const
@@ -240,6 +243,8 @@ export async function vesselRoutes(
 				return {
 					error: "MMSI must be 1-9 digits",
 					code: "VALIDATION_ERROR" as const,
+					message: "Invalid path parameter: mmsi: 1 to 9 digits (MMSI)",
+					fields: [{ field: "mmsi", expected: "1 to 9 digits (MMSI)" }],
 				}
 			}
 			const mmsi = raw.padStart(9, "0")

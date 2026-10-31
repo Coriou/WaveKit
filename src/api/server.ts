@@ -11,6 +11,7 @@
  * - Centralized error handling
  */
 
+import { resolve } from "node:path"
 import type { StationIdentity } from "@wavekit/api-types"
 import {
 	DISCOVERY_STORE_EPOCH_HEADER,
@@ -19,6 +20,7 @@ import {
 import {
 	CONFIG_EXPORT_REQUIRES_ACCESS,
 	DECODER_SETTINGS_REQUIRES_ACCESS,
+	IQ_CAPTURES_REQUIRES_ACCESS,
 	RECORDING_KEEPS_REQUIRES_ACCESS,
 	RECORDINGS_REQUIRES_ACCESS,
 } from "@wavekit/api-types"
@@ -43,6 +45,7 @@ import {
 } from "../utils/logger.js"
 import type { SourceManager } from "../core/source-manager.js"
 import type { FanoutManager } from "../core/fanout-manager.js"
+import { IQ_CAPTURES_DIR } from "../core/storage-report/areas-from-config.js"
 import type { DecoderManager } from "../decoders/manager.js"
 import type { DecoderRegistry } from "../decoders/registry.js"
 import type { AudioOutput } from "../core/audio-output.js"
@@ -71,10 +74,12 @@ import { accessBootstrapRoutes } from "./routes/access-bootstrap.js"
 import { sourceRoutes } from "./routes/sources.js"
 import { registerRouteIndex } from "./routes/route-index.js"
 import { decoderSummaryRoutes } from "./routes/decoder-summary.js"
+import { agentStatusRoutes } from "./routes/agent-status.js"
 import {
 	iqSnapshotRoutes,
 	type IqSnapshotOptions,
 } from "./routes/iq-snapshot.js"
+import { iqCaptureRoutes } from "./routes/iq-captures.js"
 import { decoderRoutes } from "./routes/decoders.js"
 import { decoderBandRoutes } from "./routes/decoder-band.js"
 import { telemetryRoutes } from "./routes/telemetry.js"
@@ -87,6 +92,7 @@ import { aircraftRoutes } from "./routes/aircraft.js"
 import { vesselRoutes } from "./routes/vessels.js"
 import { meshRoutes } from "./routes/mesh.js"
 import { coverageRoutes } from "./routes/coverage.js"
+import { fastifyValidationBody, isBodyParseError } from "./validation-errors.js"
 import type { CoverageManager } from "../core/coverage/coverage-manager.js"
 import type { StationEstimateProvider } from "../core/station-estimate/contract.js"
 import type { StationService } from "../core/station/contract.js"
@@ -1240,13 +1246,12 @@ export class ApiServer {
 				})
 			}
 
-			// Handle validation errors (from Fastify schema validation)
-			if (error.validation) {
+			// Schema validation and body parse failures name the expected fields from the
+			// route schema (static text, safe with access configured). Ajv's raw errors and the
+			// parser's message are not sent: they can carry a client key or quote the body.
+			if (error.validation || isBodyParseError(error)) {
 				return reply.status(400).send({
-					error: "ValidationError",
-					code: "VALIDATION_ERROR",
-					message: this.access ? "Request failed" : error.message,
-					...(this.access ? {} : { details: error.validation }),
+					...fastifyValidationBody(error, request),
 					correlationId,
 				})
 			}
@@ -1463,6 +1468,20 @@ export class ApiServer {
 				fanoutFor: this.iqSnapshotFanoutFor,
 				access: this.accessController,
 			})
+		// Named captures in <stateDir>/iq-captures, behind the snapshot's access
+		if (
+			this.accessController &&
+			this.iqSnapshotFanoutFor &&
+			this.getConfig &&
+			IQ_CAPTURES_REQUIRES_ACCESS
+		)
+			await this.app.register(iqCaptureRoutes, {
+				dir: resolve(this.getConfig().stateDir, IQ_CAPTURES_DIR),
+				sourceManager: this.sourceManager,
+				fanoutFor: this.iqSnapshotFanoutFor,
+				tunerState: id => this.tunerController?.getState(id),
+				access: this.accessController,
+			})
 
 		// Register decoder routes (Requirement 9.6, 9.7, 9.8, 9.9)
 		await this.app.register(decoderSummaryRoutes, {
@@ -1625,6 +1644,22 @@ export class ApiServer {
 			...(this.activityReady && activityRuntime
 				? { stats: () => activityRuntime.stats() }
 				: {}),
+		})
+
+		// One compact read for agents, under root admission like the routes it summarizes
+		await this.app.register(agentStatusRoutes, {
+			decoderManager: this.decoderManager,
+			sourceManager: this.sourceManager,
+			tunerController: this.tunerController,
+			liveDemod: this.liveDemod,
+			scanner: this.scanner,
+			activity: {
+				enabled: this.activityReady,
+				unavailable: this.activityUnavailable !== undefined,
+				...(this.activityReady && activityRuntime
+					? { stats: () => activityRuntime.stats() }
+					: {}),
+			},
 		})
 
 		// Register WebSocket route (Requirement 10.1, 10.2, 10.3, 10.4, 10.5)

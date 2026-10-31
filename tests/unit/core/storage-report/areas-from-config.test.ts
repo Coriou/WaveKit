@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import pino from "pino"
 import { describe, expect, it } from "vitest"
-import { STORAGE_AREA_IDS } from "@wavekit/api-types"
+import { IQ_CAPTURES_QUOTA_BYTES, STORAGE_AREA_IDS } from "@wavekit/api-types"
 import {
 	activityRetentionFromStats,
 	dsdFmeRecordingDir,
@@ -76,6 +76,11 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 				id: "scanner-evidence",
 				paths: [join(stateDir, "scanner")],
 				capBytes: 512 * MiB,
+			},
+			{
+				id: "iq-captures",
+				paths: [join(stateDir, "iq-captures")],
+				capBytes: IQ_CAPTURES_QUOTA_BYTES,
 			},
 			{ id: "digital-voice-wav", paths: ["/data/wav"], capBytes: null },
 			{ id: "bandplans", paths: [join(stateDir, "bandplans")], capBytes: null },
@@ -161,7 +166,7 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 		const walked = await disjoint(areas)
 		expect(walked[1]?.exclude).toEqual([inside])
 		const none = storageAreasFromConfig(inputs())
-		expect(none[2]).toEqual({
+		expect(none[3]).toEqual({
 			id: "digital-voice-wav",
 			paths: [],
 			capBytes: null,
@@ -220,6 +225,7 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 		expect(wide.find(a => a.id === "logs")?.exclude).toEqual([
 			join(stateDir, "activity"),
 			join(stateDir, "scanner"),
+			join(stateDir, "iq-captures"),
 			join(stateDir, "bandplans"),
 			join(stateDir, "operator-data"),
 			join(stateDir, "recording-keeps.json"),
@@ -239,7 +245,7 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			),
 		)
 		expect(shared[1]?.exclude).toEqual(["/d/wav"])
-		expect(shared[2]).not.toHaveProperty("exclude")
+		expect(shared[3]).not.toHaveProperty("exclude")
 	})
 
 	it("counts every file once on a real tree with nested and symlinked roots", async () => {
@@ -255,6 +261,9 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			await write(join(state, "activity", "activity.db"), 5)
 			await write(join(state, "operator-data", "access", "key"), 3)
 			await write(join(state, "scanner", "..calls", "a.wav"), 2)
+			// An IQ capture and its metadata, as the capture route writes them.
+			await write(join(state, "iq-captures", "capture.cf32"), 11)
+			await write(join(state, "iq-captures", "capture.json"), 4)
 			await symlink(join(dir, "wav"), join(state, "scanner", "link"))
 			const areas = storageAreasFromConfig(
 				inputs({
@@ -292,8 +301,9 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			expect(byId.get("operator-data")).toMatchObject({ bytes: 0, files: 0 })
 			// The symlink counts as one entry of its own size and is not followed.
 			expect(byId.get("scanner-evidence")?.files).toBe(1)
+			expect(byId.get("iq-captures")).toMatchObject({ bytes: 15, files: 2 })
 			const total = scans.reduce((sum, scan) => sum + scan.files, 0)
-			expect(total).toBe(6)
+			expect(total).toBe(8)
 		} finally {
 			await rm(dir, { recursive: true, force: true })
 		}

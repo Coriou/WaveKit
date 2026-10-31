@@ -153,7 +153,7 @@ describe("Live Audio Routes WG7", () => {
 		const response = await patch({ modulation: "usb" })
 		expect(response.statusCode).toBe(400)
 		expect(response.json<{ message: string }>().message).toContain(
-			"noise squelch requires nfm or wfm",
+			'squelchMode: one of "manual" | "auto" | "noise"; "noise" needs modulation "nfm" or "wfm"',
 		)
 		expect(liveDemod.status.config.modulation).toBe("nfm")
 	})
