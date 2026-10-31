@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events"
 import { mkdtempSync, rmSync } from "node:fs"
 import { PassThrough, Writable } from "node:stream"
+import fc from "fast-check"
 import pino from "pino"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import {
@@ -114,7 +115,8 @@ afterEach(async () => {
 	rmSync(dir, { recursive: true, force: true })
 })
 
-function setup() {
+/** `feed: false`: the test drives every input byte through `fanout.distribute`. */
+function setup(feed = true) {
 	const sources = Object.assign(new EventEmitter(), { getCaps: () => caps })
 	const fanout = new FanoutManager(logger)
 	const processes: Proc[] = []
@@ -134,17 +136,20 @@ function setup() {
 	const invalidations: unknown[][] = []
 	m.on("channel-invalidated", (...args: unknown[]) => invalidations.push(args))
 	// 10 ms of 2.048 Msps CU8 per tick: 40 960 B.
-	const feed = setInterval(() => fanout.distribute(Buffer.alloc(40_960)), 10)
-	cleanups.push(async () => {
-		clearInterval(feed)
+	const ticker = feed
+		? setInterval(() => fanout.distribute(Buffer.alloc(40_960)), 10)
+		: undefined
+	const destroy = async () => {
+		clearInterval(ticker)
 		await m.destroy()
-	})
+	}
+	cleanups.push(destroy)
 	const acquire = async (id: string) => {
 		const r = await m.requestChannel("rtl", id, request, caps)
 		if (!r.ok) throw new Error(r.detail)
 		return r
 	}
-	return { m, processes, invalidations, acquire }
+	return { m, fanout, processes, invalidations, acquire, destroy }
 }
 
 it("a live process's slow close keeps the generation; same-id reuse waits for the real closed", async () => {
@@ -212,4 +217,95 @@ it("a process that stops consuming input with a close pending is retired as wedg
 		["rtl", 1, ["steady-g1"], "close-unconfirmed"],
 	])
 	expect(steady.stream.destroyed).toBe(true)
+})
+
+/**
+ * Reaches the wedge verdict for a close sent after `before` bytes were consumed and `after` more bytes were consumed,
+ * then stdin stalls on `stalled` (the first held write) while `flood` piles onto the branch behind it.
+ */
+async function verdictAfterBackpressure(
+	before: number[],
+	after: number[],
+	stalled: number,
+	flood: number[],
+) {
+	const ctx = setup(false)
+	const { m, fanout, processes, invalidations, acquire } = ctx
+	const steady = await acquire("steady")
+	const slot = await acquire("slot")
+	for (const n of before) fanout.distribute(Buffer.alloc(n))
+	await flushImmediates()
+	void m.releaseChannel(slot.channelId) // `closed` is withheld
+	for (const n of after) fanout.distribute(Buffer.alloc(n))
+	await flushImmediates()
+	processes[0]!.reading = false
+	fanout.distribute(Buffer.alloc(stalled))
+	await flushImmediates()
+	for (const n of flood) fanout.distribute(Buffer.alloc(n))
+	await flushImmediates()
+	await vi.advanceTimersByTimeAsync(250)
+	await flushImmediates()
+	const first = [...invalidations]
+	// Nothing more is consumed: the next window is a wedge.
+	await vi.advanceTimersByTimeAsync(250)
+	await flushImmediates()
+	return { ctx, first, second: [...invalidations], steady }
+}
+
+it("input consumed before stdin backpressure counts as progress (branch buffers never move the mark back)", async () => {
+	const { first, second, steady } = await verdictAfterBackpressure(
+		[32_768],
+		[32_768],
+		4096,
+		Array.from({ length: 16 }, () => 65_536),
+	)
+	expect(first).toEqual([])
+	expect(second).toEqual([["rtl", 1, ["steady-g1"], "close-unconfirmed"]])
+	expect(steady.stream.destroyed).toBe(true)
+})
+
+it("property: the progress mark is monotonic under backpressure with variable chunk sizes", async () => {
+	// Feature: channelizer close liveness, Property 1: no retire while input progressed since the close; retire once it stops
+	// Validates: wedge check of an unconfirmed close
+	// The branch mark at 2.048 Msps CU8 is 250 ms of 4 096 000 B/s = 1 024 000 B; a flood totalling at least
+	// 1 048 576 B fills it, so a chunk stalls inside the branch's PassThrough (the double-counted state).
+	const floodTotal = 1_048_576
+	await fc.assert(
+		fc.asyncProperty(
+			fc.array(fc.integer({ min: 1, max: 131_072 }), { maxLength: 6 }),
+			// Consumed after the close: 1 B to 64 KiB, no more than the stalled branch chunk can mask.
+			fc.array(fc.integer({ min: 1, max: 32_768 }), {
+				minLength: 1,
+				maxLength: 2,
+			}),
+			// At or past the fake stdin's 4096-byte mark, so the pipe pauses the branch.
+			fc.integer({ min: 4096, max: 131_072 }),
+			fc.array(fc.integer({ min: 1, max: 131_072 }), { maxLength: 24 }),
+			async (before, after, stalled, head) => {
+				const flood = [...head]
+				let total = flood.reduce((a, n) => a + n, 0)
+				for (let i = 0; total < floodTotal; i++) {
+					const n = 32_768 + ((i * 24_593) % 98_305) // 32 KiB to 128 KiB, varied
+					flood.push(n)
+					total += n
+				}
+				const { ctx, first, second } = await verdictAfterBackpressure(
+					before,
+					after,
+					stalled,
+					flood,
+				)
+				try {
+					expect(first).toEqual([])
+					expect(second).toEqual([
+						["rtl", 1, ["steady-g1"], "close-unconfirmed"],
+					])
+				} finally {
+					cleanups.splice(cleanups.indexOf(ctx.destroy), 1)
+					await ctx.destroy()
+				}
+			},
+		),
+		{ numRuns: 100 },
+	)
 })

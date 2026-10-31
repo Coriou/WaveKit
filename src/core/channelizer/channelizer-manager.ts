@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events"
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { createConnection } from "node:net"
 import { join } from "node:path"
-import { PassThrough, type Readable } from "node:stream"
+import { PassThrough, type Readable, type Writable } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import type { ChannelizerConfig, SourceCaps } from "../../config.js"
 import { branchHighWaterMark, type FanoutManager } from "../fanout-manager.js"
@@ -136,6 +136,12 @@ interface SourceChannelizer {
 	droppedAtGap: number
 	invalidated: boolean
 	sawInputEof: boolean
+	/** The process's stdin, the branch's pipeline destination. */
+	input: Writable
+	/** Bytes the branch handed to `input`; only grows. */
+	inputHanded: number
+	/** Highest `inputHanded - input.writableLength` seen: the wedge check's progress mark, never moves back. */
+	inputTaken: number
 	detachFanout: () => void
 	settlement?: ProcessClaim
 }
@@ -1063,12 +1069,15 @@ export class ChannelizerManager
 	}
 
 	/**
-	 * Input bytes the process has taken from its branch: accepted minus still buffered. It advances while the
-	 * process's main loop runs (it reads input between control lines), so it tells a slow process from a wedged one.
+	 * Input bytes the process has taken from stdin: handed by the branch minus still queued in the stdin writable.
+	 * It advances while the process's main loop runs (it reads input between control lines), so it tells a slow
+	 * process from a wedged one. Both terms come from the pipe itself, not branch telemetry, whose buffered count
+	 * can hold a backpressured chunk on both sides of the PassThrough; the running maximum keeps it monotonic.
 	 */
 	private consumedInput(s: SourceChannelizer): number {
-		const t = s.fanout.getBranchTelemetry(s.branchId)
-		return t ? t.totalBytesWritten - t.droppedBytesTotal - t.bufferBytes : 0
+		const taken = s.inputHanded - s.input.writableLength
+		if (taken > s.inputTaken) s.inputTaken = taken
+		return s.inputTaken
 	}
 
 	/**
@@ -1320,6 +1329,9 @@ export class ChannelizerManager
 			droppedAtGap: 0,
 			invalidated: false,
 			sawInputEof: false,
+			input: proc.input,
+			inputHanded: 0,
+			inputTaken: 0,
 			detachFanout: () => {
 				fanout.off("backpressure", onBackpressure)
 				fanout.off("drain", onDrain)
@@ -1334,12 +1346,17 @@ export class ChannelizerManager
 				caps.sampleRate,
 			),
 		})
-		void pipeline(branch, proc.input).catch((err: unknown) =>
+		void pipeline(branch, s.input).catch((err: unknown) =>
 			this.log.debug(
 				{ err, sourceId, generation },
 				"Channelizer input pipeline ended",
 			),
 		)
+		// After the pipe's own listener: each chunk is counted as it is written to stdin. A listener added while the
+		// pipe has paused the branch does not resume it.
+		branch.on("data", (chunk: Buffer) => {
+			s.inputHanded += chunk.length
+		})
 		fanout.on("backpressure", onBackpressure)
 		fanout.on("drain", onDrain)
 		proc.on("event", (e: ChannelizerEvent) => this.onEvent(s, e))
