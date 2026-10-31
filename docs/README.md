@@ -23,6 +23,7 @@ the top.
 | Page                                | What it covers                                                                  |
 | ----------------------------------- | ------------------------------------------------------------------------------- |
 | [API](API.md)                       | REST and WebSocket contract                                                     |
+| [Agent recipes](AGENTS-API.md)      | Machine token, status, tuning, gain, decoders, activity and IQ capture by curl  |
 | [Core reference](CORE-REFERENCE.md) | Tuner control, RTL-TCP relay, live audio, configuration, RTL-SDR, Docker images |
 | [Docker setup](DOCKER-SETUP.md)     | Compose profiles and image builds                                               |
 

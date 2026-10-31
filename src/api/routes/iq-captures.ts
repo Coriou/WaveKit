@@ -1,0 +1,747 @@
+/**
+ * Named IQ captures (protected mode only): POST records whole seconds of the current tuning
+ * as CU8 into a private directory under the state directory; GET lists, GET by name
+ * downloads, DELETE removes. Authorization matches the IQ snapshot: mutation admission on
+ * every route (browser CSRF included) and a revocable lease for the capture and the download.
+ *
+ * Data streams chunk by chunk to `<name>.cu8.partial`, renamed to `<name>.cu8` when complete;
+ * the metadata (`<name>.json`) is written last, so a listed capture is always whole. Partial
+ * files are removed on any failure, abort or shutdown, and at the first use after a crash.
+ * Bodies and logs carry fixed text: never a submitted name, a path or a parser message.
+ */
+import { randomUUID } from "node:crypto"
+import type { EventEmitter } from "node:events"
+import { constants, createWriteStream } from "node:fs"
+import type { WriteStream } from "node:fs"
+import {
+	chmod,
+	lstat,
+	mkdir,
+	open,
+	readdir,
+	readFile,
+	rename,
+	rm,
+	statfs,
+	writeFile,
+} from "node:fs/promises"
+import type { FileHandle } from "node:fs/promises"
+import { join } from "node:path"
+import type { Readable } from "node:stream"
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify"
+import { z } from "zod"
+import {
+	IQ_CAPTURE_MAX_BYTES,
+	IQ_CAPTURE_MAX_SAMPLE_RATE,
+	IQ_CAPTURE_NAME,
+	IQ_CAPTURE_ROUTE,
+	IQ_CAPTURE_SECONDS_MAX,
+	IQ_CAPTURE_SECONDS_MIN,
+	IQ_CAPTURES_MAX_COUNT,
+	IQ_CAPTURES_MIN_FREE_BYTES,
+	IQ_CAPTURES_QUOTA_BYTES,
+	IQ_CAPTURES_ROUTE,
+} from "@wavekit/api-types"
+import type {
+	IqCapture,
+	IqCaptureErrorBody,
+	IqCaptureErrorCode,
+	IqCaptureList,
+	TunerState,
+} from "@wavekit/api-types"
+import type { FastifyAccessController } from "../../access/fastify-adapter.js"
+import type { DeniedAdmission } from "../../access/types.js"
+import type { FanoutManager } from "../../core/fanout-manager.js"
+import type { SourceManager } from "../../core/source-manager.js"
+import { safeErrorFields } from "../../decoders/safe-error-fields.js"
+import { WaveKitError } from "../../utils/errors.js"
+import { validationErrorBody, zodValidationBody } from "../validation-errors.js"
+
+/**
+ * Bytes the file stream may hold before the disk counts as too slow: 4,000,000 /
+ * (3,200,000 × 2 CU8 bytes/s) = 625 ms of IQ at the top rate. The source is never paused.
+ */
+export const IQ_CAPTURE_MAX_BUFFERED_BYTES = 4_000_000
+/** A metadata file is about 300 bytes; 4096 bounds what a listing reads per entry. */
+const META_MAX_BYTES = 4096
+/** Directory entries a listing examines: 32 captures × 2 files, with room for foreign files. */
+const LIST_MAX_ENTRIES = 1024
+
+const DATA = ".cu8"
+const META = ".json"
+const PARTIAL = ".partial"
+
+const ERRORS: Record<number, string> = {
+	404: "Not Found",
+	409: "Conflict",
+	503: "Service Unavailable",
+	507: "Insufficient Storage",
+}
+const MESSAGES: Record<IqCaptureErrorCode, string> = {
+	IQ_CAPTURE_NOT_FOUND: "IQ capture not found",
+	IQ_CAPTURE_EXISTS: "An IQ capture with this name exists; choose another name",
+	IQ_CAPTURE_BUSY:
+		"An IQ capture is running on this source; wait for it to finish",
+	IQ_CAPTURE_UNSUPPORTED: `The source must deliver U8 IQ with a known center frequency at up to ${IQ_CAPTURE_MAX_SAMPLE_RATE} samples per second`,
+	IQ_CAPTURE_QUOTA: `IQ captures are limited to ${IQ_CAPTURES_QUOTA_BYTES} bytes and ${IQ_CAPTURES_MAX_COUNT} captures; delete one first`,
+	IQ_CAPTURE_DISK_FULL: `The disk must keep ${IQ_CAPTURES_MIN_FREE_BYTES} bytes free after the capture`,
+	IQ_CAPTURE_INTERRUPTED:
+		"The capture stopped before it was complete (source change, disconnect, slow disk or shutdown); nothing was stored",
+	IQ_CAPTURES_UNAVAILABLE: "IQ captures are unavailable",
+	SOURCE_NOT_FOUND: "Source not found",
+	SOURCE_DISCONNECTED: "Source is disconnected",
+}
+
+const NAME_EXPECTED = `string, 1 to 64 characters: a-z, 0-9, "-" and "_", starting with a letter or digit; unique`
+const bodySchema = z
+	.object({
+		name: z.string().regex(IQ_CAPTURE_NAME),
+		seconds: z
+			.number()
+			.int()
+			.min(IQ_CAPTURE_SECONDS_MIN)
+			.max(IQ_CAPTURE_SECONDS_MAX),
+		sourceId: z.string().min(1).max(128).optional(),
+	})
+	.strict()
+const BODY_EXPECTED: Readonly<Record<string, string>> = Object.freeze({
+	name: NAME_EXPECTED,
+	seconds: `integer, seconds (${IQ_CAPTURE_SECONDS_MIN} to ${IQ_CAPTURE_SECONDS_MAX})`,
+	sourceId: "string, a source id from GET /api/sources",
+})
+
+const metaSchema = z
+	.object({
+		name: z.string().regex(IQ_CAPTURE_NAME),
+		sourceId: z.string().min(1).max(128),
+		format: z.literal("cu8"),
+		centerHz: z.number().int().nonnegative(),
+		sampleRate: z.number().int().positive().max(IQ_CAPTURE_MAX_SAMPLE_RATE),
+		gain: z.number().int().nullable(),
+		startedAt: z.string().datetime(),
+		durationS: z
+			.number()
+			.int()
+			.min(IQ_CAPTURE_SECONDS_MIN)
+			.max(IQ_CAPTURE_SECONDS_MAX),
+		bytes: z.number().int().positive().max(IQ_CAPTURE_MAX_BYTES),
+	})
+	.strict()
+
+function missing(err: unknown): boolean {
+	return (
+		typeof err === "object" &&
+		err !== null &&
+		(err as { code?: unknown }).code === "ENOENT"
+	)
+}
+
+/** The private capture directory. Every path it builds comes from a checked name. */
+export class IqCaptureStore {
+	#ready: Promise<void> | undefined
+
+	constructor(readonly dir: string) {}
+
+	/** Creates the private directory once and removes partial files a crash left behind. */
+	ready(): Promise<void> {
+		this.#ready ??= this.#prepare().catch((err: unknown) => {
+			this.#ready = undefined
+			throw err
+		})
+		return this.#ready
+	}
+
+	async #prepare(): Promise<void> {
+		await mkdir(this.dir, { recursive: true, mode: 0o700 })
+		const st = await lstat(this.dir)
+		if (
+			!st.isDirectory() ||
+			(typeof process.getuid === "function" && st.uid !== process.getuid())
+		)
+			throw new WaveKitError(
+				"IQ capture directory unavailable",
+				"IQ_CAPTURES_UNAVAILABLE",
+			)
+		// The directory is dedicated to captures: make it private if it is not.
+		if ((st.mode & 0o077) !== 0) await chmod(this.dir, 0o700)
+		// No capture can be in progress before the first one starts.
+		for (const entry of await readdir(this.dir))
+			if (entry.endsWith(PARTIAL))
+				await rm(join(this.dir, entry), { force: true })
+	}
+
+	data(name: string): string {
+		return join(this.dir, `${name}${DATA}`)
+	}
+
+	partial(name: string): string {
+		return join(this.dir, `${name}${DATA}${PARTIAL}`)
+	}
+
+	meta(name: string): string {
+		return join(this.dir, `${name}${META}`)
+	}
+
+	async exists(name: string): Promise<boolean> {
+		for (const path of [this.data(name), this.meta(name)]) {
+			try {
+				await lstat(path)
+				return true
+			} catch (err) {
+				if (!missing(err)) throw err
+			}
+		}
+		return false
+	}
+
+	/** Metadata of a whole capture: both files regular, the data exactly `bytes` long. */
+	async read(name: string): Promise<IqCapture | null> {
+		try {
+			const metaStat = await lstat(this.meta(name))
+			if (!metaStat.isFile() || metaStat.size > META_MAX_BYTES) return null
+			const parsed = metaSchema.safeParse(
+				JSON.parse(await readFile(this.meta(name), "utf8")),
+			)
+			if (!parsed.success || parsed.data.name !== name) return null
+			const dataStat = await lstat(this.data(name))
+			if (!dataStat.isFile() || dataStat.size !== parsed.data.bytes) return null
+			return parsed.data
+		} catch (err) {
+			if (missing(err) || err instanceof SyntaxError) return null
+			throw err
+		}
+	}
+
+	/** Whole captures, newest first, at most IQ_CAPTURES_MAX_COUNT read. */
+	async list(): Promise<IqCapture[]> {
+		const entries = (await readdir(this.dir)).slice(0, LIST_MAX_ENTRIES)
+		const names = entries
+			.filter(entry => entry.endsWith(META))
+			.map(entry => entry.slice(0, -META.length))
+			.filter(name => IQ_CAPTURE_NAME.test(name))
+			.sort()
+		const out: IqCapture[] = []
+		for (const name of names) {
+			// Foreign files past the count still occupy space; the quota counts what is listed.
+			if (out.length >= IQ_CAPTURES_MAX_COUNT) break
+			const capture = await this.read(name)
+			if (capture) out.push(capture)
+		}
+		return out.sort((a, b) =>
+			a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0,
+		)
+	}
+
+	/** Moves the finished data into place, then publishes the metadata. */
+	async commit(capture: IqCapture): Promise<void> {
+		const name = capture.name
+		await rename(this.partial(name), this.data(name))
+		const temp = `${this.meta(name)}${PARTIAL}`
+		try {
+			await writeFile(temp, JSON.stringify(capture), {
+				mode: 0o600,
+				flag: "wx",
+				flush: true,
+			})
+			await rename(temp, this.meta(name))
+		} catch (err) {
+			await rm(temp, { force: true })
+			await rm(this.data(name), { force: true })
+			throw err
+		}
+	}
+
+	/** Metadata first, so a half-removed capture is never listed. */
+	async remove(name: string): Promise<boolean> {
+		if (!(await this.exists(name))) return false
+		await rm(this.meta(name), { force: true })
+		await rm(this.data(name), { force: true })
+		return true
+	}
+
+	async openData(
+		name: string,
+	): Promise<{ capture: IqCapture; handle: FileHandle } | null> {
+		const capture = await this.read(name)
+		if (!capture) return null
+		let handle: FileHandle
+		try {
+			handle = await open(
+				this.data(name),
+				constants.O_RDONLY | constants.O_NOFOLLOW,
+			)
+		} catch (err) {
+			if (missing(err)) return null
+			throw err
+		}
+		try {
+			const st = await handle.stat()
+			if (!st.isFile() || st.size !== capture.bytes) {
+				await handle.close()
+				return null
+			}
+		} catch (err) {
+			await handle.close().catch(() => {})
+			throw err
+		}
+		return { capture, handle }
+	}
+}
+
+export interface IqCaptureOptions {
+	/** The capture directory (`<stateDir>/iq-captures`); created private on first use. */
+	dir: string
+	sourceManager: Pick<SourceManager, "getStatus" | "getAllStatus"> &
+		Pick<EventEmitter, "on" | "off">
+	fanoutFor: (
+		sourceId: string,
+	) => Pick<FanoutManager, "addBranch" | "removeBranch" | "on" | "off">
+	/** The tuner state of a source, for the gain recorded with the capture. */
+	tunerState?: ((sourceId: string) => TunerState | undefined) | undefined
+	access: Pick<
+		FastifyAccessController,
+		"authorizeMetadataMutation" | "leaseDownload"
+	>
+	/** Bytes the filesystem holding `dir` has available (tests replace it). */
+	availableBytes?: (dir: string) => Promise<number>
+}
+
+async function statfsAvailable(dir: string): Promise<number> {
+	const st = await statfs(dir)
+	return Number(st.bavail) * Number(st.bsize)
+}
+
+function sendError(
+	reply: FastifyReply,
+	status: number,
+	code: IqCaptureErrorCode,
+): FastifyReply {
+	const body: IqCaptureErrorBody = {
+		error: ERRORS[status] ?? "Error",
+		code,
+		message: MESSAGES[code],
+	}
+	return reply.code(status).header("Cache-Control", "no-store").send(body)
+}
+
+function sendDenial(reply: FastifyReply, denied: DeniedAdmission) {
+	for (const [name, value] of Object.entries(denied.headers))
+		reply.header(name, value)
+	return reply
+		.code(denied.status)
+		.header("Cache-Control", "no-store")
+		.send({ code: denied.code })
+}
+
+function sendLeaseRejected(
+	request: FastifyRequest,
+	reply: FastifyReply,
+	reason: string,
+) {
+	if (request.raw.aborted || reply.raw.destroyed)
+		return reply.code(499).send({ code: "REQUEST_ABORTED" })
+	const status =
+		reason === "capacity" ? 429 : reason === "invalidated" ? 401 : 503
+	return reply.code(status).send({
+		code:
+			status === 401
+				? "AUTH_REQUIRED"
+				: status === 429
+					? "ACCESS_CAPACITY"
+					: "ACCESS_UNAVAILABLE",
+	})
+}
+
+/** Manual gain the tuner reports as known; null under AGC or unknown state. */
+function knownGain(state: TunerState | undefined): number | null {
+	if (!state || state.gainMode !== "manual") return null
+	const unknown = state.unknownFields ?? []
+	if (unknown.includes("gain") || unknown.includes("gainMode")) return null
+	return Number.isSafeInteger(state.gain) ? state.gain : null
+}
+
+type Outcome =
+	| { kind: "complete"; startedAt: string }
+	| { kind: "interrupted" }
+	| { kind: "failed" }
+	| { kind: "gone" }
+
+export const iqCaptureRoutes: FastifyPluginAsync<IqCaptureOptions> = async (
+	app,
+	options,
+) => {
+	const store = new IqCaptureStore(options.dir)
+	const available = options.availableBytes ?? statfsAvailable
+	/** Sources with a capture running: one at a time per source. */
+	const busySources = new Set<string>()
+	/** Names being captured, so two requests cannot claim the same one. */
+	const busyNames = new Set<string>()
+	/** Bytes each running capture may still write, counted against the quota. */
+	const reserved = new Map<string, number>()
+	/** Each running capture's abort; shutdown awaits every cleanup. */
+	const active = new Map<string, () => Promise<void>>()
+
+	app.addHook("preClose", async () => {
+		await Promise.all([...active.values()].map(abort => abort()))
+	})
+
+	const authorize = (request: FastifyRequest, reply: FastifyReply) => {
+		const denied = options.access.authorizeMetadataMutation(request)
+		if (denied) {
+			void sendDenial(reply, denied)
+			return false
+		}
+		return true
+	}
+
+	app.get(IQ_CAPTURES_ROUTE, async (request, reply) => {
+		if (!authorize(request, reply)) return reply
+		try {
+			await store.ready()
+			const captures = await store.list()
+			const body: IqCaptureList = {
+				captures,
+				usedBytes: captures.reduce((sum, c) => sum + c.bytes, 0),
+				quotaBytes: IQ_CAPTURES_QUOTA_BYTES,
+				maxCount: IQ_CAPTURES_MAX_COUNT,
+			}
+			return await reply.header("Cache-Control", "no-store").send(body)
+		} catch (err) {
+			request.log.warn({ err: safeErrorFields(err) }, "IQ capture list failed")
+			return sendError(reply, 503, "IQ_CAPTURES_UNAVAILABLE")
+		}
+	})
+
+	app.get<{ Params: { name: string } }>(
+		IQ_CAPTURE_ROUTE,
+		async (request, reply) => {
+			if (!authorize(request, reply)) return reply
+			let stream: Readable | undefined
+			let handle: FileHandle | undefined
+			const lease = options.access.leaseDownload(request, reply.raw, () => {
+				if (stream) stream.destroy()
+				else void handle?.close().catch(() => {})
+			})
+			if (lease.kind === "rejected")
+				return sendLeaseRejected(request, reply, lease.reason)
+			try {
+				const name = request.params.name
+				if (!IQ_CAPTURE_NAME.test(name))
+					return sendError(reply, 404, "IQ_CAPTURE_NOT_FOUND")
+				await store.ready()
+				const opened = await store.openData(name)
+				if (opened) handle = opened.handle
+				if (!lease.active()) {
+					await handle?.close().catch(() => {})
+					return reply
+				}
+				if (!opened) return sendError(reply, 404, "IQ_CAPTURE_NOT_FOUND")
+				const { capture } = opened
+				stream = opened.handle.createReadStream({ autoClose: true })
+				const s = stream
+				s.on("error", () => {
+					request.log.warn("IQ capture download stream error")
+					lease.release()
+					s.destroy()
+				})
+				return await reply
+					.type("application/octet-stream")
+					.header(
+						"Content-Disposition",
+						`attachment; filename="${capture.name}${DATA}"`,
+					)
+					.header("Content-Length", capture.bytes)
+					.header("Cache-Control", "no-store")
+					.header("X-WaveKit-Center-Hz", capture.centerHz)
+					.header("X-WaveKit-Sample-Rate", capture.sampleRate)
+					.header("X-WaveKit-Start-Time", capture.startedAt)
+					.send(stream)
+			} catch (err) {
+				if (stream) stream.destroy()
+				else await handle?.close().catch(() => {})
+				if (!lease.active()) return reply
+				request.log.warn(
+					{ err: safeErrorFields(err) },
+					"IQ capture download unavailable",
+				)
+				return sendError(reply, 503, "IQ_CAPTURES_UNAVAILABLE")
+			}
+		},
+	)
+
+	app.delete<{ Params: { name: string } }>(
+		IQ_CAPTURE_ROUTE,
+		async (request, reply) => {
+			if (!authorize(request, reply)) return reply
+			const name = request.params.name
+			if (!IQ_CAPTURE_NAME.test(name))
+				return sendError(reply, 404, "IQ_CAPTURE_NOT_FOUND")
+			if (busyNames.has(name)) return sendError(reply, 409, "IQ_CAPTURE_BUSY")
+			try {
+				await store.ready()
+				if (!(await store.remove(name)))
+					return sendError(reply, 404, "IQ_CAPTURE_NOT_FOUND")
+				return await reply.code(204).header("Cache-Control", "no-store").send()
+			} catch (err) {
+				request.log.warn(
+					{ err: safeErrorFields(err) },
+					"IQ capture delete failed",
+				)
+				return sendError(reply, 503, "IQ_CAPTURES_UNAVAILABLE")
+			}
+		},
+	)
+
+	app.post(IQ_CAPTURES_ROUTE, async (request, reply) => {
+		if (!authorize(request, reply)) return reply
+		const parsed = bodySchema.safeParse(request.body)
+		if (!parsed.success)
+			return reply.code(400).send(
+				zodValidationBody(parsed.error, bodySchema, {
+					expected: BODY_EXPECTED,
+				}),
+			)
+		const { name, seconds } = parsed.data
+		let sourceId = parsed.data.sourceId
+		if (sourceId === undefined) {
+			const all = options.sourceManager.getAllStatus()
+			if (all.length === 0) return sendError(reply, 404, "SOURCE_NOT_FOUND")
+			if (all.length > 1)
+				return reply.code(400).send(
+					validationErrorBody("body", [
+						{
+							field: "sourceId",
+							expected:
+								"required when more than one source is configured; a source id from GET /api/sources",
+						},
+					]),
+				)
+			sourceId = all[0]!.id
+		}
+		const source = options.sourceManager.getStatus(sourceId)
+		if (!source) return sendError(reply, 404, "SOURCE_NOT_FOUND")
+		if (!source.connected) return sendError(reply, 503, "SOURCE_DISCONNECTED")
+		const { caps } = source
+		const centerHz = caps.centerFreq
+		if (
+			caps.kind !== "iq" ||
+			caps.format !== "U8_IQ" ||
+			!Number.isSafeInteger(caps.sampleRate) ||
+			caps.sampleRate <= 0 ||
+			caps.sampleRate > IQ_CAPTURE_MAX_SAMPLE_RATE ||
+			centerHz === undefined
+		)
+			return sendError(reply, 409, "IQ_CAPTURE_UNSUPPORTED")
+		const sampleRate = caps.sampleRate
+		if (busySources.has(sourceId))
+			return sendError(reply, 409, "IQ_CAPTURE_BUSY")
+		if (busyNames.has(name)) return sendError(reply, 409, "IQ_CAPTURE_EXISTS")
+		// Whole seconds at a rate ≤ 3,200,000: at most 10 × 3,200,000 × 2 = IQ_CAPTURE_MAX_BYTES.
+		const bytes = seconds * sampleRate * 2
+		const id = randomUUID()
+		// Claimed before the first await, so a concurrent request sees this capture.
+		busySources.add(sourceId)
+		busyNames.add(name)
+		reserved.set(id, bytes)
+		const release = () => {
+			busySources.delete(sourceId)
+			busyNames.delete(name)
+			reserved.delete(id)
+			active.delete(id)
+		}
+		try {
+			try {
+				await store.ready()
+				if (await store.exists(name))
+					return sendError(reply, 409, "IQ_CAPTURE_EXISTS")
+				const stored = await store.list()
+				const running = [...reserved.values()]
+				const used =
+					stored.reduce((sum, c) => sum + c.bytes, 0) +
+					running.reduce((sum, b) => sum + b, 0)
+				if (
+					used > IQ_CAPTURES_QUOTA_BYTES ||
+					stored.length + running.length > IQ_CAPTURES_MAX_COUNT
+				)
+					return sendError(reply, 507, "IQ_CAPTURE_QUOTA")
+				if ((await available(store.dir)) - bytes < IQ_CAPTURES_MIN_FREE_BYTES)
+					return sendError(reply, 507, "IQ_CAPTURE_DISK_FULL")
+			} catch (err) {
+				request.log.warn(
+					{ err: safeErrorFields(err) },
+					"IQ capture admission failed",
+				)
+				return sendError(reply, 503, "IQ_CAPTURES_UNAVAILABLE")
+			}
+			// Replaced by the running capture's finish once it exists.
+			let stop: (outcome: Outcome) => Promise<void> = async () => {}
+			const lease = options.access.leaseDownload(request, reply.raw, () => {
+				void stop({ kind: "gone" })
+			})
+			if (lease.kind === "rejected")
+				return sendLeaseRejected(request, reply, lease.reason)
+			const outcome = await capture({ id, sourceId, bytes, seconds }, fn => {
+				stop = fn
+			})
+			if (!lease.active()) return reply
+			if (outcome.kind === "gone") return reply
+			if (outcome.kind === "interrupted")
+				return sendError(reply, 503, "IQ_CAPTURE_INTERRUPTED")
+			if (outcome.kind === "failed")
+				return sendError(reply, 503, "IQ_CAPTURES_UNAVAILABLE")
+			const result: IqCapture = {
+				name,
+				sourceId,
+				format: "cu8",
+				centerHz,
+				sampleRate,
+				gain: knownGain(options.tunerState?.(sourceId)),
+				startedAt: outcome.startedAt,
+				durationS: seconds,
+				bytes,
+			}
+			try {
+				await store.commit(result)
+			} catch (err) {
+				request.log.warn(
+					{ err: safeErrorFields(err) },
+					"IQ capture could not be stored",
+				)
+				return sendError(reply, 503, "IQ_CAPTURES_UNAVAILABLE")
+			}
+			if (!lease.active()) return reply
+			return await reply
+				.code(201)
+				.header("Cache-Control", "no-store")
+				.send(result)
+		} finally {
+			release()
+		}
+
+		/**
+		 * Streams `bytes` from the source branch to the partial file. Resolves once the file
+		 * is closed (and removed unless complete); never rejects.
+		 */
+		function capture(
+			job: { id: string; sourceId: string; bytes: number; seconds: number },
+			expose: (stop: (outcome: Outcome) => Promise<void>) => void,
+		): Promise<Outcome> {
+			return new Promise<Outcome>(resolve => {
+				const fanout = options.fanoutFor(job.sourceId)
+				const branchId = `iq-capture:${job.id}`
+				let out: WriteStream
+				try {
+					out = createWriteStream(store.partial(name), {
+						flags: "wx",
+						mode: 0o600,
+						flush: true,
+					})
+				} catch {
+					resolve({ kind: "failed" })
+					return
+				}
+				let remaining = job.bytes
+				let startedAt: string | undefined
+				let settled: Promise<void> | undefined
+				const detach = () => {
+					clearTimeout(timer)
+					branch?.off("data", onData)
+					branch?.off("error", interrupted)
+					branch?.off("end", interrupted)
+					fanout.off("backpressure", congestion)
+					options.sourceManager.off("disconnected", changed)
+					options.sourceManager.off("removed", changed)
+					options.sourceManager.off("caps-changed", changed)
+					reply.raw.off("close", closed)
+					try {
+						fanout.removeBranch(branchId)
+					} catch {
+						/* An already removed branch needs no detach. */
+					}
+				}
+				const finish = (outcome: Outcome): Promise<void> => {
+					if (settled) return settled
+					detach()
+					settled = new Promise<void>(done => {
+						const keep = outcome.kind === "complete"
+						const closedFile = async () => {
+							if (!keep) await rm(store.partial(name), { force: true })
+							resolve(outcome)
+							done()
+						}
+						const failed = () => {
+							void rm(store.partial(name), { force: true })
+								.catch(() => {})
+								.then(() => {
+									resolve({ kind: "failed" })
+									done()
+								})
+						}
+						if (keep) {
+							out.off("error", writeFailed)
+							out.once("error", failed)
+							out.end(() => {
+								out.off("error", failed)
+								void closedFile().catch(failed)
+							})
+						} else {
+							out.destroy()
+							out.once("close", () => void closedFile().catch(failed))
+							if (out.closed) void closedFile().catch(failed)
+						}
+					})
+					return settled
+				}
+				const interrupted = () => void finish({ kind: "interrupted" })
+				const writeFailed = () => void finish({ kind: "failed" })
+				const closed = () => {
+					if (!reply.raw.writableFinished) void finish({ kind: "gone" })
+				}
+				const changed = (id: string) => {
+					if (id === job.sourceId) interrupted()
+				}
+				const congestion = (id: string) => {
+					if (id === branchId) interrupted()
+				}
+				const onData = (chunk: Buffer) => {
+					if (settled) return
+					startedAt ??= new Date().toISOString()
+					const part = chunk.subarray(0, remaining)
+					remaining -= part.length
+					out.write(part)
+					if (remaining === 0)
+						return void finish({ kind: "complete", startedAt })
+					// A disk slower than the source fails the capture; the source never waits.
+					if (out.writableLength > IQ_CAPTURE_MAX_BUFFERED_BYTES) interrupted()
+				}
+				out.on("error", writeFailed)
+				// A silent source gets the requested duration plus an equally long grace window:
+				// 2 × seconds (at most 20 s), then the capture is interrupted.
+				const timer = setTimeout(interrupted, job.seconds * 2 * 1000)
+				timer.unref()
+				let branch: Readable | undefined
+				expose(outcome => finish(outcome))
+				active.set(id, () => finish({ kind: "interrupted" }))
+				fanout.on("backpressure", congestion)
+				options.sourceManager.on("disconnected", changed)
+				options.sourceManager.on("removed", changed)
+				options.sourceManager.on("caps-changed", changed)
+				reply.raw.on("close", closed)
+				try {
+					// 1 byte = the smallest positive watermark: flowing reads consume synchronously.
+					branch = fanout.addBranch({
+						id: branchId,
+						sourceId: job.sourceId,
+						highWaterMark: 1,
+					})
+				} catch {
+					void finish({ kind: "failed" })
+					return
+				}
+				branch.on("error", interrupted)
+				branch.on("end", interrupted)
+				branch.on("data", onData)
+			})
+		}
+	})
+}

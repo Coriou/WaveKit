@@ -39,6 +39,8 @@ cookie alongside the bearer credential.
 
 For a one-request overview of the receiver, read
 [`GET /api/agent/status`](#get-apiagentstatus).
+Task recipes (tune, gain, decoders, activity, IQ capture) are in
+[Driving WaveKit from an agent](AGENTS-API.md).
 
 ### Tuner commands during a sample-rate restart
 
@@ -120,6 +122,54 @@ headers: clients must reject incomplete bodies against `Content-Length`.
 The snapshot endpoint is mounted when protected access and source fanout routing
 are configured. An already aborted download request returns `REQUEST_ABORTED`
 (status 499 when a response is still possible), rather than an authentication error.
+
+### Named IQ captures
+
+`POST /api/iq/captures` stores whole seconds of the current tuning as a named CU8 file in the
+private state directory (`<stateDir>/iq-captures`, mode `0700`, files `0600`):
+
+```json
+{ "name": "test-capture", "seconds": 2 }
+```
+
+`name` is 1 to 64 characters of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit
+(no dot, slash or upper case, so it is never a path), and must be unused: 409
+`IQ_CAPTURE_EXISTS`. `seconds` is an integer from 1 to 10. `sourceId` is optional while one
+source is configured, required (400 naming `sourceId`) with more. The source must be connected
+(503 `SOURCE_DISCONNECTED`) and deliver `U8_IQ` with a known center at most 3,200,000
+samples per second (409 `IQ_CAPTURE_UNSUPPORTED`); missing sources are 404. One capture runs
+per source at a time: another answers 409 `IQ_CAPTURE_BUSY`. Captures never tune, pause or
+slow the source.
+
+A capture is `seconds × sampleRate × 2` bytes, at most `10 × 3,200,000 × 2 = 64,000,000`.
+Before it starts, the stored captures plus every running capture must fit
+`8 × 64,000,000 = 512,000,000` bytes and 32 captures, else 507 `IQ_CAPTURE_QUOTA`; and the
+filesystem must keep 268,435,456 bytes (256 MiB) available after it, else 507
+`IQ_CAPTURE_DISK_FULL`. The answer is 201 once the file is complete, with the stored metadata:
+`name`, `sourceId`, `format` (`"cu8"`), `centerHz`, `sampleRate`, `gain` (tenths of a dB, null
+under AGC or when unknown), `startedAt` (UTC time of the first stored chunk), `durationS`
+and `bytes`.
+
+Data is written chunk by chunk; at most 4,000,000 bytes (625 ms at 3.2 Msps) wait for the
+disk, past that the capture stops. A source change (retune, rate change), disconnect or
+removal, a silent source (twice the requested duration), fanout congestion, client
+disconnect, lease revocation or shutdown also stop it: the partial file is removed and the
+answer, when one can still be sent, is 503 `IQ_CAPTURE_INTERRUPTED`. Partial files left by a
+crash are removed at the first use after restart.
+
+`GET /api/iq/captures` lists whole captures newest first:
+`{ captures, usedBytes, quotaBytes, maxCount }`. `GET /api/iq/captures/:name` downloads the
+file (`application/octet-stream`, `Content-Disposition: attachment; filename="<name>.cu8"`,
+`Content-Length`, `X-WaveKit-Center-Hz`, `X-WaveKit-Sample-Rate`, `X-WaveKit-Start-Time`).
+`DELETE /api/iq/captures/:name` answers 204, or 409 `IQ_CAPTURE_BUSY` while that name is being
+captured. An unknown or malformed name is 404 `IQ_CAPTURE_NOT_FOUND`. Error bodies carry
+fixed text only (`error`, `code`, `message`), never the name or a path.
+
+Authorization matches the IQ snapshot: the routes mount only with protected access, every
+route takes mutation authorization (browser CSRF included), and the capture and the download
+hold a revocable lease. Missing credentials return 401, forbidden requests 403. The DTOs are
+`IqCapture`, `IqCaptureList` and `IqCaptureRequest` in `@wavekit/api-types`; recipes are in
+[Driving WaveKit from an agent](AGENTS-API.md).
 
 ## Base URL
 

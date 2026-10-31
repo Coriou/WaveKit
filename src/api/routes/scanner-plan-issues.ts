@@ -196,6 +196,26 @@ const BANDPLAN_UNAVAILABLE: IssueText = {
 	},
 }
 
+/** A `range-empty` issue for a sweep whose ranges are all disabled (its details count them). */
+const RANGES_ALL_DISABLED: IssueText = {
+	message: "every range is disabled",
+	field: {
+		field: "ranges",
+		expected: "at least one range with enabled true (or enabled omitted)",
+	},
+}
+
+/** A `range-locked` issue raised because the band plan changed after the client read the job. */
+const RANGES_CHANGED_SINCE_READ: IssueText = {
+	message:
+		"the job's ranges changed since they were read; reread the job and resend",
+	field: {
+		field: "ranges",
+		expected:
+			"the ranges of a fresh GET /api/scanner/jobs/:id, edited and sent again",
+	},
+}
+
 /** Unknown codes (never from this server) still answer without echoing anything. */
 const UNKNOWN_ISSUE: IssueText = {
 	message: "the job spec has an error",
@@ -266,6 +286,15 @@ function textOf(issue: Readonly<Record<string, unknown>>): {
 		Object.hasOwn(details, "bandplan")
 	)
 		return { code, text: BANDPLAN_UNAVAILABLE }
+	// Selected by the checked detail, never by the preview's own words.
+	if (code === "range-empty" && details !== null && count(details["disabled"]))
+		return { code, text: RANGES_ALL_DISABLED }
+	if (
+		code === "range-locked" &&
+		details !== null &&
+		details["reason"] === "range-plan-changed"
+	)
+		return { code, text: RANGES_CHANGED_SINCE_READ }
 	return { code, text: ISSUE_TEXT[code as PlanIssueCode] }
 }
 

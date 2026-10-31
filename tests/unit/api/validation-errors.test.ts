@@ -1104,6 +1104,62 @@ describe("validation field helpers", () => {
 		])
 	})
 
+	it("plan issue guidance follows the checked details: all ranges disabled, plan changed since read", () => {
+		const { issues, fields } = staticPlanIssues([
+			{
+				code: "range-empty",
+				severity: "error",
+				message: SENTINEL,
+				details: { disabled: 2 },
+			},
+			{
+				code: "range-locked",
+				severity: "error",
+				message: SENTINEL,
+				details: {
+					reason: "range-plan-changed",
+					dropped: [1],
+					expected: 2,
+					received: 2,
+				},
+			},
+			// A malformed count falls back to the generic text.
+			{
+				code: "range-empty",
+				severity: "error",
+				message: SENTINEL,
+				details: { disabled: SENTINEL },
+			},
+		])
+		expect(issues.map(i => i.message)).toEqual([
+			"every range is disabled",
+			"the job's ranges changed since they were read; reread the job and resend",
+			"a range is empty or inverted, or the sweep has no range",
+		])
+		expect(issues[1]?.details).toEqual({
+			reason: "range-plan-changed",
+			dropped: [1],
+			expected: 2,
+			received: 2,
+		})
+		expect(fields).toEqual([
+			{
+				field: "ranges",
+				expected: "at least one range with enabled true (or enabled omitted)",
+			},
+		])
+		const stale = staticPlanIssues([
+			{
+				code: "range-locked",
+				severity: "error",
+				message: SENTINEL,
+				details: { reason: "range-plan-changed" },
+			},
+		])
+		expect(stale.fields[0]?.expected).toMatch(/fresh GET/)
+		expect(JSON.stringify({ issues, fields, stale })).not.toContain(SENTINEL)
+	})
+
 	it(`names at most ${MAX_VALIDATION_FIELDS} fields, at and past the bound`, () => {
 		const shape = (n: number) =>
 			z.object(

@@ -11,6 +11,7 @@
  * - Centralized error handling
  */
 
+import { resolve } from "node:path"
 import type { StationIdentity } from "@wavekit/api-types"
 import {
 	DISCOVERY_STORE_EPOCH_HEADER,
@@ -19,6 +20,7 @@ import {
 import {
 	CONFIG_EXPORT_REQUIRES_ACCESS,
 	DECODER_SETTINGS_REQUIRES_ACCESS,
+	IQ_CAPTURES_REQUIRES_ACCESS,
 	RECORDING_KEEPS_REQUIRES_ACCESS,
 	RECORDINGS_REQUIRES_ACCESS,
 } from "@wavekit/api-types"
@@ -76,6 +78,7 @@ import {
 	iqSnapshotRoutes,
 	type IqSnapshotOptions,
 } from "./routes/iq-snapshot.js"
+import { iqCaptureRoutes } from "./routes/iq-captures.js"
 import { decoderRoutes } from "./routes/decoders.js"
 import { decoderBandRoutes } from "./routes/decoder-band.js"
 import { telemetryRoutes } from "./routes/telemetry.js"
@@ -1462,6 +1465,20 @@ export class ApiServer {
 			await this.app.register(iqSnapshotRoutes, {
 				sourceManager: this.sourceManager,
 				fanoutFor: this.iqSnapshotFanoutFor,
+				access: this.accessController,
+			})
+		// Named captures in <stateDir>/iq-captures, behind the snapshot's access
+		if (
+			this.accessController &&
+			this.iqSnapshotFanoutFor &&
+			this.getConfig &&
+			IQ_CAPTURES_REQUIRES_ACCESS
+		)
+			await this.app.register(iqCaptureRoutes, {
+				dir: resolve(this.getConfig().stateDir, "iq-captures"),
+				sourceManager: this.sourceManager,
+				fanoutFor: this.iqSnapshotFanoutFor,
+				tunerState: id => this.tunerController?.getState(id),
 				access: this.accessController,
 			})
 
