@@ -144,14 +144,18 @@ slow the source.
 A capture is `seconds × sampleRate × 2` bytes, at most `10 × 3,200,000 × 2 = 64,000,000`.
 Before it starts, the stored captures plus every running capture must fit
 `8 × 64,000,000 = 512,000,000` bytes and 32 captures, else 507 `IQ_CAPTURE_QUOTA`; and the
-filesystem must keep 268,435,456 bytes (256 MiB) available after it, else 507
-`IQ_CAPTURE_DISK_FULL`. The answer is 201 once the file is complete, with the stored metadata:
+filesystem must keep 268,435,456 bytes (256 MiB) available after it and the bytes every other
+running capture has still to write, else 507 `IQ_CAPTURE_DISK_FULL`. Admissions and completions
+are checked one at a time, so concurrent requests on different sources never overrun either
+bound. A source change (retune, rate change, disconnect) while the request is being admitted
+answers 409 `IQ_CAPTURE_SOURCE_CHANGED`: nothing was written, so retry. The answer is 201 once the file is complete, with the stored metadata:
 `name`, `sourceId`, `format` (`"cu8"`), `centerHz`, `sampleRate`, `gain` (tenths of a dB, null
 under AGC or when unknown), `startedAt` (UTC time of the first stored chunk), `durationS`
 and `bytes`.
 
 Data is written chunk by chunk; at most 4,000,000 bytes (625 ms at 3.2 Msps) wait for the
-disk, past that the capture stops. A source change (retune, rate change), disconnect or
+disk, past that the capture stops. A source change (retune, rate change, also when only seen as
+changed caps right before the first stored sample), disconnect or
 removal, a silent source (twice the requested duration), fanout congestion, client
 disconnect, lease revocation or shutdown also stop it: the partial file is removed and the
 answer, when one can still be sent, is 503 `IQ_CAPTURE_INTERRUPTED`. Partial files left by a

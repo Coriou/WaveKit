@@ -1,4 +1,5 @@
 import { EventEmitter, once } from "node:events"
+import { createWriteStream, writeFileSync } from "node:fs"
 import {
 	mkdtemp,
 	readdir,
@@ -10,7 +11,7 @@ import {
 import { request, type IncomingMessage } from "node:http"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { PassThrough } from "node:stream"
+import { PassThrough, Writable } from "node:stream"
 import { setTimeout as delay } from "node:timers/promises"
 import fc from "fast-check"
 import Fastify, { type FastifyInstance } from "fastify"
@@ -69,7 +70,7 @@ const status = (id: string, rate = 1000): SourceStatus =>
 		},
 	}) as SourceStatus
 
-const options = (): IqCaptureOptions => ({
+const options = (extra: Partial<IqCaptureOptions> = {}): IqCaptureOptions => ({
 	dir,
 	sourceManager: sources,
 	fanoutFor: () => fanout,
@@ -96,7 +97,25 @@ const options = (): IqCaptureOptions => ({
 			}
 		},
 	},
+	...extra,
 })
+
+/** Replaces the app with one built from `extra` (a fresh plugin over the same directory). */
+const rebuild = async (extra: Partial<IqCaptureOptions> = {}) => {
+	await app.close()
+	app = Fastify()
+	await app.register(iqCaptureRoutes, options(extra))
+	await app.ready()
+}
+
+/** A promise the test opens by hand. */
+const gate = () => {
+	let open!: () => void
+	const opened = new Promise<void>(resolve => {
+		open = resolve
+	})
+	return { opened, open }
+}
 
 /** Starts a capture and waits until its branch listens. */
 const start = async (
@@ -630,4 +649,203 @@ it("uses protected admission and CSRF authorization with the real access policy"
 	} finally {
 		await protectedApp.close()
 	}
+})
+
+/** Two sources, each with its own fanout: `a` on the default fanout, `b` on its own. */
+const twoSources = async (extra: Partial<IqCaptureOptions> = {}) => {
+	const fanoutB = new FanoutManager(createLogger({ level: "fatal" }))
+	const inputB = new PassThrough()
+	fanoutB.attachSource(inputB)
+	statuses = [status("a"), status("b")]
+	await rebuild({
+		fanoutFor: id => (id === "b" ? fanoutB : fanout),
+		...extra,
+	})
+	return {
+		fanoutB,
+		inputB,
+		dispose: () => {
+			inputB.destroy()
+			fanoutB.detachSource()
+		},
+	}
+}
+
+it.each(["flush", "close"])(
+	"answers 503 and removes the partial file when the %s after the last chunk fails",
+	async step => {
+		// Created like the real stream (exclusive, private), failing the final flush or the close.
+		const failing = (path: string) => {
+			writeFileSync(path, "", { flag: "wx", mode: 0o600 })
+			return new Writable({
+				write: (_chunk, _encoding, callback) => callback(),
+				final: callback =>
+					callback(step === "flush" ? new Error("flush") : null),
+				destroy: (err, callback) =>
+					callback(err ?? (step === "close" ? new Error("close") : null)),
+			})
+		}
+		await rebuild({ createPartial: failing })
+		const { pending } = await start()
+		input.write(Buffer.alloc(2000))
+		const res = await pending
+		expect(res.statusCode).toBe(503)
+		expect(res.json()).toMatchObject({ code: "IQ_CAPTURES_UNAVAILABLE" })
+		expect(await readdir(dir)).toEqual([])
+		expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
+	},
+)
+
+it("removes the partial file when the lease is revoked after the final chunk", async () => {
+	// The lease is revoked inside end(): the capture has already chosen to keep the file.
+	await rebuild({
+		createPartial: path => {
+			const real = createWriteStream(path, { flags: "wx", mode: 0o600 })
+			const end = real.end.bind(real)
+			real.end = ((...args: Parameters<typeof end>) => {
+				invalidate?.()
+				return end(...args)
+			}) as typeof real.end
+			return real
+		},
+	})
+	const { pending } = await start()
+	input.write(Buffer.alloc(2000))
+	await pending.catch(() => undefined)
+	// Shutdown waits for every capture's commit or cleanup.
+	await rebuild()
+	expect(await readdir(dir)).toEqual([])
+})
+
+it("reserves free space across running captures on different sources", async () => {
+	const { dispose } = await twoSources()
+	try {
+		available = IQ_CAPTURES_MIN_FREE_BYTES + 2000
+		const { pending } = await start({
+			name: "first",
+			seconds: 1,
+			sourceId: "a",
+		})
+		const refused = await app.inject({
+			method: "POST",
+			url,
+			payload: { name: "second", seconds: 1, sourceId: "b" },
+		})
+		expect(refused.statusCode).toBe(507)
+		expect(refused.json()).toMatchObject({ code: "IQ_CAPTURE_DISK_FULL" })
+		input.write(Buffer.alloc(2000))
+		expect((await pending).statusCode).toBe(201)
+	} finally {
+		dispose()
+	}
+})
+
+it("admits against one consistent quota state while another capture completes", async () => {
+	const { inputB, fanoutB, dispose } = await twoSources()
+	try {
+		await app.inject({ method: "GET", url })
+		// 7 × 64,000,000 + (64,000,000 − 4000) = quota − 4000 stored.
+		for (let i = 0; i < 7; i++) await plant(`full-${i}`, IQ_CAPTURE_MAX_BYTES)
+		await plant("rest", IQ_CAPTURE_MAX_BYTES - 4000)
+		// The 2000-byte capture on `a` runs: quota − 2000 counted.
+		const { pending: first } = await start({
+			name: "first",
+			seconds: 1,
+			sourceId: "a",
+		})
+		// The 4000-byte request on `b` stalls inside its listing.
+		const listing = gate()
+		const hold = gate()
+		const list = IqCaptureStore.prototype.list
+		vi.spyOn(IqCaptureStore.prototype, "list").mockImplementation(
+			async function (this: IqCaptureStore) {
+				const captures = await list.call(this)
+				listing.open()
+				await hold.opened
+				return captures
+			},
+		)
+		const second = app
+			.inject({
+				method: "POST",
+				url,
+				payload: { name: "second", seconds: 2, sourceId: "b" },
+			})
+			.then(r => r)
+		await listing.opened
+		// The first capture completes while the listing is pending; given time, it would
+		// commit and release its reservation between the second request's reads.
+		input.write(Buffer.alloc(2000))
+		await Promise.race([first, delay(100)])
+		hold.open()
+		const refused = await second
+		expect(refused.statusCode).toBe(507)
+		expect(refused.json()).toMatchObject({ code: "IQ_CAPTURE_QUOTA" })
+		expect((await first).statusCode).toBe(201)
+		vi.restoreAllMocks()
+		const body = (await app.inject({ method: "GET", url })).json<{
+			usedBytes: number
+		}>()
+		expect(body.usedBytes).toBe(IQ_CAPTURES_QUOTA_BYTES - 2000)
+		expect(fanoutB.getTelemetrySnapshot().branches).toHaveLength(0)
+		inputB.end()
+	} finally {
+		dispose()
+	}
+})
+
+it.each([
+	["with", true],
+	["without", false],
+])(
+	"refuses with 409 when the tuning changes during admission %s an event",
+	async (_label, emit) => {
+		const checking = gate()
+		const hold = gate()
+		await rebuild({
+			availableBytes: async () => {
+				checking.open()
+				await hold.opened
+				return available
+			},
+		})
+		const pending = app
+			.inject({ method: "POST", url, payload: { name: "first", seconds: 1 } })
+			.then(r => r)
+		await checking.opened
+		statuses = [
+			{
+				...status("source"),
+				caps: { ...status("source").caps, centerFreq: 101_000_000 },
+			} as SourceStatus,
+		]
+		if (emit) sources.emit("caps-changed", "source")
+		hold.open()
+		const res = await pending
+		expect(res.statusCode).toBe(409)
+		expect(res.json()).toEqual({
+			error: "Conflict",
+			code: "IQ_CAPTURE_SOURCE_CHANGED",
+			message: expect.any(String),
+		})
+		expect(res.body).not.toContain("101000000")
+		expect(fanout.getTelemetrySnapshot().branches).toHaveLength(0)
+		expect(await readdir(dir)).toEqual([])
+		// The source slot and the name are free again.
+		statuses = [status("source")]
+		const { pending: next } = await start()
+		input.write(Buffer.alloc(2000))
+		expect((await next).json<IqCapture>().centerHz).toBe(100_000_000)
+	},
+)
+
+it("interrupts when the tuning changed silently before the first sample", async () => {
+	const { pending } = await start()
+	statuses = [status("source", 2000)]
+	input.write(Buffer.alloc(2000))
+	const res = await pending
+	expect(res.statusCode).toBe(503)
+	expect(res.json()).toMatchObject({ code: "IQ_CAPTURE_INTERRUPTED" })
+	await rebuild()
+	expect(await readdir(dir)).toEqual([])
 })

@@ -4,11 +4,11 @@ Recipes for the tasks an agent or script does most: authenticate, read the recei
 tune, set gain, check decoders, read activity and capture IQ. Each recipe is a `curl`
 command; the full contract of every route is in the [API reference](API.md).
 
-The examples assume a protected core and two shell variables:
+The examples assume a protected core, its API origin in a shell variable, and the machine token
+from the next section:
 
 ```sh
 API_ORIGIN="https://receiver.example:9443"   # your core's API origin
-AUTH="Authorization: Bearer $(cat "$HOME/.config/wavekit/machine-token")"
 ```
 
 `100000000` (100 MHz) and the source id `rtl` are examples: read your own source ids from
@@ -31,6 +31,12 @@ directory must exist, must not be writable by group or others, and must lie outs
 private directory. An existing file is refused; `--replace` overwrites your own `0600` file.
 In Docker, run the same command in a one-off container with the private directory mounted
 ([Docker setup](DOCKER-SETUP.md#protected-runtime-deployment)).
+
+Once the file exists, load the header the recipes below send:
+
+```sh
+AUTH="Authorization: Bearer $(cat "$HOME/.config/wavekit/machine-token")"
+```
 
 There is no HTTP route that issues a token. Rotating the credential
 (`rotate-credential`, core stopped) revokes every copy; run `machine-token --replace`
@@ -119,8 +125,9 @@ curl --fail --header "$AUTH" --request DELETE \
 The POST answers 201 once the capture is stored, with its `centerHz`, `sampleRate`, `gain`,
 `startedAt`, `durationS`, `bytes` and `sourceId`. `seconds` is a whole number from 1 to 10;
 add `sourceId` when the core has more than one source. Names use `a-z`, `0-9`, `-` and `_`
-and must be unique. One capture runs per source at a time (409 `IQ_CAPTURE_BUSY`); a full
-store answers 507 ([IQ captures](API.md#named-iq-captures)). For a one-off window streamed
+and must be unique. One capture runs per source at a time (409 `IQ_CAPTURE_BUSY`); a retune
+while the request is admitted answers 409 `IQ_CAPTURE_SOURCE_CHANGED` (retry); a full store
+answers 507 ([IQ captures](API.md#named-iq-captures)). For a one-off window streamed
 straight to you without storing it, use the
 [IQ snapshot](API.md#current-window-iq-snapshot).
 
