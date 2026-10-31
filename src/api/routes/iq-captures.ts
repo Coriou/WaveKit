@@ -67,7 +67,7 @@ import { validationErrorBody, zodValidationBody } from "../validation-errors.js"
 export const IQ_CAPTURE_MAX_BUFFERED_BYTES = 4_000_000
 /** A metadata file is about 300 bytes; 4096 bounds what a listing reads per entry. */
 const META_MAX_BYTES = 4096
-/** Directory entries a listing examines: 32 captures × 2 files, with room for foreign files. */
+/** Capture names a listing reads: 32 captures with room for 992 unreadable metadata files. */
 const LIST_MAX_ENTRIES = 1024
 
 const DATA = ".cu8"
@@ -256,22 +256,26 @@ export class IqCaptureStore {
 	}
 
 	/**
-	 * Whole captures, newest first, at most IQ_CAPTURES_MAX_COUNT read, and `unlistedBytes`:
-	 * the regular data files beside metadata that fails validation. The store never writes
-	 * such a pair, so it is not removed, but its bytes are on the disk under a taken name:
-	 * the quota counts them (refusing more, never less) until that name is deleted.
+	 * Whole captures, newest first (at most IQ_CAPTURES_MAX_COUNT listed), and `unlistedBytes`:
+	 * every capture-named data file on the disk that is not listed, either beside metadata
+	 * that fails validation (the store never writes such a pair, so it is not removed, but
+	 * its bytes sit under a taken name) or a whole capture past the listed count. Every
+	 * directory entry is examined; at most LIST_MAX_ENTRIES capture names are read, and
+	 * past that `overflow` is true so admission refuses (refusing more, never less).
 	 */
-	async usage(): Promise<{ captures: IqCapture[]; unlistedBytes: number }> {
-		const entries = (await readdir(this.dir)).slice(0, LIST_MAX_ENTRIES)
-		const names = entries
+	async usage(): Promise<{
+		captures: IqCapture[]
+		unlistedBytes: number
+		overflow: boolean
+	}> {
+		const names = (await readdir(this.dir))
 			.map(entry => captureName(entry, META))
 			.filter(name => name !== null)
 			.sort()
+		const overflow = names.length > LIST_MAX_ENTRIES
 		const captures: IqCapture[] = []
 		let unlistedBytes = 0
-		for (const name of names) {
-			// Foreign files past the count still occupy space; the quota counts what is read.
-			if (captures.length >= IQ_CAPTURES_MAX_COUNT) break
+		for (const name of names.slice(0, LIST_MAX_ENTRIES)) {
 			const capture = await this.read(name)
 			if (capture) captures.push(capture)
 			else unlistedBytes += await this.#dataSize(name)
@@ -279,7 +283,9 @@ export class IqCaptureStore {
 		captures.sort((a, b) =>
 			a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0,
 		)
-		return { captures, unlistedBytes }
+		for (const extra of captures.splice(IQ_CAPTURES_MAX_COUNT))
+			unlistedBytes += extra.bytes
+		return { captures, unlistedBytes, overflow }
 	}
 
 	/** Size of a regular data file, 0 when there is none. */
@@ -713,13 +719,18 @@ export const iqCaptureRoutes: FastifyPluginAsync<IqCaptureOptions> = async (
 				const refusal = await serialized(async () => {
 					if (closing) return "closing" as const
 					if (await store.exists(name)) return "exists" as const
-					const { captures: stored, unlistedBytes } = await store.usage()
+					const {
+						captures: stored,
+						unlistedBytes,
+						overflow,
+					} = await store.usage()
 					const reservations = [...running.values()]
 					const used =
 						stored.reduce((sum, c) => sum + c.bytes, 0) +
 						unlistedBytes +
 						reservations.reduce((sum, r) => sum + r.bytes, 0)
 					if (
+						overflow ||
 						used > IQ_CAPTURES_QUOTA_BYTES ||
 						stored.length + reservations.length > IQ_CAPTURES_MAX_COUNT
 					)
