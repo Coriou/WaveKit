@@ -420,6 +420,43 @@ describe("which decoders cover a frequency", () => {
 		expect(decoderCoversHz(ranged, 470_200_001)).toBe(false)
 	})
 
+	it("reads the configured targets before the first band assessment, with the same 200 kHz rule", () => {
+		// at boot, before any source capabilities: no assessment yet
+		const boot = status({ type: "readsb", targetFrequenciesHz: [ADSB_HZ] })
+		expect(decoderCoversHz(boot, ADSB_HZ)).toBe(true)
+		expect(decoderCoversHz(boot, ADSB_HZ + 200_000)).toBe(true)
+		expect(decoderCoversHz(boot, ADSB_HZ + 200_001)).toBe(false)
+		// an assessment that names no band reads the configured targets too
+		expect(
+			decoderCoversHz(
+				status({
+					type: "readsb",
+					targetFrequenciesHz: [ADSB_HZ],
+					bandAssessment: { verdict: "unknown" },
+				}),
+				ADSB_HZ,
+			),
+		).toBe(true)
+		// an assessed band wins over the configured targets
+		expect(
+			decoderCoversHz(
+				adsb({ targetFrequenciesHz: [466_000_000] }),
+				466_000_000,
+			),
+		).toBe(false)
+		// probes and malformed targets never cover
+		expect(decoderCoversHz({ ...boot, ephemeral: true }, ADSB_HZ)).toBe(false)
+		expect(
+			decoderCoversHz(
+				status({
+					type: "readsb",
+					targetFrequenciesHz: [Number.NaN, -1, "1090" as never],
+				}),
+				ADSB_HZ,
+			),
+		).toBe(false)
+	})
+
 	it("falls back to the built-in band plan's protocols for a decoder with no band", () => {
 		const pager = status({
 			type: "multimon-ng",

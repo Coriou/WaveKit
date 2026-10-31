@@ -130,7 +130,7 @@ describe("header identity", () => {
 		modeLabel: null,
 	}
 	it("prefers what was heard, then what was named, then the covering decoder, then the band", () => {
-		const rows = [{ name: "ADS-B" }]
+		const rows = [{ name: "ADS-B", state: "decoding" as const }]
 		expect(
 			cardIdentity({ ...base, heard: "ADS-B", rows, band: "ADS-B 1090" }),
 		).toEqual({ proto: "ADS-B", sub: "ADS-B 1090" })
@@ -147,6 +147,30 @@ describe("header identity", () => {
 		).toEqual({ proto: "ADS-B 1090", sub: "" })
 		expect(cardIdentity({ ...base, modeLabel: "NFM" }).proto).toBe("NFM")
 		expect(cardIdentity(base).proto).toBe("Unknown")
+	})
+
+	it("names an off decoder only without a band, and says it is off", () => {
+		const off = [{ name: "Pager", state: "off" as const }]
+		expect(
+			cardIdentity({ ...base, rows: off, band: "Paging", channel: "Ch 1" }),
+		).toEqual({ proto: "Paging", sub: "Ch 1" })
+		expect(cardIdentity({ ...base, rows: off, modeLabel: "NFM" })).toEqual({
+			proto: "Pager (off)",
+			sub: "",
+		})
+		// a decoder that is on but held back still names it
+		expect(
+			cardIdentity({
+				...base,
+				rows: [{ name: "Pager", state: "paused" as const }],
+				band: "Paging",
+			}),
+		).toEqual({ proto: "Pager", sub: "Paging" })
+		// what was heard or named still comes first
+		expect(
+			cardIdentity({ ...base, rows: off, heard: "POCSAG", band: "Paging" })
+				.proto,
+		).toBe("POCSAG")
 	})
 })
 
@@ -274,9 +298,26 @@ describe("row wording", () => {
 		expect(detailOf("ADS-B off in Settings", "ADS-B", "off", 0)).toBe(
 			"Off in Settings",
 		)
-		expect(detailOf("Decoder status unknown", "Thing", "unknown", 0)).toBe(
-			"Status unknown",
+		expect(detailOf("Decoder status unknown", "Thing", "unknown", 0)).toBe("")
+	})
+
+	it("keeps a reason the state word runs into, and drops one that only restates the state", () => {
+		expect(
+			detailOf("ADS-B waiting for the source", "ADS-B", "waiting", 0),
+		).toBe("Waiting for the source")
+		expect(
+			detailOf("ADS-B waiting for the source to settle", "ADS-B", "waiting", 0),
+		).toBe("Waiting for the source to settle")
+		expect(detailOf("ADS-B failed to run", "ADS-B", "failed", 0)).toBe("")
+		expect(
+			detailOf("ADS-B failed: restarting on its own", "ADS-B", "failed", 0),
+		).toBe("Restarting on its own")
+		expect(detailOf("ADS-B running", "ADS-B", "listening", 0)).toBe("")
+		expect(detailOf("ADS-B running", "ADS-B", "listening", 2)).toBe(
+			"2 messages so far",
 		)
+		expect(detailOf("ADS-B stopped", "ADS-B", "off", 0)).toBe("Stopped")
+		expect(detailOf("ADS-B paused", "ADS-B", "unknown", 0)).toBe("Paused")
 	})
 
 	it("maps programs to Activity's category chips", () => {

@@ -154,10 +154,23 @@ function messages(n: number): string {
 const STATE_LEAD =
 	/^(?:decoding|listening|starting|waiting|paused|failed|unavailable)\s*[:;]\s*/i
 
+/** Details that say no more than the state column, beyond the state word itself (lower case). */
+const RESTATES: Readonly<Record<RowState, readonly string[]>> = {
+	decoding: ["running"],
+	listening: ["running"],
+	starting: [],
+	waiting: [],
+	paused: [],
+	failed: ["failed to run"],
+	off: [],
+	unknown: ["status unknown"],
+}
+
 /**
  * The verdict's reason without what the other columns say: the decoder's name ("ADS-B paused: CPU budget
- * full" → "CPU budget full") and a leading state word followed by a colon. A verdict that is only its state
- * ("ADS-B decoding") says how much it decoded instead, else nothing.
+ * full" → "CPU budget full") and a leading state word followed by a colon. A state word that runs on into the
+ * reason stays ("ADS-B waiting for the source" → "Waiting for the source"). A verdict that only restates its
+ * state ("ADS-B decoding", "ADS-B failed to run") says how much it decoded instead, else nothing.
  */
 export function detailOf(
 	verdictText: string,
@@ -171,8 +184,13 @@ export function detailOf(
 			t = t.slice(lead.length + 1)
 			break
 		}
-	t = t.replace(STATE_LEAD, "")
-	if (t.toLowerCase() === STATE_WORD[state].toLowerCase() || t === "")
+	t = t.replace(STATE_LEAD, "").trim()
+	const said = t.toLowerCase()
+	if (
+		t === "" ||
+		said === STATE_WORD[state].toLowerCase() ||
+		RESTATES[state].includes(said)
+	)
 		return eventsOut > 0 && (state === "decoding" || state === "listening")
 			? `${messages(eventsOut)} so far`
 			: ""
@@ -202,7 +220,11 @@ export function rowAction(
 	return null
 }
 
-/** The Activity chip a program's messages fall under (Activity's category chips); null when none fits. */
+/**
+ * The Activity chip a program's messages fall under (Activity's category chips); null when none fits. "Last
+ * decode" opens Activity on this chip: Activity's search has no decoder token yet (the core's query takes
+ * `decoderIds`, the drawer's tokens do not), so the chip is the closest filter it offers.
+ */
 const CHIP: Readonly<Record<string, CategoryChipId>> = {
 	readsb: "aircraft",
 	dump1090: "aircraft",
@@ -364,7 +386,7 @@ export interface IdentityInput {
 	/** What Identify named here, this session's answer or a proven discovery's, else null. */
 	named: { proto: string; sub: string } | null
 	/** The table's rows: the decoders whose band holds the frequency, in table order. */
-	rows: readonly Pick<BandTableRow, "name">[]
+	rows: readonly Pick<BandTableRow, "name" | "state">[]
 	/** The band plan's band and channel at the frequency, else null. */
 	band: string | null
 	channel: string | null
@@ -375,22 +397,32 @@ export interface IdentityInput {
 /**
  * What the card's header says the signal is, most specific first: the protocol heard, what Identify named (or a
  * proven discovery), the decoder whose band holds the frequency, the band plan's band, the demodulator. A decoder
- * whose band does not hold the frequency never names it (it is not in `rows`). `sub` adds the band (unless it is
- * already the name), the channel and the named detail.
+ * whose band does not hold the frequency never names it (it is not in `rows`). A decoder that is off names it only
+ * without a band plan band, and says so ("Pager (off)"): the band names what is there better than a decoder that
+ * is not listening. `sub` adds the band (unless it is already the name), the channel and the named detail.
  */
 export function cardIdentity(input: IdentityInput): {
 	proto: string
 	sub: string
 } {
+	const lead = input.rows[0]
+	const decoder =
+		lead === undefined
+			? null
+			: lead.state !== "off"
+				? lead.name
+				: input.band === null
+					? `${lead.name} (off)`
+					: null
 	const fromBand =
 		input.heard === null &&
 		input.named === null &&
-		input.rows[0] === undefined &&
+		decoder === null &&
 		input.band !== null
 	const proto =
 		input.heard ??
 		input.named?.proto ??
-		input.rows[0]?.name ??
+		decoder ??
 		(fromBand ? input.band : null) ??
 		input.modeLabel ??
 		"Unknown"

@@ -1,7 +1,8 @@
 /* Tuned card: "On this band" (BandDecoders.tsx). Layout only: materials, colours and states come from the
    ui.css recipes, the card's .wkf-state and .wkf-dot, and tokens. One tbody per decoder: a row of facts
    (decoder, state, last decode) over a full-width detail line with the action at its right. A decoder that
-   does not run has a hollow dot and says why in words. Below 280 px the table stacks. */
+   does not run has a hollow dot and says why in words. Below 280 px the table stacks; the markup's explicit
+   roles keep it a table for assistive tech. */
 @layer wk-app {
 	.wkf-onband {
 		container: wkf-onband / inline-size;
@@ -36,6 +37,10 @@
 	.wkf-bt .wkf-bt-last {
 		padding-right: 0;
 		text-align: right;
+	}
+	/* the detail and action headers are for screen readers: their row takes no space */
+	.wkf-bt thead .wkf-bt-sr > th {
+		padding: 0;
 	}
 	.wkf-bt-dec {
 		border-top: 1px solid var(--wk-line-08);

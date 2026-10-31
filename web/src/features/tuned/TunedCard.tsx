@@ -66,7 +66,7 @@ import { AUTO_IDENTIFY_DELAY_MS, shouldAutoIdentify } from "./auto-identify.ts"
 import { nowView, type NowView } from "./now.ts"
 import { tunedCardStore } from "./place.ts"
 import { signalBars, signalPresent } from "./signal.ts"
-import { DecoderVerdictsFeed, itemsFor } from "./verdicts.ts"
+import { DecoderVerdictsFeed, itemsFor, pendingFor } from "./verdicts.ts"
 
 /** The header reads states only: no action context. */
 const NO_ACTIONS = { scanJobId: null, budget: null } as const
@@ -343,7 +343,7 @@ export function TunedCard() {
 	const verdictState = useStore(verdictFeed)
 	const summaryItems = hz === null ? [] : itemsFor(verdictState, hz)
 	// the read for a new frequency is on its way: nothing is claimed about its decoders yet
-	const pending = hz !== null && !verdictState.legacy && verdictState.hz !== hz
+	const pending = hz !== null && pendingFor(verdictState, hz)
 	const bandRows =
 		hz === null ? [] : bandTable(summaryItems, decoders, hz, NO_ACTIONS, clock)
 	// the decoders whose band holds the frequency (never one whose channel only follows the tuner)

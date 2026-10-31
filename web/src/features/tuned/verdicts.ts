@@ -1,7 +1,8 @@
 // The core's decoder verdicts (GET /api/decoders/summary?hz=) for the tuned card's header and "On this band". The
 // summary is not pushed, so it is read on attach, when the card's frequency changes, shortly after any `decoder:*`
 // event, after a reconnect, and every POLL_MS while attached. A core without the route (404) or without verdicts
-// leaves `verdicts` and `items` null: the card reads statuses only.
+// leaves `verdicts` and `items` null: the card reads statuses only. Any other failed read (a 5xx, 401/403, a
+// timeout, the network) for a frequency with no answer yet reads statuses for it too, until a read succeeds.
 import type { DataLayer } from "../../data/index.ts"
 import { ApiError, Store } from "../../data/index.ts"
 import { verdictsById, type BandVerdict } from "./band-decoders.ts"
@@ -19,6 +20,8 @@ export interface VerdictsState {
 	hz: number | null
 	/** The core has no summary (404) or sent no verdicts: read statuses instead. */
 	legacy: boolean
+	/** The last read for `hz` failed with nothing read for it before: statuses stand in until one succeeds. */
+	failed: boolean
 }
 
 /**
@@ -29,8 +32,13 @@ export function itemsFor(
 	s: VerdictsState,
 	hz: number,
 ): readonly SummaryItem[] | null {
-	if (s.legacy) return null
+	if (s.legacy || (s.failed && s.hz === hz)) return null
 	return s.hz === hz && s.items !== null ? s.items : []
+}
+
+/** Whether the answer for `hz` is still on its way (nothing is claimed about its decoders yet). */
+export function pendingFor(s: VerdictsState, hz: number): boolean {
+	return !s.legacy && s.hz !== hz
 }
 
 export class DecoderVerdictsFeed extends Store<VerdictsState> {
@@ -44,7 +52,13 @@ export class DecoderVerdictsFeed extends Store<VerdictsState> {
 	private hz: number | null = null
 
 	constructor(data: Pick<DataLayer, "api" | "events">) {
-		super({ verdicts: null, items: null, hz: null, legacy: false })
+		super({
+			verdicts: null,
+			items: null,
+			hz: null,
+			legacy: false,
+			failed: false,
+		})
 		this.data = data
 	}
 
@@ -90,7 +104,10 @@ export class DecoderVerdictsFeed extends Store<VerdictsState> {
 		}, VERDICTS_SETTLE_MS)
 	}
 
-	/** Never rejects; a failed read keeps the last verdicts. */
+	/**
+	 * Never rejects. A failed read keeps the last verdicts for the same frequency; for a frequency with no
+	 * answer yet it records the frequency as failed, so the card reads statuses instead of waiting forever.
+	 */
 	async load(): Promise<void> {
 		if (this.unavailable) return
 		const seq = ++this.seq
@@ -105,13 +122,26 @@ export class DecoderVerdictsFeed extends Store<VerdictsState> {
 				items,
 				hz,
 				legacy: items === null,
+				failed: false,
 			})
 		} catch (error) {
+			if (seq !== this.seq) return
 			// a core older than the summary route: statuses only, never asked again
 			if (error instanceof ApiError && error.status === 404) {
 				this.unavailable = true
-				this.set({ verdicts: null, items: null, hz, legacy: true })
+				this.set({
+					verdicts: null,
+					items: null,
+					hz,
+					legacy: true,
+					failed: false,
+				})
+				return
 			}
+			// the last answer for this frequency still stands; a new frequency reads statuses until a read succeeds
+			const s = this.get()
+			if (s.hz === hz && s.items !== null && !s.failed) return
+			this.set({ verdicts: null, items: null, hz, legacy: false, failed: true })
 		}
 	}
 

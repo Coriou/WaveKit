@@ -219,19 +219,14 @@ export const MOCK_TUNED_REACH_HZ = 200_000
 const positive = (n: unknown): n is number =>
 	typeof n === "number" && Number.isFinite(n) && n > 0
 
-/**
- * The core's decoderCoversHz over the band assessment: within MOCK_TUNED_REACH_HZ of a target, between the
- * lowest and highest target, or inside a range widened by the reach. Every mock decoder has a band, so the
- * core's band-plan fallback for decoders without one is not needed here: no band reads false. Scanner probes
- * never cover; malformed values never match.
- */
-export function mockCoversHz(
-	d: Pick<DecoderInfo, "owner" | "bandAssessment">,
+/** The core's tuned-band rule (bandContainsTuned) over one band; malformed values never match. */
+function bandHolds(
+	targetsHz: readonly unknown[],
+	rangesHz: readonly { minHz: unknown; maxHz: unknown }[],
 	hz: number,
 ): boolean {
-	if (!positive(hz) || d.owner === "scanner") return false
 	const reach = MOCK_TUNED_REACH_HZ
-	const targets = (d.bandAssessment?.targetsHz ?? []).filter(positive)
+	const targets = targetsHz.filter(positive)
 	if (targets.some(t => Math.abs(t - hz) <= reach)) return true
 	if (
 		targets.length > 1 &&
@@ -239,7 +234,7 @@ export function mockCoversHz(
 		hz <= Math.max(...targets) + reach
 	)
 		return true
-	return (d.bandAssessment?.rangesHz ?? []).some(
+	return rangesHz.some(
 		r =>
 			positive(r.minHz) &&
 			positive(r.maxHz) &&
@@ -247,6 +242,29 @@ export function mockCoversHz(
 			hz >= r.minHz - reach &&
 			hz <= r.maxHz + reach,
 	)
+}
+
+/**
+ * The core's decoderCoversHz over the band assessment: within MOCK_TUNED_REACH_HZ of a target, between the
+ * lowest and highest target, or inside a range widened by the reach. Without an assessed band (before the first
+ * source capabilities) the same rule runs over the configured targets. The core's built-in band-plan fallback for
+ * a decoder with neither is not mirrored: here no band reads false. Scanner probes never cover; malformed values
+ * never match.
+ */
+export function mockCoversHz(
+	d: Pick<
+		DecoderInfo,
+		"owner" | "ephemeral" | "bandAssessment" | "targetFrequenciesHz"
+	>,
+	hz: number,
+): boolean {
+	if (!positive(hz) || d.owner === "scanner" || d.ephemeral === true)
+		return false
+	const targets = d.bandAssessment?.targetsHz ?? []
+	const ranges = d.bandAssessment?.rangesHz ?? []
+	if (targets.length > 0 || ranges.length > 0)
+		return bandHolds(targets, ranges, hz)
+	return bandHolds(d.targetFrequenciesHz ?? [], [], hz)
 }
 
 /**

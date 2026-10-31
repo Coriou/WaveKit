@@ -1,7 +1,8 @@
 // The tuned card's "On this band" (band-table.ts): a compact table of the decoders whose band holds the card's
 // frequency, from the core's summary (GET /api/decoders/summary?hz=). Each decoder is one row of facts (name and
 // program, state, last decode linking to Activity) over a line of detail with at most one action at its right;
-// one "Decoder settings" link sits at the foot. Below 280 px the table stacks (band-decoders.css).
+// one "Decoder settings" link sits at the foot. Below 280 px the table stacks (band-decoders.css) and keeps its
+// roles; the detail and action columns have visually hidden headers that each cell names.
 import type { DecoderInfo } from "@wavekit/api-types"
 import { useEffect, useId, useMemo, useState } from "react"
 
@@ -59,6 +60,13 @@ export function BandDecoders({
 	const budget = useStore(budgetStore, s => s.settings?.resolved ?? null)
 	const [busy, setBusy] = useState<string | null>(null)
 	const titleId = useId()
+	const col = {
+		decoder: `${titleId}-decoder`,
+		state: `${titleId}-state`,
+		last: `${titleId}-last`,
+		detail: `${titleId}-detail`,
+		action: `${titleId}-action`,
+	}
 
 	const rows = bandTable(items, decoders, hz, { scanJobId, budget }, now)
 	// the budget is read only while a row offers raising it, so a raise at the cap is not offered;
@@ -122,31 +130,77 @@ export function BandDecoders({
 			<h3 id={titleId} className="wk-label">
 				On this band
 			</h3>
-			<table className="wkf-bt">
+			{/* explicit roles keep the table's semantics when it stacks below 280 px (display: block); every cell
+			    names its headers, so the detail and the action read as theirs, not as "Decoder" or "State" */}
+			<table className="wkf-bt" role="table">
 				<caption className="wk-sr">
 					Decoders whose band holds {formatMHz(hz)} MHz
 				</caption>
-				<thead>
-					<tr>
-						<th scope="col">Decoder</th>
-						<th scope="col">State</th>
-						<th scope="col" className="wkf-bt-last">
+				<thead role="rowgroup">
+					<tr role="row">
+						<th scope="col" role="columnheader" id={col.decoder}>
+							Decoder
+						</th>
+						<th scope="col" role="columnheader" id={col.state}>
+							State
+						</th>
+						<th
+							scope="col"
+							role="columnheader"
+							id={col.last}
+							className="wkf-bt-last"
+						>
 							Last decode
 						</th>
 					</tr>
+					<tr role="row" className="wkf-bt-sr">
+						<th
+							scope="col"
+							role="columnheader"
+							id={col.detail}
+							colSpan={2}
+							className="wk-sr"
+						>
+							Detail
+						</th>
+						<th
+							scope="col"
+							role="columnheader"
+							id={col.action}
+							className="wk-sr"
+						>
+							Action
+						</th>
+					</tr>
 				</thead>
-				{rows.map(row => {
+				{rows.map((row, i) => {
 					const a = row.action
 					const link = a !== null && isLink(a)
 					const live = LIVE_STATES.has(row.state)
+					const rowId = `${titleId}-d${i}`
 					return (
-						<tbody key={row.id} className="wkf-bt-dec" data-state={row.state}>
-							<tr className="wkf-bt-main">
-								<th scope="row" className="wkf-bt-name">
+						<tbody
+							key={row.id}
+							role="rowgroup"
+							className="wkf-bt-dec"
+							data-state={row.state}
+						>
+							<tr role="row" className="wkf-bt-main">
+								<th
+									scope="row"
+									role="rowheader"
+									id={rowId}
+									headers={col.decoder}
+									className="wkf-bt-name"
+								>
 									<span className="wkf-bt-title">{row.name}</span>
 									<span className="wkf-bt-prog">{row.protocol}</span>
 								</th>
-								<td className="wkf-bt-state">
+								<td
+									role="cell"
+									headers={`${rowId} ${col.state}`}
+									className="wkf-bt-state"
+								>
 									<span
 										className="wkf-state"
 										data-tone={live ? "accent" : undefined}
@@ -159,7 +213,11 @@ export function BandDecoders({
 										{row.stateWord}
 									</span>
 								</td>
-								<td className="wkf-bt-last">
+								<td
+									role="cell"
+									headers={`${rowId} ${col.last}`}
+									className="wkf-bt-last"
+								>
 									{row.activityChip !== null && row.lastDecodeIso !== null ? (
 										<button
 											type="button"
@@ -183,12 +241,21 @@ export function BandDecoders({
 								</td>
 							</tr>
 							{(row.detail !== "" || a !== null) && (
-								<tr className="wkf-bt-sub">
-									<td colSpan={a === null ? 3 : 2} className="wkf-bt-detail">
+								<tr role="row" className="wkf-bt-sub">
+									<td
+										role="cell"
+										headers={`${rowId} ${col.detail}`}
+										colSpan={a === null ? 3 : 2}
+										className="wkf-bt-detail"
+									>
 										{row.detail}
 									</td>
 									{a !== null && (
-										<td className="wkf-bt-act">
+										<td
+											role="cell"
+											headers={`${rowId} ${col.action}`}
+											className="wkf-bt-act"
+										>
 											<Button
 												size="sm"
 												variant={link ? "ghost" : "tonal"}

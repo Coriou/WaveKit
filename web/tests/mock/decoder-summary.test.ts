@@ -244,6 +244,33 @@ describe("mock failures, names and coverage match the core's", () => {
 				})
 			}
 	})
+
+	it("reads configured targets before the first assessment, and never covers for a probe, as the core does", async () => {
+		const { decoderCoversHz } = await coreSummary()
+		const cases = [
+			{ targetFrequenciesHz: [1_090_000_000] },
+			{ targetFrequenciesHz: [466_000_000, 466_025_000] },
+			{ targetFrequenciesHz: [Number.NaN, -1] },
+			{ targetFrequenciesHz: [1_090_000_000], ephemeral: true as const },
+			{
+				targetFrequenciesHz: [466_000_000],
+				bandAssessment: {
+					verdict: "in-band" as const,
+					targetsHz: [1_090_000_000],
+				},
+			},
+			{},
+		]
+		for (const d of cases)
+			for (const hz of [
+				1_090_000_000, 1_090_200_000, 1_090_200_001, 466_012_500, 466_225_001,
+			])
+				expect({ d, hz, covers: mockCoversHz(d, hz) }).toEqual({
+					d,
+					hz,
+					covers: decoderCoversHz({ type: "readsb", ...d }, hz),
+				})
+	})
 })
 
 describe("mock GET /api/decoders/summary", () => {

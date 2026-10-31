@@ -120,7 +120,8 @@ is, then the frequency once, the mode and channel width, the decoders on its ban
 
 The header names the signal from the most specific thing known: the protocol last heard, what
 Identify or a proven discovery named, the decoder whose band holds the frequency, then the band
-plan's band. A decoder whose channel only follows the tuner (the pager decoder listening to the
+plan's band. A decoder that is off names it only where the band plan has no band there, and says
+so ("Pager (off)"). A decoder whose channel only follows the tuner (the pager decoder listening to the
 live audio, say) never names a frequency outside its band, and the card never says "Nothing decodes
 this frequency" while a decoder's band holds it. On a data band (the band plan's mode is RAW, such
 as ADS-B at 1090 MHz) or with the receiver set to RAW, the card shows **No audio (data band)**
@@ -129,8 +130,12 @@ instead of the demodulator and "Quiet".
 **On this band** is a table of the decoders whose band holds the frequency (within 200 kHz of one
 of their frequencies or of the span between them, or inside their band). The core decides which
 those are: the card asks `GET /api/decoders/summary?hz=<Hz>` and lists the items with
-`coversHz: true`, so an agent using the same endpoint sees the same list. Each decoder takes two
-lines:
+`coversHz: true`, so an agent using the same endpoint sees the same list. Right after the core
+starts, before the receiver reports its capabilities, a decoder's configured frequencies stand in
+for its band, so ADS-B shows at 1090 MHz from the first moment. If that request fails (the core
+answers an error, the request times out or the network drops), the card lists the decoders from
+their statuses instead of waiting, and takes the core's answer again once a request succeeds. Each
+decoder takes two lines:
 
 | Column      | Shows                                                                                                          |
 | ----------- | -------------------------------------------------------------------------------------------------------------- |

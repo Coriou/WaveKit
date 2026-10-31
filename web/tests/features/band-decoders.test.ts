@@ -17,6 +17,7 @@ import { rowAction } from "../../src/features/tuned/band-table.ts"
 import {
 	DecoderVerdictsFeed,
 	itemsFor,
+	pendingFor,
 	VERDICTS_SETTLE_MS,
 } from "../../src/features/tuned/verdicts.ts"
 
@@ -417,6 +418,65 @@ describe("verdicts feed", () => {
 		expect(feed.get().verdicts).toBeNull()
 		// statuses only from now on
 		expect(itemsFor(feed.get(), 1_090_000_000)).toBeNull()
+		detach()
+	})
+
+	it("reads statuses for a frequency whose read fails, and the core's answer once a read succeeds", async () => {
+		const fail = (status: number) =>
+			new ApiError({
+				status,
+				code: null,
+				message: "Server error",
+				body: null,
+				method: "GET",
+				path: "/api/decoders/summary",
+			})
+		const answer = [
+			{
+				id: "readsb",
+				protocol: "readsb",
+				verdict: { code: "decoding", text: "ADS-B decoding", actions: [] },
+				coversHz: true,
+			},
+		]
+		let next: () => Promise<unknown> = async () => {
+			throw fail(500)
+		}
+		const get = vi.fn(async () => next())
+		const { data } = fakeData(get)
+		const feed = new DecoderVerdictsFeed(data)
+		feed.follow(1_090_000_000)
+		const detach = feed.attach()
+		await vi.waitFor(() => expect(feed.get().failed).toBe(true))
+		// not pending: the card falls back to statuses instead of "Checking…"
+		expect(pendingFor(feed.get(), 1_090_000_000)).toBe(false)
+		expect(itemsFor(feed.get(), 1_090_000_000)).toBeNull()
+		// another frequency is still pending its own read
+		expect(pendingFor(feed.get(), 466_000_000)).toBe(true)
+		next = async () => answer
+		await feed.load()
+		expect(feed.get().failed).toBe(false)
+		expect(itemsFor(feed.get(), 1_090_000_000)?.[0]?.id).toBe("readsb")
+		// a later failure (401, a timeout) keeps the answer for the same frequency
+		next = async () => {
+			throw fail(401)
+		}
+		await feed.load()
+		expect(itemsFor(feed.get(), 1_090_000_000)?.[0]?.id).toBe("readsb")
+		next = async () => {
+			throw new TypeError("network down")
+		}
+		await feed.load()
+		expect(itemsFor(feed.get(), 1_090_000_000)?.[0]?.id).toBe("readsb")
+		// a new frequency whose read fails reads statuses, never the old frequency's answer
+		feed.follow(466_000_000)
+		await vi.waitFor(() => expect(feed.get().hz).toBe(466_000_000))
+		expect(itemsFor(feed.get(), 466_000_000)).toBeNull()
+		expect(pendingFor(feed.get(), 466_000_000)).toBe(false)
+		// still asked: a failure is not a core without the route
+		const calls = get.mock.calls.length
+		await feed.load()
+		expect(get).toHaveBeenCalledTimes(calls + 1)
 		detach()
 	})
 })

@@ -282,8 +282,10 @@ function planListsAt(
 
 /**
  * Whether the decoder's own band holds `hz`: the core's tuned-band rule
- * (bandContainsTuned) over its band assessment's targets and ranges. A decoder
- * with no known band covers `hz` only when a built-in band plan range there
+ * (bandContainsTuned) over its band assessment's targets and ranges. Before
+ * the first assessment (no source capabilities yet, at boot) or when it names
+ * no band, the same rule runs over the configured targets. A decoder with no
+ * known band either covers `hz` only when a built-in band plan range there
  * lists one of its protocols. Placements (a channel that follows the tuner)
  * never count; scanner probes never cover; anything malformed reads false.
  */
@@ -300,6 +302,15 @@ export function decoderCoversHz(status: DecoderStatus, hz: number): boolean {
 	if (targetsHz.length > 0 || rangesHz.length > 0)
 		return bandContainsTuned(
 			{ basis: band?.basis ?? "configured", targetsHz, rangesHz },
+			hz,
+		)
+	const rawConfigured: unknown = status.targetFrequenciesHz
+	const configured = Array.isArray(rawConfigured)
+		? (rawConfigured as unknown[]).filter(positive)
+		: []
+	if (configured.length > 0)
+		return bandContainsTuned(
+			{ basis: "configured", targetsHz: configured, rangesHz: [] },
 			hz,
 		)
 	const protocols = Object.hasOwn(DECODER_PROTOCOLS, status.type)
