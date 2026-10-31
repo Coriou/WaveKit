@@ -9,6 +9,7 @@ import {
 	projectJson,
 } from "./projection.js"
 import type {
+	DecodeCoalesced,
 	DecodeEnvelope,
 	DecodeEnvelopeContext,
 	DecodePresentation,
@@ -128,6 +129,13 @@ const outputSchema = z
 		type: text(64),
 	})
 	.strict()
+const coalescedSchema = z
+	.object({
+		receptions: z.number().int().min(2).max(Number.MAX_SAFE_INTEGER),
+		firstSeenAt: timestamp,
+		lastSeenAt: timestamp,
+	})
+	.strict()
 const metadataSchema = z
 	.object({
 		version: z.literal(1),
@@ -155,6 +163,7 @@ const metadataSchema = z
 		fields: fieldsSchema,
 		provenance: provenanceSchema,
 		refs: refsSchema.optional(),
+		coalesced: coalescedSchema.optional(),
 	})
 	.strict()
 
@@ -240,6 +249,7 @@ interface EnvelopeBase {
 	outputType: string
 	provenance: unknown
 	refs: unknown
+	coalesced?: unknown
 }
 
 function assemble(
@@ -266,6 +276,7 @@ function assemble(
 			fields: display.fields ?? [],
 			provenance: base.provenance,
 			...(base.refs === undefined ? {} : { refs: base.refs }),
+			...(base.coalesced === undefined ? {} : { coalesced: base.coalesced }),
 		},
 		decodedData,
 	)
@@ -379,6 +390,9 @@ export function withPresentation(
 				fields: display.fields ?? [],
 				provenance: envelope.provenance,
 				...(envelope.refs === undefined ? {} : { refs: envelope.refs }),
+				...(envelope.coalesced === undefined
+					? {}
+					: { coalesced: envelope.coalesced }),
 				decodedData: envelope.decodedData,
 			} as DecodeEnvelope
 			validatedBytes.set(grown, bytes)
@@ -394,9 +408,51 @@ export function withPresentation(
 				outputType: envelope.outputType,
 				provenance: envelope.provenance,
 				refs: envelope.refs,
+				coalesced: envelope.coalesced,
 			},
 			display,
 			envelope.decodedData,
+		)
+	} catch {
+		return invalidEnvelope()
+	}
+}
+
+/**
+ * The envelope with its decodedData replaced by an entity's merged latest state
+ * (storage/coalesce.ts) and, when several receptions were merged, their
+ * `coalesced` count and span. Keeps the presentation it had; validates the
+ * metadata and the size like create. Throws like create when rejected.
+ */
+export function withMergedData(
+	envelope: DecodeEnvelope,
+	decodedData: JsonValue,
+	coalesced: DecodeCoalesced | undefined,
+): DecodeEnvelope {
+	try {
+		return assemble(
+			{
+				eventId: envelope.eventId,
+				producedAt: envelope.producedAt,
+				receivedAt: envelope.receivedAt,
+				decoderId: envelope.decoderId,
+				decoderType: envelope.decoderType,
+				outputType: envelope.outputType,
+				provenance: envelope.provenance,
+				refs: envelope.refs,
+				coalesced,
+			},
+			{
+				protocol: envelope.protocol,
+				category: envelope.category,
+				entityKey: envelope.entityKey,
+				...(envelope.position === undefined
+					? {}
+					: { position: envelope.position }),
+				title: envelope.title,
+				fields: [...envelope.fields],
+			},
+			projectJson(decodedData, false, false),
 		)
 	} catch {
 		return invalidEnvelope()

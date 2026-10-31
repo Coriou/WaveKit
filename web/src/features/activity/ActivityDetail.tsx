@@ -314,6 +314,18 @@ export function ActivityDetail({
 							</dd>
 						</div>
 					)}
+					{item?.coalesced && (
+						<div className="wka-field">
+							<dt>Merged</dt>
+							<dd>
+								{item.coalesced.receptions} receptions since{" "}
+								<time dateTime={item.coalesced.firstSeenAt}>
+									{clockText(item.coalesced.firstSeenAt)}
+								</time>
+								, latest state
+							</dd>
+						</div>
+					)}
 					{stack && stack.members.length > 1 && (
 						<div className="wka-field">
 							<dt>Seen (loaded list)</dt>

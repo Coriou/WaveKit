@@ -53,8 +53,8 @@ export const SIMULCAST_MS = 2_000
  * while it is still "the same thing going on", and stay short enough that a new episode starts a new row.
  */
 export const FAMILY_RULES: Readonly<Record<FoldFamily, FamilyRule>> = {
-	// readsb sends 1-30 messages/s per aircraft; the core stores a position-only update at most once per
-	// 60 s per aircraft (ACTIVITY_POSITION_COALESCE_MS). 2 × 60 s tolerates one missed window; an aircraft
+	// readsb sends 1-30 messages/s per aircraft; the core merges them into one row per aircraft per 60 s
+	// (ACTIVITY_POSITION_COALESCE_MS; the row's `coalesced` counts them). 2 × 60 s tolerates one missed window; an aircraft
 	// gone for over 2 min (out of range, landed) starts a new row. ICAO addresses are global: AIS-like
 	// channel changes must not split, so no frequency.
 	aircraft: { gapMs: 120_000, perChannel: false },
@@ -228,6 +228,21 @@ function computeKey(s: ActivitySummary): string {
 	return `${family}|${s.kind}|${s.protocol ?? ""}|${identity}${channel}${content}`
 }
 
+/** Receptions one row stands for: the core merges an entity's repeats into one row (`coalesced`). */
+export function receptionsOf(s: ActivitySummary): number {
+	const n = s.coalesced?.receptions
+	return typeof n === "number" && Number.isFinite(n) && n > 1
+		? Math.floor(n)
+		: 1
+}
+
+/** The first reception a row stands for: its `coalesced.firstSeenAt` when earlier, else its own time. */
+export function firstSeenOf(s: ActivitySummary): number {
+	const t = timeOf(s)
+	const first = s.coalesced ? Date.parse(s.coalesced.firstSeenAt) : Number.NaN
+	return Number.isFinite(first) && first < t ? first : t
+}
+
 /** When it was heard: producedAt, else receivedAt, else 0 (an unparseable time never splits a stack). */
 export function timeOf(s: ActivitySummary): number {
 	const e = entryOf(s)
@@ -293,8 +308,11 @@ export interface ActivityStack {
 	 * latest of them wins): never from a row heard after it, even one stored earlier.
 	 */
 	known: KnownIdentity
+	/** From the earliest reception merged into its oldest row (the core's `coalesced.firstSeenAt`). */
 	firstMs: number
 	lastMs: number
+	/** Receptions the rows stand for: each row's `coalesced.receptions`, else 1. At least members.length. */
+	receptions: number
 	/** The channels it was heard on (to 1 kHz, ascending): more than one for a simulcast page. */
 	channelsHz: readonly number[]
 }
@@ -546,8 +564,9 @@ function makeStack(
 				? { ...latest, title: LINK_STACK_TITLE, entityKey: null }
 				: withIdentity(latest, known),
 		known,
-		firstMs: timeOf(oldest),
+		firstMs: firstSeenOf(oldest),
 		lastMs: timeOf(byTime[byTime.length - 1] as ActivitySummary),
+		receptions: members.reduce((n, m) => n + receptionsOf(m), 0),
 		channelsHz: [...khz.entries()].sort((a, b) => a[0] - b[0]).map(e => e[1]),
 	}
 }
@@ -1027,8 +1046,10 @@ export function explainStack(stack: ActivityStack): StackExplanation {
 	const every = regularIntervalMs(stack)
 	const repeats =
 		every !== null ? `, repeats about every ${spanText(every)}` : ""
-	const times = `${n} time${n === 1 ? "" : "s"}`
-	const over = n > 1 ? ` over ${spanText(span)}` : ""
+	// merged rows: count what was heard, not how many rows it was stored as
+	const heard = Math.max(n, stack.receptions)
+	const times = `${heard} time${heard === 1 ? "" : "s"}`
+	const over = heard > 1 ? ` over ${spanText(span)}` : ""
 	const v = stack.view
 	switch (stack.family) {
 		case "pager":
@@ -1054,18 +1075,18 @@ export function explainStack(stack: ActivityStack): StackExplanation {
 		case "aircraft":
 			return {
 				headline:
-					n > 1
+					heard > 1
 						? `Likely one aircraft in range for ${spanText(span)} (${times})`
 						: "One aircraft decode",
-				tone: n > 1 ? "likely" : "seen",
+				tone: heard > 1 ? "likely" : "seen",
 			}
 		case "vessel":
 			return {
 				headline:
-					n > 1
+					heard > 1
 						? `Likely one vessel in range for ${spanText(span)} (${times})`
 						: "One vessel report",
-				tone: n > 1 ? "likely" : "seen",
+				tone: heard > 1 ? "likely" : "seen",
 			}
 		case "call":
 			return {

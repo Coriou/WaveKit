@@ -6,6 +6,7 @@
 import type { ActivityPublisher } from "../../decoders/manager.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
+import type { ActivityPresenter } from "./ingress.js"
 import type { ActivityQueryService } from "./storage/contract.js"
 import type {
 	ActivityRetentionPolicy,
@@ -358,7 +359,12 @@ export async function startActivityRuntime(
 				}
 				// The store presents only a kept reception; the callback reuses that result.
 				let presented: DecodeEnvelope | undefined
-				const lazy = (): DecodeEnvelope => (presented ??= present())
+				// A held reception may be presented later, merged into its entity's row;
+				// only a reception kept now reaches onEnvelope.
+				const lazy: ActivityPresenter = merged =>
+					merged === undefined
+						? (presented ??= present())
+						: (presented = present(merged))
 				const result = store.admit(envelope, lazy)
 				if (!result.admitted) return
 				try {

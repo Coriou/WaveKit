@@ -1,9 +1,14 @@
 import { randomUUID as cryptoRandomUUID } from "node:crypto"
 import type { DecoderOutput } from "../../decoders/types.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
-import { createDecodeEnvelope, withPresentation } from "./envelope.js"
+import {
+	createDecodeEnvelope,
+	withMergedData,
+	withPresentation,
+} from "./envelope.js"
 import { presentDecoderOutputResult } from "./presentation/registry.js"
 import { resolveProvenance } from "./provenance/resolve.js"
+import type { CoalesceMerge } from "./storage/coalesce.js"
 import type {
 	ActivityProvenanceLookup,
 	DecodeEnvelope,
@@ -40,9 +45,11 @@ export interface ActivityIngress {
 
 /**
  * Returns the envelope with its presentation, or the given presentation-free
- * envelope when presenting fails (counted). Never throws.
+ * envelope when presenting fails (counted). Never throws. Given an entity's
+ * merged latest state (storage/coalesce.ts), presents that data instead and
+ * carries its `coalesced` span.
  */
-export type ActivityPresenter = () => DecodeEnvelope
+export type ActivityPresenter = (merged?: CoalesceMerge) => DecodeEnvelope
 
 export interface ActivityIngressOptions {
 	/**
@@ -184,7 +191,33 @@ export function createActivityIngress(
 				return plain
 			}
 			let presented: DecodeEnvelope | undefined
-			const present: ActivityPresenter = () => {
+			const presentMerged = (merged: CoalesceMerge): DecodeEnvelope => {
+				let base: DecodeEnvelope
+				try {
+					base = withMergedData(plain, merged.decodedData, merged.coalesced)
+				} catch (err) {
+					return failed(err)
+				}
+				try {
+					const attempt = presentDecoderOutputResult(
+						{ ...output, data: merged.decodedData },
+						decoderType,
+						context,
+						base,
+					)
+					if (attempt.error !== undefined) {
+						failed(attempt.error)
+						return base
+					}
+					if (attempt.presentation === undefined) return base
+					return withPresentation(base, attempt.presentation)
+				} catch (err) {
+					failed(err)
+					return base
+				}
+			}
+			const present: ActivityPresenter = merged => {
+				if (merged !== undefined) return presentMerged(merged)
 				if (presented !== undefined) return presented
 				presented = plain
 				try {

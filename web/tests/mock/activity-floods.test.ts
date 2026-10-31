@@ -140,6 +140,14 @@ describe("mock server with floods", () => {
 		// the seeded window ends 1 s before now: 179 s × 2.5/s = 447.5
 		expect(planes.items.length).toBeGreaterThanOrEqual(447)
 		expect(planes.items.length).toBeLessThanOrEqual(448)
+		// every 10th row is a merged one: 10 receptions 400 ms apart, ending at the row
+		const mergedRow = planes.items.find(i => i.coalesced !== undefined)
+		expect(mergedRow?.coalesced?.receptions).toBe(10)
+		expect(
+			Date.parse(mergedRow?.receivedAt ?? "") -
+				Date.parse(mergedRow?.coalesced?.firstSeenAt ?? ""),
+		).toBe(9 * FLOOD_AIRCRAFT_INTERVAL_MS)
+		expect(mergedRow?.coalesced?.lastSeenAt).toBe(mergedRow?.receivedAt)
 	})
 
 	it("filters by decoderIds like the core (the tuned card's Last decode)", async () => {

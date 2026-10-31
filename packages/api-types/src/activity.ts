@@ -69,6 +69,19 @@ export interface DecodeEnvelopeContext {
 	refs?: DecodeReferences
 }
 
+/**
+ * Per-entity coalescing (src/core/activity/storage/coalesce.ts): the row is the entity's merged
+ * latest state over several receptions. Absent when the row is one reception.
+ */
+export interface DecodeCoalesced {
+	/** Receptions merged into this row, its own included (at least 2); `receptions - 1` were not stored on their own. */
+	receptions: number
+	/** receivedAt of the first merged reception. */
+	firstSeenAt: string
+	/** receivedAt of the latest merged reception (the row's own receivedAt). */
+	lastSeenAt: string
+}
+
 /** A decoder event, including lifecycle/telemetry; not accepted scanner evidence. */
 export interface DecodeEnvelope {
 	version: 1
@@ -95,6 +108,8 @@ export interface DecodeEnvelope {
 	fields: readonly DecodeField[]
 	provenance: DecodeProvenance
 	refs?: DecodeReferences
+	/** Present when the row merges several receptions of one entity. */
+	coalesced?: DecodeCoalesced
 	/** Complete JSON projection of decoded data, not original protocol wire output. */
 	decodedData: JsonValue
 }
@@ -210,6 +225,8 @@ export interface ActivitySummary {
 	/** First fields that fit the 4 KiB budget. */
 	fields: DecodeEnvelope["fields"]
 	position?: DecodeEnvelope["position"]
+	/** The envelope's `coalesced`: receptions merged into this row and their first/last receivedAt. */
+	coalesced?: DecodeEnvelope["coalesced"]
 }
 
 /** ref_type values; ref_value is the matching provenance/refs string. */
@@ -335,7 +352,10 @@ export interface ActivityStoreStats {
 		number
 	>
 	excludedTelemetry: number
-	/** Redundant position/presence receptions not stored inside their entity's window (WG1). Optional for older cores. */
+	/**
+	 * Receptions merged into their entity's latest state instead of a row of their own (aircraft,
+	 * ship, APRS and mesh positions, sensor readings). Optional for older cores.
+	 */
 	coalescedPositions?: number
 	queueDepth: number
 	queueBytes: number

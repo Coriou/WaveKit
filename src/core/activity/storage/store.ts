@@ -26,6 +26,7 @@ import { acquireActivityLock, restrictPrivate } from "./lock.js"
 import type { ActivityProbeResult } from "./probe.js"
 import { openSqliteFile, probeActivityRuntime } from "./probe.js"
 import type { BuiltActivityRow } from "./row.js"
+import type { CoalescePresenter } from "./coalesce.js"
 import type { DecodeEnvelope } from "../types.js"
 import type { Logger } from "../../../utils/logger.js"
 import { isActivityWorkerResponse } from "./writer-protocol.js"
@@ -442,6 +443,7 @@ class ActivityStore implements ActivityStoreHandle {
 	private batchTimer: ReturnType<typeof setTimeout> | undefined
 	private pauseTimer: ReturnType<typeof setTimeout> | undefined
 	private gapTimer: ReturnType<typeof setTimeout> | undefined
+	private coalesceTimer: ReturnType<typeof setTimeout> | undefined
 	private flight: Promise<void> | undefined
 	private closing: Promise<void> | undefined
 
@@ -490,9 +492,12 @@ class ActivityStore implements ActivityStoreHandle {
 	}
 
 	/** `present` runs only for a reception that is kept; see ActivityIngress.admit. */
-	admit(envelope: DecodeEnvelope, present?: () => DecodeEnvelope): AdmitResult {
+	admit(envelope: DecodeEnvelope, present?: CoalescePresenter): AdmitResult {
+		const before = this.ingress.admitted
 		const result = this.ingress.admit(envelope, present)
-		if (result.admitted) {
+		this.armCoalesceTimer()
+		// A held entity row can be queued even when this reception is held.
+		if (result.admitted || this.ingress.admitted !== before) {
 			this.onQueued()
 			if (!this.ingress.hasOpenEpisode()) this.clearGapTimer()
 		} else if (
@@ -578,6 +583,7 @@ class ActivityStore implements ActivityStoreHandle {
 		this.clearBatchTimer()
 		this.clearPause()
 		this.clearGapTimer()
+		this.clearCoalesceTimer()
 		this.logger.error("activity writer stopped")
 	}
 
@@ -590,6 +596,7 @@ class ActivityStore implements ActivityStoreHandle {
 		this.clearBatchTimer()
 		this.clearPause()
 		this.clearGapTimer()
+		this.clearCoalesceTimer()
 		this.logger.error("activity write timed out")
 	}
 
@@ -809,6 +816,39 @@ class ActivityStore implements ActivityStoreHandle {
 		this.gapTimer.unref()
 	}
 
+	/** Wakes when the first held entity row is due (coalesce.ts), so a silent entity's last state is stored. */
+	private armCoalesceTimer(): void {
+		if (this.coalesceTimer || this.stopped || this.draining) return
+		const due = this.ingress.nextCoalesceDueAt()
+		if (due === undefined) return
+		this.coalesceTimer = setTimeout(
+			() => {
+				this.coalesceTimer = undefined
+				this.onCoalesceTimer()
+			},
+			Math.max(0, due - this.now()),
+		)
+		this.coalesceTimer.unref()
+	}
+
+	private onCoalesceTimer(): void {
+		if (this.stopped || this.draining) return
+		const before = this.ingress.admitted
+		this.ingress.flushCoalesced(this.now())
+		if (this.ingress.admitted !== before) {
+			this.onQueued()
+			if (!this.ingress.hasOpenEpisode()) this.clearGapTimer()
+		}
+		this.armGapTimer()
+		this.armCoalesceTimer()
+	}
+
+	private clearCoalesceTimer(): void {
+		if (!this.coalesceTimer) return
+		clearTimeout(this.coalesceTimer)
+		this.coalesceTimer = undefined
+	}
+
 	private armTimer(): void {
 		if (this.batchTimer || this.stopped) return
 		this.batchTimer = setTimeout(() => {
@@ -865,6 +905,8 @@ class ActivityStore implements ActivityStoreHandle {
 	}
 
 	private async shutdown(): Promise<void> {
+		// Held entity rows are queued first, so a close keeps each entity's last state.
+		if (!this.stopped) this.ingress.flushAllCoalesced()
 		this.writerState = "stopped"
 		this.stopped = true
 		this.draining = true
@@ -872,6 +914,7 @@ class ActivityStore implements ActivityStoreHandle {
 		this.clearBatchTimer()
 		this.clearPause()
 		this.clearGapTimer()
+		this.clearCoalesceTimer()
 		try {
 			if (this.flight) await this.flight
 			const deadline = Date.now() + this.limits.closeTimeoutMs

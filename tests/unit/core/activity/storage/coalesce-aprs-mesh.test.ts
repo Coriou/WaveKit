@@ -156,6 +156,12 @@ describe("APRS and mesh coalescing specs", () => {
 				"track",
 				"true_heading",
 				"verticalRate",
+				// readsb reception metadata (each SBS line carries a fresh content hash)
+				"jsonSourceTimestamp",
+				"modeS",
+				"readsbFormat",
+				"sbsContentId",
+				"sbsSourceTimestamp",
 			].sort(),
 		)
 		const ship = requireSpec("ship")
@@ -183,6 +189,8 @@ describe("APRS and mesh coalescing specs", () => {
 				"mmsi",
 				"sog",
 				"timestamp",
+				// AIS radio channel A/B: vessels alternate between them
+				"channel",
 			].sort(),
 		)
 	})

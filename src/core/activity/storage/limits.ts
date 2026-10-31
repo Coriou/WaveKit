@@ -35,11 +35,15 @@ export interface ActivityLimits {
 	/** Sustained overload emits at most one ingestion-gap row per this interval. */
 	gapMaxIntervalMs: number
 	/**
-	 * Position-only receptions (aircraft, ship) of one entity are stored at most
-	 * once per this window; 0 stores every one (WG1 req 7.6).
+	 * Redundant receptions of one tracked entity (aircraft, ship, APRS and mesh
+	 * position, sensor reading) are merged into one row per this window; 0
+	 * stores every one (WG1 req 7.6, storage/coalesce.ts).
 	 */
 	positionCoalesceMs: number
-	/** Entities tracked for coalescing; the least recently stored are evicted. */
+	/**
+	 * Entities tracked for coalescing; the least recently stored are evicted and
+	 * their held receptions flushed as a row.
+	 */
 	positionCoalesceMaxEntities: number
 	/**
 	 * Which rows the row and byte caps remove (web-gaps-3 req 1.1). Age pruning is the
@@ -65,6 +69,18 @@ export const ACTIVITY_RETENTION_POLICIES: readonly ActivityRetentionPolicy[] = [
 
 /** One stored position-only update per aircraft or vessel per minute (WG1 req 7.6). */
 export const ACTIVITY_POSITION_COALESCE_MS = 60_000
+
+/**
+ * Tracked entities. Busy sites see at most about 600 aircraft, 2,000 vessels,
+ * a few hundred APRS stations and sensors at once (about 3,000 together), so
+ * 4,096 holds them all with headroom; past it the least recently stored entity
+ * is evicted and its held receptions are stored, so nothing is lost, only
+ * merged less. The admission bench measured about 1.3 KB per tracked aircraft
+ * plus 1.0 KB while it holds a reception (SBS envelopes; the presenter closure
+ * adds the decoder output, about 0.5 KB): 4,096 × (1.3 + 1.5) KB ≈ 11.5 MB at
+ * most, where the old 20,000 would allow about 56 MB.
+ */
+export const ACTIVITY_POSITION_COALESCE_MAX_ENTITIES = 4_096
 
 /**
  * The single source of default limits. Activity is on by default (WG1 req 7),
@@ -104,7 +120,7 @@ export const ACTIVITY_LIMIT_DEFAULTS: Readonly<ActivityLimits> = Object.freeze({
 	gapQuietMs: 5_000,
 	gapMaxIntervalMs: 60_000,
 	positionCoalesceMs: ACTIVITY_POSITION_COALESCE_MS,
-	positionCoalesceMaxEntities: 20_000,
+	positionCoalesceMaxEntities: ACTIVITY_POSITION_COALESCE_MAX_ENTITIES,
 	retentionPolicy: ACTIVITY_RETENTION_POLICY_DEFAULT,
 })
 

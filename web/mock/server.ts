@@ -40,7 +40,7 @@ import type {
 	TunerState,
 } from "@wavekit/api-types"
 import type { FloodEvent } from "./activity-floods.ts"
-import { floodEvents } from "./activity-floods.ts"
+import { FLOOD_AIRCRAFT_INTERVAL_MS, floodEvents } from "./activity-floods.ts"
 import { createAudioServer } from "./audio.ts"
 import {
 	buildDecoderSummaries,
@@ -495,6 +495,7 @@ function recordOf(item: ActivitySummary, decoded?: JsonValue): ActivityRecord {
 		},
 		decodedData,
 		...(item.position ? { position: item.position } : {}),
+		...(item.coalesced ? { coalesced: item.coalesced } : {}),
 	}
 	return { ...base, kind: "decoder-reception", payload }
 }
@@ -1009,6 +1010,17 @@ export async function buildMockServer(
 			commitSeq: String(seq),
 			producedAt: iso,
 			receivedAt: iso,
+			...(f.receptions !== undefined && f.receptions > 1
+				? {
+						coalesced: {
+							receptions: f.receptions,
+							firstSeenAt: new Date(
+								at - (f.receptions - 1) * FLOOD_AIRCRAFT_INTERVAL_MS,
+							).toISOString(),
+							lastSeenAt: iso,
+						},
+					}
+				: {}),
 		}
 		decodedById.set(summary.eventId, f.data)
 		if (decodedById.size > 2500) {

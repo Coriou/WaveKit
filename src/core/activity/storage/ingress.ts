@@ -10,7 +10,13 @@ import type { ActivityLimits } from "./limits.js"
 import { buildActivityRow } from "./row.js"
 import type { BuiltActivityRow } from "./row.js"
 import { isTelemetryOutput } from "./telemetry.js"
-import { PositionCoalescer, type CoalesceUndo } from "./coalesce.js"
+import { PositionCoalescer } from "./coalesce.js"
+import type {
+	CoalesceMerge,
+	CoalescePresenter,
+	CoalesceUndo,
+} from "./coalesce.js"
+import { withMergedData } from "../envelope.js"
 import { FloodDedupe, floodKeyOf } from "./flood-dedupe.js"
 import type { FloodKey } from "./flood-dedupe.js"
 import type { DecodeEnvelope } from "../types.js"
@@ -85,12 +91,54 @@ export class ActivityIngress {
 		this.coalescer = new PositionCoalescer(
 			limits.positionCoalesceMs,
 			limits.positionCoalesceMaxEntities,
+			now,
 		)
 	}
 
-	/** Position-only receptions not stored inside their entity's window. */
+	/** Receptions merged into their entity's latest state instead of a row of their own. */
 	get coalescedPositions(): number {
 		return this.coalescer.coalesced
+	}
+
+	/** Store-clock time the next held entity row is due, if any. */
+	nextCoalesceDueAt(): number | undefined {
+		return this.coalescer.nextDueAt()
+	}
+
+	/**
+	 * Queues a row for each entity whose held receptions are due (or whose
+	 * entity was evicted). O(rows queued): the held entities are in due order.
+	 * Rejections count like any reception (rate-limited, queue-full, ...).
+	 */
+	flushCoalesced(now: number): void {
+		if (this.closed) return
+		for (;;) {
+			const flush = this.coalescer.takeDue(now)
+			if (!flush) return
+			this.enqueueReception(
+				flush.envelope,
+				flush.present,
+				flush.merged,
+				flush.commit,
+				undefined,
+				now,
+			)
+		}
+	}
+
+	/** Shutdown: every held entity row, due or not, before the queue drains. */
+	flushAllCoalesced(): void {
+		if (this.closed) return
+		const now = this.now()
+		for (const flush of this.coalescer.takeAll())
+			this.enqueueReception(
+				flush.envelope,
+				flush.present,
+				flush.merged,
+				flush.commit,
+				undefined,
+				now,
+			)
 	}
 
 	/** Meshtastic flood copies not stored (req 6.6); not a loss. */
@@ -102,9 +150,11 @@ export class ActivityIngress {
 	 * `present`, when given, is called only after coalescing and admission
 	 * have kept the reception, and its envelope is the one stored. Coalescing
 	 * reads decodedData, outputType, decoderId and receivedAt, which a
-	 * presentation never changes.
+	 * presentation never changes. For a tracked entity it is called with the
+	 * entity's merged latest state (coalesce.ts) and must present that data;
+	 * a held reception keeps it until its entity's row is stored.
 	 */
-	admit(envelope: DecodeEnvelope, present?: () => DecodeEnvelope): AdmitResult {
+	admit(envelope: DecodeEnvelope, present?: CoalescePresenter): AdmitResult {
 		if (this.closed) {
 			this.dropped.closed++
 			return { admitted: false, reason: "closed" }
@@ -121,24 +171,40 @@ export class ActivityIngress {
 				return { admitted: false, reason: "flood-copy" }
 			}
 		}
-		const coalesce = this.coalescer.decide(envelope)
+		const now = this.now()
+		// O(1) when nothing is due: the next held entity row is at the front.
+		this.flushCoalesced(now)
+		const coalesce = this.coalescer.decide(envelope, present)
 		if (!coalesce.store) {
 			this.coalescer.noteCoalesced()
 			return { admitted: false, reason: "coalesced" }
 		}
-		const now = this.now()
+		const result = this.enqueueReception(
+			envelope,
+			present,
+			coalesce.merged,
+			coalesce.commit,
+			floodKey,
+			now,
+		)
+		// An evicted entity's held receptions are flushed right away.
+		if (result.admitted) this.flushCoalesced(now)
+		return result
+	}
+
+	private enqueueReception(
+		envelope: DecodeEnvelope,
+		present: CoalescePresenter | undefined,
+		merged: CoalesceMerge | undefined,
+		commit: () => CoalesceUndo,
+		floodKey: FloodKey | undefined,
+		now: number,
+	): AdmitResult {
 		if (this.paused) return this.rejectEnvelope(envelope, "store-paused")
 		if (this.itemOverflow()) return this.rejectEnvelope(envelope, "queue-full")
 		if (!this.takeTokens(envelope.decoderId, now))
 			return this.rejectEnvelope(envelope, "rate-limited")
-		let stored = envelope
-		if (present) {
-			try {
-				stored = present()
-			} catch {
-				stored = envelope
-			}
-		}
+		const stored = storedEnvelope(envelope, present, merged)
 		const row = buildActivityRow({
 			version: ACTIVITY_RECORD_VERSION,
 			eventId: stored.eventId,
@@ -157,7 +223,7 @@ export class ActivityIngress {
 		this.queue.push(row)
 		this.queueBytes += row.recordBytes
 		this.admitted++
-		this.coalesceUndo.set(row.eventId, coalesce.commit())
+		this.coalesceUndo.set(row.eventId, commit())
 		if (floodKey) {
 			this.flood.remember(floodKey, row.eventId)
 			this.floodPending.set(row.eventId, floodKey.key)
@@ -548,6 +614,41 @@ export class ActivityIngress {
 		)
 		this.decoders.set(decoderId, created)
 		return created
+	}
+}
+
+/**
+ * The envelope a kept reception is stored as: presented with the entity's
+ * merged state when there is one, else as received. A presenter that throws
+ * falls back to the unpresented merge, which keeps the envelope's own
+ * presentation.
+ */
+function storedEnvelope(
+	envelope: DecodeEnvelope,
+	present: CoalescePresenter | undefined,
+	merged: CoalesceMerge | undefined,
+): DecodeEnvelope {
+	if (present) {
+		try {
+			return merged === undefined ? present() : present(merged)
+		} catch {
+			// Fall back below.
+		}
+	}
+	if (merged === undefined) return envelope
+	try {
+		return withMergedData(envelope, merged.decodedData, merged.coalesced)
+	} catch {
+		// Only an envelope that never passed validation gets here (a test or a
+		// direct caller); the writer still refuses a record over MAX_RECORD_BYTES.
+		const { decodedData: _own, coalesced: _span, ...metadata } = envelope
+		return {
+			...metadata,
+			...(merged.coalesced === undefined
+				? {}
+				: { coalesced: merged.coalesced }),
+			decodedData: merged.decodedData,
+		}
 	}
 }
 

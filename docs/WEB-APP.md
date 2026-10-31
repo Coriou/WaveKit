@@ -301,6 +301,12 @@ rows already loaded (at most 5 000), and each live update folds again only the s
 touched; with a short folded list, Activity loads up to 10 older pages of 100 by itself to fill the
 view.
 
+The core already merges an aircraft's, vessel's, station's or sensor's repeats into one row per
+minute (its `coalesced` count and first reception; see [API.md](API.md#activity)). Folding counts
+those receptions, not rows: a stack's explanation says `Likely one aircraft in range for 2 min (239
+times)` and its span starts at the first merged reception. The detail shows a merged row's
+`Merged: 120 receptions since 12:00:00, latest state`.
+
 Each row gets a fold key from its own data: protocol and event kind, the core's entity
 (`icao:`, `mmsi:`, `capcode:`, `talkgroup:`, `sensor:`, `callsign:`, `node:`; the title when there
 is none), the channel to 1 kHz where an entity is only unique per channel, and, when the row

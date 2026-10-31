@@ -5,6 +5,7 @@
  * Changing anything here is a Main-only contract change.
  */
 import type { DecodeEnvelope } from "../types.js"
+import type { CoalescePresenter } from "./coalesce.js"
 
 export const ACTIVITY_SCHEMA_VERSION = 1
 export const ACTIVITY_RECORD_VERSION = 1
@@ -118,6 +119,8 @@ export interface ActivitySummary {
 	/** First fields that fit the 4 KiB budget. */
 	fields: DecodeEnvelope["fields"]
 	position?: DecodeEnvelope["position"]
+	/** The envelope's `coalesced`: receptions merged into this row and their first/last receivedAt. */
+	coalesced?: DecodeEnvelope["coalesced"]
 }
 
 export const MAX_RECORD_BYTES = 144 * 1024
@@ -231,7 +234,7 @@ export interface ActivityStoreHandle {
 	 * Non-blocking; never throws on overload, counts loss instead. `present`
 	 * runs only for a kept reception; its envelope is stored instead.
 	 */
-	admit(envelope: DecodeEnvelope, present?: () => DecodeEnvelope): AdmitResult
+	admit(envelope: DecodeEnvelope, present?: CoalescePresenter): AdmitResult
 	/**
 	 * WG1: admits one closed analog transmission as an `analog-transmission` record (eventId =
 	 * payload.transmissionId), with the same non-blocking, loss-counting semantics as admit().
@@ -309,7 +312,10 @@ export interface ActivityStoreStats {
 		number
 	>
 	excludedTelemetry: number
-	/** Position-only receptions not stored inside their entity's window (WG1). */
+	/**
+	 * Receptions merged into their entity's latest state instead of a row of their own
+	 * (storage/coalesce.ts): aircraft, ship, APRS and mesh positions, sensor readings.
+	 */
 	coalescedPositions: number
 	queueDepth: number
 	queueBytes: number

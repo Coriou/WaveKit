@@ -469,6 +469,9 @@ function receptionRow(
 		title: envelope.title,
 		fields: envelope.fields.map(field => ({ ...field })),
 		...(envelope.position === undefined ? {} : { position: envelope.position }),
+		...(envelope.coalesced === undefined
+			? {}
+			: { coalesced: { ...envelope.coalesced } }),
 	})
 	return {
 		eventId: record.eventId,
@@ -558,6 +561,7 @@ interface SummaryDraft {
 	title: string | null
 	fields: DecodeField[]
 	position?: DecodeEnvelope["position"]
+	coalesced?: DecodeEnvelope["coalesced"]
 }
 
 /**
@@ -613,6 +617,8 @@ function fitSummary(draft: SummaryDraft): string {
 		}
 		if (includePosition && draft.position !== undefined)
 			summary["position"] = draft.position
+		// About 110 bytes, kept whole: fields and title shrink first.
+		if (draft.coalesced !== undefined) summary["coalesced"] = draft.coalesced
 		return JSON.stringify(summary)
 	}
 	let json = build()

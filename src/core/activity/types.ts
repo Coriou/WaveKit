@@ -88,6 +88,19 @@ export interface DecodeEnvelopeContext {
 	refs?: DecodeReferences
 }
 
+/**
+ * Per-entity coalescing (src/core/activity/storage/coalesce.ts): the row is the entity's merged
+ * latest state over several receptions. Absent when the row is one reception.
+ */
+export interface DecodeCoalesced {
+	/** Receptions merged into this row, its own included (at least 2); `receptions - 1` were not stored on their own. */
+	receptions: number
+	/** receivedAt of the first merged reception. */
+	firstSeenAt: string
+	/** receivedAt of the latest merged reception (the row's own receivedAt). */
+	lastSeenAt: string
+}
+
 /** A decoder event, including lifecycle/telemetry; not accepted scanner evidence. */
 export interface DecodeEnvelope {
 	version: 1
@@ -114,6 +127,8 @@ export interface DecodeEnvelope {
 	fields: readonly DecodeField[]
 	provenance: DecodeProvenance
 	refs?: DecodeReferences
+	/** Present when the row merges several receptions of one entity. */
+	coalesced?: DecodeCoalesced
 	/** Complete JSON projection of decoded data, not original protocol wire output. */
 	decodedData: JsonValue
 }

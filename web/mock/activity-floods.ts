@@ -1,8 +1,10 @@
 // Activity floods: the repeats a live receiver produces, so the web app's folding can be seen and tested
 // against the mock. A pure schedule of absolute time (the same events for the same window on every run):
 // - one synthetic aircraft (ICAO ABC123) at 2.5 decodes/s, as readsb sends 1-30 messages/s per aircraft;
-//   every 10th decode carries its callsign and altitude, the rest are presence-only rows (no fields), as the
-//   core stores them;
+//   every 10th decode carries its callsign and altitude and, as the core's merged entity rows do,
+//   `coalesced` for the 10 receptions it stands for; the rest are presence-only rows (no fields). (The
+//   core now stores one merged row per aircraft per 60 s; the mock keeps the flood rate so folding stays
+//   exercised.)
 // - a POCSAG tone-only beacon (capcode 0042001, no content) every 45 s ± 3 s, as paging networks send
 //   idle beacons every 30-60 s;
 // - a DMR call on TG 99 once every 3 min: 12 overs from radio 4242, each a call_start then a call_end 2.4 s
@@ -36,6 +38,11 @@ export interface FloodEvent {
 	summary: FloodSummary
 	/** The decoded JSON behind it (GET /api/activity/:eventId). */
 	data: { readonly [key: string]: JsonValue }
+	/**
+	 * Receptions the core merged into this row (`coalesced`, src/core/activity/storage/coalesce.ts),
+	 * each FLOOD_AIRCRAFT_INTERVAL_MS apart and ending at `at`; absent for a single reception.
+	 */
+	receptions?: number
 }
 
 const AIRCRAFT_HZ = 1_090_000_000
@@ -155,6 +162,7 @@ export function floodEvents(
 				icao: "ABC123",
 				...(s.fields.length > 0 ? { callsign: "WKT101" } : {}),
 			},
+			...(s.fields.length > 0 ? { receptions: 10 } : {}),
 		})
 	}
 	// a beacon index's jittered time can fall either side of the window edge: look one index out
