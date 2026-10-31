@@ -1791,8 +1791,12 @@ export class IdentifyRunner implements JobDriver {
 		t.known = this.knownOf(view)
 		if (t.known) scores = knownFirst(scores, t.known.protocol, priors, bounds)
 		// Inside the ADS-B window only readsb is eligible: no probe or analog trial, and of the
-		// ambient trials readsb's alone (the others are left out, not reported).
-		const adsbOnly = inAdsbWindow(t.targetHz)
+		// ambient trials readsb's alone (the others are left out, not reported). Probe, replay and
+		// analog runs tune to the resolved track centre, not the requested target, and a track
+		// resolves within the target's tolerance: so the guard holds when either frequency is in
+		// the window. A restart drops the view and plans again, so a new centre is checked again.
+		const adsbOnly =
+			inAdsbWindow(t.targetHz) || inAdsbWindow(view.track.centreHz)
 		if (adsbOnly) scores = []
 		const plan = planIdentifyTrials(scores, {
 			format: this.deps.format(this.sourceId),

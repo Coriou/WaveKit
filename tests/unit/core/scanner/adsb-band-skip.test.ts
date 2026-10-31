@@ -116,8 +116,11 @@ const AIS_COVERAGE: AmbientCoverageLike = {
 	protocol: "ais",
 }
 
-/** An anchorless identify at `hz` (no decode anchor) with ambient coverage and analog evidence wired in. */
-async function identifyAt(hz: number, anchor?: Discovery) {
+/**
+ * An anchorless identify at `hz` (no decode anchor) with ambient coverage and analog evidence
+ * wired in; the FSK track it resolves is centred at `trackHz` (default `hz`).
+ */
+async function identifyAt(hz: number, anchor?: Discovery, trackHz = hz) {
 	const settings = testSettings()
 	// the engine window and its summary moved so the target sits 25 kHz above centre, as the
 	// fakes' TARGET_HZ does at 446.1 MHz
@@ -177,7 +180,7 @@ async function identifyAt(hz: number, anchor?: Discovery) {
 		await flushAsync()
 	}
 	await runner.start()
-	tracks.push(viewOf(fskTrack(hz)))
+	tracks.push(viewOf(fskTrack(trackHz)))
 	await advance(100)
 	await advance(100)
 	const last = events.at(-1)
@@ -185,8 +188,8 @@ async function identifyAt(hz: number, anchor?: Discovery) {
 	return { last, record }
 }
 
-async function identifyTrialsAt(hz: number) {
-	const { last } = await identifyAt(hz)
+async function identifyTrialsAt(hz: number, trackHz = hz) {
+	const { last } = await identifyAt(hz, undefined, trackHz)
 	return (last?.trials ?? []).map(t => ({
 		protocol: t.protocol,
 		decoder: t.decoder,
@@ -358,6 +361,26 @@ describe("built-in ADS-B band skip", () => {
 				expect.arrayContaining(["dmr", "analog-fm", "adsb", "ais"]),
 			)
 			for (const hz of OUTSIDE) expect(await identifyTrialsAt(hz)).toEqual(base)
+		})
+
+		it("a target just outside whose resolved track is centred inside runs readsb alone", async () => {
+			// within the default 1 kHz tolerance; probes would tune to the track centre, in the window
+			for (const [hz, trackHz] of [
+				[1_088_999_000, LOW],
+				[1_091_001_000, HIGH],
+			] as const)
+				expect(await identifyTrialsAt(hz, trackHz)).toEqual([
+					{ protocol: "adsb", decoder: "readsb", transport: "ambient" },
+				])
+		})
+
+		it("a target and resolved track both just outside plan as elsewhere", async () => {
+			const base = await identifyTrialsAt(NEUTRAL_HZ)
+			for (const [hz, trackHz] of [
+				[1_088_999_000, 1_088_998_500],
+				[1_091_001_000, 1_091_001_500],
+			] as const)
+				expect(await identifyTrialsAt(hz, trackHz)).toEqual(base)
 		})
 	})
 

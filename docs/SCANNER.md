@@ -182,8 +182,11 @@ shape suggests (a narrow FSK-looking signal included) or an analog trial: these 
 way a protocol with a prior of 0 is, not listed. readsb is still named and, as anywhere, listed
 in the skipped trials (`no-probe-mode`) because it has no replay input. An Identify there with no
 decode anchor runs no probe or analog trial; its only trial is readsb's ambient one when a
-running readsb covers the target. Outside the window, from 1 088 999 999 Hz down and
-1 091 000 001 Hz up, the plans are unchanged.
+running readsb covers the target. The rule applies when either the requested frequency or the
+centre of the signal it resolves to (which may lie up to the target tolerance away, and is where
+probes tune) is inside the window, so a request just outside the window for a signal centred
+inside it runs only readsb too. Outside the window, with both frequencies from 1 088 999 999 Hz
+down or 1 091 000 001 Hz up, the plans are unchanged.
 
 The band-plan stack under `/api/bandplans` (see [API.md](API.md#band-plans))
 selects which built-in plans the scanner uses: each enabled built-in pack, in
