@@ -1662,12 +1662,19 @@ it("a YAML decoder's cost counts in the budget catalogue decoders are admitted a
 
 it.each([
 	[869_525_000, true],
-	// Centre-only: passband 250 kHz + 2 × the 250/5 = 50 kHz carrier-offset
-	// search = 350 kHz, so the slot may sit 350/2 - 125 = 50 kHz off centre.
-	[869_525_000 + 50_000, true],
-	[869_525_000 - 50_000, true],
-	[869_525_000 + 50_001, false],
-	[869_525_000 - 50_001, false],
+	// Centre-only: the resampler edge 76 % x 500 kS/s / 2 = 190 kHz less the
+	// 125 kHz half slot and the 23 ppm x 869.525 MHz = 20 kHz crystal margin
+	// leaves the slot 45 kHz off centre (passband 250 + 2 x 45 = 340 kHz).
+	[869_525_000 + 45_000, true],
+	[869_525_000 - 45_000, true],
+	[869_525_000 + 45_001, false],
+	[869_525_000 - 45_001, false],
+	// The EU 433.875 MHz slot shares the decoder's passband (computed at its
+	// 869.525 MHz frequency), so the same 45 kHz holds there.
+	[433_875_000 + 45_000, true],
+	[433_875_000 - 45_000, true],
+	[433_875_000 + 45_001, false],
+	[433_875_000 - 45_001, false],
 ])(
 	"catalogue LoRa (EU) is placed on a source centred at %i Hz: %s",
 	(centreHz, fits) => {
@@ -1687,12 +1694,11 @@ it.each([
 		).plannerInput()
 		const lora = input.decoders.find(d => d.id === "lora-meshtastic")
 		// LongFast: 250 kHz slot around 869.525 MHz; the passband is the slot
-		// plus the bw/5 carrier-offset search per side because the decoder only
-		// demodulates the centre.
+		// plus the largest offset the wrapper shifts back exactly per side.
 		expect(lora).toMatchObject({
 			reach: "centre",
 			centreSlotHz: { minHz: 869_400_000, maxHz: 869_650_000 },
-			centrePassbandHz: 350_000,
+			centrePassbandHz: 340_000,
 		})
 		const plan = planPlacements(input)
 		expect(

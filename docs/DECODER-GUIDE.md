@@ -672,13 +672,16 @@ step is dropped. Drops are counted by reason (`crc_bad`, `short_frame`, `data_pa
 line, with a `frame_drop_summary` line at exit. Single frames are never logged.
 `rx_rssi` and `rx_snr` are 0, because gr-lora_sdr does not measure them.
 
-The decoder demodulates the capture centre (`reach: centre`). A channel up to bw/5 off
-the centre still decodes: 50 kHz for the 250 kHz presets, 25 kHz for 125 kHz and 12.5 kHz
-for 62.5 kHz. The planner places a LoRa slot only that close to the centre, so its
-passband is bw + 2 × bw/5 (350 kHz for LongFast). A frame 200 kHz off centre does not
-decode. The DC spike at the centre does not stop decoding: a synthetic frame decoded at
-+10 and −5 dB SNR with or without one. The fixtures and tests are described in
-`fixtures/lora/README.md`.
+The decoder demodulates the capture centre (`reach: centre`), and its channel may sit off
+that centre. The planner places a LoRa slot only where it still decodes: the slot plus a
+crystal margin must stay below 190 kHz at 500 kS/s, where sox's `rate -m -b 74` filter is
+at −4.2 dB (it is −3 dB at 185 kHz). The margin is 23 ppm of the slot frequency: 20 kHz at
+869.525 MHz, 10 kHz at 433.875 MHz. For LongFast at 869.525 MHz that leaves
+190 − 125 − 20 = 45 kHz, so the passband is 250 + 2 × 45 = 340 kHz. The limit is never more
+than bw/5 (50 kHz for the 250 kHz presets). A 62.5 kHz preset has no room left after the
+margin, so its slot must sit on the centre. A frame 200 kHz off centre does not decode. The
+DC spike at the centre does not stop decoding: a synthetic frame decoded at +10 and −5 dB
+SNR with or without one. The fixtures and tests are described in `fixtures/lora/README.md`.
 
 A frame arrives off its nominal frequency for two reasons:
 
@@ -690,70 +693,71 @@ A frame arrives off its nominal frequency for two reasons:
 gr-lora_sdr measures any offset up to ±bw/4, but it always corrects the clock error that a
 crystal offset would bring. On a pure shift that correction is wrong. At 5 kHz it moves the
 symbol timing by half a chip within a short frame. Meshtastic's coding rate 4/5 corrects no
-symbol error, so the frame is lost. The wrapper therefore runs gr-lora_sdr twice:
+symbol error, so the frame is lost.
 
-- The direct path decodes the stream as received. It handles crystal offsets and expects
-  the 16 preamble upchirps Meshtastic sends.
-- The recentred path first measures each preamble's offset from its upchirps and
-  downchirps, to within one bin (122 Hz for LongFast). It shifts the stream by that offset
-  and decodes the result, so it handles pure shifts. It runs 32 symbols behind the direct
-  path (262 ms for LongFast), so the shift starts before the preamble.
+The shift is known, though: it is the slot frequency minus the capture centre. The decoder
+passes it to the wrapper as `--shift-hz` (positive when the slot is above the centre, for
+example `--shift-hz 25000` for a slot at 869.525 MHz on a capture centred at 869.5 MHz).
+The wrapper rotates the stream by that amount in gnuradio's C++ rotator before
+gr-lora_sdr, so gr-lora_sdr sees only the crystal error, and its clock correction is then
+right. This single path is the default. It expects the 16 preamble upchirps Meshtastic
+sends. When the capture centre moves, the decoder restarts with the new shift. With
+`followCenter` the slot is the centre itself, so the shift is 0.
 
-A frame that both paths decode is emitted once. Each copy is placed by the input sample
-where gr-lora_sdr locked on it (the recentred path's less its 32-symbol delay), and two
-identical copies from different paths pair when those positions agree within 4 symbols
-(33 ms for LongFast). Thread timing does not matter, and identical frames that one path
-decodes are separate receptions, all emitted. The drop lines carry a `path` field
-(`direct` or `recentred`), and a `duplicate` drop is the second copy of a frame. A
+If the decoder does not know the capture centre, it passes `--shift-hz 0` and turns on
+the carrier-offset search (`--cfo-search-hz`, bw/5). The search is off whenever the shift
+is known. It adds a second, recentred path. That path measures each preamble's offset from
+its upchirps and downchirps, to within one bin (122 Hz for LongFast), shifts the stream by
+that offset and decodes the result. It runs 32 symbols behind the direct path (262 ms for
+LongFast), so the shift starts before the preamble. The recentred path removes the offset
+but not the clock error that comes with a crystal offset. That error moves the symbol
+timing by 2048 × offset / 869.525 MHz chips per symbol, which passes half a chip within the
+40 symbols after sync once the crystal part of the offset is above 5.3 kHz. So with the
+search, a frame with both an unknown shift and a crystal error above about 5 kHz can still
+be lost. That is the failure the known shift removes.
+
+With the search on, a frame that both paths decode is emitted once. Each copy is placed by
+the input sample where gr-lora_sdr locked on it (the recentred path's less its 32-symbol
+delay), and two identical copies from different paths pair when those positions agree
+within 4 symbols (33 ms for LongFast). Thread timing does not matter, and identical frames
+that one path decodes are separate receptions, all emitted. The drop lines carry a `path`
+field (`direct` or `recentred`), and a `duplicate` drop is the second copy of a frame. A
 `position_evicted` or `position_unaligned` count is a frame emitted without a position, so
 it is never paired: a lost pairing gives a duplicate packet, never a missing one. At exit,
 a `cfo_search_summary` line gives the number of preambles found and the last offset
-measured. `--cfo-search-hz 0` runs the direct path alone.
+measured.
 
-Each path corrects only one kind of offset, so the two kinds have different ranges:
+Two frames that overlap in time on the same channel (a collision) are not both decoded.
+gr-lora_sdr follows one frame at a time: a preamble that starts while a frame is being
+received is not detected, and if the later frame is strong enough it corrupts the one in
+progress, which then fails its CRC (`crc_bad`). Frames that follow each other without
+overlapping, such as a relay of a packet, decode separately.
 
-- A shift decodes up to the search range, bw/5 (50 kHz for LongFast).
-- A crystal offset decodes reliably up to ±20 kHz (23 ppm at 869.525 MHz). Only the direct
-  path decodes a large one. The recentred path removes the offset but not its clock
-  error, and that error moves the symbol timing by 2048 × offset / 869.525 MHz chips per
-  symbol. Past 5.3 kHz this exceeds half a chip within the 40 symbols after sync.
-
-A frame with both a large shift and a large crystal error can still be lost.
+The wrapper's stdout carries only the JSON packet lines. gnuradio logs at warn level and
+above, and anything native code prints to stdout goes to stderr instead.
 
 The core image has no pnpm or development dependencies, so the acceptance check for offset
 handling is the bench, run inside the core image from the repository root and never
 against a live receiver:
 
 ```bash
-python3 scripts/fixtures/bench_lora_cfo.py
-python3 scripts/fixtures/bench_lora_cfo.py --variant old --variant new --repeat 1
+python3 scripts/fixtures/bench_lora_cfo.py --cpu-seconds 60
+python3 scripts/fixtures/bench_lora_cfo.py --variant known --variant search --repeat 1
 ```
 
-It moves each committed capture 0 to ±50 kHz off its channel, either as a pure shift or
-as a crystal error with its clock error, with 8 or 16 preamble upchirps, and pipes each
-case through sox and the wrapper with the decoder's own arguments. It prints the decodes
-of each path, the measured offset and the CPU of each stage per second of signal.
-`--variant old` adds the wrapper without the search for comparison. It exits with status 1
-when a shift within `--target-hz` (default bw/5) or a crystal offset within
-`--crystal-target-hz` (default 20 kHz) decodes other than one packet per copy.
+It gives each committed capture 16 preamble upchirps, then a crystal error (0, ±5, ±10
+and ±20 kHz, with its clock error) and a shift off the capture centre (0, ±25 and
+±45 kHz). It pipes each case through sox and the wrapper with the decoder's own arguments:
+`known` passes the shift as `--shift-hz` (the default decoder), `search` uses the search
+instead (an unknown centre) and `none` uses neither. It prints the decodes of each path,
+the measured offset and the CPU of each stage per second of signal. It exits with status 1
+when a `known` case with a shift within `--target-hz` (default 45 kHz) and a crystal error
+within `--crystal-target-hz` (default 20 kHz) decodes other than one packet per copy.
+`--cpu-seconds 60` also measures the steady CPU of the default chain on noise alone: a
+70-second run less a 10-second run, so the gnuradio start-up cost cancels out.
 
-Measured in the core image on 2 CPUs of a loaded host, with 3 copies per run at +10 and
-−5 dB SNR, with the default offsets then 0 to ±30 kHz. These decode and CPU figures predate
-the position-based pairing above; re-measure them with the bench before relying on them.
-
-| Case | Decodes |
-| --- | --- |
-| shift8 | 3/3 at every offset at both SNRs |
-| crystal16 | 3/3 except at −25 kHz: 2/3 at both SNRs (direct path 2, recentred 0) |
-| shift16 | 30 of 30 runs 3/3 |
-
-58 of the 60 default runs (shift8 and crystal16) decoded 3/3. Wrapper (Python) CPU per
-second of signal:
-
-- the two-path wrapper: mean 0.54 s over the default cases, 0.34 s for shift16
-- crystal cases: 0.4–0.97 s, against 0.25–0.47 s for `old`, 1.5 to 2.5 times the
-  single-path wrapper
-- sox: 0.06–0.12 s
+Decode and CPU figures for the known-shift path have not been measured yet. Run the bench
+in the core image before relying on them.
 
 gr-lora_sdr needs a sample rate that is a whole multiple of the LoRa bandwidth
 (`samp_rate = bw × os_factor`). The decoder runs it at `bw × 2` by default, 500 kS/s for

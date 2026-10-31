@@ -20,7 +20,9 @@ import {
 	LORA_REGIONS,
 	PRESET_TABLE,
 	buildDecoderArgs,
+	loraCentrePassbandHz,
 	loraCfoSearchHz,
+	loraMaxShiftHz,
 	parseLoraMeshtasticOptions,
 	parseMeshtasticPacket,
 	type LoraPreset,
@@ -455,7 +457,7 @@ describe("LoRa/Meshtastic Decoder Property-Based Tests", () => {
 		const WRAPPER =
 			"python3 /usr/local/bin/lora_meshtastic_decode.py --bw 250000 --sf 11 --cr 5"
 		const TAIL =
-			"--frequency 869525000 --channel-key AQ== --region EU_868 --cfo-search-hz 50000"
+			"--frequency 869525000 --channel-key AQ== --region EU_868 --shift-hz 0 --cfo-search-hz 50000"
 		const chain = (overrides: Record<string, unknown>): string[] =>
 			new TestLoraMeshtasticDecoder(
 				makeConfig(validOptions(overrides)),
@@ -519,6 +521,91 @@ describe("LoRa/Meshtastic Decoder Property-Based Tests", () => {
 				expect(sampRate).toBe(PRESET_TABLE[preset].bw * DEFAULT_OVERSAMPLING)
 				expect(Number.isInteger(sampRate / opts.bw)).toBe(true)
 			}
+		})
+	})
+})
+
+describe("known placement shift", () => {
+	const argOf = (args: string[], flag: string): string | undefined =>
+		args[args.indexOf(flag) + 1]
+
+	// [slot, capture centre, followCenter, --frequency, --shift-hz, --cfo-search-hz]
+	it.each([
+		// 869.525 - 869.500 MHz: the live case, the slot 25 kHz above the centre.
+		[869_525_000, 869_500_000, false, 869_525_000, 25_000, 0],
+		[869_525_000, 869_570_000, false, 869_525_000, -45_000, 0],
+		[433_875_000, 433_920_000, false, 433_875_000, -45_000, 0],
+		[869_525_000, 869_525_000, false, 869_525_000, 0, 0],
+		// followCenter decodes the centre itself.
+		[869_525_000, 869_600_000, true, 869_600_000, 0, 0],
+		// No known centre: no shift, the opt-in search covers bw/5.
+		[869_525_000, undefined, false, 869_525_000, 0, 50_000],
+		[869_525_000, undefined, true, 869_525_000, 0, 50_000],
+	])(
+		"slot %i Hz, centre %s Hz, followCenter %s: --frequency %i --shift-hz %i --cfo-search-hz %i",
+		(slot, centre, followCenter, frequency, shift, search) => {
+			const options = parseLoraMeshtasticOptions(
+				validOptions({
+					frequency: slot,
+					followCenter,
+					...(centre !== undefined ? { inputCenterFreq: centre } : {}),
+				}),
+			)
+			expect(options.shiftHz).toBe(centre === undefined ? null : shift)
+			const args = buildDecoderArgs(options)
+			expect(argOf(args, "--frequency")).toBe(String(frequency))
+			expect(argOf(args, "--shift-hz")).toBe(String(shift))
+			expect(args.slice(-4)).toEqual([
+				"--shift-hz",
+				String(shift),
+				"--cfo-search-hz",
+				String(search),
+			])
+		},
+	)
+
+	it("updateOptions with a new capture centre rebuilds --shift-hz", () => {
+		const decoder = new TestLoraMeshtasticDecoder(
+			makeConfig(validOptions({ inputCenterFreq: 869_500_000 })),
+			testLogger,
+		)
+		expect(decoder.testArgs().join(" ")).toContain(
+			"--shift-hz 25000 --cfo-search-hz 0",
+		)
+		decoder.updateOptions({ inputCenterFreq: 869_570_000 })
+		expect(decoder.testArgs().join(" ")).toContain(
+			"--shift-hz -45000 --cfo-search-hz 0",
+		)
+	})
+
+	describe("placement bound", () => {
+		const longFast = parseLoraMeshtasticOptions(validOptions())
+		it("869.525 MHz: 190 000 - 125 000 - 20 000 = 45 000 Hz, passband 340 kHz", () => {
+			expect(loraMaxShiftHz(longFast, 869_525_000)).toBe(45_000)
+			expect(loraCentrePassbandHz(longFast, 869_525_000)).toBe(340_000)
+		})
+		it("433.875 MHz: 190 000 - 125 000 - 9 980 = 55 020, capped at bw/5 = 50 000 Hz", () => {
+			expect(loraMaxShiftHz(longFast, 433_875_000)).toBe(50_000)
+			expect(loraCentrePassbandHz(longFast, 433_875_000)).toBe(350_000)
+		})
+		it("the crystal margin is 23 ppm of the slot, rounded up", () => {
+			// 23 x 869.565 MHz = 19 999.995 -> 20 000 Hz; one Hz more margin at
+			// 23 x 869.566 MHz = 20 000.018 -> 20 001 Hz.
+			expect(loraMaxShiftHz(longFast, 869_565_000)).toBe(45_000)
+			expect(loraMaxShiftHz(longFast, 869_566_000)).toBe(44_999)
+		})
+		it("os 4 doubles the edge but stays capped at bw/5", () => {
+			const os4 = parseLoraMeshtasticOptions(validOptions({ oversampling: 4 }))
+			// 76 % x 1 MS/s / 2 = 380 000 - 125 000 - 20 000 = 235 000 > 50 000.
+			expect(loraMaxShiftHz(os4, 869_525_000)).toBe(50_000)
+		})
+		it("a slot too wide for the margin sits only on the centre", () => {
+			// VeryLongSlow 62.5 kHz at os 2: 47 500 - 31 250 - 20 000 < 0.
+			const narrow = parseLoraMeshtasticOptions(
+				validOptions({ preset: "VeryLongSlow" }),
+			)
+			expect(loraMaxShiftHz(narrow, 869_525_000)).toBe(0)
+			expect(loraCentrePassbandHz(narrow, 869_525_000)).toBe(62_500)
 		})
 	})
 })
