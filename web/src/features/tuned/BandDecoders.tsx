@@ -21,6 +21,7 @@ import {
 	LIVE_STATES,
 	settingsTarget,
 	type BandTableRow,
+	type PlanRanges,
 	type SummaryItem,
 } from "./band-table.ts"
 import { budgetPort, followBudget, raiseBudget } from "./budget-raise.ts"
@@ -34,6 +35,7 @@ export function BandDecoders({
 	hz,
 	decoders,
 	items,
+	planRanges = null,
 	feed,
 	now,
 	readOnly,
@@ -42,6 +44,8 @@ export function BandDecoders({
 	decoders: readonly DecoderInfo[]
 	/** The summary's items for `hz` (verdicts.ts itemsFor); null from a core without the summary. */
 	items: readonly SummaryItem[] | null
+	/** The core's band plan ranges for the status fallback (band-decoders.ts planRangesOf); null while not loaded. */
+	planRanges?: PlanRanges | null
 	feed: DecoderVerdictsFeed
 	now: number
 	readOnly: boolean
@@ -68,7 +72,14 @@ export function BandDecoders({
 		action: `${titleId}-action`,
 	}
 
-	const rows = bandTable(items, decoders, hz, { scanJobId, budget }, now)
+	const rows = bandTable(
+		items,
+		decoders,
+		hz,
+		{ scanJobId, budget },
+		now,
+		planRanges,
+	)
 	// the budget is read only while a row offers raising it, so a raise at the cap is not offered;
 	// it is read again with every verdicts read, so a cap lowered elsewhere offers the raise again
 	const wantsBudget =

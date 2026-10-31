@@ -8,12 +8,19 @@ import {
 	BUDGET_MAX_CORES,
 	onBand,
 	parseVerdict,
+	planRangesOf,
 	raisedBudget,
 	scanHoldingDecoders,
 	verdictsById,
 	type BandVerdict,
 } from "../../src/features/tuned/band-decoders.ts"
-import { rowAction } from "../../src/features/tuned/band-table.ts"
+import {
+	bandTable,
+	itemsFromStatus,
+	rowAction,
+} from "../../src/features/tuned/band-table.ts"
+import { mockCoversHz } from "../../mock/decoder-summary.ts"
+import { SCANNER_BANDPLANS } from "../../mock/data.ts"
 import {
 	DecoderVerdictsFeed,
 	itemsFor,
@@ -78,14 +85,16 @@ describe("decoders on the tuned band", () => {
 		expect(onBand(PROBE, 1_090_000_000)).toBe(false)
 	})
 
-	it("reads the band assessment, not targets a channel following the tuner adds", () => {
+	it("reads the band assessment when it names a band, else the configured targets, as the core does", () => {
+		// the core's decoderCoversHz: an assessment naming no band falls to the configured targets
 		const vfo = decoder({
 			id: "pager-vfo",
 			type: "multimon-ng",
 			targetFrequenciesHz: [1_090_062_000],
 			bandAssessment: { verdict: "unknown", reasonCode: "no-target-frequency" },
 		})
-		expect(onBand(vfo, 1_090_062_000)).toBe(false)
+		expect(onBand(vfo, 1_090_062_000)).toBe(true)
+		expect(onBand(vfo, 466_100_000)).toBe(false)
 		const configured = decoder({
 			id: "pager-cfg",
 			type: "multimon-ng",
@@ -94,6 +103,28 @@ describe("decoders on the tuned band", () => {
 		})
 		expect(onBand(configured, 466_100_000)).toBe(true)
 		expect(onBand(configured, 1_090_062_000)).toBe(false)
+	})
+
+	it("covers a decoder with no band of its own where the band plan lists its protocols", () => {
+		const pager = decoder({
+			id: "pager",
+			type: "multimon-ng",
+			bandAssessment: { verdict: "unknown", reasonCode: "no-target-frequency" },
+		})
+		const ranges = planRangesOf(SCANNER_BANDPLANS)
+		expect(onBand(pager, 150_000_000, ranges)).toBe(true)
+		expect(onBand(pager, 1_090_000_000, ranges)).toBe(false)
+		// band plans not loaded yet: no claim
+		expect(onBand(pager, 150_000_000, null)).toBe(false)
+		// a type with a fixed band never reads the plan
+		expect(
+			onBand(decoder({ id: "readsb", type: "readsb" }), 150_000_000, ranges),
+		).toBe(false)
+		expect(onBand({ ...pager, ephemeral: true }, 150_000_000, ranges)).toBe(
+			false,
+		)
+		// the mock's summary answers the same
+		expect(mockCoversHz(pager, 150_000_000)).toBe(true)
 	})
 })
 
@@ -477,6 +508,52 @@ describe("verdicts feed", () => {
 		const calls = get.mock.calls.length
 		await feed.load()
 		expect(get).toHaveBeenCalledTimes(calls + 1)
+		detach()
+	})
+
+	it("keeps a pager without targets on the table at 150 MHz when the first read fails", async () => {
+		const get = vi.fn(async () => {
+			throw new TypeError("network down")
+		})
+		const { data } = fakeData(get)
+		const feed = new DecoderVerdictsFeed(data)
+		feed.follow(150_000_000)
+		const detach = feed.attach()
+		await vi.waitFor(() => expect(feed.get().failed).toBe(true))
+		const items = itemsFor(feed.get(), 150_000_000)
+		expect(items).toBeNull()
+		const pager = decoder({
+			id: "pager",
+			type: "multimon-ng",
+			bandAssessment: { verdict: "unknown", reasonCode: "no-target-frequency" },
+		})
+		const ranges = planRangesOf(SCANNER_BANDPLANS)
+		const rows = bandTable(items, [pager], 150_000_000, NO_SCAN, 0, ranges)
+		expect(rows.map(r => [r.id, r.stateWord])).toEqual([["pager", "Listening"]])
+		detach()
+	})
+
+	it("keeps a decoder whose assessment names no band on its configured targets when the first read fails", async () => {
+		const get = vi.fn(async () => {
+			throw new TypeError("network down")
+		})
+		const { data } = fakeData(get)
+		const feed = new DecoderVerdictsFeed(data)
+		feed.follow(466_050_000)
+		const detach = feed.attach()
+		await vi.waitFor(() => expect(feed.get().failed).toBe(true))
+		const pager = decoder({
+			id: "pager",
+			type: "multimon-ng",
+			targetFrequenciesHz: [466_025_000],
+			bandAssessment: { verdict: "unknown", reasonCode: "no-target-frequency" },
+		})
+		const items = itemsFor(feed.get(), 466_050_000)
+		// band plans not loaded: the configured targets alone keep it there
+		expect(
+			bandTable(items, [pager], 466_050_000, NO_SCAN, 0, null).map(r => r.id),
+		).toEqual(["pager"])
+		expect(itemsFromStatus([pager])[0]?.coversHz).toBeNull()
 		detach()
 	})
 })

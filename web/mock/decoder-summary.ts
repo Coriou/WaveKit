@@ -9,6 +9,7 @@ import type {
 	DecoderVerdictCode,
 	ScanRange,
 } from "@wavekit/api-types"
+import { planListsHz } from "../src/features/tuned/decoder-protocols.ts"
 import { SCANNER_BANDPLANS } from "./data.ts"
 
 /** The core's decoding window: output in the last minute reads "decoding". */
@@ -221,23 +222,6 @@ export const MOCK_TUNED_REACH_HZ = 200_000
 const positive = (n: unknown): n is number =>
 	typeof n === "number" && Number.isFinite(n) && n > 0
 
-/** The core's DECODER_PROTOCOLS (src/decoders/enablement/contract.ts): the band plan protocols a decoder type decodes. */
-export const MOCK_DECODER_PROTOCOLS: Readonly<
-	Record<string, readonly string[]>
-> = {
-	"dsd-fme": [
-		"dmr",
-		"p25p1",
-		"p25p2",
-		"ysf",
-		"dstar",
-		"nxdn48",
-		"nxdn96",
-		"dpmr",
-	],
-	"multimon-ng": ["pocsag", "flex"],
-}
-
 /**
  * The core's built-in band plan ranges for EU (builtinBandplansFor("EU")): SCANNER_BANDPLANS without the canvas's
  * synthetic `pager-431` (the core has no such built-in), plus the French paging supplement of
@@ -294,8 +278,8 @@ function bandHolds(
  * The core's decoderCoversHz over the band assessment: within MOCK_TUNED_REACH_HZ of a target, between the
  * lowest and highest target, or inside a range widened by the reach. Without an assessed band (before the first
  * source capabilities) the same rule runs over the configured targets. A decoder with neither covers `hz` only
- * when a built-in band plan range there lists one of its protocols (MOCK_DECODER_PROTOCOLS over
- * MOCK_PLAN_RANGES). Scanner probes never cover; malformed values never match.
+ * when a built-in band plan range there lists one of its protocols (planListsHz over
+ * MOCK_PLAN_RANGES, the protocol map the web's status fallback shares). Scanner probes never cover; malformed values never match.
  */
 export function mockCoversHz(
 	d: Pick<
@@ -312,15 +296,7 @@ export function mockCoversHz(
 		return bandHolds(targets, ranges, hz)
 	const configured = (d.targetFrequenciesHz ?? []).filter(positive)
 	if (configured.length > 0) return bandHolds(configured, [], hz)
-	const protocols = Object.hasOwn(MOCK_DECODER_PROTOCOLS, d.type)
-		? MOCK_DECODER_PROTOCOLS[d.type]!
-		: []
-	return MOCK_PLAN_RANGES.some(
-		r =>
-			hz >= r.startHz &&
-			hz <= r.endHz &&
-			(r.protocols ?? []).some(p => protocols.includes(p)),
-	)
+	return planListsHz(d.type, MOCK_PLAN_RANGES, hz)
 }
 
 /**

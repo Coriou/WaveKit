@@ -254,6 +254,69 @@ describe("summary items", () => {
 		expect(rows[0]?.action).toBeNull()
 	})
 
+	it("lets a current status off or stopped win over a retained verdict, for state, detail and header", () => {
+		const c = caseById("adsb-running")
+		const items = parseSummary(c.summary)
+		const readsb = c.decoders.find(d => d.id === "readsb")!
+		expect(
+			bandTable(items, c.decoders, c.hz, NO_SCAN, TUNED_CASE_NOW).find(
+				r => r.id === "readsb",
+			)?.state,
+		).toBe("decoding")
+		const others = c.decoders.filter(d => d.id !== "readsb")
+		const off = bandTable(
+			items,
+			[...others, { ...readsb, mode: "off" as const, running: false }],
+			c.hz,
+			NO_SCAN,
+			TUNED_CASE_NOW,
+		)
+		const offRow = off.find(r => r.id === "readsb")
+		expect(offRow).toMatchObject({
+			state: "off",
+			stateWord: "Off",
+			detail: "Off in Settings",
+			action: null,
+		})
+		expect(bandStateLine(off.filter(r => r.id === "readsb"))).toBe(
+			"ADS-B · Off",
+		)
+		const stopped = bandTable(
+			items,
+			[...others, { ...readsb, desiredRunning: false, running: false }],
+			c.hz,
+			NO_SCAN,
+			TUNED_CASE_NOW,
+		).find(r => r.id === "readsb")
+		expect(stopped).toMatchObject({
+			state: "off",
+			detail: "Stopped",
+			action: { kind: "decoder", op: "start" },
+		})
+		// a failure the core reports stays: its precedence puts failure first
+		const failed = items!.map(i =>
+			i.id === "readsb"
+				? {
+						...i,
+						verdict: {
+							code: "failed" as const,
+							text: "ADS-B failed to run",
+							actions: ["restart" as const],
+						},
+					}
+				: i,
+		)
+		expect(
+			bandTable(
+				failed,
+				[...others, { ...readsb, mode: "off" as const }],
+				c.hz,
+				NO_SCAN,
+				TUNED_CASE_NOW,
+			).find(r => r.id === "readsb")?.state,
+		).toBe("failed")
+	})
+
 	it("never lists a scanner probe", () => {
 		const c = caseById("adsb-running")
 		const probe = { ...c.decoders[0]!, owner: "scanner" as const }

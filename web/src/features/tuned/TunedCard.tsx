@@ -44,6 +44,7 @@ import { defaultGroup, defaultSaveName, saveInput } from "../tuner/saved.ts"
 import { sweepMoving } from "../tuner/scan-hold.ts"
 import { useHeld, useSweep } from "../tuner/ScanHoldRow.tsx"
 import { BandDecoders } from "./BandDecoders.tsx"
+import { planRangesOf } from "./band-decoders.ts"
 import {
 	bandStateLine,
 	bandTable,
@@ -316,6 +317,9 @@ export function TunedCard() {
 	const onIt = pinned === null || pinned === tunedNow
 	const status = useLiveStatus()
 	const view = useStore(data.bandplan, s => s.view)
+	// the core's band plans: which decoders without a band of their own cover the frequency while statuses stand in
+	const plans = useStore(data.scanner, s => s.bandplans)
+	const planRanges = useMemo(() => planRangesOf(plans), [plans])
 	const level = useStore(data.liveAudio, s => s.level)
 	const decoders = useStore(feed, s => s.decoders)
 	const savedState = useStore(data.savedFrequencies)
@@ -344,8 +348,13 @@ export function TunedCard() {
 	const summaryItems = hz === null ? [] : itemsFor(verdictState, hz)
 	// the read for a new frequency is on its way: nothing is claimed about its decoders yet
 	const pending = hz !== null && pendingFor(verdictState, hz)
+	useEffect(() => {
+		void data.scanner.loadBandplans()
+	}, [data])
 	const bandRows =
-		hz === null ? [] : bandTable(summaryItems, decoders, hz, NO_ACTIONS, clock)
+		hz === null
+			? []
+			: bandTable(summaryItems, decoders, hz, NO_ACTIONS, clock, planRanges)
 	// the decoders whose band holds the frequency (never one whose channel only follows the tuner)
 	const here =
 		hz === null
@@ -973,6 +982,7 @@ export function TunedCard() {
 							hz={hz}
 							decoders={decoders}
 							items={summaryItems}
+							planRanges={planRanges}
 							feed={verdictFeed}
 							now={clock}
 							readOnly={readOnly}

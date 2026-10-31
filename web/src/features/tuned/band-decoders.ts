@@ -7,14 +7,17 @@ import {
 	DECODER_VERDICT_TEXT_MAX_LENGTH,
 } from "@wavekit/api-types"
 import type {
+	Bandplan,
 	DecoderInfo,
 	DecoderVerdictAction,
 	DecoderVerdictCode,
 	EfficiencyBudgetResolution,
 	ScanJob,
+	ScanRange,
 } from "@wavekit/api-types"
 
 import { formatMHz } from "../format.ts"
+import { planListsHz } from "./decoder-protocols.ts"
 import { decoderLabel } from "./signal.ts"
 
 /** The core's tuned-band reach (TUNED_TARGET_TOLERANCE_HZ): within 200 kHz of a target, of the span between targets, or of a band range. */
@@ -108,16 +111,39 @@ export function bandHoldsHz(
 }
 
 /**
- * True when the decoder's own band holds `hz` (the core's tuned-band rule), for cores whose summary has no
- * `coversHz`. The band assessment decides when there is one: the configured targets also hold where a
- * channel follows the tuner, which would put such a decoder on every band. Scanner probes are not band decoders.
+ * True when the decoder's own band holds `hz`, for cores whose summary has no `coversHz` and while the summary
+ * cannot be read: the core's decoderCoversHz (src/api/routes/decoder-summary.ts). The band assessment's targets
+ * and ranges decide when it names any; else the configured targets (at boot, before the first assessment, or an
+ * assessment that names no band); else a decoder with no band of its own (a pager, digital voice) covers `hz`
+ * where a band plan range there lists one of its protocols (planListsHz). `planRanges` is the core's band plan as
+ * GET /api/scanner/bandplans serves it (the effective region's plan); null while not loaded, when only the first
+ * two apply. Scanner probes and ephemeral decoders never cover.
  */
-export function onBand(d: DecoderInfo, hz: number): boolean {
-	if (d.owner === "scanner") return false
+export function onBand(
+	d: DecoderInfo,
+	hz: number,
+	planRanges:
+		| readonly Pick<ScanRange, "startHz" | "endHz" | "protocols">[]
+		| null = null,
+): boolean {
+	if (d.owner === "scanner" || d.ephemeral === true) return false
 	const band = d.bandAssessment
-	return band
-		? bandHoldsHz(band.targetsHz, band.rangesHz, hz)
-		: bandHoldsHz(d.targetFrequenciesHz, undefined, hz)
+	const targets = Array.isArray(band?.targetsHz) ? band.targetsHz : []
+	const ranges = Array.isArray(band?.rangesHz) ? band.rangesHz : []
+	if (targets.length > 0 || ranges.length > 0)
+		return bandHoldsHz(targets, ranges, hz)
+	const configured = Array.isArray(d.targetFrequenciesHz)
+		? d.targetFrequenciesHz.filter(positive)
+		: []
+	if (configured.length > 0) return bandHoldsHz(configured, undefined, hz)
+	return planListsHz(d.type, planRanges ?? [], hz)
+}
+
+/** The ranges of the core's band plans (GET /api/scanner/bandplans), for onBand; null while not loaded. */
+export function planRangesOf(
+	plans: readonly Pick<Bandplan, "ranges">[] | null,
+): ScanRange[] | null {
+	return plans === null ? null : plans.flatMap(p => p.ranges)
 }
 
 /** Opens Settings on a row (`dec.<id>` opens that decoder's row). */

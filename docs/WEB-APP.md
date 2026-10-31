@@ -134,8 +134,11 @@ those are: the card asks `GET /api/decoders/summary?hz=<Hz>` and lists the items
 starts, before the receiver reports its capabilities, a decoder's configured frequencies stand in
 for its band, so ADS-B shows at 1090 MHz from the first moment. If that request fails (the core
 answers an error, the request times out or the network drops), the card lists the decoders from
-their statuses instead of waiting, and takes the core's answer again once a request succeeds. Each
-decoder takes two lines:
+their statuses instead of waiting, and takes the core's answer again once a request succeeds. It
+picks them by the core's own rule: the decoder's band, else its configured frequencies, else, for a
+decoder with no band of its own such as the pager or digital voice, the receiver's band plan ranges
+that list its protocols (POCSAG, DMR). When Settings turns a decoder off or it is stopped, its row
+says so at once, before the core's next answer arrives. Each decoder takes two lines:
 
 | Column      | Shows                                                                                                          |
 | ----------- | -------------------------------------------------------------------------------------------------------------- |

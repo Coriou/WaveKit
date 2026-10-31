@@ -2,7 +2,7 @@
 // /api/decoders/summary?hz= (the core says which decoders cover it: `coversHz`). Columns: decoder (name and
 // program), state (one word), last decode (links to Activity), detail (the verdict's reason) and at most one
 // action. Pure: the card renders the rows and carries the action out.
-import type { DecoderInfo } from "@wavekit/api-types"
+import type { DecoderInfo, ScanRange } from "@wavekit/api-types"
 
 import type { CategoryChipId } from "../activity/search.ts"
 import {
@@ -258,17 +258,49 @@ export interface BandTableRow {
 	action: BandAction | null
 }
 
+/** The band plan ranges the status fallback reads (planRangesOf); null while not loaded. */
+export type PlanRanges = readonly Pick<
+	ScanRange,
+	"startHz" | "endHz" | "protocols"
+>[]
+
 /**
  * Whether an item belongs on the card at `hz`: the core's `coversHz` when it sent one; from an older
- * core, the band rule over the decoder's own band (onBand). Unknown decoders are left out.
+ * core or the statuses standing in for a failed read, the core's rule over the decoder's own band
+ * (onBand, with the band plan for decoders without a band). Unknown decoders are left out.
  */
 export function relevant(
 	item: Pick<SummaryItem, "id" | "coversHz">,
 	decoder: DecoderInfo | null,
 	hz: number,
+	planRanges: PlanRanges | null = null,
 ): boolean {
 	if (item.coversHz !== null) return item.coversHz
-	return decoder !== null && onBand(decoder, hz)
+	return decoder !== null && onBand(decoder, hz, planRanges)
+}
+
+/**
+ * The verdict the row shows: the summary's, unless the decoder's current status says it is off in Settings or
+ * stopped while the verdict (read up to a poll earlier) still says otherwise. A failure the core reports stays (its
+ * precedence puts a failure first); the core's next read agrees with the override.
+ */
+export function currentVerdict(
+	verdict: BandVerdict,
+	decoder: DecoderInfo | null,
+	name: string,
+): BandVerdict {
+	if (decoder === null || verdict.code === "failed") return verdict
+	if (decoder.mode === "off")
+		return verdict.code === "off"
+			? verdict
+			: { code: "off", text: `${name} off in Settings`, actions: ["turn-on"] }
+	if (
+		decoder.desiredRunning === false &&
+		!decoder.running &&
+		verdict.code !== "stopped"
+	)
+		return { code: "stopped", text: `${name} stopped`, actions: ["start"] }
+	return verdict
 }
 
 /** A status-only verdict for a core without the summary route: no action, a plain sentence. */
@@ -305,7 +337,9 @@ export function itemsFromStatus(
 
 /**
  * The table's rows: the decoders whose band holds `hz`, ordered by state (STATE_ORDER), then by name.
- * `items` null (a core without the summary route) reads the statuses instead. Scanner probes never show.
+ * `items` null (a core without the summary route, or a failed read) reads the statuses instead, with
+ * `planRanges` for decoders without a band of their own. A current status off or stopped wins over a
+ * retained verdict (currentVerdict). Scanner probes never show.
  */
 export function bandTable(
 	items: readonly SummaryItem[] | null,
@@ -313,6 +347,7 @@ export function bandTable(
 	hz: number,
 	ctx: ActionContext,
 	now: number,
+	planRanges: PlanRanges | null = null,
 ): BandTableRow[] {
 	const byId = new Map(decoders.map(d => [d.id, d]))
 	const source = items ?? itemsFromStatus(decoders)
@@ -320,8 +355,9 @@ export function bandTable(
 	for (const item of source) {
 		const decoder = byId.get(item.id) ?? null
 		if (decoder?.owner === "scanner") continue
-		if (!relevant(item, decoder, hz)) continue
-		const state = stateOf(item.verdict.code)
+		if (!relevant(item, decoder, hz, planRanges)) continue
+		const verdict = currentVerdict(item.verdict, decoder, item.name)
+		const state = stateOf(verdict.code)
 		const iso =
 			item.lastOutputAt === null
 				? null
@@ -335,8 +371,8 @@ export function bandTable(
 			lastDecode: iso === null ? "Never" : agoText(iso, now) || "Never",
 			lastDecodeIso: iso,
 			activityChip: iso === null ? null : activityChipFor(item.protocol),
-			detail: detailOf(item.verdict.text, item.name, state, item.eventsOut),
-			action: rowAction(item.verdict, decoder, ctx),
+			detail: detailOf(verdict.text, item.name, state, item.eventsOut),
+			action: rowAction(verdict, decoder, ctx),
 		})
 	}
 	rows.sort(
