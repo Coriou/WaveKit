@@ -115,6 +115,7 @@ import type { DsdFmeLinkLine } from "../../src/decoders/builtin/dsd-fme-link.js"
 import type { ChannelRequestResult } from "../../src/core/channelizer/types.js"
 import type { PlacementPlan } from "../../src/decoders/enablement/contract.js"
 import type { DecodeEnvelope } from "../../src/core/activity/types.js"
+import { DSD_CHALLENGE_MIN_SPAN_MS } from "../../src/decoders/enablement/dsd-activity.js"
 
 const CENTRE = 466_103_300
 const FAR = CENTRE - 67_000
@@ -517,10 +518,19 @@ describe("mixed-channel activity sequence", () => {
 		}
 		expect(f.runningHz()).toContain(analog)
 		expect(f.links).toHaveLength(1)
+		// A 400 ms burst alone never moves a running slot (one sighting is not a challenge).
 		for (let step = 0; step < 30; step++) {
 			block(step < 4 ? [analog, FAR] : [analog])
+			await vi.advanceTimersByTimeAsync(100)
+		}
+		expect(f.runningHz().some(h => Math.abs(h - FAR) < 2000)).toBe(false)
+		// A sustained DMR transmission does: energy seen at least DSD_CHALLENGE_MIN_SPAN_MS apart
+		// within the challenge memory displaces the no-sync incumbent, whose cooldown has passed.
+		const sustainSteps = DSD_CHALLENGE_MIN_SPAN_MS / 100 + 30
+		for (let step = 0; step < sustainSteps; step++) {
+			block([analog, FAR])
 			const hz = f.runningHz().find(h => Math.abs(h - FAR) < 2000)
-			if (hz !== undefined && step < 4) f.burstOn(hz)
+			if (hz !== undefined) f.burstOn(hz)
 			await vi.advanceTimersByTimeAsync(100)
 		}
 		expect(f.runningHz().some(h => Math.abs(h - FAR) < 2000)).toBe(true)
