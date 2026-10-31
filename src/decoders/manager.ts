@@ -3463,35 +3463,47 @@ export class DecoderManager extends EventEmitter {
 		if (opts.refuseIfHeld === true) this.assertNotHeld(state)
 		if (this.usesPlacementPlanning(state) && this.modeFor(state).mode === "off")
 			return this.stopDecoder(id)
-		if (this.usesPlacementPlanning(state))
-			return this.parentRequest(
-				state,
-				true,
-				async current => {
-					const placements = [...this.decoders.values()].filter(
-						candidate => candidate === state || candidate.parentId === id,
-					)
-					await Promise.all(
-						placements.map(candidate => this.stopPlacement(candidate, true)),
-					)
-					if (!current()) return
-					for (const worker of placements) {
-						if (worker === state) continue
-						if (worker.decoder.getStatus().running || worker.lifecycle?.pending)
-							throw new WaveKitError(
-								"Placement worker is still running",
-								"DECODER_STOP_PENDING",
+		if (this.usesPlacementPlanning(state)) {
+			// In flight from before the stop until the start settles or the
+			// request's PLACEMENT_STOP_TIMEOUT_MS deadline rejects it.
+			state.manualRestarts = (state.manualRestarts ?? 0) + 1
+			try {
+				return await this.parentRequest(
+					state,
+					true,
+					async current => {
+						const placements = [...this.decoders.values()].filter(
+							candidate => candidate === state || candidate.parentId === id,
+						)
+						await Promise.all(
+							placements.map(candidate => this.stopPlacement(candidate, true)),
+						)
+						if (!current()) return
+						for (const worker of placements) {
+							if (worker === state) continue
+							if (
+								worker.decoder.getStatus().running ||
+								worker.lifecycle?.pending
 							)
-						this.finalizeRemoval(worker)
-					}
-					await this.startDecoderNow(
-						id,
-						{ startMode: state.startMode },
-						current,
-					)
-				},
-				true,
-			)
+								throw new WaveKitError(
+									"Placement worker is still running",
+									"DECODER_STOP_PENDING",
+								)
+							this.finalizeRemoval(worker)
+						}
+						await this.startDecoderNow(
+							id,
+							{ startMode: state.startMode },
+							current,
+						)
+					},
+					true,
+				)
+			} finally {
+				state.manualRestarts = (state.manualRestarts ?? 1) - 1
+				this.emitStatusChanged(state)
+			}
+		}
 
 		this.log.info({ decoderId: id }, "Restarting decoder")
 
@@ -3515,6 +3527,7 @@ export class DecoderManager extends EventEmitter {
 			await this.startDecoder(id, { startMode })
 		} finally {
 			state.manualRestarts = (state.manualRestarts ?? 1) - 1
+			this.emitStatusChanged(state)
 		}
 	}
 
@@ -3992,9 +4005,12 @@ export class DecoderManager extends EventEmitter {
 	 * @returns Array of DecoderStatus for all decoders
 	 */
 	/**
-	 * An automatic restart of the decoder or one of its placement workers is under
-	 * way: a restart timer is set, a fired restart has not finished its respawn, or
-	 * a placement start is still pending.
+	 * A restart of the decoder or one of its placement workers is under way: a
+	 * restart timer is set, a fired restart has not finished its respawn, or a
+	 * manual restart is running. A pending placement start counts only while its
+	 * automatic restart owns it (restartRunning ends at the
+	 * PLACEMENT_STOP_TIMEOUT_MS race), so a start that never settles cannot hide
+	 * Restart forever.
 	 */
 	private restartInFlight(parent: DecoderState): boolean {
 		for (const state of this.decoders.values()) {
@@ -4002,9 +4018,7 @@ export class DecoderManager extends EventEmitter {
 			if (
 				state.restartTimer !== null ||
 				state.restartRunning === true ||
-				(state.manualRestarts ?? 0) > 0 ||
-				(state.lifecycle?.pending === true &&
-					state.lifecycle.actual === "starting")
+				(state.manualRestarts ?? 0) > 0
 			)
 				return true
 		}
@@ -4528,6 +4542,7 @@ export class DecoderManager extends EventEmitter {
 				if (state.restartTimer === timer) {
 					state.restartTimer = null
 					state.nextRestartAt = null
+					this.emitStatusChanged(state)
 				}
 				return
 			}
@@ -4649,6 +4664,7 @@ export class DecoderManager extends EventEmitter {
 			const tracked = () =>
 				restart().finally(() => {
 					state.restartRunning = false
+					this.emitStatusChanged(state)
 				})
 			if (state.placement && this.config.enablement?.gate) {
 				this.capsWork = this.capsWork.then(tracked)

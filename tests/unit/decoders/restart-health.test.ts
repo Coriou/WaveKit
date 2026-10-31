@@ -346,6 +346,25 @@ describe("health on unexpected exit", () => {
 		expect(failed.restartInFlight).toBeUndefined()
 	})
 
+	it("announces each in-flight flip: respawn end and manual restart end", async () => {
+		setup({ maxRestarts: 1, faultAfterFailures: 1 })
+		await manager.startDecoder("acars")
+		decoder.failStart = true
+		const seen: (boolean | undefined)[] = []
+		manager.on("decoder:status-changed", (id: string) => {
+			if (id === "acars") seen.push(manager.getStatus("acars")?.restartInFlight)
+		})
+		decoder.crash()
+		await vi.advanceTimersByTimeAsync(10) // the one retry fails: budget spent
+		// The last event follows the respawn's end, so the web sees it cleared.
+		expect(seen.at(-1)).toBeUndefined()
+		decoder.failStart = false
+		seen.length = 0
+		await manager.restartDecoder("acars")
+		expect(seen.at(-1)).toBeUndefined()
+		expect(manager.getStatus("acars")?.running).toBe(true)
+	})
+
 	it("explicit stop cancels the retry and clears restarting; explicit start resets a fault", async () => {
 		setup({ faultAfterFailures: 1 })
 		await manager.startDecoder("acars")
