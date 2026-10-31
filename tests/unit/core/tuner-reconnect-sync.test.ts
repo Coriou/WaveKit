@@ -306,6 +306,50 @@ describe("TunerController reconnect synchronization", () => {
 			},
 		)
 
+		it("plain under reconnectPolicy reset: a dropout keeps the unverified tuning and caps, and rate adoption continues", async () => {
+			controller = new TunerController(
+				testLogger,
+				transport as unknown as SourceManager,
+				{ reconnectPolicy: "reset" },
+			)
+			controller.initializeSource("rtl-1", { ...transport.caps }, "rtl_tcp")
+			await tuneAndPause()
+			resume("plain")
+			expect(controller.adoptObservedSampleRate("rtl-1", 2_160_000)).toBe(true)
+			// A gain the user sets after the resume is discarded by the reset, and then unverified.
+			await controller.setGain("rtl-1", 400)
+			for (let dropout = 0; dropout < 2; dropout++) {
+				transport.frames.length = 0
+				transport.capsChanges.length = 0
+				controller.noteSourceConnected("rtl-1")
+				expect(controller.synchronizeOnConnect("rtl-1").commands).toEqual([])
+				expect(transport.frames).toEqual([])
+				// No baseline caps reset: the last known centre and the adopted rate stay.
+				expect(transport.capsChanges).toEqual([])
+				expect(transport.caps).toMatchObject({
+					centerFreq: 145_000_000,
+					sampleRate: 2_160_000,
+				})
+				const state = controller.getState("rtl-1")!
+				expect(state).toMatchObject({
+					frequency: 145_000_000,
+					sampleRate: 2_160_000,
+					gain: 400,
+				})
+				expect(state.unknownFields).toEqual(
+					expect.arrayContaining([
+						"frequency",
+						"sampleRate",
+						"gainMode",
+						"gain",
+					]),
+				)
+			}
+			expect(controller.isSampleRateUnverified("rtl-1")).toBe(true)
+			expect(controller.adoptObservedSampleRate("rtl-1", 2_048_000)).toBe(true)
+			expect(transport.caps.sampleRate).toBe(2_048_000)
+		})
+
 		it("plain: a source config change does not lift the configured-gain hold", () => {
 			controller.setConfiguredTuning("rtl-1", {
 				gainMode: "manual",

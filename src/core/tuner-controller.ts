@@ -2023,13 +2023,18 @@ export class TunerController extends EventEmitter {
 			const forgot =
 				(this.inferredFields.get(sourceId)?.size ?? 0) > 0 ||
 				(this.ignoredRelayFields.get(sourceId)?.size ?? 0) > 0
+			// After a plain resume (plainResumeHold) the receiver is another client's to tune: the
+			// configured baseline is no better a guess than the last known values, so they stay,
+			// unverified with every discarded field, and caps hold them (rate adoption continues).
+			const hold = this.plainResumeHold.has(sourceId)
+			if (hold) this.holdUnverified(sourceId, desired)
 			this.desiredFields.delete(sourceId)
 			this.inferredFields.delete(sourceId)
 			this.ignoredRelayFields.delete(sourceId)
-			this.unverifiedFields.delete(sourceId)
+			if (!hold) this.unverifiedFields.delete(sourceId)
 			// With nothing accepted every non-baseline value came from an inferred write or
 			// relay command, so a forget also returns the values to the baseline (WG5 R2).
-			if (reset || forgot)
+			if ((reset || forgot) && !hold)
 				this.applyBaselineFields(state, this.baselineCaps.get(sourceId))
 			if (reset) {
 				this.log.warn(
@@ -2237,6 +2242,28 @@ export class TunerController extends EventEmitter {
 					resume: "plain",
 				}
 			: { policy, commands, reset: false, resume: "plain" }
+	}
+
+	/**
+	 * A reset-policy reconnect under plainResumeHold: the plain resume's unverified fields stay so,
+	 * and the accepted, inferred and ignored-relay fields it is about to discard join them (their
+	 * values were written on an earlier connection the receiver may no longer reflect).
+	 */
+	private holdUnverified(
+		sourceId: string,
+		desired: ReadonlyMap<DesiredField, number> | undefined,
+	): void {
+		const unverified = new Set(this.unverifiedFields.get(sourceId))
+		const discarded = [
+			...(desired?.keys() ?? []),
+			...(this.inferredFields.get(sourceId) ?? []),
+			...(this.ignoredRelayFields.get(sourceId) ?? []),
+		]
+		for (const field of discarded) {
+			const stateField = STATE_FIELDS.find(f => f === field)
+			if (stateField !== undefined) unverified.add(stateField)
+		}
+		this.unverifiedFields.set(sourceId, unverified)
 	}
 
 	/**

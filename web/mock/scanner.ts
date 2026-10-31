@@ -2119,8 +2119,9 @@ export interface ScannerMock {
 	/** The receiver feed paused: a running sweep waits in `paused(source-down)` with its lease. */
 	feedPaused(): void
 	/**
-	 * The feed resumed. Plain (`restoreTuning` false): a waiting sweep stays paused with reason
-	 * `resumed-without-retune` until an explicit resume; a restore resume continues it.
+	 * The feed resumed. Plain (`restoreTuning` false): a waiting or auto-resuming sweep stays paused
+	 * with reason `resumed-without-retune` until an explicit resume (its lease forgets the pre-job
+	 * tuning); a restore resume continues a sweep paused by the feed.
 	 */
 	feedResumed(restoreTuning: boolean): void
 	/** The sweep job holding the source's tuner, if any (identify refuses then). */
@@ -3912,17 +3913,23 @@ export function registerScannerMock(
 		},
 		feedResumed(restoreTuning) {
 			for (const r of records.values()) {
-				if (
-					r.spec.mode !== "sweep" ||
-					r.state !== "paused" ||
-					r.reason !== "source-down"
-				)
-					continue
+				if (r.spec.mode !== "sweep" || r.state !== "paused") continue
 				if (restoreTuning) {
-					resumeSweep(r)
+					if (r.reason === "source-down") resumeSweep(r)
 					continue
 				}
+				// Plain: every sweep that would retune on its own (a waiter's idle timer too) waits for
+				// Resume scan; the held lease forgets its snapshot, as on the core (a cancel restores nothing).
+				if (
+					r.reason !== "source-down" &&
+					r.reason !== "preempted-operator" &&
+					r.reason !== "preempted-relay" &&
+					r.reason !== "preempted-job"
+				)
+					continue
 				r.reason = "resumed-without-retune"
+				r.snapshotHz = null
+				r.resumeAt = null
 				touch(r)
 				emitJob(r)
 			}

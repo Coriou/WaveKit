@@ -829,7 +829,9 @@ What a resume writes to the receiver depends on the body:
   pause are no longer restored on a later dropout either, and no later dropout reconnect
   writes the configured gain until a restore resume (a value set through the API or the
   relay afterwards is restored as usual); changing the source's configured `tuner` gain
-  does not lift that hold either. Relay commands are written only when they arrived
+  does not lift that hold either. Under `reconnectPolicy: reset` a later dropout does not
+  return state or caps to the configured baseline either: the last known values stay, in
+  `unknownFields` (with any value the reset discards), and rate adoption goes on. Relay commands are written only when they arrived
   after the latest pause. When the rate-truth check then measures a sustained rate within
   1.5 % of one common rtl_tcp rate (0.25, 1.024, 1.536, 1.792, 1.92, 2.048, 2.16, 2.4, 2.56,
   2.88 or 3.2 Msps), that rate is adopted into the tuner state and the caps (it stays in
@@ -840,7 +842,12 @@ What a resume writes to the receiver depends on the body:
   band gain is applied; a sweep that held the source keeps its lease but does not hop: it
   waits in `paused(resumed-without-retune)`, with the source's decoders running, until
   `POST /api/scanner/jobs/:id/resume` (Resume scan) sends it to its next hop, and its
-  release no longer puts back the pre-pause tuning. TEST_MODE 0
+  release no longer puts back the pre-pause tuning. So does every other sweep on the source
+  that would take the tuner on its own: one waiting to auto-resume after an operator or
+  relay write (`preempted-operator`, `preempted-relay`), one waiting for another job's lease
+  (`preempted-job`), and one due to resume after a core restart (`resume.onBoot`). A sweep
+  you paused (`paused(operator)`) stays as it is; in-window and passive jobs, which never
+  tune, resume as usual. TEST_MODE 0
   (the scanner's own marker) is still sent when a marker may be open.
 - **Restore resume** (`restoreTuning: true`) writes the accepted pre-pause tuning back on
   the first payload, whatever `tuner.reconnectPolicy` says (even `reset`; a later dropout

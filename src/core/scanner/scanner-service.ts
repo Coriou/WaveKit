@@ -6158,7 +6158,10 @@ export class ScannerService extends EventEmitter {
 
 	/**
 	 * `plainResume`: the paused feed came back without retuning (another client may hold the
-	 * receiver): a sweep waits in paused(resumed-without-retune) for an explicit resume.
+	 * receiver): every sweep on it that would write tuning without the operator (paused through the
+	 * pause, a waiter that auto-resumes, a pending boot resume) waits in paused(resumed-without-retune)
+	 * for an explicit resume; a Stay-here pause stays as it is. In-window and passive jobs never tune:
+	 * they resume as after a dropout.
 	 */
 	private readonly onSourceUp = (
 		sourceId: string,
@@ -6166,16 +6169,37 @@ export class ScannerService extends EventEmitter {
 	): void => {
 		if (!this.started) return
 		const plain = info?.plainResume === true
+		const boot = new Set(plain ? (this.bootResume.get(sourceId) ?? []) : [])
 		for (const d of this.driversOn(sourceId)) {
-			if (d.record.state === "paused" && d.record.reason === "source-down")
-				d.dispatch(
-					plain ? { type: "source-up", plain: true } : { type: "source-up" },
-				).catch((err: unknown) =>
-					this.log.warn({ err, jobId: d.record.id }, "source-up failed"),
-				)
+			const { record } = d
+			if (record.state !== "paused") continue
+			const hold = plain && record.spec.mode === "sweep"
+			const resumes =
+				record.reason === "source-down" ||
+				(hold &&
+					(record.reason === "preempted-operator" ||
+						record.reason === "preempted-relay" ||
+						record.reason === "preempted-job" ||
+						(record.reason === "core-restart" && boot.has(record.id))))
+			if (!resumes) continue
+			d.dispatch(
+				hold ? { type: "source-up", plain: true } : { type: "source-up" },
+			).catch((err: unknown) =>
+				this.log.warn({ err, jobId: record.id }, "source-up failed"),
+			)
 		}
+		if (plain) this.holdBootResumes(sourceId)
 		if (!this.persistedLeases.has(sourceId)) this.runBootResumes(sourceId)
 		this.onSourceAvailable(sourceId)
+	}
+
+	/** A plain resume: the source's pending boot resumes of sweeps wait for the operator (onSourceUp). */
+	private holdBootResumes(sourceId: string): void {
+		const ids = this.bootResume.get(sourceId)
+		if (!ids) return
+		const rest = ids.filter(id => this.jobs.get(id)?.spec.mode !== "sweep")
+		if (rest.length > 0) this.bootResume.set(sourceId, rest)
+		else this.bootResume.delete(sourceId)
 	}
 
 	/** Boot-time caps are absent until SourceManager.connect(): the source's passive job is (re)built then. */

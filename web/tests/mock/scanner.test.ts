@@ -442,6 +442,48 @@ describe("mock scanner REST", () => {
 		await inject("POST", `/api/scanner/jobs/${job.id}/cancel`)
 	})
 
+	it("a plain receiver resume forgets the sweep's pre-job tuning: cancelling restores nothing", async () => {
+		server = await buildMockServer({ port: 0, resumeMs: 0 })
+		await server.app.ready()
+		const job = (
+			await inject("POST", "/api/scanner/jobs", marineSweep)
+		).json<ScanJob>()
+		await sleep(400)
+		const tunedHz = async () =>
+			(await inject("GET", "/api/tuner/rtl-0")).json<TunerState>().frequency
+		await inject("POST", "/api/sources/rtl-0/pause")
+		await inject("POST", "/api/sources/rtl-0/resume")
+		const held = await tunedHz()
+		await inject("POST", `/api/scanner/jobs/${job.id}/cancel`)
+		expect(await tunedHz()).toBe(held)
+	})
+
+	it("a plain receiver resume holds an operator-preempted sweep: its idle timer no longer resumes it", async () => {
+		server = await buildMockServer({ port: 0, resumeMs: 0 })
+		await server.app.ready()
+		const job = (
+			await inject("POST", "/api/scanner/jobs", {
+				...marineSweep,
+				resume: { autoAfterIdleMs: 300 },
+			})
+		).json<ScanJob>()
+		await sleep(400)
+		await inject("POST", "/api/tuner/rtl-0/frequency", { hz: 162_000_000 })
+		const jobNow = async () =>
+			(await inject("GET", `/api/scanner/jobs/${job.id}`)).json<ScanJob>()
+		expect((await jobNow()).reason).toBe("preempted-operator")
+		await inject("POST", "/api/sources/rtl-0/pause")
+		await inject("POST", "/api/sources/rtl-0/resume")
+		expect(await jobNow()).toMatchObject({
+			state: "paused",
+			reason: "resumed-without-retune",
+			resumeAt: null,
+		})
+		await sleep(1_100)
+		expect((await jobNow()).reason).toBe("resumed-without-retune")
+		await inject("POST", `/api/scanner/jobs/${job.id}/cancel`)
+	})
+
 	it("completes after stop.afterSweeps", async () => {
 		await start()
 		const job = (

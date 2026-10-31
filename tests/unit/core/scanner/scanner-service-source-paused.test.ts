@@ -6,7 +6,7 @@
  * leaves the sweep in paused(resumed-without-retune), writing no tuning until the operator's
  * Resume scan; a restore resume continues it.
  */
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { ScanJob } from "@wavekit/api-types"
 import type { ScannerSettings } from "../../../../src/core/scanner/types.js"
 import {
@@ -151,6 +151,190 @@ describe("scanner jobs on a paused feed", () => {
 		expect(tuningWrites(h, sent).some(c => c.name === "set-frequency")).toBe(
 			true,
 		)
+		await h.service.cancelJob(job.id)
+		await h.service.stop()
+	})
+
+	it("a plain resume holds a sweep's pending boot resume until Resume scan", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		const job = await h.service.createJob({
+			...sweep,
+			resume: { autoAfterIdleMs: null, onBoot: true },
+		})
+		await untilRunning(h, job.id)
+		const feed = pausable(h)
+		feed.pause("rtl")
+		await settled(h.service)
+		await h.service.stop()
+
+		const again = serviceHarness({ dir: h.dir, patch: noPassive })
+		const feed2 = pausable(again)
+		await again.service.start()
+		feed2.pause("rtl")
+		await settled(again.service)
+		const sent = again.tuner.sent.length
+		feed2.resume("rtl", "plain")
+		await settled(again.service)
+		await settled(again.service)
+		expect(again.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "resumed-without-retune",
+		})
+		expect(tuningWrites(again, sent)).toEqual([])
+
+		await again.service.resumeJob(job.id, { takeover: true })
+		await untilRunning(again, job.id)
+		expect(again.service.getJob(job.id)?.state).toBe("running")
+		expect(
+			tuningWrites(again, sent).some(c => c.name === "set-frequency"),
+		).toBe(true)
+		await again.service.cancelJob(job.id)
+		await again.service.stop()
+	}, 20_000)
+
+	it("a restore resume runs a sweep's pending boot resume as before", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		const job = await h.service.createJob({
+			...sweep,
+			resume: { autoAfterIdleMs: null, onBoot: true },
+		})
+		await untilRunning(h, job.id)
+		const feed = pausable(h)
+		feed.pause("rtl")
+		await settled(h.service)
+		await h.service.stop()
+
+		const again = serviceHarness({ dir: h.dir, patch: noPassive })
+		const feed2 = pausable(again)
+		await again.service.start()
+		feed2.pause("rtl")
+		await settled(again.service)
+		feed2.resume("rtl", "restore")
+		await vi.waitFor(
+			() => expect(again.service.getJob(job.id)?.state).not.toBe("paused"),
+			{ timeout: 5_000 },
+		)
+		await untilRunning(again, job.id)
+		expect(again.service.getJob(job.id)?.state).toBe("running")
+		await again.service.cancelJob(job.id)
+		await again.service.stop()
+	}, 20_000)
+
+	it("a plain resume holds a sweep preempted by the operator: its idle timeout no longer reacquires the tuner", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		let clock = Date.now()
+		const inspected = h.service as unknown as {
+			now: () => number
+			tick: () => void
+		}
+		inspected.now = () => clock
+		const feed = pausable(h)
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		const job = await h.service.createJob({
+			...sweep,
+			resume: { autoAfterIdleMs: 1000 },
+		})
+		await untilRunning(h, job.id)
+		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await settled(h.service)
+		expect(h.service.getJob(job.id)?.reason).toBe("preempted-operator")
+
+		feed.pause("rtl")
+		await settled(h.service)
+		const sent = h.tuner.sent.length
+		feed.resume("rtl", "plain")
+		await settled(h.service)
+		expect(h.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "resumed-without-retune",
+		})
+		clock += 60_000
+		inspected.tick()
+		await settled(h.service)
+		expect(h.service.getJob(job.id)?.reason).toBe("resumed-without-retune")
+		expect(tuningWrites(h, sent)).toEqual([])
+		await h.service.cancelJob(job.id)
+		await h.service.stop()
+	})
+
+	it("a restore resume leaves an operator-preempted sweep to its idle timeout", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		let clock = Date.now()
+		const inspected = h.service as unknown as {
+			now: () => number
+			tick: () => void
+		}
+		inspected.now = () => clock
+		const feed = pausable(h)
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		const job = await h.service.createJob({
+			...sweep,
+			resume: { autoAfterIdleMs: 1000 },
+		})
+		await untilRunning(h, job.id)
+		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await settled(h.service)
+		feed.pause("rtl")
+		await settled(h.service)
+		feed.resume("rtl", "restore")
+		await settled(h.service)
+		expect(h.service.getJob(job.id)?.reason).toBe("preempted-operator")
+		clock += 60_000
+		inspected.tick()
+		await vi.waitFor(
+			() => expect(h.service.getJob(job.id)?.state).toBe("running"),
+			{ timeout: 5_000 },
+		)
+		await h.service.cancelJob(job.id)
+		await h.service.stop()
+	})
+
+	it("a plain resume leaves an operator-paused sweep (Stay here) as it is", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		const feed = pausable(h)
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		const job = await h.service.createJob(sweep)
+		await untilRunning(h, job.id)
+		await h.service.pauseJob(job.id)
+		feed.pause("rtl")
+		await settled(h.service)
+		feed.resume("rtl", "plain")
+		await settled(h.service)
+		expect(h.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "operator",
+		})
+		await h.service.cancelJob(job.id)
+		await h.service.stop()
+	})
+
+	it("a plain resume resumes an in-window job (it never tunes)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		const feed = pausable(h)
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		const job = await h.service.createJob({
+			sourceId: "rtl",
+			mode: "in-window",
+			ranges: [{ startHz: CENTRE - 100_000, endHz: CENTRE + 100_000 }],
+		})
+		await untilRunning(h, job.id)
+		expect(h.service.getJob(job.id)?.state).toBe("running")
+		feed.pause("rtl")
+		await settled(h.service)
+		expect(h.service.getJob(job.id)?.reason).toBe("source-down")
+		const sent = h.tuner.sent.length
+		feed.resume("rtl", "plain")
+		await settled(h.service)
+		expect(h.service.getJob(job.id)?.state).toBe("running")
+		expect(tuningWrites(h, sent)).toEqual([])
 		await h.service.cancelJob(job.id)
 		await h.service.stop()
 	})

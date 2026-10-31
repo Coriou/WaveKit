@@ -27,7 +27,8 @@ export type JobEvent =
 	| { type: "source-down"; feedPaused?: boolean }
 	/**
 	 * `plain`: a plain resume of a paused feed (SourceManager.resumeKind "plain"): another client may
-	 * have retuned the receiver, so a sweep parks in paused(resumed-without-retune) instead of hopping.
+	 * have retuned the receiver, so a sweep parks in paused(resumed-without-retune) instead of hopping,
+	 * as does a sweep that would otherwise reacquire the tuner on its own (preempted-*, core-restart).
 	 */
 	| { type: "source-up"; plain?: boolean }
 	| { type: "preemptor-idle"; impactGrew: boolean }
@@ -226,12 +227,17 @@ export function transition(
 					: to("failed", endActions(s), "tuner-unavailable")
 			return active ? to("paused", ["stop-probes"], "source-down") : INVALID
 		case "source-up":
-			// After a plain resume the sweep keeps its lease (no waiter takes the tuner and hops) but
-			// writes nothing and frees the configured decoders until an explicit resume.
-			if (!pausedFor("source-down")) return INVALID
-			return e.plain === true
-				? to("paused", ["release-decoders"], "resumed-without-retune")
-				: to("running", ["resend-hop"])
+			// After a plain resume a sweep writes nothing and frees the configured decoders until an
+			// explicit resume: one paused through the pause keeps its lease (no waiter takes the tuner
+			// and hops), and a waiter that would reacquire it on its own (operator idle, a freed lease,
+			// a boot resume) waits too. ScannerService sends `plain` to sweeps only.
+			if (e.plain === true)
+				return pausedFor("source-down") ||
+					preempted ||
+					pausedFor("core-restart")
+					? to("paused", ["release-decoders"], "resumed-without-retune")
+					: INVALID
+			return pausedFor("source-down") ? to("running", ["resend-hop"]) : INVALID
 		case "preemptor-idle":
 			if (!preempted) return INVALID
 			return e.impactGrew

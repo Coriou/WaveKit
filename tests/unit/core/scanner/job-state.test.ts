@@ -179,9 +179,10 @@ const ROWS: [string[], string, string, string[]][] = [
 	[ACTIVE, "source-down", "paused(source-down)", ["stop-probes"]],
 	[PREEMPTED, "pause", "paused(operator)", ["stop-probes", "release-decoders"]],
 	[["paused(source-down)"], "source-up", "running", ["resend-hop"]],
-	// a plain resume of the feed: no hop, the configured decoders run; the lease stays held
+	// a plain resume of the feed: no hop, the configured decoders run; the lease stays held. A waiter
+	// that would reacquire the tuner on its own (idle timeout, freed lease, boot resume) waits too.
 	[
-		["paused(source-down)"],
+		[...PREEMPTED, "paused(source-down)", "paused(core-restart)"],
 		"source-up:plain",
 		"paused(resumed-without-retune)",
 		["release-decoders"],
