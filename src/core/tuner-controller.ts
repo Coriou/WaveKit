@@ -927,7 +927,8 @@ export class TunerController extends EventEmitter {
 	/**
 	 * The sample rate adoptObservedSampleRate took from the stream's measured rate, per source.
 	 * Reported as `measuredFields` only while the rate is still unverified and the state still
-	 * shows this value; a new plain resume or the source's teardown forgets it.
+	 * shows this value; a new pause, a resume of either kind or the source's teardown forgets
+	 * it: a measurement holds only for the connection that took it.
 	 */
 	private measuredRates: Map<string, number> = new Map()
 	/**
@@ -2022,7 +2023,11 @@ export class TunerController extends EventEmitter {
 		if (options.resume === "plain")
 			return this.synchronizeOnPlainResume(sourceId, state, pausedAt)
 		// A restore resume writes the configured frames again (and every later connection).
-		if (options.resume === "restore") this.plainResumeHold.delete(sourceId)
+		// It measured nothing yet: a rate it does not write stays unverified, not measured.
+		if (options.resume === "restore") {
+			this.plainResumeHold.delete(sourceId)
+			this.forgetMeasuredRate(sourceId)
+		}
 
 		if (policy === "reset") {
 			const reset = desired !== undefined && desired.size > 0
@@ -2289,6 +2294,13 @@ export class TunerController extends EventEmitter {
 	noteFeedPaused(sourceId: string): void {
 		if (!this.tunerStates.has(sourceId)) return
 		this.pausedAtSeq.set(sourceId, this.acceptanceSeq)
+		// The measured rate was this connection's: nothing measures a paused feed.
+		this.forgetMeasuredRate(sourceId)
+	}
+
+	/** Drops the source's measured-rate provenance, publishing the state when it was shown. */
+	private forgetMeasuredRate(sourceId: string): void {
+		if (this.measuredRates.delete(sourceId)) this.emitStateChanged(sourceId)
 	}
 
 	/**

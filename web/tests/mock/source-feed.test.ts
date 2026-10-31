@@ -201,6 +201,39 @@ describe("mock receiver feed", () => {
 		await measured.close()
 	})
 
+	it("a restore resume after a plain resume makes the restored tuning known, not measured", async () => {
+		const measured = await buildMockServer({
+			port: 0,
+			resumeMs: 0,
+			measuredRateHz: 2_160_000,
+		})
+		await measured.app.ready()
+		const state = async () =>
+			(await measured.app.inject({ method: "GET", url: "/api/tuner" })).json<
+				TunerState[]
+			>()[0]
+		const call = (url: string, payload?: object) =>
+			measured.app.inject({
+				method: "POST",
+				url,
+				...(payload ? { payload } : {}),
+			})
+		await call("/api/sources/rtl-0/pause")
+		await call("/api/sources/rtl-0/resume")
+		// only the centre is set on the plain-resumed connection
+		await call("/api/tuner/rtl-0/frequency", { hz: DEFAULT_CENTER_HZ })
+		expect((await state())?.unknownFields).toEqual(
+			expect.arrayContaining(["sampleRate", "gainMode", "gain"]),
+		)
+		await call("/api/sources/rtl-0/pause")
+		await call("/api/sources/rtl-0/resume", { restoreTuning: true })
+		const restored = await state()
+		expect(restored?.unknownFields).toBeUndefined()
+		expect(restored?.measuredFields).toBeUndefined()
+		expect(restored?.frequency).toBe(DEFAULT_CENTER_HZ)
+		await measured.close()
+	})
+
 	it("rejects a resume body other than { restoreTuning: boolean } with 400, as the core", async () => {
 		expect(resumeBodyOf(undefined)).toEqual({ restoreTuning: false })
 		expect(resumeBodyOf({})).toEqual({ restoreTuning: false })

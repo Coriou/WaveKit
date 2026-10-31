@@ -508,6 +508,36 @@ describe("TunerController reconnect synchronization", () => {
 			expect(controller.getState("rtl-1")!.measuredFields).toBeUndefined()
 		})
 
+		it("a new pause forgets the measured rate and publishes it; a restore resume does not bring it back", async () => {
+			expect(controller.adoptObservedSampleRate("rtl-1", 2_160_000)).toBe(true)
+			// Only the centre is set on this connection: the rate stays measured.
+			await controller.setFrequency("rtl-1", 146_000_000)
+			expect(controller.getState("rtl-1")!.measuredFields).toEqual([
+				"sampleRate",
+			])
+			const states: Array<{ measuredFields?: readonly string[] }> = []
+			controller.on("state-changed", (_id, state) => states.push(state))
+			controller.noteFeedPaused("rtl-1")
+			expect(states).toHaveLength(1)
+			expect(states[0]!.measuredFields).toBeUndefined()
+			controller.synchronizeOnConnect("rtl-1", { resume: "restore" })
+			const state = controller.getState("rtl-1")!
+			// Neither measured nor written on this connection: unverified only.
+			expect(state.measuredFields).toBeUndefined()
+			expect(state.unknownFields).toContain("sampleRate")
+			expect(states.every(s => s.measuredFields === undefined)).toBe(true)
+		})
+
+		it("a restore resume without a new pause marker forgets the measured rate", () => {
+			expect(controller.adoptObservedSampleRate("rtl-1", 2_160_000)).toBe(true)
+			const states: Array<{ measuredFields?: readonly string[] }> = []
+			controller.on("state-changed", (_id, state) => states.push(state))
+			controller.synchronizeOnConnect("rtl-1", { resume: "restore" })
+			expect(controller.getState("rtl-1")!.measuredFields).toBeUndefined()
+			expect(states.length).toBeGreaterThan(0)
+			expect(states.at(-1)!.measuredFields).toBeUndefined()
+		})
+
 		it("keeps the rate unverified when no common rate matches", () => {
 			expect(controller.adoptObservedSampleRate("rtl-1", 1_000_000)).toBe(false)
 			expect(controller.getState("rtl-1")!.unknownFields).toContain(

@@ -1853,6 +1853,15 @@ export async function buildMockServer(
 			if (t.sampleRate !== undefined) target.sampleRate = t.sampleRate
 			if (t.gainMode !== undefined) target.gainMode = t.gainMode
 			if (t.gain !== undefined) target.gain = t.gain
+			// like the core: written fields are known again, and a restore resume measured nothing
+			const written = new Set<string>(["frequency"])
+			if (t.sampleRate !== undefined) written.add("sampleRate")
+			if (t.gainMode !== undefined) written.add("gainMode")
+			if (t.gain !== undefined) written.add("gain")
+			const unknown = target.unknownFields?.filter(f => !written.has(f)) ?? []
+			if (unknown.length > 0) target.unknownFields = unknown
+			else delete target.unknownFields
+			delete target.measuredFields
 			if (sourceId === MOCK_SOURCE_ID) applyFrequency(t.centerFreq, "rest")
 			else {
 				target.frequency = t.centerFreq
