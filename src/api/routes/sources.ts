@@ -230,6 +230,7 @@ const sourceFeedResponseSchema = {
 		id: { type: "string" },
 		feed: sourceFeedSchema,
 		changed: { type: "boolean" },
+		persisted: { type: "boolean" },
 	},
 	required: ["id", "feed", "changed"],
 } as const

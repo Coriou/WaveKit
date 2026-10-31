@@ -1930,9 +1930,14 @@ export class TunerController extends EventEmitter {
 	 * Either way source caps are then reconciled with what the tuner state can
 	 * back, so stale metadata is never kept silently. Success means "written",
 	 * never "applied": rtl_tcp has no acknowledgement or readback.
+	 * `options.policy` overrides the configured policy for this connection (a resume of a
+	 * paused feed always restores).
 	 */
-	synchronizeOnConnect(sourceId: string): TunerConnectSyncResult {
-		const policy = this.config.reconnectPolicy ?? "restore"
+	synchronizeOnConnect(
+		sourceId: string,
+		options: { policy?: TunerReconnectPolicy } = {},
+	): TunerConnectSyncResult {
+		const policy = options.policy ?? this.config.reconnectPolicy ?? "restore"
 		const state = this.tunerStates.get(sourceId)
 		if (!state) return { policy, commands: [], reset: false }
 		const desired = this.desiredFields.get(sourceId)

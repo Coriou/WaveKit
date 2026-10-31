@@ -17,7 +17,8 @@ export type JobEvent =
 	| { type: "relay-external" }
 	| { type: "preempted-job" }
 	| { type: "preemptor-lost" }
-	| { type: "source-down" }
+	/** `feedPaused`: the operator paused the receiver feed (SourceManager.pause), no dropout. */
+	| { type: "source-down"; feedPaused?: boolean }
 	| { type: "source-up" }
 	| { type: "preemptor-idle"; impactGrew: boolean }
 	| { type: "resume"; takeover: boolean }
@@ -202,11 +203,13 @@ export function transition(
 				? to("paused", ["release-decoders"], "preempted-job")
 				: INVALID
 		case "source-down":
-			return s.state === "starting"
-				? to("failed", endActions(s), "tuner-unavailable")
-				: active
+			// A dropout during startup fails the job; a paused feed parks it with its lease until
+			// resume (source-up), as a running job waits through a dropout.
+			if (s.state === "starting")
+				return e.feedPaused === true
 					? to("paused", ["stop-probes"], "source-down")
-					: INVALID
+					: to("failed", endActions(s), "tuner-unavailable")
+			return active ? to("paused", ["stop-probes"], "source-down") : INVALID
 		case "source-up":
 			return pausedFor("source-down") ? to("running", ["resend-hop"]) : INVALID
 		case "preemptor-idle":

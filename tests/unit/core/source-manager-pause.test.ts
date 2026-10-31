@@ -232,72 +232,144 @@ describe("SourceManager feed pause / resume", () => {
 		expect(manager.getStatus("rtl")?.feed?.state).toBe("paused")
 	})
 
-	it("resume reconnects the same registration and stream and restores accepted tuning", async () => {
-		const { upstream, manager, feedEvents } = await started()
-		const tuner = new TunerController(pino({ level: "silent" }), manager)
-		wireTunerControl({
-			log: pino({ level: "silent" }),
-			sourceManager: manager,
-			tunerController: tuner,
-			tunerRelay: new TunerRelay(
-				pino({ level: "silent" }),
-				manager,
-				new FanoutManager(pino({ level: "silent" })),
-				{
-					enabled: false,
-					host: "127.0.0.1",
-					port: 0,
-					sourceId: "rtl",
-					controlPolicy: "exclusive",
-				},
-			),
-			relayEnabled: false,
-		})
-		const stream = await manager.connect(config(upstream.port))
-		let bytes = 0
-		stream.on("data", (chunk: Buffer) => {
-			bytes += chunk.length
-		})
+	it.each(["restore", "reset"] as const)(
+		"resume reconnects the same registration and stream and restores accepted tuning (reconnectPolicy %s)",
+		async reconnectPolicy => {
+			const { upstream, manager, feedEvents } = await started()
+			const tuner = new TunerController(pino({ level: "silent" }), manager, {
+				reconnectPolicy,
+			})
+			wireTunerControl({
+				log: pino({ level: "silent" }),
+				sourceManager: manager,
+				tunerController: tuner,
+				tunerRelay: new TunerRelay(
+					pino({ level: "silent" }),
+					manager,
+					new FanoutManager(pino({ level: "silent" })),
+					{
+						enabled: false,
+						host: "127.0.0.1",
+						port: 0,
+						sourceId: "rtl",
+						controlPolicy: "exclusive",
+					},
+				),
+				relayEnabled: false,
+			})
+			const stream = await manager.connect(config(upstream.port))
+			let bytes = 0
+			stream.on("data", (chunk: Buffer) => {
+				bytes += chunk.length
+			})
+			await waitFor(
+				() => manager.getStatus("rtl")?.activity.state === "streaming",
+			)
+			await tuner.setSampleRate("rtl", 2_400_000)
+			await tuner.setFrequency("rtl", 145_000_000)
+			await tuner.setGainMode("rtl", "manual")
+			await tuner.setGain("rtl", 297)
+			await waitFor(() => upstream.connections[0]!.frames.length === 4)
+
+			await manager.pause("rtl")
+			await waitFor(() => upstream.connections[0]!.closed)
+			const before = bytes
+
+			const resumed = await manager.resume("rtl")
+			expect(resumed).toMatchObject({ changed: true, feed: { state: "live" } })
+			expect(manager.isPaused("rtl")).toBe(false)
+			await waitFor(() => upstream.connections.length === 2)
+			const second = upstream.connections[1]!
+			// The usual reconnect replay on the session's first payload: rate, centre, gain.
+			await waitFor(() => second.frames.length >= 4)
+			expect(second.frames).toEqual(
+				expect.arrayContaining([
+					[0x02, 2_400_000],
+					[0x01, 145_000_000],
+					[0x03, 1],
+					[0x04, 297],
+				]),
+			)
+			// Same stream object keeps flowing after the resume.
+			await waitFor(() => bytes > before)
+			expect(manager.getStatus("rtl")?.connected).toBe(true)
+
+			expect(manager.isResumedSession("rtl")).toBe(true)
+			expect(tuner.getState("rtl")).toMatchObject({
+				sampleRate: 2_400_000,
+				frequency: 145_000_000,
+			})
+
+			const again = await manager.resume("rtl")
+			expect(again).toMatchObject({ changed: false, feed: { state: "live" } })
+			expect(upstream.connections).toHaveLength(2)
+			expect(feedEvents).toEqual([
+				["rtl", "paused"],
+				["rtl", "resuming"],
+				["rtl", "live"],
+			])
+
+			// A dropout after the resume follows the configured policy again: the override is
+			// scoped to the resume's own connection.
+			second.socket.destroy()
+			await waitFor(() => upstream.connections.length === 3, 10_000)
+			const third = upstream.connections[2]!
+			await waitFor(
+				() => manager.getStatus("rtl")?.activity.state === "streaming",
+			)
+			expect(manager.isResumedSession("rtl")).toBe(false)
+			if (reconnectPolicy === "restore") {
+				await waitFor(() => third.frames.length >= 4)
+				expect(third.frames).toEqual(
+					expect.arrayContaining([[0x01, 145_000_000]]),
+				)
+			} else {
+				// Give a replay time to arrive (it is written on the first payload, which came).
+				await new Promise(resolve => setTimeout(resolve, 100))
+				expect(third.frames).not.toEqual(
+					expect.arrayContaining([[0x01, 145_000_000]]),
+				)
+			}
+		},
+		15_000,
+	)
+
+	it("retries a failed state-file write on a repeated pause or resume and reports it", async () => {
+		const feeds = new MemoryFeeds()
+		const { upstream, manager, messages } = await started({ feeds })
+		await manager.connect(config(upstream.port))
 		await waitFor(
 			() => manager.getStatus("rtl")?.activity.state === "streaming",
 		)
-		await tuner.setSampleRate("rtl", 2_400_000)
-		await tuner.setFrequency("rtl", 145_000_000)
-		await tuner.setGainMode("rtl", "manual")
-		await tuner.setGain("rtl", 297)
-		await waitFor(() => upstream.connections[0]!.frames.length === 4)
 
-		await manager.pause("rtl")
-		await waitFor(() => upstream.connections[0]!.closed)
-		const before = bytes
+		feeds.failNext = true
+		const first = await manager.pause("rtl")
+		expect(first).toMatchObject({ changed: true, persisted: false })
+		expect(feeds.saved).toEqual([])
+		expect(
+			messages.some(m => m.startsWith("Saving the paused source feeds failed")),
+		).toBe(true)
+		// The id is already paused in memory; the repeated pause still writes.
+		const second = await manager.pause("rtl")
+		expect(second).toMatchObject({ changed: false, persisted: true })
+		expect(feeds.saved).toEqual([["rtl"]])
+		// Nothing owed: a third pause writes nothing.
+		expect(await manager.pause("rtl")).toMatchObject({ persisted: true })
+		expect(feeds.saved).toHaveLength(1)
 
+		feeds.failNext = true
 		const resumed = await manager.resume("rtl")
-		expect(resumed).toMatchObject({ changed: true, feed: { state: "live" } })
-		expect(manager.isPaused("rtl")).toBe(false)
-		await waitFor(() => upstream.connections.length === 2)
-		const second = upstream.connections[1]!
-		// The usual reconnect replay on the session's first payload: rate, centre, gain.
-		await waitFor(() => second.frames.length >= 4)
-		expect(second.frames).toEqual(
-			expect.arrayContaining([
-				[0x02, 2_400_000],
-				[0x01, 145_000_000],
-				[0x03, 1],
-				[0x04, 297],
-			]),
-		)
-		// Same stream object keeps flowing after the resume.
-		await waitFor(() => bytes > before)
-		expect(manager.getStatus("rtl")?.connected).toBe(true)
-
+		expect(resumed).toMatchObject({
+			changed: true,
+			persisted: false,
+			feed: { state: "live" },
+		})
+		// The file still says paused (a restart would honour it) until a write succeeds.
+		expect(await feeds.load()).toEqual(new Set(["rtl"]))
 		const again = await manager.resume("rtl")
-		expect(again).toMatchObject({ changed: false, feed: { state: "live" } })
-		expect(upstream.connections).toHaveLength(2)
-		expect(feedEvents).toEqual([
-			["rtl", "paused"],
-			["rtl", "resuming"],
-			["rtl", "live"],
-		])
+		expect(again).toMatchObject({ changed: false, persisted: true })
+		expect(feeds.saved.at(-1)).toEqual([])
+		expect(await feeds.load()).toEqual(new Set())
 	})
 
 	it("restart while paused: the persisted pause is honoured and nothing connects", async () => {

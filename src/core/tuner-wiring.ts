@@ -48,7 +48,13 @@ export function wireTunerControl(deps: TunerWiringDeps): void {
 		tunerController.initializeSource(sourceId, sourceManager.getCaps(sourceId))
 		// The receiver may have come back at its own defaults: restore or reset
 		// accepted tuner state per tuner.reconnectPolicy and reconcile caps.
-		const result = tunerController.synchronizeOnConnect(sourceId)
+		// A resume of a paused feed is the operator's, not a dropout: it always restores.
+		// Optional call: test doubles of the source manager predate pause / resume.
+		const resumed = sourceManager.isResumedSession?.(sourceId) === true
+		const result = tunerController.synchronizeOnConnect(
+			sourceId,
+			resumed ? { policy: "restore" } : {},
+		)
 		if (result.error) {
 			log.warn(
 				{

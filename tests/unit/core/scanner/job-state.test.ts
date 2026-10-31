@@ -450,6 +450,45 @@ describe("job transition table (§ 10.1)", () => {
 		})
 	})
 
+	it("parks a starting job on a paused feed with its lease; a starting dropout still fails", () => {
+		const parked = transition(
+			{ state: "starting" },
+			{ type: "source-down", feedPaused: true },
+		)
+		expect(parked).toEqual({
+			state: "paused",
+			reason: "source-down",
+			actions: ["stop-probes"],
+		})
+		// Resume (source-up) runs it; cancel still restores and releases the lease it kept.
+		expect(
+			transition(
+				{ state: "paused", reason: "source-down" },
+				{ type: "cancel" },
+			),
+		).toEqual({
+			state: "cancelled",
+			actions: ["stop-probes", "restore", "release-lease", "release-decoders"],
+		})
+		expect(
+			transition(
+				{ state: "starting" },
+				{ type: "source-down", feedPaused: false },
+			),
+		).toMatchObject({ state: "failed", reason: "tuner-unavailable" })
+		// Active jobs park the same way whether paused or dropped.
+		expect(
+			transition(
+				{ state: "running" },
+				{ type: "source-down", feedPaused: true },
+			),
+		).toEqual({
+			state: "paused",
+			reason: "source-down",
+			actions: ["stop-probes"],
+		})
+	})
+
 	it("resends the hop after a reconnect and restores the persisted lease at boot", () => {
 		expect(
 			transition(

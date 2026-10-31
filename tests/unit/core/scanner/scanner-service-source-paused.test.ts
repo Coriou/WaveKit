@@ -17,6 +17,11 @@ type Harness = ReturnType<typeof serviceHarness>
 const noPassive = (s: ScannerSettings): void => {
 	s.passive.enabled = false
 }
+/** Markers and no samples: the first own epoch waits for its marker run, so a sweep stays starting. */
+const heldStarting = (s: ScannerSettings): void => {
+	s.passive.enabled = false
+	s.sweep.markers = true
+}
 
 const sweep = {
 	sourceId: "rtl",
@@ -74,6 +79,47 @@ describe("scanner jobs on a paused feed", () => {
 		await settled(h.service)
 		expect(h.service.getJob(job.id)?.state).toBe("running")
 		await h.service.cancelJob(job.id)
+		await h.service.stop()
+	})
+
+	it("a sweep paused before engine-ready waits through the pause and runs on resume", async () => {
+		const h = serviceHarness({ patch: heldStarting })
+		const feed = pausable(h)
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		const job = await h.service.createJob(sweep)
+		await settled(h.service)
+		expect(h.service.getJob(job.id)?.state).toBe("starting")
+
+		feed.pause("rtl")
+		await settled(h.service)
+		expect(h.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "source-down",
+		})
+
+		feed.resume("rtl")
+		await settled(h.service)
+		expect(h.service.getJob(job.id)?.state).toBe("running")
+		await h.service.cancelJob(job.id)
+		await h.service.stop()
+	})
+
+	it("a dropout before engine-ready still fails the sweep (no pause)", async () => {
+		const h = serviceHarness({ patch: heldStarting })
+		pausable(h)
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		const job = await h.service.createJob(sweep)
+		await settled(h.service)
+		expect(h.service.getJob(job.id)?.state).toBe("starting")
+
+		h.sources.emit("disconnected", "rtl")
+		await settled(h.service)
+		expect(h.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "failed",
+			reason: "tuner-unavailable",
+		})
 		await h.service.stop()
 	})
 

@@ -786,20 +786,29 @@ curl -X POST http://localhost:9000/api/sources/rtl-pi/resume
 **Pause** closes the receiver connection cleanly (the core ends the stream and waits up to
 2 s for the receiver to close its side) and never reconnects while paused: no backoff
 retry, no stall watchdog. The source keeps its registration, caps, stream and decoder
-assignments. Decoders on it are suspended with reason `source-paused`, running scanner
-jobs wait in `paused` (reason `source-down`) exactly as after a dropout, the channelizer
-drops its channels as on a disconnect, and live audio keeps its settings with no input.
+assignments. Decoders on it are suspended with reason `source-paused`, running and
+starting scanner jobs wait in `paused` (reason `source-down`) as after a dropout of a
+running job (a starting job is not failed), the channelizer drops its channels as on a
+disconnect, and live audio releases its pipeline (status `pipelineHealth: "stopped"`,
+`suspendedReason: "source-paused"`, no automatic restart) while keeping its settings and
+its listeners.
 New scanner jobs, identify requests and job resumes on a paused source answer
 `409 SOURCE_PAUSED`; an IQ snapshot running at the pause ends early, and a new one answers
 `503 SOURCE_DISCONNECTED`. The pause is saved in `<stateDir>/source-feed.json`, so after a
 core restart the source registers without connecting and its log says it is paused.
 
-**Resume** makes one connection attempt. On success the feed is live again and tuning is
-restored as on any reconnect (with `tuner.reconnectPolicy: restore`, the default: accepted
-frequency, sample rate, gain mode and gain; scanner leases and band gains are recovered on
-the first payload). Suspended decoders and waiting scanner jobs then continue. If the
+**Resume** makes one connection attempt. On success the feed is live again and the accepted
+tuning (frequency, sample rate, gain mode and gain) is restored on the first payload,
+whatever `tuner.reconnectPolicy` says: the pause was the operator's, so even `reset` does
+not drop it (a later dropout follows the policy again). Scanner leases and band gains are
+recovered as on any reconnect. Suspended decoders, waiting scanner jobs and live audio
+(with the same frequency, mode and squelch) then continue. If the
 receiver cannot be reached the answer is `503 SOURCE_RESUME_FAILED`, the feed reads
 `error` and the source stays paused (also across a restart); call resume again to retry.
+
+When saving `source-feed.json` fails, the answer carries `persisted: false` (the change
+holds until the core restarts, and the core logs a warning); a repeated pause or resume
+retries the write and answers `persisted: true` once it succeeds.
 
 Both are idempotent: a repeated call answers `200` with `changed: false`. An unknown id
 answers `404 SOURCE_NOT_FOUND`; a recording source answers `409 SOURCE_FEED_UNSUPPORTED`.
@@ -810,6 +819,7 @@ answers `404 SOURCE_NOT_FOUND`; a recording source answers `409 SOURCE_FEED_UNSU
 {
 	"id": "rtl-pi",
 	"changed": true,
+	"persisted": true,
 	"feed": { "state": "paused", "since": "2026-10-31T09:00:00.000Z" }
 }
 ```
@@ -1717,7 +1727,9 @@ Fields:
   pipeline restarts automatically with exponential backoff (1 s doubling to 30 s,
   10 consecutive attempts; a run of 30 s resets the count). `pipelineRestarts`
   counts automatic restarts since the last manual start; after the last attempt
-  `lastError` says so and `POST /api/live-audio/start` restarts it.
+  `lastError` says so and `POST /api/live-audio/start` restarts it. While the
+  source's feed is paused the pipeline is `stopped`, never restarted, and
+  `suspendedReason` reads `source-paused`; resume starts it with the same settings.
 - `channelPowerDbfs` — smoothed channel power before demodulation, relative to a
   full-scale IQ sample (present while the pipeline runs). This is the level the
   `squelch` threshold compares against.

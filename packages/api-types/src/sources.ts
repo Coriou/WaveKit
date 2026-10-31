@@ -211,4 +211,9 @@ export interface SourceFeedResponse {
 	feed: SourceFeed
 	/** True when this call changed the feed (false for a repeated pause or resume). */
 	changed: boolean
+	/**
+	 * False when saving the paused feeds failed: the change holds until the core restarts,
+	 * and a repeated pause or resume retries the write.
+	 */
+	persisted?: boolean
 }

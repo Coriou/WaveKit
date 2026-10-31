@@ -6135,15 +6135,21 @@ export class ScannerService extends EventEmitter {
 		if (!this.started) return
 		for (const o of this.live.values())
 			if (o.sourceId === sourceId) delete o.acceptedIdentity
+		// A paused feed (not a dropout): a starting sweep waits for resume instead of failing.
+		const feedPaused = this.deps.sources.isPaused?.(sourceId) === true
 		for (const d of this.driversOn(sourceId)) {
 			if (
 				d.record.state === "starting" ||
 				d.record.state === "running" ||
 				d.record.state === "holding"
 			)
-				d.dispatch({
-					type: d.record.state === "starting" ? "engine-failed" : "source-down",
-				}).catch((err: unknown) =>
+				d.dispatch(
+					d.record.state !== "starting"
+						? { type: "source-down" }
+						: feedPaused
+							? { type: "source-down", feedPaused: true }
+							: { type: "engine-failed" },
+				).catch((err: unknown) =>
 					this.log.warn({ err, jobId: d.record.id }, "source-down failed"),
 				)
 		}

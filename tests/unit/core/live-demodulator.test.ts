@@ -122,6 +122,18 @@ function createMockSourceManager(sampleRate = 2_400_000) {
 			Object.assign(caps, update)
 			emitter.emit("caps-changed", "rtl-pi", { ...caps, ...update })
 		},
+		paused: false,
+		isPaused(id: string): boolean {
+			return id === "rtl-pi" && this.paused
+		},
+		/** SourceManager.pause / resume as the demodulator sees them. */
+		setFeedPaused(paused: boolean) {
+			this.paused = paused
+			emitter.emit("feed-changed", "rtl-pi", {
+				state: paused ? "paused" : "live",
+				since: new Date().toISOString(),
+			})
+		},
 	}
 }
 
@@ -575,6 +587,64 @@ describe("LiveDemodulator", () => {
 		expect(liveDemod.getStatus().config.offsetHz).toBe(0)
 		await liveDemod.reconfigure({ offsetHz: 6000 })
 		expect(processes[2]!.command).toContain("csdr shift -0.0025000000")
+	})
+
+	it("releases the pipeline while the source feed is paused and restarts the same settings on resume", async () => {
+		await liveDemod.start()
+		await liveDemod.reconfigure({ gain: 5 })
+		expect(spawnMock).toHaveBeenCalledTimes(4)
+		const [, , front, back] = processes
+
+		sourceManager.setFeedPaused(true)
+		await waitFor(
+			() =>
+				front!.signals.includes("SIGTERM") && back!.signals.includes("SIGTERM"),
+		)
+		await waitFor(() => liveDemod.getStatus().pipelineHealth === "stopped")
+		expect(liveDemod.getStatus()).toMatchObject({
+			running: true,
+			suspendedReason: "source-paused",
+		})
+		// No restart loop while paused: a failure, the backoff path and a caps change start nothing.
+		const internals = liveDemod as unknown as {
+			scheduleRestart(lastRunMs: number): void
+			restartTimer: unknown
+		}
+		internals.scheduleRestart(0)
+		expect(internals.restartTimer).toBeNull()
+		sourceManager.emitCaps({ sampleRate: 2_048_000 })
+		await delay(400)
+		// A settings change while paused is kept for the resume, without a run.
+		await liveDemod.reconfigure({ offsetHz: 6000 })
+		expect(spawnMock).toHaveBeenCalledTimes(4)
+
+		sourceManager.setFeedPaused(false)
+		await waitFor(() => spawnMock.mock.calls.length === 6)
+		await waitFor(() => liveDemod.getStatus().pipelineHealth === "running")
+		expect(liveDemod.getStatus().suspendedReason).toBeUndefined()
+		// The same configuration, at the caps current on resume.
+		// 6 kHz at 2.048 Msps.
+		expect(processes[4]!.command).toContain("csdr shift -0.0029296875")
+		expect(processes[4]!.command).toContain("csdr firdecimate 82 ")
+		expect(processes[5]!.command).toContain("csdr gain 5")
+		expect(liveDemod.getStatus().config).toMatchObject({
+			gain: 5,
+			offsetHz: 6000,
+		})
+	})
+
+	it("starts with no pipeline on a paused feed and runs once it is live", async () => {
+		sourceManager.paused = true
+		await liveDemod.start()
+		expect(spawnMock).not.toHaveBeenCalled()
+		expect(liveDemod.getStatus()).toMatchObject({
+			running: true,
+			pipelineHealth: "stopped",
+			suspendedReason: "source-paused",
+		})
+		sourceManager.setFeedPaused(false)
+		await waitFor(() => spawnMock.mock.calls.length === 2)
+		await waitFor(() => liveDemod.getStatus().pipelineHealth === "running")
 	})
 
 	it("keeps running across a centre-frequency retune", async () => {
