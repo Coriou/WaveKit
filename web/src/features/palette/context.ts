@@ -6,13 +6,15 @@ import { useStore } from "../../data/index.ts"
 import { pwaState } from "../../pwa/pwa.ts"
 import { useShell, useTheme } from "../../shell/hooks.ts"
 import { browserStorage } from "../../shell/theme.ts"
-import { useTunedHz, useTunerState } from "../hooks.ts"
+import { useReceiverSourceId, useTunedHz } from "../hooks.ts"
 import { receiverLock, sampleRateOptions } from "../receiver/controls.ts"
+import { feedControllerFor, feedOf, restoreCentreHz } from "../receiver/feed.ts"
 import { gainSteps } from "../receiver/gain.ts"
 import { presetsFrom } from "../scanner/planner/plan.ts"
 import { effectiveStep } from "../tuner/prefs.ts"
 import { aircraftAbout, aircraftName } from "../aircraft.ts"
 import type {
+	FeedContext,
 	PaletteAircraft,
 	PaletteContext,
 	ReceiverContext,
@@ -26,7 +28,11 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 	const { data, prefs, listen } = useServices()
 	const readOnly = useReadOnly()
 	const tunedHz = useTunedHz()
-	const tuner = useTunerState()
+	// the receiver commands act on the source the plot shows (one rule with the island and the P key)
+	const sourceId = useReceiverSourceId()
+	const tuner = useStore(data.tuner, s =>
+		sourceId === null ? undefined : s.bySource[sourceId],
+	)
 	const status = useStore(data.liveAudio, s => s.status)
 	const listening = useStore(listen, s => s.wanted)
 	const volume = useStore(listen, s => s.volume)
@@ -39,9 +45,8 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 	const sweep = useStore(data.scanner, s => s.sweep)
 	const shell = useShell()
 	const theme = useTheme()
-	const sourceId = tuner?.sourceId ?? null
 	const source = useStore(data.sources, s =>
-		tuner ? s.sources.find(x => x.id === tuner.sourceId) : s.sources[0],
+		sourceId === null ? undefined : s.sources.find(x => x.id === sourceId),
 	)
 	const caps = useStore(data.receiver, s =>
 		sourceId === null ? null : (s.caps[sourceId]?.caps ?? null),
@@ -94,6 +99,9 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 					}),
 		[aircraftSig],
 	)
+	const feedEntry = useStore(feedControllerFor(data), s =>
+		source ? s.bySource[source.id] : undefined,
+	)
 
 	// scan presets and receiver capabilities, once
 	useEffect(() => {
@@ -103,9 +111,21 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 		if (sourceId !== null) void data.receiver.loadCaps(sourceId)
 	}, [data, sourceId])
 
+	const feed = useMemo((): FeedContext | null => {
+		const f = feedOf(source, feedEntry)
+		if (!source || f === null) return null
+		return {
+			sourceId: source.id,
+			state: f.state,
+			busy: (feedEntry?.pending ?? null) !== null,
+			restoreHz: restoreCentreHz(f),
+		}
+	}, [source, feedEntry])
+
 	const receiver = useMemo((): ReceiverContext | null => {
 		if (!tuner) return null
-		const lock = receiverLock({ tuner, source, readOnly, relay })
+		const paused = feed !== null && feed.state !== "live"
+		const lock = receiverLock({ tuner, source, readOnly, relay, paused })
 		return {
 			gainAuto: tuner.gainMode === "agc",
 			gainTenthsDb: tuner.gain,
@@ -116,7 +136,7 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 			rtlAgc: tuner.agcMode,
 			lockReason: lock.locked ? lock.reason : null,
 		}
-	}, [tuner, source, readOnly, relay, caps])
+	}, [tuner, source, readOnly, relay, caps, feed])
 
 	const discoveries = useMemo(() => [...byId.values()], [byId])
 	const presets = useMemo(
@@ -152,6 +172,7 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 			boost: (id: string) => recentList.boost(id, now),
 			pwa,
 			aircraft,
+			feed,
 		}
 		// recentVersion: the list changed (a row ran)
 	}, [
@@ -173,5 +194,6 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 		recentVersion,
 		pwa,
 		aircraft,
+		feed,
 	])
 }

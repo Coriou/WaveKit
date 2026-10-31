@@ -2,7 +2,13 @@
  * Scan job lifecycle (spec § 10.1) as a pure transition function. Actions are those of a sweep;
  * in-window jobs run the same table without the lease rows (`actionsForMode`).
  */
-import type { FailReason, JobState, PauseReason, ScanMode } from "./types.js"
+import type {
+	CancelReason,
+	FailReason,
+	JobState,
+	PauseReason,
+	ScanMode,
+} from "./types.js"
 
 export type JobEvent =
 	| { type: "start" }
@@ -17,11 +23,18 @@ export type JobEvent =
 	| { type: "relay-external" }
 	| { type: "preempted-job" }
 	| { type: "preemptor-lost" }
-	| { type: "source-down" }
-	| { type: "source-up" }
+	/** `feedPaused`: the operator paused the receiver feed (SourceManager.pause), no dropout. */
+	| { type: "source-down"; feedPaused?: boolean }
+	/**
+	 * `plain`: a plain resume of a paused feed (SourceManager.resumeKind "plain"): another client may
+	 * have retuned the receiver, so a sweep parks in paused(resumed-without-retune) instead of hopping,
+	 * as does a sweep that would otherwise reacquire the tuner on its own (preempted-*, core-restart).
+	 */
+	| { type: "source-up"; plain?: boolean }
 	| { type: "preemptor-idle"; impactGrew: boolean }
 	| { type: "resume"; takeover: boolean }
-	| { type: "cancel" }
+	/** `reason`: the core cancelled it (an identify on a paused feed); absent for the operator. */
+	| { type: "cancel"; reason?: CancelReason }
 	| { type: "stop-condition" }
 	| { type: "source-removed" }
 	| { type: "boot" }
@@ -37,9 +50,10 @@ export type JobAction =
 	| "resend-hop"
 	| "report-impact"
 
-type From = { state: JobState; reason?: PauseReason | FailReason }
+type JobReason = PauseReason | FailReason | CancelReason
+type From = { state: JobState; reason?: JobReason }
 type Result =
-	| { state: JobState; reason?: PauseReason | FailReason; actions: JobAction[] }
+	| { state: JobState; reason?: JobReason; actions: JobAction[] }
 	| { invalid: true }
 
 const INVALID: Result = { invalid: true }
@@ -71,11 +85,7 @@ export function actionsForMode(
 		: actions.filter(a => !LEASE_ACTIONS.has(a))
 }
 
-function to(
-	state: JobState,
-	actions: JobAction[],
-	reason?: PauseReason | FailReason,
-): Result {
+function to(state: JobState, actions: JobAction[], reason?: JobReason): Result {
 	return reason === undefined ? { state, actions } : { state, reason, actions }
 }
 
@@ -84,7 +94,9 @@ function holdsLease(s: From): boolean {
 		return true
 	return (
 		s.state === "paused" &&
-		(s.reason === "operator" || s.reason === "source-down")
+		(s.reason === "operator" ||
+			s.reason === "source-down" ||
+			s.reason === "resumed-without-retune")
 	)
 }
 
@@ -104,8 +116,9 @@ function endActions(s: From): JobAction[] {
 
 /**
  * A lease lost while paused: the operator's pause never auto-resumes (it stays
- * `paused(operator)` without the lease); a source-down pause becomes the preemption. Probes are
- * already stopped in both.
+ * `paused(operator)` without the lease), nor does a sweep held after a plain resume (it stays
+ * `paused(resumed-without-retune)`, its decoder hold already released); a source-down pause becomes
+ * the preemption. Probes are already stopped in all three.
  */
 function pausedLeaseLost(
 	s: From,
@@ -114,6 +127,8 @@ function pausedLeaseLost(
 	if (s.state !== "paused") return INVALID
 	if (s.reason === "operator")
 		return to("paused", ["release-lease", "release-decoders"], "operator")
+	if (s.reason === "resumed-without-retune")
+		return to("paused", ["release-lease"], "resumed-without-retune")
 	if (s.reason === "source-down")
 		return to("paused", ["release-lease", "release-decoders"], lost)
 	return INVALID
@@ -191,7 +206,11 @@ export function transition(
 		case "preempted-job":
 			if (active)
 				return to("paused", ["stop-probes", "release-lease"], "preempted-job")
-			// the arbiter hands the lease over from a paused holder too; probes are already stopped
+			// the arbiter hands the lease over from a paused holder too; probes are already stopped.
+			// A sweep held after a plain resume stays held: it is no waiter, so the preemptor's end
+			// never hops it again (only the operator's Resume scan does).
+			if (pausedFor("resumed-without-retune"))
+				return to("paused", ["release-lease"], "resumed-without-retune")
 			return pausedFor("operator") || pausedFor("source-down")
 				? to("paused", ["release-lease"], "preempted-job")
 				: INVALID
@@ -202,12 +221,24 @@ export function transition(
 				? to("paused", ["release-decoders"], "preempted-job")
 				: INVALID
 		case "source-down":
-			return s.state === "starting"
-				? to("failed", endActions(s), "tuner-unavailable")
-				: active
+			// A dropout during startup fails the job; a paused feed parks it with its lease until
+			// resume (source-up), as a running job waits through a dropout.
+			if (s.state === "starting")
+				return e.feedPaused === true
 					? to("paused", ["stop-probes"], "source-down")
-					: INVALID
+					: to("failed", endActions(s), "tuner-unavailable")
+			return active ? to("paused", ["stop-probes"], "source-down") : INVALID
 		case "source-up":
+			// After a plain resume a sweep writes nothing and frees the configured decoders until an
+			// explicit resume: one paused through the pause keeps its lease (no waiter takes the tuner
+			// and hops), and a waiter that would reacquire it on its own (operator idle, a freed lease,
+			// a boot resume) waits too. ScannerService sends `plain` to sweeps only.
+			if (e.plain === true)
+				return pausedFor("source-down") ||
+					preempted ||
+					pausedFor("core-restart")
+					? to("paused", ["release-decoders"], "resumed-without-retune")
+					: INVALID
 			return pausedFor("source-down") ? to("running", ["resend-hop"]) : INVALID
 		case "preemptor-idle":
 			if (!preempted) return INVALID
@@ -224,6 +255,14 @@ export function transition(
 							"resend-hop",
 						])
 					: to("running", ["resend-hop"])
+			// The operator's explicit choice to hop again after a plain resume (Resume scan).
+			if (pausedFor("resumed-without-retune"))
+				return to("running", [
+					...(ctx.leaseHeld === false ? ["acquire-lease" as const] : []),
+					"hold-decoders",
+					...(ctx.engineOpened === false ? ["open-engine" as const] : []),
+					"resend-hop",
+				])
 			if (pausedFor("resume-blocked"))
 				return e.takeover
 					? to("running", ["acquire-lease", "hold-decoders", "resend-hop"])
@@ -241,7 +280,7 @@ export function transition(
 				return to("running", ["acquire-lease", "hold-decoders", "resend-hop"])
 			return INVALID
 		case "cancel":
-			return to("cancelled", endActions(s))
+			return to("cancelled", endActions(s), e.reason)
 		case "stop-condition":
 			return active ? to("completed", endActions(s)) : INVALID
 		case "source-removed": {

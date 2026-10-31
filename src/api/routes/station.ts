@@ -7,11 +7,14 @@ import { StationUpdateError } from "../../core/station/errors.js"
 import type { DeniedAdmission } from "../../access/types.js"
 import type { StationService } from "../../core/station/contract.js"
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify"
-import type {
-	StationErrorBody,
-	StationIdentity,
-	StationUpdate,
+import {
+	STATION_FIELDS,
+	type StationErrorBody,
+	type StationField,
+	type StationIdentity,
+	type StationUpdate,
 } from "@wavekit/api-types"
+import { describeZodSchema } from "../validation-errors.js"
 
 const provenance = z.enum(["default", "yaml", "env", "ui"])
 const stringField = (value: z.ZodString) =>
@@ -48,6 +51,8 @@ export interface StationRoutesOptions {
 }
 
 const PATCH_BODY_LIMIT = 4096
+const IF_MATCH_EXPECTED =
+	'Invalid If-Match header: expected a station revision, a non-negative integer (quoted "7" or bare 7)'
 const IF_MATCH = /^(?:"(\d{1,19})"|(\d{1,19}))$/
 
 function sendDenial(reply: FastifyReply, denied: DeniedAdmission) {
@@ -76,6 +81,37 @@ const invalid = (message: string): StationErrorBody => ({
 	code: "STATION_UPDATE_INVALID",
 	message,
 })
+
+/** What each station field accepts, from the config schema (static text). */
+const STATION_EXPECTED: Readonly<Record<StationField, string>> = Object.freeze(
+	Object.fromEntries(
+		STATION_FIELDS.map(field => [
+			field,
+			`${describeZodSchema(StationConfigSchema.shape[field], field)} or null to clear`,
+		]),
+	) as Record<StationField, string>,
+)
+
+const OBJECT_EXPECTED = `a JSON object with one or more of ${STATION_FIELDS.join(", ")}`
+
+/**
+ * A 400 station refusal in static text. Station 400s keep `fields` as the list of field
+ * names (the web settings form marks those); the message states what each accepts. A
+ * refusal without named fields (not an object, unknown or no keys) never repeats the core
+ * message, which lists the client's unknown keys.
+ */
+function stationInvalid(error: StationUpdateError): StationErrorBody {
+	const named = error.fields ?? []
+	if (named.length === 0)
+		return invalid(`Invalid request body: expected ${OBJECT_EXPECTED}`)
+	// With named fields the core message is static (field names and the lat/lon rule).
+	return {
+		...invalid(
+			`${error.message}; expected ${named.map(f => `${f}: ${STATION_EXPECTED[f]}`).join("; ")}`,
+		),
+		fields: [...named],
+	}
+}
 
 /** Station snapshot; PATCH exists only when a service is given and the access rule allows it. */
 export const stationRoutes: FastifyPluginAsync<StationRoutesOptions> = async (
@@ -126,10 +162,10 @@ export const stationRoutes: FastifyPluginAsync<StationRoutesOptions> = async (
 					400,
 					invalid(
 						code === "FST_ERR_CTP_BODY_TOO_LARGE"
-							? "Body is too large"
+							? `Invalid request body: at most ${PATCH_BODY_LIMIT} bytes of ${OBJECT_EXPECTED}`
 							: code === "FST_ERR_CTP_INVALID_MEDIA_TYPE"
-								? "Content-Type must be application/json"
-								: "Body must be valid JSON",
+								? `Invalid request body: Content-Type must be application/json, ${OBJECT_EXPECTED}`
+								: `Invalid request body: expected ${OBJECT_EXPECTED}`,
 					),
 				)
 				return
@@ -154,14 +190,18 @@ export const stationRoutes: FastifyPluginAsync<StationRoutesOptions> = async (
 					typeof header === "string" ? IF_MATCH.exec(header.trim()) : null
 				const digits = m?.[1] ?? m?.[2]
 				if (digits === undefined)
-					return sendError(reply, 400, invalid("If-Match must be a revision"))
+					return sendError(reply, 400, invalid(IF_MATCH_EXPECTED))
 				ifMatch = Number(digits)
 				if (!Number.isSafeInteger(ifMatch))
-					return sendError(reply, 400, invalid("If-Match must be a revision"))
+					return sendError(reply, 400, invalid(IF_MATCH_EXPECTED))
 			}
 			const body: unknown = request.body
 			if (typeof body !== "object" || body === null || Array.isArray(body))
-				return sendError(reply, 400, invalid("Body must be a JSON object"))
+				return sendError(
+					reply,
+					400,
+					invalid(`Invalid request body: expected ${OBJECT_EXPECTED}`),
+				)
 			try {
 				const result = await service.update(
 					body as StationUpdate,
@@ -174,7 +214,11 @@ export const stationRoutes: FastifyPluginAsync<StationRoutesOptions> = async (
 					.send(JSON.stringify(result))
 			} catch (error) {
 				if (error instanceof StationUpdateError)
-					return sendError(reply, error.statusCode, error.toBody())
+					return sendError(
+						reply,
+						error.statusCode,
+						error.statusCode === 400 ? stationInvalid(error) : error.toBody(),
+					)
 				request.log.error({ err: error }, "station update failed")
 				return reply
 					.status(500)

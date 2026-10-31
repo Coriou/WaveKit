@@ -35,6 +35,7 @@ function build(
 		options: Record<string, unknown>
 		onOptionsUpdated(): void
 		getDecoderArgs(): string[]
+		direwolfPorts(): { kissPort: number; agwPort: number }
 	}
 	return { decoder, view, warn }
 }
@@ -132,21 +133,17 @@ describe("DirewolfDecoder numeric option bounds", () => {
 	const arg = (tokens: string[], flag: string) =>
 		tokens[tokens.indexOf(flag) + 1]
 
-	it("clamps the KISS and AGW ports in argv", () => {
-		const high = argv(build({ kissPort: 99999, agwPort: "70000" }).view)
-		expect(arg(high, "-p")).toBe("65535")
-		expect(arg(high, "-a")).toBe("65535")
-		const low = argv(build({ kissPort: 0, agwPort: -4 }).view)
-		expect(arg(low, "-p")).toBe("1")
-		expect(arg(low, "-a")).toBe("1")
+	// The ports reach direwolf through the per-instance config (KISSPORT/AGWPORT), not argv.
+	it("clamps the KISS and AGW ports in the instance config", () => {
+		const high = build({ kissPort: 99999, agwPort: "70000" }).view
+		expect(high.direwolfPorts()).toEqual({ kissPort: 65535, agwPort: 65535 })
+		const low = build({ kissPort: 0, agwPort: -4 }).view
+		expect(low.direwolfPorts()).toEqual({ kissPort: 1, agwPort: 1 })
 	})
 
-	it("garbage ports fall to the default ports in argv", () => {
-		const tokens = argv(
-			build({ kissPort: "evil; id", agwPort: Number.NaN }).view,
-		)
-		expect(arg(tokens, "-p")).toBe("8001")
-		expect(arg(tokens, "-a")).toBe("8000")
+	it("garbage ports fall to the default ports", () => {
+		const { view } = build({ kissPort: "evil; id", agwPort: Number.NaN })
+		expect(view.direwolfPorts()).toEqual({ kissPort: 8001, agwPort: 8000 })
 	})
 
 	it("the KISS port the adapter connects to is bounded too", () => {
@@ -184,8 +181,14 @@ describe("DirewolfDecoder numeric option bounds", () => {
 					if (rule.integer) expect(Number.isInteger(read)).toBe(true)
 				}
 				const tokens = argv(view)
-				for (const flag of ["-p", "-a", "-r"]) {
-					const n = Number(arg(tokens, flag))
+				expect(tokens).not.toContain("-p")
+				expect(tokens).not.toContain("-a")
+				const ports = view.direwolfPorts()
+				for (const n of [
+					ports.kissPort,
+					ports.agwPort,
+					Number(arg(tokens, "-r")),
+				]) {
 					expect(Number.isInteger(n)).toBe(true)
 					expect(n).toBeGreaterThanOrEqual(1)
 					expect(n).toBeLessThanOrEqual(65535)

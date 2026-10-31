@@ -238,6 +238,11 @@ export function registerReceiverMock(
 	}
 
 	const known = (field: NonNullable<TunerState["unknownFields"]>[number]) => {
+		if (tuner.measuredFields?.includes(field)) {
+			const measured = tuner.measuredFields.filter(f => f !== field)
+			if (measured.length > 0) tuner.measuredFields = measured
+			else delete tuner.measuredFields
+		}
 		if (!tuner.unknownFields) return
 		const rest = tuner.unknownFields.filter(f => f !== field)
 		if (rest.length > 0) tuner.unknownFields = rest

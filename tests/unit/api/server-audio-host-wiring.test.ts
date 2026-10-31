@@ -23,6 +23,15 @@ const host = "receiver.lan:9000"
 const logger = pino({ level: "silent" })
 const SECRET = "offsetHz 999999 SECRET-DETAIL"
 
+const OFFSET_EXPECTED =
+	"number, Hz from the tuned centre; the channel must stay inside the capture (|offsetHz| <= sample rate / 2 - bandwidth / 2)"
+const OFFSET_400 = {
+	error: "Bad Request",
+	code: "CHANNEL_OFFSET_OUT_OF_RANGE",
+	message: `Invalid request body: offsetHz: ${OFFSET_EXPECTED}`,
+	fields: [{ field: "offsetHz", expected: OFFSET_EXPECTED }],
+}
+
 function runtimeOptions(directory: string): NamedAccessRuntimeOptions {
 	return {
 		directory,
@@ -237,11 +246,9 @@ describe("legacy audio host and live-audio redaction through the API server (WG9
 			payload: { offsetHz: 5 },
 		})
 		expect(patch.statusCode).toBe(400)
-		expect(patch.json()).toEqual({
-			error: "Bad Request",
-			code: "CHANNEL_OFFSET_OUT_OF_RANGE",
-			message: SECRET,
-		})
+		// Static text in both modes: the core message can carry the submitted offset.
+		expect(patch.json()).toEqual(OFFSET_400)
+		expect(patch.body).not.toContain("SECRET")
 	})
 
 	it("protected: stream URLs unchanged; PATCH 400 redacted", async () => {
@@ -313,11 +320,7 @@ describe("legacy audio host and live-audio redaction through the API server (WG9
 			payload: { offsetHz: 5 },
 		})
 		expect(patch.statusCode).toBe(400)
-		expect(patch.json()).toEqual({
-			error: "Bad Request",
-			code: "CHANNEL_OFFSET_OUT_OF_RANGE",
-			message: "Request failed",
-		})
+		expect(patch.json()).toEqual(OFFSET_400)
 		expect(patch.body).not.toContain("SECRET")
 	})
 })

@@ -72,6 +72,13 @@ export const spectrumRoutes: FastifyPluginAsync<SpectrumRoutesOptions> = async (
 					error: "BadRequest",
 					code: "SPECTRUM_RANGE_INVALID",
 					message: "endHz must exceed startHz by at most 2 GHz",
+					fields: [
+						{
+							field: "endHz",
+							expected:
+								"integer Hz greater than startHz, at most 2000000000 Hz above it",
+						},
+					],
 				})
 			}
 			const result = spectrum.occupancyQuery(

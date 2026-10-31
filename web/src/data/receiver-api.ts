@@ -40,6 +40,7 @@ export const tunerStateSchema = z.object({
 	// Field names stay open strings: a newer core may list a field this build does not know.
 	unknownFields: z.array(z.string()).optional(),
 	declaredOnlyFields: z.array(z.string()).optional(),
+	measuredFields: z.array(z.string()).optional(),
 	// A malformed band gain only hides the indicator; the rest of the state still counts.
 	bandGain: z
 		.object({

@@ -176,6 +176,14 @@ describe("mesh routes", () => {
 			expect(response.json()).toEqual({
 				error: "Node id must be ! and 8 hex digits",
 				code: "VALIDATION_ERROR",
+				message:
+					"Invalid path parameter: nodeId: ! followed by 8 hex digits (case-insensitive)",
+				fields: [
+					{
+						field: "nodeId",
+						expected: "! followed by 8 hex digits (case-insensitive)",
+					},
+				],
 			})
 		}
 	})

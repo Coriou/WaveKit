@@ -90,6 +90,10 @@ const VERDICTS: Readonly<
 		text: "waiting for the source",
 		actions: ["check-source"],
 	},
+	"source-paused": {
+		text: "waiting: Receiver paused — Resume",
+		actions: ["resume-source"],
+	},
 	"unsupported-rate": {
 		text: "paused: the sample rate does not suit it",
 		actions: ["change-sample-rate"],
@@ -162,6 +166,7 @@ function suspensionCode(reason: string | undefined): DecoderVerdictCode {
 	if (reason === "no-channel-selected") return "no-channel"
 	if (reason === "capture-too-narrow") return "capture-too-narrow"
 	if (reason === "tuner-scanning") return "scanner-busy"
+	if (reason === "source-paused") return "source-paused"
 	if (reason === "decoder-unavailable") return "decoder-unavailable"
 	if (reason === "channelizer-unavailable") return "channelizer-unavailable"
 	if (
@@ -190,8 +195,10 @@ export function decoderVerdict(
 	else if (status.desiredRunning === false && !running) code = "stopped"
 	else if (health === "suspended") {
 		const reason = status.suspension?.reasonCode
+		// The operator's pause outranks a stale efficiency state.
 		code =
-			reason === "efficiency-budget" || status.efficiency !== undefined
+			reason !== "source-paused" &&
+			(reason === "efficiency-budget" || status.efficiency !== undefined)
 				? efficiencyCode(status)
 				: suspensionCode(reason)
 	} else if (health === "decoding") code = "decoding"

@@ -624,6 +624,18 @@ const ObservedCentresSchema = z
 	.max(ACTIVITY_MAX_OBSERVED)
 
 /**
+ * The safe efficiency detail code (budget, cpu, drops, late-drops, unknown) while the
+ * efficiency gate refuses a decoder, as a log field; nothing otherwise.
+ */
+function efficiencyDetailField(state: { admission?: AdmissionDecision }): {
+	efficiencyDetail?: Extract<AdmissionDecision, { admit: false }>["detail"]
+} {
+	return state.admission?.admit === false
+		? { efficiencyDetail: state.admission.detail }
+		: {}
+}
+
+/**
  * DecoderManager - Orchestrates decoder lifecycle and coordinates with other components.
  *
  * Handles:
@@ -700,6 +712,8 @@ export class DecoderManager extends EventEmitter {
 	private sourceRemovedHandler: ((sourceId: string) => void) | null = null
 	/** Forgets per-source scan state when a source is removed for good. */
 	private sourceGoneHandler: ((sourceId: string) => void) | null = null
+	/** Pause / resume of a source's feed re-evaluates its decoders ("source-paused"). */
+	private sourceFeedHandler: ((sourceId: string) => void) | null = null
 	private sourceConnectedEvaluation: ((sourceId: string) => void) | null = null
 	private capsChangedHandler:
 		| ((sourceId: string, caps: SourceCaps) => void)
@@ -1417,6 +1431,7 @@ export class DecoderManager extends EventEmitter {
 					{
 						reasonCode: "efficiency-budget",
 						detail: "late-drops",
+						efficiencyDetail: "late-drops",
 						sourceId: state.placement.sourceId,
 						decoderId: state.placement.decoderId,
 					},
@@ -1440,22 +1455,27 @@ export class DecoderManager extends EventEmitter {
 		}
 		if (verdicts.length === 0 && now - this.lastEfficiencyWarningMs >= 60_000) {
 			const view = this.efficiencyView()
-			if (
-				view.sources.some(
-					source =>
-						!running.some(
-							placement =>
-								placement.sourceId === source.sourceId &&
-								now - placement.admittedAtMs < EFFICIENCY_PROBATION_MS,
-						) &&
-						(source.drops === "dropping" ||
-							(source.cpu.percent !== null &&
-								source.cpu.percent > source.cpu.limit)),
-				)
-			) {
+			const over = view.sources.filter(
+				source =>
+					!running.some(
+						placement =>
+							placement.sourceId === source.sourceId &&
+							now - placement.admittedAtMs < EFFICIENCY_PROBATION_MS,
+					) &&
+					(source.drops === "dropping" ||
+						(source.cpu.percent !== null &&
+							source.cpu.percent > source.cpu.limit)),
+			)
+			if (over.length > 0) {
 				this.lastEfficiencyWarningMs = now
 				this.log.warn(
-					{ reasonCode: "efficiency-budget" },
+					{
+						reasonCode: "efficiency-budget",
+						// Drops outrank CPU, as in the gate's own verdicts.
+						efficiencyDetail: over.some(source => source.drops === "dropping")
+							? "drops"
+							: "cpu",
+					},
 					"Decoder efficiency drops or CPU limit exceeded",
 				)
 			}
@@ -2998,18 +3018,29 @@ export class DecoderManager extends EventEmitter {
 		return this.drainCapsChanges()
 	}
 
-	/** The hold reason that applies to a configured stdin decoder, if any. */
-	private heldReason(state: DecoderState): "tuner-scanning" | null {
+	/** The hold reason that applies to a configured stdin decoder, if any; a paused feed first. */
+	private heldReason(
+		state: DecoderState,
+	): "source-paused" | "tuner-scanning" | null {
 		if (state.owner === "scanner" || state.decoder.caps.input === "external")
 			return null
 		const sourceId = this.selectedSourceId(state)
-		return sourceId !== undefined && this.isSourceHeld(sourceId)
-			? "tuner-scanning"
-			: null
+		if (sourceId === undefined) return null
+		// Optional call: test doubles of the source manager predate pause / resume.
+		if (this.sourceManager?.isPaused?.(sourceId) === true)
+			return "source-paused"
+		return this.isSourceHeld(sourceId) ? "tuner-scanning" : null
 	}
 
 	private assertNotHeld(state: DecoderState): void {
-		if (this.heldReason(state) === null) return
+		// Only a scanner hold refuses; a start on a paused feed is recorded and suspended.
+		const sourceId = this.selectedSourceId(state)
+		if (
+			this.heldReason(state) === null ||
+			sourceId === undefined ||
+			!this.isSourceHeld(sourceId)
+		)
+			return
 		throw new WaveKitError(
 			`Source ${this.selectedSourceId(state)} is held by a scanner sweep; decoder ${state.config.id} can start when the sweep ends`,
 			"SOURCE_HELD_BY_SCANNER",
@@ -3279,7 +3310,11 @@ export class DecoderManager extends EventEmitter {
 				}
 				if (!this.config.enablement)
 					this.log.info(
-						{ decoderId: id, reasonCode: state.suspension.reasonCode },
+						{
+							decoderId: id,
+							reasonCode: state.suspension.reasonCode,
+							...efficiencyDetailField(state),
+						},
 						"Start recorded; decoder suspended (see reasonCode)",
 					)
 				this.emitStatusChanged(state)
@@ -4084,6 +4119,10 @@ export class DecoderManager extends EventEmitter {
 		if (this.sourceGoneHandler && this.sourceManager) {
 			this.sourceManager.off("source-removed", this.sourceGoneHandler)
 			this.sourceGoneHandler = null
+		}
+		if (this.sourceFeedHandler && this.sourceManager) {
+			this.sourceManager.off("feed-changed", this.sourceFeedHandler)
+			this.sourceFeedHandler = null
 		}
 		if (this.sourceConnectedEvaluation && this.sourceManager) {
 			this.sourceManager.off("connected", this.sourceConnectedEvaluation)
@@ -5229,6 +5268,9 @@ export class DecoderManager extends EventEmitter {
 		if (this.sourceGoneHandler && this.sourceManager) {
 			this.sourceManager.off("source-removed", this.sourceGoneHandler)
 		}
+		if (this.sourceFeedHandler && this.sourceManager) {
+			this.sourceManager.off("feed-changed", this.sourceFeedHandler)
+		}
 		if (this.sourceConnectedEvaluation && this.sourceManager) {
 			this.sourceManager.off("connected", this.sourceConnectedEvaluation)
 		}
@@ -5292,6 +5334,15 @@ export class DecoderManager extends EventEmitter {
 			this.scanTainted.delete(sourceId)
 		}
 		sourceManager.on("source-removed", this.sourceGoneHandler)
+		this.sourceFeedHandler = sourceId => {
+			void this.evaluateSourceNow(sourceId).catch((err: unknown) =>
+				this.log.warn(
+					{ err: safeErrorFields(err), sourceId },
+					"Re-evaluating decoders after a feed change failed",
+				),
+			)
+		}
+		sourceManager.on("feed-changed", this.sourceFeedHandler)
 		this.subscribeToSourceCapsChanges()
 	}
 
@@ -5677,7 +5728,11 @@ export class DecoderManager extends EventEmitter {
 			this.updateDecoderHealth(state, "running")
 		if (!this.config.enablement)
 			this.log.info(
-				{ decoderId: id, reasonCode: state.suspension.reasonCode },
+				{
+					decoderId: id,
+					reasonCode: state.suspension.reasonCode,
+					...efficiencyDetailField(state),
+				},
 				"Suspending decoder (see reasonCode)",
 			)
 		this.emitStatusChanged(state)
@@ -6248,6 +6303,7 @@ export class DecoderManager extends EventEmitter {
 				{
 					reasonCode: "efficiency-budget",
 					detail: "budget",
+					efficiencyDetail: "budget",
 					decoderId: state.placement.decoderId,
 					placement: key,
 				},
@@ -6962,7 +7018,11 @@ export class DecoderManager extends EventEmitter {
 				(state.loggedSuspension !== undefined || reasonCode !== null)
 			)
 				this.log.info(
-					{ decoderId: state.parentId ?? state.config.id, reasonCode },
+					{
+						decoderId: state.parentId ?? state.config.id,
+						reasonCode,
+						...efficiencyDetailField(state),
+					},
 					"Decoder suspension changed",
 				)
 			state.loggedSuspension = reasonCode

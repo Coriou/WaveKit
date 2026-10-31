@@ -13,7 +13,15 @@ import { AcarsdecDecoder } from "../../../src/decoders/builtin/acarsdec.js"
 import { Dumpvdl2Decoder } from "../../../src/decoders/builtin/dumpvdl2.js"
 import { AisCatcherDecoder } from "../../../src/decoders/builtin/ais-catcher.js"
 import { ReadsbDecoder } from "../../../src/decoders/builtin/readsb.js"
-import { DirewolfDecoder } from "../../../src/decoders/builtin/direwolf.js"
+import {
+	DirewolfDecoder,
+	direwolfConfigPath,
+} from "../../../src/decoders/builtin/direwolf.js"
+import { shellCommand } from "../../../src/decoders/process-tools.js"
+
+/** Every golden builds its decoder with id "g": the per-instance direwolf config path. */
+const DW_CONF = direwolfConfigPath("g")
+const DW_CONF_SH = shellCommand(DW_CONF, [])
 
 const logger = pino({ level: "silent" })
 
@@ -405,40 +413,20 @@ const GOLDEN: Record<string, Row[]> = {
 				options: { audioDevice: "stdin", sampleRate: 48000, kissPort: 8001 },
 			},
 			expected: {
-				getDecoderArgs: [
-					"-c",
-					"/etc/direwolf.conf",
-					"-",
-					"-r",
-					"48000",
-					"-p",
-					"8001",
-					"-a",
-					"8000",
-				],
+				getDecoderArgs: ["-c", DW_CONF, "-", "-r", "48000"],
 				getArgs: [
 					"-c",
-					"csdr convert -i char -o float | csdr firdecimate 50 0.012 | csdr fmdemod | csdr gain 3 | csdr limit | csdr convert -i float -o s16 | direwolf -c /etc/direwolf.conf - -r 48000 -p 8001 -a 8000",
+					`csdr convert -i char -o float | csdr firdecimate 50 0.012 | csdr fmdemod | csdr gain 3 | csdr limit | csdr convert -i float -o s16 | direwolf -c ${DW_CONF_SH} - -r 48000`,
 				],
 			},
 		},
 		{
 			config: { options: { kissPort: 8002, agwPort: 8010 } },
 			expected: {
-				getDecoderArgs: [
-					"-c",
-					"/etc/direwolf.conf",
-					"-",
-					"-r",
-					"48000",
-					"-p",
-					"8002",
-					"-a",
-					"8010",
-				],
+				getDecoderArgs: ["-c", DW_CONF, "-", "-r", "48000"],
 				getArgs: [
 					"-c",
-					"csdr convert -i char -o float | csdr firdecimate 50 0.012 | csdr fmdemod | csdr gain 3 | csdr limit | csdr convert -i float -o s16 | direwolf -c /etc/direwolf.conf - -r 48000 -p 8002 -a 8010",
+					`csdr convert -i char -o float | csdr firdecimate 50 0.012 | csdr fmdemod | csdr gain 3 | csdr limit | csdr convert -i float -o s16 | direwolf -c ${DW_CONF_SH} - -r 48000`,
 				],
 			},
 		},
@@ -451,22 +439,10 @@ const GOLDEN: Record<string, Row[]> = {
 				},
 			},
 			expected: {
-				getDecoderArgs: [
-					"-c",
-					"/etc/direwolf.conf",
-					"-",
-					"-r",
-					"48000",
-					"-p",
-					"8001",
-					"-a",
-					"8011",
-					"-t",
-					"0",
-				],
+				getDecoderArgs: ["-c", DW_CONF, "-", "-r", "48000", "-t", "0"],
 				getArgs: [
 					"-c",
-					"csdr convert -i char -o float | csdr firdecimate 50 0.012 | csdr fmdemod | csdr gain 3 | csdr limit | csdr convert -i float -o s16 | direwolf -c /etc/direwolf.conf - -r 48000 -p 8001 -a 8011 -t 0",
+					`csdr convert -i char -o float | csdr firdecimate 50 0.012 | csdr fmdemod | csdr gain 3 | csdr limit | csdr convert -i float -o s16 | direwolf -c ${DW_CONF_SH} - -r 48000 -t 0`,
 				],
 			},
 		},

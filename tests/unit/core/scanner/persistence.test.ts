@@ -330,6 +330,37 @@ describe("ScannerPersistence lifecycle files", () => {
 		})
 	})
 
+	it("loads a sweep held after a plain resume next to jobs stored before that reason existed", async () => {
+		await withDir(async dir => {
+			const old = {
+				...job,
+				id: "j_old",
+				state: "paused" as const,
+				reason: "source-down" as const,
+			}
+			const held = {
+				...job,
+				id: "j_held",
+				state: "paused" as const,
+				reason: "resumed-without-retune" as const,
+			}
+			const p = new ScannerPersistence({ dir, logger, now: () => T0 })
+			await p.writeJobs([old])
+			// A jobs.json written before the reason existed parses as it did.
+			expect(
+				(await new ScannerPersistence({ dir, logger, now: () => T0 }).load())
+					.jobs,
+			).toEqual([old])
+			await p.writeJobs([old, held])
+			const loaded = await new ScannerPersistence({
+				dir,
+				logger,
+				now: () => T0,
+			}).load()
+			expect(loaded.jobs).toEqual([old, held])
+		})
+	})
+
 	it("round-trips a lease whose job was deleted (S1-B final review, finding 1)", async () => {
 		await withDir(async dir => {
 			const p = new ScannerPersistence({ dir, logger, now: () => T0 })

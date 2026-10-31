@@ -144,6 +144,8 @@ export interface SourceStatus {
 	signalLevelDbfs?: number
 	/** Receiver endpoint selection; only with `sdrHost.endpointSelection: auto`. */
 	endpoint?: SourceEndpoint
+	/** Pause / resume state of a network source; omitted for recordings. */
+	feed?: SourceFeed
 }
 
 export interface DecoderAssignment {
@@ -160,4 +162,102 @@ export interface ExtendedSourceStatus extends SourceStatus {
 	bytesReceived: number
 	dataRate: number
 	reconnectAttempts: number
+}
+
+/**
+ * Whether the core pulls the receiver's feed (pause / resume). "live": the source
+ * connects and reconnects as usual. "paused": the operator paused it; the connection
+ * is closed and never retried, and the pause survives a core restart. "resuming": a
+ * resume is dialling the receiver. "error": the last resume could not reach the
+ * receiver; the source stays paused until a resume succeeds (call resume again).
+ */
+export type SourceFeedState = "live" | "paused" | "resuming" | "error"
+
+export const SOURCE_FEED_STATES = [
+	"live",
+	"paused",
+	"resuming",
+	"error",
+] as const satisfies readonly SourceFeedState[]
+
+/** Fixed, safe text for a failed resume (never the transport error). */
+export const SOURCE_RESUME_FAILED_MESSAGE =
+	"The receiver could not be reached; resume again to retry"
+
+/** Fixed text of a `SOURCE_PAUSED` refusal: the request needs the feed, which the operator paused. */
+export const SOURCE_PAUSED_MESSAGE =
+	"The receiver feed is paused; resume it first"
+
+/** What a decoder held back by a paused feed reads, with its Resume action. */
+export const SOURCE_PAUSED_TEXT = "Receiver paused — Resume"
+
+/**
+ * What a restore resume (`{ restoreTuning: true }`) writes back: the centre, rate and gain the
+ * core accepted before the pause (API or tuner relay commands, including relay commands made
+ * during the pause). Only fields a restore writes are present.
+ */
+export interface SourceFeedRestoreTuning {
+	/** Centre frequency in Hz. */
+	centerFreq: number
+	sampleRate?: number
+	gainMode?: "agc" | "manual"
+	/** Manual gain in tenths of a dB. */
+	gain?: number
+}
+
+export const sourceFeedRestoreTuningSchema = {
+	type: "object",
+	properties: {
+		centerFreq: { type: "number" },
+		sampleRate: { type: "number" },
+		gainMode: { type: "string", enum: ["agc", "manual"] },
+		gain: { type: "number" },
+	},
+	required: ["centerFreq"],
+} as const
+
+export interface SourceFeed {
+	state: SourceFeedState
+	/** ISO-8601 time the feed entered this state (boot time for a pause restored at boot). */
+	since: string
+	/** Only in "error": a fixed safe message (SOURCE_RESUME_FAILED_MESSAGE). */
+	error?: string
+	/**
+	 * Only while not "live", and only when the core knows a centre to restore: the tuning a
+	 * restore resume writes back. A plain resume writes no tuning.
+	 */
+	restoreTuning?: SourceFeedRestoreTuning
+}
+
+export const sourceFeedSchema = {
+	type: "object",
+	properties: {
+		state: { type: "string", enum: SOURCE_FEED_STATES },
+		since: { type: "string", format: "date-time" },
+		error: { type: "string" },
+		restoreTuning: sourceFeedRestoreTuningSchema,
+	},
+	required: ["state", "since"],
+} as const
+
+/**
+ * POST /api/sources/:id/resume body (optional). `restoreTuning` true writes the pre-pause tuning
+ * (`SourceFeed.restoreTuning`) back; false or absent (a plain resume) writes no centre, rate,
+ * gain mode or gain, because another client may have retuned the receiver during the pause.
+ */
+export interface SourceResumeRequest {
+	restoreTuning?: boolean
+}
+
+/** POST /api/sources/:id/pause and /resume answer (200; idempotent). */
+export interface SourceFeedResponse {
+	id: string
+	feed: SourceFeed
+	/** True when this call changed the feed (false for a repeated pause or resume). */
+	changed: boolean
+	/**
+	 * False when saving the paused feeds failed: the change holds until the core restarts,
+	 * and a repeated pause or resume retries the write.
+	 */
+	persisted?: boolean
 }

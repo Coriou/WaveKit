@@ -410,4 +410,38 @@ describe("LoRa/Meshtastic Decoder Property-Based Tests", () => {
 			expect(LORA_MESHTASTIC_CAPS.integrationPattern).toBe("pure_consumer")
 		})
 	})
+
+	describe("channel key size", () => {
+		const keyOf = (n: number): string =>
+			Buffer.alloc(n, 0x5a).toString("base64")
+
+		for (const n of [1, 16, 32]) {
+			it(`accepts a ${n}-byte key`, () => {
+				const opts = parseLoraMeshtasticOptions(
+					validOptions({ channelKey: keyOf(n) }),
+				)
+				expect(Buffer.from(opts.channelKey, "base64").length).toBe(n)
+			})
+		}
+
+		for (const n of [2, 15, 17, 24, 31, 33, 64]) {
+			it(`rejects a ${n}-byte key`, () => {
+				expect(() =>
+					parseLoraMeshtasticOptions(validOptions({ channelKey: keyOf(n) })),
+				).toThrow(ConfigValidationError)
+			})
+		}
+
+		it("rejects the AA== no-encryption key the wrapper refuses", () => {
+			expect(() =>
+				parseLoraMeshtasticOptions(validOptions({ channelKey: "AA==" })),
+			).toThrow(ConfigValidationError)
+		})
+
+		it("rejects an empty key", () => {
+			expect(() =>
+				parseLoraMeshtasticOptions(validOptions({ channelKey: "" })),
+			).toThrow(ConfigValidationError)
+		})
+	})
 })

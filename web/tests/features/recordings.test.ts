@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest"
-import type { RecordingInventoryItem } from "@wavekit/api-types"
+import type {
+	RecordingInventoryItem,
+	StorageArea,
+	StorageAreaId,
+	StorageReport,
+} from "@wavekit/api-types"
 import {
 	dayLabel,
 	deleteBlocker,
@@ -9,6 +14,7 @@ import {
 	matchesAll,
 	recordingMeta,
 	recordingTitle,
+	storageLine,
 	suggest,
 } from "../../src/features/recordings/model.ts"
 import { RecordingPlayer } from "../../src/features/recordings/player.ts"
@@ -170,6 +176,53 @@ describe("recording search", () => {
 			filter: "kept",
 		})
 		expect(v.map(r => r.id)).toEqual(["a"])
+	})
+})
+
+describe("storage line", () => {
+	const area = (
+		id: StorageAreaId,
+		bytes: number,
+		cap: number | null,
+		exists = true,
+	): StorageArea => ({
+		id,
+		class: "automatic",
+		bytes,
+		files: 1,
+		exists,
+		partial: false,
+		partialReason: null,
+		cap: cap === null ? null : { bytes: cap },
+		retention: null,
+	})
+	const report = (areas: StorageArea[]): StorageReport =>
+		({
+			areas,
+			filesystem: { totalBytes: 9e9, freeBytes: 5e9, availableBytes: 4e9 },
+			lowSpace: { state: "ok" },
+		}) as unknown as StorageReport
+
+	it("names each recording area that exists, IQ captures with their quota", () => {
+		expect(
+			storageLine(
+				report([
+					area("scanner-evidence", 412e6, 2e9),
+					area("iq-captures", 96e6, 640e6),
+					area("digital-voice-wav", 1.6e9, null),
+				]),
+				2e6,
+			),
+		).toBe(
+			"Kept 2.0 MB · calls 1.6 GB · scanner 412 MB of 2.0 GB · IQ captures 96.0 MB of 640 MB · 4.0 GB free",
+		)
+	})
+
+	it("leaves out an area that does not exist and a missing report", () => {
+		expect(storageLine(report([area("iq-captures", 0, 640e6, false)]), 0)).toBe(
+			"Kept 1 kB · 4.0 GB free",
+		)
+		expect(storageLine(null, 0)).toBe("Kept 1 kB")
 	})
 })
 

@@ -36,6 +36,10 @@ interface Shot {
 	readonly viewport?: { width: number; height: number }
 	/** Time for the waterfall and the live data to fill, in ms. */
 	readonly settleMs?: number
+	/** Shell island opened by its head (its `data-island` name). */
+	readonly island?: string
+	/** The mock's receiver feed is paused for this shot (POST …/pause before, …/resume after). */
+	readonly pauseReceiver?: boolean
 }
 
 const DESKTOP = { width: 1440, height: 900 }
@@ -57,7 +61,18 @@ const SHOTS: readonly Shot[] = [
 	{ name: "messages", theme: "dark", press: ["Messages"] },
 	{ name: "scanner", theme: "dark", press: ["Scanner"] },
 	{ name: "phone", theme: "dark", press: [], viewport: PHONE, settleMs: 16000 },
+	{
+		name: "receiver-paused",
+		theme: "dark",
+		press: [],
+		island: "receiver",
+		pauseReceiver: true,
+		settleMs: 8000,
+	},
 ]
+
+/** The mock's one receiver (web/mock: `rtl-0`). */
+const MOCK_SOURCE = "rtl-0"
 
 function freePort(): Promise<number> {
 	return new Promise((resolve, reject) => {
@@ -209,18 +224,35 @@ async function main(): Promise<void> {
 					["wavekit.web.device", JSON.stringify({ mapTiles: "blank" })],
 				] as const,
 			)
+			const feed = (op: "pause" | "resume") =>
+				fetch(`http://127.0.0.1:${mockPort}/api/sources/${MOCK_SOURCE}/${op}`, {
+					method: "POST",
+				}).then(res => {
+					if (!res.ok) throw new Error(`mock ${op} answered ${res.status}`)
+				})
 			const page = await context.newPage()
 			await page.goto(url, { waitUntil: "load" })
 			await page.locator("canvas").first().waitFor()
+			// a few seconds of waterfall first, so the paused one is frozen, not empty
+			if (shot.pauseReceiver) {
+				await page.waitForTimeout(6000)
+				await feed("pause")
+			}
 			for (const label of shot.press)
 				await page
 					.locator(`nav[aria-label="Primary"] button[aria-label="${label}"]`)
+					.click()
+			if (shot.island)
+				await page
+					.locator(`[data-island="${shot.island}"] [aria-controls]`)
+					.first()
 					.click()
 			// No hover tooltip on the dock in the shot.
 			await page.mouse.move(1, 1)
 			await page.waitForTimeout(shot.settleMs ?? 5000)
 			const file = join(outDir, `${shot.name}.png`)
 			await page.screenshot({ path: file })
+			if (shot.pauseReceiver) await feed("resume")
 			console.log(`wrote ${file}`)
 			await context.close()
 		}

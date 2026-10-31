@@ -49,6 +49,7 @@ const REASONS: readonly (string | undefined)[] = [
 	"capture-too-narrow",
 	"no-channel-selected",
 	"tuner-scanning",
+	"source-paused",
 	"efficiency-budget",
 	"decoder-unavailable",
 	"channelizer-unavailable",

@@ -84,13 +84,14 @@ export const decoderRateReasonCodes = [
 	"external-input",
 ] as const
 
-/** Rate reasons plus the band and scanner-hold reasons; the suspension reasonCode enum. */
+/** Rate reasons plus the band, scanner-hold and feed-pause reasons; the suspension reasonCode enum. */
 export const decoderSuspensionReasonCodes = [
 	...decoderRateReasonCodes,
 	"frequency-out-of-band",
 	"capture-too-narrow",
 	"no-channel-selected",
 	"tuner-scanning",
+	"source-paused",
 	"efficiency-budget",
 	"decoder-unavailable",
 	"channelizer-unavailable",

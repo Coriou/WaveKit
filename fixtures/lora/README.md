@@ -1,42 +1,33 @@
-# LoRa/Meshtastic Fixture
+# LoRa/Meshtastic fixtures
 
-This directory reserves the deterministic fixture path for the LoRa/Meshtastic decoder integration test.
+These synthetic captures are made by `scripts/fixtures/gen_lora.py` (see
+`scripts/fixtures/README.md`). They are fictional and safe to commit. `SHA256SUMS` holds
+their checksums.
 
-The committed `meshtastic-sample.cu8` is a tiny placeholder, not a valid RF capture. The integration test is skipped unless all runtime dependencies exist and `meshtastic-sample.real-fixture` is present, so the placeholder never passes as a real decoder proof.
+| File                         | Content                                                                            |
+| ---------------------------- | ---------------------------------------------------------------------------------- |
+| `meshtastic_onair_frame.bin` | The 33 on-air bytes: a 16-byte header, then the encrypted `Data`                   |
+| `lora_longfast_dc_snr10.cu8` | 0.91 s of cu8 at 1.024 Msps, centre = channel (869.525 MHz), SNR +10 dB in 250 kHz |
+| `lora_longfast_dc_snrm5.cu8` | The same frame at SNR −5 dB                                                        |
 
-## Real Fixture Regeneration
+Expected decode (LongFast, `EU_868`, channel key `AQ==`): one packet with from
+`169552957`, to `4294967295` (broadcast), id `305419896`, hop limit 3, hop start 3,
+channel hash 8, portnum 1, and payload `hello wavekit` (`payload_b64`
+`aGVsbG8gd2F2ZWtpdA==`).
 
-Use a TCXO RTL-SDR and a known-busy Meshtastic default-channel node:
+Tests:
 
-```bash
-rtl_sdr -f 869525000 -s 2048000 -g 40 fixtures/lora/meshtastic-sample.cu8
-head -c 5242880 fixtures/lora/meshtastic-sample.cu8 > /tmp/meshtastic-sample.cu8
-mv /tmp/meshtastic-sample.cu8 fixtures/lora/meshtastic-sample.cu8
-```
+- `tests/unit/decoders/lora-meshtastic-wrapper.test.ts` (runs in CI) checks the
+  checksums and decrypts the frame with Node's crypto. It also runs the wrapper's
+  Python self-test, `tests/unit/decoders/test_lora_meshtastic_decode.py`. The decrypt
+  cases need the `cryptography` and `protobuf` Python modules and skip without them.
+- `tests/integration/lora-meshtastic.test.ts` is the opt-in full chain. It runs both
+  captures through the exact `LoraMeshtasticDecoder.getArgs()` pipeline, sox and then
+  gr-lora_sdr. Run it in the core image:
 
-Then decode the capture inside an image with gr-lora_sdr and the wrapper installed, and write one expected wire-shape JSON object per decoded packet to `meshtastic-sample.expected.jsonl`. The integration test compares `from`, `id`, `portnum`, and `payload_b64`.
+  ```bash
+  WAVEKIT_LORA_CHAIN=1 pnpm exec vitest run tests/integration/lora-meshtastic.test.ts
+  ```
 
-Create the marker only after replacing the placeholder with a real capture:
-
-```bash
-touch fixtures/lora/meshtastic-sample.real-fixture
-```
-
-Recommended default-channel EU_868 setup:
-
-- Region: `EU_868`
-- Preset: `LongFast`
-- Frequency: `869525000`
-- Channel key: `AQ==`
-- Expected packet count: at least 1
-
-## Manual Pi Smoke Test
-
-Use a Raspberry Pi 4 with a TCXO RTL-SDR and a known-busy Meshtastic default channel.
-
-1. Enable the commented `lora-meshtastic` decoder example in `config/default.yaml`.
-2. Set the local region and primary frequency (`EU_868` at `869525000` Hz, or the matching regional primary frequency).
-3. Keep `preset: "LongFast"` and `channelKey: "AQ=="` for the default channel.
-4. Start WaveKit and subscribe to the `decoders` WebSocket channel.
-5. Verify at least one `type: "meshtastic"` packet within 5 minutes.
-6. Verify decoder health reaches `running` and record approximate CPU usage alongside any other enabled decoders.
+With the signal 200 kHz off centre, the same frame does not decode: the decoder demodulates
+only the capture centre.

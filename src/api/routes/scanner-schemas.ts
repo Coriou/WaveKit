@@ -5,6 +5,7 @@ import {
 	IDENTIFY_WAIT_MIN_MS,
 } from "@wavekit/api-types"
 import { DISCOVERY_ID } from "../../core/scanner/store/evidence-store.js"
+import { validationFieldsSchema } from "../validation-errors.js"
 import { CAPTURE_ID } from "../../core/scanner/evidence/capture-store.js"
 import {
 	JOB_HITS_LIMIT_DEFAULT,
@@ -64,7 +65,7 @@ const confidenceEnum = [
 
 /**
  * Flat error body. `details` is untyped and extra keys pass: the central handler adds
- * `correlationId`, and its schema-validation errors carry `details` as an array.
+ * `correlationId`. A validation 400 names the failing fields in `fields`.
  */
 export const errorResponseSchema = {
 	type: "object",
@@ -73,6 +74,7 @@ export const errorResponseSchema = {
 		code: { type: "string" },
 		message: { type: "string" },
 		details: {},
+		fields: validationFieldsSchema,
 	},
 	required: ["error", "code", "message"],
 	additionalProperties: true,

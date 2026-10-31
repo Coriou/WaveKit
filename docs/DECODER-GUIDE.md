@@ -566,7 +566,8 @@ describe("HfdlDecoder", () => {
 4. Check why core suspended it: `curl -s localhost:9000/api/decoders | jq '.[] | {id, suspension}'`.
    `frequency-out-of-band` means the capture does not cover its band, `capture-too-narrow` that the
    band is in view but its channel does not fit the capture, `no-channel-selected` that no VFO or
-   band-plan channel is chosen yet ([API](API.md) lists every reason).
+   band-plan channel is chosen yet, `source-paused` that the receiver feed is paused (resume it
+   with `POST /api/sources/<id>/resume`) ([API](API.md) lists every reason).
 5. multimon-ng with only paging modes (POCSAG512, POCSAG1200, POCSAG2400, FLEX; the default
    when `modes` is unset) runs only where a paging band of your region is in the capture (the
    band catalogue's VHF paging plan, plus 466.025–466.230 MHz in the EU for French paging),
@@ -662,6 +663,36 @@ rtl_433 does not decrypt them. Activity labels these receptions `wmbus`.
 
 Wireless M-Bus meter IDs and readings are personal data, stored like other sensor IDs.
 Validation so far uses synthetic fixtures; live meter decodes have not been observed.
+
+### Meshtastic (lora-meshtastic)
+
+The wrapper (`docker/scripts/lora_meshtastic_decode.py`) takes each frame from gr-lora_sdr's
+`crc_verif` output stream. It keeps only frames whose LoRa payload CRC is valid. It then
+reads the 16-byte on-air header: to, from, packet id, flags (hop limit, want-ack, via MQTT,
+hop start), channel hash, next hop and relay node. Last, it decrypts the rest with the
+channel key (AES-128-CTR) and parses the Meshtastic `Data` message. A frame that fails any
+step is dropped. Drops are counted by reason (`crc_bad`, `short_frame`, `data_parse`,
+`bad_portnum`, ...) and written to the decoder log at most once a minute as a `frame_drops`
+line, with a `frame_drop_summary` line at exit. Single frames are never logged.
+`rx_rssi` and `rx_snr` are 0, because gr-lora_sdr does not measure them.
+
+The decoder demodulates only the capture centre (`reach: centre`). Tune the centre to the
+channel, for example 869.525 MHz for EU_868 LongFast. A frame 200 kHz off centre does
+not decode. The DC spike at the centre does not stop decoding: a synthetic frame
+decoded at +10 and −5 dB SNR with or without one. The fixtures and tests are described
+in `fixtures/lora/README.md`.
+
+### APRS (direwolf) KISS and AGW ports
+
+direwolf has no command-line option for its KISS TCP or AGW port. WaveKit therefore
+writes a config file for each instance before it starts direwolf, and passes it with
+`-c`. The file is created in an owner-only directory under the OS temp dir and removed
+when the decoder stops. It holds the image's `/etc/direwolf.conf` (`MYCALL`, `ADEVICE`,
+`CHANNEL`) without any `KISSPORT`/`AGWPORT` lines, then `KISSPORT 0`, `KISSPORT <kissPort>`
+and `AGWPORT <agwPort>` from the decoder options (defaults 8001 and 8000). direwolf 1.8.x
+still opens its default KISS port 8001 beside a configured one; `KISSPORT 0` turns that
+off, so only the configured ports open. WaveKit connects to the same `kissPort`. Two direwolf instances need different `kissPort` and `agwPort`
+values, or the second cannot bind its ports.
 
 ### High CPU usage
 

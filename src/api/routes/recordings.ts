@@ -10,7 +10,9 @@ import {
 	RECORDINGS_FILE_ROUTE,
 	RECORDING_DELETE_ROUTE,
 	RECORDING_ERROR_STATUS,
+	RECORDING_INVENTORY_KINDS,
 	RECORDING_KEEP_ROUTE,
+	RECORDINGS_PAGE_LIMIT_MAX,
 	RECORDINGS_ROUTE,
 } from "@wavekit/api-types"
 import type {
@@ -32,6 +34,8 @@ import type {
 	RecordingInventory,
 } from "../../core/recordings/inventory.js"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
+import { parseInventoryQuery } from "../../core/recordings/cursor.js"
+import type { ValidationField } from "../validation-errors.js"
 
 export interface RecordingRoutesOptions {
 	inventory: RecordingInventory
@@ -109,15 +113,51 @@ const ERRORS: Record<RecordingInventoryErrorCode, string> = {
 	RECORDINGS_UNAVAILABLE: "Service Unavailable",
 }
 
+/** What each recordings list parameter accepts (static text for the 400). */
+const QUERY_EXPECTED: Readonly<Record<string, string>> = Object.freeze({
+	limit: `integer (1 to ${RECORDINGS_PAGE_LIMIT_MAX}), one value`,
+	cursor: "the nextCursor string of the previous page, one value",
+	kind: `one of ${RECORDING_INVENTORY_KINDS.map(k => JSON.stringify(k)).join(" | ")}, one value`,
+	decoderId: "string, 1 to 128 characters, one value",
+})
+
+/**
+ * Which list parameters failed: each known one is re-checked alone, so the 400 names only
+ * schema names. An unknown parameter is named as "query" (its key is the client's).
+ */
+function queryFields(query: unknown): ValidationField[] {
+	const raw =
+		typeof query === "object" && query !== null && !Array.isArray(query)
+			? (query as Record<string, unknown>)
+			: {}
+	const fields: ValidationField[] = []
+	if (Object.keys(raw).some(key => !Object.hasOwn(QUERY_EXPECTED, key)))
+		fields.push({
+			field: "query",
+			expected: `only the parameters ${Object.keys(QUERY_EXPECTED).join(", ")}`,
+		})
+	for (const [key, expected] of Object.entries(QUERY_EXPECTED))
+		if (
+			Object.hasOwn(raw, key) &&
+			parseInventoryQuery({ [key]: raw[key] }) === null
+		)
+			fields.push({ field: key, expected })
+	return fields.length > 0
+		? fields
+		: [{ field: "query", expected: "valid limit, cursor, kind and decoderId" }]
+}
+
 function sendError(
 	reply: FastifyReply,
 	status: number,
 	code: RecordingInventoryErrorCode,
+	fields?: ValidationField[],
 ): FastifyReply {
-	const body: RecordingInventoryErrorBody = {
+	const body: RecordingInventoryErrorBody & { fields?: ValidationField[] } = {
 		error: ERRORS[code],
 		code,
 		message: MESSAGES[code],
+		...(fields !== undefined ? { fields } : {}),
 	}
 	return reply.code(status).header("Cache-Control", "no-store").send(body)
 }
@@ -233,7 +273,12 @@ export async function recordingRoutes(
 			return await reply.header("Cache-Control", "no-store").send(page)
 		} catch (err) {
 			if (err instanceof RecordingInventoryError)
-				return sendError(reply, 400, "RECORDINGS_QUERY_INVALID")
+				return sendError(
+					reply,
+					400,
+					"RECORDINGS_QUERY_INVALID",
+					queryFields(request.query),
+				)
 			request.log.warn({ err: safeErrorFields(err) }, "Recordings list failed")
 			return sendError(reply, 503, "RECORDINGS_UNAVAILABLE")
 		}
