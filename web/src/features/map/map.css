@@ -312,19 +312,27 @@
 		flex: none;
 	}
 
+	/* The selection card scrolls as one unit: its sections never shrink (a shrinking section with overflow
+	   hidden clipped the aircraft fields to their first row once the photo and identity filled the card) and
+	   none of them scrolls or clips on its own. tests/features/map-card.test.ts guards both. */
 	.wkm-sel {
 		position: absolute;
 		z-index: 3;
 		width: min(320px, calc(100% - 100px));
 		overflow-y: auto;
+		overscroll-behavior: contain;
 		box-sizing: border-box;
 		padding: 16px;
 		display: flex;
 		flex-direction: column;
 		gap: 14px;
+		container: wkm-sel / inline-size;
 	}
 	.wkm[data-wide] .wkm-sel {
 		width: min(320px, calc(100% - 210px));
+	}
+	.wkm-sel > * {
+		flex: none;
 	}
 	.wkm-sel-head {
 		display: flex;
@@ -350,25 +358,107 @@
 		color: var(--wk-text-soft);
 		overflow-wrap: anywhere;
 	}
+	/* live fields: two fixed columns of label over value, tabular figures, one line each, so a live update
+	   never moves a cell; hairlines between cells come from the cells' own borders (nothing clips) */
 	.wkm-fields {
+		margin: 0;
 		display: grid;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
-		gap: 1px;
+		border: 1px solid var(--wk-line-solid);
 		border-radius: 8px;
-		overflow: hidden;
-		background: var(--wk-line-solid);
+		background: var(--wk-surface);
 	}
 	.wkm-fields > div {
-		background: var(--wk-surface);
-		padding: 9px 12px;
+		padding: 8px 12px;
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
 		min-width: 0;
+		border-top: 1px solid var(--wk-line-solid);
 	}
-	.wkm-fields b {
+	.wkm-fields > div:nth-child(-n + 2) {
+		border-top: 0;
+	}
+	.wkm-fields > div:nth-child(2n) {
+		border-left: 1px solid var(--wk-line-solid);
+	}
+	.wkm-fields > div:first-child {
+		border-top-left-radius: 7px;
+	}
+	.wkm-fields > div:nth-child(2) {
+		border-top-right-radius: 7px;
+	}
+	.wkm-fields dt {
+		color: var(--wk-text-3);
+		font-size: var(--wk-fs-xs);
+		line-height: 16px;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.wkm-fields dd {
+		margin: 0;
+		font-size: var(--wk-fs-lg);
+		line-height: 20px;
 		font-weight: 700;
 		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.wkm-fields [data-empty] dd {
+		color: var(--wk-text-4);
+		font-weight: 400;
+	}
+	.wkm-unit {
+		font-size: var(--wk-fs-xs);
+		font-weight: 400;
+		color: var(--wk-text-3);
+	}
+	.wkm-trend {
+		display: inline-block;
+		width: 1.1em;
+		color: var(--wk-text-2);
+	}
+	.wkm-fields [data-tone="danger"] {
+		background: rgba(var(--wk-danger-rgb), 0.12);
+	}
+	.wkm-fields [data-tone="danger"] dd {
+		color: var(--wk-danger);
+	}
+	/* very narrow cards (a squeezed window): one field per row */
+	@container wkm-sel (max-width: 230px) {
+		.wkm-fields {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.wkm-fields > div:nth-child(2n) {
+			border-left: 0;
+		}
+		.wkm-fields > div:nth-child(2) {
+			border-top: 1px solid var(--wk-line-solid);
+		}
+	}
+	/* an aircraft's emergency: danger tone, above the route */
+	.wkm-alert {
+		margin: 0;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 8px 12px;
+		border-radius: 8px;
+		border: 1px solid rgba(var(--wk-danger-rgb), 0.32);
+		background: rgba(var(--wk-danger-rgb), 0.12);
+		color: var(--wk-danger);
+		font-size: var(--wk-fs-md);
+		font-weight: 700;
+	}
+	.wkm-alert svg {
+		flex: none;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 	/* aircraft details (canvas Map board, v110): photo, planned route, identity */
 	.wkm-photo {
@@ -397,9 +487,11 @@
 		bottom: 0;
 		padding: 14px 10px 6px;
 		font-size: 11px;
-		color: rgba(255, 255, 255, 0.88);
+		color: rgba(255, 255, 255, 0.92);
 		text-decoration: none;
-		background: linear-gradient(transparent, rgba(0, 0, 0, 0.55));
+		/* over any photo, light or dark: a deeper scrim and a shadow under the letters */
+		background: linear-gradient(transparent, rgba(0, 0, 0, 0.72));
+		text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -470,6 +562,20 @@
 		font-weight: 700;
 		text-align: right;
 		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+	/* the ICAO type code beside the model */
+	.wkm-code {
+		margin-left: 4px;
+		padding: 1px 5px;
+		border-radius: 4px;
+		background: var(--wk-chip);
+		color: var(--wk-text-2);
+		font-family: var(--wk-font-mono);
+		font-size: var(--wk-fs-2xs);
+		font-weight: 400;
+		text-decoration: none;
+		white-space: nowrap;
 	}
 	.wkm-seen {
 		font-size: 12px;

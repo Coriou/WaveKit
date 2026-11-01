@@ -413,11 +413,20 @@ address on VDL2`). The aircraft is found by its ICAO address and the registratio
 `GET /api/aircraft-identity` links to it, never by callsign or flight number. **Messages** shows decoded messages as cards; open one to see its
 full content or its position on the map.
 
-Select an aircraft to see what the core knows about it (see
-[ADS-B, Aircraft Enrichment](ADSB.md#aircraft-enrichment)): a photo of the airframe, credited to
-its photographer with a link to the photo's page, the airline and type, a **Military** tag, the
-planned route of its callsign, and an **Aircraft** section with registration, type, operator,
-country, ICAO address and year built. The planned route comes from a crowd-sourced database, so
+Select an aircraft to see its live flight data and what the core knows about it (see
+[ADS-B, Aircraft Enrichment](ADSB.md#aircraft-enrichment)). From the top: a photo of the airframe,
+credited to its photographer with a link to the photo's page; the callsign and who flies it (the
+airline, else the operator); a **Military** tag; an emergency alert; the planned route of its
+callsign; then the live data, always shown in full: altitude (or **On ground**), ground speed,
+vertical rate with a climb or descent arrow (**Level** within 64 ft/min), track, squawk, signal
+strength, distance and direction from the station, and when it was last heard. Values follow
+**Settings › Display › Units**, and a value the aircraft has not sent shows a dash. Squawks 7500,
+7600 and 7700, and any emergency state the aircraft reports, show as a red alert
+(`Squawk 7700 · General emergency`) and the squawk turns red. Below, the **Aircraft** section lists
+the registration, the type once with its ICAO type code (`Airbus A321 251NXSL A21N`), the
+registered operator when it is another company than the airline, the country, the ICAO address and
+the year built; the footer gives the decoder, the message count and the position. The card
+scrolls as a whole when it is taller than the window. The planned route comes from a crowd-sourced database, so
 it is hidden when the core marks it implausible (the aircraft is clearly flying away from the
 destination). On the map, an
 aircraft is named by its callsign, else its registration, else its ICAO address. Photos load

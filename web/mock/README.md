@@ -12,7 +12,9 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   SBS output does (one per decoded message; `adsbRate`).
 - Aircraft details: AFR1234 (photo, route CDG → JFK, airline), HOP47MJ (route BES → ORY, no photo)
   and FNY03 (military flag) carry the core's enrichment fields; the photos are drawn inline SVG,
-  so the mock never reaches Planespotters.
+  so the mock never reaches Planespotters. Two fictional cases test the Map's selection card: WKA77
+  (ICAO `3AFFE7`, enriched, squawk 7700 with emergency `general`, descending) and a bare Mode S
+  aircraft (ICAO `39FA0B`: no callsign, registration or enrichment).
 - Spectrum limits: `GET /api/spectrum` serves `limits.bins.max` 2048, like the shipped config.
   `WAVEKIT_MOCK_SPECTRUM_BINS=<n>` (512–8192) raises the summary budget (`spectrumSummaryBins`), so
   Settings › FFT size offers 4096 and 8192 (`spectrumBins` in `buildMockServer()`).

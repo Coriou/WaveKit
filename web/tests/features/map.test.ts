@@ -285,7 +285,7 @@ describe("items from the mock's fleets", () => {
 
 	it("normalises every fleet, aircraft drawn last, counted per layer", () => {
 		expect(countsOf(items)).toEqual({
-			aircraft: 34,
+			aircraft: 36,
 			vessels: 15,
 			aprs: 6,
 			mesh: 4,
@@ -378,8 +378,13 @@ describe("items from the mock's fleets", () => {
 			expect(info.fields.find(([k]) => k === "From station")?.[1]).toMatch(
 				/^\d+(\.\d)? km (N|NE|E|SE|S|SW|W|NW)$/,
 			)
-			// 1.5 s after a report: aircraft say seconds, the throttled fleets say "just now"
-			expect(info.seen).toMatch(it.kind === "aircraft" ? /2 s ago/ : /just now/)
+			// 1.5 s after a report: aircraft say seconds (a live field), the throttled fleets "just now"
+			if (it.kind === "aircraft") {
+				expect(info.fields.find(([k]) => k === "Last heard")?.[1]).toBe(
+					"2 s ago",
+				)
+				expect(info.seen).toMatch(/^ADS-B · readsb · [\d ]+ messages? · /)
+			} else expect(info.seen).toMatch(/just now/)
 			expect(describeItem(it).length).toBeGreaterThan(0)
 		}
 		const wx = items.find(i => glyphOf(i).glyph === "wx")
@@ -399,7 +404,8 @@ describe("items from the mock's fleets", () => {
 		const afr = items.find(i => i.name === "AFR1234")
 		expect(afr).toBeDefined()
 		const info = selectionInfo(afr!, STATION, NOW)
-		expect(info.sub).toBe("Air France · A320 214")
+		// who flies it; the type is in the identity, once
+		expect(info.sub).toBe("Air France")
 		expect(info.aircraft?.photo).toMatchObject({
 			credit: "© Mock photographer · Planespotters",
 			link: "https://www.planespotters.net/",
@@ -412,7 +418,8 @@ describe("items from the mock's fleets", () => {
 			toName: "New York",
 		})
 		expect(info.aircraft?.ident).toContainEqual(["Registration", "F-HBNA"])
-		expect(info.aircraft?.ident).toContainEqual(["Type", "A320 214"])
+		expect(info.aircraft?.ident).toContainEqual(["Type", "Airbus A320 214"])
+		expect(info.aircraft?.ident.map(r => r[0])).not.toContain("Manufacturer")
 		expect(info.aircraft?.ident).toContainEqual(["ICAO address", "3944EF"])
 		const navy = items.find(i => i.name === "FNY03")
 		expect(navy && selectionInfo(navy, STATION, NOW).aircraft?.military).toBe(

@@ -11,7 +11,7 @@ import type {
 	Vessel,
 } from "../../data/index.ts"
 import { withHistory } from "../../data/index.ts"
-import { aircraftAbout, aircraftName } from "../aircraft.ts"
+import { aircraftName } from "../aircraft.ts"
 import { token, type SearchToken } from "../activity/search.ts"
 import {
 	altitudeText,
@@ -531,17 +531,39 @@ export function agoText(ageMs: number, floorMs = 1000): string {
 
 // ---- the selection panel
 
+/** How a field's value is drawn: its unit set smaller, a climb or descent arrow, an emergency meaning. */
+export interface FieldMeta {
+	/** The unit ending the value ("452 kn" → "kn"). */
+	readonly unit?: string
+	/** Climbing or descending: an arrow, spoken as a word. */
+	readonly trend?: "up" | "down"
+	/** What an emergency value means ("General emergency"): drawn in the danger colour and spoken. */
+	readonly alert?: string
+}
+
+/** Label, value as text (units included), and how to draw it. */
+export type Field =
+	| readonly [string, string]
+	| readonly [string, string, FieldMeta]
+
 export interface SelectionInfo {
 	readonly title: string
 	readonly sub: string
 	/** A message or comment shown above the fields. */
 	readonly note: string | null
-	readonly fields: readonly (readonly [string, string])[]
+	/** An aircraft's emergency (squawk 7500/7600/7700 or its emergency state), shown as an alert. */
+	readonly alert?: string | null
+	readonly fields: readonly Field[]
 	/** Source decoder, freshness and the position. */
 	readonly seen: string
 	/** An aircraft's details from the core's enrichment (photo, route, identity), null for other items. */
 	readonly aircraft?: AircraftDetails | null
 }
+
+/** A row of the aircraft's identity: label, value, and a quiet code beside it (the ICAO type code). */
+export type IdentRow =
+	| readonly [string, string]
+	| readonly [string, string, string]
 
 /** docs/ADSB.md "Aircraft Enrichment": everything optional, shown only when known. */
 export interface AircraftDetails {
@@ -559,8 +581,10 @@ export interface AircraftDetails {
 		readonly to: string
 		readonly toName: string
 	} | null
-	/** Registration, type, operator, country, address, year. */
-	readonly ident: readonly (readonly [string, string])[]
+	/** The panel's subtitle: who flies it, else what it is, else its address. Never repeated in `ident`. */
+	readonly about: string
+	/** Registration, type, operator, country, address, year: what `about` does not already say. */
+	readonly ident: readonly IdentRow[]
 }
 
 const PHOTO_SOURCE: Readonly<Record<string, string>> = {
@@ -577,6 +601,41 @@ const imageUrl = (url: string | undefined): string | null =>
 
 function airportCode(a: { iata?: string | undefined; icao: string }): string {
 	return a.iata ?? a.icao
+}
+
+const words = (s: string): string[] =>
+	s
+		.toLowerCase()
+		.split(/[^a-z0-9]+/)
+		.filter(Boolean)
+
+/** One company under two names ("TAP Portugal", "TAP Air Portugal"): the shorter's words all in the longer. */
+export function sameOperator(a: string, b: string): boolean {
+	const [x, y] = [words(a), words(b)]
+	const [short, long] = x.length <= y.length ? [x, y] : [y, x]
+	return short.length > 0 && short.every(w => long.includes(w))
+}
+
+/**
+ * The type as people say it, with the ICAO type code beside it when the model does not already start with it:
+ * "Airbus A321 251NXSL" + "A21N"; "A320 214" says A320 already; a bare code is the type alone.
+ */
+export function aircraftType(
+	id: Aircraft["identification"],
+): { model: string; code: string | null } | null {
+	const code = id?.typeCode?.trim() || null
+	const desc = id?.typeDescription?.trim() || null
+	const maker = id?.manufacturer?.trim() || null
+	if (!desc) return code ? { model: code, code: null } : null
+	const model =
+		maker && !desc.toLowerCase().startsWith(maker.toLowerCase())
+			? `${maker} ${desc}`
+			: desc
+	const upper = desc.toUpperCase()
+	return {
+		model,
+		code: code && !upper.includes(code.toUpperCase()) ? code : null,
+	}
 }
 
 /**
@@ -615,30 +674,121 @@ export function aircraftDetails(a: Aircraft): AircraftDetails {
 					toName: r.destination.city ?? r.destination.name,
 				}
 			: null
-	// "A320 214" already says A320; "Dassault Rafale M" needs RFAL beside it
-	const code = id?.typeCode
-	const desc = id?.typeDescription
-	const type =
-		code && desc && !desc.toUpperCase().startsWith(code.toUpperCase())
-			? `${code} · ${desc}`
-			: (desc ?? code)
-	const ident: (readonly [string, string])[] = []
-	const add = (k: string, v: string | null | undefined) => {
-		if (v) ident.push([k, v])
+	// the airline flying the callsign names it; the registry's operator shows only when it is another company
+	const airline = id?.airline?.name?.trim() || null
+	const operator = id?.operator?.trim() || null
+	const who = airline ?? operator
+	const type = aircraftType(id)
+	const about = who ?? type?.model ?? `ICAO ${a.icao}`
+	const ident: IdentRow[] = []
+	const add = (k: string, v: string | null | undefined, hint?: string) => {
+		if (v) ident.push(hint ? [k, v, hint] : [k, v])
 	}
 	add("Registration", id?.registration)
-	add("Type", type)
-	add("Manufacturer", id?.manufacturer)
-	add("Operator", id?.operator)
+	if (type && about !== type.model) add("Type", type.model, type.code ?? "")
+	if (!id?.typeDescription) add("Manufacturer", id?.manufacturer)
+	if (airline && operator && !sameOperator(airline, operator))
+		add("Operator", operator)
 	add("Country", id?.country)
-	add("ICAO address", a.icao)
+	if (about !== `ICAO ${a.icao}`) add("ICAO address", a.icao)
 	add("Built", id?.year ? String(id.year) : null)
-	return { photo, military: id?.flags?.military === true, route, ident }
+	return {
+		photo,
+		military: id?.flags?.military === true,
+		route,
+		about,
+		ident,
+	}
 }
 
-const feet = (ft: number) => altitudeText(ft)
+const SQUAWK_EMERGENCY: Readonly<Record<string, string>> = {
+	"7500": "Unlawful interference",
+	"7600": "Radio failure",
+	"7700": "General emergency",
+}
+
+const EMERGENCY_STATE: Readonly<Record<string, string>> = {
+	general: "General emergency",
+	lifeguard: "Medical emergency",
+	minfuel: "Minimum fuel",
+	nordo: "No radio",
+	unlawful: "Unlawful interference",
+	downed: "Aircraft downed",
+	reserved: "Emergency",
+}
+
+/** "Squawk 7700 · General emergency", "Medical emergency", or null when the aircraft declares none. */
+export function aircraftEmergency(a: Aircraft): string | null {
+	const state =
+		a.emergency && a.emergency !== "none"
+			? (EMERGENCY_STATE[a.emergency] ?? "Emergency")
+			: null
+	const squawk = a.squawk ? SQUAWK_EMERGENCY[a.squawk] : undefined
+	if (!squawk) return state
+	return `Squawk ${a.squawk} · ${state ?? squawk}`
+}
+
+const unitOf = (text: string): string => /\s(\S+)$/.exec(text)?.[1] ?? ""
+
+/** A measure with its unit split off for drawing ("10 980 m" → unit "m"). */
+const measured = (k: string, text: string): Field => [
+	k,
+	text,
+	{ unit: unitOf(text) },
+]
+
+/** Climbs and descents under 64 ft/min are level flight (readsb's rate resolution). */
+const LEVEL_FT_MIN = 64
+
 const MPH_KN = 1.609344 / 1.852
 const c1 = (n: number) => (Math.round(n * 10) / 10).toFixed(1)
+const grouped = (n: number) =>
+	Math.round(n).toLocaleString("en-GB").replace(/,/g, " ")
+
+/** An aircraft's live flight data, in the order the panel lays it out (two per row). */
+export function aircraftFields(
+	it: MapItem,
+	a: Aircraft,
+	rel: string,
+	ago: string,
+): Field[] {
+	const ground = a.altitude?.onGround === true
+	const vs = a.altitude?.baroRate ?? a.altitude?.geomRate
+	const alert = a.squawk ? SQUAWK_EMERGENCY[a.squawk] : undefined
+	const rate = vs === undefined ? "" : climbText(Math.abs(vs))
+	const vertical: Field =
+		ground || vs === undefined
+			? ["Vertical", "—"]
+			: Math.abs(vs) <= LEVEL_FT_MIN
+				? ["Vertical", "Level"]
+				: [
+						"Vertical",
+						rate,
+						{ unit: unitOf(rate), trend: vs > 0 ? "up" : "down" },
+					]
+	return [
+		ground
+			? ["Altitude", "On ground"]
+			: it.altFt !== null
+				? measured("Altitude", altitudeText(it.altFt))
+				: ["Altitude", "—"],
+		it.speedKn !== null
+			? measured("Speed", speedText(it.speedKn))
+			: ["Speed", "—"],
+		vertical,
+		["Track", it.course !== null ? `${Math.round(it.course)}°` : "—"],
+		a.squawk
+			? alert
+				? ["Squawk", a.squawk, { alert }]
+				: ["Squawk", a.squawk]
+			: ["Squawk", "—"],
+		a.signalQuality?.rssi !== undefined
+			? measured("Signal", `${c1(a.signalQuality.rssi)} dBFS`)
+			: ["Signal", "—"],
+		["From station", rel],
+		["Last heard", ago],
+	]
+}
 
 export function selectionInfo(
 	it: MapItem,
@@ -653,52 +803,16 @@ export function selectionInfo(
 	switch (s.kind) {
 		case "aircraft": {
 			const a = s.value
-			const vs = a.altitude?.baroRate ?? a.altitude?.geomRate
-			const id = a.identification
 			const details = aircraftDetails(a)
+			const n = a.messages
 			return {
 				title: it.name,
-				sub:
-					// who flies it and what it is; the full identity is in the details below
-					aircraftAbout(a) ||
-					[`ICAO ${a.icao}`, id?.registration].filter(Boolean).join(" · "),
+				sub: details.about,
 				aircraft: details,
-				note:
-					a.emergency && a.emergency !== "none"
-						? `Emergency: ${a.emergency}`
-						: null,
-				fields: [
-					[
-						"Altitude",
-						a.altitude?.onGround
-							? "On ground"
-							: it.altFt !== null
-								? feet(it.altFt)
-								: "—",
-					],
-					[
-						"Vertical",
-						vs === undefined
-							? "—"
-							: vs > 64
-								? `↑ ${climbText(vs)}`
-								: vs < -64
-									? `↓ ${climbText(-vs)}`
-									: "Level",
-					],
-					["Speed", it.speedKn !== null ? speedText(it.speedKn) : "—"],
-					["Track", it.course !== null ? `${Math.round(it.course)}°` : "—"],
-					["Squawk", a.squawk ?? "—"],
-					["From station", rel],
-					[
-						"Signal",
-						a.signalQuality?.rssi !== undefined
-							? `${c1(a.signalQuality.rssi)} dBFS`
-							: "—",
-					],
-					["Messages", String(a.messages)],
-				],
-				seen: `ADS-B · readsb · last message ${ago} · ${ll}`,
+				note: null,
+				alert: aircraftEmergency(a),
+				fields: aircraftFields(it, a, rel, ago),
+				seen: `ADS-B · readsb · ${grouped(n)} ${n === 1 ? "message" : "messages"} · ${ll}`,
 			}
 		}
 		case "vessel": {
