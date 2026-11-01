@@ -9,8 +9,8 @@
  * callback: the expired deadline is not seen until the next loop turn, and the reply is read in
  * this turn's poll phase first, so nothing fails. `poll` (default) blocks inside an I/O callback,
  * as a burst of decoder output parsed in one socket read does: the next loop turn runs timers
- * before poll, so before WG19 the deadline fired with the reply already waiting, the reader was
- * terminated and the read failed. WG19's one-turn grace (query/deadline.ts) reads the reply first.
+ * before poll, so before this change the deadline fired with the reply already waiting, the reader was
+ * terminated and the read failed. The one-turn grace (query/deadline.ts) reads the reply first.
  * Also times one facets read (the chip counts the web page refreshes every few seconds).
  *
  *   pnpm exec esbuild scripts/longevity/reader-stall.ts --bundle --platform=node --format=esm \

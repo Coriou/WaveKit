@@ -345,7 +345,7 @@ The web app's one-dimension count went from 123 ms to 36 ms on a quiet host. Fiv
 dimensions gain from the index but not from counting in SQLite: grouping 50,000 rows by
 five columns costs about as much as fetching them, and per-dimension grouping and
 array-mode fetches measured no better. With the index, five dimensions were 9 to 11 ms on a
-120,000-row live copy in the sqlite3 CLI (WG19 round 1), which does not build JavaScript
+120,000-row live copy in the sqlite3 CLI, which does not build JavaScript
 objects.
 
 The index build (`ensureFacetsIndex`) took 1.1 s at load average 17, 2.7 s at 68, and

@@ -121,7 +121,7 @@ describe("mergeTrail", () => {
 	})
 
 	it("any coalescing of a delta stream gives the trail of applying it in order", () => {
-		// Feature: wg19-longevity, Property 3: Coalesced trail deltas lose no point
+		// Feature: longevity, Property 3: Coalesced trail deltas lose no point
 		// Validates: Requirement C.2 (trail complete in the UI)
 		fc.assert(
 			fc.property(
@@ -239,7 +239,7 @@ describe("trail overlap is found by content, not by timestamp", () => {
 	})
 
 	it("delta reconstruction through the events worker equals the core's trail, over resyncs and late snapshots", () => {
-		// Feature: wg19-longevity, Property 4: Trail deltas rebuild the core trail whatever the timestamps
+		// Feature: longevity, Property 4: Trail deltas rebuild the core trail whatever the timestamps
 		// Validates: Requirement C.2 (trail complete in the UI)
 		fc.assert(
 			fc.property(

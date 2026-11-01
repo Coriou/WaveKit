@@ -50,7 +50,7 @@ describe("LogRateLimiter", () => {
 	})
 
 	it("never allows more than one line per key per interval", () => {
-		// Feature: wg19-longevity, Property 2: Rate-limited warnings
+		// Feature: longevity, Property 2: Rate-limited warnings
 		// Validates: Requirement C.1 (rate-limit hot-path warnings)
 		fc.assert(
 			fc.property(

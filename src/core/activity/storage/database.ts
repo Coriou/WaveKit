@@ -784,7 +784,7 @@ export function hasFacetsIndex(db: SqliteDatabase): boolean {
 }
 
 /**
- * Builds the facets covering index when the store predates it (WG19). One CREATE INDEX:
+ * Builds the facets covering index when the store predates it. One CREATE INDEX:
  * a sequential table pass plus a sort, 1.1 s on a 250 000-row synthetic store at load
  * 17, up to 6.4 s at load 160-180 (docs/PERFORMANCE.md), holding the write lock
  * meanwhile. WAL readers keep reading and fall back to the rowid scan until it commits. Idempotent; `built` is false when the

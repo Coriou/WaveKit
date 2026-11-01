@@ -79,7 +79,7 @@ export interface ActivitySession {
 	 */
 	seedCounters(): void
 	/**
-	 * WG19: builds the facets covering index when the store predates it. The worker runs it
+	 * builds the facets covering index when the store predates it. The worker runs it
 	 * on its serial chain after the seed, off the open path; a failure leaves readers on the
 	 * rowid scan (still correct) and is retried on the next open.
 	 */

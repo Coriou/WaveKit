@@ -223,7 +223,7 @@ describe("AircraftUpdatePublisher", () => {
 	})
 
 	it("a client applying new, deltas and resyncs always holds the tracker's trail", () => {
-		// Feature: wg19-longevity, Property 1: Aircraft trail deltas reconstruct the trail
+		// Feature: longevity, Property 1: Aircraft trail deltas reconstruct the trail
 		// Validates: Requirement C.2 (trail on snapshot, then deltas; never lost)
 		fc.assert(
 			fc.property(

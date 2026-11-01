@@ -1,5 +1,5 @@
 /**
- * Longevity: the WG19 facets covering index on a cap-size synthetic store (measure only, not CI).
+ * Longevity: the facets covering index on a cap-size synthetic store (measure only, not CI).
  * Builds a v1 store of --rows rows (default 250 000, the row cap) in a temporary directory with
  * row sizes like live (record JSON about 1 KB, summary about 300 B; no FTS or refs rows, which the
  * facets read never touches), then reports:
@@ -182,7 +182,7 @@ try {
 	}
 	const timeRead = (request: ReadRequest) =>
 		timeIt(() => withReadOnly(dbPath, reader => runRead(reader, request)))
-	/** The pre-WG19 facets read: every scanned row materialised in JS, then counted. */
+	/** The previous facets read: every scanned row materialised in JS, then counted. */
 	const legacyRead = (dimensions: string[]) =>
 		timeIt(() =>
 			withReadOnly(dbPath, reader => {

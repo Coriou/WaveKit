@@ -321,7 +321,7 @@ function facets(
 	const names = request.dimensions.join(", ")
 	// One extra row distinguishes "exactly scanCap matches" from a truncated scan.
 	params.push(request.scanCap + 1)
-	// WG19: SQLite counts; only the distinct value combinations (tens, not 50 001 rows) cross
+	// SQLite counts; only the distinct value combinations (tens, not 50 001 rows) cross
 	// into JS. With the activity_facets covering index the scan reads index entries only;
 	// without it the same statement walks rowids (correct, slower).
 	const sql = `WITH scan AS (SELECT seq, ${columns.join(", ")} FROM activity WHERE ${where.join(" AND ")} ORDER BY seq DESC LIMIT ?) SELECT ${names}, COUNT(*) AS n, MIN(seq) AS low FROM scan GROUP BY ${names}`

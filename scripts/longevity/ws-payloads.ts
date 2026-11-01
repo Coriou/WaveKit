@@ -8,7 +8,7 @@
  * Then the `aircraft` channel per client, in real time for `--seconds` (default 10): `--aircraft`
  * (default 150) with full 100-point trails, each heard `--rate` times a second (default 6, SBS-like),
  * through the real AircraftTracker → AircraftUpdatePublisher → WebSocketEventBroadcaster to one fake
- * subscribed socket that counts bytes. "before" is what the pre-WG19 wiring sent (every tracker
+ * subscribed socket that counts bytes. "before" is what the previous wiring sent (every tracker
  * update with its whole state), measured on the same updates; "before1Hz" is that at one update per
  * aircraft per second (the LE report's 1.07 MB/s estimate). The publisher is told of every aircraft
  * first (aircraft:new, as in the core), so "after" is the steady state: the staggered full-trail

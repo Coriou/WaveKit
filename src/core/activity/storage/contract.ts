@@ -198,7 +198,7 @@ CREATE VIRTUAL TABLE activity_fts USING fts5 (
 `
 
 /**
- * WG19: covering index of the facets read (query/read.ts). It holds seq first, so the
+ * covering index of the facets read (query/read.ts). It holds seq first, so the
  * newest-first facets scan walks index entries (about 64 B each) instead of full row
  * pages (about 1.5 KB per row with its JSON). On a 250 000-row synthetic store the web's
  * category count went from 123 ms to 36 ms, for 15.3 MiB (4% of the file); see

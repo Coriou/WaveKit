@@ -148,7 +148,7 @@ describe("activity facets", () => {
 	})
 
 	it("counts like a row-by-row reference, with and without the covering index", async () => {
-		// Feature: wg19-le, Property 2: facets results match a reference and do not depend on the facets index
+		// Feature: longevity, Property 2: facets results match a reference and do not depend on the facets index
 		// Validates: Requirements B.1, B.4
 		const categories = ["aircraft", "paging", "marine"] as const
 		const protocols = ["adsb", "pocsag", null] as const

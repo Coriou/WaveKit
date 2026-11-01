@@ -87,7 +87,7 @@ export interface FixtureOptions {
 	 * thread cannot open it, so worker tests stay on a file.
 	 */
 	memory?: boolean
-	/** WG19: build the facets covering index, as a migrated store has. Default true. */
+	/** build the facets covering index, as a migrated store has. Default true. */
 	facetsIndex?: boolean
 }
 

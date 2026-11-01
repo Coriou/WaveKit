@@ -1,5 +1,5 @@
 /**
- * WG19 reader deadline semantics, on fake timers (no wall clock): the deadline covers one
+ * Reader deadline semantics, on fake timers (no wall clock): the deadline covers one
  * admitted read, never its wait in the admission queue, and an expired timer gives a reply
  * that is already due one more loop turn before the read is declared late.
  */
@@ -94,7 +94,7 @@ describe("raceDeadline", () => {
 	})
 
 	it("settles exactly once: on time when the reply is due by the deadline, timed out after", async () => {
-		// Feature: wg19-le, Property 1: deadline outcome by reply time
+		// Feature: longevity, Property 1: deadline outcome by reply time
 		// Validates: Requirements B.2
 		await fc.assert(
 			fc.asyncProperty(

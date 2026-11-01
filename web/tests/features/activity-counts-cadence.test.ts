@@ -31,7 +31,7 @@ describe("live chip-count cadence", () => {
 	})
 
 	it("is always between 4 s and 60 s and never shorter for a slower read", () => {
-		// Feature: wg19-le, Property 3: live counts delay bounds and monotonicity
+		// Feature: longevity, Property 3: live counts delay bounds and monotonicity
 		// Validates: Requirements B.4
 		fc.assert(
 			fc.property(
