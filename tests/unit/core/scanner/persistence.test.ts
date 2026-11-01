@@ -14,7 +14,10 @@ import { join } from "node:path"
 import fc from "fast-check"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import type { JournalEntry } from "../../../../src/core/scanner/store/discovery-store.js"
-import { ScannerPersistence } from "../../../../src/core/scanner/store/persistence.js"
+import {
+	SCANNER_JOURNAL_BACKLOG_CODE,
+	ScannerPersistence,
+} from "../../../../src/core/scanner/store/persistence.js"
 import type { PersistedJob } from "../../../../src/core/scanner/store/persistence.js"
 import type {
 	EngineState,
@@ -120,7 +123,7 @@ describe("ScannerPersistence journal", () => {
 		})
 	})
 
-	it("skips invalid middle lines and lines whose payload is not a store mutation", async () => {
+	it("skips invalid middle lines and lines whose payload is not a store mutation; replay stops at the gap they leave", async () => {
 		await withDir(async dir => {
 			const p = new ScannerPersistence({ dir, logger, now: () => T0 })
 			await p.load()
@@ -133,13 +136,30 @@ describe("ScannerPersistence journal", () => {
 				`${JSON.stringify({ seq: 2, at: "x", op: "observation", payload: { bogus: 1 } })}\n`,
 			)
 			await appendFile(path, `${JSON.stringify({ seq: 3, ...entry(T0) })}\n`)
-			const loaded = await new ScannerPersistence({
+			const reopened = new ScannerPersistence({ dir, logger, now: () => T0 })
+			const loaded = await reopened.load()
+			// Seq 2 is invalid: 3 was written on a base replay cannot rebuild, so replay stops at 2.
+			expect(loaded.entries.map(e => e.seq)).toEqual([1])
+			expect(loaded.droppedLines).toBe(2)
+			expect(loaded.recoveryHealth).toBe("degraded")
+			// The gap is a hole: appends wait for a snapshot covering seq 3, then follow it.
+			await expect(reopened.append(entry(T0))).rejects.toMatchObject({
+				code: SCANNER_JOURNAL_BACKLOG_CODE,
+			})
+			await reopened.writeSnapshot({
+				discoveries: [],
+				observations: [],
+				corrections: [],
+				recordingOperations: [],
+			})
+			expect(await reopened.append(entry(T0))).toBe(5)
+			const after = await new ScannerPersistence({
 				dir,
 				logger,
 				now: () => T0,
 			}).load()
-			expect(loaded.entries.map(e => e.seq)).toEqual([1, 3])
-			expect(loaded.droppedLines).toBe(2)
+			expect(after.lastSeq).toBe(4)
+			expect(after.entries.map(e => e.seq)).toEqual([5])
 		})
 	})
 

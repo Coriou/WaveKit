@@ -249,7 +249,8 @@ import {
 	type PersistedLease,
 	type RuntimeSettingsOverrides,
 } from "./store/persistence.js"
-import { SCANNER_LOAD_SLICE_ITEMS, yieldToEventLoop } from "./store/slices.js"
+import { deadlineSliceClock } from "./store/slices.js"
+import type { SliceClock } from "./store/slices.js"
 import {
 	HOLE_STREAK_RESET_MS,
 	snapshotIntervalMs,
@@ -1183,6 +1184,8 @@ export class ScannerService extends EventEmitter {
 	 * (`savedAt` in the snapshot stays wall time).
 	 */
 	private snapshotClock: () => number = () => performance.now()
+	/** Deadline slicing of the journal replay at start-up (8 ms slices); tests inject a fake. */
+	private loadSliceClock: () => SliceClock = () => deadlineSliceClock()
 	/** Start of the last snapshot on `snapshotClock`; none yet: the first is due at once. */
 	private lastSnapshotAt = Number.NEGATIVE_INFINITY
 	/** The cadence snapshot still being written: no second clone + stringify while it lags. */
@@ -1698,11 +1701,10 @@ export class ScannerService extends EventEmitter {
 			// Preserve S1's public fallback; it is never evidence of Task42 authority.
 			this.store.restore(publicSnapshot)
 		}
-		let replayed = 0
+		// In deadline slices (SCANNER_LOAD_SLICE_MS): one entry can cost ~0.3 ms, so a count bounds nothing.
+		const slice = this.loadSliceClock()
 		for (const entry of loaded.entries) {
-			if (replayed > 0 && replayed % SCANNER_LOAD_SLICE_ITEMS === 0)
-				await yieldToEventLoop()
-			replayed += 1
+			if (slice.due()) await slice.yield()
 			try {
 				this.store.replay(entry)
 			} catch (err: unknown) {

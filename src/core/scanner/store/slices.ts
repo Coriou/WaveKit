@@ -1,6 +1,7 @@
 /**
  * Bounded synchronous work while the scanner loads its state: validation and restore run in
- * slices of SCANNER_LOAD_SLICE_ITEMS items with an event-loop turn between slices, so a large
+ * slices of SCANNER_LOAD_SLICE_ITEMS items, the journal read and replay in slices of
+ * SCANNER_LOAD_SLICE_MS, with an event-loop turn between slices, so a large
  * store never holds the main thread for the whole load (timers, worker replies such as the
  * Activity writer's open, and I/O run between slices).
  */
@@ -20,6 +21,45 @@ export const yieldToEventLoop: YieldTurn = () =>
 	new Promise<void>(resolve => {
 		setImmediate(resolve)
 	})
+
+/**
+ * Time per synchronous slice where items vary in cost (the journal read, the replay of journal
+ * entries): a count bounds nothing when one item costs 0.3 ms (a replayed 1.8 kB journal entry:
+ * 1,024 of them held the thread ~280 ms). 8 ms plus the heaviest single item (under 1 ms) keeps
+ * the longest block far below the 250 ms fanout buffers (docs/PERFORMANCE.md) and the 50 ms
+ * target, even on a starved host where one turn takes several times longer.
+ */
+export const SCANNER_LOAD_SLICE_MS = 8
+
+/** Deadline slicing: check `due()` after each item; when true, `await yield()` (it restarts the slice). */
+export interface SliceClock {
+	due(): boolean
+	yield(): Promise<void>
+}
+
+/**
+ * A `SliceClock` that is due `sliceMs` after it was created or last yielded, on `now`
+ * (`performance.now` by default), yielding with `yieldTurn` (a setImmediate turn by default).
+ */
+export function deadlineSliceClock(
+	opts: {
+		sliceMs?: number
+		now?: () => number
+		yieldTurn?: YieldTurn
+	} = {},
+): SliceClock {
+	const sliceMs = opts.sliceMs ?? SCANNER_LOAD_SLICE_MS
+	const now = opts.now ?? (() => performance.now())
+	const yieldTurn = opts.yieldTurn ?? yieldToEventLoop
+	let start = now()
+	return {
+		due: () => now() - start >= sliceMs,
+		yield: async () => {
+			await yieldTurn()
+			start = now()
+		},
+	}
+}
 
 export type SliceParse<T> =
 	| { success: true; data: T[] }

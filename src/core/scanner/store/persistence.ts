@@ -21,6 +21,7 @@ import {
 	rm,
 	truncate,
 } from "node:fs/promises"
+import { readJournalFiles } from "./journal-reader.js"
 import { DQ_CONSOLIDATE_GROUP_MAX } from "../detection-quality-contract.js"
 import { join, resolve } from "node:path"
 import { z } from "zod"
@@ -57,8 +58,12 @@ import { snapshotHeadOf } from "./snapshot-mirror.js"
 import { mainSnapshotRestMs } from "./snapshot-cadence.js"
 import type { MirrorCounts, SnapshotParts } from "./snapshot-mirror.js"
 import { SnapshotWriter } from "./snapshot-writer.js"
-import { parseInSlices, yieldToEventLoop } from "./slices.js"
-import type { YieldTurn } from "./slices.js"
+import {
+	deadlineSliceClock,
+	parseInSlices,
+	yieldToEventLoop,
+} from "./slices.js"
+import type { SliceClock, YieldTurn } from "./slices.js"
 import type {
 	SnapshotWorkerFactory,
 	SnapshotWorkerStatus,
@@ -573,6 +578,7 @@ export class ScannerPersistence {
 	private readonly now: () => number
 	private readonly appendFile: (path: string, data: string) => Promise<void>
 	private readonly yieldTurn: YieldTurn
+	private readonly loadSliceClock: () => SliceClock
 	private readonly fileMaxSeq = new Map<string, number>()
 	private readonly fileBytes = new Map<string, number>()
 	private chain: Promise<unknown> = Promise.resolve()
@@ -641,6 +647,8 @@ export class ScannerPersistence {
 		snapshotWorker?: SnapshotWorkerOptions
 		/** Awaited between validation slices of the snapshot; a setImmediate turn by default. */
 		yieldTurn?: YieldTurn
+		/** Deadline slicing of the journal read; `deadlineSliceClock()` (8 ms) by default. */
+		loadSliceClock?: () => SliceClock
 		/**
 		 * Monotonic ms timing main-thread snapshot builds and the rest after them;
 		 * `performance.now` by default.
@@ -648,6 +656,7 @@ export class ScannerPersistence {
 		buildClock?: () => number
 	}) {
 		this.yieldTurn = opts.yieldTurn ?? yieldToEventLoop
+		this.loadSliceClock = opts.loadSliceClock ?? (() => deadlineSliceClock())
 		this.buildClock = opts.buildClock ?? (() => performance.now())
 		this.snapshotWorkerOptions = opts.snapshotWorker ?? {}
 		this.maxJournalBacklogBytes =
@@ -756,7 +765,7 @@ export class ScannerPersistence {
 		const uncovered =
 			this.refusedMax !== null &&
 			(this.coverSeq === null || this.coverSeq < this.refusedMax)
-		if (overCap || uncovered) return this.refuse(seq)
+		if (overCap || uncovered) return this.refuse(seq, uncovered)
 		const name = journalName(this.now())
 		let batch = this.openBatch
 		if (batch === null || batch.name !== name) {
@@ -781,15 +790,15 @@ export class ScannerPersistence {
 		return batch.written.then(() => seq)
 	}
 
-	private refuse(seq: number): Promise<number> {
-		this.refusedMax = seq
+	private refuse(seq: number, behindHole: boolean): Promise<number> {
+		this.refusedMax = Math.max(this.refusedMax ?? 0, seq)
 		this.holeFrom ??= seq
 		this.refusedCount += 1
 		this.openBatch = null // no batch spans a hole
 		if (this.refusedCount === 1)
 			this.log.warn(
-				{ seq, queuedBytes: this.queuedBytes },
-				"Journal backlog full; refusing appends until a snapshot covers them",
+				{ seq, queuedBytes: this.queuedBytes, behindHole },
+				"Journal backlog full or behind a hole; refusing appends until a snapshot covers them",
 			)
 		return Promise.reject(
 			new WaveKitError(
@@ -1487,6 +1496,13 @@ export class ScannerPersistence {
 		}
 	}
 
+	/**
+	 * The journal tail after `lastSeq`, streamed (store/journal-reader.ts): covered lines are only
+	 * byte-scanned, torn tails are cut back to the last newline, and replay stops at the first
+	 * missing seq. A gap is then a hole like a refused append: lines above it stay on disk but
+	 * replay never steps over it, so appends are refused until a snapshot covering every seq seen
+	 * (`refusedMax`) is queued; ScannerService requests one at the first refusal.
+	 */
 	private async readJournal(
 		lastSeq: number,
 	): Promise<{ entries: JournalEntry[]; maxSeq: number; dropped: number }> {
@@ -1501,60 +1517,29 @@ export class ScannerPersistence {
 			}
 			return { entries: [], maxSeq: 0, dropped: 0 }
 		}
-		const bySeq = new Map<number, JournalEntry>()
-		let maxSeq = 0
-		let dropped = 0
-		for (const name of names) {
-			const path = join(dir, name)
-			let text = await readFile(path, "utf8")
-			if (text.length > 0 && !text.endsWith("\n")) {
-				const keep = text.slice(0, text.lastIndexOf("\n") + 1)
-				dropped++
-				this.authorityHealth = "degraded"
-				this.log.warn(
-					{
-						file: path,
-						tornBytes: Buffer.byteLength(text) - Buffer.byteLength(keep),
-					},
-					"Dropping a torn final journal line",
-				)
-				await truncate(path, Buffer.byteLength(keep))
-				text = keep
-			}
-			let fileMax = 0
-			for (const line of text.split("\n")) {
-				if (line === "") continue
-				const parsed = parseJournalLine(line)
-				if (parsed === null) {
-					dropped++
-					this.authorityHealth = "degraded"
-					this.log.warn({ file: path }, "Skipping an invalid journal line")
-					continue
-				}
-				fileMax = Math.max(fileMax, parsed.seq)
-				if (parsed.seq > lastSeq) {
-					const previous = bySeq.get(parsed.seq)
-					if (
-						previous !== undefined &&
-						JSON.stringify(previous) !== JSON.stringify(parsed)
-					) {
-						this.authorityHealth = "degraded"
-						dropped++
-					} else if (previous === undefined) {
-						bySeq.set(parsed.seq, parsed)
-						this.journalBytes += Buffer.byteLength(line) + 1
-					}
-				}
-			}
-			this.fileMaxSeq.set(name, fileMax)
-			this.fileBytes.set(name, Buffer.byteLength(text))
-			maxSeq = Math.max(maxSeq, fileMax)
+		const read = await readJournalFiles({
+			dir,
+			names,
+			fromSeq: lastSeq,
+			parseLine: parseJournalLine,
+			slice: this.loadSliceClock(),
+			log: this.log,
+		})
+		if (read.degraded) this.authorityHealth = "degraded"
+		for (const file of read.files) {
+			this.fileMaxSeq.set(file.name, file.maxSeq)
+			this.fileBytes.set(file.name, file.bytes)
 		}
-		return {
-			entries: [...bySeq.values()].sort((a, b) => a.seq - b.seq),
-			maxSeq,
-			dropped,
+		this.journalBytes += read.uncoveredBytes
+		if (read.gap !== null) {
+			this.refusedMax = Math.max(this.refusedMax ?? 0, read.maxSeq)
+			this.holeFrom = Math.min(
+				this.holeFrom ?? Number.POSITIVE_INFINITY,
+				read.gap.missing,
+			)
+			this.coverSeq = null
 		}
+		return { entries: read.entries, maxSeq: read.maxSeq, dropped: read.dropped }
 	}
 
 	/** Validate aggregate prepared authority across snapshot+journal without changing S1 fallback. */
