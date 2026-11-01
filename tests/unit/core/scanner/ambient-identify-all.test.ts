@@ -502,6 +502,37 @@ it("queries occupied spans plus tolerance even beyond the widest half-width", ()
 	).toEqual([o])
 })
 
+it("indexes live observations by id through every set, replace, delete and clear", () => {
+	const map = new AmbientObservationMap(new AmbientObservationIndex())
+	const at = (id: string, centreHz = HZ) => ({
+		observationId: id,
+		sourceId: "fake",
+		startedAt: 0,
+		lastTrack: { centreHz, obwHz: 25_000 },
+	})
+	const a = at("o_a")
+	const b = at("o_b")
+	map.set("t1", a)
+	map.set("t2", b)
+	expect(map.byObservationId("o_a")).toBe(a)
+	expect(map.byObservationId("o_b")).toBe(b)
+	// A track key re-set to another observation drops the old id only.
+	const c = at("o_c")
+	map.set("t1", c)
+	expect(map.byObservationId("o_a")).toBeUndefined()
+	expect(map.byObservationId("o_c")).toBe(c)
+	// An id another key took since stays when its first key goes.
+	const b2 = at("o_b", HZ + 25_000)
+	map.set("t3", b2)
+	map.delete("t2")
+	expect(map.byObservationId("o_b")).toBe(b2)
+	map.delete("t3")
+	expect(map.byObservationId("o_b")).toBeUndefined()
+	map.clear()
+	expect(map.byObservationId("o_c")).toBeUndefined()
+	expect(map.size).toBe(0)
+})
+
 it("updates the frequency index on centre movement and expiry", () => {
 	const index = new AmbientObservationIndex()
 	const o = {

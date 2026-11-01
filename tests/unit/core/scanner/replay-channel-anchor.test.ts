@@ -38,8 +38,8 @@ import { makeObs } from "../../../mocks/scanner/observations.js"
 import { flushAsync, poolHarness } from "../../../mocks/scanner/probe-fakes.js"
 import { serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 
-const ACARS_HZ = 130_025_000
-const VDL2_HZ = 136_975_000
+const ACARS_HZ = 130_050_000
+const VDL2_HZ = 135_975_000
 /** The captured track's centre: 1.5 kHz above its channel (inside the 4 kHz raster snap). */
 const OFF = 1_500
 
@@ -409,6 +409,52 @@ describe.each(CASES)("$decoder replay to a decoded discovery", c => {
 			expect(r.internal.store.discoveryIdOf("o_live")).toBeUndefined()
 			// The close released the hold.
 			expect(r.internal.store.anchorHeldCount()).toBe(0)
+		} finally {
+			await r.stop()
+		}
+	})
+
+	it("a restored anchor (unproven, published unknown) still owns its channel for a live replay", async () => {
+		const r = await scanner(c)
+		try {
+			r.apply({})
+			const anchorId = r.discoveries()[0]!.id
+			// A restart: the anchor comes back without its in-memory identity.
+			r.internal.store.restore(r.internal.store.snapshot())
+			expect(r.internal.store.get(anchorId)).toMatchObject({
+				protocol: "unknown",
+				evidenceLevel: "weak",
+			})
+			const track = trackOf({
+				trackId: "t2",
+				centreHz: c.channelHz + OFF,
+				obwHz: 9_000,
+				epoch: 1,
+			})
+			r.internal.live.set("t2", {
+				observationId: "o_live",
+				sourceId: "rtl",
+				trackId: "t2",
+				epoch: 1,
+				jobIds: [],
+				discoveryId: null,
+				startedAt: 40_000,
+				classification: r.internal.classify(track, "rtl"),
+				probeIds: new Set(),
+				lastActivityAt: 40_000,
+				lastIngestAt: 40_000,
+				lastTrack: track,
+				decoded: false,
+				encrypted: false,
+			} as unknown as LiveObservation)
+			r.apply({ captureId: "cap-3", observationId: "o_live" })
+			r.internal.store.stopAnchorExpiry()
+			expect(r.discoveries().map(d => d.id)).toEqual([anchorId])
+			expect(r.internal.store.get(anchorId)).toMatchObject({
+				protocol: c.protocol,
+				confidence: "decoded",
+				proof: { kind: "decoded", identity: c.identity },
+			})
 		} finally {
 			await r.stop()
 		}

@@ -49,7 +49,7 @@ export function decodeAnchorKey(
  * decode may not anchor there. ADS-B has one anchor at 1090 MHz (within the 1 kHz ambient
  * target tolerance). A channel anchor sits at the decode's channel rounded to whole Hz: the
  * decoders report their configured channel, and an MHz-to-Hz product such as
- * 131.825 × 1e6 = 131 824 999.99999999 must key the same channel as 131 825 000. Channels are
+ * 130.7 × 1e6 = 130 699 999.99999999 must key the same channel as 130 700 000. Channels are
  * at least 8.33 kHz apart, far above the 0.5 Hz rounding.
  */
 export function anchorHzOf(

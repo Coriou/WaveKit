@@ -20,12 +20,12 @@ import {
 } from "../../../../src/core/scanner/replay-snapshot.js"
 
 const R = 1_024_000
-const C = 131_600_000
+const C = 133_600_000
 const base = {
 	fileBytes: 10 * R * 2,
 	rateHz: R,
 	centreHz: C,
-	channelsHz: [131_550_000],
+	channelsHz: [133_550_000],
 	decoder: "acarsdec" as const,
 }
 
@@ -70,12 +70,12 @@ describe("planSnapshotDecode", () => {
 	it("offsets every channel from the centre; several channels in one plan", () => {
 		const plan = planSnapshotDecode({
 			...base,
-			channelsHz: [131_550_000, 131_725_000, 131_825_000],
+			channelsHz: [133_550_000, 133_725_000, 133_825_000],
 		})
 		expect(plan.channels).toEqual([
-			{ channelHz: 131_550_000, offsetHz: -50_000 },
-			{ channelHz: 131_725_000, offsetHz: 125_000 },
-			{ channelHz: 131_825_000, offsetHz: 225_000 },
+			{ channelHz: 133_550_000, offsetHz: -50_000 },
+			{ channelHz: 133_725_000, offsetHz: 125_000 },
+			{ channelHz: 133_825_000, offsetHz: 225_000 },
 		])
 	})
 
@@ -85,7 +85,7 @@ describe("planSnapshotDecode", () => {
 		expect(plan.captureBandwidthHz).toBe(47_424)
 		expect(plan.maxOffsetHz).toBe(488_288)
 		// the edge itself on a raster channel: centre = channel − 488 288 (whole Hz)
-		const ch = 131_550_000
+		const ch = 133_550_000
 		expect(() =>
 			planSnapshotDecode({ ...base, centreHz: ch - 488_288, channelsHz: [ch] }),
 		).not.toThrow()
@@ -105,7 +105,7 @@ describe("planSnapshotDecode", () => {
 				fc.integer({ min: SNAPSHOT_MIN_RATE_HZ, max: 3_200_000 }),
 				fc.integer({ min: -1_600_000, max: 1_600_000 }),
 				(rateHz, delta) => {
-					const ch = 131_550_000
+					const ch = 133_550_000
 					try {
 						const plan = planSnapshotDecode({
 							...base,
@@ -135,10 +135,10 @@ describe("planSnapshotDecode", () => {
 		expect(bad({ fileBytes: 0 })).toThrow("whole CU8 samples")
 		expect(bad({ fileBytes: SNAPSHOT_MAX_BYTES + 2 })).toThrow("exceeds")
 		expect(bad({ channelsHz: [] })).toThrow("at least one channel")
-		expect(bad({ channelsHz: [131_550_000, 131_550_000] })).toThrow(
+		expect(bad({ channelsHz: [133_550_000, 133_550_000] })).toThrow(
 			"given twice",
 		)
-		expect(bad({ channelsHz: [131_551_000] })).toThrow(
+		expect(bad({ channelsHz: [133_551_000] })).toThrow(
 			"not a 25 kHz ACARS channel",
 		)
 		expect(bad({ channelsHz: [446_100_000] })).toThrow("not a 25 kHz")
@@ -151,7 +151,7 @@ describe("planSnapshotDecode", () => {
 			planSnapshotDecode({
 				...base,
 				rateHz: 2_400_000,
-				centreHz: 131_600_000,
+				centreHz: 133_600_000,
 				fileBytes: SNAPSHOT_MAX_BYTES,
 			}),
 		).not.toThrow()
@@ -196,8 +196,8 @@ describe("tool arguments", () => {
 		})
 		const vdl2 = planSnapshotDecode({
 			...base,
-			centreHz: 136_800_000,
-			channelsHz: [136_975_000, 136_725_000],
+			centreHz: 135_800_000,
+			channelsHz: [135_975_000, 135_725_000],
 			decoder: "dumpvdl2",
 		})
 		expect(vdl2.protocol).toBe("vdl2")

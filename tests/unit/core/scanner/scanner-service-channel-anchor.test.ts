@@ -13,8 +13,8 @@ import type { DecoderConfig } from "../../../../src/decoders/types.js"
  * spectrum track at all (short ACARS blocks and VDL2 frames rarely open one). Synthetic
  * channels, identities and text only.
  */
-const ACARS_HZ = 130_025_000
-const VDL2_HZ = 130_075_000
+const ACARS_HZ = 130_050_000
+const VDL2_HZ = 130_100_000
 
 interface Case {
 	decoder: "acarsdec" | "dumpvdl2"

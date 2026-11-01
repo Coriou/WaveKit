@@ -6,7 +6,7 @@
  * the live decodes of the same channel use). Pure.
  *
  * Every ACARS and VDL2 assignment lies on the 25 kHz aeronautical raster (8.33 kHz channels are
- * voice only): 129.125, 130.025, 131.550, 131.725, 131.825 MHz ACARS; 136.650 to 136.975 MHz VDL2.
+ * voice only).
  */
 import { AERO_VHF_MAX_HZ, AERO_VHF_MIN_HZ } from "./store/decode-anchor.js"
 import { ambientReachHz } from "./probes/ambient-placement.js"

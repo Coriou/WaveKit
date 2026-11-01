@@ -6045,9 +6045,9 @@ export class ScannerService extends EventEmitter {
 	 * A decoded ACARS or VDL2 replay whose observation holds no discovery of its own lands at its
 	 * raster channel (rasterChannelOf) as a live channel decode does (store.anchorDecode): it proves
 	 * the one spectrum discovery at the channel, else the channel anchor, so no second discovery
-	 * opens beside an anchor. An observation still live goes this way only when an anchor of the
-	 * decoded protocol already holds the channel (otherwise its own admission is the discovery at
-	 * the channel). The capture's tuning trust is the trust (canAnchor fails closed without it).
+	 * opens beside an anchor. An observation still live goes this way only when a channel anchor
+	 * (either protocol) already holds the channel: the store opens no discovery in an anchor's
+	 * reach (otherwise its own admission is the discovery at the channel). The capture's tuning trust is the trust (canAnchor fails closed without it).
 	 * False when it did not apply: the caller's path runs.
 	 */
 	private applyReplayAtChannel(
@@ -6060,11 +6060,13 @@ export class ScannerService extends EventEmitter {
 			return false
 		const channelHz = rasterChannelOf(decoded.protocol, rfHz)
 		if (channelHz === null) return false
-		if (live) {
-			const anchor = this.store.decodeAnchorFor(result.sourceId, channelHz)
-			if (anchor?.anchor !== "decode" || anchor.protocol !== decoded.protocol)
-				return false
-		}
+		// A channel anchor owns its channel (any protocol, restored or not): the live observation
+		// opens no discovery in its reach, so the decode goes to the channel.
+		if (
+			live &&
+			this.store.channelAnchorNear(result.sourceId, channelHz) === undefined
+		)
+			return false
 		let trust: TuningTrust | undefined
 		try {
 			trust = this.deps.iqCapture?.view(result.captureId)?.tuningTrust
@@ -6232,17 +6234,20 @@ export class ScannerService extends EventEmitter {
 		return at
 	}
 
-	/** An observation still tracked and not closed (the store's anchor-hold sweep). */
+	/**
+	 * An observation still tracked and not closed (the store's anchor-hold sweep): one id lookup,
+	 * so a sweep of the ANCHOR_HELD_MAX holds is O(holds), not O(holds x live).
+	 */
 	private isOpenObservation(observationId: string): boolean {
-		for (const o of this.live.values())
-			if (o.observationId === observationId) return o.endedAt === undefined
-		return false
+		const o = this.live.byObservationId(observationId)
+		return o !== undefined && o.endedAt === undefined
 	}
 
 	private findObservation(observationId: string): LiveObservation | undefined {
-		for (const o of this.live.values())
-			if (o.observationId === observationId) return o
-		return this.recent.find(o => o.observationId === observationId)
+		return (
+			this.live.byObservationId(observationId) ??
+			this.recent.find(o => o.observationId === observationId)
+		)
 	}
 
 	/**

@@ -43,8 +43,8 @@ import {
 import { createAcarsdecDecoder } from "../../../../src/decoders/builtin/acarsdec.js"
 import { PassThrough } from "node:stream"
 
-const VDL2 = 136_975_000
-const ACARS = 131_550_000
+const VDL2 = 135_975_000
+const ACARS = 133_550_000
 
 describe("rasterChannelOf / replayChannelHz", () => {
 	it("the snap reach is point placement's 4 000 Hz, inside the VDL2 burst margin", () => {
