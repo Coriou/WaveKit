@@ -14,6 +14,15 @@ import {
 	ScannerPersistence,
 } from "../../../../src/core/scanner/store/persistence.js"
 import {
+	HOLE_STREAK_RESET_MS,
+	holeSnapshotSpacingMs,
+} from "../../../../src/core/scanner/store/snapshot-cadence.js"
+import type { SnapshotWorkerRequest } from "../../../../src/core/scanner/store/snapshot-protocol.js"
+import type {
+	SnapshotWorkerFactory,
+	SnapshotWorkerPort,
+} from "../../../../src/core/scanner/store/snapshot-writer.js"
+import {
 	recordingAlias,
 	recordingArtifact,
 	type PreparedRecordingMetadata,
@@ -25,6 +34,7 @@ import { serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 
 type Internals = {
 	now: () => number
+	snapshotClock: () => number
 	stateLoaded: boolean
 	dirty: boolean
 	tick(): void
@@ -64,6 +74,7 @@ function harness(): {
 	const internals = h.service as unknown as Internals
 	const clock = { t: 1_000_000 }
 	internals.now = () => clock.t
+	internals.snapshotClock = () => clock.t
 	internals.stateLoaded = true
 	return { service: h.service, internals, clock }
 }
@@ -449,7 +460,10 @@ describe("ScannerService size-scaled snapshot cadence", () => {
 		internals.tick()
 		expect(write).toHaveBeenCalledTimes(2) // still requested: 10 s, not 3,888 s; fails again
 		await settle()
-		clock.t += SNAPSHOT_EVERY_MS
+		clock.t += 2 * SNAPSHOT_EVERY_MS - 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(2) // two failures in a row: 10 s x 2 = 20 s
+		clock.t += 1
 		internals.tick()
 		expect(write).toHaveBeenCalledTimes(3) // the request survives every failure; succeeds
 		await settle()
@@ -525,14 +539,17 @@ describe("ScannerService main-thread snapshot duty budget", () => {
 		const window = 10 * 60_000
 		const { starts, from, busyMs } = await recurringHoles(window, () => false)
 		expect(starts[0]).toBe(from) // the first hole: at once, well inside 1 s
-		// Each next start is the last end plus 9 x 2,700 ms (within one 100 ms tick), never sooner.
+		// Each next start is the last end plus 9 x 2,700 ms or the hole backoff after i snapshots,
+		// whichever is later (within one 100 ms tick), never sooner.
 		for (let i = 1; i < starts.length; i++) {
 			const gap = (starts[i] ?? 0) - (starts[i - 1] ?? 0)
-			expect(gap).toBeGreaterThanOrEqual(BUILD_MS + 24_300)
-			expect(gap).toBeLessThan(BUILD_MS + 24_300 + 100)
+			const due = Math.max(BUILD_MS + 24_300, holeSnapshotSpacingMs(i))
+			expect(gap).toBeGreaterThanOrEqual(due)
+			expect(gap).toBeLessThan(due + 100)
 		}
-		// 600 s / 27 s: 23 builds, not one back-to-back every 2.7 s (222).
-		expect(starts.length).toBe(23)
+		// 27 s x 8, then the backoff's 32, 64 and 128 s: 12 builds in 600 s (440 s, the next
+		// due at 696 s), not one back-to-back every 2.7 s (222).
+		expect(starts.length).toBe(12)
 		// Any window holds at most 10 % plus the one build it may end inside; whole build + rest
 		// cycles hold 10 % exactly.
 		expect(busyMs).toBeLessThanOrEqual(0.1 * window + BUILD_MS)
@@ -540,15 +557,16 @@ describe("ScannerService main-thread snapshot duty budget", () => {
 		expect(busyMs / cycles).toBeLessThanOrEqual(0.1)
 	})
 
-	it("worker-built holes stay at 1 s, even right after a main-thread build", async () => {
+	it("worker-built holes stay at 1 s, even right after a main-thread build, until the hole backoff", async () => {
 		// The first snapshot resets the stale mirror on the main thread; the worker builds the rest.
 		const { starts, from } = await recurringHoles(60_000, n => n > 0)
 		expect(starts[0]).toBe(from)
 		// Due 1 s after the first start: the first hole after the 2.7 s build releases the thread.
 		expect((starts[1] ?? 0) - (starts[0] ?? 0)).toBe(BUILD_MS + 100)
-		for (let i = 2; i < starts.length; i++)
-			expect((starts[i] ?? 0) - (starts[i - 1] ?? 0)).toBe(1_000)
-		expect(starts.length).toBe(59) // 0, 2.8 s, then every second to 59.8 s
+		// 1 s up to the 5th success in a row, then 2, 4, 8, 16, 32 s.
+		const gaps = starts.slice(2).map((t, i) => t - (starts[i + 1] ?? 0))
+		expect(gaps).toEqual([1_000, 1_000, 1_000, 2_000, 4_000, 8_000, 16_000])
+		expect(starts.length).toBe(9) // 0, 2.8, 3.8, 4.8, 5.8, 7.8, 11.8, 19.8, 35.8 s; next at 67.8 s
 	})
 
 	it("rests from the end of a worker fallback the main thread built when the write settled", async () => {
@@ -595,6 +613,269 @@ describe("ScannerService main-thread snapshot duty budget", () => {
 		clock.t += 1
 		internals.tick()
 		expect(write).toHaveBeenCalledTimes(2)
+	})
+})
+
+describe("ScannerService snapshot retry, hole backoff and clock", () => {
+	const BIG = 90_000_000
+	const PERIODIC_MS = 3_888_000
+	const LATE = 10_000_000_000
+	const settle = () => new Promise<void>(resolve => setImmediate(resolve))
+	const failing = () =>
+		Promise.reject(new WaveKitError("disk", "SCANNER_PERSIST_FAILED"))
+
+	it("retries a failing periodic snapshot after 10 s, doubling per failure up to the periodic interval", async () => {
+		const { internals, clock } = harness()
+		clock.t = LATE
+		vi.spyOn(internals.persistence, "snapshotCadence").mockReturnValue({
+			snapshotBytes: BIG,
+			journalBytes: 0,
+			onWorker: true,
+		})
+		const write = vi
+			.spyOn(internals.persistence, "writeSnapshotOf")
+			.mockImplementation(failing)
+		internals.dirty = true
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(1)
+		await settle()
+		// 10 s x 2^(f - 1): 10, 20, ... 2,560 s, then the 3,888 s periodic interval caps it.
+		const retries = [
+			10_000,
+			20_000,
+			40_000,
+			80_000,
+			160_000,
+			320_000,
+			640_000,
+			1_280_000,
+			2_560_000,
+			PERIODIC_MS,
+			PERIODIC_MS,
+		]
+		for (const [i, retry] of retries.entries()) {
+			clock.t += retry - 1
+			internals.tick()
+			expect(write).toHaveBeenCalledTimes(i + 1) // 1 ms short
+			clock.t += 1
+			internals.tick()
+			expect(write).toHaveBeenCalledTimes(i + 2)
+			await settle()
+		}
+		// A success resets the retry: the next change waits the periodic interval again.
+		write.mockImplementation(() => Promise.resolve())
+		clock.t += PERIODIC_MS
+		internals.tick()
+		await settle()
+		const calls = write.mock.calls.length
+		internals.dirty = true
+		clock.t += 10_000
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(calls)
+	})
+
+	it("a hole retry after failures is capped at 5 min, not the periodic interval", async () => {
+		const { internals, clock } = harness()
+		clock.t = LATE
+		vi.spyOn(internals.persistence, "snapshotCadence").mockReturnValue({
+			snapshotBytes: BIG,
+			journalBytes: 0,
+			onWorker: true,
+		})
+		const write = vi
+			.spyOn(internals.persistence, "writeSnapshotOf")
+			.mockImplementation(failing)
+		vi.spyOn(internals.persistence, "append").mockImplementation(() =>
+			Promise.reject(new WaveKitError("full", SCANNER_JOURNAL_BACKLOG_CODE)),
+		)
+		internals.onStoreMutation(entry())
+		await settle()
+		expect(write).toHaveBeenCalledTimes(1)
+		// 10, 20, 40, 80, 160 s, then min(5 min, 320 s) = 300 s from the 6th failure on.
+		for (const [i, retry] of [
+			10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000,
+		].entries()) {
+			clock.t += retry - 1
+			internals.tick()
+			expect(write).toHaveBeenCalledTimes(i + 1)
+			clock.t += 1
+			internals.tick()
+			expect(write).toHaveBeenCalledTimes(i + 2)
+			await settle()
+		}
+	})
+
+	/** Six successful worker hole snapshots in a row (streak 6), then `quietMs` without a hole. */
+	async function streakThenQuiet(quietMs: number): Promise<{
+		internals: Internals
+		clock: { t: number }
+		write: ReturnType<typeof vi.fn>
+	}> {
+		const { internals, clock } = harness()
+		clock.t = LATE
+		vi.spyOn(internals.persistence, "snapshotCadence").mockReturnValue({
+			snapshotBytes: BIG,
+			journalBytes: 0,
+			onWorker: true,
+		})
+		const write = vi
+			.spyOn(internals.persistence, "writeSnapshotOf")
+			.mockImplementation(() => Promise.resolve())
+		vi.spyOn(internals.persistence, "append").mockImplementation(() =>
+			Promise.reject(new WaveKitError("full", SCANNER_JOURNAL_BACKLOG_CODE)),
+		)
+		for (let n = 0; n < 6; n++) {
+			clock.t += holeSnapshotSpacingMs(n)
+			internals.onStoreMutation(entry())
+			await settle()
+			expect(write).toHaveBeenCalledTimes(n + 1)
+		}
+		clock.t += quietMs
+		internals.onStoreMutation(entry())
+		await settle()
+		expect(write).toHaveBeenCalledTimes(7) // long past any spacing
+		return {
+			internals,
+			clock,
+			write: write as unknown as ReturnType<typeof vi.fn>,
+		}
+	}
+
+	it("backs off hole snapshots after 5 in a row; a hole 1 ms short of 10 min after the last one is the same episode", async () => {
+		const { internals, clock, write } = await streakThenQuiet(
+			HOLE_STREAK_RESET_MS - 1,
+		)
+		// Streak 7 now: 1 s x 2^(7 - 4) = 8 s.
+		internals.onStoreMutation(entry())
+		await settle()
+		clock.t += 8_000 - 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(7)
+		clock.t += 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(8)
+	})
+
+	it("a hole 10 min after the last hole snapshot starts a new episode: 1 s again", async () => {
+		const { internals, clock, write } =
+			await streakThenQuiet(HOLE_STREAK_RESET_MS)
+		internals.onStoreMutation(entry())
+		await settle()
+		clock.t += 999
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(7)
+		clock.t += 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(8) // streak 1: 1 s
+	})
+
+	it("a wall-clock step back does not delay snapshots: the cadence runs on the monotonic clock", async () => {
+		const { internals, clock } = harness()
+		const mono = { t: 5_000 }
+		internals.snapshotClock = () => mono.t
+		const write = vi
+			.spyOn(internals.persistence, "writeSnapshotOf")
+			.mockImplementation(() => Promise.resolve())
+		internals.dirty = true
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(1) // the first snapshot: at once
+		await settle()
+		clock.t -= 3_600_000 // NTP steps the wall clock back an hour
+		internals.dirty = true
+		mono.t += 10_000 - 1
+		clock.t += 10_000 - 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(1)
+		mono.t += 1
+		clock.t += 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(2) // 10 s on the monotonic clock, not 1 h 10 s
+	})
+})
+
+describe("ScannerService main-thread budget at the real fallback", () => {
+	const BUILD_MS = 2_700
+	const settle = () => new Promise<void>(resolve => setImmediate(resolve))
+
+	/** A worker that acknowledges every charged message (resets included) and never commits. */
+	function ackingWorker(): SnapshotWorkerFactory {
+		return () => {
+			let listener: ((value: unknown) => void) | null = null
+			const port: SnapshotWorkerPort = {
+				postMessage: (m: SnapshotWorkerRequest) => {
+					if (m.type === "commit") return
+					const charged = m.charged
+					setImmediate(() => listener?.({ type: "applied", charged }))
+				},
+				onMessage: l => {
+					listener = l
+				},
+				onError: () => undefined,
+				onExit: () => undefined,
+				terminate: () => Promise.resolve(0),
+			}
+			return port
+		}
+	}
+
+	it("recurring holes whose worker request overflows (maxQueuedBytes 1) keep main-thread builds at or under 10 %", async () => {
+		const { internals, clock } = harness()
+		clock.t = 10_000_000_000
+		const persistence = new ScannerPersistence({
+			dir: internals.storageDir,
+			logger: createLogger({ level: "fatal" }),
+			now: () => clock.t,
+			buildClock: () => clock.t,
+			snapshotWorker: { factory: ackingWorker(), maxQueuedBytes: 1 },
+		})
+		await persistence.load()
+		internals.persistence = persistence
+		internals.store.ingest(
+			makeObs({ id: "o1", centreHz: 446_000_000, startedAt: clock.t }),
+		)
+		const snapshot = internals.store.snapshot.bind(internals.store)
+		const builds: number[] = []
+		vi.spyOn(internals.store, "snapshot").mockImplementation(() => {
+			builds.push(clock.t)
+			clock.t += BUILD_MS // the synchronous clone + stringify holds the main thread
+			return snapshot()
+		})
+		const write = vi.spyOn(persistence, "writeSnapshotOf")
+		const warn = vi.spyOn(internals.log, "warn")
+		// Failed journal batches (no line reaches the mirror, so each reset leaves it live): every
+		// hole finds the worker live and its request overflowing to the main path.
+		vi.spyOn(persistence, "append").mockImplementation(() =>
+			Promise.reject(new WaveKitError("disk", "SCANNER_PERSIST_FAILED")),
+		)
+		const window = 60_000
+		const from = clock.t
+		try {
+			while (clock.t - from < window) {
+				internals.onStoreMutation(entry())
+				await settle()
+				internals.tick()
+				await settle()
+				clock.t += 100
+			}
+		} finally {
+			await persistence.closeSnapshotWorker()
+		}
+		expect(persistence.snapshotWorkerStatus()?.overflows).toBeGreaterThan(0)
+		// Deferred requests, not builds: the worker was asked about every second.
+		expect(write.mock.calls.length).toBeGreaterThan(builds.length)
+		// 0, 27 and 54 s: each build 2.7 s, then 9 x 2.7 s of rest.
+		expect(builds.length).toBe(3)
+		for (let i = 1; i < builds.length; i++)
+			expect((builds[i] ?? 0) - (builds[i - 1] ?? 0)).toBeGreaterThanOrEqual(
+				BUILD_MS + 24_300,
+			)
+		const busyMs = builds.length * BUILD_MS
+		expect(busyMs).toBeLessThanOrEqual(0.1 * window + BUILD_MS)
+		// A deferral is no failure: nothing warns.
+		expect(warn).not.toHaveBeenCalledWith(
+			expect.anything(),
+			"Snapshot write failed",
+		)
 	})
 })
 
