@@ -19,6 +19,7 @@ import {
 	settling,
 	shortestArc,
 	SLACK_KM,
+	SAME_FIX_MS,
 	SNAP_KM,
 	type Fix,
 	type MotionState,
@@ -510,6 +511,36 @@ describe("aircraft motion smoothing", () => {
 		// a new velocity for the accepted fix still applies
 		advance(s, fix(0, 0, T0 + 50_000, 90, 450), T0 + 51_200)
 		expect(s.vE).toBeGreaterThan(0)
+	})
+
+	it("takes a later report at the accepted position as a new fix, past SAME_FIX_MS", () => {
+		// a parked plane reporting A again 59 s on refreshes the gate's clock, so a bad fix 100 km away 1 s later is
+		// held back instead of passing the 60 s reacquire rule
+		const s = createMotion(fix(0, 0, T0, null, null), T0)
+		advance(s, fix(0, 0, T0 + 59_000, null, null), T0 + 59_000)
+		expect(s.fixAt).toBe(T0 + 59_000)
+		advance(s, fix(100, 0, T0 + 60_000, null, null), T0 + 60_000)
+		expect(s.rejected).toBe(1)
+		expect(km(s, at(0, 0))).toBeLessThan(1e-9)
+		// at SAME_FIX_MS it is the same fix re-sent (time kept); just past it, a new one
+		const t = createMotion(fix(0, 0, T0, null, null), T0)
+		advance(t, fix(0, 0, T0 + SAME_FIX_MS, 90, 450), T0 + 300)
+		expect(t.fixAt).toBe(T0)
+		advance(t, fix(0, 0, T0 + SAME_FIX_MS + 1, 90, 450), T0 + 400)
+		expect(t.fixAt).toBe(T0 + SAME_FIX_MS + 1)
+	})
+
+	it("confirms a stationary relocation with a later report at the held position", () => {
+		const s = createMotion(fix(0, 0, T0, null, null), T0)
+		advance(s, fix(200, 0, T0 + 1000, null, null), T0 + 1000)
+		expect(s.rejected).toBe(1)
+		// re-sent within SAME_FIX_MS: not a confirmation
+		advance(s, fix(200, 0, T0 + 1000 + SAME_FIX_MS, null, null), T0 + 1300)
+		expect(km(s, at(0, 0))).toBeLessThan(1e-9)
+		// a second report at the same place 1 s on: confirmed, drawn there at once
+		advance(s, fix(200, 0, T0 + 2000, null, null), T0 + 2000)
+		expect(s.rejected).toBe(1)
+		expect(km(s, at(200, 0))).toBeLessThan(1e-9)
 	})
 
 	it("confirms a held-back fix only with a newer one", () => {

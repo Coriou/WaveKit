@@ -56,6 +56,13 @@ export const SETTLE_KM = 0.001
  */
 export const SNAP_KM = 5
 
+/**
+ * A fix at the same position whose time is within this of another is the same fix re-sent (a course or speed update
+ * re-timed by when the browser received it, a few ms either side); one later than this is a new report. 250 ms is
+ * far above the receive jitter and below the ~0.5 s between an aircraft's own position messages.
+ */
+export const SAME_FIX_MS = 250
+
 /** The glyph counts as turned (settling() false) within this of the reported track. */
 export const SETTLE_DEG = 0.1
 
@@ -337,13 +344,18 @@ function retrack(
 }
 
 /**
- * A fix that is new (any change since the last one seen): accept it, hold it back, or confirm a held one. A fix is
- * told by its position alone: the time is when the browser received the message, so a course or speed update for
- * the same position comes a few ms either side of it.
+ * A fix that is new (any change since the last one seen): accept it, hold it back, or confirm a held one. A fix at
+ * the same position within SAME_FIX_MS of the accepted or held one is that fix re-sent: the time is when the browser
+ * received the message, so a course or speed update for it comes a few ms either side. A later report at the same
+ * position is a new fix (a parked plane, or the second report confirming a relocation).
  */
 function observe(s: MotionState, fix: Fix, now: number): void {
 	markSeen(s, fix)
-	if (fix.lat === s.fixLat && fix.lon === s.fixLon) {
+	if (
+		fix.lat === s.fixLat &&
+		fix.lon === s.fixLon &&
+		Math.abs(fix.posAt - s.fixAt) <= SAME_FIX_MS
+	) {
 		// a new course or speed for the accepted fix: re-extrapolate from it (at its own time), blended
 		retrack(s, fix, s.fixLat, s.fixLon, s.fixAt, now, false)
 		return
@@ -352,7 +364,10 @@ function observe(s: MotionState, fix: Fix, now: number): void {
 	if (fix.posAt <= s.fixAt) return
 	const reacquire = fix.posAt - s.fixAt >= REACQUIRE_MS
 	const held =
-		!Number.isNaN(s.candAt) && fix.lat === s.candLat && fix.lon === s.candLon
+		!Number.isNaN(s.candAt) &&
+		fix.lat === s.candLat &&
+		fix.lon === s.candLon &&
+		Math.abs(fix.posAt - s.candAt) <= SAME_FIX_MS
 	// the held-back fix re-sent (a new course or speed only) is neither another rejection nor its own confirmation
 	if (held && !reacquire) return
 	const fromAccepted = kmBetween(s.fixLat, s.fixLon, fix.lat, fix.lon)
