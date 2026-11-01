@@ -9,9 +9,11 @@ import {
 } from "../../../../src/core/scanner/store/decode-anchor.js"
 import {
 	ANCHOR_HELD_MAX,
+	CHANNEL_ANCHOR_FRESH_MS,
 	CHANNEL_OWNER_REACH_HZ,
 	DiscoveryStore,
 } from "../../../../src/core/scanner/store/discovery-store.js"
+import type { Logger } from "../../../../src/utils/logger.js"
 import { evidenceLevelOf } from "../../../../src/core/scanner/proof.js"
 import { makeObs } from "../../../mocks/scanner/observations.js"
 import type {
@@ -315,12 +317,16 @@ describe("channel anchors (ACARS, VDL2)", () => {
 		})
 	})
 
-	it("keeps one anchor per source, protocol and channel", () => {
+	it("keeps one anchor per source and channel; the other protocol is refused there", () => {
 		const s = store()
 		try {
 			const a = s.anchorDecode("rtl", CH_A, acars(), "commanded").discoveryId
 			const b = s.anchorDecode("rtl", CH_B, acars(), "commanded").discoveryId
-			const v = s.anchorDecode("rtl", CH_A, vdl2(), "commanded").discoveryId
+			// M2: the ACARS anchor owns CH_A for both protocols: a VDL2 decode there opens nothing.
+			const v = s.anchorDecode("rtl", CH_A, vdl2(), "commanded")
+			expect(v).toEqual({ discoveryId: null, change: "transient" })
+			const vb = s.anchorDecode("rtl", CH_B, vdl2(), "commanded").discoveryId
+			expect(vb).toBe(null)
 			const other = s.anchorDecode(
 				"other",
 				CH_A,
@@ -333,9 +339,10 @@ describe("channel anchors (ACARS, VDL2)", () => {
 				acars("TEST02"),
 				"commanded",
 			).discoveryId
-			expect(new Set([a, b, v, other]).size).toBe(4)
+			expect(new Set([a, b, other]).size).toBe(3)
 			expect(again).toBe(a)
-			expect(s.snapshot().discoveries).toHaveLength(4)
+			expect(s.snapshot().discoveries).toHaveLength(3)
+			expect(s.decodeAnchorFor("rtl", CH_A)?.id).toBe(a)
 		} finally {
 			s.stopAnchorExpiry()
 		}
@@ -692,8 +699,8 @@ describe("channel decode at a stored spectrum discovery", () => {
 			)
 			expect(s.snapshot().discoveries).toHaveLength(1)
 			expect(decodedAt(s)).toEqual([id])
-			// The persisted observation proof still cites the identity the record holds.
-			expect(s.get(id)!.proof!.identity!.value).toBe("TEST01")
+			// M1: the proof cites the latest checked identity on the channel, as an anchor's does.
+			expect(s.get(id)!.proof!.identity!.value).toBe("TEST02")
 		} finally {
 			s.stopAnchorExpiry()
 		}
@@ -811,15 +818,264 @@ describe("channel decode at a stored spectrum discovery", () => {
 				const id = spectrum(t, "o2", 0)
 				t.anchorDecode("rtl", CH_A, vdl2(), "commanded")
 				expect(t.get(id)!.protocol).toBe("vdl2")
+				// M2: the record decoded as VDL2 owns the channel: the ACARS decode is refused, no anchor.
 				const res = t.anchorDecode("rtl", CH_A, acars(), "commanded")
-				expect(res.discoveryId).not.toBe(id)
+				expect(res).toEqual({ discoveryId: null, change: "transient" })
 				expect(t.get(id)!.protocol).toBe("vdl2")
-				expect(anchors(t)).toHaveLength(1)
+				expect(anchors(t)).toHaveLength(0)
 			} finally {
 				t.stopAnchorExpiry()
 			}
 		} finally {
 			s.stopAnchorExpiry()
+		}
+	})
+})
+
+describe("channel ownership across protocols and anchor freshness", () => {
+	const anchors = (s: DiscoveryStore) =>
+		s.snapshot().discoveries.filter(d => d.anchor === "decode")
+	const open = (s: DiscoveryStore, id: string, at: number) =>
+		s.ingest(
+			makeObs({
+				id,
+				centreHz: CH_A + 1_000,
+				startedAt: at,
+				blocks: 2,
+				obwHz: 9_000,
+				sourceId: "rtl",
+			}),
+		)
+
+	it("M1: a spectrum owner decoded by one aircraft takes another's through applyEvidence, no co-channel twin", () => {
+		for (const [first, second] of [
+			[acars("TEST01", PAIRED_AT), acars("TEST02", PAIRED_AT + 1)],
+			[vdl2("ABC001", PAIRED_AT), vdl2("ABC002", PAIRED_AT + 1)],
+		] as const) {
+			const s = store()
+			try {
+				const id = spectrum(s, "o1", 0)
+				s.appendObservationEvidence("o1", first)
+				s.applyEvidenceResult(id, first)
+				expect(s.get(id)!.proof!.identity).toEqual(first.identity)
+				// The live placement path: the observation, then the record.
+				s.appendObservationEvidence("o1", second)
+				expect(s.applyEvidenceResult(id, second).accepted).toBe(true)
+				expect(s.snapshot().discoveries.map(d => d.id)).toEqual([id])
+				expect(decodedAt(s)).toEqual([id])
+				expect(s.get(id)!.proof!.identity).toEqual(second.identity)
+			} finally {
+				s.stopAnchorExpiry()
+			}
+		}
+	})
+
+	it("M1: other protocols keep their per-identity split", () => {
+		const s = store()
+		try {
+			const id = spectrum(s, "o1", 0)
+			const pocsag = (value: string, at: number): DecodeEvidence => ({
+				protocol: "pocsag",
+				origin: "ambient",
+				crcClean: true,
+				epoch: 1,
+				at,
+				identity: { kind: "pocsag-capcode", value },
+				metadata: {},
+			})
+			s.applyEvidenceResult(id, pocsag("1234567", PAIRED_AT))
+			s.applyEvidenceResult(id, pocsag("7654321", PAIRED_AT + 1))
+			expect(s.snapshot().discoveries).toHaveLength(2)
+		} finally {
+			s.stopAnchorExpiry()
+		}
+	})
+
+	it("M2: the other protocol is refused at an anchor and a decoded spectrum owner, logged once per owner", () => {
+		const warn = vi.fn()
+		const logger = { child: () => logger, warn } as unknown as Logger
+		let n = 0
+		const s = new DiscoveryStore({
+			maxDiscoveries: 10,
+			now: () => T0,
+			newId: () => `own${n++}`,
+			logger,
+		})
+		try {
+			const a = s.anchorDecode("rtl", CH_A, acars(), "commanded").discoveryId!
+			for (const value of ["ABC001", "ABC002"])
+				expect(
+					s.anchorDecode("rtl", CH_A + 1, vdl2(value, T0 + 1), "commanded"),
+				).toEqual({ discoveryId: null, change: "transient" })
+			expect(anchors(s).map(d => d.id)).toEqual([a])
+			expect(s.decodeAnchorFor("rtl", CH_A)?.id).toBe(a)
+			expect(warn).toHaveBeenCalledTimes(1)
+			// Only the two protocols are logged, never a decoded value or frequency.
+			expect(warn.mock.calls[0]![0]).toEqual({
+				protocol: "vdl2",
+				ownerProtocol: "acars",
+			})
+			// A spectrum owner decoded as VDL2 on CH_B's reach refuses ACARS through every path.
+			const owner = s.ingest(
+				makeObs({
+					id: "o2",
+					centreHz: CH_B,
+					startedAt: PAIRED_AT - 1_000,
+					blocks: 2,
+					obwHz: 9_000,
+					sourceId: "rtl",
+				}),
+			).discoveryId!
+			const v = vdl2("ABC001", PAIRED_AT)
+			s.appendObservationEvidence("o2", v)
+			s.applyEvidenceResult(owner, v)
+			expect(s.get(owner)).toMatchObject({
+				protocol: "vdl2",
+				confidence: "decoded",
+			})
+			const ac = acars("TEST05", PAIRED_AT + 1)
+			expect(s.appendObservationEvidence("o2", ac)).toBe(false)
+			expect(s.applyEvidenceResult(owner, ac)).toEqual({
+				change: null,
+				accepted: false,
+			})
+			expect(s.anchorDecode("rtl", CH_B, ac, "commanded").discoveryId).toBe(
+				null,
+			)
+			expect(s.snapshot().discoveries).toHaveLength(2)
+			expect(s.get(owner)!.protocol).toBe("vdl2")
+			expect(warn).toHaveBeenCalledTimes(2)
+		} finally {
+			s.stopAnchorExpiry()
+		}
+	})
+
+	it("M2: a restored (unproven) anchor of the other protocol is retaken: still one record, re-keyed", () => {
+		const original = store()
+		const restored = store()
+		const again = store()
+		try {
+			const id = original.anchorDecode(
+				"rtl",
+				CH_A,
+				acars(),
+				"commanded",
+			).discoveryId!
+			original.stopAnchorExpiry()
+			restored.restore(original.snapshot())
+			const res = restored.anchorDecode(
+				"rtl",
+				CH_A,
+				vdl2("ABC001", T0 + 1),
+				"commanded",
+			)
+			expect(res.discoveryId).toBe(id)
+			restored.stopAnchorExpiry()
+			expect(restored.snapshot().discoveries.map(d => d.id)).toEqual([id])
+			expect(restored.get(id)).toMatchObject({
+				anchor: "decode",
+				protocol: "vdl2",
+				confidence: "decoded",
+				proof: { protocol: "vdl2", identity: vdl2().identity },
+			})
+			expect(restored.decodeAnchorFor("rtl", CH_A)?.id).toBe(id)
+			// Now proven as VDL2: ACARS is refused; the re-key survives a restore.
+			expect(
+				restored.anchorDecode("rtl", CH_A, acars("TEST01", T0 + 2), "commanded")
+					.discoveryId,
+			).toBe(null)
+			again.restore(restored.snapshot())
+			expect(
+				again.anchorDecode("rtl", CH_A, vdl2("ABC002", T0 + 3), "commanded")
+					.discoveryId,
+			).toBe(id)
+			expect(again.snapshot().discoveries).toHaveLength(1)
+			// A decode older than the restored anchor's last never re-keys it.
+			const older = store()
+			try {
+				older.restore(original.snapshot())
+				expect(
+					older.anchorDecode("rtl", CH_A, vdl2("ABC001", T0 - 1), "commanded"),
+				).toEqual({ discoveryId: id, change: "transient" })
+				expect(older.snapshot().discoveries[0]!.protocol).toBe("acars")
+				expect(older.decodeAnchorFor("rtl", CH_A)?.id).toBe(id)
+			} finally {
+				older.stopAnchorExpiry()
+			}
+		} finally {
+			original.stopAnchorExpiry()
+			restored.stopAnchorExpiry()
+			again.stopAnchorExpiry()
+		}
+	})
+
+	// CHANNEL_ANCHOR_FRESH_MS = ANCHOR_AIRCRAFT_WINDOW_MS = 60 000 ms, inclusive.
+	it("M4: a proven anchor suppresses a spectrum observation for 60 000 ms after its last decode, not 60 001", () => {
+		expect(CHANNEL_ANCHOR_FRESH_MS).toBe(60_000)
+		for (const [after, suppressed] of [
+			[0, true],
+			[60_000, true],
+			[60_001, false],
+		] as const) {
+			let now = T0
+			const s = store(() => now)
+			try {
+				s.anchorDecode("rtl", CH_A, acars(), "commanded")
+				now = T0 + after
+				const res = open(s, "o1", now - 1_000)
+				if (suppressed)
+					expect(res).toEqual({ discoveryId: null, change: "transient" })
+				else expect(res.discoveryId).not.toBe(null)
+			} finally {
+				s.stopAnchorExpiry()
+			}
+		}
+	})
+
+	it("M4: a restored (unproven) anchor never suppresses an independent signal", () => {
+		const original = store()
+		const restored = store()
+		try {
+			original.anchorDecode("rtl", CH_A, acars(), "commanded")
+			original.stopAnchorExpiry()
+			restored.restore(original.snapshot())
+			expect(open(restored, "o1", T0 - 1_000).discoveryId).not.toBe(null)
+		} finally {
+			original.stopAnchorExpiry()
+			restored.stopAnchorExpiry()
+		}
+	})
+
+	it("M4: once the stale anchor is proven again it keeps the channel: one decoded record", () => {
+		for (const ev of [acars(), vdl2()]) {
+			let now = T0
+			const s = store(() => now)
+			try {
+				const anchorId = s.anchorDecode(
+					"rtl",
+					CH_A,
+					ev,
+					"commanded",
+				).discoveryId!
+				now = T0 + 60_001
+				const spectrumId = open(s, "o1", now - 1_000).discoveryId!
+				expect(spectrumId).not.toBe(null)
+				// The next confirmed decode re-proves the anchor, not the spectrum record.
+				const next = { ...ev, at: now }
+				expect(s.anchorDecode("rtl", CH_A, next, "commanded").discoveryId).toBe(
+					anchorId,
+				)
+				// A placement on the spectrum record is the anchor's too: refused there.
+				s.appendObservationEvidence("o1", next)
+				expect(s.applyEvidenceResult(spectrumId, next).accepted).toBe(false)
+				s.stopAnchorExpiry()
+				expect(decodedAt(s)).toEqual([anchorId])
+				// A further spectrum observation lands on the spectrum record, never decoding it.
+				open(s, "o2", now)
+				expect(decodedAt(s)).toEqual([anchorId])
+			} finally {
+				s.stopAnchorExpiry()
+			}
 		}
 	})
 })
@@ -1020,7 +1276,7 @@ describe("channel anchor publication and restore", () => {
 		}
 	})
 
-	it("names the one channel anchor at a point target, and none for both protocols at once", () => {
+	it("names the one channel anchor at a point target; the other protocol never opens a second", () => {
 		const s = store()
 		try {
 			const a = s.anchorDecode("rtl", CH_A, acars(), "commanded").discoveryId
@@ -1028,8 +1284,10 @@ describe("channel anchor publication and restore", () => {
 			expect(s.decodeAnchorFor("rtl", CH_A + 0.4)?.id).toBe(a)
 			expect(s.decodeAnchorFor("rtl", CH_B)).toBeUndefined()
 			expect(s.decodeAnchorFor("other", CH_A)).toBeUndefined()
-			s.anchorDecode("rtl", CH_A, vdl2(), "commanded")
-			expect(s.decodeAnchorFor("rtl", CH_A)).toBeUndefined()
+			expect(s.anchorDecode("rtl", CH_A, vdl2(), "commanded").discoveryId).toBe(
+				null,
+			)
+			expect(s.decodeAnchorFor("rtl", CH_A)?.id).toBe(a)
 		} finally {
 			s.stopAnchorExpiry()
 		}

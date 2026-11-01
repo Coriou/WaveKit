@@ -1,11 +1,19 @@
 import { EventEmitter } from "node:events"
 import { rmSync } from "node:fs"
+import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
 import { makeObs } from "../../../mocks/scanner/observations.js"
 import type { LiveObservation } from "../../../../src/core/scanner/job-runner.js"
-import type { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
+import {
+	CHANNEL_OWNER_REACH_HZ,
+	type DiscoveryStore,
+} from "../../../../src/core/scanner/store/discovery-store.js"
+import type {
+	DecodeEvidence,
+	Identity,
+} from "../../../../src/core/scanner/types.js"
 import type { DecoderConfig } from "../../../../src/decoders/types.js"
 
 /**
@@ -23,8 +31,10 @@ interface Case {
 	channelHz: number
 	/** The placement's channel; dumpvdl2 decimates a span centred between its channels. */
 	placedHz: number
-	identity: { kind: string; value: string }
-	data: (n: number) => Record<string, unknown>
+	identity: Identity
+	/** Another aircraft on the same channel. */
+	otherIdentity: Identity
+	data: (n: number, value?: string) => Record<string, unknown>
 	unclean: (n: number) => Record<string, unknown>
 }
 
@@ -36,12 +46,13 @@ const CASES: Case[] = [
 		channelHz: ACARS_HZ,
 		placedHz: ACARS_HZ,
 		identity: { kind: "acars-reg", value: "TEST01" },
+		otherIdentity: { kind: "acars-reg", value: "TEST02" },
 		// acarsdec reading channel audio prints no frequency: the placement names the channel.
-		data: n => ({
+		data: (n, value = "TEST01") => ({
 			frequency: 0,
 			error: 0,
 			errorKnown: true,
-			tail: ".TEST01",
+			tail: `.${value}`,
 			label: "H1",
 			msgno: `M0${n}A`,
 			text: `SYNTHETIC ${n}`,
@@ -62,9 +73,10 @@ const CASES: Case[] = [
 		channelHz: VDL2_HZ,
 		placedHz: VDL2_HZ - 25_000,
 		identity: { kind: "vdl2-addr", value: "ABC001" },
-		data: n => ({
+		otherIdentity: { kind: "vdl2-addr", value: "ABC002" },
+		data: (n, value = "ABC001") => ({
 			frequency: VDL2_HZ,
-			fromaddr: "abc001",
+			fromaddr: value.toLowerCase(),
 			toaddr: "100001",
 			msgType: "acars",
 			acars: {
@@ -492,4 +504,473 @@ it("an ACARS message without a printed error count (unknown CRC status) never di
 	} finally {
 		await r.stop()
 	}
+})
+
+/** The service internals the ownership tests drive beyond the rig's. */
+interface Owned {
+	ambient: EventEmitter
+	deps: { iqCapture?: unknown }
+	onAmbientEvidence(e: {
+		decoderId: string
+		sourceId: string
+		hz: number
+		ev: DecodeEvidence
+		placement?: { sourceId: string; channelHz: number | null }
+	}): void
+}
+
+/** A confirmed (identity, CRC-clean) live decode of either channel protocol at `hz`. */
+function confirmed(
+	protocol: "acars" | "vdl2",
+	n: number,
+	at: number,
+): DecodeEvidence {
+	return {
+		protocol,
+		origin: "ambient",
+		crcClean: true,
+		epoch: 1,
+		at,
+		identity:
+			protocol === "acars"
+				? { kind: "acars-reg", value: `TEST0${n}` }
+				: { kind: "vdl2-addr", value: `ABC00${n}` },
+		metadata: {},
+	}
+}
+
+/** Records of the source within the channel's 4 000 Hz reach that publish decoded. */
+function decodedNear(store: DiscoveryStore, hz: number): string[] {
+	return store
+		.snapshot()
+		.discoveries.filter(
+			d =>
+				Math.abs(d.frequencyHz - hz) < CHANNEL_OWNER_REACH_HZ &&
+				store.get(d.id)?.confidence === "decoded",
+		)
+		.map(d => d.id)
+		.sort()
+}
+
+describe.each(CASES)("$decoder channel ownership at a placed discovery", c => {
+	it("M1: another aircraft at a discovery-backed placement keeps one record, its proof citing the latest", async () => {
+		const r = await rig(c)
+		try {
+			const id = r.place("o_backed", true)!
+			r.send(c.data(1))
+			r.send(c.data(2))
+			expect(r.internal.store.get(id)).toMatchObject({
+				confidence: "decoded",
+				proof: { kind: "decoded", identity: c.identity },
+			})
+			r.send(c.data(3, c.otherIdentity.value))
+			r.send(c.data(4, c.otherIdentity.value))
+			expect(r.discoveries().map(d => d.id)).toEqual([id])
+			expect(decodedNear(r.internal.store, c.channelHz)).toEqual([id])
+			expect(r.internal.store.get(id)).toMatchObject({
+				protocol: c.protocol,
+				confidence: "decoded",
+				proof: {
+					kind: "decoded",
+					protocol: c.protocol,
+					identity: c.otherIdentity,
+				},
+			})
+			// The first aircraft again: still the one record, the proof follows it.
+			r.send(c.data(5))
+			r.send(c.data(6))
+			expect(r.discoveries().map(d => d.id)).toEqual([id])
+			expect(r.internal.store.get(id)!.proof!.identity).toEqual(c.identity)
+		} finally {
+			await r.stop()
+		}
+	})
+
+	it("M2: a decode of the other protocol at a placed discovery decoded as this one is refused", async () => {
+		const r = await rig(c)
+		try {
+			const id = r.place("o_backed", true)!
+			r.send(c.data(1))
+			r.send(c.data(2))
+			const other = c.protocol === "acars" ? "vdl2" : "acars"
+			const internal = r.internal as unknown as Owned
+			internal.onAmbientEvidence({
+				decoderId: "synthetic",
+				sourceId: "rtl",
+				hz: c.channelHz,
+				ev: confirmed(other, 9, r.clock.at),
+				placement: { sourceId: "rtl", channelHz: c.channelHz },
+			})
+			expect(r.discoveries().map(d => d.id)).toEqual([id])
+			expect(r.internal.store.get(id)).toMatchObject({
+				protocol: c.protocol,
+				confidence: "decoded",
+				proof: { protocol: c.protocol, identity: c.identity },
+			})
+			const observation = r.internal.store
+				.snapshot()
+				.observations.find(o => o.id === "o_backed")!
+			expect(
+				(observation.decode ?? []).filter(ev => ev.protocol === other),
+			).toEqual([])
+		} finally {
+			await r.stop()
+		}
+	})
+
+	it("M2: a decode of the other protocol at a channel anchor is refused, the anchor keeps the channel", async () => {
+		const r = await rig(c)
+		try {
+			r.send(c.data(1))
+			r.send(c.data(2))
+			const [anchor] = r.discoveries()
+			expect(anchor).toMatchObject({ anchor: "decode", protocol: c.protocol })
+			const other = c.protocol === "acars" ? "vdl2" : "acars"
+			const internal = r.internal as unknown as Owned
+			// Unplaced, then observation-only and discovery-backed placements alike.
+			internal.onAmbientEvidence({
+				decoderId: "synthetic",
+				sourceId: "rtl",
+				hz: c.channelHz,
+				ev: confirmed(other, 9, r.clock.at),
+			})
+			r.place("o_only", false)
+			internal.onAmbientEvidence({
+				decoderId: "synthetic",
+				sourceId: "rtl",
+				hz: c.channelHz,
+				ev: confirmed(other, 8, r.clock.at + 1),
+			})
+			expect(r.discoveries().map(d => d.id)).toEqual([anchor!.id])
+			expect(r.internal.store.decodeAnchorFor("rtl", c.channelHz)?.id).toBe(
+				anchor!.id,
+			)
+		} finally {
+			await r.stop()
+		}
+	})
+
+	it("M3: a discovery-backed placement re-reads trust at the decode's placement and refuses when untrusted", async () => {
+		const r = await rig(c)
+		try {
+			const id = r.place("o_backed", true)!
+			const internal = r.internal as unknown as Owned
+			let confirmedSeen = 0
+			// Acceptance read trust as commanded; the tuning moved before the decode is placed.
+			internal.ambient.prependListener(
+				"evidence",
+				(e: { ev: DecodeEvidence }) => {
+					if (e.ev.identity === undefined) return
+					confirmedSeen += 1
+					r.trust.value = "unverified"
+				},
+			)
+			r.send(c.data(1))
+			r.send(c.data(2))
+			expect(confirmedSeen).toBeGreaterThan(0)
+			expect(r.discoveries().map(d => d.id)).toEqual([id])
+			expect(r.internal.store.get(id)!.confidence).not.toBe("decoded")
+			// The observation holds no checked identity either (only the lone first message).
+			expect(
+				(
+					r.internal.store
+						.snapshot()
+						.observations.find(o => o.id === "o_backed")!.decode ?? []
+				).filter(ev => ev.identity !== undefined),
+			).toEqual([])
+			// The re-read named the decode's placement.
+			expect(r.trustCalls.at(-1)).toEqual([
+				"synthetic",
+				c.placedHz,
+				"rtl",
+				{ sourceId: "rtl", channelHz: c.placedHz },
+			])
+		} finally {
+			await r.stop()
+		}
+	})
+
+	it("M3: a replayed decode at a discovery-backed placement from an untrusted capture proves nothing", async () => {
+		const r = await rig(c)
+		try {
+			const id = r.place("o_backed", true)!
+			const internal = r.internal as unknown as Owned
+			const capture = { trust: "unverified" as "commanded" | "unverified" }
+			internal.deps.iqCapture = {
+				view: () => ({
+					captureId: "cap-1",
+					sourceId: "rtl",
+					observationId: "o_backed",
+					epoch: 1,
+					rfHz: c.channelHz,
+					tuningTrust: capture.trust,
+					capturedAtMs: r.clock.at,
+					durationMs: 500,
+					gapSamples: 0,
+				}),
+			}
+			const replay = (captureId: string) =>
+				r.h.service.applyReplayResult({
+					captureId,
+					sourceId: "rtl",
+					observationId: "o_backed",
+					epoch: 1,
+					rfHz: c.channelHz,
+					trials: [
+						{
+							protocol: c.protocol,
+							decoderType: c.decoder,
+							known: true,
+							outcome: "decoded",
+						},
+					],
+					decoded: { protocol: c.protocol, identity: c.identity },
+				})
+			replay("cap-1")
+			expect(r.internal.store.get(id)!.confidence).not.toBe("decoded")
+			expect(r.discoveries().map(d => d.id)).toEqual([id])
+			capture.trust = "commanded"
+			replay("cap-2")
+			expect(r.internal.store.get(id)).toMatchObject({
+				confidence: "decoded",
+				proof: { identity: c.identity },
+			})
+		} finally {
+			await r.stop()
+		}
+	})
+})
+
+describe.each(CASES)("$decoder replay at an anchor-owned channel", c => {
+	it("a replay on an observation with its own spectrum record goes to the channel's anchor", async () => {
+		const r = await rig(c)
+		try {
+			r.send(c.data(1))
+			r.send(c.data(2))
+			const [anchor] = r.discoveries()
+			expect(anchor).toMatchObject({ anchor: "decode", protocol: c.protocol })
+			// The anchor is stale by the store's clock (its decodes are at the rig's): a record opens.
+			const id = r.place("o_backed", true)!
+			const internal = r.internal as unknown as Owned
+			internal.deps.iqCapture = {
+				view: () => ({
+					captureId: "cap-1",
+					sourceId: "rtl",
+					observationId: "o_backed",
+					epoch: 1,
+					rfHz: c.channelHz,
+					tuningTrust: "commanded",
+					capturedAtMs: r.clock.at,
+					durationMs: 500,
+					gapSamples: 0,
+				}),
+			}
+			r.h.service.applyReplayResult({
+				captureId: "cap-1",
+				sourceId: "rtl",
+				observationId: "o_backed",
+				epoch: 1,
+				rfHz: c.channelHz,
+				trials: [
+					{
+						protocol: c.protocol,
+						decoderType: c.decoder,
+						known: true,
+						outcome: "decoded",
+					},
+				],
+				decoded: { protocol: c.protocol, identity: c.otherIdentity },
+			})
+			r.internal.store.stopAnchorExpiry()
+			expect(r.internal.store.get(id)!.confidence).not.toBe("decoded")
+			expect(decodedNear(r.internal.store, c.channelHz)).toEqual([anchor!.id])
+			expect(r.internal.store.get(anchor!.id)!.proof).toMatchObject({
+				transport: "replay",
+				identity: c.otherIdentity,
+			})
+		} finally {
+			await r.stop()
+		}
+	})
+})
+
+interface ReplayStep {
+	k: "replay"
+	protocol: "acars" | "vdl2"
+	n: number
+	onLive: boolean
+}
+
+describe("one owner per channel through the service", () => {
+	type Step =
+		| { k: "open"; backed: boolean }
+		| { k: "close" }
+		| { k: "live"; protocol: "acars" | "vdl2"; n: number }
+		| ReplayStep
+	const protocol = fc.constantFrom<"acars" | "vdl2">("acars", "vdl2")
+	const n = fc.integer({ min: 1, max: 3 })
+	const step: fc.Arbitrary<Step> = fc.oneof(
+		fc.record({ k: fc.constant("open" as const), backed: fc.boolean() }),
+		fc.constant({ k: "close" as const }),
+		fc.record({ k: fc.constant("live" as const), protocol, n }),
+		fc.record({
+			k: fc.constant("replay" as const),
+			protocol,
+			n,
+			onLive: fc.boolean(),
+		}),
+	)
+	const c = CASES[0]!
+
+	// Feature: ACARS and VDL2 channel identity, Property 3: one owner per channel through the service
+	// Validates: M1 (another aircraft at a discovery-backed placement never splits the record), M2
+	// (one owner per source and channel across ACARS and VDL2), M4 (a stale anchor lets a spectrum
+	// record open, and the one-owner rule holds when the anchor is next proven), live ambient and
+	// replayed decodes alike
+	it("any interleaving of placements, aircraft and protocols ends with exactly one decoded record (property)", async () => {
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(fc.tuple(step, fc.integer({ min: 0, max: 90_000 })), {
+					maxLength: 14,
+				}),
+				async steps => {
+					const r = await rig(c)
+					const internal = r.internal as unknown as Owned
+					// The store's freshness clock is the rig's (a stale anchor needs > 60 000 ms).
+					;(r.internal.store as unknown as { now: () => number }).now = () =>
+						r.clock.at
+					internal.deps.iqCapture = {
+						view: (captureId: string) => ({
+							captureId,
+							sourceId: "rtl",
+							observationId: null,
+							epoch: 1,
+							rfHz: c.channelHz,
+							tuningTrust: "commanded",
+							capturedAtMs: r.clock.at,
+							durationMs: 500,
+							gapSamples: 0,
+						}),
+					}
+					const opened: string[] = []
+					let seq = 0
+					const claims = () => decodedNear(r.internal.store, c.channelHz)
+					try {
+						for (const [st, dt] of steps) {
+							r.clock.at += dt
+							if (st.k === "open") {
+								const id = `o${seq++}`
+								let backed = st.backed
+								if (backed) {
+									try {
+										r.place(id, true)
+									} catch {
+										// A fresh anchor keeps the record from opening: observation-only.
+										backed = false
+									}
+								}
+								if (!backed) r.place(id, false)
+								opened.push(id)
+							} else if (st.k === "close") {
+								const id = opened.shift()
+								if (id !== undefined) r.unplace(id)
+							} else if (st.k === "live") {
+								internal.onAmbientEvidence({
+									decoderId: "synthetic",
+									sourceId: "rtl",
+									hz: c.channelHz,
+									ev: confirmed(st.protocol, st.n, r.clock.at),
+									placement: { sourceId: "rtl", channelHz: c.channelHz },
+								})
+							} else {
+								const observationId = st.onLive
+									? (opened.at(-1) ?? `o_gone${seq++}`)
+									: `o_gone${seq++}`
+								r.h.service.applyReplayResult({
+									captureId: `cap${seq++}`,
+									sourceId: "rtl",
+									observationId,
+									epoch: 1,
+									rfHz: c.channelHz + 1_500,
+									trials: [
+										{
+											protocol: st.protocol,
+											decoderType:
+												st.protocol === "acars" ? "acarsdec" : "dumpvdl2",
+											known: true,
+											outcome: "decoded",
+										},
+									],
+									decoded: {
+										protocol: st.protocol,
+										identity: confirmed(st.protocol, st.n, 0).identity!,
+									},
+								})
+							}
+							expect(claims().length).toBeLessThanOrEqual(1)
+						}
+						// A last decode of the channel's protocol (the owner's, else ACARS) proves its owner.
+						r.clock.at += 1
+						const [owner] = claims()
+						const last =
+							owner === undefined
+								? "acars"
+								: (r.internal.store.get(owner)!.protocol as "acars" | "vdl2")
+						internal.onAmbientEvidence({
+							decoderId: "synthetic",
+							sourceId: "rtl",
+							hz: c.channelHz,
+							ev: confirmed(last, 3, r.clock.at),
+							placement: { sourceId: "rtl", channelHz: c.channelHz },
+						})
+						r.internal.store.stopAnchorExpiry()
+						const owners = claims()
+						expect(owners).toHaveLength(1)
+						expect(r.internal.store.get(owners[0]!)).toMatchObject({
+							confidence: "decoded",
+							evidenceLevel: "proven",
+							proof: { kind: "decoded", protocol: last },
+						})
+					} finally {
+						await r.stop()
+					}
+				},
+			),
+			{
+				numRuns: 100,
+				examples: [
+					// M2: an ACARS anchor, then a VDL2 decode at its channel.
+					[
+						[
+							[{ k: "live", protocol: "acars", n: 1 }, 0],
+							[{ k: "live", protocol: "vdl2", n: 1 }, 0],
+						],
+					],
+					// M1: a discovery-backed placement, then another aircraft (the last decode's).
+					[
+						[
+							[{ k: "open", backed: true }, 0],
+							[{ k: "live", protocol: "acars", n: 1 }, 0],
+						],
+					],
+					// M4: an anchor gone stale, a spectrum record opening, the anchor proven again.
+					[
+						[
+							[{ k: "live", protocol: "acars", n: 1 }, 0],
+							[{ k: "open", backed: true }, 60_001],
+							[{ k: "live", protocol: "acars", n: 2 }, 0],
+						],
+					],
+					// Replays of both protocols at a discovery-backed placement.
+					[
+						[
+							[{ k: "open", backed: true }, 0],
+							[{ k: "replay", protocol: "vdl2", n: 1, onLive: true }, 0],
+							[{ k: "replay", protocol: "acars", n: 2, onLive: true }, 0],
+						],
+					],
+				],
+			},
+		)
+	}, 600_000)
 })
