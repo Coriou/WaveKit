@@ -5,6 +5,8 @@ import {
 	hostStarvedAt,
 	lossCause,
 	ownLoss,
+	probationLoss,
+	SUSTAINED_DROP_GAP_MS,
 } from "../../../../src/decoders/enablement/host-starvation.js"
 import {
 	EFFICIENCY_RETRY_MAX_MS,
@@ -72,6 +74,23 @@ describe("host-starvation classifier", () => {
 		[2_000 + HOST_STARVATION_WINDOW_MS, true],
 	])("a drop is judged only once settled (sampled at %i): %s", (at, judged) => {
 		expect(ownLoss([drop(2_000, ["r"])], "r", 0, Infinity, at)).toBe(judged)
+	})
+
+	it("probation: a lone drop is pending until settled, adjacent drops are its own", () => {
+		const lone = [drop(2_000, ["r"])]
+		expect(probationLoss(lone, "r", 0, Infinity, 2_000)).toBe("pending")
+		expect(
+			probationLoss(lone, "r", 0, Infinity, 2_000 + HOST_STARVATION_WINDOW_MS),
+		).toBe("own")
+		expect(SUSTAINED_DROP_GAP_MS).toBe(4_000)
+		const adjacent = [drop(2_000, ["r"]), drop(4_000, ["r"])]
+		expect(probationLoss(adjacent, "r", 0, Infinity, 4_000)).toBe("own")
+		const apart = [drop(2_000, ["r"]), drop(8_000, ["r"])]
+		expect(probationLoss(apart, "r", 0, Infinity, 8_000)).toBe("pending")
+		// A sibling in the next sample explains it: never its own.
+		const host = [drop(2_000, ["r"]), drop(4_000, [LIVE])]
+		expect(probationLoss(host, "r", 0, Infinity, 40_000)).toBeNull()
+		expect(probationLoss([], "r", 0, Infinity, 40_000)).toBeNull()
 	})
 
 	it("no drops: no cause", () => {
@@ -160,13 +179,71 @@ describe("gate: host starvation never sheds the tuned decoder", () => {
 	it("a tuned probationer is not shed by host loss and graduates once it ends", () => {
 		const h = starvationHarness()
 		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
-		// Probation judges each drop on the evidence known then, so live
-		// audio congests first: readsb's branch alone first would be its own.
+		// readsb's branch congests first, live audio in the next sample: its
+		// lone drop settles as host loss once the next sample is known.
 		for (let i = 0; i < 10; i++)
-			h.tick([i % 2 === 0 ? LIVE : h.branch("readsb")])
+			h.tick([i % 2 === 0 ? h.branch("readsb") : LIVE])
 		expect(h.shed).toEqual([])
 		h.clean(32_000)
 		expect(h.probation("readsb")).toBe(false)
+	})
+
+	it("a tuned probationer hit before live audio in the next sample is not shed", () => {
+		const h = starvationHarness()
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		h.tick()
+		h.tick([h.branch("readsb")])
+		h.tick([LIVE])
+		h.clean(40_000)
+		expect(h.shed).toEqual([])
+		expect(h.probation("readsb")).toBe(false)
+	})
+
+	it("a tuned probationer's lone drop with every sibling flowing sheds it once settled", () => {
+		const h = starvationHarness()
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		h.tick()
+		h.tick([h.branch("readsb")])
+		const at = h.mono()
+		h.clean(HOST_STARVATION_WINDOW_MS)
+		expect(h.shed).toEqual([
+			{ key: "readsb", detail: "drops", at: at + HOST_STARVATION_WINDOW_MS },
+		])
+	})
+
+	it("graduation waits while a tuned probationer's drop is settling", () => {
+		const h = starvationHarness()
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		// A lone drop 28 s in: the probation would otherwise end at 34 s.
+		h.clean(28_000)
+		h.tick([h.branch("readsb")])
+		const at = h.mono()
+		h.clean(HOST_STARVATION_WINDOW_MS - SAMPLE_MS)
+		expect(h.probation("readsb")).toBe(true)
+		expect(h.shed).toEqual([])
+		h.tick()
+		expect(h.shed).toEqual([
+			{ key: "readsb", detail: "drops", at: at + HOST_STARVATION_WINDOW_MS },
+		])
+	})
+
+	it("hostBusy holds from the latest host loss, not a later lone branch's loss", () => {
+		const h = starvationHarness()
+		h.start("readsb", true)
+		h.tick([h.branch("readsb"), LIVE])
+		const hostAt = h.mono()
+		h.clean(12_000)
+		// Live audio alone, past the host loss's window: not host loss itself.
+		h.tick([LIVE])
+		expect(h.gate.hostBusy?.("a")).toMatchObject({
+			cause: "host",
+			congestedBranches: 2,
+		})
+		h.clean(hostAt + HOST_BUSY_HOLD_MS - h.mono())
+		expect(h.mono()).toBe(hostAt + HOST_BUSY_HOLD_MS)
+		expect(h.gate.hostBusy?.("a")?.cause).toBe("host")
+		h.tick()
+		expect(h.gate.hostBusy?.("a")).toBeNull()
 	})
 
 	it("hostBusy holds 60 000 ms after the latest host loss, then clears", () => {

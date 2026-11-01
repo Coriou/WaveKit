@@ -1,6 +1,6 @@
 import type { DecoderLossCause } from "@wavekit/api-types"
 import type { ChargedDrop } from "./contract.js"
-import { EFFICIENCY_DROP_WINDOW_MS } from "./contract.js"
+import { EFFICIENCY_DROP_WINDOW_MS, EFFICIENCY_SAMPLE_MS } from "./contract.js"
 
 /**
  * Loss attribution for the tuned decoder: whose loss a drop on its branch was.
@@ -80,9 +80,7 @@ export function hostExplained(
  * sibling's congestion in the samples just after it is known (10 000 ms = 5
  * samples later, inclusive). The late-drop path of a graduated decoder passes
  * it: that shed already needs sustained windows, so waiting costs nothing.
- * Probation does not: a newcomer's drop on its own branch while its siblings
- * flowed and the host was healthy is its own loss at once (the evidence known
- * then; a sibling or host sample already in the window still explains it).
+ * Probation judges with probationLoss (below).
  */
 export function ownLoss(
 	drops: readonly ChargedDrop[],
@@ -100,6 +98,52 @@ export function ownLoss(
 			(branch === undefined || d.branches.includes(branch)) &&
 			!hostExplained(drops, d),
 	)
+}
+
+/**
+ * Adjacent samples: two drops this close are one sustained run. One sample
+ * period plus one for a late sample, 4000 ms.
+ */
+export const SUSTAINED_DROP_GAP_MS = 2 * EFFICIENCY_SAMPLE_MS
+
+/**
+ * A probationer's own loss within [from, to] (see ownLoss), judged on the
+ * evidence known at `sampledAt`, the latest sample: "own" once a drop on its
+ * branch that host starvation does not explain is settled (HOST_STARVATION_
+ * WINDOW_MS, 10 000 ms, after it, so a sibling's congestion in the samples
+ * just after it is known), or at once when its branch drops in two adjacent
+ * samples (within SUSTAINED_DROP_GAP_MS) while every sibling flowed and the
+ * host stayed healthy: sustained loss of its own. "pending" while such a
+ * drop is neither, so graduation waits for it; null without one.
+ *
+ * One sample cannot tell its own loss from a host episode that reaches a
+ * sibling in the next sample: a lone drop always waits for its window.
+ */
+export function probationLoss(
+	drops: readonly ChargedDrop[],
+	branch: string | undefined,
+	from: number,
+	to: number,
+	sampledAt: number,
+): "own" | "pending" | null {
+	const own = drops
+		.filter(
+			d =>
+				d.atMono >= from &&
+				d.atMono <= to &&
+				d.branches !== "source" &&
+				(branch === undefined || d.branches.includes(branch)) &&
+				!hostExplained(drops, d),
+		)
+		.map(d => d.atMono)
+		.sort((a, b) => a - b)
+	if (own.length === 0) return null
+	if (own[0]! + HOST_STARVATION_WINDOW_MS <= sampledAt) return "own"
+	for (let i = 1; i < own.length; i++) {
+		const gap = own[i]! - own[i - 1]!
+		if (gap > 0 && gap <= SUSTAINED_DROP_GAP_MS) return "own"
+	}
+	return "pending"
 }
 
 /**

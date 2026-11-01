@@ -37,6 +37,9 @@ export function toApiDecoderStatus(
 		...(status.efficiency !== undefined
 			? { efficiency: { ...status.efficiency } }
 			: {}),
+		...(status.hostBusy !== undefined
+			? { hostBusy: { ...status.hostBusy } }
+			: {}),
 		id: status.id,
 		type: status.type,
 		running: status.running,

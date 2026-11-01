@@ -108,8 +108,17 @@ export const decoderStatusExtensionProperties = {
 		properties: {
 			detail: efficiencyDetail,
 			retryAt: { type: "string", format: "date-time" },
+			cause: { type: "string", enum: ["host", "decoder"] },
 		},
 		required: ["detail"],
+	},
+	hostBusy: {
+		type: "object",
+		properties: {
+			congestedBranches: { type: "integer", minimum: 0 },
+			loopLagP99Ms: { type: ["number", "null"], minimum: 0 },
+		},
+		required: ["congestedBranches", "loopLagP99Ms"],
 	},
 	rateHistory: {
 		type: "array",

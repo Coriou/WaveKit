@@ -940,15 +940,19 @@ not its own, when within 10 seconds either side of it (one late-drop window, 5 s
 2 seconds) another fanout branch also dropped (live audio included, even in a different
 sample) or the sample was attributed to the host (event-loop delay of 50 ms or more, or
 host CPU at the guard). A running decoder's late drops are judged only once those
-10 seconds have been sampled; a decoder still on probation is judged on what is known
-at its drop, so its own branch dropping alone while the others flow stops it at once.
+10 seconds have been sampled. On probation, a single drop also waits those 10 seconds
+(its probation does not end before then), since a host episode can reach another branch
+in the next sample; its own branch dropping alone in two samples in a row, while the
+others flow and the host is healthy, stops it at once.
 Host loss may still stop other automatic decoders, newest first, but never the tuned one,
 and it does not keep the tuned decoder from starting again. Only its own sustained loss
 (its branch congested while the other branches flowed) stops it, and then it is tried
 again after 30 seconds, doubling per consecutive stop to a 4-minute cap (30 s, 60 s,
 120 s, 240 s); that history resets after 4 minutes of running without a stop. Starting
 it yourself (`POST /api/decoders/:id/start`) clears such a stop at once and re-admits it
-on probation. While the host is starved, and for 60 seconds after its last host loss, the
+on probation: that run is judged like an automatic start, so its own loss can stop it
+again, until you stop it. While the host is starved, and for 60 seconds after its last
+host loss (a later drop on one branch alone does not end it), the
 decoder status carries `hostBusy` and the verdicts read "host busy: samples were dropped
 for every decoder" without suggesting a lower sample rate. The "Late drops shed a decoder"
 and "Decoder suspension changed" log lines carry `cause` (`host` or `decoder`),

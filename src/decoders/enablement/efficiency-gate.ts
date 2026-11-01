@@ -37,6 +37,7 @@ import {
 	hostExplained,
 	lossCause,
 	ownLoss,
+	probationLoss,
 } from "./host-starvation.js"
 import type { LossAttribution } from "./host-starvation.js"
 
@@ -359,6 +360,47 @@ export function createEfficiencyGate(
 			loopLagMaxMs: loop === null ? null : Math.round(loop.maxMs),
 		}
 	}
+	/** Per source: the latest host-explained loss seen, and its congested branches. */
+	const hostLoss = new Map<string, { atMono: number; branches: number }>()
+	/**
+	 * The source's host loss when its latest host-explained loss (a drop that
+	 * host starvation explains, host-starvation.ts) is at most
+	 * HOST_BUSY_HOLD_MS (60 000 ms) before `mono`, else null. Held from that
+	 * loss, not the latest loss: a lone branch's drop after it does not end
+	 * the hold. The latest one is kept, so it outlives the drop history.
+	 */
+	const hostBusyAt = (
+		sourceId: string,
+		mono: number,
+	): LossAttribution | null => {
+		if (!valid(mono)) return null
+		const drops =
+			chargedDrops(
+				sourceId,
+				mono - HOST_BUSY_HOLD_MS - HOST_STARVATION_WINDOW_MS,
+				mono,
+			) ?? []
+		let latest = hostLoss.get(sourceId)
+		for (const d of drops)
+			if (
+				d.atMono >= mono - HOST_BUSY_HOLD_MS &&
+				d.atMono <= mono &&
+				(latest === undefined || d.atMono > latest.atMono) &&
+				hostExplained(drops, d)
+			)
+				latest = {
+					atMono: d.atMono,
+					branches: lossCause(drops, d.atMono)?.congestedBranches ?? 0,
+				}
+		if (latest === undefined) return null
+		hostLoss.set(sourceId, latest)
+		if (mono - latest.atMono > HOST_BUSY_HOLD_MS || latest.atMono > mono)
+			return null
+		return {
+			...attributionAt(sourceId, mono, HOST_BUSY_HOLD_MS, "host"),
+			congestedBranches: latest.branches,
+		}
+	}
 	/**
 	 * Drops or CPU over the limit observed in [admitted, until]. Drops judge a
 	 * placement only when charged to the branch it reads (or the source as a
@@ -368,6 +410,20 @@ export function createEfficiencyGate(
 	 * branch, or a reader without branch evidence, is judged by every drop on the source: probation fails closed
 	 * where it cannot tell whose loss it was.
 	 */
+	/** A tuned placement's own loss in [from, until] (probationLoss), on the latest sample. */
+	const tunedLoss = (
+		p: RunningPlacement,
+		from: number,
+		until = Infinity,
+	): "own" | "pending" | null => {
+		const drops = chargedDrops(
+			p.sourceId,
+			from - HOST_STARVATION_WINDOW_MS,
+			until + HOST_STARVATION_WINDOW_MS,
+		)
+		if (drops === null) return null
+		return probationLoss(drops, p.inputBranch, from, until, sampledMono())
+	}
 	const evidence = (
 		p: RunningPlacement,
 		admitted: number,
@@ -380,19 +436,10 @@ export function createEfficiencyGate(
 			// Tuned band: only its own loss judges it. A drop on its branch that
 			// host starvation explains (host-starvation.ts, read over the window
 			// either side) is every decoder's loss, and shedding cures none.
-			// Judged on the evidence known now (no settling): a probationer
-			// whose own branch drops while its siblings flow cannot keep up.
+			// Settled on the latest sample (probationLoss): a lone drop waits
+			// for its window, two adjacent ones are sustained loss of its own.
 			if (charged !== null && p.tunedBand === true)
-				dropped = ownLoss(
-					chargedDrops(
-						p.sourceId,
-						admitted - HOST_STARVATION_WINDOW_MS,
-						until + HOST_STARVATION_WINDOW_MS,
-					) ?? charged,
-					p.inputBranch,
-					admitted,
-					until,
-				)
+				dropped = tunedLoss(p, admitted, until) === "own"
 			else if (charged !== null)
 				dropped = charged.some(
 					d =>
@@ -445,10 +492,13 @@ export function createEfficiencyGate(
 		if (graduated.has(p.key)) return true
 		const at = graduationAt(p, mono)
 		const admitted = admittedMono.get(p.key)!
+		// A tuned probationer's drop still settling (probationLoss "pending")
+		// may yet prove its own: graduation waits for its window.
 		if (
 			at !== null &&
 			!originalFailed.has(p.key) &&
-			evidence(p, admitted, at) === null
+			evidence(p, admitted, at) === null &&
+			!(p.tunedBand === true && tunedLoss(p, admitted, at) === "pending")
 		)
 			return true
 		if (p.mode !== "always" && p.startMode !== "operator") return false
@@ -865,8 +915,7 @@ export function createEfficiencyGate(
 			const hostBusyNow =
 				tuned &&
 				valid(mono) &&
-				attributionAt(newcomer.sourceId, sampledMono(), HOST_BUSY_HOLD_MS)
-					.cause === "host"
+				hostBusyAt(newcomer.sourceId, sampledMono()) !== null
 			const warming =
 				tuned &&
 				(hostBusyNow ||
@@ -1375,14 +1424,7 @@ export function createEfficiencyGate(
 			tunedRetries.delete(key)
 		},
 		shedAttribution: key => shed.get(key),
-		hostBusy(sourceId) {
-			const attribution = attributionAt(
-				sourceId,
-				sampledMono(),
-				HOST_BUSY_HOLD_MS,
-			)
-			return attribution?.cause === "host" ? attribution : null
-		},
+		hostBusy: sourceId => hostBusyAt(sourceId, sampledMono()),
 		view(running, blocked, now) {
 			const mono = monoNow()
 			observeRunning(running, mono)

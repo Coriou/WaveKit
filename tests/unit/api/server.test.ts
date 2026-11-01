@@ -1200,10 +1200,15 @@ describe("API Server", () => {
 				expect(body.message).toContain("decoder-1")
 				expect(body.decoder.running).toBe(true)
 				// A bare REST start is an operator start (band defaults spec §1.1)
-				// and is refused on a scanner-held source (signal discovery § 10.4).
+				// and is refused on a scanner-held source (signal discovery § 10.4);
+				// it clears an efficiency shed of the tuned decoder.
 				expect(mockDecoderManager.startDecoder).toHaveBeenCalledWith(
 					"decoder-1",
-					{ startMode: "operator", refuseIfHeld: true },
+					{
+						startMode: "operator",
+						refuseIfHeld: true,
+						clearEfficiencyShed: true,
+					},
 				)
 			})
 

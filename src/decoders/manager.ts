@@ -338,6 +338,12 @@ interface DecoderState {
 	efficiencyTunedShed?: boolean
 	/** Whose loss shed it (safe fields), for status and logs; cleared with the shed. */
 	efficiencyAttribution?: LossAttribution
+	/**
+	 * An operator start cleared this placement's efficiency shed: the gate
+	 * judges it as an automatic start (probation, then late shedding), so
+	 * its own loss can shed it again. Cleared when the operator stops it.
+	 */
+	efficiencyOperatorProbation?: boolean
 	/** Owning scanner job of a probe; null for configured decoders. */
 	scannerJobId: string | null
 	/** Scanner-provided input used instead of a fanout branch (probes only). */
@@ -1185,6 +1191,9 @@ export class DecoderManager extends EventEmitter {
 			delete state.efficiencyTunedShed
 			delete state.efficiencyAttribution
 			state.admission = { admit: false, detail: "unknown", retryAtMs: now }
+			// Re-admitted on probation: an operator start must not exempt it
+			// from the gate, or its own sustained loss would never shed it.
+			state.efficiencyOperatorProbation = true
 			this.log.info(
 				{ decoderId: placement.decoderId, sourceId: placement.sourceId },
 				"Operator start cleared an efficiency shed",
@@ -1296,7 +1305,13 @@ export class DecoderManager extends EventEmitter {
 				? [
 						{
 							...(owner
-								? { mode: this.modeFor(owner).mode, startMode: owner.startMode }
+								? {
+										mode: this.modeFor(owner).mode,
+										// Re-admitted on probation after an operator cleared its shed.
+										startMode: state.efficiencyOperatorProbation
+											? ("auto" as const)
+											: owner.startMode,
+									}
 								: {}),
 							key: state.placement.key,
 							sourceId: state.placement.sourceId,
@@ -3241,6 +3256,7 @@ export class DecoderManager extends EventEmitter {
 			this.cancelScheduledRestart(placement)
 			if (!running) {
 				placement.startMode = "auto"
+				delete placement.efficiencyOperatorProbation
 				this.clearChannelRetry(this.selectedSourceId(placement), true)
 			}
 			if (placement.placement)
@@ -3564,6 +3580,7 @@ export class DecoderManager extends EventEmitter {
 		if (state.admission?.admit) delete state.admission
 		delete state.admittedAtMs
 		state.startMode = "auto"
+		delete state.efficiencyOperatorProbation
 		state.rateGeneration++
 		const stopGeneration = state.rateGeneration
 		let stopError: unknown = null

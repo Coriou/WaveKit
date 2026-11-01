@@ -387,14 +387,16 @@ it("the tuned probationer's own branch drops count when no-holder overflow share
 	// Each sample: readsb's own branch drops and the absorber overflows with
 	// no holder known, on a healthy host. The overflow is loss elsewhere; the
 	// branch drops are readsb's own. Before the fix the sample was charged to
-	// the source as a whole only, and readsb was never shed in 180 s.
+	// the source as a whole only, and readsb was never shed in 180 s. A lone
+	// drop could still be a host episode reaching a sibling next sample, so
+	// it is shed at the second adjacent sample of its own loss (+4 s).
 	const h = harness([{ key: "readsb", source: "s", tuned: true }], 90)
 	const verdicts = h.run(() => {
 		h.dropOn("s", "readsb")
 		h.overflowNoHolder("s")
 	}, 180_000)
 	expect(verdicts.map(({ key, detail, at }) => ({ key, detail, at }))).toEqual([
-		{ key: "readsb", detail: "drops", at: 2_000 },
+		{ key: "readsb", detail: "drops", at: 4_000 },
 	])
 	const charged = h.monitor.chargedDropsBetweenMono("s", 0, Infinity)
 	expect(charged.at(-1)?.branches).toBe("source")

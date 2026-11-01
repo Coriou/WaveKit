@@ -934,3 +934,52 @@ it("an operator start without the clear flag keeps the shed and its backoff", as
 	expect(gate.forget).not.toHaveBeenCalledWith(placement.key)
 	expect(f.manager.getAllStatus()[0]).toMatchObject({ running: false })
 })
+
+it("an operator start that clears a tuned shed re-admits it on probation, and its own loss sheds it again", async () => {
+	const gate = fakeGate()
+	const f = setup("rate-test", gate)
+	f.create("dec")
+	const placement = f.place("dec", 162_000_000)
+	f.plan([placement])
+	await f.manager.startAll()
+	const shed = async () => {
+		gate.probation = vi.fn(() => [
+			{ key: placement.key, detail: "drops" as const },
+		])
+		await vi.advanceTimersByTimeAsync(2500)
+		gate.probation = vi.fn(() => [])
+		await f.settle()
+		expect(f.manager.getAllStatus()[0]).toMatchObject({
+			running: false,
+			efficiency: { detail: "drops" },
+		})
+	}
+	await shed()
+	await f.manager.startDecoder("dec", {
+		startMode: "operator",
+		clearEfficiencyShed: true,
+	})
+	await f.settle()
+	expect(gate.forget).toHaveBeenCalledWith(placement.key)
+	expect(f.manager.getAllStatus()[0]).toMatchObject({ running: true })
+	// The gate judges the re-admitted run as an automatic start, so probation
+	// and late shedding apply to it; an operator start would exempt it.
+	await vi.advanceTimersByTimeAsync(2500)
+	const judged = vi
+		.mocked(gate.probation)
+		.mock.calls.at(-1)![0]
+		.find(p => p.key === placement.key)
+	expect(judged).toMatchObject({ startMode: "auto" })
+	await shed()
+	// An operator stop ends it: the next operator start (no shed) is exempt.
+	await f.manager.stopDecoder("dec")
+	await f.manager.startDecoder("dec", { startMode: "operator" })
+	await f.settle()
+	await vi.advanceTimersByTimeAsync(2500)
+	expect(
+		vi
+			.mocked(gate.probation)
+			.mock.calls.at(-1)![0]
+			.find(p => p.key === placement.key),
+	).toMatchObject({ startMode: "operator" })
+})

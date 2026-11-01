@@ -12,8 +12,8 @@ import {
  * Host-wide congestion episodes, each one or more 2000 ms samples. Every drop
  * on readsb's branch has host evidence: a sibling branch (live audio) drops in
  * the same sample or within HOST_STARVATION_WINDOW_MS (a split over up to 5
- * samples, 10 000 ms, the bound included), or the event loop lags (>= 50 ms).
- * On probation the sibling of a split comes first (see the loop below).
+ * samples, 10 000 ms, the bound included, in either order), or the event loop
+ * lags (>= 50 ms).
  */
 type Episode =
 	| { kind: "both" }
@@ -68,11 +68,9 @@ it("under any interleaving of host-wide congestion the tuned decoder is never sh
 					else if (e.kind === "lag")
 						h.tick(e.live ? [readsb, LIVE] : [readsb], e.lagMs)
 					else {
-						// A probationer is judged on the evidence known at its drop:
-						// readsb's branch alone first is its own loss then (a
-						// newcomer that cannot keep up), so on probation a split
-						// leads with the sibling.
-						const readsbFirst = e.readsbFirst && !onProbation
+						// Either order, on probation too: a lone drop on readsb's
+						// branch is settled only once its window is known.
+						const readsbFirst = e.readsbFirst
 						h.tick([readsbFirst ? readsb : LIVE])
 						for (let i = 1; i < e.samples; i++) h.tick()
 						h.tick([readsbFirst ? LIVE : readsb])

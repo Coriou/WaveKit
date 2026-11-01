@@ -53,6 +53,12 @@ function fullStatus(): DecoderStatus {
 			message: "Process exited unexpectedly (code 1)",
 			at: new Date("2026-10-08T12:00:00.000Z"),
 		},
+		efficiency: {
+			detail: "late-drops",
+			retryAt: "2026-10-08T12:00:40.000Z",
+			cause: "host",
+		},
+		hostBusy: { congestedBranches: 2, loopLagP99Ms: null },
 	}
 }
 
@@ -75,6 +81,13 @@ const expectedFields = {
 		message: "Process exited unexpectedly (code 1)",
 		at: "2026-10-08T12:00:00.000Z",
 	},
+	// Whose loss shed it, and the host-busy status beside it.
+	efficiency: {
+		detail: "late-drops",
+		retryAt: "2026-10-08T12:00:40.000Z",
+		cause: "host",
+	},
+	hostBusy: { congestedBranches: 2, loopLagP99Ms: null },
 }
 
 describe("decoder REST contract", () => {

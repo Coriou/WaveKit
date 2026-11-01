@@ -1786,11 +1786,16 @@ it("a probationer's own channelizer branch is no drop evidence; a real drop on i
 		expect(decoder.running).toBe(true)
 		expect(f.manager.getStatus("rtl433")?.efficiency).toBeUndefined()
 		// A real drop on that branch during probation suspends the probationer.
+		// As the only running decoder it is protected like the tuned one: a
+		// lone drop is judged once its 10 000 ms attribution window is sampled
+		// (a host episode could reach another branch in the next sample).
 		composed.branches.set("channelizer-rtl", {
 			droppedBytesTotal: 4096,
 			droppedChunksTotal: 1,
 		})
 		await vi.advanceTimersByTimeAsync(4000)
+		expect(decoder.running).toBe(true)
+		await vi.advanceTimersByTimeAsync(8000)
 		expect(decoder.running).toBe(false)
 		expect(f.manager.getStatus("rtl433")?.efficiency?.detail).toBe("drops")
 	} finally {
