@@ -1538,6 +1538,7 @@ export function createEfficiencyGate(
 			earned.delete(key)
 			hostJudged.delete(key)
 			carried.delete(key)
+			cpuRun.delete(key)
 			reconnectRetained.delete(key)
 			placementEpochs.delete(key)
 			admittedMono.delete(key)

@@ -620,3 +620,35 @@ describe("gate: graduation clears a tuned probationer's carried loss", () => {
 		expect(holding()).toEqual([])
 	})
 })
+
+describe("gate: forget clears a tuned probationer's CPU-only run", () => {
+	afterEach(() => {
+		vi.restoreAllMocks()
+	})
+
+	it("no gate map keeps its key once the placement is forgotten", () => {
+		const h = starvationHarness()
+		const key = h.keyOf("readsb")
+		const maps = new Set<Map<unknown, unknown>>()
+		const set = Map.prototype.set
+		vi.spyOn(Map.prototype, "set").mockImplementation(function (
+			this: Map<unknown, unknown>,
+			k: unknown,
+			value: unknown,
+		) {
+			if (k === key) maps.add(this)
+			return set.call(this, k, value)
+		})
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		// Own-branch drops on a healthy host, then CPU over the guard: the
+		// CPU reset carries the drop and the CPU-only run's start.
+		h.tick([h.branch("readsb")])
+		h.tick([h.branch("readsb")], 4, false)
+		h.cpu.normalisedPercent = 100
+		h.tick([], 4)
+		h.cpu.normalisedPercent = 10
+		expect([...maps].some(m => m.has(key))).toBe(true)
+		h.gate.forget(key)
+		expect([...maps].filter(m => m.has(key))).toEqual([])
+	})
+})
