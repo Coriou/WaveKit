@@ -496,6 +496,7 @@ describe("aircraft motion smoothing", () => {
 		advance(s, fix(200, 0, T0 + 51_000, null, null), T0 + 51_000)
 		expect(s.rejected).toBe(1)
 		advance(s, fix(200, 0, T0 + 51_000, 90, 450), T0 + 51_100)
+		expect(s.rejected).toBe(1)
 		expect(s.vN).toBe(0)
 		expect(s.vE).toBe(0)
 		// a new velocity for the accepted fix still applies

@@ -359,6 +359,9 @@ function observe(s: MotionState, fix: Fix, now: number): void {
 		retrack(s, fix, fix.lat, fix.lon, fix.posAt, now, true)
 		return
 	}
+	// the held-back fix re-sent (a new course or speed only) is not another rejection
+	if (fix.posAt === s.candAt && fix.lat === s.candLat && fix.lon === s.candLon)
+		return
 	s.candLat = fix.lat
 	s.candLon = fix.lon
 	s.candAt = fix.posAt
