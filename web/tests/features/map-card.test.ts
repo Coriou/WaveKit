@@ -246,6 +246,25 @@ describe("aircraft selection fields", () => {
 		expect(aircraftEmergency({ ...BARE, emergency: "odd" })).toBe("Emergency")
 		expect(aircraftEmergency(BARE)).toBeNull()
 	})
+
+	it("treats inherited property names as unknown emergency states and squawks", () => {
+		for (const odd of ["__proto__", "constructor", "toString"]) {
+			expect(
+				aircraftEmergency({ ...ENRICHED, squawk: "4321", emergency: odd }),
+			).toBe("Emergency")
+			expect(
+				aircraftEmergency({ ...ENRICHED, squawk: "7700", emergency: odd }),
+			).toBe("Squawk 7700 · Emergency")
+			expect(aircraftEmergency({ ...ENRICHED, squawk: odd })).toBeNull()
+			const info = selectionInfo(
+				itemOf({ ...ENRICHED, squawk: odd, emergency: odd }),
+				STATION,
+				NOW,
+			)
+			expect(info.alert).toBe("Emergency")
+			expect(field(info.fields, "Squawk")).toEqual(["Squawk", odd])
+		}
+	})
 })
 
 describe("aircraft identity", () => {
@@ -261,10 +280,48 @@ describe("aircraft identity", () => {
 		])
 	})
 
+	it("calls names one company only when they match after case, punctuation and generic words", () => {
+		expect(sameOperator("WaveKit Air", "wavekit-air")).toBe(true)
+		expect(sameOperator("WaveKit  Air", "WAVEKIT AIR")).toBe(true)
+		expect(sameOperator("WaveKit", "WaveKit Airlines")).toBe(true)
+		expect(sameOperator("WaveKit Airlines", "WaveKit")).toBe(true)
+		expect(sameOperator("WaveKit Airways Ltd", "WaveKit")).toBe(true)
+		expect(sameOperator("Air Northwind", "Northwind S.A.")).toBe(true)
+		expect(sameOperator("Northwind S.A.", "Air Northwind")).toBe(true)
+		expect(sameOperator("Northwind Aviation GmbH", "Northwind Air")).toBe(true)
+		const brand = {
+			...ENRICHED,
+			identification: {
+				...ENRICHED.identification,
+				operator: "WaveKit Airlines Ltd",
+			},
+		}
+		expect(aircraftDetails(brand).ident.map(r => r[0])).not.toContain(
+			"Operator",
+		)
+	})
+
 	it("shows the registry's operator only when it is another company", () => {
 		expect(sameOperator("TAP Portugal", "TAP Air Portugal")).toBe(true)
 		expect(sameOperator("WaveKit Air", "WaveKit Air Lines")).toBe(true)
 		expect(sameOperator("WaveKit Air", "Northwind Leasing")).toBe(false)
+		expect(sameOperator("Northwind Air", "Northwind Air Charter")).toBe(false)
+		expect(sameOperator("Northwind Air Charter", "Northwind Air")).toBe(false)
+		expect(sameOperator("Northwind", "Northwind Cargo")).toBe(false)
+		expect(sameOperator("Air", "Airlines Ltd")).toBe(false)
+		expect(sameOperator("", "")).toBe(false)
+		const leasedSame = {
+			...ENRICHED,
+			identification: {
+				...ENRICHED.identification,
+				airline: { name: "Northwind Air", icao: "NWA" },
+				operator: "Northwind Air Charter",
+			},
+		}
+		expect(aircraftDetails(leasedSame).ident).toContainEqual([
+			"Operator",
+			"Northwind Air Charter",
+		])
 		const leased = {
 			...ENRICHED,
 			identification: {
@@ -288,8 +345,21 @@ describe("aircraft identity", () => {
 			},
 		}
 		const d = aircraftDetails(noOperator)
-		expect(d.about).toBe("Dassault Rafale M")
+		// the subtitle keeps the ICAO type code the dropped Type row would have shown
+		expect(d.about).toBe("Dassault Rafale M · RFAL")
 		expect(d.ident.map(r => r[0])).not.toContain("Type")
+		expect(
+			aircraftDetails({
+				...noOperator,
+				identification: { typeCode: "RFAL" },
+			}).about,
+		).toBe("RFAL")
+		expect(
+			aircraftDetails({
+				...noOperator,
+				identification: { typeCode: "A320", typeDescription: "A320 214" },
+			}).about,
+		).toBe("A320 214")
 		expect(aircraftType(noOperator.identification)).toEqual({
 			model: "Dassault Rafale M",
 			code: "RFAL",
@@ -351,6 +421,35 @@ describe("selection card render", () => {
 		expect(html).toContain(
 			'<dd>Airbus A321 251NXSL <abbr class="wkm-code" title="ICAO type code">A21N</abbr></dd>',
 		)
+	})
+
+	it("renders an aircraft whose emergency or squawk is an inherited property name", () => {
+		for (const odd of ["__proto__", "constructor", "toString"]) {
+			for (const a of [
+				{ ...ENRICHED, squawk: "4321", emergency: odd },
+				{ ...ENRICHED, squawk: odd, emergency: "none" },
+				{ ...ENRICHED, squawk: odd, emergency: odd },
+			]) {
+				const info = selectionInfo(itemOf(a), STATION, NOW)
+				const html = renderToStaticMarkup(
+					createElement(
+						Fragment,
+						null,
+						info.alert
+							? createElement(EmergencyAlert, { text: info.alert })
+							: null,
+						createElement(SelectionFields, {
+							fields: info.fields,
+							label: "Flight data",
+						}),
+					),
+				)
+				expect(html).toContain(`<dt>Squawk</dt><dd>${a.squawk}</dd>`)
+				expect(html).not.toContain('data-tone="danger"')
+				if (a.emergency === "none") expect(html).not.toContain("wkm-alert")
+				else expect(html).toContain("<span>Emergency</span>")
+			}
+		}
 	})
 
 	it("marks missing values and draws no identity section for a bare aircraft", () => {

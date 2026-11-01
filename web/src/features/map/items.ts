@@ -590,11 +590,12 @@ export interface AircraftDetails {
 	readonly ident: readonly IdentRow[]
 }
 
-const PHOTO_SOURCE: Readonly<Record<string, string>> = {
-	planespotters: "Planespotters",
-	"airport-data": "airport-data.com",
-	hexdb: "hexdb.io",
-}
+// Maps, not object literals: a decoder value like "__proto__" or "toString" must not find an inherited property.
+const PHOTO_SOURCE: ReadonlyMap<string, string> = new Map([
+	["planespotters", "Planespotters"],
+	["airport-data", "airport-data.com"],
+	["hexdb", "hexdb.io"],
+])
 
 const httpsOnly = (url: string | undefined): string | null =>
 	url && /^https:\/\//.test(url) ? url : null
@@ -606,17 +607,46 @@ function airportCode(a: { iata?: string | undefined; icao: string }): string {
 	return a.iata ?? a.icao
 }
 
+/** Case, punctuation and spacing dropped: "S.A." is "sa", "WaveKit-Air" is "wavekit air". */
 const words = (s: string): string[] =>
 	s
 		.toLowerCase()
+		.replace(/\./g, "")
 		.split(/[^a-z0-9]+/)
 		.filter(Boolean)
 
-/** One company under two names ("TAP Portugal", "TAP Air Portugal"): the shorter's words all in the longer. */
+/** Words that say what kind of company it is, not which: an airline brand and its registered name differ by these. */
+const GENERIC_COMPANY_WORDS: ReadonlySet<string> = new Set([
+	"air",
+	"airline",
+	"airlines",
+	"airways",
+	"lines",
+	"aviation",
+	"ltd",
+	"limited",
+	"plc",
+	"inc",
+	"llc",
+	"sa",
+	"ag",
+	"gmbh",
+	"spa",
+])
+
+/**
+ * One company under two names: equal once case, punctuation and spacing are dropped, or once the generic
+ * company words are ("TAP Portugal", "TAP Air Portugal"; "WaveKit Air", "WaveKit Airlines Ltd"). Anything
+ * else ("Northwind Air", "Northwind Air Charter") is two companies, so both are shown.
+ */
 export function sameOperator(a: string, b: string): boolean {
 	const [x, y] = [words(a), words(b)]
-	const [short, long] = x.length <= y.length ? [x, y] : [y, x]
-	return short.length > 0 && short.every(w => long.includes(w))
+	if (x.length === 0 || y.length === 0) return false
+	if (x.join(" ") === y.join(" ")) return true
+	const core = (w: string[]) =>
+		w.filter(t => !GENERIC_COMPANY_WORDS.has(t)).join(" ")
+	const [cx, cy] = [core(x), core(y)]
+	return cx !== "" && cx === cy
 }
 
 /**
@@ -657,7 +687,7 @@ export function aircraftDetails(a: Aircraft): AircraftDetails {
 						[
 							id.photo.photographer ? `© ${id.photo.photographer}` : null,
 							id.photo.source
-								? (PHOTO_SOURCE[id.photo.source] ?? id.photo.source)
+								? (PHOTO_SOURCE.get(id.photo.source) ?? id.photo.source)
 								: null,
 						]
 							.filter(Boolean)
@@ -682,13 +712,17 @@ export function aircraftDetails(a: Aircraft): AircraftDetails {
 	const operator = id?.operator?.trim() || null
 	const who = airline ?? operator
 	const type = aircraftType(id)
-	const about = who ?? type?.model ?? `ICAO ${a.icao}`
+	// the type as subtitle keeps its ICAO code, since the Type row is dropped then
+	const about =
+		who ??
+		(type ? [type.model, type.code].filter(Boolean).join(" · ") : null) ??
+		`ICAO ${a.icao}`
 	const ident: IdentRow[] = []
 	const add = (k: string, v: string | null | undefined, hint?: string) => {
 		if (v) ident.push(hint ? [k, v, hint] : [k, v])
 	}
 	add("Registration", id?.registration)
-	if (type && about !== type.model) add("Type", type.model, type.code ?? "")
+	if (type && who) add("Type", type.model, type.code ?? "")
 	if (!id?.typeDescription) add("Manufacturer", id?.manufacturer)
 	if (airline && operator && !sameOperator(airline, operator))
 		add("Operator", operator)
@@ -704,29 +738,30 @@ export function aircraftDetails(a: Aircraft): AircraftDetails {
 	}
 }
 
-const SQUAWK_EMERGENCY: Readonly<Record<string, string>> = {
-	"7500": "Unlawful interference",
-	"7600": "Radio failure",
-	"7700": "General emergency",
-}
+// Maps, so an untrusted squawk or state ("__proto__", "toString") finds nothing rather than an inherited property.
+const SQUAWK_EMERGENCY: ReadonlyMap<string, string> = new Map([
+	["7500", "Unlawful interference"],
+	["7600", "Radio failure"],
+	["7700", "General emergency"],
+])
 
-const EMERGENCY_STATE: Readonly<Record<string, string>> = {
-	general: "General emergency",
-	lifeguard: "Medical emergency",
-	minfuel: "Minimum fuel",
-	nordo: "No radio",
-	unlawful: "Unlawful interference",
-	downed: "Aircraft downed",
-	reserved: "Emergency",
-}
+const EMERGENCY_STATE: ReadonlyMap<string, string> = new Map([
+	["general", "General emergency"],
+	["lifeguard", "Medical emergency"],
+	["minfuel", "Minimum fuel"],
+	["nordo", "No radio"],
+	["unlawful", "Unlawful interference"],
+	["downed", "Aircraft downed"],
+	["reserved", "Emergency"],
+])
 
 /** "Squawk 7700 · General emergency", "Medical emergency", or null when the aircraft declares none. */
 export function aircraftEmergency(a: Aircraft): string | null {
 	const state =
 		a.emergency && a.emergency !== "none"
-			? (EMERGENCY_STATE[a.emergency] ?? "Emergency")
+			? (EMERGENCY_STATE.get(a.emergency) ?? "Emergency")
 			: null
-	const squawk = a.squawk ? SQUAWK_EMERGENCY[a.squawk] : undefined
+	const squawk = a.squawk ? SQUAWK_EMERGENCY.get(a.squawk) : undefined
 	if (!squawk) return state
 	return `Squawk ${a.squawk} · ${state ?? squawk}`
 }
@@ -757,7 +792,7 @@ export function aircraftFields(
 ): Field[] {
 	const ground = a.altitude?.onGround === true
 	const vs = a.altitude?.baroRate ?? a.altitude?.geomRate
-	const alert = a.squawk ? SQUAWK_EMERGENCY[a.squawk] : undefined
+	const alert = a.squawk ? SQUAWK_EMERGENCY.get(a.squawk) : undefined
 	const rate = vs === undefined ? "" : climbText(Math.abs(vs))
 	const vertical: Field =
 		ground || vs === undefined

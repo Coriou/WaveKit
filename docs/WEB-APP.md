@@ -426,7 +426,7 @@ full content or its position on the map.
 Select an aircraft to see its live flight data and what the core knows about it (see
 [ADS-B, Aircraft Enrichment](ADSB.md#aircraft-enrichment)). From the top: a photo of the airframe,
 credited to its photographer with a link to the photo's page; the callsign and who flies it (the
-airline, else the operator); a **Military** tag; an emergency alert; the planned route of its
+airline, else the operator, else the type with its ICAO type code); a **Military** tag; an emergency alert; the planned route of its
 callsign; then the live data, always shown in full: altitude (or **On ground**), ground speed,
 vertical rate with a climb or descent arrow (**Level** within 64 ft/min), track, squawk, signal
 strength, distance and direction from the station, and when it was last heard. Values follow
@@ -434,7 +434,7 @@ strength, distance and direction from the station, and when it was last heard. V
 7600 and 7700, and any emergency state the aircraft reports, show as a red alert
 (`Squawk 7700 · General emergency`) and the squawk turns red. Below, the **Aircraft** section lists
 the registration, the type once with its ICAO type code (`Airbus A321 251NXSL A21N`), the
-registered operator when it is another company than the airline, the country, the ICAO address and
+registered operator unless its name is the airline's give or take words like Air or Ltd, the country, the ICAO address and
 the year built; the footer gives the decoder, the message count and the position. The card
 scrolls as a whole when it is taller than the window. The planned route comes from a crowd-sourced database, so
 it is hidden when the core marks it implausible (the aircraft is clearly flying away from the
