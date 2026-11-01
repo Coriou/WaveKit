@@ -1,3 +1,4 @@
+import type { LossAttribution } from "./host-starvation.js"
 import type { PagingRasterRange } from "./paging-plan.js"
 import type {
 	BandRegion,
@@ -10,6 +11,7 @@ import type {
 	DecoderPlacementView,
 	DecoderEfficiencyView,
 	DecoderEfficiencyDetail,
+	DecoderLossCause,
 } from "@wavekit/api-types"
 import type { DecoderBandRequirements } from "../band-resolver.js"
 import type {
@@ -77,6 +79,24 @@ export const EFFICIENCY_CLEAR_MS = 60_000
 export const EFFICIENCY_PROBATION_MS = 30_000
 export const EFFICIENCY_RETRY_MS = 300_000
 export const EFFICIENCY_RETRY_MAX_MS = 1_800_000
+/**
+ * The tuned decoder shed for its own loss is probed again sooner than an
+ * untuned one: 30 000 ms first, doubling per consecutive shed to a
+ * 240 000 ms cap (30 s, 60 s, 120 s, 240 s, 240 s, ...: 30 000 x 2^3). Its
+ * doubling history resets after one cap's length (240 000 ms) of readmitted
+ * run without a shed.
+ */
+export const TUNED_RETRY_MS = 30_000
+export const TUNED_RETRY_MAX_MS = 8 * TUNED_RETRY_MS
+/** The next loss backoff after `previous` (undefined: the first shed). */
+export function lossRetryMs(previous: number | undefined, tuned: boolean) {
+	const [first, cap] = tuned
+		? [TUNED_RETRY_MS, TUNED_RETRY_MAX_MS]
+		: [EFFICIENCY_RETRY_MS, EFFICIENCY_RETRY_MAX_MS]
+	return previous === undefined || !(previous > 0)
+		? first
+		: Math.min(Math.max(previous * 2, first), cap)
+}
 export const EFFICIENCY_BUDGET_X64 = 1.5
 export const EFFICIENCY_BUDGET_ARM64 = 0.75
 export const EFFICIENCY_CPU_GUARD_PERCENT = 90
@@ -335,6 +355,12 @@ export interface WantedPlacement {
 	 * last: other gate-admitted placements yield to them first.
 	 */
 	tunedBand?: true
+	/**
+	 * No other decoder runs: like the tuned decoder, host starvation does not
+	 * refuse it (the probation pass protects the only running decoder the
+	 * same way). Every other admission rule is its own.
+	 */
+	alone?: true
 }
 /** Stable comparison key of placement options (absent and empty are equal). */
 export function placementOptionsKey(
@@ -402,12 +428,24 @@ export interface Admitted {
 	admit: true
 	displace?: readonly string[]
 }
-export type AdmissionDecision =
-	| Admitted
-	| { admit: false; detail: DecoderEfficiencyDetail; retryAtMs: number }
+export interface Refused {
+	admit: false
+	detail: DecoderEfficiencyDetail
+	retryAtMs: number
+	/** A loss shed: whose loss it was (see host-starvation.ts). */
+	cause?: DecoderLossCause
+}
+export type AdmissionDecision = Admitted | Refused
 export interface ProbationVerdict {
 	key: string
 	detail: "drops" | "cpu" | "late-drops"
+}
+/** Why the latest probation pass condemned a placement (EfficiencyGate.shedAttribution). */
+export interface ShedAttribution {
+	/** The judged placement was the tuned (or only running) decoder. */
+	tuned: boolean
+	/** Whose loss condemned it, with the safe evidence the logs carry. */
+	attribution: LossAttribution
 }
 export interface EfficiencyGate {
 	record(sample: EfficiencySample): void
@@ -428,7 +466,26 @@ export interface EfficiencyGate {
 		running: readonly RunningPlacement[],
 		now: number,
 	): readonly ProbationVerdict[]
-	noteSuspended(key: string, detail: DecoderEfficiencyDetail, now: number): void
+	/** `tuned`: the tuned decoder's loss backoff (TUNED_RETRY_MS) applies. */
+	noteSuspended(
+		key: string,
+		detail: DecoderEfficiencyDetail,
+		now: number,
+		tuned?: boolean,
+	): void
+	/**
+	 * Host starvation on a source now (its loss in the last
+	 * HOST_STARVATION_WINDOW_MS is host loss); null when not starved or unknown.
+	 * With `branches`, only host loss that reached them (a drop charged to one
+	 * of them, or to the whole source) counts: a decoder unaffected by it is
+	 * not reported host-busy.
+	 */
+	hostBusy?(
+		sourceId: string,
+		branches?: readonly string[],
+	): LossAttribution | null
+	/** The attribution of a verdict the latest probation() pass returned for `key`. */
+	shedAttribution?(key: string): ShedAttribution | undefined
 	/**
 	 * An activity move from `fromKey` to `toKey`: when `fromKey` graduated its
 	 * probation, `toKey` is admitted graduated (no new probation) and loses
@@ -488,6 +545,13 @@ export interface ChargedDrop {
 	atMono: number
 	code: DropAttribution
 	branches: readonly string[] | "source"
+	/**
+	 * A `host` sample labelled by host CPU at the guard alone (the event-loop
+	 * delay stayed under HOST_LOOP_DELAY_MS): its excuse of a tuned decoder's
+	 * own loss is time-bounded (CPU_ONLY_EXCUSE_MS, host-starvation.ts).
+	 * Absent: loop lag (or no host label).
+	 */
+	hostCpuOnly?: true
 }
 
 /**

@@ -221,6 +221,27 @@ function retrying(status: DecoderStatus, running: boolean): boolean {
 /** A failed verdict's sentence while the manager restarts it on its own. */
 const RETRYING_TEXT = "failed: restarting on its own"
 
+/** Host starvation: no decoder is the cause, so no rate or decoder action helps. */
+const HOST_BUSY_TEXT = "host busy: samples were dropped on several streams"
+const HOST_BUSY_ACTIONS: readonly DecoderVerdictAction[] = [
+	"turn-off-others",
+	"pause-scanner",
+]
+const LOSS_CODES: ReadonlySet<DecoderVerdictCode> = new Set([
+	"efficiency-drops",
+	"efficiency-late-drops",
+	"efficiency-cpu",
+])
+
+/** Whole seconds until `retryAt`, at least 1; null when absent, malformed or past. */
+function retryInSeconds(retryAt: unknown, now: number): number | null {
+	if (typeof retryAt !== "string" || !Number.isFinite(now)) return null
+	const at = Date.parse(retryAt)
+	return Number.isFinite(at) && at > now
+		? Math.max(1, Math.ceil((at - now) / 1_000))
+		: null
+}
+
 /** A listening verdict's sentence when the decoder's counters give a reception hint. */
 const RECEPTION_TEXT: Readonly<Record<DecoderReceptionHint, string>> = {
 	"heard-undecoded": "listening: heard signals but decoded none",
@@ -262,6 +283,7 @@ export function decoderVerdict(
 	status: DecoderStatus,
 	health: DecoderSummary["health"],
 	running: boolean,
+	now?: number,
 ): DecoderVerdict {
 	let code: DecoderVerdictCode
 	if (health === "failed") code = "failed"
@@ -281,21 +303,62 @@ export function decoderVerdict(
 	else code = "unknown"
 	const name = decoderName(status.type)
 	const reception = decoderReception(status, code)
-	const entry =
+	let entry: {
+		text: string
+		actions: readonly DecoderVerdictAction[]
+		cause?: "host" | "decoder"
+		retryAt?: string
+	} =
 		code === "failed" && retrying(status, running)
 			? { text: RETRYING_TEXT, actions: [] }
 			: reception !== undefined
 				? { text: RECEPTION_TEXT[reception], actions: VERDICTS[code].actions }
 				: VERDICTS[code]
+	// Host starvation: a running decoder says the host is busy (over any
+	// reception hint); a loss shed the host caused says so instead of
+	// suggesting a lower rate. A loss shed says when it is retried.
+	const hostBusy = status.hostBusy !== undefined && status.hostBusy !== null
+	const shedCause = status.efficiency?.cause
+	if ((code === "decoding" || code === "listening") && hostBusy)
+		entry = { text: `${code}: ${HOST_BUSY_TEXT}`, actions: [], cause: "host" }
+	else if (LOSS_CODES.has(code)) {
+		const host =
+			shedCause === "host" ||
+			(shedCause === undefined && hostBusy && code !== "efficiency-cpu")
+		if (host)
+			entry = {
+				text: `paused: ${HOST_BUSY_TEXT}`,
+				actions: HOST_BUSY_ACTIONS,
+				cause: "host",
+			}
+		else if (shedCause === "decoder") entry = { ...entry, cause: "decoder" }
+		const seconds =
+			now === undefined ? null : retryInSeconds(status.efficiency?.retryAt, now)
+		if (seconds !== null)
+			entry = {
+				...entry,
+				text: `${entry.text}; retrying in ${seconds} s`,
+				retryAt: new Date(
+					Date.parse(status.efficiency!.retryAt!),
+				).toISOString(),
+			}
+	}
 	const verdict = {
 		code,
 		text: `${name} ${entry.text}`.slice(0, DECODER_VERDICT_TEXT_MAX_LENGTH),
 		actions: [...entry.actions],
+		...(entry.cause ? { cause: entry.cause } : {}),
+		...(entry.retryAt ? { retryAt: entry.retryAt } : {}),
 	}
 	const parsed = decoderVerdictSchema.safeParse(verdict)
-	return parsed.success
-		? parsed.data
-		: { code: "unknown", text: "Decoder status unknown", actions: [] }
+	if (!parsed.success)
+		return { code: "unknown", text: "Decoder status unknown", actions: [] }
+	const { cause, retryAt, ...rest } = parsed.data
+	return {
+		...rest,
+		...(cause ? { cause } : {}),
+		...(retryAt ? { retryAt } : {}),
+	}
 }
 
 const positive = (n: unknown): n is number =>
@@ -422,7 +485,7 @@ export function decoderSummary(
 	// Precedence: crash/restart failure, suspension, recent running output, idle.
 	// A retained lastError alone is historical and does not mark a recovered run failed.
 	const health = healthOf(aggregated, last, now)
-	const verdict = decoderVerdict(status, health, running)
+	const verdict = decoderVerdict(status, health, running, now)
 	const counters = compactCounters(status.counters)
 	const reception = decoderReception(status, verdict.code)
 	return {

@@ -244,7 +244,18 @@ export interface DecoderStatus {
 	modeSource?: DecoderModeSource
 	origin?: "config" | "catalogue"
 	placements?: DecoderPlacementView[]
-	efficiency?: { detail: DecoderEfficiencyDetail; retryAt?: string }
+	efficiency?: {
+		detail: DecoderEfficiencyDetail
+		retryAt?: string
+		/** Whose loss shed it: the host's (samples dropped on several streams) or its own. Absent: not a loss shed. */
+		cause?: DecoderLossCause
+	}
+	/**
+	 * Present while its source drops samples for host or process starvation
+	 * (several branches, live audio included, congested together, or event-loop
+	 * lag): no decoder is the cause and shedding cures none.
+	 */
+	hostBusy?: DecoderHostBusy
 	/** Messages per wall-clock minute, oldest first, last 15 including the current partial minute. */
 	rateHistory?: number[]
 	id: string
@@ -411,6 +422,14 @@ export type DecoderEfficiencyDetail =
 	| "drops"
 	| "unknown"
 	| "late-drops"
+/** Whose loss it was: the host's (starved, samples dropped on several streams) or the decoder's own. */
+export type DecoderLossCause = "host" | "decoder"
+export interface DecoderHostBusy {
+	/** Distinct fanout branches that dropped in the last 10 s. */
+	congestedBranches: number
+	/** Latest event-loop delay p99 (ms); null when unmeasured. */
+	loopLagP99Ms: number | null
+}
 /** Why an activity-ranked channel (multimon-ng, dsd-fme) runs. */
 export interface DecoderPlacementActivity {
 	/** "activity": chosen from a ready activity ranking; "nearest": the nearest-first fallback. */
@@ -639,6 +658,10 @@ export interface DecoderVerdict {
 	text: string
 	/** Suggested actions, most helpful first; empty when none applies. */
 	actions: DecoderVerdictAction[]
+	/** Whose loss the verdict reports: "host" while the host is busy (samples dropped on several streams). */
+	cause?: DecoderLossCause
+	/** When a decoder shed for loss is retried (ISO time). */
+	retryAt?: string
 }
 
 export const decoderVerdictSchema = z
@@ -648,5 +671,7 @@ export const decoderVerdictSchema = z
 		actions: z
 			.array(z.enum(DECODER_VERDICT_ACTIONS))
 			.max(DECODER_VERDICT_ACTIONS.length),
+		cause: z.enum(["host", "decoder"]).optional(),
+		retryAt: z.string().datetime().optional(),
 	})
 	.strict()

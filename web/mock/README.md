@@ -155,9 +155,13 @@ Each item carries the core's `name`; `?hz=<Hz>` adds `coversHz` (whether the dec
 that frequency, the core's 200 kHz rule; a decoder with no known band covers it where a built-in
 EU band plan range lists one of its protocols, as the core does) and a bad `hz` answers the core's 400. A failed decoder
 with a restart pending reads "failed: restarting on its own" without the `restart` action.
+The mock mirrors the core's host-busy wording (a status with `hostBusy` reads "decoding: host busy: samples were dropped
+on several streams") and the "; retrying in <n> s" suffix of a loss stop with a future `efficiency.retryAt`.
 The LoRa and ISM decoders carry synthetic `counters` (`MOCK_COUNTERS`); while listening, both read
-`reception: "heard-undecoded"` with the core's "listening: heard signals but decoded none" sentence.
-`tuned-cases.ts` holds the tuned card's cases for tests (1090 MHz ADS-B paused, decoding and waiting at a paused receiver, with
+`reception: "heard-undecoded"` with the core's "listening: heard signals but decoded none" sentence (the host-busy
+sentence wins while the host is busy; `reception` stays).
+`tuned-cases.ts` holds the tuned card's cases for tests (1090 MHz ADS-B paused, decoding, decoding while the host is busy,
+shed for its own loss with a retry, and waiting at a paused receiver, with
 the pager's VFO channel there, ADS-B decoding with a stray pager decode stored at 1090.062 MHz in the channel's
 `activity` (`expect.latest`: an ADS-B decode, never the page), a synthetic 466 MHz pager and DMR, a pager restarting on its own,
 an unknown frequency, a proven discovery), each built through the same summary.

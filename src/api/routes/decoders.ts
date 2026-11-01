@@ -25,6 +25,7 @@ import { z } from "zod"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderRegistry } from "../../decoders/registry.js"
 import type {
+	DecoderEfficiencyDetail,
 	DecoderEfficiencyView,
 	EfficiencyBudgetConflict,
 	DecoderInfo as ApiDecoderInfo,
@@ -63,6 +64,71 @@ import {
 	zodValidationBody,
 	type ValidationField,
 } from "../validation-errors.js"
+
+/** Why the gate refuses an admission (no loss shed), by efficiency detail. */
+const ADMISSION_REFUSAL: Readonly<Record<DecoderEfficiencyDetail, string>> = {
+	budget: "the CPU budget is full",
+	cpu: "the host CPU is over its guard",
+	drops: "the source is dropping samples",
+	"late-drops": "samples were dropped while it ran",
+	unknown: "waiting for the source to settle",
+}
+
+/** Why a recorded start stays suspended, from its closed reason and efficiency codes. */
+export function suspendedStartReason(status: InternalDecoderStatus): string {
+	const reason = status.suspension?.reasonCode
+	const efficiency = status.efficiency
+	const retry = efficiency?.retryAt ? `; retries at ${efficiency.retryAt}` : ""
+	// The start cleared a loss shed: say what the gate answered then.
+	const cleared = status.efficiencyCleared
+	if (cleared !== undefined)
+		return cleared.blocked === null
+			? "shed cleared: re-admitted on probation"
+			: `shed cleared but blocked: ${ADMISSION_REFUSAL[cleared.blocked]}${retry}`
+	if (reason === "efficiency-budget" || efficiency !== undefined) {
+		const host = efficiency?.cause === "host"
+		switch (efficiency?.detail) {
+			case "budget":
+				return `suspended: the CPU budget is full${retry}`
+			case "cpu":
+				return `suspended: the host CPU is over its guard${retry}`
+			case "drops":
+			case "late-drops":
+				return host
+					? `suspended: host busy: samples were dropped on several streams${retry}`
+					: efficiency.detail === "drops" && efficiency.cause === undefined
+						? `suspended: ${ADMISSION_REFUSAL.drops}${retry}`
+						: `suspended: it dropped samples while it ran${retry}`
+			default:
+				return "suspended: waiting for the source to settle"
+		}
+	}
+	switch (reason) {
+		case "frequency-out-of-band":
+		case "no-channel-selected":
+			return "suspended until the tuned frequency is in its band"
+		case "capture-too-narrow":
+			return "suspended: the capture is too narrow for its band"
+		case "tuner-scanning":
+			return "suspended while the scanner holds the tuner"
+		case "source-paused":
+			return "suspended while the source is paused"
+		case "decoder-unavailable":
+			return "suspended: its program is not installed"
+		case "channelizer-unavailable":
+			return "suspended: it needs the channelizer"
+		case "insufficient-sample-rate":
+		case "unsupported-sample-rate":
+		case "unsupported-frontend-rate":
+		case "unsupported-decoder-input-rate":
+		case "source-rate-unknown":
+			return "suspended until the source rate is usable"
+		case undefined:
+			return "suspended"
+		default:
+			return `suspended (${reason})`
+	}
+}
 
 /**
  * Decoder capabilities schema for response (Requirement 17.1)
@@ -859,7 +925,11 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 			}
 
 			try {
-				await decoderManager.startDecoder(id, { startMode, refuseIfHeld: true })
+				await decoderManager.startDecoder(id, {
+					startMode,
+					refuseIfHeld: true,
+					clearEfficiencyShed: true,
+				})
 
 				const status = decoderManager.getStatus(id)
 				if (!status) {
@@ -872,7 +942,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 
 				return {
 					message: status.suspended
-						? `Decoder '${id}' start recorded; suspended until the source rate and band are usable`
+						? `Decoder '${id}' start recorded; ${suspendedStartReason(status)}`
 						: `Decoder '${id}' started successfully`,
 					decoder: toApiDecoderStatus(status),
 				}

@@ -279,24 +279,65 @@ const RECEPTION_TEXT: Readonly<Record<DecoderReceptionHint, string>> = {
 	"nothing-heard": "listening: heard nothing it recognises",
 }
 
+/** The core's host-busy sentence: host starvation, no decoder is the cause. */
+const HOST_BUSY_TEXT = "host busy: samples were dropped on several streams"
+const LOSS_CODES: ReadonlySet<DecoderVerdictCode> = new Set([
+	"efficiency-drops",
+	"efficiency-late-drops",
+	"efficiency-cpu",
+])
+
 /** The core's decoderVerdict; `counters` are the decoder's, as the core reads them from its status. */
 export function mockVerdict(
 	d: DecoderInfo,
 	health: DecoderSummary["health"],
 	counters?: DecoderCounters,
+	now?: number,
 ): DecoderVerdict {
 	const code = mockVerdictCode(d, health)
 	const reception = mockReception(counters, code)
-	const entry =
+	let entry: {
+		text: string
+		actions: readonly DecoderVerdictAction[]
+		cause?: "host" | "decoder"
+		retryAt?: string
+	} =
 		code === "failed" && retrying(d)
 			? { text: "failed: restarting on its own", actions: [] }
 			: reception !== undefined
 				? { text: RECEPTION_TEXT[reception], actions: VERDICTS[code].actions }
 				: VERDICTS[code]
+	// The core's host-busy (over any reception hint) and retry wording
+	// (src/api/routes/decoder-summary.ts).
+	const hostBusy = d.hostBusy !== undefined
+	const cause = d.efficiency?.cause
+	if ((code === "decoding" || code === "listening") && hostBusy)
+		entry = { text: `${code}: ${HOST_BUSY_TEXT}`, actions: [], cause: "host" }
+	else if (LOSS_CODES.has(code)) {
+		if (
+			cause === "host" ||
+			(cause === undefined && hostBusy && code !== "efficiency-cpu")
+		)
+			entry = {
+				text: `paused: ${HOST_BUSY_TEXT}`,
+				actions: ["turn-off-others", "pause-scanner"],
+				cause: "host",
+			}
+		else if (cause === "decoder") entry = { ...entry, cause: "decoder" }
+		const at = Date.parse(d.efficiency?.retryAt ?? "")
+		if (now !== undefined && Number.isFinite(at) && at > now)
+			entry = {
+				...entry,
+				text: `${entry.text}; retrying in ${Math.max(1, Math.ceil((at - now) / 1_000))} s`,
+				retryAt: new Date(at).toISOString(),
+			}
+	}
 	return {
 		code,
 		text: `${mockDecoderName(d.type)} ${entry.text}`,
 		actions: [...entry.actions],
+		...(entry.cause ? { cause: entry.cause } : {}),
+		...(entry.retryAt ? { retryAt: entry.retryAt } : {}),
 	}
 }
 
@@ -429,7 +470,7 @@ export function buildDecoderSummaries(
 		const counters = Object.hasOwn(MOCK_COUNTERS, d.type)
 			? MOCK_COUNTERS[d.type]
 			: undefined
-		const verdict = mockVerdict(d, health, counters)
+		const verdict = mockVerdict(d, health, counters, now)
 		const reception = mockReception(counters, verdict.code)
 		return {
 			id: d.id,

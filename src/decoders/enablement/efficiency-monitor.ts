@@ -2,6 +2,7 @@ import { performance } from "node:perf_hooks"
 import type { DropAttribution } from "@wavekit/api-types"
 import { z } from "zod"
 import {
+	HOST_LOOP_DELAY_MS,
 	LINK_GAP_MS,
 	LINK_RECOVERY_WAIT_MS,
 	type IngestInterval,
@@ -178,6 +179,7 @@ export function createEfficiencyMonitor(deps: {
 		>
 	> & {
 		latestAttribution(id: string): DropAttribution | null
+		latestLoopDelay(): LoopDelayInterval | null
 		lateWindows(id: string): readonly LateDropWindow[]
 		linkDropsSince(id: string, sinceMono: number): boolean
 		attributionCounts(id: string): {
@@ -197,6 +199,8 @@ export function createEfficiencyMonitor(deps: {
 			? EFFICIENCY_CPU_GUARD_PERCENT
 			: deps.cpuGuardPercent
 	let lastMono: number | null = null
+	/** The latest valid event-loop delay interval, for attribution logs only. */
+	let lastLoop: LoopDelayInterval | null = null
 	let interval: { cancel(): void } | undefined
 	// Evidence time is strictly monotonic: a raw clock that goes back is offset
 	// so it continues from the last reading. A discontinuity discards every
@@ -369,11 +373,17 @@ export function createEfficiencyMonitor(deps: {
 		try {
 			if (deps.loopDelay !== undefined) {
 				const parsed = loopSchema.safeParse(deps.loopDelay())
-				if (parsed.success) sampledLoopDelayMaxMs = parsed.data.maxMs
-				else commonValid = false
+				if (parsed.success) {
+					sampledLoopDelayMaxMs = parsed.data.maxMs
+					lastLoop = { maxMs: parsed.data.maxMs, p99Ms: parsed.data.p99Ms }
+				} else {
+					commonValid = false
+					lastLoop = null
+				}
 			}
 		} catch {
 			commonValid = false
+			lastLoop = null
 		}
 		const sources = new Map<string, SourceDropSample>()
 		for (const id of readable ? new Set(ids) : states.keys()) {
@@ -753,6 +763,13 @@ export function createEfficiencyMonitor(deps: {
 			const waiting = s.pending !== null
 			const link = resolved.some(r => r.code === "link")
 			for (const r of resolved) {
+				// A `host` label without loop lag came from CPU at the guard alone:
+				// the gate bounds how long it excuses a tuned decoder's own loss.
+				const cpuOnly =
+					r.code === "host" &&
+					!(r.loop !== null && r.loop >= HOST_LOOP_DELAY_MS)
+						? { hostCpuOnly: true as const }
+						: {}
 				if (r.code === "link") {
 					s.linkDrops.push(r.at)
 					if (s.linkDrops.length > 32) s.linkDrops.shift()
@@ -765,9 +782,15 @@ export function createEfficiencyMonitor(deps: {
 							atMono: r.at,
 							code: r.code,
 							branches: [...r.branches].sort(),
+							...cpuOnly,
 						})
 					if (r.sourceWide)
-						s.drops.push({ atMono: r.at, code: r.code, branches: "source" })
+						s.drops.push({
+							atMono: r.at,
+							code: r.code,
+							branches: "source",
+							...cpuOnly,
+						})
 					while (s.drops.length > MAX_DROP_SAMPLES) s.drops.shift()
 					fault(s, at)
 				}
@@ -1067,6 +1090,7 @@ export function createEfficiencyMonitor(deps: {
 		return null
 	}
 	return {
+		latestLoopDelay: () => lastLoop,
 		latestAttribution(id) {
 			const at = clock()
 			const s = states.get(id)

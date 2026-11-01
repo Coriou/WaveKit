@@ -2,6 +2,7 @@ import fc from "fast-check"
 import { expect, it } from "vitest"
 import { createEfficiencyMonitor } from "../../../../src/decoders/enablement/efficiency-monitor.js"
 import { createEfficiencyGate } from "../../../../src/decoders/enablement/efficiency-gate.js"
+import { CPU_ONLY_EXCUSE_MS } from "../../../../src/decoders/enablement/host-starvation.js"
 import {
 	EFFICIENCY_CLEAR_MS,
 	type RunningPlacement,
@@ -28,7 +29,7 @@ type Spec = { key: string; source: string; tuned?: boolean }
 function harness(
 	specs: readonly Spec[],
 	gateGuardPercent: number,
-	{ pipelined = false }: { pipelined?: boolean } = {},
+	{ pipelined = false, lagMs }: { pipelined?: boolean; lagMs?: number } = {},
 ) {
 	const sources = [...new Set(specs.map(s => s.source))]
 	let mono = 0
@@ -63,6 +64,13 @@ function harness(
 				]),
 			),
 		topology: () => "fixed",
+		...(lagMs !== undefined
+			? {
+					loopDelay: () => ({ maxMs: lagMs, p99Ms: lagMs }),
+					ingest: () => ({ maxGapMs: 0, catchupBytes: 0, chunks: 1 }),
+					shortfall: () => false,
+				}
+			: {}),
 		cpu,
 		now: () => mono,
 		monoNow: () => mono,
@@ -287,10 +295,11 @@ it("sustained CPU does not shed the tuned probationer while the scapegoat's clea
 	h.cpu.normalisedPercent = 95
 	// a goes at +2 s; nothing untuned is left, but its relief has not had
 	// EFFICIENCY_CLEAR_MS to show: readsb was shed at +4 s before the fix.
-	const verdicts = h.run(() => {}, 2_000 + EFFICIENCY_CLEAR_MS)
+	// Host CPU at the guard is host-wide: past the clear window the tuned
+	// probationer is still not shed (host starvation never sheds it).
+	const verdicts = h.run(() => {}, 2_000 + 3 * EFFICIENCY_CLEAR_MS)
 	expect(verdicts.map(({ key, detail, at }) => ({ key, detail, at }))).toEqual([
 		{ key: "a", detail: "cpu", at: 2_000 },
-		{ key: "readsb", detail: "cpu", at: 2_000 + EFFICIENCY_CLEAR_MS },
 	])
 })
 
@@ -386,14 +395,16 @@ it("the tuned probationer's own branch drops count when no-holder overflow share
 	// Each sample: readsb's own branch drops and the absorber overflows with
 	// no holder known, on a healthy host. The overflow is loss elsewhere; the
 	// branch drops are readsb's own. Before the fix the sample was charged to
-	// the source as a whole only, and readsb was never shed in 180 s.
+	// the source as a whole only, and readsb was never shed in 180 s. A lone
+	// drop could still be a host episode reaching a sibling next sample, so
+	// it is shed at the second adjacent sample of its own loss (+4 s).
 	const h = harness([{ key: "readsb", source: "s", tuned: true }], 90)
 	const verdicts = h.run(() => {
 		h.dropOn("s", "readsb")
 		h.overflowNoHolder("s")
 	}, 180_000)
 	expect(verdicts.map(({ key, detail, at }) => ({ key, detail, at }))).toEqual([
-		{ key: "readsb", detail: "drops", at: 2_000 },
+		{ key: "readsb", detail: "drops", at: 4_000 },
 	])
 	const charged = h.monitor.chargedDropsBetweenMono("s", 0, Infinity)
 	expect(charged.at(-1)?.branches).toBe("source")
@@ -402,24 +413,42 @@ it("the tuned probationer's own branch drops count when no-holder overflow share
 })
 
 it("late windows keep explicit branch charges beside source-wide overflow", () => {
-	// Host loss (CPU between the monitor's and the gate's guards): readsb's
-	// own branch drops beside no-holder overflow are still its own, and the
-	// windows name its branch beside the source-wide charge.
+	// Host loss from CPU alone (between the monitor's and the gate's guards):
+	// the windows name readsb's branch beside the source-wide charge. CPU
+	// alone excuses its own branch's drops for CPU_ONLY_EXCUSE_MS (30 000 ms)
+	// only: it graduates at +30 s, and the late windows after it shed it as
+	// its own loss (the first drop is at +2 s, so not before +32 s).
 	const h = harness([{ key: "readsb", source: "s", tuned: true }], 99)
 	h.cpu.normalisedPercent = 95
 	const verdicts = h.run(() => {
 		h.dropOn("s", "readsb")
 		h.overflowNoHolder("s")
-	}, 40_000)
-	expect(verdicts.map(({ key, detail, at }) => ({ key, detail, at }))).toEqual([
-		{ key: "readsb", detail: "drops", at: 2_000 },
+	}, 60_000)
+	expect(verdicts).toEqual([
+		{ key: "readsb", detail: "late-drops", at: 48_000 },
 	])
+	expect(verdicts[0]!.at).toBeGreaterThanOrEqual(2_000 + CPU_ONLY_EXCUSE_MS)
 	expect(h.monitor.latestAttribution("s")).toBe("host")
 	expect(h.monitor.lateWindows("s").at(-1)).toMatchObject({
 		condemning: true,
 		condemnedBranches: "source",
 		explicitBranches: ["decoder-readsb"],
 	})
+})
+
+it("late windows with explicit branch charges keep the tuned decoder while loop lag explains them", () => {
+	// The same loss with the event loop lagging (a real host episode, never
+	// time-bounded): nothing is shed.
+	const h = harness([{ key: "readsb", source: "s", tuned: true }], 99, {
+		lagMs: 80,
+	})
+	h.cpu.normalisedPercent = 95
+	const verdicts = h.run(() => {
+		h.dropOn("s", "readsb")
+		h.overflowNoHolder("s")
+	}, 120_000)
+	expect(verdicts).toEqual([])
+	expect(h.monitor.latestAttribution("s")).toBe("host")
 })
 
 it("host loss during a CPU scapegoat's clear window sheds nobody else on any source", () => {

@@ -199,6 +199,20 @@ describe("mock decoder counters match the core's", () => {
 			expect(mock).toEqual(core.verdict)
 			expect(mockReception(counters, mock.code)).toEqual(core.reception)
 			expect(counters).toEqual(core.counters)
+			// while the host is busy its sentence wins; the hint stays its own field
+			const hostBusy = { congestedBranches: 2, loopLagP99Ms: 120 }
+			const busyCore = decoderSummary(
+				{ ...d, hostBusy, counters: status },
+				Date.now(),
+			)
+			const busyMock = mockVerdict(
+				{ ...d, hostBusy } as unknown as DecoderInfo,
+				"idle",
+				counters,
+			)
+			expect(busyMock.text).toContain("host busy")
+			expect(busyMock).toEqual(busyCore.verdict)
+			expect(mockReception(counters, busyMock.code)).toEqual(busyCore.reception)
 		},
 	)
 })

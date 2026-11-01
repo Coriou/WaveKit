@@ -15,6 +15,7 @@ import type {
 	ChannelProvider,
 } from "../../../../src/core/channelizer/types.js"
 import type {
+	ChargedDrop,
 	EfficiencyGate,
 	LateDropWindow,
 	PlacementPlan,
@@ -471,8 +472,13 @@ it.each(["move", "remove and re-add"] as const)(
 		// Synthetic channels and in-process streams keep the scenario isolated.
 		f.sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 1_000_000 })
 		f.create("dec")
+		// A running YAML bystander: "dec" is not the only running decoder, so
+		// it keeps the untuned loss backoff (the sole one is protected as tuned).
+		f.yamlDecoder("bystander")
+		f.create("bystander")
+		const bystander = f.place("bystander", 1_050_000)
 		const original = f.place("dec", 1_000_000)
-		f.plan([original])
+		f.plan([original, bystander])
 		await f.manager.startAll()
 		const lateShed = async () => {
 			const start = performance.now()
@@ -495,10 +501,10 @@ it.each(["move", "remove and re-add"] as const)(
 		await lateShed()
 		const replacement = change === "move" ? f.place("dec", 1_025_000) : original
 		if (change === "remove and re-add") {
-			f.plan([])
+			f.plan([bystander])
 			await f.settle()
 		}
-		f.plan([replacement])
+		f.plan([replacement, bystander])
 		await f.settle()
 		expect(forget).toHaveBeenCalledWith(original.key)
 		expect(f.instances.get("dec")?.running).toBe(true)
@@ -800,3 +806,180 @@ it.each([false, true])(
 		monitor.stop()
 	},
 )
+
+it.each(["host", "consumer"] as const)(
+	"the only running decoder is shed for its own (consumer) loss only, never host loss: %s",
+	async code => {
+		let windows: LateDropWindow[] = []
+		let drops: ChargedDrop[] = []
+		const gate = createEfficiencyGate(
+			{ budgetCores: 10, cpuGuardPercent: 90 },
+			{
+				drops: {
+					monoNow: () => performance.now(),
+					sources: () => ["rtl"],
+					dropState: () => ({ state: "ok", dropBytesPerSecond: 0 }),
+					droppedSinceMono: () => false,
+					droppedWithinMs: () => false,
+					latestAttribution: () => "none",
+					lateWindows: () => windows,
+					lastSampleMono: () => performance.now(),
+					coverageCompleteAtMono: (_id, since, amount) =>
+						performance.now() >= since + amount ? since + amount : null,
+					chargedDropsBetweenMono: (_id, from, to) =>
+						drops.filter(d => d.atMono >= from && d.atMono <= to),
+				},
+			},
+		)
+		const probation = vi.spyOn(gate, "probation")
+		const f = setup("rate-test", gate)
+		f.create("dec")
+		f.plan([f.place("dec", 162_000_000)])
+		await f.manager.startAll()
+		await vi.advanceTimersByTimeAsync(65_000)
+		// Alone, it is judged as the tuned decoder (no band covers the tuning here).
+		const judged = probation.mock.calls.at(-1)![0][0]!
+		expect(judged.tunedBand).toBe(true)
+		const branch = judged.inputBranch!
+		const start = performance.now()
+		// Ten 2000 ms samples of loss on its own branch over two condemning
+		// windows, all settled (the last drop is 10 000 ms old by the next pass).
+		drops = Array.from({ length: 10 }, (_, i) => ({
+			atMono: start - 20_000 + 1_000 + i * 2_000,
+			code,
+			branches: [branch],
+		}))
+		windows = [0, 1].map(index => ({
+			startMono: start - 20_000 + index * 10_000,
+			endMono: start - 20_000 + (index + 1) * 10_000,
+			condemning: true,
+			linkOrUnknownDrops: false,
+			condemnedBranches: [branch],
+		}))
+		await vi.advanceTimersByTimeAsync(10_000)
+		await f.settle()
+		const status = f.manager.getAllStatus()[0]!
+		const shedLogs = f.warn.mock.calls.filter(
+			call => call[1] === "Late drops shed a decoder",
+		)
+		if (code === "host") {
+			expect(status.running).toBe(true)
+			expect(shedLogs).toEqual([])
+			expect(status.hostBusy).toEqual({
+				congestedBranches: 1,
+				loopLagP99Ms: null,
+			})
+			return
+		}
+		expect(status).toMatchObject({
+			running: false,
+			suspension: { reasonCode: "efficiency-budget" },
+			efficiency: { detail: "late-drops", cause: "decoder" },
+		})
+		const retryInMs = Date.parse(status.efficiency!.retryAt!) - Date.now()
+		expect(retryInMs).toBeGreaterThan(30_000 - 10_000)
+		expect(retryInMs).toBeLessThanOrEqual(30_000)
+		expect(shedLogs).toHaveLength(1)
+		expect(shedLogs[0]![0]).toMatchObject({
+			decoderId: "dec",
+			tuned: true,
+			retryInMs: 30_000,
+			cause: "decoder",
+			congestedBranches: 1,
+			loopLagP99Ms: null,
+			loopLagMaxMs: null,
+		})
+		expect(
+			f.info.mock.calls.find(
+				call =>
+					call[1] === "Decoder suspension changed" &&
+					call[0].reasonCode === "efficiency-budget",
+			)?.[0],
+		).toMatchObject({ efficiencyDetail: "late-drops", cause: "decoder" })
+
+		// Requirement 6: the operator's start clears the shed and re-admits it.
+		await f.manager.startDecoder("dec", {
+			startMode: "operator",
+			clearEfficiencyShed: true,
+		})
+		await f.settle()
+		expect(f.manager.getAllStatus()[0]).toMatchObject({ running: true })
+		expect(
+			f.info.mock.calls.some(
+				call => call[1] === "Operator start cleared an efficiency shed",
+			),
+		).toBe(true)
+	},
+)
+
+it("an operator start without the clear flag keeps the shed and its backoff", async () => {
+	const gate = fakeGate()
+	const f = setup("rate-test", gate)
+	f.create("dec")
+	const placement = f.place("dec", 162_000_000)
+	f.plan([placement])
+	await f.manager.startAll()
+	gate.probation = vi.fn(() => [
+		{ key: placement.key, detail: "late-drops" as const },
+	])
+	await vi.advanceTimersByTimeAsync(2500)
+	gate.probation = vi.fn(() => [])
+	gate.admit = vi.fn<EfficiencyGate["admit"]>(() => ({
+		admit: false,
+		detail: "late-drops",
+		retryAtMs: performance.now() + 100_000,
+	}))
+	await f.manager.startDecoder("dec", { startMode: "operator" })
+	await f.settle()
+	expect(gate.forget).not.toHaveBeenCalledWith(placement.key)
+	expect(f.manager.getAllStatus()[0]).toMatchObject({ running: false })
+})
+
+it("an operator start that clears a tuned shed re-admits it on probation, and its own loss sheds it again", async () => {
+	const gate = fakeGate()
+	const f = setup("rate-test", gate)
+	f.create("dec")
+	const placement = f.place("dec", 162_000_000)
+	f.plan([placement])
+	await f.manager.startAll()
+	const shed = async () => {
+		gate.probation = vi.fn(() => [
+			{ key: placement.key, detail: "drops" as const },
+		])
+		await vi.advanceTimersByTimeAsync(2500)
+		gate.probation = vi.fn(() => [])
+		await f.settle()
+		expect(f.manager.getAllStatus()[0]).toMatchObject({
+			running: false,
+			efficiency: { detail: "drops" },
+		})
+	}
+	await shed()
+	await f.manager.startDecoder("dec", {
+		startMode: "operator",
+		clearEfficiencyShed: true,
+	})
+	await f.settle()
+	expect(gate.forget).toHaveBeenCalledWith(placement.key)
+	expect(f.manager.getAllStatus()[0]).toMatchObject({ running: true })
+	// The gate judges the re-admitted run as an automatic start, so probation
+	// and late shedding apply to it; an operator start would exempt it.
+	await vi.advanceTimersByTimeAsync(2500)
+	const judged = vi
+		.mocked(gate.probation)
+		.mock.calls.at(-1)![0]
+		.find(p => p.key === placement.key)
+	expect(judged).toMatchObject({ startMode: "auto" })
+	await shed()
+	// An operator stop ends it: the next operator start (no shed) is exempt.
+	await f.manager.stopDecoder("dec")
+	await f.manager.startDecoder("dec", { startMode: "operator" })
+	await f.settle()
+	await vi.advanceTimersByTimeAsync(2500)
+	expect(
+		vi
+			.mocked(gate.probation)
+			.mock.calls.at(-1)![0]
+			.find(p => p.key === placement.key),
+	).toMatchObject({ startMode: "operator" })
+})
