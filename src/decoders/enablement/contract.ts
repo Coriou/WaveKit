@@ -422,15 +422,14 @@ export interface Admitted {
 	admit: true
 	displace?: readonly string[]
 }
-export type AdmissionDecision =
-	| Admitted
-	| {
-			admit: false
-			detail: DecoderEfficiencyDetail
-			retryAtMs: number
-			/** A loss shed: whose loss it was (see host-starvation.ts). */
-			cause?: DecoderLossCause
-	  }
+export interface Refused {
+	admit: false
+	detail: DecoderEfficiencyDetail
+	retryAtMs: number
+	/** A loss shed: whose loss it was (see host-starvation.ts). */
+	cause?: DecoderLossCause
+}
+export type AdmissionDecision = Admitted | Refused
 export interface ProbationVerdict {
 	key: string
 	detail: "drops" | "cpu" | "late-drops"
