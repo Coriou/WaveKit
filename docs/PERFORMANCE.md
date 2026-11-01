@@ -44,24 +44,25 @@ signal processing. The plan that follows from them is in
    licensed (for example `rustfft`). Avoid C DSP libraries with GPL or LGPL terms,
    such as FFTW and VOLK.
 
-Internal, transferred worker messages on a hot path may use a cheap structural
-guard instead of a Zod parse; validate external data and configuration with Zod as
-everywhere else. 9. **Logging on hot paths.** No info or warn line per message, frame, chunk or
-line. Each line is a synchronous stdout write on the main thread, and one
-`Decoded Message` line with its payload was 442 B, so 1,000 outputs/s (SBS at
-150 aircraft) would have been 38 GB of logs a day. A per-message line is debug
-or trace. A warning that can repeat per message goes through `LogRateLimiter`
-(`src/utils/logger.ts`): one line per key per minute with a `suppressed`
-count. Volume is reported by one `CountSummary` info line per minute
-(`Decoder outputs in the last minute`, counts per decoder). State changes stay
-at info: start, stop, connect, retune, prune summaries. 10. **WebSocket budget.** A broadcast is serialised once, on the first subscribed
-client, and not at all when nobody subscribes to the channel. Entity updates
-are throttled per entity (aircraft 1 s; vessels, APRS and mesh 2 s), and a
-message carries what changed rather than repeating history: the aircraft
-trail goes as `trackAppend` deltas, the full trail only with the snapshot,
-`aircraft:new`, `aircraft:lost` and a staggered resync every 300 updates. Aim
-for at most about 100 KB/s per client for the aircraft channel at 150
-aircraft.
+9. **Logging on hot paths.** No info or warn line per message, frame, chunk or line.
+   Each line is a synchronous stdout write on the main thread, and one `Decoded Message`
+   line with its payload was 442 B, so 1,000 outputs/s (SBS at 150 aircraft) would have
+   been 38 GB of logs a day. A per-message line is debug or trace. A warning that can
+   repeat per message goes through `LogRateLimiter` (`src/utils/logger.ts`): one line per
+   key per minute with a `suppressed` count. Volume is reported by one `CountSummary`
+   info line per minute (`Decoder outputs in the last minute`, counts per decoder). State
+   changes stay at info: start, stop, connect, retune, prune summaries.
+10. **WebSocket budget.** A broadcast is serialised once, on the first subscribed
+    client, and not at all when nobody subscribes to the channel. Entity updates are
+    throttled per entity (aircraft 1 s; vessels, APRS and mesh 2 s), and a message carries
+    what changed rather than repeating history: the aircraft trail goes as `trackAppend`
+    deltas, the full trail only with the snapshot, `aircraft:new`, `aircraft:lost` and a
+    staggered resync every 300 updates. Aim for at most about 100 KB/s per client for the
+    aircraft channel at 150 aircraft.
+
+Internal, transferred worker messages on a hot path may use a cheap structural guard
+instead of a Zod parse; validate external data and configuration with Zod as
+everywhere else.
 
 ### Aircraft WebSocket channel (2026-11-01)
 

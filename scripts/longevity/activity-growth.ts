@@ -138,7 +138,7 @@ try {
 		now: () => new Date(clock.t),
 	})
 
-	// "Decoded Message" line size (src/index.ts logs every decoder output at info).
+	// "Decoded Message" line size (src/index.ts logs every decoder output at debug; info before 2026-11-01).
 	let logBytes = 0
 	let logLines = 0
 	const counter = new Writable({
