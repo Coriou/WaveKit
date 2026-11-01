@@ -499,6 +499,7 @@ function recordOf(item: ActivitySummary, decoded?: JsonValue): ActivityRecord {
 		decodedData,
 		...(item.position ? { position: item.position } : {}),
 		...(item.coalesced ? { coalesced: item.coalesced } : {}),
+		...(item.aircraft ? { aircraft: item.aircraft } : {}),
 	}
 	return { ...base, kind: "decoder-reception", payload }
 }
@@ -996,6 +997,7 @@ export async function buildMockServer(
 			fields: m.fields,
 		}
 		if (m.position) summary.position = m.position
+		if (m.aircraft) summary.aircraft = m.aircraft
 		decodedById.set(summary.eventId, m.data)
 		if (decodedById.size > 2500) {
 			const first = decodedById.keys().next().value

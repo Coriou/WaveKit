@@ -1,6 +1,6 @@
 import type { AircraftData } from "../../../decoders/builtin/readsb.js"
 import { z } from "zod"
-import { isCoalescibleShape } from "../storage/coalesce.js"
+import { isPositionOnlyShape } from "../storage/coalesce.js"
 import type { DecodePresentation } from "../types.js"
 import {
 	altitudeFromFeet,
@@ -68,7 +68,7 @@ export function presentAircraft(data: unknown): DecodePresentation | undefined {
 	const key = icao === null ? null : entityKey("icao", icao)
 	const altitudeFt = firstNumber(payload, ["altitude", "alt_baro"])
 	const position = readPosition(payload, altitudeFromFeet(altitudeFt))
-	const fields = isCoalescibleShape("aircraft", payload)
+	const fields = isPositionOnlyShape("aircraft", payload)
 		? []
 		: takeFields(
 				[

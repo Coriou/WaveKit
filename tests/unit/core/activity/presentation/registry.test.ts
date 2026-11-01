@@ -58,7 +58,7 @@ describe("activity presentation registry", () => {
 		)
 	})
 
-	it("drops fields on a position-only aircraft and rejects a non-hex or tilde address", () => {
+	it("lists the fields of a position report and rejects a non-hex or tilde address", () => {
 		const bare = present("aircraft", {
 			hex: "AbC123",
 			altitude: 100,
@@ -73,7 +73,8 @@ describe("activity presentation registry", () => {
 			category: "aircraft",
 			protocol: "adsb",
 		})
-		expect(bare?.fields).toBeUndefined()
+		// A stored aircraft row stands for the merged state: it always lists its fields.
+		expect(bare?.fields?.map(field => field.key)).toEqual(["altitude"])
 		expect(
 			present("aircraft", { hex: "~ABC123", lat: 1, lon: 2 })?.entityKey,
 		).toBeUndefined()
@@ -92,7 +93,9 @@ describe("activity presentation registry", () => {
 			alt_baro: 500,
 		})
 		expect(bare?.position).toBeUndefined()
-		expect(bare?.fields).toBeUndefined()
+		expect(bare?.fields?.find(field => field.key === "altitude")?.value).toBe(
+			500,
+		)
 		const view = present("aircraft", {
 			icao: "abcdef",
 			lat: 0,
@@ -116,7 +119,7 @@ describe("activity presentation registry", () => {
 		).toBeUndefined()
 	})
 
-	it("pads an MMSI, titles a vessel by name, and hides fields on a bare position", () => {
+	it("pads an MMSI, titles a vessel by name, and lists a position report's fields", () => {
 		const named = present("ship", {
 			mmsi: "12345",
 			name: "Ever Given",
@@ -149,7 +152,7 @@ describe("activity presentation registry", () => {
 			sog: 8,
 		})
 		expect(bare?.entityKey).toBe("mmsi:244660000")
-		expect(bare?.fields).toBeUndefined()
+		expect(bare?.fields?.map(field => field.key)).toEqual(["sog", "cog"])
 		expect(bare?.title).toBe("244660000")
 		expect(present("ship", { mmsi: "1234567890" })?.entityKey).toBeUndefined()
 	})

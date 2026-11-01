@@ -71,6 +71,15 @@ describe("mock activity floods", () => {
 		expect(of("icao:ABC123")).toHaveLength(1)
 		expect(of("icao:ABC123")[0]?.members).toHaveLength(2250)
 		expect(of("icao:ABC123")[0]?.view.title).toBe("WKT101")
+		// Like the core's stored rows: every aircraft row lists its altitude and the identity known when stored.
+		const planes = rows.filter(r => r.entityKey === "icao:ABC123")
+		expect(
+			planes.every(
+				r =>
+					r.aircraft?.callsign === "WKT101" &&
+					r.fields.some(f => f.key === "altitude"),
+			),
+		).toBe(true)
 		// 15 min of beacons: one stack, called a likely idle beacon
 		const beacon = of("capcode:0042001")[0]
 		expect(of("capcode:0042001")).toHaveLength(1)

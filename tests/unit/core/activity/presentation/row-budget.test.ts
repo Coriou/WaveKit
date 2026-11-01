@@ -11,7 +11,7 @@ import {
 import { presentMeshtastic } from "../../../../../src/core/activity/presentation/meshtastic.js"
 import { presentDecoderOutput } from "../../../../../src/core/activity/presentation/registry.js"
 import { presentShip } from "../../../../../src/core/activity/presentation/ship.js"
-import { isCoalescibleShape } from "../../../../../src/core/activity/storage/coalesce.js"
+import { isPositionOnlyShape } from "../../../../../src/core/activity/storage/coalesce.js"
 import { buildActivityRow } from "../../../../../src/core/activity/storage/row.js"
 import type {
 	DecodePresentation,
@@ -58,7 +58,10 @@ function unfittedGrowth(output: DecoderOutput): number {
 }
 
 function limitOf(output: DecoderOutput): number {
-	return isCoalescibleShape(output.type, output.data as Record<string, unknown>)
+	return isPositionOnlyShape(
+		output.type,
+		output.data as Record<string, unknown>,
+	)
 		? ROW_GROWTH_COALESCED_BYTES
 		: ROW_GROWTH_MAX_BYTES
 }
@@ -100,19 +103,8 @@ describe("coalesced bound (req 4.7)", () => {
 		expect(ROW_GROWTH_MAX_BYTES).toBe(1_100)
 	})
 
-	it("keeps typical fixes unrounded with altM and the mesh title", () => {
+	it("keeps typical APRS and mesh fixes unrounded with altM and the mesh title", () => {
 		const cases: Array<[DecoderOutput, DecodePosition, string, number]> = [
-			[
-				decoderOutput("aircraft", {
-					icao: "abc123",
-					lat: 51.123456,
-					lon: -0.123456,
-					altitude: 35_000,
-				}),
-				{ lat: 51.123456, lon: -0.123456, altM: 10_668 },
-				"ABC123",
-				164,
-			],
 			[
 				decoderOutput("aprs", {
 					source: "N0CALL-9",
@@ -154,93 +146,77 @@ describe("coalesced bound (req 4.7)", () => {
 })
 
 describe("golden maximum rows", () => {
-	const coalesced: Array<
-		[string, (altM: number, lat: number, lon: number) => DecoderOutput]
-	> = [
-		[
-			"aircraft",
-			(altM, lat, lon) =>
+	// Aircraft and ship rows always list their fields: the 1,100-byte bound below.
+	const aprs = (altM: number, lat: number, lon: number) =>
+		decoderOutput("aprs", {
+			source: "ABCDEF-15",
+			dataType: "Position with timestamp and messaging",
+			lat,
+			lon,
+			altitude: altM / 0.3048,
+		})
+
+	for (const altM of [-500, 50_000]) {
+		it(`aprs at altM ${altM}, widest decimals: fits 240 bytes`, () => {
+			const output = aprs(altM, WIDE_LAT, WIDE_LON)
+			expect(limitOf(output)).toBe(ROW_GROWTH_COALESCED_BYTES)
+			const view = presentDecoderOutput(output, "measure")
+			expect(presentationGrowth(output).growth).toBeLessThanOrEqual(
+				ROW_GROWTH_COALESCED_BYTES,
+			)
+			// The 37-character data type pushes the title past the bound:
+			// the longest title at six decimals wins, altM kept.
+			expect(unfittedGrowth(output)).toBeGreaterThan(ROW_GROWTH_COALESCED_BYTES)
+			expect(view?.position).toEqual({
+				lat: -89.123457,
+				lon: -179.123457,
+				altM,
+			})
+			expect(view?.title?.startsWith("ABCDEF-15 Position")).toBe(true)
+		})
+
+		it(`aprs at altM ${altM}, widest JSON coordinates: fits 240 bytes`, () => {
+			// 17 significant digits below 1e-5 print as 25 characters, the
+			// widest JSON number in range.
+			const output = aprs(altM, WIDEST, WIDEST)
+			expect(limitOf(output)).toBe(ROW_GROWTH_COALESCED_BYTES)
+			const view = presentDecoderOutput(output, "measure")
+			expect(presentationGrowth(output).growth).toBeLessThanOrEqual(
+				ROW_GROWTH_COALESCED_BYTES,
+			)
+			expect(view?.position?.altM).toBe(altM)
+			expect(unfittedGrowth(output)).toBeGreaterThan(ROW_GROWTH_COALESCED_BYTES)
+			expect(decimals(view!.position!.lat)).toBeGreaterThanOrEqual(4)
+		})
+
+		it(`aircraft and ship position reports at altM ${altM} list their fields within 1,100 bytes`, () => {
+			for (const output of [
 				decoderOutput("aircraft", {
 					icao: "abc123",
-					lat,
-					lon,
+					lat: WIDEST,
+					lon: WIDEST,
 					altitude: altM / 0.3048,
 					gs: 1.7976931348623157e308,
 				}),
-		],
-		[
-			"aprs",
-			(altM, lat, lon) =>
-				decoderOutput("aprs", {
-					source: "ABCDEF-15",
-					dataType: "Position with timestamp and messaging",
-					lat,
-					lon,
-					altitude: altM / 0.3048,
-				}),
-		],
-		[
-			"ship",
-			(_altM, lat, lon) =>
 				decoderOutput("ship", {
 					mmsi: 999_999_999,
 					messageType: 27,
-					lat,
-					lon,
+					lat: WIDE_LAT,
+					lon: WIDE_LON,
+					sog: 1.7976931348623157e308,
 				}),
-		],
-	]
-
-	for (const [name, make] of coalesced) {
-		for (const altM of [-500, 50_000]) {
-			it(`${name} at altM ${altM}, widest decimals: fits 240 bytes`, () => {
-				const output = make(altM, WIDE_LAT, WIDE_LON)
-				expect(limitOf(output)).toBe(ROW_GROWTH_COALESCED_BYTES)
-				const view = presentDecoderOutput(output, "measure")
+			]) {
+				expect(limitOf(output)).toBe(ROW_GROWTH_MAX_BYTES)
 				expect(presentationGrowth(output).growth).toBeLessThanOrEqual(
-					ROW_GROWTH_COALESCED_BYTES,
+					ROW_GROWTH_MAX_BYTES,
 				)
-				if (name === "aprs") {
-					// The 37-character data type pushes the title past the bound:
-					// the longest title at six decimals wins, altM kept.
-					expect(unfittedGrowth(output)).toBeGreaterThan(
-						ROW_GROWTH_COALESCED_BYTES,
-					)
-					expect(view?.position).toEqual({
-						lat: -89.123457,
-						lon: -179.123457,
-						altM,
-					})
-					expect(view?.title?.startsWith("ABCDEF-15 Position")).toBe(true)
-					return
-				}
-				const position: DecodePosition = { lat: WIDE_LAT, lon: WIDE_LON }
-				if (name !== "ship") position.altM = altM
-				expect(view?.position).toEqual(position)
-			})
-
-			it(`${name} at altM ${altM}, widest JSON coordinates: fits 240 bytes`, () => {
-				// 17 significant digits below 1e-5 print as 25 characters, the
-				// widest JSON number in range.
-				const output = make(altM, WIDEST, WIDEST)
-				expect(limitOf(output)).toBe(ROW_GROWTH_COALESCED_BYTES)
-				const unfitted = unfittedGrowth(output)
 				const view = presentDecoderOutput(output, "measure")
-				expect(presentationGrowth(output).growth).toBeLessThanOrEqual(
-					ROW_GROWTH_COALESCED_BYTES,
+				expect(view?.fields?.length).toBeGreaterThan(0)
+				expect(view?.position?.lat).toBe(
+					output.type === "ship" ? WIDE_LAT : WIDEST,
 				)
-				expect(view?.position).toBeDefined()
-				if (name !== "ship") expect(view?.position?.altM).toBe(altM)
-				if (name === "aprs") {
-					expect(unfitted).toBeGreaterThan(ROW_GROWTH_COALESCED_BYTES)
-					expect(decimals(view!.position!.lat)).toBeGreaterThanOrEqual(4)
-				} else {
-					// Aircraft and AIS titles are fixed-width ids: never shrunk.
-					expect(unfitted).toBeLessThanOrEqual(ROW_GROWTH_COALESCED_BYTES)
-					expect(view?.position?.lat).toBe(WIDEST)
-				}
-			})
-		}
+			}
+		})
 	}
 
 	it("meshtastic at the widest fix fits 240 bytes unrounded with the title", () => {
@@ -339,8 +315,10 @@ describe("golden maximum rows", () => {
 })
 
 describe("altM through fitRowBudget (req 4.7)", () => {
-	const output = decoderOutput("aircraft", {
-		icao: "abc123",
+	// A bare APRS position: the 240-byte bound (aircraft rows list their fields).
+	const output = decoderOutput("aprs", {
+		source: "N0CALL",
+		dataType: "Position",
 		lat: WIDE_LAT,
 		lon: WIDE_LON,
 		altitude: 1,
@@ -493,8 +471,8 @@ describe("row budget property", () => {
 
 describe("arithmetic fast path on typical coalesced receptions", () => {
 	it("builds no row for a seeded corpus of typical fixes", () => {
-		// Deterministic LCG: readsb (6 decimals) and SBS (float32) aircraft,
-		// APRS DDMM.hh minutes, AIS 1/600 000 degree, mesh 1e-7 degree.
+		// Deterministic LCG: APRS DDMM.hh minutes and mesh 1e-7 degree fixes
+		// (aircraft and ship rows list their fields under the full bound).
 		let seed = 0x2545f491
 		const next = () => {
 			seed = (Math.imul(seed, 1_103_515_245) + 12_345) >>> 0
@@ -504,21 +482,6 @@ describe("arithmetic fast path on typical coalesced receptions", () => {
 		const int = (lo: number, hi: number) => Math.floor(between(lo, hi + 1))
 		const makers: Array<() => DecoderOutput> = [
 			() =>
-				decoderOutput("aircraft", {
-					hex: "4ca1d3",
-					lat: Number(between(-60, 70).toFixed(6)),
-					lon: Number(between(-180, 180).toFixed(6)),
-					alt_baro: int(0, 1_800) * 25,
-					gs: int(0, 5_000) / 10,
-				}),
-			() =>
-				decoderOutput("aircraft", {
-					icao: "4CA1D3",
-					lat: Math.fround(between(-60, 70)),
-					lon: Math.fround(between(-180, 180)),
-					altitude: int(0, 1_800) * 25,
-				}),
-			() =>
 				decoderOutput("aprs", {
 					source: "N0CALL-9",
 					dataType: "Position with messaging",
@@ -527,15 +490,6 @@ describe("arithmetic fast path on typical coalesced receptions", () => {
 					altitude: int(0, 5_000),
 					course: int(0, 359),
 					speed: int(0, 80),
-				}),
-			() =>
-				decoderOutput("ship", {
-					mmsi: int(200_000_000, 799_999_999),
-					messageType: 1,
-					lat: int(-54_000_000, 54_000_000) / 600_000,
-					lon: int(-108_000_000, 108_000_000) / 600_000,
-					sog: int(0, 300) / 10,
-					cog: int(0, 3_599) / 10,
 				}),
 			() =>
 				decoderOutput(

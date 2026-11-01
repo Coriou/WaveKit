@@ -112,15 +112,6 @@ function fixture(index: number): DecoderOutput {
 	)
 }
 
-function bucket(index: number): string {
-	const slot = index % 20
-	if (slot < 14) return "adsb-position"
-	if (slot < 16) return "adsb-full"
-	if (slot < 18) return "ais"
-	if (slot === 18) return "aprs"
-	return "page"
-}
-
 function asEnvelope(
 	output: DecoderOutput,
 	index: number,
@@ -141,7 +132,7 @@ function asEnvelope(
 }
 
 describe("presentation built-row and on-disk arithmetic", () => {
-	it("keeps 1.6 growth within 240 bytes and any reception within 1100", () => {
+	it("keeps APRS and mesh 1.6 growth within 240 bytes and any reception within 1100", () => {
 		const bounds: Array<[string, DecoderOutput, number]> = [
 			[
 				"adsb-position",
@@ -153,7 +144,8 @@ describe("presentation built-row and on-disk arithmetic", () => {
 					lastSeen: "2026-10-13T00:00:00.000Z",
 					messageCount: 4,
 				}),
-				240,
+				// Aircraft and ship rows list their fields (one row per entity per window).
+				1_100,
 			],
 			[
 				"ais-position",
@@ -165,7 +157,7 @@ describe("presentation built-row and on-disk arithmetic", () => {
 					cog: 10,
 					sog: 12,
 				}),
-				240,
+				1_100,
 			],
 			[
 				"aprs-position",
@@ -289,13 +281,10 @@ describe("presentation built-row and on-disk arithmetic", () => {
 		const presentedEnvelopes: DecodeEnvelope[] = []
 		for (let index = 0; index < ROWS; index++) {
 			const output = fixture(index)
-			const name = bucket(index)
 			const growth = presentationGrowth(output)
 			plainEnvelopes.push(asEnvelope(output, index, false))
 			presentedEnvelopes.push(asEnvelope(output, index, true))
-			expect(growth.growth).toBeLessThanOrEqual(
-				name === "adsb-position" ? 240 : 1_100,
-			)
+			expect(growth.growth).toBeLessThanOrEqual(1_100)
 		}
 		const empty = await openStore({ limits: LIMITS })
 		const emptyStats = empty.stats()

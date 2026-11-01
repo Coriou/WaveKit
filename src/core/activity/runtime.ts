@@ -6,7 +6,10 @@
 import type { ActivityPublisher } from "../../decoders/manager.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
-import type { ActivityPresenter } from "./ingress.js"
+import type {
+	ActivityAircraftIdentityLookup,
+	ActivityPresenter,
+} from "./ingress.js"
 import type { ActivityQueryService } from "./storage/contract.js"
 import type {
 	ActivityRetentionPolicy,
@@ -122,6 +125,11 @@ export interface StartActivityRuntimeOptions {
 	 * one. A throwing callback is ignored; it never reaches the decoder path.
 	 */
 	onEnvelope?: (envelope: DecodeEnvelope) => void
+	/**
+	 * Aircraft enrichment cache read for stored aircraft rows (ingress.ts
+	 * `aircraftIdentity`): memory only, never a lookup or an await.
+	 */
+	aircraftIdentity?: ActivityAircraftIdentityLookup | null
 }
 
 /** Service that routes never call while Activity is disabled or unavailable. */
@@ -375,6 +383,7 @@ export async function startActivityRuntime(
 			},
 			logger: options.logger,
 			resolveProvenance: options.resolveProvenance ?? null,
+			aircraftIdentity: options.aircraftIdentity ?? null,
 		})
 		try {
 			options.setPublisher((decoderId, decoderType, output) => {

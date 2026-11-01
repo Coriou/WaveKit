@@ -20,7 +20,7 @@ import {
 	MAX_INDEXED_TEXT_BYTES,
 	MAX_SUMMARY_BYTES,
 } from "../storage/contract.js"
-import { isCoalescibleShape } from "../storage/coalesce.js"
+import { isPositionOnlyShape } from "../storage/coalesce.js"
 import { buildActivityRow } from "../storage/row.js"
 import type {
 	DecodeEnvelope,
@@ -414,7 +414,10 @@ function rowLimit(output: DecoderOutput): number {
 		typeof data === "object" &&
 		data !== null &&
 		!Array.isArray(data) &&
-		isCoalescibleShape(output.type, data as { readonly [key: string]: unknown })
+		isPositionOnlyShape(
+			output.type,
+			data as { readonly [key: string]: unknown },
+		)
 	)
 		return ROW_GROWTH_COALESCED_BYTES
 	return ROW_GROWTH_MAX_BYTES

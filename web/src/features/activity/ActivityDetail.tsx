@@ -318,7 +318,9 @@ export function ActivityDetail({
 						<div className="wka-field">
 							<dt>Merged</dt>
 							<dd>
-								{item.coalesced.receptions} receptions since{" "}
+								{item.coalesced.receptions > 1
+									? `${item.coalesced.receptions} receptions since `
+									: "Heard at "}
 								<time dateTime={item.coalesced.firstSeenAt}>
 									{clockText(item.coalesced.firstSeenAt)}
 								</time>

@@ -3,8 +3,8 @@
 // - one synthetic aircraft (ICAO ABC123) at 2.5 decodes/s, as readsb sends 1-30 messages/s per aircraft;
 //   every 10th decode carries its callsign and altitude and, as the core's merged entity rows do,
 //   `coalesced` for the 10 receptions it stands for: its own and 9 held ones heard 40 ms apart since
-//   the previous row, so no reception is counted by two rows; the rest are presence-only rows that
-//   stand for themselves (no fields). (The
+//   the previous row, so no reception is counted by two rows; the rest stand for themselves. Every row
+//   lists its altitude and carries the stored identity (`aircraft`, the callsign) like the core's. (The
 //   core now stores one merged row per aircraft per 60 s; the mock keeps the flood rate so folding stays
 //   exercised.)
 // - a POCSAG tone-only beacon (capcode 0042001, no content) every 45 s ± 3 s, as paging networks send
@@ -78,12 +78,14 @@ function aircraft(n: number): FloodEvent["summary"] {
 		frequencyHz: AIRCRAFT_HZ,
 		entityKey: "icao:ABC123",
 		title: full ? "WKT101" : "ABC123",
-		fields: full
-			? [
-					{ key: "callsign", label: "Callsign", value: "WKT101" },
-					{ key: "altitude", label: "Altitude", value: altitude, unit: "ft" },
-				]
-			: [],
+		// Every stored aircraft row lists its fields; the merged state keeps the callsign.
+		fields: [
+			...(full
+				? [{ key: "callsign", label: "Callsign", value: "WKT101" }]
+				: []),
+			{ key: "altitude", label: "Altitude", value: altitude, unit: "ft" },
+		],
+		aircraft: { callsign: "WKT101" },
 		position: {
 			lat: 48.6 + (n % 600) * 0.0005,
 			lon: -3.9,

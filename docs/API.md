@@ -5442,7 +5442,10 @@ The store holds three kinds:
 - `ingestion-gap`: written when rows are dropped.
 
 Entity coalescing: repeated receptions of one tracked entity are merged into
-one row per 60 s instead of a row each. Tracked entities, per decoder: an
+one row per 60 s instead of a row each. In short, periodic sensor and position
+readings are kept at about one row per entity per minute, plus a row for every
+identity change and every event (a doorbell, a button, an AIS static report,
+an APRS message). Tracked entities, per decoder: an
 `aircraft` (per ICAO address), a `ship` (per MMSI, AIS types 1, 2, 3, 18, 19
 and 27 only), an APRS position and a Meshtastic position (below), and an
 rtl_433 sensor reading (`signal` output, per `model`, `id` and `channel`).
@@ -5455,8 +5458,9 @@ is stored as a row when it is:
 - a first sighting (or the first after the entity was evicted);
 - informative: any field off the allowlist, or outside the type's gate (every
   other AIS type, APRS objects, messages and weather, other mesh ports, a
-  sensor reading with a button, event or other unknown field); it is stored
-  with its own fields;
+  sensor reading with a button, event or other unknown field, or one with no
+  measurement at all: only `model`, `id`, `channel`, metadata or battery
+  state, as doorbells and remotes send); it is stored with its own fields;
 - an identity change: a first or changed aircraft `callsign`, `squawk` (so an
   emergency squawk), `onGround`, `category` or `emergency`; ship `navStatus`,
   `name`, `callsign`, `imo`, `shipType`, `destination`, `eta` or `draught`;
@@ -5473,7 +5477,17 @@ stands for (`receptions - 1` were not stored on their own). Held receptions
 that no row follows (the aircraft went out of range) are stored as one row 60 s
 after the first of them, so the stored state is never more than 60 s behind;
 held receptions of an evicted entity, and all of them at shutdown, are stored
-at once. These held rows skip the per-decoder admission bucket (at most one per
+at once. Such a flushed row is a snapshot of the entity's latest state taken
+when Activity stores it: its `producedAt` and `receivedAt` are that store time
+(never earlier than its latest held reception), so rows in list order (`seq`)
+also read in time order, and its `coalesced` (present even for one held
+reception, `receptions` then 1) says when the receptions it stands for were
+heard: `lastSeenAt` is the latest of them, up to 60 s before the row's own
+time. Before the 2026-11-01 core a flushed row kept its latest reception's
+times, so it could list up to 60 s out of time order. If a flushed row's write
+fails, its receptions are held again and retried (no `write-failed` drop); a
+failed reception row hands the held receptions it carried to the entity's
+next row. These held rows skip the per-decoder admission bucket (at most one per
 entity per 60 s) but take a global token; one the global bucket, the queue caps
 or a paused store turn away stays held and is retried after `pauseRetryMs`
 (`stats.coalesceDeferrals`, not a loss). Only at shutdown, or past 4,096
@@ -5638,8 +5652,12 @@ identifier is missing, malformed, or contains a control character
 (U+0000–U+001F or U+007F–U+009F). Keys are at most 128 bytes and match
 `^[a-z][a-z0-9-]*:[^:]+$`. A row has at most 6 fields and a title of at most
 80 characters; long text is cut on a UTF-8 boundary with a trailing `…`. A
-position-only row (one that coalescing could drop) has a title, key, position,
-category and protocol but no fields. A presentation that fails never loses the
+position-only row (an APRS or Meshtastic position with nothing else) has a
+title, key, position, category and protocol but no fields. Aircraft and ship
+rows always list their fields (altitude, speed, track, course, ...): each stored
+row stands for the entity's merged state. Before the 2026-11-01 core, rows of
+aircraft without a callsign yet, Mode S-only aircraft and class B vessels
+could list none. A presentation that fails never loses the
 reception: the row is stored without it. Rows stored before the 2026-10-13 core keep category
 `other` and no entity key; nothing is backfilled, and old and new rows parse.
 
@@ -5836,6 +5854,14 @@ A fifth read from one caller, or any read while the queue is full, gets 429
 A summary of a merged entity row also has `coalesced: { receptions,
 firstSeenAt, lastSeenAt }` (see entity coalescing above), as does the record
 from `GET /api/activity/:eventId` and the `activity` WebSocket replay frames.
+An aircraft row stored from the 2026-11-01 core also has `aircraft`: who the
+aircraft was when the row was stored, `{ callsign?, registration?, typeCode?,
+typeDescription?, operator? }` (each at most 64 bytes, absent when unknown, the
+whole member absent when nothing was known). The callsign comes from the
+entity's merged state, the rest from the aircraft enrichment cache already in
+memory (never a lookup at store time); `operator` is the callsign's airline
+when known, else the registered operator. Search matches these values, so an
+aircraft's history is found by registration after it has left the live fleet.
 Default page size is 100 and the maximum is 200. A page token is bound to
 the same query and expires with the snapshot (5 minutes).
 

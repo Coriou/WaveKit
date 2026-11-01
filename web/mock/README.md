@@ -131,8 +131,9 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   off with `WAVEKIT_MOCK_ACTIVITY_FLOODS=0`, off by default in tests): the repeats a live receiver
   makes, so Activity's folding can be seen. A synthetic aircraft (ICAO `ABC123`, callsign `WKT101`
   every 10th decode, carrying `coalesced` for 10 receptions as the core's merged entity rows do:
-  its own and 9 heard 40 ms apart since the previous row, so no reception counts twice;
-  presence-only rows otherwise) at 2.5 decodes/s, a POCSAG tone-only beacon
+  its own and 9 heard 40 ms apart since the previous row, so no reception counts twice; every row
+  lists its altitude and carries the stored identity `aircraft: { callsign: "WKT101" }`, and the
+  fixed aircraft messages carry theirs too) at 2.5 decodes/s, a POCSAG tone-only beacon
   (capcode `0042001`, `Message type: unknown`) every 45 s ± 3 s, and a DMR call on TG 99 every
   3 min: 12 overs from radio 4242, each a `call_start` (no duration; the first with no radio yet)
   and a `call_end` 2.4 s later carrying the duration, as dsd-fme sends them. The history holds

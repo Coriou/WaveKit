@@ -12,8 +12,8 @@
  * reception is stored as a row when it is
  *  - a first sighting (or the first after the entity was evicted),
  *  - informative: outside the eligibility gate (AIS static data, APRS
- *    messages, other mesh ports, sensor events), or carrying any field off
- *    the allowlist,
+ *    messages, other mesh ports, sensor events and readings without a
+ *    measurement), or carrying any field off the allowlist,
  *  - an identity change: a first or changed value of an identity field
  *    (callsign, squawk and so an emergency squawk, emergency, AIS name or
  *    status, APRS symbol or comment, sensor battery),
@@ -31,7 +31,11 @@
  * receptions are only consumed by the row that carries them. A merged row
  * over the queue byte cap can never queue: it is stored as the latest held
  * reception's own data, or counted as a drop when even that is over the cap,
- * so it never blocks the held rows behind it. A gap of more
+ * so it never blocks the held rows behind it. A flushed row is the entity's
+ * state when stored: storage/ingress.ts stamps its clocks with the store time
+ * so seq order and time agree, and its `coalesced` span (even for one held
+ * reception) says when the receptions were heard. A row whose write fails
+ * holds the receptions it carried again (undo); none is lost. A gap of more
  * than `windowMs` between two receptions drops the stale position and
  * kinematics from the latest state (identity is kept).
  *
@@ -70,6 +74,12 @@ export interface CoalesceSpec {
 	 * position-only row shape or budget applies (sensor readings have no position).
 	 */
 	fullRows?: true
+	/**
+	 * Stored rows always list their fields (altitude, speed, track, ...):
+	 * `isPositionOnlyShape` is false. A stored row stands for the entity's
+	 * merged state (or a first sighting), never one of many position fixes.
+	 */
+	listRows?: true
 }
 
 const AIRCRAFT: CoalesceSpec = {
@@ -116,6 +126,7 @@ const AIRCRAFT: CoalesceSpec = {
 		"category",
 		"emergency",
 	],
+	listRows: true,
 	// A Beast frame whose address is not CRC-proven (modeS.crcOk false) names no
 	// aircraft: never tracked, so it cannot fill the entity bound with junk ids.
 	tracked: data => {
@@ -155,6 +166,7 @@ const SHIP: CoalesceSpec = {
 		"eta",
 		"draught",
 	],
+	listRows: true,
 	eligible: data =>
 		typeof data["messageType"] === "number" &&
 		SHIP_POSITION_TYPES.has(data["messageType"]),
@@ -226,30 +238,36 @@ const MESHTASTIC: CoalesceSpec = {
 	eligible: data => data["portnum"] === 3,
 }
 
+/** rtl_433 identity keys and `-M time/level/protocol` metadata: no measurement. */
+const SENSOR_METADATA = [
+	"model",
+	"id",
+	"channel",
+	"time",
+	"mic",
+	"mod",
+	"freq",
+	"freq1",
+	"freq2",
+	"rssi",
+	"snr",
+	"noise",
+	"protocol",
+]
+
 /**
  * rtl_433 periodic sensor readings (`signal` outputs, src/decoders/builtin/rtl433.ts), keyed
  * like the sensor presentation: model, id and channel. Weather-station measurements and
  * rtl_433's `-M time/level/protocol` metadata are redundant; a battery change is identity.
  * Any other field (button, event, state, code, alarm, tamper, ...) makes the reading an
- * event of its own, stored as a row.
+ * event of its own, stored as a row. So is a reception with no measurement at all (only
+ * identity, metadata or battery: a doorbell or remote press): every one is stored.
  */
 const SENSOR: CoalesceSpec = {
 	entity: "id",
 	entityParts: ["model", "channel"],
 	redundant: new Set([
-		"model",
-		"id",
-		"channel",
-		"time",
-		"mic",
-		"mod",
-		"freq",
-		"freq1",
-		"freq2",
-		"rssi",
-		"snr",
-		"noise",
-		"protocol",
+		...SENSOR_METADATA,
 		"temperature_C",
 		"temperature_F",
 		"humidity",
@@ -270,8 +288,28 @@ const SENSOR: CoalesceSpec = {
 		"battery_mV",
 	]),
 	identity: ["battery_ok", "subtype"],
-	eligible: data => typeof data["model"] === "string",
+	eligible: data => typeof data["model"] === "string" && hasMeasurement(data),
 	fullRows: true,
+}
+
+const SENSOR_NOT_MEASURED: ReadonlySet<string> = new Set([
+	...SENSOR_METADATA,
+	"battery_ok",
+	"subtype",
+])
+
+/** A non-null field beyond identity, metadata and battery state. */
+function hasMeasurement(data: JsonObject): boolean {
+	for (const field in data) {
+		const value = data[field]
+		if (
+			value !== undefined &&
+			value !== null &&
+			!SENSOR_NOT_MEASURED.has(field)
+		)
+			return true
+	}
+	return false
 }
 
 /** Output-type allowlists. Aircraft and ship are the WG1 sets plus reception metadata. */
@@ -313,6 +351,47 @@ export function isCoalescibleShape(
 		if (!spec.redundant.has(field)) return false
 	}
 	return true
+}
+
+/**
+ * Presenter form of the allowlist: the reception's row is a bare position
+ * (a map point with no list fields, held to the small row budget). APRS and
+ * mesh positions only; aircraft and ship rows always list their fields
+ * (`listRows`), whatever admission merges (reception metadata, kinematics).
+ */
+export function isPositionOnlyShape(
+	outputType: string,
+	data: { readonly [key: string]: unknown },
+): boolean {
+	if (COALESCE_SPECS[outputType]?.listRows) return false
+	return isCoalescibleShape(outputType, data)
+}
+
+/**
+ * An identity value as remembered: primitives as they are (compared with
+ * `===`, so the string "7700" and the number 7700 differ), anything else as
+ * its JSON text.
+ */
+type IdentityValue = string | number | boolean | { readonly json: string }
+
+function identityValue(value: JsonValue): IdentityValue {
+	return typeof value === "object" && value !== null
+		? { json: JSON.stringify(value) }
+		: (value as string | number | boolean)
+}
+
+/** No JSON text for a primitive: the hot path compares without allocating. */
+function sameIdentity(
+	known: IdentityValue | undefined,
+	value: JsonValue,
+): boolean {
+	if (known === undefined) return false
+	if (typeof known !== "object") return known === value
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		known.json === JSON.stringify(value)
+	)
 }
 
 /**
@@ -358,8 +437,8 @@ interface Held {
 interface EntityState {
 	/** receivedAt (ms) of the last stored reception; -Infinity when none is left. */
 	storedAt: Stamped<number> | undefined
-	/** Last known value per identity field, as JSON text. */
-	identity: Map<string, Stamped<string>>
+	/** Last known value per identity field. */
+	identity: Map<string, Stamped<IdentityValue>>
 	/** Merged latest state: allowlisted fields only, newest value wins. */
 	latest: Map<string, JsonValue>
 	/** receivedAt (ms) of the entity's latest reception, stored or held. */
@@ -367,9 +446,13 @@ interface EntityState {
 	held: Held | undefined
 }
 
-/** Undoes one commit (its write failed). `settle` records that it was written. */
+/**
+ * Undoes one commit (its write failed). Returns true when the row stood only
+ * for held receptions and they are held again (or already counted lost): the
+ * failed row lost nothing more. `settle` records that it was written.
+ */
 export interface CoalesceUndo {
-	(): void
+	(): boolean
 	settle(): void
 }
 
@@ -417,18 +500,18 @@ interface Evicted {
 	merged: CoalesceMerge
 }
 
-function undoOf(undo: () => void, settle: () => void): CoalesceUndo {
+function undoOf(undo: () => boolean, settle: () => void): CoalesceUndo {
 	return Object.assign(undo, { settle })
 }
 
 const NOOP_UNDO = (): CoalesceUndo =>
 	undoOf(
-		() => {},
+		() => false,
 		() => {},
 	)
 const STORE_UNTRACKED: CoalesceDecision = { store: true, commit: NOOP_UNDO }
 const HOLD: CoalesceDecision = { store: false, commit: NOOP_UNDO }
-const NO_IDENTITY: ReadonlyMap<string, string> = new Map()
+const NO_IDENTITY: ReadonlyMap<string, IdentityValue> = new Map()
 
 function live<T>(stamp: Stamped<T> | undefined): Stamped<T> | undefined {
 	let current = stamp
@@ -510,7 +593,7 @@ export class PositionCoalescer {
 		return this.evicted.size
 	}
 
-	/** Store-clock time the next held row is due, if any (evicted rows: now). */
+	/** Store-clock time the next held row is due, if any (evicted rows: now). O(1). */
 	nextDueAt(): number | undefined {
 		if (this.evicted.size > 0) return this.now()
 		for (const state of this.heldOrder.values()) return state.held?.dueAt
@@ -555,7 +638,7 @@ export class PositionCoalescer {
 				if (!fits(value)) informative = true
 				else if (
 					!changed &&
-					state?.identity.get(field)?.value !== JSON.stringify(value)
+					!sameIdentity(state?.identity.get(field)?.value, value)
 				)
 					changed = true
 			} else if (!spec.redundant.has(field)) informative = true
@@ -656,8 +739,30 @@ export class PositionCoalescer {
 			...entry,
 			commit: () => {
 				this.evicted.delete(entry)
-				return NOOP_UNDO()
+				let pending: Evicted | undefined = entry
+				return undoOf(
+					() => {
+						// Waits again for its row (or is counted lost past the bound).
+						if (pending !== undefined) this.addEvicted(pending)
+						pending = undefined
+						return true
+					},
+					() => {
+						pending = undefined
+					},
+				)
 			},
+		}
+	}
+
+	/** Queues an evicted entity's held row; past maxEntities the oldest is lost (counted). */
+	private addEvicted(entry: Evicted): void {
+		this.evicted.add(entry)
+		if (this.evicted.size <= this.maxEntities) return
+		const lost = this.evicted.values().next().value
+		if (lost) {
+			this.evicted.delete(lost)
+			this.onLost(lost.envelope)
 		}
 	}
 
@@ -670,13 +775,25 @@ export class PositionCoalescer {
 		return {
 			envelope: held.envelope,
 			present: held.present,
-			merged: { decodedData: snapshot(state.latest), coalesced: span(held) },
+			merged: {
+				decodedData: snapshot(state.latest),
+				coalesced: flushSpan(held),
+			},
 			commit: () => {
-				if (state.held === held) {
+				const carried = state.held === held
+				if (carried) {
 					state.held = undefined
 					this.heldOrder.delete(key)
 				}
-				return this.record(key, NO_IDENTITY, at, undefined, undefined, false)
+				return this.record(
+					key,
+					NO_IDENTITY,
+					at,
+					undefined,
+					undefined,
+					false,
+					carried ? held : undefined,
+				)
 			},
 		}
 	}
@@ -704,13 +821,18 @@ export class PositionCoalescer {
 		held.receptions++
 	}
 
+	/**
+	 * `flushed`: the row is a flush of these held receptions (and nothing else).
+	 * A row that carried held receptions, either way, holds them again on undo.
+	 */
 	private record(
 		key: string,
-		seen: ReadonlyMap<string, string>,
+		seen: ReadonlyMap<string, IdentityValue>,
 		at: number,
 		data: JsonObject | undefined,
 		index: SpecIndex | undefined,
 		carriesHeld: boolean,
+		flushed?: Held,
 	): CoalesceUndo {
 		let state = this.entities.get(key)
 		if (state === undefined) {
@@ -727,13 +849,16 @@ export class PositionCoalescer {
 		// An eligible row carried the held receptions (an ineligible one, such as
 		// AIS static data, or one stored without the merged state, leaves them
 		// for their own row).
+		let carried = flushed
 		if (carriesHeld && data !== undefined && state.held !== undefined) {
+			carried = state.held
 			state.held = undefined
 			this.heldOrder.delete(key)
 		}
-		const fields: Array<[string, Stamped<string>]> = []
+		const owner = state
+		const fields: Array<[string, Stamped<IdentityValue>]> = []
 		for (const [field, value] of seen) {
-			const stamp: Stamped<string> = {
+			const stamp: Stamped<IdentityValue> = {
 				value,
 				failed: false,
 				prev: state.identity.get(field),
@@ -752,11 +877,14 @@ export class PositionCoalescer {
 		this.evict()
 		// Undo touches only what this reception set and nothing later rows
 		// replaced. A later row that replaced it skips it on its own undo.
-		const undo = () => {
+		const undo = (): boolean => {
 			clock.failed = true
 			for (const [, stamp] of fields) stamp.failed = true
+			// The held receptions the row carried are held again, never lost.
+			if (carried !== undefined) this.restoreHeld(key, owner, carried)
+			carried = undefined
 			const current = this.entities.get(key)
-			if (!current) return
+			if (!current) return flushed !== undefined
 			for (const [field, stamp] of fields) {
 				if (current.identity.get(field) !== stamp) continue
 				const back = live(stamp.prev)
@@ -770,12 +898,44 @@ export class PositionCoalescer {
 				current.held === undefined
 			)
 				this.entities.delete(key)
+			return flushed !== undefined
 		}
 		const settle = () => {
 			clock.prev = undefined
+			carried = undefined
 			for (const [, stamp] of fields) stamp.prev = undefined
 		}
 		return undoOf(undo, settle)
+	}
+
+	/**
+	 * Holds a failed row's held receptions again. They join receptions held
+	 * since (the newer envelope stays, the earlier first sighting wins); else
+	 * they are due one window from now, at the back of the due order. An
+	 * entity evicted (or replaced) since gets them back as an evicted row.
+	 */
+	private restoreHeld(key: string, state: EntityState, held: Held): void {
+		if (this.entities.get(key) !== state) {
+			this.addEvicted({
+				envelope: held.envelope,
+				present: held.present,
+				merged: {
+					decodedData: snapshot(state.latest),
+					coalesced: flushSpan(held),
+				},
+			})
+			return
+		}
+		const current = state.held
+		if (current === undefined) {
+			state.held = { ...held, dueAt: this.now() + this.windowMs }
+			this.heldOrder.delete(key)
+			this.heldOrder.set(key, state)
+			return
+		}
+		current.receptions += held.receptions
+		if (Date.parse(held.firstSeenAt) < Date.parse(current.firstSeenAt))
+			current.firstSeenAt = held.firstSeenAt
 	}
 
 	/**
@@ -791,18 +951,14 @@ export class PositionCoalescer {
 			if (held === undefined) continue
 			state.held = undefined
 			this.heldOrder.delete(key)
-			this.evicted.add({
+			this.addEvicted({
 				envelope: held.envelope,
 				present: held.present,
-				merged: { decodedData: snapshot(state.latest), coalesced: span(held) },
+				merged: {
+					decodedData: snapshot(state.latest),
+					coalesced: flushSpan(held),
+				},
 			})
-			if (this.evicted.size > this.maxEntities) {
-				const lost = this.evicted.values().next().value
-				if (lost) {
-					this.evicted.delete(lost)
-					this.onLost(lost.envelope)
-				}
-			}
 		}
 	}
 }
@@ -838,29 +994,32 @@ function fits(value: JsonValue): boolean {
 	)
 }
 
-/** Identity values a stored reception records, as JSON text. */
+/** Identity values a stored reception records. */
 function identityOf(
 	data: JsonObject,
 	spec: CoalesceSpec,
-): ReadonlyMap<string, string> {
-	let seen: Map<string, string> | undefined
+): ReadonlyMap<string, IdentityValue> {
+	let seen: Map<string, IdentityValue> | undefined
 	for (const field of spec.identity) {
 		const value = data[field]
 		if (value === undefined || value === null || !fits(value)) continue
 		seen ??= new Map()
-		seen.set(field, JSON.stringify(value))
+		seen.set(field, identityValue(value))
 	}
 	return seen ?? NO_IDENTITY
 }
 
-function span(held: Held): DecodeCoalesced | undefined {
-	return held.receptions < 2
-		? undefined
-		: {
-				receptions: held.receptions,
-				firstSeenAt: held.firstSeenAt,
-				lastSeenAt: held.envelope.receivedAt,
-			}
+/**
+ * The span a flushed row carries, even for one held reception: the row is
+ * stamped when stored (storage/ingress.ts), so `lastSeenAt` is the only
+ * record of when its latest reception arrived.
+ */
+function flushSpan(held: Held): DecodeCoalesced {
+	return {
+		receptions: held.receptions,
+		firstSeenAt: held.firstSeenAt,
+		lastSeenAt: held.envelope.receivedAt,
+	}
 }
 
 /**

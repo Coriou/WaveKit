@@ -7,6 +7,7 @@
  */
 import type {
 	ActivityCategory,
+	ActivitySummary,
 	Band,
 	Bandplan,
 	BandChannel,
@@ -1242,6 +1243,8 @@ export interface MockMessage {
 		unit?: string
 	}[]
 	position?: { lat: number; lon: number; altM?: number }
+	/** Aircraft rows: the identity the core stored with the row (ActivitySummary.aircraft). */
+	aircraft?: ActivitySummary["aircraft"]
 	data: { readonly [key: string]: JsonValue }
 }
 
@@ -1689,6 +1692,11 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 			{ key: "speed", label: "Speed", value: 452, unit: "kn" },
 		],
 		position: { lat: 48.79, lon: -3.86, altM: 10973 },
+		aircraft: {
+			callsign: "AFR1234",
+			typeCode: "A320",
+			typeDescription: "Airbus A320",
+		},
 		data: {
 			icao: "3944EF",
 			callsign: "AFR1234",
@@ -1713,6 +1721,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 			{ key: "altitude", label: "Altitude", value: 11250, unit: "ft" },
 		],
 		position: { lat: 48.52, lon: -3.71, altM: 3429 },
+		aircraft: { callsign: "EZY48KT" },
 		data: {
 			icao: "4CA7F2",
 			callsign: "EZY48KT",

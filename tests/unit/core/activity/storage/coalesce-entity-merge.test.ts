@@ -361,8 +361,13 @@ describe("per-entity merge at admission", () => {
 		const row = stored(rows[1])
 		expect(row.eventId).toBe("last")
 		expect(row.decodedData).toMatchObject({ callsign: "TST001", lat: 10.2 })
-		// One held reception: the row stands for itself.
-		expect(row.coalesced).toBeUndefined()
+		// Stamped when stored; one held reception, its time in the span.
+		expect(row.receivedAt).toBe(new Date(T0 + 5_000 + WINDOW).toISOString())
+		expect(row.coalesced).toEqual({
+			receptions: 1,
+			firstSeenAt: new Date(T0 + 5_000).toISOString(),
+			lastSeenAt: new Date(T0 + 5_000).toISOString(),
+		})
 		expect(i.nextCoalesceDueAt()).toBeUndefined()
 	})
 
@@ -463,7 +468,10 @@ describe("generalised entities", () => {
 			i.admit(sensor(T0 + 30_001, { channel: 2, temperature_C: 18 })).admitted,
 		).toBe(true)
 		// A battery change, or a field off the allowlist (a button), is stored.
-		expect(i.admit(sensor(T0 + 30_002, { battery_ok: 0 })).admitted).toBe(true)
+		expect(
+			i.admit(sensor(T0 + 30_002, { temperature_C: 20.3, battery_ok: 0 }))
+				.admitted,
+		).toBe(true)
 		expect(i.admit(sensor(T0 + 30_003, { button: 1 })).admitted).toBe(true)
 		clock.t = T0 + 30_003 + WINDOW
 		i.flushCoalesced(clock.t)

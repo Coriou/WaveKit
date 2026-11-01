@@ -2,7 +2,9 @@ import { randomUUID as cryptoRandomUUID } from "node:crypto"
 import type { DecoderOutput } from "../../decoders/types.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import {
+	AIRCRAFT_IDENTITY_MAX_BYTES,
 	createDecodeEnvelope,
+	withEnvelopeMetadata,
 	withMergedData,
 	withPresentation,
 } from "./envelope.js"
@@ -11,6 +13,7 @@ import { resolveProvenance } from "./provenance/resolve.js"
 import type { CoalesceMerge } from "./storage/coalesce.js"
 import type {
 	ActivityProvenanceLookup,
+	DecodeAircraftIdentity,
 	DecodeEnvelope,
 	DecodeEnvelopeContext,
 	DecodeProvenance,
@@ -53,6 +56,24 @@ export interface ActivityIngress {
  */
 export type ActivityPresenter = (merged?: CoalesceMerge) => DecodeEnvelope
 
+/**
+ * What the aircraft enrichment cache knows about an aircraft (ICAO address,
+ * upper case), read from memory: never a lookup, an await or I/O. Called
+ * only for aircraft rows the store keeps (about one per aircraft per
+ * minute). Undefined or null: nothing known.
+ */
+export interface ActivityKnownAircraft {
+	readonly registration?: string | undefined
+	readonly typeCode?: string | undefined
+	readonly typeDescription?: string | undefined
+	/** The callsign's airline, else the registered operator. */
+	readonly operator?: string | undefined
+}
+
+export type ActivityAircraftIdentityLookup = (
+	icao: string,
+) => ActivityKnownAircraft | null | undefined
+
 export interface ActivityIngressOptions {
 	/**
 	 * Receives the presentation-free envelope and a presenter. The store calls
@@ -68,6 +89,69 @@ export interface ActivityIngressOptions {
 	 * today's `{ sourceId: null, frequency: null }` unless the payload reports a frequency.
 	 */
 	resolveProvenance?: ActivityProvenanceLookup | null
+	/**
+	 * Stored aircraft rows carry the identity known when stored (`aircraft`):
+	 * the callsign from the entity's merged state and what this returns. A
+	 * throwing lookup or a malformed value is left out, never a failure.
+	 */
+	aircraftIdentity?: ActivityAircraftIdentityLookup | null
+}
+
+const ICAO_ENTITY = /^icao:([0-9A-F]{6})$/
+
+/** A clean identity string, or undefined (wrong type, blank, control characters, over 64 bytes). */
+function identityText(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined
+	const text = value.trim()
+	if (
+		text.length === 0 ||
+		Buffer.byteLength(text, "utf8") > AIRCRAFT_IDENTITY_MAX_BYTES ||
+		/[\x00-\x1f\x7f-\x9f]/.test(text)
+	)
+		return undefined
+	return text
+}
+
+function callsignOf(data: unknown): string | undefined {
+	if (typeof data !== "object" || data === null || Array.isArray(data))
+		return undefined
+	const body = data as { readonly [key: string]: unknown }
+	return identityText(body["callsign"]) ?? identityText(body["flight"])
+}
+
+/**
+ * The aircraft identity of a presented aircraft envelope: merged callsign,
+ * then the lookup's registration, type and operator. Undefined when none.
+ */
+function aircraftIdentityOf(
+	envelope: DecodeEnvelope,
+	lookup: ActivityAircraftIdentityLookup | null,
+): DecodeAircraftIdentity | undefined {
+	const icao = ICAO_ENTITY.exec(envelope.entityKey ?? "")?.[1]
+	if (icao === undefined) return undefined
+	const identity: DecodeAircraftIdentity = {}
+	const callsign = callsignOf(envelope.decodedData)
+	if (callsign !== undefined) identity.callsign = callsign
+	if (lookup !== null) {
+		let known: ReturnType<ActivityAircraftIdentityLookup>
+		try {
+			known = lookup(icao)
+		} catch {
+			known = undefined
+		}
+		if (typeof known === "object" && known !== null) {
+			const registration = identityText(known.registration)
+			const typeCode = identityText(known.typeCode)
+			const typeDescription = identityText(known.typeDescription)
+			const operator = identityText(known.operator)
+			if (registration !== undefined) identity.registration = registration
+			if (typeCode !== undefined) identity.typeCode = typeCode
+			if (typeDescription !== undefined)
+				identity.typeDescription = typeDescription
+			if (operator !== undefined) identity.operator = operator
+		}
+	}
+	return Object.keys(identity).length > 0 ? identity : undefined
 }
 
 /**
@@ -84,6 +168,7 @@ export function createActivityIngress(
 	const randomUUID = options.randomUUID ?? cryptoRandomUUID
 	const sink = options.sink
 	const lookup = options.resolveProvenance ?? null
+	const identityLookup = options.aircraftIdentity ?? null
 	const log = createComponentLogger(options.logger, "ActivityIngress")
 	const counts: ActivityIngressCounters = {
 		published: 0,
@@ -193,6 +278,18 @@ export function createActivityIngress(
 				return plain
 			}
 			let presented: DecodeEnvelope | undefined
+			// Aircraft rows carry who the aircraft is (stored rows only: presented lazily).
+			const identified = (env: DecodeEnvelope): DecodeEnvelope => {
+				if (env.outputType !== "aircraft") return env
+				const aircraft = aircraftIdentityOf(env, identityLookup)
+				if (aircraft === undefined) return env
+				try {
+					return withEnvelopeMetadata(env, { aircraft })
+				} catch {
+					// Over the envelope size: stored without it.
+					return env
+				}
+			}
 			const presentMerged = (merged: CoalesceMerge): DecodeEnvelope => {
 				// Throws when the merged state does not fit: not a presentation
 				// failure, the store counts it (coalesceMergeFailures).
@@ -206,13 +303,13 @@ export function createActivityIngress(
 					)
 					if (attempt.error !== undefined) {
 						failed(attempt.error)
-						return base
+						return identified(base)
 					}
-					if (attempt.presentation === undefined) return base
-					return withPresentation(base, attempt.presentation)
+					if (attempt.presentation === undefined) return identified(base)
+					return identified(withPresentation(base, attempt.presentation))
 				} catch (err) {
 					failed(err)
-					return base
+					return identified(base)
 				}
 			}
 			const present: ActivityPresenter = merged => {
@@ -228,7 +325,7 @@ export function createActivityIngress(
 					)
 					if (attempt.error !== undefined) return failed(attempt.error)
 					if (attempt.presentation === undefined) return plain
-					presented = withPresentation(plain, attempt.presentation)
+					presented = identified(withPresentation(plain, attempt.presentation))
 					return presented
 				} catch (err) {
 					return failed(err)

@@ -121,6 +121,8 @@ export interface ActivitySummary {
 	position?: DecodeEnvelope["position"]
 	/** The envelope's `coalesced`: receptions merged into this row and their first/last receivedAt. */
 	coalesced?: DecodeEnvelope["coalesced"]
+	/** The envelope's `aircraft`: who the row's aircraft is, as known when it was stored. */
+	aircraft?: DecodeEnvelope["aircraft"]
 }
 
 export const MAX_RECORD_BYTES = 144 * 1024

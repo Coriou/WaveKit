@@ -90,15 +90,39 @@ export interface DecodeEnvelopeContext {
 
 /**
  * Per-entity coalescing (src/core/activity/storage/coalesce.ts): the row is the entity's merged
- * latest state over several receptions. Absent when the row is one reception.
+ * latest state over several receptions. Absent when the row is one reception stored as it arrived.
  */
 export interface DecodeCoalesced {
-	/** Receptions merged into this row, its own included (at least 2); `receptions - 1` were not stored on their own. */
+	/**
+	 * Receptions merged into this row, its own included: at least 2 on a reception's row, at
+	 * least 1 on a row flushed for held receptions; `receptions - 1` (flushed: all) were not
+	 * stored on their own.
+	 */
 	receptions: number
 	/** receivedAt of the first merged reception. */
 	firstSeenAt: string
-	/** receivedAt of the latest merged reception (the row's own receivedAt). */
+	/**
+	 * receivedAt of the latest merged reception. A reception's row: its own receivedAt. A
+	 * flushed row (a snapshot stamped when Activity stored it: its producedAt and receivedAt
+	 * are the store time): when its latest held reception was heard, up to one window earlier.
+	 */
 	lastSeenAt: string
+}
+
+/**
+ * Who an aircraft row's aircraft is, as known when the row was stored: the callsign from the
+ * entity's merged state, the rest from the aircraft enrichment cache. Each value is at most
+ * 64 bytes; absent members were unknown.
+ */
+export interface DecodeAircraftIdentity {
+	callsign?: string
+	registration?: string
+	/** ICAO type designator ("A320"). */
+	typeCode?: string
+	/** Type in words ("Airbus A320"). */
+	typeDescription?: string
+	/** Airline flying the callsign, else the registered operator. */
+	operator?: string
 }
 
 /** A decoder event, including lifecycle/telemetry; not accepted scanner evidence. */
@@ -129,6 +153,8 @@ export interface DecodeEnvelope {
 	refs?: DecodeReferences
 	/** Present when the row merges several receptions of one entity. */
 	coalesced?: DecodeCoalesced
+	/** Aircraft rows: the identity known when stored (absent when nothing was). */
+	aircraft?: DecodeAircraftIdentity
 	/** Complete JSON projection of decoded data, not original protocol wire output. */
 	decodedData: JsonValue
 }

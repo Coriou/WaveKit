@@ -2,7 +2,7 @@ import type { APRSData } from "../../../decoders/builtin/direwolf.js"
 import { z } from "zod"
 import {
 	APRS_POSITION_DATA_TYPES,
-	isCoalescibleShape,
+	isPositionOnlyShape,
 } from "../storage/coalesce.js"
 import type { DecodePresentation } from "../types.js"
 import {
@@ -116,7 +116,7 @@ export function presentAprs(data: unknown): DecodePresentation | undefined {
 					value: comment,
 					maxBytes: APRS_TEXT_BYTES,
 				}
-	const fields = isCoalescibleShape("aprs", payload)
+	const fields = isPositionOnlyShape("aprs", payload)
 		? []
 		: takeFields(
 				[

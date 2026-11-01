@@ -17,7 +17,7 @@ import type {
 	CoalescePresenter,
 	CoalesceUndo,
 } from "./coalesce.js"
-import { withMergedData } from "../envelope.js"
+import { withEnvelopeMetadata, withMergedData } from "../envelope.js"
 import { MAX_ENVELOPE_BYTES } from "../projection.js"
 import { FloodDedupe, floodKeyOf } from "./flood-dedupe.js"
 import type { FloodKey } from "./flood-dedupe.js"
@@ -155,6 +155,9 @@ export class ActivityIngress {
 	 */
 	flushCoalesced(now: number): void {
 		if (this.closed || now < this.flushRetryAt) return
+		// Every admit calls this: no generator unless a held row is due.
+		const due = this.coalescer.nextDueAt()
+		if (due === undefined || due > now) return
 		let deferred = false
 		let skips = 0
 		for (const flush of this.coalescer.dueFlushes(now)) {
@@ -211,6 +214,7 @@ export class ActivityIngress {
 			flush.present,
 			flush.merged,
 		)
+		if (merged) stored = stampedNow(stored, now)
 		let row = buildReceptionRow(stored)
 		if (merged && row.recordBytes > this.limits.queueMaxBytes) {
 			stored = ownEnvelope(flush.envelope, flush.present)
@@ -427,17 +431,20 @@ export class ActivityIngress {
 		this.inFlight = []
 		this.inFlightBytes = 0
 		if (gap) this.pendingGap = gap
-		// Newest first, so each undo sees the state its own commit left.
+		// Newest first, so each undo sees the state its own commit left. A row
+		// of held receptions only is held again: nothing lost, no drop counted.
+		const kept = new Set<string>()
 		for (const row of [...failed].reverse())
-			this.rollBackCoalescing(row.eventId)
+			if (this.rollBackCoalescing(row.eventId)) kept.add(row.eventId)
 		for (const row of failed) this.forgetFlood(row.eventId)
 		for (const row of failed)
-			this.noteDrop(
-				"write-failed",
-				new Date(row.receivedAtMs).toISOString(),
-				row.decoderId,
-				this.now(),
-			)
+			if (!kept.has(row.eventId))
+				this.noteDrop(
+					"write-failed",
+					new Date(row.receivedAtMs).toISOString(),
+					row.decoderId,
+					this.now(),
+				)
 	}
 
 	noteSkipped(
@@ -445,13 +452,19 @@ export class ActivityIngress {
 		eventIds: readonly string[],
 	): void {
 		const skipped = new Set(eventIds)
+		const kept = new Set<string>()
 		for (const row of [...batch].reverse())
 			if (skipped.has(row.eventId)) {
-				this.rollBackCoalescing(row.eventId)
+				if (this.rollBackCoalescing(row.eventId)) kept.add(row.eventId)
 				this.forgetFlood(row.eventId)
 			}
 		for (const row of batch) {
-			if (!skipped.has(row.eventId) || row.kind === "ingestion-gap") continue
+			if (
+				!skipped.has(row.eventId) ||
+				kept.has(row.eventId) ||
+				row.kind === "ingestion-gap"
+			)
+				continue
 			this.noteDrop(
 				"write-failed",
 				new Date(row.receivedAtMs).toISOString(),
@@ -489,10 +502,11 @@ export class ActivityIngress {
 		this.flood.forget(key, eventId)
 	}
 
-	private rollBackCoalescing(eventId: string): void {
+	/** True when the row's held receptions are held again (the row lost nothing). */
+	private rollBackCoalescing(eventId: string): boolean {
 		const undo = this.coalesceUndo.get(eventId)
 		this.coalesceUndo.delete(eventId)
-		undo?.()
+		return undo?.() ?? false
 	}
 
 	/** An episode is open and has not been staged yet. */
@@ -775,6 +789,26 @@ function storedEnvelope(
 			return { envelope: raw, merged: true }
 	}
 	return { envelope: ownEnvelope(envelope, present), merged: false }
+}
+
+/**
+ * A flushed row is a snapshot of the entity's state taken when it is queued:
+ * producedAt and receivedAt are the store clock then (never earlier than its
+ * latest held reception), so rows in seq order also read in time order. Its
+ * `coalesced` span keeps when the receptions it stands for were heard.
+ */
+function stampedNow(stored: DecodeEnvelope, now: number): DecodeEnvelope {
+	const latest = Date.parse(stored.coalesced?.lastSeenAt ?? stored.receivedAt)
+	const at = Number.isFinite(latest) && latest > now ? latest : now
+	if (!Number.isFinite(at)) return stored
+	const time = new Date(at).toISOString()
+	if (time === stored.receivedAt && time === stored.producedAt) return stored
+	try {
+		return withEnvelopeMetadata(stored, { producedAt: time, receivedAt: time })
+	} catch {
+		// An envelope that never passed validation (a test or a direct caller).
+		return { ...stored, producedAt: time, receivedAt: time }
+	}
 }
 
 function ownEnvelope(

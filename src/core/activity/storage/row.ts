@@ -227,9 +227,13 @@ export function parseStoredSummary(row: StoredActivityRow): ActivitySummary {
 	}
 	// Like the query reader (query/read.ts); a malformed span is left out.
 	const coalesced = body["coalesced"]
-	const withSpan: ActivitySummary = isCoalesced(coalesced)
+	const spanned: ActivitySummary = isCoalesced(coalesced)
 		? { ...summary, coalesced }
 		: summary
+	const aircraft = body["aircraft"]
+	const withSpan: ActivitySummary = isAircraftIdentity(aircraft)
+		? { ...spanned, aircraft }
+		: spanned
 	if (isPosition(position)) return { ...withSpan, position }
 	return withSpan
 }
@@ -477,6 +481,9 @@ function receptionRow(
 		...(envelope.coalesced === undefined
 			? {}
 			: { coalesced: { ...envelope.coalesced } }),
+		...(envelope.aircraft === undefined
+			? {}
+			: { aircraft: { ...envelope.aircraft } }),
 	})
 	return {
 		eventId: record.eventId,
@@ -567,6 +574,7 @@ interface SummaryDraft {
 	fields: DecodeField[]
 	position?: DecodeEnvelope["position"]
 	coalesced?: DecodeEnvelope["coalesced"]
+	aircraft?: DecodeEnvelope["aircraft"]
 }
 
 /**
@@ -605,6 +613,7 @@ function fitSummary(draft: SummaryDraft): string {
 	const fields = draft.fields.slice()
 	let title = draft.title
 	let includePosition = draft.position !== undefined
+	let includeAircraft = draft.aircraft !== undefined
 	const build = (): string => {
 		const summary: Record<string, unknown> = {
 			eventId: draft.eventId,
@@ -624,6 +633,9 @@ function fitSummary(draft: SummaryDraft): string {
 			summary["position"] = draft.position
 		// About 110 bytes, kept whole: fields and title shrink first.
 		if (draft.coalesced !== undefined) summary["coalesced"] = draft.coalesced
+		// At most about 400 bytes; dropped only after fields and title.
+		if (includeAircraft && draft.aircraft !== undefined)
+			summary["aircraft"] = draft.aircraft
 		return JSON.stringify(summary)
 	}
 	let json = build()
@@ -645,6 +657,10 @@ function fitSummary(draft: SummaryDraft): string {
 		title = next.length === 0 ? null : next
 		json = build()
 	}
+	if (includeAircraft && Buffer.byteLength(json, "utf8") > MAX_SUMMARY_BYTES) {
+		includeAircraft = false
+		json = build()
+	}
 	if (includePosition && Buffer.byteLength(json, "utf8") > MAX_SUMMARY_BYTES) {
 		includePosition = false
 		json = build()
@@ -660,6 +676,10 @@ function indexedText(envelope: DecodeEnvelope): string {
 	const parts: string[] = []
 	if (envelope.title) parts.push(envelope.title)
 	if (envelope.protocol) parts.push(envelope.protocol)
+	// Search finds an aircraft's history by registration or operator too.
+	if (envelope.aircraft !== undefined)
+		for (const value of Object.values(envelope.aircraft))
+			if (typeof value === "string") parts.push(value)
 	for (const field of envelope.fields) {
 		parts.push(field.label)
 		if (typeof field.value === "string") parts.push(field.value)
@@ -798,9 +818,32 @@ function isCoalesced(
 	return (
 		typeof receptions === "number" &&
 		Number.isSafeInteger(receptions) &&
-		receptions >= 2 &&
+		receptions >= 1 &&
 		typeof body["firstSeenAt"] === "string" &&
 		typeof body["lastSeenAt"] === "string"
+	)
+}
+
+const AIRCRAFT_IDENTITY_KEYS: ReadonlySet<string> = new Set([
+	"callsign",
+	"registration",
+	"typeCode",
+	"typeDescription",
+	"operator",
+])
+
+function isAircraftIdentity(
+	value: unknown,
+): value is NonNullable<DecodeEnvelope["aircraft"]> {
+	const body = plain(value)
+	if (!body) return false
+	const entries = Object.entries(body)
+	return (
+		entries.length > 0 &&
+		entries.every(
+			([key, member]) =>
+				AIRCRAFT_IDENTITY_KEYS.has(key) && typeof member === "string",
+		)
 	)
 }
 

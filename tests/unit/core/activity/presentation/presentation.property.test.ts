@@ -10,7 +10,7 @@ import {
 	MAX_TITLE_CHARS,
 } from "../../../../../src/core/activity/presentation/budget.js"
 import { presentDecoderOutput } from "../../../../../src/core/activity/presentation/registry.js"
-import { isCoalescibleShape } from "../../../../../src/core/activity/storage/coalesce.js"
+import { isPositionOnlyShape } from "../../../../../src/core/activity/storage/coalesce.js"
 import type { DecodeEnvelope } from "../../../../../src/core/activity/types.js"
 import type {
 	DecoderOutput,
@@ -375,7 +375,7 @@ describe("activity presentation properties", () => {
 					typeof data === "object" &&
 					data !== null &&
 					!Array.isArray(data) &&
-					isCoalescibleShape(type, data)
+					isPositionOnlyShape(type, data)
 				) {
 					expect(view?.fields).toBeUndefined()
 					expect(growth.growth).toBeLessThanOrEqual(240)
