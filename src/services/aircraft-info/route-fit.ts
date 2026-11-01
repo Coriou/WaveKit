@@ -14,7 +14,7 @@ import { haversineM, initialBearingDeg } from "../../core/coverage/geo.js"
 
 /** Near the origin any heading fits: departures turn, climb out and hold (80 km). */
 export const ROUTE_ORIGIN_SLACK_M = 80_000
-/** Near the destination any heading fits: approaches, holds and go-arounds (30 km). */
+/** Near the destination any heading fits: approaches, holds and go-arounds (30 km); a clear climb-out there is the return leg (see flightPhaseFits). */
 export const ROUTE_DESTINATION_SLACK_M = 30_000
 /**
  * Most a course may differ from the bearing to the destination. 100° allows a dog-leg along
@@ -61,6 +61,28 @@ export const ROUTE_ALTITUDE_MARGIN_FT = 1_000
 export const ROUTE_PHASE_RATE_FPM = 1_000
 
 /**
+ * The low-and-far rule applies only to routes at least this long (300 km): commuter and
+ * island-hop sectors shorter than that cruise level below 10,000 ft, far from both ends.
+ */
+export const ROUTE_LOW_RULE_MIN_ROUTE_M = 300_000
+/**
+ * Low and far from both airports means "landing at or departing from a third airport" only
+ * when the aircraft is on the ground or clearly climbing or descending (500 ft/min).
+ */
+export const ROUTE_LOW_RULE_MIN_RATE_FPM = 500
+/**
+ * A climb near the destination is the return leg only once it is clear of a missed approach:
+ * above 5,000 ft or 15 km out (missed approaches level off lower, close to the runway).
+ */
+export const ROUTE_CLIMB_OUT_MIN_ALTITUDE_FT = 5_000
+export const ROUTE_CLIMB_OUT_MIN_DISTANCE_M = 15_000
+/**
+ * Once a phase rule has rejected a route, a rate reversal clears it only when it is clear
+ * (500 ft/min the other way): a climb-out that levels off or accelerates keeps its verdict.
+ */
+export const ROUTE_PHASE_CLEAR_RATE_FPM = 500
+
+/**
  * Without a position or a course nothing contradicts the route: the previous verdict
  * stands, or it fits. `previous` (the verdict shown now) applies the hysteresis margins;
  * absent, the plain bounds decide.
@@ -82,8 +104,15 @@ export function routePlausible(
 					destination.lat,
 					destination.lon,
 				),
+				routeM: haversineM(
+					origin.lat,
+					origin.lon,
+					destination.lat,
+					destination.lon,
+				),
 				altitudeFt: altitudeFtOf(aircraft.altitude),
 				verticalRateFpm: verticalRateOf(aircraft.altitude),
+				onGround: aircraft.altitude?.onGround === true,
 			},
 			previous,
 		)
@@ -158,34 +187,65 @@ function verticalRateOf(a: AircraftState["altitude"]): number | undefined {
 
 /**
  * The phase checks, from measured distances, altitude and vertical rate (unknown values
- * contradict nothing): a low aircraft must be near one of the route's airports; one climbing
- * out near the destination or descending near the origin flies the return leg. Both slacks and
- * the altitude bound move by their margins with a previous verdict, as in routeFits.
+ * contradict nothing):
+ * - low and far: below 10,000 ft, more than 120 km from both airports of a route at least
+ *   300 km long, and on the ground or climbing/descending at 500 ft/min or more → another route;
+ * - climb-out at the destination: within its slack, climbing at 1,000 ft/min or more, above
+ *   5,000 ft or 15 km out → the return leg; a descent of 1,000 ft/min or more within the origin
+ *   slack → the return leg too.
+ * With a previous verdict the altitude and distance bounds move by their margins, as in
+ * routeFits, and a rejected route stays rejected while the aircraft stays in the same situation:
+ * low and far needs no rate any more, and a return-leg rejection clears only on a clear rate the
+ * other way (500 ft/min), so level-offs and acceleration segments do not flip it.
  */
 export function flightPhaseFits(
 	m: {
 		fromOriginM: number
 		toDestinationM: number
+		routeM: number
 		altitudeFt: number | undefined
 		verticalRateFpm: number | undefined
+		onGround: boolean
 	},
 	previous?: boolean,
 ): boolean {
 	const sign = previous === undefined ? 0 : previous ? 1 : -1
+	const rejected = previous === false
 	const alt = m.altitudeFt
 	if (alt === undefined) return true
 	const lowBound = ROUTE_LOW_ALTITUDE_FT - sign * ROUTE_ALTITUDE_MARGIN_FT
 	if (alt >= lowBound) return true
 	const slack = sign * ROUTE_SLACK_MARGIN_M
-	const far = ROUTE_LOW_FAR_M + slack
-	if (m.fromOriginM >= far && m.toDestinationM >= far) return false
 	const rate = m.verticalRateFpm
-	if (rate === undefined) return true
+	const far = ROUTE_LOW_FAR_M + slack
+	if (
+		m.routeM >= ROUTE_LOW_RULE_MIN_ROUTE_M &&
+		m.fromOriginM >= far &&
+		m.toDestinationM >= far &&
+		(rejected ||
+			m.onGround ||
+			(rate !== undefined && Math.abs(rate) >= ROUTE_LOW_RULE_MIN_RATE_FPM))
+	)
+		return false
 	const nearDestination = m.toDestinationM < ROUTE_DESTINATION_SLACK_M + slack
 	const nearOrigin = m.fromOriginM < ROUTE_ORIGIN_SLACK_M + slack
-	if (nearDestination && !nearOrigin && rate >= ROUTE_PHASE_RATE_FPM)
-		return false
-	if (nearOrigin && !nearDestination && rate <= -ROUTE_PHASE_RATE_FPM)
-		return false
+	if (nearDestination && !nearOrigin) {
+		const clearOfMissedApproach =
+			alt >= ROUTE_CLIMB_OUT_MIN_ALTITUDE_FT ||
+			m.toDestinationM >= ROUTE_CLIMB_OUT_MIN_DISTANCE_M
+		if (rejected) {
+			if (rate === undefined || rate > -ROUTE_PHASE_CLEAR_RATE_FPM) return false
+		} else if (
+			rate !== undefined &&
+			rate >= ROUTE_PHASE_RATE_FPM &&
+			clearOfMissedApproach
+		)
+			return false
+	}
+	if (nearOrigin && !nearDestination) {
+		if (rejected) {
+			if (rate === undefined || rate < ROUTE_PHASE_CLEAR_RATE_FPM) return false
+		} else if (rate !== undefined && rate <= -ROUTE_PHASE_RATE_FPM) return false
+	}
 	return true
 }

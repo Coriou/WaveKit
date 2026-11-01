@@ -37,6 +37,11 @@ import {
 	ROUTE_LOW_FAR_M,
 	ROUTE_ALTITUDE_MARGIN_FT,
 	ROUTE_PHASE_RATE_FPM,
+	ROUTE_LOW_RULE_MIN_ROUTE_M,
+	ROUTE_LOW_RULE_MIN_RATE_FPM,
+	ROUTE_CLIMB_OUT_MIN_ALTITUDE_FT,
+	ROUTE_CLIMB_OUT_MIN_DISTANCE_M,
+	ROUTE_PHASE_CLEAR_RATE_FPM,
 } from "../../../src/services/aircraft-info/route-fit.js"
 import type { SqliteDatabase } from "../../../src/core/activity/storage/sqlite.js"
 import { AircraftTracker } from "../../../src/core/aircraft-tracker.js"
@@ -1017,13 +1022,13 @@ describe("AircraftEnrichmentService", () => {
 			expect(
 				routePlausible(
 					route,
-					low(nearDest, { baro: 4_000, baroRate: ROUTE_PHASE_RATE_FPM }),
+					low(nearDest, { baro: 6_000, baroRate: ROUTE_PHASE_RATE_FPM }),
 				),
 			).toBe(false)
 			expect(
 				routePlausible(
 					route,
-					low(nearDest, { baro: 4_000, baroRate: ROUTE_PHASE_RATE_FPM - 1 }),
+					low(nearDest, { baro: 6_000, baroRate: ROUTE_PHASE_RATE_FPM - 1 }),
 				),
 			).toBe(true)
 			// near the origin: a departure fits, a clear descent is the return leg
@@ -1050,8 +1055,10 @@ describe("AircraftEnrichmentService", () => {
 					{
 						fromOriginM: d,
 						toDestinationM: d,
+						routeM: 1_000_000,
 						altitudeFt,
-						verticalRateFpm: undefined,
+						verticalRateFpm: -800,
+						onGround: false,
 					},
 					previous,
 				)
@@ -1067,6 +1074,151 @@ describe("AircraftEnrichmentService", () => {
 			expect(phase(11_000, far, false)).toBe(true)
 			expect(phase(5_000, far - 5_000 - 1, false)).toBe(true)
 			expect(phase(5_000, far - 5_000, false)).toBe(false)
+		})
+
+		it("a short route or level flight never trips the low-and-far rule; a rejection then holds without a rate", () => {
+			expect(ROUTE_LOW_RULE_MIN_ROUTE_M).toBe(300_000)
+			expect(ROUTE_LOW_RULE_MIN_RATE_FPM).toBe(500)
+			const mid = (
+				routeM: number,
+				verticalRateFpm: number | undefined,
+				previous?: boolean,
+				onGround = false,
+			) =>
+				flightPhaseFits(
+					{
+						fromOriginM: 150_000,
+						toDestinationM: 150_000,
+						routeM,
+						altitudeFt: onGround ? 0 : 7_500,
+						verticalRateFpm,
+						onGround,
+					},
+					previous,
+				)
+			// a 299 km commuter sector cruising at 7,500 ft fits, a 300 km one descending does not
+			expect(mid(ROUTE_LOW_RULE_MIN_ROUTE_M - 1, -2_000)).toBe(true)
+			expect(mid(ROUTE_LOW_RULE_MIN_ROUTE_M, -2_000)).toBe(false)
+			// level or gentle on a long route: no verdict from this rule
+			expect(mid(1_000_000, 0)).toBe(true)
+			expect(mid(1_000_000, 499)).toBe(true)
+			expect(mid(1_000_000, 500)).toBe(false)
+			expect(mid(1_000_000, undefined)).toBe(true)
+			expect(mid(1_000_000, undefined, undefined, true)).toBe(false)
+			// once rejected, a level-off keeps it rejected
+			expect(mid(1_000_000, 0, false)).toBe(false)
+		})
+
+		it("a missed approach keeps the route; a climb-out that levels off or accelerates stays the return leg", () => {
+			expect(ROUTE_CLIMB_OUT_MIN_ALTITUDE_FT).toBe(5_000)
+			expect(ROUTE_CLIMB_OUT_MIN_DISTANCE_M).toBe(15_000)
+			expect(ROUTE_PHASE_CLEAR_RATE_FPM).toBe(500)
+			const near = (
+				toDestinationM: number,
+				altitudeFt: number,
+				verticalRateFpm: number,
+				previous?: boolean,
+			) =>
+				flightPhaseFits(
+					{
+						fromOriginM: 1_000_000,
+						toDestinationM,
+						routeM: 1_000_000,
+						altitudeFt,
+						verticalRateFpm,
+						onGround: false,
+					},
+					previous,
+				)
+			// go-around 10 km out at 2,500 ft climbing hard: still the planned route
+			expect(near(10_000, 2_500, 2_000, true)).toBe(true)
+			expect(
+				near(10_000, ROUTE_CLIMB_OUT_MIN_ALTITUDE_FT - 1, 2_000, true),
+			).toBe(true)
+			expect(near(10_000, ROUTE_CLIMB_OUT_MIN_ALTITUDE_FT, 2_000, true)).toBe(
+				false,
+			)
+			expect(near(ROUTE_CLIMB_OUT_MIN_DISTANCE_M, 3_000, 2_000, true)).toBe(
+				false,
+			)
+			// the gate's climb-out sequence: one verdict, no flapping
+			let verdict: boolean | undefined
+			const steps: Array<[number, number, number]> = [
+				[16_000, 2_000, 2_500],
+				[18_000, 3_000, 600],
+				[20_000, 4_000, 2_500],
+				[22_000, 5_000, 0],
+				[24_000, 5_000, 2_000],
+			]
+			const seen: boolean[] = []
+			for (const [d, alt, rate] of steps) {
+				verdict = near(d, alt, rate, verdict)
+				seen.push(verdict)
+			}
+			expect(seen).toEqual([false, false, false, false, false])
+			// a clear descent (500 ft/min) clears it: the aircraft is arriving after all
+			expect(near(20_000, 4_000, -499, false)).toBe(false)
+			expect(near(20_000, 4_000, -500, false)).toBe(true)
+		})
+
+		it("an arrival back at the origin stays rejected through a 3° final", () => {
+			const back = (
+				altitudeFt: number,
+				verticalRateFpm: number,
+				previous?: boolean,
+			) =>
+				flightPhaseFits(
+					{
+						fromOriginM: 40_000,
+						toDestinationM: 1_000_000,
+						routeM: 1_000_000,
+						altitudeFt,
+						verticalRateFpm,
+						onGround: false,
+					},
+					previous,
+				)
+			let verdict: boolean | undefined
+			const seen: boolean[] = []
+			for (const [alt, rate] of [
+				[7_000, -1_500],
+				[4_000, -750],
+				[2_500, -700],
+				[1_500, 0],
+			] as Array<[number, number]>) {
+				verdict = back(alt, rate, verdict)
+				seen.push(verdict)
+			}
+			expect(seen).toEqual([false, false, false, false])
+			expect(back(3_000, ROUTE_PHASE_CLEAR_RATE_FPM, false)).toBe(true)
+		})
+
+		it("both airports within their slack: the return-leg rules do not apply", () => {
+			const hop = (verticalRateFpm: number) =>
+				flightPhaseFits(
+					{
+						fromOriginM: 20_000,
+						toDestinationM: 20_000,
+						routeM: 40_000,
+						altitudeFt: 3_000,
+						verticalRateFpm,
+						onGround: false,
+					},
+					undefined,
+				)
+			expect(hop(2_000)).toBe(true)
+			expect(hop(-2_000)).toBe(true)
+		})
+
+		it("geometric altitude is used when barometric is missing", () => {
+			const far = { lat: 48.81, lon: -3.87 }
+			expect(
+				routePlausible(route, {
+					position: far,
+					velocity: { track: 284 },
+					altitude: { geom: 3_000, geomRate: -1_200 },
+				}),
+			).toBe(false)
 		})
 
 		it("a course exactly 100° off the bearing fits, just past it does not", () => {
