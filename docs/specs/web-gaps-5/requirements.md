@@ -132,14 +132,13 @@ presentation; it never throws to ingress.
 bytes (was 160); the bound for any other reception stays 1 100 bytes. From the 2026-11-01
 core a coalesced (position-only) reception is an APRS or Meshtastic position only: aircraft
 and ship rows always list their fields and each stands for the entity's merged state, so they
-take the 1 100-byte bound, a bare fix included; a stored aircraft row's `aircraft` identity
-counts within that bound and its members are dropped lowest priority first (type
-description, operator, type code, registration, callsign) until it fits. `fitRowBudget` keeps
+take the 1 100-byte bound, a bare fix included. `fitRowBudget` keeps
 `altM` on every rounded position candidate; when no candidate with `altM` fits at four or
 more decimals it tries the same candidates without `altM` before rounding further. An aircraft
 row's stored `aircraft` identity may grow the row by up to 320 bytes (5 members × 64 bytes,
 counted in built-row bytes) beyond what the presentation leaves of the 1 100, and only the
-identity may use that allowance; past it members are dropped from the lowest priority.
+identity may use that allowance; past it members are dropped lowest priority first (type
+description, operator, type code, registration, callsign) until it fits.
 4.8 Coalescing is unchanged (decided on the payload), so mesh positions store at most 61 rows
 per node per hour. Rows stored before WG5 keep `altM` null (no backfill).
 

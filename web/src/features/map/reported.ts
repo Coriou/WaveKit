@@ -13,6 +13,7 @@ import {
 	TrailHistoryStore,
 	type TrailHistoryState,
 } from "../../data/trail-history-store.ts"
+import { timeOf } from "../activity/fold.ts"
 import { aviationLive, type AviationLive } from "./aviation-live.ts"
 import { collection, type FeatureCollection } from "./features.ts"
 
@@ -153,11 +154,12 @@ export class ReportedPositionsStore implements ReadableStore<ReportedState> {
 			const p = r?.position
 			if (!r || !p || r.entityKey === null) continue
 			if (!Number.isFinite(p.lat) || !Number.isFinite(p.lon)) continue
-			const produced = Date.parse(r.producedAt)
+			// when it was heard: a flushed coalesced row is stored up to a minute after its fix
+			const produced = timeOf(r)
 			const report: LiveReport = {
 				lat: p.lat,
 				lon: p.lon,
-				producedAt: Number.isFinite(produced) ? produced : null,
+				producedAt: produced > 0 ? produced : null,
 				arrivedAt,
 			}
 			const held = this.live.get(r.entityKey)
