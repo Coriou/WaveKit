@@ -855,8 +855,8 @@ describe("agent status", () => {
 
 describe("agent status reception hint", () => {
 	const heard = {
-		preambles: { total: 12, perMin: 0, latest: 12 },
-		framesOk: { total: 0, perMin: 0, latest: 0 },
+		preambles: { total: 12, perMin: 0, latest: 12, listening: 12 },
+		framesOk: { total: 0, perMin: 0, latest: 0, listening: 0 },
 	}
 	const listening = (patch: Partial<DecoderStatus> = {}) =>
 		decoder({

@@ -6,6 +6,7 @@ import fc from "fast-check"
 import { createActivityIngress } from "../../../../src/core/activity/ingress.js"
 import type { DecodeEnvelope } from "../../../../src/core/activity/types.js"
 import { decoderSummary } from "../../../../src/api/routes/decoder-summary.js"
+import { receptionHint } from "../../../../src/decoders/decoder-counters.js"
 import { DecoderManager } from "../../../../src/decoders/manager.js"
 import type { DecoderManagerConfig } from "../../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../../src/decoders/registry.js"
@@ -1395,4 +1396,52 @@ it("unknown centre reach never falls back to a configured target hint", async ()
 	await f.manager.startAll()
 	f.sources.caps.delete("rtl")
 	expect(f.manager.getStatus("dec")?.targetFrequenciesHz).toBeUndefined()
+})
+
+it("a placement retuned in place starts its decoder's listening period afresh", async () => {
+	const f = setup()
+	f.create("dec")
+	const vfo = f.place("dec", 162_010_000, false, "vfo")
+	f.plan([f.place("dec", 162_000_000), vfo])
+	await f.manager.startAll()
+	f.instances.get(vfo.key)!.emit("counters", {
+		deltas: { preambles: 1, framesOk: 0 },
+		latest: { preambles: 1, framesOk: 0 },
+	})
+	expect(receptionHint(f.manager.getStatus("dec")?.counters)).toBe(
+		"heard-undecoded",
+	)
+	f.plan([
+		f.place("dec", 162_000_000),
+		f.place("dec", 162_025_000, false, "vfo"),
+	])
+	await f.settle()
+	expect(f.provider.retuneChannel).toHaveBeenCalledTimes(1)
+	const counters = f.manager.getStatus("dec")?.counters
+	expect(counters?.preambles).toMatchObject({ total: 1, listening: 0 })
+	expect(receptionHint(counters)).toBe("nothing-heard")
+})
+
+it("a band channel moved in place at the same rate starts its listening period afresh", async () => {
+	const f = setup()
+	f.create("dec")
+	const band = (hz: number): WantedPlacement => ({
+		...f.place("dec", hz, true, "band"),
+		options: {},
+	})
+	f.plan([band(162_000_000)])
+	await f.manager.startAll()
+	const instance = f.instances.get("dec")!
+	const starts = instance.starts
+	instance.emit("counters", {
+		deltas: { crcBad: 2, framesOk: 0 },
+		latest: { crcBad: 2, framesOk: 0 },
+	})
+	f.plan([band(162_025_000)])
+	await f.settle()
+	expect(f.provider.retuneChannel).toHaveBeenCalledTimes(1)
+	expect(instance.starts).toBe(starts)
+	const counters = f.manager.getStatus("dec")?.counters
+	expect(counters?.crcBad).toMatchObject({ total: 2, listening: 0 })
+	expect(receptionHint(counters)).toBe("nothing-heard")
 })

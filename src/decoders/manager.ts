@@ -2010,6 +2010,9 @@ export class DecoderManager extends EventEmitter {
 								channelHz: moved.channelHz,
 							}
 							worker.decoder.updateOptions({ channelHz: moved.channelHz })
+							this.counterStore.startListening(
+								worker.parentId ?? worker.config.id,
+							)
 							continue
 						}
 					}
@@ -2155,6 +2158,9 @@ export class DecoderManager extends EventEmitter {
 								delete state.efficiencyLateShed
 							}
 							state.placement = placement
+							this.counterStore.startListening(
+								state.parentId ?? state.config.id,
+							)
 							moved = false
 						}
 					} catch (error) {
@@ -4413,6 +4419,9 @@ export class DecoderManager extends EventEmitter {
 			}
 			state.lifecycle?.kick()
 			try {
+				// A new run listens afresh (decoder-counters.ts startListening); the
+				// previous child's last counts were flushed before it spawned.
+				this.counterStore.startListening(state.parentId ?? decoder.id)
 				state.lastOutputAt = null
 				state.lastStartedAt = new Date()
 				// Reset health to running when decoder starts (Requirement 20.1),
@@ -5622,6 +5631,14 @@ export class DecoderManager extends EventEmitter {
 						!state.config.options["followCenter"])) &&
 				!state.channel &&
 				previous?.centerFreq !== caps.centerFreq
+			// A decoder reading the whole source hears other air once its centre
+			// moves, even when it keeps running (decoder-counters.ts startListening).
+			if (
+				!state.channel &&
+				previous !== undefined &&
+				previous.centerFreq !== caps.centerFreq
+			)
+				this.counterStore.startListening(state.parentId ?? decoderId)
 			if (inputChanged || !passive || state.channelStale)
 				restartDecoders.add(decoderId)
 			else if (referenceMoved) {

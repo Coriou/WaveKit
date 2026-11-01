@@ -10,7 +10,12 @@ import pino from "pino"
 import { DecoderManager } from "../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../src/decoders/registry.js"
 import { FanoutManager } from "../../../src/core/fanout-manager.js"
-import type { DecoderCounterEvent } from "../../../src/decoders/decoder-counters.js"
+import type { SourceManager } from "../../../src/core/source-manager.js"
+import { FakeSources, RateDecoder, iqCaps } from "../../mocks/rate-fakes.js"
+import {
+	receptionHint,
+	type DecoderCounterEvent,
+} from "../../../src/decoders/decoder-counters.js"
 import type {
 	Decoder,
 	DecoderCaps,
@@ -120,14 +125,15 @@ describe("decoder counters in the manager", () => {
 			latest: { preambles: 15, framesOk: 0 },
 		})
 		expect(manager.getStatus("a")?.counters).toEqual({
-			preambles: { total: 15, perMin: 15, latest: 15 },
-			framesOk: { total: 0, perMin: 0, latest: 0 },
+			preambles: { total: 15, perMin: 15, latest: 15, listening: 15 },
+			framesOk: { total: 0, perMin: 0, latest: 0, listening: 0 },
 		})
 		vi.advanceTimersByTime(2 * 60_000)
 		expect(manager.getStatus("a")?.counters?.preambles).toEqual({
 			total: 15,
 			perMin: 0,
 			latest: 15,
+			listening: 15,
 		})
 	})
 
@@ -147,5 +153,80 @@ describe("decoder counters in the manager", () => {
 		).not.toThrow()
 		stub.report({ deltas: { crcBad: 1 }, latest: { crcBad: 1 } })
 		expect(manager.getStatus("a")?.counters?.crcBad?.total).toBe(1)
+	})
+})
+
+describe("listening periods in the manager", () => {
+	it("starts a new listening period when the decoder restarts, keeping totals", async () => {
+		manager.createDecoder({ id: "a", type: "stub", enabled: true, options: {} })
+		await manager.startDecoder("a")
+		const stub = decoders.get("a")!
+		stub.report({
+			deltas: { preambles: 1, framesOk: 0 },
+			latest: { preambles: 1, framesOk: 0 },
+		})
+		expect(receptionHint(manager.getStatus("a")?.counters)).toBe(
+			"heard-undecoded",
+		)
+		await manager.restartDecoder("a")
+		for (let minute = 0; minute < 5; minute++) {
+			vi.advanceTimersByTime(60_000)
+			stub.report({
+				deltas: { preambles: 0, framesOk: 0 },
+				latest: { preambles: 0, framesOk: 0 },
+			})
+		}
+		const counters = manager.getStatus("a")?.counters
+		expect(receptionHint(counters)).toBe("nothing-heard")
+		expect(counters?.preambles).toMatchObject({ total: 1, listening: 0 })
+	})
+	it("starts a new listening period when a whole-source decoder's centre moves without a restart", async () => {
+		const sources = new FakeSources()
+		sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 446_000_000 })
+		const registry = new DecoderRegistry()
+		let passive: RateDecoder | undefined
+		registry.register(
+			"dsd-fme",
+			config => {
+				passive = new RateDecoder(config.id, caps)
+				return passive
+			},
+			caps,
+		)
+		const own = new DecoderManager(
+			registry,
+			new FanoutManager(logger),
+			logger,
+			{
+				restartDelay: 10,
+				maxRestartDelay: 100,
+				validateVersions: false,
+			},
+		)
+		try {
+			own.setSourceManager(sources as unknown as SourceManager)
+			own.createDecoder({
+				id: "voice",
+				type: "dsd-fme",
+				enabled: true,
+				sourceId: "rtl",
+				options: {},
+			})
+			await own.startDecoder("voice")
+			expect(passive?.starts).toBe(1)
+			passive!.emit("counters", {
+				deltas: { detections: 3, framesOk: 0 },
+				latest: { detections: 3, framesOk: 0 },
+			})
+			sources.setCenter("rtl", 446_100_000)
+			await vi.advanceTimersByTimeAsync(350)
+			// dsd-fme takes a centre move without a restart.
+			expect(passive?.starts).toBe(1)
+			const counters = own.getStatus("voice")?.counters
+			expect(counters?.detections).toMatchObject({ total: 3, listening: 0 })
+			expect(receptionHint(counters)).toBe("nothing-heard")
+		} finally {
+			await own.destroy()
+		}
 	})
 })

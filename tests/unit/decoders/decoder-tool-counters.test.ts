@@ -103,8 +103,8 @@ describe("rtl_433 stats report", () => {
 		internals.handleOutputLine('{"frames":{"count":-1e999}}')
 		internals.handleOutputLine('{"model":"Test-Sensor","id":1,"frames":3}')
 		expect(store.view("ism")).toEqual({
-			detections: { total: 10, perMin: 10, latest: 4 },
-			framesOk: { total: 0, perMin: 0, latest: 0 },
+			detections: { total: 10, perMin: 10, latest: 4, listening: 10 },
+			framesOk: { total: 0, perMin: 0, latest: 0, listening: 0 },
 		})
 		// Only the sensor event (it has a model) is an output.
 		expect(outputs.map(o => (o.data as { model?: string }).model)).toEqual([
@@ -137,10 +137,10 @@ describe("dsd-fme line counters", () => {
 		expect(store.view("dv")).toBeUndefined()
 		vi.advanceTimersByTime(COUNTER_FLUSH_MS)
 		expect(store.view("dv")).toEqual({
-			detections: { total: 2, perMin: 2, latest: 2 },
-			framesOk: { total: 0, perMin: 0, latest: 0 },
-			crcBad: { total: 1, perMin: 1, latest: 1 },
-			fecBad: { total: 2, perMin: 2, latest: 2 },
+			detections: { total: 2, perMin: 2, latest: 2, listening: 2 },
+			framesOk: { total: 0, perMin: 0, latest: 0, listening: 0 },
+			crcBad: { total: 1, perMin: 1, latest: 1, listening: 1 },
+			fecBad: { total: 2, perMin: 2, latest: 2, listening: 2 },
 		})
 	})
 
@@ -155,7 +155,12 @@ describe("dsd-fme line counters", () => {
 		}
 		vi.advanceTimersByTime(COUNTER_FLUSH_MS)
 		const view = store.view("dv")
-		expect(view?.framesOk).toEqual({ total: 0, perMin: 0, latest: 0 })
+		expect(view?.framesOk).toEqual({
+			total: 0,
+			perMin: 0,
+			latest: 0,
+			listening: 0,
+		})
 		expect(view?.detections?.total).toBe(3)
 		expect(receptionHint(view)).toBe("heard-undecoded")
 	})

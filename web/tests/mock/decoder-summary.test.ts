@@ -174,11 +174,17 @@ describe("mock decoder counters match the core's", () => {
 		"%s: the core's verdict, reception hint and counters",
 		async (type, counters) => {
 			const { decoderSummary } = await coreSummary()
-			// the core's status reading: each counter with the child's latest reading (here its total)
+			// the core's status reading: each counter with the child's latest reading
+			// and its listening-period growth (a mock run is one period: its total)
 			const status = Object.fromEntries(
 				Object.entries(counters).map(([name, c]) => [
 					name,
-					{ total: c.total, perMin: c.perMin, latest: c.total },
+					{
+						total: c.total,
+						perMin: c.perMin,
+						latest: c.total,
+						listening: c.total,
+					},
 				]),
 			)
 			const d = {

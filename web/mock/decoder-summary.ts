@@ -235,7 +235,12 @@ export const MOCK_COUNTERS: Readonly<Record<string, DecoderCounters>> = {
 	},
 }
 
-/** The core's receptionHint (src/decoders/decoder-counters.ts) on a listening verdict. */
+/**
+ * The core's receptionHint (src/decoders/decoder-counters.ts) on a listening
+ * verdict. The core reads growth since the decoder last started or moved; a
+ * mock decoder never restarts or moves and its fixture counts are fresh, so
+ * its whole run is one listening period and that growth is its total.
+ */
 export function mockReception(
 	counters: DecoderCounters | undefined,
 	code: DecoderVerdictCode,
@@ -243,26 +248,26 @@ export function mockReception(
 	if (code !== "listening" || !counters) return undefined
 	let heard = false
 	let decoded = false
-	let heardTotal = 0
+	let heardListening = 0
 	let heardRecent = 0
-	let decodedTotal = 0
+	let decodedListening = 0
 	let decodedRecent = 0
 	for (const [name, counter] of Object.entries(counters)) {
 		if (!counter || !Object.hasOwn(DECODER_COUNTER_CLASSES, name)) continue
 		const kind = DECODER_COUNTER_CLASSES[name as DecoderCounterName]
 		if (kind === "heard" || kind === "failed") {
 			heard = true
-			heardTotal += counter.total
-			heardRecent += counter.perMin
+			heardListening += counter.total
+			heardRecent += Math.min(counter.perMin, counter.total)
 		} else if (kind === "decoded") {
 			decoded = true
-			decodedTotal += counter.total
-			decodedRecent += counter.perMin
+			decodedListening += counter.total
+			decodedRecent += Math.min(counter.perMin, counter.total)
 		}
 	}
 	if (!heard || !decoded) return undefined
-	if (decodedTotal === 0)
-		return heardTotal > 0 ? "heard-undecoded" : "nothing-heard"
+	if (decodedListening === 0)
+		return heardListening > 0 ? "heard-undecoded" : "nothing-heard"
 	return heardRecent > 0 && decodedRecent === 0
 		? "heard-undecoded"
 		: "nothing-heard"

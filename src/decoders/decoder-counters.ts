@@ -7,7 +7,9 @@
  *   the closed name list (DECODER_COUNTER_NAMES) and turns it into deltas, so a
  *   child restart (its counters back at 0) never moves a total backwards.
  * - The manager's {@link DecoderCounterStore} folds those deltas per decoder
- *   into totals since the core started and a rolling one-minute rate.
+ *   into totals since the core started, a rolling one-minute rate and growth
+ *   since the decoder's current listening period began (its last start or
+ *   move), which alone feeds {@link receptionHint}.
  */
 
 import { z } from "zod"
@@ -35,6 +37,13 @@ export interface DecoderCounterStatus {
 	perMin: number
 	/** The child's latest reading (its own count since it started, or its last interval). */
 	latest: number
+	/**
+	 * Growth since the decoder's current listening period began
+	 * ({@link DecoderCounterStore.startListening}); 0 once the counter last grew
+	 * more than {@link LISTENING_EVIDENCE_MAX_AGE_MS} ago. Internal: the
+	 * summary shows total and perMin only.
+	 */
+	listening: number
 }
 
 export type DecoderCountersStatus = Partial<
@@ -211,19 +220,36 @@ const BUCKETS = COUNTER_RATE_WINDOW_MS / COUNTER_BUCKET_MS
 /**
  * Decoders the store keeps at most. Entries follow the manager's decoders (each
  * forgotten with its decoder), so this only guards against a leak: 256 decoders
- * x 8 names x (3 + 2 x 6 bucket) numbers = 30,720 numbers, about 240 KiB.
+ * x 8 names x (5 + 2 x 6 bucket) numbers = 34,816 numbers, about 272 KiB.
  */
 export const COUNTER_STORE_MAX_DECODERS = 256
+
+/**
+ * Growth in a listening period stops counting once the counter last grew more
+ * than 2 h ago (inclusive at exactly 2 h). Measured from the last growth, not
+ * from the period's start: a 90 min dwell keeps every burst it heard (at most
+ * 90 min old when it ends) with 30 min left to read the result, while a
+ * decoder that sits on one placement for days stops reporting a single false
+ * preamble from the morning as "heard". 90 min + 30 min = 2 h.
+ */
+export const LISTENING_EVIDENCE_MAX_AGE_MS = 2 * 60 * 60 * 1_000
 
 interface CounterSeries {
 	total: number
 	latest: number
+	/** Growth since the current listening period began. */
+	listening: number
+	/** Clock ms of the last growth in the current listening period; null before any. */
+	listeningAt: number | null
 	/** Bucket index (floor(ms / COUNTER_BUCKET_MS)) each ring slot holds. */
 	keys: number[]
 	values: number[]
 }
 
-/** Manager side: totals since the core started and a rolling minute rate, per decoder id. */
+/**
+ * Manager side, per decoder id: totals since the core started, a rolling
+ * minute rate, and growth in the current listening period.
+ */
 export class DecoderCounterStore {
 	private readonly decoders = new Map<
 		string,
@@ -252,6 +278,8 @@ export class DecoderCounterStore {
 				entry = {
 					total: 0,
 					latest: 0,
+					listening: 0,
+					listeningAt: null,
 					keys: new Array<number>(BUCKETS).fill(-1),
 					values: new Array<number>(BUCKETS).fill(0),
 				}
@@ -260,6 +288,10 @@ export class DecoderCounterStore {
 			const amount = clampCount(delta)
 			entry.total = addCount(entry.total, amount)
 			entry.latest = clampCount(event.latest[name] ?? entry.latest)
+			if (amount > 0) {
+				entry.listening = addCount(entry.listening, amount)
+				entry.listeningAt = this.clock()
+			}
 			const slot = key % BUCKETS
 			if (entry.keys[slot] !== key) {
 				entry.keys[slot] = key
@@ -273,7 +305,8 @@ export class DecoderCounterStore {
 	view(decoderId: string): DecoderCountersStatus | undefined {
 		const series = this.decoders.get(decoderId)
 		if (!series || series.size === 0) return undefined
-		const key = Math.floor(this.clock() / COUNTER_BUCKET_MS)
+		const now = this.clock()
+		const key = Math.floor(now / COUNTER_BUCKET_MS)
 		const view: DecoderCountersStatus = {}
 		for (const name of DECODER_COUNTER_NAMES) {
 			const entry = series.get(name)
@@ -284,9 +317,35 @@ export class DecoderCounterStore {
 				if (at > key - BUCKETS && at <= key)
 					perMin = addCount(perMin, entry.values[slot] ?? 0)
 			}
-			view[name] = { total: entry.total, perMin, latest: entry.latest }
+			const listening =
+				entry.listeningAt !== null &&
+				now - entry.listeningAt <= LISTENING_EVIDENCE_MAX_AGE_MS
+					? entry.listening
+					: 0
+			view[name] = {
+				total: entry.total,
+				perMin,
+				latest: entry.latest,
+				listening,
+			}
 		}
 		return view
+	}
+
+	/**
+	 * `decoderId` starts listening afresh: it (or one of its placement workers)
+	 * started, restarted or moved to another channel or centre, so what it heard
+	 * before says nothing about the air it listens to now. Totals and the minute
+	 * rate are kept; growth in the listening period restarts at 0. A decoder
+	 * that never reported is not added.
+	 */
+	startListening(decoderId: string): void {
+		const series = this.decoders.get(decoderId)
+		if (!series) return
+		for (const entry of series.values()) {
+			entry.listening = 0
+			entry.listeningAt = null
+		}
 	}
 
 	forget(decoderId: string): void {
@@ -301,9 +360,11 @@ export class DecoderCounterStore {
 /**
  * What a listening decoder's counters say about the air. Needs at least one
  * "heard" or "failed" counter and the "decoded" counter (framesOk); undefined
- * otherwise (input samples alone say nothing about the air). Before its first
- * decode, totals since the core started decide (a long dwell with sparse
- * bursts still shows them); after one, the last minute alone does.
+ * otherwise (input samples alone say nothing about the air). Only the current
+ * listening period counts (since the decoder last started or moved, evidence
+ * at most {@link LISTENING_EVIDENCE_MAX_AGE_MS} old): before its first decode
+ * in it, anything heard in it decides (a long dwell with sparse bursts still
+ * shows them); after one, the last minute alone does.
  */
 export function receptionHint(
 	counters: DecoderCountersStatus | undefined,
@@ -311,9 +372,9 @@ export function receptionHint(
 	if (!counters) return undefined
 	let reportsHeard = false
 	let reportsDecoded = false
-	let heardTotal = 0
+	let heardListening = 0
 	let heardRecent = 0
-	let decodedTotal = 0
+	let decodedListening = 0
 	let decodedRecent = 0
 	for (const name of DECODER_COUNTER_NAMES) {
 		const counter = counters[name]
@@ -321,17 +382,27 @@ export function receptionHint(
 		const kind = DECODER_COUNTER_CLASSES[name]
 		if (kind === "heard" || kind === "failed") {
 			reportsHeard = true
-			heardTotal = addCount(heardTotal, clampCount(counter.total))
-			heardRecent = addCount(heardRecent, clampCount(counter.perMin))
+			heardListening = addCount(heardListening, clampCount(counter.listening))
+			// The minute can reach back before the period began: never more than the period grew.
+			heardRecent = addCount(
+				heardRecent,
+				Math.min(clampCount(counter.perMin), clampCount(counter.listening)),
+			)
 		} else if (kind === "decoded") {
 			reportsDecoded = true
-			decodedTotal = addCount(decodedTotal, clampCount(counter.total))
-			decodedRecent = addCount(decodedRecent, clampCount(counter.perMin))
+			decodedListening = addCount(
+				decodedListening,
+				clampCount(counter.listening),
+			)
+			decodedRecent = addCount(
+				decodedRecent,
+				Math.min(clampCount(counter.perMin), clampCount(counter.listening)),
+			)
 		}
 	}
 	if (!reportsHeard || !reportsDecoded) return undefined
-	if (decodedTotal === 0)
-		return heardTotal > 0 ? "heard-undecoded" : "nothing-heard"
+	if (decodedListening === 0)
+		return heardListening > 0 ? "heard-undecoded" : "nothing-heard"
 	return heardRecent > 0 && decodedRecent === 0
 		? "heard-undecoded"
 		: "nothing-heard"
