@@ -300,6 +300,170 @@ describe("ScannerService snapshot backlog", () => {
 	})
 })
 
+describe("ScannerService size-scaled snapshot cadence", () => {
+	// 90 MB of snapshot text: periodic 90e6 x 86,400,000 / 2e9 = 3,888,000 ms; main-thread
+	// spacing ceil(90e6 / 1 MiB x 1 s) = 85,831 ms; journal trigger min(90e6, 64 MiB / 2) = 32 MiB.
+	const BIG = 90_000_000
+	const PERIODIC_MS = 3_888_000
+	const MAIN_SPACING_MS = 85_831
+	/** Past every interval since the never-snapshotted start (lastSnapshotAt 0). */
+	const LATE = 10_000_000_000
+
+	it("snapshots a 90 MB store twice in two dirty hours, not 720 times, even when every snapshot is a main-thread fallback", async () => {
+		const { internals, clock } = harness()
+		clock.t = LATE
+		vi.spyOn(internals.persistence, "snapshotCadence").mockReturnValue({
+			snapshotBytes: BIG,
+			journalBytes: 0,
+			onWorker: false,
+		})
+		const write = vi
+			.spyOn(internals.persistence, "writeSnapshotOf")
+			.mockImplementation(() => Promise.resolve())
+		const starts: number[] = []
+		write.mockImplementation(() => {
+			starts.push(clock.t)
+			return Promise.resolve()
+		})
+		const from = clock.t
+		for (let s = 0; s < 7_200; s++) {
+			internals.dirty = true
+			internals.tick()
+			await new Promise<void>(resolve => setImmediate(resolve))
+			clock.t += 1_000
+		}
+		expect(starts).toEqual([from, from + PERIODIC_MS])
+	})
+
+	it("a journal tail at the trigger makes a snapshot due after the main-thread spacing; one byte under it does not", async () => {
+		const { internals, clock } = harness()
+		clock.t = LATE
+		const cadence = vi
+			.spyOn(internals.persistence, "snapshotCadence")
+			.mockReturnValue({
+				snapshotBytes: BIG,
+				journalBytes: 32 * 1024 * 1024 - 1,
+				onWorker: false,
+			})
+		const write = vi
+			.spyOn(internals.persistence, "writeSnapshotOf")
+			.mockImplementation(() => Promise.resolve())
+		internals.dirty = true
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(1)
+		await new Promise<void>(resolve => setImmediate(resolve))
+		internals.dirty = true
+		clock.t += MAIN_SPACING_MS
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(1) // under the trigger: periodic
+		cadence.mockReturnValue({
+			snapshotBytes: BIG,
+			journalBytes: 32 * 1024 * 1024,
+			onWorker: false,
+		})
+		clock.t -= 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(1) // at the trigger, 1 ms before the spacing
+		clock.t += 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(2)
+	})
+
+	it("a journal hole is covered after 1 s on or off the worker: the main-thread spacing never delays it", async () => {
+		const { internals, clock } = harness()
+		clock.t = LATE
+		const cadence = vi
+			.spyOn(internals.persistence, "snapshotCadence")
+			.mockReturnValue({ snapshotBytes: BIG, journalBytes: 0, onWorker: true })
+		const write = vi
+			.spyOn(internals.persistence, "writeSnapshotOf")
+			.mockImplementation(() => Promise.resolve())
+		vi.spyOn(internals.persistence, "append").mockImplementation(() =>
+			Promise.reject(new WaveKitError("full", SCANNER_JOURNAL_BACKLOG_CODE)),
+		)
+		const settle = () => new Promise<void>(resolve => setImmediate(resolve))
+		internals.onStoreMutation(entry())
+		await settle()
+		expect(write).toHaveBeenCalledTimes(1)
+		clock.t += 1_000
+		internals.onStoreMutation(entry())
+		await settle()
+		expect(write).toHaveBeenCalledTimes(2) // worker live: 1 s
+		cadence.mockReturnValue({
+			snapshotBytes: BIG,
+			journalBytes: 0,
+			onWorker: false,
+		})
+		clock.t += 999
+		internals.onStoreMutation(entry())
+		await settle()
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(2) // 1 ms short of 1 s
+		clock.t += 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(3) // main thread: 1 s, not 85,831 ms
+		await settle()
+		// A non-urgent journal-trigger snapshot still waits out the main-thread spacing.
+		cadence.mockReturnValue({
+			snapshotBytes: BIG,
+			journalBytes: 32 * 1024 * 1024,
+			onWorker: false,
+		})
+		internals.dirty = true
+		clock.t += MAIN_SPACING_MS - 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(3)
+		clock.t += 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(4)
+	})
+
+	it("a failed hole snapshot on a quiet store is retried after 10 s, not at the periodic interval", async () => {
+		const { internals, clock } = harness()
+		clock.t = LATE
+		vi.spyOn(internals.persistence, "snapshotCadence").mockReturnValue({
+			snapshotBytes: BIG,
+			journalBytes: 0,
+			onWorker: false,
+		})
+		const write = vi
+			.spyOn(internals.persistence, "writeSnapshotOf")
+			.mockImplementationOnce(() =>
+				Promise.reject(new WaveKitError("disk", "SCANNER_PERSIST_FAILED")),
+			)
+			.mockImplementationOnce(() =>
+				Promise.reject(new WaveKitError("disk", "SCANNER_PERSIST_FAILED")),
+			)
+			.mockImplementation(() => Promise.resolve())
+		vi.spyOn(internals.persistence, "append").mockImplementation(() =>
+			Promise.reject(new WaveKitError("full", SCANNER_JOURNAL_BACKLOG_CODE)),
+		)
+		const settle = () => new Promise<void>(resolve => setImmediate(resolve))
+		internals.onStoreMutation(entry()) // the only mutation: the store goes quiet
+		await settle()
+		expect(write).toHaveBeenCalledTimes(1) // fails
+		clock.t += SNAPSHOT_EVERY_MS - 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(1) // 1 ms short of 10 s
+		clock.t += 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(2) // still requested: 10 s, not 3,888 s; fails again
+		await settle()
+		clock.t += SNAPSHOT_EVERY_MS
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(3) // the request survives every failure; succeeds
+		await settle()
+		// Covered: dirty again only by the next change, then the periodic interval applies.
+		internals.dirty = true
+		clock.t += PERIODIC_MS - 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(3)
+		clock.t += 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(4)
+	})
+})
+
 function entry(): Parameters<ScannerPersistence["append"]>[0] {
 	return {
 		at: new Date(0).toISOString(),

@@ -465,7 +465,7 @@ export { atomicWrite }
 type JsonRead =
 	| { kind: "missing" }
 	| { kind: "invalid"; reason: unknown }
-	| { kind: "ok"; value: unknown }
+	| { kind: "ok"; value: unknown; bytes: number }
 
 async function readJson(file: string): Promise<JsonRead> {
 	let text: string
@@ -476,7 +476,11 @@ async function readJson(file: string): Promise<JsonRead> {
 		return { kind: "invalid", reason: err }
 	}
 	try {
-		return { kind: "ok", value: JSON.parse(text) as unknown }
+		return {
+			kind: "ok",
+			value: JSON.parse(text) as unknown,
+			bytes: Buffer.byteLength(text),
+		}
 	} catch (err) {
 		return { kind: "invalid", reason: err }
 	}
@@ -587,6 +591,14 @@ export class ScannerPersistence {
 	} | null = null
 	private nextSeq = 1
 	private durableLastSeq = 0
+	/**
+	 * Snapshot cadence inputs (`snapshotCadence`), in UTF-8 bytes as written to disk: the last
+	 * snapshot written or loaded, every journal line accepted (replayed ones at load included) and
+	 * that total when the last durable snapshot was queued.
+	 */
+	private snapshotBytes = 0
+	private journalBytes = 0
+	private journalBytesCovered = 0
 	private loaded = false
 	private authorityHealth: "healthy" | "degraded" = "degraded"
 
@@ -635,6 +647,9 @@ export class ScannerPersistence {
 		this.loaded = false
 		this.fileMaxSeq.clear()
 		this.fileBytes.clear()
+		this.snapshotBytes = 0
+		this.journalBytes = 0
+		this.journalBytesCovered = 0
 		const snapshot = await this.readSnapshot()
 		const journal = await this.readJournal(snapshot.lastSeq)
 		this.validateRecordingReplay(
@@ -731,6 +746,7 @@ export class ScannerPersistence {
 			batch = fresh
 		}
 		batch.lines.push(line)
+		this.journalBytes += Buffer.byteLength(line)
 		batch.bytes += cost
 		batch.maxSeq = seq
 		this.queuedLines += 1
@@ -756,9 +772,18 @@ export class ScannerPersistence {
 		)
 	}
 
-	/** A durable snapshot up to `lastSeq` closes the hole it covers. */
-	private snapshotDurable(lastSeq: number): void {
+	/**
+	 * A durable snapshot up to `lastSeq` closes the hole it covers; `journalBytes` is the journal
+	 * total when it was queued, `bytes` its size.
+	 */
+	private snapshotDurable(
+		lastSeq: number,
+		journalBytes: number,
+		bytes: number,
+	): void {
 		this.durableLastSeq = Math.max(this.durableLastSeq, lastSeq)
+		this.journalBytesCovered = Math.max(this.journalBytesCovered, journalBytes)
+		this.snapshotBytes = bytes
 		if (this.refusedMax === null) return
 		if (lastSeq >= this.refusedMax) {
 			this.log.info(
@@ -867,6 +892,24 @@ export class ScannerPersistence {
 		})
 	}
 
+	/**
+	 * What the snapshot cadence (`snapshotIntervalMs`) reads: the last snapshot's size, the journal
+	 * accepted since the last durable snapshot, and whether the worker's mirror is live (the next
+	 * `writeSnapshotOf` then costs the main thread ~1 ms instead of a whole-store clone + stringify).
+	 */
+	snapshotCadence(): {
+		snapshotBytes: number
+		journalBytes: number
+		onWorker: boolean
+	} {
+		return {
+			snapshotBytes: this.snapshotBytes,
+			journalBytes: Math.max(0, this.journalBytes - this.journalBytesCovered),
+			onWorker:
+				this.attached !== null && this.writer !== null && this.writer.live(),
+		}
+	}
+
 	/** The snapshot worker's counters, heap and last timings (null before the first writeSnapshotOf). */
 	snapshotWorkerStatus(): SnapshotWorkerStatus | null {
 		return this.writer?.status() ?? null
@@ -965,6 +1008,8 @@ export class ScannerPersistence {
 		const superseded = this.queuedSnapshot
 		this.queuedSnapshot = slot
 		this.coverSeq = slot.lastSeq
+		// Every line accepted so far is at or below slot.lastSeq: the snapshot covers it.
+		const journalBytes = this.journalBytes
 		const own = this.enqueue(async () => {
 			if (this.queuedSnapshot === slot) this.queuedSnapshot = null
 			const body = slot.text
@@ -976,7 +1021,7 @@ export class ScannerPersistence {
 			if (slot.lastSeq < this.writtenSeq) return
 			const file = join(this.root, SNAPSHOT_FILE)
 			if (body !== null) {
-				await this.writeSnapshotFile(file, body, slot.lastSeq)
+				await this.writeSnapshotFile(file, body, slot.lastSeq, journalBytes)
 				return
 			}
 			if (worker === null) return
@@ -987,7 +1032,7 @@ export class ScannerPersistence {
 					: await writer.commitTo(worker.id, file)
 			if (result.ok) {
 				this.writtenSeq = Math.max(this.writtenSeq, slot.lastSeq)
-				this.snapshotDurable(slot.lastSeq)
+				this.snapshotDurable(slot.lastSeq, journalBytes, result.bytes)
 				return
 			}
 			if (result.reason === "io") {
@@ -1012,6 +1057,7 @@ export class ScannerPersistence {
 		file: string,
 		body: string,
 		lastSeq: number,
+		journalBytes: number,
 	): Promise<void> {
 		try {
 			await atomicWrite(file, body)
@@ -1021,7 +1067,7 @@ export class ScannerPersistence {
 			throw err
 		}
 		this.writtenSeq = Math.max(this.writtenSeq, lastSeq)
-		this.snapshotDurable(lastSeq)
+		this.snapshotDurable(lastSeq, journalBytes, Buffer.byteLength(body))
 		await this.writer?.sweepAbandoned()
 	}
 
@@ -1037,6 +1083,7 @@ export class ScannerPersistence {
 		reason: string,
 	): Promise<void> {
 		const built = this.mainSnapshotText(store.snapshot())
+		const journalBytes = this.journalBytes
 		if (built === null) {
 			if (this.coverSeq === slot.lastSeq) this.coverSeq = null
 			throw invalidRecordingSnapshot()
@@ -1052,7 +1099,11 @@ export class ScannerPersistence {
 			throw err
 		}
 		this.writtenSeq = Math.max(this.writtenSeq, built.lastSeq)
-		this.snapshotDurable(built.lastSeq)
+		this.snapshotDurable(
+			built.lastSeq,
+			journalBytes,
+			Buffer.byteLength(built.text),
+		)
 		await this.writer?.sweepAbandoned()
 	}
 
@@ -1281,6 +1332,7 @@ export class ScannerPersistence {
 			)
 			return empty
 		}
+		if (read.kind === "ok") this.snapshotBytes = read.bytes
 		return parsed.data
 	}
 
@@ -1375,7 +1427,10 @@ export class ScannerPersistence {
 					) {
 						this.authorityHealth = "degraded"
 						dropped++
-					} else if (previous === undefined) bySeq.set(parsed.seq, parsed)
+					} else if (previous === undefined) {
+						bySeq.set(parsed.seq, parsed)
+						this.journalBytes += Buffer.byteLength(line) + 1
+					}
 				}
 			}
 			this.fileMaxSeq.set(name, fileMax)
