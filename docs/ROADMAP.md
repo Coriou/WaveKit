@@ -592,6 +592,14 @@ pending. Coordinate any live receiver/network changes with the hardware session.
       discovery, routing alongside the computer's internet connection, adapter/OS
       compatibility and recovery after cable removal. Measure sustained loss-free
       IQ and latency at supported rates rather than assuming Ethernet guarantees it.
+- [ ] Prefer the receiver's best link without configuration. The host already ranks its
+      addresses (Ethernet first) and core can move to the best verified one
+      (`sdrHost.endpointSelection: auto`, [spec](specs/receiver-endpoints/requirements.md)), but
+      the default is `off` and no shipped config enables it. First live run 2026-11-01: a core
+      configured with the host's Wi-Fi address switched to its Ethernet address about 2 s after
+      connecting, wrote no tuning, and went from 3.1 to 4.2–4.8 MB/s of a 4.8 MB/s stream. Make
+      `auto` the default for sources with an sdr-host API and mark the spec deployed; pair with
+      discovery (§12). Details: [shared receiver research](RESEARCH-2026-11-01-SHARED-RECEIVER.md).
 
 Both direct Wi-Fi and direct Ethernet are portability targets: one laptop, one
 Pi, one battery, with an Ethernet cable as the wired alternative. Router-based
@@ -631,6 +639,9 @@ Wi-Fi/Ethernet and direct links need separate acceptance tests.
       scanner captures and real voice/sensor/aircraft recordings; composed fixtures
       remain useful where live signals are unavailable. Keep private capture
       payloads out of the public repository.
+- [ ] Bind the raw audio TCP port to a configured host (loopback by default), like the API and
+      tuner relay. `src/core/audio-output.ts` calls `server.listen(port)` without a host, so a
+      native run serves port 8080 on every interface; Docker hides it by publishing on loopback.
 
 ## 4. API and event foundation for multiple clients
 
@@ -801,6 +812,28 @@ Activity `unavailable` and the rest running), and measured retention.
       command-history inputs for palette ranking. Reuse operational tuner/audio
       and scanner settings where they already exist; define update/conflict
       semantics rather than creating a second scanner settings store.
+
+## 4b. Shared receiver: tuning truth and control
+
+Several cores can share one SDR host (Pi or USB, same image), and today each believes its own
+config: on 2026-11-01 a core showed 446.5 MHz while another core had the dongle on 1090 MHz,
+and the host itself reported its launch frequency. Not urgent; one lane, done cleanly. Findings,
+design direction, open questions and acceptance ideas:
+[shared receiver research](RESEARCH-2026-11-01-SHARED-RECEIVER.md).
+
+- [ ] The SDR host knows and publishes the live tuning: record every command that reaches
+      rtl_tcp (centre, rate, gain mode and gain, AGC, PPM, bias tee, direct sampling) with time
+      and sender, report it in `GET /api/status` instead of the launch value, push changes, and
+      add the dongle facts (tuner type, gain count). Same image for Pi and USB.
+- [ ] Cores always use the host's truth: adopt it on connect and on every change (spectrum,
+      caps, decoder placement, island, with who and when). "Unverified" stays only for sources
+      without our host.
+- [ ] Shared control, phase 1 (no blocking, no config): attribute and broadcast every retune;
+      every core follows; decoders that lose their band suspend naming who retuned.
+- [ ] Shared control, phase 2 (optional holds): background work never preempts a hold;
+      "Take control" in the UI and `takeover` in the API do; borrows (agent dwells, tests)
+      restore the previous tuning; holds end with their core's connection; refusals say who
+      holds the tuner, why and since when.
 
 ## 5. Protocol-aware signal discovery and scanning
 
@@ -1390,3 +1423,17 @@ A new user should get from nothing to a working receiver in minutes, with a USB 
       available).
 - [ ] Later: a desktop app (Tauri or Electron, performance first) with a clean install and update
       path.
+- [ ] Core uses the receiver's announcement. The host image announces `_wavekit-sdr._tcp`
+      (`v=1 iq=<port> path=/api/status`), but nothing in core, web or CLI browses for it, so a Pi
+      setup still means copying a config and editing in an IP. Core browses for receivers, offers
+      them in the UI and the API (one click or one call to add as a source), and relies on endpoint
+      selection (§2) for the best link. Ship it opt-in, prove it on real networks (same subnet,
+      cable on another subnet, a USB host), then turn it on by default. Built features that stay
+      off help nobody: on 2026-11-01 discovery plus endpoint selection would have avoided an hour
+      of debugging a Pi served over its Wi-Fi while its cable sat idle.
+- [ ] Explain the first-run blockers seen on a Mac (2026-11-01) where they happen, not as timeouts:
+      macOS Local Network permission (needed by the terminal for a native core and by the Docker
+      app for the container), a `.local` lookup that takes 5 s on macOS when the host has no IPv6
+      and so exhausts the 5 s source connect timeout, a source paused in an earlier run (the pause
+      is kept in `data/`, which native and Docker share), and decoders whose programs are missing
+      in a native run (say they ship in the Docker app).
