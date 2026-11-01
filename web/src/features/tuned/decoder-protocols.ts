@@ -1,6 +1,7 @@
 // The band plan half of the core's decoderCoversHz (src/api/routes/decoder-summary.ts), shared by the tuned card's
 // status fallback and the mock's summary so the two cannot drift: which band plan protocols a decoder type decodes,
-// and whether a plan range at a frequency lists one of them, and which configured targets are fixed. Pure.
+// and whether a plan range at a frequency lists one of them, which configured targets are fixed, and the tuned-band
+// rule's channel cluster. Pure.
 import type { DecoderInfo, ScanRange } from "@wavekit/api-types"
 
 /**
@@ -85,4 +86,26 @@ export function fixedTargetsHz(
 	return placements
 		.filter(fixed)
 		.flatMap(p => (positive(p.channelHz) ? [p.channelHz] : []))
+}
+
+/**
+ * The core's TUNED_CLUSTER_MAX_GAP_HZ (src/decoders/enablement/tuned-band.ts): neighbouring targets further apart
+ * are separate bands (LoRa's 433 and 869 MHz slots), not one channel cluster.
+ */
+export const CLUSTER_MAX_GAP_HZ = 2_400_000
+
+/** The core's clusterHolds: `hz` between neighbouring targets at most CLUSTER_MAX_GAP_HZ apart, widened by `reach`. */
+export function clusterHolds(
+	targets: readonly number[],
+	hz: number,
+	reach: number,
+): boolean {
+	const sorted = [...targets].sort((a, b) => a - b)
+	for (let i = 1; i < sorted.length; i++) {
+		const lo = sorted[i - 1]!
+		const hi = sorted[i]!
+		if (hi - lo <= CLUSTER_MAX_GAP_HZ && hz >= lo - reach && hz <= hi + reach)
+			return true
+	}
+	return false
 }

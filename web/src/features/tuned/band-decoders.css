@@ -1,14 +1,14 @@
 /* Tuned card: "On this band" (BandDecoders.tsx). Layout only: materials, colours and states come from the
    ui.css recipes, the card's .wkf-state and .wkf-dot, and tokens. One tbody per decoder: a row of facts
-   (decoder, state, last decode) over a full-width detail line with the action at its right. A decoder that
-   does not run has a hollow dot and says why in words. Below 280 px the table stacks; the markup's explicit
-   roles keep it a table for assistive tech. */
+   (decoder, state, last decode) over a detail line with a compact action at its right. Decoders are set apart
+   by space alone, no divider lines. A decoder that does not run has a hollow dot and says why in words.
+   Below 280 px the table stacks; the markup's explicit roles keep it a table for assistive tech. */
 @layer wk-app {
 	.wkf-onband {
 		container: wkf-onband / inline-size;
 		display: flex;
 		flex-direction: column;
-		gap: var(--wk-sp-3);
+		gap: var(--wk-sp-2);
 	}
 	.wkf-onband > h3 {
 		margin: 0;
@@ -18,7 +18,7 @@
 		border-collapse: collapse;
 		table-layout: auto;
 		font-size: var(--wk-fs-md);
-		line-height: 1.4;
+		line-height: 1.35;
 		color: var(--wk-text-2);
 	}
 	.wkf-bt th,
@@ -42,19 +42,17 @@
 	.wkf-bt thead .wkf-bt-sr > th {
 		padding: 0;
 	}
-	.wkf-bt-dec {
-		border-top: 1px solid var(--wk-line-08);
-	}
+	/* space, not lines, between decoders; the first sits right under the headers */
 	.wkf-bt-main > * {
-		padding: var(--wk-sp-4) var(--wk-sp-4) 0 0;
+		padding: var(--wk-sp-5) var(--wk-sp-4) 0 0;
+	}
+	.wkf-bt-dec:first-of-type > .wkf-bt-main > * {
+		padding-top: var(--wk-sp-1);
 	}
 	.wkf-bt-main > .wkf-bt-last {
 		padding-right: 0;
 		white-space: nowrap;
 		font-variant-numeric: tabular-nums;
-	}
-	.wkf-bt-dec:not(:has(.wkf-bt-sub)) > .wkf-bt-main > * {
-		padding-bottom: var(--wk-sp-4);
 	}
 	.wkf-bt-name {
 		min-width: 0;
@@ -88,7 +86,7 @@
 		box-shadow: inset 0 0 0 1.5px var(--wk-danger);
 	}
 	.wkf-bt-sub > td {
-		padding: var(--wk-sp-2) 0 var(--wk-sp-4);
+		padding: var(--wk-sp-1) 0 0;
 		vertical-align: middle;
 	}
 	.wkf-bt-detail {
@@ -99,6 +97,16 @@
 		padding-left: var(--wk-sp-4);
 		text-align: right;
 		white-space: nowrap;
+	}
+	/* the row's action is compact, its height the detail line's; touch keeps the small button */
+	.wkf-bt-act > .wk-btn {
+		height: var(--wk-h-xs);
+		padding: 0 var(--wk-sp-4);
+	}
+	@media (pointer: coarse) {
+		.wkf-bt-act > .wk-btn {
+			height: var(--wk-h-sm);
+		}
 	}
 	.wkf-bt-link {
 		padding: 0;
@@ -140,7 +148,10 @@
 			flex-wrap: wrap;
 			align-items: baseline;
 			column-gap: var(--wk-sp-4);
-			padding-top: var(--wk-sp-4);
+			padding-top: var(--wk-sp-5);
+		}
+		.wkf-bt-dec:first-of-type > .wkf-bt-main {
+			padding-top: 0;
 		}
 		.wkf-bt-main > * {
 			padding: 0;
@@ -155,14 +166,16 @@
 			display: flex;
 			flex-wrap: wrap;
 			align-items: center;
-			gap: var(--wk-sp-2) var(--wk-sp-4);
-			padding: var(--wk-sp-2) 0 var(--wk-sp-4);
+			gap: var(--wk-sp-1) var(--wk-sp-4);
+			padding: var(--wk-sp-1) 0 0;
 		}
 		.wkf-bt-sub > td {
 			padding: 0;
 		}
+		/* detail and action share the line while both fit; the action wraps under a long detail */
 		.wkf-bt-sub > .wkf-bt-detail {
-			flex: 1 1 100%;
+			flex: 1 1 12ch;
+			min-width: 0;
 		}
 		.wkf-bt-sub > .wkf-bt-act {
 			margin-left: auto;

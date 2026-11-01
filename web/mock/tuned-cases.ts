@@ -73,6 +73,36 @@ const dmr = (over: Partial<DecoderInfo> = {}) =>
 		...over,
 	})
 
+/** LoRa as the catalogue declares it in the EU: the public Meshtastic default slots at 869 and 433 MHz. */
+const LORA_EU_HZ = [869_525_000, 433_875_000]
+const lora = (over: Partial<DecoderInfo> = {}) =>
+	status({
+		id: "lora-meshtastic",
+		type: "lora-meshtastic",
+		targetFrequenciesHz: LORA_EU_HZ,
+		bandAssessment: {
+			verdict: "out-of-band",
+			reasonCode: "frequency-out-of-band",
+			targetsHz: LORA_EU_HZ,
+			basis: "configured",
+		},
+		running: false,
+		suspended: true,
+		suspension: {
+			reasonCode: "frequency-out-of-band",
+			since: ago(60_000),
+		},
+		...over,
+	})
+
+/** Held by the operator's paused receiver feed (DecoderManager: "source-paused" outranks every other reason). */
+const feedPaused = {
+	running: false,
+	suspended: true,
+	sourceId: "rtl-0",
+	suspension: { reasonCode: "source-paused" as const, since: ago(45_000) },
+}
+
 const outOfBand = {
 	running: false,
 	suspended: true,
@@ -314,6 +344,63 @@ export const TUNED_CASES: readonly TunedCase[] = [
 				["multimon-ng", "Listening"],
 			],
 		},
+	}),
+	tunedCase({
+		id: "uhf-feed-paused",
+		title:
+			"466 MHz with the receiver feed paused: digital voice and the pager wait for Resume; LoRa's 433 and 869 MHz slots do not cover it",
+		hz: 466_012_500,
+		band: null,
+		named: null,
+		decoders: [
+			adsb({ ...feedPaused }),
+			pager(466_012_500, { ...feedPaused }),
+			dmr({ ...feedPaused }),
+			lora({ ...feedPaused }),
+		],
+		expect: {
+			proto: "Digital voice",
+			rows: [
+				["dsd-fme", "Paused"],
+				["multimon-ng", "Paused"],
+			],
+		},
+	}),
+	tunedCase({
+		id: "lora-433-edge",
+		title: "434.075 MHz: the reach's upper edge of LoRa's 433 MHz slot",
+		hz: 433_875_000 + 200_000,
+		band: null,
+		named: null,
+		decoders: [lora()],
+		expect: { proto: "LoRa", rows: [["lora-meshtastic", "Waiting"]] },
+	}),
+	tunedCase({
+		id: "lora-433-past-edge",
+		title: "434.075001 MHz: just past LoRa's 433 MHz slot",
+		hz: 433_875_000 + 200_001,
+		band: null,
+		named: null,
+		decoders: [lora()],
+		expect: { proto: "NFM", rows: [] },
+	}),
+	tunedCase({
+		id: "lora-869-edge",
+		title: "869.325 MHz: the reach's lower edge of LoRa's 869 MHz slot",
+		hz: 869_525_000 - 200_000,
+		band: null,
+		named: null,
+		decoders: [lora()],
+		expect: { proto: "LoRa", rows: [["lora-meshtastic", "Waiting"]] },
+	}),
+	tunedCase({
+		id: "lora-869-past-edge",
+		title: "869.324999 MHz: just past LoRa's 869 MHz slot",
+		hz: 869_525_000 - 200_001,
+		band: null,
+		named: null,
+		decoders: [lora()],
+		expect: { proto: "NFM", rows: [] },
 	}),
 	tunedCase({
 		id: "pager-restarting",

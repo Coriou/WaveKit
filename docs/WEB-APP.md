@@ -139,7 +139,9 @@ as ADS-B at 1090 MHz) or with the receiver set to RAW, the card shows **No audio
 instead of the demodulator and "Quiet".
 
 **On this band** is a table of the decoders whose band holds the frequency (within 200 kHz of one
-of their frequencies or of the span between them, or inside their band). The core decides which
+of their frequencies or of the span between neighbouring channels of one cluster, or inside their
+band). Frequencies more than 2.4 MHz apart are separate bands: LoRa, which listens at 433 and 869 MHz
+in Europe, is not listed at 446 MHz. The core decides which
 those are: the card asks `GET /api/decoders/summary?hz=<Hz>` and lists the items with
 `coversHz: true`, so an agent using the same endpoint sees the same list. Right after the core
 starts, before the receiver reports its capabilities, a decoder's configured frequencies stand in
@@ -150,15 +152,16 @@ picks them by the core's own rule: the decoder's band, else its configured frequ
 only follows the tuner, so the pager is not listed at 1090 MHz because its channel sits there), else, for a
 decoder with no band of its own such as the pager or digital voice, the receiver's band plan ranges
 that list its protocols (POCSAG, DMR). When Settings turns a decoder off or it is stopped, its row
-says so at once, before the core's next answer arrives. Each decoder takes two lines:
+says so at once, before the core's next answer arrives. Each decoder takes two compact lines, set
+apart by space rather than divider lines:
 
-| Column      | Shows                                                                                                          |
-| ----------- | -------------------------------------------------------------------------------------------------------------- |
-| Decoder     | Its name and program, for example ADS-B over `readsb`                                                          |
-| State       | A dot and one word: Decoding, Listening, Starting, Waiting, Paused, Failed or Off (filled dot while it runs)   |
-| Last decode | How long ago it last decoded; opens Activity on that decoder's events only. "Never" when it has not            |
-| Detail      | The second line: the reason from the core's verdict ("CPU budget full"), or how much it decoded, full width    |
-| Action      | At most one button, at the right of the detail line, only when the verdict suggests one the card can carry out |
+| Column      | Shows                                                                                                                                                    |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Decoder     | Its name and program, for example ADS-B over `readsb`                                                                                                    |
+| State       | A dot and one word: Decoding, Listening, Starting, Waiting, Paused, Failed or Off (filled dot while it runs)                                             |
+| Last decode | How long ago it last decoded; opens Activity on that decoder's events only. "Never" when it has not                                                      |
+| Detail      | The second line: the reason from the core's verdict ("CPU budget full"), or how much it decoded, full width                                              |
+| Action      | At most one small button, at the right of the detail line, only when the verdict suggests one the card can carry out; the detail never repeats its label |
 
 Decoders that decode come first, then those starting, failed, paused, waiting and off. In a narrow
 drawer or on a phone each decoder stacks: name, state and last decode, then the detail and its
@@ -264,7 +267,9 @@ waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads
   **Resume receiver** (while paused) and **Resume receiver at 161.500 MHz** do the same, and the
   `P` key toggles pause and the plain resume from anywhere; a pause from the palette or the key
   offers Undo. Read-only browsers cannot pause. While paused,
-  the tuned card's decoders read Paused, "Receiver paused — Resume", with a **Resume** button and
+  the tuned card's decoders read Paused, "Receiver paused", each with a **Resume** button; when the
+  paused feed holds every decoder on the card's frequency, the card's header reads `Receiver paused`
+  and its summary says the receiver is paused, and
   Settings › Decoders reads `Paused · the receiver is paused`. A scanner identify running when you
   pause ends with what it found so far and reads `Stopped · receiver paused`. A sweep running when
   you pause waits; **Resume at 161.500 MHz** continues it, but a plain **Resume** leaves it held so it

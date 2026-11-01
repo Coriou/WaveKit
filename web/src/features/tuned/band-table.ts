@@ -229,6 +229,8 @@ export interface BandTableRow {
 	id: string
 	name: string
 	protocol: string
+	/** The verdict's code behind `state` ("source-paused" reads "Paused" among others). */
+	code: BandVerdict["code"]
 	state: RowState
 	stateWord: string
 	/** "38 s ago", "3 min ago", "at 13:52"; "Never" when it has not decoded. */
@@ -237,6 +239,25 @@ export interface BandTableRow {
 	lastDecodeIso: string | null
 	detail: string
 	action: BandAction | null
+}
+
+/**
+ * The detail without a trailing hint that only names an action ("Receiver paused — Resume" → "Receiver paused"):
+ * the row's button already says it. An older core's paused-feed verdict carries "— Resume" whatever the button
+ * reads (a decoder without a source offers "Open the Receiver"), so a paused feed drops it too.
+ */
+export function withoutActionHint(
+	detail: string,
+	action: Pick<BandAction, "label"> | null,
+	code: BandVerdict["code"],
+): string {
+	const hint = /\s+[—–-]\s+([^—–-]+?)\.?$/.exec(detail)
+	if (!hint) return detail
+	const said = hint[1]!.trim().toLowerCase()
+	const names =
+		(action !== null && said === action.label.toLowerCase()) ||
+		(code === "source-paused" && said === "resume")
+	return names ? detail.slice(0, hint.index).trimEnd() : detail
 }
 
 /** The band plan ranges the status fallback reads (planRangesOf); null while not loaded. */
@@ -401,16 +422,22 @@ export function bandTable(
 			item.lastOutputAt === null
 				? null
 				: new Date(item.lastOutputAt).toISOString()
+		const action = rowAction(verdict, decoder, ctx)
 		rows.push({
 			id: item.id,
 			name: item.name,
 			protocol: item.protocol,
+			code: verdict.code,
 			state,
 			stateWord: STATE_WORD[state],
 			lastDecode: iso === null ? "Never" : agoText(iso, now) || "Never",
 			lastDecodeIso: iso,
-			detail: detailOf(verdict.text, item.name, state, item.eventsOut),
-			action: rowAction(verdict, decoder, ctx),
+			detail: withoutActionHint(
+				detailOf(verdict.text, item.name, state, item.eventsOut),
+				action,
+				verdict.code,
+			),
+			action,
 		})
 	}
 	rows.sort(
@@ -430,6 +457,16 @@ export const LIVE_STATES: ReadonlySet<RowState> = new Set([
 	"listening",
 ])
 
+/** The header's state while the paused receiver feed holds every decoder on this band (ReceiverIsland's words). */
+export const FEED_PAUSED_LINE = "Receiver paused"
+
+/** True when there are rows and the paused receiver feed holds every one ("source-paused"). */
+export function feedPausedHere(
+	rows: readonly Pick<BandTableRow, "code">[],
+): boolean {
+	return rows.length > 0 && rows.every(r => r.code === "source-paused")
+}
+
 /**
  * The header's line for the decoders on this band: "ADS-B · Decoding", "ADS-B · Paused", or with more
  * than one, the first (table order) and how many others ("Pager · Listening · +1"). Null without rows.
@@ -444,7 +481,8 @@ export function bandStateLine(rows: readonly BandTableRow[]): string | null {
 /**
  * The header's plain line about the decoders whose band holds the frequency (`rows`): "Decoded here by …" names
  * only live ones on the tuned channel (`onChannel`, decodersOnChannel ids); live ones whose band merely spans it
- * decode the band, not this channel; otherwise they cover it but are not decoding. Null without rows.
+ * decode the band, not this channel; while the paused feed holds them all, it says so; otherwise they cover it but
+ * are not decoding. Null without rows.
  */
 export function decodersLine(
 	rows: readonly BandTableRow[],
@@ -459,6 +497,8 @@ export function decodersLine(
 	if (here.length) return `Decoded here by ${names(here)}. Nothing heard yet.`
 	if (live.length)
 		return `${names(live)} ${one(live, "decodes", "decode")} this band, not this channel. Identify finds out what it is.`
+	if (feedPausedHere(rows))
+		return `${names(rows)} ${one(rows, "covers", "cover")} this frequency. The receiver is paused: resume it to decode.`
 	if (rows.length)
 		return `${names(rows)} ${one(rows, "covers", "cover")} this frequency but ${one(rows, "is", "are")} not decoding now.`
 	return null

@@ -2712,7 +2712,8 @@ sentence of at most 160 characters, such as "ADS-B paused: CPU budget full". `co
 one of `decoding`, `listening` (running, nothing decoded for 60 s), `starting`, `off`
 (mode off), `stopped` (stopped by the operator), `failed`, `out-of-band`,
 `no-channel`, `capture-too-narrow`, `source-unavailable`, `source-paused` (the
-source's receiver feed is paused; text "waiting: Receiver paused — Resume"),
+source's receiver feed is paused; text "waiting: Receiver paused", the Resume
+being the `resume-source` action),
 `unsupported-rate`,
 `scanner-busy`, `efficiency-budget`, `efficiency-cpu`, `efficiency-drops`,
 `efficiency-late-drops`, `efficiency-waiting`, `decoder-unavailable`,
@@ -2784,8 +2785,11 @@ decoder's fixed target frequencies: its configured targets, minus any that only
 follow the tuner (a VFO, fallback or centre placement, or the default channel of a
 single-channel audio decoder such as multimon-ng, which sits on the VFO or the
 tuned centre). A band holds `hz` within 200 kHz of a
-target, anywhere between its lowest and highest target, or inside one of its
-ranges widened by 200 kHz. A decoder with no band at all covers `hz` only when a
+target, anywhere between two neighbouring targets of one channel cluster (at most
+2.4 MHz apart, such as VDL2's channels; targets further apart are separate bands,
+so the catalogue LoRa decoder's EU slots at 433.875 and 869.525 MHz cover only
+433.675–434.075 and 869.325–869.725 MHz, never the frequencies between them), or
+inside one of its ranges widened by 200 kHz. A decoder with no band at all covers `hz` only when a
 built-in band plan range holding `hz` lists one of its protocols. A frequency that
 only follows the tuner never makes a decoder cover it, and scanner probes never
 cover. `hz` must be a positive finite number up to

@@ -586,8 +586,9 @@ export interface DecoderSummary {
 	verdict: DecoderVerdict
 	/**
 	 * Only with `?hz=`: true when the decoder's own band holds that frequency
-	 * (the tuned-band rule: within 200 kHz of a target, between its lowest and
-	 * highest target, or inside a range widened by 200 kHz). The band is the
+	 * (the tuned-band rule: within 200 kHz of a target, between neighbouring
+	 * targets of one channel cluster (at most 2.4 MHz apart), or inside a range
+	 * widened by 200 kHz). The band is the
 	 * band assessment's, else (before the first assessment) the configured
 	 * targets; for a decoder with no known band, true when a built-in band plan
 	 * range at that frequency lists one of its protocols. Where a decoder's placement happens to sit

@@ -60,6 +60,24 @@ describe("the tuned band, web and core", () => {
 		expect(onBand(d, 132.3 * MHZ)).toBe(false)
 	})
 
+	it("never hold the gap between two separate bands (LoRa's EU 433 and 869 MHz slots)", async () => {
+		const { bandContainsTuned } = await coreModule()
+		const targetsHz = [869_525_000, 433_875_000]
+		for (const [hz, held] of [
+			[446_524_920, false],
+			[433_875_000 + BAND_REACH_HZ, true],
+			[433_875_000 + BAND_REACH_HZ + 1, false],
+			[869_525_000 - BAND_REACH_HZ, true],
+			[869_525_000 - BAND_REACH_HZ - 1, false],
+		] as const) {
+			expect(
+				bandContainsTuned({ targetsHz, basis: "configured" }, hz),
+				String(hz),
+			).toBe(held)
+			expect(bandHoldsHz(targetsHz, undefined, hz), String(hz)).toBe(held)
+		}
+	})
+
 	// Feature: decoder-autostart, Property 6: web and core agree on the tuned band
 	// Validates: Requirements R5
 	it("agree for any targets, ranges and tuned frequency", async () => {

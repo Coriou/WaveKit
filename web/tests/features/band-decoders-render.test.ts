@@ -142,6 +142,46 @@ describe("On this band table semantics", () => {
 		expect(headersOf(html, ">Never<")).toEqual(["ADS-B readsb", "Last decode"])
 	})
 
+	it("a paused feed reads Paused with the reason once and one Resume button per decoder", () => {
+		const paused = (id: string, name: string, protocol: string) =>
+			item({
+				id,
+				name,
+				protocol,
+				verdict: {
+					code: "source-paused",
+					// an older core's text: the hint is dropped, the button says it
+					text: `${name} waiting: Receiver paused — Resume`,
+					actions: ["resume-source"],
+				},
+			})
+		const held = { running: false, suspended: true, sourceId: "rtl-0" }
+		const html = render(
+			[
+				paused("dsd", "Digital voice", "dsd-fme"),
+				paused("pager", "Pager", "multimon-ng"),
+			],
+			[
+				decoder({ id: "dsd", type: "dsd-fme", ...held }),
+				decoder({ id: "pager", type: "multimon-ng", ...held }),
+			],
+		)
+		expect(html).not.toContain("— Resume")
+		expect(html.match(/>Receiver paused</g)).toHaveLength(2)
+		expect(html.match(/>Paused</g)).toHaveLength(2)
+		expect(headersOf(html, 'aria-label="Resume: Pager"')).toEqual([
+			"Pager multimon-ng",
+			"Action",
+		])
+		expect(headersOf(html, 'aria-label="Resume: Digital voice"')).toEqual([
+			"Digital voice dsd-fme",
+			"Action",
+		])
+		// one tbody per decoder, each a facts row over a detail row with its action
+		expect(html.match(/class="wkf-bt-dec"/g)).toHaveLength(2)
+		expect(html.match(/class="wkf-bt-sub"/g)).toHaveLength(2)
+	})
+
 	it("renders nothing when no decoder's band holds the frequency", () => {
 		expect(
 			render(

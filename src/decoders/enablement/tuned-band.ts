@@ -13,6 +13,39 @@ import { VFO_SETTLE_MS } from "./contract.js"
 export const TUNED_TARGET_TOLERANCE_HZ = 200_000
 
 /**
+ * The widest gap between neighbouring targets of one channel cluster: 2.4 MHz,
+ * one default capture (2.4 Msps). A cluster's channels share one band (VDL2's
+ * span 325 kHz), so the span between them is the band; targets further apart
+ * are separate bands, such as the catalogue LoRa decoder's 433 MHz and 869 MHz
+ * slots, and the frequencies between them are not its band.
+ */
+export const TUNED_CLUSTER_MAX_GAP_HZ = 2_400_000
+
+/**
+ * True when `hz` lies between two neighbouring targets of one channel cluster
+ * (at most TUNED_CLUSTER_MAX_GAP_HZ apart), widened by `reach` at each end.
+ * Targets must be positive and finite.
+ */
+export function clusterHolds(
+	targets: readonly number[],
+	hz: number,
+	reach: number,
+): boolean {
+	const sorted = [...targets].sort((a, b) => a - b)
+	for (let i = 1; i < sorted.length; i++) {
+		const lo = sorted[i - 1]!
+		const hi = sorted[i]!
+		if (
+			hi - lo <= TUNED_CLUSTER_MAX_GAP_HZ &&
+			hz >= lo - reach &&
+			hz <= hi + reach
+		)
+			return true
+	}
+	return false
+}
+
+/**
  * How long a placement's band must keep holding the tuned frequency before
  * tuning into it releases its holds or restarts a stopped decoder: one VFO
  * settle (VFO_SETTLE_MS = 1000 ms), the dwell the VFO tracker already asks of
@@ -48,9 +81,9 @@ export function tunedFrequencyHz(
 
 /**
  * True when the decoder's band contains the tuned frequency: within
- * TUNED_TARGET_TOLERANCE_HZ of a target, between the lowest and highest
- * target (a channel cluster such as VDL2's), or inside a range widened by the
- * tolerance. An unknown band, a malformed band or no tuned frequency is never
+ * TUNED_TARGET_TOLERANCE_HZ of a target, between neighbouring targets of one
+ * channel cluster such as VDL2's (clusterHolds; never across the gap between
+ * two separate bands), or inside a range widened by the tolerance. An unknown band, a malformed band or no tuned frequency is never
  * tuned: the safe answer keeps today's admission order.
  */
 export function bandContainsTuned(
@@ -63,12 +96,7 @@ export function bandContainsTuned(
 		? band.targetsHz.filter(positive)
 		: []
 	if (targets.some(t => Math.abs(t - tunedHz) <= tol)) return true
-	if (
-		targets.length > 1 &&
-		tunedHz >= Math.min(...targets) - tol &&
-		tunedHz <= Math.max(...targets) + tol
-	)
-		return true
+	if (clusterHolds(targets, tunedHz, tol)) return true
 	const ranges = Array.isArray(band.rangesHz) ? band.rangesHz : []
 	return ranges.some(
 		r =>

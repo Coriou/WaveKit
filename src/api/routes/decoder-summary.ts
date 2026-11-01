@@ -109,7 +109,7 @@ const VERDICTS: Readonly<
 		actions: ["check-source"],
 	},
 	"source-paused": {
-		text: "waiting: Receiver paused — Resume",
+		text: "waiting: Receiver paused",
 		actions: ["resume-source"],
 	},
 	"unsupported-rate": {

@@ -7,7 +7,10 @@ import {
 	bandStateLine,
 	bandTable,
 	cardIdentity,
+	decodersLine,
 	detailOf,
+	FEED_PAUSED_LINE,
+	feedPausedHere,
 	NAME_MAX_LENGTH,
 	parseSummary,
 	relevant,
@@ -15,6 +18,7 @@ import {
 	stateOf,
 	STATE_WORD,
 	summaryPath,
+	withoutActionHint,
 	type BandTableRow,
 } from "../../src/features/tuned/band-table.ts"
 import { TUNED_CASE_NOW, TUNED_CASES } from "../../mock/tuned-cases.ts"
@@ -85,10 +89,12 @@ describe("tuned card cases", () => {
 		expect(rows).toHaveLength(1)
 		expect(rows[0]).toMatchObject({
 			state: "paused",
-			detail: "Receiver paused — Resume",
+			code: "source-paused",
+			detail: "Receiver paused",
 			action: { kind: "resume-source", sourceId: "rtl-0", label: "Resume" },
 		})
 		expect(bandStateLine(rows)).toBe("ADS-B · Paused")
+		expect(feedPausedHere(rows)).toBe(true)
 		// the statuses standing in for a failed summary read say it too, with no action
 		const c = caseById("adsb-source-paused")
 		const [fallback] = bandTable(
@@ -103,6 +109,67 @@ describe("tuned card cases", () => {
 			detail: "Receiver paused",
 			action: null,
 		})
+	})
+
+	it("with the feed paused, every row says so once, the header and the sentence agree, and LoRa is not listed", () => {
+		const rows = rowsOf("uhf-feed-paused")
+		expect(
+			rows.map(r => [r.name, r.stateWord, r.detail, r.action?.label]),
+		).toEqual([
+			["Digital voice", "Paused", "Receiver paused", "Resume"],
+			["Pager", "Paused", "Receiver paused", "Resume"],
+		])
+		expect(feedPausedHere(rows)).toBe(true)
+		expect(FEED_PAUSED_LINE).toBe("Receiver paused")
+		expect(decodersLine(rows, new Set())).toBe(
+			"Digital voice, Pager cover this frequency. The receiver is paused: resume it to decode.",
+		)
+	})
+
+	it("a paused feed is not claimed while any row is held for another reason", () => {
+		const rows = rowsOf("pager-dmr-466")
+		expect(feedPausedHere(rows)).toBe(false)
+		expect(feedPausedHere([])).toBe(false)
+		expect(decodersLine(rows, new Set())).not.toMatch(/paused/)
+	})
+
+	it("drops an older core's action hint from the detail: the button says it", () => {
+		const resume = { label: "Resume" }
+		expect(
+			withoutActionHint("Receiver paused — Resume", resume, "source-paused"),
+		).toBe("Receiver paused")
+		// without the decoder's source the button opens the Receiver; the hint still goes
+		expect(
+			withoutActionHint(
+				"Receiver paused — Resume",
+				{ label: "Open the Receiver" },
+				"source-paused",
+			),
+		).toBe("Receiver paused")
+		expect(
+			withoutActionHint("Receiver paused — Resume", null, "source-paused"),
+		).toBe("Receiver paused")
+		expect(
+			withoutActionHint(
+				"CPU budget full — Raise CPU budget",
+				{
+					label: "Raise CPU budget",
+				},
+				"efficiency-budget",
+			),
+		).toBe("CPU budget full")
+		// a dash that is part of the reason stays
+		expect(
+			withoutActionHint("Samples dropped — twice", resume, "efficiency-drops"),
+		).toBe("Samples dropped — twice")
+		// an older core's verdict renders without the hint
+		const c = caseById("adsb-source-paused")
+		const summary = parseSummary(c.summary)!.map(i => ({
+			...i,
+			verdict: { ...i.verdict, text: `${i.verdict.text} — Resume` },
+		}))
+		const [row] = bandTable(summary, c.decoders, c.hz, NO_SCAN, TUNED_CASE_NOW)
+		expect(row?.detail).toBe("Receiver paused")
 	})
 
 	it("says how much a decoding decoder decoded, and links its last decode to Activity", () => {
