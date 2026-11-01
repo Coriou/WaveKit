@@ -96,6 +96,40 @@ node scripts/rf-window/tune-latency.mjs --host HOST --apply --count 20 --step-hz
 In protected mode set `WAVEKIT_RF_BEARER_ENV` to the name of an environment variable
 that holds a machine bearer.
 
+## Profiling
+
+Measurement-only tools for the core's main thread and spectrum path; never CI gates.
+
+- **`profile-spectrum-main.ts`**: starts an isolated scratch core (`nice -n 10`,
+  `--cpu-prof`) with a fresh tmp config and state dir, an in-process fake rtl_tcp on an
+  ephemeral loopback port (seeded synthetic CU8 at 2.4 Msps) and one web-like
+  WebSocket client (spectrum at 25 Hz, aircraft, activity, status channels). It prints
+  WS rates, main-thread event-loop delay and utilisation, and per-thread top functions;
+  for the main thread also inclusive time and the caller chains of `structuredClone`,
+  Zod `_parse`/`safeParse` and the socket writes. `--load` adds a readsb decoder and live
+  demod (csdr engine) whose binaries are the synthetic stand-ins
+  `profile-stub-readsb.py` (discards the IQ, serves ~30 SBS lines/s) and
+  `profile-stub-csdr.py` (reproduces each stage's byte rate only) on a tmp `PATH`.
+  `--count-clones` counts `structuredClone` calls with sampled caller stacks and sizes
+  (use with `--no-prof`); `--native-sample` runs macOS `sample` on the core.
+- **`profile-cpuprof-top.mjs`**: self, inclusive (`--inclusive`), caller-chain
+  (`--callers fn,fn --depth 6`) and subtree (`--focus fn`) tables for any
+  `.cpuprofile`; bundle frames are labelled with their `src/` module.
+- **`profile-eld-preload.mjs`**: `--import` preload that records an event-loop window
+  between two `SIGUSR2` signals.
+- **`profile-spectrum.ts`**: offline spectrum pipeline profile (no core).
+
+```bash
+pnpm run build && node scripts/profile-spectrum-build.mjs
+node output/bench/profile-spectrum-main.mjs --load [--seconds 45] [--warmup 15] [--keep]
+node scripts/profile-cpuprof-top.mjs <file.cpuprofile> --inclusive --callers structuredClone
+```
+
+The scratch core never connects to anything but the fake: ports 9000, 5173, 8080 to
+8082, 15555, 15556 and 18080 are refused for every listener, `WAVEKIT_*` variables are
+stripped, the tuner relay is off, and nothing reaches Docker, the Pi or a LAN address.
+Output lives in the tmp dir, removed at the end unless `--keep`.
+
 ## Python Analysis Tools
 
 - **`auto-capture.py`**: Core capture logic. Connects to `rtlmux` TCP stream, detects signals based on standard deviation threshold block-by-block, and saves IQ data.

@@ -3,6 +3,7 @@
  *
  *   pnpm run build && node scripts/profile-spectrum-build.mjs
  *   node output/bench/profile-spectrum-main.mjs [--seconds 45] [--warmup 15] [--no-prof]
+ *     [--load] [--count-clones] [--native-sample] [--keep]
  *
  * This process opens a fake rtl_tcp on 127.0.0.1:0 that streams seeded synthetic
  * CU8 (profile-spectrum-iq.ts) paced at 2.4 Msps, picks ephemeral loopback ports
@@ -10,13 +11,29 @@
  * ports), writes a config into a fresh tmp dir (also the state dir) and runs
  * `nice -n 10 node --cpu-prof dist/index.js` against it. One WebSocket client then
  * subscribes like the web app (spectrum at 25 Hz with backfill, aircraft, activity
- * and the status channels). No decoder binaries and no live demod (csdr) run:
- * decoders are empty, so aircraft and activity carry no traffic. Output: per-thread top self time from the
- * core's .cpuprofile files, main-thread event-loop delay (preload), WS rates.
+ * and the status channels). Without --load no decoder binaries and no live demod
+ * run, so aircraft and activity carry no traffic.
+ *
+ * --load adds realistic main-thread load with stand-ins on a tmp PATH (never the real
+ * tools): the source sits at 1090 MHz, a readsb decoder (mode always, stdin mode)
+ * runs scripts/profile-stub-readsb.py, which discards the full-rate IQ branch and
+ * serves ~30 synthetic SBS lines/s on an ephemeral port the adapter connects to, and
+ * live demod (csdr engine, NFM) runs its chain through scripts/profile-stub-csdr.py,
+ * which only reproduces each stage's byte rate. --count-clones wraps structuredClone
+ * in the preload (counts, sampled caller stacks and sizes); it perturbs the profile,
+ * so use it with --no-prof. --native-sample (macOS) also runs `/usr/bin/sample` on
+ * the core for the window and prints its top-of-stack table: native frames that a
+ * V8 profile only shows as "(program)".
+ *
+ * Output: per-thread top self time from the core's .cpuprofile files (main thread
+ * also inclusive time and the caller chains of structuredClone, Zod _parse and the
+ * socket writes), main-thread event-loop delay (preload), WS rates.
  * Everything lives under the tmp dir, which is removed at the end unless --keep.
  */
 import { type ChildProcess, spawn, spawnSync } from "node:child_process"
 import {
+	chmodSync,
+	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
@@ -33,7 +50,21 @@ import { WaveKitError } from "../src/utils/errors.js"
 import { synthesizeCu8 } from "./profile-spectrum-iq.js"
 
 const RATE = 2_400_000
-const CENTRE_HZ = 1_000_000_000
+const LOAD = process.argv.includes("--load")
+const COUNT_CLONES = process.argv.includes("--count-clones")
+const NATIVE_SAMPLE = process.argv.includes("--native-sample")
+/** With --load the source sits on the ADS-B carrier so readsb is in band. */
+const CENTRE_HZ = LOAD ? 1_090_000_000 : 1_000_000_000
+/** Main-thread functions whose caller chains the report resolves. */
+const CALLERS = [
+	"structuredClone",
+	"_parse",
+	"safeParse",
+	"writev",
+	"sendToClients",
+	"JSONStringify",
+	"stringify",
+]
 const CHUNK_BYTES = 32 * 1024
 const BANNED_PORTS = new Set([
 	9000, 5173, 8080, 8081, 8082, 15555, 15556, 18080,
@@ -328,10 +359,26 @@ async function main(): Promise<void> {
 			audio: await freePort(),
 			live: await freePort(),
 			voice: await freePort(),
+			sbs: await freePort(),
 		}
 		const dir = mkdtempSync(join(os.tmpdir(), "wk-profile-main-"))
 		held.dir = dir
 		const profDir = join(dir, "prof")
+		const binDir = join(dir, "bin")
+		if (LOAD) {
+			mkdirSync(binDir)
+			for (const [tool, stub] of [
+				["csdr", "profile-stub-csdr.py"],
+				["readsb", "profile-stub-readsb.py"],
+			] as const) {
+				const path = join(binDir, tool)
+				writeFileSync(
+					path,
+					`#!/bin/sh\nexec python3 ${JSON.stringify(join(root, "scripts", stub))} "$@"\n`,
+				)
+				chmodSync(path, 0o755)
+			}
+		}
 		const config = {
 			access: { mode: "legacy" },
 			stateDir: join(dir, "state"),
@@ -351,12 +398,34 @@ async function main(): Promise<void> {
 					},
 				},
 			],
-			decoders: [],
+			decoders: LOAD
+				? [
+						{
+							id: "adsb-stub",
+							type: "readsb",
+							mode: "always",
+							enabled: true,
+							sourceId: SOURCE_ID,
+							outputHost: "127.0.0.1",
+							outputPort: ports.sbs,
+							outputProtocol: "tcp",
+							options: { outputFormat: "sbs", outputPort: ports.sbs },
+						},
+					]
+				: [],
 			api: { host: "127.0.0.1", port: ports.api },
 			audio: { tcpPort: ports.audio, monitoring: false },
 			tunerRelay: { enabled: false },
-			// csdr is not on a dev Mac: live demod would only crash-loop.
-			liveDemod: { enabled: false, httpPort: ports.live },
+			// Without --load: csdr is not on a dev Mac, live demod would only crash-loop.
+			liveDemod: LOAD
+				? {
+						enabled: true,
+						sourceId: SOURCE_ID,
+						engine: "csdr",
+						modulation: "nfm",
+						httpPort: ports.live,
+					}
+				: { enabled: false, httpPort: ports.live },
 			digitalVoice: { enabled: false, httpPort: ports.voice },
 			resources: {
 				containerMonitor: { enabled: false },
@@ -372,6 +441,8 @@ async function main(): Promise<void> {
 			if (!k.startsWith("WAVEKIT_")) env[k] = v
 		env["WAVEKIT_CONFIG"] = configPath
 		env["PROFILE_ELD_OUT"] = join(dir, "eld.json")
+		if (LOAD) env["PATH"] = `${binDir}:${process.env["PATH"] ?? ""}`
+		if (COUNT_CLONES) env["PROFILE_COUNT_CLONES"] = "1"
 		const nodeArgs = [
 			...(PROF ? ["--cpu-prof", `--cpu-prof-dir=${profDir}`] : []),
 			"--import",
@@ -432,7 +503,30 @@ async function main(): Promise<void> {
 		const t0 = performance.now()
 		const fromS = (t0 - spawnedAt) / 1000
 		child.kill("SIGUSR2") // preload: start the event-loop window
+		// `nice` execs node, so the child pid is the core's.
+		const sampler =
+			NATIVE_SAMPLE && child.pid !== undefined
+				? spawn(
+						"/usr/bin/sample",
+						[
+							String(child.pid),
+							String(Math.max(1, Math.floor(SECONDS) - 1)),
+							"-mayDie",
+							"-file",
+							join(dir, "native.txt"),
+						],
+						{ stdio: "ignore" },
+					)
+				: null
+		const sampled = new Promise<void>(resolve => {
+			if (!sampler) resolve()
+			else {
+				sampler.once("exit", () => resolve())
+				sampler.once("error", () => resolve())
+			}
+		})
 		await sleep(SECONDS * 1000)
+		await Promise.race([sampled, sleep(15_000)])
 		child.kill("SIGUSR2") // preload: write the window
 		const wallS = (performance.now() - t0) / 1000
 		const iqS = (fake.bytes() - bytes0) / (RATE * 2) / wallS
@@ -465,12 +559,52 @@ async function main(): Promise<void> {
 			elu: number
 			processCpu: number
 			delayMs: Record<string, number>
+			clones?: {
+				calls: number
+				sampleEvery: number
+				byStack: {
+					stack: string
+					sampled: number
+					meanJsonBytes: number
+					maxJsonBytes: number
+				}[]
+			}
 		}
 		process.stdout.write(
 			`main thread over ${(eld.windowMs / 1000).toFixed(1)} s: ELU ${(eld.elu * 100).toFixed(1)} %, process CPU (all threads) ${(eld.processCpu * 100).toFixed(1)} % of a core, event-loop delay (1 ms timer, value includes it) p50 ${eld.delayMs["p50"]?.toFixed(2)} p90 ${eld.delayMs["p90"]?.toFixed(2)} p99 ${eld.delayMs["p99"]?.toFixed(2)} p99.9 ${eld.delayMs["p999"]?.toFixed(2)} max ${eld.delayMs["max"]?.toFixed(1)} mean ${eld.delayMs["mean"]?.toFixed(1)} ms\n`,
 		)
+		if (NATIVE_SAMPLE) {
+			let text = ""
+			try {
+				text = readFileSync(join(dir, "native.txt"), "utf8")
+			} catch {
+				text = ""
+			}
+			const at = text.indexOf("Sort by top of stack")
+			process.stdout.write(
+				at < 0
+					? "\nnative sample: no output (sample unavailable or not permitted)\n"
+					: `\nnative sample, all threads, top of stack:\n${text
+							.slice(at)
+							.split("\n")
+							.slice(0, 30)
+							.join("\n")}\n`,
+			)
+		}
+		if (COUNT_CLONES && eld.clones) {
+			const c = eld.clones
+			process.stdout.write(
+				`\nstructuredClone: ${c.calls} calls in the window (${(c.calls / (eld.windowMs / 1000)).toFixed(1)}/s); every ${c.sampleEvery}th call sampled by caller stack:\n`,
+			)
+			for (const row of c.byStack)
+				process.stdout.write(
+					`  ~${(row.sampled * c.sampleEvery).toString().padStart(6)} calls  mean ${row.meanJsonBytes} B max ${row.maxJsonBytes} B (JSON)  ${row.stack}\n`,
+				)
+		}
 		if (PROF) {
 			for (const f of readdirSync(profDir).sort()) {
+				// node names profiles CPU.<date>.<time>.<pid>.<tid>.<seq>: tid 0 is the main thread.
+				const main = /\.\d+\.0\.\d+\.cpuprofile$/.test(f)
 				const r = spawnSync(
 					process.execPath,
 					[
@@ -482,6 +616,9 @@ async function main(): Promise<void> {
 						fromS.toFixed(1),
 						"--to-s",
 						(fromS + wallS).toFixed(1),
+						...(main
+							? ["--inclusive", "--callers", CALLERS.join(","), "--depth", "6"]
+							: []),
 					],
 					{ encoding: "utf8" },
 				)
