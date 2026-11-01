@@ -437,4 +437,37 @@ describe("facets covering index migration on the worker protocol", () => {
 			check.close()
 		}
 	}, 20_000)
+
+	it("adopts the byte figures after the build without waiting for a write", async () => {
+		const dir = await populated()
+		const indexed = await openActivityStore({
+			stateDir: dir,
+			logger,
+			execution: "inline",
+			now: fixtureClock(),
+		})
+		const withIndex = indexed.stats().dbBytes
+		await indexed.close()
+		const DatabaseSync = await loadDatabaseSync()
+		const old = new DatabaseSync(join(dir, "activity", "activity.db"))
+		old.exec(`DROP INDEX ${ACTIVITY_FACETS_INDEX}`)
+		old.close()
+		const store = await openActivityStore({
+			stateDir: dir,
+			logger,
+			workerUrl,
+			now: fixtureClock(),
+		})
+		try {
+			// The ready snapshot predates the build: the dropped index's pages are free.
+			const atOpen = store.stats().dbBytes
+			expect(atOpen).toBeLessThan(withIndex)
+			await vi.waitFor(() => {
+				expect(store.stats().dbBytes).toBe(withIndex)
+			}, SEED_WAIT)
+			expect(store.stats()).toMatchObject({ committed: 0, rows: 3 })
+		} finally {
+			await store.close()
+		}
+	}, 20_000)
 })

@@ -152,7 +152,12 @@ async function openSession(
 		.then(() => {
 			if (session !== opened) return
 			const build = opened.buildFacetsIndex()
-			post({ id: 0, type: "indexed", ...build })
+			post({
+				id: 0,
+				type: "indexed",
+				...build,
+				snapshot: opened.snapshot(),
+			})
 		})
 		.catch(() => {
 			// Never reject the chain; buildFacetsIndex reports its own failures.

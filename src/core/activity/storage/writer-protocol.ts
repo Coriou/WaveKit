@@ -39,7 +39,8 @@ interface SeededActivityWorkerMessage {
 
 /**
  * Unsolicited, after the facets covering index check (id 0): whether this open built it,
- * how long the build took, and the failure that left the store without it.
+ * how long the build took, the failure that left the store without it, and the snapshot
+ * after it (a build grows the file and the WAL, so the parent's byte figures refresh).
  */
 interface IndexedActivityWorkerMessage {
 	id: 0
@@ -47,6 +48,7 @@ interface IndexedActivityWorkerMessage {
 	built: boolean
 	ms: number
 	error?: string
+	snapshot: ActivityWorkerSnapshot
 }
 
 interface ErrorActivityWorkerResponse {

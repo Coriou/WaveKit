@@ -74,6 +74,7 @@ export interface OpenActivityStoreOptions {
 export interface ActivityWriter {
 	onGone(listener: () => void): void
 	onSeeded(listener: (snapshot: ActivityWorkerSnapshot) => void): void
+	onIndexed(listener: (snapshot: ActivityWorkerSnapshot) => void): void
 	write(
 		rows: readonly BuiltActivityRow[],
 		nowMs: number,
@@ -235,6 +236,8 @@ export class ActivityWriterClient implements ActivityWriter {
 	private gone: (() => void) | undefined
 	private seeded: ((snapshot: ActivityWorkerSnapshot) => void) | undefined
 	private lastSeeded: ActivityWorkerSnapshot | undefined
+	private indexed: ((snapshot: ActivityWorkerSnapshot) => void) | undefined
+	private lastIndexed: ActivityWorkerSnapshot | undefined
 	private readonly pending = new Map<
 		number,
 		{
@@ -414,6 +417,12 @@ export class ActivityWriterClient implements ActivityWriter {
 		return this.lastSeeded
 	}
 
+	/** Called with the snapshot after the facets index check; replayed like onSeeded. */
+	onIndexed(listener: (snapshot: ActivityWorkerSnapshot) => void): void {
+		this.indexed = listener
+		if (this.lastIndexed !== undefined) listener(this.lastIndexed)
+	}
+
 	private onMessage(raw: unknown): void {
 		if (!isActivityWorkerResponse(raw)) return
 		if (raw.type === "seeded") {
@@ -432,6 +441,8 @@ export class ActivityWriterClient implements ActivityWriter {
 					{ ms: Math.round(raw.ms) },
 					"activity facets index built",
 				)
+			this.lastIndexed = raw.snapshot
+			this.indexed?.(raw.snapshot)
 			return
 		}
 		const waiter = this.pending.get(raw.id)
@@ -506,6 +517,14 @@ class ActivityStore implements ActivityStoreHandle {
 		// The deferred seed changes only the retention counters (and `effective` on failure).
 		this.threaded?.onSeeded(seeded => {
 			this.retention = retentionOf(seeded) ?? this.retention
+		})
+		// The facets index build grows the file and the WAL: adopt the figures after it now,
+		// not at the next write. Replies arrive in worker order, so this is never stale.
+		this.threaded?.onIndexed(indexed => {
+			if (this.stopped) return
+			this.adopt(indexed)
+			// An armed pause timer stays: its retry flushes the held rows once unpaused.
+			if (this.ingress.paused) this.armPause()
 		})
 	}
 

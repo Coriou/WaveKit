@@ -42,8 +42,16 @@ describe("raceDeadline", () => {
 
 	it("keeps a reply that is due in the same turn as the deadline (blocked main thread)", async () => {
 		const onExpire = vi.fn()
-		// The deadline timer is armed first, so it runs first: the old code timed this out.
-		const raced = raceDeadline(replyAfter(250, "ok"), 250, onExpire)
+		let answer: (value: string) => void = () => {}
+		const reply = new Promise<string>(resolve => {
+			answer = resolve
+		})
+		// The deadline timer is armed before the reply's, so it runs first in the same turn:
+		// without the grace turn this times out.
+		const raced = raceDeadline(reply, 250, onExpire)
+		setTimeout(() => {
+			answer("ok")
+		}, 250)
 		await vi.advanceTimersByTimeAsync(250)
 		await expect(raced).resolves.toBe("ok")
 		expect(onExpire).not.toHaveBeenCalled()
