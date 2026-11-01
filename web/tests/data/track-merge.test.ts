@@ -1,6 +1,7 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 
+import { FleetThrottle, UPDATE_EVERY_MS } from "../../src/data/events-relay.ts"
 import {
 	TRAIL_MAX_POINTS,
 	mergeTrackPoints,
@@ -129,6 +130,142 @@ describe("mergeTrail", () => {
 				},
 			),
 			{ numRuns: 200 },
+		)
+	})
+})
+
+interface TrackPoint {
+	lat: number
+	lon: number
+	altitude: number | null
+	timestamp: number
+}
+interface Update {
+	icao: string
+	messages: number
+	trackHistory?: TrackPoint[]
+	trackAppend?: TrackPoint[]
+}
+
+/** FleetStore's aircraft merge (AIRCRAFT_SPEC.merge). */
+const AIRCRAFT_MERGE = (previous: Update, next: Update): Update =>
+	mergeTrail<TrackPoint, Update>(previous, next)
+
+const at = (timestamp: number, lat: number): TrackPoint => ({
+	lat,
+	lon: 2,
+	altitude: 3000,
+	timestamp,
+})
+
+describe("trail overlap is found by content, not by timestamp", () => {
+	it("keeps a distinct point that shares the newest point's millisecond", () => {
+		const out = mergeTrail<TrackPoint, Update>(
+			{ trackHistory: [at(1000, 50)] },
+			{ icao: "A", messages: 2, trackAppend: [at(1000, 50.01)] },
+		)
+		expect(out.trackHistory).toEqual([at(1000, 50.01), at(1000, 50)])
+	})
+
+	it("keeps exact duplicates once (a delta the snapshot already holds)", () => {
+		// delta of points the snapshot holds, coalesced under a later snapshot
+		expect(
+			mergeTrail<TrackPoint, Update>(
+				{ trackAppend: [at(2000, 51), at(1000, 50)] },
+				{
+					icao: "A",
+					messages: 3,
+					trackHistory: [at(2000, 51), at(1000, 50)],
+				},
+			).trackHistory,
+		).toEqual([at(2000, 51), at(1000, 50)])
+		// a delta that overlaps the snapshot it follows: only the new part goes on top
+		expect(
+			mergeTrackPoints(
+				[at(3000, 52), at(2000, 51)],
+				[at(2000, 51), at(1000, 50)],
+			),
+		).toEqual([at(3000, 52), at(2000, 51), at(1000, 50)])
+	})
+
+	it("keeps points after a clock rollback", () => {
+		const out = mergeTrail<TrackPoint, Update>(
+			{ trackHistory: [at(5000, 50), at(4000, 49)] },
+			{ icao: "A", messages: 2, trackAppend: [at(1001, 51.1), at(1000, 51)] },
+		)
+		expect(out.trackHistory).toEqual([
+			at(1001, 51.1),
+			at(1000, 51),
+			at(5000, 50),
+			at(4000, 49),
+		])
+	})
+
+	it("delta reconstruction through the events worker equals the core's trail", () => {
+		// Feature: wg19-longevity, Property 4: Trail deltas rebuild the core trail whatever the timestamps
+		// Validates: Requirement C.2 (trail complete in the UI)
+		fc.assert(
+			fc.property(
+				fc.integer({ min: 0, max: 3 }),
+				fc.array(
+					fc.record({
+						// timestamps repeat and step back: Date.now() within a millisecond, clock rollback
+						stamps: fc.array(fc.integer({ min: 0, max: 4 }), { maxLength: 4 }),
+						dt: fc.integer({ min: 0, max: 700 }),
+						sweep: fc.boolean(),
+						resync: fc.integer({ min: 0, max: 19 }),
+					}),
+					{ maxLength: 60 },
+				),
+				(start, steps) => {
+					// the core tracker: newest first, capped, each point a new position
+					let lat = 0
+					let history: TrackPoint[] = []
+					const add = (stamp: number) => {
+						lat += 1
+						history = [at(1000 + stamp, lat), ...history].slice(
+							0,
+							TRAIL_MAX_POINTS,
+						)
+					}
+					for (let i = 0; i < start; i++) add(i)
+					// AircraftUpdatePublisher: delta since the last point sent, found by identity
+					let anchor: TrackPoint | undefined = history[0]
+					const publish = (n: number, resync: boolean): string => {
+						const data: Update = { icao: "A", messages: n }
+						const newest = history[0]
+						if (newest) {
+							const i = !resync && anchor ? history.indexOf(anchor) : -1
+							if (i < 0) data.trackHistory = [...history]
+							else if (i > 0) data.trackAppend = history.slice(0, i)
+							anchor = newest
+						}
+						return JSON.stringify({ type: "aircraft:update", data })
+					}
+					// the browser: the GET snapshot, then what the worker's throttle lets through
+					let state: Update = {
+						icao: "A",
+						messages: 0,
+						...(history.length > 0 ? { trackHistory: [...history] } : {}),
+					}
+					const apply = (text: string) => {
+						const { data } = JSON.parse(text) as { data: Update }
+						state = AIRCRAFT_MERGE(state, data)
+					}
+					const throttle = new FleetThrottle(apply, UPDATE_EVERY_MS)
+					let now = 0
+					steps.forEach((s, n) => {
+						for (const stamp of s.stamps) add(stamp)
+						now += s.dt
+						throttle.push(publish(n + 1, s.resync === 0), now)
+						if (s.sweep) throttle.sweep(now)
+					})
+					throttle.drain()
+					expect(state.trackHistory ?? []).toEqual(history)
+					expect(state.messages).toBe(steps.length)
+				},
+			),
+			{ numRuns: 300 },
 		)
 	})
 })

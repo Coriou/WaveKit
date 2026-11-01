@@ -155,8 +155,15 @@ export class FleetThrottle {
 			return
 		}
 		if (!slot || now - slot.sentAt >= this.everyMs) {
+			// the window ended before the sweep sent the waiting update: it goes merged into this one
+			let out = text
+			if (slot && slot.waiting !== null) {
+				out = coalesceUpdate(slot.waiting, text)
+				this.droppedCount += 1
+				this.waitingCount -= 1
+			}
 			this.slots.set(fleet.id, { sentAt: now, waiting: null })
-			this.send(text)
+			this.send(out)
 			return
 		}
 		if (slot.waiting !== null) {

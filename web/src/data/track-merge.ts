@@ -18,13 +18,45 @@ export interface TrailFields<P extends TrailPointLike> {
 /** Points kept per trail: the core tracker's default `maxTrackPoints`. */
 export const TRAIL_MAX_POINTS = 100
 
-/** `newer` points past `older`'s newest, then `older`; both most recent first; at most TRAIL_MAX_POINTS. */
+/**
+ * Two points are the same when every field is equal. The core tracker only adds a point that moved
+ * at least `minTrackDistance` (50 m) from the previous one, so neighbouring points always differ in
+ * position, whereas timestamps do not order them: several points can share a millisecond
+ * (Date.now()) and the clock can step back.
+ */
+export function samePoint(a: TrailPointLike, b: TrailPointLike): boolean {
+	if (a === b) return true
+	const ka = Object.keys(a)
+	if (ka.length !== Object.keys(b).length) return false
+	return ka.every(k =>
+		Object.is(
+			(a as unknown as Record<string, unknown>)[k],
+			(b as unknown as Record<string, unknown>)[k],
+		),
+	)
+}
+
+/**
+ * `newer` points past `older`'s newest, then `older`; both most recent first; at most TRAIL_MAX_POINTS.
+ * The overlap is found by content, never by timestamp: when `newer` contains `older`'s newest point
+ * only the points above it are new; when `older` contains `newer`'s newest point `newer` is stale
+ * (already in `older`); otherwise the two are disjoint and all of `newer` goes on top (a delta).
+ */
 export function mergeTrackPoints<P extends TrailPointLike>(
 	newer: readonly P[],
 	older: readonly P[],
 ): P[] {
-	const newest = older[0]?.timestamp ?? Number.NEGATIVE_INFINITY
-	const ahead = newer.filter(p => p.timestamp > newest)
+	const top = older[0]
+	let ahead: readonly P[] = newer
+	if (top !== undefined && newer.length > 0) {
+		const at = newer.findIndex(p => samePoint(p, top))
+		if (at >= 0) ahead = newer.slice(0, at)
+		else {
+			const first = newer[0]
+			if (first !== undefined && older.some(p => samePoint(p, first)))
+				ahead = []
+		}
+	}
 	const merged = ahead.length > 0 ? [...ahead, ...older] : [...older]
 	if (merged.length > TRAIL_MAX_POINTS) merged.length = TRAIL_MAX_POINTS
 	return merged

@@ -227,6 +227,38 @@ describe("FleetStore", () => {
 		expect(e?.trail.map(p => p.lat)).toEqual([48.8, 48.81, 48.82, 48.83])
 	})
 
+	it("keeps trail points that share a millisecond or follow a clock rollback", async () => {
+		const point = (lat: number, timestamp: number) => ({
+			lat,
+			lon: -3.87,
+			altitude: 36000,
+			timestamp,
+		})
+		const { api, events, sockets } = setup(() =>
+			json(200, {
+				aircraft: [aircraft({ trackHistory: [point(50, CORE_NOW)] })],
+				stats: {},
+				timestamp: CORE_NOW,
+			}),
+		)
+		const store = new FleetStore(api, events, AIRCRAFT_SPEC, { flushMs: 250 })
+		store.attach()
+		await store.load()
+		const socket = sockets.last()
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ trackAppend: [point(50.01, CORE_NOW)] }),
+		})
+		vi.advanceTimersByTime(250)
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ trackAppend: [point(50.02, CORE_NOW - 5000)] }),
+		})
+		vi.advanceTimersByTime(250)
+		const e = store.get().entries.get("3944EF")
+		expect(e?.trail.map(p => p.lat)).toEqual([50, 50.01, 50.02])
+	})
+
 	it("does not carry a lost aircraft's trail into its new track", async () => {
 		const point = (lat: number, ago: number) => ({
 			lat,
