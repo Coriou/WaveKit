@@ -91,7 +91,9 @@ const DEFAULT_INPUT_SAMPLE_RATE = 2_048_000
  * path. In the core image, one CPU, 10 runs per capture, both committed
  * captures (+10 / -5 dB SNR) decoded 10/10 at os 2, 4 and 8; os 2 cost least
  * (sox + python CPU-s per signal-s, loaded host: os 8 0.83 / 1.98, os 4
- * 0.75-1.42 / 1.24-1.53, os 2 0.81 / 1.05).
+ * 0.75-1.42 / 1.24-1.53, os 2 0.81 / 1.05). Since the carrier-offset and
+ * one-chain wrapper changes only os 2 is re-measured (3/3 per capture); the
+ * chain bench decodes 1/3 at os 8 and 0/3 at os 4, so other factors need work.
  */
 export const DEFAULT_OVERSAMPLING = 2
 const MIN_SPS = 2

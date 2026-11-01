@@ -13,7 +13,7 @@ which is a one-off cost of a long-running decoder.
 A variant is NAME:OS_FACTOR:SOX_RATE_OPTIONS, for example `old:8:-h` (the former
 1.024 -> 2.0 Msps path) or `new:2:-m -b 74` (the current default). An OS_FACTOR whose
 rate equals --input-rate skips sox, as the decoder does. Variants come from repeated
---variant flags, else from LORA_BENCH_VARIANTS (semicolon-separated), else old and new.
+--variant flags, else from LORA_BENCH_VARIANTS (semicolon-separated), else new only.
 
 Needs sox, numpy, python3, gnuradio + gr-lora_sdr and the wrapper: run it inside the core image
 from the repository root, never against a live receiver:
@@ -47,7 +47,8 @@ from lora_bench import (  # noqa: E402
     wrapper_argv,
 )
 
-DEFAULT_VARIANTS = ["old:8:-h", "new:2:-m -b 74"]
+# The production chain only; pass --variant for others (os 4 and 8 currently fail, see lora-meshtastic.ts).
+DEFAULT_VARIANTS = ["new:2:-m -b 74"]
 
 
 def parse_variant(text: str) -> tuple[str, int, list[str]]:
