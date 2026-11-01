@@ -134,6 +134,23 @@ works with all three profiles. Use `pnpm dev:pi` for development.
 
 If the Pi has a different hostname, edit a copy of `config/pi.yaml` and select
 it with `WAVEKIT_CONFIG`; update both the source host and monitoring URLs.
+
+On macOS, prefer the Pi's IP over `wavekit-pi.local` in that copy. When the Pi publishes no IPv6
+address on your network, each `.local` lookup waits about 5 s for an IPv6 answer, and the source's
+connect timeout is also 5 s, so every attempt times out before it dials (`Source connection timed
+out after 5000ms`). `dns-sd -G v4v6 wavekit-pi.local` shows which records the Pi answers with.
+Copies named `config/*.local.yaml` are git-ignored:
+
+```sh
+cp config/pi.yaml config/pi.local.yaml
+# Replace every wavekit-pi.local with the Pi's IP, then:
+WAVEKIT_CONFIG=./config/pi.local.yaml pnpm start:pi
+```
+
+macOS must also allow your terminal on the local network. Other checks, such as a source paused in
+an earlier run and choosing the Pi's Ethernet link, are in
+[Docker runtime](DOCKER-RUNTIME.md#when-the-pi-source-does-not-connect-or-drops-samples); they apply to a
+native core too.
 Decoders remain opt-in until their binaries and radio settings are configured.
 
 ## Select a configuration explicitly
