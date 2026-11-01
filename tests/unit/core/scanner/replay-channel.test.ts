@@ -103,7 +103,7 @@ describe("rasterChannelOf / replayChannelHz", () => {
 	})
 
 	it("property: a snapped channel is on the raster, in band and strictly within the reach", () => {
-		// Feature: wg19-av replay, Property 1: raster snap
+		// Feature: ACARS and VDL2 replay identity, Property 1: raster snap
 		// Validates: Requirements replay channel attribution
 		fc.assert(
 			fc.property(

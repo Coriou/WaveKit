@@ -98,7 +98,7 @@ describe("planSnapshotDecode", () => {
 	})
 
 	it("property: a planned channel's offset never exceeds the capture bound", () => {
-		// Feature: wg19-av replay, Property 2: snapshot channel offset bound
+		// Feature: ACARS and VDL2 replay identity, Property 2: snapshot channel offset bound
 		// Validates: Requirements offline decode planning
 		fc.assert(
 			fc.property(
