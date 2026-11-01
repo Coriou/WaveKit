@@ -280,7 +280,7 @@ describe("aircraft identity", () => {
 		])
 	})
 
-	it("calls names one company only when they match after case, punctuation and generic words", () => {
+	it("calls names one company only when they match after case, punctuation and generic words at their ends", () => {
 		expect(sameOperator("WaveKit Air", "wavekit-air")).toBe(true)
 		expect(sameOperator("WaveKit  Air", "WAVEKIT AIR")).toBe(true)
 		expect(sameOperator("WaveKit", "WaveKit Airlines")).toBe(true)
@@ -289,6 +289,18 @@ describe("aircraft identity", () => {
 		expect(sameOperator("Air Northwind", "Northwind S.A.")).toBe(true)
 		expect(sameOperator("Northwind S.A.", "Air Northwind")).toBe(true)
 		expect(sameOperator("Northwind Aviation GmbH", "Northwind Air")).toBe(true)
+		expect(sameOperator("Air Northwind Airlines", "Northwind Airlines")).toBe(
+			true,
+		)
+		// the airline word on the other side is another company, both ways round
+		expect(sameOperator("Air Northwind", "Northwind Airlines")).toBe(false)
+		expect(sameOperator("Northwind Airways", "Air Northwind")).toBe(false)
+		expect(sameOperator("Air China", "China Airlines")).toBe(false)
+		expect(sameOperator("China Airlines", "Air China")).toBe(false)
+		expect(sameOperator("Japan Airlines", "Air Japan")).toBe(false)
+		expect(sameOperator("Air Japan", "Japan Airlines")).toBe(false)
+		// a legal form never swaps sides
+		expect(sameOperator("Air Northwind", "Northwind Ltd")).toBe(true)
 		const brand = {
 			...ENRICHED,
 			identification: {
@@ -302,7 +314,9 @@ describe("aircraft identity", () => {
 	})
 
 	it("shows the registry's operator only when it is another company", () => {
-		expect(sameOperator("TAP Portugal", "TAP Air Portugal")).toBe(true)
+		// a generic word in the middle is kept, so these show both (accepted: rare, and never hides a lessor)
+		expect(sameOperator("TAP Portugal", "TAP Air Portugal")).toBe(false)
+		expect(sameOperator("Northwind Air Cargo", "Northwind Cargo")).toBe(false)
 		expect(sameOperator("WaveKit Air", "WaveKit Air Lines")).toBe(true)
 		expect(sameOperator("WaveKit Air", "Northwind Leasing")).toBe(false)
 		expect(sameOperator("Northwind Air", "Northwind Air Charter")).toBe(false)

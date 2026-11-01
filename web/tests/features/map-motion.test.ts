@@ -12,12 +12,16 @@ import {
 	HEADING_TAU_MS,
 	MAX_PLAUSIBLE_KN,
 	MAX_TURN_DEG_PER_S,
+	MotionBook,
 	reach,
 	REACQUIRE_MS,
 	SETTLE_KM,
 	settling,
 	shortestArc,
 	SLACK_KM,
+	CONFIRM_SAME_MS,
+	SAME_FIX_MS,
+	SNAP_KM,
 	type Fix,
 	type MotionState,
 } from "../../src/features/map/motion.ts"
@@ -167,18 +171,18 @@ describe("aircraft motion smoothing", () => {
 	})
 
 	it("ends a large correction without a jump: no drop at BLEND_MS, at most SETTLE_KM at the very end", () => {
-		// a stationary plane, then an 8 km fix 10 s later (inside the 8.17 km gate). At BLEND_MS (1 + 6)·e⁻⁶ = 1.7 %
-		// of it, 139 m, is left; dropping it there was a 139 m jump in 1 ms. Now it moves at its decay speed
-		// A·ω²·t·e^(−ωt) = 8 km × (0.003/ms)² × 2000 ms × e⁻⁶ = 0.36 m/ms.
+		// a stationary plane, then a 4.9 km fix 10 s later (inside the 8.17 km gate and SNAP_KM). At BLEND_MS
+		// (1 + 6)·e⁻⁶ = 1.7 % of it, 85 m, is left; dropping it there was an 85 m jump in 1 ms. Now it moves at its
+		// decay speed A·ω²·t·e^(−ωt) = 4.9 km × (0.003/ms)² × 2000 ms × e⁻⁶ = 0.22 m/ms.
 		const s = createMotion(fix(0, 0, T0, null, null), T0)
-		const f = fix(8, 0, T0 + 10_000, null, null)
+		const f = fix(4.9, 0, T0 + 10_000, null, null)
 		advance(s, f, T0 + 10_000)
 		expect(s.rejected).toBe(0)
 		advance(s, f, T0 + 10_000 + BLEND_MS - 1)
 		const before = { lat: s.lat, lon: s.lon }
 		advance(s, f, T0 + 10_000 + BLEND_MS)
 		expect(km(before, s)).toBeLessThan(0.0005)
-		// every 16 ms frame to the end moves at most the peak ω·A/e = 8.8 m/ms; the last one drops under 1 m
+		// every 16 ms frame past BLEND_MS moves at most that decaying speed; the last one drops under 1 m
 		let prev = { lat: s.lat, lon: s.lon }
 		let last = 0
 		let t = T0 + 10_000 + BLEND_MS
@@ -186,12 +190,12 @@ describe("aircraft motion smoothing", () => {
 			t += FRAME_MS
 			advance(s, f, t)
 			last = km(prev, s)
-			expect(last).toBeLessThan(0.36 * FRAME_MS * 0.001)
+			expect(last).toBeLessThan(0.22 * FRAME_MS * 0.001)
 			prev = { lat: s.lat, lon: s.lon }
 		}
-		// (1 + x)·e⁻ˣ < 1/8000 at x = 11.6: ends at 3.9 s
-		expect(t - T0 - 10_000).toBeGreaterThan(3800)
-		expect(t - T0 - 10_000).toBeLessThan(4000)
+		// (1 + x)·e⁻ˣ < 1/4900 at x = 10.98: ends at 3.66 s
+		expect(t - T0 - 10_000).toBeGreaterThan(3600)
+		expect(t - T0 - 10_000).toBeLessThan(3700)
 		expect(last).toBeLessThan(SETTLE_KM + 0.0005)
 		expect(km(s, f)).toBeLessThan(1e-9)
 	})
@@ -485,11 +489,12 @@ describe("aircraft motion smoothing", () => {
 	})
 
 	it("ignores a new course or speed for an ignored or held-back fix", () => {
-		// accepted at T0 + 50 s, stationary; an older fix is ignored, then the same old fix with a new course and
-		// speed must not turn or move the accepted track
+		// accepted at T0 + 50 s, stationary; an older fix elsewhere is ignored, then the same old fix with a new course
+		// and speed must not turn or move the accepted track
 		const s = createMotion(fix(0, 0, T0 + 50_000, null, null), T0 + 50_000)
-		advance(s, fix(0, 0, T0 + 40_000, null, null), T0 + 50_100)
-		advance(s, fix(0, 0, T0 + 40_000, 90, 450), T0 + 50_200)
+		advance(s, fix(0.5, 0, T0 + 40_000, null, null), T0 + 50_100)
+		advance(s, fix(0.5, 0, T0 + 40_000, 90, 450), T0 + 50_200)
+		expect(s.fixCourse).toBeNull()
 		expect(s.vN).toBe(0)
 		expect(s.vE).toBe(0)
 		// same for a held-back far fix re-sent with a velocity
@@ -497,11 +502,84 @@ describe("aircraft motion smoothing", () => {
 		expect(s.rejected).toBe(1)
 		advance(s, fix(200, 0, T0 + 51_000, 90, 450), T0 + 51_100)
 		expect(s.rejected).toBe(1)
+		// ...or with a receive time 30 ms either side (a later one is not its own confirmation)
+		advance(s, fix(200, 0, T0 + 51_030, 90, 460), T0 + 51_130)
+		advance(s, fix(200, 0, T0 + 50_970, 90, 470), T0 + 51_160)
+		expect(s.rejected).toBe(1)
+		expect(km(s, at(0, 0))).toBeLessThan(1e-9)
 		expect(s.vN).toBe(0)
 		expect(s.vE).toBe(0)
 		// a new velocity for the accepted fix still applies
 		advance(s, fix(0, 0, T0 + 50_000, 90, 450), T0 + 51_200)
 		expect(s.vE).toBeGreaterThan(0)
+	})
+
+	it("takes a later report at the accepted position as a new fix, past SAME_FIX_MS", () => {
+		// a parked plane reporting A again 59 s on refreshes the gate's clock, so a bad fix 100 km away 1 s later is
+		// held back instead of passing the 60 s reacquire rule
+		const s = createMotion(fix(0, 0, T0, null, null), T0)
+		advance(s, fix(0, 0, T0 + 59_000, null, null), T0 + 59_000)
+		expect(s.fixAt).toBe(T0 + 59_000)
+		advance(s, fix(100, 0, T0 + 60_000, null, null), T0 + 60_000)
+		expect(s.rejected).toBe(1)
+		expect(km(s, at(0, 0))).toBeLessThan(1e-9)
+		// at SAME_FIX_MS it is the same fix re-sent (time kept); just past it, a new one
+		const t = createMotion(fix(0, 0, T0, null, null), T0)
+		advance(t, fix(0, 0, T0 + SAME_FIX_MS, 0, 0), T0 + 300)
+		expect(t.fixAt).toBe(T0)
+		advance(t, fix(0, 0, T0 + SAME_FIX_MS + 1, null, null), T0 + 400)
+		expect(t.fixAt).toBe(T0 + SAME_FIX_MS + 1)
+	})
+
+	it("confirms a stationary relocation with a report at the held position CONFIRM_SAME_MS later, not before", () => {
+		const s = createMotion(fix(0, 0, T0, null, null), T0)
+		advance(s, fix(200, 0, T0 + 1000, null, null), T0 + 1000)
+		expect(s.rejected).toBe(1)
+		// the same held position re-sent with a velocity and 300 ms of receive latency: not its own confirmation
+		advance(s, fix(200, 0, T0 + 1300, 90, 450), T0 + 1300)
+		expect(s.rejected).toBe(1)
+		expect(km(s, at(0, 0))).toBeLessThan(1e-9)
+		// just under CONFIRM_SAME_MS after it: still a re-send
+		advance(
+			s,
+			fix(200, 0, T0 + 1000 + CONFIRM_SAME_MS - 1, null, null),
+			T0 + 2999,
+		)
+		expect(km(s, at(0, 0))).toBeLessThan(1e-9)
+		// at CONFIRM_SAME_MS: a second report at the same place, confirmed and drawn there at once
+		advance(s, fix(200, 0, T0 + 1000 + CONFIRM_SAME_MS, null, null), T0 + 3000)
+		expect(s.rejected).toBe(1)
+		expect(km(s, at(200, 0))).toBeLessThan(1e-9)
+	})
+
+	it("applies a velocity update for the accepted position whatever its receive latency, never moving time back", () => {
+		const s = createMotion(fix(0, 0, T0, 90, 450), T0)
+		// 300 ms early (beyond SAME_FIX_MS) with a new course: applied, fix time kept
+		advance(s, fix(0, 0, T0 - 300, 180, 450), T0 + 100)
+		expect(s.fixAt).toBe(T0)
+		expect(s.vE).toBeCloseTo(0, 9)
+		expect(s.vN).toBeLessThan(0)
+		// 2 s late with another course: applied; a moving plane's same position is a re-send, its time kept
+		advance(s, fix(0, 0, T0 + 2000, 0, 450), T0 + 2000)
+		expect(s.fixAt).toBe(T0)
+		expect(s.vN).toBeGreaterThan(0)
+	})
+
+	it("does not pull a moving plane back when its unchanged position is re-sent late", () => {
+		// eastbound at 450 kn; the same fix and velocity re-sent 2 s later used to move the fix time forward and pull
+		// the extrapolated track back by 0.2315 km/s × 2 s = 463 m
+		const s = createMotion(fix(0, 0, T0, 90, 450), T0)
+		advance(s, fix(0, 0, T0, 90, 450), T0 + 2000)
+		const before = { lat: s.lat, lon: s.lon }
+		advance(s, fix(0, 0, T0 + 2000, 90, 450), T0 + 2000)
+		expect(s.fixAt).toBe(T0)
+		expect(km(s, before)).toBeLessThan(1e-6)
+		advance(s, fix(0, 0, T0 + 2000, 90, 450), T0 + 3000)
+		expect(km(s, at(0, 0.2315 * 3))).toBeLessThan(0.001)
+		// a parked plane's later report at the same spot does move its time forward
+		const p = createMotion(fix(0, 0, T0, null, null), T0)
+		advance(p, fix(0, 0, T0 + 2000, null, null), T0 + 2000)
+		expect(p.fixAt).toBe(T0 + 2000)
 	})
 
 	it("confirms a held-back fix only with a newer one", () => {
@@ -549,7 +627,9 @@ describe("aircraft motion smoothing", () => {
 				fc.double({ min: -88, max: 88, noNaN: true }),
 				fc.double({ min: 179, max: 181, noNaN: true }),
 				fc.double({ min: 0, max: 359.9, noNaN: true }),
-				fc.double({ min: 0, max: MAX_PLAUSIBLE_KN, noNaN: true }),
+				// up to 580 kn so the new fix stays a blend: the drawn plane is at most 580 × 1.852 / 3600 km/s ×
+				// reach(15 s) 13.75 s = 4.10 km past the fix, g another 0.71 km: 4.81 km, under SNAP_KM
+				fc.double({ min: 0, max: 580, noNaN: true }),
 				fc.integer({ min: 0, max: 15_000 }),
 				fc.double({ min: -0.5, max: 0.5, noNaN: true }),
 				fc.double({ min: -0.5, max: 0.5, noNaN: true }),
@@ -582,13 +662,157 @@ describe("aircraft motion smoothing", () => {
 					}
 					advance(m, g, T0 + age + 1)
 					expect(m.rejected).toBe(0)
+					expect(m.offAt).not.toBeNaN()
 					expect(m.lon).toBeGreaterThanOrEqual(-180)
 					expect(m.lon).toBeLessThan(180)
-					// continuous: in 1 ms it moves at most its own speed (0.6 m/ms at 1200 kn) plus rounding
+					// continuous: in 1 ms it moves at most its own speed (0.3 m/ms at 580 kn) plus rounding
 					expect(kmW(was, m)).toBeLessThan(0.001)
 				},
 			),
 			{ numRuns: 200 },
 		)
+	})
+
+	it("applies a velocity update for the accepted fix whatever its receive time jitter (±30 ms)", () => {
+		// the position is unchanged but the item's time is each message's receive time: a few ms before the fix
+		// used to count as an older fix and was dropped about half the time
+		for (const jitter of [-30, -1, 1, 30]) {
+			const s = createMotion(fix(0, 0, T0, 90, 450), T0)
+			advance(s, fix(0, 0, T0, 90, 450), T0 + 1000)
+			const before = { lat: s.lat, lon: s.lon }
+			advance(s, fix(0, 0, T0 + jitter, 180, 300), T0 + 1000)
+			expect(s.fixAt).toBe(T0)
+			expect(s.fixCourse).toBe(180)
+			expect(s.vN).toBeCloseTo(-300 * KM_PER_MS_PER_KN, 12)
+			// blended from where it was drawn, re-extrapolated from the fix's own time
+			expect(km(before, s)).toBeLessThan(1e-9)
+			advance(s, fix(0, 0, T0 + jitter, 180, 300), T0 + 6000)
+			expect(km(s, at(-300 * KM_PER_MS_PER_KN * 6000, 0))).toBeLessThan(0.001)
+			expect(s.rejected).toBe(0)
+		}
+		// an older fix elsewhere still cannot retrack
+		const s = createMotion(fix(0, 0, T0, 90, 450), T0)
+		advance(s, fix(0.1, 0, T0 - 30, 180, 300), T0 + 1000)
+		expect(s.fixCourse).toBe(90)
+		expect(km(s, at(0, eastAt(T0 + 1000)))).toBeLessThan(1e-9)
+	})
+
+	it("blends a fix while the track is fresh, snaps it past EXTRAPOLATE_STOP_MS", () => {
+		// a plane 450 kn east, then (hidden tab or layer) the next fix 0.5 km off the stopped track, drawn when the
+		// old fix is EXTRAPOLATE_STOP_MS old (blended) or 1 ms more (snapped)
+		const late = (age: number) => {
+			const s = createMotion(fix(0, 0, T0), T0)
+			advance(s, fix(0, 0, T0), T0 + 1000)
+			const f = fix(0.5, V * 15_000, T0 + age - 100)
+			// the first frame back draws the old track first, then sees the fix
+			advance(s, fix(0, 0, T0), T0 + age)
+			const before = { lat: s.lat, lon: s.lon }
+			advance(s, f, T0 + age)
+			return { s, f, before }
+		}
+		const fresh = late(EXTRAPOLATE_STOP_MS)
+		expect(fresh.s.offAt).not.toBeNaN()
+		expect(km(fresh.before, fresh.s)).toBeLessThan(1e-9)
+		const stale = late(EXTRAPOLATE_STOP_MS + 1)
+		expect(stale.s.offAt).toBeNaN()
+		// on the new track at once: the fix moved on 100 ms at 450 kn
+		const there = { lat: stale.f.lat, lon: stale.f.lon }
+		expect(km(stale.s, there)).toBeCloseTo(V * 100, 6)
+		// a hidden tab back after a minute: a 66 km jump is drawn there at once, never swept across the map
+		const s = createMotion(fix(0, 0, T0), T0)
+		const g = fix(0, eastAt(T0 + 70_000) - 4, T0 + 70_000)
+		advance(s, g, T0 + 70_000)
+		expect(s.rejected).toBe(0)
+		expect(s.offAt).toBeNaN()
+		expect(km(s, g)).toBeLessThan(1e-9)
+	})
+
+	it("blends a correction of SNAP_KM, snaps one past it", () => {
+		// stationary at the equator, a fix 10 s later (gate 8.17 km): SNAP_KM north is exactly SNAP_KM in km
+		const base: Fix = {
+			lat: 0,
+			lon: 0,
+			posAt: T0,
+			course: null,
+			speedKn: null,
+			moving: false,
+		}
+		const atBound = { ...base, lat: SNAP_KM / KM_PER_DEG, posAt: T0 + 10_000 }
+		expect(atBound.lat * KM_PER_DEG).toBe(SNAP_KM)
+		const a = createMotion(base, T0)
+		advance(a, atBound, T0 + 10_000)
+		expect(a.offAt).not.toBeNaN()
+		expect(a.lat).toBeLessThan(1e-12)
+		const past = { ...atBound, lat: (SNAP_KM + 0.01) / KM_PER_DEG }
+		const b = createMotion(base, T0)
+		advance(b, past, T0 + 10_000)
+		expect(b.rejected).toBe(0)
+		expect(b.offAt).toBeNaN()
+		expect(b.lat).toBe(past.lat)
+		// a velocity update for the accepted fix that moves the track past SNAP_KM snaps too: 15 s of travel
+		// (EXTRAPOLATE_STOP_MS) at 1200 kn turned from east to west is 2 × 0.617 × 15 = 18.5 km
+		const c = createMotion(fix(0, 0, T0, 90, MAX_PLAUSIBLE_KN), T0)
+		advance(c, fix(0, 0, T0, 90, MAX_PLAUSIBLE_KN), T0 + 15_000)
+		advance(c, fix(0, 0, T0, 270, MAX_PLAUSIBLE_KN), T0 + 15_000)
+		expect(c.offAt).toBeNaN()
+		expect(c.fixCourse).toBe(270)
+	})
+
+	it("keeps the glyph along the accepted track while an outlier is held back", () => {
+		const s = createMotion(fix(0, 0, T0, 90), T0)
+		advance(s, fix(0, eastAt(T0 + 500), T0 + 500, 90), T0 + 500)
+		// a wrong CPR zone 300 km north with a southbound course: held back, the glyph keeps pointing east
+		const outlier = fix(300, 0, T0 + 1000, 180)
+		for (let t = T0 + 1000; t <= T0 + 3000; t += FRAME_MS)
+			advance(s, outlier, t)
+		expect(s.rejected).toBe(1)
+		expect(s.rotate).toBe(90)
+		// (the 500 ms fix's zero correction has ended, and the glyph is not turning toward 180°)
+		expect(settling(s)).toBe(false)
+		// once confirmed the glyph turns to the new course
+		advance(s, fix(300, -0.1, T0 + 3500, 180), T0 + 3500)
+		expect(s.rejected).toBe(1)
+		expect(s.fixCourse).toBe(180)
+		advance(s, fix(300, -0.1, T0 + 3500, 180), T0 + 3500 + FRAME_MS)
+		expect(s.rotate).toBeGreaterThan(90)
+	})
+})
+
+describe("the engine's motion bookkeeping (MotionBook)", () => {
+	it("keeps one state per aircraft across rebuilds and drops it when the aircraft leaves", () => {
+		const book = new MotionBook()
+		const a = book.advance("a:wk0001", fix(0, 0, T0), T0)
+		book.advance("a:wk0002", fix(1, 0, T0), T0)
+		expect(book.size).toBe(2)
+		expect(book.advance("a:wk0001", fix(0, 0, T0), T0 + 500)).toBe(a)
+		const present = new Set(["a:wk0001"])
+		book.retain(id => present.has(id))
+		expect(book.size).toBe(1)
+		expect(book.has("a:wk0002")).toBe(false)
+		expect(book.has("a:wk0001")).toBe(true)
+		// back again later: a fresh state at its own fix, no stale correction
+		const back = book.advance("a:wk0002", fix(5, 0, T0 + 9000), T0 + 9000)
+		expect(back.offAt).toBeNaN()
+		expect(km(back, at(5, 0))).toBeLessThan(1e-9)
+	})
+
+	it("puts the card at the marker while the layer is drawn, at a fresh prediction while it is hidden", () => {
+		const book = new MotionBook()
+		const f = fix(0, 0, T0)
+		// a push at T0 + 1000 draws the marker there
+		const marker = book.advance("a:wk0001", f, T0 + 1000)
+		const pushed = { lat: marker.lat, lon: marker.lon }
+		// the card renders 300 ms later, between pushes: the marker's place exactly
+		const card = book.drawnAt("a:wk0001", f, T0 + 1300, true)
+		expect(card.lat).toBe(pushed.lat)
+		expect(card.lon).toBe(pushed.lon)
+		// the layer is hidden (no pushes): the card follows the plane 8 s on (0.2315 km/s × 8 s = 1.85 km) instead
+		// of freezing
+		const hidden = book.drawnAt("a:wk0001", f, T0 + 9000, false)
+		expect(km(hidden, at(0, eastAt(T0 + 9000)))).toBeLessThan(0.001)
+		expect(km(hidden, pushed)).toBeGreaterThan(1.8)
+		// and an aircraft never pushed yet is placed too
+		const fresh = book.drawnAt("a:wk0003", f, T0 + 2000, true)
+		expect(km(fresh, at(0, eastAt(T0 + 2000)))).toBeLessThan(0.001)
 	})
 })
