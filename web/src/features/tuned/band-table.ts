@@ -460,11 +460,18 @@ export const LIVE_STATES: ReadonlySet<RowState> = new Set([
 /** The header's state while the paused receiver feed holds a decoder on this band (ReceiverIsland's words). */
 export const FEED_PAUSED_LINE = "Receiver paused"
 
-/** True when the paused receiver feed holds any row ("source-paused"): the feed is paused even where another row is off, stopped or failed. */
+/**
+ * True when a paused receiver feed holds a row ("source-paused") and no row is live: the feed is paused even where
+ * another row is off, stopped or failed. A live row means a feed still delivers here (a decoder on its own dongle, or
+ * on this card's source while another source is paused), so the band is not paused. Rows do not carry their source.
+ */
 export function feedPausedHere(
-	rows: readonly Pick<BandTableRow, "code">[],
+	rows: readonly Pick<BandTableRow, "code" | "state">[],
 ): boolean {
-	return rows.some(r => r.code === "source-paused")
+	return (
+		rows.some(r => r.code === "source-paused") &&
+		!rows.some(r => LIVE_STATES.has(r.state))
+	)
 }
 
 /**
@@ -481,7 +488,7 @@ export function bandStateLine(rows: readonly BandTableRow[]): string | null {
 /**
  * The header's plain line about the decoders whose band holds the frequency (`rows`): "Decoded here by …" names
  * only live ones on the tuned channel (`onChannel`, decodersOnChannel ids); live ones whose band merely spans it
- * decode the band, not this channel; while the paused feed holds any of them, it says so; otherwise they cover it but
+ * decode the band, not this channel; while a paused feed holds one of them and none is live, it says so; otherwise they cover it but
  * are not decoding. Null without rows.
  */
 export function decodersLine(

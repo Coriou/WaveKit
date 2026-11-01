@@ -89,8 +89,9 @@ export function fixedTargetsHz(
 }
 
 /**
- * The core's TUNED_CLUSTER_MAX_GAP_HZ (src/decoders/enablement/tuned-band.ts): neighbouring targets further apart
- * are separate bands (LoRa's 433 and 869 MHz slots), not one channel cluster.
+ * The core's TUNED_CLUSTER_MAX_GAP_HZ (src/decoders/enablement/tuned-band.ts), a fixed 2.4 MHz whatever the source
+ * rate: neighbouring targets further apart are separate bands (LoRa's 433 and 869 MHz slots), not one channel cluster.
+ * web/tests/features/tuned-band-contract.test.ts pins the two together.
  */
 export const CLUSTER_MAX_GAP_HZ = 2_400_000
 

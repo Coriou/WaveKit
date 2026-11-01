@@ -587,7 +587,7 @@ export function TunedCard() {
 		? "Identifying"
 		: heldByScan
 			? "Held by the scan"
-			: // the paused feed holds every decoder here: nothing is listening, whatever was heard before
+			: // a paused feed holds a decoder here and none is live: nothing is listening, whatever was heard before
 				feedPausedHere(bandRows)
 				? FEED_PAUSED_LINE
 				: !onIt

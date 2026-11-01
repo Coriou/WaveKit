@@ -380,15 +380,26 @@ export const MOCK_PLAN_RANGES: readonly ScanRange[] = [
 	},
 ]
 
-/** The core's tuned-band rule (bandContainsTuned) over one band; malformed values never match. */
+/**
+ * The core's tuned-band rule (bandContainsTuned) over one band: a followCenter band holds its whole span between
+ * the lowest and highest target; malformed values never match.
+ */
 function bandHolds(
 	targetsHz: readonly unknown[],
 	rangesHz: readonly { minHz: unknown; maxHz: unknown }[],
 	hz: number,
+	followCenter = false,
 ): boolean {
 	const reach = MOCK_TUNED_REACH_HZ
 	const targets = targetsHz.filter(positive)
 	if (targets.some(t => Math.abs(t - hz) <= reach)) return true
+	if (
+		followCenter &&
+		targets.length > 1 &&
+		hz >= Math.min(...targets) - reach &&
+		hz <= Math.max(...targets) + reach
+	)
+		return true
 	if (clusterHolds(targets, hz, reach)) return true
 	return rangesHz.some(
 		r =>
@@ -425,7 +436,12 @@ export function mockCoversHz(
 	const targets = d.bandAssessment?.targetsHz ?? []
 	const ranges = d.bandAssessment?.rangesHz ?? []
 	if (targets.length > 0 || ranges.length > 0)
-		return bandHolds(targets, ranges, hz)
+		return bandHolds(
+			targets,
+			ranges,
+			hz,
+			d.bandAssessment?.followCenter === true,
+		)
 	const configured = fixedTargetsHz(d)
 	if (configured.length > 0) return bandHolds(configured, [], hz)
 	return planListsHz(d.type, MOCK_PLAN_RANGES, hz)

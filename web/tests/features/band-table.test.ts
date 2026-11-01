@@ -133,6 +133,32 @@ describe("tuned card cases", () => {
 		expect(decodersLine(mixed, new Set())).toMatch(/The receiver is paused/)
 	})
 
+	it("a second paused source is not claimed while a decoder on this card's source is live", () => {
+		const rows = rowsOf("uhf-feed-paused")
+		// the pager on the paused second source, digital voice decoding a call on the primary
+		const mixed = [
+			{ ...rows[0]!, code: "decoding" as const, state: "decoding" as const },
+			rows[1]!,
+		]
+		expect(feedPausedHere(mixed)).toBe(false)
+		expect(decodersLine(mixed, new Set([mixed[0]!.id]))).toBe(
+			`Decoded here by ${mixed[0]!.name}. Nothing heard yet.`,
+		)
+	})
+
+	it("a decoder on its own dongle decoding while the main feed is paused is not claimed paused", () => {
+		const [paused] = rowsOf("adsb-source-paused")
+		const own = {
+			...paused!,
+			id: "readsb-own",
+			code: "decoding" as const,
+			state: "decoding" as const,
+		}
+		expect(feedPausedHere([paused!, own])).toBe(false)
+		expect(feedPausedHere([own, paused!])).toBe(false)
+		expect(feedPausedHere([paused!])).toBe(true)
+	})
+
 	it("a paused feed is not claimed while no row is held by it", () => {
 		const rows = rowsOf("pager-dmr-466")
 		expect(feedPausedHere(rows)).toBe(false)

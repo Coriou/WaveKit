@@ -13,11 +13,13 @@ import { VFO_SETTLE_MS } from "./contract.js"
 export const TUNED_TARGET_TOLERANCE_HZ = 200_000
 
 /**
- * The widest gap between neighbouring targets of one channel cluster: 2.4 MHz,
- * one default capture (2.4 Msps). A cluster's channels share one band (VDL2's
- * span 325 kHz), so the span between them is the band; targets further apart
- * are separate bands, such as the catalogue LoRa decoder's 433 MHz and 869 MHz
- * slots, and the frequencies between them are not its band.
+ * The widest gap between neighbouring targets of one channel cluster: a fixed
+ * 2.4 MHz, whatever the source rate (it does not follow the capture width). A
+ * cluster's channels share one band (VDL2's span 325 kHz), so the span between
+ * them is the band; targets further apart are separate bands, such as the
+ * catalogue LoRa decoder's 433 MHz and 869 MHz slots, and the frequencies
+ * between them are not its band. A followCenter band is not a cluster: its
+ * targets are the edges of the band it follows (bandContainsTuned).
  */
 export const TUNED_CLUSTER_MAX_GAP_HZ = 2_400_000
 
@@ -83,8 +85,12 @@ export function tunedFrequencyHz(
  * True when the decoder's band contains the tuned frequency: within
  * TUNED_TARGET_TOLERANCE_HZ of a target, between neighbouring targets of one
  * channel cluster such as VDL2's (clusterHolds; never across the gap between
- * two separate bands), or inside a range widened by the tolerance. An unknown band, a malformed band or no tuned frequency is never
- * tuned: the safe answer keeps today's admission order.
+ * two separate bands), or inside a range widened by the tolerance. A
+ * followCenter band decodes the centre itself and its targets are the edges
+ * of the band it follows (assessDecoderBand), so it holds the whole span from
+ * the lowest to the highest target, widened by the tolerance, however wide.
+ * An unknown band, a malformed band or no tuned frequency is never tuned: the
+ * safe answer keeps today's admission order.
  */
 export function bandContainsTuned(
 	band: DecoderBandRequirements | undefined,
@@ -96,6 +102,13 @@ export function bandContainsTuned(
 		? band.targetsHz.filter(positive)
 		: []
 	if (targets.some(t => Math.abs(t - tunedHz) <= tol)) return true
+	if (
+		band.followCenter === true &&
+		targets.length > 1 &&
+		tunedHz >= Math.min(...targets) - tol &&
+		tunedHz <= Math.max(...targets) + tol
+	)
+		return true
 	if (clusterHolds(targets, tunedHz, tol)) return true
 	const ranges = Array.isArray(band.rangesHz) ? band.rangesHz : []
 	return ranges.some(

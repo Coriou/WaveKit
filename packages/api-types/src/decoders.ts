@@ -175,6 +175,12 @@ export interface DecoderBandAssessment {
 		| "external-input"
 	targetsHz?: number[]
 	rangesHz?: DecoderBandRange[]
+	/**
+	 * Present when the decoder decodes the capture centre itself
+	 * (followCenter): `targetsHz` are then the edges of the band it follows,
+	 * and every frequency between the lowest and highest one is its band.
+	 */
+	followCenter?: true
 	basis?: DecoderBandBasis
 	/** Present when a region-dependent default produced the band. */
 	region?: DecoderBandRegion

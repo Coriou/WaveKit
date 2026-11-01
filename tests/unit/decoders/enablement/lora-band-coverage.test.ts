@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { decoderCoversHz } from "../../../../src/api/routes/decoder-summary.js"
+import { assessDecoderBand } from "../../../../src/decoders/band-resolver.js"
+import type { DecoderBandRequirements } from "../../../../src/decoders/band-resolver.js"
 import { BAND_REGIONS } from "../../../../src/decoders/band-region.js"
 import { LORA_REGION_RANGES_HZ } from "../../../../src/decoders/band-defaults.js"
 import {
@@ -120,5 +122,75 @@ describe("the tuned-band channel cluster", () => {
 		expect(clusterHolds(targets, 100_500_000, REACH)).toBe(true)
 		expect(clusterHolds(targets, 500_500_000, REACH)).toBe(true)
 		expect(clusterHolds(targets, 300_000_000, REACH)).toBe(false)
+	})
+})
+
+describe("a follow-centre decoder holds its whole declared span as tuned", () => {
+	const ctx = { sampleRateHz: 2_400_000 }
+	/** The band the manager resolves, and the status its assessment at `hz` reports to the summary. */
+	const follow = (targetsHz: number[]): DecoderBandRequirements => ({
+		targetsHz,
+		basis: "configured",
+		followCenter: true,
+	})
+	const statusAt = (band: DecoderBandRequirements, hz: number) =>
+		lora(assessDecoderBand(band, { ...ctx, centerHz: hz }))
+
+	for (const [region, lo, hi] of [
+		["US", 902_000_000, 928_000_000],
+		["CN", 470_000_000, 510_000_000],
+	] as const) {
+		it(`${region}: tuned anywhere between the declared edges and at them, not past them`, () => {
+			const band = follow([lo, hi])
+			for (const hz of [lo, (lo + hi) / 2, hi, lo - REACH, hi + REACH]) {
+				expect(assessDecoderBand(band, { ...ctx, centerHz: hz }).verdict).toBe(
+					"in-band",
+				)
+				expect(bandContainsTuned(band, hz), String(hz)).toBe(true)
+				expect(decoderCoversHz(statusAt(band, hz), hz), String(hz)).toBe(true)
+			}
+			for (const hz of [lo - REACH - 1, hi + REACH + 1]) {
+				expect(bandContainsTuned(band, hz), String(hz)).toBe(false)
+				expect(decoderCoversHz(statusAt(band, hz), hz), String(hz)).toBe(false)
+			}
+		})
+	}
+
+	it("reports followCenter in the assessment, only when the band follows the centre", () => {
+		const centre = { ...ctx, centerHz: 915_000_000 }
+		expect(
+			assessDecoderBand(follow([902_000_000, 928_000_000]), centre),
+		).toMatchObject({ verdict: "in-band", followCenter: true })
+		expect(
+			assessDecoderBand(
+				{ targetsHz: [902_000_000, 928_000_000], basis: "configured" },
+				centre,
+			),
+		).not.toHaveProperty("followCenter")
+	})
+
+	it("a follow-centre channel list wider than one cluster gap (dumpvdl2 style) holds its span", () => {
+		const targets = [131_525_000, 136_975_000]
+		expect(targets[1]! - targets[0]!).toBeGreaterThan(TUNED_CLUSTER_MAX_GAP_HZ)
+		const band = follow(targets)
+		expect(bandContainsTuned(band, 134_000_000)).toBe(true)
+		expect(decoderCoversHz(statusAt(band, 134_000_000), 134_000_000)).toBe(true)
+		// The same list without followCenter is two separate channels.
+		const fixed = { targetsHz: targets, basis: "configured" as const }
+		expect(bandContainsTuned(fixed, 134_000_000)).toBe(false)
+		expect(
+			decoderCoversHz(lora({ verdict: "in-band", ...fixed }), 134_000_000),
+		).toBe(false)
+	})
+
+	it("the catalogue EU LoRa decoder (fixed slots) still never holds 446.5 MHz", () => {
+		const band = {
+			targetsHz: catalogueTargets("EU"),
+			basis: "configured" as const,
+		}
+		expect(bandContainsTuned(band, 446_524_920)).toBe(false)
+		expect(decoderCoversHz(statusAt(band, 446_524_920), 446_524_920)).toBe(
+			false,
+		)
 	})
 })

@@ -140,8 +140,10 @@ instead of the demodulator and "Quiet".
 
 **On this band** is a table of the decoders whose band holds the frequency (within 200 kHz of one
 of their frequencies or of the span between neighbouring channels of one cluster, or inside their
-band). Frequencies more than 2.4 MHz apart are separate bands: LoRa, which listens at 433 and 869 MHz
-in Europe, is not listed at 446 MHz. The core decides which
+band). Frequencies more than 2.4 MHz apart are separate bands, a fixed gap whatever the receiver's
+sample rate: LoRa, which listens at 433 and 869 MHz in Europe, is not listed at 446 MHz. A decoder
+that follows the receiver centre (`followCenter`) holds the whole band between its declared edges,
+so LoRa following 902–928 MHz is listed at 915 MHz. The core decides which
 those are: the card asks `GET /api/decoders/summary?hz=<Hz>` and lists the items with
 `coversHz: true`, so an agent using the same endpoint sees the same list. Right after the core
 starts, before the receiver reports its capabilities, a decoder's configured frequencies stand in
@@ -268,8 +270,9 @@ waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads
   `P` key toggles pause and the plain resume from anywhere; a pause from the palette or the key
   offers Undo. Read-only browsers cannot pause. While paused,
   the tuned card's decoders read Paused, "Receiver paused", each with a **Resume** button; when the
-  paused feed holds any decoder on the card's frequency, the card's header reads `Receiver paused`
-  and its summary says the receiver is paused, and
+  paused feed holds any decoder on the card's frequency and none of them is decoding (a decoder on
+  its own dongle, or on another receiver that is not paused, keeps the header live), the card's
+  header reads `Receiver paused` and its summary says the receiver is paused, and
   Settings › Decoders reads `Paused · the receiver is paused`. A scanner identify running when you
   pause ends with what it found so far and reads `Stopped · receiver paused`. A sweep running when
   you pause waits; **Resume at 161.500 MHz** continues it, but a plain **Resume** leaves it held so it
