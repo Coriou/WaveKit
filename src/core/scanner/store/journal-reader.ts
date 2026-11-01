@@ -3,9 +3,10 @@
  * file is read in 256 KiB chunks and split into lines at the byte level; a line the snapshot
  * already covers (its `{"seq":<n>,` prefix at or below `fromSeq`) is skipped without JSON.parse,
  * so a large day file the snapshot covers costs a byte scan instead of a 4 s parse. Uncovered
- * lines are parsed and validated; replay then stops at the first missing seq (a journal gap: the
- * lines after it were written on a base the store no longer has, the same rule appends follow at
- * run time). Work between event-loop turns is bounded by a deadline (`SliceClock`).
+ * lines are parsed and validated, and every valid one is returned in seq order, past any missing
+ * seq too (salvage: a gap left by a lost or corrupt line withholds nothing that can still be
+ * applied; it only degrades recovery). Work between event-loop turns is bounded by a deadline
+ * (`SliceClock`).
  */
 import { open, truncate as truncateFile } from "node:fs/promises"
 import { join } from "node:path"
@@ -65,19 +66,22 @@ export interface JournalFileInfo {
 }
 
 export interface JournalRead {
-	/** Uncovered entries in seq order, contiguous from `fromSeq + 1`, ending before the first gap. */
+	/** Every valid uncovered entry in seq order, entries past a gap included. */
 	entries: JournalEntry[]
-	/** Highest seq seen in any file (lines after a gap included), 0 for none. */
+	/** Highest seq of a valid line (covered lines by their prefix) in any file, 0 for none. */
 	maxSeq: number
 	/** Torn tails, invalid lines and differing duplicates. */
 	dropped: number
-	/** Something was dropped, a gap stopped replay, or a file was unreadable. */
+	/** Something was dropped or seqs are missing between `fromSeq` and the last entry. */
 	degraded: boolean
-	/** UTF-8 bytes (newline included) of the uncovered valid lines, after the gap too. */
+	/** UTF-8 bytes (newline included) of the uncovered valid lines. */
 	uncoveredBytes: number
 	files: JournalFileInfo[]
-	/** The first missing seq and the next seq present after it; null when contiguous. */
-	gap: { missing: number; next: number; skipped: number } | null
+	/**
+	 * Seqs missing between `fromSeq + 1` and the last entry: the first one, how many in all and in
+	 * how many runs; null when the entries are contiguous from `fromSeq + 1`.
+	 */
+	gap: { firstMissing: number; missing: number; runs: number } | null
 	/** Some day file holds seqs below an earlier file's (the clock was set back). */
 	outOfOrder: boolean
 }
@@ -239,25 +243,26 @@ export async function readJournalFiles(
 	let expected = o.fromSeq + 1
 	for (const seq of seqs) {
 		if (seq !== expected) {
-			gap = { missing: expected, next: seq, skipped: 0 }
-			break
+			// seq > expected: the keys are distinct, sorted and above fromSeq.
+			if (gap === null) gap = { firstMissing: expected, missing: 0, runs: 0 }
+			gap.missing += seq - expected
+			gap.runs++
 		}
 		const found = bySeq.get(seq)
 		if (found !== undefined) entries.push(found)
-		expected++
+		expected = seq + 1
 		if (o.slice.due()) await o.slice.yield()
 	}
 	if (gap !== null) {
-		gap.skipped = seqs.length - entries.length
 		degraded = true
 		o.log.warn(
 			{
+				firstMissing: gap.firstMissing,
 				missing: gap.missing,
-				next: gap.next,
+				runs: gap.runs,
 				replayed: entries.length,
-				skipped: gap.skipped,
 			},
-			"Scanner journal has a gap; replay stops before it",
+			"Scanner journal has missing seqs; replaying every valid entry past them",
 		)
 	}
 	return {

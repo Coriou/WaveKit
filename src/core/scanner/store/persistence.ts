@@ -166,6 +166,14 @@ export interface LoadedState {
 	/** WG10 req 1.5: merge aliases from the snapshot (journal entries replay on top). */
 	aliases?: { id: string; aliases: string[] }[]
 	recoveryHealth: "healthy" | "degraded"
+	/** Seqs missing from the replayed journal tail (recovery is then degraded); absent when none. */
+	journalGap?: JournalGap
+}
+
+/** The first seq missing from the journal tail after the snapshot and how many are missing. */
+export interface JournalGap {
+	firstMissing: number
+	missing: number
 }
 
 // ── schemas ──────────────────────────────────────────────────────────────
@@ -706,6 +714,7 @@ export class ScannerPersistence {
 				lastSeq: snapshot.lastSeq,
 				replay: journal.entries.length,
 				dropped: journal.dropped,
+				...(journal.gap ? { journalGap: journal.gap } : {}),
 			},
 			"Loaded scanner state",
 		)
@@ -723,6 +732,7 @@ export class ScannerPersistence {
 			recordingOperations: snapshot.recordingOperations ?? [],
 			...(snapshot.aliases ? { aliases: snapshot.aliases } : {}),
 			recoveryHealth: this.authorityHealth,
+			...(journal.gap ? { journalGap: journal.gap } : {}),
 		}
 	}
 
@@ -765,7 +775,7 @@ export class ScannerPersistence {
 		const uncovered =
 			this.refusedMax !== null &&
 			(this.coverSeq === null || this.coverSeq < this.refusedMax)
-		if (overCap || uncovered) return this.refuse(seq, uncovered)
+		if (overCap || uncovered) return this.refuse(seq)
 		const name = journalName(this.now())
 		let batch = this.openBatch
 		if (batch === null || batch.name !== name) {
@@ -790,15 +800,15 @@ export class ScannerPersistence {
 		return batch.written.then(() => seq)
 	}
 
-	private refuse(seq: number, behindHole: boolean): Promise<number> {
-		this.refusedMax = Math.max(this.refusedMax ?? 0, seq)
+	private refuse(seq: number): Promise<number> {
+		this.refusedMax = seq
 		this.holeFrom ??= seq
 		this.refusedCount += 1
 		this.openBatch = null // no batch spans a hole
 		if (this.refusedCount === 1)
 			this.log.warn(
-				{ seq, queuedBytes: this.queuedBytes, behindHole },
-				"Journal backlog full or behind a hole; refusing appends until a snapshot covers them",
+				{ seq, queuedBytes: this.queuedBytes },
+				"Journal backlog full; refusing appends until a snapshot covers them",
 			)
 		return Promise.reject(
 			new WaveKitError(
@@ -1498,14 +1508,17 @@ export class ScannerPersistence {
 
 	/**
 	 * The journal tail after `lastSeq`, streamed (store/journal-reader.ts): covered lines are only
-	 * byte-scanned, torn tails are cut back to the last newline, and replay stops at the first
-	 * missing seq. A gap is then a hole like a refused append: lines above it stay on disk but
-	 * replay never steps over it, so appends are refused until a snapshot covering every seq seen
-	 * (`refusedMax`) is queued; ScannerService requests one at the first refusal.
+	 * byte-scanned, torn tails are cut back to the last newline, and every valid uncovered line is
+	 * replayed in seq order, past missing seqs too. Missing seqs only degrade recovery: no line is
+	 * withheld, so a snapshot after the replay covers exactly the lines that could be applied
+	 * (`maxSeq` counts valid lines only), and runtime holes keep their own rule (`refuse`).
 	 */
-	private async readJournal(
-		lastSeq: number,
-	): Promise<{ entries: JournalEntry[]; maxSeq: number; dropped: number }> {
+	private async readJournal(lastSeq: number): Promise<{
+		entries: JournalEntry[]
+		maxSeq: number
+		dropped: number
+		gap: JournalGap | null
+	}> {
 		const dir = join(this.root, JOURNAL_DIR)
 		let names: string[]
 		try {
@@ -1515,7 +1528,7 @@ export class ScannerPersistence {
 				this.authorityHealth = "degraded"
 				this.log.warn({ err, dir }, "Scanner journal directory unreadable")
 			}
-			return { entries: [], maxSeq: 0, dropped: 0 }
+			return { entries: [], maxSeq: 0, dropped: 0, gap: null }
 		}
 		const read = await readJournalFiles({
 			dir,
@@ -1531,15 +1544,15 @@ export class ScannerPersistence {
 			this.fileBytes.set(file.name, file.bytes)
 		}
 		this.journalBytes += read.uncoveredBytes
-		if (read.gap !== null) {
-			this.refusedMax = Math.max(this.refusedMax ?? 0, read.maxSeq)
-			this.holeFrom = Math.min(
-				this.holeFrom ?? Number.POSITIVE_INFINITY,
-				read.gap.missing,
-			)
-			this.coverSeq = null
+		return {
+			entries: read.entries,
+			maxSeq: read.maxSeq,
+			dropped: read.dropped,
+			gap:
+				read.gap === null
+					? null
+					: { firstMissing: read.gap.firstMissing, missing: read.gap.missing },
 		}
-		return { entries: read.entries, maxSeq: read.maxSeq, dropped: read.dropped }
 	}
 
 	/** Validate aggregate prepared authority across snapshot+journal without changing S1 fallback. */

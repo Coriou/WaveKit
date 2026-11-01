@@ -14,10 +14,7 @@ import { join } from "node:path"
 import fc from "fast-check"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import type { JournalEntry } from "../../../../src/core/scanner/store/discovery-store.js"
-import {
-	SCANNER_JOURNAL_BACKLOG_CODE,
-	ScannerPersistence,
-} from "../../../../src/core/scanner/store/persistence.js"
+import { ScannerPersistence } from "../../../../src/core/scanner/store/persistence.js"
 import type { PersistedJob } from "../../../../src/core/scanner/store/persistence.js"
 import type {
 	EngineState,
@@ -123,7 +120,7 @@ describe("ScannerPersistence journal", () => {
 		})
 	})
 
-	it("skips invalid middle lines and lines whose payload is not a store mutation; replay stops at the gap they leave", async () => {
+	it("skips invalid middle lines and lines whose payload is not a store mutation, and replays the valid line past the gap they leave", async () => {
 		await withDir(async dir => {
 			const p = new ScannerPersistence({ dir, logger, now: () => T0 })
 			await p.load()
@@ -138,28 +135,19 @@ describe("ScannerPersistence journal", () => {
 			await appendFile(path, `${JSON.stringify({ seq: 3, ...entry(T0) })}\n`)
 			const reopened = new ScannerPersistence({ dir, logger, now: () => T0 })
 			const loaded = await reopened.load()
-			// Seq 2 is invalid: 3 was written on a base replay cannot rebuild, so replay stops at 2.
-			expect(loaded.entries.map(e => e.seq)).toEqual([1])
+			// Seq 2 is invalid: salvage replays 3 past it and reports the gap as degraded recovery.
+			expect(loaded.entries.map(e => e.seq)).toEqual([1, 3])
 			expect(loaded.droppedLines).toBe(2)
 			expect(loaded.recoveryHealth).toBe("degraded")
-			// The gap is a hole: appends wait for a snapshot covering seq 3, then follow it.
-			await expect(reopened.append(entry(T0))).rejects.toMatchObject({
-				code: SCANNER_JOURNAL_BACKLOG_CODE,
-			})
-			await reopened.writeSnapshot({
-				discoveries: [],
-				observations: [],
-				corrections: [],
-				recordingOperations: [],
-			})
-			expect(await reopened.append(entry(T0))).toBe(5)
+			expect(loaded.journalGap).toEqual({ firstMissing: 2, missing: 1 })
+			// A boot gap is no hole: appends go on at once after the highest valid seq.
+			expect(await reopened.append(entry(T0))).toBe(4)
 			const after = await new ScannerPersistence({
 				dir,
 				logger,
 				now: () => T0,
 			}).load()
-			expect(after.lastSeq).toBe(4)
-			expect(after.entries.map(e => e.seq)).toEqual([5])
+			expect(after.entries.map(e => e.seq)).toEqual([1, 3, 4])
 		})
 	})
 
@@ -791,4 +779,157 @@ describe("ScannerPersistence properties", () => {
 			{ numRuns: 100 },
 		)
 	}, 120_000)
+})
+
+describe("ScannerPersistence journal salvage past a gap", () => {
+	let opened = 0
+	/** `counterIds` starting past `from`: each restart draws ids no earlier run used. */
+	const idsFrom = (from: number): (() => string) => {
+		let n = from
+		return () => {
+			n += 1
+			return n.toString(36).toUpperCase().padStart(26, "0")
+		}
+	}
+	/** Persistence + a store journaling every mutation, as ScannerService wires them. */
+	async function open(dir: string, clock: { now: number }) {
+		const p = new ScannerPersistence({ dir, logger, now: () => clock.now })
+		const loaded = await p.load()
+		// A restarted process never reuses ids (ULIDs in production).
+		opened++
+		const store = new DiscoveryStore({
+			maxDiscoveries: 50,
+			now: () => clock.now,
+			newId: idsFrom(opened * 1_000_000),
+			rasters: () => RASTER,
+		})
+		store.restore(loaded)
+		for (const e of loaded.entries) store.replay(e)
+		const writes: Promise<number>[] = []
+		store.on("mutation", (e: Omit<JournalEntry, "seq">) =>
+			writes.push(p.append(e)),
+		)
+		return { p, loaded, store, writes }
+	}
+
+	/** One new emitter per call, each on its own 25 kHz slot: one discovery per seq range. */
+	function ingest(store: DiscoveryStore, clock: { now: number }, slot: number) {
+		store.ingest(
+			makeObs({
+				id: `o${slot}`,
+				centreHz: 446_000_000 + slot * 25_000,
+				startedAt: clock.now + slot,
+				cls: "fsk4-12k5",
+				hypotheses: [["dmr", 0.8]],
+			}),
+		)
+	}
+
+	const centres = (store: DiscoveryStore): number[] =>
+		store
+			.snapshot()
+			.discoveries.map(d => d.frequencyHz)
+			.sort((a, b) => a - b)
+
+	it("an invalid snapshot with a pruned prefix replays the valid tail, and a snapshot of it survives pruning and a second restart", async () => {
+		await withDir(async dir => {
+			const clock = { now: T0 }
+			const first = await open(dir, clock)
+			for (let slot = 0; slot < 3; slot++) ingest(first.store, clock, slot)
+			await Promise.all(first.writes)
+			await first.p.writeSnapshot(first.store.snapshot())
+			const covered = first.store.snapshot().discoveries.length
+			clock.now += DAY
+			for (let slot = 10; slot < 14; slot++) ingest(first.store, clock, slot)
+			const tailSeqs = await Promise.all(first.writes.splice(0))
+			const tail = tailSeqs.slice(-4)
+			const top = Math.max(...tailSeqs)
+			// The snapshot covers day 1, so pruning deletes it; then the snapshot is corrupted.
+			expect(
+				await first.p.pruneJournal({ maxBytes: 0, maxAgeDays: 30 }),
+			).toEqual({ deleted: ["observations-20261009.jsonl"] })
+			await writeFile(join(dir, "discoveries.json"), "{not json")
+			const tailCentres = centres(first.store).slice(covered)
+			expect(tailCentres).toEqual(
+				[10, 11, 12, 13].map(slot => 446_000_000 + slot * 25_000),
+			)
+
+			const second = await open(dir, clock)
+			expect(second.loaded.lastSeq).toBe(0)
+			expect(second.loaded.entries.map(e => e.seq)).toEqual(
+				expect.arrayContaining(tail),
+			)
+			expect(second.loaded.entries.at(-1)?.seq).toBe(top)
+			expect(second.loaded.recoveryHealth).toBe("degraded")
+			const firstTail = second.loaded.entries[0]?.seq ?? 0
+			expect(second.loaded.journalGap).toEqual({
+				firstMissing: 1,
+				missing: firstTail - 1,
+			})
+			expect(centres(second.store)).toEqual(tailCentres)
+			// Appends are not refused, and the snapshot of the salvaged store covers the tail.
+			ingest(second.store, clock, 20)
+			expect(await Promise.all(second.writes.splice(0))).toEqual([top + 1])
+			await second.p.writeSnapshot(second.store.snapshot())
+			expect(
+				await second.p.pruneJournal({ maxBytes: 0, maxAgeDays: 30 }),
+			).toEqual({ deleted: ["observations-20261010.jsonl"] })
+
+			const third = await open(dir, clock)
+			expect(third.loaded.lastSeq).toBe(top + 1)
+			expect(third.loaded.entries).toEqual([])
+			expect(third.loaded.journalGap).toBeUndefined()
+			expect(centres(third.store)).toEqual(centres(second.store))
+			expect(centres(third.store)).toEqual(expect.arrayContaining(tailCentres))
+		})
+	})
+
+	it("a corrupt middle line withholds only itself: the lines after it replay and a later snapshot keeps them", async () => {
+		await withDir(async dir => {
+			const clock = { now: T0 }
+			const first = await open(dir, clock)
+			for (let slot = 0; slot < 6; slot++) {
+				ingest(first.store, clock, slot)
+				await Promise.all(first.writes.splice(0))
+			}
+			const [file] = await journalFiles(dir)
+			const path = join(dir, "journal", file ?? "")
+			const lines = (await readFile(path, "utf8")).split("\n")
+			const victim = lines.findIndex(l => l.startsWith('{"seq":3,'))
+			expect(victim).toBeGreaterThan(0)
+			lines[victim] = '{"seq":3,"at":"corrupt'
+			await writeFile(path, lines.join("\n"))
+			const top = await maxSeqOf(path)
+
+			const second = await open(dir, clock)
+			const seqs = second.loaded.entries.map(e => e.seq)
+			expect(seqs).not.toContain(3)
+			expect(seqs).toEqual(
+				Array.from({ length: top }, (_, i) => i + 1).filter(n => n !== 3),
+			)
+			expect(second.loaded.journalGap).toEqual({ firstMissing: 3, missing: 1 })
+			expect(second.loaded.droppedLines).toBe(1)
+			expect(second.loaded.recoveryHealth).toBe("degraded")
+			const salvaged = centres(second.store)
+			// Seq 3 created slot 2's emitter: only it is lost.
+			expect(salvaged).toEqual(
+				[0, 1, 3, 4, 5].map(slot => 446_000_000 + slot * 25_000),
+			)
+			// Every emitter journaled after the corrupt line is back.
+			expect(salvaged).toEqual(
+				expect.arrayContaining(
+					centres(first.store).filter(hz => hz >= 446_000_000 + 3 * 25_000),
+				),
+			)
+			await second.p.writeSnapshot(second.store.snapshot())
+			expect(
+				await second.p.pruneJournal({ maxBytes: 0, maxAgeDays: 30 }),
+			).toEqual({ deleted: [file] })
+
+			const third = await open(dir, clock)
+			expect(third.loaded.lastSeq).toBe(top)
+			expect(third.loaded.entries).toEqual([])
+			expect(centres(third.store)).toEqual(salvaged)
+		})
+	})
 })

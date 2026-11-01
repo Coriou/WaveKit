@@ -1,6 +1,6 @@
 /**
  * The streaming journal reader: covered lines skipped by their seq prefix without a parse, torn
- * tails cut back by bytes, lines and multi-byte characters split across reads, the gap stop,
+ * tails cut back by bytes, lines and multi-byte characters split across reads, salvage past gaps,
  * day files out of order, duplicate seqs, and deadline slicing that never changes the result.
  */
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
@@ -196,41 +196,48 @@ describe("readJournalFiles", () => {
 		const read = await readJournalFiles(
 			options(dir, [DAY1], { maxLineBytes: 150, chunkBytes: 16 }),
 		)
-		// Seq 2 dropped as corrupt, so replay stops at the gap it leaves.
+		// Seq 2 dropped as corrupt; seq 3 past the gap it leaves is still returned.
 		expect(read.dropped).toBe(1)
-		expect(read.entries.map(e => e.seq)).toEqual([1])
-		expect(read.gap).toEqual({ missing: 2, next: 3, skipped: 1 })
-		// At exactly the bound it is read: line(1) without its newline is its length.
+		expect(read.entries.map(e => e.seq)).toEqual([1, 3])
+		expect(read.gap).toEqual({ firstMissing: 2, missing: 1, runs: 1 })
+		// At exactly the bound it is read: line(1) without its newline is its length (line(3)'s too).
 		const exact = Buffer.byteLength(line(1)) - 1
 		const ok = await readJournalFiles(
 			options(dir, [DAY1], { maxLineBytes: exact }),
 		)
-		expect(ok.entries.map(e => e.seq)).toEqual([1])
+		expect(ok.entries.map(e => e.seq)).toEqual([1, 3])
 		const under = await readJournalFiles(
 			options(dir, [DAY1], { maxLineBytes: exact - 1 }),
 		)
 		expect(under.entries).toEqual([])
 	})
 
-	it("stops replay at the first missing seq, degrades, and still reports the highest seq and the uncovered bytes after it", async () => {
+	it("returns every valid entry past a missing seq in seq order, degrades, and reports the first missing seq and the count", async () => {
 		const dir = await tmp()
 		await writeFile(join(dir, DAY1), line(1) + line(2) + line(3))
-		await writeFile(join(dir, DAY2), line(5) + line(6))
+		await writeFile(join(dir, DAY2), line(5) + line(6) + line(9))
 		const read = await readJournalFiles(options(dir, [DAY1, DAY2]))
-		expect(read.entries.map(e => e.seq)).toEqual([1, 2, 3])
-		expect(read.gap).toEqual({ missing: 4, next: 5, skipped: 2 })
+		expect(read.entries.map(e => e.seq)).toEqual([1, 2, 3, 5, 6, 9])
+		expect(read.gap).toEqual({ firstMissing: 4, missing: 3, runs: 2 })
 		expect(read.degraded).toBe(true)
 		expect(read.dropped).toBe(0)
-		expect(read.maxSeq).toBe(6)
+		expect(read.maxSeq).toBe(9)
 		expect(read.uncoveredBytes).toBe(
-			[1, 2, 3, 5, 6].reduce((n, s) => n + Buffer.byteLength(line(s)), 0),
+			[1, 2, 3, 5, 6, 9].reduce((n, s) => n + Buffer.byteLength(line(s)), 0),
 		)
-		// A gap right after the snapshot replays nothing.
-		const none = await readJournalFiles(
+		// A gap right after the snapshot (earlier days pruned) still replays what is left.
+		const pruned = await readJournalFiles(
 			options(dir, [DAY1, DAY2], { fromSeq: 0, names: [DAY2] }),
 		)
-		expect(none.entries).toEqual([])
-		expect(none.gap).toEqual({ missing: 1, next: 5, skipped: 2 })
+		expect(pruned.entries.map(e => e.seq)).toEqual([5, 6, 9])
+		expect(pruned.gap).toEqual({ firstMissing: 1, missing: 6, runs: 2 })
+		expect(pruned.degraded).toBe(true)
+		// Seqs at or below the snapshot are never missing: only 7 and 8 are.
+		const covered = await readJournalFiles(
+			options(dir, [DAY1, DAY2], { fromSeq: 4, names: [DAY2] }),
+		)
+		expect(covered.entries.map(e => e.seq)).toEqual([5, 6, 9])
+		expect(covered.gap).toEqual({ firstMissing: 7, missing: 2, runs: 1 })
 	})
 
 	it("sorts the uncovered tail when an earlier-named day file holds later seqs (clock set back), without degrading", async () => {
