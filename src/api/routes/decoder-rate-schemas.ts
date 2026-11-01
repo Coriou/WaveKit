@@ -149,6 +149,7 @@ export const decoderBandAssessmentSchema = {
 			],
 		},
 		targetsHz: { type: "array", items: frequency },
+		followCenter: { type: "boolean", enum: [true] },
 		rangesHz: { type: "array", items: decoderBandRangeSchema },
 		basis: {
 			type: "string",

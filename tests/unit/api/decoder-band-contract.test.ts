@@ -387,3 +387,23 @@ describe("band override routes (spec §5.2)", () => {
 		})
 	})
 })
+
+describe("follow-centre band over REST", () => {
+	it("keeps followCenter on the band assessment through the response schema", async () => {
+		decoder.band = {
+			targetsHz: [902_000_000, 928_000_000],
+			basis: "configured",
+			followCenter: true,
+		}
+		sources.setCenter("rtl", 915_000_000)
+		await settle()
+		const body = await getBody()
+		expect(body).toMatchObject({
+			bandAssessment: {
+				targetsHz: [902_000_000, 928_000_000],
+				followCenter: true,
+			},
+		})
+		expect(body).toEqual(wsPayload())
+	})
+})
