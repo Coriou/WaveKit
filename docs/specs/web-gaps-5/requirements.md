@@ -129,7 +129,12 @@ position) with `meshtastic-protobuf` `readPosition`: `lat`, `lon` and `altM` fro
 4.6 A presenter that cannot decode the altitude or the mesh payload keeps the rest of the
 presentation; it never throws to ingress.
 4.7 The built-row growth bound of a coalesced reception (WG2 requirement 1.8) becomes 240
-bytes (was 160); the bound for any other reception stays 1 100 bytes. `fitRowBudget` keeps
+bytes (was 160); the bound for any other reception stays 1 100 bytes. From the 2026-11-01
+core a coalesced (position-only) reception is an APRS or Meshtastic position only: aircraft
+and ship rows always list their fields and each stands for the entity's merged state, so they
+take the 1 100-byte bound, a bare fix included; a stored aircraft row's `aircraft` identity
+counts within that bound and its members are dropped lowest priority first (type
+description, operator, type code, registration, callsign) until it fits. `fitRowBudget` keeps
 `altM` on every rounded position candidate; when no candidate with `altM` fits at four or
 more decimals it tries the same candidates without `altM` before rounding further.
 4.8 Coalescing is unchanged (decided on the payload), so mesh positions store at most 61 rows

@@ -1894,6 +1894,11 @@ async function main(): Promise<void> {
 		const bandPlanLog = createComponentLogger(logger, "BandPlans")
 		let bandPlanSkipsWarned = false
 		let ambientProvenance: ActivityProvenanceLookup | null = null
+		// Stored aircraft rows carry the identity the live tracker knows (bound late: the tracker
+		// is created after Activity starts; null until then, so early rows keep the callsign only).
+		let activityAircraft: ReturnType<
+			AircraftTrackingManager["getTracker"]
+		> | null = null
 		// Activity runs when config.activity.enabled (the default). The store opens in the
 		// background, in parallel with the scanner state load below, and a failed open is
 		// retried with backoff (startActivityLifecycle); the rest of WaveKit never waits for it.
@@ -1914,6 +1919,17 @@ async function main(): Promise<void> {
 				ambientProvenance?.(decoderId, context) ?? null,
 			onEnvelope: env => {
 				dataGate.noteEnvelope(env)
+			},
+			aircraftIdentity: icao => {
+				const id = activityAircraft?.get(icao)?.identification
+				return id
+					? {
+							registration: id.registration,
+							typeCode: id.typeCode,
+							typeDescription: id.typeDescription,
+							operator: id.airline?.name ?? id.operator,
+						}
+					: null
 			},
 		})
 		// Own at once: a stop during the open must still close the workers.
@@ -2315,6 +2331,7 @@ async function main(): Promise<void> {
 			},
 			logger,
 		)
+		activityAircraft = aircraftTrackingManager.getTracker()
 
 		// Step 8c: Initialize aircraft enrichment service (ADS-B specific)
 		// Local tar1090-db + free online sources, cached in <stateDir>/aircraft-info.sqlite.
