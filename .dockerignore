@@ -57,6 +57,8 @@ tests
 vitest.config.ts
 # Benchmarks (not runtime; some import test mocks, which the build context leaves out)
 scripts/bench
+# Longevity measurement harnesses import test mocks, which the image does not copy
+scripts/longevity
 
 # Large test fixture data (keep scripts/manifest, ignore downloaded artifacts)
 fixtures/raw
