@@ -421,6 +421,8 @@ describe("rtl_433 detection level", () => {
 			"autolevel",
 			"-M",
 			"level",
+			"-M",
+			"stats:1:10",
 		])
 	})
 
@@ -451,6 +453,8 @@ describe("rtl_433 detection level", () => {
 			"autolevel",
 			"-M",
 			"level",
+			"-M",
+			"stats:1:10",
 			"-Y",
 			"classic",
 		])

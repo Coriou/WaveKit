@@ -123,7 +123,12 @@ Identify or a proven discovery named, the decoder whose band holds the frequency
 plan's band. A decoder that is off names it only where the band plan has no band there, and says
 so ("Pager (off)"). A decoder whose channel only follows the tuner (the pager decoder listening to the
 live audio, say) never names a frequency outside its band, and the card never says "Nothing decodes
-this frequency" while a decoder's band holds it. "Decoded here by" names only a decoder on the tuned
+this frequency" while a decoder's band holds it. The protocol last heard and the **Latest** line
+leave out decodes from a decoder whose band does not hold the frequency, as the core reports it: an
+old false pager decode stored at 1090 MHz never makes the ADS-B card read POCSAG. A decode from a
+decoder with no band to read (none from the core, its status or the band plan) still counts, as do
+Identify's own probes. A decoder forced on outside the band plan never names the card: its band
+is not readable there, by the same rule the core applies. "Decoded here by" names only a decoder on the tuned
 channel itself, one of its fixed frequencies within the channel (ADS-B anywhere readsb covers, its
 signal fills 1089 to 1091 MHz). A decoder whose band merely spans the frequency, such as the ISM
 decoder at 434.000 MHz with its channel at 433.920 MHz, reads "ISM decodes this band, not this

@@ -51,6 +51,7 @@ import {
 	cardIdentity,
 	DATA_BAND_LINE,
 	decodersLine,
+	heardOnBand,
 	skipLine,
 } from "./band-table.ts"
 import { decodersHere, decodersOnChannel } from "./decoders.ts"
@@ -514,7 +515,10 @@ export function TunedCard() {
 	const heardBefore = !named && near?.proof ? near.proof.summary : null
 
 	const now = nowView({
-		items: fresh ? items : [],
+		// a decode from a decoder whose band does not hold the frequency never names the card
+		items: fresh
+			? heardOnBand(items, summaryItems, decoders, hz, planRanges)
+			: [],
 		decoderTypes: types,
 		modulation: onIt ? (status?.config.modulation ?? null) : null,
 		channelName: channel?.name ?? null,

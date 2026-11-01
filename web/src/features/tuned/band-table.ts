@@ -2,7 +2,11 @@
 // /api/decoders/summary?hz= (the core says which decoders cover it: `coversHz`). Columns: decoder (name and
 // program), state (one word), last decode (links to Activity), detail (the verdict's reason) and at most one
 // action. Pure: the card renders the rows and carries the action out.
-import type { DecoderInfo, ScanRange } from "@wavekit/api-types"
+import type {
+	ActivitySummary,
+	DecoderInfo,
+	ScanRange,
+} from "@wavekit/api-types"
 
 import {
 	actionFor,
@@ -12,6 +16,7 @@ import {
 	type BandAction,
 	type BandVerdict,
 } from "./band-decoders.ts"
+import { fixedTargetsHz, protocolsOf } from "./decoder-protocols.ts"
 import { agoText } from "./now.ts"
 import { decoderLabel } from "./signal.ts"
 
@@ -253,6 +258,58 @@ export function relevant(
 ): boolean {
 	if (item.coversHz !== null) return item.coversHz
 	return decoder !== null && onBand(decoder, hz, planRanges)
+}
+
+/**
+ * Whether the statuses hold any band for the decoder: a band assessment naming targets or ranges, fixed configured
+ * targets, or band plan protocols with the plan loaded (onBand's three sources).
+ */
+function hasBand(d: DecoderInfo, planRanges: PlanRanges | null): boolean {
+	const band = d.bandAssessment
+	if (Array.isArray(band?.targetsHz) && band.targetsHz.length > 0) return true
+	if (Array.isArray(band?.rangesHz) && band.rangesHz.length > 0) return true
+	if (fixedTargetsHz(d).length > 0) return true
+	return planRanges !== null && protocolsOf(d.type).length > 0
+}
+
+/**
+ * The channel's Activity without decodes from a decoder whose band does not hold `hz`, so a false decode stored at
+ * a frequency its decoder's band never covers (a pager line at 1090 MHz) never names the card or its latest. The
+ * band is the core's `coversHz` for the decoder (`summary`, as relevant reads it), else its status (onBand). Kept:
+ * a decode without a decoder id, from a decoder neither the summary nor the statuses know, from a scanner probe or
+ * an ephemeral decoder (placed on the frequency to decode it), or from a decoder with no band to read at all (the
+ * core's coversHz is false for those too, so it only drops a decoder with a band or a band plan protocol).
+ */
+export function heardOnBand(
+	items: readonly ActivitySummary[],
+	summary: readonly Pick<SummaryItem, "id" | "coversHz">[] | null,
+	decoders: readonly DecoderInfo[],
+	hz: number,
+	planRanges: PlanRanges | null = null,
+): ActivitySummary[] {
+	const byId = new Map(decoders.map(d => [d.id, d]))
+	const covers = new Map<string, boolean>()
+	for (const s of summary ?? [])
+		if (s.coversHz !== null) covers.set(s.id, s.coversHz)
+	return items.filter(item => {
+		const id = item.decoderId
+		if (id === null) return true
+		const decoder = byId.get(id) ?? null
+		if (
+			decoder !== null &&
+			(decoder.owner === "scanner" || decoder.ephemeral === true)
+		)
+			return true
+		if (decoder === null) return covers.get(id) ?? true
+		// The core's coversHz is also false for a band it cannot read, so a false only drops a decoder with a band
+		// to read: one in its statuses, or a protocol the core maps to the band plan.
+		const readable =
+			hasBand(decoder, planRanges) || protocolsOf(decoder.type).length > 0
+		const said = covers.get(id)
+		if (said !== undefined) return said || !readable
+		if (!hasBand(decoder, planRanges)) return true
+		return onBand(decoder, hz, planRanges)
+	})
 }
 
 /**

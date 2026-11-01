@@ -1,5 +1,6 @@
 import { z } from "zod"
 import {
+	DECODER_RECEPTION_HINTS,
 	DECODER_VERDICT_ACTIONS,
 	DECODER_VERDICT_CODES,
 	decoderVerdictSchema,
@@ -28,6 +29,10 @@ export const AGENT_STATUS_LIMITS = Object.freeze({
 	 *   lastDecode: 9 × 74 (protocol 24, ISO time 27) + 10                  =   676
 	 * Total 4,054 < 4,096. The worst-case test builds exactly this body, checks the
 	 * schema admits it and nothing one row or one byte larger, and measures it.
+	 * A decoder row's `reception` hint rides only on a `listening` verdict, which has no
+	 * actions: code 9 instead of 23 and `[]` 2 instead of 3 actions 63 saves 75 bytes,
+	 * the hint `,"reception":"heard-undecoded"` adds 30, so such a row is 45 bytes
+	 * under the worst-case row and the total stands.
 	 */
 	targetBytes: 4096,
 	/**
@@ -193,7 +198,9 @@ export const agentScannerSchema = z
 
 /**
  * GET /api/decoders/summary: the same verdict, one row per decoder, without its
- * sentence (`text`); read the summary route for the wording.
+ * sentence (`text`); read the summary route for the wording. `reception` is the
+ * summary's hint, present only on a `listening` verdict (the byte budget in
+ * AGENT_STATUS_LIMITS relies on that).
  */
 export const agentDecoderSchema = z
 	.object({
@@ -205,8 +212,15 @@ export const agentDecoderSchema = z
 				actions: z.array(z.enum(DECODER_VERDICT_ACTIONS)).max(L.actionsMax),
 			})
 			.strict(),
+		reception: z.enum(DECODER_RECEPTION_HINTS).optional(),
 	})
 	.strict()
+	.refine(
+		row =>
+			row.reception === undefined ||
+			(row.verdict.code === "listening" && row.verdict.actions.length === 0),
+		{ message: "reception rides only on a listening verdict without actions" },
+	)
 
 /** GET /api/activity/status. `rows` is null unless the store is available. */
 export const agentActivitySchema = z
@@ -330,18 +344,28 @@ export const agentStatusResponseSchema = strictObject({
 	decoders: {
 		type: "array",
 		maxItems: L.decodersMax,
-		items: strictObject({
-			id: str,
-			protocol: str,
-			verdict: strictObject({
-				code: { type: "string", enum: [...DECODER_VERDICT_CODES] },
-				actions: {
-					type: "array",
-					maxItems: L.actionsMax,
-					items: { type: "string", enum: [...DECODER_VERDICT_ACTIONS] },
+		items: (() => {
+			const row = strictObject({
+				id: str,
+				protocol: str,
+				verdict: strictObject({
+					code: { type: "string", enum: [...DECODER_VERDICT_CODES] },
+					actions: {
+						type: "array",
+						maxItems: L.actionsMax,
+						items: { type: "string", enum: [...DECODER_VERDICT_ACTIONS] },
+					},
+				}),
+			})
+			// Optional: listed in properties, not in required.
+			return {
+				...row,
+				properties: {
+					...row.properties,
+					reception: { type: "string", enum: [...DECODER_RECEPTION_HINTS] },
 				},
-			}),
-		}),
+			}
+		})(),
 	},
 	hiddenProblems: { type: "integer", minimum: 0 },
 	activity: strictObject({

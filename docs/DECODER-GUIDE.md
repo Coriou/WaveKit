@@ -406,6 +406,19 @@ If your decoder has specific sample rate requirements, declare them in `preferre
 4. **Log unparsed lines** — Debug log lines that don't match any pattern
 5. **Include timestamps** — Always include a timestamp in output
 
+### Frame counters
+
+A `BaseDecoder` adapter whose tool already counts what it hears can report it through
+`this.counters` (`src/decoders/decoder-counters.ts`): `cumulative(sample)` for counts since
+the child started (a lower reading is taken as a restart), `delta(sample)` for counts per
+report, or `count(name, by)` for occurrences in lines the adapter already parses (sent every
+10 s). Names must be in `DECODER_COUNTER_NAMES` (`@wavekit/api-types`); a report with any
+other name, or a value that is not a finite number, counts nothing. Values clamp to
+non-negative safe integers. The manager keeps totals since the core started (a placement
+worker's fold into its decoder's) and the last minute's growth, and the summary route turns
+them into `counters` and the `reception` hint. Never add per-sample work for a counter: count
+only what the tool already prints or the adapter already parses.
+
 ### Error Handling
 
 1. **Don't throw in parseOutput** — Return `null` for unparseable lines
@@ -704,6 +717,12 @@ channel key (AES-128-CTR) and parses the Meshtastic `Data` message. A frame that
 step is dropped. Drops are counted by reason (`crc_bad`, `short_frame`, `data_parse`,
 `bad_portnum`, ...) and written to the decoder log at most once a minute as a `frame_drops`
 line, with a `frame_drop_summary` line at exit. Single frames are never logged.
+Every 10 s and at exit the wrapper also writes one machine-readable line on stderr,
+`WAVEKIT_STATS {"v":1,...}`, with its counts since start: `inputSamples`, `preambles`
+(frame_sync locks), `headersOk` (valid headers), `framesOk` (packets written), `crcBad` and
+`parseDrops` (other drops, not the dual-path duplicates). The adapter validates it with Zod and
+reports the counts as frame counters (`counters` on `GET /api/decoders/summary`); a malformed
+line counts nothing and is not logged.
 `rx_rssi` and `rx_snr` are 0, because gr-lora_sdr does not measure them.
 
 The decoder demodulates the capture centre (`reach: centre`), and its channel may sit off
