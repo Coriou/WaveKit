@@ -3,6 +3,7 @@ import { createActivityIngress } from "../../../../../src/core/activity/ingress.
 import {
 	COALESCE_SPECS,
 	MAX_MERGED_VALUE_BYTES,
+	PositionCoalescer,
 } from "../../../../../src/core/activity/storage/coalesce.js"
 import { ActivityIngress } from "../../../../../src/core/activity/storage/ingress.js"
 import {
@@ -225,6 +226,97 @@ describe("held rows survive flush admission rejections", () => {
 		const rows = drain(i)
 		expect(rows).toHaveLength(201)
 		expect(lostCount(i)).toBe(0)
+	})
+})
+
+describe("deferred evicted rows at maxEntities stay bounded and in order", () => {
+	const MAX = 64
+
+	/** Stores then holds one update for entity k (the held row's id is held-k). */
+	function hold(c: PositionCoalescer, k: number) {
+		const at = T0 + k * 2
+		const first = c.decide(plane(icaoOf(k), at))
+		expect(first.store).toBe(true)
+		if (first.store) first.commit()
+		const next = c.decide(plane(icaoOf(k), at + 1, { lat: 1.5 }, `held-${k}`))
+		expect(next.store).toBe(false)
+	}
+
+	function saturated() {
+		const lost: string[] = []
+		const c = new PositionCoalescer(
+			WINDOW,
+			MAX,
+			() => T0,
+			env => lost.push(env.eventId),
+		)
+		return { c, lost }
+	}
+
+	it("keeps maxEntities evicted rows in eviction order and counts every overflow once", () => {
+		const { c, lost } = saturated()
+		const total = MAX + 1_000
+		for (let k = 0; k < total; k++) {
+			hold(c, k)
+			expect(c.size()).toBeLessThanOrEqual(MAX)
+			expect(c.evictedCount()).toBeLessThanOrEqual(MAX)
+		}
+		// Entities 0..total-MAX-1 were evicted while held; the oldest past the bound were lost.
+		const evicted = total - MAX
+		expect(c.evictedCount()).toBe(MAX)
+		expect(lost).toHaveLength(evicted - MAX)
+		expect(lost).toEqual(
+			Array.from({ length: evicted - MAX }, (_, k) => `held-${k}`),
+		)
+		const waiting = Array.from(
+			{ length: MAX },
+			(_, k) => `held-${evicted - MAX + k}`,
+		)
+		// Nothing held is due at T0: only the evicted rows, oldest first.
+		const due = [...c.dueFlushes(T0)]
+		expect(due.map(f => f.envelope.eventId)).toEqual(waiting)
+		expect(c.takeDue(T0)?.envelope.eventId).toBe(waiting[0])
+		// Committing out of order removes exactly that row.
+		due[10]?.commit()
+		due[0]?.commit()
+		expect(c.evictedCount()).toBe(MAX - 2)
+		expect(c.takeDue(T0)?.envelope.eventId).toBe(waiting[1])
+		expect(
+			c
+				.takeAll()
+				.slice(0, MAX - 2)
+				.map(f => f.envelope.eventId),
+		).toEqual(waiting.filter((_, k) => k !== 0 && k !== 10))
+	})
+
+	it("iterates evicted rows lazily: a row lost mid-flush is not yielded as well", () => {
+		const { c, lost } = saturated()
+		const total = 3 * MAX
+		for (let k = 0; k < total; k++) hold(c, k)
+		const before = new Set(
+			Array.from({ length: MAX }, (_, k) => `held-${MAX + k}`),
+		)
+		const flushes = c.dueFlushes(T0)
+		const first = flushes.next()
+		expect(first.done).toBe(false)
+		if (!first.done) {
+			expect(first.value.envelope.eventId).toBe(`held-${MAX}`)
+			first.value.commit()
+		}
+		// MAX more held entities evict MAX more held rows: every older waiting row is lost.
+		for (let k = total; k < total + MAX; k++) hold(c, k)
+		expect(c.evictedCount()).toBe(MAX)
+		const rest = [...flushes]
+			.filter(f => f.envelope.eventId.startsWith("held-"))
+			.map(f => f.envelope.eventId)
+		expect(rest.some(id => before.has(id))).toBe(false)
+		expect(rest).toEqual(
+			Array.from({ length: MAX }, (_, k) => `held-${2 * MAX + k}`),
+		)
+		// Every evicted held row is accounted for exactly once.
+		const yielded = 1 + rest.length
+		expect(lost.length + yielded).toBe(3 * MAX)
+		expect(new Set([...lost, ...rest, `held-${MAX}`]).size).toBe(3 * MAX)
 	})
 })
 

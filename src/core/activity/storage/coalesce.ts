@@ -477,9 +477,10 @@ export class PositionCoalescer {
 	/**
 	 * Held state of evicted entities, flushed by the next `takeDue`. At most
 	 * maxEntities wait (so held state is bounded by 2 × maxEntities); past it
-	 * the oldest is handed to `onLost`.
+	 * the oldest is handed to `onLost`. A Set keeps eviction order with O(1)
+	 * removal of the oldest and of a committed row (no per-admission shifts).
 	 */
-	private readonly evicted: Evicted[] = []
+	private readonly evicted = new Set<Evicted>()
 	coalesced = 0
 
 	/**
@@ -506,12 +507,12 @@ export class PositionCoalescer {
 
 	/** Evicted entities whose held row is not queued yet (at most maxEntities). */
 	evictedCount(): number {
-		return this.evicted.length
+		return this.evicted.size
 	}
 
 	/** Store-clock time the next held row is due, if any (evicted rows: now). */
 	nextDueAt(): number | undefined {
-		if (this.evicted.length > 0) return this.now()
+		if (this.evicted.size > 0) return this.now()
 		for (const state of this.heldOrder.values()) return state.held?.dueAt
 		return undefined
 	}
@@ -607,8 +608,7 @@ export class PositionCoalescer {
 	 * The held receptions stay held until the flush is committed.
 	 */
 	takeDue(now: number): CoalesceFlush | undefined {
-		const evicted = this.evicted[0]
-		if (evicted) return this.evictedFlush(evicted)
+		for (const evicted of this.evicted) return this.evictedFlush(evicted)
 		for (const [key, state] of this.heldOrder) {
 			const held = state.held
 			if (held === undefined) {
@@ -628,9 +628,9 @@ export class PositionCoalescer {
 	 * has no room for must not hold back a smaller one behind it).
 	 */
 	*dueFlushes(now: number): Generator<CoalesceFlush, void, undefined> {
-		// A copy: committing an evicted flush removes it from the list.
-		if (this.evicted.length > 0)
-			for (const entry of [...this.evicted]) yield this.evictedFlush(entry)
+		// Live Set iteration, no copy: a committed (deleted) entry is skipped
+		// safely, and one lost meanwhile is never yielded as well as counted.
+		for (const entry of this.evicted) yield this.evictedFlush(entry)
 		for (const [key, state] of this.heldOrder) {
 			const held = state.held
 			if (held === undefined) {
@@ -644,7 +644,7 @@ export class PositionCoalescer {
 
 	/** Every held row, due or not (shutdown). */
 	takeAll(): CoalesceFlush[] {
-		const out = this.evicted.map(entry => this.evictedFlush(entry))
+		const out = Array.from(this.evicted, entry => this.evictedFlush(entry))
 		for (const [key, state] of this.heldOrder)
 			if (state.held !== undefined)
 				out.push(this.heldFlush(key, state, state.held))
@@ -655,8 +655,7 @@ export class PositionCoalescer {
 		return {
 			...entry,
 			commit: () => {
-				const at = this.evicted.indexOf(entry)
-				if (at >= 0) this.evicted.splice(at, 1)
+				this.evicted.delete(entry)
 				return NOOP_UNDO()
 			},
 		}
@@ -792,14 +791,17 @@ export class PositionCoalescer {
 			if (held === undefined) continue
 			state.held = undefined
 			this.heldOrder.delete(key)
-			this.evicted.push({
+			this.evicted.add({
 				envelope: held.envelope,
 				present: held.present,
 				merged: { decodedData: snapshot(state.latest), coalesced: span(held) },
 			})
-			if (this.evicted.length > this.maxEntities) {
-				const lost = this.evicted.shift()
-				if (lost) this.onLost(lost.envelope)
+			if (this.evicted.size > this.maxEntities) {
+				const lost = this.evicted.values().next().value
+				if (lost) {
+					this.evicted.delete(lost)
+					this.onLost(lost.envelope)
+				}
 			}
 		}
 	}
