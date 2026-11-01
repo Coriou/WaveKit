@@ -9,7 +9,6 @@ import {
 	COUNTER_STORE_MAX_DECODERS,
 	DecoderCounterReporter,
 	LISTENING_EVIDENCE_MAX_AGE_MS,
-	LISTENING_FENCE_MS,
 	DecoderCounterStore,
 	clampCount,
 	parseCounterSample,
@@ -311,14 +310,13 @@ describe("DecoderCounterStore listening sources", () => {
 		expect(events.map(e => e.local)).toEqual([true, undefined, undefined])
 	})
 
-	it("fences a tool report up to LISTENING_FENCE_MS after a move, at and past the bound", () => {
-		expect(LISTENING_FENCE_MS).toBe(COUNTER_FLUSH_MS + 2_000)
+	it("the first tool report after a move is the period's baseline, then reports count", () => {
 		let now = 1_000 * COUNTER_BUCKET_MS
 		const store = new DecoderCounterStore(() => now)
 		store.record("d", tool({ detections: 1, framesOk: 0 }), "w")
 		store.startListening("d", { source: "w", fenced: true })
 		// The tool's interval still covers air before the move.
-		now += LISTENING_FENCE_MS
+		now += 1
 		store.record("d", tool({ detections: 4, framesOk: 0 }), "w")
 		expect(store.view("d")?.detections).toMatchObject({
 			total: 5,
@@ -326,6 +324,7 @@ describe("DecoderCounterStore listening sources", () => {
 			listening: 0,
 		})
 		expect(receptionHint(store.view("d"))).toBe("nothing-heard")
+		// The next report counts, however soon it follows.
 		now += 1
 		store.record("d", tool({ detections: 2 }), "w")
 		expect(store.view("d")?.detections).toMatchObject({
@@ -336,6 +335,39 @@ describe("DecoderCounterStore listening sources", () => {
 		store.startListening("d", { source: "w", fenced: true })
 		store.record("d", tool({ detections: 1 }), "w")
 		expect(store.view("d")?.detections?.listening).toBe(0)
+	})
+
+	it("fences the first tool report however late it arrives (a skipped tick, a stalled tool)", () => {
+		let now = 1_000 * COUNTER_BUCKET_MS
+		const store = new DecoderCounterStore(() => now)
+		store.record("d", tool({ preambles: 1, framesOk: 0 }), "w")
+		store.startListening("d", { source: "w", fenced: true })
+		for (const late of [2 * COUNTER_FLUSH_MS + 1, 10 * 60_000]) {
+			now += late
+			store.record("d", tool({ preambles: 6, framesOk: 0 }), "w")
+			expect(store.view("d")?.preambles?.listening).toBe(0)
+			expect(receptionHint(store.view("d"))).toBe("nothing-heard")
+			now += COUNTER_FLUSH_MS
+			store.record("d", tool({ preambles: 3 }), "w")
+			expect(store.view("d")?.preambles?.listening).toBe(3)
+			expect(receptionHint(store.view("d"))).toBe("heard-undecoded")
+			store.startListening("d", { source: "w", fenced: true })
+		}
+		// Totals and the minute rate keep every report.
+		expect(store.view("d")?.preambles?.total).toBe(1 + 2 * (6 + 3))
+	})
+
+	it("an unfenced start clears a pending fence; other sources are never fenced", () => {
+		let now = 1_000 * COUNTER_BUCKET_MS
+		const store = new DecoderCounterStore(() => now)
+		store.startListening("d", { source: "w", fenced: true })
+		store.record("d", tool({ preambles: 2, framesOk: 0 }), "other")
+		expect(store.view("d")?.preambles?.listening).toBe(2)
+		// The child restarted before reporting: its reports are all new.
+		store.startListening("d", { source: "w" })
+		now += 1
+		store.record("d", tool({ preambles: 5 }), "w")
+		expect(store.view("d")?.preambles?.listening).toBe(7)
 	})
 
 	it("never fences local counts, which are flushed at the move", () => {

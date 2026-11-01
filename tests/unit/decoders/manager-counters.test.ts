@@ -15,7 +15,6 @@ import { FakeSources, RateDecoder, iqCaps } from "../../mocks/rate-fakes.js"
 import {
 	COUNTER_FLUSH_MS,
 	DecoderCounterReporter,
-	LISTENING_FENCE_MS,
 	receptionHint,
 	type DecoderCounterEvent,
 } from "../../../src/decoders/decoder-counters.js"
@@ -114,6 +113,22 @@ describe("decoder counters in the manager", () => {
 	it("reports no counters for a decoder that never sent any", () => {
 		manager.createDecoder({ id: "a", type: "stub", enabled: true, options: {} })
 		expect(manager.getStatus("a")).not.toHaveProperty("counters")
+	})
+
+	it("gives each decoder state its own counter source, the sequence saturating at the safe-integer bound", () => {
+		const seq = manager as unknown as { counterSourceSeq: number }
+		manager.createDecoder({ id: "a", type: "stub", enabled: true, options: {} })
+		manager.createDecoder({ id: "b", type: "stub", enabled: true, options: {} })
+		expect(seq.counterSourceSeq).toBe(2)
+		seq.counterSourceSeq = Number.MAX_SAFE_INTEGER - 1
+		manager.createDecoder({ id: "c", type: "stub", enabled: true, options: {} })
+		manager.createDecoder({ id: "d", type: "stub", enabled: true, options: {} })
+		expect(seq.counterSourceSeq).toBe(Number.MAX_SAFE_INTEGER)
+		decoders.get("d")!.report({
+			deltas: { preambles: 1, framesOk: 0 },
+			latest: { preambles: 1, framesOk: 0 },
+		})
+		expect(manager.getStatus("d")?.counters?.preambles?.listening).toBe(1)
 	})
 
 	it("folds counter events into totals and a minute rate", () => {
@@ -285,16 +300,18 @@ describe("listening periods in the manager", () => {
 				total: 2,
 				listening: 1,
 			})
-			// A tool interval report inside the fence counts toward totals only.
+			// The tool's first interval report after a move counts toward totals
+			// only, even when it arrives long after the move (a skipped tick).
 			sources.setCenter("rtl", 446_200_000)
 			await vi.advanceTimersByTimeAsync(350)
+			await vi.advanceTimersByTimeAsync(3 * COUNTER_FLUSH_MS)
 			passive!.emit("counters", {
 				deltas: { detections: 5 },
 				latest: { detections: 5 },
 			})
 			counters = own.getStatus("voice")?.counters
 			expect(counters?.detections).toMatchObject({ total: 7, listening: 0 })
-			await vi.advanceTimersByTimeAsync(LISTENING_FENCE_MS)
+			await vi.advanceTimersByTimeAsync(COUNTER_FLUSH_MS)
 			passive!.emit("counters", {
 				deltas: { detections: 1 },
 				latest: { detections: 1 },

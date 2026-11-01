@@ -9,7 +9,6 @@ import { decoderSummary } from "../../../../src/api/routes/decoder-summary.js"
 import {
 	COUNTER_FLUSH_MS,
 	DecoderCounterReporter,
-	LISTENING_FENCE_MS,
 	receptionHint,
 } from "../../../../src/decoders/decoder-counters.js"
 import { DecoderManager } from "../../../../src/decoders/manager.js"
@@ -1480,7 +1479,7 @@ it("a worker retuned in place sends its pending counts to the old period and fen
 	let counters = f.manager.getStatus("dec")?.counters
 	expect(counters?.detections).toMatchObject({ total: 1, listening: 0 })
 	expect(receptionHint(counters)).toBe("nothing-heard")
-	// The fence began at the move, COUNTER_FLUSH_MS ago: a tool report is still inside it.
+	// The tool's first report after the move still covers air before it.
 	worker.emit("counters", {
 		deltas: { detections: 2 },
 		latest: { detections: 2 },
@@ -1489,7 +1488,6 @@ it("a worker retuned in place sends its pending counts to the old period and fen
 		total: 3,
 		listening: 0,
 	})
-	await vi.advanceTimersByTimeAsync(LISTENING_FENCE_MS - COUNTER_FLUSH_MS)
 	worker.emit("counters", {
 		deltas: { detections: 1 },
 		latest: { detections: 1 },
@@ -1524,10 +1522,59 @@ it("a band channel moved in place sends its pending counts to the old period and
 	let counters = f.manager.getStatus("dec")?.counters
 	expect(counters?.crcBad).toMatchObject({ total: 4, listening: 0 })
 	expect(receptionHint(counters)).toBe("nothing-heard")
-	await vi.advanceTimersByTimeAsync(LISTENING_FENCE_MS - COUNTER_FLUSH_MS)
 	instance.emit("counters", { deltas: { crcBad: 1 }, latest: { crcBad: 1 } })
 	counters = f.manager.getStatus("dec")?.counters
 	expect(counters?.crcBad).toMatchObject({ total: 5, listening: 1 })
+})
+
+it("a worker moved in place keeps its evidence and fence when a new worker takes its old id", async () => {
+	const f = setup()
+	f.create("dec")
+	const primary = f.place("dec", 162_000_000)
+	const a = f.place("dec", 162_010_000, false, "vfo")
+	const b = f.place("dec", 162_025_000, false, "vfo")
+	f.plan([primary, a])
+	await f.manager.startAll()
+	const moved = f.instances.get(a.key)!
+	f.plan([primary, b])
+	await f.settle()
+	expect(f.provider.retuneChannel).toHaveBeenCalledTimes(1)
+	// The moved worker's adapter still carries A's id; a new secondary takes A.
+	expect(moved.id).toBe(a.key)
+	f.plan([primary, b, f.place("dec", 162_010_000, false)])
+	await f.settle()
+	const fresh = f.instances.get(a.key)!
+	expect(fresh).not.toBe(moved)
+	expect(fresh.starts).toBe(1)
+	// The new worker's start never cleared the moved one's fence.
+	moved.emit("counters", {
+		deltas: { preambles: 4, framesOk: 0 },
+		latest: { preambles: 4, framesOk: 0 },
+	})
+	expect(f.manager.getStatus("dec")?.counters?.preambles).toMatchObject({
+		total: 4,
+		listening: 0,
+	})
+	moved.emit("counters", {
+		deltas: { preambles: 2, framesOk: 0 },
+		latest: { preambles: 2, framesOk: 0 },
+	})
+	expect(f.manager.getStatus("dec")?.counters?.preambles?.listening).toBe(2)
+	// Restarting the new worker at A leaves B's evidence alone.
+	fresh.emit("started")
+	expect(f.manager.getStatus("dec")?.counters?.preambles?.listening).toBe(2)
+	fresh.emit("counters", {
+		deltas: { preambles: 1, framesOk: 0 },
+		latest: { preambles: 1, framesOk: 0 },
+	})
+	expect(f.manager.getStatus("dec")?.counters?.preambles?.listening).toBe(3)
+	// So does removing it: only its own evidence goes.
+	f.plan([primary, b])
+	await f.settle()
+	expect(f.manager.getStatus("dec")?.placements).toHaveLength(2)
+	const counters = f.manager.getStatus("dec")?.counters
+	expect(counters?.preambles).toMatchObject({ total: 7, listening: 2 })
+	expect(receptionHint(counters)).toBe("heard-undecoded")
 })
 
 it("removing a secondary placement drops what it heard from its quiet parent's period", async () => {

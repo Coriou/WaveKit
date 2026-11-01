@@ -32,7 +32,7 @@ export interface DecoderCounterEvent {
 	/**
 	 * True when the adapter counted these itself ({@link DecoderCounterReporter.count}):
 	 * the manager flushes those before a move, so they are never fenced
-	 * ({@link LISTENING_FENCE_MS}). Absent for the tool's own interval reports.
+	 * ({@link ListeningStart.fenced}). Absent for the tool's own interval reports.
 	 */
 	local?: true
 }
@@ -262,17 +262,6 @@ export const COUNTER_SOURCES_PER_DECODER_MAX =
  */
 export const LISTENING_EVIDENCE_MAX_AGE_MS = 2 * 60 * 60 * 1_000
 
-/**
- * After an in-place move (a new channel or centre, the child kept running) a
- * tool's next interval report still covers air from before the move: rtl_433
- * and the LoRa wrapper report every 10 s (COUNTER_FLUSH_MS). A tool report
- * received up to 10 s + 2 s margin (stdout and timer jitter) = 12 s after the
- * period began, inclusive, counts toward totals and the minute rate but not
- * toward the period; the first one past 12 s covers at most 10 s, all after
- * the move. Locally counted events are flushed at the move and never fenced.
- */
-export const LISTENING_FENCE_MS = COUNTER_FLUSH_MS + 2_000
-
 interface CounterSeries {
 	total: number
 	latest: number
@@ -289,8 +278,8 @@ interface ListeningCounter {
 }
 
 interface ListeningSource {
-	/** Clock ms up to which (inclusive) tool reports do not count toward the period; null when none. */
-	fenceUntil: number | null
+	/** True until the first tool report after a fenced start ({@link ListeningStart.fenced}). */
+	fenced: boolean
 	counters: Map<DecoderCounterName, ListeningCounter>
 }
 
@@ -305,8 +294,15 @@ export interface ListeningStart {
 	/** The one source that starts afresh; every source of the decoder when absent. */
 	source?: string
 	/**
-	 * The child kept running through a move: fence its next interval report
-	 * ({@link LISTENING_FENCE_MS}). A fresh child's reports are all new.
+	 * The child kept running through a move: its next interval report (rtl_433,
+	 * the LoRa wrapper) still covers air from before the move, however late it
+	 * arrives (a skipped stats tick, a stalled tool), so that first tool report
+	 * counts toward totals and the minute rate but not toward the period; it is
+	 * the new period's baseline. Every later report covers only air after it.
+	 * No time bound: a report is one interval whatever its timing, and a timer
+	 * would either drop a later, wholly post-move report or let a late first one
+	 * through. Locally counted events are flushed at the move and never fenced.
+	 * A fresh child's reports are all new.
 	 */
 	fenced?: boolean
 }
@@ -341,7 +337,7 @@ export class DecoderCounterStore {
 				const oldest = entry.sources.keys().next().value
 				if (oldest !== undefined) entry.sources.delete(oldest)
 			}
-			listening = { fenceUntil: null, counters: new Map() }
+			listening = { fenced: false, counters: new Map() }
 			entry.sources.set(source, listening)
 		}
 		return listening
@@ -360,9 +356,8 @@ export class DecoderCounterStore {
 		const entry = this.entry(decoderId)
 		const now = this.clock()
 		const listening = this.source(entry, source)
-		if (listening.fenceUntil !== null && now > listening.fenceUntil)
-			listening.fenceUntil = null
-		const fenced = listening.fenceUntil !== null && event.local !== true
+		const fenced = listening.fenced && event.local !== true
+		if (fenced) listening.fenced = false
 		const key = Math.floor(now / COUNTER_BUCKET_MS)
 		for (const name of DECODER_COUNTER_NAMES) {
 			const delta = event.deltas[name]
@@ -445,14 +440,14 @@ export class DecoderCounterStore {
 		const existing = this.decoders.get(decoderId)
 		if (!existing && !start.fenced) return
 		const entry = existing ?? this.entry(decoderId)
-		const fenceUntil = start.fenced ? this.clock() + LISTENING_FENCE_MS : null
+		const fenced = start.fenced === true
 		const sources =
 			start.source === undefined
 				? [...entry.sources.values()]
 				: [this.source(entry, start.source)]
 		for (const source of sources) {
 			source.counters.clear()
-			source.fenceUntil = fenceUntil
+			source.fenced = fenced
 		}
 	}
 

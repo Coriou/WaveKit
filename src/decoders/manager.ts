@@ -254,6 +254,12 @@ interface DecoderState {
 	optionIssues?: DecoderOptionIssue[] | undefined
 	decoder: Decoder
 	config: DecoderConfig
+	/**
+	 * This state's listening-evidence source key (decoder-counters.ts), unique
+	 * per manager and fixed for the state's life: a worker moved in place keeps
+	 * it while its id changes, so a new worker at the old id never shares it.
+	 */
+	counterSource: string
 	restartCount: number
 	currentDelay: number
 	restartTimer: ReturnType<typeof setTimeout> | null
@@ -680,6 +686,8 @@ export class DecoderManager extends EventEmitter {
 	 * parent's, so they survive worker churn and adapter rebuilds.
 	 */
 	private readonly counterStore = new DecoderCounterStore()
+	/** Last {@link DecoderState.counterSource} number handed out; bounded by MAX_SAFE_INTEGER. */
+	private counterSourceSeq = 0
 	private settledVfo: PlannerVfo | null | undefined
 	/** Monotonic ms of the last VFO settle report. */
 	private vfoSettledAtMs = -Infinity
@@ -2767,9 +2775,11 @@ export class DecoderManager extends EventEmitter {
 
 		const optionIssues = this.checkDecoderOptions(config)
 
+		if (this.counterSourceSeq < Number.MAX_SAFE_INTEGER) this.counterSourceSeq++
 		const state: DecoderState = {
 			decoder,
 			config,
+			counterSource: `#${this.counterSourceSeq}`,
 			optionIssues,
 			restartCount: 0,
 			currentDelay: this.config.restartDelay,
@@ -3975,12 +3985,12 @@ export class DecoderManager extends EventEmitter {
 	/**
 	 * `state` moved in place (another channel or centre, its child kept
 	 * running): its pending local counts go to the old listening period, then
-	 * its source starts a fenced one (decoder-counters.ts LISTENING_FENCE_MS).
+	 * its source starts a fenced one (decoder-counters.ts ListeningStart.fenced).
 	 */
 	private startMovedListening(state: DecoderState): void {
 		flushDecoderCounters(state.decoder)
 		this.counterStore.startListening(state.parentId ?? state.config.id, {
-			source: state.decoder.id,
+			source: state.counterSource,
 			fenced: true,
 		})
 	}
@@ -4187,7 +4197,7 @@ export class DecoderManager extends EventEmitter {
 		// heard no longer describes the parent's air (decoder-counters.ts dropSource).
 		if (state.parentId && this.decoders.has(state.parentId)) {
 			flushDecoderCounters(state.decoder)
-			this.counterStore.dropSource(state.parentId, state.decoder.id)
+			this.counterStore.dropSource(state.parentId, state.counterSource)
 		}
 
 		// Remove event listeners
@@ -4355,7 +4365,7 @@ export class DecoderManager extends EventEmitter {
 				this.counterStore.record(
 					state.parentId ?? decoder.id,
 					event,
-					decoder.id,
+					state.counterSource,
 				)
 			} catch (err) {
 				this.log.error(
@@ -4448,7 +4458,7 @@ export class DecoderManager extends EventEmitter {
 				// A new run listens afresh (decoder-counters.ts startListening); the
 				// previous child's last counts were flushed before it spawned.
 				this.counterStore.startListening(state.parentId ?? decoder.id, {
-					source: decoder.id,
+					source: state.counterSource,
 				})
 				state.lastOutputAt = null
 				state.lastStartedAt = new Date()

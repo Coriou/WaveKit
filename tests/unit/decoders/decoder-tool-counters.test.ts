@@ -10,6 +10,7 @@ import {
 	RTL433_STATS_ARG,
 	Rtl433Decoder,
 	parseRtl433Stats,
+	rtl433JsonOutput,
 	rtl433StatsConfigured,
 } from "../../../src/decoders/builtin/rtl433.js"
 import { DsdFmeDecoder } from "../../../src/decoders/builtin/dsd-fme.js"
@@ -54,12 +55,12 @@ const rtl433 = (options: Record<string, unknown> = {}) =>
 	)
 
 /** The shape rtl_433 25.12 prints for `-M stats:1:<s>` (values synthetic). */
-const report = (count: number, events: number) =>
+const report = (count: number, events: number, fsk = 0) =>
 	JSON.stringify({
 		time: "@10.000000s",
 		enabled: 200,
 		since: "2026-01-01T00:00:00",
-		frames: { count, fsk: 0, events },
+		frames: { count, fsk, events },
 		stats: [],
 	})
 
@@ -85,11 +86,57 @@ describe("rtl_433 stats report", () => {
 		expect(csv.getDecoderArgs()).not.toContain(RTL433_STATS_ARG)
 	})
 
+	it("requests the report only while stdout stays JSON after extraArgs", () => {
+		for (const extra of [
+			["-F", "csv"],
+			["-Fcsv"],
+			["-F", "kv"],
+			["-F", "log"],
+			["-F", "json:/data/out.json"],
+			["-F", "mqtt://broker"],
+			["-F"],
+		]) {
+			expect(rtl433JsonOutput("json", extra)).toBe(false)
+			const args = collect(rtl433({ extraArgs: extra })).internals
+			expect(args.getDecoderArgs()).not.toContain(RTL433_STATS_ARG)
+		}
+		for (const extra of [undefined, [], ["-F", "json"], ["-Fjson"], ["-A"]]) {
+			expect(rtl433JsonOutput("json", extra)).toBe(true)
+			const args = collect(
+				rtl433(extra === undefined ? {} : { extraArgs: extra }),
+			).internals
+			expect(args.getDecoderArgs()).toContain(RTL433_STATS_ARG)
+		}
+		expect(rtl433JsonOutput("csv", ["-F", "json"])).toBe(false)
+		expect(rtl433JsonOutput(undefined, undefined)).toBe(true)
+	})
+
 	it("reads a report as heard (frames) and decoded (events) deltas", () => {
 		expect(parseRtl433Stats(JSON.parse(report(6, 1)))).toEqual({
 			detections: 6,
 			framesOk: 1,
 		})
+		// OOK packages count `count`, FSK ones `fsk`: both are heard.
+		expect(parseRtl433Stats(JSON.parse(report(2, 1, 5)))).toEqual({
+			detections: 7,
+			framesOk: 1,
+		})
+		// Builds without `fsk` report OOK alone.
+		expect(
+			parseRtl433Stats({ since: "x", frames: { count: 3, events: 0 } }),
+		).toEqual({ detections: 3, framesOk: 0 })
+		expect(
+			parseRtl433Stats({
+				since: "x",
+				frames: { count: Number.MAX_VALUE, fsk: Number.MAX_VALUE, events: 0 },
+			}),
+		).toEqual({ detections: Number.MAX_SAFE_INTEGER, framesOk: 0 })
+		expect(
+			parseRtl433Stats({
+				since: "x",
+				frames: { count: 1, fsk: "2", events: 0 },
+			}),
+		).toBeNull()
 		expect(parseRtl433Stats({ model: "x", frames: {} })).toBeNull()
 		expect(parseRtl433Stats({ frames: { count: "6" } })).toBeNull()
 		expect(parseRtl433Stats(null)).toBeNull()
@@ -107,9 +154,23 @@ describe("rtl_433 stats report", () => {
 			framesOk: { total: 0, perMin: 0, latest: 0, listening: 0 },
 		})
 		// Only the sensor event (it has a model) is an output.
+		expect(outputs).toHaveLength(1)
 		expect(outputs.map(o => (o.data as { model?: string }).model)).toEqual([
 			"Test-Sensor",
 		])
+	})
+})
+
+describe("rtl_433 FSK packages", () => {
+	it("an FSK-only report is heard, so no decode reads as heard-undecoded", () => {
+		const { store, outputs, internals } = collect(rtl433())
+		internals.handleOutputLine(report(0, 0, 4))
+		expect(store.view("ism")).toEqual({
+			detections: { total: 4, perMin: 4, latest: 4, listening: 4 },
+			framesOk: { total: 0, perMin: 0, latest: 0, listening: 0 },
+		})
+		expect(receptionHint(store.view("ism"))).toBe("heard-undecoded")
+		expect(outputs).toEqual([])
 	})
 })
 

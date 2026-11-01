@@ -37,6 +37,7 @@ import {
 	RTL433_TARGET_SAMPLE_RATE_MAX_HZ,
 	RTL433_TARGET_SAMPLE_RATE_MIN_HZ,
 } from "../options/rtl433.js"
+import { clampCount } from "../decoder-counters.js"
 
 /**
  * rtl_433 `-M stats:<level>:<interval>`: level 1 (frame counts, plus per-protocol
@@ -57,16 +58,38 @@ export function rtl433StatsConfigured(
 	})
 }
 
+/**
+ * True when rtl_433's output stays JSON on stdout only after `extraArgs`: the
+ * base format is JSON and every operator `-F` (also as `-F<value>`) is plain
+ * `json`. Any other `-F` (`csv`, `kv`, `log`, a file or network sink) means no
+ * `-M stats`: its lines would mix into a non-JSON stdout or reach the
+ * operator's own sink. Pure.
+ */
+export function rtl433JsonOutput(
+	outputFormat: Rtl433OutputFormat | undefined,
+	extraArgs: readonly string[] | undefined,
+): boolean {
+	if ((outputFormat ?? "json") !== "json") return false
+	if (!extraArgs) return true
+	return extraArgs.every((arg, i) => {
+		if (arg === "-F") return extraArgs[i + 1] === "json"
+		return !arg.startsWith("-F") || arg === "-Fjson"
+	})
+}
+
 const Count = z.number().finite()
 
 /**
- * An rtl_433 stats report (`-M stats`): `frames.count` pulse packages detected
- * (heard), `frames.events` events decoded. Event lines carry `model`, a report
- * never does.
+ * An rtl_433 stats report (`-M stats`): `frames.count` OOK and `frames.fsk`
+ * FSK pulse packages detected (heard; `fsk` absent in older builds),
+ * `frames.events` events decoded. Event lines carry `model`, a report never
+ * does.
  */
 const Rtl433StatsSchema = z.object({
 	since: z.string(),
-	frames: z.object({ count: Count, events: Count }).passthrough(),
+	frames: z
+		.object({ count: Count, fsk: Count.optional(), events: Count })
+		.passthrough(),
 })
 
 /**
@@ -80,7 +103,12 @@ export function parseRtl433Stats(
 	const parsed = Rtl433StatsSchema.safeParse(json)
 	if (!parsed.success) return null
 	return {
-		detections: parsed.data.frames.count,
+		// Each clamped first, so two huge finite counts never sum to Infinity.
+		detections: Math.min(
+			Number.MAX_SAFE_INTEGER,
+			clampCount(parsed.data.frames.count) +
+				clampCount(parsed.data.frames.fsk ?? 0),
+		),
 		framesOk: parsed.data.frames.events,
 	}
 }
@@ -390,7 +418,7 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 		args.push("-M", "level")
 		// Frame counts for GET /api/decoders/summary `counters` (heard vs decoded).
 		if (
-			this.options.outputFormat === "json" &&
+			rtl433JsonOutput(this.options.outputFormat, this.options.extraArgs) &&
 			!rtl433StatsConfigured(this.options.extraArgs)
 		)
 			args.push("-M", RTL433_STATS_ARG)
