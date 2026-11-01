@@ -45,6 +45,13 @@ import type { Rect } from "./placement.ts"
 import { rowView, timeText } from "../activity/rows.ts"
 import { useDatalinkStory, type DatalinkStory } from "./datalink.ts"
 import { latestReports, ReportedPositionsStore } from "./reported.ts"
+import {
+	AircraftIdentity,
+	AircraftPhoto,
+	EmergencyAlert,
+	PlannedRoute,
+	SelectionFields,
+} from "./SelectionParts.tsx"
 import { BASEMAP } from "./style.ts"
 import {
 	MapUi,
@@ -961,7 +968,12 @@ function Selection(props: {
 		it?.source.kind === "aircraft" ? it.source.value.icao : null,
 	)
 	if (!it) return null
-	const info = selectionInfo(it, engine.stationPoint(), now)
+	const info = selectionInfo(
+		it,
+		engine.stationPoint(),
+		now,
+		engine.drawnAt(it.id),
+	)
 	const icon = LAYER_ICONS[it.layer]
 	return (
 		<aside
@@ -1003,29 +1015,14 @@ function Selection(props: {
 					</span>
 				</div>
 			)}
+			{info.alert && <EmergencyAlert text={info.alert} />}
 			{info.note && <p className="wkm-note">{info.note}</p>}
 			{info.aircraft?.route && <PlannedRoute {...info.aircraft.route} />}
-			<div className="wkm-fields">
-				{info.fields.map(([k, val]) => (
-					<div key={k}>
-						<span className="wkm-dim">{k}</span>
-						<b className="wkm-ellipsis">{val}</b>
-					</div>
-				))}
-			</div>
-			{info.aircraft && info.aircraft.ident.length > 0 && (
-				<section className="wkm-ident" aria-label="Aircraft">
-					<h3 className="wk-label">Aircraft</h3>
-					<dl>
-						{info.aircraft.ident.map(([k, val]) => (
-							<div key={k}>
-								<dt>{k}</dt>
-								<dd className="wkm-ellipsis">{val}</dd>
-							</div>
-						))}
-					</dl>
-				</section>
-			)}
+			<SelectionFields
+				fields={info.fields}
+				label={it.kind === "aircraft" ? "Flight data" : "Details"}
+			/>
+			{info.aircraft && <AircraftIdentity rows={info.aircraft.ident} />}
 			{story && (story.messages.length > 0 || story.linkCount > 0) && (
 				<Datalink story={story} />
 			)}
@@ -1062,69 +1059,6 @@ function Selection(props: {
 				</section>
 			)}
 		</aside>
-	)
-}
-
-/** The airframe's photo; the credit links back to the photo page, as Planespotters' terms require. */
-function AircraftPhoto(props: {
-	src: string
-	credit: string | null
-	link: string | null
-}) {
-	const [state, setState] = useState<"loading" | "ok" | "failed">("loading")
-	if (state === "failed") return null
-	return (
-		<figure className="wkm-photo" data-state={state}>
-			<img
-				src={props.src}
-				alt=""
-				loading="lazy"
-				decoding="async"
-				referrerPolicy="no-referrer"
-				onLoad={() => setState("ok")}
-				onError={() => setState("failed")}
-			/>
-			{props.credit &&
-				(props.link ? (
-					<a href={props.link} target="_blank" rel="noopener noreferrer">
-						{props.credit}
-					</a>
-				) : (
-					<figcaption>{props.credit}</figcaption>
-				))}
-		</figure>
-	)
-}
-
-/** The callsign's planned route (crowd-sourced, so labelled as planned). */
-function PlannedRoute(props: {
-	from: string
-	fromName: string
-	to: string
-	toName: string
-}) {
-	return (
-		<div
-			className="wkm-route"
-			aria-label={`Planned route from ${props.fromName} to ${props.toName}`}
-		>
-			<div className="wkm-route-ends">
-				<span>
-					<b className="wk-h3">{props.from}</b>
-					<span className="wkm-dim wkm-ellipsis">{props.fromName}</span>
-				</span>
-				<svg width="44" height="12" viewBox="0 0 44 12" aria-hidden="true">
-					<path d="M1 6h40M36 2l5 4-5 4" />
-				</svg>
-				<span data-end="">
-					<b className="wk-h3">{props.to}</b>
-					<span className="wkm-dim wkm-ellipsis">{props.toName}</span>
-				</span>
-			</div>
-			<span className="wkm-dim">
-				Planned route · from the callsign, may differ
-			</span>
-		</div>
 	)
 }
 

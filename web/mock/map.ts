@@ -24,6 +24,7 @@ import type {
 	AircraftIdentityResponse,
 	AircraftState,
 	AircraftTrackerStats,
+	EmergencyStatus,
 	AprsStation,
 	ActivityTrail,
 	ActivityTrailPoint,
@@ -95,13 +96,14 @@ export function mockIdentityLinks(list: readonly MockAircraft[]): MockLink[] {
 				source: "database",
 				agoMs: 60_000,
 			})
-		links.push({
-			a: { kind: "callsign", value: a.callsign },
-			b: icao,
-			evidence: "observed",
-			source: "adsb",
-			agoMs: 5_000,
-		})
+		if (a.callsign)
+			links.push({
+				a: { kind: "callsign", value: a.callsign },
+				b: icao,
+				evidence: "observed",
+				source: "adsb",
+				agoMs: 5_000,
+			})
 	}
 	for (const value of ["0A0B01", "0A0B02"])
 		links.push({
@@ -268,6 +270,8 @@ export interface MockAircraft {
 	readonly msgs: number
 	readonly registration?: string
 	readonly operator?: string
+	/** The emergency state the core reports (EmergencyStatus); "none" when absent. */
+	readonly emergency?: EmergencyStatus
 	/** The core's enrichment (docs/ADSB.md "Aircraft Enrichment") beyond registration and operator. */
 	readonly details?: Omit<
 		AircraftIdentification,
@@ -299,7 +303,10 @@ const airport = (
 	lon: number,
 ) => ({ icao, iata, name, city, country: "France", countryIso: "FR", lat, lon })
 
-/** The board's 34 aircraft (seeded): three named ones and 31 on the airways around the station. */
+/**
+ * The board's 36 aircraft (seeded): five named ones (one squawking 7700, one bare Mode S) and 31 on the
+ * airways around the station.
+ */
 export function makeAircraft(): MockAircraft[] {
 	const r = rng(20261010)
 	const out: MockAircraft[] = [
@@ -427,6 +434,53 @@ export function makeAircraft(): MockAircraft[] {
 				countryIso: "FR",
 				flags: { military: true },
 			},
+		},
+		// fictional: an enriched airliner squawking 7700, descending
+		{
+			icao: "3AFFE7",
+			callsign: "WKA77",
+			type: "A20N",
+			lat: 48.95,
+			lon: -4.3,
+			trk: 128,
+			kn: 318,
+			ft: 14500,
+			vs: -1850,
+			squawk: "7700",
+			rssi: -10.6,
+			msgs: 2409,
+			registration: "F-ZWKA",
+			operator: "WaveKit Air Lines",
+			emergency: "general",
+			details: {
+				typeDescription: "A320 251N",
+				manufacturer: "Airbus",
+				country: "France",
+				countryIso: "FR",
+				year: 2021,
+				airline: {
+					name: "WaveKit Air",
+					icao: "WKA",
+					iata: "WK",
+					callsign: "WAVEKIT",
+					source: "local",
+				},
+			},
+		},
+		// fictional: bare Mode S, no callsign and nothing known beyond the address
+		{
+			icao: "39FA0B",
+			callsign: "",
+			type: "",
+			lat: 48.62,
+			lon: -3.62,
+			trk: 205,
+			kn: 140,
+			ft: 4500,
+			vs: 0,
+			squawk: "7000",
+			rssi: -24.3,
+			msgs: 96,
 		},
 	]
 	const PFX = [
@@ -1002,7 +1056,7 @@ export function registerMapMock(
 	const aircraft = multiplyFleet(makeAircraft(), load, (a, k) => ({
 		...a,
 		icao: hexSuffix(a.icao, k),
-		callsign: `${a.callsign.slice(0, 5)}${k}`,
+		callsign: a.callsign ? `${a.callsign.slice(0, 5)}${k}` : "",
 		trk: (a.trk + k * 37) % 360,
 		lat: a.lat + ((k * 0.13) % 0.9) - 0.45,
 		lon: a.lon + ((k * 0.29) % 1.4) - 0.7,
@@ -1069,14 +1123,14 @@ export function registerMapMock(
 		const key = `a:${a.icao}`
 		return {
 			icao: a.icao,
-			callsign: a.callsign,
+			...(a.callsign ? { callsign: a.callsign } : {}),
 			squawk: a.squawk,
 			messageType: "adsb_icao",
 			position: { lat: here.lat, lon: here.lon, nic: 8, rc: 186, seenPos: 0.4 },
 			velocity: { gs: a.kn, track: Math.round(a.trk * 10) / 10 },
 			altitude: { baro: a.ft, geom: a.ft + 175, baroRate: a.vs },
 			identification: {
-				typeCode: a.type,
+				...(a.type ? { typeCode: a.type } : {}),
 				...(a.registration !== undefined
 					? { registration: a.registration }
 					: {}),
@@ -1089,7 +1143,7 @@ export function registerMapMock(
 			},
 			signalQuality: { rssi: Math.round(a.rssi * 10) / 10 },
 			category: a.type === "AT76" || a.type === "E145" ? "A2" : "A3",
-			emergency: "none",
+			emergency: a.emergency ?? "none",
 			trackHistory: history,
 			seen: 0.2,
 			seenPos: 0.4,

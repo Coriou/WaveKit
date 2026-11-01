@@ -123,8 +123,8 @@ describe("mock map routes", () => {
 			timestamp: number
 		}>()
 		expect(typeof body.timestamp).toBe("number")
-		expect(body.aircraft).toHaveLength(34)
-		expect(body.stats).toMatchObject({ aircraftCount: 34, withPosition: 34 })
+		expect(body.aircraft).toHaveLength(36)
+		expect(body.stats).toMatchObject({ aircraftCount: 36, withPosition: 36 })
 		const list = body.aircraft.map(a => aircraftSchema.parse(a))
 		const afr = list.find(a => a.callsign === "AFR1234")
 		expect(afr).toMatchObject({ icao: "3944EF", altitude: { baro: 36000 } })

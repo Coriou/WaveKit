@@ -208,14 +208,19 @@ const DRAW_ORDER: Readonly<Record<MapItem["kind"], number>> = {
 	aircraft: 4,
 }
 
-/** Marker points: glyph `g`, rotation `r`, draw order `z` (aircraft on top, the selected item above all). */
+/**
+ * Marker points: glyph `g`, rotation `r`, draw order `z` (aircraft on top, the selected item above all). An entry's
+ * `rotate` (the smoothed heading, motion.ts) overrides the glyph's own.
+ */
 export function markers(
-	list: readonly { it: MapItem; at: LatLon }[],
+	list: readonly { it: MapItem; at: LatLon; rotate?: number | null }[],
 	selected: string | null,
 ): FeatureCollection {
 	return collection(
-		list.map(({ it, at }, i) => {
-			const { glyph, rotate } = glyphOf(it)
+		list.map(({ it, at, rotate: smoothed }, i) => {
+			const own = glyphOf(it)
+			const glyph = own.glyph
+			const rotate = smoothed ?? own.rotate
 			return {
 				type: "Feature",
 				id: i,

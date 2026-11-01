@@ -402,6 +402,17 @@ discovery sits within 12.5 kHz, and up to 50 folded rows.
 The **Map** shows aircraft, vessels, APRS stations and mesh nodes around your station, with their
 trails and the station's coverage.
 
+Between reports, an aircraft keeps moving along its track at its speed. When a new position
+arrives, the plane glides onto it over about two seconds instead of jumping, and its glyph turns
+smoothly the short way round (from 359° to 0° it turns 1°, never all the way back). A position
+the aircraft could not have reached (a speed over 1200 kn since the last one, usually a bad
+decode) is held back; if the next position agrees with it, the aircraft really is there and the
+map moves it at once. A position no newer than the one the plane already follows is ignored, so
+a late report never pulls it back. After 60 seconds without a usable position, the next one is taken as it
+is. Without new reports, the plane slows down after 10 seconds and stops 20 seconds after its
+last position, then waits there instead of flying on with an old speed and track. The trail,
+label and selected aircraft's card follow the plane where it is drawn.
+
 The **ACARS** layer shows where aircraft said they were over datalink: an ADS-C report decoded by
 libacars, or the rough position a VDL2 link frame carries (to 0.1°, about 10 km). Each aircraft's
 latest report of the last hour is a hollow amber ring, never a plane glyph, and it never joins the
@@ -413,11 +424,20 @@ address on VDL2`). The aircraft is found by its ICAO address and the registratio
 `GET /api/aircraft-identity` links to it, never by callsign or flight number. **Messages** shows decoded messages as cards; open one to see its
 full content or its position on the map.
 
-Select an aircraft to see what the core knows about it (see
-[ADS-B, Aircraft Enrichment](ADSB.md#aircraft-enrichment)): a photo of the airframe, credited to
-its photographer with a link to the photo's page, the airline and type, a **Military** tag, the
-planned route of its callsign, and an **Aircraft** section with registration, type, operator,
-country, ICAO address and year built. The planned route comes from a crowd-sourced database, so
+Select an aircraft to see its live flight data and what the core knows about it (see
+[ADS-B, Aircraft Enrichment](ADSB.md#aircraft-enrichment)). From the top: a photo of the airframe,
+credited to its photographer with a link to the photo's page; the callsign and who flies it (the
+airline, else the operator, else the type with its ICAO type code); a **Military** tag; an emergency alert; the planned route of its
+callsign; then the live data, always shown in full: altitude (or **On ground**), ground speed,
+vertical rate with a climb or descent arrow (**Level** within 64 ft/min), track, squawk, signal
+strength, distance and direction from the station, and when it was last heard. Values follow
+**Settings › Display › Units**, and a value the aircraft has not sent shows a dash. Squawks 7500,
+7600 and 7700, and any emergency state the aircraft reports, show as a red alert
+(`Squawk 7700 · General emergency`) and the squawk turns red. Below, the **Aircraft** section lists
+the registration, the type once with its ICAO type code (`Airbus A321 251NXSL A21N`), the
+registered operator unless its name is the airline's give or take words like Air or Ltd, the country, the ICAO address and
+the year built; the footer gives the decoder, the message count and the position. The card
+scrolls as a whole when it is taller than the window. The planned route comes from a crowd-sourced database, so
 it is hidden when the core marks it implausible (the aircraft is clearly flying away from the
 destination). On the map, an
 aircraft is named by its callsign, else its registration, else its ICAO address. Photos load
