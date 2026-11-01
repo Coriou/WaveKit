@@ -484,6 +484,25 @@ describe("aircraft motion smoothing", () => {
 		expect(km(s, at(0, 0))).toBeLessThan(1e-9)
 	})
 
+	it("ignores a new course or speed for an ignored or held-back fix", () => {
+		// accepted at T0 + 50 s, stationary; an older fix is ignored, then the same old fix with a new course and
+		// speed must not turn or move the accepted track
+		const s = createMotion(fix(0, 0, T0 + 50_000, null, null), T0 + 50_000)
+		advance(s, fix(0, 0, T0 + 40_000, null, null), T0 + 50_100)
+		advance(s, fix(0, 0, T0 + 40_000, 90, 450), T0 + 50_200)
+		expect(s.vN).toBe(0)
+		expect(s.vE).toBe(0)
+		// same for a held-back far fix re-sent with a velocity
+		advance(s, fix(200, 0, T0 + 51_000, null, null), T0 + 51_000)
+		expect(s.rejected).toBe(1)
+		advance(s, fix(200, 0, T0 + 51_000, 90, 450), T0 + 51_100)
+		expect(s.vN).toBe(0)
+		expect(s.vE).toBe(0)
+		// a new velocity for the accepted fix still applies
+		advance(s, fix(0, 0, T0 + 50_000, 90, 450), T0 + 51_200)
+		expect(s.vE).toBeGreaterThan(0)
+	})
+
 	it("confirms a held-back fix only with a newer one", () => {
 		const s = createMotion(fix(0, 0, T0, null, null), T0)
 		advance(s, fix(200, 0, T0 + 1000, null, null), T0 + 1000)

@@ -326,11 +326,10 @@ function retrack(
 
 /** A fix that is new (any change since the last one seen): accept it, hold it back, or confirm a held one. */
 function observe(s: MotionState, fix: Fix, now: number): void {
-	const moved =
-		fix.lat !== s.seenLat || fix.lon !== s.seenLon || fix.posAt !== s.seenAt
 	markSeen(s, fix)
-	if (!moved) {
-		// a new course or speed for the same fix: re-extrapolate from it, blended
+	if (fix.posAt === s.fixAt && fix.lat === s.fixLat && fix.lon === s.fixLon) {
+		// a new course or speed for the accepted fix: re-extrapolate from it, blended (one for an ignored or
+		// held-back fix stays ignored below)
 		retrack(s, fix, s.fixLat, s.fixLon, s.fixAt, now, false)
 		return
 	}
