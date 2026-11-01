@@ -26,10 +26,12 @@ import { EntityUpdateThrottle } from "../../core/entity-update-throttle.js"
 /** At most one `aircraft:update` per aircraft per second. */
 export const AIRCRAFT_UPDATE_WINDOW_MS = 1000
 /**
- * Full trail every 300 updates per aircraft: at ≤ 1 update/s that is at most once per 5 min, so a
- * 100-point trail (7.3 KB) adds ≤ 7,300 / 300 ≈ 24 B/s per aircraft, and any client that missed a
- * delta heals within 5 min. New records start at staggered points of the cycle, so aircraft that
- * appear together (a startup, a retune to 1090 MHz) do not all resync in the same second: 150 full
+ * Full trail once every 300 updates sent for an aircraft: a count of updates, not a timer. A
+ * 100-point trail (7.3 KB) adds 7,300 / 300 ≈ 24 B per update, and a client that missed a delta
+ * heals within 300 updates of that aircraft. There is no wall-clock bound: a quiet aircraft resyncs
+ * rarely, and callsign, squawk and emergency changes skip the 1 s throttle, so a burst of them
+ * reaches the count sooner. New records start at staggered points of the cycle, so aircraft that
+ * appear together (a startup, a retune to 1090 MHz) do not all resync in the same update: 150 full
  * trails at once would be 1.1 MB, past a client's 1 MiB outbound cap.
  */
 export const AIRCRAFT_TRAIL_RESYNC_UPDATES = 300

@@ -4792,10 +4792,13 @@ The trail is not repeated in every update. `GET /api/aircraft`, `aircraft:new` a
 `aircraft:lost` carry the whole `trackHistory` (most recent first). An `aircraft:update` carries
 `trackAppend`, only the points added since the previous update (most recent first), or no trail
 field when the trail did not change. It carries the whole `trackHistory` instead when the core
-resyncs it: for an aircraft it has no record of, after a trail reset, and every 300 updates per
-aircraft (at most every 5 min). A client keeps the trail by putting `trackAppend` on top of the
-trail it holds, and replaces it on `trackHistory`; load `GET /api/aircraft` after subscribing and
-after a reconnect. The DTO is `AircraftUpdateData` in `packages/api-types/src/aircraft.ts`.
+resyncs it: for an aircraft it has no record of, after a trail reset, and once every 300 updates
+sent for that aircraft. That is a count of updates, not a timer: there is no wall-clock bound (a
+quiet aircraft resyncs rarely), and the callsign, squawk and emergency changes that skip the
+one-second throttle count too. A client keeps the trail by putting `trackAppend` on top of the
+trail it holds, and replaces it on `trackHistory` (an empty one clears it), keeping only points it
+holds above the snapshot's newest point, which reached it ahead of the snapshot; load
+`GET /api/aircraft` after subscribing and after a reconnect. The DTO is `AircraftUpdateData` in `packages/api-types/src/aircraft.ts`.
 
 ```json
 {

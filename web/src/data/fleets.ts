@@ -190,8 +190,10 @@ export const AIRCRAFT_SPEC: FleetSpec<Aircraft> = {
 				}
 			: null,
 	coreTrail: a => {
-		const track = a.trackHistory ?? a.trackAppend
-		return track && track.length > 0
+		// a full trackHistory is the core's trail even when empty (a resync that cleared it)
+		const track =
+			a.trackHistory ?? (a.trackAppend?.length ? a.trackAppend : undefined)
+		return track
 			? track.map(p => ({ lat: p.lat, lon: p.lon, at: p.timestamp })).reverse()
 			: null
 	},

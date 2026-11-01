@@ -63,9 +63,27 @@ export function mergeTrackPoints<P extends TrailPointLike>(
 }
 
 /**
+ * A full trail (`snapshot`, from GET /api/aircraft, `aircraft:new` or a resync) over the trail held
+ * (`held`): the snapshot is authoritative and replaces it. The only points of `held` kept are those
+ * provably newer than the snapshot: `held` contains the snapshot's newest point (by content) and has
+ * points above it, which arrived ahead of the snapshot (deltas applied before an older GET answer).
+ * A disjoint snapshot replaces the trail whole and an empty one clears it.
+ */
+export function replaceTrackPoints<P extends TrailPointLike>(
+	held: readonly P[],
+	snapshot: readonly P[],
+): P[] {
+	const top = snapshot[0]
+	const at = top === undefined ? -1 : held.findIndex(p => samePoint(p, top))
+	const merged = at > 0 ? [...held.slice(0, at), ...snapshot] : [...snapshot]
+	if (merged.length > TRAIL_MAX_POINTS) merged.length = TRAIL_MAX_POINTS
+	return merged
+}
+
+/**
  * `next` applied over `previous` (an older message or the known state of the same aircraft):
- * - `next` has the full trail: it wins; points of `previous` newer than it (a delta that overtook a
- *   snapshot) are kept on top;
+ * - `next` has the full trail: it replaces `previous`'s, except points of `previous` provably newer
+ *   than it (a delta that overtook a snapshot), which stay on top (replaceTrackPoints);
  * - `next` has a delta or no trail: appended to `previous`'s full trail (the result has
  *   `trackHistory`), or to `previous`'s delta (the result keeps `trackAppend`), or kept as is.
  * Returns `next` itself when there is nothing to merge.
@@ -84,7 +102,7 @@ export function mergeTrail<P extends TrailPointLike, T extends TrailFields<P>>(
 		const { trackAppend: _drop, ...rest } = next
 		return {
 			...rest,
-			trackHistory: mergeTrackPoints(before, next.trackHistory),
+			trackHistory: replaceTrackPoints(before, next.trackHistory),
 		} as T
 	}
 	if (!before) return next

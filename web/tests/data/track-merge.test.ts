@@ -6,6 +6,7 @@ import {
 	TRAIL_MAX_POINTS,
 	mergeTrackPoints,
 	mergeTrail,
+	replaceTrackPoints,
 } from "../../src/data/track-merge.ts"
 
 interface Point {
@@ -42,6 +43,34 @@ describe("mergeTrackPoints", () => {
 	})
 })
 
+describe("replaceTrackPoints", () => {
+	it("replaces a full trail of disjoint newer points whole, at the cap", () => {
+		const held = Array.from({ length: 100 }, (_, i) => pt(100 - i))
+		const snapshot = Array.from({ length: 100 }, (_, i) => pt(300 - i))
+		expect(replaceTrackPoints(held, snapshot)).toEqual(snapshot)
+	})
+
+	it("clears the trail on an empty snapshot", () => {
+		expect(replaceTrackPoints(desc(3, 2, 1), [])).toEqual([])
+		expect(
+			mergeTrail<Point, Msg>(
+				{ trackHistory: desc(2, 1) },
+				{ n: 1, trackHistory: [] },
+			),
+		).toEqual({ n: 1, trackHistory: [] })
+	})
+
+	it("keeps only the held points above the snapshot's newest", () => {
+		expect(replaceTrackPoints(desc(6, 5, 4, 3), desc(4, 3, 2, 1))).toEqual(
+			desc(6, 5, 4, 3, 2, 1),
+		)
+		// the snapshot's newest is the held newest: nothing is ahead
+		expect(replaceTrackPoints(desc(4, 3, 9), desc(4, 3, 2))).toEqual(
+			desc(4, 3, 2),
+		)
+	})
+})
+
 describe("mergeTrail", () => {
 	it("appends a delta to the full trail it follows", () => {
 		const out = mergeTrail<Point, Msg>(
@@ -69,12 +98,20 @@ describe("mergeTrail", () => {
 	})
 
 	it("lets a full trail win, keeping newer points a delta brought first", () => {
+		// disjoint: the snapshot replaces the held trail
 		expect(
 			mergeTrail<Point, Msg>(
 				{ trackHistory: desc(9, 8) },
 				{ n: 1, trackHistory: desc(5, 4) },
 			),
-		).toEqual({ n: 1, trackHistory: desc(9, 8, 5, 4) })
+		).toEqual({ n: 1, trackHistory: desc(5, 4) })
+		// the held trail is ahead of the snapshot: its points above the snapshot's newest stay
+		expect(
+			mergeTrail<Point, Msg>(
+				{ trackHistory: desc(7, 6, 5, 4) },
+				{ n: 1, trackHistory: desc(5, 4, 3) },
+			),
+		).toEqual({ n: 1, trackHistory: desc(7, 6, 5, 4, 3) })
 		expect(
 			mergeTrail<Point, Msg>(
 				{ trackHistory: desc(3, 2) },
@@ -201,7 +238,7 @@ describe("trail overlap is found by content, not by timestamp", () => {
 		])
 	})
 
-	it("delta reconstruction through the events worker equals the core's trail", () => {
+	it("delta reconstruction through the events worker equals the core's trail, over resyncs and late snapshots", () => {
 		// Feature: wg19-longevity, Property 4: Trail deltas rebuild the core trail whatever the timestamps
 		// Validates: Requirement C.2 (trail complete in the UI)
 		fc.assert(
@@ -214,6 +251,11 @@ describe("trail overlap is found by content, not by timestamp", () => {
 						dt: fc.integer({ min: 0, max: 700 }),
 						sweep: fc.boolean(),
 						resync: fc.integer({ min: 0, max: 19 }),
+						// 0: the core's trail resets to new disjoint points (a full trackHistory follows)
+						reset: fc.integer({ min: 0, max: 14 }),
+						resetLength: fc.integer({ min: 1, max: 5 }),
+						// 0: take a GET snapshot; 1: apply the one taken earlier (deltas overtook it)
+						get: fc.integer({ min: 0, max: 7 }),
 					}),
 					{ maxLength: 60 },
 				),
@@ -229,6 +271,10 @@ describe("trail overlap is found by content, not by timestamp", () => {
 						)
 					}
 					for (let i = 0; i < start; i++) add(i)
+					const reset = (length: number) => {
+						history = []
+						for (let i = 0; i < length; i++) add(i)
+					}
 					// AircraftUpdatePublisher: delta since the last point sent, found by identity
 					let anchor: TrackPoint | undefined = history[0]
 					const publish = (n: number, resync: boolean): string => {
@@ -254,11 +300,32 @@ describe("trail overlap is found by content, not by timestamp", () => {
 					}
 					const throttle = new FleetThrottle(apply, UPDATE_EVERY_MS)
 					let now = 0
+					let snapshot: TrackPoint[] | undefined
 					steps.forEach((s, n) => {
+						if (s.reset === 0) {
+							reset(s.resetLength)
+							snapshot = undefined
+						}
 						for (const stamp of s.stamps) add(stamp)
 						now += s.dt
 						throttle.push(publish(n + 1, s.resync === 0), now)
 						if (s.sweep) throttle.sweep(now)
+						if (s.get === 0) snapshot = [...history]
+						else if (s.get === 1 && snapshot) {
+							// GET /api/aircraft answered late: the updates sent meanwhile are applied first
+							throttle.drain()
+							const top = snapshot[0]
+							// an empty snapshot, or one older than a whole trail (none of it held), cannot be placed
+							if (top !== undefined && history.includes(top))
+								state = AIRCRAFT_MERGE(state, {
+									icao: "A",
+									messages: state.messages,
+									trackHistory: JSON.parse(
+										JSON.stringify(snapshot),
+									) as TrackPoint[],
+								})
+							snapshot = undefined
+						}
 					})
 					throttle.drain()
 					expect(state.trackHistory ?? []).toEqual(history)
