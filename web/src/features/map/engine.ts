@@ -79,6 +79,7 @@ import {
 	themedPaint,
 } from "./style.ts"
 import type { MapUi, MapUiState } from "./ui-store.ts"
+import { advance, createMotion, type MotionState } from "./motion.ts"
 import { latestReports, reportedFeatures } from "./reported.ts"
 import { devicePrefsStore, type MapTiles } from "../../shell/device-prefs.ts"
 
@@ -124,6 +125,14 @@ const glide = (ms: number): number =>
 /** Trail bodies are re-sent at most this often; their heads follow the markers on every push. */
 const TRAIL_BODY_MS = 2000
 
+/** A drawn item: where (an aircraft's MotionState itself), its smoothed heading, and how fast it moves (kn). */
+interface Drawn {
+	readonly it: MapItem
+	readonly at: LatLon
+	readonly rotate: number | null
+	readonly kn: number
+}
+
 export class MapEngine {
 	readonly view: Store<EngineView>
 	private readonly deps: EngineDeps
@@ -144,7 +153,9 @@ export class MapEngine {
 	private labels = devicePrefsStore.getState().mapLabels
 	private raf = 0
 	private timer: ReturnType<typeof setTimeout> | null = null
-	private drawn: { it: MapItem; at: LatLon }[] = []
+	private drawn: Drawn[] = []
+	/** Aircraft motion smoothing (motion.ts), one mutable state per aircraft, kept across item rebuilds. */
+	private readonly motion = new Map<string, MotionState>()
 	private points: ScreenPoint[] = []
 	private readonly offs: (() => void)[] = []
 	private dragging = false
@@ -291,6 +302,11 @@ export class MapEngine {
 
 	item(id: string): MapItem | undefined {
 		return this.byId.get(id)
+	}
+
+	/** Where the item was last drawn (an aircraft's smoothed position), for the selection card. */
+	drawnAt(id: string): LatLon | undefined {
+		return this.motion.get(id) ?? this.drawn.find(d => d.it.id === id)?.at
 	}
 
 	/** The station location in use (configured, else approximate). */
@@ -501,6 +517,8 @@ export class MapEngine {
 		const point = station.kind === "none" ? null : station
 		this.items = withinRange(all, point)
 		this.byId = new Map(this.items.map(i => [i.id, i]))
+		for (const id of this.motion.keys())
+			if (!this.byId.has(id)) this.motion.delete(id)
 		// a trail whose item left goes at once, not with the next body push
 		for (const id of this.trailEnds.keys())
 			if (!this.byId.has(id)) {
@@ -581,11 +599,11 @@ export class MapEngine {
 		if (following && ui.selected) {
 			const it = this.byId.get(ui.selected)
 			if (it) {
-				const p = predict(it, now)
+				const p = this.positionAt(it, now)
 				this.map.jumpTo({ center: [p.lon, p.lat] })
 			}
 		}
-		const moving = this.drawn.some(d => d.it.moving)
+		const moving = this.drawn.some(d => d.kn > 0)
 		if (following) this.raf = requestAnimationFrame(this.frame)
 		else if (moving)
 			this.timer = setTimeout(
@@ -600,9 +618,7 @@ export class MapEngine {
 	/** The push interval for the fastest moving item drawn, at the current zoom. */
 	private pushEvery(): number {
 		let kn = 0
-		for (const d of this.drawn)
-			if (d.it.moving && d.it.speedKn !== null && d.it.speedKn > kn)
-				kn = d.it.speedKn
+		for (const d of this.drawn) if (d.kn > kn) kn = d.kn
 		return pushInterval(
 			kn,
 			kmPerPx(this.map.getCenter().lat, this.map.getZoom()),
@@ -660,9 +676,21 @@ export class MapEngine {
 		this.dynamicDirty = false
 		this.lastPush = now
 		const ui = this.deps.ui.get()
-		const drawn = this.items
-			.filter(it => ui.layers[it.layer])
-			.map(it => ({ it, at: predict(it, now) }))
+		const drawn: Drawn[] = []
+		for (const it of this.items) {
+			if (!ui.layers[it.layer]) continue
+			const m = it.kind === "aircraft" ? this.motionOf(it, now) : null
+			drawn.push(
+				m
+					? { it, at: m, rotate: m.rotate, kn: m.drawnKn }
+					: {
+							it,
+							at: predict(it, now),
+							rotate: null,
+							kn: it.moving ? (it.speedKn ?? 0) : 0,
+						},
+			)
+		}
 		this.drawn = drawn
 		this.setData(SRC.items, markers(drawn, ui.selected))
 		this.pushTrails(drawn, now, ui.overlays.trails)
@@ -681,15 +709,27 @@ export class MapEngine {
 		}
 	}
 
+	/** An aircraft's motion state advanced to `now` (created on first sight). */
+	private motionOf(it: MapItem, now: number): MotionState {
+		let m = this.motion.get(it.id)
+		if (m) advance(m, it, now)
+		else {
+			m = createMotion(it, now)
+			this.motion.set(it.id, m)
+		}
+		return m
+	}
+
+	/** Where an item is drawn at `now`: aircraft smoothed (motion.ts), the rest dead reckoned. */
+	private positionAt(it: MapItem, now: number): LatLon {
+		return it.kind === "aircraft" ? this.motionOf(it, now) : predict(it, now)
+	}
+
 	/**
 	 * Trails in two parts: the bodies (most of the coordinates) at most every TRAIL_BODY_MS, and with every push
 	 * a short head from each body's end to the marker, so the line follows the marker without a gap.
 	 */
-	private pushTrails(
-		drawn: readonly { it: MapItem; at: LatLon }[],
-		now: number,
-		on: boolean,
-	): void {
+	private pushTrails(drawn: readonly Drawn[], now: number, on: boolean): void {
 		if (this.trailsDirty || now - this.lastTrailPush >= TRAIL_BODY_MS) {
 			this.trailsDirty = false
 			this.lastTrailPush = now

@@ -82,7 +82,10 @@ export const LAYER_OF: Readonly<Record<ItemKind, LayerId>> = {
 	mesh: "mesh",
 }
 
-/** Dead reckoning stops after this long without a report (the item then waits where it was predicted). */
+/**
+ * Dead reckoning stops after this long without a report (the item then waits where it was predicted). The Map
+ * draws aircraft through motion.ts instead, which eases them to a stop sooner (EXTRAPOLATE_STOP_MS).
+ */
 export const MAX_DEAD_RECKON_MS: Readonly<Record<ItemKind, number>> = {
 	aircraft: 60_000,
 	vessel: 5 * 60_000,
@@ -790,12 +793,14 @@ export function aircraftFields(
 	]
 }
 
+/** `at`: where the map draws the item (motion.ts smoothing), so the card agrees with the marker; else predict(). */
 export function selectionInfo(
 	it: MapItem,
 	station: LatLon | null,
 	now: number,
+	at?: LatLon,
 ): SelectionInfo {
-	const p = predict(it, now)
+	const p = at ?? predict(it, now)
 	const rel = station ? relativeText(station, p) : "—"
 	const ll = `${fmtLat(p.lat)} ${fmtLon(p.lon)}`
 	const ago = agoText(now - it.heardAt, FRESHNESS_FLOOR_MS[it.kind])

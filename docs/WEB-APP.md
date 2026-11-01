@@ -402,6 +402,16 @@ discovery sits within 12.5 kHz, and up to 50 folded rows.
 The **Map** shows aircraft, vessels, APRS stations and mesh nodes around your station, with their
 trails and the station's coverage.
 
+Between reports, an aircraft keeps moving along its track at its speed. When a new position
+arrives, the plane glides onto it over about two seconds instead of jumping, and its glyph turns
+smoothly the short way round (from 359° to 0° it turns 1°, never all the way back). A position
+the aircraft could not have reached (a speed over 1200 kn since the last one, usually a bad
+decode) is held back; if the next position agrees with it, the aircraft really is there and the
+map moves it at once. After 60 seconds without a usable position, the next one is taken as it
+is. Without new reports, the plane slows down after 10 seconds and stops 20 seconds after its
+last position, then waits there instead of flying on with an old speed and track. The trail,
+label and selected aircraft's card follow the plane where it is drawn.
+
 The **ACARS** layer shows where aircraft said they were over datalink: an ADS-C report decoded by
 libacars, or the rough position a VDL2 link frame carries (to 0.1°, about 10 km). Each aircraft's
 latest report of the last hour is a hollow amber ring, never a plane glyph, and it never joins the

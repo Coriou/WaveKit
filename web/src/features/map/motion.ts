@@ -1,0 +1,356 @@
+// Smoothed aircraft motion on the Map (pure; the caller passes `now`). Each aircraft keeps one mutable
+// MotionState: the accepted track (last plausible fix moved along course at speed, easing to a stop past the
+// horizon), a correction that blends the drawn position onto a new track (critically damped, so position and
+// velocity stay continuous when a fix arrives), a gate that holds implausible fixes back until a second one
+// confirms them, and a glyph heading turned along the shortest arc. advance() mutates the state in place and
+// allocates nothing; the state is the drawn position (a LatLon) the marker, label, trail head and card share.
+
+/** 6371 km sphere (geo.ts): 6371 × π / 180 = 111.195 km per degree of latitude. */
+const KM_PER_DEG = 111.195
+const KN_TO_KM_PER_MS = 1.852 / 3_600_000
+
+/**
+ * Fastest ground speed a fix may imply: 1200 kn (fast military jets with a tailwind; airliners rarely pass
+ * 650 kn) = 1200 × 1.852 / 3600 = 0.617 km/s. A reported speed above it is clamped to it.
+ */
+export const MAX_PLAUSIBLE_KN = 1200
+const MAX_KM_PER_MS = MAX_PLAUSIBLE_KN * KN_TO_KM_PER_MS
+/**
+ * Distance any fix may stray beyond that speed: fixes are timed when the browser receives them, so two fixes
+ * batched into one update can be ~0 ms apart yet up to a second of flight (0.3 km) and CPR rounding apart; 2 km
+ * covers that. A wrong CPR zone lands tens to hundreds of km away and is held back.
+ */
+export const SLACK_KM = 2
+/**
+ * After this long without an accepted fix any new fix is taken (no permanent lock-out). By then the gate already
+ * allows 60 s × 0.617 km/s + 2 = 39 km.
+ */
+export const REACQUIRE_MS = 60_000
+
+/** Dead reckoning runs at full speed this long past the last fix. */
+export const EXTRAPOLATE_FULL_MS = 10_000
+/**
+ * Then slows linearly to a stop here, so the plane never runs on with a stale speed or course and never stops
+ * dead: the reach is 10 + (20 − 10) / 2 = 15 s of travel (3.5 km at 450 kn), then it holds.
+ */
+export const EXTRAPOLATE_STOP_MS = 20_000
+
+/**
+ * A correction is blended in over this long (critically damped, ω = 6 / 2000 ms, time constant 333 ms). At the
+ * end at most (1 + 6)·e⁻⁶ = 1.7 % of it is left (17 m of a 1 km correction, 0.06 px at the default zoom), which
+ * is then dropped. Half of a correction is done after (1 + x)·e⁻ˣ = 0.5, x = 1.68, about 0.56 s.
+ */
+export const BLEND_MS = 2000
+const OMEGA = 6 / BLEND_MS
+
+/** The glyph turns toward the reported track with this time constant... */
+export const HEADING_TAU_MS = 400
+/**
+ * ...but never faster than 60°/s: airborne turns are 3–6°/s and taxiing ones under 40°/s, while a single noisy
+ * track value then turns the glyph at most 60°/s × its ~0.5 s life = 30°, not a flip.
+ */
+export const MAX_TURN_DEG_PER_S = 60
+const MAX_TURN_DEG_PER_MS = MAX_TURN_DEG_PER_S / 1000
+/** A longer gap between steps counts as this long for the heading (a hidden tab comes back already turned). */
+const MAX_HEADING_STEP_MS = 5000
+
+export interface Fix {
+	readonly lat: number
+	readonly lon: number
+	/** When the position was received (ms, the browser's clock). */
+	readonly posAt: number
+	/** Degrees true, null when unknown. */
+	readonly course: number | null
+	readonly speedKn: number | null
+	readonly moving: boolean
+}
+
+export interface MotionState {
+	/** The drawn position and glyph rotation (degrees true, 0–360) at the last advance(). */
+	lat: number
+	lon: number
+	rotate: number
+	/** How fast the drawn position moves (track plus correction), knots: the engine's push rate follows it. */
+	drawnKn: number
+	/** The last fix seen, accepted or not (a new one is told by any change). */
+	seenLat: number
+	seenLon: number
+	seenAt: number
+	seenCourse: number | null
+	seenSpeed: number | null
+	/** The accepted track: fix, its time, velocity north and east (km/ms). */
+	fixLat: number
+	fixLon: number
+	fixAt: number
+	vN: number
+	vE: number
+	/** A held-back fix waiting for confirmation; candAt is NaN when there is none. */
+	candLat: number
+	candLon: number
+	candAt: number
+	/** The correction at offAt (km and km/ms, north and east); offAt is NaN when none is running. */
+	oN: number
+	oE: number
+	ovN: number
+	ovE: number
+	offAt: number
+	/** The previous advance() (the heading steps from it). */
+	stepAt: number
+	/** Fixes held back so far (for tests and diagnostics). */
+	rejected: number
+}
+
+const wrapLon = (d: number): number => ((((d + 180) % 360) + 360) % 360) - 180
+const cosLat = (lat: number): number =>
+	Math.max(0.01, Math.cos((lat * Math.PI) / 180))
+
+/** Equirectangular distance (km): close enough for the gate, no allocation. */
+function kmBetween(
+	lat1: number,
+	lon1: number,
+	lat2: number,
+	lon2: number,
+): number {
+	const n = (lat2 - lat1) * KM_PER_DEG
+	const e = wrapLon(lon2 - lon1) * KM_PER_DEG * cosLat((lat1 + lat2) / 2)
+	return Math.sqrt(n * n + e * e)
+}
+
+/** Whether a fix at `at` can follow one at `fromAt` that far away. */
+const plausible = (km: number, fromAt: number, at: number): boolean =>
+	km <= MAX_KM_PER_MS * Math.max(0, at - fromAt) + SLACK_KM
+
+/** Effective dead-reckoning time `u` ms past the fix: linear, then easing to a stop (see EXTRAPOLATE_STOP_MS). */
+export function reach(u: number): number {
+	if (u <= 0) return 0
+	if (u <= EXTRAPOLATE_FULL_MS) return u
+	const span = EXTRAPOLATE_STOP_MS - EXTRAPOLATE_FULL_MS
+	const v = Math.min(u, EXTRAPOLATE_STOP_MS) - EXTRAPOLATE_FULL_MS
+	return EXTRAPOLATE_FULL_MS + v - (v * v) / (2 * span)
+}
+
+/** d reach / du (from the right, so a fix seen the instant it is timed already moves): 1, then falling to 0. */
+function reachRate(u: number): number {
+	if (u < 0) return 0
+	if (u <= EXTRAPOLATE_FULL_MS) return 1
+	if (u >= EXTRAPOLATE_STOP_MS) return 0
+	return (
+		1 - (u - EXTRAPOLATE_FULL_MS) / (EXTRAPOLATE_STOP_MS - EXTRAPOLATE_FULL_MS)
+	)
+}
+
+/** Shortest signed turn from a to b, degrees in [−180, 180). */
+export function shortestArc(a: number, b: number): number {
+	return ((((b - a + 180) % 360) + 360) % 360) - 180
+}
+
+const norm360 = (d: number): number => ((d % 360) + 360) % 360
+
+/** A state for an aircraft first seen now: drawn at its fix (or its dead-reckoned position), no correction. */
+export function createMotion(fix: Fix, now: number): MotionState {
+	const s: MotionState = {
+		lat: fix.lat,
+		lon: fix.lon,
+		rotate: norm360(fix.course ?? 0),
+		drawnKn: 0,
+		seenLat: Number.NaN,
+		seenLon: Number.NaN,
+		seenAt: Number.NaN,
+		seenCourse: null,
+		seenSpeed: null,
+		fixLat: fix.lat,
+		fixLon: fix.lon,
+		fixAt: fix.posAt,
+		vN: 0,
+		vE: 0,
+		candLat: 0,
+		candLon: 0,
+		candAt: Number.NaN,
+		oN: 0,
+		oE: 0,
+		ovN: 0,
+		ovE: 0,
+		offAt: Number.NaN,
+		stepAt: now,
+		rejected: 0,
+	}
+	markSeen(s, fix)
+	setTrack(s, fix, fix.lat, fix.lon, fix.posAt)
+	place(s, now)
+	return s
+}
+
+function markSeen(s: MotionState, fix: Fix): void {
+	s.seenLat = fix.lat
+	s.seenLon = fix.lon
+	s.seenAt = fix.posAt
+	s.seenCourse = fix.course
+	s.seenSpeed = fix.speedKn
+}
+
+function setTrack(
+	s: MotionState,
+	fix: Fix,
+	lat: number,
+	lon: number,
+	at: number,
+): void {
+	s.fixLat = lat
+	s.fixLon = lon
+	s.fixAt = at
+	if (!fix.moving || fix.course === null || fix.speedKn === null) {
+		s.vN = 0
+		s.vE = 0
+		return
+	}
+	const v =
+		Math.min(Math.max(0, fix.speedKn), MAX_PLAUSIBLE_KN) * KN_TO_KM_PER_MS
+	const c = (fix.course * Math.PI) / 180
+	s.vN = v * Math.cos(c)
+	s.vE = v * Math.sin(c)
+}
+
+/** Track position at `now` into s.lat / s.lon, plus the running correction; also s.drawnKn. */
+function place(s: MotionState, now: number): void {
+	const u = now - s.fixAt
+	const r = reach(u)
+	const rr = reachRate(u)
+	let n = s.vN * r
+	let e = s.vE * r
+	let velN = s.vN * rr
+	let velE = s.vE * rr
+	if (!Number.isNaN(s.offAt)) {
+		const t = now - s.offAt
+		if (t >= BLEND_MS) s.offAt = Number.NaN
+		else if (t > 0) {
+			const k = Math.exp(-OMEGA * t)
+			const bN = s.ovN + OMEGA * s.oN
+			const bE = s.ovE + OMEGA * s.oE
+			n += (s.oN + bN * t) * k
+			e += (s.oE + bE * t) * k
+			velN += (bN - OMEGA * (s.oN + bN * t)) * k
+			velE += (bE - OMEGA * (s.oE + bE * t)) * k
+		} else {
+			n += s.oN
+			e += s.oE
+			velN += s.ovN
+			velE += s.ovE
+		}
+	}
+	s.lat = s.fixLat + n / KM_PER_DEG
+	s.lon = wrapLon(s.fixLon + e / (KM_PER_DEG * cosLat(s.fixLat)))
+	s.drawnKn = Math.sqrt(velN * velN + velE * velE) / KN_TO_KM_PER_MS
+}
+
+/** The drawn velocity (km/ms) at `now`, from the current track and correction. */
+function drawnVelocity(s: MotionState, now: number): { n: number; e: number } {
+	const rr = reachRate(now - s.fixAt)
+	let n = s.vN * rr
+	let e = s.vE * rr
+	const t = now - s.offAt
+	if (!Number.isNaN(s.offAt) && t < BLEND_MS) {
+		const tt = Math.max(0, t)
+		const k = Math.exp(-OMEGA * tt)
+		const bN = s.ovN + OMEGA * s.oN
+		const bE = s.ovE + OMEGA * s.oE
+		n += (bN - OMEGA * (s.oN + bN * tt)) * k
+		e += (bE - OMEGA * (s.oE + bE * tt)) * k
+	}
+	VEL.n = n
+	VEL.e = e
+	return VEL
+}
+const VEL = { n: 0, e: 0 }
+
+/**
+ * Moves to a new track from the drawn position: the gap between where the plane is drawn and where the new
+ * track puts it becomes a correction that decays over BLEND_MS, starting with the drawn velocity, so nothing
+ * jumps. `snap` (a confirmed relocation) moves at once instead.
+ */
+function retrack(
+	s: MotionState,
+	fix: Fix,
+	lat: number,
+	lon: number,
+	at: number,
+	now: number,
+	snap: boolean,
+): void {
+	place(s, now)
+	const fromLat = s.lat
+	const fromLon = s.lon
+	const v = drawnVelocity(s, now)
+	const fromVN = v.n
+	const fromVE = v.e
+	setTrack(s, fix, lat, lon, at)
+	s.offAt = Number.NaN
+	place(s, now)
+	if (snap) return
+	s.oN = (fromLat - s.lat) * KM_PER_DEG
+	s.oE = wrapLon(fromLon - s.lon) * KM_PER_DEG * cosLat(s.lat)
+	const rr = reachRate(now - s.fixAt)
+	s.ovN = fromVN - s.vN * rr
+	s.ovE = fromVE - s.vE * rr
+	s.offAt = now
+	place(s, now)
+}
+
+/** A fix that is new (any change since the last one seen): accept it, hold it back, or confirm a held one. */
+function observe(s: MotionState, fix: Fix, now: number): void {
+	const moved =
+		fix.lat !== s.seenLat || fix.lon !== s.seenLon || fix.posAt !== s.seenAt
+	markSeen(s, fix)
+	if (!moved) {
+		// a new course or speed for the same fix: re-extrapolate from it, blended
+		retrack(s, fix, s.fixLat, s.fixLon, s.fixAt, now, false)
+		return
+	}
+	const fromAccepted = kmBetween(s.fixLat, s.fixLon, fix.lat, fix.lon)
+	if (
+		plausible(fromAccepted, s.fixAt, fix.posAt) ||
+		fix.posAt - s.fixAt >= REACQUIRE_MS
+	) {
+		const far = !plausible(fromAccepted, s.fixAt, fix.posAt)
+		s.candAt = Number.NaN
+		retrack(s, fix, fix.lat, fix.lon, fix.posAt, now, far)
+		return
+	}
+	if (
+		!Number.isNaN(s.candAt) &&
+		plausible(
+			kmBetween(s.candLat, s.candLon, fix.lat, fix.lon),
+			s.candAt,
+			fix.posAt,
+		)
+	) {
+		// two fixes agree on the new place: a real relocation, drawn there at once
+		s.candAt = Number.NaN
+		retrack(s, fix, fix.lat, fix.lon, fix.posAt, now, true)
+		return
+	}
+	s.candLat = fix.lat
+	s.candLon = fix.lon
+	s.candAt = fix.posAt
+	s.rejected += 1
+}
+
+/** The state at `now` for the item's latest fix: observes a new fix, then places the drawn position and heading. */
+export function advance(s: MotionState, fix: Fix, now: number): void {
+	if (
+		fix.lat !== s.seenLat ||
+		fix.lon !== s.seenLon ||
+		fix.posAt !== s.seenAt ||
+		fix.course !== s.seenCourse ||
+		fix.speedKn !== s.seenSpeed
+	)
+		observe(s, fix, now)
+	place(s, now)
+	const dt = Math.min(Math.max(0, now - s.stepAt), MAX_HEADING_STEP_MS)
+	s.stepAt = now
+	if (fix.course !== null && dt > 0) {
+		const d = shortestArc(s.rotate, fix.course)
+		const want = d * (1 - Math.exp(-dt / HEADING_TAU_MS))
+		const cap = MAX_TURN_DEG_PER_MS * dt
+		s.rotate = norm360(s.rotate + Math.max(-cap, Math.min(cap, want)))
+	}
+}

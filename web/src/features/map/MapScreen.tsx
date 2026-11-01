@@ -968,7 +968,12 @@ function Selection(props: {
 		it?.source.kind === "aircraft" ? it.source.value.icao : null,
 	)
 	if (!it) return null
-	const info = selectionInfo(it, engine.stationPoint(), now)
+	const info = selectionInfo(
+		it,
+		engine.stationPoint(),
+		now,
+		engine.drawnAt(it.id),
+	)
 	const icon = LAYER_ICONS[it.layer]
 	return (
 		<aside

@@ -37,6 +37,8 @@ import {
 	destination,
 	distanceKm,
 	flText,
+	fmtLat,
+	fmtLon,
 	kmPerPx,
 	relativeText,
 	scaleBar,
@@ -539,6 +541,19 @@ describe("items from the mock's fleets", () => {
 		expect(fc0.features[2]?.properties["z"]).toBe(9)
 		expect(fc0.features[0]?.properties["g"]).toBe(
 			glyphOf(items[0] as MapItem).glyph,
+		)
+	})
+
+	it("draws the smoothed heading and position, and the card reads the same position", () => {
+		const it0 = items.find(i => i.kind === "aircraft") as MapItem
+		const at = destination(it0, 45, 3)
+		const fc0 = markers([{ it: it0, at, rotate: 123.4 }], null)
+		expect(fc0.features[0]?.properties["r"]).toBe(123)
+		expect(fc0.features[0]?.geometry.coordinates).toEqual([at.lon, at.lat])
+		const info = selectionInfo(it0, STATION, NOW, at)
+		expect(info.seen).toContain(`${fmtLat(at.lat)} ${fmtLon(at.lon)}`)
+		expect(info.fields.find(f => f[0] === "From station")?.[1]).toBe(
+			relativeText(STATION, at),
 		)
 	})
 })
