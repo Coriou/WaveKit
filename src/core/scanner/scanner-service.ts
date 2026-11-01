@@ -7783,10 +7783,12 @@ export class ScannerService extends EventEmitter {
 
 	/**
 	 * Single-flight periodic snapshot: no second clone + stringify while one is being written. A
-	 * failed write leaves the state dirty, so it is retried.
+	 * failed write leaves the state dirty, so it is retried; one a journal hole requested stays
+	 * requested, so the hole is retried after 10 s, not at the periodic interval (up to 2 h).
 	 */
 	private startSnapshot(now: number): void {
 		if (!this.stateLoaded || this.snapshotInFlight) return
+		const requested = this.snapshotRequested
 		this.lastSnapshotAt = now
 		this.dirty = false
 		this.snapshotRequested = false
@@ -7800,6 +7802,7 @@ export class ScannerService extends EventEmitter {
 				(err: unknown) => {
 					// Refused journal lines rely on a later snapshot: retry.
 					this.dirty = true
+					if (requested) this.snapshotRequested = true
 					this.snapshotFailed = true
 					this.log.warn({ err }, "Snapshot write failed")
 				},
@@ -7812,9 +7815,9 @@ export class ScannerService extends EventEmitter {
 	/**
 	 * A journal hole (refused or failed lines) blocks every append, recording operations
 	 * included, until a snapshot covers it: snapshot now instead of at the next periodic
-	 * interval, still single-flight and spaced by `snapshotIntervalMs` (1 s while the snapshot
-	 * worker takes it, 1 s per MiB when the main thread must build it, at least 10 s after a
-	 * failed snapshot); the tick picks a deferred request up.
+	 * interval, still single-flight and spaced by `snapshotIntervalMs` (1 s whether the snapshot
+	 * worker or the main thread builds it, 10 s after a failed snapshot); the tick picks a
+	 * deferred request up.
 	 */
 	private requestSnapshot(): void {
 		this.dirty = true

@@ -112,14 +112,26 @@ describe("snapshotIntervalMs", () => {
 		expect(snapshotIntervalMs({ ...base, failed: true })).toBe(10_000)
 	})
 
-	it("a 90 MB store: hourly, a hole after 1 s on the worker or 85,831 ms off it", () => {
+	it("a 90 MB store: hourly, a hole after 1 s on or off the worker, 10 s after a failure", () => {
 		const big = { ...base, snapshotBytes: 90_000_000 }
 		expect(snapshotIntervalMs(big)).toBe(3_888_000)
 		expect(snapshotIntervalMs({ ...big, onWorker: true })).toBe(3_888_000)
 		expect(
 			snapshotIntervalMs({ ...big, requested: true, onWorker: true }),
 		).toBe(1_000)
-		expect(snapshotIntervalMs({ ...big, requested: true })).toBe(85_831)
+		// The main-thread spacing (85,831 ms here) never delays covering a hole.
+		expect(snapshotIntervalMs({ ...big, requested: true })).toBe(1_000)
+		expect(snapshotIntervalMs({ ...big, requested: true, failed: true })).toBe(
+			10_000,
+		)
+		expect(
+			snapshotIntervalMs({
+				...big,
+				snapshotBytes: 600 * MIB,
+				requested: true,
+				failed: true,
+			}),
+		).toBe(10_000)
 		expect(
 			snapshotIntervalMs({
 				...big,
@@ -254,7 +266,14 @@ async function setup(worker: SnapshotWorkerOptions): Promise<{
 	}
 }
 
-async function journalChars(dir: string): Promise<number> {
+async function journalFileBytes(dir: string): Promise<number> {
+	let total = 0
+	for (const name of await readdir(join(dir, "journal")))
+		total += (await stat(join(dir, "journal", name))).size
+	return total
+}
+
+async function journalUnits(dir: string): Promise<number> {
 	let total = 0
 	for (const name of await readdir(join(dir, "journal")))
 		total += (await readFile(join(dir, "journal", name), "utf8")).length
@@ -271,7 +290,7 @@ describe("ScannerPersistence.snapshotCadence", () => {
 		})
 		h.ingest(50)
 		await h.p.writeSnapshot(h.store.snapshot()) // after every queued line
-		const before = await journalChars(h.dir)
+		const before = await journalFileBytes(h.dir)
 		expect(before).toBeGreaterThan(0)
 		const size = (await stat(join(h.dir, "discoveries.json"))).size
 		expect(h.p.snapshotCadence()).toEqual({
@@ -281,8 +300,50 @@ describe("ScannerPersistence.snapshotCadence", () => {
 		})
 		h.ingest(30)
 		await h.p.writeJobs([]) // the chain drains every queued journal line
-		const tail = (await journalChars(h.dir)) - before
+		const tail = (await journalFileBytes(h.dir)) - before
 		expect(tail).toBeGreaterThan(0)
+		expect(h.p.snapshotCadence().journalBytes).toBe(tail)
+		const reloaded = new ScannerPersistence({
+			dir: h.dir,
+			logger,
+			now: () => h.clock.now,
+			snapshotWorker: { enabled: false },
+		})
+		await reloaded.load()
+		expect(reloaded.snapshotCadence()).toEqual({
+			snapshotBytes: size,
+			journalBytes: tail,
+			onWorker: false,
+		})
+	})
+
+	it("counts UTF-8 bytes on disk, not UTF-16 units, for non-ASCII journal lines and snapshots, at append and at load", async () => {
+		const h = await setup({ enabled: false })
+		h.store.ingest(
+			makeObs({
+				id: "o-ünïcødé-π-🎙",
+				sourceId: "src-東京",
+				centreHz: 446_000_000,
+				startedAt: h.clock.now,
+			}),
+		)
+		await h.p.writeSnapshot(h.store.snapshot())
+		const file = join(h.dir, "discoveries.json")
+		const size = (await stat(file)).size
+		expect(size).toBeGreaterThan((await readFile(file, "utf8")).length)
+		expect(h.p.snapshotCadence().snapshotBytes).toBe(size)
+		const before = await journalFileBytes(h.dir)
+		const unitsBefore = await journalUnits(h.dir)
+		const deleted = ["ünïcødé-π-🎙-東京".repeat(20)]
+		await h.p.append({
+			at: new Date(h.clock.now).toISOString(),
+			op: "delete",
+			payload: { discoveries: [], observations: [], deleted },
+		})
+		const tail = (await journalFileBytes(h.dir)) - before
+		// The line's UTF-16 length undercounts it: these non-ASCII chars are 2-4 bytes on disk.
+		const unitsTail = (await journalUnits(h.dir)) - unitsBefore
+		expect(tail).toBeGreaterThan(unitsTail)
 		expect(h.p.snapshotCadence().journalBytes).toBe(tail)
 		const reloaded = new ScannerPersistence({
 			dir: h.dir,

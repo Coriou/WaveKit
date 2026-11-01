@@ -18,15 +18,19 @@ export const SNAPSHOT_MAX_INTERVAL_MS = 2 * 3_600_000
  */
 export const SNAPSHOT_BYTES_PER_DAY = 2_000_000_000
 const DAY_MS = 86_400_000
-/** Fastest snapshot after a journal hole while the snapshot worker can take it (~1 ms of main thread). */
+/**
+ * Fastest snapshot after a journal hole, on the worker or the main thread alike: until one covers
+ * the hole every append is refused, recording operations included, so it is never spaced further.
+ */
 export const SNAPSHOT_REQUEST_MIN_MS = 1_000
 /**
- * Spacing of a snapshot the main thread must build (worker stale, failed or not started): 1 s per
- * MiB of snapshot text. The main path measured ~31 ms per MiB (2,715 ms at 87.6 MiB), so this keeps
- * it near 3 % of the main thread (31 ms / 1,000 ms). 88 MiB gives 88 s.
+ * Spacing of a non-urgent (journal trigger) snapshot the main thread must build (worker stale,
+ * failed or not started): 1 s per MiB of snapshot text. The main path measured ~31 ms per MiB
+ * (2,715 ms at 87.6 MiB), so this keeps it near 3 % of the main thread (31 ms / 1,000 ms).
+ * 88 MiB gives 88 s.
  */
 export const MAIN_SNAPSHOT_MS_PER_MIB = 1_000
-/** Ceiling of that spacing: a journal hole (appends refused) is covered within 10 min at any size. */
+/** Ceiling of that spacing: 10 min at any size. */
 export const MAIN_SNAPSHOT_MAX_SPACING_MS = 10 * 60_000
 /**
  * Journal since the last snapshot that makes one due early: at least 1 MiB (or the snapshot's own
@@ -87,25 +91,24 @@ export interface SnapshotCadenceInput {
 }
 
 /**
- * Minimum time between snapshot starts while the state is dirty. A journal hole is covered fast
- * (1 s on the worker, the main-thread spacing otherwise; never under 10 s after a failure, as on a
- * failing disk); a journal past its trigger makes one due after 10 s (or the main-thread spacing);
- * otherwise the size-scaled periodic interval.
+ * Minimum time between snapshot starts while the state is dirty. A journal hole is covered after
+ * 1 s whoever builds the snapshot (10 s after a failure, as on a failing disk): appends stay
+ * refused until then. A journal past its trigger makes one due after 10 s, or after the
+ * main-thread spacing when the worker cannot take it; otherwise the size-scaled periodic interval.
  */
 export function snapshotIntervalMs(s: SnapshotCadenceInput): number {
 	const periodic = periodicSnapshotIntervalMs(s.snapshotBytes)
-	const soon = s.onWorker
-		? SNAPSHOT_REQUEST_MIN_MS
-		: mainSnapshotSpacingMs(s.snapshotBytes)
 	if (s.requested)
 		return Math.min(
 			periodic,
-			s.failed ? Math.max(soon, SNAPSHOT_MIN_INTERVAL_MS) : soon,
+			s.failed ? SNAPSHOT_MIN_INTERVAL_MS : SNAPSHOT_REQUEST_MIN_MS,
 		)
 	if (
 		s.journalBytes >=
 		journalSnapshotTriggerBytes(s.snapshotBytes, s.maxJournalBytes)
-	)
-		return Math.min(periodic, Math.max(SNAPSHOT_MIN_INTERVAL_MS, soon))
+	) {
+		const spacing = s.onWorker ? 0 : mainSnapshotSpacingMs(s.snapshotBytes)
+		return Math.min(periodic, Math.max(SNAPSHOT_MIN_INTERVAL_MS, spacing))
+	}
 	return periodic
 }
