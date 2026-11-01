@@ -287,10 +287,11 @@ it("sustained CPU does not shed the tuned probationer while the scapegoat's clea
 	h.cpu.normalisedPercent = 95
 	// a goes at +2 s; nothing untuned is left, but its relief has not had
 	// EFFICIENCY_CLEAR_MS to show: readsb was shed at +4 s before the fix.
-	const verdicts = h.run(() => {}, 2_000 + EFFICIENCY_CLEAR_MS)
+	// Host CPU at the guard is host-wide: past the clear window the tuned
+	// probationer is still not shed (host starvation never sheds it).
+	const verdicts = h.run(() => {}, 2_000 + 3 * EFFICIENCY_CLEAR_MS)
 	expect(verdicts.map(({ key, detail, at }) => ({ key, detail, at }))).toEqual([
 		{ key: "a", detail: "cpu", at: 2_000 },
-		{ key: "readsb", detail: "cpu", at: 2_000 + EFFICIENCY_CLEAR_MS },
 	])
 })
 
@@ -402,18 +403,16 @@ it("the tuned probationer's own branch drops count when no-holder overflow share
 })
 
 it("late windows keep explicit branch charges beside source-wide overflow", () => {
-	// Host loss (CPU between the monitor's and the gate's guards): readsb's
-	// own branch drops beside no-holder overflow are still its own, and the
-	// windows name its branch beside the source-wide charge.
+	// Host loss (CPU between the monitor's and the gate's guards): the windows
+	// name readsb's branch beside the source-wide charge, but its branch drops
+	// are host loss, which never sheds the tuned decoder.
 	const h = harness([{ key: "readsb", source: "s", tuned: true }], 99)
 	h.cpu.normalisedPercent = 95
 	const verdicts = h.run(() => {
 		h.dropOn("s", "readsb")
 		h.overflowNoHolder("s")
 	}, 40_000)
-	expect(verdicts.map(({ key, detail, at }) => ({ key, detail, at }))).toEqual([
-		{ key: "readsb", detail: "drops", at: 2_000 },
-	])
+	expect(verdicts).toEqual([])
 	expect(h.monitor.latestAttribution("s")).toBe("host")
 	expect(h.monitor.lateWindows("s").at(-1)).toMatchObject({
 		condemning: true,

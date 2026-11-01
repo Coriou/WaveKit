@@ -178,6 +178,7 @@ export function createEfficiencyMonitor(deps: {
 		>
 	> & {
 		latestAttribution(id: string): DropAttribution | null
+		latestLoopDelay(): LoopDelayInterval | null
 		lateWindows(id: string): readonly LateDropWindow[]
 		linkDropsSince(id: string, sinceMono: number): boolean
 		attributionCounts(id: string): {
@@ -197,6 +198,8 @@ export function createEfficiencyMonitor(deps: {
 			? EFFICIENCY_CPU_GUARD_PERCENT
 			: deps.cpuGuardPercent
 	let lastMono: number | null = null
+	/** The latest valid event-loop delay interval, for attribution logs only. */
+	let lastLoop: LoopDelayInterval | null = null
 	let interval: { cancel(): void } | undefined
 	// Evidence time is strictly monotonic: a raw clock that goes back is offset
 	// so it continues from the last reading. A discontinuity discards every
@@ -369,11 +372,17 @@ export function createEfficiencyMonitor(deps: {
 		try {
 			if (deps.loopDelay !== undefined) {
 				const parsed = loopSchema.safeParse(deps.loopDelay())
-				if (parsed.success) sampledLoopDelayMaxMs = parsed.data.maxMs
-				else commonValid = false
+				if (parsed.success) {
+					sampledLoopDelayMaxMs = parsed.data.maxMs
+					lastLoop = { maxMs: parsed.data.maxMs, p99Ms: parsed.data.p99Ms }
+				} else {
+					commonValid = false
+					lastLoop = null
+				}
 			}
 		} catch {
 			commonValid = false
+			lastLoop = null
 		}
 		const sources = new Map<string, SourceDropSample>()
 		for (const id of readable ? new Set(ids) : states.keys()) {
@@ -1067,6 +1076,7 @@ export function createEfficiencyMonitor(deps: {
 		return null
 	}
 	return {
+		latestLoopDelay: () => lastLoop,
 		latestAttribution(id) {
 			const at = clock()
 			const s = states.get(id)

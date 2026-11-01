@@ -925,14 +925,34 @@ A decoder of the tuned band (such as ADS-B) on probation is judged only by drops
 branch: overflow charged to the source as a whole, CPU over the guard, or host loss on
 another decoder's branch stops the newest other automatic decoder instead, at most one per
 60-second clear window on each source (one host-wide for CPU). Under sustained CPU load the
-tuned decoder is stopped only once that window has closed with nothing else left to stop,
-and loss already spent on such a stop does not stop a second decoder through late drops
+tuned decoder is never stopped: CPU over the guard is the host's, so it restarts its
+probation instead, and loss already spent on such a stop does not stop a second decoder through late drops
 on that source until the window has closed. After a stop for CPU, host-attributed drops on
 any source are that same load and stop nobody else until that stop's own 60-second window
 has closed; stops for other loss inside it do not extend it. Other
 fresh drops on another decoder's own branch within that window are new loss and still
 stop it. A decoder's own branch drops count as
 its own even when overflow with no holder known falls in the same sample.
+
+**Host starvation never stops the tuned decoder.** The tuned decoder is the one whose band
+holds the tuned frequency, or the only decoder running. A drop on its branch is host loss,
+not its own, when within 10 seconds either side of it (one late-drop window, 5 samples of
+2 seconds) another fanout branch also dropped (live audio included, even in a different
+sample) or the sample was attributed to the host (event-loop delay of 50 ms or more, or
+host CPU at the guard). A running decoder's late drops are judged only once those
+10 seconds have been sampled; a decoder still on probation is judged on what is known
+at its drop, so its own branch dropping alone while the others flow stops it at once.
+Host loss may still stop other automatic decoders, newest first, but never the tuned one,
+and it does not keep the tuned decoder from starting again. Only its own sustained loss
+(its branch congested while the other branches flowed) stops it, and then it is tried
+again after 30 seconds, doubling per consecutive stop to a 4-minute cap (30 s, 60 s,
+120 s, 240 s); that history resets after 4 minutes of running without a stop. Starting
+it yourself (`POST /api/decoders/:id/start`) clears such a stop at once and re-admits it
+on probation. While the host is starved, and for 60 seconds after its last host loss, the
+decoder status carries `hostBusy` and the verdicts read "host busy: samples were dropped
+for every decoder" without suggesting a lower sample rate. The "Late drops shed a decoder"
+and "Decoder suspension changed" log lines carry `cause` (`host` or `decoder`),
+`congestedBranches`, `loopLagP99Ms` and `loopLagMaxMs`.
 The budget defaults to half the available CPU capacity, with process and cgroup v1/v2 limits.
 The 0.75-core automatic floor is capped at the quota when quota is below 0.75;
 see [configuration](CORE-REFERENCE.md#decoder-efficiency-cpu-budget).
@@ -942,6 +962,7 @@ in both admission and the decoder manager. After late-drop shedding, retry histo
 resets only after a clean run of at least 30 minutes since readmission. A shed or
 probation failure before then doubles the delay from 5 to 10 to 20 minutes, capped
 at 30 minutes. After that sustained clean run, the next failure starts at 5 minutes.
+The tuned decoder's own-loss stops use the shorter schedule above instead.
 
 The dsd-fme scanner link event distinguishes `verified` content from sync-only
 fields. DMR color code from voice/IDLE sync is an unverified hint, not an

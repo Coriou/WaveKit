@@ -215,6 +215,27 @@ function retrying(status: DecoderStatus, running: boolean): boolean {
 /** A failed verdict's sentence while the manager restarts it on its own. */
 const RETRYING_TEXT = "failed: restarting on its own"
 
+/** Host starvation: no decoder is the cause, so no rate or decoder action helps. */
+const HOST_BUSY_TEXT = "host busy: samples were dropped for every decoder"
+const HOST_BUSY_ACTIONS: readonly DecoderVerdictAction[] = [
+	"turn-off-others",
+	"pause-scanner",
+]
+const LOSS_CODES: ReadonlySet<DecoderVerdictCode> = new Set([
+	"efficiency-drops",
+	"efficiency-late-drops",
+	"efficiency-cpu",
+])
+
+/** Whole seconds until `retryAt`, at least 1; null when absent, malformed or past. */
+function retryInSeconds(retryAt: unknown, now: number): number | null {
+	if (typeof retryAt !== "string" || !Number.isFinite(now)) return null
+	const at = Date.parse(retryAt)
+	return Number.isFinite(at) && at > now
+		? Math.max(1, Math.ceil((at - now) / 1_000))
+		: null
+}
+
 /**
  * The decoder's one verdict. Precedence: failure, mode off, operator stop,
  * suspension (efficiency detail first), running output, a wanted start not
@@ -225,6 +246,7 @@ export function decoderVerdict(
 	status: DecoderStatus,
 	health: DecoderSummary["health"],
 	running: boolean,
+	now?: number,
 ): DecoderVerdict {
 	let code: DecoderVerdictCode
 	if (health === "failed") code = "failed"
@@ -243,19 +265,60 @@ export function decoderVerdict(
 	else if (status.desiredRunning === true) code = "starting"
 	else code = "unknown"
 	const name = decoderName(status.type)
-	const entry =
+	let entry: {
+		text: string
+		actions: readonly DecoderVerdictAction[]
+		cause?: "host" | "decoder"
+		retryAt?: string
+	} =
 		code === "failed" && retrying(status, running)
 			? { text: RETRYING_TEXT, actions: [] }
 			: VERDICTS[code]
+	// Host starvation: a running decoder says the host is busy; a loss shed the
+	// host caused says so instead of suggesting a lower rate. A loss shed says
+	// when it is retried.
+	const hostBusy = status.hostBusy !== undefined && status.hostBusy !== null
+	const shedCause = status.efficiency?.cause
+	if ((code === "decoding" || code === "listening") && hostBusy)
+		entry = { text: `${code}: ${HOST_BUSY_TEXT}`, actions: [], cause: "host" }
+	else if (LOSS_CODES.has(code)) {
+		const host =
+			shedCause === "host" ||
+			(shedCause === undefined && hostBusy && code !== "efficiency-cpu")
+		if (host)
+			entry = {
+				text: `paused: ${HOST_BUSY_TEXT}`,
+				actions: HOST_BUSY_ACTIONS,
+				cause: "host",
+			}
+		else if (shedCause === "decoder") entry = { ...entry, cause: "decoder" }
+		const seconds =
+			now === undefined ? null : retryInSeconds(status.efficiency?.retryAt, now)
+		if (seconds !== null)
+			entry = {
+				...entry,
+				text: `${entry.text}; retrying in ${seconds} s`,
+				retryAt: new Date(
+					Date.parse(status.efficiency!.retryAt!),
+				).toISOString(),
+			}
+	}
 	const verdict = {
 		code,
 		text: `${name} ${entry.text}`.slice(0, DECODER_VERDICT_TEXT_MAX_LENGTH),
 		actions: [...entry.actions],
+		...(entry.cause ? { cause: entry.cause } : {}),
+		...(entry.retryAt ? { retryAt: entry.retryAt } : {}),
 	}
 	const parsed = decoderVerdictSchema.safeParse(verdict)
-	return parsed.success
-		? parsed.data
-		: { code: "unknown", text: "Decoder status unknown", actions: [] }
+	if (!parsed.success)
+		return { code: "unknown", text: "Decoder status unknown", actions: [] }
+	const { cause, retryAt, ...rest } = parsed.data
+	return {
+		...rest,
+		...(cause ? { cause } : {}),
+		...(retryAt ? { retryAt } : {}),
+	}
 }
 
 const positive = (n: unknown): n is number =>
@@ -411,7 +474,7 @@ export function decoderSummary(
 		lastOutputAt: status.lastOutputAt?.toISOString() ?? null,
 		suspensionReason: status.suspension?.reasonCode ?? null,
 		health,
-		verdict: decoderVerdict(status, health, running),
+		verdict: decoderVerdict(status, health, running, now),
 		...(hz === undefined ? {} : { coversHz: decoderCoversHz(status, hz) }),
 	}
 }

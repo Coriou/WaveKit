@@ -64,6 +64,54 @@ import {
 	type ValidationField,
 } from "../validation-errors.js"
 
+/** Why a recorded start stays suspended, from its closed reason and efficiency codes. */
+export function suspendedStartReason(status: InternalDecoderStatus): string {
+	const reason = status.suspension?.reasonCode
+	const efficiency = status.efficiency
+	const retry = efficiency?.retryAt ? `; retries at ${efficiency.retryAt}` : ""
+	if (reason === "efficiency-budget" || efficiency !== undefined) {
+		const host = efficiency?.cause === "host"
+		switch (efficiency?.detail) {
+			case "budget":
+				return `suspended: the CPU budget is full${retry}`
+			case "cpu":
+				return `suspended: the host CPU is over its guard${retry}`
+			case "drops":
+			case "late-drops":
+				return host
+					? `suspended: the host is busy and every decoder dropped samples${retry}`
+					: `suspended: it dropped samples while it ran${retry}`
+			default:
+				return "suspended: waiting for the source to settle"
+		}
+	}
+	switch (reason) {
+		case "frequency-out-of-band":
+		case "no-channel-selected":
+			return "suspended until the tuned frequency is in its band"
+		case "capture-too-narrow":
+			return "suspended: the capture is too narrow for its band"
+		case "tuner-scanning":
+			return "suspended while the scanner holds the tuner"
+		case "source-paused":
+			return "suspended while the source is paused"
+		case "decoder-unavailable":
+			return "suspended: its program is not installed"
+		case "channelizer-unavailable":
+			return "suspended: it needs the channelizer"
+		case "insufficient-sample-rate":
+		case "unsupported-sample-rate":
+		case "unsupported-frontend-rate":
+		case "unsupported-decoder-input-rate":
+		case "source-rate-unknown":
+			return "suspended until the source rate is usable"
+		case undefined:
+			return "suspended"
+		default:
+			return `suspended (${reason})`
+	}
+}
+
 /**
  * Decoder capabilities schema for response (Requirement 17.1)
  */
@@ -859,7 +907,11 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 			}
 
 			try {
-				await decoderManager.startDecoder(id, { startMode, refuseIfHeld: true })
+				await decoderManager.startDecoder(id, {
+					startMode,
+					refuseIfHeld: true,
+					clearEfficiencyShed: true,
+				})
 
 				const status = decoderManager.getStatus(id)
 				if (!status) {
@@ -872,7 +924,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 
 				return {
 					message: status.suspended
-						? `Decoder '${id}' start recorded; suspended until the source rate and band are usable`
+						? `Decoder '${id}' start recorded; ${suspendedStartReason(status)}`
 						: `Decoder '${id}' started successfully`,
 					decoder: toApiDecoderStatus(status),
 				}

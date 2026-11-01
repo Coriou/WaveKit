@@ -41,6 +41,8 @@ import {
 	EFFICIENCY_RETRY_MS,
 	EFFICIENCY_RETRY_MAX_MS,
 	EFFICIENCY_PROBATION_MS,
+	TUNED_RETRY_MAX_MS,
+	lossRetryMs,
 	CHANNEL_CAPABLE_TYPES,
 	DECODER_BRANCH_STARTUP_BUFFER_S,
 	DECODER_BRANCH_STARTUP_MS,
@@ -49,6 +51,7 @@ import {
 	channelizerBranchId,
 } from "./enablement/contract.js"
 import type { PlannerCentreSlot } from "./enablement/contract.js"
+import type { LossAttribution } from "./enablement/host-starvation.js"
 import {
 	TUNED_SETTLE_MS,
 	bandContainsTuned,
@@ -66,6 +69,7 @@ import type {
 	DecoderMode,
 	DecoderPlacementView,
 	DecoderEfficiencyView,
+	DecoderHostBusy,
 	DecoderOptionIssue,
 	DecoderSettingValue,
 } from "@wavekit/api-types"
@@ -330,6 +334,10 @@ interface DecoderState {
 	branchReady?: () => void
 	efficiencyBackoffMs?: number
 	efficiencyLateShed?: boolean
+	/** Shed as the tuned decoder for its own loss: TUNED_RETRY_MS backoff applies. */
+	efficiencyTunedShed?: boolean
+	/** Whose loss shed it (safe fields), for status and logs; cleared with the shed. */
+	efficiencyAttribution?: LossAttribution
 	/** Owning scanner job of a probe; null for configured decoders. */
 	scannerJobId: string | null
 	/** Scanner-provided input used instead of a fanout branch (probes only). */
@@ -557,6 +565,11 @@ export interface DecoderStartIntent {
 	 * a scanner sweep holds the source (REST routes only, spec § 10.4).
 	 */
 	refuseIfHeld?: boolean
+	/**
+	 * An operator's start (REST): a tuned decoder shed by the efficiency gate
+	 * for loss is re-admitted on probation instead of waiting out its backoff.
+	 */
+	clearEfficiencyShed?: boolean
 }
 
 /**
@@ -637,14 +650,40 @@ const ObservedCentresSchema = z
 	.max(ACTIVITY_MAX_OBSERVED)
 
 /**
+ * Whose loss a loss refusal (drops, cpu, late-drops) reports: the shed's own
+ * attribution, kept while later admission checks refuse it again.
+ */
+function lossCauseField(state: {
+	admission?: AdmissionDecision
+	efficiencyAttribution?: LossAttribution
+}): { cause?: LossAttribution["cause"] } {
+	const admission = state.admission
+	if (admission?.admit !== false) return {}
+	if (admission.cause) return { cause: admission.cause }
+	const loss =
+		admission.detail === "drops" ||
+		admission.detail === "cpu" ||
+		admission.detail === "late-drops"
+	return loss && state.efficiencyAttribution
+		? { cause: state.efficiencyAttribution.cause }
+		: {}
+}
+
+/**
  * The safe efficiency detail code (budget, cpu, drops, late-drops, unknown) while the
  * efficiency gate refuses a decoder, as a log field; nothing otherwise.
  */
-function efficiencyDetailField(state: { admission?: AdmissionDecision }): {
+function efficiencyDetailField(state: {
+	admission?: AdmissionDecision
+	efficiencyAttribution?: LossAttribution
+}): {
 	efficiencyDetail?: Extract<AdmissionDecision, { admit: false }>["detail"]
-} {
+} & Partial<LossAttribution> {
 	return state.admission?.admit === false
-		? { efficiencyDetail: state.admission.detail }
+		? {
+				efficiencyDetail: state.admission.detail,
+				...(state.efficiencyAttribution ?? {}),
+			}
 		: {}
 }
 
@@ -1094,12 +1133,63 @@ export class DecoderManager extends EventEmitter {
 			gate?.forget(placement.key)
 			delete state.efficiencyBackoffMs
 			delete state.efficiencyLateShed
+			delete state.efficiencyTunedShed
+			delete state.efficiencyAttribution
 			// Due now rather than gone: it stays a refusal the gate view lists
 			// until the source evaluation re-admits or refuses it.
 			state.admission = { ...state.admission, retryAtMs: now }
 		}
 		this.tunedEpisodes = episodes
 		this.scheduleTunedSettle(waitMs)
+	}
+
+	/**
+	 * An operator start of the tuned decoder (its band holds the tuned
+	 * frequency, or no other decoder runs): each of its placements the gate
+	 * refused for loss (drops, CPU or late drops) has
+	 * the shed and its backoff forgotten and falls due now, so the next
+	 * evaluation re-admits it on probation. Budget refusals, and an untuned
+	 * decoder's placements, keep their state (the start response names why).
+	 */
+	private clearTunedLossShed(parent: DecoderState): void {
+		const gate = this.config.enablement?.gate
+		const now = performance.now()
+		const tuned = this.tunedView()
+		// The only decoder: nothing else runs, so it is protected as tuned.
+		const alone = ![...this.decoders.values()].some(
+			other =>
+				other !== parent &&
+				other.parentId !== parent.config.id &&
+				other.decoder.getStatus().running,
+		)
+		for (const state of this.decoders.values()) {
+			if (state !== parent && state.parentId !== parent.config.id) continue
+			const placement = state.placement
+			const admission = state.admission
+			if (
+				!placement ||
+				admission?.admit !== false ||
+				(admission.detail !== "drops" &&
+					admission.detail !== "cpu" &&
+					admission.detail !== "late-drops") ||
+				!(
+					alone ||
+					placement.tunedBand === true ||
+					this.placementTuned(placement, tuned)
+				)
+			)
+				continue
+			gate?.forget(placement.key)
+			delete state.efficiencyBackoffMs
+			delete state.efficiencyLateShed
+			delete state.efficiencyTunedShed
+			delete state.efficiencyAttribution
+			state.admission = { admit: false, detail: "unknown", retryAtMs: now }
+			this.log.info(
+				{ decoderId: placement.decoderId, sourceId: placement.sourceId },
+				"Operator start cleared an efficiency shed",
+			)
+		}
 	}
 
 	private scheduleTunedSettle(waitMs: number): void {
@@ -1385,8 +1475,13 @@ export class DecoderManager extends EventEmitter {
 		// Admission, probation and retry bookkeeping share the monotonic clock.
 		// YAML placements are never on probation; their cost still counts for
 		// admission through runningPlacements().
+		// The only running decoder is protected like the tuned one: host
+		// starvation never sheds it, only its own sustained loss.
 		const verdicts = gate.probation(
-			running.filter(item => !this.gateExemptKey(item.key)),
+			(running.length === 1
+				? [{ ...running[0]!, tunedBand: true as const }]
+				: running
+			).filter(item => !this.gateExemptKey(item.key)),
 			now,
 		)
 		const condemned = new Set(verdicts.map(verdict => verdict.key))
@@ -1395,16 +1490,22 @@ export class DecoderManager extends EventEmitter {
 				state.decoder.getStatus().running &&
 				state.admittedAtMs !== undefined &&
 				(state.efficiencyLateShed ||
+					state.efficiencyTunedShed ||
 					!(state.placement && condemned.has(state.placement.key))) &&
 				now - state.admittedAtMs >=
-					(state.efficiencyLateShed
-						? EFFICIENCY_RETRY_MAX_MS
-						: EFFICIENCY_PROBATION_MS)
+					(state.efficiencyTunedShed
+						? TUNED_RETRY_MAX_MS
+						: state.efficiencyLateShed
+							? EFFICIENCY_RETRY_MAX_MS
+							: EFFICIENCY_PROBATION_MS)
 			) {
 				// Normal failures reset after 30 s; late-shed history needs 1,800,000 ms
 				// since readmission. Earlier failures double 300k -> 600k -> 1.2M -> 1.8M.
+				// A tuned shed's history resets after 240,000 ms (30k -> 60k -> 120k -> 240k).
 				delete state.efficiencyLateShed
+				delete state.efficiencyTunedShed
 				delete state.efficiencyBackoffMs
+				delete state.efficiencyAttribution
 			}
 		}
 		// Each verdict belongs to the run the gate judged; a suspension awaited
@@ -1440,6 +1541,15 @@ export class DecoderManager extends EventEmitter {
 				state.lifecycle?.runGeneration !== run
 			)
 				continue
+			const why = gate.shedAttribution?.(verdict.key)
+			const tuned = why?.tuned === true
+			if (tuned) state.efficiencyTunedShed = true
+			if (why) state.efficiencyAttribution = why.attribution
+			else delete state.efficiencyAttribution
+			if (tuned) gate.noteSuspended(verdict.key, verdict.detail, now, true)
+			else gate.noteSuspended(verdict.key, verdict.detail, now)
+			// Tuned: 30,000 ms doubling to 240,000 ms; else 300,000 ms doubling to 1,800,000 ms.
+			state.efficiencyBackoffMs = lossRetryMs(state.efficiencyBackoffMs, tuned)
 			if (verdict.detail === "late-drops") {
 				state.efficiencyLateShed = true
 				this.log.warn(
@@ -1449,21 +1559,22 @@ export class DecoderManager extends EventEmitter {
 						efficiencyDetail: "late-drops",
 						sourceId: state.placement.sourceId,
 						decoderId: state.placement.decoderId,
+						...(why
+							? {
+									tuned,
+									retryInMs: state.efficiencyBackoffMs,
+									...why.attribution,
+								}
+							: {}),
 					},
 					"Late drops shed a decoder",
 				)
 			}
-			gate.noteSuspended(verdict.key, verdict.detail, now)
-			state.efficiencyBackoffMs = Math.min(
-				state.efficiencyBackoffMs === undefined
-					? EFFICIENCY_RETRY_MS
-					: state.efficiencyBackoffMs * 2,
-				EFFICIENCY_RETRY_MAX_MS,
-			)
 			state.admission = {
 				admit: false,
 				detail: verdict.detail,
 				retryAtMs: now + state.efficiencyBackoffMs,
+				...(why ? { cause: why.attribution.cause } : {}),
 			}
 			delete state.admittedAtMs
 			await this.suspend(state, this.assessEligibility(state))
@@ -2035,6 +2146,8 @@ export class DecoderManager extends EventEmitter {
 					this.restorePlacementOptions(parent)
 					delete parent.efficiencyBackoffMs
 					delete parent.efficiencyLateShed
+					delete parent.efficiencyTunedShed
+					delete parent.efficiencyAttribution
 					delete parent.admission
 					delete parent.admittedAtMs
 					delete parent.placement
@@ -2144,6 +2257,8 @@ export class DecoderManager extends EventEmitter {
 								// The gate restarts this placement's history; the manager's must match.
 								delete state.efficiencyBackoffMs
 								delete state.efficiencyLateShed
+								delete state.efficiencyTunedShed
+								delete state.efficiencyAttribution
 							}
 							state.placement = placement
 							moved = false
@@ -2160,6 +2275,8 @@ export class DecoderManager extends EventEmitter {
 					enablement.gate?.forget(state.placement.key)
 					delete state.efficiencyBackoffMs
 					delete state.efficiencyLateShed
+					delete state.efficiencyTunedShed
+					delete state.efficiencyAttribution
 					delete state.admission
 					delete state.admittedAtMs
 				}
@@ -3277,6 +3394,7 @@ export class DecoderManager extends EventEmitter {
 				!current()
 			)
 				return
+			if (intent?.clearEfficiencyShed === true) this.clearTunedLossShed(state)
 			if (!this.reconcilingPlacements) await this.reconcilePlacements()
 			if (
 				this.decoders.get(id) !== state ||
@@ -3933,9 +4051,11 @@ export class DecoderManager extends EventEmitter {
 												state.admission.retryAtMs -
 												performance.now(),
 										).toISOString(),
+										...lossCauseField(state),
 									},
 								}
 							: {}),
+						...this.hostBusyField(state),
 					}
 				: {}),
 			...(state.scannerJobId !== null
@@ -6089,6 +6209,30 @@ export class DecoderManager extends EventEmitter {
 	// Rate plan (reporting only; rate model B1)
 	// ============================================================================
 
+	/**
+	 * `hostBusy` while the decoder's source drops samples for host starvation
+	 * (the gate's hostBusy, held for HOST_BUSY_HOLD_MS after the latest host loss).
+	 */
+	private hostBusyField(state: DecoderState): { hostBusy?: DecoderHostBusy } {
+		const gate = this.config.enablement?.gate
+		const sourceId = state.placement?.sourceId ?? this.selectedSourceId(state)
+		if (typeof gate?.hostBusy !== "function" || sourceId === undefined)
+			return {}
+		try {
+			const busy = gate.hostBusy(sourceId)
+			return busy
+				? {
+						hostBusy: {
+							congestedBranches: busy.congestedBranches,
+							loopLagP99Ms: busy.loopLagP99Ms,
+						},
+					}
+				: {}
+		} catch {
+			return {}
+		}
+	}
+
 	private selectedSourceId(state: DecoderState): string | undefined {
 		return state.config.sourceId ?? this.sourceRouting?.getDefaultSourceId()
 	}
@@ -6494,6 +6638,8 @@ export class DecoderManager extends EventEmitter {
 			gate.forget(state.placement.key)
 			delete state.efficiencyBackoffMs
 			delete state.efficiencyLateShed
+			delete state.efficiencyTunedShed
+			delete state.efficiencyAttribution
 			state.admission = { admit: false, detail: "budget", retryAtMs: now }
 		}
 		this.scheduleEfficiencyEvaluation()

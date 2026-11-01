@@ -100,7 +100,10 @@ curl --fail --header "$AUTH" "$API_ORIGIN/api/decoders/summary"
 
 One entry per decoder: `state`, `placements`, `eventsOut`, `lastOutputAt`,
 `suspensionReason`, `health` and a `verdict` whose `actions` say what to try first
-([GET /api/decoders/summary](API.md#get-apidecoderssummary)).
+([GET /api/decoders/summary](API.md#get-apidecoderssummary)). A verdict `cause` of `host`
+means the host is busy and every decoder dropped samples: stopping decoders or lowering
+the sample rate of one will not help it; `retryAt` says when a decoder stopped for its
+own loss is tried again.
 
 ## Read activity
 

@@ -136,8 +136,8 @@ function harness(options: { tuned?: boolean } = {}) {
 			expect(gate.probation(running, mono)).toEqual([])
 		}
 	/** Overflow while `holder` holds the absorber, every sample for `ms`. */
-	const overflowFor = (holder: string | null, ms: number) => {
-		cpu.normalisedPercent = 95
+	const overflowFor = (holder: string | null, ms: number, cpuPercent = 95) => {
+		cpu.normalisedPercent = cpuPercent
 		const verdicts: { key: string; detail: string }[] = []
 		for (let t = 0; t < ms; t += 2_000) {
 			overflow++
@@ -217,9 +217,17 @@ it("a tuned probationer is judged by overflow its own branch held, not live audi
 	} finally {
 		live.close()
 	}
+	// CPU at 95 % makes the overflow host loss: never the tuned decoder's own.
+	const host = harness({ tuned: true })
+	try {
+		expect(host.overflowFor("decoder-readsb", 20_000)).toEqual([])
+	} finally {
+		host.close()
+	}
+	// On a healthy host the overflow its own branch held is its own loss.
 	const own = harness({ tuned: true })
 	try {
-		expect(own.overflowFor("decoder-readsb", 20_000)).toEqual([
+		expect(own.overflowFor("decoder-readsb", 20_000, 10)).toEqual([
 			{ key: "readsb", detail: "drops" },
 		])
 	} finally {

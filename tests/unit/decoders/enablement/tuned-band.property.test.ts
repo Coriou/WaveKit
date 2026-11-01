@@ -207,7 +207,7 @@ it("no newcomer displaces an always or operator-started placement, primary or se
 
 // Feature: decoder-autostart, Property 2: a tuned-band probationer's CPU loss sheds untuned first, one placement per clear window
 // Validates: Requirements R2
-it("CPU loss during a tuned-band probation sheds the newest untuned placement, one per clear window", () => {
+it("CPU loss during a tuned-band probation sheds the newest untuned placement, one per clear window, never the tuned one", () => {
 	fc.assert(
 		fc.property(
 			fc.array(fc.boolean(), { minLength: 0, maxLength: 5 }),
@@ -255,14 +255,17 @@ it("CPU loss during a tuned-band probation sheds the newest untuned placement, o
 				// CPU over the limit every 20 000 ms (inside the 30 000 ms
 				// probation, which each loss restarts): a scapegoat at most once per
 				// 60 000 ms clear window, the newest untuned one; the losses inside
-				// the window are spent on it. Nothing untuned left: the tuned one,
-				// once the last scapegoat's clear window has closed too.
+				// the window are spent on it. Nothing untuned left: host CPU is
+				// host-wide, so the tuned one is never shed for it (checked for
+				// three more clear windows, 180 000 ms).
 				let lastShed = -Infinity
-				for (;;) {
+				let after = 0
+				while (after < 9) {
 					mono += 20_000
 					gate.record({ atMs: mono, cpuPercent: 99, sources: new Map() })
 					const due = mono - lastShed >= 60_000
-					const expected = due ? (untuned.pop() ?? "tuned") : null
+					const expected = due ? (untuned.pop() ?? null) : null
+					if (expected === null && untuned.length === 0 && due) after++
 					expect(gate.probation(running, mono)).toEqual(
 						expected ? [{ key: expected, detail: "cpu" }] : [],
 					)
@@ -272,8 +275,8 @@ it("CPU loss during a tuned-band probation sheds the newest untuned placement, o
 						running.findIndex(p => p.key === expected),
 						1,
 					)
-					if (expected === "tuned") break
 				}
+				expect(running.some(p => p.key === "tuned")).toBe(true)
 			},
 		),
 		{ numRuns: 100 },

@@ -203,6 +203,9 @@ export const agentDecoderSchema = z
 			.object({
 				code: decoderVerdictSchema.shape.code,
 				actions: z.array(z.enum(DECODER_VERDICT_ACTIONS)).max(L.actionsMax),
+				/** "host": the host is busy and every decoder dropped samples. */
+				cause: decoderVerdictSchema.shape.cause,
+				retryAt: iso.optional(),
 			})
 			.strict(),
 	})

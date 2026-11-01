@@ -23,6 +23,8 @@ import type {
 	DecoderModeSource,
 	DecoderPlacementView,
 	DecoderEfficiencyDetail,
+	DecoderHostBusy,
+	DecoderLossCause,
 	DecoderBandAssessment,
 	DecoderOptionIssue,
 	DecoderRateAssessment,
@@ -308,7 +310,14 @@ export interface DecoderStatus {
 	modeSource?: DecoderModeSource
 	origin?: "config" | "catalogue"
 	placements?: DecoderPlacementView[]
-	efficiency?: { detail: DecoderEfficiencyDetail; retryAt?: string }
+	efficiency?: {
+		detail: DecoderEfficiencyDetail
+		retryAt?: string
+		/** A loss shed: whose loss it was. */
+		cause?: DecoderLossCause
+	}
+	/** Its source drops samples for host or process starvation (see the API type). */
+	hostBusy?: DecoderHostBusy
 	rateHistory?: number[]
 	/** Unique identifier for this decoder */
 	id: string

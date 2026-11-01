@@ -2,6 +2,7 @@ import { z } from "zod"
 import type { Logger } from "../../utils/logger.js"
 import type {
 	DecoderEfficiencyDetail,
+	DecoderLossCause,
 	DropAttribution,
 } from "@wavekit/api-types"
 import {
@@ -17,16 +18,27 @@ import {
 	EFFICIENCY_RETRY_MAX_MS,
 	EFFICIENCY_SAMPLE_MS,
 	EFFICIENCY_STALE_MS,
+	TUNED_RETRY_MAX_MS,
+	lossRetryMs,
 } from "./contract.js"
 import type {
 	AdmissionDecision,
 	ChargedDrop,
 	LateDropWindow,
 	EfficiencyGate,
+	ProbationVerdict,
 	EfficiencyInputs,
 	RunningPlacement,
+	ShedAttribution,
 	WantedPlacement,
 } from "./contract.js"
+import {
+	HOST_STARVATION_WINDOW_MS,
+	hostExplained,
+	lossCause,
+	ownLoss,
+} from "./host-starvation.js"
+import type { LossAttribution } from "./host-starvation.js"
 
 const DropStateSchema = z.object({
 	state: z.enum(["ok", "dropping", "clearing", "unknown"]),
@@ -86,7 +98,12 @@ export interface DropReader {
 		fromMono: number,
 		toMono: number,
 	): readonly ChargedDrop[]
+	/** The latest event-loop delay interval (ms), for attribution logs only. */
+	latestLoopDelay?(): { maxMs: number; p99Ms: number } | null
 }
+
+/** How long the host-busy status holds after its latest host loss: one clear window, 60 000 ms. */
+export const HOST_BUSY_HOLD_MS = EFFICIENCY_CLEAR_MS
 
 export function createEfficiencyGate(
 	inputs: EfficiencyInputs,
@@ -176,6 +193,10 @@ export function createEfficiencyGate(
 	let lastBudget = budgetCores()
 	const failures = new Set<string>()
 	const lateRetries = new Set<string>()
+	/** Tuned-decoder loss sheds: their doubling history resets after TUNED_RETRY_MAX_MS. */
+	const tunedRetries = new Set<string>()
+	/** The latest probation pass's verdict attributions, by placement key. */
+	const shed = new Map<string, ShedAttribution>()
 	let cpu: number | null = null
 	/** Monotonic times of samples with CPU over the limit, oldest first. */
 	const highCpu: number[] = []
@@ -289,6 +310,55 @@ export function createEfficiencyGate(
 			return []
 		}
 	}
+	/** Evidence time of the latest sample, else the monotonic clock. */
+	const sampledMono = (): number => {
+		try {
+			const at = deps.drops?.lastSampleMono?.()
+			return valid(at) ? at : monoNow()
+		} catch {
+			return monoNow()
+		}
+	}
+	/**
+	 * The attribution of a source's latest loss within `lookbackMs` before
+	 * `mono` (host-starvation.ts), with the latest event-loop delay. `known`
+	 * is a cause the caller established itself; without it and with no drop in
+	 * view the cause reads "decoder". Safe fields only.
+	 */
+	const attributionAt = (
+		sourceId: string,
+		mono: number,
+		lookbackMs: number,
+		known?: DecoderLossCause,
+	): LossAttribution => {
+		let cause: { cause: DecoderLossCause; congestedBranches: number } | null =
+			null
+		if (valid(mono)) {
+			const drops =
+				chargedDrops(
+					sourceId,
+					mono - lookbackMs - HOST_STARVATION_WINDOW_MS,
+					mono,
+				) ?? []
+			let latest = -Infinity
+			for (const d of drops)
+				if (d.atMono >= mono - lookbackMs) latest = Math.max(latest, d.atMono)
+			if (latest > -Infinity) cause = lossCause(drops, latest)
+		}
+		let loop: { maxMs: number; p99Ms: number } | null = null
+		try {
+			const value = deps.drops?.latestLoopDelay?.()
+			if (value && valid(value.maxMs) && valid(value.p99Ms)) loop = value
+		} catch {
+			/* Unmeasured. */
+		}
+		return {
+			cause: known ?? cause?.cause ?? "decoder",
+			congestedBranches: cause?.congestedBranches ?? 0,
+			loopLagP99Ms: loop === null ? null : Math.round(loop.p99Ms),
+			loopLagMaxMs: loop === null ? null : Math.round(loop.maxMs),
+		}
+	}
 	/**
 	 * Drops or CPU over the limit observed in [admitted, until]. Drops judge a
 	 * placement only when charged to the branch it reads (or the source as a
@@ -307,7 +377,23 @@ export function createEfficiencyGate(
 		try {
 			const reader = deps.drops
 			const charged = chargedDrops(p.sourceId, admitted, until)
-			if (charged !== null)
+			// Tuned band: only its own loss judges it. A drop on its branch that
+			// host starvation explains (host-starvation.ts, read over the window
+			// either side) is every decoder's loss, and shedding cures none.
+			// Judged on the evidence known now (no settling): a probationer
+			// whose own branch drops while its siblings flow cannot keep up.
+			if (charged !== null && p.tunedBand === true)
+				dropped = ownLoss(
+					chargedDrops(
+						p.sourceId,
+						admitted - HOST_STARVATION_WINDOW_MS,
+						until + HOST_STARVATION_WINDOW_MS,
+					) ?? charged,
+					p.inputBranch,
+					admitted,
+					until,
+				)
+			else if (charged !== null)
 				dropped = charged.some(
 					d =>
 						p.inputBranch === undefined ||
@@ -616,8 +702,30 @@ export function createEfficiencyGate(
 		// A window condemns the placements reading a branch that dropped in it;
 		// an unscoped window (no branch list) or upstream loss no branch can be
 		// charged with (absorber overflow, "source") condemns the whole source.
+		// Tuned band: a window condemns the tuned decoder only with loss of its
+		// own in it (a drop on its branch host starvation does not explain);
+		// host loss sheds untuned placements only. Without branch-scoped drop
+		// evidence the window is judged as before.
+		const around =
+			windows.length > 0 && placements.some(p => p.tunedBand === true)
+				? chargedDrops(
+						sourceId,
+						windows[0]!.startMono - HOST_STARVATION_WINDOW_MS,
+						mono,
+					)
+				: null
 		const condemns = (w: LateDropWindow, p: RunningPlacement) =>
-			w.condemning && chargesBranch(w.condemnedBranches, p.inputBranch)
+			w.condemning &&
+			chargesBranch(w.condemnedBranches, p.inputBranch) &&
+			(p.tunedBand !== true ||
+				around === null ||
+				ownLoss(
+					around,
+					p.inputBranch,
+					justAfter(w.startMono),
+					w.endMono,
+					sampledMono(),
+				))
 		// Windows that condemn some placement on the source: drops only on a
 		// branch no decoder reads (live audio) condemn nothing.
 		const condemningWindows = windows.filter(w =>
@@ -751,12 +859,21 @@ export function createEfficiencyGate(
 			// "unknown" until a 60 s clear window is earned. A tuned-band
 			// newcomer starts once a clean run is under way instead (host or
 			// consumer loss still refuses); its probation judges it as usual.
+			// Tuned band, host busy: the source's loss in the last
+			// HOST_BUSY_HOLD_MS is host loss (every branch starved), which
+			// withholding the tuned decoder cannot cure, so drops do not refuse it.
+			const hostBusyNow =
+				tuned &&
+				valid(mono) &&
+				attributionAt(newcomer.sourceId, sampledMono(), HOST_BUSY_HOLD_MS)
+					.cause === "host"
 			const warming =
 				tuned &&
-				state !== "dropping" &&
-				attribution !== "host" &&
-				attribution !== "consumer" &&
-				cleanRunUnderway(newcomer.sourceId, mono)
+				(hostBusyNow ||
+					(state !== "dropping" &&
+						attribution !== "host" &&
+						attribution !== "consumer" &&
+						cleanRunUnderway(newcomer.sourceId, mono)))
 			const unsettled =
 				state === "unknown" || state === "clearing" || attribution === "unknown"
 			let detail: DecoderEfficiencyDetail | null = null
@@ -769,7 +886,7 @@ export function createEfficiencyGate(
 				(attribution !== undefined && !valid(mono))
 			)
 				detail = "unknown"
-			else if (state === "dropping") detail = "drops"
+			else if (state === "dropping" && !hostBusyNow) detail = "drops"
 			else if (!valid(inputs.cpuGuardPercent)) detail = "unknown"
 			else if ((currentCpu(now) ?? 0) > inputs.cpuGuardPercent) {
 				detail = "cpu"
@@ -789,6 +906,14 @@ export function createEfficiencyGate(
 					}
 					if (freed >= newcomer.costCores) detail = null
 					else swapped.clear()
+					// Host CPU at the guard while the host is busy, or on the retry
+					// of a tuned decoder shed for its own loss: withholding it cures
+					// no host load, so it is admitted on probation (budget applies).
+					if (
+						detail === "cpu" &&
+						(hostBusyNow || tunedRetries.has(newcomer.key))
+					)
+						detail = null
 				}
 			}
 			if (
@@ -932,15 +1057,20 @@ export function createEfficiencyGate(
 					graduated.add(placement.key)
 				// Normal retries reset on graduation. Late-shed retries retain their
 				// doubling history until readmission + the 1,800,000 ms cap.
+				// A tuned decoder's loss history resets after TUNED_RETRY_MAX_MS
+				// (240 000 ms) of readmitted run, so a flapping branch still backs off.
+				const tunedHistory = tunedRetries.has(placement.key)
 				if (
 					gated.has(placement.key) &&
 					graduated.has(placement.key) &&
-					(!lateRetries.has(placement.key) ||
-						mono - admittedMono.get(placement.key)! >= EFFICIENCY_RETRY_MAX_MS)
+					((!lateRetries.has(placement.key) && !tunedHistory) ||
+						mono - admittedMono.get(placement.key)! >=
+							(tunedHistory ? TUNED_RETRY_MAX_MS : EFFICIENCY_RETRY_MAX_MS))
 				) {
 					retries.delete(placement.key)
 					failures.delete(placement.key)
 					lateRetries.delete(placement.key)
+					tunedRetries.delete(placement.key)
 				}
 			}
 			const newest = new Map<
@@ -955,10 +1085,8 @@ export function createEfficiencyGate(
 					newest.set(placement.sourceId, { placement, admitted })
 				}
 			}
-			const verdicts: {
-				key: string
-				detail: "drops" | "cpu" | "late-drops"
-			}[] = []
+			const verdicts: ProbationVerdict[] = []
+			shed.clear()
 			for (const { placement, admitted } of newest.values()) {
 				if (valid(mono)) lateSince.set(placement.sourceId, mono)
 				if (placement.mode === "always" || placement.startMode === "operator")
@@ -997,6 +1125,36 @@ export function createEfficiencyGate(
 									hostElsewhere = true
 									hostCharged.add(b)
 								}
+					}
+					// Drops on its own branch that host starvation explains are
+					// host loss too: an untuned scapegoat (one reading a branch
+					// congested beside it first) goes, never the tuned one.
+					const from = Math.max(
+						admitted,
+						hostJudged.get(placement.key) ?? admitted,
+					)
+					const around =
+						chargedDrops(
+							placement.sourceId,
+							from - HOST_STARVATION_WINDOW_MS,
+							mono,
+						) ?? []
+					for (const d of around) {
+						if (
+							d.atMono < from ||
+							d.branches === "source" ||
+							placement.inputBranch === undefined ||
+							!d.branches.includes(placement.inputBranch) ||
+							!hostExplained(around, d)
+						)
+							continue
+						hostElsewhere = true
+						for (const n of around)
+							if (
+								n.branches !== "source" &&
+								Math.abs(n.atMono - d.atMono) <= HOST_STARVATION_WINDOW_MS
+							)
+								for (const b of n.branches) if (read.has(b)) hostCharged.add(b)
 					}
 					hostJudged.set(placement.key, justAfter(mono))
 				}
@@ -1052,6 +1210,15 @@ export function createEfficiencyGate(
 					if (scapegoat) {
 						failures.add(scapegoat.key)
 						verdicts.push({ key: scapegoat.key, detail: detail ?? "drops" })
+						shed.set(scapegoat.key, {
+							tuned: false,
+							attribution: attributionAt(
+								scapegoat.sourceId,
+								mono,
+								EFFICIENCY_PROBATION_MS,
+								"host",
+							),
+						})
 						scapegoatAt.set(scapegoat.sourceId, mono)
 						// Only a CPU scapegoat opens the window, and only once the
 						// previous one has closed: other scapegoats never extend it,
@@ -1081,10 +1248,26 @@ export function createEfficiencyGate(
 					}
 				}
 				// Host loss on a sibling's branch with nothing untuned left to shed:
-				// the tuned one is judged by its own branch and CPU only.
+				// the tuned one is judged by its own branch only.
 				if (detail === null) continue
+				// Tuned band: CPU over the guard is the host's CPU, so shedding the
+				// tuned decoder cannot cure it: it restarts its probation instead
+				// (graduating once 30 000 ms pass under the guard).
+				if (tuned && detail === "cpu") {
+					if (valid(mono)) mark(placement.key, justAfter(mono))
+					continue
+				}
 				failures.add(placement.key)
 				verdicts.push({ key: placement.key, detail })
+				shed.set(placement.key, {
+					tuned,
+					attribution: attributionAt(
+						placement.sourceId,
+						mono,
+						EFFICIENCY_PROBATION_MS,
+						tuned ? "decoder" : detail === "cpu" ? "host" : undefined,
+					),
+				})
 			}
 			if (valid(mono))
 				for (const sourceId of new Set(running.map(p => p.sourceId))) {
@@ -1130,25 +1313,39 @@ export function createEfficiencyGate(
 						undefined,
 					)
 					if (newestEligible) {
+						const tunedShed = newestEligible.tunedBand === true
 						failures.add(newestEligible.key)
 						verdicts.push({ key: newestEligible.key, detail: "late-drops" })
+						shed.set(newestEligible.key, {
+							tuned: tunedShed,
+							attribution: attributionAt(
+								sourceId,
+								mono,
+								LATE_SHED_WINDOWS * EFFICIENCY_DROP_WINDOW_MS,
+								tunedShed ? "decoder" : undefined,
+							),
+						})
 						cooldownUntil.set(sourceId, mono + LATE_SHED_COOLDOWN_MS)
 						lateSince.set(sourceId, mono)
 					}
 				}
 			return verdicts
 		},
-		noteSuspended(key, detail, now) {
+		noteSuspended(key, detail, now, tuned = false) {
 			originalFailed.delete(key)
 			reconnectRetained.delete(key)
 			placementEpochs.delete(key)
 			gated.delete(key)
 			if (detail === "late-drops") lateRetries.add(key)
+			if (tuned) tunedRetries.add(key)
 			const previous = retries.get(key)
-			const delay =
+			// Tuned: 30 000 ms doubling to TUNED_RETRY_MAX_MS (240 000 ms);
+			// otherwise 300 000 ms doubling to 1 800 000 ms.
+			const base =
 				failures.delete(key) && previous
-					? Math.min(previous.delay * 2, EFFICIENCY_RETRY_MAX_MS)
-					: (previous?.delay ?? EFFICIENCY_RETRY_MS)
+					? lossRetryMs(previous.delay, tuned)
+					: (previous?.delay ?? lossRetryMs(undefined, tuned))
+			const delay = tuned ? Math.min(base, TUNED_RETRY_MAX_MS) : base
 			retries.set(key, {
 				detail,
 				delay,
@@ -1175,6 +1372,16 @@ export function createEfficiencyGate(
 			retries.delete(key)
 			failures.delete(key)
 			lateRetries.delete(key)
+			tunedRetries.delete(key)
+		},
+		shedAttribution: key => shed.get(key),
+		hostBusy(sourceId) {
+			const attribution = attributionAt(
+				sourceId,
+				sampledMono(),
+				HOST_BUSY_HOLD_MS,
+			)
+			return attribution?.cause === "host" ? attribution : null
 		},
 		view(running, blocked, now) {
 			const mono = monoNow()

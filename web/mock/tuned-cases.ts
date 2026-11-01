@@ -143,6 +143,45 @@ export const TUNED_CASES: readonly TunedCase[] = [
 		expect: { proto: "ADS-B", rows: [["readsb", "Decoding"]] },
 	}),
 	tunedCase({
+		id: "adsb-host-busy",
+		title:
+			"1090 MHz: ADS-B decoding while the host is busy and every decoder dropped samples",
+		hz: ADSB_HZ,
+		band: ADSB_BAND,
+		named: null,
+		decoders: [
+			adsb({
+				lastOutputAt: ago(2_000),
+				stats: { bytesIn: 1, eventsOut: 1204, errors: 0 },
+				hostBusy: { congestedBranches: 2, loopLagP99Ms: 180 },
+			}),
+		],
+		expect: { proto: "ADS-B", rows: [["readsb", "Decoding"]] },
+	}),
+	tunedCase({
+		id: "adsb-shed-retry",
+		title:
+			"1090 MHz: ADS-B shed for its own dropped samples; it retries in 40 s",
+		hz: ADSB_HZ,
+		band: ADSB_BAND,
+		named: null,
+		decoders: [
+			adsb({
+				running: false,
+				suspended: true,
+				suspension: { reasonCode: "efficiency-budget", since: ago(20_000) },
+				efficiency: {
+					detail: "late-drops",
+					cause: "decoder",
+					retryAt: new Date(TUNED_CASE_NOW + 40_000).toISOString(),
+				},
+				lastOutputAt: ago(25_000),
+				stats: { bytesIn: 1, eventsOut: 1204, errors: 0 },
+			}),
+		],
+		expect: { proto: "ADS-B", rows: [["readsb", "Paused"]] },
+	}),
+	tunedCase({
 		id: "adsb-source-paused",
 		title:
 			"1090 MHz: the operator paused the receiver feed; ADS-B waits for Resume",

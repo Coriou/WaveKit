@@ -275,6 +275,8 @@ export async function buildAgentStatus(
 		verdict: {
 			code: summary.verdict.code,
 			actions: bounds.list(summary.verdict.actions, L.actionsMax),
+			...(summary.verdict.cause ? { cause: summary.verdict.cause } : {}),
+			...(summary.verdict.retryAt ? { retryAt: summary.verdict.retryAt } : {}),
 		},
 	}))
 	const lastDecodeRows = bounds.list(lastDecode, L.decodersMax).map(row => ({
