@@ -268,7 +268,7 @@ waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads
   `P` key toggles pause and the plain resume from anywhere; a pause from the palette or the key
   offers Undo. Read-only browsers cannot pause. While paused,
   the tuned card's decoders read Paused, "Receiver paused", each with a **Resume** button; when the
-  paused feed holds every decoder on the card's frequency, the card's header reads `Receiver paused`
+  paused feed holds any decoder on the card's frequency, the card's header reads `Receiver paused`
   and its summary says the receiver is paused, and
   Settings › Decoders reads `Paused · the receiver is paused`. A scanner identify running when you
   pause ends with what it found so far and reads `Stopped · receiver paused`. A sweep running when
