@@ -297,6 +297,8 @@ const held: {
 	dir: string | null
 	child: ChildProcess | null
 	exited: Promise<unknown>
+	sampler: ChildProcess | null
+	sampled: Promise<unknown>
 	ws: WsStats | null
 	logChunks: Buffer[]
 } = {
@@ -304,16 +306,28 @@ const held: {
 	dir: null,
 	child: null,
 	exited: Promise.resolve(),
+	sampler: null,
+	sampled: Promise.resolve(),
 	ws: null,
 	logChunks: [],
 }
 let cleaning: Promise<void> | null = null
+
+/** POSIX single-quoted shell word: nothing inside expands. */
+function shellQuote(value: string): string {
+	return `'${value.replaceAll("'", "'\\''")}'`
+}
 
 /** Idempotent: close the client, kill and await the scratch core, close the fake, drop the tmp dir. */
 function cleanup(): Promise<void> {
 	cleaning ??= (async () => {
 		held.ws?.close()
 		held.ws = null
+		const sampler = held.sampler
+		if (sampler && sampler.exitCode === null && sampler.signalCode === null) {
+			sampler.kill("SIGKILL")
+			await Promise.race([held.sampled, sleep(5000)])
+		}
 		const child = held.child
 		if (child && child.exitCode === null && child.signalCode === null) {
 			child.kill("SIGKILL")
@@ -374,7 +388,7 @@ async function main(): Promise<void> {
 				const path = join(binDir, tool)
 				writeFileSync(
 					path,
-					`#!/bin/sh\nexec python3 ${JSON.stringify(join(root, "scripts", stub))} "$@"\n`,
+					`#!/bin/sh\nexec python3 ${shellQuote(join(root, "scripts", stub))} "$@"\n`,
 				)
 				chmodSync(path, 0o755)
 			}
@@ -525,6 +539,8 @@ async function main(): Promise<void> {
 				sampler.once("error", () => resolve())
 			}
 		})
+		held.sampler = sampler
+		held.sampled = sampled
 		await sleep(SECONDS * 1000)
 		await Promise.race([sampled, sleep(15_000)])
 		child.kill("SIGUSR2") // preload: write the window
