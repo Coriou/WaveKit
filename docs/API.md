@@ -5487,7 +5487,9 @@ time. Before the 2026-11-01 core a flushed row kept its latest reception's
 times, so it could list up to 60 s out of time order. If a flushed row's write
 fails, its receptions are held again and retried (no `write-failed` drop); a
 failed reception row hands the held receptions it carried to the entity's
-next row. These held rows skip the per-decoder admission bucket (at most one per
+next row. Once the store is closing nothing can retry them, so a row whose write
+fails then counts as one `write-failed` drop (in the shutdown ingestion gap).
+These held rows skip the per-decoder admission bucket (at most one per
 entity per 60 s) but take a global token; one the global bucket, the queue caps
 or a paused store turn away stays held and is retried after `pauseRetryMs`
 (`stats.coalesceDeferrals`, not a loss). Only at shutdown, or past 4,096
@@ -5685,7 +5687,11 @@ rate-limited receptions cost what they did before the 2026-10-13 core, and the i
 Row growth and retention: built-row growth from presentation is at most 240
 bytes for a position-only row (160 bytes before the 2026-10-16 core; raised so a typical fix
 keeps a five-digit `altM` and a mesh `!abcdef12 Position` title, 226 bytes at
-seven decimals, without rounding) and at most 1,100 bytes for any row. The raise
+seven decimals, without rounding) and at most 1,100 bytes for any row. From the
+2026-11-01 core only APRS and Meshtastic rows can be position-only: aircraft and
+ship rows always list their fields, so every one of them, a bare fix included,
+has the 1,100-byte bound, and an aircraft row's `aircraft` identity counts
+inside it. The raise
 costs at most 80 bytes per coalesced row, so at most 250,000 × 80 = 20 MB (about
 7.5 % of 256 MiB) at the row cap; rows a day are unchanged. When a row does not
 fit, its title is clipped and its coordinates rounded to six, five, then four
@@ -5857,7 +5863,11 @@ from `GET /api/activity/:eventId` and the `activity` WebSocket replay frames.
 An aircraft row stored from the 2026-11-01 core also has `aircraft`: who the
 aircraft was when the row was stored, `{ callsign?, registration?, typeCode?,
 typeDescription?, operator? }` (each at most 64 bytes, absent when unknown, the
-whole member absent when nothing was known). The callsign comes from the
+whole member absent when nothing was known). The identity fits in what the
+row's presentation leaves of the 1,100-byte growth bound: members are left out
+from the lowest priority (`typeDescription`, `operator`, `typeCode`,
+`registration`, then `callsign`) until it fits, so a row listing all its fields
+often keeps only the callsign and registration. The callsign comes from the
 entity's merged state, the rest from the aircraft enrichment cache already in
 memory (never a lookup at store time); `operator` is the callsign's airline
 when known, else the registered operator. Search matches these values, so an

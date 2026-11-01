@@ -8,6 +8,7 @@ import {
 	withMergedData,
 	withPresentation,
 } from "./envelope.js"
+import { fitAircraftIdentity } from "./presentation/budget.js"
 import { presentDecoderOutputResult } from "./presentation/registry.js"
 import { resolveProvenance } from "./provenance/resolve.js"
 import type { CoalesceMerge } from "./storage/coalesce.js"
@@ -278,10 +279,17 @@ export function createActivityIngress(
 				return plain
 			}
 			let presented: DecodeEnvelope | undefined
-			// Aircraft rows carry who the aircraft is (stored rows only: presented lazily).
-			const identified = (env: DecodeEnvelope): DecodeEnvelope => {
+			// Aircraft rows carry who the aircraft is (stored rows only: presented
+			// lazily), within the row growth bound over `from`, the envelope the
+			// presentation was fitted to.
+			const identified = (
+				env: DecodeEnvelope,
+				from: DecodeEnvelope,
+			): DecodeEnvelope => {
 				if (env.outputType !== "aircraft") return env
-				const aircraft = aircraftIdentityOf(env, identityLookup)
+				const known = aircraftIdentityOf(env, identityLookup)
+				if (known === undefined) return env
+				const aircraft = fitAircraftIdentity(env, from, known)
 				if (aircraft === undefined) return env
 				try {
 					return withEnvelopeMetadata(env, { aircraft })
@@ -303,13 +311,13 @@ export function createActivityIngress(
 					)
 					if (attempt.error !== undefined) {
 						failed(attempt.error)
-						return identified(base)
+						return identified(base, base)
 					}
-					if (attempt.presentation === undefined) return identified(base)
-					return identified(withPresentation(base, attempt.presentation))
+					if (attempt.presentation === undefined) return identified(base, base)
+					return identified(withPresentation(base, attempt.presentation), base)
 				} catch (err) {
 					failed(err)
-					return identified(base)
+					return identified(base, base)
 				}
 			}
 			const present: ActivityPresenter = merged => {
@@ -325,7 +333,10 @@ export function createActivityIngress(
 					)
 					if (attempt.error !== undefined) return failed(attempt.error)
 					if (attempt.presentation === undefined) return plain
-					presented = identified(withPresentation(plain, attempt.presentation))
+					presented = identified(
+						withPresentation(plain, attempt.presentation),
+						plain,
+					)
 					return presented
 				} catch (err) {
 					return failed(err)

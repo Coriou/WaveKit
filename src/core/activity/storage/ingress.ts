@@ -502,10 +502,15 @@ export class ActivityIngress {
 		this.flood.forget(key, eventId)
 	}
 
-	/** True when the row's held receptions are held again (the row lost nothing). */
+	/**
+	 * True when the row's held receptions are held again (the row lost
+	 * nothing). Never once closed: no flush can carry them any more, so the
+	 * row is a counted write-failed loss rather than silently held.
+	 */
 	private rollBackCoalescing(eventId: string): boolean {
 		const undo = this.coalesceUndo.get(eventId)
 		this.coalesceUndo.delete(eventId)
+		if (this.closed) return false
 		return undo?.() ?? false
 	}
 

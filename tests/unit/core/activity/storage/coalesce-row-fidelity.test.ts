@@ -1,18 +1,25 @@
 import { describe, expect, it } from "vitest"
 import { createActivityIngress } from "../../../../../src/core/activity/ingress.js"
 import type { ActivityAircraftIdentityLookup } from "../../../../../src/core/activity/ingress.js"
+import {
+	createDecodeEnvelope,
+	withEnvelopeMetadata,
+} from "../../../../../src/core/activity/envelope.js"
 import { presentAircraft } from "../../../../../src/core/activity/presentation/aircraft.js"
+import { ROW_GROWTH_MAX_BYTES } from "../../../../../src/core/activity/presentation/budget.js"
 import { presentShip } from "../../../../../src/core/activity/presentation/ship.js"
 import {
 	isPositionOnlyShape,
 	PositionCoalescer,
 } from "../../../../../src/core/activity/storage/coalesce.js"
 import { ActivityIngress } from "../../../../../src/core/activity/storage/ingress.js"
+import { ACTIVITY_RECORD_VERSION } from "../../../../../src/core/activity/storage/contract.js"
 import {
 	ACTIVITY_LIMIT_DEFAULTS,
 	resolveActivityLimits,
 } from "../../../../../src/core/activity/storage/limits.js"
 import {
+	buildActivityRow,
 	parseStoredSummary,
 	type BuiltActivityRow,
 } from "../../../../../src/core/activity/storage/row.js"
@@ -378,6 +385,52 @@ describe("a failed write keeps the held receptions it carried", () => {
 		expect(i.dropped["write-failed"]).toBe(0)
 		expect(i.nextCoalesceDueAt()).toBeDefined()
 	})
+
+	it("a shutdown flush row skipped after close is a counted loss, never held again", () => {
+		const clock = { t: T0 }
+		const i = storeIngress(clock)
+		i.admit(plane(T0, 1))
+		drain(i)
+		clock.t = T0 + 1_000
+		expect(i.admit(plane(clock.t, 1.1))).toMatchObject({ reason: "coalesced" })
+		i.flushAllCoalesced()
+		i.markClosed()
+		const batch = i.takeBatch(64, 1 << 20)
+		expect(batch).toHaveLength(1)
+		i.noteSkipped(
+			batch,
+			batch.map(r => r.eventId),
+		)
+		i.ack(new Set())
+		expect(i.dropped["write-failed"]).toBe(1)
+		expect(i.nextCoalesceDueAt()).toBeUndefined()
+		// The loss is in the ingestion-gap accounting staged at shutdown.
+		expect(i.stageOpenEpisode(clock.t)).toBe(true)
+		const gap = i.takeBatch(64, 1 << 20)
+		expect(gap.map(r => r.kind)).toEqual(["ingestion-gap"])
+		expect(JSON.parse(gap[0]!.recordJson)).toMatchObject({
+			payload: { reason: "write-failed", dropped: 1 },
+		})
+		i.abandonQueued()
+		expect(i.dropped["write-failed"]).toBe(1)
+	})
+
+	it("a shutdown flush row nacked after close is a counted loss too", () => {
+		const clock = { t: T0 }
+		const i = storeIngress(clock)
+		i.admit(plane(T0, 1))
+		drain(i)
+		clock.t = T0 + 1_000
+		i.admit(plane(clock.t, 1.1))
+		i.flushAllCoalesced()
+		i.markClosed()
+		expect(i.takeBatch(64, 1 << 20)).toHaveLength(1)
+		i.nack()
+		expect(i.dropped["write-failed"]).toBe(1)
+		expect(i.nextCoalesceDueAt()).toBeUndefined()
+		i.abandonQueued()
+		expect(i.dropped["write-failed"]).toBe(1)
+	})
 })
 
 describe("identity comparison", () => {
@@ -502,5 +555,157 @@ describe("stored aircraft rows carry the identity known when stored", () => {
 		const rows = drain(h.store)
 		expect(stored(rows[0]).aircraft).toBeUndefined()
 		expect(h.calls).toEqual([])
+	})
+})
+
+describe("stored aircraft identity stays inside the row growth bound", () => {
+	const ORDER = [
+		"callsign",
+		"registration",
+		"typeCode",
+		"operator",
+		"typeDescription",
+	] as const
+
+	function rowBytes(env: DecodeEnvelope): number {
+		const row = buildActivityRow({
+			version: ACTIVITY_RECORD_VERSION,
+			eventId: env.eventId,
+			commitSeq: "0",
+			producedAt: env.producedAt,
+			receivedAt: env.receivedAt,
+			kind: "decoder-reception",
+			payload: env,
+		})
+		return (
+			Buffer.byteLength(row.summaryJson, "utf8") +
+			Buffer.byteLength(row.recordJson, "utf8") +
+			Buffer.byteLength(row.ftsText, "utf8")
+		)
+	}
+
+	function storeOne(
+		data: Record<string, JsonValue>,
+		known: ReturnType<ActivityAircraftIdentityLookup>,
+	) {
+		const clock = { t: T0 }
+		const store = storeIngress(clock)
+		const output = {
+			timestamp: new Date(clock.t),
+			decoder: "dec",
+			type: "aircraft" as const,
+			data,
+		}
+		const core = createActivityIngress({
+			sink: (env, present) => {
+				store.admit(env, present)
+			},
+			logger,
+			now: () => new Date(clock.t),
+			randomUUID: () => "i-0",
+			aircraftIdentity: () => known,
+		})
+		core.publish("dec", "readsb", output)
+		const rows = drain(store)
+		expect(rows).toHaveLength(1)
+		const env = stored(rows[0])
+		const plain = createDecodeEnvelope(output, {
+			eventId: env.eventId,
+			receivedAt: new Date(env.receivedAt),
+			decoderId: "dec",
+			decoderType: "readsb",
+			provenance: { sourceId: null, frequency: null },
+		})
+		return { row: rows[0]!, env, plainBytes: rowBytes(plain) }
+	}
+
+	const ordinary = (callsign: string): Record<string, JsonValue> => ({
+		icao: "A0F050",
+		callsign,
+		altitude: 37_000,
+		groundSpeed: 452.5,
+		track: 271.3,
+		verticalRate: -1_024,
+		squawk: "7421",
+		lat: 51.4706123,
+		lon: -0.4619456,
+	})
+
+	it("drops identity members, lowest priority first, until record + summary + FTS growth fits 1,100 bytes", () => {
+		const quotes = '"'.repeat(64)
+		const { row, env, plainBytes } = storeOne(ordinary("WKA50"), {
+			registration: quotes,
+			typeCode: quotes,
+			typeDescription: quotes,
+			operator: quotes,
+		})
+		expect(rowBytes(env) - plainBytes).toBeLessThanOrEqual(ROW_GROWTH_MAX_BYTES)
+		// The callsign and the list fields survive; the summary agrees with the record.
+		expect(env.aircraft?.callsign).toBe("WKA50")
+		expect(keys(env.fields)).toContain("altitude")
+		expect(parseStoredSummary(storedRowOf(row)).aircraft).toEqual(env.aircraft)
+	})
+
+	it("keeps the most identity that fits, at and past the bound, for escape-heavy values", () => {
+		for (const n of [0, 8, 16, 24, 32, 40, 48, 56, 64]) {
+			const text = '\\"'.repeat(n / 2) || "N0WK50"
+			const known = {
+				registration: text,
+				typeCode: text,
+				typeDescription: text,
+				operator: text,
+			}
+			const { env, plainBytes } = storeOne(ordinary("WKA50"), known)
+			const growth = rowBytes(env) - plainBytes
+			expect(growth).toBeLessThanOrEqual(ROW_GROWTH_MAX_BYTES)
+			const identity = env.aircraft ?? {}
+			const kept = ORDER.filter(key => identity[key] !== undefined)
+			// Kept members are a priority prefix: a lower one never outlives a higher one.
+			expect(kept).toEqual(ORDER.slice(0, kept.length))
+			const next = ORDER[kept.length]
+			if (next === undefined) continue
+			// The first dropped member would have passed the bound.
+			const value = next === "callsign" ? "WKA50" : known[next]
+			const grown = withEnvelopeMetadata(env, {
+				aircraft: { ...identity, [next]: value },
+			})
+			expect(rowBytes(grown) - plainBytes).toBeGreaterThan(ROW_GROWTH_MAX_BYTES)
+		}
+	})
+
+	it("keeps an ordinary identity whole on a sparse row", () => {
+		const known = {
+			registration: "N0WK51",
+			typeCode: "B77W",
+			typeDescription: "Boeing 777-300ER",
+			operator: "WaveKit International Airways",
+		}
+		const { env, plainBytes } = storeOne(
+			{ icao: "A0F051", callsign: "WKA51", lat: 51.47, lon: -0.46 },
+			known,
+		)
+		expect(env.aircraft).toEqual({ callsign: "WKA51", ...known })
+		expect(rowBytes(env) - plainBytes).toBeLessThanOrEqual(ROW_GROWTH_MAX_BYTES)
+	})
+
+	it("keeps the callsign and registration of a fully listed row", () => {
+		const { env, plainBytes } = storeOne(ordinary("WKA52"), {
+			registration: "N0WK52",
+			typeCode: "B77W",
+			typeDescription: "Boeing 777-300ER",
+			operator: "WaveKit International Airways",
+		})
+		expect(env.aircraft).toMatchObject({
+			callsign: "WKA52",
+			registration: "N0WK52",
+		})
+		expect(keys(env.fields)).toEqual([
+			"squawk",
+			"altitude",
+			"groundSpeed",
+			"track",
+			"verticalRate",
+		])
+		expect(rowBytes(env) - plainBytes).toBeLessThanOrEqual(ROW_GROWTH_MAX_BYTES)
 	})
 })
