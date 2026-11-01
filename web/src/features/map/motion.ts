@@ -361,9 +361,12 @@ function retrack(
 function observe(s: MotionState, fix: Fix, now: number): void {
 	markSeen(s, fix)
 	if (fix.lat === s.fixLat && fix.lon === s.fixLon) {
-		// the accepted position again: a new course or speed for it (re-extrapolated, blended), and past SAME_FIX_MS a
-		// new report there, which moves the fix's time forward; never back, whatever the receive jitter
-		const at = fix.posAt - s.fixAt > SAME_FIX_MS ? fix.posAt : s.fixAt
+		// the accepted position again: a new course or speed for it (re-extrapolated from the fix's own time, blended).
+		// Only a plane that is not moving can really report the same spot later: past SAME_FIX_MS that moves the fix's
+		// time forward (a parked plane, keeping the gate's clock fresh). A moving plane's same position is a re-send,
+		// and moving its time forward would pull the track back by speed × delay. Never back, whatever the jitter.
+		const at =
+			!fix.moving && fix.posAt - s.fixAt > SAME_FIX_MS ? fix.posAt : s.fixAt
 		retrack(s, fix, s.fixLat, s.fixLon, at, now, false)
 		return
 	}

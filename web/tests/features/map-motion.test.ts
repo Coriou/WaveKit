@@ -525,9 +525,9 @@ describe("aircraft motion smoothing", () => {
 		expect(km(s, at(0, 0))).toBeLessThan(1e-9)
 		// at SAME_FIX_MS it is the same fix re-sent (time kept); just past it, a new one
 		const t = createMotion(fix(0, 0, T0, null, null), T0)
-		advance(t, fix(0, 0, T0 + SAME_FIX_MS, 90, 450), T0 + 300)
+		advance(t, fix(0, 0, T0 + SAME_FIX_MS, 0, 0), T0 + 300)
 		expect(t.fixAt).toBe(T0)
-		advance(t, fix(0, 0, T0 + SAME_FIX_MS + 1, 90, 450), T0 + 400)
+		advance(t, fix(0, 0, T0 + SAME_FIX_MS + 1, null, null), T0 + 400)
 		expect(t.fixAt).toBe(T0 + SAME_FIX_MS + 1)
 	})
 
@@ -559,10 +559,27 @@ describe("aircraft motion smoothing", () => {
 		expect(s.fixAt).toBe(T0)
 		expect(s.vE).toBeCloseTo(0, 9)
 		expect(s.vN).toBeLessThan(0)
-		// 2 s late with another course: applied, and a new report there moves the time forward
+		// 2 s late with another course: applied; a moving plane's same position is a re-send, its time kept
 		advance(s, fix(0, 0, T0 + 2000, 0, 450), T0 + 2000)
-		expect(s.fixAt).toBe(T0 + 2000)
+		expect(s.fixAt).toBe(T0)
 		expect(s.vN).toBeGreaterThan(0)
+	})
+
+	it("does not pull a moving plane back when its unchanged position is re-sent late", () => {
+		// eastbound at 450 kn; the same fix and velocity re-sent 2 s later used to move the fix time forward and pull
+		// the extrapolated track back by 0.2315 km/s × 2 s = 463 m
+		const s = createMotion(fix(0, 0, T0, 90, 450), T0)
+		advance(s, fix(0, 0, T0, 90, 450), T0 + 2000)
+		const before = { lat: s.lat, lon: s.lon }
+		advance(s, fix(0, 0, T0 + 2000, 90, 450), T0 + 2000)
+		expect(s.fixAt).toBe(T0)
+		expect(km(s, before)).toBeLessThan(1e-6)
+		advance(s, fix(0, 0, T0 + 2000, 90, 450), T0 + 3000)
+		expect(km(s, at(0, 0.2315 * 3))).toBeLessThan(0.001)
+		// a parked plane's later report at the same spot does move its time forward
+		const p = createMotion(fix(0, 0, T0, null, null), T0)
+		advance(p, fix(0, 0, T0 + 2000, null, null), T0 + 2000)
+		expect(p.fixAt).toBe(T0 + 2000)
 	})
 
 	it("confirms a held-back fix only with a newer one", () => {
