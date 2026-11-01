@@ -1366,6 +1366,7 @@ export class ScannerService extends EventEmitter {
 					),
 				}),
 				logger: this.log,
+				observationOpen: (id: string) => this.isOpenObservation(id),
 				...(deps.recordingProtection
 					? {
 							discoveryHoldsKept: (id: string) =>
@@ -4674,13 +4675,14 @@ export class ScannerService extends EventEmitter {
 		}
 		// An observation-only placement (its track never became a discovery) holds no proof: the
 		// confirmed decode proves the stored discovery at its channel, else anchors there. An
-		// anchor that took it holds those observations, so their later ingests (their close
-		// included) open no second discovery at the channel (store.holdForAnchor).
+		// anchor that took it holds those still open, so their later ingests (their close
+		// included) open no second discovery at the channel (store.holdForAnchor). A closed one
+		// never ingests again, so holding it would only use up the bound.
 		if (channelAnchored && !placedOnDiscovery) {
 			const tookId = this.anchorChannelDecode(e)
 			if (tookId !== null)
 				for (const live of candidates)
-					if (live.discoveryId === null)
+					if (live.discoveryId === null && live.endedAt === undefined)
 						this.store.holdForAnchor(live.sourceId, live.observationId, tookId)
 		}
 	}
@@ -6088,9 +6090,14 @@ export class ScannerService extends EventEmitter {
 		const id = anchored.discoveryId
 		if (id === null) return false
 		this.dirty = true
-		// An anchor that took the decode holds the capture's observation: its later ingests, its
-		// close included, open no second discovery at the channel (store.holdForAnchor).
-		if (result.observationId !== null)
+		// An anchor that took the decode holds the capture's observation while it is open: its
+		// later ingests, its close included, open no second discovery at the channel
+		// (store.holdForAnchor). A replay landing after the close holds nothing (no ingest follows).
+		if (
+			result.observationId !== null &&
+			live !== undefined &&
+			live.endedAt === undefined
+		)
 			this.store.holdForAnchor(result.sourceId, result.observationId, id)
 		const d = this.store.get(id)
 		if (
@@ -6223,6 +6230,13 @@ export class ScannerService extends EventEmitter {
 			if (span.endedAt !== undefined) at = Math.min(at, span.endedAt - 1)
 		}
 		return at
+	}
+
+	/** An observation still tracked and not closed (the store's anchor-hold sweep). */
+	private isOpenObservation(observationId: string): boolean {
+		for (const o of this.live.values())
+			if (o.observationId === observationId) return o.endedAt === undefined
+		return false
 	}
 
 	private findObservation(observationId: string): LiveObservation | undefined {

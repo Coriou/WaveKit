@@ -422,12 +422,42 @@ describe.each(CASES)("$decoder pairing scope across placements", c => {
 				obwHz: 9_000,
 				epoch: 1,
 			})
+			expect(r.internal.store.anchorHeldCount()).toBe(1)
 			r.internal.ingest(live, track)
 			r.internal.ingest(live, { ...track, blocks: 40 })
 			expect(r.discoveries().map(d => d.id)).toEqual([anchor!.id])
 			r.internal.ingest(live, { ...track, blocks: 60 }, "quiet")
 			expect(r.discoveries().map(d => d.id)).toEqual([anchor!.id])
 			expect(r.internal.store.discoveryIdOf("o_only")).toBeUndefined()
+			// The close released the hold.
+			expect(r.internal.store.anchorHeldCount()).toBe(0)
+		} finally {
+			await r.stop()
+		}
+	})
+
+	it("an anchor that took a closed observation-only placement holds nothing", async () => {
+		const r = await rig(c)
+		try {
+			r.send(c.data(1))
+			r.place("o_closed", false)
+			// Closed, still indexed for placement, as the service keeps it after its close.
+			const closed = r.internal.live.get("o_closed")!
+			closed.endedAt = r.clock.at
+			r.internal.ambientObservations.upsert({
+				...closed,
+				lastTrack: trackOf({
+					trackId: "o_closed",
+					centreHz: c.channelHz,
+					obwHz: 9_000,
+					epoch: 1,
+				}),
+			} as LiveObservation)
+			r.send(c.data(2))
+			expect(r.discoveries()).toEqual([
+				expect.objectContaining({ anchor: "decode", protocol: c.protocol }),
+			])
+			expect(r.internal.store.anchorHeldCount()).toBe(0)
 		} finally {
 			await r.stop()
 		}

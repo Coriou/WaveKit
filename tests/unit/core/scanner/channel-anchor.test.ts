@@ -7,7 +7,10 @@ import {
 	canAnchor,
 	decodeAnchorKey,
 } from "../../../../src/core/scanner/store/decode-anchor.js"
-import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
+import {
+	ANCHOR_HELD_MAX,
+	DiscoveryStore,
+} from "../../../../src/core/scanner/store/discovery-store.js"
 import { evidenceLevelOf } from "../../../../src/core/scanner/proof.js"
 import { makeObs } from "../../../mocks/scanner/observations.js"
 import type {
@@ -148,6 +151,141 @@ describe("channel anchors (ACARS, VDL2)", () => {
 		} finally {
 			s.stopAnchorExpiry()
 		}
+	})
+
+	describe("anchor holds release and bound", () => {
+		/** An observation-only track near CH_A that would surface on its own (2 blocks, passed). */
+		const near = (id: string, open: boolean, spur = false) =>
+			makeObs({
+				id,
+				centreHz: CH_A + 1_500,
+				startedAt: T0 - 10_000,
+				blocks: 2,
+				obwHz: 9_000,
+				sourceId: "rtl",
+				open,
+				spur,
+			})
+		const fill = (s: DiscoveryStore, anchorId: string, count: number) => {
+			for (let i = 0; i < count; i++)
+				expect(s.holdForAnchor("rtl", `o_${i}`, anchorId)).toBe(true)
+		}
+
+		it("a flagged close releases the hold, as an ordinary close does", () => {
+			const s = store()
+			try {
+				const anchorId = s.anchorDecode(
+					"rtl",
+					CH_A,
+					acars(),
+					"commanded",
+				).discoveryId!
+				expect(s.holdForAnchor("rtl", "o_flag", anchorId)).toBe(true)
+				expect(s.holdForAnchor("rtl", "o_plain", anchorId)).toBe(true)
+				expect(s.anchorHeldCount()).toBe(2)
+				// An open flagged ingest keeps the hold; its close releases it.
+				expect(s.ingest(near("o_flag", true, true)).change).toBe("transient")
+				expect(s.anchorHeldCount()).toBe(2)
+				expect(s.ingest(near("o_flag", false, true)).change).toBe("transient")
+				expect(s.anchorHeldCount()).toBe(1)
+				expect(s.ingest(near("o_plain", false)).change).toBe("transient")
+				expect(s.anchorHeldCount()).toBe(0)
+				expect(s.snapshot().discoveries.map(d => d.id)).toEqual([anchorId])
+			} finally {
+				s.stopAnchorExpiry()
+			}
+		})
+
+		it("deleting or pruning an anchor releases its holds and no other anchor's", () => {
+			let at = T0
+			const s = store(() => at)
+			try {
+				const a = s.anchorDecode("rtl", CH_A, acars(), "commanded").discoveryId!
+				const b = s.anchorDecode("rtl", CH_B, acars(), "commanded").discoveryId!
+				expect(s.holdForAnchor("rtl", "o_a1", a)).toBe(true)
+				expect(s.holdForAnchor("rtl", "o_a2", a)).toBe(true)
+				expect(s.holdForAnchor("rtl", "o_b", b)).toBe(true)
+				// Re-holding moves the observation to the other anchor; it is counted once.
+				expect(s.holdForAnchor("rtl", "o_a2", b)).toBe(true)
+				expect(s.anchorHeldCount()).toBe(3)
+				expect(s.delete(a)).toBe(true)
+				expect(s.anchorHeldCount()).toBe(2)
+				at = T0 + 2 * 86_400_000
+				expect(s.pruneInactive(1)).toContain(b)
+				expect(s.anchorHeldCount()).toBe(0)
+			} finally {
+				s.stopAnchorExpiry()
+			}
+		})
+
+		// Bound: ANCHOR_HELD_MAX = 4096 = 8 sources x 512 open tracks; at it a new hold is refused.
+		it("holds exactly ANCHOR_HELD_MAX (4096) live holds and refuses the 4097th without forgetting one", () => {
+			expect(ANCHOR_HELD_MAX).toBe(4096)
+			const s = store()
+			try {
+				const anchorId = s.anchorDecode(
+					"rtl",
+					CH_A,
+					acars(),
+					"commanded",
+				).discoveryId!
+				fill(s, anchorId, ANCHOR_HELD_MAX)
+				expect(s.anchorHeldCount()).toBe(4096)
+				// The 4097th is refused; re-holding one already held still succeeds.
+				expect(s.holdForAnchor("rtl", "o_4096", anchorId)).toBe(false)
+				expect(s.holdForAnchor("rtl", "o_4095", anchorId)).toBe(true)
+				expect(s.anchorHeldCount()).toBe(4096)
+				// The oldest live hold was not forgotten: its close opens no duplicate discovery.
+				expect(s.ingest(near("o_0", false)).change).toBe("transient")
+				expect(s.snapshot().discoveries.map(d => d.id)).toEqual([anchorId])
+				// The close freed a slot.
+				expect(s.holdForAnchor("rtl", "o_4096", anchorId)).toBe(true)
+				expect(s.anchorHeldCount()).toBe(4096)
+			} finally {
+				s.stopAnchorExpiry()
+			}
+		})
+
+		it("at the bound drops only holds of observations no longer open; a throwing port keeps all", () => {
+			let open: (id: string) => boolean = id => id !== "o_7"
+			let n = 0
+			const s = new DiscoveryStore({
+				maxDiscoveries: 10,
+				now: () => T0,
+				newId: () => `anchor${n++}`,
+				observationOpen: id => open(id),
+			})
+			try {
+				const anchorId = s.anchorDecode(
+					"rtl",
+					CH_A,
+					acars(),
+					"commanded",
+				).discoveryId!
+				// Under the bound the port is not read.
+				const port = vi.fn((id: string) => id !== "o_7")
+				open = port
+				fill(s, anchorId, ANCHOR_HELD_MAX - 1)
+				expect(port).not.toHaveBeenCalled()
+				fill(s, anchorId, ANCHOR_HELD_MAX)
+				expect(s.anchorHeldCount()).toBe(4096)
+				expect(s.holdForAnchor("rtl", "o_4096", anchorId)).toBe(true)
+				expect(port).toHaveBeenCalledTimes(4096)
+				expect(s.anchorHeldCount()).toBe(4096)
+				// o_7 (closed) went; o_8 (open) is still held.
+				expect(s.ingest(near("o_8", false)).change).toBe("transient")
+				expect(s.anchorHeldCount()).toBe(4095)
+				expect(s.holdForAnchor("rtl", "o_8", anchorId)).toBe(true)
+				// Fail closed: a throwing port answers "open", so the new hold is refused.
+				open = () => {
+					throw new Error("port down")
+				}
+				expect(s.holdForAnchor("rtl", "o_4097", anchorId)).toBe(false)
+				expect(s.anchorHeldCount()).toBe(4096)
+			} finally {
+				s.stopAnchorExpiry()
+			}
+		})
 	})
 
 	it("keeps one anchor per source, protocol and channel", () => {

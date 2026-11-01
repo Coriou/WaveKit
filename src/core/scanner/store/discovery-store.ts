@@ -256,6 +256,12 @@ export interface DiscoveryStoreOptions {
 	channelRasters?: (sourceId: string, centreHz: number) => Raster[]
 	/** WG9 req 2.6: inactive prune and capacity eviction skip a discovery holding kept recordings. */
 	discoveryHoldsKept?: (discoveryId: string) => boolean
+	/**
+	 * Whether an observation is still open (not closed, still tracked). Read only when the anchor
+	 * holds are full (holdForAnchor) to drop holds of observations whose close never reached the
+	 * store; a throwing port answers "open" (the hold stays). Absent: every hold counts as open.
+	 */
+	observationOpen?: (observationId: string) => boolean
 	/** WG9 R2: the eviction-blocked-by-kept warning; a module-level fallback logger without one. */
 	logger?: Logger
 	/** Scanner-redesign 3.11: region and effective ranges read when a weak record is presented. */
@@ -335,8 +341,13 @@ const DEFAULT_LIMIT = 100
 const MAX_LIMIT = 500
 const DAY_MS = 86_400_000
 const TRANSIENT: Ingested = { discoveryId: null, change: "transient" }
-/** Observations a channel anchor holds at once (holdForAnchor); the oldest go first. */
-const ANCHOR_HELD_MAX = 4096
+/**
+ * Observations channel anchors hold at once (holdForAnchor). A hold lives only while its
+ * observation is open and its anchor exists (a close or the anchor's removal releases it), so live
+ * holds are bounded by open tracks: 8 sources x 512 tracks (the spectrum engine's default
+ * maxTracks) = 4096. At the bound a new hold is refused, never a live one dropped.
+ */
+export const ANCHOR_HELD_MAX = 4096
 
 /** Comparable text of a staged anchor identity ("" for none). */
 function anchorIdentityText(identity: Identity | undefined): string {
@@ -924,10 +935,14 @@ export class DiscoveryStore
 	private readonly anchorReplayed = new Set<string>()
 	/**
 	 * Observations without a discovery whose channel decode a channel anchor took
-	 * (holdForAnchor): observation id → anchor id, in insertion order, at most
-	 * ANCHOR_HELD_MAX. In memory only, as live observations are.
+	 * (holdForAnchor): observation id → anchor id, at most ANCHOR_HELD_MAX. In memory only, as
+	 * live observations are. anchorHolds indexes the same holds by anchor id, so an anchor's
+	 * removal releases them.
 	 */
 	private readonly anchorHeld = new Map<string, string>()
+	private readonly anchorHolds = new Map<string, Set<string>>()
+	/** Logged once per run of refusals at the bound; reset when a hold is accepted again. */
+	private anchorHeldFullWarned = false
 	/** Latest confirmations stay private until publishAnchor commits a revision. */
 	private readonly anchorPending = new Map<
 		string,
@@ -1061,6 +1076,7 @@ export class DiscoveryStore
 	private proofQuiet = 0
 
 	private readonly hintScope: DiscoveryStoreOptions["hintScope"]
+	private readonly observationOpen: (observationId: string) => boolean
 
 	constructor(opts: DiscoveryStoreOptions) {
 		super()
@@ -1075,6 +1091,17 @@ export class DiscoveryStore
 		this.minSurfaceBlocks = opts.minSurfaceBlocks ?? 2
 		this.rastersFor = opts.rasters ?? (() => [])
 		this.channelRastersFor = opts.channelRasters ?? (() => [])
+		const open = opts.observationOpen
+		// Fail closed: a throwing port answers "open", so a live hold is never dropped.
+		this.observationOpen = open
+			? id => {
+					try {
+						return open(id) !== false
+					} catch {
+						return true
+					}
+				}
+			: () => true
 		const holds = opts.discoveryHoldsKept
 		// Fail closed: a throwing port answers "holds kept".
 		this.holdsKept = holds
@@ -1094,6 +1121,8 @@ export class DiscoveryStore
 	 * says, so evidence that follows still finds its discovery.
 	 */
 	ingest(input: ObservationInput, opts: IngestOptions = {}): Ingested {
+		// Read (and, on a close, released) before any early return, so every close path releases.
+		const held = this.heldByAnchor(input)
 		// A sliced restore is between turns: the store is half built, so an observation is not
 		// admitted (transient, as below the gate; the next block observes it again).
 		if (this.restoring) {
@@ -1110,7 +1139,7 @@ export class DiscoveryStore
 			return this.reingest(known, input)
 		}
 		if (flagged) return TRANSIENT
-		if (this.heldByAnchor(input)) return TRANSIENT
+		if (held) return TRANSIENT
 		if (input.jobIds.length === 0) return TRANSIENT
 		if (
 			input.track.gate !== "passed" &&
@@ -1281,7 +1310,11 @@ export class DiscoveryStore
 	 * its close included, would open a second discovery at the channel. While the anchor exists
 	 * the observation's ingests stay transient, and its pending admission entry stops counting
 	 * (no later single-block promotion surfaces it). False, and nothing held, when `anchorId` is
-	 * not a channel anchor or the observation already belongs to a discovery.
+	 * not a channel anchor or the observation already belongs to a discovery. The caller holds
+	 * only an open observation (a closed one never ingests again). At ANCHOR_HELD_MAX holds, those
+	 * of closed observations (observationOpen) are dropped first; if every hold is still live the
+	 * new one is refused (false, warned): that observation may then open its own discovery at its
+	 * close, as before holds existed, rather than a live hold being forgotten.
 	 */
 	holdForAnchor(
 		sourceId: string,
@@ -1297,24 +1330,64 @@ export class DiscoveryStore
 			this.observationIndex.has(observationId)
 		)
 			return false
-		this.pending.forget(sourceId, observationId)
-		this.anchorHeld.delete(observationId)
-		this.anchorHeld.set(observationId, anchorId)
-		if (this.anchorHeld.size > ANCHOR_HELD_MAX) {
-			const first = this.anchorHeld.keys().next()
-			if (!first.done) this.anchorHeld.delete(first.value)
+		if (
+			!this.anchorHeld.has(observationId) &&
+			this.anchorHeld.size >= ANCHOR_HELD_MAX
+		) {
+			for (const held of [...this.anchorHeld.keys()])
+				if (!this.observationOpen(held)) this.releaseAnchorHold(held)
+			if (this.anchorHeld.size >= ANCHOR_HELD_MAX) {
+				if (!this.anchorHeldFullWarned) {
+					this.anchorHeldFullWarned = true
+					const log =
+						this.injectedLog ??
+						(fallbackLog ??= createComponentLogger(
+							createLogger({ level: "info" }),
+							"DiscoveryStore",
+						))
+					log.warn(
+						{ held: this.anchorHeld.size },
+						"Channel anchor holds at the bound; a new hold was refused",
+					)
+				}
+				return false
+			}
 		}
+		this.anchorHeldFullWarned = false
+		this.pending.forget(sourceId, observationId)
+		this.releaseAnchorHold(observationId)
+		this.anchorHeld.set(observationId, anchorId)
+		let holds = this.anchorHolds.get(anchorId)
+		if (holds === undefined) {
+			holds = new Set()
+			this.anchorHolds.set(anchorId, holds)
+		}
+		holds.add(observationId)
 		return true
+	}
+
+	/** Observations channel anchors hold now (holdForAnchor); for tests and diagnostics. */
+	anchorHeldCount(): number {
+		return this.anchorHeld.size
 	}
 
 	/** The observation is held by a channel anchor that still exists; a close releases the hold. */
 	private heldByAnchor(input: ObservationInput): boolean {
 		const anchorId = this.anchorHeld.get(input.id)
 		if (anchorId === undefined) return false
-		if (input.endedAt !== undefined) this.anchorHeld.delete(input.id)
+		if (input.endedAt !== undefined) this.releaseAnchorHold(input.id)
 		if (this.discoveries.get(anchorId)?.anchor === "decode") return true
-		this.anchorHeld.delete(input.id)
+		this.releaseAnchorHold(input.id)
 		return false
+	}
+
+	private releaseAnchorHold(observationId: string): void {
+		const anchorId = this.anchorHeld.get(observationId)
+		if (anchorId === undefined) return
+		this.anchorHeld.delete(observationId)
+		const holds = this.anchorHolds.get(anchorId)
+		holds?.delete(observationId)
+		if (holds?.size === 0) this.anchorHolds.delete(anchorId)
 	}
 
 	/**
@@ -2998,6 +3071,7 @@ export class DiscoveryStore
 		this.anchorIdentity.clear()
 		this.anchorReplayed.clear()
 		this.anchorHeld.clear()
+		this.anchorHolds.clear()
 		this.anchorPending.clear()
 		this.anchorPublished.clear()
 		this.observationIndex.clear()
@@ -5577,6 +5651,9 @@ export class DiscoveryStore
 		this.anchorReplayed.delete(id)
 		this.anchorPending.delete(id)
 		this.anchorPublished.delete(id)
+		for (const held of this.anchorHolds.get(id) ?? [])
+			this.anchorHeld.delete(held)
+		this.anchorHolds.delete(id)
 		this.discoveries.delete(id)
 		const timer = this.anchorExpiry.get(id)
 		if (timer) clearTimeout(timer)

@@ -198,6 +198,7 @@ async function scanner(
 		deps: { iqCapture?: unknown }
 		store: DiscoveryStore
 		live: Map<string, LiveObservation>
+		recent: LiveObservation[]
 		classify(t: unknown, s: string): LiveObservation["classification"]
 		ingest(l: LiveObservation, t: unknown, endReason?: string): void
 	}
@@ -395,7 +396,10 @@ describe.each(CASES)("$decoder replay to a decoded discovery", c => {
 				encrypted: false,
 			} as unknown as LiveObservation
 			r.internal.live.set("t2", live)
+			// The first replay's observation ("o_gone") is not tracked: nothing was held for it.
+			expect(r.internal.store.anchorHeldCount()).toBe(0)
 			r.apply({ captureId: "cap-3", observationId: "o_live" })
+			expect(r.internal.store.anchorHeldCount()).toBe(1)
 			r.internal.ingest(live, track)
 			r.internal.ingest(live, { ...track, blocks: 40 })
 			expect(r.discoveries().map(d => d.id)).toEqual([anchorId])
@@ -403,6 +407,53 @@ describe.each(CASES)("$decoder replay to a decoded discovery", c => {
 			expect(r.discoveries().map(d => d.id)).toEqual([anchorId])
 			expect(live.discoveryId).toBeNull()
 			expect(r.internal.store.discoveryIdOf("o_live")).toBeUndefined()
+			// The close released the hold.
+			expect(r.internal.store.anchorHeldCount()).toBe(0)
+		} finally {
+			await r.stop()
+		}
+	})
+
+	it("a replay landing after its observation closed holds nothing", async () => {
+		const r = await scanner(c)
+		try {
+			const job = await r.h.service.createJob({
+				sourceId: "rtl",
+				mode: "in-window",
+				signalsOnly: true,
+			})
+			r.apply({})
+			const anchorId = r.discoveries()[0]!.id
+			const track = trackOf({
+				trackId: "t3",
+				centreHz: c.channelHz + OFF,
+				obwHz: 9_000,
+				epoch: 1,
+			})
+			// Closed and kept in recent, as the service leaves an observation after its close.
+			const closed = {
+				observationId: "o_closed",
+				sourceId: "rtl",
+				trackId: "t3",
+				epoch: 1,
+				jobIds: [job.id],
+				discoveryId: null,
+				startedAt: 40_000,
+				endedAt: 45_000,
+				endReason: "quiet",
+				classification: r.internal.classify(track, "rtl"),
+				probeIds: new Set(),
+				lastActivityAt: 45_000,
+				lastIngestAt: 45_000,
+				lastTrack: track,
+				decoded: false,
+				encrypted: false,
+			} as unknown as LiveObservation
+			r.internal.recent.push(closed)
+			r.apply({ captureId: "cap-4", observationId: "o_closed" })
+			// The anchor still took the decode; no hold was spent on an observation that never ingests again.
+			expect(r.discoveries().map(d => d.id)).toEqual([anchorId])
+			expect(r.internal.store.anchorHeldCount()).toBe(0)
 		} finally {
 			await r.stop()
 		}
