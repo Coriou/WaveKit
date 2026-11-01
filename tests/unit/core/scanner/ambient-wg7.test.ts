@@ -260,7 +260,7 @@ const ship = (mmsi: string, channel: "A" | "B" | undefined = "A") => ({
 })
 const acars = (tail: string, frequency: number, error = 0) => ({
 	type: "acars",
-	data: { tail, frequency, error },
+	data: { tail, frequency, error, errorKnown: true },
 	timestamp: new Date(1_000),
 })
 const vdl2 = (fromaddr: string, frequency: number) => ({
@@ -864,7 +864,7 @@ describe("AmbientEvidence WG7 review fixes", () => {
 	})
 
 	it.each([
-		["acarsdec", "acars", { tail: "TEST01", error: 0 }],
+		["acarsdec", "acars", { tail: "TEST01", error: 0, errorKnown: true }],
 		["dumpvdl2", "vdl2", { fromaddr: "ABC001" }],
 		["lora-meshtastic", "meshtastic", { from: 1 }],
 	])(

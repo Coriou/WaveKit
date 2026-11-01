@@ -6,6 +6,8 @@ import {
 	type AmbientTargetDeps,
 } from "../../../../src/core/scanner/probes/ambient-target.js"
 import type { DecoderConfig } from "../../../../src/decoders/types.js"
+import { Dumpvdl2Decoder } from "../../../../src/decoders/builtin/dumpvdl2.js"
+import pino from "pino"
 
 type OldTarget = {
 	sourceId: string
@@ -148,6 +150,14 @@ describe("resolveAmbientTargets", () => {
 		expect(resolveAmbientTargets(cfgOf("dumpvdl2"), d)?.targetsHz).toEqual([
 			136_650_000, 136_700_000, 136_975_000,
 		])
+		// the very list the adapter decodes (one source, options/dumpvdl2.ts)
+		const vdl2 = new Dumpvdl2Decoder(
+			cfgOf("dumpvdl2"),
+			pino({ level: "silent" }),
+		).getBandDeclaration()
+		expect(vdl2.intrinsic?.targetsHz).toEqual(
+			resolveAmbientTargets(cfgOf("dumpvdl2"), d)?.targetsHz,
+		)
 	})
 
 	it("uses the LoRa tuned frequency, and the centre when it follows", () => {

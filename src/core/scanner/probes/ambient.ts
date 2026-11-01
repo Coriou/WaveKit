@@ -121,6 +121,11 @@ export interface AmbientEvidenceEvent {
 	freqHz?: number
 	/** Shared by all evidence items from one decoder output, for debug-log deduplication. */
 	decodeToken?: object
+	/**
+	 * The manager's placement binding of a new-type decode (non-enumerable): where its trust was
+	 * read, so a channel anchor re-reads trust at the same placement. Absent for unplaced decoders.
+	 */
+	placement?: { sourceId: string; channelHz: number | null }
 }
 
 /** Where an ambient decode lies, for the shared confirm pairing. */
@@ -625,6 +630,13 @@ export class AmbientEvidence extends EventEmitter {
 				ev,
 			}
 			Object.defineProperty(event, "decodeToken", { value: decodeToken })
+			if (placement)
+				Object.defineProperty(event, "placement", {
+					value: {
+						sourceId: placement.sourceId,
+						channelHz: placement.channelHz,
+					},
+				})
 			this.emit("evidence", event)
 		}
 	}

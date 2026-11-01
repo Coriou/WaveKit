@@ -618,7 +618,28 @@ describe("HfdlDecoder", () => {
    channel, or the VFO when it sits exactly on one of them, starts first; the others start
    only when the CPU budget admits them, so some may show as suspended. It never falls back
    to the capture centre. A YAML acarsdec with `frequencies` keeps one process per listed
-   frequency.
+   frequency. Each process demodulates the 25 kHz AM channel (flat to ±6 kHz, stopped by
+   ±12 kHz). The acarsdec option `channelFilter: true` (experimental, pending measurement;
+   default off) adds a 9.2 kHz channel filter before the demodulator: flat over one ACARS
+   block (±3.6 kHz) plus 1 kHz for the aircraft transmitter (5 ppm) and Doppler at 137 MHz,
+   3 dB down at 5 kHz, 6 dB at 5.1 kHz and 55 dB at 5.6 kHz, so it rejects an 8.33 kHz voice
+   neighbour (about 62 dB down). It barely attenuates a carrier 5 kHz off the channel (3 dB),
+   and it leaves the receiver about 2 ppm of frequency error, so a dongle without a TCXO or a
+   ppm correction clips a sideband. It runs on the raw IQ path and on channelizer IQ; on the
+   raw path it is left out (one log line) when `offsetHz` is set, and on any path below an
+   11.2 kHz or above a 255.5 kHz demodulation rate (past that its filter outgrows the bounded
+   csdr buffer).
+   The built-in dumpvdl2 decodes every VDL Mode 2 channel of your region in one process. In
+   the EU these are 136.725, 136.775, 136.825, 136.875, 136.925 and 136.975 MHz, the VHF
+   digital link frequencies of Commission Implementing Regulation (EU) No 1079/2012.
+   In other regions, and for a YAML dumpvdl2 without `frequencies`, it decodes 136.650,
+   136.700 and 136.975 MHz (136.975 MHz is the worldwide common signalling channel), as
+   before; a YAML dumpvdl2 in the EU should list the EU channels in `frequencies`. The EU channels span 250 kHz and need a 300 kHz channel around 136.850 MHz,
+   which fits a capture of 1.024 Msps or more centred near that frequency. Limitation:
+   dumpvdl2 is given the whole list. On the raw IQ path a channel outside the sampled window
+   is passed anyway and cannot be decoded there; on the channelizer a list whose span does
+   not fit the channel rate is rejected (`channel-request-invalid`). WaveKit does not trim the
+   list to the channels inside the window, so list only channels your capture covers.
 7. These extra paging and ACARS channels (all but each decoder's first) always come last in
    the CPU budget. When another decoder needs room, for example AIS with 161.975 and
    162.025 MHz in the capture, that decoder starts and the newest extra channels stop with

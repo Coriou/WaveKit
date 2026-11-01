@@ -28,7 +28,7 @@ import {
 } from "../../../../src/core/scanner/probes/ambient.js"
 import { ConfirmMemory } from "../../../../src/core/scanner/probes/confirm/confirm-memory.js"
 
-const HZ = 131_725_000
+const HZ = 133_725_000
 function rig(
 	type: string,
 	hz = HZ,
@@ -130,12 +130,14 @@ describe("ambient identify all regressions", () => {
 				frequency: HZ + 500,
 				tail: "TEST01",
 				error: 0,
+				errorKnown: true,
 				msgno: "M01A",
 			})
 			r.emit("acars", {
 				frequency: HZ + 500,
 				tail: "TEST01",
 				error: 0,
+				errorKnown: true,
 				msgno: "M02A",
 			})
 			expect(seen).toEqual(
@@ -440,7 +442,7 @@ it("logs ambiguous placement once per decode, with silent shared-scope lookups",
 			sourceId: string
 			hz: number
 			at: number
-			protocol: "acars"
+			protocol: "acars" | "ais"
 		}): string | null
 	}
 	internal.now = () => 100_000
@@ -461,8 +463,14 @@ it("logs ambiguous placement once per decode, with silent shared-scope lookups",
 			protocol: "acars" as const,
 			decodeToken: {},
 		}
-		for (let i = 0; i < 5; i++)
-			expect(internal.ambientConfirmScope(e)).toBeNull()
+		// An ambiguous spectrum placement leaves a point decode to its decoder; a channel-anchored
+		// ACARS block pairs on its own channel instead.
+		for (let i = 0; i < 5; i++) {
+			expect(internal.ambientConfirmScope({ ...e, protocol: "ais" })).toBeNull()
+			expect(internal.ambientConfirmScope(e)).toBe(
+				`a:${JSON.stringify(["fake", "acars", HZ])}`,
+			)
+		}
 		expect(debug).not.toHaveBeenCalled()
 		for (let i = 0; i < 5; i++) expect(internal.placeAmbient(e)).toEqual([])
 		expect(debug).toHaveBeenCalledTimes(1)
@@ -492,6 +500,37 @@ it("queries occupied spans plus tolerance even beyond the widest half-width", ()
 			0,
 		),
 	).toEqual([o])
+})
+
+it("indexes live observations by id through every set, replace, delete and clear", () => {
+	const map = new AmbientObservationMap(new AmbientObservationIndex())
+	const at = (id: string, centreHz = HZ) => ({
+		observationId: id,
+		sourceId: "fake",
+		startedAt: 0,
+		lastTrack: { centreHz, obwHz: 25_000 },
+	})
+	const a = at("o_a")
+	const b = at("o_b")
+	map.set("t1", a)
+	map.set("t2", b)
+	expect(map.byObservationId("o_a")).toBe(a)
+	expect(map.byObservationId("o_b")).toBe(b)
+	// A track key re-set to another observation drops the old id only.
+	const c = at("o_c")
+	map.set("t1", c)
+	expect(map.byObservationId("o_a")).toBeUndefined()
+	expect(map.byObservationId("o_c")).toBe(c)
+	// An id another key took since stays when its first key goes.
+	const b2 = at("o_b", HZ + 25_000)
+	map.set("t3", b2)
+	map.delete("t2")
+	expect(map.byObservationId("o_b")).toBe(b2)
+	map.delete("t3")
+	expect(map.byObservationId("o_b")).toBeUndefined()
+	map.clear()
+	expect(map.byObservationId("o_c")).toBeUndefined()
+	expect(map.size).toBe(0)
 })
 
 it("updates the frequency index on centre movement and expiry", () => {

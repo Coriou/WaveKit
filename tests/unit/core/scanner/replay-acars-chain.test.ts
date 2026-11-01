@@ -137,6 +137,7 @@ const noPassive = {
 function scanner() {
 	const h = serviceHarness(noPassive)
 	const internals = h.service as unknown as {
+		deps: { iqCapture?: unknown }
 		live: Map<string, LiveObservation>
 		classify(t: TrackSnapshot, s: string): LiveObservation["classification"]
 		replayPlans: Map<string, readonly unknown[]>
@@ -248,6 +249,8 @@ describe("acarsdec replay chain (synthetic ACARS)", () => {
 		})
 		const { h, internals } = scanner()
 		await h.service.start()
+		// The capture's trust: a replayed ACARS decode proves only through a trusted capture.
+		internals.deps.iqCapture = { view: () => view }
 		try {
 			const applied = vi
 				.spyOn(

@@ -308,6 +308,35 @@ describe("ScannerService IQ capture wiring (WG11 req 6.3)", () => {
 		},
 	)
 
+	// A fictional 25 kHz airband channel: 133.550 MHz.
+	it.each([
+		[133_550_000 + 3_999, 133_550_000],
+		[133_550_000 - 3_999, 133_550_000],
+		[133_550_000 + 4_000, 133_550_000 + 4_000],
+		[133_550_000 + 8_333, 133_550_000 + 8_333],
+	])(
+		"a detection capture of a track at %s Hz is made at %s Hz (the raster channel within 3 999 Hz)",
+		async (centreHz, rfHz) => {
+			const { h, port, internals, live } = setup()
+			await h.service.start()
+			try {
+				internals.spectrum.engine = () => ({
+					currentEpoch: () => ({
+						epoch: 1,
+						centreHz: 133_600_000,
+						sampleRateHz: 1_024_000,
+					}),
+				})
+				internals.requestIqCapture(live(), trackOf({ centreHz }))
+				expect(port.capture).toHaveBeenCalledWith(
+					expect.objectContaining({ rfHz, reason: "detection" }),
+				)
+			} finally {
+				await h.service.stop()
+			}
+		},
+	)
+
 	it.each([
 		[
 			"not surfaced and not gate-passed",

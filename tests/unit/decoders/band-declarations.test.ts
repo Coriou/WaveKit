@@ -149,6 +149,7 @@ describe("dumpvdl2", () => {
 		const decoder = new Dumpvdl2Decoder(config("dumpvdl2", {}), logger)
 		expect(decoder.getBandDeclaration()).toEqual({
 			intrinsic: {
+				// the legacy region-less default (options/dumpvdl2.ts)
 				targetsHz: [136_650_000, 136_700_000, 136_975_000],
 				basis: "decoder-default",
 			},

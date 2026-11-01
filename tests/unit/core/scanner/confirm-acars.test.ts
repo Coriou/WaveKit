@@ -4,8 +4,8 @@ import type { DecoderOutputLike } from "../../../../src/core/scanner/probes/conf
 import { interpretAcars } from "../../../../src/core/scanner/probes/confirm/acars.js"
 
 const T0 = Date.UTC(2026, 9, 16, 12)
-const F1 = 131_550_000
-const F2 = 131_725_000
+const F1 = 133_550_000
+const F2 = 133_725_000
 const st = (epoch = 1) =>
 	createInterpreterState({ epoch, origin: "ambient", decoderId: "acars" })
 const msg = (data: unknown): DecoderOutputLike => ({
@@ -14,7 +14,14 @@ const msg = (data: unknown): DecoderOutputLike => ({
 	timestamp: new Date(T0),
 })
 const ok = (p: Record<string, unknown> = {}) =>
-	msg({ frequency: F1, error: 0, tail: ".G-ABCD", text: "secret", ...p })
+	msg({
+		frequency: F1,
+		error: 0,
+		errorKnown: true,
+		tail: ".G-ABCD",
+		text: "secret",
+		...p,
+	})
 
 describe("interpretAcars", () => {
 	it("clean decode is evidence; identity on the second", () => {
@@ -49,6 +56,18 @@ describe("interpretAcars", () => {
 		expect(
 			interpretAcars(ok(), s, { targetsHz: [F1] })[0]?.identity,
 		).toBeUndefined()
+	})
+	it("an error count acarsdec did not print is an unknown CRC status, never clean", () => {
+		for (const errorKnown of [undefined, false, "true", 1]) {
+			const s = st()
+			for (let i = 0; i < 3; i++) {
+				const r = interpretAcars(ok({ errorKnown }), s, { targetsHz: [F1] })
+				expect(r).toHaveLength(1)
+				expect(r[0]?.crcClean).toBe(false)
+				expect(r[0]?.identity).toBeUndefined()
+			}
+			expect(s.match.isAccepted("acars:reg", "G-ABCD")).toBe(false)
+		}
 	})
 	it("missing or non-number error is not clean", () => {
 		expect(

@@ -65,8 +65,7 @@ import {
 } from "./confirm/dsd-fme.js"
 import { interpretMultimon } from "./confirm/multimon.js"
 import { interpretRtl433 } from "./confirm/rtl433.js"
-import { interpretAcarsReplay } from "./confirm/acars.js"
-import { interpretVdl2 } from "./confirm/vdl2.js"
+import { interpretRasterReplay } from "./replay-interpret.js"
 import { interpretMeshtastic } from "./confirm/meshtastic.js"
 
 /** WG11 req 6.5: `replay` feeds the decoder an IQ capture (lane IQ). */
@@ -665,7 +664,7 @@ function protocolShort(p: ScannerProtocol): string {
  * target, in the capture's epoch), not the live stream, so its context needs no live spectrum engine: the
  * passive CPU guard closing the source's last engine leaves queued captures replayable.
  */
-function replayContext(req: ProbeRequest): TransportContext {
+export function replayContext(req: ProbeRequest): TransportContext {
 	return {
 		req,
 		epoch: {
@@ -2144,30 +2143,31 @@ export class ProbePool extends EventEmitter {
 				this.deliver(rec, interpretRtl433(out, rec.interp))
 				return
 			case "dumpvdl2":
-			case "lora-meshtastic": {
-				if (rec.req.replay) {
-					const interpret =
-						rec.mode.decoderType === "dumpvdl2"
-							? interpretVdl2
-							: interpretMeshtastic
+			case "acarsdec":
+				// Replay only: one CRC-clean block or frame of the replayed capture is the decode,
+				// at the capture's raster channel.
+				if (rec.req.replay)
 					this.deliver(
 						rec,
-						interpret(out, rec.interp, {
+						interpretRasterReplay(
+							rec.mode.decoderType,
+							out,
+							rec.interp,
+							rec.req.targetHz,
+						),
+					)
+				return
+			case "lora-meshtastic": {
+				if (rec.req.replay)
+					this.deliver(
+						rec,
+						interpretMeshtastic(out, rec.interp, {
 							targetsHz: [rec.req.targetHz],
 							channelHz: rec.req.targetHz,
 						}),
 					)
-				}
 				return
 			}
-			case "acarsdec":
-				// Replay only: one CRC-clean block of the replayed capture is the decode.
-				if (rec.req.replay)
-					this.deliver(
-						rec,
-						interpretAcarsReplay(out, rec.interp, rec.req.targetHz),
-					)
-				return
 		}
 	}
 

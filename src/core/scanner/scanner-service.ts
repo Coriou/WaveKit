@@ -1,4 +1,10 @@
-import { DECODE_ANCHOR_PROTOCOLS } from "./store/decode-anchor.js"
+import {
+	anchorHzOf,
+	CHANNEL_ANCHOR_PROTOCOLS,
+	DECODE_ANCHOR_PROTOCOLS,
+	decodeAnchorKey,
+} from "./store/decode-anchor.js"
+import { rasterCaptureCentreHz, rasterChannelOf } from "./replay-channel.js"
 import { narrowestPriors, withScannerOverlays } from "./classify/priors.js"
 import { judgeAnalogResult } from "../iq-capture/analog-result.js"
 import { AnalogAdmission } from "./analog-admission.js"
@@ -202,6 +208,7 @@ import {
 	AmbientObservationIndex,
 	AmbientObservationMap,
 } from "./probes/ambient-index.js"
+import { isTrusted } from "./probes/ambient-trust.js"
 import { ConfirmMemory } from "./probes/confirm/confirm-memory.js"
 import type { AmbientPairContext } from "./probes/ambient.js"
 import {
@@ -434,6 +441,16 @@ export function trackWithinPassband(
 
 /** Discoveries whose last decode time is kept for the ranker (the trial memory's 2 048). */
 export const DECODE_TIMES_MAX = 2_048
+
+/**
+ * Refused anchor and channel decode warnings already logged (ScannerService.firstRefusal): one key
+ * per decoder and reason, at most three per decoder (its id for ADS-B, `channel` and
+ * `channel-trust` for ACARS and VDL2), so 256 keys cover 85 decoders at once (85 x 3 = 255).
+ * Placement decoders come and go with retunes under fresh ids and announce no removal, so at the
+ * bound the oldest key is dropped: a new decoder still warns once, and a dropped key warns at most
+ * once more when its decoder is refused again, never once per decode.
+ */
+export const REFUSED_LOGGED_MAX = 256
 
 export interface ScannerServiceDeps {
 	settings: ScannerSettings
@@ -768,6 +785,7 @@ export class ScannerService extends EventEmitter {
 		return true
 	}
 	private readonly channelTier: ScannerChannelTier
+	/** Refused-decode warnings already logged (firstRefusal), at most REFUSED_LOGGED_MAX. */
 	private readonly refusedAnchors = new Set<string>()
 	private readonly log: Logger
 	/** Band inspection UX req 3.2: consolidation events raised before a listener attached. */
@@ -1360,6 +1378,7 @@ export class ScannerService extends EventEmitter {
 					),
 				}),
 				logger: this.log,
+				observationOpen: (id: string) => this.isOpenObservation(id),
 				...(deps.recordingProtection
 					? {
 							discoveryHoldsKept: (id: string) =>
@@ -4316,6 +4335,15 @@ export class ScannerService extends EventEmitter {
 		}
 		// WG11 req 6.4: a queue replay's decode lands once, through the queue's sink (applyReplayResult).
 		if (req.replay && req.jobId === IQ_REPLAY_QUEUE_HOLDER) return
+		// An identify replay's ACARS or VDL2 decode proves only through a trusted capture (its tuning
+		// trust, re-read now), as a queue replay's does (applyReplayResult): an untrusted capture
+		// lands nowhere, on a stored record or a live one.
+		if (
+			req.replay &&
+			CHANNEL_ANCHOR_PROTOCOLS.includes(ev.protocol) &&
+			!isTrusted(this.replayTrust(req.replay.captureId))
+		)
+			return
 		const found = this.findObservation(req.observationId)
 		if (req.replay) {
 			// a replay's evidence carries the capture's time, not the processing time.
@@ -4437,10 +4465,32 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
+	 * The pairing scope of a channel-anchored decode (ACARS, VDL2): its source, protocol and
+	 * channel, the same key its anchor discovery has. Null for any other protocol or a channel
+	 * that may not anchor (anchorHzOf).
+	 */
+	private channelAnchorScope(ctx: AmbientPairContext): string | null {
+		const protocol = ctx.protocol
+		if (protocol === undefined || !CHANNEL_ANCHOR_PROTOCOLS.includes(protocol))
+			return null
+		const hz = anchorHzOf(protocol, ctx.hz)
+		return hz === undefined
+			? null
+			: `a:${decodeAnchorKey(ctx.sourceId, protocol, hz)}`
+	}
+
+	/**
 	 * trial choice 3a: an ambient decode shares acceptance with the discovery it would be placed on
-	 * (placeAmbient). No single placement (none, or a tie): null, its decoder decides alone.
+	 * (placeAmbient). No single placement (none, or a tie): null, its decoder decides alone. A
+	 * channel-anchored decode (ACARS, VDL2) always pairs on its channel, whatever placement it
+	 * finds: each short burst is its own observation and most open no track at all, so a scope
+	 * that followed placement would flip between the channel, an observation and a discovery
+	 * from one message to the next, and two valid messages would never pair. Where the confirmed
+	 * decode lands (a placed discovery, else the channel) is onAmbientEvidence's choice.
 	 */
 	private ambientConfirmScope(ctx: AmbientPairContext): string | null {
+		const channel = this.channelAnchorScope(ctx)
+		if (channel !== null) return channel
 		const placed = this.placeAmbient(
 			{
 				sourceId: ctx.sourceId,
@@ -4460,6 +4510,103 @@ export class ScannerService extends EventEmitter {
 		return scope ?? null
 	}
 
+	/**
+	 * Whether a refused decode's warning (`key`: decoder and reason) is logged for the first time:
+	 * noted then, so it warns once, not per decode. At REFUSED_LOGGED_MAX keys the oldest is
+	 * dropped (insertion order) to make room.
+	 */
+	private firstRefusal(key: string): boolean {
+		if (this.refusedAnchors.has(key)) return false
+		if (this.refusedAnchors.size >= REFUSED_LOGGED_MAX) {
+			const oldest = this.refusedAnchors.values().next()
+			if (!oldest.done) this.refusedAnchors.delete(oldest.value)
+		}
+		this.refusedAnchors.add(key)
+		return true
+	}
+
+	/**
+	 * The tuning trust of a channel decode (ACARS, VDL2) re-read at the placement the decode was
+	 * trusted at, when it is about to prove something: a retune since its acceptance makes it
+	 * untrusted. A throw counts as none (fail closed).
+	 */
+	private channelDecodeTrust(e: AmbientEvidenceEvent): TuningTrust | undefined {
+		const placement = e.placement
+		try {
+			return this.deps.ambientTrust?.(
+				e.decoderId,
+				placement?.channelHz ?? e.hz,
+				e.sourceId,
+				placement
+					? { sourceId: placement.sourceId, channelHz: placement.channelHz }
+					: undefined,
+			)
+		} catch {
+			return undefined
+		}
+	}
+
+	/**
+	 * A confirmed ACARS block or VDL2 frame that no placed discovery took: it proves the one
+	 * stored spectrum discovery at its channel, else anchors there (store.anchorDecode), with the
+	 * trust re-read at the placement the decode was trusted at (channelDecodeTrust).
+	 * Identity-less, unclean or untrusted evidence never anchors nor proves (canAnchor). Returns
+	 * the discovery that took the decode, else null.
+	 */
+	private anchorChannelDecode(
+		e: AmbientEvidenceEvent,
+		trust: TuningTrust | undefined,
+	): string | null {
+		if (!e.ev.identity || !e.ev.crcClean) return null
+		const anchored = this.store.anchorDecode(e.sourceId, e.hz, e.ev, trust)
+		if (!anchored.discoveryId) {
+			if (this.firstRefusal(`channel\u0000${e.decoderId}`)) {
+				this.log.warn(
+					{ protocol: e.ev.protocol },
+					"Channel anchor evidence refused",
+				)
+			}
+			return null
+		}
+		const decoderType = this.deps.decoders.getStatus(e.decoderId)?.type
+		const proved = this.store.get(anchored.discoveryId)
+		if (proved && proved.anchor !== "decode") {
+			// An existing spectrum discovery took the decode (its decoded-proof path).
+			this.dirty = true
+			if (proved.confidence !== "decoded" || proved.protocol !== e.ev.protocol)
+				return proved.id
+			this.knownProtocols.recordDecode(proved.id)
+			this.noteDecoded(proved.id, e.sourceId, e.ev.protocol)
+			this.lastConfirm.set(proved.id, this.now())
+			if (decoderType)
+				this.trialMemory.record(
+					proved.id,
+					e.ev.protocol,
+					decoderType,
+					"decoded",
+				)
+			return proved.id
+		}
+		if (
+			decoderType &&
+			!this.trialMemory
+				.view(anchored.discoveryId)
+				.some(
+					entry =>
+						entry.protocol === e.ev.protocol &&
+						entry.decoder === decoderType &&
+						entry.lastOutcome === "decoded",
+				)
+		)
+			this.trialMemory.record(
+				anchored.discoveryId,
+				e.ev.protocol,
+				decoderType,
+				"decoded",
+			)
+		return anchored.discoveryId
+	}
+
 	private readonly onAmbientEvidence = (e: AmbientEvidenceEvent): void => {
 		if (DECODE_ANCHOR_PROTOCOLS.includes(e.ev.protocol)) {
 			const anchored = this.store.anchorDecode(
@@ -4472,10 +4619,8 @@ export class ScannerService extends EventEmitter {
 				}),
 			)
 			if (!anchored.discoveryId) {
-				if (!this.refusedAnchors.has(e.decoderId)) {
-					this.refusedAnchors.add(e.decoderId)
+				if (this.firstRefusal(e.decoderId))
 					this.log.warn("ADS-B anchor evidence refused")
-				}
 				return
 			}
 			const decoderType = this.deps.decoders.getStatus(e.decoderId)?.type
@@ -4533,15 +4678,48 @@ export class ScannerService extends EventEmitter {
 			...(e.freqHz !== undefined ? { freqHz: e.freqHz } : {}),
 			...(e.decodeToken ? { decodeToken: e.decodeToken } : {}),
 		})
+		const channelAnchored = CHANNEL_ANCHOR_PROTOCOLS.includes(e.ev.protocol)
+		let channelTrust: TuningTrust | undefined
+		let anchorOwns = false
+		if (channelAnchored) {
+			// Every path a channel decode proves through re-reads trust at its placement first.
+			channelTrust = this.channelDecodeTrust(e)
+			if (!isTrusted(channelTrust)) {
+				if (this.firstRefusal(`channel-trust\u0000${e.decoderId}`)) {
+					this.log.warn(
+						{ protocol: e.ev.protocol },
+						"Channel decode refused: tuning not trusted at its placement",
+					)
+				}
+				return
+			}
+			// A channel anchor in reach owns the channel: the decode is its own, never a spectrum
+			// record's beside it (the store refuses that too), and the record is not opened for it.
+			const channelHz = anchorHzOf(e.ev.protocol, e.hz)
+			anchorOwns =
+				channelHz !== undefined &&
+				this.store.channelAnchorNear(e.sourceId, channelHz) !== undefined
+		}
+		if (candidates.length === 0 && channelAnchored) {
+			this.anchorChannelDecode(e, channelTrust)
+			return
+		}
+		let placedOnDiscovery = false
 
 		// WG11 batch review R1 4 (req 1.8): an ambient identity the observation accepted on a decoded
 		// discovery resets its miss count, once per discovery for this evidence item (identify's ambient
 		// trials leave the count to this path).
 		const counted = new Set<string>()
 		for (const live of candidates) {
+			if (anchorOwns) {
+				for (const jobId of live.jobIds)
+					this.drivers.get(jobId)?.onAmbientEvidence?.(live.observationId, e.ev)
+				continue
+			}
 			const before = live.acceptedIdentity
 			const accepted = this.applyEvidence(live, e.ev)
 			const discoveryId = live.discoveryId
+			if (discoveryId && this.store.get(discoveryId)) placedOnDiscovery = true
 			if (
 				accepted &&
 				e.ev.identity &&
@@ -4564,6 +4742,18 @@ export class ScannerService extends EventEmitter {
 			for (const jobId of live.jobIds)
 				this.drivers.get(jobId)?.onAmbientEvidence?.(live.observationId, e.ev)
 		}
+		// An observation-only placement (its track never became a discovery) holds no proof: the
+		// confirmed decode proves the stored discovery at its channel, else anchors there. An
+		// anchor that took it holds those still open, so their later ingests (their close
+		// included) open no second discovery at the channel (store.holdForAnchor). A closed one
+		// never ingests again, so holding it would only use up the bound.
+		if (channelAnchored && (anchorOwns || !placedOnDiscovery)) {
+			const tookId = this.anchorChannelDecode(e, channelTrust)
+			if (tookId !== null)
+				for (const live of candidates)
+					if (live.discoveryId === null && live.endedAt === undefined)
+						this.store.holdForAnchor(live.sourceId, live.observationId, tookId)
+		}
 	}
 
 	/** Returns whether the observation accepted the evidence (§ 7.1; replay results count only then). */
@@ -4578,17 +4768,19 @@ export class ScannerService extends EventEmitter {
 			this.ingest(live, live.lastTrack, live.endReason, ev)
 		const discoveryId = live.discoveryId
 		if (!discoveryId) return false
+		// § 6.2: leak/intermod caps are decided before the decode is applied or routed, so a capped
+		// decode never reaches `decoded`, here or on a channel owner it is redirected to.
+		const cap = ev.identity ? this.capFor(live, ev.identity) : undefined
 		// § 7.1: the observation keeps its own accepted evidence (Observation.decode; A1/A3 metrics).
 		const accepted = this.store.appendObservationEvidence(
 			live.observationId,
 			ev,
+			cap ? { cap } : {},
 		)
 		if (accepted) {
 			this.dirty = true
 			this.recorder.evidence(live.observationId, ev)
 		}
-		// § 6.2: leak/intermod caps are decided before the decode is applied, so a capped decode never reaches `decoded`.
-		const cap = ev.identity ? this.capFor(live, ev.identity) : undefined
 		const wasDecoded = this.store.get(discoveryId)?.confidence === "decoded"
 		const wasLiveDecoded = live.decoded
 		const applied = this.store.applyEvidenceResult(
@@ -5161,7 +5353,8 @@ export class ScannerService extends EventEmitter {
 				sourceId: live.sourceId,
 				observationId: live.observationId,
 				epoch: track.epoch,
-				rfHz: track.centreHz,
+				// An ACARS/VDL2 channel is captured centred on its raster channel (replay-channel.ts).
+				rfHz: rasterCaptureCentreHz(track.centreHz),
 				tuningTrust: track.tuningTrust,
 				fromSample: track.startSample,
 				reason: "detection",
@@ -5820,6 +6013,14 @@ export class ScannerService extends EventEmitter {
 				? this.store.discoveryIdOf(result.observationId)
 				: undefined) ??
 			null
+		// A channel anchor in reach owns every ACARS or VDL2 decode at its channel, one replayed on
+		// an observation with a spectrum record of its own too (the store refuses it there).
+		if (
+			rfHz !== null &&
+			(ownDiscovery === null || this.channelAnchorOwnsReplay(result, rfHz)) &&
+			this.applyReplayAtChannel(result, rfHz, live)
+		)
+			return
 		// Attribution by frequency: an observation that left live/recent without a discovery
 		// (a pending capture) gives its decode to the one stored discovery on its channel.
 		const byFrequency =
@@ -5831,6 +6032,18 @@ export class ScannerService extends EventEmitter {
 					)
 				: null
 		const discoveryId = ownDiscovery ?? byFrequency
+		// A replayed ACARS or VDL2 decode proves a record only through a trusted capture (its
+		// placement's trust, re-read now): otherwise it lands nowhere, as at the channel.
+		if (
+			result.decoded &&
+			CHANNEL_ANCHOR_PROTOCOLS.includes(result.decoded.protocol) &&
+			!isTrusted(this.replayTrust(result.captureId))
+		) {
+			this.rememberReplayTrials(result, live, discoveryId)
+			this.replayPlans.delete(result.captureId)
+			this.replayOrders.delete(result.captureId)
+			return
+		}
 		if (result.decoded) {
 			const ev: DecodeEvidence = {
 				protocol: result.decoded.protocol,
@@ -5911,6 +6124,105 @@ export class ScannerService extends EventEmitter {
 					? "timeout"
 					: "no-sync"
 			this.markUndecoded(live, reason)
+		}
+	}
+
+	/**
+	 * A decoded ACARS or VDL2 replay whose observation holds no discovery of its own lands at its
+	 * raster channel (rasterChannelOf) as a live channel decode does (store.anchorDecode): it proves
+	 * the one spectrum discovery at the channel, else the channel anchor, so no second discovery
+	 * opens beside an anchor. An observation still live goes this way only when a channel anchor
+	 * (either protocol) already holds the channel: the anchor owns every decode there (otherwise
+	 * its own admission is the discovery at the channel). The capture's tuning trust is the trust
+	 * (canAnchor fails closed without it).
+	 * False when it did not apply: the caller's path runs.
+	 */
+	private applyReplayAtChannel(
+		result: IqReplayResult,
+		rfHz: number,
+		live: LiveObservation | undefined,
+	): boolean {
+		const decoded = result.decoded
+		if (!decoded || !CHANNEL_ANCHOR_PROTOCOLS.includes(decoded.protocol))
+			return false
+		const channelHz = rasterChannelOf(decoded.protocol, rfHz)
+		if (channelHz === null) return false
+		// A channel anchor (either protocol, restored or not) owns its channel and every decode
+		// there (as onAmbientEvidence routes a live decode): the decode goes to the channel, and the
+		// anchor then holds the live observation. Otherwise the observation's own admission is the
+		// record at the channel.
+		if (
+			live &&
+			this.store.channelAnchorNear(result.sourceId, channelHz) === undefined
+		)
+			return false
+		const trust = this.replayTrust(result.captureId)
+		const ev: DecodeEvidence = {
+			protocol: decoded.protocol,
+			identity: decoded.identity,
+			metadata: {},
+			crcClean: true,
+			at: this.replayEvidenceAt(result.captureId, live, result.observationId),
+			epoch: result.epoch,
+			origin: "probe",
+			transport: "replay",
+		}
+		const anchored = this.store.anchorDecode(
+			result.sourceId,
+			channelHz,
+			ev,
+			trust,
+		)
+		const id = anchored.discoveryId
+		if (id === null) return false
+		this.dirty = true
+		// An anchor that took the decode holds the capture's observation while it is open: its
+		// later ingests, its close included, open no second discovery at the channel
+		// (store.holdForAnchor). A replay landing after the close holds nothing (no ingest follows).
+		if (
+			result.observationId !== null &&
+			live !== undefined &&
+			live.endedAt === undefined
+		)
+			this.store.holdForAnchor(result.sourceId, result.observationId, id)
+		const d = this.store.get(id)
+		if (
+			d &&
+			d.anchor !== "decode" &&
+			d.confidence === "decoded" &&
+			d.protocol === decoded.protocol
+		) {
+			this.knownProtocols.recordDecode(id)
+			this.noteDecoded(id, result.sourceId, decoded.protocol)
+			this.lastConfirm.set(id, this.now())
+		}
+		this.rememberReplayTrials(result, live, id)
+		this.replayPlans.delete(result.captureId)
+		this.replayOrders.delete(result.captureId)
+		return true
+	}
+
+	/** A decoded ACARS or VDL2 replay whose raster channel a channel anchor (either protocol) holds. */
+	private channelAnchorOwnsReplay(
+		result: IqReplayResult,
+		rfHz: number,
+	): boolean {
+		const decoded = result.decoded
+		if (!decoded || !CHANNEL_ANCHOR_PROTOCOLS.includes(decoded.protocol))
+			return false
+		const channelHz = rasterChannelOf(decoded.protocol, rfHz)
+		return (
+			channelHz !== null &&
+			this.store.channelAnchorNear(result.sourceId, channelHz) !== undefined
+		)
+	}
+
+	/** The capture's tuning trust, the trust of its replayed decodes; a throw counts as none. */
+	private replayTrust(captureId: string): TuningTrust | undefined {
+		try {
+			return this.deps.iqCapture?.view(captureId)?.tuningTrust
+		} catch {
+			return undefined
 		}
 	}
 
@@ -6030,10 +6342,20 @@ export class ScannerService extends EventEmitter {
 		return at
 	}
 
+	/**
+	 * An observation still tracked and not closed (the store's anchor-hold sweep): one id lookup,
+	 * so a sweep of the ANCHOR_HELD_MAX holds is O(holds), not O(holds x live).
+	 */
+	private isOpenObservation(observationId: string): boolean {
+		const o = this.live.byObservationId(observationId)
+		return o !== undefined && o.endedAt === undefined
+	}
+
 	private findObservation(observationId: string): LiveObservation | undefined {
-		for (const o of this.live.values())
-			if (o.observationId === observationId) return o
-		return this.recent.find(o => o.observationId === observationId)
+		return (
+			this.live.byObservationId(observationId) ??
+			this.recent.find(o => o.observationId === observationId)
+		)
 	}
 
 	/**

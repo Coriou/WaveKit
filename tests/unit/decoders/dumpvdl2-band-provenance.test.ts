@@ -9,6 +9,7 @@ import { AisCatcherDecoder } from "../../../src/decoders/builtin/ais-catcher.js"
 import { ReadsbDecoder } from "../../../src/decoders/builtin/readsb.js"
 import { DirewolfDecoder } from "../../../src/decoders/builtin/direwolf.js"
 
+/** The region-less default, unchanged from before regional lists. */
 const DEFAULTS = [136_650_000, 136_700_000, 136_975_000]
 
 function make(options: Record<string, unknown>, top = {}) {

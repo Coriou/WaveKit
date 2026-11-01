@@ -1,5 +1,6 @@
 import { SCANNER_PROBE_DECODER_TYPES } from "@wavekit/api-types"
 import { captureRateFor } from "../iq-capture/rates.js"
+import { rasterCaptureCentreHz } from "./replay-channel.js"
 import { inAdsbWindow } from "../bandplans/builtin-supplement.js"
 /**
  * Identify mode (spec § 10.8, the primary use case): "what is this signal?" for one waterfall
@@ -11,7 +12,10 @@ import { inAdsbWindow } from "../bandplans/builtin-supplement.js"
  * IdentifyRunner decorates the job's in-window JobRunner, which keeps the lifecycle (transition
  * table), the engine reference and the teardown.
  */
-import { ANCHOR_AIRCRAFT_WINDOW_MS } from "./store/decode-anchor.js"
+import {
+	ANCHOR_AIRCRAFT_WINDOW_MS,
+	CHANNEL_ANCHOR_PROTOCOLS,
+} from "./store/decode-anchor.js"
 import { DQ_DATA_HOLD_MS } from "./data-decode-gate.js"
 import type {
 	DiscoveryMetadata,
@@ -1367,17 +1371,26 @@ export class IdentifyRunner implements JobDriver {
 	start(): Promise<void> {
 		const target = this.deps.identify.target
 		// Discovery requests carry the anchor's zero bandwidth. Frequency-only requests
-		// and measured spectrum targets must collect their own trial evidence.
+		// and measured spectrum targets must collect their own trial evidence. A channel anchor
+		// (ACARS, VDL2) answers only while its proof stands (a restored one has none).
 		const anchor =
 			"all" in target
 				? undefined
 				: this.deps.anchorAt?.(this.sourceId, target.frequencyHz)
+		const channelAnchor =
+			anchor !== undefined && CHANNEL_ANCHOR_PROTOCOLS.includes(anchor.protocol)
 		if (
 			anchor?.anchor === "decode" &&
 			!("all" in target) &&
 			target.frequencyHz === anchor.frequencyHz &&
 			target.bandwidthHz === 0 &&
 			anchor.bandwidthHz === 0 &&
+			// Only an explicit ADS-B anchor answers as ADS-B: a restored channel anchor publishes
+			// protocol unknown and must run its own trials.
+			(anchor.protocol === "adsb" ||
+				(channelAnchor &&
+					anchor.proof?.kind === "decoded" &&
+					anchor.proof.protocol === anchor.protocol)) &&
 			((anchor.aircraftCount ?? 0) > 0 ||
 				this.deps.now() - Date.parse(anchor.lastSeenAt) <=
 					ANCHOR_AIRCRAFT_WINDOW_MS)
@@ -1390,13 +1403,16 @@ export class IdentifyRunner implements JobDriver {
 				null,
 			)
 			t.state = "identified"
+			const count = anchor.aircraftCount ?? 0
 			t.result = {
-				protocol: "adsb",
+				protocol: channelAnchor ? anchor.protocol : "adsb",
 				confidence: "decoded",
 				metadata: anchor.metadata,
 				discoveryId: anchor.id,
 				measurements: measureTarget(null, null, t.targetHz, t.toleranceHz),
-				alreadyDecoded: `already decoded: ADS-B, ${anchor.aircraftCount ?? 0} aircraft`,
+				alreadyDecoded: channelAnchor
+					? `already decoded: ${anchor.protocol.toUpperCase()}, ${count} ${count === 1 ? "identity" : "identities"}`
+					: `already decoded: ADS-B, ${count} aircraft`,
 			}
 			this.phase = "finished"
 			this.record.state = "completed"
@@ -3120,7 +3136,8 @@ export class IdentifyRunner implements JobDriver {
 				sourceId: this.sourceId,
 				observationId: view.observationId,
 				epoch: view.epoch,
-				rfHz: view.track.centreHz,
+				// An ACARS/VDL2 channel is captured centred on its raster channel (replay-channel.ts).
+				rfHz: rasterCaptureCentreHz(view.track.centreHz),
 				tuningTrust: view.track.tuningTrust,
 				fromSample: view.track.startSample,
 				reason: "identify",
@@ -3155,10 +3172,16 @@ export class IdentifyRunner implements JobDriver {
 	private claimNear(t: TargetState, view: IdentifyTrackView): number {
 		const port = this.deps.iqCapture
 		if (!port) return 0
-		const near = port.near(this.sourceId, view.track.centreHz, t.toleranceHz, {
-			observationId: view.observationId,
-			limit: IDENTIFY_REPLAY_MAX_CAPTURES,
-		})
+		// Captures near a raster channel are made at the channel: look for them there.
+		const near = port.near(
+			this.sourceId,
+			rasterCaptureCentreHz(view.track.centreHz),
+			t.toleranceHz,
+			{
+				observationId: view.observationId,
+				limit: IDENTIFY_REPLAY_MAX_CAPTURES,
+			},
+		)
 		for (const c of near) {
 			if (t.replay.claimed.length >= IDENTIFY_REPLAY_MAX_CAPTURES) break
 			if (

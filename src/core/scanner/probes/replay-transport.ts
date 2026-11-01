@@ -8,6 +8,7 @@ import {
 	REPLAY_INPUT_DECODERS,
 	type IqCapturePort,
 } from "../iq-capture-contract.js"
+import { replayChannelHz } from "../replay-channel.js"
 import { createChannelTransport } from "./channel-transport.js"
 import type {
 	ProbeDecoderType,
@@ -78,6 +79,13 @@ export function createReplayTransport(
 				}
 			}
 			const native = configureNativeReplayDecoder(base, ctx.req.targetHz, rate)
+			// dumpvdl2 decodes the capture's raster channel (its one target frequency); the
+			// capture centre stays at DC (inputCenterFreq).
+			if (native && native.type === "dumpvdl2")
+				return {
+					...native,
+					frequencies: [replayChannelHz("vdl2", ctx.req.targetHz)],
+				}
 			if (native) return native
 			return {
 				...configured,

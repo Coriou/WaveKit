@@ -14,11 +14,17 @@
 import {
 	ANCHOR_AIRCRAFT_WINDOW_MS,
 	ANCHOR_AIRCRAFT_MAX,
+	anchorHzOf,
+	anchorRowKey,
 	canAnchor,
+	CHANNEL_ANCHOR_PROTOCOLS,
 	decodeAnchorKey,
 	newDecodeAnchor,
 } from "./decode-anchor.js"
 import { ADSB_HZ } from "../probes/confirm/readsb.js"
+import { ambientReachHz } from "../probes/ambient-placement.js"
+import { rasterChannelOf } from "../replay-channel.js"
+import { isTrusted } from "../probes/ambient-trust.js"
 import { isDsdFmeProtocol } from "../probes/confirm/dsd-fme.js"
 import { randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
@@ -56,6 +62,7 @@ import type {
 import {
 	evidenceLevelOf,
 	proofFromFacts,
+	proofSummary,
 	strongestKnownProof,
 } from "../proof.js"
 import type {
@@ -70,7 +77,7 @@ import {
 	PROOF_ANALOG_MAX_PER_OBSERVATION,
 	PROOF_TRIALS_MAX_PER_OBSERVATION,
 } from "../scanner-redesign-contract.js"
-import { CONFIDENCE_RANK } from "../types.js"
+import { AMBIENT_PAIR_MS, CONFIDENCE_RANK } from "../types.js"
 import type {
 	Classification,
 	ConfidenceCap,
@@ -250,6 +257,12 @@ export interface DiscoveryStoreOptions {
 	channelRasters?: (sourceId: string, centreHz: number) => Raster[]
 	/** WG9 req 2.6: inactive prune and capacity eviction skip a discovery holding kept recordings. */
 	discoveryHoldsKept?: (discoveryId: string) => boolean
+	/**
+	 * Whether an observation is still open (not closed, still tracked). Read only when the anchor
+	 * holds are full (holdForAnchor) to drop holds of observations whose close never reached the
+	 * store; a throwing port answers "open" (the hold stays). Absent: every hold counts as open.
+	 */
+	observationOpen?: (observationId: string) => boolean
 	/** WG9 R2: the eviction-blocked-by-kept warning; a module-level fallback logger without one. */
 	logger?: Logger
 	/** Scanner-redesign 3.11: region and effective ranges read when a weak record is presented. */
@@ -329,6 +342,88 @@ const DEFAULT_LIMIT = 100
 const MAX_LIMIT = 500
 const DAY_MS = 86_400_000
 const TRANSIENT: Ingested = { discoveryId: null, change: "transient" }
+/**
+ * Observations channel anchors hold at once (holdForAnchor). A hold lives only while its
+ * observation is open and its anchor exists (a close or the anchor's removal releases it), so live
+ * holds are bounded by open tracks: 8 sources x 512 tracks (the spectrum engine's default
+ * maxTracks) = 4096. At the bound a new hold is refused, never a live one dropped.
+ */
+export const ANCHOR_HELD_MAX = 4096
+/**
+ * How far from a channel a record still is that channel's (ACARS, VDL2): point placement's reach
+ * for a zero-width track, ambientReachHz(protocol, 0) = max(AMBIENT_VFO_MIN_REACH_HZ 1 500, 0) +
+ * AMBIENT_PLACEMENT_TOLERANCE_HZ 2 500 = 4 000 Hz, exclusive as point placement is (3 999 Hz
+ * reaches, 4 000 Hz does not). It stays below half the tightest 8.33 kHz aeronautical channel
+ * spacing (8 333 / 2 = 4 166.5 Hz), so a neighbouring channel's record is never the owner.
+ */
+export const CHANNEL_OWNER_REACH_HZ = ambientReachHz("acars", 0)
+/**
+ * How long after its last confirmed decode a proven channel anchor still keeps a spectrum record
+ * from opening in its reach (ingest): ANCHOR_AIRCRAFT_WINDOW_MS (60 000 ms), the span its aircraft
+ * count covers, so the anchor suppresses exactly while it still counts an aircraft on the channel.
+ * Inclusive as that window is: an observation ingested 60 000 ms after the anchor's last decode is
+ * suppressed, 60 001 ms after it opens. A restored (unproven) anchor never suppresses.
+ */
+export const CHANNEL_ANCHOR_FRESH_MS = ANCHOR_AIRCRAFT_WINDOW_MS
+/**
+ * How long after a channel owner's (anchor or spectrum record) last confirmed decode it refuses a
+ * decode of the other channel protocol (refusesOtherChannelProtocol): CHANNEL_ANCHOR_FRESH_MS
+ * (60 000 ms), the span an anchor counts its aircraft and keeps spectrum records back, so one
+ * freshness rules the channel. A 25 kHz channel carries one service at a time, ACARS or VDL2: a
+ * checked decode of the other service more than a minute after the owner's last means the
+ * channel's use changed, not that two services share it, and an owner nobody decoded for a
+ * minute has no fresh checked decode left to defend. Measured from the owner's last decode to
+ * the new decode's time, inclusive: a decode 60 000 ms after it is refused, one 60 001 ms after
+ * it takes the SAME record over (an anchor re-keyed, a spectrum record re-proven), so the channel
+ * still has one record.
+ */
+export const CHANNEL_PROTOCOL_HOLD_MS = CHANNEL_ANCHOR_FRESH_MS
+
+/**
+ * Where a checked channel decode (ACARS, VDL2) goes (DiscoveryStore.channelRoute): refused, the
+ * channel anchor in reach, the one spectrum record that owns the channel, or none (no record in
+ * reach, so an anchor opens or the placed record's ordinary path decides).
+ */
+type ChannelRoute =
+	| { kind: "refused" }
+	| { kind: "anchor"; owner: Discovery }
+	| { kind: "record"; owner: Discovery }
+	| { kind: "none" }
+
+/**
+ * Whether an observation pairs in time with a decode at `at`: the ambient pairing window (§ 6.3),
+ * from AMBIENT_PAIR_MS (2 000 ms) before its start to 2 000 ms after its end, both inclusive (a
+ * decode at end + 2 000 pairs, at end + 2 001 does not). An open observation's end is its start:
+ * the store keeps no later time for it. So a restored or long-closed observation whose epoch
+ * number a new run reuses never collects that run's decode.
+ */
+function pairsInTime(o: Observation, at: number): boolean {
+	const start = Date.parse(o.startedAt)
+	const end = Date.parse(o.endedAt ?? o.startedAt)
+	return (
+		Number.isFinite(at) &&
+		Number.isFinite(start) &&
+		Number.isFinite(end) &&
+		at >= start - AMBIENT_PAIR_MS &&
+		at <= end + AMBIENT_PAIR_MS
+	)
+}
+
+/** A spectrum discovery's channel proof (proveByChannel): the latest checked channel decode. */
+interface ChannelProof {
+	protocol: ScannerProtocol
+	identity: Identity
+	/** Decoded from a replayed capture (origin probe), else ambient. */
+	replayed: boolean
+	at: number
+}
+
+/** Comparable text of a staged anchor identity ("" for none). */
+function anchorIdentityText(identity: Identity | undefined): string {
+	return identity === undefined
+		? ""
+		: JSON.stringify([identity.kind, identity.value])
+}
 const CHANGE_RANK: Record<StoreChange, number> = {
 	transient: 0,
 	updated: 1,
@@ -895,6 +990,40 @@ export class DiscoveryStore
 		ReturnType<typeof setTimeout>
 	>()
 	private readonly anchorWindows = new Map<string, Map<string, number>>()
+	/**
+	 * A channel anchor's latest published checked identity (ACARS registration, VDL2 address),
+	 * which its proof cites. One entry per anchor discovery, set only by publishAnchor's commit.
+	 * In memory only: a restored anchor has none, so it is not proven (channelAnchorView) until
+	 * its next confirmed decode is published.
+	 */
+	private readonly anchorIdentity = new Map<string, Identity>()
+	/**
+	 * How the published identity was decoded: "replay" for a replayed capture's block or frame,
+	 * else ambient (absent). Set and cleared with anchorIdentity; the proof names it.
+	 */
+	private readonly anchorReplayed = new Set<string>()
+	/**
+	 * Channel proofs of spectrum discoveries that own an ACARS or VDL2 channel and took a decode
+	 * no observation of theirs paired with (proveByChannel). In memory only, as an anchor's
+	 * identity: a restored owner is unproven until its next confirmed decode. Removed with the
+	 * discovery; a merge carries the newer to the survivor.
+	 */
+	private readonly channelProofs = new Map<string, ChannelProof>()
+	/**
+	 * Channel owners (anchor or spectrum record) whose refusal of the other channel protocol was
+	 * logged (refusesOtherChannelProtocol): at most one entry per record, removed with it.
+	 */
+	private readonly channelRefusalLogged = new Set<string>()
+	/**
+	 * Observations without a discovery whose channel decode a channel anchor took
+	 * (holdForAnchor): observation id → anchor id, at most ANCHOR_HELD_MAX. In memory only, as
+	 * live observations are. anchorHolds indexes the same holds by anchor id, so an anchor's
+	 * removal releases them.
+	 */
+	private readonly anchorHeld = new Map<string, string>()
+	private readonly anchorHolds = new Map<string, Set<string>>()
+	/** Logged once per run of refusals at the bound; reset when a hold is accepted again. */
+	private anchorHeldFullWarned = false
 	/** Latest confirmations stay private until publishAnchor commits a revision. */
 	private readonly anchorPending = new Map<
 		string,
@@ -903,6 +1032,10 @@ export class DiscoveryStore
 			seen: string
 			observations: number
 			trust: "commanded" | "relay"
+			/** A channel anchor's latest checked identity, staged with the confirmation. */
+			identity?: Identity
+			/** The staged identity came from a replayed capture. */
+			replayed?: boolean
 		}
 	>()
 	private readonly anchorPublished = new Map<
@@ -913,6 +1046,8 @@ export class DiscoveryStore
 			bucket: number
 			seen: string
 			observations: number
+			/** identityText of the published identity ("" for none, as ADS-B). */
+			identity: string
 		}
 	>()
 	private readonly decodeAnchors = new Map<string, string>()
@@ -1022,6 +1157,7 @@ export class DiscoveryStore
 	private proofQuiet = 0
 
 	private readonly hintScope: DiscoveryStoreOptions["hintScope"]
+	private readonly observationOpen: (observationId: string) => boolean
 
 	constructor(opts: DiscoveryStoreOptions) {
 		super()
@@ -1036,6 +1172,17 @@ export class DiscoveryStore
 		this.minSurfaceBlocks = opts.minSurfaceBlocks ?? 2
 		this.rastersFor = opts.rasters ?? (() => [])
 		this.channelRastersFor = opts.channelRasters ?? (() => [])
+		const open = opts.observationOpen
+		// Fail closed: a throwing port answers "open", so a live hold is never dropped.
+		this.observationOpen = open
+			? id => {
+					try {
+						return open(id) !== false
+					} catch {
+						return true
+					}
+				}
+			: () => true
 		const holds = opts.discoveryHoldsKept
 		// Fail closed: a throwing port answers "holds kept".
 		this.holdsKept = holds
@@ -1055,6 +1202,8 @@ export class DiscoveryStore
 	 * says, so evidence that follows still finds its discovery.
 	 */
 	ingest(input: ObservationInput, opts: IngestOptions = {}): Ingested {
+		// Read (and, on a close, released) before any early return, so every close path releases.
+		const held = this.heldByAnchor(input)
 		// A sliced restore is between turns: the store is half built, so an observation is not
 		// admitted (transient, as below the gate; the next block observes it again).
 		if (this.restoring) {
@@ -1071,6 +1220,7 @@ export class DiscoveryStore
 			return this.reingest(known, input)
 		}
 		if (flagged) return TRANSIENT
+		if (held) return TRANSIENT
 		if (input.jobIds.length === 0) return TRANSIENT
 		if (
 			input.track.gate !== "passed" &&
@@ -1112,6 +1262,16 @@ export class DiscoveryStore
 			return this.commit("observation", op =>
 				this.addObservation(op, into, input),
 			)
+		// A proven channel anchor with a recent decode owns its channel: no second record opens in
+		// its reach. The observation stays transient, as one the anchor holds; its decodes reach the
+		// anchor (anchorDecode). A stale or restored anchor lets an independent signal open.
+		if (
+			this.channelAnchorHolding(
+				input.sourceId,
+				Math.round(place.frequencyHz),
+			) !== undefined
+		)
+			return TRANSIENT
 		const admission = decodeProvesSignal(input, opts.decode)
 			? "create"
 			: this.admits(input)
@@ -1150,10 +1310,12 @@ export class DiscoveryStore
 		const previous = this.anchorPublished.get(id)
 		const count = pending.count
 		const bucket = Math.floor(Date.parse(pending.seen) / 10_000)
+		const identity = anchorIdentityText(pending.identity)
 		if (
 			previous &&
 			previous.count === count &&
 			previous.bucket === bucket &&
+			previous.identity === identity &&
 			(!force ||
 				(previous.seen === pending.seen &&
 					previous.observations === pending.observations))
@@ -1168,12 +1330,18 @@ export class DiscoveryStore
 			bucket,
 			seen: pending.seen,
 			observations: pending.observations,
+			identity,
 		})
 		this.commit("observation", op => {
 			d.aircraftCount = pending.count
 			d.lastSeenAt = pending.seen
 			d.observationCount = pending.observations
 			d.tuningTrust = pending.trust
+			if (pending.identity) {
+				this.anchorIdentity.set(id, { ...pending.identity })
+				if (pending.replayed) this.anchorReplayed.add(id)
+				else this.anchorReplayed.delete(id)
+			}
 			const observation = this.observationIndex.get(`decode:${id}`)
 			if (observation) observation.endedAt = pending.seen
 			this.invalidateLabel(id)
@@ -1210,7 +1378,8 @@ export class DiscoveryStore
 		if (
 			published &&
 			(published.count !== pending.count ||
-				published.bucket !== Math.floor(Date.parse(pending.seen) / 10_000))
+				published.bucket !== Math.floor(Date.parse(pending.seen) / 10_000) ||
+				published.identity !== anchorIdentityText(pending.identity))
 		)
 			next = Math.min(next, published.at + 5_000)
 		if (!Number.isFinite(next)) return
@@ -1225,16 +1394,451 @@ export class DiscoveryStore
 		this.anchorExpiry.set(id, timer)
 	}
 
-	decodeAnchorFor(sourceId: string, hz: number): Discovery | undefined {
+	/**
+	 * An observation with no discovery whose confirmed channel decode (ACARS, VDL2, live or
+	 * replayed) a channel anchor took is that anchor's: an anchor never takes a spectrum
+	 * observation (obsCompatible, appendObservationEvidence), so without this its next ingest,
+	 * its close included, would open a second discovery at the channel. While the anchor exists
+	 * the observation's ingests stay transient, and its pending admission entry stops counting
+	 * (no later single-block promotion surfaces it). False, and nothing held, when `anchorId` is
+	 * not a channel anchor or the observation already belongs to a discovery. The caller holds
+	 * only an open observation (a closed one never ingests again). At ANCHOR_HELD_MAX holds, those
+	 * of closed observations (observationOpen) are dropped first; if every hold is still live the
+	 * new one is refused (false, warned): that observation may then open its own discovery at its
+	 * close, as before holds existed, rather than a live hold being forgotten.
+	 */
+	holdForAnchor(
+		sourceId: string,
+		observationId: string,
+		anchorId: string,
+	): boolean {
+		const d = this.discoveries.get(anchorId)
 		if (
-			!Number.isFinite(hz) ||
-			Math.abs(hz - ADSB_HZ) > SCANNER_AMBIENT_TARGET_TOLERANCE_HZ
+			d === undefined ||
+			d.anchor !== "decode" ||
+			!CHANNEL_ANCHOR_PROTOCOLS.includes(d.protocol) ||
+			!d.sourceIds.includes(sourceId) ||
+			this.observationIndex.has(observationId)
+		)
+			return false
+		if (
+			!this.anchorHeld.has(observationId) &&
+			this.anchorHeld.size >= ANCHOR_HELD_MAX
+		) {
+			for (const held of [...this.anchorHeld.keys()])
+				if (!this.observationOpen(held)) this.releaseAnchorHold(held)
+			if (this.anchorHeld.size >= ANCHOR_HELD_MAX) {
+				if (!this.anchorHeldFullWarned) {
+					this.anchorHeldFullWarned = true
+					const log =
+						this.injectedLog ??
+						(fallbackLog ??= createComponentLogger(
+							createLogger({ level: "info" }),
+							"DiscoveryStore",
+						))
+					log.warn(
+						{ held: this.anchorHeld.size },
+						"Channel anchor holds at the bound; a new hold was refused",
+					)
+				}
+				return false
+			}
+		}
+		this.anchorHeldFullWarned = false
+		this.pending.forget(sourceId, observationId)
+		this.releaseAnchorHold(observationId)
+		this.anchorHeld.set(observationId, anchorId)
+		let holds = this.anchorHolds.get(anchorId)
+		if (holds === undefined) {
+			holds = new Set()
+			this.anchorHolds.set(anchorId, holds)
+		}
+		holds.add(observationId)
+		return true
+	}
+
+	/** Observations channel anchors hold now (holdForAnchor); for tests and diagnostics. */
+	anchorHeldCount(): number {
+		return this.anchorHeld.size
+	}
+
+	/** The observation is held by a channel anchor that still exists; a close releases the hold. */
+	private heldByAnchor(input: ObservationInput): boolean {
+		const anchorId = this.anchorHeld.get(input.id)
+		if (anchorId === undefined) return false
+		if (input.endedAt !== undefined) this.releaseAnchorHold(input.id)
+		if (this.discoveries.get(anchorId)?.anchor === "decode") return true
+		this.releaseAnchorHold(input.id)
+		return false
+	}
+
+	private releaseAnchorHold(observationId: string): void {
+		const anchorId = this.anchorHeld.get(observationId)
+		if (anchorId === undefined) return
+		this.anchorHeld.delete(observationId)
+		const holds = this.anchorHolds.get(anchorId)
+		holds?.delete(observationId)
+		if (holds?.size === 0) this.anchorHolds.delete(anchorId)
+	}
+
+	/**
+	 * The decode anchor a point target at `hz` names: the ADS-B anchor within the 1 kHz target
+	 * tolerance of 1090 MHz, else the one channel anchor (ACARS or VDL2) keyed at `hz`'s channel
+	 * (anchorHzOf). Both protocols anchored on one channel name neither.
+	 */
+	decodeAnchorFor(sourceId: string, hz: number): Discovery | undefined {
+		if (!Number.isFinite(hz)) return undefined
+		if (Math.abs(hz - ADSB_HZ) <= SCANNER_AMBIENT_TARGET_TOLERANCE_HZ) {
+			const id = this.decodeAnchors.get(
+				decodeAnchorKey(sourceId, "adsb", ADSB_HZ),
+			)
+			return id === undefined ? undefined : this.get(id)
+		}
+		const ids: string[] = []
+		for (const protocol of CHANNEL_ANCHOR_PROTOCOLS) {
+			const channel = anchorHzOf(protocol, hz)
+			const id =
+				channel === undefined
+					? undefined
+					: this.decodeAnchors.get(decodeAnchorKey(sourceId, protocol, channel))
+			if (id !== undefined) ids.push(id)
+		}
+		return ids.length === 1 ? this.get(ids[0]!) : undefined
+	}
+
+	/**
+	 * The channel anchor (ACARS, VDL2) of the source within CHANNEL_OWNER_REACH_HZ of `hz`
+	 * (exclusive), nearest first; undefined when none. A channel anchor owns its channel: no
+	 * spectrum discovery opens in its reach (ingest), and every later decode there is its own.
+	 */
+	channelAnchorNear(sourceId: string, hz: number): Discovery | undefined {
+		return this.channelAnchorsNear(sourceId, hz)[0]
+	}
+
+	/**
+	 * The channel anchor near `hz` (channelAnchorNear) that keeps spectrum records from opening:
+	 * proven in this run (a checked identity published or staged) and last confirmed within
+	 * CHANNEL_ANCHOR_FRESH_MS of now (inclusive). Undefined when none is.
+	 */
+	channelAnchorHolding(sourceId: string, hz: number): Discovery | undefined {
+		const now = this.now()
+		for (const d of this.channelAnchorsNear(sourceId, hz)) {
+			if (!this.anchorProven(d)) continue
+			const last = Date.parse(
+				this.anchorPending.get(d.id)?.seen ?? d.lastSeenAt,
+			)
+			if (Number.isFinite(last) && now - last <= CHANNEL_ANCHOR_FRESH_MS)
+				return d
+		}
+		return undefined
+	}
+
+	private channelAnchorsNear(sourceId: string, hz: number): Discovery[] {
+		if (!Number.isFinite(hz)) return []
+		return this.discoveriesNear(hz, CHANNEL_OWNER_REACH_HZ, sourceId).filter(
+			d =>
+				d.anchor === "decode" &&
+				CHANNEL_ANCHOR_PROTOCOLS.includes(d.protocol) &&
+				Math.abs(d.frequencyHz - hz) < CHANNEL_OWNER_REACH_HZ,
+		)
+	}
+
+	/** A channel anchor whose checked identity this run published or staged (not restored only). */
+	private anchorProven(d: Discovery): boolean {
+		return (
+			this.anchorIdentity.has(d.id) ||
+			this.anchorPending.get(d.id)?.identity !== undefined
+		)
+	}
+
+	/**
+	 * The channel protocol (ACARS, VDL2) a record is decoded as: a proven anchor's, or a spectrum
+	 * record's shown decoded label. Undefined when it is not decoded as either.
+	 */
+	private channelDecodedAs(d: Discovery): ScannerProtocol | undefined {
+		if (d.anchor === "decode")
+			return CHANNEL_ANCHOR_PROTOCOLS.includes(d.protocol) &&
+				this.anchorProven(d)
+				? d.protocol
+				: undefined
+		const label = this.effectiveLabel(d)
+		return label.confidence === "decoded" &&
+			CHANNEL_ANCHOR_PROTOCOLS.includes(label.protocol)
+			? label.protocol
+			: undefined
+	}
+
+	/**
+	 * When a channel owner's last confirmed decode was (ms): a proven anchor's last confirmation
+	 * (staged or published), a spectrum record's shown decoded proof. Undefined when it holds none
+	 * or the time does not parse.
+	 */
+	private lastChannelDecodeAt(d: Discovery): number | undefined {
+		let at: number
+		if (d.anchor === "decode") {
+			if (!this.anchorProven(d)) return undefined
+			at = Date.parse(this.anchorPending.get(d.id)?.seen ?? d.lastSeenAt)
+		} else {
+			const proof = this.discoveryView(d).proof
+			if (proof?.kind !== "decoded") return undefined
+			at = Date.parse(proof.at)
+		}
+		return Number.isFinite(at) ? at : undefined
+	}
+
+	/**
+	 * A channel owner decoded as one channel protocol refuses a decode of the other while its last
+	 * confirmed decode is at most CHANNEL_PROTOCOL_HOLD_MS before the new decode (inclusive; an
+	 * older decode too): one channel, one record, and the fresh checked decode it holds is not
+	 * overruled (fail closed: an owner whose last decode time is unknown refuses). Past the hold
+	 * the owner takes the decode over as the other protocol (retakeAnchor, proveByChannel). Warned
+	 * once per owner, naming only the two protocols (never a decoded value).
+	 */
+	private refusesOtherChannelProtocol(
+		owner: Discovery,
+		ev: DecodeEvidence,
+	): boolean {
+		if (!CHANNEL_ANCHOR_PROTOCOLS.includes(ev.protocol)) return false
+		const as = this.channelDecodedAs(owner)
+		if (as === undefined || as === ev.protocol) return false
+		const last = this.lastChannelDecodeAt(owner)
+		if (last !== undefined && ev.at - last > CHANNEL_PROTOCOL_HOLD_MS)
+			return false
+		if (!this.channelRefusalLogged.has(owner.id)) {
+			this.channelRefusalLogged.add(owner.id)
+			const log =
+				this.injectedLog ??
+				(fallbackLog ??= createComponentLogger(
+					createLogger({ level: "info" }),
+					"DiscoveryStore",
+				))
+			log.warn(
+				{ protocol: ev.protocol, ownerProtocol: as },
+				"Channel decode refused: the channel's record is decoded as the other protocol",
+			)
+		}
+		return true
+	}
+
+	/**
+	 * The one record a checked channel decode (ACARS, VDL2) at `channelHz` of `sourceId` goes to,
+	 * whatever its aircraft or its protocol. Within CHANNEL_OWNER_REACH_HZ (4 000 Hz, exclusive) of
+	 * the channel, in order:
+	 *
+	 * 1. a channel anchor (channelAnchorNear, the nearest): it owns the channel;
+	 * 2. else the spectrum record already decoded as a channel protocol (channelDecodedAs), the
+	 *    nearest, ties to the oldest (firstSeenAt, then id);
+	 * 3. else, none owning the channel yet: the record the decode was placed on (`target`, when in
+	 *    reach), which becomes the owner (its own ordinary path decides). A decode is never
+	 *    redirected to a different record that no decode proved: an undecoded record beside it may
+	 *    be another signal (AM voice beside a data channel);
+	 * 4. else, with no placement (anchorDecode): the single record in reach when its tuning is
+	 *    trusted and it is not decoded as another protocol. Two or more undecoded records are
+	 *    ambiguous: none (an anchor opens).
+	 *
+	 * Refused: the owner is decoded as the other protocol within CHANNEL_PROTOCOL_HOLD_MS
+	 * (refusesOtherChannelProtocol), or a decoded spectrum owner other than the target has
+	 * untrusted tuning (fail closed: no second record proves beside it). None: no owner found.
+	 */
+	private channelRoute(
+		sourceId: string,
+		channelHz: number,
+		ev: DecodeEvidence,
+		target?: Discovery,
+	): ChannelRoute {
+		const anchor = this.channelAnchorNear(sourceId, channelHz)
+		if (anchor !== undefined)
+			return this.refusesOtherChannelProtocol(anchor, ev)
+				? { kind: "refused" }
+				: { kind: "anchor", owner: anchor }
+		const byChannel = (a: Discovery, b: Discovery): number =>
+			Math.abs(a.frequencyHz - channelHz) -
+				Math.abs(b.frequencyHz - channelHz) ||
+			compareText(a.firstSeenAt, b.firstSeenAt) ||
+			compareText(a.id, b.id)
+		const hits = this.discoveriesNear(
+			channelHz,
+			CHANNEL_OWNER_REACH_HZ,
+			sourceId,
+		)
+			.filter(
+				d =>
+					d.anchor !== "decode" &&
+					Math.abs(d.frequencyHz - channelHz) < CHANNEL_OWNER_REACH_HZ,
+			)
+			.sort(byChannel)
+		const decoded = hits.find(d => this.channelDecodedAs(d) !== undefined)
+		if (decoded !== undefined) {
+			if (this.refusesOtherChannelProtocol(decoded, ev))
+				return { kind: "refused" }
+			if (decoded !== target && !isTrusted(decoded.tuningTrust))
+				return { kind: "refused" }
+			return { kind: "record", owner: decoded }
+		}
+		if (target !== undefined)
+			return hits.includes(target)
+				? { kind: "record", owner: target }
+				: { kind: "none" }
+		// A record decoded as a non-channel protocol never becomes a channel's owner but its own.
+		const only = hits.length === 1 ? hits[0]! : undefined
+		return only !== undefined &&
+			isTrusted(only.tuningTrust) &&
+			this.effectiveLabel(only).confidence !== "decoded"
+			? { kind: "record", owner: only }
+			: { kind: "none" }
+	}
+
+	/**
+	 * channelRoute for a checked channel decode placed on spectrum record `d`: the channel is the
+	 * 25 kHz raster channel at the record (rasterChannelOf), else the record's own frequency as a
+	 * channel (anchorHzOf). Undefined when the decode is no channel decode with an identity, or the
+	 * record is outside the aeronautical band or without a source.
+	 */
+	private channelRouteOf(
+		d: Discovery,
+		ev: DecodeEvidence,
+	): ChannelRoute | undefined {
+		const sourceId = d.sourceIds[0]
+		if (
+			sourceId === undefined ||
+			ev.identity === undefined ||
+			!CHANNEL_ANCHOR_PROTOCOLS.includes(ev.protocol)
 		)
 			return undefined
-		const id = this.decodeAnchors.get(
-			decodeAnchorKey(sourceId, "adsb", ADSB_HZ),
+		const channelHz =
+			rasterChannelOf(ev.protocol, d.frequencyHz) ??
+			anchorHzOf(ev.protocol, d.frequencyHz)
+		if (channelHz === undefined) return undefined
+		return this.channelRoute(sourceId, channelHz, ev, d)
+	}
+
+	/**
+	 * A channel anchor of the other channel protocol takes a decode as that protocol: unproven
+	 * (restored, its identity not yet re-proven) or past CHANNEL_PROTOCOL_HOLD_MS since its last
+	 * decode. One record stays the channel's owner, re-keyed; until the decode publishes, it shows
+	 * no identity of the protocol it no longer is.
+	 */
+	private retakeAnchor(d: Discovery, protocol: ScannerProtocol): void {
+		const sourceId = d.sourceIds[0]!
+		this.decodeAnchors.delete(
+			decodeAnchorKey(sourceId, d.protocol, d.frequencyHz),
 		)
-		return id === undefined ? undefined : this.get(id)
+		d.protocol = protocol
+		d.family = familyOf(protocol)
+		d.frequencyKey = `decode:${protocol}:${d.frequencyHz}`
+		this.decodeAnchors.set(
+			decodeAnchorKey(sourceId, protocol, d.frequencyHz),
+			d.id,
+		)
+		// The other protocol's aircraft rows, identity and transport are not this protocol's.
+		this.anchorWindows.delete(d.id)
+		this.anchorIdentity.delete(d.id)
+		this.anchorReplayed.delete(d.id)
+		this.invalidateLabel(d.id)
+		this.touch(d)
+	}
+
+	/**
+	 * A confirmed channel decode (ACARS, VDL2) at a channel no anchor holds, where the source has a
+	 * stored spectrum discovery in reach: that discovery (`d`, chosen by channelRoute: the record
+	 * decoded as a channel protocol, else the single trusted undecoded record in reach) is the
+	 * channel's one owner and takes the decode, and no anchor opens beside it.
+	 *
+	 * Reach is CHANNEL_OWNER_REACH_HZ, 4 000 Hz exclusive (see there).
+	 *
+	 * The decode lands on the owner's newest observation of its epoch when that observation pairs
+	 * with it in time (pairsInTime, the ambient pairing window) and the owner holds no other
+	 * identity: its observation evidence, then the record (appendObservationEvidence,
+	 * applyEvidenceResult, as a stored replay does), so the proof persists. Otherwise (the
+	 * observation is from another epoch, another run, long closed, or the owner holds another
+	 * identity or protocol, which applyEvidence would split into a co-channel twin or refuse) the
+	 * owner takes it as a channel proof (proveByChannel), in memory as an anchor's identity is.
+	 *
+	 * The caller has already checked the decode (canAnchor: confirmed, CRC-clean, its own trust
+	 * re-read at its placement, same source) and the owner (channelRoute: its trust, and the
+	 * protocol it is decoded as).
+	 */
+	private proveChannelDiscovery(
+		d: Discovery,
+		ev: DecodeEvidence & { identity: Identity },
+	): Ingested {
+		const list = this.byDiscovery.get(d.id) ?? []
+		let paired: Observation | undefined
+		for (let i = list.length - 1; i >= 0; i--) {
+			const o = list[i]!
+			if (o.sampleRange.epoch !== ev.epoch) continue
+			if (pairsInTime(o, ev.at)) paired = o
+			break
+		}
+		if (
+			paired !== undefined &&
+			(d.identity === undefined || sameIdentity(d.identity, ev.identity)) &&
+			this.appendObservationEvidence(paired.id, ev)
+		) {
+			const applied = this.applyEvidenceResult(d.id, ev, {})
+			// The decode may have merged the discovery (identity key): follow the survivor.
+			const survivor = this.discoveryIdOf(paired.id) ?? d.id
+			return { discoveryId: survivor, change: applied.change ?? "updated" }
+		}
+		return this.proveByChannel(d, ev)
+	}
+
+	/**
+	 * The owner takes a channel decode no observation of it pairs with: its channel proof becomes
+	 * the decode's checked identity (channelDecodedView), and its last seen time the decode's. Nothing of
+	 * the decode is written to its observations or stored label, so a restored owner is unproven
+	 * (its spectrum label) until a fresh confirmed decode, as a restored anchor is. One revision
+	 * and change event when the shown proof or the record changed.
+	 */
+	private proveByChannel(
+		d: Discovery,
+		ev: DecodeEvidence & { identity: Identity },
+	): Ingested {
+		// An older decode never replaces the newer identity the proof cites.
+		const previous = this.channelProofs.get(d.id)
+		if (previous !== undefined && previous.at > ev.at)
+			return { discoveryId: d.id, change: "transient" }
+		// A takeover by the other channel protocol (past CHANNEL_PROTOCOL_HOLD_MS): the record's
+		// stored protocol and identity become the new decode's, so no read path (the published
+		// record, the identity filter) shows the protocol it no longer is, and the old protocol's
+		// observation decodes no longer count for it (decodeCounts).
+		if (
+			d.identity !== undefined &&
+			CHANNEL_ANCHOR_PROTOCOLS.includes(d.protocol) &&
+			d.protocol !== ev.protocol
+		) {
+			d.protocol = ev.protocol
+			d.family = familyOf(ev.protocol)
+			d.identity = { kind: ev.identity.kind, value: ev.identity.value }
+			this.touch(d)
+			this.invalidateLabel(d.id)
+		}
+		const before = this.discoveryView(d)
+		this.channelProofs.set(d.id, {
+			protocol: ev.protocol,
+			identity: { kind: ev.identity.kind, value: ev.identity.value },
+			replayed: ev.origin === "probe",
+			at: ev.at,
+		})
+		this.invalidateLabel(d.id)
+		const after = this.discoveryView(d)
+		const seen = iso(ev.at)
+		const moved = seen > d.lastSeenAt
+		if (
+			!moved &&
+			jsonEqual(before.proof, after.proof) &&
+			jsonEqual(before.label, after.label)
+		)
+			return { discoveryId: d.id, change: "transient" }
+		const upgraded =
+			rank(publishedOf(after).confidence) > rank(publishedOf(before).confidence)
+		return this.commit("evidence", op => {
+			if (moved) d.lastSeenAt = seen
+			this.touch(d)
+			op.discoveries.add(d.id)
+			mark(op, d.id, upgraded ? "upgraded" : "updated")
+			return d.id
+		})
 	}
 
 	/** Canonical destination for confirmed, trusted decode-anchored protocols. */
@@ -1245,9 +1849,36 @@ export class DiscoveryStore
 		trust: Discovery["tuningTrust"] | undefined,
 	): Ingested {
 		if (!canAnchor(ev, hz, trust) || !ev.identity) return TRANSIENT
-		const existingId = this.decodeAnchors.get(
-			decodeAnchorKey(sourceId, ev.protocol, ADSB_HZ),
-		)
+		const anchorHz = anchorHzOf(ev.protocol, hz)
+		if (anchorHz === undefined) return TRANSIENT
+		let existingId: string | undefined
+		if (CHANNEL_ANCHOR_PROTOCOLS.includes(ev.protocol)) {
+			// The channel has one owner across both protocols (channelRoute): an anchor in reach
+			// (either protocol) takes every later decode there; without one, the stored spectrum
+			// discovery that owns the channel does (proveChannelDiscovery). An owner decoded as the
+			// other protocol within CHANNEL_PROTOCOL_HOLD_MS refuses it; past it, it takes it over.
+			const route = this.channelRoute(sourceId, anchorHz, ev)
+			if (route.kind === "refused") return TRANSIENT
+			if (route.kind === "anchor") {
+				const owner = route.owner
+				if (owner.protocol !== ev.protocol) {
+					// A decode older than the anchor's last never re-keys it (nothing would publish).
+					const seen =
+						this.anchorPending.get(owner.id)?.seen ?? owner.lastSeenAt
+					if (ev.at < Date.parse(seen))
+						return { discoveryId: owner.id, change: "transient" }
+					this.retakeAnchor(owner, ev.protocol)
+				}
+				existingId = owner.id
+			} else if (route.kind === "record")
+				return this.proveChannelDiscovery(route.owner, {
+					...ev,
+					identity: ev.identity,
+				})
+		} else
+			existingId = this.decodeAnchors.get(
+				decodeAnchorKey(sourceId, ev.protocol, anchorHz),
+			)
 		let d =
 			existingId === undefined ? undefined : this.discoveries.get(existingId)
 		if (
@@ -1260,7 +1891,7 @@ export class DiscoveryStore
 			const fresh = newDecodeAnchor(
 				`d_${this.newId()}`,
 				sourceId,
-				ADSB_HZ,
+				anchorHz,
 				ev,
 				trust,
 			)
@@ -1270,12 +1901,14 @@ export class DiscoveryStore
 		}
 		const rows = this.anchorWindows.get(d.id) ?? new Map<string, number>()
 		this.anchorWindows.set(d.id, rows)
-		rows.delete(ev.identity.value.toLowerCase())
-		rows.set(ev.identity.value.toLowerCase(), ev.at)
+		const row = anchorRowKey(ev.protocol, ev.identity.value)
+		rows.delete(row)
+		rows.set(row, ev.at)
 		if (rows.size > ANCHOR_AIRCRAFT_MAX) {
 			const first = rows.keys().next()
 			if (!first.done) rows.delete(first.value)
 		}
+		// The identity is staged with the confirmation; publishAnchor's commit makes it visible.
 		this.anchorPending.set(d.id, {
 			count: rows.size,
 			seen: iso(ev.at),
@@ -1283,6 +1916,12 @@ export class DiscoveryStore
 				(this.anchorPending.get(d.id)?.observations ?? d.observationCount) +
 				(existingId === undefined ? 0 : 1),
 			trust,
+			...(ev.protocol !== "adsb"
+				? {
+						identity: { kind: ev.identity.kind, value: ev.identity.value },
+						...(ev.origin === "probe" ? { replayed: true } : {}),
+					}
+				: {}),
 		})
 		this.scheduleAnchorExpiry(d.id, existingId === undefined)
 		return {
@@ -1424,6 +2063,17 @@ export class DiscoveryStore
 		if (this.adjacentIdentityCopy(d, ev)) return null
 		if (
 			ev.identity !== undefined &&
+			CHANNEL_ANCHOR_PROTOCOLS.includes(ev.protocol)
+		) {
+			const owned = this.channelOwnerEvidence(
+				d,
+				{ ...ev, identity: ev.identity },
+				opts.cap,
+			)
+			if (owned !== undefined) return owned
+		}
+		if (
+			ev.identity !== undefined &&
 			d.identity !== undefined &&
 			!sameIdentity(ev.identity, d.identity)
 		) {
@@ -1473,6 +2123,48 @@ export class DiscoveryStore
 		const id = this.settle(op, d)
 		this.finish("evidence", op)
 		return op.changes.get(id) ?? "updated"
+	}
+
+	/**
+	 * A checked ACARS or VDL2 decode placed on spectrum record `d` (live or replayed): its channel
+	 * has one record, whatever aircraft or protocol is heard and whichever record it was placed on
+	 * (channelRouteOf). Refused (null) when the route refuses it (the other protocol within its
+	 * hold) or a channel anchor is in reach (the anchor owns the channel; anchorDecode takes the
+	 * decode). When another record owns the channel, that owner takes it as its channel proof
+	 * (proveByChannel) and `d` is left as it is (null, accepted). When `d` is the owner and holds
+	 * another aircraft or the other protocol (a takeover past the hold), it takes it as its channel
+	 * proof too, never splitting a co-channel twin, so the proof cites the latest checked identity,
+	 * as an anchor's does. Undefined: `d` owns the channel and the ordinary path decides.
+	 *
+	 * A capped decode (`cap`: adjacent leak or suspected intermod, decided before the decode) never
+	 * proves another record through redirection: refused (null, not accepted). On `d` itself the
+	 * cap is recorded first (capInto), as the ordinary path does, so it ceilings the proof.
+	 */
+	private channelOwnerEvidence(
+		d: Discovery,
+		ev: DecodeEvidence & { identity: Identity },
+		cap: ConfidenceCap | undefined,
+	): StoreChange | null | undefined {
+		const route = this.channelRouteOf(d, ev)
+		if (route === undefined || route.kind === "none") return undefined
+		if (route.kind === "refused" || route.kind === "anchor") return null
+		const owner = route.owner
+		if (owner !== d) {
+			if (cap !== undefined) return null
+			this.proveByChannel(owner, ev)
+			this.evidenceAccepted = true
+			return null
+		}
+		if (
+			d.identity === undefined ||
+			!CHANNEL_ANCHOR_PROTOCOLS.includes(d.protocol) ||
+			(d.protocol === ev.protocol && sameIdentity(d.identity, ev.identity))
+		)
+			return undefined
+		this.capInto(d, cap)
+		const proved = this.proveByChannel(d, ev)
+		this.evidenceAccepted = true
+		return proved.change === "transient" ? null : proved.change
 	}
 
 	/**
@@ -1583,17 +2275,32 @@ export class DiscoveryStore
 	 * Appends accepted evidence to `Observation.decode` (§ 7.1 "accepted values only"): CRC-clean, the
 	 * observation's epoch (P17, as the probe pool's rule in Task 34), not stamped after that epoch ended
 	 * (`endedAt` when the observation ended by `retune` or `hop`). Exact duplicates are ignored; the list
-	 * keeps the 16 newest by `at`. Journaled as one `"evidence"` entry.
+	 * keeps the 16 newest by `at`. Journaled as one `"evidence"` entry. A channel decode whose
+	 * identity does not fit its protocol (`identityFitsProtocol`) is refused before any routing. `opts.cap` is the
+	 * leak/intermod cap decided for this decode (applyEvidence's): a capped channel decode never
+	 * proves another record through redirection.
 	 */
 	appendObservationEvidence(
 		observationId: string,
 		ev: DecodeEvidence,
+		opts: { cap?: ConfidenceCap } = {},
 	): boolean {
 		ev = checkedDecode(ev)
+		// A channel decode (ACARS, VDL2) may be routed to another record: its identity must fit its
+		// protocol before any routing. Other protocols keep their stored-evidence behaviour (their
+		// proofs check the identity when read).
+		if (
+			ev.identity !== undefined &&
+			CHANNEL_ANCHOR_PROTOCOLS.includes(ev.protocol) &&
+			!identityFitsProtocol(ev.protocol, ev.identity)
+		)
+			return false
 		const o = this.observationIndex.get(observationId)
+		const owner =
+			o === undefined ? undefined : this.discoveries.get(o.discoveryId)
 		if (
 			o === undefined ||
-			this.discoveries.get(o.discoveryId)?.anchor === "decode" ||
+			owner?.anchor === "decode" ||
 			!ev.crcClean ||
 			ev.epoch !== o.sampleRange.epoch
 		)
@@ -1601,6 +2308,29 @@ export class DiscoveryStore
 		const epochEnded = o.endReason === "retune" || o.endReason === "hop"
 		if (epochEnded && o.endedAt !== undefined && ev.at >= Date.parse(o.endedAt))
 			return false
+		// One channel, one record (channelRouteOf): only the channel's owner collects a channel
+		// decode. Refused, or an anchor's: the observation keeps nothing (the anchor takes the
+		// decode through anchorDecode). Another spectrum owner's: it takes the decode as its channel
+		// proof here, so a stored replay the observation refuses still reaches it, and the
+		// observation keeps nothing (its record never becomes a second decoded owner). A capped
+		// decode proves no other owner.
+		const identity = ev.identity
+		const route =
+			owner === undefined || identity === undefined
+				? undefined
+				: this.channelRouteOf(owner, ev)
+		if (
+			identity !== undefined &&
+			route !== undefined &&
+			route.kind !== "none"
+		) {
+			if (route.kind !== "record") return false
+			if (route.owner !== owner) {
+				if (opts.cap === undefined)
+					this.proveByChannel(route.owner, { ...ev, identity })
+				return false
+			}
+		}
 		const list = o.decode ?? []
 		if (list.some(x => jsonEqual(x, ev))) return false
 		const added = plainCopy(ev)
@@ -2830,6 +3560,12 @@ export class DiscoveryStore
 		this.discoveries.clear()
 		this.decodeAnchors.clear()
 		this.anchorWindows.clear()
+		this.anchorIdentity.clear()
+		this.anchorReplayed.clear()
+		this.channelProofs.clear()
+		this.channelRefusalLogged.clear()
+		this.anchorHeld.clear()
+		this.anchorHolds.clear()
 		this.anchorPending.clear()
 		this.anchorPublished.clear()
 		this.observationIndex.clear()
@@ -4269,6 +5005,14 @@ export class DiscoveryStore
 			this.putObservation(o)
 			op.observations.add(o.id)
 		}
+		// The survivor keeps the newer channel proof (the dropped record's goes with it).
+		const dropProof = this.channelProofs.get(drop.id)
+		const keepProof = this.channelProofs.get(keep.id)
+		if (
+			dropProof !== undefined &&
+			(keepProof === undefined || dropProof.at > keepProof.at)
+		)
+			this.channelProofs.set(keep.id, dropProof)
 		keep.observationCount += drop.observationCount
 		keep.airtimeMs += drop.airtimeMs
 		if (drop.firstSeenAt < keep.firstSeenAt) keep.firstSeenAt = drop.firstSeenAt
@@ -5152,7 +5896,74 @@ export class DiscoveryStore
 		this.proofBearing.delete(discoveryId)
 	}
 
+	/**
+	 * A channel anchor (ACARS, VDL2) is decoded by construction: only a confirmed CRC-clean
+	 * identity creates or refreshes it. Its proof cites the latest published checked identity.
+	 * A restored anchor (snapshot or journal) has none in memory: it is not proven until a fresh
+	 * confirmed decode is published, and its label says so: the protocol it was last seen as, at
+	 * candidate (never decoded without a proof). Read paths publish it as any weak record
+	 * (unknown); identify does not answer from it.
+	 */
+	private channelAnchorView(d: Discovery): DiscoveryProofView {
+		const identity = this.anchorIdentity.get(d.id)
+		if (identity === undefined)
+			return {
+				proof: null,
+				evidence: "weak",
+				label: {
+					protocol: d.protocol,
+					family: d.family,
+					confidence: "candidate",
+				},
+			}
+		return this.channelDecodedView(
+			d,
+			d.protocol,
+			identity,
+			this.anchorReplayed.has(d.id),
+			d.lastSeenAt,
+			`decode:${d.id}`,
+		)
+	}
+
+	/**
+	 * The decoded view a checked channel identity gives: an anchor's (channelAnchorView) or a
+	 * spectrum owner's channel proof (proveByChannel), which cites the owner's newest observation.
+	 * An owner's label is its proof's (labelOfProof: a leak or intermod cap still ceilings it).
+	 */
+	private channelDecodedView(
+		d: Discovery,
+		protocol: ScannerProtocol,
+		identity: Identity,
+		replayed: boolean,
+		at: string,
+		observationId: string,
+	): DiscoveryProofView {
+		const bare = {
+			kind: "decoded" as const,
+			protocol,
+			transport: replayed ? ("replay" as const) : ("ambient" as const),
+			at,
+			observationId,
+			tried: [],
+			unavailable: [],
+			encrypted: false,
+			identity: { ...identity },
+		}
+		const proof: ScannerProof = { ...bare, summary: proofSummary(bare) }
+		return {
+			label:
+				d.anchor === "decode"
+					? { protocol, family: familyOf(protocol), confidence: "decoded" }
+					: this.labelOfProof(d, proof),
+			evidence: "proven",
+			proof,
+		}
+	}
+
 	private discoveryView(d: Discovery): DiscoveryProofView {
+		if (d.anchor === "decode" && d.protocol !== "adsb")
+			return this.channelAnchorView(d)
 		if (d.anchor === "decode")
 			return {
 				label: { protocol: "adsb", family: "packet", confidence: "decoded" },
@@ -5171,9 +5982,35 @@ export class DiscoveryStore
 			}
 		const hit = this.proofCache.get(d.id)
 		if (hit !== undefined) return hit
+		const own = this.observationView(d)
+		// A spectrum owner's channel proof shows unless its observations prove a decode at least as
+		// recent themselves: the proof cites the latest checked identity on the channel.
+		const channel = this.channelProofs.get(d.id)
+		const view =
+			channel !== undefined &&
+			!(
+				own.evidence === "proven" &&
+				own.proof?.kind === "decoded" &&
+				!(Date.parse(own.proof.at) < channel.at)
+			)
+				? this.channelDecodedView(
+						d,
+						channel.protocol,
+						channel.identity,
+						channel.replayed,
+						iso(channel.at),
+						this.byDiscovery.get(d.id)?.at(-1)?.id ?? `decode:${d.id}`,
+					)
+				: own
+		this.proofCache.set(d.id, view)
+		return view
+	}
+
+	/** The view a spectrum discovery's own (and co-channel) observations give; not cached. */
+	private observationView(d: Discovery): DiscoveryProofView {
 		// No sink or decode input: the stored record is the label.
-		if (!this.evidenceCanNameProof(d)) {
-			const view: DiscoveryProofView = {
+		if (!this.evidenceCanNameProof(d))
+			return {
 				proof: null,
 				evidence: "weak",
 				label: {
@@ -5182,9 +6019,6 @@ export class DiscoveryStore
 					confidence: d.confidence,
 				},
 			}
-			this.proofCache.set(d.id, view)
-			return view
-		}
 		const proof = this.deriveDiscovery(d)
 		const evidence = this.proofLevel(proof)
 		const label =
@@ -5195,9 +6029,7 @@ export class DiscoveryStore
 						family: d.family,
 						confidence: d.confidence,
 					}
-		const view: DiscoveryProofView = { proof, evidence, label }
-		this.proofCache.set(d.id, view)
-		return view
+		return { proof, evidence, label }
 	}
 
 	private toneConfidence(d: Discovery, proof: ScannerProof): ScannerConfidence {
@@ -5361,8 +6193,15 @@ export class DiscoveryStore
 		if (d === undefined) return
 		// The outer delete/merge journals removal; publishing here would nest a commit.
 		this.anchorWindows.delete(id)
+		this.anchorIdentity.delete(id)
+		this.anchorReplayed.delete(id)
+		this.channelProofs.delete(id)
+		this.channelRefusalLogged.delete(id)
 		this.anchorPending.delete(id)
 		this.anchorPublished.delete(id)
+		for (const held of this.anchorHolds.get(id) ?? [])
+			this.anchorHeld.delete(held)
+		this.anchorHolds.delete(id)
 		this.discoveries.delete(id)
 		const timer = this.anchorExpiry.get(id)
 		if (timer) clearTimeout(timer)

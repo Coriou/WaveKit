@@ -519,6 +519,7 @@ describe("built-in ADS-B band skip", () => {
 			const anchor = {
 				id: "d_adsb",
 				anchor: "decode",
+				protocol: "adsb",
 				frequencyHz: ADSB_HZ,
 				bandwidthHz: 0,
 				aircraftCount: 3,
@@ -535,6 +536,48 @@ describe("built-in ADS-B band skip", () => {
 			})
 			expect(last?.trials ?? []).toEqual([])
 		})
+
+		it.each(["acars", "vdl2"] as const)(
+			"a %s channel anchor answers from the anchor with no trial, and only while proven",
+			async protocol => {
+				// A synthetic channel inside the VHF aeronautical band.
+				const hz = 130_050_000
+				const proven = {
+					id: `d_${protocol}`,
+					anchor: "decode",
+					protocol,
+					frequencyHz: hz,
+					bandwidthHz: 0,
+					aircraftCount: 1,
+					lastSeenAt: new Date(0).toISOString(),
+					metadata: {},
+					proof: { kind: "decoded", protocol },
+				} as unknown as Discovery
+				const { last, record } = await identifyAt(hz, proven)
+				expect(record.state).toBe("completed")
+				expect(last?.result).toMatchObject({
+					protocol,
+					confidence: "decoded",
+					discoveryId: `d_${protocol}`,
+					alreadyDecoded: `already decoded: ${protocol.toUpperCase()}, 1 identity`,
+				})
+				expect(last?.trials ?? []).toEqual([])
+				// A restored anchor whose proof is withheld runs its own trials.
+				const { proof: _proof, ...withheld } = proven as unknown as Record<
+					string,
+					unknown
+				>
+				const restored = await identifyAt(hz, withheld as unknown as Discovery)
+				expect(restored.last?.result?.alreadyDecoded).toBeUndefined()
+				// The store's restored view publishes protocol unknown: never an ADS-B answer.
+				const unknown = await identifyAt(hz, {
+					...withheld,
+					protocol: "unknown",
+				} as unknown as Discovery)
+				expect(unknown.last?.result?.alreadyDecoded).toBeUndefined()
+				expect(unknown.last?.result?.protocol).not.toBe("adsb")
+			},
+		)
 
 		it("an anchorless identify just outside the window plans as elsewhere", async () => {
 			const base = await identifyTrialsAt(NEUTRAL_HZ)

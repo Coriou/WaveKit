@@ -11,6 +11,8 @@ import type {
 } from "../../../decoders/types.js"
 import type { AmbientTarget } from "./ambient.js"
 import { ADSB_HZ } from "./confirm/readsb.js"
+import { acarsDefaultChannelsHz } from "../../../decoders/options/acarsdec.js"
+import { vdl2DefaultChannelsHz } from "../../../decoders/options/dumpvdl2.js"
 
 export interface AmbientTargetDeps {
 	/** Source used when the config names none (SourceFanoutRouter.getDefaultSourceId). */
@@ -20,13 +22,6 @@ export interface AmbientTargetDeps {
 	/** Input kind of the running decoder (DecoderManager.getDecoder(id)?.caps.input). */
 	inputKind: (decoderId: string) => DecoderInputType | undefined
 }
-
-/** acarsdec adapter default (src/decoders/builtin/acarsdec.ts:282-285). */
-const ACARS_DEFAULT_HZ: readonly number[] = [131_550_000, 131_725_000]
-/** dumpvdl2 adapter default (src/decoders/builtin/dumpvdl2.ts:416-420). */
-const VDL2_DEFAULT_HZ: readonly number[] = [
-	136_650_000, 136_700_000, 136_975_000,
-]
 
 const NEW_TYPES = new Set([
 	"ais-catcher",
@@ -82,8 +77,9 @@ function newTypeTargets(
 	}
 	if (isHz(single)) return [single]
 	if (cfg.type === "ais-catcher") return Object.values(SCANNER_AIS_CHANNEL_HZ)
-	if (cfg.type === "acarsdec") return [...ACARS_DEFAULT_HZ]
-	if (cfg.type === "dumpvdl2") return [...VDL2_DEFAULT_HZ]
+	// The adapters' own region-less defaults (a catalogue decoder names its region's list).
+	if (cfg.type === "acarsdec") return [...acarsDefaultChannelsHz()]
+	if (cfg.type === "dumpvdl2") return [...vdl2DefaultChannelsHz()]
 	// readsb listens on the Mode S downlink only.
 	if (cfg.type === "readsb") return [ADSB_HZ]
 	return null

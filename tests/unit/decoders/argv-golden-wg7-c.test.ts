@@ -97,6 +97,26 @@ const GOLDEN: Record<string, Row[]> = {
 				],
 			},
 		},
+		{
+			// Opt-in ACARS channel filter: its own bounded stage after the 25 kHz front.
+			config: {
+				options: { frequencies: [131550000], channelFilter: true },
+			},
+			expected: {
+				getDecoderArgs: [
+					"--output",
+					"json:file:path=-",
+					"--sndfile",
+					"/dev/stdin,subtype=0x02",
+					"-m",
+					"1",
+				],
+				getArgs: [
+					"-c",
+					"csdr convert -i char -o float | csdr firdecimate 100 0.002500 --cutoff 0.3750 | csdr firdecimate 1 0.041667 --cutoff 0.212500 | csdr amdemod | csdr agc -f float -p fast -r 0.8 | csdr dcblock | csdr gain 1 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 24000 -e signed -b 16 -c 1 - -t raw -r 12000 - | acarsdec --output json:file:path=- --sndfile /dev/stdin,subtype=0x02 -m 1",
+				],
+			},
+		},
 	],
 	dumpvdl2: [
 		{

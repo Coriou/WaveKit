@@ -58,31 +58,55 @@ export class AmbientObservationIndex<T extends ChannelCandidate> {
 	}
 }
 
-/** A live map indexes every insertion, including restored/injected observations. */
+/**
+ * A live map indexes every insertion, including restored/injected observations, by centre (the
+ * ambient index) and by observation id (byObservationId, O(1) instead of a scan of every value).
+ */
 export class AmbientObservationMap<T extends ChannelCandidate> extends Map<
 	string,
 	T
 > {
+	private readonly byId = new Map<string, T>()
+
 	constructor(private readonly index: AmbientObservationIndex<T>) {
 		super()
 	}
 
 	override set(key: string, value: T): this {
 		const previous = this.get(key)
-		if (previous) this.index.remove(previous.observationId)
+		if (previous) {
+			this.index.remove(previous.observationId)
+			this.forgetId(previous)
+		}
 		super.set(key, value)
 		this.index.upsert(value)
+		this.byId.set(value.observationId, value)
 		return this
 	}
 
 	override delete(key: string): boolean {
 		const previous = this.get(key)
-		if (previous) this.index.remove(previous.observationId)
+		if (previous) {
+			this.index.remove(previous.observationId)
+			this.forgetId(previous)
+		}
 		return super.delete(key)
 	}
 
 	override clear(): void {
 		for (const value of this.values()) this.index.remove(value.observationId)
+		this.byId.clear()
 		super.clear()
+	}
+
+	/** The value holding `observationId`, or undefined. */
+	byObservationId(observationId: string): T | undefined {
+		return this.byId.get(observationId)
+	}
+
+	/** Drops `value`'s id entry unless another value took the id since. */
+	private forgetId(value: T): void {
+		if (this.byId.get(value.observationId) === value)
+			this.byId.delete(value.observationId)
 	}
 }
