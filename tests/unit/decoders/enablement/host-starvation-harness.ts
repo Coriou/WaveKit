@@ -23,7 +23,7 @@ export function starvationHarness() {
 	let mono = 0
 	const totals = new Map<string, number>([[`${LIVE}#1`, 0]])
 	const loop = { maxMs: 4, p99Ms: 2 }
-	const cpu = { normalisedPercent: 10 }
+	const cpu: { normalisedPercent: number | null } = { normalisedPercent: 10 }
 	const counters = () =>
 		new Map(
 			[...totals].map(([key, total]) => [
@@ -53,8 +53,11 @@ export function starvationHarness() {
 	const keyOf = (id: string) => `${id}#raw@a`
 	const idOf = (key: string) => key.slice(0, key.indexOf("#"))
 	const branch = (id: string) => `decoder-${id}`
-	/** One sample: `drop` branches each lose one chunk; `lagMs` sets the loop delay max. */
-	const tick = (drop: readonly string[] = [], lagMs = 4) => {
+	/**
+	 * One sample: `drop` branches each lose one chunk; `lagMs` sets the loop
+	 * delay max. `judge` false skips the probation pass (reconciliation lags).
+	 */
+	const tick = (drop: readonly string[] = [], lagMs = 4, judge = true) => {
 		for (const b of drop) {
 			const key = `${b}#1`
 			if (totals.has(key)) totals.set(key, totals.get(key)! + 1)
@@ -63,6 +66,7 @@ export function starvationHarness() {
 		loop.p99Ms = Math.min(lagMs, Math.max(2, lagMs / 2))
 		mono += SAMPLE_MS
 		gate.record(monitor.sampleNow())
+		if (!judge) return []
 		const verdicts: ProbationVerdict[] = [...gate.probation(running, mono)]
 		for (const v of verdicts) {
 			const tuned = gate.shedAttribution?.(v.key)?.tuned === true
@@ -126,6 +130,7 @@ export function starvationHarness() {
 	return {
 		gate,
 		monitor,
+		cpu,
 		running,
 		shed,
 		tick,

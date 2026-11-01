@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	HOST_STARVATION_BRANCHES_MIN,
 	HOST_STARVATION_WINDOW_MS,
@@ -16,7 +16,11 @@ import {
 	lossRetryMs,
 } from "../../../../src/decoders/enablement/contract.js"
 import type { ChargedDrop } from "../../../../src/decoders/enablement/contract.js"
-import { HOST_BUSY_HOLD_MS } from "../../../../src/decoders/enablement/efficiency-gate.js"
+import {
+	createEfficiencyGate,
+	HOST_BUSY_HOLD_MS,
+} from "../../../../src/decoders/enablement/efficiency-gate.js"
+import type { DropReader } from "../../../../src/decoders/enablement/efficiency-gate.js"
 import {
 	LIVE,
 	SAMPLE_MS,
@@ -255,6 +259,137 @@ describe("gate: host starvation never sheds the tuned decoder", () => {
 		expect(h.gate.hostBusy?.("a")?.cause).toBe("host")
 		h.tick()
 		expect(h.gate.hostBusy?.("a")).toBeNull()
+	})
+})
+
+describe("gate: a CPU probation reset keeps a tuned probationer's settling loss", () => {
+	it("host CPU within the drop's window is host loss: dismissed, never shed", () => {
+		const h = starvationHarness()
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		h.tick()
+		// One own-branch drop on a healthy host, still settling.
+		h.tick([h.branch("readsb")])
+		// CPU over the guard 2 s later with no further drops: host evidence
+		// within HOST_STARVATION_WINDOW_MS of the drop, and a probation reset.
+		h.cpu.normalisedPercent = 100
+		h.tick()
+		h.cpu.normalisedPercent = 10
+		expect(h.probation("readsb")).toBe(true)
+		h.clean(HOST_STARVATION_WINDOW_MS + 34_000)
+		expect(h.shed).toEqual([])
+		expect(h.probation("readsb")).toBe(false)
+	})
+
+	it("a settling drop the CPU does not explain still sheds it once settled", () => {
+		const h = starvationHarness()
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		// CPU over the guard, then probation passes lag behind the samples.
+		h.cpu.normalisedPercent = 100
+		h.tick([], 4, false)
+		h.cpu.normalisedPercent = 10
+		for (let i = 0; i < 6; i++) h.tick([], 4, false)
+		// 14 s after the CPU sample: outside its window, on a healthy host.
+		// This pass resets probation for the CPU while the drop is settling.
+		h.tick([h.branch("readsb")])
+		const at = h.mono()
+		expect(h.shed).toEqual([])
+		h.clean(HOST_STARVATION_WINDOW_MS - SAMPLE_MS)
+		expect(h.shed).toEqual([])
+		expect(h.probation("readsb")).toBe(true)
+		h.tick()
+		expect(h.shed).toEqual([
+			{ key: "readsb", detail: "drops", at: at + HOST_STARVATION_WINDOW_MS },
+		])
+	})
+
+	it("a carried drop host loss explains after the reset is dismissed", () => {
+		const h = starvationHarness()
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		h.cpu.normalisedPercent = 100
+		h.tick([], 4, false)
+		h.cpu.normalisedPercent = 10
+		for (let i = 0; i < 6; i++) h.tick([], 4, false)
+		h.tick([h.branch("readsb")])
+		// Live audio congests in the next sample: one host episode.
+		h.tick([LIVE])
+		h.clean(HOST_STARVATION_WINDOW_MS + 34_000)
+		expect(h.shed).toEqual([])
+		expect(h.probation("readsb")).toBe(false)
+	})
+})
+
+describe("gate: hostBusy memory stays bounded", () => {
+	/** A reader whose one member source has a host-attributed drop at `mono`. */
+	const churn = () => {
+		const clock = { mono: 0, members: [] as string[] }
+		const reader: DropReader = {
+			monoNow: () => clock.mono,
+			lastSampleMono: () => clock.mono,
+			sources: () => clock.members,
+			dropState: () => ({ state: "ok", dropBytesPerSecond: 0 }),
+			droppedSinceMono: () => false,
+			droppedWithinMs: () => false,
+			chargedDropsBetweenMono: (id, from, to) =>
+				clock.members.includes(id) && from <= clock.mono && clock.mono <= to
+					? [{ atMono: clock.mono, code: "host", branches: ["b", "c"] }]
+					: [],
+		}
+		const gate = createEfficiencyGate(
+			{ budgetCores: 10, cpuGuardPercent: 99 },
+			{ drops: reader },
+		)
+		return { clock, gate }
+	}
+	/** The gate's host-loss map, caught as it records an entry for a churn source. */
+	const watchHostLoss = () => {
+		const seen = new Set<Map<unknown, unknown>>()
+		const set = Map.prototype.set
+		vi.spyOn(Map.prototype, "set").mockImplementation(function (
+			this: Map<unknown, unknown>,
+			key: unknown,
+			value: unknown,
+		) {
+			if (
+				typeof key === "string" &&
+				key.startsWith("churn-") &&
+				typeof value === "object" &&
+				value !== null &&
+				"atMono" in value
+			)
+				seen.add(this)
+			return set.call(this, key, value)
+		})
+		return seen
+	}
+	afterEach(() => {
+		vi.restoreAllMocks()
+	})
+
+	it("drops the entries of sources that left the membership", () => {
+		const seen = watchHostLoss()
+		const { clock, gate } = churn()
+		for (let i = 0; i < 200; i++) {
+			clock.mono += 1_000
+			clock.members = [`churn-${i}`]
+			expect(gate.hostBusy?.(`churn-${i}`)?.cause).toBe("host")
+		}
+		expect(seen.size).toBe(1)
+		for (const map of seen) expect(map.size).toBe(1)
+	})
+
+	it("drops entries past the hold", () => {
+		const seen = watchHostLoss()
+		const { clock, gate } = churn()
+		const all: string[] = []
+		for (let i = 0; i < 200; i++) {
+			clock.mono += HOST_BUSY_HOLD_MS + 1
+			all.push(`churn-${i}`)
+			// Every source stays a member: only age prunes.
+			clock.members = all
+			expect(gate.hostBusy?.(`churn-${i}`)?.cause).toBe("host")
+		}
+		expect(seen.size).toBe(1)
+		for (const map of seen) expect(map.size).toBe(1)
 	})
 })
 
