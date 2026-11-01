@@ -1180,6 +1180,12 @@ export class ScannerService extends EventEmitter {
 	/** A journal hole asked for a snapshot sooner than the periodic interval. */
 	private snapshotRequested = false
 	private snapshotFailed = false
+	/**
+	 * The last main-thread snapshot build (`persistence.mainSnapshotBuild`): its synchronous time and
+	 * when it ended, which the cadence's duty budget spaces the next main-thread snapshot from.
+	 */
+	private mainSnapshotBuildMs = 0
+	private mainSnapshotEndAt = 0
 	/** Maintenance still running behind a slow disk: the next one waits for it. */
 	private maintenanceInFlight = false
 	private lastMaintenanceAt = 0
@@ -7785,6 +7791,8 @@ export class ScannerService extends EventEmitter {
 	 * Single-flight periodic snapshot: no second clone + stringify while one is being written. A
 	 * failed write leaves the state dirty, so it is retried; one a journal hole requested stays
 	 * requested, so the hole is retried after 10 s, not at the periodic interval (up to 2 h).
+	 * A main-thread build is noted for the duty budget: one built at once ends `ms` after `now`,
+	 * a worker fallback built later by the time the write settles.
 	 */
 	private startSnapshot(now: number): void {
 		if (!this.stateLoaded || this.snapshotInFlight) return
@@ -7793,8 +7801,13 @@ export class ScannerService extends EventEmitter {
 		this.dirty = false
 		this.snapshotRequested = false
 		this.snapshotInFlight = true
-		this.persistence
-			.writeSnapshotOf(this.store)
+		const before = this.persistence.mainSnapshotBuild().count
+		const write = this.persistence.writeSnapshotOf(this.store)
+		const built = this.noteMainSnapshotBuild(before, now, true)
+		write
+			.finally(() => {
+				this.noteMainSnapshotBuild(built, this.now(), false)
+			})
 			.then(
 				() => {
 					this.snapshotFailed = false
@@ -7812,12 +7825,27 @@ export class ScannerService extends EventEmitter {
 			})
 	}
 
+	/** Records a main-thread build made since `count` (ending `ms` after `at` when `addMs`); returns the new count. */
+	private noteMainSnapshotBuild(
+		count: number,
+		at: number,
+		addMs: boolean,
+	): number {
+		const build = this.persistence.mainSnapshotBuild()
+		if (build.count !== count) {
+			this.mainSnapshotBuildMs = build.ms
+			this.mainSnapshotEndAt = addMs ? at + build.ms : at
+		}
+		return build.count
+	}
+
 	/**
 	 * A journal hole (refused or failed lines) blocks every append, recording operations
 	 * included, until a snapshot covers it: snapshot now instead of at the next periodic
-	 * interval, still single-flight and spaced by `snapshotIntervalMs` (1 s whether the snapshot
-	 * worker or the main thread builds it, 10 s after a failed snapshot); the tick picks a
-	 * deferred request up.
+	 * interval, still single-flight and spaced by `snapshotIntervalMs` (1 s, 10 s after a failed
+	 * snapshot, and for one the main thread builds no sooner than 9 x the last main-thread build
+	 * after it ended, so recurring holes keep main-thread snapshots under 10 % of the thread);
+	 * the tick picks a deferred request up.
 	 */
 	private requestSnapshot(): void {
 		this.dirty = true
@@ -7830,7 +7858,7 @@ export class ScannerService extends EventEmitter {
 	/**
 	 * Size-scaled (store/snapshot-cadence.ts): the journal covers every mutation between
 	 * snapshots, so a large store is rewritten about hourly, sooner once its journal tail grows
-	 * past the trigger or a hole needs covering.
+	 * past the trigger or a hole needs covering, within the main-thread duty budget.
 	 */
 	private snapshotInterval(): number {
 		const cadence = this.persistence.snapshotCadence()
@@ -7839,6 +7867,8 @@ export class ScannerService extends EventEmitter {
 			maxJournalBytes: this.settings().storage.maxJournalMb * 1024 * 1024,
 			requested: this.snapshotRequested,
 			failed: this.snapshotFailed,
+			mainBuildMs: this.mainSnapshotBuildMs,
+			mainBuildEndOffsetMs: this.mainSnapshotEndAt - this.lastSnapshotAt,
 		})
 	}
 

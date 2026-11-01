@@ -19,8 +19,9 @@ export const SNAPSHOT_MAX_INTERVAL_MS = 2 * 3_600_000
 export const SNAPSHOT_BYTES_PER_DAY = 2_000_000_000
 const DAY_MS = 86_400_000
 /**
- * Fastest snapshot after a journal hole, on the worker or the main thread alike: until one covers
- * the hole every append is refused, recording operations included, so it is never spaced further.
+ * Fastest snapshot after a journal hole: until one covers the hole every append is refused,
+ * recording operations included. Only the main-thread duty budget (`MAIN_SNAPSHOT_REST_FACTOR`)
+ * spaces a hole snapshot further, and only one the main thread builds.
  */
 export const SNAPSHOT_REQUEST_MIN_MS = 1_000
 /**
@@ -30,8 +31,16 @@ export const SNAPSHOT_REQUEST_MIN_MS = 1_000
  * 88 MiB gives 88 s.
  */
 export const MAIN_SNAPSHOT_MS_PER_MIB = 1_000
-/** Ceiling of that spacing: 10 min at any size. */
+/** Ceiling of that spacing, and of the rest below: 10 min at any size. */
 export const MAIN_SNAPSHOT_MAX_SPACING_MS = 10 * 60_000
+/**
+ * Main-thread snapshot duty budget, hole snapshots included: the next snapshot the main thread
+ * builds starts no earlier than the end of the last main-thread build plus 9 x its synchronous
+ * build time, so builds take at most 1 / (1 + 9) = 10 % of the main thread however often holes
+ * recur. A 2.7 s build rests 24.3 s; a 30 ms build (about 1 MiB) rests 270 ms, inside the 1 s
+ * hole spacing. Snapshots the worker builds are not limited by it.
+ */
+export const MAIN_SNAPSHOT_REST_FACTOR = 9
 /**
  * Journal since the last snapshot that makes one due early: at least 1 MiB (or the snapshot's own
  * size, so replay never reads more than about twice the snapshot), but never past half of
@@ -62,6 +71,15 @@ export function mainSnapshotSpacingMs(snapshotBytes: number): number {
 	)
 }
 
+/** Rest after a main-thread build of `buildMs`: 9 x the build, clamped to [0, 10 min]. */
+export function mainSnapshotRestMs(buildMs: number): number {
+	const ms = Number.isFinite(buildMs) && buildMs > 0 ? buildMs : 0
+	return Math.min(
+		MAIN_SNAPSHOT_MAX_SPACING_MS,
+		Math.ceil(ms * MAIN_SNAPSHOT_REST_FACTOR),
+	)
+}
+
 /** Journal bytes since the last snapshot that make the next one due: max(1 MiB, snapshot), at most half the cap. */
 export function journalSnapshotTriggerBytes(
 	snapshotBytes: number,
@@ -88,15 +106,30 @@ export interface SnapshotCadenceInput {
 	requested: boolean
 	/** The last snapshot failed. */
 	failed: boolean
+	/** Synchronous build time of the last main-thread snapshot (0 before any). */
+	mainBuildMs: number
+	/**
+	 * When that build ended, in ms after the start of the last snapshot (negative when it ended
+	 * before; ignored while `mainBuildMs` is 0).
+	 */
+	mainBuildEndOffsetMs: number
 }
 
 /**
  * Minimum time between snapshot starts while the state is dirty. A journal hole is covered after
- * 1 s whoever builds the snapshot (10 s after a failure, as on a failing disk): appends stay
- * refused until then. A journal past its trigger makes one due after 10 s, or after the
- * main-thread spacing when the worker cannot take it; otherwise the size-scaled periodic interval.
+ * 1 s (10 s after a failure, as on a failing disk): appends stay refused until then. A journal
+ * past its trigger makes one due after 10 s, or after the main-thread spacing when the worker
+ * cannot take it; otherwise the size-scaled periodic interval. A snapshot the main thread will
+ * build also waits out the rest after the last main-thread build, hole or not.
  */
 export function snapshotIntervalMs(s: SnapshotCadenceInput): number {
+	const interval = cadenceIntervalMs(s)
+	if (s.onWorker || !(s.mainBuildMs > 0)) return interval
+	const rest = s.mainBuildEndOffsetMs + mainSnapshotRestMs(s.mainBuildMs)
+	return Number.isFinite(rest) ? Math.max(interval, rest) : interval
+}
+
+function cadenceIntervalMs(s: SnapshotCadenceInput): number {
 	const periodic = periodicSnapshotIntervalMs(s.snapshotBytes)
 	if (s.requested)
 		return Math.min(

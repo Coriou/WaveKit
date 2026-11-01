@@ -464,6 +464,140 @@ describe("ScannerService size-scaled snapshot cadence", () => {
 	})
 })
 
+describe("ScannerService main-thread snapshot duty budget", () => {
+	const BIG = 90_000_000
+	const LATE = 10_000_000_000
+	/** The measured main-thread build of an 88 MiB store. */
+	const BUILD_MS = 2_700
+	const settle = () => new Promise<void>(resolve => setImmediate(resolve))
+
+	/**
+	 * Holes on every 100 ms tick for `windowMs`; `onWorker(n)` says whether the snapshot after `n`
+	 * earlier ones is built by the worker or on the main thread (holding the clock for BUILD_MS).
+	 * Returns the starts and the main-thread time spent building.
+	 */
+	async function recurringHoles(
+		windowMs: number,
+		onWorker: (snapshots: number) => boolean,
+	): Promise<{ starts: number[]; from: number; busyMs: number }> {
+		const { internals, clock } = harness()
+		clock.t = LATE
+		const builds = { count: 0, ms: 0 }
+		const starts: number[] = []
+		vi.spyOn(internals.persistence, "snapshotCadence").mockImplementation(
+			() => ({
+				snapshotBytes: BIG,
+				journalBytes: 0,
+				onWorker: onWorker(starts.length),
+			}),
+		)
+		vi.spyOn(internals.persistence, "mainSnapshotBuild").mockImplementation(
+			() => ({ ...builds }),
+		)
+		let busyMs = 0
+		vi.spyOn(internals.persistence, "writeSnapshotOf").mockImplementation(
+			() => {
+				const worker = onWorker(starts.length)
+				starts.push(clock.t)
+				if (!worker) {
+					builds.count += 1
+					builds.ms = BUILD_MS
+					busyMs += BUILD_MS
+					clock.t += BUILD_MS // the synchronous build holds the main thread
+				}
+				return Promise.resolve()
+			},
+		)
+		vi.spyOn(internals.persistence, "append").mockImplementation(() =>
+			Promise.reject(new WaveKitError("full", SCANNER_JOURNAL_BACKLOG_CODE)),
+		)
+		const from = clock.t
+		while (clock.t - from < windowMs) {
+			internals.onStoreMutation(entry()) // every change finds the journal refusing
+			await settle()
+			internals.tick()
+			clock.t += 100
+		}
+		return { starts, from, busyMs }
+	}
+
+	it("recurring holes with the worker down: the first is covered at once, then builds stay at or under 10 % of the main thread", async () => {
+		const window = 10 * 60_000
+		const { starts, from, busyMs } = await recurringHoles(window, () => false)
+		expect(starts[0]).toBe(from) // the first hole: at once, well inside 1 s
+		// Each next start is the last end plus 9 x 2,700 ms (within one 100 ms tick), never sooner.
+		for (let i = 1; i < starts.length; i++) {
+			const gap = (starts[i] ?? 0) - (starts[i - 1] ?? 0)
+			expect(gap).toBeGreaterThanOrEqual(BUILD_MS + 24_300)
+			expect(gap).toBeLessThan(BUILD_MS + 24_300 + 100)
+		}
+		// 600 s / 27 s: 23 builds, not one back-to-back every 2.7 s (222).
+		expect(starts.length).toBe(23)
+		// Any window holds at most 10 % plus the one build it may end inside; whole build + rest
+		// cycles hold 10 % exactly.
+		expect(busyMs).toBeLessThanOrEqual(0.1 * window + BUILD_MS)
+		const cycles = (starts.at(-1) ?? 0) - from + BUILD_MS + 24_300
+		expect(busyMs / cycles).toBeLessThanOrEqual(0.1)
+	})
+
+	it("worker-built holes stay at 1 s, even right after a main-thread build", async () => {
+		// The first snapshot resets the stale mirror on the main thread; the worker builds the rest.
+		const { starts, from } = await recurringHoles(60_000, n => n > 0)
+		expect(starts[0]).toBe(from)
+		// Due 1 s after the first start: the first hole after the 2.7 s build releases the thread.
+		expect((starts[1] ?? 0) - (starts[0] ?? 0)).toBe(BUILD_MS + 100)
+		for (let i = 2; i < starts.length; i++)
+			expect((starts[i] ?? 0) - (starts[i - 1] ?? 0)).toBe(1_000)
+		expect(starts.length).toBe(59) // 0, 2.8 s, then every second to 59.8 s
+	})
+
+	it("rests from the end of a worker fallback the main thread built when the write settled", async () => {
+		const { internals, clock } = harness()
+		clock.t = LATE
+		const builds = { count: 0, ms: 0 }
+		vi.spyOn(internals.persistence, "snapshotCadence").mockReturnValue({
+			snapshotBytes: BIG,
+			journalBytes: 0,
+			onWorker: false,
+		})
+		vi.spyOn(internals.persistence, "mainSnapshotBuild").mockImplementation(
+			() => ({ ...builds }),
+		)
+		let finish!: () => void
+		const write = vi
+			.spyOn(internals.persistence, "writeSnapshotOf")
+			.mockImplementationOnce(
+				() =>
+					new Promise<void>(resolve => {
+						finish = () => {
+							builds.count += 1 // the worker failed: built on the main thread
+							builds.ms = BUILD_MS
+							resolve()
+						}
+					}),
+			)
+			.mockImplementation(() => Promise.resolve())
+		vi.spyOn(internals.persistence, "append").mockImplementation(() =>
+			Promise.reject(new WaveKitError("full", SCANNER_JOURNAL_BACKLOG_CODE)),
+		)
+		internals.onStoreMutation(entry())
+		await settle()
+		expect(write).toHaveBeenCalledTimes(1)
+		clock.t += 5_000
+		finish()
+		await settle()
+		const end = clock.t
+		internals.onStoreMutation(entry())
+		await settle()
+		clock.t = end + 24_300 - 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(1) // 1 ms short of 9 x 2,700 ms after its end
+		clock.t += 1
+		internals.tick()
+		expect(write).toHaveBeenCalledTimes(2)
+	})
+})
+
 function entry(): Parameters<ScannerPersistence["append"]>[0] {
 	return {
 		at: new Date(0).toISOString(),

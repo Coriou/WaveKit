@@ -599,6 +599,10 @@ export class ScannerPersistence {
 	private snapshotBytes = 0
 	private journalBytes = 0
 	private journalBytesCovered = 0
+	/** Main-thread snapshot builds so far and the last one's synchronous time (`mainSnapshotBuild`). */
+	private mainBuilds = 0
+	private mainBuildMs = 0
+	private readonly buildClock: () => number
 	private loaded = false
 	private authorityHealth: "healthy" | "degraded" = "degraded"
 
@@ -620,8 +624,11 @@ export class ScannerPersistence {
 		snapshotWorker?: SnapshotWorkerOptions
 		/** Awaited between validation slices of the snapshot; a setImmediate turn by default. */
 		yieldTurn?: YieldTurn
+		/** Monotonic ms timing main-thread snapshot builds; `performance.now` by default. */
+		buildClock?: () => number
 	}) {
 		this.yieldTurn = opts.yieldTurn ?? yieldToEventLoop
+		this.buildClock = opts.buildClock ?? (() => performance.now())
 		this.snapshotWorkerOptions = opts.snapshotWorker ?? {}
 		this.maxJournalBacklogBytes =
 			opts.maxJournalBacklogBytes ?? DEFAULT_MAX_JOURNAL_BACKLOG_BYTES
@@ -848,7 +855,7 @@ export class ScannerPersistence {
 
 	writeSnapshot(s: StoreSnapshot): Promise<void> {
 		if (!this.loaded) return Promise.reject(notLoaded())
-		const built = this.mainSnapshotText(s)
+		const built = this.timedMainSnapshotText(() => s)
 		if (built === null) return Promise.reject(invalidRecordingSnapshot())
 		return this.queueSnapshot({
 			text: built.text,
@@ -910,6 +917,14 @@ export class ScannerPersistence {
 		}
 	}
 
+	/**
+	 * Main-thread snapshot builds (clone + stringify) so far and the synchronous time of the last
+	 * one, for the snapshot cadence's duty budget. Worker-built snapshots do not count.
+	 */
+	mainSnapshotBuild(): { count: number; ms: number } {
+		return { count: this.mainBuilds, ms: this.mainBuildMs }
+	}
+
 	/** The snapshot worker's counters, heap and last timings (null before the first writeSnapshotOf). */
 	snapshotWorkerStatus(): SnapshotWorkerStatus | null {
 		return this.writer?.status() ?? null
@@ -968,7 +983,7 @@ export class ScannerPersistence {
 		store: SnapshotStore,
 		writer: SnapshotWriter | null,
 	): Promise<void> {
-		const built = this.mainSnapshotText(store.snapshot())
+		const built = this.timedMainSnapshotText(() => store.snapshot())
 		if (built === null) return Promise.reject(invalidRecordingSnapshot())
 		writer?.reset(built.text, built.lastSeq)
 		return this.queueSnapshot({
@@ -977,6 +992,19 @@ export class ScannerPersistence {
 			lastSeq: built.lastSeq,
 			successor: null,
 		})
+	}
+
+	/** `mainSnapshotText` of `snapshot()`, its clone included in the build time `mainSnapshotBuild` reports. */
+	private timedMainSnapshotText(
+		snapshot: () => StoreSnapshot,
+	): { text: string; lastSeq: number } | null {
+		const started = this.buildClock()
+		try {
+			return this.mainSnapshotText(snapshot())
+		} finally {
+			this.mainBuilds += 1
+			this.mainBuildMs = Math.max(0, this.buildClock() - started)
+		}
 	}
 
 	/** Today's snapshot text for `s` at the current lastSeq; null when its recording operations are invalid. */
@@ -1082,7 +1110,7 @@ export class ScannerPersistence {
 		slot: SnapshotSlot,
 		reason: string,
 	): Promise<void> {
-		const built = this.mainSnapshotText(store.snapshot())
+		const built = this.timedMainSnapshotText(() => store.snapshot())
 		const journalBytes = this.journalBytes
 		if (built === null) {
 			if (this.coverSeq === slot.lastSeq) this.coverSeq = null
