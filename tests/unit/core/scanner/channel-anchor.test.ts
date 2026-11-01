@@ -109,6 +109,47 @@ describe("channel anchors (ACARS, VDL2)", () => {
 		},
 	)
 
+	it("an anchor holds an observation it took: its ingests stay transient until the anchor goes", () => {
+		const s = store()
+		try {
+			const anchorId = s.anchorDecode(
+				"rtl",
+				CH_A,
+				acars(),
+				"commanded",
+			).discoveryId!
+			const obs = (open: boolean) =>
+				makeObs({
+					id: "o_held",
+					centreHz: CH_A + 1_500,
+					startedAt: T0 - 10_000,
+					blocks: 2,
+					obwHz: 9_000,
+					sourceId: "rtl",
+					open,
+				})
+			// Only a channel anchor of the observation's source holds it.
+			expect(s.holdForAnchor("other", "o_held", anchorId)).toBe(false)
+			expect(s.holdForAnchor("rtl", "o_held", "d_missing")).toBe(false)
+			expect(s.holdForAnchor("rtl", "o_held", anchorId)).toBe(true)
+			expect(s.ingest(obs(true))).toEqual({
+				discoveryId: null,
+				change: "transient",
+			})
+			expect(s.ingest(obs(false)).change).toBe("transient")
+			expect(s.snapshot().discoveries.map(d => d.id)).toEqual([anchorId])
+			// A spectrum discovery holds nothing; once the anchor is gone, ingests run as before.
+			const spectrumId = spectrum(s, "o_spec", 50_000)
+			expect(s.holdForAnchor("rtl", "o_next", spectrumId)).toBe(false)
+			expect(s.holdForAnchor("rtl", "o_spec", anchorId)).toBe(false)
+			expect(s.holdForAnchor("rtl", "o_held", anchorId)).toBe(true)
+			expect(s.delete(anchorId)).toBe(true)
+			expect(s.ingest(obs(false)).discoveryId).not.toBeNull()
+		} finally {
+			s.stopAnchorExpiry()
+		}
+	})
+
 	it("keeps one anchor per source, protocol and channel", () => {
 		const s = store()
 		try {

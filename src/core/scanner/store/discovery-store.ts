@@ -335,6 +335,8 @@ const DEFAULT_LIMIT = 100
 const MAX_LIMIT = 500
 const DAY_MS = 86_400_000
 const TRANSIENT: Ingested = { discoveryId: null, change: "transient" }
+/** Observations a channel anchor holds at once (holdForAnchor); the oldest go first. */
+const ANCHOR_HELD_MAX = 4096
 
 /** Comparable text of a staged anchor identity ("" for none). */
 function anchorIdentityText(identity: Identity | undefined): string {
@@ -920,6 +922,12 @@ export class DiscoveryStore
 	 * else ambient (absent). Set and cleared with anchorIdentity; the proof names it.
 	 */
 	private readonly anchorReplayed = new Set<string>()
+	/**
+	 * Observations without a discovery whose channel decode a channel anchor took
+	 * (holdForAnchor): observation id → anchor id, in insertion order, at most
+	 * ANCHOR_HELD_MAX. In memory only, as live observations are.
+	 */
+	private readonly anchorHeld = new Map<string, string>()
 	/** Latest confirmations stay private until publishAnchor commits a revision. */
 	private readonly anchorPending = new Map<
 		string,
@@ -1102,6 +1110,7 @@ export class DiscoveryStore
 			return this.reingest(known, input)
 		}
 		if (flagged) return TRANSIENT
+		if (this.heldByAnchor(input)) return TRANSIENT
 		if (input.jobIds.length === 0) return TRANSIENT
 		if (
 			input.track.gate !== "passed" &&
@@ -1263,6 +1272,49 @@ export class DiscoveryStore
 		)
 		timer.unref()
 		this.anchorExpiry.set(id, timer)
+	}
+
+	/**
+	 * An observation with no discovery whose confirmed channel decode (ACARS, VDL2, live or
+	 * replayed) a channel anchor took is that anchor's: an anchor never takes a spectrum
+	 * observation (obsCompatible, appendObservationEvidence), so without this its next ingest,
+	 * its close included, would open a second discovery at the channel. While the anchor exists
+	 * the observation's ingests stay transient, and its pending admission entry stops counting
+	 * (no later single-block promotion surfaces it). False, and nothing held, when `anchorId` is
+	 * not a channel anchor or the observation already belongs to a discovery.
+	 */
+	holdForAnchor(
+		sourceId: string,
+		observationId: string,
+		anchorId: string,
+	): boolean {
+		const d = this.discoveries.get(anchorId)
+		if (
+			d === undefined ||
+			d.anchor !== "decode" ||
+			!CHANNEL_ANCHOR_PROTOCOLS.includes(d.protocol) ||
+			!d.sourceIds.includes(sourceId) ||
+			this.observationIndex.has(observationId)
+		)
+			return false
+		this.pending.forget(sourceId, observationId)
+		this.anchorHeld.delete(observationId)
+		this.anchorHeld.set(observationId, anchorId)
+		if (this.anchorHeld.size > ANCHOR_HELD_MAX) {
+			const first = this.anchorHeld.keys().next()
+			if (!first.done) this.anchorHeld.delete(first.value)
+		}
+		return true
+	}
+
+	/** The observation is held by a channel anchor that still exists; a close releases the hold. */
+	private heldByAnchor(input: ObservationInput): boolean {
+		const anchorId = this.anchorHeld.get(input.id)
+		if (anchorId === undefined) return false
+		if (input.endedAt !== undefined) this.anchorHeld.delete(input.id)
+		if (this.discoveries.get(anchorId)?.anchor === "decode") return true
+		this.anchorHeld.delete(input.id)
+		return false
 	}
 
 	/**
@@ -2945,6 +2997,7 @@ export class DiscoveryStore
 		this.anchorWindows.clear()
 		this.anchorIdentity.clear()
 		this.anchorReplayed.clear()
+		this.anchorHeld.clear()
 		this.anchorPending.clear()
 		this.anchorPublished.clear()
 		this.observationIndex.clear()

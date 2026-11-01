@@ -199,6 +199,7 @@ async function scanner(
 		store: DiscoveryStore
 		live: Map<string, LiveObservation>
 		classify(t: unknown, s: string): LiveObservation["classification"]
+		ingest(l: LiveObservation, t: unknown, endReason?: string): void
 	}
 	internal.deps.iqCapture = {
 		view: () => ({ ...view(c), tuningTrust: trust, capturedAtMs: 50_000 }),
@@ -356,6 +357,52 @@ describe.each(CASES)("$decoder replay to a decoded discovery", c => {
 			r.apply({ captureId: "cap-3", observationId: "o_live" })
 			expect(applyEvidence).not.toHaveBeenCalled()
 			expect(r.discoveries()).toHaveLength(1)
+		} finally {
+			await r.stop()
+		}
+	})
+
+	it("the live observation a replay anchored stays with the anchor through further ingests and its close", async () => {
+		const r = await scanner(c)
+		try {
+			const job = await r.h.service.createJob({
+				sourceId: "rtl",
+				mode: "in-window",
+				signalsOnly: true,
+			})
+			r.apply({})
+			const anchorId = r.discoveries()[0]!.id
+			const track = trackOf({
+				trackId: "t2",
+				centreHz: c.channelHz + OFF,
+				obwHz: 9_000,
+				epoch: 1,
+			})
+			const live = {
+				observationId: "o_live",
+				sourceId: "rtl",
+				trackId: "t2",
+				epoch: 1,
+				jobIds: [job.id],
+				discoveryId: null,
+				startedAt: 40_000,
+				classification: r.internal.classify(track, "rtl"),
+				probeIds: new Set(),
+				lastActivityAt: 40_000,
+				lastIngestAt: 40_000,
+				lastTrack: track,
+				decoded: false,
+				encrypted: false,
+			} as unknown as LiveObservation
+			r.internal.live.set("t2", live)
+			r.apply({ captureId: "cap-3", observationId: "o_live" })
+			r.internal.ingest(live, track)
+			r.internal.ingest(live, { ...track, blocks: 40 })
+			expect(r.discoveries().map(d => d.id)).toEqual([anchorId])
+			r.internal.ingest(live, { ...track, blocks: 60 }, "quiet")
+			expect(r.discoveries().map(d => d.id)).toEqual([anchorId])
+			expect(live.discoveryId).toBeNull()
+			expect(r.internal.store.discoveryIdOf("o_live")).toBeUndefined()
 		} finally {
 			await r.stop()
 		}

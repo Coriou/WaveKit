@@ -125,4 +125,6 @@ node dist/decode-snapshot.js --file /abs/iq0.cu8 --rate 1024000 --centre 1316000
   --channel 131550000 --channel 131725000 --decoder acarsdec [--plan-only]
 ```
 
-Exit codes: 0 done (decoded or not), 1 a step failed, 2 bad arguments, 3 a program is missing.
+Exit codes: 0 done (decoded or not), 1 a step failed (a tool or the decoder exited nonzero or
+was killed by a signal, or took over 60 s), 2 bad arguments, 3 a program is missing. Results
+print only after each decoder's output is complete (its process closed, not just exited).

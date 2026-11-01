@@ -1,15 +1,38 @@
 /**
  * scripts/decode-snapshot.ts without any binary: argument parsing (Zod), the plan it prints, the
  * missing-program refusal, the capture-tool conversation against a fake child, the replay
- * decoder configuration and the per-line verdict. Synthetic numbers only.
+ * decoder configuration, the per-line verdict, and a whole run against fake tool, replay and
+ * decoder children (the adapters' own spawn is the mocked node:child_process one). Synthetic
+ * numbers and text only.
  */
 import { EventEmitter } from "node:events"
 import { PassThrough, Readable } from "node:stream"
 import type { ChildProcess } from "node:child_process"
-import { describe, expect, it, vi } from "vitest"
+import type * as childProcess from "node:child_process"
+import { afterEach, describe, expect, it, vi } from "vitest"
+
+/** The adapters spawn through node:child_process: a test sets `next` to hand them a fake. */
+const decoderSpawn = vi.hoisted(() => ({
+	next: null as null | (() => unknown),
+	calls: [] as unknown[][],
+}))
+vi.mock("node:child_process", async importOriginal => {
+	const actual = await importOriginal<typeof childProcess>()
+	return {
+		...actual,
+		spawn: (...args: unknown[]) => {
+			const next = decoderSpawn.next
+			if (next === null) throw new Error("no decoder spawn in this test")
+			decoderSpawn.calls.push(args)
+			return next()
+		},
+	}
+})
+
 import {
 	IQCAP_MAX_OPEN_CAPTURES,
 	captureWindow,
+	decoderFailure,
 	parseArgs,
 	replayDecoderConfig,
 	requiredPrograms,
@@ -353,5 +376,151 @@ describe("replay decoder configuration and verdicts", () => {
 		expect(
 			verdictLines(plan, 131_550_000, 1, out(3), state).lines[0],
 		).toContain("no evidence")
+	})
+})
+
+/** A decoder child: stdin drained, `spawn` on the next tick, exit and close driven by the test. */
+class FakeDecoderChild extends EventEmitter {
+	readonly stdin = new PassThrough()
+	readonly stdout = new PassThrough()
+	readonly stderr = new PassThrough()
+	readonly pid = undefined
+	exitCode: number | null = null
+	signalCode: NodeJS.Signals | null = null
+	killed = false
+	readonly kill = vi.fn(() => true)
+	constructor() {
+		super()
+		this.stdin.resume()
+		setImmediate(() => this.emit("spawn"))
+	}
+	/** Exit first, then (after `lateMs`) the remaining output, the stdout end and close. */
+	finish(
+		code: number | null,
+		signal: NodeJS.Signals | null,
+		lateLines: string[] = [],
+		lateMs = 0,
+	): void {
+		this.exitCode = code
+		this.signalCode = signal
+		this.emit("exit", code, signal)
+		setTimeout(() => {
+			for (const l of lateLines) this.stdout.write(`${l}\n`)
+			this.stdout.end()
+			this.stderr.end()
+			this.stdout.once("close", () => this.emit("close", code, signal))
+		}, lateMs)
+	}
+}
+
+/** One clean ACARS block as acarsdec prints it from replay audio (synthetic registration). */
+const CLEAN_ACARS =
+	'{"timestamp":1793016607.877815,"station_id":"test","channel":0,"freq":0.000,"level":-8.0,"noise":-inf,"error":0,"mode":"2","label":"H1","block_id":"1","ack":false,"tail":".TEST01","flight":"XX0001","msgno":"M01A","text":"SYNTHETIC","app":{"name":"acarsdec","ver":"test"}}'
+
+describe("a whole run against fake children", () => {
+	// One 1 s window at 1.024 Msps: one capture run, one replay, one decoder run.
+	const FILE_BYTES = 1_024_000 * 2
+	const CAPTURE_BYTES = 8 * 4_800
+	const plan = planSnapshotDecode({
+		fileBytes: FILE_BYTES,
+		rateHz: 1_024_000,
+		centreHz: 131_600_000,
+		channelsHz: [131_550_000],
+		decoder: "acarsdec",
+	})
+
+	afterEach(() => {
+		decoderSpawn.next = null
+		decoderSpawn.calls = []
+	})
+
+	/** The capture tool answers every capture once its sentinel arrives; the replay sends its bytes. */
+	function rig(drive: (decoder: FakeDecoderChild) => void) {
+		expect(plan.windows).toHaveLength(1)
+		const spawn = vi.fn((_cmd: string, argv: readonly string[]) => {
+			const child = new FakeChild()
+			if (argv[0] === "run") {
+				const ids: string[] = []
+				child.control.on("data", (b: Buffer) => {
+					for (const l of b.toString().split("\n").filter(Boolean)) {
+						const cmd = JSON.parse(l) as { type: string; id?: string }
+						if (cmd.type === "capture") ids.push(cmd.id!)
+						if (cmd.type === "end")
+							for (const id of ids)
+								child.emitEvent({
+									type: "captured",
+									id,
+									samples: 1,
+									gapSamples: 0,
+								})
+					}
+				})
+				setImmediate(() => child.emitEvent({ type: "ready" }))
+			} else {
+				setImmediate(() => {
+					child.stdout.end(Buffer.alloc(plan.replayOutput(CAPTURE_BYTES).bytes))
+					child.stdout.once("end", () =>
+						setImmediate(() => child.emit("close", 0, null)),
+					)
+				})
+			}
+			return child as unknown as ChildProcess
+		})
+		decoderSpawn.next = () => {
+			const child = new FakeDecoderChild()
+			setImmediate(() => drive(child))
+			return child
+		}
+		return deps({
+			spawn: spawn as never,
+			stat: file =>
+				Promise.resolve({
+					size: file.endsWith(".cf32") ? CAPTURE_BYTES : FILE_BYTES,
+					isFile: true,
+				}),
+		})
+	}
+
+	it("output the decoder prints after it exited still counts: results wait for its close", async () => {
+		const { d, out, err } = rig(child =>
+			child.finish(0, null, [CLEAN_ACARS], 200),
+		)
+		expect(await runDecodeSnapshot(ARGS, d)).toBe(0)
+		expect(err).toEqual([])
+		expect(decoderSpawn.calls).toHaveLength(1)
+		expect(out).toContain(
+			"VERDICT channel=131550000 window=0 crcClean=true identity=acars-reg:TEST01",
+		)
+		expect(out.at(-1)).toBe(
+			"RESULT channel=131550000 decoded acars identities=acars-reg:TEST01",
+		)
+	})
+
+	it.each([
+		[1, null, "acarsdec exited 1"],
+		[127, null, "acarsdec could not run (exit 127): is it installed?"],
+		[null, "SIGSEGV", "acarsdec was terminated by SIGSEGV"],
+	] as const)(
+		"a decoder that ends with exit %s (signal %s) fails the run: exit 1, no result",
+		async (code, signal, message) => {
+			const { d, out, err } = rig(child =>
+				child.finish(code, signal, [CLEAN_ACARS]),
+			)
+			expect(await runDecodeSnapshot(ARGS, d)).toBe(1)
+			expect(err).toEqual([`decode-snapshot: ${message}`])
+			expect(out.filter(l => l.startsWith("RESULT"))).toEqual([])
+		},
+	)
+
+	it("names every way a decoder run can end", () => {
+		expect(decoderFailure("dumpvdl2", 0, null)).toBeNull()
+		expect(decoderFailure("dumpvdl2", 2, null)).toBe("dumpvdl2 exited 2")
+		expect(decoderFailure("dumpvdl2", 126, null)).toContain("could not run")
+		expect(decoderFailure("dumpvdl2", null, "SIGTERM")).toBe(
+			"dumpvdl2 was terminated by SIGTERM",
+		)
+		expect(decoderFailure("dumpvdl2", null, null)).toBe(
+			"dumpvdl2 was terminated by a signal",
+		)
 	})
 })

@@ -55,8 +55,8 @@ import {
 	type SnapshotDecodePlan,
 	type SnapshotWindow,
 } from "../src/core/scanner/replay-snapshot.js"
-import { createAcarsdecDecoder } from "../src/decoders/builtin/acarsdec.js"
-import { createDumpvdl2Decoder } from "../src/decoders/builtin/dumpvdl2.js"
+import { AcarsdecDecoder } from "../src/decoders/builtin/acarsdec.js"
+import { Dumpvdl2Decoder } from "../src/decoders/builtin/dumpvdl2.js"
 import type { DecoderOutput } from "../src/decoders/types.js"
 
 export const USAGE = `usage: decode-snapshot --file <abs .cu8> --rate <S/s> --centre <Hz> --channel <Hz> [--channel <Hz> ...] --decoder acarsdec|dumpvdl2 [--iqcap <path>] [--plan-only]
@@ -413,7 +413,42 @@ export function verdictLines(
 	return { lines, identities }
 }
 
-/** Replay one capture into the decoder; prints every output line and its verdict. */
+/**
+ * The adapters with their child process in reach: BaseDecoder emits `exit` when the process
+ * exits, which can be before its stdout has drained; the child's `close` comes after every
+ * stdio stream ended, so after the last output line was parsed.
+ */
+class SnapshotAcarsdec extends AcarsdecDecoder {
+	child(): ChildProcess | null {
+		return this.process
+	}
+}
+class SnapshotDumpvdl2 extends Dumpvdl2Decoder {
+	child(): ChildProcess | null {
+		return this.process
+	}
+}
+
+/** A decoder run that did not end with exit 0: the step fails. */
+export function decoderFailure(
+	decoder: DecodeSnapshotArgs["decoder"],
+	code: number | null,
+	signal: NodeJS.Signals | null,
+): string | null {
+	if (code === 0) return null
+	// 126/127: the shell could not run the decoder (or a pipeline program).
+	if (code === 126 || code === 127)
+		return `${decoder} could not run (exit ${code}): is it installed?`
+	return code === null
+		? `${decoder} was terminated by ${signal ?? "a signal"}`
+		: `${decoder} exited ${code}`
+}
+
+/**
+ * Replay one capture into the decoder; prints every output line and its verdict. Resolves once
+ * the decoder's output is complete (its child closed) and the replay delivered every byte;
+ * rejects when either did not end cleanly.
+ */
 async function decodeCapture(
 	deps: DecodeSnapshotDeps,
 	args: DecodeSnapshotArgs,
@@ -458,8 +493,8 @@ async function decodeCapture(
 	const logger = pino({ level: "silent" })
 	const decoder =
 		plan.decoder === "acarsdec"
-			? createAcarsdecDecoder(config, logger)
-			: createDumpvdl2Decoder(config, logger)
+			? new SnapshotAcarsdec(config, logger)
+			: new SnapshotDumpvdl2(config, logger)
 	const state = createInterpreterState({
 		epoch: 0,
 		origin: "probe",
@@ -475,24 +510,39 @@ async function decodeCapture(
 		for (const line of v.lines) deps.out(line)
 		identities.push(...v.identities)
 	})
-	const exited = new Promise<number | null>(resolve =>
-		decoder.once("exit", (code: number | null) => resolve(code)),
-	)
+	// "started" is emitted inside start() while the child is set, before any of its events.
+	const closed = new Promise<string | null>((resolve, reject) => {
+		decoder.once("started", () => {
+			const child = decoder.child()
+			if (!child) {
+				reject(new Error(`${plan.decoder} started without a process`))
+				return
+			}
+			child.once(
+				"close",
+				(code: number | null, signal: NodeJS.Signals | null) =>
+					resolve(decoderFailure(plan.decoder, code, signal)),
+			)
+		})
+	})
 	await decoder.start()
 	decoder.attachInput(input)
-	const [code] = await withTimeout(
-		Promise.all([exited, replayDone]),
-		"a decoder run",
-		() => {
-			replay.kill("SIGKILL")
-			void decoder.stop()
-		},
-	)
-	// 126/127: the shell could not run the decoder (or a pipeline program).
-	if (code === 126 || code === 127)
-		throw new Error(
-			`${plan.decoder} could not run (exit ${code}): is it installed?`,
+	const stopAll = (): void => {
+		replay.kill("SIGKILL")
+		void decoder.stop()
+	}
+	let failure: string | null
+	try {
+		;[failure] = await withTimeout(
+			Promise.all([closed, replayDone]),
+			"a decoder run",
+			stopAll,
 		)
+	} catch (err: unknown) {
+		stopAll()
+		throw err
+	}
+	if (failure !== null) throw new Error(failure)
 	return identities
 }
 

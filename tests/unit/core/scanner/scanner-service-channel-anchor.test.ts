@@ -138,6 +138,7 @@ async function rig(c: Case) {
 			remove(id: string): void
 		}
 		classify(t: unknown, s: string): LiveObservation["classification"]
+		ingest(l: LiveObservation, t: unknown, endReason?: string): void
 		ambientConfirmScope(ctx: {
 			sourceId: string
 			hz: number
@@ -399,6 +400,34 @@ describe.each(CASES)("$decoder pairing scope across placements", c => {
 			r.unplace("o_only")
 			r.send(c.data(3))
 			expect(r.discoveries().map(d => d.id)).toEqual([all[0]!.id])
+		} finally {
+			await r.stop()
+		}
+	})
+
+	it("the observation-only placement an anchor took stays with it through further ingests and its close", async () => {
+		const r = await rig(c)
+		try {
+			r.send(c.data(1))
+			r.place("o_only", false)
+			r.send(c.data(2))
+			const [anchor] = r.discoveries()
+			expect(anchor).toMatchObject({ anchor: "decode", protocol: c.protocol })
+			const live = r.internal.live.get("o_only")!
+			live.jobIds = r.h.service.listJobs().map(j => j.id)
+			expect(live.jobIds).toHaveLength(1)
+			const track = trackOf({
+				trackId: "o_only",
+				centreHz: c.channelHz,
+				obwHz: 9_000,
+				epoch: 1,
+			})
+			r.internal.ingest(live, track)
+			r.internal.ingest(live, { ...track, blocks: 40 })
+			expect(r.discoveries().map(d => d.id)).toEqual([anchor!.id])
+			r.internal.ingest(live, { ...track, blocks: 60 }, "quiet")
+			expect(r.discoveries().map(d => d.id)).toEqual([anchor!.id])
+			expect(r.internal.store.discoveryIdOf("o_only")).toBeUndefined()
 		} finally {
 			await r.stop()
 		}
