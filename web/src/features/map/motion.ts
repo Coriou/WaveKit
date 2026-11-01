@@ -36,12 +36,20 @@ export const EXTRAPOLATE_FULL_MS = 10_000
 export const EXTRAPOLATE_STOP_MS = 20_000
 
 /**
- * A correction is blended in over this long (critically damped, ω = 6 / 2000 ms, time constant 333 ms). At the
- * end at most (1 + 6)·e⁻⁶ = 1.7 % of it is left (17 m of a 1 km correction, 0.06 px at the default zoom), which
- * is then dropped. Half of a correction is done after (1 + x)·e⁻ˣ = 0.5, x = 1.68, about 0.56 s.
+ * A correction is blended in over about this long (critically damped, ω = 6 / 2000 ms, time constant 333 ms). At
+ * BLEND_MS at most (1 + 6)·e⁻⁶ = 1.7 % of it is left (17 m of a 1 km correction); it keeps decaying until under
+ * SETTLE_KM, so it never ends in a jump. Half of a correction is done after (1 + x)·e⁻ˣ = 0.5, x = 1.68, 0.56 s.
  */
 export const BLEND_MS = 2000
 const OMEGA = 6 / BLEND_MS
+/**
+ * A correction ends (past BLEND_MS) once what is left is under 1 m, so the last step drops at most 1 m (0.004 px at
+ * the default zoom). A 1 km one gets there when (1 + x)·e⁻ˣ < 10⁻³, x = 9.23, 3.1 s; an 8 km one at x = 11.6,
+ * 3.9 s; even one around the world (20 000 km) at x = 26, 8.7 s.
+ */
+export const SETTLE_KM = 0.001
+/** The glyph counts as turned (settling() false) within this of the reported track. */
+export const SETTLE_DEG = 0.1
 
 /** The glyph turns toward the reported track with this time constant... */
 export const HEADING_TAU_MS = 400
@@ -70,8 +78,13 @@ export interface MotionState {
 	lat: number
 	lon: number
 	rotate: number
-	/** How fast the drawn position moves (track plus correction), knots: the engine's push rate follows it. */
+	/** How fast the drawn position moves (track plus correction), knots. */
 	drawnKn: number
+	/**
+	 * The most it can move from now on, knots: the track speed plus a bound on the correction's speed (a correction
+	 * that starts from rest has drawnKn 0 yet moves). The engine's push rate follows it.
+	 */
+	pushKn: number
 	/** The last fix seen, accepted or not (a new one is told by any change). */
 	seenLat: number
 	seenLon: number
@@ -153,6 +166,7 @@ export function createMotion(fix: Fix, now: number): MotionState {
 		lon: fix.lon,
 		rotate: norm360(fix.course ?? 0),
 		drawnKn: 0,
+		pushKn: 0,
 		seenLat: Number.NaN,
 		seenLon: Number.NaN,
 		seenAt: Number.NaN,
@@ -210,7 +224,10 @@ function setTrack(
 	s.vE = v * Math.sin(c)
 }
 
-/** Track position at `now` into s.lat / s.lon, plus the running correction; also s.drawnKn. */
+/**
+ * Track position at `now` into s.lat / s.lon, plus the running correction; also s.drawnKn and s.pushKn. Offsets
+ * and velocities east are km at the fix's latitude (cosLat(s.fixLat)), the one basis place() converts with.
+ */
 function place(s: MotionState, now: number): void {
 	const u = now - s.fixAt
 	const r = reach(u)
@@ -219,27 +236,36 @@ function place(s: MotionState, now: number): void {
 	let e = s.vE * r
 	let velN = s.vN * rr
 	let velE = s.vE * rr
+	let bound = 0
 	if (!Number.isNaN(s.offAt)) {
-		const t = now - s.offAt
-		if (t >= BLEND_MS) s.offAt = Number.NaN
-		else if (t > 0) {
-			const k = Math.exp(-OMEGA * t)
-			const bN = s.ovN + OMEGA * s.oN
-			const bE = s.ovE + OMEGA * s.oE
-			n += (s.oN + bN * t) * k
-			e += (s.oE + bE * t) * k
-			velN += (bN - OMEGA * (s.oN + bN * t)) * k
-			velE += (bE - OMEGA * (s.oE + bE * t)) * k
-		} else {
-			n += s.oN
-			e += s.oE
-			velN += s.ovN
-			velE += s.ovE
+		const t = Math.max(0, now - s.offAt)
+		const k = Math.exp(-OMEGA * t)
+		const bN = s.ovN + OMEGA * s.oN
+		const bE = s.ovE + OMEGA * s.oE
+		const cN = (s.oN + bN * t) * k
+		const cE = (s.oE + bE * t) * k
+		if (t >= BLEND_MS && Math.sqrt(cN * cN + cE * cE) < SETTLE_KM)
+			s.offAt = Number.NaN
+		else {
+			const wN = (bN - OMEGA * (s.oN + bN * t)) * k
+			const wE = (bE - OMEGA * (s.oE + bE * t)) * k
+			n += cN
+			e += cE
+			velN += wN
+			velE += wE
+			// from now on the correction is (c + b·τ)·e^(−ωτ) with b = w + ω·c; its speed |w − ω·b·τ|·e^(−ωτ) is at
+			// most |w| + |b|·max(ωτ·e^(−ωτ)) = |w| + |b| / e
+			const gN = wN + OMEGA * cN
+			const gE = wE + OMEGA * cE
+			bound =
+				Math.sqrt(wN * wN + wE * wE) + Math.sqrt(gN * gN + gE * gE) / Math.E
 		}
 	}
 	s.lat = s.fixLat + n / KM_PER_DEG
 	s.lon = wrapLon(s.fixLon + e / (KM_PER_DEG * cosLat(s.fixLat)))
 	s.drawnKn = Math.sqrt(velN * velN + velE * velE) / KN_TO_KM_PER_MS
+	s.pushKn =
+		(Math.sqrt(s.vN * s.vN + s.vE * s.vE) * rr + bound) / KN_TO_KM_PER_MS
 }
 
 /** The drawn velocity (km/ms) at `now`, from the current track and correction. */
@@ -247,9 +273,8 @@ function drawnVelocity(s: MotionState, now: number): { n: number; e: number } {
 	const rr = reachRate(now - s.fixAt)
 	let n = s.vN * rr
 	let e = s.vE * rr
-	const t = now - s.offAt
-	if (!Number.isNaN(s.offAt) && t < BLEND_MS) {
-		const tt = Math.max(0, t)
+	if (!Number.isNaN(s.offAt)) {
+		const tt = Math.max(0, now - s.offAt)
 		const k = Math.exp(-OMEGA * tt)
 		const bN = s.ovN + OMEGA * s.oN
 		const bE = s.ovE + OMEGA * s.oE
@@ -282,15 +307,19 @@ function retrack(
 	const v = drawnVelocity(s, now)
 	const fromVN = v.n
 	const fromVE = v.e
+	const fromCos = cosLat(s.fixLat)
 	setTrack(s, fix, lat, lon, at)
 	s.offAt = Number.NaN
 	place(s, now)
 	if (snap) return
+	// east in the new fix's basis, the one place() divides by, so the drawn point does not move (the old velocity
+	// east is rescaled the same way: its degrees per ms stay the same)
+	const toCos = cosLat(s.fixLat)
 	s.oN = (fromLat - s.lat) * KM_PER_DEG
-	s.oE = wrapLon(fromLon - s.lon) * KM_PER_DEG * cosLat(s.lat)
+	s.oE = wrapLon(fromLon - s.lon) * KM_PER_DEG * toCos
 	const rr = reachRate(now - s.fixAt)
 	s.ovN = fromVN - s.vN * rr
-	s.ovE = fromVE - s.vE * rr
+	s.ovE = (fromVE * toCos) / fromCos - s.vE * rr
 	s.offAt = now
 	place(s, now)
 }
@@ -305,6 +334,8 @@ function observe(s: MotionState, fix: Fix, now: number): void {
 		retrack(s, fix, s.fixLat, s.fixLon, s.fixAt, now, false)
 		return
 	}
+	// an older fix (or one timed with the accepted one) would rewind the track and the gate's clock: ignored
+	if (fix.posAt <= s.fixAt) return
 	const fromAccepted = kmBetween(s.fixLat, s.fixLon, fix.lat, fix.lon)
 	if (
 		plausible(fromAccepted, s.fixAt, fix.posAt) ||
@@ -317,6 +348,7 @@ function observe(s: MotionState, fix: Fix, now: number): void {
 	}
 	if (
 		!Number.isNaN(s.candAt) &&
+		fix.posAt > s.candAt &&
 		plausible(
 			kmBetween(s.candLat, s.candLon, fix.lat, fix.lon),
 			s.candAt,
@@ -332,6 +364,19 @@ function observe(s: MotionState, fix: Fix, now: number): void {
 	s.candLon = fix.lon
 	s.candAt = fix.posAt
 	s.rejected += 1
+}
+
+/**
+ * Whether the drawn position or glyph is still converging (a correction running, or the glyph more than
+ * SETTLE_DEG off the reported track): the engine keeps pushing until it is not, even for a plane that is not
+ * moving, and stops for a settled held or stale one. Reads the state as the last advance() left it.
+ */
+export function settling(s: MotionState): boolean {
+	return (
+		!Number.isNaN(s.offAt) ||
+		(s.seenCourse !== null &&
+			Math.abs(shortestArc(s.rotate, s.seenCourse)) > SETTLE_DEG)
+	)
 }
 
 /** The state at `now` for the item's latest fix: observes a new fix, then places the drawn position and heading. */

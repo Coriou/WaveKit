@@ -45,6 +45,7 @@ import {
 	labelText,
 	meshLinks,
 	predict,
+	PUSH_MIN_MS,
 	pushInterval,
 	stationOf,
 	wantsLabel,
@@ -79,7 +80,7 @@ import {
 	themedPaint,
 } from "./style.ts"
 import type { MapUi, MapUiState } from "./ui-store.ts"
-import { advance, createMotion, type MotionState } from "./motion.ts"
+import { advance, createMotion, settling, type MotionState } from "./motion.ts"
 import { latestReports, reportedFeatures } from "./reported.ts"
 import { devicePrefsStore, type MapTiles } from "../../shell/device-prefs.ts"
 
@@ -130,7 +131,10 @@ interface Drawn {
 	readonly it: MapItem
 	readonly at: LatLon
 	readonly rotate: number | null
+	/** How fast it may move until the next push, knots (the push rate follows the fastest). */
 	readonly kn: number
+	/** An aircraft whose correction or glyph turn is still running (motion.ts settling()). */
+	readonly settling: boolean
 }
 
 export class MapEngine {
@@ -603,7 +607,8 @@ export class MapEngine {
 				this.map.jumpTo({ center: [p.lon, p.lat] })
 			}
 		}
-		const moving = this.drawn.some(d => d.kn > 0)
+		// a correction starting from rest moves before its drawn speed does; a settled held plane stops the loop
+		const moving = this.drawn.some(d => d.kn > 0 || d.settling)
 		if (following) this.raf = requestAnimationFrame(this.frame)
 		else if (moving)
 			this.timer = setTimeout(
@@ -618,7 +623,13 @@ export class MapEngine {
 	/** The push interval for the fastest moving item drawn, at the current zoom. */
 	private pushEvery(): number {
 		let kn = 0
-		for (const d of this.drawn) if (d.kn > kn) kn = d.kn
+		let turning = false
+		for (const d of this.drawn) {
+			if (d.kn > kn) kn = d.kn
+			if (d.settling && d.kn <= 0) turning = true
+		}
+		// a glyph turning in place has no speed to pace it: push at the floor until it settles
+		if (turning) return PUSH_MIN_MS
 		return pushInterval(
 			kn,
 			kmPerPx(this.map.getCenter().lat, this.map.getZoom()),
@@ -682,12 +693,19 @@ export class MapEngine {
 			const m = it.kind === "aircraft" ? this.motionOf(it, now) : null
 			drawn.push(
 				m
-					? { it, at: m, rotate: m.rotate, kn: m.drawnKn }
+					? {
+							it,
+							at: m,
+							rotate: m.rotate,
+							kn: m.pushKn,
+							settling: settling(m),
+						}
 					: {
 							it,
 							at: predict(it, now),
 							rotate: null,
 							kn: it.moving ? (it.speedKn ?? 0) : 0,
+							settling: false,
 						},
 			)
 		}

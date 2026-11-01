@@ -14,6 +14,8 @@ import {
 	MAX_TURN_DEG_PER_S,
 	reach,
 	REACQUIRE_MS,
+	SETTLE_KM,
+	settling,
 	shortestArc,
 	SLACK_KM,
 	type Fix,
@@ -151,12 +153,110 @@ describe("aircraft motion smoothing", () => {
 		// just before the end at most (1 + 6)·e⁻⁶ = 1.7 % of the 1 km is left; at the end none
 		advance(s, f, T0 + 1000 + BLEND_MS - 1)
 		expect(km(s, at(1, eastAt(T0 + 1000 + BLEND_MS - 1)))).toBeLessThan(0.018)
-		// none at the end (the 0.1 m left is this test's flat-earth truth, scaled at START's latitude)
+		// it keeps decaying past BLEND_MS (no drop) until under SETTLE_KM: (1 + x)·e⁻ˣ < 10⁻³ at x = 9.23, 3.08 s
 		advance(s, f, T0 + 1000 + BLEND_MS)
+		expect(s.offAt).not.toBeNaN()
+		advance(s, f, T0 + 1000 + 3000)
+		expect(s.offAt).not.toBeNaN()
+		advance(s, f, T0 + 1000 + 3100)
 		expect(s.offAt).toBeNaN()
-		expect(km(s, at(1, eastAt(T0 + 1000 + BLEND_MS)))).toBeLessThan(0.001)
-		advance(s, f, T0 + 1000 + BLEND_MS + 500)
-		expect(km(s, at(1, eastAt(T0 + 1000 + BLEND_MS + 500)))).toBeLessThan(0.001)
+		// (the 0.1 m left is this test's flat-earth truth, scaled at START's latitude)
+		expect(km(s, at(1, eastAt(T0 + 4100)))).toBeLessThan(SETTLE_KM + 0.0002)
+		advance(s, f, T0 + 4600)
+		expect(km(s, at(1, eastAt(T0 + 4600)))).toBeLessThan(SETTLE_KM + 0.0002)
+	})
+
+	it("ends a large correction without a jump: no drop at BLEND_MS, at most SETTLE_KM at the very end", () => {
+		// a stationary plane, then an 8 km fix 10 s later (inside the 8.17 km gate). At BLEND_MS (1 + 6)·e⁻⁶ = 1.7 %
+		// of it, 139 m, is left; dropping it there was a 139 m jump in 1 ms. Now it moves at its decay speed
+		// A·ω²·t·e^(−ωt) = 8 km × (0.003/ms)² × 2000 ms × e⁻⁶ = 0.36 m/ms.
+		const s = createMotion(fix(0, 0, T0, null, null), T0)
+		const f = fix(8, 0, T0 + 10_000, null, null)
+		advance(s, f, T0 + 10_000)
+		expect(s.rejected).toBe(0)
+		advance(s, f, T0 + 10_000 + BLEND_MS - 1)
+		const before = { lat: s.lat, lon: s.lon }
+		advance(s, f, T0 + 10_000 + BLEND_MS)
+		expect(km(before, s)).toBeLessThan(0.0005)
+		// every 16 ms frame to the end moves at most the peak ω·A/e = 8.8 m/ms; the last one drops under 1 m
+		let prev = { lat: s.lat, lon: s.lon }
+		let last = 0
+		let t = T0 + 10_000 + BLEND_MS
+		while (!Number.isNaN(s.offAt) && t < T0 + 30_000) {
+			t += FRAME_MS
+			advance(s, f, t)
+			last = km(prev, s)
+			expect(last).toBeLessThan(0.36 * FRAME_MS * 0.001)
+			prev = { lat: s.lat, lon: s.lon }
+		}
+		// (1 + x)·e⁻ˣ < 1/8000 at x = 11.6: ends at 3.9 s
+		expect(t - T0 - 10_000).toBeGreaterThan(3800)
+		expect(t - T0 - 10_000).toBeLessThan(4000)
+		expect(last).toBeLessThan(SETTLE_KM + 0.0005)
+		expect(km(s, f)).toBeLessThan(1e-9)
+	})
+
+	it("keeps settling a stationary plane's correction (drawn speed 0 at its start), then stops", () => {
+		// no speed or course: the 1 km correction starts at rest, so drawnKn is 0 and the engine, which scheduled
+		// only on drawnKn > 0, left the plane at the old spot. settling() and pushKn keep it going.
+		const s = createMotion(fix(0, 0, T0, null, null), T0)
+		const f = fix(1, 0, T0 + 5000, null, null)
+		advance(s, f, T0 + 5000)
+		expect(s.drawnKn).toBe(0)
+		expect(settling(s)).toBe(true)
+		// |w| + |w + ω·c|/e = 0 + 0.003/ms × 1 km / e = 1.1 km/s = 2146 kn
+		expect(s.pushKn).toBeCloseTo((0.003 * 1) / Math.E / KM_PER_MS_PER_KN, 3)
+		let t = T0 + 5000
+		while (settling(s) && t < T0 + 20_000) {
+			t += 250
+			advance(s, f, t)
+		}
+		// 1 km to under 1 m takes 3.08 s, the next 250 ms push after it ends the correction
+		expect(t - T0 - 5000).toBe(3250)
+		expect(km(s, f)).toBeLessThan(1e-9)
+		expect(s.pushKn).toBe(0)
+		// a held plane (stale past EXTRAPOLATE_STOP_MS, no correction, glyph turned) does not keep pushing
+		const g = fix(0, 0, T0, 90)
+		const h = createMotion(g, T0)
+		advance(h, g, T0 + EXTRAPOLATE_STOP_MS + 1000)
+		expect(settling(h)).toBe(false)
+		expect(h.pushKn).toBe(0)
+		// a glyph still turning toward a new track counts as settling until within SETTLE_DEG
+		const k = createMotion(fix(0, 0, T0, 0, null), T0)
+		advance(k, fix(0, 0, T0, 90, null), T0 + FRAME_MS)
+		advance(k, fix(0, 0, T0, 90, null), T0 + 2 * FRAME_MS)
+		expect(settling(k)).toBe(true)
+		advance(k, fix(0, 0, T0, 90, null), T0 + 10_000)
+		expect(settling(k)).toBe(false)
+	})
+
+	it("pushKn bounds how far the drawn plane moves until the next push (property)", () => {
+		// Feature: map-motion-smoothing, Property 3: the push speed bounds the drawn motion while a correction runs
+		fc.assert(
+			fc.property(
+				fc.double({ min: -5, max: 5, noNaN: true }),
+				fc.double({ min: -5, max: 5, noNaN: true }),
+				fc.option(fc.double({ min: 0, max: 359.9, noNaN: true })),
+				fc.option(fc.double({ min: 0, max: 600, noNaN: true })),
+				fc.integer({ min: 16, max: 2000 }),
+				(dn, de, course, speed, every) => {
+					const s = createMotion(fix(0, 0, T0, 90, 450), T0)
+					advance(s, fix(0, 0, T0, 90, 450), T0 + 4000)
+					const f = fix(dn, eastAt(T0 + 4000) + de, T0 + 4000, course, speed)
+					for (let t = T0 + 4000; t < T0 + 12_000; t += every) {
+						advance(s, f, t)
+						const from = { lat: s.lat, lon: s.lon }
+						const kn = s.pushKn
+						// the straight-line distance over `every` is at most the bound speed times it
+						advance(s, f, t + every)
+						expect(km(from, s)).toBeLessThanOrEqual(
+							kn * KM_PER_MS_PER_KN * every * 1.001 + 1e-6 + SETTLE_KM,
+						)
+					}
+				},
+			),
+			{ numRuns: 100 },
+		)
 	})
 
 	it("turns continuously: a standard-rate turn has bounded steps and the glyph keeps up", () => {
@@ -237,13 +337,24 @@ describe("aircraft motion smoothing", () => {
 	it("gates on the plausible speed: at the bound accepted, past it held back", () => {
 		// 10 s: 0.617 km/s × 10 s + 2 km slack = 8.17 km
 		const bound = MAX_PLAUSIBLE_KN * KM_PER_MS_PER_KN * 10_000 + SLACK_KM
-		const atBound = createMotion(fix(0, 0, T0, null, null), T0)
-		advance(
-			atBound,
-			fix(bound - 0.001, 0, T0 + 10_000, null, null),
-			T0 + 10_000,
-		)
+		const under = createMotion(fix(0, 0, T0, null, null), T0)
+		advance(under, fix(bound - 0.001, 0, T0 + 10_000, null, null), T0 + 10_000)
+		expect(under.rejected).toBe(0)
+		// exactly at it (north from the equator, where n km is n / 111.195° and back again)
+		const exact: Fix = {
+			lat: 0,
+			lon: 0,
+			posAt: T0,
+			course: null,
+			speedKn: null,
+			moving: false,
+		}
+		const atBound = createMotion(exact, T0)
+		const onBound = { ...exact, lat: bound / KM_PER_DEG, posAt: T0 + 10_000 }
+		expect(onBound.lat * KM_PER_DEG).toBe(bound)
+		advance(atBound, onBound, T0 + 10_000)
 		expect(atBound.rejected).toBe(0)
+		expect(atBound.fixAt).toBe(T0 + 10_000)
 		const past = createMotion(fix(0, 0, T0, null, null), T0)
 		advance(past, fix(bound + 0.01, 0, T0 + 10_000, null, null), T0 + 10_000)
 		expect(past.rejected).toBe(1)
@@ -354,6 +465,110 @@ describe("aircraft motion smoothing", () => {
 				},
 			),
 			{ numRuns: 100 },
+		)
+	})
+
+	it("ignores a fix not newer than the accepted one, so an old fix cannot rewind the gate's clock", () => {
+		// accepted at T0 + 50 s; an older fix there (0 km, inside the slack) used to rewind fixAt to T0, so a 100 km
+		// fix at T0 + 61 s passed the 60 s reacquire rule and teleported. From T0 + 50 s, 11 s allow only
+		// 0.617 × 11 + 2 = 8.8 km: it is held back.
+		const s = createMotion(fix(0, 0, T0 + 50_000, null, null), T0 + 50_000)
+		advance(s, fix(0, 0, T0, null, null), T0 + 50_100)
+		expect(s.fixAt).toBe(T0 + 50_000)
+		advance(s, fix(100, 0, T0 + 61_000, null, null), T0 + 61_000)
+		expect(s.rejected).toBe(1)
+		expect(km(s, at(0, 0))).toBeLessThan(1e-9)
+		// a different position timed with the accepted fix is ignored too
+		advance(s, fix(0.5, 0, T0 + 50_000, null, null), T0 + 61_100)
+		expect(s.fixAt).toBe(T0 + 50_000)
+		expect(km(s, at(0, 0))).toBeLessThan(1e-9)
+	})
+
+	it("confirms a held-back fix only with a newer one", () => {
+		const s = createMotion(fix(0, 0, T0, null, null), T0)
+		advance(s, fix(200, 0, T0 + 1000, null, null), T0 + 1000)
+		expect(s.rejected).toBe(1)
+		// another far fix with the candidate's own time, 0.5 km from it (inside the 2 km slack): not a confirmation
+		advance(s, fix(200.5, 0, T0 + 1000, null, null), T0 + 1100)
+		expect(s.rejected).toBe(2)
+		expect(km(s, at(0, 0))).toBeLessThan(1e-9)
+		// a newer one agreeing with it is
+		advance(s, fix(200.6, 0, T0 + 1500, null, null), T0 + 1500)
+		expect(s.rejected).toBe(2)
+		expect(km(s, at(200.6, 0))).toBeLessThan(1e-9)
+	})
+
+	it("retracks without moving the drawn point near the poles and across the antimeridian (property)", () => {
+		// Feature: map-motion-smoothing, Property 4: a new track starts where the plane is drawn, at any latitude
+		// and across ±180°. At 89°N, course 45°, 1200 kn and a fix 10 s old, scaling east by the drawn latitude
+		// instead of the fix's moved the point 171 m east.
+		const kmW = (
+			a: { lat: number; lon: number },
+			b: { lat: number; lon: number },
+		) => {
+			const d = ((((b.lon - a.lon + 180) % 360) + 360) % 360) - 180
+			const e =
+				d * KM_PER_DEG * Math.cos((((a.lat + b.lat) / 2) * Math.PI) / 180)
+			return Math.hypot((b.lat - a.lat) * KM_PER_DEG, e)
+		}
+		const pole: Fix = {
+			lat: 89,
+			lon: 10,
+			posAt: T0,
+			course: 45,
+			speedKn: MAX_PLAUSIBLE_KN,
+			moving: true,
+		}
+		const s = createMotion(pole, T0)
+		advance(s, pole, T0 + 10_000)
+		const before = { lat: s.lat, lon: s.lon }
+		advance(s, { ...pole, course: 46 }, T0 + 10_000)
+		expect(kmW(before, s)).toBeLessThan(1e-6)
+		fc.assert(
+			fc.property(
+				fc.double({ min: -88, max: 88, noNaN: true }),
+				fc.double({ min: 179, max: 181, noNaN: true }),
+				fc.double({ min: 0, max: 359.9, noNaN: true }),
+				fc.double({ min: 0, max: MAX_PLAUSIBLE_KN, noNaN: true }),
+				fc.integer({ min: 0, max: 15_000 }),
+				fc.double({ min: -0.5, max: 0.5, noNaN: true }),
+				fc.double({ min: -0.5, max: 0.5, noNaN: true }),
+				(lat, lon, course, speedKn, age, dN, dE) => {
+					const f: Fix = {
+						lat,
+						lon: ((lon + 180) % 360) - 180,
+						posAt: T0,
+						course,
+						speedKn,
+						moving: true,
+					}
+					const m = createMotion(f, T0)
+					advance(m, f, T0 + age)
+					const was = { lat: m.lat, lon: m.lon }
+					// the same fix with a new course, then a new fix up to 0.7 km away (inside the 2 km slack, another
+					// latitude, maybe over ±180°) 1 ms later
+					advance(m, { ...f, course: (course + 30) % 360 }, T0 + age)
+					expect(kmW(was, m)).toBeLessThan(1e-6)
+					const g: Fix = {
+						...f,
+						lat: lat + dN / KM_PER_DEG,
+						lon:
+							((lon +
+								dE / (KM_PER_DEG * Math.cos((lat * Math.PI) / 180)) +
+								180) %
+								360) -
+							180,
+						posAt: T0 + age + 1,
+					}
+					advance(m, g, T0 + age + 1)
+					expect(m.rejected).toBe(0)
+					expect(m.lon).toBeGreaterThanOrEqual(-180)
+					expect(m.lon).toBeLessThan(180)
+					// continuous: in 1 ms it moves at most its own speed (0.6 m/ms at 1200 kn) plus rounding
+					expect(kmW(was, m)).toBeLessThan(0.001)
+				},
+			),
+			{ numRuns: 200 },
 		)
 	})
 })

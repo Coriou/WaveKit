@@ -407,7 +407,8 @@ arrives, the plane glides onto it over about two seconds instead of jumping, and
 smoothly the short way round (from 359° to 0° it turns 1°, never all the way back). A position
 the aircraft could not have reached (a speed over 1200 kn since the last one, usually a bad
 decode) is held back; if the next position agrees with it, the aircraft really is there and the
-map moves it at once. After 60 seconds without a usable position, the next one is taken as it
+map moves it at once. A position no newer than the one the plane already follows is ignored, so
+a late report never pulls it back. After 60 seconds without a usable position, the next one is taken as it
 is. Without new reports, the plane slows down after 10 seconds and stops 20 seconds after its
 last position, then waits there instead of flying on with an old speed and track. The trail,
 label and selected aircraft's card follow the plane where it is drawn.

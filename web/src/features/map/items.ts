@@ -281,7 +281,7 @@ export function predict(it: MapItem, now: number): LatLon {
 	return destination(it, it.course, (it.speedKn * 1.852 * dt) / 3_600_000)
 }
 
-const PUSH_MIN_MS = 250
+export const PUSH_MIN_MS = 250
 const PUSH_MAX_MS = 2000
 
 /**
