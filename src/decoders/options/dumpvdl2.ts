@@ -37,8 +37,8 @@ export const VDL2_COMMON_SIGNALLING_HZ = 136_975_000
 /**
  * The VDL Mode 2 channels a dumpvdl2 decoder listens to by default, per band-plan region: the one
  * source the adapter default, the decoder catalogue and the scanner's ambient targets read.
- * - EU: the VHF digital link frequencies of Commission Implementing Regulation (EU) No 1079/2012,
- *   Article 2: 136.725, 136.775, 136.825, 136.875, 136.925 and 136.975 MHz. (136.650 and
+ * - EU: the VHF digital link frequencies of Commission Implementing Regulation (EU) No 1079/2012:
+ *   136.725, 136.775, 136.825, 136.875, 136.925 and 136.975 MHz. (136.650 and
  *   136.700 MHz, the old default, are not among them.)
  * - Elsewhere, and for a decoder configured without frequencies and without a region: the
  *   channels WaveKit listened to before regional defaults (VDL2_LEGACY_CHANNELS_HZ), so no

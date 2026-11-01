@@ -65,6 +65,8 @@ export const acarsdecOptionsSchema = z
 			.nullable()
 			.optional(),
 		channelHz: frequencyHz.nullable().optional(),
+		// Experimental, pending measurement (acarsdec.ts acarsChannelFilterStage).
+		channelFilter: z.boolean().optional(),
 		offsetHz: z.number().finite().optional(),
 		debugRecordPath: z.string().nullable().optional(),
 		debugRecordStages: z.enum(["demod", "final", "both"]).nullable().optional(),
@@ -73,6 +75,15 @@ export const acarsdecOptionsSchema = z
 	.strict()
 
 export const acarsdecOptionDescriptors: DecoderOptionDescriptor[] = [
+	{
+		key: "channelFilter",
+		type: "boolean",
+		default: false,
+		secret: false,
+		effect: "restart",
+		description:
+			"Experimental, pending measurement: a 9.2 kHz AM channel filter before demodulation (flat to ±4.6 kHz, −55 dB at ±5.6 kHz). It rejects 8.33 kHz neighbours but narrows the receiver's frequency tolerance to about 2 ppm.",
+	},
 	{
 		key: "channelHz",
 		type: "number",

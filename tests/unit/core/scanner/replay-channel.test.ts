@@ -5,7 +5,12 @@
  */
 import fc from "fast-check"
 import pino from "pino"
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it } from "vitest"
+import {
+	CSDR_BUFFER_ENV,
+	DISABLED_CSDR_BUFFER_POLICY,
+	configureCsdrBuffers,
+} from "../../../../src/decoders/csdr-buffers.js"
 import { probeReplayShapes } from "../../../../src/core/iq-capture/shapes.js"
 import { replayRateHz } from "../../../../src/core/iq-capture/rates.js"
 import {
@@ -271,18 +276,17 @@ describe("dumpvdl2 replay argv", () => {
 		expect(off.frequencies).toEqual([VDL2 + 4_000])
 	})
 
-	it("acarsdec reads the 48 kHz cf32 capture: the ACARS channel, AM there, 12 kHz audio, no shift or decimation", () => {
+	it("acarsdec reads the 48 kHz cf32 capture, filtered by the replay tool alone: AM there, 12 kHz audio, no shift or decimation", () => {
 		const config = configFor(ACARS + 1_500, "acarsdec")
 		expect(config.options).toMatchObject({
 			inputIqFormat: "cf32",
 			inputSampleRate: 48_000,
 		})
+		expect(config.options).not.toHaveProperty("channelFilter")
 		const decoder = createAcarsdecDecoder(config, pino({ level: "silent" }))
 		const argv = (decoder as unknown as { getArgs(): string[] }).getArgs()
-		// ±5 100 Hz −6 dB edges and a 1 000 Hz transition at 48 kHz, before the envelope detector.
-		expect(argv[1]).toContain(
-			"csdr bandpass --fft --low -0.106250 --high 0.106250 0.020833 | csdr amdemod",
-		)
+		// the replay tool's 9 200/1 000 Hz filter is the only channel filter: amdemod comes first
+		expect(argv[1]?.startsWith("csdr amdemod | ")).toBe(true)
 		expect(argv[1]).toContain(
 			"sox -t raw -r 48000 -e signed -b 16 -c 1 - -t raw -r 12000 -",
 		)
@@ -291,5 +295,25 @@ describe("dumpvdl2 replay argv", () => {
 		)
 		expect(argv[1]).not.toContain("shift")
 		expect(argv[1]).not.toContain("firdecimate")
+		expect(argv[1]).not.toContain("bandpass")
+	})
+
+	afterEach(() => configureCsdrBuffers(DISABLED_CSDR_BUFFER_POLICY))
+
+	it("every csdr stage of the acarsdec replay pipeline carries the bounded ring", () => {
+		configureCsdrBuffers({ enabled: true, elements: 2_048 })
+		const decoder = createAcarsdecDecoder(
+			configFor(ACARS + 1_500, "acarsdec"),
+			pino({ level: "silent" }),
+		)
+		const [, pipeline] = (
+			decoder as unknown as { getArgs(): string[] }
+		).getArgs()
+		const csdr = (pipeline ?? "")
+			.split(" | ")
+			.filter(stage => /\bcsdr /.test(stage))
+		expect(csdr.length).toBeGreaterThan(0)
+		for (const stage of csdr)
+			expect(stage.startsWith(`${CSDR_BUFFER_ENV}=2048 csdr `)).toBe(true)
 	})
 })

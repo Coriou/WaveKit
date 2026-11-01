@@ -41,12 +41,18 @@ export const VDL2_REPLAY_MAX_OFFSET_HZ = 12_500 - VDL2_OCCUPIED_HALF_HZ
 export { ACARS_OCCUPIED_HALF_HZ }
 
 /**
- * acarsdec's replay filter: the live ACARS channel (acarsdec.ts ACARS_CHANNEL_BANDWIDTH_HZ),
- * 2 × (3 600 + 1 000) = 9 200 Hz with a 1 000 Hz transition, so its stop edge is 5 600 Hz from
- * the capture centre. It holds a block only when the capture is centred on the block's channel:
- * a capture near a raster channel is made there (rasterCaptureCentreHz), so the carrier sits
- * within its 1 000 Hz tolerance of the centre, not up to REPLAY_CHANNEL_SNAP_HZ off. The stop
- * edge stays inside the 48 kHz capture's 24 000 Hz Nyquist edge.
+ * acarsdec's replay filter, the replay tool's `--bandwidth 9200 --transition 1000` (the ACARS
+ * channel, acarsdec.ts ACARS_CHANNEL_BANDWIDTH_HZ): 2 × (3 600 + 1 000) = 9 200 Hz flat-band
+ * width with a 1 000 Hz transition, so its stop edge is 5 600 Hz from the capture centre. It is
+ * the only channel filter on replay: acarsdec adds none by default (decoder option
+ * channelFilter is off). The tool designs a Kaiser windowed sinc for 66 dB and grows it until
+ * the stopband peak is at most −62 dB (native/wavekit-chan design.rs `lowpass`): at the 48 kHz
+ * capture rate 197 taps, computed 0 dB at 4 600 Hz, −3.2 dB at 5 000 Hz, −6 dB at 5 100 Hz,
+ * −72 dB at 5 600 Hz and −85 dB at the 8 333 Hz neighbour (stopband peak −65 dB). It holds a
+ * block only when the capture is centred on the block's channel: a capture near a raster
+ * channel is made there (rasterCaptureCentreHz), so the carrier sits within its 1 000 Hz
+ * tolerance of the centre, not up to REPLAY_CHANNEL_SNAP_HZ off. The stop edge stays inside
+ * the 48 kHz capture's 24 000 Hz Nyquist edge.
  */
 export const ACARS_REPLAY_BANDWIDTH_HZ = ACARS_CHANNEL_BANDWIDTH_HZ
 export const ACARS_REPLAY_TRANSITION_HZ = ACARS_CHANNEL_TRANSITION_HZ

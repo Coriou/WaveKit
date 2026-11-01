@@ -19,7 +19,10 @@ import { CsdrConfigSchema, loadConfig } from "../../../src/config.js"
 import { Rtl433Decoder } from "../../../src/decoders/builtin/rtl433.js"
 import { MultimonDecoder } from "../../../src/decoders/builtin/multimon-ng.js"
 import { DsdFmeDecoder } from "../../../src/decoders/builtin/dsd-fme.js"
-import { AcarsdecDecoder } from "../../../src/decoders/builtin/acarsdec.js"
+import {
+	AcarsdecDecoder,
+	acarsChannelFilterStage,
+} from "../../../src/decoders/builtin/acarsdec.js"
 import type { DecoderConfig } from "../../../src/decoders/types.js"
 
 const on = { enabled: true, elements: 65536 } as const
@@ -322,6 +325,73 @@ describe("decoder pipelines honour the process-wide policy", () => {
 			}
 			expect(bounded).toContain(`${prefix}csdr firdecimate`)
 		}
+	})
+
+	it("every csdr stage of every ACARS pipeline carries the bound, one command per stage", () => {
+		const variants: Array<Record<string, unknown>> = [
+			{},
+			{ channelFilter: true },
+			{ inputSampleRate: 2_048_000, channelFilter: true },
+			{ inputIqFormat: "cf32", inputSampleRate: 24_000 },
+			{ inputIqFormat: "cf32", inputSampleRate: 24_000, channelFilter: true },
+			{ inputIqFormat: "cf32", inputSampleRate: 48_000, channelFilter: true },
+		]
+		for (const options of variants) {
+			const decoder = new AcarsdecDecoder(
+				decoderConfig("acarsdec", options),
+				logger,
+			)
+			configureCsdrBuffers(DISABLED_CSDR_BUFFER_POLICY)
+			const legacy = build(decoder)
+			// the config defaults: bounded rings of bufferElements (65 536)
+			const defaults = CsdrConfigSchema.parse({})
+			configureCsdrBuffers({
+				enabled: defaults.boundedBuffers,
+				elements: defaults.bufferElements,
+			})
+			const bounded = build(decoder)
+			const bound = `${CSDR_BUFFER_ENV}=${defaults.bufferElements} `
+			expect(bounded.replaceAll(bound, "")).toBe(legacy)
+			const csdr = bounded.split(" | ").filter(stage => /\bcsdr /.test(stage))
+			expect(csdr.length).toBeGreaterThan(0)
+			for (const stage of csdr) {
+				expect(stage.startsWith(`${bound}csdr `)).toBe(true)
+				// one csdr command per stage: the bound reaches every command
+				expect(stage.match(/\bcsdr /g)).toHaveLength(1)
+			}
+			expect(bounded).not.toContain("bandpass")
+		}
+	})
+
+	it("the ACARS channel filter's ring minimum: 1 122 elements at 24 kHz, bounded to a 255.5 kHz rate at the 2 048 floor", () => {
+		// ceil(4 / transition) + 1 taps + decimation 1 + one 1 024 read batch
+		const minimum = (rateHz: number): number | null => {
+			const stage = acarsChannelFilterStage(rateHz)
+			const transition = Number(stage?.split(" ")[3])
+			return firDecimateMinimumElements(1, transition)
+		}
+		expect(minimum(24_000)).toBe(97 + 1 + 1024)
+		expect(minimum(48_000)).toBe(
+			Math.ceil(4 / Math.fround(0.020833)) + 1 + 1 + 1024,
+		)
+		expect(minimum(11_200)).toBe(
+			Math.ceil(4 / Math.fround(0.089286)) + 1 + 1 + 1024,
+		)
+		// at the bound (2 048, the smallest ring the patch accepts) and just past it
+		expect(minimum(255_500)).toBe(2048)
+		expect(minimum(256_000)).toBeGreaterThan(2048)
+		const at = boundCsdrStages([acarsChannelFilterStage(255_500) ?? ""], {
+			enabled: true,
+			elements: 2048,
+		})
+		expect(at.stages[0]?.startsWith(`${CSDR_BUFFER_ENV}=2048 `)).toBe(true)
+		expect(at.firFallbacks).toEqual([])
+		const past = boundCsdrStages([acarsChannelFilterStage(256_000) ?? ""], {
+			enabled: true,
+			elements: 2048,
+		})
+		expect(past.stages[0]?.startsWith("csdr firdecimate 1 ")).toBe(true)
+		expect(past.firFallbacks).toHaveLength(1)
 	})
 
 	it("dsd-fme's own pipeline builder is bounded too", () => {

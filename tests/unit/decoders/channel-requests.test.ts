@@ -280,12 +280,28 @@ describe("channel requests (addendum §1, §2)", () => {
 		const chan = pipelineOf(
 			make("acarsdec", { inputSampleRate: 24_000, inputIqFormat: "cf32" }),
 		)
-		// the 9.2 kHz ACARS channel at 24 kHz is the only stage before the envelope detector
+		expect(chan.startsWith("csdr amdemod | ")).toBe(true)
+		// with the opt-in channelFilter the 9.2 kHz ACARS channel at 24 kHz is the only stage
+		// before the envelope detector
+		const filtered = pipelineOf(
+			make("acarsdec", {
+				inputSampleRate: 24_000,
+				inputIqFormat: "cf32",
+				channelFilter: true,
+			}),
+		)
 		expect(
-			chan.startsWith(
-				"csdr bandpass --fft --low -0.212500 --high 0.212500 0.041667 | csdr amdemod | ",
+			filtered.startsWith(
+				"csdr firdecimate 1 0.041667 --cutoff 0.212500 | csdr amdemod | ",
 			),
 		).toBe(true)
+		// the channel request is the 25 kHz front either way
+		expect(
+			make("acarsdec", {
+				channelHz: 131_725_000,
+				channelFilter: true,
+			}).getChannelRequest?.(input),
+		).toMatchObject({ bandwidthHz: 12_000, transitionHz: 6_000 })
 		for (const stage of ["csdr convert -i char -o float", "firdecimate"])
 			expect(chan).not.toContain(stage)
 		expect(chan.match(/\bsox /g)).toHaveLength(1)

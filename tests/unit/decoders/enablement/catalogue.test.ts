@@ -98,7 +98,7 @@ it("default options use frozen frequencies and regional LoRa defaults with indep
 	expect(CATALOGUE_DEFAULT_OPTIONS("US").acarsdec).toEqual({
 		frequencies: [131_550_000, 131_725_000],
 	})
-	// EU: Regulation (EU) No 1079/2012 Article 2; elsewhere the legacy default.
+	// EU: Commission Implementing Regulation (EU) No 1079/2012; elsewhere the legacy default.
 	expect(CATALOGUE_DEFAULT_OPTIONS("EU").dumpvdl2).toEqual({
 		frequencies: [
 			136_725_000, 136_775_000, 136_825_000, 136_875_000, 136_925_000,
