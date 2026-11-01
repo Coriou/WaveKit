@@ -609,6 +609,11 @@ export class ScannerPersistence {
 	private snapshotBytes = 0
 	private journalBytes = 0
 	private journalBytesCovered = 0
+	/** `writeStats`: bytes this process wrote (load excluded) and the wall time it started counting. */
+	private writtenJournalBytes = 0
+	private compactionBytes = 0
+	private compactions = 0
+	private readonly statsSince: number
 	/** Main-thread snapshot builds so far and the last one's synchronous time (`mainSnapshotBuild`). */
 	private mainBuilds = 0
 	private mainBuildMs = 0
@@ -650,6 +655,7 @@ export class ScannerPersistence {
 		this.root = resolve(opts.dir)
 		this.log = createComponentLogger(opts.logger, "ScannerPersistence")
 		this.now = opts.now
+		this.statsSince = opts.now()
 		this.appendFile =
 			opts.appendFile ?? ((path, data) => appendFile(path, data))
 	}
@@ -805,6 +811,8 @@ export class ScannerPersistence {
 		this.durableLastSeq = Math.max(this.durableLastSeq, lastSeq)
 		this.journalBytesCovered = Math.max(this.journalBytesCovered, journalBytes)
 		this.snapshotBytes = bytes
+		this.compactionBytes += bytes
+		this.compactions += 1
 		if (this.refusedMax === null) return
 		if (lastSeq >= this.refusedMax) {
 			this.log.info(
@@ -867,6 +875,7 @@ export class ScannerPersistence {
 		const written = Buffer.byteLength(text)
 		this.fileBytes.set(batch.name, knownBytes + written)
 		this.journalBytes += written
+		this.writtenJournalBytes += written
 	}
 
 	writeSnapshot(s: StoreSnapshot): Promise<void> {
@@ -889,7 +898,7 @@ export class ScannerPersistence {
 	 * lastSeq). Falls back to the main thread when the worker is off, stale (first snapshot,
 	 * after an overflow or a reset) or fails; the main path resets the mirror.
 	 *
-	 * `deferWithinMainRest` (the periodic and hole snapshots): a snapshot that would be built on the
+	 * `deferWithinMainRest` (the cadence and hole snapshots): a snapshot that would be built on the
 	 * main thread, here or as the fallback of a failed worker commit, while the rest after the last
 	 * main-thread build has not passed rejects with `SCANNER_SNAPSHOT_DEFERRED_CODE` instead,
 	 * building and writing nothing. Every path to a main-thread build checks it, so main-thread
@@ -943,6 +952,26 @@ export class ScannerPersistence {
 			journalBytes: Math.max(0, this.journalBytes - this.journalBytesCovered),
 			onWorker:
 				this.attached !== null && this.writer !== null && this.writer.live(),
+		}
+	}
+
+	/**
+	 * Bytes this process wrote since it was constructed (`since`, wall ms), in UTF-8 bytes on disk:
+	 * journal lines appended (lines replayed at load, refused, dropped or failed never count) and
+	 * durable snapshots (compactions). The compaction cadence keeps the sum near
+	 * J + S x max(1, J / T) a day, at most 1.5 GB + J (store/snapshot-cadence.ts).
+	 */
+	writeStats(): {
+		journalBytes: number
+		compactionBytes: number
+		compactions: number
+		since: number
+	} {
+		return {
+			journalBytes: this.writtenJournalBytes,
+			compactionBytes: this.compactionBytes,
+			compactions: this.compactions,
+			since: this.statsSince,
 		}
 	}
 

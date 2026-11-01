@@ -1185,9 +1185,9 @@ export class ScannerService extends EventEmitter {
 	private snapshotClock: () => number = () => performance.now()
 	/** Start of the last snapshot on `snapshotClock`; none yet: the first is due at once. */
 	private lastSnapshotAt = Number.NEGATIVE_INFINITY
-	/** The periodic snapshot still being written: no second clone + stringify while it lags. */
+	/** The cadence snapshot still being written: no second clone + stringify while it lags. */
 	private snapshotInFlight = false
-	/** A journal hole asked for a snapshot sooner than the periodic interval. */
+	/** A journal hole asked for a snapshot sooner than the journal trigger or the age ceiling. */
 	private snapshotRequested = false
 	/** Consecutive failed snapshots, for the failure retry (`snapshotRetryMs`); 0 after a success. */
 	private snapshotFailures = 0
@@ -7814,9 +7814,10 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
-	 * Single-flight periodic snapshot: no second clone + stringify while one is being written. A
+	 * Single-flight compaction: no second clone + stringify while one is being written. A
 	 * failed write leaves the state dirty, so it is retried after 10 s, doubling per consecutive
-	 * failure up to the periodic interval (5 min for a hole: `snapshotRetryMs`); one a journal hole
+	 * failure up to 2 h and never sooner than the write-budget floor (5 min for a hole:
+	 * `snapshotRetryMs`); one a journal hole
 	 * requested stays requested. A successful hole snapshot extends the hole streak
 	 * (`holeSnapshotSpacingMs`). One persistence deferred (a main-thread build inside the rest) is
 	 * no failure: it stays pending until the rest has passed. A main-thread build is noted for the
@@ -7886,8 +7887,8 @@ export class ScannerService extends EventEmitter {
 
 	/**
 	 * A journal hole (refused or failed lines) blocks every append, recording operations
-	 * included, until a snapshot covers it: snapshot now instead of at the next periodic
-	 * interval, still single-flight and spaced by `snapshotIntervalMs` (1 s; backing off from the
+	 * included, until a snapshot covers it: snapshot now instead of at the next journal trigger
+	 * or age ceiling, still single-flight and spaced by `snapshotIntervalMs` (1 s; backing off from the
 	 * 6th consecutive hole snapshot of an episode, 2 s doubling to 5 min; 10 s doubling after
 	 * failed snapshots; and for one the main thread builds no sooner than 9 x the last main-thread
 	 * build after it ended, so recurring holes keep main-thread snapshots under 10 % of the
@@ -7908,9 +7909,10 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
-	 * Size-scaled (store/snapshot-cadence.ts): the journal covers every mutation between
-	 * snapshots, so a large store is rewritten about hourly, sooner once its journal tail grows
-	 * past the trigger or a hole needs covering, within the main-thread duty budget.
+	 * Compaction cadence (store/snapshot-cadence.ts): the journal covers every mutation between
+	 * snapshots, so the store is rewritten once its journal tail passes the trigger, after 24 h of
+	 * changes, or at once for a hole; never sooner than the write-budget floor (1.5 GB a day) but
+	 * for a hole, and within the main-thread duty budget.
 	 */
 	private snapshotInterval(): number {
 		const cadence = this.persistence.snapshotCadence()

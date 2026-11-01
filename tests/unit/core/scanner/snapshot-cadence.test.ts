@@ -1,7 +1,8 @@
 /**
- * The size-scaled scanner snapshot cadence: the pure interval functions at and past every bound,
- * the inputs ScannerPersistence reports for it, steady snapshots staying on the worker, and a
- * journal replay after a long gap without a snapshot restoring the store.
+ * The scanner compaction cadence: the pure interval functions at and past every bound, the bytes
+ * written over simulated days, the inputs and write totals ScannerPersistence reports for it,
+ * steady snapshots staying on the worker, and a journal replay after a long gap without a
+ * snapshot restoring the store.
  */
 import { mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -36,17 +37,19 @@ import {
 	JOURNAL_TRIGGER_MIN_BYTES,
 	MAIN_SNAPSHOT_MAX_SPACING_MS,
 	MAIN_SNAPSHOT_REST_FACTOR,
-	SNAPSHOT_MAX_INTERVAL_MS,
+	COMPACTION_BYTES_PER_DAY,
+	SNAPSHOT_AGE_CEILING_MS,
 	SNAPSHOT_MIN_INTERVAL_MS,
 	SNAPSHOT_REQUEST_MIN_MS,
+	SNAPSHOT_RETRY_MAX_MS,
 	SNAPSHOT_RETRY_MIN_MS,
 	holeSnapshotSpacingMs,
 	journalSnapshotTriggerBytes,
 	mainSnapshotRestMs,
 	mainSnapshotSpacingMs,
-	periodicSnapshotIntervalMs,
 	snapshotIntervalMs,
 	snapshotRetryMs,
+	writeBudgetFloorMs,
 } from "../../../../src/core/scanner/store/snapshot-cadence.js"
 import { createLogger } from "../../../../src/utils/logger.js"
 import { counterIds, makeObs } from "../../../mocks/scanner/observations.js"
@@ -59,40 +62,34 @@ import {
 const MIB = 1024 * 1024
 const logger = createLogger({ level: "fatal" })
 
-describe("periodicSnapshotIntervalMs", () => {
-	it("keeps the 10 s floor up to 2e9 / 8,640 = 231,481 B and leaves it one byte later", () => {
-		expect(periodicSnapshotIntervalMs(0)).toBe(SNAPSHOT_MIN_INTERVAL_MS)
-		// 231,481 x 86,400,000 / 2e9 = 9,999.98 ms, rounded up to 10,000.
-		expect(periodicSnapshotIntervalMs(231_481)).toBe(10_000)
-		// 231,482 x 0.0432 = 10,000.02 ms, rounded up.
-		expect(periodicSnapshotIntervalMs(231_482)).toBe(10_001)
-	})
-
-	it("rewrites a 90 MB store every 3,888 s: 22 a day, under 2 GB", () => {
-		const interval = periodicSnapshotIntervalMs(90_000_000)
-		expect(interval).toBe(3_888_000)
-		const perDay = Math.ceil(86_400_000 / interval)
-		expect(perDay).toBe(23) // 22.2, the first one at the start included
-		expect((perDay - 1) * 90_000_000).toBeLessThanOrEqual(2_000_000_000)
-	})
-
-	it("caps at 2 h from 2e9 / 12 = 166.7 MB on", () => {
-		// 166,666,666 x 0.0432 = 7,199,999.97 ms, rounded up to the ceiling itself.
-		expect(periodicSnapshotIntervalMs(166_666_666)).toBe(7_200_000)
-		expect(periodicSnapshotIntervalMs(166_666_667)).toBe(
-			SNAPSHOT_MAX_INTERVAL_MS,
-		)
-		expect(periodicSnapshotIntervalMs(1_000_000_000)).toBe(
-			SNAPSHOT_MAX_INTERVAL_MS,
+describe("writeBudgetFloorMs", () => {
+	it("is bytes x 86,400,000 / 1.5e9 ms rounded up: 1 MiB 60,398 ms, 90 MB 86.4 min", () => {
+		expect(COMPACTION_BYTES_PER_DAY).toBe(1_500_000_000)
+		expect(writeBudgetFloorMs(0)).toBe(0)
+		// 1,048,576 x 0.0576 = 60,397.98 ms, rounded up.
+		expect(writeBudgetFloorMs(MIB)).toBe(60_398)
+		expect(writeBudgetFloorMs(90_000_000)).toBe(5_184_000)
+		// At most 1.5 GB a day: 86,400,000 / 5,184,000 = 16.67 rewrites of 90 MB.
+		expect((86_400_000 / writeBudgetFloorMs(90_000_000)) * 90e6).toBeCloseTo(
+			COMPACTION_BYTES_PER_DAY,
+			0,
 		)
 	})
 
-	it("treats a missing or nonsensical size as no snapshot (the floor)", () => {
-		for (const bad of [Number.NaN, -1, Number.NEGATIVE_INFINITY])
-			expect(periodicSnapshotIntervalMs(bad)).toBe(SNAPSHOT_MIN_INTERVAL_MS)
-		expect(periodicSnapshotIntervalMs(Number.POSITIVE_INFINITY)).toBe(
-			SNAPSHOT_MIN_INTERVAL_MS,
-		)
+	it("stays at or under the 10 s floor up to 173,611 B and passes it one byte later", () => {
+		// 173,611 x 0.0576 = 9,999.99 ms -> 10,000; 173,612 x 0.0576 = 10,000.05 -> 10,001.
+		expect(writeBudgetFloorMs(173_611)).toBe(SNAPSHOT_MIN_INTERVAL_MS)
+		expect(writeBudgetFloorMs(173_612)).toBe(10_001)
+	})
+
+	it("treats a missing or nonsensical size as no snapshot (0)", () => {
+		for (const bad of [
+			Number.NaN,
+			-1,
+			Number.NEGATIVE_INFINITY,
+			Number.POSITIVE_INFINITY,
+		])
+			expect(writeBudgetFloorMs(bad)).toBe(0)
 	})
 })
 
@@ -179,9 +176,12 @@ describe("snapshotIntervalMs", () => {
 		mainBuildMs: 0,
 		mainBuildEndOffsetMs: 0,
 	}
+	const big = { ...base, snapshotBytes: 90_000_000 }
+	const FLOOR_90MB = 5_184_000
 
-	it("leaves a small store as it was: 10 s, a hole after 1 s, 10 s after a failure", () => {
-		expect(snapshotIntervalMs(base)).toBe(10_000)
+	it("a quiet small store: the 24 h age ceiling, a hole after 1 s, 10 s after a failure", () => {
+		expect(SNAPSHOT_AGE_CEILING_MS).toBe(86_400_000)
+		expect(snapshotIntervalMs(base)).toBe(SNAPSHOT_AGE_CEILING_MS)
 		expect(snapshotIntervalMs({ ...base, requested: true })).toBe(1_000)
 		expect(snapshotIntervalMs({ ...base, requested: true, failures: 1 })).toBe(
 			10_000,
@@ -189,14 +189,41 @@ describe("snapshotIntervalMs", () => {
 		expect(snapshotIntervalMs({ ...base, failures: 1 })).toBe(10_000)
 	})
 
-	it("a 90 MB store: hourly, a hole after 1 s on or off the worker, 10 s after a first failure", () => {
-		const big = { ...base, snapshotBytes: 90_000_000 }
-		expect(snapshotIntervalMs(big)).toBe(3_888_000)
-		expect(snapshotIntervalMs({ ...big, onWorker: true })).toBe(3_888_000)
+	it("a small store's journal at its 1 MiB trigger compacts after 10 s; one byte less waits for the age ceiling", () => {
+		expect(
+			snapshotIntervalMs({
+				...base,
+				onWorker: true,
+				journalBytes: JOURNAL_TRIGGER_MIN_BYTES,
+			}),
+		).toBe(SNAPSHOT_MIN_INTERVAL_MS)
+		expect(
+			snapshotIntervalMs({
+				...base,
+				onWorker: true,
+				journalBytes: JOURNAL_TRIGGER_MIN_BYTES - 1,
+			}),
+		).toBe(SNAPSHOT_AGE_CEILING_MS)
+		// A 1 MiB store's write-budget floor (60,398 ms) holds its trigger back.
+		expect(
+			snapshotIntervalMs({
+				...base,
+				snapshotBytes: MIB,
+				onWorker: true,
+				journalBytes: MIB,
+			}),
+		).toBe(60_398)
+	})
+
+	it("a 90 MB store: the age ceiling while quiet, a hole after 1 s on or off the worker, the floor after a failure", () => {
+		expect(snapshotIntervalMs(big)).toBe(SNAPSHOT_AGE_CEILING_MS)
+		expect(snapshotIntervalMs({ ...big, onWorker: true })).toBe(
+			SNAPSHOT_AGE_CEILING_MS,
+		)
 		expect(
 			snapshotIntervalMs({ ...big, requested: true, onWorker: true }),
 		).toBe(1_000)
-		// The main-thread spacing (85,831 ms here) never delays covering a hole.
+		// The main-thread spacing (85,831 ms) and the write-budget floor never delay covering a hole.
 		expect(snapshotIntervalMs({ ...big, requested: true })).toBe(1_000)
 		expect(snapshotIntervalMs({ ...big, requested: true, failures: 1 })).toBe(
 			10_000,
@@ -209,39 +236,40 @@ describe("snapshotIntervalMs", () => {
 				failures: 1,
 			}),
 		).toBe(10_000)
-		expect(
-			snapshotIntervalMs({
-				...big,
-				requested: true,
-				onWorker: true,
-				failures: 1,
-			}),
-		).toBe(10_000)
-		// A failed periodic snapshot is retried after 10 s, not at the periodic interval.
-		expect(snapshotIntervalMs({ ...big, failures: 1 })).toBe(10_000)
+		// A failed compaction is retried no sooner than the write-budget floor.
+		expect(snapshotIntervalMs({ ...big, failures: 1 })).toBe(FLOOR_90MB)
 	})
 
-	it("a journal tail at its trigger makes one due after 10 s (worker) or the main spacing; one byte less does not", () => {
-		const big = { ...base, snapshotBytes: 90_000_000 }
+	it("a journal tail at its trigger makes one due after the floor; one byte less waits for the age ceiling", () => {
 		const trigger = 32 * MIB
 		expect(snapshotIntervalMs({ ...big, journalBytes: trigger - 1 })).toBe(
-			3_888_000,
+			SNAPSHOT_AGE_CEILING_MS,
 		)
-		expect(snapshotIntervalMs({ ...big, journalBytes: trigger })).toBe(85_831)
+		expect(snapshotIntervalMs({ ...big, journalBytes: trigger })).toBe(
+			FLOOR_90MB,
+		)
 		expect(
 			snapshotIntervalMs({ ...big, journalBytes: trigger, onWorker: true }),
-		).toBe(10_000)
+		).toBe(FLOOR_90MB)
 		// A small store's journal trigger never undercuts the 10 s floor.
 		expect(snapshotIntervalMs({ ...base, journalBytes: 100 * MIB })).toBe(
 			10_000,
 		)
+		// Off the worker the main-thread spacing (1 s per MiB) is far below the floor: a 200 KB
+		// store waits its 11,520 ms floor, not the 1 s spacing.
+		expect(
+			snapshotIntervalMs({
+				...base,
+				snapshotBytes: 200_000,
+				journalBytes: MIB,
+			}),
+		).toBe(11_520)
 	})
 
 	it("a main-thread hole snapshot waits out 9 x the last main-thread build after it ended; the worker does not", () => {
 		// The last snapshot built 2.7 s on the main thread at its start: it ended 2,700 ms after.
 		const after = {
-			...base,
-			snapshotBytes: 90_000_000,
+			...big,
 			requested: true,
 			mainBuildMs: 2_700,
 			mainBuildEndOffsetMs: 2_700,
@@ -268,15 +296,16 @@ describe("snapshotIntervalMs", () => {
 				mainBuildEndOffsetMs: 30,
 			}),
 		).toBe(1_000)
-		// Never past the periodic interval: no change to a store's normal cadence.
-		expect(snapshotIntervalMs({ ...after, requested: false })).toBe(3_888_000)
+		// Never past the age ceiling: no change to a quiet store's cadence.
+		expect(snapshotIntervalMs({ ...after, requested: false })).toBe(
+			SNAPSHOT_AGE_CEILING_MS,
+		)
 		expect(
 			snapshotIntervalMs({ ...after, mainBuildEndOffsetMs: Number.NaN }),
 		).toBe(1_000)
 	})
 
 	it("composes the hole backoff, the failure retry and the caps", () => {
-		const big = { ...base, snapshotBytes: 90_000_000 }
 		const hole = { ...big, requested: true, onWorker: true }
 		expect(snapshotIntervalMs({ ...hole, holeStreak: 4 })).toBe(1_000)
 		expect(snapshotIntervalMs({ ...hole, holeStreak: 5 })).toBe(2_000)
@@ -291,24 +320,30 @@ describe("snapshotIntervalMs", () => {
 		// A hole's failure retry stops at 5 min (5th failure: 160 s; 6th: 320 s -> 300 s).
 		expect(snapshotIntervalMs({ ...hole, failures: 5 })).toBe(160_000)
 		expect(snapshotIntervalMs({ ...hole, failures: 6 })).toBe(300_000)
-		// A periodic one's at the periodic interval: 9th failure 2,560 s, 10th 5,120 s -> 3,888 s.
-		expect(snapshotIntervalMs({ ...big, onWorker: true, failures: 9 })).toBe(
-			2_560_000,
-		)
+		// A compaction's retry waits at least the 5,184 s floor (10th failure: 5,120 s), then the
+		// retry itself, capped at 2 h (11th: 10,240 s -> 7,200 s).
 		expect(snapshotIntervalMs({ ...big, onWorker: true, failures: 10 })).toBe(
-			3_888_000,
+			FLOOR_90MB,
 		)
-		// A small store keeps its 10 s periodic ceiling whatever the backoff.
+		expect(snapshotIntervalMs({ ...big, onWorker: true, failures: 11 })).toBe(
+			SNAPSHOT_RETRY_MAX_MS,
+		)
+		expect(snapshotIntervalMs({ ...big, onWorker: true, failures: 40 })).toBe(
+			SNAPSHOT_RETRY_MAX_MS,
+		)
+		// A small store's hole keeps its 10 s write-budget ceiling whatever the backoff.
 		expect(
 			snapshotIntervalMs({ ...base, requested: true, holeStreak: 40 }),
 		).toBe(10_000)
-		expect(snapshotIntervalMs({ ...base, failures: 40 })).toBe(10_000)
-		// A journal trigger after failures waits the later of its spacing and the retry.
-		const trigger = { ...big, onWorker: true, journalBytes: 32 * MIB }
+		// A journal trigger after failures waits the later of the floor and the retry.
+		const trigger = { ...base, onWorker: true, journalBytes: 32 * MIB }
 		expect(snapshotIntervalMs({ ...trigger, failures: 3 })).toBe(40_000)
+		expect(snapshotIntervalMs({ ...trigger, failures: 40 })).toBe(
+			SNAPSHOT_RETRY_MAX_MS,
+		)
 	})
 
-	it("never exceeds the periodic interval, whatever the inputs", () => {
+	it("keeps every interval in [1 s, max(24 h, floor)] and every non-hole one at or above max(10 s, floor)", () => {
 		for (const snapshotBytes of [0, 1, MIB, 90_000_000, 2_000_000_000])
 			for (const requested of [false, true])
 				for (const failures of [0, 1, 40])
@@ -324,11 +359,147 @@ describe("snapshotIntervalMs", () => {
 								journalBytes,
 							}
 							const ms = snapshotIntervalMs(s)
+							const floor = Math.max(
+								SNAPSHOT_MIN_INTERVAL_MS,
+								writeBudgetFloorMs(snapshotBytes),
+							)
 							expect(ms).toBeGreaterThanOrEqual(SNAPSHOT_REQUEST_MIN_MS)
 							expect(ms).toBeLessThanOrEqual(
-								periodicSnapshotIntervalMs(snapshotBytes),
+								Math.max(SNAPSHOT_AGE_CEILING_MS, floor),
 							)
+							if (requested) expect(ms).toBeLessThanOrEqual(floor)
+							else expect(ms).toBeGreaterThanOrEqual(floor)
 						}
+	})
+})
+
+describe("compaction bytes over simulated days", () => {
+	const DAY = 86_400_000
+	const J = 655 // B/s, the live journal rate
+
+	/**
+	 * Ticks every 10 s for `days` days with the store always dirty: a compaction starts when the
+	 * interval since the last start has passed, is durable at once and covers the journal.
+	 * Returns compaction and journal bytes a day.
+	 */
+	function simulate(opts: {
+		snapshotBytes: number
+		journalBps: number
+		maxJournalBytes: number
+		days: number
+	}): { compactionsPerDay: number; compactionBytes: number; journal: number } {
+		const step = 10_000
+		let journalBytes = 0
+		let last = 0 // a compaction at the start (the boot one)
+		let compactions = 0
+		for (let t = step; t <= opts.days * DAY; t += step) {
+			journalBytes += (opts.journalBps * step) / 1_000
+			const interval = snapshotIntervalMs({
+				snapshotBytes: opts.snapshotBytes,
+				journalBytes,
+				maxJournalBytes: opts.maxJournalBytes,
+				onWorker: true,
+				requested: false,
+				failures: 0,
+				holeStreak: 0,
+				mainBuildMs: 0,
+				mainBuildEndOffsetMs: 0,
+			})
+			if (t - last >= interval) {
+				compactions += 1
+				last = t
+				journalBytes = 0
+			}
+		}
+		const perDay = compactions / opts.days
+		return {
+			compactionsPerDay: perDay,
+			compactionBytes: perDay * opts.snapshotBytes,
+			journal: opts.journalBps * 86_400,
+		}
+	}
+
+	it("a 90 MB store at 655 B/s and the default 64 MiB cap: ~1.69 compactions, <= 160 MB, total <= 0.25 GB a day", () => {
+		const r = simulate({
+			snapshotBytes: 90_000_000,
+			journalBps: J,
+			maxJournalBytes: 64 * MIB,
+			days: 10,
+		})
+		// 56,592,000 / 33,554,432 = 1.687 a day; the 10 s tick rounds each one up a little.
+		expect(r.journal).toBe(56_592_000)
+		expect(r.compactionsPerDay).toBeGreaterThanOrEqual(1.6)
+		expect(r.compactionsPerDay).toBeLessThanOrEqual(1.7)
+		expect(r.compactionBytes).toBeLessThanOrEqual(160_000_000)
+		expect(r.compactionBytes + r.journal).toBeLessThanOrEqual(250_000_000)
+	})
+
+	it("a 128 MiB store compacts as often (T = 32 MiB): about 227 MB a day", () => {
+		const r = simulate({
+			snapshotBytes: 128 * MIB,
+			journalBps: J,
+			maxJournalBytes: 64 * MIB,
+			days: 10,
+		})
+		expect(r.compactionBytes).toBeLessThanOrEqual(230_000_000)
+		expect(r.compactionBytes).toBeGreaterThanOrEqual(210_000_000)
+	})
+
+	it("a 10,000 MiB journal cap (T = S): the 24 h age ceiling comes first, one compaction a day", () => {
+		const r = simulate({
+			snapshotBytes: 90_000_000,
+			journalBps: J,
+			maxJournalBytes: 10_000 * MIB,
+			days: 10,
+		})
+		// The trigger would need 90e6 / 655 = 137,405 s (38 h) of journal; the ceiling holds 24 h.
+		expect(r.compactionsPerDay).toBe(1)
+		expect(r.compactionBytes + r.journal).toBeLessThanOrEqual(150_000_000)
+	})
+
+	it("a 10x journal burst (6,550 B/s) is held by the write-budget floor: <= 1.5 GB of compaction a day", () => {
+		const r = simulate({
+			snapshotBytes: 90_000_000,
+			journalBps: 10 * J,
+			maxJournalBytes: 64 * MIB,
+			days: 10,
+		})
+		// The trigger alone would compact every 33,554,432 / 6,550 = 5,123 s; the floor holds 5,184 s.
+		expect(r.compactionsPerDay).toBeLessThanOrEqual(86_400_000 / 5_184_000)
+		expect(r.compactionBytes).toBeLessThanOrEqual(COMPACTION_BYTES_PER_DAY)
+		expect(r.compactionBytes).toBeGreaterThanOrEqual(1_400_000_000)
+	})
+
+	it("a tiny journal cap cannot push a 90 MB store past the floor", () => {
+		const r = simulate({
+			snapshotBytes: 90_000_000,
+			journalBps: J,
+			maxJournalBytes: MIB,
+			days: 3,
+		})
+		expect(r.compactionBytes).toBeLessThanOrEqual(COMPACTION_BYTES_PER_DAY)
+	})
+
+	it("a store of 1 MiB or less writes at most about the journal again", () => {
+		const r = simulate({
+			snapshotBytes: MIB,
+			journalBps: J,
+			maxJournalBytes: 64 * MIB,
+			days: 3,
+		})
+		// At most 56,592,000 / 1 MiB = 54 compactions of 1 MiB a day.
+		expect(r.compactionsPerDay).toBeLessThanOrEqual(54)
+		expect(r.compactionBytes).toBeLessThanOrEqual(57_000_000)
+	})
+
+	it("a quiet, changed store compacts once every 24 h at the age ceiling, not sooner", () => {
+		const r = simulate({
+			snapshotBytes: 90_000_000,
+			journalBps: 1,
+			maxJournalBytes: 64 * MIB,
+			days: 5,
+		})
+		expect(r.compactionsPerDay).toBe(1)
 	})
 })
 
@@ -464,6 +635,42 @@ describe("ScannerPersistence.snapshotCadence", () => {
 			snapshotBytes: size,
 			journalBytes: tail,
 			onWorker: false,
+		})
+	})
+
+	it("writeStats counts the journal and compaction bytes this process wrote, never what it loaded", async () => {
+		const h = await setup({ enabled: false })
+		expect(h.p.writeStats()).toEqual({
+			journalBytes: 0,
+			compactionBytes: 0,
+			compactions: 0,
+			since: T0,
+		})
+		h.ingest(40)
+		await h.p.writeSnapshot(h.store.snapshot())
+		const first = (await stat(join(h.dir, "discoveries.json"))).size
+		h.ingest(20)
+		await h.p.writeSnapshot(h.store.snapshot())
+		const second = (await stat(join(h.dir, "discoveries.json"))).size
+		h.ingest(10)
+		await h.p.writeJobs([]) // drains the journal
+		expect(h.p.writeStats()).toEqual({
+			journalBytes: await journalFileBytes(h.dir),
+			compactionBytes: first + second,
+			compactions: 2,
+			since: T0,
+		})
+		const reloaded = new ScannerPersistence({
+			dir: h.dir,
+			logger,
+			now: () => h.clock.now,
+			snapshotWorker: { enabled: false },
+		})
+		await reloaded.load() // replays 10 ingests' lines and reads the snapshot: no writes
+		expect(reloaded.writeStats()).toMatchObject({
+			journalBytes: 0,
+			compactionBytes: 0,
+			compactions: 0,
 		})
 	})
 
