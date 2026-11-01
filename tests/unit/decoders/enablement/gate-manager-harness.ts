@@ -18,14 +18,15 @@ import { DecoderRegistry } from "../../../../src/decoders/registry.js"
 import type { Decoder } from "../../../../src/decoders/types.js"
 import { FakeSources, RateDecoder, iqCaps } from "../../../mocks/rate-fakes.js"
 
-/** A channel placement of `decoderId` at `hz` on source "rtl". */
+/** A channel placement of `decoderId` at `hz` on `sourceId` ("rtl"). */
 export const channelPlacement = (
 	decoderId: string,
 	hz: number,
+	sourceId = "rtl",
 ): WantedPlacement => ({
-	key: placementKey(decoderId, "rtl", "channel", hz),
+	key: placementKey(decoderId, sourceId, "channel", hz),
 	decoderId,
-	sourceId: "rtl",
+	sourceId,
 	channelHz: hz,
 	reach: "channel",
 	origin: "configured",
@@ -47,7 +48,11 @@ export function gateManager(
 	vi.useFakeTimers()
 	vi.setSystemTime(new Date("2026-10-22T12:00:00.000Z"))
 	const sources = new FakeSources()
-	sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 162_000_000 })
+	for (const sourceId of new Set(["rtl", ...wanted.map(p => p.sourceId)]))
+		sources.caps.set(sourceId, {
+			...iqCaps(2_400_000),
+			centerFreq: 162_000_000,
+		})
 	const registry = new DecoderRegistry()
 	const caps = {
 		input: "iq",

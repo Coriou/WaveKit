@@ -505,17 +505,20 @@ describe("agent status", () => {
 
 	const longest = (values: readonly string[]) =>
 		values.reduce((a, b) => (b.length > a.length ? b : a))
-	// Every number at the longest a double serialises to (24 bytes signed, 23 unsigned).
-	const signed = -1.2345678901234567e-300
-	const unsigned = 1.2345678901234567e-300
+	// Every number at the longest a double serialises to: 17 significant digits
+	// behind five zeros (25 bytes signed, 24 unsigned); an integer at most 23
+	// (`1.2345678901234567e+300`; below 1e21 it prints whole, 21 digits at most).
+	const signed = -0.0000012345678901234567
+	const unsigned = 0.0000012345678901234567
 	const count = 1.2345678901234567e300
 	const isoMax = new Date(8.64e15).toISOString()
 	const ascii = (char: string, bytes: number) => char.repeat(bytes)
 
 	it("bounds the largest body the schema admits under the target (the limit arithmetic)", () => {
-		const actions = [...DECODER_VERDICT_ACTIONS]
-			.sort((a, b) => b.length - a.length)
-			.slice(0, AGENT_STATUS_LIMITS.actionsMax)
+		// The schema allows repeats: every list at its cap of its longest member.
+		const actions = Array.from({ length: AGENT_STATUS_LIMITS.actionsMax }, () =>
+			longest(DECODER_VERDICT_ACTIONS),
+		) as AgentStatus["decoders"][number]["verdict"]["actions"]
 		const worst: AgentStatus = {
 			at: isoMax,
 			truncated: false,
@@ -537,7 +540,9 @@ describe("agent status", () => {
 					AGENT_SOURCE_STATES,
 				) as AgentStatus["sources"][number]["state"],
 				sampleAgeMs: unsigned,
-				warnings: [...AGENT_SOURCE_WARNINGS],
+				warnings: Array.from({ length: 2 }, () =>
+					longest(AGENT_SOURCE_WARNINGS),
+				) as AgentStatus["sources"][number]["warnings"],
 				feed: longest(
 					SOURCE_FEED_STATES,
 				) as AgentStatus["sources"][number]["feed"],
@@ -590,7 +595,12 @@ describe("agent status", () => {
 				}),
 			),
 		}
+		expect(JSON.stringify(signed)).toHaveLength(25)
+		expect(JSON.stringify(unsigned)).toHaveLength(24)
+		expect(JSON.stringify(count)).toHaveLength(23)
 		expect(agentStatusSchema.parse(worst)).toEqual(worst)
+		// The total in the AGENT_STATUS_LIMITS arithmetic.
+		expect(Buffer.byteLength(JSON.stringify(worst))).toBe(4_076)
 		expect(Buffer.byteLength(JSON.stringify(worst))).toBeLessThan(
 			AGENT_STATUS_LIMITS.targetBytes,
 		)

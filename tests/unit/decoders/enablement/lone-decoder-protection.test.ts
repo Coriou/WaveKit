@@ -90,6 +90,69 @@ it("with two decoders running neither is protected, and a newcomer of another de
 			expect(placement.alone).toBeUndefined()
 })
 
+// A valid source id may contain the key's own separators.
+const ODD_SOURCE = "rtl#1@lab"
+
+it("the only decoder on a source id containing # and @ keeps its protection in probation and view", async () => {
+	const gate = fakeGate()
+	const h = gateManager(
+		gate,
+		["dec"],
+		[
+			channelPlacement("dec", 162_000_000, ODD_SOURCE),
+			{ ...channelPlacement("dec", 162_025_000, ODD_SOURCE), primary: false },
+		],
+	)
+	manager = h.manager
+	await manager.startAll()
+	await h.settle()
+	await vi.advanceTimersByTimeAsync(2_500)
+	const judged = vi.mocked(gate.probation).mock.calls.at(-1)![0]
+	expect(judged.map(p => [p.sourceId, p.tunedBand ?? false])).toEqual([
+		[ODD_SOURCE, true],
+		[ODD_SOURCE, true],
+	])
+	manager.efficiencyView()
+	expect(
+		vi
+			.mocked(gate.view)
+			.mock.calls.at(-1)![0]
+			.map(p => p.tunedBand ?? false),
+	).toEqual([true, true])
+})
+
+it("on a source id containing # and @ a decoder's own placements never count as another decoder at admission", async () => {
+	const gate = fakeGate()
+	const first = channelPlacement("dec", 162_000_000, ODD_SOURCE)
+	const second = {
+		...channelPlacement("dec", 162_025_000, ODD_SOURCE),
+		primary: false,
+	}
+	const h = gateManager(gate, ["dec", "other"], [first])
+	manager = h.manager
+	await manager.startAll()
+	await h.settle()
+	h.plan([first, second])
+	await h.settle()
+	const own = vi
+		.mocked(gate.admit)
+		.mock.calls.filter(([placement]) => placement.key === second.key)
+	expect(own.length).toBeGreaterThan(0)
+	for (const [placement, running] of own) {
+		expect(running.some(p => p.key === first.key)).toBe(true)
+		expect(placement.alone).toBe(true)
+	}
+	// Another decoder on the same source is not alone beside dec.
+	const third = channelPlacement("other", 162_050_000, ODD_SOURCE)
+	h.plan([first, second, third])
+	await h.settle()
+	const other = vi
+		.mocked(gate.admit)
+		.mock.calls.filter(([placement]) => placement.key === third.key)
+	expect(other.length).toBeGreaterThan(0)
+	for (const [placement] of other) expect(placement.alone).toBeUndefined()
+})
+
 it("a lone decoder outside the tuned band is admitted while the host is busy (real gate)", async () => {
 	// Host loss: two sibling branches (live audio and the channelizer's
 	// neighbour) dropped together 4 s ago, the source still reads dropping.

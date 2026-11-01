@@ -679,9 +679,6 @@ const ObservedCentresSchema = z
 	)
 	.max(ACTIVITY_MAX_OBSERVED)
 
-/** The decoder of a placement key (`<decoder>#<reach or channel>@<source>`). */
-const placementDecoderId = (key: string) => key.slice(0, key.lastIndexOf("#"))
-
 /**
  * Whose loss a loss refusal (drops, cpu, late-drops) reports: the shed's own
  * attribution, kept while later admission checks refuse it again.
@@ -1394,7 +1391,8 @@ export class DecoderManager extends EventEmitter {
 	private protectLone(
 		running: readonly RunningPlacement[],
 	): RunningPlacement[] {
-		const decoders = new Set(running.map(p => placementDecoderId(p.key)))
+		const decoderOf = this.placementDecoders()
+		const decoders = new Set(running.map(p => decoderOf.get(p.key) ?? p.key))
 		return decoders.size === 1
 			? running.map(p =>
 					p.tunedBand === true ? p : { ...p, tunedBand: true as const },
@@ -1411,10 +1409,26 @@ export class DecoderManager extends EventEmitter {
 		placement: WantedPlacement,
 		running: readonly RunningPlacement[],
 	): WantedPlacement {
-		return placement.tunedBand === true ||
-			running.some(p => placementDecoderId(p.key) !== placement.decoderId)
+		if (placement.tunedBand === true) return placement
+		const decoderOf = this.placementDecoders()
+		return running.some(
+			p => (decoderOf.get(p.key) ?? p.key) !== placement.decoderId,
+		)
 			? placement
 			: { ...placement, alone: true }
+	}
+
+	/**
+	 * The decoder of each current placement key, from the placement itself:
+	 * keys are never parsed, since a source id may contain `#` or `@`. A key
+	 * no state holds stands for a decoder of its own.
+	 */
+	private placementDecoders(): Map<string, string> {
+		const decoders = new Map<string, string>()
+		for (const state of this.decoders.values())
+			if (state.placement)
+				decoders.set(state.placement.key, state.placement.decoderId)
+		return decoders
 	}
 
 	private budgetSettings: EfficiencyBudgetService | undefined
