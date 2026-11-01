@@ -218,3 +218,115 @@ describe("tracker FSK pair fusion", () => {
 		)
 	})
 })
+
+describe("tracker FSK pair fusion keeps other emitters apart", () => {
+	const at = (t: Tracker, id: string): number =>
+		(t.snapshotOf(id)!.centreHz - 433_100_000) / BIN_HZ + N / 2
+	/** The narrowest track: the weak carrier (the pair's centroid also sits mid-span). */
+	const narrowest = (t: Tracker, ids: Set<string>): string =>
+		[...ids].sort((x, y) => t.snapshotOf(x)!.obwHz - t.snapshotOf(y)!.obwHz)[0]!
+
+	it("a weak carrier keying up between the two tones keeps its own track", () => {
+		const scene: Tone[] = [
+			{ at: 200, width: 4, db: 25 },
+			{ at: 220, width: 1, db: 8 },
+			{ at: 240, width: 4, db: 25 },
+		]
+		const { ids, t } = opened(Array.from({ length: 4 }, () => scene))
+		expect(ids.size).toBe(2)
+		const weak = narrowest(t, ids)
+		expect(Math.abs(at(t, weak) - 220.5)).toBeLessThanOrEqual(1)
+		expect(t.snapshotOf(weak)!.blocks).toBe(4)
+		expect(t.snapshotOf(weak)!.obwHz).toBeLessThanOrEqual(BIN_HZ)
+	})
+
+	it("a weak carrier appearing inside an established pair's span gets its own identity", () => {
+		const two: Tone[] = [
+			{ at: 200, width: 4, db: 20 },
+			{ at: 260, width: 4, db: 20 },
+		]
+		const three: Tone[] = [...two, { at: 230, width: 1, db: 8 }]
+		const { ids, t } = opened([two, two, two, three, three, three])
+		expect(ids.size).toBe(2)
+		const weak = narrowest(t, ids)
+		expect(Math.abs(at(t, weak) - 230.5)).toBeLessThanOrEqual(1)
+		expect(t.snapshotOf(weak)!.blocks).toBe(3)
+	})
+
+	it("the transition hump bridging a wide pair's valley joins it, from the first block on", () => {
+		// a ±30 kHz sensor: 30-bin tones, a 12-bin hump 15 dB down, 4 bins of floor each side
+		const sensor: Tone[] = [
+			{ at: 200, width: 30, db: 30 },
+			{ at: 234, width: 12, db: 15 },
+			{ at: 250, width: 30, db: 30 },
+		]
+		const tones = [sensor[0]!, sensor[2]!]
+		expect(opened(Array.from({ length: 4 }, () => sensor)).ids.size).toBe(1)
+		// and inside an established pair
+		expect(opened([tones, tones, sensor, sensor, sensor]).ids.size).toBe(1)
+	})
+
+	it("a weak carrier between the tones joins while its floor gap is narrower than the tone beside it", () => {
+		// 6-bin tones, a weak 1-bin carrier `gap` bins of floor from each
+		const scene = (gap: number): Tone[] => [
+			{ at: 200, width: 6, db: 25 },
+			{ at: 206 + gap, width: 1, db: 8 },
+			{ at: 207 + 2 * gap, width: 6, db: 25 },
+		]
+		expect(opened(Array.from({ length: 3 }, () => scene(5))).ids.size).toBe(1)
+		expect(opened(Array.from({ length: 3 }, () => scene(6))).ids.size).toBe(2)
+	})
+
+	it("a weak crumb past an established pair's outer tone, inside its span, joins while within the tone's width", () => {
+		// span [200, 266) from a 12-bin right tone; then 6-bin tones and a 1-bin crumb 10 dB down
+		const wide: Tone[] = [
+			{ at: 200, width: 6, db: 25 },
+			{ at: 254, width: 12, db: 25 },
+		]
+		const tail = (gap: number): Tone[] => [
+			{ at: 200, width: 6, db: 25 },
+			{ at: 254, width: 6, db: 25 },
+			{ at: 260 + gap, width: 1, db: 15 },
+		]
+		expect(opened([wide, wide, tail(5)]).ids.size).toBe(1)
+		expect(opened([wide, wide, tail(6)]).ids.size).toBe(2)
+	})
+
+	it("abutting chirp pieces stay one track when one block shows a piece 8 dB over the rest", () => {
+		const pieces = (loud: number): Tone[] =>
+			[200, 213, 226, 239].map(at => ({
+				at,
+				width: 10,
+				db: at === loud ? 28 : 20,
+			}))
+		expect(
+			opened([pieces(0), pieces(0), pieces(226), pieces(0)]).ids.size,
+		).toBe(1)
+	})
+
+	it("a weak carrier inside a paired span keeps its identity while the pair is silent", () => {
+		const two: Tone[] = [
+			{ at: 200, width: 4, db: 20 },
+			{ at: 260, width: 4, db: 20 },
+		]
+		const weak: Tone = { at: 230, width: 1, db: 8 }
+		const { ids, t } = opened([two, two, [...two, weak], [weak], [weak]])
+		expect(ids.size).toBe(2)
+		expect(t.snapshotOf(narrowest(t, ids))!.blocks).toBe(3)
+	})
+
+	it("a pair that sends one tone per block keeps one identity", () => {
+		const left: Tone = { at: 200, width: 4, db: 20 }
+		const right: Tone = { at: 260, width: 4, db: 20 }
+		const { ids } = opened([
+			[left, right],
+			[left],
+			[right],
+			[left],
+			[right],
+			[left, right],
+			[right],
+		])
+		expect(ids.size).toBe(1)
+	})
+})

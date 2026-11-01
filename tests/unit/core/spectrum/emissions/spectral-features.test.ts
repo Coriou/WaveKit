@@ -181,3 +181,25 @@ describe("twoTone", () => {
 		expect(twoTone(p, 0, 40, 6, 6, 6)).toBe(false)
 	})
 })
+
+describe("twoTone peaks", () => {
+	/** Floor −60 dB, 3-bin humps peaking at −40 dB with −43 dB shoulders. */
+	function humps(...centres: number[]): Float32Array {
+		const p = new Float32Array(40).fill(-60)
+		for (const c of centres) {
+			p[c - 1] = -43
+			p[c] = -40
+			p[c + 1] = -43
+		}
+		return p
+	}
+
+	it("does not take the first hump's shoulder for the second tone", () => {
+		// peaks 5 bins apart: only the shoulder at 21 is 6 bins from the peak at 15
+		expect(twoTone(humps(15, 20), 0, 40, 6, 6, 6)).toBe(false)
+	})
+
+	it("accepts two true peaks at the minimum spacing", () => {
+		expect(twoTone(humps(15, 21), 0, 40, 6, 6, 6)).toBe(true)
+	})
+})

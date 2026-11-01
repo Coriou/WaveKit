@@ -92,7 +92,7 @@ export function spectralShape(
 }
 
 /**
- * Two FSK tones in a mean spectrum: the strongest bin of [startBin, endBin), a second peak at
+ * Two FSK tones in a mean spectrum: the strongest bin of [startBin, endBin), a local maximum at
  * least `minSpacingBins` from it and at most `pairDb` weaker, and a valley between them at least
  * `dipDb` under the weaker peak. A 2FSK pager or ISM sensor (tones 9 to 100 kHz apart, near
  * equal) shows it; FM voice and 4FSK flat tops have one hump, and AFSK on FM (audio tones to
@@ -115,7 +115,11 @@ export function twoTone(
 	let p2 = -1
 	for (let i = lo; i < hi; i++) {
 		if (Math.abs(i - p1) < minSpacingBins) continue
-		if (p2 < 0 || (powerDb[i] ?? -Infinity) > (powerDb[p2] ?? -Infinity)) p2 = i
+		const v = powerDb[i] ?? -Infinity
+		// A true local maximum: the first hump's shoulder rises toward it and is no tone.
+		if (v < (powerDb[i - 1] ?? -Infinity) || v < (powerDb[i + 1] ?? -Infinity))
+			continue
+		if (p2 < 0 || v > (powerDb[p2] ?? -Infinity)) p2 = i
 	}
 	if (p2 < 0) return false
 	const top1 = powerDb[p1] ?? -Infinity
