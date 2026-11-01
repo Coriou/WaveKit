@@ -50,13 +50,16 @@ const toUs = secArg("--to-s")
 let atUs = 0
 prof.samples.forEach((id, i) => {
 	atUs += deltas[i] ?? 0
-	if (fromUs !== null && atUs < fromUs) return
-	if (toUs !== null && atUs > toUs) return
-	if (exclude.size > 0 && excluded(id)) return
 	// The interval a sample covers runs to the next one; the last sample reuses its own.
-	const us = Math.max(0, deltas[i + 1] ?? deltas[i] ?? 0)
+	// Clip it to the requested window so a sparse sample cannot borrow time outside it.
+	const span = Math.max(0, deltas[i + 1] ?? deltas[i] ?? 0)
+	const start = Math.max(atUs, fromUs ?? atUs)
+	const end = Math.min(atUs + span, toUs ?? atUs + span)
+	const us = Math.max(0, end - start)
+	if (us === 0 && (fromUs !== null || toUs !== null)) return
+	totalUs += us
+	if (exclude.size > 0 && excluded(id)) return
 	weights.set(id, (weights.get(id) ?? 0) + us)
-	totalUs += deltas[i] ?? 0
 	keptUs += us
 	samples++
 })

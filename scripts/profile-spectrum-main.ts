@@ -158,11 +158,15 @@ async function startFake(iq: Uint8Array): Promise<FakeRtl> {
 	}
 }
 
-async function waitHttp(url: string, timeoutMs: number): Promise<boolean> {
+async function waitHttp(
+	url: string,
+	timeoutMs: number,
+	signal: AbortSignal,
+): Promise<boolean> {
 	const deadline = Date.now() + timeoutMs
-	while (Date.now() < deadline) {
+	while (Date.now() < deadline && !signal.aborted) {
 		try {
-			const res = await fetch(url)
+			const res = await fetch(url, { signal })
 			if (res.ok) return true
 		} catch {
 			// not up yet
@@ -401,8 +405,14 @@ async function main(): Promise<void> {
 		held.exited = exited
 		child.stdout.on("data", (d: Buffer) => held.logChunks.push(d))
 		child.stderr.on("data", (d: Buffer) => held.logChunks.push(d))
+		// Stop the readiness poll whichever side of the race wins.
+		const polling = new AbortController()
 		const up = await Promise.race([
-			waitHttp(`http://127.0.0.1:${ports.api}/api/status`, 60_000),
+			waitHttp(
+				`http://127.0.0.1:${ports.api}/api/status`,
+				60_000,
+				polling.signal,
+			),
 			spawnFailed,
 			exited.then(code => {
 				throw new WaveKitError(
@@ -410,7 +420,7 @@ async function main(): Promise<void> {
 					"PROFILE_UP",
 				)
 			}),
-		])
+		]).finally(() => polling.abort())
 		if (!up)
 			throw new WaveKitError("scratch core did not come up", "PROFILE_UP")
 		const ws = await openClient(ports.api)
