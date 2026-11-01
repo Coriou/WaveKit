@@ -1,12 +1,16 @@
 //! Spike, not production: CPU cost of the spectrum scanner's per-frame path
-//! (src/core/spectrum/frame-source.ts + fft.ts + pipeline.ts onFrame/shortFrame) in Rust with
-//! rustfft (dev-dependency only), to decide whether moving it out of the JS worker pays.
+//! (src/core/spectrum/frame-source.ts + fft.ts + pipeline.ts onFrame/shortFrame + impulse-blanker.ts)
+//! in Rust with rustfft (dev-dependency only), to decide whether moving it out of the JS worker pays.
 //!
 //! Layout reproduced: CU8 -> (u/127.5 - 1)·w[i] with the periodic Hann window (f32), complex
-//! forward FFT, fftshift'd |X|² into a per-frame f64 accumulator, block sum (+ the impulse
-//! blanker's raw sum and rise count), the sliding T_short running sum (ring, exact re-sum once per
-//! window, bracketed linear threshold compare, burst peak/count), and optionally the per-frame
-//! dB pass (powerToDb with frames = 1). Block finish (block dB + threshold brackets) is timed too.
+//! forward FFT, fftshift'd |X|² into a per-frame f64 accumulator, the impulse blanker's offer
+//! (raw sum, rise count over the usable span against the previous block's reference, pending
+//! frames judged against their per-bin median in the first block), the block sum of kept frames,
+//! the sliding T_short running sum (ring, restart on a seam, exact re-sum once per window,
+//! bracketed linear threshold compare with the Float32 dB fallback and hysteresis, burst
+//! peak/count), and optionally the per-frame dB pass (powerToDb with frames = 1). Block finish
+//! (blanker endBlock, block dB as the floor stand-in, threshold brackets, burst peak dB) is timed
+//! too. Blocks complete on sample boundaries as pipeline.ts onFrame does.
 //!
 //! Run: `cargo run --release --example frame_path_bench --manifest-path native/wavekit-chan/Cargo.toml -- <f32|f64> <0|0.5> [seconds]`
 //! Dump for the JS cross-check: `... -- dump <dir>` writes iq.cu8 (4 frames) and the per-frame
@@ -28,8 +32,17 @@ const SHORT_MS: f64 = 5.0;
 const POWER_FLOOR_DB: f64 = -200.0;
 /// Synthetic IQ generated once and cycled (larger than the L3, like a live stream).
 const GEN_SECONDS: usize = 4;
-// impulse-blanker.ts shape: rise ratio over the inner band, a frame blanks when enough bins rise
+/// config.ts spectrum defaults: usableFraction 0.8, dcGuardHz 1500, hysteresisDb 3.
+const USABLE_FRACTION: f64 = 0.8;
+const DC_GUARD_HZ: f64 = 1500.0;
+const HYSTERESIS_DB: f64 = 3.0;
+/// Stand-in for floor + k (the noise-floor module is not reproduced; block dB is the floor).
+const K_DB: f64 = 10.0;
+// impulse-blanker.ts
 const RISE: f64 = 3.981_071_705_534_972; // 10^(6/10), BLANK_RISE_DB = 6
+const BLANK_BIN_FRACTION: f64 = 0.5;
+const MIN_PENDING_FRAMES: usize = 3;
+const MEDIAN_TO_MEAN: f64 = 1.0 / std::f64::consts::LN_2;
 const TINY: f64 = 1e-30;
 
 #[repr(C)]
@@ -112,6 +125,7 @@ fn hann() -> Vec<f32> {
         .collect()
 }
 
+/// fft.ts binPowerDb (and the powerToDb body).
 fn to_db(p: f64) -> f64 {
     if p > 0.0 {
         (10.0 * p.log10()).max(POWER_FLOOR_DB)
@@ -132,23 +146,70 @@ fn bracket(t: f64, scale: f64) -> (f64, f64) {
     }
 }
 
+/// impulse-blanker.ts rises: counts every usable bin (no early exit), as JS does.
+fn rises(power: &[f64], reference: &[f64], lo: usize, hi: usize, need: usize) -> bool {
+    let mut rising = 0usize;
+    for (&p, &r) in power[lo..hi].iter().zip(&reference[lo..hi]) {
+        rising += (p >= RISE * r.max(TINY)) as usize;
+    }
+    rising >= need
+}
+
+/// Work done, to show the run carries the JS-equivalent load.
+#[derive(Default, Clone, Copy)]
+struct Counters {
+    /// Frames converted, transformed and offered to the blanker.
+    offered: u64,
+    /// Frames not processed because they straddle the synthetic buffer's wrap (a seam in JS terms).
+    skipped_wrap: u64,
+    kept: u64,
+    /// Blanked on offer (reference known) plus pending frames blanked at endBlock.
+    blanked: u64,
+    pending: u64,
+    short_restarts: u64,
+    /// Kept frames that reached the threshold compare (window full, floor ready).
+    short_evals: u64,
+    /// Bins inside the bracket that took the Float32 dB comparison.
+    db_fallback_bins: u64,
+    /// Bin-frames on (burst count increments before saturation).
+    burst_on: u64,
+    blocks: u64,
+    excluded_blocks: u64,
+    all_blanked_blocks: u64,
+}
+
 struct Path<T: Prec> {
     fft: Arc<dyn Fft<T>>,
     win: Vec<f32>,
     lut: [f64; 256],
     buf: Vec<Complex<T>>,
     scratch: Vec<Complex<T>>,
+    hop: usize,
     frame_acc: Vec<f64>,
     frame_db: Vec<f32>,
     block_acc: Vec<f64>,
+    // impulse blanker
+    blank_lo: usize,
+    blank_hi: usize,
+    blank_need: usize,
     blank_raw: Vec<f64>,
     blank_ref: Vec<f64>,
+    blank_median: Vec<f64>,
+    column: Vec<f64>,
+    pending: Vec<Vec<f64>>,
+    pool: Vec<Vec<f64>>,
+    has_ref: bool,
+    blk_frames: usize,
+    blk_blanked: usize,
+    // short path
     short_acc: Vec<f64>,
     short_ring: Vec<f64>,
     short_slot: usize,
     short_fill: usize,
+    short_next: Option<usize>,
     frames_per_short: usize,
     short_scale: f64,
+    floor_db: Vec<f32>,
     on_lo: Vec<f64>,
     on_hi: Vec<f64>,
     off_lo: Vec<f64>,
@@ -156,10 +217,10 @@ struct Path<T: Prec> {
     short_on: Vec<u8>,
     mask: Vec<u8>,
     burst_peak: Vec<f64>,
+    burst_peak_db: Vec<f64>,
     burst_count: Vec<u8>,
     floor_ready: bool,
-    blocks: u64,
-    sink: f64,
+    c: Counters,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -173,32 +234,55 @@ struct Stages {
 }
 
 impl<T: Prec> Path<T> {
-    fn new(frames_per_short: usize) -> Self {
+    fn new(frames_per_short: usize, hop: usize) -> Self {
         let fft = FftPlanner::<T>::new().plan_fft_forward(N);
         let scratch = vec![Complex::new(T::of(0.0), T::of(0.0)); fft.get_inplace_scratch_len()];
         let mut lut = [0f64; 256];
         for (u, v) in lut.iter_mut().enumerate() {
             *v = u as f64 / 127.5 - 1.0;
         }
-        let mut mask = vec![1u8; N];
-        mask[N / 2] = 0; // DC masked, as the spur map would
+        // detector.ts usableEdgeBins / dcGuardBins (rbw = binHz) and the setMasks shape
+        let edge = ((N as f64 / 2.0 * (1.0 - USABLE_FRACTION) * 1e9).round() / 1e9).ceil() as usize;
+        let bin_hz = FS / N as f64;
+        let dc_bins = (DC_GUARD_HZ.max(2.0 * bin_hz) / bin_hz).ceil() as usize;
+        let dc = N / 2;
+        let mask: Vec<u8> = (0..N)
+            .map(|i| (!(i < edge || i > N - edge || i.abs_diff(dc) <= dc_bins)) as u8)
+            .collect();
+        // pipeline.ts: usableStartBin = edgeBins, usableEndBin = n - edgeBins + 1
+        let blank_lo = edge;
+        let blank_hi = N.min(N - edge + 1);
+        let blank_need = ((BLANK_BIN_FRACTION * (blank_hi - blank_lo) as f64).ceil() as usize).max(1);
         Path {
             fft,
             win: hann(),
             lut,
             buf: vec![Complex::new(T::of(0.0), T::of(0.0)); N],
             scratch,
+            hop,
             frame_acc: vec![0.0; N],
             frame_db: vec![0.0; N],
             block_acc: vec![0.0; N],
+            blank_lo,
+            blank_hi,
+            blank_need,
             blank_raw: vec![0.0; N],
             blank_ref: vec![0.0; N],
+            blank_median: vec![0.0; N],
+            column: Vec::with_capacity(256),
+            pending: Vec::new(),
+            pool: Vec::new(),
+            has_ref: false,
+            blk_frames: 0,
+            blk_blanked: 0,
             short_acc: vec![0.0; N],
             short_ring: vec![0.0; N * frames_per_short],
             short_slot: 0,
             short_fill: 0,
+            short_next: None,
             frames_per_short,
             short_scale: 1.0 / (frames_per_short as f64 * (N as f64 / 2.0).powi(2)),
+            floor_db: vec![0.0; N],
             on_lo: vec![f64::NEG_INFINITY; N],
             on_hi: vec![f64::INFINITY; N],
             off_lo: vec![f64::NEG_INFINITY; N],
@@ -206,10 +290,10 @@ impl<T: Prec> Path<T> {
             short_on: vec![0; N],
             mask,
             burst_peak: vec![0.0; N],
+            burst_peak_db: vec![0.0; N],
             burst_count: vec![0; N],
             floor_ready: false,
-            blocks: 0,
-            sink: 0.0,
+            c: Counters::default(),
         }
     }
 
@@ -229,9 +313,8 @@ impl<T: Prec> Path<T> {
         self.fft.process_with_scratch(&mut self.buf, &mut self.scratch);
     }
 
-    /// accumulateShiftedPower into a zeroed frameAcc, blockAcc += frameAcc, blanker.offer
-    /// (raw += power, rise count over the inner band).
-    fn power(&mut self) -> bool {
+    /// accumulateShiftedPower into a zeroed frameAcc.
+    fn frame_power(&mut self) {
         let h = N / 2;
         let (lo_x, hi_x) = self.buf.split_at(h);
         let (acc_lo, acc_hi) = self.frame_acc.split_at_mut(h);
@@ -243,25 +326,115 @@ impl<T: Prec> Path<T> {
             let (r, i) = (x.re.wide(), x.im.wide());
             *a = r * r + i * i;
         }
+    }
+
+    /// Frame power, ImpulseBlanker.offer, and blockAcc += frameAcc for a kept frame. True = keep.
+    fn power(&mut self) -> bool {
+        self.frame_power();
         for (r, &p) in self.blank_raw.iter_mut().zip(&self.frame_acc) {
             *r += p;
         }
-        let (lo, hi) = (N / 16, N - N / 16);
-        let mut rising = 0usize;
-        for i in lo..hi {
-            rising += (self.frame_acc[i] >= RISE * self.blank_ref[i].max(TINY)) as usize;
+        self.blk_frames += 1;
+        self.c.offered += 1;
+        if !self.has_ref {
+            let mut copy = self.pool.pop().unwrap_or_else(|| vec![0.0; N]);
+            copy.copy_from_slice(&self.frame_acc);
+            self.pending.push(copy);
+            self.c.pending += 1;
+            return false;
         }
-        let keep = self.blocks == 0 || rising < (hi - lo) / 4;
-        if keep {
-            for (b, &p) in self.block_acc.iter_mut().zip(&self.frame_acc) {
-                *b += p;
-            }
+        if rises(&self.frame_acc, &self.blank_ref, self.blank_lo, self.blank_hi, self.blank_need) {
+            self.blk_blanked += 1;
+            self.c.blanked += 1;
+            return false;
         }
-        keep
+        for (b, &p) in self.block_acc.iter_mut().zip(&self.frame_acc) {
+            *b += p;
+        }
+        self.c.kept += 1;
+        true
     }
 
-    /// pipeline.ts shortFrame (sliding T_short sum, linear bracketed compare).
-    fn short(&mut self) {
+    /// ImpulseBlanker.resolvePending: the first block's frames against their per-bin median.
+    fn resolve_pending(&mut self) {
+        let frames = std::mem::take(&mut self.pending);
+        let judge = frames.len() >= MIN_PENDING_FRAMES;
+        if judge {
+            for i in self.blank_lo..self.blank_hi {
+                self.column.clear();
+                self.column.extend(frames.iter().map(|f| f[i]));
+                self.column.sort_by(f64::total_cmp);
+                let mid = self.column.len() / 2;
+                let median = if self.column.len() % 2 == 1 {
+                    self.column[mid]
+                } else {
+                    (self.column[mid - 1] + self.column[mid]) / 2.0
+                };
+                self.blank_median[i] = median * MEDIAN_TO_MEAN;
+            }
+        }
+        for f in frames {
+            if judge && rises(&f, &self.blank_median, self.blank_lo, self.blank_hi, self.blank_need) {
+                self.blk_blanked += 1;
+                self.c.blanked += 1;
+            } else {
+                for (b, &p) in self.block_acc.iter_mut().zip(&f) {
+                    *b += p;
+                }
+            }
+            self.pool.push(f);
+        }
+    }
+
+    /// ImpulseBlanker.endBlock: integrated frame count, raw-sum fallback, next reference.
+    fn end_block(&mut self) -> usize {
+        if !self.pending.is_empty() {
+            self.resolve_pending();
+        }
+        let frames = self.blk_frames;
+        let blanked = self.blk_blanked;
+        let excluded = 2 * blanked > frames;
+        let mut integrated = frames - blanked;
+        if integrated == 0 && frames > 0 {
+            self.block_acc.copy_from_slice(&self.blank_raw);
+            integrated = frames;
+            self.c.all_blanked_blocks += 1;
+        }
+        if frames > 0 {
+            let (src, div) = if excluded {
+                (&self.blank_raw, frames as f64)
+            } else {
+                (&self.block_acc, integrated as f64)
+            };
+            for (r, &s) in self.blank_ref.iter_mut().zip(src) {
+                *r = s / div;
+            }
+            self.has_ref = true;
+        }
+        if excluded {
+            self.c.excluded_blocks += 1;
+        }
+        black_box(&self.blank_raw);
+        self.blank_raw.fill(0.0);
+        self.blk_frames = 0;
+        self.blk_blanked = 0;
+        integrated
+    }
+
+    fn reset_short(&mut self) {
+        self.short_ring.fill(0.0);
+        self.short_acc.fill(0.0);
+        self.short_slot = 0;
+        self.short_fill = 0;
+        self.c.short_restarts += 1;
+    }
+
+    /// pipeline.ts shortFrame (sliding T_short sum, linear bracketed compare, dB fallback).
+    fn short(&mut self, start: usize) {
+        if self.short_next != Some(start) {
+            self.reset_short();
+        }
+        self.short_next = Some(start + self.hop);
         let base = self.short_slot * N;
         let ring = &mut self.short_ring[base..base + N];
         for ((s, r), &p) in self.short_acc.iter_mut().zip(ring.iter_mut()).zip(&self.frame_acc) {
@@ -283,6 +456,9 @@ impl<T: Prec> Path<T> {
         if self.short_fill < self.frames_per_short || !self.floor_ready {
             return;
         }
+        self.c.short_evals += 1;
+        let mut fallback = 0u64;
+        let mut on_bins = 0u64;
         for i in 0..N {
             let a = self.short_acc[i];
             if a > self.burst_peak[i] {
@@ -298,13 +474,27 @@ impl<T: Prec> Path<T> {
             } else {
                 (self.on_lo[i], self.on_hi[i])
             };
-            // inside the bracket JS decides in dB; only the log's cost matters here, not the decision
-            let on = a > hi || (!(a < lo) && to_db(a * self.short_scale) > 0.0);
+            let on = a > hi
+                || (!(a < lo) && {
+                    // shortOnInDb: the Float32 dB value powerToDb would store, against floor + k
+                    fallback += 1;
+                    let p = to_db(a * self.short_scale) as f32 as f64;
+                    let t = self.floor_db[i] as f64 + K_DB;
+                    if was {
+                        p >= t - HYSTERESIS_DB
+                    } else {
+                        p > t
+                    }
+                });
             self.short_on[i] = on as u8;
             if on && self.burst_count[i] < 255 {
                 self.burst_count[i] += 1;
+                on_bins += 1;
             }
         }
+        self.c.db_fallback_bins += fallback;
+        self.c.burst_on += on_bins;
+        black_box(&self.short_on);
     }
 
     /// powerToDb(frameAcc, 1, frameDb): only while the tracker has open tracks.
@@ -313,54 +503,69 @@ impl<T: Prec> Path<T> {
         for (o, &a) in self.frame_db.iter_mut().zip(&self.frame_acc) {
             *o = to_db(a * scale) as f32;
         }
+        black_box(&self.frame_db);
     }
 
-    /// Per block: block dB as the floor stand-in, then the two threshold brackets per bin.
-    fn finish(&mut self, frames: usize) {
-        let scale = 1.0 / (frames as f64 * (N as f64 / 2.0).powi(2));
+    /// finishBlockWork: blanker endBlock, block dB as the floor stand-in, the two threshold
+    /// brackets per bin, burst count/peak handed over (peak in dB), then the block reset.
+    fn finish(&mut self) {
+        let integrated = self.end_block();
+        let scale = 1.0 / (integrated as f64 * (N as f64 / 2.0).powi(2));
         for i in 0..N {
-            let floor = to_db(self.block_acc[i] * scale);
-            let t = floor + 10.0;
+            self.floor_db[i] = to_db(self.block_acc[i] * scale) as f32;
+            let t = self.floor_db[i] as f64 + K_DB;
             (self.on_lo[i], self.on_hi[i]) = bracket(t, self.short_scale);
-            (self.off_lo[i], self.off_hi[i]) = bracket(t - 3.0, self.short_scale);
-            self.blank_ref[i] = self.block_acc[i] / frames as f64;
+            (self.off_lo[i], self.off_hi[i]) = bracket(t - HYSTERESIS_DB, self.short_scale);
         }
-        self.sink += self.burst_count.iter().map(|&c| c as f64).sum::<f64>();
+        for (d, &a) in self.burst_peak_db.iter_mut().zip(&self.burst_peak) {
+            *d = to_db(a * self.short_scale);
+        }
+        black_box((&self.floor_db, &self.burst_peak_db, &self.burst_count));
         self.block_acc.fill(0.0);
-        self.blank_raw.fill(0.0);
         self.burst_count.fill(0);
         self.burst_peak.fill(0.0);
         self.floor_ready = true;
-        self.blocks += 1;
+        self.c.blocks += 1;
     }
 }
 
 struct Run {
     cpu_ns: u64,
     st: Stages,
-    frames: u64,
-    blocks: u64,
+    c: Counters,
 }
 
 /// Processes `seconds` of IQ; `staged` reads the thread clock around every stage.
 fn run<T: Prec>(iq: &[u8], hop: usize, seconds: usize, staged: bool, with_db: bool) -> Run {
-    let frames_per_block_samples = (INTEGRATION_MS * FS / (N as f64 * 1000.0)).round() as usize * N;
+    // pipeline.ts: framesPerBlock = round(T·fs/N), blockSamples = framesPerBlock·N
+    let block_samples = (INTEGRATION_MS * FS / (N as f64 * 1000.0)).round() as usize * N;
     let frames_per_short = ((SHORT_MS * FS) / (hop as f64 * 1000.0)).round().max(1.0) as usize;
-    let frames_per_block = frames_per_block_samples / hop;
-    let mut p = Path::<T>::new(frames_per_short);
+    let mut p = Path::<T>::new(frames_per_short, hop);
     let total_samples = (FS as usize) * seconds;
     let gen_samples = iq.len() / 2;
     let mut st = Stages::default();
-    let mut frames = 0u64;
-    let mut in_block = 0usize;
     let mut clipped = 0u64;
+    let mut block_index: Option<usize> = None;
     let t_start = cpu_ns();
     let mut start = 0usize;
     while start + N <= total_samples {
         let off = start % gen_samples;
         if off + N > gen_samples {
-            start += hop; // skip the wrap rather than copy (a seam in JS terms)
+            p.c.skipped_wrap += 1;
+            start += hop; // skip the wrap rather than copy: a seam, so the short window restarts
             continue;
+        }
+        // onFrame: a frame belongs to the block it starts in; a new block index closes the open one
+        let bi = start / block_samples;
+        if block_index != Some(bi) {
+            if p.blk_frames > 0 {
+                let t0 = if staged { cpu_ns() } else { 0 };
+                p.finish();
+                if staged {
+                    st.finish += cpu_ns() - t0;
+                }
+            }
+            block_index = Some(bi);
         }
         let bytes = &iq[off * 2..(off + N) * 2];
         if staged {
@@ -372,7 +577,7 @@ fn run<T: Prec>(iq: &[u8], hop: usize, seconds: usize, staged: bool, with_db: bo
             let keep = p.power();
             let t3 = cpu_ns();
             if keep {
-                p.short();
+                p.short(start);
             }
             let t4 = cpu_ns();
             if with_db && keep {
@@ -388,27 +593,24 @@ fn run<T: Prec>(iq: &[u8], hop: usize, seconds: usize, staged: bool, with_db: bo
             clipped += p.convert(bytes) as u64;
             p.fft();
             if p.power() {
-                p.short();
+                p.short(start);
                 if with_db {
                     p.db();
                 }
             }
         }
-        frames += 1;
-        in_block += 1;
-        if in_block == frames_per_block {
+        if start + hop >= (bi + 1) * block_samples {
             let t0 = if staged { cpu_ns() } else { 0 };
-            p.finish(in_block);
+            p.finish();
             if staged {
                 st.finish += cpu_ns() - t0;
             }
-            in_block = 0;
         }
         start += hop;
     }
     let cpu = cpu_ns() - t_start;
-    black_box((clipped, p.sink, &p.frame_db, &p.short_on));
-    Run { cpu_ns: cpu, st, frames, blocks: p.blocks }
+    black_box((clipped, &p.frame_db, &p.short_on, &p.blank_ref));
+    Run { cpu_ns: cpu, st, c: p.c }
 }
 
 fn dump(dir: &str) {
@@ -416,12 +618,12 @@ fn dump(dir: &str) {
     std::fs::create_dir_all(dir).expect("dump dir");
     std::fs::write(format!("{dir}/iq.cu8"), &iq).expect("write iq");
     fn powers<T: Prec>(iq: &[u8]) -> Vec<u8> {
-        let mut p = Path::<T>::new(6);
+        let mut p = Path::<T>::new(6, N);
         let mut out = Vec::new();
         for f in 0..4 {
             p.convert(&iq[f * 2 * N..(f + 1) * 2 * N]);
             p.fft();
-            p.power();
+            p.frame_power();
             for v in &p.frame_acc {
                 out.extend_from_slice(&v.to_le_bytes());
             }
@@ -438,9 +640,9 @@ fn report(label: &str, r: &Run, seconds: usize) {
     println!(
         "{label}: {:.1} CPU-ms per s of IQ ({} frames, {} blocks, {:.2} us/frame)",
         ms(r.cpu_ns),
-        r.frames,
-        r.blocks,
-        r.cpu_ns as f64 / 1e3 / r.frames as f64
+        r.c.offered,
+        r.c.blocks,
+        r.cpu_ns as f64 / 1e3 / r.c.offered as f64
     );
 }
 
@@ -479,5 +681,28 @@ fn main() {
         ms(s.st.short),
         ms(s.st.db),
         ms(s.st.finish)
+    );
+    let c = &s.c;
+    let ev = c.short_evals.max(1) as f64 * N as f64;
+    println!(
+        "  counters: offered {} | skipped at wrap {} | kept {} | blanked {} ({:.2} %) | pending {} | blocks {} (excluded {}, all blanked {})",
+        c.offered,
+        c.skipped_wrap,
+        c.kept,
+        c.blanked,
+        100.0 * c.blanked as f64 / c.offered.max(1) as f64,
+        c.pending,
+        c.blocks,
+        c.excluded_blocks,
+        c.all_blanked_blocks
+    );
+    println!(
+        "  short: restarts {} | evaluated frames {} | dB-fallback bins {} ({:.4} % of bin evals) | burst-on bin-frames {} ({:.4} %)",
+        c.short_restarts,
+        c.short_evals,
+        c.db_fallback_bins,
+        100.0 * c.db_fallback_bins as f64 / ev,
+        c.burst_on,
+        100.0 * c.burst_on as f64 / ev
     );
 }
