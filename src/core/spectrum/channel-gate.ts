@@ -85,6 +85,14 @@ export interface ChannelGateReading {
 	kDb: number
 	marginDb: number
 	valid: boolean
+	/**
+	 * The reading's own rule is the standard one (some covering slot is not burst), yet burst
+	 * slots alone cover the whole track span: a burst range overlapped by a non-burst one (ISM
+	 * 433 inside 70 cm and UHF land mobile). The track may then also pass by the burst rule
+	 * (`CHANNEL_GATE_BURST_MIN_DURATION_MS` at kCh + `CHANNEL_GATE_BURST_MARGIN_DB`). Absent or
+	 * false otherwise, and always false when `minDurationMs` is already the burst one.
+	 */
+	burstCovered?: boolean
 }
 import { WaveKitError } from "../../utils/errors.js"
 
@@ -258,6 +266,8 @@ class ChannelGateImpl implements ChannelGate {
 	private slotOrd = new Int32Array(0)
 	/** Widest slot. Bounds the contain walk after the binary search on `lo`. */
 	private maxSlotWidth = 0
+	/** Some slot of the plan is burst (`burstCovers` is skipped otherwise). */
+	private anyBurst = false
 	/** Inclusive-exclusive bin span covered by any slot. Prefix sums stop here. */
 	private span0 = 0
 	private span1 = 0
@@ -533,8 +543,12 @@ class ChannelGateImpl implements ChannelGate {
 			primary >= 0 &&
 			trackLo >= this.slotLo[primary]! &&
 			trackHi <= this.slotHi[primary]!
-		)
-			return this.writeSlot(primary, out)
+		) {
+			this.writeSlot(primary, out)
+			out.burstCovered =
+				this.slotBurst[primary] !== 1 && this.burstCovers(trackLo, trackHi)
+			return out
+		}
 		let p = 0
 		let f = 0
 		let any = false
@@ -592,7 +606,27 @@ class ChannelGateImpl implements ChannelGate {
 		out.kDb = Number.isFinite(maxK) ? maxK : this.kFallback()
 		out.marginDb = burst ? CHANNEL_GATE_BURST_MARGIN_DB : CHANNEL_GATE_MARGIN_DB
 		out.valid = snr !== null
+		out.burstCovered = !burst && this.burstCovers(trackLo, trackHi)
 		return out
+	}
+
+	/**
+	 * Burst slots alone cover [lo, hi] without a hole. Slots run in descending `lo`: a burst
+	 * slot reaching the covered edge extends it down to its own `lo`; a slot that does not reach
+	 * it is redundant if a later (lower) slot bridges the hole, so one pass suffices.
+	 */
+	private burstCovers(lo: number, hi: number): boolean {
+		if (!this.anyBurst) return false
+		const reach = this.maxSlotWidth
+		let covered = hi
+		for (let s = this.rightmostLo(hi); s >= 0; s--) {
+			const slo = this.slotLo[s]!
+			if (slo + reach <= lo) break
+			if (this.slotBurst[s] !== 1 || this.slotHi[s]! < covered) continue
+			if (slo < covered) covered = slo
+			if (covered <= lo) return true
+		}
+		return false
 	}
 
 	/** Largest index whose lo is ≤ hz, or −1. Slots are sorted by lo. */
@@ -644,6 +678,7 @@ class ChannelGateImpl implements ChannelGate {
 			this.span0 = 0
 			this.span1 = 0
 			this.maxSlotWidth = 0
+			this.anyBurst = false
 			this.zeroSlots(0)
 			return
 		}
@@ -721,6 +756,7 @@ class ChannelGateImpl implements ChannelGate {
 			}
 		}
 		this.maxSlotWidth = maxWidth
+		this.anyBurst = this.slotBurst.subarray(0, n).includes(1)
 		this.ranges = ranges
 		this.slotCount = n
 		this.coarsened = built.coarsened
@@ -1007,6 +1043,7 @@ class ChannelGateImpl implements ChannelGate {
 		out.kDb = this.kOfSlot(s)
 		out.marginDb = burst ? CHANNEL_GATE_BURST_MARGIN_DB : CHANNEL_GATE_MARGIN_DB
 		out.valid = measured
+		out.burstCovered = false
 		return out
 	}
 
@@ -1021,6 +1058,7 @@ class ChannelGateImpl implements ChannelGate {
 		out.kDb = this.kFallback()
 		out.marginDb = CHANNEL_GATE_MARGIN_DB
 		out.valid = false
+		out.burstCovered = false
 		return out
 	}
 

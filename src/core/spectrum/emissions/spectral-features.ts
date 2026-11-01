@@ -90,3 +90,40 @@ export function spectralShape(
 	const median = inner[Math.floor(inner.length / 2)] ?? peak
 	return peak - median <= 6 ? "flat" : "peaked"
 }
+
+/**
+ * Two FSK tones in a mean spectrum: the strongest bin of [startBin, endBin), a second peak at
+ * least `minSpacingBins` from it and at most `pairDb` weaker, and a valley between them at least
+ * `dipDb` under the weaker peak. A 2FSK pager or ISM sensor (tones 9 to 100 kHz apart, near
+ * equal) shows it; FM voice and 4FSK flat tops have one hump, and AFSK on FM (audio tones to
+ * 3 kHz) keeps its humps inside 6 kHz.
+ */
+export function twoTone(
+	powerDb: Float32Array,
+	startBin: number,
+	endBin: number,
+	minSpacingBins: number,
+	pairDb: number,
+	dipDb: number,
+): boolean {
+	const lo = Math.max(0, startBin)
+	const hi = Math.min(powerDb.length, endBin)
+	if (hi - lo <= minSpacingBins) return false
+	let p1 = lo
+	for (let i = lo; i < hi; i++)
+		if ((powerDb[i] ?? -Infinity) > (powerDb[p1] ?? -Infinity)) p1 = i
+	let p2 = -1
+	for (let i = lo; i < hi; i++) {
+		if (Math.abs(i - p1) < minSpacingBins) continue
+		if (p2 < 0 || (powerDb[i] ?? -Infinity) > (powerDb[p2] ?? -Infinity)) p2 = i
+	}
+	if (p2 < 0) return false
+	const top1 = powerDb[p1] ?? -Infinity
+	const top2 = powerDb[p2] ?? -Infinity
+	if (!Number.isFinite(top1) || !Number.isFinite(top2)) return false
+	if (top1 - top2 > pairDb) return false
+	let valley = Infinity
+	for (let i = Math.min(p1, p2) + 1; i < Math.max(p1, p2); i++)
+		valley = Math.min(valley, powerDb[i] ?? -Infinity)
+	return top2 - valley >= dipDb
+}

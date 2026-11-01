@@ -13,6 +13,7 @@ import {
 } from "../../../../src/core/scanner/iq-capture-contract.js"
 import {
 	boundReplayTrials,
+	isDataBurst,
 	planReplayTrials,
 	planReplayTrialsDetailed,
 } from "../../../../src/core/scanner/replay-plan.js"
@@ -473,8 +474,17 @@ describe("planReplayTrials", () => {
 							)
 						}
 					}
+					const track = c.hasTrack
+						? trackOf({ obwHz: c.obwHz, spectralShape: c.shape })
+						: null
+					// A bursty data emission runs its analog trial last (unless it is the known lead).
+					const dataLast =
+						track !== null &&
+						isDataBurst(track, c.priors) &&
+						!(knownAnalog && !pagerFirst)
 					if (analogs.length === 1) {
-						if (knownAnalog && pagerFirst)
+						if (dataLast) expect(out.indexOf(analogs[0]!)).toBe(out.length - 1)
+						else if (knownAnalog && pagerFirst)
 							expect(out.indexOf(analogs[0]!)).toBe(
 								out.filter(t => t.known).length + pagerTrials.length,
 							)

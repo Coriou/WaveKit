@@ -4,6 +4,7 @@ import {
 	envelopeAcf,
 	obwAtDb,
 	spectralShape,
+	twoTone,
 } from "../../../../../src/core/spectrum/emissions/spectral-features.js"
 import {
 	gaussian,
@@ -82,5 +83,101 @@ describe("spectralShape", () => {
 		const gauss = new Float32Array(32).fill(-80)
 		for (let i = 8; i <= 24; i++) gauss[i] = -4.34 * ((i - 16) / 1.5) ** 2
 		expect(spectralShape(gauss, 8, 25, 1000)).toBe("peaked")
+	})
+})
+
+describe("twoTone", () => {
+	/** A floor at -60 dB with humps (centre bin, dB over the floor), each 3 bins wide. */
+	const psd = (humps: [number, number][]): Float32Array => {
+		const p = new Float32Array(40).fill(-60)
+		for (const [c, db] of humps)
+			for (let i = c - 1; i <= c + 1; i++) p[i] = -60 + db - (i === c ? 0 : 3)
+		return p
+	}
+
+	it("two equal tones 9 bins apart with the floor between them", () => {
+		expect(
+			twoTone(
+				psd([
+					[15, 12],
+					[24, 12],
+				]),
+				0,
+				40,
+				6,
+				6,
+				6,
+			),
+		).toBe(true)
+	})
+
+	it("spacing, level and valley bounds", () => {
+		// peaks 6 bins apart: at the minimum spacing; 4 apart (even the far shoulder is 5): no
+		expect(
+			twoTone(
+				psd([
+					[15, 12],
+					[21, 12],
+				]),
+				0,
+				40,
+				6,
+				6,
+				6,
+			),
+		).toBe(true)
+		expect(
+			twoTone(
+				psd([
+					[15, 12],
+					[19, 12],
+				]),
+				0,
+				40,
+				6,
+				6,
+				6,
+			),
+		).toBe(false)
+		// 6 dB apart joins, 7 dB does not
+		expect(
+			twoTone(
+				psd([
+					[15, 18],
+					[24, 12],
+				]),
+				0,
+				40,
+				6,
+				6,
+				6,
+			),
+		).toBe(true)
+		expect(
+			twoTone(
+				psd([
+					[15, 19],
+					[24, 12],
+				]),
+				0,
+				40,
+				6,
+				6,
+				6,
+			),
+		).toBe(false)
+		// a valley filled to 5 dB under the weaker tone is one hump
+		const filled = psd([
+			[15, 12],
+			[24, 12],
+		])
+		for (let i = 17; i < 23; i++) filled[i] = -60 + 7
+		expect(twoTone(filled, 0, 40, 6, 6, 6)).toBe(false)
+	})
+
+	it("a single FM-like hump is not two tones", () => {
+		const p = new Float32Array(40).fill(-60)
+		for (let i = 10; i < 30; i++) p[i] = -60 + 20 - Math.abs(i - 20)
+		expect(twoTone(p, 0, 40, 6, 6, 6)).toBe(false)
 	})
 })

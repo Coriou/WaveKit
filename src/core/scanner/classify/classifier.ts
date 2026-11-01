@@ -235,6 +235,8 @@ export function classOf(
 	}
 	if ((opts.allowBurst ?? true) && track.blocks <= BURST_MAX_BLOCKS)
 		return "ook-burst"
+	// Two FSK tones (a pager or a narrow ISM sensor): data, not FM voice, whatever the hump shape.
+	if (track.fsk2 === true) return "fsk2-wide"
 	if (track.spectralShape === "flat") {
 		if (track.obwHz <= FSK4_6K25_MAX_HZ) return "fsk4-6k25"
 		if (track.obwHz <= FSK4_12K5_MAX_HZ) return "fsk4-12k5"

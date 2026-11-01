@@ -3,6 +3,7 @@ import {
 	envelopeAcf,
 	obwAtDb,
 	spectralShape,
+	twoTone,
 } from "./spectral-features.js"
 import type {
 	ObservationEndReason,
@@ -17,6 +18,8 @@ import { frameTrust } from "../retune-settle.js"
 import type { ImageCandidate } from "./iq-image.js"
 import type { TrackAssociation } from "../frame-tracks.js"
 import {
+	CHANNEL_GATE_BURST_MARGIN_DB,
+	CHANNEL_GATE_BURST_MIN_DURATION_MS,
 	CHANNEL_GATE_HYSTERESIS_DB,
 	CHANNEL_GATE_MIN_WIDTH_HZ,
 } from "../../scanner/scanner-redesign-contract.js"
@@ -51,6 +54,12 @@ export interface TrackerBlock {
 	overload: boolean
 	/** Segments of this block that are short-path bursts (spec § 4.10). */
 	burstSegments?: ReadonlySet<Segment>
+	/**
+	 * FSK pair reach per bin (0 = off there): two new segments of similar level whose peaks are
+	 * closer than this (the smaller of the two peaks' values) and that start on the same block are
+	 * the two tones of one emission (see `FSK_PAIR_DB`). Absent: no pairing.
+	 */
+	pairReachBins?: Uint16Array
 }
 
 interface EpochInfo {
@@ -67,6 +76,30 @@ const ACF_MIN_MS = 300
 const SPEC_PAD_BINS = 2
 const OBW_MIN_SNR_DB = 20
 const MATCH_TOLERANCE_BINS = 1
+/**
+ * FSK pair: two tones of one 2FSK emission show as two segments when the valley between them
+ * drops to the floor (a ±4.5 kHz POCSAG pair at 10 dB, a ±30 kHz ISM sensor). Their peaks sit
+ * within 1 to 2 dB of each other; 6 dB (`PROMINENCE_DB`) leaves room for the block-to-block
+ * scatter of a weak pair while a carrier and its far weaker neighbour stay apart. Pairing also
+ * needs both to start within one block of each other (not on an epoch's first block), so two
+ * independent emitters of similar level only join when they key up within 100 ms. The two tones of one emission are also about as wide
+ * as each other (`FSK_PAIR_WIDTH_RATIO`).
+ */
+export const FSK_PAIR_DB = 6
+/**
+ * FSK pair parts differ in width by at most this factor (plus one bin of quantisation): both
+ * tones carry the same symbol stream. A 13 kHz OOK sensor and a 30 kHz LoRa fragment keyed up on
+ * the same block (2.3 times) stay apart.
+ */
+export const FSK_PAIR_WIDTH_RATIO = 2
+/**
+ * Two-tone spectrum (`TrackSnapshot.fsk2`): tones at least 6 kHz apart, with a valley 6 dB
+ * (`PROMINENCE_DB`) under the weaker. 6 kHz is past AFSK and FM voice humps (audio to 3 kHz each
+ * side) and 4FSK outer symbols (±1.944 kHz on DMR: 3.9 kHz apart), under a ±4.5 kHz POCSAG pair
+ * (9 kHz apart).
+ */
+export const FSK2_MIN_SPACING_HZ = 6_000
+const FSK2_DIP_DB = 6
 const FIRST_UPDATE_BLOCKS = 2
 /** Matched-window minimum (see `localSnr`): a Hann tone's two main-lobe bins. */
 export const MATCHED_MIN_BINS = 2
@@ -146,6 +179,8 @@ interface GateReading {
 	marginDb: number
 	minDurationMs: number
 	valid: boolean
+	/** Burst slots cover the track though its rule is the standard one (see `ChannelGateReading`). */
+	burstCovered?: boolean
 }
 
 /** One step of a track's own gate run, for the property oracle. No hot-path alloc when unset. */
@@ -243,6 +278,11 @@ interface OpenTrack {
 	gateK: number
 	gateMargin: number
 	gateMinMs: number
+	/**
+	 * The last on block's reading had `burstCovered`: the run may also qualify by the burst
+	 * rule (100 ms at k + 6 dB) besides its own (`gateMinMs` at k + `gateMargin`).
+	 */
+	gateBurstAlso: boolean
 	/** This block's step already moved `gate` to `passed`. */
 	gateJustPassed: boolean
 	/** Block number `geomCentre` / `geomObw` were computed for. −1: none. */
@@ -251,6 +291,18 @@ interface OpenTrack {
 	geomObw: number
 	/** `blockNo` of the last gate step applied to this track. 0: none. */
 	gateStamp: number
+	/**
+	 * Opened from a fused FSK pair: while open, every segment peaking inside its span
+	 * [onMin, onMax) joins it into one segment.
+	 */
+	paired: boolean
+	/**
+	 * This block's strongest fused part (one FSK tone) as RF centre and width, for `stepObserved`;
+	 * valid only while `partBlock` is the current block.
+	 */
+	partCentre: number
+	partObw: number
+	partBlock: number
 	/**
 	 * The predecessor this track re-opened from on a max-duration rollover.
 	 * Cleared once that predecessor's run has been considered. Never a new detection.
@@ -279,6 +331,8 @@ export class Tracker {
 	private open: OpenTrack[] = []
 	private seq = 0
 	private blockNo = 0
+	/** Blocks seen in this epoch: an FSK pair needs the block before it in the same epoch. */
+	private epochBlocks = 0
 	private n = 0 // fft size, learned from the first frame or block
 	private epoch: EpochInfo = {
 		stream: 0,
@@ -341,6 +395,7 @@ export class Tracker {
 		verifiedFromSample?: number
 	}): PipelineEvent[] {
 		const events = this.closeAll("retune")
+		this.epochBlocks = 0
 		this.epoch = {
 			stream: e.stream,
 			epoch: e.epoch,
@@ -540,7 +595,11 @@ export class Tracker {
 		return this.gateExtra
 	}
 
-	block(segments: Segment[], b: TrackerBlock): PipelineEvent[] {
+	block(input: Segment[], blockIn: TrackerBlock): PipelineEvent[] {
+		this.epochBlocks++
+		const fused = this.fusePairs(input, blockIn)
+		const segments = fused?.segments ?? input
+		const b = fused?.block ?? blockIn
 		this.closedThisBlock.clear()
 		this.closedObserved.clear()
 		this.pendingOff.length = 0
@@ -584,6 +643,22 @@ export class Tracker {
 			this.assoc.set(s, nt)
 			events.push({ kind: "track-open", track: this.snapshot(nt, n) })
 		}
+		// The pipeline asks for the segments it passed in: each part maps to the fused track.
+		if (fused)
+			for (const [s, parts] of fused.parts) {
+				const t = this.assoc.get(s)
+				if (t === undefined) continue
+				t.paired = true
+				let strongest = parts[0]!
+				for (const part of parts) {
+					this.assoc.set(part, t)
+					if (part.peakDb > strongest.peakDb) strongest = part
+				}
+				t.partCentre = this.rf(strongest.centroidBin, n, t.epoch.centreHz)
+				t.partObw =
+					Math.max(1, strongest.endBin - strongest.startBin) * this.opts.binHz
+				t.partBlock = this.blockNo
+			}
 		for (const t of [...this.open]) {
 			if (matched.has(t)) continue
 			t.misses++
@@ -603,6 +678,7 @@ export class Tracker {
 				events.push(this.close(t, "max-duration", n))
 				const nt = this.openTrack(seg, b, n, blockSamples)
 				nt.justOpened = false
+				nt.paired = t.paired
 				nt.chain = chainBaseOf(t, nt)
 				// `publishGate` steps this block on the predecessor, then copies
 				// the run only if it is still alive.
@@ -753,6 +829,136 @@ export class Tracker {
 		return events
 	}
 
+	/**
+	 * FSK pairs (see `FSK_PAIR_DB`). Segments peaking inside an open paired track's span join
+	 * into one. Then, on a block whose predecessor in this epoch was measured, the strongest new
+	 * segment (no open track overlaps it, or only a track opened on the previous block) pairs with
+	 * the strongest such segment within the pair reach, `FSK_PAIR_DB` and `FSK_PAIR_WIDTH_RATIO`
+	 * of it, with no tracked segment between them; the pair, every such segment between them and
+	 * further pieces that chain on within the reach become one segment. The fused segment's track
+	 * turns paired; a one-block track it left without a segment closes on its hang (it never
+	 * passed: the gate needs 2 blocks). Null when nothing joined.
+	 */
+	private fusePairs(
+		segments: Segment[],
+		b: TrackerBlock,
+	): {
+		segments: Segment[]
+		block: TrackerBlock
+		parts: Map<Segment, Segment[]>
+	} | null {
+		const reach = b.pairReachBins
+		if (reach === undefined || b.gap || segments.length < 2) return null
+		const sorted = [...segments].sort((x, y) => x.peakBin - y.peakBin)
+		const groups: Segment[][] = []
+		const grouped = new Set<Segment>()
+		for (const t of this.open) {
+			if (!t.paired) continue
+			const lo = t.onMin - MATCH_TOLERANCE_BINS
+			const hi = t.onMax + MATCH_TOLERANCE_BINS
+			const inside = sorted.filter(
+				s => !grouped.has(s) && s.peakBin >= lo && s.peakBin < hi,
+			)
+			if (inside.length < 2) continue
+			for (const s of inside) grouped.add(s)
+			groups.push(inside)
+		}
+		if (this.epochBlocks >= 2) {
+			// 2: no open track overlaps it (it starts on this block). 1: it overlaps only unpaired
+			// tracks opened on the previous block: a tone that keyed up one block early, or a pair
+			// whose partial first block read the tones too far apart in level. 0: other. Tracks
+			// that ran longer never join here.
+			const fresh = sorted.map(s => {
+				if (grouped.has(s)) return 0
+				let state = 2
+				for (const t of this.open) {
+					const overlap =
+						Math.min(s.endBin + MATCH_TOLERANCE_BINS, t.endBin) >
+						Math.max(s.startBin - MATCH_TOLERANCE_BINS, t.startBin)
+					if (!overlap) continue
+					// Young only past the epoch's first block, where every carrier opens at once.
+					if (
+						t.paired ||
+						t.openedAtBlock !== this.blockNo ||
+						this.epochBlocks < 3
+					)
+						return 0
+					state = 1
+				}
+				return state
+			})
+			const used = new Uint8Array(sorted.length)
+			const byLevel = sorted
+				.map((_, i) => i)
+				.filter(i => fresh[i]! > 0)
+				.sort((x, y) => sorted[y]!.peakDb - sorted[x]!.peakDb)
+			const reachOf = (x: Segment): number => reach[x.peakBin] ?? 0
+			// Both peaks within each other's reach, similar level and width.
+			const pairs = (x: Segment, y: Segment): boolean =>
+				Math.abs(x.peakBin - y.peakBin) < Math.min(reachOf(x), reachOf(y)) &&
+				Math.abs(x.peakDb - y.peakDb) <= FSK_PAIR_DB &&
+				similarWidth(x, y)
+			const free = (j: number): boolean =>
+				j >= 0 && j < sorted.length && fresh[j]! > 0 && used[j] !== 1
+			for (const i of byLevel) {
+				if (used[i] === 1) continue
+				const a = sorted[i]!
+				let partner = -1
+				for (const dir of [-1, 1]) {
+					for (let j = i + dir; free(j); j += dir) {
+						const c = sorted[j]!
+						if (Math.abs(c.peakBin - a.peakBin) >= reachOf(a)) break
+						if (!pairs(a, c)) continue
+						if (partner < 0 || c.peakDb > sorted[partner]!.peakDb) partner = j
+					}
+				}
+				if (partner < 0) continue
+				let from = Math.min(i, partner)
+				let to = Math.max(i, partner)
+				// More pieces of the same emission (a LoRa chirp cut at channel edges) join while each
+				// pairs with the group's edge piece and the whole group stays within the reach.
+				const spans = (x: Segment, y: Segment): boolean =>
+					Math.abs(x.peakBin - y.peakBin) < Math.min(reachOf(x), reachOf(y))
+				while (
+					free(from - 1) &&
+					pairs(sorted[from]!, sorted[from - 1]!) &&
+					spans(sorted[from - 1]!, sorted[to]!)
+				)
+					from--
+				while (
+					free(to + 1) &&
+					pairs(sorted[to]!, sorted[to + 1]!) &&
+					spans(sorted[from]!, sorted[to + 1]!)
+				)
+					to++
+				const group = sorted.slice(from, to + 1)
+				used.fill(1, from, to + 1)
+				groups.push(group)
+			}
+		}
+		if (groups.length === 0) return null
+		const parts = new Map<Segment, Segment[]>()
+		const joined = new Set<Segment>()
+		for (const g of groups) {
+			parts.set(joinSegments(g, b.powerDb, b.floorDb), g)
+			for (const s of g) joined.add(s)
+		}
+		const out = segments.filter(s => !joined.has(s))
+		out.push(...parts.keys())
+		let burst = b.burstSegments
+		if (burst !== undefined && burst.size > 0) {
+			const next = new Set(burst)
+			// A fused segment is a burst only when every part was one.
+			for (const [s, g] of parts) if (g.every(p => burst!.has(p))) next.add(s)
+			burst = next
+		}
+		return {
+			segments: out,
+			block: burst === undefined ? b : { ...b, burstSegments: burst },
+			parts,
+		}
+	}
+
 	private bestMatch(
 		s: Segment,
 		taken: ReadonlySet<OpenTrack>,
@@ -840,6 +1046,11 @@ export class Tracker {
 			gateK: 0,
 			gateMargin: 0,
 			gateMinMs: 0,
+			gateBurstAlso: false,
+			paired: false,
+			partCentre: 0,
+			partObw: 0,
+			partBlock: -1,
 			gateJustPassed: false,
 			gateStamp: 0,
 			rolloverFrom: null,
@@ -1012,13 +1223,48 @@ export class Tracker {
 		return reading.valid && Number.isFinite(reading.channelSnrDb)
 	}
 
+	/** Holds the whole-span reading while `stepObserved` reads a fused track's strongest part. */
+	private readonly wholeReading: GateReading = {
+		channelSnrDb: Number.NEGATIVE_INFINITY,
+		kDb: 0,
+		marginDb: 0,
+		minDurationMs: 0,
+		valid: false,
+	}
+
+	/**
+	 * A fused FSK track is also measured on this block's strongest tone, as that tone's own track
+	 * would have been: the whole span counts the empty valley between the tones as noise (a 10 dB
+	 * ISM pair 60 kHz apart reads about 3 dB less over its 85 kHz). The better valid reading wins.
+	 */
 	private stepObserved(
 		t: OpenTrack,
 		gateOf: (centreHz: number, obwHz: number) => GateReading,
 	): void {
 		this.ensureGeometry(t)
 		const reading = gateOf(t.geomCentre, t.geomObw)
-		this.stepReading(t, reading, t.lastSample)
+		if (t.partBlock !== this.blockNo) {
+			this.stepReading(t, reading, t.lastSample)
+			return
+		}
+		const whole = this.wholeReading
+		whole.channelSnrDb = reading.channelSnrDb
+		whole.kDb = reading.kDb
+		whole.marginDb = reading.marginDb
+		whole.minDurationMs = reading.minDurationMs
+		whole.valid = reading.valid
+		if (reading.peakChannelSnrDb !== undefined)
+			whole.peakChannelSnrDb = reading.peakChannelSnrDb
+		else delete whole.peakChannelSnrDb
+		if (reading.burstCovered !== undefined)
+			whole.burstCovered = reading.burstCovered
+		else delete whole.burstCovered
+		const part = gateOf(t.partCentre, t.partObw)
+		const ok = (r: GateReading): boolean =>
+			r.valid && Number.isFinite(r.channelSnrDb)
+		const usePart =
+			ok(part) && (!ok(whole) || part.channelSnrDb > whole.channelSnrDb)
+		this.stepReading(t, usePart ? part : whole, t.lastSample)
 	}
 
 	/**
@@ -1052,7 +1298,16 @@ export class Tracker {
 			best = t.matchedSnrDb
 		t.peakChannelSnrDb = best
 		if (t.gate === undefined) t.gate = "pending"
-		this.stepAlive(t, snr, k, margin, minMs, true, endSample)
+		this.stepAlive(
+			t,
+			snr,
+			k,
+			margin,
+			minMs,
+			true,
+			endSample,
+			reading.burstCovered === true,
+		)
 	}
 
 	/**
@@ -1097,6 +1352,7 @@ export class Tracker {
 			t.gateMinMs,
 			false,
 			endSample,
+			t.gateBurstAlso,
 		)
 	}
 
@@ -1115,6 +1371,7 @@ export class Tracker {
 		minMs: number,
 		observed: boolean,
 		endSample: number,
+		burstAlso: boolean,
 	): void {
 		const on = observed && this.isOn(t.gateRun, snr, k)
 		if (on) {
@@ -1134,6 +1391,7 @@ export class Tracker {
 			t.gateK = k
 			t.gateMargin = margin
 			t.gateMinMs = minMs
+			t.gateBurstAlso = burstAlso
 		} else if (t.gateRun && t.gateOffs === 0) {
 			t.gateOn = false
 			t.gateOffs = 1
@@ -1168,8 +1426,16 @@ export class Tracker {
 	/** Latches `gateQualified` for this run. A later block does not clear it. */
 	private noteQualified(t: OpenTrack, endSample: number): void {
 		if (!t.gateRun || t.gateQualified) return
-		if (t.gateStrongBlocks * this.opts.blockMs < t.gateMinMs) return
-		if (t.gateBest + Tracker.MARGIN_SLACK_DB < t.gateK + t.gateMargin) return
+		const strongMs = t.gateStrongBlocks * this.opts.blockMs
+		const best = t.gateBest + Tracker.MARGIN_SLACK_DB
+		const own = strongMs >= t.gateMinMs && best >= t.gateK + t.gateMargin
+		// A burst range overlapped by a non-burst one: a short strong burst passes by the
+		// burst rule, a long weak carrier still by the standard one.
+		const asBurst =
+			t.gateBurstAlso &&
+			strongMs >= CHANNEL_GATE_BURST_MIN_DURATION_MS &&
+			best >= t.gateK + CHANNEL_GATE_BURST_MARGIN_DB
+		if (!own && !asBurst) return
 		t.gateQualified = true
 		t.gateQualifiedSample = endSample
 	}
@@ -1202,6 +1468,7 @@ export class Tracker {
 		next.gateK = prev.gateK
 		next.gateMargin = prev.gateMargin
 		next.gateMinMs = prev.gateMinMs
+		next.gateBurstAlso = prev.gateBurstAlso
 		next.gateQualified = prev.gateQualified
 		next.gateQualifiedSample = prev.gateQualifiedSample
 		next.gateStamp = this.blockNo
@@ -1502,6 +1769,17 @@ export class Tracker {
 		}
 		if (f.acf30 !== undefined) snap.acf30 = f.acf30
 		if (f.acf60 !== undefined) snap.acf60 = f.acf60
+		if (
+			twoTone(
+				mean,
+				a,
+				e,
+				Math.max(3, Math.ceil(FSK2_MIN_SPACING_HZ / binHz)),
+				FSK_PAIR_DB,
+				FSK2_DIP_DB,
+			)
+		)
+			snap.fsk2 = true
 		return snap
 	}
 }
@@ -1568,4 +1846,52 @@ function chainBaseOf(prev: OpenTrack, next: OpenTrack): ChainBase {
 		bandLinSum: Math.max(0, p.bandLinSum - next.bandLinSum),
 		floorLinSum: Math.max(0, p.floorLinSum - next.floorLinSum),
 	}
+}
+
+/**
+ * One segment from FSK pair parts (sorted by peak bin): their whole span, the strongest peak,
+ * the excess-power centroid of the parts' own bins (not the hole between them) and the union of
+ * their flags.
+ */
+function joinSegments(
+	parts: readonly Segment[],
+	powerDb: Float32Array,
+	floorDb: Float32Array,
+): Segment {
+	let start = Infinity
+	let end = -Infinity
+	let peak = parts[0]!
+	let num = 0
+	let den = 0
+	const flags = { truncated: false, skirt: false, edge: false }
+	for (const p of parts) {
+		start = Math.min(start, p.startBin)
+		end = Math.max(end, p.endBin)
+		if (p.peakDb > peak.peakDb) peak = p
+		for (let i = p.startBin; i < p.endBin; i++) {
+			const excess =
+				10 ** ((powerDb[i] ?? -200) / 10) - 10 ** ((floorDb[i] ?? -200) / 10)
+			if (excess <= 0) continue
+			num += i * excess
+			den += excess
+		}
+		flags.truncated ||= p.flags.truncated
+		flags.skirt ||= p.flags.skirt
+		flags.edge ||= p.flags.edge
+	}
+	return {
+		startBin: start,
+		endBin: end,
+		peakBin: peak.peakBin,
+		peakDb: peak.peakDb,
+		centroidBin: den > 0 ? num / den : peak.peakBin,
+		flags,
+	}
+}
+
+/** Widths within `FSK_PAIR_WIDTH_RATIO` of each other, one bin of slack. */
+function similarWidth(a: Segment, b: Segment): boolean {
+	const wa = a.endBin - a.startBin
+	const wb = b.endBin - b.startBin
+	return Math.max(wa, wb) <= FSK_PAIR_WIDTH_RATIO * Math.min(wa, wb) + 1
 }
