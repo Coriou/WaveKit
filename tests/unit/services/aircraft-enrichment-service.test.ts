@@ -42,6 +42,7 @@ import {
 	ROUTE_CLIMB_OUT_MIN_ALTITUDE_FT,
 	ROUTE_CLIMB_OUT_MIN_DISTANCE_M,
 	ROUTE_PHASE_CLEAR_RATE_FPM,
+	ROUTE_RETURN_LEG_MIN_ROUTE_M,
 } from "../../../src/services/aircraft-info/route-fit.js"
 import type { SqliteDatabase } from "../../../src/core/activity/storage/sqlite.js"
 import { AircraftTracker } from "../../../src/core/aircraft-tracker.js"
@@ -1208,6 +1209,47 @@ describe("AircraftEnrichmentService", () => {
 				)
 			expect(hop(2_000)).toBe(true)
 			expect(hop(-2_000)).toBe(true)
+		})
+
+		it("a short hop keeps its route through a normal descent; on the ground at the destination it has arrived", () => {
+			expect(ROUTE_RETURN_LEG_MIN_ROUTE_M).toBe(200_000)
+			const step = (
+				routeM: number,
+				fromOriginM: number,
+				altitudeFt: number,
+				verticalRateFpm: number | undefined,
+				previous?: boolean,
+				onGround = false,
+			) =>
+				flightPhaseFits(
+					{
+						fromOriginM,
+						toDestinationM: routeM - fromOriginM,
+						routeM,
+						altitudeFt,
+						verticalRateFpm,
+						onGround,
+					},
+					previous,
+				)
+			// a 120 km sector descending from 70 km out: one verdict, the route
+			let verdict: boolean | undefined
+			const seen: boolean[] = []
+			for (const [d, alt, rate] of [
+				[60_000, 8_000, -1_200],
+				[70_000, 6_000, -1_200],
+				[80_000, 4_000, 0],
+				[95_000, 3_000, -800],
+			] as Array<[number, number, number]>) {
+				verdict = step(120_000, d, alt, rate, verdict)
+				seen.push(verdict)
+			}
+			expect(seen).toEqual([true, true, true, true])
+			// a 400 km route: a descent on the destination half is the arrival, not the return leg
+			expect(step(400_000, 70_000, 6_000, -1_200)).toBe(false)
+			expect(step(400_000, 330_000, 6_000, -1_200)).toBe(true)
+			// touched down at the destination after an earlier rejection: arrived
+			expect(step(400_000, 395_000, 0, undefined, false, true)).toBe(true)
 		})
 
 		it("geometric altitude is used when barometric is missing", () => {

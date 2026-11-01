@@ -81,6 +81,11 @@ export const ROUTE_CLIMB_OUT_MIN_DISTANCE_M = 15_000
  * (500 ft/min the other way): a climb-out that levels off or accelerates keeps its verdict.
  */
 export const ROUTE_PHASE_CLEAR_RATE_FPM = 500
+/**
+ * The return-leg rules apply only to routes at least this long (200 km): on a shorter hop the
+ * climb and the descent both happen within the airports' slacks.
+ */
+export const ROUTE_RETURN_LEG_MIN_ROUTE_M = 200_000
 
 /**
  * Without a position or a course nothing contradicts the route: the previous verdict
@@ -190,9 +195,10 @@ function verticalRateOf(a: AircraftState["altitude"]): number | undefined {
  * contradict nothing):
  * - low and far: below 10,000 ft, more than 120 km from both airports of a route at least
  *   300 km long, and on the ground or climbing/descending at 500 ft/min or more → another route;
- * - climb-out at the destination: within its slack, climbing at 1,000 ft/min or more, above
- *   5,000 ft or 15 km out → the return leg; a descent of 1,000 ft/min or more within the origin
- *   slack → the return leg too.
+ * - climb-out at the destination: within its slack and closer to it than to the origin, climbing
+ *   at 1,000 ft/min or more, above 5,000 ft or 15 km out → the return leg; a descent of
+ *   1,000 ft/min or more within the origin slack and closer to the origin → the return leg too;
+ *   on the ground at the destination always fits (arrived).
  * With a previous verdict the altitude and distance bounds move by their margins, as in
  * routeFits, and a rejected route stays rejected while the aircraft stays in the same situation:
  * low and far needs no rate any more, and a return-leg rejection clears only on a clear rate the
@@ -227,9 +233,17 @@ export function flightPhaseFits(
 			(rate !== undefined && Math.abs(rate) >= ROUTE_LOW_RULE_MIN_RATE_FPM))
 	)
 		return false
-	const nearDestination = m.toDestinationM < ROUTE_DESTINATION_SLACK_M + slack
-	const nearOrigin = m.fromOriginM < ROUTE_ORIGIN_SLACK_M + slack
-	if (nearDestination && !nearOrigin) {
+	// each return-leg rule applies only on its own half of the route, so a short hop's normal
+	// descent (still within the origin's 80 km) is never read as an arrival back at the origin
+	if (m.routeM < ROUTE_RETURN_LEG_MIN_ROUTE_M) return true
+	const closerToDestination = m.toDestinationM < m.fromOriginM
+	const nearDestination =
+		m.toDestinationM < ROUTE_DESTINATION_SLACK_M + slack && closerToDestination
+	const nearOrigin =
+		m.fromOriginM < ROUTE_ORIGIN_SLACK_M + slack && !closerToDestination
+	// on the ground at the destination it has arrived
+	if (nearDestination && m.onGround) return true
+	if (nearDestination) {
 		const clearOfMissedApproach =
 			alt >= ROUTE_CLIMB_OUT_MIN_ALTITUDE_FT ||
 			m.toDestinationM >= ROUTE_CLIMB_OUT_MIN_DISTANCE_M
@@ -242,7 +256,7 @@ export function flightPhaseFits(
 		)
 			return false
 	}
-	if (nearOrigin && !nearDestination) {
+	if (nearOrigin) {
 		if (rejected) {
 			if (rate === undefined || rate < ROUTE_PHASE_CLEAR_RATE_FPM) return false
 		} else if (rate !== undefined && rate <= -ROUTE_PHASE_RATE_FPM) return false
