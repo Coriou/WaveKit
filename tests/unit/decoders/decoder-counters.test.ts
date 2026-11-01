@@ -5,9 +5,11 @@ import {
 	COUNTER_BUCKET_MS,
 	COUNTER_FLUSH_MS,
 	COUNTER_RATE_WINDOW_MS,
+	COUNTER_SOURCES_PER_DECODER_MAX,
 	COUNTER_STORE_MAX_DECODERS,
 	DecoderCounterReporter,
 	LISTENING_EVIDENCE_MAX_AGE_MS,
+	LISTENING_FENCE_MS,
 	DecoderCounterStore,
 	clampCount,
 	parseCounterSample,
@@ -281,6 +283,136 @@ describe("DecoderCounterStore", () => {
 		store.forget("one-more")
 		expect(store.view("one-more")).toBeUndefined()
 		expect(store.view("never")).toBeUndefined()
+	})
+})
+
+describe("DecoderCounterStore listening sources", () => {
+	const tool = (
+		deltas: DecoderCounterEvent["deltas"],
+	): DecoderCounterEvent => ({
+		deltas,
+		latest: deltas,
+	})
+	const local = (
+		deltas: DecoderCounterEvent["deltas"],
+	): DecoderCounterEvent => ({
+		deltas,
+		latest: deltas,
+		local: true,
+	})
+
+	it("marks only locally counted events local", () => {
+		vi.useFakeTimers()
+		const { r, events } = reporter()
+		r.count("detections")
+		r.flush()
+		r.cumulative({ preambles: 2 })
+		r.delta({ framesOk: 1 })
+		expect(events.map(e => e.local)).toEqual([true, undefined, undefined])
+	})
+
+	it("fences a tool report up to LISTENING_FENCE_MS after a move, at and past the bound", () => {
+		expect(LISTENING_FENCE_MS).toBe(COUNTER_FLUSH_MS + 2_000)
+		let now = 1_000 * COUNTER_BUCKET_MS
+		const store = new DecoderCounterStore(() => now)
+		store.record("d", tool({ detections: 1, framesOk: 0 }), "w")
+		store.startListening("d", { source: "w", fenced: true })
+		// The tool's interval still covers air before the move.
+		now += LISTENING_FENCE_MS
+		store.record("d", tool({ detections: 4, framesOk: 0 }), "w")
+		expect(store.view("d")?.detections).toMatchObject({
+			total: 5,
+			perMin: 5,
+			listening: 0,
+		})
+		expect(receptionHint(store.view("d"))).toBe("nothing-heard")
+		now += 1
+		store.record("d", tool({ detections: 2 }), "w")
+		expect(store.view("d")?.detections).toMatchObject({
+			total: 7,
+			listening: 2,
+		})
+		// The fence is spent: a later move starts a new one.
+		store.startListening("d", { source: "w", fenced: true })
+		store.record("d", tool({ detections: 1 }), "w")
+		expect(store.view("d")?.detections?.listening).toBe(0)
+	})
+
+	it("never fences local counts, which are flushed at the move", () => {
+		let now = 1_000 * COUNTER_BUCKET_MS
+		const store = new DecoderCounterStore(() => now)
+		store.startListening("d", { source: "w", fenced: true })
+		// A fenced start holds its fence even before the first report.
+		expect(store.view("d")).toBeUndefined()
+		now += 1_000
+		store.record("d", tool({ preambles: 3, framesOk: 0 }), "w")
+		store.record("d", local({ preambles: 1 }), "w")
+		expect(store.view("d")?.preambles).toMatchObject({
+			total: 4,
+			listening: 1,
+		})
+		// An unfenced start of a decoder that never reported adds nothing.
+		store.startListening("never", { source: "w" })
+		expect(store.view("never")).toBeUndefined()
+		expect(store.size).toBe(1)
+	})
+
+	it("sums live sources, restarts one source alone and drops a removed one", () => {
+		let now = 1_000 * COUNTER_BUCKET_MS
+		const store = new DecoderCounterStore(() => now)
+		store.record("d", tool({ preambles: 2, framesOk: 0 }))
+		store.record("d", tool({ preambles: 1, framesOk: 0 }), "w1")
+		store.record("d", tool({ preambles: 4 }), "w2")
+		expect(store.view("d")?.preambles?.listening).toBe(7)
+		store.startListening("d", { source: "w2" })
+		expect(store.view("d")?.preambles?.listening).toBe(3)
+		store.dropSource("d", "w1")
+		expect(store.view("d")?.preambles).toEqual({
+			total: 7,
+			perMin: 7,
+			latest: 4,
+			listening: 2,
+		})
+		store.dropSource("d", "d")
+		expect(store.view("d")?.preambles?.listening).toBe(0)
+		expect(receptionHint(store.view("d"))).toBe("nothing-heard")
+		// A source's evidence ages out on its own last growth.
+		store.record("d", tool({ preambles: 1 }), "w3")
+		now += LISTENING_EVIDENCE_MAX_AGE_MS
+		store.record("d", tool({ preambles: 1 }), "w4")
+		expect(store.view("d")?.preambles?.listening).toBe(2)
+		now += 1
+		expect(store.view("d")?.preambles?.listening).toBe(1)
+		// Without a source every source restarts.
+		store.startListening("d")
+		expect(store.view("d")?.preambles).toMatchObject({
+			total: 9,
+			listening: 0,
+		})
+	})
+
+	it("keeps at most COUNTER_SOURCES_PER_DECODER_MAX sources per decoder, evicting the oldest", () => {
+		expect(COUNTER_SOURCES_PER_DECODER_MAX).toBe(50)
+		const store = new DecoderCounterStore(() => 0)
+		for (let i = 0; i < COUNTER_SOURCES_PER_DECODER_MAX; i++)
+			store.record("d", tool({ preambles: 1 }), `w${i}`)
+		expect(store.view("d")?.preambles?.listening).toBe(
+			COUNTER_SOURCES_PER_DECODER_MAX,
+		)
+		store.record("d", tool({ preambles: 1 }), "one-more")
+		expect(store.view("d")?.preambles).toMatchObject({
+			total: COUNTER_SOURCES_PER_DECODER_MAX + 1,
+			listening: COUNTER_SOURCES_PER_DECODER_MAX,
+		})
+		// w0 was evicted: dropping it changes nothing, dropping a live one does.
+		store.dropSource("d", "w0")
+		expect(store.view("d")?.preambles?.listening).toBe(
+			COUNTER_SOURCES_PER_DECODER_MAX,
+		)
+		store.dropSource("d", "w1")
+		expect(store.view("d")?.preambles?.listening).toBe(
+			COUNTER_SOURCES_PER_DECODER_MAX - 1,
+		)
 	})
 })
 

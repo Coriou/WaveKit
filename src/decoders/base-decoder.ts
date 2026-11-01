@@ -78,6 +78,15 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 		this.emit("counters", event)
 	})
 
+	/**
+	 * Sends the locally counted increments now: the manager calls it before a
+	 * move or a worker's teardown, so they land in the listening period they
+	 * were heard in.
+	 */
+	flushCounters(): void {
+		this.counters.flush()
+	}
+
 	protected process: ChildProcess | null = null
 	protected inputStream: Readable | null = null
 	private readonly trackInputBytes = (chunk: Buffer): void => {

@@ -6,7 +6,12 @@ import fc from "fast-check"
 import { createActivityIngress } from "../../../../src/core/activity/ingress.js"
 import type { DecodeEnvelope } from "../../../../src/core/activity/types.js"
 import { decoderSummary } from "../../../../src/api/routes/decoder-summary.js"
-import { receptionHint } from "../../../../src/decoders/decoder-counters.js"
+import {
+	COUNTER_FLUSH_MS,
+	DecoderCounterReporter,
+	LISTENING_FENCE_MS,
+	receptionHint,
+} from "../../../../src/decoders/decoder-counters.js"
 import { DecoderManager } from "../../../../src/decoders/manager.js"
 import type { DecoderManagerConfig } from "../../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../../src/decoders/registry.js"
@@ -1444,4 +1449,134 @@ it("a band channel moved in place at the same rate starts its listening period a
 	const counters = f.manager.getStatus("dec")?.counters
 	expect(counters?.crcBad).toMatchObject({ total: 2, listening: 0 })
 	expect(receptionHint(counters)).toBe("nothing-heard")
+})
+
+/** Gives a fake decoder an adapter's batching reporter and its flushCounters hook. */
+function batching(decoder: RateDecoder): DecoderCounterReporter {
+	const reporter = new DecoderCounterReporter(event =>
+		decoder.emit("counters", event),
+	)
+	Object.assign(decoder, { flushCounters: () => reporter.flush() })
+	return reporter
+}
+
+it("a worker retuned in place sends its pending counts to the old period and fences the tool's next interval", async () => {
+	const f = setup()
+	f.create("dec")
+	const vfo = f.place("dec", 162_010_000, false, "vfo")
+	f.plan([f.place("dec", 162_000_000), vfo])
+	await f.manager.startAll()
+	const worker = f.instances.get(vfo.key)!
+	const counts = batching(worker)
+	counts.count("framesOk", 0)
+	counts.count("detections")
+	f.plan([
+		f.place("dec", 162_000_000),
+		f.place("dec", 162_025_000, false, "vfo"),
+	])
+	await f.settle()
+	expect(f.provider.retuneChannel).toHaveBeenCalledTimes(1)
+	await vi.advanceTimersByTimeAsync(COUNTER_FLUSH_MS)
+	let counters = f.manager.getStatus("dec")?.counters
+	expect(counters?.detections).toMatchObject({ total: 1, listening: 0 })
+	expect(receptionHint(counters)).toBe("nothing-heard")
+	// The fence began at the move, COUNTER_FLUSH_MS ago: a tool report is still inside it.
+	worker.emit("counters", {
+		deltas: { detections: 2 },
+		latest: { detections: 2 },
+	})
+	expect(f.manager.getStatus("dec")?.counters?.detections).toMatchObject({
+		total: 3,
+		listening: 0,
+	})
+	await vi.advanceTimersByTimeAsync(LISTENING_FENCE_MS - COUNTER_FLUSH_MS)
+	worker.emit("counters", {
+		deltas: { detections: 1 },
+		latest: { detections: 1 },
+	})
+	counters = f.manager.getStatus("dec")?.counters
+	expect(counters?.detections).toMatchObject({ total: 4, listening: 1 })
+	expect(receptionHint(counters)).toBe("heard-undecoded")
+})
+
+it("a band channel moved in place sends its pending counts to the old period and fences the tool's next interval", async () => {
+	const f = setup()
+	f.create("dec")
+	const band = (hz: number): WantedPlacement => ({
+		...f.place("dec", hz, true, "band"),
+		options: {},
+	})
+	f.plan([band(162_000_000)])
+	await f.manager.startAll()
+	const instance = f.instances.get("dec")!
+	const counts = batching(instance)
+	counts.count("framesOk", 0)
+	counts.count("crcBad")
+	f.plan([band(162_025_000)])
+	await f.settle()
+	expect(f.provider.retuneChannel).toHaveBeenCalledTimes(1)
+	await vi.advanceTimersByTimeAsync(COUNTER_FLUSH_MS)
+	expect(f.manager.getStatus("dec")?.counters?.crcBad).toMatchObject({
+		total: 1,
+		listening: 0,
+	})
+	instance.emit("counters", { deltas: { crcBad: 3 }, latest: { crcBad: 3 } })
+	let counters = f.manager.getStatus("dec")?.counters
+	expect(counters?.crcBad).toMatchObject({ total: 4, listening: 0 })
+	expect(receptionHint(counters)).toBe("nothing-heard")
+	await vi.advanceTimersByTimeAsync(LISTENING_FENCE_MS - COUNTER_FLUSH_MS)
+	instance.emit("counters", { deltas: { crcBad: 1 }, latest: { crcBad: 1 } })
+	counters = f.manager.getStatus("dec")?.counters
+	expect(counters?.crcBad).toMatchObject({ total: 5, listening: 1 })
+})
+
+it("removing a secondary placement drops what it heard from its quiet parent's period", async () => {
+	const f = setup()
+	f.create("dec")
+	const secondary = f.place("dec", 162_025_000, false)
+	f.plan([f.place("dec", 162_000_000), secondary])
+	await f.manager.startAll()
+	f.instances.get("dec")!.emit("counters", {
+		deltas: { preambles: 0, framesOk: 0 },
+		latest: { preambles: 0, framesOk: 0 },
+	})
+	const worker = f.instances.get(secondary.key)!
+	worker.emit("counters", {
+		deltas: { preambles: 1, framesOk: 0 },
+		latest: { preambles: 1, framesOk: 0 },
+	})
+	// Still batched when the worker goes: its final flush reaches the totals.
+	batching(worker).count("preambles")
+	expect(receptionHint(f.manager.getStatus("dec")?.counters)).toBe(
+		"heard-undecoded",
+	)
+	f.plan([f.place("dec", 162_000_000)])
+	await f.settle()
+	expect(f.manager.getStatus("dec")?.placements).toHaveLength(1)
+	const counters = f.manager.getStatus("dec")?.counters
+	expect(counters?.preambles).toMatchObject({ total: 2, listening: 0 })
+	expect(receptionHint(counters)).toBe("nothing-heard")
+})
+
+it("a primary keeps its own evidence when a secondary placement is removed", async () => {
+	const f = setup()
+	f.create("dec")
+	const secondary = f.place("dec", 162_025_000, false)
+	f.plan([f.place("dec", 162_000_000), secondary])
+	await f.manager.startAll()
+	f.instances.get("dec")!.emit("counters", {
+		deltas: { preambles: 2, framesOk: 0 },
+		latest: { preambles: 2, framesOk: 0 },
+	})
+	f.instances.get(secondary.key)!.emit("counters", {
+		deltas: { preambles: 1, framesOk: 0 },
+		latest: { preambles: 1, framesOk: 0 },
+	})
+	expect(f.manager.getStatus("dec")?.counters?.preambles?.listening).toBe(3)
+	f.plan([f.place("dec", 162_000_000)])
+	await f.settle()
+	expect(f.manager.getStatus("dec")?.placements).toHaveLength(1)
+	const counters = f.manager.getStatus("dec")?.counters
+	expect(counters?.preambles).toMatchObject({ total: 3, listening: 2 })
+	expect(receptionHint(counters)).toBe("heard-undecoded")
 })

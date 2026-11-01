@@ -8,8 +8,9 @@
  *   child restart (its counters back at 0) never moves a total backwards.
  * - The manager's {@link DecoderCounterStore} folds those deltas per decoder
  *   into totals since the core started, a rolling one-minute rate and growth
- *   since the decoder's current listening period began (its last start or
- *   move), which alone feeds {@link receptionHint}.
+ *   since the current listening period of each reporting source (the decoder
+ *   or one of its placement workers) began (its last start or move); the sum
+ *   over live sources alone feeds {@link receptionHint}.
  */
 
 import { z } from "zod"
@@ -19,6 +20,7 @@ import {
 	type DecoderCounterName,
 	type DecoderReceptionHint,
 } from "@wavekit/api-types"
+import { PLACED_CHANNELS_PER_DECODER_MAX } from "./enablement/contract.js"
 
 /** Counter values by name; names not reported are absent. */
 export type DecoderCounterSample = Partial<Record<DecoderCounterName, number>>
@@ -27,6 +29,12 @@ export type DecoderCounterSample = Partial<Record<DecoderCounterName, number>>
 export interface DecoderCounterEvent {
 	deltas: DecoderCounterSample
 	latest: DecoderCounterSample
+	/**
+	 * True when the adapter counted these itself ({@link DecoderCounterReporter.count}):
+	 * the manager flushes those before a move, so they are never fenced
+	 * ({@link LISTENING_FENCE_MS}). Absent for the tool's own interval reports.
+	 */
+	local?: true
 }
 
 /** One counter as the manager reports it. */
@@ -190,10 +198,13 @@ export class DecoderCounterReporter {
 		}
 		if (!this.localDirty) return
 		this.localDirty = false
-		this.emitCumulative(Object.fromEntries(this.local) as DecoderCounterSample)
+		this.emitCumulative(
+			Object.fromEntries(this.local) as DecoderCounterSample,
+			true,
+		)
 	}
 
-	private emitCumulative(sample: DecoderCounterSample): void {
+	private emitCumulative(sample: DecoderCounterSample, local = false): void {
 		const deltas: DecoderCounterSample = {}
 		let any = false
 		for (const name of DECODER_COUNTER_NAMES) {
@@ -204,7 +215,12 @@ export class DecoderCounterReporter {
 			this.baseline.set(name, value)
 			any = true
 		}
-		if (any) this.emit({ deltas, latest: { ...sample } })
+		if (!any) return
+		this.emit(
+			local
+				? { deltas, latest: { ...sample }, local: true }
+				: { deltas, latest: { ...sample } },
+		)
 	}
 }
 
@@ -219,10 +235,22 @@ const BUCKETS = COUNTER_RATE_WINDOW_MS / COUNTER_BUCKET_MS
 
 /**
  * Decoders the store keeps at most. Entries follow the manager's decoders (each
- * forgotten with its decoder), so this only guards against a leak: 256 decoders
- * x 8 names x (5 + 2 x 6 bucket) numbers = 34,816 numbers, about 272 KiB.
+ * forgotten with its decoder), so this only guards against a leak.
  */
 export const COUNTER_STORE_MAX_DECODERS = 256
+
+/**
+ * Reporting sources (the decoder itself plus its placement workers) one
+ * decoder keeps listening evidence for: one per placed channel
+ * (PLACED_CHANNELS_PER_DECODER_MAX = 49) plus the decoder's own = 50. Each
+ * source is dropped with its worker, so the oldest is evicted only on a leak.
+ *
+ * Worst case: 256 decoders x (8 names x (2 + 2 x 6 bucket) numbers + 50 sources
+ * x (1 fence + 8 names x 2) numbers) = 256 x (112 + 850) = 246,272 numbers,
+ * about 1.9 MiB.
+ */
+export const COUNTER_SOURCES_PER_DECODER_MAX =
+	PLACED_CHANNELS_PER_DECODER_MAX + 1
 
 /**
  * Growth in a listening period stops counting once the counter last grew more
@@ -234,98 +262,170 @@ export const COUNTER_STORE_MAX_DECODERS = 256
  */
 export const LISTENING_EVIDENCE_MAX_AGE_MS = 2 * 60 * 60 * 1_000
 
+/**
+ * After an in-place move (a new channel or centre, the child kept running) a
+ * tool's next interval report still covers air from before the move: rtl_433
+ * and the LoRa wrapper report every 10 s (COUNTER_FLUSH_MS). A tool report
+ * received up to 10 s + 2 s margin (stdout and timer jitter) = 12 s after the
+ * period began, inclusive, counts toward totals and the minute rate but not
+ * toward the period; the first one past 12 s covers at most 10 s, all after
+ * the move. Locally counted events are flushed at the move and never fenced.
+ */
+export const LISTENING_FENCE_MS = COUNTER_FLUSH_MS + 2_000
+
 interface CounterSeries {
 	total: number
 	latest: number
-	/** Growth since the current listening period began. */
-	listening: number
-	/** Clock ms of the last growth in the current listening period; null before any. */
-	listeningAt: number | null
 	/** Bucket index (floor(ms / COUNTER_BUCKET_MS)) each ring slot holds. */
 	keys: number[]
 	values: number[]
 }
 
+interface ListeningCounter {
+	/** Growth since the source's current listening period began. */
+	listening: number
+	/** Clock ms of the last growth in the current listening period. */
+	at: number
+}
+
+interface ListeningSource {
+	/** Clock ms up to which (inclusive) tool reports do not count toward the period; null when none. */
+	fenceUntil: number | null
+	counters: Map<DecoderCounterName, ListeningCounter>
+}
+
+interface DecoderCounters {
+	series: Map<DecoderCounterName, CounterSeries>
+	/** Listening evidence per reporting source, oldest first. */
+	sources: Map<string, ListeningSource>
+}
+
+/** How {@link DecoderCounterStore.startListening} begins a period. */
+export interface ListeningStart {
+	/** The one source that starts afresh; every source of the decoder when absent. */
+	source?: string
+	/**
+	 * The child kept running through a move: fence its next interval report
+	 * ({@link LISTENING_FENCE_MS}). A fresh child's reports are all new.
+	 */
+	fenced?: boolean
+}
+
 /**
- * Manager side, per decoder id: totals since the core started, a rolling
- * minute rate, and growth in the current listening period.
+ * Manager side, per decoder id: totals since the core started and a rolling
+ * minute rate, plus growth in the current listening period of each reporting
+ * source (the decoder itself, or one of its placement workers).
  */
 export class DecoderCounterStore {
-	private readonly decoders = new Map<
-		string,
-		Map<DecoderCounterName, CounterSeries>
-	>()
+	private readonly decoders = new Map<string, DecoderCounters>()
 
 	constructor(private readonly clock: () => number = Date.now) {}
 
-	/** Folds one adapter event into `decoderId`'s counters; values are re-clamped. */
-	record(decoderId: string, event: DecoderCounterEvent): void {
-		let series = this.decoders.get(decoderId)
-		if (!series) {
+	private entry(decoderId: string): DecoderCounters {
+		let entry = this.decoders.get(decoderId)
+		if (!entry) {
 			if (this.decoders.size >= COUNTER_STORE_MAX_DECODERS) {
 				const oldest = this.decoders.keys().next().value
 				if (oldest !== undefined) this.decoders.delete(oldest)
 			}
-			series = new Map()
-			this.decoders.set(decoderId, series)
+			entry = { series: new Map(), sources: new Map() }
+			this.decoders.set(decoderId, entry)
 		}
-		const key = Math.floor(this.clock() / COUNTER_BUCKET_MS)
+		return entry
+	}
+
+	private source(entry: DecoderCounters, source: string): ListeningSource {
+		let listening = entry.sources.get(source)
+		if (!listening) {
+			if (entry.sources.size >= COUNTER_SOURCES_PER_DECODER_MAX) {
+				const oldest = entry.sources.keys().next().value
+				if (oldest !== undefined) entry.sources.delete(oldest)
+			}
+			listening = { fenceUntil: null, counters: new Map() }
+			entry.sources.set(source, listening)
+		}
+		return listening
+	}
+
+	/**
+	 * Folds one adapter event into `decoderId`'s counters; values are
+	 * re-clamped. `source` is the reporting decoder instance (a placement
+	 * worker reports under its parent's id), the decoder itself by default.
+	 */
+	record(
+		decoderId: string,
+		event: DecoderCounterEvent,
+		source: string = decoderId,
+	): void {
+		const entry = this.entry(decoderId)
+		const now = this.clock()
+		const listening = this.source(entry, source)
+		if (listening.fenceUntil !== null && now > listening.fenceUntil)
+			listening.fenceUntil = null
+		const fenced = listening.fenceUntil !== null && event.local !== true
+		const key = Math.floor(now / COUNTER_BUCKET_MS)
 		for (const name of DECODER_COUNTER_NAMES) {
 			const delta = event.deltas[name]
 			if (delta === undefined) continue
-			let entry = series.get(name)
-			if (!entry) {
-				entry = {
+			let series = entry.series.get(name)
+			if (!series) {
+				series = {
 					total: 0,
 					latest: 0,
-					listening: 0,
-					listeningAt: null,
 					keys: new Array<number>(BUCKETS).fill(-1),
 					values: new Array<number>(BUCKETS).fill(0),
 				}
-				series.set(name, entry)
+				entry.series.set(name, series)
 			}
 			const amount = clampCount(delta)
-			entry.total = addCount(entry.total, amount)
-			entry.latest = clampCount(event.latest[name] ?? entry.latest)
-			if (amount > 0) {
-				entry.listening = addCount(entry.listening, amount)
-				entry.listeningAt = this.clock()
+			series.total = addCount(series.total, amount)
+			series.latest = clampCount(event.latest[name] ?? series.latest)
+			if (amount > 0 && !fenced) {
+				const counter = listening.counters.get(name)
+				if (counter) {
+					counter.listening = addCount(counter.listening, amount)
+					counter.at = now
+				} else listening.counters.set(name, { listening: amount, at: now })
 			}
 			const slot = key % BUCKETS
-			if (entry.keys[slot] !== key) {
-				entry.keys[slot] = key
-				entry.values[slot] = 0
+			if (series.keys[slot] !== key) {
+				series.keys[slot] = key
+				series.values[slot] = 0
 			}
-			entry.values[slot] = addCount(entry.values[slot] ?? 0, amount)
+			series.values[slot] = addCount(series.values[slot] ?? 0, amount)
 		}
 	}
 
-	/** `decoderId`'s counters, or undefined when it never reported any. */
+	/**
+	 * `decoderId`'s counters, or undefined when it never reported any. Each
+	 * counter's `listening` sums its live sources' growth, a source's growth
+	 * counting while it last grew at most {@link LISTENING_EVIDENCE_MAX_AGE_MS} ago.
+	 */
 	view(decoderId: string): DecoderCountersStatus | undefined {
-		const series = this.decoders.get(decoderId)
-		if (!series || series.size === 0) return undefined
+		const entry = this.decoders.get(decoderId)
+		if (!entry || entry.series.size === 0) return undefined
 		const now = this.clock()
 		const key = Math.floor(now / COUNTER_BUCKET_MS)
 		const view: DecoderCountersStatus = {}
 		for (const name of DECODER_COUNTER_NAMES) {
-			const entry = series.get(name)
-			if (!entry) continue
+			const series = entry.series.get(name)
+			if (!series) continue
 			let perMin = 0
 			for (let slot = 0; slot < BUCKETS; slot++) {
-				const at = entry.keys[slot] ?? -1
+				const at = series.keys[slot] ?? -1
 				if (at > key - BUCKETS && at <= key)
-					perMin = addCount(perMin, entry.values[slot] ?? 0)
+					perMin = addCount(perMin, series.values[slot] ?? 0)
 			}
-			const listening =
-				entry.listeningAt !== null &&
-				now - entry.listeningAt <= LISTENING_EVIDENCE_MAX_AGE_MS
-					? entry.listening
-					: 0
+			let listening = 0
+			for (const source of entry.sources.values()) {
+				const counter = source.counters.get(name)
+				if (counter && now - counter.at <= LISTENING_EVIDENCE_MAX_AGE_MS)
+					listening = addCount(listening, counter.listening)
+			}
 			view[name] = {
-				total: entry.total,
+				total: series.total,
 				perMin,
-				latest: entry.latest,
+				latest: series.latest,
 				listening,
 			}
 		}
@@ -333,19 +433,35 @@ export class DecoderCounterStore {
 	}
 
 	/**
-	 * `decoderId` starts listening afresh: it (or one of its placement workers)
-	 * started, restarted or moved to another channel or centre, so what it heard
-	 * before says nothing about the air it listens to now. Totals and the minute
-	 * rate are kept; growth in the listening period restarts at 0. A decoder
-	 * that never reported is not added.
+	 * A source of `decoderId` starts listening afresh: it started, restarted or
+	 * moved to another channel or centre, so what it heard before says nothing
+	 * about the air it listens to now. Totals and the minute rate are kept;
+	 * growth in its listening period restarts at 0. The caller flushes the
+	 * adapter's pending local counts first, so they land in the old period. An
+	 * unfenced start of a decoder that never reported adds nothing; a fenced
+	 * one holds its fence for the first report.
 	 */
-	startListening(decoderId: string): void {
-		const series = this.decoders.get(decoderId)
-		if (!series) return
-		for (const entry of series.values()) {
-			entry.listening = 0
-			entry.listeningAt = null
+	startListening(decoderId: string, start: ListeningStart = {}): void {
+		const existing = this.decoders.get(decoderId)
+		if (!existing && !start.fenced) return
+		const entry = existing ?? this.entry(decoderId)
+		const fenceUntil = start.fenced ? this.clock() + LISTENING_FENCE_MS : null
+		const sources =
+			start.source === undefined
+				? [...entry.sources.values()]
+				: [this.source(entry, start.source)]
+		for (const source of sources) {
+			source.counters.clear()
+			source.fenceUntil = fenceUntil
 		}
+	}
+
+	/**
+	 * A placement worker of `decoderId` was torn down (after its final flush):
+	 * its listening evidence goes with it. Totals and the minute rate are kept.
+	 */
+	dropSource(decoderId: string, source: string): void {
+		this.decoders.get(decoderId)?.sources.delete(source)
 	}
 
 	forget(decoderId: string): void {

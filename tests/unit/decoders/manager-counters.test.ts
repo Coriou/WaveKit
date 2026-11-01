@@ -13,6 +13,9 @@ import { FanoutManager } from "../../../src/core/fanout-manager.js"
 import type { SourceManager } from "../../../src/core/source-manager.js"
 import { FakeSources, RateDecoder, iqCaps } from "../../mocks/rate-fakes.js"
 import {
+	COUNTER_FLUSH_MS,
+	DecoderCounterReporter,
+	LISTENING_FENCE_MS,
 	receptionHint,
 	type DecoderCounterEvent,
 } from "../../../src/decoders/decoder-counters.js"
@@ -225,6 +228,80 @@ describe("listening periods in the manager", () => {
 			const counters = own.getStatus("voice")?.counters
 			expect(counters?.detections).toMatchObject({ total: 3, listening: 0 })
 			expect(receptionHint(counters)).toBe("nothing-heard")
+		} finally {
+			await own.destroy()
+		}
+	})
+
+	it("flushes a centre move's pending counts into the old period and fences the tool's next interval", async () => {
+		const sources = new FakeSources()
+		sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 446_000_000 })
+		const registry = new DecoderRegistry()
+		let passive: RateDecoder | undefined
+		let counts: DecoderCounterReporter | undefined
+		registry.register(
+			"dsd-fme",
+			config => {
+				const decoder = new RateDecoder(config.id, caps)
+				const reporter = new DecoderCounterReporter(event =>
+					decoder.emit("counters", event),
+				)
+				passive = decoder
+				counts = reporter
+				return Object.assign(decoder, { flushCounters: () => reporter.flush() })
+			},
+			caps,
+		)
+		const own = new DecoderManager(
+			registry,
+			new FanoutManager(logger),
+			logger,
+			{ restartDelay: 10, maxRestartDelay: 100, validateVersions: false },
+		)
+		try {
+			own.setSourceManager(sources as unknown as SourceManager)
+			own.createDecoder({
+				id: "voice",
+				type: "dsd-fme",
+				enabled: true,
+				sourceId: "rtl",
+				options: {},
+			})
+			await own.startDecoder("voice")
+			counts!.count("framesOk", 0)
+			counts!.count("detections")
+			// The sync is still batched when the centre moves.
+			sources.setCenter("rtl", 446_100_000)
+			await vi.advanceTimersByTimeAsync(350)
+			expect(passive?.starts).toBe(1)
+			await vi.advanceTimersByTimeAsync(COUNTER_FLUSH_MS)
+			let counters = own.getStatus("voice")?.counters
+			expect(counters?.detections).toMatchObject({ total: 1, listening: 0 })
+			expect(receptionHint(counters)).toBe("nothing-heard")
+			// A sync counted after the move is new air.
+			counts!.count("detections")
+			counts!.flush()
+			expect(own.getStatus("voice")?.counters?.detections).toMatchObject({
+				total: 2,
+				listening: 1,
+			})
+			// A tool interval report inside the fence counts toward totals only.
+			sources.setCenter("rtl", 446_200_000)
+			await vi.advanceTimersByTimeAsync(350)
+			passive!.emit("counters", {
+				deltas: { detections: 5 },
+				latest: { detections: 5 },
+			})
+			counters = own.getStatus("voice")?.counters
+			expect(counters?.detections).toMatchObject({ total: 7, listening: 0 })
+			await vi.advanceTimersByTimeAsync(LISTENING_FENCE_MS)
+			passive!.emit("counters", {
+				deltas: { detections: 1 },
+				latest: { detections: 1 },
+			})
+			counters = own.getStatus("voice")?.counters
+			expect(counters?.detections).toMatchObject({ total: 8, listening: 1 })
+			expect(receptionHint(counters)).toBe("heard-undecoded")
 		} finally {
 			await own.destroy()
 		}

@@ -349,6 +349,12 @@ interface DecoderState {
 	stagedOptions: Record<string, DecoderSettingValue | null> | null
 }
 
+/** Sends an adapter's pending local counts now, when it batches any (base-decoder.ts flushCounters). */
+function flushDecoderCounters(decoder: Decoder): void {
+	const flush = (decoder as Decoder & { flushCounters?: unknown }).flushCounters
+	if (typeof flush === "function") flush.call(decoder)
+}
+
 /** A staged option value equals the current one (JSON values; absent = null). */
 function sameJsonValue(a: unknown, b: unknown): boolean {
 	if (a === b) return true
@@ -2010,9 +2016,7 @@ export class DecoderManager extends EventEmitter {
 								channelHz: moved.channelHz,
 							}
 							worker.decoder.updateOptions({ channelHz: moved.channelHz })
-							this.counterStore.startListening(
-								worker.parentId ?? worker.config.id,
-							)
+							this.startMovedListening(worker)
 							continue
 						}
 					}
@@ -2158,9 +2162,7 @@ export class DecoderManager extends EventEmitter {
 								delete state.efficiencyLateShed
 							}
 							state.placement = placement
-							this.counterStore.startListening(
-								state.parentId ?? state.config.id,
-							)
+							this.startMovedListening(state)
 							moved = false
 						}
 					} catch (error) {
@@ -3970,6 +3972,19 @@ export class DecoderManager extends EventEmitter {
 		}
 	}
 
+	/**
+	 * `state` moved in place (another channel or centre, its child kept
+	 * running): its pending local counts go to the old listening period, then
+	 * its source starts a fenced one (decoder-counters.ts LISTENING_FENCE_MS).
+	 */
+	private startMovedListening(state: DecoderState): void {
+		flushDecoderCounters(state.decoder)
+		this.counterStore.startListening(state.parentId ?? state.config.id, {
+			source: state.decoder.id,
+			fenced: true,
+		})
+	}
+
 	/** The root decoder's frame counters, when its adapter or its workers report any. */
 	private counterFields(state: DecoderState): Pick<DecoderStatus, "counters"> {
 		if (state.owner === "placement") return {}
@@ -4168,6 +4183,13 @@ export class DecoderManager extends EventEmitter {
 				].slice(-200)
 		}
 
+		// A removed placement's last counts reach its parent's totals; what it
+		// heard no longer describes the parent's air (decoder-counters.ts dropSource).
+		if (state.parentId && this.decoders.has(state.parentId)) {
+			flushDecoderCounters(state.decoder)
+			this.counterStore.dropSource(state.parentId, state.decoder.id)
+		}
+
 		// Remove event listeners
 		state.decoder.removeAllListeners()
 
@@ -4330,7 +4352,11 @@ export class DecoderManager extends EventEmitter {
 		// Frame counters (decoder-counters.ts), kept under the root decoder's id.
 		decoder.on("counters", (event: DecoderCounterEvent) => {
 			try {
-				this.counterStore.record(state.parentId ?? decoder.id, event)
+				this.counterStore.record(
+					state.parentId ?? decoder.id,
+					event,
+					decoder.id,
+				)
 			} catch (err) {
 				this.log.error(
 					{ err: safeErrorFields(err), decoderId: decoder.id },
@@ -4421,7 +4447,9 @@ export class DecoderManager extends EventEmitter {
 			try {
 				// A new run listens afresh (decoder-counters.ts startListening); the
 				// previous child's last counts were flushed before it spawned.
-				this.counterStore.startListening(state.parentId ?? decoder.id)
+				this.counterStore.startListening(state.parentId ?? decoder.id, {
+					source: decoder.id,
+				})
 				state.lastOutputAt = null
 				state.lastStartedAt = new Date()
 				// Reset health to running when decoder starts (Requirement 20.1),
@@ -5638,7 +5666,7 @@ export class DecoderManager extends EventEmitter {
 				previous !== undefined &&
 				previous.centerFreq !== caps.centerFreq
 			)
-				this.counterStore.startListening(state.parentId ?? decoderId)
+				this.startMovedListening(state)
 			if (inputChanged || !passive || state.channelStale)
 				restartDecoders.add(decoderId)
 			else if (referenceMoved) {

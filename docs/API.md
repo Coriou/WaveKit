@@ -2750,11 +2750,15 @@ and `parseDrops` (heard but rejected). A decoder reports only the names it has:
 On a `listening` verdict, a decoder with a heard (or rejected) counter and `framesOk`
 also carries `reception`: `heard-undecoded` when it heard something but decoded none
 of it, `nothing-heard` when it heard nothing it recognises. Only the current listening
-period counts: it begins each time the decoder (or one of its channel placements)
-starts, restarts or moves to another channel or capture centre, so signals heard
-before a retune or restart never describe the air it listens to now, while
-`counters` keep their totals. Before its first decode in the period, anything heard
-in the period decides; after one, the last minute alone does. A counter whose last
+period counts, kept for the decoder and for each of its channel placements: a
+placement's period begins each time it starts, restarts or moves to another channel
+or capture centre, and a removed placement takes what it heard with it, so signals
+heard before a retune, a restart or on a channel no longer placed never describe the
+air the decoder listens to now, while `counters` keep their totals. Counts batched
+before a move go to the old period, and a tool's own stats report in the first
+12 seconds after a move (its 10 s interval plus a 2 s margin) counts toward `counters`
+only, since it still covers air from before the move. Before its first decode in the
+period, anything heard in the period decides; after one, the last minute alone does. A counter whose last
 growth is more than 2 hours old no longer counts, so a 90-minute dwell keeps every
 burst it heard with 30 minutes to read the result. The verdict sentence then
 reads "<name> listening: heard signals but decoded none" or "<name> listening:
