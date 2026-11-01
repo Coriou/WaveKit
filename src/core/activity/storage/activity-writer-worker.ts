@@ -144,6 +144,24 @@ async function openSession(
 			// Never reject the chain: the next message must still dispatch. The counters stay
 			// unseeded and the next write seeds them (write() seeds first).
 		})
+	// the facets covering index, built once per store after the seed (1.1 s at
+	// 250 000 rows, up to 6.4 s on a loaded host), so neither the open reply nor the
+	// startup path waits on it. Writes queued meanwhile wait on the chain as they do
+	// behind the seed (write timeout 30 s).
+	chain = chain
+		.then(() => {
+			if (session !== opened) return
+			const build = opened.buildFacetsIndex()
+			post({
+				id: 0,
+				type: "indexed",
+				...build,
+				snapshot: opened.snapshot(),
+			})
+		})
+		.catch(() => {
+			// Never reject the chain; buildFacetsIndex reports its own failures.
+		})
 }
 
 function errorResponse(id: number, error: unknown): ActivityWorkerResponse {

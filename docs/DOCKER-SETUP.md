@@ -201,6 +201,45 @@ stderr every 10 seconds and at exit. The core reads it as the decoder's
 frame counters (`GET /api/decoders/summary`), so it shows in the raw
 decoder log too; it is not an error.
 
+## Container logs
+
+Docker's default log driver, `json-file`, keeps every line a container writes,
+without limit, unless the daemon sets one. A receiver that runs for months fills
+the disk that way. Every service in the shipped compose files (`compose.yaml`,
+`compose.usb.yaml`, `packages/sdr-host/docker-compose.yml`) therefore rotates its
+logs: the `local` driver (compressed) with 3 files of 10 MB, at most 30 MB per
+container. `docker logs` and `docker compose logs` read it as before.
+
+```yaml
+services:
+  wavekit-app:
+    logging:
+      driver: local # or json-file with the same options
+      options:
+        max-size: "10m"
+        max-file: "3"
+```
+
+Containers started with `docker run` need the same flags:
+
+```bash
+docker run --log-driver local --log-opt max-size=10m --log-opt max-file=3 ...
+```
+
+To make it the default for every container on the host, set it in
+`/etc/docker/daemon.json` and restart the Docker daemon (it applies to containers
+created afterwards):
+
+```json
+{ "log-driver": "local", "log-opts": { "max-size": "10m", "max-file": "3" } }
+```
+
+At the default `logging.level: info` the core logs state changes (start, stop,
+connect, retune) and one `Decoder outputs in the last minute` line with counts per
+decoder; each decoded message is logged only at `debug`. Repeated warnings, such
+as a decoder line that does not parse, appear at most once a minute with a
+`suppressed` count ([PERFORMANCE.md](PERFORMANCE.md), rule 9).
+
 ## Troubleshooting
 
 ### After a crash or power cut

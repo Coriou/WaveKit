@@ -1,6 +1,11 @@
 import { randomBytes, randomUUID } from "node:crypto"
 import { statSync } from "node:fs"
-import { ACTIVITY_SCHEMA_VERSION, ACTIVITY_SCHEMA_V1 } from "./contract.js"
+import {
+	ACTIVITY_FACETS_INDEX,
+	ACTIVITY_FACETS_INDEX_SQL,
+	ACTIVITY_SCHEMA_VERSION,
+	ACTIVITY_SCHEMA_V1,
+} from "./contract.js"
 import type { StoreIdentity } from "./contract.js"
 import {
 	MAX_INDEXED_TEXT_BYTES,
@@ -746,6 +751,7 @@ function writeSchema(
 	db.exec("BEGIN IMMEDIATE")
 	try {
 		db.exec(ACTIVITY_SCHEMA_V1)
+		db.exec(ACTIVITY_FACETS_INDEX_SQL)
 		const insert = db.prepare(
 			"INSERT INTO store_meta(key, value) VALUES (?, ?)",
 		)
@@ -765,6 +771,33 @@ function writeSchema(
 		rollback(db)
 		throw error
 	}
+}
+
+export function hasFacetsIndex(db: SqliteDatabase): boolean {
+	return (
+		db
+			.prepare(
+				"SELECT 1 AS n FROM sqlite_master WHERE type = 'index' AND name = ?",
+			)
+			.get(ACTIVITY_FACETS_INDEX) !== undefined
+	)
+}
+
+/**
+ * Builds the facets covering index when the store predates it. One CREATE INDEX:
+ * a sequential table pass plus a sort, 1.1 s on a 250 000-row synthetic store at load
+ * 17, up to 6.4 s at load 160-180 (docs/PERFORMANCE.md), holding the write lock
+ * meanwhile. WAL readers keep reading and fall back to the rowid scan until it commits. Idempotent; `built` is false when the
+ * index already existed.
+ */
+export function ensureFacetsIndex(db: SqliteDatabase): {
+	built: boolean
+	ms: number
+} {
+	if (hasFacetsIndex(db)) return { built: false, ms: 0 }
+	const started = performance.now()
+	db.exec(ACTIVITY_FACETS_INDEX_SQL)
+	return { built: true, ms: performance.now() - started }
 }
 
 function assertSchema(db: SqliteDatabase, names: readonly string[]): void {

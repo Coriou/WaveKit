@@ -70,6 +70,8 @@ class GatedWriter implements ActivityWriter {
 
 	onSeeded(): void {}
 
+	onIndexed(): void {}
+
 	write(
 		rows: readonly BuiltActivityRow[],
 		nowMs: number,

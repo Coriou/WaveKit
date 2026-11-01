@@ -14,7 +14,10 @@ import type {
 	ActivityReplayRequest,
 	StoreIdentity,
 } from "../../../../../src/core/activity/storage/contract.js"
-import { ACTIVITY_SCHEMA_V1 } from "../../../../../src/core/activity/storage/contract.js"
+import {
+	ACTIVITY_FACETS_INDEX_SQL,
+	ACTIVITY_SCHEMA_V1,
+} from "../../../../../src/core/activity/storage/contract.js"
 import {
 	createActivityQueryService,
 	type ActivityQueryServiceOptions,
@@ -84,6 +87,8 @@ export interface FixtureOptions {
 	 * thread cannot open it, so worker tests stay on a file.
 	 */
 	memory?: boolean
+	/** build the facets covering index, as a migrated store has. Default true. */
+	facetsIndex?: boolean
 }
 
 export async function createFixture(
@@ -97,6 +102,7 @@ export async function createFixture(
 	db.exec("PRAGMA journal_mode = WAL")
 	db.exec("PRAGMA foreign_keys = ON")
 	db.exec(ACTIVITY_SCHEMA_V1)
+	if (options.facetsIndex !== false) db.exec(ACTIVITY_FACETS_INDEX_SQL)
 	const cursorKey = randomBytes(32)
 	const upsertMeta = db.prepare(
 		"INSERT INTO store_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",

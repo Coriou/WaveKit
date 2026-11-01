@@ -8,8 +8,9 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   default `http://localhost:3102`) at `/stream.wav` and `/stream`.
 - Load tests: `WAVEKIT_MOCK_LOAD=<n>` multiplies the fleets (aircraft, vessels, APRS, mesh) by `n`
   with seeded copies, and the decoder message rate by `n` (`load` in `buildMockServer()`).
-  `WAVEKIT_MOCK_ADSB_RATE=<r>` sends `r` `aircraft:update` per aircraft per second, as a core on
-  SBS output does (one per decoded message; `adsbRate`).
+  `WAVEKIT_MOCK_ADSB_RATE=<r>` sends `r` `aircraft:update` per aircraft per second (`adsbRate`),
+  a load test of the web app's own limit: the core itself sends at most one per aircraft per
+  second, with the trail as `trackAppend` deltas.
 - Aircraft details: AFR1234 (photo, route CDG → JFK, airline), HOP47MJ (route BES → ORY, no photo)
   and FNY03 (military flag) carry the core's enrichment fields; the photos are drawn inline SVG,
   so the mock never reaches Planespotters. Two fictional cases test the Map's selection card: WKA77

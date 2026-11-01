@@ -197,6 +197,20 @@ CREATE VIRTUAL TABLE activity_fts USING fts5 (
 );
 `
 
+/**
+ * covering index of the facets read (query/read.ts). It holds seq first, so the
+ * newest-first facets scan walks index entries (about 64 B each) instead of full row
+ * pages (about 1.5 KB per row with its JSON). On a 250 000-row synthetic store the web's
+ * category count went from 123 ms to 36 ms, for 15.3 MiB (4% of the file); see
+ * docs/PERFORMANCE.md. produced_at_ms rides along so a time-scoped count (the web
+ * Activity page's range chips) stays covered. Additive: schemaVersion stays 1,
+ * an older core opens a store that has it, and readers are correct before it exists.
+ * New stores get it with the schema; an existing store builds it on the writer thread
+ * after the open reply (storage/activity-writer-worker.ts), never on the startup path.
+ */
+export const ACTIVITY_FACETS_INDEX = "activity_facets"
+export const ACTIVITY_FACETS_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${ACTIVITY_FACETS_INDEX} ON activity (seq, category, protocol, decoder_id, source_id, kind, produced_at_ms)`
+
 /** ref_type values; ref_value is the matching provenance/refs string. */
 export type ActivityRefType =
 	| "callId"

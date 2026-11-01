@@ -37,6 +37,20 @@ interface SeededActivityWorkerMessage {
 	snapshot: ActivityWorkerSnapshot
 }
 
+/**
+ * Unsolicited, after the facets covering index check (id 0): whether this open built it,
+ * how long the build took, the failure that left the store without it, and the snapshot
+ * after it (a build grows the file and the WAL, so the parent's byte figures refresh).
+ */
+interface IndexedActivityWorkerMessage {
+	id: 0
+	type: "indexed"
+	built: boolean
+	ms: number
+	error?: string
+	snapshot: ActivityWorkerSnapshot
+}
+
 interface ErrorActivityWorkerResponse {
 	id: number
 	type: "error"
@@ -58,6 +72,7 @@ export type ActivityWorkerResponse =
 	| { id: number; type: "checkpointed"; snapshot: ActivityWorkerSnapshot }
 	| { id: number; type: "closed" }
 	| SeededActivityWorkerMessage
+	| IndexedActivityWorkerMessage
 	| ErrorActivityWorkerResponse
 
 const REQUEST_TYPES = new Set(["open", "write", "checkpoint", "close"])
@@ -103,6 +118,7 @@ export function isActivityWorkerResponse(
 		type === "checkpointed" ||
 		type === "closed" ||
 		type === "seeded" ||
+		type === "indexed" ||
 		type === "error"
 	)
 }

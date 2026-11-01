@@ -186,6 +186,190 @@ describe("FleetStore", () => {
 		expect(e?.trail[0]?.at).toBe(Date.now() - 16_000)
 	})
 
+	it("keeps the aircraft trail whole over trackAppend deltas, batched or not", async () => {
+		const point = (lat: number, ago: number) => ({
+			lat,
+			lon: -3.87,
+			altitude: 36000,
+			timestamp: CORE_NOW - ago,
+		})
+		const { api, events, sockets } = setup(() =>
+			json(200, {
+				aircraft: [
+					aircraft({ trackHistory: [point(48.81, 2000), point(48.8, 3000)] }),
+				],
+				stats: {},
+				timestamp: CORE_NOW,
+			}),
+		)
+		const store = new FleetStore(api, events, AIRCRAFT_SPEC, { flushMs: 250 })
+		store.attach()
+		await store.load()
+		const socket = sockets.last()
+		// two deltas inside one flush window, then an update with no new point
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ trackAppend: [point(48.82, 1000)] }),
+		})
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ trackAppend: [point(48.83, 0)] }),
+		})
+		vi.advanceTimersByTime(250)
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ messages: 101 }),
+		})
+		vi.advanceTimersByTime(250)
+		const e = store.get().entries.get("3944EF")
+		expect(e?.trailFromCore).toBe(true)
+		expect(e?.value.messages).toBe(101)
+		expect(e?.trail.map(p => p.lat)).toEqual([48.8, 48.81, 48.82, 48.83])
+	})
+
+	it("keeps trail points that share a millisecond or follow a clock rollback", async () => {
+		const point = (lat: number, timestamp: number) => ({
+			lat,
+			lon: -3.87,
+			altitude: 36000,
+			timestamp,
+		})
+		const { api, events, sockets } = setup(() =>
+			json(200, {
+				aircraft: [aircraft({ trackHistory: [point(50, CORE_NOW)] })],
+				stats: {},
+				timestamp: CORE_NOW,
+			}),
+		)
+		const store = new FleetStore(api, events, AIRCRAFT_SPEC, { flushMs: 250 })
+		store.attach()
+		await store.load()
+		const socket = sockets.last()
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ trackAppend: [point(50.01, CORE_NOW)] }),
+		})
+		vi.advanceTimersByTime(250)
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ trackAppend: [point(50.02, CORE_NOW - 5000)] }),
+		})
+		vi.advanceTimersByTime(250)
+		const e = store.get().entries.get("3944EF")
+		expect(e?.trail.map(p => p.lat)).toEqual([50, 50.01, 50.02])
+	})
+
+	it("replaces the aircraft trail with a full trackHistory, keeping only points that overtook it", async () => {
+		const point = (lat: number, timestamp: number) => ({
+			lat,
+			lon: -3.87,
+			altitude: 36000,
+			timestamp,
+		})
+		/** `count` points, most recent first like the core, lats rising from `from` by 0.01°. */
+		const trail = (from: number, count: number) =>
+			Array.from({ length: count }, (_, i) =>
+				point(from + (count - 1 - i) / 100, CORE_NOW - i * 1000),
+			)
+		let body = trail(10, 100)
+		const { api, events, sockets } = setup(() =>
+			json(200, {
+				aircraft: [aircraft({ trackHistory: body })],
+				stats: {},
+				timestamp: CORE_NOW,
+			}),
+		)
+		const store = new FleetStore(api, events, AIRCRAFT_SPEC, { flushMs: 250 })
+		store.attach()
+		await store.load()
+		const socket = sockets.last()
+		const lats = () =>
+			store
+				.get()
+				.entries.get("3944EF")
+				?.trail.map(p => p.lat) ?? []
+		expect(lats()).toHaveLength(100)
+
+		// a resync of 100 disjoint newer points replaces all 100 held ones
+		const fresh = trail(40, 100)
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ trackHistory: fresh }),
+		})
+		vi.advanceTimersByTime(250)
+		expect(lats()).toEqual(fresh.map(p => p.lat).reverse())
+
+		// an empty full trail clears it, in the pending map as over the entry
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ trackAppend: [point(41, CORE_NOW + 1000)] }),
+		})
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ trackHistory: [] }),
+		})
+		vi.advanceTimersByTime(250)
+		expect(lats()).toEqual([])
+		expect(store.get().entries.get("3944EF")?.trailFromCore).toBe(true)
+
+		// a GET answer behind the deltas already applied: it wins, the newer deltas stay on top
+		const older = [point(50.02, CORE_NOW - 2000), point(50.01, CORE_NOW - 3000)]
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ trackHistory: older }),
+		})
+		vi.advanceTimersByTime(250)
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({
+				trackAppend: [point(50.04, CORE_NOW), point(50.03, CORE_NOW - 1000)],
+			}),
+		})
+		vi.advanceTimersByTime(250)
+		body = [
+			point(50.02, CORE_NOW - 2000),
+			point(50.01, CORE_NOW - 3000),
+			point(50, CORE_NOW - 4000),
+		]
+		await store.load()
+		expect(lats()).toEqual([50, 50.01, 50.02, 50.03, 50.04])
+	})
+
+	it("does not carry a lost aircraft's trail into its new track", async () => {
+		const point = (lat: number, ago: number) => ({
+			lat,
+			lon: -3.87,
+			altitude: 36000,
+			timestamp: CORE_NOW - ago,
+		})
+		const { api, events, sockets } = setup(() =>
+			json(200, {
+				aircraft: [aircraft({ trackHistory: [point(48.81, 5000)] })],
+				stats: {},
+				timestamp: CORE_NOW,
+			}),
+		)
+		const store = new FleetStore(api, events, AIRCRAFT_SPEC, { flushMs: 250 })
+		store.attach()
+		await store.load()
+		const socket = sockets.last()
+		socket.receive({
+			type: "aircraft:lost",
+			data: { icao: "3944EF", aircraft: aircraft() },
+		})
+		socket.receive({
+			type: "aircraft:new",
+			data: aircraft({ trackHistory: [point(40, 0)] }),
+		})
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ trackAppend: [point(40.1, -1)] }),
+		})
+		vi.advanceTimersByTime(250)
+		const e = store.get().entries.get("3944EF")
+		expect(e?.trail.map(p => p.lat)).toEqual([40, 40.1])
+	})
+
 	it("builds other trails from the positions seen since the page opened", async () => {
 		const { api, events, sockets } = setup(() =>
 			json(200, {

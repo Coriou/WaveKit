@@ -46,7 +46,38 @@ signal processing. The plan that follows from them is in
 
 Internal, transferred worker messages on a hot path may use a cheap structural
 guard instead of a Zod parse; validate external data and configuration with Zod as
-everywhere else.
+everywhere else. 9. **Logging on hot paths.** No info or warn line per message, frame, chunk or
+line. Each line is a synchronous stdout write on the main thread, and one
+`Decoded Message` line with its payload was 442 B, so 1,000 outputs/s (SBS at
+150 aircraft) would have been 38 GB of logs a day. A per-message line is debug
+or trace. A warning that can repeat per message goes through `LogRateLimiter`
+(`src/utils/logger.ts`): one line per key per minute with a `suppressed`
+count. Volume is reported by one `CountSummary` info line per minute
+(`Decoder outputs in the last minute`, counts per decoder). State changes stay
+at info: start, stop, connect, retune, prune summaries. 10. **WebSocket budget.** A broadcast is serialised once, on the first subscribed
+client, and not at all when nobody subscribes to the channel. Entity updates
+are throttled per entity (aircraft 1 s; vessels, APRS and mesh 2 s), and a
+message carries what changed rather than repeating history: the aircraft
+trail goes as `trackAppend` deltas, the full trail only with the snapshot,
+`aircraft:new`, `aircraft:lost` and a staggered resync every 300 updates. Aim
+for at most about 100 KB/s per client for the aircraft channel at 150
+aircraft.
+
+### Aircraft WebSocket channel (2026-11-01)
+
+`scripts/longevity/ws-payloads.ts`, 150 aircraft with full 100-point trails
+through the real tracker, publisher and broadcaster to one counting client, 10 s
+real time. "Before" is the pre-change wiring (every tracker update with the whole
+state) on the same updates.
+
+| Messages per aircraft per second | Before, bytes/s per client | After, bytes/s per client      | Change  | Load average |
+| -------------------------------- | -------------------------- | ------------------------------ | ------- | ------------ |
+| 6 (SBS-like)                     | 6,843,001 (809 msg/s)      | 82,120 (148 msg/s, 554 B mean) | −98.8 % | 17.8 → 16.0  |
+| 1                                | 1,085,039 (135 msg/s)      | 55,909 (135 msg/s, 415 B mean) | −94.9 % | 15.0 → 14.4  |
+
+The resync adds about 7,300 B / 300 ≈ 24 B/s per aircraft (3.6 KB/s at 150), mostly
+outside a 10 s run. Measured on a busy Mac (load averages as shown); compare the
+before and after columns, not absolute rates.
 
 ## Branch marks in signal time (2026-10-30)
 
@@ -258,3 +289,77 @@ host was far busier this time. The pool costs 3 to 10 % more CPU per Msample
 15 s at a load average of about 280: the serial build entered drop-mode 62 times
 and lost 12.2 MB to absorber overflow, the pooled build entered it 0 times and
 lost nothing.
+
+## Activity reads (2026-11-01)
+
+Every Activity read (search, detail, facets, trails, band map, timeline) runs on one
+reader worker, one at a time. Budget: **250 ms** for search, detail and facets, **1 s**
+for trails, band map and timeline, on a store at its row cap (250,000 rows). A read that
+cannot meet that on a cap-size store needs an index or a bounded walk, not a longer
+deadline. Measure with `scripts/longevity/activity-queries.ts` (plans and timings on a
+store copy) and `scripts/longevity/facets-index.ts` (a synthetic cap-size store).
+
+- **The deadline covers the read only.** It starts after admission and after the reader
+  is ready (`perform` in `src/core/activity/query/service.ts`), so time in the queue
+  never counts against it (tested with fake timers in
+  `tests/unit/core/activity/query/deadline.test.ts`). The queue has its own bounds:
+  8 waiting reads, 4 per caller, a refusal past them (429 `ACTIVITY_QUERY_BUSY`), so a
+  read waits at most 8 turns of at most 1 s each.
+- **A blocked main thread does not time out a fast read.** The deadline timer runs on
+  the main thread and the reader's reply arrives in the event loop's poll phase, after
+  timers. When the main thread was blocked past the deadline inside an I/O callback (for
+  example a burst of decoder output parsed in one socket read), the next turn ran the
+  timer first, threw the waiting reply away and killed the reader. An expired deadline
+  now grants one more loop turn (`setImmediate`, which runs after poll) before it fails
+  the read (`src/core/activity/query/deadline.ts`). `scripts/longevity/reader-stall.ts
+--phase poll` (a 400 ms stall in a Unix-socket `data` callback, four searches in
+  flight, Mac at load average 83 to 91): before, one search of the four failed with
+  `ActivityQueryTimeoutError` in each of 2 runs; after, 0 of 2. A stall inside a timer
+  callback (`--phase timers`, the round-1 repro) never failed, because the reply is read
+  in that turn's poll phase. Several such stalls in a row while a decoder resumes, each
+  failing the read it overlaps and restarting the reader, can explain a cluster of
+  timeouts at one moment (inferred from the code and this repro, not caught live); a
+  slow facets read on a full store is the other source.
+- **Facets count in SQLite over a covering index.** The facets read takes the newest
+  50,000 matching rows. It used to fetch each one into JavaScript. Now one statement
+  groups and counts them, and only the distinct values come back. The
+  `activity_facets` index (`seq, category, protocol, decoder_id, source_id, kind,
+produced_at_ms`) lets that scan read index entries instead of row pages, with or
+  without a time range. A new store gets the index with its schema. An existing store
+  builds it on the writer thread after the retention seed, so the open is not delayed.
+  Until it exists, reads use the row scan and are still correct.
+
+Measured on a Mac, a synthetic store of 250,000 rows (376 MiB, about 1.5 KB a row on
+disk, like live), median of five reads through `runRead` on a fresh read-only connection as
+the reader worker opens one, wall / process CPU ms. The quiet run was at load average 16
+to 18. The busy run, at 150 to 200 from other work, shows how far the same reads stretch.
+
+| Facets read                 | No index, old code | No index, new code | Index, old code | Index, new code |
+| --------------------------- | ------------------ | ------------------ | --------------- | --------------- |
+| `category` (the web), quiet | 123 / 114          | 77 / 70            | 64 / 56         | 36 / 33         |
+| five dimensions, quiet      | 258 / 220          | 196 / 173          | 129 / 125       | 158 / 134       |
+| `category` (the web), busy  | 329 / 163          | 165 / 98           | 202 / 70        | 126 / 40        |
+| five dimensions, busy       | 900 / 259          | 593 / 227          | 442 / 166       | 560 / 168       |
+
+The web app's one-dimension count went from 123 ms to 36 ms on a quiet host. Five
+dimensions gain from the index but not from counting in SQLite: grouping 50,000 rows by
+five columns costs about as much as fetching them, and per-dimension grouping and
+array-mode fetches measured no better. With the index, five dimensions were 9 to 11 ms on a
+120,000-row live copy in the sqlite3 CLI, which does not build JavaScript
+objects.
+
+The index build (`ensureFacetsIndex`) took 1.1 s at load average 17, 2.7 s at 68, and
+1.3, 1.6 and 6.4 s at 164 to 179. It adds 15.3 MiB (about 64 B a row, 4 % of the file) and
+writes about as much to the WAL, under the 16 MiB passive checkpoint threshold. Writes
+queue behind it once, as they do behind the retention seed (write timeout 30 s). The
+reader, the startup path and the open reply do not wait. Plans checked after the build
+(`facets-index.ts`): searches keep the rowid or their equality index, the writer's
+row count and retention reads keep `activity_received`, `activity_decoder` and
+`activity_kind`, and the timeline and band map walks keep `activity_produced`.
+
+The web app's chip counts (`liveCountsDelayMs` in
+`web/src/features/activity/controller.ts`) follow live rows every 4 s while a count
+takes under 80 ms. A slower count stretches the interval to 50 times its duration, so
+counting uses at most 2 % of the reader. Each failed count doubles the 4 s floor, and
+the interval never exceeds 60 s. A server-side cache was not added: the page recounts
+only after new rows commit, so a cache keyed by the snapshot would almost never hit.

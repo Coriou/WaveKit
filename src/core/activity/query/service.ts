@@ -23,10 +23,10 @@ import type {
 import type { AggregatesReadLimits } from "./aggregates.js"
 import { QueryAdmission } from "./admission.js"
 import { issueCursor, verifyCursor } from "./cursor.js"
+import { raceDeadline } from "./deadline.js"
 import {
 	ActivityQueryClosedError,
 	ActivityQueryInvalidError,
-	ActivityQueryTimeoutError,
 	ActivityReaderFailedError,
 	ActivitySnapshotResetError,
 	ActivityCursorGapError,
@@ -109,7 +109,9 @@ export interface ActivityQueryLimits {
 	 * `maxInFlightPerClient x maxQueued` (32) other reads, however many new
 	 * clients keep arriving; a client's first waiting read has at most
 	 * `maxQueued` (8) turns ahead of it. Each turn ends within one deadline
-	 * (250 ms search, detail, facets; 1 s trails, band map, timeline), but
+	 * (250 ms search, detail, facets; 1 s trails, band map, timeline) plus one
+	 * event-loop turn of grace (deadline.ts); queue wait is never part of a
+	 * read's deadline, so 8 turns bound it at 8 x 1 s plus that grace. But
 	 * reader startup or restart (up to `READER_READY_TIMEOUT_MS`, 5 s) runs
 	 * before the deadline starts and is not bounded by it.
 	 */
@@ -239,31 +241,18 @@ export function createActivityQueryService(
 		if (closed) throw new ActivityQueryClosedError()
 		const release = await admission.acquire(clientKey)
 		const ticket = {}
-		let timer: ReturnType<typeof setTimeout> | undefined
 		try {
 			await host.ensureReady()
 			if (closed) throw new ActivityQueryClosedError()
-			return await new Promise((resolve, reject) => {
-				timer = setTimeout(() => {
+			// The deadline starts here: queue wait and reader startup are not part of it.
+			return await raceDeadline(
+				host.execute(request, delayMs(), ticket),
+				deadlineMs,
+				() => {
 					host.invalidate(ticket)
-					reject(new ActivityQueryTimeoutError())
-				}, deadlineMs)
-				timer.unref()
-				void host.execute(request, delayMs(), ticket).then(
-					value => {
-						if (timer) clearTimeout(timer)
-						resolve(value)
-					},
-					(error: unknown) => {
-						if (timer) clearTimeout(timer)
-						reject(
-							error instanceof Error ? error : new ActivityReaderFailedError(),
-						)
-					},
-				)
-			})
+				},
+			)
 		} finally {
-			if (timer) clearTimeout(timer)
 			release()
 		}
 	}

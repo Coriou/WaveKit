@@ -80,6 +80,12 @@ export interface FleetSpec<T> {
 	readonly positionOf: (value: T) => ReportedPosition | null
 	/** The core's own track (oldest first, core clock), when the fleet keeps one. */
 	readonly coreTrail?: (value: T) => readonly ReportedPosition[] | null
+	/**
+	 * A message applied over an older state of the same entity (an earlier pending message, the
+	 * current entry, or the entry a snapshot replaces), for messages that carry only a delta (the
+	 * aircraft trail's `trackAppend`). Default: the newer value replaces the older.
+	 */
+	readonly merge?: (previous: T | undefined, next: T) => T
 }
 
 export interface FleetStoreOptions {
@@ -93,8 +99,16 @@ export interface FleetStoreOptions {
 	trailPoints?: number
 }
 
-/** A pending change: the new value with its core "now", or null when the entity was lost. */
-type Pending<T> = { value: T; coreNow: number; receivedAt: number } | null
+/**
+ * A pending change: the new value with its core "now", or null when the entity was lost. `fresh`:
+ * the entity was lost before this value, so it is not merged over the current entry.
+ */
+type Pending<T> = {
+	value: T
+	coreNow: number
+	receivedAt: number
+	fresh: boolean
+} | null
 
 const TRAIL_MIN_M = 25
 
@@ -200,17 +214,19 @@ export class FleetStore<T> implements ReadableStore<FleetState<T>> {
 		this.lastFlush = this.clock()
 		const entries = new Map(this.state.get().entries)
 		for (const [key, change] of this.pending) {
-			if (change === null) entries.delete(key)
-			else
-				entries.set(
-					key,
-					this.entryOf(
-						change.value,
-						change.coreNow,
-						change.receivedAt,
-						entries.get(key),
-					),
-				)
+			if (change === null) {
+				entries.delete(key)
+				continue
+			}
+			const previous = change.fresh ? undefined : entries.get(key)
+			const value =
+				this.spec.merge && previous
+					? this.spec.merge(previous.value, change.value)
+					: change.value
+			entries.set(
+				key,
+				this.entryOf(value, change.coreNow, change.receivedAt, previous),
+			)
 		}
 		this.pending.clear()
 		this.state.update(s => ({ ...s, entries, revision: s.revision + 1 }))
@@ -234,10 +250,12 @@ export class FleetStore<T> implements ReadableStore<FleetState<T>> {
 				const parsed = this.spec.item.safeParse(raw)
 				if (!parsed.success) continue
 				const key = this.spec.keyOf(parsed.data)
-				entries.set(
-					key,
-					this.entryOf(parsed.data, list.now, receivedAt, before.get(key)),
-				)
+				const previous = before.get(key)
+				const value =
+					this.spec.merge && previous
+						? this.spec.merge(previous.value, parsed.data)
+						: parsed.data
+				entries.set(key, this.entryOf(value, list.now, receivedAt, previous))
 			}
 			this.state.update(s => ({
 				status: "live",
@@ -262,11 +280,18 @@ export class FleetStore<T> implements ReadableStore<FleetState<T>> {
 	private receive(data: unknown): void {
 		const parsed = this.spec.item.safeParse(data)
 		if (!parsed.success) return
-		const value = parsed.data
-		this.pending.set(this.spec.keyOf(value), {
+		const key = this.spec.keyOf(parsed.data)
+		const waiting = this.pending.get(key)
+		// Several messages of one entity inside a flush: a delta is merged over the one waiting.
+		const value =
+			this.spec.merge && waiting
+				? this.spec.merge(waiting.value, parsed.data)
+				: parsed.data
+		this.pending.set(key, {
 			value,
 			coreNow: (this.spec.updatedAt ?? this.spec.heardAt)(value),
 			receivedAt: this.clock(),
+			fresh: waiting === null || (waiting?.fresh ?? false),
 		})
 		this.scheduleFlush()
 	}

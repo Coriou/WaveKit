@@ -1,7 +1,15 @@
 name: wavekit
 
-services:
+# Docker's default json-file driver keeps container logs unbounded unless the daemon sets limits.
+# Every service rotates instead: the `local` driver (compressed), 3 files of 10 MB, at most
+# 30 MB per container. See docs/DOCKER-SETUP.md#container-logs.
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
 
+services:
   # ---------- standalone Docker application (no SDR++ dependency) ----------
   wavekit-app:
     profiles: ["app"]
@@ -32,11 +40,7 @@ services:
       - ./decoded_calls:/app/decoded_calls
       - ./data:/app/data
       - ./fixtures:/app/fixtures:ro
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
+    logging: *logging
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health"]
       interval: 10s
@@ -58,6 +62,7 @@ services:
         - type=registry,ref=ghcr.io/coriou/wavekit:cache-runtime-base
         - type=registry,ref=ghcr.io/coriou/wavekit:cache-base-build
     container_name: wavekit-sdrpp
+    logging: *logging
     ports:
       - "5259:5259"
     networks: [wavekit]
@@ -84,6 +89,7 @@ services:
         - type=registry,ref=ghcr.io/coriou/wavekit:cache-runtime-base
         - type=registry,ref=ghcr.io/coriou/wavekit:cache-base-build
     container_name: wavekit-api
+    logging: *logging
     depends_on:
       sdrpp-server:
         condition: service_healthy
@@ -122,6 +128,7 @@ services:
     profiles: ["prod-single-host"]
     image: ghcr.io/coriou/wavekit:latest
     container_name: wavekit
+    logging: *logging
     restart: unless-stopped
     environment:
       WAVEKIT_LOG_LEVEL: info
@@ -162,6 +169,7 @@ services:
     profiles: ["prod-distributed"]
     image: ghcr.io/coriou/wavekit:latest-sdrpp
     container_name: wavekit-sdrpp-prod
+    logging: *logging
     restart: unless-stopped
     environment:
       LOG_LEVEL: info
@@ -181,6 +189,7 @@ services:
     profiles: ["prod-distributed"]
     image: ghcr.io/coriou/wavekit:latest-core
     container_name: wavekit-core-prod
+    logging: *logging
     restart: unless-stopped
     depends_on:
       wavekit-sdrpp-prod:
@@ -217,6 +226,7 @@ services:
   demod-test:
     profiles: ["demod-test"]
     image: wavekit:dev-demod
+    logging: *logging
     build:
       context: .
       target: final-demod
@@ -282,11 +292,7 @@ services:
       # Public root only. The Caddy data volume (CA private keys) stays on the sidecar.
       - wavekit-protected-trust:/caddy-trust:ro
       - ./docker/caddy/protected-runtime.yaml:/app/config/protected-runtime.yaml:ro
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
+    logging: *logging
     healthcheck:
       test: ["CMD", "/etc/s6-overlay/scripts/healthcheck.sh"]
       interval: 30s
@@ -299,6 +305,7 @@ services:
     profiles: ["protected"]
     image: caddy:2
     container_name: wavekit-protected-caddy
+    logging: *logging
     restart: unless-stopped
     depends_on:
       - wavekit-protected

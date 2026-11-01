@@ -5,8 +5,9 @@
  *
  * - Aircraft fly straight lines through the board's positions and wrap after ±260 km (a wrap is a
  *   `aircraft:lost` then `aircraft:new`, as when a real track times out and comes back). Updates every
- *   second, unthrottled like the core's aircraft channel; `trackHistory` (most recent first) like the
- *   core's tracker keeps.
+ *   second, as the core's 1 Hz per-aircraft limit; `trackHistory` (most recent first, one point per
+ *   15 s that never moves once sent) with the list, `new` and `lost`, and updates carry only the new
+ *   points as `trackAppend`, like the core's AircraftUpdatePublisher.
  * - Vessels shuttle on the board's checked legs: ferries and the Batz shuttle leave a real berth, sit
  *   there before departing and turn round at the far end; the rest go back and forth on the leg they
  *   sailed in the board's last hour. tests/mock/map.test.ts checks every leg against the coastline.
@@ -24,6 +25,7 @@ import type {
 	AircraftIdentityResponse,
 	AircraftState,
 	AircraftTrackerStats,
+	AircraftUpdateData,
 	EmergencyStatus,
 	AprsStation,
 	ActivityTrail,
@@ -45,6 +47,8 @@ const infoUpdateBody = z.object({ online: z.boolean() }).strict()
 // ---- aircraft identity (GET /api/aircraft-identity/:kind/:value, as the core's registry)
 
 const HOUR_MS = 3_600_000
+/** Mock aircraft trails: one point per 15 s, 24 points (6 min). */
+const TRAIL_STEP_MS = 15_000
 /** As the core's LINK_LIFETIME_MS: an address and its registration for weeks, a callsign for one flight. */
 const MOCK_LINK_LIFETIME_MS: Readonly<Record<string, number>> = {
 	"icao|reg": 30 * 24 * HOUR_MS,
@@ -1109,15 +1113,17 @@ export function registerMapMock(
 		const ts = (at - startedAt) / 1000
 		const here = aircraftAt(a, ts)
 		const history: AircraftState["trackHistory"] = []
+		// on a 15 s grid from the mock's start, so a point sent once never changes
+		const grid = at - ((at - startedAt) % TRAIL_STEP_MS)
 		for (let k = 0; k < 24; k++) {
-			const back = ts - k * 15
-			const p = aircraftAt(a, back)
+			const pointAt = grid - k * TRAIL_STEP_MS
+			const p = aircraftAt(a, (pointAt - startedAt) / 1000)
 			if (p.lap !== here.lap) break
 			history.push({
 				lat: p.lat,
 				lon: p.lon,
 				altitude: a.ft,
-				timestamp: Math.round(at - k * 15_000),
+				timestamp: Math.round(pointAt),
 			})
 		}
 		const key = `a:${a.icao}`
@@ -1703,6 +1709,22 @@ export function registerMapMock(
 	)
 
 	// ---- live updates
+	/** Per aircraft, the newest trail point sent: updates carry only the points after it. */
+	const trailSent = new Map<string, number>()
+	const markTrail = (state: AircraftState) => {
+		const newest = state.trackHistory?.[0]?.timestamp
+		if (newest !== undefined) trailSent.set(state.icao, newest)
+		return state
+	}
+	const aircraftUpdate = (a: MockAircraft, at: number): AircraftUpdateData => {
+		const { trackHistory = [], ...state } = aircraftState(a, at)
+		const sent = trailSent.get(a.icao)
+		const newest = trackHistory[0]?.timestamp
+		if (newest !== undefined) trailSent.set(a.icao, newest)
+		if (sent === undefined) return { ...state, trackHistory }
+		const append = trackHistory.filter(p => p.timestamp > sent)
+		return append.length > 0 ? { ...state, trackAppend: append } : state
+	}
 	let step = 0
 	const tick = () => {
 		step += 1
@@ -1715,6 +1737,7 @@ export function registerMapMock(
 				// out of range and back at the other end: lost, then a new track
 				laps.set(a.icao, lap)
 				const last = aircraftState(a, at - 1000)
+				trailSent.delete(a.icao)
 				ctx.broadcast("aircraft", "aircraft:lost", {
 					icao: a.icao,
 					aircraft: last,
@@ -1722,11 +1745,15 @@ export function registerMapMock(
 				firstSeen.set(key, at)
 				counts.set(key, 0)
 				bump(key, at)
-				ctx.broadcast("aircraft", "aircraft:new", aircraftState(a, at))
+				ctx.broadcast(
+					"aircraft",
+					"aircraft:new",
+					markTrail(aircraftState(a, at)),
+				)
 				continue
 			}
 			bump(key, at)
-			ctx.broadcast("aircraft", "aircraft:update", aircraftState(a, at))
+			ctx.broadcast("aircraft", "aircraft:update", aircraftUpdate(a, at))
 			for (let j = 1; j < adsbRate; j++)
 				setTimeout(
 					() => {
@@ -1735,7 +1762,7 @@ export function registerMapMock(
 						ctx.broadcast(
 							"aircraft",
 							"aircraft:update",
-							aircraftState(a, later),
+							aircraftUpdate(a, later),
 						)
 					},
 					(j * (ctx.tickMs ?? 1000)) / adsbRate,
