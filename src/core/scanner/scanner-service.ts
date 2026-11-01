@@ -4768,17 +4768,19 @@ export class ScannerService extends EventEmitter {
 			this.ingest(live, live.lastTrack, live.endReason, ev)
 		const discoveryId = live.discoveryId
 		if (!discoveryId) return false
+		// § 6.2: leak/intermod caps are decided before the decode is applied or routed, so a capped
+		// decode never reaches `decoded`, here or on a channel owner it is redirected to.
+		const cap = ev.identity ? this.capFor(live, ev.identity) : undefined
 		// § 7.1: the observation keeps its own accepted evidence (Observation.decode; A1/A3 metrics).
 		const accepted = this.store.appendObservationEvidence(
 			live.observationId,
 			ev,
+			cap ? { cap } : {},
 		)
 		if (accepted) {
 			this.dirty = true
 			this.recorder.evidence(live.observationId, ev)
 		}
-		// § 6.2: leak/intermod caps are decided before the decode is applied, so a capped decode never reaches `decoded`.
-		const cap = ev.identity ? this.capFor(live, ev.identity) : undefined
 		const wasDecoded = this.store.get(discoveryId)?.confidence === "decoded"
 		const wasLiveDecoded = live.decoded
 		const applied = this.store.applyEvidenceResult(

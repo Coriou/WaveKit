@@ -635,6 +635,45 @@ describe("a whole run against fake children", () => {
 		},
 	)
 
+	it("a decoder that fails to start while its input pipe resets: exit 1 with the reason, no unhandled rejection", async () => {
+		const { d, out, err } = rig(() => undefined)
+		/** A decoder child that never spawns: its stdin resets, then the spawn fails. */
+		class UnspawnedChild extends FakeDecoderChild {
+			override emit(event: string | symbol, ...args: unknown[]): boolean {
+				return event === "spawn" ? false : super.emit(event, ...args)
+			}
+		}
+		decoderSpawn.next = () => {
+			const child = new UnspawnedChild()
+			setImmediate(() => {
+				child.stdin.emit("error", reset("EPIPE"))
+				child.emit(
+					"error",
+					Object.assign(new Error("spawn acarsdec ENOENT"), { code: "ENOENT" }),
+				)
+			})
+			return child
+		}
+		const unhandled: unknown[] = []
+		const onUnhandled = (reason: unknown): void => {
+			unhandled.push(reason)
+		}
+		process.on("unhandledRejection", onUnhandled)
+		try {
+			expect(await runDecodeSnapshot(ARGS, d)).toBe(1)
+			await tick()
+			await new Promise(resolve => setTimeout(resolve, 20))
+			expect(unhandled).toEqual([])
+			expect(err).toHaveLength(1)
+			expect(err).toEqual([
+				expect.stringMatching(/^decode-snapshot: Failed to spawn decoder /),
+			])
+			expect(out.filter(l => l.startsWith("RESULT"))).toEqual([])
+		} finally {
+			process.off("unhandledRejection", onUnhandled)
+		}
+	})
+
 	it("a decoder resetting stdout and stderr after it completed: exit 0 with the result", async () => {
 		let resets = 0
 		const { d, out, err } = rig(child => {

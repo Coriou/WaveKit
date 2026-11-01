@@ -1622,24 +1622,23 @@ export class DiscoveryStore
 
 	/**
 	 * The one record a checked channel decode (ACARS, VDL2) at `channelHz` of `sourceId` goes to,
-	 * whatever its aircraft, its protocol or the record it was placed on (`target`). Within
-	 * CHANNEL_OWNER_REACH_HZ (4 000 Hz, exclusive) of the channel, in order:
+	 * whatever its aircraft or its protocol. Within CHANNEL_OWNER_REACH_HZ (4 000 Hz, exclusive) of
+	 * the channel, in order:
 	 *
 	 * 1. a channel anchor (channelAnchorNear, the nearest): it owns the channel;
-	 * 2. else the spectrum record decoded as a channel protocol (channelDecodedAs);
-	 * 3. else, none decoded as a channel protocol yet, a spectrum record whose tuning is trusted and
-	 *    that is not decoded as another protocol (the target counts whatever it is: its own
-	 *    ordinary path decides, as it always did).
-	 *
-	 * Among several records of one step the owner is the nearest to the channel, ties to the oldest
-	 * (firstSeenAt, then id): deterministic, so whichever record's observation a decode pairs with
-	 * first, the same record becomes the channel's one decoded owner, and every later decode in
-	 * reach goes to it as a channel proof.
+	 * 2. else the spectrum record already decoded as a channel protocol (channelDecodedAs), the
+	 *    nearest, ties to the oldest (firstSeenAt, then id);
+	 * 3. else, none owning the channel yet: the record the decode was placed on (`target`, when in
+	 *    reach), which becomes the owner (its own ordinary path decides). A decode is never
+	 *    redirected to a different record that no decode proved: an undecoded record beside it may
+	 *    be another signal (AM voice beside a data channel);
+	 * 4. else, with no placement (anchorDecode): the single record in reach when its tuning is
+	 *    trusted and it is not decoded as another protocol. Two or more undecoded records are
+	 *    ambiguous: none (an anchor opens).
 	 *
 	 * Refused: the owner is decoded as the other protocol within CHANNEL_PROTOCOL_HOLD_MS
 	 * (refusesOtherChannelProtocol), or a decoded spectrum owner other than the target has
-	 * untrusted tuning (fail closed: no second record proves beside it). None: no spectrum record
-	 * in reach (step 3 found nothing).
+	 * untrusted tuning (fail closed: no second record proves beside it). None: no owner found.
 	 */
 	private channelRoute(
 		sourceId: string,
@@ -1676,14 +1675,17 @@ export class DiscoveryStore
 				return { kind: "refused" }
 			return { kind: "record", owner: decoded }
 		}
+		if (target !== undefined)
+			return hits.includes(target)
+				? { kind: "record", owner: target }
+				: { kind: "none" }
 		// A record decoded as a non-channel protocol never becomes a channel's owner but its own.
-		const owner = hits.find(
-			d =>
-				d === target ||
-				(isTrusted(d.tuningTrust) &&
-					this.effectiveLabel(d).confidence !== "decoded"),
-		)
-		return owner === undefined ? { kind: "none" } : { kind: "record", owner }
+		const only = hits.length === 1 ? hits[0]! : undefined
+		return only !== undefined &&
+			isTrusted(only.tuningTrust) &&
+			this.effectiveLabel(only).confidence !== "decoded"
+			? { kind: "record", owner: only }
+			: { kind: "none" }
 	}
 
 	/**
@@ -1739,7 +1741,7 @@ export class DiscoveryStore
 	/**
 	 * A confirmed channel decode (ACARS, VDL2) at a channel no anchor holds, where the source has a
 	 * stored spectrum discovery in reach: that discovery (`d`, chosen by channelRoute: the record
-	 * decoded as a channel protocol, else the nearest trusted one, ties to the oldest) is the
+	 * decoded as a channel protocol, else the single trusted undecoded record in reach) is the
 	 * channel's one owner and takes the decode, and no anchor opens beside it.
 	 *
 	 * Reach is CHANNEL_OWNER_REACH_HZ, 4 000 Hz exclusive (see there).
@@ -1792,11 +1794,26 @@ export class DiscoveryStore
 		d: Discovery,
 		ev: DecodeEvidence & { identity: Identity },
 	): Ingested {
-		const before = this.discoveryView(d)
 		// An older decode never replaces the newer identity the proof cites.
 		const previous = this.channelProofs.get(d.id)
 		if (previous !== undefined && previous.at > ev.at)
 			return { discoveryId: d.id, change: "transient" }
+		// A takeover by the other channel protocol (past CHANNEL_PROTOCOL_HOLD_MS): the record's
+		// stored protocol and identity become the new decode's, so no read path (the published
+		// record, the identity filter) shows the protocol it no longer is, and the old protocol's
+		// observation decodes no longer count for it (decodeCounts).
+		if (
+			d.identity !== undefined &&
+			CHANNEL_ANCHOR_PROTOCOLS.includes(d.protocol) &&
+			d.protocol !== ev.protocol
+		) {
+			d.protocol = ev.protocol
+			d.family = familyOf(ev.protocol)
+			d.identity = { kind: ev.identity.kind, value: ev.identity.value }
+			this.touch(d)
+			this.invalidateLabel(d.id)
+		}
+		const before = this.discoveryView(d)
 		this.channelProofs.set(d.id, {
 			protocol: ev.protocol,
 			identity: { kind: ev.identity.kind, value: ev.identity.value },
@@ -2048,10 +2065,11 @@ export class DiscoveryStore
 			ev.identity !== undefined &&
 			CHANNEL_ANCHOR_PROTOCOLS.includes(ev.protocol)
 		) {
-			const owned = this.channelOwnerEvidence(d, {
-				...ev,
-				identity: ev.identity,
-			})
+			const owned = this.channelOwnerEvidence(
+				d,
+				{ ...ev, identity: ev.identity },
+				opts.cap,
+			)
 			if (owned !== undefined) return owned
 		}
 		if (
@@ -2117,16 +2135,22 @@ export class DiscoveryStore
 	 * another aircraft or the other protocol (a takeover past the hold), it takes it as its channel
 	 * proof too, never splitting a co-channel twin, so the proof cites the latest checked identity,
 	 * as an anchor's does. Undefined: `d` owns the channel and the ordinary path decides.
+	 *
+	 * A capped decode (`cap`: adjacent leak or suspected intermod, decided before the decode) never
+	 * proves another record through redirection: refused (null, not accepted). On `d` itself the
+	 * cap is recorded first (capInto), as the ordinary path does, so it ceilings the proof.
 	 */
 	private channelOwnerEvidence(
 		d: Discovery,
 		ev: DecodeEvidence & { identity: Identity },
+		cap: ConfidenceCap | undefined,
 	): StoreChange | null | undefined {
 		const route = this.channelRouteOf(d, ev)
 		if (route === undefined || route.kind === "none") return undefined
 		if (route.kind === "refused" || route.kind === "anchor") return null
 		const owner = route.owner
 		if (owner !== d) {
+			if (cap !== undefined) return null
 			this.proveByChannel(owner, ev)
 			this.evidenceAccepted = true
 			return null
@@ -2137,6 +2161,7 @@ export class DiscoveryStore
 			(d.protocol === ev.protocol && sameIdentity(d.identity, ev.identity))
 		)
 			return undefined
+		this.capInto(d, cap)
 		const proved = this.proveByChannel(d, ev)
 		this.evidenceAccepted = true
 		return proved.change === "transient" ? null : proved.change
@@ -2250,13 +2275,26 @@ export class DiscoveryStore
 	 * Appends accepted evidence to `Observation.decode` (§ 7.1 "accepted values only"): CRC-clean, the
 	 * observation's epoch (P17, as the probe pool's rule in Task 34), not stamped after that epoch ended
 	 * (`endedAt` when the observation ended by `retune` or `hop`). Exact duplicates are ignored; the list
-	 * keeps the 16 newest by `at`. Journaled as one `"evidence"` entry.
+	 * keeps the 16 newest by `at`. Journaled as one `"evidence"` entry. A channel decode whose
+	 * identity does not fit its protocol (`identityFitsProtocol`) is refused before any routing. `opts.cap` is the
+	 * leak/intermod cap decided for this decode (applyEvidence's): a capped channel decode never
+	 * proves another record through redirection.
 	 */
 	appendObservationEvidence(
 		observationId: string,
 		ev: DecodeEvidence,
+		opts: { cap?: ConfidenceCap } = {},
 	): boolean {
 		ev = checkedDecode(ev)
+		// A channel decode (ACARS, VDL2) may be routed to another record: its identity must fit its
+		// protocol before any routing. Other protocols keep their stored-evidence behaviour (their
+		// proofs check the identity when read).
+		if (
+			ev.identity !== undefined &&
+			CHANNEL_ANCHOR_PROTOCOLS.includes(ev.protocol) &&
+			!identityFitsProtocol(ev.protocol, ev.identity)
+		)
+			return false
 		const o = this.observationIndex.get(observationId)
 		const owner =
 			o === undefined ? undefined : this.discoveries.get(o.discoveryId)
@@ -2274,7 +2312,8 @@ export class DiscoveryStore
 		// decode. Refused, or an anchor's: the observation keeps nothing (the anchor takes the
 		// decode through anchorDecode). Another spectrum owner's: it takes the decode as its channel
 		// proof here, so a stored replay the observation refuses still reaches it, and the
-		// observation keeps nothing (its record never becomes a second decoded owner).
+		// observation keeps nothing (its record never becomes a second decoded owner). A capped
+		// decode proves no other owner.
 		const identity = ev.identity
 		const route =
 			owner === undefined || identity === undefined
@@ -2287,7 +2326,8 @@ export class DiscoveryStore
 		) {
 			if (route.kind !== "record") return false
 			if (route.owner !== owner) {
-				this.proveByChannel(route.owner, { ...ev, identity })
+				if (opts.cap === undefined)
+					this.proveByChannel(route.owner, { ...ev, identity })
 				return false
 			}
 		}

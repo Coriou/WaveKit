@@ -674,12 +674,16 @@ async function decodeCapture(
 			)
 		}
 	})
+	// Either may reject before it is awaited (a pipe failing while the decoder starts, or a startup
+	// failure that leaves both unawaited): handled here, they never raise an unhandled rejection;
+	// the await below still sees the rejection.
+	replayDone.catch(() => undefined)
+	closed.catch(() => undefined)
 	try {
 		await decoder.start()
 	} catch (err: unknown) {
 		// No decoder run: the replay is stopped and its outcome no longer matters.
 		settled = true
-		replayDone.catch(() => undefined)
 		replay.kill("SIGKILL")
 		throw err
 	}

@@ -663,6 +663,40 @@ describe.each(CASES)("$decoder channel ownership at a placed discovery", c => {
 		}
 	})
 
+	it("F1: a leak-capped decode on another record in reach never proves the channel's owner", async () => {
+		const r = await rig(c)
+		try {
+			const a = r.place("o_a", true, -2_000)!
+			const b = r.place("o_b", true, 2_000)!
+			const internal = r.internal as unknown as {
+				live: Map<string, LiveObservation>
+				applyEvidence(live: LiveObservation, ev: DecodeEvidence): boolean
+				capFor(live: LiveObservation, identity: Identity): unknown
+			}
+			internal.capFor = () => undefined
+			internal.applyEvidence(
+				internal.live.get("o_a")!,
+				confirmed(c.protocol, 1, r.clock.at),
+			)
+			const before = r.internal.store.get(a)!
+			expect(before).toMatchObject({
+				confidence: "decoded",
+				proof: { identity: confirmed(c.protocol, 1, 0).identity },
+			})
+			// ScannerService.capFor decides the decode on o_b is an adjacent leak.
+			internal.capFor = () => "adjacent-leak"
+			internal.applyEvidence(
+				internal.live.get("o_b")!,
+				confirmed(c.protocol, 2, r.clock.at + 1),
+			)
+			expect(r.internal.store.get(a)!.proof).toEqual(before.proof)
+			expect(r.internal.store.get(b)!.confidence).not.toBe("decoded")
+			expect(decodedNear(r.internal.store, c.channelHz)).toEqual([a])
+		} finally {
+			await r.stop()
+		}
+	})
+
 	it("M3: a discovery-backed placement re-reads trust at the decode's placement and refuses when untrusted", async () => {
 		const r = await rig(c)
 		try {
@@ -989,7 +1023,9 @@ describe("one owner per channel through the service", () => {
 	// (one owner per source and channel across ACARS and VDL2), M4 (a stale anchor lets a spectrum
 	// record open, and the one-owner rule holds when the anchor is next proven), F1 (several
 	// spectrum records anywhere in the 4 000 Hz reach: one decoded owner, whichever record a
-	// decode is placed or replayed on), F2 (an owner past CHANNEL_PROTOCOL_HOLD_MS is taken over by
+	// decode is placed or replayed on; with no owner yet the placed record becomes it, never a
+	// different undecoded record, and an unplaced decode with two or more undecoded records in
+	// reach opens an anchor), F2 (an owner past CHANNEL_PROTOCOL_HOLD_MS is taken over by
 	// the other protocol as the same record), live ambient and replayed decodes alike
 	it("any interleaving of placements, aircraft and protocols keeps at most one decoded record (property)", async () => {
 		await fc.assert(
