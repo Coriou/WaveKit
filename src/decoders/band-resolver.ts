@@ -116,8 +116,10 @@ export function assessDecoderBand(
 	}
 	if (!requirements || (!targets.success && !ranges.success))
 		return { verdict: "unknown", reasonCode: "no-target-frequency" }
+	const follow = requirements.followCenter === true
 	const declared = {
 		...(targets.success ? { targetsHz: [...targets.data] } : {}),
+		...(follow && targets.success ? { followCenter: true as const } : {}),
 		...(ranges.success
 			? {
 					rangesHz: ranges.data.map(range => ({
@@ -132,7 +134,6 @@ export function assessDecoderBand(
 			? { overrideSource: requirements.overrideSource }
 			: {}),
 	}
-	const follow = requirements.followCenter === true
 
 	const center = Hz.safeParse(context.centerHz)
 	const rate = Hz.safeParse(context.sampleRateHz)

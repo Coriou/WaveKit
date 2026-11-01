@@ -16,6 +16,7 @@ import type {
 	ScanRange,
 } from "@wavekit/api-types"
 import {
+	clusterHolds,
 	fixedTargetsHz,
 	planListsHz,
 } from "../src/features/tuned/decoder-protocols.ts"
@@ -73,7 +74,7 @@ const VERDICTS: Readonly<
 		actions: ["check-source"],
 	},
 	"source-paused": {
-		text: "waiting: Receiver paused — Resume",
+		text: "waiting: Receiver paused",
 		actions: ["resume-source"],
 	},
 	"unsupported-rate": {
@@ -379,21 +380,27 @@ export const MOCK_PLAN_RANGES: readonly ScanRange[] = [
 	},
 ]
 
-/** The core's tuned-band rule (bandContainsTuned) over one band; malformed values never match. */
+/**
+ * The core's tuned-band rule (bandContainsTuned) over one band: a followCenter band holds its whole span between
+ * the lowest and highest target; malformed values never match.
+ */
 function bandHolds(
 	targetsHz: readonly unknown[],
 	rangesHz: readonly { minHz: unknown; maxHz: unknown }[],
 	hz: number,
+	followCenter = false,
 ): boolean {
 	const reach = MOCK_TUNED_REACH_HZ
 	const targets = targetsHz.filter(positive)
 	if (targets.some(t => Math.abs(t - hz) <= reach)) return true
 	if (
+		followCenter &&
 		targets.length > 1 &&
 		hz >= Math.min(...targets) - reach &&
 		hz <= Math.max(...targets) + reach
 	)
 		return true
+	if (clusterHolds(targets, hz, reach)) return true
 	return rangesHz.some(
 		r =>
 			positive(r.minHz) &&
@@ -405,8 +412,8 @@ function bandHolds(
 }
 
 /**
- * The core's decoderCoversHz over the band assessment: within MOCK_TUNED_REACH_HZ of a target, between the
- * lowest and highest target, or inside a range widened by the reach. Without an assessed band (before the first
+ * The core's decoderCoversHz over the band assessment: within MOCK_TUNED_REACH_HZ of a target, between
+ * neighbouring targets of one channel cluster, or inside a range widened by the reach. Without an assessed band (before the first
  * source capabilities) the same rule runs over the fixed configured targets (fixedTargetsHz: a frequency that only
  * follows the tuner never counts). A decoder with neither covers `hz` only
  * when a built-in band plan range there lists one of its protocols (planListsHz over
@@ -429,7 +436,12 @@ export function mockCoversHz(
 	const targets = d.bandAssessment?.targetsHz ?? []
 	const ranges = d.bandAssessment?.rangesHz ?? []
 	if (targets.length > 0 || ranges.length > 0)
-		return bandHolds(targets, ranges, hz)
+		return bandHolds(
+			targets,
+			ranges,
+			hz,
+			d.bandAssessment?.followCenter === true,
+		)
 	const configured = fixedTargetsHz(d)
 	if (configured.length > 0) return bandHolds(configured, [], hz)
 	return planListsHz(d.type, MOCK_PLAN_RANGES, hz)

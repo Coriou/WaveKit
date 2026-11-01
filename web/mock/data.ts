@@ -669,11 +669,12 @@ export const DECODER_SEEDS: readonly DecoderSeed[] = [
 	{
 		id: "meshtastic",
 		type: "lora-meshtastic",
-		targetsHz: [869525000],
+		// the catalogue's EU slots: two bands (869 and 433 MHz), never the span between them
+		targetsHz: [869525000, 433875000],
 		input: "iq",
 		output: "jsonl",
 		pattern: "pure_consumer",
-		basis: "decoder-default",
+		basis: "configured",
 		version: "0.4.0",
 	},
 	{

@@ -109,7 +109,7 @@ const VERDICTS: Readonly<
 		actions: ["check-source"],
 	},
 	"source-paused": {
-		text: "waiting: Receiver paused — Resume",
+		text: "waiting: Receiver paused",
 		actions: ["resume-source"],
 	},
 	"unsupported-rate": {
@@ -431,7 +431,8 @@ function fixedTargetsHz(status: DecoderStatus): number[] {
 
 /**
  * Whether the decoder's own band holds `hz`: the core's tuned-band rule
- * (bandContainsTuned) over its band assessment's targets and ranges. Before
+ * (bandContainsTuned) over its band assessment's targets and ranges (a
+ * followCenter assessment holds its whole span between them). Before
  * the first assessment (no source capabilities yet, at boot) or when it names
  * no band, the same rule runs over the fixed configured targets (fixedTargetsHz).
  * A decoder with neither covers `hz` only when a built-in band plan range there
@@ -451,7 +452,12 @@ export function decoderCoversHz(status: DecoderStatus, hz: number): boolean {
 		: []
 	if (targetsHz.length > 0 || rangesHz.length > 0)
 		return bandContainsTuned(
-			{ basis: band?.basis ?? "configured", targetsHz, rangesHz },
+			{
+				basis: band?.basis ?? "configured",
+				targetsHz,
+				rangesHz,
+				...(band?.followCenter === true ? { followCenter: true as const } : {}),
+			},
 			hz,
 		)
 	const configured = fixedTargetsHz(status)

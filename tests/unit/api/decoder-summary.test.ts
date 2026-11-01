@@ -258,6 +258,20 @@ it("names a paused ADS-B decoder plainly", () => {
 	).toBe("ADS-B paused: CPU budget full")
 })
 
+it("says a paused feed holds the decoder without repeating its Resume action", () => {
+	const verdict = decoderSummary(
+		status({
+			type: "dsd-fme",
+			running: false,
+			suspension: { reasonCode: "source-paused", since: new Date(now) },
+		}),
+		now,
+		446_524_920,
+	).verdict
+	expect(verdict.text).toBe("Digital voice waiting: Receiver paused")
+	expect(verdict.actions).toEqual(["resume-source"])
+})
+
 const KNOWN_DETAILS: readonly string[] = [
 	"budget",
 	"cpu",

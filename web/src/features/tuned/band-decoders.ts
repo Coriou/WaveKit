@@ -17,7 +17,11 @@ import type {
 } from "@wavekit/api-types"
 
 import { formatMHz } from "../format.ts"
-import { fixedTargetsHz, planListsHz } from "./decoder-protocols.ts"
+import {
+	clusterHolds,
+	fixedTargetsHz,
+	planListsHz,
+} from "./decoder-protocols.ts"
 import { decoderLabel } from "./signal.ts"
 
 /** The core's tuned-band reach (TUNED_TARGET_TOLERANCE_HZ): within 200 kHz of a target, of the span between targets, or of a band range. */
@@ -80,25 +84,30 @@ const positive = (n: unknown): n is number =>
 
 /**
  * The core's bandContainsTuned (src/decoders/enablement/tuned-band.ts), ported because the web cannot
- * import the core: within BAND_REACH_HZ of a target, between the lowest and highest target (a channel
- * cluster such as VDL2's), or inside a range widened by the reach. Malformed values never match.
+ * import the core: within BAND_REACH_HZ of a target, between neighbouring targets of one channel cluster
+ * such as VDL2's (never across the gap between two bands, such as LoRa's 433 and 869 MHz slots), or inside
+ * a range widened by the reach. A `followCenter` band's targets are the edges of the band it follows, so it holds
+ * the whole span between the lowest and highest target, widened by the reach. Malformed values never match.
  * web/tests/features/tuned-band-contract.test.ts holds the two to the same answers.
  */
 export function bandHoldsHz(
 	targetsHz: readonly number[] | undefined,
 	rangesHz: readonly { minHz: number; maxHz: number }[] | undefined,
 	hz: number,
+	followCenter = false,
 ): boolean {
 	if (!positive(hz)) return false
 	const reach = BAND_REACH_HZ
 	const targets = Array.isArray(targetsHz) ? targetsHz.filter(positive) : []
 	if (targets.some(t => Math.abs(t - hz) <= reach)) return true
 	if (
+		followCenter &&
 		targets.length > 1 &&
 		hz >= Math.min(...targets) - reach &&
 		hz <= Math.max(...targets) + reach
 	)
 		return true
+	if (clusterHolds(targets, hz, reach)) return true
 	return (Array.isArray(rangesHz) ? rangesHz : []).some(
 		r =>
 			r != null &&
@@ -131,7 +140,7 @@ export function onBand(
 	const targets = Array.isArray(band?.targetsHz) ? band.targetsHz : []
 	const ranges = Array.isArray(band?.rangesHz) ? band.rangesHz : []
 	if (targets.length > 0 || ranges.length > 0)
-		return bandHoldsHz(targets, ranges, hz)
+		return bandHoldsHz(targets, ranges, hz, band?.followCenter === true)
 	const configured = fixedTargetsHz(d)
 	if (configured.length > 0) return bandHoldsHz(configured, undefined, hz)
 	return planListsHz(d.type, planRanges ?? [], hz)

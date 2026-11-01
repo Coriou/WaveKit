@@ -47,6 +47,8 @@ import { BandDecoders } from "./BandDecoders.tsx"
 import { planRangesOf } from "./band-decoders.ts"
 import {
 	bandStateLine,
+	FEED_PAUSED_LINE,
+	feedPausedHere,
 	bandTable,
 	cardIdentity,
 	DATA_BAND_LINE,
@@ -585,24 +587,27 @@ export function TunedCard() {
 		? "Identifying"
 		: heldByScan
 			? "Held by the scan"
-			: !onIt
-				? (now.quiet ?? "Pinned · not tuned")
-				: squelchOpen && voice
-					? now.kind === "call"
-						? "Call in progress"
-						: "Transmitting"
-					: now.quiet && !(squelchOpen && now.kind === "plain")
-						? now.quiet
-						: (bandStateLine(bandRows) ??
-							(noAudio
-								? DATA_BAND_LINE
-								: squelchOpen
-									? "Signal present"
-									: live
-										? present === null
-											? "Squelch off"
-											: "Quiet"
-										: "Not decoded here"))
+			: // a paused feed holds a decoder here and none is live: nothing is listening, whatever was heard before
+				feedPausedHere(bandRows)
+				? FEED_PAUSED_LINE
+				: !onIt
+					? (now.quiet ?? "Pinned · not tuned")
+					: squelchOpen && voice
+						? now.kind === "call"
+							? "Call in progress"
+							: "Transmitting"
+						: now.quiet && !(squelchOpen && now.kind === "plain")
+							? now.quiet
+							: (bandStateLine(bandRows) ??
+								(noAudio
+									? DATA_BAND_LINE
+									: squelchOpen
+										? "Signal present"
+										: live
+											? present === null
+												? "Squelch off"
+												: "Quiet"
+											: "Not decoded here"))
 	const liveState = idRunning || heldByScan || (onIt && squelchOpen)
 	const stateTone = liveState
 		? "accent"
