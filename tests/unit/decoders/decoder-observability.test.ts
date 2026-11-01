@@ -273,3 +273,41 @@ it("preserves split UTF8/CRLF and flushes a bounded partial line at EOF", async 
 		{ stream: "stderr", line: "tail" },
 	])
 })
+
+it("an output stream error (parsed or drained) is logged, never thrown", async () => {
+	for (const parsing of [true, false]) {
+		const child = Object.assign(new EventEmitter(), {
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+			stdin: new PassThrough(),
+			pid: 124,
+		})
+		vi.mocked(spawn).mockReturnValue(child as unknown as ChildProcess)
+		const warn = vi.fn()
+		const logger = pino({ level: "silent" })
+		const decoder = new ObservedDecoder(
+			{ id: "test", type: "test", enabled: false, options: {} },
+			logger,
+		)
+		if (!parsing) decoder.disableParsing()
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		const started = decoder.start()
+		child.emit("spawn")
+		await started
+		vi.clearAllTimers()
+		vi.useRealTimers()
+		const internal = decoder as unknown as { logger: { warn: typeof warn } }
+		internal.logger.warn = warn
+		const reset = Object.assign(new Error("read ECONNRESET"), {
+			code: "ECONNRESET",
+		})
+		// with no listener an 'error' event throws synchronously
+		expect(() => child.stdout.destroy(reset)).not.toThrow()
+		expect(() => child.stderr.destroy(reset)).not.toThrow()
+		await new Promise(resolve => setImmediate(resolve))
+		expect(warn).toHaveBeenCalled()
+		expect(
+			warn.mock.calls.map(call => (call[0] as { source: string }).source),
+		).toEqual(expect.arrayContaining(["stdout", "stderr"]))
+	}
+})

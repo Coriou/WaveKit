@@ -239,6 +239,18 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			this.observability.captureLog(this.process.stdout, "stdout")
 		if (this.process.stderr)
 			this.observability.captureLog(this.process.stderr, "stderr")
+		// A pipe error (e.g. ECONNRESET when the child dies mid-write) on an output stream, or the
+		// same error re-emitted by a readline interface, would crash the process unhandled.
+		const onOutputError =
+			(source: "stdout" | "stderr") =>
+			(err: unknown): void => {
+				this.logger.warn(
+					{ err: safeErrorFields(err), source },
+					"Decoder output stream error",
+				)
+			}
+		this.process.stdout?.on("error", onOutputError("stdout"))
+		this.process.stderr?.on("error", onOutputError("stderr"))
 
 		// Parse stdout line by line (Requirement 4.4)
 		if (this.process.stdout) {
@@ -248,6 +260,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 					crlfDelay: Infinity,
 				})
 
+				stdoutReader.on("error", onOutputError("stdout"))
 				stdoutReader.on("line", (line: string) => {
 					this.counters.scope(counterGeneration, () => {
 						this.handleOutputLine(line)
@@ -267,6 +280,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 					crlfDelay: Infinity,
 				})
 
+				stderrReader.on("error", onOutputError("stderr"))
 				stderrReader.on("line", (line: string) => {
 					this.counters.scope(counterGeneration, () => {
 						this.handleOutputLine(line)
