@@ -15,6 +15,7 @@ import {
 import { ActivityIngress } from "../../../../../src/core/activity/storage/ingress.js"
 import { ACTIVITY_RECORD_VERSION } from "../../../../../src/core/activity/storage/contract.js"
 import {
+	ACTIVITY_AIRCRAFT_IDENTITY_ALLOWANCE_BYTES,
 	ACTIVITY_LIMIT_DEFAULTS,
 	resolveActivityLimits,
 } from "../../../../../src/core/activity/storage/limits.js"
@@ -558,7 +559,10 @@ describe("stored aircraft rows carry the identity known when stored", () => {
 	})
 })
 
-describe("stored aircraft identity stays inside the row growth bound", () => {
+describe("stored aircraft identity stays inside the row growth bound plus its allowance", () => {
+	// 1,100 for the presentation, plus 320 only identity members may use.
+	const LIMIT =
+		ROW_GROWTH_MAX_BYTES + ACTIVITY_AIRCRAFT_IDENTITY_ALLOWANCE_BYTES
 	const ORDER = [
 		"callsign",
 		"registration",
@@ -631,7 +635,11 @@ describe("stored aircraft identity stays inside the row growth bound", () => {
 		lon: -0.4619456,
 	})
 
-	it("drops identity members, lowest priority first, until record + summary + FTS growth fits 1,100 bytes", () => {
+	it("the allowance is 5 members × 64 bytes", () => {
+		expect(ACTIVITY_AIRCRAFT_IDENTITY_ALLOWANCE_BYTES).toBe(320)
+	})
+
+	it("drops identity members, lowest priority first, until record + summary + FTS growth fits 1,100 + 320 bytes", () => {
 		const quotes = '"'.repeat(64)
 		const { row, env, plainBytes } = storeOne(ordinary("WKA50"), {
 			registration: quotes,
@@ -639,7 +647,7 @@ describe("stored aircraft identity stays inside the row growth bound", () => {
 			typeDescription: quotes,
 			operator: quotes,
 		})
-		expect(rowBytes(env) - plainBytes).toBeLessThanOrEqual(ROW_GROWTH_MAX_BYTES)
+		expect(rowBytes(env) - plainBytes).toBeLessThanOrEqual(LIMIT)
 		// The callsign and the list fields survive; the summary agrees with the record.
 		expect(env.aircraft?.callsign).toBe("WKA50")
 		expect(keys(env.fields)).toContain("altitude")
@@ -657,7 +665,7 @@ describe("stored aircraft identity stays inside the row growth bound", () => {
 			}
 			const { env, plainBytes } = storeOne(ordinary("WKA50"), known)
 			const growth = rowBytes(env) - plainBytes
-			expect(growth).toBeLessThanOrEqual(ROW_GROWTH_MAX_BYTES)
+			expect(growth).toBeLessThanOrEqual(LIMIT)
 			const identity = env.aircraft ?? {}
 			const kept = ORDER.filter(key => identity[key] !== undefined)
 			// Kept members are a priority prefix: a lower one never outlives a higher one.
@@ -669,8 +677,61 @@ describe("stored aircraft identity stays inside the row growth bound", () => {
 			const grown = withEnvelopeMetadata(env, {
 				aircraft: { ...identity, [next]: value },
 			})
-			expect(rowBytes(grown) - plainBytes).toBeGreaterThan(ROW_GROWTH_MAX_BYTES)
+			expect(rowBytes(grown) - plainBytes).toBeGreaterThan(LIMIT)
 		}
+	})
+
+	it("keeps an identity that builds to exactly the bound plus allowance, and drops the type past it", () => {
+		const data = ordinary("WKA53")
+		// The presented row without an identity: the presentation alone.
+		const stored = storeOne(data, null)
+		expect(stored.env.aircraft).toEqual({ callsign: "WKA53" })
+		const { aircraft: _callsign, ...presented } = stored.env
+		const bare = { env: presented, plainBytes: stored.plainBytes }
+		expect(rowBytes(bare.env) - bare.plainBytes).toBeLessThanOrEqual(
+			ROW_GROWTH_MAX_BYTES,
+		)
+		const base = {
+			registration: "N0WK53",
+			typeCode: "B77W",
+			typeDescription: "Boeing 777-300ER",
+		}
+		const growthOf = (operator: string) =>
+			rowBytes(
+				withEnvelopeMetadata(bare.env, {
+					aircraft: { callsign: "WKA53", ...base, operator },
+				}),
+			) - bare.plainBytes
+		// A plain character costs 3 built bytes (record, summary, FTS), a quote
+		// 5 (escaped twice in JSON, raw in FTS): mix them to land on the limit.
+		let at: string | undefined
+		for (let quotes = 0; quotes <= 64 && at === undefined; quotes++)
+			for (let plain = 0; quotes + plain <= 64; plain++) {
+				const operator = '"'.repeat(quotes) + "x".repeat(plain)
+				if (operator.length > 0 && growthOf(operator) === LIMIT) {
+					at = operator
+					break
+				}
+			}
+		expect(at).toBeDefined()
+		const atBound = storeOne(data, { ...base, operator: at! })
+		expect(atBound.env.aircraft).toEqual({
+			callsign: "WKA53",
+			...base,
+			operator: at,
+		})
+		expect(rowBytes(atBound.env) - atBound.plainBytes).toBe(LIMIT)
+		// One escaped character more is past it: the type description goes first.
+		const past = `${at!.slice(0, -1)}"`
+		expect(growthOf(past)).toBeGreaterThan(LIMIT)
+		const pastBound = storeOne(data, { ...base, operator: past })
+		expect(pastBound.env.aircraft).toEqual({
+			callsign: "WKA53",
+			registration: "N0WK53",
+			typeCode: "B77W",
+			operator: past,
+		})
+		expect(keys(pastBound.env.fields)).toEqual(keys(bare.env.fields))
 	})
 
 	it("keeps an ordinary identity whole on a sparse row", () => {
@@ -688,17 +749,15 @@ describe("stored aircraft identity stays inside the row growth bound", () => {
 		expect(rowBytes(env) - plainBytes).toBeLessThanOrEqual(ROW_GROWTH_MAX_BYTES)
 	})
 
-	it("keeps the callsign and registration of a fully listed row", () => {
-		const { env, plainBytes } = storeOne(ordinary("WKA52"), {
+	it("keeps the whole ordinary identity of a fully listed row, using the allowance", () => {
+		const known = {
 			registration: "N0WK52",
 			typeCode: "B77W",
 			typeDescription: "Boeing 777-300ER",
 			operator: "WaveKit International Airways",
-		})
-		expect(env.aircraft).toMatchObject({
-			callsign: "WKA52",
-			registration: "N0WK52",
-		})
+		}
+		const { env, plainBytes } = storeOne(ordinary("WKA52"), known)
+		expect(env.aircraft).toEqual({ callsign: "WKA52", ...known })
 		expect(keys(env.fields)).toEqual([
 			"squawk",
 			"altitude",
@@ -706,6 +765,14 @@ describe("stored aircraft identity stays inside the row growth bound", () => {
 			"track",
 			"verticalRate",
 		])
-		expect(rowBytes(env) - plainBytes).toBeLessThanOrEqual(ROW_GROWTH_MAX_BYTES)
+		const growth = rowBytes(env) - plainBytes
+		// Past the plain bound: the identity uses its allowance.
+		expect(growth).toBeGreaterThan(ROW_GROWTH_MAX_BYTES)
+		expect(growth).toBeLessThanOrEqual(LIMIT)
+		// The presentation itself still fits 1,100.
+		const { aircraft: _identity, ...presented } = env
+		expect(rowBytes(presented) - plainBytes).toBeLessThanOrEqual(
+			ROW_GROWTH_MAX_BYTES,
+		)
 	})
 })

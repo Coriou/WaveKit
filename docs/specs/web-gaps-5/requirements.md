@@ -136,7 +136,10 @@ take the 1 100-byte bound, a bare fix included; a stored aircraft row's `aircraf
 counts within that bound and its members are dropped lowest priority first (type
 description, operator, type code, registration, callsign) until it fits. `fitRowBudget` keeps
 `altM` on every rounded position candidate; when no candidate with `altM` fits at four or
-more decimals it tries the same candidates without `altM` before rounding further.
+more decimals it tries the same candidates without `altM` before rounding further. An aircraft
+row's stored `aircraft` identity may grow the row by up to 320 bytes (5 members × 64 bytes,
+counted in built-row bytes) beyond what the presentation leaves of the 1 100, and only the
+identity may use that allowance; past it members are dropped from the lowest priority.
 4.8 Coalescing is unchanged (decided on the payload), so mesh positions store at most 61 rows
 per node per hour. Rows stored before WG5 keep `altM` null (no backfill).
 

@@ -53,6 +53,7 @@ function storeStats(): ActivityStoreStats {
 		floodCopies: 2,
 		coalesceDeferrals: 0,
 		coalesceMergeFailures: 0,
+		coalesceSuperseded: 0,
 	}
 	return stats
 }

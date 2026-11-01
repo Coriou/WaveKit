@@ -83,6 +83,7 @@ function stats(): ActivityStoreStats {
 		coalescedPositions: 0,
 		coalesceDeferrals: 0,
 		coalesceMergeFailures: 0,
+		coalesceSuperseded: 0,
 		queueDepth: 0,
 		queueBytes: 0,
 		dbBytes: 4096,

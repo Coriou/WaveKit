@@ -66,7 +66,14 @@ function model(
 	rows: readonly TrailRow[],
 	limits: TrailsReadLimits,
 ): ModelResult {
-	const scanned = rows.slice(0, limits.scanRows)
+	// Newest point first (heard time, else producedAt); stable, so scan order
+	// breaks ties and rows without a heard time keep their scan order.
+	const pointMs = (row: TrailRow) => row.heardAtMs ?? row.producedAtMs
+	const scanned = rows
+		.slice(0, limits.scanRows)
+		.map((row, index) => ({ row, index }))
+		.sort((a, b) => pointMs(b.row) - pointMs(a.row) || a.index - b.index)
+		.map(({ row }) => row)
 	const points = new Map<string, number[][]>()
 	const truncation = new Set<ActivityTrailsTruncation>()
 	let total = 0
@@ -95,7 +102,7 @@ function model(
 			continue
 		}
 		const target = list ?? []
-		target.push([row.producedAtMs, ...valid] as number[])
+		target.push([pointMs(row), ...valid] as number[])
 		points.set(row.entityKey, target)
 		total += 1
 	}
@@ -392,6 +399,107 @@ describe("acceptTrailRows", () => {
 		])
 	})
 
+	describe("bounds keep the newest points by heard time", () => {
+		// A flushed row stored at 1000 but heard at 100, then a row stored and heard at 900.
+		const flushed = (key: string): TrailRow => ({
+			...row(2, 1_000, key, { lat: 1, lon: 1 }),
+			heardAtMs: 100,
+		})
+		const fresh = (key: string): TrailRow =>
+			row(1, 900, key, { lat: 9, lon: 9 })
+
+		it("per-entity cap drops the earliest heard point", () => {
+			const result = acceptTrailRows([flushed("A"), fresh("A")], {
+				...DEFAULT_TRAILS_READ_LIMITS,
+				maxPointsPerEntity: 1,
+			})
+			expect(result.truncation).toEqual(["per-entity"])
+			expect(result.trails[0]?.points).toEqual([[900, 9, 9, null]])
+			expect(result.trails[0]?.truncated).toBe(true)
+		})
+
+		it("point cap drops the earliest heard point", () => {
+			const result = acceptTrailRows([flushed("A"), fresh("A")], {
+				...DEFAULT_TRAILS_READ_LIMITS,
+				maxPoints: 1,
+			})
+			expect(result.truncation).toEqual(["points"])
+			expect(result.trails[0]?.points).toEqual([[900, 9, 9, null]])
+			expect(result.trails[0]?.truncated).toBe(true)
+		})
+
+		it("entity cap keeps the most recently heard entity", () => {
+			const result = acceptTrailRows([flushed("A"), fresh("B")], {
+				...DEFAULT_TRAILS_READ_LIMITS,
+				maxEntities: 1,
+			})
+			expect(result.truncation).toEqual(["entities"])
+			expect(result.trails.map(trail => trail.entityKey)).toEqual(["B"])
+		})
+
+		it("a trail's category and protocol are those of its newest heard point", () => {
+			const result = acceptTrailRows(
+				[flushed("A"), { ...fresh("A"), category: "marine", protocol: null }],
+				DEFAULT_TRAILS_READ_LIMITS,
+			)
+			expect(result.trails[0]?.points.map(point => point[0])).toEqual([
+				100, 900,
+			])
+			expect(result.trails[0]?.category).toBe("marine")
+			expect(result.trails[0]?.protocol).toBeNull()
+		})
+
+		it("a point pending at a points stop marks its trail truncated", () => {
+			// A's flushed point waits behind B's two newer points; the cap stops at B's second.
+			const result = acceptTrailRows(
+				[
+					{ ...row(3, 1_000, "A"), heardAtMs: 100 },
+					row(2, 900, "B"),
+					row(1, 800, "B"),
+				],
+				{ ...DEFAULT_TRAILS_READ_LIMITS, maxPoints: 1 },
+			)
+			expect(result.truncation).toEqual(["points"])
+			expect(
+				result.trails.map(trail => [trail.entityKey, trail.truncated]),
+			).toEqual([["B", true]])
+		})
+
+		// Feature: web-gaps-4, Property 2: Trails truncation keeps the newest
+		// Validates: Requirements 1.4
+		it("matches the naive model in heard-time order", () => {
+			fc.assert(
+				fc.property(
+					fc.array(fc.tuple(rawRowArb, fc.integer({ min: 0, max: 15 })), {
+						maxLength: 60,
+					}),
+					limitsArb,
+					(raw, limits) => {
+						const lags = raw.map(([, lag]) => lag)
+						const rows = toScanOrder(raw.map(([row]) => row)).map(
+							(row, index) => {
+								const lag = lags[index] ?? 0
+								return lag > 0
+									? { ...row, heardAtMs: row.producedAtMs - lag }
+									: row
+							},
+						)
+						const result = strip(acceptTrailRows(rows, limits))
+						const expected = model(rows, limits)
+						const capped = (truncation: ActivityTrailsTruncation[]) =>
+							truncation.filter(bound => bound !== "scan-rows")
+						expect(result.trails).toEqual(expected.trails)
+						expect(result.pointCount).toBe(expected.pointCount)
+						expect(capped(result.truncation)).toEqual(
+							capped(expected.truncation),
+						)
+					},
+				),
+				{ numRuns: 200 },
+			)
+		})
+	})
+
 	// Feature: web-gaps-4, Property 2: Trails truncation keeps the newest
 	// Validates: Requirements 1.4
 	// Greedy newest-first admission (design "Bulk trails"): rows are taken in
@@ -545,6 +653,140 @@ describe("readTrails against a store", () => {
 		if (result.op !== "trails") throw new TypeError("wrong op")
 		return result.trails
 	}
+
+	it("dates a flushed row's point when it was heard (coalesced.lastSeenAt), not when it was stored", () => {
+		reset()
+		const iso = (ms: number) => new Date(ms).toISOString()
+		const row = (
+			producedAtMs: number,
+			lat: number,
+			coalesced?: { lastSeenAt: number },
+		) =>
+			insert({
+				producedAtMs,
+				entityKey: "icao:A0F060",
+				category: "aircraft",
+				protocol: "adsb",
+				position: null,
+				rawSummary: JSON.stringify({
+					eventId: `f${producedAtMs}`,
+					position: { lat, lon: 20 },
+					...(coalesced === undefined
+						? {}
+						: {
+								coalesced: {
+									receptions: 2,
+									firstSeenAt: iso(coalesced.lastSeenAt - 10),
+									lastSeenAt: iso(coalesced.lastSeenAt),
+								},
+							}),
+				}),
+			})
+		// A reception's own merged row: lastSeenAt is its receivedAt, its time stays.
+		row(NOW - 900, 10, { lastSeenAt: NOW - 900 })
+		// Another entity row stored in between.
+		row(NOW - 500, 11)
+		// The fading aircraft's final flush: stored at NOW - 100, heard at NOW - 700.
+		row(NOW - 100, 12, { lastSeenAt: NOW - 700 })
+		const result = read()
+		expect(result.trails).toHaveLength(1)
+		// Oldest first by heard time: the flushed point lands before the NOW - 500 row.
+		expect(result.trails[0]?.points).toEqual([
+			[NOW - 900, 10, 20, null],
+			[NOW - 700, 12, 20, null],
+			[NOW - 500, 11, 20, null],
+		])
+	})
+
+	it("ranks trails by their newest heard point", () => {
+		reset()
+		const flushed = (entityKey: string, producedAtMs: number, heard: number) =>
+			insert({
+				producedAtMs,
+				entityKey,
+				category: "aircraft",
+				protocol: "adsb",
+				position: null,
+				rawSummary: JSON.stringify({
+					eventId: `${entityKey}${producedAtMs}`,
+					position: { lat: 10, lon: 20 },
+					coalesced: {
+						receptions: 1,
+						firstSeenAt: new Date(heard).toISOString(),
+						lastSeenAt: new Date(heard).toISOString(),
+					},
+				}),
+			})
+		flushed("A", NOW - 100, NOW - 800)
+		flushed("B", NOW - 200, NOW - 300)
+		expect(read().trails.map(t => [t.entityKey, t.points[0]?.[0]])).toEqual([
+			["B", NOW - 300],
+			["A", NOW - 800],
+		])
+	})
+
+	it("caps keep the newest heard points, not the newest stored rows", () => {
+		reset()
+		const flushedRow = (
+			entityKey: string,
+			producedAtMs: number,
+			heard: number,
+		) =>
+			insert({
+				producedAtMs,
+				entityKey,
+				category: "aircraft",
+				protocol: "adsb",
+				position: null,
+				rawSummary: JSON.stringify({
+					eventId: `${entityKey}${producedAtMs}`,
+					position: { lat: 1, lon: 20 },
+					coalesced: {
+						receptions: 1,
+						firstSeenAt: new Date(heard).toISOString(),
+						lastSeenAt: new Date(heard).toISOString(),
+					},
+				}),
+			})
+		flushedRow("A", NOW - 100, NOW - 900)
+		insert({
+			producedAtMs: NOW - 200,
+			entityKey: "A",
+			category: "aircraft",
+			protocol: "adsb",
+			position: { lat: 2, lon: 20 },
+		})
+		const limits = DEFAULT_TRAILS_READ_LIMITS
+		for (const capped of [
+			{ ...limits, maxPointsPerEntity: 1 },
+			{ ...limits, maxPoints: 1 },
+		]) {
+			const result = read({ limits: capped })
+			expect(result.trails[0]?.points).toEqual([[NOW - 200, 2, 20, null]])
+			expect(result.trails[0]?.truncated).toBe(true)
+		}
+		insert({
+			producedAtMs: NOW - 300,
+			entityKey: "B",
+			category: "aircraft",
+			protocol: "adsb",
+			position: { lat: 3, lon: 20 },
+		})
+		const entities = read({ limits: { ...limits, maxEntities: 1 } })
+		expect(entities.trails.map(trail => trail.entityKey)).toEqual(["A"])
+		reset()
+		flushedRow("A", NOW - 100, NOW - 900)
+		insert({
+			producedAtMs: NOW - 300,
+			entityKey: "B",
+			category: "aircraft",
+			protocol: "adsb",
+			position: { lat: 3, lon: 20 },
+		})
+		const recent = read({ limits: { ...limits, maxEntities: 1 } })
+		expect(recent.truncation).toEqual(["entities"])
+		expect(recent.trails.map(trail => trail.entityKey)).toEqual(["B"])
+	})
 
 	it("stops at the wall budget with the newest rows and an exact per-trail flag", () => {
 		reset()

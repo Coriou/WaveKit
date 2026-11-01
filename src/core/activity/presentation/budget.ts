@@ -22,6 +22,7 @@ import {
 	MAX_SUMMARY_BYTES,
 } from "../storage/contract.js"
 import { isPositionOnlyShape } from "../storage/coalesce.js"
+import { ACTIVITY_AIRCRAFT_IDENTITY_ALLOWANCE_BYTES } from "../storage/limits.js"
 import { buildActivityRow } from "../storage/row.js"
 import type {
 	DecodeAircraftIdentity,
@@ -840,22 +841,24 @@ function identityGrowth(identity: DecodeAircraftIdentity): number {
 
 /**
  * The most of an aircraft identity the presented envelope can carry while
- * its built-row growth over `plain` stays within req 1.8 (1,100 bytes):
- * members are dropped from the lowest priority (type description, operator,
- * type code, registration, then callsign). Each value is at most 64 bytes,
- * 130 of JSON when every character is escaped (`"` or `\\`); with 72 bytes
- * of keys and punctuation a whole identity can add 2 × (12 + 72 + 5 × 130)
- * + 5 × 65 = 1,793 bytes, and a listed aircraft row's presentation alone
- * often grows by 900 or more. Arithmetic first
- * (presentation bound plus identity bound); a candidate that bound rejects
- * is measured on built rows, so the first that fits is the largest that
- * does. Undefined when nothing fits.
+ * its built-row growth over `plain` stays within req 1.8 (1,100 bytes) plus
+ * the identity allowance (320 bytes, storage/limits.ts): the presentation
+ * was fitted to 1,100 without the identity, so only identity members use
+ * the allowance. Past it members are dropped from the lowest priority (type
+ * description, operator, type code, registration, then callsign). Each
+ * value is at most 64 raw bytes, 130 of JSON when every character is
+ * escaped (`"` or `\\`); with 72 bytes of keys and punctuation a whole
+ * identity can add 2 × (12 + 72 + 5 × 130) + 5 × 65 = 1,793 bytes.
+ * Arithmetic first (presentation bound plus identity bound); a candidate
+ * that bound rejects is measured on built rows, so the first that fits is
+ * the largest that does. Undefined when nothing fits.
  */
 export function fitAircraftIdentity(
 	presented: DecodeEnvelope,
 	plain: DecodeEnvelope,
 	identity: DecodeAircraftIdentity,
-	limit: number = ROW_GROWTH_MAX_BYTES,
+	limit: number = ROW_GROWTH_MAX_BYTES +
+		ACTIVITY_AIRCRAFT_IDENTITY_ALLOWANCE_BYTES,
 ): DecodeAircraftIdentity | undefined {
 	const shown = estimateGrowth(
 		presentation({

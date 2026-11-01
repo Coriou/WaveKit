@@ -137,7 +137,7 @@ export interface RowAircraft {
 export function storedAircraft(s: ActivitySummary): RowAircraft | null {
 	const id = s.aircraft
 	if (!id || !s.entityKey) return null
-	const hex = s.entityKey.slice(s.entityKey.indexOf(":") + 1).toUpperCase()
+	const hex = hexOf(s.entityKey)
 	const name = id.callsign?.trim() || id.registration || hex
 	const about = [id.operator, id.typeDescription ?? id.typeCode]
 		.filter(Boolean)
@@ -145,12 +145,40 @@ export function storedAircraft(s: ActivitySummary): RowAircraft | null {
 	return name === hex && about === "" ? null : { name, about }
 }
 
+/** The address part of an entity key, upper case ("icao:a0b001" → "A0B001"). */
+function hexOf(entityKey: string): string {
+	return entityKey.slice(entityKey.indexOf(":") + 1).toUpperCase()
+}
+
+/**
+ * Who the row's aircraft is, field by field: the callsign the row stored (what it flew as when heard), else
+ * the live fleet's name unless that is only the hex address, else the stored registration; the stored
+ * operator and type, else the live fleet's. Null when neither knows anything.
+ */
+export function rowAircraft(
+	s: ActivitySummary,
+	live: RowAircraft | null,
+): RowAircraft | null {
+	const stored = storedAircraft(s)
+	if (live === null) return stored
+	const own = s.aircraft?.callsign?.trim()
+	const liveName =
+		s.entityKey !== null &&
+		live.name.trim().toUpperCase() === hexOf(s.entityKey)
+			? null
+			: live.name
+	return {
+		name: own || liveName || stored?.name || live.name,
+		about: stored?.about || live.about,
+	}
+}
+
 export function rowView(
 	s: ActivitySummary,
 	live: RowAircraft | null = null,
 ): RowView {
-	// The live fleet first; an aircraft it no longer tracks keeps what the row stored.
-	const aircraft = live ?? storedAircraft(s)
+	// Per field: the row's own stored identity, the live fleet filling what it lacks.
+	const aircraft = rowAircraft(s, live)
 	if (s.kind === "ingestion-gap") {
 		const dropped = s.fields.find(f => f.key === "dropped")?.value
 		// The core titles gaps "Ingestion gap (<reason>)".

@@ -560,6 +560,7 @@ class ActivityStore implements ActivityStoreHandle {
 			coalescedPositions: this.ingress.coalescedPositions,
 			coalesceDeferrals: this.ingress.coalesceDeferrals,
 			coalesceMergeFailures: this.ingress.coalesceMergeFailures,
+			coalesceSuperseded: this.ingress.coalesceSuperseded,
 			floodCopies: this.ingress.floodCopies,
 			queueDepth: this.ingress.queueDepth(),
 			queueBytes: this.ingress.queueBytesTotal(),

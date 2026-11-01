@@ -243,14 +243,25 @@ export function firstSeenOf(s: ActivitySummary): number {
 	return Number.isFinite(first) && first < t ? first : t
 }
 
-/** When it was heard: producedAt, else receivedAt, else 0 (an unparseable time never splits a stack). */
+/**
+ * When it was heard: producedAt, else receivedAt, else 0 (an unparseable time never splits a stack).
+ * A flushed coalesced row is stamped when the core stored it, up to a minute after its latest
+ * reception: its `coalesced.lastSeenAt` (earlier than its receivedAt; a reception's own row has
+ * them equal) is when it was heard. Lists keep commitSeq order; this dates points and stacks.
+ */
 export function timeOf(s: ActivitySummary): number {
 	const e = entryOf(s)
 	if (e.time !== undefined) return e.time
 	foldWork.times += 1
 	const p = Date.parse(s.producedAt)
 	const r = Number.isFinite(p) ? Number.NaN : Date.parse(s.receivedAt)
-	return (e.time = Number.isFinite(p) ? p : Number.isFinite(r) ? r : 0)
+	const stamped = Number.isFinite(p) ? p : Number.isFinite(r) ? r : 0
+	// one parse for a plain row; a coalesced row also parses its span (and its receivedAt only when earlier)
+	if (!s.coalesced) return (e.time = stamped)
+	const seen = Date.parse(s.coalesced.lastSeenAt)
+	if (!(seen < stamped)) return (e.time = stamped)
+	const received = Number.isFinite(p) ? Date.parse(s.receivedAt) : r
+	return (e.time = seen < received ? seen : stamped)
 }
 
 /** The channel to 1 kHz, or null when the row has no frequency. */

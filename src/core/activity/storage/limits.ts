@@ -82,6 +82,31 @@ export const ACTIVITY_POSITION_COALESCE_MS = 60_000
  */
 export const ACTIVITY_POSITION_COALESCE_MAX_ENTITIES = 4_096
 
+/** Identity members (callsign, registration, type code, type, operator). */
+const AIRCRAFT_IDENTITY_MEMBERS = 5
+/** Raw UTF-8 bytes of one identity value at most (the envelope cap). */
+const AIRCRAFT_IDENTITY_VALUE_BYTES = 64
+
+/**
+ * Built-row bytes an aircraft row's stored identity (`aircraft`) may add on
+ * top of the 1,100-byte row growth bound, and only the identity: the
+ * presentation is fitted to 1,100 first, then the identity gets that slack
+ * plus this. 5 × 64 = 320 bytes, the raw size of a whole identity at the
+ * member cap. Counted like the 1,100 bound, in built-row bytes, not raw
+ * value bytes: the record and the summary JSON each store `,"aircraft":`
+ * (12 bytes) and the object (82 bytes of keys, quotes and punctuation for all
+ * five, every value JSON-escaped, so `"` and `\` count twice), and the FTS
+ * text stores each raw value plus a newline. An ordinary identity (`WKA52`,
+ * `N0WK52`, `B77W`, `Boeing 777-300ER`, `WaveKit International Airways`, 61
+ * value bytes) builds to 373 bytes: on a fully listed aircraft row (881
+ * bytes of presentation growth) it stays whole at 1,254, where the 1,100
+ * alone kept only the callsign and registration. A cap-length identity
+ * builds to 1,153 bytes (1,793 when every character is escaped) and still
+ * loses members, lowest priority first, past the slack and this allowance.
+ */
+export const ACTIVITY_AIRCRAFT_IDENTITY_ALLOWANCE_BYTES =
+	AIRCRAFT_IDENTITY_MEMBERS * AIRCRAFT_IDENTITY_VALUE_BYTES
+
 /**
  * The single source of default limits. Activity is on by default (WG1 req 7),
  * so retention and admission are bounded for a Pi-class SD card: 250 000 rows,

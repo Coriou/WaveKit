@@ -395,6 +395,11 @@ export interface ActivityStoreStats {
 	 * one envelope; the held receptions wait for their own row. Optional for older cores.
 	 */
 	coalesceMergeFailures?: number
+	/**
+	 * Held rows of an evicted entity dropped because the entity was tracked again and its newer
+	 * row was stored first; their receptions have no row. Optional for older cores.
+	 */
+	coalesceSuperseded?: number
 	queueDepth: number
 	queueBytes: number
 	dbBytes: number

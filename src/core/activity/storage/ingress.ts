@@ -125,6 +125,11 @@ export class ActivityIngress {
 		return this.coalescer.coalesced
 	}
 
+	/** Evicted entity rows dropped because the entity's newer row was queued first. */
+	get coalesceSuperseded(): number {
+		return this.coalescer.superseded
+	}
+
 	/** Store-clock time the next held entity row is due (or retried), if any. */
 	nextCoalesceDueAt(): number | undefined {
 		const due = this.coalescer.nextDueAt()
@@ -238,6 +243,7 @@ export class ActivityIngress {
 		// the latest reception.
 		if (!merged) this.coalesceMergeFailures++
 		this.pushReception(row, flush.commit(), undefined, now)
+		this.coalescer.rememberAircraft(stored)
 		return undefined
 	}
 
@@ -318,6 +324,7 @@ export class ActivityIngress {
 		// Stored as its own data: the held receptions wait for a row that carries them.
 		if (!merged) this.coalesceMergeFailures++
 		this.pushReception(row, commit(!merged), floodKey, now)
+		this.coalescer.rememberAircraft(stored)
 		return { admitted: true }
 	}
 

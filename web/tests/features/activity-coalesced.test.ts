@@ -10,6 +10,7 @@ import {
 	firstSeenOf,
 	foldActivity,
 	receptionsOf,
+	timeOf,
 } from "../../src/features/activity/fold.ts"
 
 const T0 = Date.parse("2026-10-13T00:00:00.000Z")
@@ -80,6 +81,37 @@ describe("Activity folding of the core's merged entity rows", () => {
 		}
 		expect(receptionsOf(bad)).toBe(1)
 		expect(firstSeenOf(bad)).toBe(T0)
+	})
+
+	it("dates a flushed row when its latest reception was heard, not when it was stored", () => {
+		// The final flush of a fading aircraft: stamped at store time, heard 55 s before.
+		const flushed: ActivitySummary = {
+			...merged(2, T0 + 60_000),
+			coalesced: {
+				receptions: 3,
+				firstSeenAt: iso(T0 + 1_000),
+				lastSeenAt: iso(T0 + 5_000),
+			},
+		}
+		expect(timeOf(flushed)).toBe(T0 + 5_000)
+		// A reception's own merged row (lastSeenAt is its receivedAt) keeps producedAt.
+		const own: ActivitySummary = {
+			...merged(3, T0 + 120_000, 2),
+			producedAt: iso(T0 + 119_900),
+		}
+		expect(timeOf(own)).toBe(T0 + 119_900)
+		// A row without a span, or with an unparseable one, keeps producedAt.
+		expect(timeOf(merged(4, T0))).toBe(T0)
+		expect(
+			timeOf({
+				...merged(5, T0 + 60_000),
+				coalesced: { receptions: 2, firstSeenAt: "x", lastSeenAt: "nope" },
+			}),
+		).toBe(T0 + 60_000)
+		// The stack spans to the heard time; the list keeps commitSeq order.
+		const [stack] = foldActivity([merged(1, T0, 1), flushed])
+		expect(stack?.lastMs).toBe(T0 + 5_000)
+		expect(stack?.latest.eventId).toBe("e2")
 	})
 
 	it("the mock's full aircraft rows carry the core's coalesced shape", () => {
