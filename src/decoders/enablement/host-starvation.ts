@@ -163,3 +163,81 @@ export function lossCause(
 		congestedBranches: branchCount(recent),
 	}
 }
+
+/**
+ * How long CPU over the guard alone may excuse a tuned probationer's own
+ * loss: 3 attribution windows, 3 × 10 000 ms = 30 000 ms. Host CPU within a
+ * drop's window explains it (hostExplained), and each CPU sample restarts
+ * probation, so intermittent spikes (one every 10 000 ms) could otherwise
+ * excuse a branch dropping on every other sample forever. Sibling-branch
+ * drops and `host` samples (loop lag) are real host episodes: never bounded.
+ */
+export const CPU_ONLY_EXCUSE_MS = 3 * HOST_STARVATION_WINDOW_MS
+
+/**
+ * The run of drops on `branch` open at `limit`: drops in [from, limit] that no
+ * sibling-branch drop or `host` sample explains (hostExplained over `drops`,
+ * which carry no CPU evidence), each within HOST_STARVATION_WINDOW_MS of the
+ * previous. A drop real host evidence explains, or a gap longer than one
+ * window (10 000 ms) up to `limit`, ends a run. Null without an open run.
+ */
+function openRun(
+	drops: readonly ChargedDrop[],
+	branch: string,
+	from: number,
+	limit: number,
+): { start: number; last: number } | null {
+	const mine = drops
+		.filter(
+			d =>
+				d.atMono >= from &&
+				d.atMono <= limit &&
+				d.branches !== "source" &&
+				d.branches.includes(branch),
+		)
+		.sort((a, b) => a.atMono - b.atMono)
+	let run: { start: number; last: number } | null = null
+	for (const d of mine) {
+		if (hostExplained(drops, d)) run = null
+		else if (run === null || d.atMono - run.last > HOST_STARVATION_WINDOW_MS)
+			run = { start: d.atMono, last: d.atMono }
+		else run.last = d.atMono
+	}
+	return run !== null && limit - run.last <= HOST_STARVATION_WINDOW_MS
+		? run
+		: null
+}
+
+/**
+ * A tuned probationer's own-branch run that only host CPU could excuse (see
+ * openRun), judged at `sampledAt`, the latest sample. `start` is the first
+ * drop of the run open at min(to, sampledAt), settled or not: a CPU probation
+ * reset carries it. `own` once that excuse is spent: the run's first drop is
+ * CPU_ONLY_EXCUSE_MS (30 000 ms) before `sampledAt`, the run is still open
+ * there, and its settled part (drops HOST_STARVATION_WINDOW_MS old, so
+ * siblings in the samples after each are known) is the same run and still
+ * drops at that horizon (latest drop within SUSTAINED_DROP_GAP_MS, 4000 ms:
+ * one CPU sample between): 30 000 - 10 000 = 20 000 ms of settled own loss
+ * plus one window settling. A branch dropping on every sample but the CPU
+ * ones is its own loss 30 000 ms after its first drop; a run that stopped
+ * (no own drop in the latest 10 000 ms) is never judged by this bound.
+ */
+export function cpuOnlyLoss(
+	drops: readonly ChargedDrop[],
+	branch: string,
+	from: number,
+	to: number,
+	sampledAt: number,
+): { start: number | null; own: boolean } {
+	const open = openRun(drops, branch, from, Math.min(to, sampledAt))
+	const horizon = Math.min(to, sampledAt - HOST_STARVATION_WINDOW_MS)
+	const settled = openRun(drops, branch, from, horizon)
+	return {
+		start: open?.start ?? null,
+		own:
+			settled !== null &&
+			open?.start === settled.start &&
+			sampledAt - settled.start >= CPU_ONLY_EXCUSE_MS &&
+			horizon - settled.last <= SUSTAINED_DROP_GAP_MS,
+	}
+}

@@ -33,6 +33,7 @@ import type {
 	WantedPlacement,
 } from "./contract.js"
 import {
+	cpuOnlyLoss,
 	HOST_STARVATION_WINDOW_MS,
 	hostExplained,
 	lossCause,
@@ -184,6 +185,12 @@ export function createEfficiencyGate(
 	 * Its own loss is judged from here until the drop settles.
 	 */
 	const carried = new Map<string, number>()
+	/**
+	 * Per tuned-band probationer: the first drop of its own-branch run that
+	 * only host CPU excuses (cpuOnlyLoss), carried across CPU resets so the
+	 * excuse stays bounded (CPU_ONLY_EXCUSE_MS, 30 000 ms).
+	 */
+	const cpuRun = new Map<string, number>()
 	const cooldownUntil = new Map<string, number>()
 	const warned = new Map<string, Map<string, number>>()
 	let lastLateMono: number | null = null
@@ -260,6 +267,7 @@ export function createEfficiencyGate(
 	const mark = (key: string, mono: number) => {
 		admittedMono.set(key, mono)
 		carried.delete(key)
+		cpuRun.delete(key)
 		originalFailed.delete(key)
 		graduated.delete(key)
 	}
@@ -276,6 +284,7 @@ export function createEfficiencyGate(
 					earned.delete(key)
 					hostJudged.delete(key)
 					carried.delete(key)
+					cpuRun.delete(key)
 					placementEpochs.delete(key)
 					admittedMono.delete(key)
 					originalFailed.delete(key)
@@ -471,6 +480,26 @@ export function createEfficiencyGate(
 			sampledMono(),
 		)
 	}
+	/**
+	 * Whether host CPU alone has excused a tuned placement's own-branch run
+	 * past its bound (cpuOnlyLoss), reading from its carried run start; and
+	 * that run's start, for a CPU reset to carry.
+	 */
+	const cpuOnly = (
+		p: RunningPlacement,
+		from: number,
+		until = Infinity,
+	): { start: number | null; own: boolean } => {
+		if (p.inputBranch === undefined) return { start: null, own: false }
+		const start = Math.min(from, cpuRun.get(p.key) ?? from)
+		const drops = chargedDrops(
+			p.sourceId,
+			start - HOST_STARVATION_WINDOW_MS,
+			until + HOST_STARVATION_WINDOW_MS,
+		)
+		if (drops === null) return { start: null, own: false }
+		return cpuOnlyLoss(drops, p.inputBranch, start, until, sampledMono())
+	}
 	/** Where a tuned placement's own loss is judged from: a carried drop first. */
 	const ownFrom = (p: RunningPlacement, admitted: number) =>
 		Math.min(admitted, carried.get(p.key) ?? admitted)
@@ -491,8 +520,10 @@ export function createEfficiencyGate(
 					tunedLoss(p, d.atMono, d.atMono) === "pending"
 				)
 					pending = Math.min(pending ?? Infinity, d.atMono)
+		const run = cpuOnly(p, from, mono).start
 		mark(p.key, justAfter(mono))
 		if (pending !== null) carried.set(p.key, pending)
+		if (run !== null) cpuRun.set(p.key, run)
 	}
 	const evidence = (
 		p: RunningPlacement,
@@ -508,8 +539,12 @@ export function createEfficiencyGate(
 			// either side) is every decoder's loss, and shedding cures none.
 			// Settled on the latest sample (probationLoss): a lone drop waits
 			// for its window, two adjacent ones are sustained loss of its own.
+			// Host CPU alone excuses its own branch's run for at most
+			// CPU_ONLY_EXCUSE_MS (cpuOnlyLoss); then the loss is its own.
 			if (charged !== null && p.tunedBand === true)
-				dropped = tunedLoss(p, ownFrom(p, admitted), until) === "own"
+				dropped =
+					tunedLoss(p, ownFrom(p, admitted), until) === "own" ||
+					cpuOnly(p, ownFrom(p, admitted), until).own
 			else if (charged !== null)
 				dropped = charged.some(
 					d =>
@@ -1178,8 +1213,13 @@ export function createEfficiencyGate(
 			// Graduation is sticky: a later discontinuity that discards coverage
 			// restarts only the placements still on probation.
 			for (const placement of running) {
-				if (!graduated.has(placement.key) && graduates(placement, mono))
+				// A graduated placement is never judged again: nothing it
+				// carried is read, so it must not pin CPU history either.
+				if (!graduated.has(placement.key) && graduates(placement, mono)) {
 					graduated.add(placement.key)
+					carried.delete(placement.key)
+					cpuRun.delete(placement.key)
+				}
 				// Normal retries reset on graduation. Late-shed retries retain their
 				// doubling history until readmission + the 1,800,000 ms cap.
 				// A tuned decoder's loss history resets after TUNED_RETRY_MAX_MS

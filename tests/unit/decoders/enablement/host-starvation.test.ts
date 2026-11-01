@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
+	CPU_ONLY_EXCUSE_MS,
 	HOST_STARVATION_BRANCHES_MIN,
 	HOST_STARVATION_WINDOW_MS,
 	hostStarvedAt,
@@ -9,6 +10,7 @@ import {
 	SUSTAINED_DROP_GAP_MS,
 } from "../../../../src/decoders/enablement/host-starvation.js"
 import {
+	EFFICIENCY_PROBATION_MS,
 	EFFICIENCY_RETRY_MAX_MS,
 	EFFICIENCY_RETRY_MS,
 	TUNED_RETRY_MAX_MS,
@@ -448,5 +450,173 @@ describe("gate: the tuned decoder's own sustained loss", () => {
 		})
 		h.tick()
 		expect(h.admit("readsb", true)).toEqual({ admit: true })
+	})
+})
+
+describe("gate: host CPU alone excuses a tuned probationer's own loss for at most 30 s", () => {
+	/**
+	 * The reported pattern on probation: CPU over the guard on every fifth
+	 * 2000 ms sample (every 10 000 ms, dropping nothing), readsb's branch
+	 * alone dropping on every other sample, live audio flowing, the loop
+	 * healthy. Every drop is within 10 000 ms of a CPU sample and every CPU
+	 * sample restarts probation. Returns the first drop's time.
+	 */
+	const spikes = (h: ReturnType<typeof starvationHarness>, untilMs: number) => {
+		let first: number | null = null
+		for (let i = 0; h.shed.length === 0 && h.mono() < untilMs; i++) {
+			const high = i % 5 === 0
+			h.cpu.normalisedPercent = high ? 100 : 10
+			h.tick(high ? [] : [h.branch("readsb")])
+			if (!high) first ??= h.mono()
+		}
+		h.cpu.normalisedPercent = 10
+		return first!
+	}
+
+	it("states its bound: 3 attribution windows, 30 000 ms", () => {
+		expect(CPU_ONLY_EXCUSE_MS).toBe(3 * HOST_STARVATION_WINDOW_MS)
+		expect(CPU_ONLY_EXCUSE_MS).toBe(30_000)
+	})
+
+	it("sheds it 30 000 ms after its first drop, then retries it 30 s later", () => {
+		const h = starvationHarness()
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		h.tick()
+		const first = spikes(h, Infinity)
+		expect(h.shed).toEqual([
+			{ key: "readsb", detail: "drops", at: first + CPU_ONLY_EXCUSE_MS },
+		])
+		expect(h.gate.shedAttribution?.(h.keyOf("readsb"))).toMatchObject({
+			tuned: true,
+			attribution: { cause: "decoder" },
+		})
+		const at = first + CPU_ONLY_EXCUSE_MS
+		h.clean(30_000 - SAMPLE_MS)
+		expect(h.admit("readsb", true)).toMatchObject({
+			admit: false,
+			retryAtMs: at + 30_000,
+		})
+		h.tick()
+		expect(h.admit("readsb", true)).toEqual({ admit: true })
+	})
+
+	it("is not shed one sample before the bound", () => {
+		const h = starvationHarness()
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		h.tick()
+		// The first drop lands 4000 ms after admission (baseline, CPU, drop).
+		const first = h.mono() + 2 * SAMPLE_MS
+		spikes(h, first + CPU_ONLY_EXCUSE_MS - SAMPLE_MS)
+		expect(h.mono()).toBe(first + CPU_ONLY_EXCUSE_MS - SAMPLE_MS)
+		expect(h.shed).toEqual([])
+		expect(h.probation("readsb")).toBe(true)
+	})
+
+	it("a run that stops before the bound is never shed and graduates", () => {
+		const h = starvationHarness()
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		h.tick()
+		const first = h.mono() + 2 * SAMPLE_MS
+		// Drops for 18 000 ms, then a clean branch on a healthy host.
+		spikes(h, first + 18_000)
+		h.clean(CPU_ONLY_EXCUSE_MS + EFFICIENCY_PROBATION_MS + SAMPLE_MS)
+		expect(h.shed).toEqual([])
+		expect(h.probation("readsb")).toBe(false)
+	})
+
+	it("a gap longer than one window restarts the run, past the bound", () => {
+		const h = starvationHarness()
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		h.tick()
+		const first = h.mono() + 2 * SAMPLE_MS
+		spikes(h, first + 16_000)
+		// 12 000 ms without an own drop (CPU still spiking): the run ends.
+		for (let i = 0; i < 6; i++) {
+			h.cpu.normalisedPercent = i % 5 === 2 ? 100 : 10
+			h.tick()
+		}
+		h.cpu.normalisedPercent = 10
+		const restart = h.mono() + SAMPLE_MS
+		spikes(h, first + CPU_ONLY_EXCUSE_MS + SAMPLE_MS)
+		expect(h.shed).toEqual([])
+		spikes(h, Infinity)
+		expect(h.shed.map(s => [s.key, s.detail])).toEqual([["readsb", "drops"]])
+		expect(h.shed[0]!.at).toBeGreaterThanOrEqual(restart + CPU_ONLY_EXCUSE_MS)
+		expect(h.shed[0]!.at).toBeLessThanOrEqual(
+			restart + CPU_ONLY_EXCUSE_MS + 2 * SAMPLE_MS,
+		)
+	})
+
+	it("sibling loss in the run is a real host episode: never bounded", () => {
+		const h = starvationHarness()
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		h.tick()
+		// The same CPU pattern, but live audio drops with readsb every
+		// sample for 60 s: host-wide congestion, never the tuned decoder.
+		for (let i = 0; i < 30; i++) {
+			const high = i % 5 === 0
+			h.cpu.normalisedPercent = high ? 100 : 10
+			h.tick(high ? [LIVE] : [h.branch("readsb"), LIVE])
+		}
+		h.cpu.normalisedPercent = 10
+		expect(h.shed).toEqual([])
+		h.clean(HOST_STARVATION_WINDOW_MS + EFFICIENCY_PROBATION_MS + SAMPLE_MS)
+		expect(h.shed).toEqual([])
+		expect(h.probation("readsb")).toBe(false)
+	})
+
+	it("loop lag in the run is a real host episode: never bounded", () => {
+		const h = starvationHarness()
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		h.tick()
+		for (let i = 0; i < 30; i++) {
+			const high = i % 5 === 0
+			h.cpu.normalisedPercent = high ? 100 : 10
+			h.tick(high ? [] : [h.branch("readsb")], 80)
+		}
+		h.cpu.normalisedPercent = 10
+		expect(h.shed).toEqual([])
+	})
+})
+
+describe("gate: graduation clears a tuned probationer's carried loss", () => {
+	afterEach(() => {
+		vi.restoreAllMocks()
+	})
+
+	it("no gate map holds its carried drop once it graduates", () => {
+		const h = starvationHarness()
+		const key = h.keyOf("readsb")
+		// Every map that ever holds a number for readsb's key.
+		const maps = new Set<Map<unknown, unknown>>()
+		const set = Map.prototype.set
+		vi.spyOn(Map.prototype, "set").mockImplementation(function (
+			this: Map<unknown, unknown>,
+			k: unknown,
+			value: unknown,
+		) {
+			if (k === key && typeof value === "number") maps.add(this)
+			return set.call(this, k, value)
+		})
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		// CPU over the guard, probation passes lagging; then an own-branch
+		// drop 14 s later on a judged pass: the CPU reset carries it.
+		h.cpu.normalisedPercent = 100
+		h.tick([], 4, false)
+		h.cpu.normalisedPercent = 10
+		for (let i = 0; i < 6; i++) h.tick([], 4, false)
+		h.tick([h.branch("readsb")])
+		const at = h.mono()
+		const holding = () => [...maps].filter(m => m.get(key) === at)
+		expect(holding().length).toBeGreaterThan(0)
+		// Live audio congests in the next sample (host loss), and passes lag
+		// until probation completes: graduation is the first judged pass.
+		h.tick([LIVE], 4, false)
+		for (let t = 0; t < EFFICIENCY_PROBATION_MS + SAMPLE_MS; t += SAMPLE_MS)
+			h.tick([], 4, false)
+		h.tick()
+		expect(h.shed).toEqual([])
+		expect(h.probation("readsb")).toBe(false)
+		expect(holding()).toEqual([])
 	})
 })

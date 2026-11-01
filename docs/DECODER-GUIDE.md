@@ -943,7 +943,10 @@ host CPU at the guard). A running decoder's late drops are judged only once thos
 10 seconds have been sampled. On probation, a single drop also waits those 10 seconds
 (its probation does not end before then), since a host episode can reach another branch
 in the next sample; its own branch dropping alone in two samples in a row, while the
-others flow and the host is healthy, stops it at once.
+others flow and the host is healthy, stops it at once. Host CPU alone (no other branch
+dropping and no event-loop delay) excuses its own branch's drops on probation for at most
+30 seconds (3 windows of 10 seconds): if its branch keeps dropping alone that long, through
+repeated CPU spikes, the loss is its own and stops it.
 Host loss may still stop other automatic decoders, newest first, but never the tuned one,
 and it does not keep the tuned decoder from starting again. Only its own sustained loss
 (its branch congested while the other branches flowed) stops it, and then it is tried
