@@ -299,12 +299,21 @@ shows its newest decode as it was stored, with only who it is filled in from row
 never a row heard after it even when stored earlier); a measurement such as a call's
 duration, an altitude, a position or a signal level is always the newest decode's own, so a call
 that has just started never shows the previous over's duration. The row also shows the count and
-the span (`24 · 1 min`) and expands in place to the earlier rows. Counts are for the loaded list,
+the span (`24 · 1 min`) and expands in place to the earlier rows. An aircraft row titled only by its
+ICAO address takes the live fleet's callsign or registration and "who flies what"; once the aircraft
+has left the fleet it takes the identity the core stored with the row (callsign, registration, type,
+operator as known then), so history keeps naming it. Counts are for the loaded list,
 never totals: the list footer says `312 events in 41 rows, loaded so far.`, and the header counts
 rows (its tooltip says `41 rows in the 312 loaded events`). Folding runs in the browser over the
 rows already loaded (at most 5 000), and each live update folds again only the stacks its decodes
 touched; with a short folded list, Activity loads up to 10 older pages of 100 by itself to fill the
 view.
+
+The core already merges an aircraft's, vessel's, station's or sensor's repeats into one row per
+minute (its `coalesced` count and first reception; see [API.md](API.md#activity)). Folding counts
+those receptions, not rows: a stack's explanation says `Likely one aircraft in range for 2 min (239
+times)` and its span starts at the first merged reception. The detail shows a merged row's
+`Merged: 120 receptions since 12:00:00, latest state`.
 
 Each row gets a fold key from its own data: protocol and event kind, the core's entity
 (`icao:`, `mmsi:`, `capcode:`, `talkgroup:`, `sensor:`, `callsign:`, `node:`; the title when there

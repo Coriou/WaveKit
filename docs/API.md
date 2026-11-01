@@ -5475,36 +5475,104 @@ The store holds three kinds:
   token bucket per source (`analog:<sourceId>`).
 - `ingestion-gap`: written when rows are dropped.
 
-Position coalescing: a redundant position or presence update of an `aircraft`
-(per ICAO address) or `ship` (per MMSI) is stored at most once per entity per
-60 s and per decoder. Redundant means every field is position, kinematics,
-presence or reception metadata (aircraft: position, altitudes, speed, track,
-headings, vertical rate, signal, message counts, timestamps; ship: position,
-`cog`, `sog`, `heading`, timestamps, AIS types 1, 2, 3, 18, 19 and 27 only) or
-an unchanged identity field. A bare-presence aircraft report (ICAO address and
-reception metadata, as from Beast) is redundant. Always stored: a first
-sighting, a changed identity or static field (aircraft `callsign`, `squawk`,
-`onGround`, `category`, `emergency`; ship `navStatus`, `name`, `callsign`,
-`imo`, `shipType`, `destination`, `eta`, `draught`), any other field, and
-every other AIS message type (for example 4, 5, 6, 8, 9, 12, 14, 21, 24). A
-reception whose write fails is not counted as stored, so its retransmission
-is. Coalesced
-receptions are counted in `stats.coalescedPositions`; they are not losses and
-open no ingestion gap. The live trackers, `aircraft:*`/`vessel:*` and
-`decoder:output` WebSocket messages still carry every update.
+Entity coalescing: repeated receptions of one tracked entity are merged into
+one row per 60 s instead of a row each. In short, periodic sensor and position
+readings are kept at about one row per entity per minute, plus a row for every
+identity change and every event (a doorbell, a button, an AIS static report,
+an APRS message). Tracked entities, per decoder: an
+`aircraft` (per ICAO address), a `ship` (per MMSI, AIS types 1, 2, 3, 18, 19
+and 27 only), an APRS position and a Meshtastic position (below), and an
+rtl_433 sensor reading (`signal` output, per `model`, `id` and `channel`).
+Every other output (pages, calls, ACARS, VDL2, ...) stays one row per message.
+
+Every reception of a tracked entity updates the entity's latest state: the
+union of its allowlisted fields, the newest value of each winning. A reception
+is stored as a row when it is:
+
+- a first sighting (or the first after the entity was evicted);
+- informative: any field off the allowlist, or outside the type's gate (every
+  other AIS type, APRS objects, messages and weather, other mesh ports, a
+  sensor reading with a button, event or other unknown field, or one with no
+  measurement at all: only `model`, `id`, `channel`, metadata or battery
+  state, as doorbells and remotes send); it is stored with its own fields;
+- an identity change: a first or changed aircraft `callsign`, `squawk` (so an
+  emergency squawk), `onGround`, `category` or `emergency`; ship `navStatus`,
+  `name`, `callsign`, `imo`, `shipType`, `destination`, `eta` or `draught`;
+  APRS `symbol` or `comment`; sensor `battery_ok` or `subtype`;
+- due: 60 s or more after the entity's last stored row.
+
+Anything else is held: merged into the latest state, counted in
+`stats.coalescedPositions`, never rate-limited (not a loss, no ingestion gap).
+The entity's next stored row carries the merged latest state as its
+`decodedData` and presentation (for example a velocity message's row also
+shows the callsign, squawk, altitude and position heard before it) and
+`coalesced: { receptions, firstSeenAt, lastSeenAt }` for the receptions it
+stands for (`receptions - 1` were not stored on their own). Held receptions
+that no row follows (the aircraft went out of range) are stored as one row 60 s
+after the first of them, so the stored state is never more than 60 s behind;
+held receptions of an evicted entity, and all of them at shutdown, are stored
+at once. Such a flushed row is a snapshot of the entity's latest state taken
+when Activity stores it: its `producedAt` and `receivedAt` are that store time
+(never earlier than its latest held reception), so rows in list order (`seq`)
+also read in time order, and its `coalesced` (present even for one held
+reception, `receptions` then 1) says when the receptions it stands for were
+heard: `lastSeenAt` is the latest of them, up to 60 s before the row's own
+time. Before the 2026-11-01 core a flushed row kept its latest reception's
+times, so it could list up to 60 s out of time order. If a flushed row's write
+fails, its receptions are held again and retried (no `write-failed` drop); a
+failed reception row hands the held receptions it carried to the entity's
+next row. Once the store is closing nothing can retry them, so a row whose write
+fails then counts as one `write-failed` drop (in the shutdown ingestion gap).
+These held rows skip the per-decoder admission bucket (at most one per
+entity per 60 s) but take a global token; one the global bucket, the queue caps
+or a paused store turn away stays held and is retried after `pauseRetryMs`
+(`stats.coalesceDeferrals`, not a loss). Only at shutdown, or past 4,096
+evicted entities waiting for queue room, is a held row dropped (counted as
+`queue-full`). A gap of more than 60 s between two receptions drops the old
+position and kinematics from the latest state (identity is kept).
+
+Merged state is bounded: an allowlisted value over 1 KiB of JSON is never
+merged or remembered, and the reception carrying it is stored as its own row.
+If a row's own data and the merged state still exceed one envelope (128 KiB),
+the row is stored as its own data, the held receptions stay held for their own
+row, and `stats.coalesceMergeFailures` counts it.
+
+Allowlists: aircraft position, altitudes, speed, track, headings, vertical
+rate, signal, message counts, timestamps and readsb's reception metadata
+(`readsbFormat`, `sbsSourceTimestamp`, `sbsContentId`, `jsonSourceTimestamp`,
+`modeS`; a Beast frame whose address is not CRC-proven is never tracked);
+ship position, `cog`, `sog`, `heading`, `channel` and timestamps; sensor
+weather measurements (`temperature_C`/`_F`, `humidity`, pressure, wind, rain,
+UV, light, moisture, battery voltage) and rtl_433's time, level and protocol
+metadata. Before the 2026-10-31 core the readsb metadata and the AIS `channel`
+were missing from these lists, so every ADS-B and AIS reception was stored
+and the admission buckets dropped most of them as `rate-limited`.
+
+At most 4,096 entities are tracked (about 3,000 at the busiest sites: 600
+aircraft, 2,000 vessels, some hundreds of APRS stations and sensors); about
+2.8 KB each at most (1.3 KB tracked, 1.5 KB while a reception is held), so
+about 11.5 MB. Past the bound the least recently stored entity is evicted and
+its held receptions are stored. A reception whose write fails is not counted
+as stored, so its retransmission is. The live trackers,
+`aircraft:*`/`vessel:*` and `decoder:output` WebSocket messages still carry
+every update.
 
 Effective retention is whichever cap binds first. Which rows a cap removes
 depends on the retention policy (see [Retention](#retention)); under
 `oldest-first` a busy position feed shortens retention for rare events too. With
 coalescing, N entities in continuous view add about N × 1,440 rows a day: 100
 aircraft and vessels fill 250,000 rows in about 1.7 days, 300 in about 14
-hours, while the 3-day age cap binds below about 58 entities. Without it (1 Hz
-per entity) the admission limits (50/s global) would fill the row cap in about
-83 minutes. The 256 MiB byte cap can bind earlier when rows are large.
+hours, while the 3-day age cap binds below about 58 entities. 60 aircraft at 2
+SBS messages/s each (120 receptions/s) store about 4,300 rows an hour (60 × 60
+due rows, plus each aircraft's first sighting, onGround and squawk) with no
+`rate-limited` drops; before the 2026-10-31 core the same load stored about
+73,000 rows an hour and dropped about 360,000 receptions an hour as
+`rate-limited`. Without coalescing (1 Hz per entity) the admission limits
+(50/s global) would fill the row cap in about 83 minutes. The 256 MiB byte cap can bind earlier when rows are large.
 
 Receipts, recordings and transcripts are not written.
 
-APRS and Meshtastic positions are coalesced the same way: an `aprs`
+APRS and Meshtastic positions are tracked the same way: an `aprs`
 output per source callsign and decoder when its `dataType` is `Position`,
 `Position with messaging`, `Position with timestamp`, `Position with timestamp
 and messaging`, `Mic-E` or `Mic-E (old)`, it has a finite `lat` and `lon`,
@@ -5514,7 +5582,7 @@ and every other field is on the position allowlist (`source`, `destination`,
 `from` node and decoder only for port 3 (POSITION) with radio and packet
 metadata alone. Every other APRS data type (objects, items, messages, status,
 weather, telemetry), any packet with weather or a message, and every other
-Meshtastic port are always stored.
+Meshtastic port are always stored as their own rows.
 
 Meshtastic flood copies: a `meshtastic` reception with the same `from`,
 `id` and `portnum` and the same payload hash (32-bit FNV-1a over `portnum` and
@@ -5620,8 +5688,12 @@ identifier is missing, malformed, or contains a control character
 (U+0000–U+001F or U+007F–U+009F). Keys are at most 128 bytes and match
 `^[a-z][a-z0-9-]*:[^:]+$`. A row has at most 6 fields and a title of at most
 80 characters; long text is cut on a UTF-8 boundary with a trailing `…`. A
-position-only row (one that coalescing could drop) has a title, key, position,
-category and protocol but no fields. A presentation that fails never loses the
+position-only row (an APRS or Meshtastic position with nothing else) has a
+title, key, position, category and protocol but no fields. Aircraft and ship
+rows always list their fields (altitude, speed, track, course, ...): each stored
+row stands for the entity's merged state. Before the 2026-11-01 core, rows of
+aircraft without a callsign yet, Mode S-only aircraft and class B vessels
+could list none. A presentation that fails never loses the
 reception: the row is stored without it. Rows stored before the 2026-10-13 core keep category
 `other` and no entity key; nothing is backfilled, and old and new rows parse.
 
@@ -5649,7 +5721,11 @@ rate-limited receptions cost what they did before the 2026-10-13 core, and the i
 Row growth and retention: built-row growth from presentation is at most 240
 bytes for a position-only row (160 bytes before the 2026-10-16 core; raised so a typical fix
 keeps a five-digit `altM` and a mesh `!abcdef12 Position` title, 226 bytes at
-seven decimals, without rounding) and at most 1,100 bytes for any row. The raise
+seven decimals, without rounding) and at most 1,100 bytes for any row. From the
+2026-11-01 core only APRS and Meshtastic rows can be position-only: aircraft and
+ship rows always list their fields, so every one of them, a bare fix included,
+has the 1,100-byte bound, and an aircraft row's `aircraft` identity counts
+inside it. The raise
 costs at most 80 bytes per coalesced row, so at most 250,000 × 80 = 20 MB (about
 7.5 % of 256 MiB) at the row cap; rows a day are unchanged. When a row does not
 fit, its title is clipped and its coordinates rounded to six, five, then four
@@ -5815,6 +5891,21 @@ A fifth read from one caller, or any read while the queue is full, gets 429
 
 **Response** (200): `items` (summaries), `nextPageToken`, `replayCursor`,
 `snapshot` (`lowBarrier`, `highWater`, `expiresAt`), `searchCoverage`.
+A summary of a merged entity row also has `coalesced: { receptions,
+firstSeenAt, lastSeenAt }` (see entity coalescing above), as does the record
+from `GET /api/activity/:eventId` and the `activity` WebSocket replay frames.
+An aircraft row stored from the 2026-11-01 core also has `aircraft`: who the
+aircraft was when the row was stored, `{ callsign?, registration?, typeCode?,
+typeDescription?, operator? }` (each at most 64 bytes, absent when unknown, the
+whole member absent when nothing was known). The identity fits in what the
+row's presentation leaves of the 1,100-byte growth bound: members are left out
+from the lowest priority (`typeDescription`, `operator`, `typeCode`,
+`registration`, then `callsign`) until it fits, so a row listing all its fields
+often keeps only the callsign and registration. The callsign comes from the
+entity's merged state, the rest from the aircraft enrichment cache already in
+memory (never a lookup at store time); `operator` is the callsign's airline
+when known, else the registered operator. Search matches these values, so an
+aircraft's history is found by registration after it has left the live fleet.
 Default page size is 100 and the maximum is 200. A page token is bound to
 the same query and expires with the snapshot (5 minutes).
 
@@ -6041,7 +6132,9 @@ stops at 50,000 rows and 32 values per dimension.
 
 **Response** (200): `{ "enabled": true, "stats": { ... } }` with admitted,
 committed, dropped (`rate-limited`, `queue-full`, `store-paused`,
-`write-failed`, `closed`), `excludedTelemetry`, `coalescedPositions`, queue depth, `rows`,
+`write-failed`, `closed`), `excludedTelemetry`, `coalescedPositions` (receptions
+merged into their entity's row; see entity coalescing), `coalesceDeferrals` and
+`coalesceMergeFailures` (see entity coalescing), queue depth, `rows`,
 `dbBytes`, `paused` and `writer` (`running` or `stopped`). `closed` counts
 admits rejected after the writer has stopped. A write timeout stops the
 writer for the session and does not count those rows as lost. 500
@@ -6109,6 +6202,8 @@ From the 2026-10-16 core `stats` also has two optional fields (older cores omit 
 		},
 		"excludedTelemetry": 912,
 		"coalescedPositions": 29480,
+		"coalesceDeferrals": 0,
+		"coalesceMergeFailures": 0,
 		"floodCopies": 1840,
 		"queueDepth": 0,
 		"queueBytes": 0,

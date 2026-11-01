@@ -26,6 +26,7 @@ import { acquireActivityLock, restrictPrivate } from "./lock.js"
 import type { ActivityProbeResult } from "./probe.js"
 import { openSqliteFile, probeActivityRuntime } from "./probe.js"
 import type { BuiltActivityRow } from "./row.js"
+import type { CoalescePresenter } from "./coalesce.js"
 import type { DecodeEnvelope } from "../types.js"
 import type { Logger } from "../../../utils/logger.js"
 import { isActivityWorkerResponse } from "./writer-protocol.js"
@@ -62,6 +63,23 @@ export interface OpenActivityStoreOptions {
 	openTimeoutMs?: number
 	/** Acknowledgement budget for a write. Distinct from openTimeoutMs. */
 	writeTimeoutMs?: number
+	/**
+	 * Test seam (inline only): the store writes the session through this async writer, as it
+	 * does through the worker, so a test controls when each write settles and when it is gone.
+	 */
+	inlineWriter?: (session: ActivitySession) => ActivityWriter
+}
+
+/** The writer calls the store makes on its thread; ActivityWriterClient in production. */
+export interface ActivityWriter {
+	onGone(listener: () => void): void
+	onSeeded(listener: (snapshot: ActivityWorkerSnapshot) => void): void
+	write(
+		rows: readonly BuiltActivityRow[],
+		nowMs: number,
+	): Promise<WriterWorkResult>
+	checkpoint(reason: "threshold" | "close"): Promise<ActivityWorkerSnapshot>
+	close(): Promise<void>
 }
 
 interface OpenWorkerRequest {
@@ -160,14 +178,15 @@ export async function openActivityStore(
 				}
 				throw error
 			}
+			const writer = options.inlineWriter?.(session)
 			const store = new ActivityStore(
 				dbPath,
 				options.logger,
 				limits,
 				now,
 				lock,
-				session,
-				undefined,
+				writer ? undefined : session,
+				writer,
 				session.snapshot(),
 			)
 			store.restrictFiles()
@@ -206,7 +225,7 @@ export async function openActivityStore(
 }
 
 /** Exported for tests; production code reaches it only through openActivityStore. */
-export class ActivityWriterClient {
+export class ActivityWriterClient implements ActivityWriter {
 	private readySnapshot: ActivityWorkerSnapshot | undefined
 	private nextId = 1
 	private exited = false
@@ -442,6 +461,7 @@ class ActivityStore implements ActivityStoreHandle {
 	private batchTimer: ReturnType<typeof setTimeout> | undefined
 	private pauseTimer: ReturnType<typeof setTimeout> | undefined
 	private gapTimer: ReturnType<typeof setTimeout> | undefined
+	private coalesceTimer: ReturnType<typeof setTimeout> | undefined
 	private flight: Promise<void> | undefined
 	private closing: Promise<void> | undefined
 
@@ -452,7 +472,7 @@ class ActivityStore implements ActivityStoreHandle {
 		private readonly now: () => number,
 		private readonly lock: ActivityLock | undefined,
 		private readonly inline: ActivitySession | undefined,
-		private readonly threaded: ActivityWriterClient | undefined,
+		private readonly threaded: ActivityWriter | undefined,
 		snapshot: ActivityWorkerSnapshot,
 	) {
 		this.dbPath = dbPath
@@ -490,9 +510,12 @@ class ActivityStore implements ActivityStoreHandle {
 	}
 
 	/** `present` runs only for a reception that is kept; see ActivityIngress.admit. */
-	admit(envelope: DecodeEnvelope, present?: () => DecodeEnvelope): AdmitResult {
+	admit(envelope: DecodeEnvelope, present?: CoalescePresenter): AdmitResult {
+		const before = this.ingress.admitted
 		const result = this.ingress.admit(envelope, present)
-		if (result.admitted) {
+		this.armCoalesceTimer()
+		// A held entity row can be queued even when this reception is held.
+		if (result.admitted || this.ingress.admitted !== before) {
 			this.onQueued()
 			if (!this.ingress.hasOpenEpisode()) this.clearGapTimer()
 		} else if (
@@ -535,6 +558,8 @@ class ActivityStore implements ActivityStoreHandle {
 			},
 			excludedTelemetry: this.ingress.excludedTelemetry,
 			coalescedPositions: this.ingress.coalescedPositions,
+			coalesceDeferrals: this.ingress.coalesceDeferrals,
+			coalesceMergeFailures: this.ingress.coalesceMergeFailures,
 			floodCopies: this.ingress.floodCopies,
 			queueDepth: this.ingress.queueDepth(),
 			queueBytes: this.ingress.queueBytesTotal(),
@@ -573,11 +598,15 @@ class ActivityStore implements ActivityStoreHandle {
 		if (this.stopped) return
 		this.writerState = "stopped"
 		this.stopped = true
-		this.nackInFlight()
+		// Closed first: the in-flight rows are then counted lost, not held again
+		// for a flush that can no longer run, and so is every row still held.
 		this.ingress.markClosed()
+		this.nackInFlight()
+		this.ingress.abandonHeld()
 		this.clearBatchTimer()
 		this.clearPause()
 		this.clearGapTimer()
+		this.clearCoalesceTimer()
 		this.logger.error("activity writer stopped")
 	}
 
@@ -587,9 +616,11 @@ class ActivityStore implements ActivityStoreHandle {
 		this.stopped = true
 		this.ingress.forgetInFlight()
 		this.ingress.markClosed()
+		this.ingress.abandonHeld()
 		this.clearBatchTimer()
 		this.clearPause()
 		this.clearGapTimer()
+		this.clearCoalesceTimer()
 		this.logger.error("activity write timed out")
 	}
 
@@ -735,6 +766,7 @@ class ActivityStore implements ActivityStoreHandle {
 		if (result.note !== undefined)
 			this.logger.warn({ err: result.note }, "activity retention step failed")
 		this.ingress.noteSkipped(batch, result.commit.writeFailedEventIds)
+		this.armCoalesceTimer()
 		const done = new Set<string>([
 			...result.commit.committedEventIds,
 			...result.commit.duplicateEventIds,
@@ -772,9 +804,11 @@ class ActivityStore implements ActivityStoreHandle {
 		}
 	}
 
+	/** Receptions held again only a timer can carry: the source may stay silent. */
 	private nackInFlight(): void {
 		this.ingress.nack()
 		this.armGapTimer()
+		this.armCoalesceTimer()
 	}
 
 	private armGapTimer(): void {
@@ -807,6 +841,39 @@ class ActivityStore implements ActivityStoreHandle {
 			this.onGapTimer()
 		}, waitMs)
 		this.gapTimer.unref()
+	}
+
+	/** Wakes when the first held entity row is due (coalesce.ts), so a silent entity's last state is stored. */
+	private armCoalesceTimer(): void {
+		if (this.coalesceTimer || this.stopped || this.draining) return
+		const due = this.ingress.nextCoalesceDueAt()
+		if (due === undefined) return
+		this.coalesceTimer = setTimeout(
+			() => {
+				this.coalesceTimer = undefined
+				this.onCoalesceTimer()
+			},
+			Math.max(0, due - this.now()),
+		)
+		this.coalesceTimer.unref()
+	}
+
+	private onCoalesceTimer(): void {
+		if (this.stopped || this.draining) return
+		const before = this.ingress.admitted
+		this.ingress.flushCoalesced(this.now())
+		if (this.ingress.admitted !== before) {
+			this.onQueued()
+			if (!this.ingress.hasOpenEpisode()) this.clearGapTimer()
+		}
+		this.armGapTimer()
+		this.armCoalesceTimer()
+	}
+
+	private clearCoalesceTimer(): void {
+		if (!this.coalesceTimer) return
+		clearTimeout(this.coalesceTimer)
+		this.coalesceTimer = undefined
 	}
 
 	private armTimer(): void {
@@ -865,6 +932,8 @@ class ActivityStore implements ActivityStoreHandle {
 	}
 
 	private async shutdown(): Promise<void> {
+		// Held entity rows are queued first, so a close keeps each entity's last state.
+		if (!this.stopped) this.ingress.flushAllCoalesced()
 		this.writerState = "stopped"
 		this.stopped = true
 		this.draining = true
@@ -872,6 +941,7 @@ class ActivityStore implements ActivityStoreHandle {
 		this.clearBatchTimer()
 		this.clearPause()
 		this.clearGapTimer()
+		this.clearCoalesceTimer()
 		try {
 			if (this.flight) await this.flight
 			const deadline = Date.now() + this.limits.closeTimeoutMs

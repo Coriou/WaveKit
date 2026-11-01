@@ -40,7 +40,10 @@ import type {
 	TunerState,
 } from "@wavekit/api-types"
 import type { FloodEvent } from "./activity-floods.ts"
-import { floodEvents } from "./activity-floods.ts"
+import {
+	FLOOD_MERGED_RECEPTION_GAP_MS,
+	floodEvents,
+} from "./activity-floods.ts"
 import { createAudioServer } from "./audio.ts"
 import {
 	buildDecoderSummaries,
@@ -495,6 +498,8 @@ function recordOf(item: ActivitySummary, decoded?: JsonValue): ActivityRecord {
 		},
 		decodedData,
 		...(item.position ? { position: item.position } : {}),
+		...(item.coalesced ? { coalesced: item.coalesced } : {}),
+		...(item.aircraft ? { aircraft: item.aircraft } : {}),
 	}
 	return { ...base, kind: "decoder-reception", payload }
 }
@@ -992,6 +997,7 @@ export async function buildMockServer(
 			fields: m.fields,
 		}
 		if (m.position) summary.position = m.position
+		if (m.aircraft) summary.aircraft = m.aircraft
 		decodedById.set(summary.eventId, m.data)
 		if (decodedById.size > 2500) {
 			const first = decodedById.keys().next().value
@@ -1009,6 +1015,17 @@ export async function buildMockServer(
 			commitSeq: String(seq),
 			producedAt: iso,
 			receivedAt: iso,
+			...(f.receptions !== undefined && f.receptions > 1
+				? {
+						coalesced: {
+							receptions: f.receptions,
+							firstSeenAt: new Date(
+								at - (f.receptions - 1) * FLOOD_MERGED_RECEPTION_GAP_MS,
+							).toISOString(),
+							lastSeenAt: iso,
+						},
+					}
+				: {}),
 		}
 		decodedById.set(summary.eventId, f.data)
 		if (decodedById.size > 2500) {
@@ -2320,6 +2337,8 @@ export async function buildMockServer(
 				},
 				excludedTelemetry: 0,
 				coalescedPositions: 0,
+				coalesceDeferrals: 0,
+				coalesceMergeFailures: 0,
 				queueDepth: 0,
 				queueBytes: 0,
 				dbBytes: open ? activity.length * 1_024 : 0,

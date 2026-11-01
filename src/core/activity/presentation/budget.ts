@@ -13,6 +13,7 @@ import type { DecoderOutput } from "../../../decoders/types.js"
 import {
 	createDecodeEnvelope,
 	presentationJsonBytes,
+	withEnvelopeMetadata,
 	withPresentation,
 } from "../envelope.js"
 import {
@@ -20,9 +21,10 @@ import {
 	MAX_INDEXED_TEXT_BYTES,
 	MAX_SUMMARY_BYTES,
 } from "../storage/contract.js"
-import { isCoalescibleShape } from "../storage/coalesce.js"
+import { isPositionOnlyShape } from "../storage/coalesce.js"
 import { buildActivityRow } from "../storage/row.js"
 import type {
+	DecodeAircraftIdentity,
 	DecodeEnvelope,
 	DecodeEnvelopeContext,
 	DecodeField,
@@ -414,7 +416,10 @@ function rowLimit(output: DecoderOutput): number {
 		typeof data === "object" &&
 		data !== null &&
 		!Array.isArray(data) &&
-		isCoalescibleShape(output.type, data as { readonly [key: string]: unknown })
+		isPositionOnlyShape(
+			output.type,
+			data as { readonly [key: string]: unknown },
+		)
 	)
 		return ROW_GROWTH_COALESCED_BYTES
 	return ROW_GROWTH_MAX_BYTES
@@ -804,4 +809,81 @@ export function fitRowBudget(
 	}
 
 	return current
+}
+
+/** Identity members, highest priority first: fitting drops from the end. */
+const IDENTITY_ORDER = [
+	"callsign",
+	"registration",
+	"typeCode",
+	"operator",
+	"typeDescription",
+] as const satisfies readonly (keyof DecodeAircraftIdentity)[]
+
+/** `,"aircraft":` before the identity object, in the record and the summary. */
+const AIRCRAFT_MEMBER_BYTES = 12
+
+/**
+ * Built-row growth of an aircraft identity by arithmetic: the member in the
+ * record and the summary JSON (escapes counted), and each value plus a
+ * newline in the FTS text. The summary fit and the FTS cap only remove
+ * bytes, so this is an upper bound.
+ */
+function identityGrowth(identity: DecodeAircraftIdentity): number {
+	let fts = 0
+	for (const key of IDENTITY_ORDER) {
+		const value = identity[key]
+		if (value !== undefined) fts += Buffer.byteLength(value, "utf8") + 1
+	}
+	return 2 * (AIRCRAFT_MEMBER_BYTES + jsonBytes(identity)) + fts
+}
+
+/**
+ * The most of an aircraft identity the presented envelope can carry while
+ * its built-row growth over `plain` stays within req 1.8 (1,100 bytes):
+ * members are dropped from the lowest priority (type description, operator,
+ * type code, registration, then callsign). Each value is at most 64 bytes,
+ * 130 of JSON when every character is escaped (`"` or `\\`); with 72 bytes
+ * of keys and punctuation a whole identity can add 2 × (12 + 72 + 5 × 130)
+ * + 5 × 65 = 1,793 bytes, and a listed aircraft row's presentation alone
+ * often grows by 900 or more. Arithmetic first
+ * (presentation bound plus identity bound); a candidate that bound rejects
+ * is measured on built rows, so the first that fits is the largest that
+ * does. Undefined when nothing fits.
+ */
+export function fitAircraftIdentity(
+	presented: DecodeEnvelope,
+	plain: DecodeEnvelope,
+	identity: DecodeAircraftIdentity,
+	limit: number = ROW_GROWTH_MAX_BYTES,
+): DecodeAircraftIdentity | undefined {
+	const shown = estimateGrowth(
+		presentation({
+			category: presented.category,
+			protocol: presented.protocol ?? undefined,
+			entityKey: presented.entityKey,
+			title: presented.title,
+			position: presented.position,
+			fields: presented.fields,
+		}),
+	).bound
+	let plainTotal: number | undefined
+	for (let keep = IDENTITY_ORDER.length; keep > 0; keep--) {
+		// A member the identity lacks leaves the same candidate as the next.
+		if (identity[IDENTITY_ORDER[keep - 1]!] === undefined) continue
+		const candidate: DecodeAircraftIdentity = {}
+		for (const key of IDENTITY_ORDER.slice(0, keep)) {
+			const value = identity[key]
+			if (value !== undefined) candidate[key] = value
+		}
+		if (shown + identityGrowth(candidate) <= limit) return candidate
+		try {
+			plainTotal ??= builtSize(plain).total
+			const grown = withEnvelopeMetadata(presented, { aircraft: candidate })
+			if (builtSize(grown).total - plainTotal <= limit) return candidate
+		} catch {
+			// Over the envelope size or unbuildable: try a smaller identity.
+		}
+	}
+	return undefined
 }

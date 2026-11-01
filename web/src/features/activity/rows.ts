@@ -130,10 +130,27 @@ export interface RowAircraft {
 	readonly about: string
 }
 
+/**
+ * What the core stored about the row's aircraft (`aircraft`: callsign, registration, type, operator as known
+ * when the row was stored), in the live fleet's shape. Null when the row carries none.
+ */
+export function storedAircraft(s: ActivitySummary): RowAircraft | null {
+	const id = s.aircraft
+	if (!id || !s.entityKey) return null
+	const hex = s.entityKey.slice(s.entityKey.indexOf(":") + 1).toUpperCase()
+	const name = id.callsign?.trim() || id.registration || hex
+	const about = [id.operator, id.typeDescription ?? id.typeCode]
+		.filter(Boolean)
+		.join(" · ")
+	return name === hex && about === "" ? null : { name, about }
+}
+
 export function rowView(
 	s: ActivitySummary,
-	aircraft: RowAircraft | null = null,
+	live: RowAircraft | null = null,
 ): RowView {
+	// The live fleet first; an aircraft it no longer tracks keeps what the row stored.
+	const aircraft = live ?? storedAircraft(s)
 	if (s.kind === "ingestion-gap") {
 		const dropped = s.fields.find(f => f.key === "dropped")?.value
 		// The core titles gaps "Ingestion gap (<reason>)".
