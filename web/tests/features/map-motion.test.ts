@@ -19,6 +19,7 @@ import {
 	settling,
 	shortestArc,
 	SLACK_KM,
+	CONFIRM_SAME_MS,
 	SAME_FIX_MS,
 	SNAP_KM,
 	type Fix,
@@ -530,17 +531,38 @@ describe("aircraft motion smoothing", () => {
 		expect(t.fixAt).toBe(T0 + SAME_FIX_MS + 1)
 	})
 
-	it("confirms a stationary relocation with a later report at the held position", () => {
+	it("confirms a stationary relocation with a report at the held position CONFIRM_SAME_MS later, not before", () => {
 		const s = createMotion(fix(0, 0, T0, null, null), T0)
 		advance(s, fix(200, 0, T0 + 1000, null, null), T0 + 1000)
 		expect(s.rejected).toBe(1)
-		// re-sent within SAME_FIX_MS: not a confirmation
-		advance(s, fix(200, 0, T0 + 1000 + SAME_FIX_MS, null, null), T0 + 1300)
+		// the same held position re-sent with a velocity and 300 ms of receive latency: not its own confirmation
+		advance(s, fix(200, 0, T0 + 1300, 90, 450), T0 + 1300)
+		expect(s.rejected).toBe(1)
 		expect(km(s, at(0, 0))).toBeLessThan(1e-9)
-		// a second report at the same place 1 s on: confirmed, drawn there at once
-		advance(s, fix(200, 0, T0 + 2000, null, null), T0 + 2000)
+		// just under CONFIRM_SAME_MS after it: still a re-send
+		advance(
+			s,
+			fix(200, 0, T0 + 1000 + CONFIRM_SAME_MS - 1, null, null),
+			T0 + 2999,
+		)
+		expect(km(s, at(0, 0))).toBeLessThan(1e-9)
+		// at CONFIRM_SAME_MS: a second report at the same place, confirmed and drawn there at once
+		advance(s, fix(200, 0, T0 + 1000 + CONFIRM_SAME_MS, null, null), T0 + 3000)
 		expect(s.rejected).toBe(1)
 		expect(km(s, at(200, 0))).toBeLessThan(1e-9)
+	})
+
+	it("applies a velocity update for the accepted position whatever its receive latency, never moving time back", () => {
+		const s = createMotion(fix(0, 0, T0, 90, 450), T0)
+		// 300 ms early (beyond SAME_FIX_MS) with a new course: applied, fix time kept
+		advance(s, fix(0, 0, T0 - 300, 180, 450), T0 + 100)
+		expect(s.fixAt).toBe(T0)
+		expect(s.vE).toBeCloseTo(0, 9)
+		expect(s.vN).toBeLessThan(0)
+		// 2 s late with another course: applied, and a new report there moves the time forward
+		advance(s, fix(0, 0, T0 + 2000, 0, 450), T0 + 2000)
+		expect(s.fixAt).toBe(T0 + 2000)
+		expect(s.vN).toBeGreaterThan(0)
 	})
 
 	it("confirms a held-back fix only with a newer one", () => {

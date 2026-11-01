@@ -57,11 +57,21 @@ export const SETTLE_KM = 0.001
 export const SNAP_KM = 5
 
 /**
- * A fix at the same position whose time is within this of another is the same fix re-sent (a course or speed update
- * re-timed by when the browser received it, a few ms either side); one later than this is a new report. 250 ms is
- * far above the receive jitter and below the ~0.5 s between an aircraft's own position messages.
+ * A report at the accepted position more than this after it moves the fix's time forward (a parked plane reporting
+ * again); within it, it is the same fix re-sent with a new course or speed, its time only the browser's receive time,
+ * a few ms either side. A same-position report is never discarded and never moves the time back, whatever its jitter.
+ * 250 ms is far above the receive jitter of a foreground tab and below the ~0.5 s between an aircraft's own position
+ * messages.
  */
 export const SAME_FIX_MS = 250
+
+/**
+ * A held-back fix is confirmed by a report at its own position only this long after it: a re-sent copy (a new course
+ * or speed for the same position, re-timed by receive latency) must not confirm itself, while a second decode of a
+ * parked or slow plane at the same place arrives seconds later. 2 s is 8× SAME_FIX_MS; a re-send delayed more than
+ * that confirms one teleport early, which REACQUIRE_MS would do anyway.
+ */
+export const CONFIRM_SAME_MS = 2000
 
 /** The glyph counts as turned (settling() false) within this of the reported track. */
 export const SETTLE_DEG = 0.1
@@ -344,20 +354,17 @@ function retrack(
 }
 
 /**
- * A fix that is new (any change since the last one seen): accept it, hold it back, or confirm a held one. A fix at
- * the same position within SAME_FIX_MS of the accepted or held one is that fix re-sent: the time is when the browser
- * received the message, so a course or speed update for it comes a few ms either side. A later report at the same
- * position is a new fix (a parked plane, or the second report confirming a relocation).
+ * A fix that is new (any change since the last one seen): accept it, hold it back, or confirm a held one. Its time
+ * is when the browser received the message, so the same position re-sent with a new course or speed comes with
+ * receive jitter: SAME_FIX_MS and CONFIRM_SAME_MS say when a report at the accepted or held position is a new one.
  */
 function observe(s: MotionState, fix: Fix, now: number): void {
 	markSeen(s, fix)
-	if (
-		fix.lat === s.fixLat &&
-		fix.lon === s.fixLon &&
-		Math.abs(fix.posAt - s.fixAt) <= SAME_FIX_MS
-	) {
-		// a new course or speed for the accepted fix: re-extrapolate from it (at its own time), blended
-		retrack(s, fix, s.fixLat, s.fixLon, s.fixAt, now, false)
+	if (fix.lat === s.fixLat && fix.lon === s.fixLon) {
+		// the accepted position again: a new course or speed for it (re-extrapolated, blended), and past SAME_FIX_MS a
+		// new report there, which moves the fix's time forward; never back, whatever the receive jitter
+		const at = fix.posAt - s.fixAt > SAME_FIX_MS ? fix.posAt : s.fixAt
+		retrack(s, fix, s.fixLat, s.fixLon, at, now, false)
 		return
 	}
 	// an older fix elsewhere (or one timed with the accepted one) would rewind the track and the gate's clock: ignored
@@ -367,7 +374,7 @@ function observe(s: MotionState, fix: Fix, now: number): void {
 		!Number.isNaN(s.candAt) &&
 		fix.lat === s.candLat &&
 		fix.lon === s.candLon &&
-		Math.abs(fix.posAt - s.candAt) <= SAME_FIX_MS
+		fix.posAt - s.candAt < CONFIRM_SAME_MS
 	// the held-back fix re-sent (a new course or speed only) is neither another rejection nor its own confirmation
 	if (held && !reacquire) return
 	const fromAccepted = kmBetween(s.fixLat, s.fixLon, fix.lat, fix.lon)

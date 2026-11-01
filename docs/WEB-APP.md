@@ -406,8 +406,8 @@ Between reports, an aircraft keeps moving along its track at its speed. When a n
 arrives, the plane glides onto it over about two seconds instead of jumping, and its glyph turns
 smoothly the short way round (from 359° to 0° it turns 1°, never all the way back). A position
 the aircraft could not have reached (a speed over 1200 kn since the last one, usually a bad
-decode) is held back; if the next position agrees with it, the aircraft really is there and the
-map moves it at once. A position no newer than the one the plane already follows is ignored, so
+decode) is held back; if a later position agrees with it (at the very same spot, one at least two
+seconds later), the aircraft really is there and the map moves it at once. A position no newer than the one the plane already follows is ignored, so
 a late report never pulls it back; a new speed or track for the position it follows always applies. After 60 seconds without a usable position, the next one is taken as it
 is. A position more than 5 km from where the plane is drawn, or one arriving after the plane has
 stopped (a hidden tab or layer, a gap in reception), moves it at once instead of sweeping it across
