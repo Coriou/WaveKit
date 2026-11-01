@@ -28,7 +28,10 @@
  * more than one window behind the entity's latest state; an evicted entity's
  * held state is flushed at once. A held row the store cannot queue yet
  * (token bucket, queue cap, paused store) stays held and is retried; held
- * receptions are only consumed by the row that carries them. A gap of more
+ * receptions are only consumed by the row that carries them. A merged row
+ * over the queue byte cap can never queue: it is stored as the latest held
+ * reception's own data, or counted as a drop when even that is over the cap,
+ * so it never blocks the held rows behind it. A gap of more
  * than `windowMs` between two receptions drops the stale position and
  * kinematics from the latest state (identity is kept).
  *
@@ -616,6 +619,27 @@ export class PositionCoalescer {
 			return this.heldFlush(key, state, held)
 		}
 		return undefined
+	}
+
+	/**
+	 * Every row for held receptions due by `now`, in `takeDue` order: evicted
+	 * entities first, then held entities by dueAt. A flush left uncommitted
+	 * stays held, and the caller may go on to the next one (a row the queue
+	 * has no room for must not hold back a smaller one behind it).
+	 */
+	*dueFlushes(now: number): Generator<CoalesceFlush, void, undefined> {
+		// A copy: committing an evicted flush removes it from the list.
+		if (this.evicted.length > 0)
+			for (const entry of [...this.evicted]) yield this.evictedFlush(entry)
+		for (const [key, state] of this.heldOrder) {
+			const held = state.held
+			if (held === undefined) {
+				this.heldOrder.delete(key)
+				continue
+			}
+			if (held.dueAt > now) return
+			yield this.heldFlush(key, state, held)
+		}
 	}
 
 	/** Every held row, due or not (shutdown). */

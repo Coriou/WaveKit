@@ -228,6 +228,103 @@ describe("held rows survive flush admission rejections", () => {
 	})
 })
 
+describe("a held row that can never fit does not block the rows behind it", () => {
+	const wide = (c: string) => c.repeat(900)
+
+	/** A and B stored; A holds two 900-char updates, B one position update. */
+	function blocked(clock: { t: number }) {
+		const i = ingress(clock, { queueMaxBytes: 2000 })
+		expect(i.admit(plane("A00001", T0)).admitted).toBe(true)
+		drain(i)
+		clock.t = T0 + 1
+		expect(i.admit(plane("B00001", T0 + 1)).admitted).toBe(true)
+		drain(i)
+		clock.t = T0 + 2
+		i.admit(plane("A00001", T0 + 2, { readsbFormat: wide("a") }, "a-1"))
+		clock.t = T0 + 3
+		i.admit(plane("A00001", T0 + 3, { sbsContentId: wide("b") }, "a-2"))
+		clock.t = T0 + 4
+		i.admit(plane("B00001", T0 + 4, { lat: 1.5 }, "b-1"))
+		expect(i.coalescedPositions).toBe(3)
+		return i
+	}
+
+	it("stores the oversized merged row degraded to its latest reception and flushes the next", () => {
+		const clock = { t: T0 }
+		const i = blocked(clock)
+		const rows: BuiltActivityRow[] = []
+		for (let step = 0; step < 100; step++) {
+			clock.t = T0 + 2 + WINDOW + step * RETRY
+			i.flushCoalesced(clock.t)
+			drain(i, rows)
+		}
+		expect(i.coalesceDeferrals).toBe(0)
+		expect(i.nextCoalesceDueAt()).toBeUndefined()
+		expect(rows.map(r => stored(r).eventId)).toEqual(["a-2", "b-1"])
+		// A's row is its latest reception's own data, without the merged span.
+		const a = stored(rows[0])
+		expect(a.decodedData).toMatchObject({
+			icao: "A00001",
+			sbsContentId: wide("b"),
+		})
+		expect(a.decodedData).not.toHaveProperty("readsbFormat")
+		expect(a.coalesced).toBeUndefined()
+		expect(i.coalesceMergeFailures).toBe(1)
+		expect(stored(rows[1]).decodedData).toMatchObject({
+			icao: "B00001",
+			lat: 1.5,
+		})
+		expect(lostCount(i)).toBe(0)
+		for (const row of rows) expect(row.recordBytes).toBeLessThanOrEqual(2000)
+	})
+
+	it("counts a held row whose own reception cannot fit either as a drop", () => {
+		const clock = { t: T0 }
+		const i = ingress(clock, { queueMaxBytes: 1500 })
+		expect(i.admit(plane("A00001", T0)).admitted).toBe(true)
+		drain(i)
+		clock.t = T0 + 1
+		expect(i.admit(plane("B00001", T0 + 1)).admitted).toBe(true)
+		drain(i)
+		clock.t = T0 + 2
+		i.admit(plane("A00001", T0 + 2, { readsbFormat: wide("a") }, "a-1"))
+		clock.t = T0 + 3
+		i.admit(plane("B00001", T0 + 3, { lat: 1.5 }, "b-1"))
+		// B's held row is due last; A's (1531 B on its own) is over the 1500 B cap.
+		clock.t = T0 + 3 + WINDOW
+		i.flushCoalesced(clock.t)
+		const rows = drain(i)
+		expect(rows.map(r => stored(r).eventId)).toEqual(["b-1"])
+		expect(i.dropped["queue-full"]).toBe(1)
+		expect(i.coalesceDeferrals).toBe(0)
+		expect(i.nextCoalesceDueAt()).toBeUndefined()
+	})
+
+	it("lets a smaller held row pass a head the queue has no room for yet", () => {
+		const clock = { t: T0 }
+		const i = blocked(clock)
+		// One queued row (651 B): A's degraded row (1531 B) has no room yet, B's has.
+		clock.t = T0 + 5
+		expect(i.admit(plane("C00001", T0 + 5)).admitted).toBe(true)
+		const filler = i.pendingBytes()
+		clock.t = T0 + 4 + WINDOW
+		i.flushCoalesced(clock.t)
+		expect(i.pendingBytes()).toBeGreaterThan(filler)
+		expect(i.coalesceDeferrals).toBe(1)
+		const rows = drain(i)
+		expect(rows.map(r => stored(r).eventId)).toEqual([
+			"C00001-" + String(T0 + 5),
+			"b-1",
+		])
+		clock.t += RETRY
+		i.flushCoalesced(clock.t)
+		drain(i, rows)
+		expect(rows.map(r => stored(r).eventId)).toContain("a-2")
+		expect(i.nextCoalesceDueAt()).toBeUndefined()
+		expect(lostCount(i)).toBe(0)
+	})
+})
+
 describe("merged state stays bounded and never discards held work", () => {
 	const big = (c: string) => c.repeat(32 * 1024 - 8)
 

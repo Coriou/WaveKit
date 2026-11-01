@@ -26,6 +26,15 @@ import type { Logger } from "../../../utils/logger.js"
 
 const TOKEN = 1_000_000
 const MAX_GAP_DECODERS = 32
+/** Held rows passed over per flush for want of queue room before the flush waits. */
+const MAX_FLUSH_SKIPS = 32
+
+/** Why a held row was not queued: "queue-bytes" when only its own size kept it out. */
+type HeldRejection =
+	| "store-paused"
+	| "queue-full"
+	| "rate-limited"
+	| "queue-bytes"
 
 export interface IngressCounters {
 	admitted: number
@@ -140,19 +149,23 @@ export class ActivityIngress {
 	 * bound holds. A row the global bucket, the queue caps or a paused store
 	 * turn away is not lost: it stays held (counted in coalesceDeferrals, not
 	 * as a drop) and every held row waits pauseRetryMs before the next try.
+	 * A row only the queue's free bytes turn away is passed over, so smaller
+	 * rows behind it still queue (up to MAX_FLUSH_SKIPS per flush, bounding the
+	 * rows built). A row over queueMaxBytes itself never waits (enqueueHeld).
 	 */
 	flushCoalesced(now: number): void {
 		if (this.closed || now < this.flushRetryAt) return
-		for (;;) {
-			const flush = this.coalescer.takeDue(now)
-			if (!flush) return
+		let deferred = false
+		let skips = 0
+		for (const flush of this.coalescer.dueFlushes(now)) {
 			const reason = this.enqueueHeld(flush, now, true)
-			if (reason !== undefined) {
-				this.coalesceDeferrals++
-				this.flushRetryAt = now + this.limits.pauseRetryMs
-				return
-			}
+			if (reason === undefined) continue
+			deferred = true
+			if (reason !== "queue-bytes" || ++skips >= MAX_FLUSH_SKIPS) break
 		}
+		if (!deferred) return
+		this.coalesceDeferrals++
+		this.flushRetryAt = now + this.limits.pauseRetryMs
 	}
 
 	/**
@@ -167,7 +180,7 @@ export class ActivityIngress {
 			const reason = this.enqueueHeld(flush, now, false)
 			if (reason !== undefined)
 				this.noteDrop(
-					reason,
+					reason === "queue-bytes" ? "queue-full" : reason,
 					flush.envelope.receivedAt,
 					flush.envelope.decoderId,
 					now,
@@ -175,28 +188,50 @@ export class ActivityIngress {
 		}
 	}
 
-	/** Queues a held entity row; returns why it was turned away (nothing counted). */
+	/**
+	 * Queues a held entity row; returns why it was turned away (nothing
+	 * counted). A row over queueMaxBytes could never queue, whatever the
+	 * queue holds: it falls back to the latest held reception's own data, and
+	 * when even that is over the cap the held receptions are consumed as a
+	 * counted queue-full drop. Either way nothing is left to block later rows.
+	 */
 	private enqueueHeld(
 		flush: CoalesceFlush,
 		now: number,
 		globalToken: boolean,
-	): "store-paused" | "queue-full" | "rate-limited" | undefined {
+	): HeldRejection | undefined {
 		if (this.paused) return "store-paused"
 		if (this.itemOverflow()) return "queue-full"
 		if (globalToken) {
 			this.global.refill(now)
 			if (!this.global.available()) return "rate-limited"
 		}
-		const { envelope: stored, merged } = storedEnvelope(
+		let { envelope: stored, merged } = storedEnvelope(
 			flush.envelope,
 			flush.present,
 			flush.merged,
 		)
-		const row = buildReceptionRow(stored)
-		if (this.byteOverflow(row)) return "queue-full"
+		let row = buildReceptionRow(stored)
+		if (merged && row.recordBytes > this.limits.queueMaxBytes) {
+			stored = ownEnvelope(flush.envelope, flush.present)
+			merged = false
+			row = buildReceptionRow(stored)
+		}
+		if (row.recordBytes > this.limits.queueMaxBytes) {
+			flush.commit().settle()
+			this.noteDrop(
+				"queue-full",
+				flush.envelope.receivedAt,
+				flush.envelope.decoderId,
+				now,
+			)
+			return undefined
+		}
+		if (this.byteOverflow(row)) return "queue-bytes"
 		if (globalToken) this.global.take()
-		// The merged state cannot outgrow an envelope (coalesce.ts); if a
-		// presentation still made it fail, the row stands for the latest reception.
+		// The merged state cannot outgrow an envelope (coalesce.ts), but it can
+		// outgrow queueMaxBytes or fail a presentation: the row then stands for
+		// the latest reception.
 		if (!merged) this.coalesceMergeFailures++
 		this.pushReception(row, flush.commit(), undefined, now)
 		return undefined
