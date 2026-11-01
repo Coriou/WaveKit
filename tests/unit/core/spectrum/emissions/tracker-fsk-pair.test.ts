@@ -2,9 +2,13 @@ import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { segment } from "../../../../../src/core/spectrum/emissions/segmenter.js"
 import {
+	CLING_ABUT_BINS,
+	CLING_MIDPOINT_FRACTION,
+	CLING_WIDTH_RATIO,
 	FSK_PAIR_DB,
 	Tracker,
 } from "../../../../../src/core/spectrum/emissions/tracker.js"
+import type { Segment } from "../../../../../src/core/spectrum/emissions/segmenter.js"
 import type { PipelineEvent } from "../../../../../src/core/spectrum/types.js"
 
 // Scanner quality benchmark: a 2FSK emission whose valley falls to the floor (a ±4.5 kHz POCSAG
@@ -25,14 +29,14 @@ interface Tone {
 	db: number
 }
 
-function tracker(): Tracker {
+function tracker(maxTrackBlocks = 1000): Tracker {
 	const t = new Tracker({
 		sourceId: "s1",
 		binHz: BIN_HZ,
 		blockMs: 50,
 		hangBlocks: 3,
 		maxTracks: 16,
-		maxTrackBlocks: 1000,
+		maxTrackBlocks,
 		idPrefix: "t",
 	})
 	t.beginEpoch({
@@ -84,8 +88,9 @@ function runBlock(
 function opened(
 	blocks: readonly (readonly Tone[])[],
 	reach: Uint16Array | null = reachBins(REACH),
+	maxTrackBlocks = 1000,
 ): { ids: Set<string>; t: Tracker } {
-	const t = tracker()
+	const t = tracker(maxTrackBlocks)
 	const ids = new Set<string>()
 	// A quiet first block: pairing needs the block before it in the epoch.
 	runBlock(t, 0, [], reach)
@@ -266,18 +271,49 @@ describe("tracker FSK pair fusion keeps other emitters apart", () => {
 		expect(opened([tones, tones, sensor, sensor, sensor]).ids.size).toBe(1)
 	})
 
-	it("a weak carrier between the tones joins while its floor gap is narrower than the tone beside it", () => {
-		// 6-bin tones, a weak 1-bin carrier `gap` bins of floor from each
+	it("a narrow carrier between the tones joins only while it abuts one (CLING_ABUT_BINS)", () => {
+		// 6-bin tones 30 bins apart, a weak 1-bin carrier `gap` bins of floor from the left one (off
+		// the midpoint, so no transition hump)
 		const scene = (gap: number): Tone[] => [
 			{ at: 200, width: 6, db: 25 },
 			{ at: 206 + gap, width: 1, db: 8 },
-			{ at: 207 + 2 * gap, width: 6, db: 25 },
+			{ at: 230, width: 6, db: 25 },
 		]
-		expect(opened(Array.from({ length: 3 }, () => scene(5))).ids.size).toBe(1)
-		expect(opened(Array.from({ length: 3 }, () => scene(6))).ids.size).toBe(2)
+		expect(CLING_ABUT_BINS).toBe(2)
+		expect(opened(Array.from({ length: 3 }, () => scene(2))).ids.size).toBe(1)
+		expect(opened(Array.from({ length: 3 }, () => scene(3))).ids.size).toBe(2)
+		// 3 · 1 < 6 bins: a carrier tone widths narrower than the tones is never bridged past that
+		expect(opened(Array.from({ length: 3 }, () => scene(5))).ids.size).toBe(2)
 	})
 
-	it("a weak crumb past an established pair's outer tone, inside its span, joins while within the tone's width", () => {
+	it("an independent narrow carrier 5 bins from a tone keeps its identity", () => {
+		// tones [200, 206) and [260, 266) at 25 dB, a 1-bin carrier at bin 211 8 dB over the floor
+		const scene: Tone[] = [
+			{ at: 200, width: 6, db: 25 },
+			{ at: 211, width: 1, db: 8 },
+			{ at: 260, width: 6, db: 25 },
+		]
+		const { ids, t } = opened(Array.from({ length: 4 }, () => scene))
+		expect(ids.size).toBe(2)
+		const weak = narrowest(t, ids)
+		expect(Math.abs(at(t, weak) - 211.5)).toBeLessThanOrEqual(1)
+		expect(t.snapshotOf(weak)!.blocks).toBe(4)
+	})
+
+	it("a piece past the abut bound bridges while CLING_WIDTH_RATIO times its width reaches the tone's", () => {
+		// 30-bin tones, a piece 15 dB down 4 bins of floor from the left one and 30 from the right
+		// (no midpoint hump): 3 · 10 ≥ 30 joins, 3 · 9 does not
+		const sensor = (w: number): Tone[] => [
+			{ at: 200, width: 30, db: 30 },
+			{ at: 234, width: w, db: 15 },
+			{ at: 264 + w, width: 30, db: 30 },
+		]
+		expect(CLING_WIDTH_RATIO).toBe(3)
+		expect(opened(Array.from({ length: 3 }, () => sensor(10))).ids.size).toBe(1)
+		expect(opened(Array.from({ length: 3 }, () => sensor(9))).ids.size).toBe(2)
+	})
+
+	it("a weak crumb past an established pair's outer tone joins only inside that tone's last bins", () => {
 		// span [200, 266) from a 12-bin right tone; then 6-bin tones and a 1-bin crumb 10 dB down
 		const wide: Tone[] = [
 			{ at: 200, width: 6, db: 25 },
@@ -288,8 +324,39 @@ describe("tracker FSK pair fusion keeps other emitters apart", () => {
 			{ at: 254, width: 6, db: 25 },
 			{ at: 260 + gap, width: 1, db: 15 },
 		]
+		// the right tone covered [254, 266) on the block before: a crumb at 265 is the emission's own
 		expect(opened([wide, wide, tail(5)]).ids.size).toBe(1)
 		expect(opened([wide, wide, tail(6)]).ids.size).toBe(2)
+		// with 6-bin tones all along the same crumb is a carrier clear of the tone
+		const narrow = tail(100).slice(0, 2)
+		expect(opened([narrow, narrow, tail(2)]).ids.size).toBe(1)
+		expect(opened([narrow, narrow, tail(3)]).ids.size).toBe(2)
+	})
+
+	it("a narrow transition hump joins within 1/CLING_MIDPOINT_FRACTION of the tone spacing of the midpoint", () => {
+		// 24-bin tones [200, 224) and [248, 272): midpoint 236, spacing 48 bins, so ±6 bins
+		const scene = (x: number): Tone[] => [
+			{ at: 200, width: 24, db: 30 },
+			{ at: x, width: 1, db: 15 },
+			{ at: 248, width: 24, db: 30 },
+		]
+		expect(CLING_MIDPOINT_FRACTION).toBe(8)
+		const blocks = (x: number): Tone[][] =>
+			Array.from({ length: 3 }, () => scene(x))
+		// bin 241 has its middle at 241.5, 5.5 bins over; 242 is 6.5 over
+		expect(opened(blocks(241)).ids.size).toBe(1)
+		expect(opened(blocks(242)).ids.size).toBe(2)
+		expect(opened(blocks(230)).ids.size).toBe(1)
+		expect(opened(blocks(229)).ids.size).toBe(2)
+	})
+
+	it("a carrier at the midpoint as strong as the tones is no transition hump", () => {
+		const scene: Tone[] = [
+			{ at: 200, width: 24, db: 30 },
+			{ at: 236, width: 1, db: 30 },
+			{ at: 248, width: 24, db: 30 },
+		]
+		expect(opened(Array.from({ length: 3 }, () => scene)).ids.size).toBe(2)
 	})
 
 	it("abutting chirp pieces stay one track when one block shows a piece 8 dB over the rest", () => {
@@ -328,5 +395,74 @@ describe("tracker FSK pair fusion keeps other emitters apart", () => {
 			[right],
 		])
 		expect(ids.size).toBe(1)
+	})
+
+	it("a stronger narrow carrier inside an established pair does not take its identity", () => {
+		const two: Tone[] = [
+			{ at: 200, width: 4, db: 20 },
+			{ at: 260, width: 4, db: 20 },
+		]
+		const three: Tone[] = [...two, { at: 230, width: 1, db: 25 }]
+		const { ids, t } = opened([two, two, two, three, three, three])
+		expect(ids.size).toBe(2)
+		const carrier = narrowest(t, ids)
+		expect(Math.abs(at(t, carrier) - 230.5)).toBeLessThanOrEqual(1)
+		expect(t.snapshotOf(carrier)!.blocks).toBe(3)
+		const pairId = [...ids].find(id => id !== carrier)!
+		expect(t.snapshotOf(pairId)!.blocks).toBe(6)
+	})
+
+	it("a pair sending one tone per block keeps its span and partners across a max-duration rollover", () => {
+		const left: Tone = { at: 200, width: 4, db: 20 }
+		const right: Tone = { at: 260, width: 4, db: 20 }
+		// maxTrackBlocks 3: the second left-only block rolls the track over on a left-tone segment
+		const blocks: Tone[][] = [
+			[],
+			[left, right],
+			[left],
+			[left],
+			[right],
+			[left],
+			[right],
+		]
+		const t = tracker(3)
+		let opens = 0
+		let rollovers = 0
+		blocks.forEach((tones, i) => {
+			for (const e of runBlock(t, i, tones)) {
+				if (e.kind === "track-open") opens++
+				if (e.kind === "track-close") {
+					// only max-duration closes: no tone track ever opened alone and went quiet
+					expect(e.endReason).toBe("max-duration")
+					rollovers++
+				}
+			}
+		})
+		// one opening, every other open is a max-duration successor
+		expect(opens).toBe(1 + rollovers)
+		expect(rollovers).toBeGreaterThanOrEqual(2)
+		expect(t.openCount).toBe(1)
+	})
+})
+
+describe("tracker FSK pair fusion storage", () => {
+	it("a steady pair reuses its fused segments block to block (docs/PERFORMANCE.md rule 4)", () => {
+		const t = tracker()
+		const out = (t as unknown as { fuseOut: Segment[] }).fuseOut
+		const seen = new Set<Segment>()
+		const flags = new Set<Segment["flags"]>()
+		runBlock(t, 0, [])
+		for (let i = 1; i <= 50; i++) {
+			runBlock(t, i, pair(5))
+			if (i < 3) continue
+			// the input segments are the segmenter's; the fused one is the tracker's own
+			const fused = out.find(s => s.endBin - s.startBin > 4)!
+			seen.add(fused)
+			flags.add(fused.flags)
+		}
+		// one fused segment held by the track, one being written: two objects rotate
+		expect(seen.size).toBeLessThanOrEqual(2)
+		expect(flags.size).toBeLessThanOrEqual(2)
+		expect(t.openCount).toBe(1)
 	})
 })

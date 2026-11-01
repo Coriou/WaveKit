@@ -113,13 +113,26 @@ export function twoTone(
 	for (let i = lo; i < hi; i++)
 		if ((powerDb[i] ?? -Infinity) > (powerDb[p1] ?? -Infinity)) p1 = i
 	let p2 = -1
-	for (let i = lo; i < hi; i++) {
-		if (Math.abs(i - p1) < minSpacingBins) continue
-		const v = powerDb[i] ?? -Infinity
-		// A true local maximum: the first hump's shoulder rises toward it and is no tone.
-		if (v < (powerDb[i - 1] ?? -Infinity) || v < (powerDb[i + 1] ?? -Infinity))
-			continue
-		if (p2 < 0 || v > (powerDb[p2] ?? -Infinity)) p2 = i
+	for (let a = lo; a < hi; ) {
+		// A true local maximum: a plateau [a, b] of equal bins with lower bins on both sides. The
+		// first hump's shoulder rises toward it and is no tone, even when the shoulder is flat.
+		const v = powerDb[a] ?? -Infinity
+		let b = a
+		while (b + 1 < hi && (powerDb[b + 1] ?? -Infinity) === v) b++
+		const next = b + 1
+		if (
+			v > (powerDb[a - 1] ?? -Infinity) &&
+			v > (powerDb[b + 1] ?? -Infinity) &&
+			(p2 < 0 || v > (powerDb[p2] ?? -Infinity))
+		) {
+			// any plateau bin far enough from the strongest peak stands for it
+			for (let i = a; i <= b; i++)
+				if (Math.abs(i - p1) >= minSpacingBins) {
+					p2 = i
+					break
+				}
+		}
+		a = next
 	}
 	if (p2 < 0) return false
 	const top1 = powerDb[p1] ?? -Infinity

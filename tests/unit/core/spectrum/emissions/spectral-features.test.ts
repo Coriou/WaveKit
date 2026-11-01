@@ -203,3 +203,31 @@ describe("twoTone peaks", () => {
 		expect(twoTone(humps(15, 21), 0, 40, 6, 6, 6)).toBe(true)
 	})
 })
+
+describe("twoTone plateaus", () => {
+	it("does not take a flat shoulder of the first hump's neighbour for the second tone", () => {
+		// floor −60, peaks −40 at 15 and 20 (5 bins apart, under the 6-bin spacing), −43 shoulders
+		// at 14, 16, 19, 21 and 22: the flat [21, 22] falls from the peak at 20, so it is no tone
+		const p = new Float32Array(40).fill(-60)
+		p[15] = -40
+		p[20] = -40
+		for (const i of [14, 16, 19, 21, 22]) p[i] = -43
+		expect(twoTone(p, 0, 40, 6, 6, 6)).toBe(false)
+	})
+
+	it("takes a flat-topped second tone with lower bins on both sides", () => {
+		const p = new Float32Array(40).fill(-60)
+		p[15] = -40
+		p[24] = -41
+		p[25] = -41
+		expect(twoTone(p, 0, 40, 6, 6, 6)).toBe(true)
+	})
+
+	it("takes a plateau bin past the spacing when the plateau starts inside it", () => {
+		// the plateau [19, 22] starts 4 bins from the peak; its bins 21 and 22 are 6 or more away
+		const p = new Float32Array(40).fill(-60)
+		p[15] = -40
+		for (const i of [19, 20, 21, 22]) p[i] = -42
+		expect(twoTone(p, 0, 40, 6, 6, 6)).toBe(true)
+	})
+})

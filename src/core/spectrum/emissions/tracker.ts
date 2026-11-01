@@ -93,6 +93,28 @@ export const FSK_PAIR_DB = 6
  */
 export const FSK_PAIR_WIDTH_RATIO = 2
 /**
+ * Bridge (`Tracker.cling`): a piece at most this many floor bins from a group member is part of
+ * it whatever its width. 2 = the segmenter's own hole (`gapBins`) and a Hann main lobe's half
+ * width: abutting LoRa chirp pieces and a tone's split-off crumb, never a carrier 3 or more bins
+ * clear of the tone.
+ */
+export const CLING_ABUT_BINS = 2
+/**
+ * Bridge past `CLING_ABUT_BINS`: the piece's width times this reaches the member's and the floor
+ * gap is narrower than the member. A ±30 kHz ISM send's transition hump (12 bins, 4 from 30-bin
+ * tones: 3 · 12 = 36 ≥ 30) joins; a 1-bin carrier 5 bins from 6-bin tones (3 · 1 = 3 < 6) keeps
+ * its own identity.
+ */
+export const CLING_WIDTH_RATIO = 3
+/**
+ * Bridge of a 2FSK transition hump: a piece between two members, weaker than both, with each floor
+ * gap narrower than the member beside it, whose middle lies within 1/this of the members' spacing
+ * of their midpoint. The transition sweeps through the carrier frequency, so its hump is centred
+ * there: a ±30 kHz sensor at 10 dB shows a 1 to 3-bin hump at most 2.3 bins off the midpoint of
+ * tones 48.5 bins apart (2.3 ≤ 48.5 / 8 = 6.1). A carrier off the midpoint keeps its identity.
+ */
+export const CLING_MIDPOINT_FRACTION = 8
+/**
  * Two-tone spectrum (`TrackSnapshot.fsk2`): tones at least 6 kHz apart, with a valley 6 dB
  * (`PROMINENCE_DB`) under the weaker. 6 kHz is past AFSK and FM voice humps (audio to 3 kHz each
  * side) and 4FSK outer symbols (±1.944 kHz on DMR: 3.9 kHz apart), under a ±4.5 kHz POCSAG pair
@@ -159,6 +181,7 @@ class SpectrumAccumulator {
 }
 
 const NO_GATE_EVENTS: PipelineEvent[] = []
+const NO_SPANS = new Int32Array(0)
 
 interface Features {
 	acf30?: number
@@ -304,6 +327,17 @@ interface OpenTrack {
 	partObw: number
 	partBlock: number
 	/**
+	 * Width (bins) of the paired track's latest tone: the strongest part of its latest fused
+	 * segment. A segment far narrower than this (`farNarrower`) is no tone of the pair. 0: none.
+	 */
+	toneBins: number
+	/**
+	 * Bin spans [start, end) of the parts of the paired track's latest fused segment, in pairs
+	 * (`partSpans` entries used: 2 · `partCount`). Reused; grows only.
+	 */
+	partSpans: Int32Array
+	partCount: number
+	/**
 	 * The predecessor this track re-opened from on a max-duration rollover.
 	 * Cleared once that predecessor's run has been considered. Never a new detection.
 	 */
@@ -344,6 +378,15 @@ export class Tracker {
 	private readonly fuseParts = new Map<Segment, Segment[]>()
 	private readonly fusePool: Segment[][] = []
 	private readonly fuseBurst = new Set<Segment>()
+	/**
+	 * Fused segments, reused: one is free once no open track holds it as `lastSeg` and this
+	 * `fusePairs` call has not taken it, so a steady pair rotates two.
+	 */
+	private readonly fuseSegs: Segment[] = []
+	private readonly fuseSegTaken: number[] = []
+	/** The open paired track an established group belongs to, by group; null for a new pair. */
+	private readonly fuseTrack: (OpenTrack | null)[] = []
+	private fuseStamp = 0
 	private readonly fuseBlock: TrackerBlock = {
 		endSample: 0,
 		powerDb: new Float32Array(0),
@@ -678,6 +721,14 @@ export class Tracker {
 				t.partObw =
 					Math.max(1, strongest.endBin - strongest.startBin) * this.opts.binHz
 				t.partBlock = this.blockNo
+				t.toneBins = strongest.endBin - strongest.startBin
+				if (t.partSpans.length < 2 * parts.length)
+					t.partSpans = new Int32Array(2 * Math.max(4, parts.length))
+				for (let i = 0; i < parts.length; i++) {
+					t.partSpans[2 * i] = parts[i]!.startBin
+					t.partSpans[2 * i + 1] = parts[i]!.endBin
+				}
+				t.partCount = parts.length
 			}
 		for (const t of [...this.open]) {
 			if (matched.has(t)) continue
@@ -699,6 +750,14 @@ export class Tracker {
 				const nt = this.openTrack(seg, b, n, blockSamples)
 				nt.justOpened = false
 				nt.paired = t.paired
+				if (t.paired) {
+					// the successor keeps the pair's span and tone: one tone alone still matches it
+					nt.onMin = Math.min(nt.onMin, t.onMin)
+					nt.onMax = Math.max(nt.onMax, t.onMax)
+					nt.toneBins = t.toneBins
+					nt.partSpans = t.partSpans
+					nt.partCount = t.partCount
+				}
 				nt.chain = chainBaseOf(t, nt)
 				// `publishGate` steps this block on the predecessor, then copies
 				// the run only if it is still alive.
@@ -900,10 +959,13 @@ export class Tracker {
 			if (!t.paired) continue
 			const lo = t.onMin - MATCH_TOLERANCE_BINS
 			const hi = t.onMax + MATCH_TOLERANCE_BINS
+			// The anchor is the strongest segment that can be one of the pair's tones: a stronger
+			// narrow carrier keying up inside the span never takes the pair's place.
 			let a = -1
 			for (let k = 0; k < m; k++) {
 				const s = sorted[k]!
 				if (group[k]! >= 0 || s.peakBin < lo || s.peakBin >= hi) continue
+				if (farNarrower(s, t.toneBins)) continue
 				if (a < 0 || s.peakDb > sorted[a]!.peakDb) a = k
 			}
 			if (a < 0) continue
@@ -914,6 +976,7 @@ export class Tracker {
 			for (let k = first; k <= last; k++)
 				if (group[k]! < 0 && (k === a || pairLevel(sorted[a]!, sorted[k]!)))
 					group[k] = groups
+			this.fuseTrack[groups] = t
 			this.bridge(groups, first, last)
 			let count = 0
 			for (let k = first; k <= last; k++) if (group[k] === groups) count++
@@ -974,11 +1037,13 @@ export class Tracker {
 						group[k] = groups
 						to = k
 					}
+				this.fuseTrack[groups] = null
 				this.bridge(groups, from, to)
 				groups++
 			}
 		}
 		if (groups === 0) return false
+		this.fuseStamp++
 		const out = this.fuseOut
 		const parts = this.fuseParts
 		// `fresh` is spent: it now marks joined segments by input index.
@@ -1004,7 +1069,7 @@ export class Tracker {
 				list.push(sorted[k]!)
 				if (!burst.has(sorted[k]!)) allBurst = false
 			}
-			const s = joinSegments(list, b.powerDb, b.floorDb)
+			const s = joinSegments(list, b.powerDb, b.floorDb, this.freeFuseSeg())
 			// A fused segment is a burst only when every part was one.
 			if (allBurst) burst.add(s)
 			parts.set(s, list)
@@ -1017,11 +1082,14 @@ export class Tracker {
 
 	/**
 	 * Sorted positions in [from, to] that joined no group still join `g` when they cling to it:
-	 * the floor gap to a sorted neighbour already in `g` is narrower than that neighbour, and so
-	 * on outward. A 2FSK emission's transition energy sits in its valley 15 dB under the tones (a
+	 * the floor gap to a sorted neighbour already in `g` is at most `CLING_ABUT_BINS`, or narrower
+	 * than that neighbour with the piece at least 1/`CLING_WIDTH_RATIO` of its width or a
+	 * transition hump at the midpoint between it and the next member (`CLING_MIDPOINT_FRACTION`)
+	 * or inside the bins one of the established track's parts covered (`inPart`), and so on
+	 * outward. A 2FSK emission's transition energy sits in its valley 15 dB under the tones (a
 	 * ±30 kHz ISM sensor: 30 kHz tones, a 12 kHz hump 4 to 5 kHz from each), and a LoRa chirp's
-	 * pieces abut each other at levels up to 8 dB apart; an independent carrier between the tones
-	 * that lies tone widths away from them stays apart.
+	 * pieces abut each other at levels up to 8 dB apart; an independent narrow carrier between
+	 * the tones that does not abut one stays apart.
 	 */
 	private bridge(g: number, from: number, to: number): void {
 		for (let k = from + 1; k <= to; k++) this.cling(g, k, k - 1)
@@ -1034,7 +1102,82 @@ export class Tracker {
 		const s = this.fuseSorted[k]!
 		const p = this.fuseSorted[n]!
 		const gap = n < k ? s.startBin - p.endBin : p.startBin - s.endBin
-		if (gap < p.endBin - p.startBin) this.fuseGroup[k] = g
+		const member = p.endBin - p.startBin
+		if (
+			gap <= CLING_ABUT_BINS ||
+			(gap < member &&
+				(CLING_WIDTH_RATIO * (s.endBin - s.startBin) >= member ||
+					this.midHump(g, k, n, gap) ||
+					this.inPart(g, s)))
+		)
+			this.fuseGroup[k] = g
+	}
+
+	/**
+	 * `s` lies inside the bins one part of group `g`'s established track covered on its last fused
+	 * block: a fragment of the emission itself (a LoRa chirp's tail), co-channel with it.
+	 */
+	private inPart(g: number, s: Segment): boolean {
+		const t = this.fuseTrack[g]
+		if (t === null || t === undefined) return false
+		for (let i = 0; i < t.partCount; i++)
+			if (
+				s.startBin >= t.partSpans[2 * i]! &&
+				s.endBin <= t.partSpans[2 * i + 1]!
+			)
+				return true
+		return false
+	}
+
+	/**
+	 * Sorted position `k`, `gap` floor bins from member `n`, is (a piece of) a transition hump
+	 * between `n` and the nearest member on its other side (see `CLING_MIDPOINT_FRACTION`).
+	 */
+	private midHump(g: number, k: number, n: number, gap: number): boolean {
+		const dir = k - n
+		let o = k + dir
+		while (o >= 0 && o < this.fuseSorted.length && this.fuseGroup[o]! < 0)
+			o += dir
+		if (o < 0 || o >= this.fuseSorted.length || this.fuseGroup[o] !== g)
+			return false
+		const s = this.fuseSorted[k]!
+		const p = this.fuseSorted[n]!
+		const q = this.fuseSorted[o]!
+		const gapQ = o > k ? q.startBin - s.endBin : s.startBin - q.endBin
+		if (gapQ >= q.endBin - q.startBin || gap < 0 || gapQ < 0) return false
+		if (s.peakDb >= Math.min(p.peakDb, q.peakDb)) return false
+		// doubled bin centres: start + end
+		const mid = (p.startBin + p.endBin + q.startBin + q.endBin) / 2
+		const spacing = Math.abs(q.startBin + q.endBin - p.startBin - p.endBin)
+		return (
+			CLING_MIDPOINT_FRACTION * Math.abs(s.startBin + s.endBin - mid) <= spacing
+		)
+	}
+
+	/** A fused segment no open track holds and this `fusePairs` call has not taken. */
+	private freeFuseSeg(): Segment {
+		const pool = this.fuseSegs
+		for (let i = 0; i < pool.length; i++) {
+			const s = pool[i]!
+			if (this.fuseSegTaken[i] === this.fuseStamp) continue
+			let held = false
+			for (let o = 0; o < this.open.length && !held; o++)
+				held = this.open[o]!.lastSeg === s
+			if (held) continue
+			this.fuseSegTaken[i] = this.fuseStamp
+			return s
+		}
+		const s: Segment = {
+			startBin: 0,
+			endBin: 0,
+			peakBin: 0,
+			peakDb: 0,
+			centroidBin: 0,
+			flags: { truncated: false, skirt: false, edge: false },
+		}
+		pool.push(s)
+		this.fuseSegTaken.push(this.fuseStamp)
+		return s
 	}
 
 	/** `fusePairs` new-segment state of `s` (2, 1 or 0, see there). */
@@ -1095,11 +1238,13 @@ export class Tracker {
 		let bestOverlap = 0
 		for (const t of this.open) {
 			if (taken.has(t)) continue
-			// A paired track takes a lone tone anywhere in its span, never a far weaker emitter.
+			// A paired track takes a lone tone anywhere in its span, never a far weaker or far
+			// narrower emitter.
 			if (
 				t.paired &&
 				!this.fuseParts.has(s) &&
-				s.peakDb < t.lastSeg.peakDb - FSK_PAIR_DB
+				(s.peakDb < t.lastSeg.peakDb - FSK_PAIR_DB ||
+					farNarrower(s, t.toneBins))
 			)
 				continue
 			const overlap =
@@ -1186,6 +1331,9 @@ export class Tracker {
 			partCentre: 0,
 			partObw: 0,
 			partBlock: -1,
+			toneBins: 0,
+			partSpans: NO_SPANS,
+			partCount: 0,
 			gateJustPassed: false,
 			gateStamp: 0,
 			rolloverFrom: null,
@@ -1984,21 +2132,25 @@ function chainBaseOf(prev: OpenTrack, next: OpenTrack): ChainBase {
 }
 
 /**
- * One segment from FSK pair parts (sorted by peak bin): their whole span, the strongest peak,
- * the excess-power centroid of the parts' own bins (not the hole between them) and the union of
- * their flags.
+ * One segment from FSK pair parts (sorted by peak bin), written into `out`: their whole span,
+ * the strongest peak, the excess-power centroid of the parts' own bins (not the hole between
+ * them) and the union of their flags.
  */
 function joinSegments(
 	parts: readonly Segment[],
 	powerDb: Float32Array,
 	floorDb: Float32Array,
+	out: Segment,
 ): Segment {
 	let start = Infinity
 	let end = -Infinity
 	let peak = parts[0]!
 	let num = 0
 	let den = 0
-	const flags = { truncated: false, skirt: false, edge: false }
+	const flags = out.flags
+	flags.truncated = false
+	flags.skirt = false
+	flags.edge = false
 	for (const p of parts) {
 		start = Math.min(start, p.startBin)
 		end = Math.max(end, p.endBin)
@@ -2014,14 +2166,17 @@ function joinSegments(
 		flags.skirt ||= p.flags.skirt
 		flags.edge ||= p.flags.edge
 	}
-	return {
-		startBin: start,
-		endBin: end,
-		peakBin: peak.peakBin,
-		peakDb: peak.peakDb,
-		centroidBin: den > 0 ? num / den : peak.peakBin,
-		flags,
-	}
+	out.startBin = start
+	out.endBin = end
+	out.peakBin = peak.peakBin
+	out.peakDb = peak.peakDb
+	out.centroidBin = den > 0 ? num / den : peak.peakBin
+	return out
+}
+
+/** `s` is far narrower than a `toneBins`-wide tone (`FSK_PAIR_WIDTH_RATIO`, one bin of slack). */
+function farNarrower(s: Segment, toneBins: number): boolean {
+	return FSK_PAIR_WIDTH_RATIO * (s.endBin - s.startBin) + 1 < toneBins
 }
 
 /** Within `FSK_PAIR_DB` in level and `FSK_PAIR_WIDTH_RATIO` in width: two tones of one pair. */
