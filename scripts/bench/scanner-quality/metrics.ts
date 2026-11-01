@@ -1,15 +1,17 @@
 /**
  * Scanner quality benchmark: scores one run against the scene's ground truth.
  *
- * Matching: a track or capture belongs to the truth signal whose centre is nearest, within
- * max(half its nominal bandwidth, 6.25 kHz), while that signal is on (500 ms slack). A discovery
+ * Matching: a track belongs to the truth signal whose centre is nearest, within max(half its
+ * nominal bandwidth, 6.25 kHz), while that signal is on (500 ms slack). A capture counts for every
+ * signal its passband overlaps while that signal is on (capturesSpectrally). A discovery
  * matches the same way by frequency, created at any time after the signal's first transmission
  * began (push-to-talk pooling and pending promotion create records after a transmission ends).
  *
  * Identification oracle (fake decoders; nothing is decoded): a capture identifies its signal when
  * the real replay planner put the signal's protocol in its trials, the capture centre lies within
  * the decoder's reach of the signal's centre (2.5 kHz for the 48 kHz audio decoders and the
- * analog trial, the capture's own passband for rtl_433 and LoRa), the captured window holds at
+ * analog trial; for rtl_433 and LoRa the capture's passband must hold the whole signal, see
+ * reachHz), the captured window holds at
  * least 80 % of min(500 ms, the transmission), and the signal's SNR reaches the decoder floor
  * (DECODE_FLOOR_DB). The trials run one after another at a nominal 1 s each, so a protocol in
  * trial slot k is identified k s after the capture finished.
@@ -116,6 +118,8 @@ export interface QualityReport {
 		tracks: number
 		discoveries: number
 		captures: number
+		/** Requests the modelled capture port refused (busy, rate-limited). */
+		capturesRefused: number
 	}
 	falseDiscoveries: FalseDiscovery[]
 }
@@ -180,14 +184,37 @@ const trialMatches = (
 		? trial.kind === "analog" && trial.protocol === "analog-fm"
 		: trial.protocol === expected
 
-function reachHz(
+/** Decoders that take the capture's whole passband (the rest demodulate a 48 kHz audio channel). */
+const PASSBAND_DECODERS = new Set(["rtl433", "lora-meshtastic"])
+
+/**
+ * How far (Hz) the capture centre may sit from the signal's centre for `decoder` to decode it, or
+ * null when the capture cannot hold the signal at all. Passband decoders need the whole signal
+ * inside the capture: rate ≥ nominal bandwidth, else null (a 96 kHz capture never holds a
+ * 100 kHz signal), then max(2.5 kHz, (rate − bandwidth) / 2), so a passband exactly as wide as the
+ * signal keeps the 2.5 kHz centring tolerance of the narrow decoders.
+ */
+export function reachHz(
 	decoder: string,
-	capture: CaptureRecord,
-	t: TruthSignal,
-): number {
-	if (decoder === "rtl433" || decoder === "lora-meshtastic")
-		return Math.max(NARROW_REACH_HZ, capture.rateHz / 2 - t.bandwidthHz / 2)
-	return NARROW_REACH_HZ
+	capture: Pick<CaptureRecord, "rateHz">,
+	t: Pick<TruthSignal, "bandwidthHz">,
+): number | null {
+	if (!PASSBAND_DECODERS.has(decoder)) return NARROW_REACH_HZ
+	if (capture.rateHz < t.bandwidthHz) return null
+	return Math.max(NARROW_REACH_HZ, (capture.rateHz - t.bandwidthHz) / 2)
+}
+
+/**
+ * The capture's passband [rf − rate / 2, rf + rate / 2] overlaps the signal's nominal band
+ * [centre − bandwidth / 2, centre + bandwidth / 2]: the capture holds at least part of it.
+ */
+export function capturesSpectrally(
+	capture: Pick<CaptureRecord, "rfHz" | "rateHz">,
+	t: Pick<TruthSignal, "centreHz" | "bandwidthHz">,
+): boolean {
+	return (
+		Math.abs(capture.rfHz - t.centreHz) < (capture.rateHz + t.bandwidthHz) / 2
+	)
 }
 
 function overlapMs(
@@ -223,8 +250,8 @@ export function oracleIdentify(
 	const slot = capture.trials.findIndex(tr => trialMatches(expected, tr))
 	if (slot < 0) return null
 	const trial = capture.trials[slot]!
-	if (Math.abs(capture.rfHz - t.centreHz) > reachHz(trial.decoder, capture, t))
-		return null
+	const reach = reachHz(trial.decoder, capture, t)
+	if (reach === null || Math.abs(capture.rfHz - t.centreHz) > reach) return null
 	const { overlap, needed } = overlapMs(capture.windowMs, t.intervals)
 	if (overlap < needed) return null
 	return capture.finishedMs + (slot + 1) * TRIAL_MS
@@ -275,9 +302,11 @@ export function score(scene: Scene, run: RunRecord): QualityReport {
 		const txs = transmissionsOf(t)
 		const firstOn = t.intervals[0]?.startMs ?? 0
 		const ds = discOf.get(t.id) ?? []
+		// Every capture whose passband holds part of the signal while it was on; the oracle decides
+		// whether that capture is enough to decode it.
 		const captures = run.captures.filter(
 			c =>
-				Math.abs(c.rfHz - t.centreHz) <= toleranceOf(t) &&
+				capturesSpectrally(c, t) &&
 				onAt(t, c.trackStartMs, c.endedMs ?? c.trackStartMs),
 		)
 		const idTimes = captures
@@ -391,6 +420,8 @@ export function score(scene: Scene, run: RunRecord): QualityReport {
 			tracks: run.tracks.length,
 			discoveries: run.discoveries.length,
 			captures: run.captures.length,
+			capturesRefused:
+				run.refusedCaptures.busy + run.refusedCaptures.rateLimited,
 		},
 		falseDiscoveries: falses,
 	}
@@ -464,7 +495,7 @@ export function formatReport(r: QualityReport): string {
 			`false discoveries ${t.falseDiscoveries} (dc ${t.falseByKind.dc}, birdie ${t.falseByKind.birdie}, other ${t.falseByKind.other})`,
 	)
 	lines.push(
-		`pipeline tracks ${t.tracks}, discoveries created ${t.discoveries}, IQ captures requested ${t.captures}`,
+		`pipeline tracks ${t.tracks}, discoveries created ${t.discoveries}, IQ captures made ${t.captures} (refused by the port ${t.capturesRefused})`,
 	)
 	for (const f of r.falseDiscoveries)
 		lines.push(

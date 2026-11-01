@@ -378,6 +378,8 @@ export class SceneGenerator {
 	private readonly emitters: Emitter[]
 	private readonly noise: Float32Array
 	private noiseState: number
+	/** Lead-in and tail noise draw from their own stream, never from the scene's. */
+	private leadInState: number
 	private position = 0
 
 	constructor(readonly scene: Scene) {
@@ -394,6 +396,7 @@ export class SceneGenerator {
 			this.noise[i + 1] = r * Math.sin(t)
 		}
 		this.noiseState = (scene.seed ^ 0x9e3779b9) >>> 0 || 1
+		this.leadInState = (scene.seed ^ 0x85ebca6b) >>> 0 || 1
 		this.emitters = scene.truth.map((t, i) =>
 			emitterFor(t, scene, mulberry32(scene.seed + 7919 * (i + 1))),
 		)
@@ -475,12 +478,15 @@ export class SceneGenerator {
 		return out
 	}
 
-	/** Noise-only chunk (lead-in before the scene clock starts). */
+	/**
+	 * Noise-only chunk (lead-in before scene time 0, tail after the end). Its own xorshift stream:
+	 * however much lead-in a run feeds, the scene's bytes stay the same.
+	 */
 	noiseOnly(n: number): Buffer {
 		const out = Buffer.allocUnsafe(2 * n)
 		const sigma = this.scene.noiseSigma
 		const mask = (1 << NOISE_TABLE_BITS) - 1
-		let x = this.noiseState
+		let x = this.leadInState
 		for (let i = 0; i < n; i++) {
 			x ^= x << 13
 			x ^= x >>> 17
@@ -489,7 +495,7 @@ export class SceneGenerator {
 			out[2 * i] = cu8(sigma * this.noise[x & mask]!)
 			out[2 * i + 1] = cu8(sigma * this.noise[(x >>> NOISE_TABLE_BITS) & mask]!)
 		}
-		this.noiseState = x
+		this.leadInState = x
 		return out
 	}
 }

@@ -61,14 +61,16 @@ requests, replay trial plan) on a virtual clock. It prints a per-signal table, r
 identification by class and SNR, splits, false discoveries, CPU seconds per IQ second, and one
 JSON line. Decoders are faked: see `scripts/bench/scanner-quality/metrics.ts` for the oracle and
 [SCANNER.md](../docs/SCANNER.md#quality-benchmark) for what is measured. The `small` scene
-(1.024 Msps, 12 s) also runs as a vitest test; `full` (2.4 Msps, 45 s) takes a few minutes.
+(1.024 Msps, 12 s) also runs as a vitest test; `full` (2.4 Msps, 45 s) takes about 90 s. Results
+are deterministic for a seed. The fake capture port enforces the real port's limits (2 at once,
+6 per source per minute, 2 s ring); `--unbounded-captures` grants every request.
 
 **Usage:**
 
 ```bash
 pnpm exec esbuild scripts/bench/scanner-quality.ts --bundle --platform=node --format=esm \
   --packages=external --outfile=output/bench/scanner-quality.mjs
-node output/bench/scanner-quality.mjs [--scene small|full] [--seed N]
+node output/bench/scanner-quality.mjs [--scene small|full] [--seed N] [--unbounded-captures]
 node output/bench/scanner-quality.mjs --file capture.cu8 --rate 2400000 --centre 433920000 [--seconds 60]
 ```
 

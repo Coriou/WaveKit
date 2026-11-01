@@ -10,8 +10,11 @@
  *   pnpm exec esbuild scripts/bench/scanner-quality.ts --bundle \
  *     --platform=node --format=esm --packages=external \
  *     --outfile=output/bench/scanner-quality.mjs
- *   node output/bench/scanner-quality.mjs [--scene small|full] [--seed N]
+ *   node output/bench/scanner-quality.mjs [--scene small|full] [--seed N] [--unbounded-captures]
  *   node output/bench/scanner-quality.mjs --file <capture.cu8> --rate <Hz> --centre <Hz> [--seconds S]
+ *
+ * The fake capture port enforces the real one's limits (2 captures at once, 6 detection captures
+ * per source per minute, a 2 s ring); --unbounded-captures grants every request instead.
  *
  * --file replays a CU8 capture (the first seconds feed the lead-in while the passive job starts)
  * and prints counts only: there is no ground truth, so nothing is scored. Nothing listens on the
@@ -113,6 +116,7 @@ async function main(): Promise<void> {
 	const seed = num("seed")
 	const scene = name === "full" ? fullScene(seed) : smallScene(seed)
 	const gen = new SceneGenerator(scene)
+	const captureLimits = !process.argv.includes("--unbounded-captures")
 	const run = await runScanner(
 		{
 			rateHz: scene.rateHz,
@@ -121,6 +125,7 @@ async function main(): Promise<void> {
 			leadIn: n => gen.noiseOnly(n),
 		},
 		{
+			captureLimits,
 			onProgress: ms => {
 				if (ms % 10_000 < 1_000)
 					process.stderr.write(`  ${(ms / 1000).toFixed(0)} s\n`)

@@ -23,7 +23,12 @@ import type {
 	IqCaptureView,
 	IqCaptureRateHz,
 } from "../../../src/core/scanner/iq-capture-contract.js"
-import { IQ_CAPTURE_MAX_MS } from "../../../src/core/scanner/iq-capture-contract.js"
+import {
+	IQ_CAPTURE_MAX_CONCURRENT,
+	IQ_CAPTURE_MAX_MS,
+	IQ_CAPTURE_PER_SOURCE_PER_MINUTE,
+	IQ_CAPTURE_PREROLL_MAX_MS,
+} from "../../../src/core/scanner/iq-capture-contract.js"
 import type {
 	Discovery,
 	ScannerSettings,
@@ -34,12 +39,23 @@ import type {
 } from "../../../src/core/spectrum/types.js"
 import type { ScannerDiscoveryEventData } from "@wavekit/api-types"
 import { ArbiterFakeTuner } from "../../../tests/mocks/scanner/arbiter-fakes.js"
+import { VirtualClock } from "./virtual-clock.js"
 
 const SOURCE = "rtl"
 /** Virtual epoch of scene time 0. */
 export const T0_MS = 1_700_000_000_000
 /** 50 ms chunks: one integration block each at the default 50 ms. */
 export const CHUNK_MS = 50
+/** Noise fed before scene time 0 so the noise floor settles (20 chunks). */
+export const LEAD_IN_MS = 1_000
+/** Noise fed after the scene so open tracks close on their hang and captures finish. */
+const TAIL_MS = 1_000
+/** Real turns allowed for the scanner to start its passive job (state load is async I/O). */
+const START_TURNS_MAX = 10_000
+/** The capture tool keeps this much of its ring unused (RING_MARGIN_S in iq-capture/service.ts). */
+const RING_MARGIN_MS = 250
+/** The wall clock, read before the virtual clock replaces performance.now. */
+const wallNow = performance.now.bind(performance)
 
 export interface TrackRecord {
 	trackId: string
@@ -83,6 +99,8 @@ export interface CaptureRecord {
 	requestedMs: number
 	/** Scene ms of the track start (`fromSample`). */
 	trackStartMs: number
+	/** Scene ms the captured IQ starts: pre-roll before the track start, clamped to the ring. */
+	windowStartMs: number
 	rfHz: number
 	rateHz: IqCaptureRateHz | 48_000
 	endedMs: number | null
@@ -109,6 +127,8 @@ export interface RunRecord {
 	/** Discoveries listed by the service at the end (after merges). */
 	finalIds: string[]
 	transients: number
+	/** Capture requests the modelled port refused. */
+	refusedCaptures: { busy: number; rateLimited: number }
 }
 
 export interface IqChunkSource {
@@ -116,7 +136,7 @@ export interface IqChunkSource {
 	readonly centreHz: number
 	/** Next CU8 chunk of at most `samples` samples, null at the end. */
 	next(samples: number): Buffer | null
-	/** Noise for the lead-in while the passive job starts (not part of the scene clock). */
+	/** Noise for the lead-in before scene time 0 and the tail after it (not part of the scene). */
 	leadIn(samples: number): Buffer
 }
 
@@ -226,12 +246,22 @@ interface Internals {
  */
 export async function runScanner(
 	source: IqChunkSource,
-	opts: { onProgress?: (sceneMs: number) => void } = {},
+	opts: {
+		onProgress?: (sceneMs: number) => void
+		/**
+		 * Enforce the real capture port's limits (concurrency, per-minute rate, 2 s ring); default
+		 * on. Off: every request is granted with its full pre-roll (the first published baseline).
+		 */
+		captureLimits?: boolean
+		/** Diagnostics: called once with the service before it starts (wrap internals to trace). */
+		inspect?: (service: ScannerService, sceneNow: () => number) => void
+	} = {},
 ): Promise<RunRecord> {
 	const fs = source.rateHz
 	const dir = mkdtempSync(join(tmpdir(), "wk-scanner-quality-"))
-	let sceneMs = -1_000
-	const now = (): number => T0_MS + sceneMs
+	const clock = new VirtualClock(T0_MS - LEAD_IN_MS)
+	const now = (): number => clock.now()
+	const sceneNow = (): number => clock.now() - T0_MS
 	const caps: SourceCaps = {
 		kind: "iq",
 		format: "U8_IQ",
@@ -269,9 +299,9 @@ export async function runScanner(
 	let service: ScannerService | null = null
 	const finish = (c: CaptureRecord): void => {
 		if (c.finishedMs !== null || !service) return
-		c.finishedMs = sceneMs
-		const start = c.trackStartMs - preRollMs
-		const end = Math.min(start + IQ_CAPTURE_MAX_MS, c.endedMs ?? sceneMs)
+		c.finishedMs = sceneNow()
+		const start = c.windowStartMs
+		const end = Math.min(start + IQ_CAPTURE_MAX_MS, c.endedMs ?? sceneNow())
 		c.windowMs = [start, end]
 		const view: IqCaptureView = {
 			captureId: c.captureId,
@@ -303,15 +333,46 @@ export async function runScanner(
 				internals.store.discoveryIdOf(c.observationId) ?? c.discoveryId
 	}
 	let nextCapture = 1
+	const limits = opts.captureLimits !== false
+	const stamps: number[] = []
+	const refused = { busy: 0, rateLimited: 0 }
 	const port = {
 		near: () => [],
 		capture: (req: IqCaptureRequest) => {
+			const at = sceneNow()
+			const trackStartMs = sceneMsOfSample(req.fromSample)
+			if (limits) {
+				// The real port: IQ_CAPTURE_MAX_CONCURRENT captures being written, then
+				// IQ_CAPTURE_PER_SOURCE_PER_MINUTE detection captures per rolling minute.
+				let open = 0
+				for (const c of captures.values()) if (c.finishedMs === null) open++
+				if (open >= IQ_CAPTURE_MAX_CONCURRENT) {
+					refused.busy++
+					return { refused: "busy" as const }
+				}
+				while (stamps.length > 0 && at - stamps[0]! >= 60_000) stamps.shift()
+				if (
+					req.reason === "detection" &&
+					stamps.length >= IQ_CAPTURE_PER_SOURCE_PER_MINUTE
+				) {
+					refused.rateLimited++
+					return { refused: "rate-limited" as const }
+				}
+				if (req.reason === "detection") stamps.push(at)
+			}
+			// The port's ring holds the last IQ_CAPTURE_PREROLL_MAX_MS less its 250 ms margin: a
+			// later request loses the start of the track.
+			const windowStartMs = Math.max(
+				trackStartMs - preRollMs,
+				limits ? at - IQ_CAPTURE_PREROLL_MAX_MS + RING_MARGIN_MS : -Infinity,
+			)
 			const captureId = `cap-${nextCapture++}`
 			captures.set(captureId, {
 				captureId,
 				observationId: req.observationId,
-				requestedMs: sceneMs,
-				trackStartMs: sceneMsOfSample(req.fromSample),
+				requestedMs: at,
+				trackStartMs,
+				windowStartMs,
 				rfHz: req.rfHz,
 				rateHz: req.rateHz ?? 48_000,
 				endedMs: null,
@@ -337,15 +398,15 @@ export async function runScanner(
 			const c = captures.get(captureId)
 			if (c && c.finishedMs === null) {
 				c.edge = true
-				c.endedMs = sceneMs
-				c.finishedMs = sceneMs
+				c.endedMs = sceneNow()
+				c.finishedMs = sceneNow()
 			}
 			return true
 		},
 		end: (captureId: string) => {
 			const c = captures.get(captureId)
 			if (!c || c.endedMs !== null) return
-			c.endedMs = sceneMs
+			c.endedMs = sceneNow()
 			finish(c)
 		},
 		claim: () => false,
@@ -359,38 +420,47 @@ export async function runScanner(
 		state: () => "on" as const,
 	}
 
-	service = new ScannerService({
-		settings,
-		sourceConfigs: [
-			{
-				id: SOURCE,
-				type: "rtl_tcp",
-				host: "127.0.0.1",
-				port: 1234,
-				loop: false,
-				playbackSpeed: 1,
-				caps,
-			},
-		],
-		decoderConfigs: [],
-		region: "EU",
-		stateDir: dir,
-		sources: sources as never,
-		routing: {
-			getFanout: () => fanout,
-			releaseUnused: () => undefined,
-		} as never,
-		tuner: tuner as never,
-		decoders: new Decoders() as never,
-		digitalVoice: null,
-		liveDemod: null,
-		logger: pino({ level: "silent" }),
-		now,
-		engineHost: "inline",
-		tickMs: 20,
-		iqCapture: port as never,
-	})
+	// Every timer the scanner arms from here on runs on the virtual clock.
+	clock.install()
+	try {
+		service = new ScannerService({
+			settings,
+			sourceConfigs: [
+				{
+					id: SOURCE,
+					type: "rtl_tcp",
+					host: "127.0.0.1",
+					port: 1234,
+					loop: false,
+					playbackSpeed: 1,
+					caps,
+				},
+			],
+			decoderConfigs: [],
+			region: "EU",
+			stateDir: dir,
+			sources: sources as never,
+			routing: {
+				getFanout: () => fanout,
+				releaseUnused: () => undefined,
+			} as never,
+			tuner: tuner as never,
+			decoders: new Decoders() as never,
+			digitalVoice: null,
+			liveDemod: null,
+			logger: pino({ level: "silent" }),
+			now,
+			engineHost: "inline",
+			tickMs: 20,
+			iqCapture: port as never,
+		})
+	} catch (err: unknown) {
+		clock.uninstall()
+		rmSync(dir, { recursive: true, force: true })
+		throw err
+	}
 	const svc = service
+	opts.inspect?.(svc, sceneNow)
 	svc.spectrum.on("pipeline", (sourceId: string, ev: PipelineEvent) => {
 		if (sourceId !== SOURCE) return
 		if (ev.kind === "transient") transients++
@@ -406,7 +476,7 @@ export async function runScanner(
 			r = {
 				trackId: t.trackId,
 				firstMs: sceneMsOfSample(t.startSample),
-				lastMs: sceneMs,
+				lastMs: sceneNow(),
 				centreHz: t.centreHz,
 				obwHz: t.obwHz,
 				maxSnrDb: t.snrDb,
@@ -439,7 +509,7 @@ export async function runScanner(
 			r.gatePassedMs =
 				t.gatePassedSample !== undefined
 					? sceneMsOfSample(t.gatePassedSample)
-					: sceneMs
+					: sceneNow()
 		r.burst ||= t.flags.burst
 		r.edge ||= t.flags.edge
 		r.spur ||= t.flags.spur
@@ -451,8 +521,8 @@ export async function runScanner(
 		const prev = discoveries.get(d.id)
 		discoveries.set(d.id, {
 			id: d.id,
-			createdMs: prev?.createdMs ?? sceneMs,
-			lastEventMs: sceneMs,
+			createdMs: prev?.createdMs ?? sceneNow(),
+			lastEventMs: sceneNow(),
 			centreHz: d.frequencyHz + (d.measuredOffsetHz || 0),
 			frequencyHz: d.frequencyHz,
 			bandwidthHz: d.bandwidthHz,
@@ -476,63 +546,70 @@ export async function runScanner(
 		}
 	})
 
-	const started = performance.now()
+	const started = wallNow()
 	let cpuMicros = 0
 	const chunk = Math.round((fs * CHUNK_MS) / 1000)
+	/** Two real turns: stream data events and promise continuations run before the next step. */
+	const settle = async (): Promise<void> => {
+		await turn()
+		await turn()
+	}
+	/** Fires the scanner timers due up to scene time `ms`, then holds the clock there. */
+	const advanceTo = (ms: number): Promise<void> =>
+		clock.advanceTo(T0_MS + ms, settle)
 	try {
 		await svc.start()
-		// Lead-in: noise until the passive job runs and its engine branch exists (≤ 5 s).
+		// Start-up: the passive job and its engine branch come up on real turns (state load and
+		// job start are async I/O). No IQ is fed and the virtual clock does not move, so how many
+		// turns this takes changes nothing the scene sees.
 		for (
 			let i = 0;
-			i < 100 &&
+			i < START_TURNS_MAX &&
 			(svc.getJob(`passive-${SOURCE}`)?.state !== "running" ||
 				branchAtSample === null);
 			i++
-		) {
+		)
+			await turn()
+		if (branchAtSample === null)
+			throw new Error("benchmark: the passive job never opened its branch")
+		// Lead-in: LEAD_IN_MS of noise so the noise floor settles before the scene starts.
+		for (let ms = -LEAD_IN_MS + CHUNK_MS; ms <= 0; ms += CHUNK_MS) {
+			await advanceTo(ms)
 			fanout.write(source.leadIn(chunk))
 			fedSamples += chunk
-			await turn()
-			await turn()
+			await settle()
 		}
-		// One more second of noise so the noise floor settles before the scene starts.
-		for (let i = 0; i < 1000 / CHUNK_MS; i++) {
-			fanout.write(source.leadIn(chunk))
-			fedSamples += chunk
-			await turn()
-		}
-		engineSampleAtZero = fedSamples - (branchAtSample ?? 0)
-		sceneMs = 0
+		engineSampleAtZero = fedSamples - branchAtSample
+		let fedSceneSamples = 0
 		let lastProgress = 0
 		for (;;) {
 			const bytes = source.next(chunk)
 			if (!bytes) break
-			const samples = bytes.length / 2
-			sceneMs += (samples * 1000) / fs
+			fedSceneSamples += bytes.length / 2
+			// The engine processes on its batch-flush timer too: count the timers' CPU as well.
 			const cpu0 = process.cpuUsage()
+			await advanceTo((fedSceneSamples * 1000) / fs)
 			fanout.write(bytes)
-			fedSamples += samples
-			await turn()
-			await turn()
+			fedSamples += bytes.length / 2
+			await settle()
 			const d = process.cpuUsage(cpu0)
 			cpuMicros += d.user + d.system
+			const at = sceneNow()
 			for (const c of captures.values())
-				if (
-					c.finishedMs === null &&
-					sceneMs >= c.trackStartMs - preRollMs + IQ_CAPTURE_MAX_MS
-				)
+				if (c.finishedMs === null && at >= c.windowStartMs + IQ_CAPTURE_MAX_MS)
 					finish(c)
-			if (sceneMs - lastProgress >= 1000) {
-				lastProgress = sceneMs
-				opts.onProgress?.(sceneMs)
+			if (at - lastProgress >= 1000) {
+				lastProgress = at
+				opts.onProgress?.(at)
 			}
 		}
 		// Let the open tracks close on quiet (hang) and finish what is pending.
-		for (let i = 0; i < 1000 / CHUNK_MS; i++) {
-			sceneMs += CHUNK_MS
+		const sceneEnd = sceneNow()
+		for (let ms = CHUNK_MS; ms <= TAIL_MS; ms += CHUNK_MS) {
 			const cpu0 = process.cpuUsage()
+			await advanceTo(sceneEnd + ms)
 			fanout.write(source.leadIn(chunk))
-			await turn()
-			await turn()
+			await settle()
 			const d = process.cpuUsage(cpu0)
 			cpuMicros += d.user + d.system
 		}
@@ -545,17 +622,19 @@ export async function runScanner(
 		return {
 			rateHz: fs,
 			centreHz: source.centreHz,
-			iqSeconds: Math.max(0, sceneMs) / 1000,
+			iqSeconds: Math.max(0, sceneNow()) / 1000,
 			cpuSeconds: cpuMicros / 1e6,
-			wallSeconds: (performance.now() - started) / 1000,
+			wallSeconds: (wallNow() - started) / 1000,
 			tracks: [...tracks.values()],
 			discoveries: [...discoveries.values()],
 			captures: [...captures.values()],
 			finalIds,
 			transients,
+			refusedCaptures: { ...refused },
 		}
 	} finally {
 		await svc.stop()
+		clock.uninstall()
 		rmSync(dir, { recursive: true, force: true })
 	}
 }

@@ -13,11 +13,20 @@
 // discovery about 0.1 s); the OOK sensor tries rtl433 first (identified 1.9 s, was 8.9 s), the
 // POCSAG burst tries pocsag before the analog trial (4.2 s, was 8.1 s), LoRa passes the gate in
 // 2 to 3 tracks per packet (was 7) and is lost at discovery. Pipeline tracks 29 → 20.
+//
+// Deterministic since the virtual clock (the scanner's timers on scene time) and the separate
+// lead-in noise stream; the small scene runs with an unbounded capture port (captureLimits off)
+// so the floors judge admission and planning: recall 7/8, identified 6/7, 1 false (birdie). With
+// the real port's limits (2 at once, 6 per minute, 2 s ring) the same scene identifies 4/7.
+// Pending capture slots freed on admission: AFSK1200 is identified from its second packet (8.5 s,
+// was 12.5 s from the third).
 import { createHash } from "node:crypto"
 import { describe, expect, it } from "vitest"
 import { runScanner } from "../../../../scripts/bench/scanner-quality/harness.js"
 import {
+	capturesSpectrally,
 	oracleIdentify,
+	reachHz,
 	score,
 	type QualityReport,
 } from "../../../../scripts/bench/scanner-quality/metrics.js"
@@ -70,6 +79,7 @@ describe("scanner quality benchmark scene", () => {
 			observationId: null,
 			requestedMs: 1_900,
 			trackStartMs: 1_500,
+			windowStartMs: 1_000,
 			rfHz: dmr.centreHz,
 			rateHz: 48_000,
 			endedMs: 5_000,
@@ -106,24 +116,94 @@ describe("scanner quality benchmark scene", () => {
 			oracleIdentify(dmr, capture({ windowMs: [5_500, 6_500] })),
 		).toBeNull()
 	})
+
+	it("a passband decoder needs the whole signal inside the capture", () => {
+		// 100 kHz FSK sensor through rtl433: a 96 kHz capture cannot hold it, even centred
+		const fsk = { bandwidthHz: 100_000 }
+		expect(reachHz("rtl433", { rateHz: 96_000 }, fsk)).toBeNull()
+		// 192 kHz: (192 000 − 100 000) / 2 = 46 kHz of room
+		expect(reachHz("rtl433", { rateHz: 192_000 }, fsk)).toBe(46_000)
+		// equal bandwidth: no room, the 2.5 kHz centring tolerance remains; 1 Hz short: none
+		expect(reachHz("rtl433", { rateHz: 96_000 }, { bandwidthHz: 96_000 })).toBe(
+			2_500,
+		)
+		expect(
+			reachHz("lora-meshtastic", { rateHz: 96_000 }, { bandwidthHz: 96_001 }),
+		).toBeNull()
+		// the audio decoders demodulate a 48 kHz channel: always 2.5 kHz
+		expect(reachHz("dsd-fme", { rateHz: 48_000 }, fsk)).toBe(2_500)
+
+		const t = {
+			...smallScene().truth.find(x => x.class === "ism-ook")!,
+			bandwidthHz: 100_000,
+			intervals: [{ startMs: 1_000, endMs: 2_000 }],
+		}
+		const capture = (
+			rateHz: 96_000 | 192_000,
+			rfHz: number,
+		): CaptureRecord => ({
+			captureId: "c",
+			observationId: null,
+			requestedMs: 1_000,
+			trackStartMs: 1_000,
+			windowStartMs: 500,
+			rfHz,
+			rateHz,
+			endedMs: 2_000,
+			finishedMs: 2_000,
+			windowMs: [500, 2_000],
+			discoveryId: null,
+			trials: [{ protocol: "ism", decoder: "rtl433", kind: "probe" }],
+			skipped: [],
+			edge: false,
+		})
+		expect(oracleIdentify(t, capture(96_000, t.centreHz))).toBeNull()
+		expect(oracleIdentify(t, capture(192_000, t.centreHz + 46_000))).toBe(3_000)
+		expect(oracleIdentify(t, capture(192_000, t.centreHz + 46_001))).toBeNull()
+	})
+
+	it("a capture counts for a signal its passband overlaps", () => {
+		const t = { centreHz: 1_000_000, bandwidthHz: 12_000 }
+		// 48 kHz passband ± 24 kHz, signal ± 6 kHz: they touch at 30 kHz apart
+		expect(capturesSpectrally({ rfHz: 1_029_999, rateHz: 48_000 }, t)).toBe(
+			true,
+		)
+		expect(capturesSpectrally({ rfHz: 1_030_000, rateHz: 48_000 }, t)).toBe(
+			false,
+		)
+		// a 192 kHz capture 60 kHz off still holds the signal (the tolerance match dropped it)
+		expect(capturesSpectrally({ rfHz: 940_000, rateHz: 192_000 }, t)).toBe(true)
+	})
 })
 
 describe("scanner quality benchmark, small scene (real scanner)", () => {
 	let report: QualityReport
 	const bySignal = (id: string) => report.signals.find(s => s.id === id)!
 
-	it("runs the scene through the scanner", async () => {
+	const runSmall = async (): Promise<QualityReport> => {
 		const scene = smallScene()
 		const gen = new SceneGenerator(scene)
-		const run = await runScanner({
-			rateHz: scene.rateHz,
-			centreHz: scene.centreHz,
-			next: n => gen.next(n),
-			leadIn: n => gen.noiseOnly(n),
-		})
-		report = score(scene, run)
+		// Unbounded port: these floors judge admission and the replay plan, not the capture budget.
+		const run = await runScanner(
+			{
+				rateHz: scene.rateHz,
+				centreHz: scene.centreHz,
+				next: n => gen.next(n),
+				leadIn: n => gen.noiseOnly(n),
+			},
+			{ captureLimits: false },
+		)
+		return score(scene, run)
+	}
+
+	it("runs the scene through the scanner, twice with identical results", async () => {
+		report = await runSmall()
 		expect(report.iqSeconds).toBeGreaterThanOrEqual(12)
-	}, 60_000)
+		// virtual clock + separate lead-in noise: the second run sees and does the same
+		const again = await runSmall()
+		expect(again.signals).toEqual(report.signals)
+		expect(again.totals).toEqual(report.totals)
+	}, 120_000)
 
 	it("finds and identifies the strong classes", () => {
 		for (const id of [
@@ -158,6 +238,14 @@ describe("scanner quality benchmark, small scene (real scanner)", () => {
 		expect(bySignal("lora-15dB").gatePassed).toBe(true)
 	})
 
+	it("captures the second AFSK1200 packet while it is still pending", () => {
+		// packets at 2, 6 and 10 s; the second (6.0 to 6.9 s) is captured once the carrier and the
+		// push-to-talk that took both pending slots are admitted (was the third packet, 12.5 s)
+		const afsk = bySignal("afsk1200-15dB")
+		expect(afsk.identified).toBe(true)
+		expect(afsk.timeToIdentifyMs!).toBeLessThanOrEqual(9_000)
+	})
+
 	it("keeps today's floors: recall, identification, splits and false discoveries", () => {
 		const t = report.totals
 		expect(t.real).toBe(8)
@@ -170,6 +258,67 @@ describe("scanner quality benchmark, small scene (real scanner)", () => {
 		// the DC spike never becomes a track (DC guard)
 		expect(bySignal("dc-25dB").tracks).toBe(0)
 	})
+})
+
+/**
+ * One weak push-to-talk over (10 dB, 3 s) on 2.4 Msps after two 6 dB voice carriers that pass the
+ * gate, are never admitted and take both pending capture slots first. The store admits the over
+ * only on its closing ingest (sustained run), so the gate-pass capture, which skips closing
+ * snapshots, never asked for it as an admitted track and the first over was lost.
+ */
+function pttScene(): Scene {
+	return buildScene({
+		name: "ptt",
+		rateHz: 2_400_000,
+		centreHz: 433_100_000,
+		durationMs: 6_000,
+		seed: 20_261_104,
+		noiseSigma: 0.03,
+		signals: [
+			{
+				class: "nfm-voice",
+				offsetHz: -900_000,
+				snrDb: 6,
+				intervals: [{ startMs: 0, endMs: 6_000 }],
+			},
+			{
+				class: "nfm-voice",
+				offsetHz: -850_000,
+				snrDb: 6,
+				intervals: [{ startMs: 0, endMs: 6_000 }],
+			},
+			{
+				class: "nfm-ptt",
+				offsetHz: -550_000,
+				snrDb: 10,
+				intervals: [{ startMs: 1_000, endMs: 4_000 }],
+			},
+		],
+	})
+}
+
+describe("scanner quality benchmark, push-to-talk admitted at close (real scanner, port limits)", () => {
+	it("captures the over from the ring when its closing ingest admits it", async () => {
+		const scene = pttScene()
+		const gen = new SceneGenerator(scene)
+		const run = await runScanner({
+			rateHz: scene.rateHz,
+			centreHz: scene.centreHz,
+			next: n => gen.next(n),
+			leadIn: n => gen.noiseOnly(n),
+		})
+		const report = score(scene, run)
+		const ptt = report.signals.find(s => s.id === "nfm-ptt-10dB")!
+		expect(ptt.discovered).toBe(true)
+		expect(ptt.identified).toBe(true)
+		const c = run.captures.find(
+			x => Math.abs(x.rfHz - (scene.centreHz - 550_000)) <= 2_500,
+		)!
+		// asked at the close (after the over ended at 4 s), so the 2 s ring bounds its start
+		expect(c.requestedMs).toBeGreaterThanOrEqual(4_000)
+		expect(c.windowMs![0]).toBe(c.requestedMs - 2_000 + 250)
+		expect(report.totals.falseDiscoveries).toBe(0)
+	}, 60_000)
 })
 
 /** Three repeats of `lengthMs` with 15 ms gaps every period (the scene's sensor pattern). */
@@ -253,13 +402,21 @@ describe("scanner quality benchmark, FSK scene (real scanner)", () => {
 		expect(report.iqSeconds).toBeGreaterThanOrEqual(8)
 	}, 90_000)
 
-	it("a strong short ISM FSK send is one track, discovered and identified by rtl433 first", () => {
+	it("a strong short ISM FSK send is one track, discovered and planned for rtl433 first", () => {
 		const fsk = bySignal("ism-fsk-20dB")
 		expect(fsk.tracksPerTransmission).toBe(1)
 		expect(fsk.gatePassed).toBe(true)
 		expect(fsk.discoveriesLive).toBe(1)
-		expect(fsk.identified).toBe(true)
-		expect(fsk.timeToIdentifyMs!).toBeLessThanOrEqual(3_000)
+		expect(fsk.trialPlanned).toBe(true)
+		const centre = 433_100_000 + 400_000
+		const planned = captures.filter(
+			c => Math.abs(c.rfHz - centre) <= 50_000 && c.trials.length > 0,
+		)
+		expect(planned.length).toBeGreaterThan(0)
+		for (const c of planned) expect(c.trials[0]!.decoder).toBe("rtl433")
+		// Not identified: ISM captures are made at 96 kHz, narrower than the sensor's nominal
+		// 100 kHz, so rtl433 cannot hold it (the oracle used to clamp its reach and pass it).
+		expect(fsk.identified).toBe(false)
 	})
 
 	it("a weak POCSAG burst is one passing track whose plan tries pocsag first", () => {
