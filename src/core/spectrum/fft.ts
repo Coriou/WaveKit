@@ -129,11 +129,60 @@ export function powerToDb(
 	out: Float32Array,
 ): void {
 	const n = acc.length
-	const scale = 1 / (Math.max(1, frames) * (n / 2) * (n / 2))
+	const scale = powerScale(n, frames)
+	// inline, not binPowerDb: the bundled worker did not inline the call and the pass cost twice as much
 	for (let i = 0; i < n; i++) {
 		const p = acc[i]! * scale
 		out[i] =
 			p > 0 ? Math.max(POWER_FLOOR_DB, 10 * Math.log10(p)) : POWER_FLOOR_DB
+	}
+}
+
+/** `powerToDb`'s accumulator scale for `frames` frames of an N-point FFT: 1 / (frames·(N/2)²). */
+export function powerScale(n: number, frames: number): number {
+	return 1 / (Math.max(1, frames) * (n / 2) * (n / 2))
+}
+
+/**
+ * One bin of `powerToDb` before its Float32 store, the same expression (fft.test pins them
+ * bit-identical). NaN, zero and negative sums read POWER_FLOOR_DB.
+ */
+export function binPowerDb(acc: number, scale: number): number {
+	const p = acc * scale
+	return p > 0 ? Math.max(POWER_FLOOR_DB, 10 * Math.log10(p)) : POWER_FLOOR_DB
+}
+
+/**
+ * Brackets the dB threshold `t` in accumulator units so frame-rate stages compare linear power:
+ * with v(a) = Math.fround(binPowerDb(a, scale)), a > hi[i] ⇒ v(a) > t and a < lo[i] ⇒ v(a) < t.
+ * Only a in [lo, hi] (and NaN) must be decided in dB; then the decision equals the dB path's for
+ * both `>` and `>=` (v is non-decreasing in a: a product, Math.log10, max and fround all are).
+ *
+ * Bounds: B = 10^(t/10)/scale, lo/hi = B·(1 ∓ δ), δ = (|t| + 4)·2⁻²⁰. At a = B·(1 ± δ) the dB value
+ * moves by at least 10·log10(1 + δ) ≥ 4.34·δ/(1 + δ) ≥ 2.17·δ = 34.7·(|t| + 4)·2⁻²⁴, over ten times
+ * the Float32 rounding (≤ |v|·2⁻²⁴ with |v| ≤ |t| + 3.02 for δ < 0.5) plus the double-precision
+ * product, log and power errors (< 1e-12 dB for |t| < 10⁴). At −100 dB the bracket is 2·δ ≈ 2e-4
+ * relative (≈ 9e-4 dB) wide, so only a power within that sliver of the threshold takes a log.
+ * A threshold at or below POWER_FLOOR_DB (the clamp), non-finite, or with δ ≥ 0.5 brackets
+ * nothing: lo = −∞ and hi = +∞, and every value is decided in dB.
+ */
+export function dbThresholdBracket(
+	t: number,
+	scale: number,
+	lo: Float64Array,
+	hi: Float64Array,
+	i: number,
+): void {
+	const delta = (Math.abs(t) + 4) * 2 ** -20
+	const b = 10 ** (t / 10) / scale
+	const l = b * (1 - delta)
+	const h = b * (1 + delta)
+	if (t > POWER_FLOOR_DB && delta < 0.5 && l > 0 && Number.isFinite(h)) {
+		lo[i] = l
+		hi[i] = h
+	} else {
+		lo[i] = Number.NEGATIVE_INFINITY
+		hi[i] = Number.POSITIVE_INFINITY
 	}
 }
 

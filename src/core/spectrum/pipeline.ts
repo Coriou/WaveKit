@@ -31,7 +31,14 @@ import {
 	usableEdgeBins,
 } from "./detector.js"
 import type { CfarRange } from "./detector.js"
-import { accumulateShiftedPower, Fft, powerToDb } from "./fft.js"
+import {
+	accumulateShiftedPower,
+	binPowerDb,
+	dbThresholdBracket,
+	Fft,
+	powerScale,
+	powerToDb,
+} from "./fft.js"
 import { bytesPerSample, FrameSource } from "./frame-source.js"
 import type { Frame } from "./frame-source.js"
 import { NoiseFloor } from "./noise-floor.js"
@@ -267,10 +274,18 @@ export class SpectrumPipeline {
 	private shortSlot = 0
 	private shortFill = 0
 	private shortNext = -1
-	private readonly shortDb: Float32Array
+	/** `powerToDb` scale of the T_short sum; with the brackets below, the short path stays linear (§ 4.10). */
+	private readonly shortScale: number
+	/** Per block: `floor + k_short` (on) and `floor + k_short − h` (stay on) bracketed in shortAcc units. */
+	private readonly shortOnLo: Float64Array
+	private readonly shortOnHi: Float64Array
+	private readonly shortOffLo: Float64Array
+	private readonly shortOffHi: Float64Array
+	/** The short detector's hysteresis state and output (the Detector's own state is unused). */
 	private readonly shortOn: Uint8Array
 	private readonly burstCount: Uint8Array
-	private readonly burstPeakDb: Float32Array
+	/** Block peak of shortAcc; 0 reads NO_FLOOR_DBFS, like a NaN or non-positive sum. */
+	private readonly burstPeakAcc: Float64Array
 	private readonly burstCountDone: Uint8Array
 	private readonly burstPeakDone: Float32Array
 	private readonly burstOn: Uint8Array
@@ -533,10 +548,14 @@ export class SpectrumPipeline {
 		this.exclusionMask = new Uint8Array(this.n)
 		this.shortAcc = new Float64Array(this.n)
 		this.shortRing = new Float64Array(this.n * Math.max(1, this.framesPerShort))
-		this.shortDb = new Float32Array(this.n)
+		this.shortScale = powerScale(this.n, this.framesPerShort)
+		this.shortOnLo = new Float64Array(this.n)
+		this.shortOnHi = new Float64Array(this.n)
+		this.shortOffLo = new Float64Array(this.n)
+		this.shortOffHi = new Float64Array(this.n)
 		this.shortOn = new Uint8Array(this.n)
 		this.burstCount = new Uint8Array(this.n)
-		this.burstPeakDb = new Float32Array(this.n).fill(NO_FLOOR_DBFS)
+		this.burstPeakAcc = new Float64Array(this.n)
 		this.burstCountDone = new Uint8Array(this.n)
 		this.burstPeakDone = new Float32Array(this.n).fill(NO_FLOOR_DBFS)
 		this.burstOn = new Uint8Array(this.n)
@@ -930,6 +949,7 @@ export class SpectrumPipeline {
 		if (!ep) return
 		this.detector.reset()
 		this.shortDetector?.reset()
+		this.shortOn.fill(0)
 		this.resetShort()
 		this.resetArtefacts()
 		this.floorReady = false
@@ -1123,14 +1143,54 @@ export class SpectrumPipeline {
 		if (this.shortSlot === 0) this.resumShort() // exact once per window: the running sum never drifts
 		if (this.shortFill < w) this.shortFill++
 		if (this.shortFill < w || !this.floorReady) return
-		powerToDb(this.shortAcc, w, this.shortDb)
-		d.detect(this.shortDb, this.floorDb, this.shortOn)
+		// Detector.detect in linear power: the bracket decides; only a sum inside it (or NaN) takes a log
+		const mask = d.unmasked()
 		for (let i = 0; i < this.n; i++) {
-			const p = this.shortDb[i] ?? NO_FLOOR_DBFS
-			if (p > (this.burstPeakDb[i] ?? NO_FLOOR_DBFS)) this.burstPeakDb[i] = p
+			const a = this.shortAcc[i]!
+			if (a > this.burstPeakAcc[i]!) this.burstPeakAcc[i] = a
+			if (mask[i] !== 1) {
+				this.shortOn[i] = 0
+				continue
+			}
+			const was = this.shortOn[i] === 1
+			const on =
+				a > (was ? this.shortOffHi[i]! : this.shortOnHi[i]!) ||
+				(!(a < (was ? this.shortOffLo[i]! : this.shortOnLo[i]!)) &&
+					this.shortOnInDb(d, i, a, was))
+			this.shortOn[i] = on ? 1 : 0
 			// on-window frames of this block (saturating; only the comparison with burstMaxOnFrames matters)
-			if (this.shortOn[i] === 1 && (this.burstCount[i] ?? 0) < 255)
+			if (on && (this.burstCount[i] ?? 0) < 255)
 				this.burstCount[i] = (this.burstCount[i] ?? 0) + 1
+		}
+	}
+
+	/** Detector.detect's comparison for one bin, on the Float32 dB value `powerToDb` would store. */
+	private shortOnInDb(
+		d: Detector,
+		i: number,
+		a: number,
+		was: boolean,
+	): boolean {
+		const p = Math.fround(binPowerDb(a, this.shortScale))
+		const t = this.floorDb[i]! + d.kFor(i)
+		return was ? p >= t - this.cfg.hysteresisDb : p > t
+	}
+
+	/** Brackets this block's short thresholds once (fft.ts dbThresholdBracket), after the floor moves. */
+	private setShortThresholds(): void {
+		const d = this.shortDetector
+		if (!d) return
+		const h = this.cfg.hysteresisDb
+		for (let i = 0; i < this.n; i++) {
+			const t = this.floorDb[i]! + d.kFor(i)
+			dbThresholdBracket(t, this.shortScale, this.shortOnLo, this.shortOnHi, i)
+			dbThresholdBracket(
+				t - h,
+				this.shortScale,
+				this.shortOffLo,
+				this.shortOffHi,
+				i,
+			)
 		}
 	}
 
@@ -1156,7 +1216,7 @@ export class SpectrumPipeline {
 		this.blockFrames = 0
 		this.blockClipped = 0
 		this.burstCount.fill(0) // the sliding window (shortAcc, shortRing) spans blocks and is not reset here
-		this.burstPeakDb.fill(NO_FLOOR_DBFS)
+		this.burstPeakAcc.fill(0)
 		this.blanker.dropBlock()
 	}
 
@@ -1210,7 +1270,8 @@ export class SpectrumPipeline {
 			this.take(sample, "gate", tCopy)
 		}
 		this.burstCountDone.set(this.burstCount)
-		this.burstPeakDone.set(this.burstPeakDb)
+		for (let i = 0; i < this.n; i++)
+			this.burstPeakDone[i] = binPowerDb(this.burstPeakAcc[i]!, this.shortScale) // max commutes with the monotone dB map
 		this.resetBlock()
 		this.gaps = this.gaps.filter(g => g.end > blockEnd)
 
@@ -1228,6 +1289,7 @@ export class SpectrumPipeline {
 		const blockFloor = this.floor.blockFloor(this.powerDb, unmasked)
 		const effective = this.floor.effectiveFloor(blockFloor, ep.absKey)
 		this.floor.perBinFloor(this.floorDb, effective)
+		this.setShortThresholds()
 		this.floorReady = true
 		this.take(sample, "floor", t)
 		// recordNoiseEdges assumes adjacent blocks: after a skipped, stale, gap, overload or excluded block, start afresh
@@ -1273,6 +1335,7 @@ export class SpectrumPipeline {
 				this.staleAfterSettle++
 				this.detector.reset()
 				this.shortDetector?.reset()
+				this.shortOn.fill(0)
 				// the sliding short window spans blocks and frames stay contiguous through a stale discard: restart it,
 				// or the first accepted block opens a burst ghost at the previous hop's emitters (spec § 4.6)
 				this.resetShort()
