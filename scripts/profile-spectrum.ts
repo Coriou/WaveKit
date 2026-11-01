@@ -57,6 +57,7 @@ import {
 	decodeEventsFromWire,
 	encodeEventsForWire,
 } from "../src/core/spectrum/summary-wire.js"
+import { WaveKitError } from "../src/utils/errors.js"
 import type {
 	BlockSummary,
 	PipelineEvent,
@@ -89,7 +90,14 @@ const JSON_OUT = process.argv.includes("--json")
 function loadIq(): Uint8Array {
 	if (IQ_PATH) {
 		const buf = readFileSync(IQ_PATH)
+		// Whole IQ pairs only: an odd trailing byte is dropped, and an empty corpus
+		// would spin the chunk-fill loop forever.
 		const max = Math.min(buf.length, Math.round(RATE * 2 * SECONDS)) & ~1
+		if (max < 2)
+			throw new WaveKitError(
+				`--iq ${IQ_PATH} holds no complete IQ pair (${buf.length} bytes)`,
+				"PROFILE_IQ",
+			)
 		return new Uint8Array(buf.buffer, buf.byteOffset, max)
 	}
 	return synthesizeCu8(RATE, Math.min(SECONDS, 4))

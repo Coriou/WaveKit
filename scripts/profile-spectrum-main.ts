@@ -15,7 +15,7 @@
  * core's .cpuprofile files, main-thread event-loop delay (preload), WS rates.
  * Everything lives under the tmp dir, which is removed at the end unless --keep.
  */
-import { spawn, spawnSync } from "node:child_process"
+import { type ChildProcess, spawn, spawnSync } from "node:child_process"
 import {
 	mkdtempSync,
 	readdirSync,
@@ -256,86 +256,165 @@ function loadavg(): string {
 		.join(" ")
 }
 
-async function main(): Promise<void> {
-	const iq = synthesizeCu8(RATE, 4)
-	const fake = await startFake(iq)
-	const ports = {
-		api: await freePort(),
-		audio: await freePort(),
-		live: await freePort(),
-		voice: await freePort(),
-	}
-	const dir = mkdtempSync(join(os.tmpdir(), "wk-profile-main-"))
-	const profDir = join(dir, "prof")
-	const config = {
-		access: { mode: "legacy" },
-		stateDir: join(dir, "state"),
-		sources: [
-			{
-				id: SOURCE_ID,
-				type: "rtl_tcp",
-				host: "127.0.0.1",
-				port: fake.port,
-				stallTimeoutMs: 0,
-				caps: {
-					kind: "iq",
-					format: "U8_IQ",
-					sampleRate: RATE,
-					centerFreq: CENTRE_HZ,
-					exclusive: false,
-				},
-			},
-		],
-		decoders: [],
-		api: { host: "127.0.0.1", port: ports.api },
-		audio: { tcpPort: ports.audio, monitoring: false },
-		tunerRelay: { enabled: false },
-		// csdr is not on a dev Mac: live demod would only crash-loop.
-		liveDemod: { enabled: false, httpPort: ports.live },
-		digitalVoice: { enabled: false, httpPort: ports.voice },
-		resources: {
-			containerMonitor: { enabled: false },
-			sdrHostPoller: { enabled: false },
-		},
-		aircraftInfo: { online: false, localDb: { enabled: false } },
-		logging: { level: "warn" },
-	}
-	const configPath = join(dir, "config.yaml")
-	writeFileSync(configPath, JSON.stringify(config, null, 2))
-	const env: NodeJS.ProcessEnv = {}
-	for (const [k, v] of Object.entries(process.env))
-		if (!k.startsWith("WAVEKIT_")) env[k] = v
-	env["WAVEKIT_CONFIG"] = configPath
-	env["PROFILE_ELD_OUT"] = join(dir, "eld.json")
-	const nodeArgs = [
-		...(PROF ? ["--cpu-prof", `--cpu-prof-dir=${profDir}`] : []),
-		"--import",
-		join(root, "scripts/profile-eld-preload.mjs"),
-		join(root, "dist/index.js"),
-	]
-	const logPath = join(dir, "core.log")
-	const loadStart = loadavg()
-	const spawnedAt = performance.now()
-	const child = spawn("nice", ["-n", "10", process.execPath, ...nodeArgs], {
-		cwd: dir,
-		env,
-		stdio: ["ignore", "pipe", "pipe"],
+/** What a run holds, torn down once by cleanup() from finally or a signal. */
+const held: {
+	fake: FakeRtl | null
+	dir: string | null
+	child: ChildProcess | null
+	exited: Promise<unknown>
+	ws: WsStats | null
+	logChunks: Buffer[]
+} = {
+	fake: null,
+	dir: null,
+	child: null,
+	exited: Promise.resolve(),
+	ws: null,
+	logChunks: [],
+}
+let cleaning: Promise<void> | null = null
+
+/** Idempotent: close the client, kill and await the scratch core, close the fake, drop the tmp dir. */
+function cleanup(): Promise<void> {
+	cleaning ??= (async () => {
+		held.ws?.close()
+		held.ws = null
+		const child = held.child
+		if (child && child.exitCode === null && child.signalCode === null) {
+			child.kill("SIGKILL")
+			await Promise.race([held.exited, sleep(5000)])
+		}
+		const dir = held.dir
+		if (dir !== null) {
+			try {
+				writeFileSync(join(dir, "core.log"), Buffer.concat(held.logChunks))
+			} catch {
+				// the dir may never have been fully set up
+			}
+		}
+		await held.fake?.close()
+		held.fake = null
+		if (dir !== null) {
+			if (KEEP) log(`kept ${dir}`)
+			else rmSync(dir, { recursive: true, force: true })
+		}
+	})()
+	return cleaning
+}
+
+for (const signal of ["SIGINT", "SIGTERM"] as const)
+	process.once(signal, () => {
+		log(`${signal}: cleaning up`)
+		void cleanup()
+			.catch((err: unknown) => {
+				log(
+					`cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+				)
+			})
+			.finally(() => process.exit(signal === "SIGINT" ? 130 : 143))
 	})
-	const logChunks: Buffer[] = []
-	child.stdout.on("data", (d: Buffer) => logChunks.push(d))
-	child.stderr.on("data", (d: Buffer) => logChunks.push(d))
-	const exited = new Promise<number | null>(resolve =>
-		child.on("exit", code => resolve(code)),
-	)
-	let ws: WsStats | null = null
+
+async function main(): Promise<void> {
 	try {
-		const up = await waitHttp(
-			`http://127.0.0.1:${ports.api}/api/status`,
-			60_000,
-		)
+		const iq = synthesizeCu8(RATE, 4)
+		const fake = await startFake(iq)
+		held.fake = fake
+		const ports = {
+			api: await freePort(),
+			audio: await freePort(),
+			live: await freePort(),
+			voice: await freePort(),
+		}
+		const dir = mkdtempSync(join(os.tmpdir(), "wk-profile-main-"))
+		held.dir = dir
+		const profDir = join(dir, "prof")
+		const config = {
+			access: { mode: "legacy" },
+			stateDir: join(dir, "state"),
+			sources: [
+				{
+					id: SOURCE_ID,
+					type: "rtl_tcp",
+					host: "127.0.0.1",
+					port: fake.port,
+					stallTimeoutMs: 0,
+					caps: {
+						kind: "iq",
+						format: "U8_IQ",
+						sampleRate: RATE,
+						centerFreq: CENTRE_HZ,
+						exclusive: false,
+					},
+				},
+			],
+			decoders: [],
+			api: { host: "127.0.0.1", port: ports.api },
+			audio: { tcpPort: ports.audio, monitoring: false },
+			tunerRelay: { enabled: false },
+			// csdr is not on a dev Mac: live demod would only crash-loop.
+			liveDemod: { enabled: false, httpPort: ports.live },
+			digitalVoice: { enabled: false, httpPort: ports.voice },
+			resources: {
+				containerMonitor: { enabled: false },
+				sdrHostPoller: { enabled: false },
+			},
+			aircraftInfo: { online: false, localDb: { enabled: false } },
+			logging: { level: "warn" },
+		}
+		const configPath = join(dir, "config.yaml")
+		writeFileSync(configPath, JSON.stringify(config, null, 2))
+		const env: NodeJS.ProcessEnv = {}
+		for (const [k, v] of Object.entries(process.env))
+			if (!k.startsWith("WAVEKIT_")) env[k] = v
+		env["WAVEKIT_CONFIG"] = configPath
+		env["PROFILE_ELD_OUT"] = join(dir, "eld.json")
+		const nodeArgs = [
+			...(PROF ? ["--cpu-prof", `--cpu-prof-dir=${profDir}`] : []),
+			"--import",
+			join(root, "scripts/profile-eld-preload.mjs"),
+			join(root, "dist/index.js"),
+		]
+		const loadStart = loadavg()
+		const spawnedAt = performance.now()
+		const child = spawn("nice", ["-n", "10", process.execPath, ...nodeArgs], {
+			cwd: dir,
+			env,
+			stdio: ["ignore", "pipe", "pipe"],
+		})
+		held.child = child
+		// A spawn failure (no `nice` on PATH) emits error and maybe never exit.
+		const spawnFailed = new Promise<never>((_, reject) => {
+			child.once("error", err => {
+				reject(
+					new WaveKitError(
+						`scratch core spawn failed: ${err.message}`,
+						"PROFILE_SPAWN",
+					),
+				)
+			})
+		})
+		spawnFailed.catch(() => undefined)
+		const exited = new Promise<number | null>(resolve => {
+			child.once("exit", code => resolve(code))
+			child.once("error", () => resolve(null))
+		})
+		held.exited = exited
+		child.stdout.on("data", (d: Buffer) => held.logChunks.push(d))
+		child.stderr.on("data", (d: Buffer) => held.logChunks.push(d))
+		const up = await Promise.race([
+			waitHttp(`http://127.0.0.1:${ports.api}/api/status`, 60_000),
+			spawnFailed,
+			exited.then(code => {
+				throw new WaveKitError(
+					`scratch core exited (${code}) before coming up`,
+					"PROFILE_UP",
+				)
+			}),
+		])
 		if (!up)
 			throw new WaveKitError("scratch core did not come up", "PROFILE_UP")
-		ws = await openClient(ports.api)
+		const ws = await openClient(ports.api)
+		held.ws = ws
 		log(`core up, warmup ${WARMUP} s, load ${loadavg()}`)
 		await sleep(WARMUP * 1000)
 		ws.reset()
@@ -364,7 +443,7 @@ async function main(): Promise<void> {
 			)
 		writeFileSync(join(dir, "status.json"), JSON.stringify(status))
 		ws.close()
-		ws = null
+		held.ws = null
 		child.kill("SIGINT")
 		const code = await Promise.race([exited, sleep(20_000).then(() => -1)])
 		if (code === -1) {
@@ -401,18 +480,10 @@ async function main(): Promise<void> {
 		}
 	} catch (err) {
 		log(`failed: ${err instanceof Error ? err.message : String(err)}`)
-		log(Buffer.concat(logChunks).toString("utf8").slice(-4000))
+		log(Buffer.concat(held.logChunks).toString("utf8").slice(-4000))
 		process.exitCode = 1
 	} finally {
-		ws?.close()
-		if (child.exitCode === null && child.signalCode === null) {
-			child.kill("SIGKILL")
-			await Promise.race([exited, sleep(5000)])
-		}
-		writeFileSync(logPath, Buffer.concat(logChunks))
-		await fake.close()
-		if (KEEP) log(`kept ${dir}`)
-		else rmSync(dir, { recursive: true, force: true })
+		await cleanup()
 	}
 }
 
