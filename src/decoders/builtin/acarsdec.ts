@@ -315,23 +315,38 @@ export const ACARS_CHANNEL_MIN_RATE_HZ =
 	2 * (ACARS_CHANNEL_BANDWIDTH_HZ / 2 + ACARS_CHANNEL_TRANSITION_HZ)
 
 /**
+ * The highest demodulation rate the channel filter stays bounded at: csdr-buffers.ts sizes a
+ * firdecimate ring at taps + 1 + 1 024 elements and the smallest accepted ring is 2 048, so the
+ * filter may have at most 2 048 − 1 024 − 1 = 1 023 taps; at about 4 × rate / 1 000 taps that is
+ * a rate of (1 023 − 1) × 1 000 / 4 = 255 500 Hz. Above it the stage is left out (logged), never
+ * run with the upstream ring.
+ */
+export const ACARS_CHANNEL_MAX_RATE_HZ = 255_500
+
+/**
  * The opt-in pre-detection channel (decoder option channelFilter, experimental pending
  * measurement) at the demodulation rate `rateHz`: `csdr firdecimate 1`, a Hamming windowed-sinc
  * lowpass with no decimation, its −6 dB cutoff at 9 200 / 2 + 1 000 / 2 = 5 100 Hz and a
- * 1 000 Hz transition. At 24 kHz that is ceil(4 / (1 000 / 24 000)) + 1 = 97 taps, the filter
- * `csdr bandpass --fft` built with the same edges; its computed response is 0 dB at 4 600 Hz,
- * −3 dB at 5 000 Hz, −6 dB at 5 100 Hz, −55 dB at 5 600 Hz and −62 dB at the 8 333 Hz neighbour.
+ * 1 000 Hz transition. csdr builds floor(4 / transition) | 1 taps from the emitted transition:
+ * 95 at 24 kHz (0.041667), 193 at 48 kHz. Its response is about 0 dB at 4 600 Hz, −3 dB at
+ * 5 000 Hz and −6 dB at 5 100 Hz, with the stopband well down from 5 600 Hz (computed for the
+ * 97-tap design of the same edges: −55 dB at 5 600 Hz, −62 dB at the 8 333 Hz neighbour).
  *
  * A firdecimate stage and not `bandpass --fft`: csdr-buffers.ts bounds firdecimate, while
- * bandpass --fft keeps the upstream 10 485 760-element ring. This one's ring minimum is taps + 1
- * + 1 024: 97 + 1 + 1 024 = 1 122 elements at 24 kHz and 194 + 1 + 1 024 = 1 219 at 48 kHz, under
- * the 2 048-element floor, so every accepted ring bounds it up to a 255.5 kHz rate
- * (1 023 + 1 + 1 024 = 2 048); above that a smaller ring keeps the upstream one, logged
- * (boundCsdrPipeline).
- * Null (no stage) below ACARS_CHANNEL_MIN_RATE_HZ or at a rate that is not finite.
+ * bandpass --fft keeps the upstream 10 485 760-element ring. csdr-buffers.ts sizes its ring
+ * conservatively at ceil(4 / transition) + 1 taps + 1 + 1 024: 1 122 elements at 24 kHz and
+ * 1 219 at 48 kHz, under the 2 048-element floor, so every accepted ring bounds it.
+ * Null (no stage) below ACARS_CHANNEL_MIN_RATE_HZ, above ACARS_CHANNEL_MAX_RATE_HZ or at a rate
+ * that is not finite.
  */
 export function acarsChannelFilterStage(rateHz: number): string | null {
-	if (!(Number.isFinite(rateHz) && rateHz >= ACARS_CHANNEL_MIN_RATE_HZ))
+	if (
+		!(
+			Number.isFinite(rateHz) &&
+			rateHz >= ACARS_CHANNEL_MIN_RATE_HZ &&
+			rateHz <= ACARS_CHANNEL_MAX_RATE_HZ
+		)
+	)
 		return null
 	const cutoff =
 		(ACARS_CHANNEL_BANDWIDTH_HZ / 2 + ACARS_CHANNEL_TRANSITION_HZ / 2) / rateHz
@@ -347,7 +362,7 @@ export function acarsChannelFilterStage(rateHz: number): string | null {
  * The decimating filter's channel (and the channelizer request): the 25 kHz raster channel, flat
  * to ±6 kHz and stopped by ±12 kHz at 24 kHz, with or without channelFilter. Narrowing this
  * filter to the ACARS channel instead of adding a stage would need ceil(4 / (1 000 / 2 400 000))
- * = 9 600 taps at 2.4 Msps (1 600 now); the separate stage costs 97 taps at 24 kHz.
+ * = 9 600 taps at 2.4 Msps (1 600 now); the separate stage costs 95 taps at 24 kHz.
  */
 export const ACARS_FRONT_BANDWIDTH_HZ = 25_000
 
@@ -436,7 +451,7 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 		if (channel === null) {
 			this.logChannelFilterOmitted(
 				"rate",
-				"ACARS channelFilter left out: the demodulation rate is below its minimum",
+				"ACARS channelFilter left out: the demodulation rate is outside its bounded range",
 			)
 			return front
 		}
@@ -458,7 +473,11 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 		if (this.channelFilterOmitted.has(reason)) return
 		this.channelFilterOmitted.add(reason)
 		this.logger.warn(
-			{ reason, minimumRateHz: ACARS_CHANNEL_MIN_RATE_HZ },
+			{
+				reason,
+				minimumRateHz: ACARS_CHANNEL_MIN_RATE_HZ,
+				maximumRateHz: ACARS_CHANNEL_MAX_RATE_HZ,
+			},
 			message,
 		)
 	}

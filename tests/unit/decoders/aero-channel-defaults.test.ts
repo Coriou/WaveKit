@@ -65,7 +65,7 @@ describe("ACARS AM channel", () => {
 
 	it("is a bounded firdecimate 1 with its −6 dB cutoff at 5 100 Hz and a 1 000 Hz transition, from 11 200 Hz", () => {
 		expect(ACARS_CHANNEL_MIN_RATE_HZ).toBe(2 * 5_600)
-		// 24 kHz: ceil(4 / (1 000 / 24 000)) + 1 = 97 taps
+		// 24 kHz: csdr builds floor(4 / 0.041667) | 1 = 95 taps
 		expect(acarsChannelFilterStage(24_000)).toBe(
 			"csdr firdecimate 1 0.041667 --cutoff 0.212500",
 		)

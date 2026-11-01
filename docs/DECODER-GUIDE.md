@@ -613,8 +613,9 @@ describe("HfdlDecoder", () => {
    neighbour (about 62 dB down). It barely attenuates a carrier 5 kHz off the channel (3 dB),
    and it leaves the receiver about 2 ppm of frequency error, so a dongle without a TCXO or a
    ppm correction clips a sideband. It runs on the raw IQ path and on channelizer IQ; on the
-   raw path it is left out (one log line) when `offsetHz` is set, and on any path below a
-   11.2 kHz demodulation rate.
+   raw path it is left out (one log line) when `offsetHz` is set, and on any path below an
+   11.2 kHz or above a 255.5 kHz demodulation rate (past that its filter outgrows the bounded
+   csdr buffer).
    The built-in dumpvdl2 decodes every VDL Mode 2 channel of your region in one process. In
    the EU these are 136.725, 136.775, 136.825, 136.875, 136.925 and 136.975 MHz, the VHF
    digital link frequencies of Commission Implementing Regulation (EU) No 1079/2012.

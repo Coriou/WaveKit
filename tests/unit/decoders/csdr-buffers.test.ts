@@ -21,6 +21,7 @@ import { MultimonDecoder } from "../../../src/decoders/builtin/multimon-ng.js"
 import { DsdFmeDecoder } from "../../../src/decoders/builtin/dsd-fme.js"
 import {
 	AcarsdecDecoder,
+	ACARS_CHANNEL_MAX_RATE_HZ,
 	acarsChannelFilterStage,
 } from "../../../src/decoders/builtin/acarsdec.js"
 import type { DecoderConfig } from "../../../src/decoders/types.js"
@@ -377,21 +378,18 @@ describe("decoder pipelines honour the process-wide policy", () => {
 		expect(minimum(11_200)).toBe(
 			Math.ceil(4 / Math.fround(0.089286)) + 1 + 1 + 1024,
 		)
-		// at the bound (2 048, the smallest ring the patch accepts) and just past it
+		// at the bound (2 048, the smallest ring the patch accepts) and just past it: past it the
+		// stage is left out, never run with the upstream ring
+		expect(ACARS_CHANNEL_MAX_RATE_HZ).toBe(255_500)
 		expect(minimum(255_500)).toBe(2048)
-		expect(minimum(256_000)).toBeGreaterThan(2048)
 		const at = boundCsdrStages([acarsChannelFilterStage(255_500) ?? ""], {
 			enabled: true,
 			elements: 2048,
 		})
 		expect(at.stages[0]?.startsWith(`${CSDR_BUFFER_ENV}=2048 `)).toBe(true)
 		expect(at.firFallbacks).toEqual([])
-		const past = boundCsdrStages([acarsChannelFilterStage(256_000) ?? ""], {
-			enabled: true,
-			elements: 2048,
-		})
-		expect(past.stages[0]?.startsWith("csdr firdecimate 1 ")).toBe(true)
-		expect(past.firFallbacks).toHaveLength(1)
+		expect(acarsChannelFilterStage(255_501)).toBeNull()
+		expect(acarsChannelFilterStage(256_000)).toBeNull()
 	})
 
 	it("dsd-fme's own pipeline builder is bounded too", () => {
