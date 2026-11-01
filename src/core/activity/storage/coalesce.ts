@@ -26,9 +26,17 @@
  * stands for. Held receptions that no stored row follows are flushed as one
  * row `windowMs` after the first of them (store clock), so a row is never
  * more than one window behind the entity's latest state; an evicted entity's
- * held state is flushed at once, never dropped. A gap of more than `windowMs`
- * between two receptions drops the stale position and kinematics from the
- * latest state (identity is kept).
+ * held state is flushed at once. A held row the store cannot queue yet
+ * (token bucket, queue cap, paused store) stays held and is retried; held
+ * receptions are only consumed by the row that carries them. A gap of more
+ * than `windowMs` between two receptions drops the stale position and
+ * kinematics from the latest state (identity is kept).
+ *
+ * Merged state is bounded: a value over MAX_MERGED_VALUE_BYTES (JSON text) is
+ * never merged or remembered as identity; the reception carrying it is
+ * informative and stored as its own row. The largest allowlist (aircraft, 36
+ * keys) × (1 KiB + key) is at most about 37 KiB of merged data, so a flushed
+ * row always fits one envelope (128 KiB).
  *
  * Rows per entity in continuous view: one per window plus identity changes
  * (60 s: about 60 an hour), whatever the message rate. Live trackers and
@@ -37,6 +45,9 @@
 import type { DecodeCoalesced, DecodeEnvelope, JsonValue } from "../types.js"
 
 type JsonObject = { readonly [key: string]: JsonValue }
+
+/** Largest allowlisted value (JSON text bytes) merged into an entity's latest state. */
+export const MAX_MERGED_VALUE_BYTES = 1024
 
 export interface CoalesceSpec {
 	/** Entity id field. */
@@ -377,17 +388,30 @@ export interface CoalesceDecision {
 	/**
 	 * Records the reception as stored; call only once the row is queued. The
 	 * returned function undoes it if the write later fails; call its
-	 * `settle` once the write succeeded.
+	 * `settle` once the write succeeded. `keepHeld`: the row could not carry
+	 * the merged state (stored as its own data), so the held receptions stay
+	 * held for their own row.
 	 */
-	commit(): CoalesceUndo
+	commit(keepHeld?: boolean): CoalesceUndo
 }
 
-/** A row for held receptions: due, or of an evicted entity. */
+/**
+ * A row for held receptions: due, or of an evicted entity. Taking it changes
+ * nothing; `commit` (once the row is queued) consumes the held receptions. A
+ * flush that is never committed stays held and is returned again.
+ */
 export interface CoalesceFlush {
 	envelope: DecodeEnvelope
 	present: CoalescePresenter | undefined
 	merged: CoalesceMerge
 	commit(): CoalesceUndo
+}
+
+/** An evicted entity's held receptions, waiting for their row. */
+interface Evicted {
+	envelope: DecodeEnvelope
+	present: CoalescePresenter | undefined
+	merged: CoalesceMerge
 }
 
 function undoOf(undo: () => void, settle: () => void): CoalesceUndo {
@@ -447,19 +471,25 @@ export class PositionCoalescer {
 	private readonly entities = new Map<string, EntityState>()
 	/** Entities with held receptions, in the order they were first held (so by dueAt). */
 	private readonly heldOrder = new Map<string, EntityState>()
-	/** Held state of evicted entities, flushed by the next `takeDue`. */
-	private readonly evicted: CoalesceFlush[] = []
+	/**
+	 * Held state of evicted entities, flushed by the next `takeDue`. At most
+	 * maxEntities wait (so held state is bounded by 2 × maxEntities); past it
+	 * the oldest is handed to `onLost`.
+	 */
+	private readonly evicted: Evicted[] = []
 	coalesced = 0
 
 	/**
 	 * @param windowMs one stored row per entity per window; 0 disables.
 	 * @param maxEntities bound on tracked entities (at least 1); the least recently stored go first.
 	 * @param now store clock for flushing held receptions.
+	 * @param onLost an evicted entity's held row dropped past the bound (a counted loss).
 	 */
 	constructor(
 		private readonly windowMs: number,
 		private readonly maxEntities: number,
 		private readonly now: () => number = Date.now,
+		private readonly onLost: (envelope: DecodeEnvelope) => void = () => {},
 	) {}
 
 	size(): number {
@@ -469,6 +499,11 @@ export class PositionCoalescer {
 	/** Entities with held receptions (at most `size()`). */
 	heldCount(): number {
 		return this.heldOrder.size
+	}
+
+	/** Evicted entities whose held row is not queued yet (at most maxEntities). */
+	evictedCount(): number {
+		return this.evicted.length
 	}
 
 	/** Store-clock time the next held row is due, if any (evicted rows: now). */
@@ -511,13 +546,16 @@ export class PositionCoalescer {
 			const value = data[field]
 			if (value === null) continue
 			if (index.identity.has(field)) {
-				if (
+				if (value === undefined) continue
+				// An oversized value is never remembered: stored as its own row.
+				if (!fits(value)) informative = true
+				else if (
 					!changed &&
-					value !== undefined &&
 					state?.identity.get(field)?.value !== JSON.stringify(value)
 				)
 					changed = true
 			} else if (!spec.redundant.has(field)) informative = true
+			else if (value !== undefined && !fits(value)) informative = true
 		}
 		if (state !== undefined && eligible) {
 			// A gap longer than the window: the old position is no longer the latest.
@@ -542,13 +580,14 @@ export class PositionCoalescer {
 		return {
 			store: true,
 			...(merged === undefined ? {} : { merged }),
-			commit: () =>
+			commit: (keepHeld?: boolean) =>
 				this.record(
 					key,
 					identityOf(data, spec),
 					at,
 					eligible ? data : undefined,
 					index,
+					keepHeld !== true,
 				),
 		}
 	}
@@ -562,34 +601,60 @@ export class PositionCoalescer {
 	 * The next row for held receptions: an evicted entity's at once, else the
 	 * entity whose first held reception is `windowMs` old by `now`. O(1): the
 	 * held map is in dueAt order (a store clock step backwards only delays it).
+	 * The held receptions stay held until the flush is committed.
 	 */
 	takeDue(now: number): CoalesceFlush | undefined {
-		const evicted = this.evicted.shift()
-		if (evicted) return evicted
+		const evicted = this.evicted[0]
+		if (evicted) return this.evictedFlush(evicted)
 		for (const [key, state] of this.heldOrder) {
 			const held = state.held
-			if (held !== undefined && held.dueAt > now) return undefined
-			this.heldOrder.delete(key)
-			if (held === undefined) continue
-			state.held = undefined
-			const at = Date.parse(held.envelope.receivedAt)
-			return {
-				envelope: held.envelope,
-				present: held.present,
-				merged: { decodedData: snapshot(state.latest), coalesced: span(held) },
-				commit: () => this.record(key, NO_IDENTITY, at, undefined, undefined),
+			if (held === undefined) {
+				this.heldOrder.delete(key)
+				continue
 			}
+			if (held.dueAt > now) return undefined
+			return this.heldFlush(key, state, held)
 		}
 		return undefined
 	}
 
 	/** Every held row, due or not (shutdown). */
 	takeAll(): CoalesceFlush[] {
-		const out: CoalesceFlush[] = []
-		for (;;) {
-			const next = this.takeDue(Number.POSITIVE_INFINITY)
-			if (!next) return out
-			out.push(next)
+		const out = this.evicted.map(entry => this.evictedFlush(entry))
+		for (const [key, state] of this.heldOrder)
+			if (state.held !== undefined)
+				out.push(this.heldFlush(key, state, state.held))
+		return out
+	}
+
+	private evictedFlush(entry: Evicted): CoalesceFlush {
+		return {
+			...entry,
+			commit: () => {
+				const at = this.evicted.indexOf(entry)
+				if (at >= 0) this.evicted.splice(at, 1)
+				return NOOP_UNDO()
+			},
+		}
+	}
+
+	private heldFlush(
+		key: string,
+		state: EntityState,
+		held: Held,
+	): CoalesceFlush {
+		const at = Date.parse(held.envelope.receivedAt)
+		return {
+			envelope: held.envelope,
+			present: held.present,
+			merged: { decodedData: snapshot(state.latest), coalesced: span(held) },
+			commit: () => {
+				if (state.held === held) {
+					state.held = undefined
+					this.heldOrder.delete(key)
+				}
+				return this.record(key, NO_IDENTITY, at, undefined, undefined, false)
+			},
 		}
 	}
 
@@ -622,6 +687,7 @@ export class PositionCoalescer {
 		at: number,
 		data: JsonObject | undefined,
 		index: SpecIndex | undefined,
+		carriesHeld: boolean,
 	): CoalesceUndo {
 		let state = this.entities.get(key)
 		if (state === undefined) {
@@ -636,8 +702,9 @@ export class PositionCoalescer {
 				mergeInto(state.latest, data, index.spec, index.identity)
 		}
 		// An eligible row carried the held receptions (an ineligible one, such as
-		// AIS static data, leaves them for their own row).
-		if (data !== undefined && state.held !== undefined) {
+		// AIS static data, or one stored without the merged state, leaves them
+		// for their own row).
+		if (carriesHeld && data !== undefined && state.held !== undefined) {
 			state.held = undefined
 			this.heldOrder.delete(key)
 		}
@@ -705,8 +772,11 @@ export class PositionCoalescer {
 				envelope: held.envelope,
 				present: held.present,
 				merged: { decodedData: snapshot(state.latest), coalesced: span(held) },
-				commit: NOOP_UNDO,
 			})
+			if (this.evicted.length > this.maxEntities) {
+				const lost = this.evicted.shift()
+				if (lost) this.onLost(lost.envelope)
+			}
 		}
 	}
 }
@@ -721,9 +791,25 @@ function mergeInto(
 	for (const field in data) {
 		const value = data[field]
 		if (value === null || value === undefined) continue
-		if (spec.redundant.has(field) || identity.has(field))
-			latest.set(field, value)
+		if (!spec.redundant.has(field) && !identity.has(field)) continue
+		// The reception's own row carries an oversized value; a stale one must not outlive it.
+		if (fits(value)) latest.set(field, value)
+		else latest.delete(field)
 	}
+}
+
+/** JSON text of the value is at most MAX_MERGED_VALUE_BYTES (UTF-8). */
+function fits(value: JsonValue): boolean {
+	if (typeof value === "number" || typeof value === "boolean") return true
+	// JSON escapes at most 6 bytes per UTF-16 unit, quotes included in the slack.
+	if (
+		typeof value === "string" &&
+		value.length * 6 + 2 <= MAX_MERGED_VALUE_BYTES
+	)
+		return true
+	return (
+		Buffer.byteLength(JSON.stringify(value), "utf8") <= MAX_MERGED_VALUE_BYTES
+	)
 }
 
 /** Identity values a stored reception records, as JSON text. */
@@ -734,7 +820,7 @@ function identityOf(
 	let seen: Map<string, string> | undefined
 	for (const field of spec.identity) {
 		const value = data[field]
-		if (value === undefined || value === null) continue
+		if (value === undefined || value === null || !fits(value)) continue
 		seen ??= new Map()
 		seen.set(field, JSON.stringify(value))
 	}

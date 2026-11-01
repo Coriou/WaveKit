@@ -317,6 +317,16 @@ export interface ActivityStoreStats {
 	 * (storage/coalesce.ts): aircraft, ship, APRS and mesh positions, sensor readings.
 	 */
 	coalescedPositions: number
+	/**
+	 * Held entity rows the global bucket, the queue caps or a paused store
+	 * turned away: still held and retried after pauseRetryMs, not a loss.
+	 */
+	coalesceDeferrals: number
+	/**
+	 * Rows of a tracked entity stored as their own data because the merged
+	 * state would not fit one envelope; the held receptions wait for their own row.
+	 */
+	coalesceMergeFailures: number
 	queueDepth: number
 	queueBytes: number
 	dbBytes: number

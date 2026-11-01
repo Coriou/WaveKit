@@ -5473,8 +5473,19 @@ stands for (`receptions - 1` were not stored on their own). Held receptions
 that no row follows (the aircraft went out of range) are stored as one row 60 s
 after the first of them, so the stored state is never more than 60 s behind;
 held receptions of an evicted entity, and all of them at shutdown, are stored
-at once. A gap of more than 60 s between two receptions drops the old position
-and kinematics from the latest state (identity is kept).
+at once. These held rows skip the per-decoder admission bucket (at most one per
+entity per 60 s) but take a global token; one the global bucket, the queue caps
+or a paused store turn away stays held and is retried after `pauseRetryMs`
+(`stats.coalesceDeferrals`, not a loss). Only at shutdown, or past 4,096
+evicted entities waiting for queue room, is a held row dropped (counted as
+`queue-full`). A gap of more than 60 s between two receptions drops the old
+position and kinematics from the latest state (identity is kept).
+
+Merged state is bounded: an allowlisted value over 1 KiB of JSON is never
+merged or remembered, and the reception carrying it is stored as its own row.
+If a row's own data and the merged state still exceed one envelope (128 KiB),
+the row is stored as its own data, the held receptions stay held for their own
+row, and `stats.coalesceMergeFailures` counts it.
 
 Allowlists: aircraft position, altitudes, speed, track, headings, vertical
 rate, signal, message counts, timestamps and readsb's reception metadata
@@ -6052,7 +6063,8 @@ stops at 50,000 rows and 32 values per dimension.
 **Response** (200): `{ "enabled": true, "stats": { ... } }` with admitted,
 committed, dropped (`rate-limited`, `queue-full`, `store-paused`,
 `write-failed`, `closed`), `excludedTelemetry`, `coalescedPositions` (receptions
-merged into their entity's row; see entity coalescing), queue depth, `rows`,
+merged into their entity's row; see entity coalescing), `coalesceDeferrals` and
+`coalesceMergeFailures` (see entity coalescing), queue depth, `rows`,
 `dbBytes`, `paused` and `writer` (`running` or `stopped`). `closed` counts
 admits rejected after the writer has stopped. A write timeout stops the
 writer for the session and does not count those rows as lost. 500
@@ -6120,6 +6132,8 @@ From the 2026-10-16 core `stats` also has two optional fields (older cores omit 
 		},
 		"excludedTelemetry": 912,
 		"coalescedPositions": 29480,
+		"coalesceDeferrals": 0,
+		"coalesceMergeFailures": 0,
 		"floodCopies": 1840,
 		"queueDepth": 0,
 		"queueBytes": 0,

@@ -3,6 +3,7 @@ import type { ActivitySearchPage } from "@wavekit/api-types"
 
 import {
 	FLOOD_AIRCRAFT_INTERVAL_MS,
+	FLOOD_MERGED_RECEPTION_GAP_MS,
 	FLOOD_BEACON_INTERVAL_MS,
 	FLOOD_BURST_INTERVAL_MS,
 	FLOOD_CALL_BURSTS,
@@ -140,14 +141,29 @@ describe("mock server with floods", () => {
 		// the seeded window ends 1 s before now: 179 s × 2.5/s = 447.5
 		expect(planes.items.length).toBeGreaterThanOrEqual(447)
 		expect(planes.items.length).toBeLessThanOrEqual(448)
-		// every 10th row is a merged one: 10 receptions 400 ms apart, ending at the row
+		// every 10th row is a merged one: 10 receptions 40 ms apart, ending at the row
 		const mergedRow = planes.items.find(i => i.coalesced !== undefined)
 		expect(mergedRow?.coalesced?.receptions).toBe(10)
 		expect(
 			Date.parse(mergedRow?.receivedAt ?? "") -
 				Date.parse(mergedRow?.coalesced?.firstSeenAt ?? ""),
-		).toBe(9 * FLOOD_AIRCRAFT_INTERVAL_MS)
+		).toBe(9 * FLOOD_MERGED_RECEPTION_GAP_MS)
 		expect(mergedRow?.coalesced?.lastSeenAt).toBe(mergedRow?.receivedAt)
+		// Like the core, no reception is counted by two rows: each merged span starts after the
+		// entity's previous row.
+		const ordered = [...planes.items].sort(
+			(a, b) => Date.parse(a.receivedAt) - Date.parse(b.receivedAt),
+		)
+		let checked = 0
+		ordered.forEach((row, k) => {
+			const previous = ordered[k - 1]
+			if (row.coalesced === undefined || previous === undefined) return
+			checked++
+			expect(Date.parse(row.coalesced.firstSeenAt)).toBeGreaterThan(
+				Date.parse(previous.receivedAt),
+			)
+		})
+		expect(checked).toBeGreaterThan(40)
 	})
 
 	it("filters by decoderIds like the core (the tuned card's Last decode)", async () => {

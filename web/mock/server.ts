@@ -40,7 +40,10 @@ import type {
 	TunerState,
 } from "@wavekit/api-types"
 import type { FloodEvent } from "./activity-floods.ts"
-import { FLOOD_AIRCRAFT_INTERVAL_MS, floodEvents } from "./activity-floods.ts"
+import {
+	FLOOD_MERGED_RECEPTION_GAP_MS,
+	floodEvents,
+} from "./activity-floods.ts"
 import { createAudioServer } from "./audio.ts"
 import {
 	buildDecoderSummaries,
@@ -1015,7 +1018,7 @@ export async function buildMockServer(
 						coalesced: {
 							receptions: f.receptions,
 							firstSeenAt: new Date(
-								at - (f.receptions - 1) * FLOOD_AIRCRAFT_INTERVAL_MS,
+								at - (f.receptions - 1) * FLOOD_MERGED_RECEPTION_GAP_MS,
 							).toISOString(),
 							lastSeenAt: iso,
 						},
@@ -2332,6 +2335,8 @@ export async function buildMockServer(
 				},
 				excludedTelemetry: 0,
 				coalescedPositions: 0,
+				coalesceDeferrals: 0,
+				coalesceMergeFailures: 0,
 				queueDepth: 0,
 				queueBytes: 0,
 				dbBytes: open ? activity.length * 1_024 : 0,

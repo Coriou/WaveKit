@@ -55,6 +55,8 @@ type NextStats = {
 	>
 	excludedTelemetry: number
 	coalescedPositions: number
+	coalesceDeferrals: number
+	coalesceMergeFailures: number
 	queueDepth: number
 	queueBytes: number
 	dbBytes: number
@@ -70,12 +72,17 @@ type NextStats = {
 	// Optional on both sides; the runtime's API view fills it.
 	lifecycle?: Contract.ActivityLifecycleStatus
 }
+type OptionalApiStats =
+	| "coalescedPositions"
+	| "coalesceDeferrals"
+	| "coalesceMergeFailures"
 type ApiStats = {
-	[K in keyof (Omit<NextStats, "coalescedPositions"> & {
-		coalescedPositions?: number
-	})]: (Omit<NextStats, "coalescedPositions"> & {
-		coalescedPositions?: number
-	})[K]
+	[K in keyof (Omit<NextStats, OptionalApiStats> &
+		Partial<Pick<NextStats, OptionalApiStats>>)]: (Omit<
+		NextStats,
+		OptionalApiStats
+	> &
+		Partial<Pick<NextStats, OptionalApiStats>>)[K]
 }
 
 interface ExpectedRecords {

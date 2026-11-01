@@ -225,8 +225,13 @@ export function parseStoredSummary(row: StoredActivityRow): ActivitySummary {
 		title: body["title"] === null ? null : nullableString(body["title"]),
 		fields,
 	}
-	if (isPosition(position)) return { ...summary, position }
-	return summary
+	// Like the query reader (query/read.ts); a malformed span is left out.
+	const coalesced = body["coalesced"]
+	const withSpan: ActivitySummary = isCoalesced(coalesced)
+		? { ...summary, coalesced }
+		: summary
+	if (isPosition(position)) return { ...withSpan, position }
+	return withSpan
 }
 
 /** UTF-8 truncation that never splits a code point. Exported for the property test. */
@@ -782,6 +787,21 @@ function isField(value: unknown): value is DecodeField {
 	)
 		return false
 	return body["unit"] === undefined || typeof body["unit"] === "string"
+}
+
+function isCoalesced(
+	value: unknown,
+): value is NonNullable<DecodeEnvelope["coalesced"]> {
+	const body = plain(value)
+	if (!body) return false
+	const receptions = body["receptions"]
+	return (
+		typeof receptions === "number" &&
+		Number.isSafeInteger(receptions) &&
+		receptions >= 2 &&
+		typeof body["firstSeenAt"] === "string" &&
+		typeof body["lastSeenAt"] === "string"
+	)
 }
 
 function isPosition(

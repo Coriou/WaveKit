@@ -45,9 +45,11 @@ export interface ActivityIngress {
 
 /**
  * Returns the envelope with its presentation, or the given presentation-free
- * envelope when presenting fails (counted). Never throws. Given an entity's
- * merged latest state (storage/coalesce.ts), presents that data instead and
- * carries its `coalesced` span.
+ * envelope when presenting fails (counted). Given an entity's merged latest
+ * state (storage/coalesce.ts), presents that data instead and carries its
+ * `coalesced` span; throws only when no envelope can carry that state (over
+ * the envelope size), so the store keeps the held receptions and stores the
+ * reception as its own data. Never throws without a merged state.
  */
 export type ActivityPresenter = (merged?: CoalesceMerge) => DecodeEnvelope
 
@@ -192,12 +194,9 @@ export function createActivityIngress(
 			}
 			let presented: DecodeEnvelope | undefined
 			const presentMerged = (merged: CoalesceMerge): DecodeEnvelope => {
-				let base: DecodeEnvelope
-				try {
-					base = withMergedData(plain, merged.decodedData, merged.coalesced)
-				} catch (err) {
-					return failed(err)
-				}
+				// Throws when the merged state does not fit: not a presentation
+				// failure, the store counts it (coalesceMergeFailures).
+				const base = withMergedData(plain, merged.decodedData, merged.coalesced)
 				try {
 					const attempt = presentDecoderOutputResult(
 						{ ...output, data: merged.decodedData },
