@@ -22,6 +22,7 @@ import * as fs from "node:fs"
 import * as fsp from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { createInterface } from "node:readline"
 import { PassThrough, type Readable } from "node:stream"
 import { pathToFileURL } from "node:url"
 import pino from "pino"
@@ -481,18 +482,87 @@ export function verdictLines(
 }
 
 /**
- * The adapters with their child process in reach: BaseDecoder emits `exit` when the process
- * exits, which can be before its stdout has drained; the child's `close` comes after every
- * stdio stream ended, so after the last output line was parsed.
+ * Reads a decoder child's stdout and stderr line by line. readline re-emits an input stream's
+ * `error` on its interface, and BaseDecoder's own interfaces have no listener there, so a reset
+ * pipe would throw past every guard: the adapters below turn BaseDecoder's parsing off and read
+ * here instead. The stream error itself is the step's to handle (guardChildStdio).
+ */
+function readDecoderLines(
+	child: ChildProcess,
+	adapter: {
+		parse(line: string): DecoderOutput | null
+		emit(out: DecoderOutput): void
+		parseFailed(): void
+	},
+): void {
+	const onLine = (line: string): void => {
+		if (!line.trim()) return
+		try {
+			const out = adapter.parse(line)
+			if (out) adapter.emit(out)
+		} catch {
+			adapter.parseFailed()
+		}
+	}
+	for (const stream of [child.stdout, child.stderr]) {
+		if (!stream) continue
+		createInterface({ input: stream, crlfDelay: Infinity })
+			.on("line", onLine)
+			.on("error", () => undefined)
+	}
+}
+
+/**
+ * The adapters with their child process in reach. `onChild` runs in start() right after the
+ * spawn, before any child event, so the step's pipe guards are on before an error can come.
+ * BaseDecoder emits `exit` when the process exits, which can be before its stdout has drained;
+ * the child's `close` comes after every stdio stream ended, so after the last line was parsed.
  */
 class SnapshotAcarsdec extends AcarsdecDecoder {
-	child(): ChildProcess | null {
-		return this.process
+	onChild: (child: ChildProcess) => void = () => undefined
+	constructor(...args: ConstructorParameters<typeof AcarsdecDecoder>) {
+		super(...args)
+		this.parseStdout = false
+		this.parseStderr = false
+	}
+	override start(): Promise<void> {
+		// Everything up to the spawn wait runs synchronously, so the child is set on return.
+		const started = super.start()
+		if (this.process) {
+			this.onChild(this.process)
+			this.readLines(this.process)
+		}
+		return started
+	}
+	private readLines(child: ChildProcess): void {
+		readDecoderLines(child, {
+			parse: line => this.parseOutput(line),
+			emit: out => this.emitOutput(out),
+			parseFailed: () => this.stats.errors++,
+		})
 	}
 }
 class SnapshotDumpvdl2 extends Dumpvdl2Decoder {
-	child(): ChildProcess | null {
-		return this.process
+	onChild: (child: ChildProcess) => void = () => undefined
+	constructor(...args: ConstructorParameters<typeof Dumpvdl2Decoder>) {
+		super(...args)
+		this.parseStdout = false
+		this.parseStderr = false
+	}
+	override start(): Promise<void> {
+		const started = super.start()
+		if (this.process) {
+			this.onChild(this.process)
+			this.readLines(this.process)
+		}
+		return started
+	}
+	private readLines(child: ChildProcess): void {
+		readDecoderLines(child, {
+			parse: line => this.parseOutput(line),
+			emit: out => this.emitOutput(out),
+			parseFailed: () => this.stats.errors++,
+		})
 	}
 }
 
@@ -590,14 +660,8 @@ async function decodeCapture(
 		for (const line of v.lines) deps.out(line)
 		identities.push(...v.identities)
 	})
-	// "started" is emitted inside start() while the child is set, before any of its events.
 	const closed = new Promise<string | null>((resolve, reject) => {
-		decoder.once("started", () => {
-			const child = decoder.child()
-			if (!child) {
-				reject(new Error(`${plan.decoder} started without a process`))
-				return
-			}
+		decoder.onChild = child => {
 			guardChildStdio(child, plan.decoder, {
 				settled: () => settled,
 				fail: message => reject(new Error(message)),
@@ -608,7 +672,7 @@ async function decodeCapture(
 				(code: number | null, signal: NodeJS.Signals | null) =>
 					resolve(decoderFailure(plan.decoder, code, signal)),
 			)
-		})
+		}
 	})
 	try {
 		await decoder.start()

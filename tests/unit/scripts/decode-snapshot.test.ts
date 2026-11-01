@@ -619,6 +619,43 @@ describe("a whole run against fake children", () => {
 		expect(out.filter(l => l.startsWith("RESULT"))).toEqual([])
 	})
 
+	it.each(["stdout", "stderr"] as const)(
+		"a decoder whose %s resets before it completed fails the run: exit 1 naming the pipe",
+		async pipe => {
+			// BaseDecoder reads both pipes line by line, and readline re-emits an input error on its
+			// interface: without a listener there, this reset would crash the process.
+			const { d, out, err } = rig(child => {
+				child[pipe].destroy(reset())
+			})
+			expect(await runDecodeSnapshot(ARGS, d)).toBe(1)
+			expect(err).toEqual([
+				`decode-snapshot: acarsdec ${pipe} pipe failed: read ECONNRESET`,
+			])
+			expect(out.filter(l => l.startsWith("RESULT"))).toEqual([])
+		},
+	)
+
+	it("a decoder resetting stdout and stderr after it completed: exit 0 with the result", async () => {
+		let resets = 0
+		const { d, out, err } = rig(child => {
+			child.finish(0, null, [CLEAN_ACARS])
+			child.once("close", () =>
+				setImmediate(() => {
+					child.stdout.emit("error", reset())
+					child.stderr.emit("error", reset())
+					resets++
+				}),
+			)
+		})
+		expect(await runDecodeSnapshot(ARGS, d)).toBe(0)
+		await tick()
+		expect(resets).toBe(1)
+		expect(err).toEqual([])
+		expect(out.at(-1)).toBe(
+			"RESULT channel=133550000 decoded acars identities=acars-reg:TEST01",
+		)
+	})
+
 	it.each([
 		[1, null, "acarsdec exited 1"],
 		[127, null, "acarsdec could not run (exit 127): is it installed?"],
