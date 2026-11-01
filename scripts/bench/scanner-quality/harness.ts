@@ -460,104 +460,106 @@ export async function runScanner(
 		throw err
 	}
 	const svc = service
-	opts.inspect?.(svc, sceneNow)
-	svc.spectrum.on("pipeline", (sourceId: string, ev: PipelineEvent) => {
-		if (sourceId !== SOURCE) return
-		if (ev.kind === "transient") transients++
-		if (
-			ev.kind !== "track-open" &&
-			ev.kind !== "track-update" &&
-			ev.kind !== "track-close"
-		)
-			return
-		const t = ev.track
-		let r = tracks.get(t.trackId)
-		if (!r) {
-			r = {
-				trackId: t.trackId,
-				firstMs: sceneMsOfSample(t.startSample),
-				lastMs: sceneNow(),
-				centreHz: t.centreHz,
-				obwHz: t.obwHz,
-				maxSnrDb: t.snrDb,
-				maxChannelSnrDb: null,
-				blocks: t.blocks,
-				gate: t.gate ?? "none",
-				gatePassedMs: null,
-				closed: false,
-				burst: false,
-				edge: false,
-				spur: false,
-				iqImage: false,
-				truncated: false,
-			}
-			tracks.set(t.trackId, r)
-		}
-		r.lastMs = sceneMsOfSample(t.lastSample)
-		r.centreHz = t.centreHz
-		r.obwHz = t.obwHz
-		r.maxSnrDb = Math.max(r.maxSnrDb, t.snrDb)
-		const ch = Math.max(
-			t.channelSnrDb ?? -Infinity,
-			t.peakChannelSnrDb ?? -Infinity,
-		)
-		if (Number.isFinite(ch))
-			r.maxChannelSnrDb = Math.max(r.maxChannelSnrDb ?? -Infinity, ch)
-		r.blocks = t.blocks
-		if (r.gate !== "passed") r.gate = t.gate ?? "none"
-		if (t.gate === "passed" && r.gatePassedMs === null)
-			r.gatePassedMs =
-				t.gatePassedSample !== undefined
-					? sceneMsOfSample(t.gatePassedSample)
-					: sceneNow()
-		r.burst ||= t.flags.burst
-		r.edge ||= t.flags.edge
-		r.spur ||= t.flags.spur
-		r.iqImage ||= t.flags.iqImage
-		r.truncated ||= t.flags.truncated
-		if (ev.kind === "track-close") r.closed = true
-	})
-	const record = (d: Discovery, gone: boolean, mergedInto: string | null) => {
-		const prev = discoveries.get(d.id)
-		discoveries.set(d.id, {
-			id: d.id,
-			createdMs: prev?.createdMs ?? sceneNow(),
-			lastEventMs: sceneNow(),
-			centreHz: d.frequencyHz + (d.measuredOffsetHz || 0),
-			frequencyHz: d.frequencyHz,
-			bandwidthHz: d.bandwidthHz,
-			class: d.class,
-			protocol: d.protocol,
-			hint: d.hint ?? prev?.hint ?? null,
-			observationCount: d.observationCount,
-			gone: gone || (prev?.gone ?? false),
-			mergedInto: mergedInto ?? prev?.mergedInto ?? null,
-		})
-	}
-	svc.on("discovery", (data: ScannerDiscoveryEventData) => {
-		const d = data.discovery as unknown as Discovery
-		record(d, data.change === "deleted", null)
-		for (const id of data.mergedIds ?? []) {
-			const m = discoveries.get(id)
-			if (m) {
-				m.gone = true
-				m.mergedInto = d.id
-			}
-		}
-	})
-
-	const started = wallNow()
-	let cpuMicros = 0
-	const chunk = Math.round((fs * CHUNK_MS) / 1000)
-	/** Two real turns: stream data events and promise continuations run before the next step. */
-	const settle = async (): Promise<void> => {
-		await turn()
-		await turn()
-	}
-	/** Fires the scanner timers due up to scene time `ms`, then holds the clock there. */
-	const advanceTo = (ms: number): Promise<void> =>
-		clock.advanceTo(T0_MS + ms, settle)
+	// Everything after install runs inside this try: a throwing `inspect`, a failing run or a
+	// rejecting stop() still restores the real timers and clocks (the nested finally).
 	try {
+		opts.inspect?.(svc, sceneNow)
+		svc.spectrum.on("pipeline", (sourceId: string, ev: PipelineEvent) => {
+			if (sourceId !== SOURCE) return
+			if (ev.kind === "transient") transients++
+			if (
+				ev.kind !== "track-open" &&
+				ev.kind !== "track-update" &&
+				ev.kind !== "track-close"
+			)
+				return
+			const t = ev.track
+			let r = tracks.get(t.trackId)
+			if (!r) {
+				r = {
+					trackId: t.trackId,
+					firstMs: sceneMsOfSample(t.startSample),
+					lastMs: sceneNow(),
+					centreHz: t.centreHz,
+					obwHz: t.obwHz,
+					maxSnrDb: t.snrDb,
+					maxChannelSnrDb: null,
+					blocks: t.blocks,
+					gate: t.gate ?? "none",
+					gatePassedMs: null,
+					closed: false,
+					burst: false,
+					edge: false,
+					spur: false,
+					iqImage: false,
+					truncated: false,
+				}
+				tracks.set(t.trackId, r)
+			}
+			r.lastMs = sceneMsOfSample(t.lastSample)
+			r.centreHz = t.centreHz
+			r.obwHz = t.obwHz
+			r.maxSnrDb = Math.max(r.maxSnrDb, t.snrDb)
+			const ch = Math.max(
+				t.channelSnrDb ?? -Infinity,
+				t.peakChannelSnrDb ?? -Infinity,
+			)
+			if (Number.isFinite(ch))
+				r.maxChannelSnrDb = Math.max(r.maxChannelSnrDb ?? -Infinity, ch)
+			r.blocks = t.blocks
+			if (r.gate !== "passed") r.gate = t.gate ?? "none"
+			if (t.gate === "passed" && r.gatePassedMs === null)
+				r.gatePassedMs =
+					t.gatePassedSample !== undefined
+						? sceneMsOfSample(t.gatePassedSample)
+						: sceneNow()
+			r.burst ||= t.flags.burst
+			r.edge ||= t.flags.edge
+			r.spur ||= t.flags.spur
+			r.iqImage ||= t.flags.iqImage
+			r.truncated ||= t.flags.truncated
+			if (ev.kind === "track-close") r.closed = true
+		})
+		const record = (d: Discovery, gone: boolean, mergedInto: string | null) => {
+			const prev = discoveries.get(d.id)
+			discoveries.set(d.id, {
+				id: d.id,
+				createdMs: prev?.createdMs ?? sceneNow(),
+				lastEventMs: sceneNow(),
+				centreHz: d.frequencyHz + (d.measuredOffsetHz || 0),
+				frequencyHz: d.frequencyHz,
+				bandwidthHz: d.bandwidthHz,
+				class: d.class,
+				protocol: d.protocol,
+				hint: d.hint ?? prev?.hint ?? null,
+				observationCount: d.observationCount,
+				gone: gone || (prev?.gone ?? false),
+				mergedInto: mergedInto ?? prev?.mergedInto ?? null,
+			})
+		}
+		svc.on("discovery", (data: ScannerDiscoveryEventData) => {
+			const d = data.discovery as unknown as Discovery
+			record(d, data.change === "deleted", null)
+			for (const id of data.mergedIds ?? []) {
+				const m = discoveries.get(id)
+				if (m) {
+					m.gone = true
+					m.mergedInto = d.id
+				}
+			}
+		})
+
+		const started = wallNow()
+		let cpuMicros = 0
+		const chunk = Math.round((fs * CHUNK_MS) / 1000)
+		/** Two real turns: stream data events and promise continuations run before the next step. */
+		const settle = async (): Promise<void> => {
+			await turn()
+			await turn()
+		}
+		/** Fires the scanner timers due up to scene time `ms`, then holds the clock there. */
+		const advanceTo = (ms: number): Promise<void> =>
+			clock.advanceTo(T0_MS + ms, settle)
 		await svc.start()
 		// Start-up: the passive job and its engine branch come up on real turns (state load and
 		// job start are async I/O). No IQ is fed and the virtual clock does not move, so how many
@@ -633,8 +635,11 @@ export async function runScanner(
 			refusedCaptures: { ...refused },
 		}
 	} finally {
-		await svc.stop()
-		clock.uninstall()
-		rmSync(dir, { recursive: true, force: true })
+		try {
+			await svc.stop()
+		} finally {
+			clock.uninstall()
+			rmSync(dir, { recursive: true, force: true })
+		}
 	}
 }

@@ -38,7 +38,10 @@ import {
 	SceneGenerator,
 	amplitudeFor,
 	buildScene,
+	gfskScene,
+	noiseScene,
 	smallScene,
+	spursScene,
 	type Interval,
 	type Scene,
 } from "../../../../scripts/bench/scanner-quality/scene.js"
@@ -54,6 +57,28 @@ describe("scanner quality benchmark scene", () => {
 	it("is deterministic for a seed and differs across seeds", () => {
 		expect(sceneHash()).toBe(sceneHash())
 		expect(sceneHash(7)).not.toBe(sceneHash())
+	})
+
+	it("the false-discovery scenes hold nothing real; the GFSK scene is one transmitter", () => {
+		for (const rate of [1_024_000, 2_400_000] as const) {
+			const noise = noiseScene(rate)
+			expect(noise.durationMs).toBeGreaterThanOrEqual(120_000)
+			expect(noise.truth).toHaveLength(0)
+			const spurs = spursScene(rate)
+			expect(spurs.durationMs).toBeGreaterThanOrEqual(120_000)
+			expect(spurs.truth.length).toBeGreaterThan(0)
+			expect(spurs.truth.every(t => t.spurious)).toBe(true)
+		}
+		const g = gfskScene()
+		expect(g.truth).toHaveLength(1)
+		const iv = g.truth[0]!.intervals
+		// 40 ms bursts every 300 ± 30 ms
+		expect(iv.every(x => x.endMs - x.startMs === 40)).toBe(true)
+		for (let i = 1; i < iv.length; i++) {
+			const gap = iv[i]!.startMs - iv[i - 1]!.startMs
+			expect(gap).toBeGreaterThanOrEqual(240)
+			expect(gap).toBeLessThanOrEqual(360)
+		}
 	})
 
 	it("states the SNR convention: power over noise in max(12.5 kHz, bandwidth)", () => {
@@ -123,9 +148,9 @@ describe("scanner quality benchmark scene", () => {
 		expect(reachHz("rtl433", { rateHz: 96_000 }, fsk)).toBeNull()
 		// 192 kHz: (192 000 − 100 000) / 2 = 46 kHz of room
 		expect(reachHz("rtl433", { rateHz: 192_000 }, fsk)).toBe(46_000)
-		// equal bandwidth: no room, the 2.5 kHz centring tolerance remains; 1 Hz short: none
+		// equal bandwidth: no room at all, the capture must be centred; 1 Hz short: none
 		expect(reachHz("rtl433", { rateHz: 96_000 }, { bandwidthHz: 96_000 })).toBe(
-			2_500,
+			0,
 		)
 		expect(
 			reachHz("lora-meshtastic", { rateHz: 96_000 }, { bandwidthHz: 96_001 }),
@@ -160,6 +185,71 @@ describe("scanner quality benchmark scene", () => {
 		expect(oracleIdentify(t, capture(96_000, t.centreHz))).toBeNull()
 		expect(oracleIdentify(t, capture(192_000, t.centreHz + 46_000))).toBe(3_000)
 		expect(oracleIdentify(t, capture(192_000, t.centreHz + 46_001))).toBeNull()
+		// a 96 kHz signal in a 96 kHz capture: centred it is whole, 2.5 kHz off its edge is cut
+		const exact = { ...t, bandwidthHz: 96_000 }
+		expect(oracleIdentify(exact, capture(96_000, t.centreHz))).toBe(3_000)
+		expect(
+			oracleIdentify(exact, capture(96_000, t.centreHz + 2_500)),
+		).toBeNull()
+	})
+
+	it("a capture holds only the signals on air inside its own IQ window", () => {
+		// One 10 s track at +0 Hz whose capture holds 0 to 4 s; a second signal 10 kHz away
+		// (inside the 48 kHz passband) is on only at 8 to 9 s, after the captured IQ ended.
+		const scene = buildScene({
+			name: "window",
+			rateHz: 1_024_000,
+			centreHz: 433_550_000,
+			durationMs: 10_000,
+			seed: 1,
+			noiseSigma: 0.03,
+			signals: [
+				{
+					class: "nfm-voice",
+					offsetHz: -200_000,
+					snrDb: 20,
+					intervals: [{ startMs: 0, endMs: 10_000 }],
+				},
+				{
+					class: "dmr",
+					offsetHz: -190_000,
+					snrDb: 20,
+					intervals: [{ startMs: 8_000, endMs: 9_000 }],
+				},
+			],
+		})
+		const c: CaptureRecord = {
+			captureId: "c",
+			observationId: null,
+			requestedMs: 0,
+			trackStartMs: 0,
+			windowStartMs: 0,
+			rfHz: scene.centreHz - 200_000,
+			rateHz: 48_000,
+			endedMs: 10_000,
+			finishedMs: 10_000,
+			windowMs: [0, 4_000],
+			discoveryId: null,
+			trials: [],
+			skipped: [],
+			edge: false,
+		}
+		const report = score(scene, {
+			rateHz: scene.rateHz,
+			centreHz: scene.centreHz,
+			iqSeconds: 10,
+			cpuSeconds: 0,
+			wallSeconds: 0,
+			tracks: [],
+			discoveries: [],
+			captures: [c],
+			finalIds: [],
+			transients: 0,
+			refusedCaptures: { busy: 0, rateLimited: 0 },
+		})
+		const by = (cls: string) => report.signals.find(x => x.class === cls)!
+		expect(by("nfm-voice").captured).toBe(true)
+		expect(by("dmr").captured).toBe(false)
 	})
 
 	it("a capture counts for a signal its passband overlaps", () => {
@@ -174,6 +264,41 @@ describe("scanner quality benchmark scene", () => {
 		// a 192 kHz capture 60 kHz off still holds the signal (the tolerance match dropped it)
 		expect(capturesSpectrally({ rfHz: 940_000, rateHz: 192_000 }, t)).toBe(true)
 	})
+})
+
+describe("scanner quality benchmark harness cleanup", () => {
+	it("a throwing inspect still restores the real timers and clocks", async () => {
+		const real = {
+			setTimeout: globalThis.setTimeout,
+			clearTimeout: globalThis.clearTimeout,
+			setInterval: globalThis.setInterval,
+			clearInterval: globalThis.clearInterval,
+			dateNow: Date.now,
+			perfNow: performance.now,
+		}
+		const gen = new SceneGenerator(smallScene())
+		await expect(
+			runScanner(
+				{
+					rateHz: 1_024_000,
+					centreHz: 433_550_000,
+					next: n => gen.next(n),
+					leadIn: n => gen.noiseOnly(n),
+				},
+				{
+					inspect: () => {
+						throw new Error("inspect failed")
+					},
+				},
+			),
+		).rejects.toThrow("inspect failed")
+		expect(globalThis.setTimeout).toBe(real.setTimeout)
+		expect(globalThis.clearTimeout).toBe(real.clearTimeout)
+		expect(globalThis.setInterval).toBe(real.setInterval)
+		expect(globalThis.clearInterval).toBe(real.clearInterval)
+		expect(Date.now).toBe(real.dateNow)
+		expect(performance.now).toBe(real.perfNow)
+	}, 30_000)
 })
 
 describe("scanner quality benchmark, small scene (real scanner)", () => {
@@ -380,6 +505,62 @@ function fskScene(): Scene {
 		],
 	})
 }
+
+/**
+ * Two DMR carriers, one 5 s over each, 8 s at 1.024 Msps centred at 433.1 MHz (70 cm): 10 dB at
+ * -400 kHz and 6 dB at -300 kHz. Their channel SNR reads 9 to 11.7 dB and 6.2 to 8.3 dB (the
+ * TDMA slot keys about half the time), under the 12 dB sustained median.
+ */
+function dmrScene(): Scene {
+	const over = [{ startMs: 1_000, endMs: 6_000 }]
+	return buildScene({
+		name: "dmr",
+		rateHz: 1_024_000,
+		centreHz: 433_100_000,
+		durationMs: 8_000,
+		seed: 20_261_107,
+		noiseSigma: 0.03,
+		signals: [
+			{ class: "dmr", offsetHz: -400_000, snrDb: 10, intervals: over },
+			{ class: "dmr", offsetHz: -300_000, snrDb: 6, intervals: over },
+		],
+	})
+}
+
+describe("scanner quality benchmark, weak DMR (real scanner, duty-aware sustained median)", () => {
+	const runDmr = async (dutyAware: boolean): Promise<QualityReport> => {
+		const scene = dmrScene()
+		const gen = new SceneGenerator(scene)
+		const run = await runScanner(
+			{
+				rateHz: scene.rateHz,
+				centreHz: scene.centreHz,
+				next: n => gen.next(n),
+				leadIn: n => gen.noiseOnly(n),
+			},
+			{
+				inspect: svc => {
+					;(
+						svc as unknown as { store: { pending: { dutyAware: boolean } } }
+					).store.pending.dutyAware = dutyAware
+				},
+			},
+		)
+		return score(scene, run)
+	}
+
+	it("admits the 10 dB DMR carrier, not the 6 dB one; without the correction neither", async () => {
+		const on = await runDmr(true)
+		const found = (r: QualityReport, id: string) =>
+			r.signals.find(s => s.id === id)!.discovered
+		expect(found(on, "dmr-10dB")).toBe(true)
+		expect(found(on, "dmr-6dB")).toBe(false)
+		expect(on.totals.falseDiscoveries).toBe(0)
+		const off = await runDmr(false)
+		expect(found(off, "dmr-10dB")).toBe(false)
+		expect(found(off, "dmr-6dB")).toBe(false)
+	}, 90_000)
+})
 
 describe("scanner quality benchmark, FSK scene (real scanner)", () => {
 	let report: QualityReport

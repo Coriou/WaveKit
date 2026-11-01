@@ -63,14 +63,18 @@ JSON line. Decoders are faked: see `scripts/bench/scanner-quality/metrics.ts` fo
 [SCANNER.md](../docs/SCANNER.md#quality-benchmark) for what is measured. The `small` scene
 (1.024 Msps, 12 s) also runs as a vitest test; `full` (2.4 Msps, 45 s) takes about 90 s. Results
 are deterministic for a seed. The fake capture port enforces the real port's limits (2 at once,
-6 per source per minute, 2 s ring); `--unbounded-captures` grants every request.
+6 per source per minute, 2 s ring); `--unbounded-captures` grants every request. The
+false-discovery scenes `noise-1024k`, `noise-2400k`, `spurs-1024k` and `spurs-2400k` (120 s
+each, about 1 to 4 min) hold nothing real and add false discoveries per IQ hour; `gfsk` (60 s)
+is one narrowband GFSK burst transmitter. `--rule1 on|off` and `--rule2 on|off` switch the two
+weak-signal admission rules for A/B runs (SCANNER.md, admission).
 
 **Usage:**
 
 ```bash
 pnpm exec esbuild scripts/bench/scanner-quality.ts --bundle --platform=node --format=esm \
   --packages=external --outfile=output/bench/scanner-quality.mjs
-node output/bench/scanner-quality.mjs [--scene small|full] [--seed N] [--unbounded-captures]
+node output/bench/scanner-quality.mjs [--scene NAME] [--seed N] [--unbounded-captures] [--rule1 on|off] [--rule2 on|off]
 node output/bench/scanner-quality.mjs --file capture.cu8 --rate 2400000 --centre 433920000 [--seconds 60]
 ```
 

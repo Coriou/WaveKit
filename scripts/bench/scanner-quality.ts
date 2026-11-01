@@ -10,8 +10,14 @@
  *   pnpm exec esbuild scripts/bench/scanner-quality.ts --bundle \
  *     --platform=node --format=esm --packages=external \
  *     --outfile=output/bench/scanner-quality.mjs
- *   node output/bench/scanner-quality.mjs [--scene small|full] [--seed N] [--unbounded-captures]
+ *   node output/bench/scanner-quality.mjs [--scene NAME] [--seed N] [--unbounded-captures]
  *   node output/bench/scanner-quality.mjs --file <capture.cu8> --rate <Hz> --centre <Hz> [--seconds S]
+ *
+ * Scenes: small, full, gfsk (one GFSK burst transmitter, ground truth 1 discovery), and the
+ * false-discovery scenes noise-1024k, noise-2400k, spurs-1024k, spurs-2400k (120 s each, nothing
+ * real on air). A/B switches for the weak-admission rules (docs/SCANNER.md): --rule1 on|off (the
+ * duty-aware sustained median, default on) and --rule2 on|off (repeated gate passes, default
+ * off); each admission the second rule makes is printed with its pass median.
  *
  * The fake capture port enforces the real one's limits (2 captures at once, 6 detection captures
  * per source per minute, a 2 s ring); --unbounded-captures grants every request instead.
@@ -22,6 +28,13 @@
  */
 import { closeSync, openSync, readSync } from "node:fs"
 import process from "node:process"
+import type { ScannerService } from "../../src/core/scanner/scanner-service.js"
+import type { PendingAdmission } from "../../src/core/scanner/store/pending-admission.js"
+import type { ObservationInput } from "../../src/core/scanner/types.js"
+import {
+	DQ_PENDING_BUCKET_HZ,
+	DQ_REPEAT_WINDOW_MS,
+} from "../../src/core/scanner/detection-quality-contract.js"
 import { runScanner, type IqChunkSource } from "./scanner-quality/harness.js"
 import {
 	formatReport,
@@ -33,7 +46,11 @@ import {
 	SceneGenerator,
 	buildScene,
 	fullScene,
+	gfskScene,
+	noiseScene,
 	smallScene,
+	spursScene,
+	type Scene,
 } from "./scanner-quality/scene.js"
 
 const arg = (name: string): string | undefined => {
@@ -49,6 +66,88 @@ const num = (name: string): number | undefined => {
 		process.exit(2)
 	}
 	return n
+}
+
+const onOff = (name: string, fallback: boolean): boolean => {
+	const v = arg(name)
+	if (v === undefined) return fallback
+	if (v !== "on" && v !== "off") {
+		process.stderr.write(`--${name} is on or off\n`)
+		process.exit(2)
+	}
+	return v === "on"
+}
+
+const SCENES: Record<string, (seed?: number) => Scene> = {
+	small: smallScene,
+	full: fullScene,
+	gfsk: gfskScene,
+	"noise-1024k": seed => noiseScene(1_024_000, undefined, seed),
+	"noise-2400k": seed => noiseScene(2_400_000, undefined, seed),
+	"spurs-1024k": seed => spursScene(1_024_000, undefined, seed),
+	"spurs-2400k": seed => spursScene(2_400_000, undefined, seed),
+}
+
+interface RepeatAdmission {
+	sceneMs: number
+	offsetKHz: number
+	medianDb: number
+}
+
+/**
+ * Sets the admission rule switches and records each repeated-pass (rule 2) admission with the
+ * median of the passes it counted (read from the entry just before the promoting pass).
+ */
+function admissionRules(
+	centreHz: number,
+	out: RepeatAdmission[],
+): (svc: ScannerService, sceneNow: () => number) => void {
+	const rule1 = onOff("rule1", true)
+	const rule2 = onOff("rule2", false)
+	return (svc, sceneNow) => {
+		const pending = (svc as unknown as { store: { pending: PendingAdmission } })
+			.store.pending
+		pending.dutyAware = rule1
+		pending.repeatRule = rule2
+		// The store's own clock (the harness's virtual clock), the one pass times are stamped with.
+		const svcNow = (): number =>
+			(pending as unknown as { now: () => number }).now()
+		const repeated = pending.repeated.bind(pending)
+		pending.repeated = (obs: ObservationInput): boolean => {
+			const bucket = Math.round(obs.track.centreHz / DQ_PENDING_BUCKET_HZ)
+			const before = pending
+				.repeatEntries(obs.sourceId)
+				.filter(e => Math.abs(e.bucket - bucket) <= 1)
+				.flatMap(e => e.samples)
+				.filter(x => x.id !== obs.id && svcNow() - x.at < DQ_REPEAT_WINDOW_MS)
+				.map(x => x.snr)
+			const ok = repeated(obs)
+			if (ok) {
+				const snr = Math.max(
+					obs.track.channelSnrDb ?? obs.track.snrDb,
+					obs.track.peakChannelSnrDb ?? -Infinity,
+				)
+				const xs = [...before, snr].sort((a, b) => a - b)
+				const mid = xs.length >> 1
+				out.push({
+					sceneMs: sceneNow(),
+					offsetKHz: (obs.track.centreHz - centreHz) / 1000,
+					medianDb:
+						xs.length % 2 === 1 ? xs[mid]! : (xs[mid - 1]! + xs[mid]!) / 2,
+				})
+			}
+			return ok
+		}
+	}
+}
+
+function formatRepeats(rs: readonly RepeatAdmission[]): string {
+	const lines = [`rule 2 admissions ${rs.length}`]
+	for (const r of rs)
+		lines.push(
+			`  at ${(r.sceneMs / 1000).toFixed(1)} s, ${r.offsetKHz.toFixed(1)} kHz, pass median ${r.medianDb.toFixed(1)} dB`,
+		)
+	return lines.join("\n")
 }
 
 function fileSource(
@@ -99,22 +198,32 @@ async function main(): Promise<void> {
 			process.exit(2)
 		}
 		const src = fileSource(file, rate, centre, num("seconds"))
+		const repeats: RepeatAdmission[] = []
 		try {
-			const run = await runScanner(src)
-			process.stdout.write(`${formatUnscored(run)}\n\n`)
-			process.stdout.write(`${JSON.stringify(unscoredJson(run))}\n`)
+			const run = await runScanner(src, {
+				inspect: admissionRules(centre, repeats),
+			})
+			process.stdout.write(`${formatUnscored(run)}\n`)
+			process.stdout.write(`${formatRepeats(repeats)}\n\n`)
+			process.stdout.write(
+				`${JSON.stringify({ ...unscoredJson(run), rule2Admissions: repeats })}\n`,
+			)
 		} finally {
 			src.close()
 		}
 		return
 	}
 	const name = arg("scene") ?? "small"
-	if (name !== "small" && name !== "full") {
-		process.stderr.write("--scene is small or full\n")
+	const make = SCENES[name]
+	if (make === undefined) {
+		process.stderr.write(
+			`--scene is one of ${Object.keys(SCENES).join(", ")}\n`,
+		)
 		process.exit(2)
 	}
 	const seed = num("seed")
-	const scene = name === "full" ? fullScene(seed) : smallScene(seed)
+	const scene = make(seed)
+	const repeats: RepeatAdmission[] = []
 	const gen = new SceneGenerator(scene)
 	const captureLimits = !process.argv.includes("--unbounded-captures")
 	const run = await runScanner(
@@ -126,6 +235,7 @@ async function main(): Promise<void> {
 		},
 		{
 			captureLimits,
+			inspect: admissionRules(scene.centreHz, repeats),
 			onProgress: ms => {
 				if (ms % 10_000 < 1_000)
 					process.stderr.write(`  ${(ms / 1000).toFixed(0)} s\n`)
@@ -133,8 +243,14 @@ async function main(): Promise<void> {
 		},
 	)
 	const report = score(scene, run)
-	process.stdout.write(`${formatReport(report)}\n\n`)
-	process.stdout.write(`${JSON.stringify(report)}\n`)
+	const perHour = (report.totals.falseDiscoveries * 3_600) / run.iqSeconds
+	process.stdout.write(`${formatReport(report)}\n`)
+	process.stdout.write(
+		`false discoveries per IQ hour ${perHour.toFixed(1)}\n${formatRepeats(repeats)}\n\n`,
+	)
+	process.stdout.write(
+		`${JSON.stringify({ ...report, falsePerHour: perHour, rule2Admissions: repeats })}\n`,
+	)
 }
 
 main().catch((err: unknown) => {

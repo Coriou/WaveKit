@@ -1936,6 +1936,7 @@ export class DiscoveryStore
 	 * promotion from pending (1.3, 1.4), or a sustained run (1.4b, amendment 10 SC) or channel
 	 * airtime over separate transmissions (1.4d), which consume the bucket's pending entry like a
 	 * threshold create. A short burst's 18 dB threshold also needs a track SNR of at least 15 dB (1.4c).
+	 * Last, repeated gate passes on one channel (1.4e, off unless `DQ_REPEAT_ENABLED`).
 	 */
 	private admits(input: ObservationInput): "create" | "promoted" | "refuse" {
 		const track = input.track
@@ -1984,7 +1985,12 @@ export class DiscoveryStore
 			this.pending.dropRun(input.sourceId, input.id)
 			return "promoted"
 		}
-		return this.pending.sustained(input) ? "create" : "refuse"
+		if (this.pending.sustained(input)) return "create"
+		if (this.pending.repeated(input)) {
+			this.pending.dropRun(input.sourceId, input.id)
+			return "create"
+		}
+		return "refuse"
 	}
 
 	/** Refresh-cadence sweep of expired pending entries (at most every 10 s, from ingest). */

@@ -19,6 +19,7 @@ export type SignalClass =
 	| "afsk1200"
 	| "lora"
 	| "cw"
+	| "gfsk-burst"
 	| "birdie"
 	| "dc"
 
@@ -32,6 +33,7 @@ export const SIGNAL_CLASSES: readonly SignalClass[] = [
 	"afsk1200",
 	"lora",
 	"cw",
+	"gfsk-burst",
 	"birdie",
 	"dc",
 ]
@@ -95,6 +97,7 @@ const NOMINAL: Record<
 	afsk1200: { bandwidthHz: 12_000, protocol: "aprs", spurious: false },
 	lora: { bandwidthHz: 125_000, protocol: "lora", spurious: false },
 	cw: { bandwidthHz: 200, protocol: null, spurious: false },
+	"gfsk-burst": { bandwidthHz: 2_000, protocol: null, spurious: false },
 	birdie: { bandwidthHz: 100, protocol: null, spurious: true },
 	dc: { bandwidthHz: 2_000, protocol: null, spurious: true },
 }
@@ -334,6 +337,74 @@ export function fullScene(seed = 20_261_102): Scene {
 		seed,
 		noiseSigma: 0.03,
 		signals,
+	})
+}
+
+/**
+ * Noise only (false-discovery measurement): `durationMs` of receiver noise and nothing else at
+ * 1.024 Msps (433.55 MHz, the small scene's centre) or 2.4 Msps (433.1 MHz, the full scene's).
+ * Every discovery it makes is false.
+ */
+export function noiseScene(
+	rateHz: 1_024_000 | 2_400_000,
+	durationMs = 120_000,
+	seed = 20_261_104,
+): Scene {
+	return buildScene({
+		name: `noise-${rateHz / 1000}k`,
+		rateHz,
+		centreHz: rateHz === 1_024_000 ? 433_550_000 : 433_100_000,
+		durationMs,
+		seed,
+		noiseSigma: 0.03,
+		signals: [],
+	})
+}
+
+/**
+ * Spurs only (false-discovery measurement): the noise scene plus the receiver's own artefacts,
+ * a DC spike (25 dB) and three birdies (8, 10 and 12 dB) at fixed offsets, all on for the
+ * whole scene. Every discovery it makes is false.
+ */
+export function spursScene(
+	rateHz: 1_024_000 | 2_400_000,
+	durationMs = 120_000,
+	seed = 20_261_105,
+): Scene {
+	const always = ALWAYS(durationMs)
+	return buildScene({
+		...noiseScene(rateHz, durationMs, seed),
+		name: `spurs-${rateHz / 1000}k`,
+		signals: [
+			{ class: "dc", offsetHz: 0, snrDb: 25, intervals: always },
+			{ class: "birdie", offsetHz: -37_400, snrDb: 8, intervals: always },
+			{ class: "birdie", offsetHz: 128_000, snrDb: 10, intervals: always },
+			{ class: "birdie", offsetHz: -256_100, snrDb: 12, intervals: always },
+		],
+	})
+}
+
+/**
+ * One narrowband GFSK transmitter (measurement only, ground truth 1 discovery): 40 ms bursts
+ * of about 2 kHz occupied bandwidth every 300 ms (±30 ms), each burst at 21 dB ± 3 dB (18 to
+ * 24 dB) and ±2 kHz off its nominal carrier, 60 s at 1.024 Msps, +150 kHz from 869.525 MHz.
+ */
+export function gfskScene(seed = 20_261_106): Scene {
+	const ms = 60_000
+	const rng = mulberry32(seed ^ 0x5bd1e995)
+	const intervals: Interval[] = []
+	for (let t = 500; t + 40 <= ms; t += 300) {
+		const startMs = Math.round(t + (rng() - 0.5) * 60)
+		intervals.push({ startMs, endMs: startMs + 40 })
+	}
+	return buildScene({
+		name: "gfsk",
+		rateHz: 1_024_000,
+		centreHz: 869_525_000,
+		durationMs: ms,
+		seed,
+		noiseSigma: 0.03,
+		signals: [{ class: "gfsk-burst", offsetHz: 150_000, snrDb: 21, intervals }],
 	})
 }
 
@@ -698,6 +769,30 @@ function emitterFor(t: TruthSignal, scene: Scene, rng: () => number): Emitter {
 							}
 						}
 						gain[i] = gain[i]! * on
+					}
+				},
+			}
+		}
+		case "gfsk-burst": {
+			// 1 200 baud, ±600 Hz deviation, one-pole shaped (about 2 kHz occupied). Each burst draws
+			// its own carrier offset (±2 kHz) and level (±3 dB) from its start time, so the same
+			// scene gives the same bursts however it is chunked.
+			const alpha = 1 - Math.exp((-TWO_PI * 900) / fs)
+			const symbols = symbolStream(rng, fs, 1_200, [-600, 600])
+			let shaped = 0
+			return {
+				...base,
+				fill: (from, a, b, dev, gain) => {
+					const at = ((from + a) * 1000) / fs
+					const iv = t.intervals.find(x => at >= x.startMs - 1 && at < x.endMs)
+					const r = mulberry32(scene.seed + (iv?.startMs ?? 0))
+					const jitterHz = (r() * 2 - 1) * 2_000
+					const level = 10 ** (((r() * 2 - 1) * 3) / 20)
+					symbols(from, a, b, dev)
+					for (let i = a; i < b; i++) {
+						shaped += alpha * (dev[i]! - shaped)
+						dev[i] = shaped + jitterHz
+						gain[i] = gain[i]! * level
 					}
 				},
 			}

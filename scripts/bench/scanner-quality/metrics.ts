@@ -191,8 +191,8 @@ const PASSBAND_DECODERS = new Set(["rtl433", "lora-meshtastic"])
  * How far (Hz) the capture centre may sit from the signal's centre for `decoder` to decode it, or
  * null when the capture cannot hold the signal at all. Passband decoders need the whole signal
  * inside the capture: rate ≥ nominal bandwidth, else null (a 96 kHz capture never holds a
- * 100 kHz signal), then max(2.5 kHz, (rate − bandwidth) / 2), so a passband exactly as wide as the
- * signal keeps the 2.5 kHz centring tolerance of the narrow decoders.
+ * 100 kHz signal), then (rate − bandwidth) / 2, the offset at which the signal's edge meets the
+ * capture's edge: a passband exactly as wide as the signal must be centred on it (reach 0).
  */
 export function reachHz(
 	decoder: string,
@@ -201,7 +201,7 @@ export function reachHz(
 ): number | null {
 	if (!PASSBAND_DECODERS.has(decoder)) return NARROW_REACH_HZ
 	if (capture.rateHz < t.bandwidthHz) return null
-	return Math.max(NARROW_REACH_HZ, (capture.rateHz - t.bandwidthHz) / 2)
+	return (capture.rateHz - t.bandwidthHz) / 2
 }
 
 /**
@@ -304,10 +304,13 @@ export function score(scene: Scene, run: RunRecord): QualityReport {
 		const ds = discOf.get(t.id) ?? []
 		// Every capture whose passband holds part of the signal while it was on; the oracle decides
 		// whether that capture is enough to decode it.
+		// The capture's own IQ window decides, not the track's lifetime: a capture that ended
+		// before a later signal came on holds none of it.
 		const captures = run.captures.filter(
 			c =>
+				c.windowMs !== null &&
 				capturesSpectrally(c, t) &&
-				onAt(t, c.trackStartMs, c.endedMs ?? c.trackStartMs),
+				onAt(t, c.windowMs[0], c.windowMs[1]),
 		)
 		const idTimes = captures
 			.map(c => oracleIdentify(t, c))
