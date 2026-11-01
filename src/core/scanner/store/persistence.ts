@@ -54,6 +54,7 @@ import type { StoreMutation } from "./schemas.js"
 import type { JournalEntry, StoreSnapshot } from "./discovery-store.js"
 import { atomicWrite } from "./atomic-write.js"
 import { snapshotHeadOf } from "./snapshot-mirror.js"
+import { mainSnapshotRestMs } from "./snapshot-cadence.js"
 import type { MirrorCounts, SnapshotParts } from "./snapshot-mirror.js"
 import { SnapshotWriter } from "./snapshot-writer.js"
 import { parseInSlices, yieldToEventLoop } from "./slices.js"
@@ -104,6 +105,12 @@ const APPEND_OVERHEAD_BYTES = 512
 const DEFAULT_MAX_JOURNAL_BACKLOG_BYTES = 32 * 1024 * 1024
 /** Error code of an append refused because the journal backlog is full. */
 export const SCANNER_JOURNAL_BACKLOG_CODE = "SCANNER_JOURNAL_BACKLOG"
+/**
+ * Error code of a budgeted snapshot (`writeSnapshotOf(store, { deferWithinMainRest: true })`)
+ * that would have been built on the main thread inside the rest after the last main-thread build:
+ * nothing was built or written; ask again once `mainSnapshotRestRemainingMs()` has passed.
+ */
+export const SCANNER_SNAPSHOT_DEFERRED_CODE = "SCANNER_SNAPSHOT_DEFERRED"
 
 export interface LeaseTunerFields {
 	frequency: number
@@ -517,6 +524,8 @@ interface SnapshotSlot {
 	lastSeq: number
 	/** The newer write that superseded this one; its settlement is this one's. */
 	successor: Promise<void> | null
+	/** A worker failure defers its main-thread fallback while inside the main-thread rest. */
+	deferWithinMainRest: boolean
 }
 
 /** What a store removes from the snapshot set without a journal entry (`mirror-removal`). */
@@ -592,13 +601,20 @@ export class ScannerPersistence {
 	private nextSeq = 1
 	private durableLastSeq = 0
 	/**
-	 * Snapshot cadence inputs (`snapshotCadence`), in UTF-8 bytes as written to disk: the last
-	 * snapshot written or loaded, every journal line accepted (replayed ones at load included) and
-	 * that total when the last durable snapshot was queued.
+	 * Snapshot cadence inputs (`snapshotCadence`), in UTF-8 bytes on disk: the last snapshot written
+	 * or loaded, every journal line written (replayed ones at load included; refused, dropped and
+	 * failed batches never) and that total when the last durable snapshot's write step started
+	 * (every line at or below its lastSeq was written or lost by then).
 	 */
 	private snapshotBytes = 0
 	private journalBytes = 0
 	private journalBytesCovered = 0
+	/** Main-thread snapshot builds so far and the last one's synchronous time (`mainSnapshotBuild`). */
+	private mainBuilds = 0
+	private mainBuildMs = 0
+	/** `buildClock` time the rest after the last main-thread build ends (`mainSnapshotRestMs`). */
+	private mainRestUntil = Number.NEGATIVE_INFINITY
+	private readonly buildClock: () => number
 	private loaded = false
 	private authorityHealth: "healthy" | "degraded" = "degraded"
 
@@ -620,8 +636,14 @@ export class ScannerPersistence {
 		snapshotWorker?: SnapshotWorkerOptions
 		/** Awaited between validation slices of the snapshot; a setImmediate turn by default. */
 		yieldTurn?: YieldTurn
+		/**
+		 * Monotonic ms timing main-thread snapshot builds and the rest after them;
+		 * `performance.now` by default.
+		 */
+		buildClock?: () => number
 	}) {
 		this.yieldTurn = opts.yieldTurn ?? yieldToEventLoop
+		this.buildClock = opts.buildClock ?? (() => performance.now())
 		this.snapshotWorkerOptions = opts.snapshotWorker ?? {}
 		this.maxJournalBacklogBytes =
 			opts.maxJournalBacklogBytes ?? DEFAULT_MAX_JOURNAL_BACKLOG_BYTES
@@ -746,7 +768,6 @@ export class ScannerPersistence {
 			batch = fresh
 		}
 		batch.lines.push(line)
-		this.journalBytes += Buffer.byteLength(line)
 		batch.bytes += cost
 		batch.maxSeq = seq
 		this.queuedLines += 1
@@ -843,18 +864,21 @@ export class ScannerPersistence {
 			batch.name,
 			Math.max(this.fileMaxSeq.get(batch.name) ?? 0, batch.maxSeq),
 		)
-		this.fileBytes.set(batch.name, knownBytes + Buffer.byteLength(text))
+		const written = Buffer.byteLength(text)
+		this.fileBytes.set(batch.name, knownBytes + written)
+		this.journalBytes += written
 	}
 
 	writeSnapshot(s: StoreSnapshot): Promise<void> {
 		if (!this.loaded) return Promise.reject(notLoaded())
-		const built = this.mainSnapshotText(s)
+		const built = this.timedMainSnapshotText(() => s)
 		if (built === null) return Promise.reject(invalidRecordingSnapshot())
 		return this.queueSnapshot({
 			text: built.text,
 			worker: null,
 			lastSeq: built.lastSeq,
 			successor: null,
+			deferWithinMainRest: false,
 		})
 	}
 
@@ -864,9 +888,20 @@ export class ScannerPersistence {
 	 * queueing (one outstanding, a newer one supersedes a queued one, after every append up to its
 	 * lastSeq). Falls back to the main thread when the worker is off, stale (first snapshot,
 	 * after an overflow or a reset) or fails; the main path resets the mirror.
+	 *
+	 * `deferWithinMainRest` (the periodic and hole snapshots): a snapshot that would be built on the
+	 * main thread, here or as the fallback of a failed worker commit, while the rest after the last
+	 * main-thread build has not passed rejects with `SCANNER_SNAPSHOT_DEFERRED_CODE` instead,
+	 * building and writing nothing. Every path to a main-thread build checks it, so main-thread
+	 * builds never exceed 1 / (1 + MAIN_SNAPSHOT_REST_FACTOR) = 10 % of the thread, however the
+	 * worker fails. Start-up and shutdown snapshots leave it unset and always write.
 	 */
-	writeSnapshotOf(store: SnapshotStore): Promise<void> {
+	writeSnapshotOf(
+		store: SnapshotStore,
+		opts: { deferWithinMainRest?: boolean } = {},
+	): Promise<void> {
 		if (!this.loaded) return Promise.reject(notLoaded())
+		const defer = opts.deferWithinMainRest === true
 		const writer = this.writerFor(store)
 		if (
 			writer === null ||
@@ -874,7 +909,7 @@ export class ScannerPersistence {
 			store.recordCounts === undefined ||
 			store.snapshotParts === undefined
 		)
-			return this.writeMainSnapshot(store, writer)
+			return this.writeMainSnapshot(store, writer, defer)
 		const parts = store.snapshotParts()
 		const prepared = PreparedRecordingOperationsSchema.safeParse(
 			parts.recordingOperations ?? [],
@@ -883,12 +918,13 @@ export class ScannerPersistence {
 		const lastSeq = this.nextSeq - 1
 		const head = snapshotHeadOf(parts, prepared.data, lastSeq, this.now())
 		const id = writer.request(head, store.recordCounts())
-		if (id === null) return this.writeMainSnapshot(store, writer)
+		if (id === null) return this.writeMainSnapshot(store, writer, defer)
 		return this.queueSnapshot({
 			text: null,
 			worker: { id, store },
 			lastSeq,
 			successor: null,
+			deferWithinMainRest: defer,
 		})
 	}
 
@@ -908,6 +944,22 @@ export class ScannerPersistence {
 			onWorker:
 				this.attached !== null && this.writer !== null && this.writer.live(),
 		}
+	}
+
+	/**
+	 * Main-thread snapshot builds (clone + stringify) so far and the synchronous time of the last
+	 * one, for the snapshot cadence's duty budget. Worker-built snapshots do not count.
+	 */
+	mainSnapshotBuild(): { count: number; ms: number } {
+		return { count: this.mainBuilds, ms: this.mainBuildMs }
+	}
+
+	/**
+	 * Ms (on `buildClock`) until the rest after the last main-thread build ends: 9 x that build
+	 * after it ended (`mainSnapshotRestMs`), 0 once passed or before any build.
+	 */
+	mainSnapshotRestRemainingMs(): number {
+		return Math.max(0, this.mainRestUntil - this.buildClock())
 	}
 
 	/** The snapshot worker's counters, heap and last timings (null before the first writeSnapshotOf). */
@@ -967,8 +1019,11 @@ export class ScannerPersistence {
 	private writeMainSnapshot(
 		store: SnapshotStore,
 		writer: SnapshotWriter | null,
+		defer: boolean,
 	): Promise<void> {
-		const built = this.mainSnapshotText(store.snapshot())
+		if (defer && this.withinMainRest())
+			return Promise.reject(snapshotDeferred())
+		const built = this.timedMainSnapshotText(() => store.snapshot())
 		if (built === null) return Promise.reject(invalidRecordingSnapshot())
 		writer?.reset(built.text, built.lastSeq)
 		return this.queueSnapshot({
@@ -976,7 +1031,27 @@ export class ScannerPersistence {
 			worker: null,
 			lastSeq: built.lastSeq,
 			successor: null,
+			deferWithinMainRest: false,
 		})
+	}
+
+	private withinMainRest(): boolean {
+		return this.buildClock() < this.mainRestUntil
+	}
+
+	/** `mainSnapshotText` of `snapshot()`, its clone included in the build time `mainSnapshotBuild` reports. */
+	private timedMainSnapshotText(
+		snapshot: () => StoreSnapshot,
+	): { text: string; lastSeq: number } | null {
+		const started = this.buildClock()
+		try {
+			return this.mainSnapshotText(snapshot())
+		} finally {
+			const ended = this.buildClock()
+			this.mainBuilds += 1
+			this.mainBuildMs = Math.max(0, ended - started)
+			this.mainRestUntil = ended + mainSnapshotRestMs(this.mainBuildMs)
+		}
 	}
 
 	/** Today's snapshot text for `s` at the current lastSeq; null when its recording operations are invalid. */
@@ -1008,10 +1083,11 @@ export class ScannerPersistence {
 		const superseded = this.queuedSnapshot
 		this.queuedSnapshot = slot
 		this.coverSeq = slot.lastSeq
-		// Every line accepted so far is at or below slot.lastSeq: the snapshot covers it.
-		const journalBytes = this.journalBytes
 		const own = this.enqueue(async () => {
 			if (this.queuedSnapshot === slot) this.queuedSnapshot = null
+			// Every batch up to slot.lastSeq ran before this step and none after it has: what the
+			// journal holds now is what the snapshot covers.
+			const journalBytes = this.journalBytes
 			const body = slot.text
 			const worker = slot.worker
 			if (body === null && worker === null) return
@@ -1041,6 +1117,12 @@ export class ScannerPersistence {
 					`Could not write ${file}`,
 					"SCANNER_PERSIST_FAILED",
 				)
+			}
+			if (slot.deferWithinMainRest && this.withinMainRest()) {
+				// The fallback would be a main-thread build inside the rest: the next snapshot (the
+				// mirror is stale after a worker failure, so on the main path) writes it later.
+				if (this.coverSeq === slot.lastSeq) this.coverSeq = null
+				throw snapshotDeferred()
 			}
 			await this.writeFallback(file, worker.store, slot, result.reason)
 		})
@@ -1075,6 +1157,8 @@ export class ScannerPersistence {
 	 * The worker could not write this snapshot (diverged mirror, crash, timeout): the main thread
 	 * writes the store's state now, at the current lastSeq (≥ the request's: later lines are still
 	 * queued behind this step, and replay skips what it covers), and resets the mirror from it.
+	 * Lines between the two lastSeqs are written after it and counted as uncovered journal: an
+	 * overcount that only makes the next snapshot due sooner.
 	 */
 	private async writeFallback(
 		file: string,
@@ -1082,7 +1166,7 @@ export class ScannerPersistence {
 		slot: SnapshotSlot,
 		reason: string,
 	): Promise<void> {
-		const built = this.mainSnapshotText(store.snapshot())
+		const built = this.timedMainSnapshotText(() => store.snapshot())
 		const journalBytes = this.journalBytes
 		if (built === null) {
 			if (this.coverSeq === slot.lastSeq) this.coverSeq = null
@@ -1578,6 +1662,13 @@ function invalidRecordingSnapshot(): WaveKitError {
 	return new WaveKitError(
 		"Invalid recording snapshot",
 		"SCANNER_JOURNAL_INVALID",
+	)
+}
+
+function snapshotDeferred(): WaveKitError {
+	return new WaveKitError(
+		"Snapshot deferred: the main thread is resting after its last snapshot build",
+		SCANNER_SNAPSHOT_DEFERRED_CODE,
 	)
 }
 

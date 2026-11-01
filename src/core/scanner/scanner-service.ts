@@ -248,6 +248,7 @@ import {
 } from "./store/evidence-store.js"
 import {
 	SCANNER_JOURNAL_BACKLOG_CODE,
+	SCANNER_SNAPSHOT_DEFERRED_CODE,
 	ScannerPersistence,
 	type ConsolidationPlanFile,
 	type LoadedState,
@@ -256,7 +257,10 @@ import {
 	type RuntimeSettingsOverrides,
 } from "./store/persistence.js"
 import { SCANNER_LOAD_SLICE_ITEMS, yieldToEventLoop } from "./store/slices.js"
-import { snapshotIntervalMs } from "./store/snapshot-cadence.js"
+import {
+	HOLE_STREAK_RESET_MS,
+	snapshotIntervalMs,
+} from "./store/snapshot-cadence.js"
 import { PassiveGuard } from "./passive-guard.js"
 import { PASSIVE_COST_LIMIT_DEFAULT } from "./passive-cost-contract.js"
 import {
@@ -1192,12 +1196,36 @@ export class ScannerService extends EventEmitter {
 	/** Jobs whose lease an operator or relay write took: their end is not handed over at once. */
 	private readonly operatorLost = new Set<string>()
 	private timer: NodeJS.Timeout | null = null
-	private lastSnapshotAt = 0
+	/**
+	 * Monotonic ms for the snapshot cadence, so a wall-clock step back cannot delay snapshots
+	 * (`savedAt` in the snapshot stays wall time).
+	 */
+	private snapshotClock: () => number = () => performance.now()
+	/** Start of the last snapshot on `snapshotClock`; none yet: the first is due at once. */
+	private lastSnapshotAt = Number.NEGATIVE_INFINITY
 	/** The periodic snapshot still being written: no second clone + stringify while it lags. */
 	private snapshotInFlight = false
 	/** A journal hole asked for a snapshot sooner than the periodic interval. */
 	private snapshotRequested = false
-	private snapshotFailed = false
+	/** Consecutive failed snapshots, for the failure retry (`snapshotRetryMs`); 0 after a success. */
+	private snapshotFailures = 0
+	/**
+	 * Consecutive successful hole snapshots in this episode (`holeSnapshotSpacingMs`) and when the
+	 * last one ended; a hole requested `HOLE_STREAK_RESET_MS` after it starts a new episode.
+	 */
+	private holeStreak = 0
+	private lastHoleCoveredAt = Number.NEGATIVE_INFINITY
+	/**
+	 * The last snapshot was deferred by the main-thread rest (its worker request overflowed or its
+	 * commit failed): the retry is a main-thread build, so the rest applies to it.
+	 */
+	private snapshotNeedsMain = false
+	/**
+	 * The last main-thread snapshot build (`persistence.mainSnapshotBuild`): its synchronous time and
+	 * when it ended, which the cadence's duty budget spaces the next main-thread snapshot from.
+	 */
+	private mainSnapshotBuildMs = 0
+	private mainSnapshotEndAt = 0
 	/** Maintenance still running behind a slow disk: the next one waits for it. */
 	private maintenanceInFlight = false
 	private lastMaintenanceAt = 0
@@ -8086,8 +8114,12 @@ export class ScannerService extends EventEmitter {
 			this.emitProgressFor(null)
 			this.track(this.checkPassiveCost(now), "Passive cost check failed")
 		}
-		if (this.dirty && now - this.lastSnapshotAt >= this.snapshotInterval())
-			this.startSnapshot(now)
+		const snapshotAt = this.snapshotClock()
+		if (
+			this.dirty &&
+			snapshotAt - this.lastSnapshotAt >= this.snapshotInterval()
+		)
+			this.startSnapshot(snapshotAt)
 		if (
 			!this.maintenanceInFlight &&
 			now - this.lastMaintenanceAt >= MAINTENANCE_EVERY_MS
@@ -8105,8 +8137,13 @@ export class ScannerService extends EventEmitter {
 
 	/**
 	 * Single-flight periodic snapshot: no second clone + stringify while one is being written. A
-	 * failed write leaves the state dirty, so it is retried; one a journal hole requested stays
-	 * requested, so the hole is retried after 10 s, not at the periodic interval (up to 2 h).
+	 * failed write leaves the state dirty, so it is retried after 10 s, doubling per consecutive
+	 * failure up to the periodic interval (5 min for a hole: `snapshotRetryMs`); one a journal hole
+	 * requested stays requested. A successful hole snapshot extends the hole streak
+	 * (`holeSnapshotSpacingMs`). One persistence deferred (a main-thread build inside the rest) is
+	 * no failure: it stays pending until the rest has passed. A main-thread build is noted for the
+	 * duty budget: one built at once ends `ms` after `now`, a worker fallback built later by the
+	 * time the write settles. `now` is on `snapshotClock`.
 	 */
 	private startSnapshot(now: number): void {
 		if (!this.stateLoaded || this.snapshotInFlight) return
@@ -8115,18 +8152,39 @@ export class ScannerService extends EventEmitter {
 		this.dirty = false
 		this.snapshotRequested = false
 		this.snapshotInFlight = true
-		this.persistence
-			.writeSnapshotOf(this.store)
+		const before = this.persistence.mainSnapshotBuild().count
+		const write = this.persistence.writeSnapshotOf(this.store, {
+			deferWithinMainRest: true,
+		})
+		const built = this.noteMainSnapshotBuild(before, now, true)
+		write
+			.finally(() => {
+				this.noteMainSnapshotBuild(built, this.snapshotClock(), false)
+			})
 			.then(
 				() => {
-					this.snapshotFailed = false
+					this.snapshotFailures = 0
+					this.snapshotNeedsMain = false
+					if (!requested) return
+					this.holeStreak += 1
+					this.lastHoleCoveredAt = this.snapshotClock()
 				},
 				(err: unknown) => {
 					// Refused journal lines rely on a later snapshot: retry.
 					this.dirty = true
 					if (requested) this.snapshotRequested = true
-					this.snapshotFailed = true
-					this.log.warn({ err }, "Snapshot write failed")
+					if (
+						err instanceof WaveKitError &&
+						err.code === SCANNER_SNAPSHOT_DEFERRED_CODE
+					) {
+						this.snapshotNeedsMain = true
+						return
+					}
+					this.snapshotFailures += 1
+					this.log.warn(
+						{ err, failures: this.snapshotFailures },
+						"Snapshot write failed",
+					)
 				},
 			)
 			.finally(() => {
@@ -8134,17 +8192,39 @@ export class ScannerService extends EventEmitter {
 			})
 	}
 
+	/** Records a main-thread build made since `count` (ending `ms` after `at` when `addMs`); returns the new count. */
+	private noteMainSnapshotBuild(
+		count: number,
+		at: number,
+		addMs: boolean,
+	): number {
+		const build = this.persistence.mainSnapshotBuild()
+		if (build.count !== count) {
+			this.mainSnapshotBuildMs = build.ms
+			this.mainSnapshotEndAt = addMs ? at + build.ms : at
+		}
+		return build.count
+	}
+
 	/**
 	 * A journal hole (refused or failed lines) blocks every append, recording operations
 	 * included, until a snapshot covers it: snapshot now instead of at the next periodic
-	 * interval, still single-flight and spaced by `snapshotIntervalMs` (1 s whether the snapshot
-	 * worker or the main thread builds it, 10 s after a failed snapshot); the tick picks a
-	 * deferred request up.
+	 * interval, still single-flight and spaced by `snapshotIntervalMs` (1 s; backing off from the
+	 * 6th consecutive hole snapshot of an episode, 2 s doubling to 5 min; 10 s doubling after
+	 * failed snapshots; and for one the main thread builds no sooner than 9 x the last main-thread
+	 * build after it ended, so recurring holes keep main-thread snapshots under 10 % of the
+	 * thread); the tick picks a deferred request up. A hole requested 10 min or more after the last
+	 * hole snapshot ended starts a new episode.
 	 */
 	private requestSnapshot(): void {
 		this.dirty = true
+		const now = this.snapshotClock()
+		if (
+			!this.snapshotRequested &&
+			now - this.lastHoleCoveredAt >= HOLE_STREAK_RESET_MS
+		)
+			this.holeStreak = 0
 		this.snapshotRequested = true
-		const now = this.now()
 		if (now - this.lastSnapshotAt >= this.snapshotInterval())
 			this.startSnapshot(now)
 	}
@@ -8152,15 +8232,19 @@ export class ScannerService extends EventEmitter {
 	/**
 	 * Size-scaled (store/snapshot-cadence.ts): the journal covers every mutation between
 	 * snapshots, so a large store is rewritten about hourly, sooner once its journal tail grows
-	 * past the trigger or a hole needs covering.
+	 * past the trigger or a hole needs covering, within the main-thread duty budget.
 	 */
 	private snapshotInterval(): number {
 		const cadence = this.persistence.snapshotCadence()
 		return snapshotIntervalMs({
 			...cadence,
+			onWorker: cadence.onWorker && !this.snapshotNeedsMain,
 			maxJournalBytes: this.settings().storage.maxJournalMb * 1024 * 1024,
 			requested: this.snapshotRequested,
-			failed: this.snapshotFailed,
+			failures: this.snapshotFailures,
+			holeStreak: this.holeStreak,
+			mainBuildMs: this.mainSnapshotBuildMs,
+			mainBuildEndOffsetMs: this.mainSnapshotEndAt - this.lastSnapshotAt,
 		})
 	}
 

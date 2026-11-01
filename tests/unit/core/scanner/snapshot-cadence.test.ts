@@ -8,24 +8,53 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { build } from "esbuild"
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import type { JournalEntry } from "../../../../src/core/scanner/store/discovery-store.js"
-import { ScannerPersistence } from "../../../../src/core/scanner/store/persistence.js"
-import type { SnapshotWorkerOptions } from "../../../../src/core/scanner/store/persistence.js"
 import {
+	SCANNER_JOURNAL_BACKLOG_CODE,
+	SCANNER_SNAPSHOT_DEFERRED_CODE,
+	ScannerPersistence,
+} from "../../../../src/core/scanner/store/persistence.js"
+import type { SnapshotWorkerOptions } from "../../../../src/core/scanner/store/persistence.js"
+import type { SnapshotWorkerRequest } from "../../../../src/core/scanner/store/snapshot-protocol.js"
+import type {
+	SnapshotWorkerFactory,
+	SnapshotWorkerPort,
+} from "../../../../src/core/scanner/store/snapshot-writer.js"
+import {
+	HOLE_SNAPSHOT_BACKOFF_AFTER,
+	HOLE_SNAPSHOT_MAX_SPACING_MS,
 	JOURNAL_TRIGGER_MIN_BYTES,
 	MAIN_SNAPSHOT_MAX_SPACING_MS,
+	MAIN_SNAPSHOT_REST_FACTOR,
 	SNAPSHOT_MAX_INTERVAL_MS,
 	SNAPSHOT_MIN_INTERVAL_MS,
 	SNAPSHOT_REQUEST_MIN_MS,
+	SNAPSHOT_RETRY_MIN_MS,
+	holeSnapshotSpacingMs,
 	journalSnapshotTriggerBytes,
+	mainSnapshotRestMs,
 	mainSnapshotSpacingMs,
 	periodicSnapshotIntervalMs,
 	snapshotIntervalMs,
+	snapshotRetryMs,
 } from "../../../../src/core/scanner/store/snapshot-cadence.js"
 import { createLogger } from "../../../../src/utils/logger.js"
 import { counterIds, makeObs } from "../../../mocks/scanner/observations.js"
+import {
+	applySeededOps,
+	mulberry32,
+	seededStore,
+} from "./snapshot-mirror-ops.js"
 
 const MIB = 1024 * 1024
 const logger = createLogger({ level: "fatal" })
@@ -79,6 +108,22 @@ describe("mainSnapshotSpacingMs", () => {
 	})
 })
 
+describe("mainSnapshotRestMs", () => {
+	it("is 9 x the build (10 % duty), 0 for none, capped at 10 min from 66,667 ms of build on", () => {
+		expect(MAIN_SNAPSHOT_REST_FACTOR).toBe(9)
+		expect(mainSnapshotRestMs(0)).toBe(0)
+		expect(mainSnapshotRestMs(2_700)).toBe(24_300)
+		// The duty of a 2.7 s build followed by its rest: 2,700 / 27,000 = 10 %.
+		expect(2_700 / (2_700 + mainSnapshotRestMs(2_700))).toBeCloseTo(0.1, 12)
+		expect(mainSnapshotRestMs(0.5)).toBe(5) // 4.5 rounded up
+		expect(mainSnapshotRestMs(66_666)).toBe(599_994)
+		expect(mainSnapshotRestMs(66_667)).toBe(MAIN_SNAPSHOT_MAX_SPACING_MS)
+		expect(mainSnapshotRestMs(1e12)).toBe(MAIN_SNAPSHOT_MAX_SPACING_MS)
+		for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY])
+			expect(mainSnapshotRestMs(bad)).toBe(0)
+	})
+})
+
 describe("journalSnapshotTriggerBytes", () => {
 	it("is max(1 MiB, snapshot), at most half of the journal cap", () => {
 		expect(journalSnapshotTriggerBytes(0, 64 * MIB)).toBe(
@@ -93,6 +138,35 @@ describe("journalSnapshotTriggerBytes", () => {
 	})
 })
 
+describe("holeSnapshotSpacingMs", () => {
+	it("is 1 s for the first 5 hole snapshots of an episode, then 2^(streak - 4) s, capped at 5 min from streak 13 on", () => {
+		expect(HOLE_SNAPSHOT_BACKOFF_AFTER).toBe(5)
+		for (const streak of [0, 1, 4])
+			expect(holeSnapshotSpacingMs(streak)).toBe(SNAPSHOT_REQUEST_MIN_MS)
+		expect(holeSnapshotSpacingMs(5)).toBe(2_000)
+		expect(holeSnapshotSpacingMs(6)).toBe(4_000)
+		// 2^8 s = 256 s < 300 s at streak 12; 2^9 s = 512 s caps to 300 s at 13.
+		expect(holeSnapshotSpacingMs(12)).toBe(256_000)
+		expect(holeSnapshotSpacingMs(13)).toBe(HOLE_SNAPSHOT_MAX_SPACING_MS)
+		expect(holeSnapshotSpacingMs(10_000)).toBe(300_000)
+		expect(holeSnapshotSpacingMs(Number.NaN)).toBe(1_000)
+		expect(holeSnapshotSpacingMs(-3)).toBe(1_000)
+	})
+})
+
+describe("snapshotRetryMs", () => {
+	it("is 0 without failures, then 10 s doubling per consecutive failure (callers cap it)", () => {
+		expect(snapshotRetryMs(0)).toBe(0)
+		expect(snapshotRetryMs(Number.NaN)).toBe(0)
+		expect(snapshotRetryMs(1)).toBe(SNAPSHOT_RETRY_MIN_MS)
+		expect(snapshotRetryMs(2)).toBe(20_000)
+		expect(snapshotRetryMs(9)).toBe(2_560_000)
+		expect(snapshotRetryMs(10)).toBe(5_120_000)
+		// The exponent stops at 30: never Infinity or NaN.
+		expect(snapshotRetryMs(1_000)).toBe(10_000 * 2 ** 30)
+	})
+})
+
 describe("snapshotIntervalMs", () => {
 	const base = {
 		snapshotBytes: 0,
@@ -100,19 +174,22 @@ describe("snapshotIntervalMs", () => {
 		maxJournalBytes: 64 * MIB,
 		onWorker: false,
 		requested: false,
-		failed: false,
+		failures: 0,
+		holeStreak: 0,
+		mainBuildMs: 0,
+		mainBuildEndOffsetMs: 0,
 	}
 
 	it("leaves a small store as it was: 10 s, a hole after 1 s, 10 s after a failure", () => {
 		expect(snapshotIntervalMs(base)).toBe(10_000)
 		expect(snapshotIntervalMs({ ...base, requested: true })).toBe(1_000)
-		expect(snapshotIntervalMs({ ...base, requested: true, failed: true })).toBe(
+		expect(snapshotIntervalMs({ ...base, requested: true, failures: 1 })).toBe(
 			10_000,
 		)
-		expect(snapshotIntervalMs({ ...base, failed: true })).toBe(10_000)
+		expect(snapshotIntervalMs({ ...base, failures: 1 })).toBe(10_000)
 	})
 
-	it("a 90 MB store: hourly, a hole after 1 s on or off the worker, 10 s after a failure", () => {
+	it("a 90 MB store: hourly, a hole after 1 s on or off the worker, 10 s after a first failure", () => {
 		const big = { ...base, snapshotBytes: 90_000_000 }
 		expect(snapshotIntervalMs(big)).toBe(3_888_000)
 		expect(snapshotIntervalMs({ ...big, onWorker: true })).toBe(3_888_000)
@@ -121,7 +198,7 @@ describe("snapshotIntervalMs", () => {
 		).toBe(1_000)
 		// The main-thread spacing (85,831 ms here) never delays covering a hole.
 		expect(snapshotIntervalMs({ ...big, requested: true })).toBe(1_000)
-		expect(snapshotIntervalMs({ ...big, requested: true, failed: true })).toBe(
+		expect(snapshotIntervalMs({ ...big, requested: true, failures: 1 })).toBe(
 			10_000,
 		)
 		expect(
@@ -129,7 +206,7 @@ describe("snapshotIntervalMs", () => {
 				...big,
 				snapshotBytes: 600 * MIB,
 				requested: true,
-				failed: true,
+				failures: 1,
 			}),
 		).toBe(10_000)
 		expect(
@@ -137,10 +214,11 @@ describe("snapshotIntervalMs", () => {
 				...big,
 				requested: true,
 				onWorker: true,
-				failed: true,
+				failures: 1,
 			}),
 		).toBe(10_000)
-		expect(snapshotIntervalMs({ ...big, failed: true })).toBe(3_888_000)
+		// A failed periodic snapshot is retried after 10 s, not at the periodic interval.
+		expect(snapshotIntervalMs({ ...big, failures: 1 })).toBe(10_000)
 	})
 
 	it("a journal tail at its trigger makes one due after 10 s (worker) or the main spacing; one byte less does not", () => {
@@ -159,17 +237,89 @@ describe("snapshotIntervalMs", () => {
 		)
 	})
 
+	it("a main-thread hole snapshot waits out 9 x the last main-thread build after it ended; the worker does not", () => {
+		// The last snapshot built 2.7 s on the main thread at its start: it ended 2,700 ms after.
+		const after = {
+			...base,
+			snapshotBytes: 90_000_000,
+			requested: true,
+			mainBuildMs: 2_700,
+			mainBuildEndOffsetMs: 2_700,
+		}
+		expect(snapshotIntervalMs(after)).toBe(27_000) // 2,700 + 24,300
+		expect(snapshotIntervalMs({ ...after, failures: 1 })).toBe(27_000)
+		expect(snapshotIntervalMs({ ...after, onWorker: true })).toBe(1_000)
+		// A fallback that ended 5 s after the start rests from its own end.
+		expect(snapshotIntervalMs({ ...after, mainBuildEndOffsetMs: 5_000 })).toBe(
+			29_300,
+		)
+		// One that ended long before the last (worker) start no longer delays anything.
+		expect(
+			snapshotIntervalMs({ ...after, mainBuildEndOffsetMs: -24_300 }),
+		).toBe(1_000)
+		expect(
+			snapshotIntervalMs({ ...after, mainBuildEndOffsetMs: -23_299 }),
+		).toBe(1_001)
+		// A 30 ms build rests 270 ms: inside the 1 s hole spacing.
+		expect(
+			snapshotIntervalMs({
+				...after,
+				mainBuildMs: 30,
+				mainBuildEndOffsetMs: 30,
+			}),
+		).toBe(1_000)
+		// Never past the periodic interval: no change to a store's normal cadence.
+		expect(snapshotIntervalMs({ ...after, requested: false })).toBe(3_888_000)
+		expect(
+			snapshotIntervalMs({ ...after, mainBuildEndOffsetMs: Number.NaN }),
+		).toBe(1_000)
+	})
+
+	it("composes the hole backoff, the failure retry and the caps", () => {
+		const big = { ...base, snapshotBytes: 90_000_000 }
+		const hole = { ...big, requested: true, onWorker: true }
+		expect(snapshotIntervalMs({ ...hole, holeStreak: 4 })).toBe(1_000)
+		expect(snapshotIntervalMs({ ...hole, holeStreak: 5 })).toBe(2_000)
+		expect(snapshotIntervalMs({ ...hole, holeStreak: 40 })).toBe(300_000)
+		// The later of the two: a 2 s backoff and a 10 s retry wait 10 s; a 256 s backoff wins.
+		expect(snapshotIntervalMs({ ...hole, holeStreak: 5, failures: 1 })).toBe(
+			10_000,
+		)
+		expect(snapshotIntervalMs({ ...hole, holeStreak: 12, failures: 1 })).toBe(
+			256_000,
+		)
+		// A hole's failure retry stops at 5 min (5th failure: 160 s; 6th: 320 s -> 300 s).
+		expect(snapshotIntervalMs({ ...hole, failures: 5 })).toBe(160_000)
+		expect(snapshotIntervalMs({ ...hole, failures: 6 })).toBe(300_000)
+		// A periodic one's at the periodic interval: 9th failure 2,560 s, 10th 5,120 s -> 3,888 s.
+		expect(snapshotIntervalMs({ ...big, onWorker: true, failures: 9 })).toBe(
+			2_560_000,
+		)
+		expect(snapshotIntervalMs({ ...big, onWorker: true, failures: 10 })).toBe(
+			3_888_000,
+		)
+		// A small store keeps its 10 s periodic ceiling whatever the backoff.
+		expect(
+			snapshotIntervalMs({ ...base, requested: true, holeStreak: 40 }),
+		).toBe(10_000)
+		expect(snapshotIntervalMs({ ...base, failures: 40 })).toBe(10_000)
+		// A journal trigger after failures waits the later of its spacing and the retry.
+		const trigger = { ...big, onWorker: true, journalBytes: 32 * MIB }
+		expect(snapshotIntervalMs({ ...trigger, failures: 3 })).toBe(40_000)
+	})
+
 	it("never exceeds the periodic interval, whatever the inputs", () => {
 		for (const snapshotBytes of [0, 1, MIB, 90_000_000, 2_000_000_000])
 			for (const requested of [false, true])
-				for (const failed of [false, true])
+				for (const failures of [0, 1, 40])
 					for (const onWorker of [false, true])
 						for (const journalBytes of [0, 1_000 * MIB]) {
 							const s = {
 								...base,
 								snapshotBytes,
 								requested,
-								failed,
+								failures,
+								holeStreak: failures,
 								onWorker,
 								journalBytes,
 							}
@@ -365,6 +515,7 @@ describe("ScannerPersistence.snapshotCadence", () => {
 			h.ingest(100)
 			await h.p.writeSnapshotOf(h.store) // the first resets the mirror on the main thread
 			expect(h.p.snapshotCadence().onWorker).toBe(true)
+			expect(h.p.mainSnapshotBuild().count).toBe(1)
 			for (let round = 0; round < 5; round++) {
 				h.ingest(120) // 12 min of activity between snapshots
 				await h.p.writeSnapshotOf(h.store)
@@ -380,9 +531,40 @@ describe("ScannerPersistence.snapshotCadence", () => {
 			})
 			const size = (await stat(join(h.dir, "discoveries.json"))).size
 			expect(h.p.snapshotCadence().snapshotBytes).toBe(size)
+			expect(h.p.mainSnapshotBuild().count).toBe(1) // worker builds are not counted
 		} finally {
 			await h.p.closeSnapshotWorker()
 		}
+	})
+
+	it("times every main-thread build, the store clone included, on the injected build clock", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "wavekit-snapcadence-"))
+		dirs.push(dir)
+		const buildTime = { t: 0 }
+		const store = new DiscoveryStore({
+			maxDiscoveries: 1_000,
+			now: () => T0,
+			newId: counterIds(),
+		})
+		const p = new ScannerPersistence({
+			dir,
+			logger,
+			now: () => T0,
+			snapshotWorker: { enabled: false },
+			buildClock: () => buildTime.t,
+		})
+		await p.load()
+		expect(p.mainSnapshotBuild()).toEqual({ count: 0, ms: 0 })
+		const snapshot = store.snapshot.bind(store)
+		vi.spyOn(store, "snapshot").mockImplementation(() => {
+			buildTime.t += 2_700 // the clone of a large store
+			return snapshot()
+		})
+		await p.writeSnapshotOf(store)
+		expect(p.mainSnapshotBuild()).toEqual({ count: 1, ms: 2_700 })
+		buildTime.t += 50_000 // idle time between snapshots is not build time
+		await p.writeSnapshot(snapshot())
+		expect(p.mainSnapshotBuild()).toEqual({ count: 2, ms: 0 })
 	})
 
 	it("an hour of journal after the last snapshot replays to the same store", async () => {
@@ -408,4 +590,237 @@ describe("ScannerPersistence.snapshotCadence", () => {
 		expect(replica.snapshot()).toEqual(h.store.snapshot())
 		expect(replica.recordCounts()).toEqual(h.store.recordCounts())
 	})
+})
+
+describe("ScannerPersistence main-thread rest at the fallback", () => {
+	const BUILD_MS = 2_700
+
+	async function restHarness(snapshotWorker: SnapshotWorkerOptions): Promise<{
+		p: ScannerPersistence
+		store: DiscoveryStore
+		buildTime: { t: number }
+		dir: string
+	}> {
+		const dir = await mkdtemp(join(tmpdir(), "wavekit-snapcadence-"))
+		dirs.push(dir)
+		const buildTime = { t: 0 }
+		const store = new DiscoveryStore({
+			maxDiscoveries: 1_000,
+			now: () => T0,
+			newId: counterIds(),
+		})
+		const p = new ScannerPersistence({
+			dir,
+			logger,
+			now: () => T0,
+			snapshotWorker,
+			buildClock: () => buildTime.t,
+		})
+		await p.load()
+		store.on("mutation", (e: Omit<JournalEntry, "seq">) => {
+			void p.append(e).catch(() => undefined)
+		})
+		store.ingest(makeObs({ id: "o1", centreHz: 446_000_000, startedAt: T0 }))
+		const snapshot = store.snapshot.bind(store)
+		vi.spyOn(store, "snapshot").mockImplementation(() => {
+			buildTime.t += BUILD_MS
+			return snapshot()
+		})
+		return { p, store, buildTime, dir }
+	}
+
+	it("defers a budgeted main-path snapshot until 9 x the last build after it ended; unbudgeted ones always write", async () => {
+		const h = await restHarness({ enabled: false })
+		await h.p.writeSnapshotOf(h.store) // built 0 -> 2,700: rest until 27,000
+		expect(h.p.mainSnapshotBuild()).toEqual({ count: 1, ms: BUILD_MS })
+		expect(h.p.mainSnapshotRestRemainingMs()).toBe(24_300)
+		h.buildTime.t = 27_000 - 1
+		await expect(
+			h.p.writeSnapshotOf(h.store, { deferWithinMainRest: true }),
+		).rejects.toMatchObject({ code: SCANNER_SNAPSHOT_DEFERRED_CODE })
+		expect(h.p.mainSnapshotBuild().count).toBe(1) // nothing built
+		expect(h.p.mainSnapshotRestRemainingMs()).toBe(1)
+		// Start-up and shutdown snapshots are not budgeted.
+		await h.p.writeSnapshotOf(h.store)
+		expect(h.p.mainSnapshotBuild().count).toBe(2) // 26,999 -> 29,699: rest until 53,999
+		h.buildTime.t = 53_999
+		await h.p.writeSnapshotOf(h.store, { deferWithinMainRest: true })
+		expect(h.p.mainSnapshotBuild().count).toBe(3)
+	})
+
+	it("defers the main-thread fallback of a failed worker commit inside the rest, and writes nothing", async () => {
+		const commits = { count: 0 }
+		const factory: SnapshotWorkerFactory = () => {
+			let listener: ((value: unknown) => void) | null = null
+			const port: SnapshotWorkerPort = {
+				postMessage: (m: SnapshotWorkerRequest) => {
+					if (m.type === "commit") {
+						commits.count += 1
+						const id = m.id
+						setImmediate(() =>
+							listener?.({
+								type: "failed",
+								id,
+								reason: "diverged",
+								heapUsedBytes: 0,
+							}),
+						)
+						return
+					}
+					const charged = m.charged
+					setImmediate(() => listener?.({ type: "applied", charged }))
+				},
+				onMessage: l => {
+					listener = l
+				},
+				onError: () => undefined,
+				onExit: () => undefined,
+				terminate: () => Promise.resolve(0),
+			}
+			return port
+		}
+		const h = await restHarness({ factory })
+		try {
+			await h.p.writeSnapshotOf(h.store) // main path: resets the mirror, rest until 27,000
+			const first = await readFile(join(h.dir, "discoveries.json"), "utf8")
+			await new Promise<void>(resolve => setImmediate(resolve)) // the reset is acknowledged
+			expect(h.p.snapshotCadence().onWorker).toBe(true)
+			h.store.ingest(
+				makeObs({ id: "o2", centreHz: 446_012_500, startedAt: T0 + 1 }),
+			)
+			h.buildTime.t = 10_000
+			await expect(
+				h.p.writeSnapshotOf(h.store, { deferWithinMainRest: true }),
+			).rejects.toMatchObject({ code: SCANNER_SNAPSHOT_DEFERRED_CODE })
+			expect(commits.count).toBe(1) // the worker was asked and failed
+			expect(h.p.mainSnapshotBuild().count).toBe(1) // no fallback build inside the rest
+			expect(await readFile(join(h.dir, "discoveries.json"), "utf8")).toBe(
+				first,
+			)
+			// Past the rest the mirror is stale (diverged): the main path writes it.
+			h.buildTime.t = 27_000
+			await h.p.writeSnapshotOf(h.store, { deferWithinMainRest: true })
+			expect(h.p.mainSnapshotBuild().count).toBe(2)
+			expect(await readFile(join(h.dir, "discoveries.json"), "utf8")).not.toBe(
+				first,
+			)
+		} finally {
+			await h.p.closeSnapshotWorker()
+		}
+	})
+})
+
+describe("ScannerPersistence journal bytes count only lines written", () => {
+	const line = (n: number): Omit<JournalEntry, "seq"> => ({
+		at: new Date(T0).toISOString(),
+		op: "delete",
+		payload: { discoveries: [], observations: [], deleted: [`d-${n}`] },
+	})
+
+	it("refused lines (backlog full) never count", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "wavekit-snapcadence-"))
+		dirs.push(dir)
+		const p = new ScannerPersistence({
+			dir,
+			logger,
+			now: () => T0,
+			snapshotWorker: { enabled: false },
+			maxJournalBacklogBytes: 1,
+		})
+		await p.load()
+		await expect(p.append(line(1))).rejects.toMatchObject({
+			code: SCANNER_JOURNAL_BACKLOG_CODE,
+		})
+		await p.writeJobs([])
+		expect(p.snapshotCadence().journalBytes).toBe(0)
+	})
+
+	it("a failed batch and the batch dropped behind its hole never count; later written lines do, exactly", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "wavekit-snapcadence-"))
+		dirs.push(dir)
+		let release!: () => void
+		const gate = new Promise<void>(resolve => {
+			release = resolve
+		})
+		let calls = 0
+		const p = new ScannerPersistence({
+			dir,
+			logger,
+			now: () => T0,
+			snapshotWorker: { enabled: false },
+			appendFile: async (path, data) => {
+				calls += 1
+				if (calls === 1) {
+					await gate
+					throw new Error("EIO")
+				}
+				const { appendFile } = await import("node:fs/promises")
+				await appendFile(path, data)
+			},
+		})
+		await p.load()
+		const failed = p.append(line(1)).catch((err: unknown) => err)
+		await new Promise<void>(resolve => setImmediate(resolve)) // batch 1 is writing
+		const dropped = p.append(line(2)).catch((err: unknown) => err)
+		release()
+		expect(await failed).toMatchObject({ code: "SCANNER_PERSIST_FAILED" })
+		expect(await dropped).toMatchObject({ code: SCANNER_JOURNAL_BACKLOG_CODE })
+		expect(calls).toBe(1) // the dropped batch was never written
+		expect(p.snapshotCadence().journalBytes).toBe(0)
+		await p.writeSnapshot({
+			discoveries: [],
+			observations: [],
+			corrections: [],
+			recordingOperations: [],
+		}) // covers the hole
+		await p.append(line(3))
+		expect(p.snapshotCadence().journalBytes).toBe(await journalFileBytes(dir))
+		expect(await journalFileBytes(dir)).toBeGreaterThan(0)
+	})
+})
+
+describe("ScannerPersistence replay of a long journal with merges, rekeys, evictions and prunes", () => {
+	it("restores the live store from the snapshot plus thousands of seeded journal lines", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "wavekit-snapcadence-"))
+		dirs.push(dir)
+		const run = seededStore(40)
+		const p = new ScannerPersistence({
+			dir,
+			logger,
+			now: () => run.clock.now,
+			snapshotWorker: { enabled: false },
+		})
+		await p.load()
+		run.store.on("mutation", (e: Omit<JournalEntry, "seq">) => {
+			void p.append(e).catch(() => undefined)
+		})
+		const rand = mulberry32(20261101)
+		applySeededOps(run, rand, 800)
+		await p.writeSnapshot(run.store.snapshot())
+		const before = run.entries.length
+		applySeededOps(run, rand, 4_000, { obsBase: 100_000 })
+		await p.writeJobs([]) // drains every queued journal line
+		const tail = run.entries.slice(before)
+		const ops = new Set(tail.map(e => e.op))
+		for (const op of ["observation", "evidence", "rekey", "evict", "delete"])
+			expect(ops.has(op as (typeof tail)[number]["op"])).toBe(true)
+		const loaded = await new ScannerPersistence({
+			dir,
+			logger,
+			now: () => run.clock.now,
+			snapshotWorker: { enabled: false },
+		}).load()
+		expect(loaded.droppedLines).toBe(0)
+		expect(loaded.entries.length).toBe(tail.length)
+		const replica = new DiscoveryStore({
+			maxDiscoveries: 40,
+			now: () => run.clock.now,
+			newId: counterIds(),
+			rasters: () => [{ spacingHz: 12_500, firstChannelHz: 446_000_000 }],
+		})
+		replica.restore(loaded)
+		for (const e of loaded.entries) replica.replay(e)
+		expect(replica.snapshot()).toEqual(run.store.snapshot())
+		expect(replica.recordCounts()).toEqual(run.store.recordCounts())
+	}, 60_000)
 })
