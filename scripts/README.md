@@ -53,6 +53,28 @@ node output/bench/zoom-workload.mjs --fs 2048000 --fft 8192..262144 --rate 5,10 
 Other flags: `--variant fft,ddc` (shift and decimate before the FFT),
 `--no-detector`, `--span-hz`, `--gap`, `--seed`.
 
+### `bench/scanner-quality.ts`
+
+Scanner quality benchmark (measurement only): plays a seeded synthetic scene with ground truth
+through the real scanner (detector, frame tracks, channel gate, passive discoveries, IQ capture
+requests, replay trial plan) on a virtual clock. It prints a per-signal table, recall and
+identification by class and SNR, splits, false discoveries, CPU seconds per IQ second, and one
+JSON line. Decoders are faked: see `scripts/bench/scanner-quality/metrics.ts` for the oracle and
+[SCANNER.md](../docs/SCANNER.md#quality-benchmark) for what is measured. The `small` scene
+(1.024 Msps, 12 s) also runs as a vitest test; `full` (2.4 Msps, 45 s) takes a few minutes.
+
+**Usage:**
+
+```bash
+pnpm exec esbuild scripts/bench/scanner-quality.ts --bundle --platform=node --format=esm \
+  --packages=external --outfile=output/bench/scanner-quality.mjs
+node output/bench/scanner-quality.mjs [--scene small|full] [--seed N]
+node output/bench/scanner-quality.mjs --file capture.cu8 --rate 2400000 --centre 433920000 [--seconds 60]
+```
+
+`--file` replays a CU8 capture. With no ground truth it prints counts only: tracks, gate passes,
+discoveries, labels and planned trials.
+
 ### `demod-test.sh`
 
 A shell script to test the manual demodulation pipeline on recorded IQ files. Useful for replicating the production `csdr` pipeline and verifying decodability with `multimon-ng`.
