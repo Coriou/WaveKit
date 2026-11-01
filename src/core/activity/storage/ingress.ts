@@ -10,7 +10,15 @@ import type { ActivityLimits } from "./limits.js"
 import { buildActivityRow } from "./row.js"
 import type { BuiltActivityRow } from "./row.js"
 import { isTelemetryOutput } from "./telemetry.js"
-import { PositionCoalescer, type CoalesceUndo } from "./coalesce.js"
+import { PositionCoalescer } from "./coalesce.js"
+import type {
+	CoalesceFlush,
+	CoalesceMerge,
+	CoalescePresenter,
+	CoalesceUndo,
+} from "./coalesce.js"
+import { withEnvelopeMetadata, withMergedData } from "../envelope.js"
+import { MAX_ENVELOPE_BYTES } from "../projection.js"
 import { FloodDedupe, floodKeyOf } from "./flood-dedupe.js"
 import type { FloodKey } from "./flood-dedupe.js"
 import type { DecodeEnvelope } from "../types.js"
@@ -18,6 +26,15 @@ import type { Logger } from "../../../utils/logger.js"
 
 const TOKEN = 1_000_000
 const MAX_GAP_DECODERS = 32
+/** Held rows passed over per flush for want of queue room before the flush waits. */
+const MAX_FLUSH_SKIPS = 32
+
+/** Why a held row was not queued: "queue-bytes" when only its own size kept it out. */
+type HeldRejection =
+	| "store-paused"
+	| "queue-full"
+	| "rate-limited"
+	| "queue-bytes"
 
 export interface IngressCounters {
 	admitted: number
@@ -54,6 +71,12 @@ export class ActivityIngress {
 	}
 	admitted = 0
 	excludedTelemetry = 0
+	/** Held entity rows the queue or the global bucket turned away; still held, retried. */
+	coalesceDeferrals = 0
+	/** Rows of a tracked entity stored as their own data: the merged state did not fit. */
+	coalesceMergeFailures = 0
+	/** No held row is retried before this store-clock time (after a deferral). */
+	private flushRetryAt = Number.NEGATIVE_INFINITY
 	private readonly global: TokenBucket
 	private readonly coalescer: PositionCoalescer
 	/** Undo of each queued or in-flight row's coalescing state, by eventId. */
@@ -85,12 +108,137 @@ export class ActivityIngress {
 		this.coalescer = new PositionCoalescer(
 			limits.positionCoalesceMs,
 			limits.positionCoalesceMaxEntities,
+			now,
+			envelope => {
+				this.noteDrop(
+					"queue-full",
+					envelope.receivedAt,
+					envelope.decoderId,
+					this.now(),
+				)
+			},
 		)
 	}
 
-	/** Position-only receptions not stored inside their entity's window. */
+	/** Receptions merged into their entity's latest state instead of a row of their own. */
 	get coalescedPositions(): number {
 		return this.coalescer.coalesced
+	}
+
+	/** Store-clock time the next held entity row is due (or retried), if any. */
+	nextCoalesceDueAt(): number | undefined {
+		const due = this.coalescer.nextDueAt()
+		return due === undefined ? undefined : Math.max(due, this.flushRetryAt)
+	}
+
+	/** Evicted entities whose held row waits for queue room (at most maxEntities). */
+	heldEvictedCount(): number {
+		return this.coalescer.evictedCount()
+	}
+
+	/**
+	 * Queues a row for each entity whose held receptions are due (or whose
+	 * entity was evicted). O(rows queued): the held entities are in due order.
+	 *
+	 * These rows skip the per-decoder bucket: they are bounded by the entities,
+	 * not by the decoder's rate. A held entity flushes at most once per window
+	 * (its next hold starts a new window), so at most maxEntities per
+	 * positionCoalesceMs in all (4,096 / 60 s ≈ 68/s at the extreme, a few per
+	 * second at a busy site); an evicted entity's row follows a first sighting
+	 * that took both buckets. They do take a global token, so the writer's
+	 * bound holds. A row the global bucket, the queue caps or a paused store
+	 * turn away is not lost: it stays held (counted in coalesceDeferrals, not
+	 * as a drop) and every held row waits pauseRetryMs before the next try.
+	 * A row only the queue's free bytes turn away is passed over, so smaller
+	 * rows behind it still queue (up to MAX_FLUSH_SKIPS per flush, bounding the
+	 * rows built). A row over queueMaxBytes itself never waits (enqueueHeld).
+	 */
+	flushCoalesced(now: number): void {
+		if (this.closed || now < this.flushRetryAt) return
+		// Every admit calls this: no generator unless a held row is due.
+		const due = this.coalescer.nextDueAt()
+		if (due === undefined || due > now) return
+		let deferred = false
+		let skips = 0
+		for (const flush of this.coalescer.dueFlushes(now)) {
+			const reason = this.enqueueHeld(flush, now, true)
+			if (reason === undefined) continue
+			deferred = true
+			if (reason !== "queue-bytes" || ++skips >= MAX_FLUSH_SKIPS) break
+		}
+		if (!deferred) return
+		this.coalesceDeferrals++
+		this.flushRetryAt = now + this.limits.pauseRetryMs
+	}
+
+	/**
+	 * Shutdown: every held entity row, due or not, before the queue drains,
+	 * without token buckets (at most 2 × maxEntities rows). A row the queue
+	 * caps or a paused store turn away now is a counted drop.
+	 */
+	flushAllCoalesced(): void {
+		if (this.closed) return
+		const now = this.now()
+		for (const flush of this.coalescer.takeAll()) {
+			const reason = this.enqueueHeld(flush, now, false)
+			if (reason !== undefined)
+				this.noteDrop(
+					reason === "queue-bytes" ? "queue-full" : reason,
+					flush.envelope.receivedAt,
+					flush.envelope.decoderId,
+					now,
+				)
+		}
+	}
+
+	/**
+	 * Queues a held entity row; returns why it was turned away (nothing
+	 * counted). A row over queueMaxBytes could never queue, whatever the
+	 * queue holds: it falls back to the latest held reception's own data, and
+	 * when even that is over the cap the held receptions are consumed as a
+	 * counted queue-full drop. Either way nothing is left to block later rows.
+	 */
+	private enqueueHeld(
+		flush: CoalesceFlush,
+		now: number,
+		globalToken: boolean,
+	): HeldRejection | undefined {
+		if (this.paused) return "store-paused"
+		if (this.itemOverflow()) return "queue-full"
+		if (globalToken) {
+			this.global.refill(now)
+			if (!this.global.available()) return "rate-limited"
+		}
+		let { envelope: stored, merged } = storedEnvelope(
+			flush.envelope,
+			flush.present,
+			flush.merged,
+		)
+		if (merged) stored = stampedNow(stored, now)
+		let row = buildReceptionRow(stored)
+		if (merged && row.recordBytes > this.limits.queueMaxBytes) {
+			stored = ownEnvelope(flush.envelope, flush.present)
+			merged = false
+			row = buildReceptionRow(stored)
+		}
+		if (row.recordBytes > this.limits.queueMaxBytes) {
+			flush.commit().settle()
+			this.noteDrop(
+				"queue-full",
+				flush.envelope.receivedAt,
+				flush.envelope.decoderId,
+				now,
+			)
+			return undefined
+		}
+		if (this.byteOverflow(row)) return "queue-bytes"
+		if (globalToken) this.global.take()
+		// The merged state cannot outgrow an envelope (coalesce.ts), but it can
+		// outgrow queueMaxBytes or fail a presentation: the row then stands for
+		// the latest reception.
+		if (!merged) this.coalesceMergeFailures++
+		this.pushReception(row, flush.commit(), undefined, now)
+		return undefined
 	}
 
 	/** Meshtastic flood copies not stored (req 6.6); not a loss. */
@@ -102,9 +250,11 @@ export class ActivityIngress {
 	 * `present`, when given, is called only after coalescing and admission
 	 * have kept the reception, and its envelope is the one stored. Coalescing
 	 * reads decodedData, outputType, decoderId and receivedAt, which a
-	 * presentation never changes.
+	 * presentation never changes. For a tracked entity it is called with the
+	 * entity's merged latest state (coalesce.ts) and must present that data;
+	 * a held reception keeps it until its entity's row is stored.
 	 */
-	admit(envelope: DecodeEnvelope, present?: () => DecodeEnvelope): AdmitResult {
+	admit(envelope: DecodeEnvelope, present?: CoalescePresenter): AdmitResult {
 		if (this.closed) {
 			this.dropped.closed++
 			return { admitted: false, reason: "closed" }
@@ -121,48 +271,71 @@ export class ActivityIngress {
 				return { admitted: false, reason: "flood-copy" }
 			}
 		}
-		const coalesce = this.coalescer.decide(envelope)
+		const now = this.now()
+		// O(1) when nothing is due: the next held entity row is at the front.
+		this.flushCoalesced(now)
+		const coalesce = this.coalescer.decide(envelope, present)
 		if (!coalesce.store) {
 			this.coalescer.noteCoalesced()
 			return { admitted: false, reason: "coalesced" }
 		}
-		const now = this.now()
+		const result = this.enqueueReception(
+			envelope,
+			present,
+			coalesce.merged,
+			coalesce.commit,
+			floodKey,
+			now,
+		)
+		// An evicted entity's held receptions are flushed right away.
+		if (result.admitted) this.flushCoalesced(now)
+		return result
+	}
+
+	private enqueueReception(
+		envelope: DecodeEnvelope,
+		present: CoalescePresenter | undefined,
+		merge: CoalesceMerge | undefined,
+		commit: (keepHeld?: boolean) => CoalesceUndo,
+		floodKey: FloodKey | undefined,
+		now: number,
+	): AdmitResult {
 		if (this.paused) return this.rejectEnvelope(envelope, "store-paused")
 		if (this.itemOverflow()) return this.rejectEnvelope(envelope, "queue-full")
 		if (!this.takeTokens(envelope.decoderId, now))
 			return this.rejectEnvelope(envelope, "rate-limited")
-		let stored = envelope
-		if (present) {
-			try {
-				stored = present()
-			} catch {
-				stored = envelope
-			}
-		}
-		const row = buildActivityRow({
-			version: ACTIVITY_RECORD_VERSION,
-			eventId: stored.eventId,
-			commitSeq: "0",
-			producedAt: stored.producedAt,
-			receivedAt: stored.receivedAt,
-			kind: "decoder-reception",
-			payload: stored,
-		})
+		const { envelope: stored, merged } = storedEnvelope(
+			envelope,
+			present,
+			merge,
+		)
+		const row = buildReceptionRow(stored)
 		if (this.byteOverflow(row)) {
 			this.refundTokens(envelope.decoderId)
 			this.noteDrop("queue-full", envelope.receivedAt, envelope.decoderId, now)
 			return { admitted: false, reason: "queue-full" }
 		}
+		// Stored as its own data: the held receptions wait for a row that carries them.
+		if (!merged) this.coalesceMergeFailures++
+		this.pushReception(row, commit(!merged), floodKey, now)
+		return { admitted: true }
+	}
+
+	private pushReception(
+		row: BuiltActivityRow,
+		undo: CoalesceUndo,
+		floodKey: FloodKey | undefined,
+		now: number,
+	): void {
 		this.stageDueEpisode(now)
 		this.queue.push(row)
 		this.queueBytes += row.recordBytes
 		this.admitted++
-		this.coalesceUndo.set(row.eventId, coalesce.commit())
+		this.coalesceUndo.set(row.eventId, undo)
 		if (floodKey) {
 			this.flood.remember(floodKey, row.eventId)
 			this.floodPending.set(row.eventId, floodKey.key)
 		}
-		return { admitted: true }
 	}
 
 	/**
@@ -258,17 +431,21 @@ export class ActivityIngress {
 		this.inFlight = []
 		this.inFlightBytes = 0
 		if (gap) this.pendingGap = gap
-		// Newest first, so each undo sees the state its own commit left.
+		// Newest first, so each undo sees the state its own commit left. A row
+		// of held receptions only is held again: nothing lost, no drop counted.
+		const kept = new Set<string>()
 		for (const row of [...failed].reverse())
-			this.rollBackCoalescing(row.eventId)
+			if (this.rollBackCoalescing(row.eventId)) kept.add(row.eventId)
+		if (kept.size > 0) this.deferHeldRetry()
 		for (const row of failed) this.forgetFlood(row.eventId)
 		for (const row of failed)
-			this.noteDrop(
-				"write-failed",
-				new Date(row.receivedAtMs).toISOString(),
-				row.decoderId,
-				this.now(),
-			)
+			if (!kept.has(row.eventId))
+				this.noteDrop(
+					"write-failed",
+					new Date(row.receivedAtMs).toISOString(),
+					row.decoderId,
+					this.now(),
+				)
 	}
 
 	noteSkipped(
@@ -276,18 +453,53 @@ export class ActivityIngress {
 		eventIds: readonly string[],
 	): void {
 		const skipped = new Set(eventIds)
+		const kept = new Set<string>()
 		for (const row of [...batch].reverse())
 			if (skipped.has(row.eventId)) {
-				this.rollBackCoalescing(row.eventId)
+				if (this.rollBackCoalescing(row.eventId)) kept.add(row.eventId)
 				this.forgetFlood(row.eventId)
 			}
+		if (kept.size > 0) this.deferHeldRetry()
 		for (const row of batch) {
-			if (!skipped.has(row.eventId) || row.kind === "ingestion-gap") continue
+			if (
+				!skipped.has(row.eventId) ||
+				kept.has(row.eventId) ||
+				row.kind === "ingestion-gap"
+			)
+				continue
 			this.noteDrop(
 				"write-failed",
 				new Date(row.receivedAtMs).toISOString(),
 				row.decoderId,
 				this.now(),
+			)
+		}
+	}
+
+	/**
+	 * Receptions held again after a failed write are retried after
+	 * pauseRetryMs, not at once, so a failing writer is not spun on.
+	 */
+	private deferHeldRetry(): void {
+		this.flushRetryAt = Math.max(
+			this.flushRetryAt,
+			this.now() + this.limits.pauseRetryMs,
+		)
+	}
+
+	/**
+	 * The writer is gone (call after markClosed): every held entity row, due
+	 * or not, is a counted write-failed loss, since no flush can carry it now.
+	 */
+	abandonHeld(): void {
+		const now = this.now()
+		for (const flush of this.coalescer.takeAll()) {
+			flush.commit().settle()
+			this.noteDrop(
+				"write-failed",
+				flush.envelope.receivedAt,
+				flush.envelope.decoderId,
+				now,
 			)
 		}
 	}
@@ -320,10 +532,16 @@ export class ActivityIngress {
 		this.flood.forget(key, eventId)
 	}
 
-	private rollBackCoalescing(eventId: string): void {
+	/**
+	 * True when the row's held receptions are held again (the row lost
+	 * nothing). Never once closed: no flush can carry them any more, so the
+	 * row is a counted write-failed loss rather than silently held.
+	 */
+	private rollBackCoalescing(eventId: string): boolean {
 		const undo = this.coalesceUndo.get(eventId)
 		this.coalesceUndo.delete(eventId)
-		undo?.()
+		if (this.closed) return false
+		return undo?.() ?? false
 	}
 
 	/** An episode is open and has not been staged yet. */
@@ -548,6 +766,104 @@ export class ActivityIngress {
 		)
 		this.decoders.set(decoderId, created)
 		return created
+	}
+}
+
+function buildReceptionRow(stored: DecodeEnvelope): BuiltActivityRow {
+	return buildActivityRow({
+		version: ACTIVITY_RECORD_VERSION,
+		eventId: stored.eventId,
+		commitSeq: "0",
+		producedAt: stored.producedAt,
+		receivedAt: stored.receivedAt,
+		kind: "decoder-reception",
+		payload: stored,
+	})
+}
+
+/**
+ * The envelope a kept reception is stored as: presented with the entity's
+ * merged state when there is one, else as received. A presenter that throws
+ * falls back to the unpresented merge, which keeps the envelope's own
+ * presentation. `merged` is false when a merged state was given but no
+ * envelope could carry it (over MAX_ENVELOPE_BYTES): the reception is stored
+ * as its own data instead and the caller keeps the held receptions.
+ */
+function storedEnvelope(
+	envelope: DecodeEnvelope,
+	present: CoalescePresenter | undefined,
+	merge: CoalesceMerge | undefined,
+): { envelope: DecodeEnvelope; merged: boolean } {
+	if (present) {
+		try {
+			return {
+				envelope: merge === undefined ? present() : present(merge),
+				merged: true,
+			}
+		} catch {
+			// Fall back below.
+		}
+	}
+	if (merge === undefined) return { envelope, merged: true }
+	try {
+		return {
+			envelope: withMergedData(envelope, merge.decodedData, merge.coalesced),
+			merged: true,
+		}
+	} catch {
+		// An envelope that never passed validation (a test or a direct caller)
+		// is merged as it is, if the result still fits; the writer refuses a
+		// record over MAX_RECORD_BYTES.
+		const { decodedData: _own, coalesced: _span, ...metadata } = envelope
+		const raw: DecodeEnvelope = {
+			...metadata,
+			...(merge.coalesced === undefined ? {} : { coalesced: merge.coalesced }),
+			decodedData: merge.decodedData,
+		}
+		if (jsonBytes(raw) <= MAX_ENVELOPE_BYTES)
+			return { envelope: raw, merged: true }
+	}
+	return { envelope: ownEnvelope(envelope, present), merged: false }
+}
+
+/**
+ * A flushed row is a snapshot of the entity's state taken when it is queued:
+ * producedAt and receivedAt are the store clock then (never earlier than its
+ * latest held reception), so rows in seq order also read in time order. Its
+ * `coalesced` span keeps when the receptions it stands for were heard.
+ */
+function stampedNow(stored: DecodeEnvelope, now: number): DecodeEnvelope {
+	const latest = Date.parse(stored.coalesced?.lastSeenAt ?? stored.receivedAt)
+	const at = Number.isFinite(latest) && latest > now ? latest : now
+	if (!Number.isFinite(at)) return stored
+	const time = new Date(at).toISOString()
+	if (time === stored.receivedAt && time === stored.producedAt) return stored
+	try {
+		return withEnvelopeMetadata(stored, { producedAt: time, receivedAt: time })
+	} catch {
+		// An envelope that never passed validation (a test or a direct caller).
+		return { ...stored, producedAt: time, receivedAt: time }
+	}
+}
+
+function ownEnvelope(
+	envelope: DecodeEnvelope,
+	present: CoalescePresenter | undefined,
+): DecodeEnvelope {
+	if (present)
+		try {
+			return present()
+		} catch {
+			// The plain envelope below.
+		}
+	return envelope
+}
+
+function jsonBytes(value: DecodeEnvelope): number {
+	try {
+		return Buffer.byteLength(JSON.stringify(value), "utf8")
+	} catch {
+		return Number.POSITIVE_INFINITY
 	}
 }
 

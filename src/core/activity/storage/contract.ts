@@ -5,6 +5,7 @@
  * Changing anything here is a Main-only contract change.
  */
 import type { DecodeEnvelope } from "../types.js"
+import type { CoalescePresenter } from "./coalesce.js"
 
 export const ACTIVITY_SCHEMA_VERSION = 1
 export const ACTIVITY_RECORD_VERSION = 1
@@ -118,6 +119,10 @@ export interface ActivitySummary {
 	/** First fields that fit the 4 KiB budget. */
 	fields: DecodeEnvelope["fields"]
 	position?: DecodeEnvelope["position"]
+	/** The envelope's `coalesced`: receptions merged into this row and their first/last receivedAt. */
+	coalesced?: DecodeEnvelope["coalesced"]
+	/** The envelope's `aircraft`: who the row's aircraft is, as known when it was stored. */
+	aircraft?: DecodeEnvelope["aircraft"]
 }
 
 export const MAX_RECORD_BYTES = 144 * 1024
@@ -231,7 +236,7 @@ export interface ActivityStoreHandle {
 	 * Non-blocking; never throws on overload, counts loss instead. `present`
 	 * runs only for a kept reception; its envelope is stored instead.
 	 */
-	admit(envelope: DecodeEnvelope, present?: () => DecodeEnvelope): AdmitResult
+	admit(envelope: DecodeEnvelope, present?: CoalescePresenter): AdmitResult
 	/**
 	 * WG1: admits one closed analog transmission as an `analog-transmission` record (eventId =
 	 * payload.transmissionId), with the same non-blocking, loss-counting semantics as admit().
@@ -309,8 +314,21 @@ export interface ActivityStoreStats {
 		number
 	>
 	excludedTelemetry: number
-	/** Position-only receptions not stored inside their entity's window (WG1). */
+	/**
+	 * Receptions merged into their entity's latest state instead of a row of their own
+	 * (storage/coalesce.ts): aircraft, ship, APRS and mesh positions, sensor readings.
+	 */
 	coalescedPositions: number
+	/**
+	 * Held entity rows the global bucket, the queue caps or a paused store
+	 * turned away: still held and retried after pauseRetryMs, not a loss.
+	 */
+	coalesceDeferrals: number
+	/**
+	 * Rows of a tracked entity stored as their own data because the merged
+	 * state would not fit one envelope; the held receptions wait for their own row.
+	 */
+	coalesceMergeFailures: number
 	queueDepth: number
 	queueBytes: number
 	dbBytes: number

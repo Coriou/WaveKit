@@ -133,7 +133,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 2 0.05 | csdr convert -i float -o char | rtl_433 -r cu8:- -s 1024000 -F json -Y autolevel -M level",
+			"csdr convert -i char -o float | csdr firdecimate 2 0.05 | csdr convert -i float -o char | rtl_433 -r cu8:- -s 1024000 -F json -Y autolevel -M level -M stats:1:10",
 		],
 		getDecoderArgs: [
 			"-r",
@@ -146,6 +146,8 @@ const GOLDEN: Row[] = [
 			"autolevel",
 			"-M",
 			"level",
+			"-M",
+			"stats:1:10",
 		],
 	},
 	{
@@ -386,7 +388,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 2 0.05 | csdr convert -i float -o char | rtl_433 -r cu8:- -s 1024000 -F json -Y autolevel -M level",
+			"csdr convert -i char -o float | csdr firdecimate 2 0.05 | csdr convert -i float -o char | rtl_433 -r cu8:- -s 1024000 -F json -Y autolevel -M level -M stats:1:10",
 		],
 		getDecoderArgs: [
 			"-r",
@@ -399,6 +401,8 @@ const GOLDEN: Row[] = [
 			"autolevel",
 			"-M",
 			"level",
+			"-M",
+			"stats:1:10",
 		],
 	},
 	{
@@ -411,7 +415,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 2 0.05 | csdr convert -i float -o char | rtl_433 -r cu8:- -s 1024000 -F json -Y autolevel -M level",
+			"csdr convert -i char -o float | csdr firdecimate 2 0.05 | csdr convert -i float -o char | rtl_433 -r cu8:- -s 1024000 -F json -Y autolevel -M level -M stats:1:10",
 		],
 		getDecoderArgs: [
 			"-r",
@@ -424,6 +428,8 @@ const GOLDEN: Row[] = [
 			"autolevel",
 			"-M",
 			"level",
+			"-M",
+			"stats:1:10",
 		],
 	},
 	{
@@ -435,7 +441,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 2 0.05 | csdr convert -i float -o char | rtl_433 -r cu8:- -s 1024000 -F json -Y autolevel -M level -f 433920000",
+			"csdr convert -i char -o float | csdr firdecimate 2 0.05 | csdr convert -i float -o char | rtl_433 -r cu8:- -s 1024000 -F json -Y autolevel -M level -M stats:1:10 -f 433920000",
 		],
 		getDecoderArgs: [
 			"-r",
@@ -448,6 +454,8 @@ const GOLDEN: Row[] = [
 			"autolevel",
 			"-M",
 			"level",
+			"-M",
+			"stats:1:10",
 			"-f",
 			"433920000",
 		],
@@ -495,7 +503,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"rtl_433 -r cu8:- -s 1000000 -F json -Y autolevel -M level",
+			"rtl_433 -r cu8:- -s 1000000 -F json -Y autolevel -M level -M stats:1:10",
 		],
 		getDecoderArgs: [
 			"-r",
@@ -508,6 +516,8 @@ const GOLDEN: Row[] = [
 			"autolevel",
 			"-M",
 			"level",
+			"-M",
+			"stats:1:10",
 		],
 	},
 	{
@@ -519,7 +529,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 10 0.05 | csdr convert -i float -o char | rtl_433 -r cu8:- -s 240000 -F json -Y autolevel -M level",
+			"csdr convert -i char -o float | csdr firdecimate 10 0.05 | csdr convert -i float -o char | rtl_433 -r cu8:- -s 240000 -F json -Y autolevel -M level -M stats:1:10",
 		],
 		getDecoderArgs: [
 			"-r",
@@ -532,6 +542,8 @@ const GOLDEN: Row[] = [
 			"autolevel",
 			"-M",
 			"level",
+			"-M",
+			"stats:1:10",
 		],
 	},
 	{
@@ -728,7 +740,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 2 0.05 | csdr convert -i float -o char | rtl_433 -r cu8:- -s 1024000 -F json -Y autolevel -M level",
+			"csdr convert -i char -o float | csdr firdecimate 2 0.05 | csdr convert -i float -o char | rtl_433 -r cu8:- -s 1024000 -F json -Y autolevel -M level -M stats:1:10",
 		],
 		getDecoderArgs: [
 			"-r",
@@ -741,6 +753,8 @@ const GOLDEN: Row[] = [
 			"autolevel",
 			"-M",
 			"level",
+			"-M",
+			"stats:1:10",
 		],
 	},
 	{
@@ -749,7 +763,7 @@ const GOLDEN: Row[] = [
 		options: {},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 2 0.05 | csdr convert -i float -o char | rtl_433 -r cu8:- -s 1024000 -F json -Y autolevel -M level",
+			"csdr convert -i char -o float | csdr firdecimate 2 0.05 | csdr convert -i float -o char | rtl_433 -r cu8:- -s 1024000 -F json -Y autolevel -M level -M stats:1:10",
 		],
 		getDecoderArgs: [
 			"-r",
@@ -762,6 +776,8 @@ const GOLDEN: Row[] = [
 			"autolevel",
 			"-M",
 			"level",
+			"-M",
+			"stats:1:10",
 		],
 	},
 	{

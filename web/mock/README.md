@@ -130,7 +130,10 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
 - Activity floods (`activity-floods.ts`, `activityFloods` in `buildMockServer()`, on for `pnpm mock`,
   off with `WAVEKIT_MOCK_ACTIVITY_FLOODS=0`, off by default in tests): the repeats a live receiver
   makes, so Activity's folding can be seen. A synthetic aircraft (ICAO `ABC123`, callsign `WKT101`
-  every 10th decode, presence-only rows otherwise) at 2.5 decodes/s, a POCSAG tone-only beacon
+  every 10th decode, carrying `coalesced` for 10 receptions as the core's merged entity rows do:
+  its own and 9 heard 40 ms apart since the previous row, so no reception counts twice; every row
+  lists its altitude and carries the stored identity `aircraft: { callsign: "WKT101" }`, and the
+  fixed aircraft messages carry theirs too) at 2.5 decodes/s, a POCSAG tone-only beacon
   (capcode `0042001`, `Message type: unknown`) every 45 s ± 3 s, and a DMR call on TG 99 every
   3 min: 12 overs from radio 4242, each a `call_start` (no duration; the first with no radio yet)
   and a `call_end` 2.4 s later carrying the duration, as dsd-fme sends them. The history holds
@@ -154,7 +157,11 @@ EU band plan range lists one of its protocols, as the core does) and a bad `hz` 
 with a restart pending reads "failed: restarting on its own" without the `restart` action.
 The mock mirrors the core's host-busy wording (a status with `hostBusy` reads "decoding: host busy: samples were dropped
 for every decoder") and the "; retrying in <n> s" suffix of a loss stop with a future `efficiency.retryAt`.
+The LoRa and ISM decoders carry synthetic `counters` (`MOCK_COUNTERS`); while listening, both read
+`reception: "heard-undecoded"` with the core's "listening: heard signals but decoded none" sentence (the host-busy
+sentence wins while the host is busy; `reception` stays).
 `tuned-cases.ts` holds the tuned card's cases for tests (1090 MHz ADS-B paused, decoding, decoding while the host is busy,
 shed for its own loss with a retry, and waiting at a paused receiver, with
-the pager's VFO channel there, a synthetic 466 MHz pager and DMR, a pager restarting on its own,
+the pager's VFO channel there, ADS-B decoding with a stray pager decode stored at 1090.062 MHz in the channel's
+`activity` (`expect.latest`: an ADS-B decode, never the page), a synthetic 466 MHz pager and DMR, a pager restarting on its own,
 an unknown frequency, a proven discovery), each built through the same summary.

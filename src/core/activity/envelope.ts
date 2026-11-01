@@ -9,6 +9,8 @@ import {
 	projectJson,
 } from "./projection.js"
 import type {
+	DecodeAircraftIdentity,
+	DecodeCoalesced,
 	DecodeEnvelope,
 	DecodeEnvelopeContext,
 	DecodePresentation,
@@ -128,6 +130,26 @@ const outputSchema = z
 		type: text(64),
 	})
 	.strict()
+const coalescedSchema = z
+	.object({
+		// 1: a row flushed for one held reception (stamped when stored).
+		receptions: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+		firstSeenAt: timestamp,
+		lastSeenAt: timestamp,
+	})
+	.strict()
+export const AIRCRAFT_IDENTITY_MAX_BYTES = 64
+const identityText = text(AIRCRAFT_IDENTITY_MAX_BYTES)
+const aircraftSchema = z
+	.object({
+		callsign: identityText.optional(),
+		registration: identityText.optional(),
+		typeCode: identityText.optional(),
+		typeDescription: identityText.optional(),
+		operator: identityText.optional(),
+	})
+	.strict()
+	.refine(identity => Object.keys(identity).length > 0)
 const metadataSchema = z
 	.object({
 		version: z.literal(1),
@@ -155,6 +177,8 @@ const metadataSchema = z
 		fields: fieldsSchema,
 		provenance: provenanceSchema,
 		refs: refsSchema.optional(),
+		coalesced: coalescedSchema.optional(),
+		aircraft: aircraftSchema.optional(),
 	})
 	.strict()
 
@@ -240,6 +264,8 @@ interface EnvelopeBase {
 	outputType: string
 	provenance: unknown
 	refs: unknown
+	coalesced?: unknown
+	aircraft?: unknown
 }
 
 function assemble(
@@ -266,6 +292,8 @@ function assemble(
 			fields: display.fields ?? [],
 			provenance: base.provenance,
 			...(base.refs === undefined ? {} : { refs: base.refs }),
+			...(base.coalesced === undefined ? {} : { coalesced: base.coalesced }),
+			...(base.aircraft === undefined ? {} : { aircraft: base.aircraft }),
 		},
 		decodedData,
 	)
@@ -379,6 +407,12 @@ export function withPresentation(
 				fields: display.fields ?? [],
 				provenance: envelope.provenance,
 				...(envelope.refs === undefined ? {} : { refs: envelope.refs }),
+				...(envelope.coalesced === undefined
+					? {}
+					: { coalesced: envelope.coalesced }),
+				...(envelope.aircraft === undefined
+					? {}
+					: { aircraft: envelope.aircraft }),
 				decodedData: envelope.decodedData,
 			} as DecodeEnvelope
 			validatedBytes.set(grown, bytes)
@@ -394,6 +428,8 @@ export function withPresentation(
 				outputType: envelope.outputType,
 				provenance: envelope.provenance,
 				refs: envelope.refs,
+				coalesced: envelope.coalesced,
+				aircraft: envelope.aircraft,
 			},
 			display,
 			envelope.decodedData,
@@ -401,4 +437,83 @@ export function withPresentation(
 	} catch {
 		return invalidEnvelope()
 	}
+}
+
+/**
+ * The envelope with its decodedData replaced by an entity's merged latest state
+ * (storage/coalesce.ts) and, when several receptions were merged, their
+ * `coalesced` count and span. Keeps the presentation it had; validates the
+ * metadata and the size like create. Throws like create when rejected.
+ */
+export function withMergedData(
+	envelope: DecodeEnvelope,
+	decodedData: JsonValue,
+	coalesced: DecodeCoalesced | undefined,
+): DecodeEnvelope {
+	try {
+		return assemble(
+			{
+				eventId: envelope.eventId,
+				producedAt: envelope.producedAt,
+				receivedAt: envelope.receivedAt,
+				decoderId: envelope.decoderId,
+				decoderType: envelope.decoderType,
+				outputType: envelope.outputType,
+				provenance: envelope.provenance,
+				refs: envelope.refs,
+				coalesced,
+				aircraft: envelope.aircraft,
+			},
+			{
+				protocol: envelope.protocol,
+				category: envelope.category,
+				entityKey: envelope.entityKey,
+				...(envelope.position === undefined
+					? {}
+					: { position: envelope.position }),
+				title: envelope.title,
+				fields: [...envelope.fields],
+			},
+			projectJson(decodedData, false, false),
+		)
+	} catch {
+		return invalidEnvelope()
+	}
+}
+
+/**
+ * The envelope with new clocks (a flushed entity row, stamped when stored)
+ * or aircraft identity; everything else, decodedData included, as it
+ * was. Validates the metadata and the size like create; throws when rejected.
+ */
+export function withEnvelopeMetadata(
+	envelope: DecodeEnvelope,
+	patch: {
+		producedAt?: string
+		receivedAt?: string
+		aircraft?: DecodeAircraftIdentity
+	},
+): DecodeEnvelope {
+	try {
+		return complete(
+			{
+				...metadataOf(envelope),
+				...(patch.producedAt === undefined
+					? {}
+					: { producedAt: patch.producedAt }),
+				...(patch.receivedAt === undefined
+					? {}
+					: { receivedAt: patch.receivedAt }),
+				...(patch.aircraft === undefined ? {} : { aircraft: patch.aircraft }),
+			},
+			envelope.decodedData,
+		)
+	} catch {
+		return invalidEnvelope()
+	}
+}
+
+function metadataOf(envelope: DecodeEnvelope): Record<string, unknown> {
+	const { decodedData: _data, ...metadata } = envelope
+	return metadata
 }

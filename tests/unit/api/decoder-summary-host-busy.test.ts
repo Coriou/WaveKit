@@ -49,6 +49,28 @@ describe("host-busy verdicts", () => {
 		)
 	})
 
+	it("host busy wins the listening sentence while the reception hint stays its own field", () => {
+		const summary = decoderSummary(
+			status({
+				type: "lora-meshtastic",
+				lastOutputAt: undefined,
+				hostBusy: busy,
+				counters: {
+					preambles: { total: 12, perMin: 2, latest: 12, listening: 12 },
+					framesOk: { total: 0, perMin: 0, latest: 0, listening: 0 },
+				},
+			}),
+			now,
+		)
+		expect(summary.verdict).toEqual({
+			code: "listening",
+			text: "LoRa listening: host busy: samples were dropped for every decoder",
+			actions: [],
+			cause: "host",
+		})
+		expect(summary.reception).toBe("heard-undecoded")
+	})
+
 	it("without host starvation the running verdict is unchanged", () => {
 		expect(decoderSummary(status(), now).verdict).toEqual({
 			code: "decoding",

@@ -278,6 +278,12 @@ export async function buildAgentStatus(
 			...(summary.verdict.cause ? { cause: summary.verdict.cause } : {}),
 			...(summary.verdict.retryAt ? { retryAt: summary.verdict.retryAt } : {}),
 		},
+		// Only on a listening verdict (no actions): the byte budget relies on it.
+		...(summary.reception !== undefined &&
+		summary.verdict.code === "listening" &&
+		summary.verdict.actions.length === 0
+			? { reception: summary.reception }
+			: {}),
 	}))
 	const lastDecodeRows = bounds.list(lastDecode, L.decodersMax).map(row => ({
 		protocol: bounds.id(row.protocol, L.protocolMaxBytes),

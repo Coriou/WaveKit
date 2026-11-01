@@ -6,6 +6,8 @@ import {
 import type {
 	BandRegion,
 	DecoderBandRange,
+	DecoderCounters,
+	DecoderReceptionHint,
 	DecoderPlacementView,
 	DecoderSummary,
 	DecoderVerdict,
@@ -21,6 +23,10 @@ import { DECODER_PROTOCOLS } from "../../decoders/enablement/contract.js"
 import { VFO_CHANNEL_TYPES } from "../../decoders/enablement/placement.js"
 import { bandContainsTuned } from "../../decoders/enablement/tuned-band.js"
 import type { DecoderManager } from "../../decoders/manager.js"
+import {
+	receptionHint,
+	type DecoderCountersStatus,
+} from "../../decoders/decoder-counters.js"
 import type { DecoderStatus } from "../../decoders/types.js"
 import { zodValidationBody } from "../validation-errors.js"
 
@@ -236,6 +242,37 @@ function retryInSeconds(retryAt: unknown, now: number): number | null {
 		: null
 }
 
+/** A listening verdict's sentence when the decoder's counters give a reception hint. */
+const RECEPTION_TEXT: Readonly<Record<DecoderReceptionHint, string>> = {
+	"heard-undecoded": "listening: heard signals but decoded none",
+	"nothing-heard": "listening: heard nothing it recognises",
+}
+
+/** The reception hint of a listening verdict, else none (decoder-counters.ts receptionHint). */
+export function decoderReception(
+	status: DecoderStatus,
+	code: DecoderVerdictCode,
+): DecoderReceptionHint | undefined {
+	return code === "listening" ? receptionHint(status.counters) : undefined
+}
+
+/** `counters` for the summary: total and rate per name, without the child's raw reading. */
+export function compactCounters(
+	counters: DecoderCountersStatus | undefined,
+): DecoderCounters | undefined {
+	if (!counters) return undefined
+	const compact: DecoderCounters = {}
+	let any = false
+	for (const [name, counter] of Object.entries(counters) as Array<
+		[keyof DecoderCounters, DecoderCountersStatus[keyof DecoderCounters]]
+	>) {
+		if (!counter) continue
+		compact[name] = { total: counter.total, perMin: counter.perMin }
+		any = true
+	}
+	return any ? compact : undefined
+}
+
 /**
  * The decoder's one verdict. Precedence: failure, mode off, operator stop,
  * suspension (efficiency detail first), running output, a wanted start not
@@ -265,6 +302,7 @@ export function decoderVerdict(
 	else if (status.desiredRunning === true) code = "starting"
 	else code = "unknown"
 	const name = decoderName(status.type)
+	const reception = decoderReception(status, code)
 	let entry: {
 		text: string
 		actions: readonly DecoderVerdictAction[]
@@ -273,10 +311,12 @@ export function decoderVerdict(
 	} =
 		code === "failed" && retrying(status, running)
 			? { text: RETRYING_TEXT, actions: [] }
-			: VERDICTS[code]
-	// Host starvation: a running decoder says the host is busy; a loss shed the
-	// host caused says so instead of suggesting a lower rate. A loss shed says
-	// when it is retried.
+			: reception !== undefined
+				? { text: RECEPTION_TEXT[reception], actions: VERDICTS[code].actions }
+				: VERDICTS[code]
+	// Host starvation: a running decoder says the host is busy (over any
+	// reception hint); a loss shed the host caused says so instead of
+	// suggesting a lower rate. A loss shed says when it is retried.
 	const hostBusy = status.hostBusy !== undefined && status.hostBusy !== null
 	const shedCause = status.efficiency?.cause
 	if ((code === "decoding" || code === "listening") && hostBusy)
@@ -445,6 +485,9 @@ export function decoderSummary(
 	// Precedence: crash/restart failure, suspension, recent running output, idle.
 	// A retained lastError alone is historical and does not mark a recovered run failed.
 	const health = healthOf(aggregated, last, now)
+	const verdict = decoderVerdict(status, health, running, now)
+	const counters = compactCounters(status.counters)
+	const reception = decoderReception(status, verdict.code)
 	return {
 		id: status.id,
 		name: decoderName(status.type),
@@ -474,8 +517,10 @@ export function decoderSummary(
 		lastOutputAt: status.lastOutputAt?.toISOString() ?? null,
 		suspensionReason: status.suspension?.reasonCode ?? null,
 		health,
-		verdict: decoderVerdict(status, health, running, now),
+		verdict,
 		...(hz === undefined ? {} : { coversHz: decoderCoversHz(status, hz) }),
+		...(counters === undefined ? {} : { counters }),
+		...(reception === undefined ? {} : { reception }),
 	}
 }
 

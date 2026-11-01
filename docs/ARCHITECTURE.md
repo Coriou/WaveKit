@@ -501,6 +501,12 @@ not stored. Each envelope's frequency is a frequency the decoder reports in its
 payload or else the decoder's single target from its provenance binding (source,
 targets, tuning trust and, for a decoder on the whole capture, the observed input
 rate, which bounds an rtl_433 frequency estimate to what that decoder can hear).
+Repeated receptions of a tracked entity (aircraft, ship, APRS and mesh
+position, rtl_433 sensor) are merged at admission into one row per entity per
+60 s carrying the latest state and a `coalesced` count
+(`src/core/activity/storage/coalesce.ts`; rules in
+[API.md](API.md#activity)), so the admission rate limit bites only on new
+entities and events.
 Search, facets and cursor replay are served on `/api/activity` and
 the WebSocket `activity` channel. The store is off by default. A failed open
 keeps the process running and those routes answer 503 `ACTIVITY_UNAVAILABLE`.

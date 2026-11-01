@@ -515,6 +515,51 @@ export interface DecoderLateDropsView {
 }
 
 /**
+ * Decoder frame counters: the closed set of names an adapter may report, each with
+ * its class. "input" counts what the decoder read, "heard" what looked like the
+ * protocol (preambles, syncs, detected bursts, valid headers), "decoded" frames that
+ * passed every check, "failed" frames heard but rejected (CRC, FEC, parse). A name
+ * outside this list is refused at the adapter's parse boundary.
+ */
+export const DECODER_COUNTER_CLASSES = Object.freeze({
+	inputSamples: "input",
+	preambles: "heard",
+	detections: "heard",
+	headersOk: "heard",
+	framesOk: "decoded",
+	crcBad: "failed",
+	fecBad: "failed",
+	parseDrops: "failed",
+} as const)
+export type DecoderCounterName = keyof typeof DECODER_COUNTER_CLASSES
+export type DecoderCounterClass =
+	(typeof DECODER_COUNTER_CLASSES)[DecoderCounterName]
+export const DECODER_COUNTER_NAMES = Object.freeze(
+	Object.keys(DECODER_COUNTER_CLASSES) as DecoderCounterName[],
+)
+
+/** One counter: its total since the core started (monotonic across restarts) and its rate over the last 60 s. */
+export interface DecoderCounterView {
+	total: number
+	perMin: number
+}
+/** Counters a decoder reports; names it does not report are absent. */
+export type DecoderCounters = Partial<
+	Record<DecoderCounterName, DecoderCounterView>
+>
+
+/**
+ * What a listening decoder's counters say about the air: `heard-undecoded` when it
+ * heard something that looked like its protocol but decoded none of it,
+ * `nothing-heard` when it heard nothing. Only for decoders that report counters.
+ */
+export const DECODER_RECEPTION_HINTS = [
+	"nothing-heard",
+	"heard-undecoded",
+] as const
+export type DecoderReceptionHint = (typeof DECODER_RECEPTION_HINTS)[number]
+
+/**
  * Largest `hz` GET /api/decoders/summary accepts: 100 GHz, above any receiver
  * (the same bound as the discoveries `nearHz`).
  */
@@ -550,6 +595,10 @@ export interface DecoderSummary {
 	 * cover. Unknown or malformed bands read false.
 	 */
 	coversHz?: boolean
+	/** Frame counters, for decoders whose adapter reports them; absent otherwise and from older cores. */
+	counters?: DecoderCounters
+	/** Only on a `listening` verdict of a decoder with counters: heard nothing, or heard but decoded none. */
+	reception?: DecoderReceptionHint
 }
 
 /**

@@ -1,8 +1,12 @@
 // Activity floods: the repeats a live receiver produces, so the web app's folding can be seen and tested
 // against the mock. A pure schedule of absolute time (the same events for the same window on every run):
 // - one synthetic aircraft (ICAO ABC123) at 2.5 decodes/s, as readsb sends 1-30 messages/s per aircraft;
-//   every 10th decode carries its callsign and altitude, the rest are presence-only rows (no fields), as the
-//   core stores them;
+//   every 10th decode carries its callsign and altitude and, as the core's merged entity rows do,
+//   `coalesced` for the 10 receptions it stands for: its own and 9 held ones heard 40 ms apart since
+//   the previous row, so no reception is counted by two rows; the rest stand for themselves. Every row
+//   lists its altitude and carries the stored identity (`aircraft`, the callsign) like the core's. (The
+//   core now stores one merged row per aircraft per 60 s; the mock keeps the flood rate so folding stays
+//   exercised.)
 // - a POCSAG tone-only beacon (capcode 0042001, no content) every 45 s ± 3 s, as paging networks send
 //   idle beacons every 30-60 s;
 // - a DMR call on TG 99 once every 3 min: 12 overs from radio 4242, each a call_start then a call_end 2.4 s
@@ -15,6 +19,13 @@ import { MOCK_SOURCE_ID } from "./data.ts"
 
 /** 2.5 aircraft decodes per second (readsb's 1-30 msg/s range, kept low so the mock's store holds ~30 min). */
 export const FLOOD_AIRCRAFT_INTERVAL_MS = 400
+/** Receptions a merged aircraft row stands for (its own and the ones held since the previous row). */
+export const FLOOD_MERGED_RECEPTIONS = 10
+/**
+ * Spacing of a merged row's receptions. They all fall after the previous stored row, as the core's
+ * held receptions do: (FLOOD_MERGED_RECEPTIONS - 1) × 40 ms = 360 ms < FLOOD_AIRCRAFT_INTERVAL_MS.
+ */
+export const FLOOD_MERGED_RECEPTION_GAP_MS = 40
 /** A paging idle beacon every 45 s (networks: 30-60 s), jittered ±3 s. */
 export const FLOOD_BEACON_INTERVAL_MS = 45_000
 const BEACON_JITTER_MS = 3_000
@@ -36,6 +47,12 @@ export interface FloodEvent {
 	summary: FloodSummary
 	/** The decoded JSON behind it (GET /api/activity/:eventId). */
 	data: { readonly [key: string]: JsonValue }
+	/**
+	 * Receptions the core merged into this row (`coalesced`, src/core/activity/storage/coalesce.ts),
+	 * each FLOOD_MERGED_RECEPTION_GAP_MS apart, ending at `at` and all after the entity's previous
+	 * row; absent for a single reception.
+	 */
+	receptions?: number
 }
 
 const AIRCRAFT_HZ = 1_090_000_000
@@ -61,12 +78,14 @@ function aircraft(n: number): FloodEvent["summary"] {
 		frequencyHz: AIRCRAFT_HZ,
 		entityKey: "icao:ABC123",
 		title: full ? "WKT101" : "ABC123",
-		fields: full
-			? [
-					{ key: "callsign", label: "Callsign", value: "WKT101" },
-					{ key: "altitude", label: "Altitude", value: altitude, unit: "ft" },
-				]
-			: [],
+		// Every stored aircraft row lists its fields; the merged state keeps the callsign.
+		fields: [
+			...(full
+				? [{ key: "callsign", label: "Callsign", value: "WKT101" }]
+				: []),
+			{ key: "altitude", label: "Altitude", value: altitude, unit: "ft" },
+		],
+		aircraft: { callsign: "WKT101" },
 		position: {
 			lat: 48.6 + (n % 600) * 0.0005,
 			lon: -3.9,
@@ -155,6 +174,7 @@ export function floodEvents(
 				icao: "ABC123",
 				...(s.fields.length > 0 ? { callsign: "WKT101" } : {}),
 			},
+			...(s.fields.length > 0 ? { receptions: FLOOD_MERGED_RECEPTIONS } : {}),
 		})
 	}
 	// a beacon index's jittered time can fall either side of the window edge: look one index out

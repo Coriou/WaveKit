@@ -196,6 +196,11 @@ are normal and should not trigger alerts.
 If a log dashboard alerts on `SourceConnectionError`, raise the
 threshold to ignore the first 10 seconds after `wavekit-api` start.
 
+The LoRa/Meshtastic wrapper also writes one `WAVEKIT_STATS {...}` line to
+stderr every 10 seconds and at exit. The core reads it as the decoder's
+frame counters (`GET /api/decoders/summary`), so it shows in the raw
+decoder log too; it is not an error.
+
 ## Troubleshooting
 
 ### After a crash or power cut

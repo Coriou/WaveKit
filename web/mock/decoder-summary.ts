@@ -1,8 +1,14 @@
 // GET /api/decoders/summary for the mock: the core's per-decoder verdict (src/api/routes/decoder-summary.ts),
 // derived from the mock's GET /api/decoders statuses with the same precedence and wording.
-import { DECODER_SUMMARY_MAX_HZ } from "@wavekit/api-types"
+import {
+	DECODER_COUNTER_CLASSES,
+	DECODER_SUMMARY_MAX_HZ,
+} from "@wavekit/api-types"
 import type {
+	DecoderCounterName,
+	DecoderCounters,
 	DecoderInfo,
+	DecoderReceptionHint,
 	DecoderSummary,
 	DecoderVerdict,
 	DecoderVerdictAction,
@@ -209,6 +215,70 @@ export function mockVerdictCode(
 	return "unknown"
 }
 
+/**
+ * Synthetic frame counters per decoder type (the core's `counters`, from adapters that report
+ * them): the LoRa modem hears preambles it cannot decode, the ISM decoder decoded earlier and
+ * hears bursts it has not decoded in the last minute.
+ */
+export const MOCK_COUNTERS: Readonly<Record<string, DecoderCounters>> = {
+	"lora-meshtastic": {
+		inputSamples: { total: 1_500_000_000, perMin: 30_000_000 },
+		preambles: { total: 12, perMin: 1 },
+		headersOk: { total: 3, perMin: 0 },
+		framesOk: { total: 0, perMin: 0 },
+		crcBad: { total: 3, perMin: 0 },
+		parseDrops: { total: 0, perMin: 0 },
+	},
+	rtl433: {
+		detections: { total: 840, perMin: 6 },
+		framesOk: { total: 96, perMin: 0 },
+	},
+}
+
+/**
+ * The core's receptionHint (src/decoders/decoder-counters.ts) on a listening
+ * verdict. The core reads growth since the decoder last started or moved; a
+ * mock decoder never restarts or moves and its fixture counts are fresh, so
+ * its whole run is one listening period and that growth is its total.
+ */
+export function mockReception(
+	counters: DecoderCounters | undefined,
+	code: DecoderVerdictCode,
+): DecoderReceptionHint | undefined {
+	if (code !== "listening" || !counters) return undefined
+	let heard = false
+	let decoded = false
+	let heardListening = 0
+	let heardRecent = 0
+	let decodedListening = 0
+	let decodedRecent = 0
+	for (const [name, counter] of Object.entries(counters)) {
+		if (!counter || !Object.hasOwn(DECODER_COUNTER_CLASSES, name)) continue
+		const kind = DECODER_COUNTER_CLASSES[name as DecoderCounterName]
+		if (kind === "heard" || kind === "failed") {
+			heard = true
+			heardListening += counter.total
+			heardRecent += Math.min(counter.perMin, counter.total)
+		} else if (kind === "decoded") {
+			decoded = true
+			decodedListening += counter.total
+			decodedRecent += Math.min(counter.perMin, counter.total)
+		}
+	}
+	if (!heard || !decoded) return undefined
+	if (decodedListening === 0)
+		return heardListening > 0 ? "heard-undecoded" : "nothing-heard"
+	return heardRecent > 0 && decodedRecent === 0
+		? "heard-undecoded"
+		: "nothing-heard"
+}
+
+/** The core's listening sentence for a reception hint. */
+const RECEPTION_TEXT: Readonly<Record<DecoderReceptionHint, string>> = {
+	"heard-undecoded": "listening: heard signals but decoded none",
+	"nothing-heard": "listening: heard nothing it recognises",
+}
+
 /** The core's host-busy sentence: host starvation, no decoder is the cause. */
 const HOST_BUSY_TEXT = "host busy: samples were dropped for every decoder"
 const LOSS_CODES: ReadonlySet<DecoderVerdictCode> = new Set([
@@ -217,12 +287,15 @@ const LOSS_CODES: ReadonlySet<DecoderVerdictCode> = new Set([
 	"efficiency-cpu",
 ])
 
+/** The core's decoderVerdict; `counters` are the decoder's, as the core reads them from its status. */
 export function mockVerdict(
 	d: DecoderInfo,
 	health: DecoderSummary["health"],
+	counters?: DecoderCounters,
 	now?: number,
 ): DecoderVerdict {
 	const code = mockVerdictCode(d, health)
+	const reception = mockReception(counters, code)
 	let entry: {
 		text: string
 		actions: readonly DecoderVerdictAction[]
@@ -231,8 +304,11 @@ export function mockVerdict(
 	} =
 		code === "failed" && retrying(d)
 			? { text: "failed: restarting on its own", actions: [] }
-			: VERDICTS[code]
-	// The core's host-busy and retry wording (src/api/routes/decoder-summary.ts).
+			: reception !== undefined
+				? { text: RECEPTION_TEXT[reception], actions: VERDICTS[code].actions }
+				: VERDICTS[code]
+	// The core's host-busy (over any reception hint) and retry wording
+	// (src/api/routes/decoder-summary.ts).
 	const hostBusy = d.hostBusy !== undefined
 	const cause = d.efficiency?.cause
 	if ((code === "decoding" || code === "listening") && hostBusy)
@@ -391,6 +467,11 @@ export function buildDecoderSummaries(
 ): DecoderSummary[] {
 	return decoders.map(d => {
 		const health = healthOf(d, now)
+		const counters = Object.hasOwn(MOCK_COUNTERS, d.type)
+			? MOCK_COUNTERS[d.type]
+			: undefined
+		const verdict = mockVerdict(d, health, counters, now)
+		const reception = mockReception(counters, verdict.code)
 		return {
 			id: d.id,
 			name: mockDecoderName(d.type),
@@ -411,8 +492,10 @@ export function buildDecoderSummaries(
 			lastOutputAt: d.lastOutputAt ?? null,
 			suspensionReason: d.suspension?.reasonCode ?? null,
 			health,
-			verdict: mockVerdict(d, health, now),
+			verdict,
 			...(hz === undefined ? {} : { coversHz: mockCoversHz(d, hz) }),
+			...(counters === undefined ? {} : { counters }),
+			...(reception === undefined ? {} : { reception }),
 		}
 	})
 }

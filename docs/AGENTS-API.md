@@ -105,6 +105,15 @@ means the host is busy and every decoder dropped samples: stopping decoders or l
 the sample rate of one will not help it; `retryAt` says when a decoder stopped for its
 own loss is tried again.
 
+After a dwell with no output, tell "nothing on air" from "heard but undecodable" with
+`reception` (also on the `listening` rows of `GET /api/agent/status`): `heard-undecoded`
+means the decoder heard its protocol (preambles, syncs, bursts) but decoded none of it,
+`nothing-heard` means it heard nothing it recognises. It reads only what the decoder heard
+since it last started, restarted or moved channel or centre (evidence at most 2 hours old,
+a removed channel placement's evidence dropped), so a retune or restart starts it afresh.
+The LoRa, ISM (rtl_433) and digital voice (dsd-fme) decoders report it, with the underlying `counters` (`total` since the core
+started, `perMin` over the last minute) on the summary route.
+
 ## Read activity
 
 ```sh

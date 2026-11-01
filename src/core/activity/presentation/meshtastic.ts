@@ -1,6 +1,6 @@
 import type { MeshtasticPacket } from "../../../decoders/builtin/lora-meshtastic.js"
 import { readPosition as readMeshPosition } from "../../meshtastic-protobuf.js"
-import { isCoalescibleShape } from "../storage/coalesce.js"
+import { isPositionOnlyShape } from "../storage/coalesce.js"
 import type { DecodePosition, DecodePresentation } from "../types.js"
 import {
 	altitudeMetres,
@@ -132,7 +132,7 @@ export function presentMeshtastic(
 	const portnum = numberField(payload, "portnum")
 	const name = portName(portnum === undefined ? undefined : portnum)
 	const title = clampTitle(node === null ? name : `${node} ${name}`)
-	const fields = isCoalescibleShape("meshtastic", payload)
+	const fields = isPositionOnlyShape("meshtastic", payload)
 		? []
 		: takeFields(
 				[

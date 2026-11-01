@@ -69,6 +69,43 @@ export interface DecodeEnvelopeContext {
 	refs?: DecodeReferences
 }
 
+/**
+ * Per-entity coalescing (src/core/activity/storage/coalesce.ts): the row is the entity's merged
+ * latest state over several receptions. Absent when the row is one reception stored as it arrived.
+ */
+export interface DecodeCoalesced {
+	/**
+	 * Receptions merged into this row, its own included: at least 2 on a reception's row, at
+	 * least 1 on a row flushed for held receptions; `receptions - 1` (flushed: all) were not
+	 * stored on their own.
+	 */
+	receptions: number
+	/** receivedAt of the first merged reception. */
+	firstSeenAt: string
+	/**
+	 * receivedAt of the latest merged reception. A reception's row: its own receivedAt. A
+	 * flushed row (a snapshot stamped when Activity stored it: its producedAt and receivedAt
+	 * are the store time): when its latest held reception was heard, up to one window earlier.
+	 */
+	lastSeenAt: string
+}
+
+/**
+ * Who an aircraft row's aircraft is, as known when the row was stored: the callsign from the
+ * entity's merged state, the rest from the aircraft enrichment cache. Each value is at most
+ * 64 bytes; absent members were unknown.
+ */
+export interface DecodeAircraftIdentity {
+	callsign?: string
+	registration?: string
+	/** ICAO type designator ("A320"). */
+	typeCode?: string
+	/** Type in words ("Airbus A320"). */
+	typeDescription?: string
+	/** Airline flying the callsign, else the registered operator. */
+	operator?: string
+}
+
 /** A decoder event, including lifecycle/telemetry; not accepted scanner evidence. */
 export interface DecodeEnvelope {
 	version: 1
@@ -95,6 +132,10 @@ export interface DecodeEnvelope {
 	fields: readonly DecodeField[]
 	provenance: DecodeProvenance
 	refs?: DecodeReferences
+	/** Present when the row merges several receptions of one entity. */
+	coalesced?: DecodeCoalesced
+	/** Aircraft rows: the identity known when stored (absent when nothing was). */
+	aircraft?: DecodeAircraftIdentity
 	/** Complete JSON projection of decoded data, not original protocol wire output. */
 	decodedData: JsonValue
 }
@@ -210,6 +251,10 @@ export interface ActivitySummary {
 	/** First fields that fit the 4 KiB budget. */
 	fields: DecodeEnvelope["fields"]
 	position?: DecodeEnvelope["position"]
+	/** The envelope's `coalesced`: receptions merged into this row and their first/last receivedAt. */
+	coalesced?: DecodeEnvelope["coalesced"]
+	/** The envelope's `aircraft`: who the row's aircraft is, as known when it was stored. */
+	aircraft?: DecodeEnvelope["aircraft"]
 }
 
 /** ref_type values; ref_value is the matching provenance/refs string. */
@@ -335,8 +380,21 @@ export interface ActivityStoreStats {
 		number
 	>
 	excludedTelemetry: number
-	/** Redundant position/presence receptions not stored inside their entity's window (WG1). Optional for older cores. */
+	/**
+	 * Receptions merged into their entity's latest state instead of a row of their own (aircraft,
+	 * ship, APRS and mesh positions, sensor readings). Optional for older cores.
+	 */
 	coalescedPositions?: number
+	/**
+	 * Held entity rows turned away by the global bucket, the queue caps or a paused store:
+	 * still held and retried, not a loss. Optional for older cores.
+	 */
+	coalesceDeferrals?: number
+	/**
+	 * Rows of a tracked entity stored as their own data because the merged state would not fit
+	 * one envelope; the held receptions wait for their own row. Optional for older cores.
+	 */
+	coalesceMergeFailures?: number
 	queueDepth: number
 	queueBytes: number
 	dbBytes: number

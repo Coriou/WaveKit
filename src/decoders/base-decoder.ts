@@ -20,6 +20,7 @@ import { csdrChildEnv } from "./csdr-buffers.js"
 import { EventEmitter } from "node:events"
 import { spawn, type ChildProcess } from "node:child_process"
 import { DecoderObservability } from "./decoder-observability.js"
+import { DecoderCounterReporter } from "./decoder-counters.js"
 import { createInterface } from "node:readline"
 import { PassThrough, type Readable } from "node:stream"
 import type {
@@ -65,6 +66,26 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	readonly type: string
 
 	private readonly observability: DecoderObservability
+
+	/**
+	 * Frame counters (decoder-counters.ts): adapters report the counters their
+	 * tool prints (`counters.cumulative()` / `counters.delta()`) or count lines
+	 * they already parse (`counters.count()`); each accepted report is emitted as
+	 * a "counters" event (DecoderCounterEvent) the manager folds into
+	 * totals. Names outside DECODER_COUNTER_NAMES are refused.
+	 */
+	protected readonly counters = new DecoderCounterReporter(event => {
+		this.emit("counters", event)
+	})
+
+	/**
+	 * Sends the locally counted increments now: the manager calls it before a
+	 * move or a worker's teardown, so they land in the listening period they
+	 * were heard in.
+	 */
+	flushCounters(): void {
+		this.counters.flush()
+	}
 
 	protected process: ChildProcess | null = null
 	protected inputStream: Readable | null = null
@@ -164,6 +185,8 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			"Starting decoder process",
 		)
 
+		// The new child's counters start at 0; lines of the old one count nothing.
+		const counterGeneration = this.counters.restart()
 		try {
 			this.process = spawn(command, args, {
 				env: csdrChildEnv(),
@@ -207,6 +230,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 				)
 			}
 			this.logger.info({ code, signal }, "Decoder process exited")
+			this.counters.flush()
 			if (this.process === proc) this.process = null
 			this.emit("exit", code, signal)
 		})
@@ -225,7 +249,9 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 				})
 
 				stdoutReader.on("line", (line: string) => {
-					this.handleOutputLine(line)
+					this.counters.scope(counterGeneration, () => {
+						this.handleOutputLine(line)
+					})
 				})
 			} else {
 				// Drain stdout if not parsing to prevent buffer filling
@@ -242,7 +268,9 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 				})
 
 				stderrReader.on("line", (line: string) => {
-					this.handleOutputLine(line)
+					this.counters.scope(counterGeneration, () => {
+						this.handleOutputLine(line)
+					})
 				})
 			} else {
 				// Drain stderr if not parsing

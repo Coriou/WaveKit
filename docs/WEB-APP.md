@@ -123,7 +123,12 @@ Identify or a proven discovery named, the decoder whose band holds the frequency
 plan's band. A decoder that is off names it only where the band plan has no band there, and says
 so ("Pager (off)"). A decoder whose channel only follows the tuner (the pager decoder listening to the
 live audio, say) never names a frequency outside its band, and the card never says "Nothing decodes
-this frequency" while a decoder's band holds it. "Decoded here by" names only a decoder on the tuned
+this frequency" while a decoder's band holds it. The protocol last heard and the **Latest** line
+leave out decodes from a decoder whose band does not hold the frequency, as the core reports it: an
+old false pager decode stored at 1090 MHz never makes the ADS-B card read POCSAG. A decode from a
+decoder with no band to read (none from the core, its status or the band plan) still counts, as do
+Identify's own probes. A decoder forced on outside the band plan never names the card: its band
+is not readable there, by the same rule the core applies. "Decoded here by" names only a decoder on the tuned
 channel itself, one of its fixed frequencies within the channel (ADS-B anywhere readsb covers, its
 signal fills 1089 to 1091 MHz). A decoder whose band merely spans the frequency, such as the ISM
 decoder at 434.000 MHz with its channel at 433.920 MHz, reads "ISM decodes this band, not this
@@ -294,12 +299,21 @@ shows its newest decode as it was stored, with only who it is filled in from row
 never a row heard after it even when stored earlier); a measurement such as a call's
 duration, an altitude, a position or a signal level is always the newest decode's own, so a call
 that has just started never shows the previous over's duration. The row also shows the count and
-the span (`24 · 1 min`) and expands in place to the earlier rows. Counts are for the loaded list,
+the span (`24 · 1 min`) and expands in place to the earlier rows. An aircraft row titled only by its
+ICAO address takes the live fleet's callsign or registration and "who flies what"; once the aircraft
+has left the fleet it takes the identity the core stored with the row (callsign, registration, type,
+operator as known then), so history keeps naming it. Counts are for the loaded list,
 never totals: the list footer says `312 events in 41 rows, loaded so far.`, and the header counts
 rows (its tooltip says `41 rows in the 312 loaded events`). Folding runs in the browser over the
 rows already loaded (at most 5 000), and each live update folds again only the stacks its decodes
 touched; with a short folded list, Activity loads up to 10 older pages of 100 by itself to fill the
 view.
+
+The core already merges an aircraft's, vessel's, station's or sensor's repeats into one row per
+minute (its `coalesced` count and first reception; see [API.md](API.md#activity)). Folding counts
+those receptions, not rows: a stack's explanation says `Likely one aircraft in range for 2 min (239
+times)` and its span starts at the first merged reception. The detail shows a merged row's
+`Merged: 120 receptions since 12:00:00, latest state`.
 
 Each row gets a fold key from its own data: protocol and event kind, the core's entity
 (`icao:`, `mmsi:`, `capcode:`, `talkgroup:`, `sensor:`, `callsign:`, `node:`; the title when there

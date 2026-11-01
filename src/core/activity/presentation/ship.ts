@@ -1,5 +1,5 @@
 import type { ShipData } from "../../../decoders/builtin/ais-catcher.js"
-import { isCoalescibleShape } from "../storage/coalesce.js"
+import { isPositionOnlyShape } from "../storage/coalesce.js"
 import type { DecodePresentation } from "../types.js"
 import {
 	altitudeMetres,
@@ -42,7 +42,7 @@ export function presentShip(data: unknown): DecodePresentation | undefined {
 	const name = stringField(payload, "name")
 	const title = clampTitle(name ?? mmsi ?? "")
 	const key = mmsi === null ? null : entityKey("mmsi", mmsi)
-	const fields = isCoalescibleShape("ship", payload)
+	const fields = isPositionOnlyShape("ship", payload)
 		? []
 		: takeFields(
 				[

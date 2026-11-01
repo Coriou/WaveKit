@@ -17,6 +17,7 @@
 
 import type { EventEmitter } from "node:events"
 import type { DecoderReach } from "./enablement/contract.js"
+import type { DecoderCountersStatus } from "./decoder-counters.js"
 import type { Readable } from "node:stream"
 import type {
 	DecoderMode,
@@ -343,6 +344,8 @@ export interface DecoderStatus {
 	rateAssessment?: DecoderRateAssessment | undefined
 	/** Band check against the source centre; reporting plus suspension input. */
 	bandAssessment?: DecoderBandAssessment | undefined
+	/** Frame counters the adapter reports (decoder-counters.ts); absent when it reports none. */
+	counters?: DecoderCountersStatus | undefined
 	/** Live source assignment while wired, else the configured sourceId; absent for external input. */
 	sourceId?: string | undefined
 	/** Configured device serial of an external-input decoder; never inferred. */

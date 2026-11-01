@@ -51,6 +51,8 @@ function storeStats(): ActivityStoreStats {
 			prefixFallbackSteps: 0,
 		},
 		floodCopies: 2,
+		coalesceDeferrals: 0,
+		coalesceMergeFailures: 0,
 	}
 	return stats
 }

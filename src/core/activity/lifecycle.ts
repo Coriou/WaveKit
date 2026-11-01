@@ -92,6 +92,8 @@ function idleStats(): ActivityStoreStats {
 		},
 		excludedTelemetry: 0,
 		coalescedPositions: 0,
+		coalesceDeferrals: 0,
+		coalesceMergeFailures: 0,
 		queueDepth: 0,
 		queueBytes: 0,
 		dbBytes: 0,
