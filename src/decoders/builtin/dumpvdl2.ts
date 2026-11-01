@@ -668,8 +668,8 @@ function parseDumpvdl2Options(
 	const frequenciesConfigured =
 		frequencies !== undefined && frequencies.length > 0
 	if (!frequencies || frequencies.length === 0) {
-		// No region here: the Common Signalling Channel (options/dumpvdl2.ts); the catalogue
-		// decoder gets its region's list as configured frequencies.
+		// No region here: the legacy default (options/dumpvdl2.ts); the catalogue decoder gets
+		// its region's list as configured frequencies.
 		frequencies = [...vdl2DefaultChannelsHz()]
 	}
 

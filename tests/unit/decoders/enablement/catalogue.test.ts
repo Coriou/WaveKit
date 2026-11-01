@@ -98,7 +98,7 @@ it("default options use frozen frequencies and regional LoRa defaults with indep
 	expect(CATALOGUE_DEFAULT_OPTIONS("US").acarsdec).toEqual({
 		frequencies: [131_550_000, 131_725_000],
 	})
-	// EU: Regulation (EU) No 1079/2012 Article 2; elsewhere the common signalling channel.
+	// EU: Regulation (EU) No 1079/2012 Article 2; elsewhere the legacy default.
 	expect(CATALOGUE_DEFAULT_OPTIONS("EU").dumpvdl2).toEqual({
 		frequencies: [
 			136_725_000, 136_775_000, 136_825_000, 136_875_000, 136_925_000,
@@ -107,7 +107,7 @@ it("default options use frozen frequencies and regional LoRa defaults with indep
 	})
 	for (const region of BAND_REGIONS.filter(r => r !== "EU"))
 		expect(CATALOGUE_DEFAULT_OPTIONS(region).dumpvdl2).toEqual({
-			frequencies: [136_975_000],
+			frequencies: [136_650_000, 136_700_000, 136_975_000],
 		})
 	const first = build()
 	first[2]!.options["frequencies"] = []

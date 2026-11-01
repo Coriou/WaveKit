@@ -482,14 +482,14 @@ describe("channel requests (addendum §1, §2)", () => {
 			bandwidthHz: 300_000,
 			outputRateHz: 512_000,
 		})
-		// The region-less default (136.975 MHz alone) needs one channel plus its guard.
+		// The region-less default list (325 kHz span) narrows to 325 + 50 kHz (3.19).
 		const defaults = new Dumpvdl2Decoder(config("dumpvdl2", {}), logger)
 		expect(
 			defaults.getChannelRequest({
 				sampleRateHz: 2_048_000,
 				centerHz: 136.8e6,
 			}),
-		).toMatchObject({ centerHz: 136_975_000, bandwidthHz: 50_000 })
+		).toMatchObject({ bandwidthHz: 375_000, transitionHz: 26_250 })
 		const follow = new Dumpvdl2Decoder(
 			config("dumpvdl2", { followCenter: true }),
 			logger,

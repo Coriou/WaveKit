@@ -40,13 +40,22 @@ export const VDL2_COMMON_SIGNALLING_HZ = 136_975_000
  * - EU: the VHF digital link frequencies of Commission Implementing Regulation (EU) No 1079/2012,
  *   Article 2: 136.725, 136.775, 136.825, 136.875, 136.925 and 136.975 MHz. (136.650 and
  *   136.700 MHz, the old default, are not among them.)
- * - Elsewhere: the Common Signalling Channel only; other regions' channels are configured.
+ * - Elsewhere, and for a decoder configured without frequencies and without a region: the
+ *   channels WaveKit listened to before regional defaults (VDL2_LEGACY_CHANNELS_HZ), so no
+ *   existing setup loses coverage. Other channels are configured.
  * dumpvdl2 takes every channel inside one sample window: the EU list spans 136.725-136.975 MHz,
  * 250 kHz, so its channel needs 2 × 125 000 + 50 000 = 300 000 Hz (Dumpvdl2Decoder
  * getChannelRequest), inside the 512 kHz channel a 1.024 Msps capture gives (300 000 ≤
  * 512 000 × 0.95 = 486 400) and the 1.05 MHz one of 2.048 or 2.4 Msps; six channels are within
  * DUMPVDL2_BOUNDS.maxFrequencies (8).
  */
+/** The region-less default before regional lists: 136.650, 136.700 and 136.975 MHz. */
+export const VDL2_LEGACY_CHANNELS_HZ: readonly number[] = Object.freeze([
+	136_650_000,
+	136_700_000,
+	VDL2_COMMON_SIGNALLING_HZ,
+])
+
 export const VDL2_REGION_CHANNELS_HZ: Readonly<
 	Record<BandRegion, readonly number[]>
 > = Object.freeze({
@@ -58,21 +67,21 @@ export const VDL2_REGION_CHANNELS_HZ: Readonly<
 		136_925_000,
 		VDL2_COMMON_SIGNALLING_HZ,
 	]),
-	US: Object.freeze([VDL2_COMMON_SIGNALLING_HZ]),
-	CA: Object.freeze([VDL2_COMMON_SIGNALLING_HZ]),
-	AU: Object.freeze([VDL2_COMMON_SIGNALLING_HZ]),
-	NZ: Object.freeze([VDL2_COMMON_SIGNALLING_HZ]),
-	JP: Object.freeze([VDL2_COMMON_SIGNALLING_HZ]),
-	CN: Object.freeze([VDL2_COMMON_SIGNALLING_HZ]),
+	US: VDL2_LEGACY_CHANNELS_HZ,
+	CA: VDL2_LEGACY_CHANNELS_HZ,
+	AU: VDL2_LEGACY_CHANNELS_HZ,
+	NZ: VDL2_LEGACY_CHANNELS_HZ,
+	JP: VDL2_LEGACY_CHANNELS_HZ,
+	CN: VDL2_LEGACY_CHANNELS_HZ,
 })
 
 /**
  * The default VDL2 channels for `region`; with no region (a decoder configured without
- * frequencies outside the catalogue) the Common Signalling Channel, right in every region.
+ * frequencies outside the catalogue) the legacy list, unchanged from before regional defaults.
  */
 export function vdl2DefaultChannelsHz(region?: BandRegion): readonly number[] {
 	return region === undefined
-		? [VDL2_COMMON_SIGNALLING_HZ]
+		? VDL2_LEGACY_CHANNELS_HZ
 		: VDL2_REGION_CHANNELS_HZ[region]
 }
 
@@ -164,7 +173,7 @@ export const dumpvdl2OptionDescriptors: DecoderOptionDescriptor[] = [
 		secret: false,
 		effect: "restart",
 		description:
-			"VDL2 channels (default 136.975 MHz; the catalogue decoder in the EU: 136.725, 136.775, 136.825, 136.875, 136.925 and 136.975 MHz).",
+			"VDL2 channels (default 136.650, 136.700, 136.975 MHz; the catalogue decoder in the EU: 136.725, 136.775, 136.825, 136.875, 136.925 and 136.975 MHz).",
 	},
 	{
 		key: "frequency",

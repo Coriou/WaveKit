@@ -148,7 +148,7 @@ describe("resolveAmbientTargets", () => {
 			131_550_000, 131_725_000,
 		])
 		expect(resolveAmbientTargets(cfgOf("dumpvdl2"), d)?.targetsHz).toEqual([
-			136_975_000,
+			136_650_000, 136_700_000, 136_975_000,
 		])
 		// the very list the adapter decodes (one source, options/dumpvdl2.ts)
 		const vdl2 = new Dumpvdl2Decoder(

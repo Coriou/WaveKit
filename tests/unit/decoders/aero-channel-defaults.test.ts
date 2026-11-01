@@ -82,7 +82,7 @@ describe("ACARS AM channel", () => {
 })
 
 describe("default channels", () => {
-	it("VDL2: the EU list of Regulation (EU) No 1079/2012, elsewhere the common signalling channel", () => {
+	it("VDL2: the EU list of Regulation (EU) No 1079/2012, elsewhere the legacy default", () => {
 		expect(VDL2_COMMON_SIGNALLING_HZ).toBe(136_975_000)
 		expect(VDL2_REGION_CHANNELS_HZ.EU).toEqual([
 			136_725_000, 136_775_000, 136_825_000, 136_875_000, 136_925_000,
@@ -93,15 +93,22 @@ describe("default channels", () => {
 			expect(list).toContain(VDL2_COMMON_SIGNALLING_HZ)
 			expect(list.length).toBeLessThanOrEqual(DUMPVDL2_BOUNDS.maxFrequencies)
 			for (const hz of list) expect(hz % 25_000).toBe(0)
-			// one dumpvdl2 window: span + 50 kHz guard ≤ 300 kHz
+			// one dumpvdl2 window: span + 50 kHz guard fits the 512 kHz channel of a 1.024 Msps
+			// capture, 512 000 × 0.95 = 486 400 Hz (EU 300 kHz, legacy 375 kHz)
 			expect(
 				Math.max(...list) - Math.min(...list) + 50_000,
-			).toBeLessThanOrEqual(300_000)
+			).toBeLessThanOrEqual(486_400)
 			expect(CATALOGUE_DEFAULT_OPTIONS(region).dumpvdl2).toEqual({
 				frequencies: [...list],
 			})
 		}
-		expect(vdl2DefaultChannelsHz()).toEqual([VDL2_COMMON_SIGNALLING_HZ])
+		// No region and every non-EU region keep the legacy default: no setup loses coverage.
+		expect(vdl2DefaultChannelsHz()).toEqual([
+			136_650_000, 136_700_000, 136_975_000,
+		])
+		for (const region of BAND_REGIONS)
+			if (region !== "EU")
+				expect(vdl2DefaultChannelsHz(region)).toEqual(vdl2DefaultChannelsHz())
 		expect(
 			new Dumpvdl2Decoder(config("dumpvdl2"), logger).getBandDeclaration(),
 		).toEqual({

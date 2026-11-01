@@ -820,7 +820,7 @@ const GOLDEN: Row[] = [
 		options: {},
 		getArgs: [
 			"-c",
-			"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1050000 - rate -h 1050000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 10 --centerfreq 136975000 --output decoded:json:file:path=- 136975000",
+			"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1050000 - rate -h 1050000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 10 --centerfreq 136650000 --output decoded:json:file:path=- 136650000 136700000 136975000",
 		],
 		getDecoderArgs: [
 			"--iq-file",
@@ -830,9 +830,11 @@ const GOLDEN: Row[] = [
 			"--oversample",
 			"10",
 			"--centerfreq",
-			"136975000",
+			"136650000",
 			"--output",
 			"decoded:json:file:path=-",
+			"136650000",
+			"136700000",
 			"136975000",
 		],
 	},
