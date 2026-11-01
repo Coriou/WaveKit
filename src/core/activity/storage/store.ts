@@ -63,6 +63,23 @@ export interface OpenActivityStoreOptions {
 	openTimeoutMs?: number
 	/** Acknowledgement budget for a write. Distinct from openTimeoutMs. */
 	writeTimeoutMs?: number
+	/**
+	 * Test seam (inline only): the store writes the session through this async writer, as it
+	 * does through the worker, so a test controls when each write settles and when it is gone.
+	 */
+	inlineWriter?: (session: ActivitySession) => ActivityWriter
+}
+
+/** The writer calls the store makes on its thread; ActivityWriterClient in production. */
+export interface ActivityWriter {
+	onGone(listener: () => void): void
+	onSeeded(listener: (snapshot: ActivityWorkerSnapshot) => void): void
+	write(
+		rows: readonly BuiltActivityRow[],
+		nowMs: number,
+	): Promise<WriterWorkResult>
+	checkpoint(reason: "threshold" | "close"): Promise<ActivityWorkerSnapshot>
+	close(): Promise<void>
 }
 
 interface OpenWorkerRequest {
@@ -161,14 +178,15 @@ export async function openActivityStore(
 				}
 				throw error
 			}
+			const writer = options.inlineWriter?.(session)
 			const store = new ActivityStore(
 				dbPath,
 				options.logger,
 				limits,
 				now,
 				lock,
-				session,
-				undefined,
+				writer ? undefined : session,
+				writer,
 				session.snapshot(),
 			)
 			store.restrictFiles()
@@ -207,7 +225,7 @@ export async function openActivityStore(
 }
 
 /** Exported for tests; production code reaches it only through openActivityStore. */
-export class ActivityWriterClient {
+export class ActivityWriterClient implements ActivityWriter {
 	private readySnapshot: ActivityWorkerSnapshot | undefined
 	private nextId = 1
 	private exited = false
@@ -454,7 +472,7 @@ class ActivityStore implements ActivityStoreHandle {
 		private readonly now: () => number,
 		private readonly lock: ActivityLock | undefined,
 		private readonly inline: ActivitySession | undefined,
-		private readonly threaded: ActivityWriterClient | undefined,
+		private readonly threaded: ActivityWriter | undefined,
 		snapshot: ActivityWorkerSnapshot,
 	) {
 		this.dbPath = dbPath
@@ -580,8 +598,11 @@ class ActivityStore implements ActivityStoreHandle {
 		if (this.stopped) return
 		this.writerState = "stopped"
 		this.stopped = true
-		this.nackInFlight()
+		// Closed first: the in-flight rows are then counted lost, not held again
+		// for a flush that can no longer run, and so is every row still held.
 		this.ingress.markClosed()
+		this.nackInFlight()
+		this.ingress.abandonHeld()
 		this.clearBatchTimer()
 		this.clearPause()
 		this.clearGapTimer()
@@ -595,6 +616,7 @@ class ActivityStore implements ActivityStoreHandle {
 		this.stopped = true
 		this.ingress.forgetInFlight()
 		this.ingress.markClosed()
+		this.ingress.abandonHeld()
 		this.clearBatchTimer()
 		this.clearPause()
 		this.clearGapTimer()
@@ -744,6 +766,7 @@ class ActivityStore implements ActivityStoreHandle {
 		if (result.note !== undefined)
 			this.logger.warn({ err: result.note }, "activity retention step failed")
 		this.ingress.noteSkipped(batch, result.commit.writeFailedEventIds)
+		this.armCoalesceTimer()
 		const done = new Set<string>([
 			...result.commit.committedEventIds,
 			...result.commit.duplicateEventIds,
@@ -781,9 +804,11 @@ class ActivityStore implements ActivityStoreHandle {
 		}
 	}
 
+	/** Receptions held again only a timer can carry: the source may stay silent. */
 	private nackInFlight(): void {
 		this.ingress.nack()
 		this.armGapTimer()
+		this.armCoalesceTimer()
 	}
 
 	private armGapTimer(): void {

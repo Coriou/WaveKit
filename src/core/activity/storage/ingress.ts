@@ -436,6 +436,7 @@ export class ActivityIngress {
 		const kept = new Set<string>()
 		for (const row of [...failed].reverse())
 			if (this.rollBackCoalescing(row.eventId)) kept.add(row.eventId)
+		if (kept.size > 0) this.deferHeldRetry()
 		for (const row of failed) this.forgetFlood(row.eventId)
 		for (const row of failed)
 			if (!kept.has(row.eventId))
@@ -458,6 +459,7 @@ export class ActivityIngress {
 				if (this.rollBackCoalescing(row.eventId)) kept.add(row.eventId)
 				this.forgetFlood(row.eventId)
 			}
+		if (kept.size > 0) this.deferHeldRetry()
 		for (const row of batch) {
 			if (
 				!skipped.has(row.eventId) ||
@@ -470,6 +472,34 @@ export class ActivityIngress {
 				new Date(row.receivedAtMs).toISOString(),
 				row.decoderId,
 				this.now(),
+			)
+		}
+	}
+
+	/**
+	 * Receptions held again after a failed write are retried after
+	 * pauseRetryMs, not at once, so a failing writer is not spun on.
+	 */
+	private deferHeldRetry(): void {
+		this.flushRetryAt = Math.max(
+			this.flushRetryAt,
+			this.now() + this.limits.pauseRetryMs,
+		)
+	}
+
+	/**
+	 * The writer is gone (call after markClosed): every held entity row, due
+	 * or not, is a counted write-failed loss, since no flush can carry it now.
+	 */
+	abandonHeld(): void {
+		const now = this.now()
+		for (const flush of this.coalescer.takeAll()) {
+			flush.commit().settle()
+			this.noteDrop(
+				"write-failed",
+				flush.envelope.receivedAt,
+				flush.envelope.decoderId,
+				now,
 			)
 		}
 	}
