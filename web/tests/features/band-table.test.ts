@@ -126,7 +126,14 @@ describe("tuned card cases", () => {
 		)
 	})
 
-	it("a paused feed is not claimed while any row is held for another reason", () => {
+	it("a paused feed is still claimed when another row is off", () => {
+		const rows = rowsOf("uhf-feed-paused")
+		const mixed = [rows[0]!, { ...rows[1]!, code: "off" as const }]
+		expect(feedPausedHere(mixed)).toBe(true)
+		expect(decodersLine(mixed, new Set())).toMatch(/The receiver is paused/)
+	})
+
+	it("a paused feed is not claimed while no row is held by it", () => {
 		const rows = rowsOf("pager-dmr-466")
 		expect(feedPausedHere(rows)).toBe(false)
 		expect(feedPausedHere([])).toBe(false)
