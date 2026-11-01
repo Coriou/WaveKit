@@ -21,6 +21,7 @@ import {
 	rm,
 	truncate,
 } from "node:fs/promises"
+import { readJournalFiles } from "./journal-reader.js"
 import { DQ_CONSOLIDATE_GROUP_MAX } from "../detection-quality-contract.js"
 import { join, resolve } from "node:path"
 import { z } from "zod"
@@ -57,8 +58,12 @@ import { snapshotHeadOf } from "./snapshot-mirror.js"
 import { mainSnapshotRestMs } from "./snapshot-cadence.js"
 import type { MirrorCounts, SnapshotParts } from "./snapshot-mirror.js"
 import { SnapshotWriter } from "./snapshot-writer.js"
-import { parseInSlices, yieldToEventLoop } from "./slices.js"
-import type { YieldTurn } from "./slices.js"
+import {
+	deadlineSliceClock,
+	parseInSlices,
+	yieldToEventLoop,
+} from "./slices.js"
+import type { SliceClock, YieldTurn } from "./slices.js"
 import type {
 	SnapshotWorkerFactory,
 	SnapshotWorkerStatus,
@@ -161,6 +166,14 @@ export interface LoadedState {
 	/** WG10 req 1.5: merge aliases from the snapshot (journal entries replay on top). */
 	aliases?: { id: string; aliases: string[] }[]
 	recoveryHealth: "healthy" | "degraded"
+	/** Seqs missing from the replayed journal tail (recovery is then degraded); absent when none. */
+	journalGap?: JournalGap
+}
+
+/** The first seq missing from the journal tail after the snapshot and how many are missing. */
+export interface JournalGap {
+	firstMissing: number
+	missing: number
 }
 
 // ── schemas ──────────────────────────────────────────────────────────────
@@ -573,6 +586,7 @@ export class ScannerPersistence {
 	private readonly now: () => number
 	private readonly appendFile: (path: string, data: string) => Promise<void>
 	private readonly yieldTurn: YieldTurn
+	private readonly loadSliceClock: () => SliceClock
 	private readonly fileMaxSeq = new Map<string, number>()
 	private readonly fileBytes = new Map<string, number>()
 	private chain: Promise<unknown> = Promise.resolve()
@@ -609,6 +623,11 @@ export class ScannerPersistence {
 	private snapshotBytes = 0
 	private journalBytes = 0
 	private journalBytesCovered = 0
+	/** `writeStats`: bytes this process wrote (load excluded) and the wall time it started counting. */
+	private writtenJournalBytes = 0
+	private compactionBytes = 0
+	private compactions = 0
+	private readonly statsSince: number
 	/** Main-thread snapshot builds so far and the last one's synchronous time (`mainSnapshotBuild`). */
 	private mainBuilds = 0
 	private mainBuildMs = 0
@@ -636,6 +655,8 @@ export class ScannerPersistence {
 		snapshotWorker?: SnapshotWorkerOptions
 		/** Awaited between validation slices of the snapshot; a setImmediate turn by default. */
 		yieldTurn?: YieldTurn
+		/** Deadline slicing of the journal read; `deadlineSliceClock()` (8 ms) by default. */
+		loadSliceClock?: () => SliceClock
 		/**
 		 * Monotonic ms timing main-thread snapshot builds and the rest after them;
 		 * `performance.now` by default.
@@ -643,6 +664,7 @@ export class ScannerPersistence {
 		buildClock?: () => number
 	}) {
 		this.yieldTurn = opts.yieldTurn ?? yieldToEventLoop
+		this.loadSliceClock = opts.loadSliceClock ?? (() => deadlineSliceClock())
 		this.buildClock = opts.buildClock ?? (() => performance.now())
 		this.snapshotWorkerOptions = opts.snapshotWorker ?? {}
 		this.maxJournalBacklogBytes =
@@ -650,6 +672,7 @@ export class ScannerPersistence {
 		this.root = resolve(opts.dir)
 		this.log = createComponentLogger(opts.logger, "ScannerPersistence")
 		this.now = opts.now
+		this.statsSince = opts.now()
 		this.appendFile =
 			opts.appendFile ?? ((path, data) => appendFile(path, data))
 	}
@@ -691,6 +714,7 @@ export class ScannerPersistence {
 				lastSeq: snapshot.lastSeq,
 				replay: journal.entries.length,
 				dropped: journal.dropped,
+				...(journal.gap ? { journalGap: journal.gap } : {}),
 			},
 			"Loaded scanner state",
 		)
@@ -708,6 +732,7 @@ export class ScannerPersistence {
 			recordingOperations: snapshot.recordingOperations ?? [],
 			...(snapshot.aliases ? { aliases: snapshot.aliases } : {}),
 			recoveryHealth: this.authorityHealth,
+			...(journal.gap ? { journalGap: journal.gap } : {}),
 		}
 	}
 
@@ -805,6 +830,8 @@ export class ScannerPersistence {
 		this.durableLastSeq = Math.max(this.durableLastSeq, lastSeq)
 		this.journalBytesCovered = Math.max(this.journalBytesCovered, journalBytes)
 		this.snapshotBytes = bytes
+		this.compactionBytes += bytes
+		this.compactions += 1
 		if (this.refusedMax === null) return
 		if (lastSeq >= this.refusedMax) {
 			this.log.info(
@@ -867,6 +894,7 @@ export class ScannerPersistence {
 		const written = Buffer.byteLength(text)
 		this.fileBytes.set(batch.name, knownBytes + written)
 		this.journalBytes += written
+		this.writtenJournalBytes += written
 	}
 
 	writeSnapshot(s: StoreSnapshot): Promise<void> {
@@ -889,7 +917,7 @@ export class ScannerPersistence {
 	 * lastSeq). Falls back to the main thread when the worker is off, stale (first snapshot,
 	 * after an overflow or a reset) or fails; the main path resets the mirror.
 	 *
-	 * `deferWithinMainRest` (the periodic and hole snapshots): a snapshot that would be built on the
+	 * `deferWithinMainRest` (the cadence and hole snapshots): a snapshot that would be built on the
 	 * main thread, here or as the fallback of a failed worker commit, while the rest after the last
 	 * main-thread build has not passed rejects with `SCANNER_SNAPSHOT_DEFERRED_CODE` instead,
 	 * building and writing nothing. Every path to a main-thread build checks it, so main-thread
@@ -943,6 +971,26 @@ export class ScannerPersistence {
 			journalBytes: Math.max(0, this.journalBytes - this.journalBytesCovered),
 			onWorker:
 				this.attached !== null && this.writer !== null && this.writer.live(),
+		}
+	}
+
+	/**
+	 * Bytes this process wrote since it was constructed (`since`, wall ms), in UTF-8 bytes on disk:
+	 * journal lines appended (lines replayed at load, refused, dropped or failed never count) and
+	 * durable snapshots (compactions). The compaction cadence keeps the sum near
+	 * J + S x max(1, J / T) a day, at most 1.5 GB + J (store/snapshot-cadence.ts).
+	 */
+	writeStats(): {
+		journalBytes: number
+		compactionBytes: number
+		compactions: number
+		since: number
+	} {
+		return {
+			journalBytes: this.writtenJournalBytes,
+			compactionBytes: this.compactionBytes,
+			compactions: this.compactions,
+			since: this.statsSince,
 		}
 	}
 
@@ -1458,9 +1506,19 @@ export class ScannerPersistence {
 		}
 	}
 
-	private async readJournal(
-		lastSeq: number,
-	): Promise<{ entries: JournalEntry[]; maxSeq: number; dropped: number }> {
+	/**
+	 * The journal tail after `lastSeq`, streamed (store/journal-reader.ts): covered lines are only
+	 * byte-scanned, torn tails are cut back to the last newline, and every valid uncovered line is
+	 * replayed in seq order, past missing seqs too. Missing seqs only degrade recovery: no line is
+	 * withheld, so a snapshot after the replay covers exactly the lines that could be applied
+	 * (`maxSeq` counts valid lines only), and runtime holes keep their own rule (`refuse`).
+	 */
+	private async readJournal(lastSeq: number): Promise<{
+		entries: JournalEntry[]
+		maxSeq: number
+		dropped: number
+		gap: JournalGap | null
+	}> {
 		const dir = join(this.root, JOURNAL_DIR)
 		let names: string[]
 		try {
@@ -1470,61 +1528,30 @@ export class ScannerPersistence {
 				this.authorityHealth = "degraded"
 				this.log.warn({ err, dir }, "Scanner journal directory unreadable")
 			}
-			return { entries: [], maxSeq: 0, dropped: 0 }
+			return { entries: [], maxSeq: 0, dropped: 0, gap: null }
 		}
-		const bySeq = new Map<number, JournalEntry>()
-		let maxSeq = 0
-		let dropped = 0
-		for (const name of names) {
-			const path = join(dir, name)
-			let text = await readFile(path, "utf8")
-			if (text.length > 0 && !text.endsWith("\n")) {
-				const keep = text.slice(0, text.lastIndexOf("\n") + 1)
-				dropped++
-				this.authorityHealth = "degraded"
-				this.log.warn(
-					{
-						file: path,
-						tornBytes: Buffer.byteLength(text) - Buffer.byteLength(keep),
-					},
-					"Dropping a torn final journal line",
-				)
-				await truncate(path, Buffer.byteLength(keep))
-				text = keep
-			}
-			let fileMax = 0
-			for (const line of text.split("\n")) {
-				if (line === "") continue
-				const parsed = parseJournalLine(line)
-				if (parsed === null) {
-					dropped++
-					this.authorityHealth = "degraded"
-					this.log.warn({ file: path }, "Skipping an invalid journal line")
-					continue
-				}
-				fileMax = Math.max(fileMax, parsed.seq)
-				if (parsed.seq > lastSeq) {
-					const previous = bySeq.get(parsed.seq)
-					if (
-						previous !== undefined &&
-						JSON.stringify(previous) !== JSON.stringify(parsed)
-					) {
-						this.authorityHealth = "degraded"
-						dropped++
-					} else if (previous === undefined) {
-						bySeq.set(parsed.seq, parsed)
-						this.journalBytes += Buffer.byteLength(line) + 1
-					}
-				}
-			}
-			this.fileMaxSeq.set(name, fileMax)
-			this.fileBytes.set(name, Buffer.byteLength(text))
-			maxSeq = Math.max(maxSeq, fileMax)
+		const read = await readJournalFiles({
+			dir,
+			names,
+			fromSeq: lastSeq,
+			parseLine: parseJournalLine,
+			slice: this.loadSliceClock(),
+			log: this.log,
+		})
+		if (read.degraded) this.authorityHealth = "degraded"
+		for (const file of read.files) {
+			this.fileMaxSeq.set(file.name, file.maxSeq)
+			this.fileBytes.set(file.name, file.bytes)
 		}
+		this.journalBytes += read.uncoveredBytes
 		return {
-			entries: [...bySeq.values()].sort((a, b) => a.seq - b.seq),
-			maxSeq,
-			dropped,
+			entries: read.entries,
+			maxSeq: read.maxSeq,
+			dropped: read.dropped,
+			gap:
+				read.gap === null
+					? null
+					: { firstMissing: read.gap.firstMissing, missing: read.gap.missing },
 		}
 	}
 

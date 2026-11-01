@@ -1,22 +1,27 @@
 /**
- * How often the scanner rewrites `discoveries.json`. Every mutation is already in the journal, so
- * the snapshot only bounds replay and lets old journal files be pruned: its cadence scales with its
- * size instead of a flat 10 s, which at a ~90 MB store rewrote 778 GB a day
- * (90e6 B x 8,640 snapshots) and, whenever the snapshot worker could not take it, cloned and
- * stringified the whole store on the main thread every 10 s (measured 2.7 s and +228 MiB heap per
- * snapshot at 88 MiB of text).
+ * When the scanner rewrites `discoveries.json` (a compaction). Every mutation is already in the
+ * journal, so the snapshot only bounds replay and lets old journal files be pruned. A compaction is
+ * due when the journal since the last one passes its trigger (`journalSnapshotTriggerBytes`), when
+ * the store has changed and 24 h have passed (`SNAPSHOT_AGE_CEILING_MS`), or at once for a journal
+ * hole; never sooner than the write-budget floor (`writeBudgetFloorMs`) except for a hole (and for
+ * the start-up, consolidation and shutdown snapshots, which do not use this cadence).
+ *
+ * The size-scaled periodic interval this replaces rewrote a 90 MB store every 64.8 min:
+ * 22.2 x 90e6 = 2.0 GB a day for a journal of only 655 B/s x 86,400 s = 56.6 MB a day. Now the same
+ * store compacts each time 32 MiB of journal accrues: 56.6e6 / 33,554,432 = 1.69 compactions,
+ * 152 MB a day.
  */
 
-/** Floor of every interval: a small store snapshots as often as it always did. */
+/** Floor of every interval but a hole's: a small store snapshots at most every 10 s. */
 export const SNAPSHOT_MIN_INTERVAL_MS = 10_000
-/** Ceiling of the periodic interval: at most 2 h of journal replays after a crash or restart. */
-export const SNAPSHOT_MAX_INTERVAL_MS = 2 * 3_600_000
+/** A changed store compacts at least this long after the last compaction started: 24 h. */
+export const SNAPSHOT_AGE_CEILING_MS = 24 * 3_600_000
 /**
- * Periodic snapshot bytes per day: interval = bytes x 86,400,000 ms / 2e9 B. A 90 MB (90e6 B)
- * store gives 3,888 s (64.8 min, 22 snapshots a day); the 10 s floor holds up to
- * 2e9 / 8,640 = 231,481 B and the 2 h ceiling from 2e9 / 12 = 166.7 MB on.
+ * Compaction bytes per day the write-budget floor allows: floor = bytes x 86,400,000 ms / 1.5e9 B.
+ * A 90 MB store waits at least 5,184 s (86.4 min) between compactions, so even a journal burst
+ * or a tiny `maxJournalMb` rewrites it at most 86,400,000 / 5,184,000 = 16.7 times (1.5 GB) a day.
  */
-export const SNAPSHOT_BYTES_PER_DAY = 2_000_000_000
+export const COMPACTION_BYTES_PER_DAY = 1_500_000_000
 const DAY_MS = 86_400_000
 /**
  * Fastest snapshot after a journal hole: until one covers the hole every append is refused,
@@ -43,22 +48,22 @@ export const MAIN_SNAPSHOT_MAX_SPACING_MS = 10 * 60_000
  */
 export const MAIN_SNAPSHOT_REST_FACTOR = 9
 /**
- * Journal since the last snapshot that makes one due early: at least 1 MiB (or the snapshot's own
+ * Journal since the last snapshot that makes one due: at least 1 MiB (or the snapshot's own
  * size, so replay never reads more than about twice the snapshot), but never past half of
  * `storage.maxJournalMb`, so the uncovered journal pruning cannot delete stays inside the cap.
  */
 export const JOURNAL_TRIGGER_MIN_BYTES = 1024 * 1024
 const MIB = 1024 * 1024
 
-/** The periodic interval for a snapshot of `snapshotBytes`, clamped to [10 s, 2 h]. */
-export function periodicSnapshotIntervalMs(snapshotBytes: number): number {
+/**
+ * The write-budget floor for a snapshot of `snapshotBytes`: bytes x 86,400,000 / 1.5e9 ms, rounded
+ * up (0 for no snapshot). 90 MB gives 5,184,000 ms; 1 MiB 60,398 ms; up to 173,611 B it is at
+ * most the 10 s floor every interval keeps anyway (173,611 x 0.0576 = 9,999.99 ms).
+ */
+export function writeBudgetFloorMs(snapshotBytes: number): number {
 	const bytes =
 		Number.isFinite(snapshotBytes) && snapshotBytes > 0 ? snapshotBytes : 0
-	const scaled = Math.ceil((bytes * DAY_MS) / SNAPSHOT_BYTES_PER_DAY)
-	return Math.min(
-		SNAPSHOT_MAX_INTERVAL_MS,
-		Math.max(SNAPSHOT_MIN_INTERVAL_MS, scaled),
-	)
+	return Math.ceil((bytes * DAY_MS) / COMPACTION_BYTES_PER_DAY)
 }
 
 /** Spacing of main-thread snapshots of `snapshotBytes`: 1 s per MiB, clamped to [1 s, 10 min]. */
@@ -111,6 +116,12 @@ export const HOLE_SNAPSHOT_MAX_SPACING_MS = 5 * 60_000
 export const HOLE_STREAK_RESET_MS = 10 * 60_000
 /** First retry after a failed snapshot; each further consecutive failure doubles it. */
 export const SNAPSHOT_RETRY_MIN_MS = SNAPSHOT_MIN_INTERVAL_MS
+/**
+ * Ceiling of the failure retry of a snapshot that is not a hole's: 2 h, reached at the 11th
+ * consecutive failure (10 s x 2^10 = 10,240 s capped to 7,200 s), so a disk that keeps failing
+ * sees one attempt every 2 h (or every write-budget floor, when that is longer).
+ */
+export const SNAPSHOT_RETRY_MAX_MS = 2 * 3_600_000
 
 /**
  * Spacing of a hole snapshot after `streak` consecutive successful ones in the same episode:
@@ -129,9 +140,7 @@ export function holeSnapshotSpacingMs(streak: number): number {
 
 /**
  * Retry after `failures` consecutive failed snapshots (0: none): 10 s x 2^(failures - 1), so 10,
- * 20, 40, ... s, capped by the caller (the periodic interval, or 5 min while a hole waits). A
- * 90 MB store (periodic 3,888 s) reaches its cap at the 10th failure (10 s x 2^9 = 5,120 s),
- * about 1.4 h of failures in; a disk that keeps failing then sees one 90 MB attempt an hour.
+ * 20, 40, ... s, capped by the caller (2 h, or 5 min while a hole waits).
  */
 export function snapshotRetryMs(failures: number): number {
 	const f = Number.isFinite(failures) && failures > 0 ? Math.floor(failures) : 0
@@ -164,12 +173,21 @@ export interface SnapshotCadenceInput {
 }
 
 /**
- * Minimum time between snapshot starts while the state is dirty. A journal hole is covered after
- * 1 s, backing off once holes keep recurring (`holeSnapshotSpacingMs`). A journal past its
- * trigger makes one due after 10 s, or after the main-thread spacing when the worker cannot take
- * it; otherwise the size-scaled periodic interval. After failed snapshots the next waits at least
- * the failure retry (`snapshotRetryMs`), capped at the periodic interval (5 min for a hole). A
- * snapshot the main thread will build also waits out the rest after the last main-thread build,
+ * Minimum time between snapshot starts while the state is dirty.
+ *
+ * - A journal hole is covered after 1 s, backing off once holes keep recurring
+ *   (`holeSnapshotSpacingMs`) and after failures (retry capped at 5 min); never later than
+ *   max(10 s, write-budget floor), so a lasting hole episode stays inside the write budget too
+ *   (a 90 MB store's floor, 86.4 min, is far above the 5 min caps; a small store's is 10 s).
+ * - A journal past its trigger makes one due after max(10 s, floor, failure retry capped at 2 h),
+ *   and when the main thread must build it, at least the main-thread spacing.
+ * - Otherwise the 24 h age ceiling, or after a failure max(10 s, floor, retry capped at 2 h).
+ *
+ * Bytes a day, steady state, for a journal of J bytes a day, a snapshot of S bytes and the trigger
+ * T: J + S x max(1, J / T) (the age ceiling compacts a changed store at least once a day), at most
+ * 1.5 GB + J whatever J. A 90 MB store at 56.6 MB a day: 56.6 MB + 1.69 x 90 MB = 0.21 GB.
+ *
+ * A snapshot the main thread will build also waits out the rest after the last main-thread build,
  * hole or not.
  */
 export function snapshotIntervalMs(s: SnapshotCadenceInput): number {
@@ -180,25 +198,27 @@ export function snapshotIntervalMs(s: SnapshotCadenceInput): number {
 }
 
 function cadenceIntervalMs(s: SnapshotCadenceInput): number {
-	const periodic = periodicSnapshotIntervalMs(s.snapshotBytes)
+	const floor = Math.max(
+		SNAPSHOT_MIN_INTERVAL_MS,
+		writeBudgetFloorMs(s.snapshotBytes),
+	)
 	const retry = snapshotRetryMs(s.failures)
 	if (s.requested)
 		return Math.min(
-			periodic,
+			floor,
 			Math.max(
 				holeSnapshotSpacingMs(s.holeStreak),
 				Math.min(HOLE_SNAPSHOT_MAX_SPACING_MS, retry),
 			),
 		)
+	const cappedRetry = Math.min(SNAPSHOT_RETRY_MAX_MS, retry)
 	if (
 		s.journalBytes >=
 		journalSnapshotTriggerBytes(s.snapshotBytes, s.maxJournalBytes)
 	) {
 		const spacing = s.onWorker ? 0 : mainSnapshotSpacingMs(s.snapshotBytes)
-		return Math.min(
-			periodic,
-			Math.max(SNAPSHOT_MIN_INTERVAL_MS, spacing, retry),
-		)
+		return Math.max(floor, spacing, cappedRetry)
 	}
-	return retry > 0 ? Math.min(periodic, retry) : periodic
+	if (retry > 0) return Math.max(floor, cappedRetry)
+	return Math.max(SNAPSHOT_AGE_CEILING_MS, floor)
 }
