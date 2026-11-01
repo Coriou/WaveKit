@@ -616,13 +616,16 @@ const words = (s: string): string[] =>
 		.filter(Boolean)
 
 /** Words that say what kind of company it is, not which: an airline brand and its registered name differ by these. */
-const GENERIC_COMPANY_WORDS: ReadonlySet<string> = new Set([
+const AIRLINE_WORDS: ReadonlySet<string> = new Set([
 	"air",
 	"airline",
 	"airlines",
 	"airways",
 	"lines",
 	"aviation",
+])
+/** Legal forms: they only ever end a name ("Northwind S.A."). */
+const LEGAL_WORDS: ReadonlySet<string> = new Set([
 	"ltd",
 	"limited",
 	"plc",
@@ -635,18 +638,41 @@ const GENERIC_COMPANY_WORDS: ReadonlySet<string> = new Set([
 ])
 
 /**
- * One company under two names: equal once case, punctuation and spacing are dropped, or once the generic
- * company words are ("TAP Portugal", "TAP Air Portugal"; "WaveKit Air", "WaveKit Airlines Ltd"). Anything
- * else ("Northwind Air", "Northwind Air Charter") is two companies, so both are shown.
+ * A name's generic words trimmed from its ends only, middle and order kept: airline or legal words from the end,
+ * then airline words from the start. `lead` / `tail` say whether an airline word was trimmed on that side.
+ */
+function trimGeneric(w: readonly string[]): {
+	core: string
+	lead: boolean
+	tail: boolean
+} {
+	let end = w.length
+	let tail = false
+	for (; end > 0; end--) {
+		const t = w[end - 1] as string
+		if (AIRLINE_WORDS.has(t)) tail = true
+		else if (!LEGAL_WORDS.has(t)) break
+	}
+	let start = 0
+	while (start < end && AIRLINE_WORDS.has(w[start] as string)) start++
+	return { core: w.slice(start, end).join(" "), lead: start > 0, tail }
+}
+
+/**
+ * One company under two names: equal once case, punctuation and spacing are dropped, or once generic words are
+ * trimmed from the ends ("WaveKit", "WaveKit Airlines Ltd"; "Air Northwind", "Northwind S.A."). The airline word
+ * must not swap sides: "Air China" and "China Airlines" are two companies. A generic word in the middle stays, so
+ * "TAP Portugal" and "TAP Air Portugal", or "Northwind Air" and "Northwind Air Charter", both show.
  */
 export function sameOperator(a: string, b: string): boolean {
 	const [x, y] = [words(a), words(b)]
 	if (x.length === 0 || y.length === 0) return false
 	if (x.join(" ") === y.join(" ")) return true
-	const core = (w: string[]) =>
-		w.filter(t => !GENERIC_COMPANY_WORDS.has(t)).join(" ")
-	const [cx, cy] = [core(x), core(y)]
-	return cx !== "" && cx === cy
+	const [tx, ty] = [trimGeneric(x), trimGeneric(y)]
+	if (tx.core === "" || tx.core !== ty.core) return false
+	const leadOnly = (t: typeof tx) => t.lead && !t.tail
+	const tailOnly = (t: typeof tx) => t.tail && !t.lead
+	return !((leadOnly(tx) && tailOnly(ty)) || (tailOnly(tx) && leadOnly(ty)))
 }
 
 /**

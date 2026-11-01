@@ -408,10 +408,12 @@ smoothly the short way round (from 359° to 0° it turns 1°, never all the way 
 the aircraft could not have reached (a speed over 1200 kn since the last one, usually a bad
 decode) is held back; if the next position agrees with it, the aircraft really is there and the
 map moves it at once. A position no newer than the one the plane already follows is ignored, so
-a late report never pulls it back. After 60 seconds without a usable position, the next one is taken as it
-is. Without new reports, the plane slows down after 10 seconds and stops 20 seconds after its
+a late report never pulls it back; a new speed or track for the position it follows always applies. After 60 seconds without a usable position, the next one is taken as it
+is. A position more than 5 km from where the plane is drawn, or one arriving after the plane has
+stopped (a hidden tab or layer, a gap in reception), moves it at once instead of sweeping it across
+the map, and while a position is held back the glyph keeps pointing along the track it follows. Without new reports, the plane slows down after 10 seconds and stops 20 seconds after its
 last position, then waits there instead of flying on with an old speed and track. The trail,
-label and selected aircraft's card follow the plane where it is drawn.
+label and selected aircraft's card follow the plane where it is drawn; with the Aircraft layer hidden, the card still follows it.
 
 The **ACARS** layer shows where aircraft said they were over datalink: an ADS-C report decoded by
 libacars, or the rough position a VDL2 link frame carries (to 0.1°, about 10 km). Each aircraft's
@@ -435,7 +437,7 @@ strength, distance and direction from the station, and when it was last heard. V
 7600 and 7700, and any emergency state the aircraft reports, show as a red alert
 (`Squawk 7700 · General emergency`) and the squawk turns red. Below, the **Aircraft** section lists
 the registration, the type once with its ICAO type code (`Airbus A321 251NXSL A21N`), the
-registered operator unless its name is the airline's give or take words like Air or Ltd, the country, the ICAO address and
+registered operator unless its name is the airline's give or take words like Air or Ltd at its start or end (Air China and China Airlines are two companies), the country, the ICAO address and
 the year built; the footer gives the decoder, the message count and the position. The card
 scrolls as a whole when it is taller than the window. The planned route comes from a crowd-sourced database, so
 it is hidden when the core marks it implausible (the aircraft is clearly flying away from the

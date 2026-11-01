@@ -48,6 +48,14 @@ const OMEGA = 6 / BLEND_MS
  * 3.9 s; even one around the world (20 000 km) at x = 26, 8.7 s.
  */
 export const SETTLE_KM = 0.001
+/**
+ * A correction larger than this is drawn at once instead of blended: noise, CPR rounding and dead reckoning leave
+ * well under 1 km (10 s along the tangent of a standard-rate 3°/s turn at 450 kn misses by v·t²·ω / 2 =
+ * 0.2315 km/s × 100 s² × 0.0524 rad/s / 2 = 0.6 km), while blending 5 km already peaks at ω·A / e =
+ * 0.003/ms × 5 km / 2.718 = 5.5 km/s, 9× the fastest plausible plane: anything more would sweep across the map.
+ */
+export const SNAP_KM = 5
+
 /** The glyph counts as turned (settling() false) within this of the reported track. */
 export const SETTLE_DEG = 0.1
 
@@ -91,12 +99,13 @@ export interface MotionState {
 	seenAt: number
 	seenCourse: number | null
 	seenSpeed: number | null
-	/** The accepted track: fix, its time, velocity north and east (km/ms). */
+	/** The accepted track: fix, its time, velocity north and east (km/ms) and course (the glyph turns to it). */
 	fixLat: number
 	fixLon: number
 	fixAt: number
 	vN: number
 	vE: number
+	fixCourse: number | null
 	/** A held-back fix waiting for confirmation; candAt is NaN when there is none. */
 	candLat: number
 	candLon: number
@@ -177,6 +186,7 @@ export function createMotion(fix: Fix, now: number): MotionState {
 		fixAt: fix.posAt,
 		vN: 0,
 		vE: 0,
+		fixCourse: null,
 		candLat: 0,
 		candLon: 0,
 		candAt: Number.NaN,
@@ -212,6 +222,7 @@ function setTrack(
 	s.fixLat = lat
 	s.fixLon = lon
 	s.fixAt = at
+	s.fixCourse = fix.course
 	if (!fix.moving || fix.course === null || fix.speedKn === null) {
 		s.vN = 0
 		s.vE = 0
@@ -290,7 +301,7 @@ const VEL = { n: 0, e: 0 }
 /**
  * Moves to a new track from the drawn position: the gap between where the plane is drawn and where the new
  * track puts it becomes a correction that decays over BLEND_MS, starting with the drawn velocity, so nothing
- * jumps. `snap` (a confirmed relocation) moves at once instead.
+ * jumps. `snap` (a confirmed relocation, a fix after a long gap) or a gap over SNAP_KM moves at once instead.
  */
 function retrack(
 	s: MotionState,
@@ -317,6 +328,7 @@ function retrack(
 	const toCos = cosLat(s.fixLat)
 	s.oN = (fromLat - s.lat) * KM_PER_DEG
 	s.oE = wrapLon(fromLon - s.lon) * KM_PER_DEG * toCos
+	if (Math.sqrt(s.oN * s.oN + s.oE * s.oE) > SNAP_KM) return
 	const rr = reachRate(now - s.fixAt)
 	s.ovN = fromVN - s.vN * rr
 	s.ovE = (fromVE * toCos) / fromCos - s.vE * rr
@@ -324,25 +336,33 @@ function retrack(
 	place(s, now)
 }
 
-/** A fix that is new (any change since the last one seen): accept it, hold it back, or confirm a held one. */
+/**
+ * A fix that is new (any change since the last one seen): accept it, hold it back, or confirm a held one. A fix is
+ * told by its position alone: the time is when the browser received the message, so a course or speed update for
+ * the same position comes a few ms either side of it.
+ */
 function observe(s: MotionState, fix: Fix, now: number): void {
 	markSeen(s, fix)
-	if (fix.posAt === s.fixAt && fix.lat === s.fixLat && fix.lon === s.fixLon) {
-		// a new course or speed for the accepted fix: re-extrapolate from it, blended (one for an ignored or
-		// held-back fix stays ignored below)
+	if (fix.lat === s.fixLat && fix.lon === s.fixLon) {
+		// a new course or speed for the accepted fix: re-extrapolate from it (at its own time), blended
 		retrack(s, fix, s.fixLat, s.fixLon, s.fixAt, now, false)
 		return
 	}
-	// an older fix (or one timed with the accepted one) would rewind the track and the gate's clock: ignored
+	// an older fix elsewhere (or one timed with the accepted one) would rewind the track and the gate's clock: ignored
 	if (fix.posAt <= s.fixAt) return
+	const reacquire = fix.posAt - s.fixAt >= REACQUIRE_MS
+	const held =
+		!Number.isNaN(s.candAt) && fix.lat === s.candLat && fix.lon === s.candLon
+	// the held-back fix re-sent (a new course or speed only) is neither another rejection nor its own confirmation
+	if (held && !reacquire) return
 	const fromAccepted = kmBetween(s.fixLat, s.fixLon, fix.lat, fix.lon)
-	if (
-		plausible(fromAccepted, s.fixAt, fix.posAt) ||
-		fix.posAt - s.fixAt >= REACQUIRE_MS
-	) {
+	if (plausible(fromAccepted, s.fixAt, fix.posAt) || reacquire) {
 		const far = !plausible(fromAccepted, s.fixAt, fix.posAt)
+		// past EXTRAPOLATE_STOP_MS the drawn plane is held where its track stopped (a hidden tab or layer, a gap in
+		// reception): the fix is drawn at once, not swept across the map
+		const stale = now - s.fixAt > EXTRAPOLATE_STOP_MS
 		s.candAt = Number.NaN
-		retrack(s, fix, fix.lat, fix.lon, fix.posAt, now, far)
+		retrack(s, fix, fix.lat, fix.lon, fix.posAt, now, far || stale)
 		return
 	}
 	if (
@@ -359,9 +379,6 @@ function observe(s: MotionState, fix: Fix, now: number): void {
 		retrack(s, fix, fix.lat, fix.lon, fix.posAt, now, true)
 		return
 	}
-	// the held-back fix re-sent (a new course or speed only) is not another rejection
-	if (fix.posAt === s.candAt && fix.lat === s.candLat && fix.lon === s.candLon)
-		return
 	s.candLat = fix.lat
 	s.candLon = fix.lon
 	s.candAt = fix.posAt
@@ -370,14 +387,14 @@ function observe(s: MotionState, fix: Fix, now: number): void {
 
 /**
  * Whether the drawn position or glyph is still converging (a correction running, or the glyph more than
- * SETTLE_DEG off the reported track): the engine keeps pushing until it is not, even for a plane that is not
+ * SETTLE_DEG off the accepted track's course): the engine keeps pushing until it is not, even for a plane that is not
  * moving, and stops for a settled held or stale one. Reads the state as the last advance() left it.
  */
 export function settling(s: MotionState): boolean {
 	return (
 		!Number.isNaN(s.offAt) ||
-		(s.seenCourse !== null &&
-			Math.abs(shortestArc(s.rotate, s.seenCourse)) > SETTLE_DEG)
+		(s.fixCourse !== null &&
+			Math.abs(shortestArc(s.rotate, s.fixCourse)) > SETTLE_DEG)
 	)
 }
 
@@ -394,10 +411,53 @@ export function advance(s: MotionState, fix: Fix, now: number): void {
 	place(s, now)
 	const dt = Math.min(Math.max(0, now - s.stepAt), MAX_HEADING_STEP_MS)
 	s.stepAt = now
-	if (fix.course !== null && dt > 0) {
-		const d = shortestArc(s.rotate, fix.course)
+	// along the accepted track: a held-back fix's course does not turn the glyph
+	const course = s.fixCourse
+	if (course !== null && dt > 0) {
+		const d = shortestArc(s.rotate, course)
 		const want = d * (1 - Math.exp(-dt / HEADING_TAU_MS))
 		const cap = MAX_TURN_DEG_PER_MS * dt
 		s.rotate = norm360(s.rotate + Math.max(-cap, Math.min(cap, want)))
+	}
+}
+
+/**
+ * The engine's motion bookkeeping: one state per aircraft, kept across item rebuilds and dropped when the
+ * aircraft leaves. Pushes advance the states of drawn aircraft; the card reads drawnAt().
+ */
+export class MotionBook {
+	private readonly states = new Map<string, MotionState>()
+
+	get size(): number {
+		return this.states.size
+	}
+
+	has(id: string): boolean {
+		return this.states.has(id)
+	}
+
+	/** The aircraft's state advanced to `now` (created on first sight). */
+	advance(id: string, fix: Fix, now: number): MotionState {
+		let m = this.states.get(id)
+		if (m) advance(m, fix, now)
+		else {
+			m = createMotion(fix, now)
+			this.states.set(id, m)
+		}
+		return m
+	}
+
+	/** Drops the state of every aircraft `has` no longer knows. */
+	retain(has: (id: string) => boolean): void {
+		for (const id of this.states.keys()) if (!has(id)) this.states.delete(id)
+	}
+
+	/**
+	 * Where the card puts the aircraft: while its layer is drawn, the state as the last push left it (the marker's
+	 * place, even between pushes); while it is hidden nothing advances it, so it is advanced to `now` here.
+	 */
+	drawnAt(id: string, fix: Fix, now: number, drawn: boolean): MotionState {
+		const m = this.states.get(id)
+		return m && drawn ? m : this.advance(id, fix, now)
 	}
 }

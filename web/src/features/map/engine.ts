@@ -80,7 +80,7 @@ import {
 	themedPaint,
 } from "./style.ts"
 import type { MapUi, MapUiState } from "./ui-store.ts"
-import { advance, createMotion, settling, type MotionState } from "./motion.ts"
+import { MotionBook, settling, type MotionState } from "./motion.ts"
 import { latestReports, reportedFeatures } from "./reported.ts"
 import { devicePrefsStore, type MapTiles } from "../../shell/device-prefs.ts"
 
@@ -159,7 +159,7 @@ export class MapEngine {
 	private timer: ReturnType<typeof setTimeout> | null = null
 	private drawn: Drawn[] = []
 	/** Aircraft motion smoothing (motion.ts), one mutable state per aircraft, kept across item rebuilds. */
-	private readonly motion = new Map<string, MotionState>()
+	private readonly motion = new MotionBook()
 	private points: ScreenPoint[] = []
 	private readonly offs: (() => void)[] = []
 	private dragging = false
@@ -310,7 +310,15 @@ export class MapEngine {
 
 	/** Where the item was last drawn (an aircraft's smoothed position), for the selection card. */
 	drawnAt(id: string): LatLon | undefined {
-		return this.motion.get(id) ?? this.drawn.find(d => d.it.id === id)?.at
+		const it = this.byId.get(id)
+		if (it?.kind === "aircraft")
+			return this.motion.drawnAt(
+				id,
+				it,
+				Date.now(),
+				this.deps.ui.get().layers[it.layer],
+			)
+		return this.drawn.find(d => d.it.id === id)?.at
 	}
 
 	/** The station location in use (configured, else approximate). */
@@ -521,8 +529,7 @@ export class MapEngine {
 		const point = station.kind === "none" ? null : station
 		this.items = withinRange(all, point)
 		this.byId = new Map(this.items.map(i => [i.id, i]))
-		for (const id of this.motion.keys())
-			if (!this.byId.has(id)) this.motion.delete(id)
+		this.motion.retain(id => this.byId.has(id))
 		// a trail whose item left goes at once, not with the next body push
 		for (const id of this.trailEnds.keys())
 			if (!this.byId.has(id)) {
@@ -729,13 +736,7 @@ export class MapEngine {
 
 	/** An aircraft's motion state advanced to `now` (created on first sight). */
 	private motionOf(it: MapItem, now: number): MotionState {
-		let m = this.motion.get(it.id)
-		if (m) advance(m, it, now)
-		else {
-			m = createMotion(it, now)
-			this.motion.set(it.id, m)
-		}
-		return m
+		return this.motion.advance(it.id, it, now)
 	}
 
 	/** Where an item is drawn at `now`: aircraft smoothed (motion.ts), the rest dead reckoned. */
