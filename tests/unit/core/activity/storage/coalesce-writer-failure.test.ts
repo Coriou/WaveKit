@@ -168,7 +168,7 @@ describe("held entity rows and an asynchronous writer", () => {
 		expect(store.stats().dropped["write-failed"]).toBe(0)
 	})
 
-	it("retries an evicted entity's restored row after pauseRetryMs, not at once", async () => {
+	it("retries an evicted entity's restored row one window after its failed write, not every pauseRetryMs", async () => {
 		const { store, writer } = await open(1)
 		expect(store.admit(plane("A00001", T0)).admitted).toBe(true)
 		await vi.advanceTimersByTimeAsync(0)
@@ -183,11 +183,13 @@ describe("held entity rows and an asynchronous writer", () => {
 		writer.failNext = 1_000
 		const after = writer.writes
 		writer.pending?.resolve({ ok: false, message: "write failed" })
-		await vi.advanceTimersByTimeAsync(4 * RETRY)
-		expect(writer.writes - after).toBeGreaterThanOrEqual(1)
-		expect(writer.writes - after).toBeLessThanOrEqual(4)
+		// Several pauseRetryMs pass: nothing is tried before the window.
+		await vi.advanceTimersByTimeAsync(WINDOW - 10)
+		expect(writer.writes - after).toBe(0)
+		await vi.advanceTimersByTimeAsync(20)
+		expect(writer.writes - after).toBe(1)
 		writer.failNext = 0
-		await vi.advanceTimersByTimeAsync(2 * RETRY)
+		await vi.advanceTimersByTimeAsync(WINDOW + RETRY)
 		const kinds = (await readRecords(store.dbPath)).map(r => r.kind)
 		// B's own row was a counted loss; A's first sighting and its held row are stored.
 		expect(kinds.filter(kind => kind === "decoder-reception")).toHaveLength(2)

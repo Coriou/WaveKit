@@ -5492,7 +5492,13 @@ fails then counts as one `write-failed` drop (in the shutdown ingestion gap).
 These held rows skip the per-decoder admission bucket (at most one per
 entity per 60 s) but take a global token; one the global bucket, the queue caps
 or a paused store turn away stays held and is retried after `pauseRetryMs`
-(`stats.coalesceDeferrals`, not a loss). Only at shutdown, or past 4,096
+(`stats.coalesceDeferrals`, not a loss). A held row whose write failed, an
+evicted entity's included, waits one window (60 s) before its next try, so a
+writer that keeps failing sees at most one try per held row per minute. An
+evicted entity's held row still waiting when the entity is stored again (its
+newer first sighting was queued first) is dropped and counted in
+`stats.coalesceSuperseded`: its state is older than that row, and stored after
+it, it would list as the entity's latest. Only at shutdown, or past 4,096
 evicted entities waiting for queue room, is a held row dropped (counted as
 `queue-full`). A gap of more than 60 s between two receptions drops the old
 position and kinematics from the latest state (identity is kept).
@@ -5690,8 +5696,8 @@ keeps a five-digit `altM` and a mesh `!abcdef12 Position` title, 226 bytes at
 seven decimals, without rounding) and at most 1,100 bytes for any row. From the
 2026-11-01 core only APRS and Meshtastic rows can be position-only: aircraft and
 ship rows always list their fields, so every one of them, a bare fix included,
-has the 1,100-byte bound, and an aircraft row's `aircraft` identity counts
-inside it. The raise
+has the 1,100-byte bound, and an aircraft row's `aircraft` identity may add up
+to 320 bytes more (see `aircraft` under the search response). The raise
 costs at most 80 bytes per coalesced row, so at most 250,000 × 80 = 20 MB (about
 7.5 % of 256 MiB) at the row cap; rows a day are unchanged. When a row does not
 fit, its title is clipped and its coordinates rounded to six, five, then four
@@ -5863,14 +5869,25 @@ from `GET /api/activity/:eventId` and the `activity` WebSocket replay frames.
 An aircraft row stored from the 2026-11-01 core also has `aircraft`: who the
 aircraft was when the row was stored, `{ callsign?, registration?, typeCode?,
 typeDescription?, operator? }` (each at most 64 bytes, absent when unknown, the
-whole member absent when nothing was known). The identity fits in what the
-row's presentation leaves of the 1,100-byte growth bound: members are left out
-from the lowest priority (`typeDescription`, `operator`, `typeCode`,
-`registration`, then `callsign`) until it fits, so a row listing all its fields
-often keeps only the callsign and registration. The callsign comes from the
-entity's merged state, the rest from the aircraft enrichment cache already in
-memory (never a lookup at store time); `operator` is the callsign's airline
-when known, else the registered operator. Search matches these values, so an
+whole member absent when nothing was known). The row's presentation is fitted to
+the 1,100-byte growth bound first; the identity gets what it leaves plus an
+allowance of 320 bytes (5 members × 64 bytes) that only the identity can use.
+Both are built-row bytes (summary + record + FTS), not raw value bytes: each
+value is stored JSON-escaped in the summary and the record (a `"` or `\`
+counts twice) and raw in the FTS text, plus 94 bytes of member name, keys,
+quotes and punctuation per JSON copy. An ordinary identity (`WKA52`, `N0WK52`,
+`B77W`, `Boeing 777-300ER`, `WaveKit International Airways`) costs 373 bytes
+and stays whole on a row listing all its fields (881 bytes of presentation,
+1,254 in all). Only past the allowance are members left out, from the lowest
+priority (`typeDescription`, `operator`, `typeCode`, `registration`, then
+`callsign`): an identity of five 64-byte values costs 1,153 bytes (1,793 when
+every character is escaped). The callsign
+comes from the entity's merged state, the rest from the aircraft enrichment
+cache already in memory (never a lookup at store time); when the cache no
+longer knows the aircraft (a fading aircraft's final row, stored up to 60 s
+after its last reception), the row carries the identity the entity's earlier
+rows stored. `operator` is the callsign's airline when known, else the
+registered operator. Search matches these values, so an
 aircraft's history is found by registration after it has left the live fleet.
 Default page size is 100 and the maximum is 200. A page token is bound to
 the same query and expires with the snapshot (5 minutes).
@@ -5929,7 +5946,11 @@ start earlier; null when the store is empty) and `generatedAt`. Trails are sorte
 by their newest point descending, then `entityKey`. A trail is `{ entityKey,
 category, protocol, points, truncated }`; `category` and `protocol` are those of
 its newest point; `points` are `[producedAtMs, lat, lon, altM]` in ascending time
-(`altM` null when the stored position has none). From the 2026-10-16 core new rows carry `altM`
+(`altM` null when the stored position has none). A flushed entity row (stored up
+to 60 s after its latest held reception, see entity coalescing) is dated by its
+`coalesced.lastSeenAt`, when its position was heard, so a fading aircraft's
+last point is not drawn up to a minute late; the window still selects rows by
+`producedAt`. From the 2026-10-16 core new rows carry `altM`
 (see [Presentation](#presentation)); older rows are not backfilled and keep null.
 Mesh trails were empty before the 2026-10-16 core, because Meshtastic receptions had no
 position; new POSITION receptions now fill them.
@@ -6099,8 +6120,8 @@ stops at 50,000 rows and 32 values per dimension.
 **Response** (200): `{ "enabled": true, "stats": { ... } }` with admitted,
 committed, dropped (`rate-limited`, `queue-full`, `store-paused`,
 `write-failed`, `closed`), `excludedTelemetry`, `coalescedPositions` (receptions
-merged into their entity's row; see entity coalescing), `coalesceDeferrals` and
-`coalesceMergeFailures` (see entity coalescing), queue depth, `rows`,
+merged into their entity's row; see entity coalescing), `coalesceDeferrals`,
+`coalesceMergeFailures` and `coalesceSuperseded` (see entity coalescing), queue depth, `rows`,
 `dbBytes`, `paused` and `writer` (`running` or `stopped`). `closed` counts
 admits rejected after the writer has stopped. A write timeout stops the
 writer for the session and does not count those rows as lost. 500
@@ -6170,6 +6191,7 @@ From the 2026-10-16 core `stats` also has two optional fields (older cores omit 
 		"coalescedPositions": 29480,
 		"coalesceDeferrals": 0,
 		"coalesceMergeFailures": 0,
+		"coalesceSuperseded": 0,
 		"floodCopies": 1840,
 		"queueDepth": 0,
 		"queueBytes": 0,

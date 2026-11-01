@@ -80,6 +80,12 @@ export const DEFAULT_TRAILS_READ_LIMITS: TrailsReadLimits = Object.freeze({
 export interface TrailRow {
 	seq: number
 	producedAtMs: number
+	/**
+	 * When the row's position was heard, when earlier than its store stamp: a
+	 * flushed coalesced row is stamped when stored, up to one window after its
+	 * latest held reception (`coalesced.lastSeenAt`). The point's time.
+	 */
+	heardAtMs?: number
 	entityKey: string
 	category: ActivityCategory
 	protocol: string | null
@@ -248,8 +254,9 @@ export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 			stopped = true
 			return false
 		}
+		const pointMs = row.heardAtMs ?? row.producedAtMs
 		const point: ActivityTrailPoint = [
-			row.producedAtMs,
+			pointMs,
 			position.lat,
 			position.lon,
 			position.altM,
@@ -263,7 +270,7 @@ export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 				entityKey: row.entityKey,
 				category: row.category,
 				protocol: row.protocol,
-				newestMs: row.producedAtMs,
+				newestMs: pointMs,
 				points: [point],
 				truncated: false,
 			})
@@ -276,6 +283,7 @@ export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 			return true
 		}
 		trail.points.push(point)
+		if (pointMs > trail.newestMs) trail.newestMs = pointMs
 		pointCount += 1
 		return true
 	}
@@ -312,7 +320,9 @@ export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 			entityKey: entry.entityKey,
 			category: entry.category,
 			protocol: entry.protocol,
-			points: entry.points.reverse(),
+			// Oldest first by point time (stable: scan order breaks ties); a
+			// flushed row's heard time can precede a row stored before it.
+			points: entry.points.reverse().sort((left, right) => left[0] - right[0]),
 			truncated: entry.truncated,
 		}))
 		const truncation = TRUNCATION_ORDER.filter(bound => hit.has(bound))
@@ -371,14 +381,35 @@ function toTrailRow(row: Record<string, unknown>): TrailRow {
 	if (typeof entityKey !== "string" || typeof category !== "string") {
 		throw activityRecordCorrupt("Activity trail row is corrupt")
 	}
+	const producedAtMs = numberOf(row["produced_at_ms"], "producedAt")
+	const heardAtMs = heardAt(row["last_seen"], row["received_at_ms"])
 	return {
 		seq: numberOf(row["seq"], "seq"),
-		producedAtMs: numberOf(row["produced_at_ms"], "producedAt"),
+		producedAtMs,
+		...(heardAtMs !== undefined && heardAtMs < producedAtMs
+			? { heardAtMs }
+			: {}),
 		entityKey,
 		category: category as ActivityCategory,
 		protocol: typeof protocol === "string" ? protocol : null,
 		position: row["position"] ?? null,
 	}
+}
+
+/**
+ * A flushed row's `coalesced.lastSeenAt`, when earlier than the row's
+ * receivedAt (its store stamp). A reception's own row has lastSeenAt equal
+ * to its receivedAt, so it keeps its producedAt. Anything unparseable:
+ * undefined.
+ */
+function heardAt(lastSeen: unknown, receivedAtMs: unknown): number | undefined {
+	if (typeof lastSeen !== "string") return undefined
+	const heard = Date.parse(lastSeen)
+	const received =
+		typeof receivedAtMs === "bigint" ? Number(receivedAtMs) : receivedAtMs
+	if (!Number.isSafeInteger(heard) || typeof received !== "number")
+		return undefined
+	return heard < received ? heard : undefined
 }
 
 /** SQL scan plus acceptance. The caller owns the read transaction. */
@@ -421,9 +452,11 @@ export function readTrails(
 	): { pieces: StepPiece[]; next: StepCursor | null } => walk.planStep(cursor)
 	const TIE_WHERE = WALK_TIE_WHERE
 	const RANGE_WHERE = WALK_RANGE_WHERE
-	const scanSelect = `SELECT seq, produced_at_ms, entity_key, category, protocol,
+	const scanSelect = `SELECT seq, produced_at_ms, received_at_ms, entity_key, category, protocol,
 		CASE WHEN json_valid(summary_json) AND json_type(summary_json, '$.position') = 'object'
-			THEN json_extract(summary_json, '$.position') END AS position
+			THEN json_extract(summary_json, '$.position') END AS position,
+		CASE WHEN json_valid(summary_json) AND json_type(summary_json, '$.coalesced.lastSeenAt') = 'text'
+			THEN json_extract(summary_json, '$.coalesced.lastSeenAt') END AS last_seen
 		FROM activity INDEXED BY activity_produced`
 	const scanTie = db.prepare(
 		`${scanSelect} WHERE ${TIE_WHERE} AND ${filters} ORDER BY seq DESC`,

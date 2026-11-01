@@ -49,7 +49,12 @@
  * (60 s: about 60 an hour), whatever the message rate. Live trackers and
  * WebSocket paths never pass through here.
  */
-import type { DecodeCoalesced, DecodeEnvelope, JsonValue } from "../types.js"
+import type {
+	DecodeAircraftIdentity,
+	DecodeCoalesced,
+	DecodeEnvelope,
+	JsonValue,
+} from "../types.js"
 
 type JsonObject = { readonly [key: string]: JsonValue }
 
@@ -444,6 +449,13 @@ interface EntityState {
 	/** receivedAt (ms) of the entity's latest reception, stored or held. */
 	lastAt: number
 	held: Held | undefined
+	/**
+	 * The identity the entity's stored aircraft rows carried, newest member
+	 * winning (rememberAircraft). A final flush reuses it once the tracker
+	 * forgot the aircraft. At most 5 members of 64 bytes (320 bytes of
+	 * values, about 0.5 KB with the object); aircraft entities only.
+	 */
+	aircraft: DecodeAircraftIdentity | undefined
 }
 
 /**
@@ -461,6 +473,11 @@ export interface CoalesceMerge {
 	decodedData: { readonly [key: string]: JsonValue }
 	/** Absent when the row stands for one reception. */
 	coalesced: DecodeCoalesced | undefined
+	/**
+	 * The identity the entity's earlier stored rows carried, for a presenter
+	 * whose lookup no longer knows the aircraft. Absent when none.
+	 */
+	aircraft?: DecodeAircraftIdentity
 }
 
 export interface CoalesceDecision {
@@ -495,9 +512,12 @@ export interface CoalesceFlush {
 
 /** An evicted entity's held receptions, waiting for their row. */
 interface Evicted {
+	key: string
 	envelope: DecodeEnvelope
 	present: CoalescePresenter | undefined
 	merged: CoalesceMerge
+	/** Store clock (ms) of the next try: at once, or one window after a failed write. */
+	dueAt: number
 }
 
 function undoOf(undo: () => boolean, settle: () => void): CoalesceUndo {
@@ -564,7 +584,23 @@ export class PositionCoalescer {
 	 * removal of the oldest and of a committed row (no per-admission shifts).
 	 */
 	private readonly evicted = new Set<Evicted>()
+	/**
+	 * Evicted rows whose write failed, each due one window after its failure
+	 * (so in dueAt order), as ordinary held rows are: at most one write try
+	 * per row per window while the writer keeps failing. Counted with
+	 * `evicted` against maxEntities.
+	 */
+	private readonly retrying = new Set<Evicted>()
+	/** The waiting evicted row of each key (at most one: see addEvicted). */
+	private readonly evictedByKey = new Map<string, Evicted>()
 	coalesced = 0
+	/**
+	 * Evicted rows dropped because their entity was tracked again: its newer
+	 * row was queued first, so the evicted row (older state, stamped when
+	 * stored) would list after it as the entity's latest. Its receptions
+	 * were counted as coalesced and have no row of their own.
+	 */
+	superseded = 0
 
 	/**
 	 * @param windowMs one stored row per entity per window; 0 disables.
@@ -590,14 +626,47 @@ export class PositionCoalescer {
 
 	/** Evicted entities whose held row is not queued yet (at most maxEntities). */
 	evictedCount(): number {
-		return this.evicted.size
+		return this.evicted.size + this.retrying.size
 	}
 
-	/** Store-clock time the next held row is due, if any (evicted rows: now). O(1). */
+	/**
+	 * Store-clock time the next held row is due, if any (a fresh evicted row:
+	 * now; one whose write failed: a window after the failure). O(1).
+	 */
 	nextDueAt(): number | undefined {
 		if (this.evicted.size > 0) return this.now()
-		for (const state of this.heldOrder.values()) return state.held?.dueAt
-		return undefined
+		let due: number | undefined
+		for (const entry of this.retrying) {
+			due = entry.dueAt
+			break
+		}
+		for (const state of this.heldOrder.values()) {
+			const held = state.held?.dueAt
+			if (held !== undefined && (due === undefined || held < due)) due = held
+			break
+		}
+		return due
+	}
+
+	/**
+	 * Remembers the identity a queued aircraft row carries on its entity,
+	 * member by member (newest wins, a member the row lacks is kept), so the
+	 * entity's later rows can carry it once the lookup no longer knows the
+	 * aircraft. O(1); untracked envelopes are ignored.
+	 */
+	rememberAircraft(envelope: DecodeEnvelope): void {
+		const identity = envelope.aircraft
+		if (identity === undefined || this.windowMs <= 0) return
+		const key = this.keyOf(envelope)
+		if (key === undefined) return
+		const state = this.entities.get(key)
+		if (state === undefined) return
+		const next: DecodeAircraftIdentity = { ...state.aircraft }
+		for (const member of IDENTITY_MEMBERS) {
+			const value = identity[member]
+			if (typeof value === "string") next[member] = value
+		}
+		state.aircraft = next
 	}
 
 	decide(
@@ -609,18 +678,9 @@ export class PositionCoalescer {
 		if (!index) return STORE_UNTRACKED
 		const spec = index.spec
 		const data = asObject(envelope.decodedData)
-		const id = data?.[spec.entity]
-		if (!data || (typeof id !== "string" && typeof id !== "number"))
-			return STORE_UNTRACKED
-		if (spec.tracked !== undefined && !spec.tracked(data))
-			return STORE_UNTRACKED
-		let key = `${envelope.decoderId}\u0000${envelope.outputType}\u0000${String(id)}`
-		if (spec.entityParts)
-			for (const part of spec.entityParts) {
-				const text = partText(data[part])
-				if (text === undefined) return STORE_UNTRACKED
-				key += `\u0000${text}`
-			}
+		if (!data) return STORE_UNTRACKED
+		const key = entityKeyOf(envelope, index, data)
+		if (key === undefined) return STORE_UNTRACKED
 		// receivedAt is the ingest clock, allocated once per reception by the
 		// Activity ingress; producer timestamps never drive the window.
 		const at = Date.parse(envelope.receivedAt)
@@ -679,6 +739,14 @@ export class PositionCoalescer {
 		}
 	}
 
+	/** The entity key of a tracked envelope, else undefined. */
+	private keyOf(envelope: DecodeEnvelope): string | undefined {
+		const index = SPEC_INDEX.get(envelope.outputType)
+		const data = asObject(envelope.decodedData)
+		if (!index || !data) return undefined
+		return entityKeyOf(envelope, index, data)
+	}
+
 	/** Counts a reception that was held instead of stored. */
 	noteCoalesced(): void {
 		this.coalesced++
@@ -692,6 +760,10 @@ export class PositionCoalescer {
 	 */
 	takeDue(now: number): CoalesceFlush | undefined {
 		for (const evicted of this.evicted) return this.evictedFlush(evicted)
+		for (const entry of this.retrying) {
+			if (entry.dueAt <= now) return this.evictedFlush(entry)
+			break
+		}
 		for (const [key, state] of this.heldOrder) {
 			const held = state.held
 			if (held === undefined) {
@@ -714,6 +786,10 @@ export class PositionCoalescer {
 		// Live Set iteration, no copy: a committed (deleted) entry is skipped
 		// safely, and one lost meanwhile is never yielded as well as counted.
 		for (const entry of this.evicted) yield this.evictedFlush(entry)
+		for (const entry of this.retrying) {
+			if (entry.dueAt > now) break
+			yield this.evictedFlush(entry)
+		}
 		for (const [key, state] of this.heldOrder) {
 			const held = state.held
 			if (held === undefined) {
@@ -728,6 +804,7 @@ export class PositionCoalescer {
 	/** Every held row, due or not (shutdown). */
 	takeAll(): CoalesceFlush[] {
 		const out = Array.from(this.evicted, entry => this.evictedFlush(entry))
+		for (const entry of this.retrying) out.push(this.evictedFlush(entry))
 		for (const [key, state] of this.heldOrder)
 			if (state.held !== undefined)
 				out.push(this.heldFlush(key, state, state.held))
@@ -736,14 +813,17 @@ export class PositionCoalescer {
 
 	private evictedFlush(entry: Evicted): CoalesceFlush {
 		return {
-			...entry,
+			envelope: entry.envelope,
+			present: entry.present,
+			merged: entry.merged,
 			commit: () => {
-				this.evicted.delete(entry)
+				this.removeEvicted(entry)
 				let pending: Evicted | undefined = entry
 				return undoOf(
 					() => {
-						// Waits again for its row (or is counted lost past the bound).
-						if (pending !== undefined) this.addEvicted(pending)
+						// Waits a window for its next try (or is superseded, or
+						// counted lost past the bound).
+						if (pending !== undefined) this.addEvicted(pending, true)
 						pending = undefined
 						return true
 					},
@@ -755,15 +835,54 @@ export class PositionCoalescer {
 		}
 	}
 
-	/** Queues an evicted entity's held row; past maxEntities the oldest is lost (counted). */
-	private addEvicted(entry: Evicted): void {
-		this.evicted.add(entry)
-		if (this.evicted.size <= this.maxEntities) return
-		const lost = this.evicted.values().next().value
+	/**
+	 * Queues an evicted entity's held row: at once, or (`failed`: its write
+	 * failed) one window from now. A failed row whose entity is tracked again,
+	 * or that a newer evicted row of its entity replaced, is superseded
+	 * (counted, dropped): that newer row was queued first. Past maxEntities
+	 * waiting rows the oldest is lost (counted): a failed one first.
+	 */
+	private addEvicted(entry: Evicted, failed: boolean): void {
+		if (failed) {
+			if (this.entities.has(entry.key) || this.evictedByKey.has(entry.key)) {
+				this.superseded++
+				return
+			}
+			entry.dueAt = this.now() + this.windowMs
+			this.retrying.add(entry)
+		} else {
+			// Never two rows of one key: a tracked-again entity drops its old one.
+			const older = this.evictedByKey.get(entry.key)
+			if (older !== undefined) {
+				this.removeEvicted(older)
+				this.superseded++
+			}
+			entry.dueAt = this.now()
+			this.evicted.add(entry)
+		}
+		this.evictedByKey.set(entry.key, entry)
+		if (this.evicted.size + this.retrying.size <= this.maxEntities) return
+		const lost =
+			this.retrying.values().next().value ?? this.evicted.values().next().value
 		if (lost) {
-			this.evicted.delete(lost)
+			this.removeEvicted(lost)
 			this.onLost(lost.envelope)
 		}
+	}
+
+	private removeEvicted(entry: Evicted): void {
+		this.evicted.delete(entry)
+		this.retrying.delete(entry)
+		if (this.evictedByKey.get(entry.key) === entry)
+			this.evictedByKey.delete(entry.key)
+	}
+
+	/** The entity is tracked again: its waiting evicted row is superseded. */
+	private supersede(key: string): void {
+		const entry = this.evictedByKey.get(key)
+		if (entry === undefined) return
+		this.removeEvicted(entry)
+		this.superseded++
 	}
 
 	private heldFlush(
@@ -778,6 +897,7 @@ export class PositionCoalescer {
 			merged: {
 				decodedData: snapshot(state.latest),
 				coalesced: flushSpan(held),
+				...identityMerge(state),
 			},
 			commit: () => {
 				const carried = state.held === held
@@ -836,12 +956,15 @@ export class PositionCoalescer {
 	): CoalesceUndo {
 		let state = this.entities.get(key)
 		if (state === undefined) {
+			// Tracked again: an evicted row still waiting holds older state.
+			this.supersede(key)
 			state = {
 				storedAt: undefined,
 				identity: new Map(),
 				latest: new Map(),
 				lastAt: at,
 				held: undefined,
+				aircraft: undefined,
 			}
 			if (data !== undefined && index !== undefined)
 				mergeInto(state.latest, data, index.spec, index.identity)
@@ -916,14 +1039,7 @@ export class PositionCoalescer {
 	 */
 	private restoreHeld(key: string, state: EntityState, held: Held): void {
 		if (this.entities.get(key) !== state) {
-			this.addEvicted({
-				envelope: held.envelope,
-				present: held.present,
-				merged: {
-					decodedData: snapshot(state.latest),
-					coalesced: flushSpan(held),
-				},
-			})
+			this.addEvicted(evictedOf(key, state, held), true)
 			return
 		}
 		const current = state.held
@@ -951,16 +1067,57 @@ export class PositionCoalescer {
 			if (held === undefined) continue
 			state.held = undefined
 			this.heldOrder.delete(key)
-			this.addEvicted({
-				envelope: held.envelope,
-				present: held.present,
-				merged: {
-					decodedData: snapshot(state.latest),
-					coalesced: flushSpan(held),
-				},
-			})
+			this.addEvicted(evictedOf(key, state, held), false)
 		}
 	}
+}
+
+/** An entity's held receptions as an evicted row (due time set by addEvicted). */
+function evictedOf(key: string, state: EntityState, held: Held): Evicted {
+	return {
+		key,
+		envelope: held.envelope,
+		present: held.present,
+		merged: {
+			decodedData: snapshot(state.latest),
+			coalesced: flushSpan(held),
+			...identityMerge(state),
+		},
+		dueAt: 0,
+	}
+}
+
+const IDENTITY_MEMBERS = [
+	"callsign",
+	"registration",
+	"typeCode",
+	"typeDescription",
+	"operator",
+] as const satisfies readonly (keyof DecodeAircraftIdentity)[]
+
+/** The remembered identity for a merge, when the entity has one. */
+function identityMerge(state: EntityState): Pick<CoalesceMerge, "aircraft"> {
+	return state.aircraft === undefined ? {} : { aircraft: state.aircraft }
+}
+
+/** decoderId, output type, entity id and parts; undefined when it cannot be a key. */
+function entityKeyOf(
+	envelope: DecodeEnvelope,
+	index: SpecIndex,
+	data: JsonObject,
+): string | undefined {
+	const spec = index.spec
+	const id = data[spec.entity]
+	if (typeof id !== "string" && typeof id !== "number") return undefined
+	if (spec.tracked !== undefined && !spec.tracked(data)) return undefined
+	let key = `${envelope.decoderId}\u0000${envelope.outputType}\u0000${String(id)}`
+	if (spec.entityParts)
+		for (const part of spec.entityParts) {
+			const text = partText(data[part])
+			if (text === undefined) return undefined
+			key += `\u0000${text}`
+		}
+	return key
 }
 
 /** Allowlisted, non-null fields of an eligible reception, newest wins. */
@@ -1047,6 +1204,7 @@ function mergedRow(
 	}
 	return {
 		decodedData,
+		...identityMerge(state),
 		coalesced:
 			held === undefined
 				? undefined

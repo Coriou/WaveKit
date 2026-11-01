@@ -310,6 +310,31 @@ describe("mock server REST", () => {
 		)
 	})
 
+	it("searches an aircraft row's stored identity, as the core's index does", async () => {
+		// "Airbus" is only in the stored identity of the AFR1234 rows, never a field or title.
+		const found = (
+			await inject("GET", "/api/activity?text=airbus&limit=50")
+		).json<ActivitySearchPage>().items
+		expect(found.length).toBeGreaterThan(0)
+		for (const item of found) {
+			expect(item.aircraft?.typeDescription).toBe("Airbus A320")
+			expect(
+				[item.title, ...item.fields.map(f => String(f.value))].join(" "),
+			).not.toMatch(/airbus/i)
+		}
+		// Every word must match (AND), across the identity and the fields.
+		expect(
+			(
+				await inject("GET", "/api/activity?text=airbus%20afr1234&limit=50")
+			).json<ActivitySearchPage>().items.length,
+		).toBe(found.length)
+		expect(
+			(
+				await inject("GET", "/api/activity?text=airbus%20ezy48kt&limit=50")
+			).json<ActivitySearchPage>().items,
+		).toHaveLength(0)
+	})
+
 	it("searches activity by whole words, counts categories and returns records", async () => {
 		const found = (
 			await inject("GET", "/api/activity?text=1234567&limit=50")

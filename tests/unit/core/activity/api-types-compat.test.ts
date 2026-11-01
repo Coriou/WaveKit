@@ -57,6 +57,7 @@ type NextStats = {
 	coalescedPositions: number
 	coalesceDeferrals: number
 	coalesceMergeFailures: number
+	coalesceSuperseded: number
 	queueDepth: number
 	queueBytes: number
 	dbBytes: number
@@ -76,6 +77,7 @@ type OptionalApiStats =
 	| "coalescedPositions"
 	| "coalesceDeferrals"
 	| "coalesceMergeFailures"
+	| "coalesceSuperseded"
 type ApiStats = {
 	[K in keyof (Omit<NextStats, OptionalApiStats> &
 		Partial<Pick<NextStats, OptionalApiStats>>)]: (Omit<

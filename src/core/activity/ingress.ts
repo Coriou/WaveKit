@@ -122,16 +122,21 @@ function callsignOf(data: unknown): string | undefined {
 
 /**
  * The aircraft identity of a presented aircraft envelope: merged callsign,
- * then the lookup's registration, type and operator. Undefined when none.
+ * then the lookup's registration, type and operator. When the lookup knows
+ * nothing (the tracker forgot a fading aircraft before its final flush),
+ * the identity the entity's earlier rows carried (`remembered`, from the
+ * merged state) fills in. Undefined when none.
  */
 function aircraftIdentityOf(
 	envelope: DecodeEnvelope,
 	lookup: ActivityAircraftIdentityLookup | null,
+	remembered?: DecodeAircraftIdentity,
 ): DecodeAircraftIdentity | undefined {
 	const icao = ICAO_ENTITY.exec(envelope.entityKey ?? "")?.[1]
 	if (icao === undefined) return undefined
 	const identity: DecodeAircraftIdentity = {}
-	const callsign = callsignOf(envelope.decodedData)
+	const callsign =
+		callsignOf(envelope.decodedData) ?? identityText(remembered?.callsign)
 	if (callsign !== undefined) identity.callsign = callsign
 	if (lookup !== null) {
 		let known: ReturnType<ActivityAircraftIdentityLookup>
@@ -151,6 +156,22 @@ function aircraftIdentityOf(
 				identity.typeDescription = typeDescription
 			if (operator !== undefined) identity.operator = operator
 		}
+	}
+	const looked =
+		identity.registration !== undefined ||
+		identity.typeCode !== undefined ||
+		identity.typeDescription !== undefined ||
+		identity.operator !== undefined
+	if (!looked && remembered !== undefined) {
+		const registration = identityText(remembered.registration)
+		const typeCode = identityText(remembered.typeCode)
+		const typeDescription = identityText(remembered.typeDescription)
+		const operator = identityText(remembered.operator)
+		if (registration !== undefined) identity.registration = registration
+		if (typeCode !== undefined) identity.typeCode = typeCode
+		if (typeDescription !== undefined)
+			identity.typeDescription = typeDescription
+		if (operator !== undefined) identity.operator = operator
 	}
 	return Object.keys(identity).length > 0 ? identity : undefined
 }
@@ -285,9 +306,10 @@ export function createActivityIngress(
 			const identified = (
 				env: DecodeEnvelope,
 				from: DecodeEnvelope,
+				remembered?: DecodeAircraftIdentity,
 			): DecodeEnvelope => {
 				if (env.outputType !== "aircraft") return env
-				const known = aircraftIdentityOf(env, identityLookup)
+				const known = aircraftIdentityOf(env, identityLookup, remembered)
 				if (known === undefined) return env
 				const aircraft = fitAircraftIdentity(env, from, known)
 				if (aircraft === undefined) return env
@@ -302,6 +324,7 @@ export function createActivityIngress(
 				// Throws when the merged state does not fit: not a presentation
 				// failure, the store counts it (coalesceMergeFailures).
 				const base = withMergedData(plain, merged.decodedData, merged.coalesced)
+				const remembered = merged.aircraft
 				try {
 					const attempt = presentDecoderOutputResult(
 						{ ...output, data: merged.decodedData },
@@ -311,13 +334,18 @@ export function createActivityIngress(
 					)
 					if (attempt.error !== undefined) {
 						failed(attempt.error)
-						return identified(base, base)
+						return identified(base, base, remembered)
 					}
-					if (attempt.presentation === undefined) return identified(base, base)
-					return identified(withPresentation(base, attempt.presentation), base)
+					if (attempt.presentation === undefined)
+						return identified(base, base, remembered)
+					return identified(
+						withPresentation(base, attempt.presentation),
+						base,
+						remembered,
+					)
 				} catch (err) {
 					failed(err)
-					return identified(base, base)
+					return identified(base, base, remembered)
 				}
 			}
 			const present: ActivityPresenter = merged => {

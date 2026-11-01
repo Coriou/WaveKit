@@ -339,6 +339,10 @@ function matchesQuery(item: ActivitySummary, q: ActivityQuery): boolean {
 					item.title ?? "",
 					item.protocol ?? "",
 					item.entityKey ?? "",
+					// as the core indexes an aircraft row's stored identity (registration, operator, type)
+					...Object.values(item.aircraft ?? {}).filter(
+						(v): v is string => typeof v === "string",
+					),
 					...item.fields.map(f => String(f.value)),
 				]
 					.join(" ")
@@ -2339,6 +2343,7 @@ export async function buildMockServer(
 				coalescedPositions: 0,
 				coalesceDeferrals: 0,
 				coalesceMergeFailures: 0,
+				coalesceSuperseded: 0,
 				queueDepth: 0,
 				queueBytes: 0,
 				dbBytes: open ? activity.length * 1_024 : 0,

@@ -546,6 +546,77 @@ describe("readTrails against a store", () => {
 		return result.trails
 	}
 
+	it("dates a flushed row's point when it was heard (coalesced.lastSeenAt), not when it was stored", () => {
+		reset()
+		const iso = (ms: number) => new Date(ms).toISOString()
+		const row = (
+			producedAtMs: number,
+			lat: number,
+			coalesced?: { lastSeenAt: number },
+		) =>
+			insert({
+				producedAtMs,
+				entityKey: "icao:A0F060",
+				category: "aircraft",
+				protocol: "adsb",
+				position: null,
+				rawSummary: JSON.stringify({
+					eventId: `f${producedAtMs}`,
+					position: { lat, lon: 20 },
+					...(coalesced === undefined
+						? {}
+						: {
+								coalesced: {
+									receptions: 2,
+									firstSeenAt: iso(coalesced.lastSeenAt - 10),
+									lastSeenAt: iso(coalesced.lastSeenAt),
+								},
+							}),
+				}),
+			})
+		// A reception's own merged row: lastSeenAt is its receivedAt, its time stays.
+		row(NOW - 900, 10, { lastSeenAt: NOW - 900 })
+		// Another entity row stored in between.
+		row(NOW - 500, 11)
+		// The fading aircraft's final flush: stored at NOW - 100, heard at NOW - 700.
+		row(NOW - 100, 12, { lastSeenAt: NOW - 700 })
+		const result = read()
+		expect(result.trails).toHaveLength(1)
+		// Oldest first by heard time: the flushed point lands before the NOW - 500 row.
+		expect(result.trails[0]?.points).toEqual([
+			[NOW - 900, 10, 20, null],
+			[NOW - 700, 12, 20, null],
+			[NOW - 500, 11, 20, null],
+		])
+	})
+
+	it("ranks trails by their newest heard point", () => {
+		reset()
+		const flushed = (entityKey: string, producedAtMs: number, heard: number) =>
+			insert({
+				producedAtMs,
+				entityKey,
+				category: "aircraft",
+				protocol: "adsb",
+				position: null,
+				rawSummary: JSON.stringify({
+					eventId: `${entityKey}${producedAtMs}`,
+					position: { lat: 10, lon: 20 },
+					coalesced: {
+						receptions: 1,
+						firstSeenAt: new Date(heard).toISOString(),
+						lastSeenAt: new Date(heard).toISOString(),
+					},
+				}),
+			})
+		flushed("A", NOW - 100, NOW - 800)
+		flushed("B", NOW - 200, NOW - 300)
+		expect(read().trails.map(t => [t.entityKey, t.points[0]?.[0]])).toEqual([
+			["B", NOW - 300],
+			["A", NOW - 800],
+		])
+	})
+
 	it("stops at the wall budget with the newest rows and an exact per-trail flag", () => {
 		reset()
 		const at = (offset: number, entityKey: string) =>
