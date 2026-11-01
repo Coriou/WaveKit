@@ -308,7 +308,13 @@ position or track. Near those bounds the verdict has hysteresis, so it does not
 flicker while an aircraft turns or holds on an edge: a route shown as plausible
 turns implausible only past 110° off course and beyond 85 km from the origin and
 35 km from the destination, and turns plausible again within 90°, or within
-75 km of the origin or 25 km of the destination. Hide the route when it is
+75 km of the origin or 25 km of the destination. It is also `false` when the
+flight phase contradicts the route: below 10,000 ft and more than 120 km from
+both airports (the aircraft is departing from or landing at a third airport),
+or climbing at 1,000 ft/min or more near the destination, or descending at
+1,000 ft/min or more near the origin (the callsign is flying the return leg).
+These bounds also have hysteresis: 9,000 ft and 125 km to turn implausible,
+11,000 ft or 115 km to turn plausible again. Hide the route when it is
 `false`; older cores omit it.
 
 A **photo** must be shown with its photographer and a link to `photo.link`

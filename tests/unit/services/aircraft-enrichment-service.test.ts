@@ -32,6 +32,11 @@ import {
 	offCourseDeg,
 	routeFits,
 	routePlausible,
+	flightPhaseFits,
+	ROUTE_LOW_ALTITUDE_FT,
+	ROUTE_LOW_FAR_M,
+	ROUTE_ALTITUDE_MARGIN_FT,
+	ROUTE_PHASE_RATE_FPM,
 } from "../../../src/services/aircraft-info/route-fit.js"
 import type { SqliteDatabase } from "../../../src/core/activity/storage/sqlite.js"
 import { AircraftTracker } from "../../../src/core/aircraft-tracker.js"
@@ -986,6 +991,82 @@ describe("AircraftEnrichmentService", () => {
 			expect(
 				routePlausible(route, flying(270 - ROUTE_MAX_OFF_COURSE_DEG - 1, east)),
 			).toBe(false)
+		})
+
+		it("a low aircraft far from both airports, or climbing out at the destination, does not fly the route", () => {
+			expect(ROUTE_LOW_ALTITUDE_FT).toBe(10_000)
+			expect(ROUTE_LOW_FAR_M).toBe(120_000)
+			const low = (
+				position: { lat: number; lon: number },
+				altitude: Record<string, unknown>,
+				track = 284,
+			) => ({ position, velocity: { track }, altitude })
+			// on course for the destination, but landing at a third airport far from both
+			expect(
+				routePlausible(route, low(at, { baro: 3_000, baroRate: -800 })),
+			).toBe(false)
+			expect(routePlausible(route, low(at, { onGround: true }))).toBe(false)
+			// cruising there still fits; unknown altitude contradicts nothing
+			expect(routePlausible(route, low(at, { baro: 35_000 }))).toBe(true)
+			expect(routePlausible(route, low(at, {}))).toBe(true)
+			// near the destination: an arrival fits, a climb-out is the return leg
+			const nearDest = { lat: 40.7, lon: -73.7 }
+			expect(
+				routePlausible(route, low(nearDest, { baro: 4_000, baroRate: -900 })),
+			).toBe(true)
+			expect(
+				routePlausible(
+					route,
+					low(nearDest, { baro: 4_000, baroRate: ROUTE_PHASE_RATE_FPM }),
+				),
+			).toBe(false)
+			expect(
+				routePlausible(
+					route,
+					low(nearDest, { baro: 4_000, baroRate: ROUTE_PHASE_RATE_FPM - 1 }),
+				),
+			).toBe(true)
+			// near the origin: a departure fits, a clear descent is the return leg
+			const nearOrigin = { lat: 49.05, lon: 2.6 }
+			expect(
+				routePlausible(
+					route,
+					low(nearOrigin, { baro: 4_000, baroRate: 2_000 }),
+				),
+			).toBe(true)
+			expect(
+				routePlausible(
+					route,
+					low(nearOrigin, { baro: 4_000, baroRate: -ROUTE_PHASE_RATE_FPM }),
+				),
+			).toBe(false)
+		})
+
+		it("phase bounds: altitude and distance at and past their bounds, with hysteresis", () => {
+			expect(ROUTE_ALTITUDE_MARGIN_FT).toBe(1_000)
+			const far = ROUTE_LOW_FAR_M
+			const phase = (altitudeFt: number, d: number, previous?: boolean) =>
+				flightPhaseFits(
+					{
+						fromOriginM: d,
+						toDestinationM: d,
+						altitudeFt,
+						verticalRateFpm: undefined,
+					},
+					previous,
+				)
+			expect(phase(ROUTE_LOW_ALTITUDE_FT, far)).toBe(true)
+			expect(phase(ROUTE_LOW_ALTITUDE_FT - 1, far)).toBe(false)
+			expect(phase(ROUTE_LOW_ALTITUDE_FT - 1, far - 1)).toBe(true)
+			// fitting: stops only below 9,000 ft and beyond 125 km
+			expect(phase(9_000, far, true)).toBe(true)
+			expect(phase(9_000 - 1, far + 5_000, true)).toBe(false)
+			expect(phase(9_000 - 1, far + 5_000 - 1, true)).toBe(true)
+			// not fitting: fits again only at 11,000 ft, or within 115 km
+			expect(phase(11_000 - 1, far, false)).toBe(false)
+			expect(phase(11_000, far, false)).toBe(true)
+			expect(phase(5_000, far - 5_000 - 1, false)).toBe(true)
+			expect(phase(5_000, far - 5_000, false)).toBe(false)
 		})
 
 		it("a course exactly 100° off the bearing fits, just past it does not", () => {
