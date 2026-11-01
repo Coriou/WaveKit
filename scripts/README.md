@@ -121,10 +121,12 @@ inside the core image):
 
 ```bash
 node scripts/build-file.mjs scripts/decode-snapshot.ts   # writes dist/decode-snapshot.js
-node dist/decode-snapshot.js --file /abs/iq0.cu8 --rate 1024000 --centre 131600000 \
-  --channel 131550000 --channel 131725000 --decoder acarsdec [--plan-only]
+node dist/decode-snapshot.js --file /abs/iq0.cu8 --rate 1024000 --centre 133600000 \
+  --channel 133550000 --channel 133725000 --decoder acarsdec [--plan-only]
 ```
 
 Exit codes: 0 done (decoded or not), 1 a step failed (a tool or the decoder exited nonzero or
-was killed by a signal, or took over 60 s), 2 bad arguments, 3 a program is missing. Results
+was killed by a signal, a pipe to it failed before the step finished, or it took over 60 s),
+2 bad arguments, 3 a program is missing. A pipe reset (EPIPE or ECONNRESET) after a step
+finished is ignored: a tool that exits after its last command leaves that line unread. Results
 print only after each decoder's output is complete (its process closed, not just exited).

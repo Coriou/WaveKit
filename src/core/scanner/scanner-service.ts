@@ -4,7 +4,7 @@ import {
 	DECODE_ANCHOR_PROTOCOLS,
 	decodeAnchorKey,
 } from "./store/decode-anchor.js"
-import { rasterChannelOf } from "./replay-channel.js"
+import { rasterCaptureCentreHz, rasterChannelOf } from "./replay-channel.js"
 import { narrowestPriors, withScannerOverlays } from "./classify/priors.js"
 import { judgeAnalogResult } from "../iq-capture/analog-result.js"
 import { AnalogAdmission } from "./analog-admission.js"
@@ -5282,7 +5282,8 @@ export class ScannerService extends EventEmitter {
 				sourceId: live.sourceId,
 				observationId: live.observationId,
 				epoch: track.epoch,
-				rfHz: track.centreHz,
+				// An ACARS/VDL2 channel is captured centred on its raster channel (replay-channel.ts).
+				rfHz: rasterCaptureCentreHz(track.centreHz),
 				tuningTrust: track.tuningTrust,
 				fromSample: track.startSample,
 				reason: "detection",

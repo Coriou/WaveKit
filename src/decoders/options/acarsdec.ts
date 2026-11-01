@@ -1,5 +1,5 @@
 import { z } from "zod"
-import type { DecoderOptionDescriptor } from "@wavekit/api-types"
+import type { BandRegion, DecoderOptionDescriptor } from "@wavekit/api-types"
 
 const frequencyHz = z.number().finite().positive()
 
@@ -14,6 +14,33 @@ export const ACARSDEC_BOUNDS = {
 	/** A few channels fit one ~2.4 Msps capture; by meaning, not an acarsdec limit. */
 	maxFrequencies: 8,
 } as const
+
+/**
+ * The VHF ACARS channels an acarsdec decoder listens to by default: the one source the adapter
+ * default, the decoder catalogue and the scanner's ambient targets read.
+ * - Everywhere: 131.550 MHz (the worldwide primary ACARS channel) and 131.725 MHz (the European
+ *   primary), as before.
+ * - EU (requirement 3.20): the commonly published European ACARS channels 131.525, 131.550,
+ *   131.725, 131.825 and 131.850 MHz. The 136.7-136.975 MHz channels are VDL Mode 2 (dumpvdl2).
+ */
+export const ACARS_DEFAULT_CHANNELS_HZ: readonly number[] = Object.freeze([
+	131_550_000, 131_725_000,
+])
+export const ACARS_REGION_CHANNELS_HZ: Readonly<
+	Partial<Record<BandRegion, readonly number[]>>
+> = Object.freeze({
+	EU: Object.freeze([
+		131_525_000, 131_550_000, 131_725_000, 131_825_000, 131_850_000,
+	]),
+})
+
+/** The default ACARS channels for `region` (no region, or one without its own list: 131.550/131.725 MHz). */
+export function acarsDefaultChannelsHz(region?: BandRegion): readonly number[] {
+	return (
+		(region !== undefined ? ACARS_REGION_CHANNELS_HZ[region] : undefined) ??
+		ACARS_DEFAULT_CHANNELS_HZ
+	)
+}
 
 /** Options read by the acarsdec adapter and the audio-demod base class. */
 export const acarsdecOptionsSchema = z

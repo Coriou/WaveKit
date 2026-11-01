@@ -351,6 +351,27 @@ describe("identify with IQ captures (WG11 req 6.8)", () => {
 		},
 	)
 
+	it("an airband track 1 500 Hz off a 25 kHz channel is captured, and looked for, at the channel", async () => {
+		// A fictional raster channel, 133.550 MHz; the track is measured 1.5 kHz above it.
+		const channelHz = 133_550_000
+		const h = harness({ rfHz: channelHz + 1_500 })
+		await open(h, trackOf({ centreHz: channelHz + 1_500, obwHz: 7_200 }))
+		try {
+			for (let i = 0; i < 3; i++) await h.advance(1000)
+			expect(h.port.near).toHaveBeenCalledWith(
+				"rtl",
+				channelHz,
+				expect.any(Number),
+				expect.objectContaining({ observationId: "o_t1" }),
+			)
+			expect(h.port.capture).toHaveBeenCalledWith(
+				expect.objectContaining({ rfHz: channelHz, reason: "identify" }),
+			)
+		} finally {
+			await h.runner.dispatch({ type: "cancel" })
+		}
+	})
+
 	it("requests the LoRa capture rate from identify priors", async () => {
 		const h = harness({ lora: true })
 		await open(h)

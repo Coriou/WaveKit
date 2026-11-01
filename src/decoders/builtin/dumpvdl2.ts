@@ -33,7 +33,7 @@ import {
 	readNumericOption,
 	type NumericOptionWarn,
 } from "../option-values.js"
-import { DUMPVDL2_BOUNDS } from "../options/dumpvdl2.js"
+import { DUMPVDL2_BOUNDS, vdl2DefaultChannelsHz } from "../options/dumpvdl2.js"
 import {
 	acarsDirectionFromBlockId,
 	readLibacarsPayload,
@@ -408,8 +408,8 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 		// The passband is only what the targets need: dumpvdl2 channelises
 		// internally and the passband is just the front filter. Each VDL2
 		// channel is 25 kHz wide (±12.5 kHz) plus a 12.5 kHz guard, so it is
-		// 2 × (farthest target from the centre) + 50 kHz (default EU list at
-		// its midpoint: 2 × 162 500 + 50 000 = 375 000 Hz). followCenter
+		// 2 × (farthest target from the centre) + 50 kHz (EU catalogue list
+		// at its midpoint: 2 × 125 000 + 50 000 = 300 000 Hz). followCenter
 		// decodes the capture centre and keeps the default passband, still
 		// widened or rejected by the list span as before.
 		const centreHz =
@@ -668,8 +668,9 @@ function parseDumpvdl2Options(
 	const frequenciesConfigured =
 		frequencies !== undefined && frequencies.length > 0
 	if (!frequencies || frequencies.length === 0) {
-		// Default VDL2 frequencies (in Hz) - common European frequencies
-		frequencies = [136_650_000, 136_700_000, 136_975_000]
+		// No region here: the Common Signalling Channel (options/dumpvdl2.ts); the catalogue
+		// decoder gets its region's list as configured frequencies.
+		frequencies = [...vdl2DefaultChannelsHz()]
 	}
 
 	const parsed: Dumpvdl2Options = {

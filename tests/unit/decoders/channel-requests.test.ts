@@ -28,6 +28,7 @@ import {
 } from "../../../src/decoders/iq-decimate-decoder.js"
 import { audioChannelRequest } from "../../../src/decoders/audio-demod-decoder.js"
 import { admitChannel } from "../../../src/core/channelizer/admission.js"
+import { vdl2DefaultChannelsHz } from "../../../src/decoders/options/dumpvdl2.js"
 
 const logger = pino({ level: "silent" })
 // src/decoders/registry.ts has no default-registry helper; src/index.ts registers these same factories inline.
@@ -279,7 +280,12 @@ describe("channel requests (addendum §1, §2)", () => {
 		const chan = pipelineOf(
 			make("acarsdec", { inputSampleRate: 24_000, inputIqFormat: "cf32" }),
 		)
-		expect(chan.startsWith("csdr amdemod | ")).toBe(true)
+		// the 9.2 kHz ACARS channel at 24 kHz is the only stage before the envelope detector
+		expect(
+			chan.startsWith(
+				"csdr bandpass --fft --low -0.212500 --high 0.212500 0.041667 | csdr amdemod | ",
+			),
+		).toBe(true)
 		for (const stage of ["csdr convert -i char -o float", "firdecimate"])
 			expect(chan).not.toContain(stage)
 		expect(chan.match(/\bsox /g)).toHaveLength(1)
@@ -459,14 +465,31 @@ describe("channel requests (addendum §1, §2)", () => {
 			invalid:
 				"frequency span 1000000 Hz needs a channel rate > 1050000 Hz (have 1050000)",
 		})
-		// The default VDL2 list (325 kHz span) narrows to 325 + 50 kHz (3.19).
+		// The EU catalogue VDL2 list (136.725-136.975 MHz, 250 kHz span) narrows to 250 + 50 kHz
+		// around its midpoint (3.19); at 1.024 Msps it fits the 512 kHz channel (D = 2).
+		const eu = (sampleRateHz: number) =>
+			new Dumpvdl2Decoder(
+				config("dumpvdl2", { frequencies: [...vdl2DefaultChannelsHz("EU")] }),
+				logger,
+			).getChannelRequest({ sampleRateHz, centerHz: 136.8e6 })
+		expect(eu(2_048_000)).toMatchObject({
+			centerHz: 136_850_000,
+			bandwidthHz: 300_000,
+			transitionHz: 26_250,
+		})
+		expect(eu(1_024_000)).toMatchObject({
+			centerHz: 136_850_000,
+			bandwidthHz: 300_000,
+			outputRateHz: 512_000,
+		})
+		// The region-less default (136.975 MHz alone) needs one channel plus its guard.
 		const defaults = new Dumpvdl2Decoder(config("dumpvdl2", {}), logger)
 		expect(
 			defaults.getChannelRequest({
 				sampleRateHz: 2_048_000,
 				centerHz: 136.8e6,
 			}),
-		).toMatchObject({ bandwidthHz: 375_000, transitionHz: 26_250 })
+		).toMatchObject({ centerHz: 136_975_000, bandwidthHz: 50_000 })
 		const follow = new Dumpvdl2Decoder(
 			config("dumpvdl2", { followCenter: true }),
 			logger,

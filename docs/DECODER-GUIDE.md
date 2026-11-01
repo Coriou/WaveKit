@@ -605,7 +605,18 @@ describe("HfdlDecoder", () => {
    channel, or the VFO when it sits exactly on one of them, starts first; the others start
    only when the CPU budget admits them, so some may show as suspended. It never falls back
    to the capture centre. A YAML acarsdec with `frequencies` keeps one process per listed
-   frequency.
+   frequency. Each process demodulates a 9.2 kHz AM channel: one ACARS block (±3.6 kHz) plus
+   1 kHz for the aircraft transmitter (5 ppm), the receiver (1 ppm) and Doppler at 137 MHz.
+   It stops by 5.6 kHz from the channel, so an off-channel carrier or interference line a few
+   kHz away cannot take over the AM envelope. A receiver more than about 1 ppm off needs its
+   ppm correction set.
+   The built-in dumpvdl2 decodes every VDL Mode 2 channel of your region in one process. In
+   the EU these are 136.725, 136.775, 136.825, 136.875, 136.925 and 136.975 MHz, the VHF
+   digital link frequencies of Commission Implementing Regulation (EU) No 1079/2012, Article 2.
+   In other regions, and for a YAML dumpvdl2 without `frequencies`, it decodes 136.975 MHz,
+   the worldwide common signalling channel; list your region's other channels in
+   `frequencies`. The EU channels span 250 kHz and need a 300 kHz channel around 136.850 MHz,
+   which fits a capture of 1.024 Msps or more centred near that frequency.
 7. These extra paging and ACARS channels (all but each decoder's first) always come last in
    the CPU budget. When another decoder needs room, for example AIS with 161.975 and
    162.025 MHz in the capture, that decoder starts and the newest extra channels stop with

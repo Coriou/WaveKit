@@ -1,5 +1,6 @@
 import { SCANNER_PROBE_DECODER_TYPES } from "@wavekit/api-types"
 import { captureRateFor } from "../iq-capture/rates.js"
+import { rasterCaptureCentreHz } from "./replay-channel.js"
 import { inAdsbWindow } from "../bandplans/builtin-supplement.js"
 /**
  * Identify mode (spec § 10.8, the primary use case): "what is this signal?" for one waterfall
@@ -3135,7 +3136,8 @@ export class IdentifyRunner implements JobDriver {
 				sourceId: this.sourceId,
 				observationId: view.observationId,
 				epoch: view.epoch,
-				rfHz: view.track.centreHz,
+				// An ACARS/VDL2 channel is captured centred on its raster channel (replay-channel.ts).
+				rfHz: rasterCaptureCentreHz(view.track.centreHz),
 				tuningTrust: view.track.tuningTrust,
 				fromSample: view.track.startSample,
 				reason: "identify",
@@ -3170,10 +3172,16 @@ export class IdentifyRunner implements JobDriver {
 	private claimNear(t: TargetState, view: IdentifyTrackView): number {
 		const port = this.deps.iqCapture
 		if (!port) return 0
-		const near = port.near(this.sourceId, view.track.centreHz, t.toleranceHz, {
-			observationId: view.observationId,
-			limit: IDENTIFY_REPLAY_MAX_CAPTURES,
-		})
+		// Captures near a raster channel are made at the channel: look for them there.
+		const near = port.near(
+			this.sourceId,
+			rasterCaptureCentreHz(view.track.centreHz),
+			t.toleranceHz,
+			{
+				observationId: view.observationId,
+				limit: IDENTIFY_REPLAY_MAX_CAPTURES,
+			},
+		)
 		for (const c of near) {
 			if (t.replay.claimed.length >= IDENTIFY_REPLAY_MAX_CAPTURES) break
 			if (

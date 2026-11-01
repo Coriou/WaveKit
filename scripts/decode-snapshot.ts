@@ -11,8 +11,8 @@
  *
  * Build and run (no tsx in the image): `node scripts/build-file.mjs scripts/decode-snapshot.ts`
  * writes dist/decode-snapshot.js, then
- *   node dist/decode-snapshot.js --file /cap/iq0.cu8 --rate 1024000 --centre 131600000 \
- *     --channel 131550000 --channel 131725000 --decoder acarsdec
+ *   node dist/decode-snapshot.js --file /cap/iq0.cu8 --rate 1024000 --centre 133600000 \
+ *     --channel 133550000 --channel 133725000 --decoder acarsdec
  *
  * Exit codes: 0 done (decoded or not), 1 a step failed, 2 bad arguments, 3 a binary is missing.
  */
@@ -208,6 +208,51 @@ export function describePlan(plan: SnapshotDecodePlan, file: string): string[] {
 	return lines
 }
 
+/**
+ * Pipe errors that only say the other end went away. EPIPE: a write after the child closed its
+ * end. ECONNRESET: Node reads every stdio socketpair, and a child that exits with bytes we wrote
+ * still unread resets it (wavekit-iqcap after `shutdown` leaves that line on its control pipe).
+ * Once a step completed normally they are benign.
+ */
+export const BENIGN_PIPE_ERRORS: ReadonlySet<string> = new Set([
+	"EPIPE",
+	"ECONNRESET",
+])
+
+const STDIO_NAMES = ["stdin", "stdout", "stderr", "control"] as const
+
+/** How a step reacts to an error on one of its child's pipes. */
+export interface StepPipes {
+	/** True once the step resolved or failed: a later error cannot change its outcome. */
+	settled(): boolean
+	/** Fails the step (exit 1 with this reason). */
+	fail(message: string): void
+	/** Reports a non-benign error that came after the step settled. */
+	warn(message: string): void
+}
+
+/**
+ * An `error` handler on every stdio stream of `child` (an unhandled one crashes the process).
+ * Before the step settled the error fails it with a readable reason; after, EPIPE and ECONNRESET
+ * are ignored (BENIGN_PIPE_ERRORS) and anything else is only reported.
+ */
+export function guardChildStdio(
+	child: Pick<ChildProcess, "stdio">,
+	what: string,
+	step: StepPipes,
+): void {
+	child.stdio.forEach((stream, fd) => {
+		const emitter = stream as NodeJS.EventEmitter | null | undefined
+		emitter?.on("error", (err: unknown) => {
+			const code = (err as NodeJS.ErrnoException | null)?.code
+			const message = `${what} ${STDIO_NAMES[fd] ?? `fd ${fd}`} pipe failed: ${err instanceof Error ? err.message : String(err)}`
+			if (!step.settled()) step.fail(message)
+			else if (code === undefined || !BENIGN_PIPE_ERRORS.has(code))
+				step.warn(message)
+		})
+	})
+}
+
 function withTimeout<T>(
 	promise: Promise<T>,
 	what: string,
@@ -233,7 +278,8 @@ function withTimeout<T>(
  * `maxMs` budget. Resolves the capture file paths, in channel order.
  */
 export async function captureWindow(
-	deps: Pick<DecodeSnapshotDeps, "spawn">,
+	deps: Pick<DecodeSnapshotDeps, "spawn"> &
+		Partial<Pick<DecodeSnapshotDeps, "err">>,
 	opts: {
 		iqcap: string
 		plan: SnapshotDecodePlan
@@ -270,8 +316,13 @@ export async function captureWindow(
 		control.write(line)
 	}
 	const done = new Set<string>()
+	let settled = false
+	let feeding: Readable | null = null
 	const run = new Promise<string[]>((resolve, reject) => {
 		const fail = (message: string): void => {
+			if (settled) return
+			settled = true
+			feeding?.destroy()
 			child.kill("SIGKILL")
 			reject(new Error(message))
 		}
@@ -282,8 +333,12 @@ export async function captureWindow(
 			if (done.size !== ids.length)
 				fail(`wavekit-iqcap exited (${code}) before its captures finished`)
 		})
+		guardChildStdio(child, "wavekit-iqcap", {
+			settled: () => settled,
+			fail,
+			warn: message => deps.err?.(`decode-snapshot: ${message}`),
+		})
 		child.stderr?.resume()
-		child.stdin?.on("error", () => undefined)
 		const onEvent = (ev: IqToolEvent): void => {
 			if (ev.type === "ready") {
 				opts.channels.forEach((c, k) =>
@@ -304,6 +359,7 @@ export async function captureWindow(
 				ev.code === "out-of-range"
 			) {
 				const input = opts.input()
+				feeding = input
 				input.on("error", err => fail(`snapshot read failed: ${err.message}`))
 				input.pipe(child.stdin!, { end: false })
 				return
@@ -311,6 +367,13 @@ export async function captureWindow(
 			if (ev.type === "captured" && ids.includes(ev.id)) {
 				done.add(ev.id)
 				if (done.size === ids.length) {
+					settled = true
+					// A capture completes by its maxMs budget, which may be a few samples short of
+					// the window: stop feeding before stdin ends (no write after its end).
+					if (feeding) {
+						feeding.unpipe(child.stdin!)
+						feeding.destroy()
+					}
 					send({ type: "shutdown" })
 					child.stdin?.end()
 					resolve(ids.map(id => path.join(opts.outDir, `${id}.cf32`)))
@@ -332,7 +395,11 @@ export async function captureWindow(
 		)
 		child.stdout?.on("data", (chunk: Buffer) => reader.push(chunk))
 	})
-	return withTimeout(run, "a capture run", () => child.kill("SIGKILL"))
+	return withTimeout(run, "a capture run", () => {
+		settled = true
+		feeding?.destroy()
+		child.kill("SIGKILL")
+	})
 }
 
 /** The scanner's replay mode for the decoder (replay-plan.ts). */
@@ -462,10 +529,23 @@ async function decodeCapture(
 	const replay = deps.spawn(args.iqcap, plan.replayArgs(capturePath), {
 		stdio: ["ignore", "pipe", "pipe"],
 	})
+	// The step settles when the decoder run and the replay both ended, failed or timed out.
+	let settled = false
+	const warn = (message: string): void =>
+		deps.err(`decode-snapshot: ${message}`)
 	replay.stderr?.resume()
 	const input = new PassThrough()
 	let bytes = 0
 	const replayDone = new Promise<void>((resolve, reject) => {
+		const fail = (message: string): void => reject(new Error(message))
+		guardChildStdio(replay, "replay", {
+			settled: () => settled,
+			fail,
+			warn,
+		})
+		input.on("error", err => {
+			if (!settled) fail(`replay stream failed: ${err.message}`)
+		})
 		replay.once("error", err =>
 			reject(new Error(`replay could not start: ${err.message}`)),
 		)
@@ -518,6 +598,11 @@ async function decodeCapture(
 				reject(new Error(`${plan.decoder} started without a process`))
 				return
 			}
+			guardChildStdio(child, plan.decoder, {
+				settled: () => settled,
+				fail: message => reject(new Error(message)),
+				warn,
+			})
 			child.once(
 				"close",
 				(code: number | null, signal: NodeJS.Signals | null) =>
@@ -525,7 +610,15 @@ async function decodeCapture(
 			)
 		})
 	})
-	await decoder.start()
+	try {
+		await decoder.start()
+	} catch (err: unknown) {
+		// No decoder run: the replay is stopped and its outcome no longer matters.
+		settled = true
+		replayDone.catch(() => undefined)
+		replay.kill("SIGKILL")
+		throw err
+	}
 	decoder.attachInput(input)
 	const stopAll = (): void => {
 		replay.kill("SIGKILL")
@@ -541,6 +634,8 @@ async function decodeCapture(
 	} catch (err: unknown) {
 		stopAll()
 		throw err
+	} finally {
+		settled = true
 	}
 	if (failure !== null) throw new Error(failure)
 	return identities

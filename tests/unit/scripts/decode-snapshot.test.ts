@@ -30,8 +30,10 @@ vi.mock("node:child_process", async importOriginal => {
 })
 
 import {
+	BENIGN_PIPE_ERRORS,
 	IQCAP_MAX_OPEN_CAPTURES,
 	captureWindow,
+	guardChildStdio,
 	decoderFailure,
 	parseArgs,
 	replayDecoderConfig,
@@ -50,9 +52,9 @@ const ARGS = [
 	"--rate",
 	"1024000",
 	"--centre",
-	"131600000",
+	"133600000",
 	"--channel",
-	"131550000",
+	"133550000",
 	"--decoder",
 	"acarsdec",
 ]
@@ -79,11 +81,11 @@ describe("parseArgs", () => {
 		const r = parseArgs([
 			...ARGS.slice(0, 4),
 			"--center",
-			"131600000",
+			"133600000",
 			"--channel",
-			"131550000,131725000",
+			"133550000,133725000",
 			"--channel",
-			"131825000",
+			"133825000",
 			"--decoder",
 			"dumpvdl2",
 			"--iqcap",
@@ -95,8 +97,8 @@ describe("parseArgs", () => {
 			args: {
 				file: "/cap/iq0.cu8",
 				rate: 1_024_000,
-				centre: 131_600_000,
-				channels: [131_550_000, 131_725_000, 131_825_000],
+				centre: 133_600_000,
+				channels: [133_550_000, 133_725_000, 133_825_000],
 				decoder: "dumpvdl2",
 				iqcap: "/opt/wavekit-iqcap",
 				planOnly: true,
@@ -136,7 +138,7 @@ describe("runDecodeSnapshot", () => {
 	it("a plan the capture cannot hold: exit 2 naming the bound", async () => {
 		const { d, err } = deps()
 		const argv = [...ARGS]
-		argv[5] = "130000000" // the channel 1.55 MHz from the centre
+		argv[5] = "132050000" // the channel 1.55 MHz from the centre
 		expect(await runDecodeSnapshot(argv, d)).toBe(2)
 		expect(err[0]).toContain("the capture reaches ±488288 Hz")
 		const notFile = deps({
@@ -149,13 +151,13 @@ describe("runDecodeSnapshot", () => {
 	it("--plan-only prints windows, offsets and tool argv and runs nothing", async () => {
 		const { d, out, spawn } = deps({ which: () => null })
 		expect(await runDecodeSnapshot([...ARGS, "--plan-only"], d)).toBe(0)
-		expect(out).toContain("PLAN channel=131550000 offsetHz=-50000")
+		expect(out).toContain("PLAN channel=133550000 offsetHz=-50000")
 		expect(out.filter(l => l.startsWith("PLAN window="))).toHaveLength(3)
 		expect(out.find(l => l.startsWith("PLAN run:"))).toContain(
 			"run --sample-rate 1024000 --ring-ms 2000",
 		)
 		expect(out.find(l => l.startsWith("PLAN replay:"))).toContain(
-			"--bandwidth 15200 --transition 4000",
+			"--bandwidth 9200 --transition 1000",
 		)
 		expect(spawn).not.toHaveBeenCalled()
 	})
@@ -196,12 +198,16 @@ class FakeChild extends EventEmitter {
 
 const tick = () => new Promise<void>(resolve => setImmediate(resolve))
 
+/** The error a socketpair read gets when its child exited with our bytes unread. */
+const reset = (code = "ECONNRESET") =>
+	Object.assign(new Error(`read ${code}`), { code, syscall: "read" })
+
 describe("captureWindow", () => {
 	const plan = planSnapshotDecode({
 		fileBytes: 10 * 1_024_000 * 2,
 		rateHz: 1_024_000,
-		centreHz: 131_600_000,
-		channelsHz: [131_550_000, 131_725_000, 131_825_000],
+		centreHz: 133_600_000,
+		channelsHz: [133_550_000, 133_725_000, 133_825_000],
 		decoder: "acarsdec",
 	})
 	const ID = (n: number) => `00000000-0000-4000-8000-00000000000${n}`
@@ -317,33 +323,118 @@ describe("captureWindow", () => {
 	})
 })
 
+describe("pipe errors", () => {
+	const plan = planSnapshotDecode({
+		fileBytes: 10 * 1_024_000 * 2,
+		rateHz: 1_024_000,
+		centreHz: 133_600_000,
+		channelsHz: [133_550_000],
+		decoder: "acarsdec",
+	})
+	const ID = (n: number) => `00000000-0000-4000-8000-00000000000${n}`
+
+	function start(child: FakeChild, err: string[] = []) {
+		let n = 0
+		const done = captureWindow(
+			{
+				spawn: (() => child as unknown as ChildProcess) as never,
+				err: l => err.push(l),
+			},
+			{
+				iqcap: "wavekit-iqcap",
+				plan,
+				window: plan.windows[0]!,
+				channels: plan.channels,
+				input: () => Readable.from([Buffer.from([1, 2])]),
+				outDir: "/w/iq-captures",
+				anchor: "/w",
+				newId: () => ID(++n),
+			},
+		)
+		child.emitEvent({ type: "ready" })
+		child.emitEvent({ type: "error", code: "out-of-range", id: ID(2) })
+		return done
+	}
+
+	it("a control pipe reset after every capture completed is benign: the run resolves", async () => {
+		const child = new FakeChild()
+		const err: string[] = []
+		const done = start(child, err)
+		await tick()
+		child.emitEvent({ type: "captured", id: ID(1), samples: 1, gapSamples: 0 })
+		await expect(done).resolves.toEqual([`/w/iq-captures/${ID(1)}.cf32`])
+		// The tool exits after `shutdown` with that line unread: Node's read of fd 3 is reset.
+		// emit, not destroy: an unguarded stream throws here, as the crash did.
+		child.control.emit("error", reset())
+		child.stdin.emit("error", reset("EPIPE"))
+		await tick()
+		expect(err).toEqual([])
+		expect(child.kill).not.toHaveBeenCalled()
+	})
+
+	it("a pipe reset before the captures completed fails the run, naming the pipe", async () => {
+		const child = new FakeChild()
+		const done = start(child)
+		await tick()
+		child.control.destroy(reset())
+		await expect(done).rejects.toThrow(
+			"wavekit-iqcap control pipe failed: read ECONNRESET",
+		)
+		expect(child.kill).toHaveBeenCalledWith("SIGKILL")
+	})
+
+	it("after the step settled only a non-benign error is reported, and never thrown", () => {
+		expect([...BENIGN_PIPE_ERRORS].sort()).toEqual(["ECONNRESET", "EPIPE"])
+		const child = new FakeChild()
+		const failed: string[] = []
+		const warned: string[] = []
+		let settled = false
+		guardChildStdio(child as unknown as ChildProcess, "tool", {
+			settled: () => settled,
+			fail: m => failed.push(m),
+			warn: m => warned.push(m),
+		})
+		child.stdout.emit("error", reset())
+		expect(failed).toEqual(["tool stdout pipe failed: read ECONNRESET"])
+		settled = true
+		for (const code of ["ECONNRESET", "EPIPE", "EIO"])
+			child.stderr.emit("error", reset(code))
+		child.control.emit("error", new Error("no code"))
+		expect(failed).toHaveLength(1)
+		expect(warned).toEqual([
+			"tool stderr pipe failed: read EIO",
+			"tool control pipe failed: no code",
+		])
+	})
+})
+
 describe("replay decoder configuration and verdicts", () => {
 	it("is the scanner replay transport's: dumpvdl2 decodes its raster channel at 105 kHz", () => {
 		const plan = planSnapshotDecode({
 			fileBytes: 2_048_000,
 			rateHz: 1_024_000,
-			centreHz: 136_800_000,
-			channelsHz: [136_975_000],
+			centreHz: 135_800_000,
+			channelsHz: [135_975_000],
 			decoder: "dumpvdl2",
 		})
 		const { config, req } = replayDecoderConfig(
 			plan,
-			136_975_000,
+			135_975_000,
 			"cap",
 			() => new PassThrough(),
 		)
 		expect(req).toMatchObject({
-			targetHz: 136_975_000,
+			targetHz: 135_975_000,
 			replay: { captureId: "cap" },
 		})
 		expect(config).toMatchObject({
 			type: "dumpvdl2",
 			useChannelizer: false,
-			frequencies: [136_975_000],
+			frequencies: [135_975_000],
 			options: {
 				inputSampleRate: 105_000,
 				targetSampleRate: 105_000,
-				inputCenterFreq: 136_975_000,
+				inputCenterFreq: 135_975_000,
 				followCenter: true,
 			},
 		})
@@ -353,8 +444,8 @@ describe("replay decoder configuration and verdicts", () => {
 		const plan = planSnapshotDecode({
 			fileBytes: 2_048_000,
 			rateHz: 1_024_000,
-			centreHz: 131_600_000,
-			channelsHz: [131_550_000],
+			centreHz: 133_600_000,
+			channelsHz: [133_550_000],
 			decoder: "acarsdec",
 		})
 		const state = createInterpreterState({ epoch: 0, origin: "probe" })
@@ -364,17 +455,17 @@ describe("replay decoder configuration and verdicts", () => {
 			type: "acars" as const,
 			data: { frequency: 0, error, errorKnown: true, tail: ".TEST01" },
 		})
-		expect(verdictLines(plan, 131_550_000, 0, out(0), state)).toEqual({
+		expect(verdictLines(plan, 133_550_000, 0, out(0), state)).toEqual({
 			lines: [
-				"VERDICT channel=131550000 window=0 crcClean=true identity=acars-reg:TEST01",
+				"VERDICT channel=133550000 window=0 crcClean=true identity=acars-reg:TEST01",
 			],
 			identities: ["acars-reg:TEST01"],
 		})
 		expect(
-			verdictLines(plan, 131_550_000, 1, out(3), state).identities,
+			verdictLines(plan, 133_550_000, 1, out(3), state).identities,
 		).toEqual([])
 		expect(
-			verdictLines(plan, 131_550_000, 1, out(3), state).lines[0],
+			verdictLines(plan, 133_550_000, 1, out(3), state).lines[0],
 		).toContain("no evidence")
 	})
 })
@@ -384,6 +475,7 @@ class FakeDecoderChild extends EventEmitter {
 	readonly stdin = new PassThrough()
 	readonly stdout = new PassThrough()
 	readonly stderr = new PassThrough()
+	readonly stdio = [this.stdin, this.stdout, this.stderr]
 	readonly pid = undefined
 	exitCode: number | null = null
 	signalCode: NodeJS.Signals | null = null
@@ -424,8 +516,8 @@ describe("a whole run against fake children", () => {
 	const plan = planSnapshotDecode({
 		fileBytes: FILE_BYTES,
 		rateHz: 1_024_000,
-		centreHz: 131_600_000,
-		channelsHz: [131_550_000],
+		centreHz: 133_600_000,
+		channelsHz: [133_550_000],
 		decoder: "acarsdec",
 	})
 
@@ -489,11 +581,42 @@ describe("a whole run against fake children", () => {
 		expect(err).toEqual([])
 		expect(decoderSpawn.calls).toHaveLength(1)
 		expect(out).toContain(
-			"VERDICT channel=131550000 window=0 crcClean=true identity=acars-reg:TEST01",
+			"VERDICT channel=133550000 window=0 crcClean=true identity=acars-reg:TEST01",
 		)
 		expect(out.at(-1)).toBe(
-			"RESULT channel=131550000 decoded acars identities=acars-reg:TEST01",
+			"RESULT channel=133550000 decoded acars identities=acars-reg:TEST01",
 		)
+	})
+
+	it("the capture tool resetting its control pipe after it completed: exit 0 with the result", async () => {
+		const { d, out, err } = rig(child => child.finish(0, null, [CLEAN_ACARS]))
+		const spawn = d.spawn
+		d.spawn = (cmd, argv, options) => {
+			const child = spawn(cmd, argv, options) as unknown as FakeChild
+			if (argv[0] === "run")
+				child.control.on("data", (b: Buffer) => {
+					if (b.toString().includes('"shutdown"'))
+						setImmediate(() => child.control.emit("error", reset()))
+				})
+			return child as unknown as ChildProcess
+		}
+		expect(await runDecodeSnapshot(ARGS, d)).toBe(0)
+		expect(err).toEqual([])
+		expect(out.at(-1)).toBe(
+			"RESULT channel=133550000 decoded acars identities=acars-reg:TEST01",
+		)
+	})
+
+	it("a decoder whose input pipe resets mid-run fails the run: exit 1 naming the pipe", async () => {
+		// The pipe written to is the one a child that dies with bytes unread resets.
+		const { d, out, err } = rig(child => {
+			child.stdin.emit("error", reset())
+		})
+		expect(await runDecodeSnapshot(ARGS, d)).toBe(1)
+		expect(err).toEqual([
+			"decode-snapshot: acarsdec stdin pipe failed: read ECONNRESET",
+		])
+		expect(out.filter(l => l.startsWith("RESULT"))).toEqual([])
 	})
 
 	it.each([

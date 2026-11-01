@@ -28,7 +28,7 @@ import {
 } from "../../../../src/core/scanner/probes/ambient.js"
 import { ConfirmMemory } from "../../../../src/core/scanner/probes/confirm/confirm-memory.js"
 
-const HZ = 131_725_000
+const HZ = 133_725_000
 function rig(
 	type: string,
 	hz = HZ,

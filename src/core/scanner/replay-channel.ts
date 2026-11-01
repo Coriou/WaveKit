@@ -1,13 +1,18 @@
 /**
- * The channel a replayed ACARS or VDL2 capture is decoded and attributed at. A capture is centred
- * on its track's measured centre, which may sit a few hundred Hz to a few kHz off the assigned
- * channel; acarsdec reports no frequency on replay and dumpvdl2 reports the channel it was given,
- * so without this the decode would key a channel that does not exist (and miss the channel anchor
- * the live decodes of the same channel use). Pure.
+ * The channel a replayed ACARS or VDL2 capture is decoded and attributed at, and the centre such a
+ * capture is made at. A track's measured centre may sit a few hundred Hz to a few kHz off the
+ * assigned channel; acarsdec reports no frequency on replay and dumpvdl2 reports the channel it was
+ * given, so without this the decode would key a channel that does not exist (and miss the channel
+ * anchor the live decodes of the same channel use). Pure.
  *
  * Every ACARS and VDL2 assignment lies on the 25 kHz aeronautical raster (8.33 kHz channels are
  * voice only).
  */
+import {
+	ACARS_CHANNEL_BANDWIDTH_HZ,
+	ACARS_CHANNEL_TRANSITION_HZ,
+	ACARS_OCCUPIED_HALF_HZ,
+} from "../../decoders/builtin/acarsdec.js"
 import { AERO_VHF_MAX_HZ, AERO_VHF_MIN_HZ } from "./store/decode-anchor.js"
 import { ambientReachHz } from "./probes/ambient-placement.js"
 import type { ScannerProtocol } from "./types.js"
@@ -32,22 +37,19 @@ export const REPLAY_CHANNEL_SNAP_HZ = ambientReachHz("vdl2", 0)
 export const VDL2_OCCUPIED_HALF_HZ = 8_400
 export const VDL2_REPLAY_MAX_OFFSET_HZ = 12_500 - VDL2_OCCUPIED_HALF_HZ
 
-/**
- * Half the occupied bandwidth of an ACARS block: AM with 2 400 bit/s MSK audio tones at 1 200 and
- * 2 400 Hz, so the sidebands reach 2 400 + 2 400 / 2 = 3 600 Hz each side of the carrier.
- */
-export const ACARS_OCCUPIED_HALF_HZ = 3_600
+/** Half the occupied bandwidth of an ACARS block, ±3 600 Hz (acarsdec.ts owns the arithmetic). */
+export { ACARS_OCCUPIED_HALF_HZ }
 
 /**
- * acarsdec's replay filter, centred on the capture centre (the replay tool does not shift): wide
- * enough for a block up to REPLAY_CHANNEL_SNAP_HZ off centre, 2 × (4 000 + 3 600) = 15 200 Hz.
- * Its stop edge, 15 200 / 2 + 4 000 = 11 600 Hz, stays short of the nearest sideband of the
- * neighbouring 25 kHz channel, 25 000 − 4 000 − 3 600 = 17 400 Hz from the centre, and inside the
- * 48 kHz capture's 24 000 Hz Nyquist edge.
+ * acarsdec's replay filter: the live ACARS channel (acarsdec.ts ACARS_CHANNEL_BANDWIDTH_HZ),
+ * 2 × (3 600 + 1 000) = 9 200 Hz with a 1 000 Hz transition, so its stop edge is 5 600 Hz from
+ * the capture centre. It holds a block only when the capture is centred on the block's channel:
+ * a capture near a raster channel is made there (rasterCaptureCentreHz), so the carrier sits
+ * within its 1 000 Hz tolerance of the centre, not up to REPLAY_CHANNEL_SNAP_HZ off. The stop
+ * edge stays inside the 48 kHz capture's 24 000 Hz Nyquist edge.
  */
-export const ACARS_REPLAY_BANDWIDTH_HZ =
-	2 * (REPLAY_CHANNEL_SNAP_HZ + ACARS_OCCUPIED_HALF_HZ)
-export const ACARS_REPLAY_TRANSITION_HZ = 4_000
+export const ACARS_REPLAY_BANDWIDTH_HZ = ACARS_CHANNEL_BANDWIDTH_HZ
+export const ACARS_REPLAY_TRANSITION_HZ = ACARS_CHANNEL_TRANSITION_HZ
 
 /** True for the protocols decoded and attributed at a raster channel. */
 export function isRasterReplayProtocol(protocol: ScannerProtocol): boolean {
@@ -81,4 +83,16 @@ export function replayChannelHz(
 	rfHz: number,
 ): number {
 	return rasterChannelOf(protocol, rfHz) ?? rfHz
+}
+
+/**
+ * The centre a detection or identify capture at `rfHz` is made at: its 25 kHz raster channel when
+ * one lies within REPLAY_CHANNEL_SNAP_HZ (exclusive) in the VHF aeronautical band
+ * (rasterChannelOf), else `rfHz` itself. The capture tool shifts the centre to DC, so the narrow
+ * ACARS replay filter (±4 600 Hz flat) and dumpvdl2's channel are centred on the channel and not
+ * on a measured centre up to 4 kHz off. An 8.33 kHz voice channel is 8 333 Hz from the raster and
+ * keeps its own centre; a 25 kHz one moves at most to its own channel centre.
+ */
+export function rasterCaptureCentreHz(rfHz: number): number {
+	return rasterChannelOf("acars", rfHz) ?? rfHz
 }

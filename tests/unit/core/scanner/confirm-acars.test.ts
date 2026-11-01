@@ -4,8 +4,8 @@ import type { DecoderOutputLike } from "../../../../src/core/scanner/probes/conf
 import { interpretAcars } from "../../../../src/core/scanner/probes/confirm/acars.js"
 
 const T0 = Date.UTC(2026, 9, 16, 12)
-const F1 = 131_550_000
-const F2 = 131_725_000
+const F1 = 133_550_000
+const F2 = 133_725_000
 const st = (epoch = 1) =>
 	createInterpreterState({ epoch, origin: "ambient", decoderId: "acars" })
 const msg = (data: unknown): DecoderOutputLike => ({

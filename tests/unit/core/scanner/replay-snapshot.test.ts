@@ -184,9 +184,9 @@ describe("tool arguments", () => {
 			"--in",
 			"/w/c.cf32",
 			"--bandwidth",
-			"15200",
+			"9200",
 			"--transition",
-			"4000",
+			"1000",
 		])
 		// 4 s at 48 kHz cf32 = 1 536 000 B in, the same out
 		expect(acars.replayOutput(1_536_000)).toEqual({

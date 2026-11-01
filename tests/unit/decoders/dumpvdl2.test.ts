@@ -74,10 +74,8 @@ describe("Dumpvdl2Decoder", () => {
 			})
 			decoder = new Dumpvdl2Decoder(config, testLogger)
 
-			// Should use default VDL2 frequencies
-			expect((decoder as any).options.frequencies).toEqual([
-				136_650_000, 136_700_000, 136_975_000,
-			])
+			// The region-less default: the worldwide common signalling channel
+			expect((decoder as any).options.frequencies).toEqual([136_975_000])
 		})
 
 		it("should use configured frequencies (Requirement 24.4)", () => {

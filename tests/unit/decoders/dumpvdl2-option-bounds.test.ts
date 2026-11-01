@@ -207,7 +207,7 @@ describe("Dumpvdl2Decoder numeric option bounds", () => {
 			build({ targetSampleRate: "1e999", inputCenterFreq: "evil; id" }).view,
 		)
 		expect(arg(tokens, "--oversample")).toBe("10")
-		expect(arg(tokens, "--centerfreq")).toBe("136650000")
+		expect(arg(tokens, "--centerfreq")).toBe("136975000")
 	})
 
 	// Feature: web-gaps-7, Property 14: Bounded numeric options

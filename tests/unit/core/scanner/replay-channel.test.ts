@@ -10,11 +10,14 @@ import { probeReplayShapes } from "../../../../src/core/iq-capture/shapes.js"
 import { replayRateHz } from "../../../../src/core/iq-capture/rates.js"
 import {
 	ACARS_OCCUPIED_HALF_HZ,
+	ACARS_REPLAY_BANDWIDTH_HZ,
+	ACARS_REPLAY_TRANSITION_HZ,
 	AERO_DATALINK_RASTER_HZ,
 	REPLAY_CHANNEL_SNAP_HZ,
 	VDL2_OCCUPIED_HALF_HZ,
 	VDL2_REPLAY_MAX_OFFSET_HZ,
 	rasterChannelOf,
+	rasterCaptureCentreHz,
 	replayChannelHz,
 } from "../../../../src/core/scanner/replay-channel.js"
 import {
@@ -40,7 +43,12 @@ import {
 	createDumpvdl2Decoder,
 	replayChannelOf,
 } from "../../../../src/decoders/builtin/dumpvdl2.js"
-import { createAcarsdecDecoder } from "../../../../src/decoders/builtin/acarsdec.js"
+import {
+	ACARS_CARRIER_TOLERANCE_HZ,
+	ACARS_CHANNEL_BANDWIDTH_HZ,
+	ACARS_CHANNEL_TRANSITION_HZ,
+	createAcarsdecDecoder,
+} from "../../../../src/decoders/builtin/acarsdec.js"
 import { PassThrough } from "node:stream"
 
 const VDL2 = 135_975_000
@@ -56,19 +64,38 @@ describe("rasterChannelOf / replayChannelHz", () => {
 		expect(VDL2_REPLAY_MAX_OFFSET_HZ).toBe(4_100)
 		expect(DUMPVDL2_REPLAY_MAX_OFFSET_HZ).toBe(VDL2_REPLAY_MAX_OFFSET_HZ)
 		expect(REPLAY_CHANNEL_SNAP_HZ).toBeLessThan(VDL2_REPLAY_MAX_OFFSET_HZ)
-		// ACARS: a block snapped from 3 999 Hz off still sits inside acarsdec's replay passband
-		// (15 200 Hz), and the stop edge (11 600 Hz) stays short of the neighbouring channel's
-		// nearest sideband (25 000 − 4 000 − 3 600 = 17 400 Hz) and the 24 kHz Nyquist edge.
+		// ACARS: the replay filter is the live channel, flat over a block (±3 600 Hz) whose carrier
+		// is up to its 1 000 Hz tolerance off the capture centre, which the capture puts on the
+		// raster channel; the stop edge (5 600 Hz) is short of an 8.33 kHz neighbour and Nyquist.
 		const acars = probeReplayShapes().acarsdec!
-		expect(acars).toEqual({ bandwidthHz: 15_200, transitionHz: 4_000 })
-		expect(REPLAY_CHANNEL_SNAP_HZ + ACARS_OCCUPIED_HALF_HZ).toBe(
+		expect(acars).toEqual({ bandwidthHz: 9_200, transitionHz: 1_000 })
+		expect(ACARS_REPLAY_BANDWIDTH_HZ).toBe(ACARS_CHANNEL_BANDWIDTH_HZ)
+		expect(ACARS_REPLAY_TRANSITION_HZ).toBe(ACARS_CHANNEL_TRANSITION_HZ)
+		expect(ACARS_OCCUPIED_HALF_HZ + ACARS_CARRIER_TOLERANCE_HZ).toBe(
 			acars.bandwidthHz / 2,
 		)
-		expect(acars.bandwidthHz / 2 + acars.transitionHz).toBe(11_600)
-		expect(acars.bandwidthHz / 2 + acars.transitionHz).toBeLessThanOrEqual(
-			AERO_DATALINK_RASTER_HZ - REPLAY_CHANNEL_SNAP_HZ - ACARS_OCCUPIED_HALF_HZ,
-		)
+		expect(acars.bandwidthHz / 2 + acars.transitionHz).toBe(5_600)
+		expect(acars.bandwidthHz / 2 + acars.transitionHz).toBeLessThan(8_333)
 		expect(acars.bandwidthHz / 2 + acars.transitionHz).toBeLessThan(24_000)
+	})
+
+	it("a capture is made at its raster channel within 3 999 Hz in band, else at its own centre", () => {
+		expect(rasterCaptureCentreHz(ACARS)).toBe(ACARS)
+		expect(rasterCaptureCentreHz(ACARS + 3_999)).toBe(ACARS)
+		expect(rasterCaptureCentreHz(ACARS - 3_999)).toBe(ACARS)
+		expect(rasterCaptureCentreHz(ACARS + 4_000)).toBe(ACARS + 4_000)
+		expect(rasterCaptureCentreHz(ACARS - 4_000)).toBe(ACARS - 4_000)
+		// an 8.33 kHz voice channel (8 333 Hz off the raster) keeps its centre
+		expect(rasterCaptureCentreHz(ACARS + 8_333)).toBe(ACARS + 8_333)
+		// outside 117.975-137 MHz nothing moves
+		expect(rasterCaptureCentreHz(AERO_VHF_MAX_HZ + 25_000 + 1_000)).toBe(
+			AERO_VHF_MAX_HZ + 26_000,
+		)
+		expect(rasterCaptureCentreHz(AERO_VHF_MIN_HZ - 25_000 - 1_000)).toBe(
+			AERO_VHF_MIN_HZ - 26_000,
+		)
+		expect(rasterCaptureCentreHz(AERO_VHF_MAX_HZ + 1_000)).toBe(AERO_VHF_MAX_HZ)
+		expect(rasterCaptureCentreHz(Number.NaN)).toBeNaN()
 	})
 
 	it("snaps within 3 999 Hz of a raster channel, never at 4 000 Hz", () => {
@@ -244,7 +271,7 @@ describe("dumpvdl2 replay argv", () => {
 		expect(off.frequencies).toEqual([VDL2 + 4_000])
 	})
 
-	it("acarsdec reads the 48 kHz cf32 capture: AM there, 12 kHz audio, no shift or decimation", () => {
+	it("acarsdec reads the 48 kHz cf32 capture: the ACARS channel, AM there, 12 kHz audio, no shift or decimation", () => {
 		const config = configFor(ACARS + 1_500, "acarsdec")
 		expect(config.options).toMatchObject({
 			inputIqFormat: "cf32",
@@ -252,7 +279,10 @@ describe("dumpvdl2 replay argv", () => {
 		})
 		const decoder = createAcarsdecDecoder(config, pino({ level: "silent" }))
 		const argv = (decoder as unknown as { getArgs(): string[] }).getArgs()
-		expect(argv[1]).toContain("csdr amdemod")
+		// ±5 100 Hz −6 dB edges and a 1 000 Hz transition at 48 kHz, before the envelope detector.
+		expect(argv[1]).toContain(
+			"csdr bandpass --fft --low -0.106250 --high 0.106250 0.020833 | csdr amdemod",
+		)
 		expect(argv[1]).toContain(
 			"sox -t raw -r 48000 -e signed -b 16 -c 1 - -t raw -r 12000 -",
 		)

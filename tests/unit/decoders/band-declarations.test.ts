@@ -149,7 +149,8 @@ describe("dumpvdl2", () => {
 		const decoder = new Dumpvdl2Decoder(config("dumpvdl2", {}), logger)
 		expect(decoder.getBandDeclaration()).toEqual({
 			intrinsic: {
-				targetsHz: [136_650_000, 136_700_000, 136_975_000],
+				// the worldwide VDL2 common signalling channel (options/dumpvdl2.ts)
+				targetsHz: [136_975_000],
 				basis: "decoder-default",
 			},
 		})

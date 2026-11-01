@@ -170,7 +170,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 85 0.002941 --cutoff 0.3750 | csdr amdemod | csdr agc -f float -p fast -r 0.8 | csdr dcblock | csdr gain 1 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 24094.117647058825 -e signed -b 16 -c 1 - -t raw -r 12000 - | acarsdec --output json:file:path=- --sndfile /dev/stdin,subtype=0x02 -m 1",
+			"csdr convert -i char -o float | csdr firdecimate 85 0.002941 --cutoff 0.3750 | csdr bandpass --fft --low -0.211670 --high 0.211670 0.041504 | csdr amdemod | csdr agc -f float -p fast -r 0.8 | csdr dcblock | csdr gain 1 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 24094.117647058825 -e signed -b 16 -c 1 - -t raw -r 12000 - | acarsdec --output json:file:path=- --sndfile /dev/stdin,subtype=0x02 -m 1",
 		],
 		getDecoderArgs: [
 			"--output",
@@ -803,7 +803,7 @@ const GOLDEN: Row[] = [
 		options: {},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 100 0.002500 --cutoff 0.3750 | csdr amdemod | csdr agc -f float -p fast -r 0.8 | csdr dcblock | csdr gain 1 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 24000 -e signed -b 16 -c 1 - -t raw -r 12000 - | acarsdec --output json:file:path=- --sndfile /dev/stdin,subtype=0x02 -m 1",
+			"csdr convert -i char -o float | csdr firdecimate 100 0.002500 --cutoff 0.3750 | csdr bandpass --fft --low -0.212500 --high 0.212500 0.041667 | csdr amdemod | csdr agc -f float -p fast -r 0.8 | csdr dcblock | csdr gain 1 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 24000 -e signed -b 16 -c 1 - -t raw -r 12000 - | acarsdec --output json:file:path=- --sndfile /dev/stdin,subtype=0x02 -m 1",
 		],
 		getDecoderArgs: [
 			"--output",
@@ -820,7 +820,7 @@ const GOLDEN: Row[] = [
 		options: {},
 		getArgs: [
 			"-c",
-			"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1050000 - rate -h 1050000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 10 --centerfreq 136650000 --output decoded:json:file:path=- 136650000 136700000 136975000",
+			"sox -q -D --ignore-length -t raw -e unsigned-integer -b 8 -c 2 -r 2048000 - -t raw -e unsigned-integer -b 8 -c 2 -r 1050000 - rate -h 1050000 | dumpvdl2 --iq-file - --sample-format U8 --oversample 10 --centerfreq 136975000 --output decoded:json:file:path=- 136975000",
 		],
 		getDecoderArgs: [
 			"--iq-file",
@@ -830,11 +830,9 @@ const GOLDEN: Row[] = [
 			"--oversample",
 			"10",
 			"--centerfreq",
-			"136650000",
+			"136975000",
 			"--output",
 			"decoded:json:file:path=-",
-			"136650000",
-			"136700000",
 			"136975000",
 		],
 	},

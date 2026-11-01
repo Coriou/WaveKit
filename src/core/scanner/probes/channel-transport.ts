@@ -58,8 +58,8 @@ export const PROBE_CHANNEL_REQUESTS: Readonly<
 	direwolf: requestShape(
 		audioChannelRequest({ ...audioDefault, filterTransition: 0.012 }, input),
 	),
-	// Replay only: the ACARS channel (shape of the replay filter), wide enough for a capture
-	// centred up to the raster snap off its channel (replay-channel.ts).
+	// Replay only: the ACARS channel (shape of the replay filter), the live channel's 9 200 Hz
+	// with a 1 000 Hz transition; the capture is centred on its raster channel (replay-channel.ts).
 	acarsdec: requestShape({
 		...audioChannelRequest(acarsdecDemodConfig(input.sampleRateHz), input),
 		bandwidthHz: ACARS_REPLAY_BANDWIDTH_HZ,

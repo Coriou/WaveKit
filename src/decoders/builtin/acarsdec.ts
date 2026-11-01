@@ -31,8 +31,10 @@ import {
 	readNumericOption,
 	type NumericOptionWarn,
 } from "../option-values.js"
-import { ACARSDEC_BOUNDS } from "../options/acarsdec.js"
+import { ACARSDEC_BOUNDS, acarsDefaultChannelsHz } from "../options/acarsdec.js"
+import { csdrNumber } from "../csdr-stages.js"
 import { safeErrorFields } from "../safe-error-fields.js"
+import { WaveKitError } from "../../utils/errors.js"
 import { z } from "zod"
 
 /**
@@ -269,16 +271,83 @@ export function nonFiniteToNull(line: string): string {
 }
 
 /**
- * The ACARS demodulation: AM, a 25 kHz channel, demodulated at 24 kHz (decimation 100 from
- * 2.4 Msps), audio at 12 kHz (acarsdec needs a multiple of 12 kHz). DC block on: it removes the
- * carrier from the AM envelope.
+ * Half the occupied bandwidth of an ACARS block: AM with 2 400 bit/s MSK audio tones at 1 200 and
+ * 2 400 Hz, so the sidebands reach 2 400 + 2 400 / 2 = 3 600 Hz each side of the carrier.
+ */
+export const ACARS_OCCUPIED_HALF_HZ = 3_600
+
+/**
+ * How far an ACARS carrier may sit from its 25 kHz channel at 137 MHz, the top of the band:
+ * - aircraft transmitter: 5 ppm, the stability of 8.33 kHz-capable VHF radios (ICAO Annex 10
+ *   Vol V; mandatory for every aircraft in EU airspace under Regulation (EU) No 1079/2012),
+ *   137 MHz × 5e-6 = 685 Hz;
+ * - receiver: 1 ppm, a TCXO SDR, 137 Hz;
+ * - Doppler: 250 m/s, 137 MHz × 250 / 299 792 458 = 114 Hz.
+ * 685 + 137 + 114 = 936 Hz, rounded up to 1 000 Hz. A receiver more than 1 ppm off needs its
+ * ppm correction set.
+ */
+export const ACARS_CARRIER_TOLERANCE_HZ = 1_000
+
+/**
+ * The AM channel in front of acarsdec, live and on replay: flat over one ACARS block anywhere
+ * within its carrier tolerance, 2 × (3 600 + 1 000) = 9 200 Hz. (8 000 Hz would leave
+ * 4 000 − 3 600 = 400 Hz of margin, less than the 685 Hz an aircraft transmitter alone may be off.)
+ */
+export const ACARS_CHANNEL_BANDWIDTH_HZ =
+	2 * (ACARS_OCCUPIED_HALF_HZ + ACARS_CARRIER_TOLERANCE_HZ)
+
+/**
+ * Transition of that channel: the stop edge is 9 200 / 2 + 1 000 = 5 600 Hz from the carrier,
+ * so the 8.33 kHz voice channels beside it (8 333 Hz) and every 25 kHz neighbour are stopped,
+ * and an off-centre carrier 5 kHz away is cut by most of the transition before the envelope
+ * detector (a stronger carrier inside the AM channel captures a weaker block's envelope).
+ */
+export const ACARS_CHANNEL_TRANSITION_HZ = 1_000
+
+/**
+ * The pre-detection filter at the demodulation rate `rateHz`: `csdr bandpass --fft` with its
+ * −6 dB edges at ±(ACARS_CHANNEL_BANDWIDTH_HZ / 2 + transition / 2) = ±5 100 Hz and a 1 000 Hz
+ * transition, so it is flat to ±4 600 Hz and stops by ±5 600 Hz (the replay tool's
+ * `--bandwidth 9200 --transition 1000` shape). The demodulation rate must leave the stop edge
+ * inside Nyquist: 2 × 5 600 = 11 200 Hz at least (it is 24 000 or 48 000 Hz).
+ */
+export function acarsChannelFilterStage(rateHz: number): string {
+	const stopHz = ACARS_CHANNEL_BANDWIDTH_HZ / 2 + ACARS_CHANNEL_TRANSITION_HZ
+	if (!(Number.isFinite(rateHz) && rateHz >= 2 * stopHz))
+		throw new WaveKitError(
+			`ACARS demodulation rate ${rateHz} Hz is below ${2 * stopHz} Hz`,
+			"ACARS_DEMOD_RATE_INVALID",
+		)
+	const edge =
+		(ACARS_CHANNEL_BANDWIDTH_HZ / 2 + ACARS_CHANNEL_TRANSITION_HZ / 2) / rateHz
+	const transition = ACARS_CHANNEL_TRANSITION_HZ / rateHz
+	const f = (v: number): string => {
+		csdrNumber(v)
+		return v.toFixed(6)
+	}
+	return `csdr bandpass --fft --low ${f(-edge)} --high ${f(edge)} ${f(transition)}`
+}
+
+/**
+ * The shared front's channel (decimating filter, channelizer request): the 25 kHz raster channel,
+ * flat to ±6 kHz and stopped by ±12 kHz at 24 kHz. It only guards the decimation against
+ * aliasing; the ACARS channel itself is acarsChannelFilterStage at the demodulation rate. Kept
+ * at 25 kHz so the front costs what it did: narrowing it to 9 200 Hz would shrink the
+ * firdecimate transition at 2.4 Msps from 0.0025 to 0.0019 (1 600 to 2 087 taps, +30 %).
+ */
+export const ACARS_FRONT_BANDWIDTH_HZ = 25_000
+
+/**
+ * The ACARS demodulation: AM, the 25 kHz front (ACARS_FRONT_BANDWIDTH_HZ) then the 9.2 kHz ACARS
+ * channel, demodulated at 24 kHz (decimation 100 from 2.4 Msps), audio at 12 kHz (acarsdec needs
+ * a multiple of 12 kHz). DC block on: it removes the carrier from the AM envelope.
  */
 export function acarsdecDemodConfig(
 	inputSampleRate: number,
 ): DemodulationConfig {
 	return {
 		modulation: "am",
-		bandwidth: 25000,
+		bandwidth: ACARS_FRONT_BANDWIDTH_HZ,
 		sampleRate: 12000,
 		demodSampleRate: 24000,
 		inputSampleRate,
@@ -328,6 +397,26 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 		if (this.inputIsChannelIq() && this.options.inputSampleRate !== undefined)
 			return { ...config, demodSampleRate: this.options.inputSampleRate }
 		return config
+	}
+
+	/**
+	 * The shared front (shift, decimating filter) keeps its 25 kHz channel-matched shape, flat
+	 * only to ±6 kHz and stopped by ±12 kHz at 24 kHz; the sharp ACARS channel
+	 * (acarsChannelFilterStage) follows at the demodulation rate, before `csdr amdemod`. Channel
+	 * IQ (channelizer or replay) has no front stage of its own, so the filter is its only one.
+	 */
+	protected override buildIqFrontStages(
+		config: DemodulationConfig,
+		inputSampleRate: number,
+		decimation: number,
+	): { convert: string | null; shift: string | null; decimate: string | null } {
+		const front = super.buildIqFrontStages(config, inputSampleRate, decimation)
+		const channel = acarsChannelFilterStage(inputSampleRate / decimation)
+		return {
+			...front,
+			decimate:
+				front.decimate === null ? channel : `${front.decimate} | ${channel}`,
+		}
 	}
 
 	/**
@@ -481,7 +570,7 @@ function parseAcarsdecOptions(
 		warn,
 	)
 	if (!frequencies || frequencies.length === 0) {
-		frequencies = [131_550_000, 131_725_000]
+		frequencies = [...acarsDefaultChannelsHz()]
 	}
 
 	return {

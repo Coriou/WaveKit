@@ -9,7 +9,8 @@ import { AisCatcherDecoder } from "../../../src/decoders/builtin/ais-catcher.js"
 import { ReadsbDecoder } from "../../../src/decoders/builtin/readsb.js"
 import { DirewolfDecoder } from "../../../src/decoders/builtin/direwolf.js"
 
-const DEFAULTS = [136_650_000, 136_700_000, 136_975_000]
+/** The region-less default: the worldwide common signalling channel. */
+const DEFAULTS = [136_975_000]
 
 function make(options: Record<string, unknown>, top = {}) {
 	const config = {
