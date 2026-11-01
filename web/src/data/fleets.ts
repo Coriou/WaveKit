@@ -1,7 +1,8 @@
 /**
  * The four fleets the Map shows, as FleetSpecs over the core's routes and channels:
  * - aircraft: GET /api/aircraft, channel `aircraft` (`aircraft:new | update | lost`, lost data
- *   `{ icao, aircraft }`); times in Unix ms; the tracker keeps a track history (most recent first).
+ *   `{ icao, aircraft }`); times in Unix ms; the tracker keeps a track history (most recent first),
+ *   which updates carry as `trackAppend` deltas (merged by track-merge.ts).
  * - vessels (AIS, aids to navigation included): GET /api/vessels, channel `vessels`, ISO times.
  * - APRS stations, objects and items: GET /api/aprs/stations, channel `aprs`.
  * - Meshtastic nodes (with neighbour links): GET /api/mesh/nodes, channel `mesh`.
@@ -11,6 +12,7 @@
 import { z } from "zod/v4"
 import type {
 	AircraftState,
+	AircraftUpdateData,
 	AprsStation,
 	MeshNode,
 	VesselState,
@@ -20,6 +22,7 @@ import type { ApiClient } from "./api-client.ts"
 import type { EventsClient } from "./events-client.ts"
 import type { FleetSpec, FleetStoreOptions } from "./fleet-store.ts"
 import { FleetStore } from "./fleet-store.ts"
+import { mergeTrail } from "./track-merge.ts"
 
 const num = z.number()
 const optNum = num.optional()
@@ -66,6 +69,13 @@ const airportSchema = z.object({
 	city: z.string().optional(),
 	lat: num,
 	lon: num,
+})
+
+const trackPointSchema = z.object({
+	lat: num,
+	lon: num,
+	altitude: num.nullable(),
+	timestamp: num,
 })
 
 export const aircraftSchema = z.object({
@@ -145,16 +155,9 @@ export const aircraftSchema = z.object({
 	signalQuality: z.object({ rssi: optNum }).optional(),
 	category: z.string().optional(),
 	emergency: z.string().optional(),
-	trackHistory: z
-		.array(
-			z.object({
-				lat: num,
-				lon: num,
-				altitude: num.nullable(),
-				timestamp: num,
-			}),
-		)
-		.optional(),
+	trackHistory: z.array(trackPointSchema).optional(),
+	/** `aircraft:update` only: points added since the core's previous update (track-merge.ts). */
+	trackAppend: z.array(trackPointSchema).optional(),
 	seen: num,
 	seenPos: optNum,
 	messages: num,
@@ -186,12 +189,13 @@ export const AIRCRAFT_SPEC: FleetSpec<Aircraft> = {
 					at: a.lastUpdated - (a.seenPos ?? a.position.seenPos ?? 0) * 1000,
 				}
 			: null,
-	coreTrail: a =>
-		a.trackHistory && a.trackHistory.length > 0
-			? a.trackHistory
-					.map(p => ({ lat: p.lat, lon: p.lon, at: p.timestamp }))
-					.reverse()
-			: null,
+	coreTrail: a => {
+		const track = a.trackHistory ?? a.trackAppend
+		return track && track.length > 0
+			? track.map(p => ({ lat: p.lat, lon: p.lon, at: p.timestamp })).reverse()
+			: null
+	},
+	merge: (previous, next) => mergeTrail(previous, next),
 }
 
 // ---- vessels
@@ -390,6 +394,7 @@ export function createFleets(
 type Accepts<Schema, Dto extends Schema> = Dto
 export type DtoChecks = [
 	Accepts<z.input<typeof aircraftSchema>, AircraftState>,
+	Accepts<z.input<typeof aircraftSchema>, AircraftUpdateData>,
 	Accepts<z.input<typeof vesselSchema>, VesselState>,
 	Accepts<z.input<typeof aprsSchema>, AprsStation>,
 	Accepts<z.input<typeof meshSchema>, MeshNode>,

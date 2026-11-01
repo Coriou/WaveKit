@@ -6,6 +6,7 @@ import {
 	OUT_MS,
 	UPDATE_EVERY_MS,
 	WorkerSocket,
+	coalesceUpdate,
 	fleetKeyOf,
 } from "../../src/data/events-relay.ts"
 import type {
@@ -88,6 +89,56 @@ describe("FleetThrottle", () => {
 			"aircraft:update",
 		])
 		expect(t.waiting).toBe(0)
+	})
+
+	it("merges a superseded update's trail delta into the newer one", () => {
+		const sent: string[] = []
+		const t = new FleetThrottle(x => sent.push(x), 1000)
+		const p = (timestamp: number) => ({
+			lat: 1,
+			lon: 2,
+			altitude: null,
+			timestamp,
+		})
+		t.push(
+			msg("aircraft:update", { icao: "A", messages: 1, trackAppend: [p(1)] }),
+			0,
+		)
+		t.push(
+			msg("aircraft:update", { icao: "A", messages: 2, trackAppend: [p(2)] }),
+			100,
+		)
+		t.push(msg("aircraft:update", { icao: "A", messages: 3 }), 200)
+		t.push(
+			msg("aircraft:update", {
+				icao: "A",
+				messages: 4,
+				trackAppend: [p(4), p(3)],
+			}),
+			300,
+		)
+		t.sweep(1000)
+		expect(t.dropped).toBe(2)
+		expect(sent.map(dataOf)).toEqual([
+			{ icao: "A", messages: 1, trackAppend: [p(1)] },
+			// points 2, 3 and 4 all arrive, most recent first
+			{ icao: "A", messages: 4, trackAppend: [p(4), p(3), p(2)] },
+		])
+	})
+
+	it("coalesceUpdate leaves messages without a usable trail as they were", () => {
+		const newer = msg("aircraft:update", { icao: "A", messages: 2 })
+		expect(coalesceUpdate(plane("A", 1), newer)).toBe(newer)
+		expect(
+			coalesceUpdate(
+				msg("aircraft:update", {
+					icao: "A",
+					trackAppend: [{ timestamp: "x" }],
+				}),
+				newer,
+			),
+		).toBe(newer)
+		expect(coalesceUpdate("not json", newer)).toBe(newer)
 	})
 
 	it("drains everything waiting", () => {

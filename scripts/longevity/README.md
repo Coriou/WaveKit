@@ -23,7 +23,7 @@ node --expose-gc output/longevity/<name>.mjs [flags]
 | `facets-index.ts`     | Facets read time (wall and CPU, current and pre-WG19 algorithm) before and after the `activity_facets` index on a synthetic cap-size store (`--rows`, default 250 000), the index build time and size, plans after       |
 | `scanner-state.ts`    | Scanner snapshot size, snapshot write time, `load()` and `restoreInSlices` time and event-loop delay for `--discoveries` × `--obs-per`                                                                                   |
 | `memory-soak.ts`      | Heap after GC over time: `--part iq` (fake rtl_tcp → SourceManager → FanoutManager, real time) or `--part tracking` (fake clock, rotating aircraft through the tracker and Activity admission)                           |
-| `ws-payloads.ts`      | Bytes and JSON.stringify cost of `aircraft:update` by trail length and `spectrum:frame` by bin count                                                                                                                     |
+| `ws-payloads.ts`      | Bytes and JSON.stringify cost of `aircraft:update` by trail length and `spectrum:frame` by bin count; `aircraft` channel bytes/s per client before and after the 1 Hz publisher (`--aircraft`, `--rate`, `--seconds`)    |
 
 Keep each run short on a shared machine: every harness prints the load average
 it saw, so compare numbers taken at a similar load.

@@ -4,13 +4,17 @@
  * through at once, later ones within the window wait and only the newest is sent when it ends. A busy
  * ADS-B receiver sends an `aircraft:update` per decoded message (several per aircraft per second,
  * each with its track), so most of them never reach the main thread; the Map dead-reckons between
- * reports. A `new` or `lost` sends the entity's waiting update first, so its order is kept. Every other
+ * reports. A superseded update is merged into the newer one where it carries a delta (the aircraft
+ * trail's `trackAppend`, track-merge.ts), so no trail point is dropped. A `new` or `lost` sends the
+ * entity's waiting update first, so its order is kept. Every other
  * message passes straight through, sent in small batches (one postMessage per OUT_MS).
  *
  * Main thread: WorkerSocket is the EventsClient's SocketLike over that worker; each message is
  * delivered as its original text, so EventsClient parses and dispatches it as before.
  */
 import type { SocketFactory, SocketLike } from "./events-client.ts"
+import type { TrailFields, TrailPointLike } from "./track-merge.ts"
+import { mergeTrail } from "./track-merge.ts"
 
 /** The entity key field of each fleet's messages (FleetSpec.keyOf / lostKey in fleets.ts). */
 const FLEET_KEYS: Readonly<Record<string, string>> = {
@@ -53,6 +57,56 @@ export function fleetKeyOf(
 			: undefined
 	if (typeof key !== "string") return null
 	return { id: `${type.slice(0, colon)}|${key}`, update: event === "update" }
+}
+
+function trailPoints(value: unknown): value is TrailPointLike[] {
+	return (
+		Array.isArray(value) &&
+		value.every(
+			p =>
+				typeof p === "object" &&
+				p !== null &&
+				typeof (p as { timestamp?: unknown }).timestamp === "number",
+		)
+	)
+}
+
+/** The message's data when it is an object whose trail fields (if any) are point arrays. */
+function trailData(text: string): {
+	message: Record<string, unknown>
+	data: TrailFields<TrailPointLike>
+} | null {
+	let message: unknown
+	try {
+		message = JSON.parse(text)
+	} catch {
+		return null
+	}
+	if (typeof message !== "object" || message === null) return null
+	const data = (message as Record<string, unknown>)["data"]
+	if (typeof data !== "object" || data === null) return null
+	const fields = data as Record<string, unknown>
+	for (const key of ["trackHistory", "trackAppend"])
+		if (fields[key] !== undefined && !trailPoints(fields[key])) return null
+	return {
+		message: message as Record<string, unknown>,
+		data: data as TrailFields<TrailPointLike>,
+	}
+}
+
+/**
+ * The update that replaces a waiting one: `newer`, with the waiting one's trail merged in when
+ * `newer` carries only a delta. Anything that does not parse as a trail is replaced as before.
+ */
+export function coalesceUpdate(older: string, newer: string): string {
+	const before = trailData(older)
+	if (!before?.data.trackHistory && !before?.data.trackAppend) return newer
+	const after = trailData(newer)
+	if (!after) return newer
+	const merged = mergeTrail(before.data, after.data)
+	return merged === after.data
+		? newer
+		: JSON.stringify({ ...after.message, data: merged })
 }
 
 interface EntitySlot {
@@ -105,9 +159,13 @@ export class FleetThrottle {
 			this.send(text)
 			return
 		}
-		if (slot.waiting !== null) this.droppedCount += 1
-		else this.waitingCount += 1
-		slot.waiting = text
+		if (slot.waiting !== null) {
+			this.droppedCount += 1
+			slot.waiting = coalesceUpdate(slot.waiting, text)
+		} else {
+			this.waitingCount += 1
+			slot.waiting = text
+		}
 	}
 
 	/** Sends the waiting updates whose window has ended; forgets idle entities. */

@@ -44,7 +44,7 @@ import {
 	type SourceCaps,
 } from "../config.js"
 import type { Logger } from "../utils/logger.js"
-import { createComponentLogger } from "../utils/logger.js"
+import { createComponentLogger, LogRateLimiter } from "../utils/logger.js"
 import { WaveKitError } from "../utils/errors.js"
 import {
 	AudioClientRegistry,
@@ -441,6 +441,7 @@ export { streamHeaders, wavStreamHeader } from "./audio-stream-server.js"
 
 export class LiveDemodulator extends EventEmitter {
 	private readonly log: Logger
+	private readonly stderrWarnLimit = new LogRateLimiter()
 	private readonly sourceManager: SourceManager
 	private readonly fanoutManager: FanoutManager | SourceFanoutRouter
 	private branchFanout: FanoutManager | null = null
@@ -1809,7 +1810,10 @@ export class LiveDemodulator extends EventEmitter {
 			const message = data.toString().trim()
 			if (!message) return
 			this.lastError = message
-			this.log.warn({ message, role }, "Live demodulation stderr")
+			// One line per stage per minute at most (hot-path log policy).
+			const suppressed = this.stderrWarnLimit.take(role)
+			if (suppressed !== null)
+				this.log.warn({ message, role, suppressed }, "Live demodulation stderr")
 		})
 	}
 

@@ -18,7 +18,7 @@ import type {
 	ActivityWireMessage,
 } from "../activity-subscriptions.js"
 import type { Logger } from "../../utils/logger.js"
-import { createComponentLogger } from "../../utils/logger.js"
+import { createComponentLogger, LogRateLimiter } from "../../utils/logger.js"
 import type { DecoderOutput } from "../../decoders/types.js"
 import type { FanoutStatus } from "../../core/fanout-manager.js"
 import type {
@@ -33,6 +33,7 @@ import type {
 	TunerState,
 	TunerControlMode,
 	AircraftState,
+	AircraftUpdateData,
 	AircraftTrackerStats,
 	DecoderStatusEventData,
 	SourceStatusEventData,
@@ -295,6 +296,7 @@ function liveAudioConfigForClient(config: LiveDemodConfig): LiveDemodConfig {
  */
 export class WebSocketEventBroadcaster {
 	private readonly log: Logger
+	private readonly parseWarnLimit = new LogRateLimiter()
 	private readonly clients: Map<string, ClientState> = new Map()
 	private clientIdCounter = 0
 	private readonly delivery = new WeakMap<ClientState, DeliveryState>()
@@ -417,7 +419,13 @@ export class WebSocketEventBroadcaster {
 				this.handleUnsubscribe(client, message.channels)
 			}
 		} catch {
-			this.log.warn({ clientId: client.id }, "Failed to parse client message")
+			// Client-driven: one line per minute for all clients at most (hot-path log policy).
+			const suppressed = this.parseWarnLimit.take("client-message")
+			if (suppressed !== null)
+				this.log.warn(
+					{ clientId: client.id, suppressed },
+					"Failed to parse client message",
+				)
 			this.sendToClient(client, {
 				type: "error",
 				data: { message: "Invalid JSON" },
@@ -703,15 +711,14 @@ export class WebSocketEventBroadcaster {
 	 * @param message - The message to broadcast
 	 */
 	broadcast(channel: WebSocketChannel, message: ServerMessage): void {
-		const messageWithChannel = { ...message, channel }
-		const serialized = JSON.stringify(messageWithChannel)
-
+		// Serialised once, on the first subscriber: nothing is stringified for a channel nobody reads.
+		let serialized: string | undefined
 		let sentCount = 0
 
 		for (const client of this.clients.values()) {
-			if (client.subscriptions.has(channel)) {
-				if (this.enqueue(client, serialized)) sentCount++
-			}
+			if (!client.subscriptions.has(channel)) continue
+			serialized ??= JSON.stringify({ ...message, channel })
+			if (this.enqueue(client, serialized)) sentCount++
 		}
 
 		this.log.trace(
@@ -1185,11 +1192,12 @@ export class WebSocketEventBroadcaster {
 	}
 
 	/**
-	 * Broadcasts aircraft update event to subscribed clients.
+	 * Broadcasts aircraft update event to subscribed clients. The server sends it through
+	 * AircraftUpdatePublisher (≤ 1 Hz per aircraft, trail as `trackAppend` deltas).
 	 *
 	 * @param aircraft - The updated aircraft state
 	 */
-	broadcastAircraftUpdate(aircraft: AircraftState): void {
+	broadcastAircraftUpdate(aircraft: AircraftUpdateData): void {
 		this.broadcast("aircraft", {
 			type: "aircraft:update",
 			data: aircraft,

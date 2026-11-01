@@ -4783,7 +4783,43 @@ after the aircraft first appears and arrives as an `aircraft:update`. Field mean
   mode it needs a signed-in device like other metadata changes; any other body is a 400.
 
 The `aircraft` WebSocket channel pushes `aircraft:new`, `aircraft:update`, `aircraft:lost`
-and `aircraft:stats`.
+and `aircraft:stats`. Updates are throttled per aircraft to at most one per second: the first
+after a quiet second is sent at once, later ones are coalesced and the latest state is sent when
+the second ends. A callsign, squawk or emergency change is sent at once. A pending update is
+dropped when the aircraft is lost; `aircraft:lost` carries the final state.
+
+The trail is not repeated in every update. `GET /api/aircraft`, `aircraft:new` and
+`aircraft:lost` carry the whole `trackHistory` (most recent first). An `aircraft:update` carries
+`trackAppend`, only the points added since the previous update (most recent first), or no trail
+field when the trail did not change. It carries the whole `trackHistory` instead when the core
+resyncs it: for an aircraft it has no record of, after a trail reset, and every 300 updates per
+aircraft (at most every 5 min). A client keeps the trail by putting `trackAppend` on top of the
+trail it holds, and replaces it on `trackHistory`; load `GET /api/aircraft` after subscribing and
+after a reconnect. The DTO is `AircraftUpdateData` in `packages/api-types/src/aircraft.ts`.
+
+```json
+{
+	"type": "aircraft:update",
+	"channel": "aircraft",
+	"data": {
+		"icao": "4B1808",
+		"callsign": "WKA100",
+		"position": { "lat": 48.81, "lon": -3.87 },
+		"trackAppend": [
+			{
+				"lat": 48.81,
+				"lon": -3.87,
+				"altitude": 36000,
+				"timestamp": 1793500001000
+			}
+		],
+		"seen": 0.2,
+		"messages": 4182,
+		"firstSeen": 1793499100000,
+		"lastUpdated": 1793500001000
+	}
+}
+```
 
 ### Aircraft identity
 

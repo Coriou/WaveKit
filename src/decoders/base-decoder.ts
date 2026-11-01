@@ -34,7 +34,7 @@ import type {
 } from "./types.js"
 import type { Logger } from "../utils/logger.js"
 import { DecoderSpawnError } from "../utils/errors.js"
-import { createComponentLogger } from "../utils/logger.js"
+import { createComponentLogger, LogRateLimiter } from "../utils/logger.js"
 import { safeErrorFields } from "./safe-error-fields.js"
 
 /** Timeout in ms to wait for graceful shutdown before SIGKILL */
@@ -107,6 +107,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	protected restartCount: number = 0
 	protected version: string | undefined = undefined
 	protected logger: Logger
+	private readonly parseWarnLimit = new LogRateLimiter()
 	protected config: DecoderConfig
 	protected parseStdout: boolean = true
 	protected parseStderr: boolean = true
@@ -553,10 +554,13 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			if (output) this.emitOutput(output)
 		} catch (err) {
 			// Decoder output line: documented diagnostic exception to the no-option-text log rule (Main, WG7 HW R2).
-			this.logger.warn(
-				{ line, err: safeErrorFields(err) },
-				"Failed to parse decoder output",
-			)
+			// One line per minute at most (hot-path log policy); `suppressed` counts the rest.
+			const suppressed = this.parseWarnLimit.take("parse")
+			if (suppressed !== null)
+				this.logger.warn(
+					{ line, err: safeErrorFields(err), suppressed },
+					"Failed to parse decoder output",
+				)
 			this.stats.errors++
 		}
 	}

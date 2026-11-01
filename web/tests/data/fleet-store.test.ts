@@ -186,6 +186,82 @@ describe("FleetStore", () => {
 		expect(e?.trail[0]?.at).toBe(Date.now() - 16_000)
 	})
 
+	it("keeps the aircraft trail whole over trackAppend deltas, batched or not", async () => {
+		const point = (lat: number, ago: number) => ({
+			lat,
+			lon: -3.87,
+			altitude: 36000,
+			timestamp: CORE_NOW - ago,
+		})
+		const { api, events, sockets } = setup(() =>
+			json(200, {
+				aircraft: [
+					aircraft({ trackHistory: [point(48.81, 2000), point(48.8, 3000)] }),
+				],
+				stats: {},
+				timestamp: CORE_NOW,
+			}),
+		)
+		const store = new FleetStore(api, events, AIRCRAFT_SPEC, { flushMs: 250 })
+		store.attach()
+		await store.load()
+		const socket = sockets.last()
+		// two deltas inside one flush window, then an update with no new point
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ trackAppend: [point(48.82, 1000)] }),
+		})
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ trackAppend: [point(48.83, 0)] }),
+		})
+		vi.advanceTimersByTime(250)
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ messages: 101 }),
+		})
+		vi.advanceTimersByTime(250)
+		const e = store.get().entries.get("3944EF")
+		expect(e?.trailFromCore).toBe(true)
+		expect(e?.value.messages).toBe(101)
+		expect(e?.trail.map(p => p.lat)).toEqual([48.8, 48.81, 48.82, 48.83])
+	})
+
+	it("does not carry a lost aircraft's trail into its new track", async () => {
+		const point = (lat: number, ago: number) => ({
+			lat,
+			lon: -3.87,
+			altitude: 36000,
+			timestamp: CORE_NOW - ago,
+		})
+		const { api, events, sockets } = setup(() =>
+			json(200, {
+				aircraft: [aircraft({ trackHistory: [point(48.81, 5000)] })],
+				stats: {},
+				timestamp: CORE_NOW,
+			}),
+		)
+		const store = new FleetStore(api, events, AIRCRAFT_SPEC, { flushMs: 250 })
+		store.attach()
+		await store.load()
+		const socket = sockets.last()
+		socket.receive({
+			type: "aircraft:lost",
+			data: { icao: "3944EF", aircraft: aircraft() },
+		})
+		socket.receive({
+			type: "aircraft:new",
+			data: aircraft({ trackHistory: [point(40, 0)] }),
+		})
+		socket.receive({
+			type: "aircraft:update",
+			data: aircraft({ trackAppend: [point(40.1, -1)] }),
+		})
+		vi.advanceTimersByTime(250)
+		const e = store.get().entries.get("3944EF")
+		expect(e?.trail.map(p => p.lat)).toEqual([40, 40.1])
+	})
+
 	it("builds other trails from the positions seen since the page opened", async () => {
 		const { api, events, sockets } = setup(() =>
 			json(200, {

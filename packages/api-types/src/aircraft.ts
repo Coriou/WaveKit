@@ -413,11 +413,23 @@ export interface AircraftTrackerStats {
 // ============================================================================
 
 /**
- * Aircraft update event - sent when any aircraft state changes.
+ * `aircraft:update` data. The core sends at most one update per aircraft per second (the latest
+ * state). The trail is not repeated: `trackAppend` holds only the points added since the previous
+ * update (most recent first), and the whole `trackHistory` is sent instead when the core resyncs
+ * it. With neither field the trail is unchanged. The full trail comes from GET /api/aircraft,
+ * `aircraft:new` and `aircraft:lost`.
+ */
+export interface AircraftUpdateData extends AircraftState {
+	/** Track points added since the previous update, most recent first. */
+	trackAppend?: TrackPoint[]
+}
+
+/**
+ * Aircraft update event - sent when an aircraft's state changes, at most once per second.
  */
 export interface AircraftUpdateEvent {
 	type: "aircraft:update"
-	data: AircraftState
+	data: AircraftUpdateData
 }
 
 /**

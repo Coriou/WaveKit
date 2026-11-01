@@ -84,7 +84,11 @@ import {
 	CSDR_BUFFER_ENV,
 	configureCsdrBuffers,
 } from "./decoders/csdr-buffers.js"
-import { createLogger, createComponentLogger } from "./utils/logger.js"
+import {
+	CountSummary,
+	createLogger,
+	createComponentLogger,
+} from "./utils/logger.js"
 import { GracefulShutdown } from "./utils/graceful-shutdown.js"
 import { SourceManager } from "./core/source-manager.js"
 import { FanoutManager } from "./core/fanout-manager.js"
@@ -3087,9 +3091,15 @@ async function main(): Promise<void> {
 		}
 
 		// Step 15: Start enabled decoders
-		// Log decoded messages for user visibility (Requirement: User Feedback)
+		// Decoded messages: the payload at debug only (a line per output is a synchronous stdout
+		// write, 442 B per aircraft line); info gets one line per minute with the counts per decoder.
+		const outputSummary = new CountSummary(
+			log,
+			"Decoder outputs in the last minute",
+		)
 		decoderManager.on("decoder:output", (decoderId, output) => {
-			log.info({ decoderId, output }, "Decoded Message")
+			outputSummary.add(decoderId)
+			log.debug({ decoderId, output }, "Decoded Message")
 		})
 
 		checkpoint()

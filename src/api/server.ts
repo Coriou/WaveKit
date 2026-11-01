@@ -118,6 +118,8 @@ import type { ResourceAggregator } from "../core/resource-aggregator.js"
 import type { AircraftTracker } from "../core/aircraft-tracker.js"
 import type { VesselTracker } from "../core/vessel-tracker.js"
 import type {
+	AircraftState,
+	AircraftTrackerStats,
 	AprsStation,
 	AprsTrackerStats,
 	MeshNode,
@@ -128,6 +130,7 @@ import type {
 import type { MeshTracker } from "../core/mesh-tracker.js"
 import type { AprsTracker } from "../core/aprs-tracker.js"
 import { EntityUpdateThrottle } from "../core/entity-update-throttle.js"
+import { AircraftUpdatePublisher } from "./websocket/aircraft-updates.js"
 import { installAccessHooks } from "../access/fastify-adapter.js"
 import type { FastifyAccessController } from "../access/fastify-adapter.js"
 import { registerAccessRoutes } from "../access/access-routes.js"
@@ -318,6 +321,8 @@ export class ApiServer {
 	private readonly aircraftIdentity?:
 		| Pick<AircraftIdentityManager, "resolve">
 		| undefined
+	/** Detaches the aircraft tracker listeners and stops its update publisher. */
+	private aircraftWiring: (() => void) | null = null
 	/** Detaches the vessel tracker listeners; the tracker outlives the server. */
 	private vesselWiring: (() => void) | null = null
 	private readonly meshTracker?: MeshTracker | undefined
@@ -721,6 +726,10 @@ export class ApiServer {
 			this.spectrumWiring = null
 		})
 		await attempt(() => {
+			this.aircraftWiring?.()
+			this.aircraftWiring = null
+		})
+		await attempt(() => {
 			this.vesselWiring?.()
 			this.vesselWiring = null
 		})
@@ -976,23 +985,33 @@ export class ApiServer {
 			})
 		}
 
-		// Aircraft tracker events (ADS-B specific)
+		// Aircraft tracker events (ADS-B specific); updates ≤ 1 Hz per aircraft with trail deltas
 		if (this.aircraftTracker) {
-			this.aircraftTracker.on("aircraft:new", aircraft => {
-				this.wsBroadcaster.broadcastAircraftNew(aircraft)
+			const tracker = this.aircraftTracker
+			const publisher = new AircraftUpdatePublisher({
+				publishNew: aircraft =>
+					this.wsBroadcaster.broadcastAircraftNew(aircraft),
+				publishUpdate: data => this.wsBroadcaster.broadcastAircraftUpdate(data),
+				publishLost: (icao, aircraft) =>
+					this.wsBroadcaster.broadcastAircraftLost(icao, aircraft),
 			})
-
-			this.aircraftTracker.on("aircraft:update", aircraft => {
-				this.wsBroadcaster.broadcastAircraftUpdate(aircraft)
-			})
-
-			this.aircraftTracker.on("aircraft:lost", (icao, aircraft) => {
-				this.wsBroadcaster.broadcastAircraftLost(icao, aircraft)
-			})
-
-			this.aircraftTracker.on("stats:update", stats => {
+			const onNew = (aircraft: AircraftState) => publisher.onNew(aircraft)
+			const onUpdate = (aircraft: AircraftState) => publisher.onUpdate(aircraft)
+			const onLost = (icao: string, aircraft: AircraftState) =>
+				publisher.onLost(icao, aircraft)
+			const onStats = (stats: AircraftTrackerStats) =>
 				this.wsBroadcaster.broadcastAircraftStats(stats)
-			})
+			tracker.on("aircraft:new", onNew)
+			tracker.on("aircraft:update", onUpdate)
+			tracker.on("aircraft:lost", onLost)
+			tracker.on("stats:update", onStats)
+			this.aircraftWiring = () => {
+				publisher.stop()
+				tracker.off("aircraft:new", onNew)
+				tracker.off("aircraft:update", onUpdate)
+				tracker.off("aircraft:lost", onLost)
+				tracker.off("stats:update", onStats)
+			}
 		}
 
 		// AIS vessel tracker events (WG1 req 6.4); updates through the 2 s throttle (WG2 req 9.4)
