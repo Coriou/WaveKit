@@ -249,6 +249,7 @@ import {
 	type RuntimeSettingsOverrides,
 } from "./store/persistence.js"
 import { SCANNER_LOAD_SLICE_ITEMS, yieldToEventLoop } from "./store/slices.js"
+import { snapshotIntervalMs } from "./store/snapshot-cadence.js"
 import { PassiveGuard } from "./passive-guard.js"
 import { PASSIVE_COST_LIMIT_DEFAULT } from "./passive-cost-contract.js"
 import {
@@ -524,9 +525,6 @@ const COVERAGE_EVENTS = [
 	"decoder:status-changed",
 ] as const
 
-const SNAPSHOT_EVERY_MS = 10_000
-/** Fastest on-demand snapshot after a journal hole (a full-store clone + stringify each). */
-const SNAPSHOT_REQUEST_MIN_MS = 1_000
 const MAINTENANCE_EVERY_MS = 5 * 60_000
 const STATUS_EVERY_MS = 1_000
 /** WG15 DQ 7.8: consolidation groups applied per event-loop turn at start-up. */
@@ -7813,9 +7811,10 @@ export class ScannerService extends EventEmitter {
 
 	/**
 	 * A journal hole (refused or failed lines) blocks every append, recording operations
-	 * included, until a snapshot covers it: snapshot now instead of at the next 10 s interval,
-	 * still single-flight and at most once per SNAPSHOT_REQUEST_MIN_MS (the tick picks a
-	 * deferred request up), or per SNAPSHOT_EVERY_MS after a failed snapshot.
+	 * included, until a snapshot covers it: snapshot now instead of at the next periodic
+	 * interval, still single-flight and spaced by `snapshotIntervalMs` (1 s while the snapshot
+	 * worker takes it, 1 s per MiB when the main thread must build it, at least 10 s after a
+	 * failed snapshot); the tick picks a deferred request up.
 	 */
 	private requestSnapshot(): void {
 		this.dirty = true
@@ -7825,11 +7824,19 @@ export class ScannerService extends EventEmitter {
 			this.startSnapshot(now)
 	}
 
-	/** A failing disk falls back to the periodic interval: no full-store stringify every second. */
+	/**
+	 * Size-scaled (store/snapshot-cadence.ts): the journal covers every mutation between
+	 * snapshots, so a large store is rewritten about hourly, sooner once its journal tail grows
+	 * past the trigger or a hole needs covering.
+	 */
 	private snapshotInterval(): number {
-		return this.snapshotRequested && !this.snapshotFailed
-			? SNAPSHOT_REQUEST_MIN_MS
-			: SNAPSHOT_EVERY_MS
+		const cadence = this.persistence.snapshotCadence()
+		return snapshotIntervalMs({
+			...cadence,
+			maxJournalBytes: this.settings().storage.maxJournalMb * 1024 * 1024,
+			requested: this.snapshotRequested,
+			failed: this.snapshotFailed,
+		})
 	}
 
 	/** Tick work stop() awaits (S1-B final review, finding 5). Never rejects. */
