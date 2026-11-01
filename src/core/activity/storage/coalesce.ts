@@ -520,6 +520,17 @@ interface Evicted {
 	dueAt: number
 }
 
+/**
+ * The queued rows of one key that carry held receptions, not yet written or
+ * failed. Marked superseded once the key is tracked again (a first sighting
+ * after eviction): those rows hold older state than the newer row queued
+ * behind them, whatever happens to the entity afterwards.
+ */
+interface Outstanding {
+	rows: number
+	superseded: boolean
+}
+
 function undoOf(undo: () => boolean, settle: () => void): CoalesceUndo {
 	return Object.assign(undo, { settle })
 }
@@ -593,6 +604,13 @@ export class PositionCoalescer {
 	private readonly retrying = new Set<Evicted>()
 	/** The waiting evicted row of each key (at most one: see addEvicted). */
 	private readonly evictedByKey = new Map<string, Evicted>()
+	/**
+	 * Keys with queued rows that carry held receptions (a written or failed
+	 * row releases its count). One entry per such key, about 100 B with its
+	 * key, so at most one per queued or in-flight row: bounded by the store
+	 * queue's item cap, not by maxEntities.
+	 */
+	private readonly outstanding = new Map<string, Outstanding>()
 	coalesced = 0
 	/**
 	 * Evicted rows dropped because their entity was tracked again: its newer
@@ -627,6 +645,11 @@ export class PositionCoalescer {
 	/** Evicted entities whose held row is not queued yet (at most maxEntities). */
 	evictedCount(): number {
 		return this.evicted.size + this.retrying.size
+	}
+
+	/** Keys with queued rows of held receptions not yet written or failed. */
+	outstandingCount(): number {
+		return this.outstanding.size
 	}
 
 	/**
@@ -819,15 +842,21 @@ export class PositionCoalescer {
 			commit: () => {
 				this.removeEvicted(entry)
 				let pending: Evicted | undefined = entry
+				const token = this.trackOutstanding(entry.key)
 				return undoOf(
 					() => {
 						// Waits a window for its next try (or is superseded, or
 						// counted lost past the bound).
-						if (pending !== undefined) this.addEvicted(pending, true)
+						if (pending !== undefined) {
+							if (token.superseded) this.superseded++
+							else this.addEvicted(pending, true)
+							this.releaseOutstanding(entry.key, token)
+						}
 						pending = undefined
 						return true
 					},
 					() => {
+						if (pending !== undefined) this.releaseOutstanding(entry.key, token)
 						pending = undefined
 					},
 				)
@@ -877,12 +906,38 @@ export class PositionCoalescer {
 			this.evictedByKey.delete(entry.key)
 	}
 
-	/** The entity is tracked again: its waiting evicted row is superseded. */
+	/**
+	 * The entity is tracked again: its waiting evicted row is superseded, and
+	 * so is every queued row of its held receptions should its write fail.
+	 */
 	private supersede(key: string): void {
+		const outstanding = this.outstanding.get(key)
+		if (outstanding !== undefined) {
+			outstanding.superseded = true
+			this.outstanding.delete(key)
+		}
 		const entry = this.evictedByKey.get(key)
 		if (entry === undefined) return
 		this.removeEvicted(entry)
 		this.superseded++
+	}
+
+	/** One more queued row of the key's held receptions. O(1). */
+	private trackOutstanding(key: string): Outstanding {
+		let outstanding = this.outstanding.get(key)
+		if (outstanding === undefined) {
+			outstanding = { rows: 0, superseded: false }
+			this.outstanding.set(key, outstanding)
+		}
+		outstanding.rows++
+		return outstanding
+	}
+
+	/** The row was written or failed; the key's last one frees its entry. */
+	private releaseOutstanding(key: string, outstanding: Outstanding): void {
+		outstanding.rows--
+		if (outstanding.rows <= 0 && this.outstanding.get(key) === outstanding)
+			this.outstanding.delete(key)
 	}
 
 	private heldFlush(
@@ -995,6 +1050,7 @@ export class PositionCoalescer {
 			prev: state.storedAt,
 		}
 		state.storedAt = clock
+		const token = carried === undefined ? undefined : this.trackOutstanding(key)
 		this.entities.delete(key)
 		this.entities.set(key, state)
 		this.evict()
@@ -1003,8 +1059,13 @@ export class PositionCoalescer {
 		const undo = (): boolean => {
 			clock.failed = true
 			for (const [, stamp] of fields) stamp.failed = true
-			// The held receptions the row carried are held again, never lost.
-			if (carried !== undefined) this.restoreHeld(key, owner, carried)
+			// The held receptions the row carried are held again, never lost,
+			// unless the entity was tracked again since (superseded).
+			if (carried !== undefined && token !== undefined) {
+				if (token.superseded) this.superseded++
+				else this.restoreHeld(key, owner, carried)
+				this.releaseOutstanding(key, token)
+			}
 			carried = undefined
 			const current = this.entities.get(key)
 			if (!current) return flushed !== undefined
@@ -1025,6 +1086,8 @@ export class PositionCoalescer {
 		}
 		const settle = () => {
 			clock.prev = undefined
+			if (carried !== undefined && token !== undefined)
+				this.releaseOutstanding(key, token)
 			carried = undefined
 			for (const [, stamp] of fields) stamp.prev = undefined
 		}

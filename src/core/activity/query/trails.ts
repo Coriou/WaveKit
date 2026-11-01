@@ -181,8 +181,8 @@ export type TrailOlderResolver = (candidates: readonly string[]) => {
 }
 
 /**
- * Greedy newest-first acceptance over rows already ordered by
- * (produced_at_ms DESC, seq DESC). `rows` may hold one row past
+ * Greedy newest-first acceptance, by point time, over rows already ordered
+ * by (produced_at_ms DESC, seq DESC). `rows` may hold one row past
  * `limits.scanRows`; that row only signals the scan-rows bound.
  * Every scanned row (valid or not) counts toward the scan cap.
  */
@@ -229,10 +229,93 @@ export interface TrailAcceptor {
 	): AcceptedTrails
 }
 
-/** Incremental form of acceptTrailRows, so the reader can stop the SQL walk early. */
+/** A valid scanned row waiting for its place in heard-time order. */
+interface Pending {
+	row: TrailRow
+	position: TrailPosition
+	pointMs: number
+	/** Scan order: breaks ties of equal point time (the earlier scanned is newer). */
+	order: number
+}
+
+/** Pending rows newest point first (binary max-heap on point time, then scan order). */
+class PendingHeap {
+	private readonly items: Pending[] = []
+
+	get size(): number {
+		return this.items.length
+	}
+
+	peek(): Pending | undefined {
+		return this.items[0]
+	}
+
+	values(): readonly Pending[] {
+		return this.items
+	}
+
+	push(item: Pending): void {
+		const items = this.items
+		let at = items.push(item) - 1
+		while (at > 0) {
+			const parent = (at - 1) >> 1
+			const above = items[parent] as Pending
+			if (!newer(item, above)) break
+			items[at] = above
+			at = parent
+		}
+		items[at] = item
+	}
+
+	pop(): Pending | undefined {
+		const items = this.items
+		const top = items[0]
+		const last = items.pop()
+		if (top === undefined || last === undefined || items.length === 0)
+			return top
+		let at = 0
+		for (;;) {
+			const left = 2 * at + 1
+			if (left >= items.length) break
+			const right = left + 1
+			const leftItem = items[left] as Pending
+			const rightItem = items[right]
+			const child =
+				rightItem !== undefined && newer(rightItem, leftItem) ? right : left
+			const childItem = items[child] as Pending
+			if (!newer(childItem, last)) break
+			items[at] = childItem
+			at = child
+		}
+		items[at] = last
+		return top
+	}
+}
+
+function newer(left: Pending, right: Pending): boolean {
+	return left.pointMs !== right.pointMs
+		? left.pointMs > right.pointMs
+		: left.order < right.order
+}
+
+/**
+ * Incremental form of acceptTrailRows, so the reader can stop the SQL walk early.
+ *
+ * Rows arrive in store order (producedAt descending) but the bounds keep the
+ * newest points by point time (heardAtMs, else producedAt). A point is never
+ * later than its row's producedAt, so once the scan reaches producedAt S no
+ * later row can have a point newer than S: every pending point at S or newer
+ * is accepted then, newest first, and the caps see points in exact point-time
+ * order. Pending rows are those stored after their point time S' and before
+ * the scan position, so a flushed row (at most one coalescing window, 60 s,
+ * later than heard; more only after failed writes) waits about one window of
+ * rows: at a busy store's 21,700 rows an hour, about 360. Never more than the
+ * scanned rows (scanRows); each costs O(log pending).
+ */
 export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 	const hit = new Set<ActivityTrailsTruncation>()
 	const byEntity = new Map<string, Building>()
+	const pending = new PendingHeap()
 	let pointCount = 0
 	let scannedRows = 0
 	let skippedRows = 0
@@ -242,19 +325,38 @@ export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 		if (stopped || scannedRows >= limits.scanRows) return false
 		scannedRows += 1
 		const position = parseTrailPosition(row.position)
-		if (position === null) {
-			skippedRows += 1
-			return true
+		if (position === null) skippedRows += 1
+		else
+			pending.push({
+				row,
+				position,
+				pointMs: row.heardAtMs ?? row.producedAtMs,
+				order: scannedRows,
+			})
+		return release(row.producedAtMs)
+	}
+
+	/** Accepts every pending point at `fromMs` or newer, newest first. False: stopped. */
+	function release(fromMs: number): boolean {
+		for (;;) {
+			const next = pending.peek()
+			if (next === undefined || next.pointMs < fromMs) return true
+			pending.pop()
+			if (!accept(next)) {
+				stopped = true
+				return false
+			}
 		}
+	}
+
+	function accept({ row, position, pointMs }: Pending): boolean {
 		const trail = byEntity.get(row.entityKey)
 		if (pointCount >= limits.maxPoints) {
-			// The scan stops at the point cap; this row is the refused one.
+			// The scan stops at the point cap; this point is the refused one.
 			hit.add("points")
 			if (trail) trail.truncated = true
-			stopped = true
 			return false
 		}
-		const pointMs = row.heardAtMs ?? row.producedAtMs
 		const point: ActivityTrailPoint = [
 			pointMs,
 			position.lat,
@@ -266,6 +368,7 @@ export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 				hit.add("entities")
 				return true
 			}
+			// Its newest point: the trail's category and protocol are this row's.
 			byEntity.set(row.entityKey, {
 				entityKey: row.entityKey,
 				category: row.category,
@@ -283,7 +386,6 @@ export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 			return true
 		}
 		trail.points.push(point)
-		if (pointMs > trail.newestMs) trail.newestMs = pointMs
 		pointCount += 1
 		return true
 	}
@@ -296,7 +398,13 @@ export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 		if (moreRows && !stopped && scannedRows >= limits.scanRows)
 			hit.add("scan-rows")
 		if (timeLimited && !stopped) hit.add("time-limit")
+		// The scan is over: what is pending is accepted (or the point cap stops it).
+		if (!stopped) release(Number.NEGATIVE_INFINITY)
 		const built = [...byEntity.values()]
+		// A pending row left at a stop is a valid in-window point of its entity.
+		const left = new Set(pending.values().map(item => item.row.entityKey))
+		for (const entry of built)
+			if (left.has(entry.entityKey)) entry.truncated = true
 		if (
 			resolveOlder &&
 			(hit.has("scan-rows") || hit.has("points") || hit.has("time-limit"))
@@ -320,9 +428,8 @@ export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 			entityKey: entry.entityKey,
 			category: entry.category,
 			protocol: entry.protocol,
-			// Oldest first by point time (stable: scan order breaks ties); a
-			// flushed row's heard time can precede a row stored before it.
-			points: entry.points.reverse().sort((left, right) => left[0] - right[0]),
+			// Accepted newest point first: oldest first now.
+			points: entry.points.reverse(),
 			truncated: entry.truncated,
 		}))
 		const truncation = TRUNCATION_ORDER.filter(bound => hit.has(bound))

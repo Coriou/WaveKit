@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest"
 import { createActivityIngress } from "../../../../../src/core/activity/ingress.js"
 import type { ActivityKnownAircraft } from "../../../../../src/core/activity/ingress.js"
+import { PositionCoalescer } from "../../../../../src/core/activity/storage/coalesce.js"
+import type { CoalesceUndo } from "../../../../../src/core/activity/storage/coalesce.js"
 import { ActivityIngress } from "../../../../../src/core/activity/storage/ingress.js"
 import {
 	ACTIVITY_LIMIT_DEFAULTS,
@@ -149,6 +151,55 @@ describe("a stale evicted row never lists after its entity's newer row", () => {
 		expect(drain(i).map(r => r.eventId)).toEqual([`A00001-${T0 + 300}`])
 	})
 
+	it("drops an evicted row in flight whose entity came back and was evicted again", () => {
+		const clock = { t: T0 }
+		const i = evictA(clock)
+		const batch = i.takeBatch(64, 1 << 20)
+		expect(batch.map(r => r.eventId)).toContain(HELD_A)
+		// A comes back (evicting B), then C evicts the new A: neither is tracked or waiting.
+		clock.t = T0 + 300
+		expect(i.admit(plane("A00001", clock.t, 3)).admitted).toBe(true)
+		clock.t = T0 + 400
+		expect(i.admit(plane("C00001", clock.t)).admitted).toBe(true)
+		i.nack()
+		expect(i.coalesceSuperseded).toBe(1)
+		expect(i.heldEvictedCount()).toBe(0)
+		clock.t += 2 * WINDOW
+		i.flushCoalesced(clock.t)
+		const rows = drain(i).map(r => r.eventId)
+		expect(rows).toEqual([`A00001-${T0 + 300}`, `C00001-${T0 + 400}`])
+	})
+
+	it("drops a due held row in flight whose entity was evicted, came back and was evicted again", () => {
+		const clock = { t: T0 }
+		const i = ingress(clock, { positionCoalesceMaxEntities: 1 })
+		expect(i.admit(plane("A00001", T0)).admitted).toBe(true)
+		drain(i)
+		clock.t = T0 + 100
+		expect(i.admit(plane("A00001", clock.t, 1.5))).toMatchObject({
+			reason: "coalesced",
+		})
+		clock.t = T0 + 100 + WINDOW
+		i.flushCoalesced(clock.t)
+		const batch = i.takeBatch(64, 1 << 20)
+		expect(batch.map(r => r.eventId)).toEqual([HELD_A])
+		clock.t += 100
+		expect(i.admit(plane("B00001", clock.t)).admitted).toBe(true)
+		clock.t += 100
+		expect(i.admit(plane("A00001", clock.t, 3)).admitted).toBe(true)
+		const newer = `A00001-${clock.t}`
+		clock.t += 100
+		expect(i.admit(plane("C00001", clock.t)).admitted).toBe(true)
+		i.nack()
+		expect(i.coalesceSuperseded).toBe(1)
+		expect(i.heldEvictedCount()).toBe(0)
+		clock.t += 2 * WINDOW
+		i.flushCoalesced(clock.t)
+		const rows = drain(i).map(r => r.eventId)
+		expect(rows).toContain(newer)
+		expect(rows).not.toContain(HELD_A)
+	})
+
 	it("keeps an evicted row whose entity is still away", () => {
 		const clock = { t: T0 }
 		const i = evictA(clock)
@@ -255,5 +306,38 @@ describe("a fading aircraft's final flush keeps the identity its rows carried", 
 		const rows = drain(h.store)
 		expect(rows).toHaveLength(2)
 		for (const row of rows) expect(stored(row).aircraft).toBeUndefined()
+	})
+})
+
+describe("supersession bookkeeping stays bounded by the rows in flight", () => {
+	it("frees every key once its rows are written or failed, through 1,000 evictions", () => {
+		const clock = { t: T0 }
+		const c = new PositionCoalescer(WINDOW, 1, () => clock.t)
+		const pending: CoalesceUndo[] = []
+		let tracked = 0
+		for (let k = 0; k < 1_000; k++) {
+			const icao = `A0${(0xc000 + (k % 7)).toString(16).toUpperCase()}`
+			clock.t += 10
+			const first = c.decide(plane(icao, clock.t))
+			if (first.store) first.commit().settle()
+			clock.t += 10
+			expect(c.decide(plane(icao, clock.t, 1.5)).store).toBe(false)
+			clock.t += 10
+			const other = c.decide(plane("B00001", clock.t))
+			if (other.store) pending.push(other.commit())
+			for (const flush of c.dueFlushes(clock.t)) pending.push(flush.commit())
+			// At most one entry per unsettled row; settle or fail them in turn.
+			expect(c.outstandingCount()).toBeLessThanOrEqual(pending.length)
+			if (c.outstandingCount() > 0) tracked++
+			for (const [n, undo] of pending.reverse().entries())
+				if ((k + n) % 2 === 0) undo.settle()
+				else undo()
+			pending.length = 0
+			for (const flush of c.dueFlushes(clock.t + 2 * WINDOW))
+				flush.commit().settle()
+			expect(c.outstandingCount()).toBe(0)
+		}
+		expect(tracked).toBe(1_000)
+		expect(c.evictedCount()).toBe(0)
 	})
 })

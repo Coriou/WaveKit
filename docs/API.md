@@ -5915,7 +5915,10 @@ Query parameters (an unknown one is 400 `ACTIVITY_QUERY_INVALID`):
   may contain them).
 
 Rows are read newest first (`producedAt`, then `commitSeq`, descending) and
-accepted greedily under four bounds:
+their points accepted greedily, newest point time first, under four bounds
+(the bounds count point times, so a flushed row heard earlier than the rows
+stored after it is the older point; it waits until the scan passes its heard
+time, about one coalescing window of rows):
 
 | Bound        | Value   | When reached                                                                               |
 | ------------ | ------- | ------------------------------------------------------------------------------------------ |
@@ -5924,7 +5927,8 @@ accepted greedily under four bounds:
 | `entities`   | 2,000   | Trails; a row of a new entity is refused, the scan goes on for the accepted ones           |
 | `per-entity` | 1,440   | Points in one trail (24 h at the 60 s coalescing interval); older points of it are refused |
 
-So every trail holds the newest points of its entity in the window. A trail whose
+So every trail holds the newest points of its entity in the window, and the
+`entities` bound keeps the most recently heard entities. A trail whose
 older in-window points were not returned has `truncated: true`; when the scan
 stopped early (`scan-rows`, `points` or `time-limit`) the walk continues past the
 stop, reading positions only for the returned trails not yet marked, to find those
