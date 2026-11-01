@@ -15,14 +15,15 @@ pnpm exec esbuild scripts/longevity/<name>.ts --bundle --platform=node \
 node --expose-gc output/longevity/<name>.mjs [flags]
 ```
 
-| Harness               | What it reports                                                                                                                                                                                              |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `activity-growth.ts`  | Activity rows per hour and on-disk bytes per row for a traffic profile (`--profile busy\|quiet\|adsb\|paging\|ism`, `--minutes`), hours to the byte cap, reopen time, size of one "Decoded Message" log line |
-| `activity-queries.ts` | EXPLAIN QUERY PLAN, first and median time of the hot Activity reads and the retention seed scan (`--db`), reopen time (`--state-dir`, a copy)                                                                |
-| `reader-stall.ts`     | Facets read and a search burst through the query service in worker mode, with a main-thread stall (`--state-dir` copy, `--stall` ms); needs the query worker bundled next to it (see its header)             |
-| `scanner-state.ts`    | Scanner snapshot size, snapshot write time, `load()` and `restoreInSlices` time and event-loop delay for `--discoveries` × `--obs-per`                                                                       |
-| `memory-soak.ts`      | Heap after GC over time: `--part iq` (fake rtl_tcp → SourceManager → FanoutManager, real time) or `--part tracking` (fake clock, rotating aircraft through the tracker and Activity admission)               |
-| `ws-payloads.ts`      | Bytes and JSON.stringify cost of `aircraft:update` by trail length and `spectrum:frame` by bin count                                                                                                         |
+| Harness               | What it reports                                                                                                                                                                                                          |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `activity-growth.ts`  | Activity rows per hour and on-disk bytes per row for a traffic profile (`--profile busy\|quiet\|adsb\|paging\|ism`, `--minutes`), hours to the byte cap, reopen time, size of one "Decoded Message" log line             |
+| `activity-queries.ts` | EXPLAIN QUERY PLAN, first and median time of the hot Activity reads and the retention seed scan (`--db`), reopen time (`--state-dir`, a copy)                                                                            |
+| `reader-stall.ts`     | Facets read and a search burst through the query service in worker mode, with a main-thread stall (`--state-dir` copy, `--stall` ms, `--phase poll\|timers`); needs the query worker bundled next to it (see its header) |
+| `facets-index.ts`     | Facets read time (wall and CPU, current and pre-WG19 algorithm) before and after the `activity_facets` index on a synthetic cap-size store (`--rows`, default 250 000), the index build time and size, plans after       |
+| `scanner-state.ts`    | Scanner snapshot size, snapshot write time, `load()` and `restoreInSlices` time and event-loop delay for `--discoveries` × `--obs-per`                                                                                   |
+| `memory-soak.ts`      | Heap after GC over time: `--part iq` (fake rtl_tcp → SourceManager → FanoutManager, real time) or `--part tracking` (fake clock, rotating aircraft through the tracker and Activity admission)                           |
+| `ws-payloads.ts`      | Bytes and JSON.stringify cost of `aircraft:update` by trail length and `spectrum:frame` by bin count                                                                                                                     |
 
 Keep each run short on a shared machine: every harness prints the load average
 it saw, so compare numbers taken at a similar load.

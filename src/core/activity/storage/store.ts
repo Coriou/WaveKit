@@ -178,6 +178,8 @@ export async function openActivityStore(
 				}
 				throw error
 			}
+			// Inline (tests, harnesses): the worker's post-open facets index build, on the caller.
+			session.buildFacetsIndex()
 			const writer = options.inlineWriter?.(session)
 			const store = new ActivityStore(
 				dbPath,
@@ -417,6 +419,19 @@ export class ActivityWriterClient implements ActivityWriter {
 		if (raw.type === "seeded") {
 			this.lastSeeded = raw.snapshot
 			this.seeded?.(raw.snapshot)
+			return
+		}
+		if (raw.type === "indexed") {
+			if (raw.error !== undefined)
+				this.logger.warn(
+					{ built: raw.built, ms: Math.round(raw.ms), error: raw.error },
+					"activity facets index build failed; facets reads stay on the row scan",
+				)
+			else if (raw.built)
+				this.logger.info(
+					{ ms: Math.round(raw.ms) },
+					"activity facets index built",
+				)
 			return
 		}
 		const waiter = this.pending.get(raw.id)

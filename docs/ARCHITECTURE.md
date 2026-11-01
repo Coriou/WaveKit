@@ -515,8 +515,13 @@ The store opens in the background (`src/core/activity/lifecycle.ts`), started
 before the scanner loads its state, so neither waits for the other. The writer
 answers the open after its indexed reads; the full-table retention seed scan
 runs next on the writer thread, before its first write, so the open no longer
-grows with the database (5 s budget). A failed open is retried after 5 s, 15 s
-and 60 s, then every 5 minutes; a missing `node:sqlite` or a foreign schema is
+grows with the database (5 s budget). After the seed, a store that predates it
+gets the `activity_facets` covering index (`ensureFacetsIndex` in
+`src/core/activity/storage/database.ts`), also on the writer thread: 1.1 s at
+250,000 rows on a Mac at load average 17, up to 6.4 s at 160 to 180 (see
+[PERFORMANCE.md](PERFORMANCE.md#activity-reads-2026-11-01)). Writes wait behind
+it as they do behind the seed; readers are correct without it and use it from
+their next read. A failed open is retried after 5 s, 15 s and 60 s, then every 5 minutes; a missing `node:sqlite` or a foreign schema is
 not retried. Receptions and transmissions while the store is not open are
 counted (`droppedWhileClosed`), not buffered. The writer is never opened twice,
 and a timed-out writer is terminated, which frees its lock.

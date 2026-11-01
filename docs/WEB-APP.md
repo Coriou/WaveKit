@@ -212,6 +212,10 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   While the core is still opening its Activity store, the drawer says `Activity is starting…`; if
   an open failed and the core is retrying, it says `Activity store unavailable, retrying`. It checks
   again every 3 s and loads the list by itself once the store opens.
+  The counts on the category filters follow new rows every 4 s while the list is live. When the
+  core is slow to count (a large store on a busy host) they refresh less often, at most once a
+  minute: 50 times the last count's duration, and doubling after each failed count. Changing the
+  search, a filter or the range recounts at once.
   Repeats fold into one row per thing going on (see [Activity folding](#activity-folding)).
 - **Scanner:** watch the band in view or plan a scan, see the signals found, skip the ones you do
   not care about, save presets.

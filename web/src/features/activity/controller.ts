@@ -146,6 +146,32 @@ export function searchKey(
 }
 
 let columnSeq = 0
+/** Live chip-count refresh floor: the cadence while counts are cheap. */
+export const LIVE_COUNTS_MS = 4_000
+/** A counts read may take at most 1/50 (2%) of the time between live refreshes. */
+const LIVE_COUNTS_COST_FACTOR = 50
+/** Ceiling: chips are at most a minute behind while live rows stream. */
+export const LIVE_COUNTS_MAX_MS = 60_000
+
+/**
+ * Delay before the next live chip-count refresh. 4 s while the facets read is fast (a
+ * 10 ms read stretches to 0.5 s, under the floor); a slow read stretches it to 50x its
+ * duration (250 ms -> 12.5 s) so a store at its cap does not keep the single reader busy;
+ * each failed read in a row doubles the floor (4, 8, 16, 32 s), and both stop at 60 s.
+ * A user change (search, chip, range) still refreshes at once.
+ */
+export function liveCountsDelayMs(
+	lastReadMs: number,
+	failures: number,
+): number {
+	const stretched = Math.max(0, lastReadMs) * LIVE_COUNTS_COST_FACTOR
+	const backoff = LIVE_COUNTS_MS * 2 ** Math.min(Math.max(0, failures), 4)
+	return Math.min(
+		LIVE_COUNTS_MAX_MS,
+		Math.max(LIVE_COUNTS_MS, stretched, backoff),
+	)
+}
+
 const newColumnId = () =>
 	`col-${Date.now().toString(36)}-${(columnSeq++).toString(36)}`
 
@@ -155,6 +181,9 @@ export class ActivityController extends Store<ActivityViewState> {
 	private attached = 0
 	private countsAbort: AbortController | null = null
 	private countsTimer: ReturnType<typeof setTimeout> | null = null
+	/** Duration of the last answered counts read and failures since, for the live cadence. */
+	private countsReadMs = 0
+	private countsFailures = 0
 	private readonly offFeed: () => void
 	/** One feed per column, kept while the column exists; it follows the core only while the drawer is open. */
 	private readonly columnFeeds = new Map<string, ActivityFeed>()
@@ -186,7 +215,9 @@ export class ActivityController extends Store<ActivityViewState> {
 				s.status === "live" &&
 				prev.status === "live"
 			)
-				this.scheduleCounts(4000)
+				this.scheduleCounts(
+					liveCountsDelayMs(this.countsReadMs, this.countsFailures),
+				)
 		})
 	}
 
@@ -620,12 +651,15 @@ export class ActivityController extends Store<ActivityViewState> {
 		}
 		const abort = new AbortController()
 		this.countsAbort = abort
+		const started = performance.now()
 		try {
 			const byCategory = await fetchCategoryCounts(
 				this.data.api,
 				base,
 				abort.signal,
 			)
+			this.countsReadMs = performance.now() - started
+			this.countsFailures = 0
 			const counts: Record<string, number> = {}
 			for (const chip of CATEGORY_CHIPS)
 				counts[chip.id] = chip.categories.reduce(
@@ -635,6 +669,8 @@ export class ActivityController extends Store<ActivityViewState> {
 			if (!abort.signal.aborted) this.update(v => ({ ...v, counts }))
 		} catch {
 			// Counts are a hint: an older core without facets leaves the chips bare.
+			// A failure (busy or timed-out reader) slows the live refresh; an abort is not one.
+			if (!abort.signal.aborted) this.countsFailures += 1
 		}
 	}
 }

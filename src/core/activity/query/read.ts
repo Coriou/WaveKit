@@ -315,26 +315,51 @@ function facets(
 		after: null,
 	})
 	appendFilters(where, params, request.query)
-	const selected = request.dimensions
-		.map(dimension => `${FACET_COLUMN[dimension]} AS ${dimension}`)
-		.join(", ")
+	const columns = request.dimensions.map(
+		dimension => `${FACET_COLUMN[dimension]} AS ${dimension}`,
+	)
+	const names = request.dimensions.join(", ")
 	// One extra row distinguishes "exactly scanCap matches" from a truncated scan.
 	params.push(request.scanCap + 1)
-	const sql = `SELECT ${selected} FROM activity WHERE ${where.join(" AND ")} ORDER BY seq DESC LIMIT ?`
-	const found = db.prepare(sql).all(...params)
-	const truncated = found.length > request.scanCap
-	const scannedRows = truncated ? found.slice(0, request.scanCap) : found
-	const facetsOut = emptyFacets(request.dimensions)
+	// WG19: SQLite counts; only the distinct value combinations (tens, not 50 001 rows) cross
+	// into JS. With the activity_facets covering index the scan reads index entries only;
+	// without it the same statement walks rowids (correct, slower).
+	const sql = `WITH scan AS (SELECT seq, ${columns.join(", ")} FROM activity WHERE ${where.join(" AND ")} ORDER BY seq DESC LIMIT ?) SELECT ${names}, COUNT(*) AS n, MIN(seq) AS low FROM scan GROUP BY ${names}`
+	const groups = db.prepare(sql).all(...params)
 	const counts = new Map<FacetDimension, Map<string | null, number>>()
 	for (const dimension of request.dimensions) counts.set(dimension, new Map())
-	for (const row of scannedRows) {
+	const add = (row: Record<string, unknown>, by: number): void => {
 		for (const dimension of request.dimensions) {
 			const bucket = counts.get(dimension)
 			if (!bucket) continue
 			const value = facetValue(row[dimension] ?? null)
-			bucket.set(value, (bucket.get(value) ?? 0) + 1)
+			const next = (bucket.get(value) ?? 0) + by
+			if (next > 0) bucket.set(value, next)
+			else bucket.delete(value)
 		}
 	}
+	let matched = 0
+	let lowest: bigint | null = null
+	for (const group of groups) {
+		const n = group["n"]
+		if (typeof n !== "number" && typeof n !== "bigint")
+			throw new ActivityReaderFailedError("Activity facet count is unreadable")
+		matched += Number(n)
+		const low = seqFromSqlite(group["low"])
+		if (lowest === null || low < lowest) lowest = low
+		add(group, Number(n))
+	}
+	const truncated = matched > request.scanCap
+	if (truncated && lowest !== null) {
+		// The extra row is the oldest one scanned: take it back out of the counts.
+		const extra = db
+			.prepare(`SELECT ${columns.join(", ")} FROM activity WHERE seq = ?`)
+			.get(bindSeq(lowest))
+		if (!extra)
+			throw new ActivityReaderFailedError("Activity facet row vanished")
+		add(extra, -1)
+	}
+	const facetsOut = emptyFacets(request.dimensions)
 	for (const dimension of request.dimensions) {
 		const bucket = counts.get(dimension) ?? new Map<string | null, number>()
 		const ranked = [...bucket.entries()].map(([value, count]) => ({
@@ -353,7 +378,7 @@ function facets(
 	return {
 		op: "facets",
 		facets: facetsOut,
-		scanned: scannedRows.length,
+		scanned: truncated ? request.scanCap : matched,
 		truncated,
 	}
 }

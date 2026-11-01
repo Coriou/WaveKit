@@ -9,6 +9,7 @@ import {
 	activityCapActive,
 	activityLowWater,
 	commitActivityBatch,
+	ensureFacetsIndex,
 	openActivityDatabase,
 	pruneActivityFair,
 	pruneActivityPrefix,
@@ -77,9 +78,21 @@ export interface ActivitySession {
 	 * calls it first, so a write never runs against unseeded counters.
 	 */
 	seedCounters(): void
+	/**
+	 * WG19: builds the facets covering index when the store predates it. The worker runs it
+	 * on its serial chain after the seed, off the open path; a failure leaves readers on the
+	 * rowid scan (still correct) and is retried on the next open.
+	 */
+	buildFacetsIndex(): FacetsIndexBuild
 	write(rows: readonly BuiltActivityRow[], nowMs: number): WriterWorkResult
 	checkpoint(reason: "threshold" | "close"): ActivityWorkerSnapshot
 	close(): void
+}
+
+export interface FacetsIndexBuild {
+	built: boolean
+	ms: number
+	error?: string
 }
 
 /**
@@ -142,6 +155,7 @@ export function createActivitySession(
 		seed()
 	}
 	if (options.deferSeed !== true) seedOnce()
+	let facetsIndexChecked = false
 	if (state.walBytes >= limits.walPassiveBytes || paused) {
 		const wal = syncActivityWal(db, dbPath, limits)
 		paused = wal.paused
@@ -397,6 +411,24 @@ export function createActivitySession(
 		},
 		snapshot,
 		seedCounters: seedOnce,
+		buildFacetsIndex() {
+			if (facetsIndexChecked) return { built: false, ms: 0 }
+			facetsIndexChecked = true
+			let build: FacetsIndexBuild
+			try {
+				build = ensureFacetsIndex(db)
+			} catch (error) {
+				return { built: false, ms: 0, error: messageOf(error) }
+			}
+			if (!build.built) return build
+			try {
+				// The index grew the file and the WAL: refresh the byte figures, checkpoint if due.
+				refresh("threshold")
+			} catch (error) {
+				return { ...build, error: messageOf(error) }
+			}
+			return build
+		},
 		write(rows, nowMs) {
 			seedOnce()
 			if (throws > 0) {

@@ -69,7 +69,10 @@ describe("fair-share retention in the writer session", () => {
 					maxLength: 4,
 				}),
 				fc.integer({ min: 20, max: 50 }),
-				fc.integer({ min: 110_000, max: 180_000 }),
+				// The smallest cap keeps the old ~2.1 KB slack over an emptied store: the WG19
+				// activity_facets index adds one 4 KiB page, so the floor is 26 x 4096 = 106,496 B
+				// and 95% of 115,000 = 109,250 B leaves 2,754 B (110,000 left 104,500 - 102,400).
+				fc.integer({ min: 115_000, max: 180_000 }),
 				fc.integer({ min: 2, max: 25 }),
 				fc.boolean(),
 				fc.array(

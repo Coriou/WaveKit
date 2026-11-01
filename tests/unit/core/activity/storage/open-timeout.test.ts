@@ -18,6 +18,7 @@ import {
 	openActivityStore,
 } from "../../../../../src/core/activity/storage/store.js"
 import { resolveActivityLimits } from "../../../../../src/core/activity/storage/limits.js"
+import { ACTIVITY_FACETS_INDEX } from "../../../../../src/core/activity/storage/contract.js"
 import type { ActivityWorkerResponse } from "../../../../../src/core/activity/storage/writer-protocol.js"
 import { loadDatabaseSync } from "../../../../../src/core/activity/storage/probe.js"
 import { Worker } from "node:worker_threads"
@@ -311,12 +312,14 @@ describe("deferred retention seed on the worker protocol", () => {
 				rows: [shareRow("new", "b", FIXTURE_CLOCK_ANCHOR_MS)],
 				nowMs: FIXTURE_CLOCK_ANCHOR_MS,
 			})
-			const wrote = (await w.received(3))[2]
+			const [, , indexed, wrote] = await w.received(4)
+			// The store was created with the facets index: the post-seed check builds nothing.
+			expect(indexed).toMatchObject({ id: 0, type: "indexed", built: false })
 			expect(wrote).toMatchObject({ id: 2, type: "wrote" })
 			if (wrote?.type !== "wrote" || !wrote.result.ok) return
 			expect(wrote.result.snapshot.seedScans).toBe(1)
 			w.worker.postMessage({ id: 3, type: "close" })
-			expect((await w.received(4))[3]).toMatchObject({ id: 3, type: "closed" })
+			expect((await w.received(5))[4]).toMatchObject({ id: 3, type: "closed" })
 		} finally {
 			await w.worker.terminate()
 		}
@@ -377,6 +380,61 @@ describe("deferred retention seed on the worker protocol", () => {
 			expect(heard).toEqual([1])
 		} finally {
 			await client.close()
+		}
+	}, 20_000)
+})
+
+describe("facets covering index migration on the worker protocol", () => {
+	it("answers ready first, then builds the index of a store that predates it", async () => {
+		const dir = await populated()
+		const dbPath = join(dir, "activity", "activity.db")
+		const DatabaseSync = await loadDatabaseSync()
+		const old = new DatabaseSync(dbPath)
+		old.exec(`DROP INDEX ${ACTIVITY_FACETS_INDEX}`)
+		old.close()
+		const w = rawWorker()
+		try {
+			w.worker.postMessage({
+				id: 1,
+				type: "open",
+				dbPath,
+				lockPath: join(dir, "activity", "activity.lock.db"),
+				limits: resolveActivityLimits({ maxAgeMs: YEAR_MS }),
+				failNextWrites: 0,
+				throwNextWrites: 0,
+				writeDelayMs: 0,
+			})
+			// Order is the contract: the open reply never waits on the build.
+			const [ready, seeded, indexed] = await w.received(3)
+			expect(ready).toMatchObject({ id: 1, type: "ready" })
+			expect(seeded).toMatchObject({ id: 0, type: "seeded" })
+			expect(indexed).toMatchObject({ id: 0, type: "indexed", built: true })
+			expect(indexed).not.toHaveProperty("error")
+			w.worker.postMessage({
+				id: 2,
+				type: "write",
+				rows: [shareRow("new", "b", FIXTURE_CLOCK_ANCHOR_MS)],
+				nowMs: FIXTURE_CLOCK_ANCHOR_MS,
+			})
+			expect((await w.received(4))[3]).toMatchObject({ id: 2, type: "wrote" })
+			w.worker.postMessage({ id: 3, type: "close" })
+			expect((await w.received(5))[4]).toMatchObject({ id: 3, type: "closed" })
+		} finally {
+			await w.worker.terminate()
+		}
+		const check = new DatabaseSync(dbPath, { readOnly: true })
+		try {
+			const plan = check
+				.prepare(
+					"EXPLAIN QUERY PLAN SELECT category AS category FROM activity WHERE seq > ? AND seq <= ? ORDER BY seq DESC LIMIT ?",
+				)
+				.all(0, 100, 10)
+				.map(row => String(row["detail"]))
+			expect(plan.join(" ")).toContain(
+				`USING COVERING INDEX ${ACTIVITY_FACETS_INDEX}`,
+			)
+		} finally {
+			check.close()
 		}
 	}, 20_000)
 })
