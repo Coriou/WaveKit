@@ -652,3 +652,134 @@ describe("gate: forget clears a tuned probationer's CPU-only run", () => {
 		expect([...maps].filter(m => m.has(key))).toEqual([])
 	})
 })
+
+describe("gate: CPU pinned at the guard bounds the excuse on both paths", () => {
+	it("the monitor marks a host label set by CPU alone, not one with loop lag", () => {
+		const h = starvationHarness()
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		h.tick()
+		h.cpu.normalisedPercent = 100
+		h.tick([h.branch("readsb")])
+		const cpu = h.mono()
+		h.tick([h.branch("readsb")], 80)
+		const lag = h.mono()
+		h.cpu.normalisedPercent = 10
+		const drops = h.monitor.chargedDropsBetweenMono("a", cpu, lag)
+		expect(drops).toEqual([
+			{
+				atMono: cpu,
+				code: "host",
+				branches: [h.branch("readsb")],
+				hostCpuOnly: true,
+			},
+			{ atMono: lag, code: "host", branches: [h.branch("readsb")] },
+		])
+	})
+
+	it("a tuned probationer dropping on its own branch at CPU 100 every sample is shed at the bound", () => {
+		const h = starvationHarness()
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		h.tick()
+		h.cpu.normalisedPercent = 100
+		let first: number | null = null
+		while (h.shed.length === 0 && h.mono() < 300_000) {
+			h.tick([h.branch("readsb")])
+			first ??= h.mono()
+		}
+		h.cpu.normalisedPercent = 10
+		expect(h.shed).toEqual([
+			{ key: "readsb", detail: "drops", at: first! + CPU_ONLY_EXCUSE_MS },
+		])
+		expect(h.gate.shedAttribution?.(h.keyOf("readsb"))).toMatchObject({
+			tuned: true,
+			attribution: { cause: "decoder" },
+		})
+	})
+
+	it("one sample before the bound the probationer still runs", () => {
+		const h = starvationHarness()
+		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+		h.tick()
+		h.cpu.normalisedPercent = 100
+		const first = h.mono() + SAMPLE_MS
+		while (h.mono() < first + CPU_ONLY_EXCUSE_MS - SAMPLE_MS)
+			h.tick([h.branch("readsb")])
+		expect(h.shed).toEqual([])
+		expect(h.isRunning("readsb")).toBe(true)
+	})
+
+	it.each([95, 100])(
+		"a graduated tuned decoder with only own-branch drops at CPU %i is shed by late drops once the bound is spent",
+		percent => {
+			const h = starvationHarness()
+			h.start("readsb", true)
+			h.cpu.normalisedPercent = percent
+			let first: number | null = null
+			while (h.shed.length === 0 && h.mono() < 600_000) {
+				h.tick([h.branch("readsb")])
+				first ??= h.mono()
+			}
+			h.cpu.normalisedPercent = 10
+			expect(h.shed.map(s => [s.key, s.detail])).toEqual([
+				["readsb", "late-drops"],
+			])
+			// Not before the bound; within the late-shed windows after it.
+			expect(h.shed[0]!.at - first!).toBeGreaterThanOrEqual(CPU_ONLY_EXCUSE_MS)
+			expect(h.shed[0]!.at - first!).toBeLessThanOrEqual(
+				CPU_ONLY_EXCUSE_MS + 3 * HOST_STARVATION_WINDOW_MS,
+			)
+			expect(h.gate.shedAttribution?.(h.keyOf("readsb"))).toMatchObject({
+				tuned: true,
+				attribution: { cause: "decoder" },
+			})
+		},
+	)
+
+	it("a graduated tuned decoder at CPU 100 is kept while loop lag explains its drops", () => {
+		const h = starvationHarness()
+		h.start("readsb", true)
+		h.cpu.normalisedPercent = 100
+		for (let t = 0; t < 120_000; t += SAMPLE_MS)
+			h.tick([h.branch("readsb")], 80)
+		h.cpu.normalisedPercent = 10
+		expect(h.shed).toEqual([])
+	})
+
+	it("a graduated tuned decoder at CPU 100 is kept while a sibling drops beside it", () => {
+		const h = starvationHarness()
+		h.start("readsb", true)
+		h.cpu.normalisedPercent = 100
+		for (let t = 0; t < 120_000; t += SAMPLE_MS)
+			h.tick([h.branch("readsb"), LIVE])
+		h.cpu.normalisedPercent = 10
+		expect(h.shed).toEqual([])
+	})
+})
+
+describe("gate: host busy holds only on the branches the host loss reached", () => {
+	it("is held 60 000 ms on a decoder whose own branch dropped, never on one whose branch flowed", () => {
+		const h = starvationHarness()
+		h.start("readsb", true)
+		// A new branch changes the topology: the untuned one waits for a
+		// fresh 60 000 ms clear window.
+		h.clean(64_000)
+		h.start("ais", false)
+		// Host loss: readsb's branch and live audio congest together; ais flows.
+		h.tick([h.branch("readsb"), LIVE])
+		const hostAt = h.mono()
+		expect(h.gate.hostBusy?.("a")).not.toBeNull()
+		expect(h.gate.hostBusy?.("a", [h.branch("readsb")])).toMatchObject({
+			cause: "host",
+			congestedBranches: 2,
+		})
+		expect(h.gate.hostBusy?.("a", [h.branch("ais")])).toBeNull()
+		expect(h.gate.hostBusy?.("a", [])).toBeNull()
+		// Held from that loss to its end, and no further.
+		h.clean(hostAt + HOST_BUSY_HOLD_MS - h.mono())
+		expect(h.mono()).toBe(hostAt + HOST_BUSY_HOLD_MS)
+		expect(h.gate.hostBusy?.("a", [h.branch("readsb")])).not.toBeNull()
+		expect(h.gate.hostBusy?.("a", [h.branch("ais")])).toBeNull()
+		h.tick()
+		expect(h.gate.hostBusy?.("a", [h.branch("readsb")])).toBeNull()
+	})
+})

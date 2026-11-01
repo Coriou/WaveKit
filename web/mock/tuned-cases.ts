@@ -211,7 +211,7 @@ export const TUNED_CASES: readonly TunedCase[] = [
 	tunedCase({
 		id: "adsb-host-busy",
 		title:
-			"1090 MHz: ADS-B decoding while the host is busy and every decoder dropped samples",
+			"1090 MHz: ADS-B decoding while the host is busy: samples were dropped on several streams",
 		hz: ADSB_HZ,
 		band: ADSB_BAND,
 		named: null,

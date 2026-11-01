@@ -101,9 +101,11 @@ curl --fail --header "$AUTH" "$API_ORIGIN/api/decoders/summary"
 One entry per decoder: `state`, `placements`, `eventsOut`, `lastOutputAt`,
 `suspensionReason`, `health` and a `verdict` whose `actions` say what to try first
 ([GET /api/decoders/summary](API.md#get-apidecoderssummary)). A verdict `cause` of `host`
-means the host is busy and every decoder dropped samples: stopping decoders or lowering
-the sample rate of one will not help it; `retryAt` says when a decoder stopped for its
-own loss is tried again.
+means the host is busy (samples were dropped on several streams): lowering one decoder's
+sample rate will not help it; `retryAt` says when a decoder stopped for its own loss is
+tried again. The rows of `GET /api/agent/status` carry `cause` only on a loss verdict
+(`efficiency-drops`, `efficiency-late-drops`, `efficiency-cpu`) and never `retryAt`: read
+the summary route for it.
 
 After a dwell with no output, tell "nothing on air" from "heard but undecodable" with
 `reception` (also on the `listening` rows of `GET /api/agent/status`): `heard-undecoded`

@@ -2,6 +2,7 @@ import { performance } from "node:perf_hooks"
 import type { DropAttribution } from "@wavekit/api-types"
 import { z } from "zod"
 import {
+	HOST_LOOP_DELAY_MS,
 	LINK_GAP_MS,
 	LINK_RECOVERY_WAIT_MS,
 	type IngestInterval,
@@ -762,6 +763,13 @@ export function createEfficiencyMonitor(deps: {
 			const waiting = s.pending !== null
 			const link = resolved.some(r => r.code === "link")
 			for (const r of resolved) {
+				// A `host` label without loop lag came from CPU at the guard alone:
+				// the gate bounds how long it excuses a tuned decoder's own loss.
+				const cpuOnly =
+					r.code === "host" &&
+					!(r.loop !== null && r.loop >= HOST_LOOP_DELAY_MS)
+						? { hostCpuOnly: true as const }
+						: {}
 				if (r.code === "link") {
 					s.linkDrops.push(r.at)
 					if (s.linkDrops.length > 32) s.linkDrops.shift()
@@ -774,9 +782,15 @@ export function createEfficiencyMonitor(deps: {
 							atMono: r.at,
 							code: r.code,
 							branches: [...r.branches].sort(),
+							...cpuOnly,
 						})
 					if (r.sourceWide)
-						s.drops.push({ atMono: r.at, code: r.code, branches: "source" })
+						s.drops.push({
+							atMono: r.at,
+							code: r.code,
+							branches: "source",
+							...cpuOnly,
+						})
 					while (s.drops.length > MAX_DROP_SAMPLES) s.drops.shift()
 					fault(s, at)
 				}

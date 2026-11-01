@@ -47,14 +47,20 @@ function branchCount(drops: readonly ChargedDrop[]): number {
 	return branches.size
 }
 
-/** Whether the drops around `at` show host or process starvation. */
+/**
+ * Whether the drops around `at` show host or process starvation. `cpu`
+ * false reads only the evidence that is never time-bounded: a `host` sample
+ * whose label came from host CPU alone (`hostCpuOnly`) does not count then,
+ * while loop lag and sibling branches still do (see CPU_ONLY_EXCUSE_MS).
+ */
 export function hostStarvedAt(
 	drops: readonly ChargedDrop[],
 	at: number,
+	cpu = true,
 ): boolean {
 	const around = drops.filter(d => near(d, at))
 	return (
-		around.some(d => d.code === "host") ||
+		around.some(d => d.code === "host" && (cpu || d.hostCpuOnly !== true)) ||
 		branchCount(around) >= HOST_STARVATION_BRANCHES_MIN
 	)
 }
@@ -66,8 +72,9 @@ export function hostStarvedAt(
 export function hostExplained(
 	drops: readonly ChargedDrop[],
 	d: ChargedDrop,
+	cpu = true,
 ): boolean {
-	return hostStarvedAt(drops, d.atMono)
+	return hostStarvedAt(drops, d.atMono, cpu)
 }
 
 /**
@@ -165,19 +172,22 @@ export function lossCause(
 }
 
 /**
- * How long CPU over the guard alone may excuse a tuned probationer's own
- * loss: 3 attribution windows, 3 × 10 000 ms = 30 000 ms. Host CPU within a
- * drop's window explains it (hostExplained), and each CPU sample restarts
- * probation, so intermittent spikes (one every 10 000 ms) could otherwise
- * excuse a branch dropping on every other sample forever. Sibling-branch
- * drops and `host` samples (loop lag) are real host episodes: never bounded.
+ * How long CPU over the guard alone may excuse a tuned decoder's own loss,
+ * on probation and after graduation alike: 3 attribution windows,
+ * 3 × 10 000 ms = 30 000 ms. Host CPU within a drop's window explains it
+ * (hostExplained): the gate's CPU samples, and the monitor's `host` label
+ * when CPU at the guard alone set it (`hostCpuOnly`). Each CPU sample
+ * restarts probation, so intermittent spikes (one every 10 000 ms) or CPU
+ * pinned at the guard could otherwise excuse a branch dropping on every
+ * sample forever. Sibling-branch drops and `host` samples with loop lag are
+ * real host episodes: never bounded.
  */
 export const CPU_ONLY_EXCUSE_MS = 3 * HOST_STARVATION_WINDOW_MS
 
 /**
  * The run of drops on `branch` open at `limit`: drops in [from, limit] that no
- * sibling-branch drop or `host` sample explains (hostExplained over `drops`,
- * which carry no CPU evidence), each within HOST_STARVATION_WINDOW_MS of the
+ * sibling-branch drop or loop-lag `host` sample explains (hostExplained
+ * without CPU-only evidence), each within HOST_STARVATION_WINDOW_MS of the
  * previous. A drop real host evidence explains, or a gap longer than one
  * window (10 000 ms) up to `limit`, ends a run. Null without an open run.
  */
@@ -198,7 +208,7 @@ function openRun(
 		.sort((a, b) => a.atMono - b.atMono)
 	let run: { start: number; last: number } | null = null
 	for (const d of mine) {
-		if (hostExplained(drops, d)) run = null
+		if (hostExplained(drops, d, false)) run = null
 		else if (run === null || d.atMono - run.last > HOST_STARVATION_WINDOW_MS)
 			run = { start: d.atMono, last: d.atMono }
 		else run.last = d.atMono
@@ -209,7 +219,7 @@ function openRun(
 }
 
 /**
- * A tuned probationer's own-branch run that only host CPU could excuse (see
+ * A tuned decoder's own-branch run that only host CPU could excuse (see
  * openRun), judged at `sampledAt`, the latest sample. `start` is the first
  * drop of the run open at min(to, sampledAt), settled or not: a CPU probation
  * reset carries it. `own` once that excuse is spent: the run's first drop is

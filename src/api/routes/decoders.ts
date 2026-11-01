@@ -25,6 +25,7 @@ import { z } from "zod"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderRegistry } from "../../decoders/registry.js"
 import type {
+	DecoderEfficiencyDetail,
 	DecoderEfficiencyView,
 	EfficiencyBudgetConflict,
 	DecoderInfo as ApiDecoderInfo,
@@ -64,11 +65,26 @@ import {
 	type ValidationField,
 } from "../validation-errors.js"
 
+/** Why the gate refuses an admission (no loss shed), by efficiency detail. */
+const ADMISSION_REFUSAL: Readonly<Record<DecoderEfficiencyDetail, string>> = {
+	budget: "the CPU budget is full",
+	cpu: "the host CPU is over its guard",
+	drops: "the source is dropping samples",
+	"late-drops": "samples were dropped while it ran",
+	unknown: "waiting for the source to settle",
+}
+
 /** Why a recorded start stays suspended, from its closed reason and efficiency codes. */
 export function suspendedStartReason(status: InternalDecoderStatus): string {
 	const reason = status.suspension?.reasonCode
 	const efficiency = status.efficiency
 	const retry = efficiency?.retryAt ? `; retries at ${efficiency.retryAt}` : ""
+	// The start cleared a loss shed: say what the gate answered then.
+	const cleared = status.efficiencyCleared
+	if (cleared !== undefined)
+		return cleared.blocked === null
+			? "shed cleared: re-admitted on probation"
+			: `shed cleared but blocked: ${ADMISSION_REFUSAL[cleared.blocked]}${retry}`
 	if (reason === "efficiency-budget" || efficiency !== undefined) {
 		const host = efficiency?.cause === "host"
 		switch (efficiency?.detail) {
@@ -79,8 +95,10 @@ export function suspendedStartReason(status: InternalDecoderStatus): string {
 			case "drops":
 			case "late-drops":
 				return host
-					? `suspended: the host is busy and every decoder dropped samples${retry}`
-					: `suspended: it dropped samples while it ran${retry}`
+					? `suspended: host busy: samples were dropped on several streams${retry}`
+					: efficiency.detail === "drops" && efficiency.cause === undefined
+						? `suspended: ${ADMISSION_REFUSAL.drops}${retry}`
+						: `suspended: it dropped samples while it ran${retry}`
 			default:
 				return "suspended: waiting for the source to settle"
 		}

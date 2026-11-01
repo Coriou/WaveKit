@@ -34,7 +34,7 @@ describe("host-busy verdicts", () => {
 		const v = decoderSummary(status({ hostBusy: busy }), now).verdict
 		expect(v).toEqual({
 			code: "decoding",
-			text: "ADS-B decoding: host busy: samples were dropped for every decoder",
+			text: "ADS-B decoding: host busy: samples were dropped on several streams",
 			actions: [],
 			cause: "host",
 		})
@@ -45,7 +45,7 @@ describe("host-busy verdicts", () => {
 		).verdict
 		expect(idle.code).toBe("listening")
 		expect(idle.text).toBe(
-			"ADS-B listening: host busy: samples were dropped for every decoder",
+			"ADS-B listening: host busy: samples were dropped on several streams",
 		)
 	})
 
@@ -64,7 +64,7 @@ describe("host-busy verdicts", () => {
 		)
 		expect(summary.verdict).toEqual({
 			code: "listening",
-			text: "LoRa listening: host busy: samples were dropped for every decoder",
+			text: "LoRa listening: host busy: samples were dropped on several streams",
 			actions: [],
 			cause: "host",
 		})
@@ -84,7 +84,7 @@ describe("host-busy verdicts", () => {
 		detail => {
 			const v = decoderSummary(shed({ detail, cause: "host" }), now).verdict
 			expect(v.text).toBe(
-				"ADS-B paused: host busy: samples were dropped for every decoder",
+				"ADS-B paused: host busy: samples were dropped on several streams",
 			)
 			expect(v.actions).toEqual(["turn-off-others", "pause-scanner"])
 			expect(v.actions).not.toContain("lower-sample-rate")
@@ -167,7 +167,7 @@ describe("the start response names the real reason", () => {
 		[{ detail: "cpu" }, "suspended: the host CPU is over its guard"],
 		[
 			{ detail: "late-drops", cause: "host" },
-			"suspended: the host is busy and every decoder dropped samples",
+			"suspended: host busy: samples were dropped on several streams",
 		],
 		[
 			{ detail: "late-drops", cause: "decoder" },
@@ -204,5 +204,35 @@ describe("the start response names the real reason", () => {
 				}),
 			),
 		).toBe(text)
+	})
+})
+
+describe("the start answer after an operator start cleared a loss shed", () => {
+	it("says it is re-admitted on probation", () => {
+		expect(
+			suspendedStartReason(
+				shed({ detail: "unknown" }, { efficiencyCleared: { blocked: null } }),
+			),
+		).toBe("shed cleared: re-admitted on probation")
+	})
+
+	it.each([
+		["budget", "the CPU budget is full"],
+		["cpu", "the host CPU is over its guard"],
+		["drops", "the source is dropping samples"],
+		["unknown", "waiting for the source to settle"],
+	] as const)("names the gate's real refusal: %s", (blocked, text) => {
+		const retryAt = new Date(now + 2_000).toISOString()
+		expect(
+			suspendedStartReason(
+				shed({ detail: blocked, retryAt }, { efficiencyCleared: { blocked } }),
+			),
+		).toBe(`shed cleared but blocked: ${text}; retries at ${retryAt}`)
+	})
+
+	it("a drops refusal with no loss shed names the source, not the decoder", () => {
+		expect(suspendedStartReason(shed({ detail: "drops" }))).toBe(
+			"suspended: the source is dropping samples",
+		)
 	})
 })

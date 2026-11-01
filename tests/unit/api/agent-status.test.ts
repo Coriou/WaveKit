@@ -2,6 +2,7 @@ import Fastify from "fastify"
 import { describe, expect, it } from "vitest"
 import {
 	AGENT_ACTIVITY_STATES,
+	AGENT_DECODER_CAUSE_CODES,
 	AGENT_SOURCE_STATES,
 	AGENT_SOURCE_WARNINGS,
 	AGENT_STATUS_LIMITS,
@@ -593,6 +594,40 @@ describe("agent status", () => {
 		expect(Buffer.byteLength(JSON.stringify(worst))).toBeLessThan(
 			AGENT_STATUS_LIMITS.targetBytes,
 		)
+		// Every decoder row a loss row with its cause, or a listening row with its
+		// reception hint: each is under the worst-case row, so the body stays under.
+		const variants: AgentStatus["decoders"][] = [
+			worst.decoders.map(row => ({
+				...row,
+				verdict: {
+					code: "efficiency-late-drops" as const,
+					actions: actions.slice(0, AGENT_STATUS_LIMITS.causeActionsMax),
+					cause: "decoder" as const,
+				},
+			})),
+			worst.decoders.map(row => ({
+				...row,
+				verdict: { code: "listening" as const, actions: [] },
+				reception: "heard-undecoded" as const,
+			})),
+		]
+		for (const decoders of variants) {
+			const body = { ...worst, decoders }
+			expect(agentStatusSchema.parse(body)).toEqual(body)
+			expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThan(
+				Buffer.byteLength(JSON.stringify(worst)),
+			)
+		}
+		// A third action on a cause row would take the body past the worst case: refused.
+		expect(
+			agentStatusSchema.safeParse({
+				...worst,
+				decoders: variants[0]!.map(row => ({
+					...row,
+					verdict: { ...row.verdict, actions },
+				})),
+			}).success,
+		).toBe(false)
 		// One more row in any capped list, or one more byte in a string, is refused.
 		const past = (patch: Partial<AgentStatus>) =>
 			agentStatusSchema.safeParse({ ...worst, ...patch }).success
@@ -948,5 +983,134 @@ describe("agent status reception hint", () => {
 			Buffer.byteLength(JSON.stringify(worstRow)) -
 				Buffer.byteLength(JSON.stringify(rows[0])),
 		).toBe(45)
+	})
+})
+
+describe("agent status loss cause", () => {
+	const lossShed = (
+		efficiency: NonNullable<DecoderStatus["efficiency"]>,
+		patch: Partial<DecoderStatus> = {},
+	) =>
+		decoder({
+			running: false,
+			suspended: true,
+			suspension: { reasonCode: "efficiency-budget", since: new Date(now) },
+			efficiency,
+			...patch,
+		})
+
+	it("serves a loss row's cause through the response schema, without retryAt", async () => {
+		const retryAt = new Date(now + 40_000).toISOString()
+		const statuses = [
+			lossShed({ detail: "drops", cause: "host", retryAt }, { id: "host" }),
+			lossShed(
+				{ detail: "late-drops", cause: "decoder", retryAt },
+				{ id: "own" },
+			),
+			// A running decoder while the host is busy: its cause stays on the summary route.
+			decoder({
+				id: "busy",
+				hostBusy: { congestedBranches: 2, loopLagP99Ms: 120 },
+			}),
+		]
+		expect(decoderSummary(statuses[0]!, now).verdict.retryAt).toBe(retryAt)
+		const app = Fastify()
+		await app.register(
+			agentStatusRoutes,
+			options({ decoderManager: { getAllStatus: () => statuses } }),
+		)
+		try {
+			const response = await app.inject("/api/agent/status")
+			expect(response.statusCode).toBe(200)
+			const body = agentStatusSchema.parse(response.json())
+			const rows = new Map(body.decoders.map(d => [d.id, d.verdict]))
+			expect(rows.get("host")).toEqual({
+				code: "efficiency-drops",
+				actions: ["turn-off-others", "pause-scanner"],
+				cause: "host",
+			})
+			expect(rows.get("own")).toEqual({
+				code: "efficiency-late-drops",
+				actions: ["turn-off-others", "lower-sample-rate"],
+				cause: "decoder",
+			})
+			expect(rows.get("busy")).toEqual({ code: "listening", actions: [] })
+			expect(response.body).not.toContain("retryAt")
+		} finally {
+			await app.close()
+		}
+	})
+
+	it("refuses a cause on a non-loss verdict, past 2 actions, and any retryAt", () => {
+		const row = {
+			id: "d",
+			protocol: "readsb",
+			verdict: {
+				code: "efficiency-drops" as const,
+				actions: ["turn-off-others", "pause-scanner"],
+				cause: "host" as const,
+			},
+		}
+		const parse = (decoders: unknown[]) =>
+			agentStatusSchema.shape.decoders.safeParse(decoders).success
+		expect(parse([row])).toBe(true)
+		expect(
+			parse([{ ...row, verdict: { ...row.verdict, code: "decoding" } }]),
+		).toBe(false)
+		expect(
+			parse([
+				{
+					...row,
+					verdict: {
+						...row.verdict,
+						actions: [...row.verdict.actions, "lower-sample-rate"],
+					},
+				},
+			]),
+		).toBe(false)
+		expect(
+			parse([
+				{
+					...row,
+					verdict: { ...row.verdict, retryAt: new Date(now).toISOString() },
+				},
+			]),
+		).toBe(false)
+	})
+
+	it("keeps every row carrying a cause under the worst-case row (the limit arithmetic)", () => {
+		const longest = (values: readonly string[]) =>
+			values.reduce((a, b) => (b.length > a.length ? b : a))
+		const byLength = [...DECODER_VERDICT_ACTIONS].sort(
+			(a, b) => b.length - a.length,
+		)
+		const causeRow = {
+			id: "d".repeat(AGENT_STATUS_LIMITS.idMaxBytes),
+			protocol: "p".repeat(AGENT_STATUS_LIMITS.protocolMaxBytes),
+			verdict: {
+				code: longest(AGENT_DECODER_CAUSE_CODES),
+				actions: byLength.slice(0, AGENT_STATUS_LIMITS.causeActionsMax),
+				cause: "decoder" as const,
+			},
+		}
+		const worstRow = {
+			id: "d".repeat(AGENT_STATUS_LIMITS.idMaxBytes),
+			protocol: "p".repeat(AGENT_STATUS_LIMITS.protocolMaxBytes),
+			verdict: {
+				code: longest(DECODER_VERDICT_CODES),
+				actions: byLength.slice(0, AGENT_STATUS_LIMITS.actionsMax),
+			},
+		}
+		expect(causeRow.verdict.code).toBe("efficiency-late-drops")
+		expect(
+			agentStatusSchema.shape.decoders.safeParse(
+				Array.from({ length: AGENT_STATUS_LIMITS.decodersMax }, () => causeRow),
+			).success,
+		).toBe(true)
+		// A cause row is 4 bytes under the worst-case row (AGENT_STATUS_LIMITS).
+		expect(
+			Buffer.byteLength(JSON.stringify(worstRow)) -
+				Buffer.byteLength(JSON.stringify(causeRow)),
+		).toBe(4)
 	})
 })

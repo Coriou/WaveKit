@@ -954,7 +954,8 @@ stop it. A decoder's own branch drops count as
 its own even when overflow with no holder known falls in the same sample.
 
 **Host starvation never stops the tuned decoder.** The tuned decoder is the one whose band
-holds the tuned frequency, or the only decoder running. A drop on its branch is host loss,
+holds the tuned frequency, or the only decoder running (all of its placements, and also when
+it is started or retried while nothing else runs). A drop on its branch is host loss,
 not its own, when within 10 seconds either side of it (one late-drop window, 5 samples of
 2 seconds) another fanout branch also dropped (live audio included, even in a different
 sample) or the sample was attributed to the host (event-loop delay of 50 ms or more, or
@@ -963,9 +964,13 @@ host CPU at the guard). A running decoder's late drops are judged only once thos
 (its probation does not end before then), since a host episode can reach another branch
 in the next sample; its own branch dropping alone in two samples in a row, while the
 others flow and the host is healthy, stops it at once. Host CPU alone (no other branch
-dropping and no event-loop delay) excuses its own branch's drops on probation for at most
-30 seconds (3 windows of 10 seconds): if its branch keeps dropping alone that long, through
-repeated CPU spikes, the loss is its own and stops it.
+dropping and no event-loop delay, even when CPU stays at the guard on every sample) excuses
+its own branch's drops for at most 30 seconds (3 windows of 10 seconds), on probation and
+while it runs after probation alike: if its branch keeps dropping alone that long, the loss
+is its own and stops it (on probation at once, after probation through its late-drop
+windows). The other two excuses, another branch dropping within 10 seconds and event-loop
+delay of 50 ms or more, have no time bound: while they last the tuned decoder is never
+stopped, however long, and only untuned automatic decoders are stopped for that loss.
 Host loss may still stop other automatic decoders, newest first, but never the tuned one,
 and it does not keep the tuned decoder from starting again. Only its own sustained loss
 (its branch congested while the other branches flowed) stops it, and then it is tried
@@ -973,10 +978,15 @@ again after 30 seconds, doubling per consecutive stop to a 4-minute cap (30 s, 6
 120 s, 240 s); that history resets after 4 minutes of running without a stop. Starting
 it yourself (`POST /api/decoders/:id/start`) clears such a stop at once and re-admits it
 on probation: that run is judged like an automatic start, so its own loss can stop it
-again, until you stop it. While the host is starved, and for 60 seconds after its last
-host loss (a later drop on one branch alone does not end it), the
-decoder status carries `hostBusy` and the verdicts read "host busy: samples were dropped
-for every decoder" without suggesting a lower sample rate. The "Late drops shed a decoder"
+again. That probation status stays on the decoder until you stop it (a later automatic
+restart, retry or stop for loss keeps it). The start answer says what happened: started,
+"shed cleared: re-admitted on probation" when it starts at the next evaluation, or "shed
+cleared but blocked: <reason>" (the CPU budget is full, the host CPU is over its guard, the
+source is dropping samples, or waiting for the source to settle). While the host is
+starved, and for 60 seconds after its last host loss that reached the decoder (a drop on a
+branch it reads, or loss charged to the whole source; a later drop on one branch alone does
+not end it), the decoder status carries `hostBusy` and the verdicts read "host busy: samples were dropped
+on several streams" without suggesting a lower sample rate. The "Late drops shed a decoder"
 and "Decoder suspension changed" log lines carry `cause` (`host` or `decoder`),
 `congestedBranches`, `loopLagP99Ms` and `loopLagMaxMs`.
 The budget defaults to half the available CPU capacity, with process and cgroup v1/v2 limits.

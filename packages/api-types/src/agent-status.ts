@@ -33,6 +33,12 @@ export const AGENT_STATUS_LIMITS = Object.freeze({
 	 * actions: code 9 instead of 23 and `[]` 2 instead of 3 actions 63 saves 75 bytes,
 	 * the hint `,"reception":"heard-undecoded"` adds 30, so such a row is 45 bytes
 	 * under the worst-case row and the total stands.
+	 * A verdict's `cause` rides only on a loss code (AGENT_DECODER_CAUSE_CODES) with at
+	 * most `causeActionsMax` (2) actions: code 21 (`efficiency-late-drops`) instead of
+	 * 23 saves 2, 2 actions 43 instead of 3 actions 63 saves 20, and
+	 * `,"cause":"decoder"` adds 18, so such a row is 4 bytes under the worst-case row
+	 * and the total stands. `cause` and `reception` never share a row (listening is no
+	 * loss code). The summary route's `retryAt` is not carried here.
 	 */
 	targetBytes: 4096,
 	/**
@@ -57,7 +63,20 @@ export const AGENT_STATUS_LIMITS = Object.freeze({
 	decodersMax: 9,
 	/** A verdict's first actions, most helpful first; no verdict suggests more than 3. */
 	actionsMax: 3,
+	/** Actions on a row carrying `cause`: every loss verdict suggests 2 (see above). */
+	causeActionsMax: 2,
 })
+
+/**
+ * The loss verdicts whose agent row carries `cause` (whose loss stopped the
+ * decoder); the summary route's other causes (a running decoder while the host
+ * is busy) stay on that route.
+ */
+export const AGENT_DECODER_CAUSE_CODES = [
+	"efficiency-drops",
+	"efficiency-late-drops",
+	"efficiency-cpu",
+] as const satisfies readonly (typeof DECODER_VERDICT_CODES)[number][]
 
 /** Who moves the tuner now: WaveKit, an external relay client (SDR++), or a scanner job. */
 export const AGENT_TUNER_OWNERS = ["wavekit", "external", "scanner"] as const
@@ -210,9 +229,11 @@ export const agentDecoderSchema = z
 			.object({
 				code: decoderVerdictSchema.shape.code,
 				actions: z.array(z.enum(DECODER_VERDICT_ACTIONS)).max(L.actionsMax),
-				/** "host": the host is busy and every decoder dropped samples. */
+				/**
+				 * Whose loss stopped the decoder: "host" (host starvation, samples
+				 * dropped on several streams) or "decoder". Only on a loss code.
+				 */
 				cause: decoderVerdictSchema.shape.cause,
-				retryAt: iso.optional(),
 			})
 			.strict(),
 		reception: z.enum(DECODER_RECEPTION_HINTS).optional(),
@@ -223,6 +244,17 @@ export const agentDecoderSchema = z
 			row.reception === undefined ||
 			(row.verdict.code === "listening" && row.verdict.actions.length === 0),
 		{ message: "reception rides only on a listening verdict without actions" },
+	)
+	.refine(
+		row =>
+			row.verdict.cause === undefined ||
+			((AGENT_DECODER_CAUSE_CODES as readonly string[]).includes(
+				row.verdict.code,
+			) &&
+				row.verdict.actions.length <= L.causeActionsMax),
+		{
+			message: `cause rides only on a loss verdict with at most ${L.causeActionsMax} actions`,
+		},
 	)
 
 /** GET /api/activity/status. `rows` is null unless the store is available. */
@@ -365,6 +397,13 @@ export const agentStatusResponseSchema = strictObject({
 				...row,
 				properties: {
 					...row.properties,
+					verdict: {
+						...row.properties.verdict,
+						properties: {
+							...row.properties.verdict.properties,
+							cause: { type: "string", enum: ["host", "decoder"] },
+						},
+					},
 					reception: { type: "string", enum: [...DECODER_RECEPTION_HINTS] },
 				},
 			}

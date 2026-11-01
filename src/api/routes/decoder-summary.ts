@@ -222,7 +222,7 @@ function retrying(status: DecoderStatus, running: boolean): boolean {
 const RETRYING_TEXT = "failed: restarting on its own"
 
 /** Host starvation: no decoder is the cause, so no rate or decoder action helps. */
-const HOST_BUSY_TEXT = "host busy: samples were dropped for every decoder"
+const HOST_BUSY_TEXT = "host busy: samples were dropped on several streams"
 const HOST_BUSY_ACTIONS: readonly DecoderVerdictAction[] = [
 	"turn-off-others",
 	"pause-scanner",

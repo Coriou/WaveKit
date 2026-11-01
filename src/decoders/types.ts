@@ -319,6 +319,12 @@ export interface DecoderStatus {
 	}
 	/** Its source drops samples for host or process starvation (see the API type). */
 	hostBusy?: DecoderHostBusy
+	/**
+	 * Internal (not serialised): an operator start cleared its efficiency
+	 * shed; `blocked` null when it is re-admitted on probation, else why the
+	 * gate still refuses it. Absent once a later decision replaced it.
+	 */
+	efficiencyCleared?: { blocked: DecoderEfficiencyDetail | null }
 	rateHistory?: number[]
 	/** Unique identifier for this decoder */
 	id: string

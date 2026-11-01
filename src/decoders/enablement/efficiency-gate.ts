@@ -33,6 +33,7 @@ import type {
 	WantedPlacement,
 } from "./contract.js"
 import {
+	CPU_ONLY_EXCUSE_MS,
 	cpuOnlyLoss,
 	HOST_STARVATION_WINDOW_MS,
 	hostExplained,
@@ -377,8 +378,16 @@ export function createEfficiencyGate(
 			loopLagMaxMs: loop === null ? null : Math.round(loop.maxMs),
 		}
 	}
-	/** Per source: the latest host-explained loss seen, and its congested branches. */
-	const hostLoss = new Map<string, { atMono: number; branches: number }>()
+	/**
+	 * Per source and scope (the branches asked about, or the whole source):
+	 * the latest host-explained loss seen there, and its congested branches.
+	 * One entry per source and per branch set a caller asked about within
+	 * HOST_BUSY_HOLD_MS (60 000 ms); pruned past that hold.
+	 */
+	const hostLoss = new Map<
+		string,
+		{ sourceId: string; atMono: number; branches: number }
+	>()
 	/**
 	 * Bounds hostLoss: an entry past its hold, or of a source no longer in the
 	 * reader's membership, is dropped (a later loss records it afresh).
@@ -392,12 +401,12 @@ export function createEfficiencyGate(
 		} catch {
 			/* Unreadable membership prunes by age only. */
 		}
-		for (const [sourceId, loss] of hostLoss)
+		for (const [key, loss] of hostLoss)
 			if (
 				(valid(mono) && mono - loss.atMono > HOST_BUSY_HOLD_MS) ||
-				(members !== null && !members.has(sourceId))
+				(members !== null && !members.has(loss.sourceId))
 			)
-				hostLoss.delete(sourceId)
+				hostLoss.delete(key)
 	}
 	/**
 	 * The source's host loss when its latest host-explained loss (a drop that
@@ -405,10 +414,13 @@ export function createEfficiencyGate(
 	 * HOST_BUSY_HOLD_MS (60 000 ms) before `mono`, else null. Held from that
 	 * loss, not the latest loss: a lone branch's drop after it does not end
 	 * the hold. The latest one is kept, so it outlives the drop history.
+	 * With `scope`, only loss that reached those branches counts: a drop
+	 * charged to one of them, or to the source as a whole (no holder known).
 	 */
 	const hostBusyAt = (
 		sourceId: string,
 		mono: number,
+		scope?: readonly string[],
 	): LossAttribution | null => {
 		if (!valid(mono)) return null
 		pruneHostLoss(mono)
@@ -418,21 +430,31 @@ export function createEfficiencyGate(
 				mono - HOST_BUSY_HOLD_MS - HOST_STARVATION_WINDOW_MS,
 				mono,
 			) ?? []
-		let latest = hostLoss.get(sourceId)
+		const key =
+			scope === undefined
+				? sourceId
+				: `${sourceId}\u0000${[...scope].sort().join("\u0000")}`
+		const reaches = (d: ChargedDrop) =>
+			scope === undefined ||
+			d.branches === "source" ||
+			d.branches.some(b => scope.includes(b))
+		let latest = hostLoss.get(key)
 		for (const d of drops)
 			if (
 				d.atMono >= mono - HOST_BUSY_HOLD_MS &&
 				d.atMono <= mono &&
 				(latest === undefined || d.atMono > latest.atMono) &&
+				reaches(d) &&
 				hostExplained(drops, d)
 			)
 				latest = {
+					sourceId,
 					atMono: d.atMono,
 					branches: lossCause(drops, d.atMono)?.congestedBranches ?? 0,
 				}
 		if (latest === undefined || mono - latest.atMono > HOST_BUSY_HOLD_MS)
 			return null
-		hostLoss.set(sourceId, latest)
+		hostLoss.set(key, latest)
 		if (latest.atMono > mono) return null
 		return {
 			...attributionAt(sourceId, mono, HOST_BUSY_HOLD_MS, "host"),
@@ -471,7 +493,12 @@ export function createEfficiencyGate(
 					t >= from - HOST_STARVATION_WINDOW_MS &&
 					t <= until + HOST_STARVATION_WINDOW_MS,
 			)
-			.map(t => ({ atMono: t, code: "host", branches: [] }))
+			.map(t => ({
+				atMono: t,
+				code: "host",
+				branches: [],
+				hostCpuOnly: true,
+			}))
 		return probationLoss(
 			cpuHost.length > 0 ? [...drops, ...cpuHost] : drops,
 			p.inputBranch,
@@ -864,14 +891,41 @@ export function createEfficiencyGate(
 		// own in it (a drop on its branch host starvation does not explain);
 		// host loss sheds untuned placements only. Without branch-scoped drop
 		// evidence the window is judged as before.
+		// Host CPU alone excuses its own loss for at most CPU_ONLY_EXCUSE_MS
+		// (30 000 ms), as on probation: a window with a drop on its branch
+		// condemns it once the CPU-only run open at the window's end
+		// (cpuOnlyLoss) has outlived that bound. The drops read reach back far
+		// enough to see a run that began the bound before the oldest window.
 		const around =
 			windows.length > 0 && placements.some(p => p.tunedBand === true)
 				? chargedDrops(
 						sourceId,
-						windows[0]!.startMono - HOST_STARVATION_WINDOW_MS,
+						windows[0]!.startMono -
+							CPU_ONLY_EXCUSE_MS -
+							HOST_STARVATION_WINDOW_MS,
 						mono,
 					)
 				: null
+		const cpuOnlyOwn = (
+			drops: readonly ChargedDrop[],
+			branch: string | undefined,
+			w: LateDropWindow,
+		) =>
+			branch !== undefined &&
+			drops.some(
+				d =>
+					d.atMono > w.startMono &&
+					d.atMono <= w.endMono &&
+					d.branches !== "source" &&
+					d.branches.includes(branch),
+			) &&
+			cpuOnlyLoss(
+				drops,
+				branch,
+				windows[0]!.startMono - CPU_ONLY_EXCUSE_MS,
+				w.endMono,
+				sampledMono(),
+			).own
 		const condemns = (w: LateDropWindow, p: RunningPlacement) =>
 			w.condemning &&
 			chargesBranch(w.condemnedBranches, p.inputBranch) &&
@@ -883,7 +937,8 @@ export function createEfficiencyGate(
 					justAfter(w.startMono),
 					w.endMono,
 					sampledMono(),
-				))
+				) ||
+				cpuOnlyOwn(around, p.inputBranch, w))
 		// Windows that condemn some placement on the source: drops only on a
 		// branch no decoder reads (live audio) condemn nothing.
 		const condemningWindows = windows.filter(w =>
@@ -1023,17 +1078,19 @@ export function createEfficiencyGate(
 			// Tuned band, host busy: the source's loss in the last
 			// HOST_BUSY_HOLD_MS is host loss (every branch starved), which
 			// withholding the tuned decoder cannot cure, so drops do not refuse it.
+			// The only decoder (`alone`) is protected from host starvation the
+			// same way; its other admission rules stay its own.
 			const hostBusyNow =
-				tuned &&
+				(tuned || newcomer.alone === true) &&
 				valid(mono) &&
 				hostBusyAt(newcomer.sourceId, sampledMono()) !== null
 			const warming =
-				tuned &&
-				(hostBusyNow ||
-					(state !== "dropping" &&
-						attribution !== "host" &&
-						attribution !== "consumer" &&
-						cleanRunUnderway(newcomer.sourceId, mono)))
+				hostBusyNow ||
+				(tuned &&
+					state !== "dropping" &&
+					attribution !== "host" &&
+					attribution !== "consumer" &&
+					cleanRunUnderway(newcomer.sourceId, mono))
 			const unsettled =
 				state === "unknown" || state === "clearing" || attribution === "unknown"
 			let detail: DecoderEfficiencyDetail | null = null
@@ -1066,15 +1123,15 @@ export function createEfficiencyGate(
 					}
 					if (freed >= newcomer.costCores) detail = null
 					else swapped.clear()
-					// Host CPU at the guard while the host is busy, or on the retry
-					// of a tuned decoder shed for its own loss: withholding it cures
-					// no host load, so it is admitted on probation (budget applies).
-					if (
-						detail === "cpu" &&
-						(hostBusyNow || tunedRetries.has(newcomer.key))
-					)
-						detail = null
 				}
+				// Host CPU at the guard while the host is busy, or on the retry
+				// of a tuned decoder shed for its own loss: withholding it cures
+				// no host load, so it is admitted on probation (budget applies).
+				if (
+					detail === "cpu" &&
+					(hostBusyNow || (tuned && tunedRetries.has(newcomer.key)))
+				)
+					detail = null
 			}
 			if (
 				detail === null &&
@@ -1551,7 +1608,8 @@ export function createEfficiencyGate(
 			tunedRetries.delete(key)
 		},
 		shedAttribution: key => shed.get(key),
-		hostBusy: sourceId => hostBusyAt(sourceId, sampledMono()),
+		hostBusy: (sourceId, branches) =>
+			hostBusyAt(sourceId, sampledMono(), branches),
 		view(running, blocked, now) {
 			const mono = monoNow()
 			observeRunning(running, mono)

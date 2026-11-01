@@ -1,4 +1,5 @@
 import {
+	AGENT_DECODER_CAUSE_CODES,
 	AGENT_STATUS_LIMITS,
 	agentStatusResponseSchema,
 	jsonStringBytes,
@@ -56,6 +57,9 @@ const LIVE_JOB_STATES: ReadonlySet<ScanJob["state"]> = new Set([
 ])
 
 const L = AGENT_STATUS_LIMITS
+
+/** Loss verdicts whose row says whose loss stopped the decoder. */
+const CAUSE_CODES: ReadonlySet<string> = new Set(AGENT_DECODER_CAUSE_CODES)
 
 /**
  * `value` cut at a code point boundary so its JSON string body (escapes and UTF-8
@@ -275,8 +279,13 @@ export async function buildAgentStatus(
 		verdict: {
 			code: summary.verdict.code,
 			actions: bounds.list(summary.verdict.actions, L.actionsMax),
-			...(summary.verdict.cause ? { cause: summary.verdict.cause } : {}),
-			...(summary.verdict.retryAt ? { retryAt: summary.verdict.retryAt } : {}),
+			// Only on a loss verdict with at most 2 actions, and no retryAt (the
+			// summary route has it): the byte budget relies on it.
+			...(summary.verdict.cause !== undefined &&
+			CAUSE_CODES.has(summary.verdict.code) &&
+			summary.verdict.actions.length <= L.causeActionsMax
+				? { cause: summary.verdict.cause }
+				: {}),
 		},
 		// Only on a listening verdict (no actions): the byte budget relies on it.
 		...(summary.reception !== undefined &&

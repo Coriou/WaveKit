@@ -280,7 +280,7 @@ const RECEPTION_TEXT: Readonly<Record<DecoderReceptionHint, string>> = {
 }
 
 /** The core's host-busy sentence: host starvation, no decoder is the cause. */
-const HOST_BUSY_TEXT = "host busy: samples were dropped for every decoder"
+const HOST_BUSY_TEXT = "host busy: samples were dropped on several streams"
 const LOSS_CODES: ReadonlySet<DecoderVerdictCode> = new Set([
 	"efficiency-drops",
 	"efficiency-late-drops",

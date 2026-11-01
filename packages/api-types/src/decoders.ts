@@ -247,7 +247,7 @@ export interface DecoderStatus {
 	efficiency?: {
 		detail: DecoderEfficiencyDetail
 		retryAt?: string
-		/** Whose loss shed it: the host's (every decoder dropped) or its own. Absent: not a loss shed. */
+		/** Whose loss shed it: the host's (samples dropped on several streams) or its own. Absent: not a loss shed. */
 		cause?: DecoderLossCause
 	}
 	/**
@@ -422,7 +422,7 @@ export type DecoderEfficiencyDetail =
 	| "drops"
 	| "unknown"
 	| "late-drops"
-/** Whose loss it was: the host's (starved, every decoder dropped) or the decoder's own. */
+/** Whose loss it was: the host's (starved, samples dropped on several streams) or the decoder's own. */
 export type DecoderLossCause = "host" | "decoder"
 export interface DecoderHostBusy {
 	/** Distinct fanout branches that dropped in the last 10 s. */
@@ -658,7 +658,7 @@ export interface DecoderVerdict {
 	text: string
 	/** Suggested actions, most helpful first; empty when none applies. */
 	actions: DecoderVerdictAction[]
-	/** Whose loss the verdict reports: "host" while the host is busy (every decoder dropped). */
+	/** Whose loss the verdict reports: "host" while the host is busy (samples dropped on several streams). */
 	cause?: DecoderLossCause
 	/** When a decoder shed for loss is retried (ISO time). */
 	retryAt?: string

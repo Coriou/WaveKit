@@ -355,6 +355,12 @@ export interface WantedPlacement {
 	 * last: other gate-admitted placements yield to them first.
 	 */
 	tunedBand?: true
+	/**
+	 * No other decoder runs: like the tuned decoder, host starvation does not
+	 * refuse it (the probation pass protects the only running decoder the
+	 * same way). Every other admission rule is its own.
+	 */
+	alone?: true
 }
 /** Stable comparison key of placement options (absent and empty are equal). */
 export function placementOptionsKey(
@@ -470,8 +476,14 @@ export interface EfficiencyGate {
 	/**
 	 * Host starvation on a source now (its loss in the last
 	 * HOST_STARVATION_WINDOW_MS is host loss); null when not starved or unknown.
+	 * With `branches`, only host loss that reached them (a drop charged to one
+	 * of them, or to the whole source) counts: a decoder unaffected by it is
+	 * not reported host-busy.
 	 */
-	hostBusy?(sourceId: string): LossAttribution | null
+	hostBusy?(
+		sourceId: string,
+		branches?: readonly string[],
+	): LossAttribution | null
 	/** The attribution of a verdict the latest probation() pass returned for `key`. */
 	shedAttribution?(key: string): ShedAttribution | undefined
 	/**
@@ -533,6 +545,13 @@ export interface ChargedDrop {
 	atMono: number
 	code: DropAttribution
 	branches: readonly string[] | "source"
+	/**
+	 * A `host` sample labelled by host CPU at the guard alone (the event-loop
+	 * delay stayed under HOST_LOOP_DELAY_MS): its excuse of a tuned decoder's
+	 * own loss is time-bounded (CPU_ONLY_EXCUSE_MS, host-starvation.ts).
+	 * Absent: loop lag (or no host label).
+	 */
+	hostCpuOnly?: true
 }
 
 /**
