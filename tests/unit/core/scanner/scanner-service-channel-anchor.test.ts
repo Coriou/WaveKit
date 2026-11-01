@@ -1,15 +1,17 @@
 import { EventEmitter } from "node:events"
 import { rmSync } from "node:fs"
 import fc from "fast-check"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
 import { makeObs } from "../../../mocks/scanner/observations.js"
 import type { LiveObservation } from "../../../../src/core/scanner/job-runner.js"
 import {
 	CHANNEL_OWNER_REACH_HZ,
+	CHANNEL_PROTOCOL_HOLD_MS,
 	type DiscoveryStore,
 } from "../../../../src/core/scanner/store/discovery-store.js"
+import { REFUSED_LOGGED_MAX } from "../../../../src/core/scanner/scanner-service.js"
 import type {
 	DecodeEvidence,
 	Identity,
@@ -179,13 +181,13 @@ async function rig(c: Case) {
 	 * A live observation at the channel the ambient index places decodes on: discovery-backed
 	 * (a stored spectrum discovery, its observation `id`) or observation-only (no discovery).
 	 */
-	const place = (id: string, backed: boolean): string | null => {
+	const place = (id: string, backed: boolean, offsetHz = 0): string | null => {
 		let discoveryId: string | null = null
 		if (backed) {
 			discoveryId = internal.store.ingest(
 				makeObs({
 					id,
-					centreHz: c.channelHz,
+					centreHz: c.channelHz + offsetHz,
 					startedAt: clock.at - 1_000,
 					blocks: 2,
 					sourceId: "rtl",
@@ -195,7 +197,7 @@ async function rig(c: Case) {
 		}
 		const track = trackOf({
 			trackId: id,
-			centreHz: c.channelHz,
+			centreHz: c.channelHz + offsetHz,
 			obwHz: 9_000,
 			epoch: 1,
 		})
@@ -510,6 +512,17 @@ it("an ACARS message without a printed error count (unknown CRC status) never di
 interface Owned {
 	ambient: EventEmitter
 	deps: { iqCapture?: unknown }
+	log: { warn: (...args: unknown[]) => void }
+	refusedAnchors: Set<string>
+	onProbeEvidence(
+		probeId: string,
+		req: {
+			observationId: string
+			jobId: string
+			replay?: { captureId: string }
+		},
+		ev: DecodeEvidence,
+	): void
 	onAmbientEvidence(e: {
 		decoderId: string
 		sourceId: string
@@ -741,6 +754,133 @@ describe.each(CASES)("$decoder channel ownership at a placed discovery", c => {
 	})
 })
 
+describe.each(CASES)("$decoder identify replay trust", c => {
+	/** A capture view whose tuning trust the test sets (synthetic). */
+	const captureOf = (
+		r: Awaited<ReturnType<typeof rig>>,
+		trust: () => string,
+	) => ({
+		view: (captureId: string) => ({
+			captureId,
+			sourceId: "rtl",
+			observationId: "o_backed",
+			epoch: 1,
+			rfHz: c.channelHz,
+			tuningTrust: trust(),
+			capturedAtMs: r.clock.at,
+			durationMs: 500,
+			gapSamples: 0,
+		}),
+	})
+	const replayed = (at: number): DecodeEvidence => ({
+		protocol: c.protocol,
+		origin: "probe",
+		crcClean: true,
+		epoch: 1,
+		at,
+		identity: c.identity,
+		metadata: {},
+	})
+
+	it.each([
+		["a live observation", true],
+		["a stored observation", false],
+	])(
+		"F3: an identify replay from an unverified capture never proves %s; a trusted one does",
+		async (_name, live) => {
+			const r = await rig(c)
+			try {
+				const id = r.place("o_backed", true)!
+				if (!live) r.unplace("o_backed")
+				const internal = r.internal as unknown as Owned
+				let trust = "unverified"
+				internal.deps.iqCapture = captureOf(r, () => trust)
+				const req = (captureId: string) => ({
+					observationId: "o_backed",
+					jobId: "identify-job",
+					replay: { captureId },
+				})
+				internal.onProbeEvidence("p1", req("cap-1"), replayed(r.clock.at))
+				expect(r.internal.store.get(id)!.confidence).not.toBe("decoded")
+				expect(
+					(
+						r.internal.store
+							.snapshot()
+							.observations.find(o => o.id === "o_backed")!.decode ?? []
+					).filter(ev => ev.identity !== undefined),
+				).toEqual([])
+				expect(decodedNear(r.internal.store, c.channelHz)).toEqual([])
+				// A throwing capture view counts as no trust too.
+				internal.deps.iqCapture = {
+					view: () => {
+						throw new Error("gone")
+					},
+				}
+				internal.onProbeEvidence("p2", req("cap-2"), replayed(r.clock.at))
+				expect(r.internal.store.get(id)!.confidence).not.toBe("decoded")
+				trust = "commanded"
+				internal.deps.iqCapture = captureOf(r, () => trust)
+				internal.onProbeEvidence("p3", req("cap-3"), replayed(r.clock.at))
+				expect(r.internal.store.get(id)).toMatchObject({
+					confidence: "decoded",
+					proof: { identity: c.identity },
+				})
+			} finally {
+				await r.stop()
+			}
+		},
+	)
+})
+
+describe("refused decode warnings are bounded", () => {
+	// REFUSED_LOGGED_MAX = 256 keys (85 decoders x 3 reasons = 255): at the bound the oldest goes.
+	it("F4: one warning per decoder, at most 256 keys kept, the oldest dropped just past the bound", async () => {
+		expect(REFUSED_LOGGED_MAX).toBe(256)
+		const c = CASES[0]!
+		const r = await rig(c)
+		try {
+			const internal = r.internal as unknown as Owned
+			const warn = vi.spyOn(internal.log, "warn")
+			r.trust.value = "unverified"
+			const refuse = (decoderId: string) =>
+				internal.onAmbientEvidence({
+					decoderId,
+					sourceId: "rtl",
+					hz: c.channelHz,
+					ev: confirmed("acars", 1, r.clock.at),
+					placement: { sourceId: "rtl", channelHz: c.channelHz },
+				})
+			const trustWarns = () =>
+				warn.mock.calls.filter(call =>
+					String(call[1]).includes("tuning not trusted"),
+				).length
+			for (let i = 0; i < REFUSED_LOGGED_MAX; i++) refuse(`placed-${i}`)
+			expect(internal.refusedAnchors.size).toBe(256)
+			expect(trustWarns()).toBe(256)
+			// A repeat at the bound warns nothing more.
+			refuse("placed-0")
+			expect(trustWarns()).toBe(256)
+			expect(internal.refusedAnchors.has("channel-trust\u0000placed-0")).toBe(
+				true,
+			)
+			// One past the bound: still 256 keys, the oldest dropped, the newcomer warned once.
+			refuse("placed-256")
+			expect(internal.refusedAnchors.size).toBe(256)
+			expect(trustWarns()).toBe(257)
+			expect(internal.refusedAnchors.has("channel-trust\u0000placed-0")).toBe(
+				false,
+			)
+			expect(internal.refusedAnchors.has("channel-trust\u0000placed-256")).toBe(
+				true,
+			)
+			for (let i = 0; i < 1_000; i++) refuse(`churn-${i}`)
+			expect(internal.refusedAnchors.size).toBe(256)
+		} finally {
+			await r.stop()
+		}
+	})
+})
+
 describe.each(CASES)("$decoder replay at an anchor-owned channel", c => {
 	it("a replay on an observation with its own spectrum record goes to the channel's anchor", async () => {
 		const r = await rig(c)
@@ -798,54 +938,77 @@ interface ReplayStep {
 	k: "replay"
 	protocol: "acars" | "vdl2"
 	n: number
-	onLive: boolean
+	/** The observation replayed: the newest live one, the oldest closed one, or one gone. */
+	on: "live" | "closed" | "gone"
+	offsetHz: number
 }
 
 describe("one owner per channel through the service", () => {
 	type Step =
-		| { k: "open"; backed: boolean }
+		| { k: "open"; backed: boolean; offsetHz: number }
 		| { k: "close" }
 		| { k: "live"; protocol: "acars" | "vdl2"; n: number }
 		| ReplayStep
 	const protocol = fc.constantFrom<"acars" | "vdl2">("acars", "vdl2")
 	const n = fc.integer({ min: 1, max: 3 })
+	// Observation centres and capture centres anywhere inside the 4 000 Hz reach (exclusive).
+	const offsetHz = fc.integer({
+		min: -(CHANNEL_OWNER_REACH_HZ - 1),
+		max: CHANNEL_OWNER_REACH_HZ - 1,
+	})
 	const step: fc.Arbitrary<Step> = fc.oneof(
-		fc.record({ k: fc.constant("open" as const), backed: fc.boolean() }),
+		fc.record({
+			k: fc.constant("open" as const),
+			backed: fc.boolean(),
+			offsetHz,
+		}),
 		fc.constant({ k: "close" as const }),
 		fc.record({ k: fc.constant("live" as const), protocol, n }),
 		fc.record({
 			k: fc.constant("replay" as const),
 			protocol,
 			n,
-			onLive: fc.boolean(),
+			on: fc.constantFrom<"live" | "closed" | "gone">("live", "closed", "gone"),
+			offsetHz,
 		}),
+	)
+	// Gaps within and past CHANNEL_PROTOCOL_HOLD_MS (60 000 ms), at and just past it too.
+	const gap = fc.oneof(
+		fc.integer({ min: 0, max: 5_000 }),
+		fc.constantFrom(
+			CHANNEL_PROTOCOL_HOLD_MS,
+			CHANNEL_PROTOCOL_HOLD_MS + 1,
+			CHANNEL_PROTOCOL_HOLD_MS + 2_001,
+		),
+		fc.integer({ min: 0, max: 150_000 }),
 	)
 	const c = CASES[0]!
 
 	// Feature: ACARS and VDL2 channel identity, Property 3: one owner per channel through the service
 	// Validates: M1 (another aircraft at a discovery-backed placement never splits the record), M2
 	// (one owner per source and channel across ACARS and VDL2), M4 (a stale anchor lets a spectrum
-	// record open, and the one-owner rule holds when the anchor is next proven), live ambient and
-	// replayed decodes alike
-	it("any interleaving of placements, aircraft and protocols ends with exactly one decoded record (property)", async () => {
+	// record open, and the one-owner rule holds when the anchor is next proven), F1 (several
+	// spectrum records anywhere in the 4 000 Hz reach: one decoded owner, whichever record a
+	// decode is placed or replayed on), F2 (an owner past CHANNEL_PROTOCOL_HOLD_MS is taken over by
+	// the other protocol as the same record), live ambient and replayed decodes alike
+	it("any interleaving of placements, aircraft and protocols keeps at most one decoded record (property)", async () => {
 		await fc.assert(
 			fc.asyncProperty(
-				fc.array(fc.tuple(step, fc.integer({ min: 0, max: 90_000 })), {
-					maxLength: 14,
-				}),
+				fc.array(fc.tuple(step, gap), { maxLength: 14 }),
 				async steps => {
 					const r = await rig(c)
 					const internal = r.internal as unknown as Owned
 					// The store's freshness clock is the rig's (a stale anchor needs > 60 000 ms).
 					;(r.internal.store as unknown as { now: () => number }).now = () =>
 						r.clock.at
+					const captures = new Map<string, number>()
 					internal.deps.iqCapture = {
 						view: (captureId: string) => ({
 							captureId,
 							sourceId: "rtl",
 							observationId: null,
 							epoch: 1,
-							rfHz: c.channelHz,
+							rfHz: captures.get(captureId) ?? c.channelHz,
 							tuningTrust: "commanded",
 							capturedAtMs: r.clock.at,
 							durationMs: 500,
@@ -853,6 +1016,7 @@ describe("one owner per channel through the service", () => {
 						}),
 					}
 					const opened: string[] = []
+					const closed: string[] = []
 					let seq = 0
 					const claims = () => decodedNear(r.internal.store, c.channelHz)
 					try {
@@ -863,17 +1027,20 @@ describe("one owner per channel through the service", () => {
 								let backed = st.backed
 								if (backed) {
 									try {
-										r.place(id, true)
+										r.place(id, true, st.offsetHz)
 									} catch {
 										// A fresh anchor keeps the record from opening: observation-only.
 										backed = false
 									}
 								}
-								if (!backed) r.place(id, false)
+								if (!backed) r.place(id, false, st.offsetHz)
 								opened.push(id)
 							} else if (st.k === "close") {
 								const id = opened.shift()
-								if (id !== undefined) r.unplace(id)
+								if (id !== undefined) {
+									r.unplace(id)
+									closed.push(id)
+								}
 							} else if (st.k === "live") {
 								internal.onAmbientEvidence({
 									decoderId: "synthetic",
@@ -883,15 +1050,21 @@ describe("one owner per channel through the service", () => {
 									placement: { sourceId: "rtl", channelHz: c.channelHz },
 								})
 							} else {
-								const observationId = st.onLive
-									? (opened.at(-1) ?? `o_gone${seq++}`)
-									: `o_gone${seq++}`
+								const observationId =
+									(st.on === "live"
+										? opened.at(-1)
+										: st.on === "closed"
+											? closed[0]
+											: undefined) ?? `o_gone${seq++}`
+								const captureId = `cap${seq++}`
+								const rfHz = c.channelHz + st.offsetHz
+								captures.set(captureId, rfHz)
 								r.h.service.applyReplayResult({
-									captureId: `cap${seq++}`,
+									captureId,
 									sourceId: "rtl",
 									observationId,
 									epoch: 1,
-									rfHz: c.channelHz + 1_500,
+									rfHz,
 									trials: [
 										{
 											protocol: st.protocol,
@@ -949,7 +1122,7 @@ describe("one owner per channel through the service", () => {
 					// M1: a discovery-backed placement, then another aircraft (the last decode's).
 					[
 						[
-							[{ k: "open", backed: true }, 0],
+							[{ k: "open", backed: true, offsetHz: 0 }, 0],
 							[{ k: "live", protocol: "acars", n: 1 }, 0],
 						],
 					],
@@ -957,16 +1130,98 @@ describe("one owner per channel through the service", () => {
 					[
 						[
 							[{ k: "live", protocol: "acars", n: 1 }, 0],
-							[{ k: "open", backed: true }, 60_001],
+							[{ k: "open", backed: true, offsetHz: 0 }, 60_001],
 							[{ k: "live", protocol: "acars", n: 2 }, 0],
 						],
 					],
 					// Replays of both protocols at a discovery-backed placement.
 					[
 						[
-							[{ k: "open", backed: true }, 0],
-							[{ k: "replay", protocol: "vdl2", n: 1, onLive: true }, 0],
-							[{ k: "replay", protocol: "acars", n: 2, onLive: true }, 0],
+							[{ k: "open", backed: true, offsetHz: 0 }, 0],
+							[
+								{
+									k: "replay",
+									protocol: "vdl2",
+									n: 1,
+									on: "live",
+									offsetHz: 1_500,
+								},
+								0,
+							],
+							[
+								{
+									k: "replay",
+									protocol: "acars",
+									n: 2,
+									on: "live",
+									offsetHz: 1_500,
+								},
+								0,
+							],
+						],
+					],
+					// F1: two records 4 000 Hz apart in reach, each replayed with another aircraft.
+					[
+						[
+							[{ k: "open", backed: true, offsetHz: -2_000 }, 0],
+							[{ k: "open", backed: true, offsetHz: 2_000 }, 0],
+							[{ k: "close" }, 0],
+							[
+								{
+									k: "replay",
+									protocol: "acars",
+									n: 1,
+									on: "closed",
+									offsetHz: -2_000,
+								},
+								0,
+							],
+							[
+								{
+									k: "replay",
+									protocol: "acars",
+									n: 2,
+									on: "live",
+									offsetHz: 2_000,
+								},
+								0,
+							],
+						],
+					],
+					// F1 across protocols: ACARS on one record, VDL2 on the other.
+					[
+						[
+							[{ k: "open", backed: true, offsetHz: -2_000 }, 0],
+							[{ k: "open", backed: true, offsetHz: 2_000 }, 0],
+							[{ k: "close" }, 0],
+							[
+								{
+									k: "replay",
+									protocol: "acars",
+									n: 1,
+									on: "closed",
+									offsetHz: -2_000,
+								},
+								0,
+							],
+							[
+								{
+									k: "replay",
+									protocol: "vdl2",
+									n: 1,
+									on: "live",
+									offsetHz: 2_000,
+								},
+								0,
+							],
+						],
+					],
+					// F2: a spectrum owner past the hold, taken over by the other protocol.
+					[
+						[
+							[{ k: "open", backed: true, offsetHz: 0 }, 0],
+							[{ k: "live", protocol: "acars", n: 1 }, 0],
+							[{ k: "live", protocol: "vdl2", n: 1 }, 60_001],
 						],
 					],
 				],

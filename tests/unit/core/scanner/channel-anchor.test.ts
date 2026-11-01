@@ -11,6 +11,7 @@ import {
 	ANCHOR_HELD_MAX,
 	CHANNEL_ANCHOR_FRESH_MS,
 	CHANNEL_OWNER_REACH_HZ,
+	CHANNEL_PROTOCOL_HOLD_MS,
 	DiscoveryStore,
 } from "../../../../src/core/scanner/store/discovery-store.js"
 import type { Logger } from "../../../../src/utils/logger.js"
@@ -504,23 +505,56 @@ describe("channel decode at a stored spectrum discovery", () => {
 		},
 	)
 
-	it("fails closed to the anchor when two discoveries are in reach: neither is proven", () => {
-		const s = store()
-		try {
-			const a = spectrum(s, "o1", -2_000)
-			const b = spectrum(s, "o2", 2_000)
-			expect(a).not.toBe(b)
-			const res = s.anchorDecode("rtl", CH_A, acars(), "commanded")
-			expect(res.change).toBe("created")
-			expect(anchors(s).map(d => d.id)).toEqual([res.discoveryId])
-			for (const id of [a, b]) {
-				expect(s.get(id)!.confidence).not.toBe("decoded")
-				expect(s.get(id)!.proof).toBeUndefined()
+	// channelRoute: with none decoded yet, the nearest record to the channel owns it, ties to the
+	// oldest (firstSeenAt, then id); no anchor opens beside them.
+	it.each([
+		["the nearest", -1_000, 2_000, T0 - 10_000, T0 - 10_000, "near"],
+		["the nearest", 2_000, -1_000, T0 - 10_000, T0 - 10_000, "far"],
+		[
+			"the oldest of two as near",
+			-2_000,
+			2_000,
+			T0 - 10_000,
+			T0 - 11_000,
+			"far",
+		],
+		[
+			"the first id of two as near and as old",
+			2_000,
+			-2_000,
+			T0 - 10_000,
+			T0 - 10_000,
+			"near",
+		],
+	] as const)(
+		"two discoveries in reach, none decoded: %s owns the channel (%i, %i Hz)",
+		(_name, firstHz, secondHz, firstAt, secondAt, owner) => {
+			const s = store()
+			try {
+				const open = (id: string, offsetHz: number, startedAt: number) =>
+					s.ingest(
+						makeObs({
+							id,
+							centreHz: CH_A + offsetHz,
+							startedAt,
+							blocks: 2,
+							obwHz: 9_000,
+							sourceId: "rtl",
+						}),
+					).discoveryId!
+				const first = open("o1", firstHz, firstAt)
+				const second = open("o2", secondHz, secondAt)
+				expect(first).not.toBe(second)
+				const want = owner === "near" ? first : second
+				const res = s.anchorDecode("rtl", CH_A, acars(), "commanded")
+				expect(res.discoveryId).toBe(want)
+				expect(anchors(s)).toHaveLength(0)
+				expect(decodedAt(s)).toEqual([want])
+			} finally {
+				s.stopAnchorExpiry()
 			}
-		} finally {
-			s.stopAnchorExpiry()
-		}
-	})
+		},
+	)
 
 	it("never proves through untrusted or unclean evidence", () => {
 		for (const [ev, trust] of [
@@ -770,26 +804,35 @@ describe("channel decode at a stored spectrum discovery", () => {
 		}
 	})
 
-	it("M1b: an anchor that opened beside two spectrum records keeps the channel when one is left", () => {
-		const s = store()
+	it("M1b: a stale anchor with two spectrum records opened beside it keeps the channel when one is left", () => {
+		let now = T0
+		const s = store(() => now)
 		try {
-			// Two records in reach: the decode fails closed to an anchor, neither is proven.
-			const a = spectrum(s, "o1", -2_000)
-			const b = spectrum(s, "o2", 2_000)
 			const anchorId = s.anchorDecode(
 				"rtl",
 				CH_A,
 				acars(),
 				"commanded",
 			).discoveryId!
+			// Past CHANNEL_ANCHOR_FRESH_MS the anchor lets spectrum records open in its reach.
+			now = T0 + CHANNEL_ANCHOR_FRESH_MS + 1
+			const open = (id: string, offsetHz: number) =>
+				s.ingest(
+					makeObs({
+						id,
+						centreHz: CH_A + offsetHz,
+						startedAt: now - 1_000,
+						blocks: 2,
+						obwHz: 9_000,
+						sourceId: "rtl",
+					}),
+				).discoveryId!
+			const a = open("o1", -2_000)
+			const b = open("o2", 2_000)
+			expect(new Set([anchorId, a, b]).size).toBe(3)
 			// One record leaves; the anchor still holds the channel and takes the next decode.
 			s.delete(b)
-			const res = s.anchorDecode(
-				"rtl",
-				CH_A,
-				acars("TEST02", T0 + 1),
-				"commanded",
-			)
+			const res = s.anchorDecode("rtl", CH_A, acars("TEST02", now), "commanded")
 			expect(res.discoveryId).toBe(anchorId)
 			expect(s.get(a)!.confidence).not.toBe("decoded")
 			expect(decodedAt(s)).toEqual([anchorId])
@@ -1185,6 +1228,225 @@ describe("one owner per channel", () => {
 			),
 			{ numRuns: 200 },
 		)
+	})
+})
+
+describe("one decoded owner per channel across records", () => {
+	const anchors = (s: DiscoveryStore) =>
+		s.snapshot().discoveries.filter(d => d.anchor === "decode")
+	/** A replayed or live decode placed on a record's own observation: the observation, then the record. */
+	const place = (
+		s: DiscoveryStore,
+		observationId: string,
+		discoveryId: string,
+		ev: DecodeEvidence,
+	) => {
+		const collected = s.appendObservationEvidence(observationId, ev)
+		const applied = s.applyEvidenceResult(discoveryId, ev)
+		return { collected, applied }
+	}
+	const observed = (s: DiscoveryStore, id: string) =>
+		s.snapshot().observations.find(o => o.id === id)!.decode ?? []
+
+	it("F1: a second record in reach never becomes a decoded owner, whatever the aircraft: the owner takes it", () => {
+		for (const [first, second] of [
+			[acars("TEST01", PAIRED_AT), acars("TEST02", PAIRED_AT + 1)],
+			[vdl2("ABC001", PAIRED_AT), vdl2("ABC002", PAIRED_AT + 1)],
+		] as const) {
+			const s = store()
+			try {
+				const a = spectrum(s, "o1", -2_000)
+				const b = spectrum(s, "o2", 2_000)
+				expect(place(s, "o1", a, first).collected).toBe(true)
+				expect(decodedAt(s)).toEqual([a])
+				// Another aircraft on the other record's observation: the channel's owner takes it.
+				expect(place(s, "o2", b, second).collected).toBe(false)
+				expect(decodedAt(s)).toEqual([a])
+				expect(observed(s, "o2")).toEqual([])
+				expect(s.get(b)!.confidence).not.toBe("decoded")
+				expect(s.get(a)!.proof).toMatchObject({
+					kind: "decoded",
+					protocol: first.protocol,
+					identity: second.identity,
+				})
+				// The anchor path routes to the same owner.
+				const third = { ...second, at: PAIRED_AT + 2 }
+				expect(
+					s.anchorDecode("rtl", CH_A, third, "commanded").discoveryId,
+				).toBe(a)
+				expect(anchors(s)).toHaveLength(0)
+				expect(decodedAt(s)).toEqual([a])
+			} finally {
+				s.stopAnchorExpiry()
+			}
+		}
+	})
+
+	it("F1: the other protocol on the other record within the hold is refused, not a second owner", () => {
+		for (const [first, second] of [
+			[acars("TEST01", PAIRED_AT), vdl2("ABC001", PAIRED_AT + 1)],
+			[vdl2("ABC001", PAIRED_AT), acars("TEST01", PAIRED_AT + 1)],
+		] as const) {
+			const s = store()
+			try {
+				const a = spectrum(s, "o1", -2_000)
+				const b = spectrum(s, "o2", 2_000)
+				place(s, "o1", a, first)
+				expect(place(s, "o2", b, second)).toEqual({
+					collected: false,
+					applied: { change: null, accepted: false },
+				})
+				expect(decodedAt(s)).toEqual([a])
+				expect(s.get(a)!.proof).toMatchObject({
+					protocol: first.protocol,
+					identity: first.identity,
+				})
+				expect(observed(s, "o2")).toEqual([])
+			} finally {
+				s.stopAnchorExpiry()
+			}
+		}
+	})
+
+	it("F1: with none decoded, a decode placed on a farther record goes to the nearest", () => {
+		const s = store()
+		try {
+			const near = spectrum(s, "o1", -1_000)
+			const far = spectrum(s, "o2", 2_000)
+			const ev = acars("TEST01", PAIRED_AT)
+			expect(place(s, "o2", far, ev).collected).toBe(false)
+			expect(decodedAt(s)).toEqual([near])
+			expect(s.get(near)!.proof).toMatchObject({ identity: ev.identity })
+			// Later decodes on either record keep that one owner.
+			place(s, "o1", near, acars("TEST02", PAIRED_AT + 1))
+			place(s, "o2", far, acars("TEST03", PAIRED_AT + 2))
+			expect(decodedAt(s)).toEqual([near])
+			expect(s.get(near)!.proof!.identity!.value).toBe("TEST03")
+		} finally {
+			s.stopAnchorExpiry()
+		}
+	})
+
+	it("F1: a record in an anchor's reach never collects a channel decode on its observation", () => {
+		let now = T0
+		const s = store(() => now)
+		try {
+			const anchorId = s.anchorDecode(
+				"rtl",
+				CH_A,
+				acars(),
+				"commanded",
+			).discoveryId!
+			now = T0 + CHANNEL_ANCHOR_FRESH_MS + 1
+			const id = s.ingest(
+				makeObs({
+					id: "o1",
+					centreHz: CH_A + 1_000,
+					startedAt: now - 1_000,
+					blocks: 2,
+					obwHz: 9_000,
+					sourceId: "rtl",
+				}),
+			).discoveryId!
+			expect(place(s, "o1", id, acars("TEST02", now - 500)).collected).toBe(
+				false,
+			)
+			expect(observed(s, "o1")).toEqual([])
+			s.stopAnchorExpiry()
+			expect(decodedAt(s)).toEqual([anchorId])
+		} finally {
+			s.stopAnchorExpiry()
+		}
+	})
+
+	// CHANNEL_PROTOCOL_HOLD_MS = CHANNEL_ANCHOR_FRESH_MS = 60 000 ms from the owner's last decode
+	// to the new decode, inclusive: refused at 60 000 ms, taken over at 60 001 ms.
+	it("F2: an anchor refuses the other protocol 60 000 ms after its last decode and is re-keyed 60 001 ms after", () => {
+		expect(CHANNEL_PROTOCOL_HOLD_MS).toBe(60_000)
+		for (const [first, other] of [
+			[acars("TEST01", T0), vdl2("ABC001")],
+			[vdl2("ABC001", T0), acars("TEST01")],
+		] as const) {
+			let now = T0
+			const s = store(() => now)
+			try {
+				const id = s.anchorDecode("rtl", CH_A, first, "commanded").discoveryId!
+				now = T0 + 60_000
+				expect(
+					s.anchorDecode("rtl", CH_A, { ...other, at: now }, "commanded"),
+				).toEqual({ discoveryId: null, change: "transient" })
+				now = T0 + 60_001
+				const res = s.anchorDecode(
+					"rtl",
+					CH_A,
+					{ ...other, at: now },
+					"commanded",
+				)
+				expect(res.discoveryId).toBe(id)
+				s.stopAnchorExpiry()
+				expect(s.snapshot().discoveries.map(d => d.id)).toEqual([id])
+				expect(s.get(id)).toMatchObject({
+					anchor: "decode",
+					protocol: other.protocol,
+					confidence: "decoded",
+					proof: { protocol: other.protocol, identity: other.identity },
+				})
+				expect(s.decodeAnchorFor("rtl", CH_A)?.id).toBe(id)
+				// Now fresh as the other protocol: the first is refused in turn.
+				expect(
+					s.anchorDecode("rtl", CH_A, { ...first, at: now + 1 }, "commanded")
+						.discoveryId,
+				).toBe(null)
+			} finally {
+				s.stopAnchorExpiry()
+			}
+		}
+	})
+
+	it("F2: a spectrum owner refuses the other protocol 60 000 ms after its last decode and is re-proven 60 001 ms after", () => {
+		for (const path of ["placed", "anchor"] as const)
+			for (const [first, other] of [
+				[acars("TEST01", PAIRED_AT), vdl2("ABC001")],
+				[vdl2("ABC001", PAIRED_AT), acars("TEST01")],
+			] as const) {
+				const s = store()
+				try {
+					const id = spectrum(s, "o1", 0)
+					place(s, "o1", id, first)
+					expect(s.get(id)).toMatchObject({
+						protocol: first.protocol,
+						confidence: "decoded",
+					})
+					const send = (at: number) =>
+						path === "placed"
+							? place(s, "o1", id, { ...other, at }).applied.accepted
+							: s.anchorDecode("rtl", CH_A, { ...other, at }, "commanded")
+									.discoveryId === id
+					expect(send(PAIRED_AT + 60_000)).toBe(false)
+					expect(s.get(id)!.protocol).toBe(first.protocol)
+					expect(send(PAIRED_AT + 60_001)).toBe(true)
+					expect(s.snapshot().discoveries.map(d => d.id)).toEqual([id])
+					expect(anchors(s)).toHaveLength(0)
+					expect(decodedAt(s)).toEqual([id])
+					expect(s.get(id)).toMatchObject({
+						protocol: other.protocol,
+						confidence: "decoded",
+						proof: {
+							kind: "decoded",
+							protocol: other.protocol,
+							identity: other.identity,
+						},
+					})
+					// Fresh as the other protocol now: the first protocol is refused in turn.
+					expect(
+						s.applyEvidenceResult(id, { ...first, at: PAIRED_AT + 60_002 })
+							.accepted,
+					).toBe(false)
+					expect(s.get(id)!.protocol).toBe(other.protocol)
+				} finally {
+					s.stopAnchorExpiry()
+				}
+			}
 	})
 })
 

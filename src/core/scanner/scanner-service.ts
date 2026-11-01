@@ -442,6 +442,16 @@ export function trackWithinPassband(
 /** Discoveries whose last decode time is kept for the ranker (the trial memory's 2 048). */
 export const DECODE_TIMES_MAX = 2_048
 
+/**
+ * Refused anchor and channel decode warnings already logged (ScannerService.firstRefusal): one key
+ * per decoder and reason, at most three per decoder (its id for ADS-B, `channel` and
+ * `channel-trust` for ACARS and VDL2), so 256 keys cover 85 decoders at once (85 x 3 = 255).
+ * Placement decoders come and go with retunes under fresh ids and announce no removal, so at the
+ * bound the oldest key is dropped: a new decoder still warns once, and a dropped key warns at most
+ * once more when its decoder is refused again, never once per decode.
+ */
+export const REFUSED_LOGGED_MAX = 256
+
 export interface ScannerServiceDeps {
 	settings: ScannerSettings
 	/** WG11 req 6: IQ capture on detection and replay; absent keeps today's behaviour. */
@@ -775,6 +785,7 @@ export class ScannerService extends EventEmitter {
 		return true
 	}
 	private readonly channelTier: ScannerChannelTier
+	/** Refused-decode warnings already logged (firstRefusal), at most REFUSED_LOGGED_MAX. */
 	private readonly refusedAnchors = new Set<string>()
 	private readonly log: Logger
 	/** Band inspection UX req 3.2: consolidation events raised before a listener attached. */
@@ -4324,6 +4335,15 @@ export class ScannerService extends EventEmitter {
 		}
 		// WG11 req 6.4: a queue replay's decode lands once, through the queue's sink (applyReplayResult).
 		if (req.replay && req.jobId === IQ_REPLAY_QUEUE_HOLDER) return
+		// An identify replay's ACARS or VDL2 decode proves only through a trusted capture (its tuning
+		// trust, re-read now), as a queue replay's does (applyReplayResult): an untrusted capture
+		// lands nowhere, on a stored record or a live one.
+		if (
+			req.replay &&
+			CHANNEL_ANCHOR_PROTOCOLS.includes(ev.protocol) &&
+			!isTrusted(this.replayTrust(req.replay.captureId))
+		)
+			return
 		const found = this.findObservation(req.observationId)
 		if (req.replay) {
 			// a replay's evidence carries the capture's time, not the processing time.
@@ -4491,6 +4511,21 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
+	 * Whether a refused decode's warning (`key`: decoder and reason) is logged for the first time:
+	 * noted then, so it warns once, not per decode. At REFUSED_LOGGED_MAX keys the oldest is
+	 * dropped (insertion order) to make room.
+	 */
+	private firstRefusal(key: string): boolean {
+		if (this.refusedAnchors.has(key)) return false
+		if (this.refusedAnchors.size >= REFUSED_LOGGED_MAX) {
+			const oldest = this.refusedAnchors.values().next()
+			if (!oldest.done) this.refusedAnchors.delete(oldest.value)
+		}
+		this.refusedAnchors.add(key)
+		return true
+	}
+
+	/**
 	 * The tuning trust of a channel decode (ACARS, VDL2) re-read at the placement the decode was
 	 * trusted at, when it is about to prove something: a retune since its acceptance makes it
 	 * untrusted. A throw counts as none (fail closed).
@@ -4525,9 +4560,7 @@ export class ScannerService extends EventEmitter {
 		if (!e.ev.identity || !e.ev.crcClean) return null
 		const anchored = this.store.anchorDecode(e.sourceId, e.hz, e.ev, trust)
 		if (!anchored.discoveryId) {
-			const key = `channel\u0000${e.decoderId}`
-			if (!this.refusedAnchors.has(key)) {
-				this.refusedAnchors.add(key)
+			if (this.firstRefusal(`channel\u0000${e.decoderId}`)) {
 				this.log.warn(
 					{ protocol: e.ev.protocol },
 					"Channel anchor evidence refused",
@@ -4586,10 +4619,8 @@ export class ScannerService extends EventEmitter {
 				}),
 			)
 			if (!anchored.discoveryId) {
-				if (!this.refusedAnchors.has(e.decoderId)) {
-					this.refusedAnchors.add(e.decoderId)
+				if (this.firstRefusal(e.decoderId))
 					this.log.warn("ADS-B anchor evidence refused")
-				}
 				return
 			}
 			const decoderType = this.deps.decoders.getStatus(e.decoderId)?.type
@@ -4654,9 +4685,7 @@ export class ScannerService extends EventEmitter {
 			// Every path a channel decode proves through re-reads trust at its placement first.
 			channelTrust = this.channelDecodeTrust(e)
 			if (!isTrusted(channelTrust)) {
-				const key = `channel-trust\u0000${e.decoderId}`
-				if (!this.refusedAnchors.has(key)) {
-					this.refusedAnchors.add(key)
+				if (this.firstRefusal(`channel-trust\u0000${e.decoderId}`)) {
 					this.log.warn(
 						{ protocol: e.ev.protocol },
 						"Channel decode refused: tuning not trusted at its placement",
