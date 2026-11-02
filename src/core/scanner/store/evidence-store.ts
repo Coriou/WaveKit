@@ -190,7 +190,14 @@ export function probeLinkCandidates(
 	const seen = new Set<string>()
 	for (const o of observations) {
 		for (const call of calls) {
-			if (call.talkgroup === undefined && call.source === undefined) continue
+			// A clear call with no ids claims nothing; an encrypted one still vetoes its window
+			// (absent ids match any file in linkFiles).
+			if (
+				call.talkgroup === undefined &&
+				call.source === undefined &&
+				!call.encrypted
+			)
+				continue
 			if (
 				call.endedAt < o.startedAt - MATCH_SLACK_MS ||
 				call.startedAt > o.endedAt + MATCH_SLACK_MS

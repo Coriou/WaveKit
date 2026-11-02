@@ -960,4 +960,25 @@ describe("probeLinkCandidates", () => {
 		)
 		expect(past).toEqual([{ ...obs, encrypted: true }])
 	})
+	it("keeps an encrypted call with no ids as a veto of its window", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0 + 60_000,
+				statfs: plentyOfDisk,
+			})
+			const wav = callWav(T0 + 2_000, "9", "2002")
+			const probe = await probeDirWith(root, [wav], "WAV")
+			const candidates = probeLinkCandidates(
+				[obs],
+				[{ startedAt: T0 + 2_000, endedAt: T0 + 3_000, encrypted: true }],
+			)
+			expect(candidates.map(c => c.encrypted)).toEqual([false, true])
+			const result = await store.linkProbeRecordings(probe, candidates)
+			expect(result.linked).toEqual([])
+			expect(result.droppedEncrypted).toEqual(["o-1"])
+		})
+	})
 })
