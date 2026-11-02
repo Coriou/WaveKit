@@ -1229,7 +1229,16 @@ export class SweepScheduler {
 			const near =
 				Math.abs((old.hops[i]?.centreHz ?? Number.NaN) - hop.centreHz) <=
 				pending.plan.usableHalfSpanHz
-			return prev !== undefined && near ? { ...prev } : null
+			// Each new hop owns its memory: two hops mapped to one old hop must recover independently.
+			return prev !== undefined && near
+				? {
+						...prev,
+						memory: prev.memory.map(m => ({
+							...m,
+							closedAt: m.closedAt === null ? null : { ...m.closedAt },
+						})),
+					}
+				: null
 		})
 		const visited = new Set<number>()
 		for (const i of this.visited) {

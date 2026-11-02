@@ -590,6 +590,31 @@ describe("SweepScheduler re-plan", () => {
 		expect(h.s.progress()).toMatchObject({ hopIndex: 3, hopCount: 8 })
 	})
 
+	it("gives each new hop its own frequency memory when two new hops map to one old hop", () => {
+		const h = harness(
+			makeHopPlan([400 * MHZ, 401.6 * MHZ]),
+			makeNormalisedSpec({ revisit: noRevisit }),
+		)
+		h.s.start()
+		h.dwell()
+		type Mem = { closedAt: { serial: number; block: number } | null }
+		const state = h.s as unknown as { hops: { memory: Mem[] }[] }
+		const seeded = state.hops[0]
+		if (seeded === undefined) throw new TypeError("hop 0 missing")
+		seeded.memory.push({ closedAt: { serial: 1, block: 3 } } as Mem)
+		// Both new centres sit within the usable half-span of old hop 0 (400 MHz).
+		h.s.replan(
+			makeHopPlan([399.9 * MHZ, 400.1 * MHZ, 401.6 * MHZ]),
+			makeNormalisedSpec({ revisit: noRevisit }),
+		)
+		h.dwell()
+		const [a, b] = state.hops
+		expect(a?.memory).toHaveLength(1)
+		expect(a?.memory).not.toBe(b?.memory)
+		expect(a?.memory[0]).not.toBe(b?.memory[0])
+		expect(a?.memory[0]?.closedAt).not.toBe(b?.memory[0]?.closedAt)
+	})
+
 	// Feature: signal-discovery-scanner, Property 9: Job transitions (scheduler index bounds)
 	// Validates: spec § 10.1, § 10.2, § 12.1
 	it("keeps hopIndex in [0, hopCount) and sweepIndex non-decreasing for any event sequence, including re-plans", () => {
