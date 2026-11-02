@@ -7,18 +7,23 @@
  * centre. When unsure, the answer is "clear" (discover).
  *
  * Per source, every sighting the caller reports (`observe`) is logged in its dwell: the run of
- * sightings under one tuned centre and sample rate, with the RF lines seen there. A steady narrow
- * sighting at offset Δ under centre C (`check`) is LO-locked when an earlier dwell D at another
- * centre Cp (at least `minSeparationHz` away, same sample rate, last sighted within `ttlMs`, at least
- * `dwellMs` long, its line log complete) holds:
- * - a steady narrow line at Cp + Δ (within `offsetHz`, widths within `widthRatio`) with no evidence
- *   of a real signal on it, and
- * - nothing at F = C + Δ, while F lay inside D's usable window (outside its DC guard, the line's
- *   width inside the usable half-span), so a real emitter at F would have been seen;
- * and the current dwell holds Cp + Δ inside its usable window with nothing sighted there after at
- * least `dwellMs` (its line log complete). Until the current dwell is that long, or while the
- * sighting is too young to say whether it is steady, the answer is "pending" (the caller holds the
- * sighting back). If either window does not cover the other position, the answer is "clear".
+ * sightings under one tuned centre and sample rate, with the RF lines seen there. A transition
+ * (one retune, dwell D1 at C1 to the next dwell D2 at C2, at least `minSeparationHz` apart, same
+ * sample rate) follows the LO at offset Δ when:
+ * - both dwells are complete (at least `dwellMs` long, line log complete, last sighted within
+ *   `ttlMs`) and each holds a steady narrow line at its centre + Δ (within `offsetHz`, widths
+ *   within `widthRatio` of the checked sighting's) with no evidence of a real signal on it, and
+ * - each line's position lay inside the other dwell's usable window (outside its DC guard, the
+ *   line's width inside the usable half-span) and nothing was sighted there: the old position went
+ *   empty after the retune and the new one was empty before it.
+ * One such transition proves nothing: one emitter can unkey while another at the same offset from
+ * the next centre keys up. A steady narrow sighting at Δ under centre C (`check`) is LO-locked only
+ * when the transition into its dwell and the ones before it, consecutively, follow the LO at least
+ * `minTransitions` times. Any break (the old position still sighted after a retune, the new one
+ * absent, a line that is not steady or has evidence, a short or incomplete dwell) ends the chain:
+ * the count starts again after it. Before the lock every sighting is "clear" (discovered as usual).
+ * When the chain would lock but the current dwell is not yet `dwellMs` long, or the sighting is too
+ * young to say whether it is steady, the answer is "pending" (the caller holds the sighting back).
  *
  * A lock learns the offset (per sample rate). Learned offsets expire after `ttlMs`, and an offset
  * is revoked (no lock there for `ttlMs`) on contradictory evidence: a sighting with evidence of a
@@ -27,7 +32,9 @@
  * needs the dwell evidence above.
  *
  * Records (`note`): the caller's records sighted per centre; a lock names as partners the records
- * sighted as a steady narrow line at Cp + Δ from Cp and never from C (`eligible` filters them).
+ * sighted only as a steady narrow line at Δ, only from the chain's centres (the current one
+ * included), all within the TTL (`eligible` filters them). A record also sighted at another offset
+ * is one RF line seen from two centres and is never a partner.
  *
  * Bounds (constructor options): dwells per source (oldest dropped), lines per dwell (past it the
  * dwell proves no absence), records per source (least recently sighted dropped), centres per record
@@ -68,6 +75,8 @@ export interface LoLockedOptions {
 	centresPerRecord: number
 	offsetsPerSource: number
 	sourcesMax: number
+	/** Consecutive concordant retune transitions a lock needs. */
+	minTransitions: number
 }
 
 interface Line {
@@ -258,69 +267,72 @@ export class LoLockedSpurs {
 		const rate = s.sampleRateHz
 		if (this.matches(st.revoked, rate, offset)) return CLEAR
 		const width = this.width(s.obwHz)
-		const last = st.dwells.at(-1)
+		const dwells = st.dwells
+		const last = dwells.at(-1)
 		const cur =
 			last !== undefined && this.sameCentre(last, s) ? last : undefined
+		if (cur?.overflow === true) return CLEAR
+		// The transition into this dwell: the previous dwell held the line at its own offset, this
+		// position lay empty in its window, and its position lies in this window, empty so far.
+		let i = cur === undefined ? dwells.length - 1 : dwells.length - 2
+		const prev = dwells[i]
+		if (prev === undefined) return CLEAR
+		const pl = this.spurLine(prev, offset, width, rate, s.atMs)
+		if (
+			pl === undefined ||
+			!this.apart(prev.tunedHz, s.tunedHz) ||
+			!this.inWindow(s.centreHz, width, prev.tunedHz, rate) ||
+			this.sighted(prev, s.centreHz) ||
+			!this.inWindow(pl.rfHz, pl.widthHz, s.tunedHz, rate) ||
+			(cur !== undefined && this.sighted(cur, pl.rfHz))
+		)
+			return CLEAR
+		// Earlier concordant transitions, newest first; the first break ends the chain.
+		let transitions = 1
+		while (
+			i > 0 &&
+			this.concordant(dwells[i - 1]!, dwells[i]!, offset, width, rate, s.atMs)
+		) {
+			transitions++
+			i--
+		}
+		if (transitions < this.opts.minTransitions) return CLEAR
 		const curLong =
 			cur !== undefined && s.atMs - cur.firstMs >= this.opts.dwellMs
-		if (cur?.overflow === true) return CLEAR
-		let pending = false
-		const partnerCentres: Dwell[] = []
-		for (const d of st.dwells) {
-			if (
-				d === cur ||
-				d.rateHz !== rate ||
-				this.sameCentre(d, s) ||
-				d.overflow ||
-				d.lastMs - d.firstMs < this.opts.dwellMs ||
-				s.atMs - d.lastMs > this.opts.ttlMs
-			)
-				continue
-			// F (this sighting) lay in D's window and nothing was there.
-			if (
-				!this.inWindow(s.centreHz, width, d.tunedHz, rate) ||
-				this.sighted(d, s.centreHz)
-			)
-				continue
-			for (const l of d.lines) {
+		if (!curLong || s.steady !== true) return PENDING
+		const chainStart = i
+		const inChain = (tunedHz: number): boolean => {
+			if (Math.abs(tunedHz - s.tunedHz) < this.opts.minSeparationHz) return true
+			for (let k = chainStart; k < dwells.length; k++) {
+				const d = dwells[k]!
 				if (
-					l.steady !== true ||
-					l.real ||
-					Math.abs(l.rfHz - d.tunedHz - offset) > this.opts.offsetHz ||
-					!this.widthsAgree(l.widthHz, width)
+					d !== cur &&
+					Math.abs(tunedHz - d.tunedHz) < this.opts.minSeparationHz
 				)
-					continue
-				// Its position Cp + Δ lies in this window and is empty here.
-				if (!this.inWindow(l.rfHz, l.widthHz, s.tunedHz, rate)) continue
-				if (cur !== undefined && this.sighted(cur, l.rfHz)) continue
-				if (curLong && s.steady === true) partnerCentres.push(d)
-				else pending = true
-				break
+					return true
 			}
+			return false
 		}
-		if (partnerCentres.length === 0) return pending ? PENDING : CLEAR
+		// Partners: records sighted only as a steady line at this offset, only from the chain's
+		// centres (this one included), every sighting within the TTL. A record also sighted at
+		// another offset is one RF line seen from two centres (a real emitter) and stays.
 		const partners: string[] = []
 		for (const [id, list] of st.records) {
-			let there = false
-			let here = false
-			for (const e of list) {
-				if (Math.abs(e.tunedHz - s.tunedHz) < this.opts.minSeparationHz) {
-					here = true
+			if (list.length === 0) continue
+			let all = true
+			for (const e of list)
+				if (
+					e.rateHz !== rate ||
+					e.steady !== true ||
+					s.atMs - e.atMs > this.opts.ttlMs ||
+					Math.abs(e.offsetHz - offset) > this.opts.offsetHz ||
+					!this.widthsAgree(e.widthHz, width) ||
+					!inChain(e.tunedHz)
+				) {
+					all = false
 					break
 				}
-				if (
-					e.rateHz === rate &&
-					e.steady === true &&
-					s.atMs - e.atMs <= this.opts.ttlMs &&
-					Math.abs(e.offsetHz - offset) <= this.opts.offsetHz &&
-					this.widthsAgree(e.widthHz, width) &&
-					partnerCentres.some(
-						d => Math.abs(e.tunedHz - d.tunedHz) < this.opts.minSeparationHz,
-					)
-				)
-					there = true
-			}
-			if (there && !here && eligible(id)) partners.push(id)
+			if (all && eligible(id)) partners.push(id)
 		}
 		const known = st.learned.find(
 			e =>
@@ -334,6 +346,65 @@ export class LoLockedSpurs {
 		}
 		st.suppressed++
 		return { verdict: "locked", partners }
+	}
+
+	/**
+	 * The transition from dwell `a` to the next dwell `b` follows the LO at `offset`: both are
+	 * complete (long enough, log complete, within the TTL) and hold a steady unproven line at it,
+	 * each line's position lay in the other dwell's window, and neither was sighted there.
+	 */
+	private concordant(
+		a: Dwell,
+		b: Dwell,
+		offset: number,
+		width: number,
+		rate: number,
+		atMs: number,
+	): boolean {
+		if (!this.apart(a.tunedHz, b.tunedHz)) return false
+		const la = this.spurLine(a, offset, width, rate, atMs)
+		if (la === undefined) return false
+		const lb = this.spurLine(b, offset, width, rate, atMs)
+		if (lb === undefined) return false
+		return (
+			this.inWindow(lb.rfHz, lb.widthHz, a.tunedHz, rate) &&
+			!this.sighted(a, lb.rfHz) &&
+			this.inWindow(la.rfHz, la.widthHz, b.tunedHz, rate) &&
+			!this.sighted(b, la.rfHz)
+		)
+	}
+
+	/**
+	 * The steady unproven line at `offset` (widths agreeing with `width`) in a complete dwell: same
+	 * rate, log complete, at least `dwellMs` long, last sighted within the TTL. Else undefined.
+	 */
+	private spurLine(
+		d: Dwell,
+		offset: number,
+		width: number,
+		rate: number,
+		atMs: number,
+	): Line | undefined {
+		if (
+			d.rateHz !== rate ||
+			d.overflow ||
+			d.lastMs - d.firstMs < this.opts.dwellMs ||
+			atMs - d.lastMs > this.opts.ttlMs
+		)
+			return undefined
+		for (const l of d.lines)
+			if (
+				l.steady === true &&
+				!l.real &&
+				Math.abs(l.rfHz - d.tunedHz - offset) <= this.opts.offsetHz &&
+				this.widthsAgree(l.widthHz, width)
+			)
+				return l
+		return undefined
+	}
+
+	private apart(a: number, b: number): boolean {
+		return Math.abs(a - b) >= this.opts.minSeparationHz
 	}
 
 	private sameCentre(d: Dwell, s: LoSighting): boolean {

@@ -15,8 +15,8 @@
  *
  * Scenes: small, full, gfsk (one GFSK burst transmitter, ground truth 1 discovery), and the
  * false-discovery scenes noise-1024k, noise-2400k, spurs-1024k, spurs-2400k (120 s each, nothing
- * real on air), lo-spur (a receiver spur at a fixed offset while the tuner moves between two
- * centres; --lo-lock on|off), carriers (steady unmodulated carriers and one NFM over) and voice-id
+ * real on air), lo-spur (a receiver spur at a fixed offset while the tuner alternates two
+ * centres, A, B, A, B; --lo-lock on|off), carriers (steady unmodulated carriers and one NFM over) and voice-id
  * (one 28 s NFM over with CTCSS at 20 dB). --seeds N runs N seeds and prints the onset-to-classified
  * latency of each signal. A/B switches for the weak-admission rules (docs/SCANNER.md): --rule1 on|off (the
  * duty-aware sustained median, default on) and --rule2 on|off (repeated gate passes, default

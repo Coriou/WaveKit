@@ -702,14 +702,14 @@ const runScene = async (scene: Scene): Promise<QualityReport> => {
 }
 
 describe("scanner quality benchmark, quiet band (real scanner, port limits)", () => {
-	it("a receiver spur at a fixed offset across two centres leaves no discovery; real emitters stay one record each", async () => {
+	it("a receiver spur following the LO through three retunes leaves no discovery; real emitters stay one record each", async () => {
 		const scene = loSpurScene()
 		const run = await runScanner(new RetunedSource(scene))
 		const r = scoreRetuned(scene, run, { "nfm-voice-20dB": 1_000 })
 		const by = (id: string) => r.signals.find(s => s.id === id)!
-		// created at the first centre before anything showed it moves with the LO, retired at the
-		// second, never created again when the tuner returns
-		expect(by("lo-spur-20dB").created).toBeLessThanOrEqual(1)
+		// discovered at both positions while it has followed the LO through fewer than 3 retunes
+		// (C1, C2, C1), retired at the third (back at C2), never created again
+		expect(by("lo-spur-20dB").created).toBeLessThanOrEqual(2)
 		expect(by("lo-spur-20dB").live).toBe(0)
 		expect(r.falseLive).toBe(0)
 		for (const id of ["carrier-20dB", "nfm-voice-20dB"]) {

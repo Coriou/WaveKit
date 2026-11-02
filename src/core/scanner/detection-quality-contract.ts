@@ -316,6 +316,18 @@ export const DQ_LO_LOCK_DWELL_MS = 3_000
 export const DQ_LO_LOCK_TTL_MS = 600_000
 
 /**
+ * LO-locked spurs: a line locks only after following the LO through 3 consecutive retunes, each
+ * with its old position seen empty after the retune and its new one seen empty before it. One
+ * retune proves nothing: one real emitter can unkey while another at the same offset from the new
+ * centre keys up (two transmitters taking turns). Each further transition needs that coincidence
+ * again, at another retune the tuner timed on its own: if two real emitters swap at a given retune
+ * with probability p, three swaps in a row happen with p³ (p = 0.1 gives 1 in 1 000), while a spur
+ * follows every retune. A scan alternating two centres (A, B, A, B) reaches 3 transitions at its
+ * fourth dwell: under 1 min at the 12 s dwells above. 2 transitions stay unlocked.
+ */
+export const DQ_LO_LOCK_MIN_TRANSITIONS = 3
+
+/**
  * LO-locked spurs, memory only, per source: 16 dwells of at most 128 lines each (a dwell with more
  * proves no absence), 512 records (least recently sighted dropped first), 4 tuned centres each, and
  * 64 learned plus 64 revoked offsets (oldest dropped first). 16 × 128 × 40 B ≈ 82 kB of dwells plus

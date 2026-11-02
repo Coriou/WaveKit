@@ -143,6 +143,7 @@ import {
 	DQ_LO_LOCK_DWELLS_PER_SOURCE,
 	DQ_LO_LOCK_LINES_PER_DWELL,
 	DQ_LO_LOCK_MIN_SEPARATION_HZ,
+	DQ_LO_LOCK_MIN_TRANSITIONS,
 	DQ_LO_LOCK_OFFSET_HZ,
 	DQ_LO_LOCK_OFFSETS_PER_SOURCE,
 	DQ_LO_LOCK_RECORDS_PER_SOURCE,
@@ -1022,6 +1023,7 @@ export class DiscoveryStore
 		ttlMs: DQ_LO_LOCK_TTL_MS,
 		dwellsPerSource: DQ_LO_LOCK_DWELLS_PER_SOURCE,
 		linesPerDwell: DQ_LO_LOCK_LINES_PER_DWELL,
+		minTransitions: DQ_LO_LOCK_MIN_TRANSITIONS,
 	})
 	/** Evidence-free records an LO-locked sighting showed to be the same spur, for the owner to retire. */
 	private loRetirees = new Set<string>()
@@ -1345,19 +1347,27 @@ export class DiscoveryStore
 	}
 
 	/**
-	 * LO-locked spurs (`LoLockedSpurs`): an evidence-less steady narrow line whose position and its
-	 * partner's were each seen empty from the other's centre is the receiver's own spur, moving with
-	 * the LO: `locked`, and its eligible earlier records are queued for retiring. `pending` while the
-	 * current dwell is too short to tell (the sighting is held back). Without a tuned centre, only an
-	 * observation already judged locked stays locked.
+	 * LO-locked spurs (`LoLockedSpurs`): an evidence-less steady narrow line that followed the LO
+	 * through `DQ_LO_LOCK_MIN_TRANSITIONS` consecutive retunes (each old position seen empty after
+	 * the retune, each new one empty before it) is the receiver's own spur: `locked`, and its
+	 * eligible earlier records are queued for retiring. `pending` while the current dwell is too
+	 * short to tell (the sighting is held back). Without a tuned centre, only an observation already
+	 * judged locked stays locked. `into`: the record the sighting would join; a lock that does not
+	 * retire it answers `clear` (the sighting joins it as usual).
 	 */
-	private loLocked(input: StoreObservationInput): LoVerdict {
+	private loLocked(input: StoreObservationInput, into?: string): LoVerdict {
 		const s = this.loSighting(input)
 		if (s === undefined)
 			return this.loLockedObs.has(input.id) ? "locked" : "clear"
 		const res = this.loSpurs.check(s, id => this.loPartnerEligible(id))
 		for (const id of res.partners) this.loRetirees.add(id)
 		this.loLockedObs.delete(input.id)
+		if (
+			res.verdict === "locked" &&
+			into !== undefined &&
+			!res.partners.includes(into)
+		)
+			return "clear"
 		if (res.verdict === "locked") {
 			this.loLockedObs.add(input.id)
 			if (this.loLockedObs.size > LO_LOCKED_OBS_KEEP) {
@@ -1366,6 +1376,22 @@ export class DiscoveryStore
 			}
 		}
 		return res.verdict
+	}
+
+	/**
+	 * Holds back an evidence-less sighting that would join the evidence-free record `into` when it
+	 * is LO-locked (or pending): a spur revisiting a position it was discovered at before the lock.
+	 * A record with evidence or an operator's mark is never held back from.
+	 */
+	private loHeldFrom(
+		input: StoreObservationInput,
+		into: string,
+		evidenceLess: boolean,
+	): boolean {
+		if (!evidenceLess || !this.loPartnerEligible(into)) return false
+		const lo = this.loLocked(input, into)
+		if (lo === "locked") this.pending.dropRun(input.sourceId, input.id)
+		return lo !== "clear"
 	}
 
 	private ingestObservation(
@@ -1405,7 +1431,15 @@ export class DiscoveryStore
 			!decodeProvesSignal(input, opts.decode),
 			decodedAs,
 		)
-		if (sticky !== undefined)
+		if (sticky !== undefined) {
+			if (
+				this.loHeldFrom(
+					input,
+					sticky.id,
+					!decodeProvesSignal(input, opts.decode),
+				)
+			)
+				return TRANSIENT
 			return this.commit("observation", op =>
 				this.addObservation(
 					op,
@@ -1413,6 +1447,7 @@ export class DiscoveryStore
 					input,
 				),
 			)
+		}
 		const place = this.placement(
 			input.sourceId,
 			input.track.centreHz,
@@ -1428,10 +1463,15 @@ export class DiscoveryStore
 			!decodeProvesSignal(input, opts.decode),
 		)
 		const into = target.merge
-		if (into !== null)
+		if (into !== null) {
+			if (
+				this.loHeldFrom(input, into.id, !decodeProvesSignal(input, opts.decode))
+			)
+				return TRANSIENT
 			return this.commit("observation", op =>
 				this.addObservation(op, into, input),
 			)
+		}
 		// A proven channel anchor with a recent decode owns its channel: no second record opens in
 		// its reach. The observation stays transient, as one the anchor holds; its decodes reach the
 		// anchor (anchorDecode). A stale or restored anchor lets an independent signal open.

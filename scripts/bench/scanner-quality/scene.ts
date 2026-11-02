@@ -904,13 +904,18 @@ export interface RetunedScene {
 }
 
 /**
- * LO-locked spur across centres (synthetic): 1.024 Msps, tuned at C1 for 12 s, C1 + 200 kHz for
- * 12 s, then back at C1 for 8 s. A receiver spur at -150 kHz from the tuned centre (20 dB, on all
- * the time) moves with the tuner: C1 - 150 kHz, then C1 + 50 kHz. Each position lies inside the
- * other centre's usable window (±409.6 kHz: C1 - 150 kHz is 350 kHz below C1 + 200 kHz), so each
- * centre sees the other's position empty, which the LO-lock rule needs. Two real emitters stay put:
- * a steady unmodulated carrier at C1 + 150 kHz (20 dB) and an NFM voice carrier with CTCSS at
- * C1 - 100 kHz (20 dB, on from 1 s to 30 s). Ground truth: 2 discoveries, the spur none.
+ * LO-locked spur across centres (synthetic): 1.024 Msps, tuned at C1, C1 + 200 kHz and C1 again for
+ * 7 s each, then at C1 + 200 kHz until 40 s (3 retunes: a lock needs the line to follow the LO
+ * through 3). The dwells are short enough that the third retune (21 s) and its 3 s minimum dwell
+ * come before the engine's provisional spur path (a narrow line on in 95 % of 30 s of settled
+ * blocks, at one baseband bin across retunes) drops the line before tracking: past that, no
+ * sighting reaches the LO-lock rule. A receiver spur at -150 kHz from the tuned centre (20 dB, on
+ * all the time) moves with the tuner: C1 - 150 kHz, then C1 + 50 kHz, and back. Each position lies
+ * inside the other centre's usable window (±409.6 kHz: C1 - 150 kHz is 350 kHz below
+ * C1 + 200 kHz), so each centre sees the other's position empty, which the LO-lock rule needs. Two
+ * real emitters stay put: a steady unmodulated carrier at C1 + 150 kHz (20 dB) and an NFM voice
+ * carrier with CTCSS at C1 - 100 kHz (20 dB, on from 1 s to 30 s). Ground truth: 2 discoveries, the
+ * spur none at the end (its records from the first dwells are retired at the lock).
  */
 export function loSpurScene(seed = 20_261_108): RetunedScene {
 	const rateHz = 1_024_000
@@ -920,9 +925,10 @@ export function loSpurScene(seed = 20_261_108): RetunedScene {
 	const carrierHz = c1 + 150_000
 	const voiceHz = c1 - 100_000
 	const plan = [
-		{ fromMs: 0, toMs: 12_000, centreHz: c1 },
-		{ fromMs: 12_000, toMs: 24_000, centreHz: c2 },
-		{ fromMs: 24_000, toMs: 32_000, centreHz: c1 },
+		{ fromMs: 0, toMs: 7_000, centreHz: c1 },
+		{ fromMs: 7_000, toMs: 14_000, centreHz: c2 },
+		{ fromMs: 14_000, toMs: 21_000, centreHz: c1 },
+		{ fromMs: 21_000, toMs: 40_000, centreHz: c2 },
 	]
 	const voiceOn = { startMs: 1_000, endMs: 30_000 }
 	const segments = plan.map((p, i): RetunedSegment => {
