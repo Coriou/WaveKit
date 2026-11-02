@@ -151,6 +151,7 @@ interface DiscoveryQuery {
 	evidence?: "proven" | "weak" | "all"
 	nearHz?: number
 	toleranceHz?: number
+	includeReceiverSpurs?: boolean
 }
 
 /** The schema a ZodError without its own (the discovery identity query) is named against. */
@@ -428,6 +429,7 @@ function toFilter(q: DiscoveryQuery): DiscoveryFilter {
 		...(q.evidence !== undefined ? { evidence: q.evidence } : {}),
 		...(q.nearHz !== undefined ? { nearHz: q.nearHz } : {}),
 		...(q.toleranceHz !== undefined ? { toleranceHz: q.toleranceHz } : {}),
+		...(q.includeReceiverSpurs === true ? { includeReceiverSpurs: true } : {}),
 	}
 }
 
@@ -548,6 +550,17 @@ const discoveryResponseSchema = {
 		revision: { type: "integer" },
 		storeEpoch: { type: "string" },
 		storeRevision: { type: "integer" },
+		receiverSpur: {
+			type: "object",
+			additionalProperties: false,
+			required: ["offsetHz", "sampleRateHz", "centres", "lastAtMs"],
+			properties: {
+				offsetHz: { type: "number" },
+				sampleRateHz: { type: "number" },
+				centres: { type: "integer" },
+				lastAtMs: { type: "number" },
+			},
+		},
 	},
 } as const
 

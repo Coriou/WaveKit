@@ -17,6 +17,14 @@ import {
 	DQ_PTT_IDS_MAX,
 	DQ_PTT_PER_SOURCE,
 	DQ_PTT_WINDOW_MS,
+	DQ_REPEAT_ENABLED,
+	DQ_REPEAT_LOCAL_SNR_DB,
+	DQ_REPEAT_MEDIAN_SNR_DB,
+	DQ_REPEAT_MIN_OBS,
+	DQ_REPEAT_PEAK_SNR_DB,
+	DQ_REPEAT_PER_SOURCE,
+	DQ_REPEAT_SAMPLES,
+	DQ_REPEAT_WINDOW_MS,
 	DQ_SUSTAIN_FLOOR_SNR_DB,
 	DQ_SUSTAIN_MAX_GAP_MS,
 	DQ_SUSTAIN_MEDIAN_SNR_DB,
@@ -24,6 +32,7 @@ import {
 	DQ_SUSTAIN_MS,
 	DQ_SUSTAIN_PER_SOURCE,
 	DQ_SUSTAIN_SAMPLES,
+	DQ_TDMA_DUTY_DB,
 } from "../detection-quality-contract.js"
 import type { ObservationInput } from "../types.js"
 import type { TrackSnapshot } from "../../spectrum/types.js"
@@ -95,6 +104,18 @@ export interface AirtimeEntry {
 	ids: Set<string>
 }
 
+/**
+ * Req 1.4e: one channel's repeated gate passes (memory only), keyed by pending bucket, insertion
+ * (`firstAt`) order. `samples` holds one per observation id (its highest admission SNR), in
+ * first-pass order, at most `DQ_REPEAT_SAMPLES`; a pass older than `DQ_REPEAT_WINDOW_MS` drops
+ * out from the front.
+ */
+export interface RepeatEntry {
+	firstAt: number
+	bucket: number
+	samples: PendingSample[]
+}
+
 /** Median of a non-empty list (mean of the two middles when even). */
 function median(xs: readonly number[]): number {
 	const s = [...xs].sort((a, b) => a - b)
@@ -135,6 +156,12 @@ export class PendingAdmission {
 	private readonly runs = new Map<string, Map<string, SustainRun>>()
 	/** Req 1.4d: push-to-talk airtime per source, keyed by bucket, insertion (firstAt) order. */
 	private readonly airtime = new Map<string, Map<number, AirtimeEntry>>()
+	/** Req 1.4e: repeated gate passes per source, keyed by bucket, insertion (firstAt) order. */
+	private readonly repeats = new Map<string, Map<number, RepeatEntry>>()
+	/** Req 1.4b duty-aware median (`DQ_TDMA_DUTY_DB`); a switch for A/B measurement only. */
+	dutyAware = true
+	/** Req 1.4e on or off (`DQ_REPEAT_ENABLED`); a switch for A/B measurement only. */
+	repeatRule = DQ_REPEAT_ENABLED
 
 	constructor(private readonly now: () => number) {}
 
@@ -181,10 +208,16 @@ export class PendingAdmission {
 		run.lastAt = now
 		run.snrs.push(snr)
 		if (run.snrs.length > DQ_SUSTAIN_SAMPLES) run.snrs.shift()
+		// Duty-aware: a `tdma-ms` track's samples read 10 · log10(1 / 0.5) = 3.01 dB under its
+		// carrier; adding that to every sample adds it to their median.
+		const duty =
+			this.dutyAware && obs.classification.class === "tdma-ms"
+				? DQ_TDMA_DUTY_DB
+				: 0
 		const promotes =
 			(now - run.firstAt >= DQ_SUSTAIN_MS &&
 				run.snrs.length >= DQ_SUSTAIN_MIN_SAMPLES &&
-				median(run.snrs) >= DQ_SUSTAIN_MEDIAN_SNR_DB) ||
+				median(run.snrs) + duty >= DQ_SUSTAIN_MEDIAN_SNR_DB) ||
 			this.airtimePromotes(obs, now, run)
 		if (promotes) this.dropAirtime(sourceId, obs.track.centreHz)
 		else if (obs.endReason !== undefined) this.bank(obs, now, run)
@@ -283,6 +316,85 @@ export class PendingAdmission {
 		entry.onMs += span
 		for (const x of run.snrs) entry.snrs.push(x)
 		while (entry.snrs.length > DQ_SUSTAIN_SAMPLES) entry.snrs.shift()
+	}
+
+	/**
+	 * Req 1.4e: one gate-passed weak observation (finite centre and SNR, not overload; the store
+	 * checks). True = its channel holds `DQ_REPEAT_MIN_OBS` distinct passes within
+	 * `DQ_REPEAT_WINDOW_MS` whose median reaches `DQ_REPEAT_MEDIAN_SNR_DB`; the entry is deleted.
+	 * A pass under `DQ_REPEAT_PEAK_SNR_DB`, without a local SNR of at least
+	 * `DQ_REPEAT_LOCAL_SNR_DB`, or on the passband edge is not recorded. Off: always false.
+	 */
+	repeated(obs: ObservationInput): boolean {
+		if (!this.repeatRule) return false
+		const { sourceId, id, track } = obs
+		this.syncEpoch(sourceId, track.epoch)
+		const snr = admissionSnrOf(track)
+		const local = track.localSnrDb
+		if (
+			!(snr >= DQ_REPEAT_PEAK_SNR_DB) ||
+			local === undefined ||
+			!(local >= DQ_REPEAT_LOCAL_SNR_DB) ||
+			track.flags.edge === true ||
+			!Number.isFinite(track.centreHz)
+		)
+			return false
+		const now = this.now()
+		let map = this.repeats.get(sourceId)
+		if (map === undefined) {
+			map = new Map()
+			this.repeats.set(sourceId, map)
+		}
+		const bucket = Math.round(track.centreHz / DQ_PENDING_BUCKET_HZ)
+		let entry = nearestOf(map, bucket)
+		if (entry !== undefined) {
+			const s = entry.samples
+			while (s.length > 0 && now - s[0]!.at >= DQ_REPEAT_WINDOW_MS) s.shift()
+			if (s.length === 0) {
+				map.delete(entry.bucket)
+				entry = undefined
+			}
+		}
+		if (entry === undefined) {
+			if (map.has(bucket)) map.delete(bucket)
+			while (map.size >= DQ_REPEAT_PER_SOURCE) {
+				const oldest = map.keys().next()
+				if (oldest.done === true) break
+				map.delete(oldest.value)
+			}
+			entry = { firstAt: now, bucket, samples: [] }
+			map.set(bucket, entry)
+		}
+		const same = entry.samples.find(x => x.id === id)
+		if (same !== undefined) {
+			if (snr > same.snr) same.snr = snr
+		} else {
+			entry.samples.push({ id, at: now, snr })
+			if (entry.samples.length > DQ_REPEAT_SAMPLES) entry.samples.shift()
+		}
+		if (
+			entry.samples.length >= DQ_REPEAT_MIN_OBS &&
+			median(entry.samples.map(x => x.snr)) >= DQ_REPEAT_MEDIAN_SNR_DB
+		) {
+			map.delete(entry.bucket)
+			if (map.size === 0) this.repeats.delete(sourceId)
+			return true
+		}
+		return false
+	}
+
+	/** Req 1.4e: drops the repeat entry nearest `centreHz` (a create there consumed it). */
+	private dropRepeat(sourceId: string, centreHz: number): void {
+		const map = this.repeats.get(sourceId)
+		if (map === undefined || !Number.isFinite(centreHz)) return
+		const e = nearestOf(map, Math.round(centreHz / DQ_PENDING_BUCKET_HZ))
+		if (e !== undefined) map.delete(e.bucket)
+		if (map.size === 0) this.repeats.delete(sourceId)
+	}
+
+	/** Repeat entries held for a source (tests and bounds). */
+	repeatEntries(sourceId: string): readonly Readonly<RepeatEntry>[] {
+		return [...(this.repeats.get(sourceId)?.values() ?? [])]
 	}
 
 	/** Req 1.4d: drops the airtime entry nearest `centreHz` (a create there consumed it). */
@@ -384,6 +496,16 @@ export class PendingAdmission {
 			}
 			if (map.size === 0) this.airtime.delete(sourceId)
 		}
+		// Req 1.4e: an entry whose newest pass left the window holds nothing that counts. Newest
+		// passes are not in insertion order, so the scan visits every entry (at most 512).
+		for (const [sourceId, map] of this.repeats) {
+			for (const [bucket, e] of map) {
+				const last = e.samples.at(-1)
+				if (last === undefined || now - last.at >= DQ_REPEAT_WINDOW_MS)
+					map.delete(bucket)
+			}
+			if (map.size === 0) this.repeats.delete(sourceId)
+		}
 	}
 
 	/**
@@ -399,6 +521,15 @@ export class PendingAdmission {
 			for (const [bucket, e] of air) if (e.ids.has(id)) air.delete(bucket)
 			if (air.size === 0) this.airtime.delete(sourceId)
 		}
+		const rep = this.repeats.get(sourceId)
+		if (rep !== undefined) {
+			for (const [bucket, e] of rep) {
+				const i = e.samples.findIndex(x => x.id === id)
+				if (i >= 0) e.samples.splice(i, 1)
+				if (e.samples.length === 0) rep.delete(bucket)
+			}
+			if (rep.size === 0) this.repeats.delete(sourceId)
+		}
 		const map = this.bySource.get(sourceId)
 		if (map === undefined) return
 		for (const [bucket, e] of map) {
@@ -410,14 +541,19 @@ export class PendingAdmission {
 		if (map.size === 0) this.bySource.delete(sourceId)
 	}
 
-	/** Req 1.4d: a create that already took its pending entry clears the channel's airtime only. */
+	/**
+	 * Req 1.4d, 1.4e: a create that already took its pending entry clears the channel's airtime
+	 * and repeated passes only.
+	 */
 	consumeAirtime(obs: ObservationInput): void {
 		this.dropAirtime(obs.sourceId, obs.track.centreHz)
+		this.dropRepeat(obs.sourceId, obs.track.centreHz)
 	}
 
 	/** Any create at this centre consumes the matching entry (nearest of b - 1, b, b + 1). */
 	consume(obs: ObservationInput): void {
 		this.dropAirtime(obs.sourceId, obs.track.centreHz)
+		this.dropRepeat(obs.sourceId, obs.track.centreHz)
 		const map = this.bySource.get(obs.sourceId)
 		if (map === undefined) return
 		const centre = obs.track.centreHz
@@ -433,12 +569,14 @@ export class PendingAdmission {
 			this.bySource.clear()
 			this.runs.clear()
 			this.airtime.clear()
+			this.repeats.clear()
 			this.epochs.clear()
 			return
 		}
 		this.bySource.delete(sourceId)
 		this.runs.delete(sourceId)
 		this.airtime.delete(sourceId)
+		this.repeats.delete(sourceId)
 		this.epochs.delete(sourceId)
 	}
 

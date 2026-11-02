@@ -86,6 +86,47 @@ export const DQ_SUSTAIN_SAMPLES = 8
 export const DQ_SUSTAIN_PER_SOURCE = 512
 
 /**
+ * Req 1.4b (duty-aware): a TDMA (`tdma-ms`) carrier keys one 27.5 ms slot of every 60 ms
+ * (duty 0.46), so its channel SNR, a power average over the integration, reads about
+ * 10 · log10(0.46) = -3.4 dB under the carrier's own level. Taking duty 0.5, the sustained
+ * median adds 10 · log10(1 / 0.5) = 3.01 dB to every run sample of a track classified
+ * `tdma-ms` (the median of samples + 3.01 = their median + 3.01). Its run still ends under
+ * `DQ_SUSTAIN_FLOOR_SNR_DB` (9, unchanged): 9 + 3.01 = 12.01 ≥ 12, so for `tdma-ms` the floor,
+ * not the median, binds. Measured: a 10 dB DMR carrier's run reads 9 to 11.7 dB (admitted), a
+ * 6 dB one 6.2 to 8.3 dB (under the floor, never a run).
+ */
+export const DQ_TDMA_DUTY = 0.5
+export const DQ_TDMA_DUTY_DB = 10 * Math.log10(1 / DQ_TDMA_DUTY)
+
+/**
+ * Req 1.4e (repeated gate passes): a weak transmitter that repeats (a sensor, a beacon, a packet
+ * channel) promotes once 3 distinct gate-passed observations land in one pending bucket (nearest
+ * of b - 1, b, b + 1) within 60 000 ms (sliding: a pass older than 60 s stops counting), each
+ * with a local SNR (DQ 1.15) of at least 6 dB and an admission SNR of at least 9 dB, their
+ * median at least 10 dB. 9 = the gate's burst pass level (`DQ_SUSTAIN_FLOOR_SNR_DB`); 10 =
+ * 9 + 1 dB, under the 15 dB pending median (1.4) because the 60 s window is a tenth of its
+ * 600 s one. An observation counts once (its highest admission SNR); one observation, however
+ * long, never promotes alone. A track without a local SNR (no channel plan) or on the passband
+ * edge never counts. Off unless `DQ_REPEAT_ENABLED`: see docs/SCANNER.md for the measurement.
+ */
+export const DQ_REPEAT_MIN_OBS = 3
+export const DQ_REPEAT_WINDOW_MS = 60_000
+export const DQ_REPEAT_LOCAL_SNR_DB = 6
+export const DQ_REPEAT_PEAK_SNR_DB = 9
+export const DQ_REPEAT_MEDIAN_SNR_DB = 10
+
+/**
+ * Req 1.4e: newest passes an entry keeps, 5 = 3 needed + 2, so a fourth and fifth weak pass can
+ * lift a median the first three missed; entries per source, the pending budget. 512 × (5 × (40 B
+ * id + 16 B) + 48 B) ≈ 512 × 330 B ≈ 170 kB per source; the oldest entry is evicted first.
+ */
+export const DQ_REPEAT_SAMPLES = 5
+export const DQ_REPEAT_PER_SOURCE = 512
+
+/** Req 1.4e is shipped off: see docs/SCANNER.md (repeated gate passes) for the measurement. */
+export const DQ_REPEAT_ENABLED = false
+
+/**
  * Req 1.4d: push-to-talk airtime. Sustained runs on one channel (the pending bucket, nearest of
  * b - 1, b, b + 1) add up for 60 000 ms from the first credited sample: an exchange of three
  * 2 s transmissions with 25 s gaps (2 + 25 + 2 + 25 + 2 = 56 s) fits. A transmission that ends
@@ -219,3 +260,111 @@ export const DQ_CONSOLIDATE_SCAN_MAX = 32
  * records keep `DQ_OBW_RATIO_MAX` (2).
  */
 export const DQ_YOUNG_OBW_RATIO = 3
+
+/**
+ * LO-locked spurs: two sightings sit at the same offset from their tuned centres when their
+ * offsets agree within 1 200 Hz. A steady line's centroid reads within half an FFT bin, and the
+ * engine's default bin (fs / 1 000 rounded to a power of two) is at most 1 000 × √2 = 1.41 kHz:
+ * two readings of ±0.6 kHz each differ by at most 1.2 kHz. The same tolerance says whether a
+ * position was sighted in a dwell (plus the sighted line's half width).
+ */
+export const DQ_LO_LOCK_OFFSET_HZ = 1_200
+
+/**
+ * LO-locked spurs: two tuned centres count as different only 12 500 Hz or more apart (one
+ * land-mobile channel). Closer, the line's two RF positions share a channel and association
+ * already keeps them on one record, so the offset says nothing about the LO.
+ */
+export const DQ_LO_LOCK_MIN_SEPARATION_HZ = 12_500
+
+/**
+ * LO-locked spurs: only steady narrow lines lock (under 4 kHz at -20 dB, over 4 blocks, on at
+ * least 90 % of the time: `steadyLine` in the classifier). Each width is floored at 3 000 Hz (a
+ * line reads 1 to 3 bins of up to 1.41 kHz), so two steady lines read 3 to 4 kHz floored: a ratio
+ * of at most 4 / 3 = 1.33. Their widths must agree within 1.5, which keeps that margin and refuses
+ * a 4.5 kHz or wider reading against a 3 kHz line.
+ */
+export const DQ_LO_LOCK_WIDTH_RATIO = 1.5
+export const DQ_LO_LOCK_WIDTH_FLOOR_HZ = 3_000
+
+/**
+ * LO-locked spurs: a position counts as seen from a centre only inside its usable window, the
+ * detector's usable 80 % (`USABLE_FRACTION`, ±409.6 kHz at 1.024 Msps: past it signals are `edge`),
+ * the line's whole width inside, and more than `DQ_DC_ADMIT_HZ` (12.5 kHz) from the tuned centre,
+ * where the DC pedestal hides or blocks a line. Outside, nothing was proven absent there.
+ */
+export const DQ_LO_LOCK_USABLE_FRACTION = 0.8
+export const DQ_LO_LOCK_DC_GUARD_HZ = DQ_DC_ADMIT_HZ
+
+/**
+ * LO-locked spurs: the minimum dwell under a centre before its absence of a line counts against an
+ * offset (a miss). A steady line passes the channel gate after 300 ms on and the scanner ingests it
+ * at its gate pass, then once a second (its ingest throttle). 3 000 ms from the dwell's start covers
+ * the gate's on-time, a first ingest that lags it by up to 1 000 ms and two more throttled ingests
+ * (a dwell is measured from its first to its last tick or sighting, so it never reads longer than
+ * the tuner stayed). A shorter dwell is neither a hit's precondition nor a miss.
+ */
+export const DQ_LO_LOCK_DWELL_MS = 3_000
+
+/**
+ * LO-locked spurs: dwell evidence (lines seen, positions seen empty) and learned or revoked offsets
+ * last 10 min = 600 000 ms after their last sighting. A scan of a 2 MHz band at 1.024 Msps needs
+ * 3 centres; at 12 s dwells it comes back to a centre within a minute, so 10 min holds many
+ * revisits. Past it, an empty position says too little about now (an emitter may have keyed up),
+ * so the safe answer is to discover again. A flag saved with its record and restored after a restart
+ * waits the same 10 min for its offset to be learned again (a sweep relearns it within a minute).
+ */
+export const DQ_LO_LOCK_TTL_MS = 600_000
+
+/**
+ * LO-locked spurs: an offset is learned only from a steady narrow line at it seen from 3 distinct
+ * tuned centres (pairwise at least `DQ_LO_LOCK_MIN_SEPARATION_HZ` apart; revisits of a centre in a
+ * cyclic sweep keep its evidence fresh but count once). Two centres prove nothing: two real
+ * emitters can sit at one offset from two centres (one each). A third emitter at the same offset
+ * from a third centre, with nothing at that offset under any other complete dwell (a miss blocks
+ * the lock), is the coincidence the rule accepts, and then the records are only flagged (hidden by
+ * default), never deleted. A tiling sweep of 3 hops reaches it at its third hop.
+ */
+export const DQ_LO_LOCK_MIN_CENTRES = 3
+
+/**
+ * LO-locked spurs: a receiver mask line (the engine's provisional, comb or baseband spur, reported
+ * in each block summary at a fixed baseband position) counts as a steady line in the current dwell
+ * only 2 000 ms after the dwell began. A provisional line that a real emitter made before a retune
+ * survives into the new dwell until its bins have been off for the off budget,
+ * (1 − 0.95) × 30 s = 1 500 ms of settled blocks; 2 000 ms adds 500 ms (several blocks) of margin.
+ * Summaries come from settled blocks only, so the dwell starts at the first settled block.
+ */
+export const DQ_LO_LOCK_MASK_SETTLE_MS = 2_000
+
+/**
+ * LO-locked spurs: mask lines of a source are evaluated at most once per 1 000 ms (summaries come
+ * once per block; a mask line lasts tens of seconds, so once a second loses nothing).
+ */
+export const DQ_LO_LOCK_MASK_PERIOD_MS = 1_000
+
+/**
+ * LO-locked spurs, memory only, per source: 16 dwells of at most 128 lines each (a dwell with more
+ * proves no absence and is never a miss), 512 records whose whole history was seen (least recently
+ * sighted dropped first: a dropped record is never flagged), 4 tuned centres each, and
+ * 64 learned plus 64 revoked offsets (oldest dropped first). 16 × 128 × 40 B ≈ 82 kB of dwells plus
+ * 512 × (4 × 56 B + 64 B) ≈ 147 kB of records per source; at most 64 sources (the pending-capture
+ * cap): about 15 MB in the worst case, typically one source and a few kB.
+ */
+export const DQ_LO_LOCK_DWELLS_PER_SOURCE = 16
+export const DQ_LO_LOCK_LINES_PER_DWELL = 128
+export const DQ_LO_LOCK_RECORDS_PER_SOURCE = 512
+export const DQ_LO_LOCK_CENTRES_PER_RECORD = 4
+export const DQ_LO_LOCK_OFFSETS_PER_SOURCE = 64
+export const DQ_LO_LOCK_SOURCES_MAX = 64
+
+/**
+ * Early analog classification: a detection capture of a track the spectral classifier calls
+ * `analog-fm` ends once the track has been on for 2 000 ms, not at the 4 000 ms capture cap, so
+ * its analog trial (tone and voice) runs while the over is still on. The trial qualifies a CTCSS
+ * tone or DCS code from 750 ms of audio (DCS_MIN_AUDIO_SECONDS) and judges voice from the median
+ * of its frames: 2 000 ms is 2.7 times the tone minimum and 8 syllables at a 4 Hz syllabic rate.
+ * With the 500 ms pre-roll the capture holds 2 500 ms; the trial result lands about 2.5 to 3 s
+ * after onset instead of 4.5 s. A track that closes sooner ends its capture at the close, as before.
+ */
+export const DQ_ANALOG_EARLY_CAPTURE_MS = 2_000

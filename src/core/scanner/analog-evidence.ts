@@ -33,6 +33,13 @@ export interface AnalogEvidenceLog extends IdentifyAnalogEvidence {
 	 * event with `data: true` (detection quality R4) is kept with the core-only flag.
 	 */
 	record(event: AnalogTransmissionEventData & { data?: boolean }): void
+	/**
+	 * The tracker's in-progress "tone" event: a kept, still open transmission whose CTCSS tone or
+	 * DCS code qualified. Notifies subscribers once per transmission id with an open transmission
+	 * (`endedAtMs` null) carrying the tone; the kept entry is unchanged (identify reads closed
+	 * tones only). A malformed, unknown, closed, tone-less or repeated event is dropped. Never throws.
+	 */
+	recordTone(event: AnalogTransmissionEventData): void
 	/** WG10 R2: binds the tracker's pending opening (late: the tracker is built after the log). */
 	setPending(pending: (() => AnalogTransmissionEventData | null) | null): void
 	pendingNear(
@@ -41,7 +48,8 @@ export interface AnalogEvidenceLog extends IdentifyAnalogEvidence {
 		toleranceHz: number,
 	): readonly AnalogEvidenceTransmission[]
 	/**
-	 * Closed transmissions, after they are kept. Returns unsubscribe.
+	 * Closed transmissions, after they are kept, and once per transmission an open one whose
+	 * tone qualified (`recordTone`, `endedAtMs` null). Returns unsubscribe.
 	 * A throwing listener does not break the log or later listeners.
 	 */
 	subscribe(
@@ -116,26 +124,10 @@ export function evidenceOf(event: unknown): AnalogEvidenceTransmission | null {
 	if (state === "closed") {
 		endedAtMs = timeOf(event["endedAt"])
 		if (endedAtMs === null || endedAtMs < startedAtMs) return null
-		const tone = event["tone"]
-		if (tone !== undefined) {
-			if (!isRecord(tone)) return null
-			const c = tone["ctcssHz"]
-			if (c !== null && c !== undefined) {
-				if (typeof c !== "number" || !CTCSS.has(c)) return null
-				ctcssHz = c
-			}
-			const d = tone["dcs"]
-			if (d !== null && d !== undefined) {
-				if (
-					!isRecord(d) ||
-					typeof d["code"] !== "string" ||
-					!DCS_CODES.has(d["code"]) ||
-					(d["polarity"] !== "normal" && d["polarity"] !== "inverted")
-				)
-					return null
-				dcs = { code: d["code"], polarity: d["polarity"] }
-			}
-		}
+		const tone = toneOf(event["tone"])
+		if (tone === null) return null
+		ctcssHz = tone.ctcssHz
+		dcs = tone.dcs
 	}
 	return {
 		transmissionId,
@@ -153,6 +145,33 @@ export function evidenceOf(event: unknown): AnalogEvidenceTransmission | null {
 	}
 }
 
+/** Standard CTCSS / DCS of an event tone (absent: none), or null when malformed. */
+function toneOf(
+	tone: unknown,
+): Pick<AnalogEvidenceTransmission, "ctcssHz" | "dcs"> | null {
+	let ctcssHz: number | null = null
+	let dcs: AnalogEvidenceTransmission["dcs"] = null
+	if (tone === undefined) return { ctcssHz, dcs }
+	if (!isRecord(tone)) return null
+	const c = tone["ctcssHz"]
+	if (c !== null && c !== undefined) {
+		if (typeof c !== "number" || !CTCSS.has(c)) return null
+		ctcssHz = c
+	}
+	const d = tone["dcs"]
+	if (d !== null && d !== undefined) {
+		if (
+			!isRecord(d) ||
+			typeof d["code"] !== "string" ||
+			!DCS_CODES.has(d["code"]) ||
+			(d["polarity"] !== "normal" && d["polarity"] !== "inverted")
+		)
+			return null
+		dcs = { code: d["code"], polarity: d["polarity"] }
+	}
+	return { ctcssHz, dcs }
+}
+
 function copyOf(t: AnalogEvidenceTransmission): AnalogEvidenceTransmission {
 	return { ...t, dcs: t.dcs ? { ...t.dcs } : null }
 }
@@ -166,6 +185,8 @@ export function createAnalogEvidenceLog(
 	const listeners = new Set<
 		(transmission: AnalogEvidenceTransmission) => void
 	>()
+	/** Kept open transmission ids whose in-progress tone was notified (subset of `ring`). */
+	const toned = new Set<string>()
 	let lastWarnAt = Number.NEGATIVE_INFINITY
 	let pending = options.pending ?? null
 	const notify = (t: AnalogEvidenceTransmission): void => {
@@ -220,6 +241,7 @@ export function createAnalogEvidenceLog(
 					if (known.endedAtMs !== null || t.endedAtMs === null) return
 					if (known.sourceId !== t.sourceId) return
 					ring.set(t.transmissionId, t)
+					toned.delete(t.transmissionId)
 					notify(t)
 					return
 				}
@@ -228,8 +250,30 @@ export function createAnalogEvidenceLog(
 					const oldest = ring.keys().next().value
 					if (oldest === undefined) break
 					ring.delete(oldest)
+					toned.delete(oldest)
 				}
 				if (t.endedAtMs !== null) notify(t)
+			} catch {
+				// A hostile getter on the event: dropped.
+			}
+		},
+		recordTone(event: AnalogTransmissionEventData): void {
+			try {
+				const t = evidenceOf(event)
+				if (!t || t.endedAtMs !== null) return
+				const known = ring.get(t.transmissionId)
+				if (
+					!known ||
+					known.endedAtMs !== null ||
+					known.sourceId !== t.sourceId ||
+					toned.has(t.transmissionId)
+				)
+					return
+				const tone = toneOf(isRecord(event) ? event["tone"] : undefined)
+				if (tone === null || (tone.ctcssHz === null && tone.dcs === null))
+					return
+				toned.add(t.transmissionId)
+				notify({ ...known, ctcssHz: tone.ctcssHz, dcs: tone.dcs })
 			} catch {
 				// A hostile getter on the event: dropped.
 			}

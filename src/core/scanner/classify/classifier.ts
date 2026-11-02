@@ -25,6 +25,134 @@ const GMSK_MIN_HZ = 4000
 const ANALOG_MIN_HZ = 7500
 const ANALOG_MAX_HZ = 18_000
 const DEFAULT_RBW_HZ = 1000
+/**
+ * A steady line (an unmodulated carrier, a clock harmonic) is a `carrier` when it is on at least
+ * 90 % of the time (keyed CW at about 50 % and data bursts stay `unknown`) and its spectrum is a
+ * carrier's (`carrierLine`).
+ */
+export const CARRIER_STEADY_DUTY_MIN = 0.9
+/**
+ * `carrierLine`: a carrier's -20 dB width is at most 4 bins of the track's own FFT (inclusive).
+ * A Hann-windowed pure tone with at least 20 dB SNR reads 3 bins on a bin centre (the ±2-bin
+ * neighbours are window zeros) and 4 bins half a bin off (±1.5 bins at -15.4 dB): 3 000 or
+ * 4 000 Hz at 1.024 Msps with 1 024 bins (1 000 Hz), 3 516 or 4 688 Hz at 2.4 Msps with 2 048
+ * bins (1 171.875 Hz). A Hz cut can never hold both rates; bins do.
+ */
+export const CARRIER_LINE_MAX_BINS = 4
+/**
+ * `carrierLine`, peaked shape: a pure tone on a bin centre has its ±1 neighbours at -6.02 dB, so
+ * noise can lift them over the -6 dB line: 3 bins at -6 dB (shape `peaked`, not `narrow`). A
+ * peaked line is a carrier only when its -6 dB width is known and at most 3 bins; with the width
+ * unknown it keeps the pre-existing path (its digital trials).
+ */
+export const CARRIER_PEAKED_MAX_BINS_6DB = 3
+/**
+ * `carrierLine`, flat shape: narrow digital flat tops (dPMR, NXDN48: about 4 kHz occupied) can
+ * read as narrow as 3 bins at -20 dB and at -6 dB (a flat top's -6 dB width is its -20 dB width),
+ * 3 000 or 3 516 Hz at the 1 000 and 1 171.875 Hz default bins, the very widths of a 3-bin tone.
+ * Width cannot tell them apart there, so a flat line is a carrier only with a carrier's -6 dB
+ * width: at most `CARRIER_FLAT_MAX_BINS_6DB` (2) bins, what the `narrow` shape itself means, and
+ * at most `CARRIER_FLAT_MAX_BINS` (3) bins at -20 dB. A tone whose ±1 neighbours noise lifted over
+ * -6 dB (3 bins at -6 dB, read flat) keeps its digital trials: the safe answer.
+ */
+export const CARRIER_FLAT_MAX_BINS = 3
+/** `carrierLine`, flat shape: the -6 dB width (bins, inclusive) of a carrier: a `narrow` shape. */
+export const CARRIER_FLAT_MAX_BINS_6DB = 2
+/** Bin width assumed when a track does not carry its own (Hz): the engine's default RBW. */
+export const CARRIER_DEFAULT_BIN_HZ = DEFAULT_RBW_HZ
+
+/**
+ * One shared rule: does this measurement read as a carrier line (an unmodulated tone)? Used by
+ * classOf's steady-carrier rule, `steadyLine` (LO-locked spurs) and the carrier-aware analog row.
+ * - The -20 dB width is at most `CARRIER_LINE_MAX_BINS` bins of `binHz` (the track's FFT bin,
+ *   sample rate / FFT size; `CARRIER_DEFAULT_BIN_HZ` when absent or malformed).
+ * - The shape separates narrow digital (dPMR, NXDN48: 4FSK flat tops about 4 kHz wide) from a
+ *   tone: `narrow` (at most 2 bins at -6 dB) is a carrier; `peaked` only with a known -6 dB width
+ *   (`obw6Hz`) of at most `CARRIER_PEAKED_MAX_BINS_6DB` bins; `flat` only with a known -6 dB width
+ *   of at most `CARRIER_FLAT_MAX_BINS_6DB` bins and at most `CARRIER_FLAT_MAX_BINS` bins at -20 dB
+ *   (a 3-bin flat top is narrow digital). With the -6 dB width unknown, peaked and flat lines keep
+ *   the pre-existing path.
+ * - `spectralShape` undefined: the caller already judged the shape (an observation whose class
+ *   vote is `carrier`); only the width decides.
+ * Non-finite or non-positive widths are not a carrier line (the safe answer: today's path).
+ */
+export function carrierLine(line: {
+	obwHz: number
+	spectralShape?: TrackSnapshot["spectralShape"] | undefined
+	obw6Hz?: number | undefined
+	binHz?: number | undefined
+}): boolean {
+	const bin =
+		typeof line.binHz === "number" &&
+		Number.isFinite(line.binHz) &&
+		line.binHz > 0
+			? line.binHz
+			: CARRIER_DEFAULT_BIN_HZ
+	if (!(Number.isFinite(line.obwHz) && line.obwHz > 0)) return false
+	if (!withinBins(line.obwHz, CARRIER_LINE_MAX_BINS, bin)) return false
+	switch (line.spectralShape) {
+		case undefined:
+		case "narrow":
+			return true
+		case "flat":
+			return (
+				known6(line.obw6Hz) &&
+				withinBins(line.obw6Hz, CARRIER_FLAT_MAX_BINS_6DB, bin) &&
+				withinBins(line.obwHz, CARRIER_FLAT_MAX_BINS, bin)
+			)
+		case "peaked":
+			return (
+				known6(line.obw6Hz) &&
+				withinBins(line.obw6Hz, CARRIER_PEAKED_MAX_BINS_6DB, bin)
+			)
+		default:
+			return false
+	}
+}
+
+/**
+ * `steadyLine`, the one ambiguous reading: a flat line exactly `AMBIGUOUS_LINE_BINS` (3) bins wide
+ * at -20 dB and at -6 dB. An on-bin tone whose ±1 neighbours noise lifted over -6 dB reads so (its
+ * bins within 20 dB sit within 6 dB of the peak, so `flat`), and so does a narrow digital flat top
+ * (dPMR, NXDN48). Width and shape cannot tell them apart and the track carries no finer measure, so
+ * such a sighting neither proves a steady line nor disproves one (`steadyLine` is undefined: no LO
+ * learning, no revocation, no taint). Classification is unchanged: it is not a carrier (`carrierLine`
+ * false), so narrow digital keeps its trials.
+ */
+export const AMBIGUOUS_LINE_BINS = 3
+
+/** A flat line of exactly `AMBIGUOUS_LINE_BINS` bins at -20 dB and at -6 dB (see there). */
+export function ambiguousLine(line: {
+	obwHz: number
+	spectralShape?: TrackSnapshot["spectralShape"] | undefined
+	obw6Hz?: number | undefined
+	binHz?: number | undefined
+}): boolean {
+	if ((line.spectralShape ?? "flat") !== "flat") return false
+	if (!known6(line.obw6Hz) || !(Number.isFinite(line.obwHz) && line.obwHz > 0))
+		return false
+	const bin =
+		typeof line.binHz === "number" &&
+		Number.isFinite(line.binHz) &&
+		line.binHz > 0
+			? line.binHz
+			: CARRIER_DEFAULT_BIN_HZ
+	// Widths are whole bins: rounding absorbs float noise in the measured Hz.
+	return (
+		Math.round(line.obwHz / bin) === AMBIGUOUS_LINE_BINS &&
+		Math.round(line.obw6Hz / bin) === AMBIGUOUS_LINE_BINS
+	)
+}
+
+function known6(hz: number | undefined): hz is number {
+	return typeof hz === "number" && Number.isFinite(hz) && hz > 0
+}
+
+/** `hz` is at most `bins` bins of `binHz` (inclusive; widths are whole bins, so 1 ppm slack). */
+function withinBins(hz: number, bins: number, binHz: number): boolean {
+	return hz <= bins * binHz * (1 + 1e-6)
+}
+
 const LEAK_MIN_DB = 20
 
 export const CLASS_HYPOTHESES: Readonly<
@@ -235,6 +363,11 @@ export function classOf(
 	}
 	if ((opts.allowBurst ?? true) && track.blocks <= BURST_MAX_BLOCKS)
 		return "ook-burst"
+	// Two FSK tones (a pager or a narrow ISM sensor): data, not FM voice, whatever the hump shape.
+	if (track.fsk2 === true) return "fsk2-wide"
+	// A steady carrier line (`carrierLine`), before the flat-top branch (a flat line is one only
+	// with a narrow -6 dB width; a 3-bin flat top keeps its digital trials).
+	if (steadyLine(track) === true) return "carrier"
 	if (track.spectralShape === "flat") {
 		if (track.obwHz <= FSK4_6K25_MAX_HZ) return "fsk4-6k25"
 		if (track.obwHz <= FSK4_12K5_MAX_HZ) return "fsk4-12k5"
@@ -246,6 +379,31 @@ export function classOf(
 	if (track.obwHz >= ANALOG_MIN_HZ && track.obwHz <= ANALOG_MAX_HZ)
 		return "analog-fm"
 	return "unknown"
+}
+
+/**
+ * A steady narrow line (the steady-carrier class rule and the LO-locked spur rule): a carrier line
+ * (`carrierLine`: at most 4 bins at -20 dB, not a flat top), over `BURST_MAX_BLOCKS` (4) blocks and
+ * on at least `CARRIER_STEADY_DUTY_MIN` (90 %) of the time. Keyed CW, data bursts, narrow digital
+ * flat tops and anything modulated wider are not. `undefined` while the track has 4 blocks or fewer
+ * (too young to tell) and for the ambiguous 3-bin flat reading (`ambiguousLine`); non-finite width
+ * or duty is not a steady line.
+ */
+export function steadyLine(track: {
+	obwHz: number
+	blocks: number
+	dutyCycle: number
+	spectralShape?: TrackSnapshot["spectralShape"] | undefined
+	obw6Hz?: number | undefined
+	binHz?: number | undefined
+}): boolean | undefined {
+	if (!Number.isFinite(track.obwHz) || !Number.isFinite(track.dutyCycle))
+		return false
+	if (ambiguousLine(track)) return undefined
+	if (!carrierLine({ ...track, spectralShape: track.spectralShape ?? "flat" }))
+		return false
+	if (!(track.blocks > BURST_MAX_BLOCKS)) return undefined
+	return track.dutyCycle >= CARRIER_STEADY_DUTY_MIN
 }
 
 /** Priors order hypotheses; even an out-of-band protocol remains eligible. */

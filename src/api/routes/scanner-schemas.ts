@@ -304,6 +304,8 @@ export const discoveryQuerySchema = {
 			minimum: 0,
 			maximum: DISCOVERY_NEAR_MAX_TOLERANCE_HZ,
 		},
+		// Records flagged as receiver spurs are hidden unless this is true.
+		includeReceiverSpurs: { type: "boolean" },
 	},
 	additionalProperties: false,
 	allOf: [

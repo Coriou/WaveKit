@@ -298,6 +298,18 @@ export const SCANNER_PROOF_PROTOCOL_LABEL: Readonly<
 	adsb: "ADS-B",
 })
 
+/** Why a discovery is flagged as a receiver spur (`Discovery.receiverSpur`). */
+export interface DiscoveryReceiverSpur {
+	/** The spur's offset from the tuned centre (Hz). */
+	offsetHz: number
+	/** Sample rate the offset was learned at (Hz). */
+	sampleRateHz: number
+	/** Distinct tuned centres the line was seen from when flagged (0: an offset learned earlier). */
+	centres: number
+	/** When the flag was last confirmed (epoch ms). */
+	lastAtMs: number
+}
+
 /** Spec § 7.1; timestamps ISO 8601. */
 export interface Discovery {
 	/** Decodes locate this emission; RF fields are unmeasured zero placeholders. */
@@ -346,6 +358,16 @@ export interface Discovery {
 	evidenceLevel?: ScannerEvidenceLevel
 	/** Weak discoveries only: a display hint of the likely kind, never a label or filter. */
 	hint?: ScannerClass | "ism-device" | "analog-voice" | "lora"
+	/**
+	 * Set when the scanner judged this record a receiver spur (a steady narrow line at one offset
+	 * from the tuned centre, seen from several tuned centres). Such records are hidden from the
+	 * discovery list by default (`includeReceiverSpurs=true` lists them) and are never deleted for
+	 * it. Never set on a record with a proof, decode, identity, recording or operator mark; one that
+	 * gains any is unflagged for good. Persisted: after a restart it stays set, and holds if the
+	 * scanner learns the same offset again within 10 min; else it lifts then (published like any
+	 * change). Absent on older cores.
+	 */
+	receiverSpur?: DiscoveryReceiverSpur
 	/**
 	 * The latest Activity event attributed to this discovery: `eventId` names it for
 	 * `GET /api/activity/:eventId`, `producedAt` is its ISO time. Optional and additive: absent when

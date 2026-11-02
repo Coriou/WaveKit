@@ -90,3 +90,57 @@ export function spectralShape(
 	const median = inner[Math.floor(inner.length / 2)] ?? peak
 	return peak - median <= 6 ? "flat" : "peaked"
 }
+
+/**
+ * Two FSK tones in a mean spectrum: the strongest bin of [startBin, endBin), a local maximum at
+ * least `minSpacingBins` from it and at most `pairDb` weaker, and a valley between them at least
+ * `dipDb` under the weaker peak. A 2FSK pager or ISM sensor (tones 9 to 100 kHz apart, near
+ * equal) shows it; FM voice and 4FSK flat tops have one hump, and AFSK on FM (audio tones to
+ * 3 kHz) keeps its humps inside 6 kHz.
+ */
+export function twoTone(
+	powerDb: Float32Array,
+	startBin: number,
+	endBin: number,
+	minSpacingBins: number,
+	pairDb: number,
+	dipDb: number,
+): boolean {
+	const lo = Math.max(0, startBin)
+	const hi = Math.min(powerDb.length, endBin)
+	if (hi - lo <= minSpacingBins) return false
+	let p1 = lo
+	for (let i = lo; i < hi; i++)
+		if ((powerDb[i] ?? -Infinity) > (powerDb[p1] ?? -Infinity)) p1 = i
+	let p2 = -1
+	for (let a = lo; a < hi; ) {
+		// A true local maximum: a plateau [a, b] of equal bins with lower bins on both sides. The
+		// first hump's shoulder rises toward it and is no tone, even when the shoulder is flat.
+		const v = powerDb[a] ?? -Infinity
+		let b = a
+		while (b + 1 < hi && (powerDb[b + 1] ?? -Infinity) === v) b++
+		const next = b + 1
+		if (
+			v > (powerDb[a - 1] ?? -Infinity) &&
+			v > (powerDb[b + 1] ?? -Infinity) &&
+			(p2 < 0 || v > (powerDb[p2] ?? -Infinity))
+		) {
+			// any plateau bin far enough from the strongest peak stands for it
+			for (let i = a; i <= b; i++)
+				if (Math.abs(i - p1) >= minSpacingBins) {
+					p2 = i
+					break
+				}
+		}
+		a = next
+	}
+	if (p2 < 0) return false
+	const top1 = powerDb[p1] ?? -Infinity
+	const top2 = powerDb[p2] ?? -Infinity
+	if (!Number.isFinite(top1) || !Number.isFinite(top2)) return false
+	if (top1 - top2 > pairDb) return false
+	let valley = Infinity
+	for (let i = Math.min(p1, p2) + 1; i < Math.max(p1, p2); i++)
+		valley = Math.min(valley, powerDb[i] ?? -Infinity)
+	return top2 - valley >= dipDb
+}

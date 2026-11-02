@@ -12,7 +12,10 @@ import {
 	IQ_REPLAY_MAX_TRIALS,
 	type IqReplayPlanInput,
 } from "../../../../src/core/scanner/iq-capture-contract.js"
-import { planReplayTrials } from "../../../../src/core/scanner/replay-plan.js"
+import {
+	isDataBurst,
+	planReplayTrials,
+} from "../../../../src/core/scanner/replay-plan.js"
 import type { ScannerProtocol } from "../../../../src/core/scanner/types.js"
 import { TARGET_HZ, trackOf } from "../../../mocks/scanner/identify-fakes.js"
 
@@ -183,7 +186,15 @@ describe("planReplayTrials analog order", () => {
 							t => t.kind !== "analog" && familyOf(t.protocol) === "pager",
 						)
 						const pagerFirst = inPagerRange(c.priors) && pagerTrials.length > 0
-						if (knownAnalog && pagerFirst) {
+						// A bursty data emission runs its analog trial last (unless it is the known lead).
+						const dataLast =
+							input.track !== null &&
+							isDataBurst(input.track, c.priors) &&
+							!(knownAnalog && !pagerFirst)
+						if (dataLast) {
+							expect(out.indexOf(analog)).toBe(out.length - 1)
+							if (knownAnalog) expect(analog.known).toBe(false)
+						} else if (knownAnalog && pagerFirst) {
 							expect(analog.known).toBe(false)
 							expect(out.indexOf(analog)).toBe(pagerTrials.length)
 						} else if (knownAnalog) {

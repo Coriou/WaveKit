@@ -7885,6 +7885,26 @@ existing pagination. Both numbers must be finite. Non-finite values return 400
 or `"Invalid query parameter: toleranceHz must be a finite number"`; multiple
 problems are joined with `; `. A tolerance without a centre is invalid.
 
+Records the scanner judged to be receiver spurs (a steady narrow line at one
+offset from the tuned centre, seen from at least 3 tuned centres; see
+[SCANNER.md](SCANNER.md)) carry `receiverSpur: { offsetHz, sampleRateHz,
+centres, lastAtMs }` and are left out of `GET /api/scanner/discoveries` unless
+`includeReceiverSpurs=true` (boolean). They are never deleted for it, and
+`GET /api/scanner/discoveries/:id` still returns them with the field. A record
+that ever had a proof, decode, identity, recording or operator mark (even one
+later removed) is never flagged and loses the flag when it gains one; a flag
+also lifts when its offset expires or is revoked. Flagged records are left out
+of a job's discovery counts. `scanner:discovery` WebSocket messages still carry
+flagged records (with the field and its removal), so a client that filters a
+list like this route hides them unless it asked for them; every flag set or
+lifted, including a lift found on a read, is published that way. The flag is
+saved with the record: after a restart (or a store restore) it stays set, and
+holds if the scanner learns the same offset (same source and sample rate) again
+within 10 min; otherwise it lifts then, published like any change. After a
+restart `lastAtMs` is the time the flag was set until a new sighting refreshes
+it. A record shown to be more than a spur once (as above) is saved as such and
+never flagged again, across restarts. Older cores never set the field.
+
 `POST /api/scanner/identify` accepts `waitUntilSignal: true` and optional `waitMs`
 (integer 1 000–600 000, default 300 000; requires `waitUntilSignal: true`). It waits
 for a gated transmission, including one already on air, then counts `timeoutMs`

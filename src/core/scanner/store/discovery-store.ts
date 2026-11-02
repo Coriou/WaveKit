@@ -43,10 +43,12 @@ import {
 	SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
 	DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ,
 	type BandRegion,
+	type DiscoveryReceiverSpur,
 	type ScannerProbeDecoderType,
 } from "@wavekit/api-types"
-import { familyOf } from "../classify/classifier.js"
+import { familyOf, steadyLine } from "../classify/classifier.js"
 import { hintOf } from "../classify/hint.js"
+import { carrierAwareAnalog } from "../classify/carrier-voice.js"
 import {
 	UNKNOWN_LABEL,
 	acceptedAnalogEvidence,
@@ -120,6 +122,8 @@ import { JobCounts } from "./job-counts.js"
 import type { ConfidenceCounts } from "./job-counts.js"
 import type { StoreMirrorRemoval } from "./mirror-sink.js"
 import { PendingAdmission, admissionSnrOf } from "./pending-admission.js"
+import { LoLockedSpurs } from "../../spectrum/lo-locked-spurs.js"
+import type { LoCheck, LoSighting } from "../../spectrum/lo-locked-spurs.js"
 import {
 	DQ_CO_CHANNEL_MAX,
 	DQ_CONSOLIDATE_GROUP_MAX,
@@ -134,6 +138,23 @@ import {
 	DQ_IDENTITY_SPLIT_MIN_HZ,
 	DQ_IDENTITY_WEAKER_DB,
 	DQ_LOCAL_SNR_DB,
+	DQ_LO_LOCK_CENTRES_PER_RECORD,
+	DQ_LO_LOCK_DC_GUARD_HZ,
+	DQ_LO_LOCK_DWELL_MS,
+	DQ_LO_LOCK_DWELLS_PER_SOURCE,
+	DQ_LO_LOCK_LINES_PER_DWELL,
+	DQ_LO_LOCK_MIN_SEPARATION_HZ,
+	DQ_LO_LOCK_MASK_PERIOD_MS,
+	DQ_LO_LOCK_MASK_SETTLE_MS,
+	DQ_LO_LOCK_MIN_CENTRES,
+	DQ_LO_LOCK_OFFSET_HZ,
+	DQ_LO_LOCK_OFFSETS_PER_SOURCE,
+	DQ_LO_LOCK_RECORDS_PER_SOURCE,
+	DQ_LO_LOCK_SOURCES_MAX,
+	DQ_LO_LOCK_TTL_MS,
+	DQ_LO_LOCK_USABLE_FRACTION,
+	DQ_LO_LOCK_WIDTH_FLOOR_HZ,
+	DQ_LO_LOCK_WIDTH_RATIO,
 	DQ_MIN_HISTORY_OBS,
 	DQ_OBW_RATIO_MAX,
 	DQ_OVERLOAD_CREATE_SNR_DB,
@@ -213,8 +234,20 @@ export interface DiscoveryFilter {
 	/** Inclusive |Δf| window. `toleranceHz` defaults to 6 250 and is ignored without this. */
 	nearHz?: number
 	toleranceHz?: number
+	/** Records flagged as receiver spurs are left out unless this is true. */
+	includeReceiverSpurs?: boolean
 }
 /** Optional context for `ingest`. */
+/**
+ * An observation as the store ingests it: `tunedCentreHz` and `tunedSampleRateHz` are the tuned
+ * centre and sample rate of the track's epoch when the caller knows them (LO-locked spur
+ * detection); without both, nothing new is LO-locked.
+ */
+export interface StoreObservationInput extends ObservationInput {
+	tunedCentreHz?: number
+	tunedSampleRateHz?: number
+}
+
 export interface IngestOptions {
 	/**
 	 * Accepted decode the caller is about to append to this observation. With
@@ -222,6 +255,32 @@ export interface IngestOptions {
 	 * places a track whose gate has not passed.
 	 */
 	decode?: DecodeEvidence
+}
+
+/** LO-locked spurs: a line's width as the tracker compares it (floor `DQ_LO_LOCK_WIDTH_FLOOR_HZ`). */
+function loWidth(obwHz: number): number {
+	return Number.isFinite(obwHz) && obwHz > DQ_LO_LOCK_WIDTH_FLOOR_HZ
+		? obwHz
+		: DQ_LO_LOCK_WIDTH_FLOOR_HZ
+}
+
+/**
+ * LO-locked spurs: a later measurement of a centre-less creator is still its first line: centre
+ * within `DQ_LO_LOCK_OFFSET_HZ`, widths within `DQ_LO_LOCK_WIDTH_RATIO` (the tracker's own
+ * tolerances). Non-finite input is not the same line.
+ */
+function loSameLine(
+	first: { centreHz: number; widthHz: number },
+	centreHz: number,
+	obwHz: number,
+): boolean {
+	if (!Number.isFinite(centreHz)) return false
+	const w = loWidth(obwHz)
+	return (
+		Math.abs(centreHz - first.centreHz) <= DQ_LO_LOCK_OFFSET_HZ &&
+		Math.max(w, first.widthHz) <=
+			DQ_LO_LOCK_WIDTH_RATIO * Math.min(w, first.widthHz)
+	)
 }
 
 /** True when `ev` is an accepted identity decode for this track (it is not noise). */
@@ -338,6 +397,19 @@ export const OBSERVATIONS_PER_DISCOVERY = 256
 const OBSERVATION_DECODE_MAX = 16
 const MEDIAN_WINDOW = 64
 const MAX_FLAGGED_IDS = 4096
+/**
+ * LO-locked spurs: observations that created their record without a tuned centre, remembered until
+ * an ingest of theirs brings one (their record's history is then known) or they close. A track's
+ * first ingest can precede its epoch's first block summary, so this resolves within a second or
+ * two; 1 024 ids × about 100 B = 100 kB. Past the bound the oldest is dropped and its record is
+ * never flagged.
+ */
+const LO_UNKNOWN_OBS_KEEP = 1024
+/**
+ * FFT bin width per observation (memory only), for the carrier-aware analog row: 4 096 ids × about
+ * 60 B = 240 kB; oldest dropped first (a dropped id reads the default bin, the safe answer).
+ */
+const OBS_BIN_KEEP = 4096
 const DEFAULT_LIMIT = 100
 const MAX_LIMIT = 500
 const DAY_MS = 86_400_000
@@ -974,6 +1046,66 @@ export class DiscoveryStore
 	private readonly now: () => number
 	/** DQ 1.4: weak undecoded candidates, memory only. */
 	private readonly pending: PendingAdmission
+	/** LO-locked spurs: the offsets from the tuned centre records were sighted at, memory only. */
+	private readonly loSpurs = new LoLockedSpurs({
+		offsetHz: DQ_LO_LOCK_OFFSET_HZ,
+		minSeparationHz: DQ_LO_LOCK_MIN_SEPARATION_HZ,
+		widthRatio: DQ_LO_LOCK_WIDTH_RATIO,
+		widthFloorHz: DQ_LO_LOCK_WIDTH_FLOOR_HZ,
+		recordsPerSource: DQ_LO_LOCK_RECORDS_PER_SOURCE,
+		centresPerRecord: DQ_LO_LOCK_CENTRES_PER_RECORD,
+		offsetsPerSource: DQ_LO_LOCK_OFFSETS_PER_SOURCE,
+		sourcesMax: DQ_LO_LOCK_SOURCES_MAX,
+		usableFraction: DQ_LO_LOCK_USABLE_FRACTION,
+		dcGuardHz: DQ_LO_LOCK_DC_GUARD_HZ,
+		dwellMs: DQ_LO_LOCK_DWELL_MS,
+		ttlMs: DQ_LO_LOCK_TTL_MS,
+		dwellsPerSource: DQ_LO_LOCK_DWELLS_PER_SOURCE,
+		linesPerDwell: DQ_LO_LOCK_LINES_PER_DWELL,
+		minCentres: DQ_LO_LOCK_MIN_CENTRES,
+		maskSettleMs: DQ_LO_LOCK_MASK_SETTLE_MS,
+	})
+	/**
+	 * Records flagged as receiver spurs: hidden from `list` unless asked for, never deleted for it.
+	 * Keyed by record id; `sourceId` says whose offset it was. The flag as set is also journaled on
+	 * the record (`receiverSpur`, `receiverSpurSourceId`); `lastAtMs` here is refreshed in memory.
+	 */
+	private readonly spurFlags = new Map<
+		string,
+		DiscoveryReceiverSpur & { sourceId: string }
+	>()
+	/**
+	 * Flags restored from disk, pending: record id → the time (ms) by which their offset must be
+	 * learned again (restore time + `DQ_LO_LOCK_TTL_MS`). Until then the flag stands (the record
+	 * stays hidden); once the offset is learned it is an ordinary flag; past it, it lifts.
+	 */
+	private readonly loRestored = new Map<string, number>()
+	/** Earliest deadline in `loRestored` (+∞ when empty): the per-block check is one comparison. */
+	private loRestoredDue = Number.POSITIVE_INFINITY
+	/** Records whose journaled flag or ruled-out bit changed since the last flush. */
+	private readonly loDirty = new Set<string>()
+	/** A deferred settle is queued (a microtask: never inside another commit). */
+	private loDeferred = false
+	/**
+	 * Observation id → the record it created without a tuned centre (history not yet known) and its
+	 * first centre-less measurement: every centre-less ingest of it until one brings a tuned centre
+	 * must be the same line (line-like, same centre and width), else the record is never flagged.
+	 */
+	private readonly loUnknownObs = new Map<
+		string,
+		{ id: string; centreHz: number; widthHz: number }
+	>()
+	/** Record id → its creating observation in `loUnknownObs` (never flagged while there). */
+	private readonly loUnknownRecords = new Map<string, string>()
+	/**
+	 * Last mask-line evaluation per source (`DQ_LO_LOCK_MASK_PERIOD_MS`), bounded like the
+	 * tracker's sources (`DQ_LO_LOCK_SOURCES_MAX`, oldest dropped: it is only re-evaluated sooner).
+	 */
+	private readonly loMaskAt = new Map<string, number>()
+	/** Sources whose per-source history bound has dropped a record (warned once each). */
+	private readonly loHistoryWarned = new Set<string>()
+	/** Observation id → its track's FFT bin width (Hz), newest `OBS_BIN_KEEP`. */
+	private readonly obsBinHz = new Map<string, number>()
 	private lastPendingSweep = Number.NEGATIVE_INFINITY
 	private readonly newId: () => string
 	/** Accepted for the frame display role (R 2.5). Creation follows `track.gate`. */
@@ -1201,7 +1333,595 @@ export class DiscoveryStore
 	 * placement. A known observation re-ingests whatever a later snapshot's gate
 	 * says, so evidence that follows still finds its discovery.
 	 */
-	ingest(input: ObservationInput, opts: IngestOptions = {}): Ingested {
+	ingest(input: StoreObservationInput, opts: IngestOptions = {}): Ingested {
+		const knownBefore = this.observationIndex.has(input.id)
+		const res = this.ingestObservation(input, opts)
+		const bin = input.track.binHz
+		if (
+			typeof bin === "number" &&
+			Number.isFinite(bin) &&
+			bin > 0 &&
+			res.discoveryId !== null &&
+			this.obsBinHz.get(input.id) !== bin
+		) {
+			this.obsBinHz.delete(input.id)
+			this.obsBinHz.set(input.id, bin)
+			if (this.obsBinHz.size > OBS_BIN_KEEP) {
+				const oldest = this.obsBinHz.keys().next()
+				if (oldest.done !== true) this.obsBinHz.delete(oldest.value)
+			}
+		}
+		this.loAfterIngest(input, opts, res, knownBefore)
+		return res
+	}
+
+	/**
+	 * LO-locked spurs: every sighting with its tuned centre is logged in the source's dwell (what
+	 * was seen, and so what was not); a record keeps the offsets it was sighted at only when this
+	 * process saw its whole history (created by a sighting with a tuned centre). A record that is
+	 * (or ever was) more than an evidence-free line leaves the tracker and loses any flag. A new
+	 * observation placed without a tuned centre leaves its record's history unknown until one of its
+	 * ingests brings one; if it closes or is dropped first, the record leaves the tracker. A steady
+	 * sighting at a learned spur offset flags the records that were only that line.
+	 */
+	private loAfterIngest(
+		input: StoreObservationInput,
+		opts: IngestOptions,
+		res: Ingested,
+		knownBefore: boolean,
+	): void {
+		const id =
+			res.discoveryId !== null && res.change !== "transient"
+				? res.discoveryId
+				: null
+		const proven = decodeProvesSignal(input, opts.decode)
+		const real = id !== null && (proven || !this.loPartnerEligible(id))
+		if (id !== null && real) this.loTaint(id)
+		const s = this.loSighting(input)
+		if (s === undefined) {
+			if (id !== null && !real) {
+				if (res.change === "created" && !knownBefore)
+					this.loUnknown(input.id, id, input.track)
+				else if (!this.loUnknownSame(input.id, id, input.track))
+					// A centre-less observation joining a record, or a creator that stopped reading as
+					// the same line: that part of the record's history is unknown, for good.
+					this.loTaint(id)
+			}
+			if (input.endReason !== undefined) this.loUnknownClosed(input.id)
+		} else {
+			// Another observation joining a record whose creator is still of unknown history: the
+			// creator's birth would not hold this history.
+			if (
+				id !== null &&
+				!real &&
+				this.loUnknownRecords.has(id) &&
+				this.loUnknownRecords.get(id) !== input.id
+			)
+				this.loTaint(id)
+			// An observation that created its record without a tuned centre and now brings one, the
+			// same line all along: the record's whole history is this observation, so it is born now.
+			const createdUnknown = this.loKnown(input.id, s)
+			this.loSpurs.observe(s, proven || real)
+			// A measurement that is no steady line: never a spur's record (the tracker drops it too).
+			if (id !== null && !real && s.steady === false) this.loTaint(id)
+			else if (id !== null && !real) {
+				this.loSpurs.note(id, s, res.change === "created" || createdUnknown)
+				// The tracker let the record go (contradictory history, a bound): no flag stands.
+				if (this.spurFlags.has(id) && !this.loSpurs.remembers(s.sourceId, id))
+					this.unflagSpur(id)
+			}
+			this.loHistoryCheck(s.sourceId)
+			if (id !== null && !real && s.steady === true)
+				this.loFlag(
+					this.loSpurs.check(s, x => this.loFlaggable(x)),
+					s,
+				)
+		}
+		this.loLiftRevoked()
+		this.loRestoredCheck()
+		this.loFlush()
+	}
+
+	/**
+	 * Block summary of a source: the tuner is at `tunedHz` / `rateHz` (the dwell's clock), and the
+	 * engine's receiver mask lines (provisional, comb and baseband spur lines: a line on for 30 s
+	 * is masked before tracking at its baseband position, at every centre) count as steady lines
+	 * at their offsets once the dwell is settled. A mask line at a learned offset flags the records
+	 * that were that line before the mask hid it.
+	 */
+	noteReceiverLines(
+		sourceId: string,
+		tunedHz: number,
+		rateHz: number,
+		ranges: readonly { startHz: number; endHz: number }[],
+	): void {
+		const now = this.now()
+		this.loSpurs.tick(sourceId, tunedHz, rateHz, now)
+		// An offset that expired (or a stay that ended with a miss) with this tick lifts its flags,
+		// and so does a restored flag whose offset was not learned again in time.
+		this.loLiftRevoked()
+		this.loRestoredCheck()
+		this.loFlush()
+		if (ranges.length === 0) return
+		const last = this.loMaskAt.get(sourceId)
+		if (last !== undefined && now - last < DQ_LO_LOCK_MASK_PERIOD_MS) return
+		this.loMaskAt.delete(sourceId)
+		this.loMaskAt.set(sourceId, now)
+		if (this.loMaskAt.size > DQ_LO_LOCK_SOURCES_MAX) {
+			const oldest = this.loMaskAt.keys().next()
+			if (oldest.done !== true) this.loMaskAt.delete(oldest.value)
+		}
+		for (const r of ranges) {
+			const s: LoSighting = {
+				sourceId,
+				tunedHz,
+				sampleRateHz: rateHz,
+				centreHz: (r.startHz + r.endHz) / 2,
+				obwHz: r.endHz - r.startHz,
+				steady: true,
+				atMs: now,
+			}
+			if (this.loSpurs.observeMask(s))
+				this.loFlag(
+					this.loSpurs.check(s, x => this.loFlaggable(x)),
+					s,
+				)
+		}
+		this.loLiftRevoked()
+		this.loRestoredCheck()
+		this.loFlush()
+	}
+
+	/** LO-locked spurs: the sighting of an input with its tuned centre and rate, else undefined. */
+	private loSighting(input: StoreObservationInput): LoSighting | undefined {
+		if (
+			input.tunedCentreHz === undefined ||
+			input.tunedSampleRateHz === undefined
+		)
+			return undefined
+		return {
+			sourceId: input.sourceId,
+			tunedHz: input.tunedCentreHz,
+			sampleRateHz: input.tunedSampleRateHz,
+			centreHz: input.track.centreHz,
+			obwHz: input.track.obwHz,
+			steady: steadyLine(input.track),
+			atMs: this.now(),
+		}
+	}
+
+	/**
+	 * Record `id` is (or once was) more than an evidence-free line, or part of its history is
+	 * unknown: never flagged again (sticky: the tracker forgets it, and a pending centre-less
+	 * creator of it is never born).
+	 */
+	private loTaint(id: string): void {
+		this.loSpurs.taint(id)
+		this.loUnknownDrop(id)
+		this.loRuleOut(id)
+		this.unflagSpur(id)
+	}
+
+	/**
+	 * A record that is (or was restored) flagged is shown to be more than a receiver spur: the
+	 * journaled bit keeps it from ever being flagged again, across restarts. A record never flagged
+	 * needs no bit: one restored without a flag is of unknown history and never flagged anyway.
+	 */
+	private loRuleOut(id: string): void {
+		const d = this.discoveries.get(id)
+		if (
+			d === undefined ||
+			d.receiverSpurRuledOut === true ||
+			(!this.spurFlags.has(id) && d.receiverSpur === undefined)
+		)
+			return
+		d.receiverSpurRuledOut = true
+		this.touch(d)
+		this.loDirtied(id)
+	}
+
+	/**
+	 * A record created by an observation without a tuned centre: pending until that observation
+	 * brings one. A first measurement that is no line taints it at once.
+	 */
+	private loUnknown(
+		observationId: string,
+		id: string,
+		track: StoreObservationInput["track"],
+	): void {
+		if (steadyLine(track) === false) {
+			this.loTaint(id)
+			return
+		}
+		this.loUnknownDrop(id)
+		this.loUnknownObs.set(observationId, {
+			id,
+			centreHz: track.centreHz,
+			widthHz: loWidth(track.obwHz),
+		})
+		this.loUnknownRecords.set(id, observationId)
+		while (this.loUnknownObs.size > LO_UNKNOWN_OBS_KEEP) {
+			const oldest = this.loUnknownObs.entries().next()
+			if (oldest.done === true) break
+			this.loUnknownClosed(oldest.value[0])
+		}
+	}
+
+	/**
+	 * A centre-less ingest of a pending creator `observationId` on its record `id` that still reads
+	 * as the same line (line-like, centre within `DQ_LO_LOCK_OFFSET_HZ`, width within
+	 * `DQ_LO_LOCK_WIDTH_RATIO`). False for any other observation or measurement.
+	 */
+	private loUnknownSame(
+		observationId: string,
+		id: string,
+		track: StoreObservationInput["track"],
+	): boolean {
+		const u = this.loUnknownObs.get(observationId)
+		return (
+			u !== undefined &&
+			u.id === id &&
+			steadyLine(track) !== false &&
+			loSameLine(u, track.centreHz, track.obwHz)
+		)
+	}
+
+	/**
+	 * A pending creator brought a tuned centre: its record is born now when the sighting is still
+	 * the same line, else it is never flagged. Returns whether it is born.
+	 */
+	private loKnown(observationId: string, s: LoSighting): boolean {
+		const u = this.loUnknownObs.get(observationId)
+		if (u === undefined) return false
+		this.loUnknownObs.delete(observationId)
+		this.loUnknownRecords.delete(u.id)
+		if (s.steady !== false && loSameLine(u, s.centreHz, s.obwHz)) return true
+		this.loTaint(u.id)
+		return false
+	}
+
+	/** An unknown observation closed (or was dropped) without a tuned centre: taints its record. */
+	private loUnknownClosed(observationId: string): void {
+		const u = this.loUnknownObs.get(observationId)
+		if (u === undefined) return
+		this.loUnknownObs.delete(observationId)
+		this.loUnknownRecords.delete(u.id)
+		this.loTaint(u.id)
+	}
+
+	/** Forgets record `id`'s pending centre-less creator (it is never born). */
+	private loUnknownDrop(id: string): void {
+		const obs = this.loUnknownRecords.get(id)
+		if (obs === undefined) return
+		this.loUnknownRecords.delete(id)
+		this.loUnknownObs.delete(obs)
+	}
+
+	/** Is record `id` known to the LO-locked tracking (remembered, flagged or pending)? */
+	private loTracked(id: string): boolean {
+		return (
+			this.spurFlags.has(id) ||
+			this.loUnknownRecords.has(id) ||
+			this.loSpurs.remembersAny(id)
+		)
+	}
+
+	/**
+	 * Called whenever a record changed (`finish`, a recording commit): a tracked record that is
+	 * protected now (a proof, decode, recording, identity or operator mark) is never flagged
+	 * again, even when that protection is later removed. Returns whether a flag was dropped (the
+	 * caller publishes the record). No publish here: the caller's operation does.
+	 */
+	private loProtect(id: string): boolean {
+		if (!this.loTracked(id) || this.loPartnerEligible(id)) return false
+		this.loSpurs.taint(id)
+		this.loUnknownDrop(id)
+		const d = this.discoveries.get(id)
+		const stored = d?.receiverSpur !== undefined
+		if (!this.spurFlags.delete(id) && !stored) return false
+		this.loRestored.delete(id)
+		if (d !== undefined) {
+			// Written straight onto the record: the caller's operation journals it.
+			delete d.receiverSpur
+			delete d.receiverSpurSourceId
+			d.receiverSpurRuledOut = true
+			this.touch(d)
+		}
+		this.loDirty.delete(id)
+		this.countsDirty.add(id)
+		return true
+	}
+
+	/** One warning per source the first time its history bound drops a record. */
+	private loHistoryCheck(sourceId: string): void {
+		if (this.loHistoryWarned.has(sourceId)) return
+		const dropped = this.loSpurs.historyDropped(sourceId)
+		if (dropped === 0) return
+		this.loHistoryWarned.add(sourceId)
+		const log =
+			this.injectedLog ??
+			(fallbackLog ??= createComponentLogger(
+				createLogger({ level: "info" }),
+				"DiscoveryStore",
+			))
+		log.warn(
+			{ sourceId, dropped, bound: DQ_LO_LOCK_RECORDS_PER_SOURCE },
+			"Receiver-spur history bound reached; records dropped from it are never flagged as spurs",
+		)
+	}
+
+	/** May record `id` be flagged now: eligible and with no observation of unknown history. */
+	private loFlaggable(id: string): boolean {
+		if (this.loUnknownRecords.has(id)) return false
+		if (this.loPartnerEligible(id)) return true
+		this.loTaint(id)
+		return false
+	}
+
+	private loFlag(res: LoCheck, s: LoSighting): void {
+		if (res.verdict !== "locked") return
+		for (const id of res.partners)
+			this.flagSpur(id, {
+				sourceId: s.sourceId,
+				offsetHz: Math.round(s.centreHz - s.tunedHz),
+				sampleRateHz: s.sampleRateHz,
+				centres: res.centres,
+				lastAtMs: s.atMs,
+			})
+		// A restored flag at the offset just locked is learned again: an ordinary flag from now.
+		if (this.loRestored.size > 0) this.loRestoredConfirm()
+	}
+
+	/**
+	 * Restored flags whose offset is learned again within their deadline become ordinary flags. A
+	 * restored flag past its deadline is never confirmed (learning it late does not extend it): it
+	 * stays pending so `loFlagStands` fails and the next settle lifts it.
+	 */
+	private loRestoredConfirm(): void {
+		const now = this.now()
+		for (const [id, until] of this.loRestored) {
+			if (now > until) continue
+			const f = this.spurFlags.get(id)
+			if (
+				f !== undefined &&
+				this.loSpurs.isLearned(f.sourceId, f.sampleRateHz, f.offsetHz, now)
+			)
+				this.loRestored.delete(id)
+		}
+	}
+
+	/** Once per block or ingest: restored flags past their deadline are settled (lifted). */
+	private loRestoredCheck(): void {
+		if (this.now() <= this.loRestoredDue) return
+		this.loSettle()
+	}
+
+	/**
+	 * Every flag that no longer stands is lifted through the publishing path (a record no longer
+	 * eligible is ruled out); restored flags learned again are confirmed. Runs (deferred) when a
+	 * read found a flag that no longer stands, and when a restored flag's deadline passes.
+	 */
+	private loSettle(): void {
+		if (this.loRestored.size > 0) this.loRestoredConfirm()
+		const now = this.now()
+		for (const [id, f] of this.spurFlags) {
+			if (this.loFlagStands(id, f, now)) continue
+			if (!this.loPartnerEligible(id)) this.loTaint(id)
+			else this.unflagSpur(id)
+		}
+		let due = Number.POSITIVE_INFINITY
+		for (const at of this.loRestored.values()) if (at < due) due = at
+		this.loRestoredDue = due
+		this.loFlush()
+	}
+
+	/**
+	 * Does flag `f` of record `id` stand now? The record is still eligible and remembered, and its
+	 * offset is learned, or it is a restored flag still inside its deadline.
+	 */
+	private loFlagStands(
+		id: string,
+		f: DiscoveryReceiverSpur & { sourceId: string },
+		now: number,
+	): boolean {
+		if (!this.loPartnerEligible(id) || !this.loSpurs.remembers(f.sourceId, id))
+			return false
+		const restoredUntil = this.loRestored.get(id)
+		// A restored flag not confirmed by its deadline never stands again (late learning is no
+		// confirmation).
+		if (restoredUntil !== undefined) return now <= restoredUntil
+		return this.loSpurs.isLearned(f.sourceId, f.sampleRateHz, f.offsetHz, now)
+	}
+
+	/** Record `id`'s journaled spur state changed: journaled at the next flush. */
+	private loDirtied(id: string): void {
+		this.loDirty.add(id)
+		this.loDefer()
+	}
+
+	/**
+	 * Queues one deferred settle (a microtask, so never inside another commit): the safe points
+	 * (every ingest and block summary) flush at once; this covers a change made anywhere else.
+	 */
+	private loDefer(): void {
+		if (this.loDeferred) return
+		this.loDeferred = true
+		queueMicrotask(() => {
+			this.loDeferred = false
+			this.loSettle()
+		})
+	}
+
+	/**
+	 * Journals the records whose spur state changed (one operation): published as updated, so
+	 * clients see every flag set and lifted. Nothing while a sliced restore runs (it resets them).
+	 */
+	private loFlush(): void {
+		if (this.loDirty.size === 0 || this.restoring) return
+		const ids = [...this.loDirty].filter(id => this.discoveries.has(id))
+		this.loDirty.clear()
+		const first = ids[0]
+		if (first === undefined) return
+		this.commit("classification", op => {
+			for (const id of ids) {
+				op.discoveries.add(id)
+				mark(op, id, "updated")
+			}
+			return first
+		})
+	}
+
+	/**
+	 * Restore: a record's journaled flag is held pending (hidden) until `DQ_LO_LOCK_TTL_MS` from
+	 * now, by when its offset must have been learned again, and the record is remembered from here
+	 * with no sighting yet (`adopt`). A ruled-out record, one no longer eligible or one with no
+	 * source is never flagged. Called per restored or replayed record.
+	 */
+	private loRestoreFlag(id: string): void {
+		this.spurFlags.delete(id)
+		this.loRestored.delete(id)
+		const d = this.discoveries.get(id)
+		const f = d?.receiverSpur
+		const sourceId = d?.receiverSpurSourceId
+		if (
+			d === undefined ||
+			f === undefined ||
+			sourceId === undefined ||
+			d.receiverSpurRuledOut === true ||
+			!this.loPartnerEligible(id) ||
+			!this.loSpurs.adopt(sourceId, id)
+		)
+			return
+		this.spurFlags.set(id, { ...f, sourceId })
+		const until = this.now() + DQ_LO_LOCK_TTL_MS
+		this.loRestored.set(id, until)
+		if (until < this.loRestoredDue) this.loRestoredDue = until
+	}
+
+	/** Lifts the flags set at offsets the tracker revoked or expired since the last call. */
+	private loLiftRevoked(): void {
+		for (const r of this.loSpurs.takeRevoked())
+			for (const [id, f] of this.spurFlags)
+				if (
+					f.sourceId === r.sourceId &&
+					f.sampleRateHz === r.rateHz &&
+					Math.abs(f.offsetHz - r.offsetHz) <= DQ_LO_LOCK_OFFSET_HZ
+				)
+					this.unflagSpur(id)
+	}
+
+	private flagSpur(
+		id: string,
+		f: DiscoveryReceiverSpur & { sourceId: string },
+	): void {
+		const d = this.discoveries.get(id)
+		if (d === undefined || d.receiverSpurRuledOut === true) return
+		const had = this.spurFlags.get(id)
+		this.spurFlags.set(id, {
+			...f,
+			centres: Math.max(f.centres, had?.centres ?? 0),
+		})
+		if (had !== undefined) return
+		// Journaled as set (published at the flush); later sightings refresh only memory.
+		d.receiverSpur = {
+			offsetHz: f.offsetHz,
+			sampleRateHz: f.sampleRateHz,
+			centres: f.centres,
+			lastAtMs: f.lastAtMs,
+		}
+		d.receiverSpurSourceId = f.sourceId
+		this.touch(d)
+		this.loDirtied(id)
+	}
+
+	private unflagSpur(id: string): void {
+		this.loRestored.delete(id)
+		const d = this.discoveries.get(id)
+		if (!this.spurFlags.delete(id) && d?.receiverSpur === undefined) return
+		this.countsDirty.add(id)
+		if (d === undefined) return
+		delete d.receiverSpur
+		delete d.receiverSpurSourceId
+		this.touch(d)
+		this.loDirtied(id)
+	}
+
+	/**
+	 * Is `id` flagged as a receiver spur now (`loFlagStands`)? A read changes nothing: a flag that no
+	 * longer stands reads as lifted and a deferred settle lifts it through the publishing path, so
+	 * clients are told.
+	 */
+	private spurFlagOf(id: string): DiscoveryReceiverSpur | undefined {
+		const f = this.spurFlags.get(id)
+		if (f === undefined) return undefined
+		if (!this.loFlagStands(id, f, this.now())) {
+			this.loDefer()
+			return undefined
+		}
+		return {
+			offsetHz: f.offsetHz,
+			sampleRateHz: f.sampleRateHz,
+			centres: f.centres,
+			lastAtMs: f.lastAtMs,
+		}
+	}
+
+	/** LO-locked spur offsets learned for a source (Hz from the tuned centre; tests, diagnostics). */
+	loLockedOffsets(sourceId: string): number[] {
+		return this.loSpurs.learnedOffsets(sourceId, this.now())
+	}
+
+	/** LO-locked sightings of a source so far (diagnostics). */
+	loLockedSuppressed(sourceId: string): number {
+		return this.loSpurs.suppressed(sourceId)
+	}
+
+	/** Records the source's spur-history bound dropped (never flagged; diagnostics). */
+	loHistoryDropped(sourceId: string): number {
+		return this.loSpurs.historyDropped(sourceId)
+	}
+
+	/** Records flagged as receiver spurs now (diagnostics, tests). */
+	receiverSpurIds(): string[] {
+		return [...this.spurFlags.keys()].filter(
+			id => this.spurFlagOf(id) !== undefined,
+		)
+	}
+
+	/**
+	 * May record `id` be flagged as a receiver spur? Only a record with nothing that proves a
+	 * signal or that an operator gave it: not decoded, no identity, not a decode anchor, no proof,
+	 * no recordings or IQ evidence, no operator label, note, Ignore or Keep, no kept recording.
+	 * Anything else is a real emitter (or the operator's) and is never flagged.
+	 */
+	private loPartnerEligible(id: string): boolean {
+		const d = this.discoveries.get(id)
+		if (d === undefined) return false
+		if (
+			d.confidence === "decoded" ||
+			d.identity !== undefined ||
+			d.anchor !== undefined ||
+			d.evidence.recordings > 0 ||
+			d.evidence.iq
+		)
+			return false
+		const op = d.operator
+		if (
+			op !== undefined &&
+			(op.label !== undefined ||
+				op.notes !== undefined ||
+				op.lockout === true ||
+				op.keep === true)
+		)
+			return false
+		if (this.holdsKept(id)) return false
+		return this.discoveryView(d).proof === null
+	}
+
+	private ingestObservation(
+		input: StoreObservationInput,
+		opts: IngestOptions,
+	): Ingested {
 		// Read (and, on a close, released) before any early return, so every close path releases.
 		const held = this.heldByAnchor(input)
 		// A sliced restore is between turns: the store is half built, so an observation is not
@@ -1235,7 +1955,7 @@ export class DiscoveryStore
 			!decodeProvesSignal(input, opts.decode),
 			decodedAs,
 		)
-		if (sticky !== undefined)
+		if (sticky !== undefined) {
 			return this.commit("observation", op =>
 				this.addObservation(
 					op,
@@ -1243,6 +1963,7 @@ export class DiscoveryStore
 					input,
 				),
 			)
+		}
 		const place = this.placement(
 			input.sourceId,
 			input.track.centreHz,
@@ -1258,10 +1979,11 @@ export class DiscoveryStore
 			!decodeProvesSignal(input, opts.decode),
 		)
 		const into = target.merge
-		if (into !== null)
+		if (into !== null) {
 			return this.commit("observation", op =>
 				this.addObservation(op, into, input),
 			)
+		}
 		// A proven channel anchor with a recent decode owns its channel: no second record opens in
 		// its reach. The observation stays transient, as one the anchor holds; its decodes reach the
 		// anchor (anchorDecode). A stale or restored anchor lets an independent signal open.
@@ -1272,9 +1994,8 @@ export class DiscoveryStore
 			) !== undefined
 		)
 			return TRANSIENT
-		const admission = decodeProvesSignal(input, opts.decode)
-			? "create"
-			: this.admits(input)
+		const evidenceLess = !decodeProvesSignal(input, opts.decode)
+		const admission = evidenceLess ? this.admits(input) : "create"
 		if (admission === "refuse") return TRANSIENT
 		const created = this.createFrom(input, label, target.coChannel)
 		// A threshold, overload or decode create consumes the bucket's entry. A promotion
@@ -1936,6 +2657,7 @@ export class DiscoveryStore
 	 * promotion from pending (1.3, 1.4), or a sustained run (1.4b, amendment 10 SC) or channel
 	 * airtime over separate transmissions (1.4d), which consume the bucket's pending entry like a
 	 * threshold create. A short burst's 18 dB threshold also needs a track SNR of at least 15 dB (1.4c).
+	 * Last, repeated gate passes on one channel (1.4e, off unless `DQ_REPEAT_ENABLED`).
 	 */
 	private admits(input: ObservationInput): "create" | "promoted" | "refuse" {
 		const track = input.track
@@ -1984,7 +2706,12 @@ export class DiscoveryStore
 			this.pending.dropRun(input.sourceId, input.id)
 			return "promoted"
 		}
-		return this.pending.sustained(input) ? "create" : "refuse"
+		if (this.pending.sustained(input)) return "create"
+		if (this.pending.repeated(input)) {
+			this.pending.dropRun(input.sourceId, input.id)
+			return "create"
+		}
+		return "refuse"
 	}
 
 	/** Refresh-cadence sweep of expired pending entries (at most every 10 s, from ingest). */
@@ -2402,8 +3129,16 @@ export class DiscoveryStore
 		try {
 			const known = this.observationIndex.get(observationId)
 			if (known === undefined) return false
-			const accepted = acceptedAnalogEvidence(row)
-			if (accepted === undefined) return false
+			const valid = acceptedAnalogEvidence(row)
+			if (valid === undefined) return false
+			// A tone-less NFM "heard" row on an observation that measured a steady carrier is carrier
+			// evidence, not voice (a carrier strong enough to open the squelch). This observation's
+			// measurement decides, never the record's historical class.
+			const accepted = carrierAwareAnalog(valid, {
+				cls: voteOf(known),
+				obwHz: known.obwHz,
+				binHz: this.obsBinHz.get(observationId),
+			})
 			const armed = this.armWatchers(known.discoveryId)
 			const before = this.peekProof(observationId)
 			if (!this.rememberAnalog(observationId, accepted)) {
@@ -2813,6 +3548,8 @@ export class DiscoveryStore
 		plan.observation.recordingIds = plan.recordingIds
 		plan.observation.recording = plan.recordingState
 		plan.evidence.recordings = plan.recordingCount
+		// LO-locked spurs: a recording is sticky protection (published by publishRecordingCommit).
+		this.loProtect(plan.discovery.id)
 	}
 
 	/** Postdecision only: capture/emit projection before public notifications can reenter. */
@@ -3286,7 +4023,10 @@ export class DiscoveryStore
 		// Source, job, frequency and the near window (already the `base`) do not
 		// read the proof. Protocol and confidence use the stored record only while
 		// no retained evidence can name a proof; a proof's label is cached with it.
+		const spurs = filter.includeReceiverSpurs === true
 		const items = base.filter(d => {
+			if (!spurs && this.spurFlags.has(d.id) && this.spurFlagOf(d.id))
+				return false
 			if (filter.jobId !== undefined && !d.jobIds.includes(filter.jobId))
 				return false
 			if (
@@ -3587,6 +4327,16 @@ export class DiscoveryStore
 		this.indexDirty.clear()
 		this.countsDirty.clear()
 		this.jobCounts.clear()
+		// LO-locked spurs: restored records are of unknown history; nothing learned or flagged stays.
+		this.loSpurs.clear()
+		this.spurFlags.clear()
+		this.loRestored.clear()
+		this.loRestoredDue = Number.POSITIVE_INFINITY
+		this.loDirty.clear()
+		this.loUnknownObs.clear()
+		this.loUnknownRecords.clear()
+		this.loMaskAt.clear()
+		this.loHistoryWarned.clear()
 		this.proofQuiet++
 		try {
 			for (const c of s.corrections) this.corrections.set(c.sourceId, c.hz)
@@ -3606,6 +4356,9 @@ export class DiscoveryStore
 				if (tick()) yield
 			}
 			this.aliasTable.restore(s.aliases ?? [], id => this.discoveries.has(id))
+			// Journaled receiver-spur flags: pending until their offset is learned again.
+			for (const d of this.discoveries.values())
+				if (d.receiverSpur !== undefined) this.loRestoreFlag(d.id)
 			// the set was replaced, not trimmed: a mirror resets from the snapshot itself
 			this.removal = { discoveries: [], observations: [] }
 			this.catchUp()
@@ -5105,6 +5858,8 @@ export class DiscoveryStore
 		}
 		this.adoptAliases(op, keep.id, drop.id)
 		this.absorbedIndex.record(drop.id, keep.id)
+		// LO-locked spurs: the survivor took on history the tracker did not see as its own.
+		this.loTaint(keep.id)
 		this.removeDiscovery(drop.id)
 		op.discoveries.delete(drop.id)
 		op.deleted.push(drop.id)
@@ -6145,6 +6900,11 @@ export class DiscoveryStore
 			copy.metadata = emptyMetadata()
 		}
 		delete copy.contentVerified
+		delete copy.receiverSpurSourceId
+		delete copy.receiverSpurRuledOut
+		const spur = this.spurFlagOf(d.id)
+		if (spur !== undefined) copy.receiverSpur = spur
+		else delete copy.receiverSpur
 		copy.evidenceLevel = view.evidence
 		copy.revision = this.published.get(d.id) ?? 1
 		return copy
@@ -6192,6 +6952,10 @@ export class DiscoveryStore
 		const d = this.discoveries.get(id)
 		if (d === undefined) return
 		// The outer delete/merge journals removal; publishing here would nest a commit.
+		this.loSpurs.forget(id)
+		this.spurFlags.delete(id)
+		this.loRestored.delete(id)
+		this.loDirty.delete(id)
 		this.anchorWindows.delete(id)
 		this.anchorIdentity.delete(id)
 		this.anchorReplayed.delete(id)
@@ -6476,6 +7240,8 @@ export class DiscoveryStore
 			if (this.discoveries.has(a.id) || a.aliases.length === 0)
 				this.aliasTable.set(a.id, a.aliases, id => this.discoveries.has(id))
 		}
+		// A replayed record's journaled receiver-spur flag, as of this entry.
+		for (const d of m.discoveries) this.loRestoreFlag(d.id)
 	}
 
 	// ── journal ──────────────────────────────────────────────────────────
@@ -6539,6 +7305,14 @@ export class DiscoveryStore
 			if (d !== undefined && this.normalizeCheckedContent(d))
 				op.discoveries.add(id)
 		}
+		// LO-locked spurs: protection (even if later removed) is sticky; a dropped flag is published.
+		for (const id of checkedIds)
+			if (this.loProtect(id) && !op.discoveries.has(id)) {
+				op.discoveries.add(id)
+				mark(op, id, "updated")
+			}
+		// Spur state of a record this operation journals is journaled with it.
+		for (const id of op.discoveries) this.loDirty.delete(id)
 		const pending = this.pendingProof
 		this.pendingProof = new Map()
 		const notified = new Set(op.changes.keys())
@@ -6679,9 +7453,10 @@ export class DiscoveryStore
 	private syncCounts(): void {
 		for (const id of this.countsDirty) {
 			const discovery = this.discoveries.get(id)
+			// Records flagged as receiver spurs are hidden by default, so they are not counted.
 			this.jobCounts.sync(
 				id,
-				discovery === undefined
+				discovery === undefined || this.spurFlagOf(id) !== undefined
 					? undefined
 					: {
 							confidence: this.publishedLabel(discovery).confidence,

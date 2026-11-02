@@ -20,6 +20,8 @@
 			"maxBlockSnrDb": 37.75220966339111,
 			"dutyCycle": 1,
 			"spectralShape": "narrow",
+			"obw6Hz": 1000,
+			"binHz": 1000,
 			"flags": {
 				"overload": false,
 				"gap": false,
@@ -55,6 +57,8 @@
 			"maxBlockSnrDb": 37.82669925689697,
 			"dutyCycle": 1,
 			"spectralShape": "narrow",
+			"obw6Hz": 1000,
+			"binHz": 1000,
 			"flags": {
 				"overload": false,
 				"gap": false,
@@ -90,6 +94,8 @@
 			"maxBlockSnrDb": 37.96353340148926,
 			"dutyCycle": 0.389321468298109,
 			"spectralShape": "narrow",
+			"obw6Hz": 1000,
+			"binHz": 1000,
 			"flags": {
 				"overload": false,
 				"gap": false,
