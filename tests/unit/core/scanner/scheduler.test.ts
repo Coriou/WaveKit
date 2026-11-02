@@ -170,7 +170,7 @@ describe("SweepScheduler dwell", () => {
 })
 
 describe("SweepScheduler holds", () => {
-	it("holds for confirmHoldMs + probe start latency, then moves on", () => {
+	it("holds for confirmHoldMs + probe start latency, then watches a frequency not known to 8 s and moves on", () => {
 		const h = harness(
 			makeHopPlan([400 * MHZ, 401.6 * MHZ]),
 			makeNormalisedSpec({ revisit: noRevisit }),
@@ -186,7 +186,13 @@ describe("SweepScheduler holds", () => {
 		expect(h.s.progress().holdingOn).toBe("t1")
 		h.clock = 2_099
 		expect(h.s.tick(h.clock)).toEqual([])
+		// The probe ends; on air since the job started, the frequency is watched for carrier
+		// evidence up to 8000 ms (CARRIER_WATCH_MS) from the start of the hold.
 		h.clock = 2_100
+		expect(h.s.tick(h.clock)).toEqual([{ type: "stop-probes" }])
+		h.clock = 7_999
+		expect(h.s.tick(h.clock)).toEqual([])
+		h.clock = 8_000
 		expect(h.s.tick(h.clock)).toEqual([
 			{ type: "stop-probes" },
 			tune(1, 401.6 * MHZ),
@@ -456,8 +462,7 @@ describe("SweepScheduler holds", () => {
 		])
 		h.s.onEpochStarted(h.sample)
 		h.s.onTrack(at("weak2", 400.1 * MHZ, 12), true, 1_000)
-		h.s.onTrack(at("strong2", 400.2 * MHZ, 30), true, 1_800)
-		// strong was confirmed without follow and is still on air: barred; weak is held now
+		// strong has gone; weak, left over on the last visit, is held now
 		expect(h.dwell(3, false)).toEqual([
 			{ type: "start-probe", trackId: "weak2", holdMs: 1_300 },
 		])
@@ -606,29 +611,35 @@ describe("SweepScheduler re-plan", () => {
 		expect(h.s.progress()).toMatchObject({ hopIndex: 3, hopCount: 8 })
 	})
 
-	it("gives each new hop its own frequency memory when two new hops map to one old hop", () => {
+	it("keeps what it learned about a frequency across a re-plan", () => {
 		const h = harness(
 			makeHopPlan([400 * MHZ, 401.6 * MHZ]),
 			makeNormalisedSpec({ revisit: noRevisit }),
 		)
 		h.s.start()
-		h.dwell()
-		type Mem = { closedAt: { serial: number; block: number } | null }
-		const state = h.s as unknown as { hops: { memory: Mem[] }[] }
-		const seeded = state.hops[0]
-		if (seeded === undefined) throw new TypeError("hop 0 missing")
-		seeded.memory.push({ closedAt: { serial: 1, block: 3 } } as Mem)
-		// Both new centres sit within the usable half-span of old hop 0 (400 MHz).
+		h.s.onEpochStarted(0)
+		h.s.onTrack(track("a"), false, 0, { followOnAir: true })
+		h.dwell(3, false)
+		// On air since the job started: watched 8000 ms without a break, a carrier.
+		h.clock = 8_000
+		expect(h.s.tick(h.clock)).toEqual([
+			{ type: "stop-probes" },
+			tune(1, 401.6 * MHZ),
+		])
+		// Two new hops near old hop 0: the plan swaps at this boundary.
 		h.s.replan(
 			makeHopPlan([399.9 * MHZ, 400.1 * MHZ, 401.6 * MHZ]),
 			makeNormalisedSpec({ revisit: noRevisit }),
 		)
-		h.dwell()
-		const [a, b] = state.hops
-		expect(a?.memory).toHaveLength(1)
-		expect(a?.memory).not.toBe(b?.memory)
-		expect(a?.memory[0]).not.toBe(b?.memory[0])
-		expect(a?.memory[0]?.closedAt).not.toBe(b?.memory[0]?.closedAt)
+		expect(h.dwell()).toEqual([
+			{ type: "sweep-complete", sweepIndex: 0 },
+			tune(0, 399.9 * MHZ),
+		])
+		// Heard again at once on the new hop 0: a resting carrier, not held.
+		h.s.onEpochStarted(h.sample)
+		h.s.onTrack(track("b"), false, 0, { followOnAir: true })
+		expect(h.dwell(3, false)).toEqual([tune(1, 400.1 * MHZ)])
+		expect(h.s.progress().holdingOn).toBeNull()
 	})
 
 	it("counts an old hop's visits, time and holds once when two new hops map to it", () => {

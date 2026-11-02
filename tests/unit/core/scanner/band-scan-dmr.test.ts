@@ -47,6 +47,8 @@ const TARGET = 150_112_500
 const FS = 1_024_000
 const EPOCH = 11
 const LATENCY = 400 // ProbePool DEFAULT_START_LATENCY_MS before any measured start
+/** The scheduler's first hold of a frequency not known watches it up to this long (CARRIER_WATCH_MS). */
+const WATCH_MS = 8_000
 
 const impact = (): Impact => ({
 	liveAudioClients: 0,
@@ -368,6 +370,12 @@ describe("band-scan DMR: probe admission at the container's CPU (1.4 a)", () => 
 		expect(s.h.clock.now - t0).toBe(holdMs)
 		s.runner.tick(s.h.clock.now)
 		await settle()
+		// The probe hold is over; on air since the hop started, the frequency is watched for carrier
+		// evidence up to WATCH_MS from the start of the hold, then the job leaves the hop.
+		expect(s.arbiter.retunes).toHaveLength(1)
+		await s.advance(t0 + WATCH_MS - s.h.clock.now)
+		s.runner.tick(s.h.clock.now)
+		await settle()
 		expect(s.arbiter.retunes).toHaveLength(2) // next hop
 		expect(s.h.decoders.created.size).toBe(0)
 		expect(s.h.decoders.removed).toEqual([])
@@ -397,6 +405,11 @@ describe("band-scan DMR: hop hold against the DMR probe hold (1.4 b, c)", () => 
 		s.runner.tick(s.h.clock.now)
 		await settle()
 		expect(s.h.pool.status()).toEqual([])
+		// Watched to WATCH_MS from the start of the hold (a frequency not known), then left.
+		expect(s.arbiter.retunes).toHaveLength(1)
+		await s.advance(t0 + WATCH_MS - s.h.clock.now)
+		s.runner.tick(s.h.clock.now)
+		await settle()
 		expect(s.arbiter.retunes).toHaveLength(2)
 		expect(s.undecoded).toEqual([])
 	})
@@ -417,6 +430,11 @@ describe("band-scan DMR: hop hold against the DMR probe hold (1.4 b, c)", () => 
 		s.runner.tick(s.h.clock.now)
 		await settle()
 		expect(s.h.pool.status()).toEqual([])
+		// Watched to WATCH_MS from the start of the hold (a frequency not known), then left.
+		expect(s.arbiter.retunes).toHaveLength(1)
+		await s.advance(t0 + WATCH_MS - s.h.clock.now)
+		s.runner.tick(s.h.clock.now)
+		await settle()
 		expect(s.arbiter.retunes).toHaveLength(2)
 	})
 
