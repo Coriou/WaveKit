@@ -3431,6 +3431,9 @@ export class ScannerService extends EventEmitter {
 				analogFm: live.classification.class === "analog-fm",
 				nonAnalog: nonAnalogFmClass(live.classification.class),
 				discoveryId: this.store.discoveryIdOf(live.observationId) ?? null,
+				// Encrypted evidence may arrive after the last update: vetoed here too.
+				encrypted: live.encrypted,
+				recordAllowed: this.widebandRecordAllowed(live),
 			},
 		)
 		if (
@@ -3730,7 +3733,6 @@ export class ScannerService extends EventEmitter {
 	 * track not classed yet may start a shadow session where analog FM may be (`analogFmPossible`).
 	 */
 	private recordWideband(live: LiveObservation, track: TrackSnapshot): void {
-		const specs = live.jobIds.flatMap(id => this.jobs.get(id)?.spec ?? [])
 		const analogFm = live.classification.class === "analog-fm"
 		this.widebandAnalog.track({
 			observationId: live.observationId,
@@ -3744,12 +3746,17 @@ export class ScannerService extends EventEmitter {
 				!this.widebandAnalog.owns(live.observationId) &&
 				this.analogFmPossible(track.centreHz),
 			encrypted: live.encrypted,
-			recordAllowed:
-				specs.length === 0 || specs.some(spec => spec.record.analog),
+			recordAllowed: this.widebandRecordAllowed(live),
 			channelOwned: [...this.channelRecordingOwners.values()].some(
 				owner => owner.observationId === live.observationId,
 			),
 		})
+	}
+
+	/** No covering job, or a covering job with record.analog. */
+	private widebandRecordAllowed(live: LiveObservation): boolean {
+		const specs = live.jobIds.flatMap(id => this.jobs.get(id)?.spec ?? [])
+		return specs.length === 0 || specs.some(spec => spec.record.analog)
 	}
 
 	/**

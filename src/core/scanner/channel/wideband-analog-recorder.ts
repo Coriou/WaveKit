@@ -41,7 +41,11 @@ import {
 	type SegmentEvent,
 } from "./transmission-segmenter.js"
 import { VoiceActivityGate } from "./voice-activity.js"
-import { MAX_SLICE_SAMPLES, WidebandNfmChain } from "./wideband-nfm.js"
+import {
+	MAX_SLICE_SAMPLES,
+	WidebandNfmChain,
+	widebandNfmSupported,
+} from "./wideband-nfm.js"
 import type { ProofAnalogInput } from "../scanner-redesign-contract.js"
 
 /** Same bound as the channel-tier trigger: a 25 kHz NFM channel's occupied bandwidth. */
@@ -128,6 +132,18 @@ export const WIDEBAND_MAX_PENDING_GAPS = 64
  * file still settles, and one more behind it. Their audio counts in WIDEBAND_MAX_BUFFERED_FRAMES.
  */
 export const MAX_WAITING_FILES = 2
+/**
+ * A shadow file a retune ended before its class arrived waits this long for the closing
+ * snapshot (which may carry the first analog-fm class): 2 s of stream samples after the new
+ * epoch's start (2 048 000 samples at 1.024 Msps), checked on every engine write. Past it, or
+ * on a stream or engine change, it is discarded.
+ */
+export const WIDEBAND_PARK_MS = 2_000
+/**
+ * Retune-ended sessions waiting for their close per manager; past it the oldest is discarded.
+ * Each holds at most WIDEBAND_MAX_BUFFERED_FRAMES (960 KB): 4 · 960 KB = 3.84 MB at most.
+ */
+export const WIDEBAND_MAX_PARKED = 4
 /** Observations remembered as refused, and as retried once, per manager. */
 const MAX_REMEMBERED = 1024
 /** Remembered file ends per manager (pre-roll clamp of the next file on the same channel). */
@@ -243,6 +259,10 @@ export interface WidebandCloseInfo {
 	readonly analogFm: boolean
 	readonly nonAnalog?: boolean
 	readonly discoveryId: string | null
+	/** Encrypted evidence arrived (possibly after the last update): the session is discarded. */
+	readonly encrypted?: boolean
+	/** False: no covering job records analog any more; the session is discarded. */
+	readonly recordAllowed?: boolean
 }
 
 /** Demodulated audio and its tone-band twin, frame for frame; `tone` null: not for CTCSS. */
@@ -388,6 +408,15 @@ interface Session {
 	releaseCores: () => void
 	scheduled: boolean
 	done: boolean
+	/** Retune-ended and waiting for its close: the stream sample past which it is discarded. */
+	parkedUntil: number | null
+}
+
+/** What a snapshot says about an observation's class. */
+interface ClassInfo {
+	readonly analogFm: boolean
+	readonly nonAnalog?: boolean | undefined
+	readonly discoveryId: string | null
 }
 
 type Usable = "commanded" | "relay"
@@ -405,6 +434,14 @@ function cleanTrack(track: TrackSnapshot): boolean {
 		!track.flags.iqImage &&
 		!track.flags.spur &&
 		usableTrust(track.tuningTrust)
+	)
+}
+
+/** The closing snapshot bars the recording: encrypted, or no covering job records analog. */
+function barredAtClose(info: WidebandCloseInfo | undefined): boolean {
+	return (
+		info !== undefined &&
+		(info.encrypted === true || info.recordAllowed === false)
 	)
 }
 
@@ -426,6 +463,8 @@ function remember(set: Set<string>, id: string): void {
 export class WidebandAnalogRecorder {
 	private readonly log: Logger
 	private readonly sessions = new Map<string, Session>()
+	/** Retune-ended sessions whose voiced shadow files wait for the close (oldest first). */
+	private readonly parked = new Map<string, Session>()
 	/** observationId → session id. */
 	private readonly byObservation = new Map<string, string>()
 	/**
@@ -510,7 +549,9 @@ export class WidebandAnalogRecorder {
 	 * The observation's track closed. `cut` null is a natural end (the hang applies). A retune
 	 * (`epoch-changed`, a sweep hop) keeps the hang but never past the new epoch's start; any other
 	 * cut (stream change, job end) ends the file at the track's last sample. `info` is what the
-	 * closing snapshot says: its class may be the first analog-fm one.
+	 * closing snapshot says: its class may be the first analog-fm one; encrypted evidence or a
+	 * lost record.analog discards every file of the session before any promotion. A shadow file a
+	 * retune already ended waits (parked) for this call up to WIDEBAND_PARK_MS.
 	 */
 	closed(
 		observationId: string,
@@ -521,6 +562,17 @@ export class WidebandAnalogRecorder {
 		const id = this.byObservation.get(observationId)
 		if (id === undefined) return
 		this.byObservation.delete(observationId)
+		const parked = this.parked.get(id)
+		if (parked) {
+			this.updateParked(
+				parked,
+				observationId,
+				info,
+				!cleanTrack(track) || barredAtClose(info),
+				true,
+			)
+			return
+		}
 		const s = this.sessions.get(id)
 		if (!s || s.done) return
 		s.lastActive = Math.max(s.lastActive, track.lastSample)
@@ -529,8 +581,9 @@ export class WidebandAnalogRecorder {
 			span.last = Math.max(span.last, track.lastSample)
 			span.open = false
 		}
-		if (!cleanTrack(track)) {
-			// Any contributing track turning edge, spur or unverified discards the recording.
+		if (!cleanTrack(track) || barredAtClose(info)) {
+			// Any contributing track turning edge, spur, unverified or encrypted (evidence that may
+			// arrive after its last update), or losing record.analog, discards the recording.
 			this.refuse(s, true)
 			return
 		}
@@ -556,6 +609,7 @@ export class WidebandAnalogRecorder {
 	 */
 	async stop(): Promise<void> {
 		this.stopped = true
+		for (const s of [...this.parked.values()]) this.dropParked(s, false)
 		for (const s of [...this.sessions.values()]) this.endSession(s, "shutdown")
 		await this.idle()
 	}
@@ -574,11 +628,7 @@ export class WidebandAnalogRecorder {
 	private classify(
 		s: Session,
 		observationId: string,
-		info: {
-			analogFm: boolean
-			nonAnalog?: boolean | undefined
-			discoveryId: string | null
-		},
+		info: ClassInfo,
 	): boolean {
 		if (observationId === s.owner && info.discoveryId !== null)
 			s.discoveryId ??= info.discoveryId
@@ -597,6 +647,11 @@ export class WidebandAnalogRecorder {
 		const barred = input.encrypted || !input.recordAllowed || !cleanTrack(track)
 		const joinedId = this.byObservation.get(observationId)
 		if (joinedId !== undefined) {
+			const p = this.parked.get(joinedId)
+			if (p) {
+				this.updateParked(p, observationId, input, barred, false)
+				return
+			}
 			const s = this.sessions.get(joinedId)
 			if (!s) return
 			s.lastActive = Math.max(s.lastActive, track.lastSample)
@@ -649,6 +704,14 @@ export class WidebandAnalogRecorder {
 			input.nonAnalog !== true &&
 			!track.flags.burst
 		if (!input.analogFm && !shadow) return
+		if (
+			!widebandNfmSupported(epoch.sampleRateHz, track.centreHz - epoch.centreHz)
+		) {
+			// Structurally impossible (rate under 48 kHz, offset outside ±rate/2): nothing is
+			// reserved, and this observation is not tried again (bounded by MAX_REMEMBERED).
+			remember(this.refused, observationId)
+			return
+		}
 		const settings = this.deps.settings()
 		const cap = widebandRecordingCap(
 			epoch.sampleRateHz,
@@ -663,7 +726,24 @@ export class WidebandAnalogRecorder {
 			: () => undefined
 		// The shared CPU budget is full (probes, live audio): not refused, retried next snapshot.
 		if (release === null) return
-		this.startSession(input, engine, epoch, settings, release)
+		let released = false
+		const releaseOnce = (): void => {
+			if (released) return
+			released = true
+			release()
+		}
+		try {
+			this.startSession(input, engine, epoch, settings, releaseOnce)
+		} catch (err: unknown) {
+			// Any failure while starting gives the reservation back and refuses the observation
+			// (no retry each snapshot): a started part is cancelled, nothing was admitted.
+			const id = this.byObservation.get(observationId)
+			const s = id === undefined ? undefined : this.sessions.get(id)
+			if (s) this.cancelSession(s, "cancelled", true)
+			releaseOnce()
+			remember(this.refused, observationId)
+			this.warn(err)
+		}
 	}
 
 	/**
@@ -754,6 +834,7 @@ export class WidebandAnalogRecorder {
 			releaseCores,
 			scheduled: false,
 			done: false,
+			parkedUntil: null,
 		}
 		this.sessions.set(s.id, s)
 		this.byObservation.set(input.observationId, s.id)
@@ -1323,7 +1404,124 @@ export class WidebandAnalogRecorder {
 		}
 		this.completeFinish(s, file)
 		if (s.file) this.wake(s)
+		else if (s.parkedUntil !== null && !s.done) this.park(s)
 		else this.dispose(s)
+	}
+
+	/**
+	 * A voiced shadow file a retune ended (cut epoch-changed) while some joined observation is
+	 * still open: its close may bring the first analog-fm class, so it is kept, not discarded.
+	 */
+	private parkable(s: Session, file: FileState): boolean {
+		return (
+			!this.stopped &&
+			!s.done &&
+			file.cut === "epoch-changed" &&
+			file.gate.voiced &&
+			Number.isFinite(s.limit) &&
+			s.observations.size > 0 &&
+			(!s.classed || s.discoveryId === null)
+		)
+	}
+
+	/**
+	 * The session stops demodulating and gives its cores back; its parked files and observation
+	 * mappings stay until the close, WIDEBAND_PARK_MS of stream past the epoch change, a stream
+	 * or engine change, or WIDEBAND_MAX_PARKED newer parked sessions.
+	 */
+	private park(s: Session): void {
+		const until = s.parkedUntil
+		this.dispose(s, true)
+		s.parkedUntil = until
+		this.parked.set(s.id, s)
+		if (this.parked.size > WIDEBAND_MAX_PARKED) {
+			const oldest = this.parked.values().next()
+			if (oldest.done !== true) this.dropParked(oldest.value, false)
+		}
+		if (!this.parked.has(s.id)) return
+		s.untap = s.engine.tap(() => this.checkParked(s))
+	}
+
+	/** Engine write: a parked session past its time, or on a changed stream, is discarded. */
+	private checkParked(s: Session): void {
+		if (!this.parked.has(s.id)) return
+		try {
+			const engine = this.deps.engine(s.sourceId)
+			if (
+				engine !== s.engine ||
+				engine.currentEpoch().stream !== s.stream ||
+				engine.liveEdge() > (s.parkedUntil ?? Number.NEGATIVE_INFINITY)
+			)
+				this.dropParked(s, false)
+		} catch (err: unknown) {
+			this.warn(err)
+			this.dropParked(s, false)
+		}
+	}
+
+	/**
+	 * A snapshot (`closing`: the close) of a parked session's observation: barred (encrypted,
+	 * opted out, unclean) or a definite other class discards every parked file; analog-fm with a
+	 * discovery promotes them (written, cut epoch-changed); once every observation closed without
+	 * that, they are discarded.
+	 */
+	private updateParked(
+		s: Session,
+		observationId: string,
+		info: ClassInfo | undefined,
+		barred: boolean,
+		closing: boolean,
+	): void {
+		if (closing) s.observations.delete(observationId)
+		if (barred) {
+			this.dropParked(s, true)
+			return
+		}
+		if (info !== undefined) {
+			if (observationId === s.owner && info.discoveryId !== null)
+				s.discoveryId ??= info.discoveryId
+			if (info.analogFm) s.classed = true
+			else if (!s.classed && info.nonAnalog === true) {
+				this.dropParked(s, true)
+				return
+			}
+		}
+		if (s.classed && s.discoveryId !== null) {
+			this.unpark(s)
+			for (const id of s.observations)
+				if (this.byObservation.get(id) === s.id) this.byObservation.delete(id)
+			for (const f of [...s.files]) this.admit(s, f)
+			for (const f of [...s.files])
+				if (f.handle === null && !s.waiting.includes(f)) {
+					f.failed = true
+					s.files.delete(f)
+				}
+			return
+		}
+		if (s.observations.size === 0) this.dropParked(s, true)
+	}
+
+	private unpark(s: Session): void {
+		this.parked.delete(s.id)
+		s.untap()
+		s.untap = () => undefined
+		s.parkedUntil = null
+	}
+
+	/** Discards a parked session's files (nothing of them was written). */
+	private dropParked(s: Session, refuse: boolean): void {
+		if (!this.parked.has(s.id)) return
+		this.unpark(s)
+		for (const f of [...s.files])
+			if (f.handle === null) {
+				f.failed = true
+				s.files.delete(f)
+			}
+		s.waiting.length = 0
+		for (const id of s.observations) {
+			if (this.byObservation.get(id) === s.id) this.byObservation.delete(id)
+			if (refuse) remember(this.refused, id)
+		}
 	}
 
 	/** Writes the rest of a finishing file's queue, then finishes its operation. */
@@ -1339,6 +1537,11 @@ export class WidebandAnalogRecorder {
 			if (file.gate.conclude()) s.qualified = true
 			this.admit(s, file)
 			if (file.handle === null && !s.waiting.includes(file)) {
+				if (this.parkable(s, file)) {
+					// A retune ended it before its class: kept for the close (finishFile parks).
+					s.parkedUntil = s.limit + Math.round((WIDEBAND_PARK_MS * s.fs) / 1000)
+					return
+				}
 				// Not voiced, never classed or no discovery: nothing was written, nothing is kept.
 				file.failed = true
 				s.files.delete(file)
@@ -1399,14 +1602,17 @@ export class WidebandAnalogRecorder {
 		this.dispose(s)
 	}
 
-	private dispose(s: Session): void {
+	/** `keepMappings`: parked, its open observations still map to it. */
+	private dispose(s: Session, keepMappings = false): void {
 		if (s.done) return
 		s.done = true
 		s.untap()
+		s.untap = () => undefined
 		s.releaseCores()
 		this.sessions.delete(s.id)
-		for (const id of s.observations)
-			if (this.byObservation.get(id) === s.id) this.byObservation.delete(id)
+		if (!keepMappings)
+			for (const id of s.observations)
+				if (this.byObservation.get(id) === s.id) this.byObservation.delete(id)
 		const end = s.seg.previousEnd
 		if (Number.isFinite(end)) {
 			this.recentEnds.push({

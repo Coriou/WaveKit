@@ -187,6 +187,24 @@ export interface WidebandNfmOptions {
 	highPass?: boolean
 }
 
+/**
+ * Whether the chain can run at `inputRateHz` with the channel `offsetHz` from the centre: a
+ * finite rate of at least 48 kHz (the demodulation rate) and an offset inside ±rate/2. The
+ * constructor throws otherwise; callers check first so nothing is reserved for an impossible
+ * engine.
+ */
+export function widebandNfmSupported(
+	inputRateHz: number,
+	offsetHz: number,
+): boolean {
+	return (
+		Number.isFinite(inputRateHz) &&
+		inputRateHz >= DEMOD_RATE_HZ &&
+		Number.isFinite(offsetHz) &&
+		Math.abs(offsetHz) < inputRateHz / 2
+	)
+}
+
 /** One streaming chain per recording; `process` is chunk-split invariant. */
 export class WidebandNfmChain {
 	readonly factors: DecimationFactors
@@ -219,12 +237,7 @@ export class WidebandNfmChain {
 	private readonly demodIn: Float32Array
 
 	constructor(opts: WidebandNfmOptions) {
-		if (
-			!Number.isFinite(opts.inputRateHz) ||
-			opts.inputRateHz < DEMOD_RATE_HZ ||
-			!Number.isFinite(opts.offsetHz) ||
-			Math.abs(opts.offsetHz) >= opts.inputRateHz / 2
-		)
+		if (!widebandNfmSupported(opts.inputRateHz, opts.offsetHz))
 			throw new WaveKitError(
 				"Invalid wideband NFM options",
 				"SCANNER_AUDIO_OPTIONS",

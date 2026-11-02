@@ -37,13 +37,17 @@ interface Seams {
 	onTrack(sourceId: string, ev: TrackEvent, synthetic?: boolean): void
 	widebandAnalog: WidebandAnalogRecorder
 	evidence: { beginAnalog(input: unknown): unknown }
+	live: Map<string, { encrypted: boolean }>
 }
 
 /**
  * `analogFm(ageS, closing)`: whether a snapshot of a track `ageS` seconds old (closing: the
  * track-close snapshot) is classed analog-fm; otherwise it is "unknown" (never a definite class).
  */
-function harness(analogFm: (ageS: number, closing: boolean) => boolean) {
+function harness(
+	analogFm: (ageS: number, closing: boolean) => boolean,
+	encryptedAtClose = false,
+) {
 	const h = serviceHarness({})
 	cleanups.push(async () => {
 		await h.service.stop()
@@ -55,6 +59,9 @@ function harness(analogFm: (ageS: number, closing: boolean) => boolean) {
 	let closing = false
 	svc.onTrack = (sourceId, ev, synthetic) => {
 		closing = ev.kind === "track-close"
+		// Encrypted evidence that arrived after the track's last update.
+		if (closing && encryptedAtClose)
+			for (const live of svc.live.values()) live.encrypted = true
 		try {
 			onTrack(sourceId, ev, synthetic)
 		} finally {
@@ -159,6 +166,23 @@ describe("wideband analog recording with a late class", () => {
 			])
 		}, 300_000)
 	}
+
+	it("a voiced track first classed at a close that is encrypted yields no WAV and no store operation", async () => {
+		const h = harness((_age, closing) => closing, true)
+		await h.service.start()
+		const voice = {
+			src: new NfmSource({ fs: FS, offsetHz: VOICE_HZ, seed: 3 }),
+			on: false,
+		}
+		await feed(h, [voice], 1)
+		voice.on = true
+		await feed(h, [voice], 5)
+		voice.on = false
+		await feed(h, [voice], 3.5)
+		await h.recorder.idle()
+		expect(await wavs(h.dir)).toEqual([])
+		expect(h.begun()).toBe(0)
+	}, 300_000)
 
 	it("a track never classed analog-fm yields no WAV and no store operation", async () => {
 		const h = harness(() => false)
