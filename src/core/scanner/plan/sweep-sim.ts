@@ -24,7 +24,8 @@ export interface SimSignal {
 	followOnAir: boolean
 	/**
 	 * Blocks the track needs before its class (and so `followOnAir`) is known; younger updates
-	 * report `followOnAir: false`. The classifier calls a track of at most 4 blocks a burst: 5.
+	 * report `followOnAir: false` and `voiceLater: true` (a spectrum that reads as analog voice).
+	 * The classifier calls a track of at most 4 blocks a burst: 5.
 	 */
 	labelAfterBlocks?: number
 	spur?: boolean
@@ -271,6 +272,8 @@ export function simulateSweep(
 							{
 								followOnAir:
 									sig.followOnAir && blocks >= (sig.labelAfterBlocks ?? 0),
+								voiceLater:
+									sig.followOnAir && blocks < (sig.labelAfterBlocks ?? 0),
 							},
 						),
 					)

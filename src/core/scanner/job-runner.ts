@@ -2,6 +2,11 @@ import { TrialRotation } from "./trial-rotation.js"
 import { probeModesFor } from "./probes/probe-pool.js"
 import type { ObservationEndReason } from "../spectrum/types.js"
 import { protocolsForFrequency } from "./plan/protocols.js"
+import {
+	AM_VOICE_MAX_OBW_HZ,
+	AM_VOICE_MIN_OBW_HZ,
+	classOf,
+} from "./classify/classifier.js"
 /**
  * One discovery job (spec § 10.1–§ 10.5): the transition table, the sweep
  * scheduler, the lease and decoder hold, probe requests and progress.
@@ -76,6 +81,23 @@ const FOLLOW_ON_AIR_CLASSES: ReadonlySet<ScannerClass> = new Set([
 	"analog-fm",
 	"analog-am",
 ])
+/** The classifier calls a track of at most this many blocks a burst whatever its spectrum. */
+const UNLABELLED_MAX_BLOCKS = 4
+
+/**
+ * A track too young to be labelled whose spectrum reads as analog voice: FM by its class once past
+ * the burst age, AM by the width and shape `isAmVoice` accepts. The sweep dwell may wait for its
+ * label; any other young burst (a data burst, a DMR burst) leaves at the dwell.
+ */
+function voiceLater(track: TrackSnapshot): boolean {
+	if (track.blocks > UNLABELLED_MAX_BLOCKS) return false
+	if (classOf(track, { allowBurst: false }) === "analog-fm") return true
+	return (
+		(track.spectralShape === "narrow" || track.spectralShape === "peaked") &&
+		track.obwHz >= AM_VOICE_MIN_OBW_HZ &&
+		track.obwHz <= AM_VOICE_MAX_OBW_HZ
+	)
+}
 
 export interface JobRecord {
 	id: string
@@ -856,6 +878,7 @@ export class JobRunner implements JobDriver {
 			this.exec(
 				this.scheduler.onTrack(track, confirm && policy !== "never", holdMs, {
 					followOnAir: FOLLOW_ON_AIR_CLASSES.has(live.classification.class),
+					voiceLater: voiceLater(track),
 				}),
 			)
 			return

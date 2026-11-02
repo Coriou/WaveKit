@@ -74,7 +74,7 @@ const FOLLOW_BUDGETS_PER_HOP = MAX_FREQUENCY_MEMORY
 /**
  * A track of at most 4 blocks is classed as a burst whatever it is (classifySpectral), so analog
  * voice can only be labelled from its 5th block: a dwell that ends with a younger unlabelled track
- * waits for it once, at most CLASS_SETTLE_BLOCKS − 1 = 4 more blocks (200 ms in 50 ms blocks).
+ * whose spectrum reads as analog voice (TrackHints.voiceLater) waits for it once, at most CLASS_SETTLE_BLOCKS − 1 = 4 more blocks (200 ms in 50 ms blocks).
  */
 const CLASS_SETTLE_BLOCKS = 5
 /**
@@ -167,6 +167,8 @@ interface TrackInfo {
 	confirmHoldMs: number
 	/** Analog voice: a hold follows it while it stays on air (bounded by `hold.maxHoldMs`). */
 	followOnAir: boolean
+	/** Too young to be labelled, with the spectrum of analog voice (TrackHints.voiceLater). */
+	voiceLater: boolean
 	/** Steady or barred frequency, or a flagged track: never held. */
 	steady: boolean
 	/** Truncated, image or spur: never held, no activity. */
@@ -226,6 +228,11 @@ export interface HopStat {
 export interface TrackHints {
 	/** Analog voice (`analog-fm`, `analog-am`): follow it on air under `hold.policy: "hold"`. */
 	followOnAir?: boolean
+	/**
+	 * Not analog voice yet only because it is too young to be labelled (a burst), while its
+	 * spectrum reads as analog voice: the dwell may wait once for its label (CLASS_SETTLE_BLOCKS).
+	 */
+	voiceLater?: boolean
 }
 
 interface Hold {
@@ -517,6 +524,7 @@ export class SweepScheduler {
 		const steady =
 			flagged || (memory?.barred ?? false) || (memory?.steady ?? false)
 		const followOnAir = hints.followOnAir === true && !flagged
+		const voiceLater = hints.voiceLater === true && !flagged
 		if (known === undefined) {
 			v.tracks.set(track.trackId, {
 				snrDb: track.snrDb,
@@ -525,6 +533,7 @@ export class SweepScheduler {
 				needsConfirm: needsConfirm && !flagged,
 				confirmHoldMs,
 				followOnAir,
+				voiceLater,
 				steady,
 				flagged,
 				open: true,
@@ -541,6 +550,7 @@ export class SweepScheduler {
 			if (flagged) known.needsConfirm = false
 			else known.needsConfirm ||= needsConfirm
 			known.followOnAir = followOnAir
+			known.voiceLater = voiceLater
 			known.steady ||= steady
 			known.flagged ||= flagged
 			known.ageBlocks = Math.max(known.ageBlocks, track.blocks)
@@ -1146,7 +1156,8 @@ export class SweepScheduler {
 	/**
 	 * A track younger than CLASS_SETTLE_BLOCKS cannot be labelled analog voice yet: with nothing
 	 * else to hold, the dwell waits for it once (at most CLASS_SETTLE_BLOCKS − 1 blocks), so a
-	 * label that arrives with its 5th block can still start a follow.
+	 * label that arrives with its 5th block can still start a follow. Only a track whose spectrum
+	 * reads as analog voice (`voiceLater`) is waited for; any other young burst leaves at the dwell.
 	 */
 	private waitForClass(v: Visit): boolean {
 		if (
@@ -1163,6 +1174,7 @@ export class SweepScheduler {
 				!t.tried &&
 				!t.steady &&
 				!t.followOnAir &&
+				t.voiceLater &&
 				t.ageBlocks < CLASS_SETTLE_BLOCKS
 			)
 				need = Math.max(need, CLASS_SETTLE_BLOCKS - t.ageBlocks)

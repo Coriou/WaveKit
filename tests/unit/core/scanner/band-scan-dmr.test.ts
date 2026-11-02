@@ -19,7 +19,10 @@ import type {
 	ScannerClass,
 	UndecodedReason,
 } from "../../../../src/core/scanner/types.js"
-import type { PendingEpoch } from "../../../../src/core/spectrum/types.js"
+import type {
+	PendingEpoch,
+	TrackSnapshot,
+} from "../../../../src/core/spectrum/types.js"
 import { testSettings } from "../../../mocks/scanner/engine-fakes.js"
 import {
 	makeHopPlan,
@@ -211,7 +214,10 @@ function sweep(opts: { cpu: CpuMeter }) {
 		await settle()
 	}
 	/** Starts the job, settles the first hop and feeds one young (2-block) DMR track of `cls`. */
-	const toDecision = async (cls: ScannerClass): Promise<number> => {
+	const toDecision = async (
+		cls: ScannerClass,
+		over: Partial<TrackSnapshot> = {},
+	): Promise<number> => {
 		await runner.start()
 		await settle()
 		const startSample = 10_000
@@ -248,6 +254,7 @@ function sweep(opts: { cpu: CpuMeter }) {
 				startedAt: 0,
 				blocks: 2,
 			}),
+			...over,
 			epoch: EPOCH,
 			stream: 0,
 		}
@@ -416,6 +423,20 @@ describe("band-scan DMR: hop hold against the DMR probe hold (1.4 b, c)", () => 
 	it("ook-burst (the class a young track gets with no protocols at the frequency): no probe is requested and the hop is left at the dwell", async () => {
 		const s = sweep({ cpu: containerMeter(115, 2) })
 		await s.toDecision("ook-burst")
+		expect(s.h.decoders.created.size).toBe(0)
+		expect(s.undecoded).toEqual([])
+		expect(s.arbiter.retunes).toHaveLength(2)
+	})
+
+	it("a young burst whose spectrum reads as analog FM waits for its 5th block (its label) and then leaves without a probe", async () => {
+		const s = sweep({ cpu: containerMeter(115, 2) })
+		await s.toDecision("ook-burst", { obwHz: 12_000, spectralShape: "peaked" })
+		expect(s.arbiter.retunes).toHaveLength(1)
+		const block = 50 * (FS / 1000)
+		const dwell = (testSettings().detection.minSurfaceBlocks + 1) * block
+		// 2 blocks old at the dwell: 3 more blocks reach the 5th
+		s.runner.onBlock(10_000 + dwell + 3 * block, false)
+		await settle()
 		expect(s.h.decoders.created.size).toBe(0)
 		expect(s.undecoded).toEqual([])
 		expect(s.arbiter.retunes).toHaveLength(2)
