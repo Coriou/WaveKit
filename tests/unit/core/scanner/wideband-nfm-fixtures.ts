@@ -51,6 +51,11 @@ export class NfmSource {
 		return this.sample
 	}
 
+	/** Keys the voice tones on or off from the next sample (the carrier stays continuous). */
+	setVoice(voice: boolean): void {
+		this.o.voice = voice
+	}
+
 	/** `n` CU8 IQ pairs; the carrier is keyed when `on`. */
 	next(n: number, on: boolean): Uint8Array {
 		const { fs, offsetHz, amp, noiseSigma, peakDeviationHz } = this.o
@@ -85,6 +90,74 @@ export class NfmSource {
 	private gauss(): number {
 		// Irwin–Hall approximation: cheap and deterministic.
 		return this.rng() + this.rng() + this.rng() + this.rng() - 2
+	}
+}
+
+export interface FskSourceOptions {
+	fs: number
+	offsetHz: number
+	/** Symbols per second (default 4800). */
+	baud?: number
+	/** Deviation of the four levels in Hz (default ±600 and ±1800). */
+	levelsHz?: readonly number[]
+	amp?: number
+	noiseSigma?: number
+	seed?: number
+}
+
+/**
+ * Synthetic narrow 4FSK data signal (a digital-voice-like channel): random symbols at `baud`,
+ * each a constant deviation of one of `levelsHz`, phase-continuous FM at an offset.
+ */
+export class FskSource {
+	private carrierPhase = 0
+	private sample = 0
+	private symbol = 0
+	private dev = 0
+	private readonly rng: () => number
+	private readonly noise: () => number
+	private readonly o: Required<FskSourceOptions>
+	constructor(opts: FskSourceOptions) {
+		this.o = {
+			baud: 4800,
+			levelsHz: [-1800, -600, 600, 1800],
+			amp: 0.4,
+			noiseSigma: 0.02,
+			seed: 11,
+			...opts,
+		}
+		this.rng = mulberry32(this.o.seed)
+		this.noise = mulberry32(this.o.seed + 1)
+	}
+
+	/** `n` CU8 IQ pairs; the carrier is keyed when `on`. */
+	next(n: number, on: boolean): Uint8Array {
+		const { fs, offsetHz, amp, noiseSigma, baud, levelsHz } = this.o
+		const out = new Uint8Array(2 * n)
+		for (let i = 0; i < n; i++) {
+			const sym = Math.floor((this.sample * baud) / fs)
+			if (sym !== this.symbol || this.sample === 0) {
+				this.symbol = sym
+				this.dev =
+					levelsHz[Math.floor(this.rng() * levelsHz.length)] ?? levelsHz[0]!
+			}
+			let re = noiseSigma * this.gauss()
+			let im = noiseSigma * this.gauss()
+			if (on) {
+				this.carrierPhase += (TWO_PI * (offsetHz + this.dev)) / fs
+				this.carrierPhase %= TWO_PI
+				re += amp * Math.cos(this.carrierPhase)
+				im += amp * Math.sin(this.carrierPhase)
+			}
+			out[2 * i] = clampU8(re * 127.5 + 127.5)
+			out[2 * i + 1] = clampU8(im * 127.5 + 127.5)
+			this.sample++
+		}
+		return out
+	}
+
+	private gauss(): number {
+		return this.noise() + this.noise() + this.noise() + this.noise() - 2
 	}
 }
 

@@ -14,7 +14,9 @@
  * voice (`VoiceActivityGate`); then the store operation begins and the buffered audio is
  * written. A session closed without that class, or classed as something else first, is
  * discarded. A file whose audio never sounds like voice (a spur, an idle or CTCSS-only carrier)
- * is never written, and a session not voiced after WIDEBAND_QUALIFY_MS of in-track audio ends.
+ * is never written and a session not voiced after WIDEBAND_QUALIFY_MS of in-track audio ends. An
+ * unclassed shadow is not ended by time (a class may arrive only at close): it is bounded by the
+ * 60 s buffer and gives its slot to any candidate classed analog-fm (eviction).
  */
 import type { TrackSnapshot, TuningTrust } from "../../spectrum/types.js"
 import { safeErrorFields } from "../../../decoders/safe-error-fields.js"
@@ -80,9 +82,11 @@ export const WIDEBAND_QUALIFY_MS = 8_000
 export const WIDEBAND_QUALIFY_FRAMES =
 	(WIDEBAND_QUALIFY_MS / 1000) * ANALOG_AUDIO_RATE_HZ
 /**
- * A session not qualified after this much in-track audio (2 s = 16 000 frames, four gate
- * windows) may be evicted for a new candidate when every slot is held; a younger one is not,
- * so a voice that has not been heard for a full window yet is never displaced.
+ * A classed session not qualified after this much in-track audio (2 s = 16 000 frames, four
+ * gate windows) may be evicted for a candidate classed analog-fm when every slot is held; a
+ * younger one is not, so a voice that has not been heard for a full window yet is never
+ * displaced. An unclassed session without a store operation may be evicted for such a
+ * candidate at any age.
  */
 export const WIDEBAND_EVICT_MIN_HEARD_FRAMES = 2 * ANALOG_AUDIO_RATE_HZ
 /**
@@ -379,6 +383,8 @@ interface Session {
 	qualified: boolean
 	/** In-track frames the gate heard over the session's files. */
 	heard: number
+	/** In-track frames over the session's files, voiced or not (the unclassed limit). */
+	inTrack: number
 	readonly observations: Set<string>
 	/** Track spans per observation (open: still active), the voice gate's input window. */
 	readonly activity: Map<string, { start: number; last: number; open: boolean }>
@@ -717,7 +723,9 @@ export class WidebandAnalogRecorder {
 			epoch.sampleRateHz,
 			settings.cpuBudgetCores,
 		)
-		if (this.activeOn(input.sourceId) >= cap) this.evict(input.sourceId)
+		// Only a candidate classed analog-fm takes another session's slot.
+		if (input.analogFm && this.activeOn(input.sourceId) >= cap)
+			this.evict(input.sourceId)
 		// Still full: not refused, the next snapshot tries again.
 		if (this.activeOn(input.sourceId) >= cap) return
 		const reserve = this.deps.reserveCores
@@ -747,18 +755,20 @@ export class WidebandAnalogRecorder {
 	}
 
 	/**
-	 * Every slot is held: the oldest session that heard WIDEBAND_EVICT_MIN_HEARD_FRAMES of
-	 * in-track audio without sounding like voice gives its slot up (and is refused), so a steady
-	 * carrier never keeps a voice out. Such a session never began a store operation.
+	 * Every slot is held and the candidate is classed analog-fm: the oldest session without a
+	 * store operation that is either unclassed (voiced or not: a data signal can pass the voice
+	 * gate) or heard WIDEBAND_EVICT_MIN_HEARD_FRAMES of in-track audio without sounding like voice
+	 * gives its slot up (and is refused), so neither a steady carrier nor an unclassed signal
+	 * keeps a voice out.
 	 */
 	private evict(sourceId: string): void {
 		for (const s of this.sessions.values())
 			if (
 				!s.done &&
 				s.sourceId === sourceId &&
-				!s.qualified &&
 				s.ops === 0 &&
-				s.heard >= WIDEBAND_EVICT_MIN_HEARD_FRAMES
+				(!s.classed ||
+					(!s.qualified && s.heard >= WIDEBAND_EVICT_MIN_HEARD_FRAMES))
 			) {
 				this.refuse(s, true)
 				return
@@ -809,6 +819,7 @@ export class WidebandAnalogRecorder {
 			classed: input.analogFm,
 			qualified: false,
 			heard: 0,
+			inTrack: 0,
 			observations: new Set([input.observationId]),
 			activity: new Map([
 				[
@@ -1241,8 +1252,8 @@ export class WidebandAnalogRecorder {
 	/**
 	 * The gate and the CTCSS bank hear the produced frames up to `until` (a frame index of the
 	 * file), as soon as no late track report can change the spans there. A file that sounds like
-	 * voice is admitted; a session that heard WIDEBAND_QUALIFY_FRAMES of in-track audio without
-	 * it ends and is refused.
+	 * voice is admitted; a session never voiced that heard WIDEBAND_QUALIFY_FRAMES of in-track
+	 * audio in a file without it ends and is refused.
 	 */
 	private judge(s: Session, file: FileState, until: number): void {
 		while (file.judged < until && file.unjudged.length > 0) {
@@ -1262,9 +1273,16 @@ export class WidebandAnalogRecorder {
 		if (file.gate.voiced) {
 			s.qualified = true
 			this.admit(s, file)
-		} else if (file.heard >= WIDEBAND_QUALIFY_FRAMES && !file.finishing)
-			// Not voice after 8 s in the track: a carrier, not a transmission worth a slot.
-			this.refuse(s, !s.qualified)
+		} else if (
+			!s.qualified &&
+			file.heard >= WIDEBAND_QUALIFY_FRAMES &&
+			!file.finishing
+		) {
+			// Not voice after 8 s in the track: a carrier, not a transmission worth a slot. A
+			// session already voiced (a pause, or a 120 s roll-over) keeps its conversation.
+			this.refuse(s, true)
+			return
+		}
 	}
 
 	/** CTCSS input: only frames inside the observed activity (no pre-roll, no hang noise). */
@@ -1299,7 +1317,10 @@ export class WidebandAnalogRecorder {
 		const from = file.startSample + first * perFrame
 		for (const [id, a] of s.activity)
 			if (!a.open && a.last < from) s.activity.delete(id)
-		if (file.gate.voiced || pcm.length === 0) return
+		if (pcm.length === 0) return
+		const voiced = file.gate.voiced
+		// Classed and voiced: nothing left to count.
+		if (voiced && s.classed) return
 		const trim = (WIDEBAND_GATE_EDGE_TRIM_MS * s.fs) / 1000
 		const mask = new Uint8Array(pcm.length)
 		for (const a of s.activity.values()) {
@@ -1320,9 +1341,12 @@ export class WidebandAnalogRecorder {
 			}
 			let j = i
 			while (j < pcm.length && mask[j] === 1) j++
-			file.gate.push(pcm.subarray(i, j))
-			file.heard += j - i
-			s.heard += j - i
+			s.inTrack += j - i
+			if (!voiced) {
+				file.gate.push(pcm.subarray(i, j))
+				file.heard += j - i
+				s.heard += j - i
+			}
 			i = j
 		}
 	}
