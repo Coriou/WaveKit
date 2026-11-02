@@ -19,6 +19,8 @@ export interface NfmSourceOptions {
 	peakDeviationHz?: number
 	ctcssHz?: number | null
 	ctcssDeviationHz?: number
+	/** Default true; false keys a carrier with only the CTCSS sub-tone (or nothing). */
+	voice?: boolean
 	seed?: number
 }
 
@@ -36,6 +38,7 @@ export class NfmSource {
 			noiseSigma: 0.02,
 			peakDeviationHz: 2500,
 			ctcssDeviationHz: 350,
+			voice: true,
 			seed: 7,
 			...opts,
 			ctcssHz: opts.ctcssHz === undefined ? CTCSS_TEST_HZ : opts.ctcssHz,
@@ -62,8 +65,9 @@ export class NfmSource {
 					VOICE_TONES_HZ[Math.floor(t / 0.15) % VOICE_TONES_HZ.length]!
 				// Pre-emphasised like a transmitter: deviation rises 6 dB/octave up to 1 kHz.
 				const emphasis = Math.min(1, tone / 1000)
-				let dev =
-					peakDeviationHz * 0.85 * emphasis * Math.sin(TWO_PI * tone * t)
+				let dev = this.o.voice
+					? peakDeviationHz * 0.85 * emphasis * Math.sin(TWO_PI * tone * t)
+					: 0
 				if (ctcss !== null)
 					dev += this.o.ctcssDeviationHz * Math.sin(TWO_PI * ctcss * t)
 				this.carrierPhase += (TWO_PI * (offsetHz + dev)) / fs

@@ -7,6 +7,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { FS, serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 import type { ScannerSettings } from "../../../../src/core/scanner/types.js"
+import type { WidebandAnalogRecorder } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import {
 	CTCSS_TEST_HZ,
 	NfmSource,
@@ -66,8 +67,11 @@ async function wavs(dir: string): Promise<string[]> {
 	return out
 }
 
-async function settle(): Promise<void> {
-	for (let i = 0; i < 50; i++) await new Promise(r => setTimeout(r, 10))
+/** Waits for every analog operation the recorder began (and any continuation) to settle. */
+async function settle(h: ReturnType<typeof harness>): Promise<void> {
+	await (
+		h.service as unknown as { widebandAnalog: WidebandAnalogRecorder }
+	).widebandAnalog.idle()
 }
 
 /** Transmission + pre-roll (300 ms) + hang (2000 ms), the default hold settings. */
@@ -83,7 +87,7 @@ describe("wideband analog recording with the default config", () => {
 		await feed(h, src, 1, false)
 		await feed(h, src, 3, true)
 		await feed(h, src, 3.5, false)
-		await settle()
+		await settle(h)
 		const files = await wavs(h.dir)
 		expect(files).toHaveLength(1)
 		const wav = await readFile(files[0]!)
@@ -122,7 +126,7 @@ describe("wideband analog recording with the default config", () => {
 		// Fed about twice as fast as real time; sample indices, not wall time, set the file bounds.
 		await feed(h, src, 28, true)
 		await feed(h, src, 3.5, false)
-		await settle()
+		await settle(h)
 		const files = await wavs(h.dir)
 		expect(files).toHaveLength(1)
 		const wav = await readFile(files[0]!)
@@ -141,7 +145,7 @@ describe("wideband analog recording with the default config", () => {
 		await feed(h, src, 1, false)
 		await feed(h, src, 3, true)
 		await feed(h, src, 3.5, false)
-		await settle()
+		await settle(h)
 		expect(await wavs(h.dir)).toEqual([])
 		const staged = await readdir(join(h.dir, ".analog-operations")).catch(
 			() => [],
@@ -164,7 +168,7 @@ describe("wideband analog recording with the default config", () => {
 		await feed(h, src, 1, false)
 		await feed(h, src, 3, true)
 		await feed(h, src, 3.5, false)
-		await settle()
+		await settle(h)
 		expect(await wavs(h.dir)).toEqual([])
 		expect(
 			h.service.listDiscoveries({}).items.some(d => d.evidence.recordings > 0),
@@ -185,7 +189,7 @@ describe("wideband analog recording with the default config", () => {
 		await feed(h, src, 1, false)
 		await feed(h, src, 3, true)
 		await feed(h, src, 3.5, false)
-		await settle()
+		await settle(h)
 		expect(await wavs(h.dir)).toHaveLength(1)
 	}, 120_000)
 })

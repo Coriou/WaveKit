@@ -27,7 +27,7 @@ const STAGE2_TAPS_PER_DECIMATION = 10
 const STAGE2_FACTORS = [3, 4, 5, 6, 7, 8, 2] as const
 export const HIGH_PASS_HZ = 300
 /** 4th-order Butterworth as two biquads (Q of each pole pair: 1 / (2 cos(π/8)), 1 / (2 cos(3π/8))). */
-const BUTTERWORTH4_Q = [0.541_196_1, 1.306_563] as const
+export const BUTTERWORTH4_Q = [0.541_196_1, 1.306_563] as const
 /** Largest CU8 slice one `process` call accepts (128 Ki IQ pairs, 128 ms at 1.024 Msps). */
 export const MAX_SLICE_SAMPLES = 131_072
 const U8_TO_FLOAT = Float32Array.from(
@@ -92,7 +92,7 @@ function blackmanSinc(taps: number, fc: number): Float32Array {
 }
 
 /** RBJ cookbook high- or low-pass biquad, direct form I, state kept across calls. */
-class Biquad {
+export class Biquad {
 	private readonly b0: number
 	private readonly b1: number
 	private readonly b2: number
