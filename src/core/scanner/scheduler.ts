@@ -64,11 +64,28 @@ const FORGET_PRESENCE = 0.05
  */
 const FOLLOW_BUDGET_WINDOWS = 5
 /**
+ * Long-follow buckets kept per hop of the plan: one per frequency, as many as a hop's frequency
+ * memory (MAX_FREQUENCY_MEMORY) times the hop count. Hops overlap, so the frequencies of the
+ * whole plan are fewer than that and no bucket with ms left is dropped; past it the bucket with
+ * the least ms left goes first. A drained bucket (nothing left to charge) is dropped when a new
+ * one is made.
+ */
+const FOLLOW_BUDGETS_PER_HOP = MAX_FREQUENCY_MEMORY
+/**
  * A track of at most 4 blocks is classed as a burst whatever it is (classifySpectral), so analog
  * voice can only be labelled from its 5th block: a dwell that ends with a younger unlabelled track
  * waits for it once, at most CLASS_SETTLE_BLOCKS − 1 = 4 more blocks (200 ms in 50 ms blocks).
  */
 const CLASS_SETTLE_BLOCKS = 5
+/**
+ * Confirm window a visit always allows, however short its coarse sweep: the longest built-in class
+ * confirm hold (10 000 ms, `ook-burst`) plus 2 000 ms of decoder start latency the job runner adds
+ * to it. A confirm hold starting within a visit's first coarse sweep may run CONFIRM_FLOOR_MS +
+ * probe start, never past `hold.maxHoldMs` (see confirmEnd): a two-hop plan of 185 ms dwells (a
+ * 370 ms sweep) still confirms a 10 s burst class, and a 60 s operator confirm hold is cut to
+ * 12 000 + probe start.
+ */
+export const CONFIRM_FLOOR_MS = 12_000
 
 /**
  * A frequency heard on a hop. `barred`: a hold already ended on it while it stayed on air, so it is
@@ -104,14 +121,24 @@ interface FrequencyMemory {
 	presence: number
 	/** The last full visit of the hop did not hear it. */
 	missed: boolean
-	/** Long-follow bucket (FOLLOW_BUDGET_WINDOWS): ms used at `followUsedAt`. */
-	followUsedMs: number
-	followUsedAt: number
 	/**
 	 * Its last track closed with no other track of the visit on it: visit serial, block count and
 	 * clock of the close. A sighting in the same block is a rollover of the same emission.
 	 */
 	closedAt: { serial: number; block: number; at: number } | null
+}
+
+/**
+ * Long-follow bucket of one frequency (FOLLOW_BUDGET_WINDOWS), shared by every hop whose span holds
+ * it: overlapping hops hear the same frequency, and each hop's follows of it draw on this one
+ * bucket. Same frequency as FrequencyMemory: within the wider half width.
+ */
+interface FollowBudget {
+	centreHz: number
+	halfWidthHz: number
+	/** Ms used at `usedAt`. */
+	usedMs: number
+	usedAt: number
 }
 
 interface HopState {
@@ -168,6 +195,11 @@ interface Visit {
 	startedAt: number
 	/** Hop serial of this visit (FrequencyMemory.lastSerial). */
 	serial: number
+	/**
+	 * `blocks` when the current epoch started. Listening (late opens) counts from it: before a
+	 * restart (outage, preemption, resume) the visit heard nothing of what happened in between.
+	 */
+	epochBlock: number
 	/** A carrier (never an onset) turned steady during this visit. */
 	newlySteady: boolean
 	/** The dwell was lengthened once for a track too young to be labelled (CLASS_SETTLE_BLOCKS). */
@@ -264,7 +296,9 @@ export class SweepScheduler {
 	 */
 	private longHoldLock = 0
 	/** The follow in progress: its frequency's budget is charged when it ends. */
-	private following: { memory: FrequencyMemory; from: number } | null = null
+	private following: { budget: FollowBudget; from: number } | null = null
+	/** Long-follow buckets by frequency, across hops (FOLLOW_BUDGETS_PER_HOP). */
+	private budgets: FollowBudget[] = []
 
 	constructor(
 		plan: HopPlan,
@@ -332,6 +366,7 @@ export class SweepScheduler {
 		this.lastBlockEnd = startSample
 		v.dwellEnd = startSample + this.dwellSamples(this.parkedVisit)
 		v.tracks.clear()
+		this.forgetGapEvidence(v)
 		v.holdStartedAt = null
 		this.hold = null
 		this.phase = "dwell"
@@ -339,6 +374,20 @@ export class SweepScheduler {
 		this.parkedSweepSamples = 0
 		this.parkIfOneHop()
 		return actions
+	}
+
+	/**
+	 * Nothing was heard between the old epoch and the new one: a close heard on this visit before
+	 * it is no off-air gap (the frequency may have come back at once), and late opens count
+	 * listening from the new epoch only. A reopening is the same emission (FrequencyMemory).
+	 */
+	private forgetGapEvidence(v: Visit): void {
+		v.epochBlock = v.blocks
+		const hop = this.hops[v.hopIndex]
+		if (hop === undefined) return
+		for (const m of hop.memory)
+			if (m.closedAt !== null && m.closedAt.serial === v.serial)
+				m.closedAt = null
 	}
 
 	/**
@@ -777,8 +826,6 @@ export class SweepScheduler {
 				// On air for as long as the hop has been heard: persistent until visits miss it.
 				presence: onsetSeen ? 0 : 1,
 				missed: false,
-				followUsedMs: 0,
-				followUsedAt: now,
 				closedAt: null,
 			}
 			hop.memory.push(entry)
@@ -818,8 +865,69 @@ export class SweepScheduler {
 	 */
 	private spendIfCarrier(m: FrequencyMemory, now: number): void {
 		if (m.onsetSeen || (!m.barred && !m.steady)) return
-		m.followUsedMs = this.spec.hold.maxHoldMs
-		m.followUsedAt = now
+		const budget = this.budgetFor(m, now)
+		budget.usedMs = this.spec.hold.maxHoldMs
+		budget.usedAt = now
+	}
+
+	/** The frequency's long-follow bucket, if one was made. */
+	private budgetOf(m: FrequencyMemory): FollowBudget | undefined {
+		return this.budgets.find(
+			b =>
+				Math.abs(b.centreHz - m.centreHz) <=
+				Math.max(b.halfWidthHz, m.halfWidthHz),
+		)
+	}
+
+	/**
+	 * The frequency's long-follow bucket, made empty when it has none. Making one drops the
+	 * drained buckets (except the follow in progress) and keeps at most
+	 * FOLLOW_BUDGETS_PER_HOP × hop count, dropping the one with the least ms left first.
+	 */
+	private budgetFor(m: FrequencyMemory, now: number): FollowBudget {
+		const found = this.budgetOf(m)
+		if (found !== undefined) {
+			found.halfWidthHz = Math.max(found.halfWidthHz, m.halfWidthHz)
+			return found
+		}
+		const active = this.following?.budget
+		this.budgets = this.budgets.filter(
+			b => b === active || this.followUsed(b, now) > 0,
+		)
+		const limit = FOLLOW_BUDGETS_PER_HOP * Math.max(1, this.plan.hops.length)
+		while (this.budgets.length >= limit) {
+			let drop = -1
+			this.budgets.forEach((b, i) => {
+				const d = this.budgets[drop]
+				if (
+					b !== active &&
+					(d === undefined || this.followUsed(b, now) < this.followUsed(d, now))
+				)
+					drop = i
+			})
+			if (drop < 0) break
+			this.budgets.splice(drop, 1)
+		}
+		const budget: FollowBudget = {
+			centreHz: m.centreHz,
+			halfWidthHz: m.halfWidthHz,
+			usedMs: 0,
+			usedAt: now,
+		}
+		this.budgets.push(budget)
+		return budget
+	}
+
+	/**
+	 * Long-follow ms of the frequency's bucket not yet drained at `now`, the follow in progress on
+	 * it included.
+	 */
+	private usedOf(m: FrequencyMemory, now: number): number {
+		const budget = this.budgetOf(m)
+		if (budget === undefined) return 0
+		const running =
+			this.following?.budget === budget ? now - this.following.from : 0
+		return this.followUsed(budget, now) + running
 	}
 
 	/** Keeps the memory within MAX_FREQUENCY_MEMORY: the frequency missed longest goes first. */
@@ -851,14 +959,19 @@ export class SweepScheduler {
 		return (
 			isNew &&
 			(entry === undefined || entry.lastSerial < v.serial) &&
-			v.blocks >= this.minSurfaceBlocks + LATE_OPEN_BLOCKS
+			v.blocks - v.epochBlock >= this.minSurfaceBlocks + LATE_OPEN_BLOCKS
 		)
 	}
 
-	/** Ms of this visit before a track opening now went on air (it surfaced minSurfaceBlocks later). */
+	/**
+	 * Ms of this visit's epoch before a track opening now went on air (it surfaced minSurfaceBlocks
+	 * later).
+	 */
 	private listenedMs(v: Visit): number {
 		return (
-			((v.blocks - this.minSurfaceBlocks) * this.blockSamples * 1000) /
+			((v.blocks - v.epochBlock - this.minSurfaceBlocks) *
+				this.blockSamples *
+				1000) /
 			this.sampleRateHz
 		)
 	}
@@ -969,6 +1082,7 @@ export class SweepScheduler {
 			gainTenthsDb,
 			startedAt: this.now(),
 			serial: hop?.serial ?? 0,
+			epochBlock: 0,
 			newlySteady: false,
 			classWait: false,
 			closedAfterHold: new Set(),
@@ -1092,13 +1206,20 @@ export class SweepScheduler {
 		t.deferred = deferred
 		if (long && this.visit !== null) this.visit.longFollow = true
 		this.hold = { trackId, mode: "follow", deadline: cap, cap, deferred }
+		this.chargeFrom(t)
+	}
+
+	/** From now, the hold of `t` is charged to its frequency's long-follow bucket (endFollow). */
+	private chargeFrom(t: TrackInfo): void {
 		const v = this.visit
 		const hop = v === null ? undefined : this.hops[v.hopIndex]
 		const memory = hop === undefined ? undefined : this.memoryOf(hop, t)
-		if (memory !== undefined && this.following?.memory !== memory) {
-			this.endFollow()
-			this.following = { memory, from: this.now() }
-		}
+		if (memory === undefined) return
+		const now = this.now()
+		const budget = this.budgetFor(memory, now)
+		if (this.following?.budget === budget) return
+		this.endFollow()
+		this.following = { budget, from: now }
 	}
 
 	/** Charges the follow in progress to its frequency's budget. */
@@ -1107,16 +1228,13 @@ export class SweepScheduler {
 		if (f === null) return
 		this.following = null
 		const now = this.now()
-		f.memory.followUsedMs = this.followUsed(f.memory, now) + (now - f.from)
-		f.memory.followUsedAt = now
+		f.budget.usedMs = this.followUsed(f.budget, now) + (now - f.from)
+		f.budget.usedAt = now
 	}
 
-	/** Long-follow ms of the frequency's bucket still unspent at `now` (FOLLOW_BUDGET_WINDOWS). */
-	private followUsed(m: FrequencyMemory, now: number): number {
-		return Math.max(
-			0,
-			m.followUsedMs - (now - m.followUsedAt) / FOLLOW_BUDGET_WINDOWS,
-		)
+	/** Long-follow ms of a bucket still unspent at `now` (FOLLOW_BUDGET_WINDOWS). */
+	private followUsed(b: FollowBudget, now: number): number {
+		return Math.max(0, b.usedMs - (now - b.usedAt) / FOLLOW_BUDGET_WINDOWS)
 	}
 
 	/**
@@ -1144,7 +1262,7 @@ export class SweepScheduler {
 		const memory = hop === undefined ? undefined : this.memoryOf(hop, t)
 		if (memory === undefined || !memory.onsetSeen)
 			return { cap: short, deferred: false, long: false }
-		const left = this.spec.hold.maxHoldMs - this.followUsed(memory, now)
+		const left = this.spec.hold.maxHoldMs - this.usedOf(memory, now)
 		if (now + left <= short) return { cap: short, deferred: false, long: false }
 		if (this.longHoldLock > 0)
 			return { cap: short, deferred: true, long: false }
@@ -1168,10 +1286,7 @@ export class SweepScheduler {
 		const now = this.now()
 		const holdMs = Math.max(
 			0,
-			Math.min(
-				t.confirmHoldMs + this.probeStartMs,
-				this.maxHoldDeadline() - now,
-			),
+			Math.min(t.confirmHoldMs + this.probeStartMs, this.confirmEnd(t) - now),
 		)
 		t.tried = true
 		this.hold = {
@@ -1183,6 +1298,43 @@ export class SweepScheduler {
 		}
 		this.phase = "hold"
 		return [{ type: "start-probe", trackId, holdMs }]
+	}
+
+	/**
+	 * Last clock a confirm hold of `t` starting now may run to: the end of one coarse sweep S
+	 * (chainBudgetMs) from the start of the visit's holds, or the track's confirm window up to
+	 * CONFIRM_FLOOR_MS (F) from now, whichever is later, and never past `hold.maxHoldMs` from the
+	 * start of the holds. afterProbe chains a probe only within S, so a visit's confirm holds end
+	 * at most S + F + probe start after they started (one probe: max(S, F + probe start)). A
+	 * decoder that needs a longer window is probed again on the hop's later visits. Only analog
+	 * voice that may be followed long (followCap: onset seen, budget left, every hop visited since
+	 * the last long follow) is probed past that, up to its follow cap; that hold is a long follow
+	 * (its time is charged to the frequency's bucket and it locks the next long follow out until
+	 * every hop had a visit). A one-hop plan: up to `hold.maxHoldMs`.
+	 */
+	private confirmEnd(t: TrackInfo): number {
+		const now = this.now()
+		const long = this.maxHoldDeadline()
+		const v = this.visit
+		if (v === null || this.plan.hops.length < 2) return long
+		const window =
+			Math.min(t.confirmHoldMs, CONFIRM_FLOOR_MS) + this.probeStartMs
+		const short = Math.min(
+			long,
+			Math.max((v.holdStartedAt ?? now) + this.chainBudgetMs(), now + window),
+		)
+		if (
+			now + t.confirmHoldMs + this.probeStartMs <= short ||
+			!t.followOnAir ||
+			this.spec.hold.policy !== "hold" ||
+			this.spec.signalsOnly === true
+		)
+			return short
+		const follow = this.followCap(t)
+		if (!follow.long) return short
+		v.longFollow = true
+		this.chargeFrom(t)
+		return follow.cap
 	}
 
 	/** A probe finished (confirmed without following, or timed out): next queued track or leave. */
@@ -1457,9 +1609,7 @@ export class SweepScheduler {
 			}
 			hop.memory = hop.memory.filter(
 				m =>
-					!m.missed ||
-					m.presence >= FORGET_PRESENCE ||
-					this.followUsed(m, now) > 0,
+					!m.missed || m.presence >= FORGET_PRESENCE || this.usedOf(m, now) > 0,
 			)
 		}
 		const active = v.blocks > 0 ? Math.min(1, openBlocks / v.blocks) : 0

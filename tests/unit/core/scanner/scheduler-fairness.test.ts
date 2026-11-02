@@ -1,7 +1,11 @@
 // tests/unit/core/scanner/scheduler-fairness.test.ts
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
-import { SweepScheduler } from "../../../../src/core/scanner/scheduler.js"
+import {
+	CONFIRM_FLOOR_MS,
+	SweepScheduler,
+} from "../../../../src/core/scanner/scheduler.js"
+import { DEFAULT_CONFIRM_HOLD_MS } from "../../../../src/core/scanner/plan/plan-preview.js"
 import {
 	hopTimeMs,
 	simulateSweep,
@@ -741,6 +745,213 @@ describe("frequency memory bounds (direct scheduler)", () => {
 			s.onTrack(track("b"), false, 0, follow)
 			dwell(s, 50 + 50 * blocksApart)
 			expect(s.progress().holdingOn).toBe(followed ? "b" : null)
+		})
+	}
+})
+
+describe("hold evidence across restarts, shared follow budgets and confirm bounds", () => {
+	const HZ = 149.9 * MHZ
+	const at = (id: string, hz = HZ): TrackSnapshot => ({
+		...makeTrack({ id, centreHz: hz, startedAt: 0 }),
+		trackId: id,
+	})
+	const follow = { followOnAir: true }
+	const make = (
+		dwellMs: number,
+		maxHoldMs = 60_000,
+	): { s: SweepScheduler; set: (ms: number) => void } => {
+		let clock = 0
+		const s = new SweepScheduler(
+			makeHopPlan(centres(2), HALF_SPAN_HZ),
+			makeNormalisedSpec({
+				dwellMs,
+				settleMs: 35,
+				revisit: { share: 0, maxIntervalMs: null },
+				hold: { ...spec.hold, maxHoldMs },
+			}),
+			{
+				blockSamples: 50,
+				sampleRateHz: 1000,
+				now: () => clock,
+				probeStartMs: PROBE_START_MS,
+			},
+		)
+		return { s, set: ms => (clock = ms) }
+	}
+	/** Feeds 50-sample blocks from `from` until the scheduler acts; returns its actions. */
+	const until = (s: SweepScheduler, from: number) => {
+		for (let e = from + 50; e < from + 1_000_000; e += 50) {
+			const a = s.onBlock(e)
+			if (a.length > 0 || s.progress().holdingOn !== null) return a
+		}
+		return []
+	}
+
+	// Dwell 12 000 ms on 2 hops: one coarse sweep is 24 000 ms, maxHoldMs 60 000. On the job's
+	// first visit nothing brackets an onset, so only a heard gap allows a follow past one sweep.
+	// A close at 500 ms and a reopen at 10 050 ms is a 9 550 ms gap (≥ hangMs 2000) when the visit
+	// listened throughout; across an outage (no samples, then a new epoch) nothing was heard.
+	for (const outage of [false, true]) {
+		it(`a close and a reopen 9 550 ms later ${outage ? "across an outage is the same emission: one coarse sweep" : "heard by the visit is a new call: followed past one coarse sweep"}`, () => {
+			const { s, set } = make(12_000)
+			s.start()
+			s.onEpochStarted(0)
+			s.onTrack(at("a"), false, 0, follow)
+			for (let e = 50; e <= 500; e += 50) s.onBlock(e)
+			set(500)
+			s.onTrackClosed("a")
+			if (outage) {
+				set(10_000)
+				s.onEpochStarted(10_000)
+			} else for (let e = 550; e <= 10_000; e += 50) s.onBlock(e)
+			s.onBlock(10_050)
+			set(10_050)
+			s.onTrack(at("b"), false, 0, follow)
+			until(s, 10_050)
+			expect(s.progress().holdingOn).toBe("b")
+			// The hold started at 10 050: one coarse sweep ends at 34 050.
+			set(34_049)
+			expect(s.tick(34_049)).toEqual([])
+			set(34_050)
+			const left = s.tick(34_050).some(a => a.type === "tune")
+			expect(left).toBe(outage)
+		})
+	}
+
+	// A frequency first heard after 43 blocks (2 050 ms of listening, ≥ hangMs) opened late; after
+	// an outage the visit's listening restarts, so one block later is no late open.
+	for (const outage of [false, true]) {
+		it(`a new frequency opening ${outage ? "one block after an outage is not a heard onset" : "after 2 050 ms of listening is a heard onset"}`, () => {
+			const { s, set } = make(12_000)
+			s.start()
+			s.onEpochStarted(0)
+			for (let e = 50; e <= 2_000; e += 50) s.onBlock(e)
+			if (outage) {
+				set(10_000)
+				s.onEpochStarted(10_000)
+				for (let e = 10_050; e <= 10_150; e += 50) s.onBlock(e)
+			} else for (let e = 2_050; e <= 2_150; e += 50) s.onBlock(e)
+			const t0 = outage ? 10_150 : 2_150
+			set(t0)
+			s.onTrack(at("b"), false, 0, follow)
+			until(s, t0)
+			expect(s.progress().holdingOn).toBe("b")
+			set(t0 + 24_000)
+			const left = s.tick(t0 + 24_000).some(a => a.type === "tune")
+			expect(left).toBe(outage)
+		})
+	}
+
+	it("overlapping hops share one follow budget per frequency", () => {
+		// 150.4 MHz is inside hop 0 (to 150.4096) and hop 1 (from 150.3904). 50 s calls with 3 s
+		// gaps (each a new call) from 30 s, no confirm probe, no revisits.
+		const plan = makeHopPlan(centres(3), HALF_SPAN_HZ)
+		const noRevisit = makeNormalisedSpec({
+			dwellMs: DWELL_MS,
+			settleMs: SETTLE_MS,
+			revisit: { share: 0, maxIntervalMs: null },
+		})
+		const RUN = 140_000
+		const calls = series(150.4 * MHZ, 50_000, 3_000, RUN, 30_000).map(c => ({
+			...c,
+			needsConfirm: false,
+		}))
+		const r = simulateSweep(plan, noRevisit, {
+			...sim,
+			durationMs: RUN,
+			signals: calls,
+		})
+		// Long follows (holds past one coarse sweep) on either hop: settle + dwell, then the hold.
+		const followedMs = r.visits
+			.filter(
+				v =>
+					(v.hopIndex === 0 || v.hopIndex === 1) &&
+					v.leftAtMs - v.tunedAtMs > DWELL_MS + 3 * DWELL_MS + BLOCK_MS,
+			)
+			.reduce((a, v) => a + v.leftAtMs - v.tunedAtMs - DWELL_MS, 0)
+		// One bucket of maxHoldMs that drains 1 ms per 5 ms: over 110 s of calls at most
+		// 60 000 + 110 000 / 5 = 82 000 ms of long follows, whichever hop holds it.
+		expect(followedMs).toBeLessThanOrEqual(60_000 + (RUN - 30_000) / 5)
+		// Still followed long: short follows also draw on the bucket, so less than all of it.
+		expect(followedMs).toBeGreaterThan(30_000)
+	})
+
+	it("the longest built-in confirm hold and its decoder start latency fit the confirm floor", () => {
+		const longest = Math.max(...Object.values(DEFAULT_CONFIRM_HOLD_MS))
+		expect(longest + 2_000).toBe(CONFIRM_FLOOR_MS)
+	})
+
+	// Two hops of 185 ms: one coarse sweep is 370 ms. A confirm hold may run its window up to
+	// CONFIRM_FLOOR_MS (12 000) + probe start (300) = 12 300 ms, at the floor and past it.
+	for (const [confirmMs, holdMs] of [
+		[100, 400],
+		[11_999, 12_299],
+		[12_000, 12_300],
+		[12_001, 12_300],
+		[60_000, 12_300],
+	] as const) {
+		it(`a confirm hold of ${confirmMs} ms on a 370 ms sweep is held ${holdMs} ms`, () => {
+			const { s } = make(185)
+			s.start()
+			s.onEpochStarted(0)
+			s.onTrack(at("a"), true, confirmMs)
+			expect(until(s, 0)).toEqual([
+				{ type: "start-probe", trackId: "a", holdMs },
+			])
+		})
+	}
+
+	it("a 60 s confirm hold on a non-voice carrier does not keep a call on another hop waiting", () => {
+		const plan = makeHopPlan(centres(3), HALF_SPAN_HZ)
+		const slow: SimSignal = { ...carrier(HZ), confirmHoldMs: 60_000 }
+		const r = simulateSweep(plan, spec, {
+			...sim,
+			durationMs: 75_000,
+			signals: [slow, voice(151.7 * MHZ, 10_000), voice(151.5 * MHZ, 40_000)],
+		})
+		const longest = Math.max(
+			...r.visits
+				.filter(v => v.hopIndex === 0)
+				.map(v => v.leftAtMs - v.tunedAtMs),
+		)
+		// settle + dwell, then one confirm hold of at most 12 000 + 300 ms (one tick's block late).
+		expect(longest).toBeLessThanOrEqual(
+			DWELL_MS + CONFIRM_FLOOR_MS + PROBE_START_MS + BLOCK_MS,
+		)
+		const detected = r.detectedAtMs[1]
+		expect(detected).not.toBeNull()
+		// The hold on hop 0 ends by 1 150 + 12 300 = 13 450 ms, then hops 1 and 2 dwell.
+		expect(detected!).toBeLessThanOrEqual(13_450 + 2 * DWELL_MS + BLOCK_MS)
+		// A call after the first sweeps (its onset seen) is followed to its end.
+		const later = r.detectedAtMs[2]
+		expect(later).not.toBeNull()
+		expect(r.heardMs[2]).toBeGreaterThanOrEqual(68_000 - later! - BLOCK_MS)
+	})
+
+	// After three full visits of hop 0 (0, 2.3 and 4.6 s on 2 hops of 1150 ms), a voice call's
+	// onset is seen and it may be followed long: its confirm hold may then run to maxHoldMs.
+	for (const voiceCall of [true, false]) {
+		it(`a 60 s confirm hold on ${voiceCall ? "a call that may be followed long runs to maxHoldMs" : "a non-voice signal is cut to the confirm floor"}`, () => {
+			const plan = makeHopPlan(centres(2), HALF_SPAN_HZ)
+			const sig: SimSignal = {
+				...voice(HZ, 7_000, 70_000),
+				confirmHoldMs: 60_000,
+				followOnAir: voiceCall,
+			}
+			const r = simulateSweep(plan, spec, {
+				...sim,
+				durationMs: 90_000,
+				signals: [sig],
+			})
+			const first = r.visits.find(v => v.leftAtMs - v.tunedAtMs > DWELL_MS)!
+			const held = first.leftAtMs - first.tunedAtMs - DWELL_MS
+			if (voiceCall) {
+				expect(held).toBeGreaterThanOrEqual(60_000 - BLOCK_MS)
+				expect(held).toBeLessThanOrEqual(60_000 + BLOCK_MS)
+			} else
+				expect(held).toBeLessThanOrEqual(
+					CONFIRM_FLOOR_MS + PROBE_START_MS + BLOCK_MS,
+				)
 		})
 	}
 })
