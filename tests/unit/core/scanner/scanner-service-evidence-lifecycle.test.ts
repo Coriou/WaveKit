@@ -14,6 +14,8 @@ import type { DiscoveryStore } from "../../../../src/core/scanner/store/discover
 import { classifySpectral } from "../../../../src/core/scanner/classify/classifier.js"
 import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
 import { CENTRE, serviceHarness } from "../../../mocks/scanner/service-fakes.js"
+import { createRecordingInventory } from "../../../../src/core/recordings/inventory.js"
+import { createLogger } from "../../../../src/utils/logger.js"
 
 type Internals = {
 	store: DiscoveryStore
@@ -25,6 +27,14 @@ type Internals = {
 		probeId: string
 		probeDir: string
 		req: { trackId: string; sourceId: string }
+		calls: {
+			callId: string
+			startedAt: number
+			endedAt: number
+			talkgroup?: string
+			source?: string
+			encrypted: boolean
+		}[]
 	}): void
 }
 async function harness() {
@@ -152,6 +162,7 @@ describe("discovery deletion producer boundary (review F3)", () => {
 					probeId: "late",
 					probeDir,
 					req: { trackId: live.trackId, sourceId: "rtl" },
+					calls: [],
 				})
 				await vi.waitFor(() => expect(existsSync(probeDir)).toBe(false))
 				expect(existsSync(join(h.dir, "recordings", "dv", id))).toBe(false)
@@ -361,4 +372,96 @@ describe("NC2 original probe cleanup before service artifact publication", () =>
 			}
 		},
 	)
+})
+
+describe("probe call recordings reach the recordings list", () => {
+	const pad = (n: number): string => String(n).padStart(2, "0")
+	const stamp = (ms: number): string => {
+		const d = new Date(ms)
+		return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+	}
+	/** A valid 8 kHz mono s16 WAV of `seconds`. */
+	const wav = (seconds: number): Buffer => {
+		const data = 8000 * 2 * seconds
+		const b = Buffer.alloc(44 + data)
+		b.write("RIFF", 0)
+		b.writeUInt32LE(36 + data, 4)
+		b.write("WAVEfmt ", 8)
+		b.writeUInt32LE(16, 16)
+		b.writeUInt16LE(1, 20)
+		b.writeUInt16LE(1, 22)
+		b.writeUInt32LE(8000, 24)
+		b.writeUInt32LE(16000, 28)
+		b.writeUInt16LE(2, 32)
+		b.writeUInt16LE(16, 34)
+		b.write("data", 36)
+		b.writeUInt32LE(data, 40)
+		return b
+	}
+
+	it("links every over of a conversation, not only the observation's latest talkgroup and source", async () => {
+		const h = await harness()
+		try {
+			const live = h.observe()
+			// The observation keeps the latest decode only: TG 9, SRC 2002.
+			live.talkgroup = "9"
+			live.source = "2002"
+			const t0 = Math.floor(live.startedAt / 1000) * 1000
+			const first = `${stamp(t0)}_00042_DMR_CC_1_GROUP_TGT_9_SRC_2001.wav`
+			const second = `${stamp(t0 + 1_000)}_00043_DMR_CC_1_GROUP_TGT_9_SRC_2002.wav`
+			const probeDir = join(h.dir, "recordings", "dv", "probe-scn-test-1")
+			await mkdir(join(probeDir, "WAV"), { recursive: true })
+			await writeFile(join(probeDir, "WAV", first), wav(1))
+			await writeFile(join(probeDir, "WAV", second), wav(2))
+			h.internals.onProbeRecordings({
+				probeId: "scn-test-1",
+				probeDir,
+				req: { trackId: live.trackId, sourceId: live.sourceId },
+				calls: [
+					{
+						callId: "c1",
+						startedAt: t0,
+						endedAt: t0 + 1_000,
+						talkgroup: "9",
+						source: "2001",
+						encrypted: false,
+					},
+					{
+						callId: "c2",
+						startedAt: t0 + 1_000,
+						endedAt: t0 + 3_000,
+						talkgroup: "9",
+						source: "2002",
+						encrypted: false,
+					},
+				],
+			})
+			const target = join(h.dir, "recordings", "dv", live.discoveryId!)
+			await vi.waitFor(() => {
+				expect(existsSync(join(target, first))).toBe(true)
+				expect(existsSync(join(target, second))).toBe(true)
+				expect(existsSync(probeDir)).toBe(false)
+			})
+			const inventory = createRecordingInventory({
+				dsdFmeDirs: () => [],
+				scannerRecordingsDir: () => join(h.dir, "recordings"),
+				discoveryCentreHz: id => (id === live.discoveryId ? 145_500_000 : null),
+				now: () => Date.now() + 60_000,
+				logger: createLogger({ level: "fatal" }),
+			})
+			const page = await inventory.list({})
+			const items = page.items
+				.filter(i => i.discoveryId === live.discoveryId)
+				.map(i => [i.kind, i.frequencyHz, i.durationMs])
+			expect(items).toHaveLength(2)
+			expect(items).toEqual(
+				expect.arrayContaining([
+					["scanner-dv", 145_500_000, 1_000],
+					["scanner-dv", 145_500_000, 2_000],
+				]),
+			)
+		} finally {
+			await h.service.stop()
+		}
+	})
 })

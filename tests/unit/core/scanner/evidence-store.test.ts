@@ -14,7 +14,11 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import fc from "fast-check"
-import { EvidenceStore } from "../../../../src/core/scanner/store/evidence-store.js"
+import {
+	EvidenceStore,
+	MAX_PROBE_CALL_CANDIDATES,
+	probeLinkCandidates,
+} from "../../../../src/core/scanner/store/evidence-store.js"
 import type { StorageCaps } from "../../../../src/core/scanner/store/evidence-store.js"
 import { createLogger } from "../../../../src/utils/logger.js"
 
@@ -757,4 +761,290 @@ describe("EvidenceStore deletion admission (review F3)", () => {
 			})
 		},
 	)
+})
+
+describe("probeLinkCandidates", () => {
+	const obs = {
+		observationId: "o-1",
+		discoveryId: "d_ONE",
+		talkgroup: "9",
+		source: "2002",
+		startedAt: T0,
+		endedAt: T0 + 10_000,
+		encrypted: false,
+	}
+	const call = (src: string, at = T0 + 1_000, encrypted = false) => ({
+		talkgroup: "9",
+		source: src,
+		startedAt: at,
+		endedAt: at + 1_000,
+		encrypted,
+	})
+
+	it("links each over of a conversation, the observation keeping only the latest source", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0 + 60_000,
+				statfs: plentyOfDisk,
+			})
+			const a = callWav(T0 + 1_000, "9", "2001")
+			const b = callWav(T0 + 3_000, "9", "2002")
+			const probe = await probeDirWith(root, [a, b], "WAV")
+			const result = await store.linkProbeRecordings(
+				probe,
+				probeLinkCandidates([obs], [call("2001"), call("2002", T0 + 3_000)]),
+			)
+			expect(result.linked.map(l => l.recordingId).sort()).toEqual(
+				[`d_ONE~${a}`, `d_ONE~${b}`].sort(),
+			)
+		})
+	})
+
+	it("without the calls an earlier over is deleted (the gap the call candidates close)", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0 + 60_000,
+				statfs: plentyOfDisk,
+			})
+			const a = callWav(T0 + 1_000, "9", "2001")
+			const probe = await probeDirWith(root, [a], "WAV")
+			const result = await store.linkProbeRecordings(
+				probe,
+				probeLinkCandidates([obs], []),
+			)
+			expect(result.linked).toEqual([])
+		})
+	})
+
+	it("keeps an encrypted call's file out and a clear call's file in", () => {
+		const out = probeLinkCandidates(
+			[obs],
+			[call("2001", T0 + 1_000, true), call("2003")],
+		)
+		expect(out.map(c => [c.source, c.encrypted])).toEqual([
+			["2002", false],
+			["2001", true],
+			["2003", false],
+		])
+	})
+
+	it("skips calls outside the observation window (2 s slack) and calls with no ids", () => {
+		const out = probeLinkCandidates(
+			[obs],
+			[
+				call("2001", T0 - 3_001),
+				call("2004", T0 - 3_000),
+				call("2005", T0 + 12_001),
+				{ startedAt: T0, endedAt: T0 + 1_000, encrypted: false },
+			],
+		)
+		expect(out.map(c => c.source)).toEqual(["2002", "2004"])
+	})
+
+	it("adds at most MAX_PROBE_CALL_CANDIDATES call candidates, deduplicated", () => {
+		const calls = Array.from(
+			{ length: MAX_PROBE_CALL_CANDIDATES + 10 },
+			(_, i) => call(String(3_000 + i)),
+		)
+		const at = probeLinkCandidates(
+			[obs],
+			calls.slice(0, MAX_PROBE_CALL_CANDIDATES),
+		)
+		expect(at).toHaveLength(1 + MAX_PROBE_CALL_CANDIDATES)
+		const past = probeLinkCandidates([obs], [...calls, ...calls])
+		expect(past).toHaveLength(1 + MAX_PROBE_CALL_CANDIDATES)
+		// The observation's own pair is never added twice.
+		expect(
+			probeLinkCandidates([obs], [call("2002"), call("2002")]),
+		).toHaveLength(1)
+	})
+
+	it("keeps each call's own window: an encrypted over's file is dropped though a clear call shares its pair", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0 + 60_000,
+				statfs: plentyOfDisk,
+			})
+			// The observation's latest pair is 9/2002 (B); 2001 (A) spoke clear, then encrypted.
+			const clearA = callWav(T0 + 1_000, "9", "2001")
+			const encA = callWav(T0 + 6_000, "9", "2001")
+			const probe = await probeDirWith(root, [clearA, encA], "WAV")
+			const candidates = probeLinkCandidates(
+				[obs],
+				[call("2001"), call("2001", T0 + 6_000, true)],
+			)
+			expect(candidates.map(c => [c.source, c.startedAt, c.encrypted])).toEqual(
+				[
+					["2002", T0, false],
+					["2001", T0 + 6_000, true],
+					["2001", T0 + 1_000, false],
+				],
+			)
+			const result = await store.linkProbeRecordings(probe, candidates)
+			expect(result.linked.map(l => l.recordingId)).toEqual([`d_ONE~${clearA}`])
+			expect(result.droppedEncrypted).toEqual(["o-1"])
+			expect(store.recordingPath(`d_ONE~${encA}`)).toBeNull()
+		})
+	})
+
+	it("drops a file whose time matches both a clear and an encrypted call of its pair", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0 + 60_000,
+				statfs: plentyOfDisk,
+			})
+			const ambiguous = callWav(T0 + 2_000, "9", "2001")
+			const probe = await probeDirWith(root, [ambiguous], "WAV")
+			const result = await store.linkProbeRecordings(
+				probe,
+				probeLinkCandidates(
+					[obs],
+					[call("2001"), call("2001", T0 + 2_000, true)],
+				),
+			)
+			expect(result.linked).toEqual([])
+			expect(result.droppedEncrypted).toEqual(["o-1"])
+		})
+	})
+
+	it("adds an encrypted call of the observation's own pair when the observation is clear", () => {
+		const out = probeLinkCandidates([obs], [call("2002", T0 + 4_000, true)])
+		expect(out.map(c => [c.source, c.startedAt, c.encrypted])).toEqual([
+			["2002", T0, false],
+			["2002", T0 + 4_000, true],
+		])
+	})
+
+	it("keeps encrypted calls first when the bound cuts candidates", () => {
+		const clearCalls = Array.from(
+			{ length: MAX_PROBE_CALL_CANDIDATES },
+			(_, i) => call(String(3_000 + i)),
+		)
+		const out = probeLinkCandidates(
+			[obs],
+			[...clearCalls, call("2001", T0 + 5_000, true)],
+		)
+		expect(out).toHaveLength(1 + MAX_PROBE_CALL_CANDIDATES)
+		expect(out[1]).toMatchObject({ source: "2001", encrypted: true })
+		expect(out.filter(c => !c.encrypted)).toHaveLength(
+			MAX_PROBE_CALL_CANDIDATES,
+		)
+	})
+	it("fails closed when encrypted calls alone pass the bound: every candidate is encrypted", () => {
+		const encrypted = Array.from(
+			{ length: MAX_PROBE_CALL_CANDIDATES + 1 },
+			(_, i) => call(String(3_000 + i), T0 + 1_000, true),
+		)
+		const at = probeLinkCandidates(
+			[obs],
+			encrypted.slice(0, MAX_PROBE_CALL_CANDIDATES),
+		)
+		expect(at).toHaveLength(1 + MAX_PROBE_CALL_CANDIDATES)
+		expect(at[0]).toMatchObject({ source: "2002", encrypted: false })
+		// Past the bound, a dropped veto of the observation's own pair could keep its file.
+		const past = probeLinkCandidates(
+			[obs],
+			[...encrypted, call("2002", T0 + 2_000, true)],
+		)
+		expect(past).toEqual([{ ...obs, encrypted: true }])
+	})
+	it("vetoes an encrypted call that overlaps no observation's window, even of an encrypted observation's pair", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0 + 60_000,
+				statfs: plentyOfDisk,
+			})
+			// O2 clear X/Y ending at T0; O1 encrypted T/S from 10 s. Call C clear T/S 1-3 s (its
+			// window, +2 s slack, reaches 5 s); call E encrypted T/S 5-12 s.
+			const o2 = {
+				observationId: "o-2",
+				discoveryId: "d_ONE",
+				talkgroup: "X",
+				source: "Y",
+				startedAt: T0 - 5_000,
+				endedAt: T0,
+				encrypted: false,
+			}
+			const o1 = {
+				observationId: "o-1",
+				discoveryId: "d_ONE",
+				talkgroup: "T",
+				source: "S",
+				startedAt: T0 + 10_000,
+				endedAt: T0 + 20_000,
+				encrypted: true,
+			}
+			const c = {
+				talkgroup: "T",
+				source: "S",
+				startedAt: T0 + 1_000,
+				endedAt: T0 + 3_000,
+				encrypted: false,
+			}
+			const e = {
+				talkgroup: "T",
+				source: "S",
+				startedAt: T0 + 5_000,
+				endedAt: T0 + 12_000,
+				encrypted: true,
+			}
+			const wav = callWav(T0 + 5_000, "T", "S")
+			const probe = await probeDirWith(root, [wav], "WAV")
+			const candidates = probeLinkCandidates([o2, o1], [c, e])
+			expect(
+				candidates.filter(x => x.encrypted).map(x => x.startedAt),
+			).toContain(T0 + 5_000)
+			const result = await store.linkProbeRecordings(probe, candidates)
+			expect(result.linked).toEqual([])
+			expect(result.droppedEncrypted).toEqual(["o-1"])
+			expect(store.recordingPath(`d_ONE~${wav}`)).toBeNull()
+		})
+	})
+
+	it("attaches an encrypted call outside every observation window to the nearest observation", () => {
+		const far = call("2001", T0 + 60_000, true)
+		const out = probeLinkCandidates([obs], [far])
+		expect(out.map(c => [c.observationId, c.startedAt, c.encrypted])).toEqual([
+			["o-1", T0, false],
+			["o-1", T0 + 60_000, true],
+		])
+		expect(probeLinkCandidates([], [far])).toEqual([])
+	})
+
+	it("keeps an encrypted call with no ids as a veto of its window", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0 + 60_000,
+				statfs: plentyOfDisk,
+			})
+			const wav = callWav(T0 + 2_000, "9", "2002")
+			const probe = await probeDirWith(root, [wav], "WAV")
+			const candidates = probeLinkCandidates(
+				[obs],
+				[{ startedAt: T0 + 2_000, endedAt: T0 + 3_000, encrypted: true }],
+			)
+			expect(candidates.map(c => c.encrypted)).toEqual([false, true])
+			const result = await store.linkProbeRecordings(probe, candidates)
+			expect(result.linked).toEqual([])
+			expect(result.droppedEncrypted).toEqual(["o-1"])
+		})
+	})
 })

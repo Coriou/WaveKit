@@ -244,6 +244,7 @@ import {
 import {
 	DISCOVERY_ID,
 	EvidenceStore,
+	probeLinkCandidates,
 	type StorageCaps,
 } from "./store/evidence-store.js"
 import {
@@ -304,6 +305,7 @@ import type {
 	PlanPreview,
 	ScanJobSpec,
 	ScanRange,
+	ScannerClass,
 	ScannerProtocol,
 	ScannerSettings,
 	UndecodedReason,
@@ -329,6 +331,10 @@ import {
 	type RecordingNativeOutcome,
 	type RecordingProducerHandle,
 } from "./channel/recording-producer.js"
+import {
+	WidebandAnalogRecorder,
+	widebandToneEvidence,
+} from "./channel/wideband-analog-recorder.js"
 import type {
 	ObservedDecoderEligibility,
 	ScannerChannelOwnership,
@@ -750,10 +756,17 @@ export class OverloadHintTracker {
 	}
 }
 
+/** A class that is definitely not analog FM: a shadow recording of it is discarded. */
+function nonAnalogFmClass(c: ScannerClass): boolean {
+	return c !== "analog-fm" && c !== "unknown" && c !== "carrier"
+}
+
 export class ScannerService extends EventEmitter {
 	private readonly consumerLifecycle: ScannerLifecycleOwner
 	private readonly channelTaps: ChannelTaps | undefined
 	private readonly channelProducers: RecordingProducers
+	/** Default-on analog recordings from the wideband IQ ring (no channel tier needed). */
+	private readonly widebandAnalog: WidebandAnalogRecorder
 	// Effective producer adoption requires Main's exact assembled runtime acceptance.
 	private readonly channelProducerAdopted: boolean = false
 	private readonly channelRecordingOwners = new Map<
@@ -1448,8 +1461,9 @@ export class ScannerService extends EventEmitter {
 					this.stateLoaded && this.recordingRecoveryHealthy,
 				// Effective channel consumer adoption is separately gated. No grant is inferred here.
 				bindingLive: binding =>
-					this.channelProducerAdopted &&
-					this.channelProducers?.bindingLive(binding) === true,
+					(this.channelProducerAdopted &&
+						this.channelProducers?.bindingLive(binding) === true) ||
+					this.widebandAnalog?.bindingLive(binding) === true,
 				association: (discoveryId, observationId, binding) =>
 					this.store.recordingAssociation(discoveryId, observationId, binding),
 				prepare: metadata =>
@@ -1464,6 +1478,23 @@ export class ScannerService extends EventEmitter {
 					this.store.buildRecordingCommitPlan(operationId),
 				commitPlanCurrent: plan => this.store.recordingCommitPlanCurrent(plan),
 				publishCommit: plan => this.store.publishRecordingCommit(plan),
+			})
+			this.widebandAnalog = new WidebandAnalogRecorder({
+				engine: sourceId => this.spectrum.engine(sourceId),
+				settings: () => ({
+					...this.settings().hold,
+					cpuBudgetCores: this.settings().cpuBudgetCores,
+				}),
+				beginAnalog: input => this.evidence.beginAnalog(input),
+				recordTone: (observationId, ctcssHz, at) =>
+					void this.store.recordAnalog(
+						observationId,
+						widebandToneEvidence(ctcssHz, at),
+					),
+				// Recordings share the probes' and live audio's CPU budget (cpuBudgetCores).
+				reserveCores: cores => this.probes.reserveExternal(cores),
+				logger: deps.logger,
+				now: this.now,
 			})
 			this.captures = new CaptureStore({
 				dir: join(this.storageDir, "captures"),
@@ -2039,6 +2070,7 @@ export class ScannerService extends EventEmitter {
 				),
 			)
 		}
+		if (this.widebandAnalog) await attempt(() => this.widebandAnalog.stop())
 		if (this.evidence) await attempt(() => this.evidence.stopAnalog())
 		await Promise.all(independentStops)
 		await Promise.all(
@@ -3382,8 +3414,28 @@ export class ScannerService extends EventEmitter {
 		for (const d of covering) d.onTrack(live, track, needs)
 		if (!closing) {
 			this.refineLiveChannel(live, track)
+			this.recordWideband(live, track)
 			return
 		}
+		this.widebandAnalog.closed(
+			live.observationId,
+			track,
+			endReason === "quiet" || endReason === "max-duration"
+				? null
+				: endReason === "retune" || endReason === "hop"
+					? "epoch-changed"
+					: endReason === "gap"
+						? "stream-changed"
+						: "track-ended",
+			{
+				analogFm: live.classification.class === "analog-fm",
+				nonAnalog: nonAnalogFmClass(live.classification.class),
+				discoveryId: this.store.discoveryIdOf(live.observationId) ?? null,
+				// Encrypted evidence may arrive after the last update: vetoed here too.
+				encrypted: live.encrypted,
+				recordAllowed: this.widebandRecordAllowed(live),
+			},
+		)
 		if (
 			(endReason !== "quiet" && endReason !== "max-duration") ||
 			!this.finishChannelRecording(live.observationId)
@@ -3676,6 +3728,55 @@ export class ScannerService extends EventEmitter {
 		return track.tuningTrust === "unverified" ? { ...c, tier: "spectral" } : c
 	}
 
+	/**
+	 * Default-on analog recording; a job owning the observation may opt out (record.analog). A
+	 * track not classed yet may start a shadow session where analog FM may be (`analogFmPossible`).
+	 */
+	private recordWideband(live: LiveObservation, track: TrackSnapshot): void {
+		const analogFm = live.classification.class === "analog-fm"
+		this.widebandAnalog.track({
+			observationId: live.observationId,
+			discoveryId: this.store.discoveryIdOf(live.observationId) ?? null,
+			sourceId: live.sourceId,
+			track,
+			analogFm,
+			nonAnalog: nonAnalogFmClass(live.classification.class),
+			shadowAllowed:
+				!analogFm &&
+				!this.widebandAnalog.owns(live.observationId) &&
+				this.analogFmPossible(track.centreHz),
+			encrypted: live.encrypted,
+			recordAllowed: this.widebandRecordAllowed(live),
+			channelOwned: [...this.channelRecordingOwners.values()].some(
+				owner => owner.observationId === live.observationId,
+			),
+		})
+	}
+
+	/** No covering job, or a covering job with record.analog. */
+	private widebandRecordAllowed(live: LiveObservation): boolean {
+		const specs = live.jobIds.flatMap(id => this.jobs.get(id)?.spec ?? [])
+		return specs.length === 0 || specs.some(spec => spec.record.analog)
+	}
+
+	/**
+	 * Read-only band plan lookup: some enabled range at `hz` lists analog-fm, or no range there
+	 * lists any protocol (no band plan entry). O(band plan ranges) per call, only for tracks not
+	 * yet recording or classed.
+	 */
+	private analogFmPossible(hz: number): boolean {
+		let listed = false
+		for (const b of this.deps.bandplans?.() ??
+			builtinBandplansFor(this.deps.region))
+			for (const r of b.ranges) {
+				if (!isRangeEnabled(r) || hz < r.startHz || hz > r.endHz) continue
+				const protocols = r.protocols ?? []
+				if (protocols.includes("analog-fm")) return true
+				if (protocols.length > 0) listed = true
+			}
+		return !listed
+	}
+
 	private refineLiveChannel(live: LiveObservation, track: TrackSnapshot): void {
 		const ownership = this.deps.channelOwnership,
 			profile = this.deps.channelProfile
@@ -3845,6 +3946,7 @@ export class ScannerService extends EventEmitter {
 		const discoveryId = this.store.discoveryIdOf(live.observationId)
 		if (
 			!this.channelProducerAdopted ||
+			this.widebandAnalog.owns(live.observationId) ||
 			!current() ||
 			!binding ||
 			!channels ||
@@ -4976,15 +5078,19 @@ export class ScannerService extends EventEmitter {
 				o.discoveryId !== null &&
 				this.store.get(o.discoveryId) !== undefined,
 		)
-		const candidates = observations.map(o => ({
-			observationId: o.observationId,
-			discoveryId: o.discoveryId!,
-			...(o.talkgroup ? { talkgroup: o.talkgroup } : {}),
-			...(o.source ? { source: o.source } : {}),
-			startedAt: o.startedAt,
-			endedAt: o.endedAt ?? this.now(),
-			encrypted: o.encrypted,
-		}))
+		// Every call the probe reported can claim its file, not only the observation's latest pair.
+		const candidates = probeLinkCandidates(
+			observations.map(o => ({
+				observationId: o.observationId,
+				discoveryId: o.discoveryId!,
+				...(o.talkgroup ? { talkgroup: o.talkgroup } : {}),
+				...(o.source ? { source: o.source } : {}),
+				startedAt: o.startedAt,
+				endedAt: o.endedAt ?? this.now(),
+				encrypted: o.encrypted,
+			})),
+			r.calls,
+		)
 		const release = this.holdEvidence(candidates.map(c => c.discoveryId))
 		const publication = this.evidence
 			.linkProbeRecordings(r.probeDir, candidates)

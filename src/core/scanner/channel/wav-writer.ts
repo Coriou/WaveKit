@@ -3,6 +3,11 @@ import { WaveKitError } from "../../../utils/errors.js"
 
 export const WAV_HEADER_BYTES = 44
 export const MAX_WAV_DURATION_SECONDS = 120
+/**
+ * Audio per PCM write call. 10 ms writes were 100 syscalls per second of audio per recording,
+ * under real time on a loaded host; 100 ms is 10 per second and still a prompt cancel point.
+ */
+export const PCM_WRITE_MS = 100
 
 function failure(message: string, cause?: unknown): WaveKitError {
 	return cause instanceof WaveKitError
@@ -330,11 +335,13 @@ export class WavFileWriter {
 		let offset = 0
 		while (offset < buffer.length) {
 			if (pcm) this.checkCancellation()
-			// One PCM await covers at most 10 ms at the fixed 8 kHz rate.
+			// One PCM await covers at most PCM_WRITE_MS (1600 bytes at 8 kHz): cancellation still
+			// lands within one write, at a tenth of the syscalls of 10 ms writes (100 per audio s).
 			const length = Math.min(
 				buffer.length - offset,
 				pcm
-					? Math.max(1, Math.floor(this.sampleRateHz / 100)) * 2
+					? Math.max(1, Math.floor((this.sampleRateHz * PCM_WRITE_MS) / 1000)) *
+							2
 					: WAV_HEADER_BYTES,
 			)
 			const { bytesWritten } = await this.handle.write(

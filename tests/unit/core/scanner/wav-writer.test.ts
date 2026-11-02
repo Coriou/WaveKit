@@ -256,7 +256,7 @@ describe("private staged WAV writer", () => {
 		expect(f.close).toHaveBeenCalledTimes(1)
 		expect(f.unlink).toHaveBeenCalledTimes(1)
 	})
-	it("stops a large admitted buffer and queued jobs after the in-flight 10 ms PCM write", async () => {
+	it("stops a large admitted buffer and queued jobs after the in-flight 100 ms PCM write", async () => {
 		const f = fake()
 		const writer = await WavFileWriter.open("stage", 8000, { io: f.io })
 		const gate = deferred()
@@ -276,7 +276,7 @@ describe("private staged WAV writer", () => {
 			code: "SCANNER_WAV_CANCELLED",
 		})
 		await entered.promise
-		expect(f.write.mock.calls[1]?.[2]).toBe(160)
+		expect(f.write.mock.calls[1]?.[2]).toBe(1600)
 		const abort = writer.abort()
 		gate.resolve()
 		await Promise.all([activeAssertion, queuedAssertion, abort])

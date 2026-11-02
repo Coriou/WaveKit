@@ -155,6 +155,104 @@ function matchingCandidates(
 		.sort((a, b) => Math.abs(at - a.startedAt) - Math.abs(at - b.startedAt))
 }
 
+/**
+ * Call candidates kept per probe link: 256 reported calls. Matching is
+ * files × candidates comparisons, so a probe's few dozen call files cost a few thousand.
+ */
+export const MAX_PROBE_CALL_CANDIDATES = 256
+
+/** One dsd-fme call a probe reported (its `call_end`). */
+export interface ProbeLinkCall {
+	talkgroup?: string
+	source?: string
+	startedAt: number
+	endedAt: number
+	encrypted: boolean
+}
+
+/**
+ * Link candidates for a probe's call files: each observation as it stands (its latest talkgroup
+ * and source, encrypted if any decode was), plus one per call the probe reported inside the
+ * observation's window, with that call's own time and encryption. An observation keeps only its
+ * latest pair, so without the calls every earlier over of a conversation (another radio, another
+ * talkgroup) would match nothing and be deleted. Each call keeps its own window so a clear call
+ * never claims the file of an encrypted call of the same pair, and a file matching any encrypted
+ * candidate is dropped (linkFiles). At most MAX_PROBE_CALL_CANDIDATES are added, encrypted calls
+ * first: a missing clear candidate only loses audio, a missing encrypted one could keep it. Past
+ * the cap with encrypted calls alone, every file of the probe is dropped (fail closed). Every
+ * encrypted call is a candidate whatever the observations' windows; only a clear call must
+ * overlap an observation, and only a clear call of an observation's own pair is skipped.
+ */
+export function probeLinkCandidates(
+	observations: readonly LinkCandidate[],
+	calls: readonly ProbeLinkCall[],
+): LinkCandidate[] {
+	const encrypted: LinkCandidate[] = []
+	const clear: LinkCandidate[] = []
+	const seen = new Set<string>()
+	const candidate = (o: LinkCandidate, call: ProbeLinkCall): void => {
+		const key = JSON.stringify([
+			o.observationId,
+			call.talkgroup ?? null,
+			call.source ?? null,
+			call.startedAt,
+			call.endedAt,
+			call.encrypted,
+		])
+		if (seen.has(key)) return
+		seen.add(key)
+		;(call.encrypted ? encrypted : clear).push({
+			observationId: o.observationId,
+			discoveryId: o.discoveryId,
+			...(call.talkgroup !== undefined ? { talkgroup: call.talkgroup } : {}),
+			...(call.source !== undefined ? { source: call.source } : {}),
+			startedAt: call.startedAt,
+			endedAt: call.endedAt,
+			encrypted: call.encrypted,
+		})
+	}
+	const overlaps = (o: LinkCandidate, call: ProbeLinkCall): boolean =>
+		call.endedAt >= o.startedAt - MATCH_SLACK_MS &&
+		call.startedAt <= o.endedAt + MATCH_SLACK_MS
+	for (const call of calls) {
+		if (call.encrypted) {
+			// Every encrypted call vetoes its own window, whatever the observations' windows: a
+			// clear call's window may reach past its observation (dsd-fme's call_end lags RF), so
+			// a veto filtered by observation overlap could leave an encrypted file to a clear call.
+			// It is reported on the observation it overlaps, else the nearest one.
+			const o =
+				observations.find(x => overlaps(x, call)) ??
+				[...observations].sort(
+					(a, b) =>
+						Math.abs(a.startedAt - call.startedAt) -
+						Math.abs(b.startedAt - call.startedAt),
+				)[0]
+			if (o !== undefined) candidate(o, call)
+			continue
+		}
+		// A clear call with no ids claims nothing.
+		if (call.talkgroup === undefined && call.source === undefined) continue
+		for (const o of observations) {
+			if (!overlaps(o, call)) continue
+			// The observation's own candidate already covers a clear call of its pair (wider window).
+			if (
+				(call.talkgroup ?? null) === (o.talkgroup ?? null) &&
+				(call.source ?? null) === (o.source ?? null)
+			)
+				continue
+			candidate(o, call)
+		}
+	}
+	// More encrypted calls than the cap: a dropped veto could keep an encrypted file, so fail
+	// closed and treat every observation of this probe as encrypted (all its files are dropped).
+	if (encrypted.length > MAX_PROBE_CALL_CANDIDATES)
+		return observations.map(o => ({ ...o, encrypted: true }))
+	return [...observations, ...encrypted, ...clear].slice(
+		0,
+		observations.length + MAX_PROBE_CALL_CANDIDATES,
+	)
+}
+
 function errorCode(err: unknown): string | undefined {
 	if (err !== null && typeof err === "object" && "code" in err) {
 		const code = (err as { code: unknown }).code
