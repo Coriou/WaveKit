@@ -244,6 +244,7 @@ import {
 import {
 	DISCOVERY_ID,
 	EvidenceStore,
+	probeLinkCandidates,
 	type StorageCaps,
 } from "./store/evidence-store.js"
 import {
@@ -5030,15 +5031,19 @@ export class ScannerService extends EventEmitter {
 				o.discoveryId !== null &&
 				this.store.get(o.discoveryId) !== undefined,
 		)
-		const candidates = observations.map(o => ({
-			observationId: o.observationId,
-			discoveryId: o.discoveryId!,
-			...(o.talkgroup ? { talkgroup: o.talkgroup } : {}),
-			...(o.source ? { source: o.source } : {}),
-			startedAt: o.startedAt,
-			endedAt: o.endedAt ?? this.now(),
-			encrypted: o.encrypted,
-		}))
+		// Every call the probe reported can claim its file, not only the observation's latest pair.
+		const candidates = probeLinkCandidates(
+			observations.map(o => ({
+				observationId: o.observationId,
+				discoveryId: o.discoveryId!,
+				...(o.talkgroup ? { talkgroup: o.talkgroup } : {}),
+				...(o.source ? { source: o.source } : {}),
+				startedAt: o.startedAt,
+				endedAt: o.endedAt ?? this.now(),
+				encrypted: o.encrypted,
+			})),
+			r.calls,
+		)
 		const release = this.holdEvidence(candidates.map(c => c.discoveryId))
 		const publication = this.evidence
 			.linkProbeRecordings(r.probeDir, candidates)

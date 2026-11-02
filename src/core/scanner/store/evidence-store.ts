@@ -155,6 +155,68 @@ function matchingCandidates(
 		.sort((a, b) => Math.abs(at - a.startedAt) - Math.abs(at - b.startedAt))
 }
 
+/**
+ * Call candidates kept per probe link: 256 distinct talkgroup/source pairs. Matching is
+ * files × candidates comparisons, so a probe's few dozen call files cost a few thousand.
+ */
+export const MAX_PROBE_CALL_CANDIDATES = 256
+
+/** One dsd-fme call a probe reported (its `call_end`). */
+export interface ProbeLinkCall {
+	talkgroup?: string
+	source?: string
+	startedAt: number
+	endedAt: number
+	encrypted: boolean
+}
+
+/**
+ * Link candidates for a probe's call files: each observation as it stands (its latest talkgroup
+ * and source, encrypted if any decode was), plus one per distinct talkgroup/source pair of the
+ * probe's own calls inside the observation's window. An observation keeps only its latest pair,
+ * so without the calls every earlier over of a conversation (another radio, another talkgroup)
+ * would match nothing and be deleted. A call candidate is encrypted only when that call was.
+ */
+export function probeLinkCandidates(
+	observations: readonly LinkCandidate[],
+	calls: readonly ProbeLinkCall[],
+): LinkCandidate[] {
+	const out: LinkCandidate[] = [...observations]
+	const seen = new Set<string>()
+	for (const o of observations) {
+		seen.add(
+			JSON.stringify([o.observationId, o.talkgroup ?? null, o.source ?? null]),
+		)
+		for (const call of calls) {
+			if (call.talkgroup === undefined && call.source === undefined) continue
+			if (
+				call.endedAt < o.startedAt - MATCH_SLACK_MS ||
+				call.startedAt > o.endedAt + MATCH_SLACK_MS
+			)
+				continue
+			const key = JSON.stringify([
+				o.observationId,
+				call.talkgroup ?? null,
+				call.source ?? null,
+			])
+			if (seen.has(key)) continue
+			if (out.length - observations.length >= MAX_PROBE_CALL_CANDIDATES)
+				return out
+			seen.add(key)
+			out.push({
+				observationId: o.observationId,
+				discoveryId: o.discoveryId,
+				...(call.talkgroup !== undefined ? { talkgroup: call.talkgroup } : {}),
+				...(call.source !== undefined ? { source: call.source } : {}),
+				startedAt: o.startedAt,
+				endedAt: o.endedAt,
+				encrypted: call.encrypted,
+			})
+		}
+	}
+	return out
+}
+
 function errorCode(err: unknown): string | undefined {
 	if (err !== null && typeof err === "object" && "code" in err) {
 		const code = (err as { code: unknown }).code

@@ -14,7 +14,11 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import fc from "fast-check"
-import { EvidenceStore } from "../../../../src/core/scanner/store/evidence-store.js"
+import {
+	EvidenceStore,
+	MAX_PROBE_CALL_CANDIDATES,
+	probeLinkCandidates,
+} from "../../../../src/core/scanner/store/evidence-store.js"
 import type { StorageCaps } from "../../../../src/core/scanner/store/evidence-store.js"
 import { createLogger } from "../../../../src/utils/logger.js"
 
@@ -757,4 +761,107 @@ describe("EvidenceStore deletion admission (review F3)", () => {
 			})
 		},
 	)
+})
+
+describe("probeLinkCandidates", () => {
+	const obs = {
+		observationId: "o-1",
+		discoveryId: "d_ONE",
+		talkgroup: "9",
+		source: "2002",
+		startedAt: T0,
+		endedAt: T0 + 10_000,
+		encrypted: false,
+	}
+	const call = (src: string, at = T0 + 1_000, encrypted = false) => ({
+		talkgroup: "9",
+		source: src,
+		startedAt: at,
+		endedAt: at + 1_000,
+		encrypted,
+	})
+
+	it("links each over of a conversation, the observation keeping only the latest source", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0 + 60_000,
+				statfs: plentyOfDisk,
+			})
+			const a = callWav(T0 + 1_000, "9", "2001")
+			const b = callWav(T0 + 3_000, "9", "2002")
+			const probe = await probeDirWith(root, [a, b], "WAV")
+			const result = await store.linkProbeRecordings(
+				probe,
+				probeLinkCandidates([obs], [call("2001"), call("2002", T0 + 3_000)]),
+			)
+			expect(result.linked.map(l => l.recordingId).sort()).toEqual(
+				[`d_ONE~${a}`, `d_ONE~${b}`].sort(),
+			)
+		})
+	})
+
+	it("without the calls an earlier over is deleted (the gap the call candidates close)", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0 + 60_000,
+				statfs: plentyOfDisk,
+			})
+			const a = callWav(T0 + 1_000, "9", "2001")
+			const probe = await probeDirWith(root, [a], "WAV")
+			const result = await store.linkProbeRecordings(
+				probe,
+				probeLinkCandidates([obs], []),
+			)
+			expect(result.linked).toEqual([])
+		})
+	})
+
+	it("keeps an encrypted call's file out and a clear call's file in", () => {
+		const out = probeLinkCandidates(
+			[obs],
+			[call("2001", T0 + 1_000, true), call("2003")],
+		)
+		expect(out.map(c => [c.source, c.encrypted])).toEqual([
+			["2002", false],
+			["2001", true],
+			["2003", false],
+		])
+	})
+
+	it("skips calls outside the observation window (2 s slack) and calls with no ids", () => {
+		const out = probeLinkCandidates(
+			[obs],
+			[
+				call("2001", T0 - 3_001),
+				call("2004", T0 - 3_000),
+				call("2005", T0 + 12_001),
+				{ startedAt: T0, endedAt: T0 + 1_000, encrypted: false },
+			],
+		)
+		expect(out.map(c => c.source)).toEqual(["2002", "2004"])
+	})
+
+	it("adds at most MAX_PROBE_CALL_CANDIDATES distinct pairs, deduplicated", () => {
+		const calls = Array.from(
+			{ length: MAX_PROBE_CALL_CANDIDATES + 10 },
+			(_, i) => call(String(3_000 + i)),
+		)
+		const at = probeLinkCandidates(
+			[obs],
+			calls.slice(0, MAX_PROBE_CALL_CANDIDATES),
+		)
+		expect(at).toHaveLength(1 + MAX_PROBE_CALL_CANDIDATES)
+		const past = probeLinkCandidates([obs], [...calls, ...calls])
+		expect(past).toHaveLength(1 + MAX_PROBE_CALL_CANDIDATES)
+		// The observation's own pair is never added twice.
+		expect(
+			probeLinkCandidates([obs], [call("2002"), call("2002")]),
+		).toHaveLength(1)
+	})
 })

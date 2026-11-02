@@ -5,7 +5,9 @@
  * CTCSS sub-tone sits under the gate's own 500 Hz high-pass; the hiss of a weakly received
  * carrier is flat after de-emphasis, while the demodulated audio of a voice transmission tilts
  * down (most energy below about 1.2 kHz). A window qualifies when it is both loud enough and
- * tilted; a file qualifies once one window does. CTCSS is never required.
+ * tilted; a file qualifies once one window does. CTCSS is never required. Audio too short for
+ * one window (a short over, trimmed at both ends) is judged once at its end on all of it, if it
+ * holds at least VOICE_MIN_FINAL_FRAMES (`conclude()`).
  *
  * Measured through WidebandNfmChain on the synthetic test signal (500 ms windows): voice
  * windows at RMS 1100 to 6600 with tilt up to 6.7; a quieted carrier at RMS 11; a 250.3 Hz
@@ -30,6 +32,12 @@ export const VOICE_HIGH_BAND_HZ = 1_800
 export const VOICE_BLOCK_FRAMES = ANALOG_AUDIO_RATE_HZ / 10
 /** A window: 5 blocks = 500 ms, about one or two syllables. */
 export const VOICE_WINDOW_BLOCKS = 5
+/**
+ * The shortest audio judged at its end when no full window was heard: 200 ms = 1600 frames,
+ * a syllable. With the recorder's 100 ms trims at both ends a transmission of 400 ms or more
+ * can qualify (a 600 ms over gives 400 ms of audio); below this nothing is kept.
+ */
+export const VOICE_MIN_FINAL_FRAMES = 2 * VOICE_BLOCK_FRAMES
 /**
  * Window RMS (s16) above which audio counts as modulated: −36 dBFS. The discriminator maps
  * 5 kHz deviation to full scale before a ×4 de-emphasis makeup, so 1 kHz of deviation at 1 kHz
@@ -71,6 +79,9 @@ export class VoiceActivityGate {
 	private cur: Block = { total: 0, low: 0, high: 0 }
 	private inBlock = 0
 	private qualified = false
+	/** A full window was judged (and failed): the end adds nothing. */
+	private fullWindow = false
+	private concluded = false
 
 	/** True once any window was loud and voice-tilted. */
 	get voiced(): boolean {
@@ -78,7 +89,7 @@ export class VoiceActivityGate {
 	}
 
 	push(pcm: ArrayLike<number>): void {
-		if (this.qualified) return
+		if (this.qualified || this.concluded) return
 		for (let i = 0; i < pcm.length; i++) {
 			let x = pcm[i]!
 			for (const stage of this.hp) x = stage.step(x)
@@ -92,23 +103,41 @@ export class VoiceActivityGate {
 			if (this.blocks.length > VOICE_WINDOW_BLOCKS) this.blocks.shift()
 			this.cur = { total: 0, low: 0, high: 0 }
 			this.inBlock = 0
-			if (this.blocks.length === VOICE_WINDOW_BLOCKS && this.windowVoiced()) {
+			if (this.blocks.length < VOICE_WINDOW_BLOCKS) continue
+			this.fullWindow = true
+			if (
+				this.windowVoiced(this.blocks, VOICE_WINDOW_BLOCKS * VOICE_BLOCK_FRAMES)
+			) {
 				this.qualified = true
 				return
 			}
 		}
 	}
 
-	private windowVoiced(): boolean {
+	/**
+	 * The audio ended: audio that never filled a window is judged on all of it (the completed
+	 * blocks and the partial one) when it holds at least VOICE_MIN_FINAL_FRAMES. Idempotent;
+	 * later pushes are ignored.
+	 */
+	conclude(): boolean {
+		if (this.qualified || this.concluded) return this.qualified
+		this.concluded = true
+		const frames = this.blocks.length * VOICE_BLOCK_FRAMES + this.inBlock
+		if (!this.fullWindow && frames >= VOICE_MIN_FINAL_FRAMES)
+			this.qualified = this.windowVoiced([...this.blocks, this.cur], frames)
+		return this.qualified
+	}
+
+	private windowVoiced(blocks: readonly Block[], frames: number): boolean {
 		let total = 0
 		let low = 0
 		let high = 0
-		for (const b of this.blocks) {
+		for (const b of blocks) {
 			total += b.total
 			low += b.low
 			high += b.high
 		}
-		const meanSquare = total / (VOICE_WINDOW_BLOCKS * VOICE_BLOCK_FRAMES)
+		const meanSquare = total / frames
 		return (
 			meanSquare >= VOICE_MIN_RMS * VOICE_MIN_RMS &&
 			low >= VOICE_MIN_TILT * high

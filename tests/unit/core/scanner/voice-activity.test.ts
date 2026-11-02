@@ -1,12 +1,14 @@
 /**
  * VoiceActivityGate on synthetic 8 kHz audio: the level and window bounds at and past their
- * values, hiss (flat) against voice-band tones, and CTCSS tones that must never count as voice.
+ * values, hiss (flat) against voice-band tones, and CTCSS tones that must never count as voice;
+ * audio shorter than a window is judged once at its end (`conclude()`).
  */
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
 	VOICE_BLOCK_FRAMES,
 	VOICE_GATE_HIGH_PASS_HZ,
+	VOICE_MIN_FINAL_FRAMES,
 	VOICE_MIN_RMS,
 	VOICE_WINDOW_BLOCKS,
 	VoiceActivityGate,
@@ -77,5 +79,65 @@ describe("VoiceActivityGate", () => {
 			),
 			{ numRuns: 100 },
 		)
+	})
+
+	describe("conclude() on audio shorter than a window", () => {
+		function concluded(pcm: Int16Array): boolean {
+			const gate = new VoiceActivityGate()
+			gate.push(pcm)
+			return gate.conclude()
+		}
+
+		it("judges audio of VOICE_MIN_FINAL_FRAMES (200 ms) and more, never less", () => {
+			expect(VOICE_MIN_FINAL_FRAMES).toBe(1600)
+			const loud = tone(700, 8000, WINDOW - 1)
+			expect(concluded(loud.subarray(0, VOICE_MIN_FINAL_FRAMES))).toBe(true)
+			expect(concluded(loud.subarray(0, VOICE_MIN_FINAL_FRAMES - 1))).toBe(
+				false,
+			)
+			// A partial last block counts: 2.5 blocks qualify.
+			expect(concluded(loud.subarray(0, 2.5 * VOICE_BLOCK_FRAMES))).toBe(true)
+			expect(concluded(loud)).toBe(true)
+			// The level bound still applies to a short window.
+			const quiet = tone(
+				700,
+				amplitudeFor(700, 0.5 * VOICE_MIN_RMS),
+				WINDOW - 1,
+			)
+			expect(concluded(quiet)).toBe(false)
+		})
+
+		it("rejects short silence and short flat hiss", () => {
+			expect(concluded(new Int16Array(WINDOW - 1))).toBe(false)
+			const rng = mulberry32(9)
+			const hiss = Int16Array.from(
+				{ length: WINDOW - 1 },
+				() => (rng() - 0.5) * 20_000,
+			)
+			expect(concluded(hiss)).toBe(false)
+		})
+
+		it("adds nothing after a judged full window, is idempotent and ignores later pushes", () => {
+			const gate = new VoiceActivityGate()
+			gate.push(new Int16Array(WINDOW))
+			gate.push(tone(700, 8000, VOICE_BLOCK_FRAMES - 1))
+			expect(gate.conclude()).toBe(false)
+			gate.push(tone(700, 8000, 3 * WINDOW))
+			expect(gate.voiced).toBe(false)
+			expect(gate.conclude()).toBe(false)
+		})
+
+		it("never counts a short CTCSS-only window as voice", () => {
+			// Feature: wideband analog voice gate, Property 2: a short CTCSS-only over is not voice
+			fc.assert(
+				fc.property(
+					fc.double({ min: 67, max: 254.1, noNaN: true }),
+					fc.integer({ min: 0, max: 4000 }),
+					fc.integer({ min: VOICE_MIN_FINAL_FRAMES, max: WINDOW - 1 }),
+					(hz, amplitude, frames) => !concluded(tone(hz, amplitude, frames)),
+				),
+				{ numRuns: 100 },
+			)
+		})
 	})
 })

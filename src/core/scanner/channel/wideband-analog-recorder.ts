@@ -86,10 +86,14 @@ export const WIDEBAND_MAX_SILENCE_GAP_MS = 1_000
  * after a carrier drops (which is loud and not a carrier's quieted audio) stays out.
  */
 export const WIDEBAND_GATE_EDGE_TRIM_MS = 100
-/** Activity intervals kept per session (open tracks and closed ones not yet written). */
-const MAX_ACTIVITY = 64
+/**
+ * Activity intervals kept per session (open tracks and closed ones not yet written). Past it the
+ * oldest closed span goes; when every one is open the new span is not kept (an older open span
+ * covers it up to now). At most 64 entries of 3 numbers per session.
+ */
+export const WIDEBAND_MAX_ACTIVITY = 64
 /** Gaps held for a continuation not admitted yet (the analog operation keeps 64 too). */
-const MAX_PENDING_GAPS = 64
+export const WIDEBAND_MAX_PENDING_GAPS = 64
 /**
  * Files of one session waiting for a slot: a roll-over or a new transmission while the previous
  * file still settles, and one more behind it. At WIDEBAND_MAX_QUEUED_FRAMES each that is at
@@ -309,6 +313,8 @@ interface Session {
 	file: FileState | null
 	/** Files waiting, oldest first, for this session's previous operation to settle. */
 	readonly waiting: FileState[]
+	/** Every file of this session whose operation has not settled (or not begun) yet. */
+	readonly files: Set<FileState>
 	/** Operations of this session not settled yet. */
 	ops: number
 	/** A start event waiting for the current file to finish (roll-over or a new transmission). */
@@ -430,7 +436,7 @@ export class WidebandAnalogRecorder {
 		if (!cleanTrack(track)) {
 			// Any contributing track turning edge, spur or unverified discards the recording.
 			s.observations.add(observationId)
-			this.refuse(s)
+			this.refuse(s, true)
 			return
 		}
 		if (cut !== null) s.endCut ??= cut
@@ -442,7 +448,10 @@ export class WidebandAnalogRecorder {
 		this.wake(s)
 	}
 
-	/** Shutdown: finish open files (kept as cut), then wait for every operation to settle. */
+	/**
+	 * Shutdown: finish open files (kept as cut), let files waiting for a slot begin and finish,
+	 * then wait for every operation to settle.
+	 */
 	async stop(): Promise<void> {
 		this.stopped = true
 		for (const s of [...this.sessions.values()]) this.endSession(s, "shutdown")
@@ -466,15 +475,10 @@ export class WidebandAnalogRecorder {
 			if (!s) return
 			s.lastActive = Math.max(s.lastActive, track.lastSample)
 			this.noteActivity(s, observationId, track)
-			if (barred) this.refuse(s)
+			if (barred) this.refuse(s, true)
 			return
 		}
-		if (
-			input.channelOwned ||
-			this.refused.has(observationId) ||
-			!cleanTrack(track)
-		)
-			return
+		if (input.channelOwned || this.refused.has(observationId)) return
 		const engine = this.deps.engine(input.sourceId)
 		if (!engine || engine.format !== "U8_IQ") return
 		const epoch = engine.currentEpoch()
@@ -495,10 +499,11 @@ export class WidebandAnalogRecorder {
 				Math.abs(s.targetHz - track.centreHz) > WIDEBAND_JOIN_TOLERANCE_HZ
 			)
 				continue
-			if (input.encrypted || !input.recordAllowed) {
-				// Its audio would land in this file (or its hang): discard the recording.
+			if (barred) {
+				// Its audio would land in this file (or its hang): discard the recording, as when a
+				// joined track turns encrypted, opted out or unclean.
 				s.observations.add(observationId)
-				this.refuse(s)
+				this.refuse(s, true)
 				return
 			}
 			const events = s.seg.open(observationId, track.startSample)
@@ -510,13 +515,7 @@ export class WidebandAnalogRecorder {
 			this.wake(s)
 			return
 		}
-		if (
-			input.encrypted ||
-			!input.recordAllowed ||
-			!input.analogFm ||
-			input.discoveryId === null
-		)
-			return
+		if (barred || !input.analogFm || input.discoveryId === null) return
 		const settings = this.deps.settings()
 		if (
 			this.activeOn(input.sourceId) >=
@@ -582,6 +581,7 @@ export class WidebandAnalogRecorder {
 			endCut: null,
 			file: null,
 			waiting: [],
+			files: new Set(),
 			ops: 0,
 			pendingStart: null,
 			generation: 0,
@@ -659,12 +659,14 @@ export class WidebandAnalogRecorder {
 			finishing: false,
 		}
 		s.file = file
+		s.files.add(file)
 		if (s.ops === 0) {
 			this.beginOp(s, file)
 			return
 		}
 		if (s.waiting.length >= MAX_WAITING_FILES) {
 			// The store is not settling files: give up rather than hold more audio.
+			s.files.delete(file)
 			this.refuse(s)
 			return
 		}
@@ -672,12 +674,9 @@ export class WidebandAnalogRecorder {
 	}
 
 	private beginOp(s: Session, file: FileState): void {
+		// A file that waited for a slot begins even during stop(): the store stays open until the
+		// recorder's shutdown resolved, which waits for it (at most MAX_WAITING_FILES per session).
 		if (file.failed || file.handle !== null) return
-		if (this.stopped) {
-			// Shutdown while it waited for a slot: the store is closing, nothing to begin.
-			file.failed = true
-			return
-		}
 		const binding: RecordingBinding = Object.freeze({
 			sourceId: s.sourceId,
 			engineInstanceId: recordingEngineInstanceId(s.engine),
@@ -705,6 +704,7 @@ export class WidebandAnalogRecorder {
 			this.bindings.delete(key)
 			this.warn(err)
 			file.failed = true
+			s.files.delete(file)
 			if (s.file === file) this.refuse(s)
 			return
 		}
@@ -721,6 +721,7 @@ export class WidebandAnalogRecorder {
 				if (left > 0) this.unsettled.set(s.sourceId, left)
 				else this.unsettled.delete(s.sourceId)
 				this.settling.delete(settled)
+				s.files.delete(file)
 				s.ops--
 				// One at a time: the next waiting file begins when this session holds no slot.
 				while (s.ops === 0 && s.waiting.length > 0)
@@ -756,12 +757,14 @@ export class WidebandAnalogRecorder {
 			last: track.lastSample,
 			open: true,
 		})
-		if (s.activity.size <= MAX_ACTIVITY) return
+		if (s.activity.size <= WIDEBAND_MAX_ACTIVITY) return
 		for (const [id, a] of s.activity)
 			if (!a.open) {
 				s.activity.delete(id)
 				return
 			}
+		// Every span is open: an older open span already covers the new one up to now.
+		s.activity.delete(observationId)
 	}
 
 	private onSettled(s: Session, receipt: AnalogReceipt): void {
@@ -776,8 +779,13 @@ export class WidebandAnalogRecorder {
 		}
 	}
 
-	/** Refused admission: drop the session and do not try this observation again. */
-	private refuse(s: Session): void {
+	/**
+	 * Refused admission: drop the session and do not try this observation again. `everyFile`
+	 * (an observation turned encrypted, opted out or unclean) also cancels the session's earlier
+	 * files still finishing or waiting, a roll-over's first file among them; otherwise only the
+	 * current file goes and an earlier complete file is still written.
+	 */
+	private refuse(s: Session, everyFile = false): void {
 		for (const id of s.observations) {
 			this.refused.add(id)
 			if (this.refused.size > 1024) {
@@ -785,7 +793,7 @@ export class WidebandAnalogRecorder {
 				if (oldest.done !== true) this.refused.delete(oldest.value)
 			}
 		}
-		this.cancelSession(s, "cancelled")
+		this.cancelSession(s, "cancelled", everyFile)
 	}
 
 	private wake(s: Session): void {
@@ -892,7 +900,7 @@ export class WidebandAnalogRecorder {
 			outputFrameIndex: file.frames,
 		}
 		if (file.handle) file.handle.addGap(gap)
-		else if (file.gaps.length < MAX_PENDING_GAPS) file.gaps.push(gap)
+		else if (file.gaps.length < WIDEBAND_MAX_PENDING_GAPS) file.gaps.push(gap)
 		if (file.gapRun === 0) file.gapFrom = s.next
 		file.gapRun += missing
 		if (file.gapRun > (WIDEBAND_MAX_SILENCE_GAP_MS * s.fs) / 1000) {
@@ -1068,7 +1076,8 @@ export class WidebandAnalogRecorder {
 			this.flush(s, file, Number.POSITIVE_INFINITY)
 			return
 		}
-		if (!file.gate.voiced) {
+		// Every frame is written: a file too short for one gate window is judged on all of it.
+		if (!file.gate.conclude()) {
 			// A carrier with no voice-like audio (a spur, an idle or CTCSS-only carrier): no WAV.
 			file.failed = true
 			file.handle.cancel("cancelled")
@@ -1095,14 +1104,20 @@ export class WidebandAnalogRecorder {
 		this.dispose(s)
 	}
 
-	private cancelSession(s: Session, cut: AnalogCut): void {
+	private cancelSession(s: Session, cut: AnalogCut, everyFile = false): void {
 		const file = s.file
 		s.file = null
 		s.pendingStart = null
 		s.seg.abort()
-		if (file) {
-			file.failed = true
-			file.handle?.cancel(cut)
+		const files = everyFile ? [...s.files] : file ? [file] : []
+		if (everyFile) s.waiting.length = 0
+		else if (file) {
+			const at = s.waiting.indexOf(file)
+			if (at >= 0) s.waiting.splice(at, 1)
+		}
+		for (const f of files) {
+			f.failed = true
+			f.handle?.cancel(cut)
 		}
 		this.dispose(s)
 	}
