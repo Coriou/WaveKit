@@ -199,4 +199,33 @@ describe("WidebandAnalogRecorder retune before the close", () => {
 		expect(h.ops.map(o => o.input.observationId).sort()).toEqual(ids.slice(1))
 		expect(h.ops.every(o => o.outcome === "finalized")).toBe(true)
 	}, 120_000)
+	it("promotes a parked shadow only after every joined observation closed, so a later encrypted close still vetoes", async () => {
+		for (const [last, written] of [
+			[{ ...CLASSED, encrypted: true }, false],
+			[CLASSED, true],
+		] as const) {
+			const h = harness()
+			await h.feed(1, false)
+			const onset = h.engine.liveEdge()
+			await h.feed(3, true, () => {
+				for (const id of ["a", "b"])
+					h.rec.track(
+						input(id, snapshot(id, onset, h.engine.liveEdge()), SHADOW),
+					)
+			})
+			const end = h.engine.liveEdge()
+			retune(h)
+			await h.feed(0.3, false)
+			h.rec.closed("a", snapshot("a", onset, end), "epoch-changed", CLASSED)
+			await h.feed(0.2, false)
+			// "b" is still open: nothing is admitted yet.
+			expect(h.ops).toEqual([])
+			h.rec.closed("b", snapshot("b", onset, end), "epoch-changed", last)
+			await h.feed(0.5, false)
+			await h.rec.idle()
+			expect(h.ops.length).toBe(written ? 1 : 0)
+			if (written) expect(h.ops[0]!.outcome).toBe("finalized")
+			expect(h.engine.tapCount).toBe(0)
+		}
+	}, 120_000)
 })

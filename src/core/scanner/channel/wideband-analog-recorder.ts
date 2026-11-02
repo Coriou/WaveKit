@@ -1486,6 +1486,9 @@ export class WidebandAnalogRecorder {
 				return
 			}
 		}
+		// Promote only once every contributing observation closed: an open one's close may still
+		// carry an encrypted or opted-out veto (WIDEBAND_PARK_MS bounds the wait).
+		if (s.observations.size > 0) return
 		if (s.classed && s.discoveryId !== null) {
 			this.unpark(s)
 			for (const id of s.observations)
@@ -1498,7 +1501,7 @@ export class WidebandAnalogRecorder {
 				}
 			return
 		}
-		if (s.observations.size === 0) this.dropParked(s, true)
+		this.dropParked(s, true)
 	}
 
 	private unpark(s: Session): void {
