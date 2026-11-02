@@ -603,6 +603,34 @@ describe("LO-locked spur flags are sticky-safe (a real signal is never wrongly h
 		expect(listed(store, true)).toEqual(spurIds)
 	})
 
+	it("repro: an offset learned again only after the restored deadline does not keep the restored flags", () => {
+		const first = setup()
+		const spurIds = flaggedSweep(first.clock, first.store)
+		const snap = JSON.parse(
+			JSON.stringify(first.store.snapshot()),
+		) as ReturnType<DiscoveryStore["snapshot"]>
+		const { clock, store } = setup({ newId: restartIds() })
+		clock.now = first.clock.now + 60_000
+		const restoredAt = clock.now
+		store.restore(snap)
+		expect(store.receiverSpurIds().sort()).toEqual(spurIds)
+		// two sweep cycles just before the deadline (not yet a lock), the third after it
+		clock.now = restoredAt + 590_000
+		for (let cycle = 0; cycle < 2; cycle++) {
+			clock.now += 500
+			dwells(clock, store, [...SWEEP].slice(0, 2), {
+				rf: c => c + SPUR,
+				prefix: `late${cycle}-`,
+			})
+		}
+		expect(clock.now).toBeGreaterThan(restoredAt + 600_000)
+		// past the deadline before any re-learning: every restored flag lifts at the next block
+		store.noteReceiverLines("src-1", SWEEP[0], RATE, [])
+		for (const id of spurIds)
+			expect(store.get(id)?.receiverSpur).toBeUndefined()
+		expect(listed(store).sort()).toEqual(spurIds)
+	})
+
 	it("a journaled flag replays like a snapshot one, and a journal line without the spur fields parses as before", () => {
 		const first = setup()
 		const entries: JournalEntry[] = []

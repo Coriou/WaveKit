@@ -1672,10 +1672,15 @@ export class DiscoveryStore
 		if (this.loRestored.size > 0) this.loRestoredConfirm()
 	}
 
-	/** Restored flags whose offset is learned again become ordinary flags. */
+	/**
+	 * Restored flags whose offset is learned again within their deadline become ordinary flags. A
+	 * restored flag past its deadline is never confirmed (learning it late does not extend it): it
+	 * stays pending so `loFlagStands` fails and the next settle lifts it.
+	 */
 	private loRestoredConfirm(): void {
 		const now = this.now()
-		for (const id of this.loRestored.keys()) {
+		for (const [id, until] of this.loRestored) {
+			if (now > until) continue
 			const f = this.spurFlags.get(id)
 			if (
 				f !== undefined &&
@@ -1722,7 +1727,9 @@ export class DiscoveryStore
 		if (!this.loPartnerEligible(id) || !this.loSpurs.remembers(f.sourceId, id))
 			return false
 		const restoredUntil = this.loRestored.get(id)
-		if (restoredUntil !== undefined && now <= restoredUntil) return true
+		// A restored flag not confirmed by its deadline never stands again (late learning is no
+		// confirmation).
+		if (restoredUntil !== undefined) return now <= restoredUntil
 		return this.loSpurs.isLearned(f.sourceId, f.sampleRateHz, f.offsetHz, now)
 	}
 
