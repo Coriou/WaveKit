@@ -702,9 +702,9 @@ describe("intercept property", () => {
 		return { r, plan, signals, vHop, condition }
 	}
 
-	// Feature: scanner-sweep-fairness, Property 1: every 28 s ID is detected; it is heard at least as long as one confirm probe per visit heard it; it is heard to its end when it is the only call on air whose start the sweep saw and it is detected at least 8 s plus one sweep away before its end, beside carriers (labelled or not, steady or flapping) and a busy channel
+	// Feature: scanner-sweep-fairness, Property 1: every 28 s ID is detected; it is heard at least as long as one confirm probe per visit heard it (proven on plans without revisits; with revisits only against that pace); it is heard to its end when it is the only call on air whose start the sweep saw and it is detected at least 8 s plus one sweep away before its end, beside carriers (labelled or not, steady or flapping) and a busy channel
 	// Validates: Requirements 3 (detection always, hold until it ends bounded by maxHoldMs), 2 (no re-hold on a steady or flapping carrier), 1 (no hop starved by another hop's holds)
-	it("detects every 28 s ID, hears it at least as long as one confirm probe per visit, and to its end when it is the only onset-seen call and detected in time", () => {
+	it("detects every 28 s ID, hears it at least as long as one confirm probe per visit (without revisits), and to its end when it is the only onset-seen call and detected in time", () => {
 		fc.assert(
 			fc.property(
 				// 2..7 hops: 7 × 1150 ms = 8.05 s nominal period
@@ -778,7 +778,7 @@ describe("intercept property", () => {
 	// its start, watched 8 s, and its hop is back 300 ms after its end (heard 8150 ms). One confirm
 	// probe per visit heard 4500 ms of it.
 	it("7 hops: an ID detected 12.35 s after its start is heard more than one confirm probe per visit heard it; its end is missed only because it was detected too late", () => {
-		const { r, condition } = interceptCase(
+		const { r, condition, vHop } = interceptCase(
 			7,
 			30,
 			851,
@@ -792,6 +792,7 @@ describe("intercept property", () => {
 		expect(r.heardMs[0]).toBeGreaterThanOrEqual(4_500)
 		expect(condition.only).toBe(true)
 		expect(condition.inTime).toBe(false)
+		expect(endHeard(r, vHop, 47_250 + 28_000)).toBe(false)
 		expect(latestDetectionMs(7)).toBe(8_550)
 	})
 })
@@ -1568,7 +1569,7 @@ describe("calls and carriers whose onset a visit saw", () => {
 	// Regression: 7 hops, a carrier labelled analog voice from 10 s on hop 0 (its start seen) and a
 	// 28 s ID from 20 s on hop 6. The two share the time: the ID is detected 14.4 s after its start
 	// and heard 8150 ms, and its end is missed. One confirm probe per visit heard 4500 ms of it.
-	it("7 hops, mid-job carrier: the ID is heard more than one confirm probe per visit heard it; its end is missed only because another onset-seen call is on air", () => {
+	it("7 hops, mid-job carrier: the ID is heard more than one confirm probe per visit heard it; its end is missed: another onset-seen call is on air and it is detected after the deadline", () => {
 		const plan = makeHopPlan(centres(7), HALF_SPAN_HZ)
 		const signals = [
 			labelledCarrier(plan.hops[0]!.centreHz - 100_000, 10_000),
@@ -1584,6 +1585,8 @@ describe("calls and carriers whose onset a visit saw", () => {
 		expect(onsetSeen(r, plan, signals, 0)).toBe(true)
 		const condition = endCondition(r, plan, signals, 1)
 		expect(condition.only).toBe(false)
+		expect(condition.inTime).toBe(false)
+		expect(endHeard(r, 6, 48_000)).toBe(false)
 	})
 
 	for (const hops of [3, 7]) {
