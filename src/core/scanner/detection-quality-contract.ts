@@ -86,6 +86,47 @@ export const DQ_SUSTAIN_SAMPLES = 8
 export const DQ_SUSTAIN_PER_SOURCE = 512
 
 /**
+ * Req 1.4b (duty-aware): a TDMA (`tdma-ms`) carrier keys one 27.5 ms slot of every 60 ms
+ * (duty 0.46), so its channel SNR, a power average over the integration, reads about
+ * 10 · log10(0.46) = -3.4 dB under the carrier's own level. Taking duty 0.5, the sustained
+ * median adds 10 · log10(1 / 0.5) = 3.01 dB to every run sample of a track classified
+ * `tdma-ms` (the median of samples + 3.01 = their median + 3.01). Its run still ends under
+ * `DQ_SUSTAIN_FLOOR_SNR_DB` (9, unchanged): 9 + 3.01 = 12.01 ≥ 12, so for `tdma-ms` the floor,
+ * not the median, binds. Measured: a 10 dB DMR carrier's run reads 9 to 11.7 dB (admitted), a
+ * 6 dB one 6.2 to 8.3 dB (under the floor, never a run).
+ */
+export const DQ_TDMA_DUTY = 0.5
+export const DQ_TDMA_DUTY_DB = 10 * Math.log10(1 / DQ_TDMA_DUTY)
+
+/**
+ * Req 1.4e (repeated gate passes): a weak transmitter that repeats (a sensor, a beacon, a packet
+ * channel) promotes once 3 distinct gate-passed observations land in one pending bucket (nearest
+ * of b - 1, b, b + 1) within 60 000 ms (sliding: a pass older than 60 s stops counting), each
+ * with a local SNR (DQ 1.15) of at least 6 dB and an admission SNR of at least 9 dB, their
+ * median at least 10 dB. 9 = the gate's burst pass level (`DQ_SUSTAIN_FLOOR_SNR_DB`); 10 =
+ * 9 + 1 dB, under the 15 dB pending median (1.4) because the 60 s window is a tenth of its
+ * 600 s one. An observation counts once (its highest admission SNR); one observation, however
+ * long, never promotes alone. A track without a local SNR (no channel plan) or on the passband
+ * edge never counts. Off unless `DQ_REPEAT_ENABLED`: see docs/SCANNER.md for the measurement.
+ */
+export const DQ_REPEAT_MIN_OBS = 3
+export const DQ_REPEAT_WINDOW_MS = 60_000
+export const DQ_REPEAT_LOCAL_SNR_DB = 6
+export const DQ_REPEAT_PEAK_SNR_DB = 9
+export const DQ_REPEAT_MEDIAN_SNR_DB = 10
+
+/**
+ * Req 1.4e: newest passes an entry keeps, 5 = 3 needed + 2, so a fourth and fifth weak pass can
+ * lift a median the first three missed; entries per source, the pending budget. 512 × (5 × (40 B
+ * id + 16 B) + 48 B) ≈ 512 × 330 B ≈ 170 kB per source; the oldest entry is evicted first.
+ */
+export const DQ_REPEAT_SAMPLES = 5
+export const DQ_REPEAT_PER_SOURCE = 512
+
+/** Req 1.4e is shipped off: see docs/SCANNER.md (repeated gate passes) for the measurement. */
+export const DQ_REPEAT_ENABLED = false
+
+/**
  * Req 1.4d: push-to-talk airtime. Sustained runs on one channel (the pending bucket, nearest of
  * b - 1, b, b + 1) add up for 60 000 ms from the first credited sample: an exchange of three
  * 2 s transmissions with 25 s gaps (2 + 25 + 2 + 25 + 2 = 56 s) fits. A transmission that ends

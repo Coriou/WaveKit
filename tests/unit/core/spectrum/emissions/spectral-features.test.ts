@@ -4,6 +4,7 @@ import {
 	envelopeAcf,
 	obwAtDb,
 	spectralShape,
+	twoTone,
 } from "../../../../../src/core/spectrum/emissions/spectral-features.js"
 import {
 	gaussian,
@@ -82,5 +83,151 @@ describe("spectralShape", () => {
 		const gauss = new Float32Array(32).fill(-80)
 		for (let i = 8; i <= 24; i++) gauss[i] = -4.34 * ((i - 16) / 1.5) ** 2
 		expect(spectralShape(gauss, 8, 25, 1000)).toBe("peaked")
+	})
+})
+
+describe("twoTone", () => {
+	/** A floor at -60 dB with humps (centre bin, dB over the floor), each 3 bins wide. */
+	const psd = (humps: [number, number][]): Float32Array => {
+		const p = new Float32Array(40).fill(-60)
+		for (const [c, db] of humps)
+			for (let i = c - 1; i <= c + 1; i++) p[i] = -60 + db - (i === c ? 0 : 3)
+		return p
+	}
+
+	it("two equal tones 9 bins apart with the floor between them", () => {
+		expect(
+			twoTone(
+				psd([
+					[15, 12],
+					[24, 12],
+				]),
+				0,
+				40,
+				6,
+				6,
+				6,
+			),
+		).toBe(true)
+	})
+
+	it("spacing, level and valley bounds", () => {
+		// peaks 6 bins apart: at the minimum spacing; 4 apart (even the far shoulder is 5): no
+		expect(
+			twoTone(
+				psd([
+					[15, 12],
+					[21, 12],
+				]),
+				0,
+				40,
+				6,
+				6,
+				6,
+			),
+		).toBe(true)
+		expect(
+			twoTone(
+				psd([
+					[15, 12],
+					[19, 12],
+				]),
+				0,
+				40,
+				6,
+				6,
+				6,
+			),
+		).toBe(false)
+		// 6 dB apart joins, 7 dB does not
+		expect(
+			twoTone(
+				psd([
+					[15, 18],
+					[24, 12],
+				]),
+				0,
+				40,
+				6,
+				6,
+				6,
+			),
+		).toBe(true)
+		expect(
+			twoTone(
+				psd([
+					[15, 19],
+					[24, 12],
+				]),
+				0,
+				40,
+				6,
+				6,
+				6,
+			),
+		).toBe(false)
+		// a valley filled to 5 dB under the weaker tone is one hump
+		const filled = psd([
+			[15, 12],
+			[24, 12],
+		])
+		for (let i = 17; i < 23; i++) filled[i] = -60 + 7
+		expect(twoTone(filled, 0, 40, 6, 6, 6)).toBe(false)
+	})
+
+	it("a single FM-like hump is not two tones", () => {
+		const p = new Float32Array(40).fill(-60)
+		for (let i = 10; i < 30; i++) p[i] = -60 + 20 - Math.abs(i - 20)
+		expect(twoTone(p, 0, 40, 6, 6, 6)).toBe(false)
+	})
+})
+
+describe("twoTone peaks", () => {
+	/** Floor −60 dB, 3-bin humps peaking at −40 dB with −43 dB shoulders. */
+	function humps(...centres: number[]): Float32Array {
+		const p = new Float32Array(40).fill(-60)
+		for (const c of centres) {
+			p[c - 1] = -43
+			p[c] = -40
+			p[c + 1] = -43
+		}
+		return p
+	}
+
+	it("does not take the first hump's shoulder for the second tone", () => {
+		// peaks 5 bins apart: only the shoulder at 21 is 6 bins from the peak at 15
+		expect(twoTone(humps(15, 20), 0, 40, 6, 6, 6)).toBe(false)
+	})
+
+	it("accepts two true peaks at the minimum spacing", () => {
+		expect(twoTone(humps(15, 21), 0, 40, 6, 6, 6)).toBe(true)
+	})
+})
+
+describe("twoTone plateaus", () => {
+	it("does not take a flat shoulder of the first hump's neighbour for the second tone", () => {
+		// floor −60, peaks −40 at 15 and 20 (5 bins apart, under the 6-bin spacing), −43 shoulders
+		// at 14, 16, 19, 21 and 22: the flat [21, 22] falls from the peak at 20, so it is no tone
+		const p = new Float32Array(40).fill(-60)
+		p[15] = -40
+		p[20] = -40
+		for (const i of [14, 16, 19, 21, 22]) p[i] = -43
+		expect(twoTone(p, 0, 40, 6, 6, 6)).toBe(false)
+	})
+
+	it("takes a flat-topped second tone with lower bins on both sides", () => {
+		const p = new Float32Array(40).fill(-60)
+		p[15] = -40
+		p[24] = -41
+		p[25] = -41
+		expect(twoTone(p, 0, 40, 6, 6, 6)).toBe(true)
+	})
+
+	it("takes a plateau bin past the spacing when the plateau starts inside it", () => {
+		// the plateau [19, 22] starts 4 bins from the peak; its bins 21 and 22 are 6 or more away
+		const p = new Float32Array(40).fill(-60)
+		p[15] = -40
+		for (const i of [19, 20, 21, 22]) p[i] = -42
+		expect(twoTone(p, 0, 40, 6, 6, 6)).toBe(true)
 	})
 })

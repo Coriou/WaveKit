@@ -93,6 +93,14 @@ export const SIDEBAND_DB = 10
  */
 export const CHANNEL_PEAK_FRACTION = 0.8
 /**
+ * Pair reach in a burst range without a channel raster (ISM): pieces of one emission whose peaks
+ * are up to 150 kHz apart join when they start together (the tracker's `FSK_PAIR_DB`). 150 kHz
+ * holds the two tones of an FSK sensor deviating up to ±75 kHz and the pieces of a 125 kHz LoRa
+ * chirp cut at channel edges (peaks up to 125 kHz apart). Rastered ranges use the one-channel
+ * limit instead.
+ */
+export const FSK_PAIR_MAX_HZ = 150_000
+/**
  * Local floor: a track's local floor is the median of 12.5 kHz (one land-mobile channel)
  * of bins each side of its segment, so a raised plateau of busy channels is its own floor.
  */
@@ -306,6 +314,11 @@ export class SpectrumPipeline {
 	 * entry covering the bin (the finest where entries overlap); 0 = no rastered entry there.
 	 */
 	private channelPeakBins = new Uint16Array(0)
+	/**
+	 * FSK pair reach per bin for the tracker: the larger of the one-channel limit of a rastered
+	 * entry and `FSK_PAIR_MAX_HZ` of a raster-less burst entry covering the bin; 0 = none.
+	 */
+	private pairReachBins = new Uint16Array(0)
 	private masks: MasksInput = {
 		exclusions: [],
 		cfarRanges: [],
@@ -1377,6 +1390,8 @@ export class SpectrumPipeline {
 			gap,
 			overload,
 			burstSegments: burstSet,
+			// Pairing reads the channel plan's reach; without a plan the tracker skips it.
+			...(this.planActive ? { pairReachBins: this.pairReachBins } : {}),
 		}
 		const gateFrom = this.out.length
 		this.emit(this.tracker.flagSpurs(this.lineMask))
@@ -2079,10 +2094,20 @@ export class SpectrumPipeline {
 		if (this.channelPeakBins.length !== n)
 			this.channelPeakBins = new Uint16Array(n)
 		this.channelPeakBins.fill(0)
+		if (this.pairReachBins.length !== n) this.pairReachBins = new Uint16Array(n)
+		this.pairReachBins.fill(0)
 		const plan = this.channelPlan
 		if (!ep || !plan) return
 		const binOf = (hz: number): number =>
 			(hz - ep.centreHz) / this.binHz + n / 2
+		const fskReach = Math.min(65_535, Math.round(FSK_PAIR_MAX_HZ / this.binHz))
+		for (const e of plan.entries) {
+			if (e.rasterHz !== null && e.rasterHz > 0) continue
+			if (!e.burst) continue
+			const first = Math.max(0, Math.ceil(binOf(e.startHz)))
+			const last = Math.min(n - 1, Math.floor(binOf(e.endHz)))
+			if (first <= last) this.pairReachBins.fill(fskReach, first, last + 1)
+		}
 		for (const e of plan.entries) {
 			if (e.rasterHz === null || !(e.rasterHz > 0)) continue
 			// A raster far wider than its slot only places one channel: the slot is the channel.
@@ -2101,6 +2126,9 @@ export class SpectrumPipeline {
 				if (cur === 0 || limit < cur) this.channelPeakBins[i] = limit
 			}
 		}
+		for (let i = 0; i < n; i++)
+			if (this.channelPeakBins[i]! > this.pairReachBins[i]!)
+				this.pairReachBins[i] = this.channelPeakBins[i]!
 	}
 
 	private applyMasks(): void {

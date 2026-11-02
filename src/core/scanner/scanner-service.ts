@@ -147,7 +147,7 @@ import { createKnownProtocolMemory } from "./known-protocol.js"
 import { narrowRasterAt } from "./narrow-digital.js"
 import { planReplayTrials } from "./replay-plan.js"
 import { TrialMemory, type TrialMemoryEntry } from "./trial-memory.js"
-import { PendingCaptureLimiter } from "./pending-capture.js"
+import { PendingCaptureLimiter, admittedAtClose } from "./pending-capture.js"
 import {
 	replayTrialWeight,
 	type ChannelActivityRanker,
@@ -3350,6 +3350,7 @@ export class ScannerService extends EventEmitter {
 			closing ||
 			(now - live.startedAt >= 1000 && now - live.lastIngestAt >= 1000)
 		const everIngested = live.lastIngestAt !== 0
+		const pendingBeforeIngest = live.discoveryId === null
 		if (throttledIngest) this.ingest(live, track, endReason)
 		// WG12 req 4.3: first gate pass. Inside the first second the throttle has
 		// not materialized a discovery, so ingest once, then ask. A later pass
@@ -3375,6 +3376,23 @@ export class ScannerService extends EventEmitter {
 		else if (!synthetic && !late && track.gate !== undefined)
 			this.refuseAnalog(live, `gate-${track.gate}`)
 		if (captureAtGate.request && !this.analogDeferred.has(live.observationId)) {
+			this.requestIqCapture(live, track)
+		} else if (
+			admittedAtClose({
+				synthetic,
+				late,
+				endReason,
+				gate: track.gate,
+				pendingBefore: pendingBeforeIngest,
+				hasDiscovery: live.discoveryId !== null,
+				alreadyRequested: this.iqTried.has(live.observationId),
+				analogDeferred: this.analogDeferred.has(live.observationId),
+			})
+		) {
+			// A burst the store admitted only on its closing ingest (a short packet or over promoted
+			// by pending or airtime evidence) never asked as an admitted track: ask now, before the
+			// close below ends the capture. The port's 2 s ring still holds a burst that closed
+			// within it, so the first packet can be replayed; the port's own budgets apply.
 			this.requestIqCapture(live, track)
 		}
 		const needs =
@@ -3564,6 +3582,10 @@ export class ScannerService extends EventEmitter {
 					.get(jobId)
 					?.ended(live.observationId, res.discoveryId, durationMs)
 		}
+		// A capture taken while the observation was pending is an admitted track's capture now:
+		// its pending slot goes back (pending-capture.ts).
+		if (live.discoveryId === null)
+			this.pendingCaptures.admitted(live.sourceId, live.observationId)
 		live.discoveryId = res.discoveryId
 		// A discovery proof belongs to its original transmission.
 		live.decoded = live.acceptedIdentity !== undefined
@@ -5374,7 +5396,11 @@ export class ScannerService extends EventEmitter {
 			!inWindow(track.centreHz, track.obwHz, epoch, USABLE_FRACTION)
 		)
 			return
-		if (pending && !this.pendingCaptures.take(live.sourceId)) return
+		if (
+			pending &&
+			!this.pendingCaptures.take(live.sourceId, live.observationId)
+		)
+			return
 		this.iqTried.add(live.observationId)
 		try {
 			const res = port.capture({

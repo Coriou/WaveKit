@@ -133,6 +133,12 @@ export interface TrackSnapshot {
 	localSnrDb?: number
 	/** WG12: engine sample when the gate first passed. */
 	gatePassedSample?: number
+	/**
+	 * Two FSK tones: the track's mean spectrum shows two near-equal humps at least 6 kHz apart
+	 * with a 6 dB valley between them (tracker `FSK2_MIN_SPACING_HZ`). A data emission (pager,
+	 * ISM sensor), not voice. Absent otherwise.
+	 */
+	fsk2?: true
 }
 
 export interface BlockSummary {

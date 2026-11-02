@@ -40,6 +40,8 @@ import {
 } from "./identify.js"
 import { classOf, familyOf, inPagerRange } from "./classify/classifier.js"
 import { orderTrialsByMemory } from "./trial-memory.js"
+import { DQ_SHORT_BURST_BLOCKS } from "./detection-quality-contract.js"
+import type { TrackSnapshot } from "../spectrum/types.js"
 import {
 	IQ_CAPTURE_MAX_MS,
 	IQ_REPLAY_MAX_TRIALS,
@@ -287,6 +289,62 @@ function extraModeOf(
 }
 
 /**
+ * Keyed at most this fraction of the time: an on-off keyed burst (Manchester about 0.5, PWM
+ * 0.25 to 0.75). A constant-envelope FM carrier reads 1 (`dutyFromEnvelope`: its envelope spans
+ * under 6 dB).
+ */
+export const OOK_DUTY_MAX = 0.75
+
+/**
+ * A bursty data emission rather than voice: two FSK tones (`fsk2`), the `ook-burst` class, or,
+ * in a band that lists ISM and outside the `tdma-ms` class, a short burst (at most
+ * `DQ_SHORT_BURST_BLOCKS`, 1 s at 50 ms) or an on-off keyed one (`OOK_DUTY_MAX`). Its analog trial runs last, after the data decoders.
+ */
+export function isDataBurst(
+	track: TrackSnapshot,
+	priors: Partial<Record<ScannerProtocol, number>>,
+): boolean {
+	if (track.fsk2 === true) return true
+	const cls = classOf(track, { allowBurst: (priors.ism ?? 1) >= 1 })
+	if (cls === "ook-burst") return true
+	// A TDMA slot pattern keys the envelope too, but it is digital voice.
+	if (!listed(priors, "ism") || cls === "tdma-ms") return false
+	return (
+		track.blocks <= DQ_SHORT_BURST_BLOCKS ||
+		(Number.isFinite(track.dutyCycle) && track.dutyCycle <= OOK_DUTY_MAX)
+	)
+}
+
+/**
+ * Data-burst order (stable inside each group): the leading known trials, rtl433 when the band
+ * lists ISM, the pager probes when the track shows two FSK tones, the other probes, then the
+ * analog trial. Memory still reorders the result (a remembered success leads).
+ */
+function dataBurstOrder(
+	candidates: readonly IqReplayTrial[],
+	input: IqReplayPlanInput,
+): IqReplayTrial[] {
+	const ism = listed(input.priors, "ism")
+	const fsk2 = input.track?.fsk2 === true
+	let lead = 0
+	while (lead < candidates.length && candidates[lead]!.known) lead++
+	const rank = (c: IqReplayTrial): number =>
+		c.kind === "analog"
+			? 3
+			: ism && c.mode.decoderType === RTL433_REPLAY_MODE.decoderType
+				? 0
+				: fsk2 && familyOf(c.protocol) === "pager"
+					? 1
+					: 2
+	const rest = candidates
+		.slice(lead)
+		.map((c, i) => ({ c, r: rank(c), i }))
+		.sort((x, y) => x.r - y.r || x.i - y.i)
+		.map(x => x.c)
+	return [...candidates.slice(0, lead), ...rest]
+}
+
+/**
  * The plan and the trials it skipped. `replayInput` is the capability set (default: the decoders
  * with a replay input path); a decoder outside it is never planned.
  */
@@ -363,6 +421,15 @@ export function planReplayTrialsDetailed(
 		if (known) candidates.unshift(trial)
 		else candidates.push(trial)
 	}
+	// A bursty data emission tries its data decoders before the analog trial (scanner quality:
+	// an ISM sensor's rtl433 came 8th behind the analog and voice probes).
+	const dataBurst =
+		input.track !== null && isDataBurst(input.track, input.priors)
+	if (dataBurst) {
+		const reordered = dataBurstOrder(candidates, input)
+		candidates.length = 0
+		candidates.push(...reordered)
+	}
 	// One decoder run per mode key (the dedup below): the memory of any protocol planned on the
 	// same run applies to every candidate of that run, so a backoff cannot be dodged by a sibling.
 	const runCovers = new Map<string, Set<string>>()
@@ -406,10 +473,11 @@ export function planReplayTrialsDetailed(
 					: 2
 		const of = (g: number): IqReplayTrial[] =>
 			candidates.filter(c => group(c) === g)
+		// A data burst's analog trial runs after every data trial.
 		const groups = [
 			byMemory(of(0), { keepBackoff: true }),
-			byMemory(of(1), { allowEmpty: true }),
-			byMemory(of(2), { allowEmpty: true }),
+			byMemory(of(dataBurst ? 2 : 1), { allowEmpty: true }),
+			byMemory(of(dataBurst ? 1 : 2), { allowEmpty: true }),
 		]
 		ordered = groups.flat()
 		if (ordered.length === 0) ordered = byMemory(candidates)
@@ -426,7 +494,14 @@ export function planReplayTrialsDetailed(
 		// identity kept apart from the queue flag: its misses still count (requirement 1.8)
 		return leading ? t : { ...t, known: false, knownProtocol: true }
 	})
-	return { trials: boundReplayTrials(ordered), skipped }
+	const trials = boundReplayTrials(ordered)
+	// A data burst's analog trial runs last but is never cut by the bound: it takes the last slot.
+	if (dataBurst && trials.length >= IQ_REPLAY_MAX_TRIALS) {
+		const analog = ordered.find(t => t.kind === "analog")
+		if (analog !== undefined && !trials.includes(analog))
+			trials[trials.length - 1] = analog
+	}
+	return { trials, skipped }
 }
 
 export function planReplayTrials(input: IqReplayPlanInput): IqReplayTrial[] {
