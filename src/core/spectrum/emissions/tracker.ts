@@ -2028,6 +2028,8 @@ export class Tracker {
 			dutyCycle:
 				f.duty ?? t.blocks / Math.max(1, t.lastOnBlock - t.openedAtBlock + 1),
 			spectralShape: spectralShape(mean, a, e, binHz),
+			obw6Hz: obwAtDb(mean, a, e, binHz, 6),
+			binHz,
 			flags: { ...t.flags },
 			tuningTrust: frameTrust(
 				t.epoch.tuningTrust,

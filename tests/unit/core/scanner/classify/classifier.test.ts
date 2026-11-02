@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest"
 import {
-	CARRIER_CLASS_MAX_HZ,
+	CARRIER_DEFAULT_BIN_HZ,
+	CARRIER_FLAT_MAX_BINS,
+	CARRIER_LINE_MAX_BINS,
+	CARRIER_PEAKED_MAX_BINS_6DB,
 	CARRIER_STEADY_DUTY_MIN,
+	carrierLine,
 	AM_VOICE_MAX_OBW_HZ,
 	AM_VOICE_MIN_OBW_HZ,
 	applyPriors,
@@ -18,6 +22,10 @@ import {
 	ScannerClassSchema,
 } from "../../../../../src/core/scanner/store/schemas.js"
 import type { ScannerProtocol } from "../../../../../src/core/scanner/types.js"
+import {
+	obwAtDb,
+	spectralShape,
+} from "../../../../../src/core/spectrum/emissions/spectral-features.js"
 import type { TrackSnapshot } from "../../../../../src/core/spectrum/types.js"
 import {
 	addInto,
@@ -26,6 +34,43 @@ import {
 	mulberry32,
 } from "../../../../mocks/scanner/signals.js"
 import { BLOCK, CENTRE, FS, Harness } from "../../spectrum/pipeline-harness.js"
+
+/** FFT bin widths: 1.024 Msps / 1 024 and 2.4 Msps / 2 048 (the engine's default FFT sizes). */
+const BIN_1024K = 1_024_000 / 1_024
+const BIN_2400K = 2_400_000 / 2_048
+
+/** Power (dB) of a Hann-windowed complex tone at bin `k` (fractional), `n` points, peak `peakDb`. */
+function hannToneDb(n: number, k: number, peakDb: number): Float32Array {
+	const out = new Float32Array(n).fill(-200)
+	const re = new Float64Array(n)
+	const im = new Float64Array(n)
+	for (let t = 0; t < n; t++) {
+		const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * t) / n)
+		re[t] = w * Math.cos((2 * Math.PI * k * t) / n)
+		im[t] = w * Math.sin((2 * Math.PI * k * t) / n)
+	}
+	let peak = -Infinity
+	const lo = Math.floor(k) - 10
+	const hi = Math.floor(k) + 11
+	const raw = new Float64Array(n).fill(-Infinity)
+	for (let b = lo; b < hi; b++) {
+		let sr = 0
+		let si = 0
+		for (let t = 0; t < n; t++) {
+			const a = (-2 * Math.PI * b * t) / n
+			const c = Math.cos(a)
+			const s = Math.sin(a)
+			sr += (re[t] ?? 0) * c - (im[t] ?? 0) * s
+			si += (re[t] ?? 0) * s + (im[t] ?? 0) * c
+		}
+		const p = 10 * Math.log10(Math.max(sr * sr + si * si, 1e-30))
+		raw[b] = p
+		peak = Math.max(peak, p)
+	}
+	for (let b = lo; b < hi; b++)
+		out[b] = Math.max(-200, (raw[b] ?? -Infinity) - peak + peakDb)
+	return out
+}
 
 function snap(over: Partial<TrackSnapshot> = {}): TrackSnapshot {
 	return {
@@ -80,41 +125,155 @@ describe("classOf", () => {
 	])("%o → %s", (over, cls) => {
 		expect(classOf(snap(over))).toBe(cls)
 	})
-	it("a steady peaked line under 3 kHz is a carrier, not unknown; keyed, short, digital-wide or FM-wide it is not", () => {
-		const line = (over: Partial<TrackSnapshot>) =>
-			classOf(snap({ spectralShape: "peaked", obwHz: 2_000, ...over }))
+	it("repro: the steady-carrier rule counts bins of the track's FFT (≤ 4 inclusive), at 1.024 and 2.4 Msps", () => {
 		expect(CARRIER_STEADY_DUTY_MIN).toBe(0.9)
-		expect(CARRIER_CLASS_MAX_HZ).toBe(3_000)
-		expect(line({})).toBe("carrier")
-		// 3 kHz is the narrow digital floor: 2 999 Hz is a carrier, 3 000 Hz keeps its digital trials
-		expect(line({ obwHz: 2_999 })).toBe("carrier")
-		expect(line({ obwHz: 3_000 })).toBe("unknown")
-		expect(line({ obwHz: 4_000 })).toBe("gmsk-narrow")
-		// duty: at the bound a carrier, under it (keyed CW) unknown as before
-		expect(line({ dutyCycle: 0.9 })).toBe("carrier")
-		expect(line({ dutyCycle: 0.89 })).toBe("unknown")
-		expect(line({ dutyCycle: Number.NaN })).toBe("unknown")
-		// a short track stays a burst; with bursts implausible a short line is not a carrier either
-		expect(line({ blocks: 4 })).toBe("ook-burst")
-		expect(
-			classOf(snap({ spectralShape: "peaked", obwHz: 3_000, blocks: 4 }), {
-				allowBurst: false,
-			}),
-		).toBe("unknown")
-		// FM voice and narrow flat-topped data are untouched
-		expect(line({ obwHz: 11_000 })).toBe("analog-fm")
+		expect(CARRIER_LINE_MAX_BINS).toBe(4)
+		expect(CARRIER_PEAKED_MAX_BINS_6DB).toBe(3)
+		for (const binHz of [BIN_1024K, BIN_2400K]) {
+			// an on-bin tone whose ±1 neighbours noise lifted over -6 dB: peaked, 3 bins at both levels
+			const line = (over: Partial<TrackSnapshot>) =>
+				classOf(
+					snap({
+						spectralShape: "peaked",
+						obwHz: 3 * binHz,
+						obw6Hz: 3 * binHz,
+						binHz,
+						...over,
+					}),
+				)
+			expect({ binHz, cls: line({}) }).toEqual({ binHz, cls: "carrier" })
+			// drifted: 4 bins at -20 dB is still a carrier, 4 bins + 1 Hz is not
+			expect(line({ obwHz: 4 * binHz })).toBe("carrier")
+			expect(line({ obwHz: 4 * binHz + 1 })).not.toBe("carrier")
+			// -6 dB wider than 3 bins is not a tone
+			expect(line({ obw6Hz: 3 * binHz + 1, obwHz: 4 * binHz })).not.toBe(
+				"carrier",
+			)
+			// duty: at the bound a carrier, under it (keyed CW) not
+			expect(line({ dutyCycle: 0.9 })).toBe("carrier")
+			expect(line({ dutyCycle: 0.89 })).not.toBe("carrier")
+			expect(line({ dutyCycle: Number.NaN })).not.toBe("carrier")
+			// a short track stays a burst
+			expect(line({ blocks: 4 })).toBe("ook-burst")
+			// a half-bin tone reads 2 bins at -6 dB (narrow) and 4 at -20 dB: carrier
+			expect(
+				classOf(snap({ spectralShape: "narrow", obwHz: 4 * binHz, binHz })),
+			).toBe("carrier")
+		}
+		// the old Hz cut missed both: 3 000 Hz at 1 kHz bins and 3 516 Hz at 1 172 Hz bins
+		expect(3 * BIN_1024K).toBeGreaterThanOrEqual(3_000)
+		expect(3 * BIN_2400K).toBeGreaterThan(3_000)
+	})
+
+	it("narrow digital stays off the carrier rule: flat tops (NXDN48, dPMR) and lines of unknown -6 dB width keep their trials", () => {
+		expect(CARRIER_FLAT_MAX_BINS).toBe(3)
+		for (const binHz of [BIN_1024K, BIN_2400K]) {
+			// a 4 kHz flat top reads 4 bins or more at -20 dB at both rates
+			expect(Math.ceil(4_000 / binHz)).toBeGreaterThanOrEqual(4)
+			for (const obwHz of [4 * binHz, 5 * binHz])
+				expect(["fsk4-6k25", "fsk4-12k5"]).toContain(
+					classOf(snap({ spectralShape: "flat", obwHz, obw6Hz: obwHz, binHz })),
+				)
+			// repro: a 3-bin tone that noise made flat is still a carrier
+			expect(
+				classOf(
+					snap({
+						spectralShape: "flat",
+						obwHz: 3 * binHz,
+						obw6Hz: 3 * binHz,
+						binHz,
+					}),
+				),
+			).toBe("carrier")
+		}
+		// unknown -6 dB width: the flat-top path as before
 		expect(classOf(snap({ spectralShape: "flat", obwHz: 3_000 }))).toBe(
 			"fsk4-6k25",
 		)
+		// a peaked off-raster line of unknown -6 dB width: the pre-existing path (digital trials)
+		expect(classOf(snap({ spectralShape: "peaked", obwHz: 2_000 }))).toBe(
+			"unknown",
+		)
+		expect(classOf(snap({ spectralShape: "peaked", obwHz: 2_344 }))).toBe(
+			"unknown",
+		)
+		expect(classOf(snap({ spectralShape: "peaked", obwHz: 3_000 }))).toBe(
+			"unknown",
+		)
+		expect(classOf(snap({ spectralShape: "peaked", obwHz: 11_000 }))).toBe(
+			"analog-fm",
+		)
 	})
 
-	it("steadyLine: narrow, over 4 blocks and on 90 % of the time; undecided while young", () => {
-		const t = (
-			over: Partial<{ obwHz: number; blocks: number; dutyCycle: number }>,
-		) => steadyLine({ obwHz: 1_000, blocks: 40, dutyCycle: 1, ...over })
+	it("carrierLine: Hann pure tones on a bin centre read 3 bins, half a bin off 4 bins, both carrier lines at both rates", () => {
+		for (const [rate, n] of [
+			[1_024_000, 1_024],
+			[2_400_000, 2_048],
+		] as const) {
+			const binHz = rate / n
+			for (const [frac, bins] of [
+				[0, 3],
+				[0.5, 4],
+			] as const) {
+				const k0 = n / 4
+				const db = hannToneDb(n, k0 + frac, 40)
+				const lo = k0 - 8
+				const hi = k0 + 9
+				const w20 = obwAtDb(db, lo, hi, binHz, 20)
+				const w6 = obwAtDb(db, lo, hi, binHz, 6)
+				const shape = spectralShape(db, lo, hi, binHz)
+				expect({ rate, frac, bins: Math.round(w20 / binHz) }).toEqual({
+					rate,
+					frac,
+					bins,
+				})
+				expect(shape).toBe("narrow")
+				expect(
+					carrierLine({ obwHz: w20, obw6Hz: w6, spectralShape: shape, binHz }),
+				).toBe(true)
+			}
+		}
+	})
+
+	it("carrierLine: one shared rule, bounds at and past them, malformed input not a line", () => {
+		expect(CARRIER_DEFAULT_BIN_HZ).toBe(1_000)
+		const c = (over: Parameters<typeof carrierLine>[0]) => carrierLine(over)
+		expect(c({ obwHz: 4_000 })).toBe(true)
+		expect(c({ obwHz: 4_001 })).toBe(false)
+		expect(c({ obwHz: 4 * BIN_2400K, binHz: BIN_2400K })).toBe(true)
+		expect(c({ obwHz: 4 * BIN_2400K + 1, binHz: BIN_2400K })).toBe(false)
+		// a malformed bin width reads the default bin
+		expect(c({ obwHz: 4_500, binHz: Number.NaN })).toBe(false)
+		expect(c({ obwHz: 4_000, binHz: -1 })).toBe(true)
+		expect(c({ obwHz: Number.NaN })).toBe(false)
+		expect(c({ obwHz: 0 })).toBe(false)
+		expect(c({ obwHz: 1_000, spectralShape: "flat" })).toBe(false)
+		expect(c({ obwHz: 3_000, spectralShape: "flat", obw6Hz: 3_000 })).toBe(true)
+		expect(c({ obwHz: 3_001, spectralShape: "flat", obw6Hz: 3_000 })).toBe(
+			false,
+		)
+		expect(c({ obwHz: 1_000, spectralShape: "peaked" })).toBe(false)
+		expect(c({ obwHz: 3_000, spectralShape: "peaked", obw6Hz: 3_000 })).toBe(
+			true,
+		)
+		expect(c({ obwHz: 3_000, spectralShape: "peaked", obw6Hz: 3_001 })).toBe(
+			false,
+		)
+	})
+
+	it("steadyLine: a carrier line over 4 blocks and on 90 % of the time; undecided while young", () => {
+		const t = (over: Partial<Parameters<typeof steadyLine>[0]>) =>
+			steadyLine({
+				obwHz: 1_000,
+				blocks: 40,
+				dutyCycle: 1,
+				spectralShape: "narrow",
+				...over,
+			})
 		expect(t({})).toBe(true)
-		expect(t({ obwHz: 3_999 })).toBe(true)
-		expect(t({ obwHz: 4_000 })).toBe(false)
+		expect(t({ obwHz: 4_000 })).toBe(true)
+		expect(t({ obwHz: 4_001 })).toBe(false)
+		expect(t({ obwHz: 4 * BIN_2400K, binHz: BIN_2400K })).toBe(true)
 		expect(t({ dutyCycle: 0.9 })).toBe(true)
 		expect(t({ dutyCycle: 0.89 })).toBe(false)
 		expect(t({ blocks: 5 })).toBe(true)
@@ -123,6 +282,16 @@ describe("classOf", () => {
 		expect(t({ blocks: 2, obwHz: 11_000 })).toBe(false)
 		expect(t({ obwHz: Number.NaN })).toBe(false)
 		expect(t({ dutyCycle: Number.NaN })).toBe(false)
+		// repro: a continuous dPMR / NXDN48 flat top is no spur candidate; no shape reads as flat
+		expect(t({ spectralShape: "flat", obwHz: 3_000 })).toBe(false)
+		expect(
+			t({ spectralShape: "flat", obwHz: 4_000, obw6Hz: 3_000, binHz: 1_000 }),
+		).toBe(false)
+		expect(t({ spectralShape: undefined })).toBe(false)
+		expect(t({ spectralShape: "peaked", obwHz: 3_000 })).toBe(false)
+		expect(t({ spectralShape: "peaked", obwHz: 3_000, obw6Hz: 3_000 })).toBe(
+			true,
+		)
 	})
 
 	it("does not call short tracks bursts where bursts are implausible", () => {

@@ -43,6 +43,9 @@ import {
 	buildScene,
 	carriersScene,
 	loSpurScene,
+	sweepSpur2400Scene,
+	sweepSpurScene,
+	twoEmittersSweepScene,
 	voiceIdScene,
 	gfskScene,
 	noiseScene,
@@ -250,6 +253,7 @@ describe("scanner quality benchmark scene", () => {
 			discoveries: [],
 			captures: [c],
 			finalIds: [],
+			flaggedIds: [],
 			transients: 0,
 			refusedCaptures: { busy: 0, rateLimited: 0 },
 		})
@@ -310,6 +314,7 @@ describe("scanner quality benchmark scene", () => {
 			discoveries: [],
 			captures: [c],
 			finalIds: [],
+			flaggedIds: [],
 			transients: 0,
 			refusedCaptures: { busy: 0, rateLimited: 0 },
 		})
@@ -702,22 +707,68 @@ const runScene = async (scene: Scene): Promise<QualityReport> => {
 }
 
 describe("scanner quality benchmark, quiet band (real scanner, port limits)", () => {
-	it("a receiver spur following the LO through three retunes leaves no discovery; real emitters stay one record each", async () => {
+	it("a receiver spur seen from two centres only (A, B, A, B) stays discovered, never flagged; real emitters stay one record each", async () => {
 		const scene = loSpurScene()
 		const run = await runScanner(new RetunedSource(scene))
 		const r = scoreRetuned(scene, run, { "nfm-voice-20dB": 1_000 })
 		const by = (id: string) => r.signals.find(s => s.id === id)!
-		// discovered at both positions while it has followed the LO through fewer than 3 retunes
-		// (C1, C2, C1), retired at the third (back at C2), never created again
-		expect(by("lo-spur-20dB").created).toBeLessThanOrEqual(2)
-		expect(by("lo-spur-20dB").live).toBe(0)
-		expect(r.falseLive).toBe(0)
+		// two centres cannot tell a spur from two real emitters at one offset: when unsure, discover
+		expect(by("lo-spur-20dB").created).toBe(2)
+		expect(by("lo-spur-20dB").flagged).toBe(0)
+		expect(r.realFlagged).toBe(0)
 		for (const id of ["carrier-20dB", "nfm-voice-20dB"]) {
 			expect({ id, created: by(id).created }).toEqual({ id, created: 1 })
 			expect({ id, live: by(id).live }).toEqual({ id, live: 1 })
 		}
 		expect(by("carrier-20dB").labels).toEqual(["carrier"])
 		expect(by("nfm-voice-20dB").labels).toEqual(["analog-fm"])
+	}, 120_000)
+
+	it("repro: receiver spurs in a 3-hop tiling sweep (785 kHz step, 1.024 Msps, cyclic) are flagged, kept and hidden; the real carrier is listed", async () => {
+		const scene = sweepSpurScene()
+		const run = await runScanner(new RetunedSource(scene))
+		const r = scoreRetuned(scene, run)
+		const by = (id: string) => r.signals.find(s => s.id === id)!
+		// -500 kHz lies past the detector's ±486.4 kHz span at 1.024 Msps: never tracked
+		expect(by("spur-500k").created).toBe(0)
+		for (const id of ["spur-450k", "spur250k"]) {
+			const s = by(id)
+			expect({ id, created: s.created }).toEqual({ id, created: 3 })
+			expect({ id, flagged: s.flagged, live: s.live }).toEqual({
+				id,
+				flagged: 3,
+				live: 0,
+			})
+		}
+		expect(r.falseLive).toBe(0)
+		expect(r.realFlagged).toBe(0)
+		expect(by("carrier-1").live).toBe(1)
+		expect(by("carrier-1").flagged).toBe(0)
+	}, 120_000)
+
+	it("repro: a receiver spur in a 3-hop sweep at 2.4 Msps is flagged, kept and hidden; the real carrier is listed", async () => {
+		const scene = sweepSpur2400Scene()
+		const run = await runScanner(new RetunedSource(scene))
+		const r = scoreRetuned(scene, run)
+		const by = (id: string) => r.signals.find(s => s.id === id)!
+		expect(by("spur-700k").created).toBe(3)
+		expect(by("spur-700k").flagged).toBe(3)
+		expect(by("spur-700k").live).toBe(0)
+		expect(r.realFlagged).toBe(0)
+		expect(by("carrier-1").live).toBe(1)
+	}, 180_000)
+
+	it("two real emitters at one offset from two of three hops are never flagged", async () => {
+		const scene = twoEmittersSweepScene()
+		const run = await runScanner(new RetunedSource(scene))
+		const r = scoreRetuned(scene, run)
+		for (const s of r.signals)
+			expect({ id: s.id, live: s.live, flagged: s.flagged }).toEqual({
+				id: s.id,
+				live: 1,
+				flagged: 0,
+			})
+		expect(run.flaggedIds).toEqual([])
 	}, 120_000)
 
 	it("steady carriers show as carriers, never FM voice; the NFM over is analog-fm", async () => {

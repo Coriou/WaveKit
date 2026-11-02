@@ -1005,6 +1005,153 @@ export function loSpurScene(seed = 20_261_108): RetunedScene {
 	}
 }
 
+/**
+ * A tuner sweeping `centres` cyclically, `dwellMs` at each, `cycles` times round (synthetic). Each
+ * receiver spur sits at a fixed offset from the tuned centre (on all the time, 20 dB) and so moves
+ * with every hop; each real carrier stays at its RF frequency (20 dB, on all the time), present in
+ * a hop only when inside 45 % of the sample rate from its centre.
+ */
+export function sweepScene(o: {
+	name: string
+	rateHz: number
+	centres: readonly number[]
+	dwellMs: number
+	cycles: number
+	spurOffsetsHz: readonly number[]
+	carriersHz: readonly number[]
+	seed: number
+}): RetunedScene {
+	const segments: RetunedSegment[] = []
+	let t = 0
+	let i = 0
+	for (let k = 0; k < o.cycles; k++)
+		for (const centreHz of o.centres) {
+			const ms = o.dwellMs
+			const signals: SignalSpec[] = [
+				...o.spurOffsetsHz.map(
+					(offsetHz): SignalSpec => ({
+						class: "birdie",
+						offsetHz,
+						snrDb: 20,
+						intervals: ALWAYS(ms),
+					}),
+				),
+				...o.carriersHz
+					.filter(hz => Math.abs(hz - centreHz) <= 0.45 * o.rateHz)
+					.map(
+						(hz): SignalSpec => ({
+							class: "carrier",
+							offsetHz: hz - centreHz,
+							snrDb: 20,
+							intervals: ALWAYS(ms),
+						}),
+					),
+			]
+			segments.push({
+				fromMs: t,
+				centreHz,
+				scene: buildScene({
+					name: `${o.name}-${i + 1}`,
+					rateHz: o.rateHz,
+					centreHz,
+					durationMs: ms,
+					seed: o.seed + i,
+					noiseSigma: 0.03,
+					signals,
+				}),
+			})
+			t += ms
+			i++
+		}
+	return {
+		name: o.name,
+		rateHz: o.rateHz,
+		durationMs: t,
+		segments,
+		truth: [
+			...o.spurOffsetsHz.map(
+				(offsetHz): RetunedTruth => ({
+					id: `spur${offsetHz / 1000}k`,
+					class: "birdie",
+					snrDb: 20,
+					bandwidthHz: 100,
+					rfHz: o.centres.map(c => c + offsetHz),
+					spurious: true,
+				}),
+			),
+			...o.carriersHz.map(
+				(hz, k): RetunedTruth => ({
+					id: `carrier-${k + 1}`,
+					class: "carrier",
+					snrDb: 20,
+					bandwidthHz: 100,
+					rfHz: [hz],
+					spurious: false,
+				}),
+			),
+		],
+	}
+}
+
+/** Synthetic sweep base (no real allocation implied). */
+const SWEEP_BASE_HZ = 432_000_000
+
+/**
+ * Live-like sweep geometry: 1.024 Msps, 3 hops 785 kHz apart (each hop's usable ±409.6 kHz never
+ * covers another hop's spur position), cyclic, 6 s per hop, 3 cycles (54 s). Receiver spurs at
+ * -500 kHz (outside the detector's ±486.4 kHz span: never tracked), -450 kHz (in the edge zone
+ * past ±409.6 kHz) and +250 kHz from the tuned centre; one real carrier 100 kHz above the first
+ * hop (seen from that hop only). Ground truth: every spur record flagged, the carrier listed.
+ */
+export function sweepSpurScene(seed = 20_261_102): RetunedScene {
+	return sweepScene({
+		name: "sweep-spur-1024k",
+		rateHz: 1_024_000,
+		centres: [0, 1, 2].map(k => SWEEP_BASE_HZ + k * 785_000),
+		dwellMs: 6_000,
+		cycles: 3,
+		spurOffsetsHz: [-500_000, -450_000, 250_000],
+		carriersHz: [SWEEP_BASE_HZ + 100_000],
+		seed,
+	})
+}
+
+/**
+ * The same at 2.4 Msps (bins 1 171.875 Hz): 3 hops 1.9 MHz apart (usable ±960 kHz), 5 s per hop,
+ * 3 cycles (45 s), a receiver spur at -700 kHz, a real carrier 300 kHz above the first hop.
+ */
+export function sweepSpur2400Scene(seed = 20_261_103): RetunedScene {
+	return sweepScene({
+		name: "sweep-spur-2400k",
+		rateHz: 2_400_000,
+		centres: [0, 1, 2].map(k => SWEEP_BASE_HZ + k * 1_900_000),
+		dwellMs: 5_000,
+		cycles: 3,
+		spurOffsetsHz: [-700_000],
+		carriersHz: [SWEEP_BASE_HZ + 300_000],
+		seed,
+	})
+}
+
+/**
+ * Two real emitters at one offset, alternating with the hops: 1.024 Msps, 3 hops 785 kHz apart,
+ * steady carriers 300 kHz below the first and the second hop (each seen from its hop only), nothing
+ * at that offset from the third. 6 s per hop, 3 cycles. Ground truth: both listed, nothing flagged.
+ */
+export function twoEmittersSweepScene(seed = 20_261_104): RetunedScene {
+	const centres = [0, 1, 2].map(k => SWEEP_BASE_HZ + k * 785_000)
+	return sweepScene({
+		name: "two-emitters-1024k",
+		rateHz: 1_024_000,
+		centres,
+		dwellMs: 6_000,
+		cycles: 3,
+		spurOffsetsHz: [],
+		carriersHz: [centres[0]! - 300_000, centres[1]! - 300_000],
+		seed,
+	})
+}
+
 /** Plays a retuned scene segment by segment and says which centre each moment is tuned to. */
 export class RetunedSource {
 	readonly rateHz: number

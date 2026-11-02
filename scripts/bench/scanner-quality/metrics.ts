@@ -612,8 +612,10 @@ export interface RetunedSignalScore {
 	spurious: boolean
 	/** Records created for it (deleted or merged ones included). */
 	created: number
-	/** Records for it still listed at the end. */
+	/** Records for it still listed at the end (the default list: receiver spurs hidden). */
 	live: number
+	/** Records for it flagged as receiver spurs at the end (kept, hidden by default). */
+	flagged: number
 	/** Classes its records showed. */
 	labels: string[]
 	timeToClassifyMs: number | null
@@ -626,6 +628,10 @@ export interface RetunedReport {
 	/** Records of no real signal: created, and still listed at the end. */
 	falseCreated: number
 	falseLive: number
+	/** Records of no real signal flagged as receiver spurs at the end. */
+	falseFlagged: number
+	/** Records of real signals flagged as receiver spurs at the end (must stay 0). */
+	realFlagged: number
 }
 
 /**
@@ -638,9 +644,12 @@ export function scoreRetuned(
 	firstOnMs: Partial<Record<string, number>> = {},
 ): RetunedReport {
 	const live = new Set(run.finalIds)
+	const flaggedSet = new Set(run.flaggedIds)
 	const of = new Map<string, RunRecord["discoveries"]>()
 	let falseCreated = 0
 	let falseLive = 0
+	let falseFlagged = 0
+	let realFlagged = 0
 	for (const d of run.discoveries) {
 		let best: (typeof scene.truth)[number] | null = null
 		let bestD = Infinity
@@ -655,7 +664,8 @@ export function scoreRetuned(
 		if (best === null || best.spurious) {
 			falseCreated++
 			if (live.has(d.id)) falseLive++
-		}
+			if (flaggedSet.has(d.id)) falseFlagged++
+		} else if (flaggedSet.has(d.id)) realFlagged++
 		if (best === null) continue
 		const list = of.get(best.id) ?? []
 		list.push(d)
@@ -678,6 +688,7 @@ export function scoreRetuned(
 				spurious: t.spurious,
 				created: ds.length,
 				live: ds.filter(d => live.has(d.id)).length,
+				flagged: ds.filter(d => flaggedSet.has(d.id)).length,
 				labels: [...new Set(ds.map(d => d.class))],
 				timeToClassifyMs: at.length
 					? Math.min(...at) - (firstOnMs[t.id] ?? 0)
@@ -686,6 +697,8 @@ export function scoreRetuned(
 		}),
 		falseCreated,
 		falseLive,
+		falseFlagged,
+		realFlagged,
 	}
 }
 
@@ -693,10 +706,10 @@ export function formatRetuned(r: RetunedReport): string {
 	const lines = [`scene ${r.scene}: ${r.iqSeconds.toFixed(1)} s IQ (retuned)`]
 	for (const s of r.signals)
 		lines.push(
-			`  ${pad(s.id, 18)} ${s.spurious ? "(spurious)" : "          "} created ${s.created} live ${s.live} ttc ${ms(s.timeToClassifyMs)} labels ${s.labels.join(",") || "-"}`,
+			`  ${pad(s.id, 18)} ${s.spurious ? "(spurious)" : "          "} created ${s.created} live ${s.live} flagged ${s.flagged} ttc ${ms(s.timeToClassifyMs)} labels ${s.labels.join(",") || "-"}`,
 		)
 	lines.push(
-		`false discoveries created ${r.falseCreated}, listed at the end ${r.falseLive}`,
+		`false discoveries created ${r.falseCreated}, listed at the end ${r.falseLive}, flagged ${r.falseFlagged}; real records flagged ${r.realFlagged}`,
 	)
 	return lines.join("\n")
 }

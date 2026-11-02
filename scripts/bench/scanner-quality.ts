@@ -16,7 +16,9 @@
  * Scenes: small, full, gfsk (one GFSK burst transmitter, ground truth 1 discovery), and the
  * false-discovery scenes noise-1024k, noise-2400k, spurs-1024k, spurs-2400k (120 s each, nothing
  * real on air), lo-spur (a receiver spur at a fixed offset while the tuner alternates two
- * centres, A, B, A, B; --lo-lock on|off), carriers (steady unmodulated carriers and one NFM over) and voice-id
+ * centres, A, B, A, B; --lo-lock on|off), sweep-spur-1024k and sweep-spur-2400k (a 3-hop tiling
+ * sweep with receiver spurs: their records are flagged, kept and hidden), two-emitters-1024k (two
+ * real carriers at one offset from two of 3 hops: nothing flagged), carriers (steady unmodulated carriers and one NFM over) and voice-id
  * (one 28 s NFM over with CTCSS at 20 dB). --seeds N runs N seeds and prints the onset-to-classified
  * latency of each signal. A/B switches for the weak-admission rules (docs/SCANNER.md): --rule1 on|off (the
  * duty-aware sustained median, default on) and --rule2 on|off (repeated gate passes, default
@@ -54,12 +56,16 @@ import {
 	buildScene,
 	carriersScene,
 	loSpurScene,
+	sweepSpur2400Scene,
+	sweepSpurScene,
+	twoEmittersSweepScene,
 	voiceIdScene,
 	fullScene,
 	gfskScene,
 	noiseScene,
 	smallScene,
 	spursScene,
+	type RetunedScene,
 	type Scene,
 } from "./scanner-quality/scene.js"
 
@@ -100,6 +106,14 @@ const SCENES: Record<string, (seed?: number) => Scene> = {
 	"voice-id": seed => voiceIdScene(seed),
 }
 
+/** Retuned scenes (the tuner moves): scored by absolute frequency, with receiver-spur flags. */
+const RETUNED: Record<string, (seed?: number) => RetunedScene> = {
+	"lo-spur": loSpurScene,
+	"sweep-spur-1024k": sweepSpurScene,
+	"sweep-spur-2400k": sweepSpur2400Scene,
+	"two-emitters-1024k": twoEmittersSweepScene,
+}
+
 /**
  * `--lo-lock on|off` (default on): off makes the store's LO-locked spur check answer "not
  * locked", the behaviour before it existed (A/B runs).
@@ -110,11 +124,17 @@ function loLockSwitch(): ((svc: ScannerService) => void) | undefined {
 		const store = (
 			svc as unknown as {
 				store: {
-					loSpurs: { check: () => { verdict: "clear"; partners: string[] } }
+					loSpurs: {
+						check: () => {
+							verdict: "clear"
+							partners: string[]
+							centres: number
+						}
+					}
 				}
 			}
 		).store
-		store.loSpurs.check = () => ({ verdict: "clear", partners: [] })
+		store.loSpurs.check = () => ({ verdict: "clear", partners: [], centres: 0 })
 	}
 }
 
@@ -288,11 +308,15 @@ async function main(): Promise<void> {
 	}
 	const name = arg("scene") ?? "small"
 	const captureLimits = !process.argv.includes("--unbounded-captures")
-	if (name === "lo-spur") {
+	const retuned = RETUNED[name]
+	if (retuned !== undefined) {
 		const seeds = num("seeds") ?? 1
-		const base = num("seed") ?? 20_261_108
+		const base = num("seed")
 		for (let k = 0; k < seeds; k++) {
-			const scene = loSpurScene(base + 10 * k)
+			const scene =
+				base === undefined && k === 0
+					? retuned()
+					: retuned((base ?? 0) + 10 * k)
 			const inspect = loLockSwitch()
 			const run = await runScanner(new RetunedSource(scene), {
 				captureLimits,
@@ -308,7 +332,7 @@ async function main(): Promise<void> {
 	const make = SCENES[name]
 	if (make === undefined) {
 		process.stderr.write(
-			`--scene is one of ${Object.keys(SCENES).join(", ")}\n`,
+			`--scene is one of ${[...Object.keys(SCENES), ...Object.keys(RETUNED)].join(", ")}\n`,
 		)
 		process.exit(2)
 	}

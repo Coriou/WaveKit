@@ -26,6 +26,7 @@ import type {
 	Observation,
 } from "../../../../src/core/scanner/types.js"
 import type { Logger } from "../../../../src/utils/logger.js"
+import { feedAnalogEvidence } from "../../../../src/index.js"
 
 const HZ = 446_006_250
 const T0 = Date.parse("2026-10-17T10:00:00.000Z")
@@ -346,8 +347,16 @@ interface Recorded {
 	analog: ProofAnalogInput
 }
 
-function evidenceRig(opts: { observations?: () => Observation[] } = {}) {
+function evidenceRig(
+	opts: {
+		observations?: () => Observation[]
+		/** recordAnalog's answer for the n-th call (from 1); default always accepted. */
+		accept?: (n: number) => boolean
+		now?: () => number
+	} = {},
+) {
 	const recorded: Recorded[] = []
+	let calls = 0
 	const log = createAnalogEvidenceLog({ monitoring: () => true })
 	const warn = vi.fn()
 	const child = { warn, child: () => child }
@@ -370,13 +379,16 @@ function evidenceRig(opts: { observations?: () => Observation[] } = {}) {
 				nextCursor: null,
 			}),
 			recordAnalog: (observationId: string, analog: ProofAnalogInput) => {
-				recorded.push({ observationId, analog })
-				return true
+				calls += 1
+				const ok = opts.accept?.(calls) ?? true
+				if (ok) recorded.push({ observationId, analog })
+				return ok
 			},
 		},
 		analogLog: log,
 		trust: () => "commanded",
 		logger: { warn, child: () => child } as unknown as Logger,
+		...(opts.now === undefined ? {} : { now: opts.now }),
 	})
 	evidence.start()
 	return { recorded, log, evidence, warn }
@@ -518,6 +530,40 @@ describe("live-audio evidence in progress", () => {
 		expect(recorded).toHaveLength(1)
 		expect(recorded[0]?.observationId).toBe("o_2")
 		expect(recorded[0]?.analog.at).toBe(T0 + 28_000)
+	})
+
+	it("repro: an early row the store rejects leaves the close to record", () => {
+		const { recorded, log } = evidenceRig({ accept: n => n > 1 })
+		log.record(openEvent())
+		log.recordTone(openEvent({ tone: CTCSS }))
+		expect(recorded).toEqual([])
+		log.record(closedEvent())
+		expect(recorded).toHaveLength(1)
+		expect(recorded[0]?.analog.at).toBe(T0 + 28_000)
+	})
+
+	it("an open transmission's time and overlap use the injected clock", () => {
+		const { recorded, log } = evidenceRig({ now: () => T0 + 1_234 })
+		log.record(openEvent())
+		log.recordTone(openEvent({ tone: CTCSS }))
+		expect(recorded).toHaveLength(1)
+		expect(recorded[0]?.analog.at).toBe(T0 + 1_234)
+	})
+
+	it("repro: the production wiring (feedAnalogEvidence) records a qualified tone before the close", () => {
+		vi.useFakeTimers({ now: T0, toFake: ["Date"] })
+		const r = trackerRig(CTCSS)
+		const { recorded, log } = evidenceRig()
+		feedAnalogEvidence(r.tracker, log)
+		r.source.gate(true)
+		r.source.audio(1)
+		expect(r.tones).toHaveLength(1)
+		expect(recorded).toHaveLength(1)
+		expect(recorded[0]?.analog.outcome).toBe("decoded")
+		r.advance(27_000)
+		vi.setSystemTime(T0 + 28_000)
+		r.source.gate(false)
+		expect(recorded).toHaveLength(1)
 	})
 
 	it("end to end: a 28 s CTCSS voice transmission is recorded within 1 s of audio, once", () => {

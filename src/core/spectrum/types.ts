@@ -112,6 +112,10 @@ export interface TrackSnapshot {
 	acf30?: number
 	acf60?: number
 	spectralShape: "flat" | "peaked" | "narrow"
+	/** Width at -6 dB below the peak of the mean spectrum (Hz, whole bins). Absent on older producers. */
+	obw6Hz?: number
+	/** The track's FFT bin width (Hz): sample rate / FFT size of its epoch. Absent on older producers. */
+	binHz?: number
 	flags: TrackFlags
 	tuningTrust: TuningTrust
 	/**

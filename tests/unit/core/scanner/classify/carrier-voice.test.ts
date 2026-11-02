@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { carrierAwareAnalog } from "../../../../../src/core/scanner/classify/carrier-voice.js"
-import { CARRIER_LINE_MAX_HZ } from "../../../../../src/core/scanner/classify/classifier.js"
+import { CARRIER_LINE_MAX_BINS } from "../../../../../src/core/scanner/classify/classifier.js"
 import type { ProofAnalogInput } from "../../../../../src/core/scanner/scanner-redesign-contract.js"
 
 const row = (over: Partial<ProofAnalogInput> = {}): ProofAnalogInput => ({
@@ -35,17 +35,30 @@ describe("carrierAwareAnalog", () => {
 		).toEqual(row())
 	})
 
-	it("width bound: just under 4 kHz is a carrier line, at 4 kHz it is not", () => {
-		expect(CARRIER_LINE_MAX_HZ).toBe(4_000)
+	it("repro: width bound in bins of the observation's FFT, inclusive: a half-bin tone (4 bins) is a carrier at 1.024 and 2.4 Msps", () => {
+		expect(CARRIER_LINE_MAX_BINS).toBe(4)
+		for (const binHz of [1_024_000 / 1_024, 2_400_000 / 2_048]) {
+			const at = (obwHz: number) =>
+				carrierAwareAnalog(row(), { cls: "carrier", obwHz, binHz }).outcome
+			expect({ binHz, outcome: at(3 * binHz) }).toEqual({
+				binHz,
+				outcome: "carrier-only",
+			})
+			expect({ binHz, outcome: at(4 * binHz) }).toEqual({
+				binHz,
+				outcome: "carrier-only",
+			})
+			expect({ binHz, outcome: at(4 * binHz + 1) }).toEqual({
+				binHz,
+				outcome: "heard",
+			})
+		}
+		// without its bin width an observation reads the default 1 kHz bin (4 000 Hz inclusive)
 		expect(
-			carrierAwareAnalog(row(), {
-				cls: "carrier",
-				obwHz: CARRIER_LINE_MAX_HZ - 1,
-			}).outcome,
+			carrierAwareAnalog(row(), { cls: "carrier", obwHz: 4_000 }).outcome,
 		).toBe("carrier-only")
 		expect(
-			carrierAwareAnalog(row(), { cls: "carrier", obwHz: CARRIER_LINE_MAX_HZ })
-				.outcome,
+			carrierAwareAnalog(row(), { cls: "carrier", obwHz: 4_001 }).outcome,
 		).toBe("heard")
 	})
 

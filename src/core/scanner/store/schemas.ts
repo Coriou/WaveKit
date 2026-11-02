@@ -208,7 +208,7 @@ export const DiscoverySchema = z.object({
  * `proof`, `evidenceLevel`, `hint`, `coverage`, `trialMemory`, `absorbedInto`, `requestedId`,
  * `revision`, `storeEpoch` and `storeRevision` are derived DTO fields (A12; band inspection UX
  * 1.4, 3.1, 3.3; trial memory on detail reads). They are not journal keys. Nor is `lastActivity`
- * (an Activity event reference this core does not set yet).
+ * (an Activity event reference this core does not set yet), nor `receiverSpur` (memory only).
  */
 export type DiscoveryCheck = Assert<
 	SchemaMatches<
@@ -225,6 +225,7 @@ export type DiscoveryCheck = Assert<
 			| "storeEpoch"
 			| "storeRevision"
 			| "lastActivity"
+			| "receiverSpur"
 		>,
 		typeof DiscoverySchema
 	>

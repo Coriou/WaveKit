@@ -743,7 +743,7 @@ export function feedAnalogEvidence(
 	tracker: Pick<AnalogTransmissionTracker, "on"> &
 		Partial<Pick<AnalogTransmissionTracker, "pending">>,
 	log: Pick<AnalogEvidenceLog, "record"> &
-		Partial<Pick<AnalogEvidenceLog, "setPending">>,
+		Partial<Pick<AnalogEvidenceLog, "setPending" | "recordTone">>,
 	dataGate?: Pick<DataDecodeGate, "hold">,
 ): void {
 	tracker.on("transmission", event => {
@@ -755,6 +755,9 @@ export function feedAnalogEvidence(
 		dataGate.hold(event, isData => {
 			log.record(isData ? { ...event, data: true } : event)
 		})
+	})
+	tracker.on("tone", event => {
+		log.recordTone?.(event)
 	})
 	// WG10 R2: identify counts a not yet published opening at its deadline as `timeout`.
 	if (typeof tracker.pending === "function")

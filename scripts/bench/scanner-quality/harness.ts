@@ -126,8 +126,10 @@ export interface RunRecord {
 	tracks: TrackRecord[]
 	discoveries: DiscoveryRecord[]
 	captures: CaptureRecord[]
-	/** Discoveries listed by the service at the end (after merges). */
+	/** Discoveries listed by the service at the end (after merges; receiver spurs hidden). */
 	finalIds: string[]
+	/** Discoveries flagged as receiver spurs at the end (hidden from the default list, kept). */
+	flaggedIds: string[]
 	transients: number
 	/** Capture requests the modelled port refused. */
 	refusedCaptures: { busy: number; rateLimited: number }
@@ -637,8 +639,14 @@ export async function runScanner(
 		const finalIds = svc
 			.listDiscoveries({ limit: 10_000 })
 			.items.map((d: Discovery) => d.id)
-		for (const d of svc.listDiscoveries({ limit: 10_000 }).items)
-			record(d, false, null)
+		const everything = svc.listDiscoveries({
+			limit: 10_000,
+			includeReceiverSpurs: true,
+		}).items
+		const flaggedIds = everything
+			.filter((d: Discovery) => d.receiverSpur !== undefined)
+			.map((d: Discovery) => d.id)
+		for (const d of everything) record(d, false, null)
 		return {
 			rateHz: fs,
 			centreHz: source.centreHz,
@@ -649,6 +657,7 @@ export async function runScanner(
 			discoveries: [...discoveries.values()],
 			captures: [...captures.values()],
 			finalIds,
+			flaggedIds,
 			transients,
 			refusedCaptures: { ...refused },
 		}

@@ -18,6 +18,7 @@ import type {
 } from "../spectrum/types.js"
 import type {
 	DiscoveryCoverage,
+	DiscoveryReceiverSpur,
 	DiscoveryTrialMemory,
 } from "@wavekit/api-types"
 
@@ -333,6 +334,8 @@ export interface Discovery {
 	evidenceLevel?: ScannerEvidenceLevel
 	/** Scanner-redesign 3.11: weak discoveries only, computed on read, never stored. */
 	hint?: ScannerClass | "ism-device" | "analog-voice" | "lora"
+	/** Receiver-spur flag (api-types `Discovery.receiverSpur`): computed on read, memory only. */
+	receiverSpur?: DiscoveryReceiverSpur
 	/**
 	 * The latest Activity event attributed to this discovery (api-types `Discovery.lastActivity`).
 	 * Not set by this core yet: the Activity event id is allocated outside the scanner.

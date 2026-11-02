@@ -38,6 +38,8 @@ export interface LiveAudioEvidenceDeps {
 	analogLog: AnalogEvidenceLog
 	trust: (sourceId: string) => TuningTrust
 	logger: Logger
+	/** Wall clock (ms) for an open transmission's end and the overlap check; default Date.now. */
+	now?: () => number
 }
 
 const CTCSS: ReadonlySet<number> = new Set(CTCSS_HZ)
@@ -55,6 +57,7 @@ export function createLiveAudioEvidence(
 	deps: LiveAudioEvidenceDeps,
 ): LiveAudioEvidence {
 	const log = createComponentLogger(deps.logger, "LiveAudioEvidence")
+	const clock = deps.now ?? Date.now
 	let unsubscribe: (() => void) | null = null
 	let storeFaultLogged = false
 	let subscriptionFaultLogged = false
@@ -118,7 +121,7 @@ export function createLiveAudioEvidence(
 		if (tx.data === true) return
 		const mode = analogMode(tx.modulation)
 		if (mode === null) return
-		const endedAt = tx.endedAtMs ?? Date.now()
+		const endedAt = tx.endedAtMs ?? clock()
 		let found: ReturnType<DiscoveryNearQuery["near"]>
 		try {
 			found = deps.store.near(
@@ -150,7 +153,7 @@ export function createLiveAudioEvidence(
 		}
 		if (page === null || typeof page !== "object" || !Array.isArray(page.items))
 			return
-		const now = Date.now()
+		const now = clock()
 		let observationId: string | null = null
 		const items = page.items
 		const limit = Math.min(items.length, OBSERVATION_PAGE)
@@ -179,8 +182,7 @@ export function createLiveAudioEvidence(
 			at: endedAt,
 		}
 		try {
-			deps.store.recordAnalog(observationId, analog)
-			recorded = true
+			recorded = deps.store.recordAnalog(observationId, analog) === true
 		} catch (err: unknown) {
 			noteStoreFault(err)
 		}

@@ -46,9 +46,15 @@ function evidenceMode(modulation: string): "am" | "nfm" | null {
 	return null
 }
 
+/**
+ * The closed transmission ends at T0 + 2 s; an open one is evaluated at the injected clock, also
+ * T0 + 2 s, so both read the same overlap window. An open transmission records (once, at that
+ * time) only with a qualified CTCSS tone or DCS code; a closed one records heard or decoded.
+ */
+const NOW = T0 + 2_000
+
 function expected(row: Row): ProofAnalogInput | null {
 	const mode = evidenceMode(row.modulation)
-	if (row.open) return null
 	if (row.trust !== "commanded" && row.trust !== "relay") return null
 	if (row.eventTrust !== "commanded" && row.eventTrust !== "relay") return null
 	if (!row.hasDiscovery) return null
@@ -61,13 +67,14 @@ function expected(row: Row): ProofAnalogInput | null {
 		row.dcsCode !== null && DCS.has(row.dcsCode)
 			? { code: row.dcsCode, polarity: row.polarity }
 			: null
+	if (row.open && ctcssHz === null && dcs === null) return null
 	return {
 		outcome: ctcssHz !== null || dcs !== null ? "decoded" : "heard",
 		mode,
 		voice: true,
 		tone: { ctcssHz, dcs },
 		transport: "live",
-		at: T0 + 2_000,
+		at: NOW,
 	}
 }
 
@@ -104,104 +111,141 @@ const rowArb: fc.Arbitrary<Row> = fc.record({
 	open: fc.boolean(),
 })
 
+/** One row through the real evidence path against `expected`. */
+function checkRow(row: Row): void {
+	const recorded: ProofAnalogInput[] = []
+	let created = 0
+	const calls: string[] = []
+	const discovery = {
+		id: "d_1",
+		frequencyHz: HZ + row.offsetHz,
+		sourceIds: ["rtl"],
+	} as unknown as Discovery
+	const observation = {
+		id: "o_1",
+		discoveryId: "d_1",
+		sourceId: "rtl",
+		startedAt: iso(row.overlaps ? T0 - 50 : T0 + 9_000),
+		endedAt: iso(row.overlaps ? T0 + 2_500 : T0 + 10_000),
+	} as unknown as Observation
+	const listeners = new Set<(t: AnalogEvidenceTransmission) => void>()
+	const store = {
+		near: (hz: number, toleranceHz: number, sourceId?: string) => {
+			calls.push("near")
+			expect(hz).toBe(HZ)
+			expect(toleranceHz).toBe(DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ)
+			expect(sourceId).toBe("rtl")
+			if (!row.hasDiscovery) return []
+			if (sourceId !== "rtl") return []
+			if (Math.abs(discovery.frequencyHz - hz) > toleranceHz) return []
+			return [discovery]
+		},
+		observations: () => {
+			calls.push("observations")
+			return { items: [observation], nextCursor: null }
+		},
+		recordAnalog: (_id: string, analog: ProofAnalogInput) => {
+			calls.push("recordAnalog")
+			recorded.push(analog)
+			return true
+		},
+		create: () => {
+			created += 1
+		},
+	}
+	const evidence = createLiveAudioEvidence({
+		store,
+		analogLog: {
+			subscribe: (
+				listener: (transmission: AnalogEvidenceTransmission) => void,
+			) => {
+				listeners.add(listener)
+				return () => {
+					listeners.delete(listener)
+				}
+			},
+		} as unknown as Parameters<typeof createLiveAudioEvidence>[0]["analogLog"],
+		trust: () => {
+			if (row.trust === "throw") throw new Error("trust down")
+			return row.trust as TuningTrust
+		},
+		logger: { child: () => ({ warn() {} }) } as unknown as Logger,
+		now: () => NOW,
+	})
+	evidence.start()
+	const tx: AnalogEvidenceTransmission = {
+		transmissionId: "tx",
+		sourceId: "rtl",
+		startedAtMs: T0,
+		endedAtMs: row.open ? null : T0 + 2_000,
+		hz: HZ,
+		tuningTrust: row.eventTrust,
+		modulation: row.modulation as AnalogEvidenceTransmission["modulation"],
+		ctcssHz: row.ctcssHz,
+		dcs:
+			row.dcsCode === null
+				? null
+				: { code: row.dcsCode, polarity: row.polarity },
+	}
+	for (const listener of listeners) listener(tx)
+	const want = expected(row)
+	expect(created).toBe(0)
+	if (evidenceMode(row.modulation) === null) expect(recorded).toEqual([])
+	if (want === null) {
+		expect(recorded).toEqual([])
+		expect(calls.includes("recordAnalog")).toBe(false)
+	} else {
+		expect(recorded).toEqual([want])
+		expect(calls).toEqual(["near", "observations", "recordAnalog"])
+	}
+	if (row.trust !== "commanded" && row.trust !== "relay")
+		expect(calls).toEqual([])
+	expect(calls.length).toBeLessThanOrEqual(3)
+}
+
 describe("live-audio evidence property", () => {
 	it("attaches only on commanded or relay, within tolerance, to an overlapping observation", () => {
 		// Feature: scanner-redesign, Property 16: Live-audio evidence attaches only where it belongs
 		// Validates: Requirements 6.3, 6.5
-		fc.assert(
-			fc.property(rowArb, row => {
-				const recorded: ProofAnalogInput[] = []
-				let created = 0
-				const calls: string[] = []
-				const discovery = {
-					id: "d_1",
-					frequencyHz: HZ + row.offsetHz,
-					sourceIds: ["rtl"],
-				} as unknown as Discovery
-				const observation = {
-					id: "o_1",
-					discoveryId: "d_1",
-					sourceId: "rtl",
-					startedAt: iso(row.overlaps ? T0 - 50 : T0 + 9_000),
-					endedAt: iso(row.overlaps ? T0 + 2_500 : T0 + 10_000),
-				} as unknown as Observation
-				const listeners = new Set<(t: AnalogEvidenceTransmission) => void>()
-				const store = {
-					near: (hz: number, toleranceHz: number, sourceId?: string) => {
-						calls.push("near")
-						expect(hz).toBe(HZ)
-						expect(toleranceHz).toBe(DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ)
-						expect(sourceId).toBe("rtl")
-						if (!row.hasDiscovery) return []
-						if (sourceId !== "rtl") return []
-						if (Math.abs(discovery.frequencyHz - hz) > toleranceHz) return []
-						return [discovery]
-					},
-					observations: () => {
-						calls.push("observations")
-						return { items: [observation], nextCursor: null }
-					},
-					recordAnalog: (_id: string, analog: ProofAnalogInput) => {
-						calls.push("recordAnalog")
-						recorded.push(analog)
-						return true
-					},
-					create: () => {
-						created += 1
-					},
-				}
-				const evidence = createLiveAudioEvidence({
-					store,
-					analogLog: {
-						subscribe: (
-							listener: (transmission: AnalogEvidenceTransmission) => void,
-						) => {
-							listeners.add(listener)
-							return () => {
-								listeners.delete(listener)
-							}
-						},
-					} as unknown as Parameters<
-						typeof createLiveAudioEvidence
-					>[0]["analogLog"],
-					trust: () => {
-						if (row.trust === "throw") throw new Error("trust down")
-						return row.trust as TuningTrust
-					},
-					logger: { child: () => ({ warn() {} }) } as unknown as Logger,
-				})
-				evidence.start()
-				const tx: AnalogEvidenceTransmission = {
-					transmissionId: "tx",
-					sourceId: "rtl",
-					startedAtMs: T0,
-					endedAtMs: row.open ? null : T0 + 2_000,
-					hz: HZ,
-					tuningTrust: row.eventTrust,
-					modulation:
-						row.modulation as AnalogEvidenceTransmission["modulation"],
-					ctcssHz: row.ctcssHz,
-					dcs:
-						row.dcsCode === null
-							? null
-							: { code: row.dcsCode, polarity: row.polarity },
-				}
-				for (const listener of listeners) listener(tx)
-				const want = expected(row)
-				expect(created).toBe(0)
-				if (evidenceMode(row.modulation) === null) expect(recorded).toEqual([])
-				if (want === null) {
-					expect(recorded).toEqual([])
-					expect(calls.includes("recordAnalog")).toBe(false)
-				} else {
-					expect(recorded).toEqual([want])
-					expect(calls).toEqual(["near", "observations", "recordAnalog"])
-				}
-				if (row.trust !== "commanded" && row.trust !== "relay")
-					expect(calls).toEqual([])
-				expect(calls.length).toBeLessThanOrEqual(3)
-			}),
-			{ numRuns: 100 },
-		)
+		fc.assert(fc.property(rowArb, checkRow), { numRuns: 100 })
+	})
+
+	it("repro (seed 1445578895): an open transmission with a qualified tone and a non-overlapping observation records nothing", () => {
+		checkRow({
+			trust: "commanded",
+			eventTrust: "commanded",
+			offsetHz: 0,
+			hasDiscovery: true,
+			overlaps: false,
+			ctcssHz: 67,
+			dcsCode: null,
+			polarity: "normal",
+			modulation: "nfm",
+			open: true,
+		})
+	})
+
+	it("the failing seed passes the whole property", () => {
+		// Feature: scanner-redesign, Property 16: Live-audio evidence attaches only where it belongs
+		// Validates: Requirements 6.3, 6.5
+		fc.assert(fc.property(rowArb, checkRow), {
+			numRuns: 100,
+			seed: 1445578895,
+		})
+	})
+
+	it("an open transmission with a qualified tone and an overlapping observation records once, at the injected clock", () => {
+		checkRow({
+			trust: "relay",
+			eventTrust: "commanded",
+			offsetHz: 0,
+			hasDiscovery: true,
+			overlaps: true,
+			ctcssHz: 67,
+			dcsCode: null,
+			polarity: "normal",
+			modulation: "nfm",
+			open: true,
+		})
 	})
 })

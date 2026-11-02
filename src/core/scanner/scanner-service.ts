@@ -3258,6 +3258,13 @@ export class ScannerService extends EventEmitter {
 			case "block-summary":
 				this.lastSummaries.set(sourceId, ev.summary)
 				this.onBlockSummary(sourceId, ev.summary)
+				// LO-locked spurs: the dwell's clock and the engine's receiver mask lines (flag only).
+				this.store.noteReceiverLines(
+					sourceId,
+					ev.summary.centreHz,
+					ev.summary.sampleRateHz,
+					ev.summary.masks.spurRanges,
+				)
 				for (const d of drivers)
 					d.onBlock(ev.summary.endSample, ev.summary.overload)
 				return
@@ -3497,12 +3504,6 @@ export class ScannerService extends EventEmitter {
 				)
 			}
 		}
-		// LO-locked spurs: an evidence-free record the store proved to be the receiver's own spur
-		// (seen at the same offset from two tuned centres) is deleted like an operator delete.
-		for (const id of this.store.takeLoLockedRetirees())
-			this.deleteDiscovery(id).catch((err: unknown) =>
-				this.log.warn({ err }, "Retiring an LO-locked spur record failed"),
-			)
 	}
 
 	/**
@@ -6933,6 +6934,7 @@ export class ScannerService extends EventEmitter {
 			analogLog: log as AnalogEvidenceLog,
 			trust: sourceId => this.liveAudioTrust(sourceId),
 			logger: this.deps.logger,
+			now: () => this.now(),
 		})
 		this.liveAudio.start()
 	}
@@ -7659,7 +7661,12 @@ export class ScannerService extends EventEmitter {
 		const out: Discovery[] = []
 		let cursor: string | null = null
 		do {
-			const page = this.store.list({ ...filter, limit: 500, cursor })
+			const page = this.store.list({
+				...filter,
+				includeReceiverSpurs: true,
+				limit: 500,
+				cursor,
+			})
 			out.push(...page.items)
 			cursor = page.nextCursor
 		} while (cursor)

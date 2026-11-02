@@ -507,3 +507,93 @@ describe("GET /api/scanner/discoveries evidence, nearHz and toleranceHz", () => 
 		})
 	})
 })
+
+/** A store whose 3 records of one receiver spur (a 3-hop sweep) are flagged, plus one real record. */
+function spurStore(): {
+	store: DiscoveryStore
+	spurIds: string[]
+	realId: string
+} {
+	let now = T0
+	const store = new DiscoveryStore({
+		maxDiscoveries: 10,
+		now: () => now,
+		newId: counterIds(),
+	})
+	const real = store.ingest(
+		makeObs({ id: "real", centreHz: CH, startedAt: T0, blocks: 2 }),
+	).discoveryId
+	if (real === null) throw new Error("real record did not surface")
+	const spurIds = new Set<string>()
+	for (const [i, tuned] of [CH, CH + 785_000, CH + 1_570_000].entries()) {
+		const obs = makeObs({
+			id: `spur${i}`,
+			centreHz: tuned - 300_000,
+			startedAt: now,
+			snrDb: 25,
+			blocks: 40,
+			obwHz: 1_000,
+			gate: "passed",
+			cls: "carrier",
+			hypotheses: [["carrier", 0.8]],
+		})
+		obs.track.channelSnrDb = 25
+		obs.track.spectralShape = "narrow"
+		const input = { ...obs, tunedCentreHz: tuned, tunedSampleRateHz: 1_024_000 }
+		for (let k = 0; k < 5; k++) {
+			const id = store.ingest(input).discoveryId
+			if (id !== null) spurIds.add(id)
+			now += 1_000
+		}
+		now += 500
+	}
+	return { store, spurIds: [...spurIds].sort(), realId: real }
+}
+
+describe("GET /api/scanner/discoveries includeReceiverSpurs", () => {
+	let app: FastifyInstance
+
+	afterEach(async () => {
+		await app.close()
+	})
+
+	async function build(store: DiscoveryStore) {
+		app = Fastify({ logger: false })
+		await app.register(scannerRoutes, {
+			scanner: fakeService(store, filter =>
+				store.list(filter),
+			) as unknown as ScannerRouteService,
+		})
+	}
+
+	it("hides flagged receiver spurs by default, lists them (with receiverSpur) when asked, and validates the flag", async () => {
+		const { store, spurIds, realId } = spurStore()
+		expect(spurIds).toHaveLength(3)
+		await build(store)
+		const ids = async (query: string) => {
+			const res = await app.inject({
+				method: "GET",
+				url: `/api/scanner/discoveries${query}`,
+			})
+			expect(res.statusCode).toBe(200)
+			return (
+				res.json() as {
+					items: { id: string; receiverSpur?: { offsetHz: number } }[]
+				}
+			).items
+		}
+		expect((await ids("")).map(d => d.id)).toEqual([realId])
+		expect((await ids("?includeReceiverSpurs=false")).map(d => d.id)).toEqual([
+			realId,
+		])
+		const all = await ids("?includeReceiverSpurs=true")
+		expect(all.map(d => d.id).sort()).toEqual([realId, ...spurIds].sort())
+		for (const d of all)
+			if (d.id !== realId) expect(d.receiverSpur?.offsetHz).toBe(-300_000)
+		const bad = await app.inject({
+			method: "GET",
+			url: "/api/scanner/discoveries?includeReceiverSpurs=maybe",
+		})
+		expect(bad.statusCode).toBe(400)
+	})
+})

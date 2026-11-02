@@ -297,12 +297,12 @@ export const DQ_LO_LOCK_USABLE_FRACTION = 0.8
 export const DQ_LO_LOCK_DC_GUARD_HZ = DQ_DC_ADMIT_HZ
 
 /**
- * LO-locked spurs: the minimum dwell under a centre before its absence of a line counts. A steady
- * line passes the channel gate after 300 ms on and the scanner ingests it at its gate pass, then
- * once a second (its ingest throttle). 3 000 ms from the dwell's first sighting covers the gate's
- * on-time, a first ingest that lags it by up to 1 000 ms and two more throttled ingests (a dwell is
- * measured from its first to its last sighting, so it never reads longer than the tuner stayed).
- * Until the current dwell is that long, a candidate sighting is held back (no record, no lock).
+ * LO-locked spurs: the minimum dwell under a centre before its absence of a line counts against an
+ * offset (a miss). A steady line passes the channel gate after 300 ms on and the scanner ingests it
+ * at its gate pass, then once a second (its ingest throttle). 3 000 ms from the dwell's start covers
+ * the gate's on-time, a first ingest that lags it by up to 1 000 ms and two more throttled ingests
+ * (a dwell is measured from its first to its last tick or sighting, so it never reads longer than
+ * the tuner stayed). A shorter dwell is neither a hit's precondition nor a miss.
  */
 export const DQ_LO_LOCK_DWELL_MS = 3_000
 
@@ -316,20 +316,36 @@ export const DQ_LO_LOCK_DWELL_MS = 3_000
 export const DQ_LO_LOCK_TTL_MS = 600_000
 
 /**
- * LO-locked spurs: a line locks only after following the LO through 3 consecutive retunes, each
- * with its old position seen empty after the retune and its new one seen empty before it. One
- * retune proves nothing: one real emitter can unkey while another at the same offset from the new
- * centre keys up (two transmitters taking turns). Each further transition needs that coincidence
- * again, at another retune the tuner timed on its own: if two real emitters swap at a given retune
- * with probability p, three swaps in a row happen with p³ (p = 0.1 gives 1 in 1 000), while a spur
- * follows every retune. A scan alternating two centres (A, B, A, B) reaches 3 transitions at its
- * fourth dwell: under 1 min at the 12 s dwells above. 2 transitions stay unlocked.
+ * LO-locked spurs: an offset is learned only from a steady narrow line at it seen from 3 distinct
+ * tuned centres (pairwise at least `DQ_LO_LOCK_MIN_SEPARATION_HZ` apart; revisits of a centre in a
+ * cyclic sweep keep its evidence fresh but count once). Two centres prove nothing: two real
+ * emitters can sit at one offset from two centres (one each). A third emitter at the same offset
+ * from a third centre, with nothing at that offset under any other complete dwell (a miss blocks
+ * the lock), is the coincidence the rule accepts, and then the records are only flagged (hidden by
+ * default), never deleted. A tiling sweep of 3 hops reaches it at its third hop.
  */
-export const DQ_LO_LOCK_MIN_TRANSITIONS = 3
+export const DQ_LO_LOCK_MIN_CENTRES = 3
+
+/**
+ * LO-locked spurs: a receiver mask line (the engine's provisional, comb or baseband spur, reported
+ * in each block summary at a fixed baseband position) counts as a steady line in the current dwell
+ * only 2 000 ms after the dwell began. A provisional line that a real emitter made before a retune
+ * survives into the new dwell until its bins have been off for the off budget,
+ * (1 − 0.95) × 30 s = 1 500 ms of settled blocks; 2 000 ms adds 500 ms (several blocks) of margin.
+ * Summaries come from settled blocks only, so the dwell starts at the first settled block.
+ */
+export const DQ_LO_LOCK_MASK_SETTLE_MS = 2_000
+
+/**
+ * LO-locked spurs: mask lines of a source are evaluated at most once per 1 000 ms (summaries come
+ * once per block; a mask line lasts tens of seconds, so once a second loses nothing).
+ */
+export const DQ_LO_LOCK_MASK_PERIOD_MS = 1_000
 
 /**
  * LO-locked spurs, memory only, per source: 16 dwells of at most 128 lines each (a dwell with more
- * proves no absence), 512 records (least recently sighted dropped first), 4 tuned centres each, and
+ * proves no absence and is never a miss), 512 records whose whole history was seen (least recently
+ * sighted dropped first: a dropped record is never flagged), 4 tuned centres each, and
  * 64 learned plus 64 revoked offsets (oldest dropped first). 16 × 128 × 40 B ≈ 82 kB of dwells plus
  * 512 × (4 × 56 B + 64 B) ≈ 147 kB of records per source; at most 64 sources (the pending-capture
  * cap): about 15 MB in the worst case, typically one source and a few kB.
