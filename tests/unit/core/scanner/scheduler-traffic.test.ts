@@ -301,15 +301,6 @@ describe("a grid of regular QSOs: overs 5 to 45 s, gaps 1 to 3 s", () => {
 			[240_300, 236_350, 232_100, 228_850, 227_200],
 		],
 	}
-	/**
-	 * Known shortfall, not hidden: 3 hops from 0 s, 45 s overs with 2.5 s gaps is heard 282 850 ms,
-	 * 98.1 % of the earlier 288 300 ms. Its first hold heard an over without a break (carrier
-	 * evidence) and the retries found a turnaround late (each one-sweep retry catches it about
-	 * once in 14).
-	 */
-	const shortfall: Record<string, number> = {
-		"3 hops, from 0 s, 45/2.5": 282_850,
-	}
 	const gaps = [1_000, 1_500, 2_000, 2_500, 3_000]
 	for (const hops of [3, 7])
 		for (const fromMs of [0, 60_000]) {
@@ -333,9 +324,8 @@ describe("a grid of regular QSOs: overs 5 to 45 s, gaps 1 to 3 s", () => {
 							signals,
 						})
 						const cell = `${name}, ${overMs / 1000}/${gapMs / 1000}`
-						const want = shortfall[cell] ?? floor
-						if (heardTotal(r) < want)
-							below.push(`${cell}: ${heardTotal(r)} < ${want}`)
+						if (heardTotal(r) < floor)
+							below.push(`${cell}: ${heardTotal(r)} < ${floor}`)
 					})
 				})
 				expect(below).toEqual([])
@@ -343,19 +333,84 @@ describe("a grid of regular QSOs: overs 5 to 45 s, gaps 1 to 3 s", () => {
 		}
 })
 
+describe("a QSO of regular long overs is heard at least as much as before on every hop and hop overlap", () => {
+	// Overs and gaps (ms) where a QSO on air at the job start was heard less than before on some
+	// hop: its first hold heard an over without a break (carrier evidence) and later holds kept
+	// landing inside overs (3 hops, hop 2: 45 s / 1 s heard 275 600 ms against 301 000 ms).
+	const combos: [number, number][] = [
+		[45_000, 1_000],
+		[45_000, 2_500],
+		[35_000, 3_000],
+		[25_000, 2_500],
+		[20_000, 2_500],
+	]
+	// Ms heard over 600 s by the earlier scheduler (one confirm probe per visit), per combo, at 100
+	// kHz above each hop centre ("k") and in each hop overlap (400 kHz above hop k's centre, "k/k+1",
+	// heard by both hops).
+	const earlier: Record<number, Record<string, number[]>> = {
+		3: {
+			"0": [301_350, 288_300, 285_200, 285_700, 274_850],
+			"1": [301_350, 288_300, 285_200, 285_700, 274_850],
+			"2": [301_000, 286_500, 284_250, 282_100, 274_400],
+			"0/1": [366_050, 351_750, 345_150, 341_100, 333_950],
+			"1/2": [365_000, 349_500, 345_200, 340_700, 332_050],
+		},
+		7: {
+			"0": [239_100, 229_000, 218_850, 219_000, 223_350],
+			"1": [239_850, 229_150, 218_600, 219_300, 224_350],
+			"2": [237_950, 228_150, 218_800, 219_250, 221_000],
+			"3": [236_600, 227_400, 220_400, 218_000, 222_500],
+			"4": [236_850, 226_350, 219_600, 218_600, 221_550],
+			"5": [239_250, 225_400, 216_350, 216_800, 220_450],
+			"6": [235_100, 224_250, 216_350, 218_250, 222_100],
+			"0/1": [282_050, 271_200, 275_000, 263_250, 251_100],
+			"1/2": [283_550, 269_750, 275_500, 261_450, 250_050],
+			"2/3": [285_000, 269_650, 271_900, 262_000, 252_700],
+			"3/4": [280_700, 271_500, 269_350, 261_350, 252_100],
+			"4/5": [280_800, 272_500, 266_350, 262_450, 250_900],
+			"5/6": [282_600, 271_150, 273_650, 260_850, 248_500],
+		},
+	}
+	for (const hops of [3, 7])
+		it(`${hops} hops: every hop and overlap heard at least as much as before`, () => {
+			const plan = planOf(hops)
+			const below: string[] = []
+			for (const [at, floors] of Object.entries(earlier[hops]!)) {
+				const k = Number(at.split("/")[0])
+				const hz =
+					plan.hops[k]!.centreHz + (at.includes("/") ? 400_000 : 100_000)
+				combos.forEach(([overMs, gapMs], c) => {
+					const signals = regularQso(hz, 0, 600_000, overMs, gapMs)
+					const r = simulateSweep(plan, spec, {
+						...sim,
+						durationMs: 600_000,
+						signals,
+					})
+					if (heardTotal(r) < floors[c]!)
+						below.push(
+							`${at}, ${overMs / 1000}/${gapMs / 1000}: ${heardTotal(r)} < ${floors[c]}`,
+						)
+				})
+			}
+			expect(below).toEqual([])
+		}, 60_000)
+})
+
 describe("any QSO is heard at least as well as by one confirm probe per visit", () => {
 	// Feature: scanner-sweep-fairness, Property 3: a QSO, whenever and wherever it starts, is never heard less than one confirm probe per visit heard it
 	// Validates: Requirements 3 (real traffic is never heard less than one probe per visit), 1 (no hop starved by another hop's holds)
-	it("hears at least 1.24 × the share one probe per coarse sweep hears, from the job start", () => {
+	it("hears at least 1.23 × the share one probe per coarse sweep hears, from the job start", () => {
 		fc.assert(
 			fc.property(
 				fc.integer({ min: 3, max: 7 }),
 				fc.nat(1_000),
+				// anywhere in the hop's 819.2 kHz, its overlaps with the next hops included
+				fc.integer({ min: -400, max: 400 }),
 				fc.integer({ min: 0, max: 120_000 }),
 				fc.integer({ min: 1, max: 1_000_000 }),
-				(hops, slot, fromMs, seed) => {
+				(hops, slot, offsetKhz, fromMs, seed) => {
 					const plan = planOf(hops)
-					const hz = plan.hops[slot % hops]!.centreHz + 100_000
+					const hz = plan.hops[slot % hops]!.centreHz + offsetKhz * 1_000
 					// Overs of 5 to 45 s with turnarounds of 1 to 1.9 s.
 					const rnd = random(seed)
 					const signals: SimSignal[] = []
@@ -373,10 +428,10 @@ describe("any QSO is heard at least as well as by one confirm probe per visit", 
 					// One probe per coarse sweep hears the dwell's 3 blocks and the probe (1800 + 300 ms)
 					// out of a sweep of hops × 1150 ms plus that probe: 2250 / (1150 × hops + 2100). The
 					// earlier scheduler (a probe on every visit, revisits by activity) heard at least
-					// 1.24 times that over 400 random QSOs of this kind; the scheduler must too, with no
+					// 1.233 times that over 400 random QSOs of this kind; the scheduler must too, with no
 					// exception for a QSO that is never followed long.
 					const floor = 2_250 / (1_150 * hops + 2_100)
-					expect(heardShare(r, signals)).toBeGreaterThanOrEqual(1.24 * floor)
+					expect(heardShare(r, signals)).toBeGreaterThanOrEqual(1.23 * floor)
 				},
 			),
 			{ numRuns: 100 },
