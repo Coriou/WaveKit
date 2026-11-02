@@ -22,6 +22,11 @@ export interface SimSignal {
 	confirmHoldMs: number
 	/** Analog voice the job follows on air (job runner `followOnAir`). */
 	followOnAir: boolean
+	/**
+	 * Blocks the track needs before its class (and so `followOnAir`) is known; younger updates
+	 * report `followOnAir: false`. The classifier calls a track of at most 4 blocks a burst: 5.
+	 */
+	labelAfterBlocks?: number
 	spur?: boolean
 	obwHz?: number
 }
@@ -263,7 +268,10 @@ export function simulateSweep(
 							trackOf(id, sig, epoch, from, clock, blocks),
 							sig.needsConfirm,
 							sig.confirmHoldMs,
-							{ followOnAir: sig.followOnAir },
+							{
+								followOnAir:
+									sig.followOnAir && blocks >= (sig.labelAfterBlocks ?? 0),
+							},
 						),
 					)
 				}

@@ -43,10 +43,26 @@ function harness(plan: HopPlan, spec: NormalisedJobSpec, probeStartMs = 300) {
 	return h
 }
 
+/** 5 blocks: old enough to carry its class (a dwell never waits for it). */
 const track = (id: string, snrDb = 20, truncated = false): TrackSnapshot => ({
-	...makeTrack({ id, centreHz: 400 * MHZ, startedAt: 0, snrDb, truncated }),
+	...makeTrack({
+		id,
+		centreHz: 400 * MHZ,
+		startedAt: 0,
+		snrDb,
+		truncated,
+		blocks: 5,
+	}),
 	trackId: id,
 })
+/**
+ * Three empty sweeps of a two-hop plan, back on hop 0: a call that opens next was off air on
+ * three full visits of the hop, so its onset is seen and it may be followed past one coarse sweep.
+ */
+const warmUp = (h: ReturnType<typeof harness>): void => {
+	h.s.start()
+	for (let k = 0; k < 6; k++) h.dwell()
+}
 const tune = (
 	hopIndex: number,
 	centreHz: number,
@@ -309,7 +325,7 @@ describe("SweepScheduler holds", () => {
 			makeHopPlan([400 * MHZ, 401.6 * MHZ]),
 			makeNormalisedSpec({ revisit: noRevisit }),
 		)
-		h.s.start()
+		warmUp(h)
 		h.s.onEpochStarted(0)
 		h.s.onTrack(track("t1"), true, 1_800)
 		h.s.onBlock(B)
@@ -366,7 +382,7 @@ describe("SweepScheduler holds", () => {
 				},
 			}),
 		)
-		capped.s.start()
+		warmUp(capped)
 		capped.s.onEpochStarted(0)
 		capped.s.onTrack(track("t1"), true, 1_800)
 		capped.s.onBlock(B)
@@ -613,6 +629,29 @@ describe("SweepScheduler re-plan", () => {
 		expect(a?.memory).not.toBe(b?.memory)
 		expect(a?.memory[0]).not.toBe(b?.memory[0])
 		expect(a?.memory[0]?.closedAt).not.toBe(b?.memory[0]?.closedAt)
+	})
+
+	it("counts an old hop's visits, time and holds once when two new hops map to it", () => {
+		const h = harness(
+			makeHopPlan([400 * MHZ, 401.6 * MHZ]),
+			makeNormalisedSpec({ revisit: noRevisit }),
+		)
+		h.s.start()
+		h.clock = 100
+		h.dwell() // hop 0 ends: 1 visit, 100 ms
+		h.s.replan(
+			makeHopPlan([399.9 * MHZ, 400.1 * MHZ, 401.6 * MHZ]),
+			makeNormalisedSpec({ revisit: noRevisit }),
+		)
+		h.clock = 300
+		h.dwell() // hop 1 ends (1 visit, 200 ms); the re-plan applies at this boundary
+		const stats = h.s.hopStats()
+		const current = h.s.progress().hopIndex
+		const ended = stats.map(st => st.visits - (st.hopIndex === current ? 1 : 0))
+		expect(ended.reduce((a, b) => a + b, 0)).toBe(2)
+		expect(stats.reduce((a, st) => a + st.timeMs, 0)).toBe(300)
+		// Old hop 0 maps to new hops 0 and 1: only the first one carries its accounting.
+		expect(ended).toEqual([1, 0, 1])
 	})
 
 	// Feature: signal-discovery-scanner, Property 9: Job transitions (scheduler index bounds)
