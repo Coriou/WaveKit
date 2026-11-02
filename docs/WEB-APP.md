@@ -224,7 +224,8 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
   Repeats fold into one row per thing going on (see [Activity folding](#activity-folding)).
 - **Scanner:** watch the band in view or plan a scan, see the signals found, skip the ones you do
   not care about, save presets.
-- **Recordings:** recordings kept by the core, to play, search and keep. The footer line sums
+- **Recordings:** recordings kept by the core, to play, search and keep, including one scanner
+  recording per analog voice transmission the scanner finds. The footer line sums
   the disk they use: what you kept, digital-voice calls, scanner evidence and named IQ captures
   (each with its limit), then the free space.
 - **Settings:** station, receiver, decoders (each one starts **auto**, **always** or **off**), band

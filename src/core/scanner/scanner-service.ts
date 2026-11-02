@@ -329,6 +329,10 @@ import {
 	type RecordingNativeOutcome,
 	type RecordingProducerHandle,
 } from "./channel/recording-producer.js"
+import {
+	WidebandAnalogRecorder,
+	widebandToneEvidence,
+} from "./channel/wideband-analog-recorder.js"
 import type {
 	ObservedDecoderEligibility,
 	ScannerChannelOwnership,
@@ -754,6 +758,8 @@ export class ScannerService extends EventEmitter {
 	private readonly consumerLifecycle: ScannerLifecycleOwner
 	private readonly channelTaps: ChannelTaps | undefined
 	private readonly channelProducers: RecordingProducers
+	/** Default-on analog recordings from the wideband IQ ring (no channel tier needed). */
+	private readonly widebandAnalog: WidebandAnalogRecorder
 	// Effective producer adoption requires Main's exact assembled runtime acceptance.
 	private readonly channelProducerAdopted: boolean = false
 	private readonly channelRecordingOwners = new Map<
@@ -1448,8 +1454,9 @@ export class ScannerService extends EventEmitter {
 					this.stateLoaded && this.recordingRecoveryHealthy,
 				// Effective channel consumer adoption is separately gated. No grant is inferred here.
 				bindingLive: binding =>
-					this.channelProducerAdopted &&
-					this.channelProducers?.bindingLive(binding) === true,
+					(this.channelProducerAdopted &&
+						this.channelProducers?.bindingLive(binding) === true) ||
+					this.widebandAnalog?.bindingLive(binding) === true,
 				association: (discoveryId, observationId, binding) =>
 					this.store.recordingAssociation(discoveryId, observationId, binding),
 				prepare: metadata =>
@@ -1464,6 +1471,21 @@ export class ScannerService extends EventEmitter {
 					this.store.buildRecordingCommitPlan(operationId),
 				commitPlanCurrent: plan => this.store.recordingCommitPlanCurrent(plan),
 				publishCommit: plan => this.store.publishRecordingCommit(plan),
+			})
+			this.widebandAnalog = new WidebandAnalogRecorder({
+				engine: sourceId => this.spectrum.engine(sourceId),
+				settings: () => ({
+					...this.settings().hold,
+					cpuBudgetCores: this.settings().cpuBudgetCores,
+				}),
+				beginAnalog: input => this.evidence.beginAnalog(input),
+				recordTone: (observationId, ctcssHz, at) =>
+					void this.store.recordAnalog(
+						observationId,
+						widebandToneEvidence(ctcssHz, at),
+					),
+				logger: deps.logger,
+				now: this.now,
 			})
 			this.captures = new CaptureStore({
 				dir: join(this.storageDir, "captures"),
@@ -2039,6 +2061,7 @@ export class ScannerService extends EventEmitter {
 				),
 			)
 		}
+		if (this.widebandAnalog) await attempt(() => this.widebandAnalog.stop())
 		if (this.evidence) await attempt(() => this.evidence.stopAnalog())
 		await Promise.all(independentStops)
 		await Promise.all(
@@ -3382,8 +3405,20 @@ export class ScannerService extends EventEmitter {
 		for (const d of covering) d.onTrack(live, track, needs)
 		if (!closing) {
 			this.refineLiveChannel(live, track)
+			this.recordWideband(live, track)
 			return
 		}
+		this.widebandAnalog.closed(
+			live.observationId,
+			track,
+			endReason === "quiet" || endReason === "max-duration"
+				? null
+				: endReason === "retune" || endReason === "hop"
+					? "epoch-changed"
+					: endReason === "gap"
+						? "stream-changed"
+						: "track-ended",
+		)
 		if (
 			(endReason !== "quiet" && endReason !== "max-duration") ||
 			!this.finishChannelRecording(live.observationId)
@@ -3676,6 +3711,24 @@ export class ScannerService extends EventEmitter {
 		return track.tuningTrust === "unverified" ? { ...c, tier: "spectral" } : c
 	}
 
+	/** Default-on analog recording; a job owning the observation may opt out (record.analog). */
+	private recordWideband(live: LiveObservation, track: TrackSnapshot): void {
+		const specs = live.jobIds.flatMap(id => this.jobs.get(id)?.spec ?? [])
+		this.widebandAnalog.track({
+			observationId: live.observationId,
+			discoveryId: this.store.discoveryIdOf(live.observationId) ?? null,
+			sourceId: live.sourceId,
+			track,
+			analogFm: live.classification.class === "analog-fm",
+			encrypted: live.encrypted,
+			recordAllowed:
+				specs.length === 0 || specs.some(spec => spec.record.analog),
+			channelOwned: [...this.channelRecordingOwners.values()].some(
+				owner => owner.observationId === live.observationId,
+			),
+		})
+	}
+
 	private refineLiveChannel(live: LiveObservation, track: TrackSnapshot): void {
 		const ownership = this.deps.channelOwnership,
 			profile = this.deps.channelProfile
@@ -3845,6 +3898,7 @@ export class ScannerService extends EventEmitter {
 		const discoveryId = this.store.discoveryIdOf(live.observationId)
 		if (
 			!this.channelProducerAdopted ||
+			this.widebandAnalog.owns(live.observationId) ||
 			!current() ||
 			!binding ||
 			!channels ||
