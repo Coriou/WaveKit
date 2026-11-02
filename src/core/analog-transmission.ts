@@ -74,6 +74,18 @@ const DEFAULT_MAX_DURATION_MS = 600_000
 export const ANALOG_TRANSMISSION_MERGE_GAP_MS = 1500
 /** WG10 activity hygiene: shorter final transmissions are not published. */
 export const ANALOG_TRANSMISSION_MIN_MS = 500
+/** CTCSS needs this much transmission audio before its tone counts (DCS: DCS_MIN_AUDIO_SECONDS). */
+export const CTCSS_MIN_AUDIO_SECONDS = 0.75
+/**
+ * In-progress tone: the first check at the earlier of the two qualification bounds (0.75 s),
+ * then one detector read per 0.25 s of audio until a CTCSS tone or DCS code qualifies:
+ * at most 4 reads per second of audio, none after the "tone" event.
+ */
+export const ANALOG_TONE_RECHECK_SECONDS = 0.25
+const TONE_FIRST_CHECK_SECONDS = Math.min(
+	CTCSS_MIN_AUDIO_SECONDS,
+	DCS_MIN_AUDIO_SECONDS,
+)
 /** WG10 activity hygiene: 10 ms blocks with FM quieting a nfm/wfm transmission needs. */
 export const ANALOG_TRANSMISSION_MIN_CARRIER_BLOCKS = 3
 
@@ -335,6 +347,11 @@ export interface ToneDetectorPort {
 export interface AnalogTransmissionTrackerEvents {
 	transmission: [event: AnalogTransmissionEventData]
 	closed: [payload: AnalogTransmissionPayload]
+	/**
+	 * Once per announced, still open transmission: its CTCSS tone or DCS code qualified
+	 * (an open-state event with `tone`). Not a WebSocket event; the closed event still follows.
+	 */
+	tone: [event: AnalogTransmissionEventData]
 }
 
 interface OpenTransmission {
@@ -393,6 +410,8 @@ interface OpenTransmission {
 	snapshotDueBlock: number | null
 	/** A span merged while the previous span's snapshot was pending (its split waits for it). */
 	snapshotResumed: boolean
+	/** Audio seconds of the next in-progress tone check; Infinity once the "tone" event went out. */
+	toneCheckAt: number
 }
 
 /** The held part of a transmission while a resumed segment may split off (WG10 R2). */
@@ -797,6 +816,9 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			this.toneErrorCount += 1
 			this.toneBroken = true
 		}
+		this.guard(() => {
+			this.toneIfQualified(open)
+		})
 		const split = open.split
 		if (split === null || this.toneBroken) return
 		const counter = {
@@ -948,6 +970,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			feedFromBlock: carrier?.startBlock ?? 0,
 			snapshotDueBlock: null,
 			snapshotResumed: false,
+			toneCheckAt: TONE_FIRST_CHECK_SECONDS,
 		}
 		// WG10 req 3.8.6: on the carrier path the span rule implies the 3.7 carrier rule.
 		const base = carrier === null ? this.readCarrierBlocks() : null
@@ -1151,6 +1174,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			split: null,
 			cancelTimer: null,
 			feedFromBlock: split.feedFromBlock,
+			toneCheckAt: TONE_FIRST_CHECK_SECONDS,
 		}
 		this.transmission = next
 		this.finalise(held, "squelch", split.heldGapEndMs, heldTone)
@@ -1792,6 +1816,37 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			this.toneErrorCount += 1
 			this.toneBroken = true
 		}
+		this.toneIfQualified(open)
+	}
+
+	/**
+	 * Emits "tone" once for the current, announced transmission whose CTCSS tone or DCS code
+	 * qualified on its audio so far. Reads the detector only at `toneCheckAt` (throttled).
+	 */
+	private toneIfQualified(open: OpenTransmission): void {
+		if (
+			this.toneBroken ||
+			this.transmission !== open ||
+			!open.announced ||
+			!open.segmentOpen ||
+			open.audioSeconds < open.toneCheckAt
+		)
+			return
+		const tone = gatedTone(open.detector, open.audioSeconds)
+		if (tone === null || (tone.ctcssHz === null && tone.dcs === null)) {
+			open.toneCheckAt = open.audioSeconds + ANALOG_TONE_RECHECK_SECONDS
+			return
+		}
+		open.toneCheckAt = Number.POSITIVE_INFINITY
+		const event: AnalogTransmissionEventData = {
+			...this.openEvent(open),
+			tone: { ctcssHz: tone.ctcssHz, dtmf: tone.dtmf, dcs: tone.dcs ?? null },
+		}
+		try {
+			this.emit("tone", event)
+		} catch {
+			// A subscriber must not block the transmission or the source.
+		}
 	}
 
 	/** Decides a partial window before a tone is read. */
@@ -2134,7 +2189,8 @@ function gateTone(
 	audioSeconds: number,
 ): AnalogTransmissionTone {
 	const dcs = audioSeconds < DCS_MIN_AUDIO_SECONDS ? null : copyDcs(tone.dcs)
-	if (audioSeconds < 0.75) return { ctcssHz: null, dtmf: tone.dtmf, dcs }
+	if (audioSeconds < CTCSS_MIN_AUDIO_SECONDS)
+		return { ctcssHz: null, dtmf: tone.dtmf, dcs }
 	return { ctcssHz: tone.ctcssHz, dtmf: tone.dtmf, dcs }
 }
 

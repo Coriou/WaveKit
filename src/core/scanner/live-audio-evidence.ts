@@ -44,6 +44,12 @@ const CTCSS: ReadonlySet<number> = new Set(CTCSS_HZ)
 const DCS: ReadonlySet<string> = new Set(DCS_STANDARD_CODES)
 /** One observations page. The store returns newest first. */
 const OBSERVATION_PAGE = 64
+/**
+ * In-progress evidence: transmission ids recorded before their close (the close then records
+ * nothing). One tracker holds one open transmission, so an id normally leaves at its close;
+ * 64 is headroom for closes that never arrive (oldest dropped first).
+ */
+const EARLY_IDS_MAX = 64
 
 export function createLiveAudioEvidence(
 	deps: LiveAudioEvidenceDeps,
@@ -52,6 +58,8 @@ export function createLiveAudioEvidence(
 	let unsubscribe: (() => void) | null = null
 	let storeFaultLogged = false
 	let subscriptionFaultLogged = false
+	const early = new Set<string>()
+	let recorded = false
 
 	const noteStoreFault = (err: unknown): void => {
 		if (storeFaultLogged) return
@@ -74,7 +82,6 @@ export function createLiveAudioEvidence(
 	const onClosed = (tx: AnalogEvidenceTransmission): void => {
 		try {
 			if (unsubscribe === null) return
-			if (tx.endedAtMs === null) return
 			if (!Number.isFinite(tx.hz) || tx.hz <= 0) return
 			if (!trusted(tx.tuningTrust)) return
 			let trust: unknown
@@ -84,7 +91,23 @@ export function createLiveAudioEvidence(
 				return
 			}
 			if (!trusted(trust)) return
+			if (tx.endedAtMs !== null) {
+				// Recorded in progress: the close adds no second entry.
+				if (!early.delete(tx.transmissionId)) attach(tx)
+				return
+			}
+			// In progress: only a qualified CTCSS tone or DCS code records before the close.
+			const tone = standardTone(tx)
+			if (tone.ctcssHz === null && tone.dcs === null) return
+			if (early.has(tx.transmissionId)) return
+			recorded = false
 			attach(tx)
+			if (!recorded) return
+			early.add(tx.transmissionId)
+			if (early.size > EARLY_IDS_MAX) {
+				const oldest = early.values().next().value
+				if (oldest !== undefined) early.delete(oldest)
+			}
 		} catch (err: unknown) {
 			noteStoreFault(err)
 		}
@@ -95,8 +118,7 @@ export function createLiveAudioEvidence(
 		if (tx.data === true) return
 		const mode = analogMode(tx.modulation)
 		if (mode === null) return
-		const endedAt = tx.endedAtMs
-		if (endedAt === null) return
+		const endedAt = tx.endedAtMs ?? Date.now()
 		let found: ReturnType<DiscoveryNearQuery["near"]>
 		try {
 			found = deps.store.near(
@@ -158,6 +180,7 @@ export function createLiveAudioEvidence(
 		}
 		try {
 			deps.store.recordAnalog(observationId, analog)
+			recorded = true
 		} catch (err: unknown) {
 			noteStoreFault(err)
 		}
