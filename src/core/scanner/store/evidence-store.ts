@@ -178,7 +178,8 @@ export interface ProbeLinkCall {
  * talkgroup) would match nothing and be deleted. Each call keeps its own window so a clear call
  * never claims the file of an encrypted call of the same pair, and a file matching any encrypted
  * candidate is dropped (linkFiles). At most MAX_PROBE_CALL_CANDIDATES are added, encrypted calls
- * first: a missing clear candidate only loses audio, a missing encrypted one could keep it.
+ * first: a missing clear candidate only loses audio, a missing encrypted one could keep it. Past
+ * the cap with encrypted calls alone, every file of the probe is dropped (fail closed).
  */
 export function probeLinkCandidates(
 	observations: readonly LinkCandidate[],
@@ -223,6 +224,10 @@ export function probeLinkCandidates(
 			})
 		}
 	}
+	// More encrypted calls than the cap: a dropped veto could keep an encrypted file, so fail
+	// closed and treat every observation of this probe as encrypted (all its files are dropped).
+	if (encrypted.length > MAX_PROBE_CALL_CANDIDATES)
+		return observations.map(o => ({ ...o, encrypted: true }))
 	return [...observations, ...encrypted, ...clear].slice(
 		0,
 		observations.length + MAX_PROBE_CALL_CANDIDATES,

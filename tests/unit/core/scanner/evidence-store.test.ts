@@ -942,4 +942,22 @@ describe("probeLinkCandidates", () => {
 			MAX_PROBE_CALL_CANDIDATES,
 		)
 	})
+	it("fails closed when encrypted calls alone pass the bound: every candidate is encrypted", () => {
+		const encrypted = Array.from(
+			{ length: MAX_PROBE_CALL_CANDIDATES + 1 },
+			(_, i) => call(String(3_000 + i), T0 + 1_000, true),
+		)
+		const at = probeLinkCandidates(
+			[obs],
+			encrypted.slice(0, MAX_PROBE_CALL_CANDIDATES),
+		)
+		expect(at).toHaveLength(1 + MAX_PROBE_CALL_CANDIDATES)
+		expect(at[0]).toMatchObject({ source: "2002", encrypted: false })
+		// Past the bound, a dropped veto of the observation's own pair could keep its file.
+		const past = probeLinkCandidates(
+			[obs],
+			[...encrypted, call("2002", T0 + 2_000, true)],
+		)
+		expect(past).toEqual([{ ...obs, encrypted: true }])
+	})
 })
