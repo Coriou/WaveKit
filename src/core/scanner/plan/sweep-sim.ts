@@ -28,6 +28,11 @@ export interface SimSignal {
 	 * The classifier calls a track of at most 4 blocks a burst: 5.
 	 */
 	labelAfterBlocks?: number
+	/**
+	 * A decoder confirms the track this long into its confirm probe, while it is on air, and the
+	 * job follows it (job runner onEvidence → `onConfirmed(trackId, true)`). Absent: no decode.
+	 */
+	decodeAfterMs?: number
 	spur?: boolean
 	obwHz?: number
 }
@@ -180,9 +185,13 @@ export function simulateSweep(
 	/** Per signal on the current epoch: blocks heard so far, and whether its track is open. */
 	let onBlocks = signals.map(() => 0)
 	let open = signals.map(() => false)
+	/** Confirm probes running: track id → clock the probe started. */
+	const probes = new Map<string, number>()
 	const apply = (actions: SchedulerAction[]): void => {
 		for (const a of actions) {
 			if (a.type === "sweep-complete") sweepEndsMs.push(clock)
+			if (a.type === "start-probe") probes.set(a.trackId, clock)
+			if (a.type === "stop-probes") probes.clear()
 			if (a.type !== "tune") continue
 			const last = visits.at(-1)
 			if (last) last.leftAtMs = clock
@@ -277,6 +286,15 @@ export function simulateSweep(
 							},
 						),
 					)
+					const probedAt = probes.get(id)
+					if (
+						sig.decodeAfterMs !== undefined &&
+						probedAt !== undefined &&
+						clock - probedAt >= sig.decodeAfterMs
+					) {
+						probes.delete(id)
+						pending.push(...s.onConfirmed(id, true))
+					}
 				}
 			} else if (open[i] === true) {
 				open[i] = false

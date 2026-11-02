@@ -57,17 +57,41 @@ const ONSET_EVIDENCE_VISITS = 3
 /** A frequency no longer heard is forgotten below this presence (at least 10 missed visits from 1). */
 const FORGET_PRESENCE = 0.05
 /**
- * Long-follow budget per frequency: a bucket of `hold.maxHoldMs` that drains over
- * FOLLOW_BUDGET_WINDOWS × `hold.maxHoldMs`. A long follow only starts with budget left and ends
- * when it runs out, so one frequency gets at most `hold.maxHoldMs` of long follows in a burst and
- * 1 / FOLLOW_BUDGET_WINDOWS (20 %) of the time in the long run (60 s per 5 minutes by default).
+ * Retry budget per frequency that is not known as traffic. Each hold that bars it (or its turning
+ * steady) charges its bucket, and the bucket drains 1 ms per FOLLOW_BUDGET_WINDOWS ms; once it has
+ * drained the frequency is held again (a hold of at most ONSET_UNSEEN_FOLLOW_MS), at most one such
+ * retry per coarse sweep (retryLock). The k-th charge in a row is RETRY_CHARGE_MS × 2^(k − 1), at
+ * most `hold.maxHoldMs`: 8, 16, 32, then 60 s with the 60 s default, so retries at least 40, 80,
+ * 160, then 300 s after the end of the previous hold. A QSO on air since the job started is
+ * listened to again soon and a turnaround gap (TRAFFIC_GAP_MS) is heard; a carrier on air from the
+ * start of a 3-hop plan of 1150 ms hops (holds of one 3450 ms sweep) is held at 0 s and then no
+ * earlier than 43, 127 and 290 s (4 holds in its first 5 minutes), then once per 5 minutes.
  */
 const FOLLOW_BUDGET_WINDOWS = 5
+const RETRY_CHARGE_MS = 8_000
 /**
- * Long-follow buckets kept per hop of the plan: one per frequency, as many as a hop's frequency
- * memory (MAX_FREQUENCY_MEMORY) times the hop count. Hops overlap, so the frequencies of the
- * whole plan are fewer than that and no bucket with ms left is dropped; past it the bucket with
- * the least ms left goes first. A drained bucket (nothing left to charge) is dropped when a new
+ * Off-air time that proves traffic: a frequency heard off air for at least this long (a close and a
+ * reopen, a close and the end of the visit, a late open, or a visit that listened this long without
+ * hearing it) is traffic, not a carrier. A gap is measured from the close (the first block heard
+ * off air) to the sighting of the reopening (minSurfaceBlocks blocks after it went on air), so a
+ * gap of g ms reads as about g + 50 ms in 50 ms blocks: a carrier flapping with gaps of 300 to
+ * 500 ms reads 350 to 550 ms, at least 450 ms (9 blocks) short of 1000; the turnaround of a QSO
+ * (1 to 3 s) reads 1050 ms or more.
+ */
+const TRAFFIC_GAP_MS = 1_000
+/**
+ * Hold of a frequency not known as traffic (on air since before its onset could be bracketed, and
+ * no gap of TRAFFIC_GAP_MS heard): at most one coarse sweep and at most this long from the start of
+ * the visit's holds, whatever the plan size. With a 1150 ms hop, a 3-hop sweep (3450 ms) is
+ * shorter; a 60-hop plan's sweep (69 s, cut to `hold.maxHoldMs`) is not, so five labelled carriers
+ * add at most 5 × 4000 = 20 000 ms to its first sweep instead of 5 × 60 000 ms.
+ */
+const ONSET_UNSEEN_FOLLOW_MS = 8_000
+/**
+ * Follow and retry buckets kept per hop of the plan: one per frequency, as many as a hop's
+ * frequency memory (MAX_FREQUENCY_MEMORY) times the hop count. Hops overlap, so the frequencies of
+ * the whole plan are fewer than that and no bucket with ms left is dropped; past it the bucket
+ * with the least ms left goes first. A drained bucket with no retry strikes is dropped when a new
  * one is made.
  */
 const FOLLOW_BUDGETS_PER_HOP = MAX_FREQUENCY_MEMORY
@@ -92,12 +116,13 @@ export const CONFIRM_FLOOR_MS = 12_000
  * not held again during the same emission. `steady` once one emission has been present for longer
  * than the longest hold (`hold.maxHoldMs`) or is barred and heard again on a later visit.
  *
- * An emission is presumed continuous between visits. A sighting starts a new one (state reset,
- * onset seen) when an off-air gap of at least `hold.hangMs` was heard (a close and a reopen in one
- * visit, or a late open after that much listening), or when a gap nobody heard (closed or missed on
- * an earlier visit, a late open) fell on a frequency that is not persistent. A reopen within
- * `hold.hangMs` keeps the emission (a flapping carrier stays barred and steady); only its
- * transmission length restarts.
+ * An emission is presumed continuous between visits. A sighting starts a new one when an off-air
+ * gap of at least `hold.hangMs` was heard (a close and a reopen in one visit, or a late open after
+ * that much listening), or when a gap nobody heard (closed or missed on an earlier visit, a late
+ * open) fell on a frequency that is not persistent; only a heard gap, or a gap nobody heard on
+ * traffic, frees a barred or steady frequency. A heard gap of TRAFFIC_GAP_MS or more makes it
+ * traffic. A reopen within TRAFFIC_GAP_MS keeps the emission (a flapping carrier stays barred and
+ * steady); only its transmission length restarts.
  */
 interface FrequencyMemory {
 	centreHz: number
@@ -111,12 +136,28 @@ interface FrequencyMemory {
 	barred: boolean
 	steady: boolean
 	/**
-	 * The start of the current emission was heard or bracketed (off air on an earlier full visit,
-	 * or a heard gap). Only such an emission may take a follow longer than one coarse sweep.
+	 * An onset was heard or bracketed on it at least once (off air on an earlier full visit, a
+	 * heard gap, a decode): not a bare carrier, so it keeps hop activity (revisits) even when it is
+	 * not, or no longer, traffic. A follow that hears it on air without a break for `hold.maxHoldMs`
+	 * clears it.
 	 */
 	onsetSeen: boolean
-	/** An onset was seen on it at least once: traffic, not a bare carrier (it keeps hop activity). */
+	/**
+	 * Traffic, not a carrier: it was heard off air for TRAFFIC_GAP_MS, it was decoded, or (see
+	 * `provisional`) it is new on a hop whose earlier full visit missed it. Traffic is never steady
+	 * and a bar never stops its next hold: only the long-hold lock (a coarse visit of every hop
+	 * between long follows) and `hold.maxHoldMs` per hold bound it. A non-decoded follow that hears
+	 * it on air without a break for `hold.maxHoldMs` makes it a carrier again.
+	 */
 	traffic: boolean
+	/**
+	 * Traffic only because visits bracketed its onset (it is new on a hop whose earlier full visit
+	 * missed it): a carrier that switches on, or flaps in short gaps that a visit happened to miss,
+	 * looks the same. A gap shorter than TRAFFIC_GAP_MS heard on it ends that (it is not traffic,
+	 * and a follow of it is cut to the bound of a frequency not known as traffic); a gap of
+	 * TRAFFIC_GAP_MS or a decode confirms it.
+	 */
+	provisional: boolean
 	/** Share of the hop's recent full visits that heard it (PRESENCE_WEIGHT). */
 	presence: number
 	/** The last full visit of the hop did not hear it. */
@@ -129,9 +170,10 @@ interface FrequencyMemory {
 }
 
 /**
- * Long-follow bucket of one frequency (FOLLOW_BUDGET_WINDOWS), shared by every hop whose span holds
- * it: overlapping hops hear the same frequency, and each hop's follows of it draw on this one
- * bucket. Same frequency as FrequencyMemory: within the wider half width.
+ * Bucket of one frequency (FOLLOW_BUDGET_WINDOWS), shared by every hop whose span holds it:
+ * overlapping hops hear the same frequency. Follows are charged to it as they run; on a frequency
+ * not known as traffic it paces retries (spendCarrier). Same frequency as FrequencyMemory: within
+ * the wider half width.
  */
 interface FollowBudget {
 	centreHz: number
@@ -139,6 +181,8 @@ interface FollowBudget {
 	/** Ms used at `usedAt`. */
 	usedMs: number
 	usedAt: number
+	/** Holds in a row that barred the frequency without traffic evidence (RETRY_CHARGE_MS). */
+	strikes: number
 }
 
 interface HopState {
@@ -213,6 +257,12 @@ interface Visit {
 	closedAfterHold: Set<FrequencyMemory>
 	/** A follow of this visit was allowed past one coarse sweep (followCap). */
 	longFollow: boolean
+	/** A held track closed during this visit (its hold did not hear one unbroken transmission). */
+	heldClosed: boolean
+	/** The dwell was lengthened once to listen for a frequency missed by it (waitForGap). */
+	gapWait: boolean
+	/** Frequencies that dwell extension listens for; it ends early once they are all heard again. */
+	gapWaitFor: Set<FrequencyMemory>
 }
 
 /** Per-hop accounting: share of time, holds and the age of the last visit. */
@@ -242,6 +292,8 @@ interface Hold {
 	/** Last clock a follow (and its hang and reopenings) may run to (see followCap). */
 	cap: number
 	deferred: boolean
+	/** A decoder confirmed the held transmission (onConfirmed). */
+	decoded: boolean
 }
 
 /** How a sighting of a remembered frequency relates to its last emission. */
@@ -302,9 +354,15 @@ export class SweepScheduler {
 	 * long hold every hop gets its dwell first (set to the hop count, one less per coarse visit).
 	 */
 	private longHoldLock = 0
+	/**
+	 * Coarse visits still to end before another retry (remember): at most one frequency not known
+	 * as traffic is held again per coarse sweep, so retries add at most one ONSET_UNSEEN_FOLLOW_MS
+	 * hold to a sweep (set to the hop count at a retry, one less per coarse visit).
+	 */
+	private retryLock = 0
 	/** The follow in progress: its frequency's budget is charged when it ends. */
 	private following: { budget: FollowBudget; from: number } | null = null
-	/** Long-follow buckets by frequency, across hops (FOLLOW_BUDGETS_PER_HOP). */
+	/** Follow and retry buckets by frequency, across hops (FOLLOW_BUDGETS_PER_HOP). */
 	private budgets: FollowBudget[] = []
 
 	constructor(
@@ -521,8 +579,10 @@ export class SweepScheduler {
 			track.flags.truncated || track.flags.iqImage || track.flags.spur
 		const known = v.tracks.get(track.trackId)
 		const memory = flagged ? null : this.remember(v, track, known === undefined)
+		// Traffic is never steady, and a bar does not stop its next hold (FrequencyMemory.traffic).
 		const steady =
-			flagged || (memory?.barred ?? false) || (memory?.steady ?? false)
+			flagged ||
+			(memory !== null && !memory.traffic && (memory.barred || memory.steady))
 		const followOnAir = hints.followOnAir === true && !flagged
 		const voiceLater = hints.voiceLater === true && !flagged
 		if (known === undefined) {
@@ -605,20 +665,29 @@ export class SweepScheduler {
 			deadline: hold.cap,
 			cap: hold.cap,
 			deferred: hold.deferred,
+			decoded: hold.decoded,
 		}
 	}
 
+	/**
+	 * A decoder confirmed the held track. With a follow, a decode proves a transmission: its
+	 * frequency is traffic, and the follow runs to `hold.maxHoldMs` from the start of the visit's
+	 * holds with no onset or budget rule (followCap), only the long-hold lock. A decode without a
+	 * follow (policy `confirm`, voice not recorded) identified the emission: it is barred like any
+	 * hold that ends on air, not probed again while it stays on air.
+	 */
 	onConfirmed(trackId: string, follow: boolean): SchedulerAction[] {
 		if (this.phase !== "hold" || this.hold?.trackId !== trackId) return []
-		const t = this.visit?.tracks.get(trackId)
+		const v = this.visit
+		const t = v?.tracks.get(trackId)
 		if (follow && this.spec.hold.policy === "hold" && t !== undefined) {
-			this.startFollow(trackId, t)
+			const hop = v === null ? undefined : this.hops[v.hopIndex]
+			const memory = hop === undefined ? undefined : this.memoryOf(hop, t)
+			if (memory !== undefined) this.markTraffic(memory)
+			this.startFollow(trackId, t, true)
 			if (!t.open && this.hold !== null) {
 				this.hold.mode = "hang"
-				this.hold.deadline = Math.min(
-					this.now() + this.spec.hold.hangMs,
-					this.hold.cap,
-				)
+				this.hold.deadline = this.hangDeadline(this.hold.cap)
 			}
 			return []
 		}
@@ -630,6 +699,7 @@ export class SweepScheduler {
 		const t = v?.tracks.get(trackId)
 		if (v !== null && t !== undefined && t.open) {
 			t.open = false
+			if (t.tried) v.heldClosed = true
 			this.noteClosed(v, t)
 			const hop = this.hops[v.hopIndex]
 			const memory = hop === undefined ? undefined : this.memoryOf(hop, t)
@@ -641,12 +711,37 @@ export class SweepScheduler {
 			this.hold.mode === "follow"
 		) {
 			this.hold.mode = "hang"
-			this.hold.deadline = Math.min(
-				this.now() + this.spec.hold.hangMs,
-				this.hold.cap,
-			)
+			this.hold.deadline = this.hangDeadline(this.hold.cap)
 		}
 		return []
+	}
+
+	/**
+	 * End of a hang starting now: `hold.hangMs`, cut at the follow's cap, but never shorter than
+	 * TRAFFIC_GAP_MS plus one block on a frequency not known as traffic, so the gap that just
+	 * started can be classed (a reopening within TRAFFIC_GAP_MS is the same emission, a longer gap
+	 * is traffic): a hold runs past its cap by at most TRAFFIC_GAP_MS + one block (1050 ms in 50 ms
+	 * blocks), never past `hold.maxHoldMs`.
+	 */
+	private hangDeadline(cap: number): number {
+		const now = this.now()
+		const v = this.visit
+		const held =
+			this.hold === null ? undefined : v?.tracks.get(this.hold.trackId)
+		const hop = v === null ? undefined : this.hops[v.hopIndex]
+		const memory =
+			hop === undefined || held === undefined
+				? undefined
+				: this.memoryOf(hop, held)
+		const blockMs = (this.blockSamples * 1000) / this.sampleRateHz
+		const classify =
+			memory !== undefined && !memory.traffic
+				? Math.min(this.spec.hold.hangMs, TRAFFIC_GAP_MS + blockMs)
+				: 0
+		return Math.min(
+			this.maxHoldDeadline(),
+			Math.max(Math.min(now + this.spec.hold.hangMs, cap), now + classify),
+		)
 	}
 
 	onOverload(hopIndex: number): void {
@@ -816,13 +911,16 @@ export class SweepScheduler {
 				Math.max(m.halfWidthHz, halfWidthHz),
 		)
 		if (entry === undefined) {
-			// Missed by ONSET_EVIDENCE_VISITS full visits of the hop, or off air for `hold.hangMs` of
-			// this visit: its onset is bracketed. On the hop's first visits (job start, resume) it may
-			// have been on air all along.
-			const onsetSeen =
-				hop.fullVisits >= ONSET_EVIDENCE_VISITS ||
-				(this.openedLate(v, entry, isNew) &&
-					this.listenedMs(v) >= this.spec.hold.hangMs)
+			// Off air for TRAFFIC_GAP_MS of this visit before it opened: traffic. Missed by at least one
+			// full visit of the hop: traffic until a gap shorter than TRAFFIC_GAP_MS shows a carrier
+			// (FrequencyMemory.provisional). On the hop's first visit (job start, resume) it may have
+			// been on air all along. Only ONSET_EVIDENCE_VISITS missed visits make it new to the
+			// presence rule (a gap nobody heard ends its emission at once).
+			const heardOff =
+				this.openedLate(v, entry, isNew) && this.listenedMs(v) >= TRAFFIC_GAP_MS
+			const bracketed = hop.fullVisits >= ONSET_EVIDENCE_VISITS
+			const provisional = !heardOff && hop.fullVisits >= 1
+			const onsetSeen = heardOff || provisional
 			entry = {
 				centreHz: track.centreHz,
 				halfWidthHz,
@@ -833,8 +931,9 @@ export class SweepScheduler {
 				steady: false,
 				onsetSeen,
 				traffic: onsetSeen,
+				provisional,
 				// On air for as long as the hop has been heard: persistent until visits miss it.
-				presence: onsetSeen ? 0 : 1,
+				presence: heardOff || bracketed ? 0 : 1,
 				missed: false,
 				closedAt: null,
 			}
@@ -842,45 +941,159 @@ export class SweepScheduler {
 			this.boundMemory(hop)
 		} else {
 			const sighting = this.sighting(v, entry, isNew, now)
-			if (sighting === "heard-gap" || sighting === "unheard-gap") {
+			const gap = this.heardOffGap(v, entry, isNew, now)
+			// A new emission. A gap nobody heard frees only a frequency already known as traffic: on
+			// anything else it may be a carrier's short gap that a visit happened to miss, and only
+			// its retry budget (below) holds it again. A heard gap is TRAFFIC_GAP_MS or more (gap).
+			if (
+				sighting === "heard-gap" ||
+				(sighting === "unheard-gap" && entry.traffic)
+			) {
 				entry.barred = false
 				entry.steady = false
-				// A gap nobody heard brackets an onset only on a frequency already known as traffic;
-				// a carrier needs a heard gap.
-				entry.onsetSeen = sighting === "heard-gap" || entry.traffic
-				entry.traffic = entry.onsetSeen
+			}
+			if (gap) this.markTraffic(entry)
+			else if (entry.provisional && this.heardShortGap(v, entry)) {
+				// Its onset was bracketed (onsetSeen, hop activity stays), but a short gap is a carrier's.
+				entry.traffic = false
+				entry.provisional = false
+				this.spendCarrier(entry, now)
+				this.cutFollowOf(v, entry)
+			}
+			// Not traffic, barred or steady, and its retry budget has refilled: held again (a hold
+			// of at most ONSET_UNSEEN_FOLLOW_MS), so something on air since the job started is
+			// listened to again instead of staying barred until it is forgotten.
+			if (
+				!entry.traffic &&
+				(entry.barred || entry.steady) &&
+				this.retryLock === 0 &&
+				this.usedOf(entry, now) <= 0
+			) {
+				this.retryLock = this.plan.hops.length
+				entry.barred = false
+				entry.steady = false
+				entry.firstSeenAt = now
 			}
 			if (sighting !== "same" && !entry.steady) entry.firstSeenAt = now
 		}
 		entry.closedAt = null
 		entry.missed = false
 		entry.lastSeenAt = now
+		// Heard again during a dwell extended to listen for it (waitForGap): the wait ends.
+		if (
+			v.gapWaitFor.delete(entry) &&
+			v.gapWaitFor.size === 0 &&
+			this.phase === "dwell" &&
+			v.dwellEnd !== null &&
+			this.lastBlockEnd !== null
+		)
+			v.dwellEnd = Math.min(v.dwellEnd, this.lastBlockEnd)
 		// Barred and heard again on a later visit: a frequency that outlasted a hold and is still
-		// there. On air for longer than the longest hold: a carrier, not a transmission.
+		// there. On air for longer than the longest hold: a carrier, not a transmission. Traffic is
+		// never steady.
 		const wasSteady = entry.steady
-		if (entry.lastSerial < v.serial && entry.barred) entry.steady = true
-		if (now - entry.firstSeenAt >= this.spec.hold.maxHoldMs) entry.steady = true
-		if (entry.steady && !wasSteady && !entry.traffic) v.newlySteady = true
-		this.spendIfCarrier(entry, now)
+		if (!entry.traffic) {
+			if (entry.lastSerial < v.serial && entry.barred) entry.steady = true
+			if (now - entry.firstSeenAt >= this.spec.hold.maxHoldMs)
+				entry.steady = true
+		}
+		if (entry.steady && !wasSteady && !entry.traffic) {
+			if (!entry.onsetSeen) v.newlySteady = true
+			// Turning steady starts its retry budget unless a hold already did.
+			if (this.usedOf(entry, now) <= 0) this.spendCarrier(entry, now)
+		}
 		entry.lastSerial = v.serial
 		entry.halfWidthHz = Math.max(entry.halfWidthHz, halfWidthHz)
 		return entry
 	}
 
 	/**
-	 * Barred or steady with no onset seen: a carrier as far as anyone heard. Its long-follow budget
-	 * stays spent while it is heard so, and drains only once it is not (FOLLOW_BUDGET_WINDOWS): a
-	 * gap nobody heard (a flapping carrier that several visits happened to miss) wins it a hold of
-	 * one coarse sweep, or a follow of what drained since it was last heard (a fifth of that time).
+	 * A frequency not known as traffic was barred by a hold or turned steady (`known` carrier: at
+	 * once the longest charge): its retry budget is charged RETRY_CHARGE_MS × 2^(strikes) (at most
+	 * `hold.maxHoldMs`) and its next sighting after the bucket drained is held again (remember).
 	 */
-	private spendIfCarrier(m: FrequencyMemory, now: number): void {
-		if (m.onsetSeen || (!m.barred && !m.steady)) return
+	private spendCarrier(m: FrequencyMemory, now: number, known = false): void {
+		if (m.traffic) return
 		const budget = this.budgetFor(m, now)
-		budget.usedMs = this.spec.hold.maxHoldMs
+		const max = this.spec.hold.maxHoldMs
+		budget.strikes = known ? 31 : Math.min(31, budget.strikes + 1)
+		budget.usedMs = Math.min(max, RETRY_CHARGE_MS * 2 ** (budget.strikes - 1))
 		budget.usedAt = now
 	}
 
-	/** The frequency's long-follow bucket, if one was made. */
+	/**
+	 * Traffic evidence: the frequency was heard off air for TRAFFIC_GAP_MS (a decode is evidence too,
+	 * onConfirmed). It is never steady and a bar no longer stops its holds.
+	 */
+	private markTraffic(m: FrequencyMemory): void {
+		const budget = this.budgetOf(m)
+		if (budget !== undefined) budget.strikes = 0
+		m.provisional = false
+		m.traffic = true
+		m.onsetSeen = true
+		m.barred = false
+		m.steady = false
+	}
+
+	/**
+	 * This sighting reopens the frequency less than TRAFFIC_GAP_MS after a close the visit heard
+	 * (not in the same block, a rollover): the gap of a flapping carrier.
+	 */
+	private heardShortGap(v: Visit, entry: FrequencyMemory): boolean {
+		const closed = entry.closedAt
+		return (
+			closed !== null &&
+			closed.serial === v.serial &&
+			closed.block !== v.blocks &&
+			this.now() - closed.at < TRAFFIC_GAP_MS
+		)
+	}
+
+	/**
+	 * The frequency is a carrier after all (a provisional onset, then a short gap): a follow of it
+	 * in progress ends at the bound of a frequency not known as traffic (followCap).
+	 */
+	private cutFollowOf(v: Visit, entry: FrequencyMemory): void {
+		const hold = this.hold
+		const hop = this.hops[v.hopIndex]
+		const held = hold === null ? undefined : v.tracks.get(hold.trackId)
+		if (
+			hold === null ||
+			hold.mode === "confirm" ||
+			hold.decoded ||
+			hop === undefined ||
+			held === undefined ||
+			this.memoryOf(hop, held) !== entry
+		)
+			return
+		const start = v.holdStartedAt ?? this.now()
+		const cap = Math.min(
+			hold.cap,
+			start + Math.min(this.chainBudgetMs(), ONSET_UNSEEN_FOLLOW_MS),
+		)
+		hold.cap = cap
+		hold.deadline = Math.min(hold.deadline, cap)
+	}
+
+	/**
+	 * This sighting ends an off-air gap of at least TRAFFIC_GAP_MS the visit heard: a close earlier
+	 * in the visit (not in the same block, a rollover), or a late open after that much listening.
+	 */
+	private heardOffGap(
+		v: Visit,
+		entry: FrequencyMemory,
+		isNew: boolean,
+		now: number,
+	): boolean {
+		const closed = entry.closedAt
+		if (closed !== null && closed.serial === v.serial)
+			return closed.block !== v.blocks && now - closed.at >= TRAFFIC_GAP_MS
+		return (
+			this.openedLate(v, entry, isNew) && this.listenedMs(v) >= TRAFFIC_GAP_MS
+		)
+	}
+
+	/** The frequency's bucket, if one was made. */
 	private budgetOf(m: FrequencyMemory): FollowBudget | undefined {
 		return this.budgets.find(
 			b =>
@@ -890,8 +1103,8 @@ export class SweepScheduler {
 	}
 
 	/**
-	 * The frequency's long-follow bucket, made empty when it has none. Making one drops the
-	 * drained buckets (except the follow in progress) and keeps at most
+	 * The frequency's bucket, made empty when it has none. Making one drops the drained buckets
+	 * with no retry strikes (except the follow in progress) and keeps at most
 	 * FOLLOW_BUDGETS_PER_HOP × hop count, dropping the one with the least ms left first.
 	 */
 	private budgetFor(m: FrequencyMemory, now: number): FollowBudget {
@@ -902,7 +1115,7 @@ export class SweepScheduler {
 		}
 		const active = this.following?.budget
 		this.budgets = this.budgets.filter(
-			b => b === active || this.followUsed(b, now) > 0,
+			b => b === active || this.followUsed(b, now) > 0 || b.strikes > 0,
 		)
 		const limit = FOLLOW_BUDGETS_PER_HOP * Math.max(1, this.plan.hops.length)
 		while (this.budgets.length >= limit) {
@@ -923,13 +1136,14 @@ export class SweepScheduler {
 			halfWidthHz: m.halfWidthHz,
 			usedMs: 0,
 			usedAt: now,
+			strikes: 0,
 		}
 		this.budgets.push(budget)
 		return budget
 	}
 
 	/**
-	 * Long-follow ms of the frequency's bucket not yet drained at `now`, the follow in progress on
+	 * Ms of the frequency's bucket not yet drained at `now`, the follow in progress on
 	 * it included.
 	 */
 	private usedOf(m: FrequencyMemory, now: number): number {
@@ -1110,6 +1324,9 @@ export class SweepScheduler {
 			classWait: false,
 			closedAfterHold: new Set(),
 			longFollow: false,
+			heldClosed: false,
+			gapWait: false,
+			gapWaitFor: new Set(),
 		}
 	}
 
@@ -1148,9 +1365,56 @@ export class SweepScheduler {
 				v.holdStartedAt = this.now()
 				return this.startHold(next)
 			}
-			if (this.waitForClass(v)) return []
+			if (this.waitForClass(v) || this.waitForGap(v)) return []
 		}
 		return this.leaveHop([])
+	}
+
+	/**
+	 * A frequency not known as traffic that is barred or steady, was heard on the hop's last full
+	 * visit and is persistent, yet this dwell did not hear it: it may be in the gap between two
+	 * overs of a QSO. With nothing to hold, the dwell listens once for TRAFFIC_GAP_MS (plus the
+	 * minSurfaceBlocks a reopening needs to surface): if it stays off that long it is traffic
+	 * (endVisit), if it comes back the wait ends on the next block. Cost: at most
+	 * minSurfaceBlocks + ceil(TRAFFIC_GAP_MS / block) + 1 blocks of listening per visit (23 blocks,
+	 * 1150 ms, in 50 ms blocks, so 1000 ms past a 3-block dwell), and only on a visit that missed
+	 * such a frequency: a steady carrier is never missed.
+	 */
+	private waitForGap(v: Visit): boolean {
+		if (
+			v.gapWait ||
+			v.dwellEnd === null ||
+			this.spec.hold.policy !== "hold" ||
+			this.spec.signalsOnly === true ||
+			this.blockSamples <= 0
+		)
+			return false
+		const hop = this.hops[v.hopIndex]
+		if (hop === undefined) return false
+		for (const m of hop.memory)
+			if (
+				!m.traffic &&
+				(m.barred || m.steady) &&
+				m.lastSerial < v.serial &&
+				!m.missed &&
+				m.presence >= PERSISTENT_PRESENCE
+			)
+				v.gapWaitFor.add(m)
+		if (v.gapWaitFor.size === 0) return false
+		const blockMs = (this.blockSamples * 1000) / this.sampleRateHz
+		// One block more than listenedMs needs: a reopening is sighted before its block is counted.
+		const need =
+			this.minSurfaceBlocks +
+			Math.ceil(TRAFFIC_GAP_MS / blockMs) +
+			1 -
+			(v.blocks - v.epochBlock)
+		v.gapWait = true
+		if (need <= 0) {
+			v.gapWaitFor.clear()
+			return false
+		}
+		v.dwellEnd += need * this.blockSamples
+		return true
 	}
 
 	/**
@@ -1226,15 +1490,22 @@ export class SweepScheduler {
 	}
 
 	/** Holds `trackId` in follow mode up to its cap (followCap); the frequency's budget runs from now. */
-	private startFollow(trackId: string, t: TrackInfo): void {
-		const { cap, deferred, long } = this.followCap(t)
+	private startFollow(trackId: string, t: TrackInfo, decoded = false): void {
+		const { cap, deferred, long } = this.followCap(t, decoded)
 		t.deferred = deferred
 		if (long && this.visit !== null) this.visit.longFollow = true
-		this.hold = { trackId, mode: "follow", deadline: cap, cap, deferred }
+		this.hold = {
+			trackId,
+			mode: "follow",
+			deadline: cap,
+			cap,
+			deferred,
+			decoded,
+		}
 		this.chargeFrom(t)
 	}
 
-	/** From now, the hold of `t` is charged to its frequency's long-follow bucket (endFollow). */
+	/** From now, the hold of `t` is charged to its frequency's bucket (endFollow). */
 	private chargeFrom(t: TrackInfo): void {
 		const v = this.visit
 		const hop = v === null ? undefined : this.hops[v.hopIndex]
@@ -1263,13 +1534,17 @@ export class SweepScheduler {
 	}
 
 	/**
-	 * Last clock a follow of `t` may run to. Long (to `hold.maxHoldMs` from the start of the
-	 * visit's holds, at most the frequency's unspent budget) only for an emission whose onset was
-	 * seen, with budget left, and once every hop has had a coarse visit since the last long hold.
-	 * Otherwise short: one coarse sweep (chainBudgetMs) from the start of the visit's holds. A
-	 * one-hop plan has no other hop to starve: always long.
+	 * Last clock a follow of `t` may run to, counted from the start of the visit's holds. Traffic
+	 * (FrequencyMemory.traffic) and a decoded transmission (`decoded`) are followed long, to
+	 * `hold.maxHoldMs`, once every hop has had a coarse visit since the last long hold; while that
+	 * lock holds, one coarse sweep (chainBudgetMs), deferred. Anything else (on air since before its
+	 * onset could be bracketed, no gap heard) is held at most one coarse sweep and at most
+	 * ONSET_UNSEEN_FOLLOW_MS. A one-hop plan has no other hop to starve: always long.
 	 */
-	private followCap(t: TrackInfo): {
+	private followCap(
+		t: TrackInfo,
+		decoded = false,
+	): {
 		cap: number
 		deferred: boolean
 		long: boolean
@@ -1279,22 +1554,19 @@ export class SweepScheduler {
 		const v = this.visit
 		if (v === null || this.plan.hops.length < 2)
 			return { cap: long, deferred: false, long: false }
-		const short = Math.min(
-			long,
-			(v.holdStartedAt ?? now) + this.chainBudgetMs(),
-		)
+		const start = v.holdStartedAt ?? now
+		const short = Math.min(long, start + this.chainBudgetMs())
 		const hop = this.hops[v.hopIndex]
 		const memory = hop === undefined ? undefined : this.memoryOf(hop, t)
-		if (memory === undefined || !memory.onsetSeen)
-			return { cap: short, deferred: false, long: false }
-		const left = this.spec.hold.maxHoldMs - this.usedOf(memory, now)
-		// A spent budget has nothing to defer: only a lock holding back budget still left defers it.
-		if (left <= 0 || now + left <= short)
-			return { cap: short, deferred: false, long: false }
+		if (!decoded && memory?.traffic !== true)
+			return {
+				cap: Math.min(short, start + ONSET_UNSEEN_FOLLOW_MS),
+				deferred: false,
+				long: false,
+			}
 		if (this.longHoldLock > 0)
 			return { cap: short, deferred: true, long: false }
-		const cap = Math.min(long, now + left)
-		return { cap, deferred: false, long: cap > short }
+		return { cap: long, deferred: false, long: long > short }
 	}
 
 	/**
@@ -1322,6 +1594,7 @@ export class SweepScheduler {
 			deadline: now + holdMs,
 			cap: now + holdMs,
 			deferred: false,
+			decoded: false,
 		}
 		this.phase = "hold"
 		return [{ type: "start-probe", trackId, holdMs }]
@@ -1334,10 +1607,9 @@ export class SweepScheduler {
 	 * start of the holds. afterProbe chains a probe only within S, so a visit's confirm holds end
 	 * at most S + F + probe start after they started (one probe: max(S, F + probe start)). A
 	 * decoder that needs a longer window is probed again on the hop's later visits. Only analog
-	 * voice that may be followed long (followCap: onset seen, budget left, every hop visited since
-	 * the last long follow) is probed past that, up to its follow cap; that hold is a long follow
-	 * (its time is charged to the frequency's bucket and it locks the next long follow out until
-	 * every hop had a visit). A one-hop plan: up to `hold.maxHoldMs`.
+	 * voice that may be followed long (followCap: traffic, every hop visited since the last long
+	 * follow) is probed past that, up to its follow cap; that hold is a long follow (it locks the
+	 * next long follow out until every hop had a visit). A one-hop plan: up to `hold.maxHoldMs`.
 	 */
 	private confirmEnd(t: TrackInfo): number {
 		const now = this.now()
@@ -1592,11 +1864,14 @@ export class SweepScheduler {
 
 	private endVisit(now: number): void {
 		const v = this.visit
+		const hold = this.hold
 		this.endFollow()
 		this.hold = null
 		if (v === null) return
 		const hop = this.hops[v.hopIndex]
 		if (hop === undefined) return
+		this.noteTrafficEvidence(v, hop, now)
+		this.demoteUnbroken(v, hop, hold, now)
 		hop.visits++
 		hop.timeMs += Math.max(0, now - v.startedAt)
 		const heldMs =
@@ -1607,6 +1882,7 @@ export class SweepScheduler {
 		if (v.longFollow && heldMs > this.chainBudgetMs())
 			this.longHoldLock = this.plan.hops.length
 		else if (!v.revisit && this.longHoldLock > 0) this.longHoldLock--
+		if (!v.revisit && this.retryLock > 0) this.retryLock--
 		// A hold that ended with its track still on air bars the frequency from another hold
 		// during the same emission; one that ended with the frequency heard off air for at least
 		// `hold.hangMs` frees it. A close less than `hold.hangMs` before the hop is left is no heard
@@ -1632,15 +1908,20 @@ export class SweepScheduler {
 				else if (!barred.has(memory)) memory.barred = false
 			}
 			// Spurs and carriers (steady with no onset ever seen) are no activity: they never need a
-			// revisit. Traffic stays activity even while barred or steady (a long QSO).
+			// revisit. Traffic, or anything whose onset was seen, stays activity even while barred or
+			// steady (a long QSO, a busy repeater).
 			if (t.flagged) continue
-			if ((t.steady || memory?.steady === true) && memory?.traffic !== true)
+			if (
+				(t.steady || memory?.steady === true) &&
+				memory?.traffic !== true &&
+				memory?.onsetSeen !== true
+			)
 				continue
 			openBlocks = Math.max(openBlocks, t.openBlocks)
 		}
 		for (const memory of barred) {
 			memory.barred = true
-			this.spendIfCarrier(memory, now)
+			this.spendCarrier(memory, now)
 			this.barInOverlaps(v.hopIndex, memory)
 		}
 		// A full dwell hears everything on air for minSurfaceBlocks blocks: presence is counted in
@@ -1686,6 +1967,57 @@ export class SweepScheduler {
 				}
 			}
 		}
+	}
+
+	/**
+	 * Off-air time the visit heard on frequencies not known as traffic: one that closed and stayed
+	 * off for TRAFFIC_GAP_MS up to the end of the visit, or one the visit did not hear at all while
+	 * it listened for TRAFFIC_GAP_MS (listenedMs, the dwell extension of waitForGap or any longer
+	 * visit), is traffic.
+	 */
+	private noteTrafficEvidence(v: Visit, hop: HopState, now: number): void {
+		const listened = this.listenedMs(v)
+		for (const m of hop.memory) {
+			if (m.traffic) continue
+			const closed = m.closedAt
+			const closedLongEnough =
+				closed !== null &&
+				closed.serial === v.serial &&
+				now - closed.at >= TRAFFIC_GAP_MS
+			const unheard = m.lastSerial < v.serial && listened >= TRAFFIC_GAP_MS
+			if (closedLongEnough || unheard) this.markTraffic(m)
+		}
+	}
+
+	/**
+	 * A follow that was not decoded and heard its frequency on air without a break for
+	 * `hold.maxHoldMs` (the hold ran to its bound and no held track closed): one transmission that
+	 * long is a carrier, not traffic. It is held again only when its retry budget refills
+	 * (FOLLOW_BUDGET_WINDOWS), so a carrier that once went off air for a while does not take a long
+	 * follow on every lock cycle.
+	 */
+	private demoteUnbroken(
+		v: Visit,
+		hop: HopState,
+		hold: Hold | null,
+		now: number,
+	): void {
+		if (
+			hold === null ||
+			hold.decoded ||
+			v.heldClosed ||
+			v.holdStartedAt === null ||
+			now - v.holdStartedAt < this.spec.hold.maxHoldMs
+		)
+			return
+		const t = v.tracks.get(hold.trackId)
+		if (t === undefined || !t.open) return
+		const memory = this.memoryOf(hop, t)
+		if (memory === undefined || !memory.traffic) return
+		memory.traffic = false
+		memory.onsetSeen = false
+		memory.steady = true
+		this.spendCarrier(memory, now, true)
 	}
 
 	private pickRevisit(now: number, lastWasRevisit: boolean): number | null {
