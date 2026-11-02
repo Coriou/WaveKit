@@ -13,6 +13,7 @@ import {
 	type SimResult,
 	type SimSignal,
 } from "../../../../src/core/scanner/plan/sweep-sim.js"
+import type { HopPlan } from "../../../../src/core/scanner/types.js"
 import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
 import {
 	makeHopPlan,
@@ -140,6 +141,109 @@ const endHeard = (r: SimResult, hopIndex: number, endMs: number): boolean =>
 			l.fromMs <= endMs - BLOCK_MS &&
 			l.toMs >= endMs,
 	)
+/** Whole blocks of a listening span [a, b] (on its block grid from a) inside [from, to]. */
+const wholeBlocks = (
+	a: number,
+	b: number,
+	from: number,
+	to: number,
+): number => {
+	const first = a + Math.max(0, Math.ceil((from - a) / BLOCK_MS)) * BLOCK_MS
+	return Math.max(0, Math.floor((Math.min(b, to) - first) / BLOCK_MS))
+}
+/**
+ * The sweep saw the start of transmission `i` (docs/SCANNER.md, Fair holds: a full visit of its
+ * hop missed it before it appeared): a full visit (minSurfaceBlocks + 1 blocks of listening or
+ * more) of a hop holding its frequency, starting after the previous transmission on that frequency
+ * started (the job start for the first one) and before this one did, during which no transmission
+ * on the frequency was on air for minSurfaceBlocks whole blocks.
+ */
+const onsetSeen = (
+	r: SimResult,
+	plan: HopPlan,
+	signals: readonly SimSignal[],
+	i: number,
+): boolean => {
+	const sig = signals[i]!
+	const same = signals.filter(x => x.centreHz === sig.centreHz)
+	const prevStart = Math.max(
+		0,
+		...same.filter(x => x.startMs < sig.startMs).map(x => x.startMs),
+	)
+	return r.listens.some(l => {
+		const span = plan.hops[l.hopIndex]!.covered
+		return (
+			sig.centreHz >= span.startHz &&
+			sig.centreHz <= span.endHz &&
+			l.toMs - l.fromMs >= (sim.minSurfaceBlocks + 1) * BLOCK_MS &&
+			l.fromMs >= prevStart &&
+			l.fromMs < sig.startMs &&
+			same.every(
+				e =>
+					wholeBlocks(l.fromMs, l.toMs, e.startMs, e.endMs) <
+					sim.minSurfaceBlocks,
+			)
+		)
+	})
+}
+/**
+ * Condition under which a 28 s call `i` is heard to its end. `only`: its start was seen and no
+ * other transmission whose start the sweep saw is on air at any time during it. `inTime`: it was
+ * detected (`at`) no later than latestDetectionMs(hops) after its start.
+ */
+const endCondition = (
+	r: SimResult,
+	plan: HopPlan,
+	signals: readonly SimSignal[],
+	i: number,
+): { only: boolean; inTime: boolean } => {
+	const call = signals[i]!
+	const others = signals.filter(
+		(x, j) =>
+			j !== i &&
+			x.startMs < call.endMs &&
+			x.endMs > call.startMs &&
+			onsetSeen(r, plan, signals, j),
+	)
+	const at = r.detectedAtMs[i]
+	return {
+		only: onsetSeen(r, plan, signals, i) && others.length === 0,
+		inTime:
+			at !== null &&
+			at !== undefined &&
+			at - call.startMs <= latestDetectionMs(plan.hops.length),
+	}
+}
+/**
+ * Latest detection, after its start, of a 28 s call whose end is guaranteed heard: its first hold
+ * starts at the dwell end (a block after the detection) and watches it WATCH_MS; then it is one
+ * sweep away (awayMs: every other hop's dwell, a revisit per three coarse hops and the settle of
+ * the return, unheard), and the hop must listen again by its last block. 3 hops: 28 000 − 100 −
+ * 8000 − 4450 = 15 450 ms; 7 hops: 28 000 − 100 − 8000 − 11 350 = 8550 ms.
+ */
+const latestDetectionMs = (hops: number): number =>
+	28_000 - 2 * BLOCK_MS - WATCH_MS - awayMs(hops)
+/** A confirm probe of the earlier scheduler: the job's confirm hold plus the probe start latency. */
+const PROBE_HOLD_MS = CONFIRM_MS + PROBE_START_MS
+/**
+ * Floor of the ms a 28 s call is heard, from the earlier scheduler (one confirm probe per visit,
+ * nothing followed without a decode). Each of its visits of the call's hop hears at most its dwell
+ * (3 blocks) and one probe: 150 + 2100 = 2250 ms; the probe ends the visit (one track on the hop).
+ * Without revisits, consecutive visits of the hop start at least one coarse sweep apart, its own
+ * probe included: P = hops × DWELL_MS + 2100 (probes on other hops only lengthen it). So it hears
+ * at most Σₖ min(2250, 28 000 − k × P): 2 hops 15 100, 3 hops 11 500, 4 hops 10 200, 5 hops 9000,
+ * 6 hops 7750, 7 hops 6750 ms. On plans without revisits this bounds what it hears from above, so
+ * a call heard this long is heard at least as long as it was. With revisits the earlier scheduler
+ * can visit the hop more often and hear more: this floor is then its coarse cadence only.
+ */
+const earlierHeardMs = (hops: number): number => {
+	const visitMs = DWELL_MS - SETTLE_MS + PROBE_HOLD_MS
+	const periodMs = hops * DWELL_MS + PROBE_HOLD_MS
+	let sum = 0
+	for (let k = 0; 28_000 - k * periodMs > 0; k++)
+		sum += Math.min(visitMs, 28_000 - k * periodMs)
+	return sum
+}
 
 describe("sweep fairness: steady carrier, empty hop, voice hop", () => {
 	const plan = makeHopPlan(centres(3), HALF_SPAN_HZ)
@@ -539,7 +643,8 @@ describe("intercept property", () => {
 	/**
 	 * One case of Property 1: a 28 s call on hop `voiceSlot % hops` starting at `startMs`, beside
 	 * `kind` on hop `otherSlot % hops` and, when `busy`, a busy channel on hop `busySlot % hops`.
-	 * Returns the simulation and its signals for case-specific checks.
+	 * Checks the guarantee and returns the simulation, its plan and signals, the call's hop and the
+	 * end condition for case-specific checks.
 	 */
 	const interceptCase = (
 		hops: number,
@@ -550,7 +655,13 @@ describe("intercept property", () => {
 		kind: Other,
 		busy: boolean,
 		revisitShare: number,
-	): { r: SimResult; signals: SimSignal[] } => {
+	): {
+		r: SimResult
+		plan: HopPlan
+		signals: SimSignal[]
+		vHop: number
+		condition: { only: boolean; inTime: boolean }
+	} => {
 		const plan = makeHopPlan(centres(hops), HALF_SPAN_HZ)
 		const vHop = voiceSlot % hops
 		const oHop = otherSlot % hops
@@ -574,35 +685,26 @@ describe("intercept property", () => {
 				...series(plan.hops[bHop]!.centreHz + 200_000, 20_000, 300, durationMs),
 			)
 		const r = simulateSweep(plan, s, { ...sim, durationMs, signals })
+		// Detected while on air. Worst case: the hop was just left. One coarse sweep of the other
+		// hops, each a dwell, at most one hold of one coarse sweep (a carrier's hold: 8000 ms, a hang
+		// classing a gap 1050 ms), at most one revisit per round(1 / 0.3) = 3 hops, then settle + 2
+		// blocks: 7 × 1150 + 9050 + 3 × 1150 + 1150 = 21 700 ms < 28 000 ms.
 		const at = r.detectedAtMs[0]
 		expect(at).not.toBeNull()
-		// Worst case: the hop was just left. One coarse sweep of the other hops, each a
-		// dwell, at most one hold of one coarse sweep (a carrier's hold: 8000 ms, a hang classing a gap 1050 ms),
-		// at most one revisit per round(1 / 0.3) = 3 hops, then settle + 2 blocks:
-		// 7 × 1150 + 9050 + 3 × 1150 + 1150 = 21 700 ms < 28 000 ms.
 		expect(at! - startMs).toBeLessThanOrEqual(21_700)
-		// Its onset was seen: watched 8 s from the dwell end, then after a coarse visit of every hop
-		// (awayMs) followed to its end (28 s < 30 s of run). Every block after its detection is heard
-		// but those of that one sweep away, and its last block whenever the sweep away ends before
-		// it does. A call detected later (behind another hop's hold) may end during that sweep: the
-		// other hops' calls are detected first (7 hops: detected 12.35 s after its start, its end
-		// comes 300 ms before its hop is back). That sweep may also hold one frequency newly heard
-		// like any signal (a flapping carrier forgotten after ten visits fell in its gaps): its
-		// first watch and a hang classing a gap.
-		const away = awayMs(hops) + WATCH_MS + CLASS_HANG_MS
-		const remaining = startMs + 28_000 - at! - BLOCK_MS
-		expect(r.heardMs[0]).toBeGreaterThanOrEqual(
-			Math.max(Math.min(remaining, WATCH_MS - BLOCK_MS), remaining - away),
-		)
-		if (at! + BLOCK_MS + WATCH_MS + away < startMs + 28_000)
+		// Heard at least as long as one confirm probe per visit heard it (earlierHeardMs).
+		expect(r.heardMs[0]).toBeGreaterThanOrEqual(earlierHeardMs(hops))
+		// Heard to its end when it is the only call on air whose start the sweep saw and it was
+		// detected in time (latestDetectionMs).
+		const condition = endCondition(r, plan, signals, 0)
+		if (condition.only && condition.inTime)
 			expect(endHeard(r, vHop, startMs + 28_000)).toBe(true)
-		expect(r.holds[0]).toBeLessThanOrEqual(2)
-		return { r, signals }
+		return { r, plan, signals, vHop, condition }
 	}
 
-	// Feature: scanner-sweep-fairness, Property 1: a 28 s transmission in a sweep of at most 10 s is always detected and then followed to its end, beside carriers (labelled or not, steady or flapping) and a busy channel
+	// Feature: scanner-sweep-fairness, Property 1: every 28 s ID is detected; it is heard at least as long as one confirm probe per visit heard it; it is heard to its end when it is the only call on air whose start the sweep saw and it is detected at least 8 s plus one sweep away before its end, beside carriers (labelled or not, steady or flapping) and a busy channel
 	// Validates: Requirements 3 (detection always, hold until it ends bounded by maxHoldMs), 2 (no re-hold on a steady or flapping carrier), 1 (no hop starved by another hop's holds)
-	it("detects every 28 s transmission and follows it until it ends", () => {
+	it("detects every 28 s ID, hears it at least as long as one confirm probe per visit, and to its end when it is the only onset-seen call and detected in time", () => {
 		fc.assert(
 			fc.property(
 				// 2..7 hops: 7 × 1150 ms = 8.05 s nominal period
@@ -637,7 +739,7 @@ describe("intercept property", () => {
 	// a 0.5 s off gap (heard off for less than hangMs 2000 ms) and freed the frequency, so hop 6 was
 	// held for a coarse sweep (8050 ms) on three visits. Hop 1 then had only 2 full visits before
 	// 45 s, not the 3 that bracket an onset, and the call got one coarse sweep: 8500 ms heard of 28 s.
-	it("a call on a short-period sweep is followed to its end beside a carrier flapping in sub-hang gaps", () => {
+	it("a call on a short-period sweep beside a carrier flapping in sub-hang gaps is watched 8 s, and the carrier is held at most twice", () => {
 		const { r, signals } = interceptCase(
 			7,
 			946,
@@ -648,10 +750,10 @@ describe("intercept property", () => {
 			true,
 			0.3,
 		)
-		// interceptCase checked the call (signal 0) is detected and its first hold heard it a
+		// interceptCase checked the guarantee for the call (signal 0); its first hold heard it a
 		// watch long (8300 ms; before the fix that hold was one coarse sweep, 8500 ms, and the call
-		// was not held again). Detected 13.4 s after its start, it ends while every hop has its
-		// coarse visit (8050 ms and two revisits): the other hops come first.
+		// was not held again). Detected 13.4 s after its start (later than latestDetectionMs(7),
+		// 8550 ms), it ends while every hop has its coarse visit (8050 ms and two revisits).
 		expect(r.heardMs[0]).toBeGreaterThanOrEqual(WATCH_MS - BLOCK_MS)
 		// The flapping frequency (its first emission on air at the job start) is never heard as
 		// traffic (its gaps are 0.5 s): held at most once per retry slot of an 8050 ms hold (0, then
@@ -669,6 +771,28 @@ describe("intercept property", () => {
 				DWELL_MS + 7 * DWELL_MS + 1_050 + BLOCK_MS,
 			)
 		expect(signals.some(x => x.centreHz === flapHz)).toBe(true)
+	})
+
+	// Regression: 7 hops, the ID on hop 2 from 47 250 ms, a busy channel on hop 1, no revisits. Its
+	// start was seen and no other call's was, but hop 2 was just left: it is detected 12 350 ms after
+	// its start, watched 8 s, and its hop is back 300 ms after its end (heard 8150 ms). One confirm
+	// probe per visit heard 4500 ms of it.
+	it("7 hops: an ID detected 12.35 s after its start is heard more than one confirm probe per visit heard it; its end is missed only because it was detected too late", () => {
+		const { r, condition } = interceptCase(
+			7,
+			30,
+			851,
+			8,
+			47_250,
+			"none",
+			true,
+			0,
+		)
+		expect(r.detectedAtMs[0]! - 47_250).toBe(12_350)
+		expect(r.heardMs[0]).toBeGreaterThanOrEqual(4_500)
+		expect(condition.only).toBe(true)
+		expect(condition.inTime).toBe(false)
+		expect(latestDetectionMs(7)).toBe(8_550)
 	})
 })
 
@@ -1440,6 +1564,28 @@ describe("hold evidence across restarts, the long-hold lock and confirm bounds",
 describe("calls and carriers whose onset a visit saw", () => {
 	// Earlier scheduler (one confirm probe per visit) on the same scenes: detection after the call's
 	// start and ms heard.
+
+	// Regression: 7 hops, a carrier labelled analog voice from 10 s on hop 0 (its start seen) and a
+	// 28 s ID from 20 s on hop 6. The two share the time: the ID is detected 14.4 s after its start
+	// and heard 8150 ms, and its end is missed. One confirm probe per visit heard 4500 ms of it.
+	it("7 hops, mid-job carrier: the ID is heard more than one confirm probe per visit heard it; its end is missed only because another onset-seen call is on air", () => {
+		const plan = makeHopPlan(centres(7), HALF_SPAN_HZ)
+		const signals = [
+			labelledCarrier(plan.hops[0]!.centreHz - 100_000, 10_000),
+			voice(plan.hops[6]!.centreHz + 100_000, 20_000),
+		]
+		const r = simulateSweep(plan, spec, {
+			...sim,
+			durationMs: 60_000,
+			signals,
+		})
+		expect(r.detectedAtMs[1]).not.toBeNull()
+		expect(r.heardMs[1]).toBeGreaterThanOrEqual(4_500)
+		expect(onsetSeen(r, plan, signals, 0)).toBe(true)
+		const condition = endCondition(r, plan, signals, 1)
+		expect(condition.only).toBe(false)
+	})
+
 	for (const hops of [3, 7]) {
 		it(`${hops} hops: a carrier labelled analog voice from 10 s does not hide a 28 s ID on another hop from 20 s`, () => {
 			// Regression: the carrier's onset was seen (hop 0's first visits missed it), so it was
