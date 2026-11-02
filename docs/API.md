@@ -7896,8 +7896,14 @@ later removed) is never flagged and loses the flag when it gains one; a flag
 also lifts when its offset expires or is revoked. Flagged records are left out
 of a job's discovery counts. `scanner:discovery` WebSocket messages still carry
 flagged records (with the field and its removal), so a client that filters a
-list like this route hides them unless it asked for them. The flag is memory
-only: absent after a restart (or a store restore) and on older cores.
+list like this route hides them unless it asked for them; every flag set or
+lifted, including a lift found on a read, is published that way. The flag is
+saved with the record: after a restart (or a store restore) it stays set, and
+holds if the scanner learns the same offset (same source and sample rate) again
+within 10 min; otherwise it lifts then, published like any change. After a
+restart `lastAtMs` is the time the flag was set until a new sighting refreshes
+it. A record shown to be more than a spur once (as above) is saved as such and
+never flagged again, across restarts. Older cores never set the field.
 
 `POST /api/scanner/identify` accepts `waitUntilSignal: true` and optional `waitMs`
 (integer 1 000–600 000, default 300 000; requires `waitUntilSignal: true`). It waits

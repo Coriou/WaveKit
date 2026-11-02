@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
-import type { StoreObservationInput } from "../../../../src/core/scanner/store/discovery-store.js"
+import type {
+	JournalEntry,
+	StoreObservationInput,
+} from "../../../../src/core/scanner/store/discovery-store.js"
+import { parseStoreMutation } from "../../../../src/core/scanner/store/schemas.js"
+import type { StoreMutation } from "../../../../src/core/scanner/store/schemas.js"
 import type { ProofAnalogInput } from "../../../../src/core/scanner/scanner-redesign-contract.js"
 import type { ScannerClass } from "../../../../src/core/scanner/types.js"
 import {
@@ -117,6 +122,12 @@ const listed = (store: DiscoveryStore, includeReceiverSpurs = false) =>
 		})
 		.items.map(d => d.id)
 		.sort()
+
+/** Ids of a store after a restart (never one of the first store's). */
+function restartIds(): () => string {
+	let n = 0
+	return () => `RESTART${++n}`
+}
 
 /** An FM voice observation at `rf` placed without a tuned centre (a close after a retune, a restore). */
 function fmWithoutCentre(id: string, rf: number, at: number) {
@@ -554,19 +565,233 @@ describe("LO-locked spur flags are sticky-safe (a real signal is never wrongly h
 		expect(total()).toBe(4)
 	})
 
-	it("repro: a restore forgets every learned offset and flag (restored records are of unknown history)", () => {
+	it("a restore keeps the journaled flags pending (hidden), and they hold through a sweep that learns the offset again", () => {
+		const first = setup()
+		const spurIds = flaggedSweep(first.clock, first.store)
+		const snap = JSON.parse(
+			JSON.stringify(first.store.snapshot()),
+		) as ReturnType<DiscoveryStore["snapshot"]>
+		for (const d of snap.discoveries)
+			expect(d.receiverSpur?.offsetHz).toBe(SPUR)
+		const { clock, store } = setup({ newId: restartIds() })
+		clock.now = first.clock.now + 60_000
+		const restoredAt = clock.now
+		store.restore(snap)
+		// pending: still hidden, nothing learned yet
+		expect(store.loLockedOffsets("src-1")).toEqual([])
+		expect(store.receiverSpurIds().sort()).toEqual(spurIds)
+		expect(listed(store)).toEqual([])
+		expect(store.get(spurIds[0]!)?.receiverSpur?.offsetHz).toBe(SPUR)
+		// three cycles of the sweep: the sightings join the restored records and learn the offset
+		for (let cycle = 0; cycle < 3; cycle++) {
+			clock.now += 500
+			const rs = dwells(clock, store, [...SWEEP], {
+				rf: c => c + SPUR,
+				prefix: `c${cycle}-`,
+			})
+			expect(ids(rs).sort()).toEqual(spurIds)
+			expect(store.receiverSpurIds().sort()).toEqual(spurIds)
+		}
+		expect(store.loLockedOffsets("src-1")).toEqual([SPUR])
+		// past the restored deadline, kept fresh by the sweep: an ordinary flag, still hidden
+		clock.now = restoredAt + 575_000
+		dwells(clock, store, [...SWEEP], { rf: c => c + SPUR, prefix: "late-" })
+		expect(clock.now).toBeGreaterThan(restoredAt + 600_000)
+		store.noteReceiverLines("src-1", SWEEP[0], RATE, [])
+		expect(store.receiverSpurIds().sort()).toEqual(spurIds)
+		expect(listed(store)).toEqual([])
+		expect(listed(store, true)).toEqual(spurIds)
+	})
+
+	it("a journaled flag replays like a snapshot one, and a journal line without the spur fields parses as before", () => {
+		const first = setup()
+		const entries: JournalEntry[] = []
+		first.store.on("mutation", (e: Omit<JournalEntry, "seq">) =>
+			entries.push(
+				JSON.parse(
+					JSON.stringify({ ...e, seq: entries.length + 1 }),
+				) as JournalEntry,
+			),
+		)
+		const spurIds = flaggedSweep(first.clock, first.store)
+		const flagged = entries.filter(e =>
+			(e.payload as StoreMutation).discoveries.some(
+				d => d.receiverSpur !== undefined,
+			),
+		)
+		expect(flagged.length).toBeGreaterThan(0)
+		const { clock, store } = setup({ newId: restartIds() })
+		clock.now = first.clock.now
+		store.restore({ discoveries: [], observations: [], corrections: [] })
+		for (const e of entries) store.replay(e)
+		expect(store.receiverSpurIds().sort()).toEqual(spurIds)
+		// an older core's line (no spur fields) is still a valid journal line
+		const old = JSON.parse(JSON.stringify(flagged[0]!.payload)) as {
+			discoveries: Record<string, unknown>[]
+		}
+		for (const d of old.discoveries) {
+			delete d["receiverSpur"]
+			delete d["receiverSpurSourceId"]
+			delete d["receiverSpurRuledOut"]
+		}
+		expect(parseStoreMutation(old)).not.toBeNull()
+	})
+
+	it("repro: a restored flag whose offset is not learned again within 10 min lifts then, published (a block or a read)", async () => {
+		for (const via of ["block", "read"] as const) {
+			const first = setup()
+			const spurIds = flaggedSweep(first.clock, first.store)
+			const snap = first.store.snapshot()
+			const { clock, store } = setup({ newId: restartIds() })
+			clock.now = first.clock.now + 60_000
+			store.restore(snap)
+			const changed: string[] = []
+			const journaled: string[] = []
+			store.on("change", (id: string) => changed.push(id))
+			store.on("mutation", (e: Omit<JournalEntry, "seq">) => {
+				for (const d of (e.payload as StoreMutation).discoveries)
+					if (d.receiverSpur === undefined) journaled.push(d.id)
+			})
+			clock.now += 600_000
+			store.noteReceiverLines("src-1", SWEEP[0], RATE, [])
+			expect(store.receiverSpurIds().sort()).toEqual(spurIds)
+			expect(changed).toEqual([])
+			clock.now += 1
+			if (via === "block") store.noteReceiverLines("src-1", SWEEP[0], RATE, [])
+			else {
+				expect(listed(store)).toEqual(spurIds)
+				await Promise.resolve()
+			}
+			expect([...new Set(changed)].sort()).toEqual(spurIds)
+			expect([...new Set(journaled)].sort()).toEqual(spurIds)
+			expect(store.receiverSpurIds()).toEqual([])
+			expect(listed(store)).toEqual(spurIds)
+			for (const d of store.snapshot().discoveries)
+				expect(d.receiverSpur).toBeUndefined()
+		}
+	})
+
+	it("a ruled-out record stays unflagged after a restore, even through a sweep that learns its offset again", () => {
+		const first = setup()
+		const spurIds = flaggedSweep(first.clock, first.store)
+		// an operator Keep set then cleared on one flagged record: the operator's, for good
+		const out = spurIds[1]!
+		first.store.setOperator(out, { keep: true })
+		first.store.setOperator(out, { keep: false })
+		expect(first.store.receiverSpurIds().sort()).toEqual(
+			spurIds.filter(id => id !== out),
+		)
+		const snap = first.store.snapshot()
+		const stored = snap.discoveries.find(d => d.id === out) as
+			| { receiverSpur?: unknown; receiverSpurRuledOut?: boolean }
+			| undefined
+		expect(stored?.receiverSpur).toBeUndefined()
+		expect(stored?.receiverSpurRuledOut).toBe(true)
+		// a ruled-out record restored with a flag (hand-edited, or written mid-change) is not flagged
+		const forged = JSON.parse(JSON.stringify(snap)) as typeof snap
+		const kept = forged.discoveries.find(d => d.id === spurIds[0])!
+		const target = forged.discoveries.find(d => d.id === out)!
+		target.receiverSpur = kept.receiverSpur!
+		;(target as { receiverSpurSourceId?: string }).receiverSpurSourceId =
+			"src-1"
+		const { clock, store } = setup({ newId: restartIds() })
+		clock.now = first.clock.now + 1_000
+		store.restore(forged)
+		expect(store.receiverSpurIds()).not.toContain(out)
+		for (let cycle = 0; cycle < 3; cycle++) {
+			clock.now += 500
+			dwells(clock, store, [...SWEEP], {
+				rf: c => c + SPUR,
+				prefix: `c${cycle}-`,
+			})
+		}
+		expect(store.loLockedOffsets("src-1")).toEqual([SPUR])
+		expect(store.receiverSpurIds().sort()).toEqual(
+			spurIds.filter(id => id !== out),
+		)
+		expect(listed(store)).toEqual([out])
+	})
+
+	it("an older snapshot without the spur fields restores as before: nothing flagged, every record listed", () => {
+		const first = setup()
+		const spurIds = flaggedSweep(first.clock, first.store)
+		const snap = JSON.parse(JSON.stringify(first.store.snapshot())) as {
+			discoveries: Record<string, unknown>[]
+		}
+		for (const d of snap.discoveries) {
+			delete d["receiverSpur"]
+			delete d["receiverSpurSourceId"]
+			delete d["receiverSpurRuledOut"]
+		}
+		const { clock, store } = setup({ newId: restartIds() })
+		clock.now = first.clock.now
+		store.restore(snap as unknown as ReturnType<DiscoveryStore["snapshot"]>)
+		expect(store.receiverSpurIds()).toEqual([])
+		expect(listed(store)).toEqual(spurIds)
+	})
+
+	it("repro: a stay at a new hop that covers the offset with nothing there revokes it and lifts its flags at once (published)", () => {
 		const { clock, store } = setup()
 		const spurIds = flaggedSweep(clock, store)
-		const snap = store.snapshot()
-		store.restore(snap)
-		expect(store.receiverSpurIds()).toEqual([])
-		expect(store.loLockedOffsets("src-1")).toEqual([])
-		expect(listed(store)).toEqual(spurIds)
-		// their next sightings never flag them again
+		const changed: string[] = []
+		store.on("change", (id: string) => changed.push(id))
+		const far = SWEEP[2] + 785_000
 		clock.now += 500
-		dwells(clock, store, [...SWEEP], { rf: c => c + SPUR, prefix: "after" })
-		for (const id of spurIds)
-			expect(store.get(id)?.receiverSpur).toBeUndefined()
+		const until = clock.now + 10_000
+		while (clock.now <= until) {
+			store.noteReceiverLines("src-1", far, RATE, [])
+			clock.now += 1_000
+		}
+		expect(store.receiverSpurIds().sort()).toEqual(spurIds)
+		// the tuner moves on: the stay is complete and saw nothing at the offset
+		store.noteReceiverLines("src-1", SWEEP[0], RATE, [])
+		expect(store.loLockedOffsets("src-1")).toEqual([])
+		expect(store.receiverSpurIds()).toEqual([])
+		expect([...new Set(changed)].sort()).toEqual(spurIds)
+		expect(listed(store)).toEqual(spurIds)
+	})
+
+	it("an expired offset read before any block lifts its flags through the publishing path", async () => {
+		const { clock, store } = setup()
+		const spurIds = flaggedSweep(clock, store)
+		const changed: string[] = []
+		store.on("change", (id: string) => changed.push(id))
+		clock.now += 600_001
+		expect(store.get(spurIds[0]!)?.receiverSpur).toBeUndefined()
+		expect(changed).toEqual([])
+		await Promise.resolve()
+		expect([...new Set(changed)].sort()).toEqual(spurIds)
+		for (const d of store.snapshot().discoveries)
+			expect(d.receiverSpur).toBeUndefined()
+	})
+
+	it("repro: an ambiguous 3-bin flat reading at a learned offset neither revokes it nor lifts or rules out its flags", () => {
+		const { clock, store } = setup()
+		const spurIds = flaggedSweep(clock, store)
+		clock.now += 500
+		const flat = sighting("flat", SWEEP[0], SWEEP[0] + SPUR, clock.now, {
+			obwHz: 3 * 1_000,
+		})
+		flat.track.spectralShape = "flat"
+		flat.track.obw6Hz = 3 * 1_000
+		flat.track.binHz = 1_000
+		const r = dwell(clock, store, flat, 5_000)
+		expect(spurIds).toContain(r.discoveryId)
+		expect(store.loLockedOffsets("src-1")).toEqual([SPUR])
+		expect(store.receiverSpurIds().sort()).toEqual(spurIds)
+		// its next narrow sighting keeps it flagged (never ruled out)
+		clock.now += 500
+		dwell(
+			clock,
+			store,
+			sighting("narrow", SWEEP[1], SWEEP[1] + SPUR, clock.now),
+			5_000,
+		)
+		expect(store.receiverSpurIds().sort()).toEqual(spurIds)
+		for (const d of store.snapshot().discoveries)
+			expect(
+				(d as { receiverSpurRuledOut?: boolean }).receiverSpurRuledOut,
+			).toBeUndefined()
 	})
 
 	it("the mask-line clock is bounded like the tracker's sources (64), oldest dropped", () => {

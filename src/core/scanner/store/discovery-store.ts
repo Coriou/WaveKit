@@ -1066,13 +1066,26 @@ export class DiscoveryStore
 		maskSettleMs: DQ_LO_LOCK_MASK_SETTLE_MS,
 	})
 	/**
-	 * Records flagged as receiver spurs (memory only): hidden from `list` unless asked for, never
-	 * deleted for it. Keyed by record id; `sourceId` says whose offset it was.
+	 * Records flagged as receiver spurs: hidden from `list` unless asked for, never deleted for it.
+	 * Keyed by record id; `sourceId` says whose offset it was. The flag as set is also journaled on
+	 * the record (`receiverSpur`, `receiverSpurSourceId`); `lastAtMs` here is refreshed in memory.
 	 */
 	private readonly spurFlags = new Map<
 		string,
 		DiscoveryReceiverSpur & { sourceId: string }
 	>()
+	/**
+	 * Flags restored from disk, pending: record id → the time (ms) by which their offset must be
+	 * learned again (restore time + `DQ_LO_LOCK_TTL_MS`). Until then the flag stands (the record
+	 * stays hidden); once the offset is learned it is an ordinary flag; past it, it lifts.
+	 */
+	private readonly loRestored = new Map<string, number>()
+	/** Earliest deadline in `loRestored` (+∞ when empty): the per-block check is one comparison. */
+	private loRestoredDue = Number.POSITIVE_INFINITY
+	/** Records whose journaled flag or ruled-out bit changed since the last flush. */
+	private readonly loDirty = new Set<string>()
+	/** A deferred settle is queued (a microtask: never inside another commit). */
+	private loDeferred = false
 	/**
 	 * Observation id → the record it created without a tuned centre (history not yet known) and its
 	 * first centre-less measurement: every centre-less ingest of it until one brings a tuned centre
@@ -1405,6 +1418,8 @@ export class DiscoveryStore
 				)
 		}
 		this.loLiftRevoked()
+		this.loRestoredCheck()
+		this.loFlush()
 	}
 
 	/**
@@ -1422,8 +1437,11 @@ export class DiscoveryStore
 	): void {
 		const now = this.now()
 		this.loSpurs.tick(sourceId, tunedHz, rateHz, now)
-		// An offset that expired with this tick lifts its flags.
+		// An offset that expired (or a stay that ended with a miss) with this tick lifts its flags,
+		// and so does a restored flag whose offset was not learned again in time.
 		this.loLiftRevoked()
+		this.loRestoredCheck()
+		this.loFlush()
 		if (ranges.length === 0) return
 		const last = this.loMaskAt.get(sourceId)
 		if (last !== undefined && now - last < DQ_LO_LOCK_MASK_PERIOD_MS) return
@@ -1450,6 +1468,8 @@ export class DiscoveryStore
 				)
 		}
 		this.loLiftRevoked()
+		this.loRestoredCheck()
+		this.loFlush()
 	}
 
 	/** LO-locked spurs: the sighting of an input with its tuned centre and rate, else undefined. */
@@ -1478,7 +1498,26 @@ export class DiscoveryStore
 	private loTaint(id: string): void {
 		this.loSpurs.taint(id)
 		this.loUnknownDrop(id)
+		this.loRuleOut(id)
 		this.unflagSpur(id)
+	}
+
+	/**
+	 * A record that is (or was restored) flagged is shown to be more than a receiver spur: the
+	 * journaled bit keeps it from ever being flagged again, across restarts. A record never flagged
+	 * needs no bit: one restored without a flag is of unknown history and never flagged anyway.
+	 */
+	private loRuleOut(id: string): void {
+		const d = this.discoveries.get(id)
+		if (
+			d === undefined ||
+			d.receiverSpurRuledOut === true ||
+			(!this.spurFlags.has(id) && d.receiverSpur === undefined)
+		)
+			return
+		d.receiverSpurRuledOut = true
+		this.touch(d)
+		this.loDirtied(id)
 	}
 
 	/**
@@ -1577,7 +1616,18 @@ export class DiscoveryStore
 		if (!this.loTracked(id) || this.loPartnerEligible(id)) return false
 		this.loSpurs.taint(id)
 		this.loUnknownDrop(id)
-		if (!this.spurFlags.delete(id)) return false
+		const d = this.discoveries.get(id)
+		const stored = d?.receiverSpur !== undefined
+		if (!this.spurFlags.delete(id) && !stored) return false
+		this.loRestored.delete(id)
+		if (d !== undefined) {
+			// Written straight onto the record: the caller's operation journals it.
+			delete d.receiverSpur
+			delete d.receiverSpurSourceId
+			d.receiverSpurRuledOut = true
+			this.touch(d)
+		}
+		this.loDirty.delete(id)
 		this.countsDirty.add(id)
 		return true
 	}
@@ -1618,6 +1668,127 @@ export class DiscoveryStore
 				centres: res.centres,
 				lastAtMs: s.atMs,
 			})
+		// A restored flag at the offset just locked is learned again: an ordinary flag from now.
+		if (this.loRestored.size > 0) this.loRestoredConfirm()
+	}
+
+	/** Restored flags whose offset is learned again become ordinary flags. */
+	private loRestoredConfirm(): void {
+		const now = this.now()
+		for (const id of this.loRestored.keys()) {
+			const f = this.spurFlags.get(id)
+			if (
+				f !== undefined &&
+				this.loSpurs.isLearned(f.sourceId, f.sampleRateHz, f.offsetHz, now)
+			)
+				this.loRestored.delete(id)
+		}
+	}
+
+	/** Once per block or ingest: restored flags past their deadline are settled (lifted). */
+	private loRestoredCheck(): void {
+		if (this.now() <= this.loRestoredDue) return
+		this.loSettle()
+	}
+
+	/**
+	 * Every flag that no longer stands is lifted through the publishing path (a record no longer
+	 * eligible is ruled out); restored flags learned again are confirmed. Runs (deferred) when a
+	 * read found a flag that no longer stands, and when a restored flag's deadline passes.
+	 */
+	private loSettle(): void {
+		if (this.loRestored.size > 0) this.loRestoredConfirm()
+		const now = this.now()
+		for (const [id, f] of this.spurFlags) {
+			if (this.loFlagStands(id, f, now)) continue
+			if (!this.loPartnerEligible(id)) this.loTaint(id)
+			else this.unflagSpur(id)
+		}
+		let due = Number.POSITIVE_INFINITY
+		for (const at of this.loRestored.values()) if (at < due) due = at
+		this.loRestoredDue = due
+		this.loFlush()
+	}
+
+	/**
+	 * Does flag `f` of record `id` stand now? The record is still eligible and remembered, and its
+	 * offset is learned, or it is a restored flag still inside its deadline.
+	 */
+	private loFlagStands(
+		id: string,
+		f: DiscoveryReceiverSpur & { sourceId: string },
+		now: number,
+	): boolean {
+		if (!this.loPartnerEligible(id) || !this.loSpurs.remembers(f.sourceId, id))
+			return false
+		const restoredUntil = this.loRestored.get(id)
+		if (restoredUntil !== undefined && now <= restoredUntil) return true
+		return this.loSpurs.isLearned(f.sourceId, f.sampleRateHz, f.offsetHz, now)
+	}
+
+	/** Record `id`'s journaled spur state changed: journaled at the next flush. */
+	private loDirtied(id: string): void {
+		this.loDirty.add(id)
+		this.loDefer()
+	}
+
+	/**
+	 * Queues one deferred settle (a microtask, so never inside another commit): the safe points
+	 * (every ingest and block summary) flush at once; this covers a change made anywhere else.
+	 */
+	private loDefer(): void {
+		if (this.loDeferred) return
+		this.loDeferred = true
+		queueMicrotask(() => {
+			this.loDeferred = false
+			this.loSettle()
+		})
+	}
+
+	/**
+	 * Journals the records whose spur state changed (one operation): published as updated, so
+	 * clients see every flag set and lifted. Nothing while a sliced restore runs (it resets them).
+	 */
+	private loFlush(): void {
+		if (this.loDirty.size === 0 || this.restoring) return
+		const ids = [...this.loDirty].filter(id => this.discoveries.has(id))
+		this.loDirty.clear()
+		const first = ids[0]
+		if (first === undefined) return
+		this.commit("classification", op => {
+			for (const id of ids) {
+				op.discoveries.add(id)
+				mark(op, id, "updated")
+			}
+			return first
+		})
+	}
+
+	/**
+	 * Restore: a record's journaled flag is held pending (hidden) until `DQ_LO_LOCK_TTL_MS` from
+	 * now, by when its offset must have been learned again, and the record is remembered from here
+	 * with no sighting yet (`adopt`). A ruled-out record, one no longer eligible or one with no
+	 * source is never flagged. Called per restored or replayed record.
+	 */
+	private loRestoreFlag(id: string): void {
+		this.spurFlags.delete(id)
+		this.loRestored.delete(id)
+		const d = this.discoveries.get(id)
+		const f = d?.receiverSpur
+		const sourceId = d?.receiverSpurSourceId
+		if (
+			d === undefined ||
+			f === undefined ||
+			sourceId === undefined ||
+			d.receiverSpurRuledOut === true ||
+			!this.loPartnerEligible(id) ||
+			!this.loSpurs.adopt(sourceId, id)
+		)
+			return
+		this.spurFlags.set(id, { ...f, sourceId })
+		const until = this.now() + DQ_LO_LOCK_TTL_MS
+		this.loRestored.set(id, until)
+		if (until < this.loRestoredDue) this.loRestoredDue = until
 	}
 
 	/** Lifts the flags set at offsets the tracker revoked or expired since the last call. */
@@ -1636,52 +1807,48 @@ export class DiscoveryStore
 		id: string,
 		f: DiscoveryReceiverSpur & { sourceId: string },
 	): void {
-		if (!this.discoveries.has(id)) return
+		const d = this.discoveries.get(id)
+		if (d === undefined || d.receiverSpurRuledOut === true) return
 		const had = this.spurFlags.get(id)
 		this.spurFlags.set(id, {
 			...f,
 			centres: Math.max(f.centres, had?.centres ?? 0),
 		})
 		if (had !== undefined) return
-		this.countsDirty.add(id)
-		this.publish([id])
-		this.emit("change", id, "updated")
+		// Journaled as set (published at the flush); later sightings refresh only memory.
+		d.receiverSpur = {
+			offsetHz: f.offsetHz,
+			sampleRateHz: f.sampleRateHz,
+			centres: f.centres,
+			lastAtMs: f.lastAtMs,
+		}
+		d.receiverSpurSourceId = f.sourceId
+		this.touch(d)
+		this.loDirtied(id)
 	}
 
 	private unflagSpur(id: string): void {
-		if (!this.spurFlags.delete(id)) return
+		this.loRestored.delete(id)
+		const d = this.discoveries.get(id)
+		if (!this.spurFlags.delete(id) && d?.receiverSpur === undefined) return
 		this.countsDirty.add(id)
-		if (!this.discoveries.has(id)) return
-		this.publish([id])
-		this.emit("change", id, "updated")
+		if (d === undefined) return
+		delete d.receiverSpur
+		delete d.receiverSpurSourceId
+		this.touch(d)
+		this.loDirtied(id)
 	}
 
 	/**
-	 * Is `id` flagged as a receiver spur now? A flag stands only while the record is flaggable, the
-	 * tracker still remembers it, and its offset is still learned (not expired or revoked); else it
-	 * lifts here.
+	 * Is `id` flagged as a receiver spur now (`loFlagStands`)? A read changes nothing: a flag that no
+	 * longer stands reads as lifted and a deferred settle lifts it through the publishing path, so
+	 * clients are told.
 	 */
 	private spurFlagOf(id: string): DiscoveryReceiverSpur | undefined {
 		const f = this.spurFlags.get(id)
 		if (f === undefined) return undefined
-		if (!this.loPartnerEligible(id)) {
-			// A proof, decode, recording or operator mark arrived outside an ingest: never again.
-			this.spurFlags.delete(id)
-			this.countsDirty.add(id)
-			this.loSpurs.taint(id)
-			return undefined
-		}
-		if (
-			!this.loSpurs.remembers(f.sourceId, id) ||
-			!this.loSpurs.isLearned(
-				f.sourceId,
-				f.sampleRateHz,
-				f.offsetHz,
-				this.now(),
-			)
-		) {
-			this.spurFlags.delete(id)
-			this.countsDirty.add(id)
+		if (!this.loFlagStands(id, f, this.now())) {
+			this.loDefer()
 			return undefined
 		}
 		return {
@@ -4156,6 +4323,9 @@ export class DiscoveryStore
 		// LO-locked spurs: restored records are of unknown history; nothing learned or flagged stays.
 		this.loSpurs.clear()
 		this.spurFlags.clear()
+		this.loRestored.clear()
+		this.loRestoredDue = Number.POSITIVE_INFINITY
+		this.loDirty.clear()
 		this.loUnknownObs.clear()
 		this.loUnknownRecords.clear()
 		this.loMaskAt.clear()
@@ -4179,6 +4349,9 @@ export class DiscoveryStore
 				if (tick()) yield
 			}
 			this.aliasTable.restore(s.aliases ?? [], id => this.discoveries.has(id))
+			// Journaled receiver-spur flags: pending until their offset is learned again.
+			for (const d of this.discoveries.values())
+				if (d.receiverSpur !== undefined) this.loRestoreFlag(d.id)
 			// the set was replaced, not trimmed: a mirror resets from the snapshot itself
 			this.removal = { discoveries: [], observations: [] }
 			this.catchUp()
@@ -6720,6 +6893,8 @@ export class DiscoveryStore
 			copy.metadata = emptyMetadata()
 		}
 		delete copy.contentVerified
+		delete copy.receiverSpurSourceId
+		delete copy.receiverSpurRuledOut
 		const spur = this.spurFlagOf(d.id)
 		if (spur !== undefined) copy.receiverSpur = spur
 		else delete copy.receiverSpur
@@ -6772,6 +6947,8 @@ export class DiscoveryStore
 		// The outer delete/merge journals removal; publishing here would nest a commit.
 		this.loSpurs.forget(id)
 		this.spurFlags.delete(id)
+		this.loRestored.delete(id)
+		this.loDirty.delete(id)
 		this.anchorWindows.delete(id)
 		this.anchorIdentity.delete(id)
 		this.anchorReplayed.delete(id)
@@ -7056,6 +7233,8 @@ export class DiscoveryStore
 			if (this.discoveries.has(a.id) || a.aliases.length === 0)
 				this.aliasTable.set(a.id, a.aliases, id => this.discoveries.has(id))
 		}
+		// A replayed record's journaled receiver-spur flag, as of this entry.
+		for (const d of m.discoveries) this.loRestoreFlag(d.id)
 	}
 
 	// ── journal ──────────────────────────────────────────────────────────
@@ -7125,6 +7304,8 @@ export class DiscoveryStore
 				op.discoveries.add(id)
 				mark(op, id, "updated")
 			}
+		// Spur state of a record this operation journals is journaled with it.
+		for (const id of op.discoveries) this.loDirty.delete(id)
 		const pending = this.pendingProof
 		this.pendingProof = new Map()
 		const notified = new Set(op.changes.keys())

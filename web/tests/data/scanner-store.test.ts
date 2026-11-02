@@ -241,6 +241,7 @@ describe("ScannerStore loading", () => {
 			freqMaxHz: 2,
 			sort: "frequency",
 			limit: 2,
+			includeReceiverSpurs: true,
 		})
 		const url = calls.at(-1)?.url ?? ""
 		const params = new URLSearchParams(url.split("?")[1])
@@ -253,6 +254,7 @@ describe("ScannerStore loading", () => {
 			freqMaxHz: "2",
 			sort: "frequency",
 			limit: "2",
+			includeReceiverSpurs: "true",
 		})
 		expect(store.get().discoveries).toMatchObject({
 			loaded: true,
@@ -427,6 +429,70 @@ describe("ScannerStore live events", () => {
 		tick()
 		expect(store.get().discoveries.items).toHaveLength(0)
 		expect(store.discovery("a")?.confidence).toBe("candidate")
+	})
+
+	it("hides receiver-spur records unless the query includes them: a live flag removes, later sightings never re-insert, a lift brings it back", async () => {
+		const spur = {
+			offsetHz: -150_000,
+			sampleRateHz: 1_024_000,
+			centres: 3,
+			lastAtMs: T0,
+		}
+		const { store, send, tick } = await loaded([
+			discovery("a"),
+			discovery("b", { lastSeenAt: iso(5) }),
+		])
+		send("scanner:discovery", {
+			change: "updated",
+			discovery: discovery("a", { receiverSpur: spur, lastSeenAt: iso(20) }),
+		})
+		tick()
+		expect(store.get().discoveries.items.map(d => d.id)).toEqual(["b"])
+		expect(store.discovery("a")?.receiverSpur).toEqual(spur)
+		// every later sighting of the flagged record is published too: still hidden
+		for (const s of [30, 40]) {
+			send("scanner:discovery", {
+				change: "updated",
+				discovery: discovery("a", { receiverSpur: spur, lastSeenAt: iso(s) }),
+			})
+			tick()
+			expect(store.get().discoveries.items.map(d => d.id)).toEqual(["b"])
+		}
+		// a new flagged record is not inserted either
+		send("scanner:discovery", {
+			change: "created",
+			discovery: discovery("c", { receiverSpur: spur, lastSeenAt: iso(45) }),
+		})
+		tick()
+		expect(store.get().discoveries.items.map(d => d.id)).toEqual(["b"])
+		// the flag lifts: listed again in its place
+		send("scanner:discovery", {
+			change: "updated",
+			discovery: discovery("a", { lastSeenAt: iso(50) }),
+		})
+		tick()
+		expect(store.get().discoveries.items.map(d => d.id)).toEqual(["a", "b"])
+	})
+
+	it("a list that includes receiver spurs keeps flagged records in place", async () => {
+		const spur = {
+			offsetHz: 250_000,
+			sampleRateHz: 1_024_000,
+			centres: 0,
+			lastAtMs: T0,
+		}
+		const { store, send, tick } = await loaded([discovery("a")])
+		await store.refreshDiscoveries({ includeReceiverSpurs: true })
+		send("scanner:discovery", {
+			change: "updated",
+			discovery: discovery("a", { receiverSpur: spur, lastSeenAt: iso(20) }),
+		})
+		send("scanner:discovery", {
+			change: "created",
+			discovery: discovery("c", { receiverSpur: spur, lastSeenAt: iso(30) }),
+		})
+		tick()
+		expect(store.get().discoveries.items.map(d => d.id)).toEqual(["c", "a"])
 	})
 
 	it("does not insert past the loaded pages", async () => {
@@ -877,6 +943,24 @@ describe("scanner store helpers", () => {
 		expect(matchesDiscoveryQuery(d, { identity: "p25-nac:1" })).toBe(false)
 		expect(matchesDiscoveryQuery(d, { freqMaxHz: 1 })).toBe(false)
 		expect(matchesDiscoveryQuery(d, { protocol: "dmr" })).toBe(true)
+		// a receiver-spur record only when asked for (the core hides it by default)
+		const spur = {
+			...d,
+			receiverSpur: {
+				offsetHz: -150_000,
+				sampleRateHz: 1_024_000,
+				centres: 3,
+				lastAtMs: T0,
+			},
+		}
+		expect(matchesDiscoveryQuery(spur, {})).toBe(false)
+		expect(matchesDiscoveryQuery(spur, { includeReceiverSpurs: false })).toBe(
+			false,
+		)
+		expect(matchesDiscoveryQuery(spur, { includeReceiverSpurs: true })).toBe(
+			true,
+		)
+		expect(matchesDiscoveryQuery(d, { includeReceiverSpurs: true })).toBe(true)
 	})
 
 	it("absorbedBy names same-key, same-family, same-identity discoveries", () => {

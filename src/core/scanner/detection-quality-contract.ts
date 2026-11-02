@@ -311,7 +311,8 @@ export const DQ_LO_LOCK_DWELL_MS = 3_000
  * last 10 min = 600 000 ms after their last sighting. A scan of a 2 MHz band at 1.024 Msps needs
  * 3 centres; at 12 s dwells it comes back to a centre within a minute, so 10 min holds many
  * revisits. Past it, an empty position says too little about now (an emitter may have keyed up),
- * so the safe answer is to discover again.
+ * so the safe answer is to discover again. A flag saved with its record and restored after a restart
+ * waits the same 10 min for its offset to be learned again (a sweep relearns it within a minute).
  */
 export const DQ_LO_LOCK_TTL_MS = 600_000
 

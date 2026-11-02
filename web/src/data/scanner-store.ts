@@ -65,6 +65,8 @@ export interface DiscoveryQuery {
 	since?: string
 	/** WG12: `proven` (has a proof), `weak` (none) or `all`; absent means all. Older cores refuse it. */
 	evidence?: "proven" | "weak" | "all"
+	/** Also list records flagged as receiver spurs (`Discovery.receiverSpur`); hidden by default. */
+	includeReceiverSpurs?: boolean
 }
 
 /** The answer of GET /api/scanner/discoveries (`storeEpoch`/`storeRevision`: current cores). */
@@ -228,6 +230,10 @@ export function matchesDiscoveryQuery(
 	d: Discovery,
 	query: DiscoveryQuery,
 ): boolean {
+	// a record flagged as a receiver spur is hidden unless asked for (the core's default), so a
+	// live update that flags a listed record removes it and never re-inserts a flagged one
+	if (d.receiverSpur !== undefined && query.includeReceiverSpurs !== true)
+		return false
 	if (query.jobId !== undefined && !d.jobIds.includes(query.jobId)) return false
 	if (query.sourceId !== undefined && !d.sourceIds.includes(query.sourceId))
 		return false

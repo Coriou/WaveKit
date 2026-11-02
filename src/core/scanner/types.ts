@@ -334,7 +334,10 @@ export interface Discovery {
 	evidenceLevel?: ScannerEvidenceLevel
 	/** Scanner-redesign 3.11: weak discoveries only, computed on read, never stored. */
 	hint?: ScannerClass | "ism-device" | "analog-voice" | "lora"
-	/** Receiver-spur flag (api-types `Discovery.receiverSpur`): computed on read, memory only. */
+	/**
+	 * Receiver-spur flag (api-types `Discovery.receiverSpur`): journaled as set; on read shown only
+	 * while it still stands (a restored flag until its offset is learned again or 10 min pass).
+	 */
 	receiverSpur?: DiscoveryReceiverSpur
 	/**
 	 * The latest Activity event attributed to this discovery (api-types `Discovery.lastActivity`).

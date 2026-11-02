@@ -23,8 +23,25 @@ import type {
 } from "../types.js"
 import type { Assert, SchemaMatches } from "../../spectrum/types.js"
 
-/** Persisted association history and its checked-content provenance, never a DTO field. */
-export type StoredDiscovery = Discovery & { contentVerified?: boolean }
+/**
+ * Persisted association history and its checked-content provenance, never a DTO field. So are the
+ * receiver-spur flag's source (`receiverSpurSourceId`, set with `receiverSpur`) and
+ * `receiverSpurRuledOut` (a record once flagged that was then shown to be more than a receiver
+ * spur: never flagged again, across restarts).
+ */
+export type StoredDiscovery = Discovery & {
+	contentVerified?: boolean
+	receiverSpurSourceId?: string
+	receiverSpurRuledOut?: boolean
+}
+
+/** A record's receiver-spur flag as persisted (api-types `DiscoveryReceiverSpur`). */
+export const DiscoveryReceiverSpurSchema = z.object({
+	offsetHz: z.number().finite(),
+	sampleRateHz: z.number().finite().positive(),
+	centres: z.number().int().nonnegative(),
+	lastAtMs: z.number().finite(),
+})
 
 type SameUnion<A, B> = [A] extends [B]
 	? [B] extends [A]
@@ -203,12 +220,17 @@ export const DiscoverySchema = z.object({
 		psd: z.boolean(),
 		iq: z.boolean(),
 	}),
+	/** Receiver-spur flag (absent in state written before it was persisted). */
+	receiverSpur: DiscoveryReceiverSpurSchema.optional(),
+	receiverSpurSourceId: z.string().min(1).optional(),
+	receiverSpurRuledOut: z.boolean().optional(),
 })
 /**
  * `proof`, `evidenceLevel`, `hint`, `coverage`, `trialMemory`, `absorbedInto`, `requestedId`,
  * `revision`, `storeEpoch` and `storeRevision` are derived DTO fields (A12; band inspection UX
  * 1.4, 3.1, 3.3; trial memory on detail reads). They are not journal keys. Nor is `lastActivity`
- * (an Activity event reference this core does not set yet), nor `receiverSpur` (memory only).
+ * (an Activity event reference this core does not set yet). `receiverSpur` is journaled: the flag
+ * as set (restored pending a re-learn of its offset), shown only while it still stands.
  */
 export type DiscoveryCheck = Assert<
 	SchemaMatches<
@@ -225,7 +247,6 @@ export type DiscoveryCheck = Assert<
 			| "storeEpoch"
 			| "storeRevision"
 			| "lastActivity"
-			| "receiverSpur"
 		>,
 		typeof DiscoverySchema
 	>

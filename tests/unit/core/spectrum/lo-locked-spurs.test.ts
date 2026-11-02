@@ -573,6 +573,80 @@ describe("LO-locked spurs from sightings (flag only)", () => {
 
 	// Feature: scanner quiet-band quality, Property 1: a fixed RF emitter is never LO-locked
 	// Validates: goal 1 (a real signal at a fixed absolute frequency seen from several centres)
+	it("repro: a complete stay that ends with nothing at a learned offset revokes it at once (its flags lift); a shorter stay or another rate does not", () => {
+		const far = C1 + 3 * STEP
+		for (const [ms, rate, revoked] of [
+			[DQ_LO_LOCK_DWELL_MS, RATE, true],
+			[DQ_LO_LOCK_DWELL_MS - 1, RATE, false],
+			[10_000, 2_048_000, false],
+		] as const) {
+			const lo = make()
+			const rs = sweep(lo, SWEEP, SPUR)
+			expect(lo.learnedOffsets("rtl")).toEqual([SPUR])
+			lo.takeRevoked()
+			const from = rs[2]!.end + 500
+			// a fourth hop whose window covers the offset, nothing there
+			lo.tick("rtl", far, rate, from)
+			lo.tick("rtl", far, rate, from + ms)
+			// still in the stay: nothing decided yet
+			expect(lo.learnedOffsets("rtl")).toEqual([SPUR])
+			// the tuner moves on: the stay is complete
+			lo.tick("rtl", SWEEP[0], RATE, from + ms + 500)
+			expect(lo.learnedOffsets("rtl")).toEqual(revoked ? [] : [SPUR])
+			expect(lo.takeRevoked()).toEqual(
+				revoked ? [{ sourceId: "rtl", rateHz: RATE, offsetHz: SPUR }] : [],
+			)
+		}
+	})
+
+	it("a stay that ends having seen the line at a learned offset (or something covering it) revokes nothing", () => {
+		const lo = make()
+		const rs = sweep(lo, [...SWEEP, C1 + 3 * STEP], SPUR)
+		lo.tick("rtl", SWEEP[0], RATE, rs[3]!.end + 500)
+		expect(lo.learnedOffsets("rtl")).toEqual([SPUR])
+		expect(lo.takeRevoked()).toEqual([])
+	})
+
+	it("a sighting that cannot tell (steadiness undefined: young or ambiguous) neither revokes, nor overwrites the steady line, nor drops a partner", () => {
+		const lo = make()
+		const rs = sweep(lo, SWEEP, SPUR)
+		lo.takeRevoked()
+		const t = rs[2]!.end + 500
+		const vague = at(SWEEP[0], SPUR, t, { steady: undefined })
+		lo.observe(vague, false)
+		lo.note(`r${SWEEP[0]}`, vague, false)
+		expect(lo.check(vague, all).verdict).toBe("clear")
+		expect(lo.takeRevoked()).toEqual([])
+		expect(lo.learnedOffsets("rtl")).toEqual([SPUR])
+		const steady = at(SWEEP[0], SPUR, t + 1_000)
+		lo.observe(steady, false)
+		const res = lo.check(steady, all)
+		expect(res.verdict).toBe("locked")
+		expect([...res.partners].sort()).toEqual(SWEEP.map(c => `r${c}`).sort())
+	})
+
+	it("adopt: a restored record is remembered with no sighting, a partner only once its sightings are the steady line", () => {
+		const lo = make()
+		expect(lo.adopt("rtl", "old")).toBe(true)
+		expect(lo.remembers("rtl", "old")).toBe(true)
+		const rs = sweep(lo, SWEEP, SPUR)
+		expect(rs[2]!.partners.has("old")).toBe(false)
+		const s = at(SWEEP[0], SPUR, rs[2]!.end + 500)
+		lo.observe(s, false)
+		lo.note("old", s, false)
+		expect(lo.check(s, all).partners).toContain("old")
+		// a later sighting that is no steady line: never a partner again
+		lo.note(
+			"old",
+			at(SWEEP[0], SPUR, rs[2]!.end + 1_500, { steady: false }),
+			false,
+		)
+		expect(lo.remembers("rtl", "old")).toBe(false)
+		// past the source cap nothing is adopted
+		const capped = make({ sourcesMax: 0 })
+		expect(capped.adopt("rtl", "x")).toBe(false)
+	})
+
 	it("property: an emitter at a fixed RF frequency is never LO-locked by its own sightings", () => {
 		fc.assert(
 			fc.property(

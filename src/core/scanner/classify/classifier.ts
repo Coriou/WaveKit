@@ -110,6 +110,40 @@ export function carrierLine(line: {
 	}
 }
 
+/**
+ * `steadyLine`, the one ambiguous reading: a flat line exactly `AMBIGUOUS_LINE_BINS` (3) bins wide
+ * at -20 dB and at -6 dB. An on-bin tone whose ±1 neighbours noise lifted over -6 dB reads so (its
+ * bins within 20 dB sit within 6 dB of the peak, so `flat`), and so does a narrow digital flat top
+ * (dPMR, NXDN48). Width and shape cannot tell them apart and the track carries no finer measure, so
+ * such a sighting neither proves a steady line nor disproves one (`steadyLine` is undefined: no LO
+ * learning, no revocation, no taint). Classification is unchanged: it is not a carrier (`carrierLine`
+ * false), so narrow digital keeps its trials.
+ */
+export const AMBIGUOUS_LINE_BINS = 3
+
+/** A flat line of exactly `AMBIGUOUS_LINE_BINS` bins at -20 dB and at -6 dB (see there). */
+export function ambiguousLine(line: {
+	obwHz: number
+	spectralShape?: TrackSnapshot["spectralShape"] | undefined
+	obw6Hz?: number | undefined
+	binHz?: number | undefined
+}): boolean {
+	if ((line.spectralShape ?? "flat") !== "flat") return false
+	if (!known6(line.obw6Hz) || !(Number.isFinite(line.obwHz) && line.obwHz > 0))
+		return false
+	const bin =
+		typeof line.binHz === "number" &&
+		Number.isFinite(line.binHz) &&
+		line.binHz > 0
+			? line.binHz
+			: CARRIER_DEFAULT_BIN_HZ
+	// Widths are whole bins: rounding absorbs float noise in the measured Hz.
+	return (
+		Math.round(line.obwHz / bin) === AMBIGUOUS_LINE_BINS &&
+		Math.round(line.obw6Hz / bin) === AMBIGUOUS_LINE_BINS
+	)
+}
+
 function known6(hz: number | undefined): hz is number {
 	return typeof hz === "number" && Number.isFinite(hz) && hz > 0
 }
@@ -352,7 +386,8 @@ export function classOf(
  * (`carrierLine`: at most 4 bins at -20 dB, not a flat top), over `BURST_MAX_BLOCKS` (4) blocks and
  * on at least `CARRIER_STEADY_DUTY_MIN` (90 %) of the time. Keyed CW, data bursts, narrow digital
  * flat tops and anything modulated wider are not. `undefined` while the track has 4 blocks or fewer
- * (too young to tell); non-finite width or duty is not a steady line.
+ * (too young to tell) and for the ambiguous 3-bin flat reading (`ambiguousLine`); non-finite width
+ * or duty is not a steady line.
  */
 export function steadyLine(track: {
 	obwHz: number
@@ -364,6 +399,7 @@ export function steadyLine(track: {
 }): boolean | undefined {
 	if (!Number.isFinite(track.obwHz) || !Number.isFinite(track.dutyCycle))
 		return false
+	if (ambiguousLine(track)) return undefined
 	if (!carrierLine({ ...track, spectralShape: track.spectralShape ?? "flat" }))
 		return false
 	if (!(track.blocks > BURST_MAX_BLOCKS)) return undefined

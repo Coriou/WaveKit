@@ -737,16 +737,17 @@ describe("scanner quality benchmark, quiet band (real scanner, port limits)", ()
 			flagged: 3,
 		})
 		expect(spur450.live).toBe(0)
-		// +250 kHz sits on a bin centre: noise lifts its ±1 bins over -6 dB, so it reads as a 3-bin
-		// flat top (3 bins at -6 dB), which narrow digital also reads as. Not a carrier line, so it
-		// keeps its digital trials and is never flagged: when unsure, listed.
+		// +250 kHz sits on a bin centre: noise lifts its ±1 bins over -6 dB in some readings, so
+		// they read as a 3-bin flat top (3 bins at -6 dB), which narrow digital also reads as. Such a
+		// reading is ambiguous: it neither learns nor revokes the offset, so its other (narrow)
+		// sightings flag it like any spur.
 		const spur250 = by("spur250k")
 		expect({ created: spur250.created, flagged: spur250.flagged }).toEqual({
 			created: 3,
-			flagged: 0,
+			flagged: 3,
 		})
-		expect(spur250.live).toBe(3)
-		expect(r.falseLive).toBe(3)
+		expect(spur250.live).toBe(0)
+		expect(r.falseLive).toBe(0)
 		expect(r.realFlagged).toBe(0)
 		expect(by("carrier-1").live).toBe(1)
 		expect(by("carrier-1").flagged).toBe(0)

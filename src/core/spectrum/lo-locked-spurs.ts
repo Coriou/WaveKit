@@ -25,8 +25,13 @@
  * A learned offset then answers "locked" for any steady sighting at it (not seen from another
  * centre at its RF position) until it expires (`ttlMs` after it was last re-proven) or is revoked
  * (no lock there for `ttlMs`) on contradictory evidence: a sighting with evidence of a real signal
- * at it, a sighting at it that is not a steady narrow line, or one RF line seen from two centres
- * where one of its offsets is learned. Revocations and expiries are reported (`takeRevoked`) so
+ * at it, a sighting at it that is not a steady narrow line, one RF line seen from two centres
+ * where one of its offsets is learned, a checked sighting at it whose dwell evidence is
+ * contradicted (any of the learning rules above), or a complete dwell that ends (the tuner moves
+ * on) having seen nothing at it with the learned line whole in its usable window (a miss). A
+ * sighting that cannot tell (steadiness undefined: too young, or an ambiguous on-bin line) is
+ * logged but never overwrites what its line or record entry already showed, so it neither learns
+ * nor contradicts. Revocations and expiries are reported (`takeRevoked`) so
  * the caller can lift the flags it set at that offset; a flag stands only while its offset is
  * learned (`isLearned`).
  *
@@ -35,7 +40,9 @@
  * part of its history is unknown or contradictory (a sighting without a tuned centre, a merge, a
  * sighting that is no steady line, a replaced entry that was not the same steady line, an entry
  * dropped by the per-record bound).
- * A record restored from disk was never born here and is never remembered. A lock names as
+ * A record restored from disk was never born here and is never remembered, except one the caller
+ * restored with a spur flag (`adopt`): remembered with no sighting, it is a partner again only once
+ * its later sightings are all the steady line. A lock names as
  * partners the remembered records sighted only as a steady narrow line at Δ, all within the TTL
  * (`eligible` filters them further). A record also sighted at another offset is one RF line seen
  * from two centres and is never a partner.
@@ -116,6 +123,8 @@ interface OffsetEntry {
 	offsetHz: number
 	rateHz: number
 	atMs: number
+	/** Width of the line it was learned from (Hz, floored): a miss needs that whole line in window. */
+	widthHz: number
 }
 
 interface SourceState {
@@ -197,7 +206,8 @@ export class LoLockedSpurs {
 		if (line !== undefined) {
 			line.rfHz = s.centreHz
 			line.widthHz = width
-			line.steady = s.steady
+			// A sighting too young or too ambiguous to tell (undefined) keeps what the line was.
+			if (s.steady !== undefined) line.steady = s.steady
 			line.real ||= real
 			return
 		}
@@ -288,6 +298,12 @@ export class LoLockedSpurs {
 				this.taint(id)
 				return
 			}
+			// A sighting that cannot tell (undefined: too young, or an ambiguous on-bin line) neither
+			// proves nor refreshes the steady line this centre already showed: the entry stays.
+			if (prev?.steady === true && entry.steady === undefined) {
+				st.records.set(id, list)
+				return
+			}
 			list.splice(same, 1)
 		}
 		list.push(entry)
@@ -302,6 +318,27 @@ export class LoLockedSpurs {
 			st.records.delete(oldest.value)
 			st.historyDropped++
 		}
+	}
+
+	/**
+	 * Record `id` (restored from disk with a receiver-spur flag at an offset of `sourceId`) is
+	 * remembered from now on with no sighting yet: its later sightings are noted like a born
+	 * record's, and it is a partner again only once they are all the steady line. Returns whether it
+	 * is remembered (false past the source cap).
+	 */
+	adopt(sourceId: string, id: string): boolean {
+		const st = this.state(sourceId, true)
+		if (st === undefined) return false
+		if (!st.records.has(id)) {
+			st.records.set(id, [])
+			while (st.records.size > this.opts.recordsPerSource) {
+				const oldest = st.records.keys().next()
+				if (oldest.done === true) break
+				st.records.delete(oldest.value)
+				st.historyDropped++
+			}
+		}
+		return st.records.has(id)
 	}
 
 	/** Record `id`'s history is unknown or contradictory: never a partner again. */
@@ -405,21 +442,31 @@ export class LoLockedSpurs {
 		const rate = s.sampleRateHz
 		if (this.matches(st.revoked, rate, offset)) return CLEAR
 		const width = this.width(s.obwHz)
-		// This very position seen from another centre whose window covered it: a real emitter.
-		if (this.seenElsewhere(st, s.centreHz, s.tunedHz, rate)) return CLEAR
+		// This very position seen from another centre whose window covered it (a real emitter), or
+		// dwell evidence against a spur at this offset: a learned offset is revoked (its flags lift).
+		const evidence = this.seenElsewhere(st, s.centreHz, s.tunedHz, rate)
+			? "contradicted"
+			: this.evidence(st, offset, width, rate, s.atMs)
+		if (evidence === "contradicted") {
+			this.revokeLearned(s.sourceId, st, rate, offset, s.atMs)
+			return CLEAR
+		}
 		const learned = st.learned.find(
 			e =>
 				e.rateHz === rate &&
 				Math.abs(e.offsetHz - offset) <= this.opts.offsetHz,
 		)
 		let centres = 0
-		const evidence = this.evidence(st, offset, width, rate, s.atMs)
-		if (evidence === "contradicted") return CLEAR
 		if (evidence >= this.opts.minCentres) {
 			centres = evidence
 			if (learned !== undefined) learned.atMs = s.atMs
 			else {
-				st.learned.push({ offsetHz: offset, rateHz: rate, atMs: s.atMs })
+				st.learned.push({
+					offsetHz: offset,
+					rateHz: rate,
+					atMs: s.atMs,
+					widthHz: width,
+				})
 				while (st.learned.length > this.opts.offsetsPerSource)
 					st.learned.shift()
 			}
@@ -519,6 +566,8 @@ export class LoLockedSpurs {
 			cur.rateHz !== rateHz ||
 			this.apart(cur.tunedHz, tunedHz)
 		) {
+			// The stay that ends here is complete: a learned offset it saw nothing at is revoked.
+			if (cur !== undefined) this.missesAtClose(st, cur, atMs)
 			cur = {
 				tunedHz,
 				rateHz,
@@ -532,6 +581,27 @@ export class LoLockedSpurs {
 		}
 		if (atMs > cur.lastMs) cur.lastMs = atMs
 		return cur
+	}
+
+	/**
+	 * A closed dwell (at least `dwellMs` long, line log complete) that saw nothing at a learned
+	 * offset of its rate, where the learned line lies whole in its usable window outside the DC
+	 * guard: a spur shows under every centre, so the offset is revoked (its flags lift). Runs once
+	 * per retune; allocates only on a revocation.
+	 */
+	private missesAtClose(st: SourceState, d: Dwell, atMs: number): void {
+		if (d.overflow || d.lastMs - d.firstMs < this.opts.dwellMs) return
+		const learned = st.learned
+		for (let i = learned.length - 1; i >= 0; i--) {
+			const e = learned[i]
+			if (e === undefined || e.rateHz !== d.rateHz) continue
+			const pos = d.tunedHz + e.offsetHz
+			if (
+				this.inWindow(pos, e.widthHz, d.tunedHz, d.rateHz) &&
+				!this.sighted(d, pos)
+			)
+				this.revokeLearned(st.sourceId, st, e.rateHz, e.offsetHz, atMs)
+		}
 	}
 
 	private apart(a: number, b: number): boolean {
@@ -620,7 +690,7 @@ export class LoLockedSpurs {
 		)
 		if (hit !== undefined) hit.atMs = atMs
 		else {
-			st.revoked.push({ offsetHz: offset, rateHz, atMs })
+			st.revoked.push({ offsetHz: offset, rateHz, atMs, widthHz: 0 })
 			while (st.revoked.length > this.opts.offsetsPerSource) st.revoked.shift()
 		}
 	}

@@ -6,6 +6,8 @@ import {
 	CARRIER_LINE_MAX_BINS,
 	CARRIER_PEAKED_MAX_BINS_6DB,
 	CARRIER_STEADY_DUTY_MIN,
+	AMBIGUOUS_LINE_BINS,
+	ambiguousLine,
 	carrierLine,
 	AM_VOICE_MAX_OBW_HZ,
 	AM_VOICE_MIN_OBW_HZ,
@@ -206,7 +208,7 @@ describe("classOf", () => {
 		)
 	})
 
-	it("repro: a steady three-bin flat top (obwHz = obw6Hz = 3 bins, not narrow) keeps its digital trials at 1 000 and 1 171.875 Hz bins", () => {
+	it("repro: a steady three-bin flat top (obwHz = obw6Hz = 3 bins, not narrow) keeps its digital trials at 1 000 and 1 171.875 Hz bins, and is no evidence either way for a spur", () => {
 		for (const binHz of [BIN_1024K, BIN_2400K]) {
 			const track = snap({
 				spectralShape: "flat",
@@ -218,7 +220,8 @@ describe("classOf", () => {
 			})
 			expect(classOf(track)).not.toBe("carrier")
 			expect(classOf(track)).toBe("fsk4-6k25")
-			expect(steadyLine(track)).toBe(false)
+			// an on-bin tone reads so too: neither a steady line nor proof of none
+			expect(steadyLine(track)).toBeUndefined()
 			expect(
 				carrierLine({
 					obwHz: 3 * binHz,
@@ -341,6 +344,60 @@ describe("classOf", () => {
 		expect(t({ spectralShape: "peaked", obwHz: 3_000, obw6Hz: 3_000 })).toBe(
 			true,
 		)
+	})
+
+	it("ambiguousLine: a flat line exactly 3 bins wide at -20 dB and at -6 dB, at both rates; nothing else", () => {
+		expect(AMBIGUOUS_LINE_BINS).toBe(3)
+		for (const binHz of [BIN_1024K, BIN_2400K]) {
+			const a = (
+				obwBins: number,
+				obw6Bins: number | undefined,
+				shape = "flat",
+			) =>
+				ambiguousLine({
+					obwHz: obwBins * binHz,
+					...(obw6Bins === undefined ? {} : { obw6Hz: obw6Bins * binHz }),
+					spectralShape: shape as TrackSnapshot["spectralShape"],
+					binHz,
+				})
+			expect(a(3, 3)).toBe(true)
+			// a carrier's -6 dB width, a wider -20 dB width, a wider -6 dB width: decided
+			expect(a(3, 2)).toBe(false)
+			expect(a(4, 3)).toBe(false)
+			expect(a(4, 4)).toBe(false)
+			expect(a(2, 2)).toBe(false)
+			// unknown -6 dB width, or another shape: not this reading
+			expect(a(3, undefined)).toBe(false)
+			expect(a(3, 3, "peaked")).toBe(false)
+			expect(a(3, 3, "narrow")).toBe(false)
+			// young or old, steady or not: undecided (no learning, no revocation, no taint)
+			for (const [blocks, dutyCycle] of [
+				[2, 1],
+				[40, 1],
+				[40, 0.5],
+			] as const)
+				expect(
+					steadyLine({
+						obwHz: 3 * binHz,
+						obw6Hz: 3 * binHz,
+						spectralShape: "flat",
+						binHz,
+						blocks,
+						dutyCycle,
+					}),
+				).toBeUndefined()
+		}
+		// the default bin when the track carries none
+		expect(
+			ambiguousLine({ obwHz: 3_000, obw6Hz: 3_000, spectralShape: "flat" }),
+		).toBe(true)
+		expect(
+			ambiguousLine({
+				obwHz: Number.NaN,
+				obw6Hz: 3_000,
+				spectralShape: "flat",
+			}),
+		).toBe(false)
 	})
 
 	it("does not call short tracks bursts where bursts are implausible", () => {

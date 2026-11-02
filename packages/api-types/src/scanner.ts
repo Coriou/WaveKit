@@ -363,7 +363,9 @@ export interface Discovery {
 	 * from the tuned centre, seen from several tuned centres). Such records are hidden from the
 	 * discovery list by default (`includeReceiverSpurs=true` lists them) and are never deleted for
 	 * it. Never set on a record with a proof, decode, identity, recording or operator mark; one that
-	 * gains any is unflagged. Memory only: absent after a restart. Absent on older cores.
+	 * gains any is unflagged for good. Persisted: after a restart it stays set, and holds if the
+	 * scanner learns the same offset again within 10 min; else it lifts then (published like any
+	 * change). Absent on older cores.
 	 */
 	receiverSpur?: DiscoveryReceiverSpur
 	/**
