@@ -698,11 +698,12 @@ describe("frequency memory recovers when a gap is observed or may have passed", 
 	// The second call opens `afterMs` into the next visit's listening and surfaces 2 blocks later.
 	// The off-air time heard is counted without overstating it: the blocks the visit received
 	// before the sighting (afterMs / 50 + 1, the track event comes before its block event) less
-	// minSurfaceBlocks (2), so afterMs − 50 ms. At TRAFFIC_GAP_MS (1000 ms) or more that is
-	// traffic; less, and a call on air through the whole previous visit may only have flickered.
+	// minSurfaceBlocks (2), so afterMs − 50 ms. More than the longest gap of a flapping carrier
+	// (600 ms) brackets the start of a new call, followed until a gap tells a turnaround from a
+	// flap; up to 600 ms, a call on air through the whole previous visit may only have flickered.
 	for (const [afterMs, followed] of [
-		[1_000, false],
-		[1_050, true],
+		[650, false],
+		[700, true],
 	] as const) {
 		it(`a call that outlasted its hold and ended unheard ${followed ? "does not bar" : "still bars"} a call that opens after ${afterMs} ms of a later visit`, () => {
 			const s3 = makeNormalisedSpec({
@@ -851,11 +852,12 @@ describe("frequency memory bounds (direct scheduler)", () => {
 	})
 
 	// A track that opens after the visit received `blocks` blocks heard the frequency off air for
-	// (blocks − minSurfaceBlocks) × 50 ms. A persistent frequency (here a steady one heard on every
-	// visit) is traffic only when that reaches TRAFFIC_GAP_MS (1000 ms): 22 blocks, not 21.
+	// (blocks − minSurfaceBlocks) × 50 ms. On a persistent frequency (here a steady one heard on
+	// every visit) more than the longest gap of a flapping carrier (600 ms) brackets a new
+	// transmission, followed until a gap tells: 15 blocks (650 ms), not 14 (600 ms).
 	for (const [blocks, followed] of [
-		[21, false],
-		[22, true],
+		[14, false],
+		[15, true],
 	] as const) {
 		it(`a new track of a steady frequency opening after ${blocks} blocks of a later visit is ${followed ? "followed" : "still steady"}`, () => {
 			const { s, at } = make(1_000, 3_000)

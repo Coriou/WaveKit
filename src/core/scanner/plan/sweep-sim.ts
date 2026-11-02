@@ -33,6 +33,12 @@ export interface SimSignal {
 	 * job follows it (job runner onEvidence → `onConfirmed(trackId, true)`). Absent: no decode.
 	 */
 	decodeAfterMs?: number
+	/**
+	 * With `decodeAfterMs`: whether the job follows the decoded track (`onConfirmed(trackId, true)`,
+	 * the default) or only notes the decode (`false`: voice not recorded, `onConfirmed(trackId,
+	 * false)`).
+	 */
+	decodeFollows?: boolean
 	spur?: boolean
 	obwHz?: number
 }
@@ -293,7 +299,7 @@ export function simulateSweep(
 						clock - probedAt >= sig.decodeAfterMs
 					) {
 						probes.delete(id)
-						pending.push(...s.onConfirmed(id, true))
+						pending.push(...s.onConfirmed(id, sig.decodeFollows !== false))
 					}
 				}
 			} else if (open[i] === true) {

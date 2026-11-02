@@ -146,6 +146,201 @@ describe("a 28 s ID right after a QSO on air since the job started", () => {
 		}
 })
 
+/** Overs of `overMs` with `gapMs` turnarounds from `fromMs` to `untilMs`. */
+function regularQso(
+	hz: number,
+	fromMs: number,
+	untilMs: number,
+	overMs: number,
+	gapMs: number,
+): SimSignal[] {
+	const out: SimSignal[] = []
+	for (let t = fromMs; t < untilMs; t += overMs + gapMs)
+		out.push(voice(hz, t, Math.min(overMs, untilMs - t)))
+	return out
+}
+const heardTotal = (r: SimResult): number =>
+	r.heardMs.reduce((a, b) => a + b, 0)
+
+describe("a QSO of long overs on air since the job started is followed once a visit brackets an over", () => {
+	// 10 minutes of overs with 1 to 3 s turnarounds. A visit whose dwell misses the frequency
+	// listens on for it (up to 1 s); when it comes back after more than 600 ms heard off (longer
+	// than any flap) the new over is followed as traffic and its next turnaround confirms it. The
+	// thresholds are what the earlier scheduler (one confirm probe of 1800 + 300 ms per visit) heard
+	// on the same scenes.
+	const scenes: [string, number, number, number, number, number, number][] = [
+		// name, hops, hz offset from the QSO hop centre, start, over, gap, earlier ms heard
+		[
+			"3 hops, 30 s overs, 1 s gaps at 150.9 MHz",
+			3,
+			100_000,
+			0,
+			30_000,
+			1_000,
+			301_650,
+		],
+		["7 hops, 25 s overs, 1 s gaps", 7, 100_000, 0, 25_000, 1_000, 242_750],
+		["3 hops, 5 s overs, 1 s gaps", 3, 100_000, 0, 5_000, 1_000, 264_050],
+		["3 hops, 45 s overs, 3 s gaps", 3, 100_000, 0, 45_000, 3_000, 284_750],
+		[
+			"3 hops, 10 s overs, 3 s gaps from 60 s",
+			3,
+			100_000,
+			60_000,
+			10_000,
+			3_000,
+			226_900,
+		],
+		["7 hops, 5 s overs, 2 s gaps", 7, 100_000, 0, 5_000, 2_000, 181_400],
+		["7 hops, 30 s overs, 1 s gaps", 7, 100_000, 0, 30_000, 1_000, 230_400],
+		[
+			"7 hops, 45 s overs, 1.5 s gaps from 60 s",
+			7,
+			100_000,
+			60_000,
+			45_000,
+			1_500,
+			236_350,
+		],
+	]
+	for (const [name, hops, offsetHz, fromMs, overMs, gapMs, floor] of scenes)
+		it(`${name}: heard ≥ ${floor} ms`, () => {
+			const hz = planOf(hops).hops[qsoHop(hops)]!.centreHz + offsetHz
+			const signals = regularQso(hz, fromMs, fromMs + 600_000, overMs, gapMs)
+			const r = simulateSweep(planOf(hops), spec, {
+				...sim,
+				durationMs: fromMs + 600_000,
+				signals,
+			})
+			expect(heardTotal(r)).toBeGreaterThanOrEqual(floor)
+		})
+
+	// Feature: scanner-sweep-fairness, Property 3: once a QSO is followed as traffic it is heard at least maxHoldMs out of every maxHoldMs plus one lock cycle
+	// Validates: Requirements 3 (real traffic is never heard less than one probe per visit heard it), 1 (no hop starved by another hop's holds)
+	it("after its first long follow, a QSO is heard at least maxHoldMs / (maxHoldMs + one lock cycle) of its air time", () => {
+		fc.assert(
+			fc.property(
+				fc.integer({ min: 3, max: 7 }),
+				fc.nat(1_000),
+				fc.integer({ min: 0, max: 120_000 }),
+				fc.integer({ min: 1, max: 1_000_000 }),
+				(hops, slot, fromMs, seed) => {
+					const plan = planOf(hops)
+					const hop = slot % hops
+					const hz = plan.hops[hop]!.centreHz + 100_000
+					// Overs of 5 to 45 s with turnarounds of 1 to 1.9 s: shorter than hangMs (2 s), so a
+					// follow runs on across them.
+					const rnd = random(seed)
+					const signals: SimSignal[] = []
+					const endMs = fromMs + 600_000
+					for (let t = fromMs; t < endMs; ) {
+						const over = Math.round(5_000 + 40_000 * rnd())
+						signals.push(voice(hz, t, Math.min(over, endMs - t)))
+						t += over + Math.round(1_000 + 900 * rnd())
+					}
+					const r = simulateSweep(plan, spec, {
+						...sim,
+						durationMs: endMs,
+						signals,
+					})
+					// A long follow: a visit held past a hold of a frequency not known as traffic
+					// (one sweep, at most 8000 ms), a hang classing a gap, a block and a confirm probe.
+					const shortHold =
+						Math.min(hops * DWELL_MS, UNSEEN_HOLD_MS) +
+						CLASS_HANG_MS +
+						BLOCK_MS +
+						2_100
+					const first = r.visits.find(
+						v =>
+							v.hopIndex === hop &&
+							v.leftAtMs - v.tunedAtMs > DWELL_MS + shortHold,
+					)
+					if (first === undefined) return
+					const fromHeard = first.tunedAtMs + DWELL_MS
+					let air = 0
+					let heard = 0
+					for (const sig of signals) {
+						air += Math.max(0, sig.endMs - Math.max(fromHeard, sig.startMs))
+						for (const l of r.listens) {
+							const tuned = plan.hops[l.hopIndex]!.covered
+							if (hz < tuned.startHz || hz > tuned.endHz) continue
+							const a = Math.max(fromHeard, sig.startMs, l.fromMs)
+							const b = Math.min(sig.endMs, l.toMs)
+							if (b > a) heard += b - a
+						}
+					}
+					// Each cycle: a follow of maxHoldMs heard whole (its gaps are not air time), then the
+					// lock: a coarse visit of every hop (the QSO hop's own deferred visit included, its
+					// settle unheard), at most one revisit per round(1 / 0.3) = 3 coarse visits, and the
+					// next visit's settle: at most L = (hops + ceil(hops / 3) + 1) × 1150 ms unheard.
+					// The run may end inside a lock: one L more.
+					const lock = (hops + Math.ceil(hops / 3) + 1) * DWELL_MS
+					const maxHold = spec.hold.maxHoldMs
+					expect(heard).toBeGreaterThanOrEqual(
+						((air - lock) * maxHold) / (maxHold + lock),
+					)
+				},
+			),
+			{ numRuns: 100 },
+		)
+	}, 300_000)
+})
+
+describe("a decode without a follow identifies the emission", () => {
+	// The job notes a decode but does not follow it (voice not recorded): onConfirmed(id, false).
+	// A DMR-like call of 28 s from 5 s on a hop whose earlier visit missed it (traffic until shown
+	// otherwise) was probed on every visit before (3 hops: 7 probes, 7 hops: 3, revisits off). It
+	// is probed once; a later call after a heard gap is probed again.
+	const noRevisit = makeNormalisedSpec({
+		dwellMs: DWELL_MS,
+		settleMs: SETTLE_MS,
+		revisit: { share: 0, maxIntervalMs: null },
+	})
+	const call = (hz: number, startMs: number): SimSignal => ({
+		...decoded(hz, startMs, 28_000),
+		decodeFollows: false,
+	})
+	for (const hops of [3, 7])
+		it(`${hops} hops: one probe per call, not one per visit`, () => {
+			const hz = qsoHz(hops)
+			const r = simulateSweep(planOf(hops), noRevisit, {
+				...sim,
+				durationMs: 100_000,
+				signals: [call(hz, 5_000), call(hz, 60_000)],
+			})
+			expect(r.holds).toEqual([1, 1])
+		})
+})
+
+describe("a flapping carrier with a short hangMs is one emission", () => {
+	// A carrier labelled analog voice, 5 s on / 0.5 s off from the job start for 300 s. A gap of
+	// 0.5 s reads 550 ms: shorter than TRAFFIC_GAP_MS, so whatever hangMs it is the same emission and
+	// is held only in its retry slots (0, then no earlier than 43.45, 126.9 and 290.35 s: at most 4
+	// in 300 s). With hangMs 300 a gap that long used to free it: 50 held visits.
+	for (const hangMs of [300, 999, 1_000, 1_050, 2_000])
+		for (const hops of [3, 7])
+			it(`hangMs ${hangMs}, ${hops} hops: held at most once per retry slot`, () => {
+				const short = makeNormalisedSpec({
+					dwellMs: DWELL_MS,
+					settleMs: SETTLE_MS,
+					hold: { ...spec.hold, hangMs },
+				})
+				const signals = regularQso(qsoHz(hops), 0, 300_000, 5_000, 500)
+				const r = simulateSweep(planOf(hops), short, {
+					...sim,
+					durationMs: 300_000,
+					signals,
+				})
+				const held = r.visits.filter(
+					v =>
+						v.hopIndex === qsoHop(hops) &&
+						v.leftAtMs - v.tunedAtMs > 2 * DWELL_MS + BLOCK_MS,
+				)
+				expect(held.length).toBeGreaterThanOrEqual(1)
+				expect(held.length).toBeLessThanOrEqual(4)
+			})
+})
+
 describe("a decode proves a transmission", () => {
 	// DMR-like calls decoded 800 ms into the probe are followed to their end, whatever the onset
 	// evidence. The earlier scheduler (decoded follows to maxHoldMs) heard a 28 s call at 0 s and at
