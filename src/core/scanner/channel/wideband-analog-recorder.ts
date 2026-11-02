@@ -383,8 +383,6 @@ interface Session {
 	qualified: boolean
 	/** In-track frames the gate heard over the session's files. */
 	heard: number
-	/** In-track frames over the session's files, voiced or not (the unclassed limit). */
-	inTrack: number
 	readonly observations: Set<string>
 	/** Track spans per observation (open: still active), the voice gate's input window. */
 	readonly activity: Map<string, { start: number; last: number; open: boolean }>
@@ -819,7 +817,6 @@ export class WidebandAnalogRecorder {
 			classed: input.analogFm,
 			qualified: false,
 			heard: 0,
-			inTrack: 0,
 			observations: new Set([input.observationId]),
 			activity: new Map([
 				[
@@ -1317,10 +1314,7 @@ export class WidebandAnalogRecorder {
 		const from = file.startSample + first * perFrame
 		for (const [id, a] of s.activity)
 			if (!a.open && a.last < from) s.activity.delete(id)
-		if (pcm.length === 0) return
-		const voiced = file.gate.voiced
-		// Classed and voiced: nothing left to count.
-		if (voiced && s.classed) return
+		if (file.gate.voiced || pcm.length === 0) return
 		const trim = (WIDEBAND_GATE_EDGE_TRIM_MS * s.fs) / 1000
 		const mask = new Uint8Array(pcm.length)
 		for (const a of s.activity.values()) {
@@ -1341,12 +1335,9 @@ export class WidebandAnalogRecorder {
 			}
 			let j = i
 			while (j < pcm.length && mask[j] === 1) j++
-			s.inTrack += j - i
-			if (!voiced) {
-				file.gate.push(pcm.subarray(i, j))
-				file.heard += j - i
-				s.heard += j - i
-			}
+			file.gate.push(pcm.subarray(i, j))
+			file.heard += j - i
+			s.heard += j - i
 			i = j
 		}
 	}
