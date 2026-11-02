@@ -266,6 +266,27 @@ export function classOf(
 	return "unknown"
 }
 
+/**
+ * A steady narrow line (LO-locked spur rule): under `GMSK_MIN_HZ` (4 kHz) wide, over
+ * `BURST_MAX_BLOCKS` (4) blocks and on at least `CARRIER_STEADY_DUTY_MIN` (90 %) of the time. Keyed
+ * CW, data bursts and anything modulated wider are not. `undefined` while the track has 4 blocks
+ * or fewer (too young to tell); non-finite width or duty is not a steady line.
+ */
+export function steadyLine(track: {
+	obwHz: number
+	blocks: number
+	dutyCycle: number
+}): boolean | undefined {
+	if (!Number.isFinite(track.obwHz) || !Number.isFinite(track.dutyCycle))
+		return false
+	if (track.obwHz >= GMSK_MIN_HZ) return false
+	if (!(track.blocks > BURST_MAX_BLOCKS)) return undefined
+	return track.dutyCycle >= CARRIER_STEADY_DUTY_MIN
+}
+
+/** Under this width (Hz) at -20 dB a line is no FM voice (`ANALOG_MIN_HZ` is 7.5 kHz). */
+export const CARRIER_LINE_MAX_HZ = GMSK_MIN_HZ
+
 /** Priors order hypotheses; even an out-of-band protocol remains eligible. */
 export function protocolPrior(value: number | undefined): number {
 	return typeof value === "number" && Number.isFinite(value)

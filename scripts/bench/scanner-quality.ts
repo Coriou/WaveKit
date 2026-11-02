@@ -110,11 +110,11 @@ function loLockSwitch(): ((svc: ScannerService) => void) | undefined {
 		const store = (
 			svc as unknown as {
 				store: {
-					loSpurs: { check: () => { locked: boolean; partners: string[] } }
+					loSpurs: { check: () => { verdict: "clear"; partners: string[] } }
 				}
 			}
 		).store
-		store.loSpurs.check = () => ({ locked: false, partners: [] })
+		store.loSpurs.check = () => ({ verdict: "clear", partners: [] })
 	}
 }
 

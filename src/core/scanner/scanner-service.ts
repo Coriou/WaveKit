@@ -3529,7 +3529,10 @@ export class ScannerService extends EventEmitter {
 			{
 				...(dcCentred ? { dcCentred: true } : {}),
 				...(tuned !== undefined && tuned.epoch === track.epoch
-					? { tunedCentreHz: tuned.centreHz }
+					? {
+							tunedCentreHz: tuned.centreHz,
+							tunedSampleRateHz: tuned.sampleRateHz,
+						}
 					: {}),
 				id: live.observationId,
 				sourceId: live.sourceId,

@@ -905,16 +905,18 @@ export interface RetunedScene {
 
 /**
  * LO-locked spur across centres (synthetic): 1.024 Msps, tuned at C1 for 12 s, C1 + 200 kHz for
- * 12 s, then back at C1 for 8 s. A receiver spur at -250 kHz from the tuned centre (20 dB, on all
- * the time) moves with the tuner: C1 - 250 kHz, then C1 - 50 kHz. Two real emitters stay put: a
- * steady unmodulated carrier at C1 + 150 kHz (20 dB) and an NFM voice carrier with CTCSS at
+ * 12 s, then back at C1 for 8 s. A receiver spur at -150 kHz from the tuned centre (20 dB, on all
+ * the time) moves with the tuner: C1 - 150 kHz, then C1 + 50 kHz. Each position lies inside the
+ * other centre's usable window (±409.6 kHz: C1 - 150 kHz is 350 kHz below C1 + 200 kHz), so each
+ * centre sees the other's position empty, which the LO-lock rule needs. Two real emitters stay put:
+ * a steady unmodulated carrier at C1 + 150 kHz (20 dB) and an NFM voice carrier with CTCSS at
  * C1 - 100 kHz (20 dB, on from 1 s to 30 s). Ground truth: 2 discoveries, the spur none.
  */
 export function loSpurScene(seed = 20_261_108): RetunedScene {
 	const rateHz = 1_024_000
 	const c1 = 433_400_000
 	const c2 = c1 + 200_000
-	const spurOffset = -250_000
+	const spurOffset = -150_000
 	const carrierHz = c1 + 150_000
 	const voiceHz = c1 - 100_000
 	const plan = [

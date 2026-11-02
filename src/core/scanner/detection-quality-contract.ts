@@ -265,7 +265,8 @@ export const DQ_YOUNG_OBW_RATIO = 3
  * LO-locked spurs: two sightings sit at the same offset from their tuned centres when their
  * offsets agree within 1 200 Hz. A steady line's centroid reads within half an FFT bin, and the
  * engine's default bin (fs / 1 000 rounded to a power of two) is at most 1 000 × √2 = 1.41 kHz:
- * two readings of ±0.6 kHz each differ by at most 1.2 kHz.
+ * two readings of ±0.6 kHz each differ by at most 1.2 kHz. The same tolerance says whether a
+ * position was sighted in a dwell (plus the sighted line's half width).
  */
 export const DQ_LO_LOCK_OFFSET_HZ = 1_200
 
@@ -277,19 +278,52 @@ export const DQ_LO_LOCK_OFFSET_HZ = 1_200
 export const DQ_LO_LOCK_MIN_SEPARATION_HZ = 12_500
 
 /**
- * LO-locked spurs: the two sightings' widths, each floored at 3 000 Hz (a line reads 1 to 3 bins
- * of up to 1.41 kHz: 4.2 kHz at most, so 3 kHz keeps line readings comparable), are within a
- * factor of 2 of each other. A wide emission at the spur's offset is not the spur.
+ * LO-locked spurs: only steady narrow lines lock (under 4 kHz at -20 dB, over 4 blocks, on at
+ * least 90 % of the time: `steadyLine` in the classifier). Each width is floored at 3 000 Hz (a
+ * line reads 1 to 3 bins of up to 1.41 kHz), so two steady lines read 3 to 4 kHz floored: a ratio
+ * of at most 4 / 3 = 1.33. Their widths must agree within 1.5, which keeps that margin and refuses
+ * a 4.5 kHz or wider reading against a 3 kHz line.
  */
-export const DQ_LO_LOCK_WIDTH_RATIO = 2
+export const DQ_LO_LOCK_WIDTH_RATIO = 1.5
 export const DQ_LO_LOCK_WIDTH_FLOOR_HZ = 3_000
 
 /**
- * LO-locked spurs, memory only, per source: 512 records remembered (least recently sighted
- * dropped first), 4 tuned centres each, and 64 learned spur offsets (oldest dropped first).
- * 512 × (4 × 24 B + 64 B) ≈ 82 kB per source; at most 64 sources (the pending-capture cap):
- * about 5.2 MB in the worst case.
+ * LO-locked spurs: a position counts as seen from a centre only inside its usable window, the
+ * detector's usable 80 % (`USABLE_FRACTION`, ±409.6 kHz at 1.024 Msps: past it signals are `edge`),
+ * the line's whole width inside, and more than `DQ_DC_ADMIT_HZ` (12.5 kHz) from the tuned centre,
+ * where the DC pedestal hides or blocks a line. Outside, nothing was proven absent there.
  */
+export const DQ_LO_LOCK_USABLE_FRACTION = 0.8
+export const DQ_LO_LOCK_DC_GUARD_HZ = DQ_DC_ADMIT_HZ
+
+/**
+ * LO-locked spurs: the minimum dwell under a centre before its absence of a line counts. A steady
+ * line passes the channel gate after 300 ms on and the scanner ingests it at its gate pass, then
+ * once a second (its ingest throttle). 3 000 ms from the dwell's first sighting covers the gate's
+ * on-time, a first ingest that lags it by up to 1 000 ms and two more throttled ingests (a dwell is
+ * measured from its first to its last sighting, so it never reads longer than the tuner stayed).
+ * Until the current dwell is that long, a candidate sighting is held back (no record, no lock).
+ */
+export const DQ_LO_LOCK_DWELL_MS = 3_000
+
+/**
+ * LO-locked spurs: dwell evidence (lines seen, positions seen empty) and learned or revoked offsets
+ * last 10 min = 600 000 ms after their last sighting. A scan of a 2 MHz band at 1.024 Msps needs
+ * 3 centres; at 12 s dwells it comes back to a centre within a minute, so 10 min holds many
+ * revisits. Past it, an empty position says too little about now (an emitter may have keyed up),
+ * so the safe answer is to discover again.
+ */
+export const DQ_LO_LOCK_TTL_MS = 600_000
+
+/**
+ * LO-locked spurs, memory only, per source: 16 dwells of at most 128 lines each (a dwell with more
+ * proves no absence), 512 records (least recently sighted dropped first), 4 tuned centres each, and
+ * 64 learned plus 64 revoked offsets (oldest dropped first). 16 × 128 × 40 B ≈ 82 kB of dwells plus
+ * 512 × (4 × 56 B + 64 B) ≈ 147 kB of records per source; at most 64 sources (the pending-capture
+ * cap): about 15 MB in the worst case, typically one source and a few kB.
+ */
+export const DQ_LO_LOCK_DWELLS_PER_SOURCE = 16
+export const DQ_LO_LOCK_LINES_PER_DWELL = 128
 export const DQ_LO_LOCK_RECORDS_PER_SOURCE = 512
 export const DQ_LO_LOCK_CENTRES_PER_RECORD = 4
 export const DQ_LO_LOCK_OFFSETS_PER_SOURCE = 64

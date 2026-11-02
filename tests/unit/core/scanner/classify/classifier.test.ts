@@ -10,6 +10,7 @@ import {
 	familyOf,
 	isAmVoice,
 	leakOrIntermod,
+	steadyLine,
 } from "../../../../../src/core/scanner/classify/classifier.js"
 import {
 	DiscoverySchema,
@@ -102,6 +103,23 @@ describe("classOf", () => {
 		expect(classOf(snap({ spectralShape: "flat", obwHz: 3_000 }))).toBe(
 			"fsk4-6k25",
 		)
+	})
+
+	it("steadyLine: narrow, over 4 blocks and on 90 % of the time; undecided while young", () => {
+		const t = (
+			over: Partial<{ obwHz: number; blocks: number; dutyCycle: number }>,
+		) => steadyLine({ obwHz: 1_000, blocks: 40, dutyCycle: 1, ...over })
+		expect(t({})).toBe(true)
+		expect(t({ obwHz: 3_999 })).toBe(true)
+		expect(t({ obwHz: 4_000 })).toBe(false)
+		expect(t({ dutyCycle: 0.9 })).toBe(true)
+		expect(t({ dutyCycle: 0.89 })).toBe(false)
+		expect(t({ blocks: 5 })).toBe(true)
+		expect(t({ blocks: 4 })).toBeUndefined()
+		// a wide young track is already no line
+		expect(t({ blocks: 2, obwHz: 11_000 })).toBe(false)
+		expect(t({ obwHz: Number.NaN })).toBe(false)
+		expect(t({ dutyCycle: Number.NaN })).toBe(false)
 	})
 
 	it("does not call short tracks bursts where bursts are implausible", () => {

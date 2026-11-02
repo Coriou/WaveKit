@@ -45,7 +45,7 @@ import {
 	type BandRegion,
 	type ScannerProbeDecoderType,
 } from "@wavekit/api-types"
-import { familyOf } from "../classify/classifier.js"
+import { familyOf, steadyLine } from "../classify/classifier.js"
 import { hintOf } from "../classify/hint.js"
 import { carrierAwareAnalog } from "../classify/carrier-voice.js"
 import {
@@ -122,6 +122,7 @@ import type { ConfidenceCounts } from "./job-counts.js"
 import type { StoreMirrorRemoval } from "./mirror-sink.js"
 import { PendingAdmission, admissionSnrOf } from "./pending-admission.js"
 import { LoLockedSpurs } from "../../spectrum/lo-locked-spurs.js"
+import type { LoSighting, LoVerdict } from "../../spectrum/lo-locked-spurs.js"
 import {
 	DQ_CO_CHANNEL_MAX,
 	DQ_CONSOLIDATE_GROUP_MAX,
@@ -137,11 +138,17 @@ import {
 	DQ_IDENTITY_WEAKER_DB,
 	DQ_LOCAL_SNR_DB,
 	DQ_LO_LOCK_CENTRES_PER_RECORD,
+	DQ_LO_LOCK_DC_GUARD_HZ,
+	DQ_LO_LOCK_DWELL_MS,
+	DQ_LO_LOCK_DWELLS_PER_SOURCE,
+	DQ_LO_LOCK_LINES_PER_DWELL,
 	DQ_LO_LOCK_MIN_SEPARATION_HZ,
 	DQ_LO_LOCK_OFFSET_HZ,
 	DQ_LO_LOCK_OFFSETS_PER_SOURCE,
 	DQ_LO_LOCK_RECORDS_PER_SOURCE,
 	DQ_LO_LOCK_SOURCES_MAX,
+	DQ_LO_LOCK_TTL_MS,
+	DQ_LO_LOCK_USABLE_FRACTION,
 	DQ_LO_LOCK_WIDTH_FLOOR_HZ,
 	DQ_LO_LOCK_WIDTH_RATIO,
 	DQ_MIN_HISTORY_OBS,
@@ -226,11 +233,13 @@ export interface DiscoveryFilter {
 }
 /** Optional context for `ingest`. */
 /**
- * An observation as the store ingests it: `tunedCentreHz` is the tuned centre of the track's epoch
- * when the caller knows it (LO-locked spur detection); absent, nothing is LO-locked.
+ * An observation as the store ingests it: `tunedCentreHz` and `tunedSampleRateHz` are the tuned
+ * centre and sample rate of the track's epoch when the caller knows them (LO-locked spur
+ * detection); without both, nothing new is LO-locked.
  */
 export interface StoreObservationInput extends ObservationInput {
 	tunedCentreHz?: number
+	tunedSampleRateHz?: number
 }
 
 export interface IngestOptions {
@@ -356,6 +365,11 @@ export const OBSERVATIONS_PER_DISCOVERY = 256
 const OBSERVATION_DECODE_MAX = 16
 const MEDIAN_WINDOW = 64
 const MAX_FLAGGED_IDS = 4096
+/**
+ * LO-locked observations remembered for their tuned-centre-less close: an LO-locked line is held
+ * out while it lasts, at most a few per dwell; 1 024 ids × about 40 B = 40 kB.
+ */
+const LO_LOCKED_OBS_KEEP = 1024
 const DEFAULT_LIMIT = 100
 const MAX_LIMIT = 500
 const DAY_MS = 86_400_000
@@ -1002,9 +1016,21 @@ export class DiscoveryStore
 		centresPerRecord: DQ_LO_LOCK_CENTRES_PER_RECORD,
 		offsetsPerSource: DQ_LO_LOCK_OFFSETS_PER_SOURCE,
 		sourcesMax: DQ_LO_LOCK_SOURCES_MAX,
+		usableFraction: DQ_LO_LOCK_USABLE_FRACTION,
+		dcGuardHz: DQ_LO_LOCK_DC_GUARD_HZ,
+		dwellMs: DQ_LO_LOCK_DWELL_MS,
+		ttlMs: DQ_LO_LOCK_TTL_MS,
+		dwellsPerSource: DQ_LO_LOCK_DWELLS_PER_SOURCE,
+		linesPerDwell: DQ_LO_LOCK_LINES_PER_DWELL,
 	})
 	/** Evidence-free records an LO-locked sighting showed to be the same spur, for the owner to retire. */
 	private loRetirees = new Set<string>()
+	/**
+	 * Observations last judged LO-locked (newest `LO_LOCKED_OBS_KEEP`): a later ingest of one that
+	 * carries no tuned centre (its close after a retune) stays out; one with a tuned centre is judged
+	 * again.
+	 */
+	private readonly loLockedObs = new Set<string>()
 	private lastPendingSweep = Number.NEGATIVE_INFINITY
 	private readonly newId: () => string
 	/** Accepted for the frame display role (R 2.5). Creation follows `track.gate`. */
@@ -1234,21 +1260,37 @@ export class DiscoveryStore
 	 */
 	ingest(input: StoreObservationInput, opts: IngestOptions = {}): Ingested {
 		const res = this.ingestObservation(input, opts)
-		// LO-locked spurs: remember the offset from the tuned centre each evidence-free sighting
-		// landed at, so a later sighting at the same offset from another centre is known as the spur.
-		if (
-			res.discoveryId !== null &&
-			res.change !== "transient" &&
-			input.tunedCentreHz !== undefined &&
-			!decodeProvesSignal(input, opts.decode)
-		)
-			this.loSpurs.note(res.discoveryId, {
-				sourceId: input.sourceId,
-				tunedHz: input.tunedCentreHz,
-				centreHz: input.track.centreHz,
-				obwHz: input.track.obwHz,
-			})
+		// LO-locked spurs: every sighting with its tuned centre is logged in the source's dwell (what
+		// was seen, and so what was not), and records keep the offsets they were sighted at.
+		const s = this.loSighting(input)
+		if (s !== undefined) {
+			const proven = decodeProvesSignal(input, opts.decode)
+			const real =
+				proven ||
+				(res.discoveryId !== null && !this.loPartnerEligible(res.discoveryId))
+			this.loSpurs.observe(s, real)
+			if (res.discoveryId !== null && res.change !== "transient" && !proven)
+				this.loSpurs.note(res.discoveryId, s)
+		}
 		return res
+	}
+
+	/** LO-locked spurs: the sighting of an input with its tuned centre and rate, else undefined. */
+	private loSighting(input: StoreObservationInput): LoSighting | undefined {
+		if (
+			input.tunedCentreHz === undefined ||
+			input.tunedSampleRateHz === undefined
+		)
+			return undefined
+		return {
+			sourceId: input.sourceId,
+			tunedHz: input.tunedCentreHz,
+			sampleRateHz: input.tunedSampleRateHz,
+			centreHz: input.track.centreHz,
+			obwHz: input.track.obwHz,
+			steady: steadyLine(input.track),
+			atMs: this.now(),
+		}
 	}
 
 	/**
@@ -1264,7 +1306,12 @@ export class DiscoveryStore
 
 	/** LO-locked spur offsets learned for a source (Hz from the tuned centre; tests, diagnostics). */
 	loLockedOffsets(sourceId: string): number[] {
-		return this.loSpurs.learnedOffsets(sourceId)
+		return this.loSpurs.learnedOffsets(sourceId, this.now())
+	}
+
+	/** LO-locked sightings held out of the store for a source so far (diagnostics). */
+	loLockedSuppressed(sourceId: string): number {
+		return this.loSpurs.suppressed(sourceId)
 	}
 
 	/**
@@ -1298,23 +1345,27 @@ export class DiscoveryStore
 	}
 
 	/**
-	 * LO-locked spurs: an evidence-less sighting at the offset from its tuned centre where an
-	 * evidence-free record was sighted from another centre (or at a learned spur offset) is the
-	 * receiver's own spur, moving with the LO. Its eligible earlier records are queued for retiring.
+	 * LO-locked spurs (`LoLockedSpurs`): an evidence-less steady narrow line whose position and its
+	 * partner's were each seen empty from the other's centre is the receiver's own spur, moving with
+	 * the LO: `locked`, and its eligible earlier records are queued for retiring. `pending` while the
+	 * current dwell is too short to tell (the sighting is held back). Without a tuned centre, only an
+	 * observation already judged locked stays locked.
 	 */
-	private loLocked(input: StoreObservationInput): boolean {
-		if (input.tunedCentreHz === undefined) return false
-		const res = this.loSpurs.check(
-			{
-				sourceId: input.sourceId,
-				tunedHz: input.tunedCentreHz,
-				centreHz: input.track.centreHz,
-				obwHz: input.track.obwHz,
-			},
-			id => this.loPartnerEligible(id),
-		)
+	private loLocked(input: StoreObservationInput): LoVerdict {
+		const s = this.loSighting(input)
+		if (s === undefined)
+			return this.loLockedObs.has(input.id) ? "locked" : "clear"
+		const res = this.loSpurs.check(s, id => this.loPartnerEligible(id))
 		for (const id of res.partners) this.loRetirees.add(id)
-		return res.locked
+		this.loLockedObs.delete(input.id)
+		if (res.verdict === "locked") {
+			this.loLockedObs.add(input.id)
+			if (this.loLockedObs.size > LO_LOCKED_OBS_KEEP) {
+				const oldest = this.loLockedObs.values().next()
+				if (oldest.done !== true) this.loLockedObs.delete(oldest.value)
+			}
+		}
+		return res.verdict
 	}
 
 	private ingestObservation(
@@ -1392,10 +1443,9 @@ export class DiscoveryStore
 		)
 			return TRANSIENT
 		const evidenceLess = !decodeProvesSignal(input, opts.decode)
-		if (evidenceLess && this.loLocked(input)) {
-			this.pending.dropRun(input.sourceId, input.id)
-			return TRANSIENT
-		}
+		const lo = evidenceLess ? this.loLocked(input) : "clear"
+		if (lo === "locked") this.pending.dropRun(input.sourceId, input.id)
+		if (lo !== "clear") return TRANSIENT
 		const admission = evidenceLess ? this.admits(input) : "create"
 		if (admission === "refuse") return TRANSIENT
 		const created = this.createFrom(input, label, target.coChannel)
@@ -2532,12 +2582,13 @@ export class DiscoveryStore
 			if (known === undefined) return false
 			const valid = acceptedAnalogEvidence(row)
 			if (valid === undefined) return false
-			// A tone-less NFM "heard" row on a record that measures as a steady carrier is carrier
-			// evidence, not voice (a carrier strong enough to open the squelch).
-			const accepted = carrierAwareAnalog(
-				valid,
-				this.discoveries.get(known.discoveryId)?.class,
-			)
+			// A tone-less NFM "heard" row on an observation that measured a steady carrier is carrier
+			// evidence, not voice (a carrier strong enough to open the squelch). This observation's
+			// measurement decides, never the record's historical class.
+			const accepted = carrierAwareAnalog(valid, {
+				cls: voteOf(known),
+				obwHz: known.obwHz,
+			})
 			const armed = this.armWatchers(known.discoveryId)
 			const before = this.peekProof(observationId)
 			if (!this.rememberAnalog(observationId, accepted)) {
