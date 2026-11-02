@@ -960,6 +960,72 @@ describe("probeLinkCandidates", () => {
 		)
 		expect(past).toEqual([{ ...obs, encrypted: true }])
 	})
+	it("vetoes an encrypted call that overlaps no observation's window, even of an encrypted observation's pair", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0 + 60_000,
+				statfs: plentyOfDisk,
+			})
+			// O2 clear X/Y ending at T0; O1 encrypted T/S from 10 s. Call C clear T/S 1-3 s (its
+			// window, +2 s slack, reaches 5 s); call E encrypted T/S 5-12 s.
+			const o2 = {
+				observationId: "o-2",
+				discoveryId: "d_ONE",
+				talkgroup: "X",
+				source: "Y",
+				startedAt: T0 - 5_000,
+				endedAt: T0,
+				encrypted: false,
+			}
+			const o1 = {
+				observationId: "o-1",
+				discoveryId: "d_ONE",
+				talkgroup: "T",
+				source: "S",
+				startedAt: T0 + 10_000,
+				endedAt: T0 + 20_000,
+				encrypted: true,
+			}
+			const c = {
+				talkgroup: "T",
+				source: "S",
+				startedAt: T0 + 1_000,
+				endedAt: T0 + 3_000,
+				encrypted: false,
+			}
+			const e = {
+				talkgroup: "T",
+				source: "S",
+				startedAt: T0 + 5_000,
+				endedAt: T0 + 12_000,
+				encrypted: true,
+			}
+			const wav = callWav(T0 + 5_000, "T", "S")
+			const probe = await probeDirWith(root, [wav], "WAV")
+			const candidates = probeLinkCandidates([o2, o1], [c, e])
+			expect(
+				candidates.filter(x => x.encrypted).map(x => x.startedAt),
+			).toContain(T0 + 5_000)
+			const result = await store.linkProbeRecordings(probe, candidates)
+			expect(result.linked).toEqual([])
+			expect(result.droppedEncrypted).toEqual(["o-1"])
+			expect(store.recordingPath(`d_ONE~${wav}`)).toBeNull()
+		})
+	})
+
+	it("attaches an encrypted call outside every observation window to the nearest observation", () => {
+		const far = call("2001", T0 + 60_000, true)
+		const out = probeLinkCandidates([obs], [far])
+		expect(out.map(c => [c.observationId, c.startedAt, c.encrypted])).toEqual([
+			["o-1", T0, false],
+			["o-1", T0 + 60_000, true],
+		])
+		expect(probeLinkCandidates([], [far])).toEqual([])
+	})
+
 	it("keeps an encrypted call with no ids as a veto of its window", async () => {
 		await withDir(async root => {
 			const store = new EvidenceStore({

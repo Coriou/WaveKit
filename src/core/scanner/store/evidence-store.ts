@@ -179,7 +179,9 @@ export interface ProbeLinkCall {
  * never claims the file of an encrypted call of the same pair, and a file matching any encrypted
  * candidate is dropped (linkFiles). At most MAX_PROBE_CALL_CANDIDATES are added, encrypted calls
  * first: a missing clear candidate only loses audio, a missing encrypted one could keep it. Past
- * the cap with encrypted calls alone, every file of the probe is dropped (fail closed).
+ * the cap with encrypted calls alone, every file of the probe is dropped (fail closed). Every
+ * encrypted call is a candidate whatever the observations' windows; only a clear call must
+ * overlap an observation, and only a clear call of an observation's own pair is skipped.
  */
 export function probeLinkCandidates(
 	observations: readonly LinkCandidate[],
@@ -188,47 +190,57 @@ export function probeLinkCandidates(
 	const encrypted: LinkCandidate[] = []
 	const clear: LinkCandidate[] = []
 	const seen = new Set<string>()
-	for (const o of observations) {
-		for (const call of calls) {
-			// A clear call with no ids claims nothing; an encrypted one still vetoes its window
-			// (absent ids match any file in linkFiles).
-			if (
-				call.talkgroup === undefined &&
-				call.source === undefined &&
-				!call.encrypted
-			)
-				continue
-			if (
-				call.endedAt < o.startedAt - MATCH_SLACK_MS ||
-				call.startedAt > o.endedAt + MATCH_SLACK_MS
-			)
-				continue
+	const candidate = (o: LinkCandidate, call: ProbeLinkCall): void => {
+		const key = JSON.stringify([
+			o.observationId,
+			call.talkgroup ?? null,
+			call.source ?? null,
+			call.startedAt,
+			call.endedAt,
+			call.encrypted,
+		])
+		if (seen.has(key)) return
+		seen.add(key)
+		;(call.encrypted ? encrypted : clear).push({
+			observationId: o.observationId,
+			discoveryId: o.discoveryId,
+			...(call.talkgroup !== undefined ? { talkgroup: call.talkgroup } : {}),
+			...(call.source !== undefined ? { source: call.source } : {}),
+			startedAt: call.startedAt,
+			endedAt: call.endedAt,
+			encrypted: call.encrypted,
+		})
+	}
+	const overlaps = (o: LinkCandidate, call: ProbeLinkCall): boolean =>
+		call.endedAt >= o.startedAt - MATCH_SLACK_MS &&
+		call.startedAt <= o.endedAt + MATCH_SLACK_MS
+	for (const call of calls) {
+		if (call.encrypted) {
+			// Every encrypted call vetoes its own window, whatever the observations' windows: a
+			// clear call's window may reach past its observation (dsd-fme's call_end lags RF), so
+			// a veto filtered by observation overlap could leave an encrypted file to a clear call.
+			// It is reported on the observation it overlaps, else the nearest one.
+			const o =
+				observations.find(x => overlaps(x, call)) ??
+				[...observations].sort(
+					(a, b) =>
+						Math.abs(a.startedAt - call.startedAt) -
+						Math.abs(b.startedAt - call.startedAt),
+				)[0]
+			if (o !== undefined) candidate(o, call)
+			continue
+		}
+		// A clear call with no ids claims nothing.
+		if (call.talkgroup === undefined && call.source === undefined) continue
+		for (const o of observations) {
+			if (!overlaps(o, call)) continue
 			// The observation's own candidate already covers a clear call of its pair (wider window).
 			if (
 				(call.talkgroup ?? null) === (o.talkgroup ?? null) &&
-				(call.source ?? null) === (o.source ?? null) &&
-				(o.encrypted || !call.encrypted)
+				(call.source ?? null) === (o.source ?? null)
 			)
 				continue
-			const key = JSON.stringify([
-				o.observationId,
-				call.talkgroup ?? null,
-				call.source ?? null,
-				call.startedAt,
-				call.endedAt,
-				call.encrypted,
-			])
-			if (seen.has(key)) continue
-			seen.add(key)
-			;(call.encrypted ? encrypted : clear).push({
-				observationId: o.observationId,
-				discoveryId: o.discoveryId,
-				...(call.talkgroup !== undefined ? { talkgroup: call.talkgroup } : {}),
-				...(call.source !== undefined ? { source: call.source } : {}),
-				startedAt: call.startedAt,
-				endedAt: call.endedAt,
-				encrypted: call.encrypted,
-			})
+			candidate(o, call)
 		}
 	}
 	// More encrypted calls than the cap: a dropped veto could keep an encrypted file, so fail

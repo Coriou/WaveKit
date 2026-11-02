@@ -305,6 +305,7 @@ import type {
 	PlanPreview,
 	ScanJobSpec,
 	ScanRange,
+	ScannerClass,
 	ScannerProtocol,
 	ScannerSettings,
 	UndecodedReason,
@@ -753,6 +754,11 @@ export class OverloadHintTracker {
 			blankedPercent: Math.round((1000 * blanked) / frames) / 10,
 		}
 	}
+}
+
+/** A class that is definitely not analog FM: a shadow recording of it is discarded. */
+function nonAnalogFmClass(c: ScannerClass): boolean {
+	return c !== "analog-fm" && c !== "unknown" && c !== "carrier"
 }
 
 export class ScannerService extends EventEmitter {
@@ -1485,6 +1491,8 @@ export class ScannerService extends EventEmitter {
 						observationId,
 						widebandToneEvidence(ctcssHz, at),
 					),
+				// Recordings share the probes' and live audio's CPU budget (cpuBudgetCores).
+				reserveCores: cores => this.probes.reserveExternal(cores),
 				logger: deps.logger,
 				now: this.now,
 			})
@@ -3419,6 +3427,11 @@ export class ScannerService extends EventEmitter {
 					: endReason === "gap"
 						? "stream-changed"
 						: "track-ended",
+			{
+				analogFm: live.classification.class === "analog-fm",
+				nonAnalog: nonAnalogFmClass(live.classification.class),
+				discoveryId: this.store.discoveryIdOf(live.observationId) ?? null,
+			},
 		)
 		if (
 			(endReason !== "quiet" && endReason !== "max-duration") ||
@@ -3712,15 +3725,24 @@ export class ScannerService extends EventEmitter {
 		return track.tuningTrust === "unverified" ? { ...c, tier: "spectral" } : c
 	}
 
-	/** Default-on analog recording; a job owning the observation may opt out (record.analog). */
+	/**
+	 * Default-on analog recording; a job owning the observation may opt out (record.analog). A
+	 * track not classed yet may start a shadow session where analog FM may be (`analogFmPossible`).
+	 */
 	private recordWideband(live: LiveObservation, track: TrackSnapshot): void {
 		const specs = live.jobIds.flatMap(id => this.jobs.get(id)?.spec ?? [])
+		const analogFm = live.classification.class === "analog-fm"
 		this.widebandAnalog.track({
 			observationId: live.observationId,
 			discoveryId: this.store.discoveryIdOf(live.observationId) ?? null,
 			sourceId: live.sourceId,
 			track,
-			analogFm: live.classification.class === "analog-fm",
+			analogFm,
+			nonAnalog: nonAnalogFmClass(live.classification.class),
+			shadowAllowed:
+				!analogFm &&
+				!this.widebandAnalog.owns(live.observationId) &&
+				this.analogFmPossible(track.centreHz),
 			encrypted: live.encrypted,
 			recordAllowed:
 				specs.length === 0 || specs.some(spec => spec.record.analog),
@@ -3728,6 +3750,24 @@ export class ScannerService extends EventEmitter {
 				owner => owner.observationId === live.observationId,
 			),
 		})
+	}
+
+	/**
+	 * Read-only band plan lookup: some enabled range at `hz` lists analog-fm, or no range there
+	 * lists any protocol (no band plan entry). O(band plan ranges) per call, only for tracks not
+	 * yet recording or classed.
+	 */
+	private analogFmPossible(hz: number): boolean {
+		let listed = false
+		for (const b of this.deps.bandplans?.() ??
+			builtinBandplansFor(this.deps.region))
+			for (const r of b.ranges) {
+				if (!isRangeEnabled(r) || hz < r.startHz || hz > r.endHz) continue
+				const protocols = r.protocols ?? []
+				if (protocols.includes("analog-fm")) return true
+				if (protocols.length > 0) listed = true
+			}
+		return !listed
 	}
 
 	private refineLiveChannel(live: LiveObservation, track: TrackSnapshot): void {

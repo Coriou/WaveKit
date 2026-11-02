@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest"
 import {
 	WIDEBAND_HOLDBACK_MS,
+	WIDEBAND_QUALIFY_MS,
 	MAX_WAITING_FILES,
 	WIDEBAND_MAX_SILENCE_GAP_MS,
 	widebandRecordingCap,
@@ -91,22 +92,28 @@ describe("WidebandAnalogRecorder", () => {
 			const t = snapshot("y", 0, 10)
 			t.flags[flag] = true
 			h.rec.track(input("y", t))
-			expect(h.ops).toEqual([])
+			expect(h.rec.owns("y")).toBe(false)
 		}
 		const h = harness()
 		h.rec.track(input("z", snapshot("z", 0, 10, { obwHz: 16_001 })))
 		h.rec.track(input("w", snapshot("w", 0, 10, { tuningTrust: "unverified" })))
-		expect(h.ops).toEqual([])
+		expect(h.rec.owns("z")).toBe(false)
+		expect(h.rec.owns("w")).toBe(false)
 		h.rec.track(input("v", snapshot("v", 0, 10, { obwHz: 16_000 })))
-		expect(h.ops).toHaveLength(1)
+		expect(h.rec.owns("v")).toBe(true)
+		// No store operation before the file sounds like voice.
+		expect(h.ops).toEqual([])
 	}, 60_000)
 
 	it("cancels the file when the owner turns edge or spur", async () => {
 		const h = harness()
 		await h.feed(0.5, false)
 		const onset = h.engine.liveEdge()
-		h.rec.track(input("o", snapshot("o", onset, onset + 10)))
-		await h.feed(0.5, true)
+		// Voiced (judged a holdback late) and admitted after 2 s.
+		await h.feed(2, true, () =>
+			h.rec.track(input("o", snapshot("o", onset, h.engine.liveEdge()))),
+		)
+		expect(h.ops).toHaveLength(1)
 		const bad = snapshot("o", onset, h.engine.liveEdge())
 		bad.flags.edge = true
 		h.rec.track(input("o", bad))
@@ -192,7 +199,12 @@ describe("WidebandAnalogRecorder", () => {
 					snapshot(`c${i}`, 0, 10, { centreHz: CENTRE + 20_000 * i }),
 				),
 			)
-		expect(h.ops).toHaveLength(2)
+		expect(["c0", "c1", "c2"].map(id => h.rec.owns(id))).toEqual([
+			true,
+			true,
+			false,
+		])
+		expect(h.rec.activeOn("rtl")).toBe(2)
 	})
 
 	it("holds back writes for WIDEBAND_HOLDBACK_MS while the track is open", async () => {
@@ -319,12 +331,19 @@ describe("WidebandAnalogRecorder review regressions", () => {
 		})
 		await h.feed(0.5, false)
 		const onset = h.engine.liveEdge()
-		await h.feed(126, true, () =>
-			h.rec.track(input("c", snapshot("c", onset, h.engine.liveEdge(), LOW))),
+		let ownedAt = 0
+		await h.feed(14, true, () => {
+			h.rec.track(input("c", snapshot("c", onset, h.engine.liveEdge(), LOW)))
+			if (h.rec.owns("c")) ownedAt = h.engine.liveEdge()
+		})
+		// Unvoiced after WIDEBAND_QUALIFY_MS of in-track audio (judged a holdback late): ended,
+		// never admitted, and not restarted by its later snapshots.
+		const heldMs = ((ownedAt - onset) / h.fs) * 1000
+		expect(heldMs).toBeGreaterThanOrEqual(WIDEBAND_QUALIFY_MS)
+		expect(heldMs).toBeLessThanOrEqual(
+			WIDEBAND_QUALIFY_MS + WIDEBAND_HOLDBACK_MS + 300,
 		)
-		expect(h.ops).toHaveLength(1)
-		expect(h.ops[0]!.cancelled).toBe("cancelled")
-		expect(h.ops[0]!.outcome).toBe("aborted")
+		expect(h.ops).toEqual([])
 		expect(h.rec.owns("c")).toBe(false)
 		expect(h.engine.tapCount).toBe(0)
 	}, 120_000)
@@ -339,9 +358,8 @@ describe("WidebandAnalogRecorder review regressions", () => {
 			await h.feed(0.5, false)
 			await transmission(h, "t", 2)
 			await h.feed(3.5, false)
-			expect(h.ops).toHaveLength(1)
-			expect(h.ops[0]!.outcome).toBe("aborted")
-			expect(h.ops[0]!.cancelled).toBe("cancelled")
+			// Never voiced: no store operation at all (nothing reserved, nothing on disk).
+			expect(h.ops).toEqual([])
 		}
 		const h = harness()
 		await h.feed(0.5, false)
@@ -374,7 +392,8 @@ describe("WidebandAnalogRecorder review regressions", () => {
 			const h = harness()
 			await h.feed(0.5, false)
 			const onset = h.engine.liveEdge()
-			await h.feed(0.5, true, () =>
+			// Long enough to be voiced and admitted.
+			await h.feed(2, true, () =>
 				h.rec.track(input("o", snapshot("o", onset, h.engine.liveEdge()))),
 			)
 			const joinAt = h.engine.liveEdge()
@@ -394,7 +413,7 @@ describe("WidebandAnalogRecorder review regressions", () => {
 		const h = harness()
 		await h.feed(0.5, false)
 		const onset = h.engine.liveEdge()
-		await h.feed(0.5, true, () =>
+		await h.feed(2, true, () =>
 			h.rec.track(input("o", snapshot("o", onset, h.engine.liveEdge()))),
 		)
 		const at = h.engine.liveEdge()

@@ -182,6 +182,7 @@ export function harness(
 		hold?: Promise<void>
 		readyHold?: Promise<void>
 		source?: Partial<ConstructorParameters<typeof NfmSource>[0]>
+		reserveCores?: (cores: number) => (() => void) | null
 	} = {},
 ) {
 	const fs = opts.fs ?? FS
@@ -201,6 +202,7 @@ export function harness(
 		}),
 		beginAnalog: begin,
 		recordTone: (observationId, hz) => tones.push({ observationId, hz }),
+		...(opts.reserveCores ? { reserveCores: opts.reserveCores } : {}),
 		logger,
 		now: () => 1_700_000_000_000,
 		schedule: run => queue.push(run),
@@ -234,7 +236,7 @@ export function harness(
 			await pump()
 		}
 	}
-	return { engine, ops, rec, tones, warnings, feed, pump, src, fs }
+	return { engine, ops, begin, rec, tones, warnings, feed, pump, src, fs }
 }
 
 export function snapshot(

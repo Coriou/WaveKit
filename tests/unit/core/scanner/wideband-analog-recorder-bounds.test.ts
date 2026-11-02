@@ -8,8 +8,9 @@ import {
 	WIDEBAND_GATE_EDGE_TRIM_MS,
 	WIDEBAND_MAX_ACTIVITY,
 	WIDEBAND_MAX_PENDING_GAPS,
-	WIDEBAND_MAX_QUEUED_FRAMES,
+	WIDEBAND_MAX_BUFFERED_FRAMES,
 } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
+import type { WidebandTrackInput } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import {
 	CENTRE,
 	FS,
@@ -98,7 +99,8 @@ describe("WidebandAnalogRecorder shutdown and discards", () => {
 			const h = harness()
 			await h.feed(0.5, false)
 			const onset = h.engine.liveEdge()
-			await h.feed(0.5, true, () =>
+			// Long enough to be voiced and admitted.
+			await h.feed(2, true, () =>
 				h.rec.track(input("o", snapshot("o", onset, h.engine.liveEdge()))),
 			)
 			const at = h.engine.liveEdge()
@@ -116,7 +118,7 @@ describe("WidebandAnalogRecorder shutdown and discards", () => {
 		const h = harness()
 		await h.feed(0.5, false)
 		const onset = h.engine.liveEdge()
-		await h.feed(0.5, true, () =>
+		await h.feed(2, true, () =>
 			h.rec.track(input("o", snapshot("o", onset, h.engine.liveEdge()))),
 		)
 		const at = h.engine.liveEdge()
@@ -146,7 +148,8 @@ describe("WidebandAnalogRecorder short overs", () => {
 		await tone.feed(0.5, false)
 		await transmission(tone, "t", 0.6)
 		await tone.feed(3.5, false)
-		expect(tone.ops.map(o => o.outcome)).toEqual(["aborted"])
+		// Never voiced: never admitted (no store operation at all).
+		expect(tone.ops).toEqual([])
 	}, 60_000)
 
 	it("drops a 300 ms voice over (under 200 ms of audio once both edges are trimmed)", async () => {
@@ -154,7 +157,7 @@ describe("WidebandAnalogRecorder short overs", () => {
 		await h.feed(0.5, false)
 		await transmission(h, "v", 0.3)
 		await h.feed(3.5, false)
-		expect(h.ops.map(o => o.outcome)).toEqual(["aborted"])
+		expect(h.ops).toEqual([])
 	}, 60_000)
 })
 
@@ -164,7 +167,7 @@ describe("WidebandAnalogRecorder bounds", () => {
 		// A quiet carrier, then noise only (the carrier dropped), the track's last sample reported
 		// `lateMs` after the drop: noise within the trim stays out, more than it is heard.
 		for (const [lateMs, outcome] of [
-			[WIDEBAND_GATE_EDGE_TRIM_MS, "aborted"],
+			[WIDEBAND_GATE_EDGE_TRIM_MS, null],
 			[WIDEBAND_GATE_EDGE_TRIM_MS + 400, "finalized"],
 		] as const) {
 			const h = harness({ source: { voice: false, ctcssHz: null } })
@@ -177,7 +180,9 @@ describe("WidebandAnalogRecorder bounds", () => {
 			await h.feed(0.6, false)
 			h.rec.closed("n", snapshot("n", onset, drop + (lateMs * FS) / 1000), null)
 			await h.feed(3.5, false)
-			expect(h.ops.map(o => o.outcome)).toEqual([outcome])
+			expect(h.ops.map(o => o.outcome)).toEqual(
+				outcome === null ? [] : [outcome],
+			)
 		}
 	}, 60_000)
 
@@ -238,28 +243,43 @@ describe("WidebandAnalogRecorder bounds", () => {
 		}
 	}, 120_000)
 
-	it("drops a file whose queued audio would pass WIDEBAND_MAX_QUEUED_FRAMES", async () => {
-		expect(WIDEBAND_MAX_QUEUED_FRAMES).toBe(128_000)
-		// Admission never completes: every frame of the file stays queued.
-		const h = harness({
-			fs: LOW_FS,
-			offset: LOW_OFFSET,
-			readyHold: new Promise<void>(() => undefined),
-		})
-		await h.feed(0.5, false)
-		const onset = h.engine.liveEdge()
-		let most = 0
-		for (let i = 0; i < 1_000 && (i === 0 || h.rec.owns("q")); i++) {
-			await h.feed(0.025, true, () =>
-				h.rec.track(input("q", snapshot("q", onset, h.engine.liveEdge(), LOW))),
-			)
-			for (const s of sessions(h))
-				most = Math.max(most, s.file?.queue.length ?? 0)
+	it("drops a session whose buffered audio would pass WIDEBAND_MAX_BUFFERED_FRAMES", async () => {
+		// 60 s · 8000 frames/s = 480 000 frames (960 KB of s16).
+		expect(WIDEBAND_MAX_BUFFERED_FRAMES).toBe(480_000)
+		const cases: {
+			opts: Parameters<typeof harness>[0]
+			extra: Partial<WidebandTrackInput>
+			ops: number
+		}[] = [
+			// Admitted, but admission never completes: every frame stays queued.
+			{
+				opts: { readyHold: new Promise<void>(() => undefined) },
+				extra: {},
+				ops: 1,
+			},
+			// A shadow whose class never arrives: held in memory only, then dropped.
+			{ opts: {}, extra: { analogFm: false, shadowAllowed: true }, ops: 0 },
+		]
+		for (const c of cases) {
+			const h = harness({ fs: LOW_FS, offset: LOW_OFFSET, ...c.opts })
+			await h.feed(0.5, false)
+			const onset = h.engine.liveEdge()
+			let most = 0
+			for (let i = 0; i < 4_000 && (i === 0 || h.rec.owns("q")); i++) {
+				await h.feed(0.025, true, () =>
+					h.rec.track(
+						input("q", snapshot("q", onset, h.engine.liveEdge(), LOW), c.extra),
+					),
+				)
+				for (const s of sessions(h))
+					most = Math.max(most, s.file?.queue.length ?? 0)
+			}
+			expect(h.rec.owns("q")).toBe(false)
+			expect(h.ops).toHaveLength(c.ops)
+			if (c.ops > 0) expect(h.ops[0]!.cancelled).toBe("cancelled")
+			// At the bound it was kept (within one 25 ms slice of 200 frames); past it, dropped.
+			expect(most).toBeLessThanOrEqual(WIDEBAND_MAX_BUFFERED_FRAMES)
+			expect(most).toBeGreaterThan(WIDEBAND_MAX_BUFFERED_FRAMES - 200)
 		}
-		expect(h.rec.owns("q")).toBe(false)
-		expect(h.ops[0]!.cancelled).toBe("cancelled")
-		// At the bound it was kept (within one 25 ms slice of 200 frames); past it, dropped.
-		expect(most).toBeLessThanOrEqual(WIDEBAND_MAX_QUEUED_FRAMES)
-		expect(most).toBeGreaterThan(WIDEBAND_MAX_QUEUED_FRAMES - 200)
 	}, 120_000)
 })
