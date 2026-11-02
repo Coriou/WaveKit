@@ -156,7 +156,7 @@ function matchingCandidates(
 }
 
 /**
- * Call candidates kept per probe link: 256 distinct talkgroup/source pairs. Matching is
+ * Call candidates kept per probe link: 256 reported calls. Matching is
  * files × candidates comparisons, so a probe's few dozen call files cost a few thousand.
  */
 export const MAX_PROBE_CALL_CANDIDATES = 256
@@ -172,21 +172,22 @@ export interface ProbeLinkCall {
 
 /**
  * Link candidates for a probe's call files: each observation as it stands (its latest talkgroup
- * and source, encrypted if any decode was), plus one per distinct talkgroup/source pair of the
- * probe's own calls inside the observation's window. An observation keeps only its latest pair,
- * so without the calls every earlier over of a conversation (another radio, another talkgroup)
- * would match nothing and be deleted. A call candidate is encrypted only when that call was.
+ * and source, encrypted if any decode was), plus one per call the probe reported inside the
+ * observation's window, with that call's own time and encryption. An observation keeps only its
+ * latest pair, so without the calls every earlier over of a conversation (another radio, another
+ * talkgroup) would match nothing and be deleted. Each call keeps its own window so a clear call
+ * never claims the file of an encrypted call of the same pair, and a file matching any encrypted
+ * candidate is dropped (linkFiles). At most MAX_PROBE_CALL_CANDIDATES are added, encrypted calls
+ * first: a missing clear candidate only loses audio, a missing encrypted one could keep it.
  */
 export function probeLinkCandidates(
 	observations: readonly LinkCandidate[],
 	calls: readonly ProbeLinkCall[],
 ): LinkCandidate[] {
-	const out: LinkCandidate[] = [...observations]
+	const encrypted: LinkCandidate[] = []
+	const clear: LinkCandidate[] = []
 	const seen = new Set<string>()
 	for (const o of observations) {
-		seen.add(
-			JSON.stringify([o.observationId, o.talkgroup ?? null, o.source ?? null]),
-		)
 		for (const call of calls) {
 			if (call.talkgroup === undefined && call.source === undefined) continue
 			if (
@@ -194,27 +195,38 @@ export function probeLinkCandidates(
 				call.startedAt > o.endedAt + MATCH_SLACK_MS
 			)
 				continue
+			// The observation's own candidate already covers a clear call of its pair (wider window).
+			if (
+				(call.talkgroup ?? null) === (o.talkgroup ?? null) &&
+				(call.source ?? null) === (o.source ?? null) &&
+				(o.encrypted || !call.encrypted)
+			)
+				continue
 			const key = JSON.stringify([
 				o.observationId,
 				call.talkgroup ?? null,
 				call.source ?? null,
+				call.startedAt,
+				call.endedAt,
+				call.encrypted,
 			])
 			if (seen.has(key)) continue
-			if (out.length - observations.length >= MAX_PROBE_CALL_CANDIDATES)
-				return out
 			seen.add(key)
-			out.push({
+			;(call.encrypted ? encrypted : clear).push({
 				observationId: o.observationId,
 				discoveryId: o.discoveryId,
 				...(call.talkgroup !== undefined ? { talkgroup: call.talkgroup } : {}),
 				...(call.source !== undefined ? { source: call.source } : {}),
-				startedAt: o.startedAt,
-				endedAt: o.endedAt,
+				startedAt: call.startedAt,
+				endedAt: call.endedAt,
 				encrypted: call.encrypted,
 			})
 		}
 	}
-	return out
+	return [...observations, ...encrypted, ...clear].slice(
+		0,
+		observations.length + MAX_PROBE_CALL_CANDIDATES,
+	)
 }
 
 function errorCode(err: unknown): string | undefined {

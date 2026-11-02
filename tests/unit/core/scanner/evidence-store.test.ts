@@ -847,7 +847,7 @@ describe("probeLinkCandidates", () => {
 		expect(out.map(c => c.source)).toEqual(["2002", "2004"])
 	})
 
-	it("adds at most MAX_PROBE_CALL_CANDIDATES distinct pairs, deduplicated", () => {
+	it("adds at most MAX_PROBE_CALL_CANDIDATES call candidates, deduplicated", () => {
 		const calls = Array.from(
 			{ length: MAX_PROBE_CALL_CANDIDATES + 10 },
 			(_, i) => call(String(3_000 + i)),
@@ -863,5 +863,83 @@ describe("probeLinkCandidates", () => {
 		expect(
 			probeLinkCandidates([obs], [call("2002"), call("2002")]),
 		).toHaveLength(1)
+	})
+
+	it("keeps each call's own window: an encrypted over's file is dropped though a clear call shares its pair", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0 + 60_000,
+				statfs: plentyOfDisk,
+			})
+			// The observation's latest pair is 9/2002 (B); 2001 (A) spoke clear, then encrypted.
+			const clearA = callWav(T0 + 1_000, "9", "2001")
+			const encA = callWav(T0 + 6_000, "9", "2001")
+			const probe = await probeDirWith(root, [clearA, encA], "WAV")
+			const candidates = probeLinkCandidates(
+				[obs],
+				[call("2001"), call("2001", T0 + 6_000, true)],
+			)
+			expect(candidates.map(c => [c.source, c.startedAt, c.encrypted])).toEqual(
+				[
+					["2002", T0, false],
+					["2001", T0 + 6_000, true],
+					["2001", T0 + 1_000, false],
+				],
+			)
+			const result = await store.linkProbeRecordings(probe, candidates)
+			expect(result.linked.map(l => l.recordingId)).toEqual([`d_ONE~${clearA}`])
+			expect(result.droppedEncrypted).toEqual(["o-1"])
+			expect(store.recordingPath(`d_ONE~${encA}`)).toBeNull()
+		})
+	})
+
+	it("drops a file whose time matches both a clear and an encrypted call of its pair", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0 + 60_000,
+				statfs: plentyOfDisk,
+			})
+			const ambiguous = callWav(T0 + 2_000, "9", "2001")
+			const probe = await probeDirWith(root, [ambiguous], "WAV")
+			const result = await store.linkProbeRecordings(
+				probe,
+				probeLinkCandidates(
+					[obs],
+					[call("2001"), call("2001", T0 + 2_000, true)],
+				),
+			)
+			expect(result.linked).toEqual([])
+			expect(result.droppedEncrypted).toEqual(["o-1"])
+		})
+	})
+
+	it("adds an encrypted call of the observation's own pair when the observation is clear", () => {
+		const out = probeLinkCandidates([obs], [call("2002", T0 + 4_000, true)])
+		expect(out.map(c => [c.source, c.startedAt, c.encrypted])).toEqual([
+			["2002", T0, false],
+			["2002", T0 + 4_000, true],
+		])
+	})
+
+	it("keeps encrypted calls first when the bound cuts candidates", () => {
+		const clearCalls = Array.from(
+			{ length: MAX_PROBE_CALL_CANDIDATES },
+			(_, i) => call(String(3_000 + i)),
+		)
+		const out = probeLinkCandidates(
+			[obs],
+			[...clearCalls, call("2001", T0 + 5_000, true)],
+		)
+		expect(out).toHaveLength(1 + MAX_PROBE_CALL_CANDIDATES)
+		expect(out[1]).toMatchObject({ source: "2001", encrypted: true })
+		expect(out.filter(c => !c.encrypted)).toHaveLength(
+			MAX_PROBE_CALL_CANDIDATES,
+		)
 	})
 })
