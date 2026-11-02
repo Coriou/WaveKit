@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
 	CARRIER_DEFAULT_BIN_HZ,
 	CARRIER_FLAT_MAX_BINS,
+	CARRIER_FLAT_MAX_BINS_6DB,
 	CARRIER_LINE_MAX_BINS,
 	CARRIER_PEAKED_MAX_BINS_6DB,
 	CARRIER_STEADY_DUTY_MIN,
@@ -174,13 +175,13 @@ describe("classOf", () => {
 				expect(["fsk4-6k25", "fsk4-12k5"]).toContain(
 					classOf(snap({ spectralShape: "flat", obwHz, obw6Hz: obwHz, binHz })),
 				)
-			// repro: a 3-bin tone that noise made flat is still a carrier
+			// a flat line with a carrier's -6 dB width (at most 2 bins) is a carrier
 			expect(
 				classOf(
 					snap({
 						spectralShape: "flat",
 						obwHz: 3 * binHz,
-						obw6Hz: 3 * binHz,
+						obw6Hz: 2 * binHz,
 						binHz,
 					}),
 				),
@@ -203,6 +204,30 @@ describe("classOf", () => {
 		expect(classOf(snap({ spectralShape: "peaked", obwHz: 11_000 }))).toBe(
 			"analog-fm",
 		)
+	})
+
+	it("repro: a steady three-bin flat top (obwHz = obw6Hz = 3 bins, not narrow) keeps its digital trials at 1 000 and 1 171.875 Hz bins", () => {
+		for (const binHz of [BIN_1024K, BIN_2400K]) {
+			const track = snap({
+				spectralShape: "flat",
+				obwHz: 3 * binHz,
+				obw6Hz: 3 * binHz,
+				binHz,
+				blocks: 40,
+				dutyCycle: 1,
+			})
+			expect(classOf(track)).not.toBe("carrier")
+			expect(classOf(track)).toBe("fsk4-6k25")
+			expect(steadyLine(track)).toBe(false)
+			expect(
+				carrierLine({
+					obwHz: 3 * binHz,
+					obw6Hz: 3 * binHz,
+					spectralShape: "flat",
+					binHz,
+				}),
+			).toBe(false)
+		}
 	})
 
 	it("carrierLine: Hann pure tones on a bin centre read 3 bins, half a bin off 4 bins, both carrier lines at both rates", () => {
@@ -248,10 +273,34 @@ describe("classOf", () => {
 		expect(c({ obwHz: Number.NaN })).toBe(false)
 		expect(c({ obwHz: 0 })).toBe(false)
 		expect(c({ obwHz: 1_000, spectralShape: "flat" })).toBe(false)
-		expect(c({ obwHz: 3_000, spectralShape: "flat", obw6Hz: 3_000 })).toBe(true)
-		expect(c({ obwHz: 3_001, spectralShape: "flat", obw6Hz: 3_000 })).toBe(
+		expect(CARRIER_FLAT_MAX_BINS_6DB).toBe(2)
+		// a 3-bin flat top (3 bins at -6 dB too) is narrow digital, not a carrier line
+		expect(c({ obwHz: 3_000, spectralShape: "flat", obw6Hz: 3_000 })).toBe(
 			false,
 		)
+		expect(c({ obwHz: 3_000, spectralShape: "flat", obw6Hz: 2_000 })).toBe(true)
+		expect(c({ obwHz: 3_000, spectralShape: "flat", obw6Hz: 2_001 })).toBe(
+			false,
+		)
+		expect(c({ obwHz: 3_001, spectralShape: "flat", obw6Hz: 2_000 })).toBe(
+			false,
+		)
+		expect(
+			c({
+				obwHz: 3 * BIN_2400K,
+				spectralShape: "flat",
+				obw6Hz: 2 * BIN_2400K,
+				binHz: BIN_2400K,
+			}),
+		).toBe(true)
+		expect(
+			c({
+				obwHz: 3 * BIN_2400K,
+				spectralShape: "flat",
+				obw6Hz: 2 * BIN_2400K + 1,
+				binHz: BIN_2400K,
+			}),
+		).toBe(false)
 		expect(c({ obwHz: 1_000, spectralShape: "peaked" })).toBe(false)
 		expect(c({ obwHz: 3_000, spectralShape: "peaked", obw6Hz: 3_000 })).toBe(
 			true,

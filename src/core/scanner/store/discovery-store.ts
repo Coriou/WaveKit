@@ -257,6 +257,32 @@ export interface IngestOptions {
 	decode?: DecodeEvidence
 }
 
+/** LO-locked spurs: a line's width as the tracker compares it (floor `DQ_LO_LOCK_WIDTH_FLOOR_HZ`). */
+function loWidth(obwHz: number): number {
+	return Number.isFinite(obwHz) && obwHz > DQ_LO_LOCK_WIDTH_FLOOR_HZ
+		? obwHz
+		: DQ_LO_LOCK_WIDTH_FLOOR_HZ
+}
+
+/**
+ * LO-locked spurs: a later measurement of a centre-less creator is still its first line: centre
+ * within `DQ_LO_LOCK_OFFSET_HZ`, widths within `DQ_LO_LOCK_WIDTH_RATIO` (the tracker's own
+ * tolerances). Non-finite input is not the same line.
+ */
+function loSameLine(
+	first: { centreHz: number; widthHz: number },
+	centreHz: number,
+	obwHz: number,
+): boolean {
+	if (!Number.isFinite(centreHz)) return false
+	const w = loWidth(obwHz)
+	return (
+		Math.abs(centreHz - first.centreHz) <= DQ_LO_LOCK_OFFSET_HZ &&
+		Math.max(w, first.widthHz) <=
+			DQ_LO_LOCK_WIDTH_RATIO * Math.min(w, first.widthHz)
+	)
+}
+
 /** True when `ev` is an accepted identity decode for this track (it is not noise). */
 function decodeProvesSignal(
 	input: ObservationInput,
@@ -372,10 +398,11 @@ const OBSERVATION_DECODE_MAX = 16
 const MEDIAN_WINDOW = 64
 const MAX_FLAGGED_IDS = 4096
 /**
- * LO-locked spurs: observations first placed without a tuned centre, remembered until an ingest of
- * theirs brings one (their record's history is then known) or they close. A track's first ingest
- * can precede its epoch's first block summary, so this resolves within a second or two; 1 024 ids
- * × about 80 B = 80 kB. Past the bound the oldest is dropped and its record is never flagged.
+ * LO-locked spurs: observations that created their record without a tuned centre, remembered until
+ * an ingest of theirs brings one (their record's history is then known) or they close. A track's
+ * first ingest can precede its epoch's first block summary, so this resolves within a second or
+ * two; 1 024 ids × about 100 B = 100 kB. Past the bound the oldest is dropped and its record is
+ * never flagged.
  */
 const LO_UNKNOWN_OBS_KEEP = 1024
 /**
@@ -1047,16 +1074,20 @@ export class DiscoveryStore
 		DiscoveryReceiverSpur & { sourceId: string }
 	>()
 	/**
-	 * Observation id → its record id and whether it created that record: placed without a tuned
-	 * centre, history not yet known.
+	 * Observation id → the record it created without a tuned centre (history not yet known) and its
+	 * first centre-less measurement: every centre-less ingest of it until one brings a tuned centre
+	 * must be the same line (line-like, same centre and width), else the record is never flagged.
 	 */
 	private readonly loUnknownObs = new Map<
 		string,
-		{ id: string; created: boolean }
+		{ id: string; centreHz: number; widthHz: number }
 	>()
-	/** Record id → its observations in `loUnknownObs` (never flagged while any). */
-	private readonly loUnknownRecords = new Map<string, number>()
-	/** Last mask-line evaluation per source (`DQ_LO_LOCK_MASK_PERIOD_MS`). */
+	/** Record id → its creating observation in `loUnknownObs` (never flagged while there). */
+	private readonly loUnknownRecords = new Map<string, string>()
+	/**
+	 * Last mask-line evaluation per source (`DQ_LO_LOCK_MASK_PERIOD_MS`), bounded like the
+	 * tracker's sources (`DQ_LO_LOCK_SOURCES_MAX`, oldest dropped: it is only re-evaluated sooner).
+	 */
 	private readonly loMaskAt = new Map<string, number>()
 	/** Sources whose per-source history bound has dropped a record (warned once each). */
 	private readonly loHistoryWarned = new Set<string>()
@@ -1335,16 +1366,37 @@ export class DiscoveryStore
 		if (id !== null && real) this.loTaint(id)
 		const s = this.loSighting(input)
 		if (s === undefined) {
-			if (id !== null && !real && !knownBefore)
-				this.loUnknown(input.id, id, res.change === "created")
+			if (id !== null && !real) {
+				if (res.change === "created" && !knownBefore)
+					this.loUnknown(input.id, id, input.track)
+				else if (!this.loUnknownSame(input.id, id, input.track))
+					// A centre-less observation joining a record, or a creator that stopped reading as
+					// the same line: that part of the record's history is unknown, for good.
+					this.loTaint(id)
+			}
 			if (input.endReason !== undefined) this.loUnknownClosed(input.id)
 		} else {
-			// An observation that created its record without a tuned centre and now brings one: the
-			// record's whole history is this observation, so it is born now.
-			const createdUnknown = this.loKnown(input.id)
+			// Another observation joining a record whose creator is still of unknown history: the
+			// creator's birth would not hold this history.
+			if (
+				id !== null &&
+				!real &&
+				this.loUnknownRecords.has(id) &&
+				this.loUnknownRecords.get(id) !== input.id
+			)
+				this.loTaint(id)
+			// An observation that created its record without a tuned centre and now brings one, the
+			// same line all along: the record's whole history is this observation, so it is born now.
+			const createdUnknown = this.loKnown(input.id, s)
 			this.loSpurs.observe(s, proven || real)
-			if (id !== null && !real)
+			// A measurement that is no steady line: never a spur's record (the tracker drops it too).
+			if (id !== null && !real && s.steady === false) this.loTaint(id)
+			else if (id !== null && !real) {
 				this.loSpurs.note(id, s, res.change === "created" || createdUnknown)
+				// The tracker let the record go (contradictory history, a bound): no flag stands.
+				if (this.spurFlags.has(id) && !this.loSpurs.remembers(s.sourceId, id))
+					this.unflagSpur(id)
+			}
 			this.loHistoryCheck(s.sourceId)
 			if (id !== null && !real && s.steady === true)
 				this.loFlag(
@@ -1370,10 +1422,17 @@ export class DiscoveryStore
 	): void {
 		const now = this.now()
 		this.loSpurs.tick(sourceId, tunedHz, rateHz, now)
+		// An offset that expired with this tick lifts its flags.
+		this.loLiftRevoked()
 		if (ranges.length === 0) return
 		const last = this.loMaskAt.get(sourceId)
 		if (last !== undefined && now - last < DQ_LO_LOCK_MASK_PERIOD_MS) return
+		this.loMaskAt.delete(sourceId)
 		this.loMaskAt.set(sourceId, now)
+		if (this.loMaskAt.size > DQ_LO_LOCK_SOURCES_MAX) {
+			const oldest = this.loMaskAt.keys().next()
+			if (oldest.done !== true) this.loMaskAt.delete(oldest.value)
+		}
 		for (const r of ranges) {
 			const s: LoSighting = {
 				sourceId,
@@ -1411,16 +1470,37 @@ export class DiscoveryStore
 		}
 	}
 
-	/** Record `id` is more than an evidence-free line, or its history is unknown: never flagged. */
+	/**
+	 * Record `id` is (or once was) more than an evidence-free line, or part of its history is
+	 * unknown: never flagged again (sticky: the tracker forgets it, and a pending centre-less
+	 * creator of it is never born).
+	 */
 	private loTaint(id: string): void {
 		this.loSpurs.taint(id)
+		this.loUnknownDrop(id)
 		this.unflagSpur(id)
 	}
 
-	private loUnknown(observationId: string, id: string, created: boolean): void {
-		if (this.loUnknownObs.has(observationId)) return
-		this.loUnknownObs.set(observationId, { id, created })
-		this.loUnknownRecords.set(id, (this.loUnknownRecords.get(id) ?? 0) + 1)
+	/**
+	 * A record created by an observation without a tuned centre: pending until that observation
+	 * brings one. A first measurement that is no line taints it at once.
+	 */
+	private loUnknown(
+		observationId: string,
+		id: string,
+		track: StoreObservationInput["track"],
+	): void {
+		if (steadyLine(track) === false) {
+			this.loTaint(id)
+			return
+		}
+		this.loUnknownDrop(id)
+		this.loUnknownObs.set(observationId, {
+			id,
+			centreHz: track.centreHz,
+			widthHz: loWidth(track.obwHz),
+		})
+		this.loUnknownRecords.set(id, observationId)
 		while (this.loUnknownObs.size > LO_UNKNOWN_OBS_KEEP) {
 			const oldest = this.loUnknownObs.entries().next()
 			if (oldest.done === true) break
@@ -1429,15 +1509,36 @@ export class DiscoveryStore
 	}
 
 	/**
-	 * An unknown observation brought a tuned centre: its record's history is known again. Returns
-	 * whether that observation created its record.
+	 * A centre-less ingest of a pending creator `observationId` on its record `id` that still reads
+	 * as the same line (line-like, centre within `DQ_LO_LOCK_OFFSET_HZ`, width within
+	 * `DQ_LO_LOCK_WIDTH_RATIO`). False for any other observation or measurement.
 	 */
-	private loKnown(observationId: string): boolean {
+	private loUnknownSame(
+		observationId: string,
+		id: string,
+		track: StoreObservationInput["track"],
+	): boolean {
+		const u = this.loUnknownObs.get(observationId)
+		return (
+			u !== undefined &&
+			u.id === id &&
+			steadyLine(track) !== false &&
+			loSameLine(u, track.centreHz, track.obwHz)
+		)
+	}
+
+	/**
+	 * A pending creator brought a tuned centre: its record is born now when the sighting is still
+	 * the same line, else it is never flagged. Returns whether it is born.
+	 */
+	private loKnown(observationId: string, s: LoSighting): boolean {
 		const u = this.loUnknownObs.get(observationId)
 		if (u === undefined) return false
 		this.loUnknownObs.delete(observationId)
-		this.loUnknownRelease(u.id)
-		return u.created
+		this.loUnknownRecords.delete(u.id)
+		if (s.steady !== false && loSameLine(u, s.centreHz, s.obwHz)) return true
+		this.loTaint(u.id)
+		return false
 	}
 
 	/** An unknown observation closed (or was dropped) without a tuned centre: taints its record. */
@@ -1445,14 +1546,40 @@ export class DiscoveryStore
 		const u = this.loUnknownObs.get(observationId)
 		if (u === undefined) return
 		this.loUnknownObs.delete(observationId)
-		this.loUnknownRelease(u.id)
+		this.loUnknownRecords.delete(u.id)
 		this.loTaint(u.id)
 	}
 
-	private loUnknownRelease(id: string): void {
-		const n = (this.loUnknownRecords.get(id) ?? 0) - 1
-		if (n > 0) this.loUnknownRecords.set(id, n)
-		else this.loUnknownRecords.delete(id)
+	/** Forgets record `id`'s pending centre-less creator (it is never born). */
+	private loUnknownDrop(id: string): void {
+		const obs = this.loUnknownRecords.get(id)
+		if (obs === undefined) return
+		this.loUnknownRecords.delete(id)
+		this.loUnknownObs.delete(obs)
+	}
+
+	/** Is record `id` known to the LO-locked tracking (remembered, flagged or pending)? */
+	private loTracked(id: string): boolean {
+		return (
+			this.spurFlags.has(id) ||
+			this.loUnknownRecords.has(id) ||
+			this.loSpurs.remembersAny(id)
+		)
+	}
+
+	/**
+	 * Called whenever a record changed (`finish`, a recording commit): a tracked record that is
+	 * protected now (a proof, decode, recording, identity or operator mark) is never flagged
+	 * again, even when that protection is later removed. Returns whether a flag was dropped (the
+	 * caller publishes the record). No publish here: the caller's operation does.
+	 */
+	private loProtect(id: string): boolean {
+		if (!this.loTracked(id) || this.loPartnerEligible(id)) return false
+		this.loSpurs.taint(id)
+		this.loUnknownDrop(id)
+		if (!this.spurFlags.delete(id)) return false
+		this.countsDirty.add(id)
+		return true
 	}
 
 	/** One warning per source the first time its history bound drops a record. */
@@ -1493,7 +1620,7 @@ export class DiscoveryStore
 			})
 	}
 
-	/** Lifts the flags set at offsets the tracker revoked since the last call. */
+	/** Lifts the flags set at offsets the tracker revoked or expired since the last call. */
 	private loLiftRevoked(): void {
 		for (const r of this.loSpurs.takeRevoked())
 			for (const [id, f] of this.spurFlags)
@@ -1516,25 +1643,45 @@ export class DiscoveryStore
 			centres: Math.max(f.centres, had?.centres ?? 0),
 		})
 		if (had !== undefined) return
+		this.countsDirty.add(id)
 		this.publish([id])
 		this.emit("change", id, "updated")
 	}
 
 	private unflagSpur(id: string): void {
 		if (!this.spurFlags.delete(id)) return
+		this.countsDirty.add(id)
 		if (!this.discoveries.has(id)) return
 		this.publish([id])
 		this.emit("change", id, "updated")
 	}
 
-	/** Is `id` flagged as a receiver spur now? A flag on a record that is no longer flaggable lifts. */
+	/**
+	 * Is `id` flagged as a receiver spur now? A flag stands only while the record is flaggable, the
+	 * tracker still remembers it, and its offset is still learned (not expired or revoked); else it
+	 * lifts here.
+	 */
 	private spurFlagOf(id: string): DiscoveryReceiverSpur | undefined {
 		const f = this.spurFlags.get(id)
 		if (f === undefined) return undefined
 		if (!this.loPartnerEligible(id)) {
 			// A proof, decode, recording or operator mark arrived outside an ingest: never again.
 			this.spurFlags.delete(id)
+			this.countsDirty.add(id)
 			this.loSpurs.taint(id)
+			return undefined
+		}
+		if (
+			!this.loSpurs.remembers(f.sourceId, id) ||
+			!this.loSpurs.isLearned(
+				f.sourceId,
+				f.sampleRateHz,
+				f.offsetHz,
+				this.now(),
+			)
+		) {
+			this.spurFlags.delete(id)
+			this.countsDirty.add(id)
 			return undefined
 		}
 		return {
@@ -3227,6 +3374,8 @@ export class DiscoveryStore
 		plan.observation.recordingIds = plan.recordingIds
 		plan.observation.recording = plan.recordingState
 		plan.evidence.recordings = plan.recordingCount
+		// LO-locked spurs: a recording is sticky protection (published by publishRecordingCommit).
+		this.loProtect(plan.discovery.id)
 	}
 
 	/** Postdecision only: capture/emit projection before public notifications can reenter. */
@@ -4004,6 +4153,13 @@ export class DiscoveryStore
 		this.indexDirty.clear()
 		this.countsDirty.clear()
 		this.jobCounts.clear()
+		// LO-locked spurs: restored records are of unknown history; nothing learned or flagged stays.
+		this.loSpurs.clear()
+		this.spurFlags.clear()
+		this.loUnknownObs.clear()
+		this.loUnknownRecords.clear()
+		this.loMaskAt.clear()
+		this.loHistoryWarned.clear()
 		this.proofQuiet++
 		try {
 			for (const c of s.corrections) this.corrections.set(c.sourceId, c.hz)
@@ -6963,6 +7119,12 @@ export class DiscoveryStore
 			if (d !== undefined && this.normalizeCheckedContent(d))
 				op.discoveries.add(id)
 		}
+		// LO-locked spurs: protection (even if later removed) is sticky; a dropped flag is published.
+		for (const id of checkedIds)
+			if (this.loProtect(id) && !op.discoveries.has(id)) {
+				op.discoveries.add(id)
+				mark(op, id, "updated")
+			}
 		const pending = this.pendingProof
 		this.pendingProof = new Map()
 		const notified = new Set(op.changes.keys())
@@ -7103,9 +7265,10 @@ export class DiscoveryStore
 	private syncCounts(): void {
 		for (const id of this.countsDirty) {
 			const discovery = this.discoveries.get(id)
+			// Records flagged as receiver spurs are hidden by default, so they are not counted.
 			this.jobCounts.sync(
 				id,
-				discovery === undefined
+				discovery === undefined || this.spurFlagOf(id) !== undefined
 					? undefined
 					: {
 							confidence: this.publishedLabel(discovery).confidence,

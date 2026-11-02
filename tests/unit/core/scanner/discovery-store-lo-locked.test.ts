@@ -393,6 +393,197 @@ describe("LO-locked spurs in admission (flag, never delete)", () => {
 	})
 })
 
+/** A 3-hop tiling sweep of the spur at `SPUR`: every record flagged; returns their ids. */
+function flaggedSweep(clock: { now: number }, store: DiscoveryStore) {
+	const rs = dwells(clock, store, [...SWEEP], { rf: c => c + SPUR })
+	const spurIds = ids(rs).sort()
+	expect(spurIds).toHaveLength(3)
+	expect(store.receiverSpurIds().sort()).toEqual(spurIds)
+	return spurIds
+}
+
+/** An observation left open (its track still on air): no close reason yet. */
+function open(o: StoreObservationInput): StoreObservationInput {
+	delete o.endReason
+	delete o.endedAt
+	return o
+}
+
+describe("LO-locked spur flags are sticky-safe (a real signal is never wrongly hidden)", () => {
+	it("repro: an open FM voice observation placed without a tuned centre that later reads as a narrow line with one is never flagged", () => {
+		const { clock, store } = setup()
+		const fm = store.ingest(open(fmWithoutCentre("o1", SWEEP[0] + SPUR, T0)))
+		expect(fm.discoveryId).not.toBeNull()
+		// the same observation, now a narrow line with its tuned centre
+		dwell(clock, store, sighting("o1", SWEEP[0], SWEEP[0] + SPUR, T0), 10_000)
+		clock.now += 500
+		const rs = dwells(clock, store, [SWEEP[1], SWEEP[2]], {
+			rf: c => c + SPUR,
+			prefix: "n",
+		})
+		expect(store.loLockedOffsets("src-1")).toEqual([SPUR])
+		expect(store.receiverSpurIds().sort()).toEqual(ids(rs).sort())
+		expect(store.get(fm.discoveryId!)?.receiverSpur).toBeUndefined()
+		expect(listed(store)).toContain(fm.discoveryId)
+	})
+
+	it("repro: a centre-less observation joining a flagged record unflags it for good (FM voice and a plain line alike)", () => {
+		for (const late of [
+			(at: number) => fmWithoutCentre("late", SWEEP[0] + SPUR, at),
+			(at: number) => sighting("late", undefined, SWEEP[0] + SPUR, at),
+		]) {
+			const { clock, store } = setup()
+			const spurIds = flaggedSweep(clock, store)
+			const first = store
+				.list({ limit: 500, includeReceiverSpurs: true })
+				.items.find(
+					d =>
+						Math.abs(d.frequencyHz + d.measuredOffsetHz - (SWEEP[0] + SPUR)) <
+						1_000,
+				)!.id
+			clock.now += 500
+			const r = store.ingest(open(late(clock.now)))
+			expect(r.discoveryId).toBe(first)
+			expect(store.get(first)?.receiverSpur).toBeUndefined()
+			expect(listed(store)).toEqual([first])
+			// the offset still holds, yet the record stays unflagged
+			clock.now += 500
+			dwells(clock, store, [...SWEEP], { rf: c => c + SPUR, prefix: "again" })
+			expect(store.get(first)?.receiverSpur).toBeUndefined()
+			expect(store.receiverSpurIds().sort()).toEqual(
+				spurIds.filter(id => id !== first),
+			)
+		}
+	})
+
+	it("repro: a Keep set then cleared, or a recording attached then removed, before the offset is learned still protects the record", () => {
+		for (const protect of [
+			(store: DiscoveryStore, id: string) => {
+				store.setOperator(id, { keep: true })
+				store.setOperator(id, { keep: false })
+			},
+			(store: DiscoveryStore, id: string) => {
+				expect(store.attachRecordings("k1", [`${id}~a.wav`], "linked")).toBe(
+					true,
+				)
+				expect(store.forgetRecording(`${id}~a.wav`)).toBe(true)
+			},
+		]) {
+			const { clock, store } = setup()
+			const a = dwell(
+				clock,
+				store,
+				sighting("k1", SWEEP[0], SWEEP[0] + SPUR, clock.now),
+				10_000,
+			)
+			protect(store, a.discoveryId!)
+			expect(store.get(a.discoveryId!)?.evidence.recordings).toBe(0)
+			expect(store.get(a.discoveryId!)?.operator?.keep).not.toBe(true)
+			clock.now += 500
+			const rs = dwells(clock, store, [SWEEP[1], SWEEP[2]], {
+				rf: c => c + SPUR,
+				prefix: "n",
+			})
+			expect(store.loLockedOffsets("src-1")).toEqual([SPUR])
+			expect(store.receiverSpurIds().sort()).toEqual(ids(rs).sort())
+			expect(store.get(a.discoveryId!)?.receiverSpur).toBeUndefined()
+			expect(listed(store)).toEqual([a.discoveryId])
+		}
+	})
+
+	it("repro: an offset that expires lifts its flags, and an FM observation on a flagged record unflags it", () => {
+		const { clock, store } = setup()
+		const spurIds = flaggedSweep(clock, store)
+		clock.now += 600_001
+		// read with no ingest or block since: the flags already stand no more
+		expect(store.loLockedOffsets("src-1")).toEqual([])
+		expect(store.receiverSpurIds()).toEqual([])
+		expect(listed(store)).toEqual(spurIds)
+		const fm = store.ingest(
+			sighting("fm", SWEEP[0], SWEEP[0] + SPUR, clock.now, {
+				cls: "analog-fm",
+				obwHz: 11_000,
+			}),
+		)
+		expect(spurIds).toContain(fm.discoveryId)
+		expect(store.get(fm.discoveryId!)?.receiverSpur).toBeUndefined()
+		expect(listed(store)).toEqual(spurIds)
+	})
+
+	it("an FM observation on a flagged record unflags it while the offset still holds", () => {
+		const { clock, store } = setup()
+		const spurIds = flaggedSweep(clock, store)
+		clock.now += 500
+		const fm = store.ingest(
+			sighting("fm", SWEEP[2], SWEEP[2] + SPUR, clock.now, {
+				cls: "analog-fm",
+				obwHz: 11_000,
+			}),
+		)
+		expect(spurIds).toContain(fm.discoveryId)
+		expect(store.get(fm.discoveryId!)?.receiverSpur).toBeUndefined()
+		expect(listed(store)).toContain(fm.discoveryId)
+	})
+
+	it("an expiry seen by a block summary publishes the lifted flags", () => {
+		const { clock, store } = setup()
+		const spurIds = flaggedSweep(clock, store)
+		const changed: string[] = []
+		store.on("change", (id: string) => changed.push(id))
+		clock.now += 600_001
+		store.noteReceiverLines("src-1", SWEEP[0], RATE, [])
+		expect([...new Set(changed)].sort()).toEqual(spurIds)
+		expect(listed(store)).toEqual(spurIds)
+	})
+
+	it("repro: a job's discovery counts leave flagged records out", () => {
+		const { clock, store } = setup()
+		const carrier = store.ingest(sighting("c", SWEEP[0], SWEEP[0] + 50_000, T0))
+		const total = (): number =>
+			Object.values(store.countsByJob("job-1")).reduce((a, b) => a + b, 0)
+		expect(total()).toBe(1)
+		const spurIds = flaggedSweep(clock, store)
+		expect(listed(store)).toEqual([carrier.discoveryId])
+		expect(total()).toBe(1)
+		// unflagged (an operator mark): counted again
+		store.setOperator(spurIds[0]!, { label: "mine" })
+		expect(total()).toBe(2)
+		// an expiry lifts the rest: every record counts
+		clock.now += 600_001
+		store.noteReceiverLines("src-1", SWEEP[0], RATE, [])
+		expect(total()).toBe(4)
+	})
+
+	it("repro: a restore forgets every learned offset and flag (restored records are of unknown history)", () => {
+		const { clock, store } = setup()
+		const spurIds = flaggedSweep(clock, store)
+		const snap = store.snapshot()
+		store.restore(snap)
+		expect(store.receiverSpurIds()).toEqual([])
+		expect(store.loLockedOffsets("src-1")).toEqual([])
+		expect(listed(store)).toEqual(spurIds)
+		// their next sightings never flag them again
+		clock.now += 500
+		dwells(clock, store, [...SWEEP], { rf: c => c + SPUR, prefix: "after" })
+		for (const id of spurIds)
+			expect(store.get(id)?.receiverSpur).toBeUndefined()
+	})
+
+	it("the mask-line clock is bounded like the tracker's sources (64), oldest dropped", () => {
+		const { clock, store } = setup()
+		const internal = store as unknown as { loMaskAt: Map<string, number> }
+		for (let k = 0; k < 70; k++) {
+			clock.now += 10
+			store.noteReceiverLines(`src-${k}`, SWEEP[0], RATE, [
+				{ startHz: SWEEP[0] + SPUR - 1_000, endHz: SWEEP[0] + SPUR + 1_000 },
+			])
+		}
+		expect(internal.loMaskAt.size).toBe(64)
+		expect(internal.loMaskAt.has("src-0")).toBe(false)
+		expect(internal.loMaskAt.has("src-69")).toBe(true)
+	})
+})
+
 const heard = (
 	at: number,
 	ctcssHz: number | null = null,

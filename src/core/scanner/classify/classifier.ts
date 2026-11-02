@@ -47,13 +47,17 @@ export const CARRIER_LINE_MAX_BINS = 4
  */
 export const CARRIER_PEAKED_MAX_BINS_6DB = 3
 /**
- * `carrierLine`, flat shape: a tone 3 bins wide reads `flat` or `peaked` by noise alone (its ±1
- * neighbours sit at -6.02 dB, right at the flat-top median line). Narrow digital flat tops (dPMR,
- * NXDN48: about 4 kHz occupied) are wider than 3 bins at -20 dB at every default bin up to
- * 4 000 / 3 = 1 333 Hz (1 000 Hz at 1.024 and 2.048 Msps, 1 171.875 Hz at 2.4 Msps). So a flat
- * line is a carrier only at most 3 bins wide at -20 dB with a known -6 dB width.
+ * `carrierLine`, flat shape: narrow digital flat tops (dPMR, NXDN48: about 4 kHz occupied) can
+ * read as narrow as 3 bins at -20 dB and at -6 dB (a flat top's -6 dB width is its -20 dB width),
+ * 3 000 or 3 516 Hz at the 1 000 and 1 171.875 Hz default bins, the very widths of a 3-bin tone.
+ * Width cannot tell them apart there, so a flat line is a carrier only with a carrier's -6 dB
+ * width: at most `CARRIER_FLAT_MAX_BINS_6DB` (2) bins, what the `narrow` shape itself means, and
+ * at most `CARRIER_FLAT_MAX_BINS` (3) bins at -20 dB. A tone whose ±1 neighbours noise lifted over
+ * -6 dB (3 bins at -6 dB, read flat) keeps its digital trials: the safe answer.
  */
 export const CARRIER_FLAT_MAX_BINS = 3
+/** `carrierLine`, flat shape: the -6 dB width (bins, inclusive) of a carrier: a `narrow` shape. */
+export const CARRIER_FLAT_MAX_BINS_6DB = 2
 /** Bin width assumed when a track does not carry its own (Hz): the engine's default RBW. */
 export const CARRIER_DEFAULT_BIN_HZ = DEFAULT_RBW_HZ
 
@@ -65,8 +69,9 @@ export const CARRIER_DEFAULT_BIN_HZ = DEFAULT_RBW_HZ
  * - The shape separates narrow digital (dPMR, NXDN48: 4FSK flat tops about 4 kHz wide) from a
  *   tone: `narrow` (at most 2 bins at -6 dB) is a carrier; `peaked` only with a known -6 dB width
  *   (`obw6Hz`) of at most `CARRIER_PEAKED_MAX_BINS_6DB` bins; `flat` only with a known -6 dB width
- *   and at most `CARRIER_FLAT_MAX_BINS` bins at -20 dB. With the -6 dB width unknown, peaked and
- *   flat lines keep the pre-existing path.
+ *   of at most `CARRIER_FLAT_MAX_BINS_6DB` bins and at most `CARRIER_FLAT_MAX_BINS` bins at -20 dB
+ *   (a 3-bin flat top is narrow digital). With the -6 dB width unknown, peaked and flat lines keep
+ *   the pre-existing path.
  * - `spectralShape` undefined: the caller already judged the shape (an observation whose class
  *   vote is `carrier`); only the width decides.
  * Non-finite or non-positive widths are not a carrier line (the safe answer: today's path).
@@ -92,6 +97,7 @@ export function carrierLine(line: {
 		case "flat":
 			return (
 				known6(line.obw6Hz) &&
+				withinBins(line.obw6Hz, CARRIER_FLAT_MAX_BINS_6DB, bin) &&
 				withinBins(line.obwHz, CARRIER_FLAT_MAX_BINS, bin)
 			)
 		case "peaked":
@@ -325,7 +331,8 @@ export function classOf(
 		return "ook-burst"
 	// Two FSK tones (a pager or a narrow ISM sensor): data, not FM voice, whatever the hump shape.
 	if (track.fsk2 === true) return "fsk2-wide"
-	// A steady carrier line (`carrierLine`), before the flat-top branch: a 3-bin tone can read flat.
+	// A steady carrier line (`carrierLine`), before the flat-top branch (a flat line is one only
+	// with a narrow -6 dB width; a 3-bin flat top keeps its digital trials).
 	if (steadyLine(track) === true) return "carrier"
 	if (track.spectralShape === "flat") {
 		if (track.obwHz <= FSK4_6K25_MAX_HZ) return "fsk4-6k25"

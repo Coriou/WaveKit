@@ -7891,9 +7891,13 @@ offset from the tuned centre, seen from at least 3 tuned centres; see
 centres, lastAtMs }` and are left out of `GET /api/scanner/discoveries` unless
 `includeReceiverSpurs=true` (boolean). They are never deleted for it, and
 `GET /api/scanner/discoveries/:id` still returns them with the field. A record
-with a proof, decode, identity, recording or operator mark is never flagged and
-loses the flag when it gains one. The flag is memory only: absent after a
-restart and on older cores.
+that ever had a proof, decode, identity, recording or operator mark (even one
+later removed) is never flagged and loses the flag when it gains one; a flag
+also lifts when its offset expires or is revoked. Flagged records are left out
+of a job's discovery counts. `scanner:discovery` WebSocket messages still carry
+flagged records (with the field and its removal), so a client that filters a
+list like this route hides them unless it asked for them. The flag is memory
+only: absent after a restart (or a store restore) and on older cores.
 
 `POST /api/scanner/identify` accepts `waitUntilSignal: true` and optional `waitMs`
 (integer 1 000–600 000, default 300 000; requires `waitUntilSignal: true`). It waits

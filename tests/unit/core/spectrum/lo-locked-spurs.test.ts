@@ -422,6 +422,49 @@ describe("LO-locked spurs from sightings (flag only)", () => {
 		expect(lo.check(s, all).verdict).toBe("clear")
 	})
 
+	it("repro: an expired offset is reported like a revocation (its flags lift), and isLearned follows the TTL", () => {
+		const lo = make()
+		const rs = sweep(lo, SWEEP, SPUR)
+		expect(lo.takeRevoked()).toEqual([])
+		const end = rs[2]!.end
+		expect(lo.isLearned("rtl", RATE, SPUR, end + DQ_LO_LOCK_TTL_MS)).toBe(true)
+		expect(lo.isLearned("rtl", RATE, SPUR + DQ_LO_LOCK_OFFSET_HZ, end)).toBe(
+			true,
+		)
+		expect(
+			lo.isLearned("rtl", RATE, SPUR + DQ_LO_LOCK_OFFSET_HZ + 1, end),
+		).toBe(false)
+		expect(lo.isLearned("rtl", 2_400_000, SPUR, end)).toBe(false)
+		expect(lo.isLearned("other", RATE, SPUR, end)).toBe(false)
+		expect(lo.isLearned("rtl", RATE, SPUR, end + DQ_LO_LOCK_TTL_MS + 1)).toBe(
+			false,
+		)
+		// one block at the TTL: nothing due, nothing reported
+		lo.tick("rtl", SWEEP[0], RATE, end + DQ_LO_LOCK_TTL_MS)
+		expect(lo.takeRevoked()).toEqual([])
+		expect(lo.learnedOffsets("rtl")).toEqual([SPUR])
+		// one block past it: the offset expires and is reported once
+		lo.tick("rtl", SWEEP[0], RATE, end + DQ_LO_LOCK_TTL_MS + 1)
+		expect(lo.learnedOffsets("rtl")).toEqual([])
+		expect(lo.takeRevoked()).toEqual([
+			{ sourceId: "rtl", rateHz: RATE, offsetHz: SPUR },
+		])
+		lo.tick("rtl", SWEEP[0], RATE, end + DQ_LO_LOCK_TTL_MS + 2)
+		expect(lo.takeRevoked()).toEqual([])
+	})
+
+	it("records: a sighting that is no steady line (modulated, too wide) taints the record for good, at any centre", () => {
+		const lo = make()
+		lo.note("a", at(C1, SPUR, T0), true)
+		lo.note("a", at(C1 + STEP, SPUR, T0 + 1_000, { steady: false }), false)
+		expect(lo.remembers("rtl", "a")).toBe(false)
+		expect(lo.remembersAny("a")).toBe(false)
+		lo.note("b", at(C1, SPUR, T0), true)
+		// a young (undefined) sighting is no contradiction
+		lo.note("b", at(C1 + STEP, SPUR, T0 + 1_000, { steady: undefined }), false)
+		expect(lo.remembersAny("b")).toBe(true)
+	})
+
 	it("records: only a record born here is a partner; a taint is for good", () => {
 		const lo = make()
 		// a record created elsewhere (restored, or placed without a tuned centre) is never remembered

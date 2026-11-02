@@ -26,13 +26,15 @@
  * centre at its RF position) until it expires (`ttlMs` after it was last re-proven) or is revoked
  * (no lock there for `ttlMs`) on contradictory evidence: a sighting with evidence of a real signal
  * at it, a sighting at it that is not a steady narrow line, or one RF line seen from two centres
- * where one of its offsets is learned. Revocations are reported (`takeRevoked`) so the caller can
- * lift the flags it set at that offset.
+ * where one of its offsets is learned. Revocations and expiries are reported (`takeRevoked`) so
+ * the caller can lift the flags it set at that offset; a flag stands only while its offset is
+ * learned (`isLearned`).
  *
  * Records (`note`): only a record whose whole history this tracker saw is remembered: it enters
  * when created by a sighting with a tuned centre (`born`), and leaves for good (`taint`) when any
  * part of its history is unknown or contradictory (a sighting without a tuned centre, a merge, a
- * replaced entry that was not the same steady line, an entry dropped by the per-record bound).
+ * sighting that is no steady line, a replaced entry that was not the same steady line, an entry
+ * dropped by the per-record bound).
  * A record restored from disk was never born here and is never remembered. A lock names as
  * partners the remembered records sighted only as a steady narrow line at Δ, all within the TTL
  * (`eligible` filters them further). A record also sighted at another offset is one RF line seen
@@ -117,6 +119,7 @@ interface OffsetEntry {
 }
 
 interface SourceState {
+	sourceId: string
 	/** Oldest first; the last is the current dwell. */
 	dwells: Dwell[]
 	/** Records whose whole history was seen; insertion order = least recently sighted first. */
@@ -252,6 +255,12 @@ export class LoLockedSpurs {
 			this.taint(id)
 			return
 		}
+		// A measurement that is no steady line (modulated, bursty, too wide) anywhere in a record's
+		// lifetime: never a spur's record again.
+		if (s.steady === false) {
+			this.taint(id)
+			return
+		}
 		const st = this.state(s.sourceId, true)
 		if (st === undefined) return
 		const known = st.records.get(id)
@@ -308,12 +317,40 @@ export class LoLockedSpurs {
 		return this.sources.get(sourceId)?.records.has(id) === true
 	}
 
+	/** Is `id` remembered under any source? */
+	remembersAny(id: string): boolean {
+		for (const st of this.sources.values()) if (st.records.has(id)) return true
+		return false
+	}
+
+	/**
+	 * Is `offsetHz` (within `offsetHz` tolerance) a learned, unexpired offset of the source at
+	 * `rateHz` now? A flag set at an offset stands only while this holds.
+	 */
+	isLearned(
+		sourceId: string,
+		rateHz: number,
+		offsetHz: number,
+		atMs: number,
+	): boolean {
+		const st = this.sources.get(sourceId)
+		if (st === undefined) return false
+		for (const e of st.learned)
+			if (
+				e.rateHz === rateHz &&
+				Math.abs(e.offsetHz - offsetHz) <= this.opts.offsetHz &&
+				atMs - e.atMs <= this.opts.ttlMs
+			)
+				return true
+		return false
+	}
+
 	/** Records dropped by the per-source bound so far (diagnostics: they are never flagged). */
 	historyDropped(sourceId: string): number {
 		return this.sources.get(sourceId)?.historyDropped ?? 0
 	}
 
-	/** Offsets revoked since the last call (the caller lifts its flags there). */
+	/** Offsets revoked or expired since the last call (the caller lifts its flags there). */
 	takeRevoked(): LoRevocation[] {
 		if (this.revocations.length === 0) return []
 		const out = this.revocations
@@ -572,8 +609,7 @@ export class LoLockedSpurs {
 					),
 			)
 		if (!candidate) return
-		if (this.revocations.length < this.opts.offsetsPerSource * 4)
-			this.revocations.push({ sourceId, rateHz, offsetHz: offset })
+		this.report(sourceId, rateHz, offset)
 		const hit = st.revoked.find(
 			e =>
 				e.rateHz === rateHz &&
@@ -586,16 +622,38 @@ export class LoLockedSpurs {
 		}
 	}
 
+	/**
+	 * A revoked or expired offset, for the caller to lift its flags there. Bounded at
+	 * `offsetsPerSource` × 4 between two `takeRevoked` calls (the caller drains it after every
+	 * ingest and block); past it a flag still lifts when read (`isLearned`).
+	 */
+	private report(sourceId: string, rateHz: number, offsetHz: number): void {
+		if (this.revocations.length < this.opts.offsetsPerSource * 4)
+			this.revocations.push({ sourceId, rateHz, offsetHz })
+	}
+
+	/** Runs every block: plain loops, no allocation, nothing done when nothing is due. */
 	private expire(st: SourceState, atMs: number): void {
 		const ttl = this.opts.ttlMs
-		while (st.dwells.length > 1 && atMs - st.dwells[0]!.lastMs > ttl)
-			st.dwells.shift()
-		const last = st.dwells.at(-1)
-		if (last !== undefined && atMs - last.lastMs > ttl) st.dwells.pop()
-		if (st.learned.some(e => atMs - e.atMs > ttl))
-			st.learned = st.learned.filter(e => atMs - e.atMs <= ttl)
-		if (st.revoked.some(e => atMs - e.atMs > ttl))
-			st.revoked = st.revoked.filter(e => atMs - e.atMs <= ttl)
+		const dwells = st.dwells
+		while (dwells.length > 1 && atMs - dwells[0]!.lastMs > ttl) dwells.shift()
+		const last = dwells.length > 0 ? dwells[dwells.length - 1] : undefined
+		if (last !== undefined && atMs - last.lastMs > ttl) dwells.pop()
+		const learned = st.learned
+		let w = 0
+		for (let r = 0; r < learned.length; r++) {
+			const e = learned[r]!
+			if (atMs - e.atMs <= ttl) learned[w++] = e
+			else this.report(st.sourceId, e.rateHz, e.offsetHz)
+		}
+		learned.length = w
+		const revoked = st.revoked
+		w = 0
+		for (let r = 0; r < revoked.length; r++) {
+			const e = revoked[r]!
+			if (atMs - e.atMs <= ttl) revoked[w++] = e
+		}
+		revoked.length = w
 	}
 
 	private state(sourceId: string, create: boolean): SourceState | undefined {
@@ -606,6 +664,7 @@ export class LoLockedSpurs {
 			this.sources.size < this.opts.sourcesMax
 		) {
 			st = {
+				sourceId,
 				dwells: [],
 				records: new Map(),
 				learned: [],
