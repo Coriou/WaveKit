@@ -152,6 +152,8 @@ const CLEAR: LoCheck = Object.freeze({
 	centres: 0,
 })
 
+const NO_REVOCATIONS: readonly LoRevocation[] = Object.freeze([])
+
 export class LoLockedSpurs {
 	private readonly sources = new Map<string, SourceState>()
 	private revocations: LoRevocation[] = []
@@ -351,8 +353,9 @@ export class LoLockedSpurs {
 	}
 
 	/** Offsets revoked or expired since the last call (the caller lifts its flags there). */
-	takeRevoked(): LoRevocation[] {
-		if (this.revocations.length === 0) return []
+	takeRevoked(): readonly LoRevocation[] {
+		// Called once per block summary: no revocation returns one shared frozen array (no alloc).
+		if (this.revocations.length === 0) return NO_REVOCATIONS
 		const out = this.revocations
 		this.revocations = []
 		return out

@@ -158,6 +158,14 @@ function sweep(
 const lockedIn = (r: DwellResult) => r.verdicts.includes("locked")
 
 describe("LO-locked spurs from sightings (flag only)", () => {
+	it("no revocation: every block gets the same frozen empty array (no per-block allocation)", () => {
+		const lo = make()
+		const a = lo.takeRevoked()
+		expect(a).toEqual([])
+		expect(lo.takeRevoked()).toBe(a)
+		expect(Object.isFrozen(a)).toBe(true)
+	})
+
 	it("states its bounds' arithmetic", () => {
 		expect(DQ_LO_LOCK_OFFSET_HZ).toBe(1_200)
 		expect(DQ_LO_LOCK_MIN_SEPARATION_HZ).toBe(12_500)
