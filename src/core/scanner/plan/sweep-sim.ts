@@ -36,6 +36,8 @@ export interface SimOptions {
 	activitySeed?: (hop: Hop) => number
 	/** Stops once this many sweeps completed (the preview's bound). */
 	maxSweeps?: number
+	/** Stops after this many loop steps (`SimResult.truncated`): the caller's hard work bound. */
+	maxSteps?: number
 }
 
 export interface SimVisit {
@@ -59,6 +61,10 @@ export interface SimResult {
 	holds: number[]
 	/** Simulated end time. */
 	endMs: number
+	/** Loop steps taken: one per settle, epoch start, block, or run of quiet blocks. */
+	steps: number
+	/** Stopped by `maxSteps` before `durationMs` or `maxSweeps`. */
+	truncated: boolean
 }
 
 /** Same frequency within the hop: a signal belongs to every hop whose covered span holds it. */
@@ -110,7 +116,27 @@ function trackOf(
 	}
 }
 
-/** Runs the scheduler until `durationMs` (or `maxSweeps`). Cost: one loop step per block. */
+/**
+ * First block, counted from `clock` in blocks of `blockMs`, in which `sig` is on air (on for the
+ * whole block, as the main loop counts it); null when none of the next `limit` blocks.
+ */
+function firstOnBlock(
+	sig: SimSignal,
+	clock: number,
+	blockMs: number,
+	limit: number,
+): number | null {
+	const j = Math.max(0, Math.ceil((sig.startMs - clock) / blockMs))
+	if (j >= limit || sig.endMs < clock + (j + 1) * blockMs) return null
+	return j
+}
+
+/**
+ * Runs the scheduler until `durationMs` (or `maxSweeps`, or `maxSteps`). Cost: one loop step per
+ * block while a signal of the tuned hop is on air or tracked, a hold runs or the hop is parked;
+ * otherwise the quiet rest of a dwell is one step (scheduler `onBlocks`), so an empty band costs
+ * a few steps per visit whatever the dwell and block lengths.
+ */
 export function simulateSweep(
 	plan: HopPlan,
 	spec: NormalisedJobSpec,
@@ -165,7 +191,35 @@ export function simulateSweep(
 	}
 	apply(s.start())
 	const maxSweeps = opts.maxSweeps ?? Number.POSITIVE_INFINITY
+	const maxSteps = opts.maxSteps ?? Number.POSITIVE_INFINITY
+	let steps = 0
+	let truncated = false
+	const listen = (tuned: number | null, from: number, to: number): void => {
+		if (tuned === null) return
+		const lastListen = listens.at(-1)
+		if (lastListen && lastListen.hopIndex === tuned && lastListen.toMs === from)
+			lastListen.toMs = to
+		else listens.push({ hopIndex: tuned, fromMs: from, toMs: to })
+	}
+	/** Blocks from `clock` that can be skipped in one step (0: step block by block). */
+	const quietBlocks = (hop: Hop | undefined): number => {
+		const left = s.dwellBlocksLeft()
+		if (left === null || left < 2) return 0
+		let k = left
+		for (const [i, sig] of signals.entries()) {
+			if (!inHop(hop, sig.centreHz)) continue
+			if (open[i] === true || (onBlocks[i] ?? 0) > 0) return 0
+			const j = firstOnBlock(sig, clock, opts.blockMs, k)
+			if (j !== null) k = j
+		}
+		return k >= 2 ? k : 0
+	}
 	while (clock < opts.durationMs && sweepEndsMs.length < maxSweeps) {
+		if (steps >= maxSteps) {
+			truncated = true
+			break
+		}
+		steps++
 		if (settleAt !== null && clock >= settleAt) {
 			settleAt = null
 			settled = true
@@ -177,19 +231,21 @@ export function simulateSweep(
 			continue
 		}
 		const from = clock
-		clock += opts.blockMs
 		const hop = hopIndex === null ? undefined : plan.hops[hopIndex]
 		const tuned = hopIndex
-		const lastListen = listens.at(-1)
-		if (
-			lastListen &&
-			lastListen.hopIndex === tuned &&
-			lastListen.toMs === from &&
-			tuned !== null
-		)
-			lastListen.toMs = clock
-		else if (tuned !== null)
-			listens.push({ hopIndex: tuned, fromMs: from, toMs: clock })
+		const quiet = quietBlocks(hop)
+		if (quiet > 0) {
+			// No signal of this hop is on air or tracked in these blocks: nothing to report.
+			clock += quiet * opts.blockMs
+			listen(tuned, from, clock)
+			apply(s.onBlocks(clock, quiet))
+			noteHold()
+			apply(s.tick(clock))
+			noteHold()
+			continue
+		}
+		clock += opts.blockMs
+		listen(tuned, from, clock)
 		const pending: SchedulerAction[] = []
 		signals.forEach((sig, i) => {
 			const here = inHop(hop, sig.centreHz)
@@ -234,6 +290,8 @@ export function simulateSweep(
 		heardMs,
 		holds,
 		endMs: clock,
+		steps,
+		truncated,
 	}
 }
 
@@ -253,33 +311,52 @@ export function hopTimeMs(
 	return out
 }
 
+/** A listening span, ms. */
+export interface Span {
+	fromMs: number
+	toMs: number
+}
+
 /**
- * Probability that a transmission of `txMs` starting uniformly in `[fromMs, toMs)` meets a listening
- * span: the measure of the union of start intervals `[span.from - txMs + leadMs, span.to - tailMs]`
- * over the spans, divided by the window. On air for 2T inside the span: lead = tail = 2T, which
- * for one span of d per period P is (D + d - 4T) / P.
+ * Start times s (a transmission of `txMs` is on air over [s, s + txMs]) for which it is on air for
+ * `needMs` inside `span` [f, t] (it surfaces there) and, when `holdMs` is set, still on air
+ * `holdMs` after the span ends (the dwell end, where the scheduler starts its hold).
+ * Surfacing: s in [f + needMs − txMs, t − needMs]; none when the span or the transmission is
+ * shorter than `needMs`. For s ≥ f the overlap is min(txMs, t − s) ≥ needMs; for s < f it is
+ * min(s + txMs, t) − f ≥ min(needMs, t − f) ≥ needMs.
+ * Held: s in [t + holdMs − txMs, t − needMs]; none when the span is shorter than `needMs` or the
+ * transmission shorter than `needMs + holdMs` (it then covers [max(s, f), t] in full).
  */
-export function interceptProbability(
-	spans: readonly { fromMs: number; toMs: number }[],
+function startInterval(
+	span: Span,
 	txMs: number,
-	leadMs: number,
-	tailMs: number,
+	needMs: number,
+	holdMs: number | null,
+): { a: number; b: number } | null {
+	if (span.toMs - span.fromMs < needMs || txMs < needMs + (holdMs ?? 0))
+		return null
+	const a =
+		holdMs === null ? span.fromMs + needMs - txMs : span.toMs + holdMs - txMs
+	const b = span.toMs - needMs
+	return b > a ? { a, b } : null
+}
+
+/** Measure of the union of `intervals` clipped to [fromMs, toMs), over the window. */
+function unionShare(
+	intervals: { a: number; b: number }[],
 	fromMs: number,
 	toMs: number,
 ): number {
 	const window = toMs - fromMs
 	if (window <= 0) return 0
-	const intervals = spans
-		.map(sp => ({
-			a: Math.max(fromMs, sp.fromMs - txMs + leadMs),
-			b: Math.min(toMs, sp.toMs - tailMs),
-		}))
+	const clipped = intervals
+		.map(iv => ({ a: Math.max(fromMs, iv.a), b: Math.min(toMs, iv.b) }))
 		.filter(iv => iv.b > iv.a)
 		.sort((x, y) => x.a - y.a)
 	let total = 0
 	let curA: number | null = null
 	let curB = 0
-	for (const iv of intervals) {
+	for (const iv of clipped) {
 		if (curA === null) {
 			curA = iv.a
 			curB = iv.b
@@ -292,4 +369,91 @@ export function interceptProbability(
 	}
 	if (curA !== null) total += curB - curA
 	return Math.min(1, total / window)
+}
+
+/** Spans sorted and merged where they touch or overlap. */
+function mergeSpans(spans: readonly Span[]): Span[] {
+	const out: Span[] = []
+	for (const sp of [...spans].sort((x, y) => x.fromMs - y.fromMs)) {
+		const last = out.at(-1)
+		if (last && sp.fromMs <= last.toMs) last.toMs = Math.max(last.toMs, sp.toMs)
+		else if (sp.toMs > sp.fromMs) out.push({ ...sp })
+	}
+	return out
+}
+
+/**
+ * Probability that a transmission of `txMs` starting uniformly in `[fromMs, toMs)` is on air for
+ * `needMs` inside one listening span, and with `holdMs` set still on air `holdMs` after that span
+ * ends (see startInterval). Spans are merged first (a block run split in two records is one
+ * span). Detection: needMs = minSurfaceBlocks blocks, holdMs = null; for one span of d per period
+ * P that is (D + d − 2·needMs) / P. Decode: holdMs = the confirm hold, (D − needMs − holdMs) / P.
+ */
+export function interceptProbability(
+	spans: readonly Span[],
+	txMs: number,
+	needMs: number,
+	holdMs: number | null,
+	fromMs: number,
+	toMs: number,
+): number {
+	const intervals: { a: number; b: number }[] = []
+	for (const sp of mergeSpans(spans)) {
+		const iv = startInterval(sp, txMs, needMs, holdMs)
+		if (iv) intervals.push(iv)
+	}
+	return unionShare(intervals, fromMs, toMs)
+}
+
+/**
+ * interceptProbability for a schedule that repeats with period W = toMs − fromMs: `spans` inside
+ * [fromMs, toMs) are one period, copies k·W later or earlier are the rest. Bounded work whatever
+ * `txMs`: a span's start interval [a, b] is at most d + txMs − 2·needMs long; when it is at
+ * least 2·W one of its copies covers the whole window (probability 1). Otherwise the copies tried
+ * are k in [ceil((fromMs − b) / W), ceil((toMs − a) / W)], at most (b − a) / W + 3 < 5 of them, so
+ * the work is at most 5 intervals per span (plus one wrap-around span joining a span that ends at
+ * toMs to one that starts at fromMs). A span over the whole window is continuous listening.
+ */
+export function periodicInterceptProbability(
+	spans: readonly Span[],
+	txMs: number,
+	needMs: number,
+	holdMs: number | null,
+	fromMs: number,
+	toMs: number,
+): number {
+	const W = toMs - fromMs
+	if (W <= 0) return 0
+	const inWindow = mergeSpans(
+		spans
+			.map(sp => ({
+				fromMs: Math.max(fromMs, sp.fromMs),
+				toMs: Math.min(toMs, sp.toMs),
+			}))
+			.filter(sp => sp.toMs > sp.fromMs),
+	)
+	const first = inWindow[0]
+	const last = inWindow.at(-1)
+	if (first && first.fromMs <= fromMs && first.toMs >= toMs)
+		return txMs >= needMs + (holdMs ?? 0) ? 1 : 0
+	// A span running into the next period continues with the first one of that period.
+	const periodic =
+		first &&
+		last &&
+		first !== last &&
+		last.toMs >= toMs &&
+		first.fromMs <= fromMs
+			? [...inWindow, { fromMs: last.fromMs, toMs: first.toMs + W }]
+			: inWindow
+	const intervals: { a: number; b: number }[] = []
+	for (const sp of periodic) {
+		const iv = startInterval(sp, txMs, needMs, holdMs)
+		if (iv === null) continue
+		if (iv.b - iv.a >= 2 * W) return 1
+		const kMin = Math.ceil((fromMs - iv.b) / W)
+		const kMax = Math.ceil((toMs - iv.a) / W)
+		for (let k = kMin; k <= kMax; k++)
+			intervals.push({ a: iv.a + k * W, b: iv.b + k * W })
+	}
+	return unionShare(intervals, fromMs, toMs)
 }

@@ -35,7 +35,11 @@ import { lockoutExclusionsFor, planWithLockouts } from "./lockouts.js"
 import type { LockoutTarget } from "./lockouts.js"
 import { computeDecodedElsewhere } from "./decoded-elsewhere.js"
 import { computeBandPlanSkips } from "./bandplan-skips.js"
-import { interceptProbability, simulateSweep } from "./sweep-sim.js"
+import {
+	periodicInterceptProbability,
+	simulateSweep,
+	type Span,
+} from "./sweep-sim.js"
 import type { StoredScanJobSpec } from "./range-contract.js"
 
 /**
@@ -1088,60 +1092,141 @@ function withHopDwell(plan: HopPlan, spec: NormalisedJobSpec): HopPlan {
 
 /** Sweeps the preview measures after one warm-up sweep (revisit seeds settle into a pattern). */
 const SIM_SWEEPS = 3
+/**
+ * Plans of more hops than this get the analytic round-robin schedule instead of a simulation: the
+ * scheduler's revisit pick scans every hop per visit, so a simulated sweep costs O(hops²).
+ * 512 hops: at most 2 × 512 visits per sweep (a revisit at most after every coarse visit) over
+ * SIM_SWEEPS + 1 = 4 sweeps is 4096 visits, each scanning 512 hops: about 2.1 M hop checks.
+ */
+export const MAX_SIM_HOPS = 512
+/**
+ * Hard step bound of the preview's simulation. On the empty band a visit costs at most 3 steps
+ * (settle, epoch start, one quiet run to the dwell end: sweep-sim.ts), so 4 sweeps of at most
+ * 2 × MAX_SIM_HOPS + 1 visits need at most 3 × 4 × 1025 = 12 300 steps; 16 384 leaves a margin
+ * and is never reached by a plan of MAX_SIM_HOPS hops (tested at that bound).
+ */
+export const MAX_SIM_STEPS = 16_384
 
-/** The scheduler's own visiting on an empty band: listening spans per hop over SIM_SWEEPS sweeps. */
-interface SimulatedSchedule {
+/** Listening per hop over one measured window of the schedule, which repeats with its length. */
+export interface PreviewSchedule {
 	periodMs: number
 	fromMs: number
 	toMs: number
-	listens: Map<number, { fromMs: number; toMs: number }[]>
+	listens: Map<number, Span[]>
+	/** "simulated": the real scheduler on an empty band; "round-robin": the analytic fallback. */
+	source: "simulated" | "round-robin"
+	/** Simulation loop steps spent (0 for the round-robin schedule). */
+	steps: number
+}
+
+/** Listening a coarse visit gets: the scheduler's dwell in samples, rounded up to whole blocks. */
+function listenMs(
+	hop: Hop,
+	n: NormalisedJobSpec,
+	minSurfaceBlocks: number,
+): number {
+	const T = n.integrationMs
+	const ms = Math.max(
+		(minSurfaceBlocks + 1) * T,
+		(hop.dwellMs ?? n.dwellMs) - n.settleMs,
+	)
+	return Math.ceil(ms / T) * T
 }
 
 /**
- * Runs the real SweepScheduler (sweep-sim.ts) on the plan with no signals: holds come on top of
- * this, revisits follow the seed. Bounded: one visit costs at most settle + max(dwell, settle +
- * (minSurfaceBlocks + 1) blocks); a sweep is at most twice the coarse visits (share ≤ 0.9 revisits
- * at most every coarse hop), so (SIM_SWEEPS + 2) such sweeps plus the transmission length always
- * cover the measured sweeps and the transmissions starting in them. Cost: one step per block.
+ * Coarse visits only, in plan order: settle then listenMs per hop. The simulation without revisits
+ * produces exactly this; with revisits it lengthens the period (so this is the shorter period).
  */
-function simulatedSchedule(
+function roundRobinSchedule(
+	plan: HopPlan,
+	n: NormalisedJobSpec,
+	minSurfaceBlocks: number,
+): PreviewSchedule | null {
+	const listens = new Map<number, Span[]>()
+	let t = 0
+	for (const hop of plan.hops) {
+		const from = t + n.settleMs
+		t = from + listenMs(hop, n, minSurfaceBlocks)
+		listens.set(hop.index, [{ fromMs: from, toMs: t }])
+	}
+	if (!(t > 0)) return null
+	return {
+		periodMs: t,
+		fromMs: 0,
+		toMs: t,
+		listens,
+		source: "round-robin",
+		steps: 0,
+	}
+}
+
+/**
+ * The scheduler's own visiting on an empty band (sweep-sim.ts): holds come on top of this, revisits
+ * follow the seed. The window is SIM_SWEEPS sweeps after one warm-up sweep; POI treats it as one
+ * period of a repeating schedule, so the run stops at sweep SIM_SWEEPS + 1 whatever the transmission
+ * length. Bounded: plans over MAX_SIM_HOPS hops, and a run that hits MAX_SIM_STEPS, take the
+ * round-robin schedule. `durationMs` is only a safety net: one visit lasts at most settle +
+ * max(dwell, (minSurfaceBlocks + 1) blocks) rounded up to a block, a sweep at most twice the coarse
+ * visits, so (SIM_SWEEPS + 2) × 2 coarse sweeps always reach the last sweep end.
+ */
+export function previewSchedule(
 	plan: HopPlan,
 	n: NormalisedJobSpec,
 	minSurfaceBlocks: number,
 	seed: ((hop: Hop) => number) | undefined,
-): SimulatedSchedule | null {
-	const minimum = n.settleMs + (minSurfaceBlocks + 1) * n.integrationMs
+): PreviewSchedule | null {
+	if (plan.hops.length > MAX_SIM_HOPS)
+		return roundRobinSchedule(plan, n, minSurfaceBlocks)
 	let coarse = 0
 	for (const hop of plan.hops)
-		coarse += Math.max(minimum, hop.dwellMs ?? n.dwellMs) + n.settleMs
+		coarse += n.settleMs + listenMs(hop, n, minSurfaceBlocks) + n.integrationMs
 	const r = simulateSweep(plan, n, {
 		settleMs: n.settleMs,
 		blockMs: n.integrationMs,
 		minSurfaceBlocks,
 		probeStartMs: 0,
-		durationMs: (SIM_SWEEPS + 2) * 2 * coarse + n.txDurationHintMs,
+		durationMs: (SIM_SWEEPS + 2) * 2 * coarse,
+		maxSweeps: SIM_SWEEPS + 1,
+		maxSteps: MAX_SIM_STEPS,
 		...(seed ? { activitySeed: seed } : {}),
 	})
 	const fromMs = r.sweepEndsMs[0]
 	const toMs = r.sweepEndsMs[SIM_SWEEPS]
-	if (fromMs === undefined || toMs === undefined || toMs <= fromMs) return null
-	const listens = new Map<number, { fromMs: number; toMs: number }[]>()
+	if (
+		r.truncated ||
+		fromMs === undefined ||
+		toMs === undefined ||
+		toMs <= fromMs
+	)
+		return roundRobinSchedule(plan, n, minSurfaceBlocks)
+	const listens = new Map<number, Span[]>()
 	for (const l of r.listens) {
+		if (l.toMs <= fromMs || l.fromMs >= toMs) continue
 		const list = listens.get(l.hopIndex) ?? []
-		list.push(l)
+		list.push({ fromMs: l.fromMs, toMs: l.toMs })
 		listens.set(l.hopIndex, list)
 	}
-	return { periodMs: (toMs - fromMs) / SIM_SWEEPS, fromMs, toMs, listens }
+	return {
+		periodMs: (toMs - fromMs) / SIM_SWEEPS,
+		fromMs,
+		toMs,
+		listens,
+		source: "simulated",
+		steps: r.steps,
+	}
 }
 
 function poiFor(
 	hop: Hop,
 	n: NormalisedJobSpec,
-	schedule: SimulatedSchedule | null,
+	schedule: PreviewSchedule | null,
 	source: PreviewSourceView,
 	channelizer: boolean,
+	minSurfaceBlocks: number,
 ): PlanPreview["poi"][number] {
 	const T = n.integrationMs
+	// The tracker surfaces a track after minSurfaceBlocks blocks on air.
+	const need = minSurfaceBlocks * T
 	const D = n.txDurationHintMs
 	const classes = decodableClasses(
 		protocolsForHop(n, hop),
@@ -1159,34 +1244,35 @@ function poiFor(
 	if (schedule === null) {
 		return {
 			hopIndex: hop.index,
-			detection: D >= 2 * T ? 1 : 0,
+			detection: D >= need ? 1 : 0,
 			decode: confirm !== null && D >= confirm ? 1 : 0,
 		}
 	}
-	// A transmission starting in the measured sweeps is detected when it is on air for 2T (the
-	// tracker surfaces a track after minSurfaceBlocks = 2 blocks) inside a listening span of the hop:
-	// with one span of d per period P that is (D + d - 4T) / P. Decode keeps its estimate (still on
-	// air for the confirm hold), (D - confirm + d) / P per span. Hop dwells (WG1 req 8.2), the
-	// scheduler's block-aligned dwell ends and revisits are in the simulated spans.
+	// A transmission starting in the measured window is detected when it is on air for `need`
+	// inside a listening span of the hop: with one span of d per period P that is
+	// (D + d − 2·need) / P. Decode: surfaced in a span and still on air for the confirm hold after
+	// the dwell ends (where the hold starts), (D − need − confirm) / P per span. Hop dwells (WG1
+	// req 8.2), the scheduler's block-aligned dwell ends and revisits are in the spans; the window
+	// repeats, so transmissions longer than it are bounded work (sweep-sim.ts).
 	const spans = schedule.listens.get(hop.index) ?? []
 	return {
 		hopIndex: hop.index,
-		detection: interceptProbability(
+		detection: periodicInterceptProbability(
 			spans,
 			D,
-			2 * T,
-			2 * T,
+			need,
+			null,
 			schedule.fromMs,
 			schedule.toMs,
 		),
 		decode:
 			confirm === null
 				? 0
-				: interceptProbability(
+				: periodicInterceptProbability(
 						spans,
 						D,
+						need,
 						confirm,
-						0,
 						schedule.fromMs,
 						schedule.toMs,
 					),
@@ -1298,7 +1384,7 @@ export function previewPlan(
 	}
 	const schedule =
 		n.mode === "sweep" && plan.hops.length > 1
-			? simulatedSchedule(
+			? previewSchedule(
 					plan,
 					n,
 					s.detection.minSurfaceBlocks,
@@ -1307,7 +1393,14 @@ export function previewPlan(
 			: null
 	const sweepPeriodMs = schedule === null ? null : schedule.periodMs
 	const poi = plan.hops.map(h =>
-		poiFor(h, n, schedule, source, ctx.channelizerAvailable),
+		poiFor(
+			h,
+			n,
+			schedule,
+			source,
+			ctx.channelizerAvailable,
+			s.detection.minSurfaceBlocks,
+		),
 	)
 	const low = poi.filter(p => p.detection < POI_LOW)
 	if (low.length > 0) {

@@ -32,23 +32,39 @@ const SAME_FREQUENCY_FLOOR_HZ = 6_250
  * 12.5 kHz channels; 256 covers every channel of the widest hop, so a full hop never evicts.
  */
 const MAX_FREQUENCY_MEMORY = 256
+/**
+ * A track that first opens on a visit after it has received minSurfaceBlocks + LATE_OPEN_BLOCKS
+ * blocks was off air at the start of the visit: anything on air from the first block surfaces after
+ * minSurfaceBlocks blocks, plus one block for the order of track and block events.
+ */
+const LATE_OPEN_BLOCKS = 2
 
 /**
  * A frequency heard on consecutive visits of one hop (memory pruned when a full visit misses it).
  * `barred`: a hold already ended on it while it stayed on air, so it is not held again until a
  * full visit no longer hears it. `steady` once it has been continuously present for longer than
  * the longest hold (`hold.maxHoldMs`) or is barred and heard again on the next visit.
+ *
+ * Continuity is presumed between visits (a carrier is on air whenever the hop is listened to) and
+ * dropped, so the next sighting is a new transmission, as soon as a gap is observed or possible:
+ * its track closed (not a same-block rollover), it opened late in a visit that had not heard it
+ * yet, or it went unheard for longer than `hold.maxHoldMs` (an outage or a long absence).
  */
 interface FrequencyMemory {
 	centreHz: number
 	halfWidthHz: number
 	firstSeenAt: number
+	/** Clock of the last sighting. */
+	lastSeenAt: number
 	/** Hop visit serial of the last sighting. */
 	lastSerial: number
 	barred: boolean
 	steady: boolean
-	/** Its track closed on the last visit that heard it: the next sighting is a new transmission. */
-	ended: boolean
+	/**
+	 * Its last track closed with no other track of the visit on it: visit serial and block count of
+	 * the close. A sighting in the same block is a rollover of the same emission.
+	 */
+	closedAt: { serial: number; block: number } | null
 }
 
 interface HopState {
@@ -298,6 +314,56 @@ export class SweepScheduler {
 		return actions
 	}
 
+	/**
+	 * Blocks the current dwell still needs before the scheduler decides (the block that reaches the
+	 * dwell end included); null outside an unparked dwell with a known dwell end. Simulation fast
+	 * path (sweep-sim.ts), with onBlocks.
+	 */
+	dwellBlocksLeft(): number | null {
+		const v = this.visit
+		if (
+			v === null ||
+			this.phase !== "dwell" ||
+			this.parkedVisit ||
+			v.dwellEnd === null ||
+			this.lastBlockEnd === null ||
+			this.blockSamples <= 0
+		)
+			return null
+		return Math.max(
+			0,
+			Math.ceil((v.dwellEnd - this.lastBlockEnd) / this.blockSamples),
+		)
+	}
+
+	/**
+	 * `count` consecutive blocks of `blockSamples` ending at `endSample` with no track event between
+	 * them: the same as `count` onBlock calls, in one step when they all fall in an unparked dwell
+	 * before its last block (the last one goes through onBlock).
+	 */
+	onBlocks(endSample: number, count: number): SchedulerAction[] {
+		const v = this.visit
+		const before = endSample - this.blockSamples
+		if (
+			count < 2 ||
+			v === null ||
+			this.phase !== "dwell" ||
+			this.parkedVisit ||
+			v.dwellEnd === null ||
+			this.lastBlockEnd === null ||
+			before >= v.dwellEnd
+		) {
+			const out: SchedulerAction[] = []
+			for (let i = Math.max(1, count) - 1; i >= 0; i--)
+				out.push(...this.onBlock(endSample - i * this.blockSamples))
+			return out
+		}
+		v.blocks += count - 1
+		for (const t of v.tracks.values()) if (t.open) t.openBlocks += count - 1
+		this.lastBlockEnd = before
+		return this.onBlock(endSample)
+	}
+
 	onStale(blocks: number): void {
 		if (
 			this.phase === "dwell" &&
@@ -319,11 +385,11 @@ export class SweepScheduler {
 		// truncated, iqImage and spur are sticky and may first appear on a later track-update: never probed (§ 4.9)
 		const flagged =
 			track.flags.truncated || track.flags.iqImage || track.flags.spur
-		const memory = flagged ? null : this.remember(v, track)
+		const known = v.tracks.get(track.trackId)
+		const memory = flagged ? null : this.remember(v, track, known === undefined)
 		const steady =
 			flagged || (memory?.barred ?? false) || (memory?.steady ?? false)
 		const followOnAir = hints.followOnAir === true && !flagged
-		const known = v.tracks.get(track.trackId)
 		if (known === undefined) {
 			v.tracks.set(track.trackId, {
 				snrDb: track.snrDb,
@@ -355,7 +421,43 @@ export class SweepScheduler {
 			this.hold?.trackId === track.trackId
 		)
 			return this.afterProbe()
+		this.followReopened(track.trackId)
 		return []
+	}
+
+	/**
+	 * The followed transmission ended and a new one opened on the same frequency during the hang (a
+	 * repeater or a reply): the hold follows the new one, still bounded by `hold.maxHoldMs` from the
+	 * start of the visit's holds.
+	 */
+	private followReopened(trackId: string): void {
+		const hold = this.hold
+		const v = this.visit
+		if (
+			this.phase !== "hold" ||
+			hold === null ||
+			hold.mode !== "hang" ||
+			hold.trackId === trackId ||
+			v === null ||
+			this.spec.hold.policy !== "hold" ||
+			this.spec.signalsOnly === true
+		)
+			return
+		const t = v.tracks.get(trackId)
+		const held = v.tracks.get(hold.trackId)
+		if (
+			t === undefined ||
+			held === undefined ||
+			!t.open ||
+			t.tried ||
+			t.steady ||
+			!t.followOnAir ||
+			Math.abs(t.centreHz - held.centreHz) >
+				Math.max(SAME_FREQUENCY_FLOOR_HZ, t.obwHz / 2, held.obwHz / 2)
+		)
+			return
+		t.tried = true
+		this.hold = { trackId, mode: "follow", deadline: this.maxHoldDeadline() }
 	}
 
 	onConfirmed(trackId: string, follow: boolean): SchedulerAction[] {
@@ -378,8 +480,12 @@ export class SweepScheduler {
 	}
 
 	onTrackClosed(trackId: string): SchedulerAction[] {
-		const t = this.visit?.tracks.get(trackId)
-		if (t !== undefined) t.open = false
+		const v = this.visit
+		const t = v?.tracks.get(trackId)
+		if (v !== null && t !== undefined && t.open) {
+			t.open = false
+			this.noteClosed(v, t)
+		}
 		if (
 			this.phase === "hold" &&
 			this.hold?.trackId === trackId &&
@@ -548,7 +654,11 @@ export class SweepScheduler {
 	 * Records a sighting in the hop's frequency memory and returns its entry. A frequency still in
 	 * the memory has been heard on every full visit since `firstSeenAt` (endVisit prunes the rest).
 	 */
-	private remember(v: Visit, track: TrackSnapshot): FrequencyMemory | null {
+	private remember(
+		v: Visit,
+		track: TrackSnapshot,
+		isNew: boolean,
+	): FrequencyMemory | null {
 		const hop = this.hops[v.hopIndex]
 		if (hop === undefined) return null
 		const now = this.now()
@@ -563,22 +673,23 @@ export class SweepScheduler {
 				centreHz: track.centreHz,
 				halfWidthHz,
 				firstSeenAt: now,
+				lastSeenAt: now,
 				lastSerial: v.serial,
 				barred: false,
 				steady: false,
-				ended: false,
+				closedAt: null,
 			}
 			hop.memory.push(entry)
 			if (hop.memory.length > MAX_FREQUENCY_MEMORY) hop.memory.shift()
-		}
-		// Barred and heard again on a later visit: a frequency that outlasted a hold and is still
-		// there. On air for longer than the longest hold: a carrier, not a transmission.
-		if (entry.ended) {
-			entry.ended = false
+		} else if (this.startsAfresh(v, entry, isNew, now)) {
 			entry.firstSeenAt = now
 			entry.barred = false
 			entry.steady = false
 		}
+		entry.closedAt = null
+		entry.lastSeenAt = now
+		// Barred and heard again on a later visit: a frequency that outlasted a hold and is still
+		// there. On air for longer than the longest hold: a carrier, not a transmission.
 		const wasSteady = entry.steady
 		if (entry.lastSerial < v.serial && entry.barred) entry.steady = true
 		if (now - entry.firstSeenAt >= this.spec.hold.maxHoldMs) entry.steady = true
@@ -586,6 +697,46 @@ export class SweepScheduler {
 		entry.lastSerial = v.serial
 		entry.halfWidthHz = Math.max(entry.halfWidthHz, halfWidthHz)
 		return entry
+	}
+
+	/**
+	 * A sighting of a remembered frequency is a new transmission when a gap was observed or may
+	 * have passed unheard: its track closed in an earlier block (a close and an open in the same
+	 * block is a max-duration rollover), a new track opened only after this visit had received
+	 * minSurfaceBlocks + LATE_OPEN_BLOCKS blocks without it, or it was last heard more than
+	 * `hold.maxHoldMs` ago (continuity is never presumed across a gap longer than the longest hold).
+	 */
+	private startsAfresh(
+		v: Visit,
+		entry: FrequencyMemory,
+		isNew: boolean,
+		now: number,
+	): boolean {
+		const closed = entry.closedAt
+		if (
+			closed !== null &&
+			closed.serial === v.serial &&
+			closed.block === v.blocks
+		)
+			return false
+		if (closed !== null) return true
+		if (now - entry.lastSeenAt > this.spec.hold.maxHoldMs) return true
+		return (
+			isNew &&
+			entry.lastSerial < v.serial &&
+			v.blocks >= this.minSurfaceBlocks + LATE_OPEN_BLOCKS
+		)
+	}
+
+	/** A track closed: its frequency went off air unless another open track of the visit is on it. */
+	private noteClosed(v: Visit, t: TrackInfo): void {
+		const hop = this.hops[v.hopIndex]
+		if (hop === undefined) return
+		const memory = this.memoryOf(hop, t)
+		if (memory === undefined) return
+		for (const other of v.tracks.values())
+			if (other.open && this.memoryOf(hop, other) === memory) return
+		memory.closedAt = { serial: v.serial, block: v.blocks }
 	}
 
 	/**
@@ -613,7 +764,7 @@ export class SweepScheduler {
 				if (state.memory.length > MAX_FREQUENCY_MEMORY) state.memory.shift()
 			}
 			entry.barred = true
-			entry.ended = false
+			entry.closedAt = null
 			entry.lastSerial = Math.max(entry.lastSerial, state.serial)
 		})
 	}
@@ -977,21 +1128,19 @@ export class SweepScheduler {
 		// A hold that ended with its track still on air bars the frequency from another hold
 		// until a full visit misses it; one that ended with the track gone frees it.
 		let openBlocks = 0
-		const onAir = new Set<FrequencyMemory>()
+		const barred = new Set<FrequencyMemory>()
 		for (const t of v.tracks.values()) {
 			const memory = this.memoryOf(hop, t)
-			if (t.open && memory !== undefined) onAir.add(memory)
 			if (t.tried && memory !== undefined) {
-				memory.barred = t.open
-				if (t.open) this.barInOverlaps(v.hopIndex, memory)
+				if (t.open) barred.add(memory)
+				else if (!barred.has(memory)) memory.barred = false
 			}
 			if (t.steady || memory?.steady === true) continue
 			openBlocks = Math.max(openBlocks, t.openBlocks)
 		}
-		// A frequency whose track closed went off air: its next transmission starts afresh.
-		for (const t of v.tracks.values()) {
-			const memory = t.open ? undefined : this.memoryOf(hop, t)
-			if (memory !== undefined && !onAir.has(memory)) memory.ended = true
+		for (const memory of barred) {
+			memory.barred = true
+			this.barInOverlaps(v.hopIndex, memory)
 		}
 		// A full dwell hears everything on air for minSurfaceBlocks blocks: what it missed is gone.
 		if (v.blocks >= this.minSurfaceBlocks + 1)

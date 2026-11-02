@@ -266,3 +266,195 @@ describe("intercept property", () => {
 		)
 	})
 })
+
+describe("frequency memory recovers when a gap is observed or may have passed", () => {
+	const plan = makeHopPlan(centres(2), HALF_SPAN_HZ)
+	/** One visit of 29 s listening: long enough to watch several transmissions come and go. */
+	const LONG_DWELL_MS = 30_000
+
+	it("a close inside the dwell frees the frequency: the next transmission on it is followed", () => {
+		const long = makeNormalisedSpec({
+			dwellMs: LONG_DWELL_MS,
+			settleMs: SETTLE_MS,
+			revisit: { share: 0, maxIntervalMs: null },
+			hold: { ...spec.hold, maxHoldMs: 20_000 },
+		})
+		// A: on air 25 s from the start of the dwell (steady by the 20 s rule), off at 25 s.
+		// B: on the same frequency from 26 s, still on air when the dwell ends at 30 s.
+		const r = simulateSweep(plan, long, {
+			...sim,
+			durationMs: 45_000,
+			signals: [
+				voice(149.9 * MHZ, 0, 25_000),
+				voice(149.9 * MHZ, 26_000, 14_000),
+			],
+		})
+		expect(r.holds[0]).toBe(0)
+		expect(r.holds[1]).toBe(1)
+		// Followed from the dwell end to its end at 40 s.
+		expect(r.heardMs[1]).toBeGreaterThanOrEqual(40_000 - 26_000 - BLOCK_MS)
+	})
+
+	it("repeater-like transmissions within one long visit stay followable, and the hold follows each reopening", () => {
+		const long = makeNormalisedSpec({
+			dwellMs: LONG_DWELL_MS,
+			settleMs: SETTLE_MS,
+			revisit: { share: 0, maxIntervalMs: null },
+			hold: { ...spec.hold, maxHoldMs: 10_000 },
+		})
+		// 4 s on, 1 s off from 2 s: the frequency is busy for far longer than maxHoldMs, but no
+		// single transmission is.
+		const signals = Array.from({ length: 12 }, (_, k) =>
+			voice(149.9 * MHZ, 2_000 + 5_000 * k, 4_000),
+		)
+		const r = simulateSweep(plan, long, { ...sim, durationMs: 60_000, signals })
+		const first = r.visits[0]!
+		// The transmission on air at the dwell end (27..31 s) is followed; the 1 s gaps are shorter
+		// than hangMs (2 s), so the hold follows 32..36 s and 37..41 s up to maxHoldMs after 30 s.
+		expect(r.holds[5]).toBe(1)
+		expect(r.holds[6]).toBe(1)
+		expect(r.holds[7]).toBe(1)
+		expect(first.leftAtMs).toBeGreaterThanOrEqual(LONG_DWELL_MS + 10_000)
+		expect(first.leftAtMs).toBeLessThanOrEqual(
+			LONG_DWELL_MS + 10_000 + BLOCK_MS,
+		)
+	})
+
+	it("a call that outlasted its hold and ended unheard does not bar the next call that opens during a visit", () => {
+		const s3 = makeNormalisedSpec({
+			dwellMs: 3_000,
+			settleMs: SETTLE_MS,
+			revisit: { share: 0, maxIntervalMs: null },
+			hold: { ...spec.hold, maxHoldMs: 10_000 },
+		})
+		const plan3 = makeHopPlan(centres(3), HALF_SPAN_HZ)
+		const hz = 150.7 * MHZ
+		// Run 1 finds when the first call's 10 s hold ends (the hop is left with it on air).
+		const probe = simulateSweep(plan3, s3, {
+			...sim,
+			durationMs: 60_000,
+			signals: [voice(hz, 0, 100_000)],
+		})
+		const held = probe.visits.find(
+			v => v.hopIndex === 1 && v.leftAtMs - v.tunedAtMs > 10_000,
+		)!
+		expect(held).toBeDefined()
+		const endsAt = held.leftAtMs + 100
+		const next = probe.visits.find(
+			v => v.hopIndex === 1 && v.tunedAtMs > endsAt,
+		)!
+		expect(next).toBeDefined()
+		// The first call ends while the scheduler is on other hops; the second starts 1.5 s into
+		// the next visit of its hop (30 blocks after settling: well past minSurfaceBlocks + 2).
+		const startsAt = next.tunedAtMs + SETTLE_MS + 500
+		const r = simulateSweep(plan3, s3, {
+			...sim,
+			durationMs: startsAt + 20_000,
+			signals: [voice(hz, 0, endsAt), voice(hz, startsAt, 15_000)],
+		})
+		expect(r.holds[0]).toBe(1)
+		expect(r.holds[1]).toBe(1)
+	})
+})
+
+describe("frequency memory bounds (direct scheduler)", () => {
+	const HZ = 149.9 * MHZ
+	const track = (id: string): TrackSnapshot => ({
+		...makeTrack({ id, centreHz: HZ, startedAt: 0 }),
+		trackId: id,
+	})
+	const follow = { followOnAir: true }
+	const make = (
+		maxHoldMs: number,
+		dwellMs: number,
+	): { s: SweepScheduler; at: (ms: number) => void } => {
+		let clock = 0
+		const s = new SweepScheduler(
+			makeHopPlan(centres(2), HALF_SPAN_HZ),
+			makeNormalisedSpec({
+				dwellMs,
+				settleMs: 35,
+				revisit: { share: 0, maxIntervalMs: null },
+				hold: { ...spec.hold, maxHoldMs },
+			}),
+			{
+				blockSamples: 50,
+				sampleRateHz: 1000,
+				now: () => clock,
+				probeStartMs: 300,
+			},
+		)
+		return { s, at: ms => (clock = ms) }
+	}
+	/** Feeds 50-sample blocks from `from` until the scheduler tunes away or starts a hold. */
+	const dwell = (s: SweepScheduler, from: number): void => {
+		for (let e = from + 50; e < from + 1_000_000; e += 50) {
+			const a = s.onBlock(e)
+			if (a.some(x => x.type === "tune") || s.progress().holdingOn !== null)
+				return
+		}
+	}
+
+	// An outage restarts the visit: continuity spans the gap only up to maxHoldMs (10 000 ms).
+	for (const [gapMs, followed] of [
+		[10_000, false],
+		[10_001, true],
+	] as const) {
+		it(`a sighting ${gapMs} ms after the last one (maxHoldMs 10 000) is ${followed ? "a new transmission" : "the same emission"}`, () => {
+			const { s, at } = make(10_000, 185)
+			s.start()
+			s.onEpochStarted(0)
+			s.onTrack(track("a"), false, 0, follow)
+			at(gapMs)
+			// The source dropped and came back: the hop is re-sent and a new epoch starts.
+			s.onEpochStarted(1_000)
+			s.onTrack(track("b"), false, 0, follow)
+			dwell(s, 1_000)
+			// At the bound, 10 000 ms of presumed presence reach maxHoldMs: steady, never held.
+			expect(s.progress().holdingOn).toBe(followed ? "b" : null)
+		})
+	}
+
+	// A track that opens after the visit received minSurfaceBlocks + 2 = 4 blocks went on air
+	// during the visit; at 3 blocks it may have been on air from the first block.
+	for (const [blocks, followed] of [
+		[3, false],
+		[4, true],
+	] as const) {
+		it(`a new track of a steady frequency opening after ${blocks} blocks of a later visit is ${followed ? "followed" : "still steady"}`, () => {
+			const { s, at } = make(1_000, 3_000)
+			s.start()
+			s.onEpochStarted(0)
+			s.onTrack(track("a"), false, 0, follow)
+			at(1_000)
+			// On air for maxHoldMs: steady, so the dwell ends without a hold.
+			s.onTrack(track("a"), false, 0, follow)
+			dwell(s, 0)
+			expect(s.progress().holdingOn).toBeNull()
+			s.onEpochStarted(0)
+			dwell(s, 0) // hop 1, then back to hop 0
+			s.onEpochStarted(0)
+			for (let k = 1; k <= blocks; k++) s.onBlock(k * 50)
+			s.onTrack(track("b"), false, 0, follow)
+			dwell(s, blocks * 50)
+			expect(s.progress().holdingOn).toBe(followed ? "b" : null)
+		})
+	}
+
+	it("a close and an open on the same frequency in the same block is one emission (rollover); a block apart they are two", () => {
+		for (const apart of [false, true]) {
+			const { s, at } = make(1_000, 3_000)
+			s.start()
+			s.onEpochStarted(0)
+			s.onTrack(track("a"), false, 0, follow)
+			at(1_000)
+			s.onTrack(track("a"), false, 0, follow)
+			s.onBlock(50)
+			s.onTrackClosed("a")
+			if (apart) s.onBlock(100)
+			s.onTrack(track("b"), false, 0, follow)
+			dwell(s, apart ? 100 : 50)
+			expect(s.progress().holdingOn).toBe(apart ? "b" : null)
+		}
+	})
+})
