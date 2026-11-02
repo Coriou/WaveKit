@@ -35,6 +35,7 @@ import { lockoutExclusionsFor, planWithLockouts } from "./lockouts.js"
 import type { LockoutTarget } from "./lockouts.js"
 import { computeDecodedElsewhere } from "./decoded-elsewhere.js"
 import { computeBandPlanSkips } from "./bandplan-skips.js"
+import { interceptProbability, simulateSweep } from "./sweep-sim.js"
 import type { StoredScanJobSpec } from "./range-contract.js"
 
 /**
@@ -84,6 +85,11 @@ export interface PreviewContext {
 	 * `bandPlanSkips` and plans exactly as before.
 	 */
 	bandPlanSkips?: () => readonly BandPlanSkipSource[]
+	/**
+	 * The scheduler's revisit seed (recent occupancy per hop) for a source. Omitted: no seed, so the
+	 * simulated sweep has no revisits until the job hears something, as a fresh job on a quiet band.
+	 */
+	activitySeed?: (sourceId: string) => ((hop: Hop) => number) | undefined
 }
 
 type Provenance = NormalisedJobSpec["provenance"][string]
@@ -1080,26 +1086,58 @@ function withHopDwell(plan: HopPlan, spec: NormalisedJobSpec): HopPlan {
 	return changed ? { ...plan, hops } : plan
 }
 
-function sweepPeriod(
-	hops: readonly Hop[],
-	dwellMs: number,
-	share: number,
-): number {
-	const count = hops.length
-	const every = share > 0 ? Math.max(1, Math.round(1 / share)) : Infinity
-	const revisits = Number.isFinite(every) ? Math.floor(count / every) : 0
-	// No hop dwell: exactly the pre-SF1 formula, so previews stay byte-identical (R1 finding 3).
-	if (count === 0 || hops.every(hop => hop.dwellMs === undefined))
-		return (count + revisits) * dwellMs
-	let sum = 0
-	for (const hop of hops) sum += hop.dwellMs ?? dwellMs
-	return sum + revisits * (sum / count)
+/** Sweeps the preview measures after one warm-up sweep (revisit seeds settle into a pattern). */
+const SIM_SWEEPS = 3
+
+/** The scheduler's own visiting on an empty band: listening spans per hop over SIM_SWEEPS sweeps. */
+interface SimulatedSchedule {
+	periodMs: number
+	fromMs: number
+	toMs: number
+	listens: Map<number, { fromMs: number; toMs: number }[]>
+}
+
+/**
+ * Runs the real SweepScheduler (sweep-sim.ts) on the plan with no signals: holds come on top of
+ * this, revisits follow the seed. Bounded: one visit costs at most settle + max(dwell, settle +
+ * (minSurfaceBlocks + 1) blocks); a sweep is at most twice the coarse visits (share ≤ 0.9 revisits
+ * at most every coarse hop), so (SIM_SWEEPS + 2) such sweeps plus the transmission length always
+ * cover the measured sweeps and the transmissions starting in them. Cost: one step per block.
+ */
+function simulatedSchedule(
+	plan: HopPlan,
+	n: NormalisedJobSpec,
+	minSurfaceBlocks: number,
+	seed: ((hop: Hop) => number) | undefined,
+): SimulatedSchedule | null {
+	const minimum = n.settleMs + (minSurfaceBlocks + 1) * n.integrationMs
+	let coarse = 0
+	for (const hop of plan.hops)
+		coarse += Math.max(minimum, hop.dwellMs ?? n.dwellMs) + n.settleMs
+	const r = simulateSweep(plan, n, {
+		settleMs: n.settleMs,
+		blockMs: n.integrationMs,
+		minSurfaceBlocks,
+		probeStartMs: 0,
+		durationMs: (SIM_SWEEPS + 2) * 2 * coarse + n.txDurationHintMs,
+		...(seed ? { activitySeed: seed } : {}),
+	})
+	const fromMs = r.sweepEndsMs[0]
+	const toMs = r.sweepEndsMs[SIM_SWEEPS]
+	if (fromMs === undefined || toMs === undefined || toMs <= fromMs) return null
+	const listens = new Map<number, { fromMs: number; toMs: number }[]>()
+	for (const l of r.listens) {
+		const list = listens.get(l.hopIndex) ?? []
+		list.push(l)
+		listens.set(l.hopIndex, list)
+	}
+	return { periodMs: (toMs - fromMs) / SIM_SWEEPS, fromMs, toMs, listens }
 }
 
 function poiFor(
 	hop: Hop,
 	n: NormalisedJobSpec,
-	periodMs: number | null,
+	schedule: SimulatedSchedule | null,
 	source: PreviewSourceView,
 	channelizer: boolean,
 ): PlanPreview["poi"][number] {
@@ -1118,22 +1156,61 @@ function poiFor(
 					0,
 				)
 			: null
-	if (periodMs === null) {
+	if (schedule === null) {
 		return {
 			hopIndex: hop.index,
 			detection: D >= 2 * T ? 1 : 0,
 			decode: confirm !== null && D >= confirm ? 1 : 0,
 		}
 	}
-	// WG1 req 8.2: a hop with its own (per-range) dwell listens for that long.
-	const d = (hop.dwellMs ?? n.dwellMs) - n.settleMs
+	// A transmission starting in the measured sweeps is detected when it is on air for 2T (the
+	// tracker surfaces a track after minSurfaceBlocks = 2 blocks) inside a listening span of the hop:
+	// with one span of d per period P that is (D + d - 4T) / P. Decode keeps its estimate (still on
+	// air for the confirm hold), (D - confirm + d) / P per span. Hop dwells (WG1 req 8.2), the
+	// scheduler's block-aligned dwell ends and revisits are in the simulated spans.
+	const spans = schedule.listens.get(hop.index) ?? []
 	return {
 		hopIndex: hop.index,
-		detection: Math.min(1, Math.max(0, D + d - 2 * T) / periodMs),
+		detection: interceptProbability(
+			spans,
+			D,
+			2 * T,
+			2 * T,
+			schedule.fromMs,
+			schedule.toMs,
+		),
 		decode:
 			confirm === null
 				? 0
-				: Math.min(1, Math.max(0, D - confirm + d) / periodMs),
+				: interceptProbability(
+						spans,
+						D,
+						confirm,
+						0,
+						schedule.fromMs,
+						schedule.toMs,
+					),
+	}
+}
+
+/** A throwing seed reads as no occupancy, as the scheduler sees a hop that has none: no revisit for it. */
+function seedFor(
+	ctx: PreviewContext,
+	sourceId: string,
+): ((hop: Hop) => number) | undefined {
+	try {
+		const seed = ctx.activitySeed?.(sourceId)
+		if (seed === undefined) return undefined
+		return hop => {
+			try {
+				const v = seed(hop)
+				return Number.isFinite(v) ? v : 0
+			} catch {
+				return 0
+			}
+		}
+	} catch {
+		return undefined
 	}
 }
 
@@ -1219,12 +1296,18 @@ export function previewPlan(
 			),
 		)
 	}
-	const sweepPeriodMs =
+	const schedule =
 		n.mode === "sweep" && plan.hops.length > 1
-			? sweepPeriod(plan.hops, n.dwellMs, n.revisit.share)
+			? simulatedSchedule(
+					plan,
+					n,
+					s.detection.minSurfaceBlocks,
+					seedFor(ctx, source.id),
+				)
 			: null
+	const sweepPeriodMs = schedule === null ? null : schedule.periodMs
 	const poi = plan.hops.map(h =>
-		poiFor(h, n, sweepPeriodMs, source, ctx.channelizerAvailable),
+		poiFor(h, n, schedule, source, ctx.channelizerAvailable),
 	)
 	const low = poi.filter(p => p.detection < POI_LOW)
 	if (low.length > 0) {

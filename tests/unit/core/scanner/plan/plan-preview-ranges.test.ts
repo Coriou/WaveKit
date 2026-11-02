@@ -14,6 +14,7 @@ import { isRangeEnabled } from "../../../../../src/core/scanner/plan/range-contr
 import type {
 	Hop,
 	Impact,
+	NormalisedJobSpec,
 	ScanRange,
 	ScannerProtocol,
 } from "../../../../../src/core/scanner/types.js"
@@ -103,17 +104,23 @@ function geometry(hops: Hop[]) {
 	}))
 }
 
-function periodOf(
-	hops: readonly Hop[],
-	dwellMs: number,
-	share: number,
-): number {
-	const count = hops.length
-	const every = share > 0 ? Math.max(1, Math.round(1 / share)) : Infinity
-	const revisits = Number.isFinite(every) ? Math.floor(count / every) : 0
-	if (count === 0) return 0
-	const sum = hops.reduce((total, hop) => total + (hop.dwellMs ?? dwellMs), 0)
-	return sum + revisits * (sum / count)
+/**
+ * The simulated scheduler's visit on a quiet band with no occupancy seed (no revisits): it settles,
+ * then dwells max((minSurfaceBlocks + 1) blocks, round(dwell - settle)) ms, decided at the end of
+ * the block that reaches it (whole blocks).
+ */
+function visitOf(dwellMs: number, n: NormalisedJobSpec): number {
+	const T = n.integrationMs
+	const blocks = (testSettings().detection.minSurfaceBlocks + 1) * T
+	const listen = Math.max(blocks, Math.round(dwellMs - n.settleMs))
+	return n.settleMs + Math.ceil(listen / T) * T
+}
+
+function periodOf(hops: readonly Hop[], n: NormalisedJobSpec): number {
+	return hops.reduce(
+		(total, hop) => total + visitOf(hop.dwellMs ?? n.dwellMs, n),
+		0,
+	)
 }
 
 describe("range fields in the plan", () => {
@@ -454,7 +461,7 @@ describe("range fields in the plan", () => {
 		)
 	})
 
-	it("keeps the pre-SF1 sweep period formula exactly when no hop has its own dwell (R1 finding 3)", () => {
+	it("reports the scheduler's own period when no hop has its own dwell: no seed, no revisits", () => {
 		for (const dwellMs of [185.3, 101.7, 333.33]) {
 			const p = previewPlan(
 				{
@@ -466,10 +473,8 @@ describe("range fields in the plan", () => {
 				ctx(),
 			)
 			expect(p.plan.hops.every(h => h.dwellMs === undefined)).toBe(true)
-			const count = p.plan.hops.length
-			const every = Math.max(1, Math.round(1 / 0.3))
-			const revisits = Math.floor(count / every)
-			expect(p.sweepPeriodMs).toBe((count + revisits) * p.spec.dwellMs)
+			// 101.7 ms is below settle + 3 blocks: the scheduler dwells its minimum anyway
+			expect(p.sweepPeriodMs).toBeCloseTo(periodOf(p.plan.hops, p.spec), 6)
 		}
 	})
 
@@ -497,12 +502,14 @@ describe("range fields in the plan", () => {
 				1,
 				Math.max(
 					0,
-					n.txDurationHintMs + dwell - n.settleMs - 2 * n.integrationMs,
+					n.txDurationHintMs + dwell - n.settleMs - 4 * n.integrationMs,
 				) / (period ?? 1),
 			)
 		const poiOf = (h: Hop) => p.poi.find(x => x.hopIndex === h.index)
-		for (const h of own) expect(poiOf(h)?.detection).toBe(detection(2_000))
-		for (const h of rest) expect(poiOf(h)?.detection).toBe(detection(200))
+		for (const h of own)
+			expect(poiOf(h)?.detection).toBeCloseTo(detection(2_000), 9)
+		for (const h of rest)
+			expect(poiOf(h)?.detection).toBeCloseTo(detection(200), 9)
 		expect(detection(2_000)).toBeGreaterThan(detection(200))
 	})
 
@@ -697,7 +704,7 @@ describe("range fields in the plan", () => {
 					}
 					if (preview.sweepPeriodMs !== null) {
 						expect(preview.sweepPeriodMs).toBeCloseTo(
-							periodOf(preview.plan.hops, n.dwellMs, n.revisit.share),
+							periodOf(preview.plan.hops, n),
 							6,
 						)
 					}
@@ -707,17 +714,11 @@ describe("range fields in the plan", () => {
 						expect(preview.plan.hops.every(h => h.dwellMs === undefined)).toBe(
 							true,
 						)
-						if (preview.sweepPeriodMs !== null) {
-							const count = preview.plan.hops.length
-							const every =
-								n.revisit.share > 0
-									? Math.max(1, Math.round(1 / n.revisit.share))
-									: Infinity
-							const revisits = Number.isFinite(every)
-								? Math.floor(count / every)
-								: 0
-							expect(preview.sweepPeriodMs).toBe((count + revisits) * n.dwellMs)
-						}
+						if (preview.sweepPeriodMs !== null)
+							expect(preview.sweepPeriodMs).toBeCloseTo(
+								preview.plan.hops.length * visitOf(n.dwellMs, n),
+								6,
+							)
 					}
 				},
 			),

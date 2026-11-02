@@ -35,9 +35,20 @@ The job watches the current window of the source and never sends tuner commands.
 
 The job takes the source's tuner lease and steps through a hop plan (ascending centres, about 80 % of the sample rate each, overlapping by the widest channel). On each hop it settles (test-mode markers, or a timer when markers are not available), dwells, and either moves on or holds to confirm a track. Revisits favour busy hops: after every `round(1 / revisit.share)` coarse hops (share 0.3), the hop with the highest activity × time since the last visit is inserted again.
 
+**Fair holds.** A hold never starves the other hops:
+
+- One frequency is held once per appearance. A frequency whose hold ended while it stayed on air (a probe that found nothing on a carrier, a call followed to `hold.maxHoldMs`) is not held again, on that hop or on an overlapping hop, until a full visit no longer hears it. A transmission that ended during its hold frees its frequency at once, so the next call on the same channel is held again.
+- A frequency heard on every visit for longer than `hold.maxHoldMs`, or heard again after such a hold, is steady (a local carrier, a birdie). Steady frequencies and spurs are never held and count as no activity, so they attract no revisits; a hop's activity restarts when one of its frequencies turns steady.
+- One visit chains further confirm holds only while its holds stay within one nominal coarse sweep (the sum of the hop dwells), at most `hold.maxHoldMs`; the tracks left over are held on the hop's next visit.
+- Analog voice (`analog-fm`, `analog-am`) has no decoder to confirm it, so with `hold.policy: "hold"` the hold follows it while it is on air (after the digital-voice check probe, or at once when no confirmation is needed), then `hangMs`, at most `hold.maxHoldMs` from the start of the hold. With the 60 s default a 28 s call is held to its end. Signals-only jobs do not hold.
+
+So between two visits of a hop the scheduler spends at most one coarse sweep of dwells, its revisits, and the holds of transmissions new to it; a frequency that stays on air costs one hold, not one per visit.
+
 **Gain per band.** A hop with no job gain (`tuner.gainTenthsDb`) takes the gain of the per-band gain table entry holding its centre (`tuner.bandGain`; by default 37.2 dB in the 868 and 915 MHz ISM bands, your own gain elsewhere). A later hop outside the bands, the lease release, and crash recovery give your exact gain mode and gain back; an AGC gain mode is restored after the gain, so the tuner ends in AGC. When your own write (a retune, a sample rate) takes the tuner from the job, only your gain mode and gain go back, at once, unless that write set the gain, gain mode or tuner gain index; after a relay client, they go back once control returns, unless the relay client set a gain, gain mode or tuner gain index. While your gain or gain mode is unknown (right after a restart, before any gain write), hops write no band gain. Manual tuning, including a dwell you drive through the tuner API, never applies the table unless `tuner.bandGain.applyToMyTuning` is on. See [CORE-REFERENCE.md, Per-band gain](CORE-REFERENCE.md#per-band-gain).
 
-Worked example: 400–470 MHz at 2.048 Msps is 44 hops. With markers (about 30 ms counter run + 5 ms PLL settle) and 50 ms blocks, a hop dwells about 185 ms, so a coarse sweep takes about 8 s (about 11.6 s with revisits). With a 1 s timer settle (markers do not pass, typically over Wi-Fi) a hop costs about 1.15 s and a sweep about 51 s. These are assumptions; `POST /api/scanner/plan` reports the real numbers for your source (`sweepPeriodMs`, measured settle once known).
+Worked example: 400–470 MHz at 2.048 Msps is 44 hops. With markers (about 30 ms counter run + 5 ms PLL settle) and 50 ms blocks, a hop dwells about 185 ms, so a coarse sweep takes about 8 s (about 11.6 s when every revisit slot is used). With a 1 s timer settle (markers do not pass, typically over Wi-Fi) a hop costs about 1.15 s and a sweep about 51 s. These are assumptions; `POST /api/scanner/plan` reports the real numbers for your source (`sweepPeriodMs`, measured settle once known).
+
+**Preview period and probability of intercept.** The preview runs the sweep scheduler itself on the plan, on an empty band, with the source's recent occupancy as the revisit seed (the seed a new job starts with): `sweepPeriodMs` is the simulated period (dwells end on whole detection blocks; revisits only where the band was recently active), and a hop's detection POI is the chance that a `txDurationHintMs` transmission starting at a random time is on air for two blocks inside one of that hop's simulated listening spans, about `(D + d − 4T) / P` for one visit of `d` listening per period `P`. Holds on signals come on top of the simulated period. Decode POI keeps its estimate `(D − confirm + d) / P` per visit.
 
 ### Passive job
 
@@ -88,7 +99,7 @@ Each range can carry its own settings; a range without them behaves as before.
 
 - `enabled: false` keeps the range in the job (same position, same fields) but skips it: it is not swept, masked or used to pick protocols. A job needs at least one enabled range (`range-empty` otherwise).
 - `name` labels the range (1 to 100 characters).
-- `dwellMs` lengthens or shortens the dwell of the hops that overlap the range. A hop that overlaps several enabled ranges uses the longest of their dwells (a range without one counts at the job's `dwellMs`); the plan shows it as `hop.dwellMs`, and the sweep period adds up the hop dwells. The preview's probability of intercept (detection and decode) for such a hop uses its own dwell; hops without one use the job's `dwellMs`, so plans without per-range dwell are unchanged.
+- `dwellMs` lengthens or shortens the dwell of the hops that overlap the range. A hop that overlaps several enabled ranges uses the longest of their dwells (a range without one counts at the job's `dwellMs`); the plan shows it as `hop.dwellMs`, and the sweep period adds up the hop dwells. The preview's probability of intercept (detection and decode) for such a hop uses its own dwell; hops without one use the job's `dwellMs`.
 - `sensitivity` (`low`, `normal`, `high`) sets the detector's false-alarm target inside the range. Integration time stays job-wide, set by the job's `sensitivity`.
 
 ### Editing a running job's ranges
@@ -433,7 +444,7 @@ Cost on the reference Mac: about 0.06 to 0.14 cores for the tool with 2 captures
 ## Honesty and limits
 
 - Detection is measured on one strong DMR capture; false-alarm control adapts per range (CFAR), but a fresh dongle needs minutes to learn its spurs.
-- A sweep can miss short transmissions: the preview reports probability of intercept per hop for `txDurationHintMs`, with each hop's own dwell.
+- A sweep can miss short transmissions: the preview reports probability of intercept per hop for `txDurationHintMs`, with each hop's own dwell. A broad sweep is mostly settle time: 172 hops with a 1 s timer settle take about 198 s, so a 30 s transmission on a quiet hop is caught about 15 % of the time and a 5 s one about 2.5 %; hops with recent activity get the revisit slots and much better odds.
 - `scanner:progress` reaches WS clients at up to 2 Hz per job (one per 500 ms); every other scanner message keeps one per key per second, and all share the `ws.maxMessagesPerSecond` budget.
 - That budget is shared with `scanner:activity`: when slots are scarce the limiter sends state messages first, then progress, then activity, so faster progress can delay activity updates (each still gets its latest state eventually).
 - P25, NXDN, D-STAR, dPMR and DMR repeater rules are unvalidated until captures exist; those results stay `candidate` unless dsd-fme decodes them.

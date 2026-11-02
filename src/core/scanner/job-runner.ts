@@ -68,6 +68,14 @@ import type { StoredScanJobSpec } from "./plan/range-contract.js"
 
 /** Bounds first-IQ admission only; running jobs retain their existing stop contract. */
 export const JOB_STARTUP_CAP_MS = 15_000
+/**
+ * Analog voice classes: no decoder confirms them, so a sweep hold follows them while they stay on
+ * air (bounded by `hold.maxHoldMs`) instead of leaving after the confirm probe.
+ */
+const FOLLOW_ON_AIR_CLASSES: ReadonlySet<ScannerClass> = new Set([
+	"analog-fm",
+	"analog-am",
+])
 
 export interface JobRecord {
 	id: string
@@ -846,7 +854,9 @@ export class JobRunner implements JobDriver {
 		if (this.sweep && this.scheduler) {
 			const holdMs = confirm ? this.confirmHoldMs(live) : 0
 			this.exec(
-				this.scheduler.onTrack(track, confirm && policy !== "never", holdMs),
+				this.scheduler.onTrack(track, confirm && policy !== "never", holdMs, {
+					followOnAir: FOLLOW_ON_AIR_CLASSES.has(live.classification.class),
+				}),
 			)
 			return
 		}

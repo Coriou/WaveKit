@@ -22,6 +22,34 @@ const SWEEP_PERIOD_ALPHA = 0.3
 const GAIN_STEP_TENTHS = 60
 const CLEAN_VISITS_TO_RAISE = 3
 const CANDIDATE_BOOST = 2
+/**
+ * Two sightings are the same frequency within half a 12.5 kHz channel, or half the wider track's
+ * occupied bandwidth when that is larger (a wideband emitter's centroid wanders more).
+ */
+const SAME_FREQUENCY_FLOOR_HZ = 6_250
+/**
+ * Frequencies remembered per hop. A hop spans at most 3.2 Msps × 0.8 = 2.56 MHz, which is 205
+ * 12.5 kHz channels; 256 covers every channel of the widest hop, so a full hop never evicts.
+ */
+const MAX_FREQUENCY_MEMORY = 256
+
+/**
+ * A frequency heard on consecutive visits of one hop (memory pruned when a full visit misses it).
+ * `barred`: a hold already ended on it while it stayed on air, so it is not held again until a
+ * full visit no longer hears it. `steady` once it has been continuously present for longer than
+ * the longest hold (`hold.maxHoldMs`) or is barred and heard again on the next visit.
+ */
+interface FrequencyMemory {
+	centreHz: number
+	halfWidthHz: number
+	firstSeenAt: number
+	/** Hop visit serial of the last sighting. */
+	lastSerial: number
+	barred: boolean
+	steady: boolean
+	/** Its track closed on the last visit that heard it: the next sighting is a new transmission. */
+	ended: boolean
+}
 
 interface HopState {
 	activityScore: number
@@ -30,14 +58,29 @@ interface HopState {
 	gainTenthsDb: number | null
 	cleanVisits: number
 	boost: boolean
+	/** Visits of this hop so far (revisits and continued visits included). */
+	serial: number
+	memory: FrequencyMemory[]
+	/** Accounting (job progress, fairness tests): visits, ms from tune to leave, ms held. */
+	visits: number
+	timeMs: number
+	holdMs: number
 }
 
 interface TrackInfo {
 	snrDb: number
+	centreHz: number
+	obwHz: number
 	needsConfirm: boolean
 	confirmHoldMs: number
+	/** Analog voice: a hold follows it while it stays on air (bounded by `hold.maxHoldMs`). */
+	followOnAir: boolean
+	/** Steady or barred frequency: never held, no activity. */
+	steady: boolean
 	open: boolean
 	tried: boolean
+	/** Blocks this track was open during the visit (activity). */
+	openBlocks: number
 }
 
 interface Visit {
@@ -45,12 +88,32 @@ interface Visit {
 	revisit: boolean
 	dwellEnd: number | null
 	blocks: number
-	activeBlocks: number
 	overloaded: boolean
 	tracks: Map<string, TrackInfo>
 	holdStartedAt: number | null
 	/** Gain the visit was tuned with. A continued visit (no tune) needs the same gain. */
 	gainTenthsDb: number | null
+	/** Clock at the tune (or at the continue). */
+	startedAt: number
+	/** Hop serial of this visit (FrequencyMemory.lastSerial). */
+	serial: number
+	/** A frequency turned steady during this visit. */
+	newlySteady: boolean
+}
+
+/** Per-hop accounting: share of time, holds and the age of the last visit. */
+export interface HopStat {
+	hopIndex: number
+	visits: number
+	timeMs: number
+	holdMs: number
+	lastVisitAgeMs: number | null
+}
+
+/** Options for one track update. */
+export interface TrackHints {
+	/** Analog voice (`analog-fm`, `analog-am`): follow it on air under `hold.policy: "hold"`. */
+	followOnAir?: boolean
 }
 
 interface Hold {
@@ -60,6 +123,12 @@ interface Hold {
 }
 
 type Phase = "idle" | "tuning" | "dwell" | "hold"
+
+interface Candidate {
+	id: string
+	t: TrackInfo
+	kind: "confirm" | "follow"
+}
 
 function nearestHop(plan: HopPlan, centreHz: number): number {
 	let best = 0
@@ -219,11 +288,7 @@ export class SweepScheduler {
 			}
 		}
 		v.blocks++
-		for (const t of v.tracks.values())
-			if (t.open) {
-				v.activeBlocks++
-				break
-			}
+		for (const t of v.tracks.values()) if (t.open) t.openBlocks++
 		if (
 			this.phase === "dwell" &&
 			v.dwellEnd !== null &&
@@ -246,6 +311,7 @@ export class SweepScheduler {
 		track: TrackSnapshot,
 		needsConfirm: boolean,
 		confirmHoldMs: number,
+		hints: TrackHints = {},
 	): SchedulerAction[] {
 		const v = this.visit
 		if (v === null || (this.phase !== "dwell" && this.phase !== "hold"))
@@ -253,20 +319,33 @@ export class SweepScheduler {
 		// truncated, iqImage and spur are sticky and may first appear on a later track-update: never probed (§ 4.9)
 		const flagged =
 			track.flags.truncated || track.flags.iqImage || track.flags.spur
+		const memory = flagged ? null : this.remember(v, track)
+		const steady =
+			flagged || (memory?.barred ?? false) || (memory?.steady ?? false)
+		const followOnAir = hints.followOnAir === true && !flagged
 		const known = v.tracks.get(track.trackId)
 		if (known === undefined) {
 			v.tracks.set(track.trackId, {
 				snrDb: track.snrDb,
+				centreHz: track.centreHz,
+				obwHz: track.obwHz,
 				needsConfirm: needsConfirm && !flagged,
 				confirmHoldMs,
+				followOnAir,
+				steady,
 				open: true,
 				tried: false,
+				openBlocks: 0,
 			})
 		} else {
 			known.snrDb = track.snrDb
+			known.centreHz = track.centreHz
+			known.obwHz = track.obwHz
 			known.open = true
 			if (flagged) known.needsConfirm = false
 			else known.needsConfirm ||= needsConfirm
+			known.followOnAir = followOnAir
+			known.steady ||= steady
 			known.confirmHoldMs = Math.max(known.confirmHoldMs, confirmHoldMs)
 		}
 		// the held track turned out truncated or an image: drop its probe and hold
@@ -341,7 +420,7 @@ export class SweepScheduler {
 		if (now >= this.maxHoldDeadline())
 			return this.leaveHop([{ type: "stop-probes" }])
 		if (now < this.hold.deadline) return []
-		if (this.hold.mode === "confirm") return this.afterProbe()
+		if (this.hold.mode === "confirm") return this.confirmTimedOut()
 		if (this.hold.mode === "hang")
 			return this.leaveHop([{ type: "stop-probes" }])
 		return []
@@ -390,6 +469,28 @@ export class SweepScheduler {
 		return []
 	}
 
+	/** Per-hop accounting under the current plan; the visit in progress counts up to `now`. */
+	hopStats(): HopStat[] {
+		const now = this.now()
+		const v = this.visit
+		return this.hops.map((hop, hopIndex) => {
+			const current = v !== null && v.hopIndex === hopIndex
+			const held =
+				current && v.holdStartedAt !== null ? now - v.holdStartedAt : 0
+			return {
+				hopIndex,
+				visits: hop.visits + (current ? 1 : 0),
+				timeMs: hop.timeMs + (current ? now - v.startedAt : 0),
+				holdMs: hop.holdMs + held,
+				lastVisitAgeMs: current
+					? 0
+					: hop.lastVisit === null
+						? null
+						: now - hop.lastVisit,
+			}
+		})
+	}
+
 	progress(): {
 		sweepIndex: number
 		hopIndex: number
@@ -435,6 +536,119 @@ export class SweepScheduler {
 			gainTenthsDb: this.spec.tuner.gainTenthsDb,
 			cleanVisits: 0,
 			boost: false,
+			serial: 0,
+			memory: [],
+			visits: 0,
+			timeMs: 0,
+			holdMs: 0,
+		}
+	}
+
+	/**
+	 * Records a sighting in the hop's frequency memory and returns its entry. A frequency still in
+	 * the memory has been heard on every full visit since `firstSeenAt` (endVisit prunes the rest).
+	 */
+	private remember(v: Visit, track: TrackSnapshot): FrequencyMemory | null {
+		const hop = this.hops[v.hopIndex]
+		if (hop === undefined) return null
+		const now = this.now()
+		const halfWidthHz = Math.max(SAME_FREQUENCY_FLOOR_HZ, track.obwHz / 2)
+		let entry = hop.memory.find(
+			m =>
+				Math.abs(m.centreHz - track.centreHz) <=
+				Math.max(m.halfWidthHz, halfWidthHz),
+		)
+		if (entry === undefined) {
+			entry = {
+				centreHz: track.centreHz,
+				halfWidthHz,
+				firstSeenAt: now,
+				lastSerial: v.serial,
+				barred: false,
+				steady: false,
+				ended: false,
+			}
+			hop.memory.push(entry)
+			if (hop.memory.length > MAX_FREQUENCY_MEMORY) hop.memory.shift()
+		}
+		// Barred and heard again on a later visit: a frequency that outlasted a hold and is still
+		// there. On air for longer than the longest hold: a carrier, not a transmission.
+		if (entry.ended) {
+			entry.ended = false
+			entry.firstSeenAt = now
+			entry.barred = false
+			entry.steady = false
+		}
+		const wasSteady = entry.steady
+		if (entry.lastSerial < v.serial && entry.barred) entry.steady = true
+		if (now - entry.firstSeenAt >= this.spec.hold.maxHoldMs) entry.steady = true
+		if (entry.steady && !wasSteady) v.newlySteady = true
+		entry.lastSerial = v.serial
+		entry.halfWidthHz = Math.max(entry.halfWidthHz, halfWidthHz)
+		return entry
+	}
+
+	/**
+	 * Hops overlap by the widest channel: a frequency barred on one hop is barred on the hops whose
+	 * span also holds it, as if their last visit had heard it (their next visit confirms or prunes).
+	 */
+	private barInOverlaps(hopIndex: number, from: FrequencyMemory): void {
+		this.plan.hops.forEach((hop, i) => {
+			const state = this.hops[i]
+			if (
+				i === hopIndex ||
+				state === undefined ||
+				from.centreHz < hop.covered.startHz ||
+				from.centreHz > hop.covered.endHz
+			)
+				return
+			let entry = state.memory.find(
+				m =>
+					Math.abs(m.centreHz - from.centreHz) <=
+					Math.max(m.halfWidthHz, from.halfWidthHz),
+			)
+			if (entry === undefined) {
+				entry = { ...from, lastSerial: state.serial, steady: false }
+				state.memory.push(entry)
+				if (state.memory.length > MAX_FREQUENCY_MEMORY) state.memory.shift()
+			}
+			entry.barred = true
+			entry.ended = false
+			entry.lastSerial = Math.max(entry.lastSerial, state.serial)
+		})
+	}
+
+	/** Same-frequency entry of a visit's track. */
+	private memoryOf(hop: HopState, t: TrackInfo): FrequencyMemory | undefined {
+		const halfWidthHz = Math.max(SAME_FREQUENCY_FLOOR_HZ, t.obwHz / 2)
+		return hop.memory.find(
+			m =>
+				Math.abs(m.centreHz - t.centreHz) <=
+				Math.max(m.halfWidthHz, halfWidthHz),
+		)
+	}
+
+	/** A new visit record of `hopIndex` (tuned or continued). */
+	private newVisit(
+		hopIndex: number,
+		revisit: boolean,
+		tracks: Map<string, TrackInfo>,
+		gainTenthsDb: number | null,
+	): Visit {
+		const hop = this.hops[hopIndex]
+		if (hop !== undefined) hop.serial++
+		return {
+			hopIndex,
+			revisit,
+			dwellEnd: null,
+			blocks: 0,
+			overloaded: false,
+			tracks,
+			holdStartedAt: null,
+			gainTenthsDb,
+			startedAt: this.now(),
+			serial: hop?.serial ?? 0,
+			newlySteady: false,
 		}
 	}
 
@@ -457,17 +671,7 @@ export class SweepScheduler {
 				"SCANNER_HOP_RANGE",
 			)
 		const gainTenthsDb = this.gainOf(hopIndex)
-		this.visit = {
-			hopIndex,
-			revisit,
-			dwellEnd: null,
-			blocks: 0,
-			activeBlocks: 0,
-			overloaded: false,
-			tracks: new Map(),
-			holdStartedAt: null,
-			gainTenthsDb,
-		}
+		this.visit = this.newVisit(hopIndex, revisit, new Map(), gainTenthsDb)
 		this.hold = null
 		this.phase = "tuning"
 		return [{ type: "tune", hopIndex, centreHz: hop.centreHz, gainTenthsDb }]
@@ -481,27 +685,63 @@ export class SweepScheduler {
 			const next = this.nextCandidate()
 			if (next !== null) {
 				v.holdStartedAt = this.now()
-				return this.startProbe(next[0], next[1])
+				return this.startHold(next)
 			}
 		}
 		return this.leaveHop([])
 	}
 
-	private nextCandidate(): [string, TrackInfo] | null {
+	/**
+	 * The strongest open, untried, non-steady track to confirm; else (policy `hold`) the strongest
+	 * analog voice to follow on air. Steady and barred frequencies are never held.
+	 */
+	private nextCandidate(): Candidate | null {
 		if (this.spec.signalsOnly === true) return null
 		const v = this.visit
 		if (v === null) return null
-		let best: [string, TrackInfo] | null = null
+		let best: Candidate | null = null
+		const follow = this.spec.hold.policy === "hold"
 		for (const [id, t] of v.tracks) {
-			if (!t.open || !t.needsConfirm || t.tried) continue
+			if (!t.open || t.tried || t.steady) continue
+			const kind = t.needsConfirm
+				? "confirm"
+				: follow && t.followOnAir
+					? "follow"
+					: null
+			if (kind === null) continue
 			if (
 				best === null ||
-				t.snrDb > best[1].snrDb ||
-				(t.snrDb === best[1].snrDb && id < best[0])
+				(kind === "confirm" && best.kind === "follow") ||
+				(kind === best.kind &&
+					(t.snrDb > best.t.snrDb ||
+						(t.snrDb === best.t.snrDb && id < best.id)))
 			)
-				best = [id, t]
+				best = { id, t, kind }
 		}
 		return best
+	}
+
+	private startHold(c: Candidate): SchedulerAction[] {
+		if (c.kind === "confirm") return this.startProbe(c.id, c.t)
+		c.t.tried = true
+		this.hold = {
+			trackId: c.id,
+			mode: "follow",
+			deadline: this.maxHoldDeadline(),
+		}
+		this.phase = "hold"
+		return []
+	}
+
+	/**
+	 * A visit chains further holds only while its holds stay within one nominal coarse sweep (the
+	 * sum of the hop dwells, holds left out), capped by `hold.maxHoldMs`: the other hops wait at
+	 * most one extra sweep for a busy hop, and the tracks left over are held on its next visit.
+	 */
+	private chainBudgetMs(): number {
+		let sum = 0
+		for (const hop of this.plan.hops) sum += hop.dwellMs ?? this.spec.dwellMs
+		return Math.min(this.spec.hold.maxHoldMs, sum)
 	}
 
 	private startProbe(trackId: string, t: TrackInfo): SchedulerAction[] {
@@ -523,9 +763,41 @@ export class SweepScheduler {
 	private afterProbe(): SchedulerAction[] {
 		const stop: SchedulerAction[] = [{ type: "stop-probes" }]
 		const next = this.nextCandidate()
-		if (next !== null && this.now() < this.maxHoldDeadline())
-			return [...stop, ...this.startProbe(next[0], next[1])]
+		const now = this.now()
+		const started = this.visit?.holdStartedAt ?? now
+		if (
+			next !== null &&
+			now < this.maxHoldDeadline() &&
+			now - started < this.chainBudgetMs()
+		)
+			return [...stop, ...this.startHold(next)]
 		return this.leaveHop(stop)
+	}
+
+	/**
+	 * The confirm hold ran out without a decode. Analog voice still on air is followed (it has no
+	 * decoder to confirm it); anything else ends like any probe.
+	 */
+	private confirmTimedOut(): SchedulerAction[] {
+		const hold = this.hold
+		const t = hold === null ? undefined : this.visit?.tracks.get(hold.trackId)
+		if (
+			hold !== null &&
+			t !== undefined &&
+			t.open &&
+			t.followOnAir &&
+			!t.steady &&
+			this.spec.hold.policy === "hold" &&
+			this.spec.signalsOnly !== true
+		) {
+			this.hold = {
+				trackId: hold.trackId,
+				mode: "follow",
+				deadline: this.maxHoldDeadline(),
+			}
+			return [{ type: "stop-probes" }]
+		}
+		return this.afterProbe()
 	}
 
 	private maxHoldDeadline(): number {
@@ -611,17 +883,8 @@ export class SweepScheduler {
 		base: number,
 		from: Visit,
 	): void {
-		this.visit = {
-			hopIndex,
-			revisit,
-			dwellEnd: null,
-			blocks: 0,
-			activeBlocks: 0,
-			overloaded: false,
-			tracks,
-			holdStartedAt: null,
-			gainTenthsDb: from.gainTenthsDb,
-		}
+		for (const t of tracks.values()) t.openBlocks = 0
+		this.visit = this.newVisit(hopIndex, revisit, tracks, from.gainTenthsDb)
 		this.visit.dwellEnd = base + this.dwellSamples(true)
 		this.hold = null
 		this.phase = "dwell"
@@ -707,8 +970,36 @@ export class SweepScheduler {
 		if (v === null) return
 		const hop = this.hops[v.hopIndex]
 		if (hop === undefined) return
-		const active = v.blocks > 0 ? v.activeBlocks / v.blocks : 0
-		if (hop.scoreAt === null) hop.activityScore = active
+		hop.visits++
+		hop.timeMs += Math.max(0, now - v.startedAt)
+		if (v.holdStartedAt !== null)
+			hop.holdMs += Math.max(0, now - v.holdStartedAt)
+		// A hold that ended with its track still on air bars the frequency from another hold
+		// until a full visit misses it; one that ended with the track gone frees it.
+		let openBlocks = 0
+		const onAir = new Set<FrequencyMemory>()
+		for (const t of v.tracks.values()) {
+			const memory = this.memoryOf(hop, t)
+			if (t.open && memory !== undefined) onAir.add(memory)
+			if (t.tried && memory !== undefined) {
+				memory.barred = t.open
+				if (t.open) this.barInOverlaps(v.hopIndex, memory)
+			}
+			if (t.steady || memory?.steady === true) continue
+			openBlocks = Math.max(openBlocks, t.openBlocks)
+		}
+		// A frequency whose track closed went off air: its next transmission starts afresh.
+		for (const t of v.tracks.values()) {
+			const memory = t.open ? undefined : this.memoryOf(hop, t)
+			if (memory !== undefined && !onAir.has(memory)) memory.ended = true
+		}
+		// A full dwell hears everything on air for minSurfaceBlocks blocks: what it missed is gone.
+		if (v.blocks >= this.minSurfaceBlocks + 1)
+			hop.memory = hop.memory.filter(m => m.lastSerial === v.serial)
+		// Steady frequencies (carriers, birdies) are no activity: they never need a revisit.
+		const active = v.blocks > 0 ? Math.min(1, openBlocks / v.blocks) : 0
+		// A frequency that turned steady on this visit explained the hop's past score: restart it.
+		if (hop.scoreAt === null || v.newlySteady) hop.activityScore = active
 		else {
 			const keep = 2 ** (-(now - hop.scoreAt) / ACTIVITY_HALF_LIFE_MS)
 			hop.activityScore = keep * hop.activityScore + (1 - keep) * active

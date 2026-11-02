@@ -396,15 +396,54 @@ describe("SweepScheduler holds", () => {
 		expect(h.s.onBlock(3 * B)).toEqual([
 			{ type: "start-probe", trackId: "strong", holdMs: 2_100 },
 		])
-		h.clock = 400
+		// within the chain budget: one nominal coarse sweep, 2 hops × 185 ms = 370 ms
+		h.clock = 300
 		expect(h.s.onConfirmed("strong", false)).toEqual([
 			{ type: "stop-probes" },
 			{ type: "start-probe", trackId: "weak", holdMs: 1_300 },
 		])
-		h.clock = 1_700
+		h.clock = 1_600
 		expect(h.s.tick(h.clock)).toEqual([
 			{ type: "stop-probes" },
 			tune(1, 401.6 * MHZ),
+		])
+	})
+
+	it("leaves a busy hop once its holds use one nominal coarse sweep and holds the rest next visit", () => {
+		const h = harness(
+			makeHopPlan([400 * MHZ, 401.6 * MHZ]),
+			makeNormalisedSpec({ revisit: noRevisit }),
+		)
+		const at = (id: string, hz: number, snrDb: number): TrackSnapshot => ({
+			...track(id, snrDb),
+			centreHz: hz,
+		})
+		h.s.start()
+		h.s.onEpochStarted(0)
+		h.s.onTrack(at("weak", 400.1 * MHZ, 12), true, 1_000)
+		h.s.onTrack(at("strong", 400.2 * MHZ, 30), true, 1_800)
+		h.s.onBlock(B)
+		h.s.onBlock(2 * B)
+		expect(h.s.onBlock(3 * B)).toEqual([
+			{ type: "start-probe", trackId: "strong", holdMs: 2_100 },
+		])
+		// at the budget (370 ms of holds): no further probe on this visit
+		h.clock = 370
+		expect(h.s.onConfirmed("strong", false)).toEqual([
+			{ type: "stop-probes" },
+			tune(1, 401.6 * MHZ),
+		])
+		h.clock = 1_000
+		expect(h.dwell()).toEqual([
+			{ type: "sweep-complete", sweepIndex: 0 },
+			tune(0, 400 * MHZ),
+		])
+		h.s.onEpochStarted(h.sample)
+		h.s.onTrack(at("weak2", 400.1 * MHZ, 12), true, 1_000)
+		h.s.onTrack(at("strong2", 400.2 * MHZ, 30), true, 1_800)
+		// strong was confirmed without follow and is still on air: barred; weak is held now
+		expect(h.dwell(3, false)).toEqual([
+			{ type: "start-probe", trackId: "weak2", holdMs: 1_300 },
 		])
 	})
 })
