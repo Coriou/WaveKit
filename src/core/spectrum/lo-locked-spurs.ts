@@ -79,6 +79,12 @@ export interface LoLockedOptions {
 	minTransitions: number
 }
 
+/**
+ * Tainted ids kept per noted record slot: 4 × 512 records = 2 048 ids (≈ 100 KiB of strings per
+ * source), enough that an id outlives its own `records` entry by several full turnovers.
+ */
+const TAINTED_PER_RECORDS = 4
+
 interface Line {
 	rfHz: number
 	widthHz: number
@@ -117,6 +123,14 @@ interface SourceState {
 	dwells: Dwell[]
 	/** Insertion order = least recently sighted first. */
 	records: Map<string, CentreEntry[]>
+	/**
+	 * Records whose noted history was overwritten or evicted with contradictory or unknown
+	 * content (sticky): never a partner, so a lock cannot retire a record that once looked like
+	 * something other than the steady line. Bounded at TAINTED_PER_RECORDS × recordsPerSource,
+	 * oldest dropped (a dropped id is also long gone from `records`, so it cannot be a partner
+	 * until re-noted; re-noting starts a fresh, complete history).
+	 */
+	tainted: Set<string>
 	learned: OffsetEntry[]
 	revoked: OffsetEntry[]
 	suppressed: number
@@ -218,9 +232,16 @@ export class LoLockedSpurs {
 		const same = list.findIndex(
 			e => Math.abs(e.tunedHz - s.tunedHz) < this.opts.minSeparationHz,
 		)
-		if (same >= 0) list.splice(same, 1)
+		if (same >= 0) {
+			const prev = list[same]
+			if (prev !== undefined && !this.sameLine(prev, entry)) this.taint(st, id)
+			list.splice(same, 1)
+		}
 		list.push(entry)
-		while (list.length > this.opts.centresPerRecord) list.shift()
+		while (list.length > this.opts.centresPerRecord) {
+			list.shift()
+			this.taint(st, id)
+		}
 		st.records.set(id, list)
 		while (st.records.size > this.opts.recordsPerSource) {
 			const oldest = st.records.keys().next()
@@ -231,7 +252,36 @@ export class LoLockedSpurs {
 
 	/** Drops a record (deleted or merged away). */
 	forget(id: string): void {
-		for (const st of this.sources.values()) st.records.delete(id)
+		for (const st of this.sources.values()) {
+			st.records.delete(id)
+			st.tainted.delete(id)
+		}
+	}
+
+	/** Is `id`'s noted history incomplete or contradictory (never a partner)? */
+	isTainted(sourceId: string, id: string): boolean {
+		return this.sources.get(sourceId)?.tainted.has(id) === true
+	}
+
+	/** A replaced entry agrees with its successor: same steady line (offset, width, steadiness). */
+	private sameLine(a: CentreEntry, b: CentreEntry): boolean {
+		return (
+			a.steady !== false &&
+			a.rateHz === b.rateHz &&
+			Math.abs(a.offsetHz - b.offsetHz) <= this.opts.offsetHz &&
+			this.widthsAgree(a.widthHz, b.widthHz)
+		)
+	}
+
+	private taint(st: SourceState, id: string): void {
+		st.tainted.delete(id)
+		st.tainted.add(id)
+		const cap = TAINTED_PER_RECORDS * this.opts.recordsPerSource
+		while (st.tainted.size > cap) {
+			const oldest = st.tainted.values().next()
+			if (oldest.done === true) break
+			st.tainted.delete(oldest.value)
+		}
 	}
 
 	/** Drops everything a source taught (source removed). */
@@ -332,7 +382,7 @@ export class LoLockedSpurs {
 					all = false
 					break
 				}
-			if (all && eligible(id)) partners.push(id)
+			if (all && !st.tainted.has(id) && eligible(id)) partners.push(id)
 		}
 		const known = st.learned.find(
 			e =>
@@ -519,6 +569,7 @@ export class LoLockedSpurs {
 			st = {
 				dwells: [],
 				records: new Map(),
+				tainted: new Set(),
 				learned: [],
 				revoked: [],
 				suppressed: 0,

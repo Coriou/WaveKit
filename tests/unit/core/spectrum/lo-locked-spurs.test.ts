@@ -242,6 +242,31 @@ describe("LO-locked spurs from sightings", () => {
 		})
 	})
 
+	it("repro: a record whose non-steady history was overwritten by a steady line is never retired", () => {
+		const lo = make()
+		// an undecoded real emitter, sighted non-steady from C1 long before (past any revocation)
+		lo.note("r1", at(C1, SPUR, T0 - 2 * DQ_LO_LOCK_TTL_MS, { steady: false }))
+		expect(lo.isTainted("rtl", "r1")).toBe(false)
+		const res = pair(lo, C2, SPUR)
+		// the chain's steady sightings replaced that history: r1 is tainted, never a partner
+		expect(lo.isTainted("rtl", "r1")).toBe(true)
+		expect(res.verdict).toBe("locked")
+		expect(res.partners).toEqual(["r2"])
+	})
+
+	it("a record whose history lost an entry to the per-record bound is never retired; forget clears it", () => {
+		const lo = make({ centresPerRecord: 1 })
+		lo.note("r1", at(C1 + 5_000_000, SPUR, T0 - 1_000))
+		lo.note("r1", at(C1, SPUR, T0 - 500))
+		expect(lo.isTainted("rtl", "r1")).toBe(true)
+		lo.note("r9", at(C1, SPUR, T0 - 500))
+		lo.note("r9", at(C1, SPUR, T0 - 400, { steady: undefined }))
+		// a young sighting replaced by the same steady line is no contradiction
+		expect(lo.isTainted("rtl", "r9")).toBe(false)
+		lo.forget("r1")
+		expect(lo.isTainted("rtl", "r1")).toBe(false)
+	})
+
 	it("a break resets the count: the old position still seen after a retune needs three new transitions", () => {
 		const lo = make()
 		let t = dwellOn(lo, C1, SPUR, T0, 10_000, { id: "r1" }) + 500
@@ -533,13 +558,14 @@ describe("LO-locked spurs from sightings", () => {
 		expect(recs(4)).toEqual(["r1", "r2"])
 		expect(recs(3)).toEqual(["r1"])
 		expect(recs(2)).toEqual([])
-		// centres: r1's sighting at another offset fell out once the chain's centres came in
+		// centres: r1's sighting at another offset is never a partner, kept or evicted (an evicted
+		// entry leaves the record tainted)
 		const cpr = (n: number) => {
 			const lo = make({ centresPerRecord: n })
 			lo.note("r1", at(C1 + 100_000, 20_000, T0 - 1_000))
 			return [...pair(lo, C2, SPUR).partners].sort()
 		}
-		expect(cpr(1)).toEqual(["r1", "r2"])
+		expect(cpr(1)).toEqual(["r2"])
 		expect(cpr(2)).toEqual(["r2"])
 	})
 
