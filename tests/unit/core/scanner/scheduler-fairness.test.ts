@@ -9,6 +9,7 @@ import { DEFAULT_CONFIRM_HOLD_MS } from "../../../../src/core/scanner/plan/plan-
 import {
 	hopTimeMs,
 	simulateSweep,
+	type SimResult,
 	type SimSignal,
 } from "../../../../src/core/scanner/plan/sweep-sim.js"
 import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
@@ -424,6 +425,59 @@ describe("intercept property", () => {
 		return []
 	}
 
+	/**
+	 * One case of Property 1: a 28 s call on hop `voiceSlot % hops` starting at `startMs`, beside
+	 * `kind` on hop `otherSlot % hops` and, when `busy`, a busy channel on hop `busySlot % hops`.
+	 * Returns the simulation and its signals for case-specific checks.
+	 */
+	const interceptCase = (
+		hops: number,
+		voiceSlot: number,
+		otherSlot: number,
+		busySlot: number,
+		startMs: number,
+		kind: Other,
+		busy: boolean,
+		revisitShare: number,
+	): { r: SimResult; signals: SimSignal[] } => {
+		const plan = makeHopPlan(centres(hops), HALF_SPAN_HZ)
+		const vHop = voiceSlot % hops
+		const oHop = otherSlot % hops
+		const bHop = busySlot % hops
+		const durationMs = startMs + 40_000
+		const s = makeNormalisedSpec({
+			dwellMs: DWELL_MS,
+			settleMs: SETTLE_MS,
+			revisit: { share: revisitShare, maxIntervalMs: null },
+		})
+		const signals: SimSignal[] = [
+			voice(plan.hops[vHop]!.centreHz + 100_000, startMs),
+		]
+		if (oHop !== vHop)
+			signals.push(
+				...other(kind, plan.hops[oHop]!.centreHz - 150_000, durationMs),
+			)
+		// A busy channel on air from the start: 20 s overs, 0.3 s gaps.
+		if (busy && bHop !== vHop)
+			signals.push(
+				...series(plan.hops[bHop]!.centreHz + 200_000, 20_000, 300, durationMs),
+			)
+		const r = simulateSweep(plan, s, { ...sim, durationMs, signals })
+		const at = r.detectedAtMs[0]
+		expect(at).not.toBeNull()
+		// Worst case: the hop was just left. One coarse sweep of the other hops, each a
+		// dwell, at most one hold of one coarse sweep (a carrier's short hold: 8050 ms),
+		// at most one revisit per round(1 / 0.3) = 3 hops, then settle + 2 blocks:
+		// 7 × 1150 + 8050 + 3 × 1150 + 1150 = 20 700 ms < 28 000 ms.
+		expect(at! - startMs).toBeLessThanOrEqual(20_700)
+		// Held from detection to the end (28 s < maxHoldMs 60 s): every later block heard.
+		expect(r.heardMs[0]).toBeGreaterThanOrEqual(
+			startMs + 28_000 - at! - BLOCK_MS,
+		)
+		expect(r.holds[0]).toBe(1)
+		return { r, signals }
+	}
+
 	// Feature: scanner-sweep-fairness, Property 1: a 28 s transmission in a sweep of at most 10 s is always detected and then held to its end, beside carriers (labelled or not, steady or flapping) and a busy channel
 	// Validates: Requirements 3 (detection always, hold until it ends bounded by maxHoldMs), 2 (no re-hold on a steady or flapping carrier), 1 (no hop starved by another hop's holds)
 	it("detects every 28 s transmission and holds it until it ends", () => {
@@ -436,6 +490,8 @@ describe("intercept property", () => {
 				fc.nat(1_000),
 				// After the warm-up: three full visits of every hop, with at most one hold of one
 				// coarse sweep per hop in the first sweep: 3 × 8050 + 2 × 8050 = 40 250 ms < 45 000 ms.
+				// A flapping carrier's later holds would end inside its sub-hangMs gaps: the same
+				// emission, never held again, so it adds no hold after the first sweep.
 				fc.integer({ min: 45_000, max: 105_000 }),
 				fc.constantFrom<Other>(
 					"none",
@@ -446,61 +502,70 @@ describe("intercept property", () => {
 				),
 				fc.boolean(),
 				fc.constantFrom(0, 0.3),
-				(
-					hops,
-					voiceSlot,
-					otherSlot,
-					busySlot,
-					startMs,
-					kind,
-					busy,
-					revisitShare,
-				) => {
-					const plan = makeHopPlan(centres(hops), HALF_SPAN_HZ)
-					const vHop = voiceSlot % hops
-					const oHop = otherSlot % hops
-					const bHop = busySlot % hops
-					const durationMs = startMs + 40_000
-					const s = makeNormalisedSpec({
-						dwellMs: DWELL_MS,
-						settleMs: SETTLE_MS,
-						revisit: { share: revisitShare, maxIntervalMs: null },
-					})
-					const signals: SimSignal[] = [
-						voice(plan.hops[vHop]!.centreHz + 100_000, startMs),
-					]
-					if (oHop !== vHop)
-						signals.push(
-							...other(kind, plan.hops[oHop]!.centreHz - 150_000, durationMs),
-						)
-					// A busy channel on air from the start: 20 s overs, 0.3 s gaps.
-					if (busy && bHop !== vHop)
-						signals.push(
-							...series(
-								plan.hops[bHop]!.centreHz + 200_000,
-								20_000,
-								300,
-								durationMs,
-							),
-						)
-					const r = simulateSweep(plan, s, { ...sim, durationMs, signals })
-					const at = r.detectedAtMs[0]
-					expect(at).not.toBeNull()
-					// Worst case: the hop was just left. One coarse sweep of the other hops, each a
-					// dwell, at most one hold of one coarse sweep (a carrier's short hold: 8050 ms),
-					// at most one revisit per round(1 / 0.3) = 3 hops, then settle + 2 blocks:
-					// 7 × 1150 + 8050 + 3 × 1150 + 1150 = 20 700 ms < 28 000 ms.
-					expect(at! - startMs).toBeLessThanOrEqual(20_700)
-					// Held from detection to the end (28 s < maxHoldMs 60 s): every later block heard.
-					expect(r.heardMs[0]).toBeGreaterThanOrEqual(
-						startMs + 28_000 - at! - BLOCK_MS,
-					)
-					expect(r.holds[0]).toBe(1)
+				(...args) => {
+					interceptCase(...args)
 				},
 			),
 			{ numRuns: 100 },
 		)
 	}, 60_000)
+
+	// Regression (fast-check seed 1): voice on hop 1 at 45 s, a labelled carrier flapping 3 s on /
+	// 0.5 s off from 25.5 s on hop 6, a busy channel on hop 0. Each short hold of hop 6 ended inside
+	// a 0.5 s off gap (heard off for less than hangMs 2000 ms) and freed the frequency, so hop 6 was
+	// held for a coarse sweep (8050 ms) on three visits. Hop 1 then had only 2 full visits before
+	// 45 s, not the 3 that bracket an onset, and the call got one coarse sweep: 8500 ms heard of 28 s.
+	it("a call on a short-period sweep is held to its end beside a carrier flapping in sub-hang gaps", () => {
+		const { r, signals } = interceptCase(
+			7,
+			946,
+			181,
+			0,
+			45_000,
+			"flapping",
+			true,
+			0.3,
+		)
+		// interceptCase checked the call (signal 0) is heard from detection to its end (8500 ms
+		// before the fix).
+		expect(r.heardMs[0]).toBeGreaterThan(8_500)
+		// The flapping frequency was held once (its first emission, on air at the job start): every
+		// later hold would end inside a 0.5 s gap, which is the same emission.
+		const flapHz = signals[1]!.centreHz
+		const flapHolds = r.holds.filter((_, i) => signals[i]!.centreHz === flapHz)
+		expect(flapHolds.reduce((a, b) => a + b, 0)).toBe(1)
+	})
+})
+
+describe("a hold ending in an off gap shorter than hangMs", () => {
+	// Two hops of 1150 ms (settle 1000 + 3 blocks): one coarse sweep is 2300 ms. A labelled
+	// transmission on hop 0 is on air at the job start, so it gets one hold of one coarse sweep, cut
+	// at 3250 ms. It goes off air at `endMs`; the first block off air (the close) ends 50 ms later.
+	// A new transmission opens at 3600 ms, while hop 1 is visited. hangMs is 2000 ms: a close heard
+	// 2000 ms before the hold ends (at the bound) is a gap that frees the frequency; 1950 ms (past
+	// it) is the same emission, still barred, so the reopening is not held again.
+	for (const [endMs, heardOffMs, heldAgain] of [
+		[1_200, 2_000, true],
+		[1_250, 1_950, false],
+	] as const) {
+		it(`heard off for ${heardOffMs} ms when the hold ends: the reopening is ${heldAgain ? "held again" : "the same emission"}`, () => {
+			const plan = makeHopPlan(centres(2), HALF_SPAN_HZ)
+			const s = makeNormalisedSpec({
+				dwellMs: DWELL_MS,
+				settleMs: SETTLE_MS,
+				revisit: { share: 0, maxIntervalMs: null },
+			})
+			const hz = plan.hops[0]!.centreHz + 100_000
+			const r = simulateSweep(plan, s, {
+				...sim,
+				durationMs: 20_000,
+				signals: [voice(hz, 0, endMs), voice(hz, 3_600, 100_000)],
+			})
+			expect(r.visits[0]?.leftAtMs).toBe(3_250)
+			expect(3_250 - (endMs + BLOCK_MS)).toBe(heardOffMs)
+			expect(r.holds).toEqual([1, heldAgain ? 1 : 0])
+		})
+	}
 })
 
 describe("frequency memory recovers when a gap is observed or may have passed", () => {

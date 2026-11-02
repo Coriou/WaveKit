@@ -1005,6 +1005,19 @@ export class SweepScheduler {
 		return entry.presence >= PERSISTENT_PRESENCE ? "same" : "unheard-gap"
 	}
 
+	/**
+	 * This visit heard the frequency close and stay off air for at least `hold.hangMs` up to `now`
+	 * (a gap that long starts a new emission, see sighting).
+	 */
+	private heardGone(v: Visit, m: FrequencyMemory, now: number): boolean {
+		const closed = m.closedAt
+		return (
+			closed !== null &&
+			closed.serial === v.serial &&
+			now - closed.at >= this.spec.hold.hangMs
+		)
+	}
+
 	/** A track closed: its frequency went off air unless another open track of the visit is on it. */
 	private noteClosed(v: Visit, t: TrackInfo): void {
 		const hop = this.hops[v.hopIndex]
@@ -1576,14 +1589,18 @@ export class SweepScheduler {
 			this.longHoldLock = this.plan.hops.length
 		else if (!v.revisit && this.longHoldLock > 0) this.longHoldLock--
 		// A hold that ended with its track still on air bars the frequency from another hold
-		// during the same emission; one that ended with the track gone frees it. A follow cut
-		// short only to give the other hops their turn (deferred) bars nothing.
+		// during the same emission; one that ended with the frequency heard off air for at least
+		// `hold.hangMs` frees it. A close less than `hold.hangMs` before the hop is left is no heard
+		// gap (a flapping carrier between two flaps): the emission is presumed still on air, as a
+		// reopen within `hold.hangMs` would be. A follow cut short only to give the other hops their
+		// turn (deferred) bars nothing.
 		let openBlocks = 0
 		const barred = new Set<FrequencyMemory>()
 		for (const t of v.tracks.values()) {
 			const memory = this.memoryOf(hop, t)
 			if (t.tried && memory !== undefined) {
-				if (t.open && !t.deferred) barred.add(memory)
+				if (!t.deferred && (t.open || !this.heardGone(v, memory, now)))
+					barred.add(memory)
 				else if (!barred.has(memory)) memory.barred = false
 			}
 			// Spurs and carriers (steady with no onset ever seen) are no activity: they never need a
