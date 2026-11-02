@@ -66,7 +66,10 @@ are deterministic for a seed. The fake capture port enforces the real port's lim
 6 per source per minute, 2 s ring); `--unbounded-captures` grants every request. The
 false-discovery scenes `noise-1024k`, `noise-2400k`, `spurs-1024k` and `spurs-2400k` (120 s
 each, about 1 to 4 min) hold nothing real and add false discoveries per IQ hour; `gfsk` (60 s)
-is one narrowband GFSK burst transmitter. `--rule1 on|off` and `--rule2 on|off` switch the two
+is one narrowband GFSK burst transmitter. The quiet-band scenes `lo-spur` (the tuner moves
+between two centres under a receiver spur; `--lo-lock on|off`), `carriers` and `voice-id` (a 28 s
+NFM voice ID) also run in the vitest test. `--seeds N` runs N seeds and prints onset-to-classified
+and onset-to-identified latency per signal. `--rule1 on|off` and `--rule2 on|off` switch the two
 weak-signal admission rules for A/B runs (SCANNER.md, admission).
 
 **Usage:**
@@ -74,7 +77,7 @@ weak-signal admission rules for A/B runs (SCANNER.md, admission).
 ```bash
 pnpm exec esbuild scripts/bench/scanner-quality.ts --bundle --platform=node --format=esm \
   --packages=external --outfile=output/bench/scanner-quality.mjs
-node output/bench/scanner-quality.mjs [--scene NAME] [--seed N] [--unbounded-captures] [--rule1 on|off] [--rule2 on|off]
+node output/bench/scanner-quality.mjs [--scene NAME] [--seed N] [--seeds N] [--unbounded-captures] [--rule1 on|off] [--rule2 on|off] [--lo-lock on|off]
 node output/bench/scanner-quality.mjs --file capture.cu8 --rate 2400000 --centre 433920000 [--seconds 60]
 ```
 

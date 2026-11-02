@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+	CARRIER_STEADY_DUTY_MIN,
 	AM_VOICE_MAX_OBW_HZ,
 	AM_VOICE_MIN_OBW_HZ,
 	applyPriors,
@@ -77,6 +78,32 @@ describe("classOf", () => {
 	])("%o → %s", (over, cls) => {
 		expect(classOf(snap(over))).toBe(cls)
 	})
+	it("a steady peaked line under 4 kHz is a carrier, not unknown; keyed, short or FM-wide it is not", () => {
+		const line = (over: Partial<TrackSnapshot>) =>
+			classOf(snap({ spectralShape: "peaked", obwHz: 3_000, ...over }))
+		expect(CARRIER_STEADY_DUTY_MIN).toBe(0.9)
+		expect(line({})).toBe("carrier")
+		// 4 kHz is the GMSK floor: 3 999 Hz is a carrier, 4 000 Hz gmsk-narrow
+		expect(line({ obwHz: 3_999 })).toBe("carrier")
+		expect(line({ obwHz: 4_000 })).toBe("gmsk-narrow")
+		// duty: at the bound a carrier, under it (keyed CW) unknown as before
+		expect(line({ dutyCycle: 0.9 })).toBe("carrier")
+		expect(line({ dutyCycle: 0.89 })).toBe("unknown")
+		expect(line({ dutyCycle: Number.NaN })).toBe("unknown")
+		// a short track stays a burst; with bursts implausible a short line is not a carrier either
+		expect(line({ blocks: 4 })).toBe("ook-burst")
+		expect(
+			classOf(snap({ spectralShape: "peaked", obwHz: 3_000, blocks: 4 }), {
+				allowBurst: false,
+			}),
+		).toBe("unknown")
+		// FM voice and narrow flat-topped data are untouched
+		expect(line({ obwHz: 11_000 })).toBe("analog-fm")
+		expect(classOf(snap({ spectralShape: "flat", obwHz: 3_000 }))).toBe(
+			"fsk4-6k25",
+		)
+	})
+
 	it("does not call short tracks bursts where bursts are implausible", () => {
 		expect(classOf(snap({ blocks: 2 }), { allowBurst: false })).toBe(
 			"fsk4-12k5",

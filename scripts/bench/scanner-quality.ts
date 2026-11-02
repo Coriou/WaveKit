@@ -15,7 +15,10 @@
  *
  * Scenes: small, full, gfsk (one GFSK burst transmitter, ground truth 1 discovery), and the
  * false-discovery scenes noise-1024k, noise-2400k, spurs-1024k, spurs-2400k (120 s each, nothing
- * real on air). A/B switches for the weak-admission rules (docs/SCANNER.md): --rule1 on|off (the
+ * real on air), lo-spur (a receiver spur at a fixed offset while the tuner moves between two
+ * centres; --lo-lock on|off), carriers (steady unmodulated carriers and one NFM over) and voice-id
+ * (one 28 s NFM over with CTCSS at 20 dB). --seeds N runs N seeds and prints the onset-to-classified
+ * latency of each signal. A/B switches for the weak-admission rules (docs/SCANNER.md): --rule1 on|off (the
  * duty-aware sustained median, default on) and --rule2 on|off (repeated gate passes, default
  * off); each admission the second rule makes is printed with its pass median.
  *
@@ -38,13 +41,20 @@ import {
 import { runScanner, type IqChunkSource } from "./scanner-quality/harness.js"
 import {
 	formatReport,
+	formatRetuned,
 	formatUnscored,
 	score,
+	scoreRetuned,
 	unscoredJson,
+	type QualityReport,
 } from "./scanner-quality/metrics.js"
 import {
+	RetunedSource,
 	SceneGenerator,
 	buildScene,
+	carriersScene,
+	loSpurScene,
+	voiceIdScene,
 	fullScene,
 	gfskScene,
 	noiseScene,
@@ -86,7 +96,70 @@ const SCENES: Record<string, (seed?: number) => Scene> = {
 	"noise-2400k": seed => noiseScene(2_400_000, undefined, seed),
 	"spurs-1024k": seed => spursScene(1_024_000, undefined, seed),
 	"spurs-2400k": seed => spursScene(2_400_000, undefined, seed),
+	carriers: carriersScene,
+	"voice-id": seed => voiceIdScene(seed),
 }
+
+/**
+ * `--lo-lock on|off` (default on): off makes the store's LO-locked spur check answer "not
+ * locked", the behaviour before it existed (A/B runs).
+ */
+function loLockSwitch(): ((svc: ScannerService) => void) | undefined {
+	if (onOff("lo-lock", true)) return undefined
+	return svc => {
+		const store = (
+			svc as unknown as {
+				store: {
+					loSpurs: { check: () => { locked: boolean; partners: string[] } }
+				}
+			}
+		).store
+		store.loSpurs.check = () => ({ locked: false, partners: [] })
+	}
+}
+
+/** Middle value (even count: mean of the two central ones); null when empty. */
+const medianOf = (xs: readonly number[]): number | null => {
+	if (xs.length === 0) return null
+	const s = [...xs].sort((a, b) => a - b)
+	const m = s.length >> 1
+	return s.length % 2 === 1 ? s[m]! : (s[m - 1]! + s[m]!) / 2
+}
+
+/** Onset-to-classification latency of every signal over `--seeds N` runs (seed, seed + 1, ...). */
+function formatLatency(reports: readonly QualityReport[]): string {
+	const lines = [
+		`onset to classified (class) and identified over ${reports.length} seeds`,
+	]
+	const ids = reports[0]?.signals.map(s => s.id) ?? []
+	for (const id of ids)
+		for (const [what, pick] of [
+			[
+				"classified",
+				(s: QualityReport["signals"][number]) => s.timeToClassifyMs,
+			],
+			[
+				"identified",
+				(s: QualityReport["signals"][number]) => s.timeToIdentifyMs,
+			],
+		] as const) {
+			const xs = reports.map(r => {
+				const s = r.signals.find(x => x.id === id)
+				return s ? pick(s) : null
+			})
+			const got = xs.filter((x): x is number => x !== null)
+			const sorted = [...got].sort((a, b) => a - b)
+			lines.push(
+				`  ${id}: ${what} ${got.length}/${xs.length}, median ${fmtS(medianOf(got))}, min ${fmtS(sorted[0] ?? null)}, max ${fmtS(sorted.at(-1) ?? null)}`,
+			)
+		}
+	const falses = reports.map(r => r.totals.falseDiscoveries)
+	lines.push(`  false discoveries per seed: ${falses.join(", ")}`)
+	return lines.join("\n")
+}
+
+const fmtS = (v: number | null): string =>
+	v === null ? "-" : `${(v / 1000).toFixed(2)}s`
 
 interface RepeatAdmission {
 	sceneMs: number
@@ -214,6 +287,24 @@ async function main(): Promise<void> {
 		return
 	}
 	const name = arg("scene") ?? "small"
+	const captureLimits = !process.argv.includes("--unbounded-captures")
+	if (name === "lo-spur") {
+		const seeds = num("seeds") ?? 1
+		const base = num("seed") ?? 20_261_108
+		for (let k = 0; k < seeds; k++) {
+			const scene = loSpurScene(base + 10 * k)
+			const inspect = loLockSwitch()
+			const run = await runScanner(new RetunedSource(scene), {
+				captureLimits,
+				...(inspect ? { inspect } : {}),
+			})
+			const report = scoreRetuned(scene, run, { "nfm-voice-20dB": 1_000 })
+			process.stdout.write(
+				`${formatRetuned(report)}\n${JSON.stringify(report)}\n`,
+			)
+		}
+		return
+	}
 	const make = SCENES[name]
 	if (make === undefined) {
 		process.stderr.write(
@@ -222,10 +313,30 @@ async function main(): Promise<void> {
 		process.exit(2)
 	}
 	const seed = num("seed")
+	const seeds = num("seeds")
+	if (seeds !== undefined && seeds > 1) {
+		const reports: QualityReport[] = []
+		const first = seed ?? make().seed
+		for (let k = 0; k < seeds; k++) {
+			const scene = make(first + k)
+			const gen = new SceneGenerator(scene)
+			const run = await runScanner(
+				{
+					rateHz: scene.rateHz,
+					centreHz: scene.centreHz,
+					next: n => gen.next(n),
+					leadIn: n => gen.noiseOnly(n),
+				},
+				{ captureLimits },
+			)
+			reports.push(score(scene, run))
+		}
+		process.stdout.write(`${formatLatency(reports)}\n`)
+		return
+	}
 	const scene = make(seed)
 	const repeats: RepeatAdmission[] = []
 	const gen = new SceneGenerator(scene)
-	const captureLimits = !process.argv.includes("--unbounded-captures")
 	const run = await runScanner(
 		{
 			rateHz: scene.rateHz,

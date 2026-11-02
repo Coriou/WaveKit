@@ -20,6 +20,7 @@ import type { CaptureRecord, RunRecord } from "./harness.js"
 import {
 	SIGNAL_CLASSES,
 	type Interval,
+	type RetunedScene,
 	type Scene,
 	type SignalClass,
 	type TruthSignal,
@@ -37,6 +38,16 @@ export const DECODE_FLOOR_DB: Record<string, number> = {
 	lora: 0,
 }
 const NARROW_REACH_HZ = 2_500
+
+/**
+ * The scanner class a working classifier shows for a signal class (spectral class on the record),
+ * where one is expected: FM voice is `analog-fm`, an unmodulated carrier `carrier`.
+ */
+export const EXPECTED_CLASS: Partial<Record<SignalClass, string>> = {
+	"nfm-voice": "analog-fm",
+	"nfm-ptt": "analog-fm",
+	carrier: "carrier",
+}
 const ON_SLACK_MS = 500
 
 export type Stage =
@@ -70,6 +81,8 @@ export interface SignalScore {
 	trialPlanned: boolean
 	identified: boolean
 	timeToIdentifyMs: number | null
+	/** Onset to the first moment one of its records showed its expected class (EXPECTED_CLASS). */
+	timeToClassifyMs: number | null
 	/** The first stage that failed (null: every applicable stage passed). */
 	lostAt: Stage | null
 	/** Labels the discoveries showed (class / hint). */
@@ -138,6 +151,19 @@ function onAt(t: TruthSignal, fromMs: number, toMs: number): boolean {
 	return t.intervals.some(
 		iv => iv.startMs - ON_SLACK_MS <= toMs && iv.endMs + ON_SLACK_MS >= fromMs,
 	)
+}
+
+/**
+ * The signal was on air inside [fromMs, toMs]: strict interval overlap, no slack. A capture's IQ
+ * window is exact (pre-roll to its end), so a transmission that starts after the window closed is
+ * not in it, however close.
+ */
+export function onAirWithin(
+	t: Pick<TruthSignal, "intervals">,
+	fromMs: number,
+	toMs: number,
+): boolean {
+	return t.intervals.some(iv => iv.startMs < toMs && iv.endMs > fromMs)
 }
 
 /** On-intervals closer than 1 s are one transmission (a sensor's triple send). */
@@ -310,11 +336,17 @@ export function score(scene: Scene, run: RunRecord): QualityReport {
 			c =>
 				c.windowMs !== null &&
 				capturesSpectrally(c, t) &&
-				onAt(t, c.windowMs[0], c.windowMs[1]),
+				onAirWithin(t, c.windowMs[0], c.windowMs[1]),
 		)
 		const idTimes = captures
 			.map(c => oracleIdentify(t, c))
 			.filter((x): x is number => x !== null)
+		const want = EXPECTED_CLASS[t.class]
+		const classAt = want
+			? ds.flatMap(d =>
+					d.firstClassMs[want] === undefined ? [] : [d.firstClassMs[want]!],
+				)
+			: []
 		const firstCreated = ds.length
 			? Math.min(...ds.map(d => d.createdMs))
 			: null
@@ -358,6 +390,7 @@ export function score(scene: Scene, run: RunRecord): QualityReport {
 			trialPlanned: planned,
 			identified: idTimes.length > 0,
 			timeToIdentifyMs: idTimes.length ? Math.min(...idTimes) - firstOn : null,
+			timeToClassifyMs: classAt.length ? Math.min(...classAt) - firstOn : null,
 			lostAt: t.spurious ? null : (stages.find(([, ok]) => !ok)?.[0] ?? null),
 			labels,
 		}
@@ -459,6 +492,7 @@ export function formatReport(r: QualityReport): string {
 		["plan", 5],
 		["ident", 6],
 		["tti", 7],
+		["ttc", 7],
 		["lost at", 11],
 		["labels", 0],
 	] as const
@@ -477,6 +511,7 @@ export function formatReport(r: QualityReport): string {
 			s.expectedProtocol === null ? "-" : yn(s.trialPlanned),
 			s.expectedProtocol === null ? "-" : yn(s.identified),
 			ms(s.timeToIdentifyMs),
+			ms(s.timeToClassifyMs),
 			s.spurious ? "(spurious)" : (s.lostAt ?? "ok"),
 			s.labels.join(","),
 		]
@@ -567,4 +602,101 @@ export function unscoredJson(run: RunRecord) {
 		listed: run.finalIds.length,
 		captures: run.captures.length,
 	}
+}
+
+// === retuned scenes ===
+
+export interface RetunedSignalScore {
+	id: string
+	class: SignalClass
+	spurious: boolean
+	/** Records created for it (deleted or merged ones included). */
+	created: number
+	/** Records for it still listed at the end. */
+	live: number
+	/** Classes its records showed. */
+	labels: string[]
+	timeToClassifyMs: number | null
+}
+
+export interface RetunedReport {
+	scene: string
+	iqSeconds: number
+	signals: RetunedSignalScore[]
+	/** Records of no real signal: created, and still listed at the end. */
+	falseCreated: number
+	falseLive: number
+}
+
+/**
+ * Scores a retuned run by absolute frequency: a record belongs to the truth whose RF position
+ * (any of them, for a spur) is nearest within max(half its width, 6.25 kHz).
+ */
+export function scoreRetuned(
+	scene: RetunedScene,
+	run: RunRecord,
+	firstOnMs: Partial<Record<string, number>> = {},
+): RetunedReport {
+	const live = new Set(run.finalIds)
+	const of = new Map<string, RunRecord["discoveries"]>()
+	let falseCreated = 0
+	let falseLive = 0
+	for (const d of run.discoveries) {
+		let best: (typeof scene.truth)[number] | null = null
+		let bestD = Infinity
+		for (const t of scene.truth)
+			for (const hz of t.rfHz) {
+				const dist = Math.abs(d.centreHz - hz)
+				if (dist <= Math.max(t.bandwidthHz / 2, 6_250) && dist < bestD) {
+					best = t
+					bestD = dist
+				}
+			}
+		if (best === null || best.spurious) {
+			falseCreated++
+			if (live.has(d.id)) falseLive++
+		}
+		if (best === null) continue
+		const list = of.get(best.id) ?? []
+		list.push(d)
+		of.set(best.id, list)
+	}
+	return {
+		scene: scene.name,
+		iqSeconds: run.iqSeconds,
+		signals: scene.truth.map(t => {
+			const ds = of.get(t.id) ?? []
+			const want = EXPECTED_CLASS[t.class]
+			const at = want
+				? ds.flatMap(d =>
+						d.firstClassMs[want] === undefined ? [] : [d.firstClassMs[want]!],
+					)
+				: []
+			return {
+				id: t.id,
+				class: t.class,
+				spurious: t.spurious,
+				created: ds.length,
+				live: ds.filter(d => live.has(d.id)).length,
+				labels: [...new Set(ds.map(d => d.class))],
+				timeToClassifyMs: at.length
+					? Math.min(...at) - (firstOnMs[t.id] ?? 0)
+					: null,
+			}
+		}),
+		falseCreated,
+		falseLive,
+	}
+}
+
+export function formatRetuned(r: RetunedReport): string {
+	const lines = [`scene ${r.scene}: ${r.iqSeconds.toFixed(1)} s IQ (retuned)`]
+	for (const s of r.signals)
+		lines.push(
+			`  ${pad(s.id, 18)} ${s.spurious ? "(spurious)" : "          "} created ${s.created} live ${s.live} ttc ${ms(s.timeToClassifyMs)} labels ${s.labels.join(",") || "-"}`,
+		)
+	lines.push(
+		`false discoveries created ${r.falseCreated}, listed at the end ${r.falseLive}`,
+	)
+	return lines.join("\n")
 }

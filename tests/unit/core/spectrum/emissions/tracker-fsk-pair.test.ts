@@ -412,6 +412,34 @@ describe("tracker FSK pair fusion keeps other emitters apart", () => {
 		expect(t.snapshotOf(pairId)!.blocks).toBe(6)
 	})
 
+	it("a stronger narrow carrier in a tone's previous footprint does not take the pair's identity", () => {
+		// span [200, 266) from a 12-bin right tone; then the right tone narrows to 6 bins and a
+		// 1-bin carrier 10 dB over the tones keys up at 265, inside the bins that tone covered
+		const wide: Tone[] = [
+			{ at: 200, width: 6, db: 25 },
+			{ at: 254, width: 12, db: 25 },
+		]
+		const withCarrier: Tone[] = [
+			{ at: 200, width: 6, db: 25 },
+			{ at: 254, width: 6, db: 25 },
+			{ at: 265, width: 1, db: 35 },
+		]
+		const { ids, t } = opened([wide, wide, withCarrier, withCarrier])
+		// the pair and the carrier: 2 tracks, not 3 (the tones reopening beside a stolen pair id)
+		expect(ids.size).toBe(2)
+		const carrier = narrowest(t, ids)
+		expect(Math.abs(at(t, carrier) - 265.5)).toBeLessThanOrEqual(1)
+		const pairId = [...ids].find(id => id !== carrier)!
+		expect(t.snapshotOf(pairId)!.blocks).toBe(4)
+		// a weaker crumb at the same place is still the emission's own (one track)
+		const crumb: Tone[] = [
+			{ at: 200, width: 6, db: 25 },
+			{ at: 254, width: 6, db: 25 },
+			{ at: 265, width: 1, db: 15 },
+		]
+		expect(opened([wide, wide, crumb, crumb]).ids.size).toBe(1)
+	})
+
 	it("a pair sending one tone per block keeps its span and partners across a max-duration rollover", () => {
 		const left: Tone = { at: 200, width: 4, db: 20 }
 		const right: Tone = { at: 260, width: 4, db: 20 }

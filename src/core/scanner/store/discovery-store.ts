@@ -47,6 +47,7 @@ import {
 } from "@wavekit/api-types"
 import { familyOf } from "../classify/classifier.js"
 import { hintOf } from "../classify/hint.js"
+import { carrierAwareAnalog } from "../classify/carrier-voice.js"
 import {
 	UNKNOWN_LABEL,
 	acceptedAnalogEvidence,
@@ -120,6 +121,7 @@ import { JobCounts } from "./job-counts.js"
 import type { ConfidenceCounts } from "./job-counts.js"
 import type { StoreMirrorRemoval } from "./mirror-sink.js"
 import { PendingAdmission, admissionSnrOf } from "./pending-admission.js"
+import { LoLockedSpurs } from "../../spectrum/lo-locked-spurs.js"
 import {
 	DQ_CO_CHANNEL_MAX,
 	DQ_CONSOLIDATE_GROUP_MAX,
@@ -134,6 +136,14 @@ import {
 	DQ_IDENTITY_SPLIT_MIN_HZ,
 	DQ_IDENTITY_WEAKER_DB,
 	DQ_LOCAL_SNR_DB,
+	DQ_LO_LOCK_CENTRES_PER_RECORD,
+	DQ_LO_LOCK_MIN_SEPARATION_HZ,
+	DQ_LO_LOCK_OFFSET_HZ,
+	DQ_LO_LOCK_OFFSETS_PER_SOURCE,
+	DQ_LO_LOCK_RECORDS_PER_SOURCE,
+	DQ_LO_LOCK_SOURCES_MAX,
+	DQ_LO_LOCK_WIDTH_FLOOR_HZ,
+	DQ_LO_LOCK_WIDTH_RATIO,
 	DQ_MIN_HISTORY_OBS,
 	DQ_OBW_RATIO_MAX,
 	DQ_OVERLOAD_CREATE_SNR_DB,
@@ -215,6 +225,14 @@ export interface DiscoveryFilter {
 	toleranceHz?: number
 }
 /** Optional context for `ingest`. */
+/**
+ * An observation as the store ingests it: `tunedCentreHz` is the tuned centre of the track's epoch
+ * when the caller knows it (LO-locked spur detection); absent, nothing is LO-locked.
+ */
+export interface StoreObservationInput extends ObservationInput {
+	tunedCentreHz?: number
+}
+
 export interface IngestOptions {
 	/**
 	 * Accepted decode the caller is about to append to this observation. With
@@ -974,6 +992,19 @@ export class DiscoveryStore
 	private readonly now: () => number
 	/** DQ 1.4: weak undecoded candidates, memory only. */
 	private readonly pending: PendingAdmission
+	/** LO-locked spurs: the offsets from the tuned centre records were sighted at, memory only. */
+	private readonly loSpurs = new LoLockedSpurs({
+		offsetHz: DQ_LO_LOCK_OFFSET_HZ,
+		minSeparationHz: DQ_LO_LOCK_MIN_SEPARATION_HZ,
+		widthRatio: DQ_LO_LOCK_WIDTH_RATIO,
+		widthFloorHz: DQ_LO_LOCK_WIDTH_FLOOR_HZ,
+		recordsPerSource: DQ_LO_LOCK_RECORDS_PER_SOURCE,
+		centresPerRecord: DQ_LO_LOCK_CENTRES_PER_RECORD,
+		offsetsPerSource: DQ_LO_LOCK_OFFSETS_PER_SOURCE,
+		sourcesMax: DQ_LO_LOCK_SOURCES_MAX,
+	})
+	/** Evidence-free records an LO-locked sighting showed to be the same spur, for the owner to retire. */
+	private loRetirees = new Set<string>()
 	private lastPendingSweep = Number.NEGATIVE_INFINITY
 	private readonly newId: () => string
 	/** Accepted for the frame display role (R 2.5). Creation follows `track.gate`. */
@@ -1201,7 +1232,95 @@ export class DiscoveryStore
 	 * placement. A known observation re-ingests whatever a later snapshot's gate
 	 * says, so evidence that follows still finds its discovery.
 	 */
-	ingest(input: ObservationInput, opts: IngestOptions = {}): Ingested {
+	ingest(input: StoreObservationInput, opts: IngestOptions = {}): Ingested {
+		const res = this.ingestObservation(input, opts)
+		// LO-locked spurs: remember the offset from the tuned centre each evidence-free sighting
+		// landed at, so a later sighting at the same offset from another centre is known as the spur.
+		if (
+			res.discoveryId !== null &&
+			res.change !== "transient" &&
+			input.tunedCentreHz !== undefined &&
+			!decodeProvesSignal(input, opts.decode)
+		)
+			this.loSpurs.note(res.discoveryId, {
+				sourceId: input.sourceId,
+				tunedHz: input.tunedCentreHz,
+				centreHz: input.track.centreHz,
+				obwHz: input.track.obwHz,
+			})
+		return res
+	}
+
+	/**
+	 * Evidence-free records an LO-locked sighting proved to be a receiver spur since the last call,
+	 * still evidence-free now. The owner deletes them (with their evidence folders); the store
+	 * never reports them again unless the spur is sighted anew from another centre.
+	 */
+	takeLoLockedRetirees(): string[] {
+		const out = [...this.loRetirees].filter(id => this.loPartnerEligible(id))
+		this.loRetirees.clear()
+		return out
+	}
+
+	/** LO-locked spur offsets learned for a source (Hz from the tuned centre; tests, diagnostics). */
+	loLockedOffsets(sourceId: string): number[] {
+		return this.loSpurs.learnedOffsets(sourceId)
+	}
+
+	/**
+	 * May record `id` stand as an LO-locked spur's earlier sighting (and be retired)? Only a record
+	 * with nothing that proves a signal or that an operator gave it: not decoded, no identity, not a
+	 * decode anchor, no proof, no recordings or IQ evidence, no operator label, note, Ignore or
+	 * Keep, no kept recording. Anything else is a real emitter (or the operator's) and stays.
+	 */
+	private loPartnerEligible(id: string): boolean {
+		const d = this.discoveries.get(id)
+		if (d === undefined) return false
+		if (
+			d.confidence === "decoded" ||
+			d.identity !== undefined ||
+			d.anchor !== undefined ||
+			d.evidence.recordings > 0 ||
+			d.evidence.iq
+		)
+			return false
+		const op = d.operator
+		if (
+			op !== undefined &&
+			(op.label !== undefined ||
+				op.notes !== undefined ||
+				op.lockout === true ||
+				op.keep === true)
+		)
+			return false
+		if (this.holdsKept(id)) return false
+		return this.discoveryView(d).proof === null
+	}
+
+	/**
+	 * LO-locked spurs: an evidence-less sighting at the offset from its tuned centre where an
+	 * evidence-free record was sighted from another centre (or at a learned spur offset) is the
+	 * receiver's own spur, moving with the LO. Its eligible earlier records are queued for retiring.
+	 */
+	private loLocked(input: StoreObservationInput): boolean {
+		if (input.tunedCentreHz === undefined) return false
+		const res = this.loSpurs.check(
+			{
+				sourceId: input.sourceId,
+				tunedHz: input.tunedCentreHz,
+				centreHz: input.track.centreHz,
+				obwHz: input.track.obwHz,
+			},
+			id => this.loPartnerEligible(id),
+		)
+		for (const id of res.partners) this.loRetirees.add(id)
+		return res.locked
+	}
+
+	private ingestObservation(
+		input: StoreObservationInput,
+		opts: IngestOptions,
+	): Ingested {
 		// Read (and, on a close, released) before any early return, so every close path releases.
 		const held = this.heldByAnchor(input)
 		// A sliced restore is between turns: the store is half built, so an observation is not
@@ -1272,9 +1391,12 @@ export class DiscoveryStore
 			) !== undefined
 		)
 			return TRANSIENT
-		const admission = decodeProvesSignal(input, opts.decode)
-			? "create"
-			: this.admits(input)
+		const evidenceLess = !decodeProvesSignal(input, opts.decode)
+		if (evidenceLess && this.loLocked(input)) {
+			this.pending.dropRun(input.sourceId, input.id)
+			return TRANSIENT
+		}
+		const admission = evidenceLess ? this.admits(input) : "create"
 		if (admission === "refuse") return TRANSIENT
 		const created = this.createFrom(input, label, target.coChannel)
 		// A threshold, overload or decode create consumes the bucket's entry. A promotion
@@ -2408,8 +2530,14 @@ export class DiscoveryStore
 		try {
 			const known = this.observationIndex.get(observationId)
 			if (known === undefined) return false
-			const accepted = acceptedAnalogEvidence(row)
-			if (accepted === undefined) return false
+			const valid = acceptedAnalogEvidence(row)
+			if (valid === undefined) return false
+			// A tone-less NFM "heard" row on a record that measures as a steady carrier is carrier
+			// evidence, not voice (a carrier strong enough to open the squelch).
+			const accepted = carrierAwareAnalog(
+				valid,
+				this.discoveries.get(known.discoveryId)?.class,
+			)
 			const armed = this.armWatchers(known.discoveryId)
 			const before = this.peekProof(observationId)
 			if (!this.rememberAnalog(observationId, accepted)) {
@@ -6198,6 +6326,8 @@ export class DiscoveryStore
 		const d = this.discoveries.get(id)
 		if (d === undefined) return
 		// The outer delete/merge journals removal; publishing here would nest a commit.
+		this.loSpurs.forget(id)
+		this.loRetirees.delete(id)
 		this.anchorWindows.delete(id)
 		this.anchorIdentity.delete(id)
 		this.anchorReplayed.delete(id)

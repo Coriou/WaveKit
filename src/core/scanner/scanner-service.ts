@@ -309,7 +309,10 @@ import type {
 	UndecodedReason,
 } from "./types.js"
 import { AMBIENT_PAIR_MS } from "./types.js"
-import { DQ_DC_ADMIT_HZ } from "./detection-quality-contract.js"
+import {
+	DQ_ANALOG_EARLY_CAPTURE_MS,
+	DQ_DC_ADMIT_HZ,
+} from "./detection-quality-contract.js"
 import {
 	coverageFingerprint,
 	createCoverageRefresh,
@@ -3399,6 +3402,7 @@ export class ScannerService extends EventEmitter {
 			!synthetic && !late && this.needsConfirm(live, track, !closing)
 		for (const d of covering) d.onTrack(live, track, needs)
 		if (!closing) {
+			this.endAnalogCaptureEarly(live, track)
 			this.refineLiveChannel(live, track)
 			return
 		}
@@ -3493,6 +3497,12 @@ export class ScannerService extends EventEmitter {
 				)
 			}
 		}
+		// LO-locked spurs: an evidence-free record the store proved to be the receiver's own spur
+		// (seen at the same offset from two tuned centres) is deleted like an operator delete.
+		for (const id of this.store.takeLoLockedRetirees())
+			this.deleteDiscovery(id).catch((err: unknown) =>
+				this.log.warn({ err }, "Retiring an LO-locked spur record failed"),
+			)
 	}
 
 	/**
@@ -3518,6 +3528,9 @@ export class ScannerService extends EventEmitter {
 		const res = this.store.ingest(
 			{
 				...(dcCentred ? { dcCentred: true } : {}),
+				...(tuned !== undefined && tuned.epoch === track.epoch
+					? { tunedCentreHz: tuned.centreHz }
+					: {}),
 				id: live.observationId,
 				sourceId: live.sourceId,
 				jobIds: live.jobIds,
@@ -5532,6 +5545,33 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/** The captured track closed: the capture finishes now. */
+	/**
+	 * Early analog classification: an open detection capture of a track classed `analog-fm` ends
+	 * once the track has been on for `DQ_ANALOG_EARLY_CAPTURE_MS`, so its analog trial answers
+	 * while the over is still on (a long voice ID was otherwise classified only after the 4 s
+	 * capture cap, or at its close). The capture is not asked again for this observation.
+	 */
+	private endAnalogCaptureEarly(
+		live: LiveObservation,
+		track: TrackSnapshot,
+	): void {
+		if (live.classification.class !== "analog-fm") return
+		const hit = this.iqCaptureOf.get(live.observationId)
+		if (!hit) return
+		const epoch = this.spectrum.engine(live.sourceId)?.currentEpoch()
+		if (!epoch || epoch.epoch !== track.epoch || !(epoch.sampleRateHz > 0))
+			return
+		const onMs =
+			((track.lastSample - track.startSample) * 1000) / epoch.sampleRateHz
+		if (!(onMs >= DQ_ANALOG_EARLY_CAPTURE_MS)) return
+		this.iqCaptureOf.delete(live.observationId)
+		try {
+			this.deps.iqCapture?.end(hit.captureId)
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "IQ capture end failed")
+		}
+	}
+
 	private endIqCapture(live: LiveObservation): void {
 		const hit = this.iqCaptureOf.get(live.observationId)
 		this.iqCaptureOf.delete(live.observationId)

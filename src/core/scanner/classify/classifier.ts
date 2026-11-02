@@ -25,6 +25,15 @@ const GMSK_MIN_HZ = 4000
 const ANALOG_MIN_HZ = 7500
 const ANALOG_MAX_HZ = 18_000
 const DEFAULT_RBW_HZ = 1000
+/**
+ * A steady line (an unmodulated carrier, a clock harmonic) wider than 2 bins at -6 dB, from drift,
+ * phase noise or a centre between bins, still reads under `GMSK_MIN_HZ` at -20 dB: a Hann main
+ * lobe is ±2 bins, at most 4 × 1.41 kHz = 5.66 kHz at the coarsest default bin, typically 3 to 4
+ * kHz. It is a `carrier` when it is on at least 90 % of the time (keyed CW at about 50 % and
+ * data bursts stay `unknown`); FM voice (7.5 kHz and up) and narrow digital modes (flat tops) are
+ * never this narrow and peaked.
+ */
+export const CARRIER_STEADY_DUTY_MIN = 0.9
 const LEAK_MIN_DB = 20
 
 export const CLASS_HYPOTHESES: Readonly<
@@ -243,6 +252,13 @@ export function classOf(
 		if (track.obwHz <= FSK2_WIDE_MAX_HZ) return "fsk2-wide"
 		return "unknown"
 	}
+	if (
+		track.obwHz < GMSK_MIN_HZ &&
+		track.blocks > BURST_MAX_BLOCKS &&
+		Number.isFinite(track.dutyCycle) &&
+		track.dutyCycle >= CARRIER_STEADY_DUTY_MIN
+	)
+		return "carrier"
 	if (track.obwHz >= GMSK_MIN_HZ && track.obwHz < ANALOG_MIN_HZ)
 		return "gmsk-narrow"
 	if (track.obwHz >= ANALOG_MIN_HZ && track.obwHz <= ANALOG_MAX_HZ)

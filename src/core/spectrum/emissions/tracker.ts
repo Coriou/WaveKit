@@ -1108,16 +1108,21 @@ export class Tracker {
 			(gap < member &&
 				(CLING_WIDTH_RATIO * (s.endBin - s.startBin) >= member ||
 					this.midHump(g, k, n, gap) ||
-					this.inPart(g, s)))
+					this.inPart(g, s, p)))
 		)
 			this.fuseGroup[k] = g
 	}
 
 	/**
 	 * `s` lies inside the bins one part of group `g`'s established track covered on its last fused
-	 * block: a fragment of the emission itself (a LoRa chirp's tail), co-channel with it.
+	 * block: a fragment of the emission itself (a LoRa chirp's tail), co-channel with it. The old
+	 * footprint is no evidence for a piece stronger than the member `p` it clings to: a fragment
+	 * of an emission does not outshine the emission, while an independent carrier keying up where
+	 * a tone used to reach would otherwise take the pair's identity (the tones then reopen as new
+	 * tracks). Such a piece joins only by abutment or width.
 	 */
-	private inPart(g: number, s: Segment): boolean {
+	private inPart(g: number, s: Segment, p: Segment): boolean {
+		if (!(s.peakDb <= p.peakDb)) return false
 		const t = this.fuseTrack[g]
 		if (t === null || t === undefined) return false
 		for (let i = 0; i < t.partCount; i++)

@@ -260,3 +260,48 @@ export const DQ_CONSOLIDATE_SCAN_MAX = 32
  * records keep `DQ_OBW_RATIO_MAX` (2).
  */
 export const DQ_YOUNG_OBW_RATIO = 3
+
+/**
+ * LO-locked spurs: two sightings sit at the same offset from their tuned centres when their
+ * offsets agree within 1 200 Hz. A steady line's centroid reads within half an FFT bin, and the
+ * engine's default bin (fs / 1 000 rounded to a power of two) is at most 1 000 × √2 = 1.41 kHz:
+ * two readings of ±0.6 kHz each differ by at most 1.2 kHz.
+ */
+export const DQ_LO_LOCK_OFFSET_HZ = 1_200
+
+/**
+ * LO-locked spurs: two tuned centres count as different only 12 500 Hz or more apart (one
+ * land-mobile channel). Closer, the line's two RF positions share a channel and association
+ * already keeps them on one record, so the offset says nothing about the LO.
+ */
+export const DQ_LO_LOCK_MIN_SEPARATION_HZ = 12_500
+
+/**
+ * LO-locked spurs: the two sightings' widths, each floored at 3 000 Hz (a line reads 1 to 3 bins
+ * of up to 1.41 kHz: 4.2 kHz at most, so 3 kHz keeps line readings comparable), are within a
+ * factor of 2 of each other. A wide emission at the spur's offset is not the spur.
+ */
+export const DQ_LO_LOCK_WIDTH_RATIO = 2
+export const DQ_LO_LOCK_WIDTH_FLOOR_HZ = 3_000
+
+/**
+ * LO-locked spurs, memory only, per source: 512 records remembered (least recently sighted
+ * dropped first), 4 tuned centres each, and 64 learned spur offsets (oldest dropped first).
+ * 512 × (4 × 24 B + 64 B) ≈ 82 kB per source; at most 64 sources (the pending-capture cap):
+ * about 5.2 MB in the worst case.
+ */
+export const DQ_LO_LOCK_RECORDS_PER_SOURCE = 512
+export const DQ_LO_LOCK_CENTRES_PER_RECORD = 4
+export const DQ_LO_LOCK_OFFSETS_PER_SOURCE = 64
+export const DQ_LO_LOCK_SOURCES_MAX = 64
+
+/**
+ * Early analog classification: a detection capture of a track the spectral classifier calls
+ * `analog-fm` ends once the track has been on for 2 000 ms, not at the 4 000 ms capture cap, so
+ * its analog trial (tone and voice) runs while the over is still on. The trial qualifies a CTCSS
+ * tone or DCS code from 750 ms of audio (DCS_MIN_AUDIO_SECONDS) and judges voice from the median
+ * of its frames: 2 000 ms is 2.7 times the tone minimum and 8 syllables at a 4 Hz syllabic rate.
+ * With the 500 ms pre-roll the capture holds 2 500 ms; the trial result lands about 2.5 to 3 s
+ * after onset instead of 4.5 s. A track that closes sooner ends its capture at the close, as before.
+ */
+export const DQ_ANALOG_EARLY_CAPTURE_MS = 2_000

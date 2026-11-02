@@ -20,6 +20,7 @@ export type SignalClass =
 	| "lora"
 	| "cw"
 	| "gfsk-burst"
+	| "carrier"
 	| "birdie"
 	| "dc"
 
@@ -34,6 +35,7 @@ export const SIGNAL_CLASSES: readonly SignalClass[] = [
 	"lora",
 	"cw",
 	"gfsk-burst",
+	"carrier",
 	"birdie",
 	"dc",
 ]
@@ -98,6 +100,9 @@ const NOMINAL: Record<
 	lora: { bandwidthHz: 125_000, protocol: "lora", spurious: false },
 	cw: { bandwidthHz: 200, protocol: null, spurious: false },
 	"gfsk-burst": { bandwidthHz: 2_000, protocol: null, spurious: false },
+	// A steady unmodulated carrier on air (a clock harmonic radiated by a nearby device): real RF,
+	// fixed in frequency, no modulation. Not a receiver artefact, so not spurious; not voice.
+	carrier: { bandwidthHz: 100, protocol: null, spurious: false },
 	birdie: { bandwidthHz: 100, protocol: null, spurious: true },
 	dc: { bandwidthHz: 2_000, protocol: null, spurious: true },
 }
@@ -405,6 +410,70 @@ export function gfskScene(seed = 20_261_106): Scene {
 		seed,
 		noiseSigma: 0.03,
 		signals: [{ class: "gfsk-burst", offsetHz: 150_000, snrDb: 21, intervals }],
+	})
+}
+
+/**
+ * A voice ID on a quiet band (synthetic): one 28 s NFM over with a CTCSS tone at 20 dB, 1 s to
+ * 29 s of a 31 s scene at 1.024 Msps centred at 439 MHz (70 cm, no ISM allocation), +150 kHz
+ * from centre. Measures onset-to-classification latency of a long analog over.
+ */
+export function voiceIdScene(seed = 20_261_109, snrDb = 20): Scene {
+	return buildScene({
+		name: "voice-id",
+		rateHz: 1_024_000,
+		centreHz: 439_000_000,
+		durationMs: 31_000,
+		seed,
+		noiseSigma: 0.03,
+		signals: [
+			{
+				class: "nfm-voice",
+				offsetHz: 150_000,
+				snrDb,
+				intervals: [{ startMs: 1_000, endMs: 29_000 }],
+			},
+		],
+	})
+}
+
+/**
+ * Steady unmodulated carriers (clock harmonics) on a quiet band (synthetic): 20 s at 1.024 Msps
+ * centred at 439 MHz, carriers at 20, 30 and 40 dB on all the time, a carrier at 20 dB 1 kHz off a
+ * bin centre, and one NFM voice over at 20 dB (2 s to 18 s) for contrast. Ground truth: the
+ * carriers show as `carrier`, never as FM voice; the voice shows as `analog-fm`.
+ */
+export function carriersScene(seed = 20_261_110): Scene {
+	const ms = 20_000
+	return buildScene({
+		name: "carriers",
+		rateHz: 1_024_000,
+		centreHz: 439_000_000,
+		durationMs: ms,
+		seed,
+		noiseSigma: 0.03,
+		signals: [
+			{
+				class: "carrier",
+				offsetHz: -300_000,
+				snrDb: 20,
+				intervals: ALWAYS(ms),
+			},
+			{
+				class: "carrier",
+				offsetHz: -175_000,
+				snrDb: 30,
+				intervals: ALWAYS(ms),
+			},
+			{ class: "carrier", offsetHz: 62_500, snrDb: 40, intervals: ALWAYS(ms) },
+			{ class: "carrier", offsetHz: 250_500, snrDb: 20, intervals: ALWAYS(ms) },
+			{
+				class: "nfm-voice",
+				offsetHz: -50_000,
+				snrDb: 20,
+				intervals: [{ startMs: 2_000, endMs: 18_000 }],
+			},
+		],
 	})
 }
 
@@ -797,9 +866,166 @@ function emitterFor(t: TruthSignal, scene: Scene, rng: () => number): Emitter {
 				},
 			}
 		}
+		case "carrier":
 		case "birdie":
 			return { ...base, fill: () => undefined }
 		case "dc":
 			return { ...base, dc: true, fill: () => undefined }
+	}
+}
+
+// === retuned scenes (the tuner moves; receiver spurs move with it, real RF does not) ===
+
+/** One stretch at one tuned centre, from `fromMs` of the run (its own scene, offsets from that centre). */
+export interface RetunedSegment {
+	fromMs: number
+	centreHz: number
+	scene: Scene
+}
+
+/** Ground truth of a retuned run: absolute frequencies (a receiver spur has one per centre). */
+export interface RetunedTruth {
+	id: string
+	class: SignalClass
+	snrDb: number
+	bandwidthHz: number
+	/** RF frequencies it shows at (Hz). */
+	rfHz: readonly number[]
+	/** A receiver artefact: every discovery of it is false. */
+	spurious: boolean
+}
+
+export interface RetunedScene {
+	name: string
+	rateHz: number
+	durationMs: number
+	segments: readonly RetunedSegment[]
+	truth: readonly RetunedTruth[]
+}
+
+/**
+ * LO-locked spur across centres (synthetic): 1.024 Msps, tuned at C1 for 12 s, C1 + 200 kHz for
+ * 12 s, then back at C1 for 8 s. A receiver spur at -250 kHz from the tuned centre (20 dB, on all
+ * the time) moves with the tuner: C1 - 250 kHz, then C1 - 50 kHz. Two real emitters stay put: a
+ * steady unmodulated carrier at C1 + 150 kHz (20 dB) and an NFM voice carrier with CTCSS at
+ * C1 - 100 kHz (20 dB, on from 1 s to 30 s). Ground truth: 2 discoveries, the spur none.
+ */
+export function loSpurScene(seed = 20_261_108): RetunedScene {
+	const rateHz = 1_024_000
+	const c1 = 433_400_000
+	const c2 = c1 + 200_000
+	const spurOffset = -250_000
+	const carrierHz = c1 + 150_000
+	const voiceHz = c1 - 100_000
+	const plan = [
+		{ fromMs: 0, toMs: 12_000, centreHz: c1 },
+		{ fromMs: 12_000, toMs: 24_000, centreHz: c2 },
+		{ fromMs: 24_000, toMs: 32_000, centreHz: c1 },
+	]
+	const voiceOn = { startMs: 1_000, endMs: 30_000 }
+	const segments = plan.map((p, i): RetunedSegment => {
+		const ms = p.toMs - p.fromMs
+		const local = (iv: Interval): Interval[] => {
+			const a = Math.max(iv.startMs, p.fromMs) - p.fromMs
+			const b = Math.min(iv.endMs, p.toMs) - p.fromMs
+			return a < b ? [{ startMs: a, endMs: b }] : []
+		}
+		return {
+			fromMs: p.fromMs,
+			centreHz: p.centreHz,
+			scene: buildScene({
+				name: `lo-spur-${i + 1}`,
+				rateHz,
+				centreHz: p.centreHz,
+				durationMs: ms,
+				seed: seed + i,
+				noiseSigma: 0.03,
+				signals: [
+					{
+						class: "birdie",
+						offsetHz: spurOffset,
+						snrDb: 20,
+						intervals: ALWAYS(ms),
+					},
+					{
+						class: "carrier",
+						offsetHz: carrierHz - p.centreHz,
+						snrDb: 20,
+						intervals: ALWAYS(ms),
+					},
+					{
+						class: "nfm-voice",
+						offsetHz: voiceHz - p.centreHz,
+						snrDb: 20,
+						intervals: local(voiceOn),
+					},
+				],
+			}),
+		}
+	})
+	return {
+		name: "lo-spur",
+		rateHz,
+		durationMs: plan.at(-1)!.toMs,
+		segments,
+		truth: [
+			{
+				id: "lo-spur-20dB",
+				class: "birdie",
+				snrDb: 20,
+				bandwidthHz: 100,
+				rfHz: [c1 + spurOffset, c2 + spurOffset],
+				spurious: true,
+			},
+			{
+				id: "carrier-20dB",
+				class: "carrier",
+				snrDb: 20,
+				bandwidthHz: 100,
+				rfHz: [carrierHz],
+				spurious: false,
+			},
+			{
+				id: "nfm-voice-20dB",
+				class: "nfm-voice",
+				snrDb: 20,
+				bandwidthHz: 11_000,
+				rfHz: [voiceHz],
+				spurious: false,
+			},
+		],
+	}
+}
+
+/** Plays a retuned scene segment by segment and says which centre each moment is tuned to. */
+export class RetunedSource {
+	readonly rateHz: number
+	readonly centreHz: number
+	private readonly gens: SceneGenerator[]
+	private index = 0
+
+	constructor(readonly scene: RetunedScene) {
+		this.rateHz = scene.rateHz
+		this.centreHz = scene.segments[0]!.centreHz
+		this.gens = scene.segments.map(s => new SceneGenerator(s.scene))
+	}
+
+	centreAt(ms: number): number {
+		let c = this.scene.segments[0]!.centreHz
+		for (const s of this.scene.segments) if (ms >= s.fromMs) c = s.centreHz
+		return c
+	}
+
+	next(n: number): Buffer | null {
+		while (this.index < this.gens.length) {
+			const b = this.gens[this.index]!.next(n)
+			if (b) return b
+			this.index++
+		}
+		return null
+	}
+
+	leadIn(n: number): Buffer {
+		return this.gens[0]!.noiseOnly(n)
 	}
 }

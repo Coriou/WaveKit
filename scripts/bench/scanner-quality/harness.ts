@@ -88,6 +88,8 @@ export interface DiscoveryRecord {
 	protocol: string
 	hint: string | null
 	observationCount: number
+	/** Scene ms each class was first shown on this record (class-to-classification latency). */
+	firstClassMs: Record<string, number>
 	/** Deleted or merged away by the end of the run. */
 	gone: boolean
 	mergedInto: string | null
@@ -138,6 +140,11 @@ export interface IqChunkSource {
 	next(samples: number): Buffer | null
 	/** Noise for the lead-in before scene time 0 and the tail after it (not part of the scene). */
 	leadIn(samples: number): Buffer
+	/**
+	 * Tuned centre at scene time `ms` (Hz); absent, `centreHz` throughout. When it changes the
+	 * harness retunes the source like an external tuner write (caps change, a new epoch).
+	 */
+	centreAt?(ms: number): number
 }
 
 class Fanout extends EventEmitter {
@@ -522,7 +529,10 @@ export async function runScanner(
 		})
 		const record = (d: Discovery, gone: boolean, mergedInto: string | null) => {
 			const prev = discoveries.get(d.id)
+			const firstClassMs = { ...(prev?.firstClassMs ?? {}) }
+			firstClassMs[d.class] ??= sceneNow()
 			discoveries.set(d.id, {
+				firstClassMs,
 				id: d.id,
 				createdMs: prev?.createdMs ?? sceneNow(),
 				lastEventMs: sceneNow(),
@@ -584,7 +594,15 @@ export async function runScanner(
 		engineSampleAtZero = fedSamples - branchAtSample
 		let fedSceneSamples = 0
 		let lastProgress = 0
+		let tunedHz = source.centreHz
 		for (;;) {
+			const centre = source.centreAt?.((fedSceneSamples * 1000) / fs)
+			if (centre !== undefined && centre !== tunedHz) {
+				tunedHz = centre
+				tuner.states.get(SOURCE)!.frequency = centre
+				sources.setCaps(SOURCE, { centerFreq: centre })
+				await settle()
+			}
 			const bytes = source.next(chunk)
 			if (!bytes) break
 			fedSceneSamples += bytes.length / 2

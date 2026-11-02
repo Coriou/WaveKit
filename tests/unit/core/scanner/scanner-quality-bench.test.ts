@@ -25,9 +25,11 @@ import { describe, expect, it } from "vitest"
 import { runScanner } from "../../../../scripts/bench/scanner-quality/harness.js"
 import {
 	capturesSpectrally,
+	onAirWithin,
 	oracleIdentify,
 	reachHz,
 	score,
+	scoreRetuned,
 	type QualityReport,
 } from "../../../../scripts/bench/scanner-quality/metrics.js"
 import type {
@@ -35,9 +37,13 @@ import type {
 	TrackRecord,
 } from "../../../../scripts/bench/scanner-quality/harness.js"
 import {
+	RetunedSource,
 	SceneGenerator,
 	amplitudeFor,
 	buildScene,
+	carriersScene,
+	loSpurScene,
+	voiceIdScene,
 	gfskScene,
 	noiseScene,
 	smallScene,
@@ -250,6 +256,64 @@ describe("scanner quality benchmark scene", () => {
 		const by = (cls: string) => report.signals.find(x => x.class === cls)!
 		expect(by("nfm-voice").captured).toBe(true)
 		expect(by("dmr").captured).toBe(false)
+	})
+
+	it("a capture window counts a transmission only on strict overlap, no slack", () => {
+		const t = { intervals: [{ startMs: 4_400, endMs: 5_400 }] }
+		// window [0, 4000]: the transmission starts 400 ms after it closed
+		expect(onAirWithin(t, 0, 4_000)).toBe(false)
+		// touching edges hold no IQ of it; 1 ms of overlap does
+		expect(onAirWithin(t, 0, 4_400)).toBe(false)
+		expect(onAirWithin(t, 0, 4_401)).toBe(true)
+		expect(onAirWithin(t, 5_400, 6_000)).toBe(false)
+		expect(onAirWithin(t, 5_399, 6_000)).toBe(true)
+		// scored end to end: the capture does not count for the later signal
+		const scene = buildScene({
+			name: "strict",
+			rateHz: 1_024_000,
+			centreHz: 433_550_000,
+			durationMs: 6_000,
+			seed: 1,
+			noiseSigma: 0.03,
+			signals: [
+				{
+					class: "nfm-voice",
+					offsetHz: -200_000,
+					snrDb: 20,
+					intervals: [{ startMs: 4_400, endMs: 5_400 }],
+				},
+			],
+		})
+		const c: CaptureRecord = {
+			captureId: "c",
+			observationId: null,
+			requestedMs: 0,
+			trackStartMs: 0,
+			windowStartMs: 0,
+			rfHz: scene.centreHz - 200_000,
+			rateHz: 48_000,
+			endedMs: 4_000,
+			finishedMs: 4_000,
+			windowMs: [0, 4_000],
+			discoveryId: null,
+			trials: [],
+			skipped: [],
+			edge: false,
+		}
+		const report = score(scene, {
+			rateHz: scene.rateHz,
+			centreHz: scene.centreHz,
+			iqSeconds: 6,
+			cpuSeconds: 0,
+			wallSeconds: 0,
+			tracks: [],
+			discoveries: [],
+			captures: [c],
+			finalIds: [],
+			transients: 0,
+			refusedCaptures: { busy: 0, rateLimited: 0 },
+		})
+		expect(report.signals[0]!.captured).toBe(false)
 	})
 
 	it("a capture counts for a signal its passband overlaps", () => {
@@ -624,4 +688,63 @@ describe("scanner quality benchmark, FSK scene (real scanner)", () => {
 			3_000,
 		)
 	})
+})
+
+const runScene = async (scene: Scene): Promise<QualityReport> => {
+	const gen = new SceneGenerator(scene)
+	const run = await runScanner({
+		rateHz: scene.rateHz,
+		centreHz: scene.centreHz,
+		next: n => gen.next(n),
+		leadIn: n => gen.noiseOnly(n),
+	})
+	return score(scene, run)
+}
+
+describe("scanner quality benchmark, quiet band (real scanner, port limits)", () => {
+	it("a receiver spur at a fixed offset across two centres leaves no discovery; real emitters stay one record each", async () => {
+		const scene = loSpurScene()
+		const run = await runScanner(new RetunedSource(scene))
+		const r = scoreRetuned(scene, run, { "nfm-voice-20dB": 1_000 })
+		const by = (id: string) => r.signals.find(s => s.id === id)!
+		// created at the first centre before anything showed it moves with the LO, retired at the
+		// second, never created again when the tuner returns
+		expect(by("lo-spur-20dB").created).toBeLessThanOrEqual(1)
+		expect(by("lo-spur-20dB").live).toBe(0)
+		expect(r.falseLive).toBe(0)
+		for (const id of ["carrier-20dB", "nfm-voice-20dB"]) {
+			expect({ id, created: by(id).created }).toEqual({ id, created: 1 })
+			expect({ id, live: by(id).live }).toEqual({ id, live: 1 })
+		}
+		expect(by("carrier-20dB").labels).toEqual(["carrier"])
+		expect(by("nfm-voice-20dB").labels).toEqual(["analog-fm"])
+	}, 120_000)
+
+	it("steady carriers show as carriers, never FM voice; the NFM over is analog-fm", async () => {
+		const r = await runScene(carriersScene())
+		for (const s of r.signals) {
+			expect({ id: s.id, discovered: s.discovered }).toEqual({
+				id: s.id,
+				discovered: true,
+			})
+			const want =
+				s.class === "carrier" ? "carrier/carrier" : "analog-fm/analog-fm"
+			expect({ id: s.id, labels: s.labels }).toEqual({
+				id: s.id,
+				labels: [want],
+			})
+		}
+		expect(r.totals.falseDiscoveries).toBe(0)
+		expect(r.totals.splitSignals).toBe(0)
+	}, 60_000)
+
+	it("a 28 s NFM voice ID at 20 dB is classified at once and identified within 3.5 s of onset", async () => {
+		const r = await runScene(voiceIdScene())
+		const v = r.signals[0]!
+		expect(v.timeToClassifyMs!).toBeLessThanOrEqual(1_000)
+		// the capture ends after 2 s of the over (was the 4 s cap: identified at 4.5 s)
+		expect(v.identified).toBe(true)
+		expect(v.timeToIdentifyMs!).toBeLessThanOrEqual(3_500)
+		expect(r.totals.falseDiscoveries).toBe(0)
+	}, 60_000)
 })
