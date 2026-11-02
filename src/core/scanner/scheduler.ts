@@ -1397,12 +1397,17 @@ export class SweepScheduler {
 			t.followOnAir &&
 			!t.steady &&
 			this.spec.hold.policy === "hold" &&
-			this.spec.signalsOnly !== true &&
-			this.followCap(t).cap > this.now()
+			this.spec.signalsOnly !== true
 		) {
-			t.tried = true
-			this.startFollow(id, t)
-			return [{ type: "stop-probes" }]
+			const follow = this.followCap(t)
+			if (follow.cap > this.now()) {
+				t.tried = true
+				this.startFollow(id, t)
+				return [{ type: "stop-probes" }]
+			}
+			// No time left to follow it here. Held back only by the lock (deferred), its frequency
+			// stays un-barred (endVisit) and its next visit follows it once the lock clears.
+			if (follow.deferred) t.deferred = true
 		}
 		return this.afterProbe()
 	}

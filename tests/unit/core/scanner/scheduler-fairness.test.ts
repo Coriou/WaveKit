@@ -3,6 +3,7 @@ import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
 	CONFIRM_FLOOR_MS,
+	type SchedulerAction,
 	SweepScheduler,
 } from "../../../../src/core/scanner/scheduler.js"
 import { DEFAULT_CONFIRM_HOLD_MS } from "../../../../src/core/scanner/plan/plan-preview.js"
@@ -939,6 +940,76 @@ describe("hold evidence across restarts, shared follow budgets and confirm bound
 		expect(followedMs).toBeLessThanOrEqual(60_000 + (RUN - 30_000) / 5)
 		// Still followed long: short follows also draw on the bucket, so less than all of it.
 		expect(followedMs).toBeGreaterThan(30_000)
+	})
+
+	// Two hops of 185 ms: one coarse sweep is 370 ms. After three full idle visits of each hop an
+	// onset is seen. A long follow on hop 0 locks the next long follow out until both hops had a
+	// visit. A new call on hop 1 then needs an 1 800 ms confirm (hold 2 100 ms with the probe
+	// start): the probe outlasts the 370 ms follow cap. Held back only by the lock, the call is not
+	// barred: the visit of hop 1 after the lock clears follows it past one coarse sweep.
+	it("a call whose confirm outlasts the follow cap while a long follow locks it out is followed on a later visit", () => {
+		const { s, set } = make(185)
+		const VOICE_HZ = 150.9 * MHZ
+		/** Feeds blocks from `from` until the visit ends (a tune) or a hold starts. */
+		const visit = (from: number): SchedulerAction[] => {
+			for (let e = from + 50; e < from + 100_000; e += 50) {
+				const a = s.onBlock(e)
+				if (a.some(x => x.type === "tune")) return a
+				if (s.progress().holdingOn !== null) return a
+			}
+			return []
+		}
+		s.start()
+		for (let k = 0; k < 6; k++) {
+			s.onEpochStarted(0)
+			visit(0) // three full visits of each hop
+		}
+		// Hop 0: a call with a heard onset is followed long, then ends.
+		s.onEpochStarted(0)
+		s.onTrack(at("a"), false, 0, follow)
+		visit(0)
+		expect(s.progress().holdingOn).toBe("a")
+		set(1_000)
+		expect(s.tick(1_000)).toEqual([])
+		s.onTrackClosed("a")
+		set(3_000)
+		expect(s.tick(3_000).some(a => a.type === "tune")).toBe(true)
+		// Hop 1, lock active: the confirm probe runs 2 100 ms.
+		s.onEpochStarted(0)
+		s.onTrack(at("b", VOICE_HZ), true, 1_800, follow)
+		expect(visit(0)).toEqual([
+			{
+				type: "start-probe",
+				trackId: "b",
+				holdMs: 2_100,
+			},
+		])
+		const end = 3_000 + 2_100
+		set(end)
+		// No follow (the cap is spent); the hop is left with the call still on air.
+		expect(s.tick(end).some(a => a.type === "tune")).toBe(true)
+		expect(s.progress().holdingOn).toBeNull()
+		s.onEpochStarted(0)
+		visit(0) // hop 0: the lock clears
+		// Hop 1 again: the same call, on air throughout, is probed and then followed long.
+		set(end + 1_000)
+		s.onEpochStarted(0)
+		s.onTrack(at("b2", VOICE_HZ), true, 1_800, follow)
+		// A barred or steady frequency would not be probed at all.
+		expect(visit(0)).toEqual([
+			{
+				type: "start-probe",
+				trackId: "b2",
+				holdMs: 2_100,
+			},
+		])
+		const probeEnd = end + 1_000 + 2_100
+		set(probeEnd)
+		expect(s.tick(probeEnd)).toEqual([{ type: "stop-probes" }])
+		// Followed past one coarse sweep (370 ms) after the probe.
+		set(probeEnd + 1_000)
+		expect(s.tick(probeEnd + 1_000)).toEqual([])
+		expect(s.progress().holdingOn).toBe("b2")
 	})
 
 	it("the longest built-in confirm hold and its decoder start latency fit the confirm floor", () => {
