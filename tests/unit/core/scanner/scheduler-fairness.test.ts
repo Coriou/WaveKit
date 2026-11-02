@@ -21,6 +21,13 @@ import {
 import { makeTrack } from "../../../mocks/scanner/observations.js"
 
 const MHZ = 1_000_000
+/** The scheduler's per-frequency follow budget, as a test sets it up. */
+interface FollowBudgetView {
+	centreHz: number
+	halfWidthHz: number
+	usedMs: number
+	usedAt: number
+}
 /** About 1.024 Msps at 80 % usable: 819.2 kHz per hop. */
 const HALF_SPAN_HZ = 409_600
 /** Synthetic centres, 800 kHz apart. */
@@ -1011,6 +1018,99 @@ describe("hold evidence across restarts, shared follow budgets and confirm bound
 		expect(s.tick(probeEnd + 1_000)).toEqual([])
 		expect(s.progress().holdingOn).toBe("b2")
 	})
+
+	/**
+	 * The scenario above up to the end of the locked confirm probe of hop 1 (clock `end`), then
+	 * leaves hop 1 at `end`, visits hop 0 (the lock clears) and opens a call `b2` on the same
+	 * frequency of hop 1. Returns the actions of that last visit (a start-probe unless barred).
+	 */
+	const lockedConfirm = (
+		beforeEnd: (
+			s: SweepScheduler,
+			end: number,
+			set: (ms: number) => void,
+		) => void,
+	) => {
+		const { s, set } = make(185)
+		const VOICE_HZ = 150.9 * MHZ
+		const visit = (from: number): SchedulerAction[] => {
+			for (let e = from + 50; e < from + 100_000; e += 50) {
+				const a = s.onBlock(e)
+				if (a.some(x => x.type === "tune")) return a
+				if (s.progress().holdingOn !== null) return a
+			}
+			return []
+		}
+		s.start()
+		for (let k = 0; k < 6; k++) {
+			s.onEpochStarted(0)
+			visit(0)
+		}
+		s.onEpochStarted(0)
+		s.onTrack(at("a"), false, 0, follow)
+		visit(0)
+		set(1_000)
+		s.tick(1_000)
+		s.onTrackClosed("a")
+		set(3_000)
+		s.tick(3_000)
+		s.onEpochStarted(0)
+		s.onTrack(at("b", VOICE_HZ), true, 1_800, follow)
+		expect(visit(0)).toEqual([
+			{ type: "start-probe", trackId: "b", holdMs: 2_100 },
+		])
+		const end = 3_000 + 2_100
+		beforeEnd(s, end, set)
+		set(end)
+		expect(s.tick(end).some(a => a.type === "tune")).toBe(true)
+		s.onEpochStarted(0)
+		visit(0)
+		set(end + 1_000)
+		s.onEpochStarted(0)
+		s.onTrack(at("b2", VOICE_HZ), true, 1_800, follow)
+		return { s, set, end, last: visit(0) }
+	}
+
+	// The probed call b closes during its probe and its frequency reopens at once as track b1: the
+	// probe end picks b1 (deferred by the lock) while b is the tried track. The deferral covers the
+	// frequency: it is not barred and its next visit follows the call.
+	it("a reopening picked at the end of a locked confirm keeps its frequency deferred", () => {
+		const { s, set, end, last } = lockedConfirm((sc, e, setClock) => {
+			setClock(e - 500)
+			sc.onTrackClosed("b")
+			sc.onTrack(at("b1", 150.9 * MHZ), true, 1_800, follow)
+		})
+		expect(last).toEqual([
+			{ type: "start-probe", trackId: "b2", holdMs: 2_100 },
+		])
+		const probeEnd = end + 1_000 + 2_100
+		set(probeEnd)
+		expect(s.tick(probeEnd)).toEqual([{ type: "stop-probes" }])
+		set(probeEnd + 1_000)
+		expect(s.tick(probeEnd + 1_000)).toEqual([])
+		expect(s.progress().holdingOn).toBe("b2")
+	})
+
+	// At the probe end the frequency has `left` ms of follow budget. With none left the lock holds
+	// nothing back: the call still on air bars its frequency (b2 is not probed). With budget left
+	// it is deferred: b2 is probed.
+	for (const left of [0, 1]) {
+		it(`a locked confirm ending with ${left} ms of follow budget ${left > 0 ? "is deferred" : "bars its frequency"}`, () => {
+			const { last } = lockedConfirm((sc, e) => {
+				const budgets = (sc as unknown as { budgets: FollowBudgetView[] })
+					.budgets
+				budgets.push({
+					centreHz: 150.9 * MHZ,
+					halfWidthHz: 50_000,
+					usedMs: 60_000 - left,
+					usedAt: e,
+				})
+			})
+			expect(last.filter(a => a.type === "start-probe")).toEqual(
+				left > 0 ? [{ type: "start-probe", trackId: "b2", holdMs: 2_100 }] : [],
+			)
+		})
+	}
 
 	it("the longest built-in confirm hold and its decoder start latency fit the confirm floor", () => {
 		const longest = Math.max(...Object.values(DEFAULT_CONFIRM_HOLD_MS))

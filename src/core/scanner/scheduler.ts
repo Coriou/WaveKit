@@ -1276,7 +1276,9 @@ export class SweepScheduler {
 		if (memory === undefined || !memory.onsetSeen)
 			return { cap: short, deferred: false, long: false }
 		const left = this.spec.hold.maxHoldMs - this.usedOf(memory, now)
-		if (now + left <= short) return { cap: short, deferred: false, long: false }
+		// A spent budget has nothing to defer: only a lock holding back budget still left defers it.
+		if (left <= 0 || now + left <= short)
+			return { cap: short, deferred: false, long: false }
 		if (this.longHoldLock > 0)
 			return { cap: short, deferred: true, long: false }
 		const cap = Math.min(long, now + left)
@@ -1598,13 +1600,22 @@ export class SweepScheduler {
 		// `hold.hangMs` frees it. A close less than `hold.hangMs` before the hop is left is no heard
 		// gap (a flapping carrier between two flaps): the emission is presumed still on air, as a
 		// reopen within `hold.hangMs` would be. A follow cut short only to give the other hops their
-		// turn (deferred) bars nothing.
+		// turn (deferred) bars nothing: the deferral covers every track of its frequency (a reopening
+		// picked at the end of a probe is deferred while the probed track was the tried one).
+		const deferred = new Set<FrequencyMemory>()
+		for (const t of v.tracks.values()) {
+			const memory = t.deferred ? this.memoryOf(hop, t) : undefined
+			if (memory !== undefined) deferred.add(memory)
+		}
 		let openBlocks = 0
 		const barred = new Set<FrequencyMemory>()
 		for (const t of v.tracks.values()) {
 			const memory = this.memoryOf(hop, t)
 			if (t.tried && memory !== undefined) {
-				if (!t.deferred && (t.open || !this.heardGone(v, memory, now)))
+				if (
+					!deferred.has(memory) &&
+					(t.open || !this.heardGone(v, memory, now))
+				)
 					barred.add(memory)
 				else if (!barred.has(memory)) memory.barred = false
 			}
