@@ -81,7 +81,8 @@ export interface LoLockedOptions {
 
 /**
  * Tainted ids kept per noted record slot: 4 × 512 records = 2 048 ids (≈ 100 KiB of strings per
- * source), enough that an id outlives its own `records` entry by several full turnovers.
+ * source). Taints are never dropped (a dropped taint could let a lock retire a real emitter);
+ * once full, the source retires nothing (fail closed) until cleared.
  */
 const TAINTED_PER_RECORDS = 4
 
@@ -126,11 +127,13 @@ interface SourceState {
 	/**
 	 * Records whose noted history was overwritten or evicted with contradictory or unknown
 	 * content (sticky): never a partner, so a lock cannot retire a record that once looked like
-	 * something other than the steady line. Bounded at TAINTED_PER_RECORDS × recordsPerSource,
-	 * oldest dropped (a dropped id is also long gone from `records`, so it cannot be a partner
-	 * until re-noted; re-noting starts a fresh, complete history).
+	 * something other than the steady line. A record dropped from `records` by the per-source
+	 * bound is tainted too (its history is gone). Bounded at TAINTED_PER_RECORDS ×
+	 * recordsPerSource: past it nothing is dropped; the source fails closed (`taintFull`) and
+	 * no lock retires any record until the source is cleared.
 	 */
 	tainted: Set<string>
+	taintFull: boolean
 	learned: OffsetEntry[]
 	revoked: OffsetEntry[]
 	suppressed: number
@@ -247,6 +250,7 @@ export class LoLockedSpurs {
 			const oldest = st.records.keys().next()
 			if (oldest.done === true) break
 			st.records.delete(oldest.value)
+			this.taint(st, oldest.value)
 		}
 	}
 
@@ -260,7 +264,8 @@ export class LoLockedSpurs {
 
 	/** Is `id`'s noted history incomplete or contradictory (never a partner)? */
 	isTainted(sourceId: string, id: string): boolean {
-		return this.sources.get(sourceId)?.tainted.has(id) === true
+		const st = this.sources.get(sourceId)
+		return st !== undefined && (st.taintFull || st.tainted.has(id))
 	}
 
 	/** A replaced entry agrees with its successor: same steady line (offset, width, steadiness). */
@@ -274,14 +279,13 @@ export class LoLockedSpurs {
 	}
 
 	private taint(st: SourceState, id: string): void {
-		st.tainted.delete(id)
-		st.tainted.add(id)
-		const cap = TAINTED_PER_RECORDS * this.opts.recordsPerSource
-		while (st.tainted.size > cap) {
-			const oldest = st.tainted.values().next()
-			if (oldest.done === true) break
-			st.tainted.delete(oldest.value)
+		if (st.tainted.has(id) || st.taintFull) return
+		if (st.tainted.size >= TAINTED_PER_RECORDS * this.opts.recordsPerSource) {
+			// Never forget a taint: past the bound no record is retired any more.
+			st.taintFull = true
+			return
 		}
+		st.tainted.add(id)
 	}
 
 	/** Drops everything a source taught (source removed). */
@@ -382,7 +386,8 @@ export class LoLockedSpurs {
 					all = false
 					break
 				}
-			if (all && !st.tainted.has(id) && eligible(id)) partners.push(id)
+			if (all && !st.taintFull && !st.tainted.has(id) && eligible(id))
+				partners.push(id)
 		}
 		const known = st.learned.find(
 			e =>
@@ -570,6 +575,7 @@ export class LoLockedSpurs {
 				dwells: [],
 				records: new Map(),
 				tainted: new Set(),
+				taintFull: false,
 				learned: [],
 				revoked: [],
 				suppressed: 0,

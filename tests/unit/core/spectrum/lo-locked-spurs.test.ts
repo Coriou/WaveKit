@@ -267,6 +267,36 @@ describe("LO-locked spurs from sightings", () => {
 		expect(lo.isTainted("rtl", "r1")).toBe(false)
 	})
 
+	it("repro: taints are never dropped; past the bound the source retires nothing (fail closed)", () => {
+		// recordsPerSource 2 → taint bound 4 × 2 = 8 ids
+		const lo = make({ recordsPerSource: 2 })
+		lo.note("r1", at(C1, SPUR, T0 - 5_000, { steady: false }))
+		lo.note("r1", at(C1, SPUR, T0 - 4_000))
+		expect(lo.isTainted("rtl", "r1")).toBe(true)
+		for (let i = 0; i < 7; i++) {
+			lo.note(`x${i}`, at(C1, 300_000, T0 - 3_000, { steady: false }))
+			lo.note(`x${i}`, at(C1, 300_000, T0 - 2_000))
+			lo.note("r1", at(C1, SPUR, T0 - 2_000))
+		}
+		// 8 tainted ids (r1 + 7, some by records eviction): at the bound, r1 still tainted
+		expect(lo.isTainted("rtl", "r1")).toBe(true)
+		lo.note("x8", at(C1, 300_000, T0 - 1_500, { steady: false }))
+		lo.note("x8", at(C1, 300_000, T0 - 1_400))
+		// past the bound: every record counts as tainted
+		expect(lo.isTainted("rtl", "r1")).toBe(true)
+		expect(lo.isTainted("rtl", "never-seen")).toBe(true)
+		const res = pair(lo, C2, SPUR)
+		expect(res.partners).toEqual([])
+	})
+
+	it("a record dropped by the per-source bound is tainted", () => {
+		const lo = make({ recordsPerSource: 1 })
+		lo.note("r1", at(C1, SPUR, T0 - 2_000))
+		lo.note("r2", at(C1, 300_000, T0 - 1_000))
+		expect(lo.isTainted("rtl", "r1")).toBe(true)
+		expect(lo.isTainted("rtl", "r2")).toBe(false)
+	})
+
 	it("a break resets the count: the old position still seen after a retune needs three new transitions", () => {
 		const lo = make()
 		let t = dwellOn(lo, C1, SPUR, T0, 10_000, { id: "r1" }) + 500
