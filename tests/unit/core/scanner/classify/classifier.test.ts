@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+	CARRIER_CLASS_MAX_HZ,
 	CARRIER_STEADY_DUTY_MIN,
 	AM_VOICE_MAX_OBW_HZ,
 	AM_VOICE_MIN_OBW_HZ,
@@ -79,13 +80,15 @@ describe("classOf", () => {
 	])("%o → %s", (over, cls) => {
 		expect(classOf(snap(over))).toBe(cls)
 	})
-	it("a steady peaked line under 4 kHz is a carrier, not unknown; keyed, short or FM-wide it is not", () => {
+	it("a steady peaked line under 3 kHz is a carrier, not unknown; keyed, short, digital-wide or FM-wide it is not", () => {
 		const line = (over: Partial<TrackSnapshot>) =>
-			classOf(snap({ spectralShape: "peaked", obwHz: 3_000, ...over }))
+			classOf(snap({ spectralShape: "peaked", obwHz: 2_000, ...over }))
 		expect(CARRIER_STEADY_DUTY_MIN).toBe(0.9)
+		expect(CARRIER_CLASS_MAX_HZ).toBe(3_000)
 		expect(line({})).toBe("carrier")
-		// 4 kHz is the GMSK floor: 3 999 Hz is a carrier, 4 000 Hz gmsk-narrow
-		expect(line({ obwHz: 3_999 })).toBe("carrier")
+		// 3 kHz is the narrow digital floor: 2 999 Hz is a carrier, 3 000 Hz keeps its digital trials
+		expect(line({ obwHz: 2_999 })).toBe("carrier")
+		expect(line({ obwHz: 3_000 })).toBe("unknown")
 		expect(line({ obwHz: 4_000 })).toBe("gmsk-narrow")
 		// duty: at the bound a carrier, under it (keyed CW) unknown as before
 		expect(line({ dutyCycle: 0.9 })).toBe("carrier")

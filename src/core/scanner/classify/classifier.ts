@@ -34,6 +34,14 @@ const DEFAULT_RBW_HZ = 1000
  * never this narrow and peaked.
  */
 export const CARRIER_STEADY_DUTY_MIN = 0.9
+/**
+ * The `carrier` class needs a line narrower than this (Hz at -20 dB). The narrowest digital voice
+ * modes (dPMR, NXDN48 in 6.25 kHz channels, about 4 kHz occupied) can read down to 3 kHz at -20 dB
+ * and run continuously (control channels, repeaters), so a steady 3 kHz line must keep its digital
+ * trials: 3 kHz and wider stays on the pre-existing path. Lines read 3 to 4 kHz wide therefore stay
+ * `unknown` (still no FM voice: `ANALOG_MIN_HZ`).
+ */
+export const CARRIER_CLASS_MAX_HZ = 3000
 const LEAK_MIN_DB = 20
 
 export const CLASS_HYPOTHESES: Readonly<
@@ -253,7 +261,7 @@ export function classOf(
 		return "unknown"
 	}
 	if (
-		track.obwHz < GMSK_MIN_HZ &&
+		track.obwHz < CARRIER_CLASS_MAX_HZ &&
 		track.blocks > BURST_MAX_BLOCKS &&
 		Number.isFinite(track.dutyCycle) &&
 		track.dutyCycle >= CARRIER_STEADY_DUTY_MIN
