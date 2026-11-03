@@ -354,7 +354,7 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 	}
 	const at = { stream: 1, epoch: 1 }
 
-	it(`a carrier after the voice answers true from ${WIDEBAND_VOICE_ON_AIR_MS} ms after the last voiced window (still "voice" 1.5 s after the voice stopped, true 4 s after: 2 s on audio judged 1 s late), false once its squelch closes`, async () => {
+	it(`a carrier after the voice answers true from ${WIDEBAND_VOICE_ON_AIR_MS} ms after the last voiced window (still "voice" 1.5 s after the voice stopped, true by 3.5 s after: 2 s on audio judged 1 s late, plus the window's 0.5 s), false once its squelch closes`, async () => {
 		const h = harness()
 		await h.feed(1, false)
 		const { onset, report } = await voicedOver(h, "o", 3)
@@ -363,8 +363,9 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		await h.feed(1.5, true, report)
 		expect(h.rec.recordingActive("rtl", at)).toBe("voice")
 		// The judged audio runs WIDEBAND_HOLDBACK_MS (1 s) behind the live edge and the last voiced
-		// window ends up to 500 ms after the last word: true by 1 + 2 + 0.5 = 3.5 s after it.
-		await h.feed(2.5, true, report)
+		// window ends up to 500 ms after the last word: true by 1 + 2 + 0.5 = 3.5 s after it (the
+		// stated upper bound, pinned: 1.5 + 2 s fed).
+		await h.feed(2, true, report)
 		// The carrier stays keyed with no voice: the sweep keeps the hop within L only.
 		expect(h.rec.recordingActive("rtl", at)).toBe(true)
 		await h.feed(5, true, report)

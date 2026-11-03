@@ -444,8 +444,17 @@ interface Session {
 	qualified: boolean
 	/** In-track frames the gate heard over the session's files. */
 	heard: number
-	/** Per-transmission voice check over the session's in-track audio (never latches). */
+	/**
+	 * Per-transmission voice check over the session's in-track audio once voiced (never
+	 * latches). Before that, nothing can answer "voice" (recordingActive needs `qualified`), so
+	 * only the file gate filters the audio, and its qualifying window sets `voiceAt`.
+	 */
 	readonly meter: VoiceOnAirMeter
+	/**
+	 * gateFrames' in-track mask, reused (grown to the longest judged chunk: at most
+	 * MAX_SLICE_SAMPLES × 8000 / fs frames, 1024 at 1.024 Msps, 437 at 2.4 Msps).
+	 */
+	mask: Uint8Array
 	/** Input sample past the last frame fed to `meter` (a later run that does not join resets it). */
 	meterTo: number
 	/** Input sample at the end of the last voiced meter window; null before any. */
@@ -1035,6 +1044,7 @@ export class WidebandAnalogRecorder {
 			qualified: false,
 			heard: 0,
 			meter: new VoiceOnAirMeter(),
+			mask: new Uint8Array(0),
 			meterTo: Number.NEGATIVE_INFINITY,
 			voiceAt: null,
 			judgedTo: Number.NEGATIVE_INFINITY,
@@ -1681,8 +1691,11 @@ export class WidebandAnalogRecorder {
 	 * Voice gate input: the judged frames inside a joined track's span, trimmed by
 	 * WIDEBAND_GATE_EDGE_TRIM_MS at both ends (an open track runs to now). Pre-roll, hang and the
 	 * noise between joined transmissions stay out: squelch-open noise is not a carrier's audio.
-	 * The same frames feed the session's VoiceOnAirMeter for as long as the session runs (the file
-	 * gate stops once voiced): the per-transmission voice signal of recordingActive.
+	 * Once the session is voiced the same frames feed its VoiceOnAirMeter (the per-transmission
+	 * voice signal of recordingActive) for as long as it runs; before, only the file gate filters
+	 * them, and the end of its qualifying window is the first voiced window (`voiceAt`), so each
+	 * frame runs through one voice filter chain only. No allocation per chunk: the mask is the
+	 * session's, and runs are passed as ranges, not views.
 	 */
 	private gateFrames(
 		s: Session,
@@ -1697,7 +1710,9 @@ export class WidebandAnalogRecorder {
 		if (pcm.length === 0) return
 		s.judgedTo = Math.max(s.judgedTo, from + pcm.length * perFrame)
 		const trim = (WIDEBAND_GATE_EDGE_TRIM_MS * s.fs) / 1000
-		const mask = new Uint8Array(pcm.length)
+		if (s.mask.length < pcm.length) s.mask = new Uint8Array(pcm.length)
+		const mask = s.mask
+		mask.fill(0, 0, pcm.length)
 		for (const a of s.activity.values()) {
 			const lo = Math.max(0, Math.ceil((a.start + trim - from) / perFrame))
 			const hi = a.open
@@ -1716,18 +1731,25 @@ export class WidebandAnalogRecorder {
 			}
 			let j = i
 			while (j < pcm.length && mask[j] === 1) j++
-			const run = pcm.subarray(i, j)
-			const runFrom = from + i * perFrame
-			// A run that does not continue the last one (another track, after a gap or a trim):
-			// no meter window joins the two.
-			if (runFrom - s.meterTo > perFrame / 2) s.meter.reset()
-			const voicedTo = s.meter.push(run)
-			if (voicedTo > 0) s.voiceAt = runFrom + voicedTo * perFrame
-			s.meterTo = from + j * perFrame
+			let k = i
 			if (!file.gate.voiced) {
-				file.gate.push(run)
-				file.heard += j - i
-				s.heard += j - i
+				k += file.gate.push(pcm, i, j)
+				file.heard += k - i
+				s.heard += k - i
+				// The first voiced window ends here (the gate latched at frame k).
+				if (file.gate.voiced) s.voiceAt = from + k * perFrame
+			}
+			// A session voiced in an earlier file meters every frame (its new file's gate runs too,
+			// until that file is voiced); otherwise the meter starts where the gate latched.
+			const m = s.qualified ? i : k
+			if ((s.qualified || file.gate.voiced) && m < j) {
+				const runFrom = from + m * perFrame
+				// A run that does not continue the last one (another track, after a gap or a trim,
+				// or the first after the gate latched): no meter window joins the two.
+				if (runFrom - s.meterTo > perFrame / 2) s.meter.reset()
+				const voicedTo = s.meter.push(pcm, m, j)
+				if (voicedTo > 0) s.voiceAt = from + voicedTo * perFrame
+				s.meterTo = from + j * perFrame
 			}
 			i = j
 		}

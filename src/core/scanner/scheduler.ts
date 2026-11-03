@@ -86,6 +86,15 @@ const ID_MS = 28_000
 const LONG_FOLLOW_MARGIN_MS = 5_000
 /** Re-check period of a hold kept for a recording (Hold mode `record`): 5 blocks of 50 ms. */
 const RECORD_RECHECK_MS = 250
+/**
+ * Longest the recording check may go unasked while a visit's voice hold is on (Visit.voice): a
+ * longer gap spends it, as a non-voice answer does. Two re-checks (2 × RECORD_RECHECK_MS), so any
+ * span the recorder answers other than "voice" for longer than 500 ms (a QSO turnaround is 1 s
+ * or more) is seen, whatever hold runs: a `record` hold asks every 250 ms, any other hold of the
+ * visit (a probe, a follow, a hang) and a restart's dwell are sampled on every tick at most
+ * RECORD_RECHECK_MS apart (sampleVoice), and a track close asks once more.
+ */
+const VOICE_SAMPLE_GAP_MS = 2 * RECORD_RECHECK_MS
 
 /**
  * What the recording check (`recordingActive`) reports for the tuned window: false, nothing is
@@ -310,6 +319,8 @@ interface Visit {
 	 * recording hold (longHoldLock), so the next over of a QSO gets a voice hold only after it.
 	 */
 	voice: "no" | "on" | "spent"
+	/** Clock the recording check was last asked while Visit.voice was "on" (VOICE_SAMPLE_GAP_MS). */
+	voiceAskedAt: number | null
 	/** A carrier on air since before any visit saw it start showed itself: the hop's past score was it. */
 	newlyQuiet: boolean
 }
@@ -821,6 +832,13 @@ export class SweepScheduler {
 			t.open = false
 			this.noteClosed(v, t)
 		}
+		// A close may be the voiced transmission's: while another hold runs (a `record` hold
+		// re-checks on its own), the voice hold is checked now.
+		if (
+			v?.voice === "on" &&
+			(this.phase !== "hold" || this.hold?.mode !== "record")
+		)
+			this.askRecording(this.now())
 		if (
 			this.phase === "hold" &&
 			this.hold?.trackId === trackId &&
@@ -883,6 +901,7 @@ export class SweepScheduler {
 
 	tick(now: number): SchedulerAction[] {
 		this.heardAt = now
+		this.sampleVoice(now)
 		if (this.phase !== "hold" || this.hold === null) return []
 		// Forced: `hold.maxHoldMs` from the start of the visit's holds, a recording too.
 		if (now >= this.maxHoldDeadline())
@@ -901,11 +920,8 @@ export class SweepScheduler {
 	 * may keep the hop for the recording again); otherwise re-check RECORD_RECHECK_MS later.
 	 */
 	private recheckRecording(hold: Hold, now: number): SchedulerAction[] {
-		const active = this.recordingActive?.() ?? false
+		const active = this.askRecording(now)
 		const v = this.visit
-		// The voiced transmission ended (squelch closed: false) or no voice is on air any more
-		// (a carrier or hang after it: true): the voice hold is spent for the visit.
-		if (v !== null && v.voice === "on" && active !== "voice") v.voice = "spent"
 		// A recording not voice (or whose voice hold is spent) keeps only what L has left
 		// (keepForRecording's non-voice cap).
 		if (active === true || (active === "voice" && v?.voice === "spent"))
@@ -958,8 +974,7 @@ export class SweepScheduler {
 			return false
 		const now = this.now()
 		const start = this.holdOrigin()
-		const active = this.recordingActive()
-		if (v.voice === "on" && active !== "voice") v.voice = "spent"
+		const active = this.askRecording(now)
 		if (active === false) return false
 		// Voice on air in the current transmission, and the visit's voice hold not spent yet.
 		const voice = active === "voice" && v.voice !== "spent"
@@ -979,7 +994,10 @@ export class SweepScheduler {
 		if (trackId === null) return false
 		v.holdStartedAt ??= now
 		v.budgeted = true
-		if (voice) v.voice = "on"
+		if (voice) {
+			v.voice = "on"
+			v.voiceAskedAt = now
+		}
 		v.recordEndMs = cap - start
 		this.noteLong({
 			cap,
@@ -998,6 +1016,51 @@ export class SweepScheduler {
 		}
 		this.phase = "hold"
 		return true
+	}
+
+	/**
+	 * Asks the recording check (false without one). While the visit's voice hold is on
+	 * (Visit.voice), any answer other than "voice", or an answer after more than
+	 * VOICE_SAMPLE_GAP_MS unasked (the check could not see what happened meanwhile: a turnaround
+	 * may have passed), spends it (spendVoice), whatever hold runs.
+	 */
+	private askRecording(now: number): RecordingActivity {
+		const active = this.recordingActive?.() ?? false
+		const v = this.visit
+		if (v === null || v.voice !== "on") return active
+		const gap =
+			v.voiceAskedAt !== null && now - v.voiceAskedAt > VOICE_SAMPLE_GAP_MS
+		if (active !== "voice" || gap) this.spendVoice(v)
+		else v.voiceAskedAt = now
+		return active
+	}
+
+	/**
+	 * The visit's voice hold ends (its transmission ended, voice stopped, or the check went unasked
+	 * too long): a later "voice" of the visit counts as true, and every hold of the visit shares
+	 * what L has left from the start of its holds (Visit.recordEndMs, maxHoldDeadline), not the
+	 * voice cap; a `record` hold's cap is cut at its next re-check (recheckRecording).
+	 */
+	private spendVoice(v: Visit): void {
+		v.voice = "spent"
+		v.voiceAskedAt = null
+		if (v.recordEndMs !== null)
+			v.recordEndMs = Math.min(v.recordEndMs, this.followBudgetMs())
+	}
+
+	/**
+	 * A tick while the visit's voice hold is on and no `record` hold runs (a probe, a follow or a
+	 * hang started from it, or a restart's dwell): the recording check is asked at most every
+	 * RECORD_RECHECK_MS, so the voice hold's end is seen whatever hold runs. A `record` hold asks
+	 * at its own re-checks.
+	 */
+	private sampleVoice(now: number): void {
+		const v = this.visit
+		if (v === null || v.voice !== "on") return
+		if (this.phase === "hold" && this.hold?.mode === "record") return
+		if (v.voiceAskedAt !== null && now - v.voiceAskedAt < RECORD_RECHECK_MS)
+			return
+		this.askRecording(now)
 	}
 
 	/**
@@ -1428,6 +1491,7 @@ export class SweepScheduler {
 			watched: false,
 			recordEndMs: null,
 			voice: "no",
+			voiceAskedAt: null,
 			newlyQuiet: false,
 		}
 	}

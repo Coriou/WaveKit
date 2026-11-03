@@ -99,7 +99,9 @@ describe("a hop kept for a voiced analog recording", () => {
 		const { s, decided, tick } = make(() => "voice")
 		expect(tunes(decided)).toBe(false)
 		expect(s.progress().holdingOn).toBe("a")
-		expect(tunes(tick(150 + L2))).toBe(false)
+		// Ticked every 50 ms (an unasked gap over 500 ms would spend the voice hold).
+		expect(leftAt(tick, 200, 150 + L2)).toBeNull()
+		expect(leftAt(tick, 150 + L2 + 50, 60_100)).toBeNull()
 		expect(tunes(tick(60_149))).toBe(false)
 		const left = tick(60_150)
 		expect(tunes(left)).toBe(true)
@@ -108,6 +110,7 @@ describe("a hop kept for a voiced analog recording", () => {
 
 	it("a shorter hold.maxHoldMs bounds it (30 000: kept at 30 149, left at 30 150)", () => {
 		const { tick } = make(() => "voice", 30_000)
+		expect(leftAt(tick, 200, 30_100)).toBeNull()
 		expect(tunes(tick(30_149))).toBe(false)
 		expect(tunes(tick(30_150))).toBe(true)
 	})
@@ -339,5 +342,107 @@ describe("record whole voice: a spent voice hold forces a full coarse sweep", ()
 		expect(at).not.toBeNull()
 		expect(at!).toBeGreaterThanOrEqual(30_000)
 		expect(at!).toBeLessThanOrEqual(30_250)
+	})
+})
+
+describe("record whole voice: the voice hold ends with its transmission whatever hold runs", () => {
+	/**
+	 * The review's repro (RX-sol3 M1): a voice hold on "a" from 150 ms; an unrelated track "b" on
+	 * hop 0 needing a 5000 ms confirm is seen at 300 ms, so the 400 ms re-check starts its probe
+	 * (to 400 + 300 + 5000 = 5700 ms). "a" closes at 2000 ms (the recorder answers false from
+	 * then) and "a2" opens on the same frequency at 4000 ms, voiced from 5500 ms. The close and
+	 * turnaround fall inside b's probe; the voice hold is still spent there, so the hop keeps
+	 * only L (150 + 19 550 = 19 700) and hop 1 gets its coarse visit before hop 0 is kept again.
+	 */
+	function drive(trackSampled: boolean) {
+		let clock = 0
+		let hop = 0
+		const asked: number[] = []
+		const recording = (): RecordingActivity => {
+			asked.push(clock)
+			if (hop !== 0) return false
+			return clock < 2_000 || clock >= 5_500 ? "voice" : false
+		}
+		const h = make(recording)
+		const s = h.s
+		const visits: { hop: number; tunedAt: number; leftAt: number | null }[] = [
+			{ hop: 0, tunedAt: 0, leftAt: null },
+		]
+		let settleAt: number | null = null
+		const apply = (a: SchedulerAction[]) => {
+			for (const x of a)
+				if (x.type === "tune") {
+					visits[visits.length - 1]!.leftAt = clock
+					hop = x.hopIndex
+					visits.push({ hop, tunedAt: clock, leftAt: null })
+					settleAt = clock + SETTLE_MS
+				}
+		}
+		for (let ms = 200; ms <= 40_000; ms += 50) {
+			clock = ms
+			if (settleAt !== null) {
+				if (ms < settleAt) {
+					apply(s.tick(ms))
+					continue
+				}
+				settleAt = null
+				apply(s.onEpochStarted(ms))
+				// Hop 0's open tracks show again on its later visits.
+				if (hop === 0 && ms >= 4_000) {
+					apply(s.onTrack(sighting("a2"), false, 0))
+					apply(s.onTrack(sighting("b", HZ + 200_000), true, 5_000))
+				}
+				continue
+			}
+			if (hop === 0 && ms === 300)
+				apply(s.onTrack(sighting("b", HZ + 200_000), true, 5_000))
+			if (hop === 0 && ms === 2_000 && trackSampled) apply(s.onTrackClosed("a"))
+			if (hop === 0 && ms === 4_000) apply(s.onTrack(sighting("a2"), false, 0))
+			apply(s.onBlock(ms))
+			apply(s.tick(ms))
+		}
+		return { visits, asked }
+	}
+
+	for (const closeSeen of [true, false])
+		it(`record → b's probe → "a" closes → "a2" voiced: left by L (19 700), hop 1 visited before hop 0 is kept again (close ${closeSeen ? "seen" : "not seen"} by the scheduler)`, () => {
+			const { visits, asked } = drive(closeSeen)
+			const first = visits[0]!
+			expect(first.leftAt).not.toBeNull()
+			expect(first.leftAt!).toBeLessThanOrEqual(150 + L2)
+			// The recorder was asked during the probe, so its false answers (2000 to 5500 ms) were seen.
+			expect(asked.some(ms => ms >= 2_000 && ms < 5_500)).toBe(true)
+			// The coarse sweep runs: hop 1 next, then hop 0's next visit is not kept (dwell only,
+			// under the lock), before any later visit of hop 0 may hold it.
+			expect(visits[1]!.hop).toBe(1)
+			const nextZero = visits.findIndex((v, i) => i > 0 && v.hop === 0)
+			expect(nextZero).toBeGreaterThan(1)
+			const z = visits[nextZero]!
+			expect(z.leftAt).not.toBeNull()
+			expect(z.leftAt! - z.tunedAt).toBeLessThanOrEqual(DWELL_MS + 6 * 1_000)
+		})
+
+	it("a recording check unasked for more than 500 ms (2 re-checks) spends the voice hold: L only (19 700)", () => {
+		// Ticks every 50 ms to 5000 ms, then one jump of 600 ms: the voice hold is spent though the
+		// recorder answers "voice" throughout, so the hop is left by L, not at 60 150.
+		const h = make(() => "voice")
+		for (let ms = 200; ms <= 5_000; ms += 50)
+			expect(tunes(h.tick(ms))).toBe(false)
+		let at: number | null = null
+		for (let ms = 5_600; ms <= 70_000 && at === null; ms += 50)
+			if (tunes(h.tick(ms))) at = ms
+		expect(at).not.toBeNull()
+		expect(at!).toBeGreaterThanOrEqual(150 + L2)
+		expect(at!).toBeLessThanOrEqual(150 + L2 + 250)
+	})
+
+	it("a gap of exactly 500 ms keeps the voice hold (left at hold.maxHoldMs: 60 150)", () => {
+		const h = make(() => "voice")
+		for (let ms = 200; ms <= 5_000; ms += 50) h.tick(ms)
+		// The last re-check asked at 4900 (every 250 ms from 400); 4900 + 500 = 5400.
+		let at: number | null = null
+		for (let ms = 5_400; ms <= 70_000 && at === null; ms += 50)
+			if (tunes(h.tick(ms))) at = ms
+		expect(at).toBe(60_150)
 	})
 })
