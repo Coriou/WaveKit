@@ -417,6 +417,12 @@ export class SweepScheduler {
 	/** End sample of the last block seen on the current stream; continued visits dwell from it. */
 	private lastBlockEnd: number | null = null
 	/**
+	 * Clock of the last block or tick the scheduler received: the last moment it was listening. A
+	 * pause or an outage stops both (the job runner drives neither while paused), so a restart
+	 * counts the holds of the old epoch up to here, never the interruption (restartVisit).
+	 */
+	private heardAt: number | null = null
+	/**
 	 * Coarse visits still to end before another follow may outlast one coarse sweep: after such a
 	 * long hold every hop gets its dwell first (set to the hop count, one less per coarse visit).
 	 */
@@ -521,9 +527,14 @@ export class SweepScheduler {
 		v.dwellEnd = startSample + this.dwellSamples(this.parkedVisit)
 		v.tracks.clear()
 		this.forgetGapEvidence(v)
-		// The holds already run still count (holdOrigin): a restart is no fresh budget.
+		// The holds already run still count (holdOrigin): a restart is no fresh budget. They ran
+		// until the last block or tick heard (heardAt), not until now: a pause or an outage before
+		// the restart (no blocks, no ticks) spends no hold time.
 		if (v.holdStartedAt !== null)
-			v.heldBeforeMs += Math.max(0, this.now() - v.holdStartedAt)
+			v.heldBeforeMs += Math.max(
+				0,
+				Math.min(this.now(), this.heardAt ?? v.holdStartedAt) - v.holdStartedAt,
+			)
 		v.holdStartedAt = null
 		this.phase = "dwell"
 		// A re-sent window starts fresh: time without data is no dwell.
@@ -570,6 +581,7 @@ export class SweepScheduler {
 		if (v.dwellEnd === null)
 			v.dwellEnd = endSample - samples + this.dwellSamples(true)
 		this.lastBlockEnd = endSample
+		this.heardAt = this.now()
 		const actions: SchedulerAction[] = []
 		if (this.parkedVisit) {
 			this.parkedSweepSamples += samples
@@ -847,6 +859,7 @@ export class SweepScheduler {
 	}
 
 	tick(now: number): SchedulerAction[] {
+		this.heardAt = now
 		if (this.phase !== "hold" || this.hold === null) return []
 		// Forced: `hold.maxHoldMs` from the start of the visit's holds, a recording too.
 		if (now >= this.maxHoldDeadline())

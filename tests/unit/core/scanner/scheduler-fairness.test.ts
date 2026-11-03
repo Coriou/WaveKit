@@ -1994,6 +1994,10 @@ describe("a hop kept for a recording", () => {
 				clock = ms
 				return s.tick(ms)
 			},
+			/** Moves the clock with no tick and no block: a pause or an outage. */
+			at: (ms: number) => {
+				clock = ms
+			},
 		}
 	}
 	const tunes = (a: SchedulerAction[]): boolean =>
@@ -2209,25 +2213,63 @@ describe("a hop kept for a recording", () => {
 			}
 		})
 
-	it("restarts of the visit keep the hold budget it spent: kept at most L of holds in all (2 hops: 150 + 19 550 + 3 re-dwells of 150 = 20 150)", () => {
-		// Recording throughout; the epoch restarts (an outage, a preemption, a resume) at 5, 10 and
-		// 15 s. Each restart re-dwells 150 ms and the record hold resumes with what L has left
-		// (holds of 4850 ms before each restart: 3 × 4850 = 14 550, then 5000 ms), not a fresh L.
-		const { s, tick } = make({ recording: () => true })
-		const REDWELL_MS = 3 * BLOCK_MS
-		const restartAt = (ms: number): SchedulerAction[] => {
-			const actions = [...tick(ms), ...s.onEpochStarted(0)]
-			// The dwell phase ignores ticks: they only move the clock.
-			for (let e = BLOCK_MS; e <= REDWELL_MS; e += BLOCK_MS)
-				actions.push(...tick(ms + e), ...s.onBlock(e))
-			return actions
+	for (const [name, gapMs] of [
+		["back to back", 0],
+		["after 20 s pauses", 20_000],
+	] as const)
+		it(`restarts of the visit ${name} keep the hold budget it spent, never the interruptions: kept at most L of holds in all (2 hops: 150 + 19 550 + 3 re-dwells of 150 + 3 gaps)`, () => {
+			// Recording throughout; the epoch restarts (an outage, a preemption, a resume) three times,
+			// each after 4850 ms of holding, gapMs after the last tick (no blocks, no ticks: the runner
+			// drives neither while paused). Each restart re-dwells 150 ms and the record hold resumes
+			// with what L has left (3 × 4850 = 14 550, then 5000 ms), not a fresh L and not L less the
+			// gaps.
+			const { s, tick, at } = make({ recording: () => true })
+			const REDWELL_MS = 3 * BLOCK_MS
+			const HELD_MS = 4_850
+			let holdFrom = 150
+			for (let k = 0; k < 3; k++) {
+				const heardAt = holdFrom + HELD_MS
+				const restartAt = heardAt + gapMs
+				const actions = [...tick(heardAt)]
+				at(restartAt)
+				actions.push(...s.onEpochStarted(0))
+				// The dwell phase ignores ticks: they only move the clock.
+				for (let e = BLOCK_MS; e <= REDWELL_MS; e += BLOCK_MS)
+					actions.push(...tick(restartAt + e), ...s.onBlock(e))
+				expect(tunes(actions)).toBe(false)
+				holdFrom = restartAt + REDWELL_MS
+			}
+			expect(s.hopStats()[0]!.holdMs).toBe(3 * HELD_MS)
+			let tunedAt: number | null = null
+			for (
+				let ms = holdFrom;
+				ms <= holdFrom + 40_000 && tunedAt === null;
+				ms += 50
+			)
+				if (tunes(tick(ms))) tunedAt = ms
+			expect(tunedAt).toBe(150 + longFollowMs(2) + 3 * REDWELL_MS + 3 * gapMs)
+			expect(s.hopStats()[0]!.holdMs).toBe(longFollowMs(2))
+		})
+
+	it("a hold of 5 s, a 30 s pause and a resume: the hold goes on with L less 5 s, and its stats leave the pause out (2 hops)", () => {
+		// Recording throughout: a record hold from 150 to 5000 (4850 ms), heard by blocks and
+		// ticks; then nothing for 30 s (the job paused: no blocks, no ticks); the resume re-sends
+		// the hop, whose epoch restarts the visit.
+		const { s, tick, at } = make({ recording: () => true })
+		for (let ms = 200; ms <= 5_000; ms += BLOCK_MS) {
+			expect(tunes(tick(ms))).toBe(false)
+			expect(tunes(s.onBlock(ms))).toBe(false)
 		}
-		for (const ms of [5_000, 10_000, 15_000])
-			expect(tunes(restartAt(ms))).toBe(false)
+		at(35_000)
+		expect(s.onEpochStarted(0)).toEqual([{ type: "stop-probes" }])
+		expect(s.hopStats()[0]!.holdMs).toBe(4_850)
+		for (let e = BLOCK_MS; e <= 3 * BLOCK_MS; e += BLOCK_MS)
+			expect(tunes([...tick(35_000 + e), ...s.onBlock(e)])).toBe(false)
 		let tunedAt: number | null = null
-		for (let ms = 15_200; ms <= 40_000 && tunedAt === null; ms += 50)
+		for (let ms = 35_200; ms <= 80_000 && tunedAt === null; ms += 50)
 			if (tunes(tick(ms))) tunedAt = ms
-		expect(tunedAt).toBe(150 + longFollowMs(2) + 3 * REDWELL_MS)
+		// The hold resumed at 35 150 with L − 4850 left.
+		expect(tunedAt).toBe(35_150 + longFollowMs(2) - 4_850)
 		expect(s.hopStats()[0]!.holdMs).toBe(longFollowMs(2))
 	})
 
