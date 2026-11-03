@@ -1,17 +1,18 @@
 /**
  * "Record whole voice" (the user's policy for sweeps): a recording with voice on air keeps its hop
  * until that transmission ends, up to `hold.maxHoldMs`, then a full coarse sweep runs before the
- * hop gets another voice hold. Measured on the merge gate's SW-B1 scene with the deterministic
- * sweep simulator: a QSO (overs 5 to 30 s, turnarounds 1 to 3 s) on hop 0, 28 s IDs on the last
- * hop, 900 s, 3 and 7 hops, seeds 1 to 4, the QSO from 0 s and from 60 s. The recorder is modelled
- * as the gate modelled it: voiced 1.5 s into a transmission (class + voice gate).
+ * hop gets another voice hold. Measured with the deterministic sweep simulator on a busy-band
+ * scene: a QSO (overs 5 to 30 s, turnarounds 1 to 3 s) on hop 0, 28 s IDs on the last hop, 900 s,
+ * 3 and 7 hops, seeds 1 to 4, the QSO from 0 s and from 60 s. The recorder is voiced 1.5 s into a
+ * transmission (class + voice gate).
  *
  * Recorder models compared:
  * - none: no recorder (the scheduler's own follows only);
- * - true: the lane SW base (before lane RX): a voiced session answers true from 1.5 s into an over
- *   until 2 s after it (the recorder's hangMs), kept within L;
- * - session: lane RX round 4: the same span answers "voice" (kept up to maxHoldMs);
- * - voice: this policy: "voice" from 1.5 s into an over until its squelch closes, false after.
+ * - true: a recorder that only reports a recording: a voiced session answers true from 1.5 s into
+ *   an over until 2 s after it (the recorder's hangMs), kept within L;
+ * - voice: this policy: voice on air (named by its over) from 1.5 s into an over until its squelch
+ *   closes, false after.
+ * The same QSO through a repeater is modelled apart (repeater hang, below).
  *
  * The accepted cost (the user's decision): while someone talks on one hop, a short ID on another
  * hop can start and end unseen. The numbers are asserted so a change shows here.
@@ -62,7 +63,7 @@ const voice = (
 	followOnAir: true,
 })
 
-/** The gate's xorshift32 (seed 0 → 1). */
+/** xorshift32 (seed 0 → 1). */
 function rng(seed: number): () => number {
 	let s = seed >>> 0 || 1
 	return () => {
@@ -75,7 +76,7 @@ function rng(seed: number): () => number {
 	}
 }
 
-/** The gate's QSO: overs of 5 to 30 s, turnarounds of 1 to 3 s, from `fromMs` to RUN_MS. */
+/** A QSO: overs of 5 to 30 s, turnarounds of 1 to 3 s, from `fromMs` to RUN_MS. */
 function qso(hz: number, fromMs: number, seed: number): SimSignal[] {
 	const r = rng(seed)
 	const out: SimSignal[] = []
@@ -89,7 +90,7 @@ function qso(hz: number, fromMs: number, seed: number): SimSignal[] {
 	return out
 }
 
-/** The gate's ID starts: from 30 s every 43 s + seed s, up to 870 s. */
+/** ID starts: from 30 s every 43 s + seed s, up to 870 s. */
 function idStarts(seed: number): number[] {
 	const out: number[] = []
 	for (let t = 30_000; t < RUN_MS - 30_000; t += 15_000 + 28_000 + seed * 1_000)
@@ -97,7 +98,7 @@ function idStarts(seed: number): number[] {
 	return out
 }
 
-type Model = "none" | "true" | "session" | "voice"
+type Model = "none" | "true" | "voice"
 
 type Recorder = (clockMs: number, hopIndex: number | null) => RecordingActivity
 
@@ -108,16 +109,15 @@ function recorder(
 ): Recorder | undefined {
 	if (model === "none") return undefined
 	if (model === "voice")
-		return (c, hop) =>
-			signals.some(
+		return (c, hop) => {
+			const k = signals.findIndex(
 				s =>
 					inHop(hop, s.centreHz) &&
 					c >= s.startMs + VOICED_AFTER_MS &&
 					c < s.endMs,
 			)
-				? "voice"
-				: false
-	const answer: RecordingActivity = model === "true" ? true : "voice"
+			return k < 0 ? false : { voice: `tx-${k}` }
+		}
 	return (c, hop) =>
 		signals.some(
 			s =>
@@ -125,8 +125,6 @@ function recorder(
 				c >= s.startMs + VOICED_AFTER_MS &&
 				c < s.endMs + HANG_MS,
 		)
-			? answer
-			: false
 }
 
 interface SceneStats {
@@ -200,14 +198,14 @@ function isolated(hops: number, startMs: number, model: Model) {
 	}
 }
 
-describe("record whole voice: the SW-B1 scene (900 s, 152 IDs over 8 runs per plan)", () => {
-	// Measured with this simulator. "true" is the lane SW base (the recorder before lane RX
-	// answered true for a voiced session; that scheduler path is unchanged). Lane RX round 4
-	// (1cb8d5a7, "voice" for the whole session) measured on the same scene: 3 hops 41 of 152 IDs
-	// missed, QSO 3 877 550 ms, 21 IDs heard ≥ 25 s; 7 hops 23 missed, 3 125 550 ms, 7 heard ≥ 25 s.
+describe("record whole voice: the busy-band scene (900 s, 152 IDs over 8 runs per plan)", () => {
+	// Measured with this simulator. "true" is a recorder that reports a recording without voice
+	// (that scheduler path keeps L). A recorder answering voice for its whole session (every over
+	// and hang of it, one name) measured on the same scene: 3 hops 41 of 152 IDs missed, QSO
+	// 3 877 550 ms, 21 IDs heard ≥ 25 s; 7 hops 23 missed, 3 125 550 ms, 7 heard ≥ 25 s.
 	// The accepted cost of "record whole voice": IDs on another hop missed while an over is held
 	// to its end (3 hops 15 of 152, 7 hops 4 of 152); the QSO is heard about 15 % (3 hops) and
-	// 17 % (7 hops) more than at the base.
+	// 17 % (7 hops) more than with the "true" recorder.
 	const table: [number, Model, number, number, number][] = [
 		// hops, model, IDs missed, IDs heard ≥ 25 s, QSO heard (Σ ms over the eight runs)
 		[3, "none", 0, 0, 3_373_050],
@@ -224,6 +222,115 @@ describe("record whole voice: the SW-B1 scene (900 s, 152 IDs over 8 runs per pl
 			expect(x.missed).toBe(missed)
 			expect(x.heardWhole).toBe(whole)
 			expect(x.qsoMs).toBe(qsoMs)
+		})
+})
+
+/**
+ * The busy-band QSO through a repeater whose carrier hangs `hangMs` after each over: overs closer
+ * than the hang share one carrier, so the recorder's track stays open and the whole span is one
+ * transmission (one name). Voice is on air from 1.5 s into an over until VOICE_TAIL_MS after it
+ * (the 2 s voice window on audio judged 1 s late, plus part of the last 500 ms window), never
+ * past the carrier; true while the carrier hangs without voice; false once it drops. The IDs on
+ * the last hop are recorded as in the busy-band scene (model "voice").
+ *
+ * What the sweep's own tracks see (`view`): "overs", a track per over (the carrier's level
+ * changes at each turnaround, as on a repeater heard weaker than its users); "carrier", one track
+ * per carrier, which the scheduler's carrier rules also bound.
+ */
+const VOICE_TAIL_MS = 3_250
+
+function repeated(overs: readonly SimSignal[], hangMs: number): SimSignal[][] {
+	const carriers: SimSignal[][] = []
+	for (const o of overs) {
+		const last = carriers.at(-1)
+		if (last !== undefined && o.startMs < last.at(-1)!.endMs + hangMs)
+			last.push(o)
+		else carriers.push([o])
+	}
+	return carriers
+}
+
+function repeaterScene(
+	hops: number,
+	hangMs: number,
+	view: "overs" | "carrier",
+) {
+	const plan = makeHopPlan(centres(hops), HALF_SPAN_HZ)
+	const inHop = (hop: number | null, hz: number): boolean =>
+		hop !== null &&
+		hz >= plan.hops[hop]!.covered.startHz &&
+		hz <= plan.hops[hop]!.covered.endHz
+	const out = { ids: 0, missed: 0, heardWhole: 0, longestHop0Ms: 0 }
+	for (const seed of [1, 2, 3, 4])
+		for (const fromMs of [0, 60_000]) {
+			const hz = plan.hops[0]!.centreHz + 100_000
+			const overs = qso(hz, fromMs, seed)
+			const groups = repeated(overs, hangMs)
+			const carriers = groups.map(g =>
+				voice(hz, g[0]!.startMs, g.at(-1)!.endMs + hangMs - g[0]!.startMs),
+			)
+			const idHz = plan.hops[hops - 1]!.centreHz + 100_000
+			const ids = idStarts(seed).map(ms => voice(idHz, ms))
+			const idRecorder = recorder("voice", ids, inHop)!
+			const rec: Recorder = (c, hop) => {
+				if (!inHop(hop, hz)) return idRecorder(c, hop)
+				const k = carriers.findIndex(t => c >= t.startMs && c < t.endMs)
+				if (k < 0) return false
+				const g = groups[k]!
+				if (c < g[0]!.startMs + VOICED_AFTER_MS) return false
+				const voiced = g.some(
+					o => c >= o.startMs + VOICED_AFTER_MS && c < o.endMs + VOICE_TAIL_MS,
+				)
+				return voiced ? { voice: `carrier-${k}` } : true
+			}
+			const talk = view === "overs" ? overs : carriers
+			const r = simulateSweep(plan, spec, {
+				...sim,
+				durationMs: RUN_MS,
+				signals: [...talk, ...ids],
+				recordingActive: rec,
+			})
+			ids.forEach((_, k) => {
+				out.ids++
+				if (r.detectedAtMs[talk.length + k] === null) out.missed++
+				if ((r.heardMs[talk.length + k] ?? 0) >= 25_000) out.heardWhole++
+			})
+			for (const v of r.visits)
+				if (v.hopIndex === 0)
+					out.longestHop0Ms = Math.max(
+						out.longestHop0Ms,
+						v.leftAtMs - v.tunedAtMs,
+					)
+		}
+	return out
+}
+
+describe("record whole voice: the busy-band QSO through a repeater (repeater hang)", () => {
+	// The known cost: a repeater's hang carrier keeps the over's track open across turnarounds
+	// shorter than the hang, and voice stays on air VOICE_TAIL_MS past the last word, so a
+	// turnaround under about 1.75 s is never seen and the hold runs across overs up to
+	// hold.maxHoldMs (60 s). More IDs on another hop are missed than on simplex (3 hops 15, 7 hops
+	// 4 of 152). Measured with this simulator; asserted so a change shows here.
+	const table: [number, number, "overs" | "carrier", number, number, number][] =
+		[
+			// hops, hang (ms), sweep view, IDs missed, IDs heard ≥ 25 s, longest hop-0 visit (ms)
+			[3, 1_500, "overs", 35, 16, 61_150],
+			[3, 3_000, "overs", 42, 7, 61_150],
+			[7, 1_500, "overs", 20, 14, 61_150],
+			[7, 3_000, "overs", 35, 8, 61_150],
+			[3, 1_500, "carrier", 6, 96, 61_150],
+			[3, 3_000, "carrier", 2, 101, 61_150],
+			[7, 1_500, "carrier", 4, 73, 61_150],
+			[7, 3_000, "carrier", 4, 57, 61_150],
+		]
+	for (const [hops, hangMs, view, missed, whole, longest] of table)
+		it(`${hops} hops, ${hangMs} ms hang, a track per ${view === "overs" ? "over" : "carrier"}: ${missed} of 152 other-hop IDs missed, ${whole} heard ≥ 25 s, the longest hop-0 visit ${longest} ms`, () => {
+			expect(repeaterScene(hops, hangMs, view)).toEqual({
+				ids: 152,
+				missed,
+				heardWhole: whole,
+				longestHop0Ms: longest,
+			})
 		})
 })
 
@@ -273,7 +380,7 @@ describe("record whole voice: the scheduler", () => {
 				!inHop0(hop, hz0) || c < tx.startMs + VOICED_AFTER_MS || c >= tx.endMs
 					? false
 					: c < 35_000
-						? "voice"
+						? { voice: "tx" }
 						: true,
 		})
 		const first = r.visits.find(v => v.hopIndex === 0 && kept(v))!
@@ -291,15 +398,15 @@ describe("record whole voice: the scheduler", () => {
 			...sim,
 			durationMs: 140_000,
 			signals: overs,
-			recordingActive: (c, hop) =>
-				overs.some(
+			recordingActive: (c, hop) => {
+				const k = overs.findIndex(
 					o =>
 						inHop0(hop, o.centreHz) &&
 						c >= o.startMs + VOICED_AFTER_MS &&
 						c < o.endMs,
 				)
-					? "voice"
-					: false,
+				return k < 0 ? false : { voice: `over-${k}` }
+			},
 		})
 		const zero = r.visits.filter(v => v.hopIndex === 0)
 		// The voice holds (kept to their over's end): the first and the third over. The second

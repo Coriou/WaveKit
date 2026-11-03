@@ -313,7 +313,7 @@ describe("WidebandAnalogRecorder admission retries and the CPU budget", () => {
 })
 
 describe("WidebandAnalogRecorder sweep-hold hook", () => {
-	it('recordingActive is "voice" only while voice is on air in a classed, voiced session on that stream and epoch', async () => {
+	it("recordingActive answers voice (named by the voiced track) only while voice is on air in a classed, voiced session on that stream and epoch", async () => {
 		const h = harness()
 		await h.feed(1, false)
 		const onset = h.engine.liveEdge()
@@ -330,7 +330,9 @@ describe("WidebandAnalogRecorder sweep-hold hook", () => {
 		expect(h.rec.recordingActive("rtl", { stream: 1, epoch: 1 })).toBe(false)
 		classed = true
 		await h.feed(0.5, true, report)
-		expect(h.rec.recordingActive("rtl", { stream: 1, epoch: 1 })).toBe("voice")
+		expect(h.rec.recordingActive("rtl", { stream: 1, epoch: 1 })).toEqual({
+			voice: "o",
+		})
 		// The next hop's epoch, another stream and another source: not this recording's window.
 		expect(h.rec.recordingActive("rtl", { stream: 1, epoch: 2 })).toBe(false)
 		expect(h.rec.recordingActive("rtl", { stream: 2, epoch: 1 })).toBe(false)
@@ -354,14 +356,14 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 	}
 	const at = { stream: 1, epoch: 1 }
 
-	it(`a carrier after the voice answers true from ${WIDEBAND_VOICE_ON_AIR_MS} ms after the last voiced window (still "voice" 1.5 s after the voice stopped, true by 3.5 s after: 2 s on audio judged 1 s late, plus the window's 0.5 s), false once its squelch closes`, async () => {
+	it(`a carrier after the voice answers true from ${WIDEBAND_VOICE_ON_AIR_MS} ms after the last voiced window (still voice 1.5 s after the voice stopped, true by 3.5 s after: 2 s on audio judged 1 s late, plus the window's 0.5 s), false once its squelch closes`, async () => {
 		const h = harness()
 		await h.feed(1, false)
 		const { onset, report } = await voicedOver(h, "o", 3)
-		expect(h.rec.recordingActive("rtl", at)).toBe("voice")
+		expect(h.rec.recordingActive("rtl", at)).toEqual({ voice: "o" })
 		h.src.setVoice(false)
 		await h.feed(1.5, true, report)
-		expect(h.rec.recordingActive("rtl", at)).toBe("voice")
+		expect(h.rec.recordingActive("rtl", at)).toEqual({ voice: "o" })
 		// The judged audio runs WIDEBAND_HOLDBACK_MS (1 s) behind the live edge and the last voiced
 		// window ends up to 500 ms after the last word: true by 1 + 2 + 0.5 = 3.5 s after it (the
 		// stated upper bound, pinned: 1.5 + 2 s fed).
@@ -378,10 +380,11 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		expect(h.rec.owns("o")).toBe(false)
 	}, 60_000)
 
-	it('a QSO turnaround: false between the overs, the next over joined in the hang answers true until its own voice is heard, then "voice"; one file', async () => {
+	it("a QSO turnaround: false between the overs, the next over joined in the hang answers true until its own voice is heard, then voice named by the next over (another name than the first); one file", async () => {
 		const h = harness()
 		await h.feed(1, false)
 		const first = await voicedOver(h, "o", 3)
+		expect(h.rec.recordingActive("rtl", at)).toEqual({ voice: "o" })
 		const end = h.engine.liveEdge()
 		await h.feed(0.3, false)
 		h.rec.closed("o", snapshot("o", first.onset, end), null)
@@ -397,7 +400,9 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		expect(h.rec.recordingActive("rtl", at)).toBe(true)
 		h.src.setVoice(true)
 		await h.feed(1.5, true, report2)
-		expect(h.rec.recordingActive("rtl", at)).toBe("voice")
+		// A scheduler that never saw the false answers (an event-loop stall across the
+		// turnaround) still sees the turnaround: the name changed.
+		expect(h.rec.recordingActive("rtl", at)).toEqual({ voice: "o2" })
 		const end2 = h.engine.liveEdge()
 		await h.feed(0.3, false)
 		h.rec.closed("o2", snapshot("o2", onset2, end2), null)
@@ -407,7 +412,7 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		expect(h.ops[0]!.outcome).toBe("finalized")
 	}, 60_000)
 
-	it(`the window bound: "voice" with the newest judged audio exactly ${WIDEBAND_VOICE_ON_AIR_MS} ms (2 048 000 samples at 1.024 Msps) past the last voiced window, true one sample later`, async () => {
+	it(`the window bound: voice with the newest judged audio exactly ${WIDEBAND_VOICE_ON_AIR_MS} ms (2 048 000 samples at 1.024 Msps) past the last voiced window, true one sample later`, async () => {
 		const h = harness()
 		await h.feed(1, false)
 		const { report } = await voicedOver(h, "o", 3)
@@ -423,7 +428,7 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		const window = (WIDEBAND_VOICE_ON_AIR_MS * FS) / 1000
 		expect(window).toBe(2_048_000)
 		session.judgedTo = voiceAt + window
-		expect(h.rec.recordingActive("rtl", at)).toBe("voice")
+		expect(h.rec.recordingActive("rtl", at)).toEqual({ voice: "o" })
 		session.judgedTo = voiceAt + window + 1
 		expect(h.rec.recordingActive("rtl", at)).toBe(true)
 		report()

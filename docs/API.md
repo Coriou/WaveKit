@@ -3284,7 +3284,7 @@ log limit; snapshot refusals are logged at debug, outside it). The codes are exp
 	"recent": [
 		{
 			"code": "started",
-			"at": "2026-11-03T04:30:11.600Z",
+			"at": "2026-01-15T12:00:05.600Z",
 			"sourceId": "rtl",
 			"observationId": "01m6g3…",
 			"discoveryId": "d_01m6g3…"
@@ -3293,7 +3293,7 @@ log limit; snapshot refusals are logged at debug, outside it). The codes are exp
 	"recentRefusals": [
 		{
 			"code": "refused:cpu",
-			"at": "2026-11-03T04:30:11.300Z",
+			"at": "2026-01-15T12:00:05.300Z",
 			"sourceId": "rtl",
 			"observationId": "01m6g3…",
 			"discoveryId": "d_01m6g3…"
@@ -4153,7 +4153,7 @@ observations, and forgets at a restart); never on list pages or events.
 "recorder": {
 	"last": {
 		"code": "finalized",
-		"at": "2026-11-03T04:30:41.200Z",
+		"at": "2026-01-15T12:00:35.200Z",
 		"sourceId": "rtl",
 		"observationId": "01m6g3…",
 		"discoveryId": "d_01m6g3…"

@@ -60,6 +60,7 @@ import type {
 } from "@wavekit/api-types"
 import { VOICE_MIN_FINAL_FRAMES } from "./voice-activity.js"
 import { RecorderDecisions } from "./recorder-decisions.js"
+import type { RecordingActivity } from "../scheduler.js"
 
 /** Same bound as the channel-tier trigger: a 25 kHz NFM channel's occupied bandwidth. */
 export const WIDEBAND_MAX_OBW_HZ = 16_000
@@ -101,7 +102,7 @@ export const WIDEBAND_QUALIFY_FRAMES =
  */
 export const WIDEBAND_EVICT_MIN_HEARD_FRAMES = 2 * ANALOG_AUDIO_RATE_HZ
 /**
- * Voice is on air (recordingActive answers "voice") while the newest in-track audio the session
+ * Voice is on air (recordingActive answers VoiceOnAir) while the newest in-track audio the session
  * judged is at most this far past the end of the last voiced 500 ms window heard in a track that
  * is still open (VoiceOnAirMeter): 2000 ms. A voiced window ends up to 500 ms after the last loud
  * syllable in it, so 1.5 to 2 s of silence between phrases keeps the hold. Judged audio runs
@@ -446,7 +447,7 @@ interface Session {
 	heard: number
 	/**
 	 * Per-transmission voice check over the session's in-track audio once voiced (never
-	 * latches). Before that, nothing can answer "voice" (recordingActive needs `qualified`), so
+	 * latches). Before that, nothing can answer voice (recordingActive needs `qualified`), so
 	 * only the file gate filters the audio, and its qualifying window sets `voiceAt`.
 	 */
 	readonly meter: VoiceOnAirMeter
@@ -624,10 +625,12 @@ export class WidebandAnalogRecorder {
 
 	/**
 	 * The sweep-hold hook, per transmission: for a session on this source, stream and epoch that is
-	 * classed analog-fm and has been voiced (`qualified`, sticky for its files), "voice" while voice
-	 * is on air in a track still open: the last voiced meter window lies inside an open track's span
-	 * and the newest judged audio is at most WIDEBAND_VOICE_ON_AIR_MS past it (the scheduler may
-	 * keep the hop up to `hold.maxHoldMs`, RecordingActivity); true while a track is open with no
+	 * classed analog-fm and has been voiced (`qualified`, sticky for its files), voice (`{ voice }`,
+	 * named by that track's observation id: the same over keeps its name, the next over after a
+	 * turnaround opens another track) while voice is on air in a track still open: the last voiced
+	 * meter window lies inside an open track's span and the newest judged audio is at most
+	 * WIDEBAND_VOICE_ON_AIR_MS past it (the scheduler may keep the hop up to `hold.maxHoldMs` while
+	 * the name stays the same, RecordingActivity); true while a track is open with no
 	 * voice that recent (a carrier or a repeater hang after the voice, a stuck carrier: kept within
 	 * L only); false once no joined track is open (the over's squelch closed: the recorder's
 	 * `hangMs` still joins the next over into the same file, the sweep does not wait for it). A
@@ -637,8 +640,8 @@ export class WidebandAnalogRecorder {
 	recordingActive(
 		sourceId: string,
 		at: { readonly stream: number; readonly epoch: number },
-	): "voice" | boolean {
-		let answer: "voice" | boolean = false
+	): RecordingActivity {
+		let answer: RecordingActivity = false
 		for (const s of this.sessions.values()) {
 			if (
 				s.done ||
@@ -650,25 +653,37 @@ export class WidebandAnalogRecorder {
 			)
 				continue
 			const v = this.voiceOnAir(s)
-			if (v === "voice") return v
+			if (typeof v === "object") return v
 			answer ||= v
 		}
 		return answer
 	}
 
-	/** recordingActive for one classed, voiced session (see there). */
-	private voiceOnAir(s: Session): "voice" | boolean {
+	/**
+	 * recordingActive for one classed, voiced session (see there). The voiced track is the open
+	 * span the last voiced window lies in; of several (overlapping spans of one channel, e.g. a
+	 * track split), the one that started first, so the name changes only once that span closes.
+	 */
+	private voiceOnAir(s: Session): RecordingActivity {
 		let open = false
-		let voiced = false
+		let voiced: string | null = null
+		let voicedStart = Infinity
 		const at = s.voiceAt
 		const window = (WIDEBAND_VOICE_ON_AIR_MS * s.fs) / 1000
-		for (const a of s.activity.values()) {
+		for (const [id, a] of s.activity) {
 			if (!a.open) continue
 			open = true
-			if (at !== null && at >= a.start && s.judgedTo - at <= window)
-				voiced = true
+			if (
+				at !== null &&
+				at >= a.start &&
+				s.judgedTo - at <= window &&
+				a.start < voicedStart
+			) {
+				voiced = id
+				voicedStart = a.start
+			}
 		}
-		return voiced ? "voice" : open
+		return voiced !== null ? { voice: voiced } : open
 	}
 
 	/** Status block (ScannerStatus.recorder): live sessions, parked ones and the decision log. */

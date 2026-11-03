@@ -274,7 +274,7 @@ describe("WidebandAnalogRecorder decisions (synthetic signals)", () => {
 		expect(h.ops[0]!.outcome).toBe("finalized")
 	}, 60_000)
 
-	it("a classed carrier that never sounds like voice: never 'voice' for a sweep, discarded:unvoiced after 8 s in the track", async () => {
+	it("a classed carrier that never sounds like voice: never voice for a sweep, discarded:unvoiced after 8 s in the track", async () => {
 		const h = harness({
 			fs: LOW_FS,
 			offset: LOW_OFFSET,
@@ -282,13 +282,15 @@ describe("WidebandAnalogRecorder decisions (synthetic signals)", () => {
 		})
 		await h.feed(0.5, false)
 		const onset = h.engine.liveEdge()
-		const seen = new Set<string | boolean>()
+		const seen = new Set<string>()
 		// WIDEBAND_QUALIFY_MS (8 s) of in-track audio, judged a holdback (1 s) late, and a margin.
 		await h.feed(10, true, () => {
 			h.rec.track(input("c", snapshot("c", onset, h.engine.liveEdge(), LOW)))
-			seen.add(h.rec.recordingActive("rtl", { stream: 1, epoch: 1 }))
+			seen.add(
+				JSON.stringify(h.rec.recordingActive("rtl", { stream: 1, epoch: 1 })),
+			)
 		})
-		expect([...seen]).toEqual([false])
+		expect([...seen]).toEqual(["false"])
 		expect(h.rec.diagnostics().recent.map(e => e.code)).toEqual([
 			"started",
 			"discarded:unvoiced",

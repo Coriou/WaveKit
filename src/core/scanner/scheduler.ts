@@ -87,26 +87,32 @@ const LONG_FOLLOW_MARGIN_MS = 5_000
 /** Re-check period of a hold kept for a recording (Hold mode `record`): 5 blocks of 50 ms. */
 const RECORD_RECHECK_MS = 250
 /**
- * Longest the recording check may go unasked while a visit's voice hold is on (Visit.voice): a
- * longer gap spends it, as a non-voice answer does. Two re-checks (2 × RECORD_RECHECK_MS), so any
- * span the recorder answers other than "voice" for longer than 500 ms (a QSO turnaround is 1 s
- * or more) is seen, whatever hold runs: a `record` hold asks every 250 ms, any other hold of the
- * visit (a probe, a follow, a hang) and a restart's dwell are sampled on every tick at most
- * RECORD_RECHECK_MS apart (sampleVoice), and a track close asks once more.
- */
-const VOICE_SAMPLE_GAP_MS = 2 * RECORD_RECHECK_MS
-
-/**
  * What the recording check (`recordingActive`) reports for the tuned window: false, nothing is
  * recorded (or the recorded transmission's squelch closed); true, a recording runs (the hop is kept
- * within L, keepForRecording), e.g. a carrier or a repeater hang after a voiced over; "voice", voice
- * is on air in the recorded transmission now (classed analog, voiced, heard within the recorder's
- * last 2 s, WIDEBAND_VOICE_ON_AIR_MS): the hop is kept until that transmission ends, up to
- * `hold.maxHoldMs` ("record whole voice", so a 28 s ID is recorded whole). Once the answer is no
- * longer "voice" the visit's voice hold is spent (Visit.voice) and a full coarse sweep follows the
- * visit before the hop gets another (longHoldLock).
+ * within L, keepForRecording), e.g. a carrier or a repeater hang after a voiced over; VoiceOnAir,
+ * voice is on air in the recorded transmission now (classed analog, voiced, heard within the
+ * recorder's last 2 s, WIDEBAND_VOICE_ON_AIR_MS): the hop is kept until that transmission ends,
+ * up to `hold.maxHoldMs` ("record whole voice", so a 28 s ID is recorded whole). The voice hold
+ * belongs to the transmission named when it starts (VoiceOnAir.voice): it is spent (Visit.voice)
+ * by the first answer that is not voice or names another transmission (a turnaround), never by
+ * how long the check went unasked, so a stalled event loop does not end it. A full coarse sweep
+ * then follows the visit before the hop gets another (longHoldLock).
  */
-export type RecordingActivity = boolean | "voice"
+export type RecordingActivity = boolean | VoiceOnAir
+
+/** Voice on air in a recorded transmission (RecordingActivity). */
+export interface VoiceOnAir {
+	/**
+	 * Identity of the voiced transmission (the recorder's open observation id): the same over
+	 * answers the same identity, a new over (after a turnaround) another.
+	 */
+	readonly voice: string
+}
+
+/** Whether a recording check answered voice on air (RecordingActivity). */
+export function isVoiceOnAir(a: RecordingActivity): a is VoiceOnAir {
+	return typeof a === "object"
+}
 /**
  * Retry budget of a frequency with carrier evidence: after a hold of d ms it rests K × d × f ms,
  * f spread over [0.5, 1.5) (spread) so retries do not lock to the period of regular overs, with K
@@ -312,14 +318,17 @@ interface Visit {
 	recordEndMs: number | null
 	/**
 	 * Voice hold of the visit ("record whole voice"): "on" while a `record` hold runs with the
-	 * voice cap (the recorder answered "voice": voice on air in the current transmission);
-	 * "spent" once an answer is no longer "voice" (the transmission's squelch closed, or a carrier
-	 * or hang without voice followed it): a later "voice" of the visit counts as true (L only).
+	 * voice cap (the recorder answered voice on air in the current transmission, VoiceOnAir);
+	 * "spent" once an answer is not voice of that transmission (its squelch closed, a carrier or
+	 * hang without voice followed it, or another transmission is voiced): a later voice answer of
+	 * the visit counts as true (L only).
 	 * Not "no" at the visit's end: every hop gets a coarse visit before the next long follow or
 	 * recording hold (longHoldLock), so the next over of a QSO gets a voice hold only after it.
 	 */
 	voice: "no" | "on" | "spent"
-	/** Clock the recording check was last asked while Visit.voice was "on" (VOICE_SAMPLE_GAP_MS). */
+	/** The voiced transmission the voice hold belongs to (VoiceOnAir.voice) while Visit.voice is "on". */
+	voiceId: string | null
+	/** Clock the recording check was last asked while Visit.voice was "on" (sampleVoice's pace only). */
 	voiceAskedAt: number | null
 	/** A carrier on air since before any visit saw it start showed itself: the hop's past score was it. */
 	newlyQuiet: boolean
@@ -497,7 +506,7 @@ export class SweepScheduler {
 			minSurfaceBlocks?: number
 			activitySeed?: (hop: Hop) => number
 			/**
-			 * True (or "voice") while the window the scheduler is tuned to is being recorded (the
+			 * True (or VoiceOnAir) while the window the scheduler is tuned to is being recorded (the
 			 * job runner's `recordingActive` dependency): an unforced leave keeps the hop instead
 			 * (Hold mode `record`, keepForRecording; RecordingActivity). Absent: never.
 			 */
@@ -924,7 +933,7 @@ export class SweepScheduler {
 		const v = this.visit
 		// A recording not voice (or whose voice hold is spent) keeps only what L has left
 		// (keepForRecording's non-voice cap).
-		if (active === true || (active === "voice" && v?.voice === "spent"))
+		if (active === true || (isVoiceOnAir(active) && v?.voice === "spent"))
 			hold.cap = Math.min(hold.cap, this.holdOrigin() + this.followBudgetMs())
 		if (now >= hold.cap || active === false) return this.leaveHop([])
 		const next = this.nextCandidate()
@@ -949,10 +958,11 @@ export class SweepScheduler {
 	 * Keeps the hop while its window is being recorded (recordingActive), as a long follow: up to
 	 * what L has left (followBudgetMs) and never past `hold.maxHoldMs` from the start of the visit's
 	 * holds (every later hold of the visit ends by then too: Visit.recordEndMs), which
-	 * starts now if no hold ran. A recording with voice on air ("voice") is kept until the answer
-	 * is no longer "voice" (its transmission ended, or no voice for 2 s), up to `hold.maxHoldMs`
+	 * starts now if no hold ran. A recording with voice on air (VoiceOnAir) is kept until the answer
+	 * is no longer voice of that transmission (it ended, no voice for 2 s, or another transmission
+	 * is voiced), up to `hold.maxHoldMs`
 	 * whatever L has left, so a 28 s ID is recorded whole; the visit's voice hold is then spent
-	 * (Visit.voice: a later "voice" of the visit keeps L only) and every hop gets a coarse visit
+	 * (Visit.voice: a later voice answer of the visit keeps L only) and every hop gets a coarse visit
 	 * before the hop is followed or kept again (endVisit, longHoldLock). A recording that is not
 	 * voice (true) keeps L. Not while the long-hold lock holds, while parked (a parked hop is
 	 * never left), on a one-hop plan, for a signals-only job or under `hold.policy: "never"`. A
@@ -977,7 +987,7 @@ export class SweepScheduler {
 		const active = this.askRecording(now)
 		if (active === false) return false
 		// Voice on air in the current transmission, and the visit's voice hold not spent yet.
-		const voice = active === "voice" && v.voice !== "spent"
+		const voice = isVoiceOnAir(active) && v.voice !== "spent"
 		const cap = voice
 			? start + this.spec.hold.maxHoldMs
 			: Math.min(
@@ -996,6 +1006,7 @@ export class SweepScheduler {
 		v.budgeted = true
 		if (voice) {
 			v.voice = "on"
+			v.voiceId = active.voice
 			v.voiceAskedAt = now
 		}
 		v.recordEndMs = cap - start
@@ -1020,29 +1031,29 @@ export class SweepScheduler {
 
 	/**
 	 * Asks the recording check (false without one). While the visit's voice hold is on
-	 * (Visit.voice), any answer other than "voice", or an answer after more than
-	 * VOICE_SAMPLE_GAP_MS unasked (the check could not see what happened meanwhile: a turnaround
-	 * may have passed), spends it (spendVoice), whatever hold runs.
+	 * (Visit.voice), any answer that is not voice of the transmission the hold started for
+	 * (Visit.voiceId) spends it (spendVoice), whatever hold runs: a non-voice answer, or voice of
+	 * another transmission (a turnaround passed, even one the check never saw because the event
+	 * loop stalled meanwhile). How long the check went unasked never spends it.
 	 */
 	private askRecording(now: number): RecordingActivity {
 		const active = this.recordingActive?.() ?? false
 		const v = this.visit
 		if (v === null || v.voice !== "on") return active
-		const gap =
-			v.voiceAskedAt !== null && now - v.voiceAskedAt > VOICE_SAMPLE_GAP_MS
-		if (active !== "voice" || gap) this.spendVoice(v)
+		if (!isVoiceOnAir(active) || active.voice !== v.voiceId) this.spendVoice(v)
 		else v.voiceAskedAt = now
 		return active
 	}
 
 	/**
-	 * The visit's voice hold ends (its transmission ended, voice stopped, or the check went unasked
-	 * too long): a later "voice" of the visit counts as true, and every hold of the visit shares
+	 * The visit's voice hold ends (its transmission ended, voice stopped, or another transmission
+	 * is voiced): a later voice answer of the visit counts as true, and every hold of the visit shares
 	 * what L has left from the start of its holds (Visit.recordEndMs, maxHoldDeadline), not the
 	 * voice cap; a `record` hold's cap is cut at its next re-check (recheckRecording).
 	 */
 	private spendVoice(v: Visit): void {
 		v.voice = "spent"
+		v.voiceId = null
 		v.voiceAskedAt = null
 		if (v.recordEndMs !== null)
 			v.recordEndMs = Math.min(v.recordEndMs, this.followBudgetMs())
@@ -1491,6 +1502,7 @@ export class SweepScheduler {
 			watched: false,
 			recordEndMs: null,
 			voice: "no",
+			voiceId: null,
 			voiceAskedAt: null,
 			newlyQuiet: false,
 		}

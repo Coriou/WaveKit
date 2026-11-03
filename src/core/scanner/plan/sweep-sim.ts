@@ -61,8 +61,8 @@ export interface SimOptions {
 	maxSteps?: number
 	/**
 	 * A recorder's answer (the scheduler's `recordingActive`): whether the window tuned to hop
-	 * `hopIndex` (null before the first tune) is being recorded at `clockMs` ("voice": voice on air
-	 * in the recorded transmission, kept until it ends, up to `hold.maxHoldMs`; RecordingActivity).
+	 * `hopIndex` (null before the first tune) is being recorded at `clockMs` (VoiceOnAir: voice on
+	 * air in the recorded transmission, kept until it ends, up to `hold.maxHoldMs`; RecordingActivity).
 	 * Absent: never.
 	 */
 	recordingActive?: (
