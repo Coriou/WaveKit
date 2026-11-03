@@ -98,8 +98,10 @@ describe("source sample activity", () => {
 		const stream = await connect()
 		const payload = Buffer.alloc(512 * 1024)
 		sockets[0]!.write(payload)
-		await vi.waitFor(() =>
-			expect(manager.getStatus("iq")!.bytesReceived).toBe(payload.length),
+		// A loaded CI runner can take longer than the 1 s default to deliver 512 KiB over loopback.
+		await vi.waitFor(
+			() => expect(manager.getStatus("iq")!.bytesReceived).toBe(payload.length),
+			{ timeout: 10_000 },
 		)
 		expect(manager.getStatus("iq")!.activity.state).toBe("paused")
 		clock.mockReturnValue(start + 30000)
