@@ -462,6 +462,12 @@ interface Session {
 	voiceAt: number | null
 	/** Input sample past the newest frame the gate judged (in-track or not). */
 	judgedTo: number
+	/**
+	 * The voiced transmission's name (recordingActive): the first voiced open track, kept while
+	 * any overlapping track stays open (a track split or handoff is the same over), cleared once
+	 * no track is open (the squelch closed: the next over gets a new name).
+	 */
+	voiceTx: string | null
 	readonly observations: Set<string>
 	/** Track spans per observation (open: still active), the voice gate's input window. */
 	readonly activity: Map<string, { start: number; last: number; open: boolean }>
@@ -683,7 +689,10 @@ export class WidebandAnalogRecorder {
 				voicedStart = a.start
 			}
 		}
-		return voiced !== null ? { voice: voiced } : open
+		if (!open) s.voiceTx = null
+		if (voiced === null) return open
+		s.voiceTx ??= voiced
+		return { voice: s.voiceTx }
 	}
 
 	/** Status block (ScannerStatus.recorder): live sessions, parked ones and the decision log. */
@@ -774,6 +783,7 @@ export class WidebandAnalogRecorder {
 			span.last = Math.max(span.last, track.lastSample)
 			span.open = false
 		}
+		if (![...s.activity.values()].some(a => a.open)) s.voiceTx = null
 		if (!cleanTrack(track) || barredAtClose(info)) {
 			// Any contributing track turning edge, spur, unverified or encrypted (evidence that may
 			// arrive after its last update), or losing record.analog, discards the recording.
@@ -1062,6 +1072,7 @@ export class WidebandAnalogRecorder {
 			mask: new Uint8Array(0),
 			meterTo: Number.NEGATIVE_INFINITY,
 			voiceAt: null,
+			voiceTx: null,
 			judgedTo: Number.NEGATIVE_INFINITY,
 			observations: new Set([input.observationId]),
 			activity: new Map([

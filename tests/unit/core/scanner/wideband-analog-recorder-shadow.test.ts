@@ -380,6 +380,32 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		expect(h.rec.owns("o")).toBe(false)
 	}, 60_000)
 
+	it("an overlapping track that continues one over keeps the voiced name when the first track closes; the next over after a gap gets a new name", async () => {
+		const h = harness()
+		await h.feed(1, false)
+		const a = await voicedOver(h, "a", 3)
+		const onsetB = h.engine.liveEdge()
+		const both = () => {
+			a.report()
+			h.rec.track(input("b", snapshot("b", onsetB, h.engine.liveEdge())))
+		}
+		await h.feed(2, true, both)
+		expect(h.rec.recordingActive("rtl", at)).toEqual({ voice: "a" })
+		h.rec.closed("a", snapshot("a", a.onset, h.engine.liveEdge()), null)
+		expect(h.rec.recordingActive("rtl", at)).toEqual({ voice: "a" })
+		const reportB = () =>
+			h.rec.track(input("b", snapshot("b", onsetB, h.engine.liveEdge())))
+		await h.feed(1, true, reportB)
+		expect(h.rec.recordingActive("rtl", at)).toEqual({ voice: "a" })
+		const endB = h.engine.liveEdge()
+		await h.feed(0.3, false)
+		h.rec.closed("b", snapshot("b", onsetB, endB), null)
+		expect(h.rec.recordingActive("rtl", at)).toBe(false)
+		await h.feed(0.7, false)
+		await voicedOver(h, "c", 3)
+		expect(h.rec.recordingActive("rtl", at)).toEqual({ voice: "c" })
+	}, 60_000)
+
 	it("a QSO turnaround: false between the overs, the next over joined in the hang answers true until its own voice is heard, then voice named by the next over (another name than the first); one file", async () => {
 		const h = harness()
 		await h.feed(1, false)
