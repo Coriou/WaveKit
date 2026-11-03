@@ -198,6 +198,10 @@ export function harness(
 		 * recorder assumes 3 s, the FakeEngine's default ring).
 		 */
 		ringSeconds?: number
+		/** Wraps the fake store's beginAnalog (failure injection: a throw, a rejected push). */
+		beginWrap?: (
+			begin: (input: AnalogInput) => AnalogHandle,
+		) => (input: AnalogInput) => AnalogHandle
 	} = {},
 ) {
 	const fs = opts.fs ?? FS
@@ -218,7 +222,7 @@ export function harness(
 				? { ringSeconds: opts.ringSeconds }
 				: {}),
 		}),
-		beginAnalog: begin,
+		beginAnalog: opts.beginWrap ? opts.beginWrap(begin) : begin,
 		recordTone: (observationId, hz) => tones.push({ observationId, hz }),
 		...(opts.reserveCores ? { reserveCores: opts.reserveCores } : {}),
 		logger,

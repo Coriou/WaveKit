@@ -61,14 +61,24 @@ export class RecorderDecisions {
 	) {}
 
 	/**
-	 * One decision. A refusal repeating the observation's last decision (a snapshot retried while
-	 * slots or CPU stay full, a class that stays non-analog) is no new decision: it is not counted,
-	 * kept or logged. Any other code always counts (two files of one session finalize twice).
+	 * One decision. A snapshot refusal (`session` false) repeating the observation's last decision
+	 * (a snapshot retried while slots or CPU stay full, a class that stays non-analog) is no new
+	 * decision: it is not counted, kept or logged, but the discovery it now carries is still bound
+	 * (an observation may be associated only after its first refusal). Any other code always
+	 * counts: a session's decisions are each about a file or the session (two files of one session
+	 * finalize twice, two files refused by the store are refused twice).
 	 */
-	note(code: ScannerRecorderDecision, ref: RecorderDecisionRef): void {
+	note(
+		code: ScannerRecorderDecision,
+		ref: RecorderDecisionRef,
+		session = false,
+	): void {
 		const at = this.now()
 		const known = this.byObservation.get(ref.observationId)
-		if (known?.last === code && code.startsWith("refused:")) return
+		if (!session && known?.last === code && code.startsWith("refused:")) {
+			known.discoveryId = ref.discoveryId ?? known.discoveryId
+			return
+		}
 		const memory: ObservationMemory = known ?? {
 			sourceId: ref.sourceId,
 			discoveryId: null,
@@ -99,7 +109,10 @@ export class RecorderDecisions {
 		this.logLine(entry)
 	}
 
-	/** The observation's discovery became known (a shadow classed after its decisions). */
+	/**
+	 * The observation's discovery became known (a shadow classed after its decisions, a refused
+	 * observation associated later, or an association first given at its close).
+	 */
 	bindDiscovery(observationId: string, discoveryId: string): void {
 		const memory = this.byObservation.get(observationId)
 		if (memory) memory.discoveryId ??= discoveryId

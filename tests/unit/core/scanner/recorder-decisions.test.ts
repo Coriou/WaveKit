@@ -115,6 +115,29 @@ describe("RecorderDecisions", () => {
 		])
 	})
 
+	it("a repeated refusal binds the discovery it now carries, without counting or logging again", async () => {
+		const { lines, logger } = capture()
+		const d = new RecorderDecisions(logger, () => 0)
+		d.note("refused:cpu", ref(1))
+		expect(d.forDiscovery("d_1")).toBeNull()
+		d.note("refused:cpu", ref(1, "d_1"))
+		await flushLogs()
+		expect(lines).toHaveLength(1)
+		expect(d.status().counts).toEqual({ "refused:cpu": 1 })
+		expect(d.forDiscovery("d_1")).toMatchObject({
+			last: { code: "refused:cpu", observationId: "o_1", discoveryId: "d_1" },
+			counts: { "refused:cpu": 1 },
+		})
+	})
+
+	it("a session's repeated decision is a new decision (two files refused by the store count twice)", () => {
+		const d = new RecorderDecisions(pino({ level: "silent" }), () => 0)
+		d.note("refused:store", ref(1, "d_1"), true)
+		d.note("refused:store", ref(1, "d_1"), true)
+		expect(d.status().counts).toEqual({ "refused:store": 2 })
+		expect(d.status().recent).toHaveLength(2)
+	})
+
 	it(`keeps the last RECORDER_RECENT_DECISIONS (${RECORDER_RECENT_DECISIONS}) decisions, newest last`, () => {
 		const d = new RecorderDecisions(pino({ level: "silent" }), () => 0)
 		for (let i = 0; i < RECORDER_RECENT_DECISIONS; i++)
@@ -241,6 +264,28 @@ describe("WidebandAnalogRecorder decisions (synthetic signals)", () => {
 			"started",
 		])
 	}, 60_000)
+
+	it("a refused observation associated only on a later snapshot, or only at its close, names its refusal on the discovery", async () => {
+		const h = harness({ reserveCores: () => null })
+		await h.feed(0.2, false)
+		const onset = h.engine.liveEdge()
+		await h.feed(0.2, true)
+		const track = snapshot("x", onset, h.engine.liveEdge())
+		// Refused while unassociated, then the same refusal once the store associated it.
+		h.rec.track(input("c", track, { discoveryId: null }))
+		h.rec.track(input("c", track, { discoveryId: "d_cpu" }))
+		expect(h.rec.discoveryDecisions("d_cpu")).toMatchObject({
+			last: { code: "refused:cpu", observationId: "c" },
+			counts: { "refused:cpu": 1 },
+		})
+		// Refused (no class, no shadow) and associated only by its closing snapshot.
+		h.rec.track(input("n", track, { discoveryId: null, analogFm: false }))
+		expect(h.rec.discoveryDecisions("d_close")).toBeNull()
+		h.rec.closed("n", track, null, { analogFm: false, discoveryId: "d_close" })
+		expect(h.rec.discoveryDecisions("d_close")).toMatchObject({
+			last: { code: "refused:not-analog", observationId: "n" },
+		})
+	})
 
 	it("encrypted, opted out and non-analog snapshots get their own refusal codes", async () => {
 		const h = harness()

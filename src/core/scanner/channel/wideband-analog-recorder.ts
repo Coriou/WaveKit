@@ -407,6 +407,10 @@ interface FileState {
 	heard: number
 	writing: boolean
 	finishing: boolean
+	/** The operation's finish was asked for: its own receipt is its terminal decision. */
+	finishAsked: boolean
+	/** This file's terminal decision was noted (each file gets exactly one; endFile). */
+	decided: boolean
 }
 
 interface Session {
@@ -672,6 +676,9 @@ export class WidebandAnalogRecorder {
 		cut: AnalogCut | null,
 		info?: WidebandCloseInfo,
 	): void {
+		// An association first given at the close still names the observation's earlier decisions.
+		if (info !== undefined && info.discoveryId !== null)
+			this.decisions.bindDiscovery(observationId, info.discoveryId)
 		const id = this.byObservation.get(observationId)
 		if (id === undefined) return
 		this.byObservation.delete(observationId)
@@ -773,6 +780,9 @@ export class WidebandAnalogRecorder {
 
 	private onTrack(input: WidebandTrackInput): void {
 		const { track, observationId } = input
+		// A refused observation may be associated only after its refusal: bind it on every snapshot.
+		if (input.discoveryId !== null)
+			this.decisions.bindDiscovery(observationId, input.discoveryId)
 		// Encrypted, opted out or unclean: never recorded, and a file it contributes to is discarded.
 		const barred = barredSnapshot(
 			input.encrypted,
@@ -902,10 +912,10 @@ export class WidebandAnalogRecorder {
 			// (no retry each snapshot): a started part is cancelled, nothing was admitted.
 			const id = this.byObservation.get(observationId)
 			const s = id === undefined ? undefined : this.sessions.get(id)
-			if (s) this.cancelSession(s, "cancelled", true)
 			releaseOnce()
 			remember(this.refused, observationId)
-			this.decisions.note("refused:start-failed", ref)
+			if (s) this.refuse(s, "refused:start-failed", true)
+			else this.decisions.note("refused:start-failed", ref)
 			this.warn(err)
 		}
 	}
@@ -1081,6 +1091,8 @@ export class WidebandAnalogRecorder {
 			heard: 0,
 			writing: false,
 			finishing: false,
+			finishAsked: false,
+			decided: false,
 		}
 		s.file = file
 		s.files.add(file)
@@ -1111,8 +1123,8 @@ export class WidebandAnalogRecorder {
 			// The store is not settling files: give up rather than hold more audio.
 			file.failed = true
 			s.files.delete(file)
-			this.decide(s, "discarded:store-backlog")
-			if (s.file === file) this.refuse(s, null)
+			this.endFile(s, file, "discarded:store-backlog")
+			if (s.file === file) this.refuse(s, "discarded:store-backlog")
 			return
 		}
 		s.waiting.push(file)
@@ -1148,9 +1160,8 @@ export class WidebandAnalogRecorder {
 		} catch (err: unknown) {
 			this.bindings.delete(key)
 			this.warn(err)
-			file.failed = true
 			s.files.delete(file)
-			if (s.file === file) this.refuseOrRetry(s)
+			this.storeFailed(s, file)
 			return
 		}
 		file.handle = handle
@@ -1181,9 +1192,9 @@ export class WidebandAnalogRecorder {
 			},
 			() => {
 				// Storage cap, disk-low or a lost association: this transmission is not recorded
-				// (the observation is tried once more from its next snapshot).
-				file.failed = true
-				if (s.file === file) this.refuseOrRetry(s)
+				// (the observation is tried once more from its next snapshot). A finishing or waiting
+				// file gets its own refused:store; the store settles its operation.
+				this.storeFailed(s, file)
 			},
 		)
 	}
@@ -1216,8 +1227,11 @@ export class WidebandAnalogRecorder {
 	/** Per file: the tone heard over this file's own audio, once it is finalized. */
 	private onSettled(s: Session, file: FileState, receipt: AnalogReceipt): void {
 		// A file this recorder cancelled already has its decision (refused, discarded).
-		if (receipt.outcome === "finalized") this.decide(s, "finalized")
-		else if (!file.failed) this.decide(s, "discarded:aborted")
+		this.endFile(
+			s,
+			file,
+			receipt.outcome === "finalized" ? "finalized" : "discarded:aborted",
+		)
 		if (receipt.outcome !== "finalized" || this.deps.recordTone === undefined)
 			return
 		const hz = file.toneHz
@@ -1237,24 +1251,34 @@ export class WidebandAnalogRecorder {
 	 */
 	private refuse(
 		s: Session,
-		code: ScannerRecorderDecision | null,
+		code: ScannerRecorderDecision,
 		everyFile = false,
 	): void {
-		if (code !== null) this.decide(s, code)
 		for (const id of s.observations) remember(this.refused, id)
-		this.cancelSession(s, "cancelled", everyFile)
+		this.terminate(s, this.cancelSession(s, "cancelled", everyFile), code)
 	}
 
-	/** A store admission failure: the first one per observation is retried on its next snapshot. */
-	private refuseOrRetry(s: Session): void {
-		const ids = [...s.observations]
-		this.decide(s, "refused:store")
-		if (ids.length > 0 && ids.every(id => !this.retried.has(id))) {
-			for (const id of ids) remember(this.retried, id)
-			this.cancelSession(s, "cancelled")
+	/**
+	 * A store failure (admission refused or thrown, readiness rejected) of `file`. Every file gets
+	 * its own refused:store whether or not it is the current one; only the current file's failure
+	 * acts on the session: the first one per observation is retried on its next snapshot, the
+	 * second refuses it. A finishing or waiting file's failure leaves the session alone.
+	 */
+	private storeFailed(s: Session, file: FileState): void {
+		file.failed = true
+		if (s.file !== file || s.done) {
+			const at = s.waiting.indexOf(file)
+			if (at >= 0) s.waiting.splice(at, 1)
+			this.endFile(s, file, "refused:store")
 			return
 		}
-		this.refuse(s, null)
+		const ids = [...s.observations]
+		if (ids.length > 0 && ids.every(id => !this.retried.has(id))) {
+			for (const id of ids) remember(this.retried, id)
+			this.terminate(s, this.cancelSession(s, "cancelled"), "refused:store")
+			return
+		}
+		this.refuse(s, "refused:store")
 	}
 
 	/** A shadow whose class never came: nothing of it is kept, and its observations are done. */
@@ -1264,11 +1288,45 @@ export class WidebandAnalogRecorder {
 
 	/** Notes a decision about the session's owner observation (RecorderDecisions). */
 	private decide(s: Session, code: ScannerRecorderDecision): void {
-		this.decisions.note(code, {
-			sourceId: s.sourceId,
-			observationId: s.owner,
-			discoveryId: s.discoveryId,
-		})
+		this.decisions.note(
+			code,
+			{
+				sourceId: s.sourceId,
+				observationId: s.owner,
+				discoveryId: s.discoveryId,
+			},
+			true,
+		)
+	}
+
+	/** `file`'s terminal decision, noted once: a later failure or receipt of it notes nothing. */
+	private endFile(
+		s: Session,
+		file: FileState,
+		code: ScannerRecorderDecision,
+	): void {
+		if (file.decided) return
+		file.decided = true
+		this.decide(s, code)
+	}
+
+	/**
+	 * One decision ending `files` (a refusal or discard of the session): noted once when it ends a
+	 * file not decided yet, or when it ends no file at all (the session's own end). A file whose
+	 * finish was already asked for is not ended by it: its receipt is its decision (onSettled).
+	 */
+	private terminate(
+		s: Session,
+		files: readonly FileState[],
+		code: ScannerRecorderDecision,
+	): void {
+		let fresh = files.length === 0
+		for (const f of files) {
+			if (f.decided || f.finishAsked) continue
+			f.decided = true
+			fresh = true
+		}
+		if (fresh) this.decide(s, code)
 	}
 
 	private wake(s: Session): void {
@@ -1297,8 +1355,11 @@ export class WidebandAnalogRecorder {
 					this.drain(s)
 				} catch (err: unknown) {
 					this.warn(err)
-					this.decide(s, "discarded:error")
-					this.cancelSession(s, "cancelled")
+					this.terminate(
+						s,
+						this.cancelSession(s, "cancelled"),
+						"discarded:error",
+					)
 				}
 			}
 		} finally {
@@ -1636,8 +1697,12 @@ export class WidebandAnalogRecorder {
 			() => {
 				file.writing = false
 				file.failed = true
-				if (s.file === file) this.refuse(s, "discarded:write-failed")
-				else handle.cancel("cancelled")
+				if (s.file === file && !s.done) this.refuse(s, "discarded:write-failed")
+				else {
+					// A finishing file (finishFile cleared s.file): its own decision, the session goes on.
+					handle.cancel("cancelled")
+					this.endFile(s, file, "discarded:write-failed")
+				}
 			},
 		)
 	}
@@ -1782,10 +1847,12 @@ export class WidebandAnalogRecorder {
 			for (const id of s.observations)
 				if (this.byObservation.get(id) === s.id) this.byObservation.delete(id)
 			for (const f of [...s.files]) this.admit(s, f)
+			// Admission failures already have their decision (refused:store, store-backlog).
 			for (const f of [...s.files])
 				if (f.handle === null && !s.waiting.includes(f)) {
 					f.failed = true
 					s.files.delete(f)
+					this.endFile(s, f, this.unwrittenCode(s, f))
 				}
 			return
 		}
@@ -1807,16 +1874,18 @@ export class WidebandAnalogRecorder {
 	private dropParked(
 		s: Session,
 		refuse: boolean,
-		code: ScannerRecorderDecision | null,
+		code: ScannerRecorderDecision,
 	): void {
 		if (!this.parked.has(s.id)) return
-		if (code !== null) this.decide(s, code)
 		this.unpark(s)
+		const dropped: FileState[] = []
 		for (const f of [...s.files])
 			if (f.handle === null) {
 				f.failed = true
 				s.files.delete(f)
+				dropped.push(f)
 			}
+		this.terminate(s, dropped, code)
 		s.waiting.length = 0
 		for (const id of s.observations) {
 			if (this.byObservation.get(id) === s.id) this.byObservation.delete(id)
@@ -1829,6 +1898,8 @@ export class WidebandAnalogRecorder {
 		if (file.failed) {
 			file.handle?.cancel("cancelled")
 			s.files.delete(file)
+			// Every failure notes its decision; this only guards a file that would end without one.
+			if (file.handle === null) this.endFile(s, file, "discarded:aborted")
 			return
 		}
 		if (file.handle === null) {
@@ -1839,6 +1910,8 @@ export class WidebandAnalogRecorder {
 				s.qualified = true
 			}
 			this.admit(s, file)
+			// A failed admission (refused:store, store-backlog) already noted the file's decision.
+			if (file.failed) return
 			if (file.handle === null && !s.waiting.includes(file)) {
 				if (this.parkable(s, file)) {
 					// A retune ended it before its class: kept for the close (finishFile parks).
@@ -1848,8 +1921,10 @@ export class WidebandAnalogRecorder {
 				// Not voiced, never classed or no discovery: nothing was written, nothing is kept.
 				file.failed = true
 				s.files.delete(file)
-				this.decide(s, this.unwrittenCode(s, file))
-				if (file.cut === "duration-limit" && !s.done) this.refuse(s, null)
+				const code = this.unwrittenCode(s, file)
+				this.endFile(s, file, code)
+				// A 120 s file without voice: the session ends (its continuation, if any, with it).
+				if (file.cut === "duration-limit" && !s.done) this.refuse(s, code)
 			}
 			// Admitted: the readiness handler resumes the finish (or a failure cancels).
 			return
@@ -1861,6 +1936,7 @@ export class WidebandAnalogRecorder {
 			this.flush(s, file, Number.POSITIVE_INFINITY)
 			return
 		}
+		file.finishAsked = true
 		void file.handle.finish(file.cut).catch(() => undefined)
 	}
 
@@ -1873,7 +1949,9 @@ export class WidebandAnalogRecorder {
 				: "discarded:unvoiced"
 		}
 		if (!s.classed) return "discarded:unclassed"
-		return "discarded:no-discovery"
+		if (s.discoveryId === null) return "discarded:no-discovery"
+		// Voiced, classed, with a discovery and still not admitted: the store did not take it.
+		return "refused:store"
 	}
 
 	/** Ends every open file now (kept, cut), e.g. stream loss or shutdown. */
@@ -1888,13 +1966,18 @@ export class WidebandAnalogRecorder {
 				s.file = null
 				s.files.delete(file)
 				file.handle?.cancel(cut)
-				this.decide(s, "discarded:empty")
+				this.endFile(s, file, "discarded:empty")
 			} else this.finishFile(s, file)
 		}
 		this.dispose(s)
 	}
 
-	private cancelSession(s: Session, cut: AnalogCut, everyFile = false): void {
+	/** Cancels the current file (every file with `everyFile`); returns the files it ended. */
+	private cancelSession(
+		s: Session,
+		cut: AnalogCut,
+		everyFile = false,
+	): FileState[] {
 		const file = s.file
 		s.file = null
 		s.pendingStart = null
@@ -1915,8 +1998,10 @@ export class WidebandAnalogRecorder {
 			if (f.handle === null && !s.waiting.includes(f)) {
 				f.failed = true
 				s.files.delete(f)
+				files.push(f)
 			}
 		this.dispose(s)
+		return files
 	}
 
 	/** `keepMappings`: parked, its open observations still map to it. */

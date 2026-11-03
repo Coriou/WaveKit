@@ -944,10 +944,16 @@ export interface ScannerIqCaptureStatus {
 
 /**
  * Decisions of the wideband analog voice recorder (docs/SCANNER.md, Recorder decisions). A
- * `refused:*` code means the observation is not recorded: `refused:slots`, `refused:cpu`,
+ * `refused:*` code means the observation is not recorded now: `refused:slots`, `refused:cpu`,
  * `refused:not-analog`, `refused:tuning`, `refused:no-iq` and `refused:channel-owned` are
- * retried on its next snapshot, the others are final. A `discarded:*` code means audio was held
- * and dropped without a file.
+ * retried on its next snapshot. `refused:encrypted`, `refused:record-disabled` and
+ * `refused:unclean` given before any recording started are retried too (a later clear, opted-in,
+ * clean snapshot may start one); given to a recording in progress they end it and the
+ * observation. `refused:store` is retried once (a second one is final; a finishing or waiting
+ * file's store failure refuses that file only). `refused:unsupported` and `refused:start-failed`
+ * are final. A `discarded:*` code means audio was held and dropped without a file. Every
+ * recording that started ends with exactly one terminal decision per file: `finalized`,
+ * `evicted`, `refused:*` or `discarded:*`.
  */
 export const SCANNER_RECORDER_DECISIONS = [
 	"started",
