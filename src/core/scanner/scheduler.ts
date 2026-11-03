@@ -417,9 +417,10 @@ export class SweepScheduler {
 	/** End sample of the last block seen on the current stream; continued visits dwell from it. */
 	private lastBlockEnd: number | null = null
 	/**
-	 * Clock of the last block or tick the scheduler received: the last moment it was listening. A
-	 * pause or an outage stops both (the job runner drives neither while paused), so a restart
-	 * counts the holds of the old epoch up to here, never the interruption (restartVisit).
+	 * Clock of the last block or tick the scheduler received. A restart counts the holds of the old
+	 * epoch up to here (restartVisit). A pause stops both (the job runner drives neither while
+	 * paused), so a pause is never counted. During a source outage the service still ticks, so the
+	 * outage is counted as hold time: the other hops wait less, never more.
 	 */
 	private heardAt: number | null = null
 	/**
@@ -528,8 +529,9 @@ export class SweepScheduler {
 		v.tracks.clear()
 		this.forgetGapEvidence(v)
 		// The holds already run still count (holdOrigin): a restart is no fresh budget. They ran
-		// until the last block or tick heard (heardAt), not until now: a pause or an outage before
-		// the restart (no blocks, no ticks) spends no hold time.
+		// until the last block or tick heard (heardAt), not until now: a pause before the restart
+		// (no blocks, no ticks) spends no hold time. An outage is ticked, so it is counted (the
+		// safe direction: the other hops wait less).
 		if (v.holdStartedAt !== null)
 			v.heldBeforeMs += Math.max(
 				0,
@@ -905,7 +907,8 @@ export class SweepScheduler {
 	 * starts now if no hold ran. Not while the long-hold lock holds, while parked (a parked hop is
 	 * never left), on a one-hop plan, for a signals-only job or under `hold.policy: "never"`. A
 	 * hold that ran past one coarse sweep locks the next long follow out (endVisit). The held
-	 * frequency's evidence is charged as on any leave; the `record` hold itself brings none.
+	 * frequency's evidence is charged as on any leave; the `record` hold itself brings none. Never
+	 * for a recorded track (recordedTrack) whose frequency has carrier evidence.
 	 */
 	private keepForRecording(): boolean {
 		const v = this.visit
@@ -927,7 +930,16 @@ export class SweepScheduler {
 		)
 		if (now >= cap || !this.recordingActive()) return false
 		const trackId = this.recordedTrack(this.hold?.trackId)
+		// Charged first, so a hold that just heard a carrier counts. A recorded frequency with
+		// carrier evidence is held under the carrier rules only: keeping its hop for the recording
+		// would hold it on every visit again.
 		this.endHold(true)
+		const recorded = v.tracks.get(trackId)
+		if (
+			recorded !== undefined &&
+			this.memoryOf(recorded)?.evidence === "carrier"
+		)
+			return false
 		v.holdStartedAt ??= now
 		v.budgeted = true
 		v.recordEndMs = cap - start

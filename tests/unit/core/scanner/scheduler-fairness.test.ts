@@ -2273,6 +2273,62 @@ describe("a hop kept for a recording", () => {
 		expect(s.hopStats()[0]!.holdMs).toBe(longFollowMs(2))
 	})
 
+	describe("a recorder that records analog voice on air in the tuned window, with a 2 s tail", () => {
+		// 3 hops, 600 s, emitters on air from the job start, 28 s IDs on the last hop (the scenes
+		// of "labelled, flapping and busy emitters beside a voice hop"). A frequency with carrier
+		// evidence is never kept for its recording: it stays under the carrier rules. Kept for it,
+		// a labelled carrier's hop took 45.6 % of the run and 2 of the 3 ID ends were missed (IDs
+		// detected 16.95 and 15.6 s after their start, heard 8300 ms each); a carrier flapping
+		// 3 s on / 0.5 s off took 69.7 %.
+		const RUN_MS = 600_000
+		const plan = makeHopPlan(centres(3), HALF_SPAN_HZ)
+		const C = plan.hops[0]!.centreHz - 100_000
+		const BUSY = plan.hops[1]!.centreHz + 100_000
+		const V = plan.hops[2]!.centreHz + 100_000
+		const recorder =
+			(signals: readonly SimSignal[]) =>
+			(ms: number, hop: number | null): boolean => {
+				const span = hop === null ? undefined : plan.hops[hop]?.covered
+				if (span === undefined) return false
+				return signals.some(
+					s =>
+						s.followOnAir &&
+						s.centreHz >= span.startHz &&
+						s.centreHz <= span.endHz &&
+						s.startMs <= ms &&
+						ms < s.endMs + 2_000,
+				)
+			}
+		const run = (others: SimSignal[], ids: number[]) => {
+			const signals = [...others, ...ids.map(at => voice(V, at))]
+			const r = simulateSweep(plan, spec, {
+				...sim,
+				durationMs: RUN_MS,
+				signals,
+				recordingActive: recorder(signals),
+			})
+			return { r, first: others.length, hopShare: share(hopTimeMs(r, 3)) }
+		}
+
+		it("a labelled carrier and a busy channel: every ID is heard to its end, the carrier's hop takes at most 40 % (measured 33.9 %)", () => {
+			const ids = [60_000, 240_000, 420_000]
+			const { r, hopShare } = run(
+				[labelledCarrier(C), ...series(BUSY, 20_000, 300, RUN_MS)],
+				ids,
+			)
+			for (const startMs of ids)
+				expect(endHeard(r, 2, startMs + 28_000)).toBe(true)
+			expect(hopShare[0]!).toBeLessThanOrEqual(0.4)
+		})
+
+		it("a labelled carrier flapping 3 s on / 0.5 s off: its hop takes at most half the run (measured 47.0 %), every ID detected", () => {
+			const ids = [40_000, 220_000, 400_000]
+			const { r, first, hopShare } = run(series(C, 3_000, 500, RUN_MS), ids)
+			expect(hopShare[0]!).toBeLessThanOrEqual(0.5)
+			ids.forEach((_, k) => expect(r.detectedAtMs[first + k]).not.toBeNull())
+		})
+	})
+
 	it("a parked one-hop plan never asks", () => {
 		const { s, calls } = make({ hops: 1, recording: () => true })
 		expect(s.parked).toBe(true)

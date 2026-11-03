@@ -874,6 +874,58 @@ describe("a QSO on one hop does not hide 28 s IDs on another", () => {
 			expect(qsoMs).toBeGreaterThanOrEqual(floor)
 		})
 
+	// The known class below one confirm probe per visit (docs/SCANNER.md, Fair holds): 3 hops, a
+	// QSO on air from the job start. Seed 22 hears 354 300 ms of it where that scheduler
+	// (37902150) heard 370 400 ms: 4.35 % less. Measured value, asserted so a change shows here.
+	it("3 hops, QSO from 0 s, seed 22: every ID is detected, the QSO is heard 354 300 ms (4.35 % below one confirm probe per visit)", () => {
+		const { detected, ids, qsoMs } = scene(3, 0, 1_000, 3_000, [22])
+		expect(detected).toBe(ids)
+		expect(qsoMs).toBe(354_300)
+		expect(1 - qsoMs / 370_400).toBeCloseTo(0.0435, 4)
+	})
+
+	// The accepted current limit, a follow-up is planned (docs/SCANNER.md, Fair holds): a second
+	// call on air. 900 s on 3, 5 and 7 hops, seeds 1 to 40: the QSO on hop 0 from the job start,
+	// labelled calls of 8 to 20 s with 10 to 60 s gaps on hop 1, 28 s IDs on the last hop. Probe-only
+	// revisits of a hop whose follows spent L are not counted against L, so an ID can start and end
+	// while its hop waits. 2 of 1635 IDs are missed (one confirm probe per visit: none). Measured
+	// values, asserted so a change shows here.
+	it("accepted current limit: with a second call on air, 2 of 1635 28 s IDs are missed (about 0.1 %)", () => {
+		const calls = (hz: number, seed: number): SimSignal[] => {
+			const rnd = random(seed * 131 + 5)
+			const out: SimSignal[] = []
+			for (let t = 10_000 + 20_000 * rnd(); t < RUN_MS; ) {
+				const len = Math.round(8_000 + 12_000 * rnd())
+				out.push(voice(hz, t, Math.min(len, RUN_MS - t)))
+				t += len + Math.round(10_000 + 50_000 * rnd())
+			}
+			return out
+		}
+		let ids = 0
+		const missed: string[] = []
+		for (const hops of [3, 5, 7])
+			for (let seed = 1; seed <= 40; seed++) {
+				const plan = planOf(hops)
+				const talk = qso(plan.hops[0]!.centreHz - 100_000, 0, RUN_MS, seed)
+				const other = calls(plan.hops[1]!.centreHz + 150_000, seed)
+				const at = idTimes(seed)
+				const v = plan.hops[hops - 1]!.centreHz + 100_000
+				const r = simulateSweep(plan, spec, {
+					...sim,
+					durationMs: RUN_MS,
+					signals: [...talk, ...other, ...at.map(ms => voice(v, ms))],
+				})
+				const first = talk.length + other.length
+				ids += at.length
+				at.forEach((ms, k) => {
+					if (r.detectedAtMs[first + k] === null)
+						missed.push(`${hops}/${seed}/${ms}`)
+				})
+			}
+		expect(ids).toBe(1_635)
+		expect(missed).toEqual(["3/12/812300", "7/7/314977"])
+	}, 60_000)
+
 	for (const hops of [3, 7])
 		for (const fromMs of [0, 60_000])
 			it(`${hops} hops, QSO from ${fromMs / 1000} s: every ID is detected and the QSO is heard ≥ ${earlier[`${hops}/${fromMs}`]} ms`, () => {
@@ -901,6 +953,17 @@ describe("a QSO on one hop does not hide 28 s IDs on another", () => {
 			expect(mixed.detected).toBe(mixed.ids)
 			expect(fast.qsoMs).toBe(exception[hops]![0])
 			expect(mixed.qsoMs).toBe(exception[hops]![1])
+		})
+
+	// The same exception for a QSO starting mid-job (60 s) with 0.3 to 0.9 s turnarounds: that
+	// scheduler heard 1 218 850 ms (3 hops) and 912 100 ms (7 hops) over the four seeds; this one
+	// about a third and a half of that. Measured values, asserted so a change shows here.
+	const midJob: Record<number, number> = { 3: 430_400, 7: 442_400 }
+	for (const hops of [3, 7])
+		it(`accepted exception, ${hops} hops: a QSO from 60 s with 0.3 to 0.9 s turnarounds is heard ${midJob[hops]} ms`, () => {
+			const fast = scene(hops, 60_000, 300, 900)
+			expect(fast.detected).toBe(fast.ids)
+			expect(fast.qsoMs).toBe(midJob[hops])
 		})
 })
 
