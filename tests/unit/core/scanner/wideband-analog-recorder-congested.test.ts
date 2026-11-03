@@ -24,7 +24,11 @@ import {
 interface SessionView {
 	next: number
 	maxBacklog: number
-	file: { startSample: number; headCut: boolean } | null
+	file: {
+		startSample: number
+		headCut: boolean
+		endSample: number | null
+	} | null
 }
 
 function sessions(h: ReturnType<typeof harness>): SessionView[] {
@@ -157,14 +161,50 @@ describe("WidebandAnalogRecorder on a congested event loop", () => {
 		report(h, "o", onset)
 		await h.turn()
 		expect(h.engine.liveEdge() - s.next).toBe(maxBacklog)
-		// A ring of 1 s keeps half of it (500 ms) as the margin, not 1000 ms.
-		const small = low({ clock: stepClock(1), ringSeconds: 1 })
-		await small.feed(0.5, false)
-		const o2 = small.engine.liveEdge()
-		write(small, 1, true)
-		report(small, "p", o2)
-		await small.pump()
-		expect(sessions(small)[0]!.maxBacklog).toBe(LOW_FS / 2)
+	}, 60_000)
+
+	it("a real 1 s ring keeps half of it (500 ms) as the margin: catch-up at and past the bound, overruns", async () => {
+		const h = low({ clock: stepClock(WIDEBAND_TURN_BUDGET_MS), ringSeconds: 1 })
+		await h.feed(0.5, false)
+		const onset = h.engine.liveEdge()
+		for (let i = 0; i < 2 * 40; i++) {
+			write(h, 1, true)
+			report(h, "o", onset)
+			await h.pump()
+		}
+		expect(h.ops).toHaveLength(1)
+		const s = sessions(h)[0]!
+		const half = LOW_FS / 2
+		expect(s.maxBacklog).toBe(half)
+		expect(s.next).toBe(h.engine.liveEdge())
+		// At the bound: 525 ms behind, one budgeted slice leaves exactly 500 ms, not caught up.
+		write(h, half / CHUNK + 1, true)
+		report(h, "o", onset)
+		await h.turn()
+		expect(h.engine.liveEdge() - s.next).toBe(half)
+		// Past it: 600 ms behind, the turn catches up to 500 ms past the budget.
+		write(h, 4, true)
+		report(h, "o", onset)
+		await h.turn()
+		expect(h.engine.liveEdge() - s.next).toBe(half)
+		// Overrun of the real ring: 1.2 s more with no turn leaves 1.7 s behind in a 1 s ring;
+		// 700 ms are gone (under the 1 s silence bound: silence, the file goes on) and the
+		// turn demodulates from the ring's oldest sample back to 500 ms behind.
+		write(h, 48, true)
+		report(h, "o", onset)
+		expect(h.engine.liveEdge() - h.engine.oldestSample).toBe(LOW_FS)
+		await h.turn()
+		expect(h.engine.liveEdge() - s.next).toBe(half)
+		expect(h.ops[0]!.gaps).toBe(28)
+		expect(s.file?.endSample ?? null).toBeNull()
+		// Past the silence bound: 2.6 s more leaves 3.1 s behind, 2.1 s gone: cut source-lost.
+		write(h, 104, true)
+		report(h, "o", onset)
+		await h.turn()
+		await h.pump()
+		await h.rec.idle()
+		expect(h.ops[0]!.cut).toBe("source-lost")
+		expect(h.ops[0]!.outcome).toBe("finalized")
 	}, 60_000)
 
 	it("a session whose start fell out of the ring jumps to the oldest readable sample in one turn", async () => {

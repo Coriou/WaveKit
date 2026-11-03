@@ -6,8 +6,9 @@
  * operations (`recordings/analog/<discoveryId>/`, storage cap, disk-low and retention apply).
  * `TransmissionSegmenter` decides the files: one per transmission, a gap shorter than
  * `hold.hangMs` never splits. Work runs in bounded slices off the engine's tap callback, as many
- * a turn as fit WIDEBAND_TURN_BUDGET_MS, and more while a session is about to fall out of the
- * ring (WIDEBAND_RING_MARGIN_MS): a slow event loop delays a recording instead of losing it.
+ * a turn as fit WIDEBAND_TURN_BUDGET_MS, and more for the one session closest to falling out of
+ * the ring (WIDEBAND_RING_MARGIN_MS, one grant a turn): a slow event loop delays a recording
+ * instead of losing it.
  *
  * A session does not wait for the classifier: a clean, non-burst track in a range a band plan
  * lists for analog FM (or no band plan covers) starts a shadow session as soon as it appears.
@@ -121,20 +122,23 @@ export const WIDEBAND_SLICE_MS = 25
 export const WIDEBAND_TURN_BUDGET_MS = 2
 /**
  * Unread IQ a session keeps out of the ring's oldest end: 1000 ms (at most half the ring). Once
- * its backlog (live edge − next sample) passes ring − margin, the turn keeps demodulating past
- * WIDEBAND_TURN_BUDGET_MS until the backlog is back under it, so a slow loop costs latency, not
- * the recording. Such a turn demodulates at most the margin plus one slice: 1.025 s of IQ, about
- * 60 ms of main thread at the loaded 59 ms per IQ second (1.024 Msps), only when the recording
- * would otherwise lose audio. A 3 s ring (the default ringSeconds) leaves a 2 s backlog.
+ * its backlog (live edge − next sample) passes ring − margin, the turn may keep demodulating
+ * past WIDEBAND_TURN_BUDGET_MS until the backlog is back under it, so a slow loop costs latency,
+ * not the recording.
+ *
+ * This is an explicit exception to the 2 ms main-thread rule (docs/PERFORMANCE.md rule 2,
+ * docs/SCANNER.md "Analog voice recordings"): losing the recording is worse than one long turn.
+ * It is bounded per turn across all sessions: one catch-up grant a turn, to the session with
+ * the least ring headroom (ring − backlog, in ms), of at most its margin of demodulated IQ
+ * (the readable IQ past maxBacklog is at most the margin). Every other session stops at the
+ * 2 ms budget that turn (it defers), so two sessions never stack. A catch-up turn is thus at
+ * most the budget's slices plus 1 s of IQ: about 60 ms of main thread at the loaded 59 ms per
+ * IQ second (1.024 Msps), 71 ms at 2.4 Msps, and only when a recording would otherwise lose
+ * audio. A 3 s ring (the default ringSeconds) leaves a 2 s backlog.
  */
 export const WIDEBAND_RING_MARGIN_MS = 1_000
 /** The engine ring the margin is kept against when settings give none (the ringSeconds default). */
 export const WIDEBAND_DEFAULT_RING_SECONDS = 3
-/**
- * Single-sample probes to find the oldest readable sample after a ring overrun: a bisection over
- * at most 2^40 samples (far past any ring), so a session never crawls through lost IQ a slice a turn.
- */
-const MAX_PROBES = 40
 /**
  * Measured chain cost per recording, CPU ms per second of IQ: 59 at 1.024 Msps and 71 at
  * 2.4 Msps on a shared Mac at load average 56 (33 and 49 at load average 7.5; docs/SCANNER.md
@@ -440,6 +444,8 @@ interface Session {
 	 * ring − WIDEBAND_RING_MARGIN_MS (at most half the ring).
 	 */
 	readonly maxBacklog: number
+	/** Ring − maxBacklog (samples): the most IQ one catch-up grant demodulates. */
+	readonly margin: number
 	/** No sample at or past this is read (an epoch change). */
 	limit: number
 	/** Cut reason of the next non-quiet end (retune, stream change); null = completed. */
@@ -549,6 +555,13 @@ export class WidebandAnalogRecorder {
 	}[] = []
 	private readonly schedule: (run: () => void) => void
 	private readonly clock: () => number
+	/** Sessions woken for the next turn, in wake order: one scheduled turn drains them all. */
+	private readonly pending = new Set<Session>()
+	private turnScheduled = false
+	/** The sessions the running turn drains (null between turns). */
+	private turnDue: readonly Session[] | null = null
+	/** The running turn's one catch-up grant (WIDEBAND_RING_MARGIN_MS); null until asked. */
+	private grant: { session: Session; left: number } | null = null
 	private stopped = false
 	private warnedAt = Number.NEGATIVE_INFINITY
 	private readonly decisions: RecorderDecisions
@@ -950,6 +963,7 @@ export class WidebandAnalogRecorder {
 		const ringSeconds = settings.ringSeconds ?? WIDEBAND_DEFAULT_RING_SECONDS
 		const ring = Math.max(0, ringSeconds) * fs
 		const margin = Math.min(WIDEBAND_RING_MARGIN_MS * perMs, ring / 2)
+		const maxBacklog = Math.max(0, Math.floor(ring - margin))
 		const s: Session = {
 			id: ulid(this.deps.now()).toLowerCase(),
 			sourceId: input.sourceId,
@@ -978,7 +992,8 @@ export class WidebandAnalogRecorder {
 			lastActive: track.lastSample,
 			groupDelay: chain.groupDelaySeconds(fs) * 48_000,
 			next: 0,
-			maxBacklog: Math.max(0, Math.floor(ring - margin)),
+			maxBacklog,
+			margin: Math.ceil(ring - maxBacklog),
 			limit: Number.POSITIVE_INFINITY,
 			endCut: null,
 			file: null,
@@ -1259,16 +1274,66 @@ export class WidebandAnalogRecorder {
 	private wake(s: Session): void {
 		if (s.scheduled || s.done) return
 		s.scheduled = true
-		this.schedule(() => {
-			s.scheduled = false
-			try {
-				this.drain(s)
-			} catch (err: unknown) {
-				this.warn(err)
-				this.decide(s, "discarded:error")
-				this.cancelSession(s, "cancelled")
+		this.pending.add(s)
+		if (this.turnScheduled) return
+		this.turnScheduled = true
+		this.schedule(() => this.runTurn())
+	}
+
+	/**
+	 * One event-loop turn: drains every session woken before it (a session woken during it
+	 * drains next turn). The turn is the unit of the catch-up grant (catchUp).
+	 */
+	private runTurn(): void {
+		this.turnScheduled = false
+		const due = [...this.pending]
+		this.pending.clear()
+		this.turnDue = due
+		this.grant = null
+		try {
+			for (const s of due) {
+				s.scheduled = false
+				try {
+					this.drain(s)
+				} catch (err: unknown) {
+					this.warn(err)
+					this.decide(s, "discarded:error")
+					this.cancelSession(s, "cancelled")
+				}
 			}
-		})
+		} finally {
+			this.turnDue = null
+			this.grant = null
+		}
+	}
+
+	/** Ring headroom (ring − backlog) in ms; Infinity when the session is within maxBacklog. */
+	private headroomMs(s: Session): number {
+		if (s.done || !s.file) return Number.POSITIVE_INFINITY
+		const backlog = Math.min(s.engine.liveEdge(), s.limit) - s.next
+		if (backlog <= s.maxBacklog) return Number.POSITIVE_INFINITY
+		return ((s.maxBacklog + s.margin - backlog) * 1000) / s.fs
+	}
+
+	/**
+	 * Demodulated IQ (samples) `s` may still catch up past the turn budget this turn: the turn's
+	 * one grant goes, at its first request, to the due session with the least ring headroom,
+	 * for at most that session's margin; every other session gets 0 (it defers).
+	 */
+	private catchUp(s: Session): number {
+		if (this.grant === null) {
+			let best = s
+			let least = this.headroomMs(s)
+			for (const t of this.turnDue ?? []) {
+				const h = this.headroomMs(t)
+				if (h < least) {
+					best = t
+					least = h
+				}
+			}
+			this.grant = { session: best, left: best.margin }
+		}
+		return this.grant.session === s ? this.grant.left : 0
 	}
 
 	private drain(s: Session): void {
@@ -1312,16 +1377,20 @@ export class WidebandAnalogRecorder {
 		const target = (): number =>
 			Math.min(edge, file.endSample ?? Number.POSITIVE_INFINITY)
 		// Slices until caught up, for WIDEBAND_TURN_BUDGET_MS (at least one), and past it while
-		// the backlog is within WIDEBAND_RING_MARGIN_MS of the ring's oldest end.
+		// the backlog is within WIDEBAND_RING_MARGIN_MS of the ring's oldest end, if this
+		// session holds the turn's catch-up grant (catchUp; the documented exception).
 		const started = this.clock()
+		let catching = false
 		while (s.next < target()) {
-			this.readSlice(s, file, engine, target())
+			const demodulated = this.readSlice(s, file, engine, target())
 			if (s.done || s.file !== file) return
-			if (
-				this.clock() - started >= WIDEBAND_TURN_BUDGET_MS &&
-				edge - s.next <= s.maxBacklog
-			)
-				break
+			// A slice that read nothing cost no DSP: it spends neither the budget nor the grant.
+			if (demodulated === 0) continue
+			if (catching && this.grant !== null)
+				this.grant.left = Math.max(0, this.grant.left - demodulated)
+			if (this.clock() - started < WIDEBAND_TURN_BUDGET_MS) continue
+			if (edge - s.next <= s.maxBacklog || this.catchUp(s) <= 0) break
+			catching = true
 		}
 		const more = s.next < target()
 		if (s.done || s.file !== file) return
@@ -1337,26 +1406,32 @@ export class WidebandAnalogRecorder {
 		if (more) this.wake(s)
 	}
 
-	/** Demodulates one slice from `s.next` (at most WIDEBAND_SLICE_MS, not past `target`). */
+	/**
+	 * Demodulates one slice from `s.next` (at most WIDEBAND_SLICE_MS, not past `target`);
+	 * returns the samples demodulated (0 for a slice with nothing readable).
+	 */
 	private readSlice(
 		s: Session,
 		file: FileState,
 		engine: WidebandEngineView,
 		target: number,
-	): void {
+	): number {
 		const to = Math.min(
 			target,
 			s.next + Math.max(1, Math.round((WIDEBAND_SLICE_MS * s.fs) / 1000)),
 		)
 		const r = engine.readRing(s.next, to)
 		if (r === null) {
-			// Nothing readable up to `to` (overwritten, or a ring gap): skip straight to the
-			// first readable sample before `target` instead of one slice per turn.
-			this.gapTo(s, file, this.firstReadable(engine, to, target))
-			return
+			// Nothing readable in this slice (overwritten, or a ring gap). The next slice is
+			// tried in the same turn: a probe that reads nothing costs no DSP, so the turn
+			// budget and catch-up grant do not slow it. Readability is not monotonic (the ring
+			// keeps several gaps), so no probe may skip past IQ it did not read: only the slice
+			// itself is missing. A file stops at WIDEBAND_MAX_SILENCE_GAP_MS of it (gapTo).
+			this.gapTo(s, file, to)
+			return 0
 		}
 		if (r.startSample > s.next) this.gapTo(s, file, r.startSample)
-		if (s.done || s.file !== file) return
+		if (s.done || s.file !== file) return 0
 		for (let o = 0; o < r.bytes.length; o += MAX_SLICE_SAMPLES * 2) {
 			const pcm = s.chain.process(
 				r.bytes.subarray(
@@ -1365,32 +1440,11 @@ export class WidebandAnalogRecorder {
 				),
 			)
 			this.enqueue(s, file, { pcm, tone: s.chain.toneAudio().slice() })
-			if (s.done || s.file !== file) return
+			if (s.done || s.file !== file) return r.bytes.length / 2
 		}
 		s.next = r.startSample + r.bytes.length / 2
 		file.gapRun = 0
-	}
-
-	/**
-	 * The first sample in [from, to) the ring can read (`to` when none): a bisection with
-	 * single-sample reads, assuming what is gone is older than what is held (a ring gap inside
-	 * the range may be skipped whole; the next read finds its far edge).
-	 */
-	private firstReadable(
-		engine: WidebandEngineView,
-		from: number,
-		to: number,
-	): number {
-		if (from >= to) return to
-		if (engine.readRing(from, from + 1) !== null) return from
-		let lo = from
-		let hi = to
-		for (let i = 0; i < MAX_PROBES && hi - lo > 1; i++) {
-			const mid = lo + Math.floor((hi - lo) / 2)
-			if (engine.readRing(mid, mid + 1) !== null) hi = mid
-			else lo = mid
-		}
-		return hi
+		return r.bytes.length / 2
 	}
 
 	/** Input [s.next, to) is missing: a short gap becomes silence, a long one ends the file. */

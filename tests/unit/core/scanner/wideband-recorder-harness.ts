@@ -39,9 +39,17 @@ export class FakeEngine implements WidebandEngineView {
 		tuningTrust: "commanded" as "commanded" | "relay" | "unverified",
 	}
 	private readonly ring: IqRing
-	constructor(fs = FS) {
+	/** `ringSeconds`: the real ring capacity (ringSeconds × fs), as the engine sizes it. */
+	constructor(fs = FS, ringSeconds = 3) {
 		this.epoch.sampleRateHz = fs
-		this.ring = new IqRing({ bytesPerSample: 2, capacitySamples: 3 * fs })
+		this.ring = new IqRing({
+			bytesPerSample: 2,
+			capacitySamples: Math.round(ringSeconds * fs),
+		})
+	}
+	/** Oldest sample the ring still holds (test inspection only; not in WidebandEngineView). */
+	get oldestSample(): number {
+		return this.ring.oldestSample
 	}
 	private readonly taps = new Set<(s: number, b: Uint8Array) => void>()
 	currentEpoch() {
@@ -185,12 +193,15 @@ export function harness(
 		reserveCores?: (cores: number) => (() => void) | null
 		/** The recorder's per-turn budget clock (milliseconds); default performance.now. */
 		clock?: () => number
-		/** settings().ringSeconds; default absent (the recorder assumes 3 s, the FakeEngine ring). */
+		/**
+		 * settings().ringSeconds and the FakeEngine's real ring capacity; default absent (the
+		 * recorder assumes 3 s, the FakeEngine's default ring).
+		 */
 		ringSeconds?: number
 	} = {},
 ) {
 	const fs = opts.fs ?? FS
-	const engine = new FakeEngine(fs)
+	const engine = new FakeEngine(fs, opts.ringSeconds ?? 3)
 	let rec!: WidebandAnalogRecorder
 	const { ops, begin } = fakeOps(b => rec.bindingLive(b), opts)
 	const queue: (() => void)[] = []
