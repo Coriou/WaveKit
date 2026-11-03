@@ -657,10 +657,14 @@ describe("carriers flapping in short gaps are never followed as traffic", () => 
 			expect(v.leftAtMs - v.tunedAtMs).toBeLessThanOrEqual(bound)
 		// Its first hold, then retries, never one per visit: with on-times longer than a watch its
 		// holds may hear it unbroken before they hear a flap (carrierHolds); with shorter ones every
-		// hold hears a flap (flapHolds).
+		// hold hears a flap (flapHolds). One that starts after its hop's first visit ended
+		// ((hop + 1) dwells) is a call whose onset was seen: its first flap may be unpaired (one
+		// flap in its first hold), so that hold rests once its length (KNOWN_CALL_REST_FACTOR) and
+		// the flap rest starts with its second hold: one hold more.
+		const known = startMs >= (hop + 1) * DWELL_MS ? 1 : 0
 		const most =
 			onMs + offMs < Math.min(hops * DWELL_MS, WATCH_MS)
-				? flapHolds(hops, 300_000)
+				? flapHolds(hops, 300_000) + known
 				: carrierHolds(hops, 300_000)
 		expect(heldVisits(r, hop).length).toBeLessThanOrEqual(most)
 	}
@@ -691,6 +695,42 @@ describe("carriers flapping in short gaps are never followed as traffic", () => 
 	it("a carrier flapping 2 s on / 581 ms off is not probed on every visit", () => {
 		flapCase(4, 2, 2_000, 581, 16_991)
 	})
+
+	// Regressions (fast-check seed -258117743, path "61:17:7:7:27:12", and seed 1911586836): 6
+	// hops, a carrier whose onset a visit saw (a call), flapping 4822 ms on / 308 ms off from
+	// 56 081 ms, or 5130 / 507 ms from 11 192 ms. Each hold heard one flap, and the pairing window
+	// of a known call (10 s of the visit time of its hop) was shorter than two flaps heard in
+	// consecutive holds can be apart (less than the flap period after one hold's flap, the next
+	// hold's dwell, and less than the period again): the flaps were never paired and it rested
+	// once its hold (5 and 6 holds, bound 4). Now the window is derived from that and counts held
+	// time, so it earns the flap rest from its second flap: after each hold from the second on it
+	// rests at least 20 × 0.5 = 10 times that hold (its length at least the visit less the dwell
+	// and a class wait of 5 blocks), and no new hold starts before the next dwell end after it.
+	for (const [slot, onMs, offMs, startMs] of [
+		[22, 4_822, 308, 56_081],
+		[0, 5_130, 507, 11_192],
+	] as const)
+		it(`a call flapping ${onMs} ms on / ${offMs} ms off from ${startMs} ms rests twenty times its holds from its second`, () => {
+			flapCase(6, slot, onMs, offMs, startMs)
+			const plan = makeHopPlan(centres(6), HALF_SPAN_HZ)
+			const hop = slot % 6
+			const hz = plan.hops[hop]!.centreHz + 100_000
+			const signals: SimSignal[] = []
+			for (let t = startMs; t < 300_000; t += onMs + offMs)
+				signals.push(voice(hz, t, onMs))
+			const held = heldVisits(
+				simulateSweep(plan, spec, { ...sim, durationMs: 300_000, signals }),
+				hop,
+			)
+			expect(held.length).toBeGreaterThanOrEqual(2)
+			for (let k = 1; k + 1 < held.length; k++) {
+				const v = held[k]!
+				const lenMs = v.leftAtMs - v.tunedAtMs - DWELL_MS - 5 * BLOCK_MS
+				expect(
+					held[k + 1]!.tunedAtMs + DWELL_MS + 5 * BLOCK_MS,
+				).toBeGreaterThanOrEqual(v.leftAtMs + 10 * lenMs)
+			}
+		})
 
 	it("a new flapping carrier first followed as traffic is cut at its first short gap", () => {
 		// 3 hops: hop 2's first visit (2300 to 3450 ms) misses a carrier that starts flapping 3 s on
@@ -783,6 +823,7 @@ describe("a QSO on one hop does not hide 28 s IDs on another", () => {
 		fromMs: number,
 		gapMinMs: number,
 		gapMaxMs: number,
+		seeds: readonly number[] = [1, 2, 3, 4],
 	): { detected: number; ids: number; qsoMs: number } => {
 		const plan = planOf(hops)
 		const q = plan.hops[0]!.centreHz - 100_000
@@ -790,7 +831,7 @@ describe("a QSO on one hop does not hide 28 s IDs on another", () => {
 		let detected = 0
 		let ids = 0
 		let qsoMs = 0
-		for (const seed of [1, 2, 3, 4]) {
+		for (const seed of seeds) {
 			const talk = qso(q, fromMs, RUN_MS, seed, gapMinMs, gapMaxMs)
 			const at = idTimes(seed)
 			const r = simulateSweep(plan, spec, {
@@ -812,6 +853,27 @@ describe("a QSO on one hop does not hide 28 s IDs on another", () => {
 		"7/0": 927_900,
 		"7/60000": 820_050,
 	}
+	// Single seeds of the same scene (seed 15 heard 343 700 ms where that scheduler heard 376 550:
+	// a follow ended by a turnaround locked its hop to probes; seeds 38 and 24 each missed an ID
+	// while the follows of two coarse sweeps were not counted against one L), and the lowest
+	// ratio to that scheduler of each plan and start over seeds 1 to 40 (1, 21, 33, 16).
+	// Thresholds: what that scheduler (37902150) heard of the QSO on each.
+	const seeded: [number, number, number, number][] = [
+		[3, 0, 15, 376_550],
+		[3, 0, 1, 376_950],
+		[3, 0, 38, 374_950],
+		[3, 60_000, 21, 352_450],
+		[7, 0, 33, 228_950],
+		[7, 60_000, 16, 212_450],
+		[7, 60_000, 24, 199_400],
+	]
+	for (const [hops, fromMs, seed, floor] of seeded)
+		it(`${hops} hops, QSO from ${fromMs / 1000} s, seed ${seed}: every ID is detected and the QSO is heard ≥ ${floor} ms`, () => {
+			const { detected, ids, qsoMs } = scene(hops, fromMs, 1_000, 3_000, [seed])
+			expect(detected).toBe(ids)
+			expect(qsoMs).toBeGreaterThanOrEqual(floor)
+		})
+
 	for (const hops of [3, 7])
 		for (const fromMs of [0, 60_000])
 			it(`${hops} hops, QSO from ${fromMs / 1000} s: every ID is detected and the QSO is heard ≥ ${earlier[`${hops}/${fromMs}`]} ms`, () => {
@@ -827,8 +889,8 @@ describe("a QSO on one hop does not hide 28 s IDs on another", () => {
 	// 1 612 300 ms, 7 hops 1 018 150 and 979 850 ms over the four seeds). The IDs are all
 	// detected. Measured values, asserted so a change shows here.
 	const exception: Record<number, [number, number]> = {
-		3: [336_200, 889_500],
-		7: [349_100, 634_100],
+		3: [371_100, 804_900],
+		7: [300_350, 540_300],
 	}
 	for (const hops of [3, 7])
 		it(`accepted exception, ${hops} hops: a QSO with turnarounds under 1 s is heard ${exception[hops]![0]} ms (0.3 to 0.9 s) and ${exception[hops]![1]} ms (0.5 to 1.5 s)`, () => {

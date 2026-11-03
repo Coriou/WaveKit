@@ -59,17 +59,6 @@ const FORGET_MISSES = 10
  */
 const TRAFFIC_GAP_MS = 1_000
 /**
- * A short reopening (a close and reopen less than TRAFFIC_GAP_MS apart) is a flap: carrier
- * evidence. On a frequency known as a call (it was traffic, or a visit saw its onset) it earns
- * FLAP_REST_FACTOR only when the visits of its hops heard another flap at most this long before,
- * counted in their time (from each tune) and with no turnaround heard in between (traffic evidence
- * forgets the earlier flap): a QSO with one quick turnaround (0.3 to 0.9 s) then rests
- * KNOWN_CALL_REST_FACTOR, not twenty times its hold, while a carrier flapping every 3.5 s flaps
- * again within it even when each hold hears one flap. An emitter never known as a call (on air
- * since before any visit saw it start, no turnaround heard) earns it from its first flap.
- */
-const FLAP_PAIR_MS = 10_000
-/**
  * N: a hold that watched a frequency not known as traffic (its onset unseen) on air without a break
  * for this long is positive carrier evidence, and a hold of a frequency not known is cut here (one
  * whose onset was seen is then followed on after a coarse sweep, see CALL_RUN_MS).
@@ -101,7 +90,7 @@ const RECORD_RECHECK_MS = 250
  * Retry budget of a frequency with carrier evidence: after a hold of d ms it rests K × d × f ms,
  * f spread over [0.5, 1.5) (spread) so retries do not lock to the period of regular overs, with K
  * RETRY_REST_FACTOR (2), KNOWN_CALL_REST_FACTOR (1) for a frequency known as a call, and
- * FLAP_REST_FACTOR (20) for a carrier that flapped (FLAP_PAIR_MS). At most one carrier hold runs
+ * FLAP_REST_FACTOR (20) for a carrier that flapped (flapPairMs). At most one carrier hold runs
  * per coarse sweep (retryLock), and it spends the follow budget (followBudgetMs). On average a
  * carrier takes d / (d + K × d) of the time: 1/3, 1/2 for a known call, and 1/21 when it flapped.
  *
@@ -173,9 +162,9 @@ interface FrequencyMemory {
 	 * listens on for its gap.
 	 */
 	flaps: boolean
-	/** FLAP_REST_FACTOR applies (FLAP_PAIR_MS: a second flap in time, or one flap of an emitter never known as a call). */
+	/** FLAP_REST_FACTOR applies (flapPairMs: a second flap in time, or one flap of an emitter never known as a call). */
 	flapRest: boolean
-	/** Clock of the last flap heard since the last traffic evidence (FLAP_PAIR_MS). */
+	/** Clock of the last flap heard since the last traffic evidence (flapPairMs). */
 	flapAt: number | null
 	/** Ms of visits of its hops (from the tune) ended since flapAt (noteFlapListening). */
 	flapListenMs: number
@@ -228,6 +217,12 @@ interface HopState {
 	visits: number
 	timeMs: number
 	holdMs: number
+	/**
+	 * Ms this hop has waited since its last visit for other hops' visits that watched, held past one
+	 * coarse sweep or spent the follow budget (Visit.watched, longFollow, budgeted): they share L
+	 * (followBudgetMs), so no hop waits more than L for them between two of its visits.
+	 */
+	waitMs: number
 }
 
 interface TrackInfo {
@@ -279,6 +274,14 @@ interface Visit {
 	longDecoded: boolean
 	/** A hold of this visit spent the follow budget (FollowCap.budget, a recording hold). */
 	budgeted: boolean
+	/** A hold of this visit was a watch (FollowCap.watch): the other hops wait for it (HopState.waitMs). */
+	watched: boolean
+	/**
+	 * Set when the visit kept its hop for a recording (keepForRecording): the end of the L budget
+	 * that hold had. Every later hold of the visit (a probe, a follow, a hang, another recording
+	 * hold) ends by then too (maxHoldDeadline), so they share that window.
+	 */
+	recordEnd: number | null
 	/** A carrier on air since before any visit saw it start showed itself: the hop's past score was it. */
 	newlyQuiet: boolean
 }
@@ -418,18 +421,6 @@ export class SweepScheduler {
 	 * ms on 7 hops of 1150 ms) would keep the other hops waiting past a 28 s ID after the follow.
 	 */
 	private lockHop: number | null = null
-	/**
-	 * Hold ms, in the current follow window, of visits that followed voice on traffic or kept a
-	 * recording (Visit.budgeted). Such follows share L (followBudgetMs): a busy hop held on its
-	 * coarse visit and on revisits in the same sweep spends one budget, so the other hops never
-	 * wait more than L for its follows (plus one coarse sweep of dwells) before the lock.
-	 */
-	private followSpentMs = 0
-	/**
-	 * Coarse visits left in the follow window: set to the hop count by the first budgeted visit
-	 * (its own coarse visit included), the spend is forgotten when it reaches 0.
-	 */
-	private followWindow = 0
 	/**
 	 * Coarse visits still to end before another carrier hold: at most one per coarse sweep (set to
 	 * the hop count when one starts, one less per coarse visit).
@@ -879,7 +870,8 @@ export class SweepScheduler {
 
 	/**
 	 * Keeps the hop while its window is being recorded (recordingActive), as a long follow: up to
-	 * L (longFollowMs) and never past `hold.maxHoldMs` from the start of the visit's holds, which
+	 * what L has left (followBudgetMs) and never past `hold.maxHoldMs` from the start of the visit's
+	 * holds (every later hold of the visit ends by then too: Visit.recordEnd), which
 	 * starts now if no hold ran. Not while the long-hold lock holds, while parked (a parked hop is
 	 * never left), on a one-hop plan, for a signals-only job or under `hold.policy: "never"`. A
 	 * hold that ran past one coarse sweep locks the next long follow out (endVisit). The held
@@ -908,6 +900,7 @@ export class SweepScheduler {
 		this.endHold(true)
 		v.holdStartedAt = start
 		v.budgeted = true
+		v.recordEnd = cap
 		this.noteLong({
 			cap,
 			watch: false,
@@ -1070,6 +1063,7 @@ export class SweepScheduler {
 			visits: 0,
 			timeMs: 0,
 			holdMs: 0,
+			waitMs: 0,
 		}
 	}
 
@@ -1181,12 +1175,12 @@ export class SweepScheduler {
 				entry.watchAfter = 0
 				if (now - closed.at >= TRAFFIC_GAP_MS) this.markTraffic(entry)
 				else {
-					// FLAP_PAIR_MS: a known call flaps for its rest only twice in time.
+					// flapPairMs: a known call flaps for its rest only twice in time.
 					const since =
 						entry.flapAt === null
 							? null
 							: entry.flapListenMs + now - Math.max(v.startedAt, entry.flapAt)
-					const pair = since !== null && since <= FLAP_PAIR_MS
+					const pair = since !== null && since <= this.flapPairMs()
 					entry.flapAt = now
 					entry.flapListenMs = 0
 					if (pair || !(entry.wasTraffic || entry.onsetSeen))
@@ -1264,8 +1258,10 @@ export class SweepScheduler {
 		const hold = this.hold
 		const v = this.visit
 		const t = hold === null ? undefined : v?.tracks.get(hold.trackId)
+		// A `record` hold's cap is L from the shared window (keepForRecording), whatever the evidence.
 		if (
 			hold === null ||
+			hold.mode === "record" ||
 			hold.decoded ||
 			t === undefined ||
 			this.memoryOf(t) !== m
@@ -1339,6 +1335,8 @@ export class SweepScheduler {
 			longFollow: false,
 			longDecoded: false,
 			budgeted: false,
+			watched: false,
+			recordEnd: null,
 			newlyQuiet: false,
 		}
 	}
@@ -1467,7 +1465,9 @@ export class SweepScheduler {
 		if (m.evidence === "unknown") return this.coarseVisits >= m.watchAfter
 		return (
 			m.evidence !== "carrier" ||
-			(this.retryLock === 0 && (m.suspect || this.now() >= m.restUntil))
+			(this.retryLock === 0 &&
+				(m.suspect || this.now() >= m.restUntil) &&
+				this.budgetLeftMs() > 0)
 		)
 	}
 
@@ -1540,23 +1540,27 @@ export class SweepScheduler {
 	/**
 	 * A follow allowed past one coarse sweep, or a watch that may run past it (CARRIER_WATCH_MS,
 	 * CALL_RUN_MS): if the visit's holds do outlast one sweep, every hop gets a coarse visit before
-	 * the next long follow (longHoldLock).
+	 * the next long follow (longHoldLock). A follow that spends the budget (voice on traffic) locks
+	 * only once a hop waited L for such holds (endVisit): an over that ends sooner leaves the rest of L
+	 * to the window, and its hop is followed again on its next visit.
 	 */
 	private noteLong(c: FollowCap): void {
 		const v = this.visit
 		if (v === null) return
 		const sweepEnd = (v.holdStartedAt ?? this.now()) + this.chainBudgetMs()
-		if (c.long || (c.watch && c.cap > sweepEnd)) v.longFollow = true
+		if (c.watch) v.watched = true
+		if ((c.long && c.budget !== true) || (c.watch && c.cap > sweepEnd))
+			v.longFollow = true
 	}
 
 	/**
 	 * Last clock a hold of `t` may follow it to, counted from the start of the visit's holds (S: one
 	 * coarse sweep, chainBudgetMs; M: `hold.maxHoldMs`; N: CARRIER_WATCH_MS):
 	 * - decoded (`decoded`): M (a long follow), or S while the long-hold lock holds;
-	 * - analog voice under policy `hold` on traffic: what the coarse sweep left of L
-	 *   (followBudgetMs, at most M), spending it; while the long-hold lock holds S, and on the hop
-	 *   that set the lock the probe only;
-	 * - carrier evidence: min(S, N), a watch;
+	 * - analog voice under policy `hold` on traffic: what L has left (the other hops' waits)
+	 *   (followBudgetMs, at most M), spending it; while the long-hold lock holds at most S of it,
+	 *   and on the hop that set the lock the probe only;
+	 * - carrier evidence: min(S, N, what L has left), a watch;
 	 * - traffic that is not voice: not followed (the probe only);
 	 * - analog voice not known, whose onset a visit saw, watched once already in its run (and every
 	 *   hop had a coarse visit since): to CALL_RUN_MS of its run, a watch;
@@ -1581,20 +1585,32 @@ export class SweepScheduler {
 				? locked
 				: { cap: long, watch: false, long: long > sweep }
 		const evidence = m?.evidence ?? "unknown"
+		// A carrier hold spends L (startHold): it runs only within what the window left of it.
 		if (evidence === "carrier")
 			return {
-				cap: Math.min(sweep, start + CARRIER_WATCH_MS),
+				cap: Math.min(
+					sweep,
+					start + CARRIER_WATCH_MS,
+					start + this.followBudgetMs(),
+				),
 				watch: true,
 				long: false,
 			}
 		const voice = t.followOnAir && this.spec.hold.policy === "hold"
 		if (voice && evidence === "traffic") {
-			// Under the lock the hop whose long hold set it is probed, not followed (lockedOut).
+			// Under the lock the hop whose long hold set it is probed, not followed (lockedOut);
+			// another is followed one coarse sweep at most, within what L has left (a hop that
+			// already waited L for the others is not kept waiting longer).
+			const cap = Math.min(long, start + this.followBudgetMs())
 			if (this.longHoldLock > 0)
 				return this.lockedOut(v.hopIndex)
 					? { cap: now, watch: false, long: false }
-					: locked
-			const cap = Math.min(long, start + this.followBudgetMs())
+					: {
+							cap: Math.min(sweep, cap),
+							watch: false,
+							long: false,
+							budget: true,
+						}
 			return { cap, watch: false, long: cap > sweep, budget: true }
 		}
 		if (evidence === "traffic" || this.spec.hold.policy !== "hold")
@@ -1657,9 +1673,22 @@ export class SweepScheduler {
 		return Math.max(sweep, ID_MS - away - LONG_FOLLOW_MARGIN_MS)
 	}
 
-	/** L less what the follow window spent already (followSpentMs): a budgeted hold's length. */
+	/**
+	 * L less the longest wait of another hop (HopState.waitMs): a budgeted hold's length. A busy hop
+	 * followed on its coarse visit and again on a revisit spends one L for every hop not visited in
+	 * between, so no hop waits more than L of such holds between two of its visits.
+	 */
 	private followBudgetMs(): number {
-		return Math.max(0, this.longFollowMs() - this.followSpentMs)
+		return Math.max(0, this.longFollowMs() - this.longestWaitMs())
+	}
+
+	/** Longest HopState.waitMs of a hop other than the visit's. */
+	private longestWaitMs(): number {
+		const here = this.visit?.hopIndex
+		let most = 0
+		for (const [i, hop] of this.hops.entries())
+			if (i !== here) most = Math.max(most, hop.waitMs)
+		return most
 	}
 
 	/** A decoded follow of the visit that ran this long locks the next long follow out (longHoldLock). */
@@ -1706,9 +1735,15 @@ export class SweepScheduler {
 		if (v === null || this.plan.hops.length < 2) return long
 		const window =
 			Math.min(t.confirmHoldMs, CONFIRM_FLOOR_MS) + this.probeStartMs
+		const start = v.holdStartedAt ?? now
+		const room =
+			this.memoryOf(t)?.evidence === "carrier"
+				? start + this.followBudgetMs()
+				: Infinity
 		const short = Math.min(
 			long,
-			Math.max((v.holdStartedAt ?? now) + this.chainBudgetMs(), now + window),
+			room,
+			Math.max(start + this.chainBudgetMs(), now + window),
 		)
 		if (
 			now + t.confirmHoldMs + this.probeStartMs <= short ||
@@ -1719,7 +1754,8 @@ export class SweepScheduler {
 			return short
 		const follow = this.capFor(t, this.memoryOf(t))
 		if (!follow.long) return short
-		v.longFollow = true
+		if (follow.budget === true) v.budgeted = true
+		else v.longFollow = true
 		return follow.cap
 	}
 
@@ -1841,8 +1877,26 @@ export class SweepScheduler {
 			: RETRY_REST_FACTOR
 	}
 
+	/**
+	 * Last clock any hold of the visit may run to: `hold.maxHoldMs` from the start of its holds,
+	 * and, once the visit kept its hop for a recording, the end of that hold's L budget
+	 * (Visit.recordEnd): a probe or follow started from a recording hold shares its window.
+	 */
 	private maxHoldDeadline(): number {
-		return (this.visit?.holdStartedAt ?? this.now()) + this.spec.hold.maxHoldMs
+		const v = this.visit
+		const max = (v?.holdStartedAt ?? this.now()) + this.spec.hold.maxHoldMs
+		const end = v?.recordEnd ?? null
+		return end === null ? max : Math.min(max, end)
+	}
+
+	/**
+	 * Ms of L a hold starting now may still spend (followBudgetMs from the start of the visit's
+	 * holds, less what they ran already): a carrier hold runs only within it.
+	 */
+	private budgetLeftMs(): number {
+		const now = this.now()
+		const start = this.visit?.holdStartedAt ?? now
+		return start + this.followBudgetMs() - now
 	}
 
 	private leaveHop(prefix: SchedulerAction[]): SchedulerAction[] {
@@ -2018,29 +2072,26 @@ export class SweepScheduler {
 		const heldMs =
 			v.holdStartedAt === null ? 0 : Math.max(0, now - v.holdStartedAt)
 		hop.holdMs += heldMs
-		// The follow window: budgeted holds share L until every hop had a coarse visit.
-		if (v.budgeted) {
-			this.followSpentMs += heldMs
-			if (this.followWindow === 0) this.followWindow = this.plan.hops.length
-		}
-		// A long hold that used more than one coarse sweep, a decoded follow that ran to L, or a
-		// follow window that spent L (lockAfterMs): every hop gets a coarse visit before the next
-		// long follow, and the hop is probed, not followed, until then (capFor). A decoded call
-		// that ended sooner locks nothing.
+		// The other hops waited for this visit's long or budgeted holds (followBudgetMs); this hop
+		// was visited.
+		if (v.budgeted || v.longFollow || v.watched)
+			for (const [i, other] of this.hops.entries())
+				if (i !== v.hopIndex) other.waitMs += heldMs
+		hop.waitMs = 0
+		// A long hold that used more than one coarse sweep, a decoded follow that ran to L, or
+		// budgeted holds that kept a hop waiting L (lockAfterMs): every hop gets a coarse visit
+		// before the next long follow, and the hop is probed, not followed, until then (capFor). A
+		// decoded call that ended sooner locks nothing.
 		if (
 			(v.longFollow && heldMs > this.chainBudgetMs()) ||
 			(v.longDecoded && heldMs >= this.lockAfterMs()) ||
-			(v.budgeted && this.followSpentMs >= this.lockAfterMs())
+			(v.budgeted && this.longestWaitMs() >= this.lockAfterMs())
 		) {
 			this.longHoldLock = this.plan.hops.length
 			this.lockHop = v.hopIndex
-			this.followSpentMs = 0
-			this.followWindow = 0
 			// No carrier hold lengthens the sweep after it either (as after a watch, endHold).
 			this.retryLock = Math.max(this.retryLock, this.plan.hops.length)
 		} else if (!v.revisit && this.longHoldLock > 0) this.longHoldLock--
-		if (!v.revisit && this.followWindow > 0 && --this.followWindow === 0)
-			this.followSpentMs = 0
 		if (!v.revisit && this.retryLock > 0) this.retryLock--
 		if (!v.revisit) this.coarseVisits++
 		// Spurs, and carriers on air since before any visit saw them start, are no activity: they never need a revisit.
@@ -2119,11 +2170,45 @@ export class SweepScheduler {
 		}
 	}
 
-	/** Adds the visit's time (from its tune, or the flap) to each flapped frequency of its hop. */
+	/**
+	 * Adds the visit's held time (from the start of its holds, or the flap) to each flapped
+	 * frequency of its hop (flapPairMs). Dwells without a hold add nothing.
+	 */
 	private noteFlapListening(v: Visit, now: number): void {
+		if (v.holdStartedAt === null) return
+		const from = v.holdStartedAt
 		for (const m of this.memory)
 			if (m.flapAt !== null && this.covers(v.hopIndex, m))
-				m.flapListenMs += Math.max(0, now - Math.max(v.startedAt, m.flapAt))
+				m.flapListenMs += Math.max(0, now - Math.max(from, m.flapAt))
+	}
+
+	/**
+	 * A short reopening (a close and reopen less than TRAFFIC_GAP_MS apart) is a flap: carrier
+	 * evidence. On a frequency known as a call (it was traffic, or a visit saw its onset) it earns
+	 * FLAP_REST_FACTOR only when another flap was heard at most this long before, with no
+	 * turnaround heard in between (traffic evidence forgets the earlier flap). The time counted is
+	 * the held time of the earlier visits of its hops since that flap (noteFlapListening) and the
+	 * current visit from its tune. A carrier flapping with a period P shorter than its holds (P <
+	 * H = min(one coarse sweep, CARRIER_WATCH_MS)) flaps in every hold: after the flap of one hold,
+	 * that hold listens less than P (plus a hang classing a gap, TRAFFIC_GAP_MS + one block) before
+	 * it ends, and its next hold hears the next flap less than P after the dwell (spec.dwellMs, plus
+	 * a wait of CLASS_SETTLE_BLOCKS blocks for its class) that starts it. So the window is 2 H +
+	 * TRAFFIC_GAP_MS + (1 + CLASS_SETTLE_BLOCKS) blocks + spec.dwellMs: such a carrier earns the
+	 * rest from its second flap (1150 ms hops, 50 ms blocks: 3 hops 2 × 3450 + 1300 + 1150 = 9350
+	 * ms, 7 hops 2 × 8000 + 1300 + 1150 = 18 450 ms), while a QSO with one quick turnaround (0.3
+	 * to 0.9 s) rests KNOWN_CALL_REST_FACTOR, not twenty times its hold. An emitter never known as
+	 * a call (on air since before any visit saw it start, no turnaround heard) earns it from its
+	 * first flap.
+	 */
+	private flapPairMs(): number {
+		const blockMs = (this.blockSamples * 1000) / this.sampleRateHz
+		const held = Math.min(this.chainBudgetMs(), CARRIER_WATCH_MS)
+		return (
+			2 * held +
+			TRAFFIC_GAP_MS +
+			(1 + CLASS_SETTLE_BLOCKS) * blockMs +
+			this.spec.dwellMs
+		)
 	}
 
 	private pickRevisit(now: number, lastWasRevisit: boolean): number | null {
