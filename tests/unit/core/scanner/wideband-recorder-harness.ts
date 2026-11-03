@@ -240,11 +240,16 @@ export function harness(
 		offsetHz: opts.offset ?? OFFSET,
 		...opts.source,
 	})
+	let pumps = 0
 	const pump = async (): Promise<void> => {
 		for (let i = 0; i < 1000 && queue.length > 0; i++) {
 			queue.shift()!()
 			await microtasks(8)
 		}
+		// A long scene runs only microtasks: every 1 s of signal (40 chunks) one macrotask turn
+		// lets the test worker answer its runner (vitest's onTaskUpdate RPC times out after
+		// 60 s otherwise). The recorder's work stays on `queue`, so the yield runs none of it.
+		if (++pumps % 40 === 0) await new Promise(r => setImmediate(r))
 	}
 	/**
 	 * One event-loop turn: runs only the drain tasks queued before it (one per session), like

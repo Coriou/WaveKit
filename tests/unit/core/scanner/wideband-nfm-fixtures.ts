@@ -21,6 +21,12 @@ export interface NfmSourceOptions {
 	ctcssDeviationHz?: number
 	/** Default true; false keys a carrier with only the CTCSS sub-tone (or nothing). */
 	voice?: boolean
+	/**
+	 * Speech-like syllables (default false: the tone bursts keep a steady level): the voice
+	 * deviation follows a 4 Hz raised-cosine envelope with a 300 ms pause every 1.7 s, so the
+	 * envelope rises and falls like speech (VoiceFrameMeter's syllabic index about 0.77).
+	 */
+	syllables?: boolean
 	seed?: number
 }
 
@@ -39,6 +45,7 @@ export class NfmSource {
 			peakDeviationHz: 2500,
 			ctcssDeviationHz: 350,
 			voice: true,
+			syllables: false,
 			seed: 7,
 			...opts,
 			ctcssHz: opts.ctcssHz === undefined ? CTCSS_TEST_HZ : opts.ctcssHz,
@@ -56,6 +63,11 @@ export class NfmSource {
 		this.o.voice = voice
 	}
 
+	/** The CTCSS sub-tone from the next sample (null: none; the carrier stays continuous). */
+	setCtcss(hz: number | null): void {
+		this.o.ctcssHz = hz
+	}
+
 	/** `n` CU8 IQ pairs; the carrier is keyed when `on`. */
 	next(n: number, on: boolean): Uint8Array {
 		const { fs, offsetHz, amp, noiseSigma, peakDeviationHz } = this.o
@@ -70,8 +82,17 @@ export class NfmSource {
 					VOICE_TONES_HZ[Math.floor(t / 0.15) % VOICE_TONES_HZ.length]!
 				// Pre-emphasised like a transmitter: deviation rises 6 dB/octave up to 1 kHz.
 				const emphasis = Math.min(1, tone / 1000)
+				const envelope = this.o.syllables
+					? t % 1.7 > 1.4
+						? 0
+						: 0.5 - 0.5 * Math.cos(TWO_PI * 4 * t)
+					: 1
 				let dev = this.o.voice
-					? peakDeviationHz * 0.85 * emphasis * Math.sin(TWO_PI * tone * t)
+					? peakDeviationHz *
+						0.85 *
+						emphasis *
+						envelope *
+						Math.sin(TWO_PI * tone * t)
 					: 0
 				if (ctcss !== null)
 					dev += this.o.ctcssDeviationHz * Math.sin(TWO_PI * ctcss * t)
@@ -103,11 +124,16 @@ export interface FskSourceOptions {
 	amp?: number
 	noiseSigma?: number
 	seed?: number
+	/** Symbols step through `levelsHz` in order (an alternating 1010 pattern) instead of at random. */
+	alternate?: boolean
+	/** The first symbols alternate (a POCSAG-like preamble), then random ones follow. */
+	preambleSymbols?: number
 }
 
 /**
- * Synthetic narrow 4FSK data signal (a digital-voice-like channel): random symbols at `baud`,
- * each a constant deviation of one of `levelsHz`, phase-continuous FM at an offset.
+ * Synthetic narrow FSK data signal (a digital-voice-like channel): symbols at `baud`, each a
+ * constant deviation of one of `levelsHz` (random, alternating, or an alternating preamble then
+ * random), phase-continuous FM at an offset.
  */
 export class FskSource {
 	private carrierPhase = 0
@@ -124,6 +150,8 @@ export class FskSource {
 			amp: 0.4,
 			noiseSigma: 0.02,
 			seed: 11,
+			alternate: false,
+			preambleSymbols: 0,
 			...opts,
 		}
 		this.rng = mulberry32(this.o.seed)
@@ -139,7 +167,10 @@ export class FskSource {
 			if (sym !== this.symbol || this.sample === 0) {
 				this.symbol = sym
 				this.dev =
-					levelsHz[Math.floor(this.rng() * levelsHz.length)] ?? levelsHz[0]!
+					this.o.alternate || sym < this.o.preambleSymbols
+						? levelsHz[sym % levelsHz.length]!
+						: (levelsHz[Math.floor(this.rng() * levelsHz.length)] ??
+							levelsHz[0]!)
 			}
 			let re = noiseSigma * this.gauss()
 			let im = noiseSigma * this.gauss()

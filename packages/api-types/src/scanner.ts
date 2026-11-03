@@ -951,7 +951,8 @@ export interface ScannerIqCaptureStatus {
  * clean snapshot may start one); given to a recording in progress they end it and the
  * observation. `refused:store` is retried once (a second one is final; a finishing or waiting
  * file's store failure refuses that file only). `refused:unsupported` and `refused:start-failed`
- * are final. A `discarded:*` code means audio was held and dropped without a file. Every
+ * are final. `refused:close-only`: the observation was classed analog-fm only by a snapshot that
+ * closed it while no recording ran for it (nothing is left to record). A `discarded:*` code means audio was held and dropped without a file. Every
  * recording that started ends with exactly one terminal decision per file: `finalized`,
  * `evicted`, `refused:*` or `discarded:*`.
  */
@@ -974,6 +975,7 @@ export const SCANNER_RECORDER_DECISIONS = [
 	"refused:record-disabled",
 	"refused:unclean",
 	"refused:store",
+	"refused:close-only",
 	"discarded:not-analog",
 	"discarded:unclassed",
 	"discarded:no-discovery",
@@ -1006,6 +1008,52 @@ export const RECORDER_RECENT_REFUSALS = 32
 /** Observations whose decisions the recorder remembers for discovery reads (oldest dropped). */
 export const RECORDER_MAX_OBSERVATIONS = 256
 
+/**
+ * Why a track snapshot was unclean (docs/SCANNER.md, Recorder decisions): `spur` (a baseband
+ * spur line), `iq-image` (the mirror of a stronger signal), `edge` (touches the usable span),
+ * `truncated`, `wide` (occupied bandwidth over the recorder's limit, or not finite) or `tuning`
+ * (the tuning is not trusted).
+ */
+export const SCANNER_RECORDER_FLAGS = [
+	"spur",
+	"iq-image",
+	"edge",
+	"truncated",
+	"wide",
+	"tuning",
+] as const
+export type ScannerRecorderFlag = (typeof SCANNER_RECORDER_FLAGS)[number]
+/**
+ * Which snapshot raised the flag: `snapshot` (an update of the session's own observation),
+ * `joined` (another observation merged into the session: a track joining the same channel, or
+ * an update of one), `close` (the snapshot that closed an observation).
+ */
+export const SCANNER_RECORDER_FLAG_SOURCES = [
+	"snapshot",
+	"joined",
+	"close",
+] as const
+export type ScannerRecorderFlagSource =
+	(typeof SCANNER_RECORDER_FLAG_SOURCES)[number]
+
+/** The first unclean snapshot of a recording session and how many of its snapshots were. */
+export interface ScannerRecorderFlagDetail {
+	flag: ScannerRecorderFlag
+	raisedBy: ScannerRecorderFlagSource
+	/** Signal time from the session's onset to the end of the snapshot that raised it, ms. */
+	atMs: number
+	/** Unclean snapshots of the session so far. */
+	flagged: number
+	/** Snapshots of the session so far (its start, updates and closes of joined observations). */
+	snapshots: number
+	/**
+	 * The session was kept (no veto): the flag (spur or iq-image only) was first seen after the
+	 * session was classed and voiced, and stayed on fewer than half of its snapshots. Its files are
+	 * written, but give no tone evidence.
+	 */
+	kept: boolean
+}
+
 export interface ScannerRecorderDecisionEntry {
 	code: ScannerRecorderDecision
 	/** ISO time of the decision. */
@@ -1014,6 +1062,12 @@ export interface ScannerRecorderDecisionEntry {
 	observationId: string
 	/** Null while the observation has no discovery yet (a shadow). */
 	discoveryId: string | null
+	/**
+	 * Set on the decisions of a session once one of its snapshots was unclean (the refusal that
+	 * ended it, or the later decisions of a session kept over a late minority flag). Absent on
+	 * older cores and on sessions with only clean snapshots.
+	 */
+	unclean?: ScannerRecorderFlagDetail | undefined
 }
 
 /** One live recorder session (one channel being demodulated). */

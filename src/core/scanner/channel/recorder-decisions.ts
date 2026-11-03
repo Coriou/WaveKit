@@ -15,6 +15,7 @@ import {
 	type ScannerRecorderDecision,
 	type ScannerRecorderDecisionEntry,
 	type ScannerRecorderDiscovery,
+	type ScannerRecorderFlagDetail,
 } from "@wavekit/api-types"
 import type { Logger } from "../../../utils/logger.js"
 
@@ -39,6 +40,7 @@ interface ObservationMemory {
 	discoveryId: string | null
 	last: ScannerRecorderDecision
 	at: number
+	lastUnclean: ScannerRecorderFlagDetail | null
 	counts: Map<ScannerRecorderDecision, number>
 }
 
@@ -48,6 +50,7 @@ interface Entry {
 	sourceId: string
 	observationId: string
 	discoveryId: string | null
+	unclean: ScannerRecorderFlagDetail | null
 }
 
 export class RecorderDecisions {
@@ -76,12 +79,13 @@ export class RecorderDecisions {
 	 * counts: a session's decisions are each about a file or the session (two files of one session
 	 * finalize twice, two files refused by the store are refused twice). A snapshot refusal is
 	 * logged at debug and kept in the refusal ring; a session decision at info (rate limited) and in
-	 * the session ring.
+	 * the session ring. `unclean`: the session's unclean-snapshot detail (copied), when it has one.
 	 */
 	note(
 		code: ScannerRecorderDecision,
 		ref: RecorderDecisionRef,
 		session = false,
+		unclean: ScannerRecorderFlagDetail | null = null,
 	): void {
 		const at = this.now()
 		const known = this.byObservation.get(ref.observationId)
@@ -94,10 +98,13 @@ export class RecorderDecisions {
 			discoveryId: null,
 			last: code,
 			at,
+			lastUnclean: null,
 			counts: new Map(),
 		}
+		const detail = unclean === null ? null : { ...unclean }
 		memory.last = code
 		memory.at = at
+		memory.lastUnclean = detail
 		memory.discoveryId = ref.discoveryId ?? memory.discoveryId
 		memory.counts.set(code, (memory.counts.get(code) ?? 0) + 1)
 		this.byObservation.delete(ref.observationId)
@@ -113,6 +120,7 @@ export class RecorderDecisions {
 			sourceId: ref.sourceId,
 			observationId: ref.observationId,
 			discoveryId: memory.discoveryId,
+			unclean: detail,
 		}
 		if (!session) {
 			this.refusals.push(entry)
@@ -151,6 +159,7 @@ export class RecorderDecisions {
 				sourceId: last.m.sourceId,
 				observationId: last.id,
 				discoveryId,
+				unclean: last.m.lastUnclean,
 			}),
 			counts,
 		}
@@ -190,12 +199,26 @@ export class RecorderDecisions {
 	}
 }
 
-function fields(entry: Entry): Record<string, string | null> {
+/** Log fields: the trusted ids, and the unclean detail's closed codes and counts. */
+function fields(
+	entry: Entry,
+): Record<string, string | number | boolean | null> {
+	const u = entry.unclean
 	return {
 		decision: entry.code,
 		sourceId: entry.sourceId,
 		observationId: entry.observationId,
 		discoveryId: entry.discoveryId,
+		...(u === null
+			? {}
+			: {
+					uncleanFlag: u.flag,
+					uncleanRaisedBy: u.raisedBy,
+					uncleanAtMs: u.atMs,
+					uncleanFlagged: u.flagged,
+					uncleanSnapshots: u.snapshots,
+					uncleanKept: u.kept,
+				}),
 	}
 }
 
@@ -206,5 +229,6 @@ function dto(e: Entry): ScannerRecorderDecisionEntry {
 		sourceId: e.sourceId,
 		observationId: e.observationId,
 		discoveryId: e.discoveryId,
+		...(e.unclean === null ? {} : { unclean: { ...e.unclean } }),
 	}
 }

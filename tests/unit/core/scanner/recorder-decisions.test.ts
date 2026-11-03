@@ -234,6 +234,38 @@ describe("RecorderDecisions", () => {
 		})
 	})
 
+	it("an unclean detail rides its decision to the status, the discovery read and the log; a decision without one has no field", async () => {
+		const { lines, logger } = capture()
+		const d = new RecorderDecisions(logger, () => 1_000)
+		const detail = {
+			flag: "iq-image",
+			raisedBy: "close",
+			atMs: 12_500,
+			flagged: 3,
+			snapshots: 140,
+			kept: true,
+		} as const
+		d.note("started", ref(1, "d_1"), true)
+		d.note("finalized", ref(1, "d_1"), true, detail)
+		const recent = d.status().recent
+		expect(recent[0]).not.toHaveProperty("unclean")
+		expect(recent[1]!.unclean).toEqual(detail)
+		// A copy: the caller's object changing later does not change what was noted.
+		expect(recent[1]!.unclean).not.toBe(detail)
+		expect(d.forDiscovery("d_1")?.last.unclean).toEqual(detail)
+		await flushLogs()
+		expect(lines.at(-1)).toMatchObject({
+			decision: "finalized",
+			uncleanFlag: "iq-image",
+			uncleanRaisedBy: "close",
+			uncleanAtMs: 12_500,
+			uncleanFlagged: 3,
+			uncleanSnapshots: 140,
+			uncleanKept: true,
+		})
+		expect(lines[0]).not.toHaveProperty("uncleanFlag")
+	})
+
 	it("every code is a closed string of the form name or kind:why", () => {
 		for (const code of SCANNER_RECORDER_DECISIONS)
 			expect(code).toMatch(/^(?:[a-z]+|(?:refused|discarded):[a-z-]+)$/)

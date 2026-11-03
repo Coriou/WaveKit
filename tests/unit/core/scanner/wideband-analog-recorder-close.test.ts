@@ -163,7 +163,8 @@ describe("WidebandAnalogRecorder retune before the close", () => {
 			{ analogFm: false, discoveryId: "d_1" },
 		]
 		for (const info of closes) {
-			const h = harness()
+			// No CTCSS tone: the shadow's own audio does not class it.
+			const h = harness({ source: { ctcssHz: null } })
 			await h.feed(1, false)
 			const { onset, end } = await shadowTx(h, 3)
 			retune(h)

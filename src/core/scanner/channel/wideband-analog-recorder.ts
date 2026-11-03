@@ -13,13 +13,20 @@
  * A session does not wait for the classifier: a clean, non-burst track in a range a band plan
  * lists for analog FM (or no band plan covers) starts a shadow session as soon as it appears.
  * Its audio stays in memory (no store operation, nothing on disk) until the observation is
- * classed analog-fm (any snapshot, the closing one included) and the file's audio sounds like
- * voice (`VoiceActivityGate`); then the store operation begins and the buffered audio is
- * written. A session closed without that class, or classed as something else first, is
- * discarded. A file whose audio never sounds like voice (a spur, an idle or CTCSS-only carrier)
- * is never written and a session not voiced after WIDEBAND_QUALIFY_MS of in-track audio ends. An
- * unclassed shadow is not ended by time (a class may arrive only at close): it is bounded by the
- * 60 s buffer and gives its slot to any candidate classed analog-fm (eviction).
+ * classed analog-fm (any snapshot, the closing one included, or its own audio: speech over a
+ * stable standard CTCSS tone, `classByTone` and tone-class.ts, a class of the recorder only) and
+ * the file's audio sounds like voice (`VoiceActivityGate`); then the store operation begins and
+ * the buffered audio is written. A session closed without that class, or given a definite other
+ * class (the caller's `nonAnalog`: decoded or channel-tier, never a spectral class alone) before
+ * a snapshot classed it analog-fm, is discarded. A file whose audio never sounds like voice (a
+ * spur, an idle or CTCSS-only carrier) is never written and a session not voiced after
+ * WIDEBAND_QUALIFY_MS of in-track audio ends. An unclassed shadow is not ended by time (a class
+ * may arrive only at close): it is bounded by the 60 s buffer and gives its slot to any candidate
+ * classed analog-fm (eviction). A shadow of a track with a spectral digital class has the lowest
+ * slot priority and a bounded time to be classed (WIDEBAND_DIGITAL_QUALIFY_MS,
+ * WIDEBAND_DIGITAL_CLASS_MS); a session classed by its own audio only keeps a low priority and
+ * a bounded hold (WIDEBAND_TONE_ONLY_HOLD_FRAMES), and each of its files is checked again over
+ * the whole file when it finishes.
  */
 import type { TrackSnapshot, TuningTrust } from "../../spectrum/types.js"
 import { safeErrorFields } from "../../../decoders/safe-error-fields.js"
@@ -46,6 +53,7 @@ import {
 	type SegmentEvent,
 } from "./transmission-segmenter.js"
 import { VoiceActivityGate, VoiceOnAirMeter } from "./voice-activity.js"
+import { ToneClassEvidence } from "./tone-class.js"
 import {
 	MAX_SLICE_SAMPLES,
 	WidebandNfmChain,
@@ -55,6 +63,9 @@ import type { ProofAnalogInput } from "../scanner-redesign-contract.js"
 import type {
 	ScannerRecorderDecision,
 	ScannerRecorderDiscovery,
+	ScannerRecorderFlag,
+	ScannerRecorderFlagDetail,
+	ScannerRecorderFlagSource,
 	ScannerRecorderSession,
 	ScannerRecorderStatus,
 } from "@wavekit/api-types"
@@ -101,6 +112,153 @@ export const WIDEBAND_QUALIFY_FRAMES =
  * candidate at any age.
  */
 export const WIDEBAND_EVICT_MIN_HEARD_FRAMES = 2 * ANALOG_AUDIO_RATE_HZ
+/**
+ * A shadow whose track has a spectral class other than analog FM (`spectralDigital`: a narrow
+ * data signal, or a weak voice the spectrum misreads) must sound like voice within 3 s of
+ * in-track audio (24 000 frames) and be classed (by a snapshot or classByTone) within 12 s
+ * (96 000 frames), or it is discarded and frees its slot. 12 s: classByTone needs at least
+ * 2.25 s of tone blocks and 2.5 s of speech frames (tone-class.ts), which the tests' synthetic
+ * voices meet 3.6 s after their onset (judged 1 s late), the weak one (one pitched syllable in
+ * six at 11.9 dB) at 20 % periodic frames against the 10 % needed. 12 s, 3.3× that, leaves an
+ * over whose pitched frames reach the share only later (a lead-in, pauses, a weaker voice)
+ * time to be classed. An expired observation starts no other shadow in the same visit (stream and
+ * epoch: only a later analog-fm snapshot starts a recording for it then), so an unclassed data
+ * track holds a slot once per visit, for at most 12 s of signal judged up to WIDEBAND_HOLDBACK_MS
+ * late: 13 s. Two bounds keep it from holding one others wait for that long: its slot goes to
+ * any waiting candidate once its current file can no longer pass the tone test
+ * (ToneClassEvidence.toneCanHold: no standard tone within TONE_CLASS_MAX_GAP_BLOCKS, at the
+ * earliest 2.5 s of in-track audio, 3.5 s judged late), and once WIDEBAND_EXPIRED_STALE visits
+ * of the observation expired unclassed. A session classByTone classed holds a slot others wait
+ * for for a bounded time too (WIDEBAND_TONE_ONLY_HOLD_FRAMES).
+ */
+export const WIDEBAND_DIGITAL_QUALIFY_MS = 3_000
+export const WIDEBAND_DIGITAL_QUALIFY_FRAMES =
+	(WIDEBAND_DIGITAL_QUALIFY_MS / 1000) * ANALOG_AUDIO_RATE_HZ
+export const WIDEBAND_DIGITAL_CLASS_MS = 12_000
+export const WIDEBAND_DIGITAL_CLASS_FRAMES =
+	(WIDEBAND_DIGITAL_CLASS_MS / 1000) * ANALOG_AUDIO_RATE_HZ
+/**
+ * Visits of one observation whose digital shadow expired unclassed (discarded:unclassed, or a
+ * stale yield below) after which its later shadows give their slot to any waiting candidate,
+ * whatever its class: 1. Its first visit gets the whole class window; from then on it is
+ * recorded only while no other track waits, so over its remembered lifetime (MAX_REMEMBERED
+ * observations) it keeps others out of a slot for at most one 13 s window, not 13 s every visit.
+ * A stale shadow that yields is ended as an expiry of that visit (it may shadow again in the
+ * next one, still stale).
+ */
+export const WIDEBAND_EXPIRED_STALE = 1
+/**
+ * A session classed by its own audio only (classByTone, `toneOnly`) keeps the lowest priority
+ * among classed sessions. A candidate classed analog-fm takes its slot at any time. Any other
+ * waiting candidate takes it once the session heard this much in-track audio while its voice is
+ * not on air (a carrier, a hang, a pause; voiceOnAir: a voiced window within
+ * WIDEBAND_VOICE_ON_AIR_MS of the newest judged audio, in an open track): 8 s = 64 000 frames.
+ * Judged audio runs up to WIDEBAND_HOLDBACK_MS behind, so without voice on air it holds a slot
+ * others wait for at most 8 + 1 = 9 s (plus the candidate's next snapshot and its yielded file's
+ * finish). With no candidate waiting it keeps recording.
+ */
+export const WIDEBAND_TONE_ONLY_HOLD_MS = 8_000
+export const WIDEBAND_TONE_ONLY_HOLD_FRAMES =
+	(WIDEBAND_TONE_ONLY_HOLD_MS / 1000) * ANALOG_AUDIO_RATE_HZ
+/**
+ * While its voice is on air, a tone-only session that is shielded keeps its slot from
+ * candidates not classed analog-fm until it heard this much in-track audio: 60 s = 480 000
+ * frames, the default hold.maxHoldMs (the longest a sweep holds one hop). Only cap − 1
+ * tone-only sessions per source are shielded at a time, the oldest ones with voice on air
+ * (WidebandAnalogRecorder.evict): keyed periodic data
+ * over a tone (the disclosed limit of tone-class.ts) also reads as voice on air, so tone-only
+ * sessions alone never keep every slot from a waiting candidate for longer than the 8 s hold:
+ * with the default cap of 2, one is shielded and the other yields after 8 + 1 = 9 s (with a cap
+ * of 1, none is shielded). A shielded session holds its slot
+ * others wait for at most 60 + 1 = 61 s; a longer over, or one not shielded, may lose its slot to
+ * a waiting carrier or data track (its file so far is kept).
+ */
+export const WIDEBAND_TONE_ONLY_ON_AIR_MS = 60_000
+export const WIDEBAND_TONE_ONLY_ON_AIR_FRAMES =
+	(WIDEBAND_TONE_ONLY_ON_AIR_MS / 1000) * ANALOG_AUDIO_RATE_HZ
+/**
+ * After a tone-only session yields (yieldToneOnly), its observations may start no new session
+ * on that source until the candidate it yielded to started one, for at most this much stream
+ * time: 3 s (the yielded file's finish and the candidate's next snapshot, a few 100 ms each), so
+ * the freed slot goes to that candidate and not back to the session that gave it up.
+ */
+export const WIDEBAND_YIELD_RESERVE_MS = 3_000
+
+/**
+ * An unclassed shadow of a spectrally digital track after `inTrack` frames of in-track audio:
+ * discarded unvoiced at WIDEBAND_DIGITAL_QUALIFY_FRAMES (not `qualified`), unclassed at
+ * WIDEBAND_DIGITAL_CLASS_FRAMES, else null (still within its window).
+ */
+export function digitalExpiry(
+	qualified: boolean,
+	inTrack: number,
+): "discarded:unvoiced" | "discarded:unclassed" | null {
+	if (!qualified && inTrack >= WIDEBAND_DIGITAL_QUALIFY_FRAMES)
+		return "discarded:unvoiced"
+	if (inTrack >= WIDEBAND_DIGITAL_CLASS_FRAMES) return "discarded:unclassed"
+	return null
+}
+
+/**
+ * Whether a tone-only session that heard `inTrack` frames of in-track audio gives its slot to a
+ * candidate of kind `by` (evict): one classed analog-fm always; any other once it heard
+ * WIDEBAND_TONE_ONLY_HOLD_FRAMES unless it is `shielded` (its voice is on air and it is among the
+ * cap − 1 oldest such tone-only sessions on its source), WIDEBAND_TONE_ONLY_ON_AIR_FRAMES if it is.
+ */
+export function toneOnlyYields(
+	by: "analog" | "shadow" | "none",
+	inTrack: number,
+	shielded: boolean,
+): boolean {
+	return (
+		by === "analog" ||
+		inTrack >=
+			(shielded
+				? WIDEBAND_TONE_ONLY_ON_AIR_FRAMES
+				: WIDEBAND_TONE_ONLY_HOLD_FRAMES)
+	)
+}
+/**
+ * A classed, voiced session whose snapshots turn unclean keeps recording when the flag is a
+ * spur or an IQ image (an artefact flag that a strong neighbour or a spur line near the channel
+ * can raise on some snapshots of a real voice) first seen after the session was classed and
+ * voiced, and on fewer than this share of its snapshots so far: 0.5, flagged · 2 < snapshots
+ * (e.g. 49 of 100 is kept, 50 of 100 is not). Its files are written but give no tone evidence.
+ * Any other flag, an artefact flag seen before the class and the voice, or one on half of the
+ * snapshots or more, discards the session as before.
+ */
+export const WIDEBAND_LATE_FLAG_MAX_SHARE = 0.5
+
+/** The first reason `track` is not clean (cleanTrack), or null when it is. */
+export function uncleanFlag(track: TrackSnapshot): ScannerRecorderFlag | null {
+	if (!usableTrust(track.tuningTrust)) return "tuning"
+	if (!Number.isFinite(track.obwHz) || track.obwHz > WIDEBAND_MAX_OBW_HZ)
+		return "wide"
+	if (track.flags.truncated) return "truncated"
+	if (track.flags.edge) return "edge"
+	if (track.flags.iqImage) return "iq-image"
+	if (track.flags.spur === true) return "spur"
+	return null
+}
+
+/**
+ * Whether a session keeps recording over a snapshot flagged `flag` (WIDEBAND_LATE_FLAG_MAX_SHARE):
+ * a spur or IQ image, the session's first flag came after it was classed and voiced (`late`),
+ * and `flagged` of its `snapshots` (this one included) is under the share.
+ */
+export function lateFlagKept(
+	flag: ScannerRecorderFlag,
+	late: boolean,
+	flagged: number,
+	snapshots: number,
+): boolean {
+	return (
+		(flag === "spur" || flag === "iq-image") &&
+		late &&
+		flagged < WIDEBAND_LATE_FLAG_MAX_SHARE * snapshots
+	)
+}
+
 /**
  * Voice is on air (recordingActive answers VoiceOnAir) while the newest in-track audio the session
  * judged is at most this far past the end of the last voiced 500 ms window heard in a track that
@@ -305,10 +463,18 @@ export interface WidebandTrackInput {
 	readonly track: TrackSnapshot
 	/** The observation is classed analog-fm in this snapshot. */
 	readonly analogFm: boolean
-	/** Classed as something definitely not analog FM (digital, burst, AM, wideband). */
+	/**
+	 * Classed as something definitely not analog FM: a class other than analog-fm backed by more
+	 * than the spectrum (a verified decode, the channel tier). A spectral class alone is not.
+	 */
 	readonly nonAnalog?: boolean
 	/** A band plan range at the track lists analog FM, or none covers it: a shadow may start. */
 	readonly shadowAllowed?: boolean
+	/**
+	 * The snapshot's class is another class than analog FM on the spectrum alone (not
+	 * `nonAnalog`): its shadow has the lowest slot priority (WIDEBAND_DIGITAL_CLASS_MS).
+	 */
+	readonly spectralDigital?: boolean
 	readonly encrypted: boolean
 	/** No covering job, or a covering job with record.analog. */
 	readonly recordAllowed: boolean
@@ -400,6 +566,13 @@ interface FileState {
 	ctcss: CtcssBank | null
 	/** The tone heard over this file (taken when it finished), reported once it is finalized. */
 	toneHz: number | null
+	/**
+	 * The stricter evidence classByTone needs (tone-class.ts); null once the file finished, when
+	 * its verdict is in `classTone`.
+	 */
+	toneClass: ToneClassEvidence | null
+	/** The tone that classed this file's audio (ToneClassEvidence.result at its finish), or null. */
+	classTone: number | null
 	/** The start the segmenter planned (onset − preRoll, clamped): the head-cut reference. */
 	readonly planned: number
 	startSample: number
@@ -439,8 +612,43 @@ interface Session {
 	readonly owner: string
 	/** The owner's discovery; a shadow may start before it exists. */
 	discoveryId: string | null
-	/** Some snapshot of a joined observation was classed analog-fm. */
+	/** Some snapshot of a joined observation was classed analog-fm, or its own audio (classByTone). */
 	classed: boolean
+	/**
+	 * Classed by its own audio only (classByTone), no snapshot classed it analog-fm yet: a later
+	 * definite other class (`nonAnalog`) still discards it, and no tone evidence is published.
+	 */
+	toneOnly: boolean
+	/**
+	 * The owner's latest snapshot has a spectral class other than analog FM (`spectralDigital`):
+	 * the lowest slot priority, and a bounded time to be classed (WIDEBAND_DIGITAL_*_MS).
+	 */
+	digital: boolean
+	/**
+	 * Its owner's shadows expired unclassed in WIDEBAND_EXPIRED_STALE earlier visits: while
+	 * unclassed it gives its slot to any waiting candidate (evict).
+	 */
+	stale: boolean
+	/**
+	 * Tone evidence of its finalized files (CTCSS Hz → when its file settled), published once the
+	 * session ended and every file settled, only if no snapshot was unclean then (publishTones).
+	 * One entry per standard tone: at most CTCSS_HZ.length.
+	 */
+	readonly pendingTones: Map<number, number>
+	/** In-track frames heard over the session's files (voiced or not). */
+	inTrack: number
+	/** Snapshots of joined observations so far (its start, updates and closes). */
+	snapshots: number
+	/** Unclean ones among them. */
+	flagged: number
+	/** The session's first spur or IQ-image flag came after it was classed and voiced. */
+	flagLate: boolean
+	/**
+	 * The unclean detail its decisions carry, with the counts above (null while every snapshot was
+	 * clean): the first flag while the session is kept over it (lateFlagKept), the vetoing one
+	 * otherwise. A kept session gives no tone evidence.
+	 */
+	unclean: ScannerRecorderFlagDetail | null
 	/** Some file of this session sounded like voice. */
 	qualified: boolean
 	/** In-track frames the gate heard over the session's files. */
@@ -512,6 +720,7 @@ interface Session {
 interface ClassInfo {
 	readonly analogFm: boolean
 	readonly nonAnalog?: boolean | undefined
+	readonly spectralDigital?: boolean | undefined
 	readonly discoveryId: string | null
 }
 
@@ -521,24 +730,9 @@ function usableTrust(trust: TuningTrust): trust is Usable {
 	return trust === "commanded" || trust === "relay"
 }
 
+/** A track a recording may use: narrow, in the usable span, no image or spur, trusted tuning. */
 function cleanTrack(track: TrackSnapshot): boolean {
-	return (
-		Number.isFinite(track.obwHz) &&
-		track.obwHz <= WIDEBAND_MAX_OBW_HZ &&
-		!track.flags.truncated &&
-		!track.flags.edge &&
-		!track.flags.iqImage &&
-		!track.flags.spur &&
-		usableTrust(track.tuningTrust)
-	)
-}
-
-/** The closing snapshot bars the recording: encrypted, or no covering job records analog. */
-function barredAtClose(info: WidebandCloseInfo | undefined): boolean {
-	return (
-		info !== undefined &&
-		(info.encrypted === true || info.recordAllowed === false)
-	)
+	return uncleanFlag(track) === null
 }
 
 /** Why a snapshot bars a recording (encrypted, opted out, unclean track), or null when it does not. */
@@ -557,6 +751,62 @@ function bindingKey(binding: RecordingBinding): string {
 	return JSON.stringify(
 		Object.entries(binding).sort(([a], [b]) => (a < b ? -1 : 1)),
 	)
+}
+
+/** A visit of a channel: the engine stream and epoch (a retune or stream change is a new one). */
+function visitKey(at: {
+	readonly stream: number
+	readonly epoch: number
+}): string {
+	return `${at.stream}:${at.epoch}`
+}
+
+/**
+ * Whether any joined track of `s` is open, and the voiced one (voiceOnAir): the open span the
+ * last voiced meter window lies in, judged at most WIDEBAND_VOICE_ON_AIR_MS ago; of several, the
+ * one that started first. Null: voice is not on air. Reads only.
+ */
+function voicedSpan(s: Session): { open: boolean; voiced: string | null } {
+	let open = false
+	let voiced: string | null = null
+	let voicedStart = Infinity
+	const at = s.voiceAt
+	const window = (WIDEBAND_VOICE_ON_AIR_MS * s.fs) / 1000
+	for (const [id, a] of s.activity) {
+		if (!a.open) continue
+		open = true
+		if (
+			at !== null &&
+			at >= a.start &&
+			s.judgedTo - at <= window &&
+			a.start < voicedStart
+		) {
+			voiced = id
+			voicedStart = a.start
+		}
+	}
+	return { open, voiced }
+}
+
+/**
+ * An unclassed shadow that keeps others out for nothing (evict): stale (WIDEBAND_EXPIRED_STALE),
+ * or a spectrally digital one whose current file can no longer pass the tone test, so
+ * classByTone cannot class it in this file (a snapshot still could; the shadow yields only to a
+ * waiting candidate). Reads only.
+ */
+function hopeless(s: Session): boolean {
+	if (s.classed) return false
+	if (s.stale) return true
+	const evidence = s.file?.toneClass ?? null
+	return s.digital && evidence !== null && !evidence.toneCanHold()
+}
+
+/** Which snapshot of `s` an update of `observationId` is (ScannerRecorderFlagSource). */
+function raisedBy(
+	s: Session,
+	observationId: string,
+): ScannerRecorderFlagSource {
+	return observationId === s.owner ? "snapshot" : "joined"
 }
 
 /** Adds `id` to a bounded remembered set (the oldest entry goes past MAX_REMEMBERED). */
@@ -584,6 +834,29 @@ export class WidebandAnalogRecorder {
 	/** Operations not settled yet per source (a finishing file still holds an analog slot). */
 	private readonly unsettled = new Map<string, number>()
 	private readonly refused = new Set<string>()
+	/**
+	 * Observations whose spectrally digital shadow expired (WIDEBAND_DIGITAL_CLASS_MS), with the
+	 * visit (stream and epoch) it expired in: no other shadow starts for them in that visit
+	 * (bounded by MAX_REMEMBERED); an analog-fm snapshot still may, and so may a snapshot of a
+	 * later visit (a sweep back on the channel: the next over may be heard better).
+	 */
+	private readonly digitalExpired = new Map<
+		string,
+		{ visit: string; unclassed: number }
+	>()
+	/**
+	 * Tone-only sessions that yielded their slot (yieldToneOnly) while a file of theirs is still
+	 * being finished; each leaves when its last store operation settles (at most one per slot).
+	 */
+	private readonly yielding = new Set<Session>()
+	/**
+	 * Observations of a yielded tone-only session → the candidate it yielded to and the stream
+	 * sample its reservation ends at (WIDEBAND_YIELD_RESERVE_MS; bounded by MAX_REMEMBERED).
+	 */
+	private readonly yieldedTo = new Map<
+		string,
+		{ sourceId: string; candidate: string; until: number }
+	>()
 	/** Observations whose store admission failed once: the next failure refuses them. */
 	private readonly retried = new Set<string>()
 	private readonly recentEnds: {
@@ -671,24 +944,7 @@ export class WidebandAnalogRecorder {
 	 * track split), the one that started first, so the name changes only once that span closes.
 	 */
 	private voiceOnAir(s: Session): RecordingActivity {
-		let open = false
-		let voiced: string | null = null
-		let voicedStart = Infinity
-		const at = s.voiceAt
-		const window = (WIDEBAND_VOICE_ON_AIR_MS * s.fs) / 1000
-		for (const [id, a] of s.activity) {
-			if (!a.open) continue
-			open = true
-			if (
-				at !== null &&
-				at >= a.start &&
-				s.judgedTo - at <= window &&
-				a.start < voicedStart
-			) {
-				voiced = id
-				voicedStart = a.start
-			}
-		}
+		const { open, voiced } = voicedSpan(s)
 		if (!open) s.voiceTx = null
 		if (voiced === null) return open
 		s.voiceTx ??= voiced
@@ -758,7 +1014,18 @@ export class WidebandAnalogRecorder {
 		if (info !== undefined && info.discoveryId !== null)
 			this.decisions.bindDiscovery(observationId, info.discoveryId)
 		const id = this.byObservation.get(observationId)
-		if (id === undefined) return
+		if (id === undefined) {
+			// Classed analog-fm with no recording running (its first and only snapshot is the close,
+			// or every earlier one was refused): nothing can be recorded any more, but the
+			// observation still gets a decision about its analog-fm class.
+			if (info?.analogFm === true && !this.refused.has(observationId))
+				this.decisions.note("refused:close-only", {
+					sourceId: track.sourceId,
+					observationId,
+					discoveryId: info.discoveryId,
+				})
+			return
+		}
 		this.byObservation.delete(observationId)
 		const parked = this.parked.get(id)
 		if (parked) {
@@ -766,10 +1033,15 @@ export class WidebandAnalogRecorder {
 				parked,
 				observationId,
 				info,
-				barredSnapshot(
-					info?.encrypted === true,
-					info?.recordAllowed !== false,
-					cleanTrack(track),
+				this.snapshotBar(
+					parked,
+					track,
+					barredSnapshot(
+						info?.encrypted === true,
+						info?.recordAllowed !== false,
+						cleanTrack(track),
+					),
+					"close",
 				),
 				true,
 			)
@@ -784,18 +1056,21 @@ export class WidebandAnalogRecorder {
 			span.open = false
 		}
 		if (![...s.activity.values()].some(a => a.open)) s.voiceTx = null
-		if (!cleanTrack(track) || barredAtClose(info)) {
+		const bar = this.snapshotBar(
+			s,
+			track,
+			barredSnapshot(
+				info?.encrypted === true,
+				info?.recordAllowed !== false,
+				cleanTrack(track),
+			),
+			"close",
+		)
+		if (bar !== null) {
 			// Any contributing track turning edge, spur, unverified or encrypted (evidence that may
-			// arrive after its last update), or losing record.analog, discards the recording.
-			this.refuse(
-				s,
-				barredSnapshot(
-					info?.encrypted === true,
-					info?.recordAllowed !== false,
-					false,
-				) ?? "refused:unclean",
-				true,
-			)
+			// arrive after its last update), or losing record.analog, discards the recording; a
+			// late minority spur or image flag on a classed, voiced one does not (snapshotBar).
+			this.refuse(s, bar, true)
 			return
 		}
 		if (info !== undefined && !this.classify(s, observationId, info)) return
@@ -835,21 +1110,30 @@ export class WidebandAnalogRecorder {
 
 	/**
 	 * A snapshot's class for a joined observation: analog-fm classes the session (it stays
-	 * classed); a definite other class before that discards a shadow. False: discarded.
+	 * classed); a definite other class before that discards a shadow, and so does one after a
+	 * class by the session's own audio only (`toneOnly`): a verified decode or the channel tier
+	 * outranks it, so every file not written yet is discarded and one being written is cancelled.
+	 * False: discarded.
 	 */
 	private classify(
 		s: Session,
 		observationId: string,
 		info: ClassInfo,
 	): boolean {
-		if (observationId === s.owner && info.discoveryId !== null) {
-			s.discoveryId ??= info.discoveryId
-			this.decisions.bindDiscovery(s.owner, info.discoveryId)
+		if (observationId === s.owner) {
+			if (info.discoveryId !== null) {
+				s.discoveryId ??= info.discoveryId
+				this.decisions.bindDiscovery(s.owner, info.discoveryId)
+			}
+			s.digital = info.spectralDigital === true && !info.analogFm
 		}
-		if (info.analogFm && !s.classed) {
-			s.classed = true
-			this.decide(s, "classed")
-		} else if (!s.classed && info.nonAnalog === true) {
+		if (info.analogFm) {
+			s.toneOnly = false
+			if (!s.classed) {
+				s.classed = true
+				this.decide(s, "classed")
+			}
+		} else if ((!s.classed || s.toneOnly) && info.nonAnalog === true) {
 			this.refuse(s, "discarded:not-analog", true)
 			return false
 		}
@@ -872,18 +1156,31 @@ export class WidebandAnalogRecorder {
 		if (joinedId !== undefined) {
 			const p = this.parked.get(joinedId)
 			if (p) {
-				this.updateParked(p, observationId, input, barred, false)
+				this.updateParked(
+					p,
+					observationId,
+					input,
+					this.snapshotBar(p, track, barred, raisedBy(p, observationId)),
+					false,
+				)
 				return
 			}
 			const s = this.sessions.get(joinedId)
 			if (!s) return
 			s.lastActive = Math.max(s.lastActive, track.lastSample)
 			this.noteActivity(s, observationId, track)
-			if (barred !== null) this.refuse(s, barred, true)
+			const bar = this.snapshotBar(s, track, barred, raisedBy(s, observationId))
+			if (bar !== null) this.refuse(s, bar, true)
 			else this.classify(s, observationId, input)
 			return
 		}
 		if (this.refused.has(observationId)) return
+		// An expired digital shadow already has its decision: only an analog-fm class restarts it.
+		if (
+			!input.analogFm &&
+			this.digitalExpired.get(observationId)?.visit === visitKey(track)
+		)
+			return
 		const ref = {
 			sourceId: input.sourceId,
 			observationId,
@@ -918,11 +1215,12 @@ export class WidebandAnalogRecorder {
 				Math.abs(s.targetHz - track.centreHz) > WIDEBAND_JOIN_TOLERANCE_HZ
 			)
 				continue
-			if (barred !== null) {
+			const bar = this.snapshotBar(s, track, barred, "joined")
+			if (bar !== null) {
 				// Its audio would land in this file (or its hang): discard the recording, as when a
 				// joined track turns encrypted, opted out or unclean.
 				s.observations.add(observationId)
-				this.refuse(s, barred, true)
+				this.refuse(s, bar, true)
 				return
 			}
 			const events = s.seg.open(observationId, track.startSample)
@@ -935,7 +1233,22 @@ export class WidebandAnalogRecorder {
 			return
 		}
 		if (barred !== null) {
-			this.decisions.note(barred, ref)
+			const flag = barred === "refused:unclean" ? uncleanFlag(track) : null
+			this.decisions.note(
+				barred,
+				ref,
+				false,
+				flag === null
+					? null
+					: {
+							flag,
+							raisedBy: "snapshot",
+							atMs: 0,
+							flagged: 1,
+							snapshots: 1,
+							kept: false,
+						},
+			)
 			return
 		}
 		// A shadow needs a clean, narrow (cleanTrack), non-burst track where analog FM may be.
@@ -961,9 +1274,39 @@ export class WidebandAnalogRecorder {
 			epoch.sampleRateHz,
 			settings.cpuBudgetCores,
 		)
-		// Only a candidate classed analog-fm takes another session's slot.
-		if (input.analogFm && this.activeOn(input.sourceId) >= cap)
-			this.evict(input.sourceId)
+		// A yielded tone-only session's observations wait for the candidate it yielded to.
+		const yielded = this.yieldedTo.get(observationId)
+		if (yielded !== undefined) {
+			if (
+				yielded.sourceId === input.sourceId &&
+				!this.byObservation.has(yielded.candidate) &&
+				!this.refused.has(yielded.candidate) &&
+				engine.liveEdge() < yielded.until
+			) {
+				this.decisions.note("refused:slots", ref)
+				return
+			}
+			this.yieldedTo.delete(observationId)
+		}
+		// A candidate classed analog-fm takes an unclassed or tone-only session's slot; a shadow
+		// whose track has no spectral digital class takes only a digital shadow's slot (the lowest
+		// priority) or a tone-only session's past its window; a digital candidate only the latter.
+		if (this.activeOn(input.sourceId) >= cap)
+			this.evict(
+				input.sourceId,
+				input.analogFm
+					? "analog"
+					: input.spectralDigital === true
+						? "none"
+						: "shadow",
+				cap,
+				{
+					observationId,
+					until:
+						engine.liveEdge() +
+						Math.round((WIDEBAND_YIELD_RESERVE_MS * epoch.sampleRateHz) / 1000),
+				},
+			)
 		// Still full: not refused, the next snapshot tries again.
 		if (this.activeOn(input.sourceId) >= cap) {
 			this.decisions.note("refused:slots", ref)
@@ -1000,24 +1343,93 @@ export class WidebandAnalogRecorder {
 	}
 
 	/**
-	 * Every slot is held and the candidate is classed analog-fm: the oldest session without a
+	 * Every slot is held. A candidate classed analog-fm (`analog`): the oldest session without a
 	 * store operation that is either unclassed (voiced or not: a data signal can pass the voice
 	 * gate) or heard WIDEBAND_EVICT_MIN_HEARD_FRAMES of in-track audio without sounding like voice
 	 * gives its slot up (and is refused), so neither a steady carrier nor an unclassed signal
-	 * keeps a voice out.
+	 * keeps a voice out; an unclassed shadow of a spectrally digital track goes first, then a
+	 * session classed by its own audio only (`toneOnly`, store operation or not). A shadow
+	 * candidate whose track has no spectral digital class (`shadow`) takes only such a digital
+	 * shadow's slot, or a tone-only session's past its window. A digital candidate (`none`) takes
+	 * only a tone-only session's slot past its window, or an unclassed shadow's that can no longer
+	 * be classed by its audio (its current file fails ToneClassEvidence.toneCanHold) or is stale
+	 * (WIDEBAND_EXPIRED_STALE); otherwise it waits for a digital shadow's bounded window
+	 * (WIDEBAND_DIGITAL_CLASS_MS). Such a hopeless or stale shadow yields to any candidate before
+	 * anything else does, and ends as an expiry of this visit (expireDigital), not refused for
+	 * good. A tone-only session's window is WIDEBAND_TONE_ONLY_HOLD_FRAMES of in-track audio, or
+	 * WIDEBAND_TONE_ONLY_ON_AIR_FRAMES for the `cap` − 1 oldest tone-only sessions with voice on
+	 * air (shielded, toneOnlyYields); it yields keeping what it recorded (yieldToneOnly).
 	 */
-	private evict(sourceId: string): void {
-		for (const s of this.sessions.values())
+	private evict(
+		sourceId: string,
+		by: "analog" | "shadow" | "none",
+		cap: number,
+		candidate: { observationId: string; until: number },
+	): void {
+		// A yielded tone-only session's file is still finishing: its slot frees when it settles.
+		for (const y of this.yielding) if (y.sourceId === sourceId) return
+		let spent: Session | undefined
+		let digital: Session | undefined
+		let tone: Session | undefined
+		let other: Session | undefined
+		let shields = Math.max(0, cap - 1)
+		for (const s of this.sessions.values()) {
+			if (s.done || s.sourceId !== sourceId) continue
+			if (s.classed && s.toneOnly) {
+				// Oldest first (sessions keep their start order).
+				const onAir = voicedSpan(s).voiced !== null
+				const shielded = onAir && shields > 0
+				if (shielded) shields--
+				if (tone === undefined && toneOnlyYields(by, s.inTrack, shielded))
+					tone = s
+				continue
+			}
+			if (s.ops !== 0) continue
+			if (spent === undefined && hopeless(s)) spent = s
+			if (s.digital && !s.classed) {
+				digital ??= s
+				continue
+			}
 			if (
-				!s.done &&
-				s.sourceId === sourceId &&
-				s.ops === 0 &&
+				by === "analog" &&
+				other === undefined &&
 				(!s.classed ||
 					(!s.qualified && s.heard >= WIDEBAND_EVICT_MIN_HEARD_FRAMES))
-			) {
-				this.refuse(s, "evicted", true)
-				return
+			)
+				other = s
+		}
+		if (spent) this.expireDigital(spent, "evicted")
+		else if (by !== "none" && digital) this.refuse(digital, "evicted", true)
+		else if (tone) this.yieldToneOnly(tone, candidate)
+		else if (by === "analog" && other) this.refuse(other, "evicted", true)
+	}
+
+	/**
+	 * A tone-only session gives its slot up (`evicted`) to `candidate`: its current file ends here
+	 * and is kept (finishFile still checks the whole file). Its observations are not refused: once
+	 * the candidate started (or WIDEBAND_YIELD_RESERVE_MS passed) a later snapshot of theirs is a
+	 * new candidate like any other. The slot is free once that file's store operation settles; the
+	 * candidate's next snapshot takes it.
+	 */
+	private yieldToneOnly(
+		s: Session,
+		candidate: { observationId: string; until: number },
+	): void {
+		for (const id of s.observations) {
+			this.yieldedTo.delete(id)
+			this.yieldedTo.set(id, {
+				sourceId: s.sourceId,
+				candidate: candidate.observationId,
+				until: candidate.until,
+			})
+			if (this.yieldedTo.size > MAX_REMEMBERED) {
+				const oldest = this.yieldedTo.keys().next()
+				if (oldest.done !== true) this.yieldedTo.delete(oldest.value)
 			}
+		}
+		this.decide(s, "evicted")
+		this.endSession(s, "cancelled")
+		if (s.ops > 0) this.yielding.add(s)
 	}
 
 	private startSession(
@@ -1066,6 +1478,17 @@ export class WidebandAnalogRecorder {
 			owner: input.observationId,
 			discoveryId: input.discoveryId,
 			classed: input.analogFm,
+			toneOnly: false,
+			digital: input.spectralDigital === true && !input.analogFm,
+			stale:
+				(this.digitalExpired.get(input.observationId)?.unclassed ?? 0) >=
+				WIDEBAND_EXPIRED_STALE,
+			pendingTones: new Map(),
+			inTrack: 0,
+			snapshots: 1,
+			flagged: 0,
+			flagLate: false,
+			unclean: null,
 			qualified: false,
 			heard: 0,
 			meter: new VoiceOnAirMeter(),
@@ -1162,6 +1585,8 @@ export class WidebandAnalogRecorder {
 			gate: new VoiceActivityGate(),
 			ctcss: new CtcssBank(),
 			toneHz: null,
+			toneClass: new ToneClassEvidence(),
+			classTone: null,
 			planned: startSample,
 			startSample,
 			endSample: null,
@@ -1267,6 +1692,8 @@ export class WidebandAnalogRecorder {
 				// One at a time: the next waiting file begins when this session holds no slot.
 				while (s.ops === 0 && s.waiting.length > 0)
 					this.beginOp(s, s.waiting.shift()!)
+				if (s.ops === 0) this.yielding.delete(s)
+				this.publishTones(s)
 			})
 		this.settling.add(settled)
 		handle.ready.then(
@@ -1309,7 +1736,11 @@ export class WidebandAnalogRecorder {
 		s.activity.delete(observationId)
 	}
 
-	/** Per file: the tone heard over this file's own audio, once it is finalized. */
+	/**
+	 * Per file: the tone heard over this file's own audio, once it is finalized, when a snapshot
+	 * classed the session analog-fm (never for a class by its own audio only, `toneOnly`). It is
+	 * held on the session (pendingTones) and published by publishTones.
+	 */
 	private onSettled(s: Session, file: FileState, receipt: AnalogReceipt): void {
 		// A file this recorder cancelled already has its decision (refused, discarded).
 		this.endFile(
@@ -1319,13 +1750,35 @@ export class WidebandAnalogRecorder {
 		)
 		if (receipt.outcome !== "finalized" || this.deps.recordTone === undefined)
 			return
+		// A class of the recorder's own audio stays the recorder's: no discovery evidence from it.
+		if (s.toneOnly || s.unclean !== null) return
 		const hz = file.toneHz
 		if (hz === null) return
-		try {
-			this.deps.recordTone(s.owner, hz, this.deps.now())
-		} catch (err: unknown) {
-			this.warn(err)
-		}
+		s.pendingTones.delete(hz)
+		s.pendingTones.set(hz, this.deps.now())
+	}
+
+	/**
+	 * Publishes the session's held tone evidence once nothing of it can change any more: the
+	 * session ended (done, not parked) and every operation settled. A session that saw an unclean
+	 * snapshot at any time (kept over a late spur or image flag, snapshotBar, or vetoed) publishes
+	 * none, so a 120 s roll-over finalized before a later flag gives no proof either. Called after
+	 * each settle and each end.
+	 */
+	private publishTones(s: Session): void {
+		if (!s.done || s.ops > 0 || this.parked.has(s.id)) return
+		if (s.pendingTones.size === 0) return
+		const tones = [...s.pendingTones]
+		s.pendingTones.clear()
+		if (s.unclean !== null || s.toneOnly) return
+		const record = this.deps.recordTone
+		if (record === undefined) return
+		for (const [hz, at] of tones)
+			try {
+				record(s.owner, hz, at)
+			} catch (err: unknown) {
+				this.warn(err)
+			}
 	}
 
 	/**
@@ -1381,7 +1834,59 @@ export class WidebandAnalogRecorder {
 				discoveryId: s.discoveryId,
 			},
 			true,
+			s.unclean === null
+				? null
+				: { ...s.unclean, flagged: s.flagged, snapshots: s.snapshots },
 		)
+	}
+
+	/**
+	 * Counts one snapshot of a joined observation of `s` (raised by `via`) and returns what bars
+	 * the session: `barred` as given, or null when the only bar is an unclean track the session
+	 * keeps recording over (lateFlagKept). An unclean snapshot updates the session's detail.
+	 */
+	private snapshotBar(
+		s: Session,
+		track: TrackSnapshot,
+		barred: ScannerRecorderDecision | null,
+		via: ScannerRecorderFlagSource,
+	): ScannerRecorderDecision | null {
+		s.snapshots++
+		if (barred !== "refused:unclean") return barred
+		const flag = uncleanFlag(track)
+		if (flag === null) return barred
+		if (s.flagged === 0) s.flagLate = s.classed && s.qualified
+		s.flagged++
+		const kept = lateFlagKept(flag, s.flagLate, s.flagged, s.snapshots)
+		const atMs = Math.max(
+			0,
+			Math.round(((track.lastSample - s.onset) * 1000) / s.fs),
+		)
+		const first = s.unclean === null
+		// Counts are filled in at each decision (decide).
+		if (!kept || first)
+			s.unclean = {
+				flag,
+				raisedBy: via,
+				atMs,
+				flagged: s.flagged,
+				snapshots: s.snapshots,
+				kept,
+			}
+		if (!kept) return barred
+		if (first)
+			this.log.info(
+				{
+					observationId: s.owner,
+					uncleanFlag: flag,
+					uncleanRaisedBy: via,
+					uncleanAtMs: atMs,
+					uncleanFlagged: s.flagged,
+					uncleanSnapshots: s.snapshots,
+				},
+				"Analog recorder keeps a voiced session over a late flag",
+			)
+		return null
 	}
 
 	/** `file`'s terminal decision, noted once: a later failure or receipt of it notes nothing. */
@@ -1683,6 +2188,7 @@ export class WidebandAnalogRecorder {
 		if (file.gate.voiced) {
 			if (!s.qualified) this.decide(s, "voiced")
 			s.qualified = true
+			if (!s.classed) this.classByTone(s, file.toneClass?.result() ?? null)
 			this.admit(s, file)
 		} else if (
 			!s.qualified &&
@@ -1694,6 +2200,51 @@ export class WidebandAnalogRecorder {
 			this.refuse(s, "discarded:unvoiced", true)
 			return
 		}
+		if (s.done || s.classed || !s.digital || file.finishing) return
+		const expired = digitalExpiry(s.qualified, s.inTrack)
+		if (expired !== null) this.expireDigital(s, expired)
+	}
+
+	/**
+	 * A spectrally digital shadow not voiced or not classed in its window (or a hopeless or stale
+	 * one that yielded, `evicted`): discarded, and its observations start no other shadow in this
+	 * visit (`digitalExpired`, which also counts the visits that ended unclassed for
+	 * WIDEBAND_EXPIRED_STALE); a later snapshot classed analog-fm, or one of a later visit, still
+	 * starts a recording for them.
+	 */
+	private expireDigital(s: Session, code: ScannerRecorderDecision): void {
+		const ids = [...s.observations]
+		this.refuse(s, code, true)
+		const visit = visitKey(s)
+		const unclassed = code === "discarded:unvoiced" ? 0 : 1
+		for (const id of ids) {
+			this.refused.delete(id)
+			const before = this.digitalExpired.get(id)?.unclassed ?? 0
+			this.digitalExpired.delete(id)
+			this.digitalExpired.set(id, { visit, unclassed: before + unclassed })
+			if (this.digitalExpired.size > MAX_REMEMBERED) {
+				const oldest = this.digitalExpired.keys().next()
+				if (oldest.done !== true) this.digitalExpired.delete(oldest.value)
+			}
+		}
+	}
+
+	/**
+	 * A shadow's own audio classes it analog-fm, for this recorder only (`toneOnly`): voice (the
+	 * gate passed) and `toneHz`, the file's ToneClassEvidence verdict (speech over a stable
+	 * standard CTCSS tone at an encoder's level, tone-class.ts). The spectrum alone may read a
+	 * weak or low-deviation NFM over as a narrow digital class (gmsk-narrow, fsk4-6k25,
+	 * ook-burst) for its whole length. The class publishes no tone evidence (onSettled), and a
+	 * later `nonAnalog` still discards the session (classify, updateParked). Called on every
+	 * judged turn of a voiced, unclassed session (a 50-entry scan), so the class lands at most one
+	 * judging step after the evidence holds.
+	 */
+	private classByTone(s: Session, toneHz: number | null): void {
+		if (toneHz === null || s.classed || s.done) return
+		s.classed = true
+		s.toneOnly = true
+		this.decide(s, "classed")
+		for (const f of [...s.files]) this.admit(s, f)
 	}
 
 	/** CTCSS input: only frames inside the observed activity (no pre-roll, no hang noise). */
@@ -1705,11 +2256,15 @@ export class WidebandAnalogRecorder {
 	): void {
 		const bank = file.ctcss
 		if (bank === null) return
+		const evidence = file.toneClass
 		const perFrame = s.fs / ANALOG_AUDIO_RATE_HZ
 		for (let i = 0; i < tone.length; i++) {
 			const sample = file.startSample + (first + i) * perFrame
-			if (sample >= s.onset && sample <= s.lastActive)
-				bank.pushSample(tone[i]! / 32_768)
+			if (sample >= s.onset && sample <= s.lastActive) {
+				const t = tone[i]!
+				bank.pushSample(t / 32_768)
+				evidence?.tone(bank, t)
+			}
 		}
 	}
 
@@ -1757,6 +2312,20 @@ export class WidebandAnalogRecorder {
 			}
 			let j = i
 			while (j < pcm.length && mask[j] === 1) j++
+			s.inTrack += j - i
+			const evidence = file.toneClass
+			if (evidence !== null && (!s.classed || s.toneOnly)) {
+				// classByTone's speech test: the same in-track runs, a break resets its meter (also
+				// once classed by it: the whole file is checked again when it finishes).
+				const runFrom = from + i * perFrame
+				evidence.speechRun(
+					pcm,
+					i,
+					j,
+					runFrom - evidence.speechTo > perFrame / 2,
+				)
+				evidence.speechTo = from + j * perFrame
+			}
 			let k = i
 			if (!file.gate.voiced) {
 				k += file.gate.push(pcm, i, j)
@@ -1839,6 +2408,14 @@ export class WidebandAnalogRecorder {
 		)
 			file.cut = "source-lost"
 		file.toneHz = file.ctcss?.result() ?? null
+		file.classTone = file.toneClass?.result() ?? null
+		file.toneClass = null
+		if (s.toneOnly && file.classTone === null && !file.failed) {
+			// Classed by its audio only, and the whole file no longer holds the evidence (its
+			// prefix did): discarded, a file being written is cancelled (completeFinish).
+			this.endFile(s, file, "discarded:unclassed")
+			file.failed = true
+		}
 		file.ctcss = null
 		const next = s.pendingStart
 		s.pendingStart = null
@@ -1941,14 +2518,26 @@ export class WidebandAnalogRecorder {
 				s.discoveryId ??= info.discoveryId
 				this.decisions.bindDiscovery(s.owner, info.discoveryId)
 			}
-			if (info.analogFm && !s.classed) {
-				s.classed = true
-				this.decide(s, "classed")
-			} else if (!s.classed && info.nonAnalog === true) {
+			if (info.analogFm) {
+				s.toneOnly = false
+				if (!s.classed) {
+					s.classed = true
+					this.decide(s, "classed")
+				}
+			} else if ((!s.classed || s.toneOnly) && info.nonAnalog === true) {
 				this.dropParked(s, true, "discarded:not-analog")
 				return
 			}
 		}
+		// A voiced shadow parked before its audio was judged: a finished file's own evidence.
+		if (!s.classed && s.qualified)
+			for (const f of s.files)
+				if (f.classTone !== null) {
+					s.classed = true
+					s.toneOnly = true
+					this.decide(s, "classed")
+					break
+				}
 		// Promote only once every contributing observation closed: an open one's close may still
 		// carry an encrypted or opted-out veto (WIDEBAND_PARK_MS bounds the wait).
 		if (s.observations.size > 0) return
@@ -1978,6 +2567,7 @@ export class WidebandAnalogRecorder {
 		s.untap()
 		s.untap = () => undefined
 		s.parkedUntil = null
+		this.publishTones(s)
 	}
 
 	/** Discards a parked session's files (nothing of them was written). */
@@ -2136,6 +2726,7 @@ export class WidebandAnalogRecorder {
 			})
 			if (this.recentEnds.length > RECENT_ENDS) this.recentEnds.shift()
 		}
+		if (!keepMappings) this.publishTones(s)
 	}
 
 	/** At most one warning a minute; never the error's untrusted text beyond safe fields. */

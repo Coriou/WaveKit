@@ -122,6 +122,55 @@ describe("WidebandAnalogRecorder", () => {
 		expect(h.rec.owns("o")).toBe(false)
 	})
 
+	it("a spur flag discards the recording before the voice, and after it once it is on half of the snapshots", async () => {
+		const h = harness()
+		await h.feed(0.5, false)
+		const onset = h.engine.liveEdge()
+		await h.feed(2, true, () =>
+			h.rec.track(input("o", snapshot("o", onset, h.engine.liveEdge()))),
+		)
+		expect(h.ops).toHaveLength(1)
+		const spur = (last: number) => {
+			const t = snapshot("o", onset, last)
+			t.flags.spur = true
+			return t
+		}
+		// About 80 clean snapshots, then a spur on every one: discarded at the 81st or so.
+		await h.feed(3, true, () =>
+			h.rec.track(input("o", spur(h.engine.liveEdge()))),
+		)
+		expect(h.rec.owns("o")).toBe(false)
+		const end = h.engine.liveEdge()
+		await h.feed(0.6, false)
+		h.rec.closed("o", spur(end), null)
+		await h.feed(3.5, false)
+		expect(h.rec.diagnostics().recent.at(-1)!.unclean).toMatchObject({
+			flag: "spur",
+			raisedBy: "snapshot",
+			kept: false,
+		})
+		await h.rec.idle()
+		expect(h.ops).toHaveLength(1)
+		expect(h.ops[0]!.cancelled).toBe("cancelled")
+		expect(h.ops[0]!.outcome).toBe("aborted")
+		expect(h.rec.diagnostics().counts["refused:unclean"]).toBe(1)
+		expect(h.rec.diagnostics().counts.finalized).toBeUndefined()
+
+		const early = harness()
+		await early.feed(0.5, false)
+		const at = early.engine.liveEdge()
+		await early.feed(0.3, true, () =>
+			early.rec.track(input("o", snapshot("o", at, early.engine.liveEdge()))),
+		)
+		expect(early.rec.owns("o")).toBe(true)
+		const t = snapshot("o", at, early.engine.liveEdge())
+		t.flags.spur = true
+		early.rec.track(input("o", t))
+		expect(early.rec.owns("o")).toBe(false)
+		await early.feed(3, false)
+		expect(early.ops).toEqual([])
+	}, 60_000)
+
 	it("drops a refused admission and does not retry that observation", async () => {
 		const h = harness({ refuse: true })
 		await h.feed(0.5, false)
@@ -382,9 +431,16 @@ describe("WidebandAnalogRecorder review regressions", () => {
 						recordAllowed: false,
 					}),
 				),
+			// A late spur or IQ image on a minority of the snapshots is kept (flags tests); an edge or
+			// a truncation is not.
 			(h, at) => {
 				const t = snapshot("j", at, h.engine.liveEdge())
-				t.flags.spur = true
+				t.flags.edge = true
+				h.rec.closed("j", t, null)
+			},
+			(h, at) => {
+				const t = snapshot("j", at, h.engine.liveEdge())
+				t.flags.truncated = true
 				h.rec.closed("j", t, null)
 			},
 		]

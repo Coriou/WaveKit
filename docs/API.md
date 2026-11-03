@@ -3265,8 +3265,31 @@ snapshot refusals, observations refused before any recording started for them, k
 they never push a recording's decisions out of `recent`; same fields; absent from older cores,
 whose `recent` held both), `counts` (decisions per code since the core started, refusals
 included) and `logsSuppressed` (recording decision log lines left out by the 20-a-minute info
-log limit; snapshot refusals are logged at debug, outside it). The codes are explained in
-[SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings).
+log limit; snapshot refusals are logged at debug, outside it). The codes are listed in
+`SCANNER_RECORDER_DECISIONS` and explained in
+[SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings). Newer cores add the
+snapshot refusal `refused:close-only` (an observation classed `analog-fm` only by the snapshot
+that closed its track, while no recording ran for it), so a client should show an unknown code
+as it is rather than reject it. `discarded:unclassed` also ends a file of a recording classed
+only by its own audio when the whole file no longer holds that class at its end. `evicted`
+means the recording's slot went to another track: to a track classed `analog-fm`, or, for a
+recording classed only by its own audio past its hold, to any waiting track; such a recording
+keeps its file so far, which then ends with its own `finalized` or `discarded:unclassed`. A
+recording not classed yet also ends `evicted`, nothing kept, when a waiting track takes the slot
+of a shadow whose own audio can no longer class it or whose observation already ended
+unclassed in an earlier visit.
+
+Newer cores add `unclean` (`ScannerRecorderFlagDetail`) to the decisions of a recording one of
+whose snapshots was unclean, and to a `refused:unclean` snapshot refusal: `flag` (one of
+`SCANNER_RECORDER_FLAGS`: `spur`, `iq-image`, `edge`, `truncated`, `wide`, `tuning`),
+`raisedBy` (one of `SCANNER_RECORDER_FLAG_SOURCES`: `snapshot`, an update of the recording's
+own track; `joined`, another track merged into the recording; `close`, a closing snapshot),
+`atMs` (ms of signal from the recording's onset to that snapshot's end), `flagged` and
+`snapshots` (unclean snapshots and all snapshots of the recording so far) and `kept` (true: a
+late spur or IQ-image flag on fewer than half of the snapshots of a classed, voiced recording,
+whose files are written without tone evidence; false: the flag ended the recording). Absent on
+older cores and when every snapshot was clean. A recording's tone evidence is published once it
+has ended and all its files are written, and only when none of its snapshots was unclean.
 
 ```json
 "recorder": {
@@ -4143,8 +4166,8 @@ events. Each entry is a `DiscoveryTrialMemory`:
 
 The detail answer may also carry `recorder` (`ScannerRecorderDiscovery`): the analog voice
 recorder's decisions about this discovery's observations. `last` is the newest decision
-(`code`, `at` ISO 8601, `sourceId`, `observationId`, `discoveryId`) and `counts` the
-decisions per code. Codes are listed in `SCANNER_RECORDER_DECISIONS` and explained in
+(`code`, `at` ISO 8601, `sourceId`, `observationId`, `discoveryId`, and on newer cores
+`unclean` as in `recorder.recent`) and `counts` the decisions per code. Codes are listed in `SCANNER_RECORDER_DECISIONS` and explained in
 [SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings) (Recorder
 decisions). Absent when the recorder decided nothing about it (it remembers its last 256
 observations, and forgets at a restart); never on list pages or events.

@@ -760,9 +760,26 @@ export class OverloadHintTracker {
 	}
 }
 
-/** A class that is definitely not analog FM: a shadow recording of it is discarded. */
+/** A class other than analog FM (unknown and carrier may still be analog FM). */
 function nonAnalogFmClass(c: ScannerClass): boolean {
 	return c !== "analog-fm" && c !== "unknown" && c !== "carrier"
+}
+
+/**
+ * Definitely not analog FM for the wideband recorder (a shadow recording of it is discarded,
+ * none starts): another class backed by more than the spectrum, i.e. the channel tier's
+ * refinement or a verified decode of this observation. A spectral class alone is not: a weak or
+ * low-deviation NFM over can read as a narrow digital class (gmsk-narrow, fsk4-6k25) for its
+ * whole length, and its shadow may be classed by its own audio instead
+ * (speech over a stable standard CTCSS tone, WidebandAnalogRecorder.classByTone; a class of the
+ * recorder only). Such a shadow has the lowest slot priority and is discarded when it is not
+ * voiced within 3 s or not classed within 12 s of in-track audio (WIDEBAND_DIGITAL_*_MS).
+ */
+function definitelyNotAnalogFm(live: LiveObservation): boolean {
+	return (
+		nonAnalogFmClass(live.classification.class) &&
+		(live.classification.tier !== "spectral" || live.decoded)
+	)
 }
 
 export class ScannerService extends EventEmitter {
@@ -3461,7 +3478,7 @@ export class ScannerService extends EventEmitter {
 						: "track-ended",
 			{
 				analogFm: live.classification.class === "analog-fm",
-				nonAnalog: nonAnalogFmClass(live.classification.class),
+				nonAnalog: definitelyNotAnalogFm(live),
 				discoveryId: this.store.discoveryIdOf(live.observationId) ?? null,
 				// Encrypted evidence may arrive after the last update: vetoed here too.
 				encrypted: live.encrypted,
@@ -3788,7 +3805,11 @@ export class ScannerService extends EventEmitter {
 			sourceId: live.sourceId,
 			track,
 			analogFm,
-			nonAnalog: nonAnalogFmClass(live.classification.class),
+			nonAnalog: definitelyNotAnalogFm(live),
+			// A spectral class other than analog FM alone: its shadow has the lowest slot priority.
+			spectralDigital:
+				nonAnalogFmClass(live.classification.class) &&
+				!definitelyNotAnalogFm(live),
 			shadowAllowed:
 				!analogFm &&
 				!this.widebandAnalog.owns(live.observationId) &&

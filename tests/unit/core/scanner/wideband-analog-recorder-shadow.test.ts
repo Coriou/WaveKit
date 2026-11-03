@@ -41,10 +41,12 @@ async function lateClass(
 	seconds: number,
 	classAtS: number | null,
 	closeInfo = { analogFm: true },
+	each?: () => void,
 ): Promise<void> {
 	const onset = h.engine.liveEdge()
 	const end = onset + seconds * h.fs
 	await h.feed(seconds, true, () => {
+		each?.()
 		const edge = h.engine.liveEdge()
 		if (edge - onset < 0.1 * h.fs) return
 		const classed = classAtS !== null && edge - onset >= classAtS * h.fs
@@ -66,7 +68,8 @@ async function lateClass(
 describe("WidebandAnalogRecorder shadow sessions", () => {
 	it("keeps the whole transmission whenever its class arrives, even only at the close", async () => {
 		for (const classAtS of [0.2, 1.5, 2.8, null]) {
-			const h = harness()
+			// No CTCSS tone: only the snapshot (or the close) classes it, never its own audio.
+			const h = harness({ source: { ctcssHz: null } })
 			await h.feed(1, false)
 			await lateClass(h, 3, classAtS)
 			await h.feed(3.5, false)
@@ -76,27 +79,36 @@ describe("WidebandAnalogRecorder shadow sessions", () => {
 			expect(
 				Math.abs(h.ops[0]!.frames - wholeFrames(3000)),
 			).toBeLessThanOrEqual(8 * 30)
+			expect(
+				h.rec
+					.diagnostics()
+					.recent.map(d => d.code)
+					.sort(),
+			).toEqual(["classed", "finalized", "shadow", "voiced"])
 		}
 	}, 60_000)
 
 	it("holds a shadow in memory only: no store operation before the class", async () => {
-		const h = harness()
+		// Voiced, with a discovery and no tone: only the missing class keeps it off the store.
+		const h = harness({ source: { ctcssHz: null } })
 		await h.feed(1, false)
 		const onset = h.engine.liveEdge()
 		await h.feed(2.5, true, () =>
 			h.rec.track(
-				input("o", snapshot("o", onset, h.engine.liveEdge()), {
-					...SHADOW,
-					discoveryId: null,
-				}),
+				input("o", snapshot("o", onset, h.engine.liveEdge()), SHADOW),
 			),
 		)
 		expect(h.rec.owns("o")).toBe(true)
+		expect(h.rec.diagnostics().recent.map(d => d.code)).toEqual([
+			"shadow",
+			"voiced",
+		])
 		expect(h.ops).toEqual([])
 	}, 60_000)
 
 	it("never writes a shadow closed without the class, nor one classed as something else", async () => {
-		const never = harness()
+		// A voice with no CTCSS tone: its own audio never classes it (see the tone test below).
+		const never = harness({ source: { ctcssHz: null } })
 		await never.feed(1, false)
 		await lateClass(never, 3, null, { analogFm: false })
 		await never.feed(3.5, false)
@@ -104,7 +116,7 @@ describe("WidebandAnalogRecorder shadow sessions", () => {
 		expect(never.rec.owns("o")).toBe(false)
 		expect(never.engine.tapCount).toBe(0)
 
-		const other = harness()
+		const other = harness({ source: { ctcssHz: null } })
 		await other.feed(1, false)
 		const onset = other.engine.liveEdge()
 		await other.feed(2, true, () => {
@@ -122,6 +134,47 @@ describe("WidebandAnalogRecorder shadow sessions", () => {
 		expect(other.rec.owns("o")).toBe(false)
 		await other.feed(3.5, false)
 		expect(other.ops).toEqual([])
+	}, 60_000)
+
+	it("classes a voiced shadow over a standard CTCSS tone by its own audio when no snapshot says analog-fm", async () => {
+		// The spectrum never says analog-fm, the close neither (a weak over read as a narrow
+		// digital class): speech over a stable tone classes it, and the whole transmission is
+		// kept. The class is the recorder's only: no tone evidence reaches the discovery.
+		const h = harness({ source: { syllables: true } })
+		await h.feed(1, false)
+		let midOver: unknown = null
+		const start = h.engine.liveEdge()
+		const onset = () => start
+		await lateClass(h, 5, null, { analogFm: false }, () => {
+			// Mid-over the session answers voice to the sweep's hold hook, like a spectral class.
+			if (h.engine.liveEdge() - onset() >= 4.5 * h.fs && midOver === null)
+				midOver = h.rec.recordingActive("rtl", { stream: 1, epoch: 1 })
+		})
+		expect(midOver).toEqual({ voice: "o" })
+		await h.feed(3.5, false)
+		expect(h.ops).toHaveLength(1)
+		expect(h.ops[0]!.outcome).toBe("finalized")
+		expect(h.ops[0]!.cut).toBe("completed")
+		expect(Math.abs(h.ops[0]!.frames - wholeFrames(5000))).toBeLessThanOrEqual(
+			8 * 30,
+		)
+		expect(h.rec.diagnostics().recent.map(d => d.code)).toEqual([
+			"shadow",
+			"voiced",
+			"classed",
+			"finalized",
+		])
+		expect(h.tones).toEqual([])
+		// The tone alone (a CTCSS-only carrier, never voiced) does not class it.
+		const tone = harness({ source: { voice: false } })
+		await tone.feed(1, false)
+		await lateClass(tone, 3, null, { analogFm: false })
+		await tone.feed(3.5, false)
+		expect(tone.ops).toEqual([])
+		expect(tone.rec.diagnostics().recent.map(d => d.code)).toEqual([
+			"shadow",
+			"discarded:unclassed",
+		])
 	}, 60_000)
 
 	it("starts no shadow outside an analog-FM range, for a burst track or a non-analog class", () => {
@@ -314,7 +367,8 @@ describe("WidebandAnalogRecorder admission retries and the CPU budget", () => {
 
 describe("WidebandAnalogRecorder sweep-hold hook", () => {
 	it("recordingActive answers voice (named by the voiced track) only while voice is on air in a classed, voiced session on that stream and epoch", async () => {
-		const h = harness()
+		// No CTCSS tone: the shadow stays unclassed until a snapshot classes it.
+		const h = harness({ source: { ctcssHz: null } })
 		await h.feed(1, false)
 		const onset = h.engine.liveEdge()
 		let classed = false

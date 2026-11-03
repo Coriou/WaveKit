@@ -94,13 +94,13 @@ describe("WidebandAnalogRecorder shutdown and discards", () => {
 		expect(h.rec.owns("long")).toBe(false)
 	}, 120_000)
 
-	it("a new spur or IQ-image track on the recording channel discards the recording", async () => {
+	it("a new spur or IQ-image track on the channel before its voice discards the recording", async () => {
 		for (const flag of ["spur", "iqImage"] as const) {
 			const h = harness()
 			await h.feed(0.5, false)
 			const onset = h.engine.liveEdge()
-			// Long enough to be voiced and admitted.
-			await h.feed(2, true, () =>
+			// 200 ms: classed by its snapshots, not voiced yet (a gate window is 500 ms).
+			await h.feed(0.2, true, () =>
 				h.rec.track(input("o", snapshot("o", onset, h.engine.liveEdge()))),
 			)
 			const at = h.engine.liveEdge()
@@ -110,9 +110,16 @@ describe("WidebandAnalogRecorder shutdown and discards", () => {
 			t.flags[flag] = true
 			h.rec.track(input("x", t))
 			await h.pump()
-			expect(h.ops).toHaveLength(1)
-			expect(h.ops[0]!.cancelled).toBe("cancelled")
+			expect(h.ops).toHaveLength(0)
 			expect(h.rec.owns("o")).toBe(false)
+			const last = h.rec.diagnostics().recent.at(-1)!
+			expect(last.code).toBe("refused:unclean")
+			expect(last.unclean).toMatchObject({
+				flag: flag === "spur" ? "spur" : "iq-image",
+				raisedBy: "joined",
+				flagged: 1,
+				kept: false,
+			})
 		}
 		// Off the channel (past the 5 kHz join tolerance) an unclean track changes nothing.
 		const h = harness()
@@ -257,8 +264,13 @@ describe("WidebandAnalogRecorder bounds", () => {
 				extra: {},
 				ops: 1,
 			},
-			// A shadow whose class never arrives: held in memory only, then dropped.
-			{ opts: {}, extra: { analogFm: false, shadowAllowed: true }, ops: 0 },
+			// A shadow whose class never arrives (no CTCSS tone, so not by its own audio either):
+			// held in memory only, then dropped.
+			{
+				opts: { source: { ctcssHz: null } },
+				extra: { analogFm: false, shadowAllowed: true },
+				ops: 0,
+			},
 		]
 		for (const c of cases) {
 			const h = harness({ fs: LOW_FS, offset: LOW_OFFSET, ...c.opts })

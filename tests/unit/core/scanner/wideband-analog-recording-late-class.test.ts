@@ -3,7 +3,8 @@
  * pipeline: an in-process fake source (no network), the inline spectrum engine, the real
  * evidence store and WAV files on disk. The class reaches the recorder at controlled times
  * through a wrapper around the service's own classification (a test seam; the classifier is
- * unchanged).
+ * unchanged). A snapshot not classed analog-fm takes `otherClass` (default "unknown"); a narrow
+ * digital class there is what the spectrum reads for a weak or low-deviation NFM over.
  */
 import { readFile, readdir, rm } from "node:fs/promises"
 import { join } from "node:path"
@@ -11,7 +12,10 @@ import pino from "pino"
 import { afterEach, describe, expect, it } from "vitest"
 import { FS, serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 import type { WidebandAnalogRecorder } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
-import type { Classification } from "../../../../src/core/scanner/types.js"
+import type {
+	Classification,
+	ScannerClass,
+} from "../../../../src/core/scanner/types.js"
 import type {
 	PipelineEvent,
 	TrackSnapshot,
@@ -37,7 +41,7 @@ interface Seams {
 	onTrack(sourceId: string, ev: TrackEvent, synthetic?: boolean): void
 	widebandAnalog: WidebandAnalogRecorder
 	evidence: { beginAnalog(input: unknown): unknown }
-	live: Map<string, { encrypted: boolean }>
+	live: Map<string, { encrypted: boolean; decoded: boolean }>
 }
 
 /**
@@ -47,8 +51,18 @@ interface Seams {
 function harness(
 	analogFm: (ageS: number, closing: boolean) => boolean,
 	encryptedAtClose = false,
+	opts: {
+		otherClass?: (ageS: number) => ScannerClass
+		/** Snapshots of a track younger than this carry the `edge` flag (unclean). */
+		uncleanUntilS?: number
+		/** Every observation has a verified decode (its class is then definite). */
+		decoded?: boolean
+		/** Every observation of a track at least this old has a verified decode. */
+		decodedFromS?: number
+	} = {},
 ) {
 	const h = serviceHarness({})
+	const otherClass = opts.otherClass ?? (() => "unknown")
 	cleanups.push(async () => {
 		await h.service.stop()
 		await rm(h.dir, { recursive: true, force: true })
@@ -59,6 +73,14 @@ function harness(
 	let closing = false
 	svc.onTrack = (sourceId, ev, synthetic) => {
 		closing = ev.kind === "track-close"
+		const ageS = (ev.track.lastSample - ev.track.startSample) / FS
+		if (opts.uncleanUntilS !== undefined && ageS < opts.uncleanUntilS)
+			ev.track.flags.edge = true
+		if (
+			opts.decoded === true ||
+			(opts.decodedFromS !== undefined && ageS >= opts.decodedFromS)
+		)
+			for (const live of svc.live.values()) live.decoded = true
 		// Encrypted evidence that arrived after the track's last update.
 		if (closing && encryptedAtClose)
 			for (const live of svc.live.values()) live.encrypted = true
@@ -71,7 +93,17 @@ function harness(
 	svc.classify = (track, sourceId) => {
 		const c = classify(track, sourceId)
 		const age = (track.lastSample - track.startSample) / FS
-		return { ...c, class: analogFm(age, closing) ? "analog-fm" : "unknown" }
+		return {
+			...c,
+			class: analogFm(age, closing) ? "analog-fm" : otherClass(age),
+			tier: "spectral",
+		}
+	}
+	let discoveryId: string | null = null
+	const track = svc.widebandAnalog.track.bind(svc.widebandAnalog)
+	svc.widebandAnalog.track = input => {
+		discoveryId = input.discoveryId ?? discoveryId
+		track(input)
 	}
 	let begun = 0
 	const begin = svc.evidence.beginAnalog.bind(svc.evidence)
@@ -79,7 +111,13 @@ function harness(
 		begun++
 		return begin(input)
 	}
-	return { ...h, begun: () => begun, recorder: svc.widebandAnalog }
+	return {
+		...h,
+		begun: () => begun,
+		recorder: svc.widebandAnalog,
+		/** The last discovery the recorder was given for the voice's track. */
+		discoveryId: (): string | null => discoveryId,
+	}
 }
 
 type H = ReturnType<typeof harness>
@@ -123,9 +161,12 @@ async function wavs(dir: string): Promise<string[]> {
 }
 
 /** One 28 s voice transmission after 1 s of noise (inside the startup settle window tracks are unverified). */
-async function voiceTx(h: H): Promise<void> {
+async function voiceTx(
+	h: H,
+	source: { ctcssHz?: number | null; syllables?: boolean } = {},
+): Promise<void> {
 	const voice = {
-		src: new NfmSource({ fs: FS, offsetHz: VOICE_HZ, seed: 3 }),
+		src: new NfmSource({ fs: FS, offsetHz: VOICE_HZ, seed: 3, ...source }),
 		on: false,
 	}
 	await feed(h, [voice], 1)
@@ -143,7 +184,8 @@ describe("wideband analog recording with a late class", () => {
 				classAtS === null ? closing : age >= classAtS,
 			)
 			await h.service.start()
-			await voiceTx(h)
+			// No CTCSS tone: only the snapshot (or the close) classes it, never its own audio.
+			await voiceTx(h, { ctcssHz: null })
 			const files = await wavs(h.dir)
 			expect(files).toHaveLength(1)
 			const ms = wavDurationMs(await readFile(files[0]!))
@@ -168,10 +210,16 @@ describe("wideband analog recording with a late class", () => {
 	}
 
 	it("a voiced track first classed at a close that is encrypted yields no WAV and no store operation", async () => {
+		// No CTCSS tone, so nothing classes it before the close.
 		const h = harness((_age, closing) => closing, true)
 		await h.service.start()
 		const voice = {
-			src: new NfmSource({ fs: FS, offsetHz: VOICE_HZ, seed: 3 }),
+			src: new NfmSource({
+				fs: FS,
+				offsetHz: VOICE_HZ,
+				seed: 3,
+				ctcssHz: null,
+			}),
 			on: false,
 		}
 		await feed(h, [voice], 1)
@@ -184,10 +232,34 @@ describe("wideband analog recording with a late class", () => {
 		expect(h.begun()).toBe(0)
 	}, 300_000)
 
-	it("a track never classed analog-fm yields no WAV and no store operation", async () => {
+	it("a voice over a CTCSS tone classed by its own audio is still vetoed by an encrypted close: no WAV", async () => {
+		const h = harness(() => false, true, { otherClass: () => "gmsk-narrow" })
+		await h.service.start()
+		const voice = {
+			src: new NfmSource({
+				fs: FS,
+				offsetHz: VOICE_HZ,
+				seed: 3,
+				syllables: true,
+			}),
+			on: false,
+		}
+		await feed(h, [voice], 1)
+		voice.on = true
+		await feed(h, [voice], 5)
+		voice.on = false
+		await feed(h, [voice], 3.5)
+		await h.recorder.idle()
+		expect(await wavs(h.dir)).toEqual([])
+		const codes = (h.service.status().recorder?.recent ?? []).map(d => d.code)
+		expect(codes).toContain("classed")
+		expect(codes).not.toContain("finalized")
+	}, 300_000)
+
+	it("a track never classed analog-fm, with no CTCSS tone, yields no WAV and no store operation", async () => {
 		const h = harness(() => false)
 		await h.service.start()
-		await voiceTx(h)
+		await voiceTx(h, { ctcssHz: null })
 		expect(await wavs(h.dir)).toEqual([])
 		expect(h.begun()).toBe(0)
 		const staged = await readdir(join(h.dir, ".analog-operations")).catch(
@@ -234,5 +306,86 @@ describe("wideband analog recording with a late class", () => {
 		)
 		// The one file is the voice's (carriers were never admitted).
 		expect(h.begun()).toBe(1)
+	}, 300_000)
+})
+
+/**
+ * The spectrum can read a weak or low-deviation NFM over as a narrow digital class for its whole
+ * length (gmsk-narrow, fsk4-6k25, burst-like ook-burst first). Such a
+ * class alone never bars the recorder: the shadow is classed by speech over a stable CTCSS tone
+ * in its own audio (a class of the recorder only), so the over records whole. (The sweep hold for such a session is the recorder's
+ * recordingActive answer, tested in wideband-analog-recorder-shadow.test.ts.)
+ */
+describe("wideband analog recording when the spectrum reads the voice as digital", () => {
+	const digital = (age: number): ScannerClass =>
+		age < 1 ? "ook-burst" : age < 2 ? "fsk4-6k25" : "gmsk-narrow"
+
+	it("passive: a 28 s voice over CTCSS, burst-like and unclean first, then gmsk-narrow, yields one WAV of at least 25 s with its decisions on its discovery", async () => {
+		const h = harness(() => false, false, {
+			otherClass: digital,
+			uncleanUntilS: 0.5,
+		})
+		await h.service.start()
+		await voiceTx(h, { syllables: true })
+		const files = await wavs(h.dir)
+		expect(files).toHaveLength(1)
+		const ms = wavDurationMs(await readFile(files[0]!))
+		expect(ms).toBeGreaterThanOrEqual(25_000)
+		expect(Math.abs(ms - 30_300)).toBeLessThanOrEqual(300)
+		const discoveryId = h.discoveryId()
+		expect(discoveryId).not.toBeNull()
+		const decisions = h.service.discoveryRecorder(discoveryId!)
+		expect(decisions?.last.code).toBe("finalized")
+		expect(decisions?.counts).toMatchObject({
+			"refused:unclean": 1,
+			shadow: 1,
+			voiced: 1,
+			classed: 1,
+			finalized: 1,
+		})
+	}, 300_000)
+
+	it("invariant: the same over with no CTCSS tone records nothing, but its decisions are still bound to its discovery", async () => {
+		const h = harness(() => false, false, { otherClass: digital })
+		await h.service.start()
+		await voiceTx(h, { ctcssHz: null, syllables: true })
+		expect(await wavs(h.dir)).toEqual([])
+		expect(h.begun()).toBe(0)
+		const discoveryId = h.discoveryId()
+		expect(discoveryId).not.toBeNull()
+		const decisions = h.service.discoveryRecorder(discoveryId!)
+		expect(decisions?.last.code).toBe("discarded:unclassed")
+	}, 300_000)
+
+	it("a verified decode makes a digital class definite: its shadow is discarded, no WAV, the decision on its discovery", async () => {
+		// The decode lands after the first snapshot (that one starts a shadow).
+		const h = harness(() => false, false, {
+			otherClass: () => "gmsk-narrow",
+			decoded: true,
+		})
+		await h.service.start()
+		await voiceTx(h, { syllables: true })
+		expect(await wavs(h.dir)).toEqual([])
+		expect(h.begun()).toBe(0)
+		const discoveryId = h.discoveryId()
+		expect(discoveryId).not.toBeNull()
+		const decisions = h.service.discoveryRecorder(discoveryId!)
+		expect(decisions?.last.code).toBe("discarded:not-analog")
+	}, 300_000)
+
+	it("a verified decode after the voice classed itself by its tone still discards it: no WAV", async () => {
+		const h = harness(() => false, false, {
+			otherClass: () => "gmsk-narrow",
+			decodedFromS: 8,
+		})
+		await h.service.start()
+		await voiceTx(h, { syllables: true })
+		expect(await wavs(h.dir)).toEqual([])
+		const discoveryId = h.discoveryId()
+		expect(discoveryId).not.toBeNull()
+		const decisions = h.service.discoveryRecorder(discoveryId!)
+		expect(decisions?.counts).toMatchObject({ classed: 1 })
+		expect(decisions?.counts.finalized).toBeUndefined()
+		expect(decisions?.last.code).toBe("discarded:not-analog")
 	}, 300_000)
 })
