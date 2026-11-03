@@ -39,9 +39,17 @@ export class FakeEngine implements WidebandEngineView {
 		tuningTrust: "commanded" as "commanded" | "relay" | "unverified",
 	}
 	private readonly ring: IqRing
-	constructor(fs = FS) {
+	/** `ringSeconds`: the real ring capacity (ringSeconds × fs), as the engine sizes it. */
+	constructor(fs = FS, ringSeconds = 3) {
 		this.epoch.sampleRateHz = fs
-		this.ring = new IqRing({ bytesPerSample: 2, capacitySamples: 3 * fs })
+		this.ring = new IqRing({
+			bytesPerSample: 2,
+			capacitySamples: Math.round(ringSeconds * fs),
+		})
+	}
+	/** Oldest sample the ring still holds (test inspection only; not in WidebandEngineView). */
+	get oldestSample(): number {
+		return this.ring.oldestSample
 	}
 	private readonly taps = new Set<(s: number, b: Uint8Array) => void>()
 	currentEpoch() {
@@ -183,10 +191,21 @@ export function harness(
 		readyHold?: Promise<void>
 		source?: Partial<ConstructorParameters<typeof NfmSource>[0]>
 		reserveCores?: (cores: number) => (() => void) | null
+		/** The recorder's per-turn budget clock (milliseconds); default performance.now. */
+		clock?: () => number
+		/**
+		 * settings().ringSeconds and the FakeEngine's real ring capacity; default absent (the
+		 * recorder assumes 3 s, the FakeEngine's default ring).
+		 */
+		ringSeconds?: number
+		/** Wraps the fake store's beginAnalog (failure injection: a throw, a rejected push). */
+		beginWrap?: (
+			begin: (input: AnalogInput) => AnalogHandle,
+		) => (input: AnalogInput) => AnalogHandle
 	} = {},
 ) {
 	const fs = opts.fs ?? FS
-	const engine = new FakeEngine(fs)
+	const engine = new FakeEngine(fs, opts.ringSeconds ?? 3)
 	let rec!: WidebandAnalogRecorder
 	const { ops, begin } = fakeOps(b => rec.bindingLive(b), opts)
 	const queue: (() => void)[] = []
@@ -199,13 +218,17 @@ export function harness(
 			preRollMs: 300,
 			hangMs: 2000,
 			cpuBudgetCores: opts.budget ?? 1,
+			...(opts.ringSeconds !== undefined
+				? { ringSeconds: opts.ringSeconds }
+				: {}),
 		}),
-		beginAnalog: begin,
+		beginAnalog: opts.beginWrap ? opts.beginWrap(begin) : begin,
 		recordTone: (observationId, hz) => tones.push({ observationId, hz }),
 		...(opts.reserveCores ? { reserveCores: opts.reserveCores } : {}),
 		logger,
 		now: () => 1_700_000_000_000,
 		schedule: run => queue.push(run),
+		...(opts.clock ? { clock: opts.clock } : {}),
 	})
 	const origWarn = (rec as unknown as { warn(e: unknown): void }).warn.bind(rec)
 	;(rec as unknown as { warn(e: unknown): void }).warn = e => {
@@ -223,6 +246,14 @@ export function harness(
 			await microtasks(8)
 		}
 	}
+	/**
+	 * One event-loop turn: runs only the drain tasks queued before it (one per session), like
+	 * setImmediate callbacks queued during a check phase run on the next turn.
+	 */
+	const turn = async (): Promise<void> => {
+		for (const run of queue.splice(0)) run()
+		await microtasks(8)
+	}
 	/** Feeds seconds of IQ in 25 ms chunks, running the recorder in between. */
 	const feed = async (
 		seconds: number,
@@ -236,7 +267,7 @@ export function harness(
 			await pump()
 		}
 	}
-	return { engine, ops, begin, rec, tones, warnings, feed, pump, src, fs }
+	return { engine, ops, begin, rec, tones, warnings, feed, pump, turn, src, fs }
 }
 
 export function snapshot(

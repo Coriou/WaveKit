@@ -3254,6 +3254,56 @@ is unknown, and from older cores.
 `passive.disabledReason` explains a passive job switched off by the cost rule
 (for example `engine-cpu 31 % of a core`).
 
+`recorder` (`ScannerRecorderStatus`, absent from older cores) shows the analog voice
+recorder: `sessions` (one per channel being demodulated: `sourceId`, `observationId`,
+`discoveryId` or null, `state` `shadow`/`classed`/`voiced`, `writing` when a WAV is open,
+`backlogMs` how far the demodulator is behind the air), `parked` (retune-ended recordings
+waiting for their close), `recent` (the last 64 decisions about recordings: a start, class,
+voice, eviction, final decision, or the refusal or discard that ended one; newest last, each
+`code`, `at`, `sourceId`, `observationId`, `discoveryId`), `recentRefusals` (the last 32
+snapshot refusals, observations refused before any recording started for them, kept apart so
+they never push a recording's decisions out of `recent`; same fields; absent from older cores,
+whose `recent` held both), `counts` (decisions per code since the core started, refusals
+included) and `logsSuppressed` (recording decision log lines left out by the 20-a-minute info
+log limit; snapshot refusals are logged at debug, outside it). The codes are explained in
+[SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings).
+
+```json
+"recorder": {
+	"sessions": [
+		{
+			"sourceId": "rtl",
+			"observationId": "01m6g3…",
+			"discoveryId": "d_01m6g3…",
+			"state": "voiced",
+			"writing": true,
+			"backlogMs": 40
+		}
+	],
+	"parked": 0,
+	"recent": [
+		{
+			"code": "started",
+			"at": "2026-01-15T12:00:05.600Z",
+			"sourceId": "rtl",
+			"observationId": "01m6g3…",
+			"discoveryId": "d_01m6g3…"
+		}
+	],
+	"recentRefusals": [
+		{
+			"code": "refused:cpu",
+			"at": "2026-01-15T12:00:05.300Z",
+			"sourceId": "rtl",
+			"observationId": "01m6g3…",
+			"discoveryId": "d_01m6g3…"
+		}
+	],
+	"counts": { "refused:cpu": 1, "started": 1, "voiced": 1 },
+	"logsSuppressed": 0
+}
+```
+
 **Passive cost rule.** The limit is `scanner.passive.maxEngineUtilization`
 (config only, 0.05 to 1; absent means 0.25 of one core, the earlier fixed value;
 not a settings PATCH key). The first check runs 60 s after the source's spectrum
@@ -4090,6 +4140,27 @@ events. Each entry is a `DiscoveryTrialMemory`:
 - `lastOutcome`: `decoded`, `heard`, `no-sync`, `crc-errors`, `timeout`, `data-like` or
   `carrier-only`;
 - `lastAt` and, when it ever succeeded, `lastDecodedAt` (ISO 8601).
+
+The detail answer may also carry `recorder` (`ScannerRecorderDiscovery`): the analog voice
+recorder's decisions about this discovery's observations. `last` is the newest decision
+(`code`, `at` ISO 8601, `sourceId`, `observationId`, `discoveryId`) and `counts` the
+decisions per code. Codes are listed in `SCANNER_RECORDER_DECISIONS` and explained in
+[SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings) (Recorder
+decisions). Absent when the recorder decided nothing about it (it remembers its last 256
+observations, and forgets at a restart); never on list pages or events.
+
+```json
+"recorder": {
+	"last": {
+		"code": "finalized",
+		"at": "2026-01-15T12:00:35.200Z",
+		"sourceId": "rtl",
+		"observationId": "01m6g3…",
+		"discoveryId": "d_01m6g3…"
+	},
+	"counts": { "started": 1, "voiced": 1, "finalized": 1 }
+}
+```
 
 #### GET /api/scanner/discoveries/:id/observations
 

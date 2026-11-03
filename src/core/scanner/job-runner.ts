@@ -39,7 +39,11 @@ import type {
 } from "./scanner-redesign-contract.js"
 import { ScannerProtocolSchema } from "./store/schemas.js"
 import type { KnownProtocolMemory } from "./known-protocol-contract.js"
-import { SweepScheduler, type SchedulerAction } from "./scheduler.js"
+import {
+	SweepScheduler,
+	type RecordingActivity,
+	type SchedulerAction,
+} from "./scheduler.js"
 import type {
 	EngineEpoch,
 	SpectrumEngine,
@@ -324,12 +328,14 @@ export interface JobRunnerDeps {
 	 * engine's current stream and epoch, while the job's own hop epoch runs): a sweep then keeps
 	 * the hop instead of leaving it, within its bounds (scheduler `recordingActive`). Called on the
 	 * scheduler's re-checks (every 250 ms while a hop is kept). Absent: a sweep never waits for a
-	 * recording (behaviour as before).
+	 * recording (behaviour as before). VoiceOnAir: voice is on air in the recorded transmission now,
+	 * and the hop may be kept until that transmission ends, up to `hold.maxHoldMs` (scheduler
+	 * RecordingActivity, "record whole voice").
 	 */
 	recordingActive?: (
 		sourceId: string,
 		epoch: { stream: number; epoch: number },
-	) => boolean
+	) => RecordingActivity
 	/** Impact of this job's source excluding the job itself (`arbiter.impact(sourceId, spec, record.id)`). */
 	impact: () => Impact
 	/** H3: a probe request for this observation was deferred. */
@@ -1470,7 +1476,7 @@ export class JobRunner implements JobDriver {
 	 * pending epoch is not this hop's window); then the dependency's answer for the engine's
 	 * current stream and epoch. A throwing dependency counts as no recording.
 	 */
-	private recordingActive(): boolean {
+	private recordingActive(): RecordingActivity {
 		const read = this.deps.recordingActive
 		if (read === undefined || !this.epochOwn) return false
 		const epoch = this.deps.engine(this.sourceId)?.currentEpoch()

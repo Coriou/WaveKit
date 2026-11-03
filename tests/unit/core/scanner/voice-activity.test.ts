@@ -12,6 +12,7 @@ import {
 	VOICE_MIN_RMS,
 	VOICE_WINDOW_BLOCKS,
 	VoiceActivityGate,
+	VoiceOnAirMeter,
 } from "../../../../src/core/scanner/channel/voice-activity.js"
 import { mulberry32 } from "../../../mocks/scanner/signals.js"
 
@@ -139,5 +140,62 @@ describe("VoiceActivityGate", () => {
 				{ numRuns: 100 },
 			)
 		})
+	})
+})
+
+describe("VoiceOnAirMeter (per-transmission voice, never latches)", () => {
+	it("reports where the last voiced window ended, and 0 once only silence follows a full window later", () => {
+		const m = new VoiceOnAirMeter()
+		const loud = tone(700, 8000, 2 * WINDOW)
+		// Every block after the first full window ends a voiced window: the last frame counts.
+		expect(m.push(loud)).toBe(2 * WINDOW)
+		// Silence: the windows still holding loud blocks are voiced (RMS over the window), the
+		// first block-aligned window of silence only is not.
+		const quiet = new Int16Array(2 * WINDOW)
+		const to = m.push(quiet)
+		expect(to).toBeGreaterThan(0)
+		expect(to).toBeLessThan(WINDOW)
+		expect(m.push(new Int16Array(WINDOW))).toBe(0)
+		// It never latches: voice again is reported again.
+		expect(m.push(loud)).toBe(2 * WINDOW)
+	})
+
+	it("needs a full window after reset() (no window joins audio across the reset)", () => {
+		const m = new VoiceOnAirMeter()
+		const loud = tone(700, 8000, WINDOW)
+		expect(m.push(loud)).toBe(WINDOW)
+		m.reset()
+		expect(m.push(loud.subarray(0, WINDOW - VOICE_BLOCK_FRAMES))).toBe(0)
+		expect(m.push(loud.subarray(WINDOW - VOICE_BLOCK_FRAMES))).toBe(
+			VOICE_BLOCK_FRAMES,
+		)
+	})
+})
+
+describe("range pushes (the recorder passes runs as ranges, no views)", () => {
+	it("the gate consumes up to the frame that completed its first voiced window (a block boundary, at least one window in), then nothing", () => {
+		const gate = new VoiceActivityGate()
+		const pcm = new Int16Array(1_000 + WINDOW + 1_000)
+		pcm.set(tone(700, 8000, WINDOW + 1_000), 1_000)
+		// Frames 0 to 999 are silence: the first voiced window ends at a block boundary past them.
+		const used = gate.push(pcm, 0, pcm.length)
+		expect(gate.voiced).toBe(true)
+		expect(used % VOICE_BLOCK_FRAMES).toBe(0)
+		expect(used).toBeGreaterThanOrEqual(WINDOW)
+		expect(used).toBeLessThan(pcm.length)
+		expect(gate.push(pcm, 0, pcm.length)).toBe(0)
+	})
+
+	it("the gate and the meter judge a range as they judge its copy (meter index in the whole array)", () => {
+		const pcm = new Int16Array(500 + 2 * WINDOW + 300)
+		pcm.set(tone(700, 8000, 2 * WINDOW), 500)
+		const a = new VoiceOnAirMeter()
+		const b = new VoiceOnAirMeter()
+		const copy = pcm.slice(500, 500 + 2 * WINDOW)
+		expect(a.push(pcm, 500, 500 + 2 * WINDOW)).toBe(500 + b.push(copy))
+		const g1 = new VoiceActivityGate()
+		const g2 = new VoiceActivityGate()
+		expect(g1.push(pcm, 500, 500 + 2 * WINDOW)).toBe(g2.push(copy))
+		expect(g1.voiced).toBe(g2.voiced)
 	})
 })

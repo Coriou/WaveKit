@@ -20,6 +20,7 @@ import type {
 	DiscoveryCoverage,
 	DiscoveryReceiverSpur,
 	DiscoveryTrialMemory,
+	ScannerRecorderDiscovery,
 } from "@wavekit/api-types"
 
 // ---------------------------------------------------------------- vocabulary (§ 6.1)
@@ -348,6 +349,8 @@ export interface Discovery {
 	coverage?: DiscoveryCoverage[]
 	/** Detail reads only: the remembered replay trials, projected by the routes (never stored). */
 	trialMemory?: DiscoveryTrialMemory[]
+	/** Detail reads only: the analog recorder's decisions, projected by the routes (never stored). */
+	recorder?: ScannerRecorderDiscovery
 	/** Band inspection UX req 3.1: detail read by an absorbed id (never stored). */
 	absorbedInto?: string
 	requestedId?: string

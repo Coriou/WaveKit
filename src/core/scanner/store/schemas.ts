@@ -226,7 +226,7 @@ export const DiscoverySchema = z.object({
 	receiverSpurRuledOut: z.boolean().optional(),
 })
 /**
- * `proof`, `evidenceLevel`, `hint`, `coverage`, `trialMemory`, `absorbedInto`, `requestedId`,
+ * `proof`, `evidenceLevel`, `hint`, `coverage`, `trialMemory`, `recorder`, `absorbedInto`, `requestedId`,
  * `revision`, `storeEpoch` and `storeRevision` are derived DTO fields (A12; band inspection UX
  * 1.4, 3.1, 3.3; trial memory on detail reads). They are not journal keys. Nor is `lastActivity`
  * (an Activity event reference this core does not set yet). `receiverSpur` is journaled: the flag
@@ -241,6 +241,7 @@ export type DiscoveryCheck = Assert<
 			| "hint"
 			| "coverage"
 			| "trialMemory"
+			| "recorder"
 			| "absorbedInto"
 			| "requestedId"
 			| "revision"

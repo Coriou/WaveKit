@@ -6,7 +6,11 @@
  * intercept probability the scheduler really produces; tests add synthetic on-air signals to check
  * per-hop time share and intercept. Pure: no I/O, no wall clock.
  */
-import { SweepScheduler, type SchedulerAction } from "../scheduler.js"
+import {
+	SweepScheduler,
+	type RecordingActivity,
+	type SchedulerAction,
+} from "../scheduler.js"
 import type { Hop, HopPlan, NormalisedJobSpec } from "../types.js"
 import type { TrackSnapshot } from "../../spectrum/types.js"
 
@@ -57,9 +61,14 @@ export interface SimOptions {
 	maxSteps?: number
 	/**
 	 * A recorder's answer (the scheduler's `recordingActive`): whether the window tuned to hop
-	 * `hopIndex` (null before the first tune) is being recorded at `clockMs`. Absent: never.
+	 * `hopIndex` (null before the first tune) is being recorded at `clockMs` (VoiceOnAir: voice on
+	 * air in the recorded transmission, kept until it ends, up to `hold.maxHoldMs`; RecordingActivity).
+	 * Absent: never.
 	 */
-	recordingActive?: (clockMs: number, hopIndex: number | null) => boolean
+	recordingActive?: (
+		clockMs: number,
+		hopIndex: number | null,
+	) => RecordingActivity
 }
 
 export interface SimVisit {
