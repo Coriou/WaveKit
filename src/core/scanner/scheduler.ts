@@ -908,7 +908,7 @@ export class SweepScheduler {
 	 * never left), on a one-hop plan, for a signals-only job or under `hold.policy: "never"`. A
 	 * hold that ran past one coarse sweep locks the next long follow out (endVisit). The held
 	 * frequency's evidence is charged as on any leave; the `record` hold itself brings none. Never
-	 * for a recorded track (recordedTrack) whose frequency has carrier evidence.
+	 * when every frequency the recording can be of has carrier evidence (recordedTrack).
 	 */
 	private keepForRecording(): boolean {
 		const v = this.visit
@@ -929,17 +929,13 @@ export class SweepScheduler {
 			start + this.followBudgetMs(),
 		)
 		if (now >= cap || !this.recordingActive()) return false
-		const trackId = this.recordedTrack(this.hold?.trackId)
-		// Charged first, so a hold that just heard a carrier counts. A recorded frequency with
-		// carrier evidence is held under the carrier rules only: keeping its hop for the recording
-		// would hold it on every visit again.
+		const heldId = this.hold?.trackId
+		// Charged first, so a hold that just heard a carrier counts. A recording only of frequencies
+		// with carrier evidence is held under the carrier rules only: keeping its hop for it would
+		// hold them on every visit again.
 		this.endHold(true)
-		const recorded = v.tracks.get(trackId)
-		if (
-			recorded !== undefined &&
-			this.memoryOf(recorded)?.evidence === "carrier"
-		)
-			return false
+		const trackId = this.recordedTrack(heldId)
+		if (trackId === null) return false
 		v.holdStartedAt ??= now
 		v.budgeted = true
 		v.recordEndMs = cap - start
@@ -963,26 +959,36 @@ export class SweepScheduler {
 	}
 
 	/**
-	 * Track a `record` hold reports (progress `holdingOn`): the track just held if it is still
-	 * open, else the strongest open analog voice of the visit, else its strongest open track; ""
-	 * when none is open.
+	 * Track a `record` hold reports (progress `holdingOn`), or null when the recording can only be of
+	 * frequencies with carrier evidence. recordingActive names the window, not the frequency, so
+	 * every open analog voice of the visit is a candidate: null when each has carrier evidence, else
+	 * the track just held if it is one without, else the strongest without. With no open analog
+	 * voice: the track just held if it is still open, else the visit's strongest open track (null
+	 * when it has carrier evidence); "" when none is open.
 	 */
-	private recordedTrack(heldId: string | undefined): string {
+	private recordedTrack(heldId: string | undefined): string | null {
 		const v = this.visit
 		if (v === null) return ""
-		if (heldId !== undefined && v.tracks.get(heldId)?.open === true)
-			return heldId
+		const carrier = (t: TrackInfo): boolean =>
+			this.memoryOf(t)?.evidence === "carrier"
+		let voice = false
 		let best: { id: string; t: TrackInfo } | null = null
 		for (const [id, t] of v.tracks) {
-			if (!t.open || t.flagged) continue
-			if (
-				best === null ||
-				(t.followOnAir && !best.t.followOnAir) ||
-				(t.followOnAir === best.t.followOnAir && t.snrDb > best.t.snrDb)
-			)
-				best = { id, t }
+			if (!t.open || t.flagged || !t.followOnAir) continue
+			voice = true
+			if (carrier(t)) continue
+			if (id === heldId) return id
+			if (best === null || t.snrDb > best.t.snrDb) best = { id, t }
 		}
-		return best?.id ?? ""
+		if (voice) return best?.id ?? null
+		const held = heldId === undefined ? undefined : v.tracks.get(heldId)
+		if (held?.open === true) return carrier(held) ? null : (heldId ?? "")
+		for (const [id, t] of v.tracks) {
+			if (!t.open || t.flagged) continue
+			if (best === null || t.snrDb > best.t.snrDb) best = { id, t }
+		}
+		if (best === null) return ""
+		return carrier(best.t) ? null : best.id
 	}
 
 	/**

@@ -2329,6 +2329,53 @@ describe("a hop kept for a recording", () => {
 		})
 	})
 
+	it("a carrier hold that ends while another voice frequency is on air keeps the hop for its recording", () => {
+		// recordingActive names the window, not the frequency. Hop 0 holds "c", a frequency with
+		// carrier evidence labelled analog voice; "v", analog voice on another frequency of the
+		// window, comes on air during that hold. When the carrier hold ends the recording may be of
+		// "v": the hop is kept and reports "v".
+		let clock = 0
+		const s = new SweepScheduler(
+			makeHopPlan(centres(2), HALF_SPAN_HZ),
+			makeNormalisedSpec({
+				dwellMs: DWELL_MS,
+				settleMs: SETTLE_MS,
+				revisit: { share: 0, maxIntervalMs: null },
+			}),
+			{
+				blockSamples: 50,
+				sampleRateHz: 1000,
+				now: () => clock,
+				probeStartMs: PROBE_START_MS,
+				recordingActive: () => true,
+			},
+		)
+		const at = (id: string, hz: number): TrackSnapshot => ({
+			...makeTrack({ id, centreHz: hz, startedAt: 0 }),
+			trackId: id,
+		})
+		s.start()
+		s.onEpochStarted(0)
+		s.onTrack(at("c", HZ), false, 0, { followOnAir: true })
+		const memory = (
+			s as unknown as { memory: { centreHz: number; evidence: string }[] }
+		).memory.find(m => m.centreHz === HZ)!
+		memory.evidence = "carrier"
+		// The carrier hold on "c" starts at the dwell end (150) and ends at 2450.
+		const step = (ms: number): SchedulerAction[] => {
+			clock = ms
+			return [...s.tick(ms), ...s.onBlock(ms)]
+		}
+		for (let ms = 50; ms <= 2_400; ms += 50) {
+			expect(tunes(step(ms))).toBe(false)
+			if (ms === 1_000)
+				s.onTrack(at("v", HZ + 200_000), false, 0, { followOnAir: true })
+		}
+		expect(s.progress().holdingOn).toBe("c")
+		expect(step(2_450)).toEqual([{ type: "stop-probes" }])
+		expect(s.progress().holdingOn).toBe("v")
+	})
+
 	it("a parked one-hop plan never asks", () => {
 		const { s, calls } = make({ hops: 1, recording: () => true })
 		expect(s.parked).toBe(true)
