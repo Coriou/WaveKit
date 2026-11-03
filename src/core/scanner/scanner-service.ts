@@ -3573,15 +3573,21 @@ export class ScannerService extends EventEmitter {
 		const sweep = live.jobIds.some(
 			id => this.jobs.get(id)?.spec.mode === "sweep",
 		)
-		const tuned = this.lastSummaries.get(live.sourceId)
+		const last = this.lastSummaries.get(live.sourceId)
+		// The tuning of the track's own window: epochs restart at 0 on every new stream, so match both.
+		const tuned =
+			last !== undefined &&
+			last.stream === track.stream &&
+			last.epoch === track.epoch
+				? last
+				: undefined
 		const dcCentred =
 			tuned !== undefined &&
-			tuned.epoch === track.epoch &&
 			dcCentredOf(track.centreHz, track.obwHz, tuned.centreHz)
 		const res = this.store.ingest(
 			{
 				...(dcCentred ? { dcCentred: true } : {}),
-				...(tuned !== undefined && tuned.epoch === track.epoch
+				...(tuned !== undefined
 					? {
 							tunedCentreHz: tuned.centreHz,
 							tunedSampleRateHz: tuned.sampleRateHz,
