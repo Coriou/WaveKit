@@ -889,6 +889,9 @@ export class SweepScheduler {
 	 */
 	private recheckRecording(hold: Hold, now: number): SchedulerAction[] {
 		const active = this.recordingActive?.() ?? false
+		// A recording no longer voice keeps only what L has left (keepForRecording's non-voice cap).
+		if (active === true)
+			hold.cap = Math.min(hold.cap, this.holdOrigin() + this.followBudgetMs())
 		if (now >= hold.cap || active === false) return this.leaveHop([])
 		const next = this.nextCandidate()
 		if (next !== null) {

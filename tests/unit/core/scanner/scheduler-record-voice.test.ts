@@ -128,6 +128,19 @@ describe("a hop kept for a voiced analog recording", () => {
 		expect(leftAt(tick, 200, 70_000)).toBe(150 + L2)
 	})
 
+	it("a voice hold whose recording stops being voice (true) falls back to L (19 700): kept before 19 700, left by the next re-check", () => {
+		let clock = 0
+		const h = make(() => (clock < 10_000 ? "voice" : true))
+		const tick = (ms: number) => {
+			clock = ms
+			return h.tick(ms)
+		}
+		const at = leftAt(tick, 200, 70_000)
+		expect(at).not.toBeNull()
+		expect(at!).toBeGreaterThanOrEqual(150 + L2)
+		expect(at!).toBeLessThanOrEqual(150 + L2 + 250)
+	})
+
 	it("no recording (a carrier or an unvoiced signal: the recorder answers false) never keeps the hop", () => {
 		const { s, decided } = make(() => false)
 		expect(tunes(decided)).toBe(true)
