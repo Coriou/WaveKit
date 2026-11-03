@@ -252,7 +252,13 @@ interface Visit {
 	blocks: number
 	overloaded: boolean
 	tracks: Map<string, TrackInfo>
+	/** Clock the holds of the current epoch started (null before any hold of it). */
 	holdStartedAt: number | null
+	/**
+	 * Ms the visit held in its earlier epochs (restartVisit): its holds count from holdOrigin, so a
+	 * restart keeps the hold budget spent before it (L, `hold.maxHoldMs`, one coarse sweep).
+	 */
+	heldBeforeMs: number
 	/** Gain the visit was tuned with. A continued visit (no tune) needs the same gain. */
 	gainTenthsDb: number | null
 	/** Clock at the tune (or at the continue). */
@@ -278,10 +284,11 @@ interface Visit {
 	watched: boolean
 	/**
 	 * Set when the visit kept its hop for a recording (keepForRecording): the end of the L budget
-	 * that hold had. Every later hold of the visit (a probe, a follow, a hang, another recording
-	 * hold) ends by then too (maxHoldDeadline), so they share that window.
+	 * that hold had, in ms from holdOrigin. Every later hold of the visit (a probe, a follow, a
+	 * hang, another recording hold) ends by then too (maxHoldDeadline), so they share that window,
+	 * across restarts too.
 	 */
-	recordEnd: number | null
+	recordEndMs: number | null
 	/** A carrier on air since before any visit saw it start showed itself: the hop's past score was it. */
 	newlyQuiet: boolean
 }
@@ -514,6 +521,9 @@ export class SweepScheduler {
 		v.dwellEnd = startSample + this.dwellSamples(this.parkedVisit)
 		v.tracks.clear()
 		this.forgetGapEvidence(v)
+		// The holds already run still count (holdOrigin): a restart is no fresh budget.
+		if (v.holdStartedAt !== null)
+			v.heldBeforeMs += Math.max(0, this.now() - v.holdStartedAt)
 		v.holdStartedAt = null
 		this.phase = "dwell"
 		// A re-sent window starts fresh: time without data is no dwell.
@@ -792,7 +802,11 @@ export class SweepScheduler {
 	 * TRAFFIC_GAP_MS plus one block on a frequency not known as traffic, so the gap that just
 	 * started is classed (a reopening within TRAFFIC_GAP_MS is a flap, a longer gap is traffic): a
 	 * hold runs past its cap by at most TRAFFIC_GAP_MS + one block (1050 ms in 50 ms blocks), never
-	 * past `hold.maxHoldMs`.
+	 * past `hold.maxHoldMs`. A carrier hold spends L (capFor), so its hang never runs past what L
+	 * has left (budgetLeftMs) either: a gap it cannot class there is classed by a later visit.
+	 * 7 hops (L = 11 500 ms): a recording hold of 8000 ms leaves a carrier hold 3500 ms; a close
+	 * 50 ms before that cap hangs to the cap, not 1000 ms past it, so the other hops wait
+	 * 8000 + 3500 = L.
 	 */
 	private hangDeadline(cap: number): number {
 		const now = this.now()
@@ -804,8 +818,11 @@ export class SweepScheduler {
 			memory !== undefined && memory.evidence !== "traffic"
 				? TRAFFIC_GAP_MS + blockMs
 				: 0
+		const room =
+			memory?.evidence === "carrier" ? now + this.budgetLeftMs() : Infinity
 		return Math.min(
 			this.maxHoldDeadline(),
+			room,
 			Math.max(Math.min(now + this.spec.hold.hangMs, cap), now + classify),
 		)
 	}
@@ -871,7 +888,7 @@ export class SweepScheduler {
 	/**
 	 * Keeps the hop while its window is being recorded (recordingActive), as a long follow: up to
 	 * what L has left (followBudgetMs) and never past `hold.maxHoldMs` from the start of the visit's
-	 * holds (every later hold of the visit ends by then too: Visit.recordEnd), which
+	 * holds (every later hold of the visit ends by then too: Visit.recordEndMs), which
 	 * starts now if no hold ran. Not while the long-hold lock holds, while parked (a parked hop is
 	 * never left), on a one-hop plan, for a signals-only job or under `hold.policy: "never"`. A
 	 * hold that ran past one coarse sweep locks the next long follow out (endVisit). The held
@@ -890,7 +907,7 @@ export class SweepScheduler {
 		)
 			return false
 		const now = this.now()
-		const start = v.holdStartedAt ?? now
+		const start = this.holdOrigin()
 		const cap = Math.min(
 			start + this.spec.hold.maxHoldMs,
 			start + this.followBudgetMs(),
@@ -898,9 +915,9 @@ export class SweepScheduler {
 		if (now >= cap || !this.recordingActive()) return false
 		const trackId = this.recordedTrack(this.hold?.trackId)
 		this.endHold(true)
-		v.holdStartedAt = start
+		v.holdStartedAt ??= now
 		v.budgeted = true
-		v.recordEnd = cap
+		v.recordEndMs = cap - start
 		this.noteLong({
 			cap,
 			watch: false,
@@ -992,8 +1009,7 @@ export class SweepScheduler {
 		const v = this.visit
 		return this.hops.map((hop, hopIndex) => {
 			const current = v !== null && v.hopIndex === hopIndex
-			const held =
-				current && v.holdStartedAt !== null ? now - v.holdStartedAt : 0
+			const held = current ? this.heldMs(v, now) : 0
 			return {
 				hopIndex,
 				visits: hop.visits + (current ? 1 : 0),
@@ -1326,6 +1342,7 @@ export class SweepScheduler {
 			overloaded: false,
 			tracks,
 			holdStartedAt: null,
+			heldBeforeMs: 0,
 			gainTenthsDb,
 			startedAt: this.now(),
 			serial: ++this.visitSerial,
@@ -1336,7 +1353,7 @@ export class SweepScheduler {
 			longDecoded: false,
 			budgeted: false,
 			watched: false,
-			recordEnd: null,
+			recordEndMs: null,
 			newlyQuiet: false,
 		}
 	}
@@ -1547,7 +1564,7 @@ export class SweepScheduler {
 	private noteLong(c: FollowCap): void {
 		const v = this.visit
 		if (v === null) return
-		const sweepEnd = (v.holdStartedAt ?? this.now()) + this.chainBudgetMs()
+		const sweepEnd = this.holdOrigin() + this.chainBudgetMs()
 		if (c.watch) v.watched = true
 		if ((c.long && c.budget !== true) || (c.watch && c.cap > sweepEnd))
 			v.longFollow = true
@@ -1577,7 +1594,7 @@ export class SweepScheduler {
 		const v = this.visit
 		if (v === null || this.plan.hops.length < 2)
 			return { cap: long, watch: false, long: false }
-		const start = v.holdStartedAt ?? now
+		const start = this.holdOrigin()
 		const sweep = Math.min(long, start + this.chainBudgetMs())
 		const locked = { cap: sweep, watch: false, long: false }
 		if (decoded)
@@ -1735,7 +1752,7 @@ export class SweepScheduler {
 		if (v === null || this.plan.hops.length < 2) return long
 		const window =
 			Math.min(t.confirmHoldMs, CONFIRM_FLOOR_MS) + this.probeStartMs
-		const start = v.holdStartedAt ?? now
+		const start = this.holdOrigin()
 		const room =
 			this.memoryOf(t)?.evidence === "carrier"
 				? start + this.followBudgetMs()
@@ -1765,7 +1782,7 @@ export class SweepScheduler {
 		const stop: SchedulerAction[] = [{ type: "stop-probes" }]
 		const next = this.nextCandidate()
 		const now = this.now()
-		const started = this.visit?.holdStartedAt ?? now
+		const started = this.holdOrigin()
 		if (
 			next !== null &&
 			now < this.maxHoldDeadline() &&
@@ -1880,13 +1897,28 @@ export class SweepScheduler {
 	/**
 	 * Last clock any hold of the visit may run to: `hold.maxHoldMs` from the start of its holds,
 	 * and, once the visit kept its hop for a recording, the end of that hold's L budget
-	 * (Visit.recordEnd): a probe or follow started from a recording hold shares its window.
+	 * (Visit.recordEndMs): a probe or follow started from a recording hold shares its window.
 	 */
 	private maxHoldDeadline(): number {
+		const origin = this.holdOrigin()
+		const end = this.visit?.recordEndMs ?? null
+		return origin + Math.min(this.spec.hold.maxHoldMs, end ?? Infinity)
+	}
+
+	/**
+	 * Clock the visit's holds count from: the start of the current epoch's holds (now if none ran
+	 * yet) less what its earlier epochs held (Visit.heldBeforeMs).
+	 */
+	private holdOrigin(): number {
 		const v = this.visit
-		const max = (v?.holdStartedAt ?? this.now()) + this.spec.hold.maxHoldMs
-		const end = v?.recordEnd ?? null
-		return end === null ? max : Math.min(max, end)
+		return (v?.holdStartedAt ?? this.now()) - (v?.heldBeforeMs ?? 0)
+	}
+
+	/** Ms the visit held up to `now`, across its epochs. */
+	private heldMs(v: Visit, now: number): number {
+		const current =
+			v.holdStartedAt === null ? 0 : Math.max(0, now - v.holdStartedAt)
+		return v.heldBeforeMs + current
 	}
 
 	/**
@@ -1894,9 +1926,7 @@ export class SweepScheduler {
 	 * holds, less what they ran already): a carrier hold runs only within it.
 	 */
 	private budgetLeftMs(): number {
-		const now = this.now()
-		const start = this.visit?.holdStartedAt ?? now
-		return start + this.followBudgetMs() - now
+		return this.holdOrigin() + this.followBudgetMs() - this.now()
 	}
 
 	private leaveHop(prefix: SchedulerAction[]): SchedulerAction[] {
@@ -2069,8 +2099,7 @@ export class SweepScheduler {
 		this.noteFlapListening(v, now)
 		hop.visits++
 		hop.timeMs += Math.max(0, now - v.startedAt)
-		const heldMs =
-			v.holdStartedAt === null ? 0 : Math.max(0, now - v.holdStartedAt)
+		const heldMs = this.heldMs(v, now)
 		hop.holdMs += heldMs
 		// The other hops waited for this visit's long or budgeted holds (followBudgetMs); this hop
 		// was visited.

@@ -887,10 +887,11 @@ describe("a QSO on one hop does not hide 28 s IDs on another", () => {
 	// (0.3 to 0.9 s, or 0.5 to 1.5 s mixed) flaps like a carrier, so it is held as one and heard
 	// less than one confirm probe per visit heard it (that scheduler: 3 hops 1 659 350 and
 	// 1 612 300 ms, 7 hops 1 018 150 and 979 850 ms over the four seeds). The IDs are all
-	// detected. Measured values, asserted so a change shows here.
+	// detected. Measured values, asserted so a change shows here (7 hops, 0.3 to 0.9 s: 300 350 ms
+	// while a carrier hold's hang could run past what L had left, 300 250 ms bounded by it).
 	const exception: Record<number, [number, number]> = {
 		3: [371_100, 804_900],
-		7: [300_350, 540_300],
+		7: [300_250, 540_300],
 	}
 	for (const hops of [3, 7])
 		it(`accepted exception, ${hops} hops: a QSO with turnarounds under 1 s is heard ${exception[hops]![0]} ms (0.3 to 0.9 s) and ${exception[hops]![1]} ms (0.5 to 1.5 s)`, () => {

@@ -2160,6 +2160,77 @@ describe("a hop kept for a recording", () => {
 		)
 	})
 
+	for (const [name, closeMs, leftMs] of [
+		// A close one block before the cap (64 300): the hang classing its gap would run to
+		// 64 250 + 1050 = 65 300, 1000 ms past what L left; it ends at the cap.
+		["one block before its cap", 64_250, 64_300],
+		// A close two blocks before: same bound (the hang is not cut short of the cap otherwise).
+		["two blocks before its cap", 64_200, 64_300],
+	] as const)
+		it(`a carrier hold after a record hold that closes ${name} ends at what L has left (7 hops: 8000 + 3500 = L)`, () => {
+			// The scene above: the carrier on hop 1 goes off air during its 3500 ms hold (60 800 to
+			// 64 300). Its hang may class the gap only within L, so hop 2 (and every other hop) waits
+			// at most L for the holds of hops 0 and 1 between two of its visits.
+			const plan = makeHopPlan(centres(7), HALF_SPAN_HZ)
+			const signals: SimSignal[] = [
+				{
+					...carrier(plan.hops[0]!.centreHz - 100_000),
+					startMs: 40_000,
+					endMs: 200_000,
+					needsConfirm: false,
+				},
+				{
+					...carrier(plan.hops[1]!.centreHz + 100_000),
+					endMs: closeMs - BLOCK_MS + 1,
+				},
+			]
+			const r = simulateSweep(plan, spec, {
+				...sim,
+				durationMs: 120_000,
+				signals,
+				recordingActive: (ms, hop) => hop === 0 && ms >= 46_000 && ms < 56_000,
+			})
+			const carrierVisit = r.visits.find(
+				v => v.hopIndex === 1 && v.tunedAtMs > 56_200,
+			)
+			expect(carrierVisit?.tunedAtMs).toBe(59_650)
+			expect(carrierVisit?.leftAtMs).toBe(leftMs)
+			const own = r.visits.filter(v => v.hopIndex === 2)
+			for (let k = 1; k < own.length; k++) {
+				const heldMs = r.visits
+					.filter(
+						v =>
+							v.hopIndex !== 2 &&
+							v.tunedAtMs >= own[k - 1]!.leftAtMs &&
+							v.leftAtMs <= own[k]!.tunedAtMs,
+					)
+					.reduce((a, v) => a + v.leftAtMs - v.tunedAtMs - DWELL_MS, 0)
+				expect(heldMs).toBeLessThanOrEqual(longFollowMs(7))
+			}
+		})
+
+	it("restarts of the visit keep the hold budget it spent: kept at most L of holds in all (2 hops: 150 + 19 550 + 3 re-dwells of 150 = 20 150)", () => {
+		// Recording throughout; the epoch restarts (an outage, a preemption, a resume) at 5, 10 and
+		// 15 s. Each restart re-dwells 150 ms and the record hold resumes with what L has left
+		// (holds of 4850 ms before each restart: 3 × 4850 = 14 550, then 5000 ms), not a fresh L.
+		const { s, tick } = make({ recording: () => true })
+		const REDWELL_MS = 3 * BLOCK_MS
+		const restartAt = (ms: number): SchedulerAction[] => {
+			const actions = [...tick(ms), ...s.onEpochStarted(0)]
+			// The dwell phase ignores ticks: they only move the clock.
+			for (let e = BLOCK_MS; e <= REDWELL_MS; e += BLOCK_MS)
+				actions.push(...tick(ms + e), ...s.onBlock(e))
+			return actions
+		}
+		for (const ms of [5_000, 10_000, 15_000])
+			expect(tunes(restartAt(ms))).toBe(false)
+		let tunedAt: number | null = null
+		for (let ms = 15_200; ms <= 40_000 && tunedAt === null; ms += 50)
+			if (tunes(tick(ms))) tunedAt = ms
+		expect(tunedAt).toBe(150 + longFollowMs(2) + 3 * REDWELL_MS)
+		expect(s.hopStats()[0]!.holdMs).toBe(longFollowMs(2))
+	})
+
 	it("a parked one-hop plan never asks", () => {
 		const { s, calls } = make({ hops: 1, recording: () => true })
 		expect(s.parked).toBe(true)
