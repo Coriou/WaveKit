@@ -2,6 +2,11 @@ import { TrialRotation } from "./trial-rotation.js"
 import { probeModesFor } from "./probes/probe-pool.js"
 import type { ObservationEndReason } from "../spectrum/types.js"
 import { protocolsForFrequency } from "./plan/protocols.js"
+import {
+	AM_VOICE_MAX_OBW_HZ,
+	AM_VOICE_MIN_OBW_HZ,
+	classOf,
+} from "./classify/classifier.js"
 /**
  * One discovery job (spec § 10.1–§ 10.5): the transition table, the sweep
  * scheduler, the lease and decoder hold, probe requests and progress.
@@ -68,6 +73,31 @@ import type { StoredScanJobSpec } from "./plan/range-contract.js"
 
 /** Bounds first-IQ admission only; running jobs retain their existing stop contract. */
 export const JOB_STARTUP_CAP_MS = 15_000
+/**
+ * Analog voice classes: no decoder confirms them, so a sweep hold follows them while they stay on
+ * air (bounded by `hold.maxHoldMs`) instead of leaving after the confirm probe.
+ */
+const FOLLOW_ON_AIR_CLASSES: ReadonlySet<ScannerClass> = new Set([
+	"analog-fm",
+	"analog-am",
+])
+/** The classifier calls a track of at most this many blocks a burst whatever its spectrum. */
+const UNLABELLED_MAX_BLOCKS = 4
+
+/**
+ * A track too young to be labelled whose spectrum reads as analog voice: FM by its class once past
+ * the burst age, AM by the width and shape `isAmVoice` accepts. The sweep dwell may wait for its
+ * label; any other young burst (a data burst, a DMR burst) leaves at the dwell.
+ */
+function voiceLater(track: TrackSnapshot): boolean {
+	if (track.blocks > UNLABELLED_MAX_BLOCKS) return false
+	if (classOf(track, { allowBurst: false }) === "analog-fm") return true
+	return (
+		(track.spectralShape === "narrow" || track.spectralShape === "peaked") &&
+		track.obwHz >= AM_VOICE_MIN_OBW_HZ &&
+		track.obwHz <= AM_VOICE_MAX_OBW_HZ
+	)
+}
 
 export interface JobRecord {
 	id: string
@@ -289,6 +319,17 @@ export interface JobRunnerDeps {
 	refreshTuning: (sourceId: string) => Promise<void>
 	/** Sweep revisit seed from the occupancy history (§ 10.2, Task 37a); none = no seeding. */
 	activitySeed?: (hop: Hop) => number
+	/**
+	 * Whether the source's recorder is recording a transmission in the window of `epoch` (the
+	 * engine's current stream and epoch, while the job's own hop epoch runs): a sweep then keeps
+	 * the hop instead of leaving it, within its bounds (scheduler `recordingActive`). Called on the
+	 * scheduler's re-checks (every 250 ms while a hop is kept). Absent: a sweep never waits for a
+	 * recording (behaviour as before).
+	 */
+	recordingActive?: (
+		sourceId: string,
+		epoch: { stream: number; epoch: number },
+	) => boolean
 	/** Impact of this job's source excluding the job itself (`arbiter.impact(sourceId, spec, record.id)`). */
 	impact: () => Impact
 	/** H3: a probe request for this observation was deferred. */
@@ -846,7 +887,10 @@ export class JobRunner implements JobDriver {
 		if (this.sweep && this.scheduler) {
 			const holdMs = confirm ? this.confirmHoldMs(live) : 0
 			this.exec(
-				this.scheduler.onTrack(track, confirm && policy !== "never", holdMs),
+				this.scheduler.onTrack(track, confirm && policy !== "never", holdMs, {
+					followOnAir: FOLLOW_ON_AIR_CLASSES.has(live.classification.class),
+					voiceLater: voiceLater(track),
+				}),
 			)
 			return
 		}
@@ -1411,11 +1455,32 @@ export class JobRunner implements JobDriver {
 			...(this.deps.activitySeed
 				? { activitySeed: this.deps.activitySeed }
 				: {}),
+			...(this.deps.recordingActive
+				? { recordingActive: () => this.recordingActive() }
+				: {}),
 		})
 		if (this.record.spec.tuner.agc !== null && this.lease) {
 			await this.deps.arbiter.setAgc(this.lease, this.record.spec.tuner.agc)
 		}
 		this.exec(this.scheduler.start())
+	}
+
+	/**
+	 * The scheduler's `recordingActive`: false unless the job's own hop epoch runs (a foreign or
+	 * pending epoch is not this hop's window); then the dependency's answer for the engine's
+	 * current stream and epoch. A throwing dependency counts as no recording.
+	 */
+	private recordingActive(): boolean {
+		const read = this.deps.recordingActive
+		if (read === undefined || !this.epochOwn) return false
+		const epoch = this.deps.engine(this.sourceId)?.currentEpoch()
+		if (epoch === undefined) return false
+		try {
+			return read(this.sourceId, { stream: epoch.stream, epoch: epoch.epoch })
+		} catch (err: unknown) {
+			this.log.warn({ err }, "The recording check failed; leaving the hop")
+			return false
+		}
 	}
 
 	/** § 4.7: the source moved without a command we saw. A sweep re-asserts its hop (re-establishes `commanded`). */

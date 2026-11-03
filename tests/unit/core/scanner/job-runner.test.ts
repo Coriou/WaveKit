@@ -737,6 +737,50 @@ describe("job progress phase", () => {
 		expect(logs.text()).not.toContain("secret")
 	})
 
+	it("follows analog voice on air without a probe, and never a carrier", async () => {
+		for (const [cls, holding] of [
+			["analog-fm", true],
+			["carrier", false],
+		] as const) {
+			const { runner } = runnerHarness(undefined, { activity: quietActivity })
+			await runner.start()
+			await flush()
+			runner.onEpochStarted(epochAt(11, HOP0))
+			await flush()
+			const track = trackOf({
+				trackId: `t-${cls}`,
+				sourceId: "rtl",
+				centreHz: 450_125_000,
+			})
+			const live: LiveObservation = {
+				observationId: `o-${cls}`,
+				sourceId: "rtl",
+				trackId: track.trackId,
+				epoch: track.epoch,
+				jobIds: ["j_test"],
+				discoveryId: `d-${cls}`,
+				startedAt: 0,
+				classification: { class: cls, hypotheses: [], tier: "spectral" },
+				probeIds: new Set(),
+				lastActivityAt: 0,
+				lastIngestAt: 0,
+				lastTrack: track,
+				decoded: false,
+				encrypted: false,
+			}
+			// No confirm wanted (replay-first or already decoded): only the on-air follow can hold.
+			runner.onTrack(live, track, false)
+			runner.onBlock(10_000_000, false)
+			await flush()
+			if (holding)
+				expect(runner.progress()).toMatchObject({
+					phase: "holding",
+					holding: { trackId: track.trackId, frequencyHz: 450_125_000 },
+				})
+			else expect(runner.progress().phase).not.toBe("holding")
+		}
+	})
+
 	it("a hold whose track and probe are gone does not publish 0 Hz", async () => {
 		const probes: ProbeStatus[] = []
 		const { runner } = runnerHarness(undefined, {

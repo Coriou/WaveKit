@@ -19,7 +19,10 @@ import type {
 	ScannerClass,
 	UndecodedReason,
 } from "../../../../src/core/scanner/types.js"
-import type { PendingEpoch } from "../../../../src/core/spectrum/types.js"
+import type {
+	PendingEpoch,
+	TrackSnapshot,
+} from "../../../../src/core/spectrum/types.js"
 import { testSettings } from "../../../mocks/scanner/engine-fakes.js"
 import {
 	makeHopPlan,
@@ -44,6 +47,8 @@ const TARGET = 150_112_500
 const FS = 1_024_000
 const EPOCH = 11
 const LATENCY = 400 // ProbePool DEFAULT_START_LATENCY_MS before any measured start
+/** The scheduler's first hold of a frequency not known watches it up to this long (CARRIER_WATCH_MS). */
+const WATCH_MS = 8_000
 
 const impact = (): Impact => ({
 	liveAudioClients: 0,
@@ -211,7 +216,10 @@ function sweep(opts: { cpu: CpuMeter }) {
 		await settle()
 	}
 	/** Starts the job, settles the first hop and feeds one young (2-block) DMR track of `cls`. */
-	const toDecision = async (cls: ScannerClass): Promise<number> => {
+	const toDecision = async (
+		cls: ScannerClass,
+		over: Partial<TrackSnapshot> = {},
+	): Promise<number> => {
 		await runner.start()
 		await settle()
 		const startSample = 10_000
@@ -248,6 +256,7 @@ function sweep(opts: { cpu: CpuMeter }) {
 				startedAt: 0,
 				blocks: 2,
 			}),
+			...over,
 			epoch: EPOCH,
 			stream: 0,
 		}
@@ -361,6 +370,12 @@ describe("band-scan DMR: probe admission at the container's CPU (1.4 a)", () => 
 		expect(s.h.clock.now - t0).toBe(holdMs)
 		s.runner.tick(s.h.clock.now)
 		await settle()
+		// The probe hold is over; on air since the hop started, the frequency is watched for carrier
+		// evidence up to WATCH_MS from the start of the hold, then the job leaves the hop.
+		expect(s.arbiter.retunes).toHaveLength(1)
+		await s.advance(t0 + WATCH_MS - s.h.clock.now)
+		s.runner.tick(s.h.clock.now)
+		await settle()
 		expect(s.arbiter.retunes).toHaveLength(2) // next hop
 		expect(s.h.decoders.created.size).toBe(0)
 		expect(s.h.decoders.removed).toEqual([])
@@ -390,6 +405,11 @@ describe("band-scan DMR: hop hold against the DMR probe hold (1.4 b, c)", () => 
 		s.runner.tick(s.h.clock.now)
 		await settle()
 		expect(s.h.pool.status()).toEqual([])
+		// Watched to WATCH_MS from the start of the hold (a frequency not known), then left.
+		expect(s.arbiter.retunes).toHaveLength(1)
+		await s.advance(t0 + WATCH_MS - s.h.clock.now)
+		s.runner.tick(s.h.clock.now)
+		await settle()
 		expect(s.arbiter.retunes).toHaveLength(2)
 		expect(s.undecoded).toEqual([])
 	})
@@ -410,12 +430,31 @@ describe("band-scan DMR: hop hold against the DMR probe hold (1.4 b, c)", () => 
 		s.runner.tick(s.h.clock.now)
 		await settle()
 		expect(s.h.pool.status()).toEqual([])
+		// Watched to WATCH_MS from the start of the hold (a frequency not known), then left.
+		expect(s.arbiter.retunes).toHaveLength(1)
+		await s.advance(t0 + WATCH_MS - s.h.clock.now)
+		s.runner.tick(s.h.clock.now)
+		await settle()
 		expect(s.arbiter.retunes).toHaveLength(2)
 	})
 
 	it("ook-burst (the class a young track gets with no protocols at the frequency): no probe is requested and the hop is left at the dwell", async () => {
 		const s = sweep({ cpu: containerMeter(115, 2) })
 		await s.toDecision("ook-burst")
+		expect(s.h.decoders.created.size).toBe(0)
+		expect(s.undecoded).toEqual([])
+		expect(s.arbiter.retunes).toHaveLength(2)
+	})
+
+	it("a young burst whose spectrum reads as analog FM waits for its 5th block (its label) and then leaves without a probe", async () => {
+		const s = sweep({ cpu: containerMeter(115, 2) })
+		await s.toDecision("ook-burst", { obwHz: 12_000, spectralShape: "peaked" })
+		expect(s.arbiter.retunes).toHaveLength(1)
+		const block = 50 * (FS / 1000)
+		const dwell = (testSettings().detection.minSurfaceBlocks + 1) * block
+		// 2 blocks old at the dwell: 3 more blocks reach the 5th
+		s.runner.onBlock(10_000 + dwell + 3 * block, false)
+		await settle()
 		expect(s.h.decoders.created.size).toBe(0)
 		expect(s.undecoded).toEqual([])
 		expect(s.arbiter.retunes).toHaveLength(2)

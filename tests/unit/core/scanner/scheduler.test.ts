@@ -43,10 +43,26 @@ function harness(plan: HopPlan, spec: NormalisedJobSpec, probeStartMs = 300) {
 	return h
 }
 
+/** 5 blocks: old enough to carry its class (a dwell never waits for it). */
 const track = (id: string, snrDb = 20, truncated = false): TrackSnapshot => ({
-	...makeTrack({ id, centreHz: 400 * MHZ, startedAt: 0, snrDb, truncated }),
+	...makeTrack({
+		id,
+		centreHz: 400 * MHZ,
+		startedAt: 0,
+		snrDb,
+		truncated,
+		blocks: 5,
+	}),
 	trackId: id,
 })
+/**
+ * Three empty sweeps of a two-hop plan, back on hop 0: a call that opens next was off air on
+ * three full visits of the hop, so its onset is seen and it may be followed past one coarse sweep.
+ */
+const warmUp = (h: ReturnType<typeof harness>): void => {
+	h.s.start()
+	for (let k = 0; k < 6; k++) h.dwell()
+}
 const tune = (
 	hopIndex: number,
 	centreHz: number,
@@ -154,7 +170,7 @@ describe("SweepScheduler dwell", () => {
 })
 
 describe("SweepScheduler holds", () => {
-	it("holds for confirmHoldMs + probe start latency, then moves on", () => {
+	it("holds for confirmHoldMs + probe start latency, then watches a frequency not known to 8 s and moves on", () => {
 		const h = harness(
 			makeHopPlan([400 * MHZ, 401.6 * MHZ]),
 			makeNormalisedSpec({ revisit: noRevisit }),
@@ -170,7 +186,13 @@ describe("SweepScheduler holds", () => {
 		expect(h.s.progress().holdingOn).toBe("t1")
 		h.clock = 2_099
 		expect(h.s.tick(h.clock)).toEqual([])
+		// The probe ends; on air since the job started, the frequency is watched for carrier
+		// evidence up to 8000 ms (CARRIER_WATCH_MS) from the start of the hold.
 		h.clock = 2_100
+		expect(h.s.tick(h.clock)).toEqual([{ type: "stop-probes" }])
+		h.clock = 7_999
+		expect(h.s.tick(h.clock)).toEqual([])
+		h.clock = 8_000
 		expect(h.s.tick(h.clock)).toEqual([
 			{ type: "stop-probes" },
 			tune(1, 401.6 * MHZ),
@@ -309,7 +331,7 @@ describe("SweepScheduler holds", () => {
 			makeHopPlan([400 * MHZ, 401.6 * MHZ]),
 			makeNormalisedSpec({ revisit: noRevisit }),
 		)
-		h.s.start()
+		warmUp(h)
 		h.s.onEpochStarted(0)
 		h.s.onTrack(track("t1"), true, 1_800)
 		h.s.onBlock(B)
@@ -366,7 +388,7 @@ describe("SweepScheduler holds", () => {
 				},
 			}),
 		)
-		capped.s.start()
+		warmUp(capped)
 		capped.s.onEpochStarted(0)
 		capped.s.onTrack(track("t1"), true, 1_800)
 		capped.s.onBlock(B)
@@ -396,15 +418,53 @@ describe("SweepScheduler holds", () => {
 		expect(h.s.onBlock(3 * B)).toEqual([
 			{ type: "start-probe", trackId: "strong", holdMs: 2_100 },
 		])
-		h.clock = 400
+		// within the chain budget: one nominal coarse sweep, 2 hops × 185 ms = 370 ms
+		h.clock = 300
 		expect(h.s.onConfirmed("strong", false)).toEqual([
 			{ type: "stop-probes" },
 			{ type: "start-probe", trackId: "weak", holdMs: 1_300 },
 		])
-		h.clock = 1_700
+		h.clock = 1_600
 		expect(h.s.tick(h.clock)).toEqual([
 			{ type: "stop-probes" },
 			tune(1, 401.6 * MHZ),
+		])
+	})
+
+	it("leaves a busy hop once its holds use one nominal coarse sweep and holds the rest next visit", () => {
+		const h = harness(
+			makeHopPlan([400 * MHZ, 401.6 * MHZ]),
+			makeNormalisedSpec({ revisit: noRevisit }),
+		)
+		const at = (id: string, hz: number, snrDb: number): TrackSnapshot => ({
+			...track(id, snrDb),
+			centreHz: hz,
+		})
+		h.s.start()
+		h.s.onEpochStarted(0)
+		h.s.onTrack(at("weak", 400.1 * MHZ, 12), true, 1_000)
+		h.s.onTrack(at("strong", 400.2 * MHZ, 30), true, 1_800)
+		h.s.onBlock(B)
+		h.s.onBlock(2 * B)
+		expect(h.s.onBlock(3 * B)).toEqual([
+			{ type: "start-probe", trackId: "strong", holdMs: 2_100 },
+		])
+		// at the budget (370 ms of holds): no further probe on this visit
+		h.clock = 370
+		expect(h.s.onConfirmed("strong", false)).toEqual([
+			{ type: "stop-probes" },
+			tune(1, 401.6 * MHZ),
+		])
+		h.clock = 1_000
+		expect(h.dwell()).toEqual([
+			{ type: "sweep-complete", sweepIndex: 0 },
+			tune(0, 400 * MHZ),
+		])
+		h.s.onEpochStarted(h.sample)
+		h.s.onTrack(at("weak2", 400.1 * MHZ, 12), true, 1_000)
+		// strong has gone; weak, left over on the last visit, is held now
+		expect(h.dwell(3, false)).toEqual([
+			{ type: "start-probe", trackId: "weak2", holdMs: 1_300 },
 		])
 	})
 })
@@ -549,6 +609,60 @@ describe("SweepScheduler re-plan", () => {
 		expect(h.s.progress().hopCount).toBe(4)
 		expect(h.dwell()).toEqual([tune(3, 402.4 * MHZ)]) // hop 1 (401.6) is index 2 in the new plan
 		expect(h.s.progress()).toMatchObject({ hopIndex: 3, hopCount: 8 })
+	})
+
+	it("keeps what it learned about a frequency across a re-plan", () => {
+		const h = harness(
+			makeHopPlan([400 * MHZ, 401.6 * MHZ]),
+			makeNormalisedSpec({ revisit: noRevisit }),
+		)
+		h.s.start()
+		h.s.onEpochStarted(0)
+		h.s.onTrack(track("a"), false, 0, { followOnAir: true })
+		h.dwell(3, false)
+		// On air since the job started: watched 8000 ms without a break, a carrier.
+		h.clock = 8_000
+		expect(h.s.tick(h.clock)).toEqual([
+			{ type: "stop-probes" },
+			tune(1, 401.6 * MHZ),
+		])
+		// Two new hops near old hop 0: the plan swaps at this boundary.
+		h.s.replan(
+			makeHopPlan([399.9 * MHZ, 400.1 * MHZ, 401.6 * MHZ]),
+			makeNormalisedSpec({ revisit: noRevisit }),
+		)
+		expect(h.dwell()).toEqual([
+			{ type: "sweep-complete", sweepIndex: 0 },
+			tune(0, 399.9 * MHZ),
+		])
+		// Heard again at once on the new hop 0: a resting carrier, not held.
+		h.s.onEpochStarted(h.sample)
+		h.s.onTrack(track("b"), false, 0, { followOnAir: true })
+		expect(h.dwell(3, false)).toEqual([tune(1, 400.1 * MHZ)])
+		expect(h.s.progress().holdingOn).toBeNull()
+	})
+
+	it("counts an old hop's visits, time and holds once when two new hops map to it", () => {
+		const h = harness(
+			makeHopPlan([400 * MHZ, 401.6 * MHZ]),
+			makeNormalisedSpec({ revisit: noRevisit }),
+		)
+		h.s.start()
+		h.clock = 100
+		h.dwell() // hop 0 ends: 1 visit, 100 ms
+		h.s.replan(
+			makeHopPlan([399.9 * MHZ, 400.1 * MHZ, 401.6 * MHZ]),
+			makeNormalisedSpec({ revisit: noRevisit }),
+		)
+		h.clock = 300
+		h.dwell() // hop 1 ends (1 visit, 200 ms); the re-plan applies at this boundary
+		const stats = h.s.hopStats()
+		const current = h.s.progress().hopIndex
+		const ended = stats.map(st => st.visits - (st.hopIndex === current ? 1 : 0))
+		expect(ended.reduce((a, b) => a + b, 0)).toBe(2)
+		expect(stats.reduce((a, st) => a + st.timeMs, 0)).toBe(300)
+		// Old hop 0 maps to new hops 0 and 1: only the first one carries its accounting.
+		expect(ended).toEqual([1, 0, 1])
 	})
 
 	// Feature: signal-discovery-scanner, Property 9: Job transitions (scheduler index bounds)

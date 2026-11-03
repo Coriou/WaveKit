@@ -7677,6 +7677,11 @@ export class ScannerService extends EventEmitter {
 				this.deps.bandplans?.() ?? builtinBandplansFor(this.deps.region),
 			tunerRange: () => ({ startHz: 24_000_000, endHz: 1_766_000_000 }),
 			lockouts: sourceId => this.store.lockouts(sourceId),
+			// The seed the job's scheduler starts with, so the preview's revisits match the sweep's.
+			activitySeed: sourceId => {
+				const seed = this.spectrum.activitySeed(sourceId)
+				return (hop: Hop) => seed(hop.covered)
+			},
 			...(this.deps.decoderCoverage
 				? { decoderCoverage: this.deps.decoderCoverage }
 				: {}),

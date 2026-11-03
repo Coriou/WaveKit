@@ -180,11 +180,15 @@ describe("previewPlan derived defaults", () => {
 			sourceId: "default",
 		})
 		expect(p.plan.hops).toHaveLength(44)
-		expect(p.sweepPeriodMs).toBe(58 * 185) // 44 hops + 14 revisits at share 0.3
-		expect(p.poi[0]!.detection).toBeCloseTo(5050 / 10_730, 9)
-		expect(p.poi[0]!.decode).toBeCloseTo(1150 / 10_730, 9)
+		// The scheduler's own sweep: 44 hops × 185 ms, no revisits without an occupancy seed
+		expect(p.sweepPeriodMs).toBe(44 * 185)
+		// on air for minSurfaceBlocks (2) × T inside the 150 ms listening span: (5000 + 150 - 4 × 50) / 8140
+		expect(p.poi[0]!.detection).toBeCloseTo(4950 / 8_140, 9)
+		// surfaced by the dwell end, then on air for the 4000 ms confirm hold: (5000 - 100 - 4000) / 8140
+		expect(p.poi[0]!.decode).toBeCloseTo(900 / 8_140, 9)
 		expect(errors(p)).toEqual([])
-		expect(codes(p)).toContain("warning:poi-low")
+		// 4950 / 8140 = 61 % detection: at or above the 50 % warning line
+		expect(codes(p)).not.toContain("warning:poi-low")
 		expect(codes(p)).not.toContain("warning:settle-unmeasured")
 		expect(p.estimates).toEqual({
 			cpuCores: 0.58,
@@ -528,7 +532,13 @@ describe("previewPlan warnings", () => {
 			{},
 			"probe-unavailable",
 		],
-		["a low intercept probability", UHF, {}, "poi-low"],
+		// (1000 + 150 - 200) / (44 × 185) = 12 % detection for a 1 s transmission
+		[
+			"a low intercept probability",
+			{ ...UHF, txDurationHintMs: 1_000 },
+			{},
+			"poi-low",
+		],
 	])("warns about %s", (_name, spec, over, code) => {
 		const p = previewPlan(spec, ctx(over))
 		expect(codes(p)).toContain(`warning:${code}`)
