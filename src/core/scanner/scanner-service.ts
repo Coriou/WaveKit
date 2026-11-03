@@ -6894,6 +6894,9 @@ export class ScannerService extends EventEmitter {
 			logger: this.deps.logger,
 			now: this.now,
 			activity: jobId => this.jobActivity(jobId),
+			// A sweep keeps its hop while the wideband recorder records voice in that hop's window.
+			recordingActive: (sourceId, at) =>
+				this.widebandAnalog.recordingActive(sourceId, at),
 		})
 	}
 

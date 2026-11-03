@@ -515,16 +515,21 @@ export class WidebandAnalogRecorder {
 	}
 
 	/**
-	 * The sweep-hold hook: a session on this source and epoch is classed analog-fm and has been
-	 * voiced (a recording is open or about to be written). The scheduler may keep its hold on
-	 * the hop while this is true, bounded by its own maxHoldMs.
+	 * The sweep-hold hook: a session on this source, stream and epoch is classed analog-fm and has
+	 * been voiced (a recording is open or about to be written). A session of another stream or an
+	 * older epoch (the previous hop's window) answers false. The scheduler may keep its hold on
+	 * the hop while this is true, bounded by its own limits.
 	 */
-	recordingActive(sourceId: string, epoch: number): boolean {
+	recordingActive(
+		sourceId: string,
+		at: { readonly stream: number; readonly epoch: number },
+	): boolean {
 		for (const s of this.sessions.values())
 			if (
 				!s.done &&
 				s.sourceId === sourceId &&
-				s.epoch === epoch &&
+				s.stream === at.stream &&
+				s.epoch === at.epoch &&
 				s.classed &&
 				s.qualified
 			)
