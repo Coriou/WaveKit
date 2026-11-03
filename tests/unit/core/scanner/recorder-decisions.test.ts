@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest"
 import {
 	RECORDER_MAX_OBSERVATIONS,
 	RECORDER_RECENT_DECISIONS,
+	RECORDER_RECENT_REFUSALS,
 	SCANNER_RECORDER_DECISIONS,
 } from "@wavekit/api-types"
 import {
@@ -25,7 +26,7 @@ import {
 	transmission,
 } from "./wideband-recorder-harness.js"
 
-function capture() {
+function capture(level: "info" | "debug" = "info") {
 	const lines: Record<string, unknown>[] = []
 	const stream = new Writable({
 		write(chunk: Buffer, _enc, done) {
@@ -35,7 +36,7 @@ function capture() {
 			done()
 		},
 	})
-	return { lines, logger: pino({ level: "info" }, stream) }
+	return { lines, logger: pino({ level }, stream) }
 }
 
 const flushLogs = () => new Promise(r => setImmediate(r))
@@ -51,21 +52,21 @@ describe("RecorderDecisions", () => {
 		const { lines, logger } = capture()
 		let now = 1_000_000
 		const d = new RecorderDecisions(logger, () => now)
-		for (let i = 0; i < RECORDER_LOG_LIMIT; i++) d.note("started", ref(i))
+		for (let i = 0; i < RECORDER_LOG_LIMIT; i++) d.note("started", ref(i), true)
 		await flushLogs()
 		expect(lines).toHaveLength(20)
-		d.note("started", ref(20))
-		d.note("started", ref(21))
+		d.note("started", ref(20), true)
+		d.note("started", ref(21), true)
 		await flushLogs()
 		expect(lines).toHaveLength(20)
 		expect(d.status().logsSuppressed).toBe(2)
 		// One ms before the window ends: still suppressed.
 		now += RECORDER_LOG_WINDOW_MS - 1
-		d.note("started", ref(22))
+		d.note("started", ref(22), true)
 		await flushLogs()
 		expect(lines).toHaveLength(20)
 		now += 1
-		d.note("started", ref(23))
+		d.note("started", ref(23), true)
 		await flushLogs()
 		expect(lines).toHaveLength(21)
 		expect(lines[20]).toMatchObject({
@@ -99,24 +100,26 @@ describe("RecorderDecisions", () => {
 		d.note("refused:slots", ref(1))
 		d.note("refused:cpu", ref(1))
 		d.note("refused:slots", ref(1))
-		d.note("finalized", ref(1))
-		d.note("finalized", ref(1))
+		d.note("finalized", ref(1), true)
+		d.note("finalized", ref(1), true)
 		expect(d.status().counts).toEqual({
 			"refused:slots": 2,
 			"refused:cpu": 1,
 			finalized: 2,
 		})
-		expect(d.status().recent.map(e => e.code)).toEqual([
+		expect(d.status().recentRefusals.map(e => e.code)).toEqual([
 			"refused:slots",
 			"refused:cpu",
 			"refused:slots",
+		])
+		expect(d.status().recent.map(e => e.code)).toEqual([
 			"finalized",
 			"finalized",
 		])
 	})
 
 	it("a repeated refusal binds the discovery it now carries, without counting or logging again", async () => {
-		const { lines, logger } = capture()
+		const { lines, logger } = capture("debug")
 		const d = new RecorderDecisions(logger, () => 0)
 		d.note("refused:cpu", ref(1))
 		expect(d.forDiscovery("d_1")).toBeNull()
@@ -138,16 +141,61 @@ describe("RecorderDecisions", () => {
 		expect(d.status().recent).toHaveLength(2)
 	})
 
-	it(`keeps the last RECORDER_RECENT_DECISIONS (${RECORDER_RECENT_DECISIONS}) decisions, newest last`, () => {
+	it(`keeps the last RECORDER_RECENT_DECISIONS (${RECORDER_RECENT_DECISIONS}) session decisions, newest last`, () => {
 		const d = new RecorderDecisions(pino({ level: "silent" }), () => 0)
 		for (let i = 0; i < RECORDER_RECENT_DECISIONS; i++)
-			d.note("started", ref(i))
+			d.note("started", ref(i), true)
 		expect(d.status().recent).toHaveLength(64)
 		expect(d.status().recent[0]!.observationId).toBe("o_0")
-		d.note("started", ref(64))
+		d.note("started", ref(64), true)
 		expect(d.status().recent).toHaveLength(64)
 		expect(d.status().recent[0]!.observationId).toBe("o_1")
 		expect(d.status().recent[63]!.observationId).toBe("o_64")
+	})
+
+	it(`keeps the last RECORDER_RECENT_REFUSALS (${RECORDER_RECENT_REFUSALS}) snapshot refusals apart, newest last`, () => {
+		const d = new RecorderDecisions(pino({ level: "silent" }), () => 0)
+		for (let i = 0; i < RECORDER_RECENT_REFUSALS; i++)
+			d.note("refused:not-analog", ref(i))
+		expect(d.status().recentRefusals).toHaveLength(32)
+		expect(d.status().recentRefusals[0]!.observationId).toBe("o_0")
+		d.note("refused:tuning", ref(32))
+		expect(d.status().recentRefusals).toHaveLength(32)
+		expect(d.status().recentRefusals[0]!.observationId).toBe("o_1")
+		expect(d.status().recentRefusals[31]!.observationId).toBe("o_32")
+		expect(d.status().recent).toEqual([])
+		expect(d.status().counts).toEqual({
+			"refused:not-analog": 32,
+			"refused:tuning": 1,
+		})
+	})
+
+	it("a flood of snapshot refusals never pushes a session decision out of recent or the info log; refusals are logged at debug", async () => {
+		const { lines, logger } = capture("debug")
+		const d = new RecorderDecisions(logger, () => 0)
+		d.note("started", ref(0, "d_0"), true)
+		d.note("voiced", ref(0, "d_0"), true)
+		// 1000 tracks refused once each (a busy band: not analog, or of the previous epoch).
+		for (let i = 1; i <= 1_000; i++)
+			d.note(i % 2 === 0 ? "refused:not-analog" : "refused:tuning", ref(i))
+		d.note("finalized", ref(0, "d_0"), true)
+		await flushLogs()
+		expect(d.status().recent.map(e => e.code)).toEqual([
+			"started",
+			"voiced",
+			"finalized",
+		])
+		expect(d.status().recentRefusals).toHaveLength(RECORDER_RECENT_REFUSALS)
+		const info = lines.filter(l => l["level"] === 30)
+		const debug = lines.filter(l => l["level"] === 20)
+		expect(info.map(l => l["decision"])).toEqual([
+			"started",
+			"voiced",
+			"finalized",
+		])
+		expect(debug).toHaveLength(1_000)
+		expect(debug[0]).toMatchObject({ msg: "Analog recorder snapshot refusal" })
+		expect(d.status().logsSuppressed).toBe(0)
 	})
 
 	it(`remembers RECORDER_MAX_OBSERVATIONS (${RECORDER_MAX_OBSERVATIONS}) observations for discovery reads, least recent dropped`, () => {
@@ -234,7 +282,7 @@ describe("WidebandAnalogRecorder decisions (synthetic signals)", () => {
 		})
 		await h.feed(0.5, false)
 		const onset = h.engine.liveEdge()
-		const seen = new Set<string | false>()
+		const seen = new Set<string | boolean>()
 		// WIDEBAND_QUALIFY_MS (8 s) of in-track audio, judged a holdback (1 s) late, and a margin.
 		await h.feed(10, true, () => {
 			h.rec.track(input("c", snapshot("c", onset, h.engine.liveEdge(), LOW)))
@@ -259,10 +307,10 @@ describe("WidebandAnalogRecorder decisions (synthetic signals)", () => {
 		expect(h.rec.diagnostics().counts).toEqual({ "refused:cpu": 1 })
 		full = false
 		await h.feed(0.1, true, report)
-		expect(h.rec.diagnostics().recent.map(e => e.code)).toEqual([
+		expect(h.rec.diagnostics().recentRefusals?.map(e => e.code)).toEqual([
 			"refused:cpu",
-			"started",
 		])
+		expect(h.rec.diagnostics().recent.map(e => e.code)).toEqual(["started"])
 	}, 60_000)
 
 	it("a refused observation associated only on a later snapshot, or only at its close, names its refusal on the discovery", async () => {
@@ -297,7 +345,7 @@ describe("WidebandAnalogRecorder decisions (synthetic signals)", () => {
 		h.rec.track(input("r", track, { recordAllowed: false }))
 		h.rec.track(input("n", track, { analogFm: false, nonAnalog: true }))
 		expect(
-			h.rec.diagnostics().recent.map(e => [e.observationId, e.code]),
+			h.rec.diagnostics().recentRefusals?.map(e => [e.observationId, e.code]),
 		).toEqual([
 			["e", "refused:encrypted"],
 			["r", "refused:record-disabled"],

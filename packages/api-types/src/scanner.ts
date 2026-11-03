@@ -990,8 +990,19 @@ export const SCANNER_RECORDER_DECISIONS = [
 ] as const
 export type ScannerRecorderDecision =
 	(typeof SCANNER_RECORDER_DECISIONS)[number]
-/** Decisions kept in `ScannerRecorderStatus.recent` (newest last). */
+/**
+ * Session decisions kept in `ScannerRecorderStatus.recent` (newest last): a recording costs 3 to 5
+ * (started or shadow, classed, voiced, one terminal decision per file), so 64 keep the last 12 to
+ * 20 recordings whatever the snapshot refusals do.
+ */
 export const RECORDER_RECENT_DECISIONS = 64
+/**
+ * Snapshot refusals kept in `ScannerRecorderStatus.recentRefusals` (newest last), apart from the
+ * session decisions: a snapshot refused before any session (`refused:not-analog`,
+ * `refused:tuning`, `refused:slots`, …; one entry per observation and code in a row) can come
+ * every few seconds per track, so they get their own 32 and never push a session decision out.
+ */
+export const RECORDER_RECENT_REFUSALS = 32
 /** Observations whose decisions the recorder remembers for discovery reads (oldest dropped). */
 export const RECORDER_MAX_OBSERVATIONS = 256
 
@@ -1023,11 +1034,22 @@ export interface ScannerRecorderStatus {
 	sessions: ScannerRecorderSession[]
 	/** Retune-ended sessions waiting for their close. */
 	parked: number
-	/** The last RECORDER_RECENT_DECISIONS decisions, newest last. */
+	/**
+	 * The last RECORDER_RECENT_DECISIONS session decisions (a session's start, class, voice,
+	 * eviction, terminal decision, or the refusal or discard that ended it), newest last.
+	 */
 	recent: ScannerRecorderDecisionEntry[]
+	/**
+	 * The last RECORDER_RECENT_REFUSALS snapshot refusals (an observation refused before any session
+	 * started for it), newest last. Absent on older cores, whose `recent` held both.
+	 */
+	recentRefusals?: ScannerRecorderDecisionEntry[] | undefined
 	/** Decisions since the core started, per code (codes never seen are absent). */
 	counts: Partial<Record<ScannerRecorderDecision, number>>
-	/** Decision log lines left out by the info log's rate limit since the core started. */
+	/**
+	 * Session decision lines left out by the info log's rate limit since the core started (snapshot
+	 * refusals are logged at debug, outside the limit).
+	 */
 	logsSuppressed: number
 }
 

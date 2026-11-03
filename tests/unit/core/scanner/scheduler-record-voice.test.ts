@@ -1,6 +1,8 @@
 /**
- * A sweep kept for a voiced analog recording (scheduler RecordingActivity "voice"): the hold may run
- * to `hold.maxHoldMs` like a decoded follow, not L, so a 28 s ID is recorded whole. A recording that
+ * A sweep kept for a voiced analog recording (scheduler RecordingActivity "voice": voice on air in
+ * the current transmission): the hold may run until that transmission ends, up to
+ * `hold.maxHoldMs`, not L, so a 28 s ID is recorded whole ("record whole voice"); a full coarse
+ * sweep follows before the hop gets another voice hold. A recording that
  * is not voice (true) keeps L; no recording (a carrier or unvoiced signal: the recorder answers
  * false) and a recording only of frequencies with carrier evidence never keep the hop.
  */
@@ -273,5 +275,69 @@ describe("a voiced recording hold in a sweep", () => {
 		expect(voiced.leftAtMs).toBeLessThanOrEqual(48_000 + 250 + BLOCK_MS)
 		const plain = firstKept(run(true))
 		expect(plain.leftAtMs - plain.tunedAtMs).toBe(DWELL_MS + L3)
+	})
+})
+
+describe("record whole voice: a spent voice hold forces a full coarse sweep", () => {
+	const spec2 = makeNormalisedSpec({
+		dwellMs: DWELL_MS,
+		settleMs: SETTLE_MS,
+		revisit: { share: 0, maxIntervalMs: null },
+	})
+	const run = (
+		recording: (ms: number, hop: number | null) => RecordingActivity,
+	) =>
+		simulateSweep(makeHopPlan(centres(2), HALF_SPAN_HZ), spec2, {
+			settleMs: SETTLE_MS,
+			blockMs: BLOCK_MS,
+			minSurfaceBlocks: 2,
+			probeStartMs: PROBE_START_MS,
+			durationMs: 12_000,
+			signals: [],
+			recordingActive: recording,
+		})
+
+	it("a voice hold shorter than one sweep (1150 to 1650 ms) still locks: hop 0's next visit is a dwell only, the one after is kept", () => {
+		// Voice on air on hop 0 from 1100 to 1650 ms (one short over), then again from 2800 ms on
+		// (the next over of the QSO). The first hold ends at the re-check that finds it gone
+		// (1650 ms); hop 1 is visited; hop 0's next coarse visit (2800 ms) is under the lock, so it
+		// is left at its dwell end (3950 ms) though voice is on air; the visit after is kept.
+		const r = run((ms, hop) =>
+			hop === 0 && ((ms >= 1_100 && ms < 1_650) || ms >= 2_800)
+				? "voice"
+				: false,
+		)
+		const zero = r.visits.filter(v => v.hopIndex === 0)
+		expect(zero[0]).toMatchObject({ tunedAtMs: 0, leftAtMs: 1_650 })
+		expect(zero[1]).toMatchObject({ tunedAtMs: 2_800, leftAtMs: 3_950 })
+		expect(zero[2]!.leftAtMs - zero[2]!.tunedAtMs).toBeGreaterThan(2 * DWELL_MS)
+	})
+
+	it("voice, then a carrier with no voice (true), then voice again in the same visit: the hold is spent and keeps L only (2 hops: left at 150 + 19 550 = 19 700)", () => {
+		let clock = 0
+		const h = make(() =>
+			clock < 5_000 ? "voice" : clock < 8_000 ? true : "voice",
+		)
+		const tick = (ms: number) => {
+			clock = ms
+			return h.tick(ms)
+		}
+		const at = leftAt(tick, 200, 70_000)
+		expect(at).not.toBeNull()
+		expect(at!).toBeGreaterThanOrEqual(150 + L2)
+		expect(at!).toBeLessThanOrEqual(150 + L2 + 250)
+	})
+
+	it("voice past L, then a carrier with no voice (true): left at the first re-check after the voice is gone (30 000 to 30 250 ms), not at hold.maxHoldMs (60 150)", () => {
+		let clock = 0
+		const h = make(() => (clock < 30_000 ? "voice" : true))
+		const tick = (ms: number) => {
+			clock = ms
+			return h.tick(ms)
+		}
+		const at = leftAt(tick, 200, 70_000)
+		expect(at).not.toBeNull()
+		expect(at!).toBeGreaterThanOrEqual(30_000)
+		expect(at!).toBeLessThanOrEqual(30_250)
 	})
 })

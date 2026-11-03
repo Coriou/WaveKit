@@ -45,7 +45,7 @@ import {
 	type SegmentEndCut,
 	type SegmentEvent,
 } from "./transmission-segmenter.js"
-import { VoiceActivityGate } from "./voice-activity.js"
+import { VoiceActivityGate, VoiceOnAirMeter } from "./voice-activity.js"
 import {
 	MAX_SLICE_SAMPLES,
 	WidebandNfmChain,
@@ -100,6 +100,18 @@ export const WIDEBAND_QUALIFY_FRAMES =
  * candidate at any age.
  */
 export const WIDEBAND_EVICT_MIN_HEARD_FRAMES = 2 * ANALOG_AUDIO_RATE_HZ
+/**
+ * Voice is on air (recordingActive answers "voice") while the newest in-track audio the session
+ * judged is at most this far past the end of the last voiced 500 ms window heard in a track that
+ * is still open (VoiceOnAirMeter): 2000 ms. A voiced window ends up to 500 ms after the last loud
+ * syllable in it, so 1.5 to 2 s of silence between phrases keeps the hold. Judged audio runs
+ * WIDEBAND_HOLDBACK_MS (1000 ms) behind the live edge, so a carrier or a repeater hang after the
+ * last word answers true (the sweep keeps the hop within L only) at most 1000 + 2000 + 500 =
+ * 3500 ms after that word, and the sweep sees it at its next 250 ms re-check: 3.75 s. A squelch
+ * close answers false at once (the track's close, not the audio). In samples: 2000 × fs / 1000
+ * (2 048 000 at 1.024 Msps).
+ */
+export const WIDEBAND_VOICE_ON_AIR_MS = 2_000
 /**
  * A file whose first readable sample is more than this (one 50 ms engine block) after its
  * planned start (onset − preRoll) lost its pre-roll or onset (the ring did not reach back):
@@ -432,6 +444,14 @@ interface Session {
 	qualified: boolean
 	/** In-track frames the gate heard over the session's files. */
 	heard: number
+	/** Per-transmission voice check over the session's in-track audio (never latches). */
+	readonly meter: VoiceOnAirMeter
+	/** Input sample past the last frame fed to `meter` (a later run that does not join resets it). */
+	meterTo: number
+	/** Input sample at the end of the last voiced meter window; null before any. */
+	voiceAt: number | null
+	/** Input sample past the newest frame the gate judged (in-track or not). */
+	judgedTo: number
 	readonly observations: Set<string>
 	/** Track spans per observation (open: still active), the voice gate's input window. */
 	readonly activity: Map<string, { start: number; last: number; open: boolean }>
@@ -594,27 +614,52 @@ export class WidebandAnalogRecorder {
 	}
 
 	/**
-	 * The sweep-hold hook: "voice" when a session on this source, stream and epoch is classed
-	 * analog-fm, has been voiced and is still open (a recording is open or about to be written);
-	 * the scheduler may then keep the hop up to `hold.maxHoldMs` (RecordingActivity). A shadow, a
-	 * session not voiced yet, or one of another stream or an older epoch (the previous hop's
-	 * window) answers false: a carrier or an unvoiced signal never keeps a hop.
+	 * The sweep-hold hook, per transmission: for a session on this source, stream and epoch that is
+	 * classed analog-fm and has been voiced (`qualified`, sticky for its files), "voice" while voice
+	 * is on air in a track still open: the last voiced meter window lies inside an open track's span
+	 * and the newest judged audio is at most WIDEBAND_VOICE_ON_AIR_MS past it (the scheduler may
+	 * keep the hop up to `hold.maxHoldMs`, RecordingActivity); true while a track is open with no
+	 * voice that recent (a carrier or a repeater hang after the voice, a stuck carrier: kept within
+	 * L only); false once no joined track is open (the over's squelch closed: the recorder's
+	 * `hangMs` still joins the next over into the same file, the sweep does not wait for it). A
+	 * shadow, a session not voiced yet, or one of another stream or an older epoch (the previous
+	 * hop's window) answers false.
 	 */
 	recordingActive(
 		sourceId: string,
 		at: { readonly stream: number; readonly epoch: number },
-	): "voice" | false {
-		for (const s of this.sessions.values())
+	): "voice" | boolean {
+		let answer: "voice" | boolean = false
+		for (const s of this.sessions.values()) {
 			if (
-				!s.done &&
-				s.sourceId === sourceId &&
-				s.stream === at.stream &&
-				s.epoch === at.epoch &&
-				s.classed &&
-				s.qualified
+				s.done ||
+				s.sourceId !== sourceId ||
+				s.stream !== at.stream ||
+				s.epoch !== at.epoch ||
+				!s.classed ||
+				!s.qualified
 			)
-				return "voice"
-		return false
+				continue
+			const v = this.voiceOnAir(s)
+			if (v === "voice") return v
+			answer ||= v
+		}
+		return answer
+	}
+
+	/** recordingActive for one classed, voiced session (see there). */
+	private voiceOnAir(s: Session): "voice" | boolean {
+		let open = false
+		let voiced = false
+		const at = s.voiceAt
+		const window = (WIDEBAND_VOICE_ON_AIR_MS * s.fs) / 1000
+		for (const a of s.activity.values()) {
+			if (!a.open) continue
+			open = true
+			if (at !== null && at >= a.start && s.judgedTo - at <= window)
+				voiced = true
+		}
+		return voiced ? "voice" : open
 	}
 
 	/** Status block (ScannerStatus.recorder): live sessions, parked ones and the decision log. */
@@ -989,6 +1034,10 @@ export class WidebandAnalogRecorder {
 			classed: input.analogFm,
 			qualified: false,
 			heard: 0,
+			meter: new VoiceOnAirMeter(),
+			meterTo: Number.NEGATIVE_INFINITY,
+			voiceAt: null,
+			judgedTo: Number.NEGATIVE_INFINITY,
 			observations: new Set([input.observationId]),
 			activity: new Map([
 				[
@@ -1632,6 +1681,8 @@ export class WidebandAnalogRecorder {
 	 * Voice gate input: the judged frames inside a joined track's span, trimmed by
 	 * WIDEBAND_GATE_EDGE_TRIM_MS at both ends (an open track runs to now). Pre-roll, hang and the
 	 * noise between joined transmissions stay out: squelch-open noise is not a carrier's audio.
+	 * The same frames feed the session's VoiceOnAirMeter for as long as the session runs (the file
+	 * gate stops once voiced): the per-transmission voice signal of recordingActive.
 	 */
 	private gateFrames(
 		s: Session,
@@ -1643,7 +1694,8 @@ export class WidebandAnalogRecorder {
 		const from = file.startSample + first * perFrame
 		for (const [id, a] of s.activity)
 			if (!a.open && a.last < from) s.activity.delete(id)
-		if (file.gate.voiced || pcm.length === 0) return
+		if (pcm.length === 0) return
+		s.judgedTo = Math.max(s.judgedTo, from + pcm.length * perFrame)
 		const trim = (WIDEBAND_GATE_EDGE_TRIM_MS * s.fs) / 1000
 		const mask = new Uint8Array(pcm.length)
 		for (const a of s.activity.values()) {
@@ -1664,9 +1716,19 @@ export class WidebandAnalogRecorder {
 			}
 			let j = i
 			while (j < pcm.length && mask[j] === 1) j++
-			file.gate.push(pcm.subarray(i, j))
-			file.heard += j - i
-			s.heard += j - i
+			const run = pcm.subarray(i, j)
+			const runFrom = from + i * perFrame
+			// A run that does not continue the last one (another track, after a gap or a trim):
+			// no meter window joins the two.
+			if (runFrom - s.meterTo > perFrame / 2) s.meter.reset()
+			const voicedTo = s.meter.push(run)
+			if (voicedTo > 0) s.voiceAt = runFrom + voicedTo * perFrame
+			s.meterTo = from + j * perFrame
+			if (!file.gate.voiced) {
+				file.gate.push(run)
+				file.heard += j - i
+				s.heard += j - i
+			}
 			i = j
 		}
 	}

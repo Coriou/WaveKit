@@ -328,8 +328,9 @@ export interface JobRunnerDeps {
 	 * engine's current stream and epoch, while the job's own hop epoch runs): a sweep then keeps
 	 * the hop instead of leaving it, within its bounds (scheduler `recordingActive`). Called on the
 	 * scheduler's re-checks (every 250 ms while a hop is kept). Absent: a sweep never waits for a
-	 * recording (behaviour as before). "voice": the recording is of analog voice that sounded like
-	 * voice, and the hop may be kept up to `hold.maxHoldMs` (scheduler RecordingActivity).
+	 * recording (behaviour as before). "voice": voice is on air in the recorded transmission now,
+	 * and the hop may be kept until that transmission ends, up to `hold.maxHoldMs` (scheduler
+	 * RecordingActivity, "record whole voice").
 	 */
 	recordingActive?: (
 		sourceId: string,

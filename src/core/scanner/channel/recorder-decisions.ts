@@ -1,13 +1,17 @@
 /**
  * The wideband analog recorder's decision log (docs/SCANNER.md, Recorder decisions): every
- * decision gets a closed reason code (SCANNER_RECORDER_DECISIONS), logged at info within a rate
- * limit and kept for the API (a bounded ring for the scanner status, a bounded per-observation
- * memory for discovery reads). Only trusted values are logged: the code, the source id from the
- * config and the core's own observation and discovery ids.
+ * decision gets a closed reason code (SCANNER_RECORDER_DECISIONS) and is kept for the API (a
+ * bounded per-observation memory for discovery reads). A session decision is logged at info
+ * within a rate limit and kept in the status ring of session decisions; a snapshot refusal (an
+ * observation refused before any session started for it) is logged at debug and kept in its own
+ * ring, so the refusals of busy tracks never crowd session decisions out of either. Only trusted
+ * values are logged: the code, the source id from the config and the core's own observation and
+ * discovery ids.
  */
 import {
 	RECORDER_MAX_OBSERVATIONS,
 	RECORDER_RECENT_DECISIONS,
+	RECORDER_RECENT_REFUSALS,
 	type ScannerRecorderDecision,
 	type ScannerRecorderDecisionEntry,
 	type ScannerRecorderDiscovery,
@@ -15,10 +19,11 @@ import {
 import type { Logger } from "../../../utils/logger.js"
 
 /**
- * Info lines per RECORDER_LOG_WINDOW_MS. A recorded transmission costs 3 to 4 lines (started or
- * shadow, classed, voiced, finalized), so 20 a minute log about five recordings a minute in full
- * and at most 20 × 1440 = 28 800 lines a day; past it the lines are counted (logsSuppressed) and
- * the next logged line carries how many were left out.
+ * Info lines per RECORDER_LOG_WINDOW_MS, session decisions only (snapshot refusals go to debug). A
+ * recorded transmission costs 3 to 4 lines (started or shadow, classed, voiced, finalized), so 20
+ * a minute log about five recordings a minute in full and at most 20 × 1440 = 28 800 lines a day;
+ * past it the lines are counted (logsSuppressed) and the next logged line carries how many were
+ * left out.
  */
 export const RECORDER_LOG_LIMIT = 20
 export const RECORDER_LOG_WINDOW_MS = 60_000
@@ -46,7 +51,10 @@ interface Entry {
 }
 
 export class RecorderDecisions {
+	/** Session decisions, newest last (RECORDER_RECENT_DECISIONS). */
 	private readonly recent: Entry[] = []
+	/** Snapshot refusals, newest last (RECORDER_RECENT_REFUSALS). */
+	private readonly refusals: Entry[] = []
 	private readonly counts = new Map<ScannerRecorderDecision, number>()
 	/** Insertion order is recency: an update moves the observation to the end. */
 	private readonly byObservation = new Map<string, ObservationMemory>()
@@ -66,7 +74,9 @@ export class RecorderDecisions {
 	 * decision: it is not counted, kept or logged, but the discovery it now carries is still bound
 	 * (an observation may be associated only after its first refusal). Any other code always
 	 * counts: a session's decisions are each about a file or the session (two files of one session
-	 * finalize twice, two files refused by the store are refused twice).
+	 * finalize twice, two files refused by the store are refused twice). A snapshot refusal is
+	 * logged at debug and kept in the refusal ring; a session decision at info (rate limited) and in
+	 * the session ring.
 	 */
 	note(
 		code: ScannerRecorderDecision,
@@ -103,6 +113,12 @@ export class RecorderDecisions {
 			sourceId: ref.sourceId,
 			observationId: ref.observationId,
 			discoveryId: memory.discoveryId,
+		}
+		if (!session) {
+			this.refusals.push(entry)
+			if (this.refusals.length > RECORDER_RECENT_REFUSALS) this.refusals.shift()
+			this.log.debug(fields(entry), "Analog recorder snapshot refusal")
+			return
 		}
 		this.recent.push(entry)
 		if (this.recent.length > RECORDER_RECENT_DECISIONS) this.recent.shift()
@@ -142,11 +158,13 @@ export class RecorderDecisions {
 
 	status(): {
 		recent: ScannerRecorderDecisionEntry[]
+		recentRefusals: ScannerRecorderDecisionEntry[]
 		counts: Partial<Record<ScannerRecorderDecision, number>>
 		logsSuppressed: number
 	} {
 		return {
 			recent: this.recent.map(dto),
+			recentRefusals: this.refusals.map(dto),
 			counts: Object.fromEntries(this.counts),
 			logsSuppressed: this.suppressedTotal,
 		}
@@ -166,15 +184,18 @@ export class RecorderDecisions {
 		const suppressed = this.suppressedInWindow
 		this.suppressedInWindow = 0
 		this.log.info(
-			{
-				decision: entry.code,
-				sourceId: entry.sourceId,
-				observationId: entry.observationId,
-				discoveryId: entry.discoveryId,
-				...(suppressed > 0 ? { suppressed } : {}),
-			},
+			{ ...fields(entry), ...(suppressed > 0 ? { suppressed } : {}) },
 			"Analog recorder decision",
 		)
+	}
+}
+
+function fields(entry: Entry): Record<string, string | null> {
+	return {
+		decision: entry.code,
+		sourceId: entry.sourceId,
+		observationId: entry.observationId,
+		discoveryId: entry.discoveryId,
 	}
 }
 

@@ -12,6 +12,7 @@ import {
 	VOICE_MIN_RMS,
 	VOICE_WINDOW_BLOCKS,
 	VoiceActivityGate,
+	VoiceOnAirMeter,
 } from "../../../../src/core/scanner/channel/voice-activity.js"
 import { mulberry32 } from "../../../mocks/scanner/signals.js"
 
@@ -139,5 +140,34 @@ describe("VoiceActivityGate", () => {
 				{ numRuns: 100 },
 			)
 		})
+	})
+})
+
+describe("VoiceOnAirMeter (per-transmission voice, never latches)", () => {
+	it("reports where the last voiced window ended, and 0 once only silence follows a full window later", () => {
+		const m = new VoiceOnAirMeter()
+		const loud = tone(700, 8000, 2 * WINDOW)
+		// Every block after the first full window ends a voiced window: the last frame counts.
+		expect(m.push(loud)).toBe(2 * WINDOW)
+		// Silence: the windows still holding loud blocks are voiced (RMS over the window), the
+		// first block-aligned window of silence only is not.
+		const quiet = new Int16Array(2 * WINDOW)
+		const to = m.push(quiet)
+		expect(to).toBeGreaterThan(0)
+		expect(to).toBeLessThan(WINDOW)
+		expect(m.push(new Int16Array(WINDOW))).toBe(0)
+		// It never latches: voice again is reported again.
+		expect(m.push(loud)).toBe(2 * WINDOW)
+	})
+
+	it("needs a full window after reset() (no window joins audio across the reset)", () => {
+		const m = new VoiceOnAirMeter()
+		const loud = tone(700, 8000, WINDOW)
+		expect(m.push(loud)).toBe(WINDOW)
+		m.reset()
+		expect(m.push(loud.subarray(0, WINDOW - VOICE_BLOCK_FRAMES))).toBe(0)
+		expect(m.push(loud.subarray(WINDOW - VOICE_BLOCK_FRAMES))).toBe(
+			VOICE_BLOCK_FRAMES,
+		)
 	})
 })

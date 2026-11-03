@@ -129,18 +129,87 @@ export class VoiceActivityGate {
 	}
 
 	private windowVoiced(blocks: readonly Block[], frames: number): boolean {
-		let total = 0
-		let low = 0
-		let high = 0
-		for (const b of blocks) {
-			total += b.total
-			low += b.low
-			high += b.high
+		return windowVoiced(blocks, frames)
+	}
+}
+
+/** A window (blocks totalling `frames`) is loud enough and voice-tilted. */
+function windowVoiced(blocks: readonly Block[], frames: number): boolean {
+	let total = 0
+	let low = 0
+	let high = 0
+	for (const b of blocks) {
+		total += b.total
+		low += b.low
+		high += b.high
+	}
+	const meanSquare = total / frames
+	return (
+		meanSquare >= VOICE_MIN_RMS * VOICE_MIN_RMS && low >= VOICE_MIN_TILT * high
+	)
+}
+
+/**
+ * Is voice on air now? The same filters and 500 ms windows as VoiceActivityGate, but it never
+ * latches: every completed block ends a window (sliding by one 100 ms block) that is judged, and
+ * `push` returns where the last voiced window of the pushed audio ended. The recorder feeds it
+ * a session's in-track audio and asks how long ago voice was last heard (the sweep's per
+ * transmission voice signal, WIDEBAND_VOICE_ON_AIR_MS). `reset()` forgets the window across a
+ * break in the fed audio, so no window joins two transmissions. Same cost per frame as the gate.
+ */
+export class VoiceOnAirMeter {
+	private readonly hp = BUTTERWORTH4_Q.map(
+		q => new Biquad("high", VOICE_GATE_HIGH_PASS_HZ, ANALOG_AUDIO_RATE_HZ, q),
+	)
+	private readonly low = new Biquad(
+		"low",
+		VOICE_LOW_BAND_HZ,
+		ANALOG_AUDIO_RATE_HZ,
+		Math.SQRT1_2,
+	)
+	private readonly high = new Biquad(
+		"high",
+		VOICE_HIGH_BAND_HZ,
+		ANALOG_AUDIO_RATE_HZ,
+		Math.SQRT1_2,
+	)
+	/** The last VOICE_WINDOW_BLOCKS completed blocks (fixed size: no growth). */
+	private readonly blocks: Block[] = []
+	private cur: Block = { total: 0, low: 0, high: 0 }
+	private inBlock = 0
+
+	/**
+	 * Feeds frames; returns the count of frames of `pcm` up to the end of the last window that
+	 * was voiced (1 to pcm.length), or 0 when no window completed in it was voiced.
+	 */
+	push(pcm: ArrayLike<number>): number {
+		let voicedTo = 0
+		for (let i = 0; i < pcm.length; i++) {
+			let x = pcm[i]!
+			for (const stage of this.hp) x = stage.step(x)
+			const l = this.low.step(x)
+			const h = this.high.step(x)
+			this.cur.total += x * x
+			this.cur.low += l * l
+			this.cur.high += h * h
+			if (++this.inBlock < VOICE_BLOCK_FRAMES) continue
+			this.blocks.push(this.cur)
+			if (this.blocks.length > VOICE_WINDOW_BLOCKS) this.blocks.shift()
+			this.cur = { total: 0, low: 0, high: 0 }
+			this.inBlock = 0
+			if (
+				this.blocks.length === VOICE_WINDOW_BLOCKS &&
+				windowVoiced(this.blocks, VOICE_WINDOW_BLOCKS * VOICE_BLOCK_FRAMES)
+			)
+				voicedTo = i + 1
 		}
-		const meanSquare = total / frames
-		return (
-			meanSquare >= VOICE_MIN_RMS * VOICE_MIN_RMS &&
-			low >= VOICE_MIN_TILT * high
-		)
+		return voicedTo
+	}
+
+	/** Forgets the window (the filters keep their state: a break in the audio, not a new chain). */
+	reset(): void {
+		this.blocks.length = 0
+		this.cur = { total: 0, low: 0, high: 0 }
+		this.inBlock = 0
 	}
 }

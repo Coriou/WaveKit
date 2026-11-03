@@ -3258,10 +3258,14 @@ is unknown, and from older cores.
 recorder: `sessions` (one per channel being demodulated: `sourceId`, `observationId`,
 `discoveryId` or null, `state` `shadow`/`classed`/`voiced`, `writing` when a WAV is open,
 `backlogMs` how far the demodulator is behind the air), `parked` (retune-ended recordings
-waiting for their close), `recent` (the last 64 decisions, newest last, each `code`, `at`,
-`sourceId`, `observationId`, `discoveryId`), `counts` (decisions per code since the core
-started) and `logsSuppressed` (decision log lines left out by the 20-a-minute info log
-limit). The codes are explained in
+waiting for their close), `recent` (the last 64 decisions about recordings: a start, class,
+voice, eviction, final decision, or the refusal or discard that ended one; newest last, each
+`code`, `at`, `sourceId`, `observationId`, `discoveryId`), `recentRefusals` (the last 32
+snapshot refusals, observations refused before any recording started for them, kept apart so
+they never push a recording's decisions out of `recent`; same fields; absent from older cores,
+whose `recent` held both), `counts` (decisions per code since the core started, refusals
+included) and `logsSuppressed` (recording decision log lines left out by the 20-a-minute info
+log limit; snapshot refusals are logged at debug, outside it). The codes are explained in
 [SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings).
 
 ```json
@@ -3278,6 +3282,15 @@ limit). The codes are explained in
 	],
 	"parked": 0,
 	"recent": [
+		{
+			"code": "started",
+			"at": "2026-11-03T04:30:11.600Z",
+			"sourceId": "rtl",
+			"observationId": "01m6g3…",
+			"discoveryId": "d_01m6g3…"
+		}
+	],
+	"recentRefusals": [
 		{
 			"code": "refused:cpu",
 			"at": "2026-11-03T04:30:11.300Z",
