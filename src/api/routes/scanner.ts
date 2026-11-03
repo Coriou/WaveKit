@@ -28,6 +28,7 @@ import type { ScannerIdentifyRequest } from "@wavekit/api-types"
 import {
 	DISCOVERY_STORE_EPOCH_HEADER,
 	DISCOVERY_STORE_REVISION_HEADER,
+	SCANNER_RECORDER_DECISIONS,
 } from "@wavekit/api-types"
 import type {
 	FastifyInstance,
@@ -121,6 +122,7 @@ export type ScannerRouteService = Pick<
 			| "discoveryCoverage"
 			| "storeMeta"
 			| "discoveryTrialMemory"
+			| "discoveryRecorder"
 		>
 	>
 
@@ -534,6 +536,31 @@ const discoveryTrialMemorySchema = {
 	},
 } as const
 
+/** `Discovery.recorder` (detail reads): the analog recorder's decisions about the discovery. */
+const discoveryRecorderSchema = {
+	type: "object",
+	additionalProperties: false,
+	required: ["last", "counts"],
+	properties: {
+		last: {
+			type: "object",
+			additionalProperties: false,
+			required: ["code", "at", "sourceId", "observationId", "discoveryId"],
+			properties: {
+				code: { type: "string", enum: [...SCANNER_RECORDER_DECISIONS] },
+				at: { type: "string" },
+				sourceId: { type: "string" },
+				observationId: { type: "string" },
+				discoveryId: { type: ["string", "null"] },
+			},
+		},
+		counts: {
+			type: "object",
+			additionalProperties: { type: "integer" },
+		},
+	},
+} as const
+
 /**
  * A discovery record. Only the band inspection UX fields are listed (all optional); every other
  * field passes through unchanged (`additionalProperties`).
@@ -545,6 +572,7 @@ const discoveryResponseSchema = {
 		...discoveryAnchorProperties,
 		coverage: discoveryCoverageSchema,
 		trialMemory: discoveryTrialMemorySchema,
+		recorder: discoveryRecorderSchema,
 		absorbedInto: { type: "string" },
 		requestedId: { type: "string" },
 		revision: { type: "integer" },
@@ -860,7 +888,15 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 				typeof scanner.discoveryTrialMemory === "function"
 					? scanner.discoveryTrialMemory(shown.id)
 					: []
-			return trials.length > 0 ? { ...shown, trialMemory: trials } : shown
+			const recorder =
+				typeof scanner.discoveryRecorder === "function"
+					? scanner.discoveryRecorder(shown.id)
+					: null
+			return {
+				...shown,
+				...(trials.length > 0 ? { trialMemory: trials } : {}),
+				...(recorder !== null ? { recorder } : {}),
+			}
 		},
 	)
 

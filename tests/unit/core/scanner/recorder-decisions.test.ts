@@ -1,0 +1,286 @@
+/**
+ * The analog recorder's decision log: reason codes, the info log's rate limit, the bounded ring and
+ * observation memory, and the codes the recorder gives on its real paths (synthetic signals).
+ */
+import { Writable } from "node:stream"
+import pino from "pino"
+import { describe, expect, it } from "vitest"
+import {
+	RECORDER_MAX_OBSERVATIONS,
+	RECORDER_RECENT_DECISIONS,
+	SCANNER_RECORDER_DECISIONS,
+} from "@wavekit/api-types"
+import {
+	RECORDER_LOG_LIMIT,
+	RECORDER_LOG_WINDOW_MS,
+	RecorderDecisions,
+} from "../../../../src/core/scanner/channel/recorder-decisions.js"
+import {
+	LOW,
+	LOW_FS,
+	LOW_OFFSET,
+	harness,
+	input,
+	snapshot,
+	transmission,
+} from "./wideband-recorder-harness.js"
+
+function capture() {
+	const lines: Record<string, unknown>[] = []
+	const stream = new Writable({
+		write(chunk: Buffer, _enc, done) {
+			for (const line of chunk.toString().split("\n"))
+				if (line.trim() !== "")
+					lines.push(JSON.parse(line) as Record<string, unknown>)
+			done()
+		},
+	})
+	return { lines, logger: pino({ level: "info" }, stream) }
+}
+
+const flushLogs = () => new Promise(r => setImmediate(r))
+
+const ref = (n: number, discoveryId: string | null = null) => ({
+	sourceId: "rtl",
+	observationId: `o_${n}`,
+	discoveryId,
+})
+
+describe("RecorderDecisions", () => {
+	it("logs RECORDER_LOG_LIMIT (20) decisions per 60 s window at info; the 21st is counted, and the next window's first line carries it", async () => {
+		const { lines, logger } = capture()
+		let now = 1_000_000
+		const d = new RecorderDecisions(logger, () => now)
+		for (let i = 0; i < RECORDER_LOG_LIMIT; i++) d.note("started", ref(i))
+		await flushLogs()
+		expect(lines).toHaveLength(20)
+		d.note("started", ref(20))
+		d.note("started", ref(21))
+		await flushLogs()
+		expect(lines).toHaveLength(20)
+		expect(d.status().logsSuppressed).toBe(2)
+		// One ms before the window ends: still suppressed.
+		now += RECORDER_LOG_WINDOW_MS - 1
+		d.note("started", ref(22))
+		await flushLogs()
+		expect(lines).toHaveLength(20)
+		now += 1
+		d.note("started", ref(23))
+		await flushLogs()
+		expect(lines).toHaveLength(21)
+		expect(lines[20]).toMatchObject({
+			level: 30,
+			decision: "started",
+			observationId: "o_23",
+			suppressed: 3,
+			msg: "Analog recorder decision",
+		})
+		// Only the code, the source and the core's ids are logged.
+		expect(Object.keys(lines[0]!).sort()).toEqual(
+			[
+				"decision",
+				"discoveryId",
+				"hostname",
+				"level",
+				"msg",
+				"observationId",
+				"pid",
+				"sourceId",
+				"time",
+			].sort(),
+		)
+		// Every decision is still counted and kept, logged or not.
+		expect(d.status().counts.started).toBe(24)
+	})
+
+	it("a refusal repeating the observation's last decision is no new decision; other codes always count", () => {
+		const d = new RecorderDecisions(pino({ level: "silent" }), () => 0)
+		d.note("refused:slots", ref(1))
+		d.note("refused:slots", ref(1))
+		d.note("refused:cpu", ref(1))
+		d.note("refused:slots", ref(1))
+		d.note("finalized", ref(1))
+		d.note("finalized", ref(1))
+		expect(d.status().counts).toEqual({
+			"refused:slots": 2,
+			"refused:cpu": 1,
+			finalized: 2,
+		})
+		expect(d.status().recent.map(e => e.code)).toEqual([
+			"refused:slots",
+			"refused:cpu",
+			"refused:slots",
+			"finalized",
+			"finalized",
+		])
+	})
+
+	it(`keeps the last RECORDER_RECENT_DECISIONS (${RECORDER_RECENT_DECISIONS}) decisions, newest last`, () => {
+		const d = new RecorderDecisions(pino({ level: "silent" }), () => 0)
+		for (let i = 0; i < RECORDER_RECENT_DECISIONS; i++)
+			d.note("started", ref(i))
+		expect(d.status().recent).toHaveLength(64)
+		expect(d.status().recent[0]!.observationId).toBe("o_0")
+		d.note("started", ref(64))
+		expect(d.status().recent).toHaveLength(64)
+		expect(d.status().recent[0]!.observationId).toBe("o_1")
+		expect(d.status().recent[63]!.observationId).toBe("o_64")
+	})
+
+	it(`remembers RECORDER_MAX_OBSERVATIONS (${RECORDER_MAX_OBSERVATIONS}) observations for discovery reads, least recent dropped`, () => {
+		const d = new RecorderDecisions(pino({ level: "silent" }), () => 0)
+		for (let i = 0; i < RECORDER_MAX_OBSERVATIONS; i++)
+			d.note("started", ref(i, `d_${i}`))
+		expect(d.forDiscovery("d_0")).not.toBeNull()
+		// o_0 is used again: o_1 is now the least recent.
+		d.note("voiced", ref(0, "d_0"))
+		d.note("started", ref(RECORDER_MAX_OBSERVATIONS, "d_new"))
+		expect(d.forDiscovery("d_0")).not.toBeNull()
+		expect(d.forDiscovery("d_1")).toBeNull()
+		expect(d.forDiscovery("d_new")).not.toBeNull()
+	})
+
+	it("a discovery read sums its observations and names the newest decision; a shadow's decisions join once its discovery is known", () => {
+		let now = Date.UTC(2026, 10, 3, 4, 0, 0)
+		const d = new RecorderDecisions(pino({ level: "silent" }), () => now)
+		d.note("shadow", ref(1))
+		expect(d.forDiscovery("d_1")).toBeNull()
+		d.bindDiscovery("o_1", "d_1")
+		now += 1_000
+		d.note("classed", ref(1, "d_1"))
+		now += 1_000
+		d.note("refused:cpu", ref(2, "d_1"))
+		d.note("started", ref(3, "d_other"))
+		expect(d.forDiscovery("d_1")).toEqual({
+			last: {
+				code: "refused:cpu",
+				at: new Date(now).toISOString(),
+				sourceId: "rtl",
+				observationId: "o_2",
+				discoveryId: "d_1",
+			},
+			counts: { shadow: 1, classed: 1, "refused:cpu": 1 },
+		})
+	})
+
+	it("every code is a closed string of the form name or kind:why", () => {
+		for (const code of SCANNER_RECORDER_DECISIONS)
+			expect(code).toMatch(/^(?:[a-z]+|(?:refused|discarded):[a-z-]+)$/)
+	})
+})
+
+describe("WidebandAnalogRecorder decisions (synthetic signals)", () => {
+	it("a voice recorded whole: started, voiced, finalized; the status shows the live session, then the decisions", async () => {
+		const h = harness()
+		await h.feed(0.5, false)
+		const onset = h.engine.liveEdge()
+		await h.feed(2, true, () =>
+			h.rec.track(input("o", snapshot("o", onset, h.engine.liveEdge()))),
+		)
+		const live = h.rec.diagnostics()
+		expect(live.sessions).toHaveLength(1)
+		expect(live.sessions[0]).toMatchObject({
+			sourceId: "rtl",
+			observationId: "o",
+			discoveryId: "d_1",
+			state: "voiced",
+			writing: true,
+		})
+		expect(live.sessions[0]!.backlogMs).toBeGreaterThanOrEqual(0)
+		const end = h.engine.liveEdge()
+		await h.feed(0.6, false)
+		h.rec.closed("o", snapshot("o", onset, end), null)
+		await h.feed(3, false)
+		await h.rec.idle()
+		const st = h.rec.diagnostics()
+		expect(st.sessions).toEqual([])
+		expect(st.recent.map(e => e.code)).toEqual([
+			"started",
+			"voiced",
+			"finalized",
+		])
+		expect(h.rec.discoveryDecisions("d_1")?.last.code).toBe("finalized")
+		expect(h.ops[0]!.outcome).toBe("finalized")
+	}, 60_000)
+
+	it("a classed carrier that never sounds like voice: never 'voice' for a sweep, discarded:unvoiced after 8 s in the track", async () => {
+		const h = harness({
+			fs: LOW_FS,
+			offset: LOW_OFFSET,
+			source: { voice: false },
+		})
+		await h.feed(0.5, false)
+		const onset = h.engine.liveEdge()
+		const seen = new Set<string | false>()
+		// WIDEBAND_QUALIFY_MS (8 s) of in-track audio, judged a holdback (1 s) late, and a margin.
+		await h.feed(10, true, () => {
+			h.rec.track(input("c", snapshot("c", onset, h.engine.liveEdge(), LOW)))
+			seen.add(h.rec.recordingActive("rtl", { stream: 1, epoch: 1 }))
+		})
+		expect([...seen]).toEqual([false])
+		expect(h.rec.diagnostics().recent.map(e => e.code)).toEqual([
+			"started",
+			"discarded:unvoiced",
+		])
+		expect(h.ops).toHaveLength(0)
+	}, 60_000)
+
+	it("a full CPU budget: refused:cpu once however many snapshots retry; then started when it frees", async () => {
+		let full = true
+		const h = harness({ reserveCores: () => (full ? null : () => undefined) })
+		await h.feed(0.5, false)
+		const onset = h.engine.liveEdge()
+		const report = () =>
+			h.rec.track(input("o", snapshot("o", onset, h.engine.liveEdge())))
+		await h.feed(0.5, true, report)
+		expect(h.rec.diagnostics().counts).toEqual({ "refused:cpu": 1 })
+		full = false
+		await h.feed(0.1, true, report)
+		expect(h.rec.diagnostics().recent.map(e => e.code)).toEqual([
+			"refused:cpu",
+			"started",
+		])
+	}, 60_000)
+
+	it("encrypted, opted out and non-analog snapshots get their own refusal codes", async () => {
+		const h = harness()
+		await h.feed(0.2, false)
+		const onset = h.engine.liveEdge()
+		await h.feed(0.2, true)
+		const track = snapshot("x", onset, h.engine.liveEdge())
+		h.rec.track(input("e", track, { encrypted: true }))
+		h.rec.track(input("r", track, { recordAllowed: false }))
+		h.rec.track(input("n", track, { analogFm: false, nonAnalog: true }))
+		expect(
+			h.rec.diagnostics().recent.map(e => [e.observationId, e.code]),
+		).toEqual([
+			["e", "refused:encrypted"],
+			["r", "refused:record-disabled"],
+			["n", "refused:not-analog"],
+		])
+	})
+
+	it("an encrypted close discards a recording in progress: refused:encrypted is its last decision", async () => {
+		const h = harness()
+		await h.feed(0.5, false)
+		await transmission(h, "o", 2)
+		// transmission() closed it cleanly; a second one closes encrypted.
+		await h.feed(3, false)
+		const onset = h.engine.liveEdge()
+		await h.feed(2, true, () =>
+			h.rec.track(input("p", snapshot("p", onset, h.engine.liveEdge()))),
+		)
+		const end = h.engine.liveEdge()
+		h.rec.closed("p", snapshot("p", onset, end), null, {
+			analogFm: true,
+			discoveryId: "d_1",
+			encrypted: true,
+		})
+		await h.feed(1, false)
+		const codes = h.rec
+			.diagnostics()
+			.recent.filter(e => e.observationId === "p")
+			.map(e => e.code)
+		expect(codes.at(-1)).toBe("refused:encrypted")
+	}, 60_000)
+})

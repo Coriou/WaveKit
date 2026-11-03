@@ -312,7 +312,7 @@ describe("WidebandAnalogRecorder admission retries and the CPU budget", () => {
 })
 
 describe("WidebandAnalogRecorder sweep-hold hook", () => {
-	it("recordingActive is true only while a classed, voiced session is open on that stream and epoch", async () => {
+	it('recordingActive is "voice" only while a classed, voiced session is open on that stream and epoch', async () => {
 		const h = harness()
 		await h.feed(1, false)
 		const onset = h.engine.liveEdge()
@@ -329,7 +329,7 @@ describe("WidebandAnalogRecorder sweep-hold hook", () => {
 		expect(h.rec.recordingActive("rtl", { stream: 1, epoch: 1 })).toBe(false)
 		classed = true
 		await h.feed(0.5, true, report)
-		expect(h.rec.recordingActive("rtl", { stream: 1, epoch: 1 })).toBe(true)
+		expect(h.rec.recordingActive("rtl", { stream: 1, epoch: 1 })).toBe("voice")
 		// The next hop's epoch, another stream and another source: not this recording's window.
 		expect(h.rec.recordingActive("rtl", { stream: 1, epoch: 2 })).toBe(false)
 		expect(h.rec.recordingActive("rtl", { stream: 2, epoch: 1 })).toBe(false)

@@ -62,6 +62,7 @@ import type {
 	ScannerProbeDecoderType,
 	ScannerTrialOutcome,
 	DiscoveryTrialMemory,
+	ScannerRecorderDiscovery,
 } from "@wavekit/api-types"
 import {
 	SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
@@ -2145,6 +2146,7 @@ export class ScannerService extends EventEmitter {
 						},
 					}
 				: {}),
+			recorder: this.widebandAnalog.diagnostics(),
 			enabled: s.enabled,
 			channelizerAvailable: false,
 			engines,
@@ -6161,6 +6163,11 @@ export class ScannerService extends EventEmitter {
 	/** the discovery's remembered replay trial outcomes. */
 	trialMemoryOf(discoveryId: string): readonly TrialMemoryEntry[] {
 		return this.trialMemory.view(discoveryId)
+	}
+
+	/** `Discovery.recorder` of a detail read: the analog recorder's decisions, or null when none. */
+	discoveryRecorder(discoveryId: string): ScannerRecorderDiscovery | null {
+		return this.widebandAnalog.discoveryDecisions(discoveryId)
 	}
 
 	/** `Discovery.trialMemory` of a detail read: `trialMemoryOf` with ISO times; [] when none. */

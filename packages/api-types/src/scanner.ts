@@ -388,6 +388,12 @@ export interface Discovery {
 	 */
 	trialMemory?: DiscoveryTrialMemory[]
 	/**
+	 * Detail reads only: the wideband analog recorder's decisions for this discovery's
+	 * observations (ScannerRecorderDiscovery). Absent when the recorder decided nothing about it
+	 * (or forgot: it remembers RECORDER_MAX_OBSERVATIONS observations) and on older cores.
+	 */
+	recorder?: ScannerRecorderDiscovery
+	/**
 	 * Band inspection UX req 3.1: set on a detail read by an id a merge absorbed; this record is
 	 * the survivor, `requestedId` the id asked for.
 	 */
@@ -936,7 +942,98 @@ export interface ScannerIqCaptureStatus {
 	} | null
 }
 
+/**
+ * Decisions of the wideband analog voice recorder (docs/SCANNER.md, Recorder decisions). A
+ * `refused:*` code means the observation is not recorded: `refused:slots`, `refused:cpu`,
+ * `refused:not-analog`, `refused:tuning`, `refused:no-iq` and `refused:channel-owned` are
+ * retried on its next snapshot, the others are final. A `discarded:*` code means audio was held
+ * and dropped without a file.
+ */
+export const SCANNER_RECORDER_DECISIONS = [
+	"started",
+	"shadow",
+	"classed",
+	"voiced",
+	"evicted",
+	"finalized",
+	"refused:channel-owned",
+	"refused:no-iq",
+	"refused:tuning",
+	"refused:not-analog",
+	"refused:unsupported",
+	"refused:slots",
+	"refused:cpu",
+	"refused:start-failed",
+	"refused:encrypted",
+	"refused:record-disabled",
+	"refused:unclean",
+	"refused:store",
+	"discarded:not-analog",
+	"discarded:unclassed",
+	"discarded:no-discovery",
+	"discarded:unvoiced",
+	"discarded:too-short",
+	"discarded:source-lost",
+	"discarded:empty",
+	"discarded:buffer-full",
+	"discarded:store-backlog",
+	"discarded:write-failed",
+	"discarded:park-expired",
+	"discarded:aborted",
+	"discarded:error",
+] as const
+export type ScannerRecorderDecision =
+	(typeof SCANNER_RECORDER_DECISIONS)[number]
+/** Decisions kept in `ScannerRecorderStatus.recent` (newest last). */
+export const RECORDER_RECENT_DECISIONS = 64
+/** Observations whose decisions the recorder remembers for discovery reads (oldest dropped). */
+export const RECORDER_MAX_OBSERVATIONS = 256
+
+export interface ScannerRecorderDecisionEntry {
+	code: ScannerRecorderDecision
+	/** ISO time of the decision. */
+	at: string
+	sourceId: string
+	observationId: string
+	/** Null while the observation has no discovery yet (a shadow). */
+	discoveryId: string | null
+}
+
+/** One live recorder session (one channel being demodulated). */
+export interface ScannerRecorderSession {
+	sourceId: string
+	/** The observation that started the session. */
+	observationId: string
+	discoveryId: string | null
+	/** shadow: not classed analog yet; classed: classed, not voiced yet; voiced: both. */
+	state: "shadow" | "classed" | "voiced"
+	/** A store operation (a WAV file) is open. */
+	writing: boolean
+	/** How far the demodulator is behind the live edge, in ms of signal. */
+	backlogMs: number
+}
+
+export interface ScannerRecorderStatus {
+	sessions: ScannerRecorderSession[]
+	/** Retune-ended sessions waiting for their close. */
+	parked: number
+	/** The last RECORDER_RECENT_DECISIONS decisions, newest last. */
+	recent: ScannerRecorderDecisionEntry[]
+	/** Decisions since the core started, per code (codes never seen are absent). */
+	counts: Partial<Record<ScannerRecorderDecision, number>>
+	/** Decision log lines left out by the info log's rate limit since the core started. */
+	logsSuppressed: number
+}
+
+/** `Discovery.recorder`: the recorder's decisions for one discovery's observations. */
+export interface ScannerRecorderDiscovery {
+	last: ScannerRecorderDecisionEntry
+	counts: Partial<Record<ScannerRecorderDecision, number>>
+}
+
 export interface ScannerStatus {
+	/** The wideband analog recorder's sessions and decisions. Absent on older cores. */
+	recorder?: ScannerRecorderStatus | undefined
 	iqCapture?: ScannerIqCaptureStatus | undefined
 	enabled: boolean
 	channelizerAvailable: boolean

@@ -1,0 +1,176 @@
+/**
+ * The wideband analog recorder's decision log (docs/SCANNER.md, Recorder decisions): every
+ * decision gets a closed reason code (SCANNER_RECORDER_DECISIONS), logged at info within a rate
+ * limit and kept for the API (a bounded ring for the scanner status, a bounded per-observation
+ * memory for discovery reads). Only trusted values are logged: the code, the source id from the
+ * config and the core's own observation and discovery ids.
+ */
+import {
+	RECORDER_MAX_OBSERVATIONS,
+	RECORDER_RECENT_DECISIONS,
+	type ScannerRecorderDecision,
+	type ScannerRecorderDecisionEntry,
+	type ScannerRecorderDiscovery,
+} from "@wavekit/api-types"
+import type { Logger } from "../../../utils/logger.js"
+
+/**
+ * Info lines per RECORDER_LOG_WINDOW_MS. A recorded transmission costs 3 to 4 lines (started or
+ * shadow, classed, voiced, finalized), so 20 a minute log about five recordings a minute in full
+ * and at most 20 × 1440 = 28 800 lines a day; past it the lines are counted (logsSuppressed) and
+ * the next logged line carries how many were left out.
+ */
+export const RECORDER_LOG_LIMIT = 20
+export const RECORDER_LOG_WINDOW_MS = 60_000
+
+export interface RecorderDecisionRef {
+	readonly sourceId: string
+	readonly observationId: string
+	readonly discoveryId: string | null
+}
+
+interface ObservationMemory {
+	sourceId: string
+	discoveryId: string | null
+	last: ScannerRecorderDecision
+	at: number
+	counts: Map<ScannerRecorderDecision, number>
+}
+
+interface Entry {
+	code: ScannerRecorderDecision
+	at: number
+	sourceId: string
+	observationId: string
+	discoveryId: string | null
+}
+
+export class RecorderDecisions {
+	private readonly recent: Entry[] = []
+	private readonly counts = new Map<ScannerRecorderDecision, number>()
+	/** Insertion order is recency: an update moves the observation to the end. */
+	private readonly byObservation = new Map<string, ObservationMemory>()
+	private windowStart = Number.NEGATIVE_INFINITY
+	private logged = 0
+	private suppressedInWindow = 0
+	private suppressedTotal = 0
+
+	constructor(
+		private readonly log: Logger,
+		private readonly now: () => number,
+	) {}
+
+	/**
+	 * One decision. A refusal repeating the observation's last decision (a snapshot retried while
+	 * slots or CPU stay full, a class that stays non-analog) is no new decision: it is not counted,
+	 * kept or logged. Any other code always counts (two files of one session finalize twice).
+	 */
+	note(code: ScannerRecorderDecision, ref: RecorderDecisionRef): void {
+		const at = this.now()
+		const known = this.byObservation.get(ref.observationId)
+		if (known?.last === code && code.startsWith("refused:")) return
+		const memory: ObservationMemory = known ?? {
+			sourceId: ref.sourceId,
+			discoveryId: null,
+			last: code,
+			at,
+			counts: new Map(),
+		}
+		memory.last = code
+		memory.at = at
+		memory.discoveryId = ref.discoveryId ?? memory.discoveryId
+		memory.counts.set(code, (memory.counts.get(code) ?? 0) + 1)
+		this.byObservation.delete(ref.observationId)
+		this.byObservation.set(ref.observationId, memory)
+		if (this.byObservation.size > RECORDER_MAX_OBSERVATIONS) {
+			const oldest = this.byObservation.keys().next()
+			if (oldest.done !== true) this.byObservation.delete(oldest.value)
+		}
+		this.counts.set(code, (this.counts.get(code) ?? 0) + 1)
+		const entry: Entry = {
+			code,
+			at,
+			sourceId: ref.sourceId,
+			observationId: ref.observationId,
+			discoveryId: memory.discoveryId,
+		}
+		this.recent.push(entry)
+		if (this.recent.length > RECORDER_RECENT_DECISIONS) this.recent.shift()
+		this.logLine(entry)
+	}
+
+	/** The observation's discovery became known (a shadow classed after its decisions). */
+	bindDiscovery(observationId: string, discoveryId: string): void {
+		const memory = this.byObservation.get(observationId)
+		if (memory) memory.discoveryId ??= discoveryId
+	}
+
+	/** The decisions about `discoveryId`'s remembered observations, or null when there are none. */
+	forDiscovery(discoveryId: string): ScannerRecorderDiscovery | null {
+		let last: { id: string; m: ObservationMemory } | null = null
+		const counts: Partial<Record<ScannerRecorderDecision, number>> = {}
+		for (const [id, m] of this.byObservation) {
+			if (m.discoveryId !== discoveryId) continue
+			for (const [code, n] of m.counts) counts[code] = (counts[code] ?? 0) + n
+			if (last === null || m.at >= last.m.at) last = { id, m }
+		}
+		if (last === null) return null
+		return {
+			last: dto({
+				code: last.m.last,
+				at: last.m.at,
+				sourceId: last.m.sourceId,
+				observationId: last.id,
+				discoveryId,
+			}),
+			counts,
+		}
+	}
+
+	status(): {
+		recent: ScannerRecorderDecisionEntry[]
+		counts: Partial<Record<ScannerRecorderDecision, number>>
+		logsSuppressed: number
+	} {
+		return {
+			recent: this.recent.map(dto),
+			counts: Object.fromEntries(this.counts),
+			logsSuppressed: this.suppressedTotal,
+		}
+	}
+
+	private logLine(entry: Entry): void {
+		if (entry.at - this.windowStart >= RECORDER_LOG_WINDOW_MS) {
+			this.windowStart = entry.at
+			this.logged = 0
+		}
+		if (this.logged >= RECORDER_LOG_LIMIT) {
+			this.suppressedInWindow++
+			this.suppressedTotal++
+			return
+		}
+		this.logged++
+		const suppressed = this.suppressedInWindow
+		this.suppressedInWindow = 0
+		this.log.info(
+			{
+				decision: entry.code,
+				sourceId: entry.sourceId,
+				observationId: entry.observationId,
+				discoveryId: entry.discoveryId,
+				...(suppressed > 0 ? { suppressed } : {}),
+			},
+			"Analog recorder decision",
+		)
+	}
+}
+
+function dto(e: Entry): ScannerRecorderDecisionEntry {
+	return {
+		code: e.code,
+		at: new Date(e.at).toISOString(),
+		sourceId: e.sourceId,
+		observationId: e.observationId,
+		discoveryId: e.discoveryId,
+	}
+}

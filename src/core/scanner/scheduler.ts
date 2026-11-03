@@ -86,6 +86,14 @@ const ID_MS = 28_000
 const LONG_FOLLOW_MARGIN_MS = 5_000
 /** Re-check period of a hold kept for a recording (Hold mode `record`): 5 blocks of 50 ms. */
 const RECORD_RECHECK_MS = 250
+
+/**
+ * What the recording check (`recordingActive`) reports for the tuned window: false, nothing is
+ * recorded; true, a recording runs (the hop is kept within L, keepForRecording); "voice", a
+ * recording of analog voice that sounded like voice runs (classed analog, voiced, still open): the
+ * hop is kept up to `hold.maxHoldMs`, like a decoded follow, so a 28 s ID is recorded whole.
+ */
+export type RecordingActivity = boolean | "voice"
 /**
  * Retry budget of a frequency with carrier evidence: after a hold of d ms it rests K × d × f ms,
  * f spread over [0.5, 1.5) (spread) so retries do not lock to the period of regular overs, with K
@@ -395,7 +403,7 @@ export class SweepScheduler {
 	private readonly probeStartMs: number
 	private readonly minSurfaceBlocks: number
 	private readonly activitySeed: ((hop: Hop) => number) | undefined
-	private readonly recordingActive: (() => boolean) | undefined
+	private readonly recordingActive: (() => RecordingActivity) | undefined
 	private hops: HopState[]
 	private pendingReplan: { plan: HopPlan; spec: NormalisedJobSpec } | null =
 		null
@@ -465,11 +473,11 @@ export class SweepScheduler {
 			minSurfaceBlocks?: number
 			activitySeed?: (hop: Hop) => number
 			/**
-			 * True while the window the scheduler is tuned to is being recorded (the job runner's
-			 * `recordingActive` dependency): an unforced leave keeps the hop instead (Hold mode
-			 * `record`, keepForRecording). Absent: never.
+			 * True (or "voice") while the window the scheduler is tuned to is being recorded (the
+			 * job runner's `recordingActive` dependency): an unforced leave keeps the hop instead
+			 * (Hold mode `record`, keepForRecording; RecordingActivity). Absent: never.
 			 */
-			recordingActive?: () => boolean
+			recordingActive?: () => RecordingActivity
 		},
 	) {
 		if (plan.hops.length === 0)
@@ -880,8 +888,8 @@ export class SweepScheduler {
 	 * may keep the hop for the recording again); otherwise re-check RECORD_RECHECK_MS later.
 	 */
 	private recheckRecording(hold: Hold, now: number): SchedulerAction[] {
-		if (now >= hold.cap || this.recordingActive?.() !== true)
-			return this.leaveHop([])
+		const active = this.recordingActive?.() ?? false
+		if (now >= hold.cap || active === false) return this.leaveHop([])
 		const next = this.nextCandidate()
 		if (next !== null) {
 			this.endHold(false)
@@ -904,7 +912,10 @@ export class SweepScheduler {
 	 * Keeps the hop while its window is being recorded (recordingActive), as a long follow: up to
 	 * what L has left (followBudgetMs) and never past `hold.maxHoldMs` from the start of the visit's
 	 * holds (every later hold of the visit ends by then too: Visit.recordEndMs), which
-	 * starts now if no hold ran. Not while the long-hold lock holds, while parked (a parked hop is
+	 * starts now if no hold ran. A recording of voice ("voice": classed analog, voiced, still open)
+	 * is kept as a decoded follow is: up to `hold.maxHoldMs` whatever L has left, so a 28 s ID is
+	 * recorded whole; past one coarse sweep it locks the next long follow out (endVisit), and once
+	 * the other hops waited L (lockAfterMs) too. A recording that is not voice (true) keeps L. Not while the long-hold lock holds, while parked (a parked hop is
 	 * never left), on a one-hop plan, for a signals-only job or under `hold.policy: "never"`. A
 	 * hold that ran past one coarse sweep locks the next long follow out (endVisit). The held
 	 * frequency's evidence is charged as on any leave; the `record` hold itself brings none. Never
@@ -924,11 +935,16 @@ export class SweepScheduler {
 			return false
 		const now = this.now()
 		const start = this.holdOrigin()
-		const cap = Math.min(
-			start + this.spec.hold.maxHoldMs,
-			start + this.followBudgetMs(),
-		)
-		if (now >= cap || !this.recordingActive()) return false
+		const active = this.recordingActive()
+		if (active === false) return false
+		const cap =
+			active === "voice"
+				? start + this.spec.hold.maxHoldMs
+				: Math.min(
+						start + this.spec.hold.maxHoldMs,
+						start + this.followBudgetMs(),
+					)
+		if (now >= cap) return false
 		const heldId = this.hold?.trackId
 		// Charged first, so a hold that just heard a carrier counts. A recording only of frequencies
 		// with carrier evidence is held under the carrier rules only: keeping its hop for it would

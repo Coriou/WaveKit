@@ -51,6 +51,14 @@ import {
 	widebandNfmSupported,
 } from "./wideband-nfm.js"
 import type { ProofAnalogInput } from "../scanner-redesign-contract.js"
+import type {
+	ScannerRecorderDecision,
+	ScannerRecorderDiscovery,
+	ScannerRecorderSession,
+	ScannerRecorderStatus,
+} from "@wavekit/api-types"
+import { VOICE_MIN_FINAL_FRAMES } from "./voice-activity.js"
+import { RecorderDecisions } from "./recorder-decisions.js"
 
 /** Same bound as the channel-tier trigger: a 25 kHz NFM channel's occupied bandwidth. */
 export const WIDEBAND_MAX_OBW_HZ = 16_000
@@ -487,6 +495,18 @@ function barredAtClose(info: WidebandCloseInfo | undefined): boolean {
 	)
 }
 
+/** Why a snapshot bars a recording (encrypted, opted out, unclean track), or null when it does not. */
+function barredSnapshot(
+	encrypted: boolean,
+	recordAllowed: boolean,
+	clean: boolean,
+): ScannerRecorderDecision | null {
+	if (encrypted) return "refused:encrypted"
+	if (!recordAllowed) return "refused:record-disabled"
+	if (!clean) return "refused:unclean"
+	return null
+}
+
 function bindingKey(binding: RecordingBinding): string {
 	return JSON.stringify(
 		Object.entries(binding).sort(([a], [b]) => (a < b ? -1 : 1)),
@@ -531,9 +551,11 @@ export class WidebandAnalogRecorder {
 	private readonly clock: () => number
 	private stopped = false
 	private warnedAt = Number.NEGATIVE_INFINITY
+	private readonly decisions: RecorderDecisions
 
 	constructor(private readonly deps: WidebandAnalogDeps) {
 		this.log = createComponentLogger(deps.logger, "WidebandAnalogRecorder")
+		this.decisions = new RecorderDecisions(this.log, () => deps.now())
 		this.schedule = deps.schedule ?? (run => void setImmediate(run))
 		this.clock = deps.clock ?? (() => performance.now())
 	}
@@ -555,15 +577,16 @@ export class WidebandAnalogRecorder {
 	}
 
 	/**
-	 * The sweep-hold hook: a session on this source, stream and epoch is classed analog-fm and has
-	 * been voiced (a recording is open or about to be written). A session of another stream or an
-	 * older epoch (the previous hop's window) answers false. The scheduler may keep its hold on
-	 * the hop while this is true, bounded by its own limits.
+	 * The sweep-hold hook: "voice" when a session on this source, stream and epoch is classed
+	 * analog-fm, has been voiced and is still open (a recording is open or about to be written);
+	 * the scheduler may then keep the hop up to `hold.maxHoldMs` (RecordingActivity). A shadow, a
+	 * session not voiced yet, or one of another stream or an older epoch (the previous hop's
+	 * window) answers false: a carrier or an unvoiced signal never keeps a hop.
 	 */
 	recordingActive(
 		sourceId: string,
 		at: { readonly stream: number; readonly epoch: number },
-	): boolean {
+	): "voice" | false {
 		for (const s of this.sessions.values())
 			if (
 				!s.done &&
@@ -573,8 +596,36 @@ export class WidebandAnalogRecorder {
 				s.classed &&
 				s.qualified
 			)
-				return true
+				return "voice"
 		return false
+	}
+
+	/** Status block (ScannerStatus.recorder): live sessions, parked ones and the decision log. */
+	diagnostics(): ScannerRecorderStatus {
+		const sessions: ScannerRecorderSession[] = []
+		for (const s of this.sessions.values()) {
+			if (s.done) continue
+			let edge = s.next
+			try {
+				edge = Math.min(s.engine.liveEdge(), s.limit)
+			} catch {
+				// An engine closing under us: no backlog to report.
+			}
+			sessions.push({
+				sourceId: s.sourceId,
+				observationId: s.owner,
+				discoveryId: s.discoveryId,
+				state: !s.classed ? "shadow" : s.qualified ? "voiced" : "classed",
+				writing: s.ops > 0,
+				backlogMs: Math.max(0, Math.round(((edge - s.next) * 1000) / s.fs)),
+			})
+		}
+		return { sessions, parked: this.parked.size, ...this.decisions.status() }
+	}
+
+	/** Discovery reads (Discovery.recorder): the decisions about its observations, or null. */
+	discoveryDecisions(discoveryId: string): ScannerRecorderDiscovery | null {
+		return this.decisions.forDiscovery(discoveryId)
 	}
 
 	/** The analog operations' liveness check for a binding this recorder issued. */
@@ -617,7 +668,11 @@ export class WidebandAnalogRecorder {
 				parked,
 				observationId,
 				info,
-				!cleanTrack(track) || barredAtClose(info),
+				barredSnapshot(
+					info?.encrypted === true,
+					info?.recordAllowed !== false,
+					cleanTrack(track),
+				),
 				true,
 			)
 			return
@@ -633,14 +688,22 @@ export class WidebandAnalogRecorder {
 		if (!cleanTrack(track) || barredAtClose(info)) {
 			// Any contributing track turning edge, spur, unverified or encrypted (evidence that may
 			// arrive after its last update), or losing record.analog, discards the recording.
-			this.refuse(s, true)
+			this.refuse(
+				s,
+				barredSnapshot(
+					info?.encrypted === true,
+					info?.recordAllowed !== false,
+					false,
+				) ?? "refused:unclean",
+				true,
+			)
 			return
 		}
 		if (info !== undefined && !this.classify(s, observationId, info)) return
 		s.observations.delete(observationId)
 		if (s.observations.size === 0 && !s.classed) {
 			// No class can arrive any more: a shadow is never written.
-			this.discard(s)
+			this.discard(s, "discarded:unclassed")
 			return
 		}
 		if (cut !== null) s.endCut ??= cut
@@ -658,7 +721,8 @@ export class WidebandAnalogRecorder {
 	 */
 	async stop(): Promise<void> {
 		this.stopped = true
-		for (const s of [...this.parked.values()]) this.dropParked(s, false)
+		for (const s of [...this.parked.values()])
+			this.dropParked(s, false, "discarded:park-expired")
 		for (const s of [...this.sessions.values()]) this.endSession(s, "shutdown")
 		await this.idle()
 	}
@@ -679,11 +743,15 @@ export class WidebandAnalogRecorder {
 		observationId: string,
 		info: ClassInfo,
 	): boolean {
-		if (observationId === s.owner && info.discoveryId !== null)
+		if (observationId === s.owner && info.discoveryId !== null) {
 			s.discoveryId ??= info.discoveryId
-		if (info.analogFm) s.classed = true
-		else if (!s.classed && info.nonAnalog === true) {
-			this.refuse(s, true)
+			this.decisions.bindDiscovery(s.owner, info.discoveryId)
+		}
+		if (info.analogFm && !s.classed) {
+			s.classed = true
+			this.decide(s, "classed")
+		} else if (!s.classed && info.nonAnalog === true) {
+			this.refuse(s, "discarded:not-analog", true)
 			return false
 		}
 		if (s.classed) for (const f of [...s.files]) this.admit(s, f)
@@ -693,7 +761,11 @@ export class WidebandAnalogRecorder {
 	private onTrack(input: WidebandTrackInput): void {
 		const { track, observationId } = input
 		// Encrypted, opted out or unclean: never recorded, and a file it contributes to is discarded.
-		const barred = input.encrypted || !input.recordAllowed || !cleanTrack(track)
+		const barred = barredSnapshot(
+			input.encrypted,
+			input.recordAllowed,
+			cleanTrack(track),
+		)
 		const joinedId = this.byObservation.get(observationId)
 		if (joinedId !== undefined) {
 			const p = this.parked.get(joinedId)
@@ -705,20 +777,34 @@ export class WidebandAnalogRecorder {
 			if (!s) return
 			s.lastActive = Math.max(s.lastActive, track.lastSample)
 			this.noteActivity(s, observationId, track)
-			if (barred) this.refuse(s, true)
+			if (barred !== null) this.refuse(s, barred, true)
 			else this.classify(s, observationId, input)
 			return
 		}
-		if (input.channelOwned || this.refused.has(observationId)) return
+		if (this.refused.has(observationId)) return
+		const ref = {
+			sourceId: input.sourceId,
+			observationId,
+			discoveryId: input.discoveryId,
+		}
+		if (input.channelOwned) {
+			this.decisions.note("refused:channel-owned", ref)
+			return
+		}
 		const engine = this.deps.engine(input.sourceId)
-		if (!engine || engine.format !== "U8_IQ") return
+		if (!engine || engine.format !== "U8_IQ") {
+			this.decisions.note("refused:no-iq", ref)
+			return
+		}
 		const epoch = engine.currentEpoch()
 		if (
 			epoch.stream !== track.stream ||
 			epoch.epoch !== track.epoch ||
 			!usableTrust(epoch.tuningTrust)
-		)
+		) {
+			this.decisions.note("refused:tuning", ref)
 			return
+		}
 		// A continuation of a channel already recording joins whatever its classification.
 		for (const s of this.sessions.values()) {
 			if (
@@ -730,11 +816,11 @@ export class WidebandAnalogRecorder {
 				Math.abs(s.targetHz - track.centreHz) > WIDEBAND_JOIN_TOLERANCE_HZ
 			)
 				continue
-			if (barred) {
+			if (barred !== null) {
 				// Its audio would land in this file (or its hang): discard the recording, as when a
 				// joined track turns encrypted, opted out or unclean.
 				s.observations.add(observationId)
-				this.refuse(s, true)
+				this.refuse(s, barred, true)
 				return
 			}
 			const events = s.seg.open(observationId, track.startSample)
@@ -746,19 +832,26 @@ export class WidebandAnalogRecorder {
 			if (this.classify(s, observationId, input)) this.wake(s)
 			return
 		}
-		if (barred) return
+		if (barred !== null) {
+			this.decisions.note(barred, ref)
+			return
+		}
 		// A shadow needs a clean, narrow (cleanTrack), non-burst track where analog FM may be.
 		const shadow =
 			input.shadowAllowed === true &&
 			input.nonAnalog !== true &&
 			!track.flags.burst
-		if (!input.analogFm && !shadow) return
+		if (!input.analogFm && !shadow) {
+			this.decisions.note("refused:not-analog", ref)
+			return
+		}
 		if (
 			!widebandNfmSupported(epoch.sampleRateHz, track.centreHz - epoch.centreHz)
 		) {
 			// Structurally impossible (rate under 48 kHz, offset outside ±rate/2): nothing is
 			// reserved, and this observation is not tried again (bounded by MAX_REMEMBERED).
 			remember(this.refused, observationId)
+			this.decisions.note("refused:unsupported", ref)
 			return
 		}
 		const settings = this.deps.settings()
@@ -770,13 +863,19 @@ export class WidebandAnalogRecorder {
 		if (input.analogFm && this.activeOn(input.sourceId) >= cap)
 			this.evict(input.sourceId)
 		// Still full: not refused, the next snapshot tries again.
-		if (this.activeOn(input.sourceId) >= cap) return
+		if (this.activeOn(input.sourceId) >= cap) {
+			this.decisions.note("refused:slots", ref)
+			return
+		}
 		const reserve = this.deps.reserveCores
 		const release = reserve
 			? reserve(widebandSessionCores(epoch.sampleRateHz))
 			: () => undefined
 		// The shared CPU budget is full (probes, live audio): not refused, retried next snapshot.
-		if (release === null) return
+		if (release === null) {
+			this.decisions.note("refused:cpu", ref)
+			return
+		}
 		let released = false
 		const releaseOnce = (): void => {
 			if (released) return
@@ -793,6 +892,7 @@ export class WidebandAnalogRecorder {
 			if (s) this.cancelSession(s, "cancelled", true)
 			releaseOnce()
 			remember(this.refused, observationId)
+			this.decisions.note("refused:start-failed", ref)
 			this.warn(err)
 		}
 	}
@@ -813,7 +913,7 @@ export class WidebandAnalogRecorder {
 				(!s.classed ||
 					(!s.qualified && s.heard >= WIDEBAND_EVICT_MIN_HEARD_FRAMES))
 			) {
-				this.refuse(s, true)
+				this.refuse(s, "evicted", true)
 				return
 			}
 	}
@@ -895,9 +995,11 @@ export class WidebandAnalogRecorder {
 		}
 		this.sessions.set(s.id, s)
 		this.byObservation.set(input.observationId, s.id)
+		this.decide(s, s.classed ? "started" : "shadow")
 		const events = seg.open(input.observationId, track.startSample, floor)
 		this.applyEvents(s, events)
 		if (!s.file) {
+			this.decide(s, "discarded:empty")
 			this.dispose(s)
 			return
 		}
@@ -994,7 +1096,8 @@ export class WidebandAnalogRecorder {
 			// The store is not settling files: give up rather than hold more audio.
 			file.failed = true
 			s.files.delete(file)
-			if (s.file === file) this.refuse(s)
+			this.decide(s, "discarded:store-backlog")
+			if (s.file === file) this.refuse(s, null)
 			return
 		}
 		s.waiting.push(file)
@@ -1097,6 +1200,9 @@ export class WidebandAnalogRecorder {
 
 	/** Per file: the tone heard over this file's own audio, once it is finalized. */
 	private onSettled(s: Session, file: FileState, receipt: AnalogReceipt): void {
+		// A file this recorder cancelled already has its decision (refused, discarded).
+		if (receipt.outcome === "finalized") this.decide(s, "finalized")
+		else if (!file.failed) this.decide(s, "discarded:aborted")
 		if (receipt.outcome !== "finalized" || this.deps.recordTone === undefined)
 			return
 		const hz = file.toneHz
@@ -1114,7 +1220,12 @@ export class WidebandAnalogRecorder {
 	 * earlier files still finishing or waiting, a roll-over's first file among them; otherwise only
 	 * the current file goes and an earlier complete file is still written.
 	 */
-	private refuse(s: Session, everyFile = false): void {
+	private refuse(
+		s: Session,
+		code: ScannerRecorderDecision | null,
+		everyFile = false,
+	): void {
+		if (code !== null) this.decide(s, code)
 		for (const id of s.observations) remember(this.refused, id)
 		this.cancelSession(s, "cancelled", everyFile)
 	}
@@ -1122,17 +1233,27 @@ export class WidebandAnalogRecorder {
 	/** A store admission failure: the first one per observation is retried on its next snapshot. */
 	private refuseOrRetry(s: Session): void {
 		const ids = [...s.observations]
+		this.decide(s, "refused:store")
 		if (ids.length > 0 && ids.every(id => !this.retried.has(id))) {
 			for (const id of ids) remember(this.retried, id)
 			this.cancelSession(s, "cancelled")
 			return
 		}
-		this.refuse(s)
+		this.refuse(s, null)
 	}
 
 	/** A shadow whose class never came: nothing of it is kept, and its observations are done. */
-	private discard(s: Session): void {
-		this.refuse(s, true)
+	private discard(s: Session, code: ScannerRecorderDecision): void {
+		this.refuse(s, code, true)
+	}
+
+	/** Notes a decision about the session's owner observation (RecorderDecisions). */
+	private decide(s: Session, code: ScannerRecorderDecision): void {
+		this.decisions.note(code, {
+			sourceId: s.sourceId,
+			observationId: s.owner,
+			discoveryId: s.discoveryId,
+		})
 	}
 
 	private wake(s: Session): void {
@@ -1144,6 +1265,7 @@ export class WidebandAnalogRecorder {
 				this.drain(s)
 			} catch (err: unknown) {
 				this.warn(err)
+				this.decide(s, "discarded:error")
 				this.cancelSession(s, "cancelled")
 			}
 		})
@@ -1329,7 +1451,7 @@ export class WidebandAnalogRecorder {
 		if (f.pcm.length === 0) return
 		if (this.buffered(s) + f.pcm.length > WIDEBAND_MAX_BUFFERED_FRAMES) {
 			// Unclassed for a minute, or the writer is not keeping up: this file is lost.
-			this.refuse(s)
+			this.refuse(s, "discarded:buffer-full")
 			return
 		}
 		file.queue.push(f.pcm)
@@ -1359,6 +1481,7 @@ export class WidebandAnalogRecorder {
 			file.judged += n
 		}
 		if (file.gate.voiced) {
+			if (!s.qualified) this.decide(s, "voiced")
 			s.qualified = true
 			this.admit(s, file)
 		} else if (
@@ -1368,7 +1491,7 @@ export class WidebandAnalogRecorder {
 		) {
 			// Not voice after 8 s in the track: a carrier, not a transmission worth a slot. A
 			// session already voiced (a pause, or a 120 s roll-over) keeps its conversation.
-			this.refuse(s, true)
+			this.refuse(s, "discarded:unvoiced", true)
 			return
 		}
 	}
@@ -1459,7 +1582,7 @@ export class WidebandAnalogRecorder {
 			() => {
 				file.writing = false
 				file.failed = true
-				if (s.file === file) this.refuse(s)
+				if (s.file === file) this.refuse(s, "discarded:write-failed")
 				else handle.cancel("cancelled")
 			},
 		)
@@ -1542,7 +1665,8 @@ export class WidebandAnalogRecorder {
 		this.parked.set(s.id, s)
 		if (this.parked.size > WIDEBAND_MAX_PARKED) {
 			const oldest = this.parked.values().next()
-			if (oldest.done !== true) this.dropParked(oldest.value, false)
+			if (oldest.done !== true)
+				this.dropParked(oldest.value, false, "discarded:park-expired")
 		}
 		if (!this.parked.has(s.id)) return
 		s.untap = s.engine.tap(() => this.checkParked(s))
@@ -1558,10 +1682,10 @@ export class WidebandAnalogRecorder {
 				engine.currentEpoch().stream !== s.stream ||
 				engine.liveEdge() > (s.parkedUntil ?? Number.NEGATIVE_INFINITY)
 			)
-				this.dropParked(s, false)
+				this.dropParked(s, false, "discarded:park-expired")
 		} catch (err: unknown) {
 			this.warn(err)
-			this.dropParked(s, false)
+			this.dropParked(s, false, "discarded:error")
 		}
 	}
 
@@ -1575,20 +1699,24 @@ export class WidebandAnalogRecorder {
 		s: Session,
 		observationId: string,
 		info: ClassInfo | undefined,
-		barred: boolean,
+		barred: ScannerRecorderDecision | null,
 		closing: boolean,
 	): void {
 		if (closing) s.observations.delete(observationId)
-		if (barred) {
-			this.dropParked(s, true)
+		if (barred !== null) {
+			this.dropParked(s, true, barred)
 			return
 		}
 		if (info !== undefined) {
-			if (observationId === s.owner && info.discoveryId !== null)
+			if (observationId === s.owner && info.discoveryId !== null) {
 				s.discoveryId ??= info.discoveryId
-			if (info.analogFm) s.classed = true
-			else if (!s.classed && info.nonAnalog === true) {
-				this.dropParked(s, true)
+				this.decisions.bindDiscovery(s.owner, info.discoveryId)
+			}
+			if (info.analogFm && !s.classed) {
+				s.classed = true
+				this.decide(s, "classed")
+			} else if (!s.classed && info.nonAnalog === true) {
+				this.dropParked(s, true, "discarded:not-analog")
 				return
 			}
 		}
@@ -1607,7 +1735,11 @@ export class WidebandAnalogRecorder {
 				}
 			return
 		}
-		this.dropParked(s, true)
+		this.dropParked(
+			s,
+			true,
+			s.classed ? "discarded:no-discovery" : "discarded:unclassed",
+		)
 	}
 
 	private unpark(s: Session): void {
@@ -1618,8 +1750,13 @@ export class WidebandAnalogRecorder {
 	}
 
 	/** Discards a parked session's files (nothing of them was written). */
-	private dropParked(s: Session, refuse: boolean): void {
+	private dropParked(
+		s: Session,
+		refuse: boolean,
+		code: ScannerRecorderDecision | null,
+	): void {
 		if (!this.parked.has(s.id)) return
+		if (code !== null) this.decide(s, code)
 		this.unpark(s)
 		for (const f of [...s.files])
 			if (f.handle === null) {
@@ -1643,7 +1780,10 @@ export class WidebandAnalogRecorder {
 		if (file.handle === null) {
 			// Never admitted: every frame was judged, so this is the last chance. A file too short
 			// for one gate window is judged on all of it.
-			if (file.gate.conclude()) s.qualified = true
+			if (file.gate.conclude()) {
+				if (!s.qualified) this.decide(s, "voiced")
+				s.qualified = true
+			}
 			this.admit(s, file)
 			if (file.handle === null && !s.waiting.includes(file)) {
 				if (this.parkable(s, file)) {
@@ -1654,7 +1794,8 @@ export class WidebandAnalogRecorder {
 				// Not voiced, never classed or no discovery: nothing was written, nothing is kept.
 				file.failed = true
 				s.files.delete(file)
-				if (file.cut === "duration-limit" && !s.done) this.refuse(s)
+				this.decide(s, this.unwrittenCode(s, file))
+				if (file.cut === "duration-limit" && !s.done) this.refuse(s, null)
 			}
 			// Admitted: the readiness handler resumes the finish (or a failure cancels).
 			return
@@ -1669,6 +1810,18 @@ export class WidebandAnalogRecorder {
 		void file.handle.finish(file.cut).catch(() => undefined)
 	}
 
+	/** Why a finished file that was never admitted is dropped (completeFinish). */
+	private unwrittenCode(s: Session, file: FileState): ScannerRecorderDecision {
+		if (!file.gate.voiced) {
+			if (file.cut === "source-lost") return "discarded:source-lost"
+			return file.heard < VOICE_MIN_FINAL_FRAMES
+				? "discarded:too-short"
+				: "discarded:unvoiced"
+		}
+		if (!s.classed) return "discarded:unclassed"
+		return "discarded:no-discovery"
+	}
+
 	/** Ends every open file now (kept, cut), e.g. stream loss or shutdown. */
 	private endSession(s: Session, cut: AnalogCut): void {
 		const file = s.file
@@ -1681,6 +1834,7 @@ export class WidebandAnalogRecorder {
 				s.file = null
 				s.files.delete(file)
 				file.handle?.cancel(cut)
+				this.decide(s, "discarded:empty")
 			} else this.finishFile(s, file)
 		}
 		this.dispose(s)
