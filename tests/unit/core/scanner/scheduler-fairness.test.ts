@@ -38,6 +38,19 @@ const CONFIRM_MS = 1_800
 const WATCH_MS = 8_000
 /** A hang that starts before a hold's cap may run this long to class the gap (1000 ms + a block). */
 const CLASS_HANG_MS = 1_050
+/**
+ * L, the longest follow of voice on traffic from the start of a visit's holds (docs/SCANNER.md,
+ * Fair holds): max(one coarse sweep, 28 000 − away − 5000), away = (hops − 1 + ⌈hops / 3⌉) ×
+ * DWELL_MS + SETTLE_MS + 3 blocks. 2 hops: 28 000 − 3450 − 5000 = 19 550 ms; 3 hops: 28 000 −
+ * 4600 − 5000 = 18 400 ms; 7 hops: 28 000 − 11 500 − 5000 = 11 500 ms.
+ */
+const longFollowMs = (hops: number): number =>
+	Math.max(
+		hops * DWELL_MS,
+		28_000 -
+			((hops - 1 + Math.ceil(hops / 3)) * DWELL_MS + SETTLE_MS + 3 * BLOCK_MS) -
+			5_000,
+	)
 const spec = makeNormalisedSpec({ dwellMs: DWELL_MS, settleMs: SETTLE_MS })
 const sim = {
 	settleMs: SETTLE_MS,
@@ -252,7 +265,7 @@ describe("sweep fairness: steady carrier, empty hop, voice hop", () => {
 		["a carrier in the hop 0/1 overlap", 150.4 * MHZ],
 	]
 	for (const [name, carrierHz] of layouts) {
-		it(`${name}: watched once, then held as a carrier, and both calls are heard to their end`, () => {
+		it(`${name}: watched once, then held as a carrier; the first call is heard to its end, the second (on traffic) for L`, () => {
 			const r = simulateSweep(plan, spec, {
 				...sim,
 				durationMs: 180_000,
@@ -271,22 +284,37 @@ describe("sweep fairness: steady carrier, empty hop, voice hop", () => {
 			expect(r.holds[0]).toBeLessThanOrEqual(carrierHolds(3, 180_000))
 			for (const v of held.filter(x => x.tunedAtMs > 20_000))
 				expect(v.leftAtMs - v.tunedAtMs).toBeLessThanOrEqual(carrierVisitMs(3))
-			// Both transmissions are detected and followed to their end: watched 8 s, a coarse visit
-			// of every hop (awayMs), then followed (two holds each).
+			// Both transmissions are detected (a sweep, a carrier hold, settle + 2 blocks).
 			for (const i of [1, 2]) {
 				const sig = [40_000, 100_000][i - 1]!
 				const at = r.detectedAtMs[i]
 				expect(at).not.toBeNull()
 				expect(r.holds[i]).toBeLessThanOrEqual(2)
-				// a sweep, a carrier hold, settle + 2 blocks
 				expect(at! - sig).toBeLessThanOrEqual(
 					3 * DWELL_MS + carrierVisitMs(3) + DWELL_MS,
 				)
-				expect(endHeard(r, 2, sig + 28_000)).toBe(true)
-				expect(r.heardMs[i]).toBeGreaterThanOrEqual(
-					sig + 28_000 - at! - BLOCK_MS - awayMs(3),
-				)
 			}
+			// The first, its onset seen on a frequency not known: watched 8 s, a coarse visit of
+			// every hop (awayMs), then followed to its end.
+			expect(endHeard(r, 2, 68_000)).toBe(true)
+			expect(r.heardMs[1]).toBeGreaterThanOrEqual(
+				68_000 - r.detectedAtMs[1]! - BLOCK_MS - awayMs(3),
+			)
+			// The second is on traffic (the first closed and the hop heard it off for 1 s): probed and
+			// followed for what is left of L (18 400 ms) in its coarse sweep, which a carrier hold of
+			// at most one coarse sweep (3450 ms) may have spent, so a 28 s ID on another hop is not
+			// hidden; then every hop gets a coarse visit and its hop is probed, not followed, until
+			// the lock clears (measured: detected 1050 ms after its start, heard 18 150 and 20 800 ms,
+			// its end missed; the scheduler before L heard 27 050 ms and the end).
+			const second = r.visits.find(
+				v => v.hopIndex === 2 && v.tunedAtMs >= 100_000 - DWELL_MS,
+			)!
+			expect(second.leftAtMs - second.tunedAtMs).toBeLessThanOrEqual(
+				DWELL_MS + longFollowMs(3) + BLOCK_MS,
+			)
+			expect(r.heardMs[2]).toBeGreaterThanOrEqual(
+				longFollowMs(3) - 3 * DWELL_MS,
+			)
 		})
 	}
 
@@ -448,7 +476,7 @@ describe("sweep fairness: labelled, flapping and busy emitters beside a voice ho
 		)
 	})
 
-	it("a frequency with back-to-back new calls gets long follows of at most maxHoldMs, a coarse visit of every hop between two, and most of the time", () => {
+	it("a frequency with back-to-back new calls gets long follows of at most L, a coarse visit of every hop between two, and most of the time", () => {
 		// 50 s calls with 3 s gaps (longer than hangMs) from 30 s: each call is new traffic.
 		const calls = series(C, 50_000, 3_000, RUN_MS, 30_000)
 		const r = simulateSweep(plan, spec, {
@@ -466,16 +494,17 @@ describe("sweep fairness: labelled, flapping and busy emitters beside a voice ho
 			(a, v) => a + v.leftAtMs - v.tunedAtMs - DWELL_MS,
 			0,
 		)
-		// Traffic has no budget past maxHoldMs per follow: each long follow is at most settle + dwell
-		// + maxHoldMs (+ one block), and the calls get most of the 570 s they are on air. A cycle is
-		// at most a 60 s follow, then a coarse visit of hops 1 and 2 and one visit of hop 0 under the
-		// lock (4 × 1150 ms plus a hold of one coarse sweep, 3450 ms): 60 000 / 68 050 ≈ 88 %, less the
-		// 3 s gaps that end a follow early. More than 70 % of the run.
+		// A follow of traffic voice runs at most L (18 400 ms on 3 hops) from the start of the
+		// visit's holds: each long follow is at most settle + dwell + L (+ one block), and the calls
+		// still get most of the 570 s they are on air. A cycle is at most an L follow, then a coarse
+		// visit of hops 1 and 2 and one visit of hop 0 under the lock, which only probes (4 × 1150
+		// ms plus a 2100 ms probe): 18 400 / 25 100 ≈ 73 %, less the 3 s gaps that end a follow
+		// early (measured 69 %). More than 60 % of the run (with follows to maxHoldMs: 70 %).
 		for (const v of long)
 			expect(v.leftAtMs - v.tunedAtMs).toBeLessThanOrEqual(
-				DWELL_MS + spec.hold.maxHoldMs + BLOCK_MS,
+				DWELL_MS + longFollowMs(3) + BLOCK_MS,
 			)
-		expect(followedMs).toBeGreaterThan(0.7 * (RUN_MS - 30_000))
+		expect(followedMs).toBeGreaterThan(0.6 * (RUN_MS - 30_000))
 		// Between two long holds every hop had a visit.
 		for (let k = 1; k < long.length; k++) {
 			const between = r.visits.filter(
@@ -623,8 +652,47 @@ describe("hopStats", () => {
 	})
 })
 
+/** Deterministic uniform [0, 1) from a 32-bit seed (mulberry32). */
+function random(seed: number): () => number {
+	let x = seed >>> 0
+	return () => {
+		x = (x + 0x6d2b79f5) >>> 0
+		let t = Math.imul(x ^ (x >>> 15), 1 | x)
+		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+		return ((t ^ (t >>> 14)) >>> 0) / 2 ** 32
+	}
+}
+/**
+ * A synthetic QSO: overs of 5 to 30 s with turnarounds of `gapMinMs` to `gapMaxMs` (1 to 3 s by
+ * default), from `fromMs` to `untilMs`.
+ */
+function qso(
+	hz: number,
+	fromMs: number,
+	untilMs: number,
+	seed: number,
+	gapMinMs = 1_000,
+	gapMaxMs = 3_000,
+): SimSignal[] {
+	const rnd = random(seed)
+	const out: SimSignal[] = []
+	let t = fromMs
+	while (t < untilMs) {
+		const over = Math.round(5_000 + 25_000 * rnd())
+		out.push(voice(hz, t, Math.min(over, untilMs - t)))
+		t += over + Math.round(gapMinMs + (gapMaxMs - gapMinMs) * rnd())
+	}
+	return out
+}
+
 describe("intercept property", () => {
 	type Other = "none" | "carrier" | "labelled" | "flapping" | "flapping-slow"
+	/**
+	 * A busy channel on air from the start: 20 s overs with 0.3 s gaps (a flapping carrier to the
+	 * scheduler), or a QSO with real turnarounds (5 to 30 s overs, 1 to 3 s gaps: traffic, followed
+	 * long for L).
+	 */
+	type Busy = "none" | "flapping" | "turnarounds"
 	/**
 	 * A carrier on air from the start, labelled analog voice or not; or a labelled carrier that
 	 * starts flapping at 25 s (after the first sweeps heard it as a carrier): 3 s on / 0.5 s off,
@@ -642,7 +710,8 @@ describe("intercept property", () => {
 
 	/**
 	 * One case of Property 1: a 28 s call on hop `voiceSlot % hops` starting at `startMs`, beside
-	 * `kind` on hop `otherSlot % hops` and, when `busy`, a busy channel on hop `busySlot % hops`.
+	 * `kind` on hop `otherSlot % hops` and a `busy` channel on hop `busySlot % hops` (a QSO's
+	 * turnarounds from seed `busySeed`).
 	 * Checks the guarantee and returns the simulation, its plan and signals, the call's hop and the
 	 * end condition for case-specific checks.
 	 */
@@ -653,8 +722,9 @@ describe("intercept property", () => {
 		busySlot: number,
 		startMs: number,
 		kind: Other,
-		busy: boolean,
+		busy: Busy,
 		revisitShare: number,
+		busySeed = 1,
 	): {
 		r: SimResult
 		plan: HopPlan
@@ -679,30 +749,40 @@ describe("intercept property", () => {
 			signals.push(
 				...other(kind, plan.hops[oHop]!.centreHz - 150_000, durationMs),
 			)
-		// A busy channel on air from the start: 20 s overs, 0.3 s gaps.
-		if (busy && bHop !== vHop)
-			signals.push(
-				...series(plan.hops[bHop]!.centreHz + 200_000, 20_000, 300, durationMs),
-			)
+		const busyHz = plan.hops[bHop]!.centreHz + 200_000
+		if (busy === "flapping" && bHop !== vHop)
+			signals.push(...series(busyHz, 20_000, 300, durationMs))
+		if (busy === "turnarounds" && bHop !== vHop)
+			signals.push(...qso(busyHz, 0, durationMs, busySeed))
 		const r = simulateSweep(plan, s, { ...sim, durationMs, signals })
-		// Detected while on air. Worst case: the hop was just left. One coarse sweep of the other
-		// hops, each a dwell, at most one hold of one coarse sweep (a carrier's hold: 8000 ms, a hang
-		// classing a gap 1050 ms), at most one revisit per round(1 / 0.3) = 3 hops, then settle + 2
-		// blocks: 7 × 1150 + 9050 + 3 × 1150 + 1150 = 21 700 ms < 28 000 ms.
 		const at = r.detectedAtMs[0]
 		expect(at).not.toBeNull()
-		expect(at! - startMs).toBeLessThanOrEqual(21_700)
-		// Heard at least as long as one confirm probe per visit heard it (earlierHeardMs).
-		expect(r.heardMs[0]).toBeGreaterThanOrEqual(earlierHeardMs(hops))
+		if (busy !== "turnarounds") {
+			// Detected while on air. Worst case: the hop was just left. One coarse sweep of the
+			// other hops, each a dwell, at most one hold of one coarse sweep (a carrier's hold: 8000
+			// ms, a hang classing a gap 1050 ms), at most one revisit per round(1 / 0.3) = 3 hops,
+			// then settle + 2 blocks: 7 × 1150 + 9050 + 3 × 1150 + 1150 = 21 700 ms < 28 000 ms.
+			expect(at! - startMs).toBeLessThanOrEqual(21_700)
+			// Heard at least as long as one confirm probe per visit heard it (earlierHeardMs).
+			expect(r.heardMs[0]).toBeGreaterThanOrEqual(earlierHeardMs(hops))
+		}
+		// Beside a QSO with real turnarounds (traffic) it is still detected while on air: the QSO's
+		// follows and any carrier hold share L (longFollowMs) per coarse sweep, then every hop gets
+		// a coarse visit with no carrier hold and the QSO's hop is not held. The scheduler before L
+		// followed such a QSO for maxHoldMs and missed IDs on other hops. Measured over 5000 cases:
+		// detected at most 25 511 ms after its start (7 hops); the time it is heard is not bounded
+		// by one confirm probe per visit any more (the QSO's follows take that time; measured at
+		// least 2550 ms, 7 hops).
 		// Heard to its end when it is the only call on air whose start the sweep saw and it was
-		// detected in time (latestDetectionMs).
+		// detected in time (latestDetectionMs), and no QSO on another hop is followed as traffic
+		// (its follows of up to L may fall between the ID's watch and its return).
 		const condition = endCondition(r, plan, signals, 0)
-		if (condition.only && condition.inTime)
+		if (busy !== "turnarounds" && condition.only && condition.inTime)
 			expect(endHeard(r, vHop, startMs + 28_000)).toBe(true)
 		return { r, plan, signals, vHop, condition }
 	}
 
-	// Feature: scanner-sweep-fairness, Property 1: every 28 s ID is detected; it is heard at least as long as one confirm probe per visit heard it (proven on plans without revisits; with revisits only against that pace); it is heard to its end when it is the only call on air whose start the sweep saw and it is detected at least 8 s plus one sweep away before its end, beside carriers (labelled or not, steady or flapping) and a busy channel
+	// Feature: scanner-sweep-fairness, Property 1: every 28 s ID is detected, also beside a QSO with real 1 to 3 s turnarounds on another hop; beside carriers (labelled or not, steady or flapping) and a busy channel that flaps it is heard at least as long as one confirm probe per visit heard it (proven on plans without revisits; with revisits only against that pace); it is heard to its end when it is the only call on air whose start the sweep saw and it is detected at least 8 s plus one sweep away before its end
 	// Validates: Requirements 3 (detection always, hold until it ends bounded by maxHoldMs), 2 (no re-hold on a steady or flapping carrier), 1 (no hop starved by another hop's holds)
 	it("detects every 28 s ID, hears it at least as long as one confirm probe per visit (without revisits), and to its end when it is the only onset-seen call and detected in time", () => {
 		fc.assert(
@@ -724,8 +804,9 @@ describe("intercept property", () => {
 					"flapping",
 					"flapping-slow",
 				),
-				fc.boolean(),
+				fc.constantFrom<Busy>("none", "flapping", "turnarounds"),
 				fc.constantFrom(0, 0.3),
+				fc.nat(1_000),
 				(...args) => {
 					interceptCase(...args)
 				},
@@ -747,7 +828,7 @@ describe("intercept property", () => {
 			0,
 			45_000,
 			"flapping",
-			true,
+			"flapping",
 			0.3,
 		)
 		// interceptCase checked the guarantee for the call (signal 0); its first hold heard it a
@@ -785,7 +866,7 @@ describe("intercept property", () => {
 			8,
 			47_250,
 			"none",
-			true,
+			"flapping",
 			0,
 		)
 		expect(r.detectedAtMs[0]! - 47_250).toBe(12_350)
@@ -1238,10 +1319,14 @@ describe("hold evidence across restarts, the long-hold lock and confirm bounds",
 			set(18_050)
 			expect(s.tick(18_050).some(a => a.type === "tune")).toBe(outage)
 			if (!outage) {
-				// Traffic: past one coarse sweep (34 050), up to maxHoldMs.
-				set(34_050)
-				expect(s.tick(34_050)).toEqual([])
+				// Traffic: followed past the 8000 ms bound up to L, which on this plan is one coarse
+				// sweep (away = 2 × 12 000 + 35 + 150 = 24 185 ms leaves 28 000 − 24 185 − 5000 < 0):
+				// 10 050 + 24 000 = 34 050 (a ms before it, and at it).
+				set(34_049)
+				expect(s.tick(34_049)).toEqual([])
 				expect(s.progress().holdingOn).toBe("b")
+				set(34_050)
+				expect(s.tick(34_050).some(a => a.type === "tune")).toBe(true)
 			}
 		})
 	}
@@ -1268,10 +1353,13 @@ describe("hold evidence across restarts, the long-hold lock and confirm bounds",
 			set(t0 + 8_000)
 			expect(s.tick(t0 + 8_000).some(a => a.type === "tune")).toBe(outage)
 			if (!outage) {
-				// A heard onset is traffic: still followed past one coarse sweep (24 000 ms).
-				set(t0 + 24_000)
-				expect(s.tick(t0 + 24_000)).toEqual([])
+				// A heard onset is traffic: followed past the 8000 ms bound up to L, one coarse sweep
+				// (24 000 ms) on this plan (a ms before it, and at it).
+				set(t0 + 23_999)
+				expect(s.tick(t0 + 23_999)).toEqual([])
 				expect(s.progress().holdingOn).toBe("b")
+				set(t0 + 24_000)
+				expect(s.tick(t0 + 24_000).some(a => a.type === "tune")).toBe(true)
 			}
 		})
 	}
@@ -1530,9 +1618,10 @@ describe("hold evidence across restarts, the long-hold lock and confirm bounds",
 	})
 
 	// A decoder confirmed a call on the frequency at 2 to 5 s (noted, not followed): it is traffic,
-	// so voice on it may be followed long and its confirm hold may then run to maxHoldMs.
+	// so voice on it may be followed long and its confirm hold may then run to that follow's cap,
+	// L: 19 550 ms on 2 hops (longFollowMs).
 	for (const voiceCall of [true, false]) {
-		it(`a 60 s confirm hold on ${voiceCall ? "a call that may be followed long runs to maxHoldMs" : "a non-voice signal is cut to the confirm floor"}`, () => {
+		it(`a 60 s confirm hold on ${voiceCall ? "a call that may be followed long runs to L" : "a non-voice signal is cut to the confirm floor"}`, () => {
 			const plan = makeHopPlan(centres(2), HALF_SPAN_HZ)
 			const sig: SimSignal = {
 				...voice(HZ, 7_000, 70_000),
@@ -1552,8 +1641,9 @@ describe("hold evidence across restarts, the long-hold lock and confirm bounds",
 			)!
 			const held = first.leftAtMs - first.tunedAtMs - DWELL_MS
 			if (voiceCall) {
-				expect(held).toBeGreaterThanOrEqual(60_000 - BLOCK_MS)
-				expect(held).toBeLessThanOrEqual(60_000 + BLOCK_MS)
+				expect(longFollowMs(2)).toBe(19_550)
+				expect(held).toBeGreaterThanOrEqual(longFollowMs(2) - BLOCK_MS)
+				expect(held).toBeLessThanOrEqual(longFollowMs(2) + BLOCK_MS)
 			} else
 				expect(held).toBeLessThanOrEqual(
 					CONFIRM_FLOOR_MS + PROBE_START_MS + BLOCK_MS,
@@ -1706,5 +1796,365 @@ describe("frequency memory lookups", () => {
 		for (let k = 0; k < tracks; k++) s.onTrackClosed(`t${k}`)
 		const lookups = tracks + (tracks * (tracks + 1)) / 2
 		expect(s.memoryComparisons() - filled).toBeLessThanOrEqual(3 * lookups)
+	})
+})
+
+describe("flaps of a frequency known as a call (direct scheduler)", () => {
+	const HZ = 149.9 * MHZ
+	interface Entry {
+		evidence: string
+		flaps: boolean
+		flapRest: boolean
+	}
+	/**
+	 * One 40 000 ms visit of hop 0 (2 hops, 50 ms blocks, no revisits): opens and closes of one
+	 * frequency at given clocks, heard inside the visit (no hold: no confirm, no voice).
+	 */
+	const visit = (events: [number, "open" | "close"][]): Entry => {
+		let clock = 0
+		const s = new SweepScheduler(
+			makeHopPlan(centres(2), HALF_SPAN_HZ),
+			makeNormalisedSpec({
+				dwellMs: 40_000,
+				settleMs: 35,
+				revisit: { share: 0, maxIntervalMs: null },
+			}),
+			{
+				blockSamples: 50,
+				sampleRateHz: 1000,
+				now: () => clock,
+				probeStartMs: PROBE_START_MS,
+			},
+		)
+		s.start()
+		s.onEpochStarted(0)
+		let n = 0
+		for (const [ms, kind] of events) {
+			while (clock < ms) {
+				clock += 50
+				s.onBlock(clock)
+			}
+			if (kind === "open")
+				s.onTrack(
+					{
+						...makeTrack({ id: `t${n}`, centreHz: HZ, startedAt: 0 }),
+						trackId: `t${n}`,
+					},
+					false,
+					0,
+				)
+			else s.onTrackClosed(`t${n++}`)
+		}
+		return (s as unknown as { memory: Entry[] }).memory[0]!
+	}
+	/** On air at 0, a 1500 ms turnaround (traffic), then a 500 ms flap reopening at 5500 ms. */
+	const knownCall: [number, "open" | "close"][] = [
+		[0, "open"],
+		[1_000, "close"],
+		[2_500, "open"],
+		[5_000, "close"],
+		[5_500, "open"],
+	]
+
+	// FLAP_PAIR_MS: a second flap 10 000 ms after the first (at the bound) earns the flap rest; one
+	// 10 050 ms after it (a block past it) does not.
+	for (const [apartMs, rest] of [
+		[10_000, true],
+		[10_050, false],
+	] as const)
+		it(`a second flap ${apartMs} ms after the first ${rest ? "earns" : "does not earn"} the flap rest`, () => {
+			const m = visit([
+				...knownCall,
+				[5_000 + apartMs, "close"],
+				[5_500 + apartMs, "open"],
+			])
+			expect(m.evidence).toBe("carrier")
+			expect(m.flaps).toBe(true)
+			expect(m.flapRest).toBe(rest)
+		})
+
+	it("one flap of a frequency known as a call is carrier evidence without the flap rest", () => {
+		const m = visit(knownCall)
+		expect(m.evidence).toBe("carrier")
+		expect(m.flapRest).toBe(false)
+	})
+
+	it("a turnaround heard between two flaps forgets the first", () => {
+		const m = visit([
+			...knownCall,
+			[8_000, "close"],
+			[9_500, "open"],
+			[12_000, "close"],
+			[12_500, "open"],
+		])
+		expect(m.flapRest).toBe(false)
+	})
+
+	it("an emitter never known as a call (on air at the job start) earns the flap rest from its first flap", () => {
+		const m = visit([
+			[0, "open"],
+			[1_000, "close"],
+			[1_500, "open"],
+		])
+		expect(m.flapRest).toBe(true)
+	})
+})
+
+describe("a hop kept for a recording", () => {
+	const HZ = 149.9 * MHZ
+	const sighting = (id: string): TrackSnapshot => ({
+		...makeTrack({ id, centreHz: HZ, startedAt: 0 }),
+		trackId: id,
+	})
+	/**
+	 * `hops` hops of DWELL_MS (1000 ms settle, 50 ms blocks); one track "a" that is neither probed
+	 * nor followed on hop 0. Returns at the end of hop 0's dwell (clock 150: the dwell is 3 blocks
+	 * after the settled epoch start), where the scheduler leaves or keeps the hop.
+	 */
+	const make = (
+		opts: {
+			hops?: number
+			maxHoldMs?: number
+			recording?: () => boolean
+		} = {},
+	) => {
+		let clock = 0
+		let calls = 0
+		const recording = opts.recording
+		const s = new SweepScheduler(
+			makeHopPlan(centres(opts.hops ?? 2), HALF_SPAN_HZ),
+			makeNormalisedSpec({
+				dwellMs: DWELL_MS,
+				settleMs: SETTLE_MS,
+				revisit: { share: 0, maxIntervalMs: null },
+				hold: { ...spec.hold, maxHoldMs: opts.maxHoldMs ?? 60_000 },
+			}),
+			{
+				blockSamples: 50,
+				sampleRateHz: 1000,
+				now: () => clock,
+				probeStartMs: PROBE_START_MS,
+				...(recording
+					? {
+							recordingActive: () => {
+								calls++
+								return recording()
+							},
+						}
+					: {}),
+			},
+		)
+		s.start()
+		s.onEpochStarted(0)
+		s.onTrack(sighting("a"), false, 0)
+		const decided: SchedulerAction[] = []
+		for (let e = 50; e <= 150; e += 50) {
+			clock = e
+			decided.push(...s.onBlock(e))
+		}
+		return {
+			s,
+			decided,
+			calls: () => calls,
+			tick: (ms: number) => {
+				clock = ms
+				return s.tick(ms)
+			},
+		}
+	}
+	const tunes = (a: SchedulerAction[]): boolean =>
+		a.some(x => x.type === "tune")
+
+	it("without a recorder the hop is left at its dwell end", () => {
+		const { s, decided } = make()
+		expect(tunes(decided)).toBe(true)
+		expect(s.progress().holdingOn).toBeNull()
+	})
+
+	it("is kept while recording, re-checked every 250 ms, and left at the first re-check that finds the recording ended", () => {
+		let on = true
+		const { s, decided, tick } = make({ recording: () => on })
+		expect(decided).toEqual([])
+		expect(s.progress().holdingOn).toBe("a")
+		// Re-check at 150 + 250 = 400 (not a ms before), then every 250 ms.
+		expect(tick(399)).toEqual([])
+		expect(tick(400)).toEqual([])
+		on = false
+		expect(tick(649)).toEqual([])
+		expect(tunes(tick(650))).toBe(true)
+	})
+
+	it("is kept at most L from the start of its holds (19 550 ms on 2 hops: 150 + 19 550 = 19 700)", () => {
+		const { tick } = make({ recording: () => true })
+		expect(longFollowMs(2)).toBe(19_550)
+		expect(tick(19_699)).toEqual([])
+		expect(tunes(tick(19_700))).toBe(true)
+	})
+
+	it("never past hold.maxHoldMs (5000 ms here): a forced leave", () => {
+		const { tick } = make({ recording: () => true, maxHoldMs: 5_000 })
+		expect(tick(5_149)).toEqual([])
+		const left = tick(5_150)
+		expect(tunes(left)).toBe(true)
+		expect(left.some(x => x.type === "stop-probes")).toBe(true)
+	})
+
+	it("probes a new signal of the window at the next re-check", () => {
+		const { s, tick } = make({ recording: () => true })
+		s.onTrack(sighting("b"), true, CONFIRM_MS)
+		expect(tick(400)).toEqual([
+			{
+				type: "start-probe",
+				trackId: "b",
+				holdMs: CONFIRM_MS + PROBE_START_MS,
+			},
+		])
+		expect(s.progress().holdingOn).toBe("b")
+	})
+
+	it("an abandoned confirm leaves even while recording", () => {
+		let clock = 0
+		const s = new SweepScheduler(
+			makeHopPlan(centres(2), HALF_SPAN_HZ),
+			makeNormalisedSpec({ dwellMs: DWELL_MS, settleMs: SETTLE_MS }),
+			{
+				blockSamples: 50,
+				sampleRateHz: 1000,
+				now: () => clock,
+				probeStartMs: PROBE_START_MS,
+				recordingActive: () => true,
+			},
+		)
+		s.start()
+		s.onEpochStarted(0)
+		s.onTrack(sighting("a"), true, CONFIRM_MS)
+		for (let e = 50; e <= 150; e += 50) {
+			clock = e
+			s.onBlock(e)
+		}
+		expect(s.progress().holdingOn).toBe("a")
+		expect(tunes(s.abandonUnstartedConfirm())).toBe(true)
+	})
+
+	it("a parked one-hop plan never asks", () => {
+		const { s, calls } = make({ hops: 1, recording: () => true })
+		expect(s.parked).toBe(true)
+		expect(s.progress().holdingOn).toBeNull()
+		expect(calls()).toBe(0)
+	})
+
+	it("in a sweep: up to L per hold, every hop visited between two, an ID on another hop detected; a recorder that never records changes nothing", () => {
+		const plan = makeHopPlan(centres(3), HALF_SPAN_HZ)
+		// A signal neither probed nor followed on hop 0, recorded from 20 to 140 s; a 28 s ID on
+		// hop 2 at 60 s.
+		const recorded: SimSignal = {
+			...carrier(plan.hops[0]!.centreHz - 100_000),
+			startMs: 20_000,
+			endMs: 140_000,
+			needsConfirm: false,
+		}
+		const id = voice(plan.hops[2]!.centreHz + 100_000, 60_000)
+		const signals = [recorded, id]
+		const r = simulateSweep(plan, spec, {
+			...sim,
+			durationMs: 160_000,
+			signals,
+			recordingActive: (ms, hop) => hop === 0 && ms >= 20_000 && ms < 140_000,
+		})
+		const kept = r.visits.filter(
+			v => v.hopIndex === 0 && v.leftAtMs - v.tunedAtMs > 2 * DWELL_MS,
+		)
+		expect(kept.length).toBeGreaterThanOrEqual(2)
+		for (const v of kept)
+			expect(v.leftAtMs - v.tunedAtMs).toBeLessThanOrEqual(
+				DWELL_MS + longFollowMs(3) + BLOCK_MS,
+			)
+		expect(
+			kept.some(
+				v => v.leftAtMs - v.tunedAtMs >= DWELL_MS + longFollowMs(3) - BLOCK_MS,
+			),
+		).toBe(true)
+		for (let k = 1; k < kept.length; k++) {
+			const between = r.visits.filter(
+				v =>
+					v.tunedAtMs >= kept[k - 1]!.leftAtMs &&
+					v.leftAtMs <= kept[k]!.tunedAtMs,
+			)
+			expect(new Set(between.map(v => v.hopIndex))).toEqual(new Set([0, 1, 2]))
+		}
+		expect(r.detectedAtMs[1]).not.toBeNull()
+		const none = simulateSweep(plan, spec, {
+			...sim,
+			durationMs: 160_000,
+			signals,
+		})
+		const never = simulateSweep(plan, spec, {
+			...sim,
+			durationMs: 160_000,
+			signals,
+			recordingActive: () => false,
+		})
+		expect(never).toEqual(none)
+	})
+})
+
+describe("frequency memory bound", () => {
+	it("a replan from 60 hops to one keeps the 256 frequencies missed least (then heard last)", () => {
+		interface Entry {
+			centreHz: number
+			halfWidthHz: number
+			order: number
+			misses: number
+			seenVisit: number
+		}
+		const plan = makeHopPlan(centres(60), HALF_SPAN_HZ)
+		const s = new SweepScheduler(plan, spec, {
+			blockSamples: 50,
+			sampleRateHz: 1000,
+			now: () => 0,
+			probeStartMs: PROBE_START_MS,
+		})
+		const inner = s as unknown as {
+			memory: Entry[]
+			memoryBins: Map<number, Entry[]>
+			indexMemory: (m: Entry) => void
+		}
+		const all: Entry[] = []
+		for (let i = 0; i < 60 * 256; i++) {
+			const m = {
+				centreHz: 150 * MHZ + i * 3_125,
+				halfWidthHz: 6_250,
+				order: i,
+				evidence: "unknown",
+				flaps: false,
+				flapRest: false,
+				flapAt: null,
+				flapListenMs: 0,
+				wasTraffic: false,
+				onsetSeen: false,
+				restUntil: 0,
+				suspect: false,
+				runFrom: 0,
+				watchAfter: 0,
+				seenVisit: i % 997,
+				misses: i % 9,
+				closedAt: null,
+			}
+			all.push(m)
+			inner.memory.push(m)
+			inner.indexMemory(m)
+		}
+		// Idle (never started): the plan swaps at once and bounds the memory to 256 × 1 entries.
+		s.replan(makeHopPlan([150 * MHZ], HALF_SPAN_HZ), spec)
+		const expected = [...all]
+			.sort(
+				(a, b) =>
+					a.misses - b.misses || b.seenVisit - a.seenVisit || b.order - a.order,
+			)
+			.slice(0, 256)
+		expect(new Set(inner.memory)).toEqual(new Set(expected))
+		let indexed = 0
+		for (const list of inner.memoryBins.values()) indexed += list.length
+		expect(indexed).toBe(256)
 	})
 })

@@ -55,6 +55,11 @@ export interface SimOptions {
 	maxSweeps?: number
 	/** Stops after this many loop steps (`SimResult.truncated`): the caller's hard work bound. */
 	maxSteps?: number
+	/**
+	 * A recorder's answer (the scheduler's `recordingActive`): whether the window tuned to hop
+	 * `hopIndex` (null before the first tune) is being recorded at `clockMs`. Absent: never.
+	 */
+	recordingActive?: (clockMs: number, hopIndex: number | null) => boolean
 }
 
 export interface SimVisit {
@@ -161,6 +166,8 @@ export function simulateSweep(
 ): SimResult {
 	const signals = opts.signals ?? []
 	let clock = 0
+	let hopIndex: number | null = null
+	const recording = opts.recordingActive
 	const s = new SweepScheduler(plan, spec, {
 		blockSamples: opts.blockMs,
 		sampleRateHz: 1000,
@@ -168,6 +175,7 @@ export function simulateSweep(
 		probeStartMs: opts.probeStartMs,
 		minSurfaceBlocks: opts.minSurfaceBlocks,
 		...(opts.activitySeed ? { activitySeed: opts.activitySeed } : {}),
+		...(recording ? { recordingActive: () => recording(clock, hopIndex) } : {}),
 	})
 	const visits: SimVisit[] = []
 	const listens: SimResult["listens"] = []
@@ -184,7 +192,6 @@ export function simulateSweep(
 		}
 		holding = now
 	}
-	let hopIndex: number | null = null
 	let settleAt: number | null = null
 	let epoch = 0
 	let settled = false

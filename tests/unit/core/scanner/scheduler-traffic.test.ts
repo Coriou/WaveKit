@@ -76,12 +76,17 @@ function random(seed: number): () => number {
 		return ((t ^ (t >>> 14)) >>> 0) / 2 ** 32
 	}
 }
-/** A synthetic QSO: overs of 5 to 30 s with turnaround gaps of 1 to 3 s, from `fromMs` to `untilMs`. */
+/**
+ * A synthetic QSO: overs of 5 to 30 s with turnaround gaps of `gapMinMs` to `gapMaxMs` (1 to 3 s
+ * by default), from `fromMs` to `untilMs`.
+ */
 function qso(
 	hz: number,
 	fromMs: number,
 	untilMs: number,
 	seed: number,
+	gapMinMs = 1_000,
+	gapMaxMs = 3_000,
 ): SimSignal[] {
 	const rnd = random(seed)
 	const out: SimSignal[] = []
@@ -89,7 +94,7 @@ function qso(
 	while (t < untilMs) {
 		const over = Math.round(5_000 + 25_000 * rnd())
 		out.push(voice(hz, t, Math.min(over, untilMs - t)))
-		t += over + Math.round(1_000 + 2_000 * rnd())
+		t += over + Math.round(gapMinMs + (gapMaxMs - gapMinMs) * rnd())
 	}
 	return out
 }
@@ -753,4 +758,151 @@ describe("holds of frequencies not known on a large plan", () => {
 				DWELL_MS + WATCH_MS + BLOCK_MS,
 			)
 	})
+})
+
+describe("a QSO on one hop does not hide 28 s IDs on another", () => {
+	// 900 s: a QSO (5 to 30 s overs) on hop 0 from the job start or from 60 s, 28 s IDs on the last
+	// hop every 45 to 75 s from 50 to 70 s, four seeds. The scheduler before L followed the QSO for
+	// maxHoldMs (60 s) and missed 16 of the 57 IDs on 3 hops (14 on 7 hops); one confirm probe
+	// per visit detected all of them. QSO thresholds: Σ ms that scheduler (37902150) heard of the
+	// QSO over the four seeds.
+	const RUN_MS = 900_000
+	const idTimes = (seed: number): number[] => {
+		const rnd = random(seed * 77)
+		const out: number[] = []
+		for (
+			let t = 50_000 + 20_000 * rnd();
+			t < 850_000;
+			t += 45_000 + 30_000 * rnd()
+		)
+			out.push(Math.round(t))
+		return out
+	}
+	const scene = (
+		hops: number,
+		fromMs: number,
+		gapMinMs: number,
+		gapMaxMs: number,
+	): { detected: number; ids: number; qsoMs: number } => {
+		const plan = planOf(hops)
+		const q = plan.hops[0]!.centreHz - 100_000
+		const v = plan.hops[hops - 1]!.centreHz + 100_000
+		let detected = 0
+		let ids = 0
+		let qsoMs = 0
+		for (const seed of [1, 2, 3, 4]) {
+			const talk = qso(q, fromMs, RUN_MS, seed, gapMinMs, gapMaxMs)
+			const at = idTimes(seed)
+			const r = simulateSweep(plan, spec, {
+				...sim,
+				durationMs: RUN_MS,
+				signals: [...talk, ...at.map(ms => voice(v, ms))],
+			})
+			ids += at.length
+			detected += at.filter(
+				(_, k) => r.detectedAtMs[talk.length + k] !== null,
+			).length
+			qsoMs += r.heardMs.slice(0, talk.length).reduce((a, b) => a + b, 0)
+		}
+		return { detected, ids, qsoMs }
+	}
+	const earlier: Record<string, number> = {
+		"3/0": 1_503_850,
+		"3/60000": 1_101_350,
+		"7/0": 927_900,
+		"7/60000": 820_050,
+	}
+	for (const hops of [3, 7])
+		for (const fromMs of [0, 60_000])
+			it(`${hops} hops, QSO from ${fromMs / 1000} s: every ID is detected and the QSO is heard ≥ ${earlier[`${hops}/${fromMs}`]} ms`, () => {
+				const { detected, ids, qsoMs } = scene(hops, fromMs, 1_000, 3_000)
+				expect(ids).toBe(57)
+				expect(detected).toBe(ids)
+				expect(qsoMs).toBeGreaterThanOrEqual(earlier[`${hops}/${fromMs}`]!)
+			})
+
+	// The accepted exception (docs/SCANNER.md, Fair holds): a QSO whose turnarounds are under 1 s
+	// (0.3 to 0.9 s, or 0.5 to 1.5 s mixed) flaps like a carrier, so it is held as one and heard
+	// less than one confirm probe per visit heard it (that scheduler: 3 hops 1 659 350 and
+	// 1 612 300 ms, 7 hops 1 018 150 and 979 850 ms over the four seeds). The IDs are all
+	// detected. Measured values, asserted so a change shows here.
+	const exception: Record<number, [number, number]> = {
+		3: [336_200, 889_500],
+		7: [349_100, 634_100],
+	}
+	for (const hops of [3, 7])
+		it(`accepted exception, ${hops} hops: a QSO with turnarounds under 1 s is heard ${exception[hops]![0]} ms (0.3 to 0.9 s) and ${exception[hops]![1]} ms (0.5 to 1.5 s)`, () => {
+			const fast = scene(hops, 0, 300, 900)
+			const mixed = scene(hops, 0, 500, 1_500)
+			expect(fast.detected).toBe(fast.ids)
+			expect(mixed.detected).toBe(mixed.ids)
+			expect(fast.qsoMs).toBe(exception[hops]![0])
+			expect(mixed.qsoMs).toBe(exception[hops]![1])
+		})
+})
+
+describe("busy decoded channels and tail-bridged repeaters", () => {
+	// 40 DMR-like 10 s calls with 2 s gaps on hop 1, decoded 800 ms into the probe and followed:
+	// decoded follows run to their end (to maxHoldMs at most), not cut to L, and a decoded call that
+	// ends before L sets no lock. The scheduler before frequency memory heard 314 000 ms (3 hops)
+	// and 269 150 ms (7 hops); with the lock after every long decoded follow: 232 750 ms (3 hops).
+	const earlier: Record<number, number> = { 3: 314_000, 7: 269_150 }
+	for (const hops of [3, 7])
+		it(`${hops} hops: 10 s decoded calls every 12 s are heard ≥ ${earlier[hops]} ms`, () => {
+			const hz = planOf(hops).hops[1]!.centreHz
+			const calls = Array.from({ length: 40 }, (_, k) =>
+				decoded(hz, k * 12_000, 10_000),
+			)
+			const r = simulateSweep(planOf(hops), spec, {
+				...sim,
+				durationMs: 600_000,
+				signals: calls,
+			})
+			expect(r.heardMs.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(
+				earlier[hops]!,
+			)
+		})
+
+	// A repeater on hop 0 whose tail bridges its turnarounds: 90 to 240 s on air without a break,
+	// 5 to 40 s off, then a 28 s ID, then 20 to 60 s off; 28 s IDs on the last hop at 100, 300,
+	// 500, 700 and 900 s; 1200 s. Once heard as traffic (or its onset seen) it rests once its hold
+	// length (KNOWN_CALL_REST_FACTOR), not twice. Thresholds: the busy periods' ms heard by the
+	// scheduler before frequency memory (37902150), by seed.
+	const tails: Record<string, number[]> = {
+		"3/0": [417_350, 396_350],
+		"3/60000": [420_100, 383_500],
+		"7/0": [265_000, 252_000],
+		"7/60000": [256_800, 234_350],
+	}
+	for (const hops of [3, 7])
+		for (const fromMs of [0, 60_000])
+			it(`${hops} hops, repeater from ${fromMs / 1000} s: its busy periods are heard at least as much as before`, () => {
+				const plan = planOf(hops)
+				const hz = plan.hops[0]!.centreHz - 100_000
+				const v = plan.hops[hops - 1]!.centreHz + 100_000
+				tails[`${hops}/${fromMs}`]!.forEach((floor, k) => {
+					const rnd = random(k + 1)
+					const busy: SimSignal[] = []
+					const ids: SimSignal[] = []
+					for (let t = fromMs; t < 1_100_000; ) {
+						const on = Math.round(90_000 + 150_000 * rnd())
+						busy.push(voice(hz, t, on))
+						t += on + Math.round(5_000 + 35_000 * rnd())
+						ids.push(voice(hz, t, 28_000))
+						t += 28_000 + Math.round(20_000 + 40_000 * rnd())
+					}
+					const others = [100_000, 300_000, 500_000, 700_000, 900_000].map(ms =>
+						voice(v, ms),
+					)
+					const r = simulateSweep(plan, spec, {
+						...sim,
+						durationMs: 1_200_000,
+						signals: [...busy, ...ids, ...others],
+					})
+					const heard = r.heardMs
+						.slice(0, busy.length)
+						.reduce((a, b) => a + b, 0)
+					expect(heard).toBeGreaterThanOrEqual(floor)
+				})
+			})
 })

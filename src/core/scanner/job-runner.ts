@@ -319,6 +319,17 @@ export interface JobRunnerDeps {
 	refreshTuning: (sourceId: string) => Promise<void>
 	/** Sweep revisit seed from the occupancy history (§ 10.2, Task 37a); none = no seeding. */
 	activitySeed?: (hop: Hop) => number
+	/**
+	 * Whether the source's recorder is recording a transmission in the window of `epoch` (the
+	 * engine's current stream and epoch, while the job's own hop epoch runs): a sweep then keeps
+	 * the hop instead of leaving it, within its bounds (scheduler `recordingActive`). Called on the
+	 * scheduler's re-checks (every 250 ms while a hop is kept). Absent: a sweep never waits for a
+	 * recording (behaviour as before).
+	 */
+	recordingActive?: (
+		sourceId: string,
+		epoch: { stream: number; epoch: number },
+	) => boolean
 	/** Impact of this job's source excluding the job itself (`arbiter.impact(sourceId, spec, record.id)`). */
 	impact: () => Impact
 	/** H3: a probe request for this observation was deferred. */
@@ -1444,11 +1455,32 @@ export class JobRunner implements JobDriver {
 			...(this.deps.activitySeed
 				? { activitySeed: this.deps.activitySeed }
 				: {}),
+			...(this.deps.recordingActive
+				? { recordingActive: () => this.recordingActive() }
+				: {}),
 		})
 		if (this.record.spec.tuner.agc !== null && this.lease) {
 			await this.deps.arbiter.setAgc(this.lease, this.record.spec.tuner.agc)
 		}
 		this.exec(this.scheduler.start())
+	}
+
+	/**
+	 * The scheduler's `recordingActive`: false unless the job's own hop epoch runs (a foreign or
+	 * pending epoch is not this hop's window); then the dependency's answer for the engine's
+	 * current stream and epoch. A throwing dependency counts as no recording.
+	 */
+	private recordingActive(): boolean {
+		const read = this.deps.recordingActive
+		if (read === undefined || !this.epochOwn) return false
+		const epoch = this.deps.engine(this.sourceId)?.currentEpoch()
+		if (epoch === undefined) return false
+		try {
+			return read(this.sourceId, { stream: epoch.stream, epoch: epoch.epoch })
+		} catch (err: unknown) {
+			this.log.warn({ err }, "The recording check failed; leaving the hop")
+			return false
+		}
 	}
 
 	/** § 4.7: the source moved without a command we saw. A sweep re-asserts its hop (re-establishes `commanded`). */
