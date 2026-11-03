@@ -183,6 +183,10 @@ export function harness(
 		readyHold?: Promise<void>
 		source?: Partial<ConstructorParameters<typeof NfmSource>[0]>
 		reserveCores?: (cores: number) => (() => void) | null
+		/** The recorder's per-turn budget clock (milliseconds); default performance.now. */
+		clock?: () => number
+		/** settings().ringSeconds; default absent (the recorder assumes 3 s, the FakeEngine ring). */
+		ringSeconds?: number
 	} = {},
 ) {
 	const fs = opts.fs ?? FS
@@ -199,6 +203,9 @@ export function harness(
 			preRollMs: 300,
 			hangMs: 2000,
 			cpuBudgetCores: opts.budget ?? 1,
+			...(opts.ringSeconds !== undefined
+				? { ringSeconds: opts.ringSeconds }
+				: {}),
 		}),
 		beginAnalog: begin,
 		recordTone: (observationId, hz) => tones.push({ observationId, hz }),
@@ -206,6 +213,7 @@ export function harness(
 		logger,
 		now: () => 1_700_000_000_000,
 		schedule: run => queue.push(run),
+		...(opts.clock ? { clock: opts.clock } : {}),
 	})
 	const origWarn = (rec as unknown as { warn(e: unknown): void }).warn.bind(rec)
 	;(rec as unknown as { warn(e: unknown): void }).warn = e => {
@@ -223,6 +231,14 @@ export function harness(
 			await microtasks(8)
 		}
 	}
+	/**
+	 * One event-loop turn: runs only the drain tasks queued before it (one per session), like
+	 * setImmediate callbacks queued during a check phase run on the next turn.
+	 */
+	const turn = async (): Promise<void> => {
+		for (const run of queue.splice(0)) run()
+		await microtasks(8)
+	}
 	/** Feeds seconds of IQ in 25 ms chunks, running the recorder in between. */
 	const feed = async (
 		seconds: number,
@@ -236,7 +252,7 @@ export function harness(
 			await pump()
 		}
 	}
-	return { engine, ops, begin, rec, tones, warnings, feed, pump, src, fs }
+	return { engine, ops, begin, rec, tones, warnings, feed, pump, turn, src, fs }
 }
 
 export function snapshot(

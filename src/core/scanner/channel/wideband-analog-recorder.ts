@@ -5,7 +5,9 @@
  * (`WidebandNfmChain`) and writes 8 kHz WAV files through the evidence store's analog
  * operations (`recordings/analog/<discoveryId>/`, storage cap, disk-low and retention apply).
  * `TransmissionSegmenter` decides the files: one per transmission, a gap shorter than
- * `hold.hangMs` never splits. Work runs in bounded slices off the engine's tap callback.
+ * `hold.hangMs` never splits. Work runs in bounded slices off the engine's tap callback, as many
+ * a turn as fit WIDEBAND_TURN_BUDGET_MS, and more while a session is about to fall out of the
+ * ring (WIDEBAND_RING_MARGIN_MS): a slow event loop delays a recording instead of losing it.
  *
  * A session does not wait for the classifier: a clean, non-burst track in a range a band plan
  * lists for analog FM (or no band plan covers) starts a shadow session as soon as it appears.
@@ -102,6 +104,29 @@ const PUSH_FRAMES = 4_096
  * of main-thread work at 1.024 Msps and 25 · 71 / 1000 ≈ 1.8 ms at 2.4 Msps (the 2 ms rule).
  */
 export const WIDEBAND_SLICE_MS = 25
+/**
+ * Main-thread time one drain turn may spend on slices (at least one slice runs): 2 ms, the
+ * PERFORMANCE rule 2 budget, so one turn takes one or two slices (25 to 50 ms of IQ at the
+ * measured 0.8 to 1.5 ms a slice). One slice a turn is not enough: an event-loop turn longer
+ * than 25 ms (a congested core) then delivers more IQ than the session demodulates.
+ */
+export const WIDEBAND_TURN_BUDGET_MS = 2
+/**
+ * Unread IQ a session keeps out of the ring's oldest end: 1000 ms (at most half the ring). Once
+ * its backlog (live edge − next sample) passes ring − margin, the turn keeps demodulating past
+ * WIDEBAND_TURN_BUDGET_MS until the backlog is back under it, so a slow loop costs latency, not
+ * the recording. Such a turn demodulates at most the margin plus one slice: 1.025 s of IQ, about
+ * 60 ms of main thread at the loaded 59 ms per IQ second (1.024 Msps), only when the recording
+ * would otherwise lose audio. A 3 s ring (the default ringSeconds) leaves a 2 s backlog.
+ */
+export const WIDEBAND_RING_MARGIN_MS = 1_000
+/** The engine ring the margin is kept against when settings give none (the ringSeconds default). */
+export const WIDEBAND_DEFAULT_RING_SECONDS = 3
+/**
+ * Single-sample probes to find the oldest readable sample after a ring overrun: a bisection over
+ * at most 2^40 samples (far past any ring), so a session never crawls through lost IQ a slice a turn.
+ */
+const MAX_PROBES = 40
 /**
  * Measured chain cost per recording, CPU ms per second of IQ: 59 at 1.024 Msps and 71 at
  * 2.4 Msps on a shared Mac at load average 56 (33 and 49 at load average 7.5; docs/SCANNER.md
@@ -225,7 +250,13 @@ export interface WidebandEngineView {
 
 export interface WidebandAnalogDeps {
 	engine(sourceId: string): WidebandEngineView | undefined
-	settings(): { preRollMs: number; hangMs: number; cpuBudgetCores: number }
+	settings(): {
+		preRollMs: number
+		hangMs: number
+		cpuBudgetCores: number
+		/** The engine's IQ ring (scanner ringSeconds); default WIDEBAND_DEFAULT_RING_SECONDS. */
+		ringSeconds?: number
+	}
 	beginAnalog(input: AnalogInput): AnalogHandle
 	/** A standard CTCSS tone heard over a finalized file of this observation. */
 	recordTone?(observationId: string, ctcssHz: number, at: number): void
@@ -238,6 +269,8 @@ export interface WidebandAnalogDeps {
 	now(): number
 	/** Next-turn scheduler for drain slices; default setImmediate. */
 	schedule?(run: () => void): void
+	/** Monotonic milliseconds for the per-turn budget; default performance.now. */
+	clock?(): number
 }
 
 export interface WidebandTrackInput {
@@ -394,6 +427,11 @@ interface Session {
 	readonly groupDelay: number
 	/** Next input sample to demodulate. */
 	next: number
+	/**
+	 * Backlog (live edge − next, samples) past which a turn ignores WIDEBAND_TURN_BUDGET_MS:
+	 * ring − WIDEBAND_RING_MARGIN_MS (at most half the ring).
+	 */
+	readonly maxBacklog: number
 	/** No sample at or past this is read (an epoch change). */
 	limit: number
 	/** Cut reason of the next non-quiet end (retune, stream change); null = completed. */
@@ -490,12 +528,14 @@ export class WidebandAnalogRecorder {
 		end: number
 	}[] = []
 	private readonly schedule: (run: () => void) => void
+	private readonly clock: () => number
 	private stopped = false
 	private warnedAt = Number.NEGATIVE_INFINITY
 
 	constructor(private readonly deps: WidebandAnalogDeps) {
 		this.log = createComponentLogger(deps.logger, "WidebandAnalogRecorder")
 		this.schedule = deps.schedule ?? (run => void setImmediate(run))
+		this.clock = deps.clock ?? (() => performance.now())
 	}
 
 	/**
@@ -782,7 +822,7 @@ export class WidebandAnalogRecorder {
 		input: WidebandTrackInput,
 		engine: WidebandEngineView,
 		epoch: ReturnType<WidebandEngineView["currentEpoch"]>,
-		settings: { preRollMs: number; hangMs: number },
+		settings: { preRollMs: number; hangMs: number; ringSeconds?: number },
 		releaseCores: () => void,
 	): void {
 		const { track } = input
@@ -807,6 +847,9 @@ export class WidebandAnalogRecorder {
 			epoch.startSample ?? 0,
 			this.recentEnd(input.sourceId, track),
 		)
+		const ringSeconds = settings.ringSeconds ?? WIDEBAND_DEFAULT_RING_SECONDS
+		const ring = Math.max(0, ringSeconds) * fs
+		const margin = Math.min(WIDEBAND_RING_MARGIN_MS * perMs, ring / 2)
 		const s: Session = {
 			id: ulid(this.deps.now()).toLowerCase(),
 			sourceId: input.sourceId,
@@ -835,6 +878,7 @@ export class WidebandAnalogRecorder {
 			lastActive: track.lastSample,
 			groupDelay: chain.groupDelaySeconds(fs) * 48_000,
 			next: 0,
+			maxBacklog: Math.max(0, Math.floor(ring - margin)),
 			limit: Number.POSITIVE_INFINITY,
 			endCut: null,
 			file: null,
@@ -1142,36 +1186,22 @@ export class WidebandAnalogRecorder {
 			this.dispose(s)
 			return
 		}
-		const target = Math.min(edge, file.endSample ?? Number.POSITIVE_INFINITY)
-		let more = false
-		if (s.next < target) {
-			const to = Math.min(
-				target,
-				s.next + Math.max(1, Math.round((WIDEBAND_SLICE_MS * s.fs) / 1000)),
+		// The target moves when a long input gap ends the file (gapTo).
+		const target = (): number =>
+			Math.min(edge, file.endSample ?? Number.POSITIVE_INFINITY)
+		// Slices until caught up, for WIDEBAND_TURN_BUDGET_MS (at least one), and past it while
+		// the backlog is within WIDEBAND_RING_MARGIN_MS of the ring's oldest end.
+		const started = this.clock()
+		while (s.next < target()) {
+			this.readSlice(s, file, engine, target())
+			if (s.done || s.file !== file) return
+			if (
+				this.clock() - started >= WIDEBAND_TURN_BUDGET_MS &&
+				edge - s.next <= s.maxBacklog
 			)
-			const r = engine.readRing(s.next, to)
-			if (r === null) {
-				// Nothing readable (fell out of the ring or a ring gap up to `to`).
-				this.gapTo(s, file, to)
-			} else {
-				if (r.startSample > s.next) this.gapTo(s, file, r.startSample)
-				if (!s.done && s.file === file) {
-					for (let o = 0; o < r.bytes.length; o += MAX_SLICE_SAMPLES * 2) {
-						const pcm = s.chain.process(
-							r.bytes.subarray(
-								o,
-								Math.min(r.bytes.length, o + MAX_SLICE_SAMPLES * 2),
-							),
-						)
-						this.enqueue(s, file, { pcm, tone: s.chain.toneAudio().slice() })
-						if (s.done || s.file !== file) return
-					}
-					s.next = r.startSample + r.bytes.length / 2
-					file.gapRun = 0
-				}
-			}
-			more = s.next < target
+				break
 		}
+		const more = s.next < target()
 		if (s.done || s.file !== file) return
 		const until = Math.min(
 			s.seg.writableUntil(edge),
@@ -1183,6 +1213,62 @@ export class WidebandAnalogRecorder {
 		if (file.endSample !== null && s.next >= file.endSample && !file.finishing)
 			this.finishFile(s, file)
 		if (more) this.wake(s)
+	}
+
+	/** Demodulates one slice from `s.next` (at most WIDEBAND_SLICE_MS, not past `target`). */
+	private readSlice(
+		s: Session,
+		file: FileState,
+		engine: WidebandEngineView,
+		target: number,
+	): void {
+		const to = Math.min(
+			target,
+			s.next + Math.max(1, Math.round((WIDEBAND_SLICE_MS * s.fs) / 1000)),
+		)
+		const r = engine.readRing(s.next, to)
+		if (r === null) {
+			// Nothing readable up to `to` (overwritten, or a ring gap): skip straight to the
+			// first readable sample before `target` instead of one slice per turn.
+			this.gapTo(s, file, this.firstReadable(engine, to, target))
+			return
+		}
+		if (r.startSample > s.next) this.gapTo(s, file, r.startSample)
+		if (s.done || s.file !== file) return
+		for (let o = 0; o < r.bytes.length; o += MAX_SLICE_SAMPLES * 2) {
+			const pcm = s.chain.process(
+				r.bytes.subarray(
+					o,
+					Math.min(r.bytes.length, o + MAX_SLICE_SAMPLES * 2),
+				),
+			)
+			this.enqueue(s, file, { pcm, tone: s.chain.toneAudio().slice() })
+			if (s.done || s.file !== file) return
+		}
+		s.next = r.startSample + r.bytes.length / 2
+		file.gapRun = 0
+	}
+
+	/**
+	 * The first sample in [from, to) the ring can read (`to` when none): a bisection with
+	 * single-sample reads, assuming what is gone is older than what is held (a ring gap inside
+	 * the range may be skipped whole; the next read finds its far edge).
+	 */
+	private firstReadable(
+		engine: WidebandEngineView,
+		from: number,
+		to: number,
+	): number {
+		if (from >= to) return to
+		if (engine.readRing(from, from + 1) !== null) return from
+		let lo = from
+		let hi = to
+		for (let i = 0; i < MAX_PROBES && hi - lo > 1; i++) {
+			const mid = lo + Math.floor((hi - lo) / 2)
+			if (engine.readRing(mid, mid + 1) !== null) hi = mid
+			else lo = mid
+		}
+		return hi
 	}
 
 	/** Input [s.next, to) is missing: a short gap becomes silence, a long one ends the file. */
