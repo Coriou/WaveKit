@@ -3279,6 +3279,12 @@ recording not classed yet also ends `evicted`, nothing kept, when a waiting trac
 of a shadow whose own audio can no longer class it or whose observation already ended
 unclassed in an earlier visit.
 
+Recorder decisions optionally include `receipt` with `outcome` (`finalized`,
+`aborted` or `failed`), `errorCode` (a whitelisted store error code or null)
+and `operationId`. Non-finalized receipts retain the `discarded:aborted`
+decision code; the receipt distinguishes a cancellation from a store failure.
+The same detail is included in the rate-limited decision log.
+
 Newer cores add `unclean` (`ScannerRecorderFlagDetail`) to the decisions of a recording one of
 whose snapshots was unclean, and to a `refused:unclean` snapshot refusal: `flag` (one of
 `SCANNER_RECORDER_FLAGS`: `spur`, `iq-image`, `edge`, `truncated`, `wide`, `tuning`),
@@ -8004,6 +8010,12 @@ never flagged again, across restarts. Older cores never set the field.
 for a gated transmission, including one already on air, then counts `timeoutMs`
 from that transmission's start. If none arrives, the result is `unidentified`
 with `ended: "no-signal"`, cancelled trials and no verdict or miss.
+
+Sweep job progress optionally includes `hops`, an array in plan order with
+`hopIndex`, `visits`, `timeMs`, `holdMs` and nullable `lastVisitAgeMs`.
+These are scheduler totals since this job started, including the current visit;
+an unvisited hop has a null age. Time includes the entire visit, not just
+qualified listening. This field is absent without a sweep scheduler.
 
 `ScanJobProgress` and `scanner:progress` add optional `phase`, `parked`,
 `holding { discoveryId, frequencyHz, trackId }`,

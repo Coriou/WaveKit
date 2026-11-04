@@ -1133,6 +1133,20 @@ describe("ScannerStore: band inspection UX merges (req 3.1, 3.2)", () => {
 		store.dispose()
 	})
 
+	it("retries a missing discovery only three times", async () => {
+		let attempts = 0
+		const { store } = await ready([], call => {
+			if (call.url === "/api/scanner/discoveries/missing") {
+				attempts++
+				return { status: 404, body: { error: "missing" } }
+			}
+			return undefined
+		})
+		await expect(store.fetchHitDiscovery("missing")).rejects.toBeDefined()
+		expect(attempts).toBe(3)
+		store.dispose()
+	})
+
 	it("reading an absorbed id replaces it with the survivor", async () => {
 		const { store } = await ready([discovery("old")], call =>
 			call.url === "/api/scanner/discoveries/old"
@@ -1145,6 +1159,7 @@ describe("ScannerStore: band inspection UX merges (req 3.1, 3.2)", () => {
 				: undefined,
 		)
 		const d = await store.fetchDiscovery("old")
+		expect(store.get().discoveryAliases.get("old")).toBe("new")
 		expect(d.id).toBe("new")
 		const s = store.get().discoveries
 		expect(s.byId.has("old")).toBe(false)

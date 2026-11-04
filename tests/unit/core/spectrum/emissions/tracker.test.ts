@@ -689,3 +689,12 @@ describe("tracker channel gate", () => {
 		expect(opened?.gatePassedSample).toBeGreaterThan(opened?.startSample ?? 0)
 	})
 })
+
+it("publishes early classification snapshots and the existing cadence", () => {
+	const t = tracker()
+	const updates: number[] = []
+	for (let i = 0; i < 41; i++)
+		for (const e of run(t, i, [[100, 110, -30]]))
+			if (e.kind === "track-update") updates.push(e.track.blocks)
+	expect(updates).toEqual([2, 5, 20, 40])
+})

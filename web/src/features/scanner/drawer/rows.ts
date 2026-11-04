@@ -173,7 +173,11 @@ export function reasonText(d: Discovery): string | null {
 	return parts.length > 0 ? parts.join(" · ") : null
 }
 
-export function discoveryRow(d: Discovery, now: number): DiscoveryRowView {
+export function discoveryRow(
+	d: Discovery,
+	now: number,
+	savedName = "",
+): DiscoveryRowView {
 	const { main, tail } = frequencyParts(d.frequencyHz)
 	const confidence = protocolSlotText(d)
 	const likely = likelyText(d)
@@ -182,6 +186,7 @@ export function discoveryRow(d: Discovery, now: number): DiscoveryRowView {
 	// WG12 cores say how it was proven ("DMR decoded (CC1, TG 9)", "Analog FM voice, CTCSS 88.5")
 	const title =
 		label ||
+		savedName.trim() ||
 		d.proof?.summary ||
 		ident ||
 		(d.anchor !== "decode" && d.bandwidthHz > 0
@@ -431,6 +436,7 @@ export function hitEntries(
 	byId: ReadonlyMap<string, Discovery>,
 	activeNow: ReadonlySet<string>,
 	newOnly: boolean,
+	aliases: ReadonlyMap<string, string> = new Map(),
 ): HitEntry[] {
 	if (!hits) return []
 	const out: HitEntry[] = []
@@ -438,8 +444,8 @@ export function hitEntries(
 		if (newOnly && !hit.firstSeenInJob) continue
 		out.push({
 			hit,
-			discovery: byId.get(hit.discoveryId),
-			live: activeNow.has(hit.discoveryId),
+			discovery: byId.get(aliases.get(hit.discoveryId) ?? hit.discoveryId),
+			live: activeNow.has(aliases.get(hit.discoveryId) ?? hit.discoveryId),
 			fresh: hit.firstSeenInJob,
 		})
 	}
@@ -457,7 +463,7 @@ export function hitEntries(
 	return out
 }
 
-/** "3 hits · first 14:03 · last 14:05 · 4 s long"; "Ignored · …" for a lockout (line 1 names it). */
+/** "3 hits · first 14:03 · last 14:05 · latest 4 s"; "Ignored · …" for a lockout (line 1 names it). */
 export function hitMeta(e: HitEntry): string {
 	const parts: string[] = []
 	if (e.discovery?.operator?.lockout) parts.push("Ignored")
@@ -467,7 +473,9 @@ export function hitMeta(e: HitEntry): string {
 		`last ${clockText(e.hit.lastHitAt)}`,
 	)
 	if (e.hit.lastDurationMs != null && e.hit.lastDurationMs > 0)
-		parts.push(`${durationText(e.hit.lastDurationMs)} long`)
+		parts.push(
+			`latest ${e.hit.lastDurationMs < 1000 ? `${Math.max(0, Math.round(e.hit.lastDurationMs))} ms` : durationText(e.hit.lastDurationMs)}`,
+		)
 	return parts.join(" · ")
 }
 
@@ -527,7 +535,7 @@ export interface FooterInput {
 /** Coverage as a percentage, when the core reports it (0..1). */
 function coverageText(c: number | undefined): string | null {
 	if (c === undefined || !Number.isFinite(c) || c <= 0) return null
-	return `${Math.round(Math.min(1, c) * 100)} % covered`
+	return `${Math.round(Math.min(1, c) * 100)} % hops visited`
 }
 
 /** The footer: honest about how long and how much was looked at. */
@@ -595,7 +603,7 @@ const CAPTURE_FAILURES: Readonly<
 
 /**
  * The IQ capture that feeds "from capture" replays (scanner status `iqCapture`, absent while capture is off):
- * "IQ capture on · 12 captured", amber once the capture tool failed. Null when the core has no capture.
+ * "IQ analyses: 12 done", amber once the capture tool failed. Null when the core has no capture.
  */
 export function iqCaptureText(
 	iq: ScannerIqCaptureStatus | undefined,
@@ -603,7 +611,7 @@ export function iqCaptureText(
 	if (!iq) return null
 	const t = iq.trialCaptures
 	const title =
-		"WaveKit records a short IQ capture of each new signal, so a decoder can try it after the transmission ended"
+		"Short IQ analyses help identify signals. These counts do not represent saved files"
 	const fail = iq.lastToolFailure
 	if (fail && iq.toolFailures > 0)
 		return {
@@ -611,11 +619,10 @@ export function iqCaptureText(
 			title: `${title}. The capture tool failed ${iq.toolFailures} time${iq.toolFailures === 1 ? "" : "s"}.`,
 			amber: true,
 		}
-	if (!t || t.completed === 0)
-		return { text: "IQ capture on", title, amber: false }
-	const failed = t.failed > 0 ? ` · ${t.failed} failed` : ""
+	if (!t) return { text: "IQ analyses on", title, amber: false }
+	const failed = t.failed > 0 ? ` · ${t.failed} unfinished` : ""
 	return {
-		text: `IQ capture on · ${t.completed} captured${failed}`,
+		text: `IQ analyses: ${t.completed} done${failed}`,
 		title,
 		amber: false,
 	}

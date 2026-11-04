@@ -12,6 +12,7 @@ import type {
 	WidebandTrackInput,
 } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import type {
+	AnalogError,
 	AnalogHandle,
 	AnalogInput,
 } from "../../../../src/core/scanner/store/analog-operations.js"
@@ -293,3 +294,35 @@ describe("WidebandAnalogRecorder terminal decisions", () => {
 		expect(h.rec.discoveryDecisions("d_1")?.last.code).toBe("refused:store")
 	}, 60_000)
 })
+
+it.each([
+	{ outcome: "failed", errorCode: "write-failed", expected: "write-failed" },
+	{ outcome: "aborted", errorCode: null, expected: null },
+	{ outcome: "failed", errorCode: "untrusted detail", expected: null },
+] as const)(
+	"retains $outcome receipt details with safe code $expected",
+	async ({ outcome, errorCode, expected }) => {
+		const h = harness({
+			beginWrap: begin => input => {
+				const handle = begin(input)
+				const settled = handle.settled.then(receipt => ({
+					...receipt,
+					outcome,
+					errorCode: errorCode as AnalogError | null,
+				}))
+				return { ...handle, settled }
+			},
+		})
+		await h.feed(0.5, false)
+		await transmission(h, "receipt-test", 2)
+		await h.feed(3.5, false)
+		expect(
+			h.rec.diagnostics().recent.find(e => e.code === "discarded:aborted")
+				?.receipt,
+		).toEqual({
+			outcome,
+			errorCode: expected,
+			operationId: "op-1",
+		})
+	},
+)

@@ -774,6 +774,14 @@ export interface ScanJobProbe {
 	startedAt: string
 }
 export interface ScanJobProgress {
+	/** Per planned hop, including the current visit. Absent without a sweep scheduler. */
+	hops?: {
+		hopIndex: number
+		visits: number
+		timeMs: number
+		holdMs: number
+		lastVisitAgeMs: number | null
+	}[]
 	sweepIndex: number
 	hopIndex: number
 	hopCount: number
@@ -1054,7 +1062,15 @@ export interface ScannerRecorderFlagDetail {
 	kept: boolean
 }
 
+export interface ScannerRecorderReceiptDetail {
+	outcome: "finalized" | "aborted" | "failed"
+	errorCode: string | null
+	operationId: string
+}
+
 export interface ScannerRecorderDecisionEntry {
+	receipt?: ScannerRecorderReceiptDetail
+
 	code: ScannerRecorderDecision
 	/** ISO time of the decision. */
 	at: string

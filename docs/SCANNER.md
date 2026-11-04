@@ -931,3 +931,9 @@ output. See [decoder setup](DECODER-GUIDE.md#wireless-m-bus-meters-86895-mhz).
 
 Wireless M-Bus meter IDs and readings are personal data, stored like other sensor IDs.
 Validation so far uses synthetic fixtures; live meter decodes have not been observed.
+
+Track snapshots include updates at blocks 2, 5 and 20, then the existing periodic
+cadence, so early classification can reach the scheduler. This does not change
+dwell, acceptance gates or scheduling policy. Sweep job progress exposes per-hop
+visit, time and hold totals (see [API](API.md)). Recorder receipt details distinguish
+failed store operations from cancellations while retaining existing decision codes.

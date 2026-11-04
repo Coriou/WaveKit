@@ -530,3 +530,11 @@ VC/IDLE/MBCC sync never earns a proven tag or `DMR · CC n` identity. A decoded 
 identity requires repeated checked content, with checked talkgroup/source voice
 link control additionally required inside the tuner-centre DC guard. See
 [Digital voice identity checks](SCANNER.md#digital-voice-identity-checks).
+
+Scanner hit rows show the latest observation duration, in milliseconds below
+one second. A matching saved frequency's name follows an explicit operator label
+in title priority. Merged hits show their known survivor; unresolved hits say
+**Merged or unavailable**, with up to three lookup attempts when loaded.
+**IQ analyses: N done · M unfinished** counts internal analyses, including when
+none completed; it does not count saved files. Sweep percentages say **hops visited**,
+not listening coverage.

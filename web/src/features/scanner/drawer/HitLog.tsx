@@ -25,6 +25,7 @@ export function HitLog({ jobId, oneHop }: { jobId: string; oneHop: boolean }) {
 	const hits = useStore(scanner, s => s.jobHits.get(jobId) ?? EMPTY)
 	const job = useStore(scanner, s => s.jobs.get(jobId) ?? null)
 	const byId = useStore(scanner, s => s.discoveries.byId)
+	const aliases = useStore(scanner, s => s.discoveryAliases)
 	const activeNow = useStore(scanner, s => s.activeNow)
 	const newOnly = useStore(drawerView, s => s.newOnly)
 	const [openId, setOpenId] = useState<string | null>(null)
@@ -41,19 +42,29 @@ export function HitLog({ jobId, oneHop }: { jobId: string; oneHop: boolean }) {
 
 	// discoveries the store has not seen yet (hit before this page loaded), a few at a time
 	const asked = useRef(new Set<string>())
+	const [fetchVersion, setFetchVersion] = useState(0)
 	useEffect(() => {
+		let cancelled = false
 		let n = 0
 		for (const id of hits.keys()) {
-			if (byId.has(id) || asked.current.has(id)) continue
+			if (byId.has(aliases.get(id) ?? id) || asked.current.has(id)) continue
 			if (n++ >= 20) break
 			asked.current.add(id)
-			scanner.fetchDiscovery(id).catch(() => undefined)
+			scanner
+				.fetchHitDiscovery(id)
+				.catch(() => undefined)
+				.finally(() => {
+					if (!cancelled) setFetchVersion(v => v + 1)
+				})
 		}
-	}, [hits, byId, scanner])
+		return () => {
+			cancelled = true
+		}
+	}, [hits, byId, aliases, scanner, fetchVersion])
 
 	const entries = useMemo(
-		() => hitEntries(hits, byId, activeNow, newOnly),
-		[hits, byId, activeNow, newOnly],
+		() => hitEntries(hits, byId, activeNow, newOnly, aliases),
+		[hits, byId, activeNow, newOnly, aliases],
 	)
 	const keys = useMemo(() => entries.map(e => e.hit.discoveryId), [entries])
 	const toggle = useCallback(
@@ -143,11 +154,13 @@ const HitRow = memo(function HitRow({
 	const e: HitEntry = { hit, discovery, live, fresh }
 	const d = discovery
 	const id = hit.discoveryId
-	const row = d ? discoveryRow(d, Date.now()) : null
 	const parts = d ? frequencyParts(d.frequencyHz) : null
 	const saved = useStore(services.data.savedFrequencies, s =>
-		d ? s.items.some(f => f.frequencyHz === Math.round(d.frequencyHz)) : false,
+		d
+			? s.items.find(f => f.frequencyHz === Math.round(d.frequencyHz))
+			: undefined,
 	)
+	const row = d ? discoveryRow(d, Date.now(), saved?.name) : null
 	const ignored = d?.operator?.lockout === true
 	// only while the scan runs: an ended job's skips change nothing
 	const skip =
@@ -182,7 +195,7 @@ const HitRow = memo(function HitRow({
 				<span className="wks-main">
 					<span className="wks-line1">
 						<span className="wks-freq">
-							{parts?.main ?? "…"}
+							{parts?.main ?? "Merged or unavailable"}
 							<span className="wks-freq-tail">{parts?.tail}</span>
 						</span>
 						<span className="wks-conf wks-ellipsis" data-tone={row?.tone}>
@@ -246,11 +259,11 @@ const HitRow = memo(function HitRow({
 							type="button"
 							className="wk-btn"
 							data-variant="ghost"
-							aria-pressed={saved}
+							aria-pressed={!!saved}
 							aria-label={saved ? "Saved" : "Save"}
 							onClick={() => void toggleSaved(services, d)}
 						>
-							<ScanIcon name="bookmark" size={14} filled={saved} />
+							<ScanIcon name="bookmark" size={14} filled={!!saved} />
 							<span className="wks-hit-lbl">{saved ? "Saved" : "Save"}</span>
 						</button>
 					)}
@@ -300,7 +313,7 @@ const HitRow = memo(function HitRow({
 						title="Open it in All discoveries"
 						onClick={() => {
 							setTab("all")
-							openDiscovery(id)
+							openDiscovery(d.id)
 						}}
 					>
 						Details

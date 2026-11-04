@@ -165,6 +165,8 @@ export interface ScannerState {
 	passive: ScanJob | null
 	/** The last operator sweep job seen, ended or not (its hits stay for the hit log). */
 	lastSweepId: string | null
+	/** Bounded absorbed-id redirects for hit rows, including chained merges. */
+	discoveryAliases: ReadonlyMap<string, string>
 	/** Hits by job id then discovery id: live jobs and the last sweep only. */
 	jobHits: ReadonlyMap<string, ReadonlyMap<string, ScanJobHit>>
 	/** From getJobHits(). */
@@ -422,6 +424,7 @@ const INITIAL: ScannerState = {
 	sweep: null,
 	passive: null,
 	lastSweepId: null,
+	discoveryAliases: new Map(),
 	jobHits: new Map(),
 	jobHitStats: new Map(),
 	status: null,
@@ -796,6 +799,17 @@ export class ScannerStore extends Store<ScannerState> {
 		return this.readDiscovery(id, 0)
 	}
 
+	/** A hit may outlive its discovery; retry transient read failures at most twice. */
+	async fetchHitDiscovery(id: string): Promise<Discovery> {
+		for (let attempt = 0; ; attempt++) {
+			try {
+				return await this.readDiscovery(id, 0)
+			} catch (error) {
+				if (attempt >= 2 || this.disposed) throw error
+			}
+		}
+	}
+
 	private async readDiscovery(id: string, attempt: number): Promise<Discovery> {
 		const started = this.requestStart()
 		const d = await this.api.get<Discovery>(
@@ -808,7 +822,13 @@ export class ScannerStore extends Store<ScannerState> {
 				typeof d.absorbedInto === "string" && d.id !== id ? id : null
 			const base =
 				absorbed === null ? s : this.withoutDiscovery(s, absorbed, stamp)
-			return this.withDiscovery(base, d, "updated", undefined, stamp)
+			return this.withDiscovery(
+				base,
+				d,
+				absorbed === null ? "updated" : "merged",
+				absorbed === null ? undefined : [absorbed],
+				stamp,
+			)
 		})
 		// refused by the floor: one fresh read at once lands at or above it
 		if (this.takeFloored()) {
@@ -1363,7 +1383,16 @@ export class ScannerStore extends Store<ScannerState> {
 			if (i < items.length || list.nextCursor === null)
 				items = [...items.slice(0, i), stored, ...items.slice(i)]
 		}
-		return { ...s, discoveries: { ...list, items, byId } }
+		const discoveryAliases = new Map(s.discoveryAliases)
+		if (applied.has(d.id))
+			for (const id of gone) {
+				discoveryAliases.set(id, d.id)
+				for (const [alias, target] of discoveryAliases)
+					if (target === id) discoveryAliases.set(alias, d.id)
+			}
+		while (discoveryAliases.size > 2000)
+			discoveryAliases.delete(discoveryAliases.keys().next().value!)
+		return { ...s, discoveryAliases, discoveries: { ...list, items, byId } }
 	}
 
 	/** `id` was deleted: final (ids are never reused). */

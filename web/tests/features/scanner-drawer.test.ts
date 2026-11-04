@@ -409,6 +409,35 @@ describe("scanner drawer hit log", () => {
 		expect(hitEntries(undefined, byId, new Set(), false)).toEqual([])
 	})
 
+	it.each([
+		[31, "31 ms"],
+		[101, "101 ms"],
+		[8000, "8 s"],
+	])("shows latest duration %s", (ms, text) => {
+		const e = hitEntries(hits, byId, new Set(), false)[0]!
+		expect(
+			hitMeta({ ...e, hit: { ...e.hit, lastDurationMs: Number(ms) } }),
+		).toContain(`latest ${text}`)
+	})
+	it("uses the saved name after the operator label", () => {
+		expect(discoveryRow(disc(), NOW, "Bookmark").title).toBe("Bookmark")
+		expect(
+			discoveryRow(disc({ operator: { label: "Operator" } }), NOW, "Bookmark")
+				.title,
+		).toBe("Operator")
+	})
+	it("resolves a merged hit to its survivor", () => {
+		const survivor = disc({ id: "survivor" })
+		const e = hitEntries(
+			hits,
+			new Map([["survivor", survivor]]),
+			new Set(["survivor"]),
+			false,
+			new Map([["old", "survivor"]]),
+		).find(e => e.hit.discoveryId === "old")!
+		expect(e.discovery).toBe(survivor)
+		expect(e.live).toBe(true)
+	})
 	it("describes a hit", () => {
 		const e = hitEntries(hits, byId, new Set(), false).find(
 			x => x.hit.discoveryId === "old",
@@ -419,7 +448,7 @@ describe("scanner drawer hit log", () => {
 			discovery: disc({ operator: { lockout: true } }),
 			hit: { ...e.hit, hits: 3, lastDurationMs: 4200 },
 		}
-		expect(hitMeta(ignored)).toMatch(/^Ignored · 3 hits · .* · 4 s long$/)
+		expect(hitMeta(ignored)).toMatch(/^Ignored · 3 hits · .* · latest 4 s$/)
 	})
 })
 
@@ -492,10 +521,10 @@ describe("scanner drawer header and footer", () => {
 			now: NOW,
 		}
 		expect(footerText({ ...base, sweep: job() })).toMatch(
-			/^Scanning for 12 min · started \d\d:\d\d · 50 % covered$/,
+			/^Scanning for 12 min · started \d\d:\d\d · 50 % hops visited$/,
 		)
 		expect(footerText({ ...base, sweep: job({ state: "paused" }) })).toBe(
-			"Paused after 12 min · 50 % covered",
+			"Paused after 12 min · 50 % hops visited",
 		)
 		const ended = job({
 			state: "completed",
@@ -504,7 +533,7 @@ describe("scanner drawer header and footer", () => {
 			progress: { ...job().progress, coverage: 0.91 },
 		})
 		expect(footerText({ ...base, sweep: null, lastSweep: ended })).toBe(
-			"Nothing found in 12 min of scanning (91 % covered)",
+			"Nothing found in 12 min of scanning (91 % hops visited)",
 		)
 		expect(footerText({ ...base, sweep: null })).toBe(
 			"Not watching · discoveries so far are kept",

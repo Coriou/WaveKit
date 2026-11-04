@@ -653,6 +653,7 @@ export class JobRunner implements JobDriver {
 			startedAt: new Date(s.startedAt).toISOString(),
 		}))
 		const base: ScanJobProgress = {
+			...(this.scheduler ? { hops: this.scheduler.hopStats() } : {}),
 			sweepIndex: p?.sweepIndex ?? 0,
 			hopIndex: p?.hopIndex ?? 0,
 			hopCount: p?.hopCount ?? this.record.plan.hops.length,

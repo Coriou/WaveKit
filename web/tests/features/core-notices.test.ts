@@ -288,14 +288,21 @@ describe("IQ capture in the Scanner footer", () => {
 		expect(iqCaptureText(undefined)).toBeNull()
 	})
 	it("counts captures", () => {
-		expect(iqCaptureText(iq({}))?.text).toBe("IQ capture on")
+		expect(
+			iqCaptureText(
+				iq({
+					trialCaptures: { started: 2, completed: 0, failed: 2, swept: 0 },
+				}),
+			)?.text,
+		).toBe("IQ analyses: 0 done · 2 unfinished")
+		expect(iqCaptureText(iq({}))?.text).toBe("IQ analyses on")
 		expect(
 			iqCaptureText(
 				iq({
 					trialCaptures: { started: 5, completed: 4, failed: 1, swept: 2 },
 				}),
 			)?.text,
-		).toBe("IQ capture on · 4 captured · 1 failed")
+		).toBe("IQ analyses: 4 done · 1 unfinished")
 	})
 	it("turns amber when the capture tool fails", () => {
 		const v = iqCaptureText(

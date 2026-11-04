@@ -770,6 +770,8 @@ export class Tracker {
 			}
 			if (
 				t.blocks === FIRST_UPDATE_BLOCKS ||
+				t.blocks === 5 ||
+				t.blocks === 20 ||
 				t.blocks % this.updateEvery === 0 ||
 				t.flagsChanged
 			) {

@@ -623,6 +623,16 @@ describe("job progress phase", () => {
 		})
 		runner.onEpochStarted(epochAt(11, HOP0))
 		await flush()
+		expect(runner.progress().hops).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					visits: expect.any(Number),
+					timeMs: expect.any(Number),
+					holdMs: expect.any(Number),
+					lastVisitAgeMs: 0,
+				}),
+			]),
+		)
 		expect(runner.progress().phase).toBe("watching")
 		expect(runner.progress().parked).toBe(false)
 	})

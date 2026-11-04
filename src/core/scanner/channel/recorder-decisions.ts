@@ -35,7 +35,10 @@ export interface RecorderDecisionRef {
 	readonly discoveryId: string | null
 }
 
+type ReceiptDetail = ScannerRecorderDecisionEntry["receipt"]
+
 interface ObservationMemory {
+	receipt: ReceiptDetail
 	sourceId: string
 	discoveryId: string | null
 	last: ScannerRecorderDecision
@@ -45,6 +48,7 @@ interface ObservationMemory {
 }
 
 interface Entry {
+	receipt: ReceiptDetail
 	code: ScannerRecorderDecision
 	at: number
 	sourceId: string
@@ -86,6 +90,7 @@ export class RecorderDecisions {
 		ref: RecorderDecisionRef,
 		session = false,
 		unclean: ScannerRecorderFlagDetail | null = null,
+		receipt?: ReceiptDetail,
 	): void {
 		const at = this.now()
 		const known = this.byObservation.get(ref.observationId)
@@ -99,9 +104,11 @@ export class RecorderDecisions {
 			last: code,
 			at,
 			lastUnclean: null,
+			receipt: undefined,
 			counts: new Map(),
 		}
 		const detail = unclean === null ? null : { ...unclean }
+		memory.receipt = receipt
 		memory.last = code
 		memory.at = at
 		memory.lastUnclean = detail
@@ -115,6 +122,7 @@ export class RecorderDecisions {
 		}
 		this.counts.set(code, (this.counts.get(code) ?? 0) + 1)
 		const entry: Entry = {
+			receipt,
 			code,
 			at,
 			sourceId: ref.sourceId,
@@ -155,6 +163,7 @@ export class RecorderDecisions {
 		return {
 			last: dto({
 				code: last.m.last,
+				receipt: last.m.receipt,
 				at: last.m.at,
 				sourceId: last.m.sourceId,
 				observationId: last.id,
@@ -206,6 +215,13 @@ function fields(
 	const u = entry.unclean
 	return {
 		decision: entry.code,
+		...(entry.receipt
+			? {
+					receiptOutcome: entry.receipt.outcome,
+					receiptErrorCode: entry.receipt.errorCode,
+					operationId: entry.receipt.operationId,
+				}
+			: {}),
 		sourceId: entry.sourceId,
 		observationId: entry.observationId,
 		discoveryId: entry.discoveryId,
@@ -225,6 +241,7 @@ function fields(
 function dto(e: Entry): ScannerRecorderDecisionEntry {
 	return {
 		code: e.code,
+		...(e.receipt ? { receipt: { ...e.receipt } } : {}),
 		at: new Date(e.at).toISOString(),
 		sourceId: e.sourceId,
 		observationId: e.observationId,

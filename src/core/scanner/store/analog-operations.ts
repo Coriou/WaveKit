@@ -59,7 +59,7 @@ export const AnalogCutSchema = z.enum([
 	"shutdown",
 ])
 export type AnalogCut = z.infer<typeof AnalogCutSchema>
-const ErrorSchema = z.enum([
+export const ErrorSchema = z.enum([
 	"admission-denied",
 	"disk-unavailable",
 	"disk-low",

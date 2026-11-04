@@ -411,3 +411,22 @@ describe("WidebandAnalogRecorder decisions (synthetic signals)", () => {
 		expect(codes.at(-1)).toBe("refused:encrypted")
 	}, 60_000)
 })
+
+it("keeps receipt details in status, discovery detail and logs", async () => {
+	const { lines, logger } = capture()
+	const decisions = new RecorderDecisions(logger, () => 0)
+	const receipt = {
+		outcome: "failed" as const,
+		errorCode: "write-failed",
+		operationId: "op-test",
+	}
+	decisions.note("discarded:aborted", ref(1, "d"), true, null, receipt)
+	expect(decisions.status().recent[0]?.receipt).toEqual(receipt)
+	expect(decisions.forDiscovery("d")?.last.receipt).toEqual(receipt)
+	await flushLogs()
+	expect(lines[0]).toMatchObject({
+		receiptOutcome: "failed",
+		receiptErrorCode: "write-failed",
+		operationId: "op-test",
+	})
+})

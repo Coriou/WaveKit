@@ -28,6 +28,7 @@
  * a bounded hold (WIDEBAND_TONE_ONLY_HOLD_FRAMES), and each of its files is checked again over
  * the whole file when it finishes.
  */
+import type { ScannerRecorderReceiptDetail } from "@wavekit/api-types"
 import type { TrackSnapshot, TuningTrust } from "../../spectrum/types.js"
 import { safeErrorFields } from "../../../decoders/safe-error-fields.js"
 import { createComponentLogger, type Logger } from "../../../utils/logger.js"
@@ -40,7 +41,10 @@ import type {
 	AnalogInput,
 	AnalogReceipt,
 } from "../store/analog-operations.js"
-import { MAX_ACTIVE_ANALOG_PER_SOURCE } from "../store/analog-operations.js"
+import {
+	ErrorSchema,
+	MAX_ACTIVE_ANALOG_PER_SOURCE,
+} from "../store/analog-operations.js"
 import {
 	RecordingBindingSchema,
 	recordingEngineInstanceId,
@@ -1747,6 +1751,11 @@ export class WidebandAnalogRecorder {
 			s,
 			file,
 			receipt.outcome === "finalized" ? "finalized" : "discarded:aborted",
+			{
+				outcome: receipt.outcome,
+				errorCode: ErrorSchema.safeParse(receipt.errorCode).data ?? null,
+				operationId: file.handle?.operationId ?? receipt.operationId,
+			},
 		)
 		if (receipt.outcome !== "finalized" || this.deps.recordTone === undefined)
 			return
@@ -1825,7 +1834,11 @@ export class WidebandAnalogRecorder {
 	}
 
 	/** Notes a decision about the session's owner observation (RecorderDecisions). */
-	private decide(s: Session, code: ScannerRecorderDecision): void {
+	private decide(
+		s: Session,
+		code: ScannerRecorderDecision,
+		receipt?: ScannerRecorderReceiptDetail,
+	): void {
 		this.decisions.note(
 			code,
 			{
@@ -1837,6 +1850,7 @@ export class WidebandAnalogRecorder {
 			s.unclean === null
 				? null
 				: { ...s.unclean, flagged: s.flagged, snapshots: s.snapshots },
+			receipt,
 		)
 	}
 
@@ -1894,10 +1908,11 @@ export class WidebandAnalogRecorder {
 		s: Session,
 		file: FileState,
 		code: ScannerRecorderDecision,
+		receipt?: ScannerRecorderReceiptDetail,
 	): void {
 		if (file.decided) return
 		file.decided = true
-		this.decide(s, code)
+		this.decide(s, code, receipt)
 	}
 
 	/**
