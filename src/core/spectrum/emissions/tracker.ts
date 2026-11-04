@@ -124,6 +124,8 @@ export const CLING_MIDPOINT_FRACTION = 8
 export const FSK2_MIN_SPACING_HZ = 6_000
 const FSK2_DIP_DB = 6
 const FIRST_UPDATE_BLOCKS = 2
+/** Last early track update (1 s in 50 ms blocks), before the periodic cadence takes over. */
+const EARLY_LAST_UPDATE_BLOCKS = 20
 /** Matched-window minimum (see `localSnr`): a Hann tone's two main-lobe bins. */
 export const MATCHED_MIN_BINS = 2
 /** Matched width: bins within 6 dB of the peak (a Hann tone's main lobe at its -6 dB points). */
@@ -772,7 +774,7 @@ export class Tracker {
 			if (
 				t.blocks === FIRST_UPDATE_BLOCKS ||
 				t.blocks === CLASS_SETTLE_BLOCKS ||
-				t.blocks === 20 ||
+				t.blocks === EARLY_LAST_UPDATE_BLOCKS ||
 				t.blocks % this.updateEvery === 0 ||
 				t.flagsChanged
 			) {

@@ -1,6 +1,6 @@
-import type { HitLookupState } from "../../../data/hit-discovery-loader.ts"
 // The Scanner drawer's words and row anatomy (Scanner board): discovery rows, groups by sort, the open
 // row's "why", identity chips, the live hit log, the header count and the footer. Pure.
+import type { HitLookupState } from "../../../data/hit-discovery-loader.ts"
 import type {
 	Discovery,
 	ScanJob,

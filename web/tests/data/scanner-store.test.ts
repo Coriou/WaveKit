@@ -1009,6 +1009,27 @@ describe("ScannerStore: band inspection UX merges (req 3.1, 3.2)", () => {
 	}
 	const flush = () => new Promise(r => setTimeout(r, 0))
 
+	it("hit lookups fetch only ids the store cannot name, also after a reset", async () => {
+		const { store, calls } = await ready([discovery("known")], call =>
+			call.url.includes("/discoveries/")
+				? { body: discovery("new") }
+				: undefined,
+		)
+		const lookups = () =>
+			calls.filter(c => c.url.includes("/discoveries/")).length
+		store.loadHitDiscoveries(["known"])
+		await flush()
+		expect(lookups()).toBe(0)
+		store.loadHitDiscoveries(["known", "new"])
+		await flush()
+		expect(lookups()).toBe(1)
+		// A reconnect clears the lookup states; the HitLog effect then asks for the whole job again.
+		Reflect.get(store, "resetHitLookups").call(store)
+		store.loadHitDiscoveries(["known", "new"])
+		await flush()
+		expect(lookups()).toBe(1)
+	})
+
 	it("a deleted survivor drops every id in mergedIds too", async () => {
 		const { store, send, tick } = await ready([
 			discovery("s"),

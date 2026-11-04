@@ -258,6 +258,22 @@ describe("SweepScheduler parking (R 1.1, 1.3)", () => {
 		expect(h.tunes().map(t => t.type === "tune" && t.centreHz)).toEqual([A, B2])
 	})
 
+	it("a replan while accounting is paused counts only the new visit's unpaused time", () => {
+		const h = parked()
+		h.s.setAccountingActive(false)
+		const pausedAt = h.clock
+		h.clock = pausedAt + 400
+		h.s.replan(
+			makeHopPlan([A + 3 * MHZ]),
+			makeNormalisedSpec({ revisit: noRevisit, dwellMs: 200 }),
+		)
+		h.clock = pausedAt + 900
+		h.s.setAccountingActive(true)
+		h.clock = pausedAt + 1100
+		// The new visit started 400 ms into the pause, which lasted 500 ms more: 200 ms since resume.
+		expect(h.s.hopStats()[0]?.timeMs).toBe(200)
+	})
+
 	it("a gain or rate change in a one-hop replan re-tunes once", () => {
 		const h = parked()
 		const out = h.s.replan(

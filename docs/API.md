@@ -8017,7 +8017,7 @@ with `ended: "no-signal"`, cancelled trials and no verdict or miss.
 
 Sweep job progress optionally includes `hops`, an array in plan order with
 `hopIndex`, `visits`, `timeMs`, `holdMs` and nullable `lastVisitAgeMs`.
-These are scheduler totals since this job started, including the current visit;
+These are totals of the job's current scheduler, including the current visit (a core restart resets them, and `hops` is absent until the engine reopens);
 an unvisited hop has a null age. Time includes the entire visit, not just
 qualified listening. Totals freeze while paused or ended; the last-visit age
 continues to increase. Resuming excludes paused time. A replan maps old totals

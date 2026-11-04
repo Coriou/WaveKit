@@ -139,12 +139,6 @@ const FLAP_REST_FACTOR = 20
  * carrier, so it takes half of the time instead of a third.
  */
 const KNOWN_CALL_REST_FACTOR = 1
-/**
- * A track of at most 4 blocks is classed as a burst whatever it is (classifySpectral), so analog
- * voice can only be labelled from its 5th block: a dwell that ends with a younger unlabelled track
- * whose spectrum reads as analog voice (TrackHints.voiceLater) waits for it once, at most
- * CLASS_SETTLE_BLOCKS − 1 = 4 more blocks (200 ms in 50 ms blocks).
- */
 
 /**
  * Confirm window a visit always allows, however short its coarse sweep: the longest built-in class
@@ -1168,9 +1162,12 @@ export class SweepScheduler {
 	/** Freeze statistics without changing the visit's scheduling or hold policy. */
 	setAccountingActive(active: boolean): void {
 		if (active && this.accountingPausedAt !== null) {
-			const pausedMs = Math.max(0, this.now() - this.accountingPausedAt)
-			this.visitPausedMs += pausedMs
-
+			// A visit started during the pause (paused replan) only excludes the pause since its start.
+			const pausedSince = Math.max(
+				this.accountingPausedAt,
+				this.visit?.startedAt ?? this.accountingPausedAt,
+			)
+			this.visitPausedMs += Math.max(0, this.now() - pausedSince)
 			this.accountingPausedAt = null
 		} else if (!active && this.accountingPausedAt === null) {
 			this.accountingPausedAt = this.now()
@@ -2281,7 +2278,7 @@ export class SweepScheduler {
 	}
 
 	private endVisit(now: number): void {
-		now = this.accountingPausedAt ?? now
+		const accountedAt = this.accountingPausedAt ?? now
 		const v = this.visit
 		this.endHold(true)
 		if (v === null) return
@@ -2290,9 +2287,9 @@ export class SweepScheduler {
 		this.noteHeardGaps(v, now)
 		this.noteFlapListening(v, now)
 		hop.visits++
-		hop.timeMs += Math.max(0, now - v.startedAt - this.visitPausedMs)
+		hop.timeMs += Math.max(0, accountedAt - v.startedAt - this.visitPausedMs)
 		const heldMs = this.heldMs(v, now)
-		hop.holdMs += this.accountedHeldMs(v, now)
+		hop.holdMs += this.accountedHeldMs(v, accountedAt)
 		// The other hops waited for this visit's long or budgeted holds (followBudgetMs); this hop
 		// was visited.
 		if (v.budgeted || v.longFollow || v.watched)

@@ -1,7 +1,3 @@
-import {
-	HitDiscoveryLoader,
-	type HitLookupState,
-} from "./hit-discovery-loader.ts"
 /**
  * Scanner (signal discovery) data: discoveries, jobs, status and band plans from the core's
  * /api/scanner routes, kept live from the `scanner` channel (scanner:job, scanner:progress,
@@ -12,6 +8,10 @@ import {
  * load() (status, jobs, band plans) runs at start; the discoveries list loads on the first
  * refreshDiscoveries(). A reconnect refetches what was loaded (the core replays nothing).
  */
+import {
+	HitDiscoveryLoader,
+	type HitLookupState,
+} from "./hit-discovery-loader.ts"
 import {
 	DISCOVERY_STORE_EPOCH_HEADER,
 	DISCOVERY_STORE_REVISION_HEADER,
@@ -814,8 +814,14 @@ export class ScannerStore extends Store<ScannerState> {
 	}
 
 	/** Queue bounded hit lookups; cached outcomes last until reconnect or store epoch change. */
+	/** Looks up only ids the store cannot name yet: a reconnect's reset must not refetch a whole job. */
 	loadHitDiscoveries(ids: Iterable<string>): void {
-		this.hitLoader.request(ids)
+		const { discoveries, discoveryAliases } = this.current()
+		const unknown: string[] = []
+		for (const id of ids)
+			if (!discoveries.byId.has(id) && !discoveryAliases.has(id))
+				unknown.push(id)
+		this.hitLoader.request(unknown)
 	}
 
 	private resetHitLookups(): void {

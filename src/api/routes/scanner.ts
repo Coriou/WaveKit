@@ -1,8 +1,3 @@
-import {
-	SCANNER_RECORDER_ERRORS,
-	SCANNER_RECORDER_FLAGS,
-	SCANNER_RECORDER_FLAG_SOURCES,
-} from "@wavekit/api-types"
 /**
  * Scanner REST API (spec § 12.1). All additive; errors use the repo's flat
  * `{ error, code, message, details? }` body.
@@ -21,6 +16,11 @@ import {
  * - 500 `SCANNER_SETTINGS_WRITE_FAILED`
  * - 503 `SCANNER_DISABLED`, `SCANNER_STATE_UNAVAILABLE`
  */
+import {
+	SCANNER_RECORDER_ERRORS,
+	SCANNER_RECORDER_FLAGS,
+	SCANNER_RECORDER_FLAG_SOURCES,
+} from "@wavekit/api-types"
 import { discoveryAnchorProperties } from "./scanner-schemas.js"
 import type { ReadStream } from "node:fs"
 import type { FastifyAccessController } from "../../access/fastify-adapter.js"

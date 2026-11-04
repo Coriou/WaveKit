@@ -253,5 +253,11 @@ export const JOB_PROBE_MAX_WAIT_MS =
 export const JOB_PROBE_STRONG_WAIT_MS =
 	JOB_PROBE_MIN_RUN_MS + JOB_PROBE_START_ALLOWANCE_MS
 
-/** First block at which a non-burst spectral class is available. */
+/**
+ * First block at which a non-burst spectral class is available. A track of at most 4 blocks is
+ * classed as a burst whatever it is (classifySpectral), so analog voice can only be labelled from
+ * its 5th block: a dwell that ends with a younger unlabelled track whose spectrum reads as analog
+ * voice (TrackHints.voiceLater) waits for it once, at most CLASS_SETTLE_BLOCKS − 1 = 4 more blocks
+ * (200 ms in 50 ms blocks).
+ */
 export const CLASS_SETTLE_BLOCKS = 5

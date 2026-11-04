@@ -1,5 +1,5 @@
-import { SCANNER_RECORDER_ERRORS } from "@wavekit/api-types"
 /** Scanner-owned prepared-link media lifecycle. No native/channel consumer is adopted here. */
+import { SCANNER_RECORDER_ERRORS } from "@wavekit/api-types"
 import { randomUUID } from "node:crypto"
 import { constants, linkSync, lstatSync, type Stats } from "node:fs"
 import {
