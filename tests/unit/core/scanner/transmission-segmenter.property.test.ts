@@ -104,7 +104,11 @@ describe("TransmissionSegmenter (property)", () => {
 	it("matches the offline plan for late opens and closes", () => {
 		fc.assert(
 			fc.property(scenario, ({ o, txs }) => {
-				expect(simulate(txs, o)).toEqual(planSegments(txs, o, 0))
+				const files = simulate(txs, o)
+				// The plan rolls exactly; a file ended by the next open before the edge reached the
+				// rollover overruns instead (see the bound below).
+				fc.pre(files.every(f => f.end - f.start <= o.maxSegmentSamples))
+				expect(files).toEqual(planSegments(txs, o, 0))
 			}),
 			{ numRuns: 200 },
 		)
@@ -137,8 +141,15 @@ describe("TransmissionSegmenter (property)", () => {
 		fc.assert(
 			fc.property(scenario, ({ o, txs }) => {
 				const files = simulate(txs, o)
+				// A file ended by the next transmission's open before the edge reached the rollover keeps
+				// its whole tail rather than losing audio: it may overrun by at most the late-arrival slack.
 				for (const f of files)
-					expect(f.end - f.start).toBeLessThanOrEqual(o.maxSegmentSamples)
+					expect(f.end - f.start).toBeLessThanOrEqual(
+						o.maxSegmentSamples + o.hangSamples + o.holdbackSamples,
+					)
+				for (const f of files)
+					if (f.cut === "duration-limit")
+						expect(f.end - f.start).toBe(o.maxSegmentSamples)
 				for (let i = 1; i < files.length; i++)
 					if (files[i - 1]!.cut === "duration-limit")
 						expect(files[i]!.start).toBe(files[i - 1]!.end)
