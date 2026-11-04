@@ -304,6 +304,19 @@ scanner tunes` (or `· for your tuning` with the switch on). It shows the gain t
   link. Samples dropped inside WaveKit, or a link that has not yet shown it can carry the rate,
   raise no notice.
 
+### Scanner observations
+
+Hit rows show the latest observation duration: milliseconds below one second,
+or **under 1 ms** for shorter observations. An operator label takes priority over
+a matching saved frequency name in both tabs; proof remains visible below it.
+Merged hits show their survivor. Lookups say **Loading discovery…** until resolved,
+then **Merged or unavailable** on failure. Missing discoveries (404) are not retried;
+other failures retry twice with backoff. At most 20 lookups run at once, and
+reconnects or store epoch changes reset lookup outcomes.
+**IQ analyses: N done · M unfinished** counts internal analyses, even with zero
+completed; it does not count saved files. Sweep percentages say **hops visited**,
+not listening coverage.
+
 ### Activity folding
 
 Activity folds repeats into stacks, so one aircraft, one beacon or one call is one row. A stack
@@ -530,11 +543,3 @@ VC/IDLE/MBCC sync never earns a proven tag or `DMR · CC n` identity. A decoded 
 identity requires repeated checked content, with checked talkgroup/source voice
 link control additionally required inside the tuner-centre DC guard. See
 [Digital voice identity checks](SCANNER.md#digital-voice-identity-checks).
-
-Scanner hit rows show the latest observation duration, in milliseconds below
-one second. A matching saved frequency's name follows an explicit operator label
-in title priority. Merged hits show their known survivor; unresolved hits say
-**Merged or unavailable**, with up to three lookup attempts when loaded.
-**IQ analyses: N done · M unfinished** counts internal analyses, including when
-none completed; it does not count saved files. Sweep percentages say **hops visited**,
-not listening coverage.

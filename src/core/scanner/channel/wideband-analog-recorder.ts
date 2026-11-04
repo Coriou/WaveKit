@@ -1837,7 +1837,7 @@ export class WidebandAnalogRecorder {
 	private decide(
 		s: Session,
 		code: ScannerRecorderDecision,
-		receipt?: ScannerRecorderReceiptDetail,
+		receipt?: ScannerRecorderReceiptDetail & { operationId: string },
 	): void {
 		this.decisions.note(
 			code,
@@ -1908,7 +1908,7 @@ export class WidebandAnalogRecorder {
 		s: Session,
 		file: FileState,
 		code: ScannerRecorderDecision,
-		receipt?: ScannerRecorderReceiptDetail,
+		receipt?: ScannerRecorderReceiptDetail & { operationId: string },
 	): void {
 		if (file.decided) return
 		file.decided = true

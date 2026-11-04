@@ -1,3 +1,7 @@
+import {
+	HitDiscoveryLoader,
+	type HitLookupState,
+} from "./hit-discovery-loader.ts"
 /**
  * Scanner (signal discovery) data: discoveries, jobs, status and band plans from the core's
  * /api/scanner routes, kept live from the `scanner` channel (scanner:job, scanner:progress,
@@ -151,6 +155,8 @@ export interface ScannerDiscoveriesState {
 }
 
 export interface ScannerState {
+	hitLookups: ReadonlyMap<string, HitLookupState>
+	hitLookupEpoch: number
 	discoveries: ScannerDiscoveriesState
 	/** Active observations by observationId (scanner:activity active=true, dropped after ~10 s quiet). */
 	activity: ReadonlyMap<string, ScannerActivityEventData>
@@ -415,6 +421,8 @@ const INITIAL_DISCOVERIES: ScannerDiscoveriesState = {
 }
 
 const INITIAL: ScannerState = {
+	hitLookups: new Map(),
+	hitLookupEpoch: 0,
 	discoveries: INITIAL_DISCOVERIES,
 	activity: new Map(),
 	activeNow: new Set(),
@@ -507,6 +515,7 @@ export class ScannerStore extends Store<ScannerState> {
 	private bandplansLoading: Promise<void> | null = null
 	private loadedOnce = false
 	private disposed = false
+	private readonly hitLoader: HitDiscoveryLoader
 
 	constructor(
 		api: ApiClient,
@@ -515,6 +524,10 @@ export class ScannerStore extends Store<ScannerState> {
 	) {
 		super(INITIAL)
 		this.api = api
+		this.hitLoader = new HitDiscoveryLoader(
+			(id, signal) => this.readDiscovery(id, 0, signal),
+			hitLookups => this.commit(s => ({ ...s, hitLookups })),
+		)
 		this.frame = options.frame ?? defaultFrame()
 		this.now = options.now ?? (() => Date.now())
 		this.staleMs = options.activityStaleMs ?? 10_000
@@ -549,6 +562,7 @@ export class ScannerStore extends Store<ScannerState> {
 				})),
 			),
 			events.onReconnected(() => {
+				this.resetHitLookups()
 				void this.resync()
 				// events may have been missed while disconnected: the held spans are read again
 				this.markDirty()
@@ -799,23 +813,29 @@ export class ScannerStore extends Store<ScannerState> {
 		return this.readDiscovery(id, 0)
 	}
 
-	/** A hit may outlive its discovery; retry transient read failures at most twice. */
-	async fetchHitDiscovery(id: string): Promise<Discovery> {
-		for (let attempt = 0; ; attempt++) {
-			try {
-				return await this.readDiscovery(id, 0)
-			} catch (error) {
-				if (attempt >= 2 || this.disposed) throw error
-			}
-		}
+	/** Queue bounded hit lookups; cached outcomes last until reconnect or store epoch change. */
+	loadHitDiscoveries(ids: Iterable<string>): void {
+		this.hitLoader.request(ids)
 	}
 
-	private async readDiscovery(id: string, attempt: number): Promise<Discovery> {
+	private resetHitLookups(): void {
+		this.hitLoader.reset()
+		this.commit(s => ({ ...s, hitLookupEpoch: s.hitLookupEpoch + 1 }))
+	}
+
+	private async readDiscovery(
+		id: string,
+		attempt: number,
+		signal?: AbortSignal,
+	): Promise<Discovery> {
 		const started = this.requestStart()
 		const d = await this.api.get<Discovery>(
 			`/api/scanner/discoveries/${encode(id)}`,
+			signal ? { signal } : {},
 		)
 		const stamp = this.stampOf(d.storeEpoch, started, d.storeRevision)
+		if (typeof d.absorbedInto === "string" && d.id !== id)
+			this.commit(s => this.withAliases(s, new Set([id]), d.id))
 		if (stamp === null) return d
 		this.commit(s => {
 			const absorbed =
@@ -832,7 +852,8 @@ export class ScannerStore extends Store<ScannerState> {
 		})
 		// refused by the floor: one fresh read at once lands at or above it
 		if (this.takeFloored()) {
-			if (attempt === 0 && !this.disposed) return this.readDiscovery(id, 1)
+			if (attempt === 0 && !this.disposed)
+				return this.readDiscovery(id, 1, signal)
 			this.markDirty()
 		}
 		return d
@@ -1080,6 +1101,7 @@ export class ScannerStore extends Store<ScannerState> {
 
 	dispose(): void {
 		this.disposed = true
+		this.hitLoader.dispose()
 		for (const fn of this.cleanup.splice(0)) fn()
 		this.discoveryAbort?.abort()
 		if (this.frameScheduled) this.frame.cancel(this.frameHandle)
@@ -1258,12 +1280,14 @@ export class ScannerStore extends Store<ScannerState> {
 		if (this.retiredEpochs.length > 8) this.retiredEpochs.shift()
 		this.storeEpoch = epoch
 		this.epochSwitches += 1
+		this.resetHitLookups()
 		this.order = new WriteOrder<Discovery>(this.orderLimits)
 		this.storeHighWater = 0
 		// revisions restart with the epoch: nothing cached can be compared any more
 		this.commit(s => ({
 			...s,
 			discoveries: { ...s.discoveries, byId: new Map(), items: [] },
+			discoveryAliases: new Map(),
 		}))
 		this.resyncDiscoveries(null)
 		return true
@@ -1364,6 +1388,7 @@ export class ScannerStore extends Store<ScannerState> {
 					new Set(mergedIds ?? absorbedBy(d, items))
 				: new Set<string>()
 		gone.delete(d.id)
+		s = this.withAliases(s, gone, d.id)
 		const applied = this.applyWrites(byId, stamp, {
 			upsert: [d],
 			removeHard: gone,
@@ -1383,16 +1408,24 @@ export class ScannerStore extends Store<ScannerState> {
 			if (i < items.length || list.nextCursor === null)
 				items = [...items.slice(0, i), stored, ...items.slice(i)]
 		}
+		return { ...s, discoveries: { ...list, items, byId } }
+	}
+
+	private withAliases(
+		s: ScannerState,
+		gone: ReadonlySet<string>,
+		survivor: string,
+	): ScannerState {
+		if (gone.size === 0) return s
 		const discoveryAliases = new Map(s.discoveryAliases)
-		if (applied.has(d.id))
-			for (const id of gone) {
-				discoveryAliases.set(id, d.id)
-				for (const [alias, target] of discoveryAliases)
-					if (target === id) discoveryAliases.set(alias, d.id)
-			}
+		for (const id of gone) {
+			discoveryAliases.set(id, survivor)
+			for (const [alias, target] of discoveryAliases)
+				if (target === id) discoveryAliases.set(alias, survivor)
+		}
 		while (discoveryAliases.size > 2000)
 			discoveryAliases.delete(discoveryAliases.keys().next().value!)
-		return { ...s, discoveryAliases, discoveries: { ...list, items, byId } }
+		return { ...s, discoveryAliases }
 	}
 
 	/** `id` was deleted: final (ids are never reused). */

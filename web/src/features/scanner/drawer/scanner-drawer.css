@@ -386,6 +386,12 @@
 	.wks-conf[data-tone="quiet"] {
 		color: var(--wk-text-3);
 	}
+	.wks-conf > .wks-ellipsis {
+		min-width: 0;
+	}
+	.wks-line1 > .wk-tag {
+		flex: none;
+	}
 	.wks-conf > svg {
 		flex: none;
 	}

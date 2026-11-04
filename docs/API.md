@@ -3281,9 +3281,13 @@ unclassed in an earlier visit.
 
 Recorder decisions optionally include `receipt` with `outcome` (`finalized`,
 `aborted` or `failed`), `errorCode` (a whitelisted store error code or null)
-and `operationId`. Non-finalized receipts retain the `discarded:aborted`
+only. Allowed codes: `admission-denied`, `disk-unavailable`, `disk-low`,
+`storage-cap`, `write-failed`, `close-failed`, `header-invalid`, `rename-failed`,
+`metadata-failed`, `cleanup-failed`, `recovery-incomplete`, `invalid-binding`,
+and `recovery-ambiguous`. Non-finalized receipts retain the `discarded:aborted`
 decision code; the receipt distinguishes a cancellation from a store failure.
-The same detail is included in the rate-limited decision log.
+The rate-limited decision log also includes the operation ID; it is never exposed
+in the API because a recording alias can be derived from it.
 
 Newer cores add `unclean` (`ScannerRecorderFlagDetail`) to the decisions of a recording one of
 whose snapshots was unclean, and to a `refused:unclean` snapshot refusal: `flag` (one of
@@ -8015,7 +8019,11 @@ Sweep job progress optionally includes `hops`, an array in plan order with
 `hopIndex`, `visits`, `timeMs`, `holdMs` and nullable `lastVisitAgeMs`.
 These are scheduler totals since this job started, including the current visit;
 an unvisited hop has a null age. Time includes the entire visit, not just
-qualified listening. This field is absent without a sweep scheduler.
+qualified listening. Totals freeze while paused or ended; the last-visit age
+continues to increase. Resuming excludes paused time. A replan maps old totals
+once to the first matching new hop; duplicate mapped hops start at zero.
+This field is included only in job DTOs, absent from `scanner:progress` events
+and absent without a sweep scheduler.
 
 `ScanJobProgress` and `scanner:progress` add optional `phase`, `parked`,
 `holding { discoveryId, frequencyHz, trackId }`,

@@ -1,3 +1,4 @@
+import type { HitLookupState } from "../../../data/hit-discovery-loader.ts"
 // The Scanner drawer's words and row anatomy (Scanner board): discovery rows, groups by sort, the open
 // row's "why", identity chips, the live hit log, the header count and the footer. Pure.
 import type {
@@ -118,6 +119,7 @@ export interface DiscoveryRowView {
 	decoded: boolean
 	/** Label, else identity and what it carries ("CC 1 · TG 2081, TG 9 · slot 1"), else width. */
 	title: string
+	proof: string | null
 	labelled: boolean
 	/** Caps and failure reasons, or null. */
 	reason: string | null
@@ -202,7 +204,7 @@ export function discoveryRow(
 		`${formatMHz(d.frequencyHz)} MHz`,
 		confidence,
 		likely,
-		label || identityText(d.identity),
+		label || savedName.trim() || identityText(d.identity),
 	]
 		.filter(Boolean)
 		.join(", ")
@@ -217,6 +219,7 @@ export function discoveryRow(
 		next: isVerified(d) ? null : nextStepText(d),
 		decoded: d.confidence === "decoded" && d.protocol !== "carrier",
 		title,
+		proof: label || savedName.trim() ? d.proof?.summary || ident || null : null,
 		labelled: label !== "",
 		reason: reasonText(d),
 		encrypted: d.encrypted,
@@ -474,7 +477,7 @@ export function hitMeta(e: HitEntry): string {
 	)
 	if (e.hit.lastDurationMs != null && e.hit.lastDurationMs > 0)
 		parts.push(
-			`latest ${e.hit.lastDurationMs < 1000 ? `${Math.max(0, Math.round(e.hit.lastDurationMs))} ms` : durationText(e.hit.lastDurationMs)}`,
+			`latest ${e.hit.lastDurationMs < 1 ? "under 1 ms" : e.hit.lastDurationMs < 1000 ? `${Math.min(999, Math.floor(e.hit.lastDurationMs))} ms` : durationText(e.hit.lastDurationMs)}`,
 		)
 	return parts.join(" · ")
 }
@@ -533,9 +536,9 @@ export interface FooterInput {
 }
 
 /** Coverage as a percentage, when the core reports it (0..1). */
-function coverageText(c: number | undefined): string | null {
+function coverageText(c: number | undefined, sweep: boolean): string | null {
 	if (c === undefined || !Number.isFinite(c) || c <= 0) return null
-	return `${Math.round(Math.min(1, c) * 100)} % hops visited`
+	return `${Math.round(Math.min(1, c) * 100)} % ${sweep ? "hops visited" : "covered"}`
 }
 
 /** The footer: honest about how long and how much was looked at. */
@@ -545,7 +548,10 @@ export function footerText(f: FooterInput): string {
 	if (s && isJobActive(s.state)) {
 		const started = s.startedAt ? Date.parse(s.startedAt) : NaN
 		const el = Number.isFinite(started) ? durationText(f.now - started) : null
-		const cov = coverageText(f.progress?.coverage ?? s.progress.coverage)
+		const cov = coverageText(
+			f.progress?.coverage ?? s.progress.coverage,
+			s.spec.mode === "sweep",
+		)
 		const one = isOneHop(s)
 		switch (s.state) {
 			case "pending":
@@ -569,7 +575,10 @@ export function footerText(f: FooterInput): string {
 		// a finished scan stays in the footer for an hour
 		if (f.now - ended < 3_600_000) {
 			const ran = durationText(ended - Date.parse(last.startedAt))
-			const cov = coverageText(last.progress.coverage)
+			const cov = coverageText(
+				last.progress.coverage,
+				last.spec.mode === "sweep",
+			)
 			if (last.state === "failed")
 				return `${lead}Scan failed at ${clockText(ended)}`
 			if (f.found === 0)
@@ -633,4 +642,10 @@ export function spanText(centreHz: number, sampleRateHz: number): string {
 	const a = (centreHz - sampleRateHz / 2) / 1e6
 	const b = (centreHz + sampleRateHz / 2) / 1e6
 	return `${a.toFixed(1)}–${b.toFixed(1)}`
+}
+
+export function hitLookupLabel(state: HitLookupState | undefined): string {
+	return state === "unavailable" || state === "available"
+		? "Merged or unavailable"
+		: "Loading discovery…"
 }

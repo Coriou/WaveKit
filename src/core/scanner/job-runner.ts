@@ -165,7 +165,7 @@ export interface JobDriver {
 	dispatch(e: JobEvent): Promise<void>
 	idle(): Promise<void>
 	covers(sourceId: string, hz: number): boolean
-	progress(): ScanJobProgress
+	progress(includeHops?: boolean): ScanJobProgress
 	tick(now: number): void
 	onEpochStarted(epoch: EngineEpoch): void
 	onBlock(endSample: number, overload: boolean): void
@@ -635,7 +635,7 @@ export class JobRunner implements JobDriver {
 		return holder === undefined || holder.jobId === this.record.id
 	}
 
-	progress(): ScanJobProgress {
+	progress(includeHops = true): ScanJobProgress {
 		const engine = this.deps.engine(this.sourceId)
 		const p = this.scheduler?.progress()
 		const stats = engine?.stats()
@@ -653,7 +653,9 @@ export class JobRunner implements JobDriver {
 			startedAt: new Date(s.startedAt).toISOString(),
 		}))
 		const base: ScanJobProgress = {
-			...(this.scheduler ? { hops: this.scheduler.hopStats() } : {}),
+			...(includeHops && this.scheduler
+				? { hops: this.scheduler.hopStats() }
+				: {}),
 			sweepIndex: p?.sweepIndex ?? 0,
 			hopIndex: p?.hopIndex ?? 0,
 			hopCount: p?.hopCount ?? this.record.plan.hops.length,
@@ -1302,6 +1304,7 @@ export class JobRunner implements JobDriver {
 		}
 		const now = this.deps.now()
 		record.state = t.state
+		this.scheduler?.setAccountingActive(this.driving)
 		if (t.reason === undefined) delete record.reason
 		else record.reason = t.reason
 		record.updatedAt = now
@@ -1317,6 +1320,7 @@ export class JobRunner implements JobDriver {
 			// A failed action (e.g. the engine cannot start before the source has caps) must not
 			// leave the job in "starting" holding a lease or a decoder hold.
 			await this.rollback(before, prev)
+			this.scheduler?.setAccountingActive(this.driving)
 			throw err
 		}
 		if (!this.driving) this.epochOwn = false

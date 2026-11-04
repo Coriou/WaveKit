@@ -810,3 +810,63 @@ describe("SweepScheduler re-plan", () => {
 		)
 	})
 })
+
+it("freezes accounting while paused and resumes without counting the pause", () => {
+	const h = harness(
+		makeHopPlan([400 * MHZ, 402 * MHZ]),
+		makeNormalisedSpec({ revisit: noRevisit }),
+	)
+	h.s.start()
+	h.s.onEpochStarted(0)
+	h.clock = 100
+	h.s.setAccountingActive(false)
+	h.clock = 600
+	expect(h.s.hopStats()[0]).toMatchObject({
+		visits: 1,
+		timeMs: 100,
+		holdMs: 0,
+		lastVisitAgeMs: 500,
+	})
+	h.s.setAccountingActive(true)
+	h.s.onEpochStarted(0)
+	h.clock = 700
+	h.dwell(3, false)
+	expect(h.s.hopStats()[0]).toMatchObject({
+		visits: 1,
+		timeMs: 200,
+		lastVisitAgeMs: 0,
+	})
+	h.s.setAccountingActive(false)
+	const totals = h.s
+		.hopStats()
+		.map(({ visits, timeMs, holdMs }) => ({ visits, timeMs, holdMs }))
+	h.clock = 900
+	expect(
+		h.s
+			.hopStats()
+			.map(({ visits, timeMs, holdMs }) => ({ visits, timeMs, holdMs })),
+	).toEqual(totals)
+})
+
+it.each([false, true])(
+	"excludes paused held time across restart (tick at pause: %s)",
+	tick => {
+		const h = harness(
+			makeHopPlan([400 * MHZ, 402 * MHZ]),
+			makeNormalisedSpec({ revisit: noRevisit }),
+		)
+		h.s.start()
+		h.s.onEpochStarted(0)
+		h.s.onTrack(track("held"), true, 1800)
+		h.dwell(3, false)
+		h.clock = 100
+		if (tick) h.s.tick(h.clock)
+		h.s.setAccountingActive(false)
+		h.clock = 600
+		expect(h.s.hopStats()[0]?.holdMs).toBe(100)
+		h.s.setAccountingActive(true)
+		expect(h.s.hopStats()[0]?.holdMs).toBe(100)
+		h.s.onEpochStarted(3 * B)
+		expect(h.s.hopStats()[0]?.holdMs).toBe(100)
+	},
+)

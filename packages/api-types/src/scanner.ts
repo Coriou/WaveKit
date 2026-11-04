@@ -1062,10 +1062,25 @@ export interface ScannerRecorderFlagDetail {
 	kept: boolean
 }
 
+export const SCANNER_RECORDER_ERRORS = [
+	"admission-denied",
+	"disk-unavailable",
+	"disk-low",
+	"storage-cap",
+	"write-failed",
+	"close-failed",
+	"header-invalid",
+	"rename-failed",
+	"metadata-failed",
+	"cleanup-failed",
+	"recovery-incomplete",
+	"invalid-binding",
+	"recovery-ambiguous",
+] as const
+
 export interface ScannerRecorderReceiptDetail {
 	outcome: "finalized" | "aborted" | "failed"
-	errorCode: string | null
-	operationId: string
+	errorCode: (typeof SCANNER_RECORDER_ERRORS)[number] | null
 }
 
 export interface ScannerRecorderDecisionEntry {

@@ -702,6 +702,11 @@ describe("ScannerStore live events", () => {
 			peakDbfs: -30,
 		})
 		tick()
+		const lookupEpoch = store.get().hitLookupEpoch
+		store.loadHitDiscoveries(["missing"])
+		await vi.waitFor(() =>
+			expect(store.get().hitLookups.get("missing")).toBe("available"),
+		)
 		const before = calls.length
 		vi.useFakeTimers()
 		sockets.last().drop()
@@ -719,6 +724,8 @@ describe("ScannerStore live events", () => {
 			)
 		})
 		expect(store.get().activeNow.size).toBe(0)
+		expect(store.get().hitLookupEpoch).toBeGreaterThan(lookupEpoch)
+		expect(store.get().hitLookups.size).toBe(0)
 		const resub = sockets.last().sent as { type: string; channels?: string[] }[]
 		expect(
 			resub.some(
@@ -1133,7 +1140,7 @@ describe("ScannerStore: band inspection UX merges (req 3.1, 3.2)", () => {
 		store.dispose()
 	})
 
-	it("retries a missing discovery only three times", async () => {
+	it("marks a missing discovery unavailable without retrying", async () => {
 		let attempts = 0
 		const { store } = await ready([], call => {
 			if (call.url === "/api/scanner/discoveries/missing") {
@@ -1142,10 +1149,56 @@ describe("ScannerStore: band inspection UX merges (req 3.1, 3.2)", () => {
 			}
 			return undefined
 		})
-		await expect(store.fetchHitDiscovery("missing")).rejects.toBeDefined()
-		expect(attempts).toBe(3)
+		store.loadHitDiscoveries(["missing"])
+		expect(store.get().hitLookups.get("missing")).toBe("pending")
+		await flush()
+		expect(store.get().hitLookups.get("missing")).toBe("unavailable")
+		store.loadHitDiscoveries(["missing"])
+		expect(attempts).toBe(1)
 		store.dispose()
 	})
+
+	it.each(["older", "retired"] as const)(
+		"keeps survivor aliases from %s answers and resets lookups on epoch change",
+		async mode => {
+			let response = discovery("new", {
+				storeEpoch: "e1",
+				storeRevision: 10,
+				revision: 10,
+			})
+			const { store } = await ready([], call =>
+				call.url.includes("/discoveries/") ? { body: response } : undefined,
+			)
+			await store.fetchDiscovery("new")
+			const aliases = store.get().discoveryAliases
+			await store.fetchDiscovery("new")
+			expect(store.get().discoveryAliases).toBe(aliases)
+			store.loadHitDiscoveries(["new"])
+			await flush()
+			const epoch = store.get().hitLookupEpoch
+			if (mode === "retired") {
+				response = discovery("new", {
+					storeEpoch: "e2",
+					storeRevision: 10,
+					revision: 10,
+				})
+				await store.fetchDiscovery("new")
+				expect(store.get().hitLookupEpoch).toBeGreaterThan(epoch)
+				expect(store.get().hitLookups.size).toBe(0)
+			}
+			response = discovery("new", {
+				storeEpoch: "e1",
+				storeRevision: 1,
+				revision: 1,
+				absorbedInto: "new",
+				requestedId: "old",
+			})
+			await store.fetchDiscovery("old")
+			expect(store.get().discoveryAliases.get("old")).toBe("new")
+			expect(store.get().discoveries.byId.get("new")?.revision).toBe(10)
+			store.dispose()
+		},
+	)
 
 	it("reading an absorbed id replaces it with the survivor", async () => {
 		const { store } = await ready([discovery("old")], call =>

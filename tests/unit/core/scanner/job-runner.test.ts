@@ -900,3 +900,39 @@ it.each(["cancel", "throw", "dispose"] as const)(
 		expect(releases).toBe(1)
 	},
 )
+
+it.each(["pause", "stop-condition"] as const)(
+	"omits hop accounting on event progress and freezes it after %s",
+	async event => {
+		let now = 0
+		const { runner, arbiter } = runnerHarness(undefined, { now: () => now })
+		await runner.start()
+		await flush()
+		runner.onEpochStarted(epochAt(11, HOP0))
+		arbiter.retunes[0]!.resolve(pendingFor(11, HOP0))
+		await flush()
+		now = 100
+		expect(runner.progress(false)).not.toHaveProperty("hops")
+		await runner.dispatch({ type: event })
+		const before = runner
+			.progress()
+			.hops?.map(({ visits, timeMs, holdMs }) => ({ visits, timeMs, holdMs }))
+		now = 1000
+		expect(
+			runner.progress().hops?.map(({ visits, timeMs, holdMs }) => ({
+				visits,
+				timeMs,
+				holdMs,
+			})),
+		).toEqual(before)
+		if (event === "pause") await runner.dispatch({ type: "cancel" })
+		now = 2000
+		expect(
+			runner.progress().hops?.map(({ visits, timeMs, holdMs }) => ({
+				visits,
+				timeMs,
+				holdMs,
+			})),
+		).toEqual(before)
+	},
+)

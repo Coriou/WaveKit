@@ -252,3 +252,6 @@ export const JOB_PROBE_MAX_WAIT_MS =
 	7 * (JOB_PROBE_TURN_CAP_MS + JOB_PROBE_START_ALLOWANCE_MS)
 export const JOB_PROBE_STRONG_WAIT_MS =
 	JOB_PROBE_MIN_RUN_MS + JOB_PROBE_START_ALLOWANCE_MS
+
+/** First block at which a non-burst spectral class is available. */
+export const CLASS_SETTLE_BLOCKS = 5

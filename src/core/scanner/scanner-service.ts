@@ -7980,7 +7980,7 @@ export class ScannerService extends EventEmitter {
 			? [record]
 			: [...this.jobs.values()].filter(r => !isTerminal(r.state))
 		for (const r of records) {
-			const p = this.drivers.get(r.id)?.progress()
+			const p = this.drivers.get(r.id)?.progress(false)
 			if (!p) continue
 			const stats = this.hitStatsOf(r.id)
 			const hop = r.plan.hops[p.hopIndex]

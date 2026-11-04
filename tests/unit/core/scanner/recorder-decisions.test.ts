@@ -417,12 +417,18 @@ it("keeps receipt details in status, discovery detail and logs", async () => {
 	const decisions = new RecorderDecisions(logger, () => 0)
 	const receipt = {
 		outcome: "failed" as const,
-		errorCode: "write-failed",
+		errorCode: "write-failed" as const,
 		operationId: "op-test",
 	}
 	decisions.note("discarded:aborted", ref(1, "d"), true, null, receipt)
-	expect(decisions.status().recent[0]?.receipt).toEqual(receipt)
-	expect(decisions.forDiscovery("d")?.last.receipt).toEqual(receipt)
+	expect(decisions.status().recent[0]?.receipt).toEqual({
+		outcome: receipt.outcome,
+		errorCode: receipt.errorCode,
+	})
+	expect(decisions.forDiscovery("d")?.last.receipt).toEqual({
+		outcome: receipt.outcome,
+		errorCode: receipt.errorCode,
+	})
 	await flushLogs()
 	expect(lines[0]).toMatchObject({
 		receiptOutcome: "failed",

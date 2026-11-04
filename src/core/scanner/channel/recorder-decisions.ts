@@ -14,6 +14,7 @@ import {
 	RECORDER_RECENT_REFUSALS,
 	type ScannerRecorderDecision,
 	type ScannerRecorderDecisionEntry,
+	type ScannerRecorderReceiptDetail,
 	type ScannerRecorderDiscovery,
 	type ScannerRecorderFlagDetail,
 } from "@wavekit/api-types"
@@ -35,10 +36,12 @@ export interface RecorderDecisionRef {
 	readonly discoveryId: string | null
 }
 
-type ReceiptDetail = ScannerRecorderDecisionEntry["receipt"]
+interface ReceiptDetail extends ScannerRecorderReceiptDetail {
+	operationId: string
+}
 
 interface ObservationMemory {
-	receipt: ReceiptDetail
+	receipt: ReceiptDetail | undefined
 	sourceId: string
 	discoveryId: string | null
 	last: ScannerRecorderDecision
@@ -48,7 +51,7 @@ interface ObservationMemory {
 }
 
 interface Entry {
-	receipt: ReceiptDetail
+	receipt: ReceiptDetail | undefined
 	code: ScannerRecorderDecision
 	at: number
 	sourceId: string
@@ -241,7 +244,14 @@ function fields(
 function dto(e: Entry): ScannerRecorderDecisionEntry {
 	return {
 		code: e.code,
-		...(e.receipt ? { receipt: { ...e.receipt } } : {}),
+		...(e.receipt
+			? {
+					receipt: {
+						outcome: e.receipt.outcome,
+						errorCode: e.receipt.errorCode,
+					},
+				}
+			: {}),
 		at: new Date(e.at).toISOString(),
 		sourceId: e.sourceId,
 		observationId: e.observationId,

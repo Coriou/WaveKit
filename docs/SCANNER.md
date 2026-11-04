@@ -387,6 +387,12 @@ Marking a discovery Ignore (`PATCH /api/scanner/discoveries/:id` with `lockout: 
 
 ### Hit statistics
 
+Track snapshots include updates at blocks 2, 5 and 20, then the existing periodic
+cadence. The block-5 class can make a visit hold earlier, by design; dwell settings
+and acceptance gates are unchanged. Sweep job progress exposes per-hop visit,
+time and hold totals (see [API](API.md)). Recorder receipt details distinguish
+store failures from cancellations while retaining existing decision codes.
+
 Each job counts its hits: one per observation attributed to a discovery, per discovery with first and last hit time and whether the job first saw it. `GET /api/scanner/jobs/:id/hits` lists them (most recent first); the job's `progress.hitStats`, `scanner:progress` (`hits`, `newDiscoveries`) and `scanner:discovery` (`jobHits`) carry them too. In memory only: reset when a job starts (not on resume), dropped with the job, empty after a restart. Bounds: 2,000 discoveries tracked per job (later ones count in the totals only) and a 4,096-observation dedupe memory; past either bound the stats say `truncated: true` and are best-effort.
 
 ## Listening
@@ -931,9 +937,3 @@ output. See [decoder setup](DECODER-GUIDE.md#wireless-m-bus-meters-86895-mhz).
 
 Wireless M-Bus meter IDs and readings are personal data, stored like other sensor IDs.
 Validation so far uses synthetic fixtures; live meter decodes have not been observed.
-
-Track snapshots include updates at blocks 2, 5 and 20, then the existing periodic
-cadence, so early classification can reach the scheduler. This does not change
-dwell, acceptance gates or scheduling policy. Sweep job progress exposes per-hop
-visit, time and hold totals (see [API](API.md)). Recorder receipt details distinguish
-failed store operations from cancellations while retaining existing decision codes.

@@ -281,7 +281,14 @@ const DiscoveryItem = memo(function DiscoveryItem({
 	measure,
 }: ItemProps) {
 	useDisplay() // times follow Settings › Display
-	const v = discoveryRow(discovery, now)
+	const services = useServices()
+	const savedName = useStore(
+		services.data.savedFrequencies,
+		s =>
+			s.items.find(f => f.frequencyHz === Math.round(discovery.frequencyHz))
+				?.name,
+	)
+	const v = discoveryRow(discovery, now, savedName)
 	return (
 		<article
 			data-key={discovery.id}
@@ -306,8 +313,17 @@ const DiscoveryItem = memo(function DiscoveryItem({
 					<span className="wks-main">
 						<Line1 v={v} live={live} />
 						{v.title && (
-							<span className="wks-title" data-label={v.labelled || undefined}>
+							<span
+								className="wks-title wks-ellipsis"
+								title={v.title}
+								data-label={v.labelled || undefined}
+							>
 								{v.title}
+							</span>
+						)}
+						{v.proof && (
+							<span className="wks-reason wks-ellipsis" title={v.proof}>
+								{v.proof}
 							</span>
 						)}
 						{v.reason && <span className="wks-reason">{v.reason}</span>}

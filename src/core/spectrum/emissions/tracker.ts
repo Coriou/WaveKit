@@ -18,6 +18,7 @@ import { frameTrust } from "../retune-settle.js"
 import type { ImageCandidate } from "./iq-image.js"
 import type { TrackAssociation } from "../frame-tracks.js"
 import {
+	CLASS_SETTLE_BLOCKS,
 	CHANNEL_GATE_BURST_MARGIN_DB,
 	CHANNEL_GATE_BURST_MIN_DURATION_MS,
 	CHANNEL_GATE_HYSTERESIS_DB,
@@ -770,7 +771,7 @@ export class Tracker {
 			}
 			if (
 				t.blocks === FIRST_UPDATE_BLOCKS ||
-				t.blocks === 5 ||
+				t.blocks === CLASS_SETTLE_BLOCKS ||
 				t.blocks === 20 ||
 				t.blocks % this.updateEvery === 0 ||
 				t.flagsChanged

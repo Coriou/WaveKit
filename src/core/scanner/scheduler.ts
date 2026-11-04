@@ -9,6 +9,7 @@
  * followed on air) until a hold shows positive carrier evidence for it; only then is it held under
  * the carrier rules (a retry budget and holds of at most one coarse sweep). See FrequencyMemory.
  */
+import { CLASS_SETTLE_BLOCKS } from "./scanner-redesign-contract.js"
 import { WaveKitError } from "../../utils/errors.js"
 import type { Hop, HopPlan, NormalisedJobSpec } from "./types.js"
 import type { TrackSnapshot } from "../spectrum/types.js"
@@ -144,7 +145,7 @@ const KNOWN_CALL_REST_FACTOR = 1
  * whose spectrum reads as analog voice (TrackHints.voiceLater) waits for it once, at most
  * CLASS_SETTLE_BLOCKS − 1 = 4 more blocks (200 ms in 50 ms blocks).
  */
-const CLASS_SETTLE_BLOCKS = 5
+
 /**
  * Confirm window a visit always allows, however short its coarse sweep: the longest built-in class
  * confirm hold (10 000 ms, `ook-burst`) plus 2 000 ms of decoder start latency the job runner adds
@@ -562,6 +563,7 @@ export class SweepScheduler {
 	restartVisit(startSample: number): SchedulerAction[] {
 		const v = this.visit
 		if (v === null || this.phase === "idle") return []
+		const heldAtRestart = this.heldAccountingFloorMs
 		const actions: SchedulerAction[] =
 			this.phase === "hold" ? [{ type: "stop-probes" }] : []
 		this.endHold(false)
@@ -579,6 +581,14 @@ export class SweepScheduler {
 				Math.min(this.now(), this.heardAt ?? v.holdStartedAt) - v.holdStartedAt,
 			)
 		v.holdStartedAt = null
+		// Scheduling budgets use the last received tick; cost statistics must not lose the
+		// wall-clock hold interval already reported before a pause between ticks.
+		this.heldAccountingFloorMs = null
+		if (heldAtRestart !== null)
+			this.heldAccountingOffsetMs += Math.max(
+				0,
+				heldAtRestart - this.accountedHeldMs(v, this.now()),
+			)
 		this.phase = "dwell"
 		// A re-sent window starts fresh: time without data is no dwell.
 		this.parkedSweepSamples = 0
@@ -1150,20 +1160,51 @@ export class SweepScheduler {
 		return []
 	}
 
-	/** Per-hop accounting under the current plan; the visit in progress counts up to `now`. */
+	private accountingPausedAt: number | null = null
+	private visitPausedMs = 0
+	private heldAccountingFloorMs: number | null = null
+	private heldAccountingOffsetMs = 0
+
+	/** Freeze statistics without changing the visit's scheduling or hold policy. */
+	setAccountingActive(active: boolean): void {
+		if (active && this.accountingPausedAt !== null) {
+			const pausedMs = Math.max(0, this.now() - this.accountingPausedAt)
+			this.visitPausedMs += pausedMs
+
+			this.accountingPausedAt = null
+		} else if (!active && this.accountingPausedAt === null) {
+			this.accountingPausedAt = this.now()
+			this.heldAccountingFloorMs =
+				this.visit === null
+					? null
+					: this.accountedHeldMs(this.visit, this.accountingPausedAt)
+		}
+	}
+
+	private accountedHeldMs(v: Visit, now: number): number {
+		return (
+			this.heldAccountingFloorMs ??
+			Math.max(0, this.heldMs(v, now) + this.heldAccountingOffsetMs)
+		)
+	}
+
+	/** Per-hop totals, excluding pauses; last-visit age uses the wall clock. */
 	hopStats(): HopStat[] {
 		const now = this.now()
 		const v = this.visit
 		return this.hops.map((hop, hopIndex) => {
 			const current = v !== null && v.hopIndex === hopIndex
-			const held = current ? this.heldMs(v, now) : 0
+			const at = this.accountingPausedAt ?? now
+			const held = current ? this.accountedHeldMs(v, at) : 0
 			return {
 				hopIndex,
 				visits: hop.visits + (current ? 1 : 0),
-				timeMs: hop.timeMs + (current ? now - v.startedAt : 0),
+				timeMs:
+					hop.timeMs +
+					(current ? Math.max(0, at - v.startedAt - this.visitPausedMs) : 0),
 				holdMs: hop.holdMs + held,
 				lastVisitAgeMs: current
-					? 0
+					? now - at
 					: hop.lastVisit === null
 						? null
 						: now - hop.lastVisit,
@@ -2240,6 +2281,7 @@ export class SweepScheduler {
 	}
 
 	private endVisit(now: number): void {
+		now = this.accountingPausedAt ?? now
 		const v = this.visit
 		this.endHold(true)
 		if (v === null) return
@@ -2248,9 +2290,9 @@ export class SweepScheduler {
 		this.noteHeardGaps(v, now)
 		this.noteFlapListening(v, now)
 		hop.visits++
-		hop.timeMs += Math.max(0, now - v.startedAt)
+		hop.timeMs += Math.max(0, now - v.startedAt - this.visitPausedMs)
 		const heldMs = this.heldMs(v, now)
-		hop.holdMs += heldMs
+		hop.holdMs += this.accountedHeldMs(v, now)
 		// The other hops waited for this visit's long or budgeted holds (followBudgetMs); this hop
 		// was visited.
 		if (v.budgeted || v.longFollow || v.watched)
@@ -2328,6 +2370,10 @@ export class SweepScheduler {
 				}
 			}
 		}
+		this.visit = null
+		this.visitPausedMs = 0
+		this.heldAccountingFloorMs = null
+		this.heldAccountingOffsetMs = 0
 	}
 
 	/**

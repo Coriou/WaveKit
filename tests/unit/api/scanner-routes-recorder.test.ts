@@ -28,6 +28,15 @@ const decisions: ScannerRecorderDiscovery = {
 		sourceId: "rtl",
 		observationId: "o_1",
 		discoveryId: "d_a",
+		receipt: { outcome: "failed", errorCode: "write-failed" },
+		unclean: {
+			flag: "spur",
+			raisedBy: "snapshot",
+			atMs: 100,
+			flagged: 1,
+			snapshots: 5,
+			kept: true,
+		},
 	},
 	counts: { started: 1, voiced: 1, finalized: 1, "refused:cpu": 2 },
 }
@@ -76,10 +85,24 @@ describe("scanner routes: recorder decisions", () => {
 	}
 
 	it("a detail read carries every field of the discovery's recorder decisions", async () => {
-		const { app } = await build(id => (id === "d_a" ? decisions : null))
+		const { app } = await build(id =>
+			id === "d_a"
+				? {
+						...decisions,
+						last: {
+							...decisions.last,
+							receipt: {
+								...decisions.last.receipt!,
+								operationId: "private-operation",
+							},
+						},
+					}
+				: null,
+		)
 		const res = await app.inject({ url: "/api/scanner/discoveries/d_a" })
 		expect(res.statusCode).toBe(200)
 		expect(res.json().recorder).toEqual(decisions)
+		expect(JSON.stringify(res.json())).not.toContain("operationId")
 	})
 
 	it("nothing decided omits the field; the list never carries it", async () => {

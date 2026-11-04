@@ -3,7 +3,7 @@
 // An open row can Skip its channel for the rest of this scan (the Tuner's scan row does it for the held one).
 import type { ScanJob } from "@wavekit/api-types"
 import { WaveKitIcon } from "@wavekit/brand/react"
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { memo, useCallback, useEffect, useMemo, useState } from "react"
 
 import { useDisplay } from "../../display.ts"
 import { useReadOnly, useServices } from "../../../app/context.ts"
@@ -13,7 +13,13 @@ import { openDiscovery } from "../ui-store.ts"
 import { listenTo, setIgnored, setSkipped, toggleSaved } from "./actions.ts"
 import { ScanIcon } from "./icons.tsx"
 import type { HitEntry } from "./rows.ts"
-import { discoveryRow, frequencyParts, hitEntries, hitMeta } from "./rows.ts"
+import {
+	discoveryRow,
+	frequencyParts,
+	hitEntries,
+	hitMeta,
+	hitLookupLabel,
+} from "./rows.ts"
 import { drawerView, setTab, toggleNewOnly } from "./state.ts"
 import { useVirtual } from "./use-virtual.ts"
 
@@ -25,6 +31,8 @@ export function HitLog({ jobId, oneHop }: { jobId: string; oneHop: boolean }) {
 	const hits = useStore(scanner, s => s.jobHits.get(jobId) ?? EMPTY)
 	const job = useStore(scanner, s => s.jobs.get(jobId) ?? null)
 	const byId = useStore(scanner, s => s.discoveries.byId)
+	const lookups = useStore(scanner, s => s.hitLookups)
+	const lookupEpoch = useStore(scanner, s => s.hitLookupEpoch)
 	const aliases = useStore(scanner, s => s.discoveryAliases)
 	const activeNow = useStore(scanner, s => s.activeNow)
 	const newOnly = useStore(drawerView, s => s.newOnly)
@@ -41,26 +49,9 @@ export function HitLog({ jobId, oneHop }: { jobId: string; oneHop: boolean }) {
 	}, [jobId, scanner])
 
 	// discoveries the store has not seen yet (hit before this page loaded), a few at a time
-	const asked = useRef(new Set<string>())
-	const [fetchVersion, setFetchVersion] = useState(0)
 	useEffect(() => {
-		let cancelled = false
-		let n = 0
-		for (const id of hits.keys()) {
-			if (byId.has(aliases.get(id) ?? id) || asked.current.has(id)) continue
-			if (n++ >= 20) break
-			asked.current.add(id)
-			scanner
-				.fetchHitDiscovery(id)
-				.catch(() => undefined)
-				.finally(() => {
-					if (!cancelled) setFetchVersion(v => v + 1)
-				})
-		}
-		return () => {
-			cancelled = true
-		}
-	}, [hits, byId, aliases, scanner, fetchVersion])
+		scanner.loadHitDiscoveries(hits.keys())
+	}, [hits, scanner, lookupEpoch])
 
 	const entries = useMemo(
 		() => hitEntries(hits, byId, activeNow, newOnly, aliases),
@@ -119,6 +110,10 @@ export function HitLog({ jobId, oneHop }: { jobId: string; oneHop: boolean }) {
 									discovery={e.discovery}
 									live={e.live}
 									fresh={e.fresh}
+									pending={
+										lookups.get(e.hit.discoveryId) === undefined ||
+										lookups.get(e.hit.discoveryId) === "pending"
+									}
 									job={job}
 									open={openId === e.hit.discoveryId}
 									measure={v.measure}
@@ -138,11 +133,13 @@ const HitRow = memo(function HitRow({
 	discovery,
 	live,
 	fresh,
+	pending,
 	job,
 	open,
 	measure,
 	onToggle,
 }: HitEntry & {
+	pending: boolean
 	job: ScanJob | null
 	open: boolean
 	measure: (el: HTMLElement | null) => void
@@ -194,16 +191,28 @@ const HitRow = memo(function HitRow({
 				</span>
 				<span className="wks-main">
 					<span className="wks-line1">
-						<span className="wks-freq">
-							{parts?.main ?? "Merged or unavailable"}
+						<span className={parts ? "wks-freq" : "wks-conf"}>
+							<span
+								className="wks-ellipsis"
+								title={
+									parts
+										? undefined
+										: hitLookupLabel(pending ? "pending" : "unavailable")
+								}
+							>
+								{parts?.main ??
+									hitLookupLabel(pending ? "pending" : "unavailable")}
+							</span>
 							<span className="wks-freq-tail">{parts?.tail}</span>
 						</span>
-						<span className="wks-conf wks-ellipsis" data-tone={row?.tone}>
-							{row
-								? row.title
-									? `${row.confidence} · ${row.title}`
-									: row.confidence
-								: ""}
+						<span className="wks-conf" data-tone={row?.tone}>
+							<span className="wks-ellipsis" title={row?.title}>
+								{row
+									? row.title
+										? `${row.confidence} · ${row.title}`
+										: row.confidence
+									: ""}
+							</span>
 						</span>
 						<span className="wks-gap" />
 						{skip !== null && <span className="wk-tag">Skipped</span>}
@@ -230,6 +239,11 @@ const HitRow = memo(function HitRow({
 							</span>
 						)}
 					</span>
+					{row?.proof && (
+						<span className="wks-reason wks-ellipsis" title={row.proof}>
+							{row.proof}
+						</span>
+					)}
 					<span className="wks-reason">{hitMeta(e)}</span>
 					{row && row.next !== null && (
 						<span className="wks-reason wks-hint">

@@ -1,3 +1,8 @@
+import {
+	SCANNER_RECORDER_ERRORS,
+	SCANNER_RECORDER_FLAGS,
+	SCANNER_RECORDER_FLAG_SOURCES,
+} from "@wavekit/api-types"
 /**
  * Scanner REST API (spec § 12.1). All additive; errors use the repo's flat
  * `{ error, code, message, details? }` body.
@@ -552,6 +557,44 @@ const discoveryRecorderSchema = {
 				sourceId: { type: "string" },
 				observationId: { type: "string" },
 				discoveryId: { type: ["string", "null"] },
+				receipt: {
+					type: "object",
+					additionalProperties: false,
+					required: ["outcome", "errorCode"],
+					properties: {
+						outcome: {
+							type: "string",
+							enum: ["finalized", "aborted", "failed"],
+						},
+						errorCode: {
+							type: ["string", "null"],
+							enum: [...SCANNER_RECORDER_ERRORS, null],
+						},
+					},
+				},
+				unclean: {
+					type: "object",
+					additionalProperties: false,
+					required: [
+						"flag",
+						"raisedBy",
+						"atMs",
+						"flagged",
+						"snapshots",
+						"kept",
+					],
+					properties: {
+						flag: { type: "string", enum: [...SCANNER_RECORDER_FLAGS] },
+						raisedBy: {
+							type: "string",
+							enum: [...SCANNER_RECORDER_FLAG_SOURCES],
+						},
+						atMs: { type: "number" },
+						flagged: { type: "integer" },
+						snapshots: { type: "integer" },
+						kept: { type: "boolean" },
+					},
+				},
 			},
 		},
 		counts: {

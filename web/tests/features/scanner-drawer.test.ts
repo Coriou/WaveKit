@@ -16,6 +16,7 @@ import {
 	heardText,
 	hitEntries,
 	hitMeta,
+	hitLookupLabel,
 	identityChips,
 	identityLine,
 	listEntries,
@@ -82,7 +83,7 @@ function job(over: Partial<ScanJob> = {}): ScanJob {
 		name: "Land mobile",
 		state: "running",
 		passive: false,
-		spec: {} as ScanJob["spec"],
+		spec: { mode: "sweep" } as ScanJob["spec"],
 		plan: {
 			hops: [{}, {}, {}] as ScanJob["plan"]["hops"],
 			usableHalfSpanHz: 960_000,
@@ -413,6 +414,8 @@ describe("scanner drawer hit log", () => {
 		[31, "31 ms"],
 		[101, "101 ms"],
 		[8000, "8 s"],
+		[999.6, "999 ms"],
+		[0.1, "under 1 ms"],
 	])("shows latest duration %s", (ms, text) => {
 		const e = hitEntries(hits, byId, new Set(), false)[0]!
 		expect(
@@ -420,6 +423,32 @@ describe("scanner drawer hit log", () => {
 		).toContain(`latest ${text}`)
 	})
 	it("uses the saved name after the operator label", () => {
+		const named = discoveryRow(
+			disc({ metadata: { ...disc().metadata, callsigns: ["TEST"] } }),
+			NOW,
+			"Bookmark",
+		)
+		expect(named.title).toBe("Bookmark")
+		expect(named.proof).toContain("TEST")
+		const decoded = discoveryRow(
+			disc({
+				proof: {
+					kind: "digital-undecoded",
+					protocol: "dmr",
+					transport: "live",
+					at: ago(0),
+					observationId: "synthetic",
+					tried: [],
+					unavailable: [],
+					encrypted: false,
+					summary: "Verified identity",
+				},
+			}),
+			NOW,
+			"Auto name",
+		)
+		expect(decoded.title).toBe("Auto name")
+		expect(decoded.proof).toBe("Verified identity")
 		expect(discoveryRow(disc(), NOW, "Bookmark").title).toBe("Bookmark")
 		expect(
 			discoveryRow(disc({ operator: { label: "Operator" } }), NOW, "Bookmark")
@@ -520,6 +549,15 @@ describe("scanner drawer header and footer", () => {
 			readOnly: false,
 			now: NOW,
 		}
+		expect(
+			footerText({
+				...base,
+				sweep: job({
+					state: "paused",
+					spec: { ...job().spec, mode: "in-window" },
+				}),
+			}),
+		).toContain("% covered")
 		expect(footerText({ ...base, sweep: job() })).toMatch(
 			/^Scanning for 12 min · started \d\d:\d\d · 50 % hops visited$/,
 		)
@@ -667,4 +705,11 @@ describe("scanner drawer proofs (WG12)", () => {
 it("does not present anchor placeholders as RF measurements", () => {
 	const d = disc({ anchor: "decode", bandwidthHz: 0, airtimeMs: 1000 })
 	expect(measuredText(d)).not.toMatch(/SNR|wide|on air/)
+})
+
+it("distinguishes pending hit lookups from unavailable discoveries", () => {
+	expect(hitLookupLabel(undefined)).toBe("Loading discovery…")
+	expect(hitLookupLabel("pending")).toBe("Loading discovery…")
+	expect(hitLookupLabel("unavailable")).toBe("Merged or unavailable")
+	expect(hitLookupLabel("available")).toBe("Merged or unavailable")
 })

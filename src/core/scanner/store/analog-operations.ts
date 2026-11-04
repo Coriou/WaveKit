@@ -1,3 +1,4 @@
+import { SCANNER_RECORDER_ERRORS } from "@wavekit/api-types"
 /** Scanner-owned prepared-link media lifecycle. No native/channel consumer is adopted here. */
 import { randomUUID } from "node:crypto"
 import { constants, linkSync, lstatSync, type Stats } from "node:fs"
@@ -59,21 +60,7 @@ export const AnalogCutSchema = z.enum([
 	"shutdown",
 ])
 export type AnalogCut = z.infer<typeof AnalogCutSchema>
-export const ErrorSchema = z.enum([
-	"admission-denied",
-	"disk-unavailable",
-	"disk-low",
-	"storage-cap",
-	"write-failed",
-	"close-failed",
-	"header-invalid",
-	"rename-failed",
-	"metadata-failed",
-	"cleanup-failed",
-	"recovery-incomplete",
-	"invalid-binding",
-	"recovery-ambiguous",
-])
+export const ErrorSchema = z.enum(SCANNER_RECORDER_ERRORS)
 export type AnalogError = z.infer<typeof ErrorSchema>
 export const AnalogGapSchema = z
 	.object({
