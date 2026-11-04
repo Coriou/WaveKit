@@ -2284,11 +2284,12 @@ export class SweepScheduler {
 		if (v === null) return
 		const hop = this.hops[v.hopIndex]
 		if (hop === undefined) return
-		this.noteHeardGaps(v, now)
-		this.noteFlapListening(v, now)
+		// Paused time is neither heard nor held: the evidence below stops where the pause began.
+		this.noteHeardGaps(v, accountedAt)
+		this.noteFlapListening(v, accountedAt)
 		hop.visits++
 		hop.timeMs += Math.max(0, accountedAt - v.startedAt - this.visitPausedMs)
-		const heldMs = this.heldMs(v, now)
+		const heldMs = this.heldMs(v, accountedAt)
 		hop.holdMs += this.accountedHeldMs(v, accountedAt)
 		// The other hops waited for this visit's long or budgeted holds (followBudgetMs); this hop
 		// was visited.

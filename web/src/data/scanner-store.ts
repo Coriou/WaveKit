@@ -813,13 +813,15 @@ export class ScannerStore extends Store<ScannerState> {
 		return this.readDiscovery(id, 0)
 	}
 
-	/** Queue bounded hit lookups; cached outcomes last until reconnect or store epoch change. */
-	/** Looks up only ids the store cannot name yet: a reconnect's reset must not refetch a whole job. */
+	/**
+	 * Queue bounded hit lookups for ids the store cannot name yet (a reconnect's reset must not
+	 * refetch a whole job); cached outcomes last until reconnect or store epoch change.
+	 */
 	loadHitDiscoveries(ids: Iterable<string>): void {
 		const { discoveries, discoveryAliases } = this.current()
 		const unknown: string[] = []
 		for (const id of ids)
-			if (!discoveries.byId.has(id) && !discoveryAliases.has(id))
+			if (!discoveries.byId.has(discoveryAliases.get(id) ?? id))
 				unknown.push(id)
 		this.hitLoader.request(unknown)
 	}

@@ -51,7 +51,7 @@ export function HitLog({ jobId, oneHop }: { jobId: string; oneHop: boolean }) {
 	// discoveries the store has not seen yet (hit before this page loaded), a few at a time
 	useEffect(() => {
 		scanner.loadHitDiscoveries(hits.keys())
-	}, [hits, scanner, lookupEpoch])
+	}, [hits, scanner, lookupEpoch, byId, aliases])
 
 	const entries = useMemo(
 		() => hitEntries(hits, byId, activeNow, newOnly, aliases),

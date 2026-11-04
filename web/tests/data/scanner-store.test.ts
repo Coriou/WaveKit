@@ -1030,6 +1030,25 @@ describe("ScannerStore: band inspection UX merges (req 3.1, 3.2)", () => {
 		expect(lookups()).toBe(1)
 	})
 
+	it("a hit whose merged survivor is gone is looked up, so it cannot stay pending", async () => {
+		const { store, calls } = await ready([discovery("known")], call =>
+			call.url.includes("/discoveries/")
+				? { status: 404, body: { code: "SCANNER_NOT_FOUND", message: "nope" } }
+				: undefined,
+		)
+		Reflect.get(store, "commit").call(
+			store,
+			(s: ReturnType<typeof store.get>) => ({
+				...s,
+				discoveryAliases: new Map([["merged", "deleted-survivor"]]),
+			}),
+		)
+		store.loadHitDiscoveries(["merged"])
+		await flush()
+		expect(calls.some(c => c.url.includes("/discoveries/merged"))).toBe(true)
+		expect(store.get().hitLookups.get("merged")).toBe("unavailable")
+	})
+
 	it("a deleted survivor drops every id in mergedIds too", async () => {
 		const { store, send, tick } = await ready([
 			discovery("s"),
