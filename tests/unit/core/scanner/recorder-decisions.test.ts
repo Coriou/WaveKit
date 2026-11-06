@@ -435,4 +435,36 @@ it("keeps receipt details in status, discovery detail and logs", async () => {
 		receiptErrorCode: "write-failed",
 		operationId: "op-test",
 	})
+
+	describe("lastByDiscovery", () => {
+		it("gives each asked discovery its newest decision, as forDiscovery does", () => {
+			let now = 1_000
+			const d = new RecorderDecisions(pino({ level: "silent" }), () => now)
+			d.note("started", ref(1, "d_a"), true)
+			now = 2_000
+			d.note("finalized", ref(2, "d_a"), true)
+			d.note("started", ref(3, "d_b"), true)
+			d.note("started", ref(4, "d_c"), true)
+			const last = d.lastByDiscovery(new Set(["d_a", "d_b", "d_missing"]))
+			expect([...last.keys()].sort()).toEqual(["d_a", "d_b"])
+			for (const id of ["d_a", "d_b"]) {
+				const full = d.forDiscovery(id)!.last
+				expect(last.get(id)).toEqual({ code: full.code, at: full.at })
+			}
+			expect(last.get("d_a")).toEqual({
+				code: "finalized",
+				at: new Date(2_000).toISOString(),
+			})
+		})
+
+		it("forgets what the memory dropped: at the bound the oldest stays, past it it is gone", () => {
+			const d = new RecorderDecisions(pino({ level: "silent" }), () => 5)
+			d.note("started", ref(0, "d_old"), true)
+			for (let i = 1; i < RECORDER_MAX_OBSERVATIONS; i++)
+				d.note("started", ref(i, "d_other"), true)
+			expect(d.lastByDiscovery(new Set(["d_old"])).has("d_old")).toBe(true)
+			d.note("started", ref(RECORDER_MAX_OBSERVATIONS, "d_other"), true)
+			expect(d.lastByDiscovery(new Set(["d_old"])).has("d_old")).toBe(false)
+		})
+	})
 })

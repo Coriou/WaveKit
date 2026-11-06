@@ -24,6 +24,7 @@ import {
 } from "../../../src/api/routes/agent-status.js"
 import { decoderSummary } from "../../../src/api/routes/decoder-summary.js"
 import type { ActivityStoreStats } from "../../../src/core/activity/storage/contract.js"
+import { SCANNER_SETTINGS_BOUNDS } from "../../../src/core/scanner/settings.js"
 import type { LiveDemodulator } from "../../../src/core/live-demodulator.js"
 import type { SourceStatus } from "../../../src/core/source-manager.js"
 import type { DecoderStatus } from "../../../src/decoders/types.js"
@@ -561,6 +562,7 @@ describe("agent status", () => {
 				enabled: false,
 				activeJobs: count,
 				heldJobs: count,
+				discoveries: AGENT_STATUS_LIMITS.discoveriesMax,
 				job: {
 					id: ascii("j", AGENT_STATUS_LIMITS.idMaxBytes),
 					name: ascii("n", AGENT_STATUS_LIMITS.jobNameMaxBytes),
@@ -600,7 +602,7 @@ describe("agent status", () => {
 		expect(JSON.stringify(count)).toHaveLength(23)
 		expect(agentStatusSchema.parse(worst)).toEqual(worst)
 		// The total in the AGENT_STATUS_LIMITS arithmetic.
-		expect(Buffer.byteLength(JSON.stringify(worst))).toBe(4_076)
+		expect(Buffer.byteLength(JSON.stringify(worst))).toBe(4_094)
 		expect(Buffer.byteLength(JSON.stringify(worst))).toBeLessThan(
 			AGENT_STATUS_LIMITS.targetBytes,
 		)
@@ -894,6 +896,161 @@ describe("agent status", () => {
 			})
 		} finally {
 			await app.close()
+		}
+	})
+})
+
+describe("agent status as the poll", () => {
+	/** Counts every read the route makes; the heavy ones must stay at zero. */
+	function counted(discoveries = 3) {
+		const calls = {
+			status: 0,
+			listJobs: 0,
+			jobRows: 0,
+			discoveryCount: 0,
+			scannerEnabled: 0,
+			decoders: 0,
+			sources: 0,
+			tuners: 0,
+			live: 0,
+			activity: 0,
+		}
+		const opts = options({
+			decoderManager: {
+				getAllStatus: () => {
+					calls.decoders++
+					return [decoder()]
+				},
+			},
+			sourceManager: {
+				getAllStatus: () => {
+					calls.sources++
+					return [source()]
+				},
+			},
+			tunerController: {
+				getAllStates: () => {
+					calls.tuners++
+					return [tuner()]
+				},
+			},
+			liveDemod: {
+				getStatus: () => {
+					calls.live++
+					return liveStatus(true)
+				},
+			},
+			activity: {
+				enabled: true,
+				stats: () => {
+					calls.activity++
+					return { rows: 1 } as ActivityStoreStats
+				},
+			},
+			scanner: {
+				status: () => {
+					calls.status++
+					throw new Error("the poll must not build the scanner status")
+				},
+				listJobs: () => {
+					calls.listJobs++
+					throw new Error("the poll must not build job DTOs")
+				},
+				tunerLeaseHolder: () => null,
+				scannerEnabled: () => {
+					calls.scannerEnabled++
+					return true
+				},
+				discoveryCount: () => {
+					calls.discoveryCount++
+					return discoveries
+				},
+				jobRows: () => {
+					calls.jobRows++
+					return [
+						{
+							id: "job-a",
+							name: "a sweep",
+							kind: "discover" as const,
+							state: "running" as const,
+							reason: null,
+							sourceId: "source-a",
+							updatedAt: "2026-10-01T11:30:00.000Z",
+						},
+					]
+				},
+			},
+		})
+		return { calls, opts }
+	}
+
+	it("reads each summary once and never a job DTO, a scanner status or a store", async () => {
+		const { calls, opts } = counted()
+		const status = await buildAgentStatus(opts, now)
+		expect(calls).toEqual({
+			status: 0,
+			listJobs: 0,
+			jobRows: 1,
+			discoveryCount: 1,
+			scannerEnabled: 1,
+			decoders: 1,
+			sources: 1,
+			tuners: 1,
+			live: 1,
+			activity: 1,
+		})
+		expect(status.scanner).toMatchObject({
+			enabled: true,
+			activeJobs: 1,
+			discoveries: 3,
+			job: { id: "job-a", kind: "discover", reason: null },
+		})
+		expect(agentStatusSchema.parse(status)).toEqual(status)
+	})
+
+	it("counts discoveries up to the cap, and past it says the count stopped", async () => {
+		const at = await buildAgentStatus(
+			counted(AGENT_STATUS_LIMITS.discoveriesMax).opts,
+			now,
+		)
+		expect(at.scanner?.discoveries).toBe(AGENT_STATUS_LIMITS.discoveriesMax)
+		expect(at.truncated).toBe(false)
+		const past = await buildAgentStatus(
+			counted(AGENT_STATUS_LIMITS.discoveriesMax + 1).opts,
+			now,
+		)
+		expect(past.scanner?.discoveries).toBe(AGENT_STATUS_LIMITS.discoveriesMax)
+		expect(past.truncated).toBe(true)
+		expect(agentStatusSchema.parse(past)).toEqual(past)
+	})
+
+	it("ties the discovery cap to the most storage.maxDiscoveries accepts", () => {
+		expect(AGENT_STATUS_LIMITS.discoveriesMax).toBe(
+			SCANNER_SETTINGS_BOUNDS["storage.maxDiscoveries"]?.max,
+		)
+	})
+
+	it("serves the count through the response schema, and null without one", async () => {
+		const app = Fastify()
+		await app.register(agentStatusRoutes, counted().opts)
+		const older = Fastify()
+		await older.register(
+			agentStatusRoutes,
+			options({ scanner: scanner([job()]) }),
+		)
+		try {
+			const body = agentStatusSchema.parse(
+				(await app.inject("/api/agent/status")).json(),
+			)
+			expect(body.scanner?.discoveries).toBe(3)
+			const olderBody = agentStatusSchema.parse(
+				(await older.inject("/api/agent/status")).json(),
+			)
+			expect(olderBody.scanner?.discoveries).toBeNull()
+			expect(olderBody.scanner?.job?.id).toBe("job-a")
+		} finally {
+			await app.close()
+			await older.close()
 		}
 	})
 })

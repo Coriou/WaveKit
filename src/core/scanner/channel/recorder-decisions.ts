@@ -177,6 +177,25 @@ export class RecorderDecisions {
 		}
 	}
 
+	/**
+	 * The last decision per discovery of `discoveryIds`, for a page of rows: one pass over the
+	 * remembered observations (at most RECORDER_MAX_OBSERVATIONS), instead of one per row.
+	 */
+	lastByDiscovery(
+		discoveryIds: ReadonlySet<string>,
+	): Map<string, { code: ScannerRecorderDecision; at: string }> {
+		const newest = new Map<string, ObservationMemory>()
+		for (const m of this.byObservation.values()) {
+			if (m.discoveryId === null || !discoveryIds.has(m.discoveryId)) continue
+			const best = newest.get(m.discoveryId)
+			if (best === undefined || m.at >= best.at) newest.set(m.discoveryId, m)
+		}
+		const out = new Map<string, { code: ScannerRecorderDecision; at: string }>()
+		for (const [id, m] of newest)
+			out.set(id, { code: m.last, at: new Date(m.at).toISOString() })
+		return out
+	}
+
 	status(): {
 		recent: ScannerRecorderDecisionEntry[]
 		recentRefusals: ScannerRecorderDecisionEntry[]

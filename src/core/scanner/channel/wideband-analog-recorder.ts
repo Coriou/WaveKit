@@ -983,6 +983,13 @@ export class WidebandAnalogRecorder {
 		return this.decisions.forDiscovery(discoveryId)
 	}
 
+	/** Compact discovery rows: the last decision per discovery of a page. */
+	discoveryLastDecisions(
+		discoveryIds: ReadonlySet<string>,
+	): ReturnType<RecorderDecisions["lastByDiscovery"]> {
+		return this.decisions.lastByDiscovery(discoveryIds)
+	}
+
 	/** The analog operations' liveness check for a binding this recorder issued. */
 	bindingLive(binding: RecordingBinding): boolean {
 		const parsed = RecordingBindingSchema.safeParse(binding)

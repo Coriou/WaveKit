@@ -6,35 +6,25 @@ import type { FastifyInstance } from "fastify"
 import {
 	API_ENUMS_PATH,
 	RECORDING_INVENTORY_KINDS,
-	type ActivityKind,
 	type ApiEnums,
 } from "@wavekit/api-types"
-import { AGGREGATE_CATEGORIES } from "../../core/activity/query/aggregates.js"
+import {
+	ACTIVITY_QUERY_CATEGORIES,
+	ACTIVITY_QUERY_KINDS,
+} from "../../core/activity/query/validate.js"
 import {
 	confidenceEnum,
 	identityKindEnum,
+	jobListQuerySchema,
 	protocolEnum,
 	scanJobSpecSchema,
+	discoveryQuerySchema,
 } from "./scanner-schemas.js"
 import {
 	directSamplingModes,
 	gainModes,
 	tunerConfigUpdateSchema,
 } from "./tuner.js"
-
-/**
- * The activity query validator keeps its kind list private. A complete record of the closed
- * `ActivityKind` union fails to compile when a kind is added, and the test checks the
- * validator accepts every key.
- */
-const ACTIVITY_KINDS: Readonly<Record<ActivityKind, true>> = {
-	"decoder-reception": true,
-	"call-lifecycle": true,
-	"analog-transmission": true,
-	"scanner-result": true,
-	"recording-change": true,
-	"ingestion-gap": true,
-}
 
 const { mode, kind, sensitivity } = scanJobSpecSchema.properties
 
@@ -46,10 +36,12 @@ export const API_ENUMS: ApiEnums = {
 		jobModes: mode.enum,
 		jobKinds: kind.enum,
 		sensitivities: sensitivity.enum,
+		discoveryViews: discoveryQuerySchema.properties.view.enum,
+		jobViews: jobListQuerySchema.properties.view.enum,
 	},
 	activity: {
-		kinds: Object.keys(ACTIVITY_KINDS) as ActivityKind[],
-		categories: AGGREGATE_CATEGORIES,
+		kinds: ACTIVITY_QUERY_KINDS,
+		categories: ACTIVITY_QUERY_CATEGORIES,
 	},
 	tuner: {
 		gainModes,

@@ -48,6 +48,8 @@ import {
 } from "@wavekit/api-types"
 import { familyOf, steadyLine } from "../classify/classifier.js"
 import { hintOf } from "../classify/hint.js"
+import type { DiscoveryCompact } from "@wavekit/api-types"
+import { createListPace, firstSorted, type ListPace } from "./list-page.js"
 import { carrierAwareAnalog } from "../classify/carrier-voice.js"
 import {
 	UNKNOWN_LABEL,
@@ -214,6 +216,7 @@ export interface JournalEntry {
 		| "evict"
 	payload: unknown
 }
+type HintScope = ReturnType<NonNullable<DiscoveryStoreOptions["hintScope"]>>
 export interface DiscoveryFilter {
 	jobId?: string
 	sourceId?: string
@@ -3992,6 +3995,107 @@ export class DiscoveryStore
 		items: Discovery[]
 		nextCursor: string | null
 	} {
+		const plan = this.listPlan(filter)
+		const { page, nextCursor } = this.listPage(
+			plan.base.filter(plan.matches),
+			plan,
+		)
+		const scope = this.readHintScope()
+		return { items: page.map(d => this.presentDiscovery(d, scope)), nextCursor }
+	}
+
+	/**
+	 * `list` that gives the event loop a turn whenever `pace` says so, for the API. Same rows in the
+	 * same order while the store holds still. A record merged or evicted during the read is left
+	 * out, so a page can come back short of `limit` with a cursor still set.
+	 *
+	 * Cost for N records and a page of L at offset O: N filter visits, at most
+	 * N × (1 + 2 × log2 (O + L)) sort comparisons (`firstSorted`, in one stretch: 10,000 records
+	 * and a page of 500 are at most 189,000; for the default newest-first order about N), and L
+	 * rows presented. A label filter or `sort=confidence` also reads each record's cached proof;
+	 * deriving a missing one visits at most 2,304 observations, and the read yields between rows.
+	 */
+	async listPaced(
+		filter: DiscoveryFilter,
+		pace: ListPace = createListPace(),
+	): Promise<{ items: Discovery[]; nextCursor: string | null }> {
+		return this.pagedRows(filter, pace, () => {
+			const scope = this.readHintScope()
+			return d => this.presentDiscovery(d, scope)
+		})
+	}
+
+	/**
+	 * `listPaced` with one small row per record and no deep copy: the same published label and
+	 * identity as the full row (a weak record reads `unknown`; an unchecked dsd-fme identity is not
+	 * published), read from the record in place.
+	 */
+	async listCompactPaced(
+		filter: DiscoveryFilter,
+		pace: ListPace = createListPace(),
+	): Promise<{
+		items: Omit<DiscoveryCompact, "recorder">[]
+		nextCursor: string | null
+	}> {
+		return this.pagedRows(filter, pace, () => d => this.compactOf(d))
+	}
+
+	private compactOf(d: Discovery): Omit<DiscoveryCompact, "recorder"> {
+		const view = this.discoveryView(d)
+		const label = publishedOf(view)
+		const published =
+			d.identity !== undefined &&
+			(!isDsdFmeProtocol(d.protocol) || this.hasCheckedContent(d))
+		return {
+			id: d.id,
+			frequencyHz: d.frequencyHz,
+			class: d.class,
+			protocol: label.protocol,
+			confidence: label.confidence,
+			evidenceLevel: view.evidence,
+			identity: published ? { ...d.identity! } : null,
+			lastSeenAt: d.lastSeenAt,
+		}
+	}
+
+	private async pagedRows<T>(
+		filter: DiscoveryFilter,
+		pace: ListPace,
+		presenter: () => (d: Discovery) => T,
+	): Promise<{ items: T[]; nextCursor: string | null }> {
+		const plan = this.listPlan(filter)
+		const matched: Discovery[] = []
+		for (const d of plan.base) {
+			// A yield below may have removed it; reading it now would cache a dead record's proof.
+			if (this.discoveries.get(d.id) === d) {
+				if (plan.sortsByLabel) this.discoveryView(d)
+				if (plan.matches(d)) matched.push(d)
+			}
+			if (pace.due()) await pace.wait()
+		}
+		const { page, nextCursor } = this.listPage(
+			matched.filter(d => this.discoveries.get(d.id) === d),
+			plan,
+		)
+		const present = presenter()
+		const items: T[] = []
+		for (const d of page) {
+			if (this.discoveries.get(d.id) === d) items.push(present(d))
+			if (pace.due()) await pace.wait()
+		}
+		return { items, nextCursor }
+	}
+
+	/** What a list read selects: its candidates, its filter and its page bounds. */
+	private listPlan(filter: DiscoveryFilter): {
+		limit: number
+		offset: number
+		base: Discovery[]
+		matches: (d: Discovery) => boolean
+		sort: NonNullable<DiscoveryFilter["sort"]>
+		sortsByLabel: boolean
+		nearHz: number | undefined
+	} {
 		const limit = Math.min(
 			MAX_LIMIT,
 			Math.max(1, Math.floor(filter.limit ?? DEFAULT_LIMIT)),
@@ -4024,7 +4128,7 @@ export class DiscoveryStore
 		// read the proof. Protocol and confidence use the stored record only while
 		// no retained evidence can name a proof; a proof's label is cached with it.
 		const spurs = filter.includeReceiverSpurs === true
-		const items = base.filter(d => {
+		const matches = (d: Discovery): boolean => {
 			if (!spurs && this.spurFlags.has(d.id) && this.spurFlagOf(d.id))
 				return false
 			if (filter.jobId !== undefined && !d.jobIds.includes(filter.jobId))
@@ -4094,30 +4198,49 @@ export class DiscoveryStore
 				return false
 			if (min !== undefined && rank(label.confidence) < rank(min)) return false
 			return true
-		})
+		}
+		const sort = filter.sort ?? "lastSeen"
+		return {
+			limit,
+			offset,
+			base,
+			matches,
+			sort,
+			sortsByLabel: !useNear && sort === "confidence",
+			nearHz: useNear ? nearHz : undefined,
+		}
+	}
+
+	/** One page of the matched records; the confidence order reads each label once. */
+	private listPage(
+		items: Discovery[],
+		plan: ReturnType<DiscoveryStore["listPlan"]>,
+	): { page: Discovery[]; nextCursor: string | null } {
+		const { limit, offset, nearHz } = plan
 		const byLastSeen = (a: Discovery, b: Discovery): number =>
 			compareText(b.lastSeenAt, a.lastSeenAt) || compareText(a.id, b.id)
-		const byDistance = (a: Discovery, b: Discovery): number =>
-			Math.abs(a.frequencyHz - (nearHz ?? 0)) -
-				Math.abs(b.frequencyHz - (nearHz ?? 0)) || compareText(a.id, b.id)
-		const sort = filter.sort ?? "lastSeen"
-		items.sort(
-			useNear
-				? byDistance
-				: sort === "frequency"
-					? (a, b) => a.frequencyHz - b.frequencyHz || compareText(a.id, b.id)
-					: sort === "confidence"
-						? (a, b) =>
-								rank(this.publishedLabel(b).confidence) -
-									rank(this.publishedLabel(a).confidence) || byLastSeen(a, b)
-						: byLastSeen,
-		)
-		const page = items
-			.slice(offset, offset + limit)
-			.map(d => this.presentDiscovery(d))
+		let compare = byLastSeen
+		if (nearHz !== undefined)
+			compare = (a, b) =>
+				Math.abs(a.frequencyHz - nearHz) - Math.abs(b.frequencyHz - nearHz) ||
+				compareText(a.id, b.id)
+		else if (plan.sort === "frequency")
+			compare = (a, b) =>
+				a.frequencyHz - b.frequencyHz || compareText(a.id, b.id)
+		else if (plan.sortsByLabel) {
+			const ranks = new Map(
+				items.map(d => [d.id, rank(this.publishedLabel(d).confidence)]),
+			)
+			compare = (a, b) =>
+				ranks.get(b.id)! - ranks.get(a.id)! || byLastSeen(a, b)
+		}
+		const total = items.length
 		return {
-			items: page,
-			nextCursor: offset + limit < items.length ? String(offset + limit) : null,
+			page: firstSorted(items, offset + limit, compare).slice(
+				offset,
+				offset + limit,
+			),
+			nextCursor: offset + limit < total ? String(offset + limit) : null,
 		}
 	}
 
@@ -6846,14 +6969,20 @@ export class DiscoveryStore
 	private hasCheckedContent(d: Discovery): boolean {
 		if (d.contentVerified === true) return true
 		if (!this.evidenceCanNameProof(d)) return false
-		return this.proofSources(d).some(({ observation }) =>
+		// Read per row by every list and detail read, so it walks the lists instead of copying them
+		// (`proofSources`): a repeated observation cannot change an "any of" answer.
+		const checked = (observation: Observation): boolean =>
 			(observation.decode ?? []).some(
 				ev =>
 					ev.contentVerified === true &&
 					ev.crcClean === true &&
 					ev.protocol === d.protocol &&
 					sameIdentity(ev.identity, d.identity),
-			),
+			)
+		if (this.byDiscovery.get(d.id)?.some(checked) === true) return true
+		const partners = Array.isArray(d.coChannel) ? d.coChannel : NO_LINKS
+		return partners.some(
+			partnerId => this.byDiscovery.get(partnerId)?.some(checked) === true,
 		)
 	}
 
@@ -6871,7 +7000,23 @@ export class DiscoveryStore
 		return changed
 	}
 
-	private presentDiscovery(d: Discovery): Discovery {
+	/** The hint scope a read uses for all its rows, read at its first weak row (it rebuilds the ranges). */
+	private readHintScope(): () => HintScope {
+		let read = false
+		let scope: HintScope
+		return () => {
+			if (!read) {
+				scope = this.hintScope?.()
+				read = true
+			}
+			return scope
+		}
+	}
+
+	private presentDiscovery(
+		d: Discovery,
+		scope: () => HintScope = () => this.hintScope?.(),
+	): Discovery {
 		const copy = clone(d)
 
 		const view = this.discoveryView(d)
@@ -6888,7 +7033,7 @@ export class DiscoveryStore
 			copy.protocol = UNKNOWN_LABEL.protocol
 			copy.family = UNKNOWN_LABEL.family
 			copy.confidence = UNKNOWN_LABEL.confidence
-			const hint = this.hintFor(d)
+			const hint = this.hintFor(d, scope)
 			if (hint !== undefined) copy.hint = hint
 		}
 		// Historical stored identities keep association boundaries stable. Only checked
@@ -6925,8 +7070,11 @@ export class DiscoveryStore
 	}
 
 	/** Scanner-redesign 3.11: display hint of a weak record, from the read-time scope. */
-	private hintFor(d: Discovery): ScannerHint | undefined {
-		const scope = this.hintScope?.()
+	private hintFor(
+		d: Discovery,
+		readScope: () => HintScope,
+	): ScannerHint | undefined {
+		const scope = readScope()
 		if (scope === undefined) return undefined
 		return hintOf({
 			frequencyHz: d.frequencyHz,

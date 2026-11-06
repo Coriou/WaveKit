@@ -1,8 +1,10 @@
 /** JSON schemas for /api/scanner (spec § 12.1). Response bodies are DTOs from @wavekit/api-types. */
 import {
 	DISCOVERY_NEAR_MAX_TOLERANCE_HZ,
+	DISCOVERY_VIEWS,
 	IDENTIFY_WAIT_MAX_MS,
 	IDENTIFY_WAIT_MIN_MS,
+	SCAN_JOB_VIEWS,
 } from "@wavekit/api-types"
 import { DISCOVERY_ID } from "../../core/scanner/store/evidence-store.js"
 import { validationFieldsSchema } from "../validation-errors.js"
@@ -311,6 +313,12 @@ export const discoveryQuerySchema = {
 		},
 		// Records flagged as receiver spurs are hidden unless this is true.
 		includeReceiverSpurs: { type: "boolean" },
+		view: {
+			type: "string",
+			enum: DISCOVERY_VIEWS,
+			description:
+				"compact: small rows (DiscoveryCompact: id, frequencyHz, class, protocol, confidence, evidenceLevel, identity, lastSeenAt, recorder.last) instead of the full record",
+		},
 	},
 	additionalProperties: false,
 	allOf: [
@@ -319,6 +327,19 @@ export const discoveryQuerySchema = {
 			then: { required: ["nearHz"] },
 		},
 	],
+} as const
+
+/** GET /api/scanner/jobs?view=compact (ScanJobCompact). Other parameters stay ignored. */
+export const jobListQuerySchema = {
+	type: "object",
+	properties: {
+		view: {
+			type: "string",
+			enum: SCAN_JOB_VIEWS,
+			description:
+				"compact: small rows (ScanJobCompact: id, name, kind, state, reason, sourceId, updatedAt) instead of the full job with its plan",
+		},
+	},
 } as const
 
 export const observationsQuerySchema = {

@@ -41,6 +41,7 @@ import { readdir } from "node:fs/promises"
 import { existsSync, lstatSync } from "node:fs"
 import { join } from "node:path"
 import { ZodError } from "zod"
+import type { DiscoveryCompactPage, ScanJobCompact } from "@wavekit/api-types"
 import type {
 	Bandplan as BandplanDto,
 	ScanJob,
@@ -2137,6 +2138,11 @@ export class ScannerService extends EventEmitter {
 
 	// === status and settings ===
 
+	/** `status().enabled` alone: the status poll needs no engine, probe or recorder rows. */
+	scannerEnabled(): boolean {
+		return this.settings().enabled
+	}
+
 	status(): ScannerStatus {
 		const captureCounters = this.deps.iqCapture?.counters?.()
 		const s = this.settings()
@@ -2361,6 +2367,19 @@ export class ScannerService extends EventEmitter {
 
 	listJobs(): ScanJob[] {
 		return [...this.jobs.values()].map(r => this.toDto(r))
+	}
+
+	/** One small row per job: no plan, no driver progress, no probe list. */
+	jobRows(): ScanJobCompact[] {
+		return Array.from(this.jobs.values(), record => ({
+			id: record.id,
+			name: record.name,
+			kind: record.spec.kind,
+			state: record.state,
+			reason: record.reason ?? null,
+			sourceId: record.spec.sourceId,
+			updatedAt: new Date(record.updatedAt).toISOString(),
+		}))
 	}
 
 	getJob(id: string): ScanJob | undefined {
@@ -2626,6 +2645,44 @@ export class ScannerService extends EventEmitter {
 		nextCursor: string | null
 	} & DiscoveryStoreMeta {
 		return { ...this.store.list(filter), ...this.storeMeta() }
+	}
+
+	/**
+	 * `listDiscoveries` for the API: it yields during the read. The epoch and revision are taken
+	 * first, so the stamp never claims a change the rows may not reflect.
+	 */
+	async listDiscoveriesPaced(filter: DiscoveryFilter): Promise<
+		{
+			items: Discovery[]
+			nextCursor: string | null
+		} & DiscoveryStoreMeta
+	> {
+		const meta = this.storeMeta()
+		return { ...(await this.store.listPaced(filter)), ...meta }
+	}
+
+	/** GET /api/scanner/discoveries?view=compact: one pass over the recorder memory per page. */
+	async listDiscoveriesCompact(
+		filter: DiscoveryFilter,
+	): Promise<DiscoveryCompactPage> {
+		const meta = this.storeMeta()
+		const page = await this.store.listCompactPaced(filter)
+		const last = this.widebandAnalog.discoveryLastDecisions(
+			new Set(page.items.map(row => row.id)),
+		)
+		return {
+			items: page.items.map(row => {
+				const decision = last.get(row.id)
+				return { ...row, recorder: decision ? { last: decision } : null }
+			}),
+			nextCursor: page.nextCursor,
+			...meta,
+		}
+	}
+
+	/** Records in the store, O(1). */
+	discoveryCount(): number {
+		return this.store.recordCounts().discoveries
 	}
 
 	/** Band inspection UX req 3.3: the store's epoch and its revision now. */

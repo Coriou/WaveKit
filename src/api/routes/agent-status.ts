@@ -3,6 +3,7 @@ import {
 	AGENT_STATUS_LIMITS,
 	agentStatusResponseSchema,
 	jsonStringBytes,
+	scanJobCompact,
 } from "@wavekit/api-types"
 import type {
 	AgentActivity,
@@ -13,6 +14,7 @@ import type {
 	AgentStatus,
 	AgentTuner,
 	ScanJob,
+	ScanJobCompact,
 	TunerState,
 } from "@wavekit/api-types"
 import type { FastifyPluginAsync } from "fastify"
@@ -30,7 +32,11 @@ export interface AgentStatusRoutesOptions {
 	tunerController?: Pick<TunerController, "getAllStates"> | undefined
 	liveDemod?: Pick<LiveDemodulator, "getStatus"> | undefined
 	scanner?:
-		| Pick<ScannerService, "status" | "listJobs" | "tunerLeaseHolder">
+		| (Pick<ScannerService, "status" | "listJobs" | "tunerLeaseHolder"> &
+				// The cheap reads; optional so an older service shape still serves.
+				Partial<
+					Pick<ScannerService, "scannerEnabled" | "jobRows" | "discoveryCount">
+				>)
 		| undefined
 	/** Same inputs as the Activity routes: disabled, unavailable, or the store's stats. */
 	activity: {
@@ -128,7 +134,7 @@ function tunerRow(
 const TUNING_FIELDS = ["frequency", "sampleRate", "gain", "gainMode"] as const
 
 /** A sweep a plain feed resume held: it waits for an explicit job resume. */
-const isHeldSweep = (job: ScanJob): boolean =>
+const isHeldSweep = (job: ScanJobCompact): boolean =>
 	job.state === "paused" && job.reason === "resumed-without-retune"
 
 function sourceRows(
@@ -170,15 +176,20 @@ function liveAudioRow(
 }
 
 function scannerRow(
-	jobs: readonly ScanJob[],
+	jobs: readonly ScanJobCompact[],
 	enabled: boolean,
+	discoveries: number | null,
 	bounds: Bounds,
 ): AgentScanner {
 	const live = jobs.filter(job => LIVE_JOB_STATES.has(job.state))
+	if (discoveries !== null && discoveries > L.discoveriesMax)
+		bounds.truncated = true
 	const held = live.filter(isHeldSweep)
 	// A held sweep first, so a newer job never hides it; then newest update first
 	// (ISO times of one clock compare as strings).
-	const current = (held.length > 0 ? held : live).reduce<ScanJob | undefined>(
+	const current = (held.length > 0 ? held : live).reduce<
+		ScanJobCompact | undefined
+	>(
 		(best, job) => (!best || job.updatedAt > best.updatedAt ? job : best),
 		undefined,
 	)
@@ -186,6 +197,8 @@ function scannerRow(
 		enabled,
 		activeJobs: live.length,
 		heldJobs: held.length,
+		discoveries:
+			discoveries === null ? null : Math.min(discoveries, L.discoveriesMax),
 		job: current
 			? {
 					id: bounds.id(current.id),
@@ -193,13 +206,13 @@ function scannerRow(
 						current.name === null
 							? null
 							: clipJson(current.name, L.jobNameMaxBytes),
-					kind: current.spec.kind,
+					kind: current.kind,
 					state: current.state,
 					reason:
-						current.reason === undefined
+						current.reason === null
 							? null
 							: clipJson(current.reason, L.reasonMaxBytes),
-					sourceId: bounds.id(current.spec.sourceId),
+					sourceId: bounds.id(current.sourceId),
 				}
 			: null,
 	}
@@ -228,7 +241,8 @@ export async function buildAgentStatus(
 ): Promise<AgentStatus> {
 	const bounds = new Bounds()
 	const scanner = options.scanner
-	const jobs = scanner?.listJobs() ?? []
+	const jobs =
+		scanner?.jobRows?.() ?? scanner?.listJobs().map(scanJobCompact) ?? []
 	const leaseHolder = (sourceId: string): string | null =>
 		scanner?.tunerLeaseHolder(sourceId) ?? null
 	const summaries = options.decoderManager
@@ -260,7 +274,12 @@ export async function buildAgentStatus(
 	const sources = sourceRows(options.sourceManager, unverified, bounds)
 	const liveAudio = liveAudioRow(options.liveDemod, bounds)
 	const scannerStatus = scanner
-		? scannerRow(jobs, scanner.status().enabled, bounds)
+		? scannerRow(
+				jobs,
+				scanner.scannerEnabled?.() ?? scanner.status().enabled,
+				scanner.discoveryCount?.() ?? null,
+				bounds,
+			)
 		: null
 	// Problem rows first (stable otherwise), so the cut drops healthy decoders before
 	// a failed or suspended one; `hiddenProblems` counts the problem rows still cut.

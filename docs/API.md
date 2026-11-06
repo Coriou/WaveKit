@@ -587,7 +587,9 @@ Static, and under the same read admission as `GET /api`.
 		"confidences": ["activity"],
 		"jobModes": ["in-window", "sweep", "auto"],
 		"jobKinds": ["discover", "monitor"],
-		"sensitivities": ["low", "normal", "high"]
+		"sensitivities": ["low", "normal", "high"],
+		"discoveryViews": ["full", "compact"],
+		"jobViews": ["full", "compact"]
 	},
 	"activity": { "kinds": ["decoder-reception"], "categories": ["aircraft"] },
 	"tuner": {
@@ -607,23 +609,30 @@ One compact answer, always under 4 KiB, to "what is the receiver doing", for age
 and scripts. It uses the same read admission as the other API reads and never
 includes free-text errors; each field summarizes a fuller route.
 
+This is the route to poll. It reads no discovery, journal or SQLite data, and builds no job plan
+or scanner status: one read each of the decoder, source, tuner, live-audio and in-memory Activity
+counters, one small row per scanner job, and the store's record count. Its work follows the number
+of decoders and jobs, not the number of discoveries.
+
 The size is a hard bound. Lists keep their first rows: two sources and two tuners,
 nine decoder rows and nine `lastDecode` rows. Nine is the number of built-in decoder
 types, but rows are decoder instances, so two instances of one type take two rows.
 Decoders with a problem verdict (anything but `decoding`, `listening` or `off`) come
 first, so the cut drops healthy decoders before a failed or suspended one;
 `hiddenProblems` counts the problem decoders still cut. Ids are cut to 32 bytes of
-JSON, decoder protocols to 24, job names to 32 and reasons to 24. `truncated` is
-`true` when a list or an id was cut; read the fuller route then.
+JSON, decoder protocols to 24, job names to 32 and reasons to 24, and
+`scanner.discoveries` stops at 1,000,000, the most `storage.maxDiscoveries` accepts.
+`truncated` is `true` when a list or an id was cut or that count stopped; read the
+fuller route then.
 
 | Field            | Summary of                   | Content                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ---------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `at`             |                              | ISO time of the answer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `truncated`      |                              | `true` when a list was cut at its cap or an id was shortened (a shortened job name alone does not set it)                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `truncated`      |                              | `true` when a list was cut at its cap, an id was shortened or `scanner.discoveries` stopped at its cap (a shortened job name alone does not set it)                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `tuners`         | `GET /api/tuner`             | `sourceId`, `frequencyHz`, `sampleRateHz`, `gainMode`, `gain` (tenths of a dB; null in AGC), `owner` (`wavekit`, `external` while an external client such as SDR++ controls it, `scanner` while a scanner job holds the tuner lease), `declaredOnly` (frequency or rate only from config). Unknown values are null                                                                                                                                                                                                                                                       |
 | `sources`        | `GET /api/sources`           | `id`, `connected`, `state` (the source activity state), `sampleAgeMs`, `warnings` (`rate-mismatch`, `signal-flat`), `feed` (the receiver feed state: `live`, `paused`, `resuming`, `error`), `tuningUnverified` (`true` while the tuner's frequency, sample rate, gain or gain mode is unknown, for example after a plain resume)                                                                                                                                                                                                                                        |
 | `liveAudio`      | `GET /api/live-audio/status` | `running`, `health`, `sourceId`, `modulation`, `offsetHz`, `clients`, `squelchOpen` (null while stopped); null without live audio                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `scanner`        | `GET /api/scanner`           | `enabled`, `activeJobs` (not yet ended), `heldJobs` (sweeps paused with reason `resumed-without-retune`), `job` (the most recently updated held sweep, else the most recently updated active job: `id`, `name`, `kind`, `state`, `reason`, `sourceId`) or null; null without the scanner                                                                                                                                                                                                                                                                                 |
+| `scanner`        | `GET /api/scanner`           | `enabled`, `activeJobs` (not yet ended), `heldJobs` (sweeps paused with reason `resumed-without-retune`), `discoveries` (records in the discovery store; null if this core cannot say), `job` (the most recently updated held sweep, else the most recently updated active job: `id`, `name`, `kind`, `state`, `reason`, `sourceId`) or null; null without the scanner                                                                                                                                                                                                   |
 | `decoders`       | `GET /api/decoders/summary`  | one row per decoder instance, problem verdicts first, then configuration order: `id`, `protocol` (the decoder type) and the same `verdict` `code` and `actions` (at most three, most helpful first), with `cause` (`host` or `decoder`, whose loss stopped it) only on a loss verdict (`efficiency-drops`, `efficiency-late-drops`, `efficiency-cpu`, at most two actions) and never `retryAt` (read the summary route for it); the verdict sentence is on the summary route. A `listening` row may add the summary's `reception` (`heard-undecoded` or `nothing-heard`) |
 | `hiddenProblems` | `GET /api/decoders/summary`  | number of decoders with a problem verdict cut from `decoders` by its cap (0 when every problem shows)                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `activity`       | `GET /api/activity/status`   | `state` (`disabled`, `opening`, `retrying`, `available`, `unavailable`) and `rows` (null unless available)                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -3772,6 +3781,11 @@ only).
 
 #### GET /api/scanner/jobs and GET /api/scanner/jobs/:id
 
+`GET /api/scanner/jobs?view=compact` lists one small row per job (`ScanJobCompact`), without the
+plan, progress or probes: `id`, `name` (null when unnamed), `kind`, `state`, `reason` (null when the
+job has none), `sourceId` and `updatedAt`. A full job carries its whole plan, about 160 bytes per
+hop; a compact row is about 165 bytes. `view=full` is the default.
+
 ```bash
 curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 ```
@@ -4087,7 +4101,7 @@ Query parameters: `jobId`, `sourceId`, `protocol`, `minConfidence`
 (`activity` | `candidate` | `classified` | `decoded`), `freqMinHz`,
 `freqMaxHz`, `since` (ISO 8601), `encrypted` (boolean), `q` (≤ 100 chars),
 `identity` (`<kind>:<value>`, ≤ 100 chars), `sort` (`lastSeen` | `frequency` |
-`confidence`), `cursor`, `limit` (1–500).
+`confidence`), `cursor`, `limit` (1–500), `view` (`full`, the default, or `compact`).
 
 `q` is a case-insensitive substring search over the operator label and the
 decoded identity value. Everything it matched before (the label alone) still
@@ -4213,6 +4227,34 @@ says nothing about the earlier pages. A complete page read at `storeRevision` R 
 for every record its query matches: a record it did not list, from an answer read before
 R, is stale. The counter never runs out in practice: at a million changes a second it
 reaches `Number.MAX_SAFE_INTEGER` after about 285 years.
+
+##### Compact rows
+
+`view=compact` answers the same page, in the same order, with the same filters, `cursor`,
+`nextCursor`, `storeEpoch` and `storeRevision`, but with small rows (`DiscoveryCompact`), 200 to
+300 bytes each instead of 760 or more. Use it when listing many records; read
+`GET /api/scanner/discoveries/:id` for the detail of one.
+
+| Field           | Content                                                                                                                                    |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id`            | The discovery id                                                                                                                           |
+| `frequencyHz`   | Its frequency                                                                                                                              |
+| `class`         | The classifier's reading of the signal; `unknown` until it has one. Never null                                                             |
+| `protocol`      | The published protocol; `unknown` on a weak record. Never null                                                                             |
+| `confidence`    | The published confidence (`activity`, `candidate`, `classified`, `decoded`). Never null                                                    |
+| `evidenceLevel` | `proven` when a proof is set, otherwise `weak`                                                                                             |
+| `identity`      | `{ kind, value }`. Null when none is published: nothing decoded one, or a digital-voice decode whose content is not yet checked            |
+| `lastSeenAt`    | ISO time of the last sighting                                                                                                              |
+| `recorder`      | `{ last: { code, at } }`, the analog recorder's last decision about it. Null when it remembers none (it keeps the latest 256 observations) |
+
+A discovery has no `state` field: it is a record of what was heard, not a process, so a client
+reading `state` gets nothing. Use `confidence` and `evidenceLevel` for how far it is established,
+and `lastSeenAt` for whether it is recent. The `state` of a scanner job is on the job.
+
+A read gives other API calls a turn every 2 ms of work, between rows. For N records and a page of L
+at offset O it makes N filter visits and at most N × (1 + 2 × log2 (O + L)) sort comparisons, in
+one stretch, then builds L rows. A record merged or evicted during the read is left out, so a page
+can come back short of `limit` with `nextCursor` still set. `storeRevision` is read before the rows.
 
 #### GET /api/scanner/discoveries/:id
 

@@ -33,7 +33,7 @@ import {
 	ACTIVITY_TRAILS_MAX_WINDOW_MS,
 } from "@wavekit/api-types"
 
-const KINDS = [
+export const ACTIVITY_QUERY_KINDS = [
 	"decoder-reception",
 	"call-lifecycle",
 	"analog-transmission",
@@ -42,7 +42,7 @@ const KINDS = [
 	"ingestion-gap",
 ] as const satisfies readonly ActivityKind[]
 
-const CATEGORIES = [
+export const ACTIVITY_QUERY_CATEGORIES = [
 	"aircraft",
 	"marine",
 	"aviation-data",
@@ -104,11 +104,11 @@ export interface QueryLimits extends FtsLimits {
 const idSchema = z.string().min(1).max(256)
 const querySchema = z
 	.object({
-		kinds: z.array(z.enum(KINDS)).max(64).optional(),
+		kinds: z.array(z.enum(ACTIVITY_QUERY_KINDS)).max(64).optional(),
 		sourceIds: z.array(idSchema).max(64).optional(),
 		decoderIds: z.array(idSchema).max(64).optional(),
 		protocols: z.array(idSchema).max(64).optional(),
-		categories: z.array(z.enum(CATEGORIES)).max(64).optional(),
+		categories: z.array(z.enum(ACTIVITY_QUERY_CATEGORIES)).max(64).optional(),
 		frequencyHz: z
 			.object({
 				min: z.number().finite().nonnegative().optional(),
@@ -338,7 +338,7 @@ const trailsQuerySchema = z
 	.object({
 		producedFrom: z.string().min(1).max(40).optional(),
 		producedTo: z.string().min(1).max(40).optional(),
-		categories: z.array(z.enum(CATEGORIES)).max(64).optional(),
+		categories: z.array(z.enum(ACTIVITY_QUERY_CATEGORIES)).max(64).optional(),
 		protocols: z.array(idSchema).max(64).optional(),
 		entityKeys: z
 			.array(idSchema)
@@ -468,7 +468,7 @@ export function parseDecimalInteger(value: unknown, label: string): number {
 const aggregateBaseShape = {
 	producedFrom: z.string().min(1).max(40).optional(),
 	producedTo: z.string().min(1).max(40).optional(),
-	categories: z.array(z.enum(CATEGORIES)).max(64).optional(),
+	categories: z.array(z.enum(ACTIVITY_QUERY_CATEGORIES)).max(64).optional(),
 	protocols: z.array(idSchema).max(64).optional(),
 }
 

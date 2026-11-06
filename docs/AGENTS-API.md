@@ -32,7 +32,8 @@ maximum there (`GET /api/recordings`, parameter `limit`), and past the maximum t
 400 that states it ([Read a 400](#read-a-400)).
 
 `GET /api/enums` lists scanner protocols, identity kinds, confidences, job modes, job kinds and
-sensitivities, activity kinds and categories, tuner modes and recording kinds.
+sensitivities, the discovery and job list views, activity kinds and categories, tuner modes and
+recording kinds.
 
 ## Get a machine token
 
@@ -138,7 +139,9 @@ Details: [API: automation and agents](API.md#automation-and-agents) and [Securit
 ## Read the receiver state
 
 One bounded read (under 4 KiB) says what the receiver is doing: tuners, sources, live audio,
-scanner, decoder verdicts, activity store and the newest decode per protocol.
+scanner, decoder verdicts, activity store and the newest decode per protocol. Poll this route to
+ask "what is going on": it reads no discovery, journal or SQLite data, so it stays cheap on a busy
+core and however many discoveries the store holds.
 
 ```sh
 curl --fail --header "$AUTH" "$API_ORIGIN/api/agent/status"
@@ -156,7 +159,27 @@ and `error` after a failed resume. After a plain resume, `tuningUnverified: true
 receiver may have been retuned during the pause: read or set the tuning before trusting it.
 `scanner.heldJobs` counts sweeps that a plain resume parked (`reason`
 `resumed-without-retune`); `scanner.job` shows one of them before any newer job, and it
-waits for an explicit job resume.
+waits for an explicit job resume. `scanner.discoveries` is how many records the discovery store
+holds.
+
+## List what the scanner found
+
+Ask for compact rows: 200 to 300 bytes each, instead of 760 or more.
+
+```sh
+curl --fail --header "$AUTH" "$API_ORIGIN/api/scanner/discoveries?view=compact&limit=100"
+```
+
+Each row has `id`, `frequencyHz`, `class`, `protocol`, `confidence`, `evidenceLevel`, `identity`,
+`lastSeenAt` and `recorder`. `identity` is null while none is published, and `recorder` is null
+while the recorder remembers no decision; `recorder.last` holds its last `code` and `at`. There is
+no `state`: a discovery is a record, not a process, and only a job has one. Pass `nextCursor` as
+`cursor` for the next page, until it is null. All the filters work
+([compact rows](API.md#compact-rows)). A page can come back short of `limit` when a record is
+merged during the read, so stop on the cursor, not on the row count.
+
+`GET /api/scanner/jobs?view=compact` is the same for jobs: `id`, `name`, `kind`, `state`, `reason`,
+`sourceId` and `updatedAt`, without the plan.
 
 ## Tune
 

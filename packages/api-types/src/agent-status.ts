@@ -25,12 +25,13 @@ export const AGENT_STATUS_LIMITS = Object.freeze({
 	 *   tuners:     2 × 219 (sourceId 32, three numbers, owner) + 3         =   441
 	 *   sources:    2 × 209 (id 32, longest state and feed, age, the longest
 	 *               warning twice, tuningUnverified) + 3                     =   421
-	 *   liveAudio:  sourceId 32, modulation 16, two numbers                 =   206
-	 *   scanner:    job id 32, name 32, reason 24, sourceId 32, two integers =  299
+	 *   liveAudio:  sourceId 32, modulation 12, two numbers                 =   202
+	 *   scanner:    job id 32, name 32, reason 24, sourceId 32, two integers,
+	 *               discoveries 7 digits                                    =   321
 	 *   decoders:   9 × 199 (id 32, protocol 24, code 23, the longest action
 	 *               3 times: 64) + 10                                        = 1,801
 	 *   lastDecode: 9 × 74 (protocol 24, ISO time 27) + 10                  =   676
-	 * Total 4,076 < 4,096. The worst-case test builds exactly this body, checks the
+	 * Total 4,094 < 4,096. The worst-case test builds exactly this body, checks the
 	 * schema admits it and nothing one row or one byte larger, and measures it.
 	 * A decoder row's `reception` hint rides only on a `listening` verdict, which has no
 	 * actions: code 9 instead of 23 and `[]` 2 instead of 3 actions 64 saves 76 bytes,
@@ -55,8 +56,13 @@ export const AGENT_STATUS_LIMITS = Object.freeze({
 	jobNameMaxBytes: 32,
 	/** Pause or failure reasons cut to 24 bytes; the longest is 22 (`resumed-without-retune`). */
 	reasonMaxBytes: 24,
-	/** Live-audio modulation names cut to 16 bytes. */
-	modulationMaxBytes: 16,
+	/** Live-audio modulation names cut to 12 bytes; the longest is 3 (`nfm`). */
+	modulationMaxBytes: 12,
+	/**
+	 * `scanner.discoveries` stops here and sets `truncated`: the most `storage.maxDiscoveries`
+	 * accepts, 7 digits in the budget above. Records kept from eviction can pass that cap.
+	 */
+	discoveriesMax: 1_000_000,
 	/** Sources and their tuners (one tuner per source): the first two. */
 	sourcesMax: 2,
 	/**
@@ -200,6 +206,13 @@ export const agentScannerSchema = z
 		activeJobs: z.number().int().nonnegative(),
 		/** Sweeps paused with reason `resumed-without-retune`: each waits for a job resume. */
 		heldJobs: z.number().int().nonnegative(),
+		/** Records in the discovery store, read from its size; null when this core cannot say. */
+		discoveries: z
+			.number()
+			.int()
+			.nonnegative()
+			.max(L.discoveriesMax)
+			.nullable(),
 		/**
 		 * The most recently updated job paused with reason `resumed-without-retune`, else the
 		 * most recently updated non-terminal job, else null.
@@ -272,8 +285,9 @@ export const agentStatusSchema = z
 	.object({
 		at: iso,
 		/**
-		 * True when a list was cut at its cap or an id was shortened: the named full
-		 * route has everything. Shortened job names alone do not set it.
+		 * True when a list was cut at its cap, an id was shortened or the discovery count
+		 * stopped at its cap: the named full route has everything. Shortened job names alone
+		 * do not set it.
 		 */
 		truncated: z.boolean(),
 		tuners: z.array(agentTunerSchema).max(L.sourcesMax),
@@ -365,6 +379,7 @@ export const agentStatusResponseSchema = strictObject({
 			enabled: bool,
 			activeJobs: { type: "integer" },
 			heldJobs: { type: "integer" },
+			discoveries: nullable("integer"),
 			job: {
 				...strictObject({
 					id: str,
