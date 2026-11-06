@@ -310,7 +310,9 @@ describe("record whole voice: the busy-band QSO through a repeater (repeater han
 	// shorter than the hang, and voice stays on air VOICE_TAIL_MS past the last word, so a
 	// turnaround under about 1.75 s is never seen and the hold runs across overs up to
 	// hold.maxHoldMs (60 s). More IDs on another hop are missed than on simplex (3 hops 15, 7 hops
-	// 4 of 152). Measured with this simulator; asserted so a change shows here.
+	// 4 of 152). Measured with this simulator; asserted so a change shows here. A track per carrier:
+	// a watch whose run is speech marks no carrier, so a repeater on air from the job's start stays
+	// callable, its voice is held, and up to 2 more of 152 IDs elsewhere are missed (the user's rule).
 	const table: [number, number, "overs" | "carrier", number, number, number][] =
 		[
 			// hops, hang (ms), sweep view, IDs missed, IDs heard ≥ 25 s, longest hop-0 visit (ms)
@@ -318,10 +320,10 @@ describe("record whole voice: the busy-band QSO through a repeater (repeater han
 			[3, 3_000, "overs", 42, 7, 61_150],
 			[7, 1_500, "overs", 20, 14, 61_150],
 			[7, 3_000, "overs", 35, 8, 61_150],
-			[3, 1_500, "carrier", 6, 96, 61_150],
-			[3, 3_000, "carrier", 2, 101, 61_150],
-			[7, 1_500, "carrier", 4, 73, 61_150],
-			[7, 3_000, "carrier", 4, 57, 61_150],
+			[3, 1_500, "carrier", 7, 97, 61_150],
+			[3, 3_000, "carrier", 4, 95, 61_150],
+			[7, 1_500, "carrier", 6, 72, 61_150],
+			[7, 3_000, "carrier", 6, 55, 61_150],
 		]
 	for (const [hops, hangMs, view, missed, whole, longest] of table)
 		it(`${hops} hops, ${hangMs} ms hang, a track per ${view === "overs" ? "over" : "carrier"}: ${missed} of 152 other-hop IDs missed, ${whole} heard ≥ 25 s, the longest hop-0 visit ${longest} ms`, () => {

@@ -66,6 +66,28 @@ import {
 } from "../scanner/scanner-redesign-contract.js"
 
 /**
+ * The longest the plan's gate rule can take to pass a track, for a scheduler to know how long an
+ * answer can take: the burst duration only when burst entries alone overlap the track, the standard
+ * one otherwise (no entry reads as the default slot, not burst). A track also covered by burst slots
+ * (`burstCovered`) may pass sooner by the burst rule; this is its bound, so that does not change it.
+ */
+export function channelGateMinDurationMs(
+	entries: readonly Pick<ChannelPlanEntry, "startHz" | "endHz" | "burst">[],
+	centreHz: number,
+	obwHz: number,
+): number {
+	const lo = centreHz - obwHz / 2
+	const hi = centreHz + obwHz / 2
+	let any = false
+	for (const e of entries) {
+		if (e.endHz <= lo || e.startHz >= hi) continue
+		if (!e.burst) return CHANNEL_GATE_MIN_DURATION_MS
+		any = true
+	}
+	return any ? CHANNEL_GATE_BURST_MIN_DURATION_MS : CHANNEL_GATE_MIN_DURATION_MS
+}
+
+/**
  * One slot reading. `state` / `passedSample` / `runStartSample` describe the
  * slot run (CFAR). The rest is this block's measurement for a track.
  * `minDurationMs` is 300, or 100 when the measurement is burst.
