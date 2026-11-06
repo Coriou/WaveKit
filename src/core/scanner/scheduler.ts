@@ -274,9 +274,9 @@ interface HopState {
 	 * sweep's return to this hop may hold the next transmission. No activity revisit comes back here
 	 * meanwhile (pickRevisit). Per hop: a long hold elsewhere never takes a transmission's voice hold
 	 * away. Named hops, not a count: a plan change has to know which of them were paid
-	 * (reconcileVoiceLocks).
+	 * (carryVoiceLocks).
 	 */
-	voiceLock: Set<number>
+	voiceLock: HopBits
 }
 
 /** Measured ms per phase of a visit (or of a hop's ended visits). Never read by a decision. */
@@ -539,17 +539,195 @@ function spansShare(a: Hop["covered"], b: Hop["covered"]): boolean {
 	return shared > narrower / 2
 }
 
-function nearestHop(plan: HopPlan, centreHz: number): number {
-	let best = 0
-	let bestDist = Number.POSITIVE_INFINITY
-	plan.hops.forEach((hop, i) => {
-		const dist = Math.abs(hop.centreHz - centreHz)
-		if (dist < bestDist) {
-			best = i
-			bestDist = dist
+/**
+ * The hop of `plan` nearest a frequency, the lowest hop index among the nearest: sorted centres and a
+ * binary search. A re-plan makes one lookup per hop, so it costs (old + new) × log2(old) comparisons,
+ * not old × new.
+ */
+export function nearestHopIn(plan: HopPlan): (centreHz: number) => number {
+	const sorted = plan.hops
+		.map((hop, i) => ({ hz: hop.centreHz, i }))
+		.sort((a, b) => a.hz - b.hz || a.i - b.i)
+	const centres = sorted.filter((c, at) => c.hz !== sorted[at - 1]?.hz)
+	return centreHz => {
+		let lo = 0
+		let hi = centres.length
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1
+			if ((centres[mid]?.hz ?? Number.POSITIVE_INFINITY) < centreHz)
+				lo = mid + 1
+			else hi = mid
 		}
-	})
-	return best
+		const above = centres[lo]
+		const below = centres[lo - 1]
+		if (below === undefined) return above?.i ?? 0
+		if (above === undefined) return below.i
+		const toBelow = centreHz - below.hz
+		const toAbove = above.hz - centreHz
+		if (toBelow !== toAbove) return toBelow < toAbove ? below.i : above.i
+		return Math.min(below.i, above.i)
+	}
+}
+
+function bitsSet(word: number): number {
+	let w = word - ((word >>> 1) & 0x55555555)
+	w = (w & 0x33333333) + ((w >>> 2) & 0x33333333)
+	return Math.imul((w + (w >>> 4)) & 0x0f0f0f0f, 0x01010101) >>> 24
+}
+
+/**
+ * The hops a voice lock still owes: one bit per hop index of the plan in force. On N hops a lock is
+ * ceil(N / 32) words, so 1,025 hops all locked take 1,025 × 33 × 4 B = 135 KB, and adding a lock to
+ * another is ceil(N / 32) word operations where a Set takes one insert per hop.
+ */
+export class HopBits {
+	private count = 0
+
+	constructor(private readonly words: Uint32Array) {
+		for (const word of words) this.count += bitsSet(word)
+	}
+
+	/** Every hop of a plan of `hopCount` hops but `hopIndex`. */
+	static allBut(hopCount: number, hopIndex: number): HopBits {
+		const words = new Uint32Array(Math.ceil(hopCount / 32))
+		words.fill(0xffffffff)
+		if (hopCount % 32 !== 0) words[words.length - 1] = 2 ** (hopCount % 32) - 1
+		const bits = new HopBits(words)
+		bits.delete(hopIndex)
+		return bits
+	}
+
+	get size(): number {
+		return this.count
+	}
+
+	has(hopIndex: number): boolean {
+		return (((this.words[hopIndex >>> 5] ?? 0) >>> hopIndex) & 1) === 1
+	}
+
+	delete(hopIndex: number): void {
+		if (!this.has(hopIndex)) return
+		const at = hopIndex >>> 5
+		this.words[at] = (this.words[at] ?? 0) & ~(1 << hopIndex)
+		this.count--
+	}
+}
+
+/** Nothing owed; shared by every hop without a lock, since a lock is only ever replaced or shrunk. */
+const NO_HOPS = new HopBits(new Uint32Array(0))
+
+/**
+ * Carries what the voice holds still owe into a new plan. A new hop is locked when it takes over a
+ * locked old hop's window (spansShare; several can, after a split, and it can be one nearestHopIn
+ * mapped to another old hop). It owes every other new hop, except one whose whole span a paid old hop
+ * covered: that span was heard since the hold ended. Whatever the new plan added, or the locked hop's
+ * own window under a new centre, is owed, so one coarse sweep of the new plan pays it all: the coarse
+ * order reaches every other hop within one cycle, and a locked hop's visit pays its sibling's lock
+ * like any other. A locked old hop whose window the new plan drops leaves no lock. An unchanged plan
+ * whose hops neither hold nor share each other's windows keeps its locks as they are, the same
+ * objects: this rule gives exactly them.
+ *
+ * Cost, on a re-plan only and only when a lock is outstanding, for N old hops, M new hops and L
+ * locked old hops. Both plans are sorted by start and swept once: (N + M) log2(N + M) comparisons,
+ * then P tests of overlapping pairs. All hops of a plan have one width (hop-planner) and it advances
+ * by at least that width less the widest channel, so a new hop meets a few old hops, not N: at most
+ * 4 on a tiled plan, itself, its neighbours and the one it drops. P is N × M only if every old span
+ * overlaps every new one. Then, per lock with an heir, one read per new hop and per old hop holding
+ * it, and ceil(M / 32) word operations per heir: L × (M + holders) + L × heirs × ceil(M / 32). On
+ * 1,025 tiled hops all locked and new hops of half the width on the same centres (one holder, one
+ * heir): 4 × 1,025 + 1,024 × (2 × 1,025 + 33) = 2.1 M operations on typed arrays and 135 KB, against
+ * 1,025 × 1,025 span tests and up to 1,024 × 1,024 Set inserts when each lock was a Set. An unchanged
+ * plan stops after the sweep.
+ * `ops` counts the pairs tested, bit reads and word operations.
+ */
+export function carryVoiceLocks(
+	oldSpans: readonly Hop["covered"][],
+	oldLocks: readonly HopBits[],
+	nextSpans: readonly Hop["covered"][],
+): { locks: HopBits[]; ops: number } {
+	if (oldLocks.every(lock => lock.size === 0))
+		return { locks: nextSpans.map(() => NO_HOPS), ops: 0 }
+	const byStart = (spans: readonly Hop["covered"][]) =>
+		spans
+			.map((span, i) => ({ span, i }))
+			.sort((a, b) => a.span.startHz - b.span.startHz)
+	const olds = byStart(oldSpans)
+	/** Per new hop, the old hops that hold its whole span. */
+	const holders: number[][] = nextSpans.map(() => [])
+	/** Per old hop, the new hops over its window. */
+	const heirs: number[][] = oldSpans.map(() => [])
+	let ops = 0
+	let admitted = 0
+	const active: typeof olds = []
+	for (const { span, i: k } of byStart(nextSpans)) {
+		for (
+			let o = olds[admitted];
+			o !== undefined && o.span.startHz <= span.endHz;
+			o = olds[++admitted]
+		)
+			active.push(o)
+		let kept = 0
+		for (const o of active) {
+			ops++
+			// Past this hop's start: past every later hop's too.
+			if (o.span.endHz < span.startHz) continue
+			active[kept++] = o
+			if (spanHolds(o.span, span)) holders[k]?.push(o.i)
+			if (spansShare(span, o.span)) heirs[o.i]?.push(k)
+		}
+		active.length = kept
+	}
+	const onlyItself = (found: readonly number[], i: number): boolean =>
+		found.length === 1 && found[0] === i
+	if (
+		oldSpans.length === nextSpans.length &&
+		oldSpans.every((span, i) => {
+			const next = nextSpans[i]
+			return next?.startHz === span.startHz && next.endHz === span.endHz
+		}) &&
+		holders.every(onlyItself) &&
+		heirs.every(onlyItself)
+	)
+		return { locks: [...oldLocks], ops }
+	const wordCount = Math.ceil(nextSpans.length / 32)
+	const owed = new Uint32Array(wordCount)
+	const carried = new Map<number, Uint32Array>()
+	for (const [l, lock] of oldLocks.entries()) {
+		const heirsOfLock = heirs[l] ?? []
+		if (lock.size === 0 || heirsOfLock.length === 0) continue
+		owed.fill(0)
+		for (let k = 0; k < holders.length; k++) {
+			const found = holders[k] ?? []
+			let paid = false
+			ops++
+			for (let at = 0; at < found.length && !paid; at++) {
+				const i = found[at] ?? l
+				paid = i !== l && !lock.has(i)
+				ops++
+			}
+			if (!paid) owed[k >>> 5] = (owed[k >>> 5] ?? 0) | (1 << k)
+		}
+		for (const j of heirsOfLock) {
+			let words = carried.get(j)
+			if (words === undefined) {
+				words = new Uint32Array(wordCount)
+				carried.set(j, words)
+			}
+			for (let w = 0; w < wordCount; w++)
+				words[w] = (words[w] ?? 0) | (owed[w] ?? 0)
+			ops += wordCount
+		}
+	}
+	return {
+		locks: nextSpans.map((_, j) => {
+			const words = carried.get(j)
+			if (words === undefined) return NO_HOPS
+			const lock = new HopBits(words)
+			lock.delete(j)
+			return lock
+		}),
+		ops,
+	}
 }
 
 /**
@@ -1705,7 +1883,7 @@ export class SweepScheduler {
 			holdMs: 0,
 			phases: emptyPhases(),
 			waitMs: 0,
-			voiceLock: new Set(),
+			voiceLock: NO_HOPS,
 		}
 	}
 
@@ -2776,8 +2954,7 @@ export class SweepScheduler {
 		if (!v.revisit) for (const h of this.hops) h.voiceLock.delete(v.hopIndex)
 		const voiceHeld = v.voice !== "no"
 		if (voiceHeld) {
-			hop.voiceLock = new Set(this.plan.hops.keys())
-			hop.voiceLock.delete(v.hopIndex)
+			hop.voiceLock = HopBits.allBut(this.plan.hops.length, v.hopIndex)
 		}
 		// A long hold that used more than one coarse sweep, a decoded follow that ran to L, or
 		// budgeted holds that kept a hop waiting L (lockAfterMs), or a voice hold (Visit.voice):
@@ -2975,8 +3152,10 @@ export class SweepScheduler {
 		// second one starts at zero so totals are not counted twice. Frequency memory is kept by
 		// frequency, whatever the hops.
 		const accounted = new Set<number>()
+		const nearestOld = nearestHopIn(old)
+		const nearestNew = nearestHopIn(pending.plan)
 		const mapped = pending.plan.hops.map((hop): HopState | null => {
-			const i = nearestHop(old, hop.centreHz)
+			const i = nearestOld(hop.centreHz)
 			const prev = this.hops[i]
 			const near =
 				Math.abs((old.hops[i]?.centreHz ?? Number.NaN) - hop.centreHz) <=
@@ -2995,7 +3174,7 @@ export class SweepScheduler {
 		const visited = new Set<number>()
 		for (const i of this.visited) {
 			const centre = old.hops[i]?.centreHz
-			if (centre !== undefined) visited.add(nearestHop(pending.plan, centre))
+			if (centre !== undefined) visited.add(nearestNew(centre))
 		}
 		const oldHops = this.hops
 		this.plan = pending.plan
@@ -3003,49 +3182,16 @@ export class SweepScheduler {
 		this.hops = mapped.map(
 			(state, i) => state ?? this.freshHop(pending.plan.hops[i]),
 		)
-		this.reconcileVoiceLocks(old, oldHops)
+		const { locks } = carryVoiceLocks(
+			old.hops.map(hop => hop.covered),
+			oldHops.map(hop => hop.voiceLock),
+			pending.plan.hops.map(hop => hop.covered),
+		)
+		for (const [i, hop] of this.hops.entries())
+			hop.voiceLock = locks[i] ?? NO_HOPS
 		this.visited = visited
 		this.lockHop = null
-		this.coarseIndex = nearestHop(pending.plan, oldCoarseCentre)
+		this.coarseIndex = nearestNew(oldCoarseCentre)
 		this.boundMemory()
-	}
-
-	/**
-	 * Carries what the voice holds still owe into the plan just swapped in. A hop of the new plan is
-	 * locked when it takes over a locked old hop's window (spansShare; several can, after a split, and
-	 * it can be one nearestHop mapped to another old hop). It owes every other new hop, except one
-	 * whose whole span a paid old hop covered: that span was heard since the hold ended. Whatever the
-	 * new plan added, or the locked hop's own window under a new centre, is owed, so one coarse sweep
-	 * of the new plan pays it all: the coarse order reaches every other hop within one cycle, and a
-	 * locked hop's visit pays its sibling's lock like any other. A locked old hop whose window the new
-	 * plan drops leaves no lock. An unchanged plan keeps its locks as they were. Cost, on a replan
-	 * only and only when a lock is outstanding: old × new span tests, then per lock new × (the few old
-	 * hops that contain a hop).
-	 */
-	private reconcileVoiceLocks(
-		old: HopPlan,
-		oldHops: readonly HopState[],
-	): void {
-		const next = this.plan.hops
-		const locks = next.map(() => new Set<number>())
-		let within: number[][] | null = null
-		for (const [l, state] of oldHops.entries()) {
-			const lockedSpan = old.hops[l]?.covered
-			if (state.voiceLock.size === 0 || lockedSpan === undefined) continue
-			within ??= next.map(hop =>
-				old.hops.flatMap((o, i) =>
-					spanHolds(o.covered, hop.covered) ? [i] : [],
-				),
-			)
-			const paid = (k: number): boolean =>
-				within?.[k]?.some(i => i !== l && !state.voiceLock.has(i)) === true
-			const owed = [...next.keys()].filter(k => !paid(k))
-			for (const [j, hop] of next.entries()) {
-				if (!spansShare(hop.covered, lockedSpan)) continue
-				for (const k of owed) if (k !== j) locks[j]?.add(k)
-			}
-		}
-		for (const [i, hop] of this.hops.entries())
-			hop.voiceLock = locks[i] ?? new Set()
 	}
 }
