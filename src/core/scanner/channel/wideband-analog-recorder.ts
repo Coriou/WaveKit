@@ -28,7 +28,6 @@
  * a bounded hold (WIDEBAND_TONE_ONLY_HOLD_FRAMES), and each of its files is checked again over
  * the whole file when it finishes.
  */
-import type { ScannerRecorderReceiptDetail } from "@wavekit/api-types"
 import type { TrackSnapshot, TuningTrust } from "../../spectrum/types.js"
 import { safeErrorFields } from "../../../decoders/safe-error-fields.js"
 import { createComponentLogger, type Logger } from "../../../utils/logger.js"
@@ -42,6 +41,8 @@ import type {
 	AnalogReceipt,
 } from "../store/analog-operations.js"
 import {
+	AnalogCutSchema,
+	AnalogFailureSchema,
 	ErrorSchema,
 	MAX_ACTIVE_ANALOG_PER_SOURCE,
 } from "../store/analog-operations.js"
@@ -74,7 +75,7 @@ import type {
 	ScannerRecorderStatus,
 } from "@wavekit/api-types"
 import { VOICE_MIN_FINAL_FRAMES } from "./voice-activity.js"
-import { RecorderDecisions } from "./recorder-decisions.js"
+import { RecorderDecisions, type ReceiptDetail } from "./recorder-decisions.js"
 import type { RecordingActivity } from "../scheduler.js"
 
 /** Same bound as the channel-tier trigger: a 25 kHz NFM channel's occupied bandwidth. */
@@ -599,6 +600,8 @@ interface FileState {
 	finishing: boolean
 	/** The operation's finish was asked for: its own receipt is its terminal decision. */
 	finishAsked: boolean
+	/** A push of it was rejected: its receipt's decision is `discarded:write-failed`. */
+	pushFailed: boolean
 	/** This file's terminal decision was noted (each file gets exactly one; endFile). */
 	decided: boolean
 }
@@ -1606,6 +1609,7 @@ export class WidebandAnalogRecorder {
 			writing: false,
 			finishing: false,
 			finishAsked: false,
+			pushFailed: false,
 			decided: false,
 		}
 		s.file = file
@@ -1750,10 +1754,16 @@ export class WidebandAnalogRecorder {
 		this.endFile(
 			s,
 			file,
-			receipt.outcome === "finalized" ? "finalized" : "discarded:aborted",
+			receipt.outcome === "finalized"
+				? "finalized"
+				: file.pushFailed
+					? "discarded:write-failed"
+					: "discarded:aborted",
 			{
 				outcome: receipt.outcome,
 				errorCode: ErrorSchema.safeParse(receipt.errorCode).data ?? null,
+				cutReason: AnalogCutSchema.safeParse(receipt.cutReason).data ?? null,
+				failure: AnalogFailureSchema.safeParse(receipt.failure).data ?? null,
 				operationId: file.handle?.operationId ?? receipt.operationId,
 			},
 		)
@@ -1837,7 +1847,7 @@ export class WidebandAnalogRecorder {
 	private decide(
 		s: Session,
 		code: ScannerRecorderDecision,
-		receipt?: ScannerRecorderReceiptDetail & { operationId: string },
+		receipt?: ReceiptDetail,
 	): void {
 		this.decisions.note(
 			code,
@@ -1908,7 +1918,7 @@ export class WidebandAnalogRecorder {
 		s: Session,
 		file: FileState,
 		code: ScannerRecorderDecision,
-		receipt?: ScannerRecorderReceiptDetail & { operationId: string },
+		receipt?: ReceiptDetail,
 	): void {
 		if (file.decided) return
 		file.decided = true
@@ -2391,12 +2401,15 @@ export class WidebandAnalogRecorder {
 			() => {
 				file.writing = false
 				file.failed = true
-				if (s.file === file && !s.done) this.refuse(s, "discarded:write-failed")
-				else {
-					// A finishing file (finishFile cleared s.file): its own decision, the session goes on.
-					handle.cancel("cancelled")
-					this.endFile(s, file, "discarded:write-failed")
+				// Its decision comes with the receipt (onSettled): the push fails the same way whether the
+				// disk failed or the store already cancelled the operation, which only the receipt tells.
+				file.pushFailed = true
+				if (s.file === file && !s.done) {
+					for (const id of s.observations) remember(this.refused, id)
+					this.cancelSession(s, "cancelled")
 				}
+				// A finishing file (finishFile cleared s.file): the session goes on.
+				else handle.cancel("cancelled")
 			},
 		)
 	}

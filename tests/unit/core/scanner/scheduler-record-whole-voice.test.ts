@@ -204,24 +204,27 @@ describe("record whole voice: the busy-band scene (900 s, 152 IDs over 8 runs pe
 	// and hang of it, one name) measured on the same scene: 3 hops 41 of 152 IDs missed, QSO
 	// 3 877 550 ms, 21 IDs heard ≥ 25 s; 7 hops 23 missed, 3 125 550 ms, 7 heard ≥ 25 s.
 	// The accepted cost of "record whole voice": IDs on another hop missed while an over is held
-	// to its end (3 hops 15 of 152, 7 hops 4 of 152); the QSO is heard about 15 % (3 hops) and
-	// 17 % (7 hops) more than with the "true" recorder.
+	// to its end (3 hops 12 of 152, 7 hops 1). Each hop's voice hold is its own: an ID caught
+	// during the sweep forced after an over is kept whole too (heard ≥ 25 s: 27 and 25, none with
+	// the "true" recorder). The QSO is heard 1 % less than with the "true" recorder on 3 hops and
+	// 7 % more on 7 hops.
 	const table: [number, Model, number, number, number][] = [
 		// hops, model, IDs missed, IDs heard ≥ 25 s, QSO heard (Σ ms over the eight runs)
 		[3, "none", 0, 0, 3_373_050],
 		[3, "true", 0, 0, 3_399_600],
-		[3, "voice", 15, 16, 3_909_500],
+		[3, "voice", 12, 27, 3_372_200],
 		[7, "none", 0, 0, 2_373_750],
 		[7, "true", 0, 0, 2_453_750],
-		[7, "voice", 4, 18, 2_861_250],
+		[7, "voice", 1, 25, 2_617_700],
 	]
 	for (const [hops, model, missed, whole, qsoMs] of table)
 		it(`${hops} hops, recorder ${model}: ${missed} of 152 other-hop IDs missed, ${whole} heard ≥ 25 s, QSO heard ${qsoMs} ms`, () => {
-			const x = scene(hops, model)
-			expect(x.ids).toBe(152)
-			expect(x.missed).toBe(missed)
-			expect(x.heardWhole).toBe(whole)
-			expect(x.qsoMs).toBe(qsoMs)
+			expect(scene(hops, model)).toEqual({
+				ids: 152,
+				missed,
+				heardWhole: whole,
+				qsoMs,
+			})
 		})
 })
 
@@ -309,21 +312,23 @@ describe("record whole voice: the busy-band QSO through a repeater (repeater han
 	// The known cost: a repeater's hang carrier keeps the over's track open across turnarounds
 	// shorter than the hang, and voice stays on air VOICE_TAIL_MS past the last word, so a
 	// turnaround under about 1.75 s is never seen and the hold runs across overs up to
-	// hold.maxHoldMs (60 s). More IDs on another hop are missed than on simplex (3 hops 15, 7 hops
-	// 4 of 152). Measured with this simulator; asserted so a change shows here. A track per carrier:
-	// a watch whose run is speech marks no carrier, so a repeater on air from the job's start stays
-	// callable, its voice is held, and up to 2 more of 152 IDs elsewhere are missed (the user's rule).
+	// hold.maxHoldMs (60 s). More IDs on another hop are missed than on simplex (3 hops 12, 7 hops
+	// 1 of 152). Measured with this simulator; asserted so a change shows here. A track per
+	// carrier: a watch whose run is speech marks no carrier, so a repeater on air from the job's
+	// start stays callable and its voice is held. With a 3 s hang most turnarounds never close the
+	// carrier, and the hop holds again as soon as the sweep is back, so about as many IDs are missed
+	// as with a track per over (the user's rule: a voice hold per transmission).
 	const table: [number, number, "overs" | "carrier", number, number, number][] =
 		[
 			// hops, hang (ms), sweep view, IDs missed, IDs heard ≥ 25 s, longest hop-0 visit (ms)
-			[3, 1_500, "overs", 35, 16, 61_150],
-			[3, 3_000, "overs", 42, 7, 61_150],
-			[7, 1_500, "overs", 20, 14, 61_150],
-			[7, 3_000, "overs", 35, 8, 61_150],
-			[3, 1_500, "carrier", 7, 97, 61_150],
-			[3, 3_000, "carrier", 4, 95, 61_150],
-			[7, 1_500, "carrier", 6, 72, 61_150],
-			[7, 3_000, "carrier", 6, 55, 61_150],
+			[3, 1_500, "overs", 26, 30, 61_150],
+			[3, 3_000, "overs", 32, 15, 61_150],
+			[7, 1_500, "overs", 24, 25, 61_150],
+			[7, 3_000, "overs", 38, 26, 61_150],
+			[3, 1_500, "carrier", 9, 81, 61_150],
+			[3, 3_000, "carrier", 36, 33, 61_150],
+			[7, 1_500, "carrier", 8, 81, 61_150],
+			[7, 3_000, "carrier", 41, 22, 61_150],
 		]
 	for (const [hops, hangMs, view, missed, whole, longest] of table)
 		it(`${hops} hops, ${hangMs} ms hang, a track per ${view === "overs" ? "over" : "carrier"}: ${missed} of 152 other-hop IDs missed, ${whole} heard ≥ 25 s, the longest hop-0 visit ${longest} ms`, () => {
@@ -411,9 +416,8 @@ describe("record whole voice: the scheduler", () => {
 			},
 		})
 		const zero = r.visits.filter(v => v.hopIndex === 0)
-		// The voice holds (kept to their over's end): the first and the third over. The second
-		// over starts 2 s after the first hold ends, while the forced coarse sweep runs (its hop
-		// is then held only by the sweep's own bounded watches, never to the over's end).
+		// The voice holds (kept to their over's end): every over, each its own transmission. Each is
+		// caught when the forced coarse sweep comes back to the hop, 2 to 3 s into the over.
 		const voiceHolds = zero.filter(
 			v =>
 				kept(v) &&
@@ -421,18 +425,87 @@ describe("record whole voice: the scheduler", () => {
 					o => v.leftAtMs >= o.endMs && v.leftAtMs <= o.endMs + 250 + BLOCK_MS,
 				),
 		)
-		expect(voiceHolds.map(v => v.leftAtMs)).toEqual([45_050, 129_150])
+		expect(voiceHolds.map(v => v.leftAtMs)).toEqual([45_050, 87_000, 129_200])
 		// Between the two, hops 1 and 2 each get a coarse visit.
 		const between = r.visits.filter(
 			v =>
 				v.tunedAtMs >= voiceHolds[0]!.leftAtMs &&
 				v.leftAtMs <= voiceHolds[1]!.tunedAtMs,
 		)
-		expect(new Set(between.map(v => v.hopIndex))).toEqual(new Set([0, 1, 2]))
+		expect(new Set(between.map(v => v.hopIndex))).toEqual(new Set([1, 2]))
 		// Right after the first voice hold, hop 0 is not kept until hops 1 and 2 were visited.
 		const after = r.visits.filter(v => v.tunedAtMs >= 45_050)
 		const firstKept = after.findIndex(v => v.hopIndex === 0 && kept(v))
 		const before = new Set(after.slice(0, firstKept).map(v => v.hopIndex))
 		expect(before.has(1) && before.has(2)).toBe(true)
+	})
+
+	it("a watch elsewhere holds the long-hold lock: a transmission caught meanwhile is still kept to its end", () => {
+		const hz1 = plan3.hops[1]!.centreHz + 100_000
+		const hz2 = plan3.hops[2]!.centreHz + 100_000
+		// Something unknown on hop 2 from the start: an 8 s watch, longer than a coarse sweep, sets the
+		// lock. The ID starts during that watch, so the sweep comes back to it while the lock holds.
+		const other = voice(hz2, 0, 130_000)
+		const id = voice(hz1, 9_000, 28_000)
+		const r = simulateSweep(plan3, spec, {
+			...sim,
+			durationMs: 60_000,
+			signals: [other, id],
+			recordingActive: (c, hop) =>
+				hop === 1 && c >= id.startMs + VOICED_AFTER_MS && c < id.endMs
+					? { voice: "id" }
+					: false,
+		})
+		const watch = r.visits.find(v => v.hopIndex === 2 && kept(v))!
+		expect(watch.leftAtMs).toBeGreaterThan(id.startMs)
+		const caught = r.visits.find(
+			v => v.hopIndex === 1 && v.leftAtMs > watch.leftAtMs,
+		)!
+		expect(caught.leftAtMs).toBeGreaterThanOrEqual(id.endMs)
+		expect(caught.leftAtMs).toBeLessThanOrEqual(id.endMs + 250 + BLOCK_MS)
+	})
+
+	it("a recording that voices after the keep gets the transmission's voice hold, not L", () => {
+		// The recorder answers true at the end of the watch (a pause in the speech, its window spent),
+		// voice again after it. L on 3 hops is 18 400 ms from the visit's first hold.
+		const tx = voice(hz0, 5_000, 50_000)
+		const pausedFrom = tx.startMs + 8_000
+		const r = simulateSweep(plan3, spec, {
+			...sim,
+			durationMs: 70_000,
+			signals: [tx],
+			recordingActive: (c, hop) => {
+				if (
+					!inHop0(hop, hz0) ||
+					c < tx.startMs + VOICED_AFTER_MS ||
+					c >= tx.endMs
+				)
+					return false
+				return c >= pausedFrom && c < pausedFrom + 5_000
+					? true
+					: { voice: "tx" }
+			},
+		})
+		const first = r.visits.find(v => v.hopIndex === 0 && kept(v))!
+		expect(first.leftAtMs).toBeGreaterThanOrEqual(tx.endMs)
+		expect(first.leftAtMs).toBeLessThanOrEqual(tx.endMs + 250 + BLOCK_MS)
+	})
+
+	it("no activity revisit comes back during the sweep a voice hold forces", () => {
+		const plan = makeHopPlan(centres(7), HALF_SPAN_HZ)
+		// Longer than the first watch, so the recording gets its voice hold.
+		const tx = voice(plan.hops[0]!.centreHz + 100_000, 5_000, 25_000)
+		const r = simulateSweep(plan, spec, {
+			...sim,
+			durationMs: 50_000,
+			signals: [tx],
+			recordingActive: (c, hop) =>
+				hop === 0 && c >= tx.startMs + VOICED_AFTER_MS && c < tx.endMs
+					? { voice: "tx" }
+					: false,
+		})
+		const held = r.visits.find(v => v.hopIndex === 0 && kept(v))!
+		const after = r.visits.filter(v => v.tunedAtMs >= held.leftAtMs).slice(0, 6)
+		expect(after.map(v => v.hopIndex).sort()).toEqual([1, 2, 3, 4, 5, 6])
 	})
 })

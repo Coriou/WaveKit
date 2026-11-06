@@ -19,6 +19,7 @@ import {
 	type ScannerRecorderFlagDetail,
 } from "@wavekit/api-types"
 import type { Logger } from "../../../utils/logger.js"
+import type { AnalogCut, AnalogFailure } from "../store/analog-operations.js"
 
 /**
  * Info lines per RECORDER_LOG_WINDOW_MS, session decisions only (snapshot refusals go to debug). A
@@ -36,8 +37,17 @@ export interface RecorderDecisionRef {
 	readonly discoveryId: string | null
 }
 
-interface ReceiptDetail extends ScannerRecorderReceiptDetail {
+/**
+ * What a store receipt says about a file's end, kept with its decision. `discarded:aborted` covers
+ * every non-finalized receipt, so these tell why: `outcome` (aborted: a cancellation whose cleanup
+ * completed; failed: anything else), `errorCode`, and the closed codes `cutReason` (the end the
+ * operation was given: `cancelled` by this recorder, `discovery-deleted` by the store, `shutdown`)
+ * and `failure` (which check refused it, when the code is `admission-denied` or `invalid-binding`).
+ */
+export interface ReceiptDetail extends ScannerRecorderReceiptDetail {
 	operationId: string
+	cutReason?: AnalogCut | null
+	failure?: AnalogFailure | null
 }
 
 interface ObservationMemory {
@@ -222,6 +232,8 @@ function fields(
 			? {
 					receiptOutcome: entry.receipt.outcome,
 					receiptErrorCode: entry.receipt.errorCode,
+					receiptCut: entry.receipt.cutReason ?? null,
+					receiptFailure: entry.receipt.failure ?? null,
 					operationId: entry.receipt.operationId,
 				}
 			: {}),

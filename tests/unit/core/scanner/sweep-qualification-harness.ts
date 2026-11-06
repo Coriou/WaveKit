@@ -5,8 +5,10 @@
  * whatever the sweep does; the clock is the count of samples fed (no wall clock, no alignment with
  * the visits). Timers of the service are replaced by one tick per chunk.
  */
+import { readdirSync, statSync } from "node:fs"
 import { rm } from "node:fs/promises"
-import pino from "pino"
+import { join } from "node:path"
+import pino, { type Logger } from "pino"
 import { ScannerService } from "../../../../src/core/scanner/scanner-service.js"
 import type { ScannerSettings } from "../../../../src/core/scanner/types.js"
 import type { PipelineEvent } from "../../../../src/core/spectrum/types.js"
@@ -152,6 +154,7 @@ export function qualificationWorld(opts: {
 	world: World
 	centreHz: number
 	patch?: (s: ScannerSettings) => void
+	logger?: Logger
 }) {
 	const dir = makeTmpDir("wk-qualify-")
 	const sources = new FakeSources("rtl", {
@@ -209,7 +212,7 @@ export function qualificationWorld(opts: {
 		decoders: new ServiceFakeDecoders() as never,
 		digitalVoice: null,
 		liveDemod: null,
-		logger: pino({ level: "silent" }),
+		logger: opts.logger ?? pino({ level: "silent" }),
 		engineHost: "inline",
 		// One tick per chunk (advance): the interval never fires inside a test.
 		tickMs: 3_600_000,
@@ -259,6 +262,21 @@ export function qualificationWorld(opts: {
 		holds,
 		nowMs: (): number => clock() - T0,
 		scheduler: () => driver()?.scheduler,
+		/** Seconds of each finalized analog WAV (8 kHz, 16 bit, a 44 byte header). */
+		wavSeconds(): number[] {
+			const root = join(dir, "recordings", "analog")
+			let discoveries: string[]
+			try {
+				discoveries = readdirSync(root)
+			} catch {
+				return []
+			}
+			return discoveries.flatMap(d =>
+				readdirSync(join(root, d))
+					.filter(f => f.endsWith(".wav"))
+					.map(f => (statSync(join(root, d, f)).size - 44) / 2 / 8000),
+			)
+		},
 		/** Feeds `ms` of the world, one chunk and one tick at a time, with event-loop turns between. */
 		async advance(ms: number): Promise<void> {
 			const chunks = Math.round(ms / CHUNK_MS)

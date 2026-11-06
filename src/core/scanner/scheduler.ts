@@ -291,6 +291,13 @@ interface HopState {
 	 * (followBudgetMs), so no hop waits more than L for them between two of its visits.
 	 */
 	waitMs: number
+	/**
+	 * Coarse visits left before a voiced recording may keep this hop again: hops − 1 when a visit's
+	 * voice hold ends (Visit.voice), one for every other hop, so the sweep's return to this hop may
+	 * hold the next transmission. No activity revisit comes back here meanwhile (pickRevisit). Per
+	 * hop: a long hold elsewhere never takes a transmission's voice hold away.
+	 */
+	voiceLock: number
 }
 
 interface TrackInfo {
@@ -1267,6 +1274,18 @@ export class SweepScheduler {
 	private recheckRecording(hold: Hold, now: number): SchedulerAction[] {
 		const active = this.askRecording(now)
 		const v = this.visit
+		// A hop kept within L whose recording then voices (a pause at the keep, a late verdict): the
+		// transmission gets its voice hold now, as if it had answered voice at the keep.
+		if (
+			v !== null &&
+			isVoiceOnAir(active) &&
+			v.voice === "no" &&
+			!this.voiceLocked(v)
+		) {
+			this.startVoiceHold(v, active, now)
+			hold.cap = this.holdOrigin() + this.spec.hold.maxHoldMs
+			v.recordEndMs = this.spec.hold.maxHoldMs
+		}
 		// A recording not voice (or whose voice hold is spent) keeps only what L has left
 		// (keepForRecording's non-voice cap).
 		if (active === true || (isVoiceOnAir(active) && v?.voice === "spent"))
@@ -1299,10 +1318,13 @@ export class SweepScheduler {
 	 * is voiced), up to `hold.maxHoldMs`
 	 * whatever L has left, so a 28 s ID is recorded whole; the visit's voice hold is then spent
 	 * (Visit.voice: a later voice answer of the visit keeps L only) and every hop gets a coarse visit
-	 * before the hop is followed or kept again (endVisit, longHoldLock). A recording that is not
-	 * voice (true) keeps L. Not while the long-hold lock holds, while parked (a parked hop is
-	 * never left), on a one-hop plan, for a signals-only job or under `hold.policy: "never"`. A
-	 * hold that ran past one coarse sweep locks the next long follow out (endVisit). The held
+	 * before the hop is followed or kept again (endVisit, longHoldLock, HopState.voiceLock). A
+	 * recording that is not voice (true) keeps L, and not while the long-hold lock holds: that lock
+	 * bars voice only on a hop whose own voice hold set it (voiceLock), so a transmission caught while
+	 * another hop's watch or voice hold holds the lock is still kept to its end. Not while parked (a
+	 * parked hop is never left), on a one-hop plan, for a signals-only job or under
+	 * `hold.policy: "never"`. A hold that ran past one coarse sweep locks the next long follow out
+	 * (endVisit). The held
 	 * frequency's evidence is charged as on any leave; the `record` hold itself brings none. Never
 	 * when every frequency the recording can be of has carrier evidence (recordedTrack).
 	 */
@@ -1312,7 +1334,6 @@ export class SweepScheduler {
 			this.recordingActive === undefined ||
 			v === null ||
 			this.parkedVisit ||
-			this.longHoldLock > 0 ||
 			this.plan.hops.length < 2 ||
 			this.spec.signalsOnly === true ||
 			this.spec.hold.policy === "never"
@@ -1324,6 +1345,7 @@ export class SweepScheduler {
 		if (active === false) return false
 		// Voice on air in the current transmission, and the visit's voice hold not spent yet.
 		const voice = isVoiceOnAir(active) && v.voice !== "spent"
+		if (voice ? this.voiceLocked(v) : this.longHoldLock > 0) return false
 		const cap = voice
 			? start + this.spec.hold.maxHoldMs
 			: Math.min(
@@ -1342,11 +1364,7 @@ export class SweepScheduler {
 		if (trackId === null) return false
 		v.holdStartedAt ??= now
 		v.budgeted = true
-		if (voice) {
-			v.voice = "on"
-			v.voiceId = active.voice
-			v.voiceAskedAt = now
-		}
+		if (voice) this.startVoiceHold(v, active, now)
 		v.recordEndMs = cap - start
 		this.noteLong({
 			cap,
@@ -1365,6 +1383,17 @@ export class SweepScheduler {
 		}
 		this.phase = "hold"
 		return true
+	}
+
+	/** Whether the hop's own last voice hold still owes the sweep its coarse visits. */
+	private voiceLocked(v: Visit): boolean {
+		return (this.hops[v.hopIndex]?.voiceLock ?? 0) > 0
+	}
+
+	private startVoiceHold(v: Visit, active: VoiceOnAir, now: number): void {
+		v.voice = "on"
+		v.voiceId = active.voice
+		v.voiceAskedAt = now
 	}
 
 	/**
@@ -1599,6 +1628,7 @@ export class SweepScheduler {
 			timeMs: 0,
 			holdMs: 0,
 			waitMs: 0,
+			voiceLock: 0,
 		}
 	}
 
@@ -2662,6 +2692,10 @@ export class SweepScheduler {
 			for (const [i, other] of this.hops.entries())
 				if (i !== v.hopIndex) other.waitMs += heldMs
 		hop.waitMs = 0
+		if (!v.revisit)
+			for (const h of this.hops) if (h !== hop && h.voiceLock > 0) h.voiceLock--
+		const voiceHeld = v.voice !== "no"
+		if (voiceHeld) hop.voiceLock = this.plan.hops.length - 1
 		// A long hold that used more than one coarse sweep, a decoded follow that ran to L, or
 		// budgeted holds that kept a hop waiting L (lockAfterMs), or a voice hold (Visit.voice):
 		// every hop gets a coarse visit before the next long follow, and the hop is probed, not
@@ -2670,9 +2704,11 @@ export class SweepScheduler {
 			(v.longFollow && heldMs > this.chainBudgetMs()) ||
 			(v.longDecoded && heldMs >= this.lockAfterMs()) ||
 			(v.budgeted && this.longestWaitMs() >= this.lockAfterMs()) ||
-			v.voice !== "no"
+			voiceHeld
 		) {
-			this.longHoldLock = this.plan.hops.length
+			// A voice hold owes the other hops their visits (HopState.voiceLock); any other long hold
+			// locks the hop's next coarse visit too.
+			this.longHoldLock = this.plan.hops.length - (voiceHeld ? 1 : 0)
 			this.lockHop = v.hopIndex
 			// No carrier hold lengthens the sweep after it either (as after a watch, endHold).
 			this.retryLock = Math.max(this.retryLock, this.plan.hops.length)
@@ -2826,7 +2862,7 @@ export class SweepScheduler {
 		let best: number | null = null
 		let bestScore = 0
 		for (const [i, hop] of this.hops.entries()) {
-			if (i === next || hop.lastVisit === null) continue
+			if (i === next || hop.lastVisit === null || hop.voiceLock > 0) continue
 			const score =
 				hop.activityScore *
 				(hop.boost ? CANDIDATE_BOOST : 1) *

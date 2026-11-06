@@ -418,6 +418,8 @@ it("keeps receipt details in status, discovery detail and logs", async () => {
 	const receipt = {
 		outcome: "failed" as const,
 		errorCode: "write-failed" as const,
+		cutReason: "completed" as const,
+		failure: null,
 		operationId: "op-test",
 	}
 	decisions.note("discarded:aborted", ref(1, "d"), true, null, receipt)
@@ -433,6 +435,28 @@ it("keeps receipt details in status, discovery detail and logs", async () => {
 	expect(lines[0]).toMatchObject({
 		receiptOutcome: "failed",
 		receiptErrorCode: "write-failed",
+		receiptCut: "completed",
+		receiptFailure: null,
 		operationId: "op-test",
+	})
+})
+
+it("a discard's closed cause reaches its log line", async () => {
+	const { lines, logger } = capture()
+	const decisions = new RecorderDecisions(logger, () => 0)
+	decisions.note("discarded:aborted", ref(1, "d"), true, null, {
+		outcome: "failed",
+		errorCode: "admission-denied",
+		cutReason: "completed",
+		failure: "association-lost",
+		operationId: "op-test",
+	})
+	await flushLogs()
+	expect(lines[0]).toMatchObject({
+		decision: "discarded:aborted",
+		receiptOutcome: "failed",
+		receiptErrorCode: "admission-denied",
+		receiptCut: "completed",
+		receiptFailure: "association-lost",
 	})
 })

@@ -302,18 +302,19 @@ describe("record whole voice: a spent voice hold forces a full coarse sweep", ()
 			recordingActive: recording,
 		})
 
-	it("a voice hold shorter than one sweep (1150 to 1650 ms) still locks: hop 0's next visit is a dwell only, the one after is kept", () => {
+	it("a voice hold shorter than one sweep (1150 to 1650 ms) still forces the sweep: hop 1 is visited, then hop 0's next coarse visit holds the next over", () => {
 		// Voice on air on hop 0 from 1100 to 1650 ms (one short over), then again from 2800 ms on
 		// (the next over of the QSO). The first hold ends at the re-check that finds it gone
-		// (1650 ms); hop 1 is visited; hop 0's next coarse visit (2800 ms) is under the lock, so it
-		// is left at its dwell end (3950 ms) though voice is on air; the visit after is kept.
+		// (1650 ms); hop 1 is visited, which is the whole sweep on 2 hops; hop 0's next coarse visit
+		// (2800 ms) keeps the hop for the new transmission.
 		const r = run((ms, hop) =>
 			hop === 0 && ((ms >= 1_100 && ms < 1_650) || ms >= 2_800) ? VOICE : false,
 		)
 		const zero = r.visits.filter(v => v.hopIndex === 0)
 		expect(zero[0]).toMatchObject({ tunedAtMs: 0, leftAtMs: 1_650 })
-		expect(zero[1]).toMatchObject({ tunedAtMs: 2_800, leftAtMs: 3_950 })
-		expect(zero[2]!.leftAtMs - zero[2]!.tunedAtMs).toBeGreaterThan(2 * DWELL_MS)
+		expect(r.visits[1]!.hopIndex).toBe(1)
+		expect(zero[1]!.tunedAtMs).toBe(2_800)
+		expect(zero[1]!.leftAtMs - zero[1]!.tunedAtMs).toBeGreaterThan(2 * DWELL_MS)
 	})
 
 	it("voice, then a carrier with no voice (true), then voice again in the same visit: the hold is spent and keeps L only (2 hops: left at 150 + 19 550 = 19 700)", () => {
@@ -420,14 +421,10 @@ describe("record whole voice: the voice hold ends with its transmission whatever
 		const first = visits[0]!
 		expect(first.leftAt).not.toBeNull()
 		expect(first.leftAt!).toBeLessThanOrEqual(150 + L2)
-		// The coarse sweep runs: hop 1 next, then hop 0's next visit is not kept (dwell only,
-		// under the lock), before any later visit of hop 0 may hold it.
+		// The coarse sweep runs: hop 1 next, and only then may hop 0 hold its next transmission.
 		expect(visits[1]!.hop).toBe(1)
 		const nextZero = visits.findIndex((v, i) => i > 0 && v.hop === 0)
 		expect(nextZero).toBeGreaterThan(1)
-		const z = visits[nextZero]!
-		expect(z.leftAt).not.toBeNull()
-		expect(z.leftAt! - z.tunedAt).toBeLessThanOrEqual(DWELL_MS + 6 * 1_000)
 	}
 
 	for (const closeSeen of [true, false])
