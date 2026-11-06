@@ -4103,12 +4103,6 @@ export class DecoderManager extends EventEmitter {
 		return configs
 	}
 
-	/**
-	 * Gets the status of a decoder by ID (Requirement 4.5).
-	 *
-	 * @param id - The decoder ID
-	 * @returns DecoderStatus or undefined if not found
-	 */
 	/** The members of `getStatus` an ambient probe's per-line check reads, without building the rest. */
 	probeEligibility(
 		id: string,
@@ -4125,6 +4119,12 @@ export class DecoderManager extends EventEmitter {
 		}
 	}
 
+	/**
+	 * Gets the status of a decoder by ID (Requirement 4.5).
+	 *
+	 * @param id - The decoder ID
+	 * @returns DecoderStatus or undefined if not found
+	 */
 	getStatus(id: string): DecoderStatus | undefined {
 		const state = this.decoders.get(id)
 		if (!state) return undefined

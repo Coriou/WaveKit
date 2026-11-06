@@ -152,13 +152,12 @@ const IDLE_GATE: ChannelGateReading = {
 
 /**
  * Stage names recorded by an opt-in pipeline profile (R 9.2). `gate` stays 0 until a channel plan is
- * set. `frameDb` is always 0 now that no stage converts a frame to dB; the wire schema still carries it.
+ * set.
  */
 export const PIPELINE_PROFILE_STAGES = [
 	"window",
 	"fft",
 	"power",
-	"frameDb",
 	"floor",
 	"detector",
 	"gate",
@@ -677,7 +676,6 @@ export class SpectrumPipeline {
 				window: this.stageWindow,
 				fft: this.stageFft,
 				power: this.stagePower,
-				frameDb: 0,
 				floor: this.stageFloor,
 				detector: this.stageDetector,
 				gate: this.stageGate,

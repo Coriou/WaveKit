@@ -181,10 +181,9 @@ stdin in 1 024-sample blocks (2 048 bytes), about 2 340 reads a second at 2.4 Ms
 each a fresh buffer handed to the main thread, which then built two fresh sample
 vectors: about 4 700 wake-ups and 7 000 allocations a second. Now:
 
-- `LIVE_DEMOD_BLOCK_SAMPLES` = 16 384, the channelizer's size. A read returns what
-  the pipe holds, so this caps a block rather than waiting to fill one: at most
-  16 384 / 2.4e6 ≈ 6.8 ms of input at 2.4 Msps and 16 384 / 1.024e6 ≈ 16 ms at
-  1.024 Msps. A 64 KiB source chunk takes 2 reads instead of 32. The DSP is a
+- `LIVE_DEMOD_BLOCK_SAMPLES` = 16 384, the channelizer's size. The reader waits once
+  after a short read (`input.rs`): up to min(block, 32 768) bytes' time at the input
+  rate, capped at 20 ms, plus scheduling. The DSP is a
   stream, so the audio does not depend on the split (the A/B and the chunk-split
   properties pass unchanged); a retune or squelch change applies between reads, so
   it can land up to one block later in the input.
@@ -293,13 +292,15 @@ lost nothing.
 
 ## Channelizer input reads and restarts (2026-11-06)
 
-A read returns what the pipe holds, and each read woke the reader, the main thread, the DSP
+A read returns what stdin holds, and each read woke the reader, the main thread, the DSP
 helpers and every channel's writer. The cost followed the source's chunk size rather than the
 work. Now:
 
-- **The reader waits once after a short read** (`native/wavekit-chan/src/input.rs`), so the pipe
-  collects the rest of the block with nothing running. The target is `min(block, 32 768)` bytes,
-  half of Linux's default 64 KiB pipe. The wait is the target's time at the input rate, capped at
+- **The reader waits once after a short read** (`native/wavekit-chan/src/input.rs`), so stdin
+  collects the rest of the block with nothing running. The target is `min(block, 32 768)` bytes. Node
+  gives the child a Unix socket (libuv's `"pipe"` stdio is a socketpair), so no pipe size sets it: a
+  kernel buffer smaller than the target only holds the writer back in the parent's branch during the
+  wait, which loses nothing. Linux is not measured here. The wait is the target's time at the input rate, capped at
   20 ms (`MAX_INPUT_HOLD`): 16 ms at 1.024 Msps, 8 ms at 2.048 Msps, 6.83 ms at 2.4 Msps. That is
   the added latency bound for a sample, plus however late the host wakes the thread. A read that
   already holds the target does not wait, so a backlog drains at full speed, and an idle source
@@ -325,7 +326,7 @@ work. Now:
   grant: a sweep with no grants retires it there rather than feeding it the whole byte rate for as
   long as it sweeps. The next request then costs one respawn, as every move did before.
 - **`recenter` carries its position in the input.** Control and stdin are read independently, and
-  old-centre IQ can sit in a burst absorber, the branch, the pipe and the reader when the line
+  old-centre IQ can sit in a burst absorber, the branch, the stdin socket and the reader when the line
   arrives. `atInputBytes` is the fanout's count of bytes it delivered to the branch (accepted minus
   dropped, the same count `mark-gap` uses) plus what the source's absorber holds, read once the
   synchronous distribution a move may have landed in has finished, since until then the chunk in hand
@@ -337,15 +338,47 @@ work. Now:
   channel opened after the line receives no sample before it. A position already passed applies at
   once. Moves apply in order; 512 may wait, 24 bytes each. That is a safety cap, not a proved limit.
   At 2.048 Msps with the defaults the position can be ahead of the input by the absorber's
-  8 192 000 B, the branch's 2 × 1 024 000 B, the pipe's 65 536 B and the reader's 32 768 B, in all
-  2 524 ms: 505 moves at 5 ms apart and 14 at a real 185 ms hop. A larger absorber or input mark, a
-  shorter settle or unpaced retunes can pass it, and the silence watchdog does not stop that,
-  because a lagging reader that progresses stays alive. Past the cap, or on a process with a demod
-  channel, the process answers `recenter-refused` and the parent retires the generation. So does a
-  position the parent cannot trust. IQ the parent cannot place has no position and reaches a
-  reopened channel, and the source clock's settlement is what discards it: IQ older than the fanout
-  and not in an absorber (the tuner settling, a socket), and what an absorber still holds when a
-  generation starts, because a restart hands that to the new branch rather than discarding it.
+  8 192 000 B, the branch's 2 × 1 024 000 B, the stdin socket's 212 992 B (Node's `"pipe"` stdio is a
+  socket; Linux's default `wmem_default`, not measured here), the reader's 32 768 B and the settle
+  margin below, 143 360 B, in all 2 595 ms: 519 moves at 5 ms apart, past the cap, and 15 at a real
+  185 ms hop. A larger absorber or input mark, a shorter settle or unpaced retunes can pass it, and
+  the silence watchdog does not stop that, because a lagging reader that progresses stays alive.
+  Past the cap, or on a process with a demod channel, the process answers `recenter-refused` and the
+  parent retires the generation. So does a position the parent cannot trust.
+- **A reopened channel skips 35 ms of input after a move (`RECENTER_SETTLE_MS`).** The caps change
+  only once the frequency command is written (`writeFrequency`), so IQ from before the tuner moved
+  arrives after the position the parent counts, and a restart's spawn time no longer hides it. The
+  line's position is 35 ms of input later, about the 30 ms counter run plus the default 5 ms
+  `pllSettleMs` of a marker hop, so the process discards that IQ by stream position and no time is
+  spent waiting. A channel opened at least 35 ms of input after the move loses nothing. One opened
+  sooner loses up to 35 ms of its dwell: 23 % of a 150 ms dwell, 19 % of the 185 ms marker hop and 7 %
+  of 500 ms. The 150 ms operator settle would cost a whole 150 ms dwell, so it is not used. What
+  arrives later than the margin still reaches a channel opened that early, as noise at its start: on
+  one synthetic stream with real binaries, old-centre output for IQ 20, 35 and 50 ms late was 0 ms
+  (three runs each), and 30 to 38 ms for 100 ms late. Without the margin the same runs read 12 to
+  13, 33 to 35 and 64 to 70 ms for 20, 50 and 100 ms, and the older restart on every move 4 to 6, 26
+  to 28 and 47 to 53 ms. A link slower than that, which the 300 ms and 1000 ms timer settles exist
+  for, is not covered, and neither is a real tuner: what it does to scanner channel-tier evidence is
+  not tested.
+- **IQ held at a generation's start is skipped too.** A restart does not discard what an absorber
+  holds: it goes to the new branch. So when the count is above zero, a `recenter` on the unchanged
+  centre precedes the first `open`, and the channel starts after those bytes. No margin is added
+  there, because no move is known and a spawn takes the time anyway.
+- **A binary without `recenter` is restarted, never sent the line.** It would ignore it and mix
+  against the old centre: a healthy decoder on the wrong frequency. `ready` carries `"recenter":
+true`; a process whose `ready` does not gets the old restart on each move, with one warning per
+  source. A move before `ready` is not sent either: it finds no active process, and the request
+  that spawned it compares the centre once `ready` has told it which kind it has. A process that
+  offered it answers each move with `recentered`, in order, with the line's values. A line it could
+  not parse (`rejected` with no id) or an answer out of order retires it at once. So does input
+  acknowledged past a move's position by the larger of 1 s of input and 4 blocks with no answer:
+  4 096 000 B at 2.048 Msps. These are bytes, so a stalled host or source spends none of them, and
+  that is the most wrong IQ such a process can give, plus the 100 ms a `progress` line can wait.
+  More than 1024 unanswered moves retire it as well. The image build rebuilds the crate whatever the
+  mtimes and fails if the installed binary's `ready` lacks the capability.
+- **`tests/integration/channelizer-recenter-real-binary.test.ts` runs the real binary under the real
+  manager**, with tones naming each centre. It skips unless `WAVEKIT_CHAN_BIN` names a build; its
+  header has the commands.
 
 `native/wavekit-chan/examples/paced_load.py`, a real binary with paced noise on stdin and a separate
 consumer process, 12 s per run; ranges are repeated runs, with the 1 448 B, 4 096 B and 512 kHz rows
@@ -419,10 +452,11 @@ This one is not byte-identical. The old path rounded each bin through a Float32 
 an ulp at |dB| < 256: 7.63e-6 dB, 1.76e-6 relative in power. That bound on the envelope sum is a
 property test. On seeded scenes only `acf30` and `acf60` changed: every other event field stays
 byte-identical (`pipeline-frame-linear-golden.test.ts`, recorded from the dB path), and the two moved
-by at most 1.08e-6 (a 50 dB carrier). A TDMA-like envelope moved them by about 3e-8, far from mattering
-at the classifier's −0.5 and 0.5. On a noiseless tone the envelope is flat to rounding and the ACF of
-that rounding is numeric noise on either path (it moved by up to 0.45, without crossing the TDMA rule
-in that scene).
+by at most about 2e-6 on noisy scenes (`ACF_BOUND`; 1.08e-6 for a 50 dB carrier in that test). A
+TDMA-like envelope moved them by about 3e-8, far from mattering at the classifier's −0.5 and 0.5. A
+quantised noiseless cu8 tone moved them by 6.6e-4. On a noiseless float tone the envelope is flat to
+rounding and the ACF of that rounding is numeric noise on either path (it moved by up to 0.45, without
+crossing the TDMA rule in that scene).
 
 Those scenes do not cover a comparison landing exactly on its boundary, which can resolve differently
 because per-bin power differs from the old round trip by up to that 1.76e-6. The duty rule's
@@ -459,9 +493,10 @@ the pass also has its own effects. What is left costs 4.5 % of busy, 1.6 % of a 
 
 **The passive guard judges CPU time.** `eluSample()` now reports the worker's event-loop counters
 with `active` reduced to the thread's CPU time (`WorkerCostMeter`), because ELU counts a thread
-preempted mid-frame as busy. Where Node has no `worker.cpuUsage()`, it reports plain ELU. After 10
+preempted mid-frame as busy. Where Node has no `worker.cpuUsage()` (it came with 24.6.0), it reports
+plain ELU and logs that once per worker. After 10
 ticks without an answer, whether the requests hang or reject, `active` advances by ELU's advance per
-tick instead. Those 10 ticks keep the last CPU figure and read as idle, so a worker that never answers
+tick instead, logged once as well. Those 10 ticks keep the last CPU figure and read as idle, so a worker that never answers
 again at 90 % ELU reads about 75 % in the window they fall in and 90 % after it. An answer is a
 cumulative figure, so it credits all the CPU time since the previous one, less what ELU already
 credited for those ticks; neither counter moves back. When ELU credited more than the CPU time, the
@@ -485,7 +520,7 @@ process CPU (user + system) of the whole 30 s run, which includes the same IQ sy
 | Measure                                        | Head                       | This build                 | Load average (1 min) |
 | ---------------------------------------------- | -------------------------- | -------------------------- | -------------------- |
 | `bare`, process CPU s, four pairs              | 33.37, 29.17, 23.31, 22.12 | 30.38, 24.37, 19.90, 19.30 | 11 to 38             |
-| `stages`, `frameDb` span, ms per s of IQ       | 90.6, 115.6                | 0, 0                       | 10 to 13             |
+| `stages`, per-frame dB span, ms per s of IQ    | 90.6, 115.6                | 0, 0                       | 10 to 13             |
 | `stages`, `Tracker.frame` self, ms per s of IQ | 41.6, 59.5                 | 29.5, 48.8                 | 10 to 13             |
 | `stages`, `handle()` total, ms per s of IQ     | 493.7, 656.8               | 438.7, 588.3               | 10 to 13             |
 

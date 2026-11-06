@@ -45,7 +45,13 @@ async function setup(idleStopMs?: number) {
 		generation: 1,
 		input: new PassThrough(),
 		start: () => {
-			proc.emit("event", { v: 1, type: "ready", generation: 1, pid: 1 })
+			proc.emit("event", {
+				v: 1,
+				type: "ready",
+				generation: 1,
+				pid: 1,
+				recenter: true,
+			})
 			return Promise.resolve()
 		},
 		stop: vi.fn(() => Promise.resolve()),
@@ -220,7 +226,7 @@ it("a centre move during the linger keeps the process and its linger", async () 
 		v: 1,
 		type: "recenter",
 		centerHz: 163e6,
-		atInputBytes: 0,
+		atInputBytes: 143_360, // 35 ms at 2.048 Msps
 	})
 	await vi.advanceTimersByTimeAsync(CHANNELIZER_IDLE_STOP_MS - 1)
 	expect(proc.stop).not.toHaveBeenCalled()

@@ -579,11 +579,16 @@ WORKDIR /src/wavekit-chan
 COPY native/wavekit-chan/Cargo.toml native/wavekit-chan/Cargo.lock ./
 COPY native/wavekit-chan/src ./src
 
+# target/ is shared by every build on this host, and cargo decides by mtime: sources older than the last build's would
+# reuse that build's binary, so the touch rebuilds this crate (its dependencies stay cached). The last step refuses a
+# binary that does not take `recenter`, read from its own `ready` line; `--version` says nothing about that.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=chan-cargo-registry-${TARGETARCH} \
     --mount=type=cache,target=/src/wavekit-chan/target,id=chan-target-${TARGETARCH} \
+    find src -type f -exec touch {} + && \
     cargo build --release --locked && \
     install -m 0755 target/release/wavekit-chan /usr/local/bin/wavekit-chan && \
-    install -m 0755 target/release/wavekit-iqcap /usr/local/bin/wavekit-iqcap
+    install -m 0755 target/release/wavekit-iqcap /usr/local/bin/wavekit-iqcap && \
+    { : | wavekit-chan --generation 1 --input-format cu8 --input-rate 2048000 --input-center 100000000 --usable-fraction 0.8 --block-samples 16384 --socket-dir /tmp --control-fd 3 3</dev/null | head -n 1 | grep -q '"recenter":true' || { echo "wavekit-chan does not take recenter"; exit 1; }; }
 
 # ============================================================================
 # Stage: final-base

@@ -419,6 +419,7 @@ export class ChannelizerProcess
 											type: "ready",
 											generation: ready.generation,
 											pid: ready.pid,
+											...(ready.recenter ? { recenter: ready.recenter } : {}),
 										})
 									},
 									() =>

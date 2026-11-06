@@ -146,6 +146,7 @@ fn serves_a_channel_and_exits_zero_at_eof() {
     let ready = p.next(5);
     assert_eq!(ready["type"], "ready");
     assert!(ready["pid"].as_u64().unwrap() > 0);
+    assert_eq!(ready["recenter"], true, "the capability the parent reads");
 
     p.send("not json");
     let e = p.next(5);
@@ -225,10 +226,15 @@ fn recenter_moves_admission_on_the_running_process() {
     let ready = p.next(8);
     assert_eq!(ready["type"], "ready");
     p.send(r#"{"v":1,"type":"recenter","centerHz":170000000,"atInputBytes":0}"#);
+    let moved = p.next(8);
+    assert_eq!(moved["type"], "recentered", "{moved}");
+    assert_eq!(moved["centerHz"], 170000000.0);
+    assert_eq!(moved["atInputBytes"], 0);
     // The old air is outside the capture now; a line after it proves the order on the pipe.
     p.send(OPEN);
     assert_eq!(p.next(8)["reasonCode"], "channel-outside-capture");
     p.send(r#"{"v":1,"type":"recenter","centerHz":162000000,"atInputBytes":0}"#);
+    assert_eq!(p.next(8)["type"], "recentered");
     p.send(OPEN);
     let opened = p.next(8);
     assert_eq!(opened["type"], "opened", "{opened}");
@@ -246,7 +252,11 @@ fn channel_bytes_after(lines: &[&str], iq: &[u8]) -> Vec<u8> {
         p.send(line);
     }
     p.send(OPEN);
-    let opened = p.next(10);
+    // A move whose position the empty input has reached is answered before the open.
+    let mut opened = p.next(10);
+    while opened["type"] == "recentered" {
+        opened = p.next(10);
+    }
     assert_eq!(opened["type"], "opened", "{opened}");
     let mut client = UnixStream::connect(opened["socket"].as_str().unwrap()).unwrap();
     client.set_read_timeout(Some(WAIT)).unwrap();

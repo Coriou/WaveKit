@@ -320,6 +320,50 @@ describe("passive guard under host load", () => {
 })
 
 describe("WorkerCostMeter", () => {
+	describe("tells when it falls back on ELU", () => {
+		it("once, when the Node has no worker.cpuUsage", () => {
+			const told: string[] = []
+			const m = new WorkerCostMeter({
+				elu: () => ({ idle: 300, active: 700 }),
+				onEluFallback: reason => told.push(reason),
+			})
+			for (let tick = 0; tick < 5; tick++) m.sample()
+			expect(told).toEqual(["no-cpu-usage"])
+		})
+
+		it("once, at the tick the misses reach the bound and not one before", () => {
+			const told: string[] = []
+			const m = new WorkerCostMeter({
+				elu: () => ({ idle: 300, active: 700 }),
+				cpuUsage: () => new Promise(() => {}),
+				onEluFallback: reason => told.push(reason),
+			})
+			// The first tick sends the only request; each later one finds it pending and counts a miss.
+			for (let tick = 0; tick < COST_METER_MAX_MISSES; tick++) m.sample()
+			expect(told).toEqual([])
+			m.sample()
+			expect(told).toEqual(["no-answer"])
+			for (let tick = 0; tick < 5; tick++) m.sample()
+			expect(told).toEqual(["no-answer"])
+		})
+
+		it("not at all while the worker answers", async () => {
+			const told: string[] = []
+			const m = new WorkerCostMeter({
+				elu: () => ({ idle: 300, active: 700 }),
+				cpuUsage: () => Promise.resolve({ user: 1000, system: 0 }),
+				onEluFallback: reason => told.push(reason),
+			})
+			for (let tick = 0; tick < 20; tick++) {
+				m.sample()
+				await new Promise<void>(resolve => {
+					setImmediate(resolve)
+				})
+			}
+			expect(told).toEqual([])
+		})
+	})
+
 	const flush = async (): Promise<void> => {
 		await Promise.resolve()
 		await Promise.resolve()

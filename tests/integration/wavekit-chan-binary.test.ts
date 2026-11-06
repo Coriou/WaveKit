@@ -376,10 +376,10 @@ describe.skipIf(!bin)("wavekit-chan binary", () => {
 			const at = chan.events.findIndex(
 				(e, k) => k >= from && e.type === "rejected" && e.id === id,
 			)
-			// `stats` arrives every 5 s whatever the control traffic.
+			// `stats` arrives every 5 s and `progress` after main-loop work, whatever the control traffic.
 			return chan.events
 				.slice(from, at)
-				.filter(e => e.type !== "stats")
+				.filter(e => e.type !== "stats" && e.type !== "progress")
 				.map(e => e.type)
 		}
 		for (const m of malformed)

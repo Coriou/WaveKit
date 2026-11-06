@@ -55,9 +55,8 @@ export const GATE_HISTORY_MAX = 256
 const USABLE_FRACTION = 0.8
 /**
  * Largest stdin read of the native process, in IQ samples (`--block-samples`, the channelizer's
- * size). A read returns what the pipe holds, so this bounds a block rather than waiting to fill
- * one: at most 16384 / 2.4e6 ≈ 6.8 ms of input at 2.4 Msps and 16384 / 1.024e6 ≈ 16 ms at
- * 1.024 Msps. Against 1024 it cuts the reads and wakeups of a 64 KiB source chunk from 32 to 2.
+ * size). The reader waits once after a short read (`input.rs`): up to min(block, 32 768) bytes' time
+ * at the input rate, capped at 20 ms, plus scheduling.
  * The DSP is a stream, so audio does not depend on how the input is split; a retune or squelch
  * change applies between reads, so it can land up to one block later in the input.
  */

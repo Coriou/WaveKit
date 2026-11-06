@@ -364,10 +364,11 @@ exits 0.
 // requests
 { v: 1, type: "open", id, centerHz, bandwidthHz, transitionHz, outputRateHz, format: "cu8" | "cf32", gain?, queueBytes }
 { v: 1, type: "close", id }
+{ v: 1, type: "recenter", centerHz, atInputBytes }  // the capture centre moved at that stdin byte; only if `ready` offers it
 { v: 1, type: "mark-gap", atInputByte?, droppedInputBytes? }  // Node saw an input-branch drop (plan A2)
 { v: 1, type: "shutdown" }
 // events
-{ v: 1, type: "ready", generation, pid }
+{ v: 1, type: "ready", generation, pid, recenter?: true }  // absent: an older binary, restarted on a centre move
 { v: 1, type: "opened", id, generation, socket, outputRateHz, format, filterTaps, groupDelaySamples }
 { v: 1, type: "rejected", id, generation, reasonCode: "channel-outside-capture" | "channel-request-invalid", detail }
 { v: 1, type: "discontinuity", id, generation, sampleIndex, droppedSamples, cause: "queue-overflow" | "input-gap" }
@@ -375,6 +376,8 @@ exits 0.
 { v: 1, type: "closed", id, generation, reason: "requested" | "client-gone" }
 { v: 1, type: "input-eof", generation, inputSamples, discardedBytes }
 { v: 1, type: "progress", generation, inputSamples, inputBytes }  // after main-loop work, at most every 100 ms
+{ v: 1, type: "recentered", generation, centerHz, atInputBytes }  // one per move taken, in order, with the line's values
+{ v: 1, type: "recenter-refused", generation, reason: "demod-channels" | "too-many-pending" }  // the parent retires it
 ```
 
 `progress` is main-loop liveness, not telemetry. The main loop writes it after

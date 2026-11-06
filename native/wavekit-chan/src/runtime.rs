@@ -59,13 +59,14 @@ const CLOSE_JOIN_BUDGET: Duration = Duration::from_millis(500);
 const EOF_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 /// Centre moves received but not yet reached by the input: a safety cap, not a limit a sweep can be proved to stay under.
 /// A move waits while the bytes before its position are on their way, and the parent's position counts everything up to
-/// the input: at 2.048 Msps (4 096 000 B/s) with the defaults, the 2 s burst absorber 8 192 000 B + both sides of the
-/// input branch 2 × 1 024 000 B + the pipe 65 536 B + the reader's 32 768 B target = 10 338 304 B, 2 524 ms. Hops 5 ms
-/// apart (the default PLL settle, without the counter run or dwell a real hop adds) make that 505 moves; a real 185 ms
-/// hop makes 14. A larger absorber or input mark, a shorter settle or retunes not paced by a sweep can pass it, and the
-/// parent's silence watchdog does not stop that: a lagging reader that progresses stays alive. So at 24 bytes each the
-/// list holds at most about 12 KiB, and past it the move is refused (`recenter-refused`): the parent retires this
-/// generation and the next request starts another, one respawn.
+/// the input plus its settle margin: at 2.048 Msps (4 096 000 B/s) with the defaults, the 2 s burst absorber 8 192 000 B +
+/// both sides of the input branch 2 × 1 024 000 B + the kernel's stdin socket, taken at Linux's default 212 992 B
+/// (`wmem_default`, not measured here) + the reader's 32 768 B target + the 35 ms margin 143 360 B = 10 629 120 B, 2 595 ms.
+/// Hops 5 ms apart (the default PLL settle, without the counter run or dwell a real hop adds) make that 519 moves, past
+/// this cap, so such a run costs one respawn; a real 185 ms hop makes 15. A larger absorber or input mark, a shorter settle
+/// or retunes not paced by a sweep can pass it too, and the parent's silence watchdog does not stop that: a lagging reader
+/// that progresses stays alive. So at 24 bytes each the list holds at most about 12 KiB, and past it the move is refused
+/// (`recenter-refused`): the parent retires this generation and the next request starts another, one respawn.
 const MAX_PENDING_RECENTERS: usize = 512;
 /// The `rejected` detail once a move was refused: this process no longer knows the capture centre.
 const CENTRE_REFUSED: &str = "capture centre unknown after a refused recenter";
@@ -941,8 +942,19 @@ impl Runtime {
     /// A demod channel mixes against the centre it opened on, and only the live demodulator opens one, on a process
     /// that is never recentred. A move on such a process, or past [`MAX_PENDING_RECENTERS`], is refused: the parent is
     /// told, the centre stays and later opens are refused, because this process no longer knows where the capture is.
+    ///
+    /// The centre may be unchanged: the parent then only names a position, so that channels opened after this line skip
+    /// the IQ before it (what a burst absorber holds when a generation starts). Already reached, that is nothing to do.
+    /// Every move taken ends in one `recentered` line, in the order received, so the parent can tell an answered move
+    /// from a process that ignored it.
     fn recenter(&mut self, center_hz: f64, at_input_bytes: u64) {
-        if self.centre_refused || self.capture_centre() == center_hz {
+        if self.centre_refused {
+            return;
+        }
+        if self.capture_centre() == center_hz
+            && at_input_bytes.div_ceil(2) <= self.asm.consumed_bytes / 2
+        {
+            self.emit_recentered(center_hz, at_input_bytes);
             return;
         }
         if self
@@ -977,6 +989,12 @@ impl Runtime {
         self.emit(json!({"type": "recenter-refused", "reason": reason}));
     }
 
+    fn emit_recentered(&mut self, center_hz: f64, at_input_bytes: u64) {
+        self.emit(
+            json!({"type": "recentered", "centerHz": center_hz, "atInputBytes": at_input_bytes}),
+        );
+    }
+
     /// The input reached the oldest pending move. A channel that started from this move or a later one already has its
     /// offset; an older IQ channel keeps its absolute frequency with an in-place NCO retune, or closes if the capture no
     /// longer holds it.
@@ -1003,6 +1021,7 @@ impl Runtime {
         for id in outside {
             self.close(&id, "requested");
         }
+        self.emit_recentered(moved.center_hz, moved.at_input_bytes);
     }
 
     fn retune(&mut self, req: RetuneReq) {
@@ -1825,7 +1844,8 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
     if observed {
         let mut stdout = std::io::stdout().lock();
         let ready = json!({"v": 1, "type": "ready", "generation": args.generation,
-            "pid": std::process::id(), "observerCapability": disposal::CAPABILITY});
+            "pid": std::process::id(), "observerCapability": disposal::CAPABILITY,
+            "recenter": true});
         if serde_json::to_writer(&mut stdout, &ready).is_err()
             || stdout.write_all(b"\n").is_err()
             || stdout.flush().is_err()
@@ -1872,7 +1892,7 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
     let mut rt = Runtime::new(args, sink);
     rt.disposal = disposal;
     if !observed {
-        rt.emit(json!({"type": "ready", "pid": std::process::id()}));
+        rt.emit(json!({"type": "ready", "pid": std::process::id(), "recenter": true}));
     }
     loop {
         let wait = if rt.pending.is_empty() {
@@ -2134,6 +2154,77 @@ mod tests {
         let later = noise(204_800, 2);
         r.on_input(&later);
         assert_eq!(popped(&r, "c"), fresh_channel_bytes(171e6, &later));
+        r.shutdown();
+    }
+
+    fn recentered_lines(ev: &Events) -> Vec<(f64, u64)> {
+        ev.lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == "recentered")
+            .map(|e| {
+                (
+                    e["centerHz"].as_f64().unwrap(),
+                    e["atInputBytes"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_move_is_answered_once_when_it_applies_in_the_order_received() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.on_request(recenter_at(170e6, 1_000));
+        r.on_request(recenter_at(171e6, 1_000));
+        assert!(recentered_lines(&ev).is_empty(), "not reached yet");
+        r.on_input(&[128; 998]);
+        assert!(recentered_lines(&ev).is_empty(), "one sample short");
+        r.on_input(&[128; 2]);
+        assert_eq!(
+            recentered_lines(&ev),
+            [(170e6, 1_000), (171e6, 1_000)],
+            "answered in order, with the position the line carried"
+        );
+        // A position the input has passed is answered at once.
+        r.on_request(recenter_at(172e6, 500));
+        assert_eq!(recentered_lines(&ev).last(), Some(&(172e6, 500)));
+        r.shutdown();
+    }
+
+    #[test]
+    fn an_unchanged_centre_with_a_position_holds_a_new_channel_back_to_it() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        // What a burst absorber holds when a generation starts: old IQ, already described by the capture's centre.
+        let held = noise(8_192, 1);
+        r.on_request(recenter_at(162e6, held.len() as u64));
+        r.request_and_wait(open("c", 162e6, 1 << 20));
+        r.on_input(&held);
+        assert_eq!(r.channels["c"].out_samples, 0);
+        assert_eq!(recentered_lines(&ev), [(162e6, 8_192)]);
+        assert!(of_cause(&ev, "input-gap").is_empty());
+        let later = noise(204_800, 2);
+        r.on_input(&later);
+        assert_eq!(popped(&r, "c"), fresh_channel_bytes(162e6, &later));
+        r.shutdown();
+    }
+
+    #[test]
+    fn an_unchanged_centre_at_a_reached_position_changes_nothing_and_is_answered() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.on_input(&[128; 4_096]);
+        r.on_request(recenter_at(162e6, 4_096));
+        assert!(r.pending_recenters.is_empty());
+        assert_eq!(r.received_recenter, 0);
+        assert_eq!(recentered_lines(&ev), [(162e6, 4_096)]);
+        r.on_request(recenter_at(162e6, 4_097));
+        assert_eq!(
+            r.pending_recenters.len(),
+            1,
+            "a byte past the input: the sample holding it is not whole yet"
+        );
         r.shutdown();
     }
 

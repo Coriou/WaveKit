@@ -564,7 +564,6 @@ interface RateReport {
 	jobsAtEnd: JobView[]
 	profile: PipelineProfile | null
 	stageFractionOfBusy: Record<string, number> | null
-	hotOverBusyWithFrameDb: number | null
 	hotOverBusy: number | null
 	passiveGuardUtilization: number | null
 	engineUtilization: number | null
@@ -794,7 +793,6 @@ async function runRate(rate: number, iq: Uint8Array): Promise<RateReport> {
 				profile: null,
 				stageFractionOfBusy: null,
 				hotOverBusy: null,
-				hotOverBusyWithFrameDb: null,
 				passiveGuardUtilization: null,
 				engineUtilization: null,
 				measurementWindowUtilization: null,
@@ -827,7 +825,6 @@ async function runRate(rate: number, iq: Uint8Array): Promise<RateReport> {
 		const delta = deltaProfile(profileStart, profileEnd)
 		const profile = delta.ok ? delta.profile : null
 		const busy = profile ? profile.busyMs : null
-		let hotOverBusyWithFrameDb: number | null = null
 		let hotOverBusy: number | null = null
 		if (profile && busy !== null && busy > 0) {
 			const hot =
@@ -837,8 +834,6 @@ async function runRate(rate: number, iq: Uint8Array): Promise<RateReport> {
 				profile.stages.wire
 			const ratio = hot / busy
 			hotOverBusy = Number.isFinite(ratio) ? ratio : null
-			const withFrameDb = (hot + profile.stages.frameDb) / busy
-			hotOverBusyWithFrameDb = Number.isFinite(withFrameDb) ? withFrameDb : null
 		}
 		const stageFractionOfBusy =
 			profile && busy !== null && busy > 0
@@ -919,11 +914,8 @@ async function runRate(rate: number, iq: Uint8Array): Promise<RateReport> {
 			)
 			pushIfNotFinite(problems, "measurementWindowUtilization", windowSample)
 			pushIfNotFinite(problems, "engineUtilization", engineUtilization)
-			if (
-				profile &&
-				(hotOverBusy === null || hotOverBusyWithFrameDb === null)
-			) {
-				problems.push("a hot/busy ratio is missing or not finite")
+			if (profile && hotOverBusy === null) {
+				problems.push("the hot/busy ratio is missing or not finite")
 			}
 		}
 		if (!jobsRunning(jobsAtStart) || !jobsRunning(jobViews(stack.scanner))) {
@@ -951,7 +943,6 @@ async function runRate(rate: number, iq: Uint8Array): Promise<RateReport> {
 			profile,
 			stageFractionOfBusy,
 			hotOverBusy,
-			hotOverBusyWithFrameDb,
 			passiveGuardUtilization,
 			engineUtilization,
 			measurementWindowUtilization: windowSample,
@@ -988,7 +979,6 @@ async function runRate(rate: number, iq: Uint8Array): Promise<RateReport> {
 			profile: null,
 			stageFractionOfBusy: null,
 			hotOverBusy: null,
-			hotOverBusyWithFrameDb: null,
 			passiveGuardUtilization: null,
 			engineUtilization: null,
 			measurementWindowUtilization: null,
@@ -1072,7 +1062,6 @@ async function main(): Promise<number> {
 		r93Measurements: {
 			sampleRateHz: 2_048_000,
 			hotOverBusy: hot,
-			hotOverBusyWithFrameDb: finiteCounter(at2048?.hotOverBusyWithFrameDb),
 			utilizationOverLimit:
 				util === null ? null : util / PASSIVE_COST_LIMIT_DEFAULT,
 			passiveGuardUtilization: util,
@@ -1084,7 +1073,7 @@ async function main(): Promise<number> {
 		snapshotWorker,
 		notes: [
 			"Main decides R 9.3 from an idle-host run; both hot ratios and utilization are measurements only.",
-			"hotOverBusy counts window + fft + power + wire. hotOverBusyWithFrameDb also counts per-frame dB conversion as front-end power; stageFractionOfBusy.frameDb reports its share.",
+			"hotOverBusy counts window + fft + power + wire.",
 			"Parking (DT.2) is not implemented. The 200 kHz job is mode in-window on the tuned centre, the parked-job equivalent on this base.",
 			"signalsOnly is set, so the operator job does not request decoder trials. offsetProbes stays at its default false.",
 			"Frame build is SpectrumService.frames with one subscribed client at 10 Hz and 512 bins.",

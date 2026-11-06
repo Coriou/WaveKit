@@ -78,9 +78,13 @@ export function hotWorkerMessage(raw: unknown): WorkerToMain | null {
 }
 
 /** What `WorkerCostMeter` reads of a worker. `cpuUsage` is absent on a Node without it. */
+export type EluFallbackReason = "no-cpu-usage" | "no-answer"
+
 export interface WorkerCostPort {
 	elu(): { idle: number; active: number }
 	cpuUsage?: () => Promise<{ user: number; system: number }>
+	/** Told once when the sample stops being CPU time; a stopped request recovers, a missing call does not. */
+	onEluFallback?: (reason: EluFallbackReason) => void
 }
 
 /**
@@ -98,7 +102,9 @@ export const COST_METER_MAX_MISSES = 10
  * `cpuUsage` answers asynchronously, so a sample carries the previous tick's CPU figure: at most one
  * tick (1 s) stale at each end of the guard's 60 s window. Both counters only go forward, since the
  * guard reads a counter going back as a restart of its window. Until the first answer there is no
- * sample (the guard's "no measurement"). A Node without the call reports plain ELU.
+ * sample (the guard's "no measurement"). A Node without the call reports plain ELU. `worker.cpuUsage`
+ * came with Node 24.6.0 and `node:24-bookworm-slim` floats, so an old cached base image lands there, and
+ * with it the false trips under host load: `onEluFallback` tells, once per meter (one per worker).
  *
  * A worker that has not answered for `COST_METER_MAX_MISSES` ticks, whether its requests hang or
  * reject, is judged on ELU, so an overrun is never hidden: `active` advances by ELU's own advance per
@@ -130,7 +136,15 @@ export class WorkerCostMeter {
 	/** ELU's `active` at the last reported sample. */
 	private lastEluActive = 0
 
+	private toldFallback = false
+
 	constructor(private readonly port: WorkerCostPort) {}
+
+	private fallback(reason: EluFallbackReason): void {
+		if (this.toldFallback) return
+		this.toldFallback = true
+		this.port.onEluFallback?.(reason)
+	}
 
 	sample(): EventLoopUtilization | null {
 		const elu = this.port.elu()
@@ -142,11 +156,15 @@ export class WorkerCostMeter {
 				utilization: total > 0 ? elu.active / total : 0,
 			}
 		}
-		if (!this.port.cpuUsage) return raw()
+		if (!this.port.cpuUsage) {
+			this.fallback("no-cpu-usage")
+			return raw()
+		}
 		this.refresh()
-		if (this.misses >= COST_METER_MAX_MISSES)
+		if (this.misses >= COST_METER_MAX_MISSES) {
+			this.fallback("no-answer")
 			this.eluCreditMs += Math.max(0, elu.active - this.lastEluActive)
-		else if (this.cpuMs === null) return null
+		} else if (this.cpuMs === null) return null
 		const target = Math.min(
 			elu.active,
 			(this.cpuMs ?? 0) + this.cpuBaseMs + this.eluCreditMs,
@@ -315,6 +333,11 @@ export class ThreadPipelineHost implements PipelineHost {
 		this.costMeter = new WorkerCostMeter({
 			elu: () => worker.performance.eventLoopUtilization(),
 			...(cpuUsage ? { cpuUsage: () => cpuUsage.call(worker) } : {}),
+			onEluFallback: reason =>
+				this.log.warn(
+					{ reason, nodeVersion: process.version },
+					"Passive guard judges this worker on event-loop time, not CPU time: host load can read as its cost",
+				),
 		})
 		this.worker.on("message", (raw: unknown) => this.onMessage(raw))
 		this.worker.on("error", err => this.reportFatal(asError(err))) // @types/node types the listener arg as unknown

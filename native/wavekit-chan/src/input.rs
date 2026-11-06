@@ -1,11 +1,11 @@
 //! Fills one input block from stdin without waking the process per pipe chunk.
 //!
-//! A read returns what the pipe holds, so a source that delivers small chunks used to cost one
+//! A read returns what stdin holds, so a source that delivers small chunks used to cost one
 //! wake-up of the reader, the main thread, the DSP helpers and every channel writer per chunk. At
 //! 1.024 Msps with 12 channels, 1 448-byte chunks cost 792 CPU-ms per second of IQ against 411 for
 //! 64 KiB chunks (`examples/paced_load.py`, docs/PERFORMANCE.md).
 //!
-//! After a short first read the reader sleeps once, so the pipe collects the rest of the block
+//! After a short first read the reader sleeps once, so stdin collects the rest of the block
 //! while nothing runs, then takes what has arrived and hands the block on. A read that already
 //! holds the target skips the sleep, so a backlog drains at full speed. The DSP is a stream: the
 //! split never changes the output.
@@ -14,8 +14,11 @@ use std::io::{ErrorKind, Read};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::time::Duration;
 
-/// The longest first read that still waits, at most half of Linux's default 64 KiB pipe, so the
-/// pipe does not fill during the wait: `min(block, 32 768)` bytes at 2 bytes per sample.
+/// The longest first read that still waits: `min(block, 32 768)` bytes at 2 bytes per sample. This
+/// is what bounds the wait (16 ms at 1.024 Msps), not a pipe's size: Node gives the child stdin as
+/// a Unix socket (libuv's `"pipe"` stdio is a socketpair), not a pipe. A kernel buffer smaller than
+/// the target only holds the writer back in the parent's branch during the wait, which loses
+/// nothing and is read at once after it.
 const MAX_TARGET_BYTES: usize = 32_768;
 /// The wait never exceeds this, whatever the rate. 32 768 bytes take 16 ms at 1.024 Msps, so the
 /// cap only acts below 819 200 sps, where it bounds the held samples at 20 ms.

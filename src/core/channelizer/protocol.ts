@@ -53,7 +53,8 @@ export const ChannelizerRequestSchema = z
 			.strict(),
 		// The capture centre moved: same process, later opens and retunes admit against the new centre. Stdin byte
 		// `atInputBytes` (counted like `atInputByte`) is the first at the new centre; a channel opened after this line
-		// receives nothing before it.
+		// receives nothing before it. Only for a process whose `ready` carried `recenter`; answered by `recentered` or
+		// `recenter-refused`. An unchanged centre only names a position: later channels skip the IQ before it.
 		z
 			.object({
 				v,
@@ -133,12 +134,15 @@ export const ChannelizerEventSchema = z.discriminatedUnion("type", [
 			reason: z.literal("admission"),
 		})
 		.strict(),
+	// `recenter`: this binary takes the `recenter` line. Optional because a binary older than it does not say so, and
+	// must then be restarted on a centre move: it would ignore the line and mix against the old centre.
 	z
 		.object({
 			v,
 			type: z.literal("ready"),
 			generation,
 			pid: z.number().int().positive(),
+			recenter: z.literal(true).optional(),
 		})
 		.strict(),
 	OpenedEventSchema,
@@ -200,6 +204,17 @@ export const ChannelizerEventSchema = z.discriminatedUnion("type", [
 			type: z.literal("recenter-refused"),
 			generation,
 			reason: z.enum(["demod-channels", "too-many-pending"]),
+		})
+		.strict(),
+	// A `recenter` took effect: the input reached its position, or it named a position already passed on an unchanged
+	// centre. One line per move taken, in the order received, with the values the line carried.
+	z
+		.object({
+			v,
+			type: z.literal("recentered"),
+			generation,
+			centerHz: z.number().finite(),
+			atInputBytes: count.safe(),
 		})
 		.strict(),
 	z
@@ -278,6 +293,7 @@ const ObservedReadySchema = z
 		generation,
 		pid: z.number().int().positive(),
 		observerCapability: z.literal("attempt-disposal-v1"),
+		recenter: z.literal(true).optional(),
 	})
 	.strict()
 export type ObservedReadyEvent = z.infer<typeof ObservedReadySchema>

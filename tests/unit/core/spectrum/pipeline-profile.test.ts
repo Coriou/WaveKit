@@ -42,7 +42,6 @@ const STAGES = [
 	"window",
 	"fft",
 	"power",
-	"frameDb",
 	"floor",
 	"detector",
 	"gate",
@@ -168,7 +167,6 @@ describe("spectrum pipeline profile", () => {
 			bytes: bytes.subarray(BLOCK * 8, 3 * BLOCK * 8),
 		})
 		const profile = profileOf(pipeline.exportEngineState())
-		expect(profile?.stages.frameDb).toBe(0) // no stage converts a frame to dB
 		expect(profile?.stages.tracker).toBeGreaterThan(0)
 	})
 
@@ -193,7 +191,6 @@ describe("spectrum pipeline profile", () => {
 			window: 0,
 			fft: 1,
 			power: 0,
-			frameDb: 0,
 			floor: 0,
 			detector: 0,
 			gate: 0,
@@ -233,7 +230,6 @@ describe("spectrum pipeline profile", () => {
 			window: 0,
 			fft: 0,
 			power: 0,
-			frameDb: 0,
 			floor: 0,
 			detector: 0,
 			gate: 0,

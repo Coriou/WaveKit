@@ -75,7 +75,7 @@ const GOLDEN: Record<
 	},
 }
 
-/** Largest |Δacf| seen on the noisy scenes was 1.08e-6 (50 dB SNR carrier); see docs/PERFORMANCE.md. */
+/** Noisy scenes move ACF by at most about 2e-6: 1.08e-6 here (50 dB SNR carrier); see docs/PERFORMANCE.md. */
 const ACF_BOUND = 2e-6
 
 const SIGMA = 0.005
