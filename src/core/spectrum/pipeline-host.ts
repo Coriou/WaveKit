@@ -101,16 +101,28 @@ export const COST_METER_MAX_MISSES = 10
  * sample (the guard's "no measurement"). A Node without the call reports plain ELU.
  *
  * A worker that has not answered for `COST_METER_MAX_MISSES` ticks, whether its requests hang or
- * reject, is judged on ELU, so an overrun is never hidden. Counters stay continuous both ways, since
- * a step would read as cost or as a restart: `active` advances by ELU's own advance per tick (if no
- * sample was reported yet that is all of ELU, so plain ELU), and the answer that ends it rebases CPU
- * time on the `active` already reported (`cpuBaseMs`), or `active` would stand still until CPU time
- * caught up with what ELU added.
+ * reject, is judged on ELU, so an overrun is never hidden: `active` advances by ELU's own advance per
+ * tick (if no sample was reported yet that is all of ELU, so plain ELU). An answer is a cumulative
+ * figure, so it covers every tick since the previous one, those read as stale and those ELU stood in
+ * for. It adds what it exceeds ELU's credit by, so nothing is lost and nothing counted twice. When
+ * ELU credited more than CPU time, as on a preempted worker, the excess stays (`cpuBaseMs`): paying
+ * it back would hold `active` still and hide a later overrun for as long as that took.
+ *
+ * So, when each tick's CPU time is at most its ELU, whatever the pattern of answers, rejections and
+ * hangs: `active` ≤ ELU's `active` at all times, and below the CPU time by at most the CPU time of
+ * `COST_METER_MAX_MISSES` ticks. An answer read at tick t carries tick t - 1, so at t + 9 that is 10
+ * ticks behind; at t + 10 ELU takes over and each tick credits at least its CPU time, so the gap stops
+ * growing and holds those 10 ticks until the next answer. Over any window between two samples the
+ * advance of `active` is at least the window's CPU time less that, and at most the window's ELU plus
+ * that (a late answer lands in the window after its ticks). Above CPU time it reaches only what ELU credited, which takes `COST_METER_MAX_MISSES` ticks
+ * in a row without an answer.
  */
 export class WorkerCostMeter {
 	private cpuMs: number | null = null
-	/** Added to CPU time: what the ELU stretches added over it. */
+	/** Added to CPU time: what ELU credited beyond the CPU time of the same ticks. */
 	private cpuBaseMs = 0
+	/** ELU credited since the last answer; that answer's CPU figure has not covered it yet. */
+	private eluCreditMs = 0
 	private pending = false
 	private misses = 0
 	private last = { idle: 0, active: 0 }
@@ -131,11 +143,13 @@ export class WorkerCostMeter {
 		}
 		if (!this.port.cpuUsage) return raw()
 		this.refresh()
-		let target: number
 		if (this.misses >= COST_METER_MAX_MISSES)
-			target = this.last.active + Math.max(0, elu.active - this.lastEluActive)
+			this.eluCreditMs += Math.max(0, elu.active - this.lastEluActive)
 		else if (this.cpuMs === null) return null
-		else target = Math.min(elu.active, this.cpuMs + this.cpuBaseMs)
+		const target = Math.min(
+			elu.active,
+			(this.cpuMs ?? 0) + this.cpuBaseMs + this.eluCreditMs,
+		)
 		const total = elu.idle + elu.active
 		const active = Math.max(this.last.active, target)
 		const idle = Math.max(this.last.idle, total - active)
@@ -153,9 +167,10 @@ export class WorkerCostMeter {
 		this.pending = true
 		this.port.cpuUsage!()
 			.then(usage => {
-				const cpuMs = (usage.user + usage.system) / 1000
-				if (this.misses >= COST_METER_MAX_MISSES)
-					this.cpuBaseMs = this.last.active - cpuMs
+				const previous = this.cpuMs ?? 0
+				const cpuMs = Math.max(previous, (usage.user + usage.system) / 1000)
+				this.cpuBaseMs += Math.max(0, this.eluCreditMs - (cpuMs - previous))
+				this.eluCreditMs = 0
 				this.cpuMs = cpuMs
 				this.misses = 0
 			})

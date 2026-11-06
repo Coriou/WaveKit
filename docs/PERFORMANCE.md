@@ -327,7 +327,9 @@ work. Now:
 - **`recenter` carries its position in the input.** Control and stdin are read independently, and
   old-centre IQ can sit in a burst absorber, the branch, the pipe and the reader when the line
   arrives. `atInputBytes` is the fanout's count of bytes it delivered to the branch (accepted minus
-  dropped, the same count `mark-gap` uses) plus what the source's absorber holds. It is the stdin
+  dropped, the same count `mark-gap` uses) plus what the source's absorber holds, read once the
+  synchronous distribution a move may have landed in has finished, since until then the chunk in hand
+  is in neither count. So the line goes out in a microtask, and an `open` waits for it. It is the stdin
   position of the first byte after the move, except when the absorber's release drops held bytes
   for a lagging channelizer branch: then it is late by those bytes, at most the absorber's capacity,
   and a reopened channel starts that far into the new centre. It errs late and never early. The
@@ -425,10 +427,15 @@ in that scene).
 Those scenes do not cover a comparison landing exactly on its boundary, which can resolve differently
 because per-bin power differs from the old round trip by up to that 1.76e-6. The duty rule's
 `p95 <= 4 * p5` is the one found: a track alternating exactly 0.01 and 0.04 per bin read duty 0.5 on
-the old path and reads 1 now, which flips `isDataBurst` in the scanner's replay plan. It takes a power
-ratio within about that tolerance of exactly 4; both levels can move, so the ratio moves by about
-3.5e-6 at most. At 4 × (1 ± 1e-5) and 4 × (1 ± 1e-4) both paths give the same duty and the same
-`isDataBurst` (`tracker-duty-boundary.test.ts`, on the real `Tracker`).
+the old path and reads 1 now, which flips `isDataBurst` in the scanner's replay plan. The tolerance is
+relative: a ratio r with |r / 4 − 1| > 3.64e-6, which is |r − 4| > 1.456e-5, gives the same duty and
+the same `isDataBurst` on both paths at any per-bin power from the −200 dB floor up
+(`tracker-duty-boundary.test.ts`, on the real `Tracker` and as a property). Both levels can move by
+1.757e-6, 3.513e-6 in the ratio, and each path's Float32 envelope adds 1.19e-7. Inside the tolerance
+the paths may part, and more readily at low power, because half a Float32 ulp is a fixed step in dB
+that doubles with each binade of |dB|: it is 7.63e-6 dB for |dB| from 128 to 256 and 8 times less at
+−20 dB. So 4.000005, 1.25e-6 relative, agrees at 0.01 per bin and parts at 1e-15, duty 0.5 now and 1
+on the old path.
 
 **Main thread.**
 
@@ -454,11 +461,18 @@ the pass also has its own effects. What is left costs 4.5 % of busy, 1.6 % of a 
 with `active` reduced to the thread's CPU time (`WorkerCostMeter`), because ELU counts a thread
 preempted mid-frame as busy. Where Node has no `worker.cpuUsage()`, it reports plain ELU. After 10
 ticks without an answer, whether the requests hang or reject, `active` advances by ELU's advance per
-tick instead. Those 10 ticks keep the last CPU figure and read as idle, so a 90 % ELU worker reads
-about 75 % in the window they fall in and 90 % after it. The answer that ends this rebases CPU time on
-the `active` already reported, so neither direction steps a counter or moves one back. The limit is
-unchanged. A shared engine disabled with a baseline
-showing the cost is passive's own no longer comes back after one cheap window without passive; it
+tick instead. Those 10 ticks keep the last CPU figure and read as idle, so a worker that never answers
+again at 90 % ELU reads about 75 % in the window they fall in and 90 % after it. An answer is a
+cumulative figure, so it credits all the CPU time since the previous one, less what ELU already
+credited for those ticks; neither counter moves back. When ELU credited more than the CPU time, the
+excess stays, because paying it back would hold `active` still and hide a later overrun. With each
+tick's CPU time at most its ELU, for any pattern of answers, rejections and hangs: `active` never
+exceeds ELU's and is at most 10 ticks of CPU time below the CPU time. Over a window its advance is at
+least the window's CPU time less those 10 ticks, and at most the window's ELU plus 10 ticks. It reads
+above CPU time only by what ELU credited, which takes 10 ticks in a row without an answer: on a
+preempted worker at 90 % ELU and 10 % CPU, one answer in 12 ticks reads 15 %, and one in 30 reads about
+60 %, so the guard can disable passive there. The limit is unchanged. A shared engine disabled with a
+baseline showing the cost is passive's own no longer comes back after one cheap window without passive; it
 waits for the next trial, which restores the 61 s per 900 s bound.
 
 Offline, `scripts/profile-spectrum.ts`, 30 s of synthetic IQ at 2.4 Msps, head and this build

@@ -50,6 +50,14 @@ afterEach(async () => {
 	for (const dispose of cleanup.splice(0).reverse()) await dispose()
 })
 
+/** The `recenter` lines of this turn's moves are out once the turn's stack has returned. */
+const posted = (): Promise<void> => Promise.resolve()
+/** A branch with a `data` listener flows, and passes each later write on inside the write, from the next turn. */
+const flowing = (): Promise<void> =>
+	new Promise(resolve => {
+		setImmediate(resolve)
+	})
+
 /** Only the wavekit-chan process is fake. */
 function fakeProcesses(
 	options: {
@@ -262,6 +270,7 @@ describe("a capture-centre move", () => {
 		const proc = processes[0]!
 		const sentBefore = proc.sent.length
 		sources.updateSourceCaps("s", { centerFreq: 162.5e6 })
+		await posted()
 		expect(invalidated).toEqual([
 			["s", before.generation, [before.channelId], "caps-changed"],
 		])
@@ -287,11 +296,13 @@ describe("a capture-centre move", () => {
 		if (!grant.ok) throw new Error(grant.detail)
 		invalidated.length = 0
 		sources.updateSourceCaps("s", { centerFreq: 170e6 })
+		await posted()
 		invalidated.length = 0
 		const proc = processes[0]!
 		const sentBefore = proc.sent.length
 		for (let hop = 1; hop <= 200; hop++)
 			sources.updateSourceCaps("s", { centerFreq: 170e6 + hop * 1e6 })
+		await posted()
 		expect(proc.sent.slice(sentBefore)).toHaveLength(200)
 		expect(proc.sent.at(-1)).toEqual({
 			v: 1,
@@ -310,6 +321,7 @@ describe("a capture-centre move", () => {
 		const grant = await request()
 		if (!grant.ok) throw new Error(grant.detail)
 		sources.setTuningCaps("s", { sampleRate: 2_048_000, centerFreq: 163e6 })
+		await posted()
 		const proc = processes[0]!
 		expect(proc.sent.at(-1)).toEqual({
 			v: 1,
@@ -386,6 +398,7 @@ describe("the position of a centre move", () => {
 		const telemetry = fanout.getBranchTelemetry("channelizer-s")!
 		expect(telemetry.droppedBytesTotal).toBe(0)
 		sources.updateSourceCaps("s", { centerFreq: 162.5e6 })
+		await posted()
 		expect(proc.sent.at(-1)).toEqual({
 			v: 1,
 			type: "recenter",
@@ -411,6 +424,7 @@ describe("the position of a centre move", () => {
 		expect(droppedBytesTotal).toBeGreaterThan(0)
 		const delivered = chunks * chunk - droppedBytesTotal
 		sources.updateSourceCaps("s", { centerFreq: 162.5e6 })
+		await posted()
 		expect(proc.sent.at(-1)).toEqual({
 			v: 1,
 			type: "recenter",
@@ -441,11 +455,130 @@ describe("the position of a centre move", () => {
 		for (let hop = 1; hop <= 5; hop++) {
 			fanout.distribute(Buffer.alloc(100 * hop, OLD))
 			sources.updateSourceCaps("s", { centerFreq: 162e6 + hop * 1e5 })
+			await posted()
 			const line = processes[0]!.sent.at(-1)
 			if (line?.type !== "recenter") throw new Error("no recenter")
 			positions.push(line.atInputBytes)
 		}
 		expect(positions).toEqual([100, 300, 600, 1000, 1500])
+	})
+
+	describe("that lands inside a distribution", () => {
+		/** What the position would read now, in the two counts it adds up. */
+		const countedNow = (fanout: FanoutManager, held = 0): number => {
+			const t = fanout.getBranchTelemetry("channelizer-s")!
+			return t.totalBytesWritten - t.droppedBytesTotal + held
+		}
+
+		it("counts the chunk an earlier branch's callback found in neither count", async () => {
+			const { sources, fanout, processes, request } = await setup()
+			let onChunk: (() => void) | undefined
+			fanout.addBranch({ id: "early" }).on("data", () => onChunk?.())
+			const grant = await request()
+			if (!grant.ok) throw new Error(grant.detail)
+			await flowing()
+			fanout.distribute(Buffer.alloc(4096, OLD))
+			let found = -1
+			onChunk = () => {
+				onChunk = undefined
+				found = countedNow(fanout)
+				sources.updateSourceCaps("s", { centerFreq: 162.5e6 })
+			}
+			fanout.distribute(Buffer.alloc(2048, OLD))
+			// The earlier branch got the chunk first: the count still lacks it.
+			expect(found).toBe(4096)
+			await posted()
+			const proc = processes[0]!
+			expect(proc.sent.at(-1)).toEqual({
+				v: 1,
+				type: "recenter",
+				centerHz: 162.5e6,
+				atInputBytes: 6144,
+			})
+			fanout.distribute(Buffer.alloc(4096, NEW))
+			const bytes = await read(proc.input, 6144 + 4096)
+			expect(bytes.indexOf(NEW)).toBe(6144)
+		})
+
+		it("keeps the request a listener makes inside it after the line, at that position", async () => {
+			const { sources, fanout, manager, processes, request } = await setup()
+			let onChunk: (() => void) | undefined
+			fanout.addBranch({ id: "early" }).on("data", () => onChunk?.())
+			const grant = await request(162e6, "a")
+			if (!grant.ok) throw new Error(grant.detail)
+			await flowing()
+			let reopened: ReturnType<typeof request> | undefined
+			manager.on("channel-invalidated", () => {
+				reopened = request(162.5e6, "b")
+			})
+			onChunk = () => {
+				onChunk = undefined
+				sources.updateSourceCaps("s", { centerFreq: 162.5e6 })
+			}
+			fanout.distribute(Buffer.alloc(2048, OLD))
+			const proc = processes[0]!
+			const after = await reopened
+			if (!after?.ok) throw new Error("no reopened channel")
+			expect(proc.sent.slice(1)).toEqual([
+				{ v: 1, type: "close", id: grant.channelId },
+				{ v: 1, type: "recenter", centerHz: 162.5e6, atInputBytes: 2048 },
+				expect.objectContaining({ type: "open", centerHz: 162.5e6 }),
+			])
+		})
+
+		it("writes two moves of one turn in order, at one position", async () => {
+			const { sources, fanout, processes, request } = await setup()
+			let onChunk: (() => void) | undefined
+			fanout.addBranch({ id: "early" }).on("data", () => onChunk?.())
+			const grant = await request()
+			if (!grant.ok) throw new Error(grant.detail)
+			await flowing()
+			onChunk = () => {
+				onChunk = undefined
+				sources.updateSourceCaps("s", { centerFreq: 162.5e6 })
+				sources.updateSourceCaps("s", { centerFreq: 162.7e6 })
+			}
+			fanout.distribute(Buffer.alloc(2048, OLD))
+			await posted()
+			expect(processes[0]!.sent.slice(-2)).toEqual([
+				{ v: 1, type: "recenter", centerHz: 162.5e6, atInputBytes: 2048 },
+				{ v: 1, type: "recenter", centerHz: 162.7e6, atInputBytes: 2048 },
+			])
+		})
+
+		it("retires the generation when the position is gone by then", async () => {
+			const { sources, fanout, manager, processes, request } = await setup()
+			const grant = await request()
+			if (!grant.ok) throw new Error(grant.detail)
+			const real = fanout.getBranchTelemetry.bind(fanout)
+			const spy = vi
+				.spyOn(fanout, "getBranchTelemetry")
+				.mockImplementationOnce(real)
+				.mockImplementation(() => undefined)
+			sources.updateSourceCaps("s", { centerFreq: 162.5e6 })
+			const proc = processes[0]!
+			expect(proc.stop).not.toHaveBeenCalled()
+			await posted()
+			expect(proc.stop).toHaveBeenCalledTimes(1)
+			expect(proc.sent.some(r => r.type === "recenter")).toBe(false)
+			spy.mockRestore()
+			const next = await request(162.5e6)
+			if (!next.ok) throw new Error(next.detail)
+			expect(next.generation).toBe(grant.generation + 1)
+			expect(manager.currentGeneration("s")).toBe(next.generation)
+		})
+
+		it("writes nothing for a generation the same turn retired", async () => {
+			const { sources, processes, request } = await setup()
+			const grant = await request()
+			if (!grant.ok) throw new Error(grant.detail)
+			sources.updateSourceCaps("s", { centerFreq: 162.5e6 })
+			sources.updateSourceCaps("s", { sampleRate: 2_400_000 })
+			await posted()
+			const proc = processes[0]!
+			expect(proc.stop).toHaveBeenCalledTimes(1)
+			expect(proc.sent.some(r => r.type === "recenter")).toBe(false)
+		})
 	})
 
 	it.each([
@@ -539,6 +672,7 @@ describe("the position of a centre move", () => {
 			setup.absorber.ingest(Buffer.alloc(4096, OLD))
 			expect(setup.absorber.counters().heldBytes).toBe(0)
 			setup.move(162.5e6)
+			await posted()
 			expect(position(setup.processes[0]!)).toBe(4096)
 		})
 
@@ -552,6 +686,7 @@ describe("the position of a centre move", () => {
 			setup.absorber.ingest(Buffer.alloc(held, OLD))
 			expect(setup.absorber.counters().heldBytes).toBe(held)
 			setup.move(162.5e6)
+			await posted()
 			const at = position(proc)
 			expect(at).toBe(4096 + held)
 			const reopened = await setup.request(162.5e6)
@@ -576,9 +711,47 @@ describe("the position of a centre move", () => {
 			for (let hop = 1; hop <= 3; hop++) {
 				setup.absorber.ingest(Buffer.alloc(1000, OLD))
 				setup.move(162e6 + hop * 1e5)
+				await posted()
 				positions.push(position(setup.processes[0]!))
 			}
 			expect(positions).toEqual([5096, 6096, 7096])
+		})
+
+		// The absorber takes the chunk off its held count, then the fanout hands it to `early` first: for that callback
+		// the chunk is in neither count, 4 096 where 12 288 old-centre bytes ultimately arrive.
+		it("is never early when the release's first branch triggers the move", async () => {
+			const setup = setupWithAbsorber()
+			let onChunk: (() => void) | undefined
+			setup.fanout.addBranch({ id: "early" }).on("data", () => onChunk?.())
+			const grant = await setup.request()
+			if (!grant.ok) throw new Error(grant.detail)
+			const proc = setup.processes[0]!
+			await flowing()
+			const slow = congestedBy(setup)
+			const held = 8192
+			setup.absorber.ingest(Buffer.alloc(held, OLD))
+			expect(setup.absorber.counters().heldBytes).toBe(held)
+			let found = -1
+			onChunk = () => {
+				onChunk = undefined
+				const t = setup.fanout.getBranchTelemetry("channelizer-s")!
+				found =
+					t.totalBytesWritten -
+					t.droppedBytesTotal +
+					setup.absorber.counters().heldBytes
+				setup.move(162.5e6)
+			}
+			slow.resume()
+			await vi.waitFor(() =>
+				expect(setup.absorber.counters().heldBytes).toBe(0),
+			)
+			expect(found).toBe(4096)
+			const at = position(proc)
+			expect(at).toBe(4096 + held)
+			setup.absorber.ingest(Buffer.alloc(4096, NEW))
+			const bytes = await read(proc.input, at + 4096)
+			expect(bytes.indexOf(NEW)).toBe(at)
+			expect(bytes.subarray(0, at).every(b => b === OLD)).toBe(true)
 		})
 
 		// The branch itself lags, so the absorber's release drops the held bytes for it. The count cannot know that at the
@@ -603,6 +776,7 @@ describe("the position of a centre move", () => {
 			setup.absorber.ingest(Buffer.alloc(held, OLD))
 			expect(setup.absorber.counters().heldBytes).toBe(held)
 			setup.move(162.5e6)
+			await posted()
 			const at = position(proc)
 			expect(at).toBe(first + held)
 			// Past the laggard bound, at its next look, the absorber stops waiting for this branch and drops for it.

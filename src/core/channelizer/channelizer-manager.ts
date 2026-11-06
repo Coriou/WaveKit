@@ -184,6 +184,10 @@ interface SourceChannelizer {
 	recenterLingerUntil?: number
 	/** `openNow()` of the first move since the last grant: `recenterLingerUntil` never passes it by RECENTER_LINGER_MAX_MS. */
 	recenterLingerSince?: number
+	/** Centres of the moves of this turn, in order, waiting for `postMoves` to read their position. */
+	movesToPost: number[]
+	/** Settles once `postMoves` ran; an `open` waits for it, so it follows the `recenter` line of its centre. */
+	movesPosted?: Promise<void>
 	gapAtByte: number | null
 	droppedAtGap: number
 	invalidated: boolean
@@ -818,6 +822,10 @@ export class ChannelizerManager
 				if (this.remaining(ctx) <= 0) return this.timeout()
 				if (ctx.sends >= MAX_OPEN_SENDS)
 					return unavailable("channel open send limit reached")
+				if (s.movesPosted) {
+					await s.movesPosted
+					continue
+				}
 				const attempt: OpenAttempt = {
 					pending: true,
 					opened: false,
@@ -1443,6 +1451,7 @@ export class ChannelizerManager
 			interruptions: new Set(),
 			retuning: new Set(),
 			pending: 0,
+			movesToPost: [],
 			gapAtByte: null,
 			droppedAtGap: 0,
 			invalidated: false,
@@ -1862,6 +1871,10 @@ export class ChannelizerManager
 	 * reopened channel up to that many bytes into the new centre, at most the absorber's capacity. Its other discards,
 	 * a flush at a disconnect, removal or rate change, end this generation anyway.
 	 *
+	 * Only right between distributions: the absorber takes a chunk off its held count before distributing it, and the
+	 * fanout counts it branch by branch, so during one a callback on an earlier branch finds the chunk in neither count.
+	 * `postMoves` reads it once that has finished; `recenter` reads it at once only to see if it can be trusted at all.
+	 *
 	 * Undefined when it cannot be trusted: no telemetry, a branch no longer taking writes (the fanout counts a chunk it
 	 * refused there as neither written nor dropped), a count behind the bytes the branch has already emitted, or a held
 	 * count that is no byte count.
@@ -1885,11 +1898,12 @@ export class ChannelizerManager
 	 * recompute that: it re-requests through the usual stale-channel path, on the same id once `closed` lifts the fence.
 	 * A request in flight is answered instead of granted, for the same reason: it was computed for the old centre.
 	 *
-	 * The close lines and `recenter` are written before listeners run, so a request from a listener opens at the new
-	 * centre. The line carries the stdin position of the move, because control and stdin are read independently: the
-	 * process gives a channel opened after it nothing before that byte. Without a position it can trust, the generation
-	 * ends instead. IQ older than the fanout and not in an absorber (the tuner's own settling, a socket) has no position
-	 * here and is the source clock's to discard, with or without a restart. So has what an absorber still holds when a
+	 * The close lines are written before listeners run and an `open` waits for `movesPosted`, so a request from a listener
+	 * opens at the new centre. The `recenter` line carries the stdin position of the move, because control and stdin are
+	 * read independently: the process gives a channel opened after it nothing before that byte. A move can land inside a
+	 * distribution, so the line is written in a microtask (`postMoves`). No close or retune can need it first: this move
+	 * emptied `channels` and every `open` waits. Without a position it can trust, the generation ends instead. IQ older
+	 * than the fanout and not in an absorber (the tuner's own settling, a socket) has no position here and is the source clock's to discard, with or without a restart. So has what an absorber still holds when a
 	 * generation starts: a restart does not discard it, it goes to the new branch, so a restart is no answer to held IQ.
 	 */
 	private recenter(s: SourceChannelizer, centerHz: number): void {
@@ -1897,10 +1911,7 @@ export class ChannelizerManager
 			s.sourceId,
 			(this.centreMoves.get(s.sourceId) ?? 0) + 1,
 		)
-		const atInputBytes = Number.isFinite(centerHz)
-			? this.inputPosition(s)
-			: undefined
-		if (atInputBytes === undefined) {
+		if (!Number.isFinite(centerHz) || this.inputPosition(s) === undefined) {
 			// No line could carry this move, and this runs inside a foreign emitter.
 			this.log.warn(
 				{ sourceId: s.sourceId, generation: s.generation, centerHz },
@@ -1929,7 +1940,6 @@ export class ChannelizerManager
 				sourceId: s.sourceId,
 				generation: s.generation,
 				channels: ids.length,
-				atInputBytes,
 			},
 			"Capture centre moved; keeping the channelizer process",
 		)
@@ -1940,7 +1950,8 @@ export class ChannelizerManager
 			attempt.closed = true
 			void this.closeOwned(s, id, attempt.pending)
 		}
-		s.process.send({ v: 1, type: "recenter", centerHz, atInputBytes })
+		s.movesToPost.push(centerHz)
+		s.movesPosted ??= Promise.resolve().then(() => this.postMoves(s))
 		for (const wake of [...s.interruptions]) wake()
 		try {
 			if (ids.length > 0)
@@ -1962,6 +1973,38 @@ export class ChannelizerManager
 			ch.stream.destroy()
 		}
 		if (ids.length > 0) this.stopIfIdle(s, "recentered")
+	}
+
+	/**
+	 * Writes the `recenter` lines of this turn's moves. A microtask runs only once the whole synchronous stack has
+	 * returned, so any distribution the move landed in has reached every branch and the position can no longer miss its
+	 * chunk. It can only be later than the move: a chunk distributed in the same turn after it counts as before it, and
+	 * that errs late, never early. Moves of one turn share a position, and the process applies them in order.
+	 */
+	private postMoves(s: SourceChannelizer): void {
+		const centres = s.movesToPost
+		s.movesToPost = []
+		delete s.movesPosted
+		if (s.invalidated) return
+		const atInputBytes = this.inputPosition(s)
+		if (atInputBytes === undefined) {
+			this.log.warn(
+				{ sourceId: s.sourceId, generation: s.generation },
+				"Centre move lost its input position; retiring the channelizer",
+			)
+			this.invalidate(s.sourceId, "caps-changed")
+			return
+		}
+		try {
+			for (const centerHz of centres)
+				s.process.send({ v: 1, type: "recenter", centerHz, atInputBytes })
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err, sourceId: s.sourceId, generation: s.generation },
+				"Centre move could not be sent; retiring the channelizer",
+			)
+			this.invalidate(s.sourceId, "caps-changed")
+		}
 	}
 
 	/** channelQueueMs of output samples, within the process's 1 sample..=MAX_QUEUE_BYTES; a detail string when not. */

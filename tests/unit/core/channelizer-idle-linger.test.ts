@@ -214,6 +214,7 @@ it("a centre move during the linger keeps the process and its linger", async () 
 	)
 	await manager.releaseChannel(grant.channelId)
 	sources.emit("caps-changed", "s", { ...caps, centerFreq: 163e6 })
+	await Promise.resolve()
 	expect(proc.stop).not.toHaveBeenCalled()
 	expect(sent.at(-1)).toEqual({
 		v: 1,
@@ -326,6 +327,7 @@ it("a later move moves a running timer's deadline: stopped at it, not 1 ms befor
 	sources.emit("caps-changed", "s", { ...caps, centerFreq: 163e6 })
 	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 10)
 	sources.emit("caps-changed", "s", { ...caps, centerFreq: 164e6 })
+	await Promise.resolve()
 	expect(sent.at(-1)).toMatchObject({ type: "recenter", centerHz: 164e6 })
 	// The first timer is due now and must not stop the process.
 	await vi.advanceTimersByTimeAsync(10)

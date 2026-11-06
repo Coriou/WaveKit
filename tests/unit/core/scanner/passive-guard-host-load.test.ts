@@ -167,6 +167,36 @@ describe("passive guard under host load", () => {
 		}
 	})
 
+	it("a real overrun is disabled when one CPU request in 12 is answered", async () => {
+		let calls = 0
+		const s = sim({
+			rates: flat(0.9, 0.9),
+			meter: true,
+			cpuAnswer: cpuMs =>
+				calls++ % 12 === 0
+					? Promise.resolve({ user: cpuMs * 1000, system: 0 })
+					: Promise.reject(new Error("no answer")),
+		})
+		await s.run(3600 * 1000)
+		expect(s.count("disable")).toBeGreaterThan(0)
+		// Judged at the first window, not eventually.
+		expect(s.actions[0]).toEqual({ at: MINUTE, what: "disable" })
+	})
+
+	it("a preempted worker under the limit stays on when one CPU request in 12 is answered", async () => {
+		let calls = 0
+		const s = sim({
+			rates: flat(0.7, 0.2),
+			meter: true,
+			cpuAnswer: cpuMs =>
+				calls++ % 12 === 0
+					? Promise.resolve({ user: cpuMs * 1000, system: 0 })
+					: Promise.reject(new Error("no answer")),
+		})
+		await s.run(120 * MINUTE)
+		expect(s.kinds()).toEqual([])
+	})
+
 	it("sole, a real overrun comes back on probation at most once per 15 min", async () => {
 		const s = sim({ rates: flat(0.6, 0.6), meter: true })
 		await s.run(120 * MINUTE)
@@ -529,6 +559,174 @@ describe("WorkerCostMeter", () => {
 				}
 			})
 		}
+
+		const everyTwelfth = (call: number): Answer =>
+			call % 12 === 0 ? "cpu" : "reject"
+
+		it("one answer in 12: 3 600 s at CPU 0.9 reads 0.9, not the 0.15 that discards the stale ticks", async () => {
+			const w = worker(everyTwelfth, ELU_ACTIVE_SHARE)
+			let s = null
+			for (let i = 0; i < 3600; i++) s = await w.tick()
+			const cpu = w.wall() * ELU_ACTIVE_SHARE
+			expect(s!.active).toBeGreaterThanOrEqual(
+				cpu - COST_METER_MAX_MISSES * TICK_MS * ELU_ACTIVE_SHARE,
+			)
+			expect(s!.active).toBeLessThanOrEqual(cpu + 1e-6)
+			expect(s!.utilization).toBeGreaterThan(0.85)
+		})
+
+		it("one answer in 12: ELU's credit is not counted again by the CPU delta that covers it", async () => {
+			const w = worker(everyTwelfth, ELU_ACTIVE_SHARE)
+			await w.tick()
+			let s = (await w.tick())!
+			let answered = s.active
+			// Ticks 2 to 13 are one round: the answer to the request of tick 13 is read at tick 14.
+			for (let round = 1; round <= 20; round++) {
+				for (let i = 0; i < 12; i++) s = (await w.tick())!
+				expect(s.active - answered).toBeCloseTo(
+					12 * TICK_MS * ELU_ACTIVE_SHARE,
+					6,
+				)
+				answered = s.active
+			}
+		})
+
+		// The last (every - 10) ticks of each round follow ELU: 2 × 0.9 / 12 and 20 × 0.9 / 30, against
+		// CPU time's 0.1. An answer sooner than the bound credits no ELU: one in 10 reads 0.1.
+		for (const [every, reads] of [
+			[10, 0.1],
+			[12, 0.15],
+			[30, 0.6],
+		] as const) {
+			it(`one answer in ${every} on a preempted worker reads ${reads}: what ELU credited, and no more`, async () => {
+				const w = worker(call => (call % every === 0 ? "cpu" : "reject"), 0.1)
+				let s = null
+				for (let i = 0; i < 40 * every; i++) s = await w.tick()
+				expect(s!.utilization).toBeGreaterThan(reads - 0.01)
+				expect(s!.utilization).toBeLessThan(reads + 0.01)
+			})
+		}
+
+		for (const kind of FAILURES) {
+			it(`${kind}: CPU time runs ahead of active by exactly the bound, no further`, async () => {
+				const w = worker(onceThen(kind), ELU_ACTIVE_SHARE)
+				await w.tick()
+				let peak = 0
+				for (let i = 0; i < 100; i++) {
+					const s = (await w.tick())!
+					peak = Math.max(peak, w.wall() * ELU_ACTIVE_SHARE - s.active)
+				}
+				expect(peak).toBeCloseTo(
+					COST_METER_MAX_MISSES * TICK_MS * ELU_ACTIVE_SHARE,
+					6,
+				)
+			})
+		}
+
+		it("a late answer's credit stays below ELU's total", async () => {
+			const w = worker(call => (call === 1 ? "hang" : "cpu"), ELU_ACTIVE_SHARE)
+			await w.tick()
+			const before = (await w.tick())!
+			for (let i = 0; i < 4; i++) await w.tick()
+			w.release()
+			await flush()
+			await flush()
+			const after = (await w.tick())!
+			expect(after.active).toBeGreaterThan(before.active)
+			expect(after.active).toBeLessThanOrEqual(w.wall() * ELU_ACTIVE_SHARE)
+			expect(after.active).toBeCloseTo(
+				(w.wall() - TICK_MS) * ELU_ACTIVE_SHARE,
+				6,
+			)
+		})
+
+		// Feature: spectrum-main-thread, Property 4: active follows CPU time within the stale bound, under ELU
+		// Validates: docs/PERFORMANCE.md, the passive guard judges CPU time
+		it("over any answer pattern, active is within the stale bound of CPU time and under ELU", async () => {
+			const EPS = 1e-6
+			const WINDOW_TICKS = 60
+			await fc.assert(
+				fc.asyncProperty(
+					fc.array(fc.constantFrom<Answer>("cpu", "reject", "hang"), {
+						minLength: 1,
+						maxLength: 60,
+					}),
+					fc.nat({ max: 40 }),
+					fc.array(
+						fc.record({
+							elu: fc.double({ min: 0, max: 1, noNaN: true }),
+							cpuOfElu: fc.double({ min: 0, max: 1, noNaN: true }),
+						}),
+						{ minLength: 1, maxLength: 30 },
+					),
+					async (answers, releaseEvery, rates) => {
+						let tick = 0
+						let calls = 0
+						let cpu = 0
+						let elu = 0
+						let hanging: (() => void)[] = []
+						const meter = new WorkerCostMeter({
+							elu: () => ({ idle: tick * TICK_MS - elu, active: elu }),
+							cpuUsage: () => {
+								const kind = answers[calls++ % answers.length]!
+								if (kind === "reject")
+									return Promise.reject(new Error("no answer"))
+								if (kind === "cpu")
+									return Promise.resolve({ user: cpu * 1000, system: 0 })
+								return new Promise(resolve => {
+									hanging.push(() => resolve({ user: cpu * 1000, system: 0 }))
+								})
+							},
+						})
+						const cpuAt: number[] = [0]
+						const eluAt: number[] = [0]
+						const activeAt: (number | null)[] = [null]
+						/** The CPU time of the costliest `COST_METER_MAX_MISSES` ticks in a row so far. */
+						let stale = 0
+						let last = { idle: 0, active: 0 }
+						for (let t = 1; t <= 400; t++) {
+							const rate = rates[t % rates.length]!
+							tick = t
+							elu += rate.elu * TICK_MS
+							cpu += rate.elu * rate.cpuOfElu * TICK_MS
+							cpuAt.push(cpu)
+							eluAt.push(elu)
+							stale = Math.max(
+								stale,
+								cpu - cpuAt[Math.max(0, t - COST_METER_MAX_MISSES)]!,
+							)
+							const s = meter.sample()
+							activeAt.push(s === null ? null : s.active)
+							await flush()
+							await flush()
+							if (releaseEvery > 0 && t % releaseEvery === 0) {
+								for (const release of hanging) release()
+								hanging = []
+								await flush()
+								await flush()
+							}
+							if (s === null) continue
+							expect(s.active).toBeGreaterThanOrEqual(last.active)
+							expect(s.idle).toBeGreaterThanOrEqual(last.idle)
+							last = s
+							expect(s.active).toBeLessThanOrEqual(elu + EPS)
+							expect(cpu - s.active).toBeLessThanOrEqual(stale + EPS)
+							const start = activeAt[t - WINDOW_TICKS]
+							if (start === undefined || start === null) continue
+							const from = t - WINDOW_TICKS
+							const advance = s.active - start
+							expect(advance).toBeGreaterThanOrEqual(
+								cpuAt[t]! - cpuAt[from]! - stale - EPS,
+							)
+							expect(advance).toBeLessThanOrEqual(
+								eluAt[t]! - eluAt[from]! + stale + EPS,
+							)
+						}
+					},
+				),
+				{ numRuns: 100 },
+			)
+		})
 
 		// Feature: spectrum-main-thread, Property 3: the meter's counters never go back
 		// Validates: docs/PERFORMANCE.md, the passive guard judges CPU time
