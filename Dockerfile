@@ -580,10 +580,11 @@ COPY native/wavekit-chan/Cargo.toml native/wavekit-chan/Cargo.lock ./
 COPY native/wavekit-chan/src ./src
 
 # target/ is shared by every build on this host, and cargo decides by mtime: sources older than the last build's would
-# reuse that build's binary, so the touch rebuilds this crate (its dependencies stay cached). The last step refuses a
+# reuse that build's binary, so the touch rebuilds this crate (its dependencies stay cached) and the lock keeps parallel builds from crossing between
+# the touch and the build. The last step refuses a
 # binary that does not take `recenter`, read from its own `ready` line; `--version` says nothing about that.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=chan-cargo-registry-${TARGETARCH} \
-    --mount=type=cache,target=/src/wavekit-chan/target,id=chan-target-${TARGETARCH} \
+    --mount=type=cache,target=/src/wavekit-chan/target,id=chan-target-${TARGETARCH},sharing=locked \
     find src -type f -exec touch {} + && \
     cargo build --release --locked && \
     install -m 0755 target/release/wavekit-chan /usr/local/bin/wavekit-chan && \

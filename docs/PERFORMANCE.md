@@ -351,16 +351,28 @@ work. Now:
   arrives after the position the parent counts, and a restart's spawn time no longer hides it. The
   line's position is 35 ms of input later, so the process discards that IQ by stream position and no time is
   spent waiting. 35 ms is a heuristic, the assumed 30 ms marker counter run plus the default 5 ms
-  `pllSettleMs`; no real tuner's command-to-clean-IQ latency was measured. A channel opened at least 35 ms of input after the move loses nothing. One opened
-  sooner loses up to 35 ms of its dwell: 23 % of a 150 ms dwell, 19 % of the 185 ms marker hop and 7 %
-  of 500 ms. The 150 ms operator settle would cost a whole 150 ms dwell, so it is not used. What
-  arrives later than the margin still reaches a channel opened that early, as noise at its start: on
-  one synthetic stream with real binaries, old-centre output for IQ 20, 35 and 50 ms late was 0 ms
-  (three runs each), and 30 to 38 ms for 100 ms late. Without the margin the same runs read 12 to
-  13, 33 to 35 and 64 to 70 ms for 20, 50 and 100 ms, and the older restart on every move 4 to 6, 26
-  to 28 and 47 to 53 ms. A link slower than that, which the 300 ms and 1000 ms timer settles exist
+  `pllSettleMs`; no real tuner's command-to-clean-IQ latency was measured. A channel opened at least 35 ms of input after the move loses nothing, and no production consumer opens
+  sooner: decoders reopen after a 300 ms debounce, and a scanner channel tap only after a track
+  passes. So a larger margin would cost nothing today either; 35 ms stays until a real latency is
+  measured, because any other figure would be just as assumed. What arrives later than the margin
+  still reaches a channel opened at the move, as noise at its start: old-centre output is the lateness
+  minus 35 ms (one synthetic stream at 2.048 Msps, real binary, paced):
+
+  | IQ late by, ms | Opened at the move, ms | Older restart on every move, ms | Opened 135 ms later, ms | Older restart, 135 ms later, ms |
+  | -------------- | ---------------------- | ------------------------------- | ----------------------- | ------------------------------- |
+  | 35             | 0                      | 19–21                           | 0                       | 0                               |
+  | 50             | 13                     | 36                              | 0                       | 0                               |
+  | 100            | 63                     | 84–88                           | 0                       | 0                               |
+  | 150            | 113                    | 135                             | 15–23                   | 4                               |
+  | 300            | 263                    | 284–287                         | 164–167                 | 152–155                         |
+
+  A process lagging behind its input keeps the old IQ it has not read, and a channel starts at the later
+  of the line's position and its input position, so with a lag a channel opened after the move can get
+  a head that it would not otherwise: 27 ms in one of 18 runs for IQ 64 ms late and a process stopped
+  until 155 ms after the move. A link slower than that, which the 300 ms and 1000 ms timer settles exist
   for, is not covered, and neither is a real tuner: what it does to scanner channel-tier evidence is
   not tested.
+
 - **IQ held at a generation's start is skipped too.** A restart does not discard what an absorber
   holds: it goes to the new branch. So when the count is above zero, a `recenter` on the unchanged
   centre precedes the first `open`, and the channel starts after those bytes. No margin is added

@@ -69,10 +69,9 @@ export const RECENTER_LINGER_MAX_MS = 2 * RECENTER_LINGER_MS
  * docs/SCANNER.md worked example) + the default 5 ms `scanner.sweep.pllSettleMs`. The move's position is that much later, so the process discards it by stream
  * position, and no time is spent waiting: a channel opened at least 35 ms of input after the move loses nothing.
  *
- * A channel opened sooner loses up to 35 ms of its dwell: 23 % of a 150 ms dwell, 19 % of the 185 ms marker hop and 7 %
- * of 500 ms. On a marker hop those samples are counter bytes and PLL settling, which the spectrum tier leaves out too.
- * The 150 ms operator settle (OPERATOR_RETUNE_SETTLE_MS) would cost a whole 150 ms dwell, so it is not used here. A link
- * slower than this window, which the 300 ms and 1000 ms timer settles exist for, still leaks what comes later than it.
+ * No production consumer opens sooner: decoders reopen after a 300 ms debounce, a scanner tap after a track passes. A
+ * larger margin would cost nothing today either; this one stays until a real latency is measured, since any other figure
+ * would be just as assumed. A channel opened at the move still gets what comes later than the margin: lateness minus 35 ms.
  */
 export const RECENTER_SETTLE_MS = 35
 /** Whole samples, so 143 360 B at 2.048 Msps and 168 000 B at 2.4 Msps. */
@@ -86,7 +85,8 @@ export function recenterSettleBytes(sampleRateHz: number): number {
  * control share a channel in the process: at most 2 input blocks in flight + the one being filled + one more for the
  * control thread's turn, 4 blocks. One second of input (4 096 000 B at 2.048 Msps) leaves far more room for scheduling at
  * the default 16 384-sample block, where 4 blocks are 131 072 B. A false verdict costs one respawn. A process ignoring
- * moves shows wrong IQ for at most this much input plus the 100 ms a `progress` line can wait (PROGRESS_EVERY).
+ * moves shows wrong IQ for at most this much input, plus RECENTER_SETTLE_MS (the position includes it and such a process does
+ * not discard it), plus the 100 ms a `progress` line can wait (PROGRESS_EVERY).
  */
 export function unansweredMoveBytes(
 	sampleRateHz: number,
