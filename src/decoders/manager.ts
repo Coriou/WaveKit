@@ -4109,6 +4109,22 @@ export class DecoderManager extends EventEmitter {
 	 * @param id - The decoder ID
 	 * @returns DecoderStatus or undefined if not found
 	 */
+	/** The members of `getStatus` an ambient probe's per-line check reads, without building the rest. */
+	probeEligibility(
+		id: string,
+	):
+		| Pick<DecoderStatus, "running" | "health" | "suspended" | "owner">
+		| undefined {
+		const state = this.decoders.get(id)
+		if (!state) return undefined
+		return {
+			running: state.decoder.getStatus().running,
+			health: state.lastHealth,
+			suspended: state.suspension !== null,
+			owner: state.owner,
+		}
+	}
+
 	getStatus(id: string): DecoderStatus | undefined {
 		const state = this.decoders.get(id)
 		if (!state) return undefined
@@ -5183,6 +5199,7 @@ export class DecoderManager extends EventEmitter {
 				superseded: false,
 				reasonCode: result.reasonCode,
 				detail: result.detail,
+				...(result.race ? { race: true as const } : {}),
 			}
 		}
 		if (

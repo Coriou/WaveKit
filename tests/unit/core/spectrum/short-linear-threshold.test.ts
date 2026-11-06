@@ -326,10 +326,9 @@ describe("operation-count guards (no wall clock)", () => {
 		expect(perBlock).toBeLessThanOrEqual(4 * N)
 	})
 
-	it("with an open track only the tracker's frame dB pass stays per frame (≤ 54·N per block)", () => {
-		// frameDb for Tracker.frame: 50·N per block; the old short path doubled it to ≥ 100·N
+	it("an open track adds no per-frame dB pass (≤ 4·N logs per block, was ≥ 50·N)", () => {
+		// Tracker.frame reads linear power. The dB pass it needed took 50·N logs per block.
 		const { perBlock } = log10PerBlock(true)
-		expect(perBlock).toBeGreaterThan(40 * N)
-		expect(perBlock).toBeLessThanOrEqual(54 * N)
+		expect(perBlock).toBeLessThanOrEqual(4 * N)
 	})
 })

@@ -376,8 +376,8 @@ units with a stated margin. A sum outside the bracket is decided by one comparis
 inside it (about 2e-4 relative wide at −100 dB) or a NaN is decided in dB, so detections are
 identical to the dB path. Tests: pre-change event goldens on seeded scenes, a Detector
 equivalence property, and a `Math.log10` call-count guard
-(`tests/unit/core/spectrum/short-linear-threshold.test.ts`). Still per frame: the dB array that
-`Tracker.frame` reads while a track is open.
+(`tests/unit/core/spectrum/short-linear-threshold.test.ts`). `Tracker.frame` now reads linear power
+too, so no stage converts a whole frame to dB; see [below](#frame-tracks-and-main-thread-reads-2026-11-06).
 
 `scripts/profile-spectrum.ts`, 30 s of synthetic IQ (noise, CW, NFM, Mode-S-like pulses), on a
 busy Mac. Compare before and after in the same row, not absolute rates.
@@ -394,6 +394,82 @@ A first build that sent `powerToDb` through the one-bin helper `binPowerDb` was 
 that call, and the remaining frame dB pass doubled in cost. `powerToDb` keeps its inline loop.
 The spectrum feed stays on without display clients: the scanner, occupancy, backfill and
 status read every block summary.
+
+## Frame tracks and main-thread reads (2026-11-06)
+
+**`Tracker.frame` sums linear power.** It used to read a per-frame dB array and take `10 ** (dB/10)`
+per open-track bin, so one pass of `Math.log10` over 2,048 bins ran on every frame while any track
+was open. Logs per block with an open track went from at least 50·N to at most 4·N (guarded in
+`short-linear-threshold.test.ts`). NaN, zero and sums under the −200 dB floor still read the floor.
+
+This one is not byte-identical. The old path rounded each bin through a Float32 dB value, up to half
+an ulp at |dB| < 256: 7.63e-6 dB, 1.76e-6 relative in power. That bound on the envelope sum is a
+property test. Only `acf30` and `acf60` read those values: on seeded scenes every other event field
+stays byte-identical (`pipeline-frame-linear-golden.test.ts`, recorded from the dB path), and the two
+moved by at most 1.08e-6 (a 50 dB carrier). A TDMA-like envelope moved them by about 3e-8, far from
+mattering at the classifier's −0.5 and 0.5. On a noiseless tone the envelope is flat to rounding and
+the ACF of that rounding is numeric noise on either path (it moved by up to 0.45, without crossing
+the TDMA rule in that scene).
+
+**Main thread.**
+
+- `BandPlanService.view()` and `resolved()` return one deep-frozen snapshot per store state instead
+  of a `structuredClone` per call. A mutation attempt throws. The key: a commit replaces the state
+  object; an unavailable or closed store is its own key; everything else is fixed at construction.
+- The channel lookup keeps its answer per frozen snapshot, plan objects, window and protocols (at
+  most 256, then it starts over). An unfrozen view is never remembered.
+- `createDecodeEnvelope` and `withPresentation` use structural guards. A guard returns what the
+  schema would, members in schema order, or passes the input to Zod, so accessors, Proxies, unknown
+  members and `-0` still take the schema path. Tested byte for byte against the schema path
+  (`envelope-guard.test.ts`).
+- The per-block worker messages (`events`, `buffer`) use a structural guard; every other message and
+  every malformed one goes to `WorkerToMainSchema`.
+- The ambient probe's per-line eligibility check reads `DecoderManager.probeEligibility` instead of
+  a whole `getStatus`.
+
+A placement pass is not skipped when its inputs look unchanged. They include the activity clock,
+probation, every decoder's lifecycle, suspension and mode, source caps, the VFO and tuned holds, and
+the pass also has its own effects. What is left costs 4.5 % of busy, 1.6 % of a core here.
+
+**The passive guard judges CPU time.** `eluSample()` now reports the worker's event-loop counters
+with `active` reduced to the thread's CPU time (`WorkerCostMeter`), because ELU counts a thread
+preempted mid-frame as busy. Where Node has no `worker.cpuUsage()`, or the worker stops answering for
+10 ticks, it reports plain ELU. The limit is unchanged. A shared engine disabled with a baseline
+showing the cost is passive's own no longer comes back after one cheap window without passive; it
+waits for the next trial, which restores the 61 s per 900 s bound.
+
+Offline, `scripts/profile-spectrum.ts`, 30 s of synthetic IQ at 2.4 Msps, head and this build
+alternated. The `stages` and `handle()` figures are wall clock around the work and swing widely on a
+loaded host: `bare` ranged over 350 to 817 ms/s at head and 263 to 869 here. So the `bare` row is
+process CPU (user + system) of the whole 30 s run, which includes the same IQ synthesis in both.
+
+| Measure                                        | Head                       | This build                 | Load average (1 min) |
+| ---------------------------------------------- | -------------------------- | -------------------------- | -------------------- |
+| `bare`, process CPU s, four pairs              | 33.37, 29.17, 23.31, 22.12 | 30.38, 24.37, 19.90, 19.30 | 11 to 38             |
+| `stages`, `frameDb` span, ms per s of IQ       | 90.6, 115.6                | 0, 0                       | 10 to 13             |
+| `stages`, `Tracker.frame` self, ms per s of IQ | 41.6, 59.5                 | 29.5, 48.8                 | 10 to 13             |
+| `stages`, `handle()` total, ms per s of IQ     | 493.7, 656.8               | 438.7, 588.3               | 10 to 13             |
+
+The four pairs save 2.8 to 4.8 s of CPU per 30 s of IQ, 95 to 160 ms per second of IQ, 10 to 16 % of
+the run.
+
+Scratch core (`scripts/profile-spectrum-main.ts --load`, stubs, 45 s after 15 s of warm-up, 2.4 Msps,
+one web-like client), head against this build, load average 8 to 13. Function shares are of the main
+thread's busy time.
+
+| Main thread                  | Head  | This build |
+| ---------------------------- | ----- | ---------- |
+| `structuredClone`, inclusive | 4.9 % | 0.4 %      |
+| Zod `safeParse`, inclusive   | 5.5 % | 1.8 %      |
+| `reconcilePlacementsPass`    | 7.8 % | 4.5 %      |
+| ELU, this pair               | 28.5  | 32.8       |
+| Process CPU, % of a core     | 80.3  | 77.8       |
+| Event-loop delay p99, ms     | 3.84  | 4.13       |
+
+The function shares are stable across runs. The ELU, process CPU and delay rows are not: an earlier
+pair at load 10 to 13, with only `Tracker.frame` changed on the "before" side, read ELU 41.6 and
+23.3, process CPU 96.1 and 72.2, p99 7.28 and 2.70 ms. Two pairs do not settle those three, and
+neither ELU nor delay is claimed as a gain here.
 
 ## Activity reads (2026-11-01)
 

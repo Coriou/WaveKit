@@ -150,7 +150,10 @@ const IDLE_GATE: ChannelGateReading = {
 	valid: false,
 }
 
-/** Stage names recorded by an opt-in pipeline profile (R 9.2). `gate` stays 0 until a channel plan is set. */
+/**
+ * Stage names recorded by an opt-in pipeline profile (R 9.2). `gate` stays 0 until a channel plan is
+ * set. `frameDb` is always 0 now that no stage converts a frame to dB; the wire schema still carries it.
+ */
 export const PIPELINE_PROFILE_STAGES = [
 	"window",
 	"fft",
@@ -268,7 +271,8 @@ export class SpectrumPipeline {
 
 	private readonly frameAcc: Float64Array
 	private readonly blockAcc: Float64Array
-	private readonly frameDb: Float32Array
+	/** `powerToDb` scale of one frame; Tracker.frame reads frameAcc in linear power (§ 4.10). */
+	private readonly frameScale: number
 	private readonly powerDb: Float32Array
 	private readonly floorDb: Float32Array
 	private readonly on: Uint8Array
@@ -394,7 +398,6 @@ export class SpectrumPipeline {
 	private stageWindow = 0
 	private stageFft = 0
 	private stagePower = 0
-	private stageFrameDb = 0
 	private stageFloor = 0
 	private stageDetector = 0
 	private stageTracker = 0
@@ -550,7 +553,7 @@ export class SpectrumPipeline {
 		this.blockAcc = new Float64Array(this.n)
 		this.gatePower = new Float64Array(this.n)
 		this.gateMask = new Uint8Array(this.n)
-		this.frameDb = new Float32Array(this.n)
+		this.frameScale = powerScale(this.n, 1)
 		this.powerDb = new Float32Array(this.n)
 		this.floorDb = new Float32Array(this.n)
 		this.on = new Uint8Array(this.n)
@@ -674,7 +677,7 @@ export class SpectrumPipeline {
 				window: this.stageWindow,
 				fft: this.stageFft,
 				power: this.stagePower,
-				frameDb: this.stageFrameDb,
+				frameDb: 0,
 				floor: this.stageFloor,
 				detector: this.stageDetector,
 				gate: this.stageGate,
@@ -695,7 +698,6 @@ export class SpectrumPipeline {
 		if (stage === "window") this.stageWindow += dt
 		else if (stage === "fft") this.stageFft += dt
 		else if (stage === "power") this.stagePower += dt
-		else if (stage === "frameDb") this.stageFrameDb += dt
 		else if (stage === "floor") this.stageFloor += dt
 		else if (stage === "detector") this.stageDetector += dt
 		else if (stage === "gate") this.stageGate += dt
@@ -1117,10 +1119,7 @@ export class SpectrumPipeline {
 			this.take(sample, "tracker", ft)
 			if (this.tracker.openCount > 0) {
 				ft = this.mark(sample)
-				powerToDb(this.frameAcc, 1, this.frameDb)
-				this.take(sample, "frameDb", ft)
-				ft = this.mark(sample)
-				this.tracker.frame(this.frameDb, f.startSample)
+				this.tracker.frame(this.frameAcc, this.frameScale, f.startSample)
 				this.take(sample, "tracker", ft)
 			}
 		} else {

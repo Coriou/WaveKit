@@ -4,6 +4,7 @@
  * worker). Both hosts have the same contract: inputs in order, events out,
  * transferred buffers handed back through `handlers.buffer`.
  */
+import { SPECTRUM_SUMMARY_BINS_MAX } from "@wavekit/api-types"
 import { existsSync } from "node:fs"
 import { performance, type EventLoopUtilization } from "node:perf_hooks"
 import { fileURLToPath } from "node:url"
@@ -13,11 +14,12 @@ import { WaveKitError } from "../../utils/errors.js"
 import type { EngineState, PipelineConfig, PipelineEvent } from "./types.js"
 import type { ArtefactMasks } from "./artefacts.js"
 import { SpectrumPipeline, spectrumMainSpanSink } from "./pipeline.js"
-import { decodeEventsFromWire } from "./summary-wire.js"
+import { decodeEventsFromWire, wireEventProblem } from "./summary-wire.js"
 import {
 	WorkerToMainSchema,
 	type MainToWorker,
 	type WorkerPipelineInput,
+	type WorkerToMain,
 } from "./worker-protocol.js"
 
 export interface PipelineHostHandlers {
@@ -37,7 +39,8 @@ export interface PipelineHost {
 	/** Worker event-loop utilisation (0–1) since start; null when not measurable (inline). */
 	utilization(): number | null
 	/**
-	 * WG11 req 2.2: the worker's raw cumulative event-loop sample (since the worker started), for a
+	 * WG11 req 2.2: the worker's cumulative cost sample since it started (`WorkerCostMeter`: `active`
+	 * is the thread's CPU time where Node reports it, event-loop active time otherwise), for a
 	 * caller that measures its own window by difference, tagged with the worker's generation (unique
 	 * per started worker in this process) so the caller can tell a replacement worker apart even when
 	 * its counters exceed the old one's; null when not measurable. Optional: test hosts need not
@@ -55,6 +58,93 @@ export interface WorkerEluSample {
 
 /** Bumped on every worker start, process-wide, so no two workers share a generation. */
 let nextWorkerGeneration = 0
+
+/**
+ * The two per-block worker messages, checked as `WorkerToMainSchema` checks them. Anything else,
+ * malformed ones included, returns null and goes to the schema. A member the schema would strip
+ * stays on the object; `onMessage` reads only the ones named here.
+ */
+export function hotWorkerMessage(raw: unknown): WorkerToMain | null {
+	if (typeof raw !== "object" || raw === null) return null
+	const m = raw as { type?: unknown; events?: unknown; buffer?: unknown }
+	if (m.type === "buffer")
+		return m.buffer instanceof ArrayBuffer ? (raw as WorkerToMain) : null
+	if (m.type !== "events" || !Array.isArray(m.events)) return null
+	for (const ev of m.events as unknown[]) {
+		if (typeof ev !== "object" || ev === null || !("kind" in ev)) return null
+		if (wireEventProblem(ev, SPECTRUM_SUMMARY_BINS_MAX) !== null) return null
+	}
+	return raw as WorkerToMain
+}
+
+/** What `WorkerCostMeter` reads of a worker. `cpuUsage` is absent on a Node without it. */
+export interface WorkerCostPort {
+	elu(): { idle: number; active: number }
+	cpuUsage?: () => Promise<{ user: number; system: number }>
+}
+
+/** Unanswered ticks (1 s each) before the meter gives up on CPU time and reports plain ELU. */
+export const COST_METER_MAX_MISSES = 10
+
+/**
+ * The cost sample the passive guard judges: the worker's event-loop counters with `active` reduced
+ * to the thread's own CPU time. ELU's `active` is wall time inside a callback, so a thread preempted
+ * mid-frame by other work on the host counts as busy, and the same pipeline reads 0.3 on a quiet host
+ * and 0.7 on a loaded one. CPU time does not move with the load, and a real overrun still shows.
+ *
+ * `cpuUsage` answers asynchronously, so a sample carries the previous tick's CPU figure: at most one
+ * tick (1 s) stale at each end of the guard's 60 s window. Both counters only go forward, since the
+ * guard reads a counter going back as a restart of its window. Until the first answer there is no
+ * sample (the guard's "no measurement"). A Node without the call, or a worker that has not answered
+ * for `COST_METER_MAX_MISSES` ticks, reports plain ELU, so an overrun is never hidden.
+ */
+export class WorkerCostMeter {
+	private cpuMs: number | null = null
+	private pending = false
+	private misses = 0
+	private last = { idle: 0, active: 0 }
+
+	constructor(private readonly port: WorkerCostPort) {}
+
+	sample(): EventLoopUtilization | null {
+		const elu = this.port.elu()
+		const raw = (): EventLoopUtilization => {
+			const total = elu.idle + elu.active
+			return {
+				idle: elu.idle,
+				active: elu.active,
+				utilization: total > 0 ? elu.active / total : 0,
+			}
+		}
+		if (!this.port.cpuUsage) return raw()
+		this.refresh()
+		if (this.misses >= COST_METER_MAX_MISSES) return raw()
+		if (this.cpuMs === null) return null
+		const total = elu.idle + elu.active
+		const active = Math.max(this.last.active, Math.min(elu.active, this.cpuMs))
+		const idle = Math.max(this.last.idle, total - active)
+		this.last = { idle, active }
+		const sum = active + idle
+		return { idle, active, utilization: sum > 0 ? active / sum : 0 }
+	}
+
+	private refresh(): void {
+		if (this.pending) {
+			this.misses++
+			return
+		}
+		this.pending = true
+		this.port.cpuUsage!()
+			.then(usage => {
+				this.cpuMs = (usage.user + usage.system) / 1000
+				this.misses = 0
+			})
+			.catch(() => undefined) // a stopped worker: the exit path reports it, the meter just stops
+			.finally(() => {
+				this.pending = false
+			})
+	}
+}
 
 export type PipelineHostMode = "thread" | "inline"
 
@@ -132,6 +222,7 @@ export class InlinePipelineHost implements PipelineHost {
 
 export class ThreadPipelineHost implements PipelineHost {
 	private readonly worker: Worker
+	private readonly costMeter: WorkerCostMeter
 	private readonly eluStart: ReturnType<
 		Worker["performance"]["eventLoopUtilization"]
 	>
@@ -175,6 +266,16 @@ export class ThreadPipelineHost implements PipelineHost {
 		this.worker = new Worker(workerUrl, { name: `spectrum-${cfg.sourceId}` })
 		this.generation = ++nextWorkerGeneration
 		this.eluStart = this.worker.performance.eventLoopUtilization()
+		const worker = this.worker
+		const cpuUsage = (
+			worker as unknown as {
+				cpuUsage?: () => Promise<{ user: number; system: number }>
+			}
+		).cpuUsage
+		this.costMeter = new WorkerCostMeter({
+			elu: () => worker.performance.eventLoopUtilization(),
+			...(cpuUsage ? { cpuUsage: () => cpuUsage.call(worker) } : {}),
+		})
 		this.worker.on("message", (raw: unknown) => this.onMessage(raw))
 		this.worker.on("error", err => this.reportFatal(asError(err))) // @types/node types the listener arg as unknown
 		this.worker.on("exit", code => {
@@ -276,10 +377,8 @@ export class ThreadPipelineHost implements PipelineHost {
 
 	eluSample(): WorkerEluSample | null {
 		if (this.exited) return null
-		return {
-			generation: this.generation,
-			elu: this.worker.performance.eventLoopUtilization(),
-		}
+		const elu = this.costMeter.sample()
+		return elu === null ? null : { generation: this.generation, elu }
 	}
 
 	async close(): Promise<void> {
@@ -303,17 +402,20 @@ export class ThreadPipelineHost implements PipelineHost {
 	}
 
 	private onMessage(raw: unknown): void {
-		const parsed = WorkerToMainSchema.safeParse(raw)
-		if (!parsed.success) {
-			this.handlers.error(
-				new WaveKitError(
-					`Invalid spectrum worker message: ${parsed.error.message}`,
-					"SCANNER_WORKER_PROTOCOL",
-				),
-			)
-			return
+		let message = hotWorkerMessage(raw)
+		if (message === null) {
+			const parsed = WorkerToMainSchema.safeParse(raw)
+			if (!parsed.success) {
+				this.handlers.error(
+					new WaveKitError(
+						`Invalid spectrum worker message: ${parsed.error.message}`,
+						"SCANNER_WORKER_PROTOCOL",
+					),
+				)
+				return
+			}
+			message = parsed.data as WorkerToMain
 		}
-		const message = parsed.data
 		switch (message.type) {
 			case "events": {
 				const sink = spectrumMainSpanSink()

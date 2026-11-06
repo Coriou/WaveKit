@@ -15,8 +15,10 @@ import { FS, Harness, yieldToRpc } from "./pipeline-harness.js"
 
 /**
  * Linear-power short path: the pipeline's full event stream on seeded synthetic scenes must be
- * byte-identical to the dB-path pipeline. The hashes were recorded from the pre-change code
- * (base c838f93d, short path converting every frame to dB) before any edit in this change.
+ * byte-identical to the dB-path pipeline. First recorded at base c838f93d, with the short path
+ * converting every frame to dB. Re-recorded at 64ebbe99, which had moved five scenes through
+ * unrelated tracker changes, just before Tracker.frame went linear; the recording strips acf30
+ * and acf60 (see digest).
  */
 const GOLDEN: Record<string, { events: number; sha256: string }> = {
 	noise: {
@@ -24,28 +26,28 @@ const GOLDEN: Record<string, { events: number; sha256: string }> = {
 		sha256: "632320aaf46d233778cc1abcb76356d37fb98757e7add6f5ae5405fc2cac1588",
 	},
 	cw: {
-		events: 19,
-		sha256: "5524fae69b623461e62500b1d2b62b511a4abd84be2b8ea531d137052bec302c",
+		events: 20,
+		sha256: "8bc4e007532d12f1b6bdb8b93007a81a20e1ba52bfcbcff08f43edd43ddf0209",
 	},
 	nfm: {
-		events: 19,
-		sha256: "1227ff20eb6f6db3aca5469bfe1b7ff0294e3da52f3a0624fdc3cb1c5e2fc4be",
+		events: 20,
+		sha256: "f3e38880b646249ae8c4363adf7f193f56081f1bcf890cf516161009eeca71e1",
 	},
 	modeS: {
-		events: 20,
-		sha256: "fd1337dd5af54df6ac326d732f6c44a473b47a2c4bad66ddae0a6049fef535b8",
+		events: 21,
+		sha256: "9aa05457bf4eba93ceab172331115968536a3b5e98eb779267c8cb8d7c613be2",
 	},
 	bursts: {
 		events: 28,
-		sha256: "f26fe99938a569c927d0a6f5632c52ce4ce72aa04cbfb96b1e4d119fe5884eb6",
+		sha256: "76609f9525dc7ef512465e8e0e966481cb4909e83542d6d21f4810dc2d4cc24c",
 	},
 	zero: {
 		events: 17,
 		sha256: "add58f2a3dc984677b42b768c989e549a25a5bfcd9910ec490e08e940da18096",
 	},
 	nonFinite: {
-		events: 21,
-		sha256: "da8a98f19fcacd48704b5b3a1ec6c3d06552d8acdb85c8e7e2e54c8c520c5be7",
+		events: 23,
+		sha256: "f202b33499c0550a06564dc04be427c330a1ce10da4e4391e166f50703b6034c",
 	},
 }
 
@@ -126,8 +128,15 @@ function run(name: string): PipelineEvent[] {
 	return h.events
 }
 
+/** acf30 and acf60 read the frame envelope; pipeline-frame-linear-golden.test.ts bounds them. */
 const digest = (events: PipelineEvent[]): string =>
-	createHash("sha256").update(JSON.stringify(events)).digest("hex")
+	createHash("sha256")
+		.update(
+			JSON.stringify(events, (key, value: unknown) =>
+				key === "acf30" || key === "acf60" ? undefined : value,
+			),
+		)
+		.digest("hex")
 
 describe("linear short path equals the dB short path (pre-change goldens)", () => {
 	beforeEach(yieldToRpc)

@@ -472,14 +472,22 @@ export class Tracker {
 		return events
 	}
 
-	frame(framePowerDb: Float32Array, sample: number): void {
-		this.n = framePowerDb.length
-		const samplesPerMs = (this.opts.binHz * framePowerDb.length) / 1000
+	/**
+	 * One frame's linear power sum per open track, for the 1 ms envelope. `framePower[i]·scale` is
+	 * the bin's tone-calibrated power (`powerToDb`'s p for `frames` = 1). The clamp is `powerToDb`'s
+	 * floor in linear power, and NaN or a non-positive sum reads that floor as well.
+	 */
+	frame(framePower: Float64Array, scale: number, sample: number): void {
+		this.n = framePower.length
+		const floor = 10 ** (-200 / 10)
+		const samplesPerMs = (this.opts.binHz * framePower.length) / 1000
 		for (const t of this.open) {
 			if (t.frozen) continue
 			let sum = 0
-			for (let i = t.startBin; i < t.endBin; i++)
-				sum += 10 ** ((framePowerDb[i] ?? -200) / 10)
+			for (let i = t.startBin; i < t.endBin; i++) {
+				const p = framePower[i]! * scale
+				sum += p > floor ? p : floor
+			}
 			if (t.envOrigin < 0) t.envOrigin = sample
 			const bucket = Math.floor((sample - t.envOrigin) / samplesPerMs)
 			if (bucket !== t.envBucket) this.flushEnvelope(t, bucket)

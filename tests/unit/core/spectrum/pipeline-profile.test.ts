@@ -160,7 +160,7 @@ describe("spectrum pipeline profile", () => {
 		)
 		feed(pipeline, bytes.subarray(0, BLOCK * 8))
 		const tracker = (pipeline as unknown as { tracker: object }).tracker
-		// Force the frame conversion path independently of detector thresholds.
+		// Force the frame tracker path independently of detector thresholds.
 		Object.defineProperty(tracker, "openCount", { get: () => 1 })
 		pipeline.handle({
 			kind: "bytes",
@@ -168,7 +168,7 @@ describe("spectrum pipeline profile", () => {
 			bytes: bytes.subarray(BLOCK * 8, 3 * BLOCK * 8),
 		})
 		const profile = profileOf(pipeline.exportEngineState())
-		expect(profile?.stages.frameDb).toBeGreaterThan(0)
+		expect(profile?.stages.frameDb).toBe(0) // no stage converts a frame to dB
 		expect(profile?.stages.tracker).toBeGreaterThan(0)
 	})
 

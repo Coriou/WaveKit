@@ -138,6 +138,16 @@ function notifyUnavailable(
 function detach<T>(value: T): T {
 	return structuredClone(value)
 }
+/** Freezes a detached value all the way down. It is plain JSON data, so it holds no cycle. */
+function deepFreeze<T>(value: T): T {
+	if (typeof value !== "object" || value === null || Object.isFrozen(value))
+		return value
+	Object.freeze(value)
+	for (const member of Object.values(value)) deepFreeze(member)
+	return value
+}
+/** `snapshotKey()` of a store that cannot be served. */
+const UNAVAILABLE_SNAPSHOT = Symbol("bandplans-unavailable")
 function isThenable(value: unknown): boolean {
 	return (
 		(typeof value === "object" || typeof value === "function") &&
@@ -269,6 +279,12 @@ class BandPlanRuntime implements BandPlanService {
 	private readonly builtins: readonly BandPlanPack[]
 	private readonly builtinById: ReadonlyMap<string, BandPlanPack>
 	private resolvedMemo: { key: string; value: ResolvedBandPlan } | undefined
+	/** One frozen `view()` per `snapshotKey()`, shared by every reader. */
+	private viewSnapshot: { key: unknown; value: BandPlanStackView } | undefined
+	/** One frozen `resolved()` per `snapshotKey()`, shared by every reader. */
+	private resolvedSnapshot:
+		| { key: unknown; value: ResolvedBandPlanView }
+		| undefined
 	/** previewDigest → issued URL preview; insertion order is FIFO eviction order. */
 	private readonly issuedUrlPreviews = new Map<string, IssuedUrlPreview>()
 	/** Admitted URL previews and update checks; close() awaits them. */
@@ -283,40 +299,68 @@ class BandPlanRuntime implements BandPlanService {
 		this.builtinById = new Map(this.builtins.map(pack => [pack.id, pack]))
 		this.current = storage ? storage.snapshot() : emptyState()
 	}
+	/**
+	 * Identity of everything `view()` and `resolved()` read that can change. A commit replaces
+	 * `current` with a new object. `persisted()` turns undefined when the store goes unavailable or
+	 * the service closes, and that reads as the stable token below. `storage.persisted()` moves the
+	 * store view from `storeId: null` to the real id, so it picks one of two states per object. The
+	 * rest (options, deps, built-ins, limits) is fixed at construction.
+	 */
+	private snapshotKey(): unknown {
+		const state = this.persisted()
+		if (!state) return UNAVAILABLE_SNAPSHOT
+		return this.storage?.persisted() === true
+			? state
+			: `readonly-empty:${state.revision}`
+	}
 	view(): BandPlanStackView {
+		const key = this.snapshotKey()
+		if (this.viewSnapshot && this.viewSnapshot.key === key)
+			return this.viewSnapshot.value
 		const state = this.persisted()
 		const stack = this.effectiveStack()
-		return detach({
-			schemaVersion: 1,
-			store: this.storeView(),
-			context: this.context(),
-			capabilities: {
-				writable: this.options.writable,
-				importFormats: BANDPLAN_IMPORT_FORMATS.filter(
-					format => this.parserFor(format) !== undefined,
-				),
-				urlImportHosts: this.urlImportOn() ? [...this.urlHosts()] : [],
-			},
-			stack: {
-				source: stack.source,
-				entries: this.stackEntries(stack.entries),
-			},
-			packs: this.summaries(),
-			operatorBands: state ? state.operatorBands.map(asBand) : [],
-			edits: state ? [...state.edits] : [],
-			orphanedEdits: [...this.resolution().orphanedEdits],
-			limits: BANDPLANS_LIMITS,
-		})
+		const value = deepFreeze(
+			detach({
+				schemaVersion: 1 as const,
+				store: this.storeView(),
+				context: this.context(),
+				capabilities: {
+					writable: this.options.writable,
+					importFormats: BANDPLAN_IMPORT_FORMATS.filter(
+						format => this.parserFor(format) !== undefined,
+					),
+					urlImportHosts: this.urlImportOn() ? [...this.urlHosts()] : [],
+				},
+				stack: {
+					source: stack.source,
+					entries: this.stackEntries(stack.entries),
+				},
+				packs: this.summaries(),
+				operatorBands: state ? state.operatorBands.map(asBand) : [],
+				edits: state ? [...state.edits] : [],
+				orphanedEdits: [...this.resolution().orphanedEdits],
+				limits: BANDPLANS_LIMITS,
+			}),
+		)
+		this.viewSnapshot = { key, value }
+		return value
 	}
 	resolved(): ResolvedBandPlanView {
+		const key = this.snapshotKey()
+		if (this.resolvedSnapshot && this.resolvedSnapshot.key === key)
+			return this.resolvedSnapshot.value
 		const resolved = this.resolution()
-		return detach({
-			store: this.storeView(),
-			context: this.context(),
-			bands: resolved.bands,
-			shadowed: resolved.shadowed,
-			hidden: resolved.hidden,
-		})
+		const value = deepFreeze(
+			detach({
+				store: this.storeView(),
+				context: this.context(),
+				bands: resolved.bands,
+				shadowed: resolved.shadowed,
+				hidden: resolved.hidden,
+			}),
+		)
+		this.resolvedSnapshot = { key, value }
+		return value
 	}
 	pack(packId: string): BandPlanPackView {
 		if (packId === OPERATOR_PACK_ID)
