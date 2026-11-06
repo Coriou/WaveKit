@@ -57,7 +57,8 @@ const TEXT: Readonly<Record<Exclude<SourceVerdictCode, "no-samples">, string>> =
 	{
 		ok: "samples are flowing",
 		waiting: "connected; waiting for the first samples",
-		"receiver-no-device": "receiver reports no device; check USB and re-attach it if unplugged",
+		"receiver-no-device":
+			"receiver reports no device; check USB and re-attach it if unplugged",
 		"receiver-not-running":
 			"receiver reports a device but its rtl_tcp is not running",
 		backpressure: "the core is not keeping up with this source",

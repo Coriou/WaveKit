@@ -382,7 +382,8 @@ describe("GET /api/sources verdict, connected at rate 0", () => {
 		expect(await read([host])).toEqual({
 			verdict: {
 				code: "receiver-no-device",
-				message: "receiver reports no device; check USB and re-attach it if unplugged",
+				message:
+					"receiver reports no device; check USB and re-attach it if unplugged",
 				deviceFacts: "absent",
 			},
 			short: "receiver-no-device",

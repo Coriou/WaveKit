@@ -113,7 +113,7 @@ describe("passive cost guard wiring (WG11 req 2)", () => {
 		const passive = () => h.service.status().engines[0]?.passive
 		expect(passive()).not.toHaveProperty("reasonCode")
 		expect(await agent()).not.toHaveProperty("passive")
-		await h.service.spectrum.acquire("rtl", "ws:wg11-sc")
+		await h.service.spectrum.acquire("rtl", "ws:passive-reason")
 		const t1 = openedAt + PASSIVE_COST_WINDOW_MS
 		engine.utilization = () => 0.97
 		await check(t1)
