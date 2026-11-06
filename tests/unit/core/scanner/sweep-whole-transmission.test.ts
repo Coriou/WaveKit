@@ -210,6 +210,8 @@ describe("a voiced file discarded after its finish says why", () => {
 		expect(discarded?.receipt).toEqual({
 			outcome: "failed",
 			errorCode: "admission-denied",
+			cutReason: "completed",
+			failure: "association-lost",
 		})
 		expect(w.wavSeconds()).toEqual([])
 		const line = lines.find(l => l["decision"] === "discarded:aborted")

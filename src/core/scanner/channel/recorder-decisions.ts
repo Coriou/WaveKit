@@ -19,7 +19,6 @@ import {
 	type ScannerRecorderFlagDetail,
 } from "@wavekit/api-types"
 import type { Logger } from "../../../utils/logger.js"
-import type { AnalogCut, AnalogFailure } from "../store/analog-operations.js"
 
 /**
  * Info lines per RECORDER_LOG_WINDOW_MS, session decisions only (snapshot refusals go to debug). A
@@ -46,8 +45,6 @@ export interface RecorderDecisionRef {
  */
 export interface ReceiptDetail extends ScannerRecorderReceiptDetail {
 	operationId: string
-	cutReason?: AnalogCut | null
-	failure?: AnalogFailure | null
 }
 
 interface ObservationMemory {
@@ -261,6 +258,12 @@ function dto(e: Entry): ScannerRecorderDecisionEntry {
 					receipt: {
 						outcome: e.receipt.outcome,
 						errorCode: e.receipt.errorCode,
+						...(e.receipt.cutReason === undefined
+							? {}
+							: { cutReason: e.receipt.cutReason }),
+						...(e.receipt.failure === undefined
+							? {}
+							: { failure: e.receipt.failure }),
 					},
 				}
 			: {}),

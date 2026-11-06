@@ -3286,6 +3286,9 @@ only. Allowed codes: `admission-denied`, `disk-unavailable`, `disk-low`,
 `metadata-failed`, `cleanup-failed`, `recovery-incomplete`, `invalid-binding`,
 and `recovery-ambiguous`. Non-finalized receipts retain the `discarded:aborted`
 decision code; the receipt distinguishes a cancellation from a store failure.
+Newer cores add the closed `cutReason` (one of `SCANNER_RECORDER_CUTS`, the end the store
+operation was given) and `failure` (one of `SCANNER_RECORDER_FAILURES`, which check refused it,
+or null), so a discarded recording's cause can be read without the log.
 The rate-limited decision log also includes the operation ID; it is never exposed
 in the API because a recording alias can be derived from it.
 

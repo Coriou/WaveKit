@@ -11,7 +11,6 @@ import {
 import {
 	CHANNEL_GATE_BURST_MIN_DURATION_MS as BURST_MS,
 	CHANNEL_GATE_K_DB,
-	CHANNEL_GATE_MARGIN_DB,
 	CHANNEL_GATE_MIN_DURATION_MS as STANDARD_MS,
 } from "../../../../src/core/scanner/scanner-redesign-contract.js"
 import { channelGateMinDurationMs } from "../../../../src/core/spectrum/channel-gate.js"
@@ -328,8 +327,8 @@ describe("what gets no qualification", () => {
 	})
 })
 
-describe("rests after a failed qualification", () => {
-	/** Under what could pass its gate (gateReachLevelDb): rests bind it. */
+describe("a qualification remembers no failure", () => {
+	/** Under the gate's pass level: a line like this never answers. */
 	const WEAK_DB = 4
 	/** Runs `sweeps` coarse sweeps with the candidate on air on hop 0: the blocks of each hop-0 visit. */
 	function visits(sweeps: number, answer: "timeout" | "close"): number[] {
@@ -363,77 +362,17 @@ describe("rests after a failed qualification", () => {
 		return out
 	}
 
-	const W = STANDARD_ANSWER_BLOCKS
-	const D = DWELL_BLOCKS
-
-	it("doubles from one sweep up to the cap of four: at most one wait in five sweeps", () => {
-		// 1 rest, wait, 2 rests, wait, 4 rests, wait, 4 rests, wait.
-		expect(visits(20, "timeout")).toEqual([
-			W,
-			D,
-			W,
-			D,
-			D,
-			W,
-			D,
-			D,
-			D,
-			D,
-			W,
-			D,
-			D,
-			D,
-			D,
-			W,
-			D,
-			D,
-			D,
-			D,
-		])
+	it("a line that never answers pays its whole wait on every visit", () => {
+		expect(visits(20, "timeout")).toEqual(
+			Array.from({ length: 20 }, () => STANDARD_ANSWER_BLOCKS),
+		)
 	})
 
-	it("a refusal rests too, and its visit ended when the gate refused", () => {
-		expect(visits(4, "close")).toEqual([6, D, 6, D])
+	it("a refusal ends each visit where the gate refused, on every visit", () => {
+		expect(visits(4, "close")).toEqual([6, 6, 6, 6])
 	})
 
-	it("a frequency that failed long ago starts over at one sweep", () => {
-		const h = harness()
-		h.start()
-		const onVisit = (id: string): number => {
-			const was = h.tuned.length
-			let block = 0
-			while (h.tuned.length === was && block < 100) {
-				block++
-				h.block(() => {
-					if (block <= 2)
-						h.s.onCandidate(
-							candidate(block, { channelSnrDb: WEAK_DB }, id),
-							STANDARD_MS,
-						)
-				})
-			}
-			h.s.onEpochStarted(h.sample)
-			h.toNextHop()
-			h.toNextHop()
-			return block
-		}
-		const emptySweep = (): void => {
-			h.toNextHop()
-			h.toNextHop()
-			h.toNextHop()
-		}
-		expect(onVisit("a")).toBe(STANDARD_ANSWER_BLOCKS - 0)
-		emptySweep()
-		expect(onVisit("b")).toBe(STANDARD_ANSWER_BLOCKS)
-		// Two strikes: two sweeps of rest, then past QUALIFY_STRIKE_MEMORY_SWEEPS (8) of quiet.
-		for (let i = 0; i < 2 + 8; i++) emptySweep()
-		expect(onVisit("c")).toBe(STANDARD_ANSWER_BLOCKS)
-		// One sweep of rest again, not four.
-		emptySweep()
-		expect(onVisit("d")).toBe(STANDARD_ANSWER_BLOCKS)
-	})
-
-	it("a passed candidate that gets no hold rests like a refused one, and a held one owes nothing", () => {
+	it("a passed candidate pays for its answer on each visit, held or not", () => {
 		const run = (follow: boolean): number[] => {
 			const h = harness(
 				makeNormalisedSpec({
@@ -470,11 +409,102 @@ describe("rests after a failed qualification", () => {
 			}
 			return out
 		}
-		// No hold: answered at block 6, then a sweep's rest.
-		expect(run(false)).toEqual([6, DWELL_BLOCKS, 6, DWELL_BLOCKS])
-		// Held on each visit: never rests.
+		// No hold: answered at block 6, the visit ends there.
+		expect(run(false)).toEqual([6, 6, 6, 6])
 		const held = run(true)
 		expect(held.every(b => b > DWELL_BLOCKS)).toBe(true)
+	})
+})
+
+describe("the wait's cap: 6 blocks per epoch of a hop visit", () => {
+	/** The longest wait at 50 ms blocks: a standard gate's 8 blocks less minSurfaceBlocks. */
+	const CAP_BLOCKS = 6
+	const CAPPED_VISIT = DWELL_BLOCKS + CAP_BLOCKS
+
+	it.each([1, 2, 6, 40])(
+		"%i candidates of the youngest age that may wait: exactly at the cap",
+		count => {
+			const h = harness()
+			h.start()
+			const blocks = runVisit(h, block => {
+				for (let i = 0; i < count; i++) {
+					const over = { centreHz: AT + i * 25_000 }
+					if (block === 2)
+						h.s.onCandidate(candidate(1, over, `c${i}`), STANDARD_MS)
+					if (block === 3)
+						h.s.onCandidate(candidate(2, over, `c${i}`), STANDARD_MS)
+				}
+			})
+			expect(blocks).toBe(CAPPED_VISIT)
+		},
+	)
+
+	it("a class wait, then a candidate opening at its end: stops at the cap, not 3 + 6 blocks past the dwell", () => {
+		const h = harness()
+		h.start()
+		const blocks = runVisit(h, block => {
+			// Opens at block 2, passes a burst gate at block 3: 3 blocks of class wait, to block 6.
+			if (block === 2) h.s.onCandidate(candidate(1, {}, "b"), BURST_MS)
+			if (block === 3) h.s.onTrack(passed(2, "b"), false, 0)
+			// Opens at block 5: at block 6 its own answer would be 6 blocks away.
+			const over = { centreHz: AT + 25_000 }
+			if (block === 5) h.s.onCandidate(candidate(1, over, "n"), STANDARD_MS)
+			if (block === 6) h.s.onCandidate(candidate(2, over, "n"), STANDARD_MS)
+		})
+		expect(blocks).toBe(CAPPED_VISIT)
+	})
+
+	it("a qualification to the cap, then a burst pass at its last block: no class wait past the cap", () => {
+		const h = harness()
+		h.start()
+		const blocks = runVisit(h, block => {
+			if (block === 2) h.s.onCandidate(candidate(1, {}, "c"), STANDARD_MS)
+			if (block === 3) h.s.onCandidate(candidate(2, {}, "c"), STANDARD_MS)
+			const over = { centreHz: AT + 25_000 }
+			if (block === 8) h.s.onCandidate(candidate(1, over, "b"), BURST_MS)
+			if (block === 9)
+				h.s.onTrack(candidate(2, { gate: "passed", ...over }, "b"), false, 0)
+		})
+		expect(blocks).toBe(CAPPED_VISIT)
+	})
+
+	it("a burst pass opening at block 2 and passing at block 3 waits to block 6: 150 ms past the dwell", () => {
+		const h = harness()
+		h.start()
+		const blocks = runVisit(h, block => {
+			if (block === 2) h.s.onCandidate(candidate(1), BURST_MS)
+			if (block === 3) h.s.onTrack(passed(2), false, 0)
+		})
+		expect(blocks).toBe(DWELL_BLOCKS + 3)
+	})
+
+	it("each epoch has its own cap, and a restart during a class wait still listens a whole dwell", () => {
+		const h = harness()
+		h.start()
+		for (let block = 1; block <= 4; block++)
+			h.block(() => {
+				if (block === 2) h.s.onCandidate(candidate(1), BURST_MS)
+				if (block === 3) h.s.onTrack(passed(2), false, 0)
+			})
+		expect(h.tuned).toHaveLength(1)
+		h.s.restartVisit(h.sample)
+		// The empty new epoch: a whole dwell, no answer left over from the old one.
+		expect(h.toNextHop()).toBe(DWELL_BLOCKS)
+		// And a restart in a wait gives the new epoch the whole cap.
+		const r = harness()
+		r.start()
+		for (let block = 1; block <= 8; block++)
+			r.block(() => {
+				if (block === 2) r.s.onCandidate(candidate(1), STANDARD_MS)
+				if (block === 3) r.s.onCandidate(candidate(2), STANDARD_MS)
+			})
+		r.s.restartVisit(r.sample)
+		expect(
+			runVisit(r, block => {
+				if (block === 2) r.s.onCandidate(candidate(1, {}, "e2"), STANDARD_MS)
+				if (block === 3) r.s.onCandidate(candidate(2, {}, "e2"), STANDARD_MS)
+			}),
+		).toBe(CAPPED_VISIT)
 	})
 })
 
@@ -619,6 +649,7 @@ describe("fairness of qualification", () => {
 						snr: fc.double({ min: -5, max: 30, noNaN: true }),
 						burst: fc.boolean(),
 						close: fc.boolean(),
+						pass: fc.boolean(),
 					}),
 					{ maxLength: 60 },
 				),
@@ -641,6 +672,7 @@ describe("fairness of qualification", () => {
 								`t${e.id}`,
 							)
 							if (e.close) h.s.onCandidateClosed({ ...t, gate: "below" })
+							else if (e.pass) h.s.onTrack({ ...t, gate: "passed" }, false, 0)
 							else h.s.onCandidate(t, e.burst ? BURST_MS : STANDARD_MS)
 						})
 					}
@@ -722,7 +754,7 @@ describe("fairness of qualification", () => {
 		expect(three.longestGap).toBeLessThanOrEqual(8_000 + 3 * 8 * 50)
 	})
 
-	it("the worst-case period: a failing candidate on every hop of a 3-hop plan costs at most its waits, then the rests", () => {
+	it("the worst-case period: a failing candidate on every hop of a 3-hop plan costs its wait on every visit", () => {
 		const h = harness()
 		h.start()
 		const WORST_WAIT = 5 // 8 − 3 blocks for a signal on air at arrival
@@ -751,9 +783,7 @@ describe("fairness of qualification", () => {
 			waits += block - DWELL_BLOCKS
 			h.s.onEpochStarted(h.sample)
 		}
-		// 20 sweeps of rests 1, 2, 4, 4: at most 7 waits per hop, each WORST_WAIT blocks.
-		expect(waits).toBeLessThanOrEqual(3 * 7 * WORST_WAIT)
-		expect(waits).toBeGreaterThan(0)
+		expect(waits).toBe(VISITS * WORST_WAIT)
 	})
 })
 
@@ -960,14 +990,9 @@ function failedTransient(
 	h.toNextHop()
 }
 
-describe("a rest binds only what looks like the emission that earned it", () => {
+describe("a call right after a failure", () => {
 	const TRANSIENT_DB = 4
-	/** k + margin − hysteresis under the standard rule: 3 + 3 − 1.5. */
-	const REACH_DB = 4.5
-	/** k + burst margin − hysteresis: 3 + 6 − 1.5. */
-	const BURST_REACH_DB = 7.5
-	/** Over a rest earned by a pass with nothing to hold, this is another emission. */
-	const STRONGER_DB = CHANNEL_GATE_MARGIN_DB
+	const W = STANDARD_ANSWER_BLOCKS
 
 	it("a strong new signal after a failed transient qualifies on the next visit (standard gate)", () => {
 		const h = harness()
@@ -1018,154 +1043,27 @@ describe("a rest binds only what looks like the emission that earned it", () => 
 		expect(h.s.progress().holdingOn).toBe("s")
 	})
 
-	it("a pass is an answer no refusal can discard: at the refused level it still gets its class wait", () => {
-		const h = harness()
-		failedTransient(h, 10)
-		const blocks = runVisit(h, block => {
-			if (block === 1)
-				h.s.onCandidate(candidate(1, { channelSnrDb: 10 }, "s"), BURST_MS)
-			if (block === 2 || block === 5)
-				h.s.onTrack(
-					candidate(block, { gate: "passed", channelSnrDb: 10 }, "s"),
-					false,
-					0,
-				)
-		})
-		// Up to its fifth block, then nothing to hold.
-		expect(blocks).toBe(5)
-	})
-
-	it.each([
-		["the rest's level", TRANSIENT_DB, DWELL_BLOCKS],
-		["just under what could pass", REACH_DB - 0.01, DWELL_BLOCKS],
-		["what could pass", REACH_DB, STANDARD_ANSWER_BLOCKS],
-	])("a candidate at %s: the bound of the rest", (_name, snrDb, expected) => {
-		const h = harness()
-		failedTransient(h, TRANSIENT_DB)
-		expect(runVisit(h, steady(h, snrDb, "s"))).toBe(expected)
-	})
-
-	it("the rest ends: a new call at the transient's own level loses one visit, no more", () => {
-		const h = harness()
-		failedTransient(h, TRANSIENT_DB)
-		expect(runVisit(h, steady(h, TRANSIENT_DB, "s0"))).toBe(DWELL_BLOCKS)
-		h.toNextHop()
-		h.toNextHop()
-		expect(runVisit(h, steady(h, TRANSIENT_DB, "s1"))).toBe(
-			STANDARD_ANSWER_BLOCKS,
-		)
-	})
-
-	/** `levels[i]`: the emitter's reading on sweep i. The waits it costs its hop. */
-	function waits(levels: readonly number[]): number {
-		const h = harness()
-		h.start()
-		let total = 0
-		levels.forEach((level, i) => {
-			const blocks = runVisit(h, steady(h, level, `e${i}`))
-			if (blocks > DWELL_BLOCKS) total++
-			h.toNextHop()
-			h.toNextHop()
-		})
-		return total
-	}
-
-	it("a steady weak emitter with a reading that wanders under what could pass rests as a steady one does", () => {
-		const levels = Array.from({ length: 20 }, (_, i) =>
-			i % 2 === 0 ? 3 : REACH_DB - 0.01,
-		)
-		expect(waits(levels)).toBe(5)
-	})
-
-	it("a line that could pass but never answers pays its wait on every visit: the wait is its bound", () => {
-		expect(waits(Array.from({ length: 20 }, () => REACH_DB))).toBe(20)
-	})
-
-	it("a level that falls back after a strong reading rests as the schedule says", () => {
-		// Visits 1, 2 (the 30 dB is never rested), then rests of 2 and 4, 4, 4: visits 5, 10, 15, 20.
-		expect(waits([3, 30, ...Array.from({ length: 18 }, () => 3)])).toBe(6)
-	})
-
-	// Feature: sweep-qualification, Property 3: a rest binds only what cannot pass
-	// Validates: Requirements 3 (a steady emitter does not tax each sweep, no call is skipped)
-	it("readings too weak to pass cost the rests' waits at most, and each stronger one its own", () => {
-		fc.assert(
-			fc.property(
-				fc.array(fc.double({ min: 3, max: 30, noNaN: true }), {
-					minLength: 20,
-					maxLength: 20,
-				}),
-				levels => {
-					const over = levels.flatMap((l, i) => (l >= REACH_DB ? [i + 1] : []))
-					const waited = waitedSweeps(levels)
-					for (const sweep of over) expect(waited).toContain(sweep)
-					// 20 sweeps of rests 1, 2, 4, 4: 5 waits; a stronger reading only raises the strikes.
-					expect(waited.length - over.length).toBeLessThanOrEqual(5)
-				},
-			),
-			{ numRuns: 100 },
-		)
-	})
-
-	/** `levels[i]`: the emitter's reading on sweep i. The sweeps (1-based) whose visit waited. */
-	function waitedSweeps(levels: readonly number[]): number[] {
-		const h = harness()
-		h.start()
-		const out: number[] = []
-		levels.forEach((level, i) => {
-			if (runVisit(h, steady(h, level, `e${i}`)) > DWELL_BLOCKS) out.push(i + 1)
-			h.toNextHop()
-			h.toNextHop()
-		})
-		return out
-	}
-
-	describe("a candidate that could pass its gate is never rested", () => {
-		/** The weak candidates' visits: rests of 1, then 2 sweeps, ending inside a rest of 4. */
-		function weakHistory(h: ReturnType<typeof harness>): number[] {
-			h.start()
-			const out: number[] = []
-			for (let i = 0; i < 6; i++) {
-				out.push(runVisit(h, steady(h, TRANSIENT_DB, `w${i}`)))
-				h.toNextHop()
-				h.toNextHop()
-			}
-			return out
-		}
-		const W = STANDARD_ANSWER_BLOCKS
-		const D = DWELL_BLOCKS
-
-		it("a call reading 1 dB over the failures, inside their rest of four sweeps, passes and holds", () => {
+	it.each([3, TRANSIENT_DB, 4.2, 4.5, 7.4, 7.5, 30])(
+		"a candidate at %f dB after a failure at 4 dB waits its whole answer",
+		snrDb => {
 			const h = harness()
-			expect(weakHistory(h)).toEqual([W, D, W, D, D, W])
+			failedTransient(h, TRANSIENT_DB)
+			expect(runVisit(h, steady(h, snrDb, "s"))).toBe(W)
+		},
+	)
+
+	it.each([3, 4.2, 5, 10])(
+		"a call at the failure's own %f dB, right after it, passes and holds",
+		snrDb => {
+			const h = harness()
+			h.start()
+			expect(runVisit(h, steady(h, snrDb, "first"))).toBe(W)
+			h.toNextHop()
+			h.toNextHop()
 			const blocks = runVisit(
 				h,
 				block => {
-					steady(h, TRANSIENT_DB + 1, "call")(block)
-					if (block === 6)
-						h.s.onTrack(
-							candidate(6, { gate: "passed", channelSnrDb: 7 }, "call"),
-							false,
-							0,
-							{ followOnAir: true },
-						)
-				},
-				6,
-			)
-			expect(blocks).toBe(6)
-			expect(h.s.progress().holdingOn).toBe("call")
-		})
-
-		it("a same-level call on the next visit after a failure at 5 dB passes and holds", () => {
-			const h = harness()
-			h.start()
-			expect(runVisit(h, steady(h, 5, "first"))).toBe(W)
-			h.toNextHop()
-			h.toNextHop()
-			runVisit(
-				h,
-				block => {
-					steady(h, 5, "call")(block)
+					steady(h, snrDb, "call")(block)
 					if (block === 6)
 						h.s.onTrack(
 							candidate(6, { gate: "passed", channelSnrDb: 6 }, "call"),
@@ -1176,159 +1074,110 @@ describe("a rest binds only what looks like the emission that earned it", () => 
 				},
 				6,
 			)
+			expect(blocks).toBe(6)
 			expect(h.s.progress().holdingOn).toBe("call")
-		})
+		},
+	)
 
-		it.each([
-			["under the standard level", STANDARD_MS, REACH_DB - 0.01, D],
-			["at the standard level", STANDARD_MS, REACH_DB, W],
-			["under the burst level", BURST_MS, BURST_REACH_DB - 0.01, D],
-			["at the burst level", BURST_MS, BURST_REACH_DB, BURST_ANSWER_BLOCKS],
-		])(
-			"a candidate %s: the bound of the rest",
-			(_name, minMs, snrDb, expected) => {
-				const h = harness()
-				weakHistory(h)
-				expect(runVisit(h, steady(h, snrDb, "s", minMs))).toBe(expected)
-			},
+	it("through the real gate: a run reading 4.2 dB five times and then 6 dB passes at block 6 and holds after a failed transient", () => {
+		const r = throughTracker([4.2, 4.2, 4.2, 4.2, 4.2, 6, 6, 6], h =>
+			failedTransient(h, TRANSIENT_DB, TRACKER_LINE_HZ),
 		)
-
-		it("through the real gate: a call that reads 5 dB on its first blocks and 6 dB later passes on a rested frequency", () => {
-			const r = throughTracker([5, 5, 5, 5, 5, 6, 6, 6], h =>
-				failedTransient(h, TRANSIENT_DB, TRACKER_LINE_HZ),
-			)
-			expect(r.passedAt).toBe(6)
-			expect(r.holding).toBe(true)
-		})
-
-		it("through the real gate: a line under the level has no pass to lose, and rests", () => {
-			const line = Array.from({ length: 12 }, () => REACH_DB - 0.1)
-			const free = throughTracker(line)
-			expect(free.passedAt).toBeNull()
-			expect(free.leftAt).toBe(STANDARD_ANSWER_BLOCKS)
-			const rested = throughTracker(line, h =>
-				failedTransient(h, TRANSIENT_DB, TRACKER_LINE_HZ),
-			)
-			expect(rested.passedAt).toBeNull()
-			expect(rested.leftAt).toBe(DWELL_BLOCKS)
-		})
+		expect(r.passedAt).toBe(6)
+		expect(r.leftAt).toBeNull()
+		expect(r.holding).toBe(true)
 	})
 
-	it("[5, 8, fourteen quiet visits] repeats its two waits: an expired history keeps nothing", () => {
-		const period = [5, 8, ...Array.from({ length: 14 }, () => 0)]
-		expect(waitedSweeps([...period, ...period, ...period])).toEqual([
-			1, 2, 17, 18, 33, 34,
-		])
+	it("through the real gate: a line that never reaches the pass level pays to the bound, with or without a failure before it", () => {
+		const line = Array.from({ length: 12 }, () => 4.4)
+		const free = throughTracker(line)
+		expect(free.passedAt).toBeNull()
+		expect(free.leftAt).toBe(W)
+		const after = throughTracker(line, h =>
+			failedTransient(h, TRANSIENT_DB, TRACKER_LINE_HZ),
+		)
+		expect(after.passedAt).toBeNull()
+		expect(after.leftAt).toBe(W)
 	})
 
-	describe("a rest earned by a pass with nothing to hold", () => {
-		/** `levels[i]`, 0 for no signal: a standard-gate pass at block 6, not held. Waited sweeps (1-based). */
-		function passedSweeps(levels: readonly number[]): number[] {
-			const h = harness()
-			h.start()
-			const out: number[] = []
-			levels.forEach((db, i) => {
-				const id = `p${i}`
-				const blocks = runVisit(h, block => {
-					if (db === 0) return
-					steady(h, db, id)(block)
-					if (block === 6)
-						h.s.onTrack(
-							candidate(6, { gate: "passed", channelSnrDb: db }, id),
-							false,
-							0,
-						)
-				})
-				if (blocks > DWELL_BLOCKS) out.push(i + 1)
-				h.toNextHop()
-				h.toNextHop()
-			})
-			return out
-		}
-
-		it("binds what reads like it, and a margin over it is another transmission", () => {
-			expect(passedSweeps([10, 10])).toEqual([1])
-			expect(passedSweeps([10, 10 + STRONGER_DB - 0.01])).toEqual([1])
-			expect(passedSweeps([10, 10 + STRONGER_DB])).toEqual([1, 2])
-		})
-
-		it("one margin's wait per history: the history's expiry starts the levels over", () => {
-			const period = [10, 13, ...Array.from({ length: 14 }, () => 0)]
-			// Rests of one and two sweeps, then 8 quiet sweeps forget the history.
-			expect(passedSweeps([...period, ...period, ...period])).toEqual([
-				1, 2, 17, 18, 33, 34,
-			])
-			// Inside the history the same 10 dB stays bound.
-			expect(passedSweeps([10, 13, 0, 10])).toEqual([1, 2])
-		})
+	// Feature: sweep-qualification, Property 3: no failure takes a later wait away
+	// Validates: Requirements 3 (no call is skipped, a line that does not answer pays per visit)
+	it("whatever failed before, every reading at the threshold or over gets its wait on every visit", () => {
+		fc.assert(
+			fc.property(
+				fc.array(fc.double({ min: 3, max: 30, noNaN: true }), {
+					minLength: 20,
+					maxLength: 20,
+				}),
+				levels => {
+					const h = harness()
+					h.start()
+					levels.forEach((level, i) => {
+						expect(runVisit(h, steady(h, level, `e${i}`))).toBe(W)
+						h.toNextHop()
+						h.toNextHop()
+					})
+				},
+			),
+			{ numRuns: 100 },
+		)
 	})
 
-	it("a hold clears every rest within the lookup's tolerance, across a bin boundary", () => {
-		const REST_HZ = 400_099_900
-		const CALL_HZ = 400_100_100
-		// Either side of a 12.5 kHz bin edge, and the same frequency for a lookup.
-		expect(Math.floor(REST_HZ / 12_500)).not.toBe(Math.floor(CALL_HZ / 12_500))
-		const h = harness()
-		h.start()
-		const at = (block: number, snrDb: number, hz: number, id: string): void => {
-			if (block === 1 || block === 2 || block === 5)
-				h.s.onCandidate(
-					candidate(block, { channelSnrDb: snrDb, centreHz: hz }, id),
-					STANDARD_MS,
+	describe("a signals-only job", () => {
+		const spec = makeNormalisedSpec({
+			revisit: { share: 0, maxIntervalMs: null },
+			signalsOnly: true,
+			hold: { policy: "hold", confirmHoldMs: {}, maxHoldMs: 60_000, hangMs: 0 },
+		})
+		const VOICE_DB = 10
+		/** A voice pass at block 6 on each of `sweeps` visits: the blocks of each, the passes heard. */
+		function voiceVisits(h: ReturnType<typeof harness>, sweeps: number) {
+			const blocks: number[] = []
+			let heard = 0
+			for (let i = 0; i < sweeps; i++) {
+				const id = `v${i}`
+				blocks.push(
+					runVisit(h, block => {
+						steady(h, VOICE_DB, id)(block)
+						if (block === 6) {
+							heard++
+							h.s.onTrack(
+								candidate(6, { gate: "passed", channelSnrDb: VOICE_DB }, id),
+								false,
+								0,
+								{ followOnAir: true },
+							)
+						}
+					}),
 				)
+				h.toNextHop()
+				h.toNextHop()
+			}
+			return { blocks, heard }
 		}
-		const toHop0 = (): void => {
-			h.toNextHop()
-			h.toNextHop()
-		}
-		// Waits at sweeps 1, 3 and 6: the last failure earned a rest of four sweeps.
-		const history = [0, 1, 2, 3, 4, 5].map(i => {
-			const blocks = runVisit(h, b => at(b, TRANSIENT_DB, REST_HZ, `r${i}`))
-			toHop0()
-			return blocks
+
+		it("repeated 10 dB voice passes listen for the answer on every visit, and an ID at the same level passes", () => {
+			const h = harness(spec)
+			h.start()
+			const r = voiceVisits(h, 12)
+			expect(r.blocks).toEqual(Array.from({ length: 12 }, () => 6))
+			expect(r.heard).toBe(12)
+			expect(voiceVisits(h, 1)).toEqual({ blocks: [6], heard: 1 })
+			expect(h.s.progress().holdingOn).toBeNull()
 		})
-		expect(history).toEqual([
-			STANDARD_ANSWER_BLOCKS,
-			DWELL_BLOCKS,
-			STANDARD_ANSWER_BLOCKS,
-			DWELL_BLOCKS,
-			DWELL_BLOCKS,
-			STANDARD_ANSWER_BLOCKS,
-		])
-		const CALL_DB = 12
-		runVisit(
-			h,
-			block => {
-				at(block, CALL_DB, CALL_HZ, "call")
-				if (block === 6)
-					h.s.onTrack(
-						candidate(
-							6,
-							{ gate: "passed", channelSnrDb: CALL_DB, centreHz: CALL_HZ },
-							"call",
-						),
-						false,
-						0,
-						{ followOnAir: true },
-					)
-			},
-			6,
-		)
-		expect(h.s.progress().holdingOn).toBe("call")
-		// The transmission ends: the hop is left once the hold is over.
-		h.note(h.s.onTrackClosed("call"))
-		let guard = 0
-		const before = h.tuned.length
-		while (h.tuned.length === before && guard++ < 400) {
-			h.block()
-			h.note(h.s.tick(h.clock))
-		}
-		expect(h.tuned.length).toBeGreaterThan(before)
-		h.s.onEpochStarted(h.sample)
-		while (h.tuned[h.tuned.length - 1] !== HOP0 && guard++ < 400) h.toNextHop()
-		expect(runVisit(h, b => at(b, TRANSIENT_DB, CALL_HZ, "later"))).toBe(
-			STANDARD_ANSWER_BLOCKS,
-		)
+
+		it("after those passes a candidate not answered yet keeps the visit to the bound, on every visit", () => {
+			const h = harness(spec)
+			h.start()
+			voiceVisits(h, 6)
+			const unanswered: number[] = []
+			for (let i = 0; i < 6; i++) {
+				unanswered.push(runVisit(h, steady(h, VOICE_DB, `u${i}`)))
+				h.toNextHop()
+				h.toNextHop()
+			}
+			expect(unanswered).toEqual(Array.from({ length: 6 }, () => W))
+		})
 	})
 
 	describe("a steady emitter that passes with nothing to hold", () => {
@@ -1362,7 +1211,7 @@ describe("a rest binds only what looks like the emission that earned it", () => 
 		}
 		const C = 5 // its class wait: to the fifth block
 
-		it("keeps its class wait on every visit: a rest takes it from no voice call, at 100 ms each", () => {
+		it("keeps its class wait on every visit, at 100 ms each", () => {
 			expect(burstVisits(6, () => 12)).toEqual([C, C, C, C, C, C])
 		})
 

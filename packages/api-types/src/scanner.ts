@@ -1078,9 +1078,42 @@ export const SCANNER_RECORDER_ERRORS = [
 	"recovery-ambiguous",
 ] as const
 
+/** The end a recording's store operation was given (`ScannerRecorderReceiptDetail.cutReason`). */
+export const SCANNER_RECORDER_CUTS = [
+	"completed",
+	"duration-limit",
+	"track-ended",
+	"cancelled",
+	"discovery-deleted",
+	"source-lost",
+	"epoch-changed",
+	"stream-changed",
+	"channel-invalidated",
+	"engine-failed",
+	"shutdown",
+] as const
+
+/**
+ * Which check refused a store operation whose error is `admission-denied` or `invalid-binding`
+ * (`ScannerRecorderReceiptDetail.failure`).
+ */
+export const SCANNER_RECORDER_FAILURES = [
+	"cancelled",
+	"authority-unhealthy",
+	"discovery-removed",
+	"association-lost",
+	"binding-unusable",
+	"binding-not-live",
+	"commit-plan-stale",
+] as const
+
 export interface ScannerRecorderReceiptDetail {
 	outcome: "finalized" | "aborted" | "failed"
 	errorCode: (typeof SCANNER_RECORDER_ERRORS)[number] | null
+	/** Why a recording ended; absent on older cores. */
+	cutReason?: (typeof SCANNER_RECORDER_CUTS)[number] | null
+	/** Which check refused it, null when none did; absent on older cores. */
+	failure?: (typeof SCANNER_RECORDER_FAILURES)[number] | null
 }
 
 export interface ScannerRecorderDecisionEntry {

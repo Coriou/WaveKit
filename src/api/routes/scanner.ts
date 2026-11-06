@@ -17,7 +17,9 @@
  * - 503 `SCANNER_DISABLED`, `SCANNER_STATE_UNAVAILABLE`
  */
 import {
+	SCANNER_RECORDER_CUTS,
 	SCANNER_RECORDER_ERRORS,
+	SCANNER_RECORDER_FAILURES,
 	SCANNER_RECORDER_FLAGS,
 	SCANNER_RECORDER_FLAG_SOURCES,
 } from "@wavekit/api-types"
@@ -569,6 +571,14 @@ const discoveryRecorderSchema = {
 						errorCode: {
 							type: ["string", "null"],
 							enum: [...SCANNER_RECORDER_ERRORS, null],
+						},
+						cutReason: {
+							type: ["string", "null"],
+							enum: [...SCANNER_RECORDER_CUTS, null],
+						},
+						failure: {
+							type: ["string", "null"],
+							enum: [...SCANNER_RECORDER_FAILURES, null],
 						},
 					},
 				},

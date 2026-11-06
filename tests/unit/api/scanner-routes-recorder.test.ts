@@ -28,7 +28,12 @@ const decisions: ScannerRecorderDiscovery = {
 		sourceId: "rtl",
 		observationId: "o_1",
 		discoveryId: "d_a",
-		receipt: { outcome: "failed", errorCode: "write-failed" },
+		receipt: {
+			outcome: "failed",
+			errorCode: "admission-denied",
+			cutReason: "completed",
+			failure: "association-lost",
+		},
 		unclean: {
 			flag: "spur",
 			raisedBy: "snapshot",

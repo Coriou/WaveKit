@@ -9,13 +9,19 @@ import {
 	RECORDER_MAX_OBSERVATIONS,
 	RECORDER_RECENT_DECISIONS,
 	RECORDER_RECENT_REFUSALS,
+	SCANNER_RECORDER_CUTS,
 	SCANNER_RECORDER_DECISIONS,
+	SCANNER_RECORDER_FAILURES,
 } from "@wavekit/api-types"
 import {
 	RECORDER_LOG_LIMIT,
 	RECORDER_LOG_WINDOW_MS,
 	RecorderDecisions,
 } from "../../../../src/core/scanner/channel/recorder-decisions.js"
+import {
+	AnalogCutSchema,
+	AnalogFailureSchema,
+} from "../../../../src/core/scanner/store/analog-operations.js"
 import {
 	LOW,
 	LOW_FS,
@@ -423,14 +429,14 @@ it("keeps receipt details in status, discovery detail and logs", async () => {
 		operationId: "op-test",
 	}
 	decisions.note("discarded:aborted", ref(1, "d"), true, null, receipt)
-	expect(decisions.status().recent[0]?.receipt).toEqual({
+	const dto = {
 		outcome: receipt.outcome,
 		errorCode: receipt.errorCode,
-	})
-	expect(decisions.forDiscovery("d")?.last.receipt).toEqual({
-		outcome: receipt.outcome,
-		errorCode: receipt.errorCode,
-	})
+		cutReason: receipt.cutReason,
+		failure: null,
+	}
+	expect(decisions.status().recent[0]?.receipt).toEqual(dto)
+	expect(decisions.forDiscovery("d")?.last.receipt).toEqual(dto)
 	await flushLogs()
 	expect(lines[0]).toMatchObject({
 		receiptOutcome: "failed",
@@ -439,6 +445,43 @@ it("keeps receipt details in status, discovery detail and logs", async () => {
 		receiptFailure: null,
 		operationId: "op-test",
 	})
+})
+
+it("a discard's closed cause reaches the API's decision, and its operation id does not", () => {
+	const decisions = new RecorderDecisions(pino({ level: "silent" }), () => 0)
+	decisions.note("discarded:aborted", ref(1, "d"), true, null, {
+		outcome: "failed",
+		errorCode: "admission-denied",
+		cutReason: "discovery-deleted",
+		failure: "association-lost",
+		operationId: "op-test",
+	})
+	const dto = {
+		outcome: "failed",
+		errorCode: "admission-denied",
+		cutReason: "discovery-deleted",
+		failure: "association-lost",
+	}
+	expect(decisions.status().recent[0]?.receipt).toEqual(dto)
+	expect(decisions.forDiscovery("d")?.last.receipt).toEqual(dto)
+})
+
+it("a receipt without a cause leaves its fields out, as an older core's does", () => {
+	const decisions = new RecorderDecisions(pino({ level: "silent" }), () => 0)
+	decisions.note("discarded:aborted", ref(1, "d"), true, null, {
+		outcome: "aborted",
+		errorCode: null,
+		operationId: "op-test",
+	})
+	expect(decisions.status().recent[0]?.receipt).toEqual({
+		outcome: "aborted",
+		errorCode: null,
+	})
+})
+
+it("the API's closed cause lists are the store's", () => {
+	expect(SCANNER_RECORDER_CUTS).toEqual(AnalogCutSchema.options)
+	expect(SCANNER_RECORDER_FAILURES).toEqual(AnalogFailureSchema.options)
 })
 
 it("a discard's closed cause reaches its log line", async () => {
