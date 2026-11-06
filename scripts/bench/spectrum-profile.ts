@@ -1072,7 +1072,7 @@ async function main(): Promise<number> {
 		rates,
 		snapshotWorker,
 		notes: [
-			"Main decides R 9.3 from an idle-host run; both hot ratios and utilization are measurements only.",
+			"Main decides R 9.3 from an idle-host run; the hot ratio and utilization are measurements only.",
 			"hotOverBusy counts window + fft + power + wire.",
 			"Parking (DT.2) is not implemented. The 200 kHz job is mode in-window on the tuned centre, the parked-job equivalent on this base.",
 			"signalsOnly is set, so the operator job does not request decoder trials. offsetProbes stays at its default false.",
