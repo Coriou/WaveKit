@@ -2139,6 +2139,17 @@ source plays at a time; digital wins over analog after the analog over releases
   and source rate changes; only the stall timeout, a server stop or shutdown
   closes them. The per-client queue bound and the 30 s stall disconnect of
   `/stream` apply.
+- Delivery is paced in 20 ms blocks, but a late pacer catches up in one tick, so a
+  reader can receive up to 500 ms of audio (48 000 bytes) at once. A jitter buffer
+  smaller than 500 ms can overflow on that burst; size for it or expect to discard.
+- Above 500 ms the pacer stops catching up: it sends those 500 ms, skips the rest of
+  the time and counts one `autoRoute.clockRebases`. The audio it did not send stays
+  queued, up to 3 s, so latency rises and a reader that keeps a short buffer can
+  discard back to its target (the web app's does).
+- Catch-up does not recover audio lost to IQ congestion inside the core. Audio that
+  never reached the route becomes zeros at full rate: the byte rate looks perfect
+  and the listener hears holes. `autoRoute.underruns` counts those 20 ms blocks.
+  The root cause is core load.
 - Same server, access rules, stream leases and CORS as `/stream` (below).
 - Status: `autoRoute` on [GET /api/live-audio/status](#get-apilive-audiostatus) and
   on `live-audio:level`.

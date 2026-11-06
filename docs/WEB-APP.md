@@ -202,10 +202,21 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
 **Open on CTCSS**. The `autoSquelch` field of
 [`GET /api/live-audio/status`](API.md#get-apilive-audiostatus) reports the gate.
 
-**Connecting…** means Listen is starting, playing audio stopped arriving for 2 s, or the stream ended and is being reattached. A
-shorter gap on an open stream keeps **Listening** or **Squelched**, and **Audio options** counts it
-next to the latency, for example `12 audio gaps`. Gaps usually mean the core is too busy to send
-audio on time.
+**Connecting…** means Listen is starting, no audio has played for about 2 s, or the stream ended and is
+being reattached. If no data at all arrives for 5 s, Listen reattaches by itself; after about 28 s of
+failed attempts it shows **No audio** with the reason and keeps trying.
+
+A short gap on an open stream keeps **Listening**. When over 10% of the audio you should be hearing
+did not play in the last 10 s, the card says so next to it, for example
+**Listening** `Breaking up · 71% heard`, until the figure is back within 5%. It needs at least 5 s of open
+signal to judge, and silence from a closed squelch never counts. **Audio options** gives the figure and
+the total missing since Listen started, next to the latency, for example `71% heard · 17.4 s missing`;
+hover it for what the core reported. The web app reads the core's figure every 2 s, so it can lag a little.
+The latency includes audio waiting in the core.
+
+Breaking up usually means the core is too busy. It catches up a late stream by up to 500 ms at once, which
+hides short stalls, but it cannot recover audio it never received: when the receiver's data backs up inside
+the core (`Branch congested` in its log), the holes stay until the load comes down. The `<audio>` fallback, used where the browser lacks Web Audio, reattaches the same way but shows no figure.
 
 ## Drawers
 

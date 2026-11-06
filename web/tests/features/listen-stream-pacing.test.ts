@@ -1,5 +1,9 @@
 // One long-lived /auto stream against the real store, controller and jitter ring: what the card says when
 // the core is too busy to keep its 20 ms pacer on time. The connection never drops in these runs.
+import {
+	LIVE_AUDIO_AUTO_ROUTE_BLOCK_MS,
+	LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS,
+} from "@wavekit/api-types"
 import type { LiveAudioStatus } from "@wavekit/api-types"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ApiClient, EventsClient } from "../../src/data/index.ts"
@@ -8,23 +12,31 @@ import {
 	audioAttachKey,
 	autoRouteSource,
 } from "../../src/features/listen/audio.ts"
+import { NO_AUDIO_HEALTH } from "../../src/features/listen/audio-health.ts"
 import {
+	DEAD_STREAM_MS,
 	ListenController,
+	ROUTE_POLL_MS,
+	STALL_GRACE_MS,
 	type ListenPhase,
 	type ListenPlayer,
 } from "../../src/features/listen/controller.ts"
-import { PcmRing, STATS_EVERY_S } from "../../src/features/listen/pcm.ts"
+import {
+	PcmRing,
+	RING_MAX_MS,
+	STATS_EVERY_S,
+} from "../../src/features/listen/pcm.ts"
 import type { RingStats } from "../../src/features/listen/pcm.ts"
 import type { PcmPlayerEvents } from "../../src/features/listen/pcm-player.ts"
 
 const BASE = "http://localhost:5173/"
 const RATE = 48_000
-const BLOCK_MS = 20
+const BLOCK_MS = LIVE_AUDIO_AUTO_ROUTE_BLOCK_MS
 const BLOCK_SAMPLES = 960
-const CATCHUP_MAX_BLOCKS = 5
+const CATCHUP_MAX_BLOCKS = LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS
 const QUANTUM = 128
 
-function runningStatus(): LiveAudioStatus {
+function runningStatus(underruns = 0): LiveAudioStatus {
 	return {
 		running: true,
 		sourceId: "rtl-0",
@@ -48,15 +60,15 @@ function runningStatus(): LiveAudioStatus {
 			digitalAvailable: false,
 			active: "analog",
 			since: "2026-01-01T00:00:00.000Z",
-			underruns: 0,
+			underruns,
 			droppedMs: 0,
 			clockRebases: 0,
-			bufferedMs: 60,
+			latencyMs: 60,
 		},
 	} as unknown as LiveAudioStatus
 }
 
-/** The core's `/auto` pacer (src/core/auto-listen/router.ts tick): 5 blocks of catch-up, the rest is never sent. */
+/** The core's `/auto` pacer (src/core/auto-listen/router.ts tick): CATCHUP blocks at most, the rest is never sent. */
 class CorePacer {
 	private startAt: number
 	private emitted = 0
@@ -85,7 +97,7 @@ class CorePacer {
 	}
 }
 
-function harness() {
+function harness(routeUnderruns: () => number = () => 0) {
 	const handlers = new Map<string, (payload: unknown) => void>()
 	const events = {
 		subscribe: () => () => undefined,
@@ -96,7 +108,7 @@ function harness() {
 		onReconnected: () => () => undefined,
 	} as unknown as EventsClient
 	const api = {
-		get: () => Promise.resolve(runningStatus()),
+		get: () => Promise.resolve(runningStatus(routeUnderruns())),
 		post: () => Promise.resolve({ success: true }),
 	} as unknown as ApiClient
 	const store = new LiveAudioStore(api, events)
@@ -162,7 +174,10 @@ function runStream(
 	let lastStats = 0
 	let audibleMs = 0
 	for (let t = 1; t <= ms; t++) {
-		pacer.step(t, options.stalled(t), () => ring.push(block))
+		pacer.step(t, options.stalled(t), () => {
+			ring.push(block)
+			h.events().onData()
+		})
 		quantaDue += RATE / 1000 / QUANTUM
 		while (quantaDue >= 1) {
 			quantaDue -= 1
@@ -186,6 +201,7 @@ function runStream(
 				noiseFloorDbfs: -100,
 				squelchOpen: !options.silent,
 				thresholdDbfs: -90,
+				autoRoute: { active: options.silent ? "none" : "analog" },
 			})
 		vi.advanceTimersByTime(1)
 	}
@@ -193,8 +209,16 @@ function runStream(
 	return { ring, pacer, audibleMs }
 }
 
-/** A loop stall of 290 ms every second: 100 ms catches up, 190 ms is never sent. */
+/** 290 ms every second: under the bound, so all of it is caught up and only the first stall drains the ring. */
 const busyCore = (t: number) => t % 1000 < 290
+/** Past the bound: 1 900 ms with no byte, 500 ms catches up, 1 400 ms is never sent. */
+const drowningCore = (t: number) => t % 2150 < 1900
+
+/** Lets the route reading's promise settle between fake-timer steps. */
+async function settle(ms = 0) {
+	vi.advanceTimersByTime(ms)
+	for (let i = 0; i < 5; i++) await Promise.resolve()
+}
 
 describe("Listen on a stream the core paces late", () => {
 	beforeEach(() => {
@@ -203,6 +227,10 @@ describe("Listen on a stream the core paces late", () => {
 
 	afterEach(() => {
 		vi.useRealTimers()
+	})
+
+	it("the bound the pacer uses is one the ring can take", () => {
+		expect(CATCHUP_MAX_BLOCKS * BLOCK_MS).toBe(RING_MAX_MS)
 	})
 
 	it.each([
@@ -217,41 +245,51 @@ describe("Listen on a stream the core paces late", () => {
 			const h = harness()
 			await h.listen.start()
 			expect(h.plays).toEqual(["http://localhost:3102/auto"])
-			const { ring, pacer, audibleMs } = runStream(h, 60_000, {
+			const { ring, pacer } = runStream(h, 60_000, {
 				stalled: busyCore,
 				silent,
 			})
-			// the scenario: the core wrote about four fifths of real time, one connected client
-			expect(pacer.blocks * BLOCK_MS).toBeGreaterThan(0.78 * 60_000)
-			expect(pacer.blocks * BLOCK_MS).toBeLessThan(0.84 * 60_000)
-			// the audio really had holes, and the stream was never touched
-			expect(ring.underruns).toBeGreaterThan(30)
-			expect(audibleMs).toBeLessThan(0.9 * 60_000)
+			// a stall under the bound is caught up: all of real time was written, one connected client
+			expect(pacer.blocks * BLOCK_MS).toBeGreaterThan(0.99 * 60_000)
+			expect(ring.underruns).toBeLessThanOrEqual(1)
 			expect(h.plays).toHaveLength(1)
 			expect(h.stops()).toBe(0)
 			expect(h.timeline.map(e => e.phase)).toEqual(["connecting", "playing"])
 			expect(h.listen.get().phase).toBe("playing")
+			expect(h.listen.get().audio.breaking).toBe(false)
 		},
 	)
 
-	it("stalls the ring could ride out still drain it: late time is never sent again", async () => {
+	it("a stream mostly dry says breaking up, not a clean Listening, and stays connected", async () => {
 		const h = harness()
 		await h.listen.start()
-		// 150 ms every second: shorter than the ring's 200 ms, but 50 ms is lost each time
-		const { ring } = runStream(h, 60_000, { stalled: t => t % 1000 < 150 })
-		expect(ring.underruns).toBeGreaterThanOrEqual(10)
-		expect(h.timeline.map(e => e.phase)).toEqual(["connecting", "playing"])
+		const { ring, audibleMs } = runStream(h, 60_000, { stalled: drowningCore })
+		expect(ring.underruns).toBeGreaterThan(20)
+		expect(audibleMs).toBeLessThan(0.5 * 60_000)
+		expect(h.plays).toHaveLength(1)
+		expect(h.listen.get().phase).toBe("playing")
+		const { audio } = h.listen.get()
+		expect(audio.breaking).toBe(true)
+		expect(audio.heardPct).toBeLessThan(50)
+		// what the readout says agrees with what the ring rendered, within one window's granularity
+		expect(Math.abs(audio.missingMs - (60_000 - audibleMs))).toBeLessThan(2_000)
 	})
 
-	it("counts the holes this Listen heard", async () => {
+	it("squelch silence never reads as breaking up, whatever the stream does", async () => {
 		const h = harness()
 		await h.listen.start()
-		const { ring } = runStream(h, 20_000, { stalled: busyCore })
-		expect(ring.underruns).toBeGreaterThan(5)
-		expect(h.listen.get().audioGaps).toBe(ring.underruns)
+		const { audibleMs } = runStream(h, 60_000, {
+			stalled: drowningCore,
+			silent: true,
+		})
+		expect(audibleMs).toBeLessThan(0.5 * 60_000)
+		const { audio } = h.listen.get()
+		expect(audio.breaking).toBe(false)
+		expect(audio.heardPct).toBeNull()
+		expect(audio.missingMs).toBe(0)
 	})
 
-	it("says Connecting once bytes stop for real on an open connection, and recovers", async () => {
+	it("says Connecting within the grace when bytes stop, reattaches at the dead bound, and recovers", async () => {
 		const h = harness()
 		await h.listen.start()
 		// 5 s of good audio, 10 s with no byte at all, then good audio again
@@ -261,7 +299,204 @@ describe("Listen on a stream the core paces late", () => {
 		const flip = h.timeline[2]?.at ?? 0
 		// the ring drains 200 ms after the last byte, then the grace runs
 		expect(flip).toBeGreaterThan(5_000)
-		expect(flip).toBeLessThanOrEqual(5_000 + 200 + 2_000 + 25)
+		expect(flip).toBeLessThanOrEqual(5_000 + 200 + STALL_GRACE_MS + 25)
+		// the last byte, the 5 s bound, the first retry's 1 s, and the bytes return before the second bound
+		expect(h.plays).toHaveLength(2)
+	})
+})
+
+describe("Listen reads the core's zero-fill", () => {
+	beforeEach(() => {
+		vi.useFakeTimers()
+	})
+
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
+	it("zeros at full rate count as missing, on a stream the ring finds perfect", async () => {
+		let underruns = 1_000
+		const h = harness(() => underruns)
+		await h.listen.start()
+		const ring = {
+			playing: true,
+			bufferedMs: 200,
+			underruns: 0,
+			droppedSamples: 0,
+			renderedMs: 0,
+			dryMs: 0,
+		}
+		h.events().onStats(ring)
+		await settle()
+		for (let i = 1; i <= 80; i++) {
+			// 290 ms of every second becomes zeros: 14.5 blocks per second, 3.625 per 250 ms
+			underruns += 3.625
+			ring.renderedMs += 250
+			h.events().onStats({ ...ring })
+			await settle(250)
+		}
+		const { audio, latencyMs } = h.listen.get()
+		expect(ring.dryMs).toBe(0)
+		expect(audio.breaking).toBe(true)
+		// once steady the 10 s window holds five 2 s readings of 580 ms: 29% missing
+		expect(audio.heardPct).toBe(71)
+		// 20 s less the last reading's 2 s, at 290 ms a second
+		expect(audio.coreFilledMs).toBe(5_200)
+		expect(audio.missingMs).toBe(audio.coreFilledMs)
+		// ring 200 + core backlog 60
+		expect(latencyMs).toBe(260)
+	})
+
+	it("reads at most once per bound, in ring time", async () => {
+		const get = vi.fn(() => Promise.resolve(runningStatus()))
+		const h = harness()
+		h.store.readAutoRoute = () => get().then(status => status.autoRoute ?? null)
+		await h.listen.start()
+		const stats = {
+			playing: true,
+			bufferedMs: 200,
+			underruns: 0,
+			droppedSamples: 0,
+			renderedMs: 0,
+			dryMs: 0,
+		}
+		h.events().onStats(stats)
+		await settle()
+		expect(get).toHaveBeenCalledTimes(1)
+		h.events().onStats({ ...stats, renderedMs: ROUTE_POLL_MS - 1 })
+		await settle()
+		expect(get).toHaveBeenCalledTimes(1)
+		h.events().onStats({ ...stats, renderedMs: ROUTE_POLL_MS })
+		await settle()
+		expect(get).toHaveBeenCalledTimes(2)
+	})
+
+	it("a reading that returns after Stop and Listen again is ignored", async () => {
+		let release: (route: null) => void = () => undefined
+		const h = harness()
+		const read = vi.fn(
+			() =>
+				new Promise<null>(resolve => {
+					release = resolve
+				}),
+		)
+		h.store.readAutoRoute = read
+		await h.listen.start()
+		const stats = {
+			playing: true,
+			bufferedMs: 200,
+			underruns: 0,
+			droppedSamples: 0,
+			renderedMs: 0,
+			dryMs: 0,
+		}
+		h.events().onStats(stats)
+		expect(read).toHaveBeenCalledTimes(1)
+		await h.listen.stop()
+		await h.listen.start()
+		h.events().onStats(stats)
+		// not blocked by the old one still in flight
+		expect(read).toHaveBeenCalledTimes(2)
+		release(null)
+		await settle()
+		expect(read).toHaveBeenCalledTimes(2)
+	})
+})
+
+describe("Listen on a stream that went quiet", () => {
+	const playing: RingStats = {
+		playing: true,
+		bufferedMs: 200,
+		underruns: 0,
+		droppedSamples: 0,
+		renderedMs: 0,
+		dryMs: 0,
+	}
+
+	beforeEach(() => {
+		vi.useFakeTimers()
+	})
+
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
+	async function live() {
+		const h = harness()
+		await h.listen.start()
+		h.events().onData()
+		h.events().onStats(playing)
+		return h
+	}
+
+	it("the bound is past the grace and the longest live gap", () => {
+		expect(DEAD_STREAM_MS).toBe(5_000)
+		expect(DEAD_STREAM_MS).toBeGreaterThan(STALL_GRACE_MS + 200)
+	})
+
+	it("does not reattach just under the bound, and does at it", async () => {
+		const h = await live()
+		vi.advanceTimersByTime(DEAD_STREAM_MS - 1)
+		expect(h.listen.get().phase).toBe("playing")
+		expect(h.plays).toHaveLength(1)
+		vi.advanceTimersByTime(1)
+		expect(h.listen.get().phase).toBe("connecting")
+		vi.advanceTimersByTime(999)
+		expect(h.plays).toHaveLength(1)
+		vi.advanceTimersByTime(1)
+		expect(h.plays).toHaveLength(2)
+	})
+
+	it("a slow stream with a byte inside each bound is alive, however dry the ring", async () => {
+		const h = await live()
+		for (let i = 0; i < 20; i++) {
+			vi.advanceTimersByTime(DEAD_STREAM_MS - 1)
+			h.events().onData()
+		}
+		expect(h.plays).toHaveLength(1)
+		expect(h.stops()).toBe(0)
+	})
+
+	it("a connection that never sends its first byte has the same bound", async () => {
+		const h = harness()
+		await h.listen.start()
+		vi.advanceTimersByTime(DEAD_STREAM_MS)
+		expect(h.listen.get().phase).toBe("connecting")
+		vi.advanceTimersByTime(1_000)
+		expect(h.plays).toHaveLength(2)
+	})
+
+	it("repeated silence ends in the error state, keeps trying, and audio clears it", async () => {
+		const h = await live()
+		// 5 + 1 + 5 + 2 + 5 + 5 + 5 = 28 s from the last byte
+		vi.advanceTimersByTime(28_000 - 1)
+		expect(h.listen.get().phase).toBe("connecting")
+		vi.advanceTimersByTime(1)
+		expect(h.listen.get().phase).toBe("error")
+		expect(h.listen.get().error).toBe("No audio arrived for 5 s")
+		const plays = h.plays.length
+		vi.advanceTimersByTime(5_000)
+		expect(h.plays.length).toBe(plays + 1)
+		h.events().onData()
+		h.events().onStats(playing)
+		expect(h.listen.get().phase).toBe("playing")
+		expect(h.listen.get().error).toBeNull()
+	})
+
+	it("stopping clears it: no timer is left and nothing reattaches", async () => {
+		const h = await live()
+		await h.listen.stop()
+		expect(vi.getTimerCount()).toBe(0)
+		vi.advanceTimersByTime(60_000)
+		expect(h.plays).toHaveLength(1)
+		expect(h.listen.get().phase).toBe("off")
+	})
+
+	it("a blocked context keeps saying Tap to play", async () => {
+		const h = await live()
+		h.events().onBlocked()
+		vi.advanceTimersByTime(3 * DEAD_STREAM_MS)
+		expect(h.listen.get().phase).toBe("blocked")
 		expect(h.plays).toHaveLength(1)
 	})
 })
@@ -272,6 +507,8 @@ describe("Listen's stall grace", () => {
 		bufferedMs: 200,
 		underruns: 0,
 		droppedSamples: 0,
+		renderedMs: 0,
+		dryMs: 0,
 	}
 	const dry: RingStats = { ...playing, playing: false, bufferedMs: 0 }
 
@@ -314,7 +551,8 @@ describe("Listen's stall grace", () => {
 		h.events().onStats(dry)
 		vi.advanceTimersByTime(1_999)
 		h.events().onStats(playing)
-		vi.advanceTimersByTime(10_000)
+		h.events().onData()
+		vi.advanceTimersByTime(DEAD_STREAM_MS - 1)
 		expect(h.timeline.map(e => e.phase)).toEqual(["connecting", "playing"])
 	})
 
@@ -331,7 +569,7 @@ describe("Listen's stall grace", () => {
 		const h = await listening()
 		h.events().onStats(dry)
 		await h.listen.stop()
-		vi.advanceTimersByTime(10_000)
+		vi.advanceTimersByTime(DEAD_STREAM_MS + 10_000)
 		expect(h.listen.get().phase).toBe("off")
 	})
 
@@ -345,6 +583,7 @@ describe("Listen's stall grace", () => {
 
 	it("the <audio> fallback holds its waiting event to the same bound", async () => {
 		const handlers = new Map<string, () => void>()
+		const play = vi.fn(() => Promise.resolve())
 		const el = {
 			addEventListener: (type: string, fn: () => void) =>
 				void handlers.set(type, fn),
@@ -352,7 +591,7 @@ describe("Listen's stall grace", () => {
 			removeAttribute: () => undefined,
 			pause: () => undefined,
 			load: () => undefined,
-			play: () => Promise.resolve(),
+			play,
 			volume: 1,
 		} as unknown as HTMLAudioElement
 		const store = new LiveAudioStore(
@@ -373,25 +612,36 @@ describe("Listen's stall grace", () => {
 		vi.advanceTimersByTime(1_999)
 		expect(listen.get().phase).toBe("playing")
 		handlers.get("playing")?.()
-		vi.advanceTimersByTime(10_000)
+		for (let i = 0; i < 5; i++) {
+			vi.advanceTimersByTime(2_000)
+			handlers.get("progress")?.()
+		}
 		expect(listen.get().phase).toBe("playing")
 		handlers.get("waiting")?.()
 		vi.advanceTimersByTime(2_000)
 		expect(listen.get().phase).toBe("connecting")
+		// and it reattaches at the dead bound, its last sign of bytes being the progress before the wait
+		vi.advanceTimersByTime(DEAD_STREAM_MS - 2_000)
+		vi.advanceTimersByTime(1_000)
+		expect(play).toHaveBeenCalledTimes(2)
 		listen.dispose()
 	})
 
-	it("gaps start at zero on each Listen, whatever the ring counted before", async () => {
+	it("the readout starts clean on each Listen, whatever the ring counted before", async () => {
 		const h = harness()
 		await h.listen.start()
-		h.events().onStats({ ...playing, underruns: 7 })
-		expect(h.listen.get().audioGaps).toBe(0)
-		h.events().onStats({ ...dry, underruns: 8 })
-		expect(h.listen.get().audioGaps).toBe(1)
+		h.events().onStats({ ...playing, renderedMs: 60_000, dryMs: 9_000 })
+		for (let i = 1; i <= 8; i++)
+			h.events().onStats({
+				...playing,
+				renderedMs: 60_000 + i * 1_000,
+				dryMs: 9_000 + i * 500,
+			})
+		expect(h.listen.get().audio.missingMs).toBe(4_000)
 		await h.listen.stop()
 		await h.listen.start()
-		expect(h.listen.get().audioGaps).toBe(0)
-		h.events().onStats({ ...playing, underruns: 8 })
-		expect(h.listen.get().audioGaps).toBe(0)
+		expect(h.listen.get().audio).toEqual(NO_AUDIO_HEALTH)
+		h.events().onStats({ ...playing, renderedMs: 70_000, dryMs: 13_000 })
+		expect(h.listen.get().audio).toEqual(NO_AUDIO_HEALTH)
 	})
 })

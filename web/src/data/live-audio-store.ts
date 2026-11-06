@@ -3,6 +3,7 @@
  * squelch, offsetHz...), and the `live-audio` channel (status, config, level).
  */
 import type {
+	LiveAudioAutoRoute,
 	LiveAudioConfig,
 	LiveAudioLevel,
 	LiveAudioStatus,
@@ -74,6 +75,21 @@ export class LiveAudioStore extends Store<LiveAudioState> {
 			this.update(s => ({ ...s, status, loaded: true, error: null }))
 		} catch (error) {
 			this.update(s => ({ ...s, error: errorMessage(error) }))
+		}
+	}
+
+	/**
+	 * The `/auto` counters now, or null. The core broadcasts status only when something changes, so these
+	 * counters are read on demand. Nothing lands in the store: a fresh status redraws everything showing one.
+	 */
+	async readAutoRoute(): Promise<LiveAudioAutoRoute | null> {
+		try {
+			const status = await this.api.get<LiveAudioStatus>(
+				"/api/live-audio/status",
+			)
+			return status.autoRoute ?? null
+		} catch {
+			return null
 		}
 	}
 

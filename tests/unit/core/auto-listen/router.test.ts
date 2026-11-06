@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events"
 import type * as http from "node:http"
 import { describe, expect, it } from "vitest"
+import { LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS } from "@wavekit/api-types"
 import type { LiveAudioAutoRouteLevel } from "@wavekit/api-types"
 import { AUTO_ROUTE_STREAM } from "../../../../src/core/auto-listen/contract.js"
 import type {
@@ -395,7 +396,7 @@ describe("AutoListenRouter", () => {
 		expect(s.underruns).toBe(sim.router.underruns)
 	})
 
-	it("rebases once on an event-loop stall without losing or repeating a sample (2.7)", () => {
+	it("catches up a 500 ms stall in one tick: 25 blocks and no rebase (2.6, 2.7)", () => {
 		const sim = new Sim()
 		const rand = lcg(4)
 		sim.connect()
@@ -403,11 +404,40 @@ describe("AutoListenRouter", () => {
 			sim.analog(noise(960, rand), true)
 			sim.step()
 		}
-		// A 500 ms stall: the input arrives in one burst, then one late tick.
 		for (let i = 0; i < 25; i++) sim.analog(noise(960, rand), true)
 		const before = sim.produced.length
-		sim.step(500)
-		expect(sim.produced.length - before).toBe(5)
+		sim.step(25 * 20)
+		expect(sim.produced.length - before).toBe(
+			LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS,
+		)
+		expect(sim.router.clockRebases).toBe(0)
+	})
+
+	it("a stall just under one block past the bound still does not rebase (2.7)", () => {
+		const sim = new Sim()
+		sim.connect()
+		sim.step(25 * 20 + 19)
+		expect(sim.produced).toHaveLength(25)
+		expect(sim.router.clockRebases).toBe(0)
+		// the 19 ms it still owes comes out with the next block
+		sim.step(1)
+		expect(sim.produced).toHaveLength(26)
+		expect(sim.router.clockRebases).toBe(0)
+	})
+
+	it("rebases once a full block past the bound, without losing or repeating a sample (2.7)", () => {
+		const sim = new Sim()
+		const rand = lcg(4)
+		sim.connect()
+		for (let i = 0; i < 10; i++) {
+			sim.analog(noise(960, rand), true)
+			sim.step()
+		}
+		// A 520 ms stall: the input arrives in one burst, then one late tick.
+		for (let i = 0; i < 26; i++) sim.analog(noise(960, rand), true)
+		const before = sim.produced.length
+		sim.step(26 * 20)
+		expect(sim.produced.length - before).toBe(25)
 		expect(sim.router.clockRebases).toBe(1)
 		for (let i = 0; i < 100; i++) {
 			sim.analog(noise(960, rand), true)
@@ -422,6 +452,19 @@ describe("AutoListenRouter", () => {
 		}
 		sim.expectReadsMatch("analog", sim.analogRef())
 		expect(sim.of("analog", "drop")).toHaveLength(0)
+	})
+
+	it("one catch-up tick fits a reading client's queue (2.7)", () => {
+		const sim = new Sim()
+		sim.connect()
+		expect(LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS * 1_920).toBe(48_000)
+		expect(sim.router.registry.queueLimitBytes).toBe(96_000)
+		const client = sim.router.registry.clients.values().next().value
+		// A client that takes nothing during the burst keeps all of it queued.
+		if (sim.client) sim.client.accept = false
+		sim.step(20)
+		sim.step(25 * 20)
+		expect(client?.droppedBytes).toBe(0)
 	})
 
 	it("emits nothing after a backward clock step until due passes emitted (design, pacing)", () => {

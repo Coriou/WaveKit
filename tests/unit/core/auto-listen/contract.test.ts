@@ -39,7 +39,7 @@ describe("auto listen route contract", () => {
 		expect(LIVE_AUDIO_AUTO_ROUTE_DIGITAL_RELEASE_MS).toBe(300)
 		expect(LIVE_AUDIO_AUTO_ROUTE_PREEMPT_MAX_MS).toBe(1_500)
 		expect(LIVE_AUDIO_AUTO_ROUTE_TARGET_MS).toBe(60)
-		expect(LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS).toBe(5)
+		expect(LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS).toBe(25)
 	})
 
 	it("preemption bound equals the evidence pre-roll capacity", () => {

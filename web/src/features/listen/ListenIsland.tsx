@@ -34,7 +34,13 @@ import {
 	squelchThreshold,
 	voiceSource,
 } from "./audio.ts"
+import {
+	audioHealthText,
+	audioHealthTitle,
+	breakingUpText,
+} from "./audio-health.ts"
 import type { ListenPhase } from "./controller.ts"
+import "./listen.css"
 import { recordClock, recordFileName } from "./recorder.ts"
 import {
 	agcOf,
@@ -258,6 +264,11 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 		on && sweep && sweepLive(sweep.state)
 			? followingText(sweep, heldHz, held)
 			: null
+	const audible =
+		state.phase === "playing" &&
+		open &&
+		status?.toneSquelch?.state !== "waiting"
+	const breaking = audible ? breakingUpText(state.audio) : null
 	return (
 		<IslandHead className="wk-shell-listen-head">
 			<button
@@ -280,12 +291,19 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 			<div className="wk-shell-listen-text">
 				<div className="wk-shell-listen-title">
 					<b>
-						{state.phase === "playing" &&
-						(!open || status?.toneSquelch?.state === "waiting")
+						{state.phase === "playing" && !audible
 							? "Squelched"
 							: TITLE[state.phase]}
 					</b>
-					{follow ? (
+					{breaking ? (
+						<span
+							className="wk-shell-sub"
+							data-breaking=""
+							title="Part of the audio is not arriving, usually because the core is busy. Audio options has the detail."
+						>
+							{breaking}
+						</span>
+					) : follow ? (
 						<span className="wk-shell-sub wkf-following" title={follow.title}>
 							<Icon name="scanner" size={13} />
 							<span>{follow.text}</span>
@@ -722,7 +740,8 @@ function RecordRow() {
 	const recording = useStore(listen, s => s.recording)
 	const wanted = useStore(listen, s => s.wanted)
 	const latency = useStore(listen, s => s.latencyMs)
-	const gaps = useStore(listen, s => s.audioGaps)
+	const audio = useStore(listen, s => s.audio)
+	const audioText = audioHealthText(audio)
 	const hz = useSettledHz()
 	const save = (wav: Blob, startedAt: number) => {
 		const name = recordFileName(hz, startedAt)
@@ -761,18 +780,18 @@ function RecordRow() {
 					: "Record audio"}
 			</Button>
 			<span className="wkf-gap" />
-			{wanted && gaps > 0 && (
+			{wanted && audioText !== null && (
 				<span
 					className="wkf-quiet wkf-small wkf-num"
-					title="Times the audio ran dry since Listen started: the stream arrived late, usually because the core is busy."
+					title={audioHealthTitle(audio)}
 				>
-					{gaps} audio {gaps === 1 ? "gap" : "gaps"}
+					{audioText}
 				</span>
 			)}
 			{latency !== null && (
 				<span
 					className="wkf-quiet wkf-small wkf-num"
-					title="Buffered in this browser plus the audio device; the core's pipeline adds to it"
+					title="Waiting in the core, buffered in this browser, and the audio device"
 				>
 					Latency ≈ {latency} ms
 				</span>

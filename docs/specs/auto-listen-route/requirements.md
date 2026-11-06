@@ -84,14 +84,17 @@ emitted samples are identical.
 
 2.6 Output is paced at 48 000 samples per second of monotonic time in 20 ms blocks
 (960 samples), tracked against the start time, so it never drifts while ticks are late by at
-most `LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS` blocks (100 ms); while no source is selected the
+most `LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS` blocks (500 ms); while no source is selected the
 blocks are exact zeros.
 
-2.7 **Bounded catch-up.** One tick emits at most `CATCHUP_MAX_BLOCKS` blocks. When the pacer
-is further behind (an event-loop stall), it emits that many and rebases its start time so it is
-no longer behind, counting `autoRoute.clockRebases`. A rebase is a timing discontinuity only: no
-queued source sample is dropped or repeated, the backlog grows by the stall and is removed by
-4.7. Backlog is bounded by the per-source FIFO cap.
+2.7 **Bounded catch-up.** One tick emits at most `CATCHUP_MAX_BLOCKS` blocks: 25 × 20 ms = 500 ms,
+25 × 1 920 B = 48 000 B, half of a client's 96 000 B queue, so one catch-up cannot trim a client that
+is reading. A client's own buffer must take a 500 ms burst. When the pacer is further behind (an
+event-loop stall), it emits that many and rebases its start time so it is no longer behind, counting
+`autoRoute.clockRebases`. A rebase is a timing discontinuity only: no queued source sample is dropped
+or repeated, the backlog grows by the stall and is removed by 4.7. Backlog is bounded by the
+per-source FIFO cap. Catch-up recovers time only: when the source itself lost audio (IQ congestion),
+the blocks it no longer has are zeros at full rate and count as `autoRoute.underruns`.
 
 2.8 **Output buffer ownership.** Every buffer handed to the `/auto` client registry is owned by
 the registry from then on and is never written again by the router (the registry queues the
@@ -258,8 +261,10 @@ is proven by the bench `tests/bench/auto-listen-route.bench.ts` (shadow, coverag
 work included) before landing.
 
 8.2 Router work runs on the event loop in at most `CATCHUP_MAX_BLOCKS` 20 ms blocks per timer
-tick (2.7) plus per-chunk
-resampling; no single call exceeds 1 ms at 200 kHz analog input on the desktop reference host.
+tick (2.7) plus per-chunk resampling. One block, or one chunk's resampling, does not exceed 1 ms at
+200 kHz analog input on the desktop reference host. A catch-up tick does up to 25 blocks of that work
+in one call, right after a stall; it is the work of the ticks the stall skipped, so the steady-state
+cost in 8.1 is unchanged.
 
 ## 9. Acceptance
 
