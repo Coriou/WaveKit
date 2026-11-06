@@ -951,7 +951,8 @@ impl Runtime {
         if self.centre_refused {
             return;
         }
-        if self.capture_centre() == center_hz
+        if self.pending_recenters.is_empty()
+            && self.capture_centre() == center_hz
             && at_input_bytes.div_ceil(2) <= self.asm.consumed_bytes / 2
         {
             self.emit_recentered(center_hz, at_input_bytes);
@@ -2584,6 +2585,25 @@ mod tests {
         assert_eq!(
             (rejected["id"].as_str(), rejected["reasonCode"].as_str()),
             (Some("left-behind"), Some("channel-outside-capture"))
+        );
+        r.shutdown();
+    }
+
+    #[test]
+    fn a_same_centre_move_already_reached_waits_behind_a_pending_one() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let line = |at: u64| {
+            parse_request(&format!(
+                r#"{{"v":1,"type":"recenter","centerHz":170000000,"atInputBytes":{at}}}"#
+            ))
+            .unwrap()
+        };
+        r.on_request(line(4096));
+        r.on_request(line(0));
+        assert!(
+            !ev.lock().unwrap().iter().any(|e| e["type"] == "recentered"),
+            "the answers keep the order received, so neither is due before the input reaches 4096"
         );
         r.shutdown();
     }

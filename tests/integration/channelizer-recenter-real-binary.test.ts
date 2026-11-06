@@ -3,7 +3,7 @@
  * tests/unit/core/channelizer/recenter.test.ts fakes the process and tests/process.rs runs the binary alone; only here
  * do the two meet. Nothing connects anywhere: the IQ comes from this file.
  *
- * Skipped unless WAVEKIT_CHAN_BIN names a build of native/wavekit-chan:
+ * Skipped when WAVEKIT_CHAN_BIN is unset; a set path that does not exist fails, for this and WAVEKIT_CHAN_OLD_BIN:
  *
  *   CARGO_TARGET_DIR=/tmp/chan cargo build --release --locked --manifest-path native/wavekit-chan/Cargo.toml
  *   WAVEKIT_CHAN_BIN=/tmp/chan/release/wavekit-chan \
@@ -31,6 +31,10 @@ import { parseDemodEventLine } from "../../src/core/live-demod/rust-protocol.js"
 
 const bin = process.env["WAVEKIT_CHAN_BIN"]
 const oldBin = process.env["WAVEKIT_CHAN_OLD_BIN"]
+for (const named of [bin, oldBin]) {
+	if (named && !existsSync(named))
+		throw new Error(`Configured wavekit-chan binary is missing: ${named}`)
+}
 const RATE = 2_048_000
 const OUTPUT_RATE = 48_000
 const OFFSET = -200_000

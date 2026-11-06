@@ -64,9 +64,9 @@ export const RECENTER_LINGER_MAX_MS = 2 * RECENTER_LINGER_MS
 /**
  * How much input after a centre move a reopened channel skips, in ms at the input rate. The caps change only once the
  * frequency command is written (`writeFrequency` in tuner-controller.ts), so the tuner has not moved yet: IQ of the old
- * centre, then its settling, still arrives after the position the parent can count. A hop bracketed by test-mode
- * markers measures this window: about 30 ms of counter run (docs/SCANNER.md, worked example) + the default 5 ms
- * `scanner.sweep.pllSettleMs` = 35 ms. The move's position is that much later, so the process discards it by stream
+ * centre, then its settling, still arrives after the position the parent can count. 35 ms is a heuristic, not a
+ * measurement of command-to-clean-IQ latency: the assumed 30 ms marker counter run (`MARKER_RUN_ASSUMED_MS`,
+ * docs/SCANNER.md worked example) + the default 5 ms `scanner.sweep.pllSettleMs`. The move's position is that much later, so the process discards it by stream
  * position, and no time is spent waiting: a channel opened at least 35 ms of input after the move loses nothing.
  *
  * A channel opened sooner loses up to 35 ms of its dwell: 23 % of a 150 ms dwell, 19 % of the 185 ms marker hop and 7 %

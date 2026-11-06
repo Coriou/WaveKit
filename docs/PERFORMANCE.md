@@ -348,9 +348,9 @@ work. Now:
 - **A reopened channel skips 35 ms of input after a move (`RECENTER_SETTLE_MS`).** The caps change
   only once the frequency command is written (`writeFrequency`), so IQ from before the tuner moved
   arrives after the position the parent counts, and a restart's spawn time no longer hides it. The
-  line's position is 35 ms of input later, about the 30 ms counter run plus the default 5 ms
-  `pllSettleMs` of a marker hop, so the process discards that IQ by stream position and no time is
-  spent waiting. A channel opened at least 35 ms of input after the move loses nothing. One opened
+  line's position is 35 ms of input later, so the process discards that IQ by stream position and no time is
+  spent waiting. 35 ms is a heuristic, the assumed 30 ms marker counter run plus the default 5 ms
+  `pllSettleMs`; no real tuner's command-to-clean-IQ latency was measured. A channel opened at least 35 ms of input after the move loses nothing. One opened
   sooner loses up to 35 ms of its dwell: 23 % of a 150 ms dwell, 19 % of the 185 ms marker hop and 7 %
   of 500 ms. The 150 ms operator settle would cost a whole 150 ms dwell, so it is not used. What
   arrives later than the margin still reaches a channel opened that early, as noise at its start: on
@@ -372,12 +372,13 @@ true`; a process whose `ready` does not gets the old restart on each move, with 
   offered it answers each move with `recentered`, in order, with the line's values. A line it could
   not parse (`rejected` with no id) or an answer out of order retires it at once. So does input
   acknowledged past a move's position by the larger of 1 s of input and 4 blocks with no answer:
-  4 096 000 B at 2.048 Msps. These are bytes, so a stalled host or source spends none of them, and
-  that is the most wrong IQ such a process can give, plus the 100 ms a `progress` line can wait.
+  4 096 000 B at 2.048 Msps. These are bytes, so a stalled host or source spends none of them. The
+  position already includes the 35 ms margin, which such a process does not discard, so the most wrong
+  IQ it can give is those bytes plus 35 ms of input, plus the 100 ms a `progress` line can wait.
   More than 1024 unanswered moves retire it as well. The image build rebuilds the crate whatever the
   mtimes and fails if the installed binary's `ready` lacks the capability.
 - **`tests/integration/channelizer-recenter-real-binary.test.ts` runs the real binary under the real
-  manager**, with tones naming each centre. It skips unless `WAVEKIT_CHAN_BIN` names a build; its
+  manager**, with tones naming each centre. It skips when `WAVEKIT_CHAN_BIN` is unset and fails when it names a missing file; its
   header has the commands.
 
 `native/wavekit-chan/examples/paced_load.py`, a real binary with paced noise on stdin and a separate
