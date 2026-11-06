@@ -39,7 +39,7 @@ export interface PipelineHost {
 	/** Worker event-loop utilisation (0–1) since start; null when not measurable (inline). */
 	utilization(): number | null
 	/**
-	 * WG11 req 2.2: the worker's cumulative cost sample since it started (`WorkerCostMeter`: `active`
+	 * The worker's cumulative cost sample since it started (`WorkerCostMeter`: `active`
 	 * is the thread's CPU time where Node reports it, event-loop active time otherwise), for a
 	 * caller that measures its own window by difference, tagged with the worker's generation (unique
 	 * per started worker in this process) so the caller can tell a replacement worker apart even when

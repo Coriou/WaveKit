@@ -890,7 +890,8 @@ and it starts. When you tune, the core decides for each decoder in this order:
    WaveKit raises the rate when you tune within 200 kHz of 1090 MHz in WaveKit; a retune made
    in SDR++ through the relay only gets advice), else a rate reason such as `insufficient-sample-rate`.
 5. **Placement.** Channel decoders need a channel that fits the capture (`capture-too-narrow`,
-   `no-channel-selected`) and the channelizer (`channelizer-unavailable`).
+   `no-channel-selected`) and the channelizer (`channelizer-unavailable`). A request caught by
+   a capture-centre move fails with that reason once, and the next request uses the same process.
 6. **CPU budget.** Decoders the core started on its own share a CPU budget
    (`efficiency-budget`). The decoder whose band holds the frequency you tuned (the VFO on its
    source, within 200 kHz of its targets or the span between them, or inside its band) goes
