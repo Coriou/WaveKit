@@ -119,6 +119,7 @@ async function inWindow(
 			acquire: () => ({ ok: false, reason: "no-lease" }),
 			release: () => Promise.resolve({ restored: [], unrestorable: [] }),
 			holder: () => undefined,
+			isConnected: () => true,
 			holderPriority: () => undefined,
 			operatorIdleSince: () => null,
 		} as never,

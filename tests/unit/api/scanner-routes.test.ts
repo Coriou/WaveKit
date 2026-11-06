@@ -598,7 +598,7 @@ describe("scanner routes", () => {
 				{ impact },
 			],
 			[
-				"The source is down: this job continues by itself when it reconnects",
+				"No data from the source: this job continues by itself when data returns",
 				"SCANNER_SOURCE_DOWN",
 				{ reason: "source-down" },
 			],

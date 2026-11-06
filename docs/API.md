@@ -3939,16 +3939,34 @@ Each returns the `ScanJob`. `resume` takes an optional body
   `SCANNER_SOURCE_BUSY` while another job holds the lease
   (`details.holderJobId`) or a better-placed job waits for it
   (`details.waiter`);
-- from `paused(source-down)` after a dropout: 409 `SCANNER_SOURCE_DOWN`. There is
-  nothing to resume yet; the job continues by itself when the source reconnects, or
-  `cancel` ends it (on a feed paused by hand the answer is 409 `SOURCE_PAUSED`: resume
-  the feed first).
+- from `paused(source-down)` after a dropout: 409 `SCANNER_SOURCE_DOWN` while the source
+  sends no data (a TCP reconnect without data still counts). There is nothing to resume
+  yet; the job continues by itself when data returns, or `cancel` ends it (on a feed
+  paused by hand the answer is 409 `SOURCE_PAUSED`: resume the feed first). Once data
+  is back a resume carries the job on, in case it is still waiting;
+- from any other paused reason while the source sends no data: 409
+  `SCANNER_SOURCE_DOWN`, with or without `takeover`. The job keeps its reason and does
+  not resume by itself when data returns: resume it again then.
+
+| Paused reason                                          | Source has no data                                                                                                | Source has data                         |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| `source-down`                                          | `SCANNER_SOURCE_DOWN`; waits                                                                                      | carries on (normally by itself already) |
+| `operator`, `resumed-without-retune`, `resume-blocked` | `SCANNER_SOURCE_DOWN`; stays                                                                                      | resumes, with the 409s above            |
+| `preempted-*`                                          | `SCANNER_SOURCE_BUSY` while a job holds the lease or waits with a better claim, else `SCANNER_SOURCE_DOWN`; stays | arbitrates, with the 409s above         |
+| `core-restart`                                         | `SCANNER_SOURCE_DOWN`; stays                                                                                      | restarts from its first hop             |
+
+A feed paused by hand answers 409 `SOURCE_PAUSED` before any of these. Right after a
+core start, before the source has been heard from, nothing yet counts it as down.
 
 A refused resume changes nothing but the reason (`SCANNER_SOURCE_BUSY` moves
 `paused(operator)` and `paused(resumed-without-retune)` to `paused(resume-blocked)`,
 as above), and the job keeps its pass, hop statistics, discoveries and `startedAt`.
-A resumed job hops again from where it was. The `reason` plus the answer's `code` and
-`message` always give the next step; `job.impact` holds the impact last reported.
+A resumed job hops again from where it was, except from `paused(core-restart)`, which
+starts again from its first hop. A `paused(resume-blocked)` job stays blocked across a
+core restart, even with `resume.onBoot`: it does not resume by itself, and its first
+resume after the restart asks for consent again; its hops restart from the first. The
+`reason` plus the answer's `code` and `message` always give the next step; `job.impact`
+holds the impact last reported.
 
 `pause` on `paused(preempted-*)` is **Stay here**: the job becomes
 `paused(operator)` without taking the lease back and no longer auto-resumes.
@@ -3964,8 +3982,9 @@ threshold below 0, or auto), plus 3 s after the squelch closes; it then restarts
 from the full `resume.autoAfterIdleMs`. Recording activity does not hold it yet.
 
 409 `SCANNER_INVALID_TRANSITION` when the action does not apply to the
-current state (`resume` of a job that is not paused; every paused reason answers as
-above), 409 `SCANNER_IDENTIFY_NOT_PAUSABLE` for pause/resume on an
+current state (`resume` of a job that is not paused, whose `message` names the state
+and the next step, such as "already running; nothing is needed"; every paused reason
+answers as above), 409 `SCANNER_IDENTIFY_NOT_PAUSABLE` for pause/resume on an
 identify job.
 
 `cancel` of a job that already ended (`completed`, `cancelled` or `failed`,
@@ -7935,7 +7954,7 @@ Scanner and spectrum routes answer with the flat body
 | `SPECTRUM_SOURCE_NOT_FOUND`     | 404  | Occupancy query: no history for the source                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `SCANNER_TAKEOVER_REQUIRED`     | 409  | The sweep (or the resume of a paused sweep without the lease: `paused(operator)`, `paused(resumed-without-retune)` or `paused(resume-blocked)`) disturbs other consumers; `details.impact`, and on a resume `message` names them; resend with `takeover: true`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `SCANNER_SOURCE_BUSY`           | 409  | The tuner is not available; the detail is in `message` (a relay client controls the tuner, "holder is starting", "releasing", "recovery pending", lease held by another job). `details.reason`: `"releasing"` (the previous lease is still restoring), `"recovery-pending"` (a crash or outage recovery waits for the source's data), `"holder-starting"` (the holder is still starting), `"relay"` (a relay client controls the tuner) or `"held"` (another scanner job holds the lease, or waits for it with a better claim). The first three clear by themselves within seconds; retry. `relay` and `held` last until the relay or the holder lets go. `details.holderJobId` when a job holds the source; `details.waiter` when a better-placed job waits; `details.issues` when the preview found it |
-| `SCANNER_SOURCE_DOWN`           | 409  | `resume` of a job in `paused(source-down)` after a dropout: it continues by itself when the source reconnects; `details.reason`: `"source-down"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `SCANNER_SOURCE_DOWN`           | 409  | `resume` while the source sends no data. A job in `paused(source-down)` continues by itself when data returns; any other paused job keeps its reason and needs another resume then; `details.reason`: `"source-down"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `SCANNER_NO_TUNER_CONTROL`      | 409  | The source has no rtl_tcp tuner control (sweep)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `SCANNER_JOB_TERMINAL`          | 409  | Edit or action on an ended job                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `SCANNER_JOB_NOT_TERMINAL`      | 409  | `DELETE` of a job that has not ended                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |

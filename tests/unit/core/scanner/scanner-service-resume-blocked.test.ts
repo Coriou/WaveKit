@@ -27,9 +27,10 @@ const sweep = (priority = 50) => ({
 	resume: { autoAfterIdleMs: 30 },
 })
 
-function setup() {
+function setup(dir?: string) {
 	const live = { running: false, sourceId: "rtl", clientCount: 0 }
 	const h = serviceHarness({
+		...(dir !== undefined ? { dir } : {}),
 		patch: s => {
 			s.passive.enabled = false
 		},
@@ -80,6 +81,17 @@ async function blocked(s: ReturnType<typeof setup>, priority = 50) {
 	expect(job(id).state).toBe("paused")
 	expect(job(id).impact?.liveAudioClients).toBe(1)
 	return { id, before: job(id) }
+}
+
+/** The sweep moves on to another hop, and the move reaches the tuner. */
+async function hopsAgain(s: ReturnType<typeof setup>, id: string) {
+	const { h, job, feedUntil } = s
+	const at = job(id).progress.hopIndex
+	const writes = h.tuner.sent.length
+	await feedUntil(() => job(id).progress.hopIndex !== at, 500)
+	expect(h.tuner.sent.slice(writes).some(c => c.name === "set-frequency")).toBe(
+		true,
+	)
 }
 
 /** The sweep is running, holds the lease and the decoders, and went on hopping from where it was. */
@@ -314,13 +326,304 @@ describe("resume from paused(source-down), service level", () => {
 				code: "SCANNER_SOURCE_DOWN",
 				details: { reason: "source-down" },
 			})
-			expect((refused as Error).message).toContain("when it reconnects")
+			expect((refused as Error).message).toContain("No data from the source")
+			expect((refused as Error).message).toContain("when data returns")
 			expect(job(id).reason).toBe("source-down")
 		}
+		// connected again, no byte yet: still no data
+		h.sources.emit("connected", "rtl")
+		await expect(
+			h.service.resumeJob(id, { takeover: false }),
+		).rejects.toMatchObject({ code: "SCANNER_SOURCE_DOWN" })
 		h.sources.emit("payload-started", "rtl")
 		await settled(h.service)
 		expect(job(id).state).toBe("running")
 		expect(job(id).startedAt).toBe(before.startedAt)
+		await hopsAgain(s, id)
+		await h.service.stop()
+	}, 30_000)
+
+	it("a dropout and return during a resume's held-up decoder hold ends running, and it hops", async () => {
+		const s = setup()
+		const { h, job, record, feedUntil } = s
+		await h.service.start()
+		const { id } = await h.service.createJob(sweep())
+		await feedUntil(() => job(id).state === "running")
+		await h.service.pauseJob(id)
+		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await settled(h.service)
+		expect(job(id)).toMatchObject({ state: "paused", reason: "operator" })
+
+		const hold = h.decoders.holdSource.bind(h.decoders)
+		let release = (): void => undefined
+		const gate = new Promise<void>(resolve => {
+			release = resolve
+		})
+		h.decoders.holdSource = async (...args) => {
+			await gate
+			return hold(...args)
+		}
+		const resuming = h.service.resumeJob(id, { takeover: true })
+		await vi.waitFor(() => expect(record(id).state).toBe("running"), WAIT)
+		h.sources.emit("disconnected", "rtl")
+		h.sources.emit("payload-started", "rtl")
+		release()
+		await resuming
+		await vi.waitFor(() => {
+			expect(job(id).state).toBe("running")
+			expect(job(id).reason).toBeUndefined()
+		}, WAIT)
+		await settled(h.service)
+		expect(job(id).state).toBe("running")
+		await hopsAgain(s, id)
+		await h.service.stop()
+	}, 30_000)
+
+	it("a dropout and return in one tick ends running, and it hops", async () => {
+		const s = setup()
+		const { h, job, feedUntil } = s
+		await h.service.start()
+		const { id } = await h.service.createJob(sweep())
+		await feedUntil(() => job(id).state === "running")
+		h.sources.emit("disconnected", "rtl")
+		h.sources.emit("payload-started", "rtl")
+		await vi.waitFor(() => expect(job(id).state).toBe("running"), WAIT)
+		await settled(h.service)
+		expect(job(id).state).toBe("running")
+		await hopsAgain(s, id)
+		await h.service.stop()
+	}, 30_000)
+
+	it("a second dropout right after the return leaves the job waiting in source-down", async () => {
+		const s = setup()
+		const { h, job, feedUntil } = s
+		await h.service.start()
+		const { id } = await h.service.createJob(sweep())
+		await feedUntil(() => job(id).state === "running")
+		h.sources.emit("disconnected", "rtl")
+		h.sources.emit("payload-started", "rtl")
+		h.sources.emit("disconnected", "rtl")
+		await settled(h.service)
+		await tick(20)
+		await settled(h.service)
+		expect(job(id)).toMatchObject({ state: "paused", reason: "source-down" })
+		await h.service.stop()
+	}, 30_000)
+
+	it("a resume carries on a job left in source-down with the source up", async () => {
+		const s = setup()
+		const { h, job, feedUntil } = s
+		await h.service.start()
+		const { id } = await h.service.createJob(sweep())
+		await feedUntil(() => job(id).state === "running")
+		h.sources.emit("disconnected", "rtl")
+		await settled(h.service)
+		// a return this job never heard of
+		const arbiter = (
+			h.service as unknown as {
+				arbiter: {
+					listeners(e: string): ((...args: unknown[]) => void)[]
+					off(e: string, l: (...args: unknown[]) => void): void
+					on(e: string, l: (...args: unknown[]) => void): void
+				}
+			}
+		).arbiter
+		const listeners = arbiter.listeners("source-up")
+		for (const l of listeners) arbiter.off("source-up", l)
+		h.sources.emit("payload-started", "rtl")
+		for (const l of listeners) arbiter.on("source-up", l)
+		await settled(h.service)
+		expect(job(id)).toMatchObject({ state: "paused", reason: "source-down" })
+
+		await h.service.resumeJob(id, { takeover: false })
+		await settled(h.service)
+		expect(job(id).state).toBe("running")
+		await hopsAgain(s, id)
+		await h.service.stop()
+	}, 30_000)
+
+	it("a blocked job refuses while the source is down, keeps its reason, and resumes once it returns", async () => {
+		const s = setup()
+		const { h, job, holder } = s
+		const { id, before } = await blocked(s)
+		h.sources.emit("disconnected", "rtl")
+		await settled(h.service)
+		for (const takeover of [false, true]) {
+			const refused = await h.service
+				.resumeJob(id, { takeover })
+				.catch((err: unknown) => err)
+			expect(refused).toMatchObject({
+				statusCode: 409,
+				code: "SCANNER_SOURCE_DOWN",
+				details: { reason: "source-down" },
+			})
+			expect((refused as Error).message).toContain("once data returns")
+			expect((refused as Error).message).toContain(
+				"stays paused with its progress",
+			)
+			expect(job(id)).toMatchObject({
+				state: "paused",
+				reason: "resume-blocked",
+			})
+			expect(holder()).toBeUndefined()
+		}
+		h.sources.emit("payload-started", "rtl")
+		await settled(h.service)
+		// it comes back to the same question, not to a running job
+		expect(job(id)).toMatchObject({ state: "paused", reason: "resume-blocked" })
+		await expect(
+			h.service.resumeJob(id, { takeover: false }),
+		).rejects.toMatchObject({ code: "SCANNER_TAKEOVER_REQUIRED" })
+		await h.service.resumeJob(id, { takeover: true })
+		await settled(h.service)
+		await carriedOn(s, id, before)
+		await h.service.stop()
+	}, 30_000)
+
+	it("an operator pause refuses while the source is down, and resumes once it returns", async () => {
+		const s = setup()
+		const { h, job, feedUntil } = s
+		await h.service.start()
+		const { id } = await h.service.createJob(sweep())
+		await feedUntil(() => job(id).state === "running")
+		await h.service.pauseJob(id)
+		h.sources.emit("disconnected", "rtl")
+		await settled(h.service)
+		await expect(
+			h.service.resumeJob(id, { takeover: false }),
+		).rejects.toMatchObject({
+			code: "SCANNER_SOURCE_DOWN",
+			message: expect.stringContaining("once data returns") as string,
+		})
+		expect(job(id)).toMatchObject({ state: "paused", reason: "operator" })
+		h.sources.emit("payload-started", "rtl")
+		await settled(h.service)
+		expect(job(id)).toMatchObject({ state: "paused", reason: "operator" })
+		await h.service.resumeJob(id, { takeover: false })
+		await settled(h.service)
+		expect(job(id).state).toBe("running")
+		await hopsAgain(s, id)
+		await h.service.stop()
+	}, 30_000)
+})
+
+describe("a failed takeover", () => {
+	it("keeps the old consent when the decoder hold rejects", async () => {
+		const s = setup()
+		const { h, job, record, holder } = s
+		const { id } = await blocked(s)
+		const consented = record(id).consentedImpact
+		const hold = h.decoders.holdSource.bind(h.decoders)
+		h.decoders.holdSource = () => Promise.reject(new Error("no hold"))
+		await expect(h.service.resumeJob(id, { takeover: true })).rejects.toThrow(
+			"no hold",
+		)
+		expect(job(id)).toMatchObject({ state: "paused", reason: "resume-blocked" })
+		expect(record(id).consentedImpact).toEqual(consented)
+		expect(holder()).toBeUndefined()
+		h.decoders.holdSource = hold
+		await expect(
+			h.service.resumeJob(id, { takeover: false }),
+		).rejects.toMatchObject({ code: "SCANNER_TAKEOVER_REQUIRED" })
+		await h.service.stop()
+	}, 30_000)
+})
+
+describe("a blocked job across a restart", () => {
+	/** A second service on the same state dir, with the first one's listener still present. */
+	async function restarted(dir: string) {
+		const s = setup(dir)
+		s.live.running = true
+		s.live.clientCount = 1
+		await s.h.service.start()
+		s.h.sources.emit("payload-started", "rtl")
+		await settled(s.h.service)
+		return s
+	}
+
+	it("keeps its block: a plain resume still asks about the listener", async () => {
+		const first = setup()
+		const { id } = await blocked(first)
+		await first.h.service.stop()
+
+		const s = await restarted(first.h.dir)
+		const { h, job, holder } = s
+		expect(job(id)).toMatchObject({ state: "paused", reason: "resume-blocked" })
+		const refused = await h.service
+			.resumeJob(id, { takeover: false })
+			.catch((err: unknown) => err)
+		expect(refused).toMatchObject({
+			code: "SCANNER_TAKEOVER_REQUIRED",
+			details: { impact: { liveAudioClients: 1 } },
+		})
+		expect(job(id).reason).toBe("resume-blocked")
+		expect(holder()).toBeUndefined()
+
+		await h.service.resumeJob(id, { takeover: true })
+		await settled(h.service)
+		expect(job(id).state).toBe("running")
+		expect(holder()).toBe(id)
+		await hopsAgain(s, id)
+		await h.service.stop()
+	}, 30_000)
+
+	it("does not resume on boot, even with onBoot set", async () => {
+		const first = setup()
+		const { h: h1, job: job1, live, feedUntil } = first
+		await h1.service.start()
+		const { id } = await h1.service.createJob({
+			...sweep(),
+			resume: { autoAfterIdleMs: 30, onBoot: true },
+		})
+		await feedUntil(() => job1(id).state === "running")
+		h1.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await settled(h1.service)
+		live.running = true
+		live.clientCount = 1
+		await vi.waitFor(() => expect(job1(id).reason).toBe("resume-blocked"), WAIT)
+		await h1.service.stop()
+
+		const s = await restarted(h1.dir)
+		const { h, job, holder } = s
+		const writes = h.tuner.sent.length
+		await tick(100)
+		await settled(h.service)
+		expect(job(id)).toMatchObject({ state: "paused", reason: "resume-blocked" })
+		expect(holder()).toBeUndefined()
+		expect(h.tuner.sent.length).toBe(writes)
+		await expect(
+			h.service.resumeJob(id, { takeover: false }),
+		).rejects.toMatchObject({ code: "SCANNER_TAKEOVER_REQUIRED" })
+		await h.service.stop()
+	}, 30_000)
+})
+
+describe("a resume of a job that is not paused", () => {
+	it("names the state and that nothing is needed, keeping the code", async () => {
+		const s = setup()
+		const { h, job, feedUntil } = s
+		await h.service.start()
+		const { id } = await h.service.createJob(sweep())
+		await feedUntil(() => job(id).state === "running")
+		const refused = await h.service
+			.resumeJob(id, { takeover: false })
+			.catch((err: unknown) => err)
+		expect(refused).toMatchObject({
+			statusCode: 409,
+			code: "SCANNER_INVALID_TRANSITION",
+		})
+		expect((refused as Error).message).toContain("already running")
+		expect((refused as Error).message).toContain("nothing is needed")
+		await h.service.cancelJob(id)
+		await settled(h.service)
+		await expect(
+			h.service.resumeJob(id, { takeover: false }),
+		).rejects.toMatchObject({
+			code: "SCANNER_INVALID_TRANSITION",
+			message: expect.stringContaining(
+				"has ended (cancelled) and cannot resume; start a new scan",
+			) as string,
+		})
 		await h.service.stop()
 	}, 30_000)
 })

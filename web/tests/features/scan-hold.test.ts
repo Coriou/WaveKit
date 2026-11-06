@@ -314,7 +314,7 @@ describe("scan hold row", () => {
 		expect(down).toMatchObject({ glyph: "plug", title: "Source down" })
 		// no dead button: each says what it waits for
 		expect(other.detail).toBe(" · carries on when it ends")
-		expect(down.detail).toBe(" · carries on when it returns")
+		expect(down.detail).toBe(" · waits for it to return")
 		expect(ids(down)).toEqual(["stop"])
 	})
 
@@ -390,7 +390,8 @@ describe("scan hold row", () => {
 			const j = job({ state: "paused", reason })
 			const m = holdRowModel(input({ job: j }))
 			expect(ids(m).includes("resume")).toBe(scanResumable(j))
-			if (!scanResumable(j)) expect(m.detail).toContain("carries on when")
+			if (!scanResumable(j))
+				expect(m.detail).toMatch(/carries on when|waits for it to return/)
 		}
 	})
 

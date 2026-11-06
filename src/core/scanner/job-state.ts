@@ -284,8 +284,8 @@ export function transition(
 			// only when the lease is free and the job is the best waiter; a refused acquire changes nothing.
 			if (preempted)
 				return to("running", ["acquire-lease", "hold-decoders", "resend-hop"])
-			// paused(source-down) stays here on purpose: only source-up continues it, and the runner
-			// answers SCANNER_SOURCE_DOWN instead of a generic refusal. Every other paused reason resumes.
+			// paused(source-down) stays here on purpose: only source-up continues it. The runner answers a
+			// resume before this table: SCANNER_SOURCE_DOWN with no data, source-up once data is back.
 			return INVALID
 		case "cancel":
 			return to("cancelled", endActions(s), e.reason)

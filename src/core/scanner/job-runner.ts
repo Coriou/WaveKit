@@ -276,6 +276,37 @@ function resumeRefusalMessage(r: { detail: string; reason?: string }): string {
 	return `${r.detail}; it cannot resume until the source has tuner control. ${KEEPS_PROGRESS}`
 }
 
+/** A resume with no data from the source. A job in source-down carries on by itself; any other waits for the operator. */
+function noDataRefusal(reason: JobRecord["reason"]): ScannerApiError {
+	return new ScannerApiError(
+		reason === "source-down"
+			? `No data from the source: this job continues by itself when data returns. Nothing to resume yet; cancel it to end it. ${KEEPS_PROGRESS}`
+			: `No data from the source: resume this job again once data returns, or cancel it to end it. ${KEEPS_PROGRESS}`,
+		"SCANNER_SOURCE_DOWN",
+		409,
+		{ reason: "source-down" },
+	)
+}
+
+/** A resume of a job that is not paused: its state and what to do next. */
+function notPausedMessage(id: string, state: JobState): string {
+	switch (state) {
+		case "running":
+			return `Job ${id} is already running; nothing is needed.`
+		case "holding":
+			return `Job ${id} is running and holding on a signal; nothing is needed. It moves on when the signal ends.`
+		case "pending":
+		case "starting":
+			return `Job ${id} is still starting; nothing is needed. It runs as soon as it has started.`
+		case "completed":
+		case "cancelled":
+		case "failed":
+			return `Job ${id} has ended (${state}) and cannot resume; start a new scan.`
+		case "paused":
+			return `Job ${id} cannot resume in state paused; cancel it and start a new scan.`
+	}
+}
+
 type Deferral = Extract<
 	ReturnType<ProbePool["request"]>,
 	{ deferred: unknown }
@@ -336,6 +367,7 @@ export interface JobRunnerDeps {
 		| "holder"
 		| "holderPriority"
 		| "operatorIdleSince"
+		| "isConnected"
 	>
 	probes: Pick<
 		ProbePool,
@@ -1244,6 +1276,15 @@ export class JobRunner implements JobDriver {
 
 	private async apply(e: JobEvent): Promise<void> {
 		const { record } = this
+		if (e.type === "resume" && record.state === "paused") {
+			// A paused feed answers SOURCE_PAUSED in the service, before it gets here.
+			if (!this.deps.arbiter.isConnected(this.sourceId))
+				throw noDataRefusal(record.reason)
+			// The source is back and this job missed its source-up: the resume carries it on. It holds
+			// the lease through source-down, so there is no one new to ask consent for.
+			if (record.reason === "source-down")
+				return this.apply({ type: "source-up" })
+		}
 		const operatorAutoResume =
 			e.type === "preemptor-idle" &&
 			(record.reason === "preempted-operator" ||
@@ -1266,16 +1307,10 @@ export class JobRunner implements JobDriver {
 			engineOpened: this.engineOpened,
 		})
 		if ("invalid" in t) {
-			// Reached for a dropout only: a feed the operator paused answers SOURCE_PAUSED in the service.
-			if (e.type === "resume" && from.reason === "source-down")
-				throw new ScannerApiError(
-					`The source is down: this job continues by itself when it reconnects. Nothing to resume yet; cancel it to end it. ${KEEPS_PROGRESS}`,
-					"SCANNER_SOURCE_DOWN",
-					409,
-					{ reason: "source-down" },
-				)
 			throw new ScannerApiError(
-				`Job ${record.id} cannot handle "${e.type}" in state ${record.state}`,
+				e.type === "resume"
+					? notPausedMessage(record.id, record.state)
+					: `Job ${record.id} cannot handle "${e.type}" in state ${record.state}`,
 				"SCANNER_INVALID_TRANSITION",
 				409,
 			)
@@ -1357,8 +1392,9 @@ export class JobRunner implements JobDriver {
 		record.updatedAt = now
 		if (t.state === "running" && record.startedAt === undefined)
 			record.startedAt = now
-		if (e.type === "resume" && e.takeover)
-			record.consentedImpact = this.deps.impact()
+		// Read before the actions change what is on the source; it counts only once they succeed.
+		const consented =
+			e.type === "resume" && e.takeover ? this.deps.impact() : null
 		try {
 			for (const action of this.ordered(actions)) {
 				await this.run(action)
@@ -1370,6 +1406,7 @@ export class JobRunner implements JobDriver {
 			this.scheduler?.setAccountingActive(this.driving)
 			throw err
 		}
+		if (consented) record.consentedImpact = consented
 		if (!this.driving) this.epochOwn = false
 		if (isTerminal(t.state)) {
 			this.releaseAnalogSession?.()

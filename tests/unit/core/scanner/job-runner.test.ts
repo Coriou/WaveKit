@@ -169,6 +169,10 @@ class RunnerArbiter {
 	holder() {
 		return this.lease ?? undefined
 	}
+	connected = true
+	isConnected() {
+		return this.connected
+	}
 	/** The other job named by `refuseHolder` holds at an equal priority: the acquire is refused. */
 	holderPriority() {
 		return this.lease || this.refuseHolder !== null ? 50 : undefined
@@ -565,6 +569,7 @@ describe("JobRunner resume of an operator pause without its lease (R4)", () => {
 		h.arbiter.retunes[0]!.resolve(pendingFor(11, HOP0))
 		await flush()
 		await h.runner.dispatch({ type: "source-down" })
+		h.arbiter.connected = false
 		expect(h.record).toMatchObject({ state: "paused", reason: "source-down" })
 		await expect(
 			h.runner.dispatch({ type: "resume", takeover: false }),

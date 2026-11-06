@@ -1,5 +1,6 @@
 // The Tuner's scan hold row (docs/web/canvas/Tuner.dc.html `hold`, DESIGN.md "Scanner UX review" and "Scanner second
-// pass"): the only status and control of a running sweep. Pure: what the row says and which buttons it has for a job.
+// pass"): the main status and control of a sweep (a paused scan's Resume is also in the plan and drawer footers,
+// ResumeScan.tsx, and the palette). Pure: what the row says and which buttons it has for a job.
 import type {
 	Discovery,
 	Impact,
@@ -322,8 +323,9 @@ export async function resumeWithConsent({
 }
 
 /**
- * Whether Resume can do anything. Two waits have no button, because the core would only refuse: another
- * scan holds the receiver (preempted-job) or the source is gone (source-down). Both carry on by themselves.
+ * Whether Resume can do anything. Two waits have no button: another scan holds the receiver (preempted-job, which
+ * carries on when that scan ends) or the source is gone (source-down, which waits for it: a dropout's return carries on,
+ * and a feed resumed plainly by hand moves it to resumed-without-retune, which has a button).
  */
 export function scanResumable(job: Pick<ScanJob, "state" | "reason">): boolean {
 	return (
@@ -520,7 +522,7 @@ export function holdRowModel(input: HoldRowInput): HoldRowModel {
 				case "source-down":
 					if (job.reason === "source-down") glyph = "plug"
 					title = line.title
-					detail = `${line.detail} · carries on when ${job.reason === "source-down" ? "it returns" : "it ends"}`
+					detail = `${line.detail} · ${job.reason === "source-down" ? "waits for it to return" : "carries on when it ends"}`
 					actions = [STOP]
 					break
 				case "resume-blocked": {

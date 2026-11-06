@@ -1,6 +1,6 @@
 // The scan hold row under the Tuner head (docs/web/canvas/Tuner.dc.html `hold`; DESIGN.md "Scanner UX review",
-// "Scanner second pass"): the only status and control of a running sweep. Glyph, the scan's name, the frequency it is
-// on, Pause / Resume / Stop, and Skip / Ignore / Save while it holds on a hit; a thin pass-progress line moved by
+// "Scanner second pass"): the main status and control of a sweep (a paused scan's Resume is also in the plan and drawer
+// footers, ResumeScan.tsx, and the palette). Glyph, the scan's name, the frequency it is on, Pause / Resume / Stop, and Skip / Ignore / Save while it holds on a hit; a thin pass-progress line moved by
 // transform only. Phosphor (accent) while live, amber when paused. A click opens the scan plan in the Scanner drawer.
 // Solid surface (no backdrop blur): it adds no blurred layer over the waterfall.
 import "./scan-hold.css"

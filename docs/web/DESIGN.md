@@ -695,8 +695,9 @@ Condensed + Noto Sans, Tabler-based icons).
     settle set the speed. Rejected: one job-wide step (wrong for Marine 25 + PMR 12.5) and hiding
     it. The Tuner keeps "Tuning step" (manual tuning); the planner says "Channel spacing".
   - *One running surface:* the band strip island is removed (board deleted). The Tuner hold row
-    is the only status and control (glyph, name, pass-progress line, current frequency, Pause,
-    Stop; Skip / Ignore / Save while holding); clicking it opens the planner in running mode,
+    is the only status and control of a running scan (glyph, name, pass-progress line, current
+    frequency, Pause, Stop; Skip / Ignore / Save while holding; a paused scan's Resume is also in
+    the plan and drawer footers and the palette); clicking it opens the planner in running mode,
     which is the readable "where is it" (big ruler, current hop lit, discovery ticks, ranges
     switchable). The tuned card says only "Scanning · 146.9625"; Listen keeps "Following the
     scan"; the drawer keeps one count.
@@ -734,7 +735,7 @@ Condensed + Noto Sans, Tabler-based icons).
     as a screen with "‹ Scanner".
   - *Running ownership:* the Tuner hold row is the only place with Pause, Stop, the current frequency
     and progress. The running pane has no Pause or Stop; its footer reads "Pass 3 · 62 % · full pass ≈
-    10 s". Range on/off, protocols and skips can change mid-run and wait in an amber "N changes waiting
+    10 s", with Resume once the scan is paused. Range on/off, protocols and skips can change mid-run and wait in an amber "N changes waiting
     · Discard · Apply" bar (core applies job edits at the next hop); edges and channel spacing are
     locked while running ("Stop to change edges"). The drawer's running block is only "Show plan / Hide
     plan", and its header "Scan a band" button hides while a scan runs.

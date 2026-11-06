@@ -294,7 +294,8 @@ waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads
   names them on its first button, so one click resumes it. If anyone else has arrived by the time you
   click, nothing is interrupted and the button names them instead. The Resume in the scan plan's footer
   and the Scanner drawer's footer works the same way. A scan that keeps its place by itself has no Resume: `Paused by Marine VHF · carries on
-  when it ends` and `Source down · carries on when it returns`. The resumed scan hops without a band gain, and when it ends nothing is put
+  when it ends` and `Source down · waits for it to return`. A Resume clicked on a paused scan while the source sends no data does nothing and says to try
+  again once data returns. In the ⌘K palette, a Resume scan that would interrupt someone asks you to choose Resume in the scan row. The resumed scan hops without a band gain, and when it ends nothing is put
   back: the receiver keeps whatever it was last tuned to. With more than one
   receiver, the Receiver island, the palette's receiver commands (pause, resume, gain, sample rate,
   bias tee, RTL AGC) and `P` act on the receiver the waterfall shows: the first connected one, which

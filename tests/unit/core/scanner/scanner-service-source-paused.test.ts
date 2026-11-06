@@ -99,6 +99,27 @@ describe("scanner jobs on a paused feed", () => {
 		await h.service.stop()
 	})
 
+	it("a pause and plain resume in one tick still holds the sweep without a tuning write", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		const feed = pausable(h)
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		const job = await h.service.createJob(sweep)
+		await untilRunning(h, job.id)
+		const from = h.tuner.sent.length
+
+		feed.pause("rtl")
+		feed.resume("rtl", "plain")
+		await vi.waitFor(() =>
+			expect(h.service.getJob(job.id)?.reason).toBe("resumed-without-retune"),
+		)
+		await settled(h.service)
+		expect(h.service.getJob(job.id)?.state).toBe("paused")
+		expect(tuningWrites(h, from)).toEqual([])
+		await h.service.cancelJob(job.id)
+		await h.service.stop()
+	})
+
 	it("a plain resume holds the sweep in paused(resumed-without-retune) without a tuning write until Resume scan", async () => {
 		const h = serviceHarness({ patch: noPassive })
 		const feed = pausable(h)

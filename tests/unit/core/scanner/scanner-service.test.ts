@@ -1008,7 +1008,7 @@ describe("ScannerService", () => {
 			h.service.resumeJob(low.id, { takeover: true }),
 		).rejects.toMatchObject({
 			statusCode: 409,
-			message: `Lease held by scanner job ${mid.id}`,
+			message: `Lease held by scanner job ${mid.id}; stop that job or wait for it to end, then resume. This job stays paused with its progress.`,
 		})
 		await h.service.stop()
 	})

@@ -340,6 +340,15 @@ describe("mock scanner REST", () => {
 		const again = await inject("POST", `/api/scanner/jobs/${job.id}/pause`)
 		expect(again.statusCode).toBe(409)
 		expect(again.json()).toMatchObject({ code: "SCANNER_INVALID_TRANSITION" })
+		// a resume of a running scan says it is running, as the core does
+		await inject("POST", `/api/scanner/jobs/${job.id}/resume`)
+		const twice = await inject("POST", `/api/scanner/jobs/${job.id}/resume`)
+		expect(twice.statusCode).toBe(409)
+		expect(twice.json()).toMatchObject({
+			code: "SCANNER_INVALID_TRANSITION",
+			message: `Job ${job.id} is already running; nothing is needed.`,
+		})
+		await inject("POST", `/api/scanner/jobs/${job.id}/pause`)
 		// edges are locked; live fields are not
 		const ranges = paused.spec.ranges
 		const locked = await inject("PATCH", `/api/scanner/jobs/${job.id}`, {

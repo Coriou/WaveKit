@@ -3561,8 +3561,25 @@ export function registerScannerMock(
 		emitProgress(r)
 	}
 
+	/** The core's job-runner `notPausedMessage`. */
+	const notPaused = (r: JobRec): ScannerApiError => {
+		const ended =
+			r.state === "completed" || r.state === "cancelled" || r.state === "failed"
+		return new ScannerApiError(
+			r.state === "running"
+				? `Job ${r.id} is already running; nothing is needed.`
+				: r.state === "holding"
+					? `Job ${r.id} is running and holding on a signal; nothing is needed. It moves on when the signal ends.`
+					: ended
+						? `Job ${r.id} has ended (${r.state}) and cannot resume; start a new scan.`
+						: `Job ${r.id} is still starting; nothing is needed. It runs as soon as it has started.`,
+			"SCANNER_INVALID_TRANSITION",
+			409,
+		)
+	}
+
 	const resumeJob = (r: JobRec, takeover: boolean): void => {
-		if (r.state !== "paused") throw invalid(r.id, "resume", r.state)
+		if (r.state !== "paused") throw notPaused(r)
 		// The mock's only source-down is a feed paused by hand: the core's route answers it the same way.
 		if (r.reason === "source-down")
 			throw new ScannerApiError(
@@ -3616,7 +3633,13 @@ export function registerScannerMock(
 			resumeSweep(r)
 			return
 		}
-		if (holder && holder !== r) throw sourceBusy(holder)
+		if (holder && holder !== r)
+			throw new ScannerApiError(
+				`${sourceBusy(holder).message}; stop that job or wait for it to end, then resume. This job stays paused with its progress.`,
+				"SCANNER_SOURCE_BUSY",
+				409,
+				{ reason: "held", holderJobId: holder.id },
+			)
 		const best = [...records.values()]
 			.filter(
 				j =>
@@ -3632,7 +3655,7 @@ export function registerScannerMock(
 			)[0]
 		if (best && best !== r)
 			throw new ScannerApiError(
-				`Scanner job ${best.id} waits for the lease with a better claim`,
+				`Scanner job ${best.id} waits for the lease with a better claim; stop it or wait for it, then resume. This job stays paused with its progress.`,
 				"SCANNER_SOURCE_BUSY",
 				409,
 				{ reason: "held", waiter: best.id },
