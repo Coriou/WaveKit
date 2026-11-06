@@ -16,6 +16,9 @@ import {
 	TUNER_CHANGE_ACTORS,
 	TUNER_CHANGE_FIELDS,
 	TUNER_CHANGE_REASONS,
+	TUNE_RESTORE_CANCEL_REASONS,
+	TUNE_RESTORE_STATUSES,
+	TUNE_SETTINGS,
 	type ApiEnums,
 } from "@wavekit/api-types"
 import {
@@ -62,6 +65,9 @@ export const API_ENUMS: ApiEnums = {
 		changeActors: TUNER_CHANGE_ACTORS,
 		changeReasons: TUNER_CHANGE_REASONS,
 		changeFields: TUNER_CHANGE_FIELDS,
+		tuneSettings: TUNE_SETTINGS,
+		tuneRestoreStatuses: TUNE_RESTORE_STATUSES,
+		tuneRestoreCancelReasons: TUNE_RESTORE_CANCEL_REASONS,
 	},
 	sources: {
 		verdictCodes: SOURCE_VERDICT_CODES,

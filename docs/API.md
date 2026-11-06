@@ -55,7 +55,8 @@ REST tuner mutations for each source are FIFO (scanner, relay and live-demod
 retunes are not queued),
 including frequency proof writes and bulk updates. A changed sample rate is flushed
 to the receiver, then its connection is deliberately reopened using the existing
-reconnect path. `POST /api/tuner/:sourceId/sample-rate` returns success only after the
+reconnect path. [`POST /api/tuner/:sourceId/tune`](#post-apitunersourceidtune) sets rate, centre and
+gain in one call and waits for this for you. `POST /api/tuner/:sourceId/sample-rate` returns success only after the
 source is writable and delivering IQ again; queued commands then run in order.
 An unchanged rate needs no restart. Recovery requires the new connection’s first
 IQ payload so reconnect tuning
@@ -854,18 +855,18 @@ curl http://localhost:9000/api/sources
 
 `verdict` says what the state means, in one closed code (listed in `GET /api/enums`): `{ code, message, deviceFacts }`. The message is fixed text, never a value from the receiver.
 
-| `code`                 | Meaning                                                                                                        |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `ok`                   | Samples are flowing                                                                                            |
-| `waiting`              | Connected, the first samples are not due yet                                                                   |
-| `no-samples`           | Connected with no IQ; the receiver's status API says nothing that explains it                                  |
-| `receiver-no-device`   | The receiver reports no device: re-attach USB. Needs `deviceFacts: "absent"`, and rtl_tcp not reported running |
-| `receiver-not-running` | The receiver reports a device, and that its rtl_tcp does not run. Needs `deviceFacts: "present"`               |
-| `backpressure`         | The core is not keeping up with this source                                                                    |
-| `disconnected`         | Not connected to the receiver                                                                                  |
-| `feed-paused`          | An operator holds the receiver feed off (`feed.state` `paused` or `resuming`)                                  |
-| `feed-error`           | Resuming the feed failed (`feed.state` `error`)                                                                |
-| `ended`                | A recording source reached its end                                                                             |
+| `code`                 | Meaning                                                                                                                                        |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ok`                   | Samples are flowing                                                                                                                            |
+| `waiting`              | Connected, the first samples are not due yet                                                                                                   |
+| `no-samples`           | Connected with no IQ; the receiver's status API says nothing that explains it                                                                  |
+| `receiver-no-device`   | The receiver reports no device (a failed USB probe reads the same): check USB. Needs `deviceFacts: "absent"`, and rtl_tcp not reported running |
+| `receiver-not-running` | The receiver reports a device, and that its rtl_tcp does not run. Needs `deviceFacts: "present"`                                               |
+| `backpressure`         | The core is not keeping up with this source                                                                                                    |
+| `disconnected`         | Not connected to the receiver                                                                                                                  |
+| `feed-paused`          | An operator holds the receiver feed off (`feed.state` `paused` or `resuming`)                                                                  |
+| `feed-error`           | Resuming the feed failed (`feed.state` `error`)                                                                                                |
+| `ended`                | A recording source reached its end                                                                                                             |
 
 `deviceFacts` says what the receiver's status API can tell, and only `present` and `absent` assert a device state: `present` or `absent` (a fresh answer stating a boolean), `malformed` (it answered without one), `stale` (its last answer is over 15 s old), `unreachable` (it does not answer now), `none` (this core polls no status API for the source). Samples flowing outrank any report, so a receiver that says "no device" while IQ arrives still reads `ok`. The verdict is on this route and on `source:status` events (where a change that comes only from the receiver's facts waits for the 10 s heartbeat) and, as a bare code, on `GET /api/agent/status`.
 
@@ -1685,17 +1686,17 @@ pending.
 one per source, in memory, absent until the first change since the core started. Clients cannot
 set it: `actor` comes from the core's own view of the write. All three lists are in `GET /api/enums`.
 
-| `actor`        | `reason`                              | Written by                                                                                                   |
-| -------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `web`          | `rest-command`                        | A REST write under a browser session                                                                         |
-| `agent`        | `rest-command`                        | A REST write under a machine token                                                                           |
-| `unknown`      | `rest-command`                        | A REST write on a core without access protection: there is no principal to tell who                          |
-| `scanner-job`  | `scanner-hop`                         | A scanner job's tuner lease; `jobId` names the job                                                           |
-| `restore`      | `scanner-restore`, `reconnect-replay` | The core putting tuning back: after a lease (`jobId` when the release knows it), or replay on a reconnect    |
-| `config`       | `source-config`                       | The source's configured tuning, written on connect                                                           |
-| `decoder-rate` | `decoder-rate`                        | The decoder rate policy raising the sample rate                                                              |
-| `relay`        | `relay-command`                       | An external client through the tuner relay, including a value the controller ignores (the relay forwards it) |
-| `unknown`      | `unknown`                             | An untagged write                                                                                            |
+| `actor`        | `reason`                                              | Written by                                                                                                                        |
+| -------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `web`          | `rest-command`                                        | A REST write under a browser session                                                                                              |
+| `agent`        | `rest-command`                                        | A REST write under a machine token                                                                                                |
+| `unknown`      | `rest-command`                                        | A REST write on a core without access protection: there is no principal to tell who                                               |
+| `scanner-job`  | `scanner-hop`                                         | A scanner job's tuner lease; `jobId` names the job                                                                                |
+| `restore`      | `scanner-restore`, `tune-restore`, `reconnect-replay` | The core putting tuning back: after a lease (`jobId` when the release knows it), after a temporary tune, or replay on a reconnect |
+| `config`       | `source-config`                                       | The source's configured tuning, written on connect                                                                                |
+| `decoder-rate` | `decoder-rate`                                        | The decoder rate policy raising the sample rate                                                                                   |
+| `relay`        | `relay-command`                                       | An external client through the tuner relay, including a value the controller ignores (the relay forwards it)                      |
+| `unknown`      | `unknown`                                             | An untagged write                                                                                                                 |
 
 Writes of one actor, reason and job under a second apart extend `fields`, each field at most once
 (a hop writes rate, centre and gain in a row). A scanner settle marker (test mode on and off) is no change.
@@ -1808,6 +1809,103 @@ Get tuner state for a single source.
 ```bash
 curl http://localhost:9000/api/tuner/rtl-pi
 ```
+
+#### POST /api/tuner/:sourceId/tune
+
+Set the rate, the centre and the gain in one call. The answer comes only when the source can be
+used again, so a sample-rate change needs no retry loop. Agents should use this over the separate
+routes below.
+
+| Body field      | Sets in `GET /api/tuner` | Value                                                                    |
+| --------------- | ------------------------ | ------------------------------------------------------------------------ |
+| `sampleRateHz`  | `sampleRate`             | Integer Hz, 225001-300000 or 900001-3200000                              |
+| `frequencyHz`   | `frequency`              | Integer Hz, 24000000-1900000000                                          |
+| `gainMode`      | `gainMode`               | `manual` or `agc`                                                        |
+| `gain`          | `gain`                   | Integer tenths of a dB, 0-500                                            |
+| `restoreAfterS` |                          | Integer seconds, 1-3600: see [temporary tune](#temporary-tune). Optional |
+
+At least one setting is required, and an unknown field is a 400. They are written in the order of
+the table: the rate first, then the centre, then the gain (for `agc`, the gain and then the mode,
+because rtl_tcp `SET_GAIN` switches the tuner to manual). A setting already at the value and proven
+is not written again. The same rules as the separate routes apply: it runs in the source's
+[command queue](#tuner-commands-during-a-sample-rate-restart), a frequency without a rate takes the
+[rate proof](#post-apitunersourceidfrequency) and the decoder rate policy, and a band gain applies
+after the centre, where an explicit `gain` overrides it. It refuses external control (409
+`TUNER_CONTROL_EXTERNAL`). Like every operator write, it takes the tuner from a scanner job that
+holds a lease rather than being refused: the job loses the lease (`preempted-operator`).
+
+**200** is the tuner state plus `usable: true`, `applied` (the settings, as named in `GET /api/enums`
+`tuner.tuneSettings`) and `notApplied: []`. It means the source is connected, writable and delivering
+IQ on its current connection, after any reconnect restore. As with every tuner route, this is
+"written": rtl_tcp has no readback.
+
+**Any failure after the settings were accepted** carries `usable`, `applied`, `notApplied` and
+`state`, so a partial tune is never silent:
+
+| Status | `code`                        | Meaning                                                                                                                                                                                                                                                                        |
+| ------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 503    | `TUNER_NOT_USABLE`            | The source was not usable within 18 s (or its feed is paused, which answers at once). `sourceVerdict` says why. `applied` can be non-empty: those settings were written and return with the source. `inFlight: true`: one was being written at the deadline and may still land |
+| 503    | `TUNER_TUNE_PARTIAL`          | The source is usable but shows other values, as after a `tuner.reconnectPolicy: reset` reconnect discards what was written                                                                                                                                                     |
+| 503    | `SOURCE_DISCONNECTED`         | The source dropped during the writes; `applied` stops where it did                                                                                                                                                                                                             |
+| 409    | `TUNER_CONTROL_EXTERNAL`      | An external client has the tuner                                                                                                                                                                                                                                               |
+| 409    | `TUNER_TUNE_BUSY`             | One tune per source: another is running, or a restore is putting tuning back. It is not queued; retry when it answers                                                                                                                                                          |
+| 409    | `TUNER_RESTORE_PRIOR_UNKNOWN` | `restoreAfterS` with a setting whose prior value the core does not know (see `unknownFields`): nothing is written. Set it first, or tune without a restore                                                                                                                     |
+| 404    | `TUNER_SOURCE_NOT_FOUND`      | No tuner for this source                                                                                                                                                                                                                                                       |
+
+503 answers carry `Retry-After: 1`. The 18 s is one command (9 s) plus one sample-rate recovery (9 s,
+[above](#tuner-commands-during-a-sample-rate-restart)). Waiting for a source that was already
+reconnecting and time queued behind other commands use the same 18 s, and no write starts after it.
+The wait follows the source's first payload rather than a poll, so the answer comes as soon as the
+source is back.
+
+A client that disconnects does not stop a tune: every setting is still applied, the temporary tune
+is still armed, and `lastTune` in `GET /api/tuner` (`at`, `usable`, `applied`, `notApplied`, `code`) says
+how it ended.
+
+##### Temporary tune
+
+`restoreAfterS` puts the prior rate, centre, gain mode and gain back that long after the tune
+finishes (the clock starts after any reconnect). Values it finds unchanged are not written, so
+restoring a tune of the centre alone writes one command. A band gain in force before the tune is
+reported again when the gain comes back.
+
+The rule is that the user wins. A later write to this tuner by anyone cancels the restore for good,
+and nothing overwrites it: another REST write (including one to another field, such as `ppm`), a tune
+without `restoreAfterS`, a relay client or the control going external, a scanner job, the decoder
+rate policy. A reconnect that replays the same tuning does not count. A reconnect that leaves other
+values (`reset` policy, a plain resume that leaves them unverified) cancels it with reason
+`state-changed`. A scanner job that holds a lease but has not written yet is not seen: its next hop
+cancels the restore, but a restore that fires before that hop preempts the job as an operator write
+does.
+
+`restore` in `GET /api/tuner` shows the source's one restore, the pending one or how the last one
+ended, until the next temporary tune or the source's removal:
+
+| Field         | Content                                                                                                                                                      |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `at`          | ISO time it is or was due                                                                                                                                    |
+| `status`      | `pending`, `restoring`, `restored`, `cancelled` or `failed`                                                                                                  |
+| `state`       | What goes back: `sampleRate`, `frequency`, `gainMode`, `gain`. A field the core did not know at the tune is absent                                           |
+| `cancelledBy` | `{ actor, reason, at }`. `reason` is `tuner-write`, `state-changed`, `external-control` (`actor` `relay`) or `cancel-request`                                |
+| `restored`    | The settings back at their prior value; after a cancel or a failure, those before it stopped                                                                 |
+| `failure`     | The error code of a failed restore. It is one attempt with the same 18 s bound and is not retried: the temporary tuning stays and later writes work as usual |
+
+The restore's writes read `actor: restore`, `reason: tune-restore` in `lastChange`.
+
+`DELETE /api/tuner/:sourceId/tune/restore` keeps the temporary tuning (`cancel-request`) and answers the
+tuner state; with no restore pending it is 404 `TUNER_RESTORE_NOT_PENDING`.
+
+A new temporary tune during a pending one keeps the original snapshot and takes the new time: the
+tuner goes back to where it was before the first. If the new tune writes nothing, the pending restore
+keeps its old time.
+
+###### Temporary tune and restart
+
+A pending restore lives in memory. On shutdown it is dropped and nothing is written. Removing or
+re-adding the source drops it too. The core does not save tuning at all, so no temporary value becomes
+a saved one, but the receiver keeps what it was last told: after a restart a dongle can still be on
+the temporary tuning while the core's state returns to its configured baseline, with the fields in
+`declaredOnlyFields` or `unknownFields`. Tune again after a restart if the tuning matters.
 
 #### POST /api/tuner/:sourceId/frequency
 
@@ -4280,9 +4378,10 @@ and additive; older cores omit them.
 - `storeEpoch`: an opaque string, new each time the core starts. Revisions restart with
   it and are never compared across epochs: on a new epoch, drop what you cached and read
   again.
-- `storeRevision`: the store-wide revision when the answer was taken; no record in it has
-  a newer one. On list pages, and on the detail and PATCH answers (PATCH: the revision
-  of that edit, taken when it was applied).
+- `storeRevision`: the store-wide revision when the answer was taken. On detail answers no
+  record in it has a newer one; on PATCH answers it is the revision of that edit, taken when
+  it was applied. On list pages it is taken when the read starts: the read yields to other
+  work, so a returned row can carry a newer `revision` than the page's `storeRevision`.
 - On `scanner:discovery` events: `revision` (the record's new revision, or for `deleted`
   the revision of the removal; for `merged`, every id in `mergedIds` was removed at that
   same revision) and `storeEpoch`.
@@ -4331,10 +4430,15 @@ A discovery has no `state` field: it is a record of what was heard, not a proces
 reading `state` gets nothing. Use `confidence` and `evidenceLevel` for how far it is established,
 and `lastSeenAt` for whether it is recent. The `state` of a scanner job is on the job.
 
-A read gives other API calls a turn every 2 ms of work, between rows. For N records and a page of L
-at offset O it makes N filter visits and at most N × (1 + 2 × log2 (O + L)) sort comparisons, in
-one stretch, then builds L rows. A record merged or evicted during the read is left out, so a page
-can come back short of `limit` with `nextCursor` still set. `storeRevision` is read before the rows.
+A read gives other API calls a turn every 2 ms of work: between rows while it filters and builds
+them, and at most 1,064 comparisons apart (about 0.1 ms) while it picks the page. For N records and
+a page of L at offset O it makes N filter visits, then at most N × (1 + 2 × log2 (O + L))
+comparisons, or N × log2 N when O + L reaches half of N, then builds L rows. The whole read therefore
+takes longer on a deep page of a large store (about 2 s of work for a page in the middle of a
+million records), without holding other requests up for that long. The order uses each record's
+sort keys as the read first saw them. A record merged or evicted during the read is left out, so a
+page can come back short of `limit` with `nextCursor` still set. `storeRevision` is read before the
+rows, so a row can carry a newer `revision`.
 
 #### GET /api/scanner/discoveries/:id
 

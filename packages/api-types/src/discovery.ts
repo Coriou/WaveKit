@@ -23,6 +23,9 @@ import type {
 	TunerChangeActor,
 	TunerChangeField,
 	TunerChangeReason,
+	TuneRestoreCancelReason,
+	TuneRestoreStatus,
+	TuneSetting,
 	TunerState,
 } from "./tuner.js"
 
@@ -135,6 +138,9 @@ export interface ApiEnums {
 		changeActors: readonly TunerChangeActor[]
 		changeReasons: readonly TunerChangeReason[]
 		changeFields: readonly TunerChangeField[]
+		tuneSettings: readonly TuneSetting[]
+		tuneRestoreStatuses: readonly TuneRestoreStatus[]
+		tuneRestoreCancelReasons: readonly TuneRestoreCancelReason[]
 	}
 	sources: {
 		verdictCodes: readonly SourceVerdictCode[]

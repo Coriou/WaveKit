@@ -136,6 +136,105 @@ export interface TunerState {
 	 * becoming unknown. `tenthsDb` is the value written (snapped to the tuner's step).
 	 */
 	bandGain?: TunerBandGain
+	/**
+	 * The temporary tune of this source (POST /api/tuner/:sourceId/tune with `restoreAfterS`): the
+	 * one pending, or how the last one ended. In memory; gone with the source or a core restart.
+	 */
+	restore?: TuneRestore
+	/** How the last POST /api/tuner/:sourceId/tune ended, for a client that lost its answer. */
+	lastTune?: TunerLastTune
+}
+
+/**
+ * The settings of POST /api/tuner/:sourceId/tune, in the order they are written: the rate first
+ * (the receiver restarts on it), then the centre, then the gain. `applied` and `notApplied` name
+ * them. `sampleRateHz` and `frequencyHz` set `sampleRate` and `frequency` of GET /api/tuner.
+ */
+export const TUNE_SETTINGS = [
+	"sampleRateHz",
+	"frequencyHz",
+	"gainMode",
+	"gain",
+] as const
+export type TuneSetting = (typeof TUNE_SETTINGS)[number]
+
+/**
+ * Longest `restoreAfterS`: one hour, far under what a timer can hold (3,600,000 ms against
+ * 2^31 − 1 ms, about 24.8 days). Each source holds one restore, so the memory is bounded by the
+ * sources whatever the value.
+ */
+export const TUNE_RESTORE_MAX_S = 3_600
+
+/** Body of POST /api/tuner/:sourceId/tune. At least one setting; `restoreAfterS` is not one. */
+export interface TuneRequest {
+	sampleRateHz?: number
+	frequencyHz?: number
+	gainMode?: TunerGainMode
+	/** Tenths of a dB (0-500), as `gain` in GET /api/tuner. */
+	gain?: number
+	/** Integer seconds, 1 to TUNE_RESTORE_MAX_S: put the prior tuning back after this long. */
+	restoreAfterS?: number
+}
+
+/** What became of a temporary tune's restore (`TunerState.restore.status`). */
+export const TUNE_RESTORE_STATUSES = [
+	"pending",
+	"restoring",
+	"restored",
+	"cancelled",
+	"failed",
+] as const
+export type TuneRestoreStatus = (typeof TUNE_RESTORE_STATUSES)[number]
+
+/** Why a restore was cancelled (`TunerState.restore.cancelledBy.reason`). */
+export const TUNE_RESTORE_CANCEL_REASONS = [
+	"tuner-write",
+	"state-changed",
+	"external-control",
+	"cancel-request",
+] as const
+export type TuneRestoreCancelReason =
+	(typeof TUNE_RESTORE_CANCEL_REASONS)[number]
+
+/** The prior tuning a restore writes; a field the core did not know then is absent. */
+export interface TuneRestoreTuning {
+	sampleRate?: number
+	frequency?: number
+	gainMode?: TunerGainMode
+	gain?: number
+}
+
+export interface TuneRestore {
+	/** ISO time the restore is or was due. */
+	at: string
+	status: TuneRestoreStatus
+	state: TuneRestoreTuning
+	/** Who ended it, once cancelled. A cancelled restore never comes back. */
+	cancelledBy?: {
+		actor: TunerChangeActor
+		reason: TuneRestoreCancelReason
+		at: string
+	}
+	/** The settings back at their prior value; on a cancel or a failure, those before it stopped. */
+	restored?: TuneSetting[]
+	/** The error code of a failed restore. It is not retried. */
+	failure?: string
+}
+
+export interface TunerLastTune {
+	at: string
+	usable: boolean
+	applied: TuneSetting[]
+	notApplied: TuneSetting[]
+	/** The error code of a tune that did not fully apply. */
+	code?: string
+}
+
+/** 200 of POST /api/tuner/:sourceId/tune: the new tuner state, usable, every setting applied. */
+export type TuneResponse = TunerState & {
+	usable: true
+	applied: TuneSetting[]
+	notApplied: []
 }
 
 /** The band gain on the tuner (TunerState.bandGain). */
@@ -221,7 +320,8 @@ export type TunerCommandOrigin =
 /**
  * Who made a tuner's last change (`TunerState.lastChange`). Set by the core, never by a client:
  * `web` a browser session, `agent` a machine token, `scanner-job` a scanner job's tuner lease,
- * `restore` the core putting tuning back (after a scanner lease, or replay on reconnect),
+ * `restore` the core putting tuning back (after a scanner lease, after a temporary tune, or replay
+ * on reconnect),
  * `config` the source's configured tuning, `decoder-rate` the decoder rate policy, `relay` an
  * external client through the tuner relay. `unknown`: a REST write on a core without access
  * protection (no principal to tell who), or an untagged write.
@@ -243,6 +343,7 @@ export const TUNER_CHANGE_REASONS = [
 	"rest-command",
 	"scanner-hop",
 	"scanner-restore",
+	"tune-restore",
 	"reconnect-replay",
 	"source-config",
 	"decoder-rate",

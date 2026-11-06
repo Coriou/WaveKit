@@ -34,6 +34,10 @@ import type {
 	TunerChangeReason,
 	TunerLastChange,
 	TunerRatePolicyEventData,
+	TuneRestore,
+	TuneRestoreTuning,
+	TuneSetting,
+	TunerLastTune,
 } from "@wavekit/api-types"
 
 /**
@@ -44,7 +48,8 @@ import type {
  * its current value. Test mode is never a desired field, so it is never replayed.
  * `actor`, `jobId` and `restore` only describe the write for `lastChange`: `actor` says who a
  * REST write came from (from the request's access principal, never from the client), `jobId`
- * which job's lease a scanner write serves, `restore` that it puts the snapshot back.
+ * which job's lease a scanner write serves, `restore` that it puts the snapshot back (a scanner
+ * lease's, or with origin "rest" a temporary tune's; that one is no operator gain choice).
  */
 export interface TunerWriteOptions {
 	origin?: TunerCommandOrigin
@@ -60,6 +65,24 @@ export interface TunerWriteOptions {
  * adds a closed field once, so a fast sweep cannot grow it past TUNER_CHANGE_FIELDS (15).
  */
 export const TUNER_CHANGE_MERGE_MS = 1_000
+
+/** A tune's settings under GET /api/tuner's names; absent settings are left alone. */
+export type TuneValues = TuneRestoreTuning
+
+/** `restore` and `lastTune` of a source's published state. */
+type TuneStatusOf = (sourceId: string) => {
+	restore?: TuneRestore
+	lastTune?: TunerLastTune
+}
+
+/** What `tuneSnapshot` read before a temporary tune. */
+export interface TuneSnapshot {
+	/** The fields the core knows (not in `unknownFields`). */
+	state: TuneValues
+	bandGain?: TunerBandGain
+	/** An operator gain saved before a band gain was on record. */
+	savedOperatorGain: boolean
+}
 
 /**
  * Sample rates the RTL2832U accepts. librtlsdr's rtlsdr_set_sample_rate()
@@ -111,6 +134,9 @@ const VALIDATION = {
 	uint32: { min: 0, max: 0xffffffff },
 	uint16: { min: 0, max: 0xffff },
 } as const
+
+/** The tuner's value bounds, for route schemas: the controller still checks every write. */
+export const TUNER_VALUE_BOUNDS = VALIDATION
 
 const DEFAULT_FREQUENCY = 100_000_000
 
@@ -338,7 +364,9 @@ function changeOf(opts: TunerWriteOptions): {
 	const job = opts.jobId !== undefined ? { jobId: opts.jobId } : {}
 	switch (opts.origin) {
 		case "rest":
-			return { actor: opts.actor ?? "unknown", reason: "rest-command" }
+			return opts.restore === true
+				? { actor: "restore", reason: "tune-restore" }
+				: { actor: opts.actor ?? "unknown", reason: "rest-command" }
 		case "scanner":
 			return opts.restore === true
 				? { actor: "restore", reason: "scanner-restore", ...job }
@@ -437,6 +465,8 @@ export interface TunerControllerEvents {
 	"control-mode-changed": (sourceId: string, mode: TunerControlMode) => void
 	/** WG5: the source's tuner state is gone (removeSource); getState now returns undefined. */
 	"source-removed": (sourceId: string) => void
+	/** A change was recorded for `lastChange`: synchronous, before the state it brings is set. */
+	"last-change": (sourceId: string, change: TunerLastChange) => void
 	error: (sourceId: string, error: Error) => void
 }
 
@@ -950,7 +980,11 @@ export class TunerController extends EventEmitter {
 		sourceId: string,
 		opts: TunerWriteOptions,
 	): void {
-		if (opts.origin === "rest" && !this.applyingBandGain.has(sourceId))
+		if (
+			opts.origin === "rest" &&
+			opts.restore !== true &&
+			!this.applyingBandGain.has(sourceId)
+		)
 			this.dropOperatorGain(sourceId)
 	}
 
@@ -2038,6 +2072,164 @@ export class TunerController extends EventEmitter {
 		}
 	}
 
+	// === Tune in one call ===
+
+	/**
+	 * The settings of a tune with the setters' own value checks, for a refusal before anything
+	 * waits or writes. Throws TunerValidationError naming the field by its GET /api/tuner name.
+	 */
+	validateTune(values: TuneValues): void {
+		this.validateUpdates(values)
+	}
+
+	/**
+	 * Applies a tune inside one tuner command: the rate first (rate before centre, as a reconnect
+	 * replays them), then the centre, then the gain. An operator's tune follows the bulk update's
+	 * rules: the rate policy and the rate proof run only without an explicit rate, a band gain
+	 * applies after the centre, and an explicit gain overrides it. A field already at the value and
+	 * proven is not written, but still counts as applied.
+	 *
+	 * `opts.restore` puts a temporary tune's prior tuning back: exactly the given values, only
+	 * where they differ (never a write to prove a value nobody changed), with no rate policy and no
+	 * band gain. `applied` is called after each setting; a throw from it stops the tune there.
+	 * `leftAgc`: a gain written since the mode was (rtl_tcp SET_GAIN switches the tuner to manual
+	 * and the state does not show it), so going back to AGC writes the mode even when it matches.
+	 * A written gain mode is always followed by a written gain: a tuner switched to manual may
+	 * reset its gain.
+	 */
+	async applyTune(
+		sourceId: string,
+		values: TuneValues,
+		opts: TunerWriteOptions,
+		applied: (setting: TuneSetting) => void,
+		leftAgc = false,
+	): Promise<void> {
+		const state = this.validateSourceForControl(sourceId)
+		this.validateUpdates(values)
+		const restoring = opts.restore === true
+		const operator = opts.origin === "rest" && !restoring
+		const unproven = (field: TunerStateField): boolean => {
+			const proof = this.fieldProof(sourceId)
+			return (
+				proof.unknownFields.includes(field) ||
+				proof.declaredOnlyFields.includes(field)
+			)
+		}
+		const changed = (field: TunerStateField, differs: boolean): boolean =>
+			differs || (!restoring && unproven(field))
+
+		const hz = values.sampleRate
+		if (hz !== undefined) {
+			if (changed("sampleRate", hz !== state.sampleRate))
+				await this.setSampleRate(sourceId, hz, opts)
+			else if (operator && this.onOperatorSampleRate) {
+				this.sourceManager.assertTunerCommandActive()
+				this.withoutCommand(() => this.onOperatorSampleRate?.(sourceId))
+				this.emitStateChanged(sourceId)
+			}
+			applied("sampleRateHz")
+		}
+
+		const frequency = values.frequency
+		if (frequency !== undefined) {
+			if (operator && hz === undefined) {
+				if (this.beforeOperatorRetune !== null) {
+					await this.beforeOperatorRetune(sourceId, frequency, opts)
+					this.sourceManager.assertTunerCommandActive()
+					this.emitStateChanged(sourceId)
+				}
+				await this.proveSampleRateForFrequency(sourceId, opts, frequency)
+			}
+			if (changed("frequency", frequency !== state.frequency)) {
+				const retune = async () => {
+					await this.writeFrequency(sourceId, frequency, opts, state)
+					if (operator)
+						await this.applyOperatorBandGain(sourceId, frequency, opts)
+				}
+				await (operator && this.bandGain?.applyToMyTuning() === true
+					? this.serialRestRetune(sourceId, retune)
+					: retune())
+			}
+			applied("frequencyHz")
+		}
+
+		let wroteGain = leftAgc
+		let wroteMode = false
+		const writeMode = async (mode: TunerGainMode) => {
+			if (
+				changed("gainMode", mode !== state.gainMode) ||
+				(mode === "agc" && wroteGain)
+			) {
+				await this.setGainMode(sourceId, mode, opts)
+				wroteMode = true
+			} else if (operator) this.noteUnchangedGainChoice(sourceId, opts)
+			applied("gainMode")
+		}
+		const writeGain = async (tenthsDb: number) => {
+			if (changed("gain", tenthsDb !== state.gain) || wroteMode) {
+				await this.setGain(sourceId, tenthsDb, opts)
+				wroteGain = true
+			} else if (operator) this.noteUnchangedGainChoice(sourceId, opts, true)
+			applied("gain")
+		}
+		// rtl_tcp SET_GAIN switches the tuner to manual: for AGC the mode goes last.
+		if (values.gainMode === "agc") {
+			if (values.gain !== undefined) await writeGain(values.gain)
+			await writeMode("agc")
+		} else {
+			if (values.gainMode !== undefined) await writeMode(values.gainMode)
+			if (values.gain !== undefined) await writeGain(values.gain)
+		}
+	}
+
+	/** What a temporary tune must remember to put the tuner back. */
+	tuneSnapshot(sourceId: string): TuneSnapshot | undefined {
+		const state = this.tunerStates.get(sourceId)
+		if (!state) return undefined
+		const { unknownFields } = this.fieldProof(sourceId)
+		const known = (field: TunerStateField) => !unknownFields.includes(field)
+		const bandGain = this.confirmedBandGain(state, unknownFields)
+		return {
+			state: {
+				...(known("sampleRate") ? { sampleRate: state.sampleRate } : {}),
+				...(known("frequency") ? { frequency: state.frequency } : {}),
+				...(known("gainMode") ? { gainMode: state.gainMode } : {}),
+				...(known("gain") ? { gain: state.gain } : {}),
+			},
+			...(bandGain ? { bandGain } : {}),
+			savedOperatorGain: this.operatorGainBeforeBand.has(sourceId),
+		}
+	}
+
+	/**
+	 * A restore put `snapshot` back. A gain saved before a band during the temporary tune is older
+	 * than this write and goes; one from before the snapshot still stands. A band gain confirmed at
+	 * the snapshot is confirmed again when the known state shows it.
+	 */
+	noteTuneRestored(sourceId: string, snapshot: TuneSnapshot): void {
+		if (!snapshot.savedOperatorGain) this.dropOperatorGain(sourceId)
+		const hz = this.tunerStates.get(sourceId)?.frequency
+		if (snapshot.bandGain !== undefined && hz !== undefined)
+			this.noteBandGainApplied(
+				sourceId,
+				snapshot.bandGain.tenthsDb,
+				snapshot.bandGain.owner,
+				hz,
+			)
+	}
+
+	private tuneStatus: TuneStatusOf | null = null
+
+	/** Where `restore` and `lastTune` of the published state come from. */
+	setTuneStatus(status: TuneStatusOf | null): void {
+		this.tuneStatus = status
+	}
+
+	/** Publishes the state again after `restore` or `lastTune` changed. */
+	publishState(sourceId: string): void {
+		this.emitStateChanged(sourceId)
+	}
+
 	// === Reconnect Synchronization ===
 
 	/**
@@ -3045,11 +3237,13 @@ export class TunerController extends EventEmitter {
 			last.jobId === change.jobId &&
 			now - Date.parse(last.at) < TUNER_CHANGE_MERGE_MS
 		const fields = extending ? last.fields : []
-		this.lastChanges.set(sourceId, {
+		const next: TunerLastChange = {
 			...change,
 			at: new Date(now).toISOString(),
 			fields: fields.includes(field) ? fields : [...fields, field],
-		})
+		}
+		this.lastChanges.set(sourceId, next)
+		this.emit("last-change", sourceId, next)
 	}
 
 	private emitStateChanged(sourceId: string): void {
@@ -3076,6 +3270,7 @@ export class TunerController extends EventEmitter {
 		const lastChange = this.lastChanges.get(state.sourceId)
 		return {
 			...fields,
+			...this.tuneStatus?.(state.sourceId),
 			...(lastChange
 				? { lastChange: { ...lastChange, fields: [...lastChange.fields] } }
 				: {}),

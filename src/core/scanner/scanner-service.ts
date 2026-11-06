@@ -2650,7 +2650,8 @@ export class ScannerService extends EventEmitter {
 
 	/**
 	 * `listDiscoveries` for the API: it yields during the read. The epoch and revision are taken
-	 * first, so the stamp never claims a change the rows may not reflect.
+	 * first, a conservative start stamp: every change up to it is in the rows, while a record
+	 * changed during a yield can come back with a newer revision than the stamp.
 	 */
 	async listDiscoveriesPaced(filter: DiscoveryFilter): Promise<
 		{

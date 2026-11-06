@@ -3,9 +3,12 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import type { DiscoveryFilter } from "../../../../src/core/scanner/store/discovery-store.js"
 import {
+	LIST_PACE_EVERY_STEPS,
 	LIST_SLICE_MS,
+	LIST_STRETCH_COMPARISONS,
 	createListPace,
 	firstSorted,
+	firstSortedPaced,
 	type ListPace,
 } from "../../../../src/core/scanner/store/list-page.js"
 import type { Discovery } from "../../../../src/core/scanner/types.js"
@@ -210,6 +213,100 @@ describe("firstSorted", () => {
 	})
 })
 
+describe("firstSortedPaced", () => {
+	const compare = (a: number, b: number): number => a - b
+	const alwaysDue = (onWait: () => void = () => {}): ListPace => ({
+		due: () => true,
+		wait: () => {
+			onWait()
+			return Promise.resolve()
+		},
+	})
+
+	it("states the bound its arithmetic gives", () => {
+		expect(LIST_STRETCH_COMPARISONS).toBe(
+			LIST_PACE_EVERY_STEPS - 1 + 1 + 2 * 20,
+		)
+		// A heap holds under half of the store's cap, so 20 levels hold it.
+		expect(2 ** 20).toBeGreaterThan(1_000_000 / 2)
+	})
+
+	it("answers what the plain selection answers, however the pace falls", async () => {
+		await fc.assert(
+			fc.asyncProperty(
+				fc.uniqueArray(fc.integer(), { maxLength: 300 }),
+				fc.integer({ min: 0, max: 320 }),
+				fc.array(fc.boolean(), { minLength: 1, maxLength: 16 }),
+				async (values, count, dues) => {
+					let at = 0
+					const pace: ListPace = {
+						due: () => dues[at++ % dues.length]!,
+						wait: () => Promise.resolve(),
+					}
+					expect(
+						await firstSortedPaced([...values], count, compare, pace),
+					).toEqual(firstSorted([...values], count, compare))
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
+
+	it("matches the plain selection across a real pace at both sides of the sort fallback", async () => {
+		const walk = shuffled(5_000)
+		for (const count of [0, 1, 2_499, 2_500, 2_501, 5_000, 6_000]) {
+			expect(
+				await firstSortedPaced([...walk], count, compare, alwaysDue()),
+			).toEqual(firstSorted([...walk], count, compare))
+		}
+	})
+
+	const n = 40_000
+	const walk = shuffled(n)
+	it.each([
+		["the heap, every record beats the root", n / 2 - 1, (i: number) => n - i],
+		["the heap, no record beats the root", n / 2 - 1, (i: number) => i],
+		["the heap, shuffled", 500, (i: number) => walk[i]!],
+		["the sort, at half", n / 2, (i: number) => walk[i]!],
+		["the sort, past half", n, (i: number) => walk[i]!],
+		["the sort, already sorted", n, (i: number) => i],
+	])(
+		"checks the pace within the comparison bound: %s",
+		async (_n, count, value) => {
+			const values = Array.from({ length: n }, (_, i) => value(i))
+			let stretch = 0
+			let longest = 0
+			let total = 0
+			let waits = 0
+			const out = await firstSortedPaced(
+				values,
+				count,
+				(a, b) => {
+					stretch++
+					total++
+					return a - b
+				},
+				alwaysDue(() => {
+					waits++
+					longest = Math.max(longest, stretch)
+					stretch = 0
+				}),
+			)
+			longest = Math.max(longest, stretch)
+			expect(out).toHaveLength(count)
+			expect(waits).toBeGreaterThan(0)
+			expect(longest).toBeLessThanOrEqual(LIST_STRETCH_COMPARISONS)
+			const logN = Math.ceil(Math.log2(n))
+			const logCount = Math.ceil(Math.log2(count))
+			expect(total).toBeLessThanOrEqual(
+				count * 2 >= n
+					? n * logN
+					: 2 * count + (n - count) * (1 + 2 * logCount) + count * logCount,
+			)
+		},
+	)
+})
+
 describe("createListPace", () => {
 	it("is due at the slice, not before, and starts over after a wait", async () => {
 		expect(LIST_SLICE_MS).toBe(2)
@@ -291,6 +388,124 @@ describe("paced reads", () => {
 			expect(internals.proofCache.has(gone)).toBe(false)
 		},
 	)
+
+	it("yields while picking the page, not only between rows", async () => {
+		const n = 3_000
+		const { store } = storeOf(n)
+		const wait = vi.fn(() => Promise.resolve())
+		// Half of the store: the whole-sort path, n × log2 n ≈ 34,700 comparisons.
+		const page = await store.listPaced(
+			{ limit: 500, cursor: "1000" },
+			{ due: () => true, wait },
+		)
+		expect(page.items).toHaveLength(500)
+		// Rows alone: n filter visits + 500 presented. The selection adds at least one per
+		// LIST_PACE_EVERY_STEPS moved elements (n × log2 n moves).
+		const selection = wait.mock.calls.length - n - 500
+		expect(selection).toBeGreaterThanOrEqual(
+			Math.floor((n * 11) / LIST_PACE_EVERY_STEPS) - 1,
+		)
+		expect(page).toEqual(
+			await store.listPaced({ limit: 500, cursor: "1000" }, noYield()),
+		)
+	})
+
+	it.each<[string, DiscoveryFilter]>([
+		["default", { limit: 50, cursor: "1000" }],
+		["frequency", { limit: 50, cursor: "1000", sort: "frequency" }],
+		["confidence", { limit: 50, cursor: "1000", sort: "confidence" }],
+		[
+			"near",
+			{ limit: 50, cursor: "100", nearHz: BASE_HZ, toleranceHz: 500_000_000 },
+		],
+		["heap of a small page", { limit: 50 }],
+		["past the end", { limit: 50, cursor: "5000" }],
+	])("selects the same rows across yields: %s", async (_name, filter) => {
+		const { store } = storeOf(2_100)
+		expect(
+			await store.listPaced(filter, {
+				due: () => true,
+				wait: () => Promise.resolve(),
+			}),
+		).toEqual(store.list(filter))
+	})
+
+	it("keeps a consistent order when a record changes during a yield", async () => {
+		const n = 1_500
+		const { store } = storeOf(n)
+		const filter = { limit: 500, cursor: "500" }
+		const before = store.list(filter).items.map(d => d.id)
+		const all = store.list({ limit: 500 }).items.map(d => d.id)
+		all.push(
+			...before,
+			...store.list({ limit: 500, cursor: "1000" }).items.map(d => d.id),
+		)
+		const internals = store as unknown as {
+			discoveries: Map<string, Discovery>
+		}
+		// Every yield of the selection rewrites what a live comparator would read. The rows keep
+		// the order the filter pass saw (the sort path: 1,000 of 1,500).
+		let waits = 0
+		const page = await store.listPaced(filter, {
+			due: () => true,
+			wait: () => {
+				if (++waits > n) {
+					const d = internals.discoveries.get(all[waits % n]!)!
+					d.lastSeenAt = new Date(T0 + (waits % 2) * 10_000_000).toISOString()
+				}
+				return Promise.resolve()
+			},
+		})
+		expect(page.items.map(d => d.id)).toEqual(before)
+	})
+
+	it("leaves out a record removed during the selection, and a page keeps its cursor", async () => {
+		const { store } = storeOf(2_100)
+		const expected = store.list({ limit: 500 }).items.map(d => d.id)
+		const gone = expected[3]!
+		let waits = 0
+		const page = await store.listPaced(
+			{ limit: 500 },
+			{
+				due: () => true,
+				wait: () => {
+					// Past the filter pass, inside the selection.
+					if (++waits === 2_100 + 5) store.delete(gone)
+					return Promise.resolve()
+				},
+			},
+		)
+		const ids = page.items.map(d => d.id)
+		expect(ids).toEqual(expected.filter(id => id !== gone))
+		expect(page.nextCursor).toBe("500")
+	})
+
+	it("visits a record added during a yield at most within the first count", async () => {
+		const { store } = storeOf(50)
+		let added = false
+		const visits = await store.listPaced(
+			{ limit: 200, sort: "frequency" },
+			{
+				due: () => true,
+				wait: () => {
+					if (!added) {
+						added = true
+						store.ingest(
+							makeObs({
+								id: "o-new",
+								centreHz: BASE_HZ - SLOT_HZ,
+								startedAt: T0,
+								blocks: 2,
+							}),
+						)
+					}
+					return Promise.resolve()
+				},
+			},
+		)
+		// The read stops after the 50 records it started with.
+		expect(visits.items).toHaveLength(50)
+	})
 
 	it("reports an invalid cursor as a rejection, as the plain read throws", async () => {
 		const { store } = storeOf(2)

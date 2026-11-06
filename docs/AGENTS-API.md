@@ -1,7 +1,7 @@
 # Driving WaveKit from an agent or script
 
-Recipes for the tasks an agent or script does most: authenticate, read the receiver state,
-tune, set gain, check decoders, read activity and capture IQ. Each recipe is a `curl`
+Recipes for the tasks an agent or script does most: authenticate, tune, read the receiver state,
+set gain, check decoders, read activity and capture IQ. Each recipe is a `curl`
 command; the full contract of every route is in the [API reference](API.md).
 
 The examples assume a protected core, its API origin in a shell variable, and the machine token
@@ -32,8 +32,8 @@ maximum there (`GET /api/recordings`, parameter `limit`), and past the maximum t
 400 that states it ([Read a 400](#read-a-400)).
 
 `GET /api/enums` lists scanner protocols, identity kinds, confidences, job modes, job kinds and
-sensitivities, the discovery and job list views, activity kinds and categories, tuner modes and
-recording kinds.
+sensitivities, the discovery and job list views, activity kinds and categories, tuner modes, tune
+settings and restore statuses, and recording kinds.
 
 ## Get a machine token
 
@@ -136,6 +136,41 @@ whoever can reach the port, so the core's bind address is the only boundary
 
 Details: [API: automation and agents](API.md#automation-and-agents) and [Security](SECURITY.md).
 
+## Tune
+
+One call sets the rate, the centre and the gain, and answers once the source delivers IQ again, so
+a rate change needs no retries:
+
+```sh
+curl --fail-with-body --header "$AUTH" --header "Content-Type: application/json" \
+  --data '{"sampleRateHz":2400000,"frequencyHz":100000000,"gainMode":"manual","gain":372}' \
+  "$API_ORIGIN/api/tuner/rtl/tune"
+```
+
+Send at least one of `sampleRateHz`, `frequencyHz`, `gainMode` and `gain` (tenths of a dB). The
+answer is the tuner state of `GET /api/tuner` (`sampleRate`, `frequency`, `gainMode`, `gain`) plus
+`usable`, `applied` and `notApplied`. It takes up to 18 s; give your client a longer timeout. Past
+that, or when a write fails, the answer is an error that still says what was and was not applied.
+A 503 with `usable: false` also carries `sourceVerdict`, the reason the source is silent. Read the
+[whole contract](API.md#post-apitunersourceidtune).
+
+### Tune for a while
+
+Add `restoreAfterS` (1 to 3600) and the core puts the prior rate, centre and gain back by itself:
+
+```sh
+curl --fail-with-body --header "$AUTH" --header "Content-Type: application/json" \
+  --data '{"frequencyHz":100000000,"restoreAfterS":60}' "$API_ORIGIN/api/tuner/rtl/tune"
+curl --fail --header "$AUTH" "$API_ORIGIN/api/tuner/rtl"                        # see "restore"
+curl --fail --header "$AUTH" --request DELETE "$API_ORIGIN/api/tuner/rtl/tune/restore"  # keep it
+```
+
+The person at the receiver wins: any later write to this tuner from anyone, including the web app,
+an external client such as SDR++ or a scanner job, cancels the restore for good and never gets
+overwritten. `restore` in `GET /api/tuner` says what happened: `status`, `at`, `state` (what goes
+back) and `cancelledBy`. A core restart drops a pending restore: read
+[what a restart does](API.md#temporary-tune-and-restart) before relying on one.
+
 ## Read the receiver state
 
 One bounded read (under 4 KiB) says what the receiver is doing: tuners, sources, live audio,
@@ -193,18 +228,6 @@ merged during the read, so stop on the cursor, not on the row count.
 
 `GET /api/scanner/jobs?view=compact` is the same for jobs: `id`, `name`, `kind`, `state`, `reason`,
 `sourceId` and `updatedAt`, without the plan.
-
-## Tune
-
-```sh
-curl --fail --header "$AUTH" --header "Content-Type: application/json" \
-  --data '{"hz":100000000}' "$API_ORIGIN/api/tuner/rtl/frequency"
-```
-
-`hz` is the center frequency in Hz. The answer is the new tuner state. A sample-rate change
-(`POST /api/tuner/rtl/sample-rate`, `{"hz":2400000}`) reconnects the source and may answer
-503 `SOURCE_RECONNECTING` with `Retry-After: 1`; retry after that many seconds
-([sample-rate restarts](API.md#tuner-commands-during-a-sample-rate-restart)).
 
 ## Set gain
 

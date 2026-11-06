@@ -3,7 +3,15 @@
  */
 
 import type { SourceManager } from "../../core/source-manager.js"
-import { TUNER_REST_COMMAND_POLICY } from "../../core/tuner-controller.js"
+import {
+	TUNER_REST_COMMAND_POLICY,
+	TUNER_VALUE_BOUNDS,
+} from "../../core/tuner-controller.js"
+import {
+	TunerTuning,
+	type TuneOutcome,
+	type TuneSource,
+} from "../../core/tuner-tune.js"
 import type {
 	FastifyError,
 	FastifyInstance,
@@ -15,8 +23,14 @@ import {
 	TUNER_CHANGE_ACTORS,
 	TUNER_CHANGE_FIELDS,
 	TUNER_CHANGE_REASONS,
+	TUNE_RESTORE_CANCEL_REASONS,
+	TUNE_RESTORE_MAX_S,
+	TUNE_RESTORE_STATUSES,
+	TUNE_SETTINGS,
+	sourceVerdictSchema,
 } from "@wavekit/api-types"
 import type { AccessPrincipal } from "../../access/types.js"
+import type { Logger } from "../../utils/logger.js"
 import {
 	BandGainSettingsError,
 	type BandGainSettingsService,
@@ -50,6 +64,7 @@ import type {
 	SetTunerIfGainRequest,
 	SetTunerGainIndexRequest,
 	SetXtalRequest,
+	TuneRequest,
 	TunerConfigUpdate,
 	TunerDirectSampling,
 	TunerGainMode,
@@ -89,6 +104,52 @@ const tunerIfGainSchema = {
 		gain: { type: "integer" },
 	},
 	required: ["stage", "gain"],
+} as const
+
+const tuneSettingsSchema = {
+	type: "array",
+	items: { type: "string", enum: [...TUNE_SETTINGS] },
+} as const
+
+const tuneRestoreSchema = {
+	type: "object",
+	properties: {
+		at: { type: "string", format: "date-time" },
+		status: { type: "string", enum: [...TUNE_RESTORE_STATUSES] },
+		state: {
+			type: "object",
+			properties: {
+				sampleRate: { type: "integer" },
+				frequency: { type: "integer" },
+				gainMode: gainModeSchema,
+				gain: { type: "integer" },
+			},
+		},
+		cancelledBy: {
+			type: "object",
+			properties: {
+				actor: { type: "string", enum: [...TUNER_CHANGE_ACTORS] },
+				reason: { type: "string", enum: [...TUNE_RESTORE_CANCEL_REASONS] },
+				at: { type: "string", format: "date-time" },
+			},
+			required: ["actor", "reason", "at"],
+		},
+		restored: tuneSettingsSchema,
+		failure: { type: "string" },
+	},
+	required: ["at", "status", "state"],
+} as const
+
+const lastTuneSchema = {
+	type: "object",
+	properties: {
+		at: { type: "string", format: "date-time" },
+		usable: { type: "boolean" },
+		applied: tuneSettingsSchema,
+		notApplied: tuneSettingsSchema,
+		code: { type: "string" },
+	},
+	required: ["at", "usable", "applied", "notApplied"],
 } as const
 
 const tunerStateSchema = {
@@ -140,6 +201,8 @@ const tunerStateSchema = {
 			},
 			required: ["tenthsDb", "owner"],
 		},
+		restore: tuneRestoreSchema,
+		lastTune: lastTuneSchema,
 	},
 	required: [
 		"sourceId",
@@ -170,6 +233,63 @@ const errorResponseSchema = {
 	required: ["error", "code", "message"],
 } as const
 
+/** Body of POST /api/tuner/:sourceId/tune. Bounds from the controller, which checks them too. */
+const tuneBodySchema = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		sampleRateHz: {
+			type: "integer",
+			minimum: TUNER_VALUE_BOUNDS.sampleRate.min,
+			maximum: TUNER_VALUE_BOUNDS.sampleRate.max,
+		},
+		frequencyHz: {
+			type: "integer",
+			minimum: TUNER_VALUE_BOUNDS.frequency.min,
+			maximum: TUNER_VALUE_BOUNDS.frequency.max,
+		},
+		gainMode: gainModeSchema,
+		gain: {
+			type: "integer",
+			minimum: TUNER_VALUE_BOUNDS.gain.min,
+			maximum: TUNER_VALUE_BOUNDS.gain.max,
+		},
+		restoreAfterS: {
+			type: "integer",
+			minimum: 1,
+			maximum: TUNE_RESTORE_MAX_S,
+		},
+	},
+} as const
+
+/** What was and was not applied, on every answer of a tune that got as far as trying. */
+const tuneResultProperties = {
+	usable: { type: "boolean" },
+	applied: tuneSettingsSchema,
+	notApplied: tuneSettingsSchema,
+} as const
+
+const tuneResponseSchema = {
+	type: "object",
+	properties: { ...tunerStateSchema.properties, ...tuneResultProperties },
+	required: [...tunerStateSchema.required, "usable", "applied", "notApplied"],
+} as const
+
+const tuneFailureSchema = {
+	type: "object",
+	properties: {
+		...errorResponseSchema.properties,
+		...tuneResultProperties,
+		inFlight: { type: "boolean" },
+		state: tunerStateSchema,
+		sourceVerdict: sourceVerdictSchema,
+	},
+	required: errorResponseSchema.required,
+} as const
+
+const TUNE_URL = "/api/tuner/:sourceId/tune"
+const TUNE_EXPECTED = `at least one of "sampleRateHz" (integer Hz, 225001-300000 or 900001-3200000), "frequencyHz" (integer Hz, 24000000-1900000000), "gainMode" ("manual" | "agc"), "gain" (integer, tenths of a dB, 0-500); optional "restoreAfterS" (integer seconds, 1-${TUNE_RESTORE_MAX_S}) puts the prior tuning back`
+
 export const tunerConfigUpdateSchema = {
 	type: "object",
 	additionalProperties: false,
@@ -195,7 +315,8 @@ export const tunerConfigUpdateSchema = {
 
 export interface TunerRoutesOptions {
 	tunerController: TunerController
-	sourceManager?: Pick<SourceManager, "runTunerCommand">
+	/** With the whole of `TuneSource`, POST /api/tuner/:sourceId/tune mounts too. */
+	sourceManager?: Pick<SourceManager, "runTunerCommand"> & Partial<TuneSource>
 	/** Per-band gain settings; GET/PUT /api/tuner-band-gain are mounted only with them. */
 	bandGain?: BandGainSettingsService | null
 	/** The admitted principal's kind; absent on a core without access protection. */
@@ -241,6 +362,7 @@ const EXPECTED_BODY: Readonly<Record<string, string>> = Object.freeze({
 	"/api/tuner/:sourceId/tuner-if-gain":
 		'{"stage": integer (0-65535), "gain": integer, tenths of a dB (0-65535)}',
 	"/api/tuner/:sourceId/control-mode": '{"mode": "internal" | "external"}',
+	[TUNE_URL]: TUNE_EXPECTED,
 	"/api/tuner-band-gain":
 		'{"applyToMyTuning": boolean, "entries": [{"minHz": integer Hz, "maxHz": integer Hz, "gain": integer tenths of a dB (0-500) or "keep", "label"?: string}]}',
 	"/api/tuner/:sourceId/config":
@@ -267,6 +389,13 @@ const FIELD_EXPECTED: Readonly<
 	"/api/tuner/:sourceId/tuner-if-gain": {
 		stage: "integer (0-65535)",
 		gain: "integer, tenths of a dB (0-65535)",
+	},
+	[TUNE_URL]: {
+		sampleRateHz:
+			"integer, sample rate in Hz (225001-300000 or 900001-3200000)",
+		frequencyHz: "integer, frequency in Hz (24000000-1900000000)",
+		gain: "integer, gain in tenths of a dB (0-500)",
+		restoreAfterS: `integer, seconds (1-${TUNE_RESTORE_MAX_S})`,
 	},
 	"/api/tuner/:sourceId/config": {
 		frequency: "integer, frequency in Hz (24000000-1900000000)",
@@ -316,6 +445,7 @@ function expectedFor(url: string | undefined): string | undefined {
  */
 const KNOWN_FIELDS: ReadonlySet<string> = new Set([
 	...Object.keys(tunerConfigUpdateSchema.properties),
+	...Object.keys(tuneBodySchema.properties),
 	"sourceId",
 	"hz",
 	"tenthsDb",
@@ -364,6 +494,7 @@ function handleTunerError(
 	reply: FastifyReply,
 	err: unknown,
 	expected?: string,
+	extra: Record<string, unknown> = {},
 ): unknown {
 	const url = reply.request.routeOptions.url
 	const error = err instanceof Error ? err : new Error("Unknown error")
@@ -371,13 +502,16 @@ function handleTunerError(
 	if (
 		maybeStatus?.code === "SOURCE_RECONNECTING" ||
 		maybeStatus?.code === "TUNER_COMMAND_TIMEOUT" ||
-		maybeStatus?.code === "TUNER_QUEUE_FULL"
+		maybeStatus?.code === "TUNER_QUEUE_FULL" ||
+		maybeStatus?.code === "TUNER_NOT_USABLE" ||
+		maybeStatus?.code === "TUNER_TUNE_PARTIAL"
 	) {
 		reply.header("Retry-After", "1")
 		return reply.status(503).send({
 			error: error.name,
 			code: maybeStatus.code,
 			message: error.message,
+			...extra,
 		})
 	}
 	const statusCode =
@@ -418,6 +552,7 @@ function handleTunerError(
 					]),
 				}
 			: {}),
+		...extra,
 	})
 }
 
@@ -1244,6 +1379,117 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 			}
 		},
 	)
+
+	const source = options.sourceManager
+	if (
+		source?.isTunerUsable !== undefined &&
+		source.waitUntilTunerUsable !== undefined &&
+		source.getStatus !== undefined
+	) {
+		// Made on first use and only then: until a tune runs, the state carries nothing of it.
+		const tuneSource = source as TuneSource
+		let tuning: TunerTuning | undefined
+		const tuningOf = (): TunerTuning =>
+			(tuning ??= new TunerTuning(
+				fastify.log as unknown as Logger,
+				tunerController,
+				tuneSource,
+			))
+		fastify.addHook("onClose", async () => {
+			tuning?.close()
+		})
+		const tuneResult = (outcome: TuneOutcome) => ({
+			usable: outcome.usable,
+			applied: outcome.applied,
+			notApplied: outcome.notApplied,
+		})
+
+		// POST /api/tuner/:sourceId/tune - Rate, centre and gain in one call
+		fastify.post<{
+			Params: { sourceId: string }
+			Body: TuneRequest
+			Reply: unknown
+		}>(
+			TUNE_URL,
+			{
+				schema: {
+					tags: ["tuner"],
+					summary: "Tune: rate, centre and gain in one call",
+					description:
+						"Applies the settings in order and answers once the source delivers IQ again, at most 18 s later. With restoreAfterS the prior tuning comes back unless another write changes the tuner first.",
+					body: tuneBodySchema,
+					response: {
+						200: tuneResponseSchema,
+						400: errorResponseSchema,
+						404: tuneFailureSchema,
+						409: tuneFailureSchema,
+						500: tuneFailureSchema,
+						503: tuneFailureSchema,
+					},
+				},
+				preValidation: rejectUnknownBodyFields(tuneBodySchema, TUNE_EXPECTED),
+			},
+			async (request, reply) => {
+				const { sampleRateHz, frequencyHz, gainMode, gain } = request.body
+				if (
+					sampleRateHz === undefined &&
+					frequencyHz === undefined &&
+					gainMode === undefined &&
+					gain === undefined
+				)
+					return reply.status(400).send({
+						error: "ValidationError",
+						code: "VALIDATION_ERROR",
+						message: `Invalid request body; expected ${TUNE_EXPECTED}`,
+						fields: [{ field: "body", expected: TUNE_EXPECTED }],
+					})
+				try {
+					const outcome = await tuningOf().tune(
+						request.params.sourceId,
+						request.body,
+						rest(request),
+					)
+					if (outcome.error === undefined)
+						return { ...outcome.state, ...tuneResult(outcome) }
+					return handleTunerError(reply, outcome.error, TUNE_EXPECTED, {
+						...tuneResult(outcome),
+						...(outcome.inFlight ? { inFlight: true } : {}),
+						...(outcome.state ? { state: outcome.state } : {}),
+						...(outcome.sourceVerdict
+							? { sourceVerdict: outcome.sourceVerdict }
+							: {}),
+					})
+				} catch (err) {
+					return handleTunerError(reply, err, TUNE_EXPECTED)
+				}
+			},
+		)
+
+		// DELETE /api/tuner/:sourceId/tune/restore - Keep the temporary tuning
+		fastify.delete<{ Params: { sourceId: string }; Reply: unknown }>(
+			"/api/tuner/:sourceId/tune/restore",
+			{
+				schema: {
+					tags: ["tuner"],
+					summary: "Cancel the pending restore of a temporary tune",
+					response: {
+						200: tunerStateSchema,
+						404: errorResponseSchema,
+					},
+				},
+			},
+			async (request, reply) => {
+				try {
+					return tuningOf().cancelRestore(
+						request.params.sourceId,
+						rest(request).actor ?? "unknown",
+					)
+				} catch (err) {
+					return handleTunerError(reply, err)
+				}
+			},
+		)
+	}
 
 	const bandGain = options.bandGain ?? null
 	if (bandGain === null) return
