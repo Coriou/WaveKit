@@ -83,7 +83,10 @@ export interface WorkerCostPort {
 	cpuUsage?: () => Promise<{ user: number; system: number }>
 }
 
-/** Unanswered ticks (1 s each) before the meter gives up on CPU time and reports plain ELU. */
+/**
+ * Ticks (1 s each) without a CPU answer, the request hanging or rejected, before the meter stops
+ * trusting its last figure and follows ELU. 10 of the guard's 60 s window can read stale at most.
+ */
 export const COST_METER_MAX_MISSES = 10
 
 /**
@@ -95,14 +98,24 @@ export const COST_METER_MAX_MISSES = 10
  * `cpuUsage` answers asynchronously, so a sample carries the previous tick's CPU figure: at most one
  * tick (1 s) stale at each end of the guard's 60 s window. Both counters only go forward, since the
  * guard reads a counter going back as a restart of its window. Until the first answer there is no
- * sample (the guard's "no measurement"). A Node without the call, or a worker that has not answered
- * for `COST_METER_MAX_MISSES` ticks, reports plain ELU, so an overrun is never hidden.
+ * sample (the guard's "no measurement"). A Node without the call reports plain ELU.
+ *
+ * A worker that has not answered for `COST_METER_MAX_MISSES` ticks, whether its requests hang or
+ * reject, is judged on ELU, so an overrun is never hidden. Counters stay continuous both ways, since
+ * a step would read as cost or as a restart: `active` advances by ELU's own advance per tick (if no
+ * sample was reported yet that is all of ELU, so plain ELU), and the answer that ends it rebases CPU
+ * time on the `active` already reported (`cpuBaseMs`), or `active` would stand still until CPU time
+ * caught up with what ELU added.
  */
 export class WorkerCostMeter {
 	private cpuMs: number | null = null
+	/** Added to CPU time: what the ELU stretches added over it. */
+	private cpuBaseMs = 0
 	private pending = false
 	private misses = 0
 	private last = { idle: 0, active: 0 }
+	/** ELU's `active` at the last reported sample. */
+	private lastEluActive = 0
 
 	constructor(private readonly port: WorkerCostPort) {}
 
@@ -118,12 +131,16 @@ export class WorkerCostMeter {
 		}
 		if (!this.port.cpuUsage) return raw()
 		this.refresh()
-		if (this.misses >= COST_METER_MAX_MISSES) return raw()
-		if (this.cpuMs === null) return null
+		let target: number
+		if (this.misses >= COST_METER_MAX_MISSES)
+			target = this.last.active + Math.max(0, elu.active - this.lastEluActive)
+		else if (this.cpuMs === null) return null
+		else target = Math.min(elu.active, this.cpuMs + this.cpuBaseMs)
 		const total = elu.idle + elu.active
-		const active = Math.max(this.last.active, Math.min(elu.active, this.cpuMs))
+		const active = Math.max(this.last.active, target)
 		const idle = Math.max(this.last.idle, total - active)
 		this.last = { idle, active }
+		this.lastEluActive = elu.active
 		const sum = active + idle
 		return { idle, active, utilization: sum > 0 ? active / sum : 0 }
 	}
@@ -136,10 +153,17 @@ export class WorkerCostMeter {
 		this.pending = true
 		this.port.cpuUsage!()
 			.then(usage => {
-				this.cpuMs = (usage.user + usage.system) / 1000
+				const cpuMs = (usage.user + usage.system) / 1000
+				if (this.misses >= COST_METER_MAX_MISSES)
+					this.cpuBaseMs = this.last.active - cpuMs
+				this.cpuMs = cpuMs
 				this.misses = 0
 			})
-			.catch(() => undefined) // a stopped worker: the exit path reports it, the meter just stops
+			.catch(() => {
+				// Counted here since no request is left pending for the next tick to count. A stopped
+				// worker lands here too; its exit path reports it and the host stops sampling.
+				this.misses++
+			})
 			.finally(() => {
 				this.pending = false
 			})

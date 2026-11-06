@@ -506,6 +506,19 @@ describe("createBandplanChannelLookup memo", () => {
 		({ ranges: [{ startHz: 100, endHz: 900, protocols }] }) as never
 	const WINDOW = { sourceId: "s", minHz: 100, maxHz: 900 }
 
+	it("sees an element replaced in the provider's one stable array", () => {
+		const plans = [plan(["a"])]
+		const snapshot = freeze(view([200]))
+		const lookup = createBandplanChannelLookup({
+			getResolved: () => snapshot,
+			scannerPlans: () => plans,
+		})
+		expect(lookup(WINDOW, ["a"])).toEqual([200])
+		plans[0] = plan(["b"])
+		expect(lookup(WINDOW, ["a"])).toEqual([])
+		expect(lookup(WINDOW, ["b"])).toEqual([200])
+	})
+
 	/** Plain lookups with a fresh, unfrozen copy each call are the reference. */
 	const reference = (v: ResolvedBandPlanView, plans: never[]) =>
 		createBandplanChannelLookup({
@@ -683,5 +696,35 @@ describe("createBandplanRangeLookup parse", () => {
 		] as never[]
 		expect(lookup("s", 150, ["a"])).toBe(false)
 		expect(lookup("s", 350, ["a"])).toBe(true)
+	})
+
+	it("sees an element replaced in the provider's one stable array", () => {
+		const plans = [
+			{ ranges: [{ startHz: 100, endHz: 200, protocols: ["a"] }] },
+		] as never[]
+		const lookup = createBandplanRangeLookup({ scannerPlans: () => plans })
+		expect(lookup("s", 150, ["a"])).toBe(true)
+		plans[0] = {
+			ranges: [{ startHz: 300, endHz: 400, protocols: ["a"] }],
+		} as never
+		expect(lookup("s", 150, ["a"])).toBe(false)
+		expect(lookup("s", 350, ["a"])).toBe(true)
+	})
+
+	it("keeps the parse while the stable array holds the same elements", () => {
+		let reads = 0
+		const plans = [
+			{
+				get ranges() {
+					reads++
+					return [{ startHz: 100, endHz: 200, protocols: ["a"] }]
+				},
+			},
+		] as never[]
+		const lookup = createBandplanRangeLookup({ scannerPlans: () => plans })
+		expect(lookup("s", 150, ["a"])).toBe(true)
+		const first = reads
+		expect(lookup("s", 160, ["a"])).toBe(true)
+		expect(reads).toBe(first)
 	})
 })

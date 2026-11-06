@@ -415,12 +415,20 @@ was open. Logs per block with an open track went from at least 50·N to at most 
 
 This one is not byte-identical. The old path rounded each bin through a Float32 dB value, up to half
 an ulp at |dB| < 256: 7.63e-6 dB, 1.76e-6 relative in power. That bound on the envelope sum is a
-property test. Only `acf30` and `acf60` read those values: on seeded scenes every other event field
-stays byte-identical (`pipeline-frame-linear-golden.test.ts`, recorded from the dB path), and the two
-moved by at most 1.08e-6 (a 50 dB carrier). A TDMA-like envelope moved them by about 3e-8, far from
-mattering at the classifier's −0.5 and 0.5. On a noiseless tone the envelope is flat to rounding and
-the ACF of that rounding is numeric noise on either path (it moved by up to 0.45, without crossing
-the TDMA rule in that scene).
+property test. On seeded scenes only `acf30` and `acf60` changed: every other event field stays
+byte-identical (`pipeline-frame-linear-golden.test.ts`, recorded from the dB path), and the two moved
+by at most 1.08e-6 (a 50 dB carrier). A TDMA-like envelope moved them by about 3e-8, far from mattering
+at the classifier's −0.5 and 0.5. On a noiseless tone the envelope is flat to rounding and the ACF of
+that rounding is numeric noise on either path (it moved by up to 0.45, without crossing the TDMA rule
+in that scene).
+
+Those scenes do not cover a comparison landing exactly on its boundary, which can resolve differently
+because per-bin power differs from the old round trip by up to that 1.76e-6. The duty rule's
+`p95 <= 4 * p5` is the one found: a track alternating exactly 0.01 and 0.04 per bin read duty 0.5 on
+the old path and reads 1 now, which flips `isDataBurst` in the scanner's replay plan. It takes a power
+ratio within about that tolerance of exactly 4; both levels can move, so the ratio moves by about
+3.5e-6 at most. At 4 × (1 ± 1e-5) and 4 × (1 ± 1e-4) both paths give the same duty and the same
+`isDataBurst` (`tracker-duty-boundary.test.ts`, on the real `Tracker`).
 
 **Main thread.**
 
@@ -444,8 +452,12 @@ the pass also has its own effects. What is left costs 4.5 % of busy, 1.6 % of a 
 
 **The passive guard judges CPU time.** `eluSample()` now reports the worker's event-loop counters
 with `active` reduced to the thread's CPU time (`WorkerCostMeter`), because ELU counts a thread
-preempted mid-frame as busy. Where Node has no `worker.cpuUsage()`, or the worker stops answering for
-10 ticks, it reports plain ELU. The limit is unchanged. A shared engine disabled with a baseline
+preempted mid-frame as busy. Where Node has no `worker.cpuUsage()`, it reports plain ELU. After 10
+ticks without an answer, whether the requests hang or reject, `active` advances by ELU's advance per
+tick instead. Those 10 ticks keep the last CPU figure and read as idle, so a 90 % ELU worker reads
+about 75 % in the window they fall in and 90 % after it. The answer that ends this rebases CPU time on
+the `active` already reported, so neither direction steps a counter or moves one back. The limit is
+unchanged. A shared engine disabled with a baseline
 showing the cost is passive's own no longer comes back after one cheap window without passive; it
 waits for the next trial, which restores the 61 s per 900 s bound.
 

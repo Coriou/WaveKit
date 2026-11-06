@@ -494,8 +494,13 @@ function guardFields(value: unknown): object[] | undefined {
 		return undefined
 	const out: object[] = []
 	const seen = new Set<string>()
-	for (const item of value as unknown[]) {
-		const f = plainMembers(item, FIELD_KEYS)
+	// By descriptor and index: an element may be an accessor, and with a hole the key count above still
+	// matches one extra member, which may be an own Symbol.iterator. At most `FIELDS_MAX` lookups.
+	for (let i = 0; i < value.length; i++) {
+		const element = Object.getOwnPropertyDescriptor(value, i)
+		if (element === undefined || !element.enumerable || !("value" in element))
+			return undefined
+		const f = plainMembers(element.value, FIELD_KEYS)
 		if (f === null) return undefined
 		const key = f["key"]
 		const label = f["label"]

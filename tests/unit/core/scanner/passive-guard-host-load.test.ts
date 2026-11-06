@@ -1,5 +1,6 @@
 // The passive guard on realistic worker counters: host contention, a quiet host, and a passive job
 // that really costs too much. Real PassiveGuard and real WorkerCostMeter, no fake decisions.
+import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { PassiveGuard } from "../../../../src/core/scanner/passive-guard.js"
 import type { PassiveGuardView } from "../../../../src/core/scanner/passive-guard.js"
@@ -27,6 +28,8 @@ function sim(opts: {
 	displays?: string[]
 	rates: (passive: boolean, t: number) => Rates
 	meter: boolean
+	/** Replaces the worker's CPU answer; `cpuMs` is what a healthy worker would report. */
+	cpuAnswer?: (cpuMs: number) => Promise<{ user: number; system: number }>
 }) {
 	const displays = opts.displays ?? []
 	let t = 0
@@ -41,7 +44,10 @@ function sim(opts: {
 	const newMeter = (): WorkerCostMeter =>
 		new WorkerCostMeter({
 			elu: () => ({ idle: t - openedAt - eluActive, active: eluActive }),
-			cpuUsage: () => Promise.resolve({ user: cpu * 1000, system: 0 }),
+			cpuUsage: () =>
+				opts.cpuAnswer
+					? opts.cpuAnswer(cpu)
+					: Promise.resolve({ user: cpu * 1000, system: 0 }),
 		})
 	let meter = newMeter()
 	const actions: { at: number; what: string }[] = []
@@ -134,6 +140,28 @@ describe("passive guard under host load", () => {
 		for (const elu of [0.6, 0.95]) {
 			const s = sim({ rates: flat(elu, 0.6), meter: true })
 			await s.run(MINUTE + 2000)
+			expect(s.count("disable")).toBe(1)
+			expect(s.passive()).toBe(false)
+		}
+	})
+
+	it("a real overrun is disabled when every CPU request after the first fails or hangs", async () => {
+		const failures: (() => Promise<never>)[] = [
+			() => Promise.reject(new Error("worker stopped")),
+			() => new Promise<never>(() => undefined),
+		]
+		for (const failure of failures) {
+			let calls = 0
+			const s = sim({
+				rates: flat(0.9, 0.9),
+				meter: true,
+				cpuAnswer: cpuMs =>
+					calls++ === 0
+						? Promise.resolve({ user: cpuMs * 1000, system: 0 })
+						: failure(),
+			})
+			// The 10 stale ticks read as idle, so the first window reads about 0.75 and the limit is 0.25.
+			await s.run(MINUTE + 12_000)
 			expect(s.count("disable")).toBe(1)
 			expect(s.passive()).toBe(false)
 		}
@@ -358,5 +386,183 @@ describe("WorkerCostMeter", () => {
 		await flush()
 		await flush()
 		expect(m.sample()!.active).toBe(100)
+	})
+
+	describe("a worker that stops answering", () => {
+		const TICK_MS = 1000
+		const ELU_ACTIVE_SHARE = 0.9
+		type Answer = "cpu" | "reject" | "hang"
+
+		/**
+		 * A worker whose ELU runs at 90 % active and whose CPU time runs at `cpuShare`. `answer` decides
+		 * each request; `release` settles the requests left hanging with the current CPU figure.
+		 */
+		function worker(answer: (call: number) => Answer, cpuShare = 0.1) {
+			let tick = 0
+			let calls = 0
+			let hanging: ((usage: { user: number; system: number }) => void)[] = []
+			const usage = () => ({
+				user: tick * TICK_MS * cpuShare * 1000,
+				system: 0,
+			})
+			const meter = new WorkerCostMeter({
+				elu: () => ({
+					idle: tick * TICK_MS * (1 - ELU_ACTIVE_SHARE),
+					active: tick * TICK_MS * ELU_ACTIVE_SHARE,
+				}),
+				cpuUsage: () => {
+					const kind = answer(calls++)
+					if (kind === "cpu") return Promise.resolve(usage())
+					if (kind === "reject")
+						return Promise.reject(new Error("worker stopped"))
+					return new Promise(resolve => hanging.push(resolve))
+				},
+			})
+			return {
+				meter,
+				/** One 1 s tick: time passes, the guard samples, the worker answers. */
+				tick: async () => {
+					tick++
+					const s = meter.sample()
+					await flush()
+					await flush()
+					return s
+				},
+				release: () => {
+					for (const resolve of hanging) resolve(usage())
+					hanging = []
+				},
+				wall: () => tick * TICK_MS,
+			}
+		}
+
+		const FAILURES: Answer[] = ["reject", "hang"]
+		const onceThen = (kind: Answer) => (call: number) =>
+			call === 0 ? "cpu" : kind
+
+		for (const kind of FAILURES) {
+			it(`${kind}: stale CPU at 9 misses, ELU from 10, counters consistent`, async () => {
+				const w = worker(onceThen(kind))
+				expect(await w.tick()).toBeNull()
+				// The answer to the first request: 1 s × 0.1, and from here no answer arrives.
+				const first = (await w.tick())!
+				expect(first.active).toBe(100)
+				for (let misses = 1; misses < COST_METER_MAX_MISSES; misses++) {
+					const stale = (await w.tick())!
+					expect(stale.active).toBe(100)
+					expect(stale.idle).toBe(w.wall() - 100)
+				}
+				// Miss 10: one tick of ELU, no jump to ELU's own cumulative figure.
+				const at10 = (await w.tick())!
+				expect(at10.active).toBeCloseTo(100 + 900, 6)
+				expect(at10.active + at10.idle).toBeCloseTo(w.wall(), 6)
+				let last = at10
+				for (let i = 0; i < 120; i++) {
+					const s = (await w.tick())!
+					expect(s.active - last.active).toBeCloseTo(900, 6)
+					expect(s.idle - last.idle).toBeCloseTo(100, 6)
+					expect(s.active + s.idle).toBeCloseTo(w.wall(), 6)
+					expect(s.utilization).toBeCloseTo(s.active / w.wall(), 10)
+					last = s
+				}
+			})
+
+			it(`${kind} from the first request: no sample until 10 misses, then plain ELU`, async () => {
+				const w = worker(() => kind)
+				for (let tick = 1; tick <= COST_METER_MAX_MISSES; tick++)
+					expect(await w.tick()).toBeNull()
+				const s = (await w.tick())!
+				expect(s.active).toBeCloseTo(w.wall() * ELU_ACTIVE_SHARE, 6)
+				expect(s.idle).toBeCloseTo(w.wall() * (1 - ELU_ACTIVE_SHARE), 6)
+				expect(s.utilization).toBeCloseTo(ELU_ACTIVE_SHARE, 10)
+			})
+		}
+
+		it("a reject answered before the bound never falls back", async () => {
+			// Nine misses in a row, then an answer: the count starts over each time.
+			const w = worker(call => (call % 10 === 0 ? "cpu" : "reject"))
+			await w.tick()
+			for (let i = 0; i < 100; i++) {
+				const s = (await w.tick())!
+				expect(s.active).toBeLessThanOrEqual(w.wall() * 0.1 + 1e-6)
+			}
+		})
+
+		for (const kind of FAILURES) {
+			it(`${kind}: on recovery active follows CPU again from where ELU left it`, async () => {
+				let failing = false
+				const w = worker(call => {
+					if (call === 0) return "cpu"
+					return failing ? kind : "cpu"
+				})
+				await w.tick()
+				await w.tick()
+				failing = true
+				const samples = []
+				for (let i = 0; i < 30; i++) samples.push((await w.tick())!)
+				failing = false
+				w.release()
+				await flush()
+				await flush()
+				// A rejecting worker has nothing to release: the next request carries its first answer.
+				if (kind === "reject") samples.push((await w.tick())!)
+				// The next sample is the one the recovery answer rebases on: no jump either way.
+				const rebased = (await w.tick())!
+				samples.push(rebased)
+				expect(rebased.active).toBeCloseTo(samples.at(-2)!.active, 6)
+				expect(rebased.idle - samples.at(-2)!.idle).toBeCloseTo(TICK_MS, 6)
+				// Then each tick costs what CPU says, not a flat stretch while CPU catches ELU up.
+				let last = rebased
+				for (let i = 0; i < 30; i++) {
+					const s = (await w.tick())!
+					samples.push(s)
+					expect(s.active - last.active).toBeCloseTo(100, 6)
+					expect(s.idle - last.idle).toBeCloseTo(900, 6)
+					expect(s.active + s.idle).toBeCloseTo(w.wall(), 6)
+					last = s
+				}
+				for (let i = 1; i < samples.length; i++) {
+					expect(samples[i]!.active).toBeGreaterThanOrEqual(
+						samples[i - 1]!.active,
+					)
+					expect(samples[i]!.idle).toBeGreaterThanOrEqual(samples[i - 1]!.idle)
+				}
+			})
+		}
+
+		// Feature: spectrum-main-thread, Property 3: the meter's counters never go back
+		// Validates: docs/PERFORMANCE.md, the passive guard judges CPU time
+		it("counters never go back and active stays within ELU over any answer pattern", async () => {
+			await fc.assert(
+				fc.asyncProperty(
+					fc.array(fc.constantFrom<Answer>("cpu", "reject", "hang"), {
+						minLength: 1,
+						maxLength: 40,
+					}),
+					fc.array(fc.nat({ max: 25 }), { minLength: 1, maxLength: 6 }),
+					fc.double({ min: 0, max: 1, noNaN: true }),
+					async (answers, releases, cpuShare) => {
+						const w = worker(call => answers[call % answers.length]!, cpuShare)
+						let last = { idle: 0, active: 0 }
+						for (const stretch of releases) {
+							for (let i = 0; i <= stretch; i++) {
+								const s = await w.tick()
+								if (s === null) continue
+								expect(s.active).toBeGreaterThanOrEqual(last.active)
+								expect(s.idle).toBeGreaterThanOrEqual(last.idle)
+								expect(s.active).toBeLessThanOrEqual(
+									w.wall() * ELU_ACTIVE_SHARE + 1e-6,
+								)
+								last = s
+							}
+							w.release()
+							await flush()
+							await flush()
+						}
+					},
+				),
+				{ numRuns: 200 },
+			)
+		})
 	})
 })

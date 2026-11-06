@@ -163,7 +163,8 @@ type ParsedPlans = z.infer<typeof plansSchema>
  * The parse of a scanner plan list, kept while its elements stay the same objects. The provider
  * builds a new array per call but hands out the scanner's own built-in plan objects, which nothing
  * edits (bandplans/scanner-feed.ts), so element identity decides. A different element or a failed
- * parse parses again.
+ * parse parses again. The element list is copied: a provider may hand out one array and replace an
+ * element in it, which comparing against that same array could never see.
  */
 function createPlansParser(): (
 	plans: readonly Bandplan[],
@@ -181,7 +182,7 @@ function createPlansParser(): (
 			last = null
 			return null
 		}
-		last = { plans, parsed: parsed.data }
+		last = { plans: plans.slice(), parsed: parsed.data }
 		return parsed.data
 	}
 }

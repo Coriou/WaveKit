@@ -767,6 +767,198 @@ describe("createDecodeEnvelope guards against the schemas", () => {
 			})
 		}
 	})
+
+	describe("an accessor at any level is refused without being read", () => {
+		const FIELD = { key: "k", label: "K", value: "v" }
+		const OTHER = { key: "o", label: "O", value: 1 }
+		const INVALID = { threw: "DECODE_ENVELOPE_INVALID" }
+
+		/** `target` with an accessor at `key` whose reads are counted in `reads`. */
+		const accessor = <T extends object>(
+			reads: { n: number },
+			target: T,
+			key: string,
+			value: unknown,
+		): T =>
+			Object.defineProperty(target, key, {
+				get: () => {
+					reads.n++
+					return value
+				},
+				enumerable: true,
+				configurable: true,
+			})
+
+		type Reads = { n: number }
+		const inPresentation: [string, (r: Reads) => DecodePresentation][] = [
+			[
+				"the only fields element",
+				r => presentation({ fields: accessor(r, [FIELD], "0", FIELD) }),
+			],
+			[
+				"the first of two fields elements",
+				r => presentation({ fields: accessor(r, [FIELD, OTHER], "0", FIELD) }),
+			],
+			[
+				"the last of two fields elements",
+				r => presentation({ fields: accessor(r, [FIELD, OTHER], "1", OTHER) }),
+			],
+			[
+				"a field's key",
+				r =>
+					presentation({
+						fields: [accessor(r, { label: "K", value: "v" }, "key", "k")],
+					}),
+			],
+			[
+				"a field's value",
+				r =>
+					presentation({
+						fields: [accessor(r, { key: "k", label: "K" }, "value", "v")],
+					}),
+			],
+			[
+				"a field's unit",
+				r => presentation({ fields: [accessor(r, { ...FIELD }, "unit", "u")] }),
+			],
+			[
+				"a position member",
+				r =>
+					presentation({ position: accessor(r, { lon: 2.25 }, "lat", 48.5) }),
+			],
+			[
+				"the fields member",
+				r =>
+					accessor(r, presentation({ fields: undefined }), "fields", [FIELD]),
+			],
+			[
+				"the position member",
+				r =>
+					accessor(r, presentation({ position: undefined }), "position", {
+						lat: 1,
+						lon: 2,
+					}),
+			],
+			[
+				"the title member",
+				r => accessor(r, presentation({ title: undefined }), "title", "t"),
+			],
+		]
+		for (const [name, make] of inPresentation) {
+			it(`create: ${name}`, () => {
+				const reads = { n: 0 }
+				expect(expectSame(output(), context(), make(reads))).toEqual(INVALID)
+				expect(reads.n).toBe(0)
+			})
+			it(`withPresentation: ${name}`, () => {
+				const reads = { n: 0 }
+				const plain = createDecodeEnvelope(output(), context())
+				expect(outcome(() => withPresentation(plain, make(reads)))).toEqual(
+					INVALID,
+				)
+				expect(reads.n).toBe(0)
+			})
+		}
+
+		const inContext: [string, (r: Reads) => DecodeEnvelopeContext][] = [
+			[
+				"a frequency member",
+				r =>
+					context({
+						provenance: {
+							sourceId: "rtl",
+							frequency: accessor(
+								r,
+								{ basis: "channel", tuningTrust: "commanded" },
+								"hz",
+								1_000_000,
+							),
+						},
+					}),
+			],
+			[
+				"a provenance member",
+				r =>
+					context({
+						provenance: accessor(
+							r,
+							{ sourceId: null, frequency: null },
+							"jobId",
+							"j",
+						),
+					}),
+			],
+			["a refs member", r => context({ refs: accessor(r, {}, "callId", "c") })],
+			[
+				"a context member",
+				r => accessor(r, context({ refs: undefined }), "refs", { callId: "c" }),
+			],
+		]
+		for (const [name, make] of inContext) {
+			it(`create: ${name}`, () => {
+				const reads = { n: 0 }
+				expect(expectSame(output(), make(reads))).toEqual(INVALID)
+				expect(reads.n).toBe(0)
+			})
+		}
+
+		it("create: a producer member", () => {
+			const reads = { n: 0 }
+			const o = accessor(reads, output({ type: undefined }), "type", "aircraft")
+			expect(expectSame(o, context())).toEqual(INVALID)
+			expect(reads.n).toBe(0)
+		})
+
+		it("an own iterator over a hole is not run, though the key count matches", () => {
+			// ["0", "length", Symbol.iterator] is length + 1 keys for a length of 2.
+			let runs = 0
+			const fields = [FIELD, undefined]
+			delete fields[1]
+			Object.defineProperty(fields, Symbol.iterator, {
+				value: function* () {
+					runs++
+					yield FIELD
+				},
+			})
+			expect(expectSame(output(), context(), presentation({ fields }))).toEqual(
+				INVALID,
+			)
+			expect(guardPresentation(presentation({ fields }))).toBeUndefined()
+			expect(runs).toBe(0)
+		})
+
+		it("a hole with a named member in its place goes to the schema", () => {
+			const fields = [FIELD, undefined] as unknown[]
+			delete fields[1]
+			const holed = Object.assign(fields, { x: 1 })
+			expect(guardPresentation(presentation({ fields: holed }))).toBeUndefined()
+			expectSame(output(), context(), presentation({ fields: holed }))
+		})
+
+		it("a non-enumerable element takes the schema's answer", () => {
+			const fields = Object.defineProperty([FIELD], "0", {
+				value: FIELD,
+				enumerable: false,
+			})
+			expect(guardPresentation(presentation({ fields }))).toBeUndefined()
+			expectSame(output(), context(), presentation({ fields }))
+		})
+
+		it("frozen and non-writable data elements stay on the guard", () => {
+			const frozen = presentation({ fields: Object.freeze([FIELD, OTHER]) })
+			expect(guardPresentation(frozen)).toBeDefined()
+			expectSame(output(), context(), frozen)
+			const readOnly = presentation({
+				fields: Object.defineProperty([FIELD], "0", {
+					value: FIELD,
+					enumerable: true,
+					writable: false,
+				}),
+			})
+			expect(guardPresentation(readOnly)).toBeDefined()
+			expectSame(output(), context(), readOnly)
+		})
+	})
 })
 
 /** Key-sorted copy: a parsed presentation's member order is not significant, assemble picks by name. */
