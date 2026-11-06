@@ -1,5 +1,11 @@
 /** What a fresh client reads to learn the API: the route index and the closed value lists. */
 import type { ActivityCategory, ActivityKind } from "./activity.js"
+import type { ScannerPassiveReason } from "./agent-status.js"
+import type {
+	DecoderInputState,
+	DecoderReceptionHint,
+	DecoderVerdictCode,
+} from "./decoders.js"
 import type { RecordingInventoryKind } from "./recordings.js"
 import type {
 	Identity,
@@ -12,7 +18,13 @@ import type {
 	ScannerProtocol,
 	ScannerRecorderDecision,
 } from "./scanner.js"
-import type { TunerState } from "./tuner.js"
+import type { SourceDeviceFacts, SourceVerdictCode } from "./sources.js"
+import type {
+	TunerChangeActor,
+	TunerChangeField,
+	TunerChangeReason,
+	TunerState,
+} from "./tuner.js"
 
 /** Swagger UI; the OpenAPI document is `OPENAPI_DOCUMENT_PATH`. */
 export const OPENAPI_UI_PATH = "/docs"
@@ -109,6 +121,8 @@ export interface ApiEnums {
 		sensitivities: readonly NonNullable<ScanJobSpec["sensitivity"]>[]
 		discoveryViews: readonly DiscoveryView[]
 		jobViews: readonly ScanJobView[]
+		recorderDecisions: readonly ScannerRecorderDecision[]
+		passiveReasons: readonly ScannerPassiveReason[]
 	}
 	activity: {
 		kinds: readonly ActivityKind[]
@@ -118,6 +132,18 @@ export interface ApiEnums {
 		gainModes: readonly TunerState["gainMode"][]
 		directSamplingModes: readonly TunerState["directSampling"][]
 		controlModes: readonly TunerState["controlMode"][]
+		changeActors: readonly TunerChangeActor[]
+		changeReasons: readonly TunerChangeReason[]
+		changeFields: readonly TunerChangeField[]
+	}
+	sources: {
+		verdictCodes: readonly SourceVerdictCode[]
+		deviceFacts: readonly SourceDeviceFacts[]
+	}
+	decoders: {
+		verdictCodes: readonly DecoderVerdictCode[]
+		receptionHints: readonly DecoderReceptionHint[]
+		inputStates: readonly DecoderInputState[]
 	}
 	recordings: {
 		kinds: readonly RecordingInventoryKind[]

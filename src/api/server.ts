@@ -439,6 +439,8 @@ export class ApiServer {
 		this.wsBroadcaster.attachActivity(this.activityHub)
 		activity?.bindSubscriptions(this.activityHub)
 		this.sourceStatusPublisher = new SourceStatusPublisher({
+			sdrHostStatuses: () =>
+				this.resourceAggregator?.getSdrHostStatuses() ?? [],
 			sourceManager: this.sourceManager,
 			fanoutTelemetry: this.fanoutTelemetry,
 			broadcaster: this.wsBroadcaster,
@@ -1504,6 +1506,8 @@ export class ApiServer {
 		await this.app.register(sourceRoutes, {
 			sourceManager: this.sourceManager,
 			fanoutManager: this.fanoutTelemetry,
+			sdrHostStatuses: () =>
+				this.resourceAggregator?.getSdrHostStatuses() ?? [],
 		})
 
 		if (this.accessController && this.iqSnapshotFanoutFor)
@@ -1530,6 +1534,7 @@ export class ApiServer {
 		// Register decoder routes (Requirement 9.6, 9.7, 9.8, 9.9)
 		await this.app.register(decoderSummaryRoutes, {
 			decoderManager: this.decoderManager,
+			sourceManager: this.sourceManager,
 		})
 		await this.app.register(decoderRoutes, {
 			efficiencyBudget: this.decoderManager.efficiencyBudget?.(),
@@ -1586,6 +1591,12 @@ export class ApiServer {
 				tunerController: this.tunerController,
 				sourceManager: this.sourceManager,
 				bandGain: this.tunerController.bandGainSettings(),
+				...(this.accessController
+					? {
+							principalKind: request =>
+								this.accessController?.principalOf(request)?.kind,
+						}
+					: {}),
 			})
 		}
 
@@ -1707,6 +1718,8 @@ export class ApiServer {
 		await this.app.register(agentStatusRoutes, {
 			decoderManager: this.decoderManager,
 			sourceManager: this.sourceManager,
+			sdrHostStatuses: () =>
+				this.resourceAggregator?.getSdrHostStatuses() ?? [],
 			tunerController: this.tunerController,
 			liveDemod: this.liveDemod,
 			scanner: this.scanner,

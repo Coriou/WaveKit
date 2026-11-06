@@ -514,7 +514,7 @@ export class TunerArbiter extends EventEmitter {
 				"SCANNER_ENGINE_MISSING",
 			)
 		const s = this.deps.settings()
-		const opts: TunerWriteOptions = { origin: "scanner" }
+		const opts: TunerWriteOptions = { origin: "scanner", jobId: lease.jobId }
 		let state = this.requireState(sourceId)
 		let rateChanged = false
 		// WG9 req 3.1: the hop commands the rate too whenever it is unproven: declared only, or
@@ -690,6 +690,7 @@ export class TunerArbiter extends EventEmitter {
 		this.assertHeld(lease)
 		await this.deps.tuner.setAgcMode(lease.sourceId, enabled, {
 			origin: "scanner",
+			jobId: lease.jobId,
 		})
 	}
 
@@ -727,9 +728,13 @@ export class TunerArbiter extends EventEmitter {
 			f => lease.snapshot[f] !== undefined,
 		)
 		if (opts.restore) {
-			const r = await this.restoreFields(lease.sourceId, lease.snapshot, [
-				...lease.changedFields,
-			])
+			const r = await this.restoreFields(
+				lease.sourceId,
+				lease.snapshot,
+				[...lease.changedFields],
+				undefined,
+				lease.jobId,
+			)
 			result = {
 				restored: r.restored,
 				unrestorable: [...r.unknown, ...r.failed],
@@ -1057,11 +1062,16 @@ export class TunerArbiter extends EventEmitter {
 		snapshot: Partial<TunerFieldValues>,
 		changed: (keyof TunerFieldValues)[],
 		abort: () => boolean = () => false,
+		jobId?: string,
 	): Promise<{ restored: string[]; unknown: string[]; failed: string[] }> {
 		const restored: string[] = []
 		const unknown: string[] = []
 		const failed: string[] = []
-		const opts: TunerWriteOptions = { origin: "scanner" }
+		const opts: TunerWriteOptions = {
+			origin: "scanner",
+			restore: true,
+			...(jobId !== undefined ? { jobId } : {}),
+		}
 		const tuner = this.deps.tuner
 		const order = snapshot.gainMode === "agc" ? FIELDS_AGC_SNAPSHOT : FIELDS
 		for (const field of order) {
@@ -1464,6 +1474,7 @@ export class TunerArbiter extends EventEmitter {
 			persisted.snapshot,
 			[...fields],
 			superseded,
+			persisted.jobId,
 		)
 		if (superseded()) return
 		if (r.failed.length > 0) {

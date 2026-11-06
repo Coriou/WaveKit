@@ -154,7 +154,63 @@ export interface DecoderAssignment {
 	assignedAt: string
 }
 
+/**
+ * What a source's state means, in one closed code. `receiver-no-device` and
+ * `receiver-not-running` are claims and need fresh, well-formed receiver facts; everything else
+ * says only what the core itself sees (`no-samples`: connected with no IQ).
+ */
+export const SOURCE_VERDICT_CODES = [
+	"ok",
+	"waiting",
+	"no-samples",
+	"receiver-no-device",
+	"receiver-not-running",
+	"backpressure",
+	"disconnected",
+	"feed-paused",
+	"feed-error",
+	"ended",
+] as const
+export type SourceVerdictCode = (typeof SOURCE_VERDICT_CODES)[number]
+
+/**
+ * What the receiver's status API can say about its device: `present` or `absent` from a fresh
+ * answer; `malformed` it answered without a boolean device state; `stale` its last answer is too
+ * old; `unreachable` it does not answer now; `none` this core polls no status API for the source.
+ * Only `present` and `absent` assert a device state.
+ */
+export const SOURCE_DEVICE_FACTS = [
+	"present",
+	"absent",
+	"malformed",
+	"stale",
+	"unreachable",
+	"none",
+] as const
+export type SourceDeviceFacts = (typeof SOURCE_DEVICE_FACTS)[number]
+
+/** `verdict` on GET /api/sources. */
+export interface SourceVerdict {
+	code: SourceVerdictCode
+	/** One fixed sentence per code and facts state; never carries a value from the receiver. */
+	message: string
+	deviceFacts: SourceDeviceFacts
+}
+
+/** Fastify response schema of `SourceVerdict`. */
+export const sourceVerdictSchema = {
+	type: "object",
+	properties: {
+		code: { type: "string", enum: [...SOURCE_VERDICT_CODES] },
+		message: { type: "string" },
+		deviceFacts: { type: "string", enum: [...SOURCE_DEVICE_FACTS] },
+	},
+	required: ["code", "message", "deviceFacts"],
+} as const
+
 export interface ExtendedSourceStatus extends SourceStatus {
+	/** What the source's state means. Absent from older cores. */
+	verdict?: SourceVerdict
 	assignments: DecoderAssignment[]
 	consumers: number
 	available: boolean

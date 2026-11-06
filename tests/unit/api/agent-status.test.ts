@@ -4,12 +4,15 @@ import {
 	AGENT_ACTIVITY_STATES,
 	AGENT_DECODER_CAUSE_CODES,
 	AGENT_SOURCE_STATES,
+	AGENT_SOURCE_VERDICTS,
 	AGENT_SOURCE_WARNINGS,
 	AGENT_STATUS_LIMITS,
 	AGENT_TUNER_OWNERS,
 	DECODER_VERDICT_ACTIONS,
 	DECODER_VERDICT_CODES,
+	SCANNER_PASSIVE_REASONS,
 	SOURCE_FEED_STATES,
+	SOURCE_VERDICT_CODES,
 	agentStatusSchema,
 	jsonStringBytes,
 	type AgentStatus,
@@ -548,6 +551,12 @@ describe("agent status", () => {
 					SOURCE_FEED_STATES,
 				) as AgentStatus["sources"][number]["feed"],
 				tuningUnverified: false,
+				verdict: longest(
+					AGENT_SOURCE_VERDICTS,
+				) as AgentStatus["sources"][number]["verdict"],
+				passive: longest(
+					SCANNER_PASSIVE_REASONS,
+				) as AgentStatus["sources"][number]["passive"],
 			})),
 			liveAudio: {
 				running: false,
@@ -602,7 +611,14 @@ describe("agent status", () => {
 		expect(JSON.stringify(count)).toHaveLength(23)
 		expect(agentStatusSchema.parse(worst)).toEqual(worst)
 		// The total in the AGENT_STATUS_LIMITS arithmetic.
-		expect(Buffer.byteLength(JSON.stringify(worst))).toBe(4_094)
+		expect(Buffer.byteLength(JSON.stringify(worst))).toBe(4_078)
+		// Every verdict but `ok`, in one list that cannot drift from the route's.
+		expect([...AGENT_SOURCE_VERDICTS, "ok"].sort()).toEqual(
+			[...SOURCE_VERDICT_CODES].sort(),
+		)
+		// The worst row is the bound: the sources' two optional codes are at their longest.
+		expect(worst.sources[0]?.verdict).toBe("receiver-not-running")
+		expect(worst.sources[0]?.passive).toBe("measuring-baseline")
 		expect(Buffer.byteLength(JSON.stringify(worst))).toBeLessThan(
 			AGENT_STATUS_LIMITS.targetBytes,
 		)
@@ -661,6 +677,35 @@ describe("agent status", () => {
 				],
 			}),
 		).toBe(false)
+		// The source codes are closed; `ok` is never sent; a long code cannot slip past the budget.
+		expect(
+			past({
+				sources: [
+					{
+						...worst.sources[0]!,
+						verdict: "ok" as AgentStatus["sources"][number]["verdict"],
+					},
+				],
+			}),
+		).toBe(false)
+		expect(
+			past({
+				sources: [
+					{
+						...worst.sources[0]!,
+						passive: "x" as AgentStatus["sources"][number]["passive"],
+					},
+				],
+			}),
+		).toBe(false)
+		// The protocol cap: 16 fits (the longest built-in is 15), 17 does not.
+		const row = worst.decoders[0]!
+		expect(past({ decoders: [{ ...row, protocol: "p".repeat(16) }] })).toBe(
+			true,
+		)
+		expect(past({ decoders: [{ ...row, protocol: "p".repeat(17) }] })).toBe(
+			false,
+		)
 		// A byte cap counts JSON bytes: a 7-character id of quotes is 14 bytes.
 		expect(
 			past({
@@ -674,7 +719,7 @@ describe("agent status", () => {
 		return Array.from({ length: total }, (_, index) =>
 			decoder({
 				id: idOf(index),
-				type: `${"p".repeat(20)}-${String(index).padStart(3, "0")}`,
+				type: `${"p".repeat(12)}-${String(index).padStart(3, "0")}`,
 				lastOutputAt: new Date(now - index * 1_000),
 				suspension: { reasonCode: "efficiency-budget", since: new Date(now) },
 				efficiency: { detail: "budget" } as NonNullable<

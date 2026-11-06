@@ -104,6 +104,8 @@ export interface TunerState {
 	tunerGainIndex?: number
 	controlMode: TunerControlMode // "internal" = WaveKit controls, "external" = SDR++ controls
 	lastCommandAt?: string
+	/** Who made the last change, and why (see TunerLastChange). */
+	lastChange?: TunerLastChange
 	lastError?: string
 	commandCount: number
 	/**
@@ -215,6 +217,74 @@ export type TunerCommandOrigin =
 	| "replay"
 	| "config"
 	| "decoder-rate"
+
+/**
+ * Who made a tuner's last change (`TunerState.lastChange`). Set by the core, never by a client:
+ * `web` a browser session, `agent` a machine token, `scanner-job` a scanner job's tuner lease,
+ * `restore` the core putting tuning back (after a scanner lease, or replay on reconnect),
+ * `config` the source's configured tuning, `decoder-rate` the decoder rate policy, `relay` an
+ * external client through the tuner relay. `unknown`: a REST write on a core without access
+ * protection (no principal to tell who), or an untagged write.
+ */
+export const TUNER_CHANGE_ACTORS = [
+	"web",
+	"agent",
+	"scanner-job",
+	"restore",
+	"config",
+	"decoder-rate",
+	"relay",
+	"unknown",
+] as const
+export type TunerChangeActor = (typeof TUNER_CHANGE_ACTORS)[number]
+
+/** Why a tuner's last change happened (`TunerState.lastChange.reason`). */
+export const TUNER_CHANGE_REASONS = [
+	"rest-command",
+	"scanner-hop",
+	"scanner-restore",
+	"reconnect-replay",
+	"source-config",
+	"decoder-rate",
+	"relay-command",
+	"unknown",
+] as const
+export type TunerChangeReason = (typeof TUNER_CHANGE_REASONS)[number]
+
+/** The tuner fields a change can name. */
+export const TUNER_CHANGE_FIELDS = [
+	"frequency",
+	"sampleRate",
+	"gainMode",
+	"gain",
+	"ppm",
+	"ifGain",
+	"testMode",
+	"agcMode",
+	"directSampling",
+	"offsetTuning",
+	"rtlXtal",
+	"tunerXtal",
+	"tunerGainIndex",
+	"biasTee",
+	"tunerIfGain",
+] as const
+export type TunerChangeField = (typeof TUNER_CHANGE_FIELDS)[number]
+
+/**
+ * The last change the core wrote or saw on a tuner: one per source, in memory, absent until the
+ * first one since the core started. Writes of one actor, reason and job within a second extend
+ * `fields` (a hop writes rate, centre and gain in a row), so `fields` holds each closed field at
+ * most once. A scanner settle marker (test mode on and off) is no change.
+ */
+export interface TunerLastChange {
+	actor: TunerChangeActor
+	reason: TunerChangeReason
+	at: string
+	fields: TunerChangeField[]
+	/** The job whose lease moved the tuner; only on `scanner-job` and scanner `restore` changes. */
+	jobId?: string
+}
 
 /** `tuner:command-sent` on the `tuner` channel. */
 export interface TunerCommandSentEventData {

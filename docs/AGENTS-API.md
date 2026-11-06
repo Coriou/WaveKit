@@ -154,6 +154,19 @@ id was cut; read the fuller route named in the [field table](API.md#get-apiagent
 Decoders with a problem verdict are listed first; `hiddenProblems` above 0 means more problem
 decoders than fit, so read `GET /api/decoders/summary`.
 
+Each answer below is one read, no logs needed; every closed list is in `GET /api/enums`:
+
+- **Who moved the tuner, and why:** `lastChange` on `GET /api/tuner` (`actor`, `reason`, `at`,
+  `fields`, and `jobId` when a job moved it). A machine token reads `agent`, a browser session
+  `web`, a core without access `unknown`.
+- **Why a source gives no samples:** `verdict` on `GET /api/sources`, its bare code as
+  `sources[].verdict` here (absent when `ok`). `receiver-no-device` means fresh receiver facts say
+  so; `no-samples` claims no cause, and `deviceFacts` says why not.
+- **Why passive scanning is off:** `sources[].passive` here, `engines[].passive.reasonCode` on
+  `GET /api/scanner`.
+- **Why a signal was not recorded:** `recorder` on `GET /api/scanner/discoveries/:id`.
+- **What a sweep was allowed to disturb:** `impact` and `consentedImpact` on the job.
+
 `sources[].feed` reads `paused` or `resuming` while an operator holds the receiver feed off
 and `error` after a failed resume. After a plain resume, `tuningUnverified: true` means the
 receiver may have been retuned during the pause: read or set the tuning before trusting it.
@@ -254,6 +267,10 @@ since it last started, restarted or moved channel or centre (evidence at most 2 
 a removed channel placement's evidence dropped), so a retune or restart starts it afresh.
 The LoRa, ISM (rtl_433) and digital voice (dsd-fme) decoders report it, with the underlying `counters` (`total` since the core
 started, `perMin` over the last minute) on the summary route.
+
+Quiet or broken: `listening` is quiet (running, nothing decodable), even with `health: idle`
+and sparse output. `source-unavailable` with `input: none` is broken (running, no input); `failed`
+is a failing process ([table](API.md#get-apidecoderssummary)).
 
 ## Read activity
 

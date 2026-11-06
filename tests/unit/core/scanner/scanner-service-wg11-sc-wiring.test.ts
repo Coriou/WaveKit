@@ -8,6 +8,8 @@ import {
 	PASSIVE_COST_RECHECK_MS,
 	PASSIVE_COST_WINDOW_MS,
 } from "../../../../src/core/scanner/passive-cost-contract.js"
+import { buildAgentStatus } from "../../../../src/api/routes/agent-status.js"
+import { MEASURING_REASON } from "../../../../src/core/scanner/passive-guard.js"
 import { serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 import { meteredCheck } from "./passive-elu-fixture.js"
 
@@ -77,6 +79,90 @@ describe("passive cost guard wiring (WG11 req 2)", () => {
 			WAIT,
 		)
 		await h.service.stop()
+	})
+
+	it("exposes the hold with a closed reason in the scanner and agent reads, then clears it", async () => {
+		const { h, engine, openedAt } = await started()
+		const check = meteredCheck(h.service)
+		const agent = async () =>
+			(
+				await buildAgentStatus(
+					{
+						decoderManager: { getAllStatus: () => [] },
+						sourceManager: {
+							getAllStatus: () =>
+								[
+									{
+										id: "rtl",
+										connected: true,
+										activity: {
+											state: "streaming",
+											lastSampleAt: null,
+											sampleAgeMs: 1,
+											timeoutMs: 1,
+										},
+									},
+								] as never,
+						},
+						scanner: h.service,
+						activity: { enabled: false },
+					},
+					1,
+				)
+			).sources[0]
+		const passive = () => h.service.status().engines[0]?.passive
+		expect(passive()).not.toHaveProperty("reasonCode")
+		expect(await agent()).not.toHaveProperty("passive")
+		await h.service.spectrum.acquire("rtl", "ws:wg11-sc")
+		const t1 = openedAt + PASSIVE_COST_WINDOW_MS
+		engine.utilization = () => 0.97
+		await check(t1)
+		expect(passive()).toMatchObject({
+			enabled: false,
+			reasonCode: "engine-cost",
+			disabledAt: new Date(t1).toISOString(),
+		})
+		expect(await agent()).toMatchObject({ passive: "engine-cost" })
+		await check(t1 + 1_000)
+		engine.utilization = () => 0.2
+		await check(t1 + 1_000 + PASSIVE_COST_WINDOW_MS)
+		await check(t1 + 1_000 + 2 * PASSIVE_COST_WINDOW_MS)
+		expect(passive()).not.toHaveProperty("reasonCode")
+		expect(passive()).not.toHaveProperty("disabledAt")
+		expect(await agent()).not.toHaveProperty("passive")
+		await h.service.stop()
+	})
+
+	it("a job DTO states the impact consented to, apart from the impact last reported", async () => {
+		const { h } = await started()
+		expect(h.service.getJob("passive-rtl")?.consentedImpact).toBeNull()
+		const job = await h.service.createJob({
+			sourceId: "rtl",
+			mode: "sweep",
+			ranges: [{ startHz: 446_000_000, endHz: 446_200_000 }],
+			takeover: true,
+			resume: { autoAfterIdleMs: null },
+		})
+		const dto = h.service.getJob(job.id)
+		expect(dto?.consentedImpact).toEqual(dto?.impact)
+		expect(dto?.consentedImpact).not.toBeNull()
+		await h.service.stop()
+	})
+
+	it("names every reason the guard writes, and only those", () => {
+		const service = serviceHarness().service
+		const internals = service as unknown as {
+			passiveDisabled: Map<string, string>
+		}
+		const of = (reason: string) => {
+			internals.passiveDisabled.set("rtl", reason)
+			return service.passiveHoldReason("rtl")
+		}
+		expect(service.passiveHoldReason("rtl")).toBeNull()
+		expect(of("passive-cpu 30 % of a core")).toBe("passive-cost")
+		expect(of("engine-cpu 30 % of a core")).toBe("engine-cost")
+		expect(of(MEASURING_REASON)).toBe("measuring-baseline")
+		expect(of("a reason from a newer build")).toBe("unknown")
 	})
 
 	it("an enabled source is re-judged too and disabled when the engine got costly", async () => {

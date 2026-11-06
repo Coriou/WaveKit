@@ -6,7 +6,8 @@ import {
 	decoderSummaryRoutes,
 	DECODING_WINDOW_MS,
 } from "../../../src/api/routes/decoder-summary.js"
-import type { DecoderPlacementView } from "@wavekit/api-types"
+import type { DecoderPlacementView, DecoderSummary } from "@wavekit/api-types"
+import type { SourceStatus } from "../../../src/core/source-manager.js"
 import type { DecoderStatus } from "../../../src/decoders/types.js"
 import fc from "fast-check"
 import {
@@ -100,6 +101,7 @@ it("serves a compact summary and takes static precedence over decoder ids", asyn
 				"suspensionReason",
 				"health",
 				"verdict",
+				"input",
 			].sort(),
 		)
 	} finally {
@@ -743,6 +745,124 @@ describe("decoder counters in the summary", () => {
 				framesOk: { total: 0, perMin: 0 },
 			})
 			expect(item?.["reception"]).toBe("heard-undecoded")
+		} finally {
+			await app.close()
+		}
+	})
+})
+
+describe("quiet versus broken", () => {
+	const silentRun = { lastOutputAt: undefined, sourceId: "s" }
+	const activity =
+		(state: SourceStatus["activity"]["state"] | undefined) => () =>
+			state
+
+	it.each([
+		["streaming", "flowing", "listening"],
+		["disconnected", "none", "source-unavailable"],
+		["stale", "none", "source-unavailable"],
+		["ended", "none", "source-unavailable"],
+		// Just connecting or backed up says nothing: never read as broken.
+		["waiting", "unknown", "listening"],
+		["paused", "unknown", "listening"],
+		[undefined, "unknown", "listening"],
+	] as const)(
+		"a silent running decoder on a %s source",
+		(state, input, code) => {
+			const item = decoderSummary(
+				status(silentRun),
+				now,
+				undefined,
+				activity(state),
+			)
+			expect(item.input).toBe(input)
+			expect(item.verdict.code).toBe(code)
+			expect(decoderVerdictSchema.safeParse(item.verdict).success).toBe(true)
+			// `health` keeps its meaning: no output in the window, not a fault.
+			expect(item.health).toBe("idle")
+			if (code === "source-unavailable") {
+				expect(item.verdict.actions).toEqual(["check-source"])
+				expect(item.verdict.text).toMatch(/no input/)
+				expect(item).not.toHaveProperty("reception")
+			}
+		},
+	)
+
+	it("sparse output is quiet, not broken: the last output keeps its time", () => {
+		const last = new Date(now - DECODING_WINDOW_MS - 1)
+		const item = decoderSummary(
+			status({ lastOutputAt: last, sourceId: "s" }),
+			now,
+			undefined,
+			activity("streaming"),
+		)
+		expect(item.health).toBe("idle")
+		expect(item.verdict.code).toBe("listening")
+		expect(item.lastOutputAt).toBe(last.toISOString())
+	})
+
+	it("a failing process stays failed whatever its input", () => {
+		const item = decoderSummary(
+			status({ health: "faulted", running: false, sourceId: "s" }),
+			now,
+			undefined,
+			activity("streaming"),
+		)
+		expect(item.verdict.code).toBe("failed")
+	})
+
+	it("a decoder with no source, or no reader, never reads as broken", () => {
+		const free = decoderSummary(
+			status({ lastOutputAt: undefined }),
+			now,
+			undefined,
+			activity("stale"),
+		)
+		expect(free.input).toBe("unknown")
+		expect(free.verdict.code).toBe("listening")
+		const noReader = decoderSummary(status(silentRun), now)
+		expect(noReader.input).toBe("unknown")
+		expect(noReader.verdict.code).toBe("listening")
+	})
+
+	it("one placement source still streaming is input", () => {
+		const placement = (sourceId: string) =>
+			({
+				sourceId,
+				channelHz: 1,
+				running: true,
+				reach: "channel",
+				origin: "configured",
+			}) as DecoderPlacementView
+		const item = decoderSummary(
+			status({
+				lastOutputAt: undefined,
+				placements: [placement("dead"), placement("live")],
+			}),
+			now,
+			undefined,
+			id => (id === "live" ? "streaming" : "stale"),
+		)
+		expect(item.input).toBe("flowing")
+		expect(item.verdict.code).toBe("listening")
+	})
+
+	it("the route reads the source through the source manager", async () => {
+		const app = Fastify()
+		await app.register(decoderSummaryRoutes, {
+			decoderManager: { getAllStatus: () => [status(silentRun)] },
+			sourceManager: {
+				getStatus: () =>
+					({
+						activity: { state: "stale" },
+					}) as SourceStatus,
+			},
+		})
+		try {
+			const response = await app.inject("/api/decoders/summary")
+			const [item] = response.json<DecoderSummary[]>()
+			expect(item?.input).toBe("none")
+			expect(item?.verdict.code).toBe("source-unavailable")
 		} finally {
 			await app.close()
 		}

@@ -22,12 +22,14 @@
  */
 
 import type { EventEmitter } from "node:events"
+import type { SdrHostStatus } from "@wavekit/api-types"
 import type { SourceManager, SourceStatus } from "../../core/source-manager.js"
 import type { FanoutTelemetryProvider } from "../../core/source-fanout-router.js"
 import type { WebSocketEventBroadcaster } from "./events.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import {
 	countConsumersBySource,
+	sdrHostsBySource,
 	toApiExtendedSourceStatus,
 } from "../serializers/source-status.js"
 
@@ -56,6 +58,8 @@ export interface SourceStatusPublisherOptions {
 	fanoutTelemetry?:
 		| Pick<FanoutTelemetryProvider, "getTelemetrySnapshot">
 		| undefined
+	/** The receiver facts behind a source verdict; a verdict's change waits for the heartbeat. */
+	sdrHostStatuses?: (() => readonly SdrHostStatus[]) | undefined
 	broadcaster: Pick<
 		WebSocketEventBroadcaster,
 		"broadcastSourceStatus" | "getSubscribersCount"
@@ -142,9 +146,10 @@ export class SourceStatusPublisher {
 		})
 		if (due.length === 0) return
 		const consumers = countConsumersBySource(fanoutTelemetry)
+		const hosts = sdrHostsBySource(this.options.sdrHostStatuses)
 		for (const status of due)
 			broadcaster.broadcastSourceStatus(
-				toApiExtendedSourceStatus(status, sourceManager, consumers),
+				toApiExtendedSourceStatus(status, sourceManager, consumers, hosts, now),
 			)
 	}
 

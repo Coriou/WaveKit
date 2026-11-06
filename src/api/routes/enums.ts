@@ -5,7 +5,17 @@
 import type { FastifyInstance } from "fastify"
 import {
 	API_ENUMS_PATH,
+	DECODER_INPUT_STATES,
+	DECODER_RECEPTION_HINTS,
+	DECODER_VERDICT_CODES,
 	RECORDING_INVENTORY_KINDS,
+	SCANNER_PASSIVE_REASONS,
+	SCANNER_RECORDER_DECISIONS,
+	SOURCE_DEVICE_FACTS,
+	SOURCE_VERDICT_CODES,
+	TUNER_CHANGE_ACTORS,
+	TUNER_CHANGE_FIELDS,
+	TUNER_CHANGE_REASONS,
 	type ApiEnums,
 } from "@wavekit/api-types"
 import {
@@ -38,6 +48,8 @@ export const API_ENUMS: ApiEnums = {
 		sensitivities: sensitivity.enum,
 		discoveryViews: discoveryQuerySchema.properties.view.enum,
 		jobViews: jobListQuerySchema.properties.view.enum,
+		recorderDecisions: SCANNER_RECORDER_DECISIONS,
+		passiveReasons: SCANNER_PASSIVE_REASONS,
 	},
 	activity: {
 		kinds: ACTIVITY_QUERY_KINDS,
@@ -47,6 +59,18 @@ export const API_ENUMS: ApiEnums = {
 		gainModes,
 		directSamplingModes,
 		controlModes: tunerConfigUpdateSchema.properties.controlMode.enum,
+		changeActors: TUNER_CHANGE_ACTORS,
+		changeReasons: TUNER_CHANGE_REASONS,
+		changeFields: TUNER_CHANGE_FIELDS,
+	},
+	sources: {
+		verdictCodes: SOURCE_VERDICT_CODES,
+		deviceFacts: SOURCE_DEVICE_FACTS,
+	},
+	decoders: {
+		verdictCodes: DECODER_VERDICT_CODES,
+		receptionHints: DECODER_RECEPTION_HINTS,
+		inputStates: DECODER_INPUT_STATES,
 	},
 	recordings: { kinds: RECORDING_INVENTORY_KINDS },
 }

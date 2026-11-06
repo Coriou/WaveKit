@@ -20,6 +20,7 @@ import {
 	sourceRateMismatchSchema,
 	sourceSignalFlatSchema,
 	sourceEndpointSchema,
+	sourceVerdictSchema,
 } from "@wavekit/api-types"
 import { WaveKitError } from "../../utils/errors.js"
 import { SourceConfigSchema } from "../../config.js"
@@ -38,10 +39,12 @@ import type { FanoutTelemetryProvider } from "../../core/source-fanout-router.js
 import type {
 	DecoderAssignment as ApiDecoderAssignment,
 	ExtendedSourceStatus as ApiExtendedSourceStatus,
+	SdrHostStatus,
 	SourceFeedResponse,
 } from "@wavekit/api-types"
 import {
 	countConsumersBySource,
+	sdrHostsBySource,
 	toApiExtendedSourceStatus,
 } from "../serializers/source-status.js"
 
@@ -151,6 +154,7 @@ const extendedSourceStatusSchema = {
 		signalLevelDbfs: { type: "number" },
 		endpoint: sourceEndpointSchema,
 		feed: sourceFeedSchema,
+		verdict: sourceVerdictSchema,
 		assignments: {
 			type: "array",
 			items: decoderAssignmentSchema,
@@ -334,6 +338,8 @@ const unassignmentResponseSchema = {
 export interface SourceRoutesOptions {
 	sourceManager: SourceManager
 	fanoutManager?: FanoutTelemetryProvider
+	/** The receiver facts behind a source verdict; absent or empty says nothing of a device. */
+	sdrHostStatuses?: () => readonly SdrHostStatus[]
 }
 
 /**
@@ -408,7 +414,7 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 	fastify: FastifyInstance,
 	options: SourceRoutesOptions,
 ) => {
-	const { sourceManager, fanoutManager } = options
+	const { sourceManager, fanoutManager, sdrHostStatuses } = options
 
 	/**
 	 * GET /api/sources - List all sources
@@ -434,10 +440,18 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 		},
 		async () => {
 			const consumersBySourceId = countConsumersBySource(fanoutManager)
+			const hosts = sdrHostsBySource(sdrHostStatuses)
+			const now = Date.now()
 			return sourceManager
 				.getAllStatus()
 				.map(status =>
-					toApiExtendedSourceStatus(status, sourceManager, consumersBySourceId),
+					toApiExtendedSourceStatus(
+						status,
+						sourceManager,
+						consumersBySourceId,
+						hosts,
+						now,
+					),
 				)
 		},
 	)

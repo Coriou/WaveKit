@@ -13,6 +13,7 @@ import type {
 	AgentSourceWarning,
 	AgentStatus,
 	AgentTuner,
+	SdrHostStatus,
 	ScanJob,
 	ScanJobCompact,
 	TunerState,
@@ -20,22 +21,33 @@ import type {
 import type { FastifyPluginAsync } from "fastify"
 import type { ActivityStoreStats } from "../../core/activity/storage/contract.js"
 import type { LiveDemodulator } from "../../core/live-demodulator.js"
+import { sourceVerdict } from "../../core/source-verdict.js"
 import type { ScannerService } from "../../core/scanner/scanner-service.js"
 import type { SourceManager } from "../../core/source-manager.js"
 import type { TunerController } from "../../core/tuner-controller.js"
 import type { DecoderManager } from "../../decoders/manager.js"
-import { decoderSummary } from "./decoder-summary.js"
+import { sdrHostsBySource } from "../serializers/source-status.js"
+import { decoderSummary, sourceActivityReader } from "./decoder-summary.js"
 
 export interface AgentStatusRoutesOptions {
 	decoderManager: Pick<DecoderManager, "getAllStatus">
-	sourceManager: Pick<SourceManager, "getAllStatus">
+	sourceManager: Pick<SourceManager, "getAllStatus"> &
+		Partial<Pick<SourceManager, "getStatus">>
+	/** The receiver facts behind a source verdict; absent or empty says nothing of a device. */
+	sdrHostStatuses?: (() => readonly SdrHostStatus[]) | undefined
 	tunerController?: Pick<TunerController, "getAllStates"> | undefined
 	liveDemod?: Pick<LiveDemodulator, "getStatus"> | undefined
 	scanner?:
 		| (Pick<ScannerService, "status" | "listJobs" | "tunerLeaseHolder"> &
 				// The cheap reads; optional so an older service shape still serves.
 				Partial<
-					Pick<ScannerService, "scannerEnabled" | "jobRows" | "discoveryCount">
+					Pick<
+						ScannerService,
+						| "scannerEnabled"
+						| "jobRows"
+						| "discoveryCount"
+						| "passiveHoldReason"
+					>
 				>)
 		| undefined
 	/** Same inputs as the Activity routes: disabled, unavailable, or the store's stats. */
@@ -141,11 +153,16 @@ function sourceRows(
 	sourceManager: AgentStatusRoutesOptions["sourceManager"],
 	unverified: ReadonlySet<string>,
 	bounds: Bounds,
+	options: Pick<AgentStatusRoutesOptions, "sdrHostStatuses" | "scanner">,
+	now: number,
 ): AgentSource[] {
+	const hosts = sdrHostsBySource(options.sdrHostStatuses)
 	return bounds.list(sourceManager.getAllStatus(), L.sourcesMax).map(status => {
 		const warnings: AgentSourceWarning[] = []
 		if (status.rateMismatch) warnings.push("rate-mismatch")
 		if (status.signalFlat) warnings.push("signal-flat")
+		const verdict = sourceVerdict(status, hosts.get(status.id), now).code
+		const passive = options.scanner?.passiveHoldReason?.(status.id) ?? null
 		return {
 			id: bounds.id(status.id),
 			connected: status.connected,
@@ -154,6 +171,8 @@ function sourceRows(
 			warnings,
 			feed: status.feed?.state ?? "live",
 			tuningUnverified: unverified.has(status.id),
+			...(verdict !== "ok" ? { verdict } : {}),
+			...(passive !== null ? { passive } : {}),
 		}
 	})
 }
@@ -245,9 +264,10 @@ export async function buildAgentStatus(
 		scanner?.jobRows?.() ?? scanner?.listJobs().map(scanJobCompact) ?? []
 	const leaseHolder = (sourceId: string): string | null =>
 		scanner?.tunerLeaseHolder(sourceId) ?? null
+	const activityOf = sourceActivityReader(options.sourceManager)
 	const summaries = options.decoderManager
 		.getAllStatus()
-		.map(status => decoderSummary(status, now))
+		.map(status => decoderSummary(status, now, undefined, activityOf))
 	// Newest output per protocol over every decoder, not only the rows shown.
 	const newest = new Map<string, string>()
 	for (const summary of summaries) {
@@ -271,7 +291,13 @@ export async function buildAgentStatus(
 			)
 			.map(state => state.sourceId),
 	)
-	const sources = sourceRows(options.sourceManager, unverified, bounds)
+	const sources = sourceRows(
+		options.sourceManager,
+		unverified,
+		bounds,
+		options,
+		now,
+	)
 	const liveAudio = liveAudioRow(options.liveDemod, bounds)
 	const scannerStatus = scanner
 		? scannerRow(

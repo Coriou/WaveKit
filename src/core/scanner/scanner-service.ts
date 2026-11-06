@@ -63,6 +63,7 @@ import type {
 	ScannerProbeDecoderType,
 	ScannerTrialOutcome,
 	DiscoveryTrialMemory,
+	ScannerPassiveReason,
 	ScannerRecorderDiscovery,
 } from "@wavekit/api-types"
 import {
@@ -265,7 +266,7 @@ import {
 	HOLE_STREAK_RESET_MS,
 	snapshotIntervalMs,
 } from "./store/snapshot-cadence.js"
-import { PassiveGuard } from "./passive-guard.js"
+import { MEASURING_REASON, PassiveGuard } from "./passive-guard.js"
 import { PASSIVE_COST_LIMIT_DEFAULT } from "./passive-cost-contract.js"
 import {
 	SCANNER_SETTINGS_BOUNDS,
@@ -7967,6 +7968,7 @@ export class ScannerService extends EventEmitter {
 				? { decodedElsewhere: record.decodedElsewhere }
 				: {}),
 			...(record.bandPlanSkips ? { bandPlanSkips: record.bandPlanSkips } : {}),
+			consentedImpact: record.consentedImpact ?? null,
 			progress: driver
 				? { ...driver.progress(), hitStats: this.hitStatsOf(record.id) }
 				: {
@@ -7999,6 +8001,16 @@ export class ScannerService extends EventEmitter {
 				: {}),
 			...(driver instanceof IdentifyRunner ? { identify: driver.view() } : {}),
 		}
+	}
+
+	/** Why the cost guard holds `sourceId`'s passive scanning off; null when it does not. Read only. */
+	passiveHoldReason(sourceId: string): ScannerPassiveReason | null {
+		const reason = this.passiveDisabled.get(sourceId)
+		if (reason === undefined) return null
+		if (reason === MEASURING_REASON) return "measuring-baseline"
+		if (reason.startsWith("passive-cpu")) return "passive-cost"
+		if (reason.startsWith("engine-cpu")) return "engine-cost"
+		return "unknown"
 	}
 
 	private hitStatsOf(jobId: string): ScanJobHitStats {
@@ -8079,6 +8091,8 @@ export class ScannerService extends EventEmitter {
 		const link = linkOf(cfg)
 		const frequencyError = this.frequencyErrors.get(cfg.id)
 		const disabledReason = this.passiveDisabled.get(cfg.id)
+		const reasonCode = this.passiveHoldReason(cfg.id)
+		const disabledAt = this.passiveGuard.status(cfg.id).disabledAt
 		const error = spectrumStatus?.lastError
 		const overloadHint = this.overloadHints.update(cfg.id, {
 			stats,
@@ -8118,6 +8132,10 @@ export class ScannerService extends EventEmitter {
 			passive: {
 				enabled: this.jobs.has(`passive-${cfg.id}`),
 				...(disabledReason ? { disabledReason } : {}),
+				...(reasonCode !== null ? { reasonCode } : {}),
+				...(disabledAt !== null
+					? { disabledAt: new Date(disabledAt).toISOString() }
+					: {}),
 			},
 			frequencyError: frequencyError
 				? {

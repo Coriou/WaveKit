@@ -10,6 +10,16 @@ import pino from "pino"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	API_ENUMS_PATH,
+	DECODER_INPUT_STATES,
+	DECODER_RECEPTION_HINTS,
+	DECODER_VERDICT_CODES,
+	SCANNER_PASSIVE_REASONS,
+	SCANNER_RECORDER_DECISIONS,
+	SOURCE_DEVICE_FACTS,
+	SOURCE_VERDICT_CODES,
+	TUNER_CHANGE_ACTORS,
+	TUNER_CHANGE_FIELDS,
+	TUNER_CHANGE_REASONS,
 	BANDPLAN_SCANNER_PROTOCOLS,
 	OPENAPI_DOCUMENT_PATH,
 	RECORDING_INVENTORY_KINDS,
@@ -259,6 +269,20 @@ describe("GET /api/enums", () => {
 			gainModes: ["manual", "agc"],
 			directSamplingModes: ["off", "i", "q"],
 			controlModes: ["internal", "external"],
+			changeActors: TUNER_CHANGE_ACTORS,
+			changeReasons: TUNER_CHANGE_REASONS,
+			changeFields: TUNER_CHANGE_FIELDS,
+		})
+		expect(API_ENUMS.scanner.recorderDecisions).toBe(SCANNER_RECORDER_DECISIONS)
+		expect(API_ENUMS.scanner.passiveReasons).toBe(SCANNER_PASSIVE_REASONS)
+		expect(API_ENUMS.sources).toEqual({
+			verdictCodes: SOURCE_VERDICT_CODES,
+			deviceFacts: SOURCE_DEVICE_FACTS,
+		})
+		expect(API_ENUMS.decoders).toEqual({
+			verdictCodes: DECODER_VERDICT_CODES,
+			receptionHints: DECODER_RECEPTION_HINTS,
+			inputStates: DECODER_INPUT_STATES,
 		})
 		expect([...protocolEnum].sort()).toEqual(
 			[...BANDPLAN_SCANNER_PROTOCOLS].sort(),

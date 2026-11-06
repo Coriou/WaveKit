@@ -29,6 +29,10 @@ import type {
 	TunerDirectSampling,
 	TunerControlMode,
 	TunerCommandOrigin,
+	TunerChangeActor,
+	TunerChangeField,
+	TunerChangeReason,
+	TunerLastChange,
 	TunerRatePolicyEventData,
 } from "@wavekit/api-types"
 
@@ -38,11 +42,24 @@ import type {
  * command and updates state and caps, marks the field known (inferred) and
  * records no desired field; a field accepted earlier is still replayed with
  * its current value. Test mode is never a desired field, so it is never replayed.
+ * `actor`, `jobId` and `restore` only describe the write for `lastChange`: `actor` says who a
+ * REST write came from (from the request's access principal, never from the client), `jobId`
+ * which job's lease a scanner write serves, `restore` that it puts the snapshot back.
  */
 export interface TunerWriteOptions {
 	origin?: TunerCommandOrigin
 	accept?: boolean
+	actor?: Extract<TunerChangeActor, "web" | "agent">
+	jobId?: string
+	restore?: boolean
 }
+
+/**
+ * Writes of one actor, reason and job this close (under a second) extend `lastChange.fields`
+ * instead of replacing it: a hop or a PATCH writes its fields back to back. Merging only ever
+ * adds a closed field once, so a fast sweep cannot grow it past TUNER_CHANGE_FIELDS (15).
+ */
+export const TUNER_CHANGE_MERGE_MS = 1_000
 
 /**
  * Sample rates the RTL2832U accepts. librtlsdr's rtlsdr_set_sample_rate()
@@ -296,6 +313,45 @@ const COMMAND_FIELDS: Record<number, DesiredField> = {
 	[RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX]: "tunerGainIndex",
 	[RTL_TCP_COMMANDS.SET_BIAS_TEE]: "biasTee",
 	[RTL_TCP_COMMANDS.SET_TUNER_IF_GAIN]: "tunerIfGain",
+}
+
+/** The field each command names in `lastChange` (test mode is no desired field, so it is added). */
+const CHANGE_FIELDS: ReadonlyMap<string, TunerChangeField> = new Map<
+	string,
+	TunerChangeField
+>([
+	...Object.entries(COMMAND_FIELDS).flatMap(
+		([cmd, field]): Array<[string, TunerChangeField]> => {
+			const name = COMMAND_NAMES[Number(cmd)]
+			return name === undefined ? [] : [[name, field]]
+		},
+	),
+	["set-test-mode", "testMode"],
+])
+
+/** Who and why, from what the core itself knows of a write; any gap reads `unknown`. */
+function changeOf(opts: TunerWriteOptions): {
+	actor: TunerChangeActor
+	reason: TunerChangeReason
+	jobId?: string
+} {
+	const job = opts.jobId !== undefined ? { jobId: opts.jobId } : {}
+	switch (opts.origin) {
+		case "rest":
+			return { actor: opts.actor ?? "unknown", reason: "rest-command" }
+		case "scanner":
+			return opts.restore === true
+				? { actor: "restore", reason: "scanner-restore", ...job }
+				: { actor: "scanner-job", reason: "scanner-hop", ...job }
+		case "replay":
+			return { actor: "restore", reason: "reconnect-replay" }
+		case "config":
+			return { actor: "config", reason: "source-config" }
+		case "decoder-rate":
+			return { actor: "decoder-rate", reason: "decoder-rate" }
+		default:
+			return { actor: "unknown", reason: "unknown" }
+	}
 }
 
 /** Relay commands from which applyExternalCommand infers manual gain mode. */
@@ -902,6 +958,8 @@ export class TunerController extends EventEmitter {
 	private readonly sourceManager: SourceManager
 	private readonly config: TunerControllerConfig
 	private tunerStates: Map<string, TunerState> = new Map()
+	/** The last change per source: one entry each, gone with the source (removeSource). */
+	private readonly lastChanges = new Map<string, TunerLastChange>()
 	private controlModeOrigins: Map<string, ControlModeOrigin> = new Map()
 	/**
 	 * Per source, who changed the centre whose caps update is being applied
@@ -1058,6 +1116,7 @@ export class TunerController extends EventEmitter {
 		this.configProvenFields.delete(sourceId)
 		if (!this.tunerStates.has(sourceId)) return
 		this.tunerStates.delete(sourceId)
+		this.lastChanges.delete(sourceId)
 		this.controlModeOrigins.delete(sourceId)
 		this.desiredFields.delete(sourceId)
 		this.inferredFields.delete(sourceId)
@@ -1228,6 +1287,12 @@ export class TunerController extends EventEmitter {
 		}
 
 		const cmdName = COMMAND_NAMES[command] ?? `cmd-0x${command.toString(16)}`
+		// The relay forwards raw bytes upstream before any check below, so even a value this
+		// controller ignores may have moved the receiver: the client did it either way.
+		this.noteChange(sourceId, cmdName, {
+			actor: "relay",
+			reason: "relay-command",
+		})
 		const now = new Date().toISOString()
 		let updated = false
 
@@ -2137,6 +2202,7 @@ export class TunerController extends EventEmitter {
 		}
 
 		for (const { name, value } of written) {
+			this.noteChange(sourceId, name, changeOf({ origin: "replay" }))
 			this.emit("command-sent", sourceId, name, value, "replay")
 		}
 		if (failure) this.emit("error", sourceId, failure)
@@ -2247,8 +2313,10 @@ export class TunerController extends EventEmitter {
 				{ sourceId, commands, err: failure.message },
 				"Writing relay commands from the pause interrupted; will retry on next connection",
 			)
-		for (const { name, value } of written)
+		for (const { name, value } of written) {
+			this.noteChange(sourceId, name, changeOf({ origin: "replay" }))
 			this.emit("command-sent", sourceId, name, value, "replay")
+		}
 		if (failure) this.emit("error", sourceId, failure)
 		this.emitStateChanged(sourceId)
 		return failure
@@ -2507,8 +2575,10 @@ export class TunerController extends EventEmitter {
 			)
 		}
 
-		for (const { name, value } of written)
+		for (const { name, value } of written) {
+			this.noteChange(sourceId, name, changeOf({ origin: "config" }))
 			this.emit("command-sent", sourceId, name, value, "config")
+		}
 		if (failure) {
 			this.emit("error", sourceId, failure)
 			return {
@@ -2927,6 +2997,11 @@ export class TunerController extends EventEmitter {
 				delete state.lastError
 			}
 			const cmdName = COMMAND_NAMES[cmd] ?? `cmd-0x${cmd.toString(16)}`
+			// A scanner settle marker (test mode on and off) moves nothing.
+			if (
+				!(cmd === RTL_TCP_COMMANDS.SET_TEST_MODE && opts.origin === "scanner")
+			)
+				this.noteChange(sourceId, cmdName, changeOf(opts))
 			this.emit("command-sent", sourceId, cmdName, value, opts.origin)
 			this.log.debug(
 				{ sourceId, command: cmdName, value, origin: opts.origin },
@@ -2947,6 +3022,34 @@ export class TunerController extends EventEmitter {
 			this.emitStateChanged(sourceId)
 			throw err
 		}
+	}
+
+	/**
+	 * Remembers a change for `lastChange`. One entry per known source, and `fields` holds each of
+	 * the closed fields at most once, so this memory is bounded by the sources. A command with no
+	 * field (an unhandled relay command) is no change.
+	 */
+	private noteChange(
+		sourceId: string,
+		commandName: string,
+		change: ReturnType<typeof changeOf>,
+	): void {
+		const field = CHANGE_FIELDS.get(commandName)
+		if (field === undefined || !this.tunerStates.has(sourceId)) return
+		const now = Date.now()
+		const last = this.lastChanges.get(sourceId)
+		const extending =
+			last !== undefined &&
+			last.actor === change.actor &&
+			last.reason === change.reason &&
+			last.jobId === change.jobId &&
+			now - Date.parse(last.at) < TUNER_CHANGE_MERGE_MS
+		const fields = extending ? last.fields : []
+		this.lastChanges.set(sourceId, {
+			...change,
+			at: new Date(now).toISOString(),
+			fields: fields.includes(field) ? fields : [...fields, field],
+		})
 	}
 
 	private emitStateChanged(sourceId: string): void {
@@ -2970,8 +3073,12 @@ export class TunerController extends EventEmitter {
 		const measured =
 			unknownFields.includes("sampleRate") &&
 			this.measuredRates.get(state.sourceId) === state.sampleRate
+		const lastChange = this.lastChanges.get(state.sourceId)
 		return {
 			...fields,
+			...(lastChange
+				? { lastChange: { ...lastChange, fields: [...lastChange.fields] } }
+				: {}),
 			...(ratePolicy ? { ratePolicy } : {}),
 			tunerIfGain: state.tunerIfGain
 				? { ...state.tunerIfGain }
