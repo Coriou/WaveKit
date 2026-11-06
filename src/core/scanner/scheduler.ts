@@ -267,12 +267,14 @@ interface HopState {
 	 */
 	waitMs: number
 	/**
-	 * Coarse visits left before a voiced recording may keep this hop again: hops − 1 when a visit's
-	 * voice hold ends (Visit.voice), one for every other hop, so the sweep's return to this hop may
-	 * hold the next transmission. No activity revisit comes back here meanwhile (pickRevisit). Per
-	 * hop: a long hold elsewhere never takes a transmission's voice hold away.
+	 * The hops (indices in the plan in force) that still owe a coarse visit before a voiced recording
+	 * may keep this hop again: every other hop when a visit's voice hold ends (Visit.voice), so the
+	 * sweep's return to this hop may hold the next transmission. No activity revisit comes back here
+	 * meanwhile (pickRevisit). Per hop: a long hold elsewhere never takes a transmission's voice hold
+	 * away. Named hops, not a count: a plan change has to know which of them were paid
+	 * (reconcileVoiceLocks).
 	 */
-	voiceLock: number
+	voiceLock: Set<number>
 }
 
 interface TrackInfo {
@@ -449,6 +451,22 @@ function channelReadingDb(track: TrackSnapshot): number {
 	return snr !== undefined && Number.isFinite(snr)
 		? snr
 		: Number.NEGATIVE_INFINITY
+}
+
+/** Whether `outer` holds all of `inner`. */
+function spanHolds(outer: Hop["covered"], inner: Hop["covered"]): boolean {
+	return outer.startHz <= inner.startHz && inner.endHz <= outer.endHz
+}
+
+/**
+ * Whether two hops are the same window for a voice lock: they share more than half of the narrower
+ * span. Neighbouring hops overlap by a sliver and are not; the parts of a split hop, a wider hop over
+ * it and a small shift of its centre are.
+ */
+function spansShare(a: Hop["covered"], b: Hop["covered"]): boolean {
+	const shared = Math.min(a.endHz, b.endHz) - Math.max(a.startHz, b.startHz)
+	const narrower = Math.min(a.endHz - a.startHz, b.endHz - b.startHz)
+	return shared > narrower / 2
 }
 
 function nearestHop(plan: HopPlan, centreHz: number): number {
@@ -1132,12 +1150,14 @@ export class SweepScheduler {
 		const active = this.askRecording(now)
 		const v = this.visit
 		// A hop kept within L whose recording then voices (a pause at the keep, a late verdict): the
-		// transmission gets its voice hold now, as if it had answered voice at the keep.
+		// transmission gets its voice hold now, as if it had answered voice at the keep, so under the
+		// same guard: a recording only of frequencies with carrier evidence stays within L.
 		if (
 			v !== null &&
 			isVoiceOnAir(active) &&
 			v.voice === "no" &&
-			!this.voiceLocked(v)
+			!this.voiceLocked(v) &&
+			this.recordedTrack(hold.trackId) !== null
 		) {
 			this.startVoiceHold(v, active, now)
 			hold.cap = this.holdOrigin() + this.spec.hold.maxHoldMs
@@ -1244,7 +1264,7 @@ export class SweepScheduler {
 
 	/** Whether the hop's own last voice hold still owes the sweep its coarse visits. */
 	private voiceLocked(v: Visit): boolean {
-		return (this.hops[v.hopIndex]?.voiceLock ?? 0) > 0
+		return (this.hops[v.hopIndex]?.voiceLock.size ?? 0) > 0
 	}
 
 	private startVoiceHold(v: Visit, active: VoiceOnAir, now: number): void {
@@ -1485,7 +1505,7 @@ export class SweepScheduler {
 			timeMs: 0,
 			holdMs: 0,
 			waitMs: 0,
-			voiceLock: 0,
+			voiceLock: new Set(),
 		}
 	}
 
@@ -2541,10 +2561,12 @@ export class SweepScheduler {
 			for (const [i, other] of this.hops.entries())
 				if (i !== v.hopIndex) other.waitMs += heldMs
 		hop.waitMs = 0
-		if (!v.revisit)
-			for (const h of this.hops) if (h !== hop && h.voiceLock > 0) h.voiceLock--
+		if (!v.revisit) for (const h of this.hops) h.voiceLock.delete(v.hopIndex)
 		const voiceHeld = v.voice !== "no"
-		if (voiceHeld) hop.voiceLock = this.plan.hops.length - 1
+		if (voiceHeld) {
+			hop.voiceLock = new Set(this.plan.hops.keys())
+			hop.voiceLock.delete(v.hopIndex)
+		}
 		// A long hold that used more than one coarse sweep, a decoded follow that ran to L, or
 		// budgeted holds that kept a hop waiting L (lockAfterMs), or a voice hold (Visit.voice):
 		// every hop gets a coarse visit before the next long follow, and the hop is probed, not
@@ -2711,7 +2733,8 @@ export class SweepScheduler {
 		let best: number | null = null
 		let bestScore = 0
 		for (const [i, hop] of this.hops.entries()) {
-			if (i === next || hop.lastVisit === null || hop.voiceLock > 0) continue
+			if (i === next || hop.lastVisit === null || hop.voiceLock.size > 0)
+				continue
 			const score =
 				hop.activityScore *
 				(hop.boost ? CANDIDATE_BOOST : 1) *
@@ -2761,14 +2784,55 @@ export class SweepScheduler {
 			const centre = old.hops[i]?.centreHz
 			if (centre !== undefined) visited.add(nearestHop(pending.plan, centre))
 		}
+		const oldHops = this.hops
 		this.plan = pending.plan
 		this.spec = pending.spec
 		this.hops = mapped.map(
 			(state, i) => state ?? this.freshHop(pending.plan.hops[i]),
 		)
+		this.reconcileVoiceLocks(old, oldHops)
 		this.visited = visited
 		this.lockHop = null
 		this.coarseIndex = nearestHop(pending.plan, oldCoarseCentre)
 		this.boundMemory()
+	}
+
+	/**
+	 * Carries what the voice holds still owe into the plan just swapped in. A hop of the new plan is
+	 * locked when it takes over a locked old hop's window (spansShare; several can, after a split, and
+	 * it can be one nearestHop mapped to another old hop). It owes every other new hop, except one
+	 * whose whole span a paid old hop covered: that span was heard since the hold ended. Whatever the
+	 * new plan added, or the locked hop's own window under a new centre, is owed, so one coarse sweep
+	 * of the new plan pays it all: the coarse order reaches every other hop within one cycle, and a
+	 * locked hop's visit pays its sibling's lock like any other. A locked old hop whose window the new
+	 * plan drops leaves no lock. An unchanged plan keeps its locks as they were. Cost, on a replan
+	 * only and only when a lock is outstanding: old × new span tests, then per lock new × (the few old
+	 * hops that contain a hop).
+	 */
+	private reconcileVoiceLocks(
+		old: HopPlan,
+		oldHops: readonly HopState[],
+	): void {
+		const next = this.plan.hops
+		const locks = next.map(() => new Set<number>())
+		let within: number[][] | null = null
+		for (const [l, state] of oldHops.entries()) {
+			const lockedSpan = old.hops[l]?.covered
+			if (state.voiceLock.size === 0 || lockedSpan === undefined) continue
+			within ??= next.map(hop =>
+				old.hops.flatMap((o, i) =>
+					spanHolds(o.covered, hop.covered) ? [i] : [],
+				),
+			)
+			const paid = (k: number): boolean =>
+				within?.[k]?.some(i => i !== l && !state.voiceLock.has(i)) === true
+			const owed = [...next.keys()].filter(k => !paid(k))
+			for (const [j, hop] of next.entries()) {
+				if (!spansShare(hop.covered, lockedSpan)) continue
+				for (const k of owed) if (k !== j) locks[j]?.add(k)
+			}
+		}
+		for (const [i, hop] of this.hops.entries())
+			hop.voiceLock = locks[i] ?? new Set()
 	}
 }

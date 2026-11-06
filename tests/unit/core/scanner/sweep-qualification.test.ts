@@ -87,6 +87,49 @@ const signalTrack = (w: Awaited<ReturnType<typeof sweep>>) =>
 const hopVisits = (w: Awaited<ReturnType<typeof sweep>>, hz: number) =>
 	w.visits.filter(v => v.centreHz === hz && v.endMs !== null)
 
+describe("a line at the baseband position of the track the last hop left open", () => {
+	const LINE_OFFSET_HZ = 100_437
+	/** STALE_MAX_MS (the pipeline's stale discard), 20 blocks of 50 ms, on top of an empty visit. */
+	const STALE_DISCARD_MS = 1_000
+
+	const visitAfterWatch = async (offsetHz: number) => {
+		const w = await sweep(
+			[
+				{
+					hz: SIGNAL_HOP + LINE_OFFSET_HZ,
+					kind: "carrier",
+					fromMs: 0,
+					toMs: 60_000,
+				},
+				{ hz: HOPS[2]! + offsetHz, kind: "carrier", fromMs: 0, toMs: 60_000 },
+			],
+			undefined,
+		)
+		await w.advance(12_000)
+		const [first, ...later] = hopVisits(w, HOPS[2]!)
+		return {
+			first: first!.endMs! - first!.atMs,
+			later: later.map(v => v.endMs! - v.atMs),
+		}
+	}
+
+	it("reads as stale IQ on its hop's first visit: at most 1 s more, and only once", async () => {
+		const { first, later } = await visitAfterWatch(LINE_OFFSET_HZ)
+		expect(first).toBeGreaterThan(STALE_DISCARD_MS)
+		expect(first).toBeLessThanOrEqual(
+			EMPTY_VISIT_MS + STALE_DISCARD_MS + CHUNK_MS,
+		)
+		expect(later.length).toBeGreaterThan(0)
+		for (const ms of later)
+			expect(ms).toBeLessThanOrEqual(EMPTY_VISIT_MS + CHUNK_MS)
+	}, 120_000)
+
+	it("at any other offset the first visit is an empty visit's length", async () => {
+		const { first } = await visitAfterWatch(LINE_OFFSET_HZ + 150_000)
+		expect(first).toBeLessThanOrEqual(EMPTY_VISIT_MS + CHUNK_MS)
+	}, 120_000)
+})
+
 describe.each(GATES)("a sweep over a $gate gate", ({ protocols }) => {
 	it("voice on air at arrival is qualified, then held on the same visit until its transmission ends", async () => {
 		// Long enough to outlast the 8 s watch: only the voice hold can keep the hop that long.
