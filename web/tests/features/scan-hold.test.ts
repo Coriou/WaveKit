@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import type { Discovery, ScanJob } from "@wavekit/api-types"
+import type { Discovery, Impact, ScanJob } from "@wavekit/api-types"
 
 import { ApiError } from "../../src/data/api-client.ts"
 import { decoderLabel } from "../../src/features/tuned/signal.ts"
@@ -395,10 +395,19 @@ describe("scan hold row", () => {
 	})
 
 	it("asks for consent when resuming would interrupt someone", () => {
+		const nobody = {
+			liveAudioClients: 0,
+			digitalVoiceListeners: 0,
+			runningDecoders: [],
+			pinnedDecoders: [],
+			scannerJobs: [],
+			unrestorable: [],
+		}
 		const m = holdRowModel(
 			input({
 				job: job({ state: "paused", reason: "operator" }),
-				consent: ["APRS"],
+				consent: { ...nobody, runningDecoders: ["APRS"] },
+				decoderName: id => id,
 			}),
 		)
 		expect(m).toMatchObject({ glyph: "warn", title: "Resume needs your OK" })
@@ -409,7 +418,11 @@ describe("scan hold row", () => {
 		const many = holdRowModel(
 			input({
 				job: job({ state: "paused", reason: "operator" }),
-				consent: ["APRS", "AIS", "Pager", "ADS-B"],
+				consent: {
+					...nobody,
+					runningDecoders: ["APRS", "AIS", "Pager", "ADS-B"],
+				},
+				decoderName: id => id,
 			}),
 		)
 		expect(many.actions[0]?.label).toBe("Resume and interrupt APRS, AIS +2")
@@ -454,11 +467,50 @@ describe("resume refusals", () => {
 		expect(consentNames(none, name)).toEqual([])
 	})
 
+	it("decoders of one type read with their number, each id once", () => {
+		const aprs = () => "APRS"
+		expect(
+			consentNames(
+				{
+					...none,
+					runningDecoders: ["aprs-1", "aprs-2"],
+					pinnedDecoders: ["aprs-2"],
+				},
+				aprs,
+			),
+		).toEqual(["2 APRS"])
+		expect(
+			consentNames({ ...none, runningDecoders: ["aprs-1"] }, aprs),
+		).toEqual(["APRS"])
+	})
+
+	it("a changed set of one type shows on the button, and the label still truncates", () => {
+		const label = (consent: Impact) =>
+			holdRowModel(
+				input({
+					job: job({ state: "paused", reason: "operator" }),
+					consent,
+					decoderName: id => id.split("-")[0]?.toUpperCase() ?? id,
+				}),
+			).actions[0]?.label
+		expect(label({ ...none, runningDecoders: ["aprs-1", "aprs-2"] })).toBe(
+			"Resume and interrupt 2 APRS",
+		)
+		expect(
+			label({
+				...none,
+				liveAudioClients: 1,
+				runningDecoders: ["aprs-1", "aprs-2", "ais-1", "pager-1"],
+			}),
+		).toBe("Resume and interrupt 1 listener, 2 APRS +2")
+	})
+
 	it("a listener alone is named on the confirm", () => {
 		const m = holdRowModel(
 			input({
 				job: job({ state: "paused", reason: "resume-blocked" }),
-				consent: consentNames({ ...none, liveAudioClients: 1 }, name),
+				consent: { ...none, liveAudioClients: 1 },
+				decoderName: name,
 			}),
 		)
 		expect(m.actions[0]).toMatchObject({
@@ -477,11 +529,11 @@ describe("resume refusals", () => {
 			method: "POST",
 			path: "/api/scanner/jobs/j1/resume",
 		})
-		expect(resumeRefusal(asked, name)).toEqual({
+		expect(resumeRefusal(asked)).toEqual({
 			kind: "consent",
-			names: ["1 listener"],
+			impact: { ...none, liveAudioClients: 1 },
 		})
-		expect(resumeRefusal(new Error("Stop that job"), name)).toEqual({
+		expect(resumeRefusal(new Error("Stop that job"))).toEqual({
 			kind: "error",
 			message: "Stop that job",
 		})
@@ -489,7 +541,7 @@ describe("resume refusals", () => {
 })
 
 describe("one click on Resume", () => {
-	const none = {
+	const none: Impact = {
 		liveAudioClients: 0,
 		digitalVoiceListeners: 0,
 		runningDecoders: [],
@@ -497,15 +549,17 @@ describe("one click on Resume", () => {
 		scannerJobs: [],
 		unrestorable: [],
 	}
-	const takeoverRequired = (impact: object) =>
+	const impactOf = (over: Partial<Impact>): Impact => ({ ...none, ...over })
+	const takeoverRequired = (over: Partial<Impact>) =>
 		new ApiError({
 			status: 409,
 			code: "SCANNER_TAKEOVER_REQUIRED",
 			message: "Resuming interrupts someone",
-			body: { details: { impact: { ...none, ...impact } } },
+			body: { details: { impact: impactOf(over) } },
 			method: "POST",
 			path: "/api/scanner/jobs/j1/resume",
 		})
+	const oneListener = impactOf({ liveAudioClients: 1 })
 	const busy = new ApiError({
 		status: 409,
 		code: "SCANNER_SOURCE_BUSY",
@@ -529,7 +583,7 @@ describe("one click on Resume", () => {
 		}
 	}
 	const click = (
-		approved: readonly string[] | null,
+		approved: Impact | null,
 		resume: (id: string, options: { takeover?: boolean }) => Promise<unknown>,
 		current: () => boolean = () => true,
 	) =>
@@ -537,7 +591,6 @@ describe("one click on Resume", () => {
 			jobId: "j1",
 			approved,
 			resume,
-			decoderName: id => id.toUpperCase(),
 			current,
 		})
 	const PLAIN = { id: "j1", takeover: false }
@@ -545,94 +598,182 @@ describe("one click on Resume", () => {
 
 	it("the people the button named: plain, then a takeover in the same click", async () => {
 		const f = fake(takeoverRequired({ liveAudioClients: 1 }), "ok")
-		expect(await click(["1 listener"], f.resume)).toEqual({ kind: "resumed" })
+		expect(await click(oneListener, f.resume)).toEqual({ kind: "resumed" })
 		expect(f.calls).toEqual([PLAIN, TAKEOVER])
 	})
 
 	it("a plain success never sends a takeover", async () => {
 		const f = fake("ok")
-		expect(await click(["1 listener"], f.resume)).toEqual({ kind: "resumed" })
+		expect(await click(oneListener, f.resume)).toEqual({ kind: "resumed" })
 		expect(f.calls).toEqual([PLAIN])
 	})
 
 	it("someone the button did not name: no takeover, and the confirm names them", async () => {
-		const f = fake(
-			takeoverRequired({ liveAudioClients: 1, runningDecoders: ["aprs"] }),
-		)
-		expect(await click(["1 listener"], f.resume)).toEqual({
+		const fresh = { liveAudioClients: 1, runningDecoders: ["aprs"] }
+		const f = fake(takeoverRequired(fresh))
+		expect(await click(oneListener, f.resume)).toEqual({
 			kind: "confirm",
-			names: ["1 listener", "APRS"],
+			impact: impactOf(fresh),
 		})
 		expect(f.calls).toEqual([PLAIN])
 	})
 
+	it("a newcomer of an approved decoder's type: no takeover, and the confirm carries both ids", async () => {
+		const fresh = { runningDecoders: ["aprs-1", "aprs-2"] }
+		const f = fake(takeoverRequired(fresh))
+		expect(
+			await click(impactOf({ runningDecoders: ["aprs-1"] }), f.resume),
+		).toEqual({ kind: "confirm", impact: impactOf(fresh) })
+		expect(f.calls).toEqual([PLAIN])
+	})
+
+	it("the same decoder ids go through in one click", async () => {
+		const same = { runningDecoders: ["aprs-1", "aprs-2"] }
+		const f = fake(takeoverRequired(same), "ok")
+		expect(await click(impactOf(same), f.resume)).toEqual({ kind: "resumed" })
+		expect(f.calls).toEqual([PLAIN, TAKEOVER])
+	})
+
+	it("a subset of the approved decoders goes through in one click", async () => {
+		const f = fake(takeoverRequired({ runningDecoders: ["aprs-2"] }), "ok")
+		expect(
+			await click(
+				impactOf({ runningDecoders: ["aprs-1", "aprs-2"] }),
+				f.resume,
+			),
+		).toEqual({ kind: "resumed" })
+		expect(f.calls).toEqual([PLAIN, TAKEOVER])
+	})
+
+	it("a decoder pinned since the approval is a new fact", async () => {
+		const fresh = { runningDecoders: ["aprs-1"], pinnedDecoders: ["aprs-1"] }
+		const f = fake(takeoverRequired(fresh))
+		expect(
+			await click(impactOf({ runningDecoders: ["aprs-1"] }), f.resume),
+		).toEqual({ kind: "confirm", impact: impactOf(fresh) })
+		expect(f.calls).toEqual([PLAIN])
+	})
+
+	it("another scanner job or tuner field is a new fact", async () => {
+		const scan = { scannerJobs: ["j2", "j3"] }
+		const scans = fake(takeoverRequired(scan))
+		expect(
+			await click(impactOf({ scannerJobs: ["j2"] }), scans.resume),
+		).toEqual({ kind: "confirm", impact: impactOf(scan) })
+		expect(scans.calls).toEqual([PLAIN])
+
+		const field = { unrestorable: ["gain", "agcMode"] }
+		const fields = fake(takeoverRequired(field))
+		expect(
+			await click(impactOf({ unrestorable: ["gain"] }), fields.resume),
+		).toEqual({ kind: "confirm", impact: impactOf(field) })
+		expect(fields.calls).toEqual([PLAIN])
+	})
+
+	it("fewer listeners than the button named go through in one click", async () => {
+		const f = fake(
+			takeoverRequired({ liveAudioClients: 1, digitalVoiceListeners: 1 }),
+			"ok",
+		)
+		expect(
+			await click(
+				impactOf({ liveAudioClients: 3, digitalVoiceListeners: 2 }),
+				f.resume,
+			),
+		).toEqual({ kind: "resumed" })
+		expect(f.calls).toEqual([PLAIN, TAKEOVER])
+	})
+
 	it("one more listener is someone new", async () => {
 		const f = fake(takeoverRequired({ liveAudioClients: 2 }))
-		expect(await click(["1 listener"], f.resume)).toEqual({
+		expect(await click(oneListener, f.resume)).toEqual({
 			kind: "confirm",
-			names: ["2 listeners"],
+			impact: impactOf({ liveAudioClients: 2 }),
 		})
+		expect(f.calls).toEqual([PLAIN])
+	})
+
+	it("one more digital voice listener is someone new", async () => {
+		const fresh = { digitalVoiceListeners: 2 }
+		const f = fake(takeoverRequired(fresh))
+		expect(
+			await click(impactOf({ digitalVoiceListeners: 1 }), f.resume),
+		).toEqual({ kind: "confirm", impact: impactOf(fresh) })
 		expect(f.calls).toEqual([PLAIN])
 	})
 
 	it("a confirm click checks again and refuses a further newcomer, then goes through on the next", async () => {
 		const first = fake(takeoverRequired({ runningDecoders: ["aprs"] }))
 		const asked = await click(null, first.resume)
-		expect(asked).toEqual({ kind: "confirm", names: ["APRS"] })
+		const aprs = impactOf({ runningDecoders: ["aprs"] })
+		expect(asked).toEqual({ kind: "confirm", impact: aprs })
 		expect(first.calls).toEqual([PLAIN])
 
-		const impact = { runningDecoders: ["aprs", "ais"] }
-		const second = fake(takeoverRequired(impact))
-		const again = await click(["APRS"], second.resume)
-		expect(again).toEqual({ kind: "confirm", names: ["APRS", "AIS"] })
+		const both = { runningDecoders: ["aprs", "ais"] }
+		const second = fake(takeoverRequired(both))
+		const again = await click(aprs, second.resume)
+		expect(again).toEqual({ kind: "confirm", impact: impactOf(both) })
 		expect(second.calls).toEqual([PLAIN])
 
-		const third = fake(takeoverRequired(impact), "ok")
-		expect(await click(["APRS", "AIS"], third.resume)).toEqual({
+		const third = fake(takeoverRequired(both), "ok")
+		expect(await click(impactOf(both), third.resume)).toEqual({
 			kind: "resumed",
 		})
 		expect(third.calls).toEqual([PLAIN, TAKEOVER])
 	})
 
+	it("a plain Resume agrees to nothing, whoever the refusal names", async () => {
+		const fresh = { liveAudioClients: 1 }
+		const f = fake(takeoverRequired(fresh))
+		expect(await click(null, f.resume)).toEqual({
+			kind: "confirm",
+			impact: impactOf(fresh),
+		})
+		expect(f.calls).toEqual([PLAIN])
+	})
+
 	it("a plain Resume agrees to nothing, even a refusal that names nobody", async () => {
 		const f = fake(takeoverRequired({ unrestorable: ["gain"] }))
-		expect(await click(null, f.resume)).toEqual({ kind: "confirm", names: [] })
+		expect(await click(null, f.resume)).toEqual({
+			kind: "confirm",
+			impact: impactOf({ unrestorable: ["gain"] }),
+		})
 		expect(f.calls).toEqual([PLAIN])
 	})
 
 	it("Resume anyway agrees to a refusal that names nobody, and to no more than that", async () => {
-		const asked = takeoverRequired({ unrestorable: ["gain"] })
-		const f = fake(asked, "ok")
-		expect(await click([], f.resume)).toEqual({ kind: "resumed" })
+		const gain = { unrestorable: ["gain"] }
+		const f = fake(takeoverRequired(gain), "ok")
+		expect(await click(impactOf(gain), f.resume)).toEqual({ kind: "resumed" })
 		expect(f.calls).toEqual([PLAIN, TAKEOVER])
 
 		const more = fake(takeoverRequired({ liveAudioClients: 1 }))
-		expect(await click([], more.resume)).toEqual({
+		expect(await click(impactOf(gain), more.resume)).toEqual({
 			kind: "confirm",
-			names: ["1 listener"],
+			impact: oneListener,
 		})
 		expect(more.calls).toEqual([PLAIN])
 	})
 
 	it("a button that named someone does not agree to a refusal that names nobody", async () => {
 		const f = fake(takeoverRequired({ unrestorable: ["gain"] }))
-		expect(await click(["1 listener"], f.resume)).toEqual({
+		expect(await click(oneListener, f.resume)).toEqual({
 			kind: "confirm",
-			names: [],
+			impact: impactOf({ unrestorable: ["gain"] }),
 		})
 		expect(f.calls).toEqual([PLAIN])
 	})
 
 	it("a busy refusal says the core's words, on the plain request and on the takeover", async () => {
 		const plain = fake(busy)
-		expect(await click(["1 listener"], plain.resume)).toEqual({
+		expect(await click(oneListener, plain.resume)).toEqual({
 			kind: "error",
 			message: "Lease held by scanner job j2",
 		})
 		expect(plain.calls).toEqual([PLAIN])
 
 		const late = fake(takeoverRequired({ liveAudioClients: 1 }), busy)
-		expect(await click(["1 listener"], late.resume)).toEqual({
+		expect(await click(oneListener, late.resume)).toEqual({
 			kind: "error",
 			message: "Lease held by scanner job j2",
 		})
@@ -643,7 +784,7 @@ describe("one click on Resume", () => {
 		const requests = latestRequest()
 		const current = requests.begin()
 		const f = fake(takeoverRequired({ liveAudioClients: 1 }))
-		const pending = click(["1 listener"], f.resume, current)
+		const pending = click(oneListener, f.resume, current)
 		requests.cancel()
 		expect(await pending).toEqual({ kind: "superseded" })
 		expect(f.calls).toEqual([PLAIN])
@@ -660,22 +801,25 @@ describe("one click on Resume", () => {
 		expect(old()).toBe(false)
 	})
 
-	it("the approved list is the confirm's names, else a blocked job's, else nothing", () => {
-		const name = (id: string) => id.toUpperCase()
-		const impact = { ...none, runningDecoders: ["aprs"] }
+	it("what is approved is the confirm's impact, else a blocked job's, else nothing", () => {
+		const impact = impactOf({ runningDecoders: ["aprs"] })
+		const confirm = impactOf({ runningDecoders: ["ais"] })
+		const gain = impactOf({ unrestorable: ["gain"] })
 		const blocked = { reason: "resume-blocked", impact } as const
-		expect(resumeApproved(blocked, null, name)).toEqual(["APRS"])
-		expect(resumeApproved(blocked, ["AIS"], name)).toEqual(["AIS"])
-		expect(resumeApproved(blocked, [], name)).toEqual([])
+		expect(resumeApproved(blocked, null)).toEqual(impact)
+		expect(resumeApproved(blocked, confirm)).toEqual(confirm)
+		expect(resumeApproved(blocked, gain)).toEqual(gain)
+		// a blocked job that names nobody stays a plain Resume, even with tuner fields it cannot restore
 		expect(
-			resumeApproved({ reason: "resume-blocked", impact: none }, null, name),
+			resumeApproved({ reason: "resume-blocked", impact: none }, null),
 		).toBeNull()
 		expect(
-			resumeApproved({ reason: "resume-blocked", impact: null }, null, name),
+			resumeApproved({ reason: "resume-blocked", impact: gain }, null),
 		).toBeNull()
 		expect(
-			resumeApproved({ reason: "operator", impact }, null, name),
+			resumeApproved({ reason: "resume-blocked", impact: null }, null),
 		).toBeNull()
+		expect(resumeApproved({ reason: "operator", impact }, null)).toBeNull()
 	})
 
 	it("decoderNamer labels a known decoder by type and falls back to the id", () => {

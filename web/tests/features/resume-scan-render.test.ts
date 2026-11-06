@@ -80,6 +80,17 @@ describe("Resume in the plan and drawer footers", () => {
 			impact: { ...impact, liveAudioClients: 0, unrestorable: ["gain"] },
 		})
 		expect(nobody).toContain(">Resume</button>")
+		const two = render({
+			id: "j1",
+			state: "paused",
+			reason: "resume-blocked",
+			impact: {
+				...impact,
+				liveAudioClients: 0,
+				runningDecoders: ["aprs-1", "aprs-2"],
+			},
+		})
+		expect(two).toContain("Resume and interrupt aprs-1, aprs-2</button>")
 	})
 
 	it("is not offered where the core would only refuse, or on a scan that is not paused", () => {

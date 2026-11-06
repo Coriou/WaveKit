@@ -102,8 +102,8 @@ export interface HoldRowInput {
 	held: Discovery | null
 	/** The held frequency is already a saved frequency. */
 	saved: boolean
-	/** Resume was refused for lack of consent: the names of what it would pause. */
-	consent: readonly string[] | null
+	/** Resume was refused for lack of consent: what it would interrupt. */
+	consent: Impact | null
 	/** How the row names a decoder id (decoderNamer). */
 	decoderName: (id: string) => string
 	/** Read-only access: the row only reports. */
@@ -165,7 +165,10 @@ const STOP: HoldAction = {
 	icon: "stop",
 }
 
-/** Who a takeover interrupts, for its button: listeners, decoders, other scans. Empty: only untouchable tuner fields. */
+/**
+ * Who a takeover interrupts, for its button: listeners, decoders, other scans. Decoders of one type read "2 APRS", so a
+ * changed set shows. Empty: only untouchable tuner fields.
+ */
 export function consentNames(
 	impact: Impact,
 	decoderName: (id: string) => string,
@@ -173,6 +176,14 @@ export function consentNames(
 	const count = (n: number, one: string, many: string) =>
 		n === 0 ? [] : [n === 1 ? `1 ${one}` : `${n} ${many}`]
 	const scans = impact.scannerJobs.length
+	const decoders = new Map<string, number>()
+	for (const id of new Set([
+		...impact.runningDecoders,
+		...impact.pinnedDecoders,
+	])) {
+		const label = decoderName(id)
+		decoders.set(label, (decoders.get(label) ?? 0) + 1)
+	}
 	return [
 		...count(impact.liveAudioClients, "listener", "listeners"),
 		...count(
@@ -180,25 +191,20 @@ export function consentNames(
 			"digital voice listener",
 			"digital voice listeners",
 		),
-		...new Set(
-			[...impact.runningDecoders, ...impact.pinnedDecoders].map(decoderName),
-		),
+		...[...decoders].map(([label, n]) => (n === 1 ? label : `${n} ${label}`)),
 		...(scans === 0 ? [] : [scans === 1 ? "another scan" : `${scans} scans`]),
 	]
 }
 
 /** What a refused resume means here: ask who may be interrupted, or say why not. */
 export type ResumeRefusal =
-	| { kind: "consent"; names: string[] }
+	| { kind: "consent"; impact: Impact }
 	| { kind: "error"; message: string }
 
-export function resumeRefusal(
-	error: unknown,
-	decoderName: (id: string) => string,
-): ResumeRefusal {
+export function resumeRefusal(error: unknown): ResumeRefusal {
 	const impact = takeoverImpact(error)
 	return impact
-		? { kind: "consent", names: consentNames(impact, decoderName) }
+		? { kind: "consent", impact }
 		: { kind: "error", message: errorMessage(error) }
 }
 
@@ -210,30 +216,32 @@ export function decoderNamer(
 }
 
 /**
- * Who a click on Resume agrees to interrupt: the names its button shows. A confirm's names, or, on a scan blocked by
- * someone new, the names the job reports. Null: a plain Resume that named nobody, so it agrees to nothing. An empty list
- * is the "Resume anyway" confirm, which agrees to what the core could not name.
+ * What a click on Resume agrees to interrupt: the impact its button came from. A confirm's impact, or, on a scan blocked
+ * by someone new, the one the job reports. Null: a plain Resume that named nobody, so it agrees to nothing. A confirm
+ * whose impact names nobody is "Resume anyway", which agrees to the tuner fields the core reported.
  */
 export function resumeApproved(
 	job: Pick<ScanJob, "reason" | "impact">,
-	consent: readonly string[] | null,
-	decoderName: (id: string) => string,
-): readonly string[] | null {
+	consent: Impact | null,
+): Impact | null {
 	if (consent) return consent
 	if (job.reason !== "resume-blocked" || !job.impact) return null
-	const names = consentNames(job.impact, decoderName)
-	return names.length > 0 ? names : null
+	return consentNames(job.impact, id => id).length > 0 ? job.impact : null
 }
 
-function approvedCovers(
-	approved: readonly string[] | null,
-	names: readonly string[],
-): boolean {
+/** Whether a fresh impact holds nothing beyond the approved one, by the same facts as the core's own consent check. */
+function approvedCovers(approved: Impact | null, fresh: Impact): boolean {
 	if (approved === null) return false
-	// Nobody to name is only agreed to by the button that said so, not by one that named someone else.
-	return names.length === 0
-		? approved.length === 0
-		: names.every(n => approved.includes(n))
+	const within = (ids: readonly string[], agreed: readonly string[]) =>
+		ids.every(id => agreed.includes(id))
+	return (
+		fresh.liveAudioClients <= approved.liveAudioClients &&
+		fresh.digitalVoiceListeners <= approved.digitalVoiceListeners &&
+		within(fresh.runningDecoders, approved.runningDecoders) &&
+		within(fresh.pinnedDecoders, approved.pinnedDecoders) &&
+		within(fresh.scannerJobs, approved.scannerJobs) &&
+		within(fresh.unrestorable, approved.unrestorable)
+	)
 }
 
 /** Tells a request's response apart from one superseded by a newer request or another job. */
@@ -259,33 +267,31 @@ export function latestRequest(): LatestRequest {
 
 export type ResumeOutcome =
 	| { kind: "resumed" }
-	/** Ask first: these names become the approved list of the next click. */
-	| { kind: "confirm"; names: string[] }
+	/** Ask first: this impact becomes what the next click approves. */
+	| { kind: "confirm"; impact: Impact }
 	| { kind: "error"; message: string }
 	/** A newer request or another job took over: show nothing. */
 	| { kind: "superseded" }
 
 export interface ResumeWithConsentInput {
 	jobId: string
-	/** The names the clicked button showed (resumeApproved). */
-	approved: readonly string[] | null
+	/** The impact behind the clicked button (resumeApproved). */
+	approved: Impact | null
 	resume: (id: string, options: { takeover?: boolean }) => Promise<unknown>
-	decoderName: (id: string) => string
 	/** From latestRequest().begin(). */
 	current: () => boolean
 }
 
 /**
  * One click on Resume. A plain resume goes first, because it may no longer need anyone's consent. A consent refusal is
- * answered with a takeover in the same click only if the core's fresh list holds nobody the button did not name;
- * otherwise the fresh names go back to the user as a confirm. The API has no takeover bound to an impact, so someone who
- * arrives in the tiny window between the two requests is still interrupted unnamed.
+ * answered with a takeover in the same click only if the core's fresh impact holds nothing the button's did not;
+ * otherwise the fresh impact goes back to the user as a confirm. The API has no takeover bound to an impact, so someone
+ * who arrives in the tiny window between the two requests is still interrupted unnamed.
  */
 export async function resumeWithConsent({
 	jobId,
 	approved,
 	resume,
-	decoderName,
 	current,
 }: ResumeWithConsentInput): Promise<ResumeOutcome> {
 	const attempt = async (options: {
@@ -295,21 +301,21 @@ export async function resumeWithConsent({
 			await resume(jobId, options)
 			return null
 		} catch (err) {
-			return resumeRefusal(err, decoderName)
+			return resumeRefusal(err)
 		}
 	}
 	const answer = (refusal: ResumeRefusal | null): ResumeOutcome => {
 		if (!current()) return { kind: "superseded" }
 		if (refusal === null) return { kind: "resumed" }
 		return refusal.kind === "consent"
-			? { kind: "confirm", names: refusal.names }
+			? { kind: "confirm", impact: refusal.impact }
 			: refusal
 	}
 	const plain = await attempt({})
 	if (
 		!current() ||
 		plain?.kind !== "consent" ||
-		!approvedCovers(approved, plain.names)
+		!approvedCovers(approved, plain.impact)
 	)
 		return answer(plain)
 	return answer(await attempt({ takeover: true }))
@@ -454,7 +460,10 @@ export function holdRowModel(input: HoldRowInput): HoldRowModel {
 				glyph = "warn"
 				title = "Resume needs your OK"
 				detail = ""
-				actions = [consentAction(consent), STOP]
+				actions = [
+					consentAction(consentNames(consent, input.decoderName)),
+					STOP,
+				]
 				break
 			}
 			switch (job.reason) {
@@ -519,10 +528,10 @@ export function holdRowModel(input: HoldRowInput): HoldRowModel {
 					// an informed one. It asks first if the core reports anyone it did not name.
 					title = "Scan paused"
 					detail = " · someone else is using the receiver"
-					const names = resumeApproved(job, null, input.decoderName)
+					const approved = resumeApproved(job, null)
 					actions = [
-						names
-							? consentAction(names)
+						approved
+							? consentAction(consentNames(approved, input.decoderName))
 							: {
 									id: "resume",
 									label: "Resume",

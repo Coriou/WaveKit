@@ -6,7 +6,7 @@
 import "./scan-hold.css"
 
 import { useEffect, useState, type MouseEvent } from "react"
-import type { Discovery, ScanJob } from "@wavekit/api-types"
+import type { Discovery, Impact, ScanJob } from "@wavekit/api-types"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { errorMessage } from "../../data/api-client.ts"
@@ -154,7 +154,7 @@ function HoldRow({ job }: { job: ScanJob }) {
 			heldAt !== null &&
 			s.items.some(f => f.frequencyHz === Math.round(heldAt)),
 	)
-	const [consent, setConsent] = useState<string[] | null>(null)
+	const [consent, setConsent] = useState<Impact | null>(null)
 	const [error, setError] = useState<string | null>(null)
 	const [busy, setBusy] = useState(false)
 	const [requests] = useState(latestRequest)
@@ -210,14 +210,13 @@ function HoldRow({ job }: { job: ScanJob }) {
 		setError(null)
 		void resumeWithConsent({
 			jobId: job.id,
-			approved: resumeApproved(job, consent, decoderName),
+			approved: resumeApproved(job, consent),
 			resume: (id, options) => scanner.resumeJob(id, options),
-			decoderName,
 			current,
 		}).then(outcome => {
 			if (outcome.kind === "superseded") return
 			setBusy(false)
-			if (outcome.kind === "confirm") setConsent(outcome.names)
+			if (outcome.kind === "confirm") setConsent(outcome.impact)
 			else if (outcome.kind === "error") setError(outcome.message)
 			else setConsent(null)
 		})
