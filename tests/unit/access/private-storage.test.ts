@@ -111,6 +111,112 @@ describe("private single-operator persistence", () => {
 		}
 	})
 
+	it("rotation records the credential fence durably before the state and adds nothing else", async () => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		const token = storage.useMachineCredential(value => value)
+		const rename = vi.spyOn(fs, "rename")
+		await storage.rotateMachineCredential()
+		const replaced = storage.useMachineCredential(value => value)
+		const targets = rename.mock.calls.map(([, to]) => String(to))
+		expect(targets).toEqual([
+			join(directory, "credential-fence.json"),
+			join(directory, "access-state.json"),
+		])
+		const fence = await fs.lstat(join(directory, "credential-fence.json"))
+		expect(fence.mode & 0o7777).toBe(0o600)
+		expect(fence.nlink).toBe(1)
+		const text = await fs.readFile(
+			join(directory, "credential-fence.json"),
+			"utf8",
+		)
+		expect(JSON.parse(text)).toEqual({
+			version: 1,
+			credentialBinding: storage.credentialBinding,
+		})
+		expect(text).not.toContain(token)
+		expect(text).not.toContain(replaced)
+		await storage.close()
+		expect((await fs.readdir(directory)).sort()).toEqual([
+			"access-state.json",
+			"credential-fence.json",
+			"initialized",
+		])
+	})
+
+	it("counts the fence against the directory entry limit without treating it as an owner", async () => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		await storage.rotateMachineCredential()
+		await storage.close()
+		// With this open's owner file: state, marker, fence and 60 others make 64.
+		for (let index = 0; index < 60; index++)
+			await fs.writeFile(join(directory, `.left-${index}.tmp`), "", {
+				mode: 0o600,
+			})
+		const atLimit = await open(directory, "load")
+		await atLimit.close()
+		await fs.writeFile(join(directory, ".left-over.tmp"), "", { mode: 0o600 })
+		await expect(open(directory, "load")).rejects.toMatchObject({
+			code: "ACCESS_STORAGE_OWNERSHIP_UNVERIFIED",
+		})
+	})
+
+	it("a fence without a state stays incomplete and never provisions a credential", async () => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		await storage.rotateMachineCredential()
+		await storage.close()
+		await fs.unlink(join(directory, "access-state.json"))
+		await expect(open(directory)).rejects.toMatchObject({
+			code: "ACCESS_STORAGE_INCOMPLETE",
+		})
+		await expect(
+			fs.lstat(join(directory, "access-state.json")),
+		).rejects.toMatchObject({ code: "ENOENT" })
+	})
+
+	it("only a rotation open can reach a mismatched state, and it can do nothing else with it", async () => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		const before = await fs.readFile(
+			join(directory, "access-state.json"),
+			"utf8",
+		)
+		await storage.rotateMachineCredential()
+		const snapshot = storage.startupSnapshot()
+		await storage.close()
+		await fs.writeFile(join(directory, "access-state.json"), before)
+		const code = "ACCESS_STORAGE_CREDENTIAL_MISMATCH"
+		await expect(open(directory, "load")).rejects.toMatchObject({ code })
+
+		const rotator = await PrivateAccessStorage.open({
+			directory,
+			mode: "rotate",
+			ownership,
+		})
+		owners.push(rotator)
+		expect(rotator.credentialMismatch).toBe(true)
+		expect(() => rotator.useMachineCredential(value => value)).toThrowError(
+			expect.objectContaining({ code }),
+		)
+		expect(() => rotator.machineSecretDigest()).toThrowError(
+			expect.objectContaining({ code }),
+		)
+		await expect(rotator.persist(snapshot)).rejects.toMatchObject({ code })
+		await expect(
+			rotator.rotateMachineCredential({ keepSessions: true }),
+		).rejects.toMatchObject({ code })
+		expect(
+			await fs.readFile(join(directory, "access-state.json"), "utf8"),
+		).toBe(before)
+		await rotator.rotateMachineCredential()
+		expect(rotator.credentialMismatch).toBe(false)
+		await rotator.close()
+		const reopened = await open(directory, "load")
+		await reopened.close()
+	})
+
 	it("readonly reads never provision a missing directory and sanitize invalid options", async () => {
 		const { root, directory } = await location()
 		const mkdir = vi.spyOn(fs, "mkdir")

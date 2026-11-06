@@ -422,6 +422,21 @@ and answers every bearer, cookie and audio request with 503 `ACCESS_UNAVAILABLE`
 it is restarted: it can no longer tell whether its in-memory credential is current. It
 also logs an error. `/health` stays public. Streams admitted before the loss are not cut.
 
+A write such a core had already started can still land after the rotation and put the
+old credential back on disk. It is not accepted: every rotation first records a hash of
+the new credential in `credential-fence.json` in the private directory, and a stored
+credential that does not match refuses with `ACCESS_STORAGE_CREDENTIAL_MISMATCH`. A core
+does not start, `machine-token` writes no file, and `pair` and `devices` report
+`ACCESS_CREDENTIAL_UNAVAILABLE`. A core already running keeps the credential it loaded,
+and its next session write puts that credential back on disk. Run `rotate-credential`
+again to recover, then export the token again. `--keep-sessions` is refused in this state and
+changes nothing, because the stored browser sessions may be ones a rotation removed, so
+every browser pairs again. A rotation that failed between the two writes, or restoring
+only `access-state.json` from a backup, or rotating with a core older than this check,
+gives the same refusal and the same recovery. A directory that has never rotated has no
+fence and needs no migration. A fence file that is not a private regular file refuses with `ACCESS_STORAGE_UNSAFE`,
+which rotation cannot repair: restore its `0600` mode or replace it, then rotate.
+
 ### Browser pairing for a web origin
 
 A web app served on the same scheme and hostname as `access.publicOrigins.api`, on

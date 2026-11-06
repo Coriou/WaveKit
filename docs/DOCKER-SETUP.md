@@ -781,6 +781,13 @@ An agent sees connection failures from the stop to the start. After the start
 the old token gets 401 `AUTH_REQUIRED`. See
 [Automation and agents](API.md#automation-and-agents).
 
+If the core refuses to start with `ACCESS_STORAGE_CREDENTIAL_MISMATCH`, the stored
+credential is not the one the last rotation recorded: a rotation was interrupted,
+or a stalled core's last write landed after it. The old token stays refused. Run
+the first rotation command above again, then export the token and start the core.
+`--keep-sessions` is refused in this state and changes nothing, so every browser
+pairs again. See [Protected runtime](API.md#protected-runtime-opt-in).
+
 #### Exposure audit
 
 Exposure audit checklist for this profile. The static items are visible in

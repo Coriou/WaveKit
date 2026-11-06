@@ -94,6 +94,10 @@ node dist/access-command.js machine-token --replace \
   retry finds it.
 - **If rotation fails after it started writing,** the message says the credential may have been
   replaced. Rotate again and export again.
+- **`ACCESS_STORAGE_CREDENTIAL_MISMATCH`.** The stored credential is not the one the last rotation
+  recorded, so it may be a revoked one. The core does not start and `machine-token` writes nothing.
+  Rotate again without `--keep-sessions` (it is refused here, so every browser pairs again) and
+  export again.
 - **In Docker,** the exported file belongs to you after the `chown`, so `--replace` refuses it: delete
   it and export again, as in the [exact commands](DOCKER-SETUP.md#rotate-the-machine-credential).
 

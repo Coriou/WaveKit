@@ -13,7 +13,10 @@ import {
 } from "../../../src/access/credentials.js"
 import { installAccessHooks } from "../../../src/access/fastify-adapter.js"
 import { AccessPolicy } from "../../../src/access/policy.js"
-import { PrivateAccessStorage } from "../../../src/access/private-storage.js"
+import {
+	ACCESS_CREDENTIAL_MISMATCH,
+	PrivateAccessStorage,
+} from "../../../src/access/private-storage.js"
 import { openAccessRuntime } from "../../../src/access/runtime-context.js"
 import { SessionStore } from "../../../src/access/sessions.js"
 import { setupLocalAccess } from "../../../src/access/setup.js"
@@ -150,6 +153,51 @@ function rotate(extra: string[] = []) {
 		directory,
 		...extra,
 	])
+}
+
+const statePath = () => join(directory, "access-state.json")
+const fencePath = () => join(directory, "credential-fence.json")
+
+async function storedToken(): Promise<string> {
+	const state = JSON.parse(await fs.readFile(statePath(), "utf8")) as {
+		machineToken: string
+	}
+	return state.machineToken
+}
+
+/** Fails like a process that died between the fence and the state write. */
+function failNextStateRename() {
+	const real = fs.rename.bind(fs)
+	let armed = true
+	return vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+		if (armed && String(to) === statePath()) {
+			armed = false
+			throw new WaveKitError("injected", "INJECTED")
+		}
+		await real(from, to)
+	})
+}
+
+/** A startup, an export and a --keep-sessions rotation all refuse with the code. */
+async function expectRefusedUntilRotated(revoked: string) {
+	await expect(startCore()).rejects.toMatchObject({
+		code: ACCESS_CREDENTIAL_MISMATCH,
+	})
+	await expect(
+		PrivateAccessStorage.readMachineCredential({ directory }, t => t),
+	).rejects.toMatchObject({ code: ACCESS_CREDENTIAL_MISMATCH })
+	const exported = await exportToken(["--replace"])
+	expect(exported.exitCode).toBe(1)
+	expect(exported.lines.join("\n")).toContain(ACCESS_CREDENTIAL_MISMATCH)
+	expect(exported.lines.join("\n")).toContain("rotate-credential")
+	expect(exported.lines.join("\n")).not.toContain(revoked)
+	const before = await fs.readFile(statePath(), "utf8")
+	const kept = await rotate(["--keep-sessions"])
+	expect(kept.exitCode).toBe(1)
+	expect(kept.lines.join("\n")).toContain(ACCESS_CREDENTIAL_MISMATCH)
+	expect(kept.lines.join("\n")).toContain("did not change")
+	expect(kept.lines.join("\n")).toContain("without --keep-sessions")
+	expect(await fs.readFile(statePath(), "utf8")).toBe(before)
 }
 
 /** What a client does: read the file once and trim the newline. */
@@ -298,6 +346,239 @@ describe("machine credential lifecycle", () => {
 		expect(await restarted.bearer(await tokenFile())).toBe(200)
 	})
 
+	it("never restores a revoked credential when a paused owner's write lands after a rotation", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+		await exportToken()
+		const stale = await startCore()
+		const minted = await tokenFile()
+		const browser = await stale.pair(minted)
+		const issued = await stale.app.inject({
+			method: "POST",
+			url: "/api/access/pairing-codes",
+			headers: { host, authorization: `Bearer ${minted}` },
+		})
+
+		// The owner passes its heartbeat check, then stops just before its rename.
+		const real = fs.rename.bind(fs)
+		let reached!: () => void
+		let release!: () => void
+		const paused = new Promise<void>(resolve => {
+			reached = resolve
+		})
+		const resume = new Promise<void>(resolve => {
+			release = resolve
+		})
+		let armed = true
+		vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+			if (armed && String(to) === statePath()) {
+				armed = false
+				reached()
+				await resume
+			}
+			await real(from, to)
+		})
+		const pendingWrite = stale.app.inject({
+			method: "POST",
+			url: "/api/access/pair",
+			headers: { host, origin },
+			payload: { code: issued.json<{ code: string }>().code },
+		})
+		await paused
+
+		// Its lock expires; another process reclaims it and rotates successfully.
+		const lock = (await fs.readdir(directory)).find(entry =>
+			entry.startsWith("owner-"),
+		)
+		if (!lock) throw new Error("Expected the core's owner file")
+		const old = new Date(Date.now() - 120_000)
+		await fs.utimes(join(directory, lock), old, old)
+		let clock = 0
+		const rotator = await PrivateAccessStorage.open({
+			directory,
+			mode: "load",
+			ownership,
+			lockWait: {
+				now: () => clock,
+				sleep: async ms => {
+					clock += ms
+				},
+			},
+		})
+		await rotator.rotateMachineCredential()
+		const replacement = rotator.useMachineCredential(t => t)
+		await rotator.close()
+
+		// The old owner resumes with ownership already lost: the rename still lands.
+		vi.advanceTimersByTime(10_000)
+		for (let attempt = 0; attempt < 200; attempt++) {
+			if ((await stale.bearer(minted)) === 503) break
+			await new Promise(resolve => setTimeout(resolve, 5))
+		}
+		expect(await stale.bearer(minted)).toBe(503)
+		release()
+		await pendingWrite
+		expect(await storedToken()).toBe(minted)
+		await stale.close()
+		vi.useRealTimers()
+
+		// A restart refuses rather than admit the revoked token.
+		await expectRefusedUntilRotated(minted)
+
+		// Rotating again recovers; the browser the stale write carried stays out.
+		const recovered = await rotate()
+		expect(recovered.exitCode).toBe(0)
+		expect(recovered.lines.join("\n")).toContain("sessions were removed")
+		expect((await exportToken(["--replace"])).exitCode).toBe(0)
+		const fresh = await tokenFile()
+		const core = await startCore()
+		expect(await core.bearer(fresh)).toBe(200)
+		expect(await core.bearer(minted)).toBe(401)
+		expect(await core.bearer(replacement)).toBe(401)
+		expect(await core.cookie(browser)).toBe(401)
+	})
+
+	it("fails closed after a crash between the fence and the state write, then recovers by rotating", async () => {
+		await exportToken()
+		const minted = await tokenFile()
+		const spy = failNextStateRename()
+		const crashed = await rotate()
+		spy.mockRestore()
+		expect(crashed.exitCode).toBe(1)
+		expect(crashed.lines.join("\n")).toContain("may have been replaced")
+		expect(await storedToken()).toBe(minted)
+		await expectRefusedUntilRotated(minted)
+
+		expect((await rotate()).exitCode).toBe(0)
+		expect((await exportToken(["--replace"])).exitCode).toBe(0)
+		const fresh = await tokenFile()
+		expect(fresh).not.toBe(minted)
+		const core = await startCore()
+		expect(await core.bearer(fresh)).toBe(200)
+		expect(await core.bearer(minted)).toBe(401)
+	})
+
+	it("loads a directory that never rotated, without creating a fence", async () => {
+		await exportToken()
+		const minted = await tokenFile()
+		const core = await startCore()
+		const browser = await core.pair(minted)
+		await core.close()
+		const restarted = await startCore()
+		expect(await restarted.bearer(minted)).toBe(200)
+		expect(await restarted.cookie(browser)).toBe(200)
+		await expect(fs.lstat(fencePath())).rejects.toMatchObject({
+			code: "ENOENT",
+		})
+	})
+
+	it.each([
+		["not JSON", "not json"],
+		["empty", ""],
+		["a missing binding", JSON.stringify({ version: 1 })],
+		[
+			"another version",
+			JSON.stringify({ version: 2, credentialBinding: "a".repeat(64) }),
+		],
+		[
+			"an extra field",
+			JSON.stringify({
+				version: 1,
+				credentialBinding: "a".repeat(64),
+				token: "x",
+			}),
+		],
+		[
+			"a binding that is not a hash",
+			JSON.stringify({ version: 1, credentialBinding: "A".repeat(64) }),
+		],
+	])(
+		"refuses a fence holding %s until rotation replaces it",
+		async (_, text) => {
+			await exportToken()
+			const minted = await tokenFile()
+			await fs.writeFile(fencePath(), text, { mode: 0o600 })
+			await expectRefusedUntilRotated(minted)
+			expect((await rotate()).exitCode).toBe(0)
+			expect((await exportToken(["--replace"])).exitCode).toBe(0)
+			const core = await startCore()
+			expect(await core.bearer(await tokenFile())).toBe(200)
+			expect(await core.bearer(minted)).toBe(401)
+		},
+	)
+
+	it("refuses a fence that is not a private regular file, even for rotation", async () => {
+		await exportToken()
+		await fs.writeFile(fencePath(), "{}", { mode: 0o644 })
+		await fs.chmod(fencePath(), 0o644)
+		await expect(startCore()).rejects.toMatchObject({
+			code: "ACCESS_STORAGE_UNSAFE",
+		})
+		const refused = await rotate()
+		expect(refused.exitCode).toBe(1)
+		expect(refused.lines.join("\n")).toContain("ACCESS_STORAGE_UNSAFE")
+		expect(refused.lines.join("\n")).toContain("did not change")
+	})
+
+	it("keeps loading after ordinary writes by the owner that rotated", async () => {
+		await exportToken()
+		expect((await rotate()).exitCode).toBe(0)
+		expect((await fs.lstat(fencePath())).mode & 0o7777).toBe(0o600)
+		expect((await exportToken(["--replace"])).exitCode).toBe(0)
+		const token = await tokenFile()
+		const core = await startCore()
+		const browser = await core.pair(token)
+		await core.close()
+		const restarted = await startCore()
+		expect(await restarted.bearer(token)).toBe(200)
+		expect(await restarted.cookie(browser)).toBe(200)
+	})
+
+	it("a running owner keeps its own credential when a stale write lands, and its next write repairs the disk", async () => {
+		await exportToken()
+		const minted = await tokenFile()
+		const staleState = await fs.readFile(statePath(), "utf8")
+		expect((await rotate()).exitCode).toBe(0)
+		const current = await PrivateAccessStorage.readMachineCredential(
+			{ directory },
+			t => t,
+		)
+		const core = await startCore()
+		await fs.writeFile(statePath(), staleState)
+
+		expect(await core.bearer(current)).toBe(200)
+		expect(await core.bearer(minted)).toBe(401)
+		const exported = await exportToken(["--replace"])
+		expect(exported.lines.join("\n")).toContain(ACCESS_CREDENTIAL_MISMATCH)
+
+		await core.pair(current)
+		expect(await storedToken()).toBe(current)
+		expect((await exportToken(["--replace"])).exitCode).toBe(0)
+		expect(await tokenFile()).toBe(current)
+	})
+
+	it("tells setup to rotate rather than provision over a mismatch", async () => {
+		await exportToken()
+		const minted = await tokenFile()
+		const spy = failNextStateRename()
+		await rotate()
+		spy.mockRestore()
+		const result = await runAccessCommand([
+			"setup",
+			"--private-directory",
+			directory,
+			"--ownership",
+			ownership,
+			"--api-origin",
+			origin,
+			"--allow-origin",
+			origin,
+		])
+		expect(result.exitCode).toBe(1)
+		expect(result.lines.join("\n")).toContain(ACCESS_CREDENTIAL_MISMATCH)
+		expect(result.lines.join("\n")).toContain("rotate-credential")
+		expect(await storedToken()).toBe(minted)
+	})
+
 	it("does not claim nothing changed when rotation fails after the new state landed", async () => {
 		await exportToken()
 		const minted = await tokenFile()
@@ -307,13 +588,14 @@ describe("machine credential lifecycle", () => {
 		}
 		await probe.close()
 		const realSync = handlePrototype.sync
+		let directorySyncs = 0
 		const spy = vi
 			.spyOn(handlePrototype, "sync")
 			.mockImplementation(async function (this: {
 				stat(): Promise<{ isDirectory(): boolean }>
 			}) {
-				// The directory fsync runs only after the rename published the state.
-				if ((await this.stat()).isDirectory())
+				// Directory fsyncs follow each rename: the fence's, then the state's.
+				if ((await this.stat()).isDirectory() && ++directorySyncs === 2)
 					throw new WaveKitError("injected", "INJECTED")
 				return realSync.call(this)
 			})

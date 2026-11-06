@@ -1,7 +1,10 @@
 import { isAbsolute } from "node:path"
 import { z } from "zod"
 import { WaveKitError } from "../utils/errors.js"
-import { PrivateAccessStorage } from "./private-storage.js"
+import {
+	ACCESS_CREDENTIAL_MISMATCH,
+	PrivateAccessStorage,
+} from "./private-storage.js"
 
 const optionsSchema = z
 	.object({
@@ -25,6 +28,10 @@ export type MachineRotationResult =
  * owner holds the private directory. By default the same durable write removes
  * remembered browser sessions. `keepSessions` rebinds them under the new
  * binding. Nothing secret is returned.
+ *
+ * This is also the only recovery from a state that fails the credential fence.
+ * That state's sessions cannot be trusted, so `keepSessions` is refused for it
+ * and nothing changes; rotating without it recovers.
  */
 export async function rotateLocalMachineCredential(options: {
 	directory: string
@@ -42,9 +49,15 @@ export async function rotateLocalMachineCredential(options: {
 	try {
 		storage = await PrivateAccessStorage.open({
 			directory: parsed.data.directory,
-			mode: "load",
+			mode: "rotate",
 			ownership: "single-host-pid-namespace",
 		})
+		if (parsed.data.keepSessions === true && storage.credentialMismatch)
+			return {
+				kind: "unavailable",
+				code: ACCESS_CREDENTIAL_MISMATCH,
+				changed: "no",
+			}
 		writing = true
 		await storage.rotateMachineCredential({
 			keepSessions: parsed.data.keepSessions === true,
