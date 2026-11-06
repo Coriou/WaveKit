@@ -232,7 +232,8 @@ decimate-by-2 stage (11 taps at 2.4 Msps) 11 ns, the next two 5.4 and 2.6 ns,
 the 16/25 stage (973 taps at 75 kHz) under 1 ns. The cu8 input conversion,
 shared by all channels, took 3 ns per sample.
 
-A SIMD FIR does not pay here. The long filter is already cheap. The short
+A SIMD FIR does not pay much for this narrow channel (it pays for a wide one; see
+[Wide channels](#wide-channels-2026-11-06)). The long filter is already cheap. The short
 half-band stages are dominated by per-output overhead rather than multiplies,
 and the NCO is a serial phasor recursion that cannot be split without changing
 its bits. The channels themselves are independent, so the channelizer now runs
@@ -405,9 +406,100 @@ at about 120 to 480/s in both builds.
 never reads, so every queue overflows.
 
 CPU no longer depends on the chunk size. 64 KiB chunks are within noise, as expected: they were
-already whole blocks. The 4 × 512 kHz rows show what is left: a wide channel is about 0.25 core of
+already whole blocks. The 4 × 512 kHz rows show what was left: a wide channel was about 0.25 core of
 DSP user time at 1.024 Msps here (300 kHz wide, 5 kHz transition), so channel width, not wake-ups,
-sets the floor for such a layout.
+set the floor for such a layout. [Wide channels](#wide-channels-2026-11-06) explains and cuts it.
+
+## Wide channels (2026-11-06)
+
+**The last stage's filter sets the cost, and it scales with output rate × stage input rate ÷
+transition.** Kaiser's length at 66 dB is 4.04 × r / tr taps per phase for a stage with input rate r
+and transition tr, and each output takes two dots of that length (I and Q), so a stage costs about
+`2 × out × 4.04 × r / tr` multiplies per second. Check: 1.024 Msps to 512 kHz at 5 kHz is 847 M (829
+taps, 849 M); 64 kHz to 48 kHz at 2.5 kHz is 10 M. A decoder's 5 % rule, tr = out / 40, makes that
+323 × r: a narrow channel reaches its last stage at about 64 kHz, a wide one at 1 MHz or more. Chunk
+size and wake-ups do not enter it.
+
+**The 5 kHz transition was the bench's, not production's.** Decoders derive the request from their
+output rate. The wide requests come from dumpvdl2, `rtl_433` and AIS-catcher, one channel per decoder
+instance, and none asks for 5 kHz: dumpvdl2 at 1.024 Msps asks for 512 kHz with a 12.8 kHz transition
+(325 taps, not 829). LoRa and readsb do not use the channelizer. `rtl_433`'s default 1 MHz request
+has no plan from 1.024 Msps: one 125/128 stage needs about 20 700 taps, over the 16 384 budget, and no
+intermediate rate lies between 1.1 MHz and the input.
+
+**The FIR now runs I and Q and two consecutive outputs side by side, on AVX** (`dots_avx` in
+`native/wavekit-chan/src/stages.rs`). One accumulator is limited by its add's latency, about 4 cycles
+per 8 taps, whatever the vector width; each lane's sum must stay in order to keep its bits, but
+separate outputs do not depend on one another. Per tap, on one 829-tap dot pattern (best of 9, load
+average about 8): 0.165 ns for the previous `dot`, 0.118 for one AVX accumulator, 0.077 for I and Q
+together, 0.047 with two outputs. Two outputs need at least 128 taps per phase: at 53 taps they cost
+more than one, at 185 less.
+
+The output is bit-identical. Same 8 lanes, same order, IEEE add and multiply, and no fused
+multiply-add, which would round once where `dot` rounds twice. The kernel is picked once per block
+from the CPU, so a host's CPU changes the cost and never the output. Tests: the kernels against `dot`
+on random lengths up to 69 with far-apart magnitudes, a pair of values that separates fused from unfused
+rounding (substituting FMA fails three tests), stages against the reference loop on both sides of 128
+taps, and the pinned output hashes in `channel.rs` and `dsp_pool_output_and_events_match_the_serial_loop`
+unchanged. Without AVX, and on arm64, stages run the previous `dot`; arm64 has not been measured.
+
+`chan_bench` per request (`-- FS OUT BW TR [SECONDS]`), one thread, 3 s of noise, previous and this
+build alternated 3 times. The output hash matched in every run. Share of a core at the capture rate:
+the fastest block, which preemption does not inflate, and the median of the mean. One-minute load
+average 26 to 21.
+
+| Decoder request                  | Capture, Msps | Out, bandwidth, transition (Hz) | Per-phase taps, longest stage | M multiplies/s | Before: fastest, mean | After: fastest, mean |
+| -------------------------------- | ------------- | ------------------------------- | ----------------------------- | -------------- | --------------------- | -------------------- |
+| The earlier bench, not a decoder | 1.024         | 512 000, 300 000, 5 000         | 829                           | 849            | 0.148, 0.194          | 0.047, 0.062         |
+| dumpvdl2                         | 1.024         | 512 000, 300 000, 12 800        | 325                           | 333            | 0.065, 0.088          | 0.025, 0.034         |
+| AIS-catcher                      | 1.024         | 384 000, 364 800, 9 600         | 217                           | 201            | 0.049, 0.063          | 0.021, 0.027         |
+| direwolf                         | 1.024         | 48 000, 47 424, 288             | 899                           | 111            | 0.034, 0.043          | 0.020, 0.026         |
+| multimon-ng                      | 1.024         | 48 000, 12 000, 2 500           | 105                           | 32             | 0.021, 0.026          | 0.016, 0.021         |
+| dsd-fme                          | 1.024         | 48 000, 12 500, 6 250           | 43                            | 26             | 0.020, 0.026          | 0.016, 0.021         |
+| acarsdec                         | 1.024         | 24 000, 12 000, 6 000           | 23                            | 24             | 0.020, 0.026          | 0.016, 0.021         |
+| rtl_433                          | 2.4           | 1 000 000, 950 000, 25 000      | 195                           | 498            | 0.118, 0.147          | 0.056, 0.074         |
+| dumpvdl2                         | 2.4           | 1 050 000, 300 000, 26 250      | 185                           | 424            | 0.102, 0.132          | 0.053, 0.069         |
+| AIS-catcher                      | 2.4           | 384 000, 364 800, 9 600         | 253                           | 258            | 0.084, 0.101          | 0.046, 0.060         |
+| direwolf                         | 2.4           | 48 000, 47 424, 288             | 843                           | 138            | 0.060, 0.074          | 0.041, 0.049         |
+| multimon-ng                      | 2.4           | 48 000, 12 000, 2 500           | 122                           | 63             | 0.047, 0.056          | 0.037, 0.049         |
+| dsd-fme                          | 2.4           | 48 000, 12 500, 6 250           | 49                            | 56             | 0.046, 0.054          | 0.037, 0.044         |
+| acarsdec                         | 2.4           | 24 000, 12 000, 6 000           | 26                            | 53             | 0.043, 0.055          | 0.037, 0.045         |
+
+Narrow channels gain about 20 %: what is left there is 4.9 ns per input sample in the NCO, a serial
+recursion, and the first short half-bands, per channel, because each channel mixes first. Summing the
+means, the 7 requests at 2.4 Msps go from 0.62 to 0.39 core, and the 6 at 1.024 Msps from 0.27 to 0.15.
+
+`paced_load.py`, the whole process with a consumer, 15 s per run, previous and this build alternated:
+
+| Channels at 1.024 Msps, chunk 65 536 B | Previous, user + sys ms per s of IQ | This build, user + sys | Load average (1 min) |
+| -------------------------------------- | ----------------------------------- | ---------------------- | -------------------- |
+| 4 × 512 kHz, 300 kHz, 5 kHz, two pairs | 938 + 19, 976 + 22                  | 351 + 17, 360 + 18     | 15 to 10             |
+| 1 × 512 kHz, 300 kHz, 12.8 kHz         | 89 + 5                              | 37 + 5                 | 12 to 9              |
+
+Tried and not adopted, for the 1.024 Msps to 512 kHz channel, fastest block in ns per input sample
+(this build direct: 41.4 at 5 kHz, 19.5 at 12.8 kHz; load average about 7):
+
+- **Decimate by 2 first, then a same-rate shaping filter.** 21 + 415 taps instead of 829: 31.4 at
+  5 kHz, and 19.45 at 12.8 kHz, where production is, so nothing there. It changes the output and the
+  planner.
+- **Symmetric taps.** With one accumulator on AVX: 214 ns per dot against 98 for plain AVX with one
+  accumulator, because of the reversed loads. It also changes the output. Several accumulators were
+  not tried.
+- **FFT overlap-save** (rustfft, one channel, before the output copy): 3.9 to 4.3 at 5 kHz and 3.2 to
+  3.7 at 12.8 kHz, so 5 to 10 times cheaper. It only does integer decimation, and the wide stages at
+  2.4 Msps are 5/6, 7/8 and 16/25. It would also put an FFT crate in the shipped binary, change the
+  output, and hold outputs until a frame is complete, which breaks the per-block schedule (plan A12).
+  Worth reopening only if several wide channels at 1.024 Msps become common.
+- **No filter.** An output rate equal to the input already has no stage; below it, the anti-alias
+  filter is needed.
+
+**A wider request would cut dumpvdl2 further, and is not made here.** dumpvdl2 channelises for itself,
+so its front filter only has to keep images out. At 1.024 Msps a transition of 106 kHz, the most
+`bw/2 + tr <= out/2` allows, gives 41 taps. Measured response: 0.0056 dB ripple across ±150 kHz,
+−5.1 dB at 200 kHz, −100 dB at 256 kHz, and −76.9 dB or better for anything folding back onto the
+150 kHz edge. Cost: 0.025 to 0.011 core at 1.024 Msps, 0.053 to 0.041 at 2.4 Msps (375 kHz transition),
+fastest block. Signals between 150 and 256 kHz would reach dumpvdl2's input at unity gain; no
+target sits there, and no real signal has been tried through it.
 
 ## Spectrum frame path (2026-11-01)
 
