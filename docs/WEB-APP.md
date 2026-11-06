@@ -202,6 +202,11 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
 **Open on CTCSS**. The `autoSquelch` field of
 [`GET /api/live-audio/status`](API.md#get-apilive-audiostatus) reports the gate.
 
+**Connecting…** means Listen is starting, playing audio stopped arriving for 2 s, or the stream ended and is being reattached. A
+shorter gap on an open stream keeps **Listening** or **Squelched**, and **Audio options** counts it
+next to the latency, for example `12 audio gaps`. Gaps usually mean the core is too busy to send
+audio on time.
+
 ## Drawers
 
 ![Activity: a searchable log of decoded events, with category filters along the top](assets/screenshots/activity.png)

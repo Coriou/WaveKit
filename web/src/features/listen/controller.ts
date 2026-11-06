@@ -26,6 +26,8 @@ export interface ListenState {
 	recording: { seconds: number; startedAt: number } | null
 	/** Output latency while playing (jitter buffer plus the device), ms; null otherwise. */
 	latencyMs: number | null
+	/** Times the audio ran dry since this Listen started (the stream arrived late; it stayed connected). */
+	audioGaps: number
 }
 
 /** The part of PcmPlayer the controller drives (a fake in tests). */
@@ -55,6 +57,12 @@ export interface ListenControllerOptions {
 const VOLUME_KEY = "wavekit.web.volume"
 const REATTACH_DELAY_MS = 250
 const RETRY_MS = [1000, 2000, 5000] as const
+/**
+ * How long a dry jitter ring on an open stream stays "playing" before Listen says Connecting…. A busy core
+ * holds its 20 ms pacer for up to about 1.3 s, then the ring needs RING_TARGET_MS (200 ms) to prime again:
+ * 1 500 ms, rounded up. A real stall shows at most 2 000 + 200 ms (the ring draining) after its last byte.
+ */
+const STALL_GRACE_MS = 2000
 
 function readVolume(): number {
 	try {
@@ -81,6 +89,9 @@ export class ListenController extends Store<ListenState> {
 	private attachedKey: string | null = null
 	private timer: ReturnType<typeof setTimeout> | null = null
 	private retries = 0
+	private stallTimer: ReturnType<typeof setTimeout> | null = null
+	/** The ring's underrun count when this Listen first heard from it (the count outlives a Listen). */
+	private underrunBase: number | null = null
 	private readonly liveAudio: LiveAudioStore
 	private readonly player: ListenPlayer | null
 	private unbind: (() => void) | null = null
@@ -101,6 +112,7 @@ export class ListenController extends Store<ListenState> {
 			hear: readHearChoice(),
 			recording: null,
 			latencyMs: null,
+			audioGaps: 0,
 		})
 		this.liveAudio = liveAudio
 		const events = {
@@ -139,9 +151,10 @@ export class ListenController extends Store<ListenState> {
 		const offs = [
 			on("playing", () => {
 				this.retries = 0
+				this.clearStall()
 				this.setPhase("playing")
 			}),
-			on("waiting", () => this.get().wanted && this.setPhase("connecting")),
+			on("waiting", () => this.noteDry()),
 			on("error", () => this.fail("The audio stream could not be played")),
 			on("ended", () => this.fail("The audio stream ended")),
 		]
@@ -167,8 +180,15 @@ export class ListenController extends Store<ListenState> {
 
 	/** User gesture: start the core's live audio if needed and play here. */
 	async start(): Promise<void> {
-		this.set({ ...this.get(), wanted: true, phase: "connecting", error: null })
+		this.set({
+			...this.get(),
+			wanted: true,
+			phase: "connecting",
+			error: null,
+			audioGaps: 0,
+		})
 		this.retries = 0
+		this.underrunBase = null
 		// unlock audio inside the gesture so the browser allows sound later on
 		const status = this.liveAudio.get().status
 		try {
@@ -363,12 +383,28 @@ export class ListenController extends Store<ListenState> {
 					(stats.bufferedMs + (this.player?.outputLatencyMs?.() ?? 0)) / 10,
 				) * 10
 			: null
-		if (latency !== s.latencyMs)
-			this.update(x => ({ ...x, latencyMs: latency }))
+		this.underrunBase ??= stats.underruns
+		const audioGaps = Math.max(0, stats.underruns - this.underrunBase)
+		if (latency !== s.latencyMs || audioGaps !== s.audioGaps)
+			this.update(x => ({ ...x, latencyMs: latency, audioGaps }))
 		if (stats.playing) {
 			this.retries = 0
+			this.clearStall()
 			this.setPhase("playing")
-		} else if (s.phase === "playing") this.setPhase("connecting")
+		} else this.noteDry()
+	}
+
+	/**
+	 * The buffer ran dry on a stream that is still open. An underrun is not a reconnect: nothing was torn
+	 * down, and a core that paces late causes one a second. Connecting… is for a dry spell past the bound;
+	 * a stream that failed or ended goes through fail() at once.
+	 */
+	private noteDry(): void {
+		if (this.get().phase !== "playing" || this.stallTimer) return
+		this.stallTimer = setTimeout(() => {
+			this.stallTimer = null
+			if (this.get().phase === "playing") this.setPhase("connecting")
+		}, STALL_GRACE_MS)
 	}
 
 	private schedule(ms: number): void {
@@ -412,6 +448,7 @@ export class ListenController extends Store<ListenState> {
 	}
 
 	private detach(): void {
+		this.clearStall()
 		this.attachedKey = null
 		this.player?.stop()
 		const el = this.el
@@ -424,6 +461,7 @@ export class ListenController extends Store<ListenState> {
 	private fail(message: string): void {
 		const s = this.get()
 		if (!s.wanted || this.attachedKey === null) return
+		this.clearStall()
 		const delay = RETRY_MS[Math.min(this.retries, RETRY_MS.length - 1)] ?? 5000
 		this.retries += 1
 		this.update(x => ({
@@ -441,5 +479,10 @@ export class ListenController extends Store<ListenState> {
 	private clearTimer(): void {
 		if (this.timer) clearTimeout(this.timer)
 		this.timer = null
+	}
+
+	private clearStall(): void {
+		if (this.stallTimer) clearTimeout(this.stallTimer)
+		this.stallTimer = null
 	}
 }

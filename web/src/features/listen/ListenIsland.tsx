@@ -722,6 +722,7 @@ function RecordRow() {
 	const recording = useStore(listen, s => s.recording)
 	const wanted = useStore(listen, s => s.wanted)
 	const latency = useStore(listen, s => s.latencyMs)
+	const gaps = useStore(listen, s => s.audioGaps)
 	const hz = useSettledHz()
 	const save = (wav: Blob, startedAt: number) => {
 		const name = recordFileName(hz, startedAt)
@@ -760,6 +761,14 @@ function RecordRow() {
 					: "Record audio"}
 			</Button>
 			<span className="wkf-gap" />
+			{wanted && gaps > 0 && (
+				<span
+					className="wkf-quiet wkf-small wkf-num"
+					title="Times the audio ran dry since Listen started: the stream arrived late, usually because the core is busy."
+				>
+					{gaps} audio {gaps === 1 ? "gap" : "gaps"}
+				</span>
+			)}
 			{latency !== null && (
 				<span
 					className="wkf-quiet wkf-small wkf-num"
