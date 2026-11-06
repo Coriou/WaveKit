@@ -44,6 +44,7 @@ import type {
 import { z, ZodError, ZodIssueCode, type ZodIssue, type ZodTypeAny } from "zod"
 import { staticPlanIssues } from "./scanner-plan-issues.js"
 import {
+	rejectUnknownBodyFields,
 	validationErrorBody,
 	zodValidationBody,
 	zodValidationFields,
@@ -733,6 +734,7 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 				body: scanJobSpecSchema,
 				response: errors,
 			},
+			preValidation: rejectUnknownBodyFields(scanJobSpecSchema),
 		},
 		async (request, reply) => {
 			try {
@@ -752,6 +754,7 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 				body: scanJobSpecSchema,
 				response: errors,
 			},
+			preValidation: rejectUnknownBodyFields(scanJobSpecSchema),
 		},
 		async (request, reply) => {
 			try {

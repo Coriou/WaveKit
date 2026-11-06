@@ -14,6 +14,26 @@ API_ORIGIN="https://receiver.example:9443"   # your core's API origin
 `100000000` (100 MHz) and the source id `rtl` are examples: read your own source ids from
 `GET /api/agent/status` or `GET /api/sources`.
 
+## Discover the API
+
+The first step for a fresh agent, once it has the token from the next section. Three reads
+describe everything else, and all three take the same token as any other API read (without one, a
+protected core answers 401):
+
+```sh
+curl --fail --header "$AUTH" "$API_ORIGIN/api"           # every route, plus the two URLs below
+curl --fail --header "$AUTH" "$API_ORIGIN/docs/json"     # OpenAPI 3: parameters, bodies, bounds
+curl --fail --header "$AUTH" "$API_ORIGIN/api/enums"     # accepted values of the closed lists
+```
+
+`GET /api` answers `{ openapi, enums, routes }`; `openapi` and `enums` hold the last two paths.
+Paths in the OpenAPI document are relative to the origin you fetched it from. A page size has its
+maximum there (`GET /api/recordings`, parameter `limit`), and past the maximum the route answers a
+400 that states it ([Read a 400](#read-a-400)).
+
+`GET /api/enums` lists scanner protocols, identity kinds, confidences, job modes, job kinds and
+sensitivities, activity kinds and categories, tuner modes and recording kinds.
+
 ## Get a machine token
 
 Agents use the machine credential, never a browser session. A core has exactly one, created by
@@ -161,6 +181,32 @@ curl --fail --header "$AUTH" --header "Content-Type: application/json" \
 
 `gain` is in tenths of a dB (0 to 500; `372` is 37.2 dB), the same unit as `gain` in
 `GET /api/tuner` and `GET /api/agent/status`. `{"mode":"agc"}` returns to automatic gain.
+`tenthsDb` is a deprecated alias of `gain` that older clients still send; use `gain`.
+
+### Tuner field names
+
+Each single-setting `POST` route has its own short body field. Sending the name `GET /api/tuner`
+reports instead is a 400 that names the field the route expects:
+
+| `GET /api/tuner` field | `POST` route           | Body field |
+| ---------------------- | ---------------------- | ---------- |
+| `frequency`            | `.../frequency`        | `hz`       |
+| `sampleRate`           | `.../sample-rate`      | `hz`       |
+| `gainMode`             | `.../gain-mode`        | `mode`     |
+| `agcMode`              | `.../agc`              | `enabled`  |
+| `biasTee`              | `.../bias-tee`         | `enabled`  |
+| `directSampling`       | `.../direct-sampling`  | `mode`     |
+| `offsetTuning`         | `.../offset-tuning`    | `enabled`  |
+| `testMode`             | `.../test-mode`        | `enabled`  |
+| `ifGain`               | `.../if-gain`          | `gain`     |
+| `rtlXtal`              | `.../rtl-xtal`         | `hz`       |
+| `tunerXtal`            | `.../tuner-xtal`       | `hz`       |
+| `tunerGainIndex`       | `.../tuner-gain-index` | `index`    |
+| `controlMode`          | `.../control-mode`     | `mode`     |
+
+`gain`, `ppm` and `tunerIfGain` (`stage`, `gain`) keep their names. To use the `GET` names
+throughout, send them to `PATCH /api/tuner/:sourceId/config`, which takes those names and units
+and answers 400 for any other field.
 
 ## Check decoders
 
@@ -245,6 +291,10 @@ unit) and resend. Routes with their own error code (for example `SCANNER_PLAN_IN
 `PATCH /api/station` keeps `fields` as a list of field names (`["lat"]`) for the web settings
 form; its `message` states what each named field accepts
 ([validation errors](API.md#validation-errors)).
+
+Most routes ignore a body field they do not know, so a misspelled name reads as an absent one.
+`POST /api/scanner/plan`, `POST /api/scanner/jobs` and `PATCH /api/tuner/:sourceId/config` answer
+400 for an unknown top-level field instead, and their `fields` list the accepted names.
 
 ## Pause and resume
 

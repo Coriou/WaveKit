@@ -246,6 +246,69 @@ describe("tuner 400s name the failing field by its schema name (m5)", () => {
 		expect(messageOf(missing.body)).toMatch(/^Invalid request body at hz;/)
 	})
 
+	it("PATCH /config: a field outside the GET names is a 400 listing them, not a silent no-op", async () => {
+		const { app: a, controller } = await build()
+		for (const payload of [
+			{ tenthsDb: 300 },
+			{ hz: 100 },
+			{ gain: 300, "ECHO-key": 1 },
+		]) {
+			const res = await patch(a, payload)
+			expect(res.statusCode).toBe(400)
+			expect(res.body).not.toContain("ECHO-key")
+			const { code, fields } = JSON.parse(res.body) as {
+				code: string
+				fields: { field: string; expected: string }[]
+			}
+			expect(code).toBe("VALIDATION_ERROR")
+			expect(fields[0]?.field).toBe("body")
+			expect(fields[0]?.expected).toContain('"gain" (tenths of a dB, 0-500)')
+			expect(fields[0]?.expected).toContain('"frequency" (Hz)')
+		}
+		expect(controller.configure).not.toHaveBeenCalled()
+	})
+
+	it("PATCH /config: every GET name is accepted; an empty body and a non-object keep their answers", async () => {
+		const { app: a, controller } = await build()
+		const res = await patch(a, { gain: 300, frequency: 100_000_000 })
+		expect(res.statusCode).toBe(200)
+		expect(controller.configure).toHaveBeenCalledTimes(1)
+		expect((await patch(a, {})).statusCode).toBe(200)
+		const array = await patch(a, [])
+		expect(array.statusCode).toBe(400)
+		expect(JSON.parse(array.body)).toMatchObject({ code: "VALIDATION_ERROR" })
+	})
+
+	it.each([
+		["frequency", "frequency", 100_000_000, "hz"],
+		["sample-rate", "sampleRate", 2_400_000, "hz"],
+		["gain-mode", "gainMode", "manual", "mode"],
+		["agc", "agcMode", true, "enabled"],
+		["bias-tee", "biasTee", true, "enabled"],
+		["direct-sampling", "directSampling", "off", "mode"],
+		["offset-tuning", "offsetTuning", true, "enabled"],
+		["test-mode", "testMode", true, "enabled"],
+		["if-gain", "ifGain", 1, "gain"],
+		["rtl-xtal", "rtlXtal", 1, "hz"],
+		["tuner-xtal", "tunerXtal", 1, "hz"],
+		["tuner-gain-index", "tunerGainIndex", 1, "index"],
+		["control-mode", "controlMode", "internal", "mode"],
+	])(
+		"POST /%s with the GET name %s is a 400 naming the expected field",
+		async (route, getName, value, expected) => {
+			const { app: a } = await build()
+			const res = await post(a, `/api/tuner/rtl-1/${route}`, {
+				[getName]: value,
+			})
+			expect(res.statusCode).toBe(400)
+			const { fields } = JSON.parse(res.body) as {
+				fields: { field: string; expected: string }[]
+			}
+			expect(fields[0]?.field).toBe(expected)
+			expect(fields[0]?.expected).toMatch(/^required; /)
+		},
+	)
+
 	it("PATCH /config: a schema 400 names the field, nested ones by path", async () => {
 		const { app: a, controller } = await build()
 		const rate = await patch(a, { sampleRate: "ECHO" })

@@ -18,6 +18,7 @@ import { BandGainSettingsSchema } from "../../core/band-gain-schema.js"
 import {
 	ajvValidationFields,
 	isBodyParseError,
+	rejectUnknownBodyFields,
 	requestPart,
 	routeSchemaFor,
 	validationFieldsSchema,
@@ -43,19 +44,21 @@ import type {
 	SetTunerGainIndexRequest,
 	SetXtalRequest,
 	TunerConfigUpdate,
+	TunerDirectSampling,
+	TunerGainMode,
 } from "@wavekit/api-types"
 
 /** Every REST tuner write is an operator command (signal discovery spec § 10.3). */
 const REST: TunerWriteOptions = { origin: "rest" }
 
-const gainModeSchema = {
-	type: "string",
-	enum: [...TUNER_REST_COMMAND_POLICY[2].rule.values],
-}
-const directSamplingSchema = {
-	type: "string",
-	enum: [...TUNER_REST_COMMAND_POLICY[8].rule.values],
-}
+export const gainModes = [
+	...TUNER_REST_COMMAND_POLICY[2].rule.values,
+] as TunerGainMode[]
+export const directSamplingModes = [
+	...TUNER_REST_COMMAND_POLICY[8].rule.values,
+] as TunerDirectSampling[]
+const gainModeSchema = { type: "string", enum: gainModes }
+const directSamplingSchema = { type: "string", enum: directSamplingModes }
 const testModeSchema = { type: TUNER_REST_COMMAND_POLICY[6].rule.kind }
 const agcModeSchema = { type: TUNER_REST_COMMAND_POLICY[7].rule.kind }
 const offsetTuningSchema = { type: TUNER_REST_COMMAND_POLICY[9].rule.kind }
@@ -136,7 +139,7 @@ const errorResponseSchema = {
 	required: ["error", "code", "message"],
 } as const
 
-const tunerConfigUpdateSchema = {
+export const tunerConfigUpdateSchema = {
 	type: "object",
 	additionalProperties: false,
 	properties: {
@@ -1171,10 +1174,15 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 			schema: {
 				tags: ["tuner"],
 				summary: "Update tuner configuration",
-				description: "Apply multiple tuner settings at once",
+				description:
+					"Apply multiple tuner settings at once. Takes the field names and units of GET /api/tuner; any other field is a 400.",
 				body: tunerConfigUpdateSchema,
 				response: { 200: tunerStateSchema, 400: errorResponseSchema },
 			},
+			preValidation: rejectUnknownBodyFields(
+				tunerConfigUpdateSchema,
+				expectedFor("/api/tuner/:sourceId/config"),
+			),
 		},
 		async (request, reply) => {
 			try {

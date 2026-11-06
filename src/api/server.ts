@@ -13,6 +13,7 @@
 
 import { resolve } from "node:path"
 import type { StationIdentity } from "@wavekit/api-types"
+import { OPENAPI_UI_PATH } from "@wavekit/api-types"
 import {
 	DISCOVERY_STORE_EPOCH_HEADER,
 	DISCOVERY_STORE_REVISION_HEADER,
@@ -73,6 +74,7 @@ import type { Config } from "../config.js"
 import { accessBootstrapRoutes } from "./routes/access-bootstrap.js"
 import { sourceRoutes } from "./routes/sources.js"
 import { registerRouteIndex } from "./routes/route-index.js"
+import { enumRoutes } from "./routes/enums.js"
 import { decoderSummaryRoutes } from "./routes/decoder-summary.js"
 import { agentStatusRoutes } from "./routes/agent-status.js"
 import {
@@ -1170,14 +1172,22 @@ export class ApiServer {
 					description: "SDR stream processing framework REST API",
 					version: "1.0.0",
 				},
-				servers: [
-					{
-						url: `http://${this.config.host}:${this.config.port}`,
-						description: "Local server",
-					},
-				],
+				// No `servers`: paths are relative to the origin that served this document. The
+				// bind address is not one a client can reach (0.0.0.0, or a port behind a proxy).
+				...(this.access
+					? {
+							components: {
+								securitySchemes: {
+									machineToken: { type: "http", scheme: "bearer" },
+								},
+							},
+							security: [{ machineToken: [] }],
+						}
+					: {}),
 				tags: [
+					{ name: "system", description: "API discovery" },
 					{ name: "health", description: "Health check endpoints" },
+					{ name: "recordings", description: "Recording inventory" },
 					{ name: "sources", description: "SDR source management" },
 					{ name: "decoders", description: "Decoder management" },
 					{ name: "aircraft", description: "Aircraft tracking endpoints" },
@@ -1203,7 +1213,7 @@ export class ApiServer {
 
 		// Swagger UI for interactive documentation
 		await this.app.register(fastifySwaggerUi, {
-			routePrefix: "/docs",
+			routePrefix: OPENAPI_UI_PATH,
 			uiConfig: {
 				docExpansion: "list",
 				deepLinking: true,
@@ -1406,6 +1416,8 @@ export class ApiServer {
 	 * Routes are implemented in separate files and registered here.
 	 */
 	private async registerRoutes(): Promise<void> {
+		// Static value lists under root admission, like GET /api
+		await this.app.register(enumRoutes)
 		// PATCH mounts with the service and, while STATION_WRITE_REQUIRES_ACCESS, only with
 		// the access controller (protected mode), like the band-plan mutations.
 		if (this.station)

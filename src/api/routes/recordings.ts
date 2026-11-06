@@ -4,7 +4,12 @@
  * Bodies and logs carry fixed text: never an id, a path or a file name.
  */
 import type { Readable } from "node:stream"
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify"
+import type {
+	FastifyInstance,
+	FastifyReply,
+	FastifyRequest,
+	FastifySchema,
+} from "fastify"
 import {
 	RECORDING_INVENTORY_ID,
 	RECORDINGS_FILE_ROUTE,
@@ -12,6 +17,8 @@ import {
 	RECORDING_ERROR_STATUS,
 	RECORDING_INVENTORY_KINDS,
 	RECORDING_KEEP_ROUTE,
+	RECORDINGS_CURSOR_MAX_LENGTH,
+	RECORDINGS_PAGE_LIMIT_DEFAULT,
 	RECORDINGS_PAGE_LIMIT_MAX,
 	RECORDINGS_ROUTE,
 } from "@wavekit/api-types"
@@ -35,7 +42,10 @@ import type {
 } from "../../core/recordings/inventory.js"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import { parseInventoryQuery } from "../../core/recordings/cursor.js"
-import type { ValidationField } from "../validation-errors.js"
+import {
+	validationFieldsSchema,
+	type ValidationField,
+} from "../validation-errors.js"
 
 export interface RecordingRoutesOptions {
 	inventory: RecordingInventory
@@ -145,6 +155,38 @@ function queryFields(query: unknown): ValidationField[] {
 	return fields.length > 0
 		? fields
 		: [{ field: "query", expected: "valid limit, cursor, kind and decoderId" }]
+}
+
+const LIST_SCHEMA: FastifySchema = {
+	summary: "List recordings",
+	tags: ["recordings"],
+	querystring: {
+		type: "object",
+		properties: {
+			limit: {
+				type: "integer",
+				minimum: 1,
+				maximum: RECORDINGS_PAGE_LIMIT_MAX,
+				default: RECORDINGS_PAGE_LIMIT_DEFAULT,
+			},
+			cursor: { type: "string", maxLength: RECORDINGS_CURSOR_MAX_LENGTH },
+			kind: { type: "string", enum: [...RECORDING_INVENTORY_KINDS] },
+			decoderId: { type: "string", minLength: 1, maxLength: 128 },
+		},
+		additionalProperties: false,
+	},
+	response: {
+		400: {
+			type: "object",
+			properties: {
+				error: { type: "string" },
+				code: { type: "string" },
+				message: { type: "string" },
+				fields: validationFieldsSchema,
+			},
+			required: ["error", "code", "message"],
+		},
+	},
 }
 
 function sendError(
@@ -265,24 +307,36 @@ export async function recordingRoutes(
 		})
 	}
 
-	fastify.get(RECORDINGS_ROUTE, async (request, reply) => {
-		const denied = authorize(request)
-		if (denied) return sendDenial(reply, denied)
-		try {
-			const page = await inventory.list(request.query)
-			return await reply.header("Cache-Control", "no-store").send(page)
-		} catch (err) {
-			if (err instanceof RecordingInventoryError)
-				return sendError(
-					reply,
-					400,
-					"RECORDINGS_QUERY_INVALID",
-					queryFields(request.query),
+	fastify.get(
+		RECORDINGS_ROUTE,
+		{
+			schema: LIST_SCHEMA,
+			// The schema documents the query in OpenAPI. The handler authorizes first and the
+			// inventory parses strictly, so a denial still wins over a bad query.
+			validatorCompiler: () => data => ({ value: data }),
+		},
+		async (request, reply) => {
+			const denied = authorize(request)
+			if (denied) return sendDenial(reply, denied)
+			try {
+				const page = await inventory.list(request.query)
+				return await reply.header("Cache-Control", "no-store").send(page)
+			} catch (err) {
+				if (err instanceof RecordingInventoryError)
+					return sendError(
+						reply,
+						400,
+						"RECORDINGS_QUERY_INVALID",
+						queryFields(request.query),
+					)
+				request.log.warn(
+					{ err: safeErrorFields(err) },
+					"Recordings list failed",
 				)
-			request.log.warn({ err: safeErrorFields(err) }, "Recordings list failed")
-			return sendError(reply, 503, "RECORDINGS_UNAVAILABLE")
-		}
-	})
+				return sendError(reply, 503, "RECORDINGS_UNAVAILABLE")
+			}
+		},
+	)
 
 	fastify.get<{ Params: { id: string } }>(
 		RECORDINGS_FILE_ROUTE,

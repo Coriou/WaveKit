@@ -19,6 +19,8 @@ it("indexes every method, encapsulated route and schema including itself", async
 	try {
 		const response = await app.inject("/api")
 		expect(response.statusCode).toBe(200)
+		expect(response.json().openapi).toBe("/docs/json")
+		expect(response.json().enums).toBe("/api/enums")
 		expect(response.json().routes).toEqual(
 			expect.arrayContaining([
 				{

@@ -134,6 +134,19 @@ const errors = (p: PlanPreview) =>
 const PMR = { startHz: MHz(446.0), endHz: MHz(446.2) }
 
 describe("previewPlan derived defaults", () => {
+	it("absent protocols are the ranges' ones, else every protocol; the answer states which", () => {
+		const fromPlan = previewPlan({ bandplans: ["uhf-land-mobile"] }, ctx())
+		expect(fromPlan.spec.protocols.length).toBeGreaterThan(0)
+		expect(fromPlan.spec.provenance["protocols"]).toBe("bandplan")
+		const ranges = [{ startHz: MHz(30), endHz: MHz(31) }]
+		const none = previewPlan({ ranges }, ctx())
+		expect(none.spec.protocols).toEqual([])
+		expect(none.spec.provenance["protocols"]).toBe("default")
+		const empty = previewPlan({ ranges, protocols: [] }, ctx())
+		expect(empty.spec.protocols).toEqual([])
+		expect(empty.spec.provenance["protocols"]).toBe("operator")
+	})
+
 	it("fills every default for a bandplan sweep, with provenance, period, POI and estimates", () => {
 		const p = previewPlan({ bandplans: ["uhf-land-mobile"] }, ctx())
 		expect(p.spec).toMatchObject({

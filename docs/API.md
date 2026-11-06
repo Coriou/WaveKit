@@ -565,10 +565,41 @@ For the component details behind a 503, read [`GET /api/status`](#get-apistatus)
 #### GET /api
 
 Lists every registered HTTP route, including automatic HEAD routes and routes
-without schemas: `{ "routes": [{ "method": "GET", "path": "/api", "summary":
-"List registered routes", "tags": ["system"] }] }`. Summaries and tags come
-from the route schema; missing summaries are null and missing tags are empty.
-The index uses the same authenticated read admission as other API reads.
+without schemas: `{ "openapi": "/docs/json", "enums": "/api/enums", "routes":
+[{ "method": "GET", "path": "/api", "summary": "List registered routes", "tags":
+["system"] }] }`. Summaries and tags come from the route schema; missing summaries
+are null and missing tags are empty. The index uses the same authenticated read
+admission as other API reads, and so do `/docs` and `/docs/json`: a protected core
+answers 401 without a credential and accepts the machine token. The OpenAPI document
+states the bearer scheme on a protected core and has no `servers` entry: its paths
+are relative to the origin that served it.
+
+#### GET /api/enums
+
+The accepted values of the closed lists, the same lists the routes validate against.
+Static, and under the same read admission as `GET /api`.
+
+```json
+{
+	"scanner": {
+		"protocols": ["analog-fm", "dmr"],
+		"identityKinds": ["dmr-cc"],
+		"confidences": ["activity"],
+		"jobModes": ["in-window", "sweep", "auto"],
+		"jobKinds": ["discover", "monitor"],
+		"sensitivities": ["low", "normal", "high"]
+	},
+	"activity": { "kinds": ["decoder-reception"], "categories": ["aircraft"] },
+	"tuner": {
+		"gainModes": ["manual", "agc"],
+		"directSamplingModes": ["off", "i", "q"],
+		"controlModes": ["internal", "external"]
+	},
+	"recordings": { "kinds": ["dsd-fme-call"] }
+}
+```
+
+Some lists are shortened here; the answer holds every value.
 
 #### GET /api/agent/status
 
@@ -1758,7 +1789,8 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
 - `POST /api/tuner/:sourceId/rtl-xtal` — RTL XTAL frequency
 - `POST /api/tuner/:sourceId/tuner-xtal` — Tuner XTAL frequency
 - `POST /api/tuner/:sourceId/tuner-gain-index` — Gain index value
-- `PATCH /api/tuner/:sourceId/config` — Bulk update
+- `PATCH /api/tuner/:sourceId/config` — Bulk update, with the field names and units of
+  `GET /api/tuner`; any other field is a 400 that lists them
 
 Every 400 from these routes names the field that failed, by its schema name, and the fields it
 expects, their types and units, for example `Invalid request body at gain; expected {"gain":
@@ -3509,6 +3541,13 @@ Pure preview of a job spec (no side effects): the normalised spec with
 `default`), the hop plan, `sweepPeriodMs`, probability of intercept per hop,
 CPU/disk estimates, the impact and `issues` (`severity` `error` or
 `warning`). Same body as `POST /api/scanner/jobs`.
+
+On both routes `protocols` is optional. Absent, the job uses the protocols of its
+ranges (`spec.provenance.protocols` is `bandplan`); with none there either, or with an
+empty list, every protocol is a candidate and `spec.protocols` is `[]` (provenance
+`default`, or `operator` for an explicit empty list). A value outside
+[`GET /api/enums`](#get-apienums) `scanner.protocols` is a 400 listing the accepted
+values, and so is a top-level field the job spec does not name, such as `protocol`.
 
 ```bash
 curl -X POST http://localhost:9000/api/scanner/plan \

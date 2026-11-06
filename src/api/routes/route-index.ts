@@ -1,16 +1,14 @@
 import type { FastifyInstance } from "fastify"
+import {
+	API_ENUMS_PATH,
+	OPENAPI_DOCUMENT_PATH,
+	type ApiRouteIndex,
+	type ApiRouteIndexEntry,
+} from "@wavekit/api-types"
 
 /** Install on the root before plugins so encapsulated and schema-less routes appear too. */
 export function registerRouteIndex(app: FastifyInstance): void {
-	const routes = new Map<
-		string,
-		{
-			method: string
-			path: string
-			summary: string | null
-			tags: string[]
-		}
-	>()
+	const routes = new Map<string, ApiRouteIndexEntry>()
 	app.addHook("onRoute", route => {
 		for (const method of Array.isArray(route.method)
 			? route.method
@@ -29,7 +27,9 @@ export function registerRouteIndex(app: FastifyInstance): void {
 		{
 			schema: { summary: "List registered routes", tags: ["system"] },
 		},
-		async () => ({
+		async (): Promise<ApiRouteIndex> => ({
+			openapi: OPENAPI_DOCUMENT_PATH,
+			enums: API_ENUMS_PATH,
 			routes: [...routes.values()].sort(
 				(a, b) =>
 					a.path.localeCompare(b.path) || a.method.localeCompare(b.method),
