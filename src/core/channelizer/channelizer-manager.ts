@@ -48,6 +48,12 @@ export const CRASH_WINDOW_MS = 60_000
 const OPEN_TIMEOUT_MS = 5000
 const CLOSE_TIMEOUT_MS = 250
 /**
+ * How long a process with no channels waits after a centre move for its decoders to re-request, when no longer idle
+ * stop is configured: the decoder manager's 300 ms caps debounce plus a decoder's 5000 ms graceful stop, rounded up. A
+ * decoder later than this costs one respawn, as every centre move did before.
+ */
+export const RECENTER_LINGER_MS = 6000
+/**
  * Generation watchdog: a process that owes work (a control reply, or stdin bytes written but not yet acknowledged) and
  * wrote no event line for this long is wedged and retired. The runtime writes `progress` after every unit of main-loop
  * work, at most every 100 ms (PROGRESS_EVERY in native/wavekit-chan/src/runtime.rs), so a live one has 2000 / 100 = 20
@@ -257,9 +263,9 @@ function defaultConnect(path: string, signal?: AbortSignal): Promise<Readable> {
 
 /**
  * One `wavekit-chan` per source (addendum §4, §6; plan A2, A14): a raw-fanout consumer spawned lazily on the first
- * channel request and stopped when its last channel is released. Every spawn is a new generation; caps changes,
- * source loss and unexpected exits invalidate the generation's channels, and nothing respawns until the next request.
- * Channel opens, closes and retunes are control lines to the running generation: a slow reply never restarts it or
+ * channel request and stopped when its last channel is released. Every spawn is a new generation; a rate or format
+ * change, source loss and unexpected exits invalidate the generation's channels, and nothing respawns until the next
+ * request. A capture-centre move only re-wires the channels: the process stays (`recenter`). Channel opens, closes and retunes are control lines to the running generation: a slow reply never restarts it or
  * re-creates its fanout branch (only a wedged process, one that owes work and wrote nothing for WEDGE_MS, is retired).
  */
 export class ChannelizerManager
@@ -301,7 +307,9 @@ export class ChannelizerManager
 	private destroyed = false
 	private readonly onCaps = (sourceId: string, caps: SourceCaps) => {
 		const s = this.active.get(sourceId)
-		if (s && this.capsDiffer(s, caps)) this.invalidate(sourceId, "caps-changed")
+		if (!s) return
+		if (this.capsDiffer(s, caps)) this.invalidate(sourceId, "caps-changed")
+		else this.followCentre(s, caps)
 	}
 	private readonly onGone = (sourceId: string) => {
 		this.losses.set(sourceId, (this.losses.get(sourceId) ?? 0) + 1)
@@ -616,12 +624,12 @@ export class ChannelizerManager
 			}
 		const queueBytes = this.queueBytes(req)
 		if (typeof queueBytes === "string") return invalid(queueBytes)
-		if (
-			s &&
-			(s.caps.sampleRate !== caps.sampleRate || s.caps.centerHz !== centerHz)
-		) {
+		if (s && s.caps.sampleRate !== caps.sampleRate) {
 			this.invalidate(sourceId, "caps-changed")
 			s = undefined
+		} else if (s && s.caps.centerHz !== centerHz) {
+			this.recenter(s, centerHz)
+			if (s.invalidated) s = undefined
 		}
 		const generation = s?.generation ?? this.currentGeneration(sourceId) + 1
 		const channelId = `${sanitize(decoderId)}-g${generation}`
@@ -733,6 +741,8 @@ export class ChannelizerManager
 				this.invalidate(sourceId, "changed-during-spawn")
 				return superseded()
 			}
+			this.followCentre(s, now)
+			if (s.invalidated) return superseded()
 		}
 		if (
 			ctx.transaction &&
@@ -771,6 +781,7 @@ export class ChannelizerManager
 				const caps = this.deps.sourceManager.getCaps(s.sourceId)
 				if (!s.invalidated && (!caps || this.capsDiffer(s, caps)))
 					this.invalidate(s.sourceId, "caps-changed")
+				if (!s.invalidated && caps) this.followCentre(s, caps)
 				if (s.invalidated || this.active.get(s.sourceId) !== s)
 					return await superseded()
 				if (this.remaining(ctx) <= 0) return this.timeout()
@@ -1665,18 +1676,24 @@ export class ChannelizerManager
 		if (!s.invalidated && s.channels.size === 0 && s.pending === 0) {
 			const idleStopMs = this.deps.idleStopMs ?? 0
 			if (
-				idleStopMs > 0 &&
-				(cause === "last-channel-released" ||
-					cause === "last-channel-died" ||
-					cause === "no-channels")
+				cause === "recentered" ||
+				(idleStopMs > 0 &&
+					(cause === "last-channel-released" ||
+						cause === "last-channel-died" ||
+						cause === "no-channels"))
 			) {
 				if (s.idleTimer === undefined) {
 					s.idleCause = cause
-					s.idleTimer = setTimeout(() => {
-						delete s.idleTimer
-						delete s.idleCause
-						this.stopIfIdle(s, "idle-timeout")
-					}, idleStopMs)
+					s.idleTimer = setTimeout(
+						() => {
+							delete s.idleTimer
+							delete s.idleCause
+							this.stopIfIdle(s, "idle-timeout")
+						},
+						cause === "recentered"
+							? Math.max(idleStopMs, RECENTER_LINGER_MS)
+							: idleStopMs,
+					)
 					s.idleTimer.unref()
 				}
 				return
@@ -1756,12 +1773,64 @@ export class ChannelizerManager
 		this.stops.add(stop)
 	}
 
+	/** Only these end a generation (docs/PERFORMANCE.md rule 5); a centre move goes through `recenter`. */
 	private capsDiffer(s: SourceChannelizer, caps: SourceCaps): boolean {
-		return (
-			!isCu8Iq(caps) ||
-			s.caps.sampleRate !== caps.sampleRate ||
-			(caps.centerFreq !== undefined && s.caps.centerHz !== caps.centerFreq)
+		return !isCu8Iq(caps) || s.caps.sampleRate !== caps.sampleRate
+	}
+
+	private followCentre(s: SourceChannelizer, caps: SourceCaps): void {
+		if (caps.centerFreq !== undefined && s.caps.centerHz !== caps.centerFreq)
+			this.recenter(s, caps.centerFreq)
+	}
+
+	/**
+	 * The capture centre moved at the same rate and format. The process, its fanout branch and the generation stay.
+	 * Open channels are invalidated as before, because a decoder's request may follow the centre and only it can
+	 * recompute that: it re-requests through the usual stale-channel path, on the same id once `closed` lifts the fence.
+	 * The close lines and `recenter` are written before listeners run, so a request from a listener opens at the new
+	 * centre. An open still in flight is settled by the process against the new centre when it installs.
+	 */
+	private recenter(s: SourceChannelizer, centerHz: number): void {
+		if (!Number.isFinite(centerHz)) {
+			// The line could not be encoded, and this runs inside a foreign emitter.
+			this.invalidate(s.sourceId, "caps-changed")
+			return
+		}
+		s.caps.centerHz = centerHz
+		const channels = [...s.channels.values()]
+		const ids = channels.map(ch => ch.id)
+		for (const ch of channels) {
+			if (ch.settlement)
+				this.deps.settlementObserver?.endGrant(ch.settlement, "caps-changed")
+			this.channelOwner.delete(ch.id)
+		}
+		s.channels.clear()
+		this.log.debug(
+			{ sourceId: s.sourceId, generation: s.generation, channels: ids.length },
+			"Capture centre moved; keeping the channelizer process",
 		)
+		for (const id of ids) void this.closeOwned(s, id, false)
+		s.process.send({ v: 1, type: "recenter", centerHz })
+		try {
+			if (ids.length > 0)
+				this.emit(
+					"channel-invalidated",
+					s.sourceId,
+					s.generation,
+					ids,
+					"caps-changed",
+				)
+		} catch (err: unknown) {
+			this.log.error(
+				{ err, sourceId: s.sourceId, generation: s.generation },
+				"channel-invalidated listener threw",
+			)
+		}
+		for (const ch of channels) {
+			ch.socket.destroy()
+			ch.stream.destroy()
+		}
+		if (ids.length > 0) this.stopIfIdle(s, "recentered")
 	}
 
 	/** channelQueueMs of output samples, within the process's 1 sample..=MAX_QUEUE_BYTES; a detail string when not. */

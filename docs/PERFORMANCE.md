@@ -291,6 +291,62 @@ host was far busier this time. The pool costs 3 to 10 % more CPU per Msample
 and lost 12.2 MB to absorber overflow, the pooled build entered it 0 times and
 lost nothing.
 
+## Channelizer input reads and restarts (2026-11-06)
+
+A read returns what the pipe holds, and each read woke the reader, the main thread, the DSP
+helpers and every channel's writer. The cost followed the source's chunk size rather than the
+work. Now:
+
+- **The reader waits once after a short read** (`native/wavekit-chan/src/input.rs`), so the pipe
+  collects the rest of the block with nothing running. The target is `min(block, 32 768)` bytes,
+  half of Linux's default 64 KiB pipe. The wait is the target's time at the input rate, capped at
+  20 ms (`MAX_INPUT_HOLD`): 16 ms at 1.024 Msps, 8 ms at 2.048 Msps, 6.83 ms at 2.4 Msps. That is
+  the added latency bound for a sample, plus however late the host wakes the thread. A read that
+  already holds the target does not wait, so a backlog drains at full speed, and an idle source
+  blocks in `read` as before. After the wait the reader never blocks, so a stalled source cannot
+  hold bytes longer than one wait. Output does not depend on the split (chunk-split properties in
+  `input.rs`, `tests/process.rs`, and the existing serial/pool equivalence).
+- **An IQ channel keeps its buffers between blocks.** `ChannelDsp::run_chain` allocated about
+  400 KB per channel per 16 384-sample block (a working pair per stage, halving down the chain).
+  `tests/channel_allocations.rs` now holds that at zero allocations once warm. On the Mac below the
+  gain at whole-block chunks is within noise. On Linux, glibc may return and refault that memory per
+  block; that has not been measured.
+- **A capture-centre move no longer restarts the process.** Centre was part of `capsDiffer`, so
+  every retune ended the generation, even with no channels open. Now only a rate or format change
+  does (rule 5). A centre move sends one `recenter` control line. Open channels are still
+  invalidated and re-requested, because a decoder's request may follow the centre and only the
+  decoder can recompute it. A channel reopened after a move can see up to the input branch's
+  buffered samples from the old centre (normally milliseconds, at most the 250 ms branch mark per
+  side), as a dongle's in-flight transfers already do across a retune.
+
+`native/wavekit-chan/examples/paced_load.py`, a real binary with paced noise on stdin and a separate
+consumer process, 12 s per run; ranges are repeated runs, with the 1 448 B, 4 096 B and 512 kHz rows
+alternated between builds. One-minute load average 6 to 19 on a Mac i5 with 8 threads. Child CPU in ms
+per second of IQ (user + system). This host cannot show a Linux page-fault effect: minor faults stayed
+at about 120 to 480/s in both builds.
+
+| Rate, channels                  | Chunk, bytes | Before, user + sys | After, user + sys | Voluntary switches/s, before → after |
+| ------------------------------- | ------------ | ------------------ | ----------------- | ------------------------------------ |
+| 1.024 Msps, 12 × 48 kHz         | 65 536       | 382 + 28           | 361 + 25          | 33 → 33                              |
+| 1.024 Msps, 12 × 48 kHz         | 8 192        | 423 + 87           | 369 + 28          | 251 → 18                             |
+| 1.024 Msps, 12 × 48 kHz         | 4 096        | 449–474 + 139–158  | 366–375 + 26      | 500 → 10                             |
+| 1.024 Msps, 12 × 48 kHz         | 1 448        | 508–523 + 229–268  | 369–372 + 26–28   | 1 390 → 2                            |
+| 1.024 Msps, 4 × 48 kHz          | 4 096        | 186 + 89           | 128 + 15          | 497 → 8                              |
+| 2.4 Msps, 12 × 48 kHz           | 65 536       | 831 + 64           | 846 + 56          | 73 → 75                              |
+| 2.4 Msps, 12 × 48 kHz           | 4 096        | 1 032 + 307        | 835 + 59          | 1 159 → 17                           |
+| 1.024 Msps, 4 × 512 kHz         | 4 096        | 1 043–1 075 + 86   | 975–1 047 + 24    | 500 → 260                            |
+| 1.024 Msps, 4 × 512 kHz         | 65 536       | 1 008–1 010 + 22   | 974–1 040 + 22    | 284 → 285                            |
+| 1.024 Msps, 8 × 48 kHz, 4 idle¹ | 4 096        | 471 + 128          | 368 + 24          | 502 → 10                             |
+| 1.024 Msps, 12 stalled²         | 4 096        | 464 + 57           | 358 + 13          | 502 → 12                             |
+
+¹ Four more channels that no client ever connects to; a slow consumer on the rest. ² Connected,
+never reads, so every queue overflows.
+
+CPU no longer depends on the chunk size. 64 KiB chunks are within noise, as expected: they were
+already whole blocks. The 4 × 512 kHz rows show what is left: a wide channel is about 0.25 core of
+DSP user time at 1.024 Msps here (300 kHz wide, 5 kHz transition), so channel width, not wake-ups,
+sets the floor for such a layout.
+
 ## Spectrum frame path (2026-11-01)
 
 The spectrum worker runs about 1,172 frames/s at 2.4 Msps with FFT 2048 (19.8 blocks/s).

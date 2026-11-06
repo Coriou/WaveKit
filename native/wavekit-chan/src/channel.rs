@@ -67,6 +67,11 @@ pub struct ChannelDsp {
     emitted: u64,
     held_i: Vec<f32>,
     held_q: Vec<f32>,
+    // The chain's working buffers: one block's input after the NCO, then each stage's output.
+    work_i: Vec<f32>,
+    work_q: Vec<f32>,
+    next_i: Vec<f32>,
+    next_q: Vec<f32>,
 }
 
 fn gcd(a: u64, b: u64) -> u64 {
@@ -111,8 +116,17 @@ impl ChannelDsp {
             emitted: 0,
             held_i: Vec::new(),
             held_q: Vec::new(),
+            work_i: Vec::new(),
+            work_q: Vec::new(),
+            next_i: Vec::new(),
+            next_q: Vec::new(),
             spec,
         }
+    }
+
+    /// The NCO's current offset from the capture centre.
+    pub(crate) fn offset_hz(&self) -> f64 {
+        self.spec.offset_hz
     }
 
     /// Changes only the NCO step, preserving its phase, FIR histories and output schedule.
@@ -179,20 +193,31 @@ impl ChannelDsp {
         self.held_q.clear();
     }
 
-    /// Runs NCO + stages, then releases exactly the samples the chain schedule makes due (plan A12).
+    /// Runs NCO + stages and returns how many samples at the front of `held_*` the chain schedule
+    /// makes due (plan A12); the caller takes them and calls [`Self::consume`].
     /// Each stage emits ⌈n·l/m⌉ (Task 12), so the chain is never short of ⌊n_in·num/den⌋; the surplus waits in `held_*`.
-    fn run_chain(&mut self, i: &[f32], q: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    /// Every buffer is kept between blocks: a steady stream does not allocate here.
+    fn run_chain(&mut self, i: &[f32], q: &[f32]) -> usize {
         debug_assert_eq!(i.len(), q.len());
-        let (mut ai, mut aq) = (i.to_vec(), q.to_vec());
-        self.nco.mix(&mut ai, &mut aq);
+        self.work_i.clear();
+        self.work_q.clear();
+        self.work_i.extend_from_slice(i);
+        self.work_q.extend_from_slice(q);
+        self.nco.mix(&mut self.work_i, &mut self.work_q);
         for st in &mut self.stages {
-            let (mut bi, mut bq) = (Vec::with_capacity(ai.len()), Vec::with_capacity(aq.len()));
-            st.process(&ai, &aq, &mut bi, &mut bq);
-            ai = bi;
-            aq = bq;
+            self.next_i.clear();
+            self.next_q.clear();
+            st.process(
+                &self.work_i,
+                &self.work_q,
+                &mut self.next_i,
+                &mut self.next_q,
+            );
+            std::mem::swap(&mut self.work_i, &mut self.next_i);
+            std::mem::swap(&mut self.work_q, &mut self.next_q);
         }
-        self.held_i.extend_from_slice(&ai);
-        self.held_q.extend_from_slice(&aq);
+        self.held_i.extend_from_slice(&self.work_i);
+        self.held_q.extend_from_slice(&self.work_q);
         self.n_in += i.len() as u64;
         let due = (self.n_in as u128 * self.num as u128 / self.den as u128) as u64;
         let want = (due - self.emitted) as usize;
@@ -202,36 +227,38 @@ impl ChannelDsp {
             self.held_i.len()
         );
         let release = want.min(self.held_i.len());
-        let rest_i = self.held_i.split_off(release);
-        let rest_q = self.held_q.split_off(release);
         self.emitted += release as u64;
         debug_assert!(
-            rest_i.len() <= self.stages.len(),
+            self.held_i.len() - release <= self.stages.len(),
             "held {} > {} stages (plan A12)",
-            rest_i.len(),
+            self.held_i.len() - release,
             self.stages.len()
         );
-        (
-            std::mem::replace(&mut self.held_i, rest_i),
-            std::mem::replace(&mut self.held_q, rest_q),
-        )
+        release
+    }
+
+    /// Drops the samples the caller took from the front of `held_*`, keeping the surplus.
+    fn consume(&mut self, released: usize) {
+        self.held_i.drain(..released);
+        self.held_q.drain(..released);
     }
 
     /// Appends the encoded output to `out` and reports how many samples it holds and how many
     /// of those saturated (cu8 only).
     pub fn process(&mut self, i: &[f32], q: &[f32], out: &mut Vec<u8>) -> ProcessOutcome {
-        let (ai, aq) = self.run_chain(i, q);
+        let released = self.run_chain(i, q);
+        let (ai, aq) = (&self.held_i[..released], &self.held_q[..released]);
         let mut saturated = 0u64;
-        out.reserve(ai.len() * self.spec.format.sample_bytes());
+        out.reserve(released * self.spec.format.sample_bytes());
         match self.spec.format {
             Format::Cf32 => {
-                for (x, y) in ai.iter().zip(&aq) {
+                for (x, y) in ai.iter().zip(aq) {
                     out.extend_from_slice(&x.to_le_bytes());
                     out.extend_from_slice(&y.to_le_bytes());
                 }
             }
             Format::Cu8 => {
-                for (&x, &y) in ai.iter().zip(&aq) {
+                for (&x, &y) in ai.iter().zip(aq) {
                     let (bi, si) = f32_to_cu8(x, self.spec.gain);
                     let (bq, sq) = f32_to_cu8(y, self.spec.gain);
                     out.push(bi);
@@ -240,15 +267,22 @@ impl ChannelDsp {
                 }
             }
         }
+        self.consume(released);
         ProcessOutcome {
-            samples: ai.len() as u64,
+            samples: released as u64,
             saturated,
         }
     }
 
     /// f32 output for property tests (no encoding); same schedule as `process`.
     pub fn process_f32(&mut self, i: &[f32], q: &[f32]) -> (Vec<f32>, Vec<f32>) {
-        self.run_chain(i, q)
+        let released = self.run_chain(i, q);
+        let out = (
+            self.held_i[..released].to_vec(),
+            self.held_q[..released].to_vec(),
+        );
+        self.consume(released);
+        out
     }
 }
 

@@ -18,6 +18,7 @@ use crate::{
     },
     dsp_pool::{resolve_dsp_helpers, DspPool, Job, DSP_HELPERS_ENV},
     framing::{self, FrameSink},
+    input::{fill_block, Coalesce, FdInput, InputEnd, InputSource},
     preparation::{Planner, Prepared, SubmitError},
     protocol::{
         parse_observed_request, parse_request, DemodOpen, ObservedRequest, OpenReq, Request,
@@ -27,9 +28,9 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, VecDeque};
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::net::Shutdown;
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsFd, FromRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -303,6 +304,8 @@ pub struct Runtime {
     /// One input block's converted I and Q, kept between blocks so `on_input` does not allocate.
     input_i: Vec<f32>,
     input_q: Vec<f32>,
+    /// The serial loop's encoded output for one channel's block, kept between blocks.
+    serial_out: Vec<u8>,
 }
 
 /// An echoed request id cut to the schema's 64 (PF7). Cutting at ≤ 64 UTF-8 bytes on a char
@@ -361,6 +364,7 @@ impl Runtime {
             scratch: Vec::new(),
             input_i: Vec::new(),
             input_q: Vec::new(),
+            serial_out: Vec::new(),
         }
     }
 
@@ -406,6 +410,7 @@ impl Runtime {
                 channel_id,
                 center_hz,
             } => self.retune_iq(channel_id, center_hz),
+            Request::Recenter { center_hz } => self.recenter(center_hz),
             Request::Squelch(req) => self.squelch(req),
             Request::Close { id } => self.close(&id, "requested"),
             Request::MarkGap {
@@ -610,12 +615,41 @@ impl Runtime {
         o: OpenReq,
         serial: u64,
         Prepared {
-            dsp,
+            mut dsp,
             queue,
             payload,
         }: Prepared,
         observed: Option<RuntimePermits>,
     ) {
+        // A recenter may have landed while this open was being prepared.
+        match dsp.admit_retune(
+            o.center_hz,
+            self.args.input_center,
+            self.args.usable_fraction,
+        ) {
+            Ok(offset) => {
+                if offset != dsp.offset_hz() {
+                    dsp.retune(offset);
+                }
+            }
+            Err(r) => {
+                let id = o.id.clone();
+                drop(o);
+                drop(dsp);
+                drop(queue);
+                if let Some(p) = observed {
+                    p.writer.publish();
+                    self.reject(&id, r.code, r.detail);
+                    if let Some(payload) = payload {
+                        payload.publish();
+                    }
+                    p.logical.publish();
+                } else {
+                    self.reject(&id, r.code, r.detail);
+                }
+                return;
+            }
+        }
         let socket = self.args.socket_dir.join(format!("{}.sock", o.id));
         let _ = std::fs::remove_file(&socket);
         // Listening before `opened` (§11): a client may connect as soon as it reads the event.
@@ -804,6 +838,32 @@ impl Runtime {
             self.emit(json!({"type": "retuned", "channelId": channel_id, "centerHz": center_hz}));
         } else {
             self.emit(json!({"type": "refused", "channelId": channel_id, "reason": "admission"}));
+        }
+    }
+
+    /// The capture centre moved; the sample rate and format did not, so nothing restarts. Later
+    /// opens and retunes admit against the new centre. An IQ channel still open keeps its absolute
+    /// frequency with an in-place NCO retune, or closes if the capture no longer holds it. A
+    /// preparing open is checked when it installs. The parent opens no demod channel on a process
+    /// it recentres: the live demodulator runs its own.
+    fn recenter(&mut self, center_hz: f64) {
+        let previous = self.args.input_center;
+        if previous == center_hz {
+            return;
+        }
+        self.args.input_center = center_hz;
+        let fraction = self.args.usable_fraction;
+        let mut outside = Vec::new();
+        for (id, ch) in self.channels.iter_mut() {
+            if let Engine::Iq(dsp) = &mut ch.dsp {
+                match dsp.admit_retune(previous + dsp.offset_hz(), center_hz, fraction) {
+                    Ok(offset) => dsp.retune(offset),
+                    Err(_) => outside.push(id.clone()),
+                }
+            }
+        }
+        for id in outside {
+            self.close(&id, "requested");
         }
     }
 
@@ -1074,15 +1134,14 @@ impl Runtime {
             return self.feed_parallel(i, q);
         }
         let mut events = Vec::new();
-        let mut out = Vec::new();
         let input_samples = self.asm.consumed_bytes / 2;
         for (id, ch) in self.channels.iter_mut() {
-            out.clear();
-            let r = ch.dsp.process(i, q, &mut out, &mut events);
+            self.serial_out.clear();
+            let r = ch.dsp.process(i, q, &mut self.serial_out, &mut events);
             ch.saturated += r.saturated;
             let first = ch.out_samples;
             ch.out_samples += r.samples;
-            push_output(id, ch, &out, first, &mut events);
+            push_output(id, ch, &self.serial_out, first, &mut events);
             self.out.step(input_samples);
         }
         for e in events {
@@ -1534,30 +1593,31 @@ fn read_control_mode<R: BufRead>(
 /// being read into. Spent buffers go back to the reader, which allocates only when none is free.
 const INPUT_BUFFERS: usize = 3;
 
-/// The stdin reader: reads of at most `block` bytes into recycled buffers, then `InputEof`.
+/// The stdin reader: blocks of at most `block` bytes (see [`fill_block`]) in recycled buffers, then
+/// `InputEof`.
 fn read_input(
-    mut input: impl Read,
+    mut input: impl InputSource,
     block: usize,
+    policy: Coalesce,
     tx: &mpsc::SyncSender<Msg>,
     free: &mpsc::Receiver<Vec<u8>>,
 ) {
     loop {
         let mut buf = free.try_recv().unwrap_or_default();
         buf.resize(block, 0);
-        match input.read(&mut buf) {
-            Ok(0) => {
-                let _ = tx.send(Msg::InputEof);
+        let filled = fill_block(&mut input, &mut buf, policy, &mut thread::sleep);
+        if filled.bytes > 0 {
+            buf.truncate(filled.bytes);
+            if tx.send(Msg::Input(buf)).is_err() {
                 return;
             }
-            Ok(n) => {
-                buf.truncate(n);
-                if tx.send(Msg::Input(buf)).is_err() {
-                    return;
+        }
+        match filled.end {
+            None => {}
+            Some(end) => {
+                if let InputEnd::Failed(e) = end {
+                    eprintln!("wavekit-chan: stdin: {e}");
                 }
-            }
-            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-            Err(e) => {
-                eprintln!("wavekit-chan: stdin: {e}");
                 let _ = tx.send(Msg::InputEof);
                 return;
             }
@@ -1601,7 +1661,16 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
     {
         let tx = tx.clone();
         let block = args.block_samples * 2;
-        thread::spawn(move || read_input(std::io::stdin().lock(), block, &tx, &free_rx));
+        let policy = Coalesce::new(block, args.input_rate);
+        thread::spawn(
+            move || match std::io::stdin().as_fd().try_clone_to_owned() {
+                Ok(fd) => read_input(FdInput::new(fd), block, policy, &tx, &free_rx),
+                Err(e) => {
+                    eprintln!("wavekit-chan: stdin: {e}");
+                    let _ = tx.send(Msg::InputEof);
+                }
+            },
+        );
     }
     {
         let fd = args.control_fd;
@@ -1773,6 +1842,91 @@ mod tests {
         );
         assert_eq!(last(&ev)["type"], "retuned");
         assert_eq!(last(&ev)["centerHz"], 162010000.0);
+        r.shutdown();
+    }
+
+    fn iq_offset(r: &Runtime, id: &str) -> f64 {
+        match &r.channels[id].dsp {
+            Engine::Iq(dsp) => dsp.offset_hz(),
+            Engine::Demod(_) | Engine::Lent => unreachable!(),
+        }
+    }
+
+    fn recenter(center_hz: f64) -> Request {
+        parse_request(&format!(
+            r#"{{"v":1,"type":"recenter","centerHz":{center_hz}}}"#
+        ))
+        .unwrap()
+    }
+
+    // The capture is 2.048 Msps at fraction 0.8: |offset| + 45 600 / 2 + 1 200 ≤ 819 200.
+    #[test]
+    fn recenter_keeps_channels_in_the_capture_on_their_frequency_and_closes_the_rest() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.request_and_wait(open("near", 162e6, 4096));
+        r.request_and_wait(open("far", 162.5e6, 4096));
+        // At the admission bound for "far" (795 200 Hz away), then one hertz past it.
+        r.on_request(recenter(162.5e6 - 795_200.0));
+        assert_eq!(iq_offset(&r, "far"), 795_200.0);
+        assert_eq!(iq_offset(&r, "near"), 295_200.0);
+        r.on_request(recenter(162.5e6 + 795_201.0));
+        assert!(!r.channels.contains_key("far"));
+        assert!(!r.channels.contains_key("near"));
+        let events = ev.lock().unwrap().clone();
+        let closed: Vec<_> = events
+            .iter()
+            .filter(|e| e["type"] == "closed")
+            .map(|e| (e["id"].as_str().unwrap(), e["reason"].as_str().unwrap()))
+            .collect();
+        assert_eq!(closed, [("far", "requested"), ("near", "requested")]);
+        r.shutdown();
+    }
+
+    #[test]
+    fn later_opens_and_retunes_admit_against_the_new_centre() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.on_request(recenter(170e6));
+        r.request_and_wait(open("old-air", 162e6, 4096));
+        assert_eq!(last(&ev)["reasonCode"], "channel-outside-capture");
+        r.request_and_wait(open("new-air", 170.1e6, 4096));
+        assert_eq!(last(&ev)["type"], "opened");
+        assert!((iq_offset(&r, "new-air") - 100_000.0).abs() < 1e-3);
+        r.on_request(
+            parse_request(r#"{"v":1,"type":"retune","channelId":"new-air","centerHz":162000000}"#)
+                .unwrap(),
+        );
+        assert_eq!(last(&ev)["type"], "refused");
+        r.shutdown();
+    }
+
+    #[test]
+    fn a_preparing_open_installs_against_the_centre_current_at_install() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.on_request(open("follows", 162.1e6, 4096));
+        r.on_request(open("left-behind", 162e6, 4096));
+        r.on_request(recenter(162.8e6)); // 700 kHz away fits the 795 200 Hz bound; 800 kHz does not
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !r.pending.is_empty() {
+            r.poll_prepared();
+            assert!(Instant::now() < deadline, "preparation did not finish");
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!((iq_offset(&r, "follows") + 700_000.0).abs() < 1e-3);
+        assert!(!r.channels.contains_key("left-behind"));
+        let rejected = ev
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| e["type"] == "rejected")
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            (rejected["id"].as_str(), rejected["reasonCode"].as_str()),
+            (Some("left-behind"), Some("channel-outside-capture"))
+        );
         r.shutdown();
     }
 
@@ -3536,7 +3690,16 @@ mod tests {
         let spare = Vec::with_capacity(4096);
         let spare_at = spare.as_ptr();
         free_tx.try_send(spare).unwrap();
-        read_input(std::io::Cursor::new(input.clone()), 4096, &tx, &free_rx);
+        read_input(
+            crate::input::tests::Memory(std::io::Cursor::new(input.clone())),
+            4096,
+            Coalesce {
+                target_bytes: 1,
+                wait: Duration::ZERO,
+            },
+            &tx,
+            &free_rx,
+        );
         let mut got = Vec::new();
         let mut reads = Vec::new();
         while let Ok(m) = rx.try_recv() {

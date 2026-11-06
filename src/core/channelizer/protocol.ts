@@ -51,6 +51,14 @@ export const ChannelizerRequestSchema = z
 				centerHz: z.number().finite(),
 			})
 			.strict(),
+		// The capture centre moved: same process, later opens and retunes admit against the new centre.
+		z
+			.object({
+				v,
+				type: z.literal("recenter"),
+				centerHz: z.number().finite(),
+			})
+			.strict(),
 		z
 			.object({
 				v,

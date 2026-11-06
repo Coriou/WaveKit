@@ -194,6 +194,62 @@ fn serves_a_channel_and_exits_zero_at_eof() {
     );
 }
 
+/// The channel's bytes for `iq` written to stdin `chunk` bytes at a time, with `pause` between chunks.
+fn channel_bytes(iq: &[u8], chunk: usize, pause: Duration) -> Vec<u8> {
+    let mut p = Proc::spawn(7);
+    assert_eq!(p.next(7)["type"], "ready");
+    p.send(OPEN);
+    let opened = p.next(7);
+    assert_eq!(opened["type"], "opened", "{opened}");
+    let mut client = UnixStream::connect(opened["socket"].as_str().unwrap()).unwrap();
+    client.set_read_timeout(Some(WAIT)).unwrap();
+    let reader = thread::spawn(move || {
+        let mut out = Vec::new();
+        client.read_to_end(&mut out).unwrap();
+        out
+    });
+    let mut stdin = p.stdin.take().unwrap();
+    for c in iq.chunks(chunk) {
+        stdin.write_all(c).unwrap();
+        stdin.flush().unwrap();
+        thread::sleep(pause);
+    }
+    drop(stdin);
+    assert_eq!(p.wait_exit(), Some(0));
+    reader.join().unwrap()
+}
+
+#[test]
+fn recenter_moves_admission_on_the_running_process() {
+    let mut p = Proc::spawn(8);
+    let ready = p.next(8);
+    assert_eq!(ready["type"], "ready");
+    p.send(r#"{"v":1,"type":"recenter","centerHz":170000000}"#);
+    // The old air is outside the capture now; a line after it proves the order on the pipe.
+    p.send(OPEN);
+    assert_eq!(p.next(8)["reasonCode"], "channel-outside-capture");
+    p.send(r#"{"v":1,"type":"recenter","centerHz":162000000}"#);
+    p.send(OPEN);
+    let opened = p.next(8);
+    assert_eq!(opened["type"], "opened", "{opened}");
+    assert_eq!(opened["generation"], 8);
+    p.send(r#"{"v":1,"type":"shutdown"}"#);
+    assert_eq!(p.next(8)["type"], "closed");
+    assert_eq!(p.wait_exit(), Some(0));
+}
+
+// Feature: core-channelizer, Property 4: Chunk-split independence (process)
+// Validates: addendum §12.4
+#[test]
+fn a_channels_bytes_do_not_depend_on_how_stdin_is_chunked() {
+    let iq: Vec<u8> = (0..2 * 102_400u32).map(|k| (k * 13 % 251) as u8).collect();
+    let whole = channel_bytes(&iq, iq.len(), Duration::ZERO);
+    assert_eq!(whole.len(), 2_400 * 8);
+    // Paced small chunks take the reader's waiting path, unpaced ones its backlog path.
+    assert_eq!(channel_bytes(&iq, 1_448, Duration::from_millis(1)), whole);
+    assert_eq!(channel_bytes(&iq, 4_099, Duration::ZERO), whole);
+}
+
 #[test]
 fn shutdown_closes_channels_and_exits_zero() {
     let mut p = Proc::spawn(9);
