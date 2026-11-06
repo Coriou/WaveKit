@@ -70,9 +70,10 @@ const RETRY_MS = [1000, 2000, 5000] as const
  */
 export const STALL_GRACE_MS = 2000
 /**
- * No byte for this long on an open stream: it is dead, so reattach through fail(). Every route sends bytes
- * all the time (exact silence while squelched or between calls), so the longest gap on a live stream is the
- * core's 1 300 ms stall. 2.5 × STALL_GRACE_MS = 5 000 ms is 3.8 times that, and leaves Connecting… on the
+ * No byte for this long on an open stream: reattach through fail(). `/auto` and decoded voice send bytes all
+ * the time (exact silence while squelched or between calls), so their longest gap is the core's 1 300 ms
+ * stall. `/stream` sends nothing while its source has no IQ (feed paused or dropped); there the retries end
+ * in the error state, which holds until audio returns. 2.5 × STALL_GRACE_MS = 5 000 ms is 3.8 times that, and leaves Connecting… on the
  * card for 2 800 ms first. With RETRY_MS an unanswering core reaches the error state 5 + 1 + 5 + 2 + 5 + 5 + 5
  * = 28 s after the attach.
  */
@@ -521,6 +522,12 @@ export class ListenController extends Store<ListenState> {
 		this.armDeadTimer(DEAD_STREAM_MS)
 	}
 
+	/** A retry after the error state keeps it: the card does not flip back to Connecting… every few seconds. */
+	private showAttaching(): void {
+		const { phase } = this.get()
+		if (phase !== "playing" && phase !== "error") this.setPhase("connecting")
+	}
+
 	private schedule(ms: number): void {
 		this.clearTimer()
 		this.timer = setTimeout(() => {
@@ -538,7 +545,7 @@ export class ListenController extends Store<ListenState> {
 			this.attachedKey = this.key
 			this.watchStream()
 			this.rebaseRoute()
-			if (this.get().phase !== "playing") this.setPhase("connecting")
+			this.showAttaching()
 			this.player.play({
 				url: source.httpUrl,
 				format: source.format,
@@ -556,7 +563,7 @@ export class ListenController extends Store<ListenState> {
 		else el.removeAttribute("crossorigin")
 		el.src = source.wavUrl
 		el.volume = this.outVolume()
-		if (this.get().phase !== "playing") this.setPhase("connecting")
+		this.showAttaching()
 		el.play().catch((error: unknown) => {
 			if (error instanceof DOMException && error.name === "NotAllowedError")
 				this.update(s => ({ ...s, phase: "blocked" }))

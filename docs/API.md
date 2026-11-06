@@ -1950,7 +1950,8 @@ droppedMs, clockRebases, latencyMs }`. `active` is `analog`, `digital` or `none`
   (public origin, legacy `Host` rewrite). `digitalAvailable` is `false` when the
   core routes analog only. `underruns` counts output blocks short of audio, by
   any amount; `zeroFilledSamples` (cumulative, absent from older cores) counts the
-  samples those blocks filled with zeros, so the time lost is that divided by 48 000;
+  samples those blocks filled with zeros, so the time lost is that divided by 48 000,
+  except the wait after a digital call's last frame, which counts only if the call goes on;
   `droppedMs` the audio dropped on overflow, preemption or invalidation,
   `clockRebases` the pacer resets after an event-loop stall, and `latencyMs` the
   selected source's backlog plus one 20 ms block. Optional in `@wavekit/api-types`;
@@ -3973,8 +3974,8 @@ Each returns the `ScanJob`. `resume` takes an optional body
 | `preempted-*`                                          | `SCANNER_SOURCE_BUSY` while a job holds the lease or waits with a better claim, else `SCANNER_SOURCE_DOWN`; stays, and no idle timeout resumes it until data returns | arbitrates, with the 409s above; resumes by itself after its idle time |
 | `core-restart`                                         | `SCANNER_SOURCE_DOWN`; stays, and a pending `resume.onBoot` waits for data                                                                                           | restarts from its first hop; by itself with `resume.onBoot`            |
 
-A feed paused by hand answers 409 `SOURCE_PAUSED` before any of these. Right after a
-core start, before the source has been heard from, nothing yet counts it as down.
+A feed paused by hand answers 409 `SOURCE_PAUSED` before any of these. A source that has
+sent no data since the core started counts as no data.
 
 A refused resume changes nothing but the reason (`SCANNER_SOURCE_BUSY` moves
 `paused(operator)` and `paused(resumed-without-retune)` to `paused(resume-blocked)`,

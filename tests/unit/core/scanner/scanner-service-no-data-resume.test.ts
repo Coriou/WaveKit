@@ -281,6 +281,14 @@ describe("automatic resume without data", () => {
 			state: "paused",
 			reason: "preempted-job",
 		})
+		await expect(
+			h.service.resumeJob(low.id, { takeover: false }),
+		).rejects.toMatchObject({
+			code: "SCANNER_SOURCE_DOWN",
+			message: expect.stringContaining(
+				"takes the tuner back by itself",
+			) as string,
+		})
 
 		h.sources.emit("payload-started", "rtl")
 		await vi.waitFor(() =>
@@ -417,5 +425,23 @@ describe("automatic resume without data", () => {
 		expect(h.service.getJob(low)?.state).toBe("running")
 		await h.service.cancelJob(low)
 		await h.service.stop()
+	}, 20_000)
+})
+
+describe("a source that has sent no data since the core started", () => {
+	it("refuses a manual resume, with no disconnect ever seen, until data arrives", async () => {
+		const { again, id } = await restarted()
+		let lastSampleAt: number | null = null
+		Object.assign(again.sources, {
+			getStatus: () => ({ activity: { lastSampleAt } }),
+		})
+		await expect(
+			again.service.resumeJob(id, { takeover: false }),
+		).rejects.toMatchObject({ code: "SCANNER_SOURCE_DOWN" })
+		expect(again.service.getJob(id)).toMatchObject(waiting)
+		lastSampleAt = 1
+		again.sources.emit("payload-started", "rtl")
+		await untilRunning(again, id)
+		await again.service.stop()
 	}, 20_000)
 })

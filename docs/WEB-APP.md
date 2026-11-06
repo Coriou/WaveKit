@@ -204,7 +204,8 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
 
 **Connecting…** means Listen is starting, no audio has played for about 2 s, or the stream ended and is
 being reattached. If no data at all arrives for 5 s, Listen reattaches by itself; after about 28 s of
-failed attempts it shows **No audio** with the reason and keeps trying.
+failed attempts it shows **No audio** with the reason, and stays there while it keeps trying, until
+audio returns.
 
 A short gap on an open stream keeps **Listening**. When over 10% of the audio you should be hearing
 did not play in the last 10 s, the card says so next to it, for example

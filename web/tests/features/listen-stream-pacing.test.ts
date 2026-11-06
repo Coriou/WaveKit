@@ -723,9 +723,8 @@ describe("a status read that hangs", () => {
 		dryMs: 0,
 	})
 
-	it("its lifetime fits inside the reading cadence", () => {
-		expect(AUTO_ROUTE_READ_TIMEOUT_MS).toBe(1_500)
-		expect(AUTO_ROUTE_READ_TIMEOUT_MS).toBeLessThan(ROUTE_POLL_MS)
+	it("its lifetime is 2.5 reading cadences: readings are single flight, so a slow one still counts", () => {
+		expect(AUTO_ROUTE_READ_TIMEOUT_MS).toBe(2.5 * ROUTE_POLL_MS)
 	})
 
 	it("ends at the bound, not before, and answers null", async () => {
@@ -754,8 +753,7 @@ describe("a status read that hangs", () => {
 		await settle(AUTO_ROUTE_READ_TIMEOUT_MS)
 		expect(signals[0]?.aborted).toBe(true)
 		hang = false
-		await settle(ROUTE_POLL_MS - AUTO_ROUTE_READ_TIMEOUT_MS)
-		h.events().onStats(stats(ROUTE_POLL_MS))
+		h.events().onStats(stats(AUTO_ROUTE_READ_TIMEOUT_MS))
 		expect(signals).toHaveLength(2)
 	})
 
@@ -861,6 +859,8 @@ describe("Listen on a stream that went quiet", () => {
 		const plays = h.plays.length
 		vi.advanceTimersByTime(5_000)
 		expect(h.plays.length).toBe(plays + 1)
+		// the retry does not flip the card back to Connecting…
+		expect(h.listen.get().phase).toBe("error")
 		h.events().onData()
 		h.events().onStats(playing)
 		expect(h.listen.get().phase).toBe("playing")

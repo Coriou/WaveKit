@@ -505,3 +505,62 @@ describe("one catch-up across a digital call", () => {
 		expect(old.audibleMs - got.audibleMs).toBeLessThanOrEqual(100)
 	})
 })
+
+describe("zero-fill on a digital call", () => {
+	const run = async (gapMs: number) => {
+		const Router = await routerAt(LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS)
+		const clock = new StepClock()
+		const router = new Router(logger, { clock, wallClock: () => 0 })
+		let tap: VoiceTap | null = null
+		router.attachVoice(
+			{
+				voiceSampleRate: 8_000,
+				addVoiceTap: t => {
+					tap = t
+					return () => {
+						tap = null
+					}
+				},
+			},
+			{ generation: 0, covers: () => "yes" },
+		)
+		router.registry.register(
+			new RingResponse(
+				new PcmRing({ rate: RATE }),
+			) as unknown as http.ServerResponse,
+			"127.0.0.1",
+			AUTO_ROUTE_STREAM,
+		)
+		const frame = Buffer.alloc(320)
+		for (let i = 0; i < 160; i++) frame.writeInt16LE(1_000, i * 2)
+		const call = {
+			callId: "c",
+			active: true,
+			encrypted: false,
+			protocol: "DMR",
+			slot: 1,
+		}
+		const silentFrom = 1_000
+		// the call pauses for gapMs at 1 s, then runs to 2 s; a gap of null ends it at 1 s
+		for (let t = 1; t <= 4_000; t++) {
+			clock.t = t
+			if (t % LIVE_AUDIO_AUTO_ROUTE_BLOCK_MS !== 0) continue
+			clock.fn?.()
+			const inGap = t > silentFrom && t <= silentFrom + gapMs
+			if (!inGap && t <= 2_000)
+				(tap as VoiceTap | null)?.frame("d", frame, call)
+		}
+		return router
+	}
+
+	it("the wait after a call's last frame is not counted as lost audio", async () => {
+		const router = await run(3_000)
+		expect(router.underruns).toBeGreaterThan(0)
+		expect(router.zeroFilledSamples).toBe(0)
+	})
+
+	it("a hole inside a call that goes on is counted", async () => {
+		const router = await run(260)
+		expect(router.zeroFilledSamples).toBeGreaterThan(0)
+	})
+})

@@ -130,7 +130,7 @@ export interface ArbiterDeps {
 	tuner: ArbiterTuner
 	sources: Pick<SourceManager, "on" | "off" | "isRtlTcpSource"> &
 		// Optional: test doubles of the source manager predate pause / resume.
-		Partial<Pick<SourceManager, "resumeKind">>
+		Partial<Pick<SourceManager, "resumeKind" | "getStatus">>
 	epochs: (sourceId: string) => EpochClock | undefined
 	settings: () => ScannerSettings
 	/** Timer-mode settle class of the source's transport (§ 4.6). */
@@ -381,11 +381,13 @@ export class TunerArbiter extends EventEmitter {
 
 	/**
 	 * False from a seen disconnect or teardown until the source's next payload, so a TCP reconnect
-	 * without data still reads false. A source not heard from yet (boot) counts as connected: nothing
-	 * says it is down, and a missed first payload must not refuse its jobs for good.
+	 * without data still reads false, and false for a source that never sent data (unreachable at boot
+	 * emits no disconnect). That reads the manager's sample time, not an event, so none can be missed.
 	 */
 	isConnected(sourceId: string): boolean {
-		return !this.linkLost.has(sourceId)
+		if (this.linkLost.has(sourceId)) return false
+		const activity = this.deps.sources.getStatus?.(sourceId)?.activity
+		return activity ? activity.lastSampleAt !== null : true
 	}
 
 	acquire(

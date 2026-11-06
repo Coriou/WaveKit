@@ -295,6 +295,8 @@ function noDataRefusal(
 		next = `No data from the source: this job continues by itself when data returns. Nothing to resume yet; cancel it to end it. ${KEEPS_PROGRESS}`
 	else if (bootResumePending)
 		next = `No data from the source: this job restarts by itself when data returns. Nothing to resume yet; cancel it to end it. ${KEEPS_PROGRESS}`
+	else if (reason === "preempted-job")
+		next = `No data from the source: this job takes the tuner back by itself when data returns, if no other job holds it. Nothing to resume yet; cancel it to end it. ${KEEPS_PROGRESS}`
 	else if (preempted && record.spec.resume.autoAfterIdleMs !== null)
 		next = `No data from the source: this job resumes by itself once data returns and the tuner has been idle for its resume delay. Resume it again then to go sooner, or cancel it to end it. ${KEEPS_PROGRESS}`
 	return new ScannerApiError(next, "SCANNER_SOURCE_DOWN", 409, {

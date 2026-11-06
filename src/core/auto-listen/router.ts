@@ -115,6 +115,11 @@ export class AutoListenRouter extends EventEmitter {
 	private underrunCount = 0
 	/** At 48 000 samples/s a double stays exact for over 5 000 years. */
 	private zeroFilled = 0
+	/**
+	 * Zeros played while the selected voice has nothing queued. They count only if the voice goes on: waiting
+	 * out the release after a call's last frame (about 98 ms per call, up to the 300 ms hold) is not lost audio.
+	 */
+	private voiceFillPending = 0
 	private selected: Selected = null
 	private selectedAt = 0
 	private sinceWall: number
@@ -351,9 +356,15 @@ export class AutoListenRouter extends EventEmitter {
 			const excess = sel.out.queued - TARGET_SAMPLES
 			if (excess > 0) sel.out.discardSilentHead(excess)
 			const got = sel.out.read(this.block, AUTO_ROUTE_BLOCK_SAMPLES)
-			if (got < AUTO_ROUTE_BLOCK_SAMPLES) {
-				this.underrunCount++
-				this.zeroFilled += AUTO_ROUTE_BLOCK_SAMPLES - got
+			const short = AUTO_ROUTE_BLOCK_SAMPLES - got
+			if (short > 0) this.underrunCount++
+			if (sel === this.analog) this.zeroFilled += short
+			else {
+				// A whole block means the voice went on; a call's tail only ever trickles short ones.
+				if (short === 0) {
+					this.zeroFilled += this.voiceFillPending
+					this.voiceFillPending = 0
+				} else this.voiceFillPending += short
 			}
 		}
 		// A fresh block: the registry and the socket may keep the reference (2.8).
@@ -451,6 +462,7 @@ export class AutoListenRouter extends EventEmitter {
 		// queued before it (between blocks, or before the first tick) is not played.
 		if (next !== null) next.out.discardUntilAudible()
 		this.selected = next
+		this.voiceFillPending = 0
 		this.selectedAt = now
 		this.sinceWall = this.wallClock()
 		this.emit("auto-route-changed", this.level())

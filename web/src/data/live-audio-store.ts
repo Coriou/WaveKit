@@ -23,10 +23,12 @@ export interface LiveAudioState {
 }
 
 /**
- * How long one `/auto` reading may take: the 1 300 ms longest stall seen in the core plus 200 ms. It is
- * under Listen's 2 000 ms reading cadence, so a hung request costs one reading and the next starts on time.
+ * How long this client waits for one `/auto` reading: 2.5 × Listen's 2 000 ms cadence. Readings are single
+ * flight, so a slow one only delays the next and its cumulative counters still count; a shorter bound would
+ * throw away every answer from a slow core. A hung request costs 5 000 ms. This bounds the client's wait; it
+ * does nothing for the slowness itself.
  */
-export const AUTO_ROUTE_READ_TIMEOUT_MS = 1_500
+export const AUTO_ROUTE_READ_TIMEOUT_MS = 5_000
 
 /** PATCH body: any config field; `agc: null` returns to the modulation default. */
 export type LiveAudioConfigPatch = Partial<Omit<LiveAudioConfig, "agc">> & {
