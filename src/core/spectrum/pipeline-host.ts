@@ -115,7 +115,8 @@ export const COST_METER_MAX_MISSES = 10
  * growing and holds those 10 ticks until the next answer. Over any window between two samples the
  * advance of `active` is at least the window's CPU time less that, and at most the window's ELU plus
  * that (a late answer lands in the window after its ticks). Above CPU time it reaches only what ELU credited, which takes `COST_METER_MAX_MISSES` ticks
- * in a row without an answer.
+ * in a row without an answer. These bounds assume the counter is read when the answer arrives: a late
+ * answer with an older counter adds its age to the shortfall until the next answer credits it.
  */
 export class WorkerCostMeter {
 	private cpuMs: number | null = null

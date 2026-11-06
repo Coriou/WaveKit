@@ -468,7 +468,9 @@ credited for those ticks; neither counter moves back. When ELU credited more tha
 excess stays, because paying it back would hold `active` still and hide a later overrun. With each
 tick's CPU time at most its ELU, for any pattern of answers, rejections and hangs: `active` never
 exceeds ELU's and is at most 10 ticks of CPU time below the CPU time. Over a window its advance is at
-least the window's CPU time less those 10 ticks, and at most the window's ELU plus 10 ticks. It reads
+least the window's CPU time less those 10 ticks, and at most the window's ELU plus 10 ticks. These
+bounds assume an answer's counter is read when it arrives: an answer delivered late with an older
+counter adds its age to the shortfall until the next answer, which credits it in full. It reads
 above CPU time only by what ELU credited, which takes 10 ticks in a row without an answer: on a
 preempted worker at 90 % ELU and 10 % CPU, one answer in 12 ticks reads 15 %, and one in 30 reads about
 60 %, so the guard can disable passive there. The limit is unchanged. A shared engine disabled with a
