@@ -121,10 +121,16 @@ export class AccessPolicy {
 	#cookieName: string
 	#digest: Uint8Array
 	#sessions: SessionStore
+	#authorityLost: () => boolean
 
 	constructor(options: AccessPolicyOptions) {
 		const parsed = accessPolicySchema.safeParse(options)
-		if (!parsed.success || !(options.sessions instanceof SessionStore))
+		if (
+			!parsed.success ||
+			!(options.sessions instanceof SessionStore) ||
+			(options.credentialAuthorityLost !== undefined &&
+				typeof options.credentialAuthorityLost !== "function")
+		)
 			throw new WaveKitError(
 				"Invalid access policy configuration",
 				"ACCESS_CONFIG_INVALID",
@@ -161,6 +167,7 @@ export class AccessPolicy {
 				"ACCESS_CONFIG_INVALID",
 			)
 		this.#sessions = options.sessions
+		this.#authorityLost = options.credentialAuthorityLost ?? (() => false)
 	}
 
 	get sessionCookieName(): string {
@@ -324,6 +331,9 @@ export class AccessPolicy {
 			(path === "/health" || path === "/health/live")
 		)
 			return { kind: "public-health", headers }
+		// A reclaimed directory may hold a rotated credential: this process's digest
+		// and sessions can be revoked, so neither may admit until a restart reloads them.
+		if (this.#authorityLost()) return deny(503, "ACCESS_UNAVAILABLE")
 		const authorization = values.get("authorization")
 		if (authorization !== undefined) {
 			if (authorization.includes(",")) return deny(400, "MALFORMED_REQUEST")

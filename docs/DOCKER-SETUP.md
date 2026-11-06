@@ -711,22 +711,7 @@ docker compose -f compose.yaml --profile protected exec \
   sh -c 'exec node /app/dist/access-command.js devices revoke-all --yes --private-directory /var/lib/wavekit/access --api-origin "https://${WAVEKIT_PUBLIC_HOST}:9443"'
 ```
 
-Rotate the machine credential while the core is stopped, with the same
-one-off shape as setup. By default, rotation removes remembered browser
-sessions and the command says they were removed. `--keep-sessions` keeps
-them; the command then says they were kept and to review `devices list`
-after the core is started again. Restart the core before using the new
-credential.
-
-```bash
-docker compose -f compose.yaml --profile protected run --rm --no-deps \
-  --entrypoint sh wavekit-protected -c \
-  'exec node /app/dist/access-command.js rotate-credential --private-directory /var/lib/wavekit/access'
-
-docker compose -f compose.yaml --profile protected run --rm --no-deps \
-  --entrypoint sh wavekit-protected -c \
-  'exec node /app/dist/access-command.js rotate-credential --private-directory /var/lib/wavekit/access --keep-sessions'
-```
+#### Give an agent the machine credential
 
 Give an agent the machine credential without a shell in the core container.
 `machine-token` reads it from the private volume (the core may be running) and
@@ -743,9 +728,60 @@ sudo chown "$(id -u):$(id -g)" agent-secrets/machine-token
 ```
 
 The file belongs to the container user (root in the published image) until the
-`chown`, which keeps mode `0600`. An existing file is refused; after a
-`rotate-credential`, which revokes every copy, delete the old file and run the
-command again. See [Automation and agents](API.md#automation-and-agents).
+`chown`, which keeps mode `0600`. An existing file is refused. The agent reads
+the host file; it needs no `docker exec`. The credential lives in
+`wavekit-protected-access`, so it survives `docker compose down`, a new image
+and a recreated container. `docker compose down -v` deletes that volume and the
+credential with it; a new setup creates a different one. See
+[Get a machine token](AGENTS-API.md#get-a-machine-token) for how a client uses
+the file.
+
+#### Rotate the machine credential
+
+Rotating is how the credential is revoked: there is one, and the new one
+replaces every copy. Rotate while the core is stopped, with the same one-off
+shape as setup. By default, rotation removes remembered browser sessions and
+the command says they were removed. `--keep-sessions` keeps them; the command
+then says they were kept and to review `devices list` after the core is started
+again. Restart the core before using the new credential.
+
+```bash
+docker compose -f compose.yaml --profile protected stop wavekit-protected
+
+docker compose -f compose.yaml --profile protected run --rm --no-deps \
+  --entrypoint sh wavekit-protected -c \
+  'exec node /app/dist/access-command.js rotate-credential --private-directory /var/lib/wavekit/access'
+
+# Or, to keep browsers paired:
+docker compose -f compose.yaml --profile protected run --rm --no-deps \
+  --entrypoint sh wavekit-protected -c \
+  'exec node /app/dist/access-command.js rotate-credential --private-directory /var/lib/wavekit/access --keep-sessions'
+```
+
+A running core refuses this with `ACCESS_STORAGE_FOREIGN_OWNER` after up to 40
+seconds, and the old credential stays valid: the one-off is in another PID
+namespace, so it watches the core's lock instead of probing its PID. The same
+wait lets it take over the lock of a core that was killed. Then replace the
+agent's file before starting the core, so the agent's next retry finds it. The
+`chown` above makes the file yours, so `--replace` refuses it from the
+container; delete it and export again:
+
+```bash
+rm agent-secrets/machine-token
+docker compose -f compose.yaml --profile protected run --rm --no-deps \
+  -v "$PWD/agent-secrets:/agent" \
+  --entrypoint sh wavekit-protected -c \
+  'exec node /app/dist/access-command.js machine-token --private-directory /var/lib/wavekit/access --out /agent/machine-token'
+sudo chown "$(id -u):$(id -g)" agent-secrets/machine-token
+
+docker compose -f compose.yaml --profile protected up -d
+```
+
+An agent sees connection failures from the stop to the start. After the start
+the old token gets 401 `AUTH_REQUIRED`. See
+[Automation and agents](API.md#automation-and-agents).
+
+#### Exposure audit
 
 Exposure audit checklist for this profile. The static items are visible in
 `docker compose -f compose.yaml --profile protected config` and the files

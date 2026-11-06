@@ -29,13 +29,20 @@ never put the credential into URLs or logs.
 
 There is no HTTP route that issues or exports a machine credential, and the file
 holds the same single credential as the private directory: it is not a separate
-grant. `node dist/access-command.js rotate-credential --private-directory ABS`
-(core stopped) revokes it and every copy; run `machine-token --replace` afterwards
-to refresh the agent's file. Pass `--keep-sessions` to retain remembered browsers.
+grant. It survives core restarts and image recreates while the private directory
+persists. Revoking is rotating:
+`node dist/access-command.js rotate-credential --private-directory ABS` (core
+stopped) revokes it and every copy; run `machine-token --replace` afterwards to
+refresh the agent's file. Pass `--keep-sessions` to retain remembered browsers.
 Browser pairing issues a browser session, not a machine token. An agent without
 access to private host state must receive the file securely from the administrator.
 Machine requests need the configured Host/Origin policy; do not send a browser
 cookie alongside the bearer credential.
+
+In [legacy mode](#protected-runtime-opt-in), the default, the core checks no
+credential and ignores this header. The full flow (mint, store, use, rotate, and
+what a client sees meanwhile) is in
+[Get a machine token](AGENTS-API.md#get-a-machine-token).
 
 For a one-request overview of the receiver, read
 [`GET /api/agent/status`](#get-apiagentstatus).
@@ -404,7 +411,16 @@ file. By default that write removes remembered browser sessions. `--keep-session
 rebinds them to the new generation. The success line says those sessions were
 kept and to run `devices list` after restart. It prints no credential. Restart the
 core before the new credential is used. A running server's old persistence hook
-cannot write the previous binding.
+cannot write the previous binding. A failure before the write says private state did
+not change. A failure once the write started says the credential may have been
+replaced, because a failed directory sync cannot tell; rotate again and export again.
+
+A live owner refreshes its lock every 10 seconds, and a lock unchanged for 30 seconds
+can be reclaimed, so a core stalled that long (a paused container, for example) can
+lose the directory to a rotation. Within one refresh of resuming, that core notices
+and answers every bearer, cookie and audio request with 503 `ACCESS_UNAVAILABLE` until
+it is restarted: it can no longer tell whether its in-memory credential is current. It
+also logs an error. `/health` stays public. Streams admitted before the loss are not cut.
 
 ### Browser pairing for a web origin
 

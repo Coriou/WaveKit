@@ -17,7 +17,8 @@ const optionsSchema = z
 
 export type MachineRotationResult =
 	| { kind: "rotated" }
-	| { kind: "unavailable"; code: string }
+	/** `changed: "unknown"`: the write started, so the new state may have landed. */
+	| { kind: "unavailable"; code: string; changed: "no" | "unknown" }
 
 /**
  * Offline replacement of the machine credential. Refuses while another live
@@ -31,14 +32,20 @@ export async function rotateLocalMachineCredential(options: {
 }): Promise<MachineRotationResult> {
 	const parsed = optionsSchema.safeParse(options)
 	if (!parsed.success)
-		return { kind: "unavailable", code: "ACCESS_COMMAND_INVALID" }
+		return {
+			kind: "unavailable",
+			code: "ACCESS_COMMAND_INVALID",
+			changed: "no",
+		}
 	let storage: PrivateAccessStorage | undefined
+	let writing = false
 	try {
 		storage = await PrivateAccessStorage.open({
 			directory: parsed.data.directory,
 			mode: "load",
 			ownership: "single-host-pid-namespace",
 		})
+		writing = true
 		await storage.rotateMachineCredential({
 			keepSessions: parsed.data.keepSessions === true,
 		})
@@ -46,7 +53,7 @@ export async function rotateLocalMachineCredential(options: {
 	} catch (error) {
 		const code =
 			error instanceof WaveKitError ? error.code : "ACCESS_STORAGE_UNAVAILABLE"
-		return { kind: "unavailable", code }
+		return { kind: "unavailable", code, changed: writing ? "unknown" : "no" }
 	} finally {
 		await storage?.close().catch(() => undefined)
 	}

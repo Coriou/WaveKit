@@ -1,3 +1,4 @@
+import { createComponentLogger } from "../utils/logger.js"
 import type { Logger } from "../utils/logger.js"
 import { constants } from "node:fs"
 import fs from "node:fs/promises"
@@ -319,6 +320,10 @@ export class PrivateAccessStorage {
 	get unavailable(): boolean {
 		return this.#unavailable
 	}
+	/** Latched when another owner reclaimed the directory; it may have rotated the state. */
+	get ownershipLost(): boolean {
+		return this.#ownershipLost
+	}
 	get credentialBinding(): string {
 		return this.#current().credentialBinding
 	}
@@ -460,6 +465,10 @@ export class PrivateAccessStorage {
 				onLost: () => {
 					this.#ownershipLost = true
 					this.#unavailable = true
+					if (options?.logger)
+						createComponentLogger(options.logger, "PrivateAccessStorage").error(
+							"Private access ownership lost; denying credentials until the core restarts",
+						)
 				},
 			},
 		)

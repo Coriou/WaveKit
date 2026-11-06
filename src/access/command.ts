@@ -348,11 +348,7 @@ export async function runAccessCommand(
 		if (rotated.kind !== "rotated")
 			return {
 				exitCode: 1,
-				lines: [
-					rotated.code === "ACCESS_STORAGE_BUSY"
-						? "ACCESS_STORAGE_BUSY: Stop the core and retry credential rotation."
-						: `${rotated.code}: Credential rotation did not change private state.`,
-				],
+				lines: [rotationFailure(rotated.code, rotated.changed)],
 			}
 		return {
 			exitCode: 0,
@@ -449,6 +445,14 @@ export async function runAccessCommand(
 			`Expires in ${result.expiresInSeconds} seconds. Enter it in the connected web UI; the code is not a reusable API credential.`,
 		],
 	}
+}
+
+function rotationFailure(code: string, changed: "no" | "unknown"): string {
+	if (changed === "unknown")
+		return `${code}: Credential rotation failed and the machine credential may have been replaced. Stop the core, run rotate-credential again, then export the token again.`
+	if (code === "ACCESS_STORAGE_BUSY" || code === "ACCESS_STORAGE_FOREIGN_OWNER")
+		return `${code}: Stop the core and retry credential rotation.`
+	return `${code}: Credential rotation did not change private state.`
 }
 
 function machineTokenFailure(code: string): string {

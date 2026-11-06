@@ -23,8 +23,13 @@ the RTL-TCP relay are disabled in protected mode.
 - The machine credential for agents and scripts: `access-command.js machine-token`
   copies it into a private `0600` file without a container shell and never prints it.
   It writes inside the directory it checked, never into the private directory even
-  if a path is swapped for a link mid-way; `rotate-credential` revokes every copy. See
-  [Automation and agents](API.md#automation-and-agents).
+  if a path is swapped for a link mid-way. It survives restarts while the private
+  directory persists. `rotate-credential` is the only revocation and revokes every
+  copy; a stalled core that lost the directory to a rotation answers 503 until it is
+  restarted, so it cannot keep admitting the old credential. See
+  [Get a machine token](AGENTS-API.md#get-a-machine-token).
+- In the default legacy mode the core checks no credential: a token adds nothing, and
+  the bind address above is the only boundary.
 
 ## Decoder versions
 

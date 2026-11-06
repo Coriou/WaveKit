@@ -16,8 +16,14 @@ API_ORIGIN="https://receiver.example:9443"   # your core's API origin
 
 ## Get a machine token
 
-Agents use the machine credential, never a browser session. On the host, with the private
-state directory the core uses (the core may be running):
+Agents use the machine credential, never a browser session. A core has exactly one, created by
+[`setup`](LOCAL-SETUP.md#protected-mode-locally) and kept in the core's private state directory.
+You copy it into a file once; the agent then needs no `docker exec` and no shell in the container.
+No HTTP route issues a token, and a browser pairing code is not one.
+
+### Mint
+
+On the host, with the private state directory the core uses. The core may be running or stopped:
 
 ```sh
 mkdir -p -m 700 "$HOME/.config/wavekit"
@@ -26,24 +32,84 @@ node dist/access-command.js machine-token \
   --out "$HOME/.config/wavekit/machine-token"
 ```
 
-The command writes the file with mode `0600` and never prints the credential. The target
-directory must exist, must not be writable by group or others, and must lie outside the
-private directory. An existing file is refused; `--replace` overwrites your own `0600` file.
-In Docker, run the same command in a one-off container with the private directory mounted
-([Docker setup](DOCKER-SETUP.md#protected-runtime-deployment)).
+In Docker, run the same command in a one-off container that mounts the private volume and a host
+directory: [the exact commands](DOCKER-SETUP.md#give-an-agent-the-machine-credential). A failure
+reading `ACCESS_CREDENTIAL_UNAVAILABLE` means the directory has no provisioned credential yet, or
+is not your own `0700` directory.
 
-Once the file exists, load the header the recipes below send:
+### Store
+
+The command writes the file with mode `0600` and never prints the credential. The target directory
+must exist, must not be writable by group or others, and must lie outside the private directory.
+An existing file is refused; `--replace` overwrites only your own `0600` file. Hand the file to an
+agent on another machine over a secure channel. Never put the token in a URL or a log. An export
+killed partway can leave a `0600` `.machine-token-*.tmp` beside the file, holding the same token;
+delete it, and if `--replace` then still answers `ACCESS_TOKEN_OUT_UNSAFE`, delete the file too and
+export again.
+
+The file is a copy of the one credential, not a separate grant, and it has no expiry. It stays valid
+across core restarts and image recreates for as long as the private directory persists. Deleting
+that directory (`docker compose down -v` on a named volume, or stopping `make dev-protected`
+without `--keep`) destroys the credential: a new `setup` creates a different one.
+
+### Use
+
+The client reads the file once when it starts and sends the header on every request. In a shell,
+load the header the recipes below send:
 
 ```sh
 AUTH="Authorization: Bearer $(cat "$HOME/.config/wavekit/machine-token")"
 ```
 
-There is no HTTP route that issues a token. Rotating the credential
-(`rotate-credential`, core stopped) revokes every copy; on the host run `machine-token --replace`
-afterwards. In Docker the file belongs to the container user, so `--replace` refuses it: delete
-the old file and run the one-off command again, as in
-[Docker setup](DOCKER-SETUP.md#protected-runtime-deployment). Keep the file private and never put the token in a URL or a log. Details:
-[API: automation and agents](API.md#automation-and-agents) and [Security](SECURITY.md).
+On a host shared with other users, `curl --header "$AUTH"` shows the token in `ps`. Use a client
+that reads the file itself there.
+
+| Answer                   | Meaning                                                       | What to do                                                 |
+| ------------------------ | ------------------------------------------------------------- | ---------------------------------------------------------- |
+| 401 `AUTH_REQUIRED`      | The token is not the current credential: it was rotated       | Re-read the file once and retry once, then ask an operator |
+| 503 `ACCESS_UNAVAILABLE` | The core cannot vouch for its credentials and needs a restart | Ask an operator; the token may still be fine               |
+| Connection failure       | The core is stopped, for example during a rotation            | Retry with a delay; do not change the token                |
+
+### Rotate and revoke
+
+Revoking is rotating: there is one machine credential, so replacing it revokes every copy at once
+and every agent needs the new one. Rotation runs with the core stopped:
+
+```sh
+# Stop the core, then:
+node dist/access-command.js rotate-credential --private-directory "$PRIVATE_DIRECTORY"
+node dist/access-command.js machine-token --replace \
+  --private-directory "$PRIVATE_DIRECTORY" \
+  --out "$HOME/.config/wavekit/machine-token"
+# Start the core again.
+```
+
+- **Browsers.** By default rotation also removes every remembered browser, so each one pairs again.
+  `--keep-sessions` keeps browsers paired; review them with `devices list` after the restart.
+- **While a core runs.** Rotation is refused with `ACCESS_STORAGE_BUSY` (or
+  `ACCESS_STORAGE_FOREIGN_OWNER` from another container) and the token stays valid. Rotation waits up
+  to 40 seconds for the lock of a core that was killed without a clean exit.
+- **What an agent sees.** Connection failures from stop to start, including on `/health`. After the
+  start, the old token gets 401, so export the new file before starting the core and the agent's
+  retry finds it.
+- **If rotation fails after it started writing,** the message says the credential may have been
+  replaced. Rotate again and export again.
+- **In Docker,** the exported file belongs to you after the `chown`, so `--replace` refuses it: delete
+  it and export again, as in the [exact commands](DOCKER-SETUP.md#rotate-the-machine-credential).
+
+To revoke one browser instead, use [`devices revoke`](API.md#protected-runtime-opt-in) against the
+running core; it leaves the machine credential alone.
+
+### A core without protection
+
+Legacy mode is the default (no `access` block, and `pnpm start:local`). It has no access check at
+all: no credential is needed, the `Authorization` header is ignored, and every route is open to
+whoever can reach the port, so the core's bind address is the only boundary
+([Security](SECURITY.md#access-and-pairing)). A token grants nothing extra there, and running
+`setup` or `machine-token` does not turn protection on. A request without a token that gets 200 from
+`GET /api/agent/status` means the core is unprotected; a protected core answers 401.
+
+Details: [API: automation and agents](API.md#automation-and-agents) and [Security](SECURITY.md).
 
 ## Read the receiver state
 

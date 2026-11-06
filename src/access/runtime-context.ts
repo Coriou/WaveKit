@@ -223,11 +223,13 @@ export async function openAccessRuntime(
 			persistSeen: storage.persistSeen,
 			...(config.logger ? { logger: seenLoggerFor(config.logger) } : {}),
 		})
+		const ownedStorage = storage
 		const common = {
 			allowedOrigins: bootstrap.allowedOrigins,
 			sessionCookieName: config.sessionCookieName,
 			machineSecretDigest: storage.machineSecretDigest(),
 			sessions,
+			credentialAuthorityLost: () => ownedStorage.ownershipLost,
 		}
 		const apiPolicy = new AccessPolicy({
 			...common,
@@ -245,7 +247,6 @@ export async function openAccessRuntime(
 			pairing: new PairingService({ policy: apiPolicy, sessions }),
 			flows: new SessionFlows({ policy: apiPolicy, sessions }),
 		})
-		const ownedStorage = storage
 		const ownedLeases = leases
 		let closing: Promise<void> | undefined
 		return Object.freeze({
