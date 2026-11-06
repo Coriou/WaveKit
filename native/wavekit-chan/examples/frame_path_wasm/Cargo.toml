@@ -1,0 +1,28 @@
+# Spike, not production: examples/frame_path/fp.rs for wasm32, run by scripts/profile-frame-path-wasm.ts.
+# A package of its own so the shipped crate's manifest, lockfile and dependencies stay untouched.
+[package]
+name = "frame_path_wasm"
+version = "0.0.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[workspace]
+
+[dependencies]
+# MIT OR Apache-2.0; pinned to the version in the parent Cargo.lock
+rustfft = { version = "=6.4.1", default-features = false }
+
+[features]
+default = ["simd"]
+# rustfft's wasm32 kernels; build with RUSTFLAGS="-C target-feature=+simd128"
+simd = ["rustfft/wasm_simd"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

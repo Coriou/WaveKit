@@ -532,20 +532,43 @@ equivalence property, and a `Math.log10` call-count guard
 too, so no stage converts a whole frame to dB; see [below](#frame-tracks-and-main-thread-reads-2026-11-06).
 
 `scripts/profile-spectrum.ts`, 30 s of synthetic IQ (noise, CW, NFM, Mode-S-like pulses), on a
-busy Mac. Compare before and after in the same row, not absolute rates.
+busy Mac. These rows are wall clock, taken before the tool read thread CPU. Compare before and after
+in the same row, not absolute rates.
 
-| Mode, ms of worker CPU per s of IQ | Before | After | Load average |
-| ---------------------------------- | ------ | ----- | ------------ |
-| `stages`, short path (self)        | 137.9  | 48.8  | 15.6 → 17.8  |
-| `stages`, built-in `tracker` span  | 313.3  | 173.3 | 15.6 → 17.8  |
-| `stages`, worker total             | 846.4  | 644.7 | 15.6 → 17.8  |
-| `bare`, `handle()` total           | 1113.2 | 634.0 | 52.6 → 56.8  |
+| Mode, wall ms per s of IQ         | Before | After | Load average |
+| --------------------------------- | ------ | ----- | ------------ |
+| `stages`, short path (self)       | 137.9  | 48.8  | 15.6 → 17.8  |
+| `stages`, built-in `tracker` span | 313.3  | 173.3 | 15.6 → 17.8  |
+| `stages`, worker total            | 846.4  | 644.7 | 15.6 → 17.8  |
+| `bare`, `handle()` total          | 1113.2 | 634.0 | 52.6 → 56.8  |
 
 A first build that sent `powerToDb` through the one-bin helper `binPowerDb` was slower in
 `bare` mode (565 to 602 against 522 to 540, load 12 to 16): the bundled worker did not inline
 that call, and the remaining frame dB pass doubled in cost. `powerToDb` keeps its inline loop.
 The spectrum feed stays on without display clients: the scanner, occupancy, backfill and
 status read every block summary.
+
+### Frame path cost on thread CPU (2026-11-06)
+
+Measured to judge moving the frame path out of JS; nothing here is built into the product.
+`scripts/profile-spectrum.ts` now reads `process.threadCpuUsage()`, the same kind of figure the passive
+guard reads through `worker.cpuUsage()`. `scripts/profile-frame-path-wasm.ts` runs the Rust path natively
+and as wasm32 with SIMD on the same synthetic scene, alternated. Figures are core fraction per second of
+IQ, f64 FFT, FFT 2048 at 2.4 Msps and 1024 at 1.024 Msps, overlap 0, on a Mac i5 with other work running.
+SMT and cache sharing inflate thread CPU on a loaded host, so a quiet host reads lower.
+
+| Measure                                     | 2.4 Msps      | Load     | 1.024 Msps    | Load     |
+| ------------------------------------------- | ------------- | -------- | ------------- | -------- |
+| JS `handle()` plus wire, whole worker path  | 0.346 - 0.376 | 14 to 19 | 0.142 - 0.156 | 20 to 28 |
+| JS frame path share (self CPU, `stages`)    | 83 %          | 24 to 30 | 80 %          | 15 to 19 |
+| Rust frame path, native                     | 0.044 - 0.053 | 15 to 35 | 0.020 - 0.021 | 21 to 27 |
+| Rust frame path, wasm32 SIMD, with boundary | 0.089 - 0.095 | 15 to 28 | 0.040 - 0.042 | 21 to 27 |
+
+The boundary is one call per chunk with the chunk copied into linear memory and flat block results
+copied out: about 1.4 ms of CPU per second of IQ at 2.4 Msps. rustfft's wasm SIMD kernels need its
+`wasm_simd` feature and `+simd128`: the FFT stage reads 0.029 core with them and 0.044 without. Rust power bins
+differ from the JS ones by up to 0.011 dB over 2000 frames (0.0032 dB above -100 dB); the JS transform
+stores Float32 at every stage, the likely cause. The native and wasm32 f64 builds agree within 1e-10 dB.
 
 ## Frame tracks and main-thread reads (2026-11-06)
 

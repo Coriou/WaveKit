@@ -4,22 +4,30 @@
  *   node scripts/profile-spectrum-build.mjs
  *   nice -n 10 node output/bench/profile-spectrum.mjs [--seconds 30] [--rate 2400000]
  *     [--fft auto|<n>] [--overlap 0|0.5] [--feed on|off] [--mode stages|bare|proto]
- *     [--iq <path.cu8>] [--json]
+ *     [--wire] [--iq <path.cu8>] [--json]
  *
  * Drives a real SpectrumPipeline (no worker thread) as fast as it will go with
  * seeded synthetic CU8: Gaussian noise, CW and NFM carriers and Mode-S-like PPM
  * bursts. No socket, no state dir, nothing written.
+ *
+ * Clocks: wall is `performance.now()`; CPU is `process.threadCpuUsage()`, this thread's user + system
+ * time, the same kind of figure the passive guard reads through `worker.cpuUsage()`. Compare CPU with
+ * `frame_path_bench`; wall also holds any preemption, so it swings with host load.
  *
  * Modes:
  * - `stages`: wraps the prototype methods of every pipeline stage in the harness
  *   (self time on a call stack, so nested stages are not double counted) and turns
  *   on the pipeline's own opt-in profile as a cross check. Block summaries are
  *   wire-encoded and structured-cloned (the postMessage copy), then decoded and
- *   observed by an OccupancyHistory like the main thread does.
- * - `bare`: no wrapping and no profile; one clock around each handle(). Use this
- *   for the total and under `node --cpu-prof`.
+ *   observed by an OccupancyHistory like the main thread does. Both clocks are read around every
+ *   wrapped call. A CPU read is far from free (microseconds on macOS), so the calibrated cost of the
+ *   reads each stage holds is taken off its self time; `handle()` itself stays raw and inflated, so
+ *   take the total from `bare` and only the shares from here.
+ * - `bare`: no wrapping and no profile; one pair of clocks around each handle(). Use this
+ *   for the total and under `node --cpu-prof`. `--wire` adds the worker's encode and postMessage copy
+ *   of each event batch, clocked apart, without the main-thread decode.
  * - `proto`: FFT prototypes (Float32 tables, radix-4, real-input pair) on the
- *   same frames, against the production Fft.
+ *   same frames, against the production Fft. Wall clock only.
  *
  * `--iq` reads a private capture for an offline run; report only aggregate CPU.
  */
@@ -86,6 +94,7 @@ const FEED = flag("feed") !== "off"
 const MODE = flag("mode") ?? "stages"
 const IQ_PATH = flag("iq")
 const JSON_OUT = process.argv.includes("--json")
+const WIRE = process.argv.includes("--wire")
 
 function loadIq(): Uint8Array {
 	if (IQ_PATH) {
@@ -103,15 +112,68 @@ function loadIq(): Uint8Array {
 	return synthesizeCu8(RATE, Math.min(SECONDS, 4))
 }
 
+// ---- clocks ----
+
+/** This thread's CPU time in ms. Per thread on Node 24: a spinning worker does not move another's. */
+function cpuNow(): number {
+	const u = process.threadCpuUsage()
+	return (u.user + u.system) / 1000
+}
+
+/** What one CPU read costs on each clock, in ms, averaged over a burst of reads. */
+function calibrateCpuRead(): { cpuMs: number; wallMs: number } {
+	const reads = 20_000
+	const cpu0 = cpuNow()
+	const wall0 = performance.now()
+	for (let i = 0; i < reads; i++) cpuNow()
+	return {
+		cpuMs: (cpuNow() - cpu0) / reads,
+		wallMs: (performance.now() - wall0) / reads,
+	}
+}
+
+let cpuRead = { cpuMs: 0, wallMs: 0 }
+
+/** Worker work between two reads, on both clocks. */
+class Span {
+	wallMs = 0
+	cpuMs = 0
+	add(wall0: number, cpu0: number): void {
+		const cpu1 = cpuNow()
+		this.wallMs += performance.now() - wall0
+		this.cpuMs += cpu1 - cpu0
+	}
+}
+
 // ---- self-time accounting ----
 
-const self = new Map<string, number>()
+const self = new Map<string, { wallMs: number; cpuMs: number }>()
 const calls = new Map<string, number>()
-const stack: { label: string; t0: number; child: number }[] = []
+const stack: {
+	label: string
+	wall0: number
+	cpu0: number
+	childWall: number
+	childCpu: number
+	children: number
+}[] = []
 let wrapping = false
+/** Frame path labels: what a move out of the worker would take; every other label stays in JS. */
+const FRAME_PATH_LABELS = new Set([
+	"fft",
+	"window + cu8 convert (FrameSource)",
+	"impulse blanker",
+	"power accumulate + block sum (onFrame inline)",
+	"short path window (5 ms burst)",
+	"frame tracks (Tracker.frame)",
+])
 
-function charge(label: string, ms: number): void {
-	self.set(label, (self.get(label) ?? 0) + ms)
+function charge(label: string, wallMs: number, cpuMs: number): void {
+	const row = self.get(label)
+	if (row) {
+		row.wallMs += wallMs
+		row.cpuMs += cpuMs
+	} else self.set(label, { wallMs, cpuMs })
 }
 
 type AnyFn = (this: unknown, ...args: unknown[]) => unknown
@@ -126,17 +188,36 @@ function wrapMethod(
 	const fn = original as AnyFn
 	proto[name] = function (this: unknown, ...args: unknown[]): unknown {
 		if (!wrapping) return fn.apply(this, args)
-		const frame = { label, t0: performance.now(), child: 0 }
+		const frame = {
+			label,
+			wall0: performance.now(),
+			cpu0: 0,
+			childWall: 0,
+			childCpu: 0,
+			children: 0,
+		}
 		stack.push(frame)
+		frame.cpu0 = cpuNow()
 		try {
 			return fn.apply(this, args)
 		} finally {
+			const cpuTotal = cpuNow() - frame.cpu0
+			const wallTotal = performance.now() - frame.wall0
 			stack.pop()
-			const total = performance.now() - frame.t0
-			charge(label, total - frame.child)
+			// This span holds one read of its own, and each child's span leaves one more read here.
+			const reads = 1 + frame.children
+			charge(
+				label,
+				wallTotal - frame.childWall - reads * cpuRead.wallMs,
+				cpuTotal - frame.childCpu - reads * cpuRead.cpuMs,
+			)
 			calls.set(label, (calls.get(label) ?? 0) + 1)
 			const parent = stack[stack.length - 1]
-			if (parent) parent.child += total
+			if (parent) {
+				parent.childWall += wallTotal
+				parent.childCpu += cpuTotal
+				parent.children++
+			}
 		}
 	}
 }
@@ -194,15 +275,24 @@ function installWraps(): void {
 	wrapClass(NoiseFloor, "noise floor")
 	wrapClass(SpurMap, "spur map")
 	wrapClass(ProvisionalSpurs, "provisional spurs / lines")
-	wrapClass(Detector, "detector (CFAR)")
+	// Entry points only. Their helpers run about 145 000 calls/s (flushEnvelope, kFor and such), and a
+	// wrap around each costs far more than the helper, so they stay in their caller's self time.
+	wrapClass(Detector, "detector (CFAR)", [
+		"detect",
+		"setCfarRanges",
+		"setMasks",
+	])
 	wrapClass(Tracker, "frame tracks (Tracker.frame)", ["frame"])
-	wrapClass(
-		Tracker,
-		"emissions tracker (block)",
-		Object.getOwnPropertyNames(Tracker.prototype).filter(
-			n => n !== "frame" && n !== "constructor",
-		),
-	)
+	wrapClass(Tracker, "emissions tracker (block)", [
+		"block",
+		"associationOf",
+		"trackBinsMask",
+		"longLived",
+		"openCandidates",
+		"flagSpurs",
+		"snapshotOf",
+		"publishGate",
+	])
 	const proto = SpectrumPipeline.prototype as unknown as Record<string, unknown>
 	for (const [name, label] of Object.entries(PIPELINE_METHODS))
 		wrapMethod(proto, name, label)
@@ -212,14 +302,42 @@ function installWraps(): void {
 
 interface RunResult {
 	wallMs: number
-	handleMs: number
+	/** Whole loop on this thread, the chunk copies included. */
+	loopCpuMs: number
+	handle: Span
 	frames: number
 	blocks: number
 	summaries: number
 	iqSeconds: number
-	wire: { encodeMs: number; cloneMs: number; decodeMs: number }
-	occupancyMs: number
+	encode: Span
+	clone: Span
+	decode: Span
+	occupancy: Span
+	openTracksPerChunk: number
+	openBinsPerChunk: number
 	profile: PipelineProfile | null
+}
+
+/** Open, unfrozen tracks and their bins right now, to size the Rust Tracker.frame stand-in. */
+function openTracks(pipeline: SpectrumPipeline): {
+	tracks: number
+	bins: number
+} {
+	const tracker = (
+		pipeline as unknown as {
+			tracker: {
+				open: Iterable<{ frozen: boolean; startBin: number; endBin: number }>
+			}
+		}
+	).tracker
+	let tracks = 0
+	let bins = 0
+	for (const t of tracker.open) {
+		if (t.frozen) continue
+		tracks++
+		bins += t.endBin - t.startBin
+	}
+	return { tracks, bins }
 }
 
 function settings(): SpectrumSettings {
@@ -250,16 +368,23 @@ function run(iq: Uint8Array): RunResult {
 	})
 	pipeline.handle({ kind: "spectrum-feed", enabled: FEED })
 	const totalBytes = Math.round(RATE * 2 * SECONDS) & ~1
-	const wire = { encodeMs: 0, cloneMs: 0, decodeMs: 0 }
-	let occupancyMs = 0
-	let handleMs = 0
+	const handleSpan = new Span()
+	const encode = new Span()
+	const clone = new Span()
+	const decode = new Span()
+	const occupancyUse = new Span()
+	let trackSamples = 0
+	let openTrackSum = 0
+	let openBinSum = 0
 	let blocks = 0
 	let summaries = 0
 	let sample = 0
 	let offset = 0
 	const chunk = new Uint8Array(CHUNK_BYTES)
+	cpuRead = calibrateCpuRead()
 	wrapping = MODE === "stages"
 	const wall0 = performance.now()
+	const loopCpu0 = cpuNow()
 	for (let done = 0; done < totalBytes; done += CHUNK_BYTES) {
 		const len = Math.min(CHUNK_BYTES, totalBytes - done)
 		for (let w = 0; w < len; ) {
@@ -270,30 +395,42 @@ function run(iq: Uint8Array): RunResult {
 		}
 		const bytes = len === CHUNK_BYTES ? chunk : chunk.subarray(0, len)
 		const t0 = performance.now()
+		const c0 = cpuNow()
 		const events = pipeline.handle({
 			kind: "bytes",
 			startSample: sample,
 			bytes,
 		})
-		handleMs += performance.now() - t0
+		handleSpan.add(t0, c0)
 		sample += len / 2
+		if (MODE === "stages") {
+			const open = openTracks(pipeline)
+			trackSamples++
+			openTrackSum += open.tracks
+			openBinSum += open.bins
+		}
 		if (events.length === 0) continue
 		for (const ev of events) {
 			if (ev.kind === "block-summary") summaries++
 			if (ev.kind === "block-summary" || ev.kind === "stale-discard") blocks++
 		}
-		if (MODE !== "stages") continue
+		if (MODE !== "stages" && !WIRE) continue
 		let t = performance.now()
+		let c = cpuNow()
 		const transfer: ArrayBuffer[] = []
 		encodeEventsForWire(events, transfer)
-		wire.encodeMs += performance.now() - t
+		encode.add(t, c)
 		t = performance.now()
+		c = cpuNow()
 		const copy = structuredClone(events) as PipelineEvent[]
-		wire.cloneMs += performance.now() - t
+		clone.add(t, c)
+		if (MODE !== "stages") continue
 		t = performance.now()
+		c = cpuNow()
 		decodeEventsFromWire(copy)
-		wire.decodeMs += performance.now() - t
+		decode.add(t, c)
 		t = performance.now()
+		c = cpuNow()
 		for (const ev of copy) {
 			if (ev.kind !== "block-summary") continue
 			const sum: BlockSummary = ev.summary
@@ -305,21 +442,27 @@ function run(iq: Uint8Array): RunResult {
 				cfg.integrationMs,
 			)
 		}
-		occupancyMs += performance.now() - t
+		occupancyUse.add(t, c)
 	}
+	const loopCpuMs = cpuNow() - loopCpu0
 	const wallMs = performance.now() - wall0
 	wrapping = false
 	const state = pipeline.exportEngineState() as { profile?: PipelineProfile }
 	const n = cfg.fftSize
 	return {
 		wallMs,
-		handleMs,
+		loopCpuMs,
+		handle: handleSpan,
 		frames: Math.floor(sample / (n * (1 - OVERLAP))),
 		blocks,
 		summaries,
 		iqSeconds: sample / RATE,
-		wire,
-		occupancyMs,
+		encode,
+		clone,
+		decode,
+		occupancy: occupancyUse,
+		openTracksPerChunk: openTrackSum / Math.max(1, trackSamples),
+		openBinsPerChunk: openBinSum / Math.max(1, trackSamples),
 		profile: state.profile ?? null,
 	}
 }
@@ -638,7 +781,7 @@ function main(): void {
 			return
 		}
 		process.stdout.write(
-			`FFT prototypes, ${RATE} S/s, ${SECONDS} s, load ${load.join(" ")} -> ${end.join(" ")}\n`,
+			`FFT prototypes (wall clock), ${RATE} S/s, ${SECONDS} s, load ${load.join(" ")} -> ${end.join(" ")}\n`,
 		)
 		for (const [k, v] of Object.entries(out))
 			process.stdout.write(`  ${k.padEnd(60)} ${v.toPrecision(4)}\n`)
@@ -652,18 +795,18 @@ function main(): void {
 	const head =
 		`spectrum pipeline ${MODE}, ${RATE} S/s, fft ${FFT_ARG}, overlap ${OVERLAP}, feed ${FEED ? "on" : "off"}, ` +
 		`${fmt(r.iqSeconds)} s IQ${IQ_PATH ? " (capture)" : " (synthetic)"}, load ${load.join(" ")} -> ${end.join(" ")}`
-	const rows: [string, number][] = []
+	const rows: [string, { wallMs: number; cpuMs: number }][] = []
 	if (MODE === "stages") {
 		for (const [k, v] of self) rows.push([k, v])
-		rows.push(["wire encode (encodeEventsForWire)", r.wire.encodeMs])
-		rows.push(["postMessage copy (structuredClone)", r.wire.cloneMs])
-		rows.push(["[main] wire decode", r.wire.decodeMs])
-		rows.push(["[main] occupancy observe", r.occupancyMs])
-		rows.sort((a, b) => b[1] - a[1])
+		rows.push(["wire encode (encodeEventsForWire)", r.encode])
+		rows.push(["postMessage copy (structuredClone)", r.clone])
+		rows.push(["[main] wire decode", r.decode])
+		rows.push(["[main] occupancy observe", r.occupancy])
+		rows.sort((a, b) => b[1].cpuMs - a[1].cpuMs)
 	}
 	if (JSON_OUT) {
 		process.stdout.write(
-			`${JSON.stringify({ head, ...r, rows, calls: Object.fromEntries(calls) })}\n`,
+			`${JSON.stringify({ head, cpuRead, ...r, rows, calls: Object.fromEntries(calls) })}\n`,
 		)
 		return
 	}
@@ -672,26 +815,42 @@ function main(): void {
 		`frames ${r.frames} (${fmt(r.frames / r.iqSeconds)}/s), blocks ${r.blocks} (${fmt(r.blocks / r.iqSeconds)}/s), summaries ${r.summaries}\n`,
 	)
 	process.stdout.write(
-		`handle() total ${fmt(perSec(r.handleMs))} CPU-ms per s IQ (${fmt(perSec(r.handleMs) / 10)} % core), ${fmt(perFrame(r.handleMs), 2)} µs/frame, ${fmt(RATE / (r.handleMs / r.iqSeconds) / 1000, 2)}x realtime-equivalent Msps\n`,
+		`handle() total: ${fmt(perSec(r.handle.cpuMs))} thread-CPU-ms per s IQ (${fmt(perSec(r.handle.cpuMs) / 1000, 3)} core), ${fmt(perSec(r.handle.wallMs))} wall-ms per s IQ; ${fmt(perFrame(r.handle.cpuMs), 2)} CPU-µs/frame${MODE === "stages" ? " (raw, wrap overhead inside; take totals from bare)" : ""}\n`,
 	)
+	process.stdout.write(
+		`loop thread CPU, chunk copies included: ${fmt(perSec(r.loopCpuMs))} ms per s IQ; wall ${fmt(perSec(r.wallMs))} ms per s IQ\n`,
+	)
+	if (WIRE && MODE !== "stages")
+		process.stdout.write(
+			`wire: encode ${fmt(perSec(r.encode.cpuMs), 2)} + postMessage copy ${fmt(perSec(r.clone.cpuMs), 2)} thread-CPU-ms per s IQ; handle + wire ${fmt(perSec(r.handle.cpuMs + r.encode.cpuMs + r.clone.cpuMs))}\n`,
+		)
 	if (MODE !== "stages") return
 	process.stdout.write(
-		`\n${"stage (self time)".padEnd(52)} ${"µs/frame".padStart(9)} ${"ms/s IQ".padStart(9)} ${"%".padStart(6)} ${"calls/s".padStart(9)}\n`,
+		`thread-clock read ${fmt(cpuRead.cpuMs * 1000, 2)} CPU-µs, taken off each stage per read; ${fmt(r.openTracksPerChunk, 2)} open tracks, ${fmt(r.openBinsPerChunk)} open bins (mean per chunk)\n`,
 	)
-	const workerTotal = r.handleMs + r.wire.encodeMs + r.wire.cloneMs
+	process.stdout.write(
+		`\n${"stage (self time, clock reads removed)".padEnd(52)} ${"CPU µs/frame".padStart(12)} ${"CPU ms/s IQ".padStart(11)} ${"wall ms/s IQ".padStart(12)} ${"CPU %".padStart(6)} ${"calls/s".padStart(9)}\n`,
+	)
+	let workerCpu = 0
+	let framePathCpu = 0
+	for (const [k, v] of rows) {
+		if (k.startsWith("[main]")) continue
+		workerCpu += v.cpuMs
+		if (FRAME_PATH_LABELS.has(k)) framePathCpu += v.cpuMs
+	}
 	for (const [k, v] of rows) {
 		const c = calls.get(k)
 		process.stdout.write(
-			`${k.padEnd(52)} ${fmt(perFrame(v), 2).padStart(9)} ${fmt(perSec(v), 2).padStart(9)} ${fmt((100 * v) / workerTotal).padStart(6)} ${(c === undefined ? "" : fmt(c / r.iqSeconds, 0)).padStart(9)}\n`,
+			`${k.padEnd(52)} ${fmt(perFrame(v.cpuMs), 2).padStart(12)} ${fmt(perSec(v.cpuMs), 2).padStart(11)} ${fmt(perSec(v.wallMs), 2).padStart(12)} ${fmt((100 * v.cpuMs) / workerCpu).padStart(6)} ${(c === undefined ? "" : fmt(c / r.iqSeconds, 0)).padStart(9)}\n`,
 		)
 	}
 	process.stdout.write(
-		`worker total (handle + encode + clone) ${fmt(perSec(workerTotal))} ms/s IQ; wrap overhead is inside these numbers\n`,
+		`worker self CPU, clock reads removed (handle + encode + clone) ${fmt(perSec(workerCpu))} ms/s IQ; frame path ${fmt(perSec(framePathCpu))} (${fmt((100 * framePathCpu) / workerCpu)} %), other stages ${fmt(perSec(workerCpu - framePathCpu))} (${fmt((100 * (workerCpu - framePathCpu)) / workerCpu)} %). Wrap closures remain inside these numbers\n`,
 	)
 	const p = r.profile
 	if (p) {
 		process.stdout.write(
-			`\nbuilt-in pipeline profile (inclusive spans): blocks ${p.blocks}, busy ${fmt(perSec(p.busyMs))} ms/s IQ\n`,
+			`\nbuilt-in pipeline profile (inclusive spans, wall clock): blocks ${p.blocks}, busy ${fmt(perSec(p.busyMs))} ms/s IQ\n`,
 		)
 		for (const st of PIPELINE_PROFILE_STAGES)
 			process.stdout.write(
