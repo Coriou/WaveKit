@@ -320,19 +320,30 @@ work. Now:
   does (rule 5). A centre move sends one `recenter` control line. Open channels are still
   invalidated and re-requested, because a decoder's request may follow the centre and only the
   decoder can recompute it. A request still in flight is answered the same way, so it is computed
-  again rather than granted for the old centre.
+  again rather than granted for the old centre. A process left with no channels waits 6 s after the
+  latest move for its decoders to come back, and at most 12 s after the first move since its last
+  grant: a sweep with no grants retires it there rather than feeding it the whole byte rate for as
+  long as it sweeps. The next request then costs one respawn, as every move did before.
 - **`recenter` carries its position in the input.** Control and stdin are read independently, and
-  old-centre IQ can sit in the branch, the pipe and the reader when the line arrives.
-  `atInputBytes` is the fanout's count of bytes it delivered to the branch (accepted minus dropped,
-  the same count `mark-gap` uses), so it is the stdin position of the first byte after the move.
-  The process applies the move when its input reaches that byte, splitting the block there, and a
+  old-centre IQ can sit in a burst absorber, the branch, the pipe and the reader when the line
+  arrives. `atInputBytes` is the fanout's count of bytes it delivered to the branch (accepted minus
+  dropped, the same count `mark-gap` uses) plus what the source's absorber holds. It is the stdin
+  position of the first byte after the move, except when the absorber's release drops held bytes
+  for a lagging channelizer branch: then it is late by those bytes, at most the absorber's capacity,
+  and a reopened channel starts that far into the new centre. It errs late and never early. The
+  process applies the move when its input reaches that byte, splitting the block there, and a
   channel opened after the line receives no sample before it. A position already passed applies at
-  once. Moves apply in order; at most 512 wait (a reader lags by at most 2 250 ms before the parent
-  retires it, hops are at least the 5 ms default PLL settle apart: 450, rounded up; 24 bytes each).
-  Past that, or on a process with a demod channel, the process answers `recenter-refused` and the
-  parent restarts it. So does a position the parent cannot trust. IQ older than the fanout (the
-  tuner settling, a socket, a burst absorber) has no position: it reaches a reopened channel as it
-  does after a restart, and the source clock's settlement is what discards it.
+  once. Moves apply in order; 512 may wait, 24 bytes each. That is a safety cap, not a proved limit.
+  At 2.048 Msps with the defaults the position can be ahead of the input by the absorber's
+  8 192 000 B, the branch's 2 × 1 024 000 B, the pipe's 65 536 B and the reader's 32 768 B, in all
+  2 524 ms: 505 moves at 5 ms apart and 14 at a real 185 ms hop. A larger absorber or input mark, a
+  shorter settle or unpaced retunes can pass it, and the silence watchdog does not stop that,
+  because a lagging reader that progresses stays alive. Past the cap, or on a process with a demod
+  channel, the process answers `recenter-refused` and the parent retires the generation. So does a
+  position the parent cannot trust. IQ the parent cannot place has no position and reaches a
+  reopened channel, and the source clock's settlement is what discards it: IQ older than the fanout
+  and not in an absorber (the tuner settling, a socket), and what an absorber still holds when a
+  generation starts, because a restart hands that to the new branch rather than discarding it.
 
 `native/wavekit-chan/examples/paced_load.py`, a real binary with paced noise on stdin and a separate
 consumer process, 12 s per run; ranges are repeated runs, with the 1 448 B, 4 096 B and 512 kHz rows

@@ -9,6 +9,7 @@ import {
 } from "../../../src/config.js"
 import {
 	ChannelizerManager,
+	RECENTER_LINGER_MAX_MS,
 	RECENTER_LINGER_MS,
 } from "../../../src/core/channelizer/channelizer-manager.js"
 import type { ChannelizerRequest } from "../../../src/core/channelizer/protocol.js"
@@ -317,6 +318,74 @@ it("a grant after a move ends the deadline: its release retires at once", async 
 	)
 	if (!next.ok) throw new WaveKitError(next.detail, "TEST")
 	await manager.releaseChannel(next.channelId)
+	expect(proc.stop).toHaveBeenCalledTimes(1)
+})
+
+it("a later move moves a running timer's deadline: stopped at it, not 1 ms before", async () => {
+	const { proc, sources, caps, sent } = await setup()
+	sources.emit("caps-changed", "s", { ...caps, centerFreq: 163e6 })
+	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 10)
+	sources.emit("caps-changed", "s", { ...caps, centerFreq: 164e6 })
+	expect(sent.at(-1)).toMatchObject({ type: "recenter", centerHz: 164e6 })
+	// The first timer is due now and must not stop the process.
+	await vi.advanceTimersByTimeAsync(10)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 10 - 1)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(1)
+	expect(proc.stop).toHaveBeenCalledTimes(1)
+	expect(vi.getTimerCount()).toBe(0)
+})
+
+it("moves that never stop hold a channel-less process only up to the cap", async () => {
+	const { proc, sources, caps } = await setup()
+	const hopMs = 500
+	let hop = 0
+	const hops = RECENTER_LINGER_MAX_MS / hopMs
+	sources.emit("caps-changed", "s", { ...caps, centerFreq: 163e6 })
+	// A hop every 500 ms: each one is inside the linger, so only the cap can end it.
+	for (; hop < hops - 1; hop++) {
+		await vi.advanceTimersByTimeAsync(hopMs)
+		sources.emit("caps-changed", "s", {
+			...caps,
+			centerFreq: 164e6 + hop * 1e5,
+		})
+		expect(proc.stop).not.toHaveBeenCalled()
+	}
+	await vi.advanceTimersByTimeAsync(hopMs - 1)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(1)
+	expect(proc.stop).toHaveBeenCalledTimes(1)
+	expect(vi.getTimerCount()).toBe(0)
+})
+
+it("a grant gives the next move a whole new cap", async () => {
+	const { manager, proc, sources, caps } = await setup()
+	sources.emit("caps-changed", "s", { ...caps, centerFreq: 163e6 })
+	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 1)
+	const moved = { ...caps, centerFreq: 164e6 }
+	sources.getCaps = () => moved
+	sources.emit("caps-changed", "s", moved)
+	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 1)
+	const grant = await manager.requestChannel(
+		"s",
+		"d",
+		{
+			centerHz: 164e6,
+			bandwidthHz: 45_600,
+			transitionHz: 1200,
+			outputRateHz: 48_000,
+			format: "cf32",
+		},
+		moved,
+	)
+	if (!grant.ok) throw new WaveKitError(grant.detail, "TEST")
+	const later = { ...caps, centerFreq: 165e6 }
+	sources.getCaps = () => later
+	sources.emit("caps-changed", "s", later)
+	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 1)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(1)
 	expect(proc.stop).toHaveBeenCalledTimes(1)
 })
 

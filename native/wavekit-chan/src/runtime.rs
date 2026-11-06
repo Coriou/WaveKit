@@ -57,10 +57,15 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 /// accept poll or a failing write left). The list therefore holds at most the writers of closes from the last 500 ms.
 const CLOSE_JOIN_BUDGET: Duration = Duration::from_millis(500);
 const EOF_DRAIN_BUDGET: Duration = Duration::from_secs(2);
-/// Centre moves received but not yet reached by the input. The parent retires a process that is silent for
-/// `WEDGE_MS` + one watch period (2 000 + 250 ms in channelizer-manager.ts), so a live reader lags by at most 2.25 s, and
-/// a sweep hops no faster than its 5 ms default PLL settle: 2 250 / 5 = 450 moves, rounded up. At 24 bytes each the list
-/// holds about 12 KiB. Past it the move is refused (`recenter-refused`) and the parent restarts the process.
+/// Centre moves received but not yet reached by the input: a safety cap, not a limit a sweep can be proved to stay under.
+/// A move waits while the bytes before its position are on their way, and the parent's position counts everything up to
+/// the input: at 2.048 Msps (4 096 000 B/s) with the defaults, the 2 s burst absorber 8 192 000 B + both sides of the
+/// input branch 2 × 1 024 000 B + the pipe 65 536 B + the reader's 32 768 B target = 10 338 304 B, 2 524 ms. Hops 5 ms
+/// apart (the default PLL settle, without the counter run or dwell a real hop adds) make that 505 moves; a real 185 ms
+/// hop makes 14. A larger absorber or input mark, a shorter settle or retunes not paced by a sweep can pass it, and the
+/// parent's silence watchdog does not stop that: a lagging reader that progresses stays alive. So at 24 bytes each the
+/// list holds at most about 12 KiB, and past it the move is refused (`recenter-refused`): the parent retires this
+/// generation and the next request starts another, one respawn.
 const MAX_PENDING_RECENTERS: usize = 512;
 /// The `rejected` detail once a move was refused: this process no longer knows the capture centre.
 const CENTRE_REFUSED: &str = "capture centre unknown after a refused recenter";
@@ -917,12 +922,14 @@ impl Runtime {
     }
 
     /// The `opened_at_byte` of a channel installed now: it sees no byte before the last move received, so a gap at or
-    /// before that move never reached it.
+    /// before that move never reached it. An odd position rounds up to the whole sample the channel really starts at, as
+    /// a move's seam does; otherwise a gap at that sample would count as inside the channel, or not, depending on whether
+    /// its line arrived before or after the input reached the move.
     fn opened_at_byte(&self) -> u64 {
         let moved_at = self
             .pending_recenters
             .back()
-            .map_or(0, |r| r.at_input_bytes);
+            .map_or(0, |r| r.at_input_bytes.div_ceil(2).saturating_mul(2));
         self.received_bytes().max(moved_at)
     }
 
@@ -2210,6 +2217,74 @@ mod tests {
             "both gaps, on the live channel only: {gaps:?}"
         );
         assert!(gaps.iter().all(|e| e["id"] == "live"));
+        r.shutdown();
+    }
+
+    // Byte 4 095 is the odd half of sample 2 047, so the first whole sample at the new centre is byte 4 096, where the gap
+    // also lands: it is before the new channel's first sample whichever line arrives first.
+    #[test]
+    fn a_gap_at_an_odd_moves_first_whole_sample_is_not_the_channels_in_either_order() {
+        let gap = || Request::MarkGap {
+            at_input_byte: Some(4_096),
+            dropped_input_bytes: Some(1_024),
+        };
+        let start = |r: &mut Runtime| {
+            r.request_and_wait(open("live", 162e6, 1 << 20));
+            r.on_request(recenter_at(162.1e6, 4_095));
+            r.request_and_wait(open("new", 162.1e6, 1 << 20));
+            assert_eq!(r.channels["new"].opened_at_byte, 4_096);
+        };
+        let check = |ev: &Events| {
+            let gaps = of_cause(ev, "input-gap");
+            assert_eq!(gaps.len(), 1, "the live channel's only: {gaps:?}");
+            assert_eq!(gaps[0]["id"], "live");
+        };
+        // The input reaches the move, then the line arrives.
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        start(&mut r);
+        r.on_input(&[128; 4_096]);
+        assert_eq!(r.args.input_center, 162.1e6);
+        r.on_request(gap());
+        r.on_input(&[128; 8_192]);
+        check(&ev);
+        r.shutdown();
+        // The line arrives, then the input reaches both.
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        start(&mut r);
+        r.on_request(gap());
+        r.on_input(&[128; 4_096 + 8_192]);
+        check(&ev);
+        r.shutdown();
+    }
+
+    #[test]
+    fn a_gap_one_whole_sample_after_an_odd_move_is_the_channels_in_either_order() {
+        let gap = || Request::MarkGap {
+            at_input_byte: Some(4_098),
+            dropped_input_bytes: Some(1_024),
+        };
+        let start = |r: &mut Runtime| {
+            r.on_request(recenter_at(162.1e6, 4_095));
+            r.request_and_wait(open("new", 162.1e6, 1 << 20));
+        };
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        start(&mut r);
+        r.on_input(&[128; 4_098]);
+        r.on_request(gap());
+        r.on_input(&[128; 8_192]);
+        let gaps = of_cause(&ev, "input-gap");
+        assert_eq!(gaps.len(), 1, "after its first sample: {gaps:?}");
+        r.shutdown();
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        start(&mut r);
+        r.on_request(gap());
+        r.on_input(&[128; 4_098 + 8_192]);
+        let gaps = of_cause(&ev, "input-gap");
+        assert_eq!(gaps.len(), 1, "after its first sample: {gaps:?}");
         r.shutdown();
     }
 

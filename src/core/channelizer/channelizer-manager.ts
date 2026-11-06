@@ -54,6 +54,14 @@ const CLOSE_TIMEOUT_MS = 250
  */
 export const RECENTER_LINGER_MS = 6000
 /**
+ * Each move restarts that wait, so a sweep with no grants would hold a channel-less process for as long as it sweeps,
+ * with the source's whole byte rate still going down its stdin. This ends it: at most this long after the first move
+ * since the last grant, one linger for the decoders that move stopped and one for a re-request a later move answered
+ * with `race`, 2 × 6000 ms. A hop every 185 ms is then 65 moves, not a process for life. Past it the next request costs
+ * one respawn, as every centre move did before; a grant starts a new cap.
+ */
+export const RECENTER_LINGER_MAX_MS = 2 * RECENTER_LINGER_MS
+/**
  * Generation watchdog: a process that owes work (a control reply, or stdin bytes written but not yet acknowledged) and
  * wrote no event line for this long is wedged and retired. The runtime writes `progress` after every unit of main-loop
  * work, at most every 100 ms (PROGRESS_EVERY in native/wavekit-chan/src/runtime.rs), so a live one has 2000 / 100 = 20
@@ -98,7 +106,9 @@ function sanitize(id: string): string {
 
 export interface ChannelizerManagerDeps {
 	sourceManager: Pick<SourceManager, "getCaps" | "on" | "off">
-	routing: Pick<SourceFanoutRouter, "getFanout" | "releaseUnused">
+	/** `linkBurst` is what lets a centre move count IQ a burst absorber holds; without it nothing is taken as held. */
+	routing: Pick<SourceFanoutRouter, "getFanout" | "releaseUnused"> &
+		Partial<Pick<SourceFanoutRouter, "linkBurst">>
 	config: ChannelizerConfig
 	logger: Logger
 	createProcess?: (
@@ -172,6 +182,8 @@ interface SourceChannelizer {
 	idleCause?: string
 	/** `openNow()` until which an empty process waits for re-requests after a centre move; a grant ends it. */
 	recenterLingerUntil?: number
+	/** `openNow()` of the first move since the last grant: `recenterLingerUntil` never passes it by RECENTER_LINGER_MAX_MS. */
+	recenterLingerSince?: number
 	gapAtByte: number | null
 	droppedAtGap: number
 	invalidated: boolean
@@ -992,6 +1004,7 @@ export class ChannelizerManager
 			)
 			socket.pipe(stream, { end: false })
 			delete s.recenterLingerUntil
+			delete s.recenterLingerSince
 			s.channels.set(channelId, {
 				id: channelId,
 				socket,
@@ -1725,17 +1738,24 @@ export class ChannelizerManager
 		if (!s.invalidated && s.channels.size === 0 && s.pending === 0) {
 			const idleStopMs = this.deps.idleStopMs ?? 0
 			// The recentre deadline outlives the acquisitions that cleared the timer: cleaning one up must not stop a process
-			// whose decoders are still on their way back.
-			const lingerMs =
+			// whose decoders are still on their way back. A move does not touch a running timer, so a timer that comes due
+			// before a later move's deadline waits out the rest: at most one timer per linger, however fast the hops.
+			const recenterMs = (s.recenterLingerUntil ?? 0) - this.openNow()
+			const lingers =
 				cause === "recentered" ||
 				cause === "last-channel-released" ||
 				cause === "last-channel-died" ||
 				cause === "no-channels"
-					? Math.max(idleStopMs, (s.recenterLingerUntil ?? 0) - this.openNow())
-					: 0
+			const lingerMs =
+				cause === "idle-timeout"
+					? recenterMs
+					: lingers
+						? Math.max(idleStopMs, recenterMs)
+						: 0
 			if (lingerMs > 0) {
 				if (s.idleTimer === undefined) {
-					s.idleCause = cause
+					// `idleCause` restores a linger a request interrupted, so it never is the timer's own cause.
+					s.idleCause = cause === "idle-timeout" ? "no-channels" : cause
 					s.idleTimer = setTimeout(() => {
 						delete s.idleTimer
 						delete s.idleCause
@@ -1836,14 +1856,27 @@ export class ChannelizerManager
 	 * dropped under backpressure never reach stdin, so they are outside it, as in `mark-gap`'s `atInputByte`. The count
 	 * is on the write side, unlike `inputWritten`: it includes what still sits in the branch.
 	 *
+	 * A burst absorber sits before the fanout: what it holds came from the old centre and is distributed later, so it is
+	 * added. The sum can only err late, never early. The absorber's release may drop some of those bytes for this branch
+	 * (it stopped waiting for this branch as a laggard), and the count cannot know that yet: the process then starts a
+	 * reopened channel up to that many bytes into the new centre, at most the absorber's capacity. Its other discards,
+	 * a flush at a disconnect, removal or rate change, end this generation anyway.
+	 *
 	 * Undefined when it cannot be trusted: no telemetry, a branch no longer taking writes (the fanout counts a chunk it
-	 * refused there as neither written nor dropped), or a count behind the bytes the branch has already emitted.
+	 * refused there as neither written nor dropped), a count behind the bytes the branch has already emitted, or a held
+	 * count that is no byte count.
 	 */
 	private inputPosition(s: SourceChannelizer): number | undefined {
 		const t = s.fanout.getBranchTelemetry(s.branchId)
 		if (!t || s.branch.destroyed || s.branch.writableEnded) return undefined
-		const at = t.totalBytesWritten - t.droppedBytesTotal
-		return Number.isSafeInteger(at) && at >= s.inputWritten ? at : undefined
+		const delivered = t.totalBytesWritten - t.droppedBytesTotal
+		const held =
+			this.deps.routing.linkBurst?.(s.sourceId)?.absorber?.counters()
+				.heldBytes ?? 0
+		const at = delivered + held
+		return Number.isSafeInteger(at) && held >= 0 && delivered >= s.inputWritten
+			? at
+			: undefined
 	}
 
 	/**
@@ -1855,8 +1888,9 @@ export class ChannelizerManager
 	 * The close lines and `recenter` are written before listeners run, so a request from a listener opens at the new
 	 * centre. The line carries the stdin position of the move, because control and stdin are read independently: the
 	 * process gives a channel opened after it nothing before that byte. Without a position it can trust, the generation
-	 * ends instead: a restart is safe, stale IQ is not. IQ older than the fanout (the tuner's own settling, a socket, a
-	 * burst absorber) has no position here and is the source clock's to discard, with or without a restart.
+	 * ends instead. IQ older than the fanout and not in an absorber (the tuner's own settling, a socket) has no position
+	 * here and is the source clock's to discard, with or without a restart. So has what an absorber still holds when a
+	 * generation starts: a restart does not discard it, it goes to the new branch, so a restart is no answer to held IQ.
 	 */
 	private recenter(s: SourceChannelizer, centerHz: number): void {
 		this.centreMoves.set(
@@ -1876,7 +1910,12 @@ export class ChannelizerManager
 			return
 		}
 		s.caps.centerHz = centerHz
-		s.recenterLingerUntil = this.openNow() + RECENTER_LINGER_MS
+		const movedAt = this.openNow()
+		s.recenterLingerSince ??= movedAt
+		s.recenterLingerUntil = Math.min(
+			movedAt + RECENTER_LINGER_MS,
+			s.recenterLingerSince + RECENTER_LINGER_MAX_MS,
+		)
 		const channels = [...s.channels.values()]
 		const ids = channels.map(ch => ch.id)
 		for (const ch of channels) {

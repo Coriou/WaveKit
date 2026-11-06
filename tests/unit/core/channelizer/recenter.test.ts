@@ -15,6 +15,10 @@ import {
 	type ChannelizerRequest,
 } from "../../../../src/core/channelizer/protocol.js"
 import { FanoutManager } from "../../../../src/core/fanout-manager.js"
+import { createBurstAbsorber } from "../../../../src/core/link-burst/absorber.js"
+import { ABSORBER_LAGGARD_MS } from "../../../../src/core/link-burst/contract.js"
+import type { IngestRecorder } from "../../../../src/core/link-burst/contract.js"
+import { SourceFanoutRouter } from "../../../../src/core/source-fanout-router.js"
 import { SourceManager } from "../../../../src/core/source-manager.js"
 
 const logger = pino({ level: "silent" })
@@ -46,51 +50,15 @@ afterEach(async () => {
 	for (const dispose of cleanup.splice(0).reverse()) await dispose()
 })
 
-/**
- * The production wiring around the process boundary: the real SourceManager with a live connection to an in-process
- * server on an ephemeral loopback port, the real fanout and the real manager. Only the wavekit-chan process is faked.
- */
-async function setup(
+/** Only the wavekit-chan process is fake. */
+function fakeProcesses(
 	options: {
-		connect?: () => Promise<PassThrough>
 		/** The fake answers no `open`. */
 		silentOpen?: boolean
 		/** `start` waits for `ready()`. */
 		holdStart?: boolean
 	} = {},
 ) {
-	const peers: Socket[] = []
-	const server: Server = createServer(socket => {
-		peers.push(socket)
-		socket.on("error", () => {})
-	})
-	server.listen(0, "127.0.0.1")
-	await once(server, "listening")
-	const address = server.address()
-	if (!address || typeof address === "string")
-		throw new Error("Missing address")
-	cleanup.push(
-		() =>
-			new Promise<void>(resolve => {
-				for (const peer of peers) peer.destroy()
-				server.close(() => resolve())
-			}),
-	)
-	const sources = new SourceManager(logger)
-	cleanup.push(() => sources.disconnectAll())
-	const accepted = once(server, "connection")
-	await sources.connect({
-		id: "s",
-		type: "rtl_tcp",
-		host: "127.0.0.1",
-		port: address.port,
-		loop: false,
-		playbackSpeed: 1,
-		caps: { ...CAPS },
-	})
-	await accepted
-	const dir = mkdtempSync("/tmp/ch-rc-")
-	cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
 	const processes: FakeProcess[] = []
 	const createProcess = (o: ChannelizerProcessOptions) => {
 		let started: () => void = () => {}
@@ -141,6 +109,125 @@ async function setup(
 		processes.push(proc)
 		return proc
 	}
+	return { processes, createProcess }
+}
+
+/**
+ * The production router, fanout, absorber and manager on a source the router takes for a network link. Nothing connects:
+ * the source is a local stream under a reserved hostname, and the test feeds the absorber as the router's ingest would.
+ */
+function setupWithAbsorber() {
+	let caps: SourceCaps = { ...CAPS }
+	const sources = Object.assign(new EventEmitter(), {
+		getAllStatus: () => [{ id: "s", connected: true }],
+		getStatus: () => ({ connected: true }),
+		getStream: () => new PassThrough(),
+		getCaps: () => caps,
+		getConfig: () => ({
+			host: "example.invalid",
+			type: "rtl_tcp",
+			burstAbsorber: { seconds: 2 },
+		}),
+	})
+	const recorder = {
+		configure: () => {},
+		resetArrival: () => {},
+		observeChunk: () => {},
+		noteHolding: () => {},
+	} as unknown as IngestRecorder
+	const clock = { now: 1_000 }
+	const fanout = new FanoutManager(logger)
+	const router = new SourceFanoutRouter(
+		sources as unknown as SourceManager,
+		fanout,
+		logger,
+		"s",
+		{
+			linkBurst: {
+				createRecorder: () => recorder,
+				createAbsorber: (_id, deps) => createBurstAbsorber(deps),
+				monoNow: () => clock.now,
+			},
+		},
+	)
+	const absorber = router.linkBurst("s")?.absorber
+	if (!absorber) throw new Error("no absorber on a network source")
+	const dir = mkdtempSync("/tmp/ch-rc-")
+	const { processes, createProcess } = fakeProcesses()
+	const manager = new ChannelizerManager({
+		sourceManager: sources as unknown as SourceManager,
+		routing: router,
+		logger,
+		config: ChannelizerConfigSchema.parse({ enabled: true, socketDir: dir }),
+		createProcess,
+		connect: () => Promise.resolve(new PassThrough()),
+	})
+	cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
+	cleanup.push(() => {
+		router.destroy()
+		fanout.destroy()
+	})
+	cleanup.push(() => manager.destroy())
+	const request = (centerHz = 162e6) =>
+		manager.requestChannel(
+			"s",
+			"d",
+			{ ...REQUEST, centerHz },
+			sources.getCaps(),
+		)
+	const move = (centerFreq: number) => {
+		caps = { ...caps, centerFreq }
+		sources.emit("caps-changed", "s", caps)
+	}
+	return { clock, fanout, absorber, processes, request, move }
+}
+
+/**
+ * The production wiring around the process boundary: the real SourceManager with a live connection to an in-process
+ * server on an ephemeral loopback port, the real fanout and the real manager. Only the wavekit-chan process is faked.
+ */
+async function setup(
+	options: {
+		connect?: () => Promise<PassThrough>
+		/** The fake answers no `open`. */
+		silentOpen?: boolean
+		/** `start` waits for `ready()`. */
+		holdStart?: boolean
+	} = {},
+) {
+	const peers: Socket[] = []
+	const server: Server = createServer(socket => {
+		peers.push(socket)
+		socket.on("error", () => {})
+	})
+	server.listen(0, "127.0.0.1")
+	await once(server, "listening")
+	const address = server.address()
+	if (!address || typeof address === "string")
+		throw new Error("Missing address")
+	cleanup.push(
+		() =>
+			new Promise<void>(resolve => {
+				for (const peer of peers) peer.destroy()
+				server.close(() => resolve())
+			}),
+	)
+	const sources = new SourceManager(logger)
+	cleanup.push(() => sources.disconnectAll())
+	const accepted = once(server, "connection")
+	await sources.connect({
+		id: "s",
+		type: "rtl_tcp",
+		host: "127.0.0.1",
+		port: address.port,
+		loop: false,
+		playbackSpeed: 1,
+		caps: { ...CAPS },
+	})
+	await accepted
+	const dir = mkdtempSync("/tmp/ch-rc-")
+	cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
+	const { processes, createProcess } = fakeProcesses(options)
 	const fanout = new FanoutManager(logger)
 	const manager = new ChannelizerManager({
 		sourceManager: sources,
@@ -431,6 +518,135 @@ describe("the position of a centre move", () => {
 		if (!next.ok) throw new Error(next.detail)
 		expect(next.generation).toBe(grant.generation + 1)
 		expect(manager.currentGeneration("s")).toBe(next.generation)
+	})
+
+	describe("with IQ held in the burst absorber", () => {
+		const position = (proc: FakeProcess): number => {
+			const line = proc.sent.at(-1)
+			if (line?.type !== "recenter") throw new Error("no recenter")
+			return line.atInputBytes
+		}
+		const congestedBy = (setup: ReturnType<typeof setupWithAbsorber>) => {
+			const slow = setup.fanout.addBranch({ id: "slow", highWaterMark: 1024 })
+			setup.absorber.ingest(Buffer.alloc(4096, OLD))
+			return slow
+		}
+
+		it("is the position when nothing is held", async () => {
+			const setup = setupWithAbsorber()
+			const grant = await setup.request()
+			if (!grant.ok) throw new Error(grant.detail)
+			setup.absorber.ingest(Buffer.alloc(4096, OLD))
+			expect(setup.absorber.counters().heldBytes).toBe(0)
+			setup.move(162.5e6)
+			expect(position(setup.processes[0]!)).toBe(4096)
+		})
+
+		it("keeps the held bytes before the position when a reopened channel sees them drain", async () => {
+			const setup = setupWithAbsorber()
+			const grant = await setup.request()
+			if (!grant.ok) throw new Error(grant.detail)
+			const proc = setup.processes[0]!
+			const slow = congestedBy(setup)
+			const held = 8192
+			setup.absorber.ingest(Buffer.alloc(held, OLD))
+			expect(setup.absorber.counters().heldBytes).toBe(held)
+			setup.move(162.5e6)
+			const at = position(proc)
+			expect(at).toBe(4096 + held)
+			const reopened = await setup.request(162.5e6)
+			if (!reopened.ok) throw new Error(reopened.detail)
+			expect(reopened.generation).toBe(grant.generation)
+			// The other branch drains: what the absorber held goes out now, after the move.
+			slow.resume()
+			await vi.waitFor(() =>
+				expect(setup.absorber.counters().heldBytes).toBe(0),
+			)
+			setup.absorber.ingest(Buffer.alloc(4096, NEW))
+			const bytes = await read(proc.input, at + 4096)
+			expect(bytes.indexOf(NEW)).toBe(at)
+		})
+
+		it("moves on with each hop as the held bytes grow", async () => {
+			const setup = setupWithAbsorber()
+			const grant = await setup.request()
+			if (!grant.ok) throw new Error(grant.detail)
+			congestedBy(setup)
+			const positions: number[] = []
+			for (let hop = 1; hop <= 3; hop++) {
+				setup.absorber.ingest(Buffer.alloc(1000, OLD))
+				setup.move(162e6 + hop * 1e5)
+				positions.push(position(setup.processes[0]!))
+			}
+			expect(positions).toEqual([5096, 6096, 7096])
+		})
+
+		// The branch itself lags, so the absorber's release drops the held bytes for it. The count cannot know that at the
+		// move: the position is late by what was dropped, which costs new-centre input and never lets old-centre IQ past.
+		it("errs late, never early, when the branch loses held bytes on their release", async () => {
+			const setup = setupWithAbsorber()
+			const grant = await setup.request()
+			if (!grant.ok) throw new Error(grant.detail)
+			const proc = setup.processes[0]!
+			const branchState = () =>
+				setup.fanout.getBranchTelemetry("channelizer-s")!
+			// A chunk past the 1 024 000-byte mark goes on to the unread stdin; the next one stays in the branch, full.
+			const chunk = 1_100_000
+			setup.fanout.distribute(Buffer.alloc(chunk, OLD))
+			await vi.waitFor(() =>
+				expect(branchState().backpressureActive).toBe(false),
+			)
+			setup.fanout.distribute(Buffer.alloc(chunk, OLD))
+			expect(branchState().backpressureActive).toBe(true)
+			const first = 2 * chunk
+			const held = 8192
+			setup.absorber.ingest(Buffer.alloc(held, OLD))
+			expect(setup.absorber.counters().heldBytes).toBe(held)
+			setup.move(162.5e6)
+			const at = position(proc)
+			expect(at).toBe(first + held)
+			// Past the laggard bound, at its next look, the absorber stops waiting for this branch and drops for it.
+			setup.clock.now += ABSORBER_LAGGARD_MS
+			setup.fanout.addBranch({ id: "later" })
+			expect(setup.absorber.counters().heldBytes).toBe(0)
+			expect(branchState().droppedBytesTotal).toBe(held)
+			const tail = 2 * held
+			const reading = read(proc.input, first + tail)
+			await vi.waitFor(
+				() => expect(branchState().backpressureActive).toBe(false),
+				{
+					timeout: 5000,
+				},
+			)
+			setup.absorber.ingest(Buffer.alloc(tail, NEW))
+			const bytes = await reading
+			expect(bytes.indexOf(NEW)).toBe(first)
+			expect(at).toBeGreaterThan(first)
+			expect(bytes.subarray(at).every(b => b === NEW)).toBe(true)
+			expect(bytes.length).toBeGreaterThan(at)
+		})
+
+		it.each([
+			["not a number", Number.NaN],
+			["negative", -2],
+			["past safe integers", 2 ** 60],
+		])(
+			"retires the generation with a held count %s",
+			async (_name, heldBytes) => {
+				const setup = setupWithAbsorber()
+				const grant = await setup.request()
+				if (!grant.ok) throw new Error(grant.detail)
+				const counters = setup.absorber.counters()
+				vi.spyOn(setup.absorber, "counters").mockReturnValue({
+					...counters,
+					heldBytes,
+				})
+				setup.move(162.5e6)
+				const proc = setup.processes[0]!
+				expect(proc.stop).toHaveBeenCalledTimes(1)
+				expect(proc.sent.some(r => r.type === "recenter")).toBe(false)
+			},
+		)
 	})
 })
 
