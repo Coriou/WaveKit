@@ -1591,6 +1591,12 @@ export class ApiServer {
 				tunerController: this.tunerController,
 				sourceManager: this.sourceManager,
 				bandGain: this.tunerController.bandGainSettings(),
+				...(this.scanner
+					? {
+							scannerLeaseHolder: (sourceId: string) =>
+								this.scanner?.tunerLeaseHolder(sourceId) ?? null,
+						}
+					: {}),
 				...(this.accessController
 					? {
 							principalKind: request =>

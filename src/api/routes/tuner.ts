@@ -11,6 +11,7 @@ import {
 	TunerTuning,
 	type TuneOutcome,
 	type TuneSource,
+	type TunerLeaseHolder,
 } from "../../core/tuner-tune.js"
 import type {
 	FastifyError,
@@ -323,6 +324,11 @@ export interface TunerRoutesOptions {
 	principalKind?: (
 		request: FastifyRequest,
 	) => AccessPrincipal["kind"] | undefined
+	/**
+	 * The job holding a source's tuner lease; absent on a core without a scanner. A restore of a
+	 * temporary tune yields to a held lease.
+	 */
+	scannerLeaseHolder?: TunerLeaseHolder
 }
 
 const GAIN_EXPECTED =
@@ -1383,8 +1389,9 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 	const source = options.sourceManager
 	if (
 		source?.isTunerUsable !== undefined &&
-		source.waitUntilTunerUsable !== undefined &&
-		source.getStatus !== undefined
+		source.getStatus !== undefined &&
+		source.on !== undefined &&
+		source.off !== undefined
 	) {
 		// Made on first use and only then: until a tune runs, the state carries nothing of it.
 		const tuneSource = source as TuneSource
@@ -1394,6 +1401,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				fastify.log as unknown as Logger,
 				tunerController,
 				tuneSource,
+				options.scannerLeaseHolder,
 			))
 		fastify.addHook("onClose", async () => {
 			tuning?.close()

@@ -167,8 +167,9 @@ curl --fail --header "$AUTH" --request DELETE "$API_ORIGIN/api/tuner/rtl/tune/re
 
 The person at the receiver wins: any later write to this tuner from anyone, including the web app,
 an external client such as SDR++ or a scanner job, cancels the restore for good and never gets
-overwritten. `restore` in `GET /api/tuner` says what happened: `status`, `at`, `state` (what goes
-back) and `cancelledBy`. A core restart drops a pending restore: read
+overwritten. A scanner job holding the tuner's lease cancels it as well: a restore never preempts a
+job. `restore` in `GET /api/tuner` says what happened: `status`, `at`, `state` (what goes back) and
+`cancelledBy`. A core restart drops a pending restore: read
 [what a restart does](API.md#temporary-tune-and-restart) before relying on one.
 
 ## Read the receiver state

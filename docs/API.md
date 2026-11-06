@@ -1874,21 +1874,29 @@ and nothing overwrites it: another REST write (including one to another field, s
 without `restoreAfterS`, a relay client or the control going external, a scanner job, the decoder
 rate policy. A reconnect that replays the same tuning does not count. A reconnect that leaves other
 values (`reset` policy, a plain resume that leaves them unverified) cancels it with reason
-`state-changed`. A scanner job that holds a lease but has not written yet is not seen: its next hop
-cancels the restore, but a restore that fires before that hop preempts the job as an operator write
-does.
+`state-changed`.
+
+A restore never preempts anyone. A scanner job's tuner lease cancels it for good (`actor`
+`scanner-job`, reason `scanner-lease`) whenever the core sees the lease held: on any tuner state
+change, when the restore comes due, and before each of its writes. The job keeps its lease, and a
+job that has not hopped yet is not disturbed. A job that took a lease and gave it back before any of
+those moments, with no hop, moved nothing and does not cancel it. A pending restore can show
+`pending` while a lease is held until one of those moments comes.
+
+A write that lands while a restore is writing wins too: the restore sends nothing more, and neither
+the state nor a reconnect's replay ever shows the value the restore had just sent.
 
 `restore` in `GET /api/tuner` shows the source's one restore, the pending one or how the last one
 ended, until the next temporary tune or the source's removal:
 
-| Field         | Content                                                                                                                                                      |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `at`          | ISO time it is or was due                                                                                                                                    |
-| `status`      | `pending`, `restoring`, `restored`, `cancelled` or `failed`                                                                                                  |
-| `state`       | What goes back: `sampleRate`, `frequency`, `gainMode`, `gain`. A field the core did not know at the tune is absent                                           |
-| `cancelledBy` | `{ actor, reason, at }`. `reason` is `tuner-write`, `state-changed`, `external-control` (`actor` `relay`) or `cancel-request`                                |
-| `restored`    | The settings back at their prior value; after a cancel or a failure, those before it stopped                                                                 |
-| `failure`     | The error code of a failed restore. It is one attempt with the same 18 s bound and is not retried: the temporary tuning stays and later writes work as usual |
+| Field         | Content                                                                                                                                                                                                                                                                                                                                     |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `at`          | ISO time it is or was due                                                                                                                                                                                                                                                                                                                   |
+| `status`      | `pending`, `restoring`, `restored`, `cancelled` or `failed`                                                                                                                                                                                                                                                                                 |
+| `state`       | What goes back: `sampleRate`, `frequency`, `gainMode`, `gain`. A field the core did not know at the tune is absent                                                                                                                                                                                                                          |
+| `cancelledBy` | `{ actor, reason, at }`. `reason` is `tuner-write`, `state-changed`, `external-control` (`actor` `relay`), `cancel-request` or `scanner-lease` (`actor` `scanner-job`)                                                                                                                                                                      |
+| `restored`    | The settings back at their prior value; after a cancel or a failure, those that went back before it stopped and stayed                                                                                                                                                                                                                      |
+| `failure`     | The error code of a failed restore: `TUNER_NOT_USABLE`, `TUNER_RESTORE_DEADLINE` (usable, but its 18 s ran out, time queued behind other commands included) or the write's own error. It is one attempt and is not retried: no write starts after the 18 s, what did not go back keeps the temporary tuning, and later writes work as usual |
 
 The restore's writes read `actor: restore`, `reason: tune-restore` in `lastChange`.
 
@@ -1901,8 +1909,9 @@ keeps its old time.
 
 ###### Temporary tune and restart
 
-A pending restore lives in memory. On shutdown it is dropped and nothing is written. Removing or
-re-adding the source drops it too. The core does not save tuning at all, so no temporary value becomes
+A pending restore lives in memory. On shutdown it is dropped, a tune or restore still running is
+aborted (its client gets a 503 if the connection still stands) and nothing more is written. Removing
+or re-adding the source does the same for that source. The core does not save tuning at all, so no temporary value becomes
 a saved one, but the receiver keeps what it was last told: after a restart a dongle can still be on
 the temporary tuning while the core's state returns to its configured baseline, with the fields in
 `declaredOnlyFields` or `unknownFields`. Tune again after a restart if the tuning matters.

@@ -42,8 +42,11 @@ export const TUNE_DEADLINE_MS = 2 * TUNER_COMMAND_TIMEOUT_MS
 
 export type TuneSource = Pick<
 	SourceManager,
-	"runTunerCommand" | "isTunerUsable" | "waitUntilTunerUsable" | "getStatus"
+	"runTunerCommand" | "isTunerUsable" | "getStatus" | "on" | "off"
 >
+
+/** The job holding a source's tuner lease, else null. Only a core with a scanner has one. */
+export type TunerLeaseHolder = (sourceId: string) => string | null
 
 export interface TuneOutcome {
 	usable: boolean
@@ -65,7 +68,10 @@ interface RestoreRecord {
 	expected: TuneValues
 	/** The temporary tune wrote a gain: rtl_tcp then left AGC whatever the state shows. */
 	wroteGain: boolean
+	/** While pending, the time it is due; while restoring, its deadline. */
 	timer: NodeJS.Timeout | undefined
+	/** Ends its usability waits once it is over, however it ended. */
+	abort: AbortController
 }
 
 interface ActiveTune {
@@ -73,6 +79,8 @@ interface ActiveTune {
 	owned: boolean
 	/** Another actor wrote while it ran, or the restore was cancelled before it armed. */
 	overriddenBy: RestoreRecord["view"]["cancelledBy"]
+	/** Shutdown or the source's removal: no frame goes out, every wait ends. */
+	abort: AbortController
 }
 
 /** A restore or tune stopped between settings; never reaches a client as itself. */
@@ -150,6 +158,7 @@ export class TunerTuning {
 		logger: Logger,
 		private readonly controller: TunerController,
 		private readonly source: TuneSource,
+		private readonly leaseHolder?: TunerLeaseHolder,
 	) {
 		this.log = createComponentLogger(logger, "TunerTuning")
 		controller.on("last-change", this.onLastChange)
@@ -200,7 +209,12 @@ export class TunerTuning {
 				"TUNER_TUNE_BUSY",
 				409,
 			)
-		const run: ActiveTune = { owned: false, overriddenBy: undefined }
+		const run: ActiveTune = {
+			owned: false,
+			overriddenBy: undefined,
+			abort: new AbortController(),
+		}
+		const { signal } = run.abort
 		this.active.set(sourceId, run)
 		const settings = settingsOf(values)
 		const applied = new Set<TuneSetting>()
@@ -208,9 +222,15 @@ export class TunerTuning {
 		const temporary = request.restoreAfterS !== undefined
 		let expired = false
 		let started = false
+		let wrote = false
 		let error: unknown
 		let carried: RestoreRecord | undefined
 		let snapshot: TuneSnapshot | undefined
+		// Timers can run late: the clock decides as well as `expired`, in the frame's own section.
+		const stopIfHalted = () => {
+			if (expired || signal.aborted || Date.now() >= deadline)
+				throw new TuneStopped()
+		}
 
 		const finish = (usable: boolean, stateNow = this.state(sourceId)) => {
 			if (stateNow === undefined) error = new TunerSourceNotFoundError(sourceId)
@@ -225,7 +245,7 @@ export class TunerTuning {
 					"TUNER_TUNE_PARTIAL",
 				)
 			if (!usable && error === undefined) error = this.notUsable()
-			if (this.controller.getState(sourceId) !== undefined) {
+			if (!signal.aborted && this.controller.getState(sourceId) !== undefined) {
 				this.lastTunes.set(sourceId, {
 					at: new Date().toISOString(),
 					usable,
@@ -260,13 +280,15 @@ export class TunerTuning {
 		const settle = () => {
 			if (this.active.get(sourceId) === run) this.active.delete(sourceId)
 			if (!temporary || !run.owned || snapshot === undefined) return
-			if (this.closed || this.controller.getState(sourceId) === undefined)
+			if (signal.aborted || this.controller.getState(sourceId) === undefined)
 				return
 			if (run.overriddenBy !== undefined) {
 				this.endWithoutRestore(sourceId, carried, snapshot, run.overriddenBy)
 				return
 			}
-			if (applied.size > 0)
+			// With a restore pending, only a frame that went out takes the new time. A tune that
+			// finds its values in place changed nothing and leaves the pending restore's time.
+			if (applied.size > 0 && (carried === undefined || wrote))
 				this.arm(
 					sourceId,
 					snapshot,
@@ -280,8 +302,7 @@ export class TunerTuning {
 		if (!this.source.isTunerUsable(sourceId)) {
 			const held = this.source.getStatus(sourceId)?.feed?.state === "paused"
 			const usable =
-				!held &&
-				(await this.source.waitUntilTunerUsable(sourceId, TUNE_DEADLINE_MS))
+				!held && (await this.waitUsable(sourceId, TUNE_DEADLINE_MS, signal))
 			if (!usable) {
 				settle()
 				return finish(false)
@@ -289,7 +310,7 @@ export class TunerTuning {
 		}
 
 		const command = this.source.runTunerCommand(sourceId, async () => {
-			if (expired) throw new TuneStopped()
+			stopIfHalted()
 			started = true
 			if (temporary) {
 				const prior = this.restores.get(sourceId)
@@ -310,12 +331,19 @@ export class TunerTuning {
 					carried.timer = undefined
 				}
 			}
-			await this.controller.applyTune(sourceId, values, opts, setting => {
+			const writing: TunerWriteOptions = {
+				...opts,
+				beforeWrite: stopIfHalted,
+				afterWrite: () => {
+					wrote = true
+				},
+			}
+			await this.controller.applyTune(sourceId, values, writing, setting => {
 				applied.add(setting)
 				// A tune that stays is the newest word: nothing goes back over it.
 				if (!temporary)
 					this.cancel(sourceId, opts.actor ?? "unknown", "tuner-write")
-				if (expired) throw new TuneStopped()
+				stopIfHalted()
 			})
 		})
 		const settled = command.then(
@@ -331,15 +359,22 @@ export class TunerTuning {
 		})
 
 		let timer: NodeJS.Timeout | undefined
-		const deadlineReached = new Promise<"deadline">(resolve => {
+		let onAbort: () => void = () => {}
+		const halted = new Promise<"deadline" | "stopped">(resolve => {
+			onAbort = () => resolve("stopped")
+			if (signal.aborted) onAbort()
+			else signal.addEventListener("abort", onAbort, { once: true })
 			timer = setTimeout(
 				() => resolve("deadline"),
 				Math.max(0, deadline - Date.now()),
 			)
 			timer.unref()
 		})
-		const first = await Promise.race([settled, deadlineReached])
+		const first = await Promise.race([settled, halted])
 		clearTimeout(timer)
+		signal.removeEventListener("abort", onAbort)
+		// No frame goes out from here: `stopIfHalted` guards each one.
+		if (first === "stopped") return finish(false)
 		if (first === "deadline") {
 			expired = true
 			const outcome = finish(false)
@@ -349,9 +384,10 @@ export class TunerTuning {
 		// A recovery that ran out of its own window still counts if the source returns in time.
 		if (error !== undefined && codeOf(error) !== "SOURCE_RECONNECTING")
 			return finish(this.source.isTunerUsable(sourceId))
-		const usable = await this.source.waitUntilTunerUsable(
+		const usable = await this.waitUsable(
 			sourceId,
 			deadline - Date.now(),
+			signal,
 		)
 		error = usable ? undefined : this.notUsable()
 		return finish(usable)
@@ -378,10 +414,17 @@ export class TunerTuning {
 		return this.state(sourceId)
 	}
 
-	/** Shutdown: drops every pending restore and writes nothing. The tuner keeps its tuning. */
+	/**
+	 * Shutdown: drops every pending restore, aborts every running tune and restore, and writes
+	 * nothing more. Their waits give back their listeners and timers at once. The tuner keeps its
+	 * tuning. A frame already sent stays sent; a tune still in the command queue finds itself
+	 * aborted when its turn comes.
+	 */
 	close(): void {
 		if (this.closed) return
 		this.closed = true
+		for (const run of this.active.values()) run.abort.abort()
+		this.active.clear()
 		for (const record of this.restores.values()) this.stop(record)
 		this.restores.clear()
 		this.lastTunes.clear()
@@ -394,6 +437,64 @@ export class TunerTuning {
 
 	private state(sourceId: string): TunerState | undefined {
 		return this.controller.getState(sourceId)
+	}
+
+	/**
+	 * Waits for the source's first payload on a usable connection (after the reconnect restore,
+	 * whose listener registered first), writing nothing. False at the deadline, when the source
+	 * goes away, or on abort; every way out gives back the listeners and the timer.
+	 */
+	private waitUsable(
+		sourceId: string,
+		timeoutMs: number,
+		signal: AbortSignal,
+	): Promise<boolean> {
+		if (signal.aborted) return Promise.resolve(false)
+		if (this.source.isTunerUsable(sourceId)) return Promise.resolve(true)
+		if (timeoutMs <= 0) return Promise.resolve(false)
+		return new Promise<boolean>(resolve => {
+			const finish = (usable: boolean) => {
+				clearTimeout(timer)
+				this.source.off("payload-started", started)
+				this.source.off("source-removed", removed)
+				signal.removeEventListener("abort", aborted)
+				resolve(usable)
+			}
+			const started = (id: string) => {
+				if (id === sourceId && this.source.isTunerUsable(sourceId)) finish(true)
+			}
+			const removed = (id: string) => {
+				if (id === sourceId) finish(false)
+			}
+			const aborted = () => finish(false)
+			const timer = setTimeout(() => finish(false), timeoutMs)
+			timer.unref()
+			this.source.on("payload-started", started)
+			this.source.on("source-removed", removed)
+			signal.addEventListener("abort", aborted, { once: true })
+		})
+	}
+
+	/**
+	 * An automatic restore never preempts anyone, so a held lease ends it for good. Without a
+	 * lease view the core has no scanner, so no lease exists. A view that fails says nothing about
+	 * a lease: no restore then either.
+	 */
+	private yieldToLease(sourceId: string): boolean {
+		if (this.leaseHolder === undefined) return false
+		let holder: string | null
+		try {
+			holder = this.leaseHolder(sourceId)
+		} catch (err) {
+			this.log.warn(
+				{ sourceId, code: codeOf(err) },
+				"The scanner lease could not be read; the temporary tune stays",
+			)
+			holder = "unknown"
+		}
+		if (holder === null) return false
+		this.cancel(sourceId, "scanner-job", "scanner-lease")
+		return true
 	}
 
 	private verdict(sourceId: string): SourceVerdict | undefined {
@@ -448,6 +549,7 @@ export class TunerTuning {
 	private stop(record: RestoreRecord): void {
 		clearTimeout(record.timer)
 		record.timer = undefined
+		record.abort.abort()
 		if (record.view.status === "restoring") record.view.status = "cancelled"
 	}
 
@@ -465,6 +567,7 @@ export class TunerTuning {
 			return false
 		clearTimeout(record.timer)
 		record.timer = undefined
+		record.abort.abort()
 		record.view.status = "cancelled"
 		record.view.cancelledBy = this.cancelledBy(actor, reason)
 		this.log.info({ sourceId, actor, reason }, "Temporary tune stays")
@@ -491,6 +594,7 @@ export class TunerTuning {
 			expected: {},
 			wroteGain: false,
 			timer: undefined,
+			abort: new AbortController(),
 		})
 		this.controller.publishState(sourceId)
 	}
@@ -512,6 +616,7 @@ export class TunerTuning {
 			expected: state,
 			wroteGain,
 			timer: undefined,
+			abort: new AbortController(),
 		}
 		this.restores.set(sourceId, record)
 		this.rearm(sourceId, record, delayMs)
@@ -532,7 +637,12 @@ export class TunerTuning {
 		record.timer.unref()
 	}
 
-	/** The timer's work: one attempt, whatever the outcome; a failure is reported, not retried. */
+	/**
+	 * The timer's work: one attempt, whatever the outcome; a failure is reported, not retried.
+	 * TUNE_DEADLINE_MS bounds all of it, time queued behind other commands included. Each frame
+	 * checks in its own synchronous section that the restore still runs, its budget is not spent
+	 * and no lease is held, so no frame goes out after a cancel, late or over a lease.
+	 */
 	private async fire(sourceId: string, record: RestoreRecord): Promise<void> {
 		const { view } = record
 		if (
@@ -542,16 +652,39 @@ export class TunerTuning {
 		)
 			return
 		record.timer = undefined
+		if (this.yieldToLease(sourceId)) return
 		view.status = "restoring"
 		view.restored = []
 		this.controller.publishState(sourceId)
 		const deadline = Date.now() + TUNE_DEADLINE_MS
+		const { signal } = record.abort
 		const running = () => view.status === "restoring"
+		// Timers can run late: the deadline timer ends a restore stuck in a wait or the command
+		// queue, and `stopIfOver` still refuses a frame that comes before that timer has run.
+		const late = () =>
+			new WaveKitError(
+				"The restore's time ran out before all of it was written",
+				"TUNER_RESTORE_DEADLINE",
+			)
+		record.timer = setTimeout(() => {
+			if (!running()) return
+			this.failRestore(
+				sourceId,
+				record,
+				this.source.isTunerUsable(sourceId) ? late() : this.notUsable(),
+			)
+			this.controller.publishState(sourceId)
+		}, TUNE_DEADLINE_MS)
+		record.timer.unref()
+		const stopIfOver = () => {
+			if (!running() || this.yieldToLease(sourceId)) throw new TuneStopped()
+			if (Date.now() >= deadline) throw late()
+		}
 		try {
-			if (!(await this.source.waitUntilTunerUsable(sourceId, TUNE_DEADLINE_MS)))
+			if (!(await this.waitUsable(sourceId, TUNE_DEADLINE_MS, signal)))
 				throw this.notUsable()
 			await this.source.runTunerCommand(sourceId, async () => {
-				if (!running()) return
+				stopIfOver()
 				// A reconnect may have left it elsewhere with no write to say who did.
 				if (this.movedFromExpected(sourceId, record, true)) {
 					this.cancel(sourceId, this.lastActor(sourceId), "state-changed")
@@ -560,36 +693,49 @@ export class TunerTuning {
 				await this.controller.applyTune(
 					sourceId,
 					view.state,
-					{ origin: "rest", restore: true },
+					{ origin: "rest", restore: true, beforeWrite: stopIfOver },
 					setting => {
-						view.restored?.push(setting)
+						// A frame sent and then overwritten by someone else is not back.
+						if (holds(this.state(sourceId), view.state, setting))
+							view.restored?.push(setting)
 						if (!running()) throw new TuneStopped()
 					},
 					record.wroteGain,
 				)
-				this.controller.noteTuneRestored(sourceId, record.snapshot)
+				if (running())
+					this.controller.noteTuneRestored(sourceId, record.snapshot)
 			})
 			if (!running()) return
-			const usable = await this.source.waitUntilTunerUsable(
-				sourceId,
-				deadline - Date.now(),
-			)
+			const remaining = deadline - Date.now()
+			if (remaining <= 0) throw late()
+			const usable = await this.waitUsable(sourceId, remaining, signal)
 			if (!running()) return
 			if (!usable) throw this.notUsable()
 			view.status = "restored"
 			this.log.info({ sourceId }, "Temporary tune put back")
 		} catch (err) {
 			if (err instanceof TuneStopped || !running()) return
-			view.status = "failed"
-			view.failure = codeOf(err)
-			this.log.warn(
-				{ sourceId, code: view.failure },
-				"Putting a temporary tune back failed; it is not retried",
-			)
+			this.failRestore(sourceId, record, err)
 		} finally {
+			clearTimeout(record.timer)
+			record.timer = undefined
 			if (this.restores.get(sourceId) === record)
 				this.controller.publishState(sourceId)
 		}
+	}
+
+	private failRestore(
+		sourceId: string,
+		record: RestoreRecord,
+		err: unknown,
+	): void {
+		record.view.status = "failed"
+		record.view.failure = codeOf(err)
+		record.abort.abort()
+		this.log.warn(
+			{ sourceId, code: record.view.failure },
+			"Putting a temporary tune back failed; it is not retried",
+		)
 	}
 
 	private lastActor(sourceId: string): TunerChangeActor {
@@ -648,6 +794,7 @@ export class TunerTuning {
 		const record = this.restores.get(sourceId)
 		if (record?.view.status !== "pending") return
 		if (this.active.get(sourceId)?.owned === true) return
+		if (this.yieldToLease(sourceId)) return
 		if (this.movedFromExpected(sourceId, record, false))
 			this.cancel(sourceId, this.lastActor(sourceId), "state-changed")
 	}
@@ -664,6 +811,9 @@ export class TunerTuning {
 	}
 
 	private readonly onSourceRemoved = (sourceId: string): void => {
+		// A source re-added under this id is another source: nothing of this one writes to it.
+		this.active.get(sourceId)?.abort.abort()
+		this.active.delete(sourceId)
 		const record = this.restores.get(sourceId)
 		if (record !== undefined) this.stop(record)
 		this.restores.delete(sourceId)

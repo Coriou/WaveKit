@@ -192,6 +192,7 @@ export const TUNE_RESTORE_CANCEL_REASONS = [
 	"state-changed",
 	"external-control",
 	"cancel-request",
+	"scanner-lease",
 ] as const
 export type TuneRestoreCancelReason =
 	(typeof TUNE_RESTORE_CANCEL_REASONS)[number]

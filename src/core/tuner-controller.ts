@@ -50,6 +50,8 @@ import type {
  * REST write came from (from the request's access principal, never from the client), `jobId`
  * which job's lease a scanner write serves, `restore` that it puts the snapshot back (a scanner
  * lease's, or with origin "rest" a temporary tune's; that one is no operator gain choice).
+ * `beforeWrite` runs in the same synchronous section as each frame of the write, band gain and rate
+ * proof included: a throw stops it with nothing sent. `afterWrite` says a frame did go out.
  */
 export interface TunerWriteOptions {
 	origin?: TunerCommandOrigin
@@ -57,6 +59,8 @@ export interface TunerWriteOptions {
 	actor?: Extract<TunerChangeActor, "web" | "agent">
 	jobId?: string
 	restore?: boolean
+	beforeWrite?: () => void
+	afterWrite?: () => void
 }
 
 /**
@@ -994,6 +998,11 @@ export class TunerController extends EventEmitter {
 	private tunerStates: Map<string, TunerState> = new Map()
 	/** The last change per source: one entry each, gone with the source (removeSource). */
 	private readonly lastChanges = new Map<string, TunerLastChange>()
+	/**
+	 * Frames that went out per source and state field, whoever wrote them: at most one counter per
+	 * closed field per source, gone with the source (removeSource).
+	 */
+	private readonly fieldWrites = new Map<string, Map<TunerStateField, number>>()
 	private controlModeOrigins: Map<string, ControlModeOrigin> = new Map()
 	/**
 	 * Per source, who changed the centre whose caps update is being applied
@@ -1151,6 +1160,7 @@ export class TunerController extends EventEmitter {
 		if (!this.tunerStates.has(sourceId)) return
 		this.tunerStates.delete(sourceId)
 		this.lastChanges.delete(sourceId)
+		this.fieldWrites.delete(sourceId)
 		this.controlModeOrigins.delete(sourceId)
 		this.desiredFields.delete(sourceId)
 		this.inferredFields.delete(sourceId)
@@ -1323,6 +1333,10 @@ export class TunerController extends EventEmitter {
 		const cmdName = COMMAND_NAMES[command] ?? `cmd-0x${command.toString(16)}`
 		// The relay forwards raw bytes upstream before any check below, so even a value this
 		// controller ignores may have moved the receiver: the client did it either way.
+		this.noteFieldWrite(sourceId, stateFieldOf(command))
+		// Gain commands imply manual mode on the relay path (state below).
+		if (MANUAL_GAIN_COMMANDS.has(command))
+			this.noteFieldWrite(sourceId, "gainMode")
 		this.noteChange(sourceId, cmdName, {
 			actor: "relay",
 			reason: "relay-command",
@@ -1592,8 +1606,10 @@ export class TunerController extends EventEmitter {
 	): Promise<void> {
 		// Before the write: a failed write may still have moved the tuner off the band.
 		this.appliedBandGain.delete(sourceId)
+		const mine = this.nextFieldWrite(sourceId, "frequency")
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_FREQUENCY, hz, opts)
 		this.sourceManager.assertTunerCommandActive()
+		if (this.supersededWrite(sourceId, "frequency", mine)) return
 		state.frequency = hz
 		this.withCentreOrigin(
 			sourceId,
@@ -1685,8 +1701,10 @@ export class TunerController extends EventEmitter {
 				"sampleRate",
 			)
 		}
+		const mine = this.nextFieldWrite(sourceId, "sampleRate")
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_SAMPLE_RATE, hz, opts)
 		this.sourceManager.assertTunerCommandActive()
+		if (this.supersededWrite(sourceId, "sampleRate", mine)) return
 		state.sampleRate = hz
 		if (opts.origin === "rest")
 			this.withoutCommand(() => this.onOperatorSampleRate?.(sourceId))
@@ -1706,9 +1724,11 @@ export class TunerController extends EventEmitter {
 		const state = this.validateSourceForControl(sourceId)
 		const value = mode === "manual" ? 1 : 0
 		this.appliedBandGain.delete(sourceId)
+		const mine = this.nextFieldWrite(sourceId, "gainMode")
 		await this.countedGainWrite(sourceId, opts, () =>
 			this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_GAIN_MODE, value, opts),
 		)
+		if (this.supersededWrite(sourceId, "gainMode", mine)) return
 		state.gainMode = mode
 		this.noteOperatorGainWrite(sourceId, opts)
 		this.emitStateChanged(sourceId)
@@ -1722,9 +1742,11 @@ export class TunerController extends EventEmitter {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("gain", tenthsDb, VALIDATION.gain)
 		this.appliedBandGain.delete(sourceId)
+		const mine = this.nextFieldWrite(sourceId, "gain")
 		await this.countedGainWrite(sourceId, opts, () =>
 			this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_GAIN, tenthsDb, opts),
 		)
+		if (this.supersededWrite(sourceId, "gain", mine)) return
 		state.gain = tenthsDb
 		this.noteOperatorGainWrite(sourceId, opts)
 		this.emitStateChanged(sourceId)
@@ -3170,6 +3192,38 @@ export class TunerController extends EventEmitter {
 		return buf
 	}
 
+	/** The count `field` will show once a frame about to go out has gone. */
+	private nextFieldWrite(sourceId: string, field: TunerStateField): number {
+		return (this.fieldWrites.get(sourceId)?.get(field) ?? 0) + 1
+	}
+
+	private noteFieldWrite(
+		sourceId: string,
+		field: TunerStateField | undefined,
+	): void {
+		if (field === undefined) return
+		let fields = this.fieldWrites.get(sourceId)
+		if (!fields) {
+			fields = new Map()
+			this.fieldWrites.set(sourceId, fields)
+		}
+		fields.set(field, (fields.get(field) ?? 0) + 1)
+	}
+
+	/**
+	 * A newer frame of `field` went out while this setter waited for its own, from a listener or
+	 * another writer's turn. That write owns the state and the reconnect replay, and this setter
+	 * publishes nothing. Checked in the same synchronous section as the publish, so no write can
+	 * land between them.
+	 */
+	private supersededWrite(
+		sourceId: string,
+		field: TunerStateField,
+		mine: number,
+	): boolean {
+		return (this.fieldWrites.get(sourceId)?.get(field) ?? 0) !== mine
+	}
+
 	private async sendCommand(
 		sourceId: string,
 		cmd: number,
@@ -3177,8 +3231,11 @@ export class TunerController extends EventEmitter {
 		opts: TunerWriteOptions = {},
 	): Promise<void> {
 		this.sourceManager.assertTunerCommandActive()
+		opts.beforeWrite?.()
 		try {
 			this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
+			this.noteFieldWrite(sourceId, stateFieldOf(cmd))
+			opts.afterWrite?.()
 			if (opts.accept === false) this.markWrittenNotAccepted(sourceId, cmd)
 			else this.markAccepted(sourceId, cmd)
 			this.markConnectionWrite(sourceId, cmd)

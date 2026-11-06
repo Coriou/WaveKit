@@ -3247,34 +3247,6 @@ export class SourceManager extends EventEmitter {
 		)
 	}
 
-	/**
-	 * Waits for `isTunerUsable`, on the connection's first payload (after the reconnect restore,
-	 * whose listener registered first). Writes nothing and starts no reconnect. False at the
-	 * deadline or when the source goes away.
-	 */
-	waitUntilTunerUsable(id: string, timeoutMs: number): Promise<boolean> {
-		if (this.isTunerUsable(id)) return Promise.resolve(true)
-		if (timeoutMs <= 0 || !this.sources.has(id)) return Promise.resolve(false)
-		return new Promise<boolean>(resolve => {
-			const finish = (usable: boolean) => {
-				clearTimeout(timer)
-				this.off("payload-started", started)
-				this.off("source-removed", removed)
-				resolve(usable)
-			}
-			const started = (sourceId: string) => {
-				if (sourceId === id && this.isTunerUsable(id)) finish(true)
-			}
-			const removed = (sourceId: string) => {
-				if (sourceId === id) finish(false)
-			}
-			const timer = setTimeout(() => finish(false), timeoutMs)
-			timer.unref()
-			this.on("payload-started", started)
-			this.on("source-removed", removed)
-		})
-	}
-
 	/** End each recovery once, before notifying consumers that preservation ended. */
 	private finishRateRecovery(id: string, succeeded: boolean): void {
 		const recovery = this.rateRecovery.get(id)

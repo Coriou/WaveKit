@@ -24,7 +24,10 @@ import {
 	TunerController,
 	type TunerReconnectPolicy,
 } from "../../../src/core/tuner-controller.js"
-import { TUNE_DEADLINE_MS } from "../../../src/core/tuner-tune.js"
+import {
+	TUNE_DEADLINE_MS,
+	type TunerLeaseHolder,
+} from "../../../src/core/tuner-tune.js"
 import type { TunerRelay } from "../../../src/core/tuner-relay.js"
 import { wireTunerControl } from "../../../src/core/tuner-wiring.js"
 import { createLogger } from "../../../src/utils/logger.js"
@@ -34,6 +37,7 @@ const SET_RATE = 2
 const SET_FREQUENCY = 1
 const SET_GAIN_MODE = 3
 const SET_GAIN = 4
+const SET_PPM = 5
 const START_RATE = 1_024_000
 const START_HZ = 100_000_000
 const OTHER_RATE = 2_400_000
@@ -112,34 +116,39 @@ async function setup(
 		tunerRelay: { handleSourceConnected: () => {} } as unknown as TunerRelay,
 		relayEnabled: false,
 	})
+	let leaseHolder: TunerLeaseHolder = () => null
 	const app = Fastify()
 	await app.register(tunerRoutes, {
 		tunerController: controller,
 		sourceManager: manager,
 		principalKind: () => principal,
+		scannerLeaseHolder: sourceId => leaseHolder(sourceId),
 	})
 	await app.ready()
 	cleanup.push(() => app.close())
 	manager.on("error", () => {})
 	controller.on("error", () => {})
-	const payload = event(manager, "payload-started")
-	await manager.connect({
-		id: "rtl",
-		type: "rtl_tcp",
-		host: "127.0.0.1",
-		port: (server.address() as net.AddressInfo).port,
-		loop: false,
-		playbackSpeed: 1,
-		stallTimeoutMs: 0,
-		caps: {
-			kind: "iq",
-			sampleRate: START_RATE,
-			centerFreq: START_HZ,
-			format: "U8_IQ",
-			exclusive: false,
-		},
-	})
-	await payload
+	const connect = async () => {
+		const payload = event(manager, "payload-started")
+		await manager.connect({
+			id: "rtl",
+			type: "rtl_tcp",
+			host: "127.0.0.1",
+			port: (server.address() as net.AddressInfo).port,
+			loop: false,
+			playbackSpeed: 1,
+			stallTimeoutMs: 0,
+			caps: {
+				kind: "iq",
+				sampleRate: START_RATE,
+				centerFreq: START_HZ,
+				format: "U8_IQ",
+				exclusive: false,
+			},
+		})
+		await payload
+	}
+	await connect()
 	const post = (body: unknown) =>
 		app.inject({
 			method: "POST",
@@ -156,6 +165,26 @@ async function setup(
 		frames,
 		post,
 		read,
+		connect,
+		useLeases: (holder: TunerLeaseHolder) => {
+			leaseHolder = holder
+		},
+		/** What a tune or restore waiting for the source holds on it. */
+		waitListeners: () =>
+			manager.listenerCount("payload-started") +
+			manager.listenerCount("source-removed"),
+		/** A command that takes the queue for `ms` of fake time. */
+		holdQueue: (ms: number) => {
+			void manager
+				.runTunerCommand(
+					"rtl",
+					() =>
+						new Promise<void>(resolve => {
+							setTimeout(resolve, ms)
+						}),
+				)
+				.catch(() => {})
+		},
 		connections: () => connections,
 		fakeTime: () => {
 			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })
@@ -177,6 +206,33 @@ async function until(done: () => boolean): Promise<void> {
 function restoreOf(state: TunerState): TuneRestore {
 	if (state.restore === undefined) throw new Error("no restore block")
 	return state.restore
+}
+
+/** A real arbiter over the harness's controller and source, with its lease losses recorded. */
+function arbiterOn(h: Awaited<ReturnType<typeof setup>>) {
+	const arbiter = new TunerArbiter({
+		tuner: h.controller,
+		sources: h.manager,
+		epochs: () => undefined,
+		settings: () => testSettings(),
+		link: () => "network",
+		persistLease: () => Promise.resolve(),
+		impactSources: {
+			liveDemod: null,
+			digitalVoice: null,
+			decoders: { getAllStatus: () => [] },
+		},
+		scannerJobsOn: () => [],
+		canHandOver: () => true,
+		logger: pino({ level: "silent" }),
+		now: () => Date.now(),
+	} as never)
+	const lost: string[] = []
+	arbiter.on("lease-lost", (_lease: unknown, reason: string) =>
+		lost.push(reason),
+	)
+	h.manager.emit("payload-started", "rtl")
+	return { arbiter, lost }
 }
 
 describe("tune in one call", () => {
@@ -342,6 +398,8 @@ describe("tune in one call", () => {
 			applied: [],
 			notApplied: ["frequencyHz"],
 		})
+		// Nothing had started: nothing can still land.
+		expect(res.json().inFlight).toBeUndefined()
 		await vi.advanceTimersByTimeAsync(3 * TUNER_COMMAND_TIMEOUT_MS)
 		await until(() =>
 			(h.read().lastTune?.notApplied ?? []).includes("frequencyHz"),
@@ -351,6 +409,34 @@ describe("tune in one call", () => {
 		})
 		expect(h.frames).toEqual([])
 		expect(h.read().frequency).toBe(START_HZ)
+	})
+
+	it("says inFlight when a setting is being written as the deadline passes", async () => {
+		const h = await setup()
+		// The source never returns from the rate change, whose recovery runs past the deadline.
+		h.server.close()
+		h.fakeTime()
+		// Two commands of 8 s: the tune starts at 16 s, 2 s before its deadline of 18 s.
+		h.holdQueue(8_000)
+		h.holdQueue(8_000)
+		let answered = false
+		const answer = h.post({ sampleRateHz: OTHER_RATE }).finally(() => {
+			answered = true
+		})
+		await new Promise<void>(resolve => {
+			setImmediate(resolve)
+		})
+		await vi.advanceTimersByTimeAsync(16_000)
+		await until(() => h.frames.some(f => f.cmd === SET_RATE))
+		expect(answered).toBe(false)
+		while (!answered) await vi.advanceTimersByTimeAsync(100)
+		const res = await answer
+		expect(res.statusCode).toBe(503)
+		expect(res.json()).toMatchObject({
+			code: "TUNER_NOT_USABLE",
+			usable: false,
+			inFlight: true,
+		})
 	})
 
 	it("reports exactly what applied when a write fails partway", async () => {
@@ -412,28 +498,7 @@ describe("tune in one call", () => {
 
 	it("takes a scanner lease as the other routes do: the operator preempts it", async () => {
 		const h = await setup()
-		const arbiter = new TunerArbiter({
-			tuner: h.controller,
-			sources: h.manager,
-			epochs: () => undefined,
-			settings: () => testSettings(),
-			link: () => "network",
-			persistLease: () => Promise.resolve(),
-			impactSources: {
-				liveDemod: null,
-				digitalVoice: null,
-				decoders: { getAllStatus: () => [] },
-			},
-			scannerJobsOn: () => [],
-			canHandOver: () => true,
-			logger: pino({ level: "silent" }),
-			now: () => Date.now(),
-		} as never)
-		const lost: string[] = []
-		arbiter.on("lease-lost", (_lease: unknown, reason: string) =>
-			lost.push(reason),
-		)
-		h.manager.emit("payload-started", "rtl")
+		const { arbiter, lost } = arbiterOn(h)
 		const lease = arbiter.acquire("job", "rtl", 50)
 		expect(lease.ok).toBe(true)
 		const res = await h.post({ frequencyHz: TUNE_HZ })
@@ -546,6 +611,101 @@ describe("tune in one call", () => {
 		})
 		expect(res.statusCode).toBe(404)
 		expect(res.json().code).toBe("TUNER_SOURCE_NOT_FOUND")
+	})
+})
+
+describe("shutdown and source removal during a tune", () => {
+	async function waiting() {
+		const h = await setup()
+		h.fakeTime()
+		const dropped = event(h.manager, "disconnected")
+		h.sockets[0]!.destroy()
+		await dropped
+		const listeners = h.waitListeners()
+		const timers = vi.getTimerCount()
+		const answer = h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 5 })
+		await until(() => h.waitListeners() > listeners)
+		return { h, listeners, timers, answer }
+	}
+
+	it("aborts a tune waiting for the source on shutdown: it writes nothing when IQ returns", async () => {
+		const { h, listeners, timers, answer } = await waiting()
+		expect(vi.getTimerCount()).toBeGreaterThan(timers)
+		await h.app.close()
+		const res = await answer
+		expect(res.statusCode).toBe(503)
+		expect(res.json()).toMatchObject({
+			usable: false,
+			applied: [],
+			notApplied: ["frequencyHz"],
+		})
+		// Its listeners and its timer are gone, not left for the deadline.
+		expect(h.waitListeners()).toBe(listeners)
+		expect(vi.getTimerCount()).toBe(timers)
+		const back = event(h.manager, "payload-started")
+		await vi.advanceTimersByTimeAsync(calculateBackoffDelay(2))
+		await back
+		await vi.advanceTimersByTimeAsync(TUNE_DEADLINE_MS)
+		await new Promise<void>(resolve => {
+			setImmediate(resolve)
+		})
+		expect(h.frames.filter(f => f.value === TUNE_HZ)).toEqual([])
+		expect(h.read().frequency).toBe(START_HZ)
+		expect(h.read().restore).toBeUndefined()
+	})
+
+	it("stops a tune queued behind a command on shutdown: its turn writes nothing", async () => {
+		const h = await setup()
+		h.fakeTime()
+		h.holdQueue(5_000)
+		const answer = h.post({ frequencyHz: TUNE_HZ, gain: 300 })
+		// In its turn at the queue.
+		for (let i = 0; i < 2; i++)
+			await new Promise<void>(resolve => {
+				setImmediate(resolve)
+			})
+		await h.app.close()
+		expect((await answer).statusCode).toBe(503)
+		await vi.advanceTimersByTimeAsync(5_000)
+		await new Promise<void>(resolve => {
+			setImmediate(resolve)
+		})
+		expect(h.frames).toEqual([])
+		expect(h.read().frequency).toBe(START_HZ)
+	})
+
+	it("ends a waiting tune when its source goes, with its listeners and timer", async () => {
+		const { h, listeners, answer } = await waiting()
+		await h.manager.disconnect("rtl")
+		const res = await answer
+		expect(res.statusCode).toBe(404)
+		expect(res.json().code).toBe("TUNER_SOURCE_NOT_FOUND")
+		expect(h.waitListeners()).toBe(listeners)
+	})
+
+	it("writes nothing to a source re-added under the same id", async () => {
+		const h = await setup()
+		h.fakeTime()
+		h.holdQueue(5_000)
+		const answer = h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 5 })
+		await new Promise<void>(resolve => {
+			setImmediate(resolve)
+		})
+		await new Promise<void>(resolve => {
+			setImmediate(resolve)
+		})
+		await h.manager.disconnect("rtl")
+		expect((await answer).statusCode).toBe(404)
+		await h.connect()
+		// The old tune is over: a new one is not refused as busy.
+		await vi.advanceTimersByTimeAsync(5_000)
+		await new Promise<void>(resolve => {
+			setImmediate(resolve)
+		})
+		expect(h.frames.filter(f => f.value === TUNE_HZ)).toEqual([])
+		expect(h.read()).toMatchObject({ frequency: START_HZ })
+		expect(h.read().restore).toBeUndefined()
+		expect(h.read().lastTune).toBeUndefined()
 	})
 })
 
@@ -739,9 +899,333 @@ describe("a temporary tune", () => {
 		await until(() => restoreOf(h.read()).status === "cancelled")
 		expect(restoreOf(h.read())).toMatchObject({
 			cancelledBy: { actor: "scanner-job", reason: "tuner-write" },
-			restored: ["sampleRateHz", "frequencyHz"],
+			// Its frequency frame went out, but the hop's overwrote it: that setting is not back.
+			restored: ["sampleRateHz"],
 		})
 		expect(h.read().gain).toBe(300)
+	})
+
+	describe("with a write landing while a restore frame is in flight", () => {
+		const onRestoreFrequency = (
+			h: Awaited<ReturnType<typeof tuned>>,
+			act: () => void,
+		) => {
+			const onSent = (
+				_id: string,
+				command: string,
+				value: number,
+				origin?: string,
+			) => {
+				if (command !== "set-frequency" || origin !== "rest") return
+				if (value !== OTHER_HZ) return
+				h.controller.off("command-sent", onSent)
+				act()
+			}
+			h.controller.on("command-sent", onSent)
+		}
+
+		it.each<
+			[string, (h: Awaited<ReturnType<typeof tuned>>) => void, string, string]
+		>([
+			[
+				"a relay client",
+				h =>
+					h.controller.applyExternalCommand("rtl", SET_FREQUENCY, OTHER_HZ + 1),
+				"relay",
+				"external-control",
+			],
+			[
+				"a scanner hop",
+				h => {
+					void h.controller.setFrequency("rtl", OTHER_HZ + 1, {
+						origin: "scanner",
+						jobId: "job",
+					})
+				},
+				"scanner-job",
+				"tuner-write",
+			],
+			[
+				"a REST write",
+				h => {
+					void h.controller.setFrequency("rtl", OTHER_HZ + 1, {
+						origin: "rest",
+						actor: "agent",
+					})
+				},
+				"agent",
+				"tuner-write",
+			],
+		])(
+			"leaves %s in the state and in the replay",
+			async (_name, write, actor, reason) => {
+				const h = await tuned()
+				await h.post({ frequencyHz: TUNE_HZ, gain: 300, restoreAfterS: 1 })
+				await until(() => h.frames.length === 2)
+				h.frames.length = 0
+				onRestoreFrequency(h, () => write(h))
+				await vi.advanceTimersByTimeAsync(1_000)
+				await until(() => restoreOf(h.read()).status === "cancelled")
+				expect(restoreOf(h.read()).cancelledBy).toMatchObject({ actor, reason })
+				// Its setter resumed after the write and changed nothing.
+				await new Promise<void>(resolve => {
+					setImmediate(resolve)
+				})
+				expect(h.read().frequency).toBe(OTHER_HZ + 1)
+				expect(restoreOf(h.read()).restored).toEqual(["sampleRateHz"])
+				// No further restore frame: the gain stays the temporary one.
+				expect(h.read().gain).toBe(300)
+				await until(() =>
+					h.frames.some(f => f.cmd === SET_FREQUENCY && f.value === OTHER_HZ),
+				)
+				expect(h.frames.some(f => f.cmd === SET_GAIN)).toBe(false)
+				h.frames.length = 0
+				// A reconnect sync writes what the state holds.
+				if (h.read().controlMode === "external")
+					h.controller.setControlMode("rtl", "internal")
+				const dropped = event(h.manager, "disconnected")
+				h.sockets[0]!.destroy()
+				await dropped
+				const back = event(h.manager, "payload-started")
+				await vi.advanceTimersByTimeAsync(calculateBackoffDelay(2))
+				await back
+				await until(() => h.frames.some(f => f.cmd === SET_FREQUENCY))
+				expect(
+					h.frames.filter(f => f.cmd === SET_FREQUENCY).map(f => f.value),
+				).toEqual([OTHER_HZ + 1])
+				expect(h.read().frequency).toBe(OTHER_HZ + 1)
+			},
+		)
+
+		it("leaves a REST route queued behind the restore last in the state and the replay", async () => {
+			const h = await tuned()
+			await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 1 })
+			await until(() => h.frames.length === 1)
+			let answer: ReturnType<typeof h.post> | undefined
+			onRestoreFrequency(h, () => {
+				answer = h.app.inject({
+					method: "POST",
+					url: "/api/tuner/rtl/frequency",
+					payload: { hz: OTHER_HZ + 1 },
+				}) as ReturnType<typeof h.post>
+			})
+			await vi.advanceTimersByTimeAsync(1_000)
+			await until(() => answer !== undefined)
+			expect((await answer!).statusCode).toBe(200)
+			expect(h.read().frequency).toBe(OTHER_HZ + 1)
+			expect(h.read().lastChange?.actor).toBe("agent")
+			h.frames.length = 0
+			const dropped = event(h.manager, "disconnected")
+			h.sockets[0]!.destroy()
+			await dropped
+			const back = event(h.manager, "payload-started")
+			await vi.advanceTimersByTimeAsync(calculateBackoffDelay(2))
+			await back
+			await until(() => h.frames.some(f => f.cmd === SET_FREQUENCY))
+			expect(
+				h.frames.filter(f => f.cmd === SET_FREQUENCY).map(f => f.value),
+			).toEqual([OTHER_HZ + 1])
+		})
+
+		it("still shows the setting it did put back when the write was to another field", async () => {
+			const h = await tuned()
+			await h.post({ frequencyHz: TUNE_HZ, gain: 300, restoreAfterS: 1 })
+			await until(() => h.frames.length === 2)
+			onRestoreFrequency(h, () => {
+				void h.controller.setPpm("rtl", 3, { origin: "rest", actor: "agent" })
+			})
+			await vi.advanceTimersByTimeAsync(1_000)
+			await until(() => restoreOf(h.read()).status === "cancelled")
+			await new Promise<void>(resolve => {
+				setImmediate(resolve)
+			})
+			expect(h.read()).toMatchObject({ frequency: OTHER_HZ, gain: 300, ppm: 3 })
+			expect(restoreOf(h.read()).restored).toEqual([
+				"sampleRateHz",
+				"frequencyHz",
+			])
+			await until(() => h.frames.some(f => f.cmd === SET_PPM))
+		})
+	})
+
+	describe("the 18 s of a restore", () => {
+		it("ends at its deadline behind a queue, and writes nothing when the queue clears", async () => {
+			const h = await tuned()
+			await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 5 })
+			await until(() => h.frames.length === 1)
+			h.frames.length = 0
+			// Three commands of 8 s from now: the restore, due in 5 s, would start 19 s after that.
+			for (let i = 0; i < 3; i++) h.holdQueue(8_000)
+			await vi.advanceTimersByTimeAsync(5_000 + TUNE_DEADLINE_MS - 1)
+			expect(restoreOf(h.read()).status).toBe("restoring")
+			await vi.advanceTimersByTimeAsync(1)
+			expect(restoreOf(h.read())).toMatchObject({
+				status: "failed",
+				failure: "TUNER_RESTORE_DEADLINE",
+				restored: [],
+			})
+			await vi.advanceTimersByTimeAsync(3 * 8_000)
+			await new Promise<void>(resolve => {
+				setImmediate(resolve)
+			})
+			expect(h.frames).toEqual([])
+			expect(h.read().frequency).toBe(TUNE_HZ)
+			expect(restoreOf(h.read()).status).toBe("failed")
+		})
+
+		// Due at 1 s, so its 18 s end at 19 s; three commands of about 6.3 s hold the queue.
+		it.each<[string, number, number, string]>([
+			["one tick before", 6_333, 18_999, "restored"],
+			["exactly at", 6_334, 19_000, "failed"],
+		])(
+			"bounds the first write: a queue clearing %s the deadline",
+			async (_name, last, end, status) => {
+				const h = await tuned()
+				await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 1 })
+				await until(() => h.frames.length === 1)
+				h.frames.length = 0
+				expect(6_333 + 6_333 + last).toBe(end)
+				h.holdQueue(6_333)
+				h.holdQueue(6_333)
+				h.holdQueue(last)
+				await vi.advanceTimersByTimeAsync(end)
+				await until(() => restoreOf(h.read()).status === status)
+				await new Promise<void>(resolve => {
+					setImmediate(resolve)
+				})
+				const wrote = h.frames.filter(f => f.value === OTHER_HZ)
+				expect(wrote.length).toBe(status === "restored" ? 1 : 0)
+				expect(h.read().frequency).toBe(
+					status === "restored" ? OTHER_HZ : TUNE_HZ,
+				)
+			},
+		)
+
+		it("starts no further write once its budget is spent, even with its timer late", async () => {
+			const h = await tuned()
+			await h.post({ frequencyHz: TUNE_HZ, gain: 300, restoreAfterS: 1 })
+			await until(() => h.frames.length === 2)
+			h.frames.length = 0
+			const onSent = (_id: string, command: string, _v: number, o?: string) => {
+				if (command !== "set-frequency" || o !== "rest") return
+				h.controller.off("command-sent", onSent)
+				// The clock passes the deadline with no timer run: a stalled event loop.
+				vi.setSystemTime(Date.now() + TUNE_DEADLINE_MS)
+			}
+			h.controller.on("command-sent", onSent)
+			await vi.advanceTimersByTimeAsync(1_000)
+			await until(() => restoreOf(h.read()).status === "failed")
+			expect(restoreOf(h.read())).toMatchObject({
+				failure: "TUNER_RESTORE_DEADLINE",
+				// The gain mode was already back, with no write; the gain was not.
+				restored: ["sampleRateHz", "frequencyHz", "gainMode"],
+			})
+			expect(h.read().gain).toBe(300)
+			await until(() => h.frames.some(f => f.cmd === SET_FREQUENCY))
+			expect(h.frames.some(f => f.cmd === SET_GAIN)).toBe(false)
+		})
+
+		it("does not report restored when its budget is spent by the final check", async () => {
+			const h = await tuned()
+			await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 1 })
+			await until(() => h.frames.length === 1)
+			const onSent = (_id: string, command: string, _v: number, o?: string) => {
+				if (command !== "set-frequency" || o !== "rest") return
+				h.controller.off("command-sent", onSent)
+				vi.setSystemTime(Date.now() + TUNE_DEADLINE_MS)
+			}
+			h.controller.on("command-sent", onSent)
+			await vi.advanceTimersByTimeAsync(1_000)
+			await until(() => restoreOf(h.read()).status !== "restoring")
+			expect(restoreOf(h.read())).toMatchObject({
+				status: "failed",
+				failure: "TUNER_RESTORE_DEADLINE",
+				restored: ["sampleRateHz", "frequencyHz", "gainMode", "gain"],
+			})
+			// The write did land before the time ran out: the state says so.
+			expect(h.read().frequency).toBe(OTHER_HZ)
+		})
+	})
+
+	describe("and a scanner lease", () => {
+		it("cancels for good when it comes due under a lease with no hop yet, preempting nothing", async () => {
+			const h = await tuned()
+			const { arbiter, lost } = arbiterOn(h)
+			h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
+			await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 5 })
+			await until(() => h.frames.some(f => f.value === TUNE_HZ))
+			h.frames.length = 0
+			const lease = arbiter.acquire("job", "rtl", 50)
+			if (!lease.ok) throw new Error("no lease")
+			await vi.advanceTimersByTimeAsync(5_000)
+			expect(restoreOf(h.read())).toMatchObject({
+				status: "cancelled",
+				cancelledBy: { actor: "scanner-job", reason: "scanner-lease" },
+			})
+			expect(lost).toEqual([])
+			expect(arbiter.holder("rtl")).toBe(lease.lease)
+			expect(h.frames).toEqual([])
+			// For good: the lease going away brings nothing back.
+			await arbiter.release(lease.lease, { restore: false })
+			await vi.advanceTimersByTimeAsync(10_000)
+			expect(restoreOf(h.read()).status).toBe("cancelled")
+			expect(h.frames.filter(f => f.value === OTHER_HZ)).toEqual([])
+			expect(h.read().frequency).toBe(TUNE_HZ)
+		})
+
+		it("cancels as soon as the state next changes under a lease", async () => {
+			const h = await tuned()
+			const { arbiter, lost } = arbiterOn(h)
+			h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
+			await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 60 })
+			const lease = arbiter.acquire("job", "rtl", 50)
+			expect(lease.ok).toBe(true)
+			expect(restoreOf(h.read()).status).toBe("pending")
+			h.controller.publishState("rtl")
+			expect(restoreOf(h.read()).cancelledBy?.reason).toBe("scanner-lease")
+			expect(lost).toEqual([])
+		})
+
+		it("stops between settings when a lease is taken while it writes", async () => {
+			const h = await tuned()
+			const { arbiter, lost } = arbiterOn(h)
+			h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
+			await h.post({ frequencyHz: TUNE_HZ, gain: 300, restoreAfterS: 1 })
+			await until(() =>
+				h.frames.some(f => f.cmd === SET_GAIN && f.value === 300),
+			)
+			h.frames.length = 0
+			const onSent = (_id: string, command: string, _v: number, o?: string) => {
+				if (command !== "set-frequency" || o !== "rest") return
+				h.controller.off("command-sent", onSent)
+				expect(arbiter.acquire("job", "rtl", 50).ok).toBe(true)
+			}
+			h.controller.on("command-sent", onSent)
+			await vi.advanceTimersByTimeAsync(1_000)
+			await until(() => restoreOf(h.read()).status === "cancelled")
+			expect(restoreOf(h.read()).cancelledBy).toMatchObject({
+				actor: "scanner-job",
+				reason: "scanner-lease",
+			})
+			expect(lost).toEqual([])
+			expect(arbiter.holder("rtl")?.jobId).toBe("job")
+			await until(() => h.frames.some(f => f.cmd === SET_FREQUENCY))
+			expect(h.frames.some(f => f.cmd === SET_GAIN)).toBe(false)
+			expect(h.read().gain).toBe(300)
+		})
+
+		it("writes nothing when the lease cannot be read", async () => {
+			const h = await tuned()
+			h.useLeases(() => {
+				throw new Error("no answer")
+			})
+			await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 1 })
+			await until(() => h.frames.length === 1)
+			h.frames.length = 0
+			await vi.advanceTimersByTimeAsync(5_000)
+			expect(restoreOf(h.read()).cancelledBy?.actor).toBe("scanner-job")
+			expect(h.frames).toEqual([])
+		})
 	})
 
 	it("cancels on DELETE, then has nothing left to cancel", async () => {
@@ -814,6 +1298,27 @@ describe("a temporary tune", () => {
 		expect(h.read().restore).toBeUndefined()
 	})
 
+	it("ends a restore waiting for the source on shutdown, its listeners and timers with it", async () => {
+		const h = await tuned()
+		await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 1 })
+		await until(() => h.frames.length === 1)
+		h.frames.length = 0
+		const dropped = event(h.manager, "disconnected")
+		h.sockets[0]!.destroy()
+		await dropped
+		const before = h.waitListeners()
+		await vi.advanceTimersByTimeAsync(1_000)
+		expect(restoreOf(h.read()).status).toBe("restoring")
+		expect(h.waitListeners()).toBeGreaterThan(before)
+		await h.app.close()
+		expect(h.waitListeners()).toBe(before)
+		await vi.advanceTimersByTimeAsync(calculateBackoffDelay(3))
+		await new Promise<void>(resolve => {
+			setImmediate(resolve)
+		})
+		expect(h.frames.filter(f => f.value === OTHER_HZ)).toEqual([])
+	})
+
 	it("keeps the original snapshot through a new temporary tune, with the new time", async () => {
 		const h = await tuned()
 		await h.post({ frequencyHz: TUNE_HZ, gain: 300, restoreAfterS: 5 })
@@ -847,6 +1352,27 @@ describe("a temporary tune", () => {
 		spy.mockImplementation(write)
 		expect(restoreOf(h.read()).status).toBe("pending")
 		await vi.advanceTimersByTimeAsync(5_000)
+		await until(() => restoreOf(h.read()).status === "restored")
+		expect(h.read().frequency).toBe(OTHER_HZ)
+	})
+
+	it("keeps the pending restore's time when a new temporary tune finds its values in place", async () => {
+		const h = await tuned()
+		const first = await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 5 })
+		const due = restoreOf(first.json()).at
+		await until(() => h.frames.length === 1)
+		h.frames.length = 0
+		const again = await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 60 })
+		expect(again.statusCode).toBe(200)
+		expect(again.json().applied).toEqual(["frequencyHz"])
+		expect(restoreOf(again.json())).toMatchObject({
+			status: "pending",
+			at: due,
+		})
+		expect(h.frames).toEqual([])
+		await vi.advanceTimersByTimeAsync(4_999)
+		expect(restoreOf(h.read()).status).toBe("pending")
+		await vi.advanceTimersByTimeAsync(1)
 		await until(() => restoreOf(h.read()).status === "restored")
 		expect(h.read().frequency).toBe(OTHER_HZ)
 	})
