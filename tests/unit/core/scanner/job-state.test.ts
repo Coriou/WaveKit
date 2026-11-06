@@ -243,6 +243,13 @@ const ROWS: [string[], string, string, string[]][] = [
 	],
 	[["paused(operator)"], "resume:plain", "running", ["resend-hop"]],
 	[["paused(operator)"], "resume:takeover", "running", ["resend-hop"]],
+	// the runner's consent gate answers a plain resume with a grown impact before this row applies
+	[
+		["paused(resume-blocked)"],
+		"resume:plain",
+		"running",
+		["acquire-lease", "hold-decoders", "resend-hop"],
+	],
 	[
 		["paused(resume-blocked)"],
 		"resume:takeover",
@@ -429,7 +436,7 @@ describe("job transition table (§ 10.1)", () => {
 		})
 	})
 
-	it("auto-resumes only when the impact did not grow; resume-blocked needs takeover", () => {
+	it("auto-resumes only when the impact did not grow; resume-blocked resumes either way", () => {
 		const paused: S = { state: "paused", reason: "preempted-relay" }
 		expect(
 			transition(paused, { type: "preemptor-idle", impactGrew: false }),
@@ -449,7 +456,10 @@ describe("job transition table (§ 10.1)", () => {
 				{ state: "paused", reason: "resume-blocked" },
 				{ type: "resume", takeover: false },
 			),
-		).toEqual({ invalid: true })
+		).toEqual({
+			state: "running",
+			actions: ["acquire-lease", "hold-decoders", "resend-hop"],
+		})
 		expect(
 			transition(
 				{ state: "paused", reason: "resume-blocked" },
@@ -459,6 +469,44 @@ describe("job transition table (§ 10.1)", () => {
 			state: "running",
 			actions: ["acquire-lease", "hold-decoders", "resend-hop"],
 		})
+	})
+
+	it("every paused reason resumes, plain or with takeover, except source-down", () => {
+		for (const reason of PAUSED)
+			for (const takeover of [false, true]) {
+				const t = transition(
+					{ state: "paused", reason: reason as never },
+					{ type: "resume", takeover },
+				)
+				if (reason === "source-down") expect(t).toEqual({ invalid: true })
+				else expect(t).toMatchObject({ state: "running" })
+			}
+	})
+
+	it("a blocked job that never opened its engine opens it on resume", () => {
+		expect(
+			transition(
+				{ state: "paused", reason: "resume-blocked" },
+				{ type: "resume", takeover: false },
+				{ engineOpened: false },
+			),
+		).toEqual({
+			state: "running",
+			actions: ["acquire-lease", "hold-decoders", "open-engine", "resend-hop"],
+		})
+	})
+
+	it("an in-window job's resume touches no lease in any resumable reason", () => {
+		for (const reason of PAUSED) {
+			const t = transition(
+				{ state: "paused", reason: reason as never },
+				{ type: "resume", takeover: false },
+			)
+			if ("invalid" in t) continue
+			const actions = actionsForMode("in-window", t.actions)
+			expect(actions).not.toContain("acquire-lease")
+			expect(actions).not.toContain("hold-decoders")
+		}
 	})
 
 	it("keeps an operator pause when the lease is lost and re-acquires it on resume", () => {

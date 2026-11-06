@@ -263,10 +263,16 @@ export function transition(
 					...(ctx.engineOpened === false ? ["open-engine" as const] : []),
 					"resend-hop",
 				])
+			// The runner's consent gate runs first: a plain resume with a grown impact answers
+			// SCANNER_TAKEOVER_REQUIRED and changes nothing. No open-engine unless a job that never opened
+			// one was blocked (core-restart, then a plain feed resume, then a refused acquire).
 			if (pausedFor("resume-blocked"))
-				return e.takeover
-					? to("running", ["acquire-lease", "hold-decoders", "resend-hop"])
-					: INVALID
+				return to("running", [
+					"acquire-lease",
+					"hold-decoders",
+					...(ctx.engineOpened === false ? ["open-engine" as const] : []),
+					"resend-hop",
+				])
 			if (pausedFor("core-restart"))
 				return to("running", [
 					"acquire-lease",
@@ -278,6 +284,8 @@ export function transition(
 			// only when the lease is free and the job is the best waiter; a refused acquire changes nothing.
 			if (preempted)
 				return to("running", ["acquire-lease", "hold-decoders", "resend-hop"])
+			// paused(source-down) stays here on purpose: only source-up continues it, and the runner
+			// answers SCANNER_SOURCE_DOWN instead of a generic refusal. Every other paused reason resumes.
 			return INVALID
 		case "cancel":
 			return to("cancelled", endActions(s), e.reason)

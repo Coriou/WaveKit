@@ -802,7 +802,8 @@ describe("mock scanner WebSocket", () => {
 		).body as ScanJob
 		await inbox.next(isJob(job.id, "running"))
 		const before = Date.now()
-		const tuned = await post("/api/tuner/rtl-0/frequency", { hz: 145_500_000 })
+		// stays in the marine band: a retune that starts another band's decoders would block the auto-resume
+		const tuned = await post("/api/tuner/rtl-0/frequency", { hz: 162_000_000 })
 		expect(tuned.status).toBe(200)
 		const paused = (await inbox.next(isJob(job.id, "paused"))).data as ScanJob
 		const mark = inbox.messages.length
@@ -818,11 +819,99 @@ describe("mock scanner WebSocket", () => {
 		const state = (await (
 			await fetch(`${api}/api/tuner/rtl-0`)
 		).json()) as TunerState
-		expect(state.frequency).toBe(145_500_000)
+		expect(state.frequency).toBe(162_000_000)
 		const resumed = (await inbox.next(isJob(job.id, "running"), 4000, mark))
 			.data as ScanJob
 		expect(resumed.resumeAt).toBeNull()
 		await post(`/api/scanner/jobs/${job.id}/cancel`)
+	})
+
+	it("a decoder started during the pause blocks the auto-resume; Resume asks, then a takeover or its end lets it through", async () => {
+		const inbox = await connect()
+		await post("/api/decoders/dsd-fme/stop")
+		const job = (
+			await post("/api/scanner/jobs", {
+				...marineSweep,
+				resume: { autoAfterIdleMs: 200 },
+			})
+		).body as ScanJob
+		await inbox.next(isJob(job.id, "running"))
+		await post("/api/tuner/rtl-0/frequency", { hz: 145_500_000 })
+		await post("/api/decoders/dsd-fme/start")
+		const mark = inbox.messages.length
+		const seen = (
+			await inbox.next(
+				m =>
+					m.type === "scanner:job" &&
+					(m.data as ScanJob).id === job.id &&
+					(m.data as ScanJob).reason === "resume-blocked",
+				4000,
+				mark,
+			)
+		).data as ScanJob
+		expect(seen.impact?.runningDecoders).toContain("dsd-fme")
+
+		const asked = await post(`/api/scanner/jobs/${job.id}/resume`)
+		expect(asked.status).toBe(409)
+		expect(asked.body).toMatchObject({
+			code: "SCANNER_TAKEOVER_REQUIRED",
+			details: {
+				impact: {
+					runningDecoders: expect.arrayContaining(["dsd-fme"]) as string[],
+				},
+			},
+		})
+		// the button names the job's impact, and the refusal lists the same people: one click goes straight through
+		expect(
+			(asked.body as { details: { impact: unknown } }).details.impact,
+		).toEqual(seen.impact)
+		expect((asked.body as { message: string }).message).toContain("dsd-fme")
+		expect((asked.body as { message: string }).message).toContain(
+			"takeover: true",
+		)
+		const resumed = await post(`/api/scanner/jobs/${job.id}/resume`, {
+			takeover: true,
+		})
+		expect(resumed.body).toMatchObject({ state: "running" })
+		// consent moved: the same decoder no longer needs asking after the next pause
+		await post(`/api/scanner/jobs/${job.id}/pause`)
+		const again = await post(`/api/scanner/jobs/${job.id}/resume`)
+		expect(again.body).toMatchObject({ state: "running" })
+		await post(`/api/scanner/jobs/${job.id}/cancel`)
+		await post("/api/decoders/dsd-fme/stop")
+		await post("/api/decoders/dsd-fme/start")
+	})
+
+	it("a blocked sweep resumes plainly once the one it would disturb is gone", async () => {
+		const inbox = await connect()
+		await post("/api/decoders/dsd-fme/stop")
+		const job = (
+			await post("/api/scanner/jobs", {
+				...marineSweep,
+				resume: { autoAfterIdleMs: 200 },
+			})
+		).body as ScanJob
+		await inbox.next(isJob(job.id, "running"))
+		await post("/api/tuner/rtl-0/frequency", { hz: 145_500_000 })
+		await post("/api/decoders/dsd-fme/start")
+		const mark = inbox.messages.length
+		const seen = (
+			await inbox.next(
+				m =>
+					m.type === "scanner:job" &&
+					(m.data as ScanJob).id === job.id &&
+					(m.data as ScanJob).reason === "resume-blocked",
+				4000,
+				mark,
+			)
+		).data as ScanJob
+		// everyone it would interrupt (a retune also starts the band's own decoders) stops
+		const named = seen.impact?.runningDecoders ?? []
+		for (const id of named) await post(`/api/decoders/${id}/stop`)
+		const resumed = await post(`/api/scanner/jobs/${job.id}/resume`)
+		expect(resumed.body).toMatchObject({ state: "running" })
+		await post(`/api/scanner/jobs/${job.id}/cancel`)
+		for (const id of named) await post(`/api/decoders/${id}/start`)
 	})
 
 	it("defaults resumeAt to 60 s after the operator's last write", async () => {

@@ -14,6 +14,7 @@ import { Seg } from "../../../ui/Seg.tsx"
 import { Skeleton } from "../../../ui/Skeleton.tsx"
 import { Switch } from "../../../ui/Switch.tsx"
 import { useNow, useTunerState } from "../../hooks.ts"
+import { ResumeScan } from "../ResumeScan.tsx"
 import { closePlan, openDiscovery, openPlan, scannerUi } from "../ui-store.ts"
 import { DiscoveryList } from "./DiscoveryList.tsx"
 import { HitLog } from "./HitLog.tsx"
@@ -411,6 +412,7 @@ function Footer() {
 			<span className="wks-ellipsis" title={text}>
 				{text}
 			</span>
+			{sweep && <ResumeScan job={sweep} />}
 			{capture && (
 				<span
 					className="wks-footer-iq wks-ellipsis"

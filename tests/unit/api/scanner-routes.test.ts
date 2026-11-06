@@ -582,6 +582,52 @@ describe("scanner routes", () => {
 		})
 	})
 
+	it("a refused resume answers its status, code, message and details", async () => {
+		const impact = {
+			liveAudioClients: 1,
+			digitalVoiceListeners: 0,
+			runningDecoders: [],
+			pinnedDecoders: [],
+			scannerJobs: [],
+			unrestorable: [],
+		}
+		for (const [message, code, details] of [
+			[
+				"Resuming interrupts 1 live audio listener; resend with takeover: true to interrupt them",
+				"SCANNER_TAKEOVER_REQUIRED",
+				{ impact },
+			],
+			[
+				"The source is down: this job continues by itself when it reconnects",
+				"SCANNER_SOURCE_DOWN",
+				{ reason: "source-down" },
+			],
+			[
+				"Lease held by scanner job j_2 at equal or higher priority; stop that job",
+				"SCANNER_SOURCE_BUSY",
+				{ reason: "held", holderJobId: "j_2" },
+			],
+		] as const) {
+			await build({
+				resumeJob: vi.fn(() =>
+					Promise.reject(new ScannerApiError(message, code, 409, details)),
+				),
+			})
+			const res = await app.inject({
+				method: "POST",
+				url: "/api/scanner/jobs/j_1/resume",
+			})
+			expect(res.statusCode).toBe(409)
+			expect(res.json()).toEqual({
+				error: "ScannerApiError",
+				code,
+				message,
+				details,
+			})
+			await app.close()
+		}
+	})
+
 	it("resumes without a body as takeover false", async () => {
 		await build()
 		expect(

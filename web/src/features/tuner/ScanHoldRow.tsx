@@ -9,19 +9,22 @@ import { useEffect, useState, type MouseEvent } from "react"
 import type { Discovery, ScanJob } from "@wavekit/api-types"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
-import { bandAt, channelAt, errorMessage, useStore } from "../../data/index.ts"
+import { errorMessage } from "../../data/api-client.ts"
+import { bandAt, channelAt, useStore } from "../../data/index.ts"
 import { heldFrequencyHz, isJobActive } from "../../data/scanner-format.ts"
-import { takeoverImpact } from "../../data/scanner-store.ts"
 import { shellStore } from "../../shell/store.ts"
 import { openPlan } from "../scanner/ui-store.ts"
 import { useLiveStatus, useNow, useSettledHz } from "../hooks.ts"
-import { decoderLabel } from "../tuned/signal.ts"
 import { modulationOf } from "./modes.ts"
 import { defaultSaveName, saveInput } from "./saved.ts"
 import {
+	decoderNamer,
 	heldDiscoveryId,
 	holdRowModel,
 	holdSaveName,
+	latestRequest,
+	resumeApproved,
+	resumeWithConsent,
 	skipPatch,
 	type HoldAction,
 	type HoldGlyph,
@@ -154,15 +157,22 @@ function HoldRow({ job }: { job: ScanJob }) {
 	const [consent, setConsent] = useState<string[] | null>(null)
 	const [error, setError] = useState<string | null>(null)
 	const [busy, setBusy] = useState(false)
+	const [requests] = useState(latestRequest)
+	const decoderName = decoderNamer(useStore(decoders, s => s.decoders))
 	// "resumes in 42 s" counts down
 	const ticking = job.state === "paused" && job.resumeAt !== null
 	const now = useNow(ticking, 1000)
 
+	// the row can be reused for another job: what is in flight answers for the old one
+	useEffect(() => {
+		requests.cancel()
+		setBusy(false)
+	}, [requests, job.id])
 	// a consent question or an error belongs to the state it was asked in
 	useEffect(() => {
 		setConsent(null)
 		setError(null)
-	}, [job.state, job.reason])
+	}, [job.id, job.state, job.reason])
 	useEffect(() => {
 		if (error === null) return
 		const t = setTimeout(() => setError(null), 5000)
@@ -177,25 +187,40 @@ function HoldRow({ job }: { job: ScanJob }) {
 		held,
 		saved,
 		consent,
+		decoderName,
 		readOnly,
 	})
 
 	const run = (work: () => Promise<unknown>) => {
+		const current = requests.begin()
 		setBusy(true)
 		setError(null)
 		work()
 			.catch((err: unknown) => {
-				const impact = takeoverImpact(err)
-				if (impact) {
-					const all = decoders.get().decoders
-					setConsent(
-						impact.runningDecoders.map(id =>
-							decoderLabel(all.find(d => d.id === id)?.type ?? id),
-						),
-					)
-				} else setError(errorMessage(err))
+				if (current()) setError(errorMessage(err))
 			})
-			.finally(() => setBusy(false))
+			.finally(() => {
+				if (current()) setBusy(false)
+			})
+	}
+
+	const resume = () => {
+		const current = requests.begin()
+		setBusy(true)
+		setError(null)
+		void resumeWithConsent({
+			jobId: job.id,
+			approved: resumeApproved(job, consent, decoderName),
+			resume: (id, options) => scanner.resumeJob(id, options),
+			decoderName,
+			current,
+		}).then(outcome => {
+			if (outcome.kind === "superseded") return
+			setBusy(false)
+			if (outcome.kind === "confirm") setConsent(outcome.names)
+			else if (outcome.kind === "error") setError(outcome.message)
+			else setConsent(null)
+		})
 	}
 
 	const act = (a: HoldAction, e: MouseEvent) => {
@@ -205,9 +230,8 @@ function HoldRow({ job }: { job: ScanJob }) {
 			case "stay":
 				return run(() => scanner.pauseJob(job.id))
 			case "resume":
-				return run(() => scanner.resumeJob(job.id))
 			case "takeover":
-				return run(() => scanner.resumeJob(job.id, { takeover: true }))
+				return resume()
 			case "stop":
 				return run(() => scanner.cancelJob(job.id))
 			case "skip":
@@ -251,7 +275,7 @@ function HoldRow({ job }: { job: ScanJob }) {
 			className="wkf-hold"
 			data-tone={tone}
 			role="status"
-			title={model.tooltip}
+			title={error ?? model.tooltip}
 			onClick={openScanPlan}
 		>
 			{model.pulse ? (

@@ -239,6 +239,43 @@ export function impactGrew(now: Impact, consented: Impact | null): boolean {
 	)
 }
 
+/** Who a takeover interrupts, in words for the 409 message; the same facts are in `details.impact`. */
+export function impactWords(i: Impact): string {
+	const counted = (n: number, what: string): string =>
+		`${n} ${what}${n === 1 ? "" : "s"}`
+	const named = (ids: readonly string[], what: string): string =>
+		`${what}${ids.length === 1 ? "" : "s"} ${ids.join(", ")}`
+	const decoders = [...new Set([...i.runningDecoders, ...i.pinnedDecoders])]
+	return [
+		i.liveAudioClients > 0
+			? counted(i.liveAudioClients, "live audio listener")
+			: "",
+		i.digitalVoiceListeners > 0
+			? counted(i.digitalVoiceListeners, "digital voice listener")
+			: "",
+		decoders.length > 0 ? named(decoders, "decoder") : "",
+		i.scannerJobs.length > 0 ? named(i.scannerJobs, "scanner job") : "",
+		i.unrestorable.length > 0
+			? `tuner settings it cannot restore (${i.unrestorable.join(", ")})`
+			: "",
+	]
+		.filter(part => part !== "")
+		.join(", ")
+}
+
+const KEEPS_PROGRESS = "This job stays paused with its progress."
+
+/** A refused resume: the arbiter's detail first (API contract), then what to do about it. */
+function resumeRefusalMessage(r: { detail: string; reason?: string }): string {
+	if (TRANSIENT_REFUSALS.has(r.detail))
+		return `${r.detail}: the tuner is not free yet; retry in a few seconds. ${KEEPS_PROGRESS}`
+	if (r.reason === "held")
+		return `${r.detail} at equal or higher priority; stop that job or wait for it to end, then resume. ${KEEPS_PROGRESS}`
+	if (r.reason === "relay")
+		return `${r.detail}; wait for it to give control back, then resume. ${KEEPS_PROGRESS}`
+	return `${r.detail}; it cannot resume until the source has tuner control. ${KEEPS_PROGRESS}`
+}
+
 type Deferral = Extract<
 	ReturnType<ProbePool["request"]>,
 	{ deferred: unknown }
@@ -383,10 +420,12 @@ const ACTIVE: ReadonlySet<JobState> = new Set([
 /**
  * Pauses that hold the job until an explicit resume and may lose the lease meanwhile: a lease-less
  * resume of one needs consent like createJob, and a refused acquire moves it to resume-blocked.
+ * resume-blocked is one itself: it never holds the lease, and a refused resume leaves it as it is.
  */
 const HELD_PAUSES: ReadonlySet<string | undefined> = new Set([
 	"operator",
 	"resumed-without-retune",
+	"resume-blocked",
 ])
 
 const LOST_EVENTS: ReadonlySet<JobEvent["type"]> = new Set([
@@ -1227,6 +1266,14 @@ export class JobRunner implements JobDriver {
 			engineOpened: this.engineOpened,
 		})
 		if ("invalid" in t) {
+			// Reached for a dropout only: a feed the operator paused answers SOURCE_PAUSED in the service.
+			if (e.type === "resume" && from.reason === "source-down")
+				throw new ScannerApiError(
+					`The source is down: this job continues by itself when it reconnects. Nothing to resume yet; cancel it to end it. ${KEEPS_PROGRESS}`,
+					"SCANNER_SOURCE_DOWN",
+					409,
+					{ reason: "source-down" },
+				)
 			throw new ScannerApiError(
 				`Job ${record.id} cannot handle "${e.type}" in state ${record.state}`,
 				"SCANNER_INVALID_TRANSITION",
@@ -1249,7 +1296,7 @@ export class JobRunner implements JobDriver {
 			const impact = this.deps.impact()
 			if (impactGrew(impact, record.consentedImpact))
 				throw new ScannerApiError(
-					"Resuming disturbs consumers started since the operator took the tuner; resend with takeover",
+					`Resuming interrupts ${impactWords(impact)}; resend with takeover: true to interrupt them, or resume again once they have stopped. ${KEEPS_PROGRESS}`,
 					"SCANNER_TAKEOVER_REQUIRED",
 					409,
 					{ impact },
@@ -1291,7 +1338,7 @@ export class JobRunner implements JobDriver {
 						: {}),
 				}
 				throw new ScannerApiError(
-					r.detail,
+					e.type === "resume" ? resumeRefusalMessage(r) : r.detail,
 					r.code,
 					409,
 					Object.keys(details).length > 0 ? details : undefined,

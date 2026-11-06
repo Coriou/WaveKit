@@ -1,0 +1,20 @@
+/* Resume on a paused scan, at the end of the plan and drawer footers (the hold row keeps its own buttons). */
+@layer wk-app {
+	.wk-resume-scan {
+		flex: none;
+		max-width: 70%;
+		margin-left: auto;
+		padding-left: 12px;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.wk-resume-scan-err {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-amber);
+	}
+}

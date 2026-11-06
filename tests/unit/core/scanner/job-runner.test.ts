@@ -7,6 +7,7 @@ import {
 	JobRunner,
 	chooseLeaseHolder,
 	impactGrew,
+	impactWords,
 	undecodedForDeferral,
 	undecodedForProbe,
 	type JobRecord,
@@ -531,6 +532,78 @@ describe("JobRunner resume of an operator pause without its lease (R4)", () => {
 			details: { holderJobId: "j_other" },
 		})
 		expect(record).toMatchObject({ state: "paused", reason: "resume-blocked" })
+	})
+
+	it("a transient refusal says to retry and leaves a blocked job blocked", async () => {
+		const { runner, arbiter, record } = await pausedWithoutLease()
+		record.reason = "resume-blocked"
+		arbiter.refuse = "releasing"
+		await expect(
+			runner.dispatch({ type: "resume", takeover: true }),
+		).rejects.toMatchObject({
+			code: "SCANNER_SOURCE_BUSY",
+			message: expect.stringContaining("retry in a few seconds") as string,
+		})
+		expect(record).toMatchObject({ state: "paused", reason: "resume-blocked" })
+		expect(record.consentedImpact).toBeNull()
+	})
+
+	it("a start keeps the arbiter's bare detail; only a resume adds what to do", async () => {
+		const { runner, arbiter, record } = runnerHarness()
+		arbiter.refuse = "Lease held by scanner job j_other"
+		await expect(runner.start()).rejects.toMatchObject({
+			message: "Lease held by scanner job j_other",
+		})
+		expect(record.state).toBe("pending")
+	})
+
+	it("a resume during a dropout says the job continues by itself", async () => {
+		const h = runnerHarness()
+		await h.runner.start()
+		await flush()
+		h.runner.onEpochStarted(epochAt(11, HOP0))
+		h.arbiter.retunes[0]!.resolve(pendingFor(11, HOP0))
+		await flush()
+		await h.runner.dispatch({ type: "source-down" })
+		expect(h.record).toMatchObject({ state: "paused", reason: "source-down" })
+		await expect(
+			h.runner.dispatch({ type: "resume", takeover: false }),
+		).rejects.toMatchObject({
+			statusCode: 409,
+			code: "SCANNER_SOURCE_DOWN",
+			details: { reason: "source-down" },
+		})
+		expect(h.record).toMatchObject({ state: "paused", reason: "source-down" })
+	})
+})
+
+describe("impactWords", () => {
+	const none = {
+		liveAudioClients: 0,
+		digitalVoiceListeners: 0,
+		runningDecoders: [],
+		pinnedDecoders: [],
+		scannerJobs: [],
+		unrestorable: [],
+	}
+	it("names everyone a takeover interrupts, one decoder once", () => {
+		expect(
+			impactWords({
+				liveAudioClients: 2,
+				digitalVoiceListeners: 1,
+				runningDecoders: ["a", "b"],
+				pinnedDecoders: ["b"],
+				scannerJobs: ["j_1"],
+				unrestorable: ["gain"],
+			}),
+		).toBe(
+			"2 live audio listeners, 1 digital voice listener, decoders a, b, scanner job j_1, tuner settings it cannot restore (gain)",
+		)
+		expect(impactWords({ ...none, runningDecoders: ["a"] })).toBe("decoder a")
+		expect(impactWords({ ...none, liveAudioClients: 1 })).toBe(
+			"1 live audio listener",
+		)
+		expect(impactWords(none)).toBe("")
 	})
 })
 
