@@ -647,6 +647,18 @@ describe("automatic resume reentry", () => {
 		expect(h.record.state).toBe("running")
 		expect(h.arbiter.holder()).toBeDefined()
 	})
+	it("refuses a job hand-back with no data, so the service can owe it", async () => {
+		const h = runnerHarness()
+		h.record.state = "paused"
+		h.record.reason = "preempted-job"
+		h.arbiter.connected = false
+		await expect(
+			h.runner.dispatch({ type: "preemptor-idle", impactGrew: false }),
+		).rejects.toMatchObject({ code: "SCANNER_SOURCE_DOWN" })
+		expect(h.record).toMatchObject({ state: "paused", reason: "preempted-job" })
+		expect(h.arbiter.holder()).toBeUndefined()
+		expect(h.arbiter.retunes).toHaveLength(0)
+	})
 	it("a queued idle event cannot acquire after activity starts", async () => {
 		let quiet = true
 		const h = runnerHarness(() => quiet)

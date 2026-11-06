@@ -96,6 +96,20 @@ describe("the Listen card", () => {
 		expect(html).toContain("data-breaking")
 	})
 
+	it("keeps saying breaking up, without a figure, when the core has gone unread", () => {
+		const html = head({ audio: { breaking: true, heardPct: null } })
+		expect(html).toContain("<b>Listening</b>")
+		expect(html).toContain("Breaking up")
+		expect(html).not.toContain("% heard")
+	})
+
+	it("claims no figure with nothing known", () => {
+		const html = head({ audio: { heardPct: null } })
+		expect(html).toContain("<b>Listening</b>")
+		expect(html).not.toContain("Breaking up")
+		expect(html).not.toContain("% heard")
+	})
+
 	it("says a clean Listening while the audio is fine", () => {
 		const html = head({ audio: { heardPct: 100 } })
 		expect(html).toContain("<b>Listening</b>")

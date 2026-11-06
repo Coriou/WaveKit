@@ -1314,6 +1314,14 @@ export class JobRunner implements JobDriver {
 				!(this.deps.autoResumeReady?.() ?? true))
 		)
 			return
+		// A hand-back queued before the data stopped: this job gets no source-up for it, so the service
+		// has to hear of the refusal and owe it to the next one.
+		if (
+			e.type === "preemptor-idle" &&
+			record.reason === "preempted-job" &&
+			!this.deps.arbiter.isConnected(this.sourceId)
+		)
+			throw noDataRefusal(record, false)
 		if (e.type === "resume" || e.type === "start")
 			this.autoResumeGuardActive = false
 		if (e.type === "preemptor-idle")

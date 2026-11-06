@@ -12,6 +12,7 @@ import {
 	HEALTH_MIN_EXPECTED_MS,
 	HEALTH_WINDOW_BUCKETS,
 	NO_AUDIO_HEALTH,
+	ROUTE_UNKNOWN_AFTER_MS,
 } from "../../src/features/listen/audio-health.ts"
 import type { RingStats } from "../../src/features/listen/pcm.ts"
 
@@ -23,6 +24,7 @@ class Feed {
 	renderedMs = 0
 	dryMs = 0
 	last = NO_AUDIO_HEALTH
+	onRoute = false
 	constructor() {
 		this.t.noteStats(this.stats(), true)
 	}
@@ -39,7 +41,7 @@ class Feed {
 	bucket(dryMs: number, expected = true): void {
 		this.renderedMs += HEALTH_BUCKET_MS
 		this.dryMs += dryMs
-		this.last = this.t.noteStats(this.stats(), expected)
+		this.last = this.t.noteStats(this.stats(), expected, this.onRoute)
 	}
 	/** A window with this much missing in total, spread evenly. */
 	window(missingMs: number): void {
@@ -278,6 +280,130 @@ describe("the audio health figure", () => {
 			f.window(0)
 			expect(f.last).toMatchObject({ coreFilledMs: 1_000, rebases: 1 })
 		})
+
+		it("a late reading goes into the window at its rate, and the total keeps it all", () => {
+			const f = new Feed()
+			f.onRoute = true
+			f.t.noteRoute(route(0))
+			for (let i = 0; i < 3; i++) f.window(0)
+			// 30% of 30 s is 9 000 ms; the window holds 30% of its 10 000 ms
+			f.t.noteRoute(route(450 * BLOCK))
+			f.window(0)
+			expect(f.last).toMatchObject({
+				heardPct: 70,
+				breaking: true,
+				coreFilledMs: 9_000,
+			})
+		})
+
+		it("a late reading of nothing but zeros fills the window and no more", () => {
+			const f = new Feed()
+			f.onRoute = true
+			f.t.noteRoute(route(0))
+			for (let i = 0; i < 3; i++) f.window(0)
+			f.t.noteRoute(route(1_500 * BLOCK))
+			f.window(0)
+			expect(f.last).toMatchObject({ heardPct: 0, coreFilledMs: 30_000 })
+			// the credit has left the window with it
+			f.t.noteRoute(route(1_500 * BLOCK))
+			f.window(0)
+			expect(f.last).toMatchObject({ heardPct: 100, coreFilledMs: 30_000 })
+		})
+
+		describe("with no reading on /auto", () => {
+			it("states its bound: the whole window, 5 readings at one per 2 s", () => {
+				expect(ROUTE_UNKNOWN_AFTER_MS).toBe(WINDOW_MS)
+				expect(ROUTE_UNKNOWN_AFTER_MS).toBe(5 * 2_000)
+			})
+
+			it("is known at the bound and unknown just past it", () => {
+				const at = new Feed()
+				at.onRoute = true
+				at.window(0)
+				expect(at.renderedMs).toBe(ROUTE_UNKNOWN_AFTER_MS)
+				expect(at.last).toMatchObject({ heardPct: 100, breaking: false })
+
+				const past = new Feed()
+				past.onRoute = true
+				past.renderedMs += 1
+				past.t.noteStats(past.stats(), true, true)
+				past.window(0)
+				expect(past.renderedMs).toBe(ROUTE_UNKNOWN_AFTER_MS + 1)
+				expect(past.last).toMatchObject({ heardPct: null, breaking: false })
+			})
+
+			it("a base alone does not count as a reading", () => {
+				const f = new Feed()
+				f.onRoute = true
+				f.t.noteRoute(route(0))
+				f.window(0)
+				f.bucket(0)
+				expect(f.last.heardPct).toBeNull()
+			})
+
+			it("the next reading brings the figure back", () => {
+				const f = new Feed()
+				f.onRoute = true
+				f.t.noteRoute(route(0))
+				f.window(0)
+				f.bucket(0)
+				expect(f.last.heardPct).toBeNull()
+				f.t.noteRoute(route(0))
+				f.bucket(0)
+				expect(f.last.heardPct).toBe(100)
+			})
+
+			it("does not clear breaking up on no information", () => {
+				const f = new Feed()
+				f.onRoute = true
+				f.t.noteRoute(route(0))
+				f.window(3_000)
+				f.t.noteRoute(route(0))
+				f.window(3_000)
+				expect(f.last.breaking).toBe(true)
+				f.window(0)
+				f.window(0)
+				expect(f.last).toMatchObject({ heardPct: null, breaking: true })
+				// a reading saying nothing was filled is information
+				f.t.noteRoute(route(0))
+				f.bucket(0)
+				expect(f.last).toMatchObject({ heardPct: 100, breaking: false })
+			})
+
+			it("does not raise breaking up on no information, but the ring's own loss does", () => {
+				const clean = new Feed()
+				clean.onRoute = true
+				for (let i = 0; i < 3; i++) clean.window(0)
+				expect(clean.last).toMatchObject({ heardPct: null, breaking: false })
+
+				const dry = new Feed()
+				dry.onRoute = true
+				for (let i = 0; i < 3; i++) dry.window(3_000)
+				expect(dry.last).toMatchObject({ heardPct: 70, breaking: true })
+			})
+
+			it("the ring's own loss under the bound does not make a figure", () => {
+				const f = new Feed()
+				f.onRoute = true
+				for (let i = 0; i < 3; i++) f.window(500)
+				expect(f.last).toMatchObject({ heardPct: null, breaking: false })
+			})
+
+			it("off /auto no reading is due, so the figure stands", () => {
+				const f = new Feed()
+				for (let i = 0; i < 3; i++) f.window(0)
+				expect(f.last.heardPct).toBe(100)
+			})
+
+			it("the time off /auto does not count against it", () => {
+				const f = new Feed()
+				f.window(0)
+				f.window(0)
+				f.onRoute = true
+				f.window(0)
+				expect(f.last.heardPct).toBe(100)
+			})
+		})
 	})
 })
 
@@ -326,6 +452,10 @@ describe("what the card and Audio options say", () => {
 		expect(breakingUpText(health({ heardPct: 95 }))).toBeNull()
 		expect(breakingUpText(health({ breaking: true, heardPct: 71 }))).toBe(
 			"Breaking up · 71% heard",
+		)
+		expect(breakingUpText(health({ heardPct: null }))).toBeNull()
+		expect(breakingUpText(health({ breaking: true, heardPct: null }))).toBe(
+			"Breaking up",
 		)
 	})
 

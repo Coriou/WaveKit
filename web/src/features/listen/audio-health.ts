@@ -5,7 +5,8 @@
 // reading is only trusted for the time this Listen was hearing `/auto`: the controller rebases it across
 // anything else. Another client cannot move it faster: the route has one pacer however many listen
 // (src/core/auto-listen/router.ts). Time with the squelch closed is not counted at all: exact silence is
-// correct there, so it cannot read as breaking up.
+// correct there, so it cannot read as breaking up. A failed or slow reading moves nothing: the next one says
+// what happened since, and is credited to the window it lands in.
 import { LIVE_AUDIO_AUTO_ROUTE_RATE } from "@wavekit/api-types"
 import type {
 	LiveAudioAutoRoute,
@@ -19,6 +20,7 @@ import { autoRouteNow } from "./sound.ts"
 export const HEALTH_BUCKET_MS = 1_000
 /** 10 buckets × 1 s = the last 10 s. */
 export const HEALTH_WINDOW_BUCKETS = 10
+const HEALTH_WINDOW_MS = HEALTH_BUCKET_MS * HEALTH_WINDOW_BUCKETS
 /** No verdict on under half the window (5 s of expected audio): one stall in a short over says little. */
 export const HEALTH_MIN_EXPECTED_MS = 5_000
 /**
@@ -28,9 +30,18 @@ export const HEALTH_MIN_EXPECTED_MS = 5_000
 export const BREAKING_MISSING_OVER = 0.1
 /** Clears at 5% or less, 500 ms of a full window, so a figure near 10% does not make the card flicker. */
 export const BREAKING_CLEARS_AT = 0.05
+/**
+ * On `/auto`, past 10 000 ms of ring time with no reading the figure is unknown: 5 readings at one per 2 s
+ * lost, so the whole window is time the core has said nothing about. Up to it the window still holds the last
+ * reading's credit, so a sustained loss cannot read as a clean 100%: it either shows or the figure is withheld.
+ */
+export const ROUTE_UNKNOWN_AFTER_MS = HEALTH_WINDOW_MS
 
 export interface AudioHealth {
-	/** Percent of the expected audio that played in the window (rounded down), null without enough of it. */
+	/**
+	 * Percent of the expected audio that played in the window (rounded down), null without enough of it, or
+	 * without a recent reading from the core unless the ring's own loss already shows.
+	 */
 	heardPct: number | null
 	breaking: boolean
 	/** Since Listen started, whole 100 ms: all missing audio, and the part the core filled with zeros. */
@@ -78,10 +89,13 @@ export class AudioHealthTracker {
 	private lastRebases = 0
 	private expectedSinceReadingMs = 0
 	private drySinceReadingMs = 0
+	/** Ring time on `/auto` since a reading last spoke for it. A base does not: it covers nothing. */
+	private unreadMs = 0
 	private readonly buckets: Bucket[] = []
 	private bucketRenderedMs = 0
 	private bucket: Bucket = { expectedMs: 0, missingMs: 0 }
 	private pendingFilledMs = 0
+	private pendingWindowMs = 0
 	private totalMissingMs = 0
 	private totalFilledMs = 0
 	private totalRebases = 0
@@ -90,7 +104,8 @@ export class AudioHealthTracker {
 	/**
 	 * The core's counters; the first reading is only a base (they outlive a Listen). One reading credits at
 	 * most the expected time since the last one less what the ring already counted as dry, so missing can
-	 * never exceed expected.
+	 * never exceed expected. A reading covering more than the window goes in at its rate, 30% of 30 s as 30%
+	 * of 10 s: the window holds 10 s of it, and all of it would read as nothing heard. The total keeps it all.
 	 */
 	noteRoute(
 		route: Pick<LiveAudioAutoRoute, "zeroFilledSamples" | "clockRebases">,
@@ -100,10 +115,14 @@ export class AudioHealthTracker {
 		if (this.lastFilledSamples !== null && this.started) {
 			// a lower count is a restarted core: nothing is known about the time between
 			const filled = Math.max(0, samples - this.lastFilledSamples)
-			this.pendingFilledMs += Math.min(
+			const creditMs = Math.min(
 				(filled / LIVE_AUDIO_AUTO_ROUTE_RATE) * 1000,
 				Math.max(0, this.expectedSinceReadingMs - this.drySinceReadingMs),
 			)
+			this.pendingFilledMs += creditMs
+			this.pendingWindowMs +=
+				creditMs * Math.min(1, HEALTH_WINDOW_MS / this.expectedSinceReadingMs)
+			this.unreadMs = 0
 			this.totalRebases += Math.max(0, route.clockRebases - this.lastRebases)
 		}
 		this.lastFilledSamples = samples
@@ -119,8 +138,8 @@ export class AudioHealthTracker {
 		this.drySinceReadingMs = 0
 	}
 
-	/** One ring report; the same object back unless the readout changed. */
-	noteStats(stats: RingStats, expected: boolean): AudioHealth {
+	/** One ring report; the same object back unless the readout changed. `onRoute`: this Listen hears `/auto`. */
+	noteStats(stats: RingStats, expected: boolean, onRoute = false): AudioHealth {
 		if (!this.started) {
 			// priming at the start of a Listen is not a fault: count from the first audio
 			if (!stats.playing) return this.health
@@ -133,6 +152,7 @@ export class AudioHealthTracker {
 		const dryMs = Math.max(0, stats.dryMs - this.lastDryMs)
 		this.lastRenderedMs = stats.renderedMs
 		this.lastDryMs = stats.dryMs
+		this.unreadMs = onRoute ? this.unreadMs + renderedMs : 0
 		const b = this.bucket
 		if (expected) {
 			b.expectedMs += renderedMs
@@ -142,7 +162,8 @@ export class AudioHealthTracker {
 			this.drySinceReadingMs += dryMs
 		}
 		// the core only counts these while a source is selected, so they are always missing audio
-		b.missingMs += this.pendingFilledMs
+		b.missingMs += this.pendingWindowMs
+		this.pendingWindowMs = 0
 		this.totalMissingMs += this.pendingFilledMs
 		this.totalFilledMs += this.pendingFilledMs
 		this.pendingFilledMs = 0
@@ -164,12 +185,16 @@ export class AudioHealthTracker {
 		}
 		const enough = expectedMs >= HEALTH_MIN_EXPECTED_MS
 		const missing = enough ? Math.min(1, missingMs / expectedMs) : 0
+		const over =
+			missing >
+			(this.health.breaking ? BREAKING_CLEARS_AT : BREAKING_MISSING_OVER)
+		// Unread, only what the ring itself counted is known: a loss past the bound still shows, at most this
+		// much heard. Short of that there is no figure, and nothing to raise or clear breaking up with.
+		const unread = this.unreadMs > ROUTE_UNKNOWN_AFTER_MS
 		const next: AudioHealth = {
-			heardPct: enough ? 100 - Math.ceil(missing * 100) : null,
-			breaking:
-				enough &&
-				missing >
-					(this.health.breaking ? BREAKING_CLEARS_AT : BREAKING_MISSING_OVER),
+			heardPct:
+				enough && (over || !unread) ? 100 - Math.ceil(missing * 100) : null,
+			breaking: enough && (over || (unread && this.health.breaking)),
 			missingMs: Math.floor(this.totalMissingMs / 100) * 100,
 			coreFilledMs: Math.floor(this.totalFilledMs / 100) * 100,
 			rebases: this.totalRebases,
@@ -187,11 +212,12 @@ export class AudioHealthTracker {
 	}
 }
 
-/** For the card: "Breaking up · 71% heard", null while the audio is fine. */
+/** For the card: "Breaking up · 71% heard", or no figure while the core is unread; null while the audio is fine. */
 export function breakingUpText(health: AudioHealth): string | null {
-	return health.breaking && health.heardPct !== null
-		? `Breaking up · ${health.heardPct}% heard`
-		: null
+	if (!health.breaking) return null
+	return health.heardPct === null
+		? "Breaking up"
+		: `Breaking up · ${health.heardPct}% heard`
 }
 
 function seconds(ms: number): string {

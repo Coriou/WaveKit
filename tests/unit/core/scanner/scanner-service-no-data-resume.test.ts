@@ -291,4 +291,131 @@ describe("automatic resume without data", () => {
 		await h.service.cancelJob(low.id)
 		await h.service.stop()
 	}, 20_000)
+
+	/** A sweep preempted by a running job, with a hook on the moment the free lease is handed back. */
+	async function handingBack() {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		h.sources.emit("payload-started", "rtl")
+		const low = await h.service.createJob(sweep)
+		await untilRunning(h, low.id)
+		const high = await h.service.createJob({
+			...sweep,
+			priority: 90,
+			ranges: [{ startHz: 451_000_000, endHz: 451_200_000 }],
+		})
+		await untilRunning(h, high.id)
+		expect(h.service.getJob(low.id)?.reason).toBe("preempted-job")
+		const driver = (
+			h.service as unknown as {
+				drivers: Map<
+					string,
+					{ dispatch(e: { type: string }): Promise<unknown> }
+				>
+			}
+		).drivers.get(low.id)!
+		const dispatch = driver.dispatch.bind(driver)
+		return { h, low: low.id, high: high.id, driver, dispatch }
+	}
+
+	it("a hand-back already past its check waits when the data stops, and runs on the next payload", async () => {
+		const { h, low, high, driver, dispatch } = await handingBack()
+		let writes = -1
+		let handBacks = 0
+		driver.dispatch = e => {
+			if (e.type === "preemptor-idle") {
+				handBacks += 1
+				if (handBacks === 1) {
+					// arbitration has seen data; the source drops before the job's turn to apply it
+					h.sources.emit("disconnected", "rtl")
+					writes = h.tuner.sent.length
+				}
+			}
+			return dispatch(e)
+		}
+		await h.service.cancelJob(high)
+		await settled(h.service)
+		expect(handBacks).toBe(1)
+		expect(h.service.getJob(low)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "preempted-job",
+		})
+		expect(h.tuner.sent.slice(writes)).toEqual([])
+
+		h.sources.emit("payload-started", "rtl")
+		await vi.waitFor(() =>
+			expect(h.service.getJob(low)?.state).not.toBe("paused"),
+		)
+		await untilRunning(h, low)
+		expect(h.service.getJob(low)?.state).toBe("running")
+		expect(h.tuner.sent.length).toBeGreaterThan(writes)
+		await h.service.cancelJob(low)
+		await h.service.stop()
+	}, 20_000)
+
+	/** Frees the lease with arbitration held off, so `pass` is the only one that can hand it back. */
+	async function freedForOnePass(h: Harness, high: string) {
+		const inspected = h.service as unknown as {
+			arbitrateLeases: (sourceId: string) => Promise<void>
+			arbitrate: (sourceId: string) => Promise<void>
+			handBackOwed: Set<string>
+		}
+		const real = inspected.arbitrateLeases
+		inspected.arbitrateLeases = () => Promise.resolve()
+		await h.service.cancelJob(high)
+		await settled(h.service)
+		inspected.arbitrateLeases = real
+		return { pass: () => inspected.arbitrate("rtl"), inspected }
+	}
+
+	it("a refusal on the only pass stays owed to the next payload", async () => {
+		const { h, low, high, driver, dispatch } = await handingBack()
+		const { pass, inspected } = await freedForOnePass(h, high)
+		let writes = -1
+		driver.dispatch = e => {
+			if (e.type === "preemptor-idle" && writes < 0) {
+				h.sources.emit("disconnected", "rtl")
+				writes = h.tuner.sent.length
+			}
+			return dispatch(e)
+		}
+		await pass()
+		expect(writes).toBeGreaterThanOrEqual(0)
+		expect(inspected.handBackOwed.has("rtl")).toBe(true)
+		expect(h.service.getJob(low)?.state).toBe("paused")
+		expect(h.tuner.sent.slice(writes)).toEqual([])
+
+		h.sources.emit("payload-started", "rtl")
+		await vi.waitFor(() =>
+			expect(h.service.getJob(low)?.state).not.toBe("paused"),
+		)
+		await untilRunning(h, low)
+		expect(h.service.getJob(low)?.state).toBe("running")
+		await h.service.cancelJob(low)
+		await h.service.stop()
+	}, 20_000)
+
+	it("a hand-back refused after the data returned runs at once", async () => {
+		const { h, low, high, driver, dispatch } = await handingBack()
+		const { pass } = await freedForOnePass(h, high)
+		let once = true
+		driver.dispatch = e => {
+			if (e.type !== "preemptor-idle" || !once) return dispatch(e)
+			once = false
+			h.sources.emit("disconnected", "rtl")
+			return dispatch(e).catch((err: unknown) => {
+				// the payload runs here, ahead of the service's own refusal handler: nothing is owed yet
+				h.sources.emit("payload-started", "rtl")
+				throw err
+			})
+		}
+		await pass()
+		await vi.waitFor(() =>
+			expect(h.service.getJob(low)?.state).not.toBe("paused"),
+		)
+		await untilRunning(h, low)
+		expect(h.service.getJob(low)?.state).toBe("running")
+		await h.service.cancelJob(low)
+		await h.service.stop()
+	}, 20_000)
 })

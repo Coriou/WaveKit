@@ -211,7 +211,10 @@ did not play in the last 10 s, the card says so next to it, for example
 **Listening** `Breaking up · 71% heard`, until the figure is back within 5%. It needs at least 5 s of open
 signal to judge, and silence from a closed squelch never counts. **Audio options** gives the figure and
 the total missing since Listen started, next to the latency, for example `71% heard · 17.4 s missing`;
-hover it for what the core reported. The web app reads the core's figure every 2 s, so it can lag a little.
+hover it for what the core reported. The web app reads the core's figure every 2 s, so it can lag a little;
+a reading that fails is made up by the next one. After 10 s of playback with no reading it only knows what
+this browser played: it gives a percentage only if that alone is breaking up, and a card already breaking up
+stays that way, without a percentage if it has none, until a reading arrives.
 Time this browser was not playing the stream (a suspended tab's audio, a reattach, another stream) never
 counts as missing.
 The latency includes audio waiting in the core.

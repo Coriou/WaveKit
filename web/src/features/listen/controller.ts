@@ -88,8 +88,6 @@ export const ROUTE_POLL_MS = 2000
  * Time under the bound can credit at most 1 000 ms: 10% of the 10 s window, which is not yet breaking up.
  */
 export const STATS_GAP_MS = 1_000
-/** Past 3 × 2 000 ms without a reading (two lost, a third late) the next one is a new base. */
-export const ROUTE_GAP_MS = 3 * ROUTE_POLL_MS
 
 function readVolume(): number {
 	try {
@@ -123,7 +121,6 @@ export class ListenController extends Store<ListenState> {
 	/** The route reading in flight; one that comes back after being replaced here is ignored. */
 	private routeRead: AbortController | null = null
 	private routePolledAt = Number.NEGATIVE_INFINITY
-	private routeReadAt = 0
 	private lastStatsAt = 0
 	private routeSourceId: string | undefined
 	private routeLatencyMs = 0
@@ -432,6 +429,7 @@ export class ListenController extends Store<ListenState> {
 		const audio = this.health.noteStats(
 			stats,
 			audioExpected(status, level, auto),
+			auto,
 		)
 		// to 10 ms: a reading that changes every stats tick would redraw the panel for nothing
 		const latency = stats.playing
@@ -463,9 +461,6 @@ export class ListenController extends Store<ListenState> {
 			if (this.routeRead !== read) return
 			this.routeRead = null
 			if (!route) return
-			const now = Date.now()
-			if (now - this.routeReadAt > ROUTE_GAP_MS) this.health.rebaseRoute()
-			this.routeReadAt = now
 			this.health.noteRoute(route)
 			this.routeLatencyMs = route.latencyMs
 		})

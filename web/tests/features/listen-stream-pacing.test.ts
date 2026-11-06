@@ -13,11 +13,13 @@ import {
 	audioAttachKey,
 	autoRouteSource,
 } from "../../src/features/listen/audio.ts"
-import { NO_AUDIO_HEALTH } from "../../src/features/listen/audio-health.ts"
+import {
+	NO_AUDIO_HEALTH,
+	ROUTE_UNKNOWN_AFTER_MS,
+} from "../../src/features/listen/audio-health.ts"
 import {
 	DEAD_STREAM_MS,
 	ListenController,
-	ROUTE_GAP_MS,
 	ROUTE_POLL_MS,
 	STALL_GRACE_MS,
 	STATS_GAP_MS,
@@ -457,7 +459,7 @@ describe("the core's counters only speak for time this Listen was hearing /auto"
 	it("the bounds state their arithmetic", () => {
 		expect(STATS_GAP_MS).toBe(4 * STATS_EVERY_S * 1000)
 		expect(STATS_GAP_MS / 10_000).toBeLessThanOrEqual(0.1)
-		expect(ROUTE_GAP_MS).toBe(3 * ROUTE_POLL_MS)
+		expect(ROUTE_UNKNOWN_AFTER_MS).toBe(5 * ROUTE_POLL_MS)
 	})
 
 	it("a suspended ring: the counter rising meanwhile is not missing audio", async () => {
@@ -571,43 +573,120 @@ describe("the core's counters only speak for time this Listen was hearing /auto"
 		expect(gets).toHaveLength(2)
 	})
 
-	it("readings failing past the gap start from a new base; up to it they still count", async () => {
-		const run = async (lostMs: number) => {
-			const route = { filled: 0, down: false }
-			const h = harness(
-				() => route.filled,
-				() =>
-					route.down
-						? Promise.reject(new Error("no"))
-						: Promise.resolve(runningStatus(route.filled)),
-			)
-			await h.listen.start()
-			let renderedMs = 0
-			const play = async (ms: number) => {
-				for (let t = 0; t < ms; t += 250) {
-					h.events().onData()
-					h.events().onStats({
-						playing: true,
-						bufferedMs: 200,
-						underruns: 0,
-						droppedSamples: 0,
-						renderedMs,
-						dryMs: 0,
-					})
-					await settle(250)
-					renderedMs += 250
-				}
+	/** Stats every 250 ms of ring time; `answers(renderedMs)` decides which readings succeed. */
+	async function flaky(answers: (renderedMs: number) => boolean) {
+		const route = { filled: 0 }
+		let renderedMs = 0
+		const h = harness(
+			() => route.filled,
+			() =>
+				answers(renderedMs)
+					? Promise.resolve(runningStatus(route.filled))
+					: Promise.reject(new Error("no")),
+		)
+		await h.listen.start()
+		const play = async (ms: number, each?: () => void) => {
+			for (let t = 0; t < ms; t += 250) {
+				h.events().onData()
+				h.events().onStats({
+					playing: true,
+					bufferedMs: 200,
+					underruns: 0,
+					droppedSamples: 0,
+					renderedMs,
+					dryMs: 0,
+				})
+				await settle(250)
+				renderedMs += 250
+				each?.()
 			}
+		}
+		return { h, route, play }
+	}
+
+	it("readings failing keep the base, however long: the next one counts what they missed", async () => {
+		const run = async (lostMs: number) => {
+			let down = false
+			const { h, route, play } = await flaky(() => !down)
 			await play(4_000)
-			route.down = true
+			down = true
 			route.filled += 25 * BLOCK_SAMPLES
 			await play(lostMs)
-			route.down = false
+			down = false
 			await play(4_500)
 			return h.listen.get().audio.coreFilledMs
 		}
-		expect(await run(ROUTE_GAP_MS - 2_500)).toBe(500)
-		expect(await run(ROUTE_GAP_MS + 2_000)).toBe(0)
+		expect(await run(3_500)).toBe(500)
+		expect(await run(ROUTE_UNKNOWN_AFTER_MS + 8_000)).toBe(500)
+	})
+
+	it("sustained zero-fill read only every 8 s shows, about 70% heard", async () => {
+		const { h, route, play } = await flaky(ms => ms % 8_000 === 0)
+		// 30% of 250 ms of the route's samples at 48 kHz
+		const fill = () => {
+			route.filled += 3_600
+		}
+		await play(32_000, fill)
+		const figures: (number | null)[] = []
+		for (let i = 0; i < 32; i++) {
+			await play(1_000, fill)
+			figures.push(h.listen.get().audio.heardPct)
+			expect(h.listen.get().audio.breaking).toBe(true)
+		}
+		// each reading credits 2 400 ms. The 10 s window holds one of them on 6 buckets of every 8, 24%
+		// missing, and two on the other 2, 48%: (6 × 76 + 2 × 52) / 8 = 70
+		const heard = figures.filter(f => f !== null)
+		expect(heard).toHaveLength(figures.length)
+		expect(Math.min(...heard)).toBeGreaterThanOrEqual(51)
+		expect(Math.max(...heard)).toBeLessThanOrEqual(76)
+		const mean = heard.reduce((a, b) => a + b, 0) / heard.length
+		expect(Math.abs(mean - 70)).toBeLessThan(2)
+	})
+
+	it("a healthy stream read only every 8 s stays fully heard", async () => {
+		const { h, play } = await flaky(ms => ms % 8_000 === 0)
+		await play(32_000)
+		for (let i = 0; i < 16; i++) {
+			await play(1_000)
+			expect(h.listen.get().audio).toMatchObject({
+				heardPct: 100,
+				breaking: false,
+				missingMs: 0,
+			})
+		}
+	})
+
+	it("no reading at all has no figure, and no breaking up, past the bound", async () => {
+		const { h, play } = await flaky(() => false)
+		await play(ROUTE_UNKNOWN_AFTER_MS + 250)
+		expect(h.listen.get().audio.heardPct).toBe(100)
+		await play(1_000)
+		expect(h.listen.get().audio).toMatchObject({
+			heardPct: null,
+			breaking: false,
+		})
+		await play(30_000)
+		expect(h.listen.get().audio).toMatchObject({
+			heardPct: null,
+			breaking: false,
+		})
+	})
+
+	it("a suspended ring still rebases, with the readings failing before it", async () => {
+		let down = false
+		const { h, route, play } = await flaky(() => !down)
+		await play(4_000)
+		down = true
+		await play(2_000)
+		await settle(30_000)
+		route.filled += 3_000 * BLOCK_SAMPLES
+		down = false
+		await play(12_000)
+		expect(h.listen.get().audio).toMatchObject({
+			heardPct: 100,
+			missingMs: 0,
+			coreFilledMs: 0,
+		})
 	})
 })
 

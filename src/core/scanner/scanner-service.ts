@@ -7545,9 +7545,21 @@ export class ScannerService extends EventEmitter {
 					record.consentedImpact,
 				),
 			})
-			.catch((err: unknown) =>
-				this.log.warn({ err, jobId: best }, "Lease hand-back refused"),
-			)
+			.catch((err: unknown) => {
+				if (
+					!(err instanceof ScannerApiError) ||
+					err.code !== "SCANNER_SOURCE_DOWN"
+				) {
+					this.log.warn({ err, jobId: best }, "Lease hand-back refused")
+					return
+				}
+				// The data stopped after the check above. A narrowed run comes back on the next tick. Data can
+				// return before this refusal lands, and that source-up owed nothing. Each pass needs the source
+				// connected and each refusal needs it disconnected, so this repeats at most once per dropout.
+				if (eligible) return
+				if (this.arbiter.isConnected(sourceId)) this.queueArbitration(sourceId)
+				else this.handBackOwed.add(sourceId)
+			})
 		this.updateMasks(sourceId)
 	}
 
