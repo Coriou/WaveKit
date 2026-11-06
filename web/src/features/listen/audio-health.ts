@@ -88,6 +88,8 @@ export class AudioHealthTracker {
 	private lastFilledSamples: number | null = null
 	private lastRebases = 0
 	private expectedSinceReadingMs = 0
+	/** All ring time since the last reading, squelch closed included: the span a late reading covers. */
+	private renderedSinceReadingMs = 0
 	private drySinceReadingMs = 0
 	/** Ring time on `/auto` since a reading last spoke for it. A base does not: it covers nothing. */
 	private unreadMs = 0
@@ -121,13 +123,14 @@ export class AudioHealthTracker {
 			)
 			this.pendingFilledMs += creditMs
 			this.pendingWindowMs +=
-				creditMs * Math.min(1, HEALTH_WINDOW_MS / this.expectedSinceReadingMs)
+				creditMs * Math.min(1, HEALTH_WINDOW_MS / this.renderedSinceReadingMs)
 			this.unreadMs = 0
 			this.totalRebases += Math.max(0, route.clockRebases - this.lastRebases)
 		}
 		this.lastFilledSamples = samples
 		this.lastRebases = route.clockRebases
 		this.expectedSinceReadingMs = 0
+		this.renderedSinceReadingMs = 0
 		this.drySinceReadingMs = 0
 	}
 
@@ -135,6 +138,7 @@ export class AudioHealthTracker {
 	rebaseRoute(): void {
 		this.lastFilledSamples = null
 		this.expectedSinceReadingMs = 0
+		this.renderedSinceReadingMs = 0
 		this.drySinceReadingMs = 0
 	}
 
@@ -153,6 +157,7 @@ export class AudioHealthTracker {
 		this.lastRenderedMs = stats.renderedMs
 		this.lastDryMs = stats.dryMs
 		this.unreadMs = onRoute ? this.unreadMs + renderedMs : 0
+		this.renderedSinceReadingMs += renderedMs
 		const b = this.bucket
 		if (expected) {
 			b.expectedMs += renderedMs

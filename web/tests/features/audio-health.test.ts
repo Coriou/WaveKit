@@ -154,6 +154,19 @@ describe("the audio health figure", () => {
 	})
 
 	describe("the core's zero-fill", () => {
+		it("a late reading spread over closed squelch does not break up a clean window", () => {
+			const f = new Feed()
+			f.t.noteRoute({ zeroFilledSamples: 0, clockRebases: 0 })
+			for (let i = 0; i < 30; i++) f.bucket(0, false)
+			for (let i = 0; i < 20; i++) f.bucket(0)
+			f.t.noteRoute({ zeroFilledSamples: 144_000, clockRebases: 0 })
+			f.bucket(0)
+			expect(f.last.breaking).toBe(false)
+			// 3 s over 50 s of ring time puts 600 ms in the window: 6%
+			expect(f.last.heardPct).toBe(94)
+			expect(f.last.coreFilledMs).toBe(3000)
+		})
+
 		const BLOCK = 960
 		const route = (zeroFilledSamples: number, clockRebases = 0) => ({
 			zeroFilledSamples,
