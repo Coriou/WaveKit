@@ -3821,6 +3821,37 @@ recomputed at the same points and after decoder changes. Since 2026-10-16,
 `progress.hitStats` is `{ discoveries, hits, newDiscoveries, truncated }`
 since the job started: see `GET /api/scanner/jobs/:id/hits`.
 
+`progress.coverage` of a sweep is the share of planned hops visited in the last
+full sweep (the current one before that), not a share of time or of the spectrum
+heard. In-window, it is settled samples over observed samples.
+
+`progress.hops` (job views from `GET /api/scanner/jobs` and `GET /api/scanner/jobs/:id`;
+absent without a sweep scheduler and from `scanner:progress`) has one entry per planned
+hop, including its current visit. `timeMs` is wall time from tune to leave, and it adds up:
+
+```text
+measuredSettleMs + measuredStaleMs + measuredDwellMs + measuredQualifyMs + holdMs + overheadMs = timeMs
+```
+
+All in whole ms, none negative:
+
+| Field               | What it counts                                                                                                                                                                |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `measuredSettleMs`  | From the tune's answer to the first block of its epoch, that block's own length left out. Includes the tune's latency when the epoch opened before the answer.                |
+| `measuredStaleMs`   | Blocks of the previous hop's IQ the engine discarded after settling, each counted at most at its length (a block's excess is settle or overhead).                             |
+| `measuredDwellMs`   | Heard blocks of the planned dwell: their sample time, at most the wall time they took.                                                                                        |
+| `measuredQualifyMs` | The same, past the planned dwell: waiting for a gate's or a young track's class answer, or listening for a carrier's gap.                                                     |
+| `holdMs`            | The visit's holds, from the first hold's start to the leave (unchanged).                                                                                                      |
+| `overheadMs`        | The rest: tune command and action queue latency, and a dwell's stream arriving later than its samples. The next tune is sent at a visit's end, so no gap sits between visits. |
+
+The `measured*` fields are what a visit took. `spec.settleMs`, `spec.dwellMs` and
+`plan.hops[i].dwellMs` are what was planned. Paused time is in none of them: the running phase closes where the
+pause began and restarts when it ends, as for `timeMs`. A visit started during a pause
+counts from the pause's end. A resume restarts the visit, whose earlier phases and holds
+stay counted. A replan carries a hop's totals to the one new hop nearest it (a hop
+that no longer has one starts from zero), so a job's total over `hops` can fall after a
+replan; each hop still adds up. All these fields are optional on the wire.
+
 #### PATCH /api/scanner/jobs/:id
 
 Live edit. The hop plan changes at the next hop; detection masks, protocol

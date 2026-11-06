@@ -662,7 +662,7 @@ export class JobRunner implements JobDriver {
 		}))
 		const base: ScanJobProgress = {
 			...(includeHops && this.scheduler
-				? { hops: this.scheduler.hopStats() }
+				? { hops: this.scheduler.hopPhaseStats() }
 				: {}),
 			sweepIndex: p?.sweepIndex ?? 0,
 			hopIndex: p?.hopIndex ?? 0,
@@ -1593,6 +1593,7 @@ export class JobRunner implements JobDriver {
 		// Paused: the hop is remembered and sent by the resume's resend-hop.
 		if (!this.driving) return
 		this.retunes += 1
+		this.scheduler?.noteTuneStarted(a.hopIndex)
 		try {
 			const pending = await this.deps.arbiter.retune(
 				lease,
@@ -1606,6 +1607,7 @@ export class JobRunner implements JobDriver {
 					: undefined,
 			)
 			this.autoResumeGuardActive = false
+			this.scheduler?.noteTuneAnswered(a.hopIndex)
 			// R 1.2: only an explicit no-op has no epoch-started event to resume the visit.
 			// A real retune can emit that event before its promise resolves.
 			this.addOwnEpoch(pending.epoch)

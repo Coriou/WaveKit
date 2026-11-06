@@ -395,7 +395,7 @@ Marking a discovery Ignore (`PATCH /api/scanner/discoveries/:id` with `lockout: 
 
 ### Hit statistics
 
-Sweep job progress exposes per-hop visit, time and hold totals (see [API](API.md)).
+Sweep job progress exposes per-hop visit, time and hold totals, and splits each hop's time into measured settle, discarded stale IQ, dwell, qualification wait, hold and overhead, which add up to it (see [API](API.md)). These show what a pass really spent: a pass planned at 35 ms of settle and 185 ms of dwell per hop can take over a second per hop on a slow tuner. The planned figures stay in the job's `spec`; a sweep's `coverage` counts hops visited, not time.
 
 Each job counts its hits: one per observation attributed to a discovery, per discovery with first and last hit time and whether the job first saw it. `GET /api/scanner/jobs/:id/hits` lists them (most recent first); the job's `progress.hitStats`, `scanner:progress` (`hits`, `newDiscoveries`) and `scanner:discovery` (`jobHits`) carry them too. In memory only: reset when a job starts (not on resume), dropped with the job, empty after a restart. Bounds: 2,000 discoveries tracked per job (later ones count in the totals only) and a 4,096-observation dedupe memory; past either bound the stats say `truncated: true` and are best-effort.
 

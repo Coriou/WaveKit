@@ -260,6 +260,8 @@ interface HopState {
 	visits: number
 	timeMs: number
 	holdMs: number
+	/** Accounting only: ended visits' measured phases of `timeMs` (hopPhaseStats). */
+	phases: PhaseTotals
 	/**
 	 * Ms this hop has waited since its last visit for other hops' visits that watched, held past one
 	 * coarse sweep or spent the follow budget (Visit.watched, longFollow, budgeted): they share L
@@ -275,6 +277,53 @@ interface HopState {
 	 * (reconcileVoiceLocks).
 	 */
 	voiceLock: Set<number>
+}
+
+/** Measured ms per phase of a visit (or of a hop's ended visits). Never read by a decision. */
+interface PhaseTotals {
+	settleMs: number
+	staleMs: number
+	dwellMs: number
+	qualifyMs: number
+}
+
+/**
+ * Phase of a visit the accounting clock is in. `command`: a tune not answered yet (overhead). `hold`:
+ * the visit's existing hold clock counts it (holdStartedAt, accountedHeldMs), this clock adds nothing.
+ */
+type PhaseKind = "command" | "settle" | "dwell" | "qualify" | "hold"
+
+/**
+ * Read-only accounting of one visit: which phase it is in since `at`, and the totals of its closed
+ * phases. `heardMs` is the sample time of the blocks heard since `at`: a dwell or a qualification
+ * counts only that, so wall time no block accounts for (a late or stalled stream) stays overhead.
+ */
+interface VisitClock extends PhaseTotals {
+	kind: PhaseKind
+	at: number
+	heardMs: number
+}
+
+const emptyPhases = (): PhaseTotals => ({
+	settleMs: 0,
+	staleMs: 0,
+	dwellMs: 0,
+	qualifyMs: 0,
+})
+
+/** Adds the running phase of `c`, up to `at`, to `into` (`c` itself when the phase closes). */
+function addRunningPhase(into: PhaseTotals, c: VisitClock, at: number): void {
+	const wall = Math.max(0, at - c.at)
+	if (c.kind === "settle") into.settleMs += wall
+	else if (c.kind === "dwell") into.dwellMs += Math.min(wall, c.heardMs)
+	else if (c.kind === "qualify") into.qualifyMs += Math.min(wall, c.heardMs)
+}
+
+function addPhases(into: PhaseTotals, from: PhaseTotals): void {
+	into.settleMs += from.settleMs
+	into.staleMs += from.staleMs
+	into.dwellMs += from.dwellMs
+	into.qualifyMs += from.qualifyMs
 }
 
 interface TrackInfo {
@@ -383,6 +432,8 @@ interface Visit {
 	voiceAskedAt: number | null
 	/** A carrier on air since before any visit saw it start showed itself: the hop's past score was it. */
 	newlyQuiet: boolean
+	/** Read-only phase accounting (hopPhaseStats). */
+	clock: VisitClock
 }
 
 /** Per-hop accounting: share of time, holds and the age of the last visit. */
@@ -392,6 +443,25 @@ export interface HopStat {
 	timeMs: number
 	holdMs: number
 	lastVisitAgeMs: number | null
+}
+
+/**
+ * HopStat with the phases of `timeMs`, in whole ms. `measuredSettleMs + measuredStaleMs +
+ * measuredDwellMs + measuredQualifyMs + holdMs + overheadMs === timeMs`: overhead is the rest, and
+ * each measured phase is rounded down so it cannot go negative. "measured" sets them apart from the
+ * planned `spec.settleMs`, `spec.dwellMs` and `plan.hops[i].dwellMs`.
+ */
+export interface HopPhaseStat extends HopStat {
+	/** From the tune's answer to the first block of its epoch, that block's own length left out. */
+	measuredSettleMs: number
+	/** Blocks of the previous hop's IQ the engine discarded after settling (onStale). */
+	measuredStaleMs: number
+	/** Heard blocks of the dwell the plan asked for, at most the wall time they took. */
+	measuredDwellMs: number
+	/** Heard blocks past that dwell: a gate's or a class's answer, a carrier's gap (decide). */
+	measuredQualifyMs: number
+	/** The rest: tune command and action queue latency, a dwell's stream arriving late. */
+	overheadMs: number
 }
 
 /** Options for one track update. */
@@ -637,6 +707,11 @@ export class SweepScheduler {
 	restartVisit(startSample: number): SchedulerAction[] {
 		const v = this.visit
 		if (v === null || this.phase === "idle") return []
+		// The epoch opened before the tune's answer (a timer-settled epoch can): the two cannot be
+		// told apart, and the engine was settling, so it all counts as settle. Settle runs on until the
+		// first block: a timer-settled epoch is announced ahead of its first settled sample (onBlock).
+		if (v.clock.kind === "command") v.clock.kind = "settle"
+		this.enterPhase(v, "settle")
 		const heldAtRestart = this.heldAccountingFloorMs
 		const actions: SchedulerAction[] =
 			this.phase === "hold" ? [{ type: "stop-probes" }] : []
@@ -710,6 +785,7 @@ export class SweepScheduler {
 				endSample - (this.lastBlockEnd ?? endSample - this.blockSamples),
 			),
 		)
+		this.noteHeard(v, samples)
 		if (v.dwellEnd === null)
 			v.dwellEnd = endSample - samples + this.dwellSamples(true)
 		this.lastBlockEnd = endSample
@@ -783,6 +859,8 @@ export class SweepScheduler {
 			return out
 		}
 		v.blocks += count - 1
+		v.clock.heardMs +=
+			((count - 1) * this.blockSamples * 1000) / this.sampleRateHz
 		for (const t of v.tracks.values()) if (t.open) t.openBlocks += count - 1
 		this.lastBlockEnd = before
 		return this.onBlock(endSample)
@@ -793,8 +871,48 @@ export class SweepScheduler {
 			this.phase === "dwell" &&
 			this.visit !== null &&
 			this.visit.dwellEnd !== null
-		)
+		) {
 			this.visit.dwellEnd += blocks * this.blockSamples
+			this.noteStale(this.visit, blocks)
+		}
+	}
+
+	/**
+	 * Accounting of a heard block: one addition per block, no allocation. The first block after a
+	 * settle ends it: its own length is dwell, the wall time before that was settle.
+	 */
+	private noteHeard(v: Visit, samples: number): void {
+		const c = v.clock
+		const heardMs = (samples * 1000) / this.sampleRateHz
+		if (c.kind !== "settle") {
+			c.heardMs += heardMs
+			return
+		}
+		const at = this.accountingPausedAt ?? this.now()
+		const block = Math.min(heardMs, Math.max(0, at - c.at))
+		this.closePhase(v, at)
+		c.settleMs -= block
+		c.at -= block
+		c.heardMs = heardMs
+		c.kind = "dwell"
+	}
+
+	/**
+	 * Wall time since the discarded blocks' predecessor counts as stale IQ up to their length; a dwell
+	 * keeps the blocks it heard before them, and the excess stays overhead (dwell) or settle.
+	 */
+	private noteStale(v: Visit, blocks: number): void {
+		const c = v.clock
+		if (c.kind !== "settle" && c.kind !== "dwell" && c.kind !== "qualify")
+			return
+		const at = this.accountingPausedAt ?? this.now()
+		const wall = Math.max(0, at - c.at)
+		const heard = c.kind === "settle" ? 0 : Math.min(wall, c.heardMs)
+		const lengthMs = (blocks * this.blockSamples * 1000) / this.sampleRateHz
+		const stale = Math.min(wall - heard, lengthMs)
+		this.closePhase(v, at)
+		if (c.kind === "settle") c.settleMs -= stale
+		c.staleMs += stale
 	}
 
 	onTrack(
@@ -1239,6 +1357,7 @@ export class SweepScheduler {
 		this.endHold(true, voice)
 		const trackId = this.recordedTrack(heldId)
 		if (trackId === null) return false
+		if (v.holdStartedAt === null) this.enterPhase(v, "hold")
 		v.holdStartedAt ??= now
 		v.budgeted = true
 		if (voice) this.startVoiceHold(v, active, now)
@@ -1409,8 +1528,14 @@ export class SweepScheduler {
 			)
 			this.visitPausedMs += Math.max(0, this.now() - pausedSince)
 			this.accountingPausedAt = null
+			if (this.visit !== null) {
+				this.visit.clock.at = this.now()
+				this.visit.clock.heardMs = 0
+			}
 		} else if (!active && this.accountingPausedAt === null) {
 			this.accountingPausedAt = this.now()
+			if (this.visit !== null)
+				this.closePhase(this.visit, this.accountingPausedAt)
 			this.heldAccountingFloorMs =
 				this.visit === null
 					? null
@@ -1425,9 +1550,83 @@ export class SweepScheduler {
 		)
 	}
 
-	/** Per-hop totals, excluding pauses; last-visit age uses the wall clock. */
-	hopStats(): HopStat[] {
+	/** Closes the running phase at `at`; the clock runs on from there in the same phase. */
+	private closePhase(v: Visit, at: number): void {
+		const c = v.clock
+		addRunningPhase(c, c, at)
+		c.heardMs = 0
+		c.at = Math.max(c.at, at)
+	}
+
+	private enterPhase(v: Visit, kind: PhaseKind): void {
+		this.closePhase(v, this.accountingPausedAt ?? this.now())
+		v.clock.kind = kind
+	}
+
+	/**
+	 * The job runner sends the visit's tune (again, for a re-send). Accounting only. A hold whose clock
+	 * still runs (no pause since it started) keeps counting: it counts until the restart.
+	 */
+	noteTuneStarted(hopIndex: number): void {
+		const v = this.visit
+		if (
+			v === null ||
+			v.hopIndex !== hopIndex ||
+			(v.holdStartedAt !== null && this.heldAccountingFloorMs === null)
+		)
+			return
+		this.enterPhase(v, "command")
+	}
+
+	/** The tune was answered: what follows until its epoch opens is settle. Accounting only. */
+	noteTuneAnswered(hopIndex: number): void {
+		const v = this.visit
+		if (v !== null && v.hopIndex === hopIndex && v.clock.kind === "command")
+			this.enterPhase(v, "settle")
+	}
+
+	/**
+	 * hopStats with the phases of `timeMs` (HopPhaseStat). A pause counts in none of them: the running
+	 * phase closes where the pause began and its clock restarts when the pause ends, as timeMs does.
+	 * Cost: one object per hop per job view read; `scanner:progress` carries no hops and never asks.
+	 */
+	hopPhaseStats(): HopPhaseStat[] {
 		const now = this.now()
+		const at = this.accountingPausedAt ?? now
+		const v = this.visit
+		return this.hopStats(now).map((stat, i) => {
+			const sum = emptyPhases()
+			const ended = this.hops[i]?.phases
+			if (ended !== undefined) addPhases(sum, ended)
+			if (v !== null && v.hopIndex === i) {
+				addPhases(sum, v.clock)
+				addRunningPhase(sum, v.clock, at)
+			}
+			const measuredSettleMs = Math.floor(sum.settleMs)
+			const measuredStaleMs = Math.floor(sum.staleMs)
+			const measuredDwellMs = Math.floor(sum.dwellMs)
+			const measuredQualifyMs = Math.floor(sum.qualifyMs)
+			return {
+				...stat,
+				measuredSettleMs,
+				measuredStaleMs,
+				measuredDwellMs,
+				measuredQualifyMs,
+				overheadMs: Math.max(
+					0,
+					stat.timeMs -
+						measuredSettleMs -
+						measuredStaleMs -
+						measuredDwellMs -
+						measuredQualifyMs -
+						stat.holdMs,
+				),
+			}
+		})
+	}
+
+	/** Per-hop totals, excluding pauses; last-visit age uses the wall clock. */
+	hopStats(now = this.now()): HopStat[] {
 		const v = this.visit
 		return this.hops.map((hop, hopIndex) => {
 			const current = v !== null && v.hopIndex === hopIndex
@@ -1504,6 +1703,7 @@ export class SweepScheduler {
 			visits: 0,
 			timeMs: 0,
 			holdMs: 0,
+			phases: emptyPhases(),
 			waitMs: 0,
 			voiceLock: new Set(),
 		}
@@ -1766,6 +1966,7 @@ export class SweepScheduler {
 		tracks: Map<string, TrackInfo>,
 		gainTenthsDb: number | null,
 	): Visit {
+		const now = this.now()
 		return {
 			hopIndex,
 			revisit,
@@ -1776,7 +1977,7 @@ export class SweepScheduler {
 			holdStartedAt: null,
 			heldBeforeMs: 0,
 			gainTenthsDb,
-			startedAt: this.now(),
+			startedAt: now,
 			serial: ++this.visitSerial,
 			epochBlock: 0,
 			classWait: false,
@@ -1793,6 +1994,7 @@ export class SweepScheduler {
 			voiceId: null,
 			voiceAskedAt: null,
 			newlyQuiet: false,
+			clock: { ...emptyPhases(), kind: "command", at: now, heardMs: 0 },
 		}
 	}
 
@@ -1828,13 +2030,19 @@ export class SweepScheduler {
 		if (this.spec.hold.policy !== "never") {
 			const next = this.nextCandidate()
 			if (next !== null) {
+				this.enterPhase(v, "hold")
 				v.holdStartedAt = this.now()
 				return this.startHold(next)
 			}
-			if (this.waitForClass(v)) return []
-			if (this.listenForGap(v)) return []
+			if (this.waitForClass(v) || this.listenForGap(v)) {
+				this.enterPhase(v, "qualify")
+				return []
+			}
 		}
-		if (this.qualify(v)) return []
+		if (this.qualify(v)) {
+			this.enterPhase(v, "qualify")
+			return []
+		}
 		return this.leaveOrRecord([])
 	}
 
@@ -2463,6 +2671,8 @@ export class SweepScheduler {
 		for (const t of tracks.values()) t.openBlocks = 0
 		this.visit = this.newVisit(hopIndex, revisit, tracks, from.gainTenthsDb)
 		this.visit.dwellEnd = base + this.dwellSamples(true)
+		// No tune, no settle: the window was already listening.
+		this.visit.clock.kind = "dwell"
 		this.hold = null
 		this.phase = "dwell"
 	}
@@ -2553,6 +2763,8 @@ export class SweepScheduler {
 		this.noteFlapListening(v, accountedAt)
 		hop.visits++
 		hop.timeMs += Math.max(0, accountedAt - v.startedAt - this.visitPausedMs)
+		this.closePhase(v, accountedAt)
+		addPhases(hop.phases, v.clock)
 		const heldMs = this.heldMs(v, accountedAt)
 		hop.holdMs += this.accountedHeldMs(v, accountedAt)
 		// The other hops waited for this visit's long or budgeted holds (followBudgetMs); this hop
@@ -2777,6 +2989,7 @@ export class SweepScheduler {
 				visits: first ? prev.visits : 0,
 				timeMs: first ? prev.timeMs : 0,
 				holdMs: first ? prev.holdMs : 0,
+				phases: first ? prev.phases : emptyPhases(),
 			}
 		})
 		const visited = new Set<number>()
