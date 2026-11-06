@@ -291,6 +291,39 @@ host was far busier this time. The pool costs 3 to 10 % more CPU per Msample
 and lost 12.2 MB to absorber overflow, the pooled build entered it 0 times and
 lost nothing.
 
+## Spectrum frame path (2026-11-01)
+
+The spectrum worker runs about 1,172 frames/s at 2.4 Msps with FFT 2048 (19.8 blocks/s).
+**Stages that run once per frame work in linear power.** A dB threshold that changes once
+per block is converted to linear power once per block, frames are compared in linear power,
+and peaks are kept linear and converted to dB at block end. Do not add a full-spectrum dB
+pass per frame: `Math.log10` over 2,048 bins costs about 50 to 110 ms per second of IQ.
+
+The short-burst path (`shortFrame` in `src/core/spectrum/pipeline.ts`) follows this rule.
+`dbThresholdBracket` (`src/core/spectrum/fft.ts`) brackets each threshold in accumulator
+units with a stated margin. A sum outside the bracket is decided by one comparison, and a sum
+inside it (about 2e-4 relative wide at −100 dB) or a NaN is decided in dB, so detections are
+identical to the dB path. Tests: pre-change event goldens on seeded scenes, a Detector
+equivalence property, and a `Math.log10` call-count guard
+(`tests/unit/core/spectrum/short-linear-threshold.test.ts`). Still per frame: the dB array that
+`Tracker.frame` reads while a track is open.
+
+`scripts/profile-spectrum.ts`, 30 s of synthetic IQ (noise, CW, NFM, Mode-S-like pulses), on a
+busy Mac. Compare before and after in the same row, not absolute rates.
+
+| Mode, ms of worker CPU per s of IQ | Before | After | Load average |
+| ---------------------------------- | ------ | ----- | ------------ |
+| `stages`, short path (self)        | 137.9  | 48.8  | 15.6 → 17.8  |
+| `stages`, built-in `tracker` span  | 313.3  | 173.3 | 15.6 → 17.8  |
+| `stages`, worker total             | 846.4  | 644.7 | 15.6 → 17.8  |
+| `bare`, `handle()` total           | 1113.2 | 634.0 | 52.6 → 56.8  |
+
+A first build that sent `powerToDb` through the one-bin helper `binPowerDb` was slower in
+`bare` mode (565 to 602 against 522 to 540, load 12 to 16): the bundled worker did not inline
+that call, and the remaining frame dB pass doubled in cost. `powerToDb` keeps its inline loop.
+The spectrum feed stays on without display clients: the scanner, occupancy, backfill and
+status read every block summary.
+
 ## Activity reads (2026-11-01)
 
 Every Activity read (search, detail, facets, trails, band map, timeline) runs on one
