@@ -8,7 +8,7 @@
 //! Prints, per channel: the planned stages with their multiplies per second, then ns per input
 //! sample for the NCO and each stage, measured on one thread, and the share of a core the
 //! channel costs at its real-time input rate. `best block` repeats that from each stage's
-//! fastest block: on a shared host preemption inflates the mean, not the fastest block.
+//! sum of each stage's fastest block, not one observed block: on a shared host preemption inflates the mean, not a minimum.
 //! `output hash` covers every output float's bits, to compare builds on the same request.
 
 use std::hint::black_box;

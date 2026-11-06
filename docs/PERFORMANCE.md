@@ -447,7 +447,7 @@ average about 8): 0.165 ns for the previous `dot`, 0.118 for one AVX accumulator
 together, 0.047 with two outputs. Two outputs need at least 128 taps per phase: at 53 taps they cost
 more than one, at 185 less.
 
-The output is bit-identical. Same 8 lanes, same order, IEEE add and multiply, and no fused
+The output is bit-identical for finite input, the only input there is: the process takes `cu8` alone and each byte converts to a finite value. A NaN payload can differ between kernels and between block splits. Same 8 lanes, same order, IEEE add and multiply, and no fused
 multiply-add, which would round once where `dot` rounds twice. The kernel is picked once per block
 from the CPU, so a host's CPU changes the cost and never the output. Tests: the kernels against `dot`
 on random lengths up to 69 with far-apart magnitudes, a pair of values that separates fused from unfused
@@ -457,7 +457,7 @@ unchanged. Without AVX, and on arm64, stages run the previous `dot`; arm64 has n
 
 `chan_bench` per request (`-- FS OUT BW TR [SECONDS]`), one thread, 3 s of noise, previous and this
 build alternated 3 times. The output hash matched in every run. Share of a core at the capture rate:
-the fastest block, which preemption does not inflate, and the median of the mean. One-minute load
+the sum of each stage's fastest block ("fastest" below, not one observed block), which preemption does not inflate, and the median of the mean. One-minute load
 average 26 to 21.
 
 | Decoder request                  | Capture, Msps | Out, bandwidth, transition (Hz) | Per-phase taps, longest stage | M multiplies/s | Before: fastest, mean | After: fastest, mean |
@@ -488,7 +488,7 @@ means, the 7 requests at 2.4 Msps go from 0.62 to 0.39 core, and the 6 at 1.024 
 | 4 × 512 kHz, 300 kHz, 5 kHz, two pairs | 938 + 19, 976 + 22                  | 351 + 17, 360 + 18     | 15 to 10             |
 | 1 × 512 kHz, 300 kHz, 12.8 kHz         | 89 + 5                              | 37 + 5                 | 12 to 9              |
 
-Tried and not adopted, for the 1.024 Msps to 512 kHz channel, fastest block in ns per input sample
+Tried and not adopted, for the 1.024 Msps to 512 kHz channel, sum of stage minima in ns per input sample
 (this build direct: 41.4 at 5 kHz, 19.5 at 12.8 kHz; load average about 7):
 
 - **Decimate by 2 first, then a same-rate shaping filter.** 21 + 415 taps instead of 829: 31.4 at
@@ -510,7 +510,7 @@ so its front filter only has to keep images out. At 1.024 Msps a transition of 1
 `bw/2 + tr <= out/2` allows, gives 41 taps. Measured response: 0.0056 dB ripple across ±150 kHz,
 −5.1 dB at 200 kHz, −100 dB at 256 kHz, and −76.9 dB or better for anything folding back onto the
 150 kHz edge. Cost: 0.025 to 0.011 core at 1.024 Msps, 0.053 to 0.041 at 2.4 Msps (375 kHz transition),
-fastest block. Signals between 150 and 256 kHz would reach dumpvdl2's input at unity gain; no
+sum of stage minima. Signals between 150 and 256 kHz would reach dumpvdl2's input at unity gain; no
 target sits there, and no real signal has been tried through it.
 
 ## Spectrum frame path (2026-11-01)

@@ -294,6 +294,7 @@ impl RationalFir {
 
     /// [`Self::outputs`] compiled for AVX, so the kernel inlines into the loop and the switch
     /// back to SSE code happens once per block instead of once per dot.
+    /// Bit-identical to `dot` for finite input only, which is all `cu8` conversion yields; a NaN payload may differ.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx")]
     unsafe fn outputs_avx(&mut self, base: u64, end: u64, oi: &mut Vec<f32>, oq: &mut Vec<f32>) {
