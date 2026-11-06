@@ -214,7 +214,12 @@ it("a centre move during the linger keeps the process and its linger", async () 
 	await manager.releaseChannel(grant.channelId)
 	sources.emit("caps-changed", "s", { ...caps, centerFreq: 163e6 })
 	expect(proc.stop).not.toHaveBeenCalled()
-	expect(sent.at(-1)).toEqual({ v: 1, type: "recenter", centerHz: 163e6 })
+	expect(sent.at(-1)).toEqual({
+		v: 1,
+		type: "recenter",
+		centerHz: 163e6,
+		atInputBytes: 0,
+	})
 	await vi.advanceTimersByTimeAsync(CHANNELIZER_IDLE_STOP_MS - 1)
 	expect(proc.stop).not.toHaveBeenCalled()
 	await vi.advanceTimersByTimeAsync(1)
@@ -233,6 +238,87 @@ it.each([undefined, 0])(
 		expect(proc.stop).toHaveBeenCalledTimes(1)
 	},
 )
+
+it("cleaning up an acquisition the move caught keeps the recentre deadline", async () => {
+	const { manager, proc, sources, caps, connect } = await setup()
+	connect.mockImplementation(() => new Promise<PassThrough>(() => {}))
+	const controller = new AbortController()
+	const pending = manager.requestChannel(
+		"s",
+		"b",
+		{
+			centerHz: 162e6,
+			bandwidthHz: 45_600,
+			transitionHz: 1200,
+			outputRateHz: 48_000,
+			format: "cf32",
+		},
+		caps,
+		controller.signal,
+	)
+	await vi.advanceTimersByTimeAsync(10)
+	expect(connect).toHaveBeenCalledTimes(2)
+	const moved = { ...caps, centerFreq: 163e6 }
+	sources.getCaps = () => moved
+	sources.emit("caps-changed", "s", moved)
+	await vi.advanceTimersByTimeAsync(100)
+	controller.abort()
+	expect((await pending).ok).toBe(false)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 101)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(1)
+	expect(proc.stop).toHaveBeenCalledTimes(1)
+})
+
+it("a request the new centre refuses inside the linger keeps its deadline too", async () => {
+	const { manager, proc, sources, caps } = await setup()
+	sources.emit("caps-changed", "s", { ...caps, centerFreq: 170e6 })
+	const moved = { ...caps, centerFreq: 170e6 }
+	sources.getCaps = () => moved
+	await vi.advanceTimersByTimeAsync(1000)
+	const refused = await manager.requestChannel(
+		"s",
+		"b",
+		{
+			centerHz: 162e6,
+			bandwidthHz: 45_600,
+			transitionHz: 1200,
+			outputRateHz: 48_000,
+			format: "cf32",
+		},
+		moved,
+	)
+	expect(refused.ok).toBe(false)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 1001)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(1)
+	expect(proc.stop).toHaveBeenCalledTimes(1)
+})
+
+it("a grant after a move ends the deadline: its release retires at once", async () => {
+	const { manager, proc, sources, caps } = await setup()
+	const moved = { ...caps, centerFreq: 163e6 }
+	sources.getCaps = () => moved
+	sources.emit("caps-changed", "s", moved)
+	await vi.advanceTimersByTimeAsync(10)
+	const next = await manager.requestChannel(
+		"s",
+		"d",
+		{
+			centerHz: 163e6,
+			bandwidthHz: 45_600,
+			transitionHz: 1200,
+			outputRateHz: 48_000,
+			format: "cf32",
+		},
+		moved,
+	)
+	if (!next.ok) throw new WaveKitError(next.detail, "TEST")
+	await manager.releaseChannel(next.channelId)
+	expect(proc.stop).toHaveBeenCalledTimes(1)
+})
 
 it("a longer configured idle stop wins over the recentre linger", async () => {
 	const { proc, sources, caps } = await setup(CHANNELIZER_IDLE_STOP_MS)

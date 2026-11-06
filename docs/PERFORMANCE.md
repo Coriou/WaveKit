@@ -311,13 +311,28 @@ work. Now:
   `tests/channel_allocations.rs` now holds that at zero allocations once warm. On the Mac below the
   gain at whole-block chunks is within noise. On Linux, glibc may return and refault that memory per
   block; that has not been measured.
+- **The live demodulator waits too.** It runs the same reader at the same 16 384-sample block, so
+  its target is 32 768 bytes and the hold above applies to it: 6.83 ms at 2.4 Msps, 8 ms at
+  2.048 Msps, 16 ms at 1.024 Msps and 20 ms below 819.2 ksps, plus however late the host wakes the
+  thread. This is arithmetic from the target and the rate, not a measurement of audio latency.
 - **A capture-centre move no longer restarts the process.** Centre was part of `capsDiffer`, so
   every retune ended the generation, even with no channels open. Now only a rate or format change
   does (rule 5). A centre move sends one `recenter` control line. Open channels are still
   invalidated and re-requested, because a decoder's request may follow the centre and only the
-  decoder can recompute it. A channel reopened after a move can see up to the input branch's
-  buffered samples from the old centre (normally milliseconds, at most the 250 ms branch mark per
-  side), as a dongle's in-flight transfers already do across a retune.
+  decoder can recompute it. A request still in flight is answered the same way, so it is computed
+  again rather than granted for the old centre.
+- **`recenter` carries its position in the input.** Control and stdin are read independently, and
+  old-centre IQ can sit in the branch, the pipe and the reader when the line arrives.
+  `atInputBytes` is the fanout's count of bytes it delivered to the branch (accepted minus dropped,
+  the same count `mark-gap` uses), so it is the stdin position of the first byte after the move.
+  The process applies the move when its input reaches that byte, splitting the block there, and a
+  channel opened after the line receives no sample before it. A position already passed applies at
+  once. Moves apply in order; at most 512 wait (a reader lags by at most 2 250 ms before the parent
+  retires it, hops are at least the 5 ms default PLL settle apart: 450, rounded up; 24 bytes each).
+  Past that, or on a process with a demod channel, the process answers `recenter-refused` and the
+  parent restarts it. So does a position the parent cannot trust. IQ older than the fanout (the
+  tuner settling, a socket, a burst absorber) has no position: it reaches a reopened channel as it
+  does after a restart, and the source clock's settlement is what discards it.
 
 `native/wavekit-chan/examples/paced_load.py`, a real binary with paced noise on stdin and a separate
 consumer process, 12 s per run; ranges are repeated runs, with the 1 448 B, 4 096 B and 512 kHz rows

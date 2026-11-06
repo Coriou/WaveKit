@@ -51,12 +51,15 @@ export const ChannelizerRequestSchema = z
 				centerHz: z.number().finite(),
 			})
 			.strict(),
-		// The capture centre moved: same process, later opens and retunes admit against the new centre.
+		// The capture centre moved: same process, later opens and retunes admit against the new centre. Stdin byte
+		// `atInputBytes` (counted like `atInputByte`) is the first at the new centre; a channel opened after this line
+		// receives nothing before it.
 		z
 			.object({
 				v,
 				type: z.literal("recenter"),
 				centerHz: z.number().finite(),
+				atInputBytes: count.safe(),
 			})
 			.strict(),
 		z
@@ -188,6 +191,15 @@ export const ChannelizerEventSchema = z.discriminatedUnion("type", [
 			id,
 			generation,
 			reason: z.enum(["requested", "client-gone"]),
+		})
+		.strict(),
+	// The process did not take a `recenter` and no longer knows the capture centre; the parent retires it.
+	z
+		.object({
+			v,
+			type: z.literal("recenter-refused"),
+			generation,
+			reason: z.enum(["demod-channels", "too-many-pending"]),
 		})
 		.strict(),
 	z

@@ -53,9 +53,14 @@ interface ChannelGranted {
 	generation: number
 	realised: RealisedChannel
 }
-export type ChannelRequestResult =
-	| ChannelGranted
-	| { ok: false; reasonCode: ChannelAdmissionReason; detail: string }
+interface ChannelRefused {
+	ok: false
+	reasonCode: ChannelAdmissionReason
+	detail: string
+	/** The capture centre moved during the request: recompute it against the current caps; not an outage. */
+	race?: true
+}
+export type ChannelRequestResult = ChannelGranted | ChannelRefused
 
 export interface ChannelProvider {
 	requestChannel(
