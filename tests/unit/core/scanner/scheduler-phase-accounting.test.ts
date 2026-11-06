@@ -94,6 +94,34 @@ function expectAddsUp(stats: readonly HopPhaseStat[]): void {
 }
 
 describe("hop phases", () => {
+	it("does not count a recording check's time in both the dwell and the hold", () => {
+		let during = (): void => undefined
+		const { s, at, now } = scene({
+			recording: () => {
+				during()
+				return true
+			},
+		})
+		during = () => at(now() + 10)
+		s.start()
+		s.noteTuneStarted(0)
+		s.noteTuneAnswered(0)
+		s.onEpochStarted(0)
+		s.onTrack(track("a", HZ_A), false, 0)
+		for (const [sample, wall] of [
+			[50, 50],
+			[100, 100],
+			[150, 140],
+		] as const) {
+			at(wall)
+			s.onBlock(sample)
+		}
+		const hop = s.hopPhaseStats()[0]
+		expect(hop).toMatchObject({ timeMs: 150, holdMs: 10 })
+		expect(hop?.measuredDwellMs).toBe(140)
+		expectAddsUp(s.hopPhaseStats())
+	})
+
 	it("splits one visit into tune latency, settle and dwell", () => {
 		const { s, at } = scene()
 		s.start()

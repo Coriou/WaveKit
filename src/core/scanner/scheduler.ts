@@ -1535,7 +1535,9 @@ export class SweepScheduler {
 		this.endHold(true, voice)
 		const trackId = this.recordedTrack(heldId)
 		if (trackId === null) return false
-		if (v.holdStartedAt === null) this.enterPhase(v, "hold")
+		// Closed at `now`, where the hold's own clock starts: the recording check may take time, and
+		// blocks heard meanwhile would count in both the dwell and the hold.
+		if (v.holdStartedAt === null) this.enterPhase(v, "hold", now)
 		v.holdStartedAt ??= now
 		v.budgeted = true
 		if (voice) this.startVoiceHold(v, active, now)
@@ -1736,8 +1738,8 @@ export class SweepScheduler {
 		c.at = Math.max(c.at, at)
 	}
 
-	private enterPhase(v: Visit, kind: PhaseKind): void {
-		this.closePhase(v, this.accountingPausedAt ?? this.now())
+	private enterPhase(v: Visit, kind: PhaseKind, at = this.now()): void {
+		this.closePhase(v, this.accountingPausedAt ?? at)
 		v.clock.kind = kind
 	}
 
