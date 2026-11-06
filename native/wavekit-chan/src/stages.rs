@@ -250,7 +250,7 @@ impl RationalFir {
     }
 
     /// Appends this block's outputs to `oi`/`oq`. The kernel is chosen once per block and every
-    /// kernel gives the same bits, so a host's CPU changes the cost and never the output.
+    /// kernel gives the same bits on finite input (a NaN's payload may differ), so a host's CPU changes the cost and never the output.
     pub fn process(&mut self, i: &[f32], q: &[f32], oi: &mut Vec<f32>, oq: &mut Vec<f32>) {
         debug_assert_eq!(i.len(), q.len());
         let base = self.consumed;

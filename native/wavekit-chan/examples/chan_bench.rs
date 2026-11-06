@@ -7,8 +7,9 @@
 //!
 //! Prints, per channel: the planned stages with their multiplies per second, then ns per input
 //! sample for the NCO and each stage, measured on one thread, and the share of a core the
-//! channel costs at its real-time input rate. `best block` repeats that from each stage's
-//! sum of each stage's fastest block, not one observed block: on a shared host preemption inflates the mean, not a minimum.
+//! channel costs at its real-time input rate. `sum of stage minima` repeats that from
+//! each stage's fastest block, so it is not one observed block: on a shared host preemption
+//! inflates the mean, not a minimum.
 //! `output hash` covers every output float's bits, to compare builds on the same request.
 
 use std::hint::black_box;
@@ -131,7 +132,7 @@ fn main() {
     println!("output hash: {hash:016x}");
     let fastest = best.iter().sum::<u128>() as f64 / BLOCK as f64;
     println!(
-        "best block: {:.2} ns/input sample ({:.2} in the NCO), {:.3} core at {} sps",
+        "sum of stage minima: {:.2} ns/input sample ({:.2} in the NCO), {:.3} core at {} sps",
         fastest,
         best[0] as f64 / BLOCK as f64,
         fastest * fs as f64 / 1e9,

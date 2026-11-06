@@ -69,3 +69,48 @@ fn a_warm_channel_does_not_allocate_per_block() {
         assert_eq!(allocated, 0, "{} blocks of {block}", format.as_str());
     }
 }
+
+// Requests whose longest stage has at least 185 taps per phase, so they take the two-output kernel.
+#[test]
+fn a_warm_wide_channel_does_not_allocate_per_block() {
+    // (input rate, bandwidth, transition, output rate)
+    let requests = [
+        (1_024_000u64, 300_000.0, 5_000.0, 512_000u64),
+        (1_024_000, 300_000.0, 12_800.0, 512_000),
+        (1_024_000, 364_800.0, 9_600.0, 384_000),
+        (2_400_000, 950_000.0, 25_000.0, 1_000_000),
+        (2_400_000, 300_000.0, 26_250.0, 1_050_000),
+        (2_400_000, 364_800.0, 9_600.0, 384_000),
+    ];
+    for (input_rate, bandwidth_hz, transition_hz, output_rate) in requests {
+        for block in [16_384usize, 4_099, 2_048] {
+            let mut dsp = ChannelDsp::new(ChannelSpec {
+                input_rate,
+                offset_hz: 10_000.0,
+                bandwidth_hz,
+                transition_hz,
+                output_rate,
+                format: Format::Cf32,
+                gain: 1.0,
+            })
+            .unwrap();
+            let i: Vec<f32> = (0..block).map(|n| (n as f32 * 0.1).sin()).collect();
+            let q: Vec<f32> = (0..block).map(|n| (n as f32 * 0.1).cos()).collect();
+            let mut out = Vec::new();
+            for _ in 0..64 {
+                out.clear();
+                dsp.process(&i, &q, &mut out);
+            }
+            let before = ALLOCATIONS.with(Cell::get);
+            for _ in 0..1000 {
+                out.clear();
+                dsp.process(&i, &q, &mut out);
+            }
+            let allocated = ALLOCATIONS.with(Cell::get) - before;
+            assert_eq!(
+                allocated, 0,
+                "{output_rate} from {input_rate}, blocks of {block}"
+            );
+        }
+    }
+}

@@ -435,9 +435,10 @@ size and wake-ups do not enter it.
 **The 5 kHz transition was the bench's, not production's.** Decoders derive the request from their
 output rate. The wide requests come from dumpvdl2, `rtl_433` and AIS-catcher, one channel per decoder
 instance, and none asks for 5 kHz: dumpvdl2 at 1.024 Msps asks for 512 kHz with a 12.8 kHz transition
-(325 taps, not 829). LoRa and readsb do not use the channelizer. `rtl_433`'s default 1 MHz request
-has no plan from 1.024 Msps: one 125/128 stage needs about 20 700 taps, over the 16 384 budget, and no
-intermediate rate lies between 1.1 MHz and the input.
+(325 taps, not 829). LoRa and readsb do not use the channelizer. The catalogue `rtl_433` takes the raw capture
+up to 2.4 Msps (rule 6) and opens no channel, so its row below applies only to an operator's
+`useChannelizer: true` decoder. A 1 MHz request from 1.024 Msps has no plan and is refused earlier, as
+outside the capture.
 
 **The FIR now runs I and Q and two consecutive outputs side by side, on AVX** (`dots_avx` in
 `native/wavekit-chan/src/stages.rs`). One accumulator is limited by its add's latency, about 4 cycles
@@ -447,7 +448,7 @@ average about 8): 0.165 ns for the previous `dot`, 0.118 for one AVX accumulator
 together, 0.047 with two outputs. Two outputs need at least 128 taps per phase: at 53 taps they cost
 more than one, at 185 less.
 
-The output is bit-identical for finite input, the only input there is: the process takes `cu8` alone and each byte converts to a finite value. A NaN payload can differ between kernels and between block splits. Same 8 lanes, same order, IEEE add and multiply, and no fused
+The output is bit-identical for finite input. `wavekit-chan` takes `cu8` only, and each byte converts to a finite value. `wavekit-iqcap replay` can read non-finite floats from a damaged file, and there only a NaN's payload can differ, between kernels and between block splits. Same 8 lanes, same order, IEEE add and multiply, and no fused
 multiply-add, which would round once where `dot` rounds twice. The kernel is picked once per block
 from the CPU, so a host's CPU changes the cost and never the output. Tests: the kernels against `dot`
 on random lengths up to 69 with far-apart magnitudes, a pair of values that separates fused from unfused
@@ -469,7 +470,7 @@ average 26 to 21.
 | multimon-ng                      | 1.024         | 48 000, 12 000, 2 500           | 105                           | 32             | 0.021, 0.026          | 0.016, 0.021         |
 | dsd-fme                          | 1.024         | 48 000, 12 500, 6 250           | 43                            | 26             | 0.020, 0.026          | 0.016, 0.021         |
 | acarsdec                         | 1.024         | 24 000, 12 000, 6 000           | 23                            | 24             | 0.020, 0.026          | 0.016, 0.021         |
-| rtl_433                          | 2.4           | 1 000 000, 950 000, 25 000      | 195                           | 498            | 0.118, 0.147          | 0.056, 0.074         |
+| rtl_433, `useChannelizer` only   | 2.4           | 1 000 000, 950 000, 25 000      | 195                           | 498            | 0.118, 0.147          | 0.056, 0.074         |
 | dumpvdl2                         | 2.4           | 1 050 000, 300 000, 26 250      | 185                           | 424            | 0.102, 0.132          | 0.053, 0.069         |
 | AIS-catcher                      | 2.4           | 384 000, 364 800, 9 600         | 253                           | 258            | 0.084, 0.101          | 0.046, 0.060         |
 | direwolf                         | 2.4           | 48 000, 47 424, 288             | 843                           | 138            | 0.060, 0.074          | 0.041, 0.049         |
@@ -479,7 +480,7 @@ average 26 to 21.
 
 Narrow channels gain about 20 %: what is left there is 4.9 ns per input sample in the NCO, a serial
 recursion, and the first short half-bands, per channel, because each channel mixes first. Summing the
-means, the 7 requests at 2.4 Msps go from 0.62 to 0.39 core, and the 6 at 1.024 Msps from 0.27 to 0.15.
+means, the 6 default-path requests at 2.4 Msps go from 0.47 to 0.32 core (0.62 to 0.39 with the operator `rtl_433` row), and the 6 at 1.024 Msps from 0.27 to 0.15. This is one channel per request, not a live total: a decoder can hold several narrow channels, up to 33 for paging.
 
 `paced_load.py`, the whole process with a consumer, 15 s per run, previous and this build alternated:
 
