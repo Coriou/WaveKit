@@ -14,6 +14,9 @@
  * qualifyBlocks). An empty hop pays nothing.
  */
 import {
+	CHANNEL_GATE_BURST_MARGIN_DB,
+	CHANNEL_GATE_BURST_MIN_DURATION_MS,
+	CHANNEL_GATE_HYSTERESIS_DB,
 	CHANNEL_GATE_K_DB,
 	CHANNEL_GATE_MARGIN_DB,
 	CLASS_SETTLE_BLOCKS,
@@ -103,8 +106,9 @@ const QUALIFY_MARGIN_BLOCKS = 2
 /**
  * A frequency whose qualification brought nothing to hold (the gate refused it, did not answer in
  * time, or passed a class that is not held) rests this many coarse visits per hop of the plan,
- * doubling with each failure in a row up to QUALIFY_REST_MAX_SWEEPS. So a steady weak emitter costs
- * its hop at most 6 blocks (300 ms at 50 ms) every 1 + 4 sweeps at the cap: 60 ms a sweep.
+ * doubling with each failure in a row up to QUALIFY_REST_MAX_SWEEPS. So a steady emitter too weak
+ * to pass (gateReachLevelDb) costs its hop at most 6 blocks (300 ms at 50 ms) every 1 + 4 sweeps at
+ * the cap: 60 ms a sweep.
  */
 const QUALIFY_REST_MAX_SWEEPS = 4
 /**
@@ -113,11 +117,12 @@ const QUALIFY_REST_MAX_SWEEPS = 4
  */
 const QUALIFY_STRIKE_MEMORY_SWEEPS = 8
 /**
- * A candidate this far over the highest level that earned a rest (the gate's own margin, twice the
- * power) is another emission, not the steady line seen again, and the rest does not bind it. Each
- * wait bought this way raises that level by at least this much while the failures stay in a row, so
- * a run of them costs at most (highest − lowest reading) / 3 dB waits past the rests: 9 from 3 to
- * 30 dB, each at most 300 ms, once.
+ * A rest earned by a pass with nothing to hold binds what reads like that emission: a reading this
+ * far over the highest level of its failures (the gate's own margin, twice the power) is another
+ * transmission. Each wait bought this way raises that level by at least this much, so one failure
+ * history (the failures in a row, QUALIFY_STRIKE_MEMORY_SWEEPS) costs at most (highest − lowest
+ * reading) / 3 dB waits past the rests: 9 from 3 to 30 dB, each at most 300 ms. Its expiry starts
+ * the levels over, so this is no bound over an emitter's lifetime.
  */
 const QUALIFY_REST_STRONGER_DB = CHANNEL_GATE_MARGIN_DB
 /** Re-check period of a hold kept for a recording (Hold mode `record`): 5 blocks of 50 ms. */
@@ -322,6 +327,8 @@ interface CandidateInfo {
 	onsetBlock: number
 	/** The longest its gate can take to pass it, in blocks (qualifyBlocks). */
 	answerBlocks: number
+	/** The lowest reading that could still pass its gate (gateReachLevelDb). */
+	reachLevelDb: number
 	/**
 	 * Highest channel reading of its sightings in this epoch (candidateLevelDb). The tracker publishes
 	 * at blocks 1, 2, 5 and 20 only and the gate's hysteresis carries a run across a low block, so
@@ -340,8 +347,8 @@ interface QualifyRest {
 	/** Highest level of those failures: what binds is what reads like it (QUALIFY_REST_STRONGER_DB). */
 	levelDb: number
 	/**
-	 * One of them passed its gate and had nothing to hold. Without this the failures were the gate's
-	 * refusal or no answer, and a track that does pass is not what they were.
+	 * One of them passed its gate and had nothing to hold, so this rest also binds a candidate that
+	 * could pass (qualifyResting). Without this the failures were the gate's refusal or no answer.
 	 */
 	passed: boolean
 }
@@ -470,6 +477,25 @@ interface Candidate {
 	id: string
 	t: TrackInfo
 	kind: "confirm" | "follow"
+}
+
+/**
+ * The lowest reading on a dwell's blocks that could still pass its gate: no rest binds it. One block
+ * of the run must reach kCh + margin, kCh is never under CHANNEL_GATE_K_DB, and a dwell reads only the
+ * track's first blocks, so a level within the gate's hysteresis of that pass level may be the low side
+ * of a run that reaches it: 3 + 3 − 1.5 = 4.5 dB under the standard rule, 3 + 6 − 1.5 = 7.5 dB when
+ * burst entries alone cover the track (`gateMinDurationMs` tells which; a track also covered by burst
+ * slots keeps the standard rule's lower level). Measured through the real pipeline: the lowest dwell
+ * reading that passed was 5.0 dB for FM voice and 5.7 dB for a steady line. What reads between this
+ * and the pass level without ever passing pays its wait on each visit, and a raised kCh widens that
+ * band (it reaches at most 300 ms per hop visit, the wait's own bound).
+ */
+function gateReachLevelDb(gateMinDurationMs: number): number {
+	const margin =
+		gateMinDurationMs <= CHANNEL_GATE_BURST_MIN_DURATION_MS
+			? CHANNEL_GATE_BURST_MARGIN_DB
+			: CHANNEL_GATE_MARGIN_DB
+	return CHANNEL_GATE_K_DB + margin - CHANNEL_GATE_HYSTERESIS_DB
 }
 
 /** This snapshot's channel reading; a track the gate cannot measure reads as −Infinity. */
@@ -830,9 +856,8 @@ export class SweepScheduler {
 			asCandidate?.levelDb ?? Number.NEGATIVE_INFINITY,
 			channelReadingDb(track),
 		)
-		const qualified =
-			asCandidate !== undefined &&
-			!this.qualifyResting(track.centreHz, levelDb, true)
+		// A rest binds a candidate, not a pass: its class wait is how a voice call gets its hold.
+		const qualified = asCandidate !== undefined
 		this.remember(v, track, known === undefined, flagged)
 		const followOnAir = hints.followOnAir === true && !flagged
 		const voiceLater = hints.voiceLater === true && !flagged
@@ -903,6 +928,7 @@ export class SweepScheduler {
 			blocks: track.blocks,
 			onsetBlock: Math.min(was?.onsetBlock ?? onsetBlock, onsetBlock),
 			answerBlocks: this.qualifyBlocks(gateMinDurationMs),
+			reachLevelDb: gateReachLevelDb(gateMinDurationMs),
 			levelDb: Math.max(
 				was?.levelDb ?? Number.NEGATIVE_INFINITY,
 				channelReadingDb(track),
@@ -963,7 +989,7 @@ export class SweepScheduler {
 		if (!this.realOnAir(c)) return false
 		const m = this.memoryAt(c.centreHz, c.obwHz)
 		if (m !== undefined && !this.mayHoldFrequency(m)) return false
-		return !this.qualifyResting(c.centreHz, c.levelDb, false)
+		return !this.qualifyResting(c)
 	}
 
 	/**
@@ -1006,28 +1032,34 @@ export class SweepScheduler {
 	}
 
 	/**
-	 * A rest binds only what reads like the emission that earned it: a level under its own plus
-	 * QUALIFY_REST_STRONGER_DB. `passed`: the track passed its gate, which a refusal or a missing
-	 * answer says nothing about, so only a rest earned by a pass with nothing to hold binds it.
+	 * A rest that binds this candidate. It never binds one that could pass its gate (reachLevelDb):
+	 * such a line passes and falls under the carrier rules, or a refusal ends its wait, so a wait is
+	 * all it costs. The exception is a rest earned by a pass with nothing to hold, which does bind what
+	 * reads like it (under its level plus QUALIFY_REST_STRONGER_DB): that line would pass to nothing
+	 * again on every visit, with no carrier rule to end it.
 	 */
-	private qualifyResting(
-		centreHz: number,
-		levelDb: number,
-		passed: boolean,
-	): boolean {
+	private qualifyResting(c: CandidateInfo): boolean {
+		for (const [, rest] of this.restsNear(c.centreHz))
+			if (
+				this.coarseVisits < rest.untilVisit &&
+				(c.levelDb < c.reachLevelDb ||
+					(rest.passed && c.levelDb < rest.levelDb + QUALIFY_REST_STRONGER_DB))
+			)
+				return true
+		return false
+	}
+
+	/** The rests of one frequency, by bin: within SAME_FREQUENCY_FLOOR_HZ, in its bin or a neighbour. */
+	private *restsNear(centreHz: number): Generator<[number, QualifyRest]> {
 		const bin = Math.floor(centreHz / MEMORY_BIN_HZ)
 		for (let b = bin - 1; b <= bin + 1; b++) {
 			const rest = this.qualifyRests.get(b)
 			if (
 				rest !== undefined &&
-				Math.abs(rest.centreHz - centreHz) <= SAME_FREQUENCY_FLOOR_HZ &&
-				this.coarseVisits < rest.untilVisit &&
-				levelDb < rest.levelDb + QUALIFY_REST_STRONGER_DB &&
-				(rest.passed || !passed)
+				Math.abs(rest.centreHz - centreHz) <= SAME_FREQUENCY_FLOOR_HZ
 			)
-				return true
+				yield [b, rest]
 		}
-		return false
 	}
 
 	/** A qualification brought nothing to hold: its frequency rests (QUALIFY_REST_MAX_SWEEPS). */
@@ -1066,7 +1098,7 @@ export class SweepScheduler {
 
 	/** A qualification led to a hold: its frequency owes no rest. */
 	private clearQualifyRest(centreHz: number): void {
-		this.qualifyRests.delete(Math.floor(centreHz / MEMORY_BIN_HZ))
+		for (const [bin] of this.restsNear(centreHz)) this.qualifyRests.delete(bin)
 	}
 
 	/**
@@ -1945,8 +1977,10 @@ export class SweepScheduler {
 	 * label that arrives with its 5th block can still start a follow. A track whose spectrum reads
 	 * as analog voice (`voiceLater`) is waited for, and one that just passed its gate as a candidate
 	 * of this visit (TrackInfo.qualified: a burst gate passes at the 2nd or 3rd block, on a spectrum
-	 * too young to read); its frequency rests if nothing comes of it. Any other young burst leaves
-	 * at the dwell.
+	 * too young to read). No rest takes this wait away (qualifyResting binds candidates), so a voice
+	 * call after a steady carrier gets its hold; a track passed by its second block waits 2 blocks
+	 * more than the dwell. Nothing coming of it earns a rest. Any other young burst leaves at the
+	 * dwell.
 	 */
 	private waitForClass(v: Visit): boolean {
 		if (

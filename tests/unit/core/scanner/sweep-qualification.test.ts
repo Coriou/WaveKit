@@ -149,16 +149,12 @@ describe.each(GATES)("a sweep over a $gate gate", ({ protocols }) => {
 			for (const v of later)
 				expect(v.endMs! - v.atMs).toBeLessThanOrEqual(EMPTY_VISIT_MS + CHUNK_MS)
 		} else {
-			// Nothing to hold in an ISM range: the qualification alone, then rests of 1, 2 and 4 sweeps.
+			// Nothing to hold in an ISM range: each visit waits for its class, within the bound.
 			expect(held).toBeUndefined()
 			for (const v of [visit!, ...later])
 				expect(v.endMs! - v.atMs).toBeLessThanOrEqual(
 					EMPTY_VISIT_MS + QUALIFY_MS + CHUNK_MS,
 				)
-			const waited = later.filter(
-				v => v.endMs! - v.atMs > EMPTY_VISIT_MS + CHUNK_MS,
-			)
-			expect(waited.length).toBeLessThan(later.length / 2)
 		}
 		// The other hops got their visits after it.
 		expect(
