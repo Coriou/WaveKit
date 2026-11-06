@@ -82,6 +82,14 @@ export const DEAD_STREAM_MS = 2.5 * STALL_GRACE_MS
  * on a change, so this is the zero-fill figure's source: 5 readings per 10 s window, one small GET each 2 s.
  */
 export const ROUTE_POLL_MS = 2000
+/**
+ * Stats arrive every 250 ms of rendering. Over 4 of those periods with none, the ring was not rendering
+ * (suspended, or a blocked page), so the core's counters since the last reading are not about this Listen.
+ * Time under the bound can credit at most 1 000 ms: 10% of the 10 s window, which is not yet breaking up.
+ */
+export const STATS_GAP_MS = 1_000
+/** Past 3 × 2 000 ms without a reading (two lost, a third late) the next one is a new base. */
+export const ROUTE_GAP_MS = 3 * ROUTE_POLL_MS
 
 function readVolume(): number {
 	try {
@@ -112,10 +120,12 @@ export class ListenController extends Store<ListenState> {
 	private deadTimer: ReturnType<typeof setTimeout> | null = null
 	private lastDataAt = 0
 	private health = new AudioHealthTracker()
-	/** Bumped by each Listen: a route reading that comes back later belongs to an older one. */
-	private session = 0
+	/** The route reading in flight; one that comes back after being replaced here is ignored. */
+	private routeRead: AbortController | null = null
 	private routePolledAt = Number.NEGATIVE_INFINITY
-	private routePolling = false
+	private routeReadAt = 0
+	private lastStatsAt = 0
+	private routeSourceId: string | undefined
 	private routeLatencyMs = 0
 	private readonly liveAudio: LiveAudioStore
 	private readonly player: ListenPlayer | null
@@ -218,9 +228,8 @@ export class ListenController extends Store<ListenState> {
 		})
 		this.retries = 0
 		this.health = new AudioHealthTracker()
-		this.session += 1
+		this.abortRouteRead()
 		this.routePolledAt = Number.NEGATIVE_INFINITY
-		this.routePolling = false
 		this.routeLatencyMs = 0
 		// unlock audio inside the gesture so the browser allows sound later on
 		const status = this.liveAudio.get().status
@@ -411,8 +420,15 @@ export class ListenController extends Store<ListenState> {
 		const s = this.get()
 		if (!s.wanted || this.attachedKey === null || s.phase === "blocked") return
 		const auto = this.source?.route === "auto"
-		if (auto) this.readRoute(stats.renderedMs)
 		const { status, level } = this.liveAudio.get()
+		const now = Date.now()
+		if (
+			now - this.lastStatsAt > STATS_GAP_MS ||
+			status?.sourceId !== this.routeSourceId
+		)
+			this.rebaseRoute()
+		this.lastStatsAt = now
+		if (auto) this.readRoute(stats.renderedMs)
 		const audio = this.health.noteStats(
 			stats,
 			audioExpected(status, level, auto),
@@ -438,18 +454,38 @@ export class ListenController extends Store<ListenState> {
 
 	/** One reading at a time; a failed one is skipped and the next says what happened since. */
 	private readRoute(renderedMs: number): void {
-		if (this.routePolling || renderedMs - this.routePolledAt < ROUTE_POLL_MS)
+		if (this.routeRead || renderedMs - this.routePolledAt < ROUTE_POLL_MS)
 			return
-		this.routePolling = true
+		const read = new AbortController()
+		this.routeRead = read
 		this.routePolledAt = renderedMs
-		const session = this.session
-		void this.liveAudio.readAutoRoute().then(route => {
-			if (session !== this.session) return
-			this.routePolling = false
+		void this.liveAudio.readAutoRoute(read.signal).then(route => {
+			if (this.routeRead !== read) return
+			this.routeRead = null
 			if (!route) return
+			const now = Date.now()
+			if (now - this.routeReadAt > ROUTE_GAP_MS) this.health.rebaseRoute()
+			this.routeReadAt = now
 			this.health.noteRoute(route)
 			this.routeLatencyMs = route.latencyMs
 		})
+	}
+
+	private abortRouteRead(): void {
+		this.routeRead?.abort()
+		this.routeRead = null
+	}
+
+	/**
+	 * What the core counted from here on is about this Listen again; what it counted before is not: a
+	 * suspended ring, a new stream, or another source. The base comes from a reading taken now.
+	 */
+	private rebaseRoute(): void {
+		this.abortRouteRead()
+		this.routePolledAt = Number.NEGATIVE_INFINITY
+		this.health.rebaseRoute()
+		this.lastStatsAt = Date.now()
+		this.routeSourceId = this.liveAudio.get().status?.sourceId
 	}
 
 	/**
@@ -506,6 +542,7 @@ export class ListenController extends Store<ListenState> {
 			if (!source.httpUrl) return
 			this.attachedKey = this.key
 			this.watchStream()
+			this.rebaseRoute()
 			if (this.get().phase !== "playing") this.setPhase("connecting")
 			this.player.play({
 				url: source.httpUrl,
@@ -535,6 +572,7 @@ export class ListenController extends Store<ListenState> {
 	private detach(): void {
 		this.clearStall()
 		this.clearDead()
+		this.abortRouteRead()
 		this.attachedKey = null
 		this.player?.stop()
 		const el = this.el

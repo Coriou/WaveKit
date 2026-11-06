@@ -276,16 +276,30 @@ function resumeRefusalMessage(r: { detail: string; reason?: string }): string {
 	return `${r.detail}; it cannot resume until the source has tuner control. ${KEEPS_PROGRESS}`
 }
 
-/** A resume with no data from the source. A job in source-down carries on by itself; any other waits for the operator. */
-function noDataRefusal(reason: JobRecord["reason"]): ScannerApiError {
-	return new ScannerApiError(
-		reason === "source-down"
-			? `No data from the source: this job continues by itself when data returns. Nothing to resume yet; cancel it to end it. ${KEEPS_PROGRESS}`
-			: `No data from the source: resume this job again once data returns, or cancel it to end it. ${KEEPS_PROGRESS}`,
-		"SCANNER_SOURCE_DOWN",
-		409,
-		{ reason: "source-down" },
-	)
+/**
+ * A resume with no data from the source. What it says follows what happens next: a job in source-down, a
+ * pending boot resume and an automatic resume after preemption all carry on without the operator; any other
+ * job waits for them.
+ */
+function noDataRefusal(
+	record: JobRecord,
+	bootResumePending: boolean,
+): ScannerApiError {
+	const { reason } = record
+	const preempted =
+		reason === "preempted-operator" ||
+		reason === "preempted-relay" ||
+		reason === "preempted-job"
+	let next = `No data from the source: resume this job again once data returns, or cancel it to end it. ${KEEPS_PROGRESS}`
+	if (reason === "source-down")
+		next = `No data from the source: this job continues by itself when data returns. Nothing to resume yet; cancel it to end it. ${KEEPS_PROGRESS}`
+	else if (bootResumePending)
+		next = `No data from the source: this job restarts by itself when data returns. Nothing to resume yet; cancel it to end it. ${KEEPS_PROGRESS}`
+	else if (preempted && record.spec.resume.autoAfterIdleMs !== null)
+		next = `No data from the source: this job resumes by itself once data returns and the tuner has been idle for its resume delay. Resume it again then to go sooner, or cancel it to end it. ${KEEPS_PROGRESS}`
+	return new ScannerApiError(next, "SCANNER_SOURCE_DOWN", 409, {
+		reason: "source-down",
+	})
 }
 
 /** A resume of a job that is not paused: its state and what to do next. */
@@ -357,6 +371,8 @@ export interface JobRunnerDeps {
 	leaseAnalogSession?: (sourceId: string) => (() => void) | undefined
 	/** Rechecked on the serial dispatch chain before an automatic acquisition. */
 	autoResumeReady?: () => boolean
+	/** A boot resume of this job is still waiting for data: it restarts without the operator. */
+	bootResumePending?: () => boolean
 	record: JobRecord
 	arbiter: Pick<
 		TunerArbiter,
@@ -875,6 +891,8 @@ export class JobRunner implements JobDriver {
 			if (
 				idleSince !== null &&
 				now - idleSince >= spec.resume.autoAfterIdleMs &&
+				// No data: nothing to hop on. The next tick after data returns resumes it.
+				this.deps.arbiter.isConnected(this.sourceId) &&
 				(this.deps.autoResumeReady?.() ?? true) &&
 				!this.deps.arbiter.holder(this.sourceId)
 			) {
@@ -1279,7 +1297,7 @@ export class JobRunner implements JobDriver {
 		if (e.type === "resume" && record.state === "paused") {
 			// A paused feed answers SOURCE_PAUSED in the service, before it gets here.
 			if (!this.deps.arbiter.isConnected(this.sourceId))
-				throw noDataRefusal(record.reason)
+				throw noDataRefusal(record, this.deps.bootResumePending?.() ?? false)
 			// The source is back and this job missed its source-up: the resume carries it on. It holds
 			// the lease through source-down, so there is no one new to ask consent for.
 			if (record.reason === "source-down")
@@ -1289,7 +1307,13 @@ export class JobRunner implements JobDriver {
 			e.type === "preemptor-idle" &&
 			(record.reason === "preempted-operator" ||
 				record.reason === "preempted-relay")
-		if (operatorAutoResume && !(this.deps.autoResumeReady?.() ?? true)) return
+		// Queued before the data stopped, or before activity began: a later tick asks again.
+		if (
+			operatorAutoResume &&
+			(!this.deps.arbiter.isConnected(this.sourceId) ||
+				!(this.deps.autoResumeReady?.() ?? true))
+		)
+			return
 		if (e.type === "resume" || e.type === "start")
 			this.autoResumeGuardActive = false
 		if (e.type === "preemptor-idle")

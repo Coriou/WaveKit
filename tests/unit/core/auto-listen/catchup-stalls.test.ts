@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	LIVE_AUDIO_AUTO_ROUTE_BLOCK_MS,
 	LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS,
+	LIVE_AUDIO_AUTO_ROUTE_RATE,
 } from "@wavekit/api-types"
 import type * as ApiTypes from "@wavekit/api-types"
 import { AUTO_ROUTE_STREAM } from "../../../../src/core/auto-listen/contract.js"
@@ -95,6 +96,7 @@ interface Result {
 	gaps: number
 	rebases: number
 	routeUnderruns: number
+	routeZeroFilledSamples: number
 	fifoDroppedMs: number
 	ringDroppedMs: number
 	endLatencyMs: number
@@ -152,6 +154,7 @@ async function run(blocks: number, s: Scenario): Promise<Result> {
 		gaps: ring.underruns,
 		rebases: router.clockRebases,
 		routeUnderruns: router.underruns,
+		routeZeroFilledSamples: router.zeroFilledSamples,
 		fifoDroppedMs: router.droppedSamples / SAMPLES_PER_MS,
 		ringDroppedMs: ring.droppedSamples / SAMPLES_PER_MS,
 		endLatencyMs: status.latencyMs + ring.bufferedMs,
@@ -177,7 +180,7 @@ describe("the catch-up bound", () => {
 // `delivered` and `audible` are percent of 60 s, the milliseconds are exact to within 1 ms.
 const BUSY: Scenario = { stallMs: 290, periodMs: 1000, order: "pipe-first" }
 describe("60 s of steady audio through a stalling core, real router and ring", () => {
-	it.each<[string, number, Scenario, Result]>([
+	it.each<[string, number, Scenario, Omit<Result, "routeZeroFilledSamples">]>([
 		[
 			"150 ms each second, audio first, old bound",
 			5,
@@ -340,15 +343,70 @@ describe("60 s of steady audio through a stalling core, real router and ring", (
 		expect(Math.abs(got.endLatencyMs - want.endLatencyMs)).toBeLessThan(1)
 	})
 
-	it("lost source audio is counted as underruns: 20 ms each comes to what the ear missed", async () => {
+	it("lost source audio is counted in samples, and comes to what the ear missed", async () => {
 		const got = await run(LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS, {
 			...BUSY,
 			order: "source-lost",
 		})
 		const missing =
-			(got.routeUnderruns * LIVE_AUDIO_AUTO_ROUTE_BLOCK_MS) / (SECONDS * 1000)
-		expect(missing * 100).toBe(30)
+			got.routeZeroFilledSamples / LIVE_AUDIO_AUTO_ROUTE_RATE / SECONDS
+		expect(missing * 100).toBeCloseTo(30, 1)
 		expect(Math.abs(100 - got.audible - missing * 100)).toBeLessThan(1)
+		// mostly whole blocks here, so the two agree to about a block in each of the 60 seconds
+		expect(
+			got.routeUnderruns * 960 - got.routeZeroFilledSamples,
+		).toBeLessThanOrEqual(60 * 960)
+	})
+
+	it("a block one sample short counts one sample, not 20 ms", async () => {
+		const Router = await routerAt(LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS)
+		const clock = new StepClock()
+		const router = new Router(logger, { clock, wallClock: () => 0 })
+		let zeros = 0
+		const client = new EventEmitter() as EventEmitter & {
+			writableEnded: boolean
+			destroyed: boolean
+			write(chunk: Buffer): boolean
+			end(): void
+			destroy(): void
+		}
+		Object.assign(client, {
+			writableEnded: false,
+			destroyed: false,
+			write: (chunk: Buffer) => {
+				for (let i = 0; i < chunk.length; i += 2)
+					if (chunk.readInt16LE(i) === 0) zeros += 1
+				return true
+			},
+			end: () => undefined,
+			destroy: () => undefined,
+		})
+		router.registry.register(
+			client as unknown as http.ServerResponse,
+			"127.0.0.1",
+			AUTO_ROUTE_STREAM,
+		)
+		const chunk = Buffer.alloc(CHUNK_SAMPLES * 2)
+		for (let i = 0; i < CHUNK_SAMPLES; i++) chunk.writeInt16LE(1_000, i * 2)
+		// 10 s = 500 blocks of 960 samples, every fifth source chunk 959
+		const blocks = 500
+		for (let b = 1; b <= blocks; b++) {
+			clock.t = b * LIVE_AUDIO_AUTO_ROUTE_BLOCK_MS
+			const end = b % 5 === 0 ? chunk.length - 2 : chunk.length
+			router.pushAnalog(chunk, 0, end, true, { rate: RATE, format: "s16le" })
+			clock.fn?.()
+		}
+		const status = router.status({ httpUrl: "h", wavUrl: "w" })
+		expect(status.zeroFilledSamples).toBe(zeros)
+		expect(status.underruns).toBe(router.underruns)
+		const zeroMs = (zeros / LIVE_AUDIO_AUTO_ROUTE_RATE) * 1000
+		expect(zeroMs).toBeLessThan(3)
+		// each short block at the old 20 ms: at least 2 000 ms, for under 3 ms of zeros
+		expect(router.underruns).toBeGreaterThanOrEqual(100)
+		expect(
+			router.underruns * LIVE_AUDIO_AUTO_ROUTE_BLOCK_MS,
+		).toBeGreaterThanOrEqual(2_000)
+		router.destroy()
 	})
 })
 

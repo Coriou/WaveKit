@@ -748,6 +748,7 @@ describe("AutoListenRouter", () => {
 			clientCount: 0,
 			digitalAvailable: false,
 			underruns: 0,
+			zeroFilledSamples: 0,
 			droppedMs: 0,
 			clockRebases: 0,
 			latencyMs: 20,

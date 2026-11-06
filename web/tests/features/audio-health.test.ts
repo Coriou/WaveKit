@@ -152,15 +152,17 @@ describe("the audio health figure", () => {
 	})
 
 	describe("the core's zero-fill", () => {
-		const route = (underruns: number, clockRebases = 0) => ({
-			underruns,
+		const BLOCK = 960
+		const route = (zeroFilledSamples: number, clockRebases = 0) => ({
+			zeroFilledSamples,
 			clockRebases,
 		})
 
-		it("takes its first reading as a base, and counts 20 ms a block after", () => {
+		it("takes its first reading as a base, and counts samples at the route's rate after", () => {
 			const f = new Feed()
-			f.t.noteRoute(route(5_000, 7))
-			f.t.noteRoute(route(5_050, 9))
+			f.t.noteRoute(route(5_000 * BLOCK, 7))
+			f.window(0)
+			f.t.noteRoute(route(5_050 * BLOCK, 9))
 			f.window(0)
 			expect(f.last).toMatchObject({
 				missingMs: 1_000,
@@ -170,21 +172,111 @@ describe("the audio health figure", () => {
 			})
 		})
 
+		it("a sample short every fifth block for 10 s is about 2 ms, not 2 000 ms", () => {
+			const f = new Feed()
+			f.t.noteRoute(route(0))
+			f.window(0)
+			// what the real router counts for this (tests/unit/core/auto-listen/catchup-stalls.test.ts)
+			f.t.noteRoute(route(117))
+			f.window(0)
+			expect(f.last).toMatchObject({ missingMs: 0, breaking: false })
+			expect(f.last.heardPct).toBeGreaterThanOrEqual(99)
+		})
+
 		it("a lower count is a restarted core, not a negative loss", () => {
 			const f = new Feed()
-			f.t.noteRoute(route(5_000))
-			f.t.noteRoute(route(10))
-			f.t.noteRoute(route(20))
+			f.t.noteRoute(route(5_000 * BLOCK))
+			f.window(0)
+			f.t.noteRoute(route(10 * BLOCK))
+			f.window(0)
+			f.t.noteRoute(route(20 * BLOCK))
 			f.window(0)
 			expect(f.last).toMatchObject({ coreFilledMs: 200, rebases: 0 })
 		})
 
-		it("never reports below zero heard", () => {
+		it("an older core without the sample count shows no fill, only its rebases", () => {
+			const f = new Feed()
+			f.t.noteRoute({ clockRebases: 1 })
+			f.window(0)
+			f.t.noteRoute({ clockRebases: 3 })
+			f.window(0)
+			expect(f.last).toMatchObject({ coreFilledMs: 0, rebases: 2 })
+		})
+
+		it("one reading credits at most the expected time it covers", () => {
 			const f = new Feed()
 			f.t.noteRoute(route(0))
-			f.t.noteRoute(route(100_000))
 			f.window(0)
+			// exactly what it covers: 10 s
+			f.t.noteRoute(route(500 * BLOCK))
+			f.window(0)
+			expect(f.last.coreFilledMs).toBe(10_000)
+			// past it: 3 000 blocks are 60 s, the reading covers 10 s
+			f.t.noteRoute(route(3_500 * BLOCK))
+			f.window(0)
+			expect(f.last.coreFilledMs).toBe(20_000)
 			expect(f.last.heardPct).toBe(0)
+		})
+
+		it("credits nothing when no time passed between readings", () => {
+			const f = new Feed()
+			f.t.noteRoute(route(0))
+			f.t.noteRoute(route(100_000 * BLOCK))
+			f.window(0)
+			expect(f.last).toMatchObject({ missingMs: 0, heardPct: 100 })
+		})
+
+		it("does not credit what the ring already counted as dry, nor closed-squelch time", () => {
+			const f = new Feed()
+			f.t.noteRoute(route(0))
+			// 10 s expected, 4 s of it already dry
+			f.window(4_000)
+			f.t.noteRoute(route(500 * BLOCK))
+			f.window(0)
+			expect(f.last.coreFilledMs).toBe(6_000)
+			expect(f.last.missingMs).toBe(10_000)
+			f.t.noteRoute(route(500 * BLOCK))
+			for (let i = 0; i < 10; i++) f.bucket(0, false)
+			f.t.noteRoute(route(1_000 * BLOCK))
+			f.window(0)
+			expect(f.last.coreFilledMs).toBe(6_000)
+		})
+
+		it("missing never exceeds expected, whatever the readings say", () => {
+			const f = new Feed()
+			let expectedMs = 0
+			let filled = 0
+			f.t.noteRoute(route(0))
+			for (let i = 0; i < 200; i++) {
+				f.bucket(i % 7 === 0 ? 300 : 0)
+				expectedMs += HEALTH_BUCKET_MS
+				if (i % 3 === 0) {
+					filled += (i % 11) * 10_000 * BLOCK
+					f.t.noteRoute(route(filled))
+				}
+			}
+			f.bucket(0)
+			expect(f.last.missingMs).toBeLessThanOrEqual(
+				expectedMs + HEALTH_BUCKET_MS,
+			)
+		})
+
+		it("after a rebase the next reading is only a base", () => {
+			const f = new Feed()
+			f.t.noteRoute(route(0, 0))
+			f.window(0)
+			f.t.rebaseRoute()
+			f.t.noteRoute(route(3_000 * BLOCK, 5))
+			f.window(0)
+			expect(f.last).toMatchObject({
+				missingMs: 0,
+				coreFilledMs: 0,
+				rebases: 0,
+				heardPct: 100,
+			})
+			f.t.noteRoute(route(3_050 * BLOCK, 6))
+			f.window(0)
+			expect(f.last).toMatchObject({ coreFilledMs: 1_000, rebases: 1 })
 		})
 	})
 })

@@ -66,7 +66,7 @@ Condensed + Noto Sans, Tabler-based icons).
 | Tuned card, every signal type | Gallery of the card for all 18 mocked signals (voice, fleets, messages, sensors, audio only, unknown) | Active |
 | Tuner island | Digit tuning, typed entry with suggestions, mode, bandwidth, step, saved frequencies | Active |
 | Receiver island | Sample rate, gain table, AGC, bias-T, PPM, advanced (direct sampling, DC removal, IQ correction) | Active |
-| Listen island | Listen, squelch meter with auto/off, tone squelch ("Waiting for 88.5 Hz" in the header while the gate holds, tweak `toneDemo`), volume, analog vs decoded voice, AGC, filters, Record audio (a WAV saved in the browser's downloads, its file name said after) | Active |
+| Listen island | Listen, squelch meter with auto/off, tone squelch ("Waiting for 88.5 Hz" in the header while the gate holds, tweak `toneDemo`), volume, analog vs decoded voice, AGC, filters, Record audio (a WAV saved in the browser's downloads, its file name said after); breaking up (`Breaking up · 71% heard` beside Listening while over 10% of the last 10 s of expected audio did not play, the figure and total missing in Audio options) | Active |
 | Decoded messages + Decode card | One card anatomy for every decoder; JSON fallback for unknown rtl_433 models | Active |
 | JSON viewer | Syntax colours, wrap, copy pretty / one line | Active |
 | Activity | The drawer (search with typed chips, one list, detail pushed in with Back, audio replay, transcripts, live feed) plus its columns pane: pinned searches side by side, attached to the drawer's left; a switcher row when there is no room. `mode` tweak: wide / drawer / narrow | Active, wide mode reworked |

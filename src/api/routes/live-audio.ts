@@ -196,6 +196,7 @@ const liveDemodStatusSchema = {
 				clientCount: { type: "number" },
 				digitalAvailable: { type: "boolean" },
 				underruns: { type: "number" },
+				zeroFilledSamples: { type: "number" },
 				droppedMs: { type: "number" },
 				clockRebases: { type: "number" },
 				latencyMs: { type: "number" },

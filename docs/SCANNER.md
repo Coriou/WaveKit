@@ -162,7 +162,7 @@ Explicit `resume` in the other cases:
 - `paused(operator)` after an operator or relay write took the lease: re-acquires it. With a grown impact and no `takeover` it answers 409 `SCANNER_TAKEOVER_REQUIRED` (the job stays paused); while a job of equal or higher priority holds the lease it answers 409 `SCANNER_SOURCE_BUSY` and moves to `paused(resume-blocked)` (taking the lease from a lower-priority job needs consent like a takeover).
 - `paused(resumed-without-retune)`: re-holds the decoders and retunes to the current hop; without the lease it re-acquires it as from `paused(operator)`.
 - `paused(core-restart)`: re-acquires the lease, re-opens the engine and restarts the sweep from its first hop.
-- Any paused reason while the source sends no data: 409 `SCANNER_SOURCE_DOWN`, and the job keeps its reason (`SOURCE_PAUSED` first on a feed paused by hand). Only `source-down` then continues by itself; the others take another `resume` once data returns.
+- Any paused reason while the source sends no data: 409 `SCANNER_SOURCE_DOWN`, and the job keeps its reason (`SOURCE_PAUSED` first on a feed paused by hand). No automatic resume runs without data. Once data returns `source-down` continues, a preempted job with `autoAfterIdleMs` resumes after its idle time, one waiting for a lease freed meanwhile gets it, and `core-restart` with a pending `onBoot` restarts; the others take another `resume`. The `message` says which.
 
 Every 409 `SCANNER_SOURCE_BUSY` carries `details.reason`: `releasing`, `recovery-pending` and `holder-starting` clear by themselves (retry); `relay` and `held` last until the relay or the holding job lets go.
 

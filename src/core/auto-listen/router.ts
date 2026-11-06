@@ -113,6 +113,8 @@ export class AutoListenRouter extends EventEmitter {
 	private emitted = 0
 	private rebases = 0
 	private underrunCount = 0
+	/** At 48 000 samples/s a double stays exact for over 5 000 years. */
+	private zeroFilled = 0
 	private selected: Selected = null
 	private selectedAt = 0
 	private sinceWall: number
@@ -161,6 +163,11 @@ export class AutoListenRouter extends EventEmitter {
 
 	get underruns(): number {
 		return this.underrunCount
+	}
+
+	/** Output samples that were zeros because the selected source ran short. */
+	get zeroFilledSamples(): number {
+		return this.zeroFilled
 	}
 
 	get droppedSamples(): number {
@@ -225,6 +232,7 @@ export class AutoListenRouter extends EventEmitter {
 			clientCount: this.registry.size,
 			digitalAvailable: this.voiceSource !== null && this.coverage !== null,
 			underruns: this.underrunCount,
+			zeroFilledSamples: this.zeroFilled,
 			droppedMs: this.counter.droppedSamples / SAMPLES_PER_MS,
 			clockRebases: this.rebases,
 			latencyMs:
@@ -343,7 +351,10 @@ export class AutoListenRouter extends EventEmitter {
 			const excess = sel.out.queued - TARGET_SAMPLES
 			if (excess > 0) sel.out.discardSilentHead(excess)
 			const got = sel.out.read(this.block, AUTO_ROUTE_BLOCK_SAMPLES)
-			if (got < AUTO_ROUTE_BLOCK_SAMPLES) this.underrunCount++
+			if (got < AUTO_ROUTE_BLOCK_SAMPLES) {
+				this.underrunCount++
+				this.zeroFilled += AUTO_ROUTE_BLOCK_SAMPLES - got
+			}
 		}
 		// A fresh block: the registry and the socket may keep the reference (2.8).
 		const out = Buffer.allocUnsafe(AUTO_ROUTE_BLOCK_BYTES)

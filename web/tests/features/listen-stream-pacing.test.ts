@@ -8,6 +8,7 @@ import type { LiveAudioStatus } from "@wavekit/api-types"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ApiClient, EventsClient } from "../../src/data/index.ts"
 import { LiveAudioStore } from "../../src/data/index.ts"
+import { AUTO_ROUTE_READ_TIMEOUT_MS } from "../../src/data/live-audio-store.ts"
 import {
 	audioAttachKey,
 	autoRouteSource,
@@ -16,8 +17,10 @@ import { NO_AUDIO_HEALTH } from "../../src/features/listen/audio-health.ts"
 import {
 	DEAD_STREAM_MS,
 	ListenController,
+	ROUTE_GAP_MS,
 	ROUTE_POLL_MS,
 	STALL_GRACE_MS,
+	STATS_GAP_MS,
 	type ListenPhase,
 	type ListenPlayer,
 } from "../../src/features/listen/controller.ts"
@@ -36,7 +39,7 @@ const BLOCK_SAMPLES = 960
 const CATCHUP_MAX_BLOCKS = LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS
 const QUANTUM = 128
 
-function runningStatus(underruns = 0): LiveAudioStatus {
+function runningStatus(zeroFilledSamples = 0): LiveAudioStatus {
 	return {
 		running: true,
 		sourceId: "rtl-0",
@@ -60,7 +63,8 @@ function runningStatus(underruns = 0): LiveAudioStatus {
 			digitalAvailable: false,
 			active: "analog",
 			since: "2026-01-01T00:00:00.000Z",
-			underruns,
+			underruns: 0,
+			zeroFilledSamples,
 			droppedMs: 0,
 			clockRebases: 0,
 			latencyMs: 60,
@@ -97,7 +101,11 @@ class CorePacer {
 	}
 }
 
-function harness(routeUnderruns: () => number = () => 0) {
+function harness(
+	routeFilled: () => number = () => 0,
+	get: (signal?: AbortSignal) => Promise<LiveAudioStatus> = () =>
+		Promise.resolve(runningStatus(routeFilled())),
+) {
 	const handlers = new Map<string, (payload: unknown) => void>()
 	const events = {
 		subscribe: () => () => undefined,
@@ -108,7 +116,8 @@ function harness(routeUnderruns: () => number = () => 0) {
 		onReconnected: () => () => undefined,
 	} as unknown as EventsClient
 	const api = {
-		get: () => Promise.resolve(runningStatus(routeUnderruns())),
+		get: (_path: string, options?: { signal?: AbortSignal }) =>
+			get(options?.signal),
 		post: () => Promise.resolve({ success: true }),
 	} as unknown as ApiClient
 	const store = new LiveAudioStore(api, events)
@@ -315,8 +324,8 @@ describe("Listen reads the core's zero-fill", () => {
 	})
 
 	it("zeros at full rate count as missing, on a stream the ring finds perfect", async () => {
-		let underruns = 1_000
-		const h = harness(() => underruns)
+		let filled = 48_000
+		const h = harness(() => filled)
 		await h.listen.start()
 		const ring = {
 			playing: true,
@@ -329,9 +338,11 @@ describe("Listen reads the core's zero-fill", () => {
 		h.events().onStats(ring)
 		await settle()
 		for (let i = 1; i <= 80; i++) {
-			// 290 ms of every second becomes zeros: 14.5 blocks per second, 3.625 per 250 ms
-			underruns += 3.625
+			// 290 ms of every second becomes zeros: 13 920 samples per second, 3 480 per 250 ms
+			filled += 3_480
 			ring.renderedMs += 250
+			// bytes keep arriving: only the ring's view is perfect, nothing reattaches
+			h.events().onData()
 			h.events().onStats({ ...ring })
 			await settle(250)
 		}
@@ -400,6 +411,300 @@ describe("Listen reads the core's zero-fill", () => {
 		release(null)
 		await settle()
 		expect(read).toHaveBeenCalledTimes(2)
+	})
+})
+
+describe("the core's counters only speak for time this Listen was hearing /auto", () => {
+	beforeEach(() => {
+		vi.useFakeTimers()
+	})
+
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
+	const BLOCKS_60_S = 3_000 * BLOCK_SAMPLES
+
+	/** Listen with a base reading taken, then `play(ms)` runs stats and readings every 250 ms. */
+	async function listening() {
+		const route = { filled: 0 }
+		const h = harness(() => route.filled)
+		await h.listen.start()
+		let renderedMs = 0
+		const tick = async () => {
+			h.events().onData()
+			h.events().onStats({
+				playing: true,
+				bufferedMs: 200,
+				underruns: 0,
+				droppedSamples: 0,
+				renderedMs,
+				dryMs: 0,
+			})
+			await settle()
+		}
+		await tick()
+		const play = async (ms: number) => {
+			for (let t = 0; t < ms; t += 250) {
+				await settle(250)
+				renderedMs += 250
+				await tick()
+			}
+		}
+		return { h, route, play, tick }
+	}
+
+	it("the bounds state their arithmetic", () => {
+		expect(STATS_GAP_MS).toBe(4 * STATS_EVERY_S * 1000)
+		expect(STATS_GAP_MS / 10_000).toBeLessThanOrEqual(0.1)
+		expect(ROUTE_GAP_MS).toBe(3 * ROUTE_POLL_MS)
+	})
+
+	it("a suspended ring: the counter rising meanwhile is not missing audio", async () => {
+		const { h, route, play } = await listening()
+		await play(10_000)
+		await settle(30_000)
+		route.filled += BLOCKS_60_S
+		await play(12_000)
+		expect(h.listen.get().audio).toMatchObject({
+			heardPct: 100,
+			missingMs: 0,
+			coreFilledMs: 0,
+			breaking: false,
+		})
+		// counted again after the new base
+		route.filled += 50 * BLOCK_SAMPLES
+		await play(4_000)
+		expect(h.listen.get().audio.coreFilledMs).toBe(1_000)
+	})
+
+	it("a stats gap at the bound keeps the base, and one past it does not", async () => {
+		const at = await listening()
+		await at.play(2_000)
+		await settle(STATS_GAP_MS - 250)
+		at.route.filled += 25 * BLOCK_SAMPLES
+		await at.play(4_000)
+		expect(at.h.listen.get().audio.coreFilledMs).toBe(500)
+
+		const past = await listening()
+		await past.play(2_000)
+		await settle(STATS_GAP_MS - 249)
+		past.route.filled += 25 * BLOCK_SAMPLES
+		await past.play(4_000)
+		expect(past.h.listen.get().audio.coreFilledMs).toBe(0)
+	})
+
+	it("a switch of source: another source's count is not this one's", async () => {
+		const { h, route, play } = await listening()
+		await play(2_000)
+		route.filled += 50 * BLOCK_SAMPLES
+		h.emit("live-audio:status", {
+			...runningStatus(route.filled),
+			sourceId: "rtl-1",
+		})
+		await play(4_000)
+		expect(h.listen.get().audio.coreFilledMs).toBe(0)
+	})
+
+	it("a reattach is a new stream", async () => {
+		const { h, route, play } = await listening()
+		await play(2_000)
+		route.filled += 50 * BLOCK_SAMPLES
+		h.events().onEnded("The audio stream ended")
+		await settle(1_000)
+		expect(h.plays).toHaveLength(2)
+		await play(4_000)
+		expect(h.listen.get().audio.coreFilledMs).toBe(0)
+	})
+
+	it("leaving /auto and coming back starts from a new base", async () => {
+		const { h, route, play } = await listening()
+		await play(2_000)
+		const auto = autoRouteSource(h.store.get().status, BASE)
+		const stream = {
+			...auto!,
+			route: "stream" as const,
+			httpUrl: "http://localhost:3102/stream",
+		}
+		h.listen.setSource(audioAttachKey(stream), stream)
+		await settle(250)
+		expect(h.plays).toHaveLength(2)
+		await play(2_000)
+		route.filled += 200 * BLOCK_SAMPLES
+		await play(2_000)
+		h.listen.setSource(audioAttachKey(auto), auto)
+		await settle(250)
+		expect(h.plays).toHaveLength(3)
+		await play(4_000)
+		expect(h.listen.get().audio.coreFilledMs).toBe(0)
+	})
+
+	it("a reading in flight across a discontinuity is dropped", async () => {
+		const route = { filled: 0 }
+		const gets: ((status: LiveAudioStatus) => void)[] = []
+		const h = harness(
+			() => route.filled,
+			() =>
+				new Promise<LiveAudioStatus>(resolve => {
+					gets.push(resolve)
+				}),
+		)
+		await h.listen.start()
+		const stats = {
+			playing: true,
+			bufferedMs: 200,
+			underruns: 0,
+			droppedSamples: 0,
+			renderedMs: 0,
+			dryMs: 0,
+		}
+		h.events().onStats(stats)
+		expect(gets).toHaveLength(1)
+		await settle(STATS_GAP_MS + 1)
+		h.events().onStats(stats)
+		// a new base is asked for at once; the old one coming back changes nothing
+		expect(gets).toHaveLength(2)
+		gets[0]?.(runningStatus(BLOCKS_60_S))
+		await settle()
+		gets[1]?.(runningStatus(0))
+		await settle()
+		expect(gets).toHaveLength(2)
+	})
+
+	it("readings failing past the gap start from a new base; up to it they still count", async () => {
+		const run = async (lostMs: number) => {
+			const route = { filled: 0, down: false }
+			const h = harness(
+				() => route.filled,
+				() =>
+					route.down
+						? Promise.reject(new Error("no"))
+						: Promise.resolve(runningStatus(route.filled)),
+			)
+			await h.listen.start()
+			let renderedMs = 0
+			const play = async (ms: number) => {
+				for (let t = 0; t < ms; t += 250) {
+					h.events().onData()
+					h.events().onStats({
+						playing: true,
+						bufferedMs: 200,
+						underruns: 0,
+						droppedSamples: 0,
+						renderedMs,
+						dryMs: 0,
+					})
+					await settle(250)
+					renderedMs += 250
+				}
+			}
+			await play(4_000)
+			route.down = true
+			route.filled += 25 * BLOCK_SAMPLES
+			await play(lostMs)
+			route.down = false
+			await play(4_500)
+			return h.listen.get().audio.coreFilledMs
+		}
+		expect(await run(ROUTE_GAP_MS - 2_500)).toBe(500)
+		expect(await run(ROUTE_GAP_MS + 2_000)).toBe(0)
+	})
+})
+
+describe("a status read that hangs", () => {
+	beforeEach(() => {
+		vi.useFakeTimers()
+	})
+
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
+	/** Answers nothing until aborted, as fetch does; `hang` decides per call. */
+	function hanging(hang: () => boolean) {
+		const signals: AbortSignal[] = []
+		const get = (signal?: AbortSignal) => {
+			if (signal) signals.push(signal)
+			if (!hang()) return Promise.resolve(runningStatus())
+			return new Promise<LiveAudioStatus>((_resolve, reject) => {
+				const abort = () => reject(new DOMException("aborted", "AbortError"))
+				if (signal?.aborted) abort()
+				signal?.addEventListener("abort", abort)
+			})
+		}
+		return { get, signals }
+	}
+
+	const stats = (renderedMs: number) => ({
+		playing: true,
+		bufferedMs: 200,
+		underruns: 0,
+		droppedSamples: 0,
+		renderedMs,
+		dryMs: 0,
+	})
+
+	it("its lifetime fits inside the reading cadence", () => {
+		expect(AUTO_ROUTE_READ_TIMEOUT_MS).toBe(1_500)
+		expect(AUTO_ROUTE_READ_TIMEOUT_MS).toBeLessThan(ROUTE_POLL_MS)
+	})
+
+	it("ends at the bound, not before, and answers null", async () => {
+		const { get, signals } = hanging(() => true)
+		const h = harness(undefined, get)
+		let answer: unknown = "pending"
+		void h.store.readAutoRoute().then(route => {
+			answer = route
+		})
+		await settle(AUTO_ROUTE_READ_TIMEOUT_MS - 1)
+		expect(signals[0]?.aborted).toBe(false)
+		expect(answer).toBe("pending")
+		await settle(1)
+		expect(signals[0]?.aborted).toBe(true)
+		await settle()
+		expect(answer).toBeNull()
+	})
+
+	it("later readings still run, and on time", async () => {
+		let hang = true
+		const { get, signals } = hanging(() => hang)
+		const h = harness(undefined, get)
+		await h.listen.start()
+		h.events().onStats(stats(0))
+		expect(signals).toHaveLength(1)
+		await settle(AUTO_ROUTE_READ_TIMEOUT_MS)
+		expect(signals[0]?.aborted).toBe(true)
+		hang = false
+		await settle(ROUTE_POLL_MS - AUTO_ROUTE_READ_TIMEOUT_MS)
+		h.events().onStats(stats(ROUTE_POLL_MS))
+		expect(signals).toHaveLength(2)
+	})
+
+	it("Stop aborts it, and so does dispose", async () => {
+		const { get, signals } = hanging(() => true)
+		const h = harness(undefined, get)
+		await h.listen.start()
+		h.events().onStats(stats(0))
+		expect(signals[0]?.aborted).toBe(false)
+		// Stop's own status read answers through the same hanging get
+		void h.listen.stop()
+		expect(signals[0]?.aborted).toBe(true)
+
+		const second = hanging(() => true)
+		const d = harness(undefined, second.get)
+		await d.listen.start()
+		d.events().onStats(stats(0))
+		d.listen.dispose()
+		expect(second.signals[0]?.aborted).toBe(true)
+	})
+
+	it("an aborted caller signal ends a read before it starts", async () => {
+		const { get, signals } = hanging(() => true)
+		const h = harness(undefined, get)
+		const abort = new AbortController()
+		abort.abort()
+		await expect(h.store.readAutoRoute(abort.signal)).resolves.toBeNull()
+		expect(signals[0]?.aborted).toBe(true)
 	})
 })
 

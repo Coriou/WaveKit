@@ -662,6 +662,42 @@ describe("automatic resume reentry", () => {
 		expect(h.arbiter.holder()).toBeUndefined()
 		expect(h.arbiter.retunes).toHaveLength(0)
 	})
+	const idlePreempted = () => {
+		const h = runnerHarness()
+		h.record.state = "paused"
+		h.record.reason = "preempted-operator"
+		h.record.spec.resume = { autoAfterIdleMs: 1000, onBoot: false }
+		h.arbiter.operatorIdleSince = () => 0 as unknown as null
+		return h
+	}
+	it("an idle timeout does nothing with no data, and resumes on the first tick after data returns", async () => {
+		const h = idlePreempted()
+		h.arbiter.connected = false
+		h.runner.tick(1000)
+		await flush()
+		expect(h.record).toMatchObject({
+			state: "paused",
+			reason: "preempted-operator",
+		})
+		expect(h.arbiter.holder()).toBeUndefined()
+		h.arbiter.connected = true
+		h.runner.tick(1000)
+		await flush()
+		await h.runner.idle()
+		expect(h.record.state).toBe("running")
+	})
+	it("an idle resume queued before the data stopped does not acquire", async () => {
+		const h = idlePreempted()
+		h.runner.tick(1000)
+		h.arbiter.connected = false
+		await flush()
+		await h.runner.idle()
+		expect(h.record).toMatchObject({
+			state: "paused",
+			reason: "preempted-operator",
+		})
+		expect(h.arbiter.holder()).toBeUndefined()
+	})
 })
 
 describe("job progress phase", () => {

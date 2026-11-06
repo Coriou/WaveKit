@@ -1,9 +1,12 @@
 // How much of the audio this Listen expected actually played. Ring time is the clock: elapsed time is what
 // the ring rendered, so a suspended context counts nothing. Missing is the time the ring had nothing to play
-// plus the blocks the core filled with zeros because its source had no audio. Those zeros arrive at full rate
-// and look perfect to the ring; only `autoRoute.underruns` shows them. Time with the squelch closed is not
-// counted at all: exact silence is correct there, so it cannot read as breaking up.
-import { LIVE_AUDIO_AUTO_ROUTE_BLOCK_MS } from "@wavekit/api-types"
+// plus the time the core filled with zeros because its source had no audio. Those zeros arrive at full rate
+// and look perfect to the ring; only `autoRoute.zeroFilledSamples` shows them. That counter is global, so a
+// reading is only trusted for the time this Listen was hearing `/auto`: the controller rebases it across
+// anything else. Another client cannot move it faster: the route has one pacer however many listen
+// (src/core/auto-listen/router.ts). Time with the squelch closed is not counted at all: exact silence is
+// correct there, so it cannot read as breaking up.
+import { LIVE_AUDIO_AUTO_ROUTE_RATE } from "@wavekit/api-types"
 import type {
 	LiveAudioAutoRoute,
 	LiveAudioLevel,
@@ -70,8 +73,11 @@ export class AudioHealthTracker {
 	private started = false
 	private lastRenderedMs = 0
 	private lastDryMs = 0
-	private lastUnderruns: number | null = null
+	/** The route base: null until a reading after the start or the last rebase. */
+	private lastFilledSamples: number | null = null
 	private lastRebases = 0
+	private expectedSinceReadingMs = 0
+	private drySinceReadingMs = 0
 	private readonly buckets: Bucket[] = []
 	private bucketRenderedMs = 0
 	private bucket: Bucket = { expectedMs: 0, missingMs: 0 }
@@ -81,18 +87,36 @@ export class AudioHealthTracker {
 	private totalRebases = 0
 	private health = NO_AUDIO_HEALTH
 
-	/** The core's counters; the first reading is only a base (they outlive a Listen). */
+	/**
+	 * The core's counters; the first reading is only a base (they outlive a Listen). One reading credits at
+	 * most the expected time since the last one less what the ring already counted as dry, so missing can
+	 * never exceed expected.
+	 */
 	noteRoute(
-		route: Pick<LiveAudioAutoRoute, "underruns" | "clockRebases">,
+		route: Pick<LiveAudioAutoRoute, "zeroFilledSamples" | "clockRebases">,
 	): void {
-		if (this.lastUnderruns !== null && this.started) {
+		// an older core has no sample count: its rebases still show, no fill does
+		const samples = route.zeroFilledSamples ?? 0
+		if (this.lastFilledSamples !== null && this.started) {
 			// a lower count is a restarted core: nothing is known about the time between
-			const underruns = Math.max(0, route.underruns - this.lastUnderruns)
-			this.pendingFilledMs += underruns * LIVE_AUDIO_AUTO_ROUTE_BLOCK_MS
+			const filled = Math.max(0, samples - this.lastFilledSamples)
+			this.pendingFilledMs += Math.min(
+				(filled / LIVE_AUDIO_AUTO_ROUTE_RATE) * 1000,
+				Math.max(0, this.expectedSinceReadingMs - this.drySinceReadingMs),
+			)
 			this.totalRebases += Math.max(0, route.clockRebases - this.lastRebases)
 		}
-		this.lastUnderruns = route.underruns
+		this.lastFilledSamples = samples
 		this.lastRebases = route.clockRebases
+		this.expectedSinceReadingMs = 0
+		this.drySinceReadingMs = 0
+	}
+
+	/** This browser was not hearing `/auto` for a while: the next reading is a new base. */
+	rebaseRoute(): void {
+		this.lastFilledSamples = null
+		this.expectedSinceReadingMs = 0
+		this.drySinceReadingMs = 0
 	}
 
 	/** One ring report; the same object back unless the readout changed. */
@@ -114,6 +138,8 @@ export class AudioHealthTracker {
 			b.expectedMs += renderedMs
 			b.missingMs += dryMs
 			this.totalMissingMs += dryMs
+			this.expectedSinceReadingMs += renderedMs
+			this.drySinceReadingMs += dryMs
 		}
 		// the core only counts these while a source is selected, so they are always missing audio
 		b.missingMs += this.pendingFilledMs

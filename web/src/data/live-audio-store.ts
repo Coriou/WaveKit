@@ -22,6 +22,12 @@ export interface LiveAudioState {
 	error: string | null
 }
 
+/**
+ * How long one `/auto` reading may take: the 1 300 ms longest stall seen in the core plus 200 ms. It is
+ * under Listen's 2 000 ms reading cadence, so a hung request costs one reading and the next starts on time.
+ */
+export const AUTO_ROUTE_READ_TIMEOUT_MS = 1_500
+
 /** PATCH body: any config field; `agc: null` returns to the modulation default. */
 export type LiveAudioConfigPatch = Partial<Omit<LiveAudioConfig, "agc">> & {
 	agc?: LiveAudioConfig["agc"] | null
@@ -81,15 +87,27 @@ export class LiveAudioStore extends Store<LiveAudioState> {
 	/**
 	 * The `/auto` counters now, or null. The core broadcasts status only when something changes, so these
 	 * counters are read on demand. Nothing lands in the store: a fresh status redraws everything showing one.
+	 * Ends within AUTO_ROUTE_READ_TIMEOUT_MS, or as soon as `signal` aborts.
 	 */
-	async readAutoRoute(): Promise<LiveAudioAutoRoute | null> {
+	async readAutoRoute(
+		signal?: AbortSignal,
+	): Promise<LiveAudioAutoRoute | null> {
+		const bound = new AbortController()
+		const abort = () => bound.abort()
+		const timer = setTimeout(abort, AUTO_ROUTE_READ_TIMEOUT_MS)
+		if (signal?.aborted) abort()
+		signal?.addEventListener("abort", abort, { once: true })
 		try {
 			const status = await this.api.get<LiveAudioStatus>(
 				"/api/live-audio/status",
+				{ signal: bound.signal },
 			)
 			return status.autoRoute ?? null
 		} catch {
 			return null
+		} finally {
+			clearTimeout(timer)
+			signal?.removeEventListener("abort", abort)
 		}
 	}
 

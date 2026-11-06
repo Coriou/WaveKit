@@ -126,7 +126,13 @@ export interface LiveAudioAutoRoute {
 	wavUrl: string
 	clientCount: number
 	digitalAvailable: boolean
+	/** Output blocks with any sample missing: one sample short counts like a whole block. */
 	underruns: number
+	/**
+	 * Output samples filled with zeros because the selected source ran short, cumulative. Time lost:
+	 * samples / LIVE_AUDIO_AUTO_ROUTE_RATE. Absent from older cores.
+	 */
+	zeroFilledSamples?: number
 	droppedMs: number
 	clockRebases: number
 	/** Selected source's backlog plus one block, ms. */

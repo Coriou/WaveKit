@@ -212,6 +212,8 @@ did not play in the last 10 s, the card says so next to it, for example
 signal to judge, and silence from a closed squelch never counts. **Audio options** gives the figure and
 the total missing since Listen started, next to the latency, for example `71% heard · 17.4 s missing`;
 hover it for what the core reported. The web app reads the core's figure every 2 s, so it can lag a little.
+Time this browser was not playing the stream (a suspended tab's audio, a reattach, another stream) never
+counts as missing.
 The latency includes audio waiting in the core.
 
 Breaking up usually means the core is too busy. It catches up a late stream by up to 500 ms at once, which
