@@ -654,6 +654,18 @@ describe("shutdown and source removal during a tune", () => {
 		expect(h.read().restore).toBeUndefined()
 	})
 
+	it("aborts the wait after the writes on shutdown: the request answers at once as not usable", async () => {
+		const h = await setup({ payloadOnReconnect: false })
+		const answer = h.post({ sampleRateHz: OTHER_RATE })
+		await until(() => h.frames.some(f => f.value === OTHER_RATE))
+		await h.app.close()
+		// No payload ever comes, so only the abort can end the wait inside this test's time.
+		expect((await answer).json()).toMatchObject({
+			usable: false,
+			applied: ["sampleRateHz"],
+		})
+	})
+
 	it("stops a tune queued behind a command on shutdown: its turn writes nothing", async () => {
 		const h = await setup()
 		h.fakeTime()

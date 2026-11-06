@@ -151,6 +151,8 @@ export class TunerTuning {
 	private readonly restores = new Map<string, RestoreRecord>()
 	/** One per source, at most: the tune answering 409 to a second one. */
 	private readonly active = new Map<string, ActiveTune>()
+	/** Tunes past their writes, still waiting for the source. At most one per request. */
+	private readonly finalWaits = new Set<AbortController>()
 	private readonly lastTunes = new Map<string, TunerLastTune>()
 	private closed = false
 
@@ -384,11 +386,13 @@ export class TunerTuning {
 		// A recovery that ran out of its own window still counts if the source returns in time.
 		if (error !== undefined && codeOf(error) !== "SOURCE_RECONNECTING")
 			return finish(this.source.isTunerUsable(sourceId))
+		// `settle` took the run off `active`, so close and removal reach this wait through its own set.
+		this.finalWaits.add(run.abort)
 		const usable = await this.waitUsable(
 			sourceId,
 			deadline - Date.now(),
 			signal,
-		)
+		).finally(() => this.finalWaits.delete(run.abort))
 		error = usable ? undefined : this.notUsable()
 		return finish(usable)
 	}
@@ -425,6 +429,7 @@ export class TunerTuning {
 		this.closed = true
 		for (const run of this.active.values()) run.abort.abort()
 		this.active.clear()
+		for (const abort of this.finalWaits) abort.abort()
 		for (const record of this.restores.values()) this.stop(record)
 		this.restores.clear()
 		this.lastTunes.clear()
