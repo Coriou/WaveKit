@@ -15,6 +15,7 @@
  */
 import {
 	CHANNEL_GATE_K_DB,
+	CHANNEL_GATE_MARGIN_DB,
 	CLASS_SETTLE_BLOCKS,
 } from "./scanner-redesign-contract.js"
 import { WaveKitError } from "../../utils/errors.js"
@@ -111,6 +112,14 @@ const QUALIFY_REST_MAX_SWEEPS = 4
  * failures start over at a rest of one sweep.
  */
 const QUALIFY_STRIKE_MEMORY_SWEEPS = 8
+/**
+ * A candidate this far over the highest level that earned a rest (the gate's own margin, twice the
+ * power) is another emission, not the steady line seen again, and the rest does not bind it. Each
+ * wait bought this way raises that level by at least this much while the failures stay in a row, so
+ * a run of them costs at most (highest − lowest reading) / 3 dB waits past the rests: 9 from 3 to
+ * 30 dB, each at most 300 ms, once.
+ */
+const QUALIFY_REST_STRONGER_DB = CHANNEL_GATE_MARGIN_DB
 /** Re-check period of a hold kept for a recording (Hold mode `record`): 5 blocks of 50 ms. */
 const RECORD_RECHECK_MS = 250
 /**
@@ -244,8 +253,9 @@ interface FrequencyMemory {
 	/** Visit (serial across the job) of the last sighting. */
 	seenVisit: number
 	/**
-	 * Visit of the last sighting of a candidate on it (onCandidate): on air, though the channel gate
-	 * did not answer in that visit, so that visit did not miss it (heardOn). It brings no evidence.
+	 * Visit of the last sighting of a candidate on it that was real on air (onCandidate: as long and
+	 * as strong as one that may qualify), though the channel gate did not answer in that visit, so
+	 * that visit did not miss it (heardOn). It brings no evidence.
 	 */
 	candidateVisit: number
 	/** Full visits in a row, of hops whose span holds it, that did not hear it. */
@@ -298,6 +308,8 @@ interface TrackInfo {
 	ageBlocks: number
 	/** The track was a candidate of this visit before its gate passed (endVisit: QualifyRest). */
 	qualified: boolean
+	/** Highest channel reading of the track in this epoch (candidateLevelDb). */
+	levelDb: number
 }
 
 /** Energy on the hop the channel gate has not answered yet (onCandidate): no observation yet. */
@@ -310,8 +322,12 @@ interface CandidateInfo {
 	onsetBlock: number
 	/** The longest its gate can take to pass it, in blocks (qualifyBlocks). */
 	answerBlocks: number
-	/** Measured in its channel at or over the lowest threshold of a gate run (gateMayAnswer). */
-	mayPass: boolean
+	/**
+	 * Highest channel reading of its sightings in this epoch (candidateLevelDb). The tracker publishes
+	 * at blocks 1, 2, 5 and 20 only and the gate's hysteresis carries a run across a low block, so
+	 * the last reading is no answer: only the gate's refusal, a close or the bound end a wait.
+	 */
+	levelDb: number
 }
 
 /** A frequency that may not qualify before a coarse visit count (QUALIFY_REST_MAX_SWEEPS). */
@@ -321,6 +337,13 @@ interface QualifyRest {
 	untilVisit: number
 	/** Failures in a row. */
 	strikes: number
+	/** Highest level of those failures: what binds is what reads like it (QUALIFY_REST_STRONGER_DB). */
+	levelDb: number
+	/**
+	 * One of them passed its gate and had nothing to hold. Without this the failures were the gate's
+	 * refusal or no answer, and a track that does pass is not what they were.
+	 */
+	passed: boolean
 }
 
 interface Visit {
@@ -449,14 +472,12 @@ interface Candidate {
 	kind: "confirm" | "follow"
 }
 
-/**
- * The gate measured the track's channel at or over the lowest threshold a gate run can stay on at.
- * A track it cannot measure, or that reads under it, has no run to pass, so no answer to wait for;
- * this leaves out the noise and quantisation lines a hop shows (3 dB or less in their channel).
- */
-function gateMayAnswer(track: TrackSnapshot): boolean {
+/** This snapshot's channel reading; a track the gate cannot measure reads as −Infinity. */
+function channelReadingDb(track: TrackSnapshot): number {
 	const snr = track.channelSnrDb
-	return snr !== undefined && Number.isFinite(snr) && snr >= CHANNEL_GATE_K_DB
+	return snr !== undefined && Number.isFinite(snr)
+		? snr
+		: Number.NEGATIVE_INFINITY
 }
 
 function nearestHop(plan: HopPlan, centreHz: number): number {
@@ -803,8 +824,15 @@ export class SweepScheduler {
 		const flagged =
 			track.flags.truncated || track.flags.iqImage || track.flags.spur
 		const known = v.tracks.get(track.trackId)
+		const asCandidate = v.candidates.get(track.trackId)
+		v.candidates.delete(track.trackId)
+		const levelDb = Math.max(
+			asCandidate?.levelDb ?? Number.NEGATIVE_INFINITY,
+			channelReadingDb(track),
+		)
 		const qualified =
-			v.candidates.delete(track.trackId) && !this.qualifyResting(track.centreHz)
+			asCandidate !== undefined &&
+			!this.qualifyResting(track.centreHz, levelDb, true)
 		this.remember(v, track, known === undefined, flagged)
 		const followOnAir = hints.followOnAir === true && !flagged
 		const voiceLater = hints.voiceLater === true && !flagged
@@ -823,6 +851,7 @@ export class SweepScheduler {
 				openBlocks: 0,
 				ageBlocks: track.blocks,
 				qualified,
+				levelDb,
 			})
 		} else {
 			known.snrDb = track.snrDb
@@ -837,6 +866,7 @@ export class SweepScheduler {
 			known.ageBlocks = Math.max(known.ageBlocks, track.blocks)
 			known.confirmHoldMs = Math.max(known.confirmHoldMs, confirmHoldMs)
 			known.qualified ||= qualified
+			known.levelDb = Math.max(known.levelDb, levelDb)
 		}
 		// the held track turned out truncated or an image: drop its probe and hold
 		if (
@@ -853,8 +883,10 @@ export class SweepScheduler {
 	/**
 	 * Energy on the hop that the channel gate has not answered yet: it has no observation, so it is no
 	 * track of the visit (onTrack), yet the visit should not end before its gate can answer. Brings
-	 * no evidence, only marks its known frequency as on air. `gateMinDurationMs` is the longest its
-	 * gate rule can take to pass it. Told on the track's open and updates (blocks 1, 2, 5, 20, ...).
+	 * no evidence, and marks its known frequency as on air only when it is as long and as strong as
+	 * one that may qualify: a weaker sighting must not keep a carrier's memory or hide its gap.
+	 * `gateMinDurationMs` is the longest its gate rule can take to pass it. Told on the track's open
+	 * and updates (blocks 1, 2, 5, 20, ...).
 	 */
 	onCandidate(track: TrackSnapshot, gateMinDurationMs: number): void {
 		const v = this.visit
@@ -863,25 +895,37 @@ export class SweepScheduler {
 			v.candidates.delete(track.trackId)
 			return
 		}
-		const known = this.memoryAt(track.centreHz, track.obwHz)
-		if (known !== undefined) known.candidateVisit = v.serial
 		const onsetBlock = v.blocks - track.blocks + 1
 		const was = v.candidates.get(track.trackId)
-		v.candidates.set(track.trackId, {
+		const candidate: CandidateInfo = {
 			centreHz: track.centreHz,
 			obwHz: track.obwHz,
 			blocks: track.blocks,
 			onsetBlock: Math.min(was?.onsetBlock ?? onsetBlock, onsetBlock),
 			answerBlocks: this.qualifyBlocks(gateMinDurationMs),
-			mayPass: gateMayAnswer(track),
-		})
+			levelDb: Math.max(
+				was?.levelDb ?? Number.NEGATIVE_INFINITY,
+				channelReadingDb(track),
+			),
+		}
+		v.candidates.set(track.trackId, candidate)
+		if (this.realOnAir(candidate)) {
+			const known = this.memoryAt(track.centreHz, track.obwHz)
+			if (known !== undefined) known.candidateVisit = v.serial
+		}
 	}
 
-	/** A candidate closed without passing its gate: refused, the hop is released at once (onBlock). */
+	/**
+	 * A candidate closed without passing its gate: refused, the hop is released at once (onBlock).
+	 * One that could not have been waited for cost nothing, so it earns no rest.
+	 */
 	onCandidateClosed(track: TrackSnapshot): void {
 		const v = this.visit
-		if (v === null || !v.candidates.delete(track.trackId)) return
-		this.noteQualifyFailed(track.centreHz)
+		const c = v?.candidates.get(track.trackId)
+		if (v === null || v === undefined || c === undefined) return
+		const failed = this.mayQualify(c)
+		v.candidates.delete(track.trackId)
+		if (failed) this.noteQualifyFailed(c.centreHz, c.levelDb, false)
 	}
 
 	/**
@@ -899,16 +943,27 @@ export class SweepScheduler {
 	}
 
 	/**
-	 * Candidates the dwell may wait for: on air for minSurfaceBlocks blocks (a single block may be
-	 * noise, and on a next visit a signal still on air is caught), measurable by its gate, and on a
-	 * frequency that may be held and is not resting. A frequency with carrier evidence therefore
-	 * qualifies only when its retry is due, as the sweep's one carrier hold (mayHoldFrequency).
+	 * Real on air, as far as a candidate can tell: on air for minSurfaceBlocks blocks (a single block
+	 * may be noise) and read at or over the lowest threshold a gate run can stay on at, in any
+	 * sighting of this epoch. A track the gate cannot measure, or that never read that high, has no
+	 * run to pass; this leaves out the noise and quantisation lines a hop shows (3 dB or less in
+	 * their channel).
+	 */
+	private realOnAir(c: CandidateInfo): boolean {
+		return c.blocks >= this.minSurfaceBlocks && c.levelDb >= CHANNEL_GATE_K_DB
+	}
+
+	/**
+	 * Candidates the dwell may wait for: real on air (on a next visit a signal still on air is
+	 * caught), on a frequency that may be held and where no rest binds it. A frequency with carrier
+	 * evidence therefore qualifies only when its retry is due, as the sweep's one carrier hold
+	 * (mayHoldFrequency).
 	 */
 	private mayQualify(c: CandidateInfo): boolean {
-		if (c.blocks < this.minSurfaceBlocks || !c.mayPass) return false
+		if (!this.realOnAir(c)) return false
 		const m = this.memoryAt(c.centreHz, c.obwHz)
 		if (m !== undefined && !this.mayHoldFrequency(m)) return false
-		return !this.qualifyResting(c.centreHz)
+		return !this.qualifyResting(c.centreHz, c.levelDb, false)
 	}
 
 	/**
@@ -925,7 +980,8 @@ export class SweepScheduler {
 		if (v.qualifyWait) {
 			// The wait ended with candidates left: they are not answered in time.
 			for (const c of v.candidates.values())
-				if (this.mayQualify(c)) this.noteQualifyFailed(c.centreHz)
+				if (this.mayQualify(c))
+					this.noteQualifyFailed(c.centreHz, c.levelDb, false)
 			return false
 		}
 		let need = 0
@@ -949,14 +1005,25 @@ export class SweepScheduler {
 		return true
 	}
 
-	private qualifyResting(centreHz: number): boolean {
+	/**
+	 * A rest binds only what reads like the emission that earned it: a level under its own plus
+	 * QUALIFY_REST_STRONGER_DB. `passed`: the track passed its gate, which a refusal or a missing
+	 * answer says nothing about, so only a rest earned by a pass with nothing to hold binds it.
+	 */
+	private qualifyResting(
+		centreHz: number,
+		levelDb: number,
+		passed: boolean,
+	): boolean {
 		const bin = Math.floor(centreHz / MEMORY_BIN_HZ)
 		for (let b = bin - 1; b <= bin + 1; b++) {
 			const rest = this.qualifyRests.get(b)
 			if (
 				rest !== undefined &&
 				Math.abs(rest.centreHz - centreHz) <= SAME_FREQUENCY_FLOOR_HZ &&
-				this.coarseVisits < rest.untilVisit
+				this.coarseVisits < rest.untilVisit &&
+				levelDb < rest.levelDb + QUALIFY_REST_STRONGER_DB &&
+				(rest.passed || !passed)
 			)
 				return true
 		}
@@ -964,7 +1031,11 @@ export class SweepScheduler {
 	}
 
 	/** A qualification brought nothing to hold: its frequency rests (QUALIFY_REST_MAX_SWEEPS). */
-	private noteQualifyFailed(centreHz: number): void {
+	private noteQualifyFailed(
+		centreHz: number,
+		levelDb: number,
+		passed: boolean,
+	): void {
 		const bin = Math.floor(centreHz / MEMORY_BIN_HZ)
 		const hops = this.plan.hops.length
 		const was = this.qualifyRests.get(bin)
@@ -976,6 +1047,8 @@ export class SweepScheduler {
 		this.qualifyRests.set(bin, {
 			centreHz,
 			strikes,
+			levelDb: inARow ? Math.max(was.levelDb, levelDb) : levelDb,
+			passed: passed || (inARow && was.passed),
 			// The current visit's own end counts one coarse visit, so one more: the hop's next
 			// R visits are the ones that rest.
 			untilVisit:
@@ -2540,7 +2613,7 @@ export class SweepScheduler {
 			if (!t.qualified) continue
 			t.qualified = false
 			if (t.tried) this.clearQualifyRest(t.centreHz)
-			else this.noteQualifyFailed(t.centreHz)
+			else this.noteQualifyFailed(t.centreHz, t.levelDb, true)
 		}
 		// Paused time is neither heard nor held: the evidence below stops where the pause began.
 		this.noteHeardGaps(v, accountedAt)

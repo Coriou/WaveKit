@@ -11,9 +11,12 @@ import {
 import {
 	CHANNEL_GATE_BURST_MIN_DURATION_MS as BURST_MS,
 	CHANNEL_GATE_K_DB,
+	CHANNEL_GATE_MARGIN_DB,
 	CHANNEL_GATE_MIN_DURATION_MS as STANDARD_MS,
 } from "../../../../src/core/scanner/scanner-redesign-contract.js"
 import { channelGateMinDurationMs } from "../../../../src/core/spectrum/channel-gate.js"
+import { segment } from "../../../../src/core/spectrum/emissions/segmenter.js"
+import { Tracker } from "../../../../src/core/spectrum/emissions/tracker.js"
 import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
 import {
 	makeHopPlan,
@@ -737,6 +740,526 @@ describe("fairness of qualification", () => {
 		// 20 sweeps of rests 1, 2, 4, 4: at most 7 waits per hop, each WORST_WAIT blocks.
 		expect(waits).toBeLessThanOrEqual(3 * 7 * WORST_WAIT)
 		expect(waits).toBeGreaterThan(0)
+	})
+})
+
+/** The real tracker's gate run over one channel SNR per block, its events fed to the scheduler. */
+function throughTracker(snrs: readonly number[]) {
+	const h = harness()
+	const tracker = new Tracker({
+		sourceId: "s1",
+		binHz: 1000,
+		blockMs: 50,
+		hangBlocks: 3,
+		maxTracks: 4,
+		maxTrackBlocks: 100,
+		idPrefix: "t",
+	})
+	tracker.beginEpoch({
+		stream: 1,
+		epoch: 1,
+		centreHz: HOP0,
+		tuningTrust: "commanded",
+	})
+	tracker.setGatePlan(true)
+	const N = 256
+	const powerDb = new Float32Array(N).fill(-60)
+	const floorDb = new Float32Array(N).fill(-60)
+	for (let i = 140; i < 149; i++) powerDb[i] = -20
+	const on = Uint8Array.from(powerDb, p => (p > -56 ? 1 : 0))
+	const reading = (channelSnrDb: number) => ({
+		channelSnrDb,
+		kDb: CHANNEL_GATE_K_DB,
+		marginDb: 3,
+		minDurationMs: STANDARD_MS,
+		valid: true,
+	})
+	let passedAt: number | null = null
+	let leftAt: number | null = null
+	const told: number[] = []
+	h.start()
+	for (let i = 0; i < snrs.length && leftAt === null; i++) {
+		const actions = h.block(() => {
+			const segments = segment(on, powerDb, floorDb, {
+				gapBins: 2,
+				usableStartBin: 26,
+				usableEndBin: 231,
+				exclusionEdges: [],
+				rasterBinEdges: [],
+				skirtDb: 30,
+				inWindow: false,
+			})
+			const events = tracker.block(segments, {
+				endSample: (i + 1) * 12_800,
+				powerDb,
+				floorDb,
+				blockFloorDb: -60,
+				thresholdDb: 4,
+				gap: false,
+				overload: false,
+			})
+			const extra = tracker.publishGate(() => reading(snrs[i]!), events, 0)
+			for (const e of [...events, ...extra]) {
+				if (e.kind !== "track-open" && e.kind !== "track-update") continue
+				if (e.track.gate === "passed") {
+					passedAt ??= i + 1
+					h.s.onTrack(e.track, false, 0, { followOnAir: true })
+				} else {
+					told.push(i + 1)
+					h.s.onCandidate(e.track, STANDARD_MS)
+				}
+			}
+		})
+		if (actions.some(a => a.type === "tune")) leftAt = i + 1
+	}
+	return {
+		passedAt,
+		leftAt,
+		told,
+		holding: h.s.progress().holdingOn !== null,
+	}
+}
+
+describe("a reading between the tracker's snapshots", () => {
+	const K = CHANNEL_GATE_K_DB
+	/** Inside the gate's hysteresis: the run stays on, and its reading is under the threshold. */
+	const LOW = K - 0.1
+
+	it("a low second reading does not abandon a signal the gate passes at block 7", () => {
+		const r = throughTracker([10, LOW, 10, 10, 10, 10, 10, 10])
+		expect(r.told).toEqual([1, 2, 5])
+		expect(r.passedAt).toBe(7)
+		expect(r.leftAt).toBeNull()
+		expect(r.holding).toBe(true)
+	})
+
+	it("a low fifth reading does not end the wait either", () => {
+		const r = throughTracker([10, 10, 10, 10, LOW, 10, 10, 10])
+		expect(r.passedAt).toBe(7)
+		expect(r.leftAt).toBeNull()
+		expect(r.holding).toBe(true)
+	})
+
+	it("a first low reading and a second one at the threshold wait as well", () => {
+		const r = throughTracker([LOW, K, 10, 10, 10, 10, 10, 10])
+		// The run starts with the second block: its sixth strong block is the seventh.
+		expect(r.passedAt).toBe(7)
+		expect(r.holding).toBe(true)
+	})
+
+	it("the bound still holds: a pass at the eighth block is heard, one at the ninth is not", () => {
+		const at = throughTracker([10, LOW, 10, 10, 10, 10, LOW, 10, 10])
+		expect(at.passedAt).toBe(8)
+		expect(at.holding).toBe(true)
+		const past = throughTracker([10, LOW, 10, 10, 10, 10, LOW, LOW, 10, 10])
+		expect(past.leftAt).toBe(STANDARD_ANSWER_BLOCKS)
+		expect(past.passedAt).toBeNull()
+	})
+
+	it("two low readings start no wait: what never read as a run costs its hop nothing", () => {
+		const r = throughTracker([LOW, LOW, 10, 10, 10, 10, 10, 10, 10])
+		expect(r.leftAt).toBe(DWELL_BLOCKS)
+	})
+
+	// Feature: sweep-qualification, Property 2: a low reading is not a refusal
+	// Validates: Requirements 2 (only the refusal, a close or the bound ends a wait)
+	it("a track with a reading at the threshold in its first two blocks is on the visit at any gate pass within the bound", () => {
+		fc.assert(
+			fc.property(
+				fc.array(fc.constantFrom(-2, 1.4, 1.5, LOW, K, 6, 10), {
+					minLength: 12,
+					maxLength: 12,
+				}),
+				snrs => {
+					fc.pre(snrs[0]! >= K || snrs[1]! >= K)
+					const r = throughTracker(snrs)
+					if (r.passedAt === null || r.passedAt > STANDARD_ANSWER_BLOCKS)
+						expect(r.leftAt).toBe(STANDARD_ANSWER_BLOCKS)
+					else {
+						expect(r.leftAt).toBeNull()
+						expect(r.holding).toBe(true)
+					}
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
+})
+
+/** One visit of the hop the sweep is on: its blocks, `at` telling the tracker's events per block. */
+function runVisit(
+	h: ReturnType<typeof harness>,
+	at: (block: number) => void,
+	limit = 100,
+): number {
+	const was = h.tuned.length
+	let block = 0
+	while (h.tuned.length === was && block < limit) {
+		block++
+		const b = block
+		h.block(() => at(b))
+	}
+	if (h.tuned.length !== was) h.s.onEpochStarted(h.sample)
+	return block
+}
+
+/** Candidate at blocks 1, 2 and 5 at `snrDb`, as the tracker tells it. */
+const steady =
+	(
+		h: ReturnType<typeof harness>,
+		snrDb: number,
+		id: string,
+		minMs = STANDARD_MS,
+	) =>
+	(block: number): void => {
+		if (block === 1 || block === 2 || block === 5)
+			h.s.onCandidate(candidate(block, { channelSnrDb: snrDb }, id), minMs)
+	}
+
+/** A two-block transient that closes below its gate during the wait, then the two empty hops. */
+function failedTransient(h: ReturnType<typeof harness>, snrDb: number): void {
+	h.start()
+	const blocks = runVisit(h, block => {
+		if (block <= 2)
+			h.s.onCandidate(
+				candidate(block, { channelSnrDb: snrDb }, "t"),
+				STANDARD_MS,
+			)
+		if (block === 4)
+			h.s.onCandidateClosed(
+				candidate(3, { gate: "below", channelSnrDb: snrDb }, "t"),
+			)
+	})
+	expect(blocks).toBe(4)
+	h.toNextHop()
+	h.toNextHop()
+}
+
+describe("a rest binds only what looks like the emission that earned it", () => {
+	const TRANSIENT_DB = 5
+	/** A level this far over the rest's is no longer the emission that earned it. */
+	const STRONGER_DB = CHANNEL_GATE_MARGIN_DB
+
+	it("a strong new signal after a failed transient qualifies on the next visit (standard gate)", () => {
+		const h = harness()
+		failedTransient(h, TRANSIENT_DB)
+		const blocks = runVisit(
+			h,
+			block => {
+				steady(h, 12, "s")(block)
+				if (block === 6)
+					h.s.onTrack(
+						candidate(6, { gate: "passed", channelSnrDb: 12 }, "s"),
+						false,
+						0,
+						{ followOnAir: true },
+					)
+			},
+			6,
+		)
+		expect(blocks).toBe(6)
+		expect(h.s.progress().holdingOn).toBe("s")
+	})
+
+	it("a strong new signal passing a burst gate at block 2 after a failed transient gets its class wait", () => {
+		const h = harness()
+		failedTransient(h, TRANSIENT_DB)
+		const blocks = runVisit(
+			h,
+			block => {
+				if (block === 1)
+					h.s.onCandidate(candidate(1, { channelSnrDb: 12 }, "s"), BURST_MS)
+				if (block === 2)
+					h.s.onTrack(
+						candidate(2, { gate: "passed", channelSnrDb: 12 }, "s"),
+						false,
+						0,
+					)
+				if (block === 5)
+					h.s.onTrack(
+						candidate(5, { gate: "passed", channelSnrDb: 12 }, "s"),
+						false,
+						0,
+						{ followOnAir: true },
+					)
+			},
+			5,
+		)
+		expect(blocks).toBe(5)
+		expect(h.s.progress().holdingOn).toBe("s")
+	})
+
+	it("a pass is an answer no refusal can discard: at the refused level it still gets its class wait", () => {
+		const h = harness()
+		failedTransient(h, 10)
+		const blocks = runVisit(h, block => {
+			if (block === 1)
+				h.s.onCandidate(candidate(1, { channelSnrDb: 10 }, "s"), BURST_MS)
+			if (block === 2 || block === 5)
+				h.s.onTrack(
+					candidate(block, { gate: "passed", channelSnrDb: 10 }, "s"),
+					false,
+					0,
+				)
+		})
+		// Up to its fifth block, then nothing to hold.
+		expect(blocks).toBe(5)
+	})
+
+	it.each([
+		["the rest's level", TRANSIENT_DB, DWELL_BLOCKS],
+		["just under the margin", TRANSIENT_DB + STRONGER_DB - 0.01, DWELL_BLOCKS],
+		["at the margin", TRANSIENT_DB + STRONGER_DB, STANDARD_ANSWER_BLOCKS],
+	])("a candidate at %s: the bound of the rest", (_name, snrDb, expected) => {
+		const h = harness()
+		failedTransient(h, TRANSIENT_DB)
+		expect(runVisit(h, steady(h, snrDb, "s"))).toBe(expected)
+	})
+
+	it("the rest ends: a new call at the transient's own level loses one visit, no more", () => {
+		const h = harness()
+		failedTransient(h, TRANSIENT_DB)
+		expect(runVisit(h, steady(h, TRANSIENT_DB, "s0"))).toBe(DWELL_BLOCKS)
+		h.toNextHop()
+		h.toNextHop()
+		expect(runVisit(h, steady(h, TRANSIENT_DB, "s1"))).toBe(
+			STANDARD_ANSWER_BLOCKS,
+		)
+	})
+
+	/** `levels[i]`: the emitter's reading on sweep i. The waits it costs its hop. */
+	function waits(levels: readonly number[]): number {
+		const h = harness()
+		h.start()
+		let total = 0
+		levels.forEach((level, i) => {
+			const blocks = runVisit(h, steady(h, level, `e${i}`))
+			if (blocks > DWELL_BLOCKS) total++
+			h.toNextHop()
+			h.toNextHop()
+		})
+		return total
+	}
+
+	it("a steady weak emitter with a reading that wanders under the margin rests as a steady one does", () => {
+		const levels = Array.from({ length: 20 }, (_, i) =>
+			i % 2 === 0 ? 4 : 4 + STRONGER_DB - 0.01,
+		)
+		// The level that earned the rest is 4: every reading stays under 4 + 3 dB.
+		expect(waits(levels)).toBe(5)
+	})
+
+	it("a level that climbs past the rest buys one wait per margin, then rests at the cap", () => {
+		// 3, 6, ..., 30: each reading is a margin over the highest failure so far.
+		const climb = Array.from({ length: 10 }, (_, i) => 3 + i * STRONGER_DB)
+		const hold = Array.from({ length: 10 }, () => 30)
+		// The 10 climbing visits wait; then the cap of four sweeps: 2 in the next 10 visits.
+		expect(waits([...climb, ...hold])).toBe(12)
+	})
+
+	it("a level that falls back after a climb stays under the highest failure", () => {
+		// The rest remembers 30 dB: back at 3 dB it waits only as the schedule allows. Visits 1, 2 (the
+		// one wait the 30 dB buys), then rests of 2 and 4, 4, 4: visits 5, 10, 15 and 20.
+		expect(waits([3, 30, ...Array.from({ length: 18 }, () => 3)])).toBe(6)
+	})
+
+	// Feature: sweep-qualification, Property 3: a rest bounds what any level costs
+	// Validates: Requirements 3 (a steady emitter does not tax each sweep)
+	it("no reading sequence costs more than the rests' waits and one wait per margin of range", () => {
+		fc.assert(
+			fc.property(
+				fc.array(fc.double({ min: 3, max: 30, noNaN: true }), {
+					minLength: 20,
+					maxLength: 20,
+				}),
+				levels => {
+					// 20 sweeps of rests 1, 2, 4, 4: 5 waits; (30 − 3) / 3 = 9 more.
+					expect(waits(levels)).toBeLessThanOrEqual(5 + 9)
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
+
+	describe("a steady emitter that passes with nothing to hold", () => {
+		/** Passes a burst gate at block 2 on each visit at `level(i)`, no class held: blocks per visit. */
+		function burstVisits(
+			sweeps: number,
+			level: (i: number) => number,
+		): number[] {
+			const h = harness()
+			h.start()
+			const out: number[] = []
+			for (let i = 0; i < sweeps; i++) {
+				const id = `p${i}`
+				const db = level(i)
+				out.push(
+					runVisit(h, block => {
+						if (block === 1)
+							h.s.onCandidate(candidate(1, { channelSnrDb: db }, id), BURST_MS)
+						if (block >= 2 && block <= 5)
+							h.s.onTrack(
+								candidate(block, { gate: "passed", channelSnrDb: db }, id),
+								false,
+								0,
+							)
+					}),
+				)
+				h.toNextHop()
+				h.toNextHop()
+			}
+			return out
+		}
+		const C = 5 // its class wait: to the fifth block
+
+		it("rests its class wait as the schedule says: it does not tax each sweep", () => {
+			const D = DWELL_BLOCKS
+			expect(burstVisits(11, () => 12)).toEqual([
+				C,
+				D,
+				C,
+				D,
+				D,
+				C,
+				D,
+				D,
+				D,
+				D,
+				C,
+			])
+		})
+
+		it("a stronger one at the same frequency is another transmission", () => {
+			const D = DWELL_BLOCKS
+			expect(burstVisits(4, i => (i === 1 ? 12 + STRONGER_DB : 12))).toEqual([
+				C,
+				C,
+				D,
+				D,
+			])
+		})
+	})
+})
+
+describe("what counts as heard for a carrier's memory", () => {
+	const K = CHANNEL_GATE_K_DB
+	const spec = makeNormalisedSpec({
+		revisit: { share: 0, maxIntervalMs: null },
+		hold: { policy: "hold", confirmHoldMs: {}, maxHoldMs: 60_000, hangMs: 0 },
+	})
+	/** minSurfaceBlocks + 1 s of blocks: a due retry listening for the carrier's gap. */
+	const GAP_LISTEN_BLOCKS = 2 + 20
+
+	/** An 8 s watch earns carrier evidence on hop 0; a coarse sweep later its retry is due. */
+	function dueRetry(): ReturnType<typeof harness> {
+		const h = harness(spec)
+		h.start()
+		for (let block = 1; block <= 6; block++)
+			h.block(() => {
+				if (block < 6) h.s.onCandidate(candidate(block), STANDARD_MS)
+				else h.s.onTrack(passed(6), false, 0, { followOnAir: true })
+			})
+		for (let i = 0; i < 165 && h.tuned.length === 1; i++) {
+			h.block()
+			h.note(h.s.tick(h.clock))
+		}
+		expect(h.tuned).toEqual([HOP0, HOP1])
+		h.s.onEpochStarted(h.sample)
+		h.toNextHop()
+		h.toNextHop()
+		// Past the rest (at most 3 × the 8 s hold).
+		h.clock += 24_001
+		return h
+	}
+
+	it("the control: an empty channel with a due retry listens for the gap", () => {
+		const h = dueRetry()
+		expect(runVisit(h, () => undefined)).toBe(GAP_LISTEN_BLOCKS)
+	})
+
+	it.each([
+		["a 0 dB sighting", 2, 2, 0],
+		["a reading under the gate's threshold", 2, 2, K - 0.1],
+		["one block, however strong", 3, 1, 30],
+	])(
+		"%s on the empty channel is not heard: the retry still listens for the gap",
+		(_name, atBlock, blocks, snrDb) => {
+			const h = dueRetry()
+			const visit = runVisit(h, block => {
+				if (block === atBlock)
+					h.s.onCandidate(
+						candidate(blocks, { channelSnrDb: snrDb }, "w"),
+						STANDARD_MS,
+					)
+			})
+			expect(visit).toBe(GAP_LISTEN_BLOCKS)
+		},
+	)
+
+	it("a sighting that would qualify is heard: no gap to listen for", () => {
+		const h = dueRetry()
+		const visit = runVisit(h, block => {
+			if (block === 2)
+				h.s.onCandidate(candidate(2, { channelSnrDb: K }, "w"), STANDARD_MS)
+		})
+		expect(visit).toBeLessThan(GAP_LISTEN_BLOCKS)
+	})
+
+	it("a low reading after one at the threshold is heard, as the gate's run holds it", () => {
+		const h = dueRetry()
+		const visit = runVisit(h, block => {
+			if (block === 1)
+				h.s.onCandidate(candidate(1, { channelSnrDb: 10 }, "w"), STANDARD_MS)
+			if (block === 2)
+				h.s.onCandidate(
+					candidate(2, { channelSnrDb: K - 0.1 }, "w"),
+					STANDARD_MS,
+				)
+		})
+		expect(visit).toBeLessThan(GAP_LISTEN_BLOCKS)
+	})
+
+	/**
+	 * Carrier evidence, then `visits` visits of its hop with `snrDb` sightings (none due). Then a
+	 * strong candidate: a resting carrier leaves at the dwell, a forgotten frequency qualifies.
+	 */
+	function afterSightings(visits: number, snrDb: number): number {
+		const h = harness(spec)
+		h.start()
+		for (let block = 1; block <= 6; block++)
+			h.block(() => {
+				if (block < 6) h.s.onCandidate(candidate(block), STANDARD_MS)
+				else h.s.onTrack(passed(6), false, 0, { followOnAir: true })
+			})
+		for (let i = 0; i < 165 && h.tuned.length === 1; i++) {
+			h.block()
+			h.note(h.s.tick(h.clock))
+		}
+		h.s.onEpochStarted(h.sample)
+		h.toNextHop()
+		h.toNextHop()
+		for (let i = 0; i < visits; i++) {
+			runVisit(h, block => {
+				if (block <= 2)
+					h.s.onCandidate(
+						candidate(block, { channelSnrDb: snrDb }, `w${i}`),
+						STANDARD_MS,
+					)
+			})
+			h.toNextHop()
+			h.toNextHop()
+		}
+		return runVisit(h, steady(h, 12, "new"))
+	}
+
+	it("repeated weak sightings do not keep obsolete carrier evidence: it is forgotten like any miss", () => {
+		const FORGET_MISSES = 10
+		expect(afterSightings(FORGET_MISSES, 0)).toBe(STANDARD_ANSWER_BLOCKS)
+	})
+
+	it("sightings that would qualify do keep it: the carrier still rests", () => {
+		const FORGET_MISSES = 10
+		expect(afterSightings(FORGET_MISSES, 10)).toBe(DWELL_BLOCKS)
 	})
 })
 
