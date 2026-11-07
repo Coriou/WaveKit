@@ -727,7 +727,7 @@ sample serves all callers for 2 s, so polling cannot multiply its cost.
 | `eventLoopUtilization` | Share of the time the main thread was busy over `process.windowMs`, 0 to 1. Null on the first sample                                                                                          |
 | `eventLoopDelay`       | The core's loop meter: the last 2 s interval and the worst over 10 minutes, in ms. The meter runs anyway (10 ms resolution, a fixed histogram); this route adds no timer. Null when not wired |
 | `process`              | All threads of the core together: cores averaged since the previous sample (at least 2 s), and totals since it started. `windowMs` and `cpuCores` are null on the first sample                |
-| `containerCpuCores`    | The whole container with its decoder processes, in cores, as `GET /api/resources/container` reads it. Null outside a container on cgroup v2; a v1 host outside one reads the whole machine    |
+| `containerCpuCores`    | The whole container with its decoder processes, in cores. Natively on cgroup v2: the core's own service or session, null in the host's root cgroup; a v1 host outside one: the whole machine  |
 | `threads`              | Linux only, null elsewhere: each thread's name, CPU seconds since it started, and cores over the window (null when the previous sample did not read that thread), busiest first               |
 | `threadsTimedOut`      | True when the thread reads did not finish in time: `threads` is then partial with `truncated`, or null                                                                                        |
 | `channels`             | Open channelizer outputs with what they cost: filter length, input and output rate, and the process's last counters (`stats`, every 5 s, null before the first). Null without a channelizer   |
@@ -887,7 +887,9 @@ curl http://localhost:9000/api/status
 `GET /api/resources` is one snapshot of the core's resource use: container CPU and memory,
 one status per SDR host, and per-source backpressure. `/api/resources/container` and
 `/api/resources/backpressure` return just one of those parts. The `resources` WebSocket
-channel pushes the same data as it changes.
+channel pushes the same data as it changes. Outside a container on cgroup v2, the "container"
+figures describe the core's own cgroup, meaning its service or login session; they are
+unavailable if the core sits in the host's root cgroup.
 
 #### GET /api/telemetry/fanout
 

@@ -5,9 +5,12 @@
  * Provides CPU usage, memory usage, and OOM kill counts.
  *
  * Detection:
- * - cgroups v2: /sys/fs/cgroup/cgroup.controllers exists, and so does cgroup.type, which the kernel
- *   leaves off the root cgroup. A container sees its own non-root cgroup there; native Linux sees
- *   the root, whose cpu.stat is the whole machine, so that reads as unavailable.
+ * - cgroups v2: /sys/fs/cgroup/cgroup.controllers exists. The mount root has cgroup.type, which the
+ *   kernel leaves off the root cgroup, in a container with a private cgroup namespace: the mount
+ *   root is then the container's own cgroup. Without it the mount root is the host's root, whose
+ *   cpu.stat is the whole machine, so the counters come from the process's own cgroup named by
+ *   /proc/self/cgroup: the container under --cgroupns=host, the process's service or session on
+ *   native Linux. A process in the root itself, or a path that is odd, reads as unavailable.
  * - cgroups v1: /sys/fs/cgroup/memory/ and /sys/fs/cgroup/cpu/ exist. The files cannot tell a
  *   container from a host, so a v1 host outside a container reports the whole machine.
  *
@@ -24,6 +27,7 @@ import type { ContainerResources } from "@wavekit/api-types"
 // ============================================================================
 
 const CGROUP_V2_ROOT = "/sys/fs/cgroup"
+const SELF_CGROUP_FILE = "/proc/self/cgroup"
 
 // cgroups v1 paths
 const CGROUP_V1_CPUACCT = "/sys/fs/cgroup/cpuacct"
@@ -48,6 +52,19 @@ export interface ContainerMonitorOptions {
 
 	/** Custom cgroup root for testing (default: /sys/fs/cgroup) */
 	cgroupRoot?: string
+
+	/** Custom /proc/self/cgroup for testing */
+	selfCgroupFile?: string
+}
+
+/** An absolute cgroup path with no `..`, `.` or empty component ("/" is the root itself). */
+function isPlainCgroupPath(path: string): boolean {
+	if (path === "/") return true
+	if (!path.startsWith("/") || path.includes("\0")) return false
+	return path
+		.slice(1)
+		.split("/")
+		.every(part => part !== "" && part !== "." && part !== "..")
 }
 
 // ============================================================================
@@ -59,6 +76,9 @@ export class ContainerMonitor extends EventEmitter {
 	private readonly pollIntervalMs: number
 	private readonly emitSnapshots: boolean
 	private readonly cgroupRoot: string
+	private readonly selfCgroupFile: string
+	/** The directory holding this process's v2 counters. */
+	private cgroupV2Dir: string
 
 	private pollTimer: ReturnType<typeof setInterval> | null = null
 	private cgroupVersion: "v1" | "v2" | "unknown" = "unknown"
@@ -74,6 +94,8 @@ export class ContainerMonitor extends EventEmitter {
 		this.pollIntervalMs = options.pollIntervalMs ?? 2000
 		this.emitSnapshots = options.emitSnapshots ?? true
 		this.cgroupRoot = options.cgroupRoot ?? CGROUP_V2_ROOT
+		this.selfCgroupFile = options.selfCgroupFile ?? SELF_CGROUP_FILE
+		this.cgroupV2Dir = this.cgroupRoot
 
 		// Detect cgroup version on construction
 		this.detectCgroupVersion()
@@ -188,10 +210,12 @@ export class ContainerMonitor extends EventEmitter {
 		// Check for cgroups v2 (unified hierarchy)
 		if (this.fileExists(this.v2File("cgroup.controllers"))) {
 			this.cgroupVersion = "v2"
-			this.isAvailable = this.fileExists(this.v2File("cgroup.type"))
+			const dir = this.resolveCgroupV2Dir()
+			this.isAvailable = dir !== null
+			if (dir !== null) this.cgroupV2Dir = dir
 			this.log.debug(
 				{ available: this.isAvailable },
-				"Detected cgroups v2; only a non-root cgroup is a container's",
+				"Detected cgroups v2; the host's root cgroup is never read",
 			)
 			return
 		}
@@ -218,7 +242,36 @@ export class ContainerMonitor extends EventEmitter {
 	// ============================================================================
 
 	private v2File(name: string): string {
-		return `${this.cgroupRoot}/${name}`
+		return `${this.cgroupV2Dir}/${name}`
+	}
+
+	/** Where this process's counters live; null when it has none of its own or the path is odd. */
+	private resolveCgroupV2Dir(): string | null {
+		const privateNamespace = this.fileExists(this.v2File("cgroup.type"))
+		const path = this.readSelfCgroupPath()
+		if (path !== null && !isPlainCgroupPath(path)) return null
+		// The whole container, wherever inside it this process sits.
+		if (privateNamespace) return this.cgroupRoot
+		if (path === null || path === "/") return null
+		try {
+			const root = fs.realpathSync(this.cgroupRoot)
+			const dir = fs.realpathSync(`${root}${path}`)
+			if (!dir.startsWith(`${root}/`)) return null
+			return this.fileExists(`${dir}/cpu.stat`) ? dir : null
+		} catch {
+			return null
+		}
+	}
+
+	/** The path on the v2 line of /proc/self/cgroup; null when unreadable or it has no such line. */
+	private readSelfCgroupPath(): string | null {
+		try {
+			const lines = fs.readFileSync(this.selfCgroupFile, "utf8").split("\n")
+			const line = lines.find(entry => entry.startsWith("0::"))
+			return line === undefined ? null : line.slice(3)
+		} catch {
+			return null
+		}
 	}
 
 	private readCgroupV2(): ContainerResources {

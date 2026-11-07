@@ -4,6 +4,7 @@ import type {
 } from "../core/activity/types.js"
 import type { TunerControlMode, TunerState } from "@wavekit/api-types"
 import { placementKey } from "./enablement/contract.js"
+import { readExtraArgsOption } from "./option-values.js"
 import type { DecoderBandDeclaration, DecoderStatus } from "./types.js"
 
 type ProvenanceDecoderEvent =
@@ -22,11 +23,15 @@ export interface ProvenanceDecoderSource {
 		| (Pick<DecoderStatus, "sourceId" | "targetFrequenciesHz"> &
 				Partial<Pick<DecoderStatus, "type">>)
 		| undefined
-	getDecoder(
-		id: string,
-	):
-		| { caps: { input: string }; getBandDeclaration?(): DecoderBandDeclaration }
-		| undefined
+	getDecoder(id: string): ProvenanceDecoder | undefined
+}
+
+/** The decoder fields the provenance index reads. */
+interface ProvenanceDecoder {
+	caps: { input: string }
+	getBandDeclaration?(): DecoderBandDeclaration
+	/** The options this instance runs with (BaseDecoder keeps them current). */
+	config?: { options?: Record<string, unknown> }
 }
 
 /**
@@ -100,6 +105,8 @@ interface Entry {
 	/** Source and centre captured on `decoder:created` / `decoder:started` (WG5 req 6.3). */
 	bindSourceId: string | null
 	bindCentre: number | undefined
+	/** The operator's `-f` in rtl_433's extraArgs replaces the bound centre as its reference. */
+	operatorCentre: boolean
 	/** Source the cached bindings carry; one frozen binding per trust value. */
 	cacheSourceId: string | null
 	/** Input rate the cached bindings carry (undefined: unknown). */
@@ -224,11 +231,20 @@ export function createDecoderProvenanceIndex(
 			const snapshot = snapshots.get(sourceId)
 			if (snapshot?.bindable) bindCentre = snapshot.frequency
 		}
+		// The same read and the same test the adapter uses to leave its own `-f` out.
+		const operatorCentre =
+			status.type === "rtl433" &&
+			(readExtraArgsOption(
+				decoder?.config?.options?.["extraArgs"],
+				() => {},
+			)?.some(arg => arg.startsWith("-f")) ??
+				false)
 		entries.set(id, {
 			configured,
 			targets,
 			bindSourceId: sourceId,
 			bindCentre,
+			operatorCentre,
 			cacheSourceId: sourceId,
 			cache: {},
 		})
@@ -294,14 +310,16 @@ export function createDecoderProvenanceIndex(
 					: entry.configured
 			const trust = tuner ? trustOf(entry, sourceId) : "unverified"
 			// The decoder hears the source capture unless a channel context says otherwise; then the
-			// observed tuner rate is its input rate. A raw placement runs as its own worker, whose
-			// start is the one that counts.
+			// observed tuner rate is its input rate. The process that holds `-f` is the one whose start
+			// counts: a secondary raw placement's own worker, else the decoder itself, which runs its
+			// primary placement (the source check below refuses it for any other source).
 			const snap = sourceId !== null ? snapshots.get(sourceId) : undefined
 			const started =
 				context === undefined
 					? entry
 					: context.channelHz === null
-						? entries.get(placementKey(id, context.sourceId, "raw", null))
+						? (entries.get(placementKey(id, context.sourceId, "raw", null)) ??
+							entry)
 						: undefined
 			const rate =
 				(context === undefined || context.channelHz === null) &&
@@ -310,9 +328,11 @@ export function createDecoderProvenanceIndex(
 					: undefined
 			// The centre the decoder started on, only while the tuner is still there: rtl_433's `-f` is
 			// frozen at its start, so after a retune with no restart its estimate has no known reference.
+			// An operator's `-f` is not the capture centre, so that estimate has none either.
 			const centre =
 				rate !== undefined &&
-				started?.bindSourceId === sourceId &&
+				started?.operatorCentre === false &&
+				started.bindSourceId === sourceId &&
 				started.bindCentre === snap?.frequency
 					? started.bindCentre
 					: undefined

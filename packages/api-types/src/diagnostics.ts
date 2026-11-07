@@ -84,9 +84,10 @@ export interface Diagnostics {
 	}
 	/**
 	 * The whole container with every decoder process in it, in cores, from the monitor's shared
-	 * reading. Null on the first reading, if it failed, when container monitoring is off, and outside
-	 * a container on cgroup v2. On a cgroup v1 host outside a container, which its files cannot tell
-	 * from a container, it reads the whole machine.
+	 * reading. Null on the first reading, if it failed, when container monitoring is off, and when
+	 * the process sits in the host's root cgroup. Natively on cgroup v2 it reads the process's own
+	 * cgroup instead, which is its service or login session and not a container. On a cgroup v1 host
+	 * outside a container, which its files cannot tell from a container, it reads the whole machine.
 	 */
 	containerCpuCores: number | null
 	/**
