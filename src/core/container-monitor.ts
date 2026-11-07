@@ -5,8 +5,11 @@
  * Provides CPU usage, memory usage, and OOM kill counts.
  *
  * Detection:
- * - cgroups v2: /sys/fs/cgroup/cgroup.controllers exists
- * - cgroups v1: /sys/fs/cgroup/memory/ and /sys/fs/cgroup/cpu/ exist
+ * - cgroups v2: /sys/fs/cgroup/cgroup.controllers exists, and so does cgroup.type, which the kernel
+ *   leaves off the root cgroup. A container sees its own non-root cgroup there; native Linux sees
+ *   the root, whose cpu.stat is the whole machine, so that reads as unavailable.
+ * - cgroups v1: /sys/fs/cgroup/memory/ and /sys/fs/cgroup/cpu/ exist. The files cannot tell a
+ *   container from a host, so a v1 host outside a container reports the whole machine.
  *
  * Falls back gracefully when running outside containers or on unsupported systems.
  */
@@ -21,13 +24,6 @@ import type { ContainerResources } from "@wavekit/api-types"
 // ============================================================================
 
 const CGROUP_V2_ROOT = "/sys/fs/cgroup"
-const CGROUP_V2_CONTROLLERS = `${CGROUP_V2_ROOT}/cgroup.controllers`
-
-// cgroups v2 files
-const CGROUP_V2_CPU_STAT = `${CGROUP_V2_ROOT}/cpu.stat`
-const CGROUP_V2_MEMORY_CURRENT = `${CGROUP_V2_ROOT}/memory.current`
-const CGROUP_V2_MEMORY_MAX = `${CGROUP_V2_ROOT}/memory.max`
-const CGROUP_V2_MEMORY_EVENTS = `${CGROUP_V2_ROOT}/memory.events`
 
 // cgroups v1 paths
 const CGROUP_V1_CPUACCT = "/sys/fs/cgroup/cpuacct"
@@ -69,6 +65,8 @@ export class ContainerMonitor extends EventEmitter {
 	private lastCpuUsage: bigint = 0n
 	private lastCpuTime: number = 0
 	private isAvailable: boolean = false
+	/** The last read of the files; readers inside one poll interval share it. */
+	private lastRead: { at: number; snapshot: ContainerResources } | null = null
 
 	constructor(logger: Logger, options: ContainerMonitorOptions = {}) {
 		super()
@@ -129,9 +127,28 @@ export class ContainerMonitor extends EventEmitter {
 	}
 
 	/**
-	 * Gets a snapshot of current container resources.
+	 * Gets a snapshot of current container resources. Reading the CPU counters moves the window the
+	 * next reading is measured over, so several readers (the broadcast, the resources route,
+	 * diagnostics) share one reading per poll interval: none shortens another's window, and none
+	 * gets a window too short to mean anything.
 	 */
 	getSnapshot(): ContainerResources {
+		const now = Date.now()
+		const age = this.lastRead ? now - this.lastRead.at : null
+		if (
+			this.lastRead &&
+			age !== null &&
+			age >= 0 &&
+			age < this.pollIntervalMs
+		) {
+			return this.lastRead.snapshot
+		}
+		const snapshot = this.readSnapshot()
+		this.lastRead = { at: now, snapshot }
+		return snapshot
+	}
+
+	private readSnapshot(): ContainerResources {
 		if (!this.isAvailable) {
 			return this.unavailableSnapshot()
 		}
@@ -169,15 +186,13 @@ export class ContainerMonitor extends EventEmitter {
 
 	private detectCgroupVersion(): void {
 		// Check for cgroups v2 (unified hierarchy)
-		const v2ControllerPath =
-			this.cgroupRoot === CGROUP_V2_ROOT
-				? CGROUP_V2_CONTROLLERS
-				: `${this.cgroupRoot}/cgroup.controllers`
-
-		if (this.fileExists(v2ControllerPath)) {
+		if (this.fileExists(this.v2File("cgroup.controllers"))) {
 			this.cgroupVersion = "v2"
-			this.isAvailable = true
-			this.log.debug("Detected cgroups v2")
+			this.isAvailable = this.fileExists(this.v2File("cgroup.type"))
+			this.log.debug(
+				{ available: this.isAvailable },
+				"Detected cgroups v2; only a non-root cgroup is a container's",
+			)
 			return
 		}
 
@@ -202,6 +217,10 @@ export class ContainerMonitor extends EventEmitter {
 	// cgroups v2 Reading
 	// ============================================================================
 
+	private v2File(name: string): string {
+		return `${this.cgroupRoot}/${name}`
+	}
+
 	private readCgroupV2(): ContainerResources {
 		const cpuStats = this.parseCpuStatV2()
 		const memoryUsage = this.readMemoryV2()
@@ -224,7 +243,7 @@ export class ContainerMonitor extends EventEmitter {
 		throttledPercent: number | null
 	} {
 		try {
-			const content = fs.readFileSync(CGROUP_V2_CPU_STAT, "utf8")
+			const content = fs.readFileSync(this.v2File("cpu.stat"), "utf8")
 			const lines = content.trim().split("\n")
 			const stats: Record<string, number> = {}
 
@@ -275,7 +294,7 @@ export class ContainerMonitor extends EventEmitter {
 	} {
 		try {
 			const currentStr = fs
-				.readFileSync(CGROUP_V2_MEMORY_CURRENT, "utf8")
+				.readFileSync(this.v2File("memory.current"), "utf8")
 				.trim()
 			const current = Number(currentStr)
 
@@ -283,7 +302,7 @@ export class ContainerMonitor extends EventEmitter {
 			let percent: number | null = null
 
 			try {
-				const maxStr = fs.readFileSync(CGROUP_V2_MEMORY_MAX, "utf8").trim()
+				const maxStr = fs.readFileSync(this.v2File("memory.max"), "utf8").trim()
 				if (maxStr !== "max") {
 					limit = Number(maxStr)
 					if (limit > 0) {
@@ -302,7 +321,7 @@ export class ContainerMonitor extends EventEmitter {
 
 	private parseMemoryEventsV2(): number | null {
 		try {
-			const content = fs.readFileSync(CGROUP_V2_MEMORY_EVENTS, "utf8")
+			const content = fs.readFileSync(this.v2File("memory.events"), "utf8")
 			const lines = content.trim().split("\n")
 
 			for (const line of lines) {
@@ -460,7 +479,7 @@ export class ContainerMonitor extends EventEmitter {
 		// Take initial reading so first snapshot has valid delta
 		try {
 			if (this.cgroupVersion === "v2") {
-				const content = fs.readFileSync(CGROUP_V2_CPU_STAT, "utf8")
+				const content = fs.readFileSync(this.v2File("cpu.stat"), "utf8")
 				for (const line of content.trim().split("\n")) {
 					const [key, value] = line.split(" ")
 					if (key === "usage_usec") {

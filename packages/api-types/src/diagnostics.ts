@@ -82,7 +82,12 @@ export interface Diagnostics {
 		userSeconds: number
 		systemSeconds: number
 	}
-	/** The whole container with every decoder process in it, in cores; null outside a container or if it failed. */
+	/**
+	 * The whole container with every decoder process in it, in cores, from the monitor's shared
+	 * reading. Null on the first reading, if it failed, when container monitoring is off, and outside
+	 * a container on cgroup v2. On a cgroup v1 host outside a container, which its files cannot tell
+	 * from a container, it reads the whole machine.
+	 */
 	containerCpuCores: number | null
 	/**
 	 * Null off Linux, when the thread list cannot be read, when the list did not arrive in time, or

@@ -414,11 +414,12 @@ describe("planReplayTrials", () => {
 					narrow: fc.boolean(),
 				}),
 				c => {
+					const earlyTrack = c.hasTrack
+						? trackOf({ obwHz: c.obwHz, spectralShape: c.shape })
+						: null
 					const out = planReplayTrials(
 						input({
-							track: c.hasTrack
-								? trackOf({ obwHz: c.obwHz, spectralShape: c.shape })
-								: null,
+							track: earlyTrack,
 							knownProtocol: c.known,
 							priors: c.priors,
 							narrowRaster: c.narrow,
@@ -437,12 +438,18 @@ describe("planReplayTrials", () => {
 					const analogWanted = knownAnalog || priorAnalog
 					const analogs = out.filter(t => t.kind === "analog")
 					expect(analogs).toHaveLength(analogWanted ? 1 : 0)
-					// In a paging range the pager trials run before any analog trial; a known analog
-					// trial behind them is planned unflagged (the queue runs flagged trials first).
+					// In a paging range the pager trials, and on a data burst any other decoder, run before
+					// any analog trial; a known analog trial behind them is planned unflagged (the queue runs
+					// flagged trials first).
 					const pagerTrials = out.filter(
 						t => t.kind !== "analog" && familyOf(t.protocol) === "pager",
 					)
-					const pagerFirst = inPagerRange(c.priors) && pagerTrials.length > 0
+					const othersFirst =
+						inPagerRange(c.priors) &&
+						(pagerTrials.length > 0 ||
+							(earlyTrack !== null &&
+								isDataBurst(earlyTrack, c.priors) &&
+								out.some(t => t.kind !== "analog")))
 					for (const t of out) {
 						// rtl433 runs only as the ISM replay trial, and only when ISM is called.
 						if (t.mode.decoderType === "rtl433") {
@@ -452,7 +459,7 @@ describe("planReplayTrials", () => {
 						if (t.kind === "analog") {
 							expect(["analog-fm", "analog-am"]).toContain(t.protocol)
 							if (knownAnalog) {
-								expect(t.known).toBe(!pagerFirst)
+								expect(t.known).toBe(!othersFirst)
 								expect(t.protocol).toBe(c.known)
 								expect(t.analogMode).toBe(
 									c.known === "analog-am" ? "am" : "nfm",
@@ -481,10 +488,10 @@ describe("planReplayTrials", () => {
 					const dataLast =
 						track !== null &&
 						isDataBurst(track, c.priors) &&
-						!(knownAnalog && !pagerFirst)
+						!(knownAnalog && !othersFirst)
 					if (analogs.length === 1) {
 						if (dataLast) expect(out.indexOf(analogs[0]!)).toBe(out.length - 1)
-						else if (knownAnalog && pagerFirst)
+						else if (knownAnalog && othersFirst)
 							expect(out.indexOf(analogs[0]!)).toBe(
 								out.filter(t => t.known).length + pagerTrials.length,
 							)
@@ -524,7 +531,7 @@ describe("planReplayTrials", () => {
 							"lora",
 						].includes(c.known)
 					const knownPlanned =
-						replayable || (knownAnalog && !(knownAnalog && pagerFirst))
+						replayable || (knownAnalog && !(knownAnalog && othersFirst))
 					if (knownPlanned)
 						expect(out[0]).toMatchObject({ protocol: c.known, known: true })
 					expect(out.filter(t => t.known).length).toBe(knownPlanned ? 1 : 0)

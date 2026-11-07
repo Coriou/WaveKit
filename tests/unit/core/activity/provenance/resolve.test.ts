@@ -234,6 +234,51 @@ describe("resolveProvenance table", () => {
 	})
 })
 
+describe("rtl_433 on the raw capture, with no target", () => {
+	const onCapture = (
+		captureCentreHz?: number,
+		rate = 1_024_000,
+	): ActivityDecoderBinding => ({
+		...bind([]),
+		inputSampleRateHz: rate,
+		...(captureCentreHz === undefined ? {} : { captureCentreHz }),
+	})
+	const hzOf = (freq: unknown, binding: ActivityDecoderBinding) =>
+		resolveProvenance(out("signal", { model: "m", freq }), binding).frequency
+
+	it("accepts an estimate around the centre it started on, unverified", () => {
+		expect(hzOf(433.92, onCapture(434_000_000))).toEqual({
+			hz: 433_920_000,
+			basis: "channel",
+			tuningTrust: "unverified",
+		})
+	})
+
+	it("refuses an estimate outside the usable part of the capture", () => {
+		expect(hzOf(868.3, onCapture(434_000_000))).toBeNull()
+	})
+
+	it("refuses an estimate in Hz by mistake", () => {
+		expect(hzOf(433_920_000, onCapture(434_000_000))).toBeNull()
+	})
+
+	it("reads no frequency with no centre: no target, or retuned since it started", () => {
+		expect(hzOf(433.92, onCapture())).toBeNull()
+	})
+
+	it("never uses the centre itself as the row's frequency", () => {
+		expect(
+			resolveProvenance(out("signal", { model: "m" }), onCapture(434_000_000))
+				.frequency,
+		).toBeNull()
+	})
+
+	it("prefers a single target to the centre", () => {
+		const binding = { ...onCapture(434_000_000), ...bind([868_300_000]) }
+		expect(hzOf(433.92, binding)?.hz).toBe(868_300_000)
+	})
+})
+
 describe("synthetic rtl_433 FSK estimates", () => {
 	it("uses the midpoint of two FSK tones and keeps the usable tuner-window bounds", () => {
 		const binding = { ...bind([433_920_000]), inputSampleRateHz: 1_000_000 }

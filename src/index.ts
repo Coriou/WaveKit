@@ -2594,6 +2594,12 @@ async function main(): Promise<void> {
 				liveDemod,
 				digitalVoice,
 				resourceAggregator,
+				diagnostics: {
+					loopDelay: () => composed.loopMeter.report(monitor.monoNow()),
+					...(channelizer
+						? { channels: () => channelizer.openChannelRows() }
+						: {}),
+				},
 				aircraftTracker: aircraftTrackingManager.getTracker(),
 				aircraftInfo: aircraftEnrichmentService,
 				vesselTracker: vesselTrackingManager.getTracker(),

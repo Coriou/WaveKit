@@ -727,7 +727,7 @@ sample serves all callers for 2 s, so polling cannot multiply its cost.
 | `eventLoopUtilization` | Share of the time the main thread was busy over `process.windowMs`, 0 to 1. Null on the first sample                                                                                          |
 | `eventLoopDelay`       | The core's loop meter: the last 2 s interval and the worst over 10 minutes, in ms. The meter runs anyway (10 ms resolution, a fixed histogram); this route adds no timer. Null when not wired |
 | `process`              | All threads of the core together: cores averaged since the previous sample (at least 2 s), and totals since it started. `windowMs` and `cpuCores` are null on the first sample                |
-| `containerCpuCores`    | The whole container, decoder processes included, in cores: the same reading as `GET /api/resources/container`. Null outside a container                                                       |
+| `containerCpuCores`    | The whole container with its decoder processes, in cores, as `GET /api/resources/container` reads it. Null outside a container on cgroup v2; a v1 host outside one reads the whole machine    |
 | `threads`              | Linux only, null elsewhere: each thread's name, CPU seconds since it started, and cores over the window (null when the previous sample did not read that thread), busiest first               |
 | `threadsTimedOut`      | True when the thread reads did not finish in time: `threads` is then partial with `truncated`, or null                                                                                        |
 | `channels`             | Open channelizer outputs with what they cost: filter length, input and output rate, and the process's last counters (`stats`, every 5 s, null before the first). Null without a channelizer   |
@@ -980,7 +980,7 @@ curl http://localhost:9000/api/sources
 | `waiting`              | Connected, the first samples are not due yet                                                                                                                                                                                                     |
 | `no-samples`           | Connected with no IQ; the receiver's status API says nothing that explains it                                                                                                                                                                    |
 | `receiver-no-device`   | The receiver reports no device: re-attach USB. Needs `deviceFacts: "absent"`, and rtl_tcp not reported running. A failed USB check is not this code; only a receiver too old to report its check can still read this way, and its message hedges |
-| `receiver-not-running` | The receiver reports a device, and that its rtl_tcp does not run. Needs `deviceFacts: "present"`                                                                                                                                                 |
+| `receiver-not-running` | The receiver's rtl_tcp does not run. Needs `deviceFacts: "present"`, or `probe-failed`, whose message says the device state is unknown                                                                                                           |
 | `backpressure`         | The core is not keeping up with this source                                                                                                                                                                                                      |
 | `disconnected`         | Not connected to the receiver                                                                                                                                                                                                                    |
 | `feed-paused`          | An operator holds the receiver feed off (`feed.state` `paused` or `resuming`)                                                                                                                                                                    |
@@ -2911,7 +2911,10 @@ capture rate is 250 ksps to 2.4 Msps: the band plan decides whether it runs,
 never which part of the capture it hears, so a device just past the band-plan
 edge still decodes. Its placement then has `reach: "raw"` and no `channelHz`. rtl_433 runs with `-f`
 set to the centre of the IQ it reads and `-M level`, so each of its events
-also carries `freq` (MHz), `rssi`, `snr` and `noise`.
+also carries `freq` (MHz), `rssi`, `snr` and `noise`. An Activity row from a placement with no
+target frequency takes `frequencyHz` from that `freq` when it lies within the usable 80 % of
+the capture around the centre rtl_433 started on, and is null otherwise, also after a retune
+with no restart, since `-f` is fixed at its start. Older rows stay null.
 At faster captures it narrows a channel (1 MHz down to 250 kHz) to fit. A band-plan channel inside the
 window whose passband the window cannot hold is a fit failure too. A fit failure
 is physical: it is reported for `always`, operator starts and band opt-outs as

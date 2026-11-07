@@ -448,8 +448,12 @@ stayed below the block threshold, and no live track sat within 12.5 kHz. Otherwi
 `heard-digital-unconfirmed` it matters: a lone sync over voice is usually the voice, so say "voice, with a
 possible digital sync", not "possibly DMR".
 
-`decoded` needs two matching decodes 2 s to 5 min apart, so a continuous transmission takes about 2.5 s
-from its first decode, and a single short burst with no earlier match stays `heard-digital-unconfirmed`.
+For digital voice (DMR, P25, NXDN, YSF, D-STAR, dPMR), `decoded` needs two matching decodes 2 s to 5 min
+apart, so a continuous transmission takes about 2.5 s from its first decode, and a single short burst with
+no earlier match stays `heard-digital-unconfirmed`. A pager follows its own rule: one decode with a plausible
+message can be enough, and one decode of a capcode already accepted on this signal counts at any age, since
+a false line naming that capcode out of about 2 million is unlikely. Say "this capcode, seen here before",
+which does not mean a second decode just now.
 The lists are in `GET /api/enums` (`scanner.identifyVerdictCodes`, `scanner.identifyVerdictWhy`).
 
 `verdict.confirmedAcrossJobs: true` on a `decoded` means this request heard one burst and the match came

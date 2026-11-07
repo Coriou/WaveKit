@@ -22,7 +22,9 @@ export async function runPreflight(logger: Logger): Promise<PreflightResult> {
 	// Check for dongle
 	const dongle = await detectDongle(logger)
 
-	if (!dongle.present) {
+	if (dongle.probeFailed) {
+		warnings.push("USB check failed; device state unknown.")
+	} else if (!dongle.present) {
 		errors.push("No RTL-SDR dongle detected. Check USB connection.")
 	}
 
@@ -33,7 +35,8 @@ export async function runPreflight(logger: Logger): Promise<PreflightResult> {
 		)
 	}
 
-	const ready = errors.length === 0
+	// A failed check found no fault and proved no device, so it is not ready either.
+	const ready = errors.length === 0 && !dongle.probeFailed
 
 	if (ready) {
 		log.info("Preflight checks passed")
@@ -49,7 +52,12 @@ export async function runPreflight(logger: Logger): Promise<PreflightResult> {
 	}
 }
 
-/** Refresh the shared status snapshot after USB insertions and removals. */
+/**
+ * Refresh the shared status snapshot after USB insertions and removals. A failed USB check observes
+ * nothing, so it is not a change: rtl_tcp restarts only when a check that answered differs from the
+ * last state handled. A removal and replug wholly between failed checks reads as a change only if
+ * the kernel gave the device a new number, which it normally does.
+ */
 export function startPreflightMonitoring(
 	result: PreflightResult,
 	logger: Logger,
@@ -77,7 +85,10 @@ export function startPreflightMonitoring(
 				const changed = JSON.stringify(result) !== JSON.stringify(updated)
 				Object.assign(result, updated)
 				const currentIdentity = identity(updated.dongle)
-				if (currentIdentity !== handledIdentity) {
+				if (
+					!updated.dongle.probeFailed &&
+					currentIdentity !== handledIdentity
+				) {
 					await options.onDeviceChange?.()
 					// A failed restart is retried on the next poll, without overlap.
 					handledIdentity = currentIdentity

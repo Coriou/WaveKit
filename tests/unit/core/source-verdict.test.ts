@@ -87,7 +87,7 @@ describe("sourceVerdict", () => {
 		})
 		const failed = of("failed")
 		expect(failed).toMatchObject({
-			code: "no-samples",
+			code: "receiver-not-running",
 			deviceFacts: "probe-failed",
 		})
 		expect(failed.message).not.toMatch(/re-attach/)
@@ -100,7 +100,7 @@ describe("sourceVerdict", () => {
 				host({
 					receiverFacts: {
 						deviceFound,
-						rtlTcpRunning: false,
+						rtlTcpRunning: null,
 						deviceProbe: "failed",
 					},
 				}),
@@ -109,6 +109,65 @@ describe("sourceVerdict", () => {
 			expect(verdict.code).toBe("disconnected")
 			expect(verdict.deviceFacts).toBe("probe-failed")
 		}
+	})
+
+	it("says rtl_tcp is down after a failed USB check, with the device state unknown", () => {
+		for (const activity of ["stale", "disconnected", "waiting"] as const) {
+			for (const deviceFound of [true, false, null]) {
+				expect(
+					sourceVerdict(
+						status(activity),
+						host({
+							receiverFacts: {
+								deviceFound,
+								rtlTcpRunning: false,
+								deviceProbe: "failed",
+							},
+						}),
+						now,
+					),
+				).toEqual({
+					code: "receiver-not-running",
+					message:
+						"receiver's rtl_tcp is not running; its USB check failed, so its device state is unknown",
+					deviceFacts: "probe-failed",
+				})
+			}
+		}
+	})
+
+	it("keeps no-samples after a failed USB check while rtl_tcp runs or is not stated", () => {
+		for (const rtlTcpRunning of [true, null]) {
+			expect(
+				sourceVerdict(
+					status("stale"),
+					host({
+						receiverFacts: {
+							deviceFound: null,
+							rtlTcpRunning,
+							deviceProbe: "failed",
+						},
+					}),
+					now,
+				).code,
+			).toBe("no-samples")
+		}
+	})
+
+	it("lets samples outrank a failed USB check with rtl_tcp stated off", () => {
+		expect(
+			sourceVerdict(
+				status("streaming"),
+				host({
+					receiverFacts: {
+						deviceFound: null,
+						rtlTcpRunning: false,
+						deviceProbe: "failed",
+					},
+				}),
+				now,
+			).code,
+		).toBe("ok")
 	})
 
 	it("claims nothing when the device and rtl_tcp facts disagree", () => {

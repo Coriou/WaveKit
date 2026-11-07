@@ -32,8 +32,11 @@ export function registerFixRoutes(fastify: FastifyInstance): void {
 			return reply.send(response)
 		}
 
-		// Check for missing dongle
-		if (!preflightResult.dongle.present) {
+		// Check for missing dongle; a failed USB check says nothing about it
+		if (
+			!preflightResult.dongle.present &&
+			!preflightResult.dongle.probeFailed
+		) {
 			const response: FixResponse = {
 				issue: "dongle_not_detected",
 				description: "No RTL-SDR dongle was detected on USB.",

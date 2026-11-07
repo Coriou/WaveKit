@@ -7,10 +7,12 @@
  *   at most one file-pool thread is taken; no shell and no child process. One one-shot timer bounds
  *   the wait (`threadReadBudgetMs`); a read that hangs past it is left behind, and no new walk
  *   starts until it settles, so hung reads hold 1 file-pool thread at most however long they last;
- * - the container reading: the cgroup files GET /api/resources/container reads, small and in-memory.
- *   Those reads are synchronous on the main thread, after the walk: no timer can interrupt them, and
- *   were one to hang, the whole core would hang with it. The monitor's own 2 s poll makes the same
- *   reads, so this route adds no new way to hang.
+ * - the container reading: the monitor's shared reading, re-read at most once per its poll interval
+ *   whoever asks, so this route adds no reading and takes no CPU window from another reader. A
+ *   re-read is the cgroup files GET /api/resources/container reads, small and in-memory, synchronous
+ *   on the main thread after the walk: no timer can interrupt them, and were one to hang, the whole
+ *   core would hang with it. The monitor's other readers make the same reads, so this route adds no
+ *   new way to hang.
  * The event-loop delay comes from the loop meter the core runs anyway (10 ms resolution, a native
  * timer recording into a fixed histogram): this route adds no meter of its own.
  */

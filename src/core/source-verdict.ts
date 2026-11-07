@@ -75,6 +75,10 @@ const TEXT: Readonly<Record<Exclude<SourceVerdictCode, "no-samples">, string>> =
 /** `receiver-no-device` from a host whose USB check answered: an observed absence. */
 const DEVICE_ABSENCE_OBSERVED = "receiver has no device; re-attach USB"
 
+/** `receiver-not-running` from a host whose USB check failed: rtl_tcp's state does not depend on it. */
+const NOT_RUNNING_DEVICE_UNKNOWN =
+	"receiver's rtl_tcp is not running; its USB check failed, so its device state is unknown"
+
 /** One source's verdict. `host`: its poller status, undefined when none polls this source. */
 export function sourceVerdict(
 	status: Pick<SourceStatus, "activity" | "feed">,
@@ -102,6 +106,11 @@ export function sourceVerdict(
 			: done("receiver-no-device")
 	if (deviceFacts === "present" && running === false)
 		return done("receiver-not-running")
+	if (deviceFacts === "probe-failed" && running === false)
+		return {
+			...done("receiver-not-running"),
+			message: NOT_RUNNING_DEVICE_UNKNOWN,
+		}
 	if (activity === "disconnected") return done("disconnected")
 	if (activity === "waiting") return done("waiting")
 	return {
