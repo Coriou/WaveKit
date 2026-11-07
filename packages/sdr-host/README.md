@@ -426,6 +426,9 @@ verdict.
 
 Returns dongle info, process states and the legacy `rtlmux.stats` shape, plus:
 
+- `dongle.probeFailed`: `false` when `lsusb` answered, so `present` is an
+  observation; `true` when it failed or passed its 3 s limit, so `present: false`
+  observes nothing. A WaveKit core makes no device claim from a failed check.
 - `sampling` (`SdrHostSampling`): `streaming` only while rtlmux's upstream byte
   count grows by real sample data within 10 s; `waiting`, `stale`,
   `disconnected` or `unknown` otherwise. Zero downstream clients never implies

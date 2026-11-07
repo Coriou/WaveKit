@@ -60,6 +60,57 @@ describe("sourceVerdict", () => {
 		).toMatchObject({ code: "no-samples", deviceFacts: "stale" })
 	})
 
+	it("says plainly that a device is gone only when the receiver's USB check answered", () => {
+		const of = (deviceProbe?: "observed" | "failed") =>
+			sourceVerdict(
+				status("stale"),
+				host({
+					receiverFacts: {
+						deviceFound: deviceProbe === "failed" ? null : false,
+						rtlTcpRunning: false,
+						...(deviceProbe ? { deviceProbe } : {}),
+					},
+				}),
+				now,
+			)
+		expect(of("observed")).toEqual({
+			code: "receiver-no-device",
+			message: "receiver has no device; re-attach USB",
+			deviceFacts: "absent",
+		})
+		// An older host cannot tell a failed check from an absence: same code, hedged text.
+		expect(of()).toEqual({
+			code: "receiver-no-device",
+			message:
+				"receiver reports no device; check USB and re-attach it if unplugged",
+			deviceFacts: "absent",
+		})
+		const failed = of("failed")
+		expect(failed).toMatchObject({
+			code: "no-samples",
+			deviceFacts: "probe-failed",
+		})
+		expect(failed.message).not.toMatch(/re-attach/)
+	})
+
+	it("makes no device claim from a failed USB check, even with a stale present flag", () => {
+		for (const deviceFound of [true, false, null]) {
+			const verdict = sourceVerdict(
+				status("disconnected"),
+				host({
+					receiverFacts: {
+						deviceFound,
+						rtlTcpRunning: false,
+						deviceProbe: "failed",
+					},
+				}),
+				now,
+			)
+			expect(verdict.code).toBe("disconnected")
+			expect(verdict.deviceFacts).toBe("probe-failed")
+		}
+	})
+
 	it("claims nothing when the device and rtl_tcp facts disagree", () => {
 		const verdict = sourceVerdict(
 			status("stale"),

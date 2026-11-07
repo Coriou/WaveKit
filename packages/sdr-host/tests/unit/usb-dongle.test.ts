@@ -20,6 +20,18 @@ describe("usb-dongle", () => {
 		expect(result.usb?.pid).toBe("2838")
 		expect(result.driverConflict).toBe(true)
 		expect(result.conflictingDriver).toBe("dvb_usb_rtl28xxu")
+		expect(result.probeFailed).toBe(false)
+	})
+
+	it("reports a failed lsusb apart from an observed absence", async () => {
+		const { detectDongle } = await import("../../src/utils/usb-dongle.js")
+		const execRunner = vi.fn().mockRejectedValueOnce(new Error("timed out"))
+
+		const result = await detectDongle(logger, execRunner)
+
+		expect(result.probeFailed).toBe(true)
+		expect(result.present).toBe(false)
+		expect(result.usb).toBeNull()
 	})
 
 	it("returns not present when no dongle is found", async () => {
@@ -31,6 +43,7 @@ describe("usb-dongle", () => {
 
 		expect(result.present).toBe(false)
 		expect(result.usb).toBeNull()
+		expect(result.probeFailed).toBe(false)
 	})
 
 	it("checkDriverConflict returns false when drivers not loaded", async () => {

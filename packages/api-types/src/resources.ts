@@ -85,6 +85,8 @@ export interface SdrHostDongleInfo {
 	vendor: string | null
 	product: string | null
 	serial: string | null
+	/** True when the receiver's USB check failed: `found: false` then observes nothing. */
+	probeFailed?: boolean
 }
 
 /**
@@ -114,7 +116,15 @@ export interface SdrHostStatus {
 	 * Validated receiver facts of the last answer: null where the body did not state a boolean.
 	 * `dongle.found` reads false for a body with no statement, so a claim reads this instead.
 	 */
-	receiverFacts?: { deviceFound: boolean | null; rtlTcpRunning: boolean | null }
+	receiverFacts?: {
+		deviceFound: boolean | null
+		rtlTcpRunning: boolean | null
+		/**
+		 * The receiver's USB check: `observed` it answered, `failed` it failed or timed out (then
+		 * `deviceFound` is null). Absent from a host too old to say.
+		 */
+		deviceProbe?: "observed" | "failed"
+	}
 
 	/** Dongle detection info */
 	dongle: SdrHostDongleInfo | null

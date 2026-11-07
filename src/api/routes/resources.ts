@@ -177,6 +177,7 @@ const sdrHostStatusSchema = {
 				vendor: { type: ["string", "null"] },
 				product: { type: ["string", "null"] },
 				serial: { type: ["string", "null"] },
+				probeFailed: { type: "boolean" },
 			},
 		},
 		warnings: { type: "array", items: { type: "string" } },
