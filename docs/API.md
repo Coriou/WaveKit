@@ -606,6 +606,26 @@ Static, and under the same read admission as `GET /api`.
 		"discoveryViews": ["full", "compact"],
 		"jobViews": ["full", "compact"],
 		"recorderDecisions": ["started", "refused:slots"],
+		"identifyVerdictCodes": [
+			"decoded",
+			"heard-digital-unconfirmed",
+			"undecodable",
+			"nothing",
+			"could-not-test"
+		],
+		"identifyVerdictWhy": [
+			"budget",
+			"unsupported-protocol",
+			"unsupported-format",
+			"decoders-unavailable",
+			"no-live-audio",
+			"window-moved",
+			"source-lost",
+			"cancelled",
+			"interrupted",
+			"artefact",
+			"unknown"
+		],
 		"passiveReasons": [
 			"passive-cost",
 			"engine-cost",
@@ -4783,7 +4803,8 @@ Also 409 `LIVE_AUDIO_UNAVAILABLE` (live audio not configured), 409
 #### POST /api/scanner/identify
 
 Identify a signal in the current window: every plausible decoder tries it,
-without retuning. Body: `sourceId?`, `target` (exactly one of
+without retuning and without moving live audio. For the short version an agent
+needs, see [Is that DMR at this frequency?](AGENTS-API.md#is-that-dmr-at-this-frequency). Body: `sourceId?`, `target` (exactly one of
 `{frequencyHz, bandwidthHz?}` or `{all: true}`), `timeoutMs` (1000–120000,
 default 15000; bounds only the wait for a signal), `protocols?`,
 `exhaustive?` (default false: stop at the first accepted decode), `record?`
@@ -4796,7 +4817,25 @@ from job creation. With no usable IQ, the job fails with `tuner-unavailable`;
 a single target reports `unidentified`, empty trials and null nullable RF
 statistics, while `all` reports no measured targets. A transmission found
 within the signal-wait budget may finish its bounded decoder trials afterward;
-`timeoutMs` is not an overall job-duration limit. An epoch change preserves an
+`timeoutMs` is not an overall job-duration limit, except with `waitUntilSignal`.
+`waitUntilSignal: true` stays waiting for a gated transmission for up to `waitMs`
+(1000 to 600000, default 300000; only with `waitUntilSignal`); `timeoutMs` then
+counts from that transmission and also ends its trials. No transmission in time:
+`result.ended: "no-signal"`.
+
+A decode awaiting its pair keeps its run for 3080 ms (`IDENTIFY_PAIR_WAIT_MS`,
+once per run): acceptance needs a second decode at least 2000 ms later, and the
+1800 ms DMR hold alone cannot reach it. A run with no decode keeps its plain hold.
+With a first decode at the end of the hold, a DMR run lasts at most
+1800 + 400 + 3080 = 5280 ms at the default 400 ms start latency.
+
+A point request that a running job already answers returns that job with **200**
+instead of **201**, and starts no second probe. It joins when it has the same source;
+its frequency is within the running job's `max(1 kHz, bw/2)`; its `protocols` are
+contained in the running job's; and it asks no more than that job does (`exhaustive`,
+`record`, a longer `timeoutMs`, a wait the job does not have). A running job with no
+`protocols` contains a named one only once its plan holds a runnable trial for it. A
+finished job or a finished target never joins, and `target.all` never does. An epoch change preserves an
 established single-target deadline; collected `all` targets may receive a
 bounded re-resolution wait. Disconnect during active identify ends it with
 the results collected so far.
@@ -4881,19 +4920,53 @@ given, or a bound is broken:
 }
 ```
 
-409 `OUT_OF_WINDOW` with `details.window`:
+409 `OUT_OF_WINDOW` with `details.window` and `details.next`, the call that fixes it.
+The suggested centre is half the usable half span from the target, at most 100 kHz,
+so the target does not land on the DC spike:
 
 ```json
 {
 	"error": "ScannerApiError",
 	"code": "OUT_OF_WINDOW",
 	"message": "The target is outside the tuned window; tune first",
-	"details": { "window": { "startHz": 445180800, "endHz": 446819200 } }
+	"details": {
+		"window": { "startHz": 445180800, "endHz": 446819200 },
+		"next": {
+			"method": "POST",
+			"path": "/api/tuner/rtl/tune",
+			"body": { "frequencyHz": 446900000 },
+			"effect": "Moves the receiver, and anything listening in the old window with it. Then repeat this identify request; the centre suggested keeps the target off the DC spike.",
+			"then": { "method": "POST", "path": "/api/scanner/identify" }
+		}
+	}
 }
 ```
 
 409 `SCANNER_SOURCE_BUSY` while a sweep holds the source's tuner
-(`details.reason: "held"`, `details.holderJobId`); 503 `SCANNER_DISABLED`. The job is listed,
+(`details.reason: "held"`, `details.holderJobId`, and `details.next` as above with
+`preempt: true` in its `body` and what that does to the job in its `effect`; for
+`target.all` its frequency is the current centre); 503 `SCANNER_DISABLED`. A
+`SCANNER_SOURCE_BUSY` for a relay client (`details.reason: "relay"`) has no `next`:
+no call takes the tuner from it.
+
+Each final target carries `verdict`, the answer in one closed code. The lists are
+`scanner.identifyVerdictCodes` and `scanner.identifyVerdictWhy` in `GET /api/enums`:
+
+| `verdict.code`              | Meaning                                                                                             |
+| --------------------------- | --------------------------------------------------------------------------------------------------- |
+| `decoded`                   | A confirmed identity that met acceptance. `protocol` is what it is, which may not be what you named |
+| `heard-digital-unconfirmed` | A lone sync, one decode, or an identity capped by a leak flag. Never `decoded`                      |
+| `undecodable`               | A signal is there and every plausible trial ran and found nothing                                   |
+| `nothing`                   | No signal                                                                                           |
+| `could-not-test`            | See `verdict.why`                                                                                   |
+
+`verdict.why`, only on `could-not-test`: `budget`, `unsupported-protocol`,
+`unsupported-format`, `decoders-unavailable`, `no-live-audio`, `window-moved`,
+`source-lost`, `cancelled`, `interrupted` (a trial was cut short), `artefact`, `unknown`.
+One plausible trial that did not run withholds `undecodable`. Analog voice with no tone
+is `undecodable`, with `result.analog` beside it; a standard tone on a trusted frequency is
+`decoded` with the analog protocol. `verdict.protocol` is what was decoded or heard,
+otherwise the one protocol the request named. Older cores send no `verdict`. The job is listed,
 cancellable and deletable once ended, but `pause`/`resume` answer 409
 `SCANNER_IDENTIFY_NOT_PAUSABLE` and `PATCH` 409
 `SCANNER_IDENTIFY_NOT_EDITABLE`. Identify jobs are not kept across a core
@@ -7846,7 +7919,7 @@ when a transmission starts or ends. Activity is shed first under load (newest wi
 #### scanner:identify
 
 One stream per identify target (`all: true` sends one per surfaced emission, with
-`targetHz` its centre): `{jobId, targetHz, state, trials, result?}`. Coalesced to at
+`targetHz` its centre): `{jobId, targetHz, state, trials, result?, verdict?}`. Coalesced to at
 most 1/s per (job, target); the latest state is always delivered.
 
 - `state`: `waiting-for-signal` → `trying` → `identified` | `candidate` | `unidentified`.
@@ -7867,6 +7940,7 @@ most 1/s per (job, target); the latest state is always delivered.
   transmission ended); see `POST /api/scanner/identify`.
 - `result`: see `POST /api/scanner/identify`, including `artefact?`,
   `ended?: "window-moved"`, and `analog?` and `decodersUnavailable?`.
+- `verdict`: on a final target only; see `POST /api/scanner/identify`.
 
 If `all: true` finds nothing within `timeoutMs`, no `scanner:identify` is sent;
 the job completes with `identify.targets: []` (`scanner:job`).

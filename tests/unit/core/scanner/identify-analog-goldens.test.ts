@@ -257,6 +257,13 @@ const CHANGED: Readonly<Record<string, Record<string, unknown>>> = {
 	"spawn-enoent-unavailable": { decodersUnavailable: ["multimon-ng"] },
 }
 
+/** The goldens stay frozen: `verdict` is additive and has its own table (identify-verdict.test.ts). */
+function withoutVerdict(
+	events: ScannerIdentifyEventData[],
+): ScannerIdentifyEventData[] {
+	return events.map(({ verdict: _verdict, ...e }) => e)
+}
+
 function withAdded(
 	events: ScannerIdentifyEventData[],
 	added: Record<string, unknown> | undefined,
@@ -285,11 +292,15 @@ describe("identify goldens without the analog port (WG10 3.1, 3.5)", () => {
 			const recorded = goldens[s.name]
 			expect(recorded).toBeDefined()
 			const events = await s.run()
-			expect(events).toEqual(withAdded(recorded!, CHANGED[s.name]))
+			expect(withoutVerdict(events)).toEqual(
+				withAdded(recorded!, CHANGED[s.name]),
+			)
 		})
 		it(`${s.name} matches with an empty unavailable memo wired`, async () => {
 			const events = await s.run({ memo: () => new Set() })
-			expect(events).toEqual(withAdded(goldens[s.name]!, CHANGED[s.name]))
+			expect(withoutVerdict(events)).toEqual(
+				withAdded(goldens[s.name]!, CHANGED[s.name]),
+			)
 		})
 	}
 })

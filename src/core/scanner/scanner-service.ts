@@ -172,6 +172,8 @@ import { JobHits, emptyHitStats } from "./job-hits.js"
 import {
 	IDENTIFY_KEEP_JOBS,
 	IdentifyRunner,
+	identifyNextStep,
+	identifyTuneCentreHz,
 	inWindow,
 	normaliseIdentify,
 	type NormalisedIdentify,
@@ -2629,6 +2631,16 @@ export class ScannerService extends EventEmitter {
 	// === identify (spec § 10.8) ===
 
 	async identify(req: ScannerIdentifyRequest): Promise<ScanJob> {
+		return (await this.identifyOrJoin(req)).job
+	}
+
+	/**
+	 * The job that answers `req`: a new one, or (`joined`) a running one that already asks the same
+	 * thing (identifyRequestJoins). Refusals come first, so a window that moved never joins.
+	 */
+	async identifyOrJoin(
+		req: ScannerIdentifyRequest,
+	): Promise<{ job: ScanJob; joined: boolean }> {
 		if (!this.settings().enabled)
 			throw new ScannerApiError(
 				"The scanner is disabled",
@@ -2661,7 +2673,11 @@ export class ScannerService extends EventEmitter {
 				`A sweep (scanner job ${holder.jobId}) holds this source's tuner; identify works in a still window`,
 				"SCANNER_SOURCE_BUSY",
 				409,
-				{ reason: "held", holderJobId: holder.jobId },
+				{
+					reason: "held",
+					holderJobId: holder.jobId,
+					...this.identifyBusyNext(n.sourceId, identify.target),
+				},
 			)
 		}
 		const target = identify.target
@@ -2681,17 +2697,26 @@ export class ScannerService extends EventEmitter {
 					"The target is outside the tuned window; tune first",
 					"OUT_OF_WINDOW",
 					409,
-					window
-						? {
-								window: {
-									startHz: window.centreHz - half,
-									endHz: window.centreHz + half,
-								},
-							}
-						: undefined,
+					{
+						...(window
+							? {
+									window: {
+										startHz: window.centreHz - half,
+										endHz: window.centreHz + half,
+									},
+								}
+							: {}),
+						next: identifyNextStep(
+							n.sourceId,
+							identifyTuneCentreHz(target.frequencyHz, window),
+							false,
+						),
+					},
 				)
 			}
 		}
+		const running = this.runningIdentifyFor(n.sourceId, identify)
+		if (running) return { job: this.toDto(running), joined: true }
 		const now = this.now()
 		const record: JobRecord = {
 			id: `j_${ulid(now)}`,
@@ -2729,7 +2754,41 @@ export class ScannerService extends EventEmitter {
 		this.pruneIdentifyJobs()
 		const dto = this.toDto(record)
 		this.emit("job", dto)
-		return dto
+		return { job: dto, joined: false }
+	}
+
+	/** At most the identify jobs alive on the source: the ended ones fail on their state first. */
+	private runningIdentifyFor(
+		sourceId: string,
+		identify: NormalisedIdentify,
+	): JobRecord | null {
+		for (const record of this.jobs.values()) {
+			if (
+				record.spec.sourceId !== sourceId ||
+				record.spec.kind !== "identify" ||
+				!["pending", "starting", "running"].includes(record.state)
+			)
+				continue
+			const driver = this.drivers.get(record.id)
+			if (driver instanceof IdentifyRunner && driver.joins(identify))
+				return record
+		}
+		return null
+	}
+
+	/** `details.next` of a held tuner. A window target names its frequency; the whole window, the centre it stays on. */
+	private identifyBusyNext(
+		sourceId: string,
+		target: NormalisedIdentify["target"],
+	): { next?: Record<string, unknown> } {
+		const window = this.identifyWindow(sourceId)
+		const frequencyHz =
+			"all" in target
+				? window?.centreHz
+				: identifyTuneCentreHz(target.frequencyHz, window)
+		return frequencyHz === undefined
+			? {}
+			: { next: identifyNextStep(sourceId, frequencyHz, true) }
 	}
 
 	// === discoveries and evidence ===

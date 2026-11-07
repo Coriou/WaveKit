@@ -101,6 +101,14 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 			code: "OUT_OF_WINDOW",
 			details: {
 				window: { startHz: CENTRE - 409_600, endHz: CENTRE + 409_600 },
+				next: {
+					method: "POST",
+					path: "/api/tuner/rtl/tune",
+					// 100 kHz off the target: past the 12.5 kHz DC admission, inside the usable span.
+					body: { frequencyHz: CENTRE + 500_000 },
+					effect: expect.stringContaining("Moves the receiver") as string,
+					then: { method: "POST", path: "/api/scanner/identify" },
+				},
 			},
 		})
 		await h.service.createJob({
@@ -116,9 +124,76 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 		).rejects.toMatchObject({
 			statusCode: 409,
 			code: "SCANNER_SOURCE_BUSY",
-			details: { holderJobId: expect.any(String) },
+			details: {
+				reason: "held",
+				holderJobId: expect.any(String),
+				next: {
+					method: "POST",
+					path: "/api/tuner/rtl/tune",
+					body: { frequencyHz: CENTRE - 100_000, preempt: true },
+					effect: expect.stringContaining("preempt: true takes") as string,
+					then: { method: "POST", path: "/api/scanner/identify" },
+				},
+			},
+		})
+		// The whole window has no frequency of its own: the call stays on the centre.
+		await expect(
+			h.service.identify({ sourceId: "rtl", target: { all: true } }),
+		).rejects.toMatchObject({
+			code: "SCANNER_SOURCE_BUSY",
+			details: { next: { body: { preempt: true } } },
 		})
 		await h.service.stop()
+	})
+
+	describe("a same-frequency request while a job runs", () => {
+		const ask = (
+			h: ReturnType<typeof serviceHarness>,
+			over: { frequencyHz?: number; protocols?: ("dmr" | "p25p1")[] } = {},
+		) =>
+			h.service.identifyOrJoin({
+				sourceId: "rtl",
+				target: { frequencyHz: over.frequencyHz ?? CENTRE + 100_000 },
+				protocols: over.protocols ?? ["dmr"],
+			})
+
+		it("returns the running job, and starts no second one", async () => {
+			const h = serviceHarness(noPassive)
+			await h.service.start()
+			const first = await ask(h)
+			expect(first.joined).toBe(false)
+			const again = await ask(h)
+			expect(again).toMatchObject({ joined: true, job: { id: first.job.id } })
+			// At the 1 kHz tolerance it is one track; past it, another target.
+			const edge = await ask(h, { frequencyHz: CENTRE + 101_000 })
+			expect(edge).toMatchObject({ joined: true, job: { id: first.job.id } })
+			const past = await ask(h, { frequencyHz: CENTRE + 101_001 })
+			expect(past.joined).toBe(false)
+			expect(past.job.id).not.toBe(first.job.id)
+			await h.service.stop()
+		})
+
+		it("starts a new job for a protocol the running job does not cover", async () => {
+			const h = serviceHarness(noPassive)
+			await h.service.start()
+			const first = await ask(h)
+			const other = await ask(h, { protocols: ["p25p1"] })
+			expect(other.joined).toBe(false)
+			expect(other.job.id).not.toBe(first.job.id)
+			await h.service.stop()
+		})
+
+		it("starts a new job once the running one has finished", async () => {
+			const h = serviceHarness(noPassive)
+			await h.service.start()
+			const first = await ask(h)
+			await h.service.cancelJob(first.job.id)
+			await settled(h.service)
+			const next = await ask(h)
+			expect(next.joined).toBe(false)
+			expect(next.job.id).not.toBe(first.job.id)
+			await h.service.stop()
+		})
 	})
 
 	it("refuses kind: identify on POST /jobs (identify has its own route)", async () => {

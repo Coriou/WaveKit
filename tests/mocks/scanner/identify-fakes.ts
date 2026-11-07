@@ -29,7 +29,7 @@ import type {
 	TrackSnapshot,
 } from "../../../src/core/spectrum/types.js"
 import { testSettings } from "./engine-fakes.js"
-import { flushAsync, poolHarness } from "./probe-fakes.js"
+import { flushAsync, poolHarness, type PoolConfirm } from "./probe-fakes.js"
 
 /** 25 kHz above the FakeEngineView centre (446.1 MHz at 2.048 Msps). */
 export const TARGET_HZ = 446_125_000
@@ -213,6 +213,13 @@ export function identifyHarness(
 		patch?: (s: ScannerSettings) => void
 		/** Pool transports (default `[offsetTransport]`); Task 40 passes the post-channelizer order. */
 		transports?: readonly TransportStrategy[]
+		gatedAt?: (
+			sourceId: string,
+			hz: number,
+			toleranceHz: number,
+		) => { startSample: number; atMs: number } | null
+		/** Shared acceptance as the composed core has it (real ConfirmMemory on the harness clock). */
+		confirm?: PoolConfirm
 	} = {},
 ) {
 	const settings = testSettings(opts.patch)
@@ -220,6 +227,7 @@ export function identifyHarness(
 		settings,
 		cpuPercent: opts.cpuPercent ?? null,
 		...(opts.transports ? { transports: opts.transports } : {}),
+		...(opts.confirm ? { confirm: opts.confirm } : {}),
 	})
 	const record = identifyRecord()
 	const inner = fakeInner(record, () => pool.clock.now)
@@ -251,6 +259,7 @@ export function identifyHarness(
 		emit: d => events.push(structuredClone(d)),
 		logger: pino({ level: "silent" }),
 		now: () => pool.clock.now,
+		...(opts.gatedAt ? { gatedAt: opts.gatedAt } : {}),
 	})
 	/** Advances the clock, ticks the runner and pumps the pool (as ScannerService.tick does), then lets spawns and releases settle. */
 	const advance = async (ms: number): Promise<void> => {

@@ -16,6 +16,8 @@ import type {
 	ScannerConfidence,
 	ScannerEvidenceLevel,
 	ScannerProtocol,
+	ScannerIdentifyVerdictCode,
+	ScannerIdentifyVerdictWhy,
 	ScannerRecorderDecision,
 } from "./scanner.js"
 import type { SourceDeviceFacts, SourceVerdictCode } from "./sources.js"
@@ -126,6 +128,8 @@ export interface ApiEnums {
 		jobViews: readonly ScanJobView[]
 		recorderDecisions: readonly ScannerRecorderDecision[]
 		passiveReasons: readonly ScannerPassiveReason[]
+		identifyVerdictCodes: readonly ScannerIdentifyVerdictCode[]
+		identifyVerdictWhy: readonly ScannerIdentifyVerdictWhy[]
 	}
 	activity: {
 		kinds: readonly ActivityKind[]

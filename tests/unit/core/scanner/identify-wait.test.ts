@@ -30,8 +30,11 @@ import { FakeMemory } from "./identify-heard-fakes.js"
 import golden from "./identify-wait-default-golden.json" with { type: "json" }
 
 /** The c6eef7e1 transcript, with undefined fields dropped the way the golden file stores them. */
+/** The golden stays frozen: `verdict` is additive and has its own table (identify-verdict.test.ts). */
 function canon(events: ScannerIdentifyEventData[]): unknown {
-	return JSON.parse(JSON.stringify(events)) as unknown
+	return JSON.parse(
+		JSON.stringify(events.map(({ verdict: _verdict, ...e }) => e)),
+	) as unknown
 }
 
 type GateStart = { startSample: number; atMs: number }

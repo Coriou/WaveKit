@@ -17,6 +17,11 @@ import {
 	CHANNEL_ANCHOR_PROTOCOLS,
 } from "./store/decode-anchor.js"
 import { DQ_DATA_HOLD_MS } from "./data-decode-gate.js"
+import { CONFIRM_MIN_SEPARATION_MS } from "./probes/confirm/confirm-memory.js"
+import {
+	identifyTargetVerdict,
+	type IdentifyStopCause,
+} from "./identify-verdict.js"
 import type {
 	DiscoveryMetadata,
 	ScanJobProgress,
@@ -124,6 +129,18 @@ export const IDENTIFY_DEFAULT_TIMEOUT_MS = 15_000
 export const IDENTIFY_PROBE_PRIORITY = 101
 /** Every run lasts at least the DMR late-entry hold (§ 6.4 row 1): the click may come mid-call. */
 export const IDENTIFY_MIN_HOLD_MS = 1800
+/**
+ * A decode awaiting its pair keeps its run this long: acceptance needs a second decode at least
+ * CONFIRM_MIN_SEPARATION_MS later (2 000 ms), and a run holds only IDENTIFY_MIN_HOLD_MS plus the
+ * probe's start latency, so with the latency spent before the first decode 1 800 ms remain and a
+ * continuous transmission could never confirm. The slack is three DMR superframes (3 × 360 ms =
+ * 1 080 ms): the next checked voice LC, and two more should FEC reject them. 2 000 + 1 080 = 3 080 ms.
+ * It applies once per run, from the first such decode, so the longest run is hold + latency + 3 080:
+ * 1 800 + 400 + 3 080 = 5 280 ms at the default latency. A run with no decode keeps its plain hold.
+ */
+export const IDENTIFY_PAIR_SLACK_MS = 1080
+export const IDENTIFY_PAIR_WAIT_MS =
+	CONFIRM_MIN_SEPARATION_MS + IDENTIFY_PAIR_SLACK_MS
 /** A run that gets no probe slot within this time is reported `skipped-budget`. */
 export const IDENTIFY_QUEUE_WAIT_MS = 3000
 /** Trials are planned once the track has 300 ms of envelope at 50 ms blocks (the § 6.2 ACF test), or closed. */
@@ -310,6 +327,87 @@ export function normaliseIdentify(
 /** § 10.8: a track resolves the target within max(1 kHz, bw/2). */
 export function toleranceHz(bandwidthHz: number | undefined): number {
 	return Math.max(IDENTIFY_MIN_TOLERANCE_HZ, (bandwidthHz ?? 0) / 2)
+}
+
+/**
+ * Whether a new request is already answered by a running point-target job, so a voice assistant
+ * asking twice does not start a second probe. The match: the frequency lies within the running
+ * job's tolerance, max(1 kHz, bw/2), which is what resolves one track; its protocols are contained
+ * in the running job's; and it asks no more than that job does (exhaustive, recording, a longer
+ * wait). A running job with no explicit protocols contains a named protocol only once its plan
+ * holds a runnable trial for it: "every plausible" need not include it. Any doubt is a new job.
+ */
+export function identifyRequestJoins(
+	running: NormalisedIdentify,
+	targets: readonly {
+		state: ScannerIdentifyState
+		trials: readonly ScannerIdentifyTrial[]
+	}[],
+	req: NormalisedIdentify,
+): boolean {
+	const a = running.target
+	const b = req.target
+	if ("all" in a || "all" in b) return false
+	if (!(Math.abs(a.frequencyHz - b.frequencyHz) <= toleranceHz(a.bandwidthHz)))
+		return false
+	if (targets.some(t => FINAL.has(t.state))) return false
+	if (req.exhaustive && !running.exhaustive) return false
+	if (req.record && !running.record) return false
+	if (req.timeoutMs > running.timeoutMs) return false
+	if (req.waitUntilSignal === true) {
+		if (running.waitUntilSignal !== true) return false
+		if (
+			(req.waitMs ?? IDENTIFY_WAIT_DEFAULT_MS) >
+			(running.waitMs ?? IDENTIFY_WAIT_DEFAULT_MS)
+		)
+			return false
+	}
+	if (running.protocols.length > 0)
+		return (
+			req.protocols.length > 0 &&
+			req.protocols.every(p => running.protocols.includes(p))
+		)
+	const planned = targets[0]?.trials ?? []
+	return req.protocols.every(p =>
+		planned.some(t => t.protocol === p && t.outcome !== "unsupported"),
+	)
+}
+
+/** How far a suggested tune puts the target from the new centre at most. */
+const IDENTIFY_TUNE_OFFSET_HZ = 100_000
+
+/**
+ * The centre to tune so a target is identifiable: never the target itself, where the DC mask answers
+ * "dc" without a trial and DQ_DC_ADMIT_HZ (12.5 kHz) refuses most identities. Half of the usable
+ * half span, at most 100 kHz: at 1.024 Msps the usable half span is 409.6 kHz, so 100 kHz; at the
+ * lowest rate, 225 001 Hz, it is 90 000 Hz, so 45 kHz. Both are past 12.5 kHz and inside the window.
+ */
+export function identifyTuneCentreHz(
+	targetHz: number,
+	window: { sampleRateHz: number } | null,
+): number {
+	const half = window ? (window.sampleRateHz * USABLE_FRACTION) / 2 : Infinity
+	return Math.round(targetHz - Math.min(IDENTIFY_TUNE_OFFSET_HZ, half / 2))
+}
+
+const NEXT_TUNE_EFFECT =
+	"Moves the receiver, and anything listening in the old window with it. Then repeat this identify request; the centre suggested keeps the target off the DC spike."
+const NEXT_PREEMPT_EFFECT =
+	"preempt: true takes the tuner from the sweep holding it. The job pauses (fails if it was still starting) and no restore comes. It resumes by its own rules: preempted.autoAfterIdleMs in the answer says when, and null means it stays paused until POST /api/scanner/jobs/:id/resume. Then repeat this identify request."
+
+/** `details.next` of the 409s: fixed text, a configured source id and validated numbers only. */
+export function identifyNextStep(
+	sourceId: string,
+	frequencyHz: number,
+	preempt: boolean,
+): Record<string, unknown> {
+	return {
+		method: "POST",
+		path: `/api/tuner/${encodeURIComponent(sourceId)}/tune`,
+		body: { frequencyHz, ...(preempt ? { preempt: true } : {}) },
+		effect: preempt ? NEXT_PREEMPT_EFFECT : NEXT_TUNE_EFFECT,
+		then: { method: "POST", path: "/api/scanner/identify" },
+	}
 }
 
 export function inWindow(
@@ -1217,6 +1315,8 @@ interface RunState {
 	replay?: { captureId: string; planRun: number }
 	/** The pool reported the replay decoder's clean end (its verdict is the evidence seen). */
 	replayDone: boolean
+	/** The run already took its one IDENTIFY_PAIR_WAIT_MS for a decode awaiting its pair. */
+	pairExtended?: boolean
 }
 
 /** One step of a target's replay queue: a probe run, or the analog trial that shares that queue. */
@@ -1290,6 +1390,10 @@ interface TargetState {
 	analogAbort: AbortController[]
 	/** Per-trial wall-clock deadline (ANALOG_REPLAY_TRIAL_DEADLINE_MS from start). */
 	analogDue: Map<AbortController, number>
+	/** A protocol a live trial heard without confirming it: a sync, or one checked decode. */
+	heard: ScannerProtocol | null
+	/** What stopped the job before this target finished, if anything did. */
+	stopped: IdentifyStopCause | null
 }
 
 const FINAL: ReadonlySet<ScannerIdentifyState> = new Set([
@@ -1339,6 +1443,8 @@ export class IdentifyRunner implements JobDriver {
 	private readonly unavailableTypes = new Set<ScannerProbeDecoderType>()
 	/** Cancel / source-down: captures are settled once the probes are released. */
 	private aborting = false
+	/** Stamped on each target that finishes after the job was told to stop. */
+	private stopCause: IdentifyStopCause | null = null
 
 	constructor(private readonly deps: IdentifyDeps) {
 		this.record = deps.record
@@ -1346,6 +1452,7 @@ export class IdentifyRunner implements JobDriver {
 		deps.probes.on("probe-state", this.onProbeState)
 		deps.probes.on("evidence", this.onPoolEvidence)
 		deps.probes.on("decoder-unavailable", this.onDecoderUnavailable)
+		deps.probes.on("unpaired-decode", this.onUnpairedDecode)
 		if (deps.iqCapture) deps.probes.on("replay-end", this.onReplayEnd)
 	}
 
@@ -1364,6 +1471,16 @@ export class IdentifyRunner implements JobDriver {
 			record: identify.record,
 			targets: this.targets.map(t => this.eventOf(t)),
 		}
+	}
+
+	/** Whether `req` is answered by this job (see identifyRequestJoins). */
+	joins(req: NormalisedIdentify): boolean {
+		if (this.phase === "finished") return false
+		return identifyRequestJoins(
+			this.deps.identify,
+			this.targets.map(t => ({ state: t.state, trials: t.trials })),
+			req,
+		)
 	}
 
 	// === JobDriver ===
@@ -1449,6 +1566,7 @@ export class IdentifyRunner implements JobDriver {
 			case "engine-failed":
 				if (e.type === "engine-failed" && this.record.state === "starting")
 					return this.failStartup(e)
+				this.stopCause = e.type === "cancel" ? "cancelled" : "source-lost"
 				await this.abort()
 				try {
 					await this.deps.inner.dispatch(e)
@@ -1678,6 +1796,8 @@ export class IdentifyRunner implements JobDriver {
 			analogStopped: new Set(),
 			analogAbort: [],
 			analogDue: new Map(),
+			heard: null,
+			stopped: null,
 		}
 		this.targets.push(t)
 		this.emitTarget(t)
@@ -2291,6 +2411,7 @@ export class IdentifyRunner implements JobDriver {
 		unavailable = false,
 	): void {
 		if (FINAL.has(t.state)) return
+		t.stopped = this.stopCause
 		this.stopAnalog(t)
 		const resolved = t.view ?? t.fallback
 		const latest = resolved
@@ -2386,6 +2507,7 @@ export class IdentifyRunner implements JobDriver {
 	/** No accepted IQ: never use a retained summary as an RF measurement. */
 	private async failStartup(event: JobEvent): Promise<void> {
 		if (this.phase === "finished") return
+		this.stopCause = "source-lost"
 		const target = this.deps.identify.target
 		if (this.targets.length === 0 && "frequencyHz" in target) {
 			const t = this.newTarget(
@@ -2418,6 +2540,7 @@ export class IdentifyRunner implements JobDriver {
 
 	/** source-down (and a lease loss, never expected): end through the stop-condition row with the results so far. */
 	private async endWithResults(): Promise<void> {
+		this.stopCause ??= "source-lost"
 		await this.abort()
 		try {
 			await this.deps.inner.dispatch({ type: "stop-condition" })
@@ -2429,6 +2552,7 @@ export class IdentifyRunner implements JobDriver {
 	/** A paused receiver feed: release the probes, keep the results so far, end `cancelled(source-paused)`. */
 	private async cancelForPausedFeed(): Promise<void> {
 		if (this.phase === "finished") return
+		this.stopCause = "source-lost"
 		await this.abort()
 		try {
 			await this.deps.inner.dispatch({
@@ -2554,12 +2678,42 @@ export class IdentifyRunner implements JobDriver {
 		// H2: the interpreters attach an identity only after the second CRC-clean line with the same value.
 		if (ev.identity) seen.identity = ev.identity
 		hit.r.seen.set(ev.protocol, seen)
-		if (!ev.identity) return
+		if (!ev.identity) {
+			// CRC failures are `crc-errors` (undecodable), not a protocol heard.
+			if (ev.crcClean) hit.t.heard ??= ev.protocol
+			return
+		}
 		this.countDecode(hit.t)
 		hit.t.decoded ??= { protocol: ev.protocol, identity: ev.identity }
 		// WG11 req 6.5: a live decode discards the observation's captures that were not replayed yet.
 		if (!hit.r.replay) this.confirmLive(req.observationId)
 		if (!this.deps.identify.exhaustive) this.endRun(hit.t, hit.r, "decoded")
+	}
+
+	/**
+	 * A checked decode awaiting its pair (it yields no evidence yet). The run now has output, and
+	 * gets the time acceptance needs, once: see IDENTIFY_PAIR_WAIT_MS.
+	 */
+	private readonly onUnpairedDecode = (
+		probeId: string,
+		req: ProbeRequest,
+		protocol: ScannerProtocol,
+	): void => {
+		if (req.jobId !== this.record.id) return
+		const hit = this.findRun(r => r.probeId === probeId)
+		if (!hit) return
+		const { t, r } = hit
+		const seen = r.seen.get(protocol) ?? {
+			output: false,
+			crcFailures: 0,
+			identity: null,
+		}
+		seen.output = true
+		r.seen.set(protocol, seen)
+		t.heard ??= protocol
+		if (r.pairExtended === true || r.endsAt === null) return
+		r.pairExtended = true
+		r.endsAt = Math.max(r.endsAt, this.deps.now() + IDENTIFY_PAIR_WAIT_MS)
 	}
 
 	/**
@@ -3559,6 +3713,18 @@ export class IdentifyRunner implements JobDriver {
 			state: t.state,
 			trials: t.trials.map(x => ({ ...x })),
 			...(t.result ? { result: t.result } : {}),
+			...(FINAL.has(t.state)
+				? {
+						verdict: identifyTargetVerdict({
+							state: t.state,
+							trials: t.trials,
+							result: t.result ?? undefined,
+							requested: this.deps.identify.protocols,
+							heard: t.heard,
+							stopped: t.stopped,
+						}),
+					}
+				: {}),
 		}
 	}
 
@@ -3576,5 +3742,6 @@ export class IdentifyRunner implements JobDriver {
 		this.deps.probes.off("probe-state", this.onProbeState)
 		this.deps.probes.off("evidence", this.onPoolEvidence)
 		this.deps.probes.off("decoder-unavailable", this.onDecoderUnavailable)
+		this.deps.probes.off("unpaired-decode", this.onUnpairedDecode)
 	}
 }

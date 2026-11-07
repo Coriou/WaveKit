@@ -210,6 +210,11 @@ export function probeRequest(
 	}
 }
 
+/** Shared acceptance as the composed core has it, on the harness clock. */
+export type PoolConfirm = (clock: {
+	now: number
+}) => NonNullable<ProbePoolDeps["confirm"]>
+
 export function poolHarness(
 	opts: {
 		settings?: ScannerSettings
@@ -217,6 +222,7 @@ export function poolHarness(
 		transports?: readonly TransportStrategy[]
 		engines?: FakeEngineView[]
 		digitalVoice?: ProbePoolDeps["digitalVoice"]
+		confirm?: PoolConfirm
 	} = {},
 ) {
 	const decoders = new FakeDecoderManager()
@@ -237,6 +243,7 @@ export function poolHarness(
 		allocatePort: () => Promise.resolve(port++),
 		logger: pino({ level: "silent" }),
 		now: () => clock.now,
+		...(opts.confirm ? { confirm: opts.confirm(clock) } : {}),
 	})
 	const evidence: { probeId: string; req: ProbeRequest; ev: DecodeEvidence }[] =
 		[]

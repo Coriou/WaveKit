@@ -422,6 +422,21 @@ function dsd(
 	return { decoderType: "dsd-fme", protocol, covers, options: { mode }, holdMs }
 }
 
+/** The scanner protocol a dsd-fme link line names (the same mapping the confirm interpreter keys on). */
+function linkLineProtocol(
+	line: DsdFmeLinkLine,
+	interp: InterpreterState,
+): ScannerProtocol {
+	switch (line.protocol) {
+		case "p25":
+			return "p25p1"
+		case "nxdn":
+			return interp.nxdn
+		default:
+			return line.protocol
+	}
+}
+
 function keepRequested(
 	modes: ProbeMode[],
 	protocols: ScannerProtocol[],
@@ -1817,7 +1832,15 @@ export class ProbePool extends EventEmitter {
 				if (this.isStopping(rec)) return
 				this.markOutput(rec)
 				if (this.isStopping(rec)) return
-				this.deliver(rec, interpretDsdFme({ kind: "link", line }, rec.interp))
+				const evs = interpretDsdFme({ kind: "link", line }, rec.interp)
+				const clean =
+					line.verified === true &&
+					line.crcErr === false &&
+					(line.fecErrs ?? 0) === 0
+				if (clean)
+					this.reportUnpaired(rec, linkLineProtocol(line, rec.interp), evs)
+				if (this.isStopping(rec)) return
+				this.deliver(rec, evs)
 			}
 			rec.detach.push(() => {
 				emitter.off("link", onLink)
@@ -2132,8 +2155,18 @@ export class ProbePool extends EventEmitter {
 				return
 			}
 			case "multimon-ng": {
-				if (rec.capcodes)
-					this.deliver(rec, rec.capcodes.interpret(out, this.now()))
+				if (rec.capcodes) {
+					const evs = rec.capcodes.interpret(out, this.now())
+					const capcode = multimonCapcode(out)
+					if (capcode !== null)
+						this.reportUnpaired(
+							rec,
+							capcode.startsWith("flex:") ? "flex" : "pocsag",
+							evs,
+						)
+					if (this.isStopping(rec)) return
+					this.deliver(rec, evs)
+				}
 				return
 			}
 			case "direwolf":
@@ -2184,6 +2217,32 @@ export class ProbePool extends EventEmitter {
 			key,
 			prev === undefined ? sample : prev + LATENCY_ALPHA * (sample - prev),
 		)
+	}
+
+	/**
+	 * A decode the interpreter holds for its pair yields no evidence, so without this nobody could
+	 * tell it from silence. Tells listeners (identify) a live decode awaits its second occurrence.
+	 * A listener failure is logged and never blocks the output.
+	 */
+	private reportUnpaired(
+		rec: ProbeRecord,
+		protocol: ScannerProtocol,
+		evs: readonly DecodeEvidence[],
+	): void {
+		if (
+			rec.transport.kind === "replay" ||
+			rec.epochEndedAt !== null ||
+			evs.some(ev => ev.identity !== undefined)
+		)
+			return
+		try {
+			this.emit("unpaired-decode", rec.probeId, rec.req, protocol)
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err, probeId: rec.probeId },
+				"Unpaired-decode listener failed",
+			)
+		}
 	}
 
 	private trackCall(

@@ -1580,6 +1580,8 @@ export interface ScannerIdentifyEventData {
 	state: ScannerIdentifyState
 	trials: ScannerIdentifyTrial[]
 	result?: ScannerIdentifyResult
+	/** The answer in one closed code, once the target is final. Absent on older cores and while it runs. */
+	verdict?: ScannerIdentifyVerdict
 }
 export interface ScannerIdentifyView {
 	target: ScannerIdentifyTarget
@@ -1629,4 +1631,67 @@ export interface ScannerCapture {
 	durationS: number
 	bytes: number
 	files: { iq: string; manifest: string }
+}
+
+/** Every `ScannerTrialOutcome`, for clients and for tests that must cover them all. */
+export const SCANNER_TRIAL_OUTCOMES = [
+	"pending",
+	"running",
+	"decoded",
+	"no-sync",
+	"crc-errors",
+	"timeout",
+	"skipped-budget",
+	"unsupported",
+	"not-needed",
+	"cancelled",
+	"heard",
+	"data-like",
+	"carrier-only",
+] as const satisfies readonly ScannerTrialOutcome[]
+/** Compile-time check: fails when `ScannerTrialOutcome` gains a member the list lacks. */
+export const SCANNER_TRIAL_OUTCOMES_COMPLETE: [ScannerTrialOutcome] extends [
+	(typeof SCANNER_TRIAL_OUTCOMES)[number],
+]
+	? true
+	: never = true
+
+/**
+ * `decoded`: a confirmed identity that met acceptance. `heard-digital-unconfirmed`: a lone sync or
+ * one decode, never `decoded`. `undecodable`: a signal is there and the trials found nothing.
+ * `nothing`: no signal. `could-not-test`: see `SCANNER_IDENTIFY_VERDICT_WHY`.
+ */
+export const SCANNER_IDENTIFY_VERDICT_CODES = [
+	"decoded",
+	"heard-digital-unconfirmed",
+	"undecodable",
+	"nothing",
+	"could-not-test",
+] as const
+export type ScannerIdentifyVerdictCode =
+	(typeof SCANNER_IDENTIFY_VERDICT_CODES)[number]
+
+/** Why a target `could-not-test`. `unknown` is the safe answer to anything unrecognised. */
+export const SCANNER_IDENTIFY_VERDICT_WHY = [
+	"budget",
+	"unsupported-protocol",
+	"unsupported-format",
+	"decoders-unavailable",
+	"no-live-audio",
+	"window-moved",
+	"source-lost",
+	"cancelled",
+	"interrupted",
+	"artefact",
+	"unknown",
+] as const
+export type ScannerIdentifyVerdictWhy =
+	(typeof SCANNER_IDENTIFY_VERDICT_WHY)[number]
+
+export interface ScannerIdentifyVerdict {
+	code: ScannerIdentifyVerdictCode
+	/** Present only on `could-not-test`. */
+	why?: ScannerIdentifyVerdictWhy
+	/** What was decoded or heard; otherwise the one protocol the request named, when it named one. */
+	protocol?: ScannerProtocol
 }

@@ -403,6 +403,59 @@ answers 507 ([IQ captures](API.md#named-iq-captures)). For a one-off window stre
 straight to you without storing it, use the
 [IQ snapshot](API.md#current-window-iq-snapshot).
 
+## Is that DMR at this frequency?
+
+`POST /api/scanner/identify` answers without moving anything: it never retunes and never moves live
+audio. Ask, then poll the job until it has ended:
+
+```sh
+curl --fail-with-body --header "$AUTH" --header "Content-Type: application/json" \
+  --data '{"sourceId":"rtl","target":{"frequencyHz":446100000},"protocols":["dmr"]}' \
+  "$API_ORIGIN/api/scanner/identify"
+curl --fail-with-body --header "$AUTH" "$API_ORIGIN/api/scanner/jobs/<id>"
+```
+
+**201** started a job. **200** means a running job already asks this, and you have that job: same
+source, a frequency within its `max(1 kHz, bw/2)`, your `protocols` contained in its own, and asking
+no more than it does. A finished job is never reused.
+
+Read `identify.targets[0].verdict` once the target is final. Say only what it says:
+
+| `verdict.code`              | Say                                                                        |
+| --------------------------- | -------------------------------------------------------------------------- |
+| `decoded`                   | It is `verdict.protocol`, which may not be the protocol you asked about    |
+| `heard-digital-unconfirmed` | Possibly `verdict.protocol`: a lone sync or one decode, not a confirmation |
+| `undecodable`               | Something is there, and the trials decoded nothing                         |
+| `nothing`                   | No signal within `timeoutMs`                                               |
+| `could-not-test`            | No answer. `verdict.why` says why; do not read it as "not DMR"             |
+
+`decoded` needs two decodes at least 2 s apart, so a continuous transmission takes about 2.5 s from
+its first decode and a single short burst stays `heard-digital-unconfirmed`. The lists are in `GET /api/enums`
+(`scanner.identifyVerdictCodes`, `scanner.identifyVerdictWhy`).
+
+A signal that comes and goes: send `"waitUntilSignal": true`, with `waitMs` for how long.
+
+**When it answers 409**, `details.next` is the call to make, in fixed text:
+
+- `OUT_OF_WINDOW`: the frequency is outside the tuned window (`details.window`). `next` is a
+  `POST /api/tuner/:sourceId/tune` with a `frequencyHz` that puts the target off the DC spike. It moves
+  the receiver for everyone, so decide that first; then ask again.
+- `SCANNER_SOURCE_BUSY`: a sweep holds the tuner, and identify needs a still window. `next` adds
+  `preempt: true`. That pauses the job (it fails if it was still starting) and no restore comes; read
+  `preempted.autoAfterIdleMs` in the answer, because `null` means it stays paused until someone calls
+  `POST /api/scanner/jobs/:id/resume`. See [When a scan holds the tuner](#when-a-scan-holds-the-tuner).
+  With `details.reason: "relay"` there is no `next`: a relay client has the tuner.
+
+**What it costs.** Each trial is one offset probe, 0.5 core of the 1-core `cpuBudgetCores` by default,
+one at a time. `timeoutMs` (default 15 s, at most 120 s) bounds the wait for a signal, not the trials.
+A DMR trial lasts about 2.2 s on silence and at most about 5.3 s after a first decode. Naming
+`protocols` keeps it to the trials you need; without it every plausible decoder takes its turn.
+
+**What it does to the rest.** Its probes preempt scan and passive probes at once (priority 101), for
+that short, bounded time; they come back by themselves. A sweep blocks it (409 above), and a retune
+that moves the window off the target ends it as `could-not-test` with `why: "window-moved"`.
+`trials[].transport` says which path each trial took; this core runs every live trial as `offset`.
+
 ## Read a 400
 
 Every validation 400 names the failing field and what it accepts, never the value you sent:

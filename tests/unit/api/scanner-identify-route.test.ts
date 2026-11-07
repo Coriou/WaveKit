@@ -9,18 +9,79 @@ import { ScannerApiError } from "../../../src/core/scanner/errors.js"
 describe("POST /api/scanner/identify", () => {
 	let app: FastifyInstance
 	const identify = vi.fn()
+	let joined = false
 
 	async function build(impl: () => Promise<unknown>) {
 		identify.mockReset()
 		identify.mockImplementation(impl)
 		app = Fastify({ logger: false })
 		await app.register(scannerRoutes, {
-			scanner: { identify } as unknown as ScannerRouteService,
+			scanner: {
+				identifyOrJoin: async (req: unknown) => {
+					const job: unknown = await identify(req)
+					return { job, joined }
+				},
+			} as unknown as ScannerRouteService,
 		})
 	}
 
 	afterEach(async () => {
 		await app.close()
+	})
+
+	it("answers 200 with the running job when the request joined it, 201 when it created one", async () => {
+		await build(() => Promise.resolve({ id: "j_running" }))
+		joined = true
+		const again = await app.inject({
+			method: "POST",
+			url: "/api/scanner/identify",
+			payload: { target: { frequencyHz: 446_193_750 } },
+		})
+		joined = false
+		expect(again.statusCode).toBe(200)
+		expect(again.json()).toMatchObject({ id: "j_running" })
+	})
+
+	it("hands waitUntilSignal and waitMs to the service", async () => {
+		await build(() => Promise.resolve({ id: "j_wait" }))
+		const res = await app.inject({
+			method: "POST",
+			url: "/api/scanner/identify",
+			payload: {
+				target: { frequencyHz: 446_193_750 },
+				waitUntilSignal: true,
+				waitMs: 5000,
+			},
+		})
+		expect(res.statusCode).toBe(201)
+		expect(identify).toHaveBeenLastCalledWith({
+			target: { frequencyHz: 446_193_750 },
+			waitUntilSignal: true,
+			waitMs: 5000,
+		})
+	})
+
+	it("passes the next step of a 409 through its body", async () => {
+		const next = {
+			method: "POST",
+			path: "/api/tuner/rtl/tune",
+			body: { frequencyHz: 446_093_750 },
+		}
+		await build(() =>
+			Promise.reject(
+				new ScannerApiError("tune first", "OUT_OF_WINDOW", 409, { next }),
+			),
+		)
+		const res = await app.inject({
+			method: "POST",
+			url: "/api/scanner/identify",
+			payload: { target: { frequencyHz: 446_193_750 } },
+		})
+		expect(res.statusCode).toBe(409)
+		expect(res.json()).toMatchObject({
+			code: "OUT_OF_WINDOW",
+			details: { next },
+		})
 	})
 
 	it("creates an identify job (201) from a frequency target or the whole window", async () => {
