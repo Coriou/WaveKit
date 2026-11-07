@@ -134,6 +134,7 @@ Cuts exact-rate channels out of a source's IQ in one native process instead of o
 
 **Location**: `src/core/channelizer/` (`ChannelizerManager`), `native/wavekit-chan/` (Rust)
 
+- **Open channels are readable**: `GET /api/diagnostics` lists them with what the manager knows of their cost ([API](API.md)).
 - **Opt-in twice**: `channelizer.enabled: true` constructs the manager in `src/index.ts`, and each decoder instance opts in with `useChannelizer: true`. Both default to false; with either off the decoder reads its raw fanout branch exactly as before. A decoder with `useChannelizer` but no channel request (not yet migrated, addendum §7) also stays on raw fanout. readsb and lora-meshtastic are never channelised.
 - **One `wavekit-chan` per source**, spawned lazily on the first channel request and stopped when its last channel is released. It reads raw CU8 (a live IQ source or a CU8 recording) from fanout branch `channelizer-<sourceId>` on stdin, takes JSON-line requests on fd 3 (`--control-fd 3`) and emits events on stdout. Each channel is a Unix socket `<channelizer.socketDir>/<sourceId>-g<generation>/<channelId>.sock`; the decoder gets a stream fed from it.
 - **Admission failures are suspensions, not crashes**: `channel-outside-capture`, `channel-request-invalid`, `channelizer-unavailable` (core-internal; the status DTO shows `suspended: true` without a `suspension` object). `channelizer-unavailable` decoders are retried every 15 s; after 5 unexpected `wavekit-chan` exits within 60 s a source gets no respawn until the oldest exit leaves the window.
