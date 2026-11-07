@@ -325,12 +325,14 @@ describe("nothing through the runner", () => {
 	it("a silence from readiness to the first block: no-samples", async () => {
 		const h = silent()
 		h.state.summary = quietSummaryOf()
+		h.state.iqFlowing = false
 		await h.runner.start()
+		await h.advance(10)
 		await h.advance(900)
 		h.runner.onBlock(1000, false)
 		await h.advance(50)
 		h.runner.onBlock(2000, false)
-		await h.advance(1000)
+		await h.advance(50)
 		await flushAsync()
 		await h.advance(10)
 		expect(h.last()?.verdict?.why).toBe("no-samples")
@@ -340,11 +342,13 @@ describe("nothing through the runner", () => {
 	it("repeated end samples through the deadline do not keep the proof fresh", async () => {
 		const h = silent()
 		h.state.summary = quietSummaryOf()
+		h.state.iqFlowing = false
 		await h.runner.start()
+		await h.advance(10)
 		h.runner.onBlock(1000, false)
 		await h.advance(50)
 		h.runner.onBlock(2000, false)
-		for (let i = 0; i < 40; i++) {
+		for (let i = 0; i < 19; i++) {
 			await h.advance(50)
 			h.runner.onBlock(2000, false)
 		}
