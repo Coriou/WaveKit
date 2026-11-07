@@ -1,5 +1,6 @@
 import { SpectrumPipeline } from "../../../../src/core/spectrum/pipeline.js"
 import type { Logger } from "../../../../src/utils/logger.js"
+import type { FrameWasmModule } from "../../../../src/core/spectrum/frame-wasm.js"
 import type {
 	FreqRange,
 	PendingEpoch,
@@ -66,6 +67,9 @@ export class Harness {
 			provisionalWindowMs?: number
 			logger?: Logger
 			now?: () => number
+			/** The wasm frame kernel (frame-wasm-harness.ts); absent runs the JS frame path. */
+			frameWasm?: FrameWasmModule | null
+			frameBatchFrames?: number
 		} = {},
 	) {
 		this.config = pipelineConfig(over)

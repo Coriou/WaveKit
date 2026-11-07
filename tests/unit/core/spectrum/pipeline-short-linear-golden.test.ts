@@ -12,6 +12,8 @@ import {
 import type { Iq } from "../../../mocks/scanner/signals.js"
 import { projectionDigest, shortInDb } from "./linear-golden-projection.js"
 import { FS, Harness, yieldToRpc } from "./pipeline-harness.js"
+import { FRAME_PATHS, WASM_LABEL } from "./frame-wasm-harness.js"
+import type { FrameWasmModule } from "../../../../src/core/spectrum/frame-wasm.js"
 
 /**
  * Linear-power short path against the dB short path, on what the change could move
@@ -129,10 +131,16 @@ const SCENES: Record<string, () => Iq> = {
 	},
 }
 
-function run(name: string, setup?: (h: Harness) => void): PipelineEvent[] {
+function run(
+	name: string,
+	setup?: (h: Harness) => void,
+	frameWasm: FrameWasmModule | null = null,
+): PipelineEvent[] {
 	const scene = SCENES[name]
 	if (!scene) throw new Error(`no scene ${name}`)
-	const h = new Harness({ format: "FLOAT32LE" })
+	const h = new Harness({ format: "FLOAT32LE" }, { frameWasm })
+	if (frameWasm && h.pipeline.framePath.path !== "wasm")
+		throw new Error(h.pipeline.framePath.reason)
 	setup?.(h)
 	h.start({ feed: true })
 	h.push(scene(), 8192)
@@ -164,26 +172,50 @@ describe("linear short path equals the dB short path (pre-change goldens)", () =
 		expect(tracks(run("nfm"))).toBeGreaterThan(0)
 	})
 
-	for (const name of Object.keys(SCENES)) {
-		it(`scene ${name}`, () => {
-			expect(summary(run(name))).toEqual(GOLDEN[name])
-		})
+	// The wasm frame kernel sends a sum inside its bracket to the same `shortOnInDb` (the import
+	// `short_db`), so the dB variants below exercise the kernel's fallback as well.
+	for (const fp of FRAME_PATHS) {
+		const label = fp.path === "js" ? "" : ` (${WASM_LABEL})`
+		describe.skipIf(fp.skip)(`frame path ${fp.path}`, () => {
+			for (const name of Object.keys(SCENES)) {
+				it(`scene ${name}${label}`, () => {
+					expect(summary(run(name, undefined, fp.frameWasm))).toEqual(
+						GOLDEN[name],
+					)
+				})
 
-		it(`scene ${name}: every short-path decision taken in dB gives the same stream`, () => {
-			expect(summary(run(name, h => shortInDb(h)))).toEqual(GOLDEN[name])
+				it(`scene ${name}: every short-path decision taken in dB gives the same stream${label}`, () => {
+					expect(summary(run(name, h => shortInDb(h), fp.frameWasm))).toEqual(
+						GOLDEN[name],
+					)
+				})
+			}
+
+			it(`a 1 dB fault in the short path's dB comparison fails the comparison${label}`, () => {
+				// The accumulator read 1 dB high before its dB comparison: near-threshold bursts flip.
+				for (const name of ["modeS", "bursts"]) {
+					const events = run(
+						name,
+						h =>
+							shortInDb(
+								h,
+								exact => (d, i, a, was) => exact(d, i, a * 10 ** 0.1, was),
+							),
+						fp.frameWasm,
+					)
+					expect(summary(events)).not.toEqual(GOLDEN[name])
+				}
+			})
 		})
 	}
 
-	it("a 1 dB fault in the short path's dB comparison fails the comparison", () => {
-		// The accumulator read 1 dB high before its dB comparison: near-threshold bursts flip.
-		for (const name of ["modeS", "bursts"]) {
-			const events = run(name, h =>
-				shortInDb(
-					h,
-					exact => (d, i, a, was) => exact(d, i, a * 10 ** 0.1, was),
-				),
-			)
-			expect(summary(events)).not.toEqual(GOLDEN[name])
-		}
-	})
+	it.skipIf(FRAME_PATHS[1]!.skip)(
+		`the wasm kernel gives the JS stream itself, event for event (${WASM_LABEL})`,
+		() => {
+			for (const name of Object.keys(SCENES))
+				expect(run(name, undefined, FRAME_PATHS[1]!.frameWasm)).toEqual(
+					run(name),
+				)
+		},
+	)
 })

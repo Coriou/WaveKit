@@ -80,3 +80,53 @@ describe("wavekit-chan image integration (addendum §10)", () => {
 			expect(notices).toMatch(new RegExp(`^\\| ${crate} +\\|`, "m"))
 	})
 })
+
+describe("wasm kernels in the image", () => {
+	const finalBase = () => {
+		const start = dockerfile.search(/^FROM \S+ AS final-base$/m)
+		const rest = dockerfile.slice(start + 1)
+		return rest.slice(0, rest.search(/^FROM /m))
+	}
+	it("final-base refuses a kernel that does not validate or whose source digest is not the bundle's", () => {
+		const stage = finalBase()
+		const check = stage.indexOf("RUN node -e")
+		expect(check).toBeGreaterThan(-1)
+		for (const wasm of ["spectrum-frame.wasm", "wideband-nfm.wasm"]) {
+			expect(
+				stage.indexOf(`COPY --from=frame-wasm /out/${wasm} /app/dist/${wasm}`),
+			).toBeLessThan(check)
+			expect(stage.slice(check)).toContain(`"${wasm}"`)
+		}
+		expect(
+			stage.indexOf("COPY --from=node-build /app/dist /app/dist"),
+		).toBeLessThan(check)
+		const line = stage.slice(check, stage.indexOf("\n", check))
+		expect(line).toContain("WebAssembly.validate(x)")
+		expect(line).toContain('"wavekit.source-digest"')
+		expect(line).toContain('"spectrum-worker.js", "FRAME"')
+		expect(line).toContain('"index.js", "NFM"')
+		// each refusal exits non-zero; readFileSync throws (non-zero) on a missing file
+		expect(line.match(/process\.exit\(1\)/g)).toHaveLength(2)
+		expect(line).toContain("readFileSync(f)")
+		// no node flags: the check sees the runtime's default wasm features (SIMD)
+		expect(line.startsWith("RUN node -e '")).toBe(true)
+	})
+	it("the frame-wasm stage builds from exactly the digest's inputs (build.sh, Cargo.toml, Cargo.lock, src)", () => {
+		for (const crate of ["wavekit-frame", "wavekit-nfm"]) {
+			expect(dockerfile).toContain(
+				`COPY native/${crate}/Cargo.toml native/${crate}/Cargo.lock native/${crate}/build.sh ./`,
+			)
+			expect(dockerfile).toContain(`COPY native/${crate}/src ./src`)
+		}
+	})
+	it("keeps the kernels' target dirs out of the context and their notices in", () => {
+		for (const crate of ["wavekit-frame", "wavekit-nfm"]) {
+			expect(dockerignore).toContain(`native/${crate}/target`)
+			const reinclude = dockerignore.indexOf(`!native/${crate}/LICENSES.md`)
+			expect(reinclude).toBeGreaterThan(dockerignore.indexOf("*.md"))
+			expect(dockerfile).toContain(
+				`COPY native/${crate}/LICENSES.md /usr/share/doc/${crate}/LICENSES.md`,
+			)
+		}
+	})
+})

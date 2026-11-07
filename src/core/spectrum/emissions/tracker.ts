@@ -74,6 +74,8 @@ interface EpochInfo {
 }
 
 const ENV_MAX_MS = 1000
+/** `Tracker.frame`'s per-bin floor: `powerToDb`'s −200 dB in linear power (the wasm kernel takes this value). */
+export const FRAME_POWER_FLOOR = 10 ** (-200 / 10)
 const ACF_MIN_MS = 300
 const SPEC_PAD_BINS = 2
 const OBW_MIN_SNR_DB = 20
@@ -646,7 +648,7 @@ export class Tracker {
 	 */
 	frame(framePower: Float64Array, scale: number, sample: number): void {
 		this.n = framePower.length
-		const floor = 10 ** (-200 / 10)
+		const floor = FRAME_POWER_FLOOR
 		const samplesPerMs = (this.opts.binHz * framePower.length) / 1000
 		for (const t of this.open) {
 			if (t.frozen) continue
@@ -655,13 +657,58 @@ export class Tracker {
 				const p = framePower[i]! * scale
 				sum += p > floor ? p : floor
 			}
-			if (t.envOrigin < 0) t.envOrigin = sample
-			const bucket = Math.floor((sample - t.envOrigin) / samplesPerMs)
-			if (bucket !== t.envBucket) this.flushEnvelope(t, bucket)
-			if (t.frozen) continue
-			t.envSum += sum
-			t.envFrames++
+			this.envelopeFrame(t, sum, sample, samplesPerMs)
 		}
+	}
+
+	/**
+	 * The wasm frame kernel's half of `frame`: `[startBin, endBin)` of every open track, in order,
+	 * into `bins` (0, 0 for a frozen one, which `frame` skips). Returns the count, or −1 past `cap`.
+	 */
+	frameBins(bins: Uint32Array, cap: number): number {
+		const open = this.open
+		if (open.length > cap) return -1
+		for (let j = 0; j < open.length; j++) {
+			const t = open[j]!
+			bins[2 * j] = t.frozen ? 0 : t.startBin
+			bins[2 * j + 1] = t.frozen ? 0 : t.endBin
+		}
+		return open.length
+	}
+
+	/**
+	 * `frame` with each track's sum already taken by the kernel over the bins `frameBins` gave:
+	 * `sums[offset + j]` belongs to open track j. The open set is the one `frameBins` saw (tracks open
+	 * and close only in block stages); a track that froze since is skipped, as `frame` skips it.
+	 */
+	frameSums(
+		sums: Float64Array,
+		offset: number,
+		sample: number,
+		n: number,
+	): void {
+		this.n = n
+		const samplesPerMs = (this.opts.binHz * n) / 1000
+		const open = this.open
+		for (let j = 0; j < open.length; j++) {
+			const t = open[j]!
+			if (t.frozen) continue
+			this.envelopeFrame(t, sums[offset + j]!, sample, samplesPerMs)
+		}
+	}
+
+	private envelopeFrame(
+		t: OpenTrack,
+		sum: number,
+		sample: number,
+		samplesPerMs: number,
+	): void {
+		if (t.envOrigin < 0) t.envOrigin = sample
+		const bucket = Math.floor((sample - t.envOrigin) / samplesPerMs)
+		if (bucket !== t.envBucket) this.flushEnvelope(t, bucket)
+		if (t.frozen) return
+		t.envSum += sum
+		t.envFrames++
 	}
 
 	/** Turns gate fields on or off. Clearing the plan drops them from open tracks. */

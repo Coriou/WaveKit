@@ -16,6 +16,8 @@ import {
 	withDbFrame,
 } from "./linear-golden-projection.js"
 import { FS, Harness, yieldToRpc } from "./pipeline-harness.js"
+import { FRAME_PATHS, frameWasm, WASM_LABEL } from "./frame-wasm-harness.js"
+import type { FrameWasmModule } from "../../../../src/core/spectrum/frame-wasm.js"
 
 /**
  * Linear-power Tracker.frame against the per-frame dB path it replaced, on what that change could
@@ -125,10 +127,15 @@ const SCENES: Record<string, () => Iq> = {
 	},
 }
 
-function play(name: string): PipelineEvent[] {
+function play(
+	name: string,
+	kernel: FrameWasmModule | null = null,
+): PipelineEvent[] {
 	const scene = SCENES[name]
 	if (!scene) throw new Error(`no scene ${name}`)
-	const h = new Harness({ format: "FLOAT32LE" })
+	const h = new Harness({ format: "FLOAT32LE" }, { frameWasm: kernel })
+	if (kernel && h.pipeline.framePath.path !== "wasm")
+		throw new Error(h.pipeline.framePath.reason)
 	h.start({ feed: true })
 	h.push(scene(), 8192)
 	return h.events
@@ -184,6 +191,21 @@ describe("linear Tracker.frame against the dB path's recorded event streams", ()
 			).toEqual([])
 		})
 	}
+
+	// The wasm kernel takes the track sums Tracker.frame would take (Tracker.frameSums applies them):
+	// the recorded streams must come out of it too, and the JS stream itself, event for event.
+	describe.skipIf(FRAME_PATHS[1]!.skip)(
+		`frame path wasm (${WASM_LABEL})`,
+		() => {
+			for (const name of Object.keys(SCENES)) {
+				it(`scene ${name} (wasm)`, () => {
+					const events = play(name, frameWasm)
+					expect(departures(name, events, ACF_BOUND)).toEqual([])
+					expect(events).toEqual(run(name))
+				})
+			}
+		},
+	)
 
 	it("a fault in the per-frame dB values fails the comparison", () => {
 		// The dB path with its Float32 values rounded to 0.5 dB, as a coarser conversion would.

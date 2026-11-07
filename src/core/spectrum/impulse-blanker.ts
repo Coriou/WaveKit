@@ -15,6 +15,7 @@
  * Powers are the linear shifted |X|² sums of accumulateShiftedPower (one frame each). Pure and
  * synchronous; the pipeline (Task 10) owns one per source.
  */
+import { WaveKitError } from "../../utils/errors.js"
 export const BLANK_RISE_DB = 6
 export const BLANK_BIN_FRACTION = 0.5
 export const RFI_MIN_EVENTS = 3
@@ -22,11 +23,29 @@ export const RFI_INTERVAL_TOLERANCE = 0.1
 export const RFI_HOLD_MS = 2000
 const MAX_EVENTS = 8
 const MIN_PENDING_FRAMES = 3
-const RISE = 10 ** (BLANK_RISE_DB / 10)
+/** The rise factor and the reference floor of `rises`; the wasm frame kernel takes these values. */
+export const BLANK_RISE = 10 ** (BLANK_RISE_DB / 10)
+export const BLANK_TINY = 1e-30
+const RISE = BLANK_RISE
 const MEDIAN_TO_MEAN = 1 / Math.LN2 // one frame's bin power is exponential: median = ln 2 × mean
-const TINY = 1e-30
+const TINY = BLANK_TINY
 
 export type FrameVerdict = "keep" | "blank" | "pending"
+
+/** The usable span [lo, hi) `rises` counts over, and the rising-bin count that blanks a frame. */
+export function blankSpan(opts: {
+	fftSize: number
+	usableStartBin: number
+	usableEndBin: number
+}): { lo: number; hi: number; need: number } {
+	const lo = Math.max(0, opts.usableStartBin)
+	const hi = Math.min(opts.fftSize, opts.usableEndBin)
+	return {
+		lo,
+		hi,
+		need: Math.max(1, Math.ceil(BLANK_BIN_FRACTION * (hi - lo))),
+	}
+}
 
 export interface BlockBlanking {
 	/** Frames offered in the block. */
@@ -52,11 +71,18 @@ export interface ImpulseBlankerOptions {
 	usableStartBin: number
 	usableEndBin: number
 	sampleRateHz: number
+	/**
+	 * The raw sum and the reference in memory the caller owns (the wasm frame kernel's linear
+	 * memory): the kernel adds each frame to `raw` and reads `ref`; this class keeps the rest.
+	 */
+	storage?: { raw: Float64Array; ref: Float64Array }
 }
 
 interface PendingFrame {
 	startSample: number
 	power: Float64Array
+	/** From `pool` (returned there); false for a kernel slot the caller owns. */
+	pooled: boolean
 }
 
 export class ImpulseBlanker {
@@ -81,13 +107,24 @@ export class ImpulseBlanker {
 
 	constructor(opts: ImpulseBlankerOptions) {
 		this.n = opts.fftSize
-		this.lo = Math.max(0, opts.usableStartBin)
-		this.hi = Math.min(opts.fftSize, opts.usableEndBin)
-		this.need = Math.max(1, Math.ceil(BLANK_BIN_FRACTION * (this.hi - this.lo)))
+		const span = blankSpan(opts)
+		this.lo = span.lo
+		this.hi = span.hi
+		this.need = span.need
 		this.fs = opts.sampleRateHz
-		this.ref = new Float64Array(this.n)
+		this.ref = opts.storage?.ref ?? new Float64Array(this.n)
 		this.median = new Float64Array(this.n)
-		this.raw = new Float64Array(this.n)
+		this.raw = opts.storage?.raw ?? new Float64Array(this.n)
+	}
+
+	/** A reference exists: frames are judged on offer, not held. */
+	get hasReference(): boolean {
+		return this.hasRef
+	}
+
+	/** Frames held for endBlock in this block. */
+	get pendingCount(): number {
+		return this.pending.length
 	}
 
 	/** Frames blanked since construction. */
@@ -112,12 +149,38 @@ export class ImpulseBlanker {
 		if (!this.hasRef) {
 			const copy = this.pool.pop() ?? new Float64Array(this.n)
 			copy.set(power)
-			this.pending.push({ startSample, power: copy })
+			this.pending.push({ startSample, power: copy, pooled: true })
 			return "pending"
 		}
 		if (!this.rises(power, this.ref)) return "keep"
 		this.blank(startSample)
 		return "blank"
+	}
+
+	/**
+	 * `offer` for a frame the wasm kernel judged: it already added the frame to `raw` and, for
+	 * "pending", copied it to `power` (a kernel slot, valid until this block ends). This keeps the
+	 * timing, counts and the pending list exactly as `offer` would.
+	 */
+	noteOffer(
+		startSample: number,
+		verdict: FrameVerdict,
+		power: Float64Array | null,
+	): void {
+		this.latest = startSample
+		if (this.lastBlank !== null && startSample < this.lastBlank) {
+			this.events = []
+			this.lastBlank = null
+		}
+		this.frames++
+		if (verdict === "pending") {
+			if (!power)
+				throw new WaveKitError(
+					"a pending frame needs its power",
+					"SCANNER_FRAME_KERNEL",
+				)
+			this.pending.push({ startSample, power, pooled: false })
+		} else if (verdict === "blank") this.blank(startSample)
 	}
 
 	/**
@@ -147,7 +210,7 @@ export class ImpulseBlanker {
 
 	/** Forgets the open block (discarded, stale or never closed). */
 	dropBlock(): void {
-		for (const f of this.pending) this.pool.push(f.power)
+		for (const f of this.pending) if (f.pooled) this.pool.push(f.power)
 		this.pending = []
 		this.clearBlock()
 	}
@@ -216,7 +279,7 @@ export class ImpulseBlanker {
 			else
 				for (let i = 0; i < this.n; i++)
 					acc[i] = (acc[i] ?? 0) + (f.power[i] ?? 0)
-			this.pool.push(f.power)
+			if (f.pooled) this.pool.push(f.power)
 		}
 		this.pending = []
 	}

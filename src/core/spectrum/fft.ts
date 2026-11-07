@@ -47,6 +47,13 @@ export class Fft {
 		}
 	}
 
+	/** Copies the twiddle and bit-reversal tables (the wasm frame kernel runs on these exact values). */
+	copyTables(cos: Float64Array, sin: Float64Array, rev: Uint32Array): void {
+		cos.set(this.cos)
+		sin.set(this.sin)
+		rev.set(this.rev)
+	}
+
 	/** X[k] = Σ x[n]·e^{−j2πkn/N}, in place. */
 	transform(re: Float32Array, im: Float32Array): void {
 		const n = this.size

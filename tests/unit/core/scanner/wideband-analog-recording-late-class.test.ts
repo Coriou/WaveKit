@@ -6,6 +6,8 @@
  * unchanged). A snapshot not classed analog-fm takes `otherClass` (default "unknown"); a narrow
  * digital class there is what the spectrum reads for a weak or low-deviation NFM over.
  */
+// WAVEKIT_REQUIRE_NFM_WASM=1: fail rather than run the JS chain (wideband-recorder-harness.ts).
+import "./recorder-dsp-required.js"
 import { readFile, readdir, rm } from "node:fs/promises"
 import { join } from "node:path"
 import pino from "pino"

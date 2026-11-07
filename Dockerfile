@@ -592,6 +592,35 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=chan-cargo-registry-$
     { : | wavekit-chan --generation 1 --input-format cu8 --input-rate 2048000 --input-center 100000000 --usable-fraction 0.8 --block-samples 16384 --socket-dir /tmp --control-fd 3 3</dev/null | head -n 1 | grep -q '"recenter":true' || { echo "wavekit-chan does not take recenter"; exit 1; }; }
 
 # ============================================================================
+# Stage: frame-wasm
+# Purpose: Build the wasm32 SIMD kernels (AGPL-3.0-or-later, no dependencies):
+#          the spectrum worker's frame kernel (native/wavekit-frame) and the
+#          wideband recorder's NFM chain (native/wavekit-nfm). One artefact
+#          each serves amd64 and arm64, so they build once on the build
+#          platform with the pinned toolchain; each falls back to JS when it
+#          is missing or does not validate.
+# ============================================================================
+FROM --platform=$BUILDPLATFORM ${RUST_IMAGE} AS frame-wasm
+
+WORKDIR /src/wavekit-frame
+
+RUN rustup target add wasm32-unknown-unknown
+
+COPY native/wavekit-frame/Cargo.toml native/wavekit-frame/Cargo.lock native/wavekit-frame/build.sh ./
+COPY native/wavekit-frame/src ./src
+
+RUN CARGO_TARGET_DIR=/tmp/frame-target sh ./build.sh /out/spectrum-frame.wasm && \
+    test "$(head -c 4 /out/spectrum-frame.wasm | od -An -tx1 | tr -d ' ')" = "0061736d"
+
+WORKDIR /src/wavekit-nfm
+
+COPY native/wavekit-nfm/Cargo.toml native/wavekit-nfm/Cargo.lock native/wavekit-nfm/build.sh ./
+COPY native/wavekit-nfm/src ./src
+
+RUN CARGO_TARGET_DIR=/tmp/nfm-target sh ./build.sh /out/wideband-nfm.wasm && \
+    test "$(head -c 4 /out/wideband-nfm.wasm | od -An -tx1 | tr -d ' ')" = "0061736d"
+
+# ============================================================================
 # Stage: final-base
 # Purpose: Common ancestor of `final` and `final-core`. Holds every artifact
 #          shared by both: python runtime, every decoder binary + library,
@@ -695,6 +724,16 @@ RUN echo "Verifying decoder installations..." && \
 # Node runtime + app dist + workspace packages + config
 COPY --from=node-build /usr/local/bin/node /usr/local/bin/
 COPY --from=node-build /app/dist /app/dist
+# wasm frame kernel beside dist/spectrum-worker.js (frame-wasm stage)
+COPY --from=frame-wasm /out/spectrum-frame.wasm /app/dist/spectrum-frame.wasm
+COPY native/wavekit-frame/LICENSES.md /usr/share/doc/wavekit-frame/LICENSES.md
+# wasm NFM chain beside dist/index.js, where the wideband recorder looks (frame-wasm stage)
+COPY --from=frame-wasm /out/wideband-nfm.wasm /app/dist/wideband-nfm.wasm
+COPY native/wavekit-nfm/LICENSES.md /usr/share/doc/wavekit-nfm/LICENSES.md
+# Both kernels must validate under this image's node (default flags, so wasm SIMD) and carry the
+# source digest the bundles were built with (scripts/kernel-digest.mjs): a missing, truncated,
+# non-SIMD or stale artefact fails the build here instead of logging "path js" at runtime.
+RUN node -e 'const fs = require("node:fs"); for (const [w, b, k] of [["spectrum-frame.wasm", "spectrum-worker.js", "FRAME"], ["wideband-nfm.wasm", "index.js", "NFM"]]) { const f = "/app/dist/" + w, x = fs.readFileSync(f); if (!WebAssembly.validate(x)) { console.error(f + " does not validate"); process.exit(1) } const s = WebAssembly.Module.customSections(new WebAssembly.Module(x), "wavekit.source-digest"), d = s.length === 1 ? new TextDecoder().decode(s[0]) : "", m = new RegExp(k + "_SOURCE_DIGEST\\d* = \"([0-9a-f]{64})\"").exec(fs.readFileSync("/app/dist/" + b, "utf8")); if (!m || m[1] !== d) { console.error(f + " source digest does not match dist/" + b); process.exit(1) } }'
 COPY --from=node-build /app/node_modules /app/node_modules
 COPY --from=node-build /app/packages/shared/package.json /app/packages/shared/package.json
 COPY --from=node-build /app/packages/shared/dist /app/packages/shared/dist

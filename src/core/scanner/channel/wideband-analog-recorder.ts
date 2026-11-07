@@ -61,7 +61,8 @@ import { VoiceActivityGate, VoiceOnAirMeter } from "./voice-activity.js"
 import { ToneClassEvidence } from "./tone-class.js"
 import {
 	MAX_SLICE_SAMPLES,
-	WidebandNfmChain,
+	createWidebandNfmChain,
+	type WidebandNfmChain,
 	widebandNfmSupported,
 } from "./wideband-nfm.js"
 import type { ProofAnalogInput } from "../scanner-redesign-contract.js"
@@ -1516,7 +1517,7 @@ export class WidebandAnalogRecorder {
 		}
 		const fs = epoch.sampleRateHz
 		const perMs = fs / 1000
-		const chain = new WidebandNfmChain({
+		const chain = createWidebandNfmChain({
 			inputRateHz: fs,
 			offsetHz: track.centreHz - epoch.centreHz,
 		})

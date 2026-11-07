@@ -22,7 +22,12 @@
  *   soon as `push` returns. The `re`/`im` arrays passed to `onFrame` are reused
  *   for every frame and are valid only during the callback; the callee may
  *   transform them in place.
+ * - Raw mode (`raw: true`, the wasm frame kernel): frames are not converted; `re`/`im` are stale,
+ *   `clipped` is 0, and `copyFrame` hands the frame's bytes to the callee during the callback.
+ *   `convertRawFrame` converts that frame after all (the kernel fell back to JS inside the
+ *   callback). Framing, seams, counter runs and hold-back are the same in both modes.
  */
+import { Buffer } from "node:buffer"
 import { WaveKitError } from "../../utils/errors.js"
 import type { IqFormat } from "./types.js"
 import { hannWindow } from "./fft.js"
@@ -74,6 +79,11 @@ export class FrameSource {
 	private readonly queue: QueuedInput[] = []
 	private buf = new Uint8Array(0)
 	private view = new DataView(this.buf.buffer)
+	/** `buf` as a Buffer, for an allocation-free `copyFrame`. */
+	private bufBytes = Buffer.from(this.buf.buffer)
+	private raw: boolean
+	/** The frame in the current `onFrame` callback was emitted raw and is not converted yet. */
+	private rawFrame = false
 	/** Unconsumed bytes are buf[head, tail); buf[head] is the first byte of sample bufStartSample. */
 	private head = 0
 	private tail = 0
@@ -87,7 +97,12 @@ export class FrameSource {
 	private streakLen = 0
 	private runStartSample: number | null = null
 
-	constructor(opts: { format: IqFormat; fftSize: number; overlap?: 0 | 0.5 }) {
+	constructor(opts: {
+		format: IqFormat
+		fftSize: number
+		overlap?: 0 | 0.5
+		raw?: boolean
+	}) {
 		const n = opts.fftSize
 		if (!Number.isInteger(n) || n < 2 || n > 1 << 20 || (n & (n - 1)) !== 0) {
 			throw new WaveKitError(
@@ -104,6 +119,28 @@ export class FrameSource {
 		this.window = hannWindow(n)
 		this.re = new Float32Array(n)
 		this.im = new Float32Array(n)
+		this.raw = opts.raw ?? false
+	}
+
+	/** Raw mode on or off; takes effect from the next frame (the kernel's JS fallback turns it off). */
+	setRaw(raw: boolean): void {
+		this.raw = raw
+	}
+
+	/**
+	 * During `onFrame` only: converts the current frame into `re`/`im` if it was emitted raw and
+	 * returns its clipped count; null when the frame was already converted (then `frame.clipped`
+	 * holds it). Raw mode turned off inside the callback leaves the frame in hand unconverted.
+	 */
+	convertRawFrame(): number | null {
+		if (!this.rawFrame) return null
+		this.rawFrame = false
+		return this.convert(this.head)
+	}
+
+	/** During `onFrame` only: copies the current frame's raw bytes to `dst` at `dstOffset`. */
+	copyFrame(dst: Uint8Array, dstOffset: number): void {
+		this.bufBytes.copy(dst, dstOffset, this.head, this.head + this.frameBytes)
 	}
 
 	/** The counter run currently being received, if any (samples so far). */
@@ -233,13 +270,15 @@ export class FrameSource {
 
 	private emitFrames(limit: number, onFrame: (frame: Frame) => void): void {
 		while (limit - this.head >= this.frameBytes) {
-			const clipped = this.convert(this.head)
+			this.rawFrame = this.raw
+			const clipped = this.raw ? 0 : this.convert(this.head)
 			onFrame({
 				startSample: this.bufStartSample,
 				re: this.re,
 				im: this.im,
 				clipped,
 			})
+			this.rawFrame = false
 			this.head += this.hopBytes
 			this.bufStartSample += this.hopSamples
 		}
@@ -330,6 +369,7 @@ export class FrameSource {
 				grown.set(this.buf.subarray(0, this.tail))
 				this.buf = grown
 				this.view = new DataView(grown.buffer)
+				this.bufBytes = Buffer.from(grown.buffer)
 			}
 		}
 		this.buf.set(bytes, this.tail)

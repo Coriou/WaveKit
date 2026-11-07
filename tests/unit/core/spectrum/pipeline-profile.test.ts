@@ -23,6 +23,7 @@ import {
 	N,
 	pipelineConfig,
 } from "./pipeline-harness.js"
+import { FRAME_PATHS } from "./frame-wasm-harness.js"
 
 const baseGolden = JSON.parse(
 	readFileSync(
@@ -479,6 +480,88 @@ describe("spectrum pipeline profile", () => {
 		expect(stageSum(profile!)).toBeCloseTo(profile!.busyMs, 6)
 	})
 })
+
+describe.each(FRAME_PATHS)(
+	"spectrum pipeline profile on the $path frame path",
+	({ path, frameWasm: kernelModule, skip }) => {
+		it.skipIf(skip)(
+			"busy is the sum of the stages and the end-of-chunk kernel flush counts once",
+			() => {
+				let t = 0
+				const pipeline = new SpectrumPipeline(
+					pipelineConfig({ format: "FLOAT32LE" }),
+					{
+						now: () => 0,
+						profile: { sampleEvery: 1 },
+						profileNow: () => t,
+						frameWasm: kernelModule,
+					},
+				)
+				expect(pipeline.framePath.path).toBe(path)
+				feed(pipeline, new Uint8Array(0)) // masks, feed and the stream (a new FrameSource)
+				const internals = pipeline as unknown as {
+					frames: {
+						append: (part: Uint8Array) => void
+						copyFrame: (dst: Uint8Array, at: number) => void
+					}
+					kernel: { run: (s: unknown) => number } | null
+				}
+				// the clock moves only inside these: framing 10 per chunk, staging 1 per frame (wasm),
+				// the kernel call 100 per flush (wasm)
+				let appends = 0
+				let staged = 0
+				let flushes = 0
+				const frames = internals.frames
+				const append = frames.append.bind(frames)
+				frames.append = part => {
+					appends++
+					t += 10
+					append(part)
+				}
+				const copyFrame = frames.copyFrame.bind(frames)
+				frames.copyFrame = (dst, at) => {
+					staged++
+					t += 1
+					copyFrame(dst, at)
+				}
+				const kernel = internals.kernel
+				if (kernel) {
+					const run = kernel.run.bind(kernel)
+					kernel.run = s => {
+						flushes++
+						t += 100
+						return run(s)
+					}
+				}
+				// part of one block: no block finishes, so only framing, staging and flushes take time
+				const half = bytes.subarray(0, Math.floor(BLOCK / 2) * 8)
+				for (let off = 0; off < half.length; off += 4096 * 8)
+					pipeline.handle({
+						kind: "bytes",
+						startSample: off / 8,
+						bytes: half.subarray(off, Math.min(half.length, off + 4096 * 8)),
+					})
+				const profile = profileOf(pipeline.exportEngineState())
+				expect(profile).toBeDefined()
+				expect(appends).toBeGreaterThan(1)
+				if (path === "wasm") {
+					expect(flushes).toBe(appends) // one flush per chunk (no batch fills in half a block)
+					expect(staged).toBeGreaterThan(0)
+				} else {
+					expect(flushes).toBe(0)
+					expect(staged).toBe(0)
+				}
+				expect(profile!.stages.fft).toBeCloseTo(100 * flushes, 6)
+				expect(profile!.stages.window).toBeCloseTo(10 * appends + staged, 6)
+				expect(profile!.busyMs).toBeCloseTo(
+					10 * appends + staged + 100 * flushes,
+					6,
+				)
+				expect(stageSum(profile!)).toBeCloseTo(profile!.busyMs, 6)
+			},
+		)
+	},
+)
 
 function stageSum(profile: ProfileShape): number {
 	return STAGES.reduce((sum, stage) => sum + profile.stages[stage], 0)

@@ -532,20 +532,302 @@ equivalence property, and a `Math.log10` call-count guard
 too, so no stage converts a whole frame to dB; see [below](#frame-tracks-and-main-thread-reads-2026-11-06).
 
 `scripts/profile-spectrum.ts`, 30 s of synthetic IQ (noise, CW, NFM, Mode-S-like pulses), on a
-busy Mac. Compare before and after in the same row, not absolute rates.
+busy Mac. These rows are wall clock, taken before the tool read thread CPU. Compare before and after
+in the same row, not absolute rates.
 
-| Mode, ms of worker CPU per s of IQ | Before | After | Load average |
-| ---------------------------------- | ------ | ----- | ------------ |
-| `stages`, short path (self)        | 137.9  | 48.8  | 15.6 → 17.8  |
-| `stages`, built-in `tracker` span  | 313.3  | 173.3 | 15.6 → 17.8  |
-| `stages`, worker total             | 846.4  | 644.7 | 15.6 → 17.8  |
-| `bare`, `handle()` total           | 1113.2 | 634.0 | 52.6 → 56.8  |
+| Mode, wall ms per s of IQ         | Before | After | Load average |
+| --------------------------------- | ------ | ----- | ------------ |
+| `stages`, short path (self)       | 137.9  | 48.8  | 15.6 → 17.8  |
+| `stages`, built-in `tracker` span | 313.3  | 173.3 | 15.6 → 17.8  |
+| `stages`, worker total            | 846.4  | 644.7 | 15.6 → 17.8  |
+| `bare`, `handle()` total          | 1113.2 | 634.0 | 52.6 → 56.8  |
 
 A first build that sent `powerToDb` through the one-bin helper `binPowerDb` was slower in
 `bare` mode (565 to 602 against 522 to 540, load 12 to 16): the bundled worker did not inline
 that call, and the remaining frame dB pass doubled in cost. `powerToDb` keeps its inline loop.
 The spectrum feed stays on without display clients: the scanner, occupancy, backfill and
 status read every block summary.
+
+### Frame path cost on thread CPU (2026-11-06)
+
+Measured to judge moving the frame path out of JS; nothing here is built into the product.
+`scripts/profile-spectrum.ts` now reads `process.threadCpuUsage()`, the same kind of figure the passive
+guard reads through `worker.cpuUsage()`. `scripts/profile-frame-path-wasm.ts` runs the Rust path natively
+and as wasm32 with SIMD on the same synthetic scene, alternated. Figures are core fraction per second of
+IQ, f64 FFT, FFT 2048 at 2.4 Msps and 1024 at 1.024 Msps, overlap 0, on a Mac i5 with other work running.
+SMT and cache sharing inflate thread CPU on a loaded host, so a quiet host reads lower.
+
+| Measure                                     | 2.4 Msps      | Load     | 1.024 Msps    | Load     |
+| ------------------------------------------- | ------------- | -------- | ------------- | -------- |
+| JS `handle()` plus wire, whole worker path  | 0.346 - 0.376 | 14 to 19 | 0.142 - 0.156 | 20 to 28 |
+| JS frame path share (self CPU, `stages`)    | 83 %          | 24 to 30 | 80 %          | 15 to 19 |
+| Rust frame path, native                     | 0.044 - 0.053 | 15 to 35 | 0.020 - 0.021 | 21 to 27 |
+| Rust frame path, wasm32 SIMD, with boundary | 0.089 - 0.095 | 15 to 28 | 0.040 - 0.042 | 21 to 27 |
+
+The boundary is one call per chunk with the chunk copied into linear memory and flat block results
+copied out: about 1.4 ms of CPU per second of IQ at 2.4 Msps. rustfft's wasm SIMD kernels need its
+`wasm_simd` feature and `+simd128`: the FFT stage reads 0.029 core with them and 0.044 without. Rust power bins
+differ from the JS ones by up to 0.011 dB over 2000 frames (0.0032 dB above -100 dB); the JS transform
+stores Float32 at every stage, the likely cause. The native and wasm32 f64 builds agree within 1e-10 dB.
+
+## Spectrum frame path in wasm (2026-11-07)
+
+The spectrum worker runs its per-frame path in a wasm32 kernel, `native/wavekit-frame`, when the
+artefact `dist/spectrum-frame.wasm` validates and instantiates; otherwise it runs the JS path. The
+JS path stays the reference and the fallback. One info line per worker names the path and the reason.
+
+**Scope.** One `fp_run` call per batch: the frames of an input chunk, cut where a block ends or a
+block is discarded. Per frame the kernel converts and windows the raw IQ (U8, S16 or FLOAT32), runs
+the FFT, the shifted power, the blanker's raw sum and rise test (or holds the frame as pending), the
+block sum, the 5 ms short path with its bracketed threshold compare, and the per-track power sums of
+`Tracker.frame`. Block stages, `ImpulseBlanker.endBlock`, the threshold brackets and the envelope
+buckets stay JS and read the kernel's arrays through typed-array views of its memory. Framing, seams,
+counter runs and hold-back stay in `FrameSource` (raw mode copies each frame's bytes; the counter
+scan remains a per-byte JS loop). Kernel execution makes no JS object per frame; `FrameSource` still
+hands the pipeline one small frame record per frame, as on the JS path.
+
+**Equivalence is bit for bit.** The kernel takes every table JS computes (window, twiddles, bit
+reversal, U8 lookup, rise factor, track floor) from JS, keeps the JS operand order in f64, stores
+Float32 after each FFT stage as `fft.ts` does, and uses no fused multiply-add. SIMD lanes run the same
+IEEE operations as scalar code. A short sum inside its bracket calls back into the JS `shortOnInDb`,
+so even the `Math.log10` comparison is the JS one. `tests/unit/core/spectrum/frame-wasm-lockstep.ts`
+feeds both paths the same inputs and compares the events and every piece of frame-path state after
+each input (SameValue: NaN equal, −0 apart): noise, carriers with a QSO and a Morse ID, bursts at the
+short threshold (U8 and FLOAT32), Mode S at 2.4 Msps, zeros, non-finite samples, clipping, S16,
+50 % overlap, broadband impulses (blanked on offer and as pending frames), seams, gaps, a marker epoch
+with its counter run, a new stream, 1-sample to 64 Ki chunks, batch cuts of 1 and 7 frames, a timer
+epoch, and a carrier on a learned spur line with a voice across it. A one-ulp change to one window
+coefficient fails it. Both linear goldens run on both paths, and the built worker matches the inline
+JS host. Deterministic block decisions follow: detections, tracks, duty, `isDataBurst` and short-path
+verdicts are the JS ones at every threshold, not only on these scenes.
+
+Why not rustfft: its mixed-radix kernels round differently. The earlier 0.011 dB gap between Rust
+and JS power bins is the Float32 storage of the JS transform: the same radix-2 code with Float64
+storage differs from it by up to 5.3e-3 dB over 2000 frames of the profiler scene (1.3e-3 dB above
+−100 dB; the Float32 input rounding alone 1.3e-3 dB), while f64 implementations agree to about
+1e-10 dB. Reproducing that rounding exactly was preferred over bounding it, since a bound cannot
+rule out flips at the thresholds.
+
+**Memory is fixed.** The module imports a `WebAssembly.Memory` with `initial = maximum`, sized by
+`frameKernelLayout` from the pipeline config; it cannot grow and nothing is allocated per chunk.
+Bytes: 256 KiB reserved for the kernel's 64 KiB stack and static data, a 384-byte control block, then
+ten f64 arrays of N plus two twiddle tables (12·8·N), cos/sin (8·N), window, re, im and bit reversal
+(16·N), the 2 KiB U8 table, pending frames 8·N·P with P = frames per block, the short ring
+8·N·max(1, F), three u8 arrays of N, staging (frame bytes · P), 8·P starts, P verdicts, 8·T track bins
+and 8·P·T sums with T = maxTracks − 1, each region 16-byte aligned. At 2.4 Msps, FFT 2048, P 59,
+F 6, T 511: 1 806 387 bytes of regions, 32 pages (2 MiB). A layout over 256 MiB runs JS. Pending
+frames past P (only possible with sample indices replayed into one block) are a kernel error.
+
+**Faults.** A trap or a kernel error never leaves the worker: the open block is discarded, the
+short window restarts (as after a seam), and a fresh instance on the same memory takes over, at most
+`FRAME_KERNEL_MAX_RESTARTS` (2) times; the next fault keeps the JS path for that worker. One warn
+line for the first fault and one for the switch, fields `fault`, `restarts`, `path` only. When the
+fault comes from finishing a block as the next block's first frame arrives, that frame was already
+handed over raw; after the switch to JS it is converted then, so it runs on the JS path and only the
+discarded block's frames are lost. The lockstep comparison covers faults at a batch cut, at a block
+change after a counter run, at a seam, in an epoch's first block, at a held-back frame and with 50 %
+overlap: the JS side drops the same frames and discards the same block, and both then match. A real trap
+partway through a batch can leave the per-frame scratch sum (`frameAcc`) different from JS until the
+next frame overwrites it; events, decisions and every state a decision reads still match (tested).
+
+**Selection** (no config key): `WAVEKIT_SPECTRUM_FRAME_PATH=js` forces JS, `=wasm` logs a warning
+when the kernel is unavailable, unset means auto; `WAVEKIT_SPECTRUM_FRAME_WASM` names another
+artefact. Neither variable has a `__`, so the config loader ignores them.
+
+**Build.** One artefact for amd64 and arm64. Locally, with Rust 1.98.1 and the
+`wasm32-unknown-unknown` target: `native/wavekit-frame/build.sh` writes `dist/spectrum-frame.wasm`
+next to `dist/spectrum-worker.js` (`pnpm run build` leaves it there). Without it, `pnpm run build`
+and `make dev-local` run the JS path and log why. The Dockerfile's `frame-wasm` stage runs the same
+script on the build platform and copies the file into `/app/dist`; a final-stage check refuses an
+image whose kernels do not validate under its Node or whose source digests differ from the bundles'.
+
+**Stale artefacts.** `build.sh` embeds a source digest (sha256 over the crate's `build.sh`,
+`Cargo.toml`, `Cargo.lock` and `src/`, `scripts/kernel-digest.mjs`) as the custom section
+`wavekit.source-digest`, and `pnpm run build` bundles the digest of the sources as they are then. The
+loader refuses an artefact whose digest differs or is missing and runs JS with the reason `artefact
+older than its sources`, so an old `dist/*.wasm` never runs after the crate changed; rebuild it with
+`build.sh`. `pnpm run dev` recomputes the bundled digest when a crate file changes. The digest covers
+the crate, not the JS reference: a JS frame-path or chain edit is caught by the equivalence tests,
+not by the loader. Unbundled runs (vitest, tsx) skip the loader's check; the test harnesses check
+the digest themselves. Other reasons the path line can give: the file or a configured path not found
+(the configured path quoted as given, at most 160 characters), unreadable (the error code), does not
+validate (with `no wasm SIMD on this host` only when a minimal SIMD module fails too), does not
+compile, instantiate failed, ABI mismatch.
+
+`scripts/profile-spectrum.ts`, `bare --wire`, synthetic scene, FFT 2048 at 2.4 Msps and 1024 at
+1.024 Msps, overlap 0, thread CPU of `handle()` plus the worker's encode and postMessage copy, Mac i5,
+runs alternated, load average at start of each run:
+
+| Frame path, core fraction | 2.4 Msps      | Load     | 1.024 Msps    | Load     |
+| ------------------------- | ------------- | -------- | ------------- | -------- |
+| JS                        | 0.285 - 0.358 | 17 to 36 | 0.113 - 0.168 | 24 to 40 |
+| wasm kernel               | 0.171 - 0.220 | 15 to 28 | 0.076 - 0.099 | 23 to 44 |
+
+The kernel call itself takes 63 to 79 µs per 2048-point frame (0.074 to 0.093 core at 2.4 Msps,
+load 15 to 55); the exact FFT is most of it. The rest of the worker (block stages, the counter scan,
+the frame copy and the envelope replay) is unchanged JS. Two code-generation facts matter here:
+LLVM scalarises `f32x4.demote_f64x2_zero` when it can see that only some result lanes are used (a
+constant shuffle or a 64-bit lane store after it), so the FFT packs two demotes with a swizzle whose
+index vector is read from memory; that took the kernel from about 107 to 71 µs per frame. V8 runs
+the kernel optimised (`--no-liftoff` changes nothing).
+
+```bash
+native/wavekit-frame/build.sh                       # dist/spectrum-frame.wasm
+node scripts/profile-spectrum-build.mjs
+nice -n 10 node output/bench/profile-spectrum.mjs --mode bare --wire --seconds 20 --rate 2400000 --path js
+nice -n 10 node output/bench/profile-spectrum.mjs --mode bare --wire --seconds 20 --rate 2400000 --path wasm
+nice -n 10 node output/bench/profile-spectrum.mjs --mode bare --wire --seconds 20 --rate 1024000 --path js
+nice -n 10 node output/bench/profile-spectrum.mjs --mode bare --wire --seconds 20 --rate 1024000 --path wasm
+```
+
+Live, the worker's line `spectrum frame path` says which path runs; `worker.cpuUsage()` (the passive
+guard's figure) compares them with `WAVEKIT_SPECTRUM_FRAME_PATH=js` and unset. With `--mode stages`
+or the pipeline's opt-in profile on the wasm path, the `fft` stage holds the whole kernel call and
+`window` the raw framing, counter scan and staging; each span is charged to one stage, so the stages
+sum to busy on both paths.
+
+**Tests on the artefact.** The wasm halves of the frame-path tests skip without the artefact;
+`WAVEKIT_REQUIRE_FRAME_WASM=1` makes a missing or stale kernel, or a missing `dist/spectrum-worker.js`,
+fail instead. Build both first:
+
+```bash
+native/wavekit-frame/build.sh && pnpm run build
+WAVEKIT_REQUIRE_FRAME_WASM=1 pnpm exec vitest run --maxWorkers=1 tests/unit/core/spectrum
+```
+
+## Wideband recorder NFM chain in wasm (2026-11-07)
+
+The wideband analog recorder demodulates each recording on the main thread
+(`WidebandAnalogRecorder.readSlice`, `WidebandNfmChain.process` per slice). `createWidebandNfmChain`
+runs the same chain in a wasm32 kernel, `native/wavekit-nfm`, when the artefact
+`dist/wideband-nfm.wasm` validates and instantiates; otherwise it builds the JS chain, which stays the
+reference and the fallback. One info line per process (`wideband NFM chain path`) names the path and
+the reason.
+
+**Scope.** One `nfm_run` call per slice piece (at most `MAX_SLICE_SAMPLES` IQ pairs) runs every stage
+of `wideband-nfm.ts`: the NCO mix and triangular sum-and-dump, the stage-2 and ±8 kHz channel FIRs,
+the resampler to 48 kHz, the `FmAudioDemod` discriminator (de-emphasis, 127-tap low-pass, 6:1) and
+the 300 Hz high- and low-pass biquads. JS copies the CU8 piece into the kernel's memory and copies the
+pcm out (a new array per call, as the JS chain returns); `toneAudio()` is a view of the kernel's
+memory, which the recorder copies as before.
+
+**Equivalence is stated, not bit for bit: pcm and tone within ±1 LSB, the same verdicts.** JS hands
+the kernel every table and constant (U8 lookup, NCO rotation, all taps, biquad coefficients,
+discriminator scale and de-emphasis factor). Stage 1 runs in f64x2 lanes with the JS operand order
+per lane (a subtraction is the addition of an exactly negated product), values JS stores in a
+Float32Array are rounded to f32 at the same points, `Math.hypot` (the NCO renormalisation) is V8's
+algorithm, `Math.round` is half-up, and `atan2` is the fdlibm algorithm V8 also uses. The one
+deliberate difference: the stage-2, channel and discriminator FIRs sum with four partial
+accumulators, which moves a few f64 ULP before the next f32 rounding. Measured over every scene of
+`tests/unit/core/scanner/channel/wideband-nfm-wasm-equivalence.test.ts` (an NFM QSO with CTCSS in two
+overs, a speech-like voice ID, an unmodulated carrier, noise, a 4FSK burst, a retune to new chains at
+a new offset, high-pass off, at 1.024 and 2.4 Msps and at 64 kHz, 250 kHz and 3.2 Msps, chunks of 1
+sample to `MAX_SLICE_SAMPLES`): 0 LSB difference on every pcm and tone sample. The test bounds it at
+1 LSB and requires identical verdicts from the recorder's judges on both outputs: `VoiceActivityGate`
+(latch frame and conclusion), `VoiceOnAirMeter`, the `CtcssBank` result and per-block winners, and
+`ToneClassEvidence` (result, speech counts, gap rule). A fast-check property (100 runs) holds the
+wasm chain's output identical under random chunk splits.
+
+**Faults.** A trap or a kernel error code never reaches the recorder, and the stream continues as if
+JS had run it all along. At the start of every `process` call the kernel copies its whole stream
+state aside: the 576-byte control block (stage phases, NCO, triangle accumulators, resampler,
+discriminator and biquad state) and the delay-line span from the stage-2 line to the discriminator
+history (with the channel and discriminator taps between them): 6 512 bytes below 96 kHz input
+(k · m = 1), 7 152 at 1.024 Msps, 7 792 at 2.4 Msps, about 100 to 130 ns per call, 0.02 to 0.06 % of
+a 25 ms slice (the opt-in bench reports it). On a fault the chain drops its kernel, writes that copy into the JS
+chain it inherits (`WidebandNfmChain.adoptHandoverState`: every field of the NCO, the sum-and-dump,
+both FIR delay lines and heads, the resampler, `FmAudioDemod` and the four biquads) and runs the
+faulted slice again in JS, then every later one. Nothing is lost or duplicated and there is no
+settling transient: `tests/unit/core/scanner/channel/wideband-nfm-wasm-handover.test.ts` compares the
+output with a JS chain that ran the whole stream, at 48 kHz (the exact resampler path), 64 kHz
+(k · m = 1), 1.024 and 2.4 Msps, with traps on the first slice, mid-stream and right after slices
+ending with carries (59 999 samples then 1 at 2.4 Msps keeps its frame), plus a fast-check property
+(100 runs) over random fault points and chunk splits: within the stated ±1 LSB, 0 measured (512 000
+samples of syllabic voice after a fault at 512 001: 0 samples differ). The handed-over state matches
+a JS chain's field by field: integers and stage 1 exactly, the FIR lines, discriminator and biquad
+state within 1e-12 relative (the four-accumulator summation above), and a JS chain that adopts it
+holds it exactly. A copied state out of range (a phase or head past its bound, a non-finite value) is
+refused before anything is written: the chain then continues from the initial JS state, with the
+transient of a new chain (a few ms of filter settling, the 300 Hz high-pass the longest). One warn
+line per fault (fields `cause`, `error`, `k`, `m`, `handover` = `state` or `reset`, `faults`,
+`maxFaults`; no IQ, audio or frequency). After `NFM_WASM_MAX_FAULTS` (3) faults in a process every new
+chain is JS, logged once.
+
+**Memory is fixed per chain.** Each chain imports its own `WebAssembly.Memory` with
+`initial = maximum`, sized by `nfmKernelLayout` from its factors and `MAX_SLICE_SAMPLES`; it cannot
+grow and nothing is allocated per slice beyond the returned pcm. Bytes: 128 KiB reserved for the
+64 KiB stack and static data (`__heap_base` 66 368), a 576-byte control block, the 2 KiB U8 table,
+taps (8 bytes each), doubled delay lines (32 bytes per complex tap, 16 per discriminator tap), the
+256 KiB CU8 piece (2 · `MAX_SLICE_SAMPLES`) and pcm and tone of
+`floor((5 + ceil(MAX_SLICE_SAMPLES / (k · m)) + 2) / 6) + 1` frames each. Alongside it the chain keeps
+the slice-start copy above and the JS chain's filter state (taps, delay lines, the discriminator's
+history: about 3 KB). The JS chain's slice buffers (the 48 kHz buffer, 8 · (ceil(`MAX_SLICE_SAMPLES`
+/ (k · m)) + 2) bytes, and the tone copy) are made on its first JS `process` only, so a wasm chain
+holds none until it falls back. Per chain:
+
+| Input rate (k, m)          | Wasm memory      | Slice-start copy | After a fallback: JS slice buffers |
+| -------------------------- | ---------------- | ---------------- | ---------------------------------- |
+| 48 to < 96 kHz (k · m = 1) | 8 pages, 512 KiB | 6 512 B          | 1 048 592 + up to 43 694 B         |
+| 1.024 Msps (7, 3)          | 7 pages, 448 KiB | 7 152 B          | 49 952 + up to 2 084 B             |
+| 2.4 Msps (10, 5)           | 7 pages, 448 KiB | 7 792 B          | 20 992 + up to 878 B               |
+
+Two live sessions on the wasm path: about 1.07 MB at k · m = 1 and 0.94 MB at 1.024 or 2.4 Msps. A
+chain that fell back holds its JS buffers instead (1.09 MB at k · m = 1), and its dropped kernel's
+memory until a garbage collection frees it, so two fallen-back chains at k · m = 1 can briefly hold
+about 3.2 MB. This module does not bound how many chains exist: the recorder's session lifecycle
+does. Live sessions are at most `widebandRecordingCap` (at most `MAX_ACTIVE_ANALOG_PER_SOURCE`, 2) per
+source; a retune-ended session parked for its close keeps its chain (the session holds it) and at
+most `WIDEBAND_MAX_PARKED` (4) are parked per recorder, the oldest discarded past it; a session
+waiting in the recorder's turn queue or referenced by a pending store or writer callback keeps its
+chain until that settles, which nothing here bounds. A chain is freed with its session (garbage
+collected; nothing in this module holds it): a test makes and drops 1000 chains and finds none
+retained after a GC.
+
+**Selection** (no config key): `WAVEKIT_RECORDER_DSP=js` forces JS, `=wasm` logs a warning when the
+kernel is unavailable, unset means auto; `WAVEKIT_RECORDER_DSP_WASM` names another artefact.
+
+**Build.** One artefact for amd64 and arm64 (12.5 KB, `no_std`, no crates.io dependency). Locally,
+with Rust 1.98.1 and the `wasm32-unknown-unknown` target: `native/wavekit-nfm/build.sh` writes
+`dist/wideband-nfm.wasm` next to `dist/index.js`. Without it, `pnpm run build` and `make dev-local`
+run the JS chain and log why. The Dockerfile's `frame-wasm` stage builds it with the frame kernel and
+copies it into `/app/dist`. Stale artefacts and the path line's reasons are as for the frame kernel.
+
+**Tests on the artefact.** `tests/unit/core/scanner/channel` loads `dist/wideband-nfm.wasm` itself.
+The recorder tests (`tests/unit/core/scanner`) take their chains from the process runtime, whose
+default artefact under vitest is next to the module source, where nothing is built: they run the
+JS chain unless `WAVEKIT_RECORDER_DSP_WASM` names the built artefact. `WAVEKIT_REQUIRE_NFM_WASM=1`
+makes either set fail when its chains would be JS (missing, invalid or stale artefact, or the
+variable unset for the recorder tests):
+
+```bash
+native/wavekit-nfm/build.sh
+WAVEKIT_RECORDER_DSP_WASM=$PWD/dist/wideband-nfm.wasm WAVEKIT_REQUIRE_NFM_WASM=1 \
+  pnpm exec vitest run --maxWorkers=1 tests/unit/core/scanner
+```
+
+The recorder's per-slice block (25 ms slices, `process` then the tone copy) on synthetic NFM voice with
+CTCSS, 10 s of IQ per run after 0.5 s of warm-up, thread CPU (`process.threadCpuUsage`) per second of
+IQ, JS and wasm alternated over 3 rounds, Mac i5, load average 11.2 to 11.9:
+
+| Chain, CPU ms per IQ second | 1.024 Msps, 1 session | 1.024 Msps, 2 sessions | 2.4 Msps, 1 session | 2.4 Msps, 2 sessions |
+| --------------------------- | --------------------- | ---------------------- | ------------------- | -------------------- |
+| JS                          | 35.3 - 40.4           | 66.3 - 74.7            | 51.6 - 56.9         | 104.3 - 108.1        |
+| wasm                        | 15.0 - 18.0           | 28.6 - 30.9            | 25.3 - 28.5         | 46.1 - 50.1          |
+
+That is 2.2 to 2.5 times less main-thread CPU at 1.024 Msps and 2.0 to 2.3 times at 2.4 Msps. A
+catch-up turn (1 s of IQ back to back, one session) took 34 to 39 ms in JS and 14 to 17 ms in wasm at
+1.024 Msps, 49 to 61 ms and 19 to 40 ms at 2.4 Msps. The p99 slice was 1.4 to 3.9 ms in JS and 0.7 to
+1.5 ms in wasm at 1.024 Msps; the worst single slices (1.5 to 15 ms) are wall time on a loaded host
+and follow preemption, not the path. `WIDEBAND_CPU_FIXED_MS` and `WIDEBAND_CPU_MS_PER_MSPS` (the
+recorder's CPU reservation) are still the JS chain's figures.
+
+```bash
+native/wavekit-nfm/build.sh                       # dist/wideband-nfm.wasm
+WAVEKIT_NFM_BENCH=1 nice -n 10 pnpm exec vitest run --maxWorkers=1 \
+  tests/unit/core/scanner/channel/wideband-nfm-wasm-bench.test.ts
+WAVEKIT_NFM_EVIDENCE=1 pnpm exec vitest run --maxWorkers=1 \
+  tests/unit/core/scanner/channel/wideband-nfm-wasm-equivalence.test.ts
+```
 
 ## Frame tracks and main-thread reads (2026-11-06)
 
