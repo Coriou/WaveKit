@@ -2250,9 +2250,10 @@ describe("a temporary tune and the gain saved before a band", () => {
 	const OUTSIDE_HZ = 145_000_000
 	const SAVED_PATH = `/state/${BAND_GAIN_SAVED_FILE_NAME}`
 
-	async function inBand() {
-		const h = await setup()
-		const files = new Map<string, string>()
+	async function wireBandGain(
+		h: Awaited<ReturnType<typeof setup>>,
+		files: Map<string, string>,
+	) {
 		const fs: BandGainFs = {
 			readFile: path => {
 				const text = files.get(path)
@@ -2278,6 +2279,13 @@ describe("a temporary tune and the gain saved before a band", () => {
 		})
 		await service.load()
 		h.controller.setBandGain(service)
+	}
+
+	/** Gain 200 outside the bands, with no record and no file yet. */
+	async function atUserGain() {
+		const h = await setup()
+		const files = new Map<string, string>()
+		await wireBandGain(h, files)
 		const write = (url: string, payload: object) =>
 			h.app.inject({
 				method: "POST",
@@ -2286,11 +2294,6 @@ describe("a temporary tune and the gain saved before a band", () => {
 			})
 		await write("gain-mode", { mode: "manual" })
 		await write("gain", { gain: 200 })
-		await write("frequency", { hz: BAND_HZ })
-		await until(() => files.get(SAVED_PATH)?.includes('"gain": 200') === true)
-		expect(h.read()).toMatchObject({ gain: 297, bandGain: { tenthsDb: 297 } })
-		const before = files.get(SAVED_PATH)
-		h.fakeTime()
 		const settled = async () => {
 			for (let i = 0; i < 20; i++)
 				await new Promise<void>(resolve => {
@@ -2301,11 +2304,44 @@ describe("a temporary tune and the gain saved before a band", () => {
 			h,
 			files,
 			write,
-			before,
 			settled,
 			saved: () => files.get(SAVED_PATH),
 		}
 	}
+
+	/** Gain 200 saved by entering a band: the file holds the record. */
+	async function inBand() {
+		const base = await atUserGain()
+		await base.write("frequency", { hz: BAND_HZ })
+		await until(() => base.saved()?.includes('"gain": 200') === true)
+		expect(base.h.read()).toMatchObject({
+			gain: 297,
+			bandGain: { tenthsDb: 297 },
+		})
+		const before = base.saved()
+		base.h.fakeTime()
+		return { ...base, before }
+	}
+
+	/** Gain 200 outside the bands: the file does not exist. */
+	async function outsideBands() {
+		const base = await atUserGain()
+		await base.settled()
+		expect(base.saved()).toBeUndefined()
+		base.h.fakeTime()
+		return { ...base, before: undefined }
+	}
+
+	/** The same state directory read by a core that has just started. */
+	async function restarted(files: Map<string, string>) {
+		vi.useRealTimers()
+		const h = await setup()
+		await wireBandGain(h, files)
+		return h
+	}
+
+	const del = (h: Awaited<ReturnType<typeof setup>>) =>
+		h.app.inject({ method: "DELETE", url: "/api/tuner/rtl/tune/restore" })
 
 	it.each([
 		["the centre alone", {}],
@@ -2334,106 +2370,140 @@ describe("a temporary tune and the gain saved before a band", () => {
 		expect(h.read().gain).toBe(200)
 	})
 
-	it("forgets what it saved itself when it goes back", async () => {
-		const { h, write, settled, saved } = await inBand()
-		await write("frequency", { hz: OUTSIDE_HZ })
-		await settled()
-		expect(h.read().gain).toBe(200)
-		const before = saved()
+	it("entering a band with no record writes no file, and its restore leaves none", async () => {
+		const { h, files, settled, saved } = await outsideBands()
 		await h.post({ frequencyHz: BAND_HZ, restoreAfterS: 5 })
 		expect(h.read().gain).toBe(297)
+		await settled()
+		expect(files.has(SAVED_PATH)).toBe(false)
 		await vi.advanceTimersByTimeAsync(5_000)
 		await until(() => restoreOf(h.read()).status === "restored")
 		await settled()
-		expect(saved()).toBe(before)
-		expect(h.read()).toMatchObject({ frequency: OUTSIDE_HZ, gain: 200 })
+		expect(saved()).toBeUndefined()
+		expect(h.read()).toMatchObject({ frequency: START_HZ, gain: 200 })
 	})
 
-	// Every way a restore can fail to run: none of them changes the saved gain, on disk or in memory.
-	type Band = Awaited<ReturnType<typeof inBand>>
-	const CANCELS: Array<[string, (band: Band, body: object) => Promise<void>]> =
-		[
-			[
-				"DELETE",
-				async ({ h }, body) => {
-					await h.post(body)
-					await h.app.inject({
-						method: "DELETE",
-						url: "/api/tuner/rtl/tune/restore",
-					})
-					expect(restoreOf(h.read()).status).toBe("cancelled")
-				},
-			],
-			[
-				"a user's write to another field",
-				async ({ h, write }, body) => {
-					await h.post(body)
-					await write("ppm", { ppm: 3 })
-					expect(restoreOf(h.read()).status).toBe("cancelled")
-				},
-			],
-			[
-				"a scanner lease",
-				async ({ h }, body) => {
-					const { arbiter } = arbiterOn(h)
-					h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
-					await h.post(body)
-					expect(arbiter.acquire("job", "rtl", 50).ok).toBe(true)
-					await vi.advanceTimersByTimeAsync(5_000)
-					expect(restoreOf(h.read()).cancelledBy?.reason).toBe("scanner-lease")
-				},
-			],
-			[
-				"preempting a job",
-				async ({ h }, body) => {
-					const { arbiter } = arbiterOn(h)
-					h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
-					expect(arbiter.acquire("job", "rtl", 50).ok).toBe(true)
-					const res = await h.post({ ...body, preempt: true })
-					expect(res.statusCode).toBe(200)
-					expect(restoreOf(h.read()).cancelledBy?.reason).toBe(
-						"scanner-preempted",
-					)
-				},
-			],
-			[
-				"a failed restore",
-				async ({ h }, body) => {
-					await h.post(body)
-					vi.spyOn(h.manager, "writeToSource").mockImplementation(() => {
-						throw Object.assign(new Error("Source rtl is not connected"), {
-							code: "SOURCE_DISCONNECTED",
-						})
-					})
-					await vi.advanceTimersByTimeAsync(5_000)
-					await until(() => restoreOf(h.read()).status === "failed")
-				},
-			],
-			[
-				"shutdown",
-				async ({ h }, body) => {
-					await h.post(body)
-					await h.app.close()
-				},
-			],
-			[
-				"the source's removal",
-				async ({ h }, body) => {
-					await h.post(body)
-					await h.manager.disconnect("rtl")
-				},
-			],
-		]
+	it("what it held does not outlive its restore: a later band saves the gain of then", async () => {
+		const { h, write, settled, saved } = await outsideBands()
+		await h.post({ frequencyHz: BAND_HZ, restoreAfterS: 5 })
+		await vi.advanceTimersByTimeAsync(5_000)
+		await until(() => restoreOf(h.read()).status === "restored")
+		await write("gain", { gain: 150 })
+		await write("frequency", { hz: BAND_HZ })
+		await settled()
+		expect(saved()).toContain('"gain": 150')
+		await write("frequency", { hz: OUTSIDE_HZ })
+		expect(h.read().gain).toBe(150)
+	})
 
-	describe.each([
+	it("a second temporary tune leaving the band goes by what the first one held", async () => {
+		const { h, settled, saved } = await outsideBands()
+		await h.post({ frequencyHz: BAND_HZ, restoreAfterS: 5 })
+		await h.post({ frequencyHz: OUTSIDE_HZ, restoreAfterS: 5 })
+		expect(h.read().gain).toBe(200)
+		await settled()
+		expect(saved()).toBeUndefined()
+		await vi.advanceTimersByTimeAsync(5_000)
+		await until(() => restoreOf(h.read()).status === "restored")
+		await settled()
+		expect(saved()).toBeUndefined()
+		expect(h.read()).toMatchObject({ frequency: START_HZ, gain: 200 })
+	})
+
+	type Band = Awaited<ReturnType<typeof inBand>>
+	/** The tune stays, so it becomes an operator tune, once. */
+	const STAYS: Array<[string, (band: Band, body: object) => Promise<void>]> = [
+		[
+			"DELETE",
+			async ({ h }, body) => {
+				await h.post(body)
+				await del(h)
+				expect(restoreOf(h.read()).status).toBe("cancelled")
+			},
+		],
+		[
+			"a user's write to another field",
+			async ({ h, write }, body) => {
+				await h.post(body)
+				await write("ppm", { ppm: 3 })
+				expect(restoreOf(h.read()).status).toBe("cancelled")
+			},
+		],
+		[
+			"a scanner lease",
+			async ({ h }, body) => {
+				const { arbiter } = arbiterOn(h)
+				h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
+				await h.post(body)
+				expect(arbiter.acquire("job", "rtl", 50).ok).toBe(true)
+				await vi.advanceTimersByTimeAsync(5_000)
+				expect(restoreOf(h.read()).cancelledBy?.reason).toBe("scanner-lease")
+			},
+		],
+		[
+			"preempting a job",
+			async ({ h }, body) => {
+				const { arbiter } = arbiterOn(h)
+				h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
+				expect(arbiter.acquire("job", "rtl", 50).ok).toBe(true)
+				const res = await h.post({ ...body, preempt: true })
+				expect(res.statusCode).toBe(200)
+				expect(restoreOf(h.read()).cancelledBy?.reason).toBe(
+					"scanner-preempted",
+				)
+			},
+		],
+	]
+	/** The tune does not stay as an operator's: nothing of it reaches the file. */
+	const DROPS: Array<[string, (band: Band, body: object) => Promise<void>]> = [
+		[
+			"its restore",
+			async ({ h }, body) => {
+				await h.post(body)
+				await vi.advanceTimersByTimeAsync(5_000)
+				await until(() => restoreOf(h.read()).status === "restored")
+			},
+		],
+		[
+			"a failed restore",
+			async ({ h }, body) => {
+				await h.post(body)
+				vi.spyOn(h.manager, "writeToSource").mockImplementation(() => {
+					throw Object.assign(new Error("Source rtl is not connected"), {
+						code: "SOURCE_DISCONNECTED",
+					})
+				})
+				await vi.advanceTimersByTimeAsync(5_000)
+				await until(() => restoreOf(h.read()).status === "failed")
+			},
+		],
+		[
+			"shutdown",
+			async ({ h }, body) => {
+				await h.post(body)
+				await h.app.close()
+			},
+		],
+		[
+			"the source's removal",
+			async ({ h }, body) => {
+				await h.post(body)
+				await h.manager.disconnect("rtl")
+			},
+		],
+	]
+
+	const GAINS: Array<[string, object]> = [
 		["the centre alone", {}],
 		["an explicit gain", { gain: 300 }],
-	])("with %s", (_tune, extra) => {
-		it.each(CANCELS)(
+	]
+
+	describe.each(GAINS)("out of a band with %s", (_tune, extra) => {
+		it.each(DROPS)(
 			"the saved file stays byte-identical through %s",
-			async (_path, cancel) => {
+			async (_path, end) => {
 				const band = await inBand()
-				await cancel(band, {
+				await end(band, {
 					frequencyHz: OUTSIDE_HZ,
 					restoreAfterS: 5,
 					...extra,
@@ -2444,33 +2514,201 @@ describe("a temporary tune and the gain saved before a band", () => {
 		)
 	})
 
-	describe("kept by DELETE, a later retune and the record it left", () => {
-		const keep = async (body: object) => {
+	describe.each(GAINS)("into a band, no record, with %s", (_tune, extra) => {
+		it.each(DROPS)("no file appears through %s", async (_path, end) => {
+			const band = await outsideBands()
+			await end(band, { frequencyHz: BAND_HZ, restoreAfterS: 5, ...extra })
+			await band.settled()
+			expect(band.saved()).toBeUndefined()
+		})
+	})
+
+	it("a restart with a restore pending leaves the file as it was", async () => {
+		const band = await inBand()
+		await band.h.post({ frequencyHz: OUTSIDE_HZ, gain: 300, restoreAfterS: 5 })
+		await band.settled()
+		const h = await restarted(band.files)
+		expect(band.saved()).toBe(band.before)
+		await h.post({ frequencyHz: OUTSIDE_HZ + 1 })
+		expect(h.read().gain).toBe(200)
+	})
+
+	describe("that stays with a gain of its own", () => {
+		it.each(STAYS)(
+			"the saved gain goes, durably, through %s",
+			async (_path, stay) => {
+				const band = await inBand()
+				await stay(band, {
+					frequencyHz: OUTSIDE_HZ,
+					restoreAfterS: 5,
+					gain: 300,
+				})
+				await band.settled()
+				expect(band.saved()).not.toContain('"gain": 200')
+			},
+		)
+
+		it("treats a gain mode the same", async () => {
+			const { h, settled, saved } = await inBand()
+			await h.post({
+				frequencyHz: OUTSIDE_HZ,
+				restoreAfterS: 5,
+				gainMode: "agc",
+			})
+			await del(h)
+			await settled()
+			expect(saved()).not.toContain('"gain": 200')
+		})
+
+		const keep = async () => {
 			const band = await inBand()
 			await band.h.post({
 				frequencyHz: OUTSIDE_HZ,
 				restoreAfterS: 5,
-				...body,
+				gain: 300,
 			})
-			await band.h.app.inject({
-				method: "DELETE",
-				url: "/api/tuner/rtl/tune/restore",
-			})
+			await del(band.h)
+			await band.settled()
+			return band
+		}
+
+		it("a later retune leaves that gain on the tuner", async () => {
+			const { h, write, settled, saved } = await keep()
+			await write("frequency", { hz: OUTSIDE_HZ + 1 })
+			await settled()
+			expect(h.read().gain).toBe(300)
+			expect(saved()).not.toContain('"gain": 200')
+		})
+
+		it("a retune into a band saves that gain in the old one's place", async () => {
+			const { h, write, settled, saved } = await keep()
+			await write("frequency", { hz: BAND_HZ })
+			await settled()
+			expect(h.read().gain).toBe(297)
+			expect(saved()).toContain('"gain": 300')
+			await write("frequency", { hz: OUTSIDE_HZ })
+			expect(h.read().gain).toBe(300)
+		})
+
+		it("the old gain does not come back after the source is removed and re-added", async () => {
+			const { h, write, settled, saved } = await keep()
+			vi.useRealTimers()
+			await h.manager.disconnect("rtl")
+			await h.connect()
+			await write("frequency", { hz: OUTSIDE_HZ + 1 })
+			await settled()
+			expect(h.read().frequency).toBe(OUTSIDE_HZ + 1)
+			expect(h.read().gain).not.toBe(200)
+			expect(saved()).not.toContain('"gain": 200')
+		})
+
+		it("the old gain does not come back in a core started on the same files", async () => {
+			const { files, saved } = await keep()
+			const h = await restarted(files)
+			await h.post({ frequencyHz: OUTSIDE_HZ + 1 })
+			expect(h.read().frequency).toBe(OUTSIDE_HZ + 1)
+			expect(h.read().gain).not.toBe(200)
+			expect(saved()).not.toContain('"gain": 200')
+		})
+
+		it("into a band with no record, it saves nothing and leaving keeps its gain", async () => {
+			const { h, write, settled, saved } = await outsideBands()
+			await h.post({ frequencyHz: BAND_HZ, restoreAfterS: 5, gain: 300 })
+			await del(h)
+			await settled()
+			expect(saved()).toBeUndefined()
+			await write("frequency", { hz: OUTSIDE_HZ })
+			expect(h.read().gain).toBe(300)
+		})
+	})
+
+	describe("that stays with no gain, having entered a band with no record", () => {
+		it.each(STAYS)("its save is written through %s", async (_path, stay) => {
+			const band = await outsideBands()
+			await stay(band, { frequencyHz: BAND_HZ, restoreAfterS: 5 })
+			await band.settled()
+			expect(band.saved()).toContain('"gain": 200')
+			expect(band.h.read().gain).toBe(297)
+		})
+
+		it("leaving the band gives the user's gain back and clears the record", async () => {
+			const { h, write, settled, saved } = await outsideBands()
+			await h.post({ frequencyHz: BAND_HZ, restoreAfterS: 5 })
+			await del(h)
+			await settled()
+			await write("frequency", { hz: OUTSIDE_HZ })
+			await settled()
+			expect(h.read().gain).toBe(200)
+			expect(saved()).not.toContain('"gain": 200')
+		})
+
+		it("a core started on the same files still gives that gain back", async () => {
+			const { files, h: old, settled } = await outsideBands()
+			await old.post({ frequencyHz: BAND_HZ, restoreAfterS: 5 })
+			await del(old)
+			await settled()
+			const h = await restarted(files)
+			await h.post({ frequencyHz: OUTSIDE_HZ })
+			expect(h.read().gain).toBe(200)
+		})
+
+		it("a failed save takes it back, with the tune still standing", async () => {
+			const { h, settled, saved } = await outsideBands()
+			await h.post({ frequencyHz: BAND_HZ, restoreAfterS: 5 })
+			const service = h.controller.bandGainSettings()
+			if (service === null) throw new Error("no band gain service")
+			vi.spyOn(service, "saveOperatorGains").mockResolvedValue(false)
+			await del(h)
+			await settled()
+			expect(saved()).toBeUndefined()
+			expect(h.read().gain).toBe(297)
+			// The record was taken back: leaving the band has nothing to write.
+			vi.restoreAllMocks()
+			await h.post({ frequencyHz: OUTSIDE_HZ })
+			expect(h.read().gain).toBe(297)
+		})
+	})
+
+	describe("that stays with no gain, needing no save", () => {
+		it.each(STAYS)(
+			"the file stays byte-identical through %s, leaving a band",
+			async (_path, stay) => {
+				const band = await inBand()
+				await stay(band, { frequencyHz: OUTSIDE_HZ, restoreAfterS: 5 })
+				await band.settled()
+				expect(band.saved()).toBe(band.before)
+			},
+		)
+
+		it.each(STAYS)(
+			"no file appears through %s, outside the bands",
+			async (_path, stay) => {
+				const band = await outsideBands()
+				await stay(band, { frequencyHz: OUTSIDE_HZ, restoreAfterS: 5 })
+				await band.settled()
+				expect(band.saved()).toBeUndefined()
+			},
+		)
+
+		const keep = async () => {
+			const band = await inBand()
+			await band.h.post({ frequencyHz: OUTSIDE_HZ, restoreAfterS: 5 })
+			await del(band.h)
 			await band.settled()
 			expect(band.saved()).toBe(band.before)
 			return band
 		}
 
-		it("gives the saved gain back and clears it, as any exit from a band", async () => {
-			const { h, write, settled, saved } = await keep({})
+		it("a retune gives the saved gain back and clears it, as any exit from a band", async () => {
+			const { h, write, settled, saved } = await keep()
 			await write("frequency", { hz: OUTSIDE_HZ + 1 })
 			await settled()
 			expect(h.read().gain).toBe(200)
 			expect(saved()).not.toContain('"gain": 200')
 		})
 
-		it("still holds it through a return to the band, and gives it back on leaving", async () => {
-			const { h, write, settled, before, saved } = await keep({})
+		it("a return to the band still holds it, and leaving gives it back", async () => {
+			const { h, write, settled, before, saved } = await keep()
 			await write("frequency", { hz: BAND_HZ })
 			await settled()
 			expect(h.read().gain).toBe(297)
@@ -2481,28 +2719,9 @@ describe("a temporary tune and the gain saved before a band", () => {
 			expect(saved()).not.toContain('"gain": 200')
 		})
 
-		it("never writes it over the gain the kept tune set: it is retired instead", async () => {
-			const { h, write, settled, saved } = await keep({ gain: 300 })
-			await write("frequency", { hz: OUTSIDE_HZ + 1 })
-			await settled()
-			expect(h.read().gain).toBe(300)
-			expect(saved()).not.toContain('"gain": 200')
-		})
-
-		it("a retune into a band saves the kept tune's gain in its place", async () => {
-			const { h, write, settled, saved } = await keep({ gain: 300 })
-			await write("frequency", { hz: BAND_HZ })
-			await settled()
-			expect(h.read().gain).toBe(297)
-			expect(saved()).toContain('"gain": 300')
-			await write("frequency", { hz: OUTSIDE_HZ })
-			expect(h.read().gain).toBe(300)
-		})
-
 		it("the next temporary tune leaves it alone too, and writes it nowhere", async () => {
-			const { h, before, saved, settled } = await keep({ gain: 300 })
+			const { h, before, saved, settled } = await keep()
 			await h.post({ frequencyHz: OUTSIDE_HZ + 1, restoreAfterS: 5 })
-			expect(h.read().gain).toBe(300)
 			await settled()
 			expect(saved()).toBe(before)
 			await vi.advanceTimersByTimeAsync(5_000)
@@ -2520,6 +2739,16 @@ describe("a temporary tune and the gain saved before a band", () => {
 		expect(restoreOf(h.read()).status).toBe("cancelled")
 		expect(saved()).not.toContain('"gain": 200')
 		await write("frequency", { hz: OUTSIDE_HZ + 1 })
+		expect(h.read().gain).toBe(150)
+	})
+
+	it("cancelled by a user's gain after entering a band, nothing older comes back", async () => {
+		const { h, write, settled, saved } = await outsideBands()
+		await h.post({ frequencyHz: BAND_HZ, restoreAfterS: 5 })
+		await write("gain", { gain: 150 })
+		await settled()
+		expect(saved()).not.toContain('"gain": 200')
+		await write("frequency", { hz: OUTSIDE_HZ })
 		expect(h.read().gain).toBe(150)
 	})
 

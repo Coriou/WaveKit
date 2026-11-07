@@ -43,7 +43,9 @@ latches: the lock file replaced or gone. Another error reading or refreshing it 
 error on a bind mount, say) proves nothing. That check's write is refused, the next
 refresh retries, the error is logged and counted, and admission carries on. If the lock
 goes unrefreshed for the whole 30 seconds it latches too, because at that age another
-owner may take it.
+owner may take it. A core that was stalled past those 30 seconds (a suspended laptop, say)
+still gets 10 seconds to prove the lock is unchanged, and keeps it if it is; a check that
+hangs for those 10 seconds latches.
 
 Once latched, until the core restarts:
 

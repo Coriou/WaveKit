@@ -19,7 +19,9 @@ import type { Logger } from "./logger.js"
  * The holder detects ownership loss within H = 10 s and stops further writes.
  * Only a changed identity or a missing file proves that loss. Any other stat or
  * refresh error proves nothing: that write is refused, the next tick retries, and
- * the holder latches at 3H without a refresh, when a contender may reclaim.
+ * the holder latches at 3H without a refresh, when a contender may reclaim. After an
+ * event loop stall its next tick still has H to prove the identity, so an unchanged lock
+ * survives the stall and a check that hangs latches by max(3H, tick start + H).
  */
 export const lockOwnerSchema = z.object({
 	pid: z.number().int().positive(),
@@ -419,13 +421,18 @@ export async function startLockHeartbeat(
 	const identity = await handle.stat()
 	let lost = false
 	let stopped = false
+	/** Set the moment stop() starts; `stopped` follows once the running tick has ended. */
+	let stopping = false
 	let pending = Promise.resolve()
 	let transientFaults = 0
 	let failedTicks = 0
 	// Monotonic: what a contender observes is this refresh, not any wall clock.
 	let refreshedAt = performance.now()
+	/** The running tick's lease deadline. Only one runs: ticks queue on `pending`. */
+	let leaseEnd: NodeJS.Timeout | undefined
 	const lose = () => {
-		if (lost) return
+		// Stopping is not a loss: a shutdown waiting for a check latches nothing, whatever it finds.
+		if (lost || stopping) return
 		lost = true
 		clearInterval(timer)
 		options.onLost?.()
@@ -446,7 +453,7 @@ export async function startLockHeartbeat(
 		return !lost && !stopped
 	}
 	const fault = (error: unknown, tick: boolean) => {
-		if (lost || stopped) return
+		if (lost || stopping) return
 		if (hasLockCode(error, "ENOENT")) {
 			log?.warn("Storage lock file is gone")
 			lose()
@@ -477,9 +484,12 @@ export async function startLockHeartbeat(
 		pending = pending.then(async () => {
 			if (lost || stopped) return
 			// File system calls can hang past the lease, and a contender may then reclaim. This
-			// deadline needs no I/O to settle. A check that returns in time keeps the lock, even
-			// after an event loop stall, because it proves the identity first.
-			const leaseEnd = setTimeout(
+			// deadline needs no I/O to settle. A loop resumed past the lease has 0 ms left, and a
+			// 0 ms timer would fire before any check returns, losing an unchanged lock. So a tick
+			// always gets at least H: delay = max(3H - age, H), which equals 3H - age for any age
+			// up to 2H (every tick on time) and H past that. A check that returns within it keeps
+			// the lock because it proves the identity first; one still hanging latches.
+			leaseEnd = setTimeout(
 				() => {
 					try {
 						log?.warn("Storage lock check outlived the lease; latching")
@@ -488,7 +498,10 @@ export async function startLockHeartbeat(
 						/* An onLost failure must not escape a timer. */
 					}
 				},
-				Math.max(0, refreshedAt + HEARTBEAT_STALE_MS - performance.now()),
+				Math.max(
+					refreshedAt + HEARTBEAT_STALE_MS - performance.now(),
+					HEARTBEAT_MS,
+				),
 			)
 			leaseEnd.unref()
 			try {
@@ -512,7 +525,10 @@ export async function startLockHeartbeat(
 	let closing: Promise<void> | undefined
 	const stop = () => {
 		closing ??= (async () => {
+			// At once, not after the running check: no latch fires from here on.
+			stopping = true
 			clearInterval(timer)
+			clearTimeout(leaseEnd)
 			await pending
 			stopped = true
 			await handle.close()

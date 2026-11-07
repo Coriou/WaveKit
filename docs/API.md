@@ -1968,23 +1968,19 @@ The restore's writes read `actor: restore`, `reason: tune-restore` in `lastChang
 `DELETE /api/tuner/:sourceId/tune/restore` keeps the temporary tuning (`cancel-request`) and answers the
 tuner state; with no restore pending it is 404 `TUNER_RESTORE_NOT_PENDING`.
 
-A temporary tune leaves the gain saved before a band ([per-band gain](CORE-REFERENCE.md#per-band-gain),
-`applyToMyTuning`) exactly as it was, on disk too, however it ends: restored, cancelled (`DELETE`, a
-later write, a scanner lease), `preempt: true`, failed, shutdown or the source's removal. When the
-restore has run, leaving the band gives your gain back as if the tune had never been. If the tune went
-back to where no gain was saved, what it saved itself on entering a band goes. If the restore never
-ran, a gain it saved on entering a band is kept for leaving it.
+While a tune is temporary, the core never writes the gain saved before a band
+([per-band gain](CORE-REFERENCE.md#per-band-gain), `applyToMyTuning`) to disk. What entering a band
+with no saved gain would have saved is held in memory, so that band gain goes on without waiting for
+the file. How the tune ends decides what happens to the file:
 
-What a later operator retune does with the record, when the restore never ran:
+| The temporary tune                                                                                  | `tuner-band-gain-saved.json`                                                                                                                                                                                                                          |
+| --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Is restored, fails to restore, or is pending at a shutdown, a restart or the source's removal       | Byte-identical. What it held is dropped. A failed restore can leave a band gain on the tuner with nothing saved for it                                                                                                                                |
+| Stays (`DELETE`, a later write, a scanner lease, `preempt: true`) and set its own gain or gain mode | The saved gain is removed, as your own gain write removes it. The tune's gain is newer: the old one never comes back over it, also after a restart. A retune into a band saves the current gain in its place                                          |
+| Stays, set no gain, and entered a band with no saved gain                                           | The gain from before the tune is saved now, so leaving the band gives it back                                                                                                                                                                         |
+| Stays, set no gain, and needed no save                                                              | Byte-identical. The saved gain is still yours: a retune that ends outside the bands writes it and clears it, as any exit from a band does, even if the temporary tune had already left the band. A retune back into a band keeps it for the next exit |
 
-- **The tune set no gain or gain mode:** the record is still yours. A retune that ends outside the bands
-  writes it and clears it, as any exit from a band does, even if the temporary tune had already left the
-  band. A retune back into a band keeps it for the next exit.
-- **The tune set a gain or gain mode and was not put back:** that gain is newer and it stays. The next
-  retune never writes the older record over it: the record is cleared with no gain write, and a retune
-  into a band saves the current gain in its place. A failed restore does not count here: it was meant
-  to go back, so the record still stands. The core remembers this in memory only, so after a restart the
-  record on disk is live again, and the next exit from a band writes it.
+When the restore has run, leaving the band gives your gain back as if the tune had never been.
 
 Your own gain, gain mode or gain index write replaces the saved gain whatever the restore is doing, as
 it always does: it is the newest gain, and the saved one must not come back over it.
@@ -2083,7 +2079,8 @@ Manual tuning (`POST …/frequency`, `PATCH …/config`, the web app, and a dwel
 through these routes) does **not** change gain unless `applyToMyTuning` is on. With it on,
 tuning into a listed range applies its gain, and tuning out of the bands puts back the gain
 mode and gain you had before (kept in `<stateDir>/tuner-band-gain-saved.json`, so a restart
-inside a band still restores it). The band gain goes on only after that file is written; if
+inside a band still restores it). The band gain goes on only after that file is written (a
+[temporary tune](#temporary-tune) writes it only if it stays); if
 writing it fails or takes over 5 s, your gain stays and the failure is logged. While your gain or
 gain mode is unknown (right after a restart, before any gain write), no band gain goes on. Setting a gain, gain mode or tuner gain index
 yourself inside a band makes that your gain, also in a `PATCH …/config` whose value equals the

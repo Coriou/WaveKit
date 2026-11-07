@@ -94,7 +94,7 @@ export class TunerLeaseHeldError extends TunerControllerError {
 }
 
 /** What a temporary tune under a job's lease would go back to: nothing, never the job's hop. */
-const NO_SNAPSHOT: TuneSnapshot = { state: {}, savedOperatorGain: false }
+const NO_SNAPSHOT: TuneSnapshot = { state: {} }
 
 /** What a tune that took a job's lease tells its client, once a frame has gone out. */
 function preemptionOf(job: TunerLeaseJob, temporary: boolean): TunePreemption {
@@ -142,7 +142,7 @@ interface RestoreRecord {
 	expected: TuneValues
 	/** The temporary tune wrote a gain: rtl_tcp then left AGC whatever the state shows. */
 	wroteGain: boolean
-	/** It set a gain or gain mode: if it stays, that gain is newer than any saved before a band. */
+	/** It set a gain or gain mode: if it stays, the gain saved before a band goes for good. */
 	choseGain: boolean
 	/** While pending, the time it is due; while restoring, its deadline. */
 	timer: NodeJS.Timeout | undefined
@@ -417,8 +417,10 @@ export class TunerTuning {
 		const settle = () => {
 			if (this.active.get(sourceId) === run) this.active.delete(sourceId)
 			if (!temporary || !run.owned || snapshot === undefined) return
-			if (signal.aborted || this.controller.getState(sourceId) === undefined)
+			if (signal.aborted || this.controller.getState(sourceId) === undefined) {
+				this.controller.dropTuneGainSave(sourceId)
 				return
+			}
 			const due = new Date(
 				Date.now() + request.restoreAfterS! * 1_000,
 			).toISOString()
@@ -606,7 +608,10 @@ export class TunerTuning {
 		for (const run of this.active.values()) run.abort.abort()
 		this.active.clear()
 		for (const abort of this.finalWaits) abort.abort()
-		for (const record of this.restores.values()) this.stop(record)
+		for (const [sourceId, record] of this.restores) {
+			this.stop(record)
+			this.controller.dropTuneGainSave(sourceId)
+		}
 		this.restores.clear()
 		this.lastTunes.clear()
 		this.controller.off("last-change", this.onLastChange)
@@ -779,11 +784,22 @@ export class TunerTuning {
 				: {}),
 		}
 		// A gain the restore already put back is not one the tune leaves on the tuner.
-		if (record.choseGain && record.view.restored?.includes("gain") !== true)
-			this.controller.noteTuneKept(sourceId)
+		if (this.gainBack(record.view)) this.controller.dropTuneGainSave(sourceId)
+		else this.controller.noteTuneKept(sourceId, record.choseGain)
 		this.log.info({ sourceId, actor, reason }, "Temporary tune stays")
 		this.controller.publishState(sourceId)
 		return true
+	}
+
+	/** A restore has written back every gain setting it had to. */
+	private gainBack({ restored, state }: TuneRestore): boolean {
+		return (
+			restored !== undefined &&
+			(["gainMode", "gain"] as const).every(
+				setting =>
+					valueOf(state, setting) === undefined || restored.includes(setting),
+			)
+		)
 	}
 
 	/** A temporary tune overridden before it armed: the block says so, nothing will fire. */
@@ -796,8 +812,10 @@ export class TunerTuning {
 		due: string,
 	): void {
 		clearTimeout(carried?.timer)
-		if (choseGain || carried?.choseGain === true)
-			this.controller.noteTuneKept(sourceId)
+		this.controller.noteTuneKept(
+			sourceId,
+			choseGain || carried?.choseGain === true,
+		)
 		this.restores.set(sourceId, {
 			view: {
 				at: carried?.view.at ?? due,
@@ -950,6 +968,7 @@ export class TunerTuning {
 		record.view.status = "failed"
 		record.view.failure = codeOf(err)
 		record.abort.abort()
+		this.controller.dropTuneGainSave(sourceId)
 		this.log.warn(
 			{ sourceId, code: record.view.failure },
 			"Putting a temporary tune back failed; it is not retried",

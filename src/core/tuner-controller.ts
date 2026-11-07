@@ -66,8 +66,9 @@ export interface TunerWriteOptions {
 
 /**
  * One POST /tune, by identity: "last-change" hands it back, so a tune tells its own writes from
- * anybody else's whatever their actor or reason. A temporary tune sets `keepsSavedGain`: it never
- * changes the gain saved before a band, however it ends (TunerController.noteTuneKept).
+ * anybody else's whatever their actor or reason. A temporary tune sets `keepsSavedGain`: while it
+ * is temporary it writes nothing to the file of gains saved before a band, in any path. It becomes
+ * an operator tune, once, only if it stays (TunerController.noteTuneKept).
  */
 export interface TuneWriteRun {
 	keepsSavedGain: boolean
@@ -94,8 +95,6 @@ export interface TuneSnapshot {
 	/** The fields the core knows (not in `unknownFields`). */
 	state: TuneValues
 	bandGain?: TunerBandGain
-	/** An operator gain saved before a band gain was on record. */
-	savedOperatorGain: boolean
 }
 
 /**
@@ -642,10 +641,12 @@ export class TunerController extends EventEmitter {
 	/** Sources whose band gain write is in flight (its own gain writes keep the saved gain). */
 	private applyingBandGain: Set<string> = new Set()
 	/**
-	 * Sources whose saved gain is older than a gain a kept temporary tune set (noteTuneKept). In
-	 * memory only, as the record on disk stays untouched: a restart makes the record live again.
+	 * What entering a band with no record would have saved, per source, while the tune that entered
+	 * it is temporary. Never in `operatorGainBeforeBand`, as every save writes that whole map. One
+	 * per source: the tune's restore, its failure, shutdown and removal drop it unwritten, and a
+	 * restart forgets it. Only a tune that stays writes it (noteTuneKept).
 	 */
-	private keptGainOverSaved: Set<string> = new Set()
+	private tuneGainSaves: Map<string, SavedOperatorGain | null> = new Map()
 	/** The saveOperatorGain call that wrote each saved gain (a drop or newer save replaces it). */
 	private savedRecords: Map<string, { value: SavedOperatorGain | null }> =
 		new Map()
@@ -823,7 +824,6 @@ export class TunerController extends EventEmitter {
 	): Promise<"saved" | "failed" | "superseded"> {
 		const record = { value: saved }
 		const choices = this.gainChoiceCount(sourceId)
-		this.keptGainOverSaved.delete(sourceId)
 		this.operatorGainBeforeBand.set(sourceId, saved)
 		this.savedRecords.set(sourceId, record)
 		const durable =
@@ -852,7 +852,7 @@ export class TunerController extends EventEmitter {
 	}
 
 	private dropOperatorGain(sourceId: string): void {
-		this.keptGainOverSaved.delete(sourceId)
+		this.tuneGainSaves.delete(sourceId)
 		this.savedRecords.delete(sourceId)
 		if (!this.operatorGainBeforeBand.delete(sourceId)) return
 		void this.bandGain?.saveOperatorGains(this.operatorGainBeforeBand)
@@ -875,39 +875,29 @@ export class TunerController extends EventEmitter {
 		const state = this.tunerStates.get(sourceId)
 		if (!state || state.controlMode !== "internal") return
 		const target = this.bandGainFor(sourceId, hz)
-		// The next tune that stays retires a record older than the gain a kept tune set: it never
-		// goes on over that gain, and entering a band saves that gain instead.
-		if (
-			this.keptGainOverSaved.has(sourceId) &&
-			opts.run?.keepsSavedGain !== true
-		)
-			this.dropOperatorGain(sourceId)
-		const saved = this.operatorGainBeforeBand.get(sourceId)
-		if (
-			target === null &&
-			(saved === undefined || this.keptGainOverSaved.has(sourceId))
-		)
-			return
+		const saved = this.operatorGainBeforeBand.has(sourceId)
+			? this.operatorGainBeforeBand.get(sourceId)
+			: this.tuneGainSaves.get(sourceId)
+		if (target === null && saved === undefined) return
 		this.applyingBandGain.add(sourceId)
 		try {
 			if (target !== null) {
 				const unknown = this.fieldProof(sourceId).unknownFields
 				// The band gain goes on only once the gain it replaces is durable, so a restart
 				// in the band still restores it. Unsaved, or chosen meanwhile: the gain stays.
+				// A temporary tune only holds it: its restore puts that gain back.
 				if (saved === undefined) {
 					// A gain or gain mode not known yet (right after a restart, before any gain
 					// write) could never be restored: no band gain, as for a scanner hop.
 					if (unknown.includes("gainMode") || unknown.includes("gain")) return
-					const outcome = await this.saveOperatorGain(sourceId, {
-						gainMode: state.gainMode,
-						gain: state.gain,
-					})
-					if (outcome === "failed")
-						this.log.warn(
-							{ sourceId },
-							"Saving the gain from before the band failed; band gain not applied",
-						)
-					if (outcome !== "saved") return
+					const before = { gainMode: state.gainMode, gain: state.gain }
+					if (opts.run?.keepsSavedGain === true)
+						this.tuneGainSaves.set(sourceId, before)
+					else {
+						const outcome = await this.saveOperatorGain(sourceId, before)
+						if (outcome === "failed") this.logGainSaveFailed(sourceId)
+						if (outcome !== "saved") return
+					}
 				}
 				const now = this.tunerStates.get(sourceId) ?? state
 				const proof = this.fieldProof(sourceId).unknownFields
@@ -943,6 +933,13 @@ export class TunerController extends EventEmitter {
 		} finally {
 			this.applyingBandGain.delete(sourceId)
 		}
+	}
+
+	private logGainSaveFailed(sourceId: string): void {
+		this.log.warn(
+			{ sourceId },
+			"Saving the gain from before the band failed; band gain not applied",
+		)
 	}
 
 	/**
@@ -1199,7 +1196,7 @@ export class TunerController extends EventEmitter {
 
 	removeSource(sourceId: string): void {
 		// The saved pre-band gain stays (as on disk): a reconnect still restores it on leaving a band.
-		this.keptGainOverSaved.delete(sourceId)
+		this.tuneGainSaves.delete(sourceId)
 		this.appliedBandGain.delete(sourceId)
 		// WG11: configured tuning belongs to the removed source's config; a source
 		// re-added under the same id brings its own (resolved on `connected`).
@@ -2279,18 +2276,16 @@ export class TunerController extends EventEmitter {
 				...(known("gain") ? { gain: state.gain } : {}),
 			},
 			...(bandGain ? { bandGain } : {}),
-			savedOperatorGain: this.operatorGainBeforeBand.has(sourceId),
 		}
 	}
 
 	/**
-	 * A restore put `snapshot` back. A gain saved before a band during the temporary tune is older
-	 * than this write and goes; one from before the snapshot still stands, as a temporary tune never
-	 * uses it up (TuneWriteRun). A band gain confirmed at the snapshot is confirmed again when the
-	 * known state shows it.
+	 * A restore put `snapshot` back: what the tune held for the record goes unwritten, and the file
+	 * is as it was before the tune (TuneWriteRun). A band gain confirmed at the snapshot is confirmed
+	 * again when the known state shows it.
 	 */
 	noteTuneRestored(sourceId: string, snapshot: TuneSnapshot): void {
-		if (!snapshot.savedOperatorGain) this.dropOperatorGain(sourceId)
+		this.dropTuneGainSave(sourceId)
 		const hz = this.tunerStates.get(sourceId)?.frequency
 		if (snapshot.bandGain !== undefined && hz !== undefined)
 			this.noteBandGainApplied(
@@ -2301,14 +2296,29 @@ export class TunerController extends EventEmitter {
 			)
 	}
 
+	/** A temporary tune ended without staying: what it held for the record goes unwritten. */
+	dropTuneGainSave(sourceId: string): void {
+		this.tuneGainSaves.delete(sourceId)
+	}
+
 	/**
-	 * A temporary tune that set a gain or gain mode is not going back. The saved gain stays exactly
-	 * as it was, on disk too, but it is now older than the gain on the tuner, so it is never written
-	 * over it: the next operator retune retires it instead (applyOperatorBandGain).
+	 * A temporary tune stays, so it stops being temporary and acts as an operator tune, once. With a
+	 * gain or gain mode of its own the record goes, as for an explicit gain write, durably: the old
+	 * gain can never come back over it, even after a restart. Without one, a band it entered with no
+	 * record saves the gain from before the tune, so leaving the band gives it back. With neither
+	 * the file is untouched, and a later retune handles the record as usual.
 	 */
-	noteTuneKept(sourceId: string): void {
-		if (this.operatorGainBeforeBand.has(sourceId))
-			this.keptGainOverSaved.add(sourceId)
+	noteTuneKept(sourceId: string, choseGain: boolean): void {
+		if (choseGain) {
+			this.dropOperatorGain(sourceId)
+			return
+		}
+		const held = this.tuneGainSaves.get(sourceId)
+		if (held === undefined) return
+		this.tuneGainSaves.delete(sourceId)
+		void this.saveOperatorGain(sourceId, held).then(outcome => {
+			if (outcome === "failed") this.logGainSaveFailed(sourceId)
+		})
 	}
 
 	/** The tune behind the current `lastChange`, if a tune wrote it. */

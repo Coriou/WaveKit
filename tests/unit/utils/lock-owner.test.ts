@@ -727,8 +727,8 @@ describe("ownership loss and monotonic observation", () => {
 		await fs.rename(path, detached)
 		await fs.writeFile(path, "successor")
 		await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+		await vi.waitFor(() => expect(heartbeat.lost).toBe(true))
 		await heartbeat()
-		expect(heartbeat.lost).toBe(true)
 		expect((await fs.stat(detached)).mtimeMs).toBe(0)
 	})
 	describe("what a failed check proves", () => {
@@ -842,6 +842,101 @@ describe("ownership loss and monotonic observation", () => {
 			release()
 			vi.useRealTimers()
 			await heartbeat()
+		})
+
+		/** A heartbeat on a plain file whose tick is stuck in lstat until `release`. */
+		async function heldTick(age: number) {
+			const path = await lockPath()
+			await fs.rmdir(path)
+			await fs.writeFile(path, "owner")
+			vi.useFakeTimers({
+				toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"],
+			})
+			const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+			const lost = vi.fn()
+			const heartbeat = await startLockHeartbeat(path, { onLost: lost })
+			let release = () => {}
+			const held = new Promise<void>(resolve => {
+				release = resolve
+			})
+			const lstat = fs.lstat.bind(fs)
+			vi.spyOn(fs, "lstat").mockImplementation(async (...args) => {
+				await held
+				return lstat(...(args as Parameters<typeof lstat>))
+			})
+			await fs.utimes(path, new Date(0), new Date(0))
+			now.mockReturnValue(1000 + age)
+			await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+			return { path, lost, heartbeat, release: () => release() }
+		}
+
+		describe.each([HEARTBEAT_STALE_MS, HEARTBEAT_STALE_MS + 1])(
+			"a tick that starts %i ms after the last refresh, the loop having stalled",
+			age => {
+				it("proves an unchanged lock in under H and keeps it", async () => {
+					const { path, lost, heartbeat, release } = await heldTick(age)
+					await vi.advanceTimersByTimeAsync(HEARTBEAT_MS - 1)
+					expect(heartbeat.lost).toBe(false)
+					release()
+					vi.useRealTimers()
+					await vi.waitFor(async () =>
+						expect((await fs.stat(path)).mtimeMs).toBeGreaterThan(0),
+					)
+					expect(heartbeat.lost).toBe(false)
+					expect(lost).not.toHaveBeenCalled()
+					await heartbeat()
+				})
+
+				it("latches when the check still hangs after H", async () => {
+					const { lost, heartbeat, release } = await heldTick(age)
+					await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+					expect(heartbeat.lost).toBe(true)
+					expect(lost).toHaveBeenCalledTimes(1)
+					release()
+					vi.useRealTimers()
+					await heartbeat()
+				})
+			},
+		)
+
+		describe("stopped with a check still running", () => {
+			it.each([
+				["at the lease's end", HEARTBEAT_STALE_MS],
+				["past it", HEARTBEAT_STALE_MS + 1],
+			])("nothing latches %s", async (_when, elapsed) => {
+				const { lost, heartbeat, release } = await heldTick(0)
+				const stopping = heartbeat()
+				await vi.advanceTimersByTimeAsync(elapsed)
+				expect(heartbeat.lost).toBe(false)
+				release()
+				vi.useRealTimers()
+				await stopping
+				expect(heartbeat.lost).toBe(false)
+				expect(lost).not.toHaveBeenCalled()
+			})
+
+			it("nothing latches when the check then finds another owner", async () => {
+				const { path, lost, heartbeat, release } = await heldTick(0)
+				const stopping = heartbeat()
+				await fs.rename(path, `${path}.old`)
+				await fs.writeFile(path, "successor")
+				release()
+				vi.useRealTimers()
+				await stopping
+				expect(heartbeat.lost).toBe(false)
+				expect(lost).not.toHaveBeenCalled()
+			})
+
+			it("nothing latches when the check then finds the file gone", async () => {
+				const { path, lost, heartbeat, release } = await heldTick(0)
+				const stopping = heartbeat()
+				await fs.rm(path)
+				release()
+				vi.useRealTimers()
+				await stopping
+				expect(heartbeat.lost).toBe(false)
+				expect(lost).not.toHaveBeenCalled()
+			})
 		})
 
 		it("repeated write checks during a fault do not use up the ticks", async () => {
