@@ -1012,6 +1012,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			this.supersede(held, command)
 			return
 		}
+		// Entries from before the last disconnect tuned a connection that is gone. Dropping them here
+		// bounds the list by the stream boundaries queued since that disconnect.
+		let kept = 0
+		for (const entry of this.carried)
+			if (entry.ticket >= this.disconnectTicket) this.carried[kept++] = entry
+		this.carried.length = kept
 		this.carried.push({
 			trust: command.trust,
 			...(command.centreHz !== undefined ? { centreHz: command.centreHz } : {}),
@@ -1027,13 +1033,14 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	 * a value still unknown or only declared then, and a host-centre mismatch still demotes it.
 	 */
 	private supersede(held: ExternalCommand, command: ExternalCommand): void {
-		const newer = command.ticket >= held.ticket
-		if (newer) held.trust = command.trust
-		if (
-			command.centreHz !== undefined &&
-			(newer || held.centreHz === undefined)
-		)
-			held.centreHz = command.centreHz
+		// The newer command's centre wins even when it names none: an older explicit centre may be
+		// one another writer (a relay) has since moved away from, so the posting then reads the
+		// source's own centre. An older command never adds a centre to a newer one.
+		if (command.ticket >= held.ticket) {
+			held.trust = command.trust
+			if (command.centreHz !== undefined) held.centreHz = command.centreHz
+			else delete held.centreHz
+		}
 		held.checkState = true
 		held.ticket = Math.min(held.ticket, command.ticket)
 	}
