@@ -151,8 +151,28 @@ Send at least one of `sampleRateHz`, `frequencyHz`, `gainMode` and `gain` (tenth
 answer is the tuner state of `GET /api/tuner` (`sampleRate`, `frequency`, `gainMode`, `gain`) plus
 `usable`, `applied` and `notApplied`. It takes up to 18 s; give your client a longer timeout. Past
 that, or when a write fails, the answer is an error that still says what was and was not applied.
-A 503 with `usable: false` also carries `sourceVerdict`, the reason the source is silent. Read the
-[whole contract](API.md#post-apitunersourceidtune).
+A 503 with `usable: false` also carries `sourceVerdict`, the reason the source is silent. A 409
+`TUNER_TUNE_OVERRIDDEN` means someone else changed the tuner after your tune: read `state.lastChange`
+before tuning again. Read the [whole contract](API.md#post-apitunersourceidtune).
+
+### When a scan holds the tuner
+
+A tune never takes the receiver from a running scan unasked. While a job holds the tuner's lease the
+answer is 409 `TUNER_LEASE_HELD` with `jobId` and `jobName`, and nothing is written. Decide with
+whoever runs the scan, then send `"preempt": true`:
+
+```sh
+curl --fail-with-body --header "$AUTH" --header "Content-Type: application/json" \
+  --data '{"frequencyHz":100000000,"restoreAfterS":30,"preempt":true}' "$API_ORIGIN/api/tuner/rtl/tune"
+```
+
+The 200 then carries `preempted`: `jobId`, `jobName`, `job` (`paused`, or `failed` if it was still
+starting), `autoAfterIdleMs` and `message`. Read `autoAfterIdleMs` before you rely on the job coming
+back:
+
+- A number: the job resumes by itself that long after the last operator write (60 s by default), or
+  later if activity holds it, even in the middle of a longer `restoreAfterS`.
+- `null`: **a short look stops the scan until someone calls `POST /api/scanner/jobs/:id/resume`.**
 
 ### Tune for a while
 
@@ -167,10 +187,16 @@ curl --fail --header "$AUTH" --request DELETE "$API_ORIGIN/api/tuner/rtl/tune/re
 
 The person at the receiver wins: any later write to this tuner from anyone, including the web app,
 an external client such as SDR++ or a scanner job, cancels the restore for good and never gets
-overwritten. A scanner job holding the tuner's lease cancels it as well: a restore never preempts a
-job. `restore` in `GET /api/tuner` says what happened: `status`, `at`, `state` (what goes back) and
+overwritten. A scanner job taking the tuner's lease cancels it as well: a restore itself never preempts
+a job. `restore` in `GET /api/tuner` says what happened: `status`, `at`, `state` (what goes back) and
 `cancelledBy`. A core restart drops a pending restore: read
 [what a restart does](API.md#temporary-tune-and-restart) before relying on one.
+
+With `preempt: true` over a scan, **no restore comes**: `restore` reads `cancelled` with reason
+`scanner-preempted` from the start. Going back would mean going to the job's hop, and the tuning from
+before the job is not kept either. When `restoreAfterS` passes nothing happens: the receiver stays on
+your tune until the job resumes by its own rules and retunes, or someone tunes it. If you need your own
+tuning back afterwards, tune to it.
 
 ## Read the receiver state
 

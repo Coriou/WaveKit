@@ -174,6 +174,26 @@ export interface TuneRequest {
 	gain?: number
 	/** Integer seconds, 1 to TUNE_RESTORE_MAX_S: put the prior tuning back after this long. */
 	restoreAfterS?: number
+	/**
+	 * Take the tuner from a scanner job holding its lease. Without it such a tune answers 409
+	 * TUNER_LEASE_HELD and writes nothing.
+	 */
+	preempt?: boolean
+}
+
+/** What a tune with `preempt: true` did to the scanner job that held the tuner's lease. */
+export interface TunePreemption {
+	jobId: string
+	jobName: string | null
+	/** `paused`: its own resume rules apply. `failed`: it was still starting. */
+	job: "paused" | "failed"
+	/**
+	 * The job's `resume.autoAfterIdleMs`: it resumes by itself this long after the last operator
+	 * write, whatever a `restoreAfterS` says. Null: it stays paused until someone resumes it.
+	 */
+	autoAfterIdleMs: number | null
+	/** The same in a sentence, with what to do next. */
+	message: string
 }
 
 /** What became of a temporary tune's restore (`TunerState.restore.status`). */
@@ -193,6 +213,7 @@ export const TUNE_RESTORE_CANCEL_REASONS = [
 	"external-control",
 	"cancel-request",
 	"scanner-lease",
+	"scanner-preempted",
 ] as const
 export type TuneRestoreCancelReason =
 	(typeof TUNE_RESTORE_CANCEL_REASONS)[number]
@@ -215,6 +236,8 @@ export interface TuneRestore {
 		actor: TunerChangeActor
 		reason: TuneRestoreCancelReason
 		at: string
+		/** The scanner job, on `scanner-lease` and `scanner-preempted`, when the core can name it. */
+		job?: { jobId: string; jobName: string | null }
 	}
 	/** The settings back at their prior value; on a cancel or a failure, those before it stopped. */
 	restored?: TuneSetting[]
@@ -229,6 +252,8 @@ export interface TunerLastTune {
 	notApplied: TuneSetting[]
 	/** The error code of a tune that did not fully apply. */
 	code?: string
+	/** The scanner job this tune took the tuner from. */
+	preempted?: TunePreemption
 }
 
 /** 200 of POST /api/tuner/:sourceId/tune: the new tuner state, usable, every setting applied. */
@@ -236,6 +261,8 @@ export type TuneResponse = TunerState & {
 	usable: true
 	applied: TuneSetting[]
 	notApplied: []
+	/** The scanner job this tune took the tuner from (`preempt: true` with a lease held). */
+	preempted?: TunePreemption
 }
 
 /** The band gain on the tuner (TunerState.bandGain). */

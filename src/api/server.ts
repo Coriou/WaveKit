@@ -1594,9 +1594,13 @@ export class ApiServer {
 				...(this.scanner
 					? {
 							scannerLeaseHolder: (sourceId: string) =>
-								this.scanner?.tunerLeaseHolder(sourceId) ?? null,
+								this.scanner?.tunerLeaseJob(sourceId) ?? null,
 						}
 					: {}),
+				receiverStatus: (sourceId: string) =>
+					this.resourceAggregator
+						?.getSdrHostStatuses()
+						.find(host => host.sourceId === sourceId),
 				...(this.accessController
 					? {
 							principalKind: request =>

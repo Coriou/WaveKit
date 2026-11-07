@@ -588,3 +588,28 @@ describe("fatal engine job cleanup (review F5)", () => {
 		},
 	)
 })
+
+describe("tunerLeaseJob", () => {
+	it("names the job holding the tuner and the resume rule a tune would meet", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		try {
+			h.sources.emit("payload-started", "rtl")
+			expect(h.service.tunerLeaseJob("rtl")).toBeNull()
+			const job = await h.service.createJob({
+				...sweep(50),
+				name: "Night sweep",
+				resume: { autoAfterIdleMs: 60_000 },
+			})
+			await untilRunning(h, job.id)
+			expect(h.service.tunerLeaseJob("rtl")).toEqual({
+				jobId: job.id,
+				name: "Night sweep",
+				autoAfterIdleMs: 60_000,
+				starting: false,
+			})
+		} finally {
+			await h.service.stop()
+		}
+	})
+})

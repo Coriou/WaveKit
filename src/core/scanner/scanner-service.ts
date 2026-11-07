@@ -2366,6 +2366,24 @@ export class ScannerService extends EventEmitter {
 		return this.arbiter.holder(sourceId)?.jobId ?? null
 	}
 
+	/** The holder as POST /api/tuner/:sourceId/tune names it, and the resume rule it would meet. */
+	tunerLeaseJob(sourceId: string): {
+		jobId: string
+		name: string | null
+		autoAfterIdleMs: number | null
+		starting: boolean
+	} | null {
+		const jobId = this.tunerLeaseHolder(sourceId)
+		if (jobId === null) return null
+		const record = this.jobs.get(jobId)
+		return {
+			jobId,
+			name: record?.name ?? null,
+			autoAfterIdleMs: record?.spec.resume.autoAfterIdleMs ?? null,
+			starting: record?.state === "starting",
+		}
+	}
+
 	listJobs(): ScanJob[] {
 		return [...this.jobs.values()].map(r => this.toDto(r))
 	}

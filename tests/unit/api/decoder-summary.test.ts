@@ -2,6 +2,7 @@ import Fastify from "fastify"
 import { describe, expect, it } from "vitest"
 import {
 	decoderCoversHz,
+	sourceActivityReader,
 	decoderSummary,
 	decoderSummaryRoutes,
 	DECODING_WINDOW_MS,
@@ -866,5 +867,35 @@ describe("quiet versus broken", () => {
 		} finally {
 			await app.close()
 		}
+	})
+})
+
+describe("sourceActivityReader", () => {
+	const manager = (activity: string, recovering: boolean) => ({
+		getStatus: () => ({ activity: { state: activity } }) as never,
+		isCommandedRecovery: () => recovering,
+	})
+
+	it.each(["disconnected", "stale"])(
+		"a %s source in its commanded recovery says nothing, so a running decoder stays listening",
+		state => {
+			expect(sourceActivityReader(manager(state, true))("rtl")).toBe("waiting")
+			expect(sourceActivityReader(manager(state, false))("rtl")).toBe(state)
+		},
+	)
+
+	it("does not hide a recording that ended, or samples flowing", () => {
+		expect(sourceActivityReader(manager("ended", true))("rtl")).toBe("ended")
+		expect(sourceActivityReader(manager("streaming", true))("rtl")).toBe(
+			"streaming",
+		)
+	})
+
+	it("a manager without the recovery view reads as before", () => {
+		expect(
+			sourceActivityReader({
+				getStatus: () => ({ activity: { state: "disconnected" } }) as never,
+			})("rtl"),
+		).toBe("disconnected")
 	})
 })

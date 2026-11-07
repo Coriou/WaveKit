@@ -8,8 +8,10 @@ import {
 	TUNER_VALUE_BOUNDS,
 } from "../../core/tuner-controller.js"
 import {
+	TunerLeaseHeldError,
 	TunerTuning,
 	type TuneOutcome,
+	type TuneReceiverStatus,
 	type TuneSource,
 	type TunerLeaseHolder,
 } from "../../core/tuner-tune.js"
@@ -112,6 +114,18 @@ const tuneSettingsSchema = {
 	items: { type: "string", enum: [...TUNE_SETTINGS] },
 } as const
 
+const tunePreemptionSchema = {
+	type: "object",
+	properties: {
+		jobId: { type: "string" },
+		jobName: { type: "string", nullable: true },
+		job: { type: "string", enum: ["paused", "failed"] },
+		autoAfterIdleMs: { type: "integer", nullable: true },
+		message: { type: "string" },
+	},
+	required: ["jobId", "jobName", "job", "autoAfterIdleMs", "message"],
+} as const
+
 const tuneRestoreSchema = {
 	type: "object",
 	properties: {
@@ -132,6 +146,14 @@ const tuneRestoreSchema = {
 				actor: { type: "string", enum: [...TUNER_CHANGE_ACTORS] },
 				reason: { type: "string", enum: [...TUNE_RESTORE_CANCEL_REASONS] },
 				at: { type: "string", format: "date-time" },
+				job: {
+					type: "object",
+					properties: {
+						jobId: { type: "string" },
+						jobName: { type: "string", nullable: true },
+					},
+					required: ["jobId", "jobName"],
+				},
 			},
 			required: ["actor", "reason", "at"],
 		},
@@ -149,6 +171,7 @@ const lastTuneSchema = {
 		applied: tuneSettingsSchema,
 		notApplied: tuneSettingsSchema,
 		code: { type: "string" },
+		preempted: tunePreemptionSchema,
 	},
 	required: ["at", "usable", "applied", "notApplied"],
 } as const
@@ -260,6 +283,7 @@ const tuneBodySchema = {
 			minimum: 1,
 			maximum: TUNE_RESTORE_MAX_S,
 		},
+		preempt: { type: "boolean" },
 	},
 } as const
 
@@ -268,6 +292,7 @@ const tuneResultProperties = {
 	usable: { type: "boolean" },
 	applied: tuneSettingsSchema,
 	notApplied: tuneSettingsSchema,
+	preempted: tunePreemptionSchema,
 } as const
 
 const tuneResponseSchema = {
@@ -282,6 +307,8 @@ const tuneFailureSchema = {
 		...errorResponseSchema.properties,
 		...tuneResultProperties,
 		inFlight: { type: "boolean" },
+		jobId: { type: "string" },
+		jobName: { type: "string", nullable: true },
 		state: tunerStateSchema,
 		sourceVerdict: sourceVerdictSchema,
 	},
@@ -289,7 +316,7 @@ const tuneFailureSchema = {
 } as const
 
 const TUNE_URL = "/api/tuner/:sourceId/tune"
-const TUNE_EXPECTED = `at least one of "sampleRateHz" (integer Hz, 225001-300000 or 900001-3200000), "frequencyHz" (integer Hz, 24000000-1900000000), "gainMode" ("manual" | "agc"), "gain" (integer, tenths of a dB, 0-500); optional "restoreAfterS" (integer seconds, 1-${TUNE_RESTORE_MAX_S}) puts the prior tuning back`
+const TUNE_EXPECTED = `at least one of "sampleRateHz" (integer Hz, 225001-300000 or 900001-3200000), "frequencyHz" (integer Hz, 24000000-1900000000), "gainMode" ("manual" | "agc"), "gain" (integer, tenths of a dB, 0-500); optional "restoreAfterS" (integer seconds, 1-${TUNE_RESTORE_MAX_S}) puts the prior tuning back; optional "preempt" (boolean) takes the tuner from a scanner job holding it`
 
 export const tunerConfigUpdateSchema = {
 	type: "object",
@@ -325,10 +352,12 @@ export interface TunerRoutesOptions {
 		request: FastifyRequest,
 	) => AccessPrincipal["kind"] | undefined
 	/**
-	 * The job holding a source's tuner lease; absent on a core without a scanner. A restore of a
-	 * temporary tune yields to a held lease.
+	 * The job holding a source's tuner lease; absent on a core without a scanner. A tune answers
+	 * 409 under a held lease unless told to preempt, and a restore yields to one.
 	 */
 	scannerLeaseHolder?: TunerLeaseHolder
+	/** The source's receiver status, for the verdict of a tune that finds the source silent. */
+	receiverStatus?: TuneReceiverStatus
 }
 
 const GAIN_EXPECTED =
@@ -1402,6 +1431,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				tunerController,
 				tuneSource,
 				options.scannerLeaseHolder,
+				options.receiverStatus,
 			))
 		fastify.addHook("onClose", async () => {
 			tuning?.close()
@@ -1410,7 +1440,12 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 			usable: outcome.usable,
 			applied: outcome.applied,
 			notApplied: outcome.notApplied,
+			...(outcome.preempted ? { preempted: outcome.preempted } : {}),
 		})
+		const leaseFacts = (err: unknown) =>
+			err instanceof TunerLeaseHeldError
+				? { jobId: err.job.jobId, jobName: err.job.name }
+				: {}
 
 		// POST /api/tuner/:sourceId/tune - Rate, centre and gain in one call
 		fastify.post<{
@@ -1424,7 +1459,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					tags: ["tuner"],
 					summary: "Tune: rate, centre and gain in one call",
 					description:
-						"Applies the settings in order and answers once the source delivers IQ again, at most 18 s later. With restoreAfterS the prior tuning comes back unless another write changes the tuner first.",
+						"Applies the settings in order and answers once the source delivers IQ again, at most 18 s later. With restoreAfterS the prior tuning comes back unless another write changes the tuner first. A scanner job holding the tuner answers 409 TUNER_LEASE_HELD unless preempt is true; the answer then says what became of the job.",
 					body: tuneBodySchema,
 					response: {
 						200: tuneResponseSchema,
@@ -1461,6 +1496,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 						return { ...outcome.state, ...tuneResult(outcome) }
 					return handleTunerError(reply, outcome.error, TUNE_EXPECTED, {
 						...tuneResult(outcome),
+						...leaseFacts(outcome.error),
 						...(outcome.inFlight ? { inFlight: true } : {}),
 						...(outcome.state ? { state: outcome.state } : {}),
 						...(outcome.sourceVerdict
@@ -1468,7 +1504,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 							: {}),
 					})
 				} catch (err) {
-					return handleTunerError(reply, err, TUNE_EXPECTED)
+					return handleTunerError(reply, err, TUNE_EXPECTED, leaseFacts(err))
 				}
 			},
 		)

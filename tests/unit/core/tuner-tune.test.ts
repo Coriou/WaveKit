@@ -2,18 +2,27 @@
  * POST /api/tuner/:sourceId/tune through the real route, TunerController and SourceManager against
  * an in-process fake rtl_tcp on an ephemeral loopback port. Time is faked only for the timers.
  */
-import { once } from "node:events"
-import type { EventEmitter } from "node:events"
+import { EventEmitter, once } from "node:events"
 import * as net from "node:net"
 import Fastify from "fastify"
 import pino from "pino"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	TUNE_RESTORE_MAX_S,
+	type SdrHostStatus,
 	type TuneRestore,
 	type TunerState,
 } from "@wavekit/api-types"
 import { tunerRoutes } from "../../../src/api/routes/tuner.js"
+import {
+	ApiServer,
+	type ApiServerDependencies,
+} from "../../../src/api/server.js"
+import {
+	BAND_GAIN_SAVED_FILE_NAME,
+	BandGainSettingsService,
+	type BandGainFs,
+} from "../../../src/core/band-gain.js"
 import { TunerArbiter } from "../../../src/core/scanner/tuner-arbiter.js"
 import {
 	SourceManager,
@@ -26,7 +35,7 @@ import {
 } from "../../../src/core/tuner-controller.js"
 import {
 	TUNE_DEADLINE_MS,
-	type TunerLeaseHolder,
+	type TunerLeaseJob,
 } from "../../../src/core/tuner-tune.js"
 import type { TunerRelay } from "../../../src/core/tuner-relay.js"
 import { wireTunerControl } from "../../../src/core/tuner-wiring.js"
@@ -116,13 +125,23 @@ async function setup(
 		tunerRelay: { handleSourceConnected: () => {} } as unknown as TunerRelay,
 		relayEnabled: false,
 	})
-	let leaseHolder: TunerLeaseHolder = () => null
+	let leaseHolder: (sourceId: string) => string | null = () => null
+	let leaseJob: Omit<TunerLeaseJob, "jobId"> = {
+		name: "Night sweep",
+		autoAfterIdleMs: 60_000,
+		starting: false,
+	}
+	let receiver: SdrHostStatus | undefined
 	const app = Fastify()
 	await app.register(tunerRoutes, {
 		tunerController: controller,
 		sourceManager: manager,
 		principalKind: () => principal,
-		scannerLeaseHolder: sourceId => leaseHolder(sourceId),
+		scannerLeaseHolder: sourceId => {
+			const jobId = leaseHolder(sourceId)
+			return jobId === null ? null : { jobId, ...leaseJob }
+		},
+		receiverStatus: () => receiver,
 	})
 	await app.ready()
 	cleanup.push(() => app.close())
@@ -166,8 +185,14 @@ async function setup(
 		post,
 		read,
 		connect,
-		useLeases: (holder: TunerLeaseHolder) => {
+		useLeases: (holder: (sourceId: string) => string | null) => {
 			leaseHolder = holder
+		},
+		describeLeaseJob: (job: Partial<Omit<TunerLeaseJob, "jobId">>) => {
+			leaseJob = { ...leaseJob, ...job }
+		},
+		useReceiver: (status: SdrHostStatus) => {
+			receiver = status
 		},
 		/** What a tune or restore waiting for the source holds on it. */
 		waitListeners: () =>
@@ -496,14 +521,69 @@ describe("tune in one call", () => {
 		expect(h.frames).toEqual([])
 	})
 
-	it("takes a scanner lease as the other routes do: the operator preempts it", async () => {
+	it("names the job under a held lease and writes nothing, unlike the other routes", async () => {
 		const h = await setup()
 		const { arbiter, lost } = arbiterOn(h)
-		const lease = arbiter.acquire("job", "rtl", 50)
-		expect(lease.ok).toBe(true)
-		const res = await h.post({ frequencyHz: TUNE_HZ })
-		expect(res.statusCode).toBe(200)
+		h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
+		expect(arbiter.acquire("job", "rtl", 50).ok).toBe(true)
+		const frames = h.frames.length
+		const res = await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 5 })
+		expect(res.statusCode).toBe(409)
+		expect(res.json()).toMatchObject({
+			code: "TUNER_LEASE_HELD",
+			jobId: "job",
+			jobName: "Night sweep",
+		})
+		expect(res.json().message).toContain('"preempt": true')
+		expect(res.json().message).toContain("job")
+		expect(lost).toEqual([])
+		expect(arbiter.holder("rtl")?.jobId).toBe("job")
+		expect(h.frames.length).toBe(frames)
+		expect(h.read()).not.toHaveProperty("restore")
+		// The separate routes are unchanged: an operator write still preempts.
+		const route = await h.app.inject({
+			method: "POST",
+			url: "/api/tuner/rtl/frequency",
+			payload: { hz: TUNE_HZ },
+		})
+		expect(route.statusCode).toBe(200)
 		expect(lost).toEqual(["preempted-operator"])
+	})
+
+	it("refuses a lease taken while it queued, with nothing written", async () => {
+		const h = await setup()
+		const { arbiter, lost } = arbiterOn(h)
+		h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
+		h.fakeTime()
+		const queued = vi.spyOn(h.manager, "runTunerCommand")
+		h.holdQueue(1_000)
+		const frames = h.frames.length
+		const answer = h.post({ frequencyHz: TUNE_HZ })
+		await until(() => queued.mock.calls.length === 2)
+		expect(arbiter.acquire("job", "rtl", 50).ok).toBe(true)
+		await vi.advanceTimersByTimeAsync(1_000)
+		const res = await answer
+		expect(res.statusCode).toBe(409)
+		expect(res.json()).toMatchObject({
+			code: "TUNER_LEASE_HELD",
+			jobId: "job",
+			applied: [],
+		})
+		expect(lost).toEqual([])
+		expect(h.frames.length).toBe(frames)
+	})
+
+	it("refuses when the lease cannot be read, unless told to preempt", async () => {
+		const h = await setup()
+		h.useLeases(() => {
+			throw new Error("no answer")
+		})
+		const res = await h.post({ frequencyHz: TUNE_HZ })
+		expect(res.statusCode).toBe(409)
+		expect(res.json().code).toBe("TUNER_LEASE_HELD")
+		expect(res.json().message).toContain("could not be read")
+		const forced = await h.post({ frequencyHz: TUNE_HZ, preempt: true })
+		expect(forced.statusCode).toBe(200)
 	})
 
 	it("runs one tune per source and answers a second 409", async () => {
@@ -1228,12 +1308,12 @@ describe("a temporary tune", () => {
 
 		it("writes nothing when the lease cannot be read", async () => {
 			const h = await tuned()
-			h.useLeases(() => {
-				throw new Error("no answer")
-			})
 			await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 1 })
 			await until(() => h.frames.length === 1)
 			h.frames.length = 0
+			h.useLeases(() => {
+				throw new Error("no answer")
+			})
 			await vi.advanceTimersByTimeAsync(5_000)
 			expect(restoreOf(h.read()).cancelledBy?.actor).toBe("scanner-job")
 			expect(h.frames).toEqual([])
@@ -1499,5 +1579,679 @@ describe("a temporary tune", () => {
 		})
 		const list = await h.app.inject({ method: "GET", url: "/api/tuner" })
 		expect(restoreOf(list.json()[0]).status).toBe("pending")
+	})
+})
+
+describe("who moved the tuner, across a reconnect", () => {
+	it("a web rate change says web in its own answer and after the replay", async () => {
+		const h = await setup({ principal: "session" })
+		h.fakeTime()
+		await h.app.inject({
+			method: "POST",
+			url: "/api/tuner/rtl/frequency",
+			payload: { hz: OTHER_HZ },
+		})
+		await vi.advanceTimersByTimeAsync(2_000)
+		const disconnected = event(h.manager, "disconnected")
+		const answer = h.app.inject({
+			method: "POST",
+			url: "/api/tuner/rtl/sample-rate",
+			payload: { hz: OTHER_RATE },
+		})
+		await disconnected
+		await vi.advanceTimersByTimeAsync(calculateBackoffDelay(1))
+		const res = await answer
+		expect(res.statusCode).toBe(200)
+		await until(() =>
+			h.frames.some(f => f.connection === 2 && f.cmd === SET_FREQUENCY),
+		)
+		for (const change of [res.json().lastChange, h.read().lastChange])
+			expect(change).toMatchObject({
+				actor: "web",
+				reason: "rest-command",
+				fields: ["sampleRate"],
+			})
+	})
+
+	it("POST /tune keeps its actor and all its fields through the recovery between them", async () => {
+		const h = await setup()
+		h.fakeTime()
+		const disconnected = event(h.manager, "disconnected")
+		const answer = h.post({
+			sampleRateHz: OTHER_RATE,
+			frequencyHz: TUNE_HZ,
+			gainMode: "manual",
+			gain: 300,
+		})
+		await disconnected
+		await vi.advanceTimersByTimeAsync(calculateBackoffDelay(1))
+		const res = await answer
+		expect(res.statusCode).toBe(200)
+		const fields = ["sampleRate", "frequency", "gainMode", "gain"]
+		expect(res.json().lastChange).toMatchObject({
+			actor: "agent",
+			reason: "rest-command",
+		})
+		expect([...res.json().lastChange.fields].sort()).toEqual([...fields].sort())
+	})
+
+	it("a dropout leaves the last mover, its time and its fields as they were", async () => {
+		const h = await setup({ principal: "session" })
+		h.fakeTime()
+		await h.app.inject({
+			method: "POST",
+			url: "/api/tuner/rtl/frequency",
+			payload: { hz: OTHER_HZ },
+		})
+		const before = h.read().lastChange
+		expect(before?.actor).toBe("web")
+		await until(() => h.frames.some(f => f.value === OTHER_HZ))
+		const dropped = event(h.manager, "disconnected")
+		h.sockets[0]!.destroy()
+		await dropped
+		const back = event(h.manager, "payload-started")
+		await vi.advanceTimersByTimeAsync(calculateBackoffDelay(2))
+		await back
+		await until(() =>
+			h.frames.some(f => f.connection === 2 && f.value === OTHER_HZ),
+		)
+		expect(h.read().lastChange).toEqual(before)
+	})
+})
+
+describe("the user always wins over a temporary tune", () => {
+	async function ready() {
+		const h = await setup()
+		await h.post({ frequencyHz: OTHER_HZ, gainMode: "manual", gain: 200 })
+		await until(() => h.frames.length === 4)
+		h.frames.length = 0
+		h.fakeTime()
+		return h
+	}
+	const inject =
+		(method: "POST" | "PATCH", url: string, payload: object) =>
+		(h: Awaited<ReturnType<typeof setup>>) =>
+			h.app.inject({ method, url: `/api/tuner/rtl/${url}`, payload })
+
+	// Three writes behind a tune holding the queue: none has a new value to show, and each is a
+	// choice. The tune's last frame and the next command's start are one microtask apart.
+	it.each([
+		["POST ppm", inject("POST", "ppm", { ppm: 3 })],
+		[
+			"POST gain with the tune's own value",
+			inject("POST", "gain", { gain: 300 }),
+		],
+		[
+			"POST frequency with the tune's own value",
+			inject("POST", "frequency", { hz: TUNE_HZ }),
+		],
+	])(
+		"%s queued right behind the tune cancels the restore",
+		async (_name, write) => {
+			const h = await ready()
+			const queued = vi.spyOn(h.manager, "runTunerCommand")
+			h.holdQueue(1_000)
+			const tune = h.post({ frequencyHz: TUNE_HZ, gain: 300, restoreAfterS: 1 })
+			await until(() => queued.mock.calls.length === 2)
+			const user = write(h)
+			await until(() => queued.mock.calls.length === 3)
+			await vi.advanceTimersByTimeAsync(1_000)
+			expect((await user).statusCode).toBe(200)
+			await tune
+			expect(restoreOf(h.read())).toMatchObject({
+				status: "cancelled",
+				cancelledBy: { actor: "agent", reason: "tuner-write" },
+			})
+			await until(() => h.frames.some(f => f.cmd === SET_GAIN))
+			h.frames.length = 0
+			await vi.advanceTimersByTimeAsync(10_000)
+			expect(h.frames).toEqual([])
+			expect(h.read()).toMatchObject({ frequency: TUNE_HZ, gain: 300 })
+		},
+	)
+
+	it.each([
+		["the frequency", { frequency: TUNE_HZ }],
+		["the gain", { gain: 300 }],
+		["the frequency and the gain", { frequency: TUNE_HZ, gain: 300 }],
+	])(
+		"an unchanged PATCH of %s cancels a pending restore, no frame sent",
+		async (_name, payload) => {
+			const h = await ready()
+			await h.post({ frequencyHz: TUNE_HZ, gain: 300, restoreAfterS: 5 })
+			await until(() => h.frames.length === 2)
+			h.frames.length = 0
+			const res = await inject("PATCH", "config", payload)(h)
+			expect(res.statusCode).toBe(200)
+			expect(restoreOf(h.read())).toMatchObject({
+				status: "cancelled",
+				cancelledBy: { actor: "agent", reason: "tuner-write" },
+			})
+			await vi.advanceTimersByTimeAsync(10_000)
+			expect(h.frames).toEqual([])
+			expect(h.read()).toMatchObject({ frequency: TUNE_HZ, gain: 300 })
+		},
+	)
+
+	it("an unchanged PATCH queued behind the tune cancels too", async () => {
+		const h = await ready()
+		const queued = vi.spyOn(h.manager, "runTunerCommand")
+		h.holdQueue(1_000)
+		const tune = h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 1 })
+		await until(() => queued.mock.calls.length === 2)
+		const user = inject("PATCH", "config", { frequency: TUNE_HZ })(h)
+		await until(() => queued.mock.calls.length === 3)
+		await vi.advanceTimersByTimeAsync(1_000)
+		expect((await user).statusCode).toBe(200)
+		await tune
+		expect(restoreOf(h.read()).status).toBe("cancelled")
+		await vi.advanceTimersByTimeAsync(10_000)
+		expect(h.read().frequency).toBe(TUNE_HZ)
+	})
+
+	it("an empty PATCH chooses nothing and leaves the restore", async () => {
+		const h = await ready()
+		await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 5 })
+		await inject("PATCH", "config", {})(h)
+		expect(restoreOf(h.read()).status).toBe("pending")
+	})
+
+	it("the rate policy's write inside the tune is the tune's own; outside it is not", async () => {
+		const h = await ready()
+		let raise = true
+		h.controller.setBeforeOperatorRetune(async sourceId => {
+			if (!raise) return
+			raise = false
+			await h.controller.setPpm(sourceId, 1, { origin: "decoder-rate" })
+		})
+		await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 5 })
+		expect(restoreOf(h.read()).status).toBe("pending")
+		await h.controller.setPpm("rtl", 2, { origin: "decoder-rate" })
+		expect(restoreOf(h.read())).toMatchObject({
+			status: "cancelled",
+			cancelledBy: { actor: "decoder-rate", reason: "tuner-write" },
+		})
+	})
+
+	it("says a write overrode the tune, with no retry hint", async () => {
+		const h = await ready()
+		const queued = vi.spyOn(h.manager, "runTunerCommand")
+		h.holdQueue(1_000)
+		const tune = h.post({ frequencyHz: TUNE_HZ })
+		await until(() => queued.mock.calls.length === 2)
+		const user = inject("POST", "frequency", { hz: TUNE_HZ + 1 })(h)
+		await until(() => queued.mock.calls.length === 3)
+		await vi.advanceTimersByTimeAsync(1_000)
+		await user
+		const res = await tune
+		expect(res.statusCode).toBe(409)
+		expect(res.headers).not.toHaveProperty("retry-after")
+		expect(res.json()).toMatchObject({
+			code: "TUNER_TUNE_OVERRIDDEN",
+			usable: true,
+			notApplied: ["frequencyHz"],
+			state: {
+				frequency: TUNE_HZ + 1,
+				lastTune: { code: "TUNER_TUNE_OVERRIDDEN" },
+			},
+		})
+		expect(h.read().frequency).toBe(TUNE_HZ + 1)
+	})
+
+	it("a tune that stays ends a restore already writing, and queues behind it", async () => {
+		const h = await ready()
+		await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 1 })
+		await until(() => h.frames.length === 1)
+		h.frames.length = 0
+		h.holdQueue(2_000)
+		await vi.advanceTimersByTimeAsync(1_000)
+		await until(() => restoreOf(h.read()).status === "restoring")
+		// A second temporary tune still waits its turn: it has nothing to keep the first one's snapshot.
+		const busy = await h.post({ frequencyHz: TUNE_HZ + 1, restoreAfterS: 1 })
+		expect(busy.statusCode).toBe(409)
+		expect(busy.json().code).toBe("TUNER_TUNE_BUSY")
+		const answer = h.post({ frequencyHz: TUNE_HZ + 2 })
+		await until(() => restoreOf(h.read()).status === "cancelled")
+		expect(restoreOf(h.read()).cancelledBy).toMatchObject({
+			actor: "agent",
+			reason: "tuner-write",
+		})
+		await vi.advanceTimersByTimeAsync(2_000)
+		expect((await answer).statusCode).toBe(200)
+		await until(() => h.frames.some(f => f.value === TUNE_HZ + 2))
+		expect(h.frames.some(f => f.value === OTHER_HZ)).toBe(false)
+		expect(h.read().frequency).toBe(TUNE_HZ + 2)
+	})
+
+	it("gives the receiver's own facts in the verdict of a silent source", async () => {
+		const h = await setup()
+		h.server.close()
+		h.fakeTime()
+		const disconnected = event(h.manager, "disconnected")
+		const answer = h.post({ sampleRateHz: OTHER_RATE })
+		await disconnected
+		await vi.advanceTimersByTimeAsync(TUNE_DEADLINE_MS - 1)
+		h.useReceiver({
+			sourceId: "rtl",
+			available: true,
+			lastFetchedAt: new Date().toISOString(),
+			receiverFacts: { deviceFound: false, rtlTcpRunning: false },
+		} as SdrHostStatus)
+		await vi.advanceTimersByTimeAsync(1)
+		const res = await answer
+		expect(res.statusCode).toBe(503)
+		expect(res.json().sourceVerdict).toMatchObject({
+			code: "receiver-no-device",
+			deviceFacts: "absent",
+		})
+	})
+})
+
+/** A scanner job's hop, as its lease writes it. */
+async function hop(
+	h: Awaited<ReturnType<typeof setup>>,
+	hz: number,
+	gain?: number,
+): Promise<void> {
+	const scanner = { origin: "scanner", accept: false, jobId: "job" } as const
+	await h.controller.setFrequency("rtl", hz, scanner)
+	if (gain !== undefined) await h.controller.setGain("rtl", gain, scanner)
+}
+
+describe("a tune with preempt: true under a scanner lease", () => {
+	async function leased() {
+		const h = await setup()
+		await h.post({ frequencyHz: OTHER_HZ, gainMode: "manual", gain: 200 })
+		await until(() => h.frames.length === 4)
+		const { arbiter, lost } = arbiterOn(h)
+		h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
+		const lease = arbiter.acquire("job", "rtl", 50)
+		if (!lease.ok) throw new Error("no lease")
+		// The job's own hop: what a restore must never go back to.
+		await hop(h, 433_000_000, 450)
+		await until(() => h.frames.some(f => f.value === 433_000_000))
+		h.frames.length = 0
+		h.fakeTime()
+		return { h, arbiter, lost, lease: lease.lease }
+	}
+
+	it("reports the job, pauses it, and answers usable", async () => {
+		const { h, lost, arbiter } = await leased()
+		const res = await h.post({ frequencyHz: TUNE_HZ, preempt: true })
+		expect(res.statusCode).toBe(200)
+		expect(lost).toEqual(["preempted-operator"])
+		expect(arbiter.holder("rtl")).toBeUndefined()
+		expect(res.json().preempted).toMatchObject({
+			jobId: "job",
+			jobName: "Night sweep",
+			job: "paused",
+			autoAfterIdleMs: 60_000,
+		})
+		expect(res.json().preempted.message).toContain("60000 ms")
+		expect(h.read().lastTune?.preempted?.jobId).toBe("job")
+	})
+
+	it("never restores to the job's hop: no restore comes, and the block says so", async () => {
+		const { h } = await leased()
+		const res = await h.post({
+			frequencyHz: TUNE_HZ,
+			restoreAfterS: 5,
+			preempt: true,
+		})
+		expect(res.statusCode).toBe(200)
+		expect(restoreOf(res.json())).toMatchObject({
+			status: "cancelled",
+			state: {},
+			cancelledBy: {
+				actor: "agent",
+				reason: "scanner-preempted",
+				job: { jobId: "job", jobName: "Night sweep" },
+			},
+		})
+		expect(Date.parse(restoreOf(res.json()).at)).toBe(Date.now() + 5_000)
+		expect(res.json().preempted.message).toContain("No restore comes")
+		await until(() => h.frames.some(f => f.value === TUNE_HZ))
+		h.frames.length = 0
+		await vi.advanceTimersByTimeAsync(10_000)
+		expect(h.frames).toEqual([])
+		expect(h.read()).toMatchObject({ frequency: TUNE_HZ, gain: 450 })
+	})
+
+	it("says a job with no auto-resume stays paused, in the field and the message", async () => {
+		const { h } = await leased()
+		h.describeLeaseJob({ autoAfterIdleMs: null })
+		const res = await h.post({
+			frequencyHz: TUNE_HZ,
+			restoreAfterS: 5,
+			preempt: true,
+		})
+		expect(res.json().preempted).toMatchObject({
+			job: "paused",
+			autoAfterIdleMs: null,
+		})
+		expect(res.json().preempted.message).toContain("stays paused")
+		expect(res.json().preempted.message).toContain(
+			"POST /api/scanner/jobs/job/resume",
+		)
+	})
+
+	it("says a job still starting failed", async () => {
+		const { h } = await leased()
+		h.describeLeaseJob({ starting: true })
+		const res = await h.post({ frequencyHz: TUNE_HZ, preempt: true })
+		expect(res.json().preempted.job).toBe("failed")
+	})
+
+	it("an auto-resume inside a longer restoreAfterS finds nothing to fight", async () => {
+		const { h, arbiter } = await leased()
+		await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 300, preempt: true })
+		await until(() => h.frames.some(f => f.value === TUNE_HZ))
+		h.frames.length = 0
+		await vi.advanceTimersByTimeAsync(60_000)
+		const back = arbiter.acquire("job", "rtl", 50)
+		if (!back.ok) throw new Error("no lease")
+		await hop(h, 434_000_000)
+		await until(() => h.frames.some(f => f.value === 434_000_000))
+		h.frames.length = 0
+		await vi.advanceTimersByTimeAsync(300_000)
+		expect(h.frames).toEqual([])
+		expect(arbiter.holder("rtl")).toBe(back.lease)
+		expect(h.read().frequency).toBe(434_000_000)
+	})
+
+	it("a tune with nothing to write takes nothing and restores nothing", async () => {
+		const { h, lost, arbiter, lease } = await leased()
+		const res = await h.post({
+			frequencyHz: 433_000_000,
+			restoreAfterS: 5,
+			preempt: true,
+		})
+		expect(res.statusCode).toBe(200)
+		expect(res.json()).not.toHaveProperty("preempted")
+		expect(lost).toEqual([])
+		expect(arbiter.holder("rtl")).toBe(lease)
+		expect(restoreOf(res.json()).cancelledBy).toMatchObject({
+			actor: "scanner-job",
+			reason: "scanner-lease",
+			job: { jobId: "job" },
+		})
+		h.frames.length = 0
+		await vi.advanceTimersByTimeAsync(10_000)
+		expect(h.frames).toEqual([])
+	})
+
+	it("changes nothing with no lease held", async () => {
+		const h = await setup()
+		const res = await h.post({ frequencyHz: TUNE_HZ, preempt: true })
+		expect(res.statusCode).toBe(200)
+		expect(res.json()).not.toHaveProperty("preempted")
+	})
+
+	it("a job that returns during a restore armed with no lease ends it, naming the job", async () => {
+		const h = await setup()
+		await h.post({ frequencyHz: OTHER_HZ, gainMode: "manual", gain: 200 })
+		await until(() => h.frames.length === 4)
+		const { arbiter, lost } = arbiterOn(h)
+		h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
+		h.fakeTime()
+		await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 300 })
+		await vi.advanceTimersByTimeAsync(60_000)
+		const lease = arbiter.acquire("job", "rtl", 50)
+		if (!lease.ok) throw new Error("no lease")
+		await hop(h, 434_000_000)
+		await until(() => h.frames.some(f => f.value === 434_000_000))
+		h.frames.length = 0
+		expect(restoreOf(h.read()).cancelledBy).toMatchObject({
+			reason: "scanner-lease",
+			job: { jobId: "job", jobName: "Night sweep" },
+		})
+		await vi.advanceTimersByTimeAsync(300_000)
+		expect(h.frames).toEqual([])
+		expect(lost).toEqual([])
+	})
+})
+
+describe("a temporary tune and the gain saved before a band", () => {
+	const BAND_HZ = 868_100_000
+	const OUTSIDE_HZ = 145_000_000
+	const SAVED_PATH = `/state/${BAND_GAIN_SAVED_FILE_NAME}`
+
+	async function inBand() {
+		const h = await setup()
+		const files = new Map<string, string>()
+		const fs: BandGainFs = {
+			readFile: path => {
+				const text = files.get(path)
+				return text === undefined
+					? Promise.reject(
+							Object.assign(new Error("missing"), { code: "ENOENT" }),
+						)
+					: Promise.resolve(Buffer.from(text))
+			},
+			atomicWrite: (path, data) => {
+				files.set(path, data)
+				return Promise.resolve()
+			},
+		}
+		const service = new BandGainSettingsService({
+			stateDir: "/state",
+			config: {
+				applyToMyTuning: true,
+				entries: [{ minHz: 863_000_000, maxHz: 870_000_000, gain: 297 }],
+			},
+			logger: quiet,
+			fs,
+		})
+		await service.load()
+		h.controller.setBandGain(service)
+		const write = (url: string, payload: object) =>
+			h.app.inject({
+				method: "POST",
+				url: `/api/tuner/rtl/${url}`,
+				payload,
+			})
+		await write("gain-mode", { mode: "manual" })
+		await write("gain", { gain: 200 })
+		await write("frequency", { hz: BAND_HZ })
+		await until(() => files.get(SAVED_PATH)?.includes('"gain": 200') === true)
+		expect(h.read()).toMatchObject({ gain: 297, bandGain: { tenthsDb: 297 } })
+		const before = files.get(SAVED_PATH)
+		h.fakeTime()
+		const settled = async () => {
+			for (let i = 0; i < 20; i++)
+				await new Promise<void>(resolve => {
+					setImmediate(resolve)
+				})
+		}
+		return {
+			h,
+			files,
+			write,
+			before,
+			settled,
+			saved: () => files.get(SAVED_PATH),
+		}
+	}
+
+	it.each([
+		["the centre alone", {}],
+		["an explicit gain", { gain: 300 }],
+	])("leaves it exactly as it was, durably, with %s", async (_name, extra) => {
+		const { h, write, before, saved, settled } = await inBand()
+		const res = await h.post({
+			frequencyHz: OUTSIDE_HZ,
+			restoreAfterS: 5,
+			...extra,
+		})
+		expect(res.statusCode).toBe(200)
+		await settled()
+		expect(saved()).toBe(before)
+		await vi.advanceTimersByTimeAsync(5_000)
+		await until(() => restoreOf(h.read()).status === "restored")
+		await settled()
+		expect(saved()).toBe(before)
+		expect(h.read()).toMatchObject({
+			frequency: BAND_HZ,
+			gain: 297,
+			bandGain: { tenthsDb: 297 },
+		})
+		// Leaving the band gives the user's gain back, as if the tune had never been.
+		await write("frequency", { hz: OUTSIDE_HZ })
+		expect(h.read().gain).toBe(200)
+	})
+
+	it("forgets what it saved itself when it goes back", async () => {
+		const { h, write, settled, saved } = await inBand()
+		await write("frequency", { hz: OUTSIDE_HZ })
+		await settled()
+		expect(h.read().gain).toBe(200)
+		const before = saved()
+		await h.post({ frequencyHz: BAND_HZ, restoreAfterS: 5 })
+		expect(h.read().gain).toBe(297)
+		await vi.advanceTimersByTimeAsync(5_000)
+		await until(() => restoreOf(h.read()).status === "restored")
+		await settled()
+		expect(saved()).toBe(before)
+		expect(h.read()).toMatchObject({ frequency: OUTSIDE_HZ, gain: 200 })
+	})
+
+	it("kept by DELETE, it stays as an operator tune stays: the gain it used is gone", async () => {
+		const { h, write, settled, saved } = await inBand()
+		await h.post({ frequencyHz: OUTSIDE_HZ, restoreAfterS: 5 })
+		await h.app.inject({
+			method: "DELETE",
+			url: "/api/tuner/rtl/tune/restore",
+		})
+		await settled()
+		expect(saved()).not.toContain('"gain": 200')
+		await write("frequency", { hz: OUTSIDE_HZ + 1 })
+		expect(h.read().gain).toBe(200)
+	})
+
+	it("cancelled by a user's gain, that gain stands and the saved one is gone", async () => {
+		const { h, write, settled, saved } = await inBand()
+		await h.post({ frequencyHz: OUTSIDE_HZ, restoreAfterS: 5 })
+		await write("gain", { gain: 150 })
+		await settled()
+		expect(restoreOf(h.read()).status).toBe("cancelled")
+		expect(saved()).not.toContain('"gain": 200')
+		await write("frequency", { hz: OUTSIDE_HZ + 1 })
+		expect(h.read().gain).toBe(150)
+	})
+
+	it("cancelled by a user's other write, the explicit gain of the tune stays with it", async () => {
+		const { h, write, settled, saved } = await inBand()
+		await h.post({ frequencyHz: OUTSIDE_HZ, gain: 300, restoreAfterS: 5 })
+		await write("ppm", { ppm: 3 })
+		await settled()
+		expect(saved()).not.toContain('"gain": 200')
+		await write("frequency", { hz: OUTSIDE_HZ + 1 })
+		expect(h.read().gain).toBe(300)
+	})
+
+	it("on shutdown with the restore pending, the saved gain is what it was before the tune", async () => {
+		const { h, before, saved, settled } = await inBand()
+		await h.post({ frequencyHz: OUTSIDE_HZ, restoreAfterS: 5 })
+		await h.app.close()
+		await settled()
+		expect(saved()).toBe(before)
+	})
+
+	it("preempting a job, nothing goes back, so it uses the saved gain as any operator tune", async () => {
+		const { h, settled, saved } = await inBand()
+		const { arbiter } = arbiterOn(h)
+		h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
+		expect(arbiter.acquire("job", "rtl", 50).ok).toBe(true)
+		const res = await h.post({
+			frequencyHz: OUTSIDE_HZ,
+			restoreAfterS: 5,
+			preempt: true,
+		})
+		expect(res.statusCode).toBe(200)
+		await settled()
+		expect(saved()).not.toContain('"gain": 200')
+	})
+})
+
+describe("POST /tune through the real ApiServer", () => {
+	it("a restore yields to the scanner's lease, with no write", async () => {
+		const h = await setup()
+		await h.post({ frequencyHz: OTHER_HZ })
+		await until(() => h.frames.some(f => f.value === OTHER_HZ))
+		let holder: {
+			jobId: string
+			name: string
+			autoAfterIdleMs: null
+			starting: false
+		} | null = null
+		const server = new ApiServer(
+			{
+				logger: quiet,
+				tunerController: h.controller,
+				sourceManager: h.manager,
+				scanner: Object.assign(new EventEmitter(), {
+					tunerLeaseJob: () => holder,
+					settings: () => testSettings(),
+				}),
+				decoderManager: Object.assign(new EventEmitter(), {
+					getAllDecoders: () => [],
+					getAllStatus: () => [],
+					getAllHealth: () => new Map(),
+				}),
+				fanoutManager: Object.assign(new EventEmitter(), {
+					getTelemetrySnapshot: () => ({
+						timestamp: new Date().toISOString(),
+						branches: [],
+						backpressureActiveCount: 0,
+						droppedBytesTotal: 0,
+						droppedChunksTotal: 0,
+					}),
+				}),
+				audioOutput: Object.assign(new EventEmitter(), {
+					getConnectedClients: () => 0,
+					getPort: () => 0,
+				}),
+			} as unknown as ApiServerDependencies,
+			{ host: "127.0.0.1", port: 0 },
+		)
+		cleanup.push(() => server.stop())
+		await server.start()
+		const app = server.getApp()
+		const tune = (payload: object) =>
+			app.inject({ method: "POST", url: "/api/tuner/rtl/tune", payload })
+		h.fakeTime()
+		const armed = await tune({ frequencyHz: TUNE_HZ, restoreAfterS: 5 })
+		expect(armed.statusCode).toBe(200)
+		await until(() => h.frames.some(f => f.value === TUNE_HZ))
+		h.frames.length = 0
+		holder = {
+			jobId: "job",
+			name: "Night sweep",
+			autoAfterIdleMs: null,
+			starting: false,
+		}
+		await vi.advanceTimersByTimeAsync(5_000)
+		const read = await app.inject({ url: "/api/tuner/rtl" })
+		expect(restoreOf(read.json())).toMatchObject({
+			status: "cancelled",
+			cancelledBy: {
+				actor: "scanner-job",
+				reason: "scanner-lease",
+				job: { jobId: "job", jobName: "Night sweep" },
+			},
+		})
+		expect(h.frames).toEqual([])
+		// And the route refuses through the same wiring, naming the job.
+		const refused = await tune({ frequencyHz: OTHER_HZ })
+		expect(refused.statusCode).toBe(409)
+		expect(refused.json()).toMatchObject({
+			code: "TUNER_LEASE_HELD",
+			jobId: "job",
+			jobName: "Night sweep",
+		})
+		// The wrong-shaped response schemas would drop these: the 200 keeps them.
+		holder = null
+		const free = await tune({ frequencyHz: OTHER_HZ })
+		expect(free.json().restore.cancelledBy.job.jobName).toBe("Night sweep")
 	})
 })

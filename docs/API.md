@@ -1686,20 +1686,25 @@ pending.
 one per source, in memory, absent until the first change since the core started. Clients cannot
 set it: `actor` comes from the core's own view of the write. All three lists are in `GET /api/enums`.
 
-| `actor`        | `reason`                                              | Written by                                                                                                                        |
-| -------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `web`          | `rest-command`                                        | A REST write under a browser session                                                                                              |
-| `agent`        | `rest-command`                                        | A REST write under a machine token                                                                                                |
-| `unknown`      | `rest-command`                                        | A REST write on a core without access protection: there is no principal to tell who                                               |
-| `scanner-job`  | `scanner-hop`                                         | A scanner job's tuner lease; `jobId` names the job                                                                                |
-| `restore`      | `scanner-restore`, `tune-restore`, `reconnect-replay` | The core putting tuning back: after a lease (`jobId` when the release knows it), after a temporary tune, or replay on a reconnect |
-| `config`       | `source-config`                                       | The source's configured tuning, written on connect                                                                                |
-| `decoder-rate` | `decoder-rate`                                        | The decoder rate policy raising the sample rate                                                                                   |
-| `relay`        | `relay-command`                                       | An external client through the tuner relay, including a value the controller ignores (the relay forwards it)                      |
-| `unknown`      | `unknown`                                             | An untagged write                                                                                                                 |
+| `actor`        | `reason`                                              | Written by                                                                                                                                                                                  |
+| -------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `web`          | `rest-command`                                        | A REST write under a browser session                                                                                                                                                        |
+| `agent`        | `rest-command`                                        | A REST write under a machine token                                                                                                                                                          |
+| `unknown`      | `rest-command`                                        | A REST write on a core without access protection: there is no principal to tell who                                                                                                         |
+| `scanner-job`  | `scanner-hop`                                         | A scanner job's tuner lease; `jobId` names the job                                                                                                                                          |
+| `restore`      | `scanner-restore`, `tune-restore`, `reconnect-replay` | The core putting tuning back: after a lease (`jobId` when the release knows it), after a temporary tune, or a replay on a reconnect that wrote another value than that command's last frame |
+| `config`       | `source-config`                                       | The source's configured tuning, written on connect, when it differs from that command's last frame                                                                                          |
+| `decoder-rate` | `decoder-rate`                                        | The decoder rate policy raising the sample rate                                                                                                                                             |
+| `relay`        | `relay-command`                                       | An external client through the tuner relay, including a value the controller ignores (the relay forwards it)                                                                                |
+| `unknown`      | `unknown`                                             | An untagged write                                                                                                                                                                           |
 
 Writes of one actor, reason and job under a second apart extend `fields`, each field at most once
-(a hop writes rate, centre and gain in a row). A scanner settle marker (test mode on and off) is no change.
+(a hop writes rate, centre and gain in a row). All the writes of one `POST /tune` merge, however long the
+recovery of a rate change parts them. A scanner settle marker (test mode on and off) is no change.
+
+A reconnect does not move the tuner when it writes back what was already there, so it leaves `lastChange`
+alone: after a sample-rate change (its 200 included) or a dropout, `lastChange` still names who moved the
+tuner, when, and which fields. Only a frame with another value than that command's last one replaces it.
 
 **Configured gain and AGC on connect.** An `rtl_tcp` source may carry
 `tuner: { gainMode, gainDb?, agcMode? }` in its config (`sources[].tuner`, also
@@ -1816,13 +1821,14 @@ Set the rate, the centre and the gain in one call. The answer comes only when th
 used again, so a sample-rate change needs no retry loop. Agents should use this over the separate
 routes below.
 
-| Body field      | Sets in `GET /api/tuner` | Value                                                                    |
-| --------------- | ------------------------ | ------------------------------------------------------------------------ |
-| `sampleRateHz`  | `sampleRate`             | Integer Hz, 225001-300000 or 900001-3200000                              |
-| `frequencyHz`   | `frequency`              | Integer Hz, 24000000-1900000000                                          |
-| `gainMode`      | `gainMode`               | `manual` or `agc`                                                        |
-| `gain`          | `gain`                   | Integer tenths of a dB, 0-500                                            |
-| `restoreAfterS` |                          | Integer seconds, 1-3600: see [temporary tune](#temporary-tune). Optional |
+| Body field      | Sets in `GET /api/tuner` | Value                                                                                     |
+| --------------- | ------------------------ | ----------------------------------------------------------------------------------------- |
+| `sampleRateHz`  | `sampleRate`             | Integer Hz, 225001-300000 or 900001-3200000                                               |
+| `frequencyHz`   | `frequency`              | Integer Hz, 24000000-1900000000                                                           |
+| `gainMode`      | `gainMode`               | `manual` or `agc`                                                                         |
+| `gain`          | `gain`                   | Integer tenths of a dB, 0-500                                                             |
+| `restoreAfterS` |                          | Integer seconds, 1-3600: see [temporary tune](#temporary-tune). Optional                  |
+| `preempt`       |                          | `true` takes the tuner from a scanner job: see [below](#tune-and-a-scanner-job). Optional |
 
 At least one setting is required, and an unknown field is a 400. They are written in the order of
 the table: the rate first, then the centre, then the gain (for `agc`, the gain and then the mode,
@@ -1831,8 +1837,8 @@ is not written again. The same rules as the separate routes apply: it runs in th
 [command queue](#tuner-commands-during-a-sample-rate-restart), a frequency without a rate takes the
 [rate proof](#post-apitunersourceidfrequency) and the decoder rate policy, and a band gain applies
 after the centre, where an explicit `gain` overrides it. It refuses external control (409
-`TUNER_CONTROL_EXTERNAL`). Like every operator write, it takes the tuner from a scanner job that
-holds a lease rather than being refused: the job loses the lease (`preempted-operator`).
+`TUNER_CONTROL_EXTERNAL`). Unlike the separate routes, it does not take the tuner from a scanner job
+unasked: see [tune and a scanner job](#tune-and-a-scanner-job).
 
 **200** is the tuner state plus `usable: true`, `applied` (the settings, as named in `GET /api/enums`
 `tuner.tuneSettings`) and `notApplied: []`. It means the source is connected, writable and delivering
@@ -1846,9 +1852,11 @@ IQ on its current connection, after any reconnect restore. As with every tuner r
 | ------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 503    | `TUNER_NOT_USABLE`            | The source was not usable within 18 s (or its feed is paused, which answers at once). `sourceVerdict` says why. `applied` can be non-empty: those settings were written and return with the source. `inFlight: true`: one was being written at the deadline and may still land |
 | 503    | `TUNER_TUNE_PARTIAL`          | The source is usable but shows other values, as after a `tuner.reconnectPolicy: reset` reconnect discards what was written                                                                                                                                                     |
+| 409    | `TUNER_TUNE_OVERRIDDEN`       | Another write changed the tuner after this tune, and it stands. `state.lastChange` says who. No `Retry-After`: tuning again would overwrite that choice, so decide first                                                                                                       |
 | 503    | `SOURCE_DISCONNECTED`         | The source dropped during the writes; `applied` stops where it did                                                                                                                                                                                                             |
 | 409    | `TUNER_CONTROL_EXTERNAL`      | An external client has the tuner                                                                                                                                                                                                                                               |
-| 409    | `TUNER_TUNE_BUSY`             | One tune per source: another is running, or a restore is putting tuning back. It is not queued; retry when it answers                                                                                                                                                          |
+| 409    | `TUNER_LEASE_HELD`            | A scanner job holds the tuner's lease and the body has no `preempt: true`. `jobId` and `jobName` name it; nothing was written. See [tune and a scanner job](#tune-and-a-scanner-job)                                                                                           |
+| 409    | `TUNER_TUNE_BUSY`             | One tune per source: another is running, or `restoreAfterS` while a restore is putting tuning back. It is not queued; retry when it answers. A tune without `restoreAfterS` during a restore ends the restore and queues behind it                                             |
 | 409    | `TUNER_RESTORE_PRIOR_UNKNOWN` | `restoreAfterS` with a setting whose prior value the core does not know (see `unknownFields`): nothing is written. Set it first, or tune without a restore                                                                                                                     |
 | 404    | `TUNER_SOURCE_NOT_FOUND`      | No tuner for this source                                                                                                                                                                                                                                                       |
 
@@ -1862,6 +1870,38 @@ A client that disconnects does not stop a tune: every setting is still applied, 
 is still armed, and `lastTune` in `GET /api/tuner` (`at`, `usable`, `applied`, `notApplied`, `code`) says
 how it ended.
 
+##### Tune and a scanner job
+
+A tune never takes the tuner from a scan silently. While a scanner job holds the tuner's lease, or a
+lease cannot be read, the tune answers 409 `TUNER_LEASE_HELD` with `jobId` and `jobName` and writes
+nothing. This is checked on arrival and again when the tune's turn in the command queue comes. To go
+ahead, send `preempt: true`, wait for the job to end, or cancel it (`POST /api/scanner/jobs/:id/cancel`;
+pausing a job keeps its lease). The separate routes below and the web app do not ask: they preempt as
+they always have.
+
+With `preempt: true` and a lease held, the first frame takes the lease (`preempted-operator`), and the
+answer carries `preempted`, which `lastTune` repeats. A tune that finds every value in place sends no
+frame, so it preempts nothing and has no `preempted`.
+
+| `preempted` field | Content                                                                                                                                                   |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `jobId`           | The job                                                                                                                                                   |
+| `jobName`         | Its name, or `null`                                                                                                                                       |
+| `job`             | `paused`, or `failed` for a job that was still starting                                                                                                   |
+| `autoAfterIdleMs` | Its `resume.autoAfterIdleMs`. `null`: **it stays paused until someone calls `POST /api/scanner/jobs/:id/resume`**, however short the look was meant to be |
+| `message`         | All of this in a sentence, with what to do next                                                                                                           |
+
+A paused job resumes by its own rules, whatever the tune says: `autoAfterIdleMs` after the last
+operator write to this tuner, or later if activity holds it. The default is 60 s, so a job can take the
+tuner back during a longer `restoreAfterS`.
+
+With `restoreAfterS` as well, **no restore comes**. The tuning under a lease is the job's hop, and
+that is never something to go back to. `restore` is `cancelled` from the start, with reason
+`scanner-preempted`, `job` naming the job, an empty `state` and `at` when it would have been due.
+Nothing is written at that time: the receiver stays on the tune until the job resumes and retunes, or
+someone tunes it. The tuning from before the job does not come back either: an operator write ends the
+lease with no restore ([scanner jobs](SCANNER.md)), so if you want that tuning, tune to it.
+
 ##### Temporary tune
 
 `restoreAfterS` puts the prior rate, centre, gain mode and gain back that long after the tune
@@ -1870,16 +1910,21 @@ restoring a tune of the centre alone writes one command. A band gain in force be
 reported again when the gain comes back.
 
 The rule is that the user wins. A later write to this tuner by anyone cancels the restore for good,
-and nothing overwrites it: another REST write (including one to another field, such as `ppm`), a tune
-without `restoreAfterS`, a relay client or the control going external, a scanner job, the decoder
-rate policy. A reconnect that replays the same tuning does not count. A reconnect that leaves other
+and nothing overwrites it: another REST write (including one to another field, such as `ppm`, one with
+the tune's own value, and one queued right behind the tune), a `PATCH /config` even if its values are
+already in place and it sends nothing, a tune without `restoreAfterS`, a relay client or the control
+going external, a scanner job, the decoder rate policy outside this tune. A reconnect that replays the
+same tuning does not count. A reconnect that leaves other
 values (`reset` policy, a plain resume that leaves them unverified) cancels it with reason
 `state-changed`.
 
-A restore never preempts anyone. A scanner job's tuner lease cancels it for good (`actor`
-`scanner-job`, reason `scanner-lease`) whenever the core sees the lease held: on any tuner state
-change, when the restore comes due, and before each of its writes. The job keeps its lease, and a
-job that has not hopped yet is not disturbed. A job that took a lease and gave it back before any of
+A restore never preempts anyone, but the tune that armed it can: see [tune and a scanner
+job](#tune-and-a-scanner-job). A restore armed with no lease held can still meet one: a job paused
+earlier resumes `autoAfterIdleMs` after the last operator write, during a longer `restoreAfterS`. A
+scanner job's tuner lease cancels the restore for good (`actor` `scanner-job`, reason `scanner-lease`,
+`job` naming the job) whenever the core sees the lease held: on any tuner state change, on a hop, when
+the restore comes due, and before each of its writes. The job keeps its lease, and a job that has not
+hopped yet is not disturbed. A job that took a lease and gave it back before any of
 those moments, with no hop, moved nothing and does not cancel it. A pending restore can show
 `pending` while a lease is held until one of those moments comes.
 
@@ -1894,7 +1939,7 @@ ended, until the next temporary tune or the source's removal:
 | `at`          | ISO time it is or was due                                                                                                                                                                                                                                                                                                                   |
 | `status`      | `pending`, `restoring`, `restored`, `cancelled` or `failed`                                                                                                                                                                                                                                                                                 |
 | `state`       | What goes back: `sampleRate`, `frequency`, `gainMode`, `gain`. A field the core did not know at the tune is absent                                                                                                                                                                                                                          |
-| `cancelledBy` | `{ actor, reason, at }`. `reason` is `tuner-write`, `state-changed`, `external-control` (`actor` `relay`), `cancel-request` or `scanner-lease` (`actor` `scanner-job`)                                                                                                                                                                      |
+| `cancelledBy` | `{ actor, reason, at, job? }`. `reason` is `tuner-write`, `state-changed`, `external-control` (`actor` `relay`), `cancel-request`, `scanner-lease` (`actor` `scanner-job`) or `scanner-preempted` (the tune took a job's lease, so no restore comes). On the last two, `job` is `{ jobId, jobName }` when the core can name it              |
 | `restored`    | The settings back at their prior value; after a cancel or a failure, those that went back before it stopped and stayed                                                                                                                                                                                                                      |
 | `failure`     | The error code of a failed restore: `TUNER_NOT_USABLE`, `TUNER_RESTORE_DEADLINE` (usable, but its 18 s ran out, time queued behind other commands included) or the write's own error. It is one attempt and is not retried: no write starts after the 18 s, what did not go back keeps the temporary tuning, and later writes work as usual |
 
@@ -1902,6 +1947,19 @@ The restore's writes read `actor: restore`, `reason: tune-restore` in `lastChang
 
 `DELETE /api/tuner/:sourceId/tune/restore` keeps the temporary tuning (`cancel-request`) and answers the
 tuner state; with no restore pending it is 404 `TUNER_RESTORE_NOT_PENDING`.
+
+A temporary tune leaves the gain saved before a band ([per-band gain](CORE-REFERENCE.md#per-band-gain),
+`applyToMyTuning`) as it was, on disk too: when the restore has run, leaving the band gives your gain
+back as if the tune had never been. If it goes back to where no gain was saved, what the tune itself
+saved on entering a band goes. If the restore never runs, it depends on why:
+
+- **Cancelled** (a later write, `DELETE`, a scanner lease): the tune stays, as an operator tune stays. A
+  saved gain it would have used up (by leaving the band, or with its own `gain`) is gone, and one it
+  saved on entering a band is kept for leaving it.
+- **Failed:** the saved gain stays, so a later retune out of the band can still give it back.
+- **Shutdown or the source's removal:** the saved gain stays as it was on disk, including one the tune
+  saved on entering a band.
+- **`preempt: true` under a lease:** no restore was ever armed, so it counts as any operator tune.
 
 A new temporary tune during a pending one keeps the original snapshot and takes the new time: the
 tuner goes back to where it was before the first. If the new tune writes nothing, the pending restore
@@ -3057,13 +3115,13 @@ curl "http://localhost:9000/api/decoders/summary?hz=1090000000"
 
 **Quiet or broken.** `verdict.code` separates the two; `input` says whether samples reach the decoder, from the activity of its sources (`flowing`, `none`, or `unknown` when the core cannot say: no source of its own, or one just connecting or backed up). `health: idle` alone says neither: it means no output in the last minute.
 
-| `verdict.code`       | `input`                | Reads as                                                                                                                 |
-| -------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `decoding`           | any                    | Working: output in the last minute                                                                                       |
-| `listening`          | `flowing` or `unknown` | Quiet: running, nothing decodable in the last minute, so sparse traffic reads here between bursts. `reception` says more |
-| `source-unavailable` | `none`                 | Broken: running but no input, its source delivers no samples. Read the source's [`verdict`](#get-apisources)             |
-| `failed`             | any                    | Broken: the process crashed or fails to start. `lastError` is on `GET /api/decoders/:id`                                 |
-| `starting`           | any                    | Wanted, not running yet                                                                                                  |
+| `verdict.code`       | `input`                | Reads as                                                                                                                                                                                                                                     |
+| -------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `decoding`           | any                    | Working: output in the last minute                                                                                                                                                                                                           |
+| `listening`          | `flowing` or `unknown` | Quiet: running, nothing decodable in the last minute, so sparse traffic reads here between bursts. `reception` says more                                                                                                                     |
+| `source-unavailable` | `none`                 | Broken: running but no input, its source delivers no samples. Read the source's [`verdict`](#get-apisources). A source in the recovery of a commanded rate change (at most 9 s) reads `unknown` instead; a recording that ended stays `none` |
+| `failed`             | any                    | Broken: the process crashed or fails to start. `lastError` is on `GET /api/decoders/:id`                                                                                                                                                     |
+| `starting`           | any                    | Wanted, not running yet                                                                                                                                                                                                                      |
 
 `input` follows the source, not the decoder's own pipe: a decoder whose branch alone stopped while its source streams still reads `flowing`. `lastOutputAt` is the newest of the decoder and its placement workers (ids `<decoder>#<channel>@<source>`).
 

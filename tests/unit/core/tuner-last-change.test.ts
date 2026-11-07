@@ -97,8 +97,6 @@ describe("TunerController lastChange", () => {
 	})
 
 	it.each([
-		[{ origin: "replay" }, "restore", "reconnect-replay"],
-		[{ origin: "config" }, "config", "source-config"],
 		[{ origin: "decoder-rate" }, "decoder-rate", "decoder-rate"],
 		[{}, "unknown", "unknown"],
 		[{ origin: "rest" }, "unknown", "rest-command"],
@@ -106,6 +104,76 @@ describe("TunerController lastChange", () => {
 		const c = harness()
 		await c.setPpm("rtl-1", 2, opts)
 		expect(c.getState("rtl-1")?.lastChange).toMatchObject({ actor, reason })
+	})
+
+	describe("across a reconnect", () => {
+		it("a replay of the accepted values moves nothing: the mover, time and fields stay", async () => {
+			const c = harness()
+			await c.setFrequency("rtl-1", 145_000_000, {
+				origin: "rest",
+				actor: "web",
+			})
+			await c.setGain("rtl-1", 300, { origin: "rest", actor: "web" })
+			const before = c.getState("rtl-1")?.lastChange
+			vi.advanceTimersByTime(TUNER_CHANGE_MERGE_MS * 5)
+			expect(c.synchronizeOnConnect("rtl-1").commands.length).toBeGreaterThan(0)
+			expect(c.getState("rtl-1")?.lastChange).toEqual(before)
+		})
+
+		it("a replay of a value other than the last frame's is a change, by the core", () => {
+			const c = harness()
+			// Accepted, then a value the controller ignores goes out through the relay.
+			c.applyExternalCommand("rtl-1", 0x01, 145_000_000)
+			c.applyExternalCommand("rtl-1", 0x01, 0xffffffff)
+			vi.advanceTimersByTime(TUNER_CHANGE_MERGE_MS)
+			c.synchronizeOnConnect("rtl-1")
+			expect(c.getState("rtl-1")?.lastChange).toMatchObject({
+				actor: "restore",
+				reason: "reconnect-replay",
+				fields: ["frequency"],
+			})
+		})
+
+		it("takes a relay's negative value and its replay as the same value", async () => {
+			const c = harness()
+			c.applyExternalCommand("rtl-1", 0x05, -3 >>> 0)
+			const before = c.getState("rtl-1")?.lastChange
+			vi.advanceTimersByTime(TUNER_CHANGE_MERGE_MS)
+			c.synchronizeOnConnect("rtl-1")
+			expect(c.getState("rtl-1")?.lastChange).toEqual(before)
+		})
+
+		it("a plain resume that replays a relay's command moves nothing either", () => {
+			const c = harness()
+			c.noteFeedPaused("rtl-1")
+			c.applyExternalCommand("rtl-1", 0x01, 145_000_000)
+			const before = c.getState("rtl-1")?.lastChange
+			vi.advanceTimersByTime(TUNER_CHANGE_MERGE_MS)
+			expect(
+				c.synchronizeOnConnect("rtl-1", { resume: "plain" }).commands,
+			).toEqual(["set-frequency"])
+			expect(c.getState("rtl-1")?.lastChange).toEqual(before)
+		})
+
+		it("the configured tuning reads config once, and not again on each reconnect", async () => {
+			const c = harness()
+			c.syncConfiguredTuning("rtl-1", { gain: 30 } as never)
+			c.noteSourceConnected("rtl-1")
+			c.synchronizeOnConnect("rtl-1")
+			expect(c.getState("rtl-1")?.lastChange).toMatchObject({
+				actor: "config",
+				reason: "source-config",
+			})
+			await c.setFrequency("rtl-1", 145_000_000, {
+				origin: "rest",
+				actor: "web",
+			})
+			const mover = c.getState("rtl-1")?.lastChange
+			vi.advanceTimersByTime(TUNER_CHANGE_MERGE_MS)
+			c.noteSourceConnected("rtl-1")
+			expect(c.synchronizeOnConnect("rtl-1").commands.length).toBeGreaterThan(1)
+			expect(c.getState("rtl-1")?.lastChange).toEqual(mover)
+		})
 	})
 
 	it("a relay command reads relay, even one the controller ignores", () => {

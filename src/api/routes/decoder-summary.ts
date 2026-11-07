@@ -480,11 +480,21 @@ export type SourceActivityOf = (
 	sourceId: string,
 ) => SourceStatus["activity"]["state"] | undefined
 
-/** Reads activity through `getStatus`; a manager without it reads every source unknown. */
+/**
+ * Reads activity through `getStatus`; a manager without it reads every source unknown. A source in
+ * its commanded rate-change recovery (at most 9 s) is on its way back, not broken, so it reads as
+ * one just connecting. A recording that ended keeps reading `ended`: nothing brings it back.
+ */
 export function sourceActivityReader(
-	manager: Partial<Pick<SourceManager, "getStatus">>,
+	manager: Partial<Pick<SourceManager, "getStatus" | "isCommandedRecovery">>,
 ): SourceActivityOf {
-	return id => manager.getStatus?.(id)?.activity.state
+	return id => {
+		const activity = manager.getStatus?.(id)?.activity.state
+		return (activity === "disconnected" || activity === "stale") &&
+			manager.isCommandedRecovery?.(id) === true
+			? "waiting"
+			: activity
+	}
 }
 
 /**
