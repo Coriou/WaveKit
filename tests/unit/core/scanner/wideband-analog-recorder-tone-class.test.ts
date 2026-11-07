@@ -229,6 +229,38 @@ describe("a verified digital class still vetoes a tone-classed recording", () =>
 		expect(h.tones).toEqual([])
 	}, 120_000)
 
+	it("after a kept wide reading: discarded the same, nothing finalized", async () => {
+		const h = lowHarness(SPEECH)
+		await h.feed(1, false)
+		const onset = h.engine.liveEdge()
+		let classedAt: number | null = null
+		await over(h, 6, {
+			extra: at => {
+				if (classedAt === null && codes(h).includes("classed")) classedAt = at
+				if (classedAt === null || at < classedAt + 0.25) return {}
+				return {
+					nonAnalog: at >= classedAt + 0.5,
+					track: snapshot("o", onset, h.engine.liveEdge(), {
+						...LOW,
+						obwHz: 20_000,
+					}),
+				}
+			},
+		})
+		expect(classedAt).not.toBeNull()
+		expect(codes(h)).toEqual([
+			"shadow",
+			"voiced",
+			"classed",
+			"discarded:not-analog",
+		])
+		expect(h.ops.every(o => o.outcome !== "finalized")).toBe(true)
+		expect(h.rec.diagnostics().recent.at(-1)!.unclean).toMatchObject({
+			flag: "wide",
+			kept: true,
+		})
+	}, 120_000)
+
 	it("on the close: discarded, nothing finalized", async () => {
 		const h = lowHarness(SPEECH)
 		await h.feed(1, false)

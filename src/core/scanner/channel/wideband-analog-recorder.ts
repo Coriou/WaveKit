@@ -230,29 +230,44 @@ export function toneOnlyYields(
 /**
  * A classed, voiced session whose snapshots turn unclean keeps recording when the flag is a
  * spur or an IQ image (an artefact flag that a strong neighbour or a spur line near the channel
- * can raise on some snapshots of a real voice) first seen after the session was classed and
- * voiced, and on fewer than this share of its snapshots so far: 0.5, flagged · 2 < snapshots
- * (e.g. 49 of 100 is kept, 50 of 100 is not). Its files are written but give no tone evidence.
- * Any other flag, an artefact flag seen before the class and the voice, or one on half of the
- * snapshots or more, discards the session as before.
+ * can raise on some snapshots of a real voice) or a wide reading past a channel
+ * (WIDEBAND_KEPT_WIDE_OBW_HZ), first seen after the session was classed and voiced, and on fewer
+ * than this share of its snapshots so far: 0.5, flagged · 2 < snapshots (e.g. 49 of 100 is kept,
+ * 50 of 100 is not). Its files are written but give no tone evidence. Any other flag, a flag seen
+ * before the class and the voice, or one on half of the snapshots or more, discards the session
+ * as before.
  */
 export const WIDEBAND_LATE_FLAG_MAX_SHARE = 0.5
+/**
+ * A classed, voiced session keeps recording over a wide reading up to this, on any share of its
+ * snapshots: one 25 kHz channel, the line above which the classifier calls a signal `wideband`
+ * (classOf). The bound of WIDEBAND_MAX_OBW_HZ decides what may start a recording; a voice already
+ * heard reads over it when the -20 dB width of its mean spectrum runs one 1 kHz bin wider, and the
+ * demodulator hears the same ±8 kHz channel (CHANNEL_CUTOFF_HZ) whatever the reading says. With no
+ * voice after it, the sweep's answer falls back by itself (WIDEBAND_VOICE_ON_AIR_MS). Past a
+ * channel the reading counts as a late flag (lateFlagKept), and an unknown width too.
+ */
+export const WIDEBAND_KEPT_WIDE_OBW_HZ = 25_000
 
-/** The first reason `track` is not clean (cleanTrack), or null when it is. */
+/**
+ * The first reason `track` is not clean (cleanTrack), or null when it is. Hardest to keep a session
+ * over first (lateFlagKept), so that a lenient flag never hides a stricter one on the same snapshot.
+ */
 export function uncleanFlag(track: TrackSnapshot): ScannerRecorderFlag | null {
 	if (!usableTrust(track.tuningTrust)) return "tuning"
-	if (!Number.isFinite(track.obwHz) || track.obwHz > WIDEBAND_MAX_OBW_HZ)
-		return "wide"
 	if (track.flags.truncated) return "truncated"
 	if (track.flags.edge) return "edge"
 	if (track.flags.iqImage) return "iq-image"
 	if (track.flags.spur === true) return "spur"
+	if (!Number.isFinite(track.obwHz) || track.obwHz > WIDEBAND_MAX_OBW_HZ)
+		return "wide"
 	return null
 }
 
 /**
  * Whether a session keeps recording over a snapshot flagged `flag` (WIDEBAND_LATE_FLAG_MAX_SHARE):
- * a spur or IQ image, the session's first flag came after it was classed and voiced (`late`),
+ * a spur, an IQ image or a wide reading past WIDEBAND_KEPT_WIDE_OBW_HZ (snapshotBar keeps one up
+ * to it without asking), the session's first flag came after it was classed and voiced (`late`),
  * and `flagged` of its `snapshots` (this one included) is under the share.
  */
 export function lateFlagKept(
@@ -262,7 +277,7 @@ export function lateFlagKept(
 	snapshots: number,
 ): boolean {
 	return (
-		(flag === "spur" || flag === "iq-image") &&
+		(flag === "spur" || flag === "iq-image" || flag === "wide") &&
 		late &&
 		flagged < WIDEBAND_LATE_FLAG_MAX_SHARE * snapshots
 	)
@@ -672,7 +687,9 @@ interface Session {
 	snapshots: number
 	/** Unclean ones among them. */
 	flagged: number
-	/** The session's first spur or IQ-image flag came after it was classed and voiced. */
+	/** Of those, wide readings within WIDEBAND_KEPT_WIDE_OBW_HZ: outside any flag's share. */
+	flaggedInChannel: number
+	/** The session's first flag came after it was classed and voiced. */
 	flagLate: boolean
 	/**
 	 * The unclean detail its decisions carry, with the counts above (null while every snapshot was
@@ -1113,7 +1130,8 @@ export class WidebandAnalogRecorder {
 		if (bar !== null) {
 			// Any contributing track turning edge, spur, unverified or encrypted (evidence that may
 			// arrive after its last update), or losing record.analog, discards the recording; a
-			// late minority spur or image flag on a classed, voiced one does not (snapshotBar).
+			// late minority spur or image flag or a wide reading on a classed, voiced one does not
+			// (snapshotBar).
 			this.refuse(s, bar, true)
 			return
 		}
@@ -1531,6 +1549,7 @@ export class WidebandAnalogRecorder {
 			inTrack: 0,
 			snapshots: 1,
 			flagged: 0,
+			flaggedInChannel: 0,
 			flagLate: false,
 			unclean: null,
 			qualified: false,
@@ -1818,7 +1837,7 @@ export class WidebandAnalogRecorder {
 	/**
 	 * Publishes the session's held tone evidence once nothing of it can change any more: the
 	 * session ended (done, not parked) and every operation settled. A session that saw an unclean
-	 * snapshot at any time (kept over a late spur or image flag, snapshotBar, or vetoed) publishes
+	 * snapshot at any time (kept over a late flag or wide reading, snapshotBar, or vetoed) publishes
 	 * none, so a 120 s roll-over finalized before a later flag gives no proof either. Called after
 	 * each settle and each end.
 	 */
@@ -1905,7 +1924,8 @@ export class WidebandAnalogRecorder {
 	/**
 	 * Counts one snapshot of a joined observation of `s` (raised by `via`) and returns what bars
 	 * the session: `barred` as given, or null when the only bar is an unclean track the session
-	 * keeps recording over (lateFlagKept). An unclean snapshot updates the session's detail.
+	 * keeps recording over (WIDEBAND_KEPT_WIDE_OBW_HZ, lateFlagKept). An unclean snapshot updates
+	 * the session's detail.
 	 */
 	private snapshotBar(
 		s: Session,
@@ -1919,7 +1939,17 @@ export class WidebandAnalogRecorder {
 		if (flag === null) return barred
 		if (s.flagged === 0) s.flagLate = s.classed && s.qualified
 		s.flagged++
-		const kept = lateFlagKept(flag, s.flagLate, s.flagged, s.snapshots)
+		const inChannel =
+			flag === "wide" && track.obwHz <= WIDEBAND_KEPT_WIDE_OBW_HZ
+		if (inChannel) s.flaggedInChannel++
+		const kept =
+			(inChannel && s.flagLate) ||
+			lateFlagKept(
+				flag,
+				s.flagLate,
+				s.flagged - s.flaggedInChannel,
+				s.snapshots,
+			)
 		const atMs = Math.max(
 			0,
 			Math.round(((track.lastSample - s.onset) * 1000) / s.fs),

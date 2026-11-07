@@ -2,15 +2,20 @@
  * WidebandAnalogRecorder over unclean snapshots: which flag and which snapshot raised it are in
  * the decision detail, a spur or IQ-image flag first seen after the session was classed and
  * voiced and present on fewer than half of its snapshots keeps the recording (no tone evidence),
- * and every other case still discards it.
+ * a wide reading after the class and the voice keeps it up to a 25 kHz channel and under the same
+ * share past that, and every other case still discards it.
  */
 import { describe, expect, it } from "vitest"
+import { classOf } from "../../../../src/core/scanner/classify/classifier.js"
 import {
+	WIDEBAND_KEPT_WIDE_OBW_HZ,
 	WIDEBAND_LATE_FLAG_MAX_SHARE,
+	WIDEBAND_MAX_OBW_HZ,
 	lateFlagKept,
 	uncleanFlag,
 } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
+import { NfmSource } from "./wideband-nfm-fixtures.js"
 import {
 	CENTRE,
 	LOW,
@@ -107,9 +112,233 @@ describe("which flag barred a recording", () => {
 			// First seen before the session was classed and voiced: never kept.
 			expect(lateFlagKept(flag, false, 1, 100)).toBe(false)
 		}
-		for (const flag of ["edge", "truncated", "wide", "tuning"] as const)
+		for (const flag of ["edge", "truncated", "tuning"] as const)
 			expect(lateFlagKept(flag, true, 1, 100)).toBe(false)
 	})
+
+	it("a wide reading never hides a flag the session cannot be kept over", () => {
+		const wide = (flag: Flag | "truncated"): TrackSnapshot => {
+			const t = snapshot("o", 0, 10, { obwHz: 20_000 })
+			t.flags[flag] = true
+			return t
+		}
+		expect(uncleanFlag(wide("edge"))).toBe("edge")
+		expect(uncleanFlag(wide("truncated"))).toBe("truncated")
+		expect(uncleanFlag(wide("spur"))).toBe("spur")
+		expect(uncleanFlag(wide("iqImage"))).toBe("iq-image")
+		expect(
+			uncleanFlag(
+				snapshot("o", 0, 10, { obwHz: 20_000, tuningTrust: "unverified" }),
+			),
+		).toBe("tuning")
+	})
+
+	it("the kept wide bound is the classifier's own line for a wideband signal", () => {
+		expect(WIDEBAND_KEPT_WIDE_OBW_HZ).toBe(25_000)
+		expect(
+			classOf(snapshot("o", 0, 10, { obwHz: WIDEBAND_KEPT_WIDE_OBW_HZ })),
+		).not.toBe("wideband")
+		expect(
+			classOf(snapshot("o", 0, 10, { obwHz: WIDEBAND_KEPT_WIDE_OBW_HZ + 1 })),
+		).toBe("wideband")
+	})
+})
+
+describe("a voiced, classed session over a wide reading", () => {
+	/** `seconds` of voice, every snapshot reading `obwHz`. */
+	const wideVoice = (
+		h: Harness,
+		onset: number,
+		seconds: number,
+		obwHz: number,
+	) =>
+		h.feed(seconds, true, () =>
+			h.rec.track(
+				input("o", snapshot("o", onset, h.engine.liveEdge(), { obwHz })),
+			),
+		)
+
+	it.each([WIDEBAND_MAX_OBW_HZ + 1, WIDEBAND_KEPT_WIDE_OBW_HZ])(
+		"%i Hz on every later snapshot keeps the one file, the voice answer and no tone evidence",
+		async obwHz => {
+			const h = harness()
+			const onset = await voiced(h, 2)
+			await wideVoice(h, onset, 3, obwHz)
+			expect(h.rec.owns("o")).toBe(true)
+			expect(h.ops[0]!.cancelled).toBeNull()
+			expect(
+				h.rec.recordingActive("rtl", { stream: 1, epoch: 1 }),
+			).toMatchObject({ voice: "o" })
+			await closeAll(h, onset, (_, t) => ({ ...t, obwHz }))
+			expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+			expect(h.tones).toEqual([])
+			const last = decided(h).at(-1)!
+			expect(last.code).toBe("finalized")
+			expect(last.unclean).toMatchObject({
+				flag: "wide",
+				raisedBy: "snapshot",
+				kept: true,
+			})
+			// About 120 of the 200 snapshots of the over read wide: over half, still kept.
+			expect(last.unclean!.flagged * 2).toBeGreaterThan(last.unclean!.snapshots)
+		},
+		60_000,
+	)
+
+	it("with no voice after it the sweep's answer falls back on its own, the file stays", async () => {
+		const h = harness()
+		const onset = await voiced(h, 2)
+		// The carrier stays on with no speech: 1000 ms judged late + 2000 ms on air + 500 ms window.
+		const carrier = new NfmSource({
+			fs: h.fs,
+			offsetHz: OFFSET,
+			voice: false,
+		})
+		const chunk = h.fs / 40
+		for (let i = 0; i < 3.75 * 40; i++) {
+			h.engine.write(carrier.next(chunk, true))
+			h.rec.track(
+				input(
+					"o",
+					snapshot("o", onset, h.engine.liveEdge(), { obwHz: 20_000 }),
+				),
+			)
+			await h.pump()
+		}
+		expect(h.rec.owns("o")).toBe(true)
+		expect(h.rec.recordingActive("rtl", { stream: 1, epoch: 1 })).toBe(true)
+		await closeAll(h, onset, (_, t) => ({ ...t, obwHz: 20_000 }))
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+	}, 60_000)
+
+	it.each([WIDEBAND_KEPT_WIDE_OBW_HZ + 1, Number.NaN])(
+		"%f Hz, past a channel: one reading is kept, on half of the snapshots it discards the recording",
+		async obwHz => {
+			const once = harness()
+			const onceOnset = await voiced(once, 2)
+			await wideVoice(once, onceOnset, 0.025, obwHz)
+			await once.feed(1, true, () =>
+				once.rec.track(
+					input("o", snapshot("o", onceOnset, once.engine.liveEdge())),
+				),
+			)
+			await closeAll(once, onceOnset)
+			expect(once.ops.map(o => o.outcome)).toEqual(["finalized"])
+			expect(decided(once).at(-1)!.unclean).toMatchObject({
+				flag: "wide",
+				flagged: 1,
+				kept: true,
+			})
+
+			const h = harness()
+			const onset = await voiced(h, 2)
+			for (let i = 0; i < 400 && h.rec.owns("o"); i++)
+				await wideVoice(h, onset, 0.025, obwHz)
+			expect(h.rec.owns("o")).toBe(false)
+			const last = decided(h).at(-1)!
+			expect(last.code).toBe("refused:unclean")
+			expect(last.unclean).toMatchObject({ flag: "wide", kept: false })
+			expect(last.unclean!.flagged * 2).toBe(last.unclean!.snapshots)
+			expect(h.ops.map(o => o.cancelled)).toEqual(["cancelled"])
+		},
+		120_000,
+	)
+
+	it("a kept wide reading does not count against a later spur's share", async () => {
+		const h = harness()
+		const onset = await voiced(h, 2)
+		await wideVoice(h, onset, 3, 20_000)
+		h.rec.track(input("x", joined(h, "spur")))
+		await h.pump()
+		expect(h.rec.owns("o")).toBe(true)
+		expect(h.ops[0]!.cancelled).toBeNull()
+	}, 60_000)
+
+	it.each(["edge", "truncated"] as const)(
+		"a wide reading on a snapshot also flagged %s still discards it",
+		async flag => {
+			const h = harness()
+			const onset = await voiced(h, 2)
+			const t = snapshot("o", onset, h.engine.liveEdge(), { obwHz: 20_000 })
+			t.flags[flag] = true
+			h.rec.track(input("o", t))
+			await h.pump()
+			expect(h.rec.owns("o")).toBe(false)
+			expect(h.ops.map(o => o.cancelled)).toEqual(["cancelled"])
+			expect(decided(h).at(-1)).toMatchObject({
+				code: "refused:unclean",
+				unclean: { flag, kept: false },
+			})
+		},
+		60_000,
+	)
+
+	it("an encrypted snapshot after a kept wide reading still discards it", async () => {
+		const h = harness()
+		const onset = await voiced(h, 2)
+		await wideVoice(h, onset, 0.5, 20_000)
+		expect(h.rec.owns("o")).toBe(true)
+		h.rec.track(
+			input("o", snapshot("o", onset, h.engine.liveEdge()), {
+				encrypted: true,
+			}),
+		)
+		await h.pump()
+		expect(h.rec.owns("o")).toBe(false)
+		expect(h.ops.map(o => o.cancelled)).toEqual(["cancelled"])
+		expect(decided(h).at(-1)!.code).toBe("refused:encrypted")
+	}, 60_000)
+})
+
+describe("a wide reading before the voice", () => {
+	it.each([
+		{ name: "a classed session", extra: {} },
+		{ name: "a shadow", extra: { analogFm: false, shadowAllowed: true } },
+	])(
+		"still refuses $name, within a channel too",
+		async ({ extra }) => {
+			const h = harness()
+			await h.feed(0.5, false)
+			const onset = h.engine.liveEdge()
+			await h.feed(0.5, false, () =>
+				h.rec.track(
+					input("o", snapshot("o", onset, h.engine.liveEdge()), extra),
+				),
+			)
+			expect(h.rec.owns("o")).toBe(true)
+			h.rec.track(
+				input(
+					"o",
+					snapshot("o", onset, h.engine.liveEdge(), { obwHz: 20_000 }),
+					extra,
+				),
+			)
+			await h.pump()
+			expect(h.rec.owns("o")).toBe(false)
+			expect(decided(h).at(-1)).toMatchObject({
+				code: "refused:unclean",
+				unclean: { flag: "wide", kept: false },
+			})
+			expect(h.ops.every(o => o.outcome !== "finalized")).toBe(true)
+		},
+		60_000,
+	)
+
+	it("a signal wide from its first snapshot never starts a recording", async () => {
+		const h = harness()
+		await h.feed(0.5, false)
+		const onset = h.engine.liveEdge()
+		await h.feed(3, true, () =>
+			h.rec.track(
+				input(
+					"o",
+					snapshot("o", onset, h.engine.liveEdge(), { obwHz: 40_000 }),
+				),
+			),
+		)
+		expect(h.rec.owns("o")).toBe(false)
+		expect(h.ops).toEqual([])
+	}, 60_000)
 })
 
 describe("a voiced, classed session over a late minority flag", () => {
