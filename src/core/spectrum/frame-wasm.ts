@@ -12,12 +12,15 @@
  * - Memory: imported, `initial === maximum`, sized from the pipeline config by `frameKernelLayout`;
  *   it cannot grow, so views never detach and nothing is allocated per chunk.
  */
-import { readFileSync } from "node:fs"
 import { WaveKitError } from "../../utils/errors.js"
+import { FRAME_SOURCE_DIGEST } from "./kernel-digest.js"
 import type { IqFormat } from "./types.js"
+import { compileWasmArtefact, loadWasmArtefact } from "./wasm-artefact.js"
+import type { WasmArtefactLoad } from "./wasm-artefact.js"
 
 /** The artefact's file name, next to dist/spectrum-worker.js. */
 export const FRAME_WASM_FILE = "spectrum-frame.wasm"
+const FRAME_CRATE = "native/wavekit-frame"
 /** native/wavekit-frame/src/lib.rs `ABI`. */
 export const FRAME_KERNEL_ABI = 1
 const PAGE = 65_536
@@ -229,41 +232,48 @@ export type FrameWasmLoad =
 
 const EXPORTS = ["fp_abi", "fp_ctl_bytes", "fp_init", "fp_run"] as const
 
-/** Compiles kernel bytes: WebAssembly.validate first (false where wasm SIMD is unavailable). */
-export function compileFrameWasm(bytes: Uint8Array): FrameWasmLoad {
-	const api = wasmApi()
-	if (!api) return { ok: false, reason: "no WebAssembly in this runtime" }
-	if (!api.validate(bytes))
-		return {
-			ok: false,
-			reason: "the module does not validate here (no wasm SIMD?)",
-		}
-	try {
-		return {
-			ok: true,
-			module: { kind: "frame-wasm-module", module: new api.Module(bytes) },
-		}
-	} catch (err) {
-		return { ok: false, reason: `compile failed: ${errorName(err)}` }
-	}
+export interface FrameWasmLoadOptions {
+	/** The env var the location came from (reasons name the configured path); absent: the default. */
+	configuredBy?: string
+	/** The source digest the artefact must carry; default: the bundle's (null unbundled: unchecked). */
+	digest?: string | null
+}
+
+/** Compiles kernel bytes (wasm-artefact.ts): validated, compiled and digest-checked, or why not. */
+export function compileFrameWasm(
+	bytes: Uint8Array,
+	opts: FrameWasmLoadOptions = {},
+): FrameWasmLoad {
+	return wrap(
+		compileWasmArtefact(bytes, {
+			file: FRAME_WASM_FILE,
+			crate: FRAME_CRATE,
+			digest: opts.digest === undefined ? FRAME_SOURCE_DIGEST : opts.digest,
+		}),
+	)
 }
 
 /** Reads and compiles the artefact; a missing file is a reason, not an error (dev builds have none). */
-export function loadFrameWasm(location: string | URL): FrameWasmLoad {
-	let bytes: Uint8Array
-	try {
-		bytes = readFileSync(location)
-	} catch (err) {
-		const code = (err as { code?: unknown }).code
-		return {
-			ok: false,
-			reason:
-				code === "ENOENT"
-					? `${FRAME_WASM_FILE} not found`
-					: `cannot read ${FRAME_WASM_FILE}: ${typeof code === "string" ? code : errorName(err)}`,
-		}
-	}
-	return compileFrameWasm(bytes)
+export function loadFrameWasm(
+	location: string | URL,
+	opts: FrameWasmLoadOptions = {},
+): FrameWasmLoad {
+	return wrap(
+		loadWasmArtefact(location, {
+			file: FRAME_WASM_FILE,
+			crate: FRAME_CRATE,
+			...(opts.configuredBy === undefined
+				? {}
+				: { configuredBy: opts.configuredBy }),
+			digest: opts.digest === undefined ? FRAME_SOURCE_DIGEST : opts.digest,
+		}),
+	)
+}
+
+function wrap(load: WasmArtefactLoad): FrameWasmLoad {
+	return load.ok
+		? { ok: true, module: { kind: "frame-wasm-module", module: load.module } }
+		: load
 }
 
 export type FramePathChoice = "auto" | "js" | "wasm"
@@ -508,7 +518,7 @@ export class FrameKernel {
 			)
 		if (e.fp_abi() !== FRAME_KERNEL_ABI)
 			throw new WaveKitError(
-				`frame kernel ABI ${e.fp_abi()}, expected ${FRAME_KERNEL_ABI}`,
+				`ABI mismatch: frame kernel ABI ${e.fp_abi()}, expected ${FRAME_KERNEL_ABI}`,
 				"SCANNER_FRAME_KERNEL",
 			)
 		const heapBase = e.__heap_base?.value

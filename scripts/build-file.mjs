@@ -3,6 +3,7 @@ import { build, context } from "esbuild"
 import { readFileSync } from "node:fs"
 import { basename, extname } from "node:path"
 import process from "node:process"
+import { kernelDigestPlugin } from "./kernel-digest.mjs"
 
 const args = process.argv.slice(2)
 let watch = false
@@ -40,6 +41,9 @@ const options = {
 	platform: "node",
 	format: "esm",
 	packages: "external",
+	// The wasm kernels' source digests (src/core/spectrum/kernel-digest.ts): a loader refuses
+	// dist/*.wasm built from other sources than these.
+	plugins: [kernelDigestPlugin()],
 }
 
 if (watch) {

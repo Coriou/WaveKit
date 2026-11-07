@@ -638,7 +638,21 @@ artefact. Neither variable has a `__`, so the config loader ignores them.
 `wasm32-unknown-unknown` target: `native/wavekit-frame/build.sh` writes `dist/spectrum-frame.wasm`
 next to `dist/spectrum-worker.js` (`pnpm run build` leaves it there). Without it, `pnpm run build`
 and `make dev-local` run the JS path and log why. The Dockerfile's `frame-wasm` stage runs the same
-script on the build platform and copies the file into `/app/dist`.
+script on the build platform and copies the file into `/app/dist`; a final-stage check refuses an
+image whose kernels do not validate under its Node or whose source digests differ from the bundles'.
+
+**Stale artefacts.** `build.sh` embeds a source digest (sha256 over the crate's `build.sh`,
+`Cargo.toml`, `Cargo.lock` and `src/`, `scripts/kernel-digest.mjs`) as the custom section
+`wavekit.source-digest`, and `pnpm run build` bundles the digest of the sources as they are then. The
+loader refuses an artefact whose digest differs or is missing and runs JS with the reason `artefact
+older than its sources`, so an old `dist/*.wasm` never runs after the crate changed; rebuild it with
+`build.sh`. `pnpm run dev` recomputes the bundled digest when a crate file changes. The digest covers
+the crate, not the JS reference: a JS frame-path or chain edit is caught by the equivalence tests,
+not by the loader. Unbundled runs (vitest, tsx) skip the loader's check; the test harnesses check
+the digest themselves. Other reasons the path line can give: the file or a configured path not found
+(the configured path quoted as given, at most 160 characters), unreadable (the error code), does not
+validate (with `no wasm SIMD on this host` only when a minimal SIMD module fails too), does not
+compile, instantiate failed, ABI mismatch.
 
 `scripts/profile-spectrum.ts`, `bare --wire`, synthetic scene, FFT 2048 at 2.4 Msps and 1024 at
 1.024 Msps, overlap 0, thread CPU of `handle()` plus the worker's encode and postMessage copy, Mac i5,
@@ -668,7 +682,18 @@ nice -n 10 node output/bench/profile-spectrum.mjs --mode bare --wire --seconds 2
 
 Live, the worker's line `spectrum frame path` says which path runs; `worker.cpuUsage()` (the passive
 guard's figure) compares them with `WAVEKIT_SPECTRUM_FRAME_PATH=js` and unset. With `--mode stages`
-or the pipeline's opt-in profile on the wasm path, the `fft` stage holds the whole kernel call.
+or the pipeline's opt-in profile on the wasm path, the `fft` stage holds the whole kernel call and
+`window` the raw framing, counter scan and staging; each span is charged to one stage, so the stages
+sum to busy on both paths.
+
+**Tests on the artefact.** The wasm halves of the frame-path tests skip without the artefact;
+`WAVEKIT_REQUIRE_FRAME_WASM=1` makes a missing or stale kernel, or a missing `dist/spectrum-worker.js`,
+fail instead. Build both first:
+
+```bash
+native/wavekit-frame/build.sh && pnpm run build
+WAVEKIT_REQUIRE_FRAME_WASM=1 pnpm exec vitest run --maxWorkers=1 tests/unit/core/spectrum
+```
 
 ## Wideband recorder NFM chain in wasm (2026-11-07)
 
@@ -765,7 +790,20 @@ kernel is unavailable, unset means auto; `WAVEKIT_RECORDER_DSP_WASM` names anoth
 with Rust 1.98.1 and the `wasm32-unknown-unknown` target: `native/wavekit-nfm/build.sh` writes
 `dist/wideband-nfm.wasm` next to `dist/index.js`. Without it, `pnpm run build` and `make dev-local`
 run the JS chain and log why. The Dockerfile's `frame-wasm` stage builds it with the frame kernel and
-copies it into `/app/dist`.
+copies it into `/app/dist`. Stale artefacts and the path line's reasons are as for the frame kernel.
+
+**Tests on the artefact.** `tests/unit/core/scanner/channel` loads `dist/wideband-nfm.wasm` itself.
+The recorder tests (`tests/unit/core/scanner`) take their chains from the process runtime, whose
+default artefact under vitest is next to the module source, where nothing is built: they run the
+JS chain unless `WAVEKIT_RECORDER_DSP_WASM` names the built artefact. `WAVEKIT_REQUIRE_NFM_WASM=1`
+makes either set fail when its chains would be JS (missing, invalid or stale artefact, or the
+variable unset for the recorder tests):
+
+```bash
+native/wavekit-nfm/build.sh
+WAVEKIT_RECORDER_DSP_WASM=$PWD/dist/wideband-nfm.wasm WAVEKIT_REQUIRE_NFM_WASM=1 \
+  pnpm exec vitest run --maxWorkers=1 tests/unit/core/scanner
+```
 
 The recorder's per-slice block (25 ms slices, `process` then the tone copy) on synthetic NFM voice with
 CTCSS, 10 s of IQ per run after 0.5 s of warm-up, thread CPU (`process.threadCpuUsage`) per second of

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import process from "node:process"
@@ -8,6 +8,7 @@ import {
 	InlinePipelineHost,
 	ThreadPipelineHost,
 } from "../../../../src/core/spectrum/pipeline-host.js"
+import { loadFrameWasm } from "../../../../src/core/spectrum/frame-wasm.js"
 import { buildPipelineConfig } from "../../../../src/core/spectrum/spectrum-engine.js"
 import type { PipelineEvent } from "../../../../src/core/spectrum/types.js"
 import {
@@ -122,13 +123,34 @@ function decisions(events: PipelineEvent[]): unknown[] {
 
 // The bundled worker loads dist/spectrum-frame.wasm beside it (native/wavekit-frame/build.sh); the
 // inline host is the JS frame path. Skipped unless both are built; with WAVEKIT_REQUIRE_FRAME_WASM=1
-// a built worker without the kernel runs, and fails, instead (frame-wasm-harness.ts).
+// it always runs, so a missing bundle or kernel, or a kernel the bundle would refuse (another
+// source digest), fails instead of skipping.
+const FRAME_WASM_REQUIRED = process.env["WAVEKIT_REQUIRE_FRAME_WASM"] === "1"
 const SKIP_WASM_WORKER =
-	!existsSync(WORKER) ||
-	(!existsSync(KERNEL) && process.env["WAVEKIT_REQUIRE_FRAME_WASM"] !== "1")
+	!FRAME_WASM_REQUIRED && (!existsSync(WORKER) || !existsSync(KERNEL))
 describe.skipIf(SKIP_WASM_WORKER)(
 	"built spectrum worker with the wasm frame kernel",
 	() => {
+		it("the bundle and a kernel it accepts are built", () => {
+			expect(
+				existsSync(WORKER),
+				`${WORKER} is missing: run pnpm run build (WAVEKIT_REQUIRE_FRAME_WASM=1 needs the bundled worker)`,
+			).toBe(true)
+			expect(
+				existsSync(KERNEL),
+				`${KERNEL} is missing: run native/wavekit-frame/build.sh`,
+			).toBe(true)
+			const bundled = /FRAME_SOURCE_DIGEST\d* = "([0-9a-f]{64})"/.exec(
+				readFileSync(WORKER, "utf8"),
+			)
+			expect(
+				bundled?.[1],
+				`${WORKER} carries no frame source digest: rebuild it with pnpm run build`,
+			).toBeDefined()
+			const load = loadFrameWasm(KERNEL, { digest: bundled?.[1] ?? null })
+			expect(load.ok ? "accepted" : load.reason).toBe("accepted")
+		})
+
 		it("decides like the inline JS pipeline on a signal scene", async () => {
 			expect(existsSync(KERNEL), KERNEL).toBe(true)
 			const fs = 1_024_000

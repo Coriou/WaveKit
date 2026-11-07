@@ -45,10 +45,14 @@ function selectFrameWasm(): FrameWasmLoad {
 	const choice = framePathChoice(process.env["WAVEKIT_SPECTRUM_FRAME_PATH"])
 	if (choice === "js")
 		return { ok: false, reason: "WAVEKIT_SPECTRUM_FRAME_PATH=js" }
-	frameWasm ??= loadFrameWasm(
-		process.env["WAVEKIT_SPECTRUM_FRAME_WASM"] ??
-			new URL(`./${FRAME_WASM_FILE}`, import.meta.url),
-	)
+	if (frameWasm) return frameWasm
+	const configured = process.env["WAVEKIT_SPECTRUM_FRAME_WASM"]
+	frameWasm =
+		configured === undefined
+			? loadFrameWasm(new URL(`./${FRAME_WASM_FILE}`, import.meta.url))
+			: loadFrameWasm(configured, {
+					configuredBy: "WAVEKIT_SPECTRUM_FRAME_WASM",
+				})
 	return frameWasm
 }
 

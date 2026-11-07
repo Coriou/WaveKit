@@ -14,11 +14,17 @@
  * - Faults: each call first copies the stream state (control block and delay lines, 6.5 to 7.8 KB)
  *   into a preallocated buffer; `state("slice-start")` hands it to the JS chain after a fault.
  */
-import { readFileSync } from "node:fs"
+import { NFM_SOURCE_DIGEST } from "../../spectrum/kernel-digest.js"
+import {
+	compileWasmArtefact,
+	loadWasmArtefact,
+} from "../../spectrum/wasm-artefact.js"
+import type { WasmArtefactLoad } from "../../spectrum/wasm-artefact.js"
 import { WaveKitError } from "../../../utils/errors.js"
 
 /** The artefact's file name, next to dist/index.js. */
 export const NFM_WASM_FILE = "wideband-nfm.wasm"
+const NFM_CRATE = "native/wavekit-nfm"
 /** native/wavekit-nfm/src/lib.rs `ABI`. */
 export const NFM_KERNEL_ABI = 1
 const PAGE = 65_536
@@ -206,41 +212,48 @@ function errorName(err: unknown): string {
 	return err instanceof Error ? err.name : "unknown"
 }
 
-/** Compiles kernel bytes: WebAssembly.validate first (false where wasm SIMD is unavailable). */
-export function compileNfmWasm(bytes: Uint8Array): NfmWasmLoad {
-	const api = wasmApi()
-	if (!api) return { ok: false, reason: "no WebAssembly in this runtime" }
-	if (!api.validate(bytes))
-		return {
-			ok: false,
-			reason: "the module does not validate here (no wasm SIMD?)",
-		}
-	try {
-		return {
-			ok: true,
-			module: { kind: "nfm-wasm-module", module: new api.Module(bytes) },
-		}
-	} catch (err) {
-		return { ok: false, reason: `compile failed: ${errorName(err)}` }
-	}
+export interface NfmWasmLoadOptions {
+	/** The env var the location came from (reasons name the configured path); absent: the default. */
+	configuredBy?: string
+	/** The source digest the artefact must carry; default: the bundle's (null unbundled: unchecked). */
+	digest?: string | null
+}
+
+/** Compiles kernel bytes (wasm-artefact.ts): validated, compiled and digest-checked, or why not. */
+export function compileNfmWasm(
+	bytes: Uint8Array,
+	opts: NfmWasmLoadOptions = {},
+): NfmWasmLoad {
+	return wrap(
+		compileWasmArtefact(bytes, {
+			file: NFM_WASM_FILE,
+			crate: NFM_CRATE,
+			digest: opts.digest === undefined ? NFM_SOURCE_DIGEST : opts.digest,
+		}),
+	)
 }
 
 /** Reads and compiles the artefact; a missing file is a reason, not an error (dev builds have none). */
-export function loadNfmWasm(location: string | URL): NfmWasmLoad {
-	let bytes: Uint8Array
-	try {
-		bytes = readFileSync(location)
-	} catch (err) {
-		const code = (err as { code?: unknown }).code
-		return {
-			ok: false,
-			reason:
-				code === "ENOENT"
-					? `${NFM_WASM_FILE} not found`
-					: `cannot read ${NFM_WASM_FILE}: ${typeof code === "string" ? code : errorName(err)}`,
-		}
-	}
-	return compileNfmWasm(bytes)
+export function loadNfmWasm(
+	location: string | URL,
+	opts: NfmWasmLoadOptions = {},
+): NfmWasmLoad {
+	return wrap(
+		loadWasmArtefact(location, {
+			file: NFM_WASM_FILE,
+			crate: NFM_CRATE,
+			...(opts.configuredBy === undefined
+				? {}
+				: { configuredBy: opts.configuredBy }),
+			digest: opts.digest === undefined ? NFM_SOURCE_DIGEST : opts.digest,
+		}),
+	)
+}
+
+function wrap(load: WasmArtefactLoad): NfmWasmLoad {
+	return load.ok
+		? { ok: true, module: { kind: "nfm-wasm-module", module: load.module } }
+		: load
 }
 
 export type RecorderDspChoice = "auto" | "js" | "wasm"
@@ -432,7 +445,7 @@ export class NfmKernel {
 			)
 		if (e.nfm_abi() !== NFM_KERNEL_ABI)
 			throw new WaveKitError(
-				`NFM kernel ABI ${e.nfm_abi()}, expected ${NFM_KERNEL_ABI}`,
+				`ABI mismatch: NFM kernel ABI ${e.nfm_abi()}, expected ${NFM_KERNEL_ABI}`,
 				"SCANNER_NFM_KERNEL",
 			)
 		const heapBase = e.__heap_base?.value

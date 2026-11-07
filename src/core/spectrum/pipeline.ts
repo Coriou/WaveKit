@@ -174,8 +174,9 @@ const IDLE_GATE: ChannelGateReading = {
 
 /**
  * Stage names recorded by an opt-in pipeline profile (R 9.2). `gate` stays 0 until a channel plan is
- * set. On the wasm frame path `fft` holds the whole kernel call (convert to track sums) and `window`
- * the counter scan.
+ * set. On the wasm frame path `fft` holds the whole kernel call (convert to track sums, with the
+ * blanker and tracker replay) and `window` the raw framing, counter scan and staging. Every span is
+ * charged to exactly one stage, so the stages sum to `busyMs` on both paths.
  */
 export const PIPELINE_PROFILE_STAGES = [
 	"window",
@@ -1136,13 +1137,16 @@ export class SpectrumPipeline {
 			},
 			r => this.onCounterRun(r),
 		)
-		this.flushFrames()
+		// The tail (framing after the last frame) ends before the kernel flush, which charges its
+		// own span to `fft` and busy: counting the flush here too would charge it twice.
 		const tail = this.profileClock() - cursor
-		if (!(tail > 0)) return
-		if (this.sampling) {
-			this.stageWindow += tail
-			this.chargeBusy(tail)
-		} else this.leadWindowMs += tail
+		if (tail > 0) {
+			if (this.sampling) {
+				this.stageWindow += tail
+				this.chargeBusy(tail)
+			} else this.leadWindowMs += tail
+		}
+		this.flushFrames()
 	}
 
 	private onCounterRun(run: { startSample: number; endSample: number }): void {
@@ -1211,8 +1215,15 @@ export class SpectrumPipeline {
 			this.frames.copyFrame(k.staging, k.count * k.frameBytes)
 			k.starts[k.count] = f.startSample
 			k.count++
+			// staging is the wasm path's framing: charged to `window` and busy, so stages sum to busy;
 			// the flush charges itself (to `fft`), so the frame's own span ends before it
-			if (sample) this.chargeBusy(this.profileClock() - frameStart)
+			if (sample) {
+				const dt = this.profileClock() - frameStart
+				if (dt > 0) {
+					this.stageWindow += dt
+					this.chargeBusy(dt)
+				}
+			}
 			if (k.count === k.batchCap) this.flushFrames()
 			if (f.startSample + this.hop >= blockEnd) this.finishBlock()
 			return

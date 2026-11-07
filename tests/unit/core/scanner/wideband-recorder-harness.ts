@@ -1,7 +1,17 @@
 /**
  * Shared harness for the WidebandAnalogRecorder tests: a fake engine ring, fake analog
  * operations with the store's admission rules, synthetic NFM input and track snapshots.
+ *
+ * NFM chain path: the recorder's chains come from the process runtime, which under vitest looks for
+ * wideband-nfm.wasm next to the module source and so runs the JS chain. To run these tests on the
+ * built kernel, point WAVEKIT_RECORDER_DSP_WASM at it, and add WAVEKIT_REQUIRE_NFM_WASM=1 so a
+ * missing, invalid or stale artefact fails instead of falling back (recorder-dsp-required.ts):
+ *
+ *   native/wavekit-nfm/build.sh
+ *   WAVEKIT_RECORDER_DSP_WASM=$PWD/dist/wideband-nfm.wasm WAVEKIT_REQUIRE_NFM_WASM=1 \
+ *     pnpm exec vitest run --maxWorkers=1 tests/unit/core/scanner
  */
+import "./recorder-dsp-required.js"
 import pino from "pino"
 import {
 	WidebandAnalogRecorder,

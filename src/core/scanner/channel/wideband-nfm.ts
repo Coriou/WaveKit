@@ -635,6 +635,10 @@ export interface WidebandNfmRuntimeOptions {
 	choice: RecorderDspChoice
 	/** The artefact (read once, on the first chain). */
 	location: string | URL
+	/** The env var `location` came from (reasons name the configured path); absent: the default. */
+	configuredBy?: string
+	/** The source digest the artefact must carry; default: the bundle's (null unbundled: unchecked). */
+	digest?: string | null
 	/** Default: a "WidebandNfm" component logger at info, created on the first line. */
 	log?: WidebandNfmLog
 }
@@ -659,7 +663,12 @@ export class WidebandNfmRuntime {
 	wasm(): NfmWasmLoad {
 		if (this.opts.choice === "js")
 			return { ok: false, reason: "WAVEKIT_RECORDER_DSP=js" }
-		this.load ??= loadNfmWasm(this.opts.location)
+		this.load ??= loadNfmWasm(this.opts.location, {
+			...(this.opts.configuredBy === undefined
+				? {}
+				: { configuredBy: this.opts.configuredBy }),
+			...(this.opts.digest === undefined ? {} : { digest: this.opts.digest }),
+		})
 		return this.load
 	}
 
@@ -845,11 +854,12 @@ let defaultRuntime: WidebandNfmRuntime | null = null
 
 /** The process's runtime: `WAVEKIT_RECORDER_DSP` and `WAVEKIT_RECORDER_DSP_WASM` (read once). */
 export function widebandNfmRuntime(): WidebandNfmRuntime {
+	const configured = process.env["WAVEKIT_RECORDER_DSP_WASM"]
 	defaultRuntime ??= new WidebandNfmRuntime({
 		choice: recorderDspChoice(process.env["WAVEKIT_RECORDER_DSP"]),
-		location:
-			process.env["WAVEKIT_RECORDER_DSP_WASM"] ??
-			new URL(`./${NFM_WASM_FILE}`, import.meta.url),
+		...(configured === undefined
+			? { location: new URL(`./${NFM_WASM_FILE}`, import.meta.url) }
+			: { location: configured, configuredBy: "WAVEKIT_RECORDER_DSP_WASM" }),
 	})
 	return defaultRuntime
 }

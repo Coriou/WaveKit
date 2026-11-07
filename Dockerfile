@@ -730,6 +730,10 @@ COPY native/wavekit-frame/LICENSES.md /usr/share/doc/wavekit-frame/LICENSES.md
 # wasm NFM chain beside dist/index.js, where the wideband recorder looks (frame-wasm stage)
 COPY --from=frame-wasm /out/wideband-nfm.wasm /app/dist/wideband-nfm.wasm
 COPY native/wavekit-nfm/LICENSES.md /usr/share/doc/wavekit-nfm/LICENSES.md
+# Both kernels must validate under this image's node (default flags, so wasm SIMD) and carry the
+# source digest the bundles were built with (scripts/kernel-digest.mjs): a missing, truncated,
+# non-SIMD or stale artefact fails the build here instead of logging "path js" at runtime.
+RUN node -e 'const fs = require("node:fs"); for (const [w, b, k] of [["spectrum-frame.wasm", "spectrum-worker.js", "FRAME"], ["wideband-nfm.wasm", "index.js", "NFM"]]) { const f = "/app/dist/" + w, x = fs.readFileSync(f); if (!WebAssembly.validate(x)) { console.error(f + " does not validate"); process.exit(1) } const s = WebAssembly.Module.customSections(new WebAssembly.Module(x), "wavekit.source-digest"), d = s.length === 1 ? new TextDecoder().decode(s[0]) : "", m = new RegExp(k + "_SOURCE_DIGEST\\d* = \"([0-9a-f]{64})\"").exec(fs.readFileSync("/app/dist/" + b, "utf8")); if (!m || m[1] !== d) { console.error(f + " source digest does not match dist/" + b); process.exit(1) } }'
 COPY --from=node-build /app/node_modules /app/node_modules
 COPY --from=node-build /app/packages/shared/package.json /app/packages/shared/package.json
 COPY --from=node-build /app/packages/shared/dist /app/packages/shared/dist

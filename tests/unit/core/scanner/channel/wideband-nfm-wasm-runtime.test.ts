@@ -99,7 +99,7 @@ describe("wideband NFM chain selection", () => {
 		expect(widebandNfmChainPath(runtime.chain(OPTS))).toBe("js")
 		expect(log.lines[0]!.obj).toEqual({
 			path: "js",
-			reason: "the module does not validate here (no wasm SIMD?)",
+			reason: "wideband-nfm.wasm does not validate",
 		})
 	})
 

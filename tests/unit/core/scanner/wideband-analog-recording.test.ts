@@ -2,6 +2,8 @@
  * Default-config analog recordings through the real scanner pipeline: an in-process fake source
  * (no network), the inline spectrum engine, the real evidence store and WAV files on disk.
  */
+// WAVEKIT_REQUIRE_NFM_WASM=1: fail rather than run the JS chain (wideband-recorder-harness.ts).
+import "./recorder-dsp-required.js"
 import { readFile, readdir, realpath, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"

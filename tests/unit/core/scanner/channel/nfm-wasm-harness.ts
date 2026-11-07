@@ -12,6 +12,10 @@ import {
 } from "../../../../../src/core/scanner/channel/wideband-nfm-wasm.js"
 import type { NfmWasmLoad } from "../../../../../src/core/scanner/channel/wideband-nfm-wasm.js"
 import {
+	KERNEL_CRATES,
+	kernelSourceDigest,
+} from "../../../../../scripts/kernel-digest.mjs"
+import {
 	MAX_SLICE_SAMPLES,
 	WidebandNfmRuntime,
 	widebandNfmChainPath,
@@ -28,12 +32,25 @@ import type {
  * saying so (per test file that imports it) and the skipped suites carry the reason in their
  * names. With WAVEKIT_REQUIRE_NFM_WASM=1 a missing or invalid artefact fails every file that
  * imports this module instead, so a CI job that builds the artefact can require it.
+ * The artefact must carry the digest of the crate's sources as they are now (an older build is
+ * refused, as the bundle refuses it). The recorder tests (tests/unit/core/scanner) take their
+ * chains from the process runtime instead: see recorder-dsp-required.ts.
  */
 export const NFM_WASM_PATH =
 	process.env["WAVEKIT_RECORDER_DSP_WASM"] ??
 	path.resolve(import.meta.dirname, "../../../../../dist", NFM_WASM_FILE)
 
-const load: NfmWasmLoad = loadNfmWasm(NFM_WASM_PATH)
+/** The digest of native/wavekit-nfm's sources now (scripts/kernel-digest.mjs). */
+export const NFM_SOURCE_DIGEST_NOW = kernelSourceDigest(
+	KERNEL_CRATES.nfm,
+).digest
+
+const load: NfmWasmLoad = loadNfmWasm(NFM_WASM_PATH, {
+	digest: NFM_SOURCE_DIGEST_NOW,
+	...(process.env["WAVEKIT_RECORDER_DSP_WASM"] === undefined
+		? {}
+		: { configuredBy: "WAVEKIT_RECORDER_DSP_WASM" }),
+})
 
 if (!load.ok) {
 	const why = `NFM kernel ${NFM_WASM_PATH}: ${load.reason}`
@@ -75,7 +92,12 @@ export function testRuntime(
 ): { runtime: WidebandNfmRuntime; log: ReturnType<typeof recordingLog> } {
 	const log = recordingLog()
 	return {
-		runtime: new WidebandNfmRuntime({ choice, location, log }),
+		runtime: new WidebandNfmRuntime({
+			choice,
+			location,
+			log,
+			digest: NFM_SOURCE_DIGEST_NOW,
+		}),
 		log,
 	}
 }
