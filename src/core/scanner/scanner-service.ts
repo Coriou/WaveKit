@@ -42,6 +42,11 @@ import { existsSync, lstatSync } from "node:fs"
 import { join } from "node:path"
 import { ZodError } from "zod"
 import type {
+	DiscoveryCompactPage,
+	ScanJobCompact,
+	TunePreemptionWaiter,
+} from "@wavekit/api-types"
+import type {
 	Bandplan as BandplanDto,
 	ScanJob,
 	ScanJobHit,
@@ -62,11 +67,13 @@ import type {
 	ScannerProbeDecoderType,
 	ScannerTrialOutcome,
 	DiscoveryTrialMemory,
+	ScannerPassiveReason,
 	ScannerRecorderDiscovery,
 } from "@wavekit/api-types"
 import {
 	SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
 	SOURCE_PAUSED_MESSAGE,
+	TUNE_WAITERS_MAX,
 } from "@wavekit/api-types"
 import type {
 	RecordingProtection,
@@ -264,7 +271,7 @@ import {
 	HOLE_STREAK_RESET_MS,
 	snapshotIntervalMs,
 } from "./store/snapshot-cadence.js"
-import { PassiveGuard } from "./passive-guard.js"
+import { MEASURING_REASON, PassiveGuard } from "./passive-guard.js"
 import { PASSIVE_COST_LIMIT_DEFAULT } from "./passive-cost-contract.js"
 import {
 	SCANNER_SETTINGS_BOUNDS,
@@ -470,6 +477,12 @@ export const REFUSED_LOGGED_MAX = 256
 
 export interface ScannerServiceDeps {
 	settings: ScannerSettings
+	/**
+	 * True once this core lost private ownership: another owner may hold the scanner's state and
+	 * the tuner, and the scanner has no lock of its own. From then on it restores no lease and
+	 * writes no state, while its close still ends sockets, children and listeners.
+	 */
+	readonly lostOwnership?: () => boolean
 	/** WG11 req 6: IQ capture on detection and replay; absent keeps today's behaviour. */
 	readonly analogTrial?: AnalogTrialRunner
 	readonly iqCapture?: ScannerIqCapture
@@ -1375,6 +1388,11 @@ export class ScannerService extends EventEmitter {
 				dir: this.storageDir,
 				logger: this.log,
 				now: () => this.now(),
+				// Its delayed write must not outlive the ownership it was scheduled under.
+				setTimer: (write, ms) =>
+					setTimeout(() => {
+						if (!this.ownershipLost()) write()
+					}, ms),
 			})
 			this.effective = mergeScannerSettings({
 				config: deps.settings,
@@ -1400,7 +1418,7 @@ export class ScannerService extends EventEmitter {
 					loadEngine: sourceId => this.persistence.loadEngine(sourceId),
 					// Occupancy keeps the same gate (S1-B final review, Info 2).
 					writeOccupancy: (sourceId, state) =>
-						this.configLoaded
+						this.configLoaded && !this.ownershipLost()
 							? this.persistence.writeOccupancy(sourceId, state)
 							: Promise.resolve(),
 					loadOccupancy: sourceId => this.persistence.loadOccupancy(sourceId),
@@ -1898,6 +1916,7 @@ export class ScannerService extends EventEmitter {
 	 */
 	private async consolidateAtLoad(): Promise<void> {
 		try {
+			if (this.ownershipLost()) return
 			const read = await this.persistence.readConsolidationPlan()
 			// An invalid file was moved aside by the reader: no resume and no new plan this load (7.9).
 			if (read.kind === "invalid") return
@@ -1912,6 +1931,7 @@ export class ScannerService extends EventEmitter {
 				truncated = plan.truncated
 				if (plan.groups.length === 0) return
 				groups = plan.groups
+				if (this.ownershipLost()) return
 				await this.persistence.writeConsolidationPlan({
 					createdAt: new Date(this.now()).toISOString(),
 					groups,
@@ -1944,7 +1964,11 @@ export class ScannerService extends EventEmitter {
 				},
 				"Consolidated duplicate discoveries",
 			)
+			// Unfinished as far as disk knows: the owner's next load resumes the plan.
+			if (this.ownershipLost()) return
 			await this.persistence.writeSnapshotOf(this.store)
+			// A loss during that write: the plan may be the new owner's now.
+			if (this.ownershipLost()) return
 			await this.persistence.removeConsolidationPlan()
 		} catch (err: unknown) {
 			this.log.warn(
@@ -2041,7 +2065,9 @@ export class ScannerService extends EventEmitter {
 			attempt(() => this.ambient?.stop()),
 			attempt(() => this.deps.cpuMeter?.stop()),
 			attempt(() => this.recorder?.stop()),
-			attempt(() => this.trialMemory.flush()),
+			attempt(() =>
+				this.ownershipLost() ? undefined : this.trialMemory.flush(),
+			),
 		]
 		for (const registration of this.constructorListeners) {
 			if (registration.settled) continue
@@ -2079,7 +2105,8 @@ export class ScannerService extends EventEmitter {
 			...this.arbitrations.values(),
 		]))
 			if (outcome.status === "rejected") failed = true
-		if (this.spectrum && this.arbiter) {
+		// After a lost ownership the tuner may be another owner's: its tuning stays as it is.
+		if (this.spectrum && this.arbiter && !this.ownershipLost()) {
 			await Promise.all(
 				this.spectrum.sourceIds().map(sourceId =>
 					attempt(async () => {
@@ -2112,7 +2139,7 @@ export class ScannerService extends EventEmitter {
 			await attempt(() => this.spectrum.off("fatal", this.onEngineFatal))
 		}
 		if (this.arbiter) await attempt(() => this.arbiter.dispose())
-		if (this.stateLoaded)
+		if (this.stateLoaded && !this.ownershipLost())
 			await attempt(() => this.persistence.writeSnapshotOf(this.store))
 		await attempt(() => this.persistence.closeSnapshotWorker())
 		if (this.startupAttempted && this.persistence)
@@ -2130,6 +2157,10 @@ export class ScannerService extends EventEmitter {
 			: { ok: true }
 	}
 
+	private ownershipLost(): boolean {
+		return this.deps.lostOwnership?.() === true
+	}
+
 	private drainProbeComponents(): Promise<void> {
 		this.probeComponentDrain ??= Promise.resolve().then(async () => {
 			// WG11 req 6.4: the replay queue stops (its replay cancelled) before the probes drain.
@@ -2140,6 +2171,11 @@ export class ScannerService extends EventEmitter {
 	}
 
 	// === status and settings ===
+
+	/** `status().enabled` alone: the status poll needs no engine, probe or recorder rows. */
+	scannerEnabled(): boolean {
+		return this.settings().enabled
+	}
 
 	status(): ScannerStatus {
 		const captureCounters = this.deps.iqCapture?.counters?.()
@@ -2226,6 +2262,11 @@ export class ScannerService extends EventEmitter {
 		this.overrides = next
 		this.recomputeSettings()
 		try {
+			if (this.ownershipLost())
+				throw new WaveKitError(
+					"This core no longer owns its state",
+					"ACCESS_UNAVAILABLE",
+				)
 			await this.persistence.writeSettings(next)
 		} catch (err) {
 			// Never keep a change in memory that the next boot would not see.
@@ -2363,8 +2404,73 @@ export class ScannerService extends EventEmitter {
 		return this.arbiter.holder(sourceId)?.jobId ?? null
 	}
 
+	/** The holder as POST /api/tuner/:sourceId/tune names it, and the resume rule it would meet. */
+	tunerLeaseJob(sourceId: string): {
+		jobId: string
+		name: string | null
+		autoAfterIdleMs: number | null
+		starting: boolean
+		reason: string | null
+		waiters: TunePreemptionWaiter[]
+	} | null {
+		const jobId = this.tunerLeaseHolder(sourceId)
+		if (jobId === null) return null
+		const record = this.jobs.get(jobId)
+		return {
+			jobId,
+			name: record?.name ?? null,
+			autoAfterIdleMs: record?.spec.resume.autoAfterIdleMs ?? null,
+			starting: record?.state === "starting",
+			reason: record?.state === "paused" ? (record.reason ?? null) : null,
+			waiters: this.tunerLeaseWaiters(sourceId, jobId),
+		}
+	}
+
+	/**
+	 * Who can take the tuner once it is idle: a sweep that lost it to another job (`resumeIdleWaiters`)
+	 * or to an operator or relay (its runner's tick) and has an automatic resume. The soonest first;
+	 * ties by id, so the answer is stable.
+	 */
+	private tunerLeaseWaiters(
+		sourceId: string,
+		holderId: string,
+	): TunePreemptionWaiter[] {
+		const waiters: TunePreemptionWaiter[] = []
+		for (const job of this.jobs.values()) {
+			const autoAfterIdleMs = job.spec.resume.autoAfterIdleMs
+			if (
+				job.id !== holderId &&
+				job.spec.sourceId === sourceId &&
+				job.spec.mode === "sweep" &&
+				isPreempted(job) &&
+				autoAfterIdleMs !== null
+			)
+				waiters.push({ jobId: job.id, jobName: job.name, autoAfterIdleMs })
+		}
+		return waiters
+			.sort(
+				(a, b) =>
+					a.autoAfterIdleMs - b.autoAfterIdleMs ||
+					a.jobId.localeCompare(b.jobId),
+			)
+			.slice(0, TUNE_WAITERS_MAX)
+	}
+
 	listJobs(): ScanJob[] {
 		return [...this.jobs.values()].map(r => this.toDto(r))
+	}
+
+	/** One small row per job: no plan, no driver progress, no probe list. */
+	jobRows(): ScanJobCompact[] {
+		return Array.from(this.jobs.values(), record => ({
+			id: record.id,
+			name: record.name,
+			kind: record.spec.kind,
+			state: record.state,
+			reason: record.reason ?? null,
+			sourceId: record.spec.sourceId,
+			updatedAt: new Date(record.updatedAt).toISOString(),
+		}))
 	}
 
 	getJob(id: string): ScanJob | undefined {
@@ -2630,6 +2736,45 @@ export class ScannerService extends EventEmitter {
 		nextCursor: string | null
 	} & DiscoveryStoreMeta {
 		return { ...this.store.list(filter), ...this.storeMeta() }
+	}
+
+	/**
+	 * `listDiscoveries` for the API: it yields during the read. The epoch and revision are taken
+	 * first, a conservative start stamp: every change up to it is in the rows, while a record
+	 * changed during a yield can come back with a newer revision than the stamp.
+	 */
+	async listDiscoveriesPaced(filter: DiscoveryFilter): Promise<
+		{
+			items: Discovery[]
+			nextCursor: string | null
+		} & DiscoveryStoreMeta
+	> {
+		const meta = this.storeMeta()
+		return { ...(await this.store.listPaced(filter)), ...meta }
+	}
+
+	/** GET /api/scanner/discoveries?view=compact: one pass over the recorder memory per page. */
+	async listDiscoveriesCompact(
+		filter: DiscoveryFilter,
+	): Promise<DiscoveryCompactPage> {
+		const meta = this.storeMeta()
+		const page = await this.store.listCompactPaced(filter)
+		const last = this.widebandAnalog.discoveryLastDecisions(
+			new Set(page.items.map(row => row.id)),
+		)
+		return {
+			items: page.items.map(row => {
+				const decision = last.get(row.id)
+				return { ...row, recorder: decision ? { last: decision } : null }
+			}),
+			nextCursor: page.nextCursor,
+			...meta,
+		}
+	}
+
+	/** Records in the store, O(1). */
+	discoveryCount(): number {
+		return this.store.recordCounts().discoveries
 	}
 
 	/** Band inspection UX req 3.3: the store's epoch and its revision now. */
@@ -8016,6 +8161,7 @@ export class ScannerService extends EventEmitter {
 				? { decodedElsewhere: record.decodedElsewhere }
 				: {}),
 			...(record.bandPlanSkips ? { bandPlanSkips: record.bandPlanSkips } : {}),
+			consentedImpact: record.consentedImpact ?? null,
 			progress: driver
 				? { ...driver.progress(), hitStats: this.hitStatsOf(record.id) }
 				: {
@@ -8048,6 +8194,16 @@ export class ScannerService extends EventEmitter {
 				: {}),
 			...(driver instanceof IdentifyRunner ? { identify: driver.view() } : {}),
 		}
+	}
+
+	/** Why the cost guard holds `sourceId`'s passive scanning off; null when it does not. Read only. */
+	passiveHoldReason(sourceId: string): ScannerPassiveReason | null {
+		const reason = this.passiveDisabled.get(sourceId)
+		if (reason === undefined) return null
+		if (reason === MEASURING_REASON) return "measuring-baseline"
+		if (reason.startsWith("passive-cpu")) return "passive-cost"
+		if (reason.startsWith("engine-cpu")) return "engine-cost"
+		return "unknown"
 	}
 
 	private hitStatsOf(jobId: string): ScanJobHitStats {
@@ -8128,6 +8284,8 @@ export class ScannerService extends EventEmitter {
 		const link = linkOf(cfg)
 		const frequencyError = this.frequencyErrors.get(cfg.id)
 		const disabledReason = this.passiveDisabled.get(cfg.id)
+		const reasonCode = this.passiveHoldReason(cfg.id)
+		const disabledAt = this.passiveGuard.status(cfg.id).disabledAt
 		const error = spectrumStatus?.lastError
 		const overloadHint = this.overloadHints.update(cfg.id, {
 			stats,
@@ -8167,6 +8325,10 @@ export class ScannerService extends EventEmitter {
 			passive: {
 				enabled: this.jobs.has(`passive-${cfg.id}`),
 				...(disabledReason ? { disabledReason } : {}),
+				...(reasonCode !== null ? { reasonCode } : {}),
+				...(disabledAt !== null
+					? { disabledAt: new Date(disabledAt).toISOString() }
+					: {}),
 			},
 			frequencyError: frequencyError
 				? {
@@ -8212,7 +8374,7 @@ export class ScannerService extends EventEmitter {
 		entry: Parameters<ScannerPersistence["append"]>[0],
 	): void => {
 		this.dirty = true
-		if (!this.stateLoaded) return
+		if (!this.stateLoaded || this.ownershipLost()) return
 		// Recording operations (at most 16 in flight) are reserved: never refused by the byte cap.
 		const recording = this.recordingAppends.has(entry)
 		const appended = this.persistence.append(
@@ -8383,7 +8545,7 @@ export class ScannerService extends EventEmitter {
 
 	/** Never rejects (a failed write is logged). */
 	private async persistJobs(): Promise<void> {
-		if (!this.configLoaded) return
+		if (!this.configLoaded || this.ownershipLost()) return
 		// Identify jobs are never persisted: a 15 s question does not survive a restart (§ 10.8).
 		const persisted = [...this.jobs.values()].filter(
 			r => !r.passive && r.spec.kind !== "identify",
@@ -8480,7 +8642,8 @@ export class ScannerService extends EventEmitter {
 	 * time the write settles. `now` is on `snapshotClock`.
 	 */
 	private startSnapshot(now: number): void {
-		if (!this.stateLoaded || this.snapshotInFlight) return
+		if (!this.stateLoaded || this.snapshotInFlight || this.ownershipLost())
+			return
 		const requested = this.snapshotRequested
 		this.lastSnapshotAt = now
 		this.dirty = false
@@ -8666,6 +8829,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private async maintenance(): Promise<void> {
+		if (this.ownershipLost()) return
 		const s = this.settings()
 		await this.spectrum.persist()
 		// § 8 storage.discoveryMaxAgeDays (never operator `keep` or `lockout`)
@@ -8697,6 +8861,8 @@ export class ScannerService extends EventEmitter {
 				"Pruned inactive discoveries",
 			)
 		}
+		// A pass the loss caught midway deletes nothing more.
+		if (this.ownershipLost()) return
 		const keep = new Set(
 			[...all.values()].filter(d => d.operator?.keep).map(d => d.id),
 		)
@@ -8708,7 +8874,7 @@ export class ScannerService extends EventEmitter {
 			.catch((err: unknown) =>
 				this.log.warn({ err }, "Capture retention failed"),
 			)
-		if (this.stateLoaded) {
+		if (this.stateLoaded && !this.ownershipLost()) {
 			await this.persistence
 				.pruneJournal({
 					maxBytes: s.storage.maxJournalMb * 1024 * 1024,
@@ -8784,7 +8950,7 @@ export class ScannerService extends EventEmitter {
 		sourceId: string,
 		state: EngineState,
 	): Promise<void> {
-		if (!this.configLoaded) return
+		if (!this.configLoaded || this.ownershipLost()) return
 		await this.persistence
 			.writeEngine(sourceId, state)
 			.catch((err: unknown) =>

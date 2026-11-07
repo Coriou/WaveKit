@@ -1,7 +1,7 @@
 # Driving WaveKit from an agent or script
 
-Recipes for the tasks an agent or script does most: authenticate, read the receiver state,
-tune, set gain, check decoders, read activity and capture IQ. Each recipe is a `curl`
+Recipes for the tasks an agent or script does most: authenticate, tune, read the receiver state,
+set gain, check decoders, read activity and capture IQ. Each recipe is a `curl`
 command; the full contract of every route is in the [API reference](API.md).
 
 The examples assume a protected core, its API origin in a shell variable, and the machine token
@@ -14,10 +14,37 @@ API_ORIGIN="https://receiver.example:9443"   # your core's API origin
 `100000000` (100 MHz) and the source id `rtl` are examples: read your own source ids from
 `GET /api/agent/status` or `GET /api/sources`.
 
+## Discover the API
+
+The first step for a fresh agent, once it has the token from the next section. Three reads
+describe everything else, and all three take the same token as any other API read (without one, a
+protected core answers 401):
+
+```sh
+curl --fail --header "$AUTH" "$API_ORIGIN/api"           # every route, plus the two URLs below
+curl --fail --header "$AUTH" "$API_ORIGIN/docs/json"     # OpenAPI 3.1: parameters, bodies, bounds
+curl --fail --header "$AUTH" "$API_ORIGIN/api/enums"     # accepted values of the closed lists
+```
+
+`GET /api` answers `{ openapi, enums, routes }`; `openapi` and `enums` hold the last two paths.
+Paths in the OpenAPI document are relative to the origin you fetched it from. A page size has its
+maximum there (`GET /api/recordings`, parameter `limit`), and past the maximum the route answers a
+400 that states it ([Read a 400](#read-a-400)).
+
+`GET /api/enums` lists scanner protocols, identity kinds, confidences, job modes, job kinds and
+sensitivities, the discovery and job list views, activity kinds and categories, tuner modes, tune
+settings and restore statuses, and recording kinds.
+
 ## Get a machine token
 
-Agents use the machine credential, never a browser session. On the host, with the private
-state directory the core uses (the core may be running):
+Agents use the machine credential, never a browser session. A core has exactly one, created by
+[`setup`](LOCAL-SETUP.md#protected-mode-locally) and kept in the core's private state directory.
+You copy it into a file once; the agent then needs no `docker exec` and no shell in the container.
+No HTTP route issues a token, and a browser pairing code is not one.
+
+### Mint
+
+On the host, with the private state directory the core uses. The core may be running or stopped:
 
 ```sh
 mkdir -p -m 700 "$HOME/.config/wavekit"
@@ -26,29 +53,174 @@ node dist/access-command.js machine-token \
   --out "$HOME/.config/wavekit/machine-token"
 ```
 
-The command writes the file with mode `0600` and never prints the credential. The target
-directory must exist, must not be writable by group or others, and must lie outside the
-private directory. An existing file is refused; `--replace` overwrites your own `0600` file.
-In Docker, run the same command in a one-off container with the private directory mounted
-([Docker setup](DOCKER-SETUP.md#protected-runtime-deployment)).
+In Docker, run the same command in a one-off container that mounts the private volume and a host
+directory: [the exact commands](DOCKER-SETUP.md#give-an-agent-the-machine-credential). A failure
+reading `ACCESS_CREDENTIAL_UNAVAILABLE` means the directory has no provisioned credential yet, or
+is not your own `0700` directory.
 
-Once the file exists, load the header the recipes below send:
+### Store
+
+The command writes the file with mode `0600` and never prints the credential. The target directory
+must exist, must not be writable by group or others, and must lie outside the private directory.
+An existing file is refused; `--replace` overwrites only your own `0600` file. Hand the file to an
+agent on another machine over a secure channel. Never put the token in a URL or a log. An export
+killed partway can leave a `0600` `.machine-token-*.tmp` beside the file, holding the same token;
+delete it, and if `--replace` then still answers `ACCESS_TOKEN_OUT_UNSAFE`, delete the file too and
+export again.
+
+The file is a copy of the one credential, not a separate grant, and it has no expiry. It stays valid
+across core restarts and image recreates for as long as the private directory persists. Deleting
+that directory (`docker compose down -v` on a named volume, or stopping `make dev-protected`
+without `--keep`) destroys the credential: a new `setup` creates a different one.
+
+### Use
+
+The client reads the file once when it starts and sends the header on every request. For `curl`,
+keep the header in a private file beside the token, so the token is never on a command line where
+`ps` shows it. Create it once, and again after every rotation (`printf` is a shell builtin, so this
+line does not show the token either):
 
 ```sh
-AUTH="Authorization: Bearer $(cat "$HOME/.config/wavekit/machine-token")"
+install -m 600 /dev/null "$HOME/.config/wavekit/machine-token.header"
+printf 'Authorization: Bearer %s\n' "$(cat "$HOME/.config/wavekit/machine-token")" \
+  > "$HOME/.config/wavekit/machine-token.header"
 ```
 
-There is no HTTP route that issues a token. Rotating the credential
-(`rotate-credential`, core stopped) revokes every copy; on the host run `machine-token --replace`
-afterwards. In Docker the file belongs to the container user, so `--replace` refuses it: delete
-the old file and run the one-off command again, as in
-[Docker setup](DOCKER-SETUP.md#protected-runtime-deployment). Keep the file private and never put the token in a URL or a log. Details:
-[API: automation and agents](API.md#automation-and-agents) and [Security](SECURITY.md).
+Then point the recipes below at that file. `curl --header @file` reads the header from it:
+
+```sh
+AUTH="@$HOME/.config/wavekit/machine-token.header"
+```
+
+| Answer                   | Meaning                                                     | What to do                                                                                                                  |
+| ------------------------ | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| 401 `AUTH_REQUIRED`      | The token is not the current credential: it was rotated     | Re-read the file once and retry once, then ask an operator                                                                  |
+| 503 `ACCESS_UNAVAILABLE` | The core cannot vouch for its credentials and is restarting | Retry with a delay; the token may still be fine. `GET /health`, which needs no token, then says 503 `access_authority_lost` |
+| Connection failure       | The core is stopped, for example during a rotation          | Retry with a delay; do not change the token                                                                                 |
+
+### Rotate and revoke
+
+Revoking is rotating: there is one machine credential, so replacing it revokes every copy at once
+and every agent needs the new one. Rotation runs with the core stopped:
+
+```sh
+# Stop the core, then:
+node dist/access-command.js rotate-credential --private-directory "$PRIVATE_DIRECTORY"
+node dist/access-command.js machine-token --replace \
+  --private-directory "$PRIVATE_DIRECTORY" \
+  --out "$HOME/.config/wavekit/machine-token"
+# Start the core again.
+```
+
+- **Browsers.** By default rotation also removes every remembered browser, so each one pairs again.
+  `--keep-sessions` keeps browsers paired; review them with `devices list` after the restart.
+- **While a core runs.** Rotation is refused with `ACCESS_STORAGE_BUSY` (or
+  `ACCESS_STORAGE_FOREIGN_OWNER` from another container) and the token stays valid. Rotation waits up
+  to 40 seconds for the lock of a core that was killed without a clean exit.
+- **What an agent sees.** Connection failures from stop to start, including on `/health`. After the
+  start, the old token gets 401, so export the new file before starting the core and the agent's
+  retry finds it.
+- **If rotation fails after it started writing,** the message says the credential may have been
+  replaced. Rotate again and export again.
+- **`ACCESS_STORAGE_CREDENTIAL_MISMATCH`.** The stored credential is not the one the last rotation
+  recorded, so it may be a revoked one. The core does not start and `machine-token` writes nothing.
+  Rotate again without `--keep-sessions` (it is refused here, so every browser pairs again) and
+  export again.
+- **In Docker,** the exported file belongs to you after the `chown`, so `--replace` refuses it: delete
+  it and export again, as in the [exact commands](DOCKER-SETUP.md#rotate-the-machine-credential).
+
+To revoke one browser instead, use [`devices revoke`](API.md#protected-runtime-opt-in) against the
+running core; it leaves the machine credential alone.
+
+### A core without protection
+
+Legacy mode is the default (no `access` block, and `pnpm start:local`). It has no access check at
+all: no credential is needed, the `Authorization` header is ignored, and every route is open to
+whoever can reach the port, so the core's bind address is the only boundary
+([Security](SECURITY.md#access-and-pairing)). A token grants nothing extra there, and running
+`setup` or `machine-token` does not turn protection on. A request without a token that gets 200 from
+`GET /api/agent/status` means the core is unprotected; a protected core answers 401.
+
+Details: [API: automation and agents](API.md#automation-and-agents) and [Security](SECURITY.md).
+
+## Tune
+
+One call sets the rate, the centre and the gain, and answers once the source delivers IQ again, so
+a rate change needs no retries:
+
+```sh
+curl --fail-with-body --header "$AUTH" --header "Content-Type: application/json" \
+  --data '{"sampleRateHz":2400000,"frequencyHz":100000000,"gainMode":"manual","gain":372}' \
+  "$API_ORIGIN/api/tuner/rtl/tune"
+```
+
+Send at least one of `sampleRateHz`, `frequencyHz`, `gainMode` and `gain` (tenths of a dB). The
+answer is the tuner state of `GET /api/tuner` (`sampleRate`, `frequency`, `gainMode`, `gain`) plus
+`usable`, `applied` and `notApplied`. It takes up to 18 s; give your client a longer timeout. Past
+that, or when a write fails, the answer is an error that still says what was and was not applied.
+A 503 with `usable: false` also carries `sourceVerdict`, the reason the source is silent. A 409
+`TUNER_TUNE_OVERRIDDEN` means someone else changed the tuner during or after your tune, and any setting
+not yet written was not sent: read `state.lastChange` before tuning again. Read the [whole contract](API.md#post-apitunersourceidtune).
+
+### When a scan holds the tuner
+
+A tune never takes the receiver from a running scan unasked. While a job holds the tuner's lease the
+answer is 409 `TUNER_LEASE_HELD` with `jobId` and `jobName`, and nothing is written. A lease that
+arrives while your tune is writing stops it the same way, and `applied` says what stands. Decide with
+whoever runs the scan, then send `"preempt": true`:
+
+```sh
+curl --fail-with-body --header "$AUTH" --header "Content-Type: application/json" \
+  --data '{"frequencyHz":100000000,"restoreAfterS":30,"preempt":true}' "$API_ORIGIN/api/tuner/rtl/tune"
+```
+
+This holds for a tune to where the scan already sits, too: asking to stay on the job's hop, or for a
+gain already in place, sends a frame so that the job really stops and the tuner stays.
+
+The 200 then carries `preempted`: `jobId`, `jobName`, `job` (`paused`, or `failed` if it was still
+starting), `autoAfterIdleMs`, `waiters` and `message`. Read `autoAfterIdleMs` before you rely on the job
+coming back:
+
+- A number: the job resumes by itself that long after the last operator write (60 s by default), or
+  later if activity holds it, even in the middle of a longer `restoreAfterS`.
+- `null`: **a short look stops the scan until someone calls `POST /api/scanner/jobs/:id/resume`.** A job
+  somebody had already paused reads `null` too, whatever its own rule: it never resumes by itself. So
+  does a job that was still starting: it failed, and only a new start brings it back.
+
+`waiters` lists other jobs that lost this tuner, to a job or to an operator, and can take it once it is
+idle, each with its own `autoAfterIdleMs`, so the job you stopped may not be the one that moves the receiver next. Cancel
+one if you need longer.
+
+### Tune for a while
+
+Add `restoreAfterS` (1 to 3600) and the core puts the prior rate, centre and gain back by itself:
+
+```sh
+curl --fail-with-body --header "$AUTH" --header "Content-Type: application/json" \
+  --data '{"frequencyHz":100000000,"restoreAfterS":60}' "$API_ORIGIN/api/tuner/rtl/tune"
+curl --fail --header "$AUTH" "$API_ORIGIN/api/tuner/rtl"                        # see "restore"
+curl --fail --header "$AUTH" --request DELETE "$API_ORIGIN/api/tuner/rtl/tune/restore"  # keep it
+```
+
+The person at the receiver wins: any later write to this tuner from anyone, including the web app,
+an external client such as SDR++ or a scanner job, cancels the restore for good and never gets
+overwritten. A scanner job taking the tuner's lease cancels it as well, and the receiver ends on your
+temporary tuning when the job ends: a restore itself never preempts a job. `restore` in `GET /api/tuner` says what happened: `status`, `at`, `state` (what goes back) and
+`cancelledBy`. A core restart drops a pending restore: read
+[what a restart does](API.md#temporary-tune-and-restart) before relying on one.
+
+With `preempt: true` over a scan, **no restore comes**: `restore` reads `cancelled` with reason
+`scanner-preempted` from the start. Going back would mean going to the job's hop, and the tuning from
+before the job is not kept either. When `restoreAfterS` passes nothing happens: the receiver stays on
+your tune until the job resumes by its own rules and retunes, or someone tunes it. If you need your own
+tuning back afterwards, tune to it.
 
 ## Read the receiver state
 
 One bounded read (under 4 KiB) says what the receiver is doing: tuners, sources, live audio,
-scanner, decoder verdicts, activity store and the newest decode per protocol.
+scanner, decoder verdicts, activity store and the newest decode per protocol. Poll this route to
+ask "what is going on": it reads no discovery, journal or SQLite data, so it stays cheap on a busy
+core and however many discoveries the store holds.
 
 ```sh
 curl --fail --header "$AUTH" "$API_ORIGIN/api/agent/status"
@@ -61,24 +233,59 @@ id was cut; read the fuller route named in the [field table](API.md#get-apiagent
 Decoders with a problem verdict are listed first; `hiddenProblems` above 0 means more problem
 decoders than fit, so read `GET /api/decoders/summary`.
 
+Each answer below is one read, no logs needed; every closed list is in `GET /api/enums`:
+
+- **Who moved the tuner, and why:** `lastChange` on `GET /api/tuner` (`actor`, `reason`, `at`,
+  `fields`, and `jobId` when a job moved it). A machine token reads `agent`, a browser session
+  `web`, a core without access `unknown`.
+- **Why a source gives no samples:** `verdict` on `GET /api/sources`, its bare code as
+  `sources[].verdict` here (absent when `ok`). `receiver-no-device` means fresh receiver facts say
+  so; `no-samples` claims no cause, and `deviceFacts` says why not.
+- **Why passive scanning is off:** `sources[].passive` here, `engines[].passive.reasonCode` on
+  `GET /api/scanner`.
+- **Why a signal was not recorded:** `recorder` on `GET /api/scanner/discoveries/:id`.
+- **What a sweep was allowed to disturb:** `impact` and `consentedImpact` on the job.
+
 `sources[].feed` reads `paused` or `resuming` while an operator holds the receiver feed off
 and `error` after a failed resume. After a plain resume, `tuningUnverified: true` means the
 receiver may have been retuned during the pause: read or set the tuning before trusting it.
 `scanner.heldJobs` counts sweeps that a plain resume parked (`reason`
 `resumed-without-retune`); `scanner.job` shows one of them before any newer job, and it
-waits for an explicit job resume.
+waits for an explicit job resume. `scanner.discoveries` is how many records the discovery store
+holds.
 
-## Tune
+## List what the scanner found
+
+Ask for compact rows: 200 to 300 bytes each, instead of 760 or more.
 
 ```sh
-curl --fail --header "$AUTH" --header "Content-Type: application/json" \
-  --data '{"hz":100000000}' "$API_ORIGIN/api/tuner/rtl/frequency"
+curl --fail --header "$AUTH" "$API_ORIGIN/api/scanner/discoveries?view=compact&limit=100"
 ```
 
-`hz` is the center frequency in Hz. The answer is the new tuner state. A sample-rate change
-(`POST /api/tuner/rtl/sample-rate`, `{"hz":2400000}`) reconnects the source and may answer
-503 `SOURCE_RECONNECTING` with `Retry-After: 1`; retry after that many seconds
-([sample-rate restarts](API.md#tuner-commands-during-a-sample-rate-restart)).
+Each row has `id`, `frequencyHz`, `class`, `protocol`, `confidence`, `evidenceLevel`, `identity`,
+`lastSeenAt` and `recorder`. `identity` is null while none is published, and `recorder` is null
+while the recorder remembers no decision; `recorder.last` holds its last `code` and `at`. There is
+no `state`: a discovery is a record, not a process, and only a job has one. Pass `nextCursor` as
+`cursor` for the next page, until it is null. All the filters work
+([compact rows](API.md#compact-rows)). A page can come back short of `limit` when a record is
+merged during the read, so stop on the cursor, not on the row count.
+
+While a sweep runs, walk with `sort=frequency`. The cursor is an offset into the order of that
+moment, and the default order follows `lastSeen`: every re-heard signal jumps to the front and pushes
+the rest down, so the next page repeats some rows and never shows others. Being heard again does not
+move a record in this order:
+
+```sh
+curl --fail --header "$AUTH" "$API_ORIGIN/api/scanner/discoveries?view=compact&sort=frequency&limit=100"
+```
+
+A record new to the store can still shift the offset by a row, so keep rows by `id`.
+
+`GET /api/scanner/jobs?view=compact` is the same for jobs: `id`, `name`, `kind`, `state`, `reason`,
+`sourceId` and `updatedAt`, without the plan. It tells you whether a job is still going, and has no
+progress by design. To follow a sweep, poll `progress` on the one job:
+`GET /api/scanner/jobs/<id>` (`sweepIndex`, `hopIndex`, `hopCount`, `coverage`, `counts`). That answer
+carries the whole plan too, about 160 bytes per hop, so poll it at human pace, not in a tight loop.
 
 ## Set gain
 
@@ -91,6 +298,32 @@ curl --fail --header "$AUTH" --header "Content-Type: application/json" \
 
 `gain` is in tenths of a dB (0 to 500; `372` is 37.2 dB), the same unit as `gain` in
 `GET /api/tuner` and `GET /api/agent/status`. `{"mode":"agc"}` returns to automatic gain.
+`tenthsDb` is a deprecated alias of `gain` that older clients still send; use `gain`.
+
+### Tuner field names
+
+Each single-setting `POST` route has its own short body field. Sending the name `GET /api/tuner`
+reports instead is a 400 that names the field the route expects:
+
+| `GET /api/tuner` field | `POST` route           | Body field |
+| ---------------------- | ---------------------- | ---------- |
+| `frequency`            | `.../frequency`        | `hz`       |
+| `sampleRate`           | `.../sample-rate`      | `hz`       |
+| `gainMode`             | `.../gain-mode`        | `mode`     |
+| `agcMode`              | `.../agc`              | `enabled`  |
+| `biasTee`              | `.../bias-tee`         | `enabled`  |
+| `directSampling`       | `.../direct-sampling`  | `mode`     |
+| `offsetTuning`         | `.../offset-tuning`    | `enabled`  |
+| `testMode`             | `.../test-mode`        | `enabled`  |
+| `ifGain`               | `.../if-gain`          | `gain`     |
+| `rtlXtal`              | `.../rtl-xtal`         | `hz`       |
+| `tunerXtal`            | `.../tuner-xtal`       | `hz`       |
+| `tunerGainIndex`       | `.../tuner-gain-index` | `index`    |
+| `controlMode`          | `.../control-mode`     | `mode`     |
+
+`gain`, `ppm` and `tunerIfGain` (`stage`, `gain`) keep their names. To use the `GET` names
+throughout, send them to `PATCH /api/tuner/:sourceId/config`, which takes those names and units
+and answers 400 for any other field.
 
 ## Check decoders
 
@@ -115,6 +348,10 @@ since it last started, restarted or moved channel or centre (evidence at most 2 
 a removed channel placement's evidence dropped), so a retune or restart starts it afresh.
 The LoRa, ISM (rtl_433) and digital voice (dsd-fme) decoders report it, with the underlying `counters` (`total` since the core
 started, `perMin` over the last minute) on the summary route.
+
+Quiet or broken: `listening` is quiet (running, nothing decodable), even with `health: idle`
+and sparse output. `source-unavailable` with `input: none` is broken (running, no input); `failed`
+is a failing process ([table](API.md#get-apidecoderssummary)).
 
 ## Read activity
 
@@ -175,6 +412,10 @@ unit) and resend. Routes with their own error code (for example `SCANNER_PLAN_IN
 `PATCH /api/station` keeps `fields` as a list of field names (`["lat"]`) for the web settings
 form; its `message` states what each named field accepts
 ([validation errors](API.md#validation-errors)).
+
+Most routes ignore a body field they do not know, so a misspelled name reads as an absent one.
+`POST /api/scanner/plan`, `POST /api/scanner/jobs` and `PATCH /api/tuner/:sourceId/config` answer
+400 for an unknown top-level field instead, and their `fields` list the accepted names.
 
 ## Pause and resume
 

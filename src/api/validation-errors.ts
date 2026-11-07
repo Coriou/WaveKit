@@ -12,7 +12,7 @@
  * expected }] }`. Routes with their own error codes keep them and add `fields`.
  */
 
-import type { FastifyError, FastifyRequest } from "fastify"
+import type { FastifyError, FastifyReply, FastifyRequest } from "fastify"
 import {
 	ZodArray,
 	ZodBoolean,
@@ -446,6 +446,38 @@ export function ajvValidationFields(
 		)
 	}
 	return [...fields].map(([field, expected]) => ({ field, expected }))
+}
+
+/**
+ * Fastify's validator strips a key the body schema does not name before the handler runs, so
+ * a misspelled field reads as an absent one. This preValidation hook answers 400 instead,
+ * naming every field the schema accepts (the server's own names, never the client's key).
+ * Top-level keys only. `expected` overrides the generated text.
+ */
+export function rejectUnknownBodyFields(
+	schema: { readonly properties: Readonly<Record<string, unknown>> },
+	expected?: string,
+) {
+	const names = Object.keys(schema.properties)
+	const field: ValidationField = {
+		field: "body",
+		expected: expected ?? `only the fields ${names.join(", ")}`,
+	}
+	return (
+		request: FastifyRequest,
+		reply: FastifyReply,
+		done: () => void,
+	): void => {
+		const body = request.body
+		if (
+			!isSchema(body) ||
+			Object.keys(body).every(key => Object.hasOwn(schema.properties, key))
+		) {
+			done()
+			return
+		}
+		void reply.status(400).send(validationErrorBody("body", [field]))
+	}
 }
 
 /** The route's own JSON schema for a request part (Fastify keeps it on routeOptions). */

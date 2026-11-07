@@ -3232,6 +3232,21 @@ export class SourceManager extends EventEmitter {
 		})
 	}
 
+	/**
+	 * The source can take a tuner command and is delivering IQ on the current connection: what a
+	 * rate-change recovery waits for, and not the socket a recovery is about to replace.
+	 */
+	isTunerUsable(id: string): boolean {
+		const state = this.sources.get(id)
+		return (
+			state !== undefined &&
+			state.connected &&
+			state.socket?.writable === true &&
+			state.lastSampleAt !== null &&
+			this.rateRecovery.get(id)?.socket !== state.socket
+		)
+	}
+
 	/** End each recovery once, before notifying consumers that preservation ended. */
 	private finishRateRecovery(id: string, succeeded: boolean): void {
 		const recovery = this.rateRecovery.get(id)

@@ -1,3 +1,4 @@
+import { createComponentLogger } from "../utils/logger.js"
 import type { Logger } from "../utils/logger.js"
 import { constants } from "node:fs"
 import fs from "node:fs/promises"
@@ -31,6 +32,14 @@ import type { SessionSnapshot } from "./sessions.js"
 const STATE = "access-state.json"
 const MARKER = "initialized"
 const MARKER_CONTENT = "wavekit-private-access-v1\n"
+/**
+ * Written durably by every rotation before the new state. It holds the state's
+ * own `credentialBinding` (a salted hash of the token's digest), so it adds no
+ * verifier the state file does not already carry. It is replaced only by the
+ * next rotation and never removed.
+ */
+const FENCE = "credential-fence.json"
+const FENCE_BYTES = 256
 const MAX_BYTES = 64 * 1024
 const LIFETIME = 30 * 24 * 60 * 60 * 1000
 const ownerName = /^owner-([1-9][0-9]*)-([a-f0-9-]{36})\.lock$/
@@ -57,16 +66,29 @@ const stateSchema = z
 		sessions: sessionSnapshotSchema,
 	})
 	.strict()
+const fenceSchema = z
+	.object({
+		version: z.literal(1),
+		credentialBinding: z.string().regex(/^[a-f0-9]{64}$/),
+	})
+	.strict()
 const optionsSchema = z.object({
 	directory: z.string().min(1).max(4096).refine(isAbsolute),
-	mode: z.enum(["load", "provision"]),
+	mode: z.enum(["load", "provision", "rotate"]),
 	ownership: z.literal("single-host-pid-namespace"),
 })
 type PrivateState = z.infer<typeof stateSchema>
 
+/** The stored credential is not the one the last rotation recorded. */
+export const ACCESS_CREDENTIAL_MISMATCH = "ACCESS_STORAGE_CREDENTIAL_MISMATCH"
+
 export interface PrivateAccessStorageOptions {
 	directory: string
-	mode: "load" | "provision"
+	/**
+	 * `rotate` is `load` for the rotation command alone: it may open a state that
+	 * fails the credential fence, and that state can only be rotated away.
+	 */
+	mode: "load" | "provision" | "rotate"
 	/** Dedicated local directory, never shared across hosts or PID namespaces. */
 	ownership: "single-host-pid-namespace"
 	random?: AccessRandomBytes
@@ -79,7 +101,24 @@ export interface ReadMachineCredentialOptions {
 }
 
 function failure(code: string): WaveKitError {
-	return new WaveKitError("Private access storage unavailable", code)
+	return new WaveKitError(
+		code === ACCESS_CREDENTIAL_MISMATCH
+			? "Stored machine credential does not match the last rotation; stop the core and run rotate-credential again"
+			: "Private access storage unavailable",
+		code,
+	)
+}
+
+/** Unparseable counts as a mismatch: it cannot prove the state is current. */
+function fenceMatches(text: string, binding: string): boolean {
+	let input: unknown
+	try {
+		input = JSON.parse(text)
+	} catch {
+		return false
+	}
+	const fence = fenceSchema.safeParse(input)
+	return fence.success && fence.data.credentialBinding === binding
 }
 
 function hasCode(error: unknown, code: string): boolean {
@@ -156,6 +195,15 @@ function validateSnapshot(input: unknown, binding: string): SessionSnapshot {
  * persist resolves only after file+directory fsync; failures latch unavailable.
  * A failure after rename has an uncertain disk outcome, never a success claim.
  * Restart reloads validated disk state; no rollback can promise undo after rename.
+ *
+ * A rename cannot be conditional, so an old holder paused just before its rename
+ * can still replace a successor's state. The credential fence detects that: a
+ * state whose credential is not the one the last rotation recorded is refused at
+ * every load until rotation replaces it, so the revoked token is never admitted
+ * or exported. A crash between the fence and the state write looks the same and
+ * recovers the same way. A directory that never rotated has no fence and loads
+ * as before. The fence covers the credential only: a paused holder of the
+ * current credential can still land an older session list.
  */
 export class PrivateAccessStorage {
 	#directory: string
@@ -163,12 +211,14 @@ export class PrivateAccessStorage {
 	#directoryIdentity: { dev: number; ino: number }
 	#stopHeartbeat: LockHeartbeat | undefined
 	#ownershipLost = false
+	#ownershipListeners = new Set<() => void>()
 	#owner = ""
 	#ownerIdentity: { dev: number; ino: number } | undefined
 	#state: PrivateState | undefined
 	#created = false
 	#closed = false
 	#unavailable = false
+	#credentialMismatch = false
 	#queue: Promise<void> = Promise.resolve()
 
 	private constructor(
@@ -233,7 +283,9 @@ export class PrivateAccessStorage {
 			token = reader.#current().machineToken
 			reader.#state = undefined
 			reader.#closed = true
-		} catch {
+		} catch (error) {
+			if (hasCode(error, ACCESS_CREDENTIAL_MISMATCH))
+				throw failure(ACCESS_CREDENTIAL_MISMATCH)
 			throw failure("ACCESS_CREDENTIAL_UNAVAILABLE")
 		} finally {
 			await handle?.close().catch(() => {
@@ -270,7 +322,7 @@ export class PrivateAccessStorage {
 				}
 			}
 			const stat = await fs.lstat(options.directory).catch(error => {
-				if (options.mode === "load" && hasCode(error, "ENOENT"))
+				if (options.mode !== "provision" && hasCode(error, "ENOENT"))
 					throw failure("ACCESS_STORAGE_MISSING")
 				throw error
 			})
@@ -308,6 +360,11 @@ export class PrivateAccessStorage {
 		} catch (error) {
 			if (storage) await storage.close().catch(() => undefined)
 			else if (handle) await handle.close().catch(() => undefined)
+			// Startup output carries only the code; the logger reaches the operator.
+			if (hasCode(error, ACCESS_CREDENTIAL_MISMATCH) && options.logger)
+				createComponentLogger(options.logger, "PrivateAccessStorage").error(
+					failure(ACCESS_CREDENTIAL_MISMATCH).message,
+				)
 			if (error instanceof WaveKitError) throw error
 			throw failure("ACCESS_STORAGE_UNAVAILABLE")
 		}
@@ -318,6 +375,23 @@ export class PrivateAccessStorage {
 	}
 	get unavailable(): boolean {
 		return this.#unavailable
+	}
+	/** Latched when another owner reclaimed the directory; it may have rotated the state. */
+	get ownershipLost(): boolean {
+		return this.#ownershipLost
+	}
+	/** Fires once, at the latch, or at once if it already happened. Returns the unsubscribe. */
+	onOwnershipLost(listener: () => void): () => void {
+		if (this.#ownershipLost) {
+			listener()
+			return () => {}
+		}
+		this.#ownershipListeners.add(listener)
+		return () => this.#ownershipListeners.delete(listener)
+	}
+	/** Only a `rotate` open can see true here; `load` refuses instead. */
+	get credentialMismatch(): boolean {
+		return this.#credentialMismatch
 	}
 	get credentialBinding(): string {
 		return this.#current().credentialBinding
@@ -336,10 +410,12 @@ export class PrivateAccessStorage {
 		return structuredClone(this.#current().sessions)
 	}
 
-	#current(): PrivateState {
+	#current(recovering = false): PrivateState {
 		if (this.#ownershipLost) throw failure("ACCESS_STORAGE_BUSY")
 		if (this.#closed || this.#unavailable || !this.#state)
 			throw failure("ACCESS_STORAGE_UNAVAILABLE")
+		if (this.#credentialMismatch && !recovering)
+			throw failure(ACCESS_CREDENTIAL_MISMATCH)
 		return this.#state
 	}
 
@@ -460,6 +536,19 @@ export class PrivateAccessStorage {
 				onLost: () => {
 					this.#ownershipLost = true
 					this.#unavailable = true
+					if (options?.logger)
+						createComponentLogger(options.logger, "PrivateAccessStorage").error(
+							"Private access ownership lost; denying credentials and closing streams until the core restarts",
+						)
+					const listeners = [...this.#ownershipListeners]
+					this.#ownershipListeners.clear()
+					for (const listener of listeners) {
+						try {
+							listener()
+						} catch {
+							/* One listener's cleanup must not skip the next one. */
+						}
+					}
 				},
 			},
 		)
@@ -529,7 +618,8 @@ export class PrivateAccessStorage {
 					// take a lock refreshed during its own pause. Without fencing tokens,
 					// this advisory lease cannot close that window. The old holder notices
 					// the loss within H = 10 s and stops writing; at most the write already
-					// in flight can land.
+					// in flight can land, and the credential fence refuses it at the next
+					// load if it carries a revoked credential.
 					await fs.unlink(path).catch(error => {
 						if (!hasCode(error, "ENOENT")) throw error
 					})
@@ -551,7 +641,7 @@ export class PrivateAccessStorage {
 	}
 
 	async #load(
-		mode: "load" | "provision",
+		mode: PrivateAccessStorageOptions["mode"],
 		random: AccessRandomBytes | undefined,
 	): Promise<void> {
 		const marker = await this.#read(MARKER, 64)
@@ -593,6 +683,16 @@ export class PrivateAccessStorage {
 		)
 			throw failure("ACCESS_STORAGE_INVALID")
 		validateSnapshot(result.data.sessions, result.data.credentialBinding)
+		// Read after the state: rotation writes the fence first, so a stale state
+		// seen above always meets a fence at least as new as the one that outdated it.
+		const fence = await this.#read(FENCE, FENCE_BYTES)
+		if (
+			fence !== undefined &&
+			!fenceMatches(fence, result.data.credentialBinding)
+		) {
+			if (mode !== "rotate") throw failure(ACCESS_CREDENTIAL_MISMATCH)
+			this.#credentialMismatch = true
+		}
 		this.#state = result.data
 	}
 
@@ -618,8 +718,9 @@ export class PrivateAccessStorage {
 			await this.#assertDirectory()
 			const existing = await this.#read(name, MAX_BYTES)
 			if (
-				(initial && existing !== undefined) ||
-				(!initial && existing === undefined)
+				name !== FENCE &&
+				((initial && existing !== undefined) ||
+					(!initial && existing === undefined))
 			)
 				throw failure("ACCESS_STORAGE_INCOMPLETE")
 			if (name === STATE && (await this.#read(MARKER, 64)) !== MARKER_CONTENT)
@@ -709,6 +810,10 @@ export class PrivateAccessStorage {
 	 * and, by default, removes remembered sessions. `keepSessions` rebinds them
 	 * to the new generation instead. Old-binding persistence hooks still reject,
 	 * so a live store cannot write the previous generation.
+	 *
+	 * The fence lands first, so no crash or stale writer can leave the new state
+	 * unrecorded. A state that failed the fence is replaced here, but its sessions
+	 * may be ones a rotation removed, so `keepSessions` is refused for it.
 	 */
 	rotateMachineCredential(options?: {
 		random?: AccessRandomBytes
@@ -717,7 +822,9 @@ export class PrivateAccessStorage {
 		const random = options?.random
 		const keepSessions = options?.keepSessions === true
 		return this.#serialize(async () => {
-			const current = this.#current()
+			const current = this.#current(true)
+			if (keepSessions && this.#credentialMismatch)
+				throw failure(ACCESS_CREDENTIAL_MISMATCH)
 			let machineToken = generateMachineToken(random)
 			for (
 				let attempt = 1;
@@ -744,8 +851,13 @@ export class PrivateAccessStorage {
 				credentialBinding: binding,
 				sessions,
 			}
+			await this.#atomic(
+				FENCE,
+				JSON.stringify({ version: 1, credentialBinding: binding }),
+			)
 			await this.#atomic(STATE, JSON.stringify(next))
 			this.#state = next
+			this.#credentialMismatch = false
 		})
 	}
 

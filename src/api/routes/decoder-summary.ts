@@ -7,6 +7,7 @@ import type {
 	BandRegion,
 	DecoderBandRange,
 	DecoderCounters,
+	DecoderInputState,
 	DecoderReceptionHint,
 	DecoderPlacementView,
 	DecoderSummary,
@@ -23,6 +24,7 @@ import { DECODER_PROTOCOLS } from "../../decoders/enablement/contract.js"
 import { VFO_CHANNEL_TYPES } from "../../decoders/enablement/placement.js"
 import { bandContainsTuned } from "../../decoders/enablement/tuned-band.js"
 import type { DecoderManager } from "../../decoders/manager.js"
+import type { SourceManager, SourceStatus } from "../../core/source-manager.js"
 import {
 	receptionHint,
 	type DecoderCountersStatus,
@@ -473,14 +475,82 @@ export function decoderCoversHz(status: DecoderStatus, hz: number): boolean {
 	return planListsAt(protocols, hz, band?.region?.code)
 }
 
+/** A source's activity state by id; undefined for an unknown source. */
+export type SourceActivityOf = (
+	sourceId: string,
+) => SourceStatus["activity"]["state"] | undefined
+
+/**
+ * Reads activity through `getStatus`; a manager without it reads every source unknown. A source in
+ * its commanded rate-change recovery (at most 9 s) is on its way back, not broken, so it reads as
+ * one just connecting. A recording that ended keeps reading `ended`: nothing brings it back.
+ */
+export function sourceActivityReader(
+	manager: Partial<Pick<SourceManager, "getStatus" | "isCommandedRecovery">>,
+): SourceActivityOf {
+	return id => {
+		const activity = manager.getStatus?.(id)?.activity.state
+		return (activity === "disconnected" || activity === "stale") &&
+			manager.isCommandedRecovery?.(id) === true
+			? "waiting"
+			: activity
+	}
+}
+
+/**
+ * Whether samples reach the decoder, from the activity of the sources it runs on (its running
+ * placements, else its own source). A source delivering nothing is known from its own sample age:
+ * `stale` is past the source's sample timeout, so a sparse band is never `none`. A source just
+ * connecting (`waiting`) or backed up (`paused`) says nothing, and neither does a decoder with no
+ * source: both read `unknown`, which never changes a verdict.
+ */
+export function decoderInput(
+	status: DecoderStatus,
+	activityOf: SourceActivityOf | undefined,
+): DecoderInputState {
+	if (!activityOf) return "unknown"
+	const running = (status.placements ?? [])
+		.filter(placement => placement.running)
+		.map(placement => placement.sourceId)
+	const sources =
+		running.length > 0
+			? running
+			: status.sourceId !== undefined
+				? [status.sourceId]
+				: []
+	if (sources.length === 0) return "unknown"
+	let silent = 0
+	for (const id of sources) {
+		const activity = activityOf(id)
+		if (activity === "streaming") return "flowing"
+		if (
+			activity === "disconnected" ||
+			activity === "stale" ||
+			activity === "ended"
+		)
+			silent++
+	}
+	return silent === sources.length ? "none" : "unknown"
+}
+
+/** A running decoder whose every source delivers nothing is broken, not quiet. */
+const NO_INPUT_VERDICT = {
+	code: "source-unavailable",
+	actions: ["check-source"],
+} as const satisfies Pick<DecoderVerdict, "code" | "actions">
+const NO_INPUT_TEXT = "has no input: its source delivers no samples"
+
 /**
  * One decoder's summary item. With `hz`, `coversHz` says whether its band
- * holds that frequency (decoderCoversHz); without, the field is absent.
+ * holds that frequency (decoderCoversHz); without, the field is absent. With
+ * `activityOf`, a `listening` decoder without input reads `source-unavailable`
+ * (quiet versus broken, docs/API.md); without it, `input` is `unknown`.
  */
 export function decoderSummary(
 	status: DecoderStatus,
 	now: number,
 	hz?: number,
+	activityOf?: SourceActivityOf,
 ): DecoderSummary {
 	// A decoder's placement workers (instances such as `<type>#<channel>@<source>`)
 	// run for it: any running placement makes the decoder running.
@@ -491,7 +561,16 @@ export function decoderSummary(
 	// Precedence: crash/restart failure, suspension, recent running output, idle.
 	// A retained lastError alone is historical and does not mark a recovered run failed.
 	const health = healthOf(aggregated, last, now)
-	const verdict = decoderVerdict(status, health, running, now)
+	const input = decoderInput(status, activityOf)
+	const judged = decoderVerdict(status, health, running, now)
+	const verdict: DecoderVerdict =
+		judged.code === "listening" && input === "none"
+			? {
+					...NO_INPUT_VERDICT,
+					actions: [...NO_INPUT_VERDICT.actions],
+					text: `${decoderName(status.type)} ${NO_INPUT_TEXT}`,
+				}
+			: judged
 	const counters = compactCounters(status.counters)
 	const reception = decoderReception(status, verdict.code)
 	return {
@@ -527,6 +606,7 @@ export function decoderSummary(
 		...(hz === undefined ? {} : { coversHz: decoderCoversHz(status, hz) }),
 		...(counters === undefined ? {} : { counters }),
 		...(reception === undefined ? {} : { reception }),
+		input,
 	}
 }
 
@@ -542,7 +622,8 @@ const SummaryQuerySchema = z.object({
 
 export const decoderSummaryRoutes: FastifyPluginAsync<{
 	decoderManager: Pick<DecoderManager, "getAllStatus">
-}> = async (app, { decoderManager }) => {
+	sourceManager?: Partial<Pick<SourceManager, "getStatus">> | undefined
+}> = async (app, { decoderManager, sourceManager }) => {
 	app.get(
 		"/api/decoders/summary",
 		{
@@ -561,9 +642,12 @@ export const decoderSummaryRoutes: FastifyPluginAsync<{
 				)
 			const now = Date.now()
 			const { hz } = query.data
+			const activityOf = sourceManager
+				? sourceActivityReader(sourceManager)
+				: undefined
 			return decoderManager
 				.getAllStatus()
-				.map(status => decoderSummary(status, now, hz))
+				.map(status => decoderSummary(status, now, hz, activityOf))
 		},
 	)
 }

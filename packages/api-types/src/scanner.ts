@@ -3,6 +3,7 @@
  * § 7.1, § 10, § 12). Copies of src/core/scanner/types.ts; the contract test
  * tests/unit/api/scanner-dto-contract.test.ts keeps them identical.
  */
+import type { ScannerPassiveReason } from "./agent-status.js"
 import type { BandRegion, DecoderSuspensionReasonCode } from "./decoders.js"
 import type { AnalogTransmissionDcs } from "./live-audio.js"
 
@@ -880,6 +881,13 @@ export interface ScanJob {
 	decodedElsewhere?: DecodedElsewhereRange[]
 	/** WG7: band-plan skip ranges at the job's last plan (runtime only). */
 	bandPlanSkips?: BandPlanSkipRange[]
+	/**
+	 * What the operator agreed to (`takeover: true`, at creation or on a resume); null when no
+	 * consent was given. `impact` is what the job would disturb as last reported: at creation,
+	 * and again when a resume is refused or an auto-resume finds it grew. A job auto-resumes only
+	 * while the current impact fits this one. Absent from older cores.
+	 */
+	consentedImpact?: Impact | null
 }
 
 // --- Status, settings, bandplans (spec § 12.1) ---
@@ -903,7 +911,14 @@ export interface ScannerEngineStatus {
 	blankedFrames: number
 	/** Periodic broadband RFI (`broadband-rfi`, § 4.9) while active. */
 	broadbandRfi: { periodMs: number } | null
-	passive: { enabled: boolean; disabledReason?: string }
+	passive: {
+		enabled: boolean
+		disabledReason?: string
+		/** `disabledReason` as a closed code; absent while the cost guard does not hold it off. */
+		reasonCode?: ScannerPassiveReason
+		/** When the cost guard turned it off (not set for a measuring window). */
+		disabledAt?: string
+	}
 	frequencyError: { hz: number; ppm: number; discoveries: number } | null
 	lastError?: string
 	/**

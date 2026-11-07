@@ -149,6 +149,15 @@ export class ScannerService extends EventEmitter {
 		this.owner = options.construction ?? options.channelOwnership?.construction ?? new ScannerLifecycleOwner()
 		this.owner.ownCleanup("service", async () => {
 			process.stdout.write("scanner-stop-real\\n")
+			process.stdout.write("close-lost-ownership " + options.lostOwnership() + " " + options.tuner.config.lostOwnership() + "\\n")
+			if (process.env.R14_PROCESS_CASE?.startsWith("hung-file-calls:")) {
+				// More calls than the default 4 pool threads, each stuck opening a FIFO with no writer.
+				const fifo = process.env.R14_PROCESS_CASE.slice("hung-file-calls:".length)
+				const { open } = await import("node:fs/promises")
+				for (let call = 0; call < 8; call++) void open(fifo, "r")
+				process.stdout.write("close-file-calls-hung\\n")
+				await new Promise(() => {})
+			}
 			if (process.env.R14_PROCESS_CASE === "legacy-held") {
 				// Listen before announcing: the parent signals on the marker, and an
 				// unhandled SIGUSR2 would kill this process.
@@ -903,12 +912,126 @@ describe("built protected runtime process", () => {
 				"WaveKit startup failed: WaveKitError [ACCESS_STORAGE_BUSY]: startup could not complete\n",
 			)
 			expect(core.stdout() + core.stderr()).not.toContain(env.directory)
+			// One log line and the refusal: a start a supervisor repeats adds no more than this.
+			expect(core.stdout().trim().split("\n")).toHaveLength(1)
 			for (const port of [env.api, env.analog, env.digital, env.raw, env.relay])
 				expect(await listening(port)).toBe(false)
 		} finally {
 			await holder.close()
 		}
 	}, 15_000)
+
+	it("exits 1 when it loses its private directory, ignoring a signal on the way, and a restart serves again", async () => {
+		const env = await fixture()
+		const storage = await PrivateAccessStorage.open({
+			directory: env.directory,
+			mode: "provision",
+			ownership: "single-host-pid-namespace",
+		})
+		await storage.close()
+		await env.releasePorts()
+		const first = run(env.configFile, env.directory)
+		await started(first)
+		expect((await http(env.api, "/health")).status).toBe(200)
+		const owner = (await readdir(env.directory)).find(name =>
+			name.startsWith("owner-"),
+		)
+		if (owner === undefined) throw new Error("Expected the core's owner file")
+		let exited = false
+		void first.exited.then(() => {
+			exited = true
+		})
+		// A signal right after the latch must not start a second close or change the code.
+		void marker(first, "exiting so that a restart can load").then(
+			() => first.child.kill("SIGTERM"),
+			() => undefined,
+		)
+		// The next heartbeat tick (within H = 10 s) finds the file gone.
+		await rm(join(env.directory, owner))
+		const statuses: (number | undefined)[] = []
+		while (!exited) {
+			await http(env.api, "/health").then(
+				response => statuses.push(response.status),
+				() => undefined,
+			)
+			await delay(20)
+		}
+		expect(await first.exited).toEqual({ code: 1, signal: null })
+		expect(first.stdout()).toContain("Private access ownership lost; exiting")
+		// Honest to the end: once it reads 503 it never reads healthy again. Here the close can be
+		// over before a poll lands, so no 503 is required: protected-server.test.ts shows the answer.
+		const lost = statuses.indexOf(503)
+		if (lost >= 0)
+			expect(statuses.slice(lost).every(status => status === 503)).toBe(true)
+		expect(first.stdout() + first.stderr()).not.toContain(env.directory)
+		for (const port of [env.api, env.analog, env.digital, env.raw, env.relay])
+			expect(await listening(port)).toBe(false)
+		// What s6 does next: the same start, which owns the directory again.
+		const second = run(env.configFile, env.directory)
+		await started(second)
+		expect((await http(env.api, "/health")).status).toBe(200)
+		expect(await stop(second)).toEqual({ code: 0, signal: null })
+	}, 40_000)
+
+	it("hands the close mode to the scanner and the tuner: off on a stop, on from the latch", async () => {
+		const env = await fixture()
+		const storage = await PrivateAccessStorage.open({
+			directory: env.directory,
+			mode: "provision",
+			ownership: "single-host-pid-namespace",
+		})
+		await storage.close()
+		await env.releasePorts()
+		const stopped = run(env.configFile, env.directory, scannerPhasesEntry)
+		await started(stopped)
+		expect(await stop(stopped)).toEqual({ code: 0, signal: null })
+		expect(stopped.stdout()).toContain("close-lost-ownership false false")
+		const lost = run(env.configFile, env.directory, scannerPhasesEntry)
+		await started(lost)
+		const owner = (await readdir(env.directory)).find(name =>
+			name.startsWith("owner-"),
+		)
+		if (owner === undefined) throw new Error("Expected the core's owner file")
+		await rm(join(env.directory, owner))
+		expect(await lost.exited).toEqual({ code: 1, signal: null })
+		expect(lost.stdout()).toContain("close-lost-ownership true true")
+	}, 40_000)
+
+	it("ends a close stuck on hung file calls with SIGKILL, which plain process exit would wait for", async () => {
+		const env = await fixture()
+		const storage = await PrivateAccessStorage.open({
+			directory: env.directory,
+			mode: "provision",
+			ownership: "single-host-pid-namespace",
+		})
+		await storage.close()
+		await env.releasePorts()
+		const scratch = await mkdtemp(join(tmpdir(), "wavekit-hung-close-"))
+		const fifo = join(scratch, "fifo")
+		await new Promise<void>((resolve, reject) => {
+			const made = spawn("mkfifo", [fifo], { stdio: "ignore" })
+			made.once("error", reject)
+			made.once("close", () => resolve())
+		})
+		try {
+			const core = run(
+				env.configFile,
+				env.directory,
+				scannerPhasesEntry,
+				`hung-file-calls:${fifo}`,
+			)
+			await started(core)
+			const owner = (await readdir(env.directory)).find(name =>
+				name.startsWith("owner-"),
+			)
+			if (owner === undefined) throw new Error("Expected the core's owner file")
+			await rm(join(env.directory, owner))
+			expect(await core.exited).toEqual({ code: null, signal: "SIGKILL" })
+			expect(core.stdout()).toContain("close-file-calls-hung")
+		} finally {
+			await rm(scratch, { recursive: true, force: true })
+		}
+	}, 60_000)
 
 	it("mounts admission, disables raw listeners and drains SIGTERM before a durable browser restart", async () => {
 		const env = await fixture()

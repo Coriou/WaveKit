@@ -17,6 +17,14 @@ import type { Logger } from "./logger.js"
  * ownership, then resume its pending rename after a successor reclaims the lock.
  * That one in-flight write may overwrite the successor's newer committed state.
  * The holder detects ownership loss within H = 10 s and stops further writes.
+ * Only a changed identity or a missing file proves that loss. Any other stat or
+ * refresh error proves nothing: that write is refused, the next tick retries, and
+ * the holder latches at 3H without a refresh, when a contender may reclaim. After an
+ * event loop stall its next tick still has H to prove the identity, so an unchanged lock
+ * survives the stall and a check that hangs latches by max(3H, tick start + H). An error
+ * follows the same rule: once faults begin, or begin again after a stall, they may not latch
+ * for max(3H since the refresh, H from that fault), so one error after a stall never ends it.
+ * Three failed ticks in a row always do, so a permanent fault latches whatever the stalls.
  */
 export const lockOwnerSchema = z.object({
 	pid: z.number().int().positive(),
@@ -384,8 +392,24 @@ export async function observeStartupLocks(
 }
 export interface LockHeartbeat {
 	(): Promise<void>
+	/** Latched: a changed identity, a missing file, or 3H without a refresh. */
 	readonly lost: boolean
+	/** All unproven stat or refresh errors so far, whether or not they latched. */
+	readonly transientFaults: number
+	/** False also during a transient fault: refuse this write, nothing is latched. */
 	check: () => Promise<boolean>
+}
+// 3H / H = 3 failed ticks in a row reach the age at which a contender may reclaim.
+const STALE_TICKS = HEARTBEAT_STALE_MS / HEARTBEAT_MS
+// Ticks run H apart, so 2H without one means at least one was missed: the process stalled.
+const STALL_GAP_MS = 2 * HEARTBEAT_MS
+function lockErrorCode(error: unknown): string {
+	return typeof error === "object" &&
+		error !== null &&
+		"code" in error &&
+		typeof error.code === "string"
+		? error.code
+		: "unknown"
 }
 export async function startLockHeartbeat(
 	path: string,
@@ -402,53 +426,133 @@ export async function startLockHeartbeat(
 	const identity = await handle.stat()
 	let lost = false
 	let stopped = false
+	/** Set the moment stop() starts; `stopped` follows once the running tick has ended. */
+	let stopping = false
 	let pending = Promise.resolve()
+	let transientFaults = 0
+	let failedTicks = 0
+	// Monotonic: what a contender observes is this refresh, not any wall clock.
+	let refreshedAt = performance.now()
+	/** The running tick's lease deadline. Only one runs: ticks queue on `pending`. */
+	let leaseEnd: NodeJS.Timeout | undefined
+	/** From here a fault latches; unset until the first fault since a refresh or a stall. */
+	let faultGraceEnd: number | undefined
+	/** The last tick or fault, which tells a stall from the regular H between ticks. */
+	let previousRunAt = refreshedAt
+	/** What came before a stall says nothing about now, so a fault after one gets its own grace. */
+	const noteRunning = (): number => {
+		const now = performance.now()
+		if (now - previousRunAt >= STALL_GAP_MS) faultGraceEnd = undefined
+		previousRunAt = now
+		return now
+	}
 	const lose = () => {
-		if (lost) return
+		// Stopping is not a loss: a shutdown waiting for a check latches nothing, whatever it finds.
+		if (lost || stopping) return
 		lost = true
 		clearInterval(timer)
 		options.onLost?.()
 	}
+	/** Throws what it could not read; false means another owner is proven. */
+	const verifyOwnership = async () => {
+		const [actual, opened] = await Promise.all([fs.lstat(path), handle.stat()])
+		if (
+			actual.dev !== opened.dev ||
+			actual.ino !== opened.ino ||
+			actual.dev !== identity.dev ||
+			actual.ino !== identity.ino ||
+			(options.verify && !(await options.verify()))
+		) {
+			lose()
+			return false
+		}
+		return !lost && !stopped
+	}
+	const fault = (error: unknown, tick: boolean) => {
+		if (lost || stopping) return
+		if (hasLockCode(error, "ENOENT")) {
+			log?.warn("Storage lock file is gone")
+			lose()
+			return
+		}
+		transientFaults++
+		if (tick) failedTicks++
+		const now = noteRunning()
+		// On schedule the first fault leaves 3H since the refresh. Past 2H, only a stall gets there,
+		// and H is what a tick has after one (the lease deadline below): an error alone never ends it.
+		faultGraceEnd ??= Math.max(
+			refreshedAt + HEARTBEAT_STALE_MS,
+			now + HEARTBEAT_MS,
+		)
+		const expired = failedTicks >= STALE_TICKS || now >= faultGraceEnd
+		log?.warn(
+			{ code: lockErrorCode(error), failedTicks, faults: transientFaults },
+			expired
+				? "Storage lock unverified for the whole lease; latching"
+				: "Storage lock check failed; retrying",
+		)
+		if (expired) lose()
+	}
 	const check = async () => {
 		if (lost || stopped) return false
 		try {
-			const [actual, opened] = await Promise.all([
-				fs.lstat(path),
-				handle.stat(),
-			])
-			if (
-				actual.dev !== opened.dev ||
-				actual.ino !== opened.ino ||
-				actual.dev !== identity.dev ||
-				actual.ino !== identity.ino ||
-				(options.verify && !(await options.verify()))
-			) {
-				lose()
-				return false
-			}
-			return !lost && !stopped
-		} catch {
-			lose()
+			return await verifyOwnership()
+		} catch (error) {
+			fault(error, false)
 			return false
 		}
 	}
 	const timer = setInterval(() => {
-		pending = pending
-			.then(async () => {
-				if (!(await check())) return
+		pending = pending.then(async () => {
+			if (lost || stopped) return
+			noteRunning()
+			// File system calls can hang past the lease, and a contender may then reclaim. This
+			// deadline needs no I/O to settle. A loop resumed past the lease has 0 ms left, and a
+			// 0 ms timer would fire before any check returns, losing an unchanged lock. So a tick
+			// always gets at least H: delay = max(3H - age, H), which equals 3H - age for any age
+			// up to 2H (every tick on time) and H past that. A check that returns within it keeps
+			// the lock because it proves the identity first; one still hanging latches.
+			leaseEnd = setTimeout(
+				() => {
+					try {
+						log?.warn("Storage lock check outlived the lease; latching")
+						lose()
+					} catch {
+						/* An onLost failure must not escape a timer. */
+					}
+				},
+				Math.max(
+					refreshedAt + HEARTBEAT_STALE_MS - performance.now(),
+					HEARTBEAT_MS,
+				),
+			)
+			leaseEnd.unref()
+			try {
+				if (!(await verifyOwnership())) return
 				const now = new Date()
 				await handle.utimes(now, now)
-			})
-			.catch(() => {
-				lose()
-				log?.warn("Storage lock heartbeat refresh failed")
-			})
+				refreshedAt = performance.now()
+				failedTicks = 0
+				faultGraceEnd = undefined
+			} catch (error) {
+				try {
+					fault(error, true)
+				} catch {
+					/* An onLost failure must not reject the chain stop() awaits. */
+				}
+			} finally {
+				clearTimeout(leaseEnd)
+			}
+		})
 	}, HEARTBEAT_MS)
 	timer.unref()
 	let closing: Promise<void> | undefined
 	const stop = () => {
 		closing ??= (async () => {
+			// At once, not after the running check: no latch fires from here on.
+			stopping = true
 			clearInterval(timer)
+			clearTimeout(leaseEnd)
 			await pending
 			stopped = true
 			await handle.close()
@@ -456,6 +560,9 @@ export async function startLockHeartbeat(
 		return closing
 	}
 	Object.defineProperty(stop, "lost", { get: () => lost })
+	Object.defineProperty(stop, "transientFaults", {
+		get: () => transientFaults,
+	})
 	return Object.assign(stop, { check }) as LockHeartbeat
 }
 const OWNER = "owner.json"

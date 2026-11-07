@@ -5,7 +5,7 @@ import {
 	DECODER_VERDICT_CODES,
 	decoderVerdictSchema,
 } from "./decoders.js"
-import { SOURCE_FEED_STATES } from "./sources.js"
+import { SOURCE_FEED_STATES, type SourceVerdictCode } from "./sources.js"
 
 /**
  * GET /api/agent/status: one compact answer to "what is the receiver doing", for
@@ -23,14 +23,17 @@ export const AGENT_STATUS_LIMITS = Object.freeze({
 	 *   envelope: keys and braces 121, `at` 29, `truncated` 5, activity 54,
 	 *             `hiddenProblems` 23                                      =   232
 	 *   tuners:     2 × 219 (sourceId 32, three numbers, owner) + 3         =   441
-	 *   sources:    2 × 209 (id 32, longest state and feed, age, the longest
-	 *               warning twice, tuningUnverified) + 3                     =   421
-	 *   liveAudio:  sourceId 32, modulation 16, two numbers                 =   206
-	 *   scanner:    job id 32, name 32, reason 24, sourceId 32, two integers =  299
-	 *   decoders:   9 × 199 (id 32, protocol 24, code 23, the longest action
-	 *               3 times: 64) + 10                                        = 1,801
-	 *   lastDecode: 9 × 74 (protocol 24, ISO time 27) + 10                  =   676
-	 * Total 4,076 < 4,096. The worst-case test builds exactly this body, checks the
+	 *   sources:    2 × 273 (id 32, longest state and feed, age, the longest
+	 *               warning twice, tuningUnverified; `verdict` 33 with the 20-byte
+	 *               `receiver-not-running`, `passive` 31 with the 18-byte
+	 *               `measuring-baseline`) + 3                                =   549
+	 *   liveAudio:  sourceId 32, modulation 12, two numbers                 =   202
+	 *   scanner:    job id 32, name 32, reason 24, sourceId 32, two integers,
+	 *               discoveries 7 digits                                    =   321
+	 *   decoders:   9 × 191 (id 32, protocol 16, code 23, the longest action
+	 *               3 times: 64) + 10                                        = 1,729
+	 *   lastDecode: 9 × 66 (protocol 16, ISO time 27) + 10                  =   604
+	 * Total 4,078 < 4,096. The worst-case test builds exactly this body, checks the
 	 * schema admits it and nothing one row or one byte larger, and measures it.
 	 * A decoder row's `reception` hint rides only on a `listening` verdict, which has no
 	 * actions: code 9 instead of 23 and `[]` 2 instead of 3 actions 64 saves 76 bytes,
@@ -49,14 +52,22 @@ export const AGENT_STATUS_LIMITS = Object.freeze({
 	 * 32-character scanner probe decoder id fit whole.
 	 */
 	idMaxBytes: 32,
-	/** Decoder protocol (type) names cut to 24 bytes; the longest built-in is 15. */
-	protocolMaxBytes: 24,
+	/**
+	 * Decoder protocol (type) names cut to 16 bytes, so that sources carry `verdict` and
+	 * `passive`; the longest built-in is 15, and a longer custom type sets `truncated`.
+	 */
+	protocolMaxBytes: 16,
 	/** Scanner job names cut to 32 bytes here (the job route keeps up to 100 characters). */
 	jobNameMaxBytes: 32,
 	/** Pause or failure reasons cut to 24 bytes; the longest is 22 (`resumed-without-retune`). */
 	reasonMaxBytes: 24,
-	/** Live-audio modulation names cut to 16 bytes. */
-	modulationMaxBytes: 16,
+	/** Live-audio modulation names cut to 12 bytes; the longest is 3 (`nfm`). */
+	modulationMaxBytes: 12,
+	/**
+	 * `scanner.discoveries` stops here and sets `truncated`: the most `storage.maxDiscoveries`
+	 * accepts, 7 digits in the budget above. Records kept from eviction can pass that cap.
+	 */
+	discoveriesMax: 1_000_000,
 	/** Sources and their tuners (one tuner per source): the first two. */
 	sourcesMax: 2,
 	/**
@@ -95,6 +106,33 @@ export const AGENT_SOURCE_STATES = [
 ] as const
 export const AGENT_SOURCE_WARNINGS = ["rate-mismatch", "signal-flat"] as const
 export type AgentSourceWarning = (typeof AGENT_SOURCE_WARNINGS)[number]
+
+/** A source row's `verdict` (GET /api/sources `verdict.code`): every code but `ok`. */
+export const AGENT_SOURCE_VERDICTS = [
+	"waiting",
+	"no-samples",
+	"receiver-no-device",
+	"receiver-not-running",
+	"backpressure",
+	"disconnected",
+	"feed-paused",
+	"feed-error",
+	"ended",
+] as const satisfies readonly Exclude<SourceVerdictCode, "ok">[]
+
+/**
+ * Why the scanner's cost guard holds a source's passive scanning off: `passive-cost` what passive
+ * adds to a shared engine costs too much of a core, `engine-cost` the whole engine does (passive
+ * alone, or saturated), `measuring-baseline` off for one minute to measure the engine without it,
+ * `unknown` a reason this build does not name (never a guess).
+ */
+export const SCANNER_PASSIVE_REASONS = [
+	"passive-cost",
+	"engine-cost",
+	"measuring-baseline",
+	"unknown",
+] as const
+export type ScannerPassiveReason = (typeof SCANNER_PASSIVE_REASONS)[number]
 
 /** `disabled` when Activity is off in config; otherwise the store lifecycle. */
 export const AGENT_ACTIVITY_STATES = [
@@ -175,6 +213,10 @@ export const agentSourceSchema = z
 		 * `unknownFields` (for example after a plain resume): the receiver may be tuned elsewhere.
 		 */
 		tuningUnverified: z.boolean(),
+		/** GET /api/sources `verdict.code`; absent when it reads `ok`. Message on that route. */
+		verdict: z.enum(AGENT_SOURCE_VERDICTS).optional(),
+		/** Why the cost guard holds passive scanning off (GET /api/scanner); absent otherwise. */
+		passive: z.enum(SCANNER_PASSIVE_REASONS).optional(),
 	})
 	.strict()
 
@@ -200,6 +242,13 @@ export const agentScannerSchema = z
 		activeJobs: z.number().int().nonnegative(),
 		/** Sweeps paused with reason `resumed-without-retune`: each waits for a job resume. */
 		heldJobs: z.number().int().nonnegative(),
+		/** Records in the discovery store, read from its size; null when this core cannot say. */
+		discoveries: z
+			.number()
+			.int()
+			.nonnegative()
+			.max(L.discoveriesMax)
+			.nullable(),
 		/**
 		 * The most recently updated job paused with reason `resumed-without-retune`, else the
 		 * most recently updated non-terminal job, else null.
@@ -272,8 +321,9 @@ export const agentStatusSchema = z
 	.object({
 		at: iso,
 		/**
-		 * True when a list was cut at its cap or an id was shortened: the named full
-		 * route has everything. Shortened job names alone do not set it.
+		 * True when a list was cut at its cap, an id was shortened or the discovery count
+		 * stopped at its cap: the named full route has everything. Shortened job names alone
+		 * do not set it.
 		 */
 		truncated: z.boolean(),
 		tuners: z.array(agentTunerSchema).max(L.sourcesMax),
@@ -335,18 +385,29 @@ export const agentStatusResponseSchema = strictObject({
 	sources: {
 		type: "array",
 		maxItems: L.sourcesMax,
-		items: strictObject({
-			id: str,
-			connected: bool,
-			state: { type: "string", enum: [...AGENT_SOURCE_STATES] },
-			sampleAgeMs: nullable("number"),
-			warnings: {
-				type: "array",
-				items: { type: "string", enum: [...AGENT_SOURCE_WARNINGS] },
-			},
-			feed: { type: "string", enum: [...SOURCE_FEED_STATES] },
-			tuningUnverified: bool,
-		}),
+		items: (() => {
+			const row = strictObject({
+				id: str,
+				connected: bool,
+				state: { type: "string", enum: [...AGENT_SOURCE_STATES] },
+				sampleAgeMs: nullable("number"),
+				warnings: {
+					type: "array",
+					items: { type: "string", enum: [...AGENT_SOURCE_WARNINGS] },
+				},
+				feed: { type: "string", enum: [...SOURCE_FEED_STATES] },
+				tuningUnverified: bool,
+			})
+			// Optional: listed in properties, not in required.
+			return {
+				...row,
+				properties: {
+					...row.properties,
+					verdict: { type: "string", enum: [...AGENT_SOURCE_VERDICTS] },
+					passive: { type: "string", enum: [...SCANNER_PASSIVE_REASONS] },
+				},
+			}
+		})(),
 	},
 	liveAudio: {
 		...strictObject({
@@ -365,6 +426,7 @@ export const agentStatusResponseSchema = strictObject({
 			enabled: bool,
 			activeJobs: { type: "integer" },
 			heldJobs: { type: "integer" },
+			discoveries: nullable("integer"),
 			job: {
 				...strictObject({
 					id: str,

@@ -1,7 +1,10 @@
 import { isAbsolute } from "node:path"
 import { z } from "zod"
 import { WaveKitError } from "../utils/errors.js"
-import { PrivateAccessStorage } from "./private-storage.js"
+import {
+	ACCESS_CREDENTIAL_MISMATCH,
+	PrivateAccessStorage,
+} from "./private-storage.js"
 
 const optionsSchema = z
 	.object({
@@ -17,13 +20,18 @@ const optionsSchema = z
 
 export type MachineRotationResult =
 	| { kind: "rotated" }
-	| { kind: "unavailable"; code: string }
+	/** `changed: "unknown"`: the write started, so the new state may have landed. */
+	| { kind: "unavailable"; code: string; changed: "no" | "unknown" }
 
 /**
  * Offline replacement of the machine credential. Refuses while another live
  * owner holds the private directory. By default the same durable write removes
  * remembered browser sessions. `keepSessions` rebinds them under the new
  * binding. Nothing secret is returned.
+ *
+ * This is also the only recovery from a state that fails the credential fence.
+ * That state's sessions cannot be trusted, so `keepSessions` is refused for it
+ * and nothing changes; rotating without it recovers.
  */
 export async function rotateLocalMachineCredential(options: {
 	directory: string
@@ -31,14 +39,26 @@ export async function rotateLocalMachineCredential(options: {
 }): Promise<MachineRotationResult> {
 	const parsed = optionsSchema.safeParse(options)
 	if (!parsed.success)
-		return { kind: "unavailable", code: "ACCESS_COMMAND_INVALID" }
+		return {
+			kind: "unavailable",
+			code: "ACCESS_COMMAND_INVALID",
+			changed: "no",
+		}
 	let storage: PrivateAccessStorage | undefined
+	let writing = false
 	try {
 		storage = await PrivateAccessStorage.open({
 			directory: parsed.data.directory,
-			mode: "load",
+			mode: "rotate",
 			ownership: "single-host-pid-namespace",
 		})
+		if (parsed.data.keepSessions === true && storage.credentialMismatch)
+			return {
+				kind: "unavailable",
+				code: ACCESS_CREDENTIAL_MISMATCH,
+				changed: "no",
+			}
+		writing = true
 		await storage.rotateMachineCredential({
 			keepSessions: parsed.data.keepSessions === true,
 		})
@@ -46,7 +66,7 @@ export async function rotateLocalMachineCredential(options: {
 	} catch (error) {
 		const code =
 			error instanceof WaveKitError ? error.code : "ACCESS_STORAGE_UNAVAILABLE"
-		return { kind: "unavailable", code }
+		return { kind: "unavailable", code, changed: writing ? "unknown" : "no" }
 	} finally {
 		await storage?.close().catch(() => undefined)
 	}

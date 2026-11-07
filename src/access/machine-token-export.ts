@@ -13,11 +13,15 @@ import {
 } from "node:path"
 import { z } from "zod"
 import { WaveKitError } from "../utils/errors.js"
-import { PrivateAccessStorage } from "./private-storage.js"
+import {
+	ACCESS_CREDENTIAL_MISMATCH,
+	PrivateAccessStorage,
+} from "./private-storage.js"
 
 export type MachineTokenExportCode =
 	| "ACCESS_COMMAND_INVALID"
 	| "ACCESS_CREDENTIAL_UNAVAILABLE"
+	| typeof ACCESS_CREDENTIAL_MISMATCH
 	| "ACCESS_TOKEN_OUT_EXISTS"
 	| "ACCESS_TOKEN_OUT_UNSAFE"
 	| "ACCESS_TOKEN_WRITE_FAILED"
@@ -198,8 +202,10 @@ export async function exportMachineToken(
 				failure = codeOf(error)
 			}),
 		)
-	} catch {
-		failure ??= "ACCESS_CREDENTIAL_UNAVAILABLE"
+	} catch (error) {
+		failure ??= hasCode(error, ACCESS_CREDENTIAL_MISMATCH)
+			? ACCESS_CREDENTIAL_MISMATCH
+			: "ACCESS_CREDENTIAL_UNAVAILABLE"
 	} finally {
 		await parentHandle.close().catch(() => undefined)
 	}

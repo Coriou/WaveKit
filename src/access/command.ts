@@ -13,6 +13,7 @@ import type { MachineAccessDevicesDto } from "./machine-devices.js"
 import { rotateLocalMachineCredential } from "./machine-rotation.js"
 import { exportMachineToken } from "./machine-token-export.js"
 import { canonicalPairingOrigin, requestPairingCode } from "./pairing-client.js"
+import { ACCESS_CREDENTIAL_MISMATCH } from "./private-storage.js"
 import { setupLocalAccess } from "./setup.js"
 
 export interface AccessCommandResult {
@@ -325,9 +326,11 @@ export async function runAccessCommand(
 			return {
 				exitCode: 1,
 				lines: [
-					result.nextStep === "stop-core-and-retry"
-						? "ACCESS_SETUP_UNAVAILABLE: Stop the core and retry setup."
-						: "ACCESS_SETUP_UNAVAILABLE: Private access state needs offline repair; no replacement credential was provisioned.",
+					result.code === ACCESS_CREDENTIAL_MISMATCH
+						? `${result.code}: The stored credential does not match the last rotation and may be a revoked one. Stop the core and run rotate-credential again; setup changed nothing.`
+						: result.nextStep === "stop-core-and-retry"
+							? "ACCESS_SETUP_UNAVAILABLE: Stop the core and retry setup."
+							: "ACCESS_SETUP_UNAVAILABLE: Private access state needs offline repair; no replacement credential was provisioned.",
 				],
 			}
 		return {
@@ -348,11 +351,7 @@ export async function runAccessCommand(
 		if (rotated.kind !== "rotated")
 			return {
 				exitCode: 1,
-				lines: [
-					rotated.code === "ACCESS_STORAGE_BUSY"
-						? "ACCESS_STORAGE_BUSY: Stop the core and retry credential rotation."
-						: `${rotated.code}: Credential rotation did not change private state.`,
-				],
+				lines: [rotationFailure(rotated.code, rotated.changed)],
 			}
 		return {
 			exitCode: 0,
@@ -451,7 +450,21 @@ export async function runAccessCommand(
 	}
 }
 
+function rotationFailure(code: string, changed: "no" | "unknown"): string {
+	if (changed === "unknown")
+		return `${code}: Credential rotation failed and the machine credential may have been replaced. Stop the core, run rotate-credential again, then export the token again.`
+	if (code === ACCESS_CREDENTIAL_MISMATCH)
+		return `${code}: The stored credential does not match the last rotation, so its remembered browser sessions cannot be trusted and --keep-sessions was refused. Private state did not change. Run rotate-credential again without --keep-sessions; every browser pairs again.`
+	if (code === "ACCESS_STORAGE_BUSY" || code === "ACCESS_STORAGE_FOREIGN_OWNER")
+		return `${code}: Stop the core and retry credential rotation.`
+	if (code === "ACCESS_STORAGE_UNSAFE")
+		return `${code}: Credential rotation did not change private state: something in the private directory is not private. Stop the core, then make the directory mode 0700 and its files mode 0600, owned by this user, and retry. If credential-fence.json is a link, a directory or oversized, move it out of the directory and run rotate-credential at once, before the core starts; never just delete it. See docs/SECURITY.md.`
+	return `${code}: Credential rotation did not change private state.`
+}
+
 function machineTokenFailure(code: string): string {
+	if (code === ACCESS_CREDENTIAL_MISMATCH)
+		return `${code}: The stored credential does not match the last rotation and may be a revoked one, so it was not exported. Stop the core, run rotate-credential again, then export again. No file was written.`
 	if (code === "ACCESS_TOKEN_OUT_EXISTS")
 		return `${code}: The --out file already exists. Pass --replace to overwrite your own 0600 file.`
 	if (code === "ACCESS_TOKEN_OUT_UNSAFE")

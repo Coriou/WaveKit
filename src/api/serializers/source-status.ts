@@ -6,8 +6,10 @@
 import type {
 	DecoderAssignment as ApiDecoderAssignment,
 	ExtendedSourceStatus as ApiExtendedSourceStatus,
+	SdrHostStatus,
 	SourceCaps as ApiSourceCaps,
 } from "@wavekit/api-types"
+import { sourceVerdict } from "../../core/source-verdict.js"
 import type { SourceManager, SourceStatus } from "../../core/source-manager.js"
 import type { FanoutTelemetryProvider } from "../../core/source-fanout-router.js"
 
@@ -27,6 +29,13 @@ export function toApiSourceCaps(caps: SourceStatus["caps"]): ApiSourceCaps {
 	}
 }
 
+/** The receiver facts per source; absent or empty says nothing of a device. */
+export function sdrHostsBySource(
+	statuses: (() => readonly SdrHostStatus[]) | undefined,
+): Map<string, SdrHostStatus> {
+	return new Map(statuses?.().map(host => [host.sourceId, host]))
+}
+
 /** Counts fanout branches per source; empty when telemetry is unavailable. */
 export function countConsumersBySource(
 	fanout?: Pick<FanoutTelemetryProvider, "getTelemetrySnapshot"> | undefined,
@@ -44,6 +53,8 @@ export function toApiExtendedSourceStatus(
 	status: SourceStatus,
 	sourceManager: SourceStatusReader,
 	consumersBySourceId: ReadonlyMap<string, number>,
+	hostsBySourceId: ReadonlyMap<string, SdrHostStatus>,
+	now: number,
 ): ApiExtendedSourceStatus {
 	const assignments: ApiDecoderAssignment[] = sourceManager
 		.getSourceAssignments(status.id)
@@ -63,6 +74,7 @@ export function toApiExtendedSourceStatus(
 		assignments,
 		consumers: consumersBySourceId.get(status.id) ?? assignments.length,
 		available: sourceManager.isSourceAvailable(status.id),
+		verdict: sourceVerdict(status, hostsBySourceId.get(status.id), now),
 		...(status.type !== undefined ? { type: status.type } : {}),
 		...(status.url !== undefined ? { url: status.url } : {}),
 		...(status.lastError !== undefined ? { lastError: status.lastError } : {}),

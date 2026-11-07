@@ -1,8 +1,10 @@
 /** JSON schemas for /api/scanner (spec § 12.1). Response bodies are DTOs from @wavekit/api-types. */
 import {
 	DISCOVERY_NEAR_MAX_TOLERANCE_HZ,
+	DISCOVERY_VIEWS,
 	IDENTIFY_WAIT_MAX_MS,
 	IDENTIFY_WAIT_MIN_MS,
+	SCAN_JOB_VIEWS,
 } from "@wavekit/api-types"
 import { DISCOVERY_ID } from "../../core/scanner/store/evidence-store.js"
 import { validationFieldsSchema } from "../validation-errors.js"
@@ -12,7 +14,7 @@ import {
 	JOB_HITS_LIMIT_MAX,
 } from "../../core/scanner/job-hits.js"
 
-const protocolEnum = [
+export const protocolEnum = [
 	"analog-fm",
 	"analog-am",
 	"dmr",
@@ -36,7 +38,7 @@ const protocolEnum = [
 	"lora",
 	"adsb",
 ] as const
-const identityKindEnum = [
+export const identityKindEnum = [
 	"dmr-cc",
 	"p25-nac",
 	"nxdn-ran",
@@ -56,7 +58,7 @@ const identityKindEnum = [
 export const IDENTITY_QUERY = new RegExp(
 	`^(${identityKindEnum.join("|")}):(.+)$`,
 )
-const confidenceEnum = [
+export const confidenceEnum = [
 	"activity",
 	"candidate",
 	"classified",
@@ -148,7 +150,12 @@ export const scanJobSpecSchema = {
 		ranges: { type: "array", items: rangeSchema, maxItems: 64 },
 		bandplans: { type: "array", items: { type: "string" }, maxItems: 16 },
 		exclusions: { type: "array", items: exclusionSchema, maxItems: 256 },
-		protocols: { type: "array", items: { type: "string", enum: protocolEnum } },
+		protocols: {
+			type: "array",
+			items: { type: "string", enum: protocolEnum },
+			description:
+				"absent uses the protocols of the job's ranges; absent there too, or empty, tries every protocol. The plan answer states the outcome in spec.protocols and spec.provenance.protocols",
+		},
 		sensitivity: { type: "string", enum: ["low", "normal", "high"] },
 		thresholdDb: { type: "number", minimum: 0, maximum: 40 },
 		fftSize: { type: "integer", enum: [512, 1024, 2048, 4096, 8192, 16384] },
@@ -306,6 +313,12 @@ export const discoveryQuerySchema = {
 		},
 		// Records flagged as receiver spurs are hidden unless this is true.
 		includeReceiverSpurs: { type: "boolean" },
+		view: {
+			type: "string",
+			enum: DISCOVERY_VIEWS,
+			description:
+				"compact: small rows (DiscoveryCompact: id, frequencyHz, class, protocol, confidence, evidenceLevel, identity, lastSeenAt, recorder.last) instead of the full record",
+		},
 	},
 	additionalProperties: false,
 	allOf: [
@@ -314,6 +327,19 @@ export const discoveryQuerySchema = {
 			then: { required: ["nearHz"] },
 		},
 	],
+} as const
+
+/** GET /api/scanner/jobs?view=compact (ScanJobCompact). Other parameters stay ignored. */
+export const jobListQuerySchema = {
+	type: "object",
+	properties: {
+		view: {
+			type: "string",
+			enum: SCAN_JOB_VIEWS,
+			description:
+				"compact: small rows (ScanJobCompact: id, name, kind, state, reason, sourceId, updatedAt) instead of the full job with its plan",
+		},
+	},
 } as const
 
 export const observationsQuerySchema = {

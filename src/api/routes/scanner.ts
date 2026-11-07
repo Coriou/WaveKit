@@ -20,6 +20,9 @@ import {
 	SCANNER_RECORDER_ERRORS,
 	SCANNER_RECORDER_FLAGS,
 	SCANNER_RECORDER_FLAG_SOURCES,
+	scanJobCompact,
+	type DiscoveryView,
+	type ScanJobView,
 } from "@wavekit/api-types"
 import { discoveryAnchorProperties } from "./scanner-schemas.js"
 import type { ReadStream } from "node:fs"
@@ -44,6 +47,7 @@ import type {
 import { z, ZodError, ZodIssueCode, type ZodIssue, type ZodTypeAny } from "zod"
 import { staticPlanIssues } from "./scanner-plan-issues.js"
 import {
+	rejectUnknownBodyFields,
 	validationErrorBody,
 	zodValidationBody,
 	zodValidationFields,
@@ -54,6 +58,7 @@ import { ScannerApiError } from "../../core/scanner/errors.js"
 import type { ScannerService } from "../../core/scanner/scanner-service.js"
 import { ScannerSettingsPatchSchema } from "../../core/scanner/settings.js"
 import type { DiscoveryFilter } from "../../core/scanner/store/discovery-store.js"
+import { createListPace } from "../../core/scanner/store/list-page.js"
 import type {
 	Discovery,
 	Identity,
@@ -78,6 +83,7 @@ import {
 	IDENTITY_QUERY,
 	identifyBodySchema,
 	jobIdParamsSchema,
+	jobListQuerySchema,
 	looseObjectSchema,
 	observationsQuerySchema,
 	jobHitsQuerySchema,
@@ -127,6 +133,9 @@ export type ScannerRouteService = Pick<
 			| "discoveryCoverage"
 			| "storeMeta"
 			| "discoveryTrialMemory"
+			| "listDiscoveriesPaced"
+			| "listDiscoveriesCompact"
+			| "jobRows"
 			| "discoveryRecorder"
 		>
 	>
@@ -159,6 +168,7 @@ interface DiscoveryQuery {
 	nearHz?: number
 	toleranceHz?: number
 	includeReceiverSpurs?: boolean
+	view?: DiscoveryView
 }
 
 /** The schema a ZodError without its own (the discovery identity query) is named against. */
@@ -733,6 +743,7 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 				body: scanJobSpecSchema,
 				response: errors,
 			},
+			preValidation: rejectUnknownBodyFields(scanJobSpecSchema),
 		},
 		async (request, reply) => {
 			try {
@@ -752,6 +763,7 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 				body: scanJobSpecSchema,
 				response: errors,
 			},
+			preValidation: rejectUnknownBodyFields(scanJobSpecSchema),
 		},
 		async (request, reply) => {
 			try {
@@ -763,10 +775,21 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 		},
 	)
 
-	fastify.get(
+	fastify.get<{ Querystring: { view?: ScanJobView } }>(
 		"/api/scanner/jobs",
-		{ schema: { tags, summary: "List scan jobs" } },
-		async () => scanner.listJobs(),
+		{
+			schema: {
+				tags,
+				summary: "List scan jobs",
+				querystring: jobListQuerySchema,
+			},
+		},
+		async request => {
+			if (request.query.view !== "compact") return scanner.listJobs()
+			return typeof scanner.jobRows === "function"
+				? scanner.jobRows()
+				: scanner.listJobs().map(scanJobCompact)
+		},
 	)
 
 	fastify.get<{ Params: { id: string } }>(
@@ -898,11 +921,29 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 			const invalid = nonFiniteDiscoveryQuery(request.query)
 			if (invalid !== null) return reply.code(400).send(invalid)
 			try {
-				const page = scanner.listDiscoveries(toFilter(request.query))
+				const filter = toFilter(request.query)
+				if (
+					request.query.view === "compact" &&
+					typeof scanner.listDiscoveriesCompact === "function"
+				) {
+					const compact = await scanner.listDiscoveriesCompact(filter)
+					// The response schema describes the full record; these rows are built field by field.
+					return reply.serializer(body => JSON.stringify(body)).send(compact)
+				}
+				const page =
+					typeof scanner.listDiscoveriesPaced === "function"
+						? await scanner.listDiscoveriesPaced(filter)
+						: scanner.listDiscoveries(filter)
 				const index = coverageIndexOf(scanner)
-				return index === null
-					? page
-					: { ...page, items: page.items.map(d => withCoverage(d, index)) }
+				if (index === null) return page
+				// At most 12,288 comparisons a row (discovery-coverage.ts), so it yields as well.
+				const pace = createListPace()
+				const items: typeof page.items = []
+				for (const d of page.items) {
+					items.push(withCoverage(d, index))
+					if (pace.due()) await pace.wait()
+				}
+				return { ...page, items }
 			} catch (err) {
 				return sendError(reply, err)
 			}

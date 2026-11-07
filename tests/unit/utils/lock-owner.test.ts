@@ -26,6 +26,7 @@ import {
 	ownerHasRecentHeartbeat,
 } from "../../../src/utils/lock-owner.js"
 import type {
+	LockHeartbeat,
 	LockOwner,
 	OwnerReader,
 	WriterLock,
@@ -584,9 +585,12 @@ describe("heartbeat leases", () => {
 		expect((await fs.stat(path)).mtimeMs).toBe(0)
 		await vi.advanceTimersByTimeAsync(1)
 		await stop()
-		expect((await fs.stat(path)).mtimeMs).toBe(Date.now())
+		// utimes goes through double seconds, so a written millisecond can read back just under.
+		expect(Math.round((await fs.stat(path)).mtimeMs)).toBe(Date.now())
 		await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
-		expect((await fs.stat(path)).mtimeMs).toBe(Date.now() - HEARTBEAT_MS)
+		expect(Math.round((await fs.stat(path)).mtimeMs)).toBe(
+			Date.now() - HEARTBEAT_MS,
+		)
 	})
 	it("releases by renaming even with contender claim files", async () => {
 		const lock = await lockPath()
@@ -693,7 +697,8 @@ describe("ownership loss and monotonic observation", () => {
 		await first.release()
 		expect(first.lost).toBe(true)
 		expect(lost).toHaveBeenCalledTimes(1)
-		expect(vi.getTimerCount()).toBe(1)
+		// The second handle's tick holds its lease deadline until its file calls return.
+		await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
 		expect(await second.check()).toBe(true)
 		await second.release()
 		expect(vi.getTimerCount()).toBe(0)
@@ -722,9 +727,395 @@ describe("ownership loss and monotonic observation", () => {
 		await fs.rename(path, detached)
 		await fs.writeFile(path, "successor")
 		await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+		await vi.waitFor(() => expect(heartbeat.lost).toBe(true))
 		await heartbeat()
-		expect(heartbeat.lost).toBe(true)
 		expect((await fs.stat(detached)).mtimeMs).toBe(0)
+	})
+	describe("what a failed check proves", () => {
+		const fault = (code: string) =>
+			Object.assign(new Error("fault"), { code }) as NodeJS.ErrnoException
+		/** A heartbeat whose lstat of its own file throws while `failing` holds a code. */
+		async function faulty() {
+			const lock = await lockPath()
+			const path = join(lock, "owner.json")
+			await fs.writeFile(path, "owner")
+			const failing: { code: string | null } = { code: null }
+			const lstat = fs.lstat.bind(fs)
+			vi.spyOn(fs, "lstat").mockImplementation(((target: string) => {
+				if (target === path && failing.code) throw fault(failing.code)
+				return lstat(target)
+			}) as typeof fs.lstat)
+			const lost = vi.fn()
+			const heartbeat = await startLockHeartbeat(path, { onLost: lost })
+			return { path, failing, lost, heartbeat }
+		}
+		/** Ticks do real I/O: each waits for what it must have counted, on real timers. */
+		async function failedTick(heartbeat: LockHeartbeat) {
+			const faults = heartbeat.transientFaults
+			vi.advanceTimersByTime(HEARTBEAT_MS)
+			await vi.waitFor(() => expect(heartbeat.transientFaults).toBe(faults + 1))
+		}
+		async function goodTick(path: string) {
+			await fs.utimes(path, new Date(0), new Date(0))
+			vi.advanceTimersByTime(HEARTBEAT_MS)
+			await vi.waitFor(async () =>
+				expect((await fs.stat(path)).mtimeMs).toBeGreaterThan(0),
+			)
+		}
+		const fakeTicks = () =>
+			vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+		afterEach(() => {
+			vi.restoreAllMocks()
+			vi.useRealTimers()
+		})
+
+		it("retries an I/O error, refusing the write, and recovers without a latch", async () => {
+			fakeTicks()
+			const { path, failing, lost, heartbeat } = await faulty()
+			failing.code = "EIO"
+			expect(await heartbeat.check()).toBe(false)
+			await failedTick(heartbeat)
+			await failedTick(heartbeat)
+			expect(heartbeat.lost).toBe(false)
+			expect(heartbeat.transientFaults).toBe(3)
+			failing.code = null
+			expect(await heartbeat.check()).toBe(true)
+			await goodTick(path)
+			expect(lost).not.toHaveBeenCalled()
+			await heartbeat()
+		})
+
+		it("a good refresh restarts the count: 2 failed ticks, 1 good, 2 failed stay held", async () => {
+			fakeTicks()
+			const { path, failing, heartbeat } = await faulty()
+			failing.code = "EBUSY"
+			await failedTick(heartbeat)
+			await failedTick(heartbeat)
+			failing.code = null
+			await goodTick(path)
+			failing.code = "EBUSY"
+			await failedTick(heartbeat)
+			await failedTick(heartbeat)
+			expect(heartbeat.lost).toBe(false)
+			expect(heartbeat.transientFaults).toBe(4)
+			await heartbeat()
+		})
+
+		it("latches at the third failed tick (3 x H = the lease), not the second", async () => {
+			fakeTicks()
+			const { failing, lost, heartbeat } = await faulty()
+			failing.code = "EIO"
+			await failedTick(heartbeat)
+			await failedTick(heartbeat)
+			expect(heartbeat.lost).toBe(false)
+			await failedTick(heartbeat)
+			expect(heartbeat.lost).toBe(true)
+			expect(lost).toHaveBeenCalledTimes(1)
+			await heartbeat()
+		})
+
+		it("a check that hangs past the lease latches with the file call still pending", async () => {
+			const path = await lockPath()
+			await fs.rmdir(path)
+			await fs.writeFile(path, "owner")
+			vi.useFakeTimers({
+				toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"],
+			})
+			const lost = vi.fn()
+			const heartbeat = await startLockHeartbeat(path, { onLost: lost })
+			let release = () => {}
+			const held = new Promise<void>(resolve => {
+				release = resolve
+			})
+			const lstat = fs.lstat.bind(fs)
+			vi.spyOn(fs, "lstat").mockImplementation(async (...args) => {
+				await held
+				return lstat(...(args as Parameters<typeof lstat>))
+			})
+			await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+			// performance.now is real here, so the deadline is a whole lease from the tick.
+			await vi.advanceTimersByTimeAsync(HEARTBEAT_STALE_MS - 200)
+			expect(heartbeat.lost).toBe(false)
+			await vi.advanceTimersByTimeAsync(200)
+			expect(heartbeat.lost).toBe(true)
+			expect(lost).toHaveBeenCalledTimes(1)
+			release()
+			vi.useRealTimers()
+			await heartbeat()
+		})
+
+		/** A heartbeat on a plain file whose tick is stuck in lstat until `release`. */
+		async function heldTick(age: number) {
+			const path = await lockPath()
+			await fs.rmdir(path)
+			await fs.writeFile(path, "owner")
+			vi.useFakeTimers({
+				toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"],
+			})
+			const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+			const lost = vi.fn()
+			const heartbeat = await startLockHeartbeat(path, { onLost: lost })
+			let release = () => {}
+			const held = new Promise<void>(resolve => {
+				release = resolve
+			})
+			const lstat = fs.lstat.bind(fs)
+			vi.spyOn(fs, "lstat").mockImplementation(async (...args) => {
+				await held
+				return lstat(...(args as Parameters<typeof lstat>))
+			})
+			await fs.utimes(path, new Date(0), new Date(0))
+			now.mockReturnValue(1000 + age)
+			await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+			return { path, lost, heartbeat, release: () => release() }
+		}
+
+		describe.each([HEARTBEAT_STALE_MS, HEARTBEAT_STALE_MS + 1])(
+			"a tick that starts %i ms after the last refresh, the loop having stalled",
+			age => {
+				it("proves an unchanged lock in under H and keeps it", async () => {
+					const { path, lost, heartbeat, release } = await heldTick(age)
+					await vi.advanceTimersByTimeAsync(HEARTBEAT_MS - 1)
+					expect(heartbeat.lost).toBe(false)
+					release()
+					vi.useRealTimers()
+					await vi.waitFor(async () =>
+						expect((await fs.stat(path)).mtimeMs).toBeGreaterThan(0),
+					)
+					expect(heartbeat.lost).toBe(false)
+					expect(lost).not.toHaveBeenCalled()
+					await heartbeat()
+				})
+
+				it("latches when the check still hangs after H", async () => {
+					const { lost, heartbeat, release } = await heldTick(age)
+					await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+					expect(heartbeat.lost).toBe(true)
+					expect(lost).toHaveBeenCalledTimes(1)
+					release()
+					vi.useRealTimers()
+					await heartbeat()
+				})
+			},
+		)
+
+		describe("stopped with a check still running", () => {
+			it.each([
+				["at the lease's end", HEARTBEAT_STALE_MS],
+				["past it", HEARTBEAT_STALE_MS + 1],
+			])("nothing latches %s", async (_when, elapsed) => {
+				const { lost, heartbeat, release } = await heldTick(0)
+				const stopping = heartbeat()
+				await vi.advanceTimersByTimeAsync(elapsed)
+				expect(heartbeat.lost).toBe(false)
+				release()
+				vi.useRealTimers()
+				await stopping
+				expect(heartbeat.lost).toBe(false)
+				expect(lost).not.toHaveBeenCalled()
+			})
+
+			it("nothing latches when the check then finds another owner", async () => {
+				const { path, lost, heartbeat, release } = await heldTick(0)
+				const stopping = heartbeat()
+				await fs.rename(path, `${path}.old`)
+				await fs.writeFile(path, "successor")
+				release()
+				vi.useRealTimers()
+				await stopping
+				expect(heartbeat.lost).toBe(false)
+				expect(lost).not.toHaveBeenCalled()
+			})
+
+			it("nothing latches when the check then finds the file gone", async () => {
+				const { path, lost, heartbeat, release } = await heldTick(0)
+				const stopping = heartbeat()
+				await fs.rm(path)
+				release()
+				vi.useRealTimers()
+				await stopping
+				expect(heartbeat.lost).toBe(false)
+				expect(lost).not.toHaveBeenCalled()
+			})
+		})
+
+		it("repeated write checks during a fault do not use up the ticks", async () => {
+			const { failing, heartbeat } = await faulty()
+			failing.code = "EIO"
+			for (let check = 0; check < 10; check++)
+				expect(await heartbeat.check()).toBe(false)
+			expect(heartbeat.lost).toBe(false)
+			expect(heartbeat.transientFaults).toBe(10)
+			await heartbeat()
+		})
+
+		describe.each([HEARTBEAT_STALE_MS, HEARTBEAT_STALE_MS + 1])(
+			"stalled for %i ms, the lease being 30 s",
+			age => {
+				it("one failing write check does not end it; only H of faults does", async () => {
+					const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+					const { failing, lost, heartbeat } = await faulty()
+					failing.code = "EIO"
+					now.mockReturnValue(1000 + age)
+					expect(await heartbeat.check()).toBe(false)
+					expect(heartbeat.lost).toBe(false)
+					now.mockReturnValue(1000 + age + HEARTBEAT_MS - 1)
+					expect(await heartbeat.check()).toBe(false)
+					expect(heartbeat.lost).toBe(false)
+					now.mockReturnValue(1000 + age + HEARTBEAT_MS)
+					expect(await heartbeat.check()).toBe(false)
+					expect(heartbeat.lost).toBe(true)
+					expect(lost).toHaveBeenCalledOnce()
+					await heartbeat()
+				})
+
+				it("one failing tick does not end it, and the next good one keeps the lock", async () => {
+					fakeTicks()
+					const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+					const { path, failing, lost, heartbeat } = await faulty()
+					failing.code = "EIO"
+					now.mockReturnValue(1000 + age)
+					await failedTick(heartbeat)
+					expect(heartbeat.lost).toBe(false)
+					failing.code = null
+					await goodTick(path)
+					failing.code = "EIO"
+					// The refresh started the lease over: this fault has all of it again.
+					now.mockReturnValue(1000 + age + HEARTBEAT_STALE_MS - 1)
+					expect(await heartbeat.check()).toBe(false)
+					expect(lost).not.toHaveBeenCalled()
+					await heartbeat()
+				})
+
+				it("a tick failing H after the first ends it, on two failed ticks", async () => {
+					fakeTicks()
+					const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+					const { failing, heartbeat } = await faulty()
+					failing.code = "EIO"
+					now.mockReturnValue(1000 + age)
+					await failedTick(heartbeat)
+					now.mockReturnValue(1000 + age + HEARTBEAT_MS - 1)
+					expect(await heartbeat.check()).toBe(false)
+					expect(heartbeat.lost).toBe(false)
+					now.mockReturnValue(1000 + age + HEARTBEAT_MS)
+					await failedTick(heartbeat)
+					expect(heartbeat.lost).toBe(true)
+					await heartbeat()
+				})
+			},
+		)
+
+		it("a fault under a stall gets no fresh grace: 2H between runs is the first that does", async () => {
+			const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+			const { failing, heartbeat } = await faulty()
+			failing.code = "EIO"
+			now.mockReturnValue(1000 + HEARTBEAT_MS)
+			expect(await heartbeat.check()).toBe(false)
+			// Just under 2H: still on the first fault's grace, which ends 3H after the refresh.
+			now.mockReturnValue(1000 + 3 * HEARTBEAT_MS - 1)
+			expect(await heartbeat.check()).toBe(false)
+			expect(heartbeat.lost).toBe(false)
+			now.mockReturnValue(1000 + 3 * HEARTBEAT_MS)
+			expect(await heartbeat.check()).toBe(false)
+			expect(heartbeat.lost).toBe(true)
+			await heartbeat()
+		})
+
+		it("a fault, a stall of 2H, and one more fault: what came before the stall does not count", async () => {
+			const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+			const { failing, heartbeat } = await faulty()
+			failing.code = "EIO"
+			now.mockReturnValue(1000 + HEARTBEAT_MS)
+			expect(await heartbeat.check()).toBe(false)
+			now.mockReturnValue(1000 + 3 * HEARTBEAT_MS)
+			expect(await heartbeat.check()).toBe(false)
+			expect(heartbeat.lost).toBe(false)
+			now.mockReturnValue(1000 + 4 * HEARTBEAT_MS)
+			expect(await heartbeat.check()).toBe(false)
+			expect(heartbeat.lost).toBe(true)
+			await heartbeat()
+		})
+
+		it("a permanent fault still latches at the third failed tick, however long the stalls", async () => {
+			fakeTicks()
+			const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+			const { failing, lost, heartbeat } = await faulty()
+			failing.code = "EIO"
+			for (const stalls of [1, 2]) {
+				now.mockReturnValue(1000 + stalls * 2 * HEARTBEAT_STALE_MS)
+				await failedTick(heartbeat)
+				expect(heartbeat.lost).toBe(false)
+			}
+			now.mockReturnValue(1000 + 3 * 2 * HEARTBEAT_STALE_MS)
+			await failedTick(heartbeat)
+			expect(heartbeat.lost).toBe(true)
+			expect(lost).toHaveBeenCalledOnce()
+			await heartbeat()
+		})
+
+		it("a missing file latches at the first check", async () => {
+			const { failing, lost, heartbeat } = await faulty()
+			failing.code = "ENOENT"
+			expect(await heartbeat.check()).toBe(false)
+			expect(heartbeat.lost).toBe(true)
+			expect(heartbeat.transientFaults).toBe(0)
+			expect(lost).toHaveBeenCalledTimes(1)
+			await heartbeat()
+		})
+
+		it("a replaced file latches on the next tick, whatever faults came before", async () => {
+			fakeTicks()
+			const { path, failing, heartbeat } = await faulty()
+			failing.code = "EIO"
+			await failedTick(heartbeat)
+			failing.code = null
+			await fs.rename(path, `${path}.old`)
+			await fs.writeFile(path, "successor")
+			vi.advanceTimersByTime(HEARTBEAT_MS)
+			await vi.waitFor(() => expect(heartbeat.lost).toBe(true))
+			await heartbeat()
+		})
+
+		it("a failing refresh counts like a failing read", async () => {
+			fakeTicks()
+			const lock = await lockPath()
+			const path = join(lock, "owner.json")
+			await fs.writeFile(path, "owner")
+			const open = fs.open.bind(fs)
+			vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+				const handle = await open(...args)
+				handle.utimes = () => Promise.reject(fault("EROFS"))
+				return handle
+			})
+			const heartbeat = await startLockHeartbeat(path)
+			await failedTick(heartbeat)
+			await failedTick(heartbeat)
+			expect(heartbeat.lost).toBe(false)
+			await failedTick(heartbeat)
+			expect(heartbeat.lost).toBe(true)
+			await heartbeat()
+		})
+
+		it("a band-plan or operator-data writer lock only refuses the write during a fault", async () => {
+			const lock = await lockPath()
+			await fs.rmdir(lock)
+			const lost = vi.fn()
+			const handle = await acquireHandle(lock, { onLost: lost })
+			if (!handle) throw new Error("missing handle")
+			const readFile = fs.readFile.bind(fs)
+			const spy = vi.spyOn(fs, "readFile").mockImplementation(((
+				...args: Parameters<typeof fs.readFile>
+			) => {
+				if (args[0] === join(lock, "owner.json")) throw fault("EIO")
+				return readFile(...args)
+			}) as typeof fs.readFile)
+			expect(await handle.check()).toBe(false)
+			expect(handle.lost).toBe(false)
+			spy.mockRestore()
+			expect(await handle.check()).toBe(true)
+			expect(lost).not.toHaveBeenCalled()
+			await handle.release()
+		})
 	})
 })
 

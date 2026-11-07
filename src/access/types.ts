@@ -18,6 +18,14 @@ export interface AccessPolicyOptions {
 	sessionCookieName: string
 	machineSecretDigest: Uint8Array
 	sessions: SessionStore
+	/**
+	 * True once this process no longer owns the private state behind the digest and
+	 * the sessions: another owner may have rotated them, so nothing in memory can
+	 * still prove a credential is current. Latched by the storage owner.
+	 */
+	credentialAuthorityLost?: () => boolean
+	/** Fires once at that latch, or at once if it already happened. Returns the unsubscribe. */
+	onCredentialAuthorityLost?: (listener: () => void) => () => void
 }
 
 export interface AccessPrincipal {

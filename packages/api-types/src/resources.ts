@@ -110,6 +110,12 @@ export interface SdrHostStatus {
 	/** rtlmux process status and stats */
 	rtlmux: SdrHostRtlmuxStatus | null
 
+	/**
+	 * Validated receiver facts of the last answer: null where the body did not state a boolean.
+	 * `dongle.found` reads false for a body with no statement, so a claim reads this instead.
+	 */
+	receiverFacts?: { deviceFound: boolean | null; rtlTcpRunning: boolean | null }
+
 	/** Dongle detection info */
 	dongle: SdrHostDongleInfo | null
 

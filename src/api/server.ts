@@ -13,6 +13,7 @@
 
 import { resolve } from "node:path"
 import type { StationIdentity } from "@wavekit/api-types"
+import { OPENAPI_UI_PATH } from "@wavekit/api-types"
 import {
 	DISCOVERY_STORE_EPOCH_HEADER,
 	DISCOVERY_STORE_REVISION_HEADER,
@@ -36,6 +37,7 @@ import Fastify, { type FastifyInstance, type FastifyError } from "fastify"
 import fastifyCors from "@fastify/cors"
 import fastifyWebsocket from "@fastify/websocket"
 import fastifySwagger from "@fastify/swagger"
+import type { SwaggerTransformObject } from "@fastify/swagger"
 import fastifySwaggerUi from "@fastify/swagger-ui"
 import {
 	createComponentLogger,
@@ -72,7 +74,8 @@ import { decoderOptionDescriptors } from "../decoders/options/index.js"
 import type { Config } from "../config.js"
 import { accessBootstrapRoutes } from "./routes/access-bootstrap.js"
 import { sourceRoutes } from "./routes/sources.js"
-import { registerRouteIndex } from "./routes/route-index.js"
+import { installRouteIndex, toOpenApi31Forms } from "./routes/route-index.js"
+import { enumRoutes } from "./routes/enums.js"
 import { decoderSummaryRoutes } from "./routes/decoder-summary.js"
 import { agentStatusRoutes } from "./routes/agent-status.js"
 import {
@@ -437,6 +440,8 @@ export class ApiServer {
 		this.wsBroadcaster.attachActivity(this.activityHub)
 		activity?.bindSubscriptions(this.activityHub)
 		this.sourceStatusPublisher = new SourceStatusPublisher({
+			sdrHostStatuses: () =>
+				this.resourceAggregator?.getSdrHostStatuses() ?? [],
 			sourceManager: this.sourceManager,
 			fanoutTelemetry: this.fanoutTelemetry,
 			broadcaster: this.wsBroadcaster,
@@ -1137,7 +1142,7 @@ export class ApiServer {
 	 * Registers all Fastify plugins.
 	 */
 	private async registerPlugins(): Promise<void> {
-		registerRouteIndex(this.app)
+		const mountRouteIndex = installRouteIndex(this.app)
 		// CORS support for browser clients
 		if (!this.access)
 			await this.app.register(fastifyCors, {
@@ -1163,21 +1168,41 @@ export class ApiServer {
 
 		// Swagger/OpenAPI documentation
 		await this.app.register(fastifySwagger, {
+			transformObject: ((document: Parameters<SwaggerTransformObject>[0]) =>
+				toOpenApi31Forms(
+					"openapiObject" in document
+						? document.openapiObject
+						: document.swaggerObject,
+				)) satisfies SwaggerTransformObject,
 			openapi: {
-				openapi: "3.0.0",
+				// The route schemas use JSON Schema 2020-12 forms (numeric exclusiveMinimum,
+				// type "null"), which only 3.1 accepts; transformObject converts the rest.
+				openapi: "3.1.0",
 				info: {
 					title: "WaveKit API",
 					description: "SDR stream processing framework REST API",
 					version: "1.0.0",
 				},
-				servers: [
-					{
-						url: `http://${this.config.host}:${this.config.port}`,
-						description: "Local server",
-					},
-				],
+				// No `servers`: paths are relative to the origin that served this document. The
+				// bind address is not one a client can reach (0.0.0.0, or a port behind a proxy).
+				...(this.access
+					? {
+							components: {
+								securitySchemes: {
+									machineToken: { type: "http", scheme: "bearer" },
+								},
+							},
+							security: [{ machineToken: [] }],
+						}
+					: {}),
 				tags: [
+					{ name: "system", description: "API discovery" },
 					{ name: "health", description: "Health check endpoints" },
+					{
+						name: "access",
+						description: "Browser pairing, sessions and devices",
+					},
+					{ name: "recordings", description: "Recording inventory" },
 					{ name: "sources", description: "SDR source management" },
 					{ name: "decoders", description: "Decoder management" },
 					{ name: "aircraft", description: "Aircraft tracking endpoints" },
@@ -1199,11 +1224,14 @@ export class ApiServer {
 			},
 		})
 
+		// After swagger: its onRoute hook documents only the routes added once it loaded.
+		mountRouteIndex()
+
 		this.log.debug("Swagger plugin registered")
 
 		// Swagger UI for interactive documentation
 		await this.app.register(fastifySwaggerUi, {
-			routePrefix: "/docs",
+			routePrefix: OPENAPI_UI_PATH,
 			uiConfig: {
 				docExpansion: "list",
 				deepLinking: true,
@@ -1406,6 +1434,8 @@ export class ApiServer {
 	 * Routes are implemented in separate files and registered here.
 	 */
 	private async registerRoutes(): Promise<void> {
+		// Static value lists under root admission, like GET /api
+		await this.app.register(enumRoutes)
 		// PATCH mounts with the service and, while STATION_WRITE_REQUIRES_ACCESS, only with
 		// the access controller (protected mode), like the band-plan mutations.
 		if (this.station)
@@ -1486,12 +1516,17 @@ export class ApiServer {
 			audioOutput: this.audioOutput,
 			audioConfig: this.audioConfig,
 			tunerRelay: this.tunerRelay,
+			accessAuthorityLost: this.access
+				? () => this.access?.api.policy.credentialAuthorityLost === true
+				: undefined,
 		})
 
 		// Register source routes (Requirement 9.3, 9.4, 9.5)
 		await this.app.register(sourceRoutes, {
 			sourceManager: this.sourceManager,
 			fanoutManager: this.fanoutTelemetry,
+			sdrHostStatuses: () =>
+				this.resourceAggregator?.getSdrHostStatuses() ?? [],
 		})
 
 		if (this.accessController && this.iqSnapshotFanoutFor)
@@ -1518,6 +1553,7 @@ export class ApiServer {
 		// Register decoder routes (Requirement 9.6, 9.7, 9.8, 9.9)
 		await this.app.register(decoderSummaryRoutes, {
 			decoderManager: this.decoderManager,
+			sourceManager: this.sourceManager,
 		})
 		await this.app.register(decoderRoutes, {
 			efficiencyBudget: this.decoderManager.efficiencyBudget?.(),
@@ -1574,6 +1610,22 @@ export class ApiServer {
 				tunerController: this.tunerController,
 				sourceManager: this.sourceManager,
 				bandGain: this.tunerController.bandGainSettings(),
+				...(this.scanner
+					? {
+							scannerLeaseHolder: (sourceId: string) =>
+								this.scanner?.tunerLeaseJob(sourceId) ?? null,
+						}
+					: {}),
+				receiverStatus: (sourceId: string) =>
+					this.resourceAggregator
+						?.getSdrHostStatuses()
+						.find(host => host.sourceId === sourceId),
+				...(this.accessController
+					? {
+							principalKind: request =>
+								this.accessController?.principalOf(request)?.kind,
+						}
+					: {}),
 			})
 		}
 
@@ -1695,6 +1747,8 @@ export class ApiServer {
 		await this.app.register(agentStatusRoutes, {
 			decoderManager: this.decoderManager,
 			sourceManager: this.sourceManager,
+			sdrHostStatuses: () =>
+				this.resourceAggregator?.getSdrHostStatuses() ?? [],
 			tunerController: this.tunerController,
 			liveDemod: this.liveDemod,
 			scanner: this.scanner,

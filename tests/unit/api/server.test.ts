@@ -15,6 +15,7 @@ import {
 import { createLogger } from "../../../src/utils/logger.js"
 import { WaveKitError } from "../../../src/utils/errors.js"
 import { ActivityQueryBusyError } from "../../../src/core/activity/query/errors.js"
+import type { SourceStatus } from "../../../src/core/source-manager.js"
 import { EventEmitter } from "node:events"
 
 // Create a test logger
@@ -516,7 +517,7 @@ describe("API Server", () => {
 			expect(response.statusCode).toBe(200)
 
 			const spec = JSON.parse(response.body)
-			expect(spec.openapi).toBe("3.0.0")
+			expect(spec.openapi).toBe("3.1.0")
 			expect(spec.info.title).toBe("WaveKit API")
 			expect(spec.info.version).toBe("1.0.0")
 		})
@@ -801,6 +802,12 @@ describe("API Server", () => {
 					{
 						id: "source-1",
 						connected: true,
+						activity: {
+							state: "streaming",
+							lastSampleAt: null,
+							sampleAgeMs: null,
+							timeoutMs: 5000,
+						},
 						bytesReceived: 1024,
 						dataRate: 10.5,
 						reconnectAttempts: 0,
@@ -814,6 +821,12 @@ describe("API Server", () => {
 					{
 						id: "source-2",
 						connected: false,
+						activity: {
+							state: "disconnected",
+							lastSampleAt: null,
+							sampleAgeMs: null,
+							timeoutMs: 5000,
+						},
 						bytesReceived: 0,
 						dataRate: 0,
 						lastError: "Connection refused",
@@ -1530,6 +1543,7 @@ describe("Property-Based Tests", () => {
 							{
 								id: string
 								connected: boolean
+								activity: SourceStatus["activity"]
 								bytesReceived: number
 								dataRate: number
 								reconnectAttempts: number
@@ -1557,6 +1571,12 @@ describe("Property-Based Tests", () => {
 									sourcesStore.set(config.id, {
 										id: config.id,
 										connected: true,
+										activity: {
+											state: "streaming",
+											lastSampleAt: null,
+											sampleAgeMs: null,
+											timeoutMs: 5000,
+										},
 										bytesReceived: 0,
 										dataRate: 0,
 										reconnectAttempts: 0,
@@ -1772,6 +1792,7 @@ describe("Property-Based Tests", () => {
 							{
 								id: string
 								connected: boolean
+								activity: SourceStatus["activity"]
 								bytesReceived: number
 								dataRate: number
 								reconnectAttempts: number
@@ -1798,6 +1819,12 @@ describe("Property-Based Tests", () => {
 									sourcesStore.set(config.id, {
 										id: config.id,
 										connected: true,
+										activity: {
+											state: "streaming",
+											lastSampleAt: null,
+											sampleAgeMs: null,
+											timeoutMs: 5000,
+										},
 										bytesReceived: 0,
 										dataRate: 0,
 										reconnectAttempts: 0,

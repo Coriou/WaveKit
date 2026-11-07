@@ -97,28 +97,49 @@ export function registerAccessRoutes(
 				})
 		},
 	}
-	app.post("/api/access/pairing-codes", options, async (request, reply) =>
-		run(reply, () =>
-			services.pairing.issue(accessRequestFromHttp(request.raw, "api")),
-		),
-	)
-	app.post("/api/access/pair", options, async (request, reply) =>
-		run(reply, () =>
-			services.pairing.redeem(
-				accessRequestFromHttp(request.raw, "api"),
-				request.body,
+	const documented = (summary: string) => ({
+		...options,
+		schema: { summary, tags: ["access"] },
+	})
+	app.post(
+		"/api/access/pairing-codes",
+		documented("Issue a one-time browser pairing code"),
+		async (request, reply) =>
+			run(reply, () =>
+				services.pairing.issue(accessRequestFromHttp(request.raw, "api")),
 			),
-		),
 	)
-	app.get("/api/access/session", options, async (request, reply) =>
-		run(reply, () =>
-			services.flows.status(accessRequestFromHttp(request.raw, "api")),
-		),
+	app.post(
+		"/api/access/pair",
+		{
+			...options,
+			schema: {
+				summary: "Exchange a one-time code for a browser session",
+				tags: ["access"],
+				// Public: the code is the credential, so the document's bearer does not apply.
+				security: [],
+			},
+		},
+		async (request, reply) =>
+			run(reply, () =>
+				services.pairing.redeem(
+					accessRequestFromHttp(request.raw, "api"),
+					request.body,
+				),
+			),
+	)
+	app.get(
+		"/api/access/session",
+		documented("Read this browser's session"),
+		async (request, reply) =>
+			run(reply, () =>
+				services.flows.status(accessRequestFromHttp(request.raw, "api")),
+			),
 	)
 	app.route({
 		method: ["GET", "HEAD"],
 		url: "/api/access/devices",
-		...options,
+		...documented("List remembered browsers"),
 		exposeHeadRoute: false,
 		errorHandler(error, request, reply) {
 			reply.serializer(JSON.stringify)
@@ -151,41 +172,56 @@ export function registerAccessRoutes(
 			)
 		},
 	})
-	app.post("/api/access/session/refresh", options, async (request, reply) =>
-		run(reply, () =>
-			services.flows.refresh(accessRequestFromHttp(request.raw, "api")),
-		),
-	)
-	app.post("/api/access/session/logout", options, async (request, reply) =>
-		run(reply, () =>
-			services.flows.logout(accessRequestFromHttp(request.raw, "api")),
-		),
-	)
-	app.post("/api/access/devices/label", options, async (request, reply) =>
-		run(reply, () =>
-			services.flows.label(
-				accessRequestFromHttp(request.raw, "api"),
-				request.body,
+	app.post(
+		"/api/access/session/refresh",
+		documented("Renew this browser's session"),
+		async (request, reply) =>
+			run(reply, () =>
+				services.flows.refresh(accessRequestFromHttp(request.raw, "api")),
 			),
-		),
 	)
-	app.post("/api/access/devices/revoke", options, async (request, reply) =>
-		run(reply, () =>
-			services.flows.revoke(
-				accessRequestFromHttp(request.raw, "api"),
-				request.body,
+	app.post(
+		"/api/access/session/logout",
+		documented("End this browser's session"),
+		async (request, reply) =>
+			run(reply, () =>
+				services.flows.logout(accessRequestFromHttp(request.raw, "api")),
 			),
-		),
 	)
-	app.post("/api/access/devices/revoke-all", options, async (request, reply) =>
-		run(reply, () =>
-			services.flows.revokeAll(accessRequestFromHttp(request.raw, "api")),
-		),
+	app.post(
+		"/api/access/devices/label",
+		documented("Name a remembered browser"),
+		async (request, reply) =>
+			run(reply, () =>
+				services.flows.label(
+					accessRequestFromHttp(request.raw, "api"),
+					request.body,
+				),
+			),
+	)
+	app.post(
+		"/api/access/devices/revoke",
+		documented("Revoke a remembered browser"),
+		async (request, reply) =>
+			run(reply, () =>
+				services.flows.revoke(
+					accessRequestFromHttp(request.raw, "api"),
+					request.body,
+				),
+			),
+	)
+	app.post(
+		"/api/access/devices/revoke-all",
+		documented("Sign out every paired browser"),
+		async (request, reply) =>
+			run(reply, () =>
+				services.flows.revokeAll(accessRequestFromHttp(request.raw, "api")),
+			),
 	)
 	app.route({
 		method: ["GET", "HEAD"],
 		url: "/api/access/machine/devices",
-		...options,
+		...documented("List remembered browsers, with the machine credential"),
 		exposeHeadRoute: false,
 		errorHandler(error, request, reply) {
 			reply.serializer(JSON.stringify)
@@ -224,21 +260,30 @@ export function registerAccessRoutes(
 		url:
 			| "/api/access/machine/devices/revoke"
 			| "/api/access/machine/devices/revoke-all",
+		summary: string,
 		invoke: (request: FastifyRequest) => Promise<AccessFlowResult<unknown>>,
 	): void => {
-		app.post(url, options, async (request, reply) => {
+		app.post(url, documented(summary), async (request, reply) => {
 			reply.serializer(JSON.stringify)
 			return run(reply, () => invoke(request))
 		})
 	}
-	machinePost("/api/access/machine/devices/revoke", request =>
-		services.flows.machineRevoke(
-			accessRequestFromHttp(request.raw, "api"),
-			request.body,
-		),
+	machinePost(
+		"/api/access/machine/devices/revoke",
+		"Revoke a remembered browser, with the machine credential",
+		request =>
+			services.flows.machineRevoke(
+				accessRequestFromHttp(request.raw, "api"),
+				request.body,
+			),
 	)
-	machinePost("/api/access/machine/devices/revoke-all", request =>
-		services.flows.machineRevokeAll(accessRequestFromHttp(request.raw, "api")),
+	machinePost(
+		"/api/access/machine/devices/revoke-all",
+		"Sign out every paired browser, with the machine credential",
+		request =>
+			services.flows.machineRevokeAll(
+				accessRequestFromHttp(request.raw, "api"),
+			),
 	)
 	return controller
 }

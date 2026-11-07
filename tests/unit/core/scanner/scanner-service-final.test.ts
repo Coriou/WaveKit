@@ -7,7 +7,7 @@ import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import { JobRunner } from "../../../../src/core/scanner/job-runner.js"
 import { SpectrumEngine } from "../../../../src/core/spectrum/spectrum-engine.js"
-import type { ScanJob } from "@wavekit/api-types"
+import { TUNE_WAITERS_MAX, type ScanJob } from "@wavekit/api-types"
 import { ArbiterFakeTuner } from "../../../mocks/scanner/arbiter-fakes.js"
 import type { ScannerSettings } from "../../../../src/core/scanner/types.js"
 import {
@@ -587,4 +587,87 @@ describe("fatal engine job cleanup (review F5)", () => {
 			}
 		},
 	)
+})
+
+describe("tunerLeaseJob", () => {
+	it("names the job holding the tuner and the resume rule a tune would meet", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		try {
+			h.sources.emit("payload-started", "rtl")
+			expect(h.service.tunerLeaseJob("rtl")).toBeNull()
+			const job = await h.service.createJob({
+				...sweep(50),
+				name: "Night sweep",
+				resume: { autoAfterIdleMs: 60_000 },
+			})
+			await untilRunning(h, job.id)
+			expect(h.service.tunerLeaseJob("rtl")).toEqual({
+				jobId: job.id,
+				name: "Night sweep",
+				autoAfterIdleMs: 60_000,
+				starting: false,
+				reason: null,
+				waiters: [],
+			})
+		} finally {
+			await h.service.stop()
+		}
+	})
+
+	it("says why the holder is paused", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		try {
+			h.sources.emit("payload-started", "rtl")
+			const job = await h.service.createJob(sweep(50))
+			await untilRunning(h, job.id)
+			await h.service.pauseJob(job.id)
+			await settled(h.service)
+			expect(h.service.tunerLeaseJob("rtl")?.reason).toBe("operator")
+		} finally {
+			await h.service.stop()
+		}
+	})
+
+	// TUNE_WAITERS_MAX jobs fit, and one more drops the latest of them, never the soonest.
+	it("names at most TUNE_WAITERS_MAX waiters able to take the tuner, the soonest first", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		try {
+			h.sources.emit("payload-started", "rtl")
+			const next = async (priority: number, autoAfterIdleMs: number | null) => {
+				const job = await h.service.createJob({
+					...sweep(priority),
+					resume: { autoAfterIdleMs },
+				})
+				await untilRunning(h, job.id)
+				return job.id
+			}
+			const ids = () =>
+				h.service.tunerLeaseJob("rtl")?.waiters.map(waiter => waiter.jobId)
+			// Each new job takes the lease from the one before it. The soonest come last, so the
+			// list is not simply in creation order.
+			const expected: string[] = []
+			let holder = await next(10, 90_000)
+			for (let i = 1; i < TUNE_WAITERS_MAX; i++) {
+				expected.unshift(holder)
+				holder = await next(10 + i, 90_000 - i * 1_000)
+			}
+			expected.unshift(holder)
+			// The former holder is the 8th waiter: exactly the limit, all of them named.
+			const unable = await next(40, null)
+			expect(ids()).toEqual(expected)
+			expect(expected).toHaveLength(TUNE_WAITERS_MAX)
+			// It waits as well once it loses the lease, but nothing brings it back by itself.
+			const soonest = await next(50, 1_000)
+			expect(ids()).toEqual(expected)
+			expect(ids()).not.toContain(unable)
+			// A 9th able waiter: past the limit the latest goes, never the soonest.
+			await next(60, 500)
+			expect(ids()).toEqual([soonest, ...expected.slice(0, -1)])
+		} finally {
+			await h.service.stop()
+		}
+	})
 })

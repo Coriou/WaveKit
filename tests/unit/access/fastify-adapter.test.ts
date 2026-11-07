@@ -39,6 +39,8 @@ async function setup(capacity = 32, publicBootstrap = false) {
 		persist,
 		monotonicNow: () => elapsed,
 	})
+	let authorityLost = false
+	const lossListeners = new Set<() => void>()
 	const policy = new AccessPolicy({
 		listenerScheme: "http",
 		allowedAuthorities: ["receiver.lan:9000"],
@@ -46,6 +48,11 @@ async function setup(capacity = 32, publicBootstrap = false) {
 		sessionCookieName: "wavekit_session",
 		machineSecretDigest: digest,
 		sessions,
+		credentialAuthorityLost: () => authorityLost,
+		onCredentialAuthorityLost: listener => {
+			lossListeners.add(listener)
+			return () => lossListeners.delete(listener)
+		},
 	})
 	const app = Fastify({ logger: false })
 	apps.push(app)
@@ -84,6 +91,11 @@ async function setup(capacity = 32, publicBootstrap = false) {
 		machine,
 		advance: (ms: number) => {
 			elapsed += ms
+		},
+		lossListeners,
+		loseAuthority: () => {
+			authorityLost = true
+			for (const listener of [...lossListeners]) listener()
 		},
 	}
 }
@@ -754,6 +766,106 @@ describe("unmounted root Fastify access hooks", () => {
 		expect(destroy).toHaveBeenCalledTimes(1)
 		env.controller.dispose()
 		expect(destroy).toHaveBeenCalledTimes(1)
+	})
+
+	describe("credential authority lost", () => {
+		it("closes machine and session WebSockets, which have no expiry to end them", async () => {
+			const env = await setup()
+			await addWs(env)
+			const url = await listen(env.app)
+			const machine = await connect(url, env.machine)
+			const session = await connect(url, env.headers)
+			const closes = [once(machine, "close"), once(session, "close")]
+			env.loseAuthority()
+			const [machineClose, sessionClose] = await Promise.all(closes)
+			expect(machineClose?.[0]).toBe(1008)
+			expect(sessionClose?.[0]).toBe(1008)
+		})
+
+		it("cuts a machine download and destroys its producer", async () => {
+			const env = await setup()
+			const destroy = vi.fn()
+			let opened: () => void = () => {}
+			const started = new Promise<void>(resolve => {
+				opened = resolve
+			})
+			env.app.get("/download", (request, reply) => {
+				const result = env.controller.leaseDownload(request, reply.raw, destroy)
+				if (result.kind !== "attached") return reply.code(429).send()
+				reply.hijack()
+				reply.raw.writeHead(200)
+				reply.raw.write("audio")
+				opened()
+				return undefined
+			})
+			const url = await listen(env.app)
+			const response = await new Promise<IncomingMessage>((resolve, reject) => {
+				const request = get(
+					url + "/download",
+					{ headers: env.machine },
+					resolve,
+				)
+				request.on("error", reject)
+			})
+			response.on("error", () => {})
+			await started
+			const closed = once(response, "close").catch(() => [])
+			env.loseAuthority()
+			await closed
+			expect(destroy).toHaveBeenCalledTimes(1)
+		})
+
+		it("refuses a stream a request admitted before the loss tries to open after it", async () => {
+			const env = await setup()
+			const fixture = reservedSocket(env)
+			env.loseAuthority()
+			expect(
+				env.controller.adoptWebSocket(fixture.request, fixture.socket),
+			).toBe(false)
+			expect(fixture.socket.terminate).toHaveBeenCalled()
+
+			const late = await setup()
+			const results: string[] = []
+			late.app.get("/late", async (request, reply) => {
+				late.loseAuthority()
+				const result = late.controller.leaseDownload(
+					request,
+					reply.raw,
+					() => {},
+				)
+				results.push(result.kind === "attached" ? "attached" : result.reason)
+				return reply.code(503).send()
+			})
+			await late.app.inject({ url: "/late", headers: late.machine })
+			expect(results).toEqual(["unavailable"])
+		})
+
+		it("still answers the public probes and denies everything else", async () => {
+			const env = await setup()
+			env.app.get("/health", async () => ({ ok: true }))
+			env.app.get("/api/x", async () => ({ ok: true }))
+			await env.app.ready()
+			env.loseAuthority()
+			expect(env.controller.admissionStopped).toBe(false)
+			const { host } = env.machine
+			expect(
+				(await env.app.inject({ url: "/health", headers: { host } }))
+					.statusCode,
+			).toBe(200)
+			const denied = await env.app.inject({
+				url: "/api/x",
+				headers: env.machine,
+			})
+			expect(denied.statusCode).toBe(503)
+			expect(denied.json()).toEqual({ code: "ACCESS_UNAVAILABLE" })
+		})
+
+		it("unsubscribes when disposed", async () => {
+			const env = await setup()
+			expect(env.lossListeners.size).toBe(1)
+			env.controller.dispose()
+			expect(env.lossListeners.size).toBe(0)
+		})
 	})
 
 	it("releases completed downloads and disposes accepted sockets without hanging server shutdown", async () => {

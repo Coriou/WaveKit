@@ -1114,6 +1114,11 @@ async function main(): Promise<void> {
 	let admissionFailed = false
 	let closing: Promise<void> | undefined
 	let closeLegacy: (() => Promise<void>) | undefined
+	// The close after a lost private lock: the tuner and every store without a lock of its own may
+	// be another owner's, so the tuner controller and the scanner read this and write neither. It
+	// holds from the latch on, also for a close a signal already began.
+	let ownershipLost = false
+	const lostOwnership = () => ownershipLost
 	const closeProtected = (): Promise<void> => {
 		stopping = true
 		for (const gate of admissionGates) {
@@ -1143,20 +1148,26 @@ async function main(): Promise<void> {
 		})()
 		return closing
 	}
+	// A signal and a latch can arrive together: the first decides how the process ends.
+	let exitProtected = false
+	const closeAndExit = (exitCode: 0 | 1) => {
+		if (exitProtected) return
+		exitProtected = true
+		// Not process.exit: exiting waits for the thread pool, so a hung file call would hold it.
+		const watchdog = setTimeout(
+			() => process.kill(process.pid, "SIGKILL"),
+			10_000,
+		)
+		void closeProtected().then(
+			() => {
+				clearTimeout(watchdog)
+				process.exit(exitCode)
+			},
+			() => process.exit(1),
+		)
+	}
 	if (protectedMode) {
-		let signaled = false
-		const signal = () => {
-			if (signaled) return
-			signaled = true
-			const watchdog = setTimeout(() => process.exit(1), 10_000)
-			void closeProtected().then(
-				() => {
-					clearTimeout(watchdog)
-					process.exit(0)
-				},
-				() => process.exit(1),
-			)
-		}
+		const signal = () => closeAndExit(0)
 		process.on("SIGTERM", signal)
 		process.on("SIGINT", signal)
 	}
@@ -1201,6 +1212,15 @@ async function main(): Promise<void> {
 				directory: process.env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] ?? "",
 				ownership: "single-host-pid-namespace",
 				logger,
+			})
+			// Another owner may have rotated the state, and only a new start can load it. A core kept
+			// up without it serves nobody, so it goes: s6 starts it again, /health reads 503 till then.
+			access.api.policy.onCredentialAuthorityLost(() => {
+				ownershipLost = true
+				log.error(
+					"Private access ownership lost; exiting so that a restart can load the current state",
+				)
+				closeAndExit(1)
 			})
 			checkpoint()
 		}
@@ -1324,6 +1344,7 @@ async function main(): Promise<void> {
 		own(80, () => tunerRelay.stop())
 		const tunerController = new TunerController(logger, sourceManager, {
 			reconnectPolicy: config.tuner.reconnectPolicy,
+			lostOwnership,
 		})
 		// Per-band gain: tuner.bandGain, replaced by <stateDir>/tuner-band-gain.json once PUT.
 		const bandGain = new BandGainSettingsService({
@@ -1999,6 +2020,7 @@ async function main(): Promise<void> {
 				analogEvidence,
 				recordingProtection: keeps,
 				construction: scannerConstruction,
+				lostOwnership,
 				channels,
 				channelUsableFraction: config.channelizer.usableFraction,
 				channelTier: Object.freeze({ ...channelTier }),

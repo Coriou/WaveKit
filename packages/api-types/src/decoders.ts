@@ -566,6 +566,14 @@ export const DECODER_RECEPTION_HINTS = [
 export type DecoderReceptionHint = (typeof DECODER_RECEPTION_HINTS)[number]
 
 /**
+ * Whether samples reach a decoder, from its source's activity: `flowing` a source of it is
+ * streaming, `none` every source of it is disconnected, stale or ended, `unknown` the core cannot
+ * say (no source, or one just connecting).
+ */
+export const DECODER_INPUT_STATES = ["flowing", "none", "unknown"] as const
+export type DecoderInputState = (typeof DECODER_INPUT_STATES)[number]
+
+/**
  * Largest `hz` GET /api/decoders/summary accepts: 100 GHz, above any receiver
  * (the same bound as the discoveries `nearHz`).
  */
@@ -606,6 +614,8 @@ export interface DecoderSummary {
 	counters?: DecoderCounters
 	/** Only on a `listening` verdict of a decoder with counters: heard nothing, or heard but decoded none. */
 	reception?: DecoderReceptionHint
+	/** Whether samples reach it; absent from older cores. */
+	input?: DecoderInputState
 }
 
 /**

@@ -68,6 +68,29 @@ export function parseReceiverEndpoints(
 	return result.success ? result.data : null
 }
 
+const DongleFactSchema = z.object({
+	present: z.boolean().optional(),
+	found: z.boolean().optional(),
+})
+const RtlTcpFactSchema = z.object({ running: z.boolean() })
+
+/**
+ * The status body's device and rtl_tcp facts, each null unless stated as a boolean: a claim about
+ * the receiver reads these, never a default. `present` wins over the legacy `found`.
+ */
+export function parseReceiverFacts(
+	body: Record<string, unknown>,
+): NonNullable<SdrHostStatus["receiverFacts"]> {
+	const dongle = DongleFactSchema.safeParse(body["dongle"])
+	const rtlTcp = RtlTcpFactSchema.safeParse(body["rtlTcp"])
+	return {
+		deviceFound: dongle.success
+			? (dongle.data.present ?? dongle.data.found ?? null)
+			: null,
+		rtlTcpRunning: rtlTcp.success ? rtlTcp.data.running : null,
+	}
+}
+
 const ReadingStateSchema = z.enum(["ok", "stale", "unavailable"])
 const HostLinkSchema = z.object({
 	network: z.object({
@@ -566,6 +589,7 @@ export class SdrHostPoller extends EventEmitter {
 							clientDetails,
 						}
 					: null,
+				receiverFacts: parseReceiverFacts(body as Record<string, unknown>),
 				dongle: data.dongle
 					? {
 							found: data.dongle.present ?? data.dongle.found ?? false,
