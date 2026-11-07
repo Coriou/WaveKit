@@ -40,14 +40,32 @@ export interface Emitter {
 	hz: number
 	fromMs: number
 	toMs: number
-	/** Voice tones and a CTCSS tone over speech syllables; or an unmodulated carrier. */
-	kind: "voice" | "carrier"
+	/**
+	 * Voice tones and a CTCSS tone over speech syllables; an unmodulated carrier; or random 4FSK
+	 * data (fmData), a flat-topped spectrum.
+	 */
+	kind: "voice" | "carrier" | "data"
 	amp?: number
 	/**
 	 * Spans of a voice's time with no speech: the carrier and its sub-tone stay on air (a pause
 	 * between phrases, or a repeater's hang). Sorted, absolute ms of the world.
 	 */
 	pauses?: readonly Span[]
+	/** How the voice speaks (Speech); absent: the default speaker. */
+	speech?: Speech
+}
+
+/**
+ * A speaker's rhythm: syllables at `syllableHz` (4), and every `phraseMs` (1700) a dip of `dipMs`
+ * (300) to a low level, where speech runs between two words without stopping. Pauses with no speech
+ * at all are the emitter's `pauses`.
+ */
+export interface Speech {
+	syllableHz?: number
+	phraseMs?: number
+	dipMs?: number
+	/** Scales every voice tone's deviation (1): 6 spreads it past a 25 kHz channel, as broadcast FM. */
+	deviationScale?: number
 }
 
 /** From `fromMs` to `toMs` of the world. */
@@ -65,7 +83,12 @@ function fmVoice(
 	offsetHz: number,
 	amp: number,
 	pauses: readonly Span[] = [],
+	speech: Speech = {},
 ): (n: number, startSample: number) => Uint8Array {
+	const syllableHz = speech.syllableHz ?? 4
+	const phraseS = (speech.phraseMs ?? 1_700) / 1000
+	const dipS = (speech.dipMs ?? 300) / 1000
+	const scale = speech.deviationScale ?? 1
 	const TONES = [
 		{ hz: 410, dev: 1900 },
 		{ hz: 730, dev: 1500 },
@@ -84,12 +107,41 @@ function fmVoice(
 			const ms = t * 1000
 			const envelope = silent.some(p => ms >= p.fromMs && ms < p.toMs)
 				? 0
-				: t % 1.7 > 1.4
+				: t % phraseS > phraseS - dipS
 					? 0.15
-					: 0.55 - 0.45 * Math.cos(2 * Math.PI * 4 * t)
+					: 0.55 - 0.45 * Math.cos(2 * Math.PI * syllableHz * t)
 			let dev = 350 * Math.sin(2 * Math.PI * 67 * t)
 			for (const tone of TONES)
-				dev += envelope * tone.dev * Math.sin(2 * Math.PI * tone.hz * t)
+				dev += envelope * scale * tone.dev * Math.sin(2 * Math.PI * tone.hz * t)
+			phase = (phase + (2 * Math.PI * (offsetHz + dev)) / FS) % (2 * Math.PI)
+			out[2 * i] = Math.round(127.5 + 127.5 * amp * Math.cos(phase))
+			out[2 * i + 1] = Math.round(127.5 + 127.5 * amp * Math.sin(phase))
+		}
+		return out
+	}
+}
+
+/**
+ * Random 4FSK at `offsetHz`, 4800 symbols/s at ±2 and ±6 kHz deviation: a flat top about 20 kHz wide
+ * at -20 dB (a wideband data signal within one 25 kHz channel). Symbols follow the absolute sample,
+ * so every hop hears the same data.
+ */
+function fmData(
+	offsetHz: number,
+	amp: number,
+): (n: number, startSample: number) => Uint8Array {
+	const LEVELS = [-6_000, -2_000, 2_000, 6_000]
+	const SYMBOL = FS / 4_800
+	let phase = 0
+	return (n, startSample) => {
+		const out = new Uint8Array(2 * n)
+		for (let i = 0; i < n; i++) {
+			const symbol = Math.floor((startSample + i) / SYMBOL)
+			// A hashed seed per symbol (Knuth's multiplier) and one draw discarded: nearby seeds of
+			// xorshift start alike.
+			const r = rng(Math.imul(symbol + 1, 2_654_435_761) >>> 0)
+			r()
+			const dev = LEVELS[Math.floor(r() * 4)]!
 			phase = (phase + (2 * Math.PI * (offsetHz + dev)) / FS) % (2 * Math.PI)
 			out[2 * i] = Math.round(127.5 + 127.5 * amp * Math.cos(phase))
 			out[2 * i + 1] = Math.round(127.5 + 127.5 * amp * Math.sin(phase))
@@ -108,7 +160,8 @@ export function synthWorld(emitters: readonly Emitter[]): World {
 		if (s === undefined) {
 			const offsetHz = e.hz - centreHz
 			const amp = e.amp ?? 0.25
-			if (e.kind === "voice") s = fmVoice(offsetHz, amp, e.pauses)
+			if (e.kind === "voice") s = fmVoice(offsetHz, amp, e.pauses, e.speech)
+			else if (e.kind === "data") s = fmData(offsetHz, amp)
 			else {
 				const carrier = new NfmSource({
 					fs: FS,

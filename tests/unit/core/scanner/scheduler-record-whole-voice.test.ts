@@ -205,17 +205,19 @@ describe("record whole voice: the busy-band scene (900 s, 152 IDs over 8 runs pe
 	// 3 877 550 ms, 21 IDs heard ≥ 25 s; 7 hops 23 missed, 3 125 550 ms, 7 heard ≥ 25 s.
 	// The accepted cost of "record whole voice": IDs on another hop missed while an over is held
 	// to its end (3 hops 12 of 152, 7 hops 1). Each hop's voice hold is its own: an ID caught
-	// during the sweep forced after an over is kept whole too (heard ≥ 25 s: 27 and 25, none with
+	// during the sweep forced after an over is kept whole too (heard ≥ 25 s: 27 and 23, none with
 	// the "true" recorder). The QSO is heard 1 % less than with the "true" recorder on 3 hops and
-	// 7 % more on 7 hops.
+	// 9 % more on 7 hops. A revisit of the hop whose long hold set the long-hold lock holds no voice
+	// (keepForRecording): 3 hops 3 372 200 → 3 369 700 ms, 7 hops 25 → 23 IDs heard ≥ 25 s and
+	// 2 617 700 → 2 663 500 ms.
 	const table: [number, Model, number, number, number][] = [
 		// hops, model, IDs missed, IDs heard ≥ 25 s, QSO heard (Σ ms over the eight runs)
 		[3, "none", 0, 0, 3_373_050],
 		[3, "true", 0, 0, 3_399_600],
-		[3, "voice", 12, 27, 3_372_200],
+		[3, "voice", 12, 27, 3_369_700],
 		[7, "none", 0, 0, 2_373_750],
 		[7, "true", 0, 0, 2_453_750],
-		[7, "voice", 1, 25, 2_617_700],
+		[7, "voice", 1, 23, 2_663_500],
 	]
 	for (const [hops, model, missed, whole, qsoMs] of table)
 		it(`${hops} hops, recorder ${model}: ${missed} of 152 other-hop IDs missed, ${whole} heard ≥ 25 s, QSO heard ${qsoMs} ms`, () => {
@@ -325,7 +327,8 @@ describe("record whole voice: the busy-band QSO through a repeater (repeater han
 			[3, 3_000, "overs", 32, 15, 61_150],
 			[7, 1_500, "overs", 24, 25, 61_150],
 			[7, 3_000, "overs", 38, 26, 61_150],
-			[3, 1_500, "carrier", 9, 81, 61_150],
+			// 9 before a revisit of the lock's hop stopped holding voice (keepForRecording).
+			[3, 1_500, "carrier", 10, 81, 61_150],
 			[3, 3_000, "carrier", 36, 33, 61_150],
 			[7, 1_500, "carrier", 8, 81, 61_150],
 			[7, 3_000, "carrier", 41, 22, 61_150],

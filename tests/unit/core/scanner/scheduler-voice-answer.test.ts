@@ -13,6 +13,7 @@ import {
 	type RecordingActivity,
 	type SchedulerAction,
 	SweepScheduler,
+	VOICE_QUIET_PAST_L_MS,
 } from "../../../../src/core/scanner/scheduler.js"
 import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
 import {
@@ -45,6 +46,7 @@ const hopHz = (n: number): number => BASE_HZ + n * STEP_HZ + 100_437
 function drive(
 	answer: (hop: number, ms: number) => RecordingActivity,
 	land: (hop: number, s: SweepScheduler, visit: number) => void,
+	share = 0,
 ) {
 	let clock = 0
 	let hop = 0
@@ -59,7 +61,7 @@ function drive(
 		makeNormalisedSpec({
 			dwellMs: DWELL_MS,
 			settleMs: SETTLE_MS,
-			revisit: { share: 0, maxIntervalMs: null },
+			revisit: { share, maxIntervalMs: null },
 		}),
 		{
 			blockSamples: BLOCK_MS,
@@ -68,6 +70,7 @@ function drive(
 			probeStartMs: 0,
 			minSurfaceBlocks: 2,
 			recordingActive: () => answer(hop, clock),
+			activitySeed: h => (h.centreHz === BASE_HZ + STEP_HZ ? 1 : 0),
 		},
 	)
 	const apply = (actions: SchedulerAction[]): void => {
@@ -147,13 +150,14 @@ describe("a voice hold past L", () => {
 		)
 	}
 
-	it("keeps a quiet of 1000 ms, the limit, to the voice's end", () => {
-		const d = held(() => 1_000, 30_000)
+	it("keeps a quiet of 1300 ms, the limit, to the voice's end", () => {
+		expect(VOICE_QUIET_PAST_L_MS).toBe(1_300)
+		const d = held(() => VOICE_QUIET_PAST_L_MS, 30_000)
 		expect(d.stayed(0, 1)).toBeGreaterThanOrEqual(COARSE_MS + 30_000)
 	})
 
-	it("is left at the first re-check past L that reads 1001 ms", () => {
-		const d = held(into => (into >= L3 + 2_000 ? 1_001 : 0))
+	it("is left at the first re-check past L that reads 1301 ms", () => {
+		const d = held(into => (into >= L3 + 2_000 ? VOICE_QUIET_PAST_L_MS + 1 : 0))
 		const stay = d.stayed(0, 1)
 		expect(stay).toBeGreaterThanOrEqual(COARSE_MS + L3 + 2_000)
 		expect(stay).toBeLessThanOrEqual(COARSE_MS + L3 + 2_000 + RECHECK_MS)
@@ -165,14 +169,14 @@ describe("a voice hold past L", () => {
 	})
 
 	it("reaching L in a quiet over the limit ends it at the re-check that sees L", () => {
-		const d = held(() => 1_500)
+		const d = held(() => 1_600)
 		const stay = d.stayed(0, 1)
 		expect(stay).toBeGreaterThanOrEqual(COARSE_MS + L3)
 		expect(stay).toBeLessThanOrEqual(COARSE_MS + L3 + RECHECK_MS)
 	})
 
 	it("is followed by the forced sweep: both other hops visited before the hop is held again", () => {
-		const d = held(() => 1_500)
+		const d = held(() => 1_600)
 		d.stayed(0, 2)
 		expect(d.visits.slice(0, 3).map(v => v.hop)).toEqual([0, 1, 2])
 		for (const v of d.visits.slice(1, 3))
@@ -288,6 +292,113 @@ describe("a voiced landing on a traffic frequency with a follow budget of 0", ()
 		const v = d.visits.filter(x => x.hop === 0)[2]!
 		d.runUntil(() => v.leftAt !== null)
 		expect(v.leftAt! - v.tunedAt).toBeLessThanOrEqual(COARSE_MS + 2 * BLOCK_MS)
+	})
+})
+
+describe("a watch's long-hold lock and a voice on its hop", () => {
+	/**
+	 * Hop 1 watches a track 8 s (longer than a coarse sweep: the long-hold lock, set by hop 1), then
+	 * answers voice from then on. With activity revisits on, hop 1 is the active hop a revisit would
+	 * pick right after hop 2, and hold for that voice while hop 0 still waits for its coarse visit.
+	 */
+	const afterWatch = () => {
+		let watched = false
+		const d = drive(
+			(hop, ms) =>
+				hop === 1 && watched && ms < 120_000 ? voiceAnswer() : false,
+			(hop, s, visit) => {
+				if (hop !== 1) return
+				if (visit === 1) {
+					s.onTrack(sighting("w", hopHz(1)), false, 0, { followOnAir: true })
+					// Something else on air in the window: the hop's activity, for a revisit to pick.
+					s.onTrack(sighting("a", hopHz(1) + 50_000), false, 0)
+				} else watched = true
+			},
+			// A revisit after every coarse visit.
+			1,
+		)
+		d.runUntil(() => d.visits.filter(v => v.hop === 1).length >= 2)
+		d.runUntil(() => d.visits.at(-1)!.leftAt !== null || d.visits.length > 8)
+		return d
+	}
+
+	it("the hop that set it holds no voice on a revisit before every other hop had its coarse visit", () => {
+		const d = afterWatch()
+		d.runUntil(
+			() =>
+				d.visits.filter(v => v.hop === 1 && v.leftAt !== null).length >= 3 ||
+				d.now() > 200_000,
+		)
+		const first = d.visits.findIndex(v => v.hop === 1)
+		expect(d.visits[first]!.leftAt! - d.visits[first]!.tunedAt).toBeGreaterThan(
+			COARSE_MS + 7_000,
+		)
+		// The first later visit of hop 1 that holds (its voice): hops 2 and 0 both came before it.
+		const held = d.visits.findIndex(
+			(v, i) =>
+				i > first &&
+				v.hop === 1 &&
+				v.leftAt !== null &&
+				v.leftAt - v.tunedAt > COARSE_MS + 2_000,
+		)
+		expect(held).toBeGreaterThan(first)
+		const between = new Set(d.visits.slice(first + 1, held).map(v => v.hop))
+		expect(between).toEqual(new Set([0, 1, 2]))
+	})
+})
+
+describe("a voice beside a line with carrier evidence", () => {
+	/**
+	 * Visit 1 of hop 0 watches a 4 kHz line 8 s with its onset unseen: carrier evidence. Visit 2 hears
+	 * a track of `obwHz` on the same frequency (the line taken into a voice's track) and the recorder
+	 * answers voice for 20 s from that landing.
+	 */
+	const secondVisit = (obwHz: number, lineWidensTo: number | null = null) => {
+		let voiceFrom: number | null = null
+		const d = drive(
+			(hop, ms) =>
+				hop === 0 && voiceFrom !== null && ms < voiceFrom + 20_000
+					? voiceAnswer()
+					: false,
+			(hop, s, visit) => {
+				if (hop !== 0) return
+				if (visit === 1) {
+					s.onTrack({ ...sighting("c", hopHz(0)), obwHz: 4_000 }, false, 0, {
+						followOnAir: true,
+					})
+					// A voice joins the line's track during its watch: the track reads wider.
+					if (lineWidensTo !== null)
+						s.onTrack(
+							{ ...sighting("c", hopHz(0)), obwHz: lineWidensTo },
+							false,
+							0,
+							{ followOnAir: true },
+						)
+				}
+				if (visit === 2) {
+					voiceFrom = d.now()
+					s.onTrack({ ...sighting("v", hopHz(0) + 1_000), obwHz }, false, 0, {
+						followOnAir: true,
+					})
+				}
+			},
+		)
+		expect(d.stayed(0, 1)).toBeGreaterThan(COARSE_MS + 7_000)
+		return d.stayed(0, 2)
+	}
+
+	it("a track twice the line's width (8 kHz) is the line: no voice hold", () => {
+		expect(secondVisit(8_000)).toBeLessThan(COARSE_MS + 9_000)
+	})
+
+	it("one past it (8001 Hz) is a voice: held to the voice's end", () => {
+		expect(secondVisit(8_001)).toBeGreaterThanOrEqual(COARSE_MS + 20_000)
+	})
+
+	it("the line's track widening during its watch still leaves the line's own width as the carrier's", () => {
+		expect(secondVisit(14_000, 14_000)).toBeGreaterThanOrEqual(
+			COARSE_MS + 20_000,
+		)
 	})
 })
 
