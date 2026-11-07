@@ -750,21 +750,26 @@ describe("WorkerCostMeter", () => {
 								await flush()
 							}
 							if (s === null) continue
-							expect(s.active).toBeGreaterThanOrEqual(last.active)
-							expect(s.idle).toBeGreaterThanOrEqual(last.idle)
+							// Plain comparisons: 400 ticks x 100 runs of expect() calls cost seconds on a busy host.
+							const fail = (what: string): never => {
+								throw new Error(
+									`tick ${t}: ${what} (active ${s.active}, idle ${s.idle}, cpu ${cpu}, elu ${elu}, stale ${stale})`,
+								)
+							}
+							if (s.active < last.active) fail("active went back")
+							if (s.idle < last.idle) fail("idle went back")
 							last = s
-							expect(s.active).toBeLessThanOrEqual(elu + EPS)
-							expect(cpu - s.active).toBeLessThanOrEqual(stale + EPS)
+							if (s.active > elu + EPS) fail("active above ELU")
+							if (cpu - s.active > stale + EPS)
+								fail("active below CPU by more than the stale bound")
 							const start = activeAt[t - WINDOW_TICKS]
 							if (start === undefined || start === null) continue
 							const from = t - WINDOW_TICKS
 							const advance = s.active - start
-							expect(advance).toBeGreaterThanOrEqual(
-								cpuAt[t]! - cpuAt[from]! - stale - EPS,
-							)
-							expect(advance).toBeLessThanOrEqual(
-								eluAt[t]! - eluAt[from]! + stale + EPS,
-							)
+							if (advance < cpuAt[t]! - cpuAt[from]! - stale - EPS)
+								fail("window advance below CPU less the stale bound")
+							if (advance > eluAt[t]! - eluAt[from]! + stale + EPS)
+								fail("window advance above ELU plus the stale bound")
 						}
 					},
 				),
@@ -790,11 +795,15 @@ describe("WorkerCostMeter", () => {
 							for (let i = 0; i <= stretch; i++) {
 								const s = await w.tick()
 								if (s === null) continue
-								expect(s.active).toBeGreaterThanOrEqual(last.active)
-								expect(s.idle).toBeGreaterThanOrEqual(last.idle)
-								expect(s.active).toBeLessThanOrEqual(
-									w.wall() * ELU_ACTIVE_SHARE + 1e-6,
+								// Plain comparisons, as above: expect() per tick is the cost on a busy host.
+								if (
+									s.active < last.active ||
+									s.idle < last.idle ||
+									s.active > w.wall() * ELU_ACTIVE_SHARE + 1e-6
 								)
+									throw new Error(
+										`counters went back or active passed ELU: ${JSON.stringify({ s, last, wall: w.wall() })}`,
+									)
 								last = s
 							}
 							w.release()
