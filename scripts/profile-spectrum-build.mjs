@@ -7,7 +7,11 @@ import { fileURLToPath } from "node:url"
 
 const root = fileURLToPath(new URL("../", import.meta.url))
 
-for (const name of ["profile-spectrum", "profile-spectrum-main"]) {
+for (const name of [
+	"profile-spectrum",
+	"profile-spectrum-main",
+	"profile-frame-path-wasm",
+]) {
 	if (!existsSync(`${root}scripts/${name}.ts`)) continue
 	await build({
 		absWorkingDir: root,

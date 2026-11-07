@@ -148,12 +148,26 @@ Measurement-only tools for the core's main thread and spectrum path; never CI ga
   `.cpuprofile`; bundle frames are labelled with their `src/` module.
 - **`profile-eld-preload.mjs`**: `--import` preload that records an event-loop window
   between two `SIGUSR2` signals.
-- **`profile-spectrum.ts`**: offline spectrum pipeline profile (no core).
+- **`profile-spectrum.ts`**: offline spectrum pipeline profile (no core). It prints thread CPU
+  (`process.threadCpuUsage()`) and wall time apart. `--mode bare --wire` is the total; `--mode stages`
+  gives the shares, with the calibrated cost of the clock reads taken off each stage.
+- **`profile-frame-path-wasm.ts`**: the Rust frame path (`native/wavekit-chan/examples/frame_path/`)
+  as wasm32 in a worker thread, alternated with the native `frame_path_bench` on one IQ scene, on each
+  thread's CPU clock. It also compares both builds' power bins with the production JS. The wasm crate is
+  a package of its own (`examples/frame_path_wasm`), so the shipped manifest stays as it is; no tool
+  beyond a Rust `wasm32-unknown-unknown` target is needed.
 
 ```bash
 pnpm run build && node scripts/profile-spectrum-build.mjs
 node output/bench/profile-spectrum-main.mjs --load [--seconds 45] [--warmup 15] [--keep]
 node scripts/profile-cpuprof-top.mjs <file.cpuprofile> --inclusive --callers structuredClone
+node output/bench/profile-spectrum.mjs --mode bare --wire [--seconds 30] [--rate 2400000]
+
+RUSTFLAGS="-C target-feature=+simd128" cargo build --release --target wasm32-unknown-unknown \
+  --manifest-path native/wavekit-chan/examples/frame_path_wasm/Cargo.toml
+cargo build --release --example frame_path_bench --manifest-path native/wavekit-chan/Cargo.toml
+node output/bench/profile-frame-path-wasm.mjs --wasm <frame_path_wasm.wasm> --native <frame_path_bench> \
+  [--prec f64|f32] [--overlap 0|0.5] [--rate 2400000] [--tracks 99 --track-bins 4] [--agree-frames 2000]
 ```
 
 The scratch core never connects to anything but the fake: ports 9000, 5173, 8080 to
