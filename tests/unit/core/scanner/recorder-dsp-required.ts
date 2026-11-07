@@ -9,13 +9,17 @@
  *     pnpm exec vitest run --maxWorkers=1 tests/unit/core/scanner
  *
  * With WAVEKIT_REQUIRE_NFM_WASM=1, importing this module throws when the runtime's chains would be
- * JS (the artefact missing, unreadable, invalid, or built from other sources than the crate's now,
- * or WAVEKIT_RECORDER_DSP=js), so the file fails instead of silently testing the JS chain. Without
+ * JS (the artefact missing, unreadable, invalid, without the kernel's exports or not instantiating,
+ * built from other sources than the crate's now, or WAVEKIT_RECORDER_DSP=js), so the file fails instead of silently testing the JS chain. Without
  * the flag it does nothing. Production behaviour is unchanged.
  */
 import process from "node:process"
 import { loadNfmWasm } from "../../../../src/core/scanner/channel/wideband-nfm-wasm.js"
-import { widebandNfmRuntime } from "../../../../src/core/scanner/channel/wideband-nfm.js"
+import {
+	createWidebandNfmChain,
+	widebandNfmChainPath,
+	widebandNfmRuntime,
+} from "../../../../src/core/scanner/channel/wideband-nfm.js"
 import {
 	KERNEL_CRATES,
 	kernelSourceDigest,
@@ -48,5 +52,12 @@ if (process.env["WAVEKIT_REQUIRE_NFM_WASM"] === "1") {
 	if (!load.ok)
 		throw new Error(
 			`WAVEKIT_REQUIRE_NFM_WASM=1: the process runtime gives JS chains (${load.reason})`,
+		)
+	// Compiling is not enough: a module without the kernel's exports, or one that does not instantiate,
+	// still gives JS chains. Build one chain the way the recorder does and check its path.
+	const probe = createWidebandNfmChain({ inputRateHz: 1_024_000, offsetHz: 0 })
+	if (widebandNfmChainPath(probe) !== "wasm")
+		throw new Error(
+			"WAVEKIT_REQUIRE_NFM_WASM=1: a recorder chain built on the process runtime runs JS (see the recorder dsp path log line)",
 		)
 }

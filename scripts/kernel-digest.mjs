@@ -34,6 +34,14 @@ function filesUnder(dir) {
 	return out
 }
 
+/** `dir` and every directory below it: esbuild's directory watches are not recursive. */
+function dirsUnder(dir) {
+	const out = [dir]
+	for (const entry of readdirSync(dir, { withFileTypes: true }))
+		if (entry.isDirectory()) out.push(...dirsUnder(join(dir, entry.name)))
+	return out
+}
+
 function sha256(bytes) {
 	return createHash("sha256").update(bytes).digest("hex")
 }
@@ -79,8 +87,8 @@ export function kernelDigestPlugin() {
 					loader: "ts",
 					watchFiles: [...frame.files, ...nfm.files],
 					watchDirs: [
-						join(KERNEL_CRATES.frame, "src"),
-						join(KERNEL_CRATES.nfm, "src"),
+						...dirsUnder(join(KERNEL_CRATES.frame, "src")),
+						...dirsUnder(join(KERNEL_CRATES.nfm, "src")),
 					],
 				}
 			})
