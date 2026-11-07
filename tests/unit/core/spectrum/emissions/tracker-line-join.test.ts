@@ -1102,12 +1102,12 @@ describe("a join across a line stays with its track", () => {
 	describe("what a parted track measured over the join", () => {
 		/** One block's frames, 1 ms each, over both pieces: keyed 30 ms on and 30 ms off, or steady. */
 		function frames(t: Tracker, block: number, keyed: boolean): void {
-			const db = new Float32Array(N).fill(FLOOR)
+			const power = new Float64Array(N).fill(10 ** (FLOOR / 10))
 			for (let ms = 0; ms < 50; ms++) {
 				const at = block * 50 + ms
 				const on = !keyed || Math.floor(at / 30) % 2 === 0
-				db.fill(on ? -30 : FLOOR, 140, 152)
-				t.frame(db, (at * BLOCK) / 50)
+				power.fill(10 ** ((on ? -30 : FLOOR) / 10), 140, 152)
+				t.frame(power, 1, (at * BLOCK) / 50)
 			}
 		}
 
