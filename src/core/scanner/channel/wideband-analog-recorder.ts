@@ -1038,6 +1038,12 @@ export class WidebandAnalogRecorder {
 	 */
 	private readonly waived = new Set<string>()
 	/**
+	 * Of `waived`, the observations whose session was classed by its own audio only (`toneOnly`) when
+	 * the waiver was granted: a definite other class (classVetoes) still ends their waiver once the
+	 * session itself is gone. Same bound and life as `waived`.
+	 */
+	private readonly waivedToneOnly = new Set<string>()
+	/**
 	 * Observations whose spectrally digital shadow expired (WIDEBAND_DIGITAL_CLASS_MS), with the
 	 * visit (stream and epoch) it expired in: no other shadow starts for them in that visit
 	 * (bounded by MAX_REMEMBERED); an analog-fm snapshot still may, and so may a snapshot of a
@@ -1150,7 +1156,18 @@ export class WidebandAnalogRecorder {
 		if (barred !== "refused:unclean") return this.revoke(observationId)
 		const id = this.byObservation.get(observationId)
 		const s = id === undefined ? undefined : this.sessions.get(id)
-		if (!s || s.done) return this.waived.has(observationId)
+		if (!s || s.done) {
+			if (!this.waived.has(observationId)) return false
+			// The session is gone, its class provenance is not: a verified other class still vetoes
+			// a recording classed by its own audio only.
+			if (
+				this.waivedToneOnly.has(observationId) &&
+				!info.analogFm &&
+				info.nonAnalog === true
+			)
+				return this.revoke(observationId)
+			return true
+		}
 		// The session's next call would refuse it (a flag before the class and the voice is never
 		// late, countSnapshot): the artefact verdict.
 		if (
@@ -1161,18 +1178,24 @@ export class WidebandAnalogRecorder {
 		)
 			return this.revoke(observationId)
 		remember(this.waived, observationId)
+		if (s.toneOnly) remember(this.waivedToneOnly, observationId)
+		else this.waivedToneOnly.delete(observationId)
 		return true
 	}
 
 	/** Ends `observationId`'s waiver (keepsOverArtefact); false, the answer it then gives. */
 	private revoke(observationId: string): false {
 		this.waived.delete(observationId)
+		this.waivedToneOnly.delete(observationId)
 		return false
 	}
 
 	/** A veto, refusal or failed file of `s`: none of its observations keeps a waiver. */
 	private revokeWaivers(s: Session): void {
-		for (const id of s.observations) this.waived.delete(id)
+		for (const id of s.observations) {
+			this.waived.delete(id)
+			this.waivedToneOnly.delete(id)
+		}
 	}
 
 	/**
@@ -1301,6 +1324,7 @@ export class WidebandAnalogRecorder {
 	): void {
 		// Its closing ingest came first: the observation asks for no waiver any more.
 		this.waived.delete(observationId)
+		this.waivedToneOnly.delete(observationId)
 		// An association first given at the close still names the observation's earlier decisions.
 		if (info !== undefined && info.discoveryId !== null)
 			this.decisions.bindDiscovery(observationId, info.discoveryId)

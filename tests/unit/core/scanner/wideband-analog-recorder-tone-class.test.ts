@@ -276,6 +276,46 @@ describe("a verified digital class still vetoes a tone-classed recording", () =>
 		expect(h.ops.every(o => o.outcome !== "finalized")).toBe(true)
 	}, 120_000)
 
+	it("after a retune ended its session, a verified digital class still ends a late spur waiver", async () => {
+		for (const verified of [false, true]) {
+			const h = lowHarness(SPEECH)
+			await h.feed(1, false)
+			const chunk = h.fs / 40
+			const onset = h.engine.liveEdge()
+			for (let i = 0; i < 6 * 40 && !codes(h).includes("classed"); i++) {
+				h.engine.write(h.src.next(chunk, true))
+				const edge = h.engine.liveEdge()
+				if (edge - onset >= 0.1 * h.fs)
+					h.rec.track(input("o", snapshot("o", onset, edge, LOW), SHADOW))
+				await h.pump()
+			}
+			expect(codes(h)).toContain("classed")
+			const spur = snapshot("o", onset, h.engine.liveEdge(), LOW)
+			spur.flags.spur = true
+			expect(h.rec.keepsOverArtefact("o", spur, input("o", spur, SHADOW))).toBe(
+				true,
+			)
+			h.rec.track(input("o", spur, SHADOW))
+			// The tuner moves on before the track's close: the session ends with its file.
+			h.engine.epoch = {
+				...h.engine.epoch,
+				epoch: h.engine.epoch.epoch + 1,
+				startSample: h.engine.liveEdge(),
+			}
+			await quiet(h, 0.5, h.src)
+			expect(h.rec.owns("o")).toBe(false)
+			const later = snapshot("o", onset, h.engine.liveEdge(), LOW)
+			later.flags.spur = true
+			const info = input("o", later, {
+				...SHADOW,
+				...(verified ? { nonAnalog: true } : {}),
+			})
+			expect(h.rec.keepsOverArtefact("o", later, info)).toBe(!verified)
+			h.rec.closed("o", later, "epoch-changed", NOT_ANALOG)
+			await h.rec.idle()
+		}
+	}, 120_000)
+
 	it("a session a snapshot classed analog-fm keeps its parent behaviour (the class is sticky)", async () => {
 		const h = lowHarness(SPEECH)
 		await h.feed(1, false)
