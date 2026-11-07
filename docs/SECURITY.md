@@ -62,7 +62,10 @@ Once latched, the core exits (below). In the seconds before it does:
 **The core exits and restarts.** It logs the loss, closes and exits with code 1. A close still
 running after 10 seconds ends with SIGKILL, even with file system calls hung. A call that hangs
 after the close finished, or one the kernel cannot interrupt, holds the process until it returns.
-It exits whatever else is running: a locked-out core cannot be read, steered or stopped by
+SIGKILL skips the rest of the close: unwritten logs and data are lost, a voice recording may not
+be finished, and decoder children can outlive the core. In the image the finish script sends TERM
+to the known decoders, without waiting; run natively, stop any left over by hand. The list of what
+you see below describes a close that finishes in time. It exits whatever else is running: a locked-out core cannot be read, steered or stopped by
 anyone, and only a new start can load the state another owner may have rotated.
 
 The close differs from a stop in one way: another owner may hold the state and the tuner by
@@ -79,7 +82,7 @@ records, which belong to those files.
 
 In the image, s6 starts it again, about 5 seconds after the exit. What you see:
 
-- A recording in progress ends, as on any stop. Finished recordings and every decode so far stay
+- A recording in progress ends, as on any stop, when the close finishes in time. Finished recordings and every decode so far stay
   on disk. A voice recording closes its file. A named IQ capture in progress loses its partial
   file and its request fails, and a scanner capture in progress is discarded.
 - Decoders stop, and their output to external sinks is gone for those seconds. Clients are cut
