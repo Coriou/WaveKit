@@ -34,6 +34,32 @@ jobs:
       - name: Test
         run: pnpm test
 
+  channelizer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build shared packages
+        run: pnpm --filter @wavekit/shared build && pnpm --filter @wavekit/api-types build
+      # Same toolchain as the Dockerfile's RUST_IMAGE.
+      - name: Install Rust
+        run: rustup toolchain install 1.98.1 --profile minimal && rustup default 1.98.1
+      - name: Crate tests
+        run: make chan-test
+      - name: Build the binary
+        run: make chan-build
+      # The manager and the binary agree on recentring only when both are real.
+      - name: Real binary under the real manager
+        env:
+          WAVEKIT_CHAN_BIN: ${{ github.workspace }}/native/wavekit-chan/target/release/wavekit-chan
+        run: pnpm exec vitest run tests/integration/wavekit-chan-binary.test.ts tests/integration/channelizer-recenter-real-binary.test.ts
+
   docs:
     runs-on: ubuntu-latest
     steps:
