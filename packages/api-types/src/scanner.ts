@@ -779,14 +779,33 @@ export interface ScanJobProgress {
 	hops?: {
 		hopIndex: number
 		visits: number
+		/** Wall ms from tune to leave, pauses excluded. The phases below and `holdMs` sum to it. */
 		timeMs: number
 		holdMs: number
 		lastVisitAgeMs: number | null
+		/**
+		 * Measured, unlike the planned `spec.settleMs`: from the tune's answer to the first block of its
+		 * epoch, that block's own length left out. Includes the tune's latency when the epoch opened
+		 * before the answer.
+		 */
+		measuredSettleMs?: number
+		/** Measured: blocks of the previous hop's IQ discarded after settling. */
+		measuredStaleMs?: number
+		/** Measured, unlike the planned `spec.dwellMs`: heard blocks, at most the wall time they took. */
+		measuredDwellMs?: number
+		/** Measured: heard blocks past the planned dwell (a gate's or class's answer, a carrier's gap). */
+		measuredQualifyMs?: number
+		/** The rest of `timeMs`: tune command and queue latency, a dwell's stream arriving late. */
+		overheadMs?: number
 	}[]
 	sweepIndex: number
 	hopIndex: number
 	hopCount: number
 	sweepPeriodMs: number | null
+	/**
+	 * Sweep: the share of planned hops visited in the last full sweep (the current one before that);
+	 * no measure of time or of the spectrum heard. In-window: settled samples over observed samples.
+	 */
 	coverage: number
 	holdingOn: string | null
 	settleMode: SettleMode | null
@@ -1093,9 +1112,42 @@ export const SCANNER_RECORDER_ERRORS = [
 	"recovery-ambiguous",
 ] as const
 
+/** The end a recording's store operation was given (`ScannerRecorderReceiptDetail.cutReason`). */
+export const SCANNER_RECORDER_CUTS = [
+	"completed",
+	"duration-limit",
+	"track-ended",
+	"cancelled",
+	"discovery-deleted",
+	"source-lost",
+	"epoch-changed",
+	"stream-changed",
+	"channel-invalidated",
+	"engine-failed",
+	"shutdown",
+] as const
+
+/**
+ * Which check refused a store operation whose error is `admission-denied` or `invalid-binding`
+ * (`ScannerRecorderReceiptDetail.failure`).
+ */
+export const SCANNER_RECORDER_FAILURES = [
+	"cancelled",
+	"authority-unhealthy",
+	"discovery-removed",
+	"association-lost",
+	"binding-unusable",
+	"binding-not-live",
+	"commit-plan-stale",
+] as const
+
 export interface ScannerRecorderReceiptDetail {
 	outcome: "finalized" | "aborted" | "failed"
 	errorCode: (typeof SCANNER_RECORDER_ERRORS)[number] | null
+	/** Why a recording ended; absent on older cores. */
+	cutReason?: (typeof SCANNER_RECORDER_CUTS)[number] | null
+	/** Which check refused it, null when none did; absent on older cores. */
+	failure?: (typeof SCANNER_RECORDER_FAILURES)[number] | null
 }
 
 export interface ScannerRecorderDecisionEntry {

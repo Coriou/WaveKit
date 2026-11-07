@@ -176,6 +176,14 @@ export interface JobDriver {
 		needsConfirm: boolean,
 	): void
 	onTrackClosed(trackId: string): void
+	/**
+	 * A track of the driver's window the channel gate has not answered yet: no observation exists.
+	 * Only a sweep listens (SweepScheduler.onCandidate); other drivers leave these out. `gateMinDurationMs`
+	 * is the longest the gate rule at its frequency can take to pass it.
+	 */
+	onCandidate?(track: TrackSnapshot, gateMinDurationMs: number): void
+	/** That track closed without passing its gate. */
+	onCandidateClosed?(track: TrackSnapshot): void
 	/** § 4.7: the source moved without a command the core saw (pipeline `untracked-retune`). */
 	onUntrackedRetune(): void
 	onEvidence(probeId: string, ev: DecodeEvidence): void
@@ -743,7 +751,7 @@ export class JobRunner implements JobDriver {
 		}))
 		const base: ScanJobProgress = {
 			...(includeHops && this.scheduler
-				? { hops: this.scheduler.hopStats() }
+				? { hops: this.scheduler.hopPhaseStats() }
 				: {}),
 			sweepIndex: p?.sweepIndex ?? 0,
 			hopIndex: p?.hopIndex ?? 0,
@@ -1031,6 +1039,16 @@ export class JobRunner implements JobDriver {
 			hold.following ? hangMs : 0,
 		)
 		timer.unref()
+	}
+
+	onCandidate(track: TrackSnapshot, gateMinDurationMs: number): void {
+		if (this.sweep && this.driving && this.epochOwn)
+			this.scheduler?.onCandidate(track, gateMinDurationMs)
+	}
+
+	onCandidateClosed(track: TrackSnapshot): void {
+		if (this.sweep && this.driving && this.epochOwn)
+			this.scheduler?.onCandidateClosed(track)
 	}
 
 	onEvidence(probeId: string, ev: DecodeEvidence): void {
@@ -1693,6 +1711,7 @@ export class JobRunner implements JobDriver {
 		// Paused: the hop is remembered and sent by the resume's resend-hop.
 		if (!this.driving) return
 		this.retunes += 1
+		this.scheduler?.noteTuneStarted(a.hopIndex)
 		try {
 			const pending = await this.deps.arbiter.retune(
 				lease,
@@ -1706,6 +1725,7 @@ export class JobRunner implements JobDriver {
 					: undefined,
 			)
 			this.autoResumeGuardActive = false
+			this.scheduler?.noteTuneAnswered(a.hopIndex)
 			// R 1.2: only an explicit no-op has no epoch-started event to resume the visit.
 			// A real retune can emit that event before its promise resolves.
 			this.addOwnEpoch(pending.epoch)

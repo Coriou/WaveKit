@@ -322,6 +322,8 @@ it.each([
 		).toEqual({
 			outcome,
 			errorCode: expected,
+			cutReason: null,
+			failure: null,
 		})
 	},
 	60_000,

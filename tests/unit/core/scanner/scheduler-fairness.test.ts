@@ -1,4 +1,5 @@
 // tests/unit/core/scanner/scheduler-fairness.test.ts
+import { WIDEBAND_VOICE_ANSWER_MS } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
@@ -25,6 +26,16 @@ const MHZ = 1_000_000
 /** About 1.024 Msps at 80 % usable: 819.2 kHz per hop. */
 const HALF_SPAN_HZ = 409_600
 /** Synthetic centres, 800 kHz apart. */
+/**
+ * Sample positions of a snapshot in the direct-scheduler tests (one sample per ms, 50 ms blocks): on
+ * air from `fromSample` to `toSample`, as the on-air gap between a close and a reopening reads them.
+ */
+const onAir = (fromSample: number, toSample = fromSample + 50) => ({
+	startSample: fromSample,
+	lastSample: toSample,
+	blocks: Math.round((toSample - fromSample) / 50),
+})
+
 const centres = (n: number): number[] =>
 	Array.from({ length: n }, (_, i) => 150 * MHZ + i * 800_000)
 /** Timer settle 1000 ms + (2 + 1) blocks of 50 ms. */
@@ -1081,13 +1092,14 @@ describe("evidence rules (direct scheduler)", () => {
 			s.start()
 			s.onEpochStarted(0)
 			at(1_000)
-			s.onTrack(track("a"), false, 0, follow)
+			s.onTrack({ ...track("a"), ...onAir(0) }, false, 0, follow)
 			s.onBlock(50)
 			s.onTrackClosed("a")
 			for (let k = 1; k <= blocksApart; k++) s.onBlock(50 + 50 * k)
 			const t0 = 1_000 + gapMs
 			at(t0)
-			s.onTrack(track("b"), false, 0, follow)
+			// Last block of "a" ended at sample 50, the first of "b" starts at `gapMs`: reads gapMs.
+			s.onTrack({ ...track("b"), ...onAir(gapMs) }, false, 0, follow)
 			dwell(s, 50 + 50 * blocksApart)
 			expect(s.progress().holdingOn).toBe("b")
 			at(t0 + 6_000)
@@ -1314,6 +1326,7 @@ describe("hold evidence across restarts, the long-hold lock and confirm bounds",
 			s.onTrack(at("a"), false, 0, follow)
 			for (let e = 50; e <= 500; e += 50) s.onBlock(e)
 			set(500)
+			s.onTrack({ ...at("a"), ...onAir(0, 500) }, false, 0, follow)
 			s.onTrackClosed("a")
 			if (outage) {
 				set(10_000)
@@ -1321,7 +1334,7 @@ describe("hold evidence across restarts, the long-hold lock and confirm bounds",
 			} else for (let e = 550; e <= 10_000; e += 50) s.onBlock(e)
 			s.onBlock(10_050)
 			set(10_050)
-			s.onTrack(at("b"), false, 0, follow)
+			s.onTrack({ ...at("b"), ...onAir(10_000) }, false, 0, follow)
 			until(s, 10_050)
 			expect(s.progress().holdingOn).toBe("b")
 			// The hold started at 10 050: the 8000 ms bound ends at 18 050 (at it, and a ms before).
@@ -1402,7 +1415,8 @@ describe("hold evidence across restarts, the long-hold lock and confirm bounds",
 		)
 		expect(long.length).toBeGreaterThan(2)
 		// A visit's time past its dwell is its holds, and a dwell lengthened by up to 4 blocks for
-		// the class of a young track (a new call's first blocks).
+		// the class of a young track (a new call's first blocks). A visit landing once L is spent still
+		// follows voice to the recorder's first possible answer (WIDEBAND_VOICE_ANSWER_MS).
 		const own = r.visits.filter(v => v.hopIndex === 2)
 		for (let k = 1; k < own.length; k++) {
 			const between = r.visits.filter(
@@ -1416,7 +1430,10 @@ describe("hold evidence across restarts, the long-hold lock and confirm bounds",
 				0,
 			)
 			expect(heldMs).toBeLessThanOrEqual(
-				longFollowMs(3) + BLOCK_MS + between.length * 4 * BLOCK_MS,
+				longFollowMs(3) +
+					BLOCK_MS +
+					between.length * 4 * BLOCK_MS +
+					Math.max(0, between.length - 1) * WIDEBAND_VOICE_ANSWER_MS,
 			)
 		}
 	})
@@ -1857,6 +1874,12 @@ describe("flaps of a frequency known as a call (direct scheduler)", () => {
 		s.onEpochStarted(0)
 		const memory = (): Entry => (s as unknown as { memory: Entry[] }).memory[0]!
 		let n = 0
+		let openedAt = 0
+		const snapshot = (fromSample: number, toSample: number): TrackSnapshot => ({
+			...makeTrack({ id: `t${n}`, centreHz: HZ, startedAt: 0 }),
+			...onAir(fromSample, toSample),
+			trackId: `t${n}`,
+		})
 		for (const [ms, kind] of events) {
 			while (clock < ms) {
 				clock += 50
@@ -1864,16 +1887,14 @@ describe("flaps of a frequency known as a call (direct scheduler)", () => {
 			}
 			if (listenedMs !== undefined && clock === listenedMs[0])
 				memory().flapListenMs = listenedMs[1]
-			if (kind === "open")
-				s.onTrack(
-					{
-						...makeTrack({ id: `t${n}`, centreHz: HZ, startedAt: 0 }),
-						trackId: `t${n}`,
-					},
-					false,
-					0,
-				)
-			else s.onTrackClosed(`t${n++}`)
+			if (kind === "open") {
+				// Sighted one block in: a close at c and an open at o read o − c on air.
+				openedAt = clock - 50
+				s.onTrack(snapshot(openedAt, clock), false, 0)
+			} else {
+				s.onTrack(snapshot(openedAt, clock), false, 0)
+				s.onTrackClosed(`t${n++}`)
+			}
 		}
 		return memory()
 	}

@@ -62,6 +62,21 @@ export const AnalogCutSchema = z.enum([
 export type AnalogCut = z.infer<typeof AnalogCutSchema>
 export const ErrorSchema = z.enum(SCANNER_RECORDER_ERRORS)
 export type AnalogError = z.infer<typeof ErrorSchema>
+/**
+ * Which check refused an operation whose error is `admission-denied` or `invalid-binding`
+ * (AnalogReceipt.failure): those two codes cover every one of them, and only this tells a discovery
+ * removed from an observation merged away. A closed code: safe to log.
+ */
+export const AnalogFailureSchema = z.enum([
+	"cancelled",
+	"authority-unhealthy",
+	"discovery-removed",
+	"association-lost",
+	"binding-unusable",
+	"binding-not-live",
+	"commit-plan-stale",
+])
+export type AnalogFailure = z.infer<typeof AnalogFailureSchema>
 export const AnalogGapSchema = z
 	.object({
 		cause: z.enum([
@@ -108,6 +123,8 @@ export const AnalogReceiptSchema = z
 		cleanup: z.enum(["complete", "pending"]),
 		residueBytes: count.nullable(),
 		errorCode: ErrorSchema.nullable(),
+		/** Absent on a finalized receipt, on older markers and on failures of other steps. */
+		failure: AnalogFailureSchema.optional(),
 		durability: z
 			.object({
 				mediaFileSync: z.enum(["synced", "not-acknowledged"]),
@@ -254,6 +271,8 @@ interface Operation {
 	descriptors: Set<WavHandle>
 	writer: WavFileWriter | null
 	cancelled: AnalogCut | null
+	/** The check that refused it first (AnalogFailure), for its receipt. */
+	failure: AnalogFailure | null
 	accepting: boolean
 	decision: AnalogReceipt | null
 	markerLinked: boolean
@@ -403,6 +422,7 @@ export class AnalogOperations {
 			intent,
 			writer: null,
 			cancelled: null,
+			failure: null,
 			accepting: true,
 			decision: null,
 			markerLinked: false,
@@ -470,18 +490,28 @@ export class AnalogOperations {
 		}
 	}
 	private valid(op: Operation): void {
-		if (op.cancelled)
+		const failure = this.invalidBecause(op)
+		if (failure === null) return
+		op.failure ??= failure
+		if (failure === "binding-unusable" || failure === "binding-not-live")
+			throw coded("invalid-binding", "Actual live 48 kHz cf32 binding required")
+		if (failure === "cancelled")
 			throw coded("admission-denied", "Analog operation cancelled")
+		throw coded("admission-denied", "Analog association is unavailable")
+	}
+	/** The first check `op` fails, or null. A callback may cancel it meanwhile, so the last ones repeat. */
+	private invalidBecause(op: Operation): AnalogFailure | null {
+		if (op.cancelled) return "cancelled"
+		if (!this.context.adapter.authorityHealthy()) return "authority-unhealthy"
+		if (!this.context.admits(op.intent.discoveryId)) return "discovery-removed"
 		if (
-			!this.context.adapter.authorityHealthy() ||
-			!this.context.admits(op.intent.discoveryId) ||
 			!this.context.adapter.association(
 				op.intent.discoveryId,
 				op.intent.observationId,
 				op.intent.binding,
 			)
 		)
-			throw coded("admission-denied", "Analog association is unavailable")
+			return "association-lost"
 		const b = op.intent.binding
 		if (
 			b.inputFormat !== "cf32" ||
@@ -491,15 +521,13 @@ export class AnalogOperations {
 			b.stream === null ||
 			b.epoch === null ||
 			b.channelId === null ||
-			b.channelGeneration === null ||
-			!this.context.adapter.bindingLive(b)
+			b.channelGeneration === null
 		)
-			throw coded("invalid-binding", "Actual live 48 kHz cf32 binding required")
-		if (op.cancelled || !this.context.admits(op.intent.discoveryId))
-			throw coded(
-				"admission-denied",
-				"Analog operation cancelled during validation",
-			)
+			return "binding-unusable"
+		if (!this.context.adapter.bindingLive(b)) return "binding-not-live"
+		if (op.cancelled) return "cancelled"
+		if (!this.context.admits(op.intent.discoveryId)) return "discovery-removed"
+		return null
 	}
 	private async admit(op: Operation): Promise<void> {
 		await this.exclusive(async () => {
@@ -796,8 +824,10 @@ export class AnalogOperations {
 					plan.evidence.recordings !== plan.priorCount ||
 					plan.discovery.evidence !== plan.evidence ||
 					plan.observation.discoveryId !== plan.discovery.id
-				)
+				) {
+					op.failure ??= op.cancelled ? "cancelled" : "commit-plan-stale"
 					throw coded("admission-denied", "Current commit plan invalidated")
+				}
 				try {
 					linkSync(markerTemp, marker)
 				} catch (cause) {
@@ -998,6 +1028,9 @@ export class AnalogOperations {
 				cleanup,
 				residueBytes,
 				errorCode,
+				...(outcome !== "finalized" && op.failure !== null
+					? { failure: op.failure }
+					: {}),
 				durability: {
 					mediaFileSync: op.output ? "synced" : "not-acknowledged",
 					metadata: op.metadataAck

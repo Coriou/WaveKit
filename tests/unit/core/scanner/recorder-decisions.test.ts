@@ -9,13 +9,19 @@ import {
 	RECORDER_MAX_OBSERVATIONS,
 	RECORDER_RECENT_DECISIONS,
 	RECORDER_RECENT_REFUSALS,
+	SCANNER_RECORDER_CUTS,
 	SCANNER_RECORDER_DECISIONS,
+	SCANNER_RECORDER_FAILURES,
 } from "@wavekit/api-types"
 import {
 	RECORDER_LOG_LIMIT,
 	RECORDER_LOG_WINDOW_MS,
 	RecorderDecisions,
 } from "../../../../src/core/scanner/channel/recorder-decisions.js"
+import {
+	AnalogCutSchema,
+	AnalogFailureSchema,
+} from "../../../../src/core/scanner/store/analog-operations.js"
 import {
 	LOW,
 	LOW_FS,
@@ -322,7 +328,8 @@ describe("WidebandAnalogRecorder decisions (synthetic signals)", () => {
 				JSON.stringify(h.rec.recordingActive("rtl", { stream: 1, epoch: 1 })),
 			)
 		})
-		expect([...seen]).toEqual(["false"])
+		// Its voice answer is to come for 2 s of heard audio (WIDEBAND_VOICE_JUDGE_MS), never voice.
+		expect([...seen]).toEqual(['"judging"', "false"])
 		expect(h.rec.diagnostics().recent.map(e => e.code)).toEqual([
 			"started",
 			"discarded:unvoiced",
@@ -418,21 +425,25 @@ it("keeps receipt details in status, discovery detail and logs", async () => {
 	const receipt = {
 		outcome: "failed" as const,
 		errorCode: "write-failed" as const,
+		cutReason: "completed" as const,
+		failure: null,
 		operationId: "op-test",
 	}
 	decisions.note("discarded:aborted", ref(1, "d"), true, null, receipt)
-	expect(decisions.status().recent[0]?.receipt).toEqual({
+	const dto = {
 		outcome: receipt.outcome,
 		errorCode: receipt.errorCode,
-	})
-	expect(decisions.forDiscovery("d")?.last.receipt).toEqual({
-		outcome: receipt.outcome,
-		errorCode: receipt.errorCode,
-	})
+		cutReason: receipt.cutReason,
+		failure: null,
+	}
+	expect(decisions.status().recent[0]?.receipt).toEqual(dto)
+	expect(decisions.forDiscovery("d")?.last.receipt).toEqual(dto)
 	await flushLogs()
 	expect(lines[0]).toMatchObject({
 		receiptOutcome: "failed",
 		receiptErrorCode: "write-failed",
+		receiptCut: "completed",
+		receiptFailure: null,
 		operationId: "op-test",
 	})
 
@@ -466,5 +477,62 @@ it("keeps receipt details in status, discovery detail and logs", async () => {
 			d.note("started", ref(RECORDER_MAX_OBSERVATIONS, "d_other"), true)
 			expect(d.lastByDiscovery(new Set(["d_old"])).has("d_old")).toBe(false)
 		})
+	})
+})
+
+it("a discard's closed cause reaches the API's decision, and its operation id does not", () => {
+	const decisions = new RecorderDecisions(pino({ level: "silent" }), () => 0)
+	decisions.note("discarded:aborted", ref(1, "d"), true, null, {
+		outcome: "failed",
+		errorCode: "admission-denied",
+		cutReason: "discovery-deleted",
+		failure: "association-lost",
+		operationId: "op-test",
+	})
+	const dto = {
+		outcome: "failed",
+		errorCode: "admission-denied",
+		cutReason: "discovery-deleted",
+		failure: "association-lost",
+	}
+	expect(decisions.status().recent[0]?.receipt).toEqual(dto)
+	expect(decisions.forDiscovery("d")?.last.receipt).toEqual(dto)
+})
+
+it("a receipt without a cause leaves its fields out, as an older core's does", () => {
+	const decisions = new RecorderDecisions(pino({ level: "silent" }), () => 0)
+	decisions.note("discarded:aborted", ref(1, "d"), true, null, {
+		outcome: "aborted",
+		errorCode: null,
+		operationId: "op-test",
+	})
+	expect(decisions.status().recent[0]?.receipt).toEqual({
+		outcome: "aborted",
+		errorCode: null,
+	})
+})
+
+it("the API's closed cause lists are the store's", () => {
+	expect(SCANNER_RECORDER_CUTS).toEqual(AnalogCutSchema.options)
+	expect(SCANNER_RECORDER_FAILURES).toEqual(AnalogFailureSchema.options)
+})
+
+it("a discard's closed cause reaches its log line", async () => {
+	const { lines, logger } = capture()
+	const decisions = new RecorderDecisions(logger, () => 0)
+	decisions.note("discarded:aborted", ref(1, "d"), true, null, {
+		outcome: "failed",
+		errorCode: "admission-denied",
+		cutReason: "completed",
+		failure: "association-lost",
+		operationId: "op-test",
+	})
+	await flushLogs()
+	expect(lines[0]).toMatchObject({
+		decision: "discarded:aborted",
+		receiptOutcome: "failed",
+		receiptErrorCode: "admission-denied",
+		receiptCut: "completed",
+		receiptFailure: "association-lost",
 	})
 })

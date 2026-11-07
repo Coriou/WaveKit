@@ -8,9 +8,21 @@
  * Fair holds: every frequency is held like any signal (a confirm probe on each visit, analog voice
  * followed on air) until a hold shows positive carrier evidence for it; only then is it held under
  * the carrier rules (a retry budget and holds of at most one coarse sweep). See FrequencyMemory.
+ *
+ * Qualification: a dwell is short (minSurfaceBlocks + 1 blocks) and only a hop with energy the
+ * channel gate has not answered yet listens on, within a bound derived from that gate (onCandidate,
+ * qualifyBlocks). An empty hop pays nothing.
  */
-import { CLASS_SETTLE_BLOCKS } from "./scanner-redesign-contract.js"
+import {
+	CHANNEL_GATE_K_DB,
+	CHANNEL_GATE_MIN_DURATION_MS,
+	CLASS_SETTLE_BLOCKS,
+} from "./scanner-redesign-contract.js"
 import { WaveKitError } from "../../utils/errors.js"
+import {
+	WIDEBAND_VOICE_ANSWER_MS,
+	WIDEBAND_VOICE_JUDGE_MS,
+} from "./channel/wideband-analog-recorder.js"
 import type { Hop, HopPlan, NormalisedJobSpec } from "./types.js"
 import type { TrackSnapshot } from "../spectrum/types.js"
 
@@ -52,11 +64,15 @@ const MAX_FREQUENCY_MEMORY = 256
  */
 const FORGET_MISSES = 10
 /**
- * Off-air time that proves traffic. A gap is read from the close (the end of the first block off
- * air) to the sighting of the reopening (minSurfaceBlocks blocks after it went on air), so a gap of
- * g ms reads g + 50 ms ± one block in 50 ms blocks: a QSO turnaround (1 s or more) reads 1000 ms or
- * more, a carrier flapping with gaps of up to 0.9 s reads less. A close and reopen heard less than
- * this apart is a flap: carrier evidence.
+ * Off-air time that proves traffic. A reopening's gap is read on air (gapOnAirMs), from the closed
+ * track's last block to the reopening's first: the engine's close comes about 500 ms after that last
+ * block and a gate passes the reopening up to 350 ms after its first, and neither counts. A block
+ * that is on air for part of its length counts as on, so in 50 ms blocks a gap of g ms spans whole
+ * off blocks of more than g − 100 and at most g ms; one block is added, so it reads more than g − 50
+ * and at most g + 50: a QSO turnaround (1 s or more) reads 1000 ms or more, a carrier flapping with
+ * gaps of up to 0.9 s reads at most 950 (between the two, either). A close and reopen read less than
+ * this apart is a flap: carrier evidence. A close with no reopening is read from the close to the end
+ * of the visit (noteHeardGaps), since a reopening may still wait for its gate when the visit ends.
  */
 const TRAFFIC_GAP_MS = 1_000
 /**
@@ -85,6 +101,13 @@ const CALL_RUN_MS = 30_000
 const ID_MS = 28_000
 /** Margin of the long follow cap (longFollowMs) for an ID detected late in a follow. */
 const LONG_FOLLOW_MARGIN_MS = 5_000
+/**
+ * Blocks added to a qualification's answer: the first block of a track, which its gate may not be
+ * able to measure yet (the track's channel is known from it), and the one off block a gate run
+ * tolerates (measured through the real pipeline: a tone passes a 300 ms gate at its 6th block,
+ * synthetic and captured FM voice by its 7th).
+ */
+const QUALIFY_MARGIN_BLOCKS = 2
 /** Re-check period of a hold kept for a recording (Hold mode `record`): 5 blocks of 50 ms. */
 const RECORD_RECHECK_MS = 250
 /**
@@ -97,9 +120,11 @@ const RECORD_RECHECK_MS = 250
  * belongs to the transmission named when it starts (VoiceOnAir.voice): it is spent (Visit.voice)
  * by the first answer that is not voice or names another transmission (a turnaround), never by
  * how long the check went unasked, so a stalled event loop does not end it. A full coarse sweep
- * then follows the visit before the hop gets another (longHoldLock).
+ * then follows the visit before the hop gets another (longHoldLock). "judging": a classed session
+ * of the window has started and its voice answer is still to come (WIDEBAND_VOICE_JUDGE_MS): the
+ * hop is kept for that answer, once per visit, so a landing is not split by leaving just before it.
  */
-export type RecordingActivity = boolean | VoiceOnAir
+export type RecordingActivity = boolean | VoiceOnAir | "judging"
 
 /** Voice on air in a recorded transmission (RecordingActivity). */
 export interface VoiceOnAir {
@@ -108,7 +133,26 @@ export interface VoiceOnAir {
 	 * answers the same identity, a new over (after a turnaround) another.
 	 */
 	readonly voice: string
+	/**
+	 * Longest quiet in the judged audio since the last answer, ms, the one still running included
+	 * (past VOICE_QUIET_PAST_L_MS, a hold past L ends). Judged, not wall clock, so a stalled event
+	 * loop adds nothing, and a quiet that ended between two answers still reads. Absent: none.
+	 */
+	readonly quietMs?: number
 }
+
+/**
+ * Quiet a voice hold that reached L may still answer: 1000 ms. Before L the recorder's 2 s limit
+ * (WIDEBAND_VOICE_ON_AIR_MS) carries a hold through a speaker's pauses, and under a repeater's hang
+ * through a turnaround too, since the track never closes. Past L a hold must be continuous voice, so
+ * the hold of one over does not run on into the next. The recorder knows the quiet, the scheduler L,
+ * so the answer carries the quiet and the scheduler applies this. Arithmetic: judged audio runs 1000
+ * ms behind the air and a voiced window ends up to 500 ms after the last word; 1000 of quiet and the
+ * 250 ms re-check: past L the hold falls back at most 1000 + 500 + 1000 + 250 = 2750 ms after the
+ * last word (3750 ms before L), or at the re-check after the reply's first voiced window. A pause of
+ * p ms reads p less the tail (up to 500) plus the 100 to 400 ms the next window takes to read voiced.
+ */
+const VOICE_QUIET_PAST_L_MS = 1_000
 
 /** Whether a recording check answered voice on air (RecordingActivity). */
 export function isVoiceOnAir(a: RecordingActivity): a is VoiceOnAir {
@@ -217,13 +261,25 @@ interface FrequencyMemory {
 	watchAfter: number
 	/** Visit (serial across the job) of the last sighting. */
 	seenVisit: number
+	/**
+	 * Visit of the last sighting of a candidate on it that was real on air (onCandidate: as long and
+	 * as strong as one that may qualify), though the channel gate did not answer in that visit, so
+	 * that visit did not miss it (heardOn). It brings no evidence.
+	 */
+	candidateVisit: number
 	/** Full visits in a row, of hops whose span holds it, that did not hear it. */
 	misses: number
 	/**
 	 * Its last track closed with no other track of the visit on it: visit, block count and clock
-	 * of the close. A sighting in the same block is a rollover of the same transmission.
+	 * of the close, and the end of that track's last block on air. A sighting in the same block is
+	 * a rollover of the same transmission.
 	 */
-	closedAt: { visit: number; block: number; at: number } | null
+	closedAt: {
+		visit: number
+		block: number
+		at: number
+		lastSample: number
+	} | null
 }
 
 interface HopState {
@@ -239,12 +295,70 @@ interface HopState {
 	visits: number
 	timeMs: number
 	holdMs: number
+	/** Accounting only: ended visits' measured phases of `timeMs` (hopPhaseStats). */
+	phases: PhaseTotals
 	/**
 	 * Ms this hop has waited since its last visit for other hops' visits that watched, held past one
 	 * coarse sweep or spent the follow budget (Visit.watched, longFollow, budgeted): they share L
 	 * (followBudgetMs), so no hop waits more than L for them between two of its visits.
 	 */
 	waitMs: number
+	/**
+	 * The hops (indices in the plan in force) that still owe a coarse visit before a voiced recording
+	 * may keep this hop again: every other hop when a visit's voice hold ends (Visit.voice), so the
+	 * sweep's return to this hop may hold the next transmission. No activity revisit comes back here
+	 * meanwhile (pickRevisit). Per hop: a long hold elsewhere never takes a transmission's voice hold
+	 * away. Named hops, not a count: a plan change has to know which of them were paid
+	 * (carryVoiceLocks).
+	 */
+	voiceLock: HopBits
+}
+
+/** Measured ms per phase of a visit (or of a hop's ended visits). Never read by a decision. */
+interface PhaseTotals {
+	settleMs: number
+	staleMs: number
+	dwellMs: number
+	qualifyMs: number
+}
+
+/**
+ * Phase of a visit the accounting clock is in. `command`: a tune not answered yet (overhead). `hold`:
+ * the visit's existing hold clock counts it (holdStartedAt, accountedHeldMs), this clock adds nothing.
+ */
+type PhaseKind = "command" | "settle" | "dwell" | "qualify" | "hold"
+
+/**
+ * Read-only accounting of one visit: which phase it is in since `at`, and the totals of its closed
+ * phases. `heardMs` is the sample time of the blocks heard since `at`: a dwell or a qualification
+ * counts only that, so wall time no block accounts for (a late or stalled stream) stays overhead.
+ */
+interface VisitClock extends PhaseTotals {
+	kind: PhaseKind
+	at: number
+	heardMs: number
+}
+
+const emptyPhases = (): PhaseTotals => ({
+	settleMs: 0,
+	staleMs: 0,
+	dwellMs: 0,
+	qualifyMs: 0,
+})
+
+/** Adds the running phase of `c`, up to `at`, to `into` (`c` itself when the phase closes). */
+function addRunningPhase(into: PhaseTotals, c: VisitClock, at: number): void {
+	const wall = Math.max(0, at - c.at)
+	if (c.kind === "settle") into.settleMs += wall
+	else if (c.kind === "dwell") into.dwellMs += Math.min(wall, c.heardMs)
+	else if (c.kind === "qualify") into.qualifyMs += Math.min(wall, c.heardMs)
+}
+
+function addPhases(into: PhaseTotals, from: PhaseTotals): void {
+	into.settleMs += from.settleMs
+	into.staleMs += from.staleMs
+	into.dwellMs += from.dwellMs
+	into.qualifyMs += from.qualifyMs
 }
 
 interface TrackInfo {
@@ -265,6 +379,28 @@ interface TrackInfo {
 	openBlocks: number
 	/** Blocks of the track (its age for the classifier). */
 	ageBlocks: number
+	/** The track was a candidate of this visit before its gate passed (awaitsClass). */
+	qualified: boolean
+	/** End of its last block on air, from its latest snapshot (the closing one at a close). */
+	lastSample: number
+}
+
+/** Energy on the hop the channel gate has not answered yet (onCandidate): no observation yet. */
+interface CandidateInfo {
+	centreHz: number
+	obwHz: number
+	/** On-air blocks of the track when last sighted: under minSurfaceBlocks it may be noise. */
+	blocks: number
+	/** Visit block count (Visit.blocks) the track's age counts from. */
+	onsetBlock: number
+	/** The longest its gate can take to pass it, in blocks (qualifyBlocks). */
+	answerBlocks: number
+	/**
+	 * Highest channel reading of its sightings in this epoch (channelReadingDb). The tracker publishes
+	 * at blocks 1, 2, 5 and 20 only and the gate's hysteresis carries a run across a low block, so
+	 * the last reading is no answer: only the gate's refusal, a close or the bound end a wait.
+	 */
+	levelDb: number
 }
 
 interface Visit {
@@ -296,6 +432,12 @@ interface Visit {
 	classWait: boolean
 	/** The dwell was lengthened once to listen to a carrier's frequency it missed (listenForGap). */
 	gapWait: boolean
+	/** Energy the channel gate has not answered yet in this epoch of the visit (onCandidate). */
+	candidates: Map<string, CandidateInfo>
+	/** The dwell was lengthened for the gate's answer: at most once per epoch (qualify). */
+	qualifyWait: boolean
+	/** Blocks this epoch's answers (qualify, waitForClass) added to the dwell (extendForAnswer). */
+	answerWaitBlocks: number
 	/** A follow (not decoded), a watch or a recording hold of this visit was allowed past one coarse sweep (capFor). */
 	longFollow: boolean
 	/** A decoded follow of this visit was allowed past one coarse sweep (capFor). */
@@ -325,8 +467,12 @@ interface Visit {
 	voiceId: string | null
 	/** Clock the recording check was last asked while Visit.voice was "on" (sampleVoice's pace only). */
 	voiceAskedAt: number | null
+	/** The visit's one keep for a voice answer still to come (RecordingActivity "judging") was used. */
+	judged: boolean
 	/** A carrier on air since before any visit saw it start showed itself: the hop's past score was it. */
 	newlyQuiet: boolean
+	/** Read-only phase accounting (hopPhaseStats). */
+	clock: VisitClock
 }
 
 /** Per-hop accounting: share of time, holds and the age of the last visit. */
@@ -336,6 +482,25 @@ export interface HopStat {
 	timeMs: number
 	holdMs: number
 	lastVisitAgeMs: number | null
+}
+
+/**
+ * HopStat with the phases of `timeMs`, in whole ms. `measuredSettleMs + measuredStaleMs +
+ * measuredDwellMs + measuredQualifyMs + holdMs + overheadMs === timeMs`: overhead is the rest, and
+ * each measured phase is rounded down so it cannot go negative. "measured" sets them apart from the
+ * planned `spec.settleMs`, `spec.dwellMs` and `plan.hops[i].dwellMs`.
+ */
+export interface HopPhaseStat extends HopStat {
+	/** From the tune's answer to the first block of its epoch, that block's own length left out. */
+	measuredSettleMs: number
+	/** Blocks of the previous hop's IQ the engine discarded after settling (onStale). */
+	measuredStaleMs: number
+	/** Heard blocks of the dwell the plan asked for, at most the wall time they took. */
+	measuredDwellMs: number
+	/** Heard blocks past that dwell: a gate's or a class's answer, a carrier's gap (decide). */
+	measuredQualifyMs: number
+	/** The rest: tune command and action queue latency, a dwell's stream arriving late. */
+	overheadMs: number
 }
 
 /** Options for one track update. */
@@ -389,17 +554,219 @@ interface Candidate {
 	kind: "confirm" | "follow"
 }
 
-function nearestHop(plan: HopPlan, centreHz: number): number {
-	let best = 0
-	let bestDist = Number.POSITIVE_INFINITY
-	plan.hops.forEach((hop, i) => {
-		const dist = Math.abs(hop.centreHz - centreHz)
-		if (dist < bestDist) {
-			best = i
-			bestDist = dist
+/** This snapshot's channel reading; a track the gate cannot measure reads as −Infinity. */
+function channelReadingDb(track: TrackSnapshot): number {
+	const snr = track.channelSnrDb
+	return snr !== undefined && Number.isFinite(snr)
+		? snr
+		: Number.NEGATIVE_INFINITY
+}
+
+/** Whether `outer` holds all of `inner`. */
+function spanHolds(outer: Hop["covered"], inner: Hop["covered"]): boolean {
+	return outer.startHz <= inner.startHz && inner.endHz <= outer.endHz
+}
+
+/**
+ * Whether two hops are the same window for a voice lock: they share more than half of the narrower
+ * span. Neighbouring hops overlap by a sliver and are not; the parts of a split hop, a wider hop over
+ * it and a small shift of its centre are.
+ */
+function spansShare(a: Hop["covered"], b: Hop["covered"]): boolean {
+	const shared = Math.min(a.endHz, b.endHz) - Math.max(a.startHz, b.startHz)
+	const narrower = Math.min(a.endHz - a.startHz, b.endHz - b.startHz)
+	return shared > narrower / 2
+}
+
+/**
+ * The hop of `plan` nearest a frequency, the lowest hop index among the nearest: sorted centres and a
+ * binary search. A re-plan makes one lookup per hop, so it costs (old + new) × log2(old) comparisons,
+ * not old × new.
+ */
+export function nearestHopIn(plan: HopPlan): (centreHz: number) => number {
+	const sorted = plan.hops
+		.map((hop, i) => ({ hz: hop.centreHz, i }))
+		.sort((a, b) => a.hz - b.hz || a.i - b.i)
+	const centres = sorted.filter((c, at) => c.hz !== sorted[at - 1]?.hz)
+	return centreHz => {
+		let lo = 0
+		let hi = centres.length
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1
+			if ((centres[mid]?.hz ?? Number.POSITIVE_INFINITY) < centreHz)
+				lo = mid + 1
+			else hi = mid
 		}
-	})
-	return best
+		const above = centres[lo]
+		const below = centres[lo - 1]
+		if (below === undefined) return above?.i ?? 0
+		if (above === undefined) return below.i
+		const toBelow = centreHz - below.hz
+		const toAbove = above.hz - centreHz
+		if (toBelow !== toAbove) return toBelow < toAbove ? below.i : above.i
+		return Math.min(below.i, above.i)
+	}
+}
+
+function bitsSet(word: number): number {
+	let w = word - ((word >>> 1) & 0x55555555)
+	w = (w & 0x33333333) + ((w >>> 2) & 0x33333333)
+	return Math.imul((w + (w >>> 4)) & 0x0f0f0f0f, 0x01010101) >>> 24
+}
+
+/**
+ * The hops a voice lock still owes: one bit per hop index of the plan in force. On N hops a lock is
+ * ceil(N / 32) words, so 1,025 hops all locked take 1,025 × 33 × 4 B = 135 KB, and adding a lock to
+ * another is ceil(N / 32) word operations where a Set takes one insert per hop.
+ */
+export class HopBits {
+	private count = 0
+
+	constructor(private readonly words: Uint32Array) {
+		for (const word of words) this.count += bitsSet(word)
+	}
+
+	/** Every hop of a plan of `hopCount` hops but `hopIndex`. */
+	static allBut(hopCount: number, hopIndex: number): HopBits {
+		const words = new Uint32Array(Math.ceil(hopCount / 32))
+		words.fill(0xffffffff)
+		if (hopCount % 32 !== 0) words[words.length - 1] = 2 ** (hopCount % 32) - 1
+		const bits = new HopBits(words)
+		bits.delete(hopIndex)
+		return bits
+	}
+
+	get size(): number {
+		return this.count
+	}
+
+	has(hopIndex: number): boolean {
+		return (((this.words[hopIndex >>> 5] ?? 0) >>> hopIndex) & 1) === 1
+	}
+
+	delete(hopIndex: number): void {
+		if (!this.has(hopIndex)) return
+		const at = hopIndex >>> 5
+		this.words[at] = (this.words[at] ?? 0) & ~(1 << hopIndex)
+		this.count--
+	}
+}
+
+/** Nothing owed; shared by every hop without a lock, since a lock is only ever replaced or shrunk. */
+const NO_HOPS = new HopBits(new Uint32Array(0))
+
+/**
+ * Carries what the voice holds still owe into a new plan. A new hop is locked when it takes over a
+ * locked old hop's window (spansShare; several can, after a split, and it can be one nearestHopIn
+ * mapped to another old hop). It owes every other new hop, except one whose whole span a paid old hop
+ * covered: that span was heard since the hold ended. Whatever the new plan added, or the locked hop's
+ * own window under a new centre, is owed, so one coarse sweep of the new plan pays it all: the coarse
+ * order reaches every other hop within one cycle, and a locked hop's visit pays its sibling's lock
+ * like any other. A locked old hop whose window the new plan drops leaves no lock. An unchanged plan
+ * whose hops neither hold nor share each other's windows keeps its locks as they are, the same
+ * objects: this rule gives exactly them.
+ *
+ * Cost, on a re-plan only and only when a lock is outstanding, for N old hops, M new hops and L
+ * locked old hops. Both plans are sorted by start and swept once: (N + M) log2(N + M) comparisons,
+ * then P tests of overlapping pairs. All hops of a plan have one width (hop-planner) and it advances
+ * by at least that width less the widest channel, so a new hop meets a few old hops, not N: at most
+ * 4 on a tiled plan, itself, its neighbours and the one it drops. P is N × M only if every old span
+ * overlaps every new one. Then, per lock with an heir, one read per new hop and per old hop holding
+ * it, and ceil(M / 32) word operations per heir: L × (M + holders) + L × heirs × ceil(M / 32). On
+ * 1,025 tiled hops all locked and new hops of half the width on the same centres (one holder, one
+ * heir): 4 × 1,025 + 1,024 × (2 × 1,025 + 33) = 2.1 M operations on typed arrays and 135 KB, against
+ * 1,025 × 1,025 span tests and up to 1,024 × 1,024 Set inserts when each lock was a Set. An unchanged
+ * plan stops after the sweep.
+ * `ops` counts the pairs tested, bit reads and word operations.
+ */
+export function carryVoiceLocks(
+	oldSpans: readonly Hop["covered"][],
+	oldLocks: readonly HopBits[],
+	nextSpans: readonly Hop["covered"][],
+): { locks: HopBits[]; ops: number } {
+	if (oldLocks.every(lock => lock.size === 0))
+		return { locks: nextSpans.map(() => NO_HOPS), ops: 0 }
+	const byStart = (spans: readonly Hop["covered"][]) =>
+		spans
+			.map((span, i) => ({ span, i }))
+			.sort((a, b) => a.span.startHz - b.span.startHz)
+	const olds = byStart(oldSpans)
+	/** Per new hop, the old hops that hold its whole span. */
+	const holders: number[][] = nextSpans.map(() => [])
+	/** Per old hop, the new hops over its window. */
+	const heirs: number[][] = oldSpans.map(() => [])
+	let ops = 0
+	let admitted = 0
+	const active: typeof olds = []
+	for (const { span, i: k } of byStart(nextSpans)) {
+		for (
+			let o = olds[admitted];
+			o !== undefined && o.span.startHz <= span.endHz;
+			o = olds[++admitted]
+		)
+			active.push(o)
+		let kept = 0
+		for (const o of active) {
+			ops++
+			// Past this hop's start: past every later hop's too.
+			if (o.span.endHz < span.startHz) continue
+			active[kept++] = o
+			if (spanHolds(o.span, span)) holders[k]?.push(o.i)
+			if (spansShare(span, o.span)) heirs[o.i]?.push(k)
+		}
+		active.length = kept
+	}
+	const onlyItself = (found: readonly number[], i: number): boolean =>
+		found.length === 1 && found[0] === i
+	if (
+		oldSpans.length === nextSpans.length &&
+		oldSpans.every((span, i) => {
+			const next = nextSpans[i]
+			return next?.startHz === span.startHz && next.endHz === span.endHz
+		}) &&
+		holders.every(onlyItself) &&
+		heirs.every(onlyItself)
+	)
+		return { locks: [...oldLocks], ops }
+	const wordCount = Math.ceil(nextSpans.length / 32)
+	const owed = new Uint32Array(wordCount)
+	const carried = new Map<number, Uint32Array>()
+	for (const [l, lock] of oldLocks.entries()) {
+		const heirsOfLock = heirs[l] ?? []
+		if (lock.size === 0 || heirsOfLock.length === 0) continue
+		owed.fill(0)
+		for (let k = 0; k < holders.length; k++) {
+			const found = holders[k] ?? []
+			let paid = false
+			ops++
+			for (let at = 0; at < found.length && !paid; at++) {
+				const i = found[at] ?? l
+				paid = i !== l && !lock.has(i)
+				ops++
+			}
+			if (!paid) owed[k >>> 5] = (owed[k >>> 5] ?? 0) | (1 << k)
+		}
+		for (const j of heirsOfLock) {
+			let words = carried.get(j)
+			if (words === undefined) {
+				words = new Uint32Array(wordCount)
+				carried.set(j, words)
+			}
+			for (let w = 0; w < wordCount; w++)
+				words[w] = (words[w] ?? 0) | (owed[w] ?? 0)
+			ops += wordCount
+		}
+	}
+	return {
+		locks: nextSpans.map((_, j) => {
+			const words = carried.get(j)
+			if (words === undefined) return NO_HOPS
+			const lock = new HopBits(words)
+			lock.delete(j)
+			return lock
+		}),
+		ops,
+	}
 }
 
 /**
@@ -557,6 +924,11 @@ export class SweepScheduler {
 	restartVisit(startSample: number): SchedulerAction[] {
 		const v = this.visit
 		if (v === null || this.phase === "idle") return []
+		// The epoch opened before the tune's answer (a timer-settled epoch can): the two cannot be
+		// told apart, and the engine was settling, so it all counts as settle. Settle runs on until the
+		// first block: a timer-settled epoch is announced ahead of its first settled sample (onBlock).
+		if (v.clock.kind === "command") v.clock.kind = "settle"
+		this.enterPhase(v, "settle")
 		const heldAtRestart = this.heldAccountingFloorMs
 		const actions: SchedulerAction[] =
 			this.phase === "hold" ? [{ type: "stop-probes" }] : []
@@ -564,6 +936,11 @@ export class SweepScheduler {
 		this.lastBlockEnd = startSample
 		v.dwellEnd = startSample + this.dwellSamples(this.parkedVisit)
 		v.tracks.clear()
+		// A new epoch: the gate starts over and what it heard is gone, so it may be waited for again.
+		v.candidates.clear()
+		v.qualifyWait = false
+		v.classWait = false
+		v.answerWaitBlocks = 0
 		this.forgetGapEvidence(v)
 		// The holds already run still count (holdOrigin): a restart is no fresh budget. They ran
 		// until the last block or tick heard (heardAt), not until now: a pause before the restart
@@ -625,6 +1002,7 @@ export class SweepScheduler {
 				endSample - (this.lastBlockEnd ?? endSample - this.blockSamples),
 			),
 		)
+		this.noteHeard(v, samples)
 		if (v.dwellEnd === null)
 			v.dwellEnd = endSample - samples + this.dwellSamples(true)
 		this.lastBlockEnd = endSample
@@ -645,12 +1023,11 @@ export class SweepScheduler {
 		}
 		v.blocks++
 		for (const t of v.tracks.values()) if (t.open) t.openBlocks++
-		if (
-			this.phase === "dwell" &&
-			v.dwellEnd !== null &&
-			endSample >= v.dwellEnd
-		)
-			return [...actions, ...this.decide()]
+		if (this.phase === "dwell" && v.dwellEnd !== null) {
+			// Every answer the visit waits for came early: the wait ends with this block.
+			if (endSample < v.dwellEnd && this.waitAnswered(v)) v.dwellEnd = endSample
+			if (endSample >= v.dwellEnd) return [...actions, ...this.decide()]
+		}
 		return actions
 	}
 
@@ -699,6 +1076,8 @@ export class SweepScheduler {
 			return out
 		}
 		v.blocks += count - 1
+		v.clock.heardMs +=
+			((count - 1) * this.blockSamples * 1000) / this.sampleRateHz
 		for (const t of v.tracks.values()) if (t.open) t.openBlocks += count - 1
 		this.lastBlockEnd = before
 		return this.onBlock(endSample)
@@ -709,8 +1088,48 @@ export class SweepScheduler {
 			this.phase === "dwell" &&
 			this.visit !== null &&
 			this.visit.dwellEnd !== null
-		)
+		) {
 			this.visit.dwellEnd += blocks * this.blockSamples
+			this.noteStale(this.visit, blocks)
+		}
+	}
+
+	/**
+	 * Accounting of a heard block: one addition per block, no allocation. The first block after a
+	 * settle ends it: its own length is dwell, the wall time before that was settle.
+	 */
+	private noteHeard(v: Visit, samples: number): void {
+		const c = v.clock
+		const heardMs = (samples * 1000) / this.sampleRateHz
+		if (c.kind !== "settle") {
+			c.heardMs += heardMs
+			return
+		}
+		const at = this.accountingPausedAt ?? this.now()
+		const block = Math.min(heardMs, Math.max(0, at - c.at))
+		this.closePhase(v, at)
+		c.settleMs -= block
+		c.at -= block
+		c.heardMs = heardMs
+		c.kind = "dwell"
+	}
+
+	/**
+	 * Wall time since the discarded blocks' predecessor counts as stale IQ up to their length; a dwell
+	 * keeps the blocks it heard before them, and the excess stays overhead (dwell) or settle.
+	 */
+	private noteStale(v: Visit, blocks: number): void {
+		const c = v.clock
+		if (c.kind !== "settle" && c.kind !== "dwell" && c.kind !== "qualify")
+			return
+		const at = this.accountingPausedAt ?? this.now()
+		const wall = Math.max(0, at - c.at)
+		const heard = c.kind === "settle" ? 0 : Math.min(wall, c.heardMs)
+		const lengthMs = (blocks * this.blockSamples * 1000) / this.sampleRateHz
+		const stale = Math.min(wall - heard, lengthMs)
+		this.closePhase(v, at)
+		if (c.kind === "settle") c.settleMs -= stale
+		c.staleMs += stale
 	}
 
 	onTrack(
@@ -726,6 +1145,7 @@ export class SweepScheduler {
 		const flagged =
 			track.flags.truncated || track.flags.iqImage || track.flags.spur
 		const known = v.tracks.get(track.trackId)
+		const qualified = v.candidates.delete(track.trackId)
 		this.remember(v, track, known === undefined, flagged)
 		const followOnAir = hints.followOnAir === true && !flagged
 		const voiceLater = hints.voiceLater === true && !flagged
@@ -743,8 +1163,11 @@ export class SweepScheduler {
 				tried: false,
 				openBlocks: 0,
 				ageBlocks: track.blocks,
+				qualified,
+				lastSample: track.lastSample,
 			})
 		} else {
+			known.lastSample = track.lastSample
 			known.snrDb = track.snrDb
 			known.centreHz = track.centreHz
 			known.obwHz = track.obwHz
@@ -756,6 +1179,7 @@ export class SweepScheduler {
 			known.flagged ||= flagged
 			known.ageBlocks = Math.max(known.ageBlocks, track.blocks)
 			known.confirmHoldMs = Math.max(known.confirmHoldMs, confirmHoldMs)
+			known.qualified ||= qualified
 		}
 		// the held track turned out truncated or an image: drop its probe and hold
 		if (
@@ -767,6 +1191,133 @@ export class SweepScheduler {
 			return this.afterProbe()
 		this.followReopened(track.trackId)
 		return []
+	}
+
+	/**
+	 * Energy on the hop that the channel gate has not answered yet: it has no observation, so it is no
+	 * track of the visit (onTrack), yet the visit should not end before its gate can answer. Brings
+	 * no evidence, and marks its known frequency as on air only when it is as long and as strong as
+	 * one that may qualify: a weaker sighting must not keep a carrier's memory or hide its gap.
+	 * `gateMinDurationMs` is the longest its gate rule can take to pass it. Told on the track's open
+	 * and updates (blocks 1, 2, 5, 20, ...).
+	 */
+	onCandidate(track: TrackSnapshot, gateMinDurationMs: number): void {
+		const v = this.visit
+		if (v === null || (this.phase !== "dwell" && this.phase !== "hold")) return
+		if (track.flags.truncated || track.flags.iqImage || track.flags.spur) {
+			v.candidates.delete(track.trackId)
+			return
+		}
+		const onsetBlock = v.blocks - track.blocks + 1
+		const was = v.candidates.get(track.trackId)
+		const candidate: CandidateInfo = {
+			centreHz: track.centreHz,
+			obwHz: track.obwHz,
+			blocks: track.blocks,
+			onsetBlock: Math.min(was?.onsetBlock ?? onsetBlock, onsetBlock),
+			answerBlocks: this.qualifyBlocks(gateMinDurationMs),
+			levelDb: Math.max(
+				was?.levelDb ?? Number.NEGATIVE_INFINITY,
+				channelReadingDb(track),
+			),
+		}
+		v.candidates.set(track.trackId, candidate)
+		if (this.realOnAir(candidate)) {
+			const known = this.memoryAt(track.centreHz, track.obwHz)
+			if (known !== undefined) known.candidateVisit = v.serial
+		}
+	}
+
+	/** A candidate closed without passing its gate: refused, the hop is released at once (onBlock). */
+	onCandidateClosed(track: TrackSnapshot): void {
+		this.visit?.candidates.delete(track.trackId)
+	}
+
+	/**
+	 * Blocks from a track's first block until its qualification is answered: its gate's minimum
+	 * duration or the class settle, whichever is later (both count from the track's first block),
+	 * and QUALIFY_MARGIN_BLOCKS. 50 ms blocks: a 300 ms gate max(6, 5) + 2 = 8 blocks (400 ms), a
+	 * 100 ms gate max(2, 5) + 2 = 7 blocks (350 ms).
+	 */
+	private qualifyBlocks(gateMinDurationMs: number): number {
+		const blockMs = (this.blockSamples * 1000) / this.sampleRateHz
+		return (
+			Math.max(Math.ceil(gateMinDurationMs / blockMs), CLASS_SETTLE_BLOCKS) +
+			QUALIFY_MARGIN_BLOCKS
+		)
+	}
+
+	/**
+	 * Real on air, as far as a candidate can tell: on air for minSurfaceBlocks blocks (a single block
+	 * may be noise) and read at or over the lowest threshold a gate run can stay on at, in any
+	 * sighting of this epoch. A track the gate cannot measure, or that never read that high, has no
+	 * run to pass; this leaves out the noise and quantisation lines a hop shows (3 dB or less in
+	 * their channel).
+	 */
+	private realOnAir(c: CandidateInfo): boolean {
+		return c.blocks >= this.minSurfaceBlocks && c.levelDb >= CHANNEL_GATE_K_DB
+	}
+
+	/**
+	 * Candidates the dwell may wait for: real on air (on a next visit a signal still on air is
+	 * caught), on a frequency that may be held. A frequency with carrier evidence therefore qualifies
+	 * only when its retry is due, as the sweep's one carrier hold (mayHoldFrequency). Nothing else is
+	 * remembered against a frequency: a failed or unheld qualification costs its hop this wait again
+	 * on its next visit, since any memory of it can skip a real call on that frequency.
+	 */
+	private mayQualify(c: CandidateInfo): boolean {
+		if (!this.realOnAir(c)) return false
+		const m = this.memoryAt(c.centreHz, c.obwHz)
+		return m === undefined || this.mayHoldFrequency(m)
+	}
+
+	/**
+	 * Lengthens the dwell for its candidates' gate answer: once per epoch, until the youngest of them
+	 * could have had it (qualifyBlocks). The wait ends as soon as none is left to answer (onBlock).
+	 * A candidate has at least minSurfaceBlocks blocks when the dwell ends, so the wait is at most
+	 * 8 − 2 = 6 blocks (300 ms at 50 ms) per epoch, 5 blocks (250 ms) for a signal on air on arrival:
+	 * its visit listens 400 ms. A later candidate waits only for what is left of it. A parked hop is
+	 * never left and needs no wait. A job that does not hold waits too: without the answer no
+	 * observation exists at all.
+	 */
+	private qualify(v: Visit): boolean {
+		if (this.parkedVisit || v.qualifyWait) return false
+		let need = 0
+		for (const c of v.candidates.values())
+			if (this.mayQualify(c))
+				need = Math.max(need, c.answerBlocks - (v.blocks - c.onsetBlock))
+		if (!this.extendForAnswer(v, need)) return false
+		v.qualifyWait = true
+		return true
+	}
+
+	/**
+	 * Lengthens the dwell by `need` blocks for an answer, within what is left of the epoch's cap: the
+	 * longest qualification: a standard gate's answer for a candidate of minSurfaceBlocks when the
+	 * dwell ends (8 − 2 = 6 blocks, 300 ms, at 50 ms; a longer block's class settle takes more, 5 of
+	 * 100 ms). A qualification and a class wait share it, however many candidates the hop has, so one
+	 * epoch never adds more: without it a young burst pass (3 blocks) and then a candidate opening at
+	 * its end (6) would add 9.
+	 */
+	private extendForAnswer(v: Visit, need: number): boolean {
+		const cap =
+			this.qualifyBlocks(CHANNEL_GATE_MIN_DURATION_MS) - this.minSurfaceBlocks
+		const blocks = Math.min(need, cap - v.answerWaitBlocks)
+		if (blocks <= 0 || v.dwellEnd === null) return false
+		v.answerWaitBlocks += blocks
+		v.dwellEnd += blocks * this.blockSamples
+		return true
+	}
+
+	/**
+	 * The dwell waits for an answer (the gate's, or a young track's class) and none is left to come.
+	 * A wait to hear a carrier's gap (Visit.gapWait) is no answer: it runs its length.
+	 */
+	private waitAnswered(v: Visit): boolean {
+		if ((!v.qualifyWait && !v.classWait) || v.gapWait) return false
+		for (const c of v.candidates.values()) if (this.mayQualify(c)) return false
+		for (const t of v.tracks.values()) if (this.awaitsClass(t)) return false
+		return true
 	}
 
 	/**
@@ -935,9 +1486,26 @@ export class SweepScheduler {
 	private recheckRecording(hold: Hold, now: number): SchedulerAction[] {
 		const active = this.askRecording(now)
 		const v = this.visit
+		// A hop kept within L whose recording then voices (a pause at the keep, a late verdict): the
+		// transmission gets its voice hold now, as if it had answered voice at the keep, so under the
+		// same guard: a recording only of frequencies with carrier evidence stays within L.
+		if (
+			v !== null &&
+			isVoiceOnAir(active) &&
+			v.voice === "no" &&
+			!this.voiceLocked(v) &&
+			this.recordedTrack(hold.trackId) !== null
+		) {
+			this.startVoiceHold(v, active, now)
+			hold.cap = this.holdOrigin() + this.spec.hold.maxHoldMs
+			v.recordEndMs = this.spec.hold.maxHoldMs
+		}
 		// A recording not voice (or whose voice hold is spent) keeps only what L has left
 		// (keepForRecording's non-voice cap).
-		if (active === true || (isVoiceOnAir(active) && v?.voice === "spent"))
+		if (
+			active === true ||
+			((isVoiceOnAir(active) || active === "judging") && v?.voice === "spent")
+		)
 			hold.cap = Math.min(hold.cap, this.holdOrigin() + this.followBudgetMs())
 		if (now >= hold.cap || active === false) return this.leaveHop([])
 		const next = this.nextCandidate()
@@ -967,12 +1535,18 @@ export class SweepScheduler {
 	 * is voiced), up to `hold.maxHoldMs`
 	 * whatever L has left, so a 28 s ID is recorded whole; the visit's voice hold is then spent
 	 * (Visit.voice: a later voice answer of the visit keeps L only) and every hop gets a coarse visit
-	 * before the hop is followed or kept again (endVisit, longHoldLock). A recording that is not
-	 * voice (true) keeps L. Not while the long-hold lock holds, while parked (a parked hop is
-	 * never left), on a one-hop plan, for a signals-only job or under `hold.policy: "never"`. A
-	 * hold that ran past one coarse sweep locks the next long follow out (endVisit). The held
+	 * before the hop is followed or kept again (endVisit, longHoldLock, HopState.voiceLock). A
+	 * recording that is not voice (true) keeps L, and not while the long-hold lock holds: that lock
+	 * bars voice only on a hop whose own voice hold set it (voiceLock), so a transmission caught while
+	 * another hop's watch or voice hold holds the lock is still kept to its end. Not while parked (a
+	 * parked hop is never left), on a one-hop plan, for a signals-only job or under
+	 * `hold.policy: "never"`. A hold that ran past one coarse sweep locks the next long follow out
+	 * (endVisit). The held
 	 * frequency's evidence is charged as on any leave; the `record` hold itself brings none. Never
-	 * when every frequency the recording can be of has carrier evidence (recordedTrack).
+	 * when every frequency the recording can be of has carrier evidence (recordedTrack). A session
+	 * whose voice answer is still to come ("judging") keeps the hop for that answer as voice does, at
+	 * most WIDEBAND_VOICE_JUDGE_MS (3000 ms) and once per visit, spending L as a recording hold does;
+	 * then the answer rules (recheckRecording).
 	 */
 	private keepForRecording(): boolean {
 		const v = this.visit
@@ -980,7 +1554,6 @@ export class SweepScheduler {
 			this.recordingActive === undefined ||
 			v === null ||
 			this.parkedVisit ||
-			this.longHoldLock > 0 ||
 			this.plan.hops.length < 2 ||
 			this.spec.signalsOnly === true ||
 			this.spec.hold.policy === "never"
@@ -990,34 +1563,42 @@ export class SweepScheduler {
 		const start = this.holdOrigin()
 		const active = this.askRecording(now)
 		if (active === false) return false
+		const judging = active === "judging"
+		if (judging && (v.voice !== "no" || v.judged)) return false
 		// Voice on air in the current transmission, and the visit's voice hold not spent yet.
 		const voice = isVoiceOnAir(active) && v.voice !== "spent"
+		if (voice || judging ? this.voiceLocked(v) : this.longHoldLock > 0)
+			return false
+		const longest = start + this.spec.hold.maxHoldMs
 		const cap = voice
-			? start + this.spec.hold.maxHoldMs
-			: Math.min(
-					start + this.spec.hold.maxHoldMs,
-					start + this.followBudgetMs(),
-				)
+			? longest
+			: judging
+				? Math.min(longest, now + WIDEBAND_VOICE_JUDGE_MS)
+				: Math.min(longest, start + this.followBudgetMs())
 		if (now >= cap) return false
 		const heldId = this.hold?.trackId
-		// Charged first, so a hold that just heard a carrier counts. A recording only of frequencies
-		// with carrier evidence is held under the carrier rules only: keeping its hop for it would
-		// hold them on every visit again.
-		this.endHold(true)
+		// Charged first, so a hold that just heard a carrier counts, unless voice is on air: an unbroken
+		// watch of a transmission heard speaking is no carrier evidence (a 28 s ID caught mid-way, its
+		// onset unseen, would be cut at the watch). A recording only of frequencies with carrier evidence
+		// is held under the carrier rules only: keeping its hop for it would hold them on every visit
+		// again.
+		this.endHold(true, voice)
 		const trackId = this.recordedTrack(heldId)
 		if (trackId === null) return false
+		// Closed at `now`, where the hold's own clock starts: the recording check may take time, and
+		// blocks heard meanwhile would count in both the dwell and the hold.
+		if (v.holdStartedAt === null) this.enterPhase(v, "hold", now)
 		v.holdStartedAt ??= now
 		v.budgeted = true
-		if (voice) {
-			v.voice = "on"
-			v.voiceId = active.voice
-			v.voiceAskedAt = now
-		}
-		v.recordEndMs = cap - start
+		if (voice) this.startVoiceHold(v, active, now)
+		if (judging) v.judged = true
+		// A judging hold's cap is a re-check, not a forced leave: voice answered since the last one
+		// still gets its hold at the cap.
+		v.recordEndMs = cap - start + (judging ? RECORD_RECHECK_MS : 0)
 		this.noteLong({
 			cap,
 			watch: false,
-			long: cap > start + this.chainBudgetMs(),
+			long: !judging && cap > start + this.chainBudgetMs(),
 		})
 		this.hold = {
 			trackId,
@@ -1033,18 +1614,36 @@ export class SweepScheduler {
 		return true
 	}
 
+	/** Whether the hop's own last voice hold still owes the sweep its coarse visits. */
+	private voiceLocked(v: Visit): boolean {
+		return (this.hops[v.hopIndex]?.voiceLock.size ?? 0) > 0
+	}
+
+	private startVoiceHold(v: Visit, active: VoiceOnAir, now: number): void {
+		v.voice = "on"
+		v.voiceId = active.voice
+		v.voiceAskedAt = now
+	}
+
 	/**
 	 * Asks the recording check (false without one). While the visit's voice hold is on
 	 * (Visit.voice), any answer that is not voice of the transmission the hold started for
 	 * (Visit.voiceId) spends it (spendVoice), whatever hold runs: a non-voice answer, or voice of
 	 * another transmission (a turnaround passed, even one the check never saw because the event
-	 * loop stalled meanwhile). How long the check went unasked never spends it.
+	 * loop stalled meanwhile), and once the hold reached L an answer quiet for over
+	 * VOICE_QUIET_PAST_L_MS. How long the check went unasked never spends it.
 	 */
 	private askRecording(now: number): RecordingActivity {
 		const active = this.recordingActive?.() ?? false
 		const v = this.visit
 		if (v === null || v.voice !== "on") return active
-		if (!isVoiceOnAir(active) || active.voice !== v.voiceId) this.spendVoice(v)
+		if (
+			!isVoiceOnAir(active) ||
+			active.voice !== v.voiceId ||
+			((active.quietMs ?? 0) > VOICE_QUIET_PAST_L_MS &&
+				now >= this.holdOrigin() + this.lockAfterMs())
+		)
+			this.spendVoice(v)
 		else v.voiceAskedAt = now
 		return active
 	}
@@ -1169,8 +1768,14 @@ export class SweepScheduler {
 			)
 			this.visitPausedMs += Math.max(0, this.now() - pausedSince)
 			this.accountingPausedAt = null
+			if (this.visit !== null) {
+				this.visit.clock.at = this.now()
+				this.visit.clock.heardMs = 0
+			}
 		} else if (!active && this.accountingPausedAt === null) {
 			this.accountingPausedAt = this.now()
+			if (this.visit !== null)
+				this.closePhase(this.visit, this.accountingPausedAt)
 			this.heldAccountingFloorMs =
 				this.visit === null
 					? null
@@ -1185,9 +1790,83 @@ export class SweepScheduler {
 		)
 	}
 
-	/** Per-hop totals, excluding pauses; last-visit age uses the wall clock. */
-	hopStats(): HopStat[] {
+	/** Closes the running phase at `at`; the clock runs on from there in the same phase. */
+	private closePhase(v: Visit, at: number): void {
+		const c = v.clock
+		addRunningPhase(c, c, at)
+		c.heardMs = 0
+		c.at = Math.max(c.at, at)
+	}
+
+	private enterPhase(v: Visit, kind: PhaseKind, at = this.now()): void {
+		this.closePhase(v, this.accountingPausedAt ?? at)
+		v.clock.kind = kind
+	}
+
+	/**
+	 * The job runner sends the visit's tune (again, for a re-send). Accounting only. A hold whose clock
+	 * still runs (no pause since it started) keeps counting: it counts until the restart.
+	 */
+	noteTuneStarted(hopIndex: number): void {
+		const v = this.visit
+		if (
+			v === null ||
+			v.hopIndex !== hopIndex ||
+			(v.holdStartedAt !== null && this.heldAccountingFloorMs === null)
+		)
+			return
+		this.enterPhase(v, "command")
+	}
+
+	/** The tune was answered: what follows until its epoch opens is settle. Accounting only. */
+	noteTuneAnswered(hopIndex: number): void {
+		const v = this.visit
+		if (v !== null && v.hopIndex === hopIndex && v.clock.kind === "command")
+			this.enterPhase(v, "settle")
+	}
+
+	/**
+	 * hopStats with the phases of `timeMs` (HopPhaseStat). A pause counts in none of them: the running
+	 * phase closes where the pause began and its clock restarts when the pause ends, as timeMs does.
+	 * Cost: one object per hop per job view read; `scanner:progress` carries no hops and never asks.
+	 */
+	hopPhaseStats(): HopPhaseStat[] {
 		const now = this.now()
+		const at = this.accountingPausedAt ?? now
+		const v = this.visit
+		return this.hopStats(now).map((stat, i) => {
+			const sum = emptyPhases()
+			const ended = this.hops[i]?.phases
+			if (ended !== undefined) addPhases(sum, ended)
+			if (v !== null && v.hopIndex === i) {
+				addPhases(sum, v.clock)
+				addRunningPhase(sum, v.clock, at)
+			}
+			const measuredSettleMs = Math.floor(sum.settleMs)
+			const measuredStaleMs = Math.floor(sum.staleMs)
+			const measuredDwellMs = Math.floor(sum.dwellMs)
+			const measuredQualifyMs = Math.floor(sum.qualifyMs)
+			return {
+				...stat,
+				measuredSettleMs,
+				measuredStaleMs,
+				measuredDwellMs,
+				measuredQualifyMs,
+				overheadMs: Math.max(
+					0,
+					stat.timeMs -
+						measuredSettleMs -
+						measuredStaleMs -
+						measuredDwellMs -
+						measuredQualifyMs -
+						stat.holdMs,
+				),
+			}
+		})
+	}
+
+	/** Per-hop totals, excluding pauses; last-visit age uses the wall clock. */
+	hopStats(now = this.now()): HopStat[] {
 		const v = this.visit
 		return this.hops.map((hop, hopIndex) => {
 			const current = v !== null && v.hopIndex === hopIndex
@@ -1264,7 +1943,9 @@ export class SweepScheduler {
 			visits: 0,
 			timeMs: 0,
 			holdMs: 0,
+			phases: emptyPhases(),
 			waitMs: 0,
+			voiceLock: NO_HOPS,
 		}
 	}
 
@@ -1354,6 +2035,7 @@ export class SweepScheduler {
 				runFrom: now,
 				watchAfter: 0,
 				seenVisit: v.serial,
+				candidateVisit: 0,
 				misses: 0,
 				closedAt: null,
 			}
@@ -1374,7 +2056,8 @@ export class SweepScheduler {
 			if (closed.block !== v.blocks) {
 				entry.runFrom = now
 				entry.watchAfter = 0
-				if (now - closed.at >= TRAFFIC_GAP_MS) this.markTraffic(entry)
+				if (this.gapOnAirMs(closed.lastSample, track) >= TRAFFIC_GAP_MS)
+					this.markTraffic(entry)
 				else {
 					// flapPairMs: a known call flaps for its rest only twice in time.
 					const since =
@@ -1499,7 +2182,34 @@ export class SweepScheduler {
 		if (memory === undefined) return
 		for (const other of v.tracks.values())
 			if (other.open && this.memoryOf(other) === memory) return
-		memory.closedAt = { visit: v.serial, block: v.blocks, at: this.now() }
+		memory.closedAt = {
+			visit: v.serial,
+			block: v.blocks,
+			at: this.now(),
+			lastSample: t.lastSample,
+		}
+	}
+
+	/**
+	 * The on-air gap between a closed track and a track that opened since, as TRAFFIC_GAP_MS reads it:
+	 * from sample positions, so neither the close's lag nor the reopening's wait for its gate counts.
+	 * The first block of the run is the earlier of the track's start and its on-air blocks back from
+	 * its last sample (the sweep preview's snapshots start at their current block).
+	 */
+	private gapOnAirMs(closedLastSample: number, track: TrackSnapshot): number {
+		const first = Math.min(
+			track.startSample,
+			track.lastSample - track.blocks * this.blockSamples,
+		)
+		return (
+			((first - closedLastSample + this.blockSamples) * 1000) /
+			this.sampleRateHz
+		)
+	}
+
+	/** The visit heard it on air: as a track, or as a candidate its gate has not answered yet. */
+	private heardOn(m: FrequencyMemory, v: Visit): boolean {
+		return m.seenVisit === v.serial || m.candidateVisit === v.serial
 	}
 
 	/** Covered span of hop `hopIndex` holds `m`. */
@@ -1519,6 +2229,7 @@ export class SweepScheduler {
 		tracks: Map<string, TrackInfo>,
 		gainTenthsDb: number | null,
 	): Visit {
+		const now = this.now()
 		return {
 			hopIndex,
 			revisit,
@@ -1529,11 +2240,14 @@ export class SweepScheduler {
 			holdStartedAt: null,
 			heldBeforeMs: 0,
 			gainTenthsDb,
-			startedAt: this.now(),
+			startedAt: now,
 			serial: ++this.visitSerial,
 			epochBlock: 0,
 			classWait: false,
 			gapWait: false,
+			candidates: new Map(),
+			qualifyWait: false,
+			answerWaitBlocks: 0,
 			longFollow: false,
 			longDecoded: false,
 			budgeted: false,
@@ -1542,7 +2256,9 @@ export class SweepScheduler {
 			voice: "no",
 			voiceId: null,
 			voiceAskedAt: null,
+			judged: false,
 			newlyQuiet: false,
+			clock: { ...emptyPhases(), kind: "command", at: now, heardMs: 0 },
 		}
 	}
 
@@ -1578,11 +2294,18 @@ export class SweepScheduler {
 		if (this.spec.hold.policy !== "never") {
 			const next = this.nextCandidate()
 			if (next !== null) {
+				this.enterPhase(v, "hold")
 				v.holdStartedAt = this.now()
 				return this.startHold(next)
 			}
-			if (this.waitForClass(v)) return []
-			if (this.listenForGap(v)) return []
+			if (this.waitForClass(v) || this.listenForGap(v)) {
+				this.enterPhase(v, "qualify")
+				return []
+			}
+		}
+		if (this.qualify(v)) {
+			this.enterPhase(v, "qualify")
+			return []
 		}
 		return this.leaveOrRecord([])
 	}
@@ -1616,7 +2339,7 @@ export class SweepScheduler {
 			m =>
 				m.evidence === "carrier" &&
 				!m.flaps &&
-				m.seenVisit !== v.serial &&
+				!this.heardOn(m, v) &&
 				(m.suspect || now >= m.restUntil) &&
 				this.covers(v.hopIndex, m),
 		)
@@ -1631,8 +2354,13 @@ export class SweepScheduler {
 	/**
 	 * A track younger than CLASS_SETTLE_BLOCKS cannot be labelled analog voice yet: with nothing
 	 * else to hold, the dwell waits for it once (at most CLASS_SETTLE_BLOCKS − 1 blocks), so a
-	 * label that arrives with its 5th block can still start a follow. Only a track whose spectrum
-	 * reads as analog voice (`voiceLater`) is waited for; any other young burst leaves at the dwell.
+	 * label that arrives with its 5th block can still start a follow. A track whose spectrum reads
+	 * as analog voice (`voiceLater`) is waited for, and one that just passed its gate as a candidate
+	 * of this visit (TrackInfo.qualified: a burst gate passes at the 2nd or 3rd block, on a spectrum
+	 * too young to read), so a voice call after a steady carrier gets its hold. A candidate opening
+	 * at the dwell's 2nd block and passing at its 3rd waits to visit block 6: 3 blocks past the dwell
+	 * (150 ms at 50 ms), at most, within the epoch's cap (extendForAnswer). Any other young burst
+	 * leaves at the dwell.
 	 */
 	private waitForClass(v: Visit): boolean {
 		if (
@@ -1644,19 +2372,22 @@ export class SweepScheduler {
 			return false
 		let need = 0
 		for (const t of v.tracks.values())
-			if (
-				t.open &&
-				!t.tried &&
-				this.mayHold(t) &&
-				!t.followOnAir &&
-				t.voiceLater &&
-				t.ageBlocks < CLASS_SETTLE_BLOCKS
-			)
+			if (this.awaitsClass(t))
 				need = Math.max(need, CLASS_SETTLE_BLOCKS - t.ageBlocks)
-		if (need === 0) return false
+		if (!this.extendForAnswer(v, need)) return false
 		v.classWait = true
-		v.dwellEnd += need * this.blockSamples
 		return true
+	}
+
+	private awaitsClass(t: TrackInfo): boolean {
+		return (
+			t.open &&
+			!t.tried &&
+			this.mayHold(t) &&
+			!t.followOnAir &&
+			(t.voiceLater || t.qualified) &&
+			t.ageBlocks < CLASS_SETTLE_BLOCKS
+		)
 	}
 
 	/**
@@ -1666,7 +2397,10 @@ export class SweepScheduler {
 	private mayHold(t: TrackInfo): boolean {
 		if (t.flagged) return false
 		const m = this.memoryOf(t)
-		if (m === undefined) return true
+		return m === undefined || this.mayHoldFrequency(m)
+	}
+
+	private mayHoldFrequency(m: FrequencyMemory): boolean {
 		if (m.evidence === "unknown") return this.coarseVisits >= m.watchAfter
 		return (
 			m.evidence !== "carrier" ||
@@ -1764,7 +2498,10 @@ export class SweepScheduler {
 	 * - decoded (`decoded`): M (a long follow), or S while the long-hold lock holds;
 	 * - analog voice under policy `hold` on traffic: what L has left (the other hops' waits)
 	 *   (followBudgetMs, at most M), spending it; while the long-hold lock holds at most S of it,
-	 *   and on the hop that set the lock the probe only;
+	 *   and on the hop that set the lock the probe only; never under WIDEBAND_VOICE_ANSWER_MS (1500
+	 *   ms) unless the hop still owes a sweep for its last voice hold: one hold of L elsewhere zeroes
+	 *   the budget until every hop was visited, and a landing that leaves before the recorder can
+	 *   answer never gets the voice hold keepForRecording would give it;
 	 * - carrier evidence: min(S, N, what L has left), a watch;
 	 * - traffic that is not voice: not followed (the probe only);
 	 * - analog voice not known, whose onset a visit saw, watched once already in its run (and every
@@ -1806,16 +2543,20 @@ export class SweepScheduler {
 			// Under the lock the hop whose long hold set it is probed, not followed (lockedOut);
 			// another is followed one coarse sweep at most, within what L has left (a hop that
 			// already waited L for the others is not kept waiting longer).
-			const cap = Math.min(long, start + this.followBudgetMs())
+			const budget = start + this.followBudgetMs()
+			const floor = this.voiceLocked(v)
+				? start
+				: start + WIDEBAND_VOICE_ANSWER_MS
 			if (this.longHoldLock > 0)
 				return this.lockedOut(v.hopIndex)
 					? { cap: now, watch: false, long: false }
 					: {
-							cap: Math.min(sweep, cap),
+							cap: Math.min(long, Math.max(floor, Math.min(sweep, budget))),
 							watch: false,
 							long: false,
 							budget: true,
 						}
+			const cap = Math.min(long, Math.max(floor, budget))
 			return { cap, watch: false, long: cap > sweep, budget: true }
 		}
 		if (evidence === "traffic" || this.spec.hold.policy !== "hold")
@@ -2009,6 +2750,23 @@ export class SweepScheduler {
 					t = other
 					break
 				}
+		// A probe as short as its unlabelled class's, ended before the label could come: wait for it
+		// once, as a dwell does (waitForClass), so a voice just passed is followed, not left.
+		if (
+			hold !== null &&
+			v !== null &&
+			t !== undefined &&
+			this.classComing(v, t)
+		) {
+			const blockMs = (this.blockSamples * 1000) / this.sampleRateHz
+			v.classWait = true
+			hold.cap = Math.min(
+				this.maxHoldDeadline(),
+				this.now() + (CLASS_SETTLE_BLOCKS - t.ageBlocks) * blockMs,
+			)
+			hold.deadline = hold.cap
+			return []
+		}
 		// A probed track that closed during the probe, with no reopening yet, is held in its hang
 		// (on a frequency not known as traffic, long enough to class the gap).
 		if (
@@ -2029,12 +2787,31 @@ export class SweepScheduler {
 	}
 
 	/**
+	 * A probed track too young to be labelled that may yet read as analog voice (awaitsClass but for
+	 * being tried), and the visit has not waited for a class: at most CLASS_SETTLE_BLOCKS − 1 blocks.
+	 */
+	private classComing(v: Visit, t: TrackInfo): boolean {
+		return (
+			!v.classWait &&
+			t.open &&
+			!t.flagged &&
+			!t.followOnAir &&
+			(t.voiceLater || t.qualified) &&
+			t.ageBlocks < CLASS_SETTLE_BLOCKS &&
+			this.spec.hold.policy === "hold" &&
+			this.spec.signalsOnly !== true
+		)
+	}
+
+	/**
 	 * The hold ends. With `evidence`, what it heard counts: on air at its end without a break since
 	 * it started (or since the last reopening) for CARRIER_WATCH_MS on a watch, or for
 	 * `hold.maxHoldMs` on a follow that no decoder confirmed, is carrier evidence. A carrier's
-	 * retry budget is charged RETRY_REST_FACTOR times the hold.
+	 * retry budget is charged RETRY_REST_FACTOR times the hold. With `voiceOnAir` the recording check
+	 * just answered voice: the run is speech, so it marks no carrier, and a watch at its cap waits for
+	 * a coarse sweep as a call's does.
 	 */
-	private endHold(evidence: boolean): void {
+	private endHold(evidence: boolean, voiceOnAir = false): void {
 		const hold = this.hold
 		this.hold = null
 		// A recording hold brings no carrier evidence and charges no retry budget.
@@ -2056,8 +2833,8 @@ export class SweepScheduler {
 				m.evidence === "traffic" || sampled
 					? this.spec.hold.maxHoldMs
 					: CARRIER_WATCH_MS
-			if (now - from >= unbroken) this.markCarrier(m, false)
-			else if (sampled && hold.watch && now >= hold.cap) {
+			if (now - from >= unbroken && !voiceOnAir) this.markCarrier(m, false)
+			else if ((sampled || voiceOnAir) && hold.watch && now >= hold.cap) {
 				// Every hop gets a coarse visit before it is held again; no carrier hold lengthens
 				// that sweep (a carrier's retry waits one sweep more).
 				m.watchAfter = this.coarseVisits + this.plan.hops.length
@@ -2199,6 +2976,8 @@ export class SweepScheduler {
 		for (const t of tracks.values()) t.openBlocks = 0
 		this.visit = this.newVisit(hopIndex, revisit, tracks, from.gainTenthsDb)
 		this.visit.dwellEnd = base + this.dwellSamples(true)
+		// No tune, no settle: the window was already listening.
+		this.visit.clock.kind = "dwell"
 		this.hold = null
 		this.phase = "dwell"
 	}
@@ -2289,6 +3068,8 @@ export class SweepScheduler {
 		this.noteFlapListening(v, accountedAt)
 		hop.visits++
 		hop.timeMs += Math.max(0, accountedAt - v.startedAt - this.visitPausedMs)
+		this.closePhase(v, accountedAt)
+		addPhases(hop.phases, v.clock)
 		const heldMs = this.heldMs(v, accountedAt)
 		hop.holdMs += this.accountedHeldMs(v, accountedAt)
 		// The other hops waited for this visit's long or budgeted holds (followBudgetMs); this hop
@@ -2297,6 +3078,11 @@ export class SweepScheduler {
 			for (const [i, other] of this.hops.entries())
 				if (i !== v.hopIndex) other.waitMs += heldMs
 		hop.waitMs = 0
+		if (!v.revisit) for (const h of this.hops) h.voiceLock.delete(v.hopIndex)
+		const voiceHeld = v.voice !== "no"
+		if (voiceHeld) {
+			hop.voiceLock = HopBits.allBut(this.plan.hops.length, v.hopIndex)
+		}
 		// A long hold that used more than one coarse sweep, a decoded follow that ran to L, or
 		// budgeted holds that kept a hop waiting L (lockAfterMs), or a voice hold (Visit.voice):
 		// every hop gets a coarse visit before the next long follow, and the hop is probed, not
@@ -2305,9 +3091,11 @@ export class SweepScheduler {
 			(v.longFollow && heldMs > this.chainBudgetMs()) ||
 			(v.longDecoded && heldMs >= this.lockAfterMs()) ||
 			(v.budgeted && this.longestWaitMs() >= this.lockAfterMs()) ||
-			v.voice !== "no"
+			voiceHeld
 		) {
-			this.longHoldLock = this.plan.hops.length
+			// A voice hold owes the other hops their visits (HopState.voiceLock); any other long hold
+			// locks the hop's next coarse visit too.
+			this.longHoldLock = this.plan.hops.length - (voiceHeld ? 1 : 0)
 			this.lockHop = v.hopIndex
 			// No carrier hold lengthens the sweep after it either (as after a watch, endHold).
 			this.retryLock = Math.max(this.retryLock, this.plan.hops.length)
@@ -2330,7 +3118,7 @@ export class SweepScheduler {
 			let forgotten = false
 			for (const m of this.memory)
 				if (this.covers(v.hopIndex, m)) {
-					m.misses = m.seenVisit === v.serial ? 0 : m.misses + 1
+					m.misses = this.heardOn(m, v) ? 0 : m.misses + 1
 					if (m.misses >= FORGET_MISSES) {
 						this.unindexMemory(m)
 						forgotten = true
@@ -2388,7 +3176,7 @@ export class SweepScheduler {
 				(closed !== null &&
 					closed.visit === v.serial &&
 					now - closed.at >= TRAFFIC_GAP_MS) ||
-				(m.seenVisit !== v.serial && listened)
+				(!this.heardOn(m, v) && listened)
 			)
 				this.markTraffic(m)
 		}
@@ -2461,7 +3249,8 @@ export class SweepScheduler {
 		let best: number | null = null
 		let bestScore = 0
 		for (const [i, hop] of this.hops.entries()) {
-			if (i === next || hop.lastVisit === null) continue
+			if (i === next || hop.lastVisit === null || hop.voiceLock.size > 0)
+				continue
 			const score =
 				hop.activityScore *
 				(hop.boost ? CANDIDATE_BOOST : 1) *
@@ -2490,8 +3279,10 @@ export class SweepScheduler {
 		// second one starts at zero so totals are not counted twice. Frequency memory is kept by
 		// frequency, whatever the hops.
 		const accounted = new Set<number>()
+		const nearestOld = nearestHopIn(old)
+		const nearestNew = nearestHopIn(pending.plan)
 		const mapped = pending.plan.hops.map((hop): HopState | null => {
-			const i = nearestHop(old, hop.centreHz)
+			const i = nearestOld(hop.centreHz)
 			const prev = this.hops[i]
 			const near =
 				Math.abs((old.hops[i]?.centreHz ?? Number.NaN) - hop.centreHz) <=
@@ -2504,21 +3295,30 @@ export class SweepScheduler {
 				visits: first ? prev.visits : 0,
 				timeMs: first ? prev.timeMs : 0,
 				holdMs: first ? prev.holdMs : 0,
+				phases: first ? prev.phases : emptyPhases(),
 			}
 		})
 		const visited = new Set<number>()
 		for (const i of this.visited) {
 			const centre = old.hops[i]?.centreHz
-			if (centre !== undefined) visited.add(nearestHop(pending.plan, centre))
+			if (centre !== undefined) visited.add(nearestNew(centre))
 		}
+		const oldHops = this.hops
 		this.plan = pending.plan
 		this.spec = pending.spec
 		this.hops = mapped.map(
 			(state, i) => state ?? this.freshHop(pending.plan.hops[i]),
 		)
+		const { locks } = carryVoiceLocks(
+			old.hops.map(hop => hop.covered),
+			oldHops.map(hop => hop.voiceLock),
+			pending.plan.hops.map(hop => hop.covered),
+		)
+		for (const [i, hop] of this.hops.entries())
+			hop.voiceLock = locks[i] ?? NO_HOPS
 		this.visited = visited
 		this.lockHop = null
-		this.coarseIndex = nearestHop(pending.plan, oldCoarseCentre)
+		this.coarseIndex = nearestNew(oldCoarseCentre)
 		this.boundMemory()
 	}
 }

@@ -36,7 +36,14 @@ export interface RecorderDecisionRef {
 	readonly discoveryId: string | null
 }
 
-interface ReceiptDetail extends ScannerRecorderReceiptDetail {
+/**
+ * What a store receipt says about a file's end, kept with its decision. `discarded:aborted` covers
+ * every non-finalized receipt, so these tell why: `outcome` (aborted: a cancellation whose cleanup
+ * completed; failed: anything else), `errorCode`, and the closed codes `cutReason` (the end the
+ * operation was given: `cancelled` by this recorder, `discovery-deleted` by the store, `shutdown`)
+ * and `failure` (which check refused it, when the code is `admission-denied` or `invalid-binding`).
+ */
+export interface ReceiptDetail extends ScannerRecorderReceiptDetail {
 	operationId: string
 }
 
@@ -241,6 +248,8 @@ function fields(
 			? {
 					receiptOutcome: entry.receipt.outcome,
 					receiptErrorCode: entry.receipt.errorCode,
+					receiptCut: entry.receipt.cutReason ?? null,
+					receiptFailure: entry.receipt.failure ?? null,
 					operationId: entry.receipt.operationId,
 				}
 			: {}),
@@ -268,6 +277,12 @@ function dto(e: Entry): ScannerRecorderDecisionEntry {
 					receipt: {
 						outcome: e.receipt.outcome,
 						errorCode: e.receipt.errorCode,
+						...(e.receipt.cutReason === undefined
+							? {}
+							: { cutReason: e.receipt.cutReason }),
+						...(e.receipt.failure === undefined
+							? {}
+							: { failure: e.receipt.failure }),
 					},
 				}
 			: {}),

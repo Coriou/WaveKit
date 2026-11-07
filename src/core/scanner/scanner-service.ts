@@ -356,6 +356,7 @@ import { recordingEngineInstanceId } from "./store/recording-operation.js"
 import { extractChannelFeatures } from "./classify/channel-features.js"
 import { refineChannelClassification } from "./classify/channel-tier.js"
 import { updateChannelAdmission } from "./plan/resource-admission.js"
+import { channelGateMinDurationMs } from "../spectrum/channel-gate.js"
 import type { AnalogCut } from "./store/analog-operations.js"
 import type { IdentifyAnalogEvidence } from "./identify-analog-contract.js"
 import {
@@ -3512,6 +3513,7 @@ export class ScannerService extends EventEmitter {
 				)
 				if (ev.kind === "track-close" && track.gate === "below")
 					for (const d of covering) d.record.counts.transients += 1
+				this.noteCandidate(sourceId, ev, covering)
 				return
 			}
 			live = {
@@ -3676,6 +3678,34 @@ export class ScannerService extends EventEmitter {
 				"PSD evidence write failed",
 			),
 		)
+	}
+
+	/**
+	 * Tells the covering sweeps about a track the gate has not answered: its dwell listens for the
+	 * answer (SweepScheduler.onCandidate). Not for a track of a stream that already ended.
+	 */
+	private noteCandidate(
+		sourceId: string,
+		ev: Extract<
+			PipelineEvent,
+			{ kind: "track-open" | "track-update" | "track-close" }
+		>,
+		covering: readonly JobDriver[],
+	): void {
+		const track = ev.track
+		if (track.stream < (this.streamFloor.get(sourceId) ?? 0)) return
+		if (ev.kind === "track-close") {
+			for (const d of covering) d.onCandidateClosed?.(track)
+			return
+		}
+		const sweeps = covering.filter(d => d.record.spec.mode === "sweep")
+		if (sweeps.length === 0) return
+		const minMs = channelGateMinDurationMs(
+			this.channelPlanOf(sourceId)?.entries ?? [],
+			track.centreHz,
+			track.obwHz,
+		)
+		for (const d of sweeps) d.onCandidate?.(track, minMs)
 	}
 
 	private rememberClosed(trackId: string): void {

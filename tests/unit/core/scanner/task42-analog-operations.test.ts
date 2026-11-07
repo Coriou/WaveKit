@@ -1433,3 +1433,82 @@ describe("Task42 owned prepared-link operations", () => {
 		expect(AnalogReceiptSchema.safeParse({}).success).toBe(false)
 	})
 })
+
+describe("a non-finalized receipt keeps which step refused it", () => {
+	const started = async (h: Awaited<ReturnType<typeof harness>>) => {
+		const op = h.begin()
+		await op.ready
+		await op.push(new Int16Array([1, -2, 3]))
+		return op
+	}
+	it("an observation that lost its association (merged, retired) while the file was written", async () => {
+		const h = await harness()
+		const op = await started(h)
+		h.adapter.association = () => null
+		const receipt = await op.finish()
+		expect(receipt).toMatchObject({
+			outcome: "failed",
+			errorCode: "admission-denied",
+			failure: "association-lost",
+			cutReason: "completed",
+		})
+	})
+	it("store authority lost while the file was written", async () => {
+		const h = await harness()
+		const op = await started(h)
+		h.state.healthy = false
+		// Its cleanup needs the authority too: the code is the cleanup's, the step tells the cause.
+		expect(await op.finish()).toMatchObject({
+			outcome: "failed",
+			errorCode: "cleanup-failed",
+			failure: "authority-unhealthy",
+		})
+	})
+	it("a binding no longer live at the finish", async () => {
+		const h = await harness()
+		const op = await started(h)
+		h.state.live = false
+		expect(await op.finish()).toMatchObject({
+			outcome: "failed",
+			errorCode: "invalid-binding",
+			failure: "binding-not-live",
+		})
+	})
+	it("a commit plan invalidated at the last check", async () => {
+		const h = await harness()
+		const op = await started(h)
+		h.adapter.commitPlanCurrent = () => false
+		expect(await op.finish()).toMatchObject({
+			outcome: "failed",
+			errorCode: "admission-denied",
+			failure: "commit-plan-stale",
+		})
+	})
+	it("a cancellation by the recorder", async () => {
+		const h = await harness()
+		const op = await started(h)
+		op.cancel("cancelled")
+		expect(await op.settled).toMatchObject({
+			outcome: "aborted",
+			cutReason: "cancelled",
+			failure: "cancelled",
+		})
+	})
+	it("a discovery deleted while the file was written", async () => {
+		const h = await harness()
+		const op = await started(h)
+		await h.evidence.removeDiscovery(h.discoveryId)
+		expect(await op.settled).toMatchObject({
+			outcome: "aborted",
+			cutReason: "discovery-deleted",
+			failure: "cancelled",
+		})
+	})
+	it("a finalized receipt carries none, and a receipt without one still parses", async () => {
+		const h = await harness()
+		const receipt = await record(h)
+		expect(receipt.outcome).toBe("finalized")
+		expect(receipt.failure).toBeUndefined()
+		expect(AnalogReceiptSchema.safeParse(receipt).success).toBe(true)
+	})
+})
