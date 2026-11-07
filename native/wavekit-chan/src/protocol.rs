@@ -201,6 +201,11 @@ pub enum Request {
         channel_id: String,
         center_hz: f64,
     },
+    /// The capture centre moved; the process keeps running. Stdin byte `at_input_bytes` is the first at the new centre.
+    Recenter {
+        center_hz: f64,
+        at_input_bytes: u64,
+    },
     Squelch(SquelchReq),
     Close {
         id: String,
@@ -344,6 +349,17 @@ pub fn parse_request(line: &str) -> Result<Request, (String, String)> {
             })
         }
         Some("retune") => parse_retune(obj, id),
+        Some("recenter") => {
+            only(obj, &["v", "type", "centerHz", "atInputBytes"]).map_err(err)?;
+            let center_hz = num("centerHz")?;
+            if !center_hz.is_finite() {
+                return Err(err("non-finite centre".into()));
+            }
+            Ok(Request::Recenter {
+                center_hz,
+                at_input_bytes: uint("atInputBytes")?,
+            })
+        }
         Some("squelch") => parse_squelch(obj, id),
         Some("close") => {
             only(obj, &["v", "type", "id"]).map_err(err)?;
@@ -908,6 +924,13 @@ mod tests {
     #[test]
     fn iq_retune_schema_is_distinct_from_demod_retune() {
         assert_eq!(
+            parse_request(r#"{"v":1,"type":"recenter","centerHz":123,"atInputBytes":4096}"#),
+            Ok(Request::Recenter {
+                center_hz: 123.0,
+                at_input_bytes: 4096,
+            })
+        );
+        assert_eq!(
             parse_request(r#"{"v":1,"type":"retune","channelId":"a","centerHz":123}"#),
             Ok(Request::RetuneIq {
                 channel_id: "a".into(),
@@ -915,6 +938,13 @@ mod tests {
             })
         );
         for line in [
+            r#"{"v":1,"type":"recenter"}"#,
+            r#"{"v":1,"type":"recenter","centerHz":123}"#,
+            r#"{"v":1,"type":"recenter","centerHz":"a","atInputBytes":0}"#,
+            r#"{"v":1,"type":"recenter","centerHz":123,"atInputBytes":-1}"#,
+            r#"{"v":1,"type":"recenter","centerHz":123,"atInputBytes":1.5}"#,
+            r#"{"v":1,"type":"recenter","centerHz":123,"atInputBytes":"0"}"#,
+            r#"{"v":1,"type":"recenter","centerHz":123,"atInputBytes":0,"id":"a"}"#,
             r#"{"v":1,"type":"retune","channelId":"bad id","centerHz":123}"#,
             r#"{"v":1,"type":"retune","channelId":"a"}"#,
             r#"{"v":1,"type":"retune","channelId":"a","centerHz":123,"bandwidthHz":12000}"#,

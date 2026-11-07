@@ -143,7 +143,7 @@ export interface AmbientPairContext {
 
 export interface AmbientDeps {
 	decoders: Pick<DecoderManager, "on" | "off" | "getDecoder" | "getAllStatus"> &
-		Partial<Pick<DecoderManager, "getStatus">>
+		Partial<Pick<DecoderManager, "getStatus" | "probeEligibility">>
 	/** Configured target of a decoder (config frequencies, or caps centre + offsetHz). */
 	targetOf: (decoderId: string) => AmbientTarget | null
 	/** Current engine epoch of a source; null when no engine runs there. */
@@ -423,9 +423,10 @@ export class AmbientEvidence extends EventEmitter {
 	 * config-owned (a missing owner is not eligible; fail closed). New types only.
 	 */
 	private eligible(decoderId: string): boolean {
-		const getStatus = this.deps.decoders.getStatus
+		const getStatus =
+			this.deps.decoders.probeEligibility ?? this.deps.decoders.getStatus
 		if (!getStatus) return false
-		let status: ReturnType<DecoderManager["getStatus"]>
+		let status: ReturnType<DecoderManager["probeEligibility"]>
 		try {
 			status = getStatus.call(this.deps.decoders, decoderId)
 		} catch {

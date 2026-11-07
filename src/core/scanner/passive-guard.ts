@@ -85,6 +85,15 @@ interface SourceState {
 	 * generation changes or a counter goes back.
 	 */
 	offSamples: { at: number; sample: EluSample }[]
+	/**
+	 * The other consumers when the guard disabled passive with a valid baseline showing the cost is
+	 * passive's own (8.4 row 4, or row 3 with U - B over the limit). While they stand, a cheap engine
+	 * without passive proves nothing, so row 8 waits for the next trial (8.6). Without this the source
+	 * would come back one window later and be disabled one window after that, every 2 min, against
+	 * the 8.8 bound of 61 s of passive per 900 s. Null otherwise: a whole-engine disable with nothing
+	 * to compare against says nothing about passive, and row 8 clears it.
+	 */
+	costHeldFor: string | null
 }
 
 export interface PassiveGuardStatus {
@@ -229,6 +238,7 @@ export class PassiveGuard {
 				trialing: false,
 				lastSample: null,
 				offSamples: [],
+				costHeldFor: null,
 			}
 			this.states.set(sourceId, st)
 		}
@@ -354,6 +364,7 @@ export class PassiveGuard {
 				probationDue: false,
 			})
 			if (r.decision === "clear") {
+				if (st.costHeldFor === st.others) return { kind: "none" }
 				this.disabledAt.delete(sourceId)
 				this.expect(st, "restore")
 				return { kind: "restore", why: "clear" }
@@ -395,6 +406,11 @@ export class PassiveGuard {
 		st.trialing = false
 		if (r.decision === "disable") {
 			this.disabledAt.set(sourceId, now)
+			const b = this.validBaseline(st, now)
+			st.costHeldFor =
+				r.row === 4 || (r.row === 3 && b !== null && (u ?? 0) - b > limit)
+					? st.others
+					: null
 			this.expect(st, "off")
 			const pct = ((r.value ?? 0) * 100).toFixed(0)
 			return {

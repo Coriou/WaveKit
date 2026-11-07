@@ -7,7 +7,11 @@ import {
 	ChannelizerConfigSchema,
 	type SourceCaps,
 } from "../../../src/config.js"
-import { ChannelizerManager } from "../../../src/core/channelizer/channelizer-manager.js"
+import {
+	ChannelizerManager,
+	RECENTER_LINGER_MAX_MS,
+	RECENTER_LINGER_MS,
+} from "../../../src/core/channelizer/channelizer-manager.js"
 import type { ChannelizerRequest } from "../../../src/core/channelizer/protocol.js"
 import type { SourceManager } from "../../../src/core/source-manager.js"
 import { FanoutManager } from "../../../src/core/fanout-manager.js"
@@ -41,7 +45,13 @@ async function setup(idleStopMs?: number) {
 		generation: 1,
 		input: new PassThrough(),
 		start: () => {
-			proc.emit("event", { v: 1, type: "ready", generation: 1, pid: 1 })
+			proc.emit("event", {
+				v: 1,
+				type: "ready",
+				generation: 1,
+				pid: 1,
+				recenter: true,
+			})
 			return Promise.resolve()
 		},
 		stop: vi.fn(() => Promise.resolve()),
@@ -196,13 +206,207 @@ it.each(["caps-changed", "disconnected", "removed"])(
 			CHANNELIZER_IDLE_STOP_MS,
 		)
 		await manager.releaseChannel(grant.channelId)
-		sources.emit(event, "s", { ...caps, centerFreq: 163e6 })
+		sources.emit(event, "s", { ...caps, sampleRate: 2_400_000 })
 		expect(proc.stop).toHaveBeenCalledTimes(1)
 		expect(vi.getTimerCount()).toBe(0)
 		await vi.advanceTimersByTimeAsync(CHANNELIZER_IDLE_STOP_MS)
 		expect(proc.stop).toHaveBeenCalledTimes(1)
 	},
 )
+
+it("a centre move during the linger keeps the process and its linger", async () => {
+	const { manager, grant, proc, sources, caps, sent } = await setup(
+		CHANNELIZER_IDLE_STOP_MS,
+	)
+	await manager.releaseChannel(grant.channelId)
+	sources.emit("caps-changed", "s", { ...caps, centerFreq: 163e6 })
+	await Promise.resolve()
+	expect(proc.stop).not.toHaveBeenCalled()
+	expect(sent.at(-1)).toEqual({
+		v: 1,
+		type: "recenter",
+		centerHz: 163e6,
+		atInputBytes: 143_360, // 35 ms at 2.048 Msps
+	})
+	await vi.advanceTimersByTimeAsync(CHANNELIZER_IDLE_STOP_MS - 1)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(1)
+	expect(proc.stop).toHaveBeenCalledTimes(1)
+})
+
+it.each([undefined, 0])(
+	"with idle stop %s, a centre move that takes the last channel lingers for exactly RECENTER_LINGER_MS",
+	async idleStopMs => {
+		const { proc, sources, caps } = await setup(idleStopMs)
+		sources.emit("caps-changed", "s", { ...caps, centerFreq: 163e6 })
+		expect(proc.stop).not.toHaveBeenCalled()
+		await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 1)
+		expect(proc.stop).not.toHaveBeenCalled()
+		await vi.advanceTimersByTimeAsync(1)
+		expect(proc.stop).toHaveBeenCalledTimes(1)
+	},
+)
+
+it("cleaning up an acquisition the move caught keeps the recentre deadline", async () => {
+	const { manager, proc, sources, caps, connect } = await setup()
+	connect.mockImplementation(() => new Promise<PassThrough>(() => {}))
+	const controller = new AbortController()
+	const pending = manager.requestChannel(
+		"s",
+		"b",
+		{
+			centerHz: 162e6,
+			bandwidthHz: 45_600,
+			transitionHz: 1200,
+			outputRateHz: 48_000,
+			format: "cf32",
+		},
+		caps,
+		controller.signal,
+	)
+	await vi.advanceTimersByTimeAsync(10)
+	expect(connect).toHaveBeenCalledTimes(2)
+	const moved = { ...caps, centerFreq: 163e6 }
+	sources.getCaps = () => moved
+	sources.emit("caps-changed", "s", moved)
+	await vi.advanceTimersByTimeAsync(100)
+	controller.abort()
+	expect((await pending).ok).toBe(false)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 101)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(1)
+	expect(proc.stop).toHaveBeenCalledTimes(1)
+})
+
+it("a request the new centre refuses inside the linger keeps its deadline too", async () => {
+	const { manager, proc, sources, caps } = await setup()
+	sources.emit("caps-changed", "s", { ...caps, centerFreq: 170e6 })
+	const moved = { ...caps, centerFreq: 170e6 }
+	sources.getCaps = () => moved
+	await vi.advanceTimersByTimeAsync(1000)
+	const refused = await manager.requestChannel(
+		"s",
+		"b",
+		{
+			centerHz: 162e6,
+			bandwidthHz: 45_600,
+			transitionHz: 1200,
+			outputRateHz: 48_000,
+			format: "cf32",
+		},
+		moved,
+	)
+	expect(refused.ok).toBe(false)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 1001)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(1)
+	expect(proc.stop).toHaveBeenCalledTimes(1)
+})
+
+it("a grant after a move ends the deadline: its release retires at once", async () => {
+	const { manager, proc, sources, caps } = await setup()
+	const moved = { ...caps, centerFreq: 163e6 }
+	sources.getCaps = () => moved
+	sources.emit("caps-changed", "s", moved)
+	await vi.advanceTimersByTimeAsync(10)
+	const next = await manager.requestChannel(
+		"s",
+		"d",
+		{
+			centerHz: 163e6,
+			bandwidthHz: 45_600,
+			transitionHz: 1200,
+			outputRateHz: 48_000,
+			format: "cf32",
+		},
+		moved,
+	)
+	if (!next.ok) throw new WaveKitError(next.detail, "TEST")
+	await manager.releaseChannel(next.channelId)
+	expect(proc.stop).toHaveBeenCalledTimes(1)
+})
+
+it("a later move moves a running timer's deadline: stopped at it, not 1 ms before", async () => {
+	const { proc, sources, caps, sent } = await setup()
+	sources.emit("caps-changed", "s", { ...caps, centerFreq: 163e6 })
+	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 10)
+	sources.emit("caps-changed", "s", { ...caps, centerFreq: 164e6 })
+	await Promise.resolve()
+	expect(sent.at(-1)).toMatchObject({ type: "recenter", centerHz: 164e6 })
+	// The first timer is due now and must not stop the process.
+	await vi.advanceTimersByTimeAsync(10)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 10 - 1)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(1)
+	expect(proc.stop).toHaveBeenCalledTimes(1)
+	expect(vi.getTimerCount()).toBe(0)
+})
+
+it("moves that never stop hold a channel-less process only up to the cap", async () => {
+	const { proc, sources, caps } = await setup()
+	const hopMs = 500
+	let hop = 0
+	const hops = RECENTER_LINGER_MAX_MS / hopMs
+	sources.emit("caps-changed", "s", { ...caps, centerFreq: 163e6 })
+	// A hop every 500 ms: each one is inside the linger, so only the cap can end it.
+	for (; hop < hops - 1; hop++) {
+		await vi.advanceTimersByTimeAsync(hopMs)
+		sources.emit("caps-changed", "s", {
+			...caps,
+			centerFreq: 164e6 + hop * 1e5,
+		})
+		expect(proc.stop).not.toHaveBeenCalled()
+	}
+	await vi.advanceTimersByTimeAsync(hopMs - 1)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(1)
+	expect(proc.stop).toHaveBeenCalledTimes(1)
+	expect(vi.getTimerCount()).toBe(0)
+})
+
+it("a grant gives the next move a whole new cap", async () => {
+	const { manager, proc, sources, caps } = await setup()
+	sources.emit("caps-changed", "s", { ...caps, centerFreq: 163e6 })
+	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 1)
+	const moved = { ...caps, centerFreq: 164e6 }
+	sources.getCaps = () => moved
+	sources.emit("caps-changed", "s", moved)
+	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 1)
+	const grant = await manager.requestChannel(
+		"s",
+		"d",
+		{
+			centerHz: 164e6,
+			bandwidthHz: 45_600,
+			transitionHz: 1200,
+			outputRateHz: 48_000,
+			format: "cf32",
+		},
+		moved,
+	)
+	if (!grant.ok) throw new WaveKitError(grant.detail, "TEST")
+	const later = { ...caps, centerFreq: 165e6 }
+	sources.getCaps = () => later
+	sources.emit("caps-changed", "s", later)
+	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS - 1)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(1)
+	expect(proc.stop).toHaveBeenCalledTimes(1)
+})
+
+it("a longer configured idle stop wins over the recentre linger", async () => {
+	const { proc, sources, caps } = await setup(CHANNELIZER_IDLE_STOP_MS)
+	sources.emit("caps-changed", "s", { ...caps, centerFreq: 163e6 })
+	await vi.advanceTimersByTimeAsync(RECENTER_LINGER_MS + 1)
+	expect(proc.stop).not.toHaveBeenCalled()
+	await vi.advanceTimersByTimeAsync(
+		CHANNELIZER_IDLE_STOP_MS - RECENTER_LINGER_MS - 1,
+	)
+	expect(proc.stop).toHaveBeenCalledTimes(1)
+})
 
 it("destroy during the linger stops the process and leaves no timer", async () => {
 	const { manager, grant, proc } = await setup(CHANNELIZER_IDLE_STOP_MS)

@@ -145,8 +145,8 @@
 				"iqImage": false
 			},
 			"tuningTrust": "commanded",
-			"acf30": 0.8928995204079212,
-			"acf60": 0.7860504775188166
+			"acf30": 0.892899525240274,
+			"acf60": 0.7860504825424074
 		},
 		"endReason": "quiet"
 	}

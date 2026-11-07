@@ -210,6 +210,34 @@ describe("source binding and target (request 2)", () => {
 	})
 })
 
+describe("probeEligibility", () => {
+	const same = (id: string) => {
+		const status = manager.getStatus(id)!
+		expect(manager.probeEligibility(id)).toEqual({
+			running: status.running,
+			health: status.health,
+			suspended: status.suspended,
+			owner: status.owner,
+		})
+	}
+
+	it("equals the getStatus members through a decoder's life", async () => {
+		const stub = create({ id: "a" })
+		same("a")
+		await manager.startDecoder("a")
+		same("a")
+		stub.crash(1)
+		same("a")
+		await manager.stopDecoder("a")
+		same("a")
+	})
+
+	it("answers undefined for an unknown decoder, like getStatus", () => {
+		expect(manager.probeEligibility("nope")).toBeUndefined()
+		expect(manager.getStatus("nope")).toBeUndefined()
+	})
+})
+
 describe("lastError (request 3)", () => {
 	it("is absent until something fails", () => {
 		create({ id: "a" })

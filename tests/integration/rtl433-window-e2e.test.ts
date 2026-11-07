@@ -405,6 +405,8 @@ describe.skipIf(!chanBin || !rtl433)("rtl433 on the whole capture", () => {
 			"434600000",
 			"-M",
 			"level",
+			"-M",
+			"stats:1:10",
 		])
 		// The burst stays at +250 kHz: the stream is the capture itself.
 		expect(Math.abs(channelOffset - OFFSET)).toBeLessThanOrEqual(1_000)

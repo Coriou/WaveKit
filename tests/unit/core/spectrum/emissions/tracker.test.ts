@@ -1,12 +1,23 @@
+import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { segment } from "../../../../../src/core/spectrum/emissions/segmenter.js"
 import type { Segment } from "../../../../../src/core/spectrum/emissions/segmenter.js"
 import { Tracker } from "../../../../../src/core/spectrum/emissions/tracker.js"
 import type { TrackerBlock } from "../../../../../src/core/spectrum/emissions/tracker.js"
+import {
+	binPowerDb,
+	POWER_FLOOR_DB,
+	powerScale,
+} from "../../../../../src/core/spectrum/fft.js"
 import type {
 	PipelineEvent,
 	TrackSnapshot,
 } from "../../../../../src/core/spectrum/types.js"
+
+/** The open-track field these tests read. */
+interface OpenEnv {
+	envSum: number
+}
 
 const N = 256
 const BIN_HZ = 1000
@@ -208,16 +219,17 @@ describe("Tracker", () => {
 
 	it("builds a 1 ms envelope from frames and measures the TDMA signature", () => {
 		const t = tracker({ hangBlocks: 10 })
-		const frameDb = new Float32Array(N)
+		const framePower = new Float64Array(N)
 		let last: PipelineEvent[] = []
 		for (let blk = 0; blk < 12; blk++) {
 			if (blk > 0) {
 				for (let f = 0; f < 50; f++) {
 					const ms = blk * 50 + f
 					const on = ms % 60 < 27.5
-					frameDb.fill(FLOOR)
-					for (let i = 140; i < 149; i++) frameDb[i] = on ? -20 : FLOOR
-					t.frame(frameDb, ms * 256)
+					framePower.fill(10 ** (FLOOR / 10))
+					for (let i = 140; i < 149; i++)
+						framePower[i] = 10 ** ((on ? -20 : FLOOR) / 10)
+					t.frame(framePower, 1, ms * 256)
 				}
 			}
 			last = run(t, blk, [[140, 149, -24]])
@@ -229,6 +241,93 @@ describe("Tracker", () => {
 		expect(snap.acf30).toBeLessThanOrEqual(-0.5)
 		expect(snap.acf60).toBeGreaterThanOrEqual(0.5)
 		expect(snap.dutyCycle).toBeCloseTo(27.5 / 60, 1)
+	})
+
+	describe("Tracker.frame in linear power", () => {
+		/** The removed path's per-bin value: powerToDb's Float32 store, then 10 ** (dB / 10). */
+		const viaDb = (acc: number, scale: number): number =>
+			10 ** (Math.fround(binPowerDb(acc, scale)) / 10)
+		const openTrack = (): { t: Tracker; first: () => OpenEnv } => {
+			const t = tracker({ hangBlocks: 10 })
+			run(t, 0, [[140, 149, -24]])
+			return {
+				t,
+				first: () => (t as unknown as { open: OpenEnv[] }).open[0]!,
+			}
+		}
+		const SCALE = powerScale(N, 1)
+
+		// Feature: spectrum-frame-path, Property 1: linear frame sum within the Float32 dB rounding of the old sum
+		// Validates: docs/PERFORMANCE.md, Spectrum frame path
+		it("differs from the dB path by at most its Float32 rounding", () => {
+			// Half an ulp of a Float32 in [128, 256) is 2⁻¹⁶ / 2 = 7.63e-6 dB, 7.63e-6·ln 10 / 10 =
+			// 1.76e-6 relative in power. A sum of positive terms keeps the largest relative error.
+			const BOUND = 1.76e-6 + 1e-12
+			fc.assert(
+				fc.property(
+					fc.array(fc.double({ min: -220, max: 40, noNaN: true }), {
+						minLength: 9,
+						maxLength: 9,
+					}),
+					dbs => {
+						const a = openTrack()
+						const b = openTrack()
+						const linear = new Float64Array(N)
+						const old = new Float64Array(N)
+						dbs.forEach((db, k) => {
+							const acc = 10 ** (db / 10) / SCALE
+							linear[140 + k] = acc
+							old[140 + k] = viaDb(acc, SCALE)
+						})
+						a.t.frame(linear, SCALE, 0)
+						b.t.frame(old, 1, 0)
+						const x = a.first().envSum
+						const y = b.first().envSum
+						expect(Math.abs(x - y) / y).toBeLessThanOrEqual(BOUND)
+					},
+				),
+				{ numRuns: 200 },
+			)
+		})
+
+		it("reads the dB path's floor for NaN, zero, negative and sub-floor sums, and +∞ stays +∞", () => {
+			for (const v of [
+				Number.NaN,
+				0,
+				-1,
+				1e-300,
+				1e-20 / SCALE / 2,
+				Number.NEGATIVE_INFINITY,
+			]) {
+				const { t, first } = openTrack()
+				const acc = new Float64Array(N)
+				acc[140] = v
+				t.frame(acc, SCALE, 0)
+				// nine bins: 140 holds `v`, the other eight are 0
+				let sum = 0
+				for (let k = 0; k < 9; k++) sum += viaDb(k === 0 ? v : 0, SCALE)
+				expect(first().envSum).toBe(sum)
+				expect(viaDb(0, SCALE)).toBe(10 ** (POWER_FLOOR_DB / 10))
+			}
+			const { t, first } = openTrack()
+			const acc = new Float64Array(N)
+			acc[140] = Number.POSITIVE_INFINITY
+			t.frame(acc, SCALE, 0)
+			expect(first().envSum).toBe(viaDb(Number.POSITIVE_INFINITY, SCALE))
+		})
+
+		it("a bin exactly at the floor and one ulp above it", () => {
+			const floor = 10 ** (POWER_FLOOR_DB / 10)
+			const { t, first } = openTrack()
+			const acc = new Float64Array(N)
+			acc.fill(floor)
+			acc[140] = floor * (1 + Number.EPSILON)
+			t.frame(acc, 1, 0)
+			let sum = acc[140]!
+			for (let k = 0; k < 8; k++) sum += floor
+			expect(first().envSum).toBe(sum)
+			expect(acc[140]).toBeGreaterThan(floor)
+		})
 	})
 
 	it("trackBinsMask marks the current bins of tracks with enough blocks", () => {

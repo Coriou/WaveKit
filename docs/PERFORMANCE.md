@@ -181,10 +181,9 @@ stdin in 1 024-sample blocks (2 048 bytes), about 2 340 reads a second at 2.4 Ms
 each a fresh buffer handed to the main thread, which then built two fresh sample
 vectors: about 4 700 wake-ups and 7 000 allocations a second. Now:
 
-- `LIVE_DEMOD_BLOCK_SAMPLES` = 16 384, the channelizer's size. A read returns what
-  the pipe holds, so this caps a block rather than waiting to fill one: at most
-  16 384 / 2.4e6 ≈ 6.8 ms of input at 2.4 Msps and 16 384 / 1.024e6 ≈ 16 ms at
-  1.024 Msps. A 64 KiB source chunk takes 2 reads instead of 32. The DSP is a
+- `LIVE_DEMOD_BLOCK_SAMPLES` = 16 384, the channelizer's size. The reader waits once
+  after a short read (`input.rs`): up to min(block, 32 768) bytes' time at the input
+  rate, capped at 20 ms, plus scheduling. The DSP is a
   stream, so the audio does not depend on the split (the A/B and the chunk-split
   properties pass unchanged); a retune or squelch change applies between reads, so
   it can land up to one block later in the input.
@@ -233,7 +232,8 @@ decimate-by-2 stage (11 taps at 2.4 Msps) 11 ns, the next two 5.4 and 2.6 ns,
 the 16/25 stage (973 taps at 75 kHz) under 1 ns. The cu8 input conversion,
 shared by all channels, took 3 ns per sample.
 
-A SIMD FIR does not pay here. The long filter is already cheap. The short
+A SIMD FIR does not pay much for this narrow channel (it pays for a wide one; see
+[Wide channels](#wide-channels-2026-11-06)). The long filter is already cheap. The short
 half-band stages are dominated by per-output overhead rather than multiplies,
 and the NCO is a serial phasor recursion that cannot be split without changing
 its bits. The channels themselves are independent, so the channelizer now runs
@@ -290,6 +290,366 @@ host was far busier this time. The pool costs 3 to 10 % more CPU per Msample
 15 s at a load average of about 280: the serial build entered drop-mode 62 times
 and lost 12.2 MB to absorber overflow, the pooled build entered it 0 times and
 lost nothing.
+
+## Channelizer input reads and restarts (2026-11-06)
+
+A read returns what stdin holds, and each read woke the reader, the main thread, the DSP
+helpers and every channel's writer. The cost followed the source's chunk size rather than the
+work. Now:
+
+- **The reader waits once after a short read** (`native/wavekit-chan/src/input.rs`), so stdin
+  collects the rest of the block with nothing running. The target is `min(block, 32 768)` bytes. Node
+  gives the child a Unix socket (libuv's `"pipe"` stdio is a socketpair), so no pipe size sets it: a
+  kernel buffer smaller than the target only holds the writer back in the parent's branch during the
+  wait, which loses nothing. Linux is not measured here. The wait is the target's time at the input rate, capped at
+  20 ms (`MAX_INPUT_HOLD`): 16 ms at 1.024 Msps, 8 ms at 2.048 Msps, 6.83 ms at 2.4 Msps. That is
+  the added latency bound for a sample, plus however late the host wakes the thread. A read that
+  already holds the target does not wait, so a backlog drains at full speed, and an idle source
+  blocks in `read` as before. After the wait the reader never blocks, so a stalled source cannot
+  hold bytes longer than one wait. Output does not depend on the split (chunk-split properties in
+  `input.rs`, `tests/process.rs`, and the existing serial/pool equivalence).
+- **An IQ channel keeps its buffers between blocks.** `ChannelDsp::run_chain` allocated about
+  400 KB per channel per 16 384-sample block (a working pair per stage, halving down the chain).
+  `tests/channel_allocations.rs` now holds that at zero allocations once warm. On the Mac below the
+  gain at whole-block chunks is within noise. On Linux, glibc may return and refault that memory per
+  block; that has not been measured.
+- **The live demodulator waits too.** It runs the same reader at the same 16 384-sample block, so
+  its target is 32 768 bytes and the hold above applies to it: 6.83 ms at 2.4 Msps, 8 ms at
+  2.048 Msps, 16 ms at 1.024 Msps and 20 ms below 819.2 ksps, plus however late the host wakes the
+  thread. This is arithmetic from the target and the rate, not a measurement of audio latency.
+- **A capture-centre move no longer restarts the process.** Centre was part of `capsDiffer`, so
+  every retune ended the generation, even with no channels open. Now only a rate or format change
+  does (rule 5). A centre move sends one `recenter` control line. Open channels are still
+  invalidated and re-requested, because a decoder's request may follow the centre and only the
+  decoder can recompute it. A request still in flight is answered the same way, so it is computed
+  again rather than granted for the old centre. A process left with no channels waits 6 s after the
+  latest move for its decoders to come back, and at most 12 s after the first move since its last
+  grant: a sweep with no grants retires it there rather than feeding it the whole byte rate for as
+  long as it sweeps. The next request then costs one respawn, as every move did before.
+- **`recenter` carries its position in the input.** Control and stdin are read independently, and
+  old-centre IQ can sit in a burst absorber, the branch, the stdin socket and the reader when the line
+  arrives. `atInputBytes` is the fanout's count of bytes it delivered to the branch (accepted minus
+  dropped, the same count `mark-gap` uses) plus what the source's absorber holds, read once the
+  synchronous distribution a move may have landed in has finished, since until then the chunk in hand
+  is in neither count. So the line goes out in a microtask, and an `open` waits for it. It is the stdin
+  position of the first byte after the move, except when the absorber's release drops held bytes
+  for a lagging channelizer branch: then it is late by those bytes, at most the absorber's capacity,
+  and a reopened channel starts that far into the new centre. It errs late and never early. The
+  process applies the move when its input reaches that byte, splitting the block there, and a
+  channel opened after the line receives no sample before it. A position already passed applies at
+  once. Moves apply in order; 512 may wait, 24 bytes each. That is a safety cap, not a proved limit.
+  At 2.048 Msps with the defaults the position can be ahead of the input by the absorber's
+  8 192 000 B, the branch's 2 × 1 024 000 B, the stdin socket's 212 992 B (Node's `"pipe"` stdio is a
+  socket; Linux's default `wmem_default`, not measured here), the reader's 32 768 B and the settle
+  margin below, 143 360 B, in all 2 595 ms: 519 moves at 5 ms apart, past the cap, and 15 at a real
+  185 ms hop. A larger absorber or input mark, a shorter settle or unpaced retunes can pass it, and
+  the silence watchdog does not stop that, because a lagging reader that progresses stays alive.
+  Past the cap, or on a process with a demod channel, the process answers `recenter-refused` and the
+  parent retires the generation. So does a position the parent cannot trust.
+- **A reopened channel skips 35 ms of input after a move (`RECENTER_SETTLE_MS`).** The caps change
+  only once the frequency command is written (`writeFrequency`), so IQ from before the tuner moved
+  arrives after the position the parent counts, and a restart's spawn time no longer hides it. The
+  line's position is 35 ms of input later, so the process discards that IQ by stream position and no time is
+  spent waiting. 35 ms is a heuristic, the assumed 30 ms marker counter run plus the default 5 ms
+  `pllSettleMs`; no real tuner's command-to-clean-IQ latency was measured. A channel opened at least 35 ms of input after the move loses nothing, and no production consumer opens
+  sooner: decoders reopen after a 300 ms debounce, and a scanner channel tap only after a track
+  passes. So a larger margin would cost nothing today either; 35 ms stays until a real latency is
+  measured, because any other figure would be just as assumed. What arrives later than the margin
+  still reaches a channel opened at the move, as noise at its start: old-centre output is the lateness
+  minus 35 ms (one synthetic stream at 2.048 Msps, real binary, paced):
+
+  | IQ late by, ms | Opened at the move, ms | Older restart on every move, ms | Opened 135 ms later, ms | Older restart, 135 ms later, ms |
+  | -------------- | ---------------------- | ------------------------------- | ----------------------- | ------------------------------- |
+  | 35             | 0                      | 19–21                           | 0                       | 0                               |
+  | 50             | 13                     | 36                              | 0                       | 0                               |
+  | 100            | 63                     | 84–88                           | 0                       | 0                               |
+  | 150            | 113                    | 135                             | 15–23                   | 4                               |
+  | 300            | 263                    | 284–287                         | 164–167                 | 152–155                         |
+
+  A process lagging behind its input keeps the old IQ it has not read, and a channel starts at the later
+  of the line's position and its input position, so with a lag a channel opened after the move can get
+  a head that it would not otherwise: 27 ms in one of 18 runs for IQ 64 ms late and a process stopped
+  until 155 ms after the move. A link slower than that, which the 300 ms and 1000 ms timer settles exist
+  for, is not covered, and neither is a real tuner: what it does to scanner channel-tier evidence is
+  not tested.
+
+- **IQ held at a generation's start is skipped too.** A restart does not discard what an absorber
+  holds: it goes to the new branch. So when the count is above zero, a `recenter` on the unchanged
+  centre precedes the first `open`, and the channel starts after those bytes. No margin is added
+  there, because no move is known and a spawn takes the time anyway.
+- **A binary without `recenter` is restarted, never sent the line.** It would ignore it and mix
+  against the old centre: a healthy decoder on the wrong frequency. `ready` carries `"recenter":
+true`; a process whose `ready` does not gets the old restart on each move, with one warning per
+  source. A move before `ready` is not sent either: it finds no active process, and the request
+  that spawned it compares the centre once `ready` has told it which kind it has. A process that
+  offered it answers each move with `recentered`, in order, with the line's values. A line it could
+  not parse (`rejected` with no id) or an answer out of order retires it at once. So does input
+  acknowledged past a move's position by the larger of 1 s of input and 4 blocks with no answer:
+  4 096 000 B at 2.048 Msps. These are bytes, so a stalled host or source spends none of them. The
+  position already includes the 35 ms margin, which such a process does not discard, so the most wrong
+  IQ it can give is those bytes plus 35 ms of input, plus the 100 ms a `progress` line can wait.
+  More than 1024 unanswered moves retire it as well. The image build rebuilds the crate whatever the
+  mtimes and fails if the installed binary's `ready` lacks the capability.
+- **`tests/integration/channelizer-recenter-real-binary.test.ts` runs the real binary under the real
+  manager**, with tones naming each centre. It skips when `WAVEKIT_CHAN_BIN` is unset and fails when it names a missing file; its
+  header has the commands.
+
+`native/wavekit-chan/examples/paced_load.py`, a real binary with paced noise on stdin and a separate
+consumer process, 12 s per run; ranges are repeated runs, with the 1 448 B, 4 096 B and 512 kHz rows
+alternated between builds. One-minute load average 6 to 19 on a Mac i5 with 8 threads. Child CPU in ms
+per second of IQ (user + system). This host cannot show a Linux page-fault effect: minor faults stayed
+at about 120 to 480/s in both builds.
+
+| Rate, channels                  | Chunk, bytes | Before, user + sys | After, user + sys | Voluntary switches/s, before → after |
+| ------------------------------- | ------------ | ------------------ | ----------------- | ------------------------------------ |
+| 1.024 Msps, 12 × 48 kHz         | 65 536       | 382 + 28           | 361 + 25          | 33 → 33                              |
+| 1.024 Msps, 12 × 48 kHz         | 8 192        | 423 + 87           | 369 + 28          | 251 → 18                             |
+| 1.024 Msps, 12 × 48 kHz         | 4 096        | 449–474 + 139–158  | 366–375 + 26      | 500 → 10                             |
+| 1.024 Msps, 12 × 48 kHz         | 1 448        | 508–523 + 229–268  | 369–372 + 26–28   | 1 390 → 2                            |
+| 1.024 Msps, 4 × 48 kHz          | 4 096        | 186 + 89           | 128 + 15          | 497 → 8                              |
+| 2.4 Msps, 12 × 48 kHz           | 65 536       | 831 + 64           | 846 + 56          | 73 → 75                              |
+| 2.4 Msps, 12 × 48 kHz           | 4 096        | 1 032 + 307        | 835 + 59          | 1 159 → 17                           |
+| 1.024 Msps, 4 × 512 kHz         | 4 096        | 1 043–1 075 + 86   | 975–1 047 + 24    | 500 → 260                            |
+| 1.024 Msps, 4 × 512 kHz         | 65 536       | 1 008–1 010 + 22   | 974–1 040 + 22    | 284 → 285                            |
+| 1.024 Msps, 8 × 48 kHz, 4 idle¹ | 4 096        | 471 + 128          | 368 + 24          | 502 → 10                             |
+| 1.024 Msps, 12 stalled²         | 4 096        | 464 + 57           | 358 + 13          | 502 → 12                             |
+
+¹ Four more channels that no client ever connects to; a slow consumer on the rest. ² Connected,
+never reads, so every queue overflows.
+
+CPU no longer depends on the chunk size. 64 KiB chunks are within noise, as expected: they were
+already whole blocks. The 4 × 512 kHz rows show what was left: a wide channel was about 0.25 core of
+DSP user time at 1.024 Msps here (300 kHz wide, 5 kHz transition), so channel width, not wake-ups,
+set the floor for such a layout. [Wide channels](#wide-channels-2026-11-06) explains and cuts it.
+
+## Wide channels (2026-11-06)
+
+**The last stage's filter sets the cost, and it scales with output rate × stage input rate ÷
+transition.** Kaiser's length at 66 dB is 4.04 × r / tr taps per phase for a stage with input rate r
+and transition tr, and each output takes two dots of that length (I and Q), so a stage costs about
+`2 × out × 4.04 × r / tr` multiplies per second. Check: 1.024 Msps to 512 kHz at 5 kHz is 847 M (829
+taps, 849 M); 64 kHz to 48 kHz at 2.5 kHz is 10 M. A decoder's 5 % rule, tr = out / 40, makes that
+323 × r: a narrow channel reaches its last stage at about 64 kHz, a wide one at 1 MHz or more. Chunk
+size and wake-ups do not enter it.
+
+**The 5 kHz transition was the bench's, not production's.** Decoders derive the request from their
+output rate. The wide requests come from dumpvdl2, `rtl_433` and AIS-catcher, one channel per decoder
+instance, and none asks for 5 kHz: dumpvdl2 at 1.024 Msps asks for 512 kHz with a 12.8 kHz transition
+(325 taps, not 829). LoRa and readsb do not use the channelizer. The catalogue `rtl_433` takes the raw capture
+up to 2.4 Msps (rule 6) and opens no channel, so its row below applies only to an operator's
+`useChannelizer: true` decoder. A 1 MHz request from 1.024 Msps has no plan and is refused earlier, as
+outside the capture.
+
+**The FIR now runs I and Q and two consecutive outputs side by side, on AVX** (`dots_avx` in
+`native/wavekit-chan/src/stages.rs`). One accumulator is limited by its add's latency, about 4 cycles
+per 8 taps, whatever the vector width; each lane's sum must stay in order to keep its bits, but
+separate outputs do not depend on one another. Per tap, on one 829-tap dot pattern (best of 9, load
+average about 8): 0.165 ns for the previous `dot`, 0.118 for one AVX accumulator, 0.077 for I and Q
+together, 0.047 with two outputs. Two outputs need at least 128 taps per phase: at 53 taps they cost
+more than one, at 185 less.
+
+The output is bit-identical for finite input. `wavekit-chan` takes `cu8` only, and each byte converts to a finite value. `wavekit-iqcap replay` can read non-finite floats from a damaged file, and there only a NaN's payload can differ, between kernels and between block splits. Same 8 lanes, same order, IEEE add and multiply, and no fused
+multiply-add, which would round once where `dot` rounds twice. The kernel is picked once per block
+from the CPU, so a host's CPU changes the cost and never the output. Tests: the kernels against `dot`
+on random lengths up to 69 with far-apart magnitudes, a pair of values that separates fused from unfused
+rounding (substituting FMA fails three tests), stages against the reference loop on both sides of 128
+taps, and the pinned output hashes in `channel.rs` and `dsp_pool_output_and_events_match_the_serial_loop`
+unchanged. Without AVX, and on arm64, stages run the previous `dot`; arm64 has not been measured.
+
+`chan_bench` per request (`-- FS OUT BW TR [SECONDS]`), one thread, 3 s of noise, previous and this
+build alternated 3 times. The output hash matched in every run. Share of a core at the capture rate:
+the sum of each stage's fastest block ("fastest" below, not one observed block), which preemption does not inflate, and the median of the mean. One-minute load
+average 26 to 21.
+
+| Decoder request                  | Capture, Msps | Out, bandwidth, transition (Hz) | Per-phase taps, longest stage | M multiplies/s | Before: fastest, mean | After: fastest, mean |
+| -------------------------------- | ------------- | ------------------------------- | ----------------------------- | -------------- | --------------------- | -------------------- |
+| The earlier bench, not a decoder | 1.024         | 512 000, 300 000, 5 000         | 829                           | 849            | 0.148, 0.194          | 0.047, 0.062         |
+| dumpvdl2                         | 1.024         | 512 000, 300 000, 12 800        | 325                           | 333            | 0.065, 0.088          | 0.025, 0.034         |
+| AIS-catcher                      | 1.024         | 384 000, 364 800, 9 600         | 217                           | 201            | 0.049, 0.063          | 0.021, 0.027         |
+| direwolf                         | 1.024         | 48 000, 47 424, 288             | 899                           | 111            | 0.034, 0.043          | 0.020, 0.026         |
+| multimon-ng                      | 1.024         | 48 000, 12 000, 2 500           | 105                           | 32             | 0.021, 0.026          | 0.016, 0.021         |
+| dsd-fme                          | 1.024         | 48 000, 12 500, 6 250           | 43                            | 26             | 0.020, 0.026          | 0.016, 0.021         |
+| acarsdec                         | 1.024         | 24 000, 12 000, 6 000           | 23                            | 24             | 0.020, 0.026          | 0.016, 0.021         |
+| rtl_433, `useChannelizer` only   | 2.4           | 1 000 000, 950 000, 25 000      | 195                           | 498            | 0.118, 0.147          | 0.056, 0.074         |
+| dumpvdl2                         | 2.4           | 1 050 000, 300 000, 26 250      | 185                           | 424            | 0.102, 0.132          | 0.053, 0.069         |
+| AIS-catcher                      | 2.4           | 384 000, 364 800, 9 600         | 253                           | 258            | 0.084, 0.101          | 0.046, 0.060         |
+| direwolf                         | 2.4           | 48 000, 47 424, 288             | 843                           | 138            | 0.060, 0.074          | 0.041, 0.049         |
+| multimon-ng                      | 2.4           | 48 000, 12 000, 2 500           | 122                           | 63             | 0.047, 0.056          | 0.037, 0.049         |
+| dsd-fme                          | 2.4           | 48 000, 12 500, 6 250           | 49                            | 56             | 0.046, 0.054          | 0.037, 0.044         |
+| acarsdec                         | 2.4           | 24 000, 12 000, 6 000           | 26                            | 53             | 0.043, 0.055          | 0.037, 0.045         |
+
+Narrow channels gain about 20 %: what is left there is 4.9 ns per input sample in the NCO, a serial
+recursion, and the first short half-bands, per channel, because each channel mixes first. Summing the
+means, the 6 default-path requests at 2.4 Msps go from 0.47 to 0.32 core (0.62 to 0.39 with the operator `rtl_433` row), and the 6 at 1.024 Msps from 0.27 to 0.15. This is one channel per request, not a live total: a decoder can hold several narrow channels, up to 33 for paging.
+
+`paced_load.py`, the whole process with a consumer, 15 s per run, previous and this build alternated:
+
+| Channels at 1.024 Msps, chunk 65 536 B | Previous, user + sys ms per s of IQ | This build, user + sys | Load average (1 min) |
+| -------------------------------------- | ----------------------------------- | ---------------------- | -------------------- |
+| 4 × 512 kHz, 300 kHz, 5 kHz, two pairs | 938 + 19, 976 + 22                  | 351 + 17, 360 + 18     | 15 to 10             |
+| 1 × 512 kHz, 300 kHz, 12.8 kHz         | 89 + 5                              | 37 + 5                 | 12 to 9              |
+
+Tried and not adopted, for the 1.024 Msps to 512 kHz channel, sum of stage minima in ns per input sample
+(this build direct: 41.4 at 5 kHz, 19.5 at 12.8 kHz; load average about 7):
+
+- **Decimate by 2 first, then a same-rate shaping filter.** 21 + 415 taps instead of 829: 31.4 at
+  5 kHz, and 19.45 at 12.8 kHz, where production is, so nothing there. It changes the output and the
+  planner.
+- **Symmetric taps.** With one accumulator on AVX: 214 ns per dot against 98 for plain AVX with one
+  accumulator, because of the reversed loads. It also changes the output. Several accumulators were
+  not tried.
+- **FFT overlap-save** (rustfft, one channel, before the output copy): 3.9 to 4.3 at 5 kHz and 3.2 to
+  3.7 at 12.8 kHz, so 5 to 10 times cheaper. It only does integer decimation, and the wide stages at
+  2.4 Msps are 5/6, 7/8 and 16/25. It would also put an FFT crate in the shipped binary, change the
+  output, and hold outputs until a frame is complete, which breaks the per-block schedule (plan A12).
+  Worth reopening only if several wide channels at 1.024 Msps become common.
+- **No filter.** An output rate equal to the input already has no stage; below it, the anti-alias
+  filter is needed.
+
+**A wider request would cut dumpvdl2 further, and is not made here.** dumpvdl2 channelises for itself,
+so its front filter only has to keep images out. At 1.024 Msps a transition of 106 kHz, the most
+`bw/2 + tr <= out/2` allows, gives 41 taps. Measured response: 0.0056 dB ripple across ±150 kHz,
+−5.1 dB at 200 kHz, −100 dB at 256 kHz, and −76.9 dB or better for anything folding back onto the
+150 kHz edge. Cost: 0.025 to 0.011 core at 1.024 Msps, 0.053 to 0.041 at 2.4 Msps (375 kHz transition),
+sum of stage minima. Signals between 150 and 256 kHz would reach dumpvdl2's input at unity gain; no
+target sits there, and no real signal has been tried through it.
+
+## Spectrum frame path (2026-11-01)
+
+The spectrum worker runs about 1,172 frames/s at 2.4 Msps with FFT 2048 (19.8 blocks/s).
+**Stages that run once per frame work in linear power.** A dB threshold that changes once
+per block is converted to linear power once per block, frames are compared in linear power,
+and peaks are kept linear and converted to dB at block end. Do not add a full-spectrum dB
+pass per frame: `Math.log10` over 2,048 bins costs about 50 to 110 ms per second of IQ.
+
+The short-burst path (`shortFrame` in `src/core/spectrum/pipeline.ts`) follows this rule.
+`dbThresholdBracket` (`src/core/spectrum/fft.ts`) brackets each threshold in accumulator
+units with a stated margin. A sum outside the bracket is decided by one comparison, and a sum
+inside it (about 2e-4 relative wide at −100 dB) or a NaN is decided in dB, so detections are
+identical to the dB path. Tests: pre-change event goldens on seeded scenes, a Detector
+equivalence property, and a `Math.log10` call-count guard
+(`tests/unit/core/spectrum/short-linear-threshold.test.ts`). `Tracker.frame` now reads linear power
+too, so no stage converts a whole frame to dB; see [below](#frame-tracks-and-main-thread-reads-2026-11-06).
+
+`scripts/profile-spectrum.ts`, 30 s of synthetic IQ (noise, CW, NFM, Mode-S-like pulses), on a
+busy Mac. Compare before and after in the same row, not absolute rates.
+
+| Mode, ms of worker CPU per s of IQ | Before | After | Load average |
+| ---------------------------------- | ------ | ----- | ------------ |
+| `stages`, short path (self)        | 137.9  | 48.8  | 15.6 → 17.8  |
+| `stages`, built-in `tracker` span  | 313.3  | 173.3 | 15.6 → 17.8  |
+| `stages`, worker total             | 846.4  | 644.7 | 15.6 → 17.8  |
+| `bare`, `handle()` total           | 1113.2 | 634.0 | 52.6 → 56.8  |
+
+A first build that sent `powerToDb` through the one-bin helper `binPowerDb` was slower in
+`bare` mode (565 to 602 against 522 to 540, load 12 to 16): the bundled worker did not inline
+that call, and the remaining frame dB pass doubled in cost. `powerToDb` keeps its inline loop.
+The spectrum feed stays on without display clients: the scanner, occupancy, backfill and
+status read every block summary.
+
+## Frame tracks and main-thread reads (2026-11-06)
+
+**`Tracker.frame` sums linear power.** It used to read a per-frame dB array and take `10 ** (dB/10)`
+per open-track bin, so one pass of `Math.log10` over 2,048 bins ran on every frame while any track
+was open. Logs per block with an open track went from at least 50·N to at most 4·N (guarded in
+`short-linear-threshold.test.ts`). NaN, zero and sums under the −200 dB floor still read the floor.
+
+This one is not byte-identical. The old path rounded each bin through a Float32 dB value, up to half
+an ulp at |dB| < 256: 7.63e-6 dB, 1.76e-6 relative in power. That bound on the envelope sum is a
+property test. On seeded scenes only `acf30` and `acf60` changed: every other event field stays
+byte-identical (`pipeline-frame-linear-golden.test.ts`, recorded from the dB path), and the two moved
+by at most about 2e-6 on noisy scenes (`ACF_BOUND`; 1.08e-6 for a 50 dB carrier in that test). A
+TDMA-like envelope moved them by about 3e-8, far from mattering at the classifier's −0.5 and 0.5. A
+quantised noiseless cu8 tone moved them by 6.6e-4. On a noiseless float tone the envelope is flat to
+rounding and the ACF of that rounding is numeric noise on either path (it moved by up to 0.45, without
+crossing the TDMA rule in that scene).
+
+Those scenes do not cover a comparison landing exactly on its boundary, which can resolve differently
+because per-bin power differs from the old round trip by up to that 1.76e-6. The duty rule's
+`p95 <= 4 * p5` is the one found: a track alternating exactly 0.01 and 0.04 per bin read duty 0.5 on
+the old path and reads 1 now, which flips `isDataBurst` in the scanner's replay plan. The tolerance is
+relative: a ratio r with |r / 4 − 1| > 3.64e-6, which is |r − 4| > 1.456e-5, gives the same duty and
+the same `isDataBurst` on both paths at any per-bin power from the −200 dB floor up
+(`tracker-duty-boundary.test.ts`, on the real `Tracker` and as a property). Both levels can move by
+1.757e-6, 3.513e-6 in the ratio, and each path's Float32 envelope adds 1.19e-7. Inside the tolerance
+the paths may part, and more readily at low power, because half a Float32 ulp is a fixed step in dB
+that doubles with each binade of |dB|: it is 7.63e-6 dB for |dB| from 128 to 256 and 8 times less at
+−20 dB. So 4.000005, 1.25e-6 relative, agrees at 0.01 per bin and parts at 1e-15, duty 0.5 now and 1
+on the old path.
+
+**Main thread.**
+
+- `BandPlanService.view()` and `resolved()` return one deep-frozen snapshot per store state instead
+  of a `structuredClone` per call. A mutation attempt throws. The key: a commit replaces the state
+  object; an unavailable or closed store is its own key; everything else is fixed at construction.
+- The channel lookup keeps its answer per frozen snapshot, plan objects, window and protocols (at
+  most 256, then it starts over). An unfrozen view is never remembered.
+- `createDecodeEnvelope` and `withPresentation` use structural guards. A guard returns what the
+  schema would, members in schema order, or passes the input to Zod, so accessors, Proxies, unknown
+  members and `-0` still take the schema path. Tested byte for byte against the schema path
+  (`envelope-guard.test.ts`).
+- The per-block worker messages (`events`, `buffer`) use a structural guard; every other message and
+  every malformed one goes to `WorkerToMainSchema`.
+- The ambient probe's per-line eligibility check reads `DecoderManager.probeEligibility` instead of
+  a whole `getStatus`.
+
+A placement pass is not skipped when its inputs look unchanged. They include the activity clock,
+probation, every decoder's lifecycle, suspension and mode, source caps, the VFO and tuned holds, and
+the pass also has its own effects. What is left costs 4.5 % of busy, 1.6 % of a core here.
+
+**The passive guard judges CPU time.** `eluSample()` now reports the worker's event-loop counters
+with `active` reduced to the thread's CPU time (`WorkerCostMeter`), because ELU counts a thread
+preempted mid-frame as busy. Where Node has no `worker.cpuUsage()` (it came with 24.6.0), it reports
+plain ELU and logs that once per worker. After 10
+ticks without an answer, whether the requests hang or reject, `active` advances by ELU's advance per
+tick instead, logged once as well. Those 10 ticks keep the last CPU figure and read as idle, so a worker that never answers
+again at 90 % ELU reads about 75 % in the window they fall in and 90 % after it. An answer is a
+cumulative figure, so it credits all the CPU time since the previous one, less what ELU already
+credited for those ticks; neither counter moves back. When ELU credited more than the CPU time, the
+excess stays, because paying it back would hold `active` still and hide a later overrun. With each
+tick's CPU time at most its ELU, for any pattern of answers, rejections and hangs: `active` never
+exceeds ELU's and is at most 10 ticks of CPU time below the CPU time. Over a window its advance is at
+least the window's CPU time less those 10 ticks, and at most the window's ELU plus 10 ticks. These
+bounds assume an answer's counter is read when it arrives: an answer delivered late with an older
+counter adds its age to the shortfall until the next answer, which credits it in full. It reads
+above CPU time only by what ELU credited, which takes 10 ticks in a row without an answer: on a
+preempted worker at 90 % ELU and 10 % CPU, one answer in 12 ticks reads 15 %, and one in 30 reads about
+60 %, so the guard can disable passive there. The limit is unchanged. A shared engine disabled with a
+baseline showing the cost is passive's own no longer comes back after one cheap window without passive; it
+waits for the next trial, which restores the 61 s per 900 s bound.
+
+Offline, `scripts/profile-spectrum.ts`, 30 s of synthetic IQ at 2.4 Msps, head and this build
+alternated. The `stages` and `handle()` figures are wall clock around the work and swing widely on a
+loaded host: `bare` ranged over 350 to 817 ms/s at head and 263 to 869 here. So the `bare` row is
+process CPU (user + system) of the whole 30 s run, which includes the same IQ synthesis in both.
+
+| Measure                                        | Head                       | This build                 | Load average (1 min) |
+| ---------------------------------------------- | -------------------------- | -------------------------- | -------------------- |
+| `bare`, process CPU s, four pairs              | 33.37, 29.17, 23.31, 22.12 | 30.38, 24.37, 19.90, 19.30 | 11 to 38             |
+| `stages`, per-frame dB span, ms per s of IQ    | 90.6, 115.6                | 0, 0                       | 10 to 13             |
+| `stages`, `Tracker.frame` self, ms per s of IQ | 41.6, 59.5                 | 29.5, 48.8                 | 10 to 13             |
+| `stages`, `handle()` total, ms per s of IQ     | 493.7, 656.8               | 438.7, 588.3               | 10 to 13             |
+
+The four pairs save 2.8 to 4.8 s of CPU per 30 s of IQ, 95 to 160 ms per second of IQ, 10 to 16 % of
+the run.
+
+Scratch core (`scripts/profile-spectrum-main.ts --load`, stubs, 45 s after 15 s of warm-up, 2.4 Msps,
+one web-like client), head against this build, load average 8 to 13. Function shares are of the main
+thread's busy time.
+
+| Main thread                  | Head  | This build |
+| ---------------------------- | ----- | ---------- |
+| `structuredClone`, inclusive | 4.9 % | 0.4 %      |
+| Zod `safeParse`, inclusive   | 5.5 % | 1.8 %      |
+| `reconcilePlacementsPass`    | 7.8 % | 4.5 %      |
+| ELU, this pair               | 28.5  | 32.8       |
+| Process CPU, % of a core     | 80.3  | 77.8       |
+| Event-loop delay p99, ms     | 3.84  | 4.13       |
+
+The function shares are stable across runs. The ELU, process CPU and delay rows are not: an earlier
+pair at load 10 to 13, with only `Tracker.frame` changed on the "before" side, read ELU 41.6 and
+23.3, process CPU 96.1 and 72.2, p99 7.28 and 2.70 ms. Two pairs do not settle those three, and
+neither ELU nor delay is claimed as a gain here.
 
 ## Activity reads (2026-11-01)
 

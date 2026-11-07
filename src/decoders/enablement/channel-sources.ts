@@ -157,33 +157,109 @@ const plansSchema = z.array(
 	}),
 )
 
+type ParsedPlans = z.infer<typeof plansSchema>
+
+/**
+ * The parse of a scanner plan list, kept while its elements stay the same objects. The provider
+ * builds a new array per call but hands out the scanner's own built-in plan objects, which nothing
+ * edits (bandplans/scanner-feed.ts), so element identity decides. A different element or a failed
+ * parse parses again. The element list is copied: a provider may hand out one array and replace an
+ * element in it, which comparing against that same array could never see.
+ */
+function createPlansParser(): (
+	plans: readonly Bandplan[],
+) => ParsedPlans | null {
+	let last: { plans: readonly Bandplan[]; parsed: ParsedPlans } | null = null
+	return plans => {
+		if (
+			last !== null &&
+			last.plans.length === plans.length &&
+			last.plans.every((plan, index) => plan === plans[index])
+		)
+			return last.parsed
+		const parsed = plansSchema.safeParse(plans)
+		if (!parsed.success) {
+			last = null
+			return null
+		}
+		last = { plans: plans.slice(), parsed: parsed.data }
+		return parsed.data
+	}
+}
+
+/**
+ * Distinct lookups kept per band-plan revision. A pass asks once per decoder per source, about 20
+ * entries today, and a sweep adds one window per hop; past the cap the map starts over, which only
+ * costs the next lookups their parse. 256 × (about 100 B of key + a short number list) is under
+ * 100 KB.
+ */
+export const CHANNEL_LOOKUP_MEMO_MAX = 256
+
 /** Reads effective channels within the resolved bands' inclusive visible segments.
  * The resolver omits disabled, hidden and fully shadowed bands.
  * Missing/throwing views yield no channels even if scannerPlans has a fallback.
+ *
+ * A lookup's answer depends only on: the window (`sourceId`, `minHz`, `maxHz`), the wanted
+ * protocols, the resolved view and the plans. It is remembered while the view is the same frozen
+ * snapshot and the plans are the same objects. A view that is not frozen could change in place, so
+ * it is never remembered, and a throw or missing view stays `[]` as before.
  */
 export function createBandplanChannelLookup(deps: {
 	getResolved: () => ResolvedBandPlanView | undefined
 	scannerPlans: () => readonly Bandplan[]
 }): BandplanChannelLookup {
+	const parsePlans = createPlansParser()
+	let memo: {
+		view: ResolvedBandPlanView
+		plans: ParsedPlans
+		bands: z.infer<typeof resolvedSchema>["bands"]
+		results: Map<string, readonly number[]>
+	} | null = null
 	return (window, protocols) => {
 		try {
+			const view = deps.getResolved()
+			if (!view) return []
+			const plans = parsePlans(deps.scannerPlans())
+			if (plans === null) return []
+			if (memo === null || memo.view !== view || memo.plans !== plans) {
+				const resolved = resolvedSchema.safeParse(view)
+				if (!resolved.success) return []
+				memo = {
+					view,
+					plans,
+					bands: resolved.data.bands,
+					results: new Map(),
+				}
+			}
+			const current = memo
+			const frozen = Object.isFrozen(view)
+			const key = frozen
+				? JSON.stringify([
+						window.sourceId,
+						window.minHz,
+						window.maxHz,
+						protocols,
+					])
+				: ""
+			if (frozen) {
+				const hit = current.results.get(key)
+				if (hit !== undefined) return [...hit]
+			} else {
+				memo = null // not a snapshot: this view may change before the next lookup
+			}
 			const bounds = windowSchema.safeParse(window)
 			const wanted = z.array(z.string().min(1)).safeParse(protocols)
-			const view = deps.getResolved()
-			if (!bounds.success || !wanted.success || !view) return []
-			const resolved = resolvedSchema.safeParse(view)
-			const plans = plansSchema.safeParse(deps.scannerPlans())
-			if (!resolved.success || !plans.success) return []
-			const ranges = plans.data
+			if (!bounds.success || !wanted.success) return []
+			const ranges = plans
 				.flatMap(plan => plan.ranges)
 				.filter(
 					range =>
 						range.enabled !== false &&
 						range.protocols?.some(p => wanted.data.includes(p)),
 				)
-			return [
+			const result = [
 				...new Set(
-					resolved.data.bands.flatMap(({ band, segments }) =>
+					current.bands.flatMap(({ band, segments }) =>
 						band.channels
 							.filter(channel =>
 								segments.some(
@@ -203,6 +279,13 @@ export function createBandplanChannelLookup(deps: {
 						ranges.some(range => hz >= range.startHz && hz <= range.endHz),
 				)
 				.sort((a, b) => a - b)
+			if (frozen) {
+				if (current.results.size >= CHANNEL_LOOKUP_MEMO_MAX)
+					current.results.clear()
+				current.results.set(key, result)
+				return [...result]
+			}
+			return result
 		} catch {
 			return []
 		}
@@ -213,13 +296,14 @@ export function createBandplanChannelLookup(deps: {
 export function createBandplanRangeLookup(deps: {
 	scannerPlans: () => readonly Bandplan[]
 }): BandplanRangeLookup {
+	const parsePlans = createPlansParser()
 	return (_sourceId, hz, protocols) => {
 		try {
 			const wanted = z.array(z.string().min(1)).safeParse(protocols)
 			if (!frequency.safeParse(hz).success || !wanted.success) return false
-			const plans = plansSchema.safeParse(deps.scannerPlans())
-			if (!plans.success) return false
-			return plans.data.some(plan =>
+			const plans = parsePlans(deps.scannerPlans())
+			if (plans === null) return false
+			return plans.some(plan =>
 				plan.ranges.some(
 					range =>
 						range.enabled !== false &&

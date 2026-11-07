@@ -98,8 +98,19 @@ impl Nco {
     }
 }
 
+/// Joins the 8 lanes in their fixed order, then adds the tail term by term.
+#[inline(always)]
+fn join_lanes(acc: [f32; 8], ra: &[f32], rb: &[f32]) -> f32 {
+    let mut s = ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7]));
+    for (x, y) in ra.iter().zip(rb) {
+        s += x * y;
+    }
+    s
+}
+
 /// Dot product of two equal-length slices, accumulated in 8 independent lanes so the compiler
 /// can vectorise it; the lane order is fixed, so results do not depend on alignment.
+/// This is the reference: every other kernel must produce its bits.
 #[inline]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
@@ -110,12 +121,71 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
             *s += xv * yv;
         }
     }
-    let mut s = ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7]));
-    for (x, y) in ra.iter().zip(rb) {
-        s += x * y;
-    }
-    s
+    join_lanes(acc, ra, rb)
 }
+
+/// `P` outputs at once: the dot of `h[p]` with `i[p]` and with `q[p]`, each with [`dot`]'s bits.
+/// All slices must have one length, and `P` must be at least 1.
+///
+/// One accumulator is limited by the latency of its add, about 4 cycles per 8 taps, whatever the
+/// vector width. Each lane's sum has to stay in order to keep its bits, but separate outputs do
+/// not depend on one another, so `2 * P` accumulators advance side by side.
+/// AVX and not FMA: a fused multiply-add would round once where [`dot`] rounds twice.
+///
+/// # Safety
+/// The CPU must support AVX.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+#[inline]
+unsafe fn dots_avx<const P: usize>(
+    h: [&[f32]; P],
+    i: [&[f32]; P],
+    q: [&[f32]; P],
+) -> ([f32; P], [f32; P]) {
+    use std::arch::x86_64::{
+        _mm256_add_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_setzero_ps, _mm256_storeu_ps,
+    };
+    let len = h[0].len();
+    for p in 0..P {
+        assert!(h[p].len() == len && i[p].len() == len && q[p].len() == len);
+    }
+    let chunks = len / 8;
+    let (mut sum_i, mut sum_q) = ([_mm256_setzero_ps(); P], [_mm256_setzero_ps(); P]);
+    for c in 0..chunks {
+        for p in 0..P {
+            // SAFETY: AVX is the caller's contract. `c * 8 + 8 <= len`, the length of all three
+            // slices (asserted above), and each unaligned load reads those 8 floats.
+            unsafe {
+                let t = _mm256_loadu_ps(h[p].as_ptr().add(c * 8));
+                let (x, y) = (
+                    _mm256_loadu_ps(i[p].as_ptr().add(c * 8)),
+                    _mm256_loadu_ps(q[p].as_ptr().add(c * 8)),
+                );
+                sum_i[p] = _mm256_add_ps(sum_i[p], _mm256_mul_ps(t, x));
+                sum_q[p] = _mm256_add_ps(sum_q[p], _mm256_mul_ps(t, y));
+            }
+        }
+    }
+    let at = chunks * 8;
+    let (mut out_i, mut out_q) = ([0f32; P], [0f32; P]);
+    for p in 0..P {
+        let (mut acc_i, mut acc_q) = ([0f32; 8], [0f32; 8]);
+        // SAFETY: AVX is the caller's contract, and each store writes the 8 floats of its array.
+        unsafe {
+            _mm256_storeu_ps(acc_i.as_mut_ptr(), sum_i[p]);
+            _mm256_storeu_ps(acc_q.as_mut_ptr(), sum_q[p]);
+        }
+        out_i[p] = join_lanes(acc_i, &h[p][at..], &i[p][at..]);
+        out_q[p] = join_lanes(acc_q, &h[p][at..], &q[p][at..]);
+    }
+    (out_i, out_q)
+}
+
+/// From this many taps per phase, a stage on AVX computes two outputs per kernel call. Below it
+/// one output per call is cheaper, because the tail and the reduction outweigh the loop
+/// (measured: 53 taps cost more per tap in two, 185 less).
+#[cfg(target_arch = "x86_64")]
+const TWO_OUTPUT_MIN_TAPS: usize = 128;
 
 /// Polyphase L/M resampler. Output k sits at upsampled index kM: n = ⌊kM/L⌋, phase p = kM mod L.
 /// Output k is emitted as soon as input n has arrived, so n inputs yield ⌈nL/M⌉ outputs (plan A12).
@@ -179,27 +249,87 @@ impl RationalFir {
         self.next_p = 0;
     }
 
-    /// Appends this block's outputs to `oi`/`oq`.
+    /// Appends this block's outputs to `oi`/`oq`. The kernel is chosen once per block and every
+    /// kernel gives the same bits on finite input (a NaN's payload may differ), so a host's CPU changes the cost and never the output.
     pub fn process(&mut self, i: &[f32], q: &[f32], oi: &mut Vec<f32>, oq: &mut Vec<f32>) {
         debug_assert_eq!(i.len(), q.len());
         let base = self.consumed;
+        let end = base + i.len() as u64;
         self.hist_i.extend_from_slice(i);
         self.hist_q.extend_from_slice(q);
-        let end = base + i.len() as u64;
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx") {
+            // SAFETY: AVX was just detected on this CPU.
+            unsafe { self.outputs_avx(base, end, oi, oq) };
+        } else {
+            self.outputs(base, end, oi, oq);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        self.outputs(base, end, oi, oq);
+        self.consumed = end;
+        let drop = self.hist_i.len() - (self.t - 1);
+        self.hist_i.drain(..drop);
+        self.hist_q.drain(..drop);
+    }
+
+    /// The output that follows output `(n, p)`.
+    #[inline(always)]
+    fn after(&self, n: u64, p: usize) -> (u64, usize) {
+        let p = p + self.m;
+        (n + (p / self.l) as u64, p % self.l)
+    }
+
+    /// Emits every output due before absolute input `end`; `base` is the input index at the
+    /// start of the history's current block.
+    fn outputs(&mut self, base: u64, end: u64, oi: &mut Vec<f32>, oq: &mut Vec<f32>) {
         while self.next_n < end {
             let last = (self.next_n - base) as usize + (self.t - 1);
             let start = last + 1 - self.t;
             let h = &self.phases_rev[self.next_p];
             oi.push(dot(h, &self.hist_i[start..=last]));
             oq.push(dot(h, &self.hist_q[start..=last]));
-            self.next_p += self.m;
-            self.next_n += (self.next_p / self.l) as u64;
-            self.next_p %= self.l;
+            (self.next_n, self.next_p) = self.after(self.next_n, self.next_p);
         }
-        self.consumed = end;
-        let drop = self.hist_i.len() - (self.t - 1);
-        self.hist_i.drain(..drop);
-        self.hist_q.drain(..drop);
+    }
+
+    /// [`Self::outputs`] compiled for AVX, so the kernel inlines into the loop and the switch
+    /// back to SSE code happens once per block instead of once per dot.
+    /// Bit-identical to `dot` for finite input only, which is all `cu8` conversion yields; a NaN payload may differ.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx")]
+    unsafe fn outputs_avx(&mut self, base: u64, end: u64, oi: &mut Vec<f32>, oq: &mut Vec<f32>) {
+        let t = self.t;
+        while self.next_n < end {
+            let (n, p) = (self.next_n, self.next_p);
+            let at = (n - base) as usize;
+            let (n2, p2) = self.after(n, p);
+            if t >= TWO_OUTPUT_MIN_TAPS && n2 < end {
+                let at2 = (n2 - base) as usize;
+                // SAFETY: this function only runs with AVX, its own contract.
+                let (x, y) = unsafe {
+                    dots_avx::<2>(
+                        [&self.phases_rev[p], &self.phases_rev[p2]],
+                        [&self.hist_i[at..at + t], &self.hist_i[at2..at2 + t]],
+                        [&self.hist_q[at..at + t], &self.hist_q[at2..at2 + t]],
+                    )
+                };
+                oi.extend_from_slice(&x);
+                oq.extend_from_slice(&y);
+                (self.next_n, self.next_p) = self.after(n2, p2);
+            } else {
+                // SAFETY: as above.
+                let (x, y) = unsafe {
+                    dots_avx::<1>(
+                        [&self.phases_rev[p]],
+                        [&self.hist_i[at..at + t]],
+                        [&self.hist_q[at..at + t]],
+                    )
+                };
+                oi.extend_from_slice(&x);
+                oq.extend_from_slice(&y);
+                (self.next_n, self.next_p) = (n2, p2);
+            }
+        }
     }
 }
 
@@ -345,6 +475,162 @@ mod tests {
             let b: Vec<f32> = (0..len).map(|k| 1.0 - k as f32 * 0.125).collect();
             let want: f64 = a.iter().zip(&b).map(|(x, y)| *x as f64 * *y as f64).sum();
             assert!((dot(&a, &b) as f64 - want).abs() < 1e-3, "len={len}");
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    type Kernel = fn(&[f32], &[f32]) -> f32;
+
+    /// The AVX kernels by name, each as a dot of `h` with `x`, on hosts that have AVX. The two-output
+    /// kernel runs `x` in every position, with a different second output on either side of it.
+    #[cfg(target_arch = "x86_64")]
+    fn avx_kernels() -> Vec<(&'static str, Kernel)> {
+        if !std::arch::is_x86_feature_detected!("avx") {
+            return Vec::new();
+        }
+        // SAFETY: AVX was just detected on this CPU.
+        vec![
+            ("one, I", |h, x| unsafe {
+                dots_avx::<1>([h], [x], [h]).0[0]
+            }),
+            ("one, Q", |h, x| unsafe {
+                dots_avx::<1>([h], [h], [x]).1[0]
+            }),
+            ("two, first I", |h, x| unsafe {
+                dots_avx::<2>([h, x], [x, h], [h, h]).0[0]
+            }),
+            ("two, first Q", |h, x| unsafe {
+                dots_avx::<2>([h, x], [h, h], [x, h]).1[0]
+            }),
+            ("two, second I", |h, x| unsafe {
+                dots_avx::<2>([x, h], [h, x], [h, h]).0[1]
+            }),
+            ("two, second Q", |h, x| unsafe {
+                dots_avx::<2>([x, h], [h, h], [h, x]).1[1]
+            }),
+        ]
+    }
+
+    /// A kernel must round like `dot`; a fused multiply-add would not. Lane 0 holds −(1 + 2⁻¹¹),
+    /// then adds (1 + 2⁻¹²)² = 1 + 2⁻¹¹ + 2⁻²⁴. The product rounds to 1 + 2⁻¹¹ first, so the
+    /// lane reads 0; fused, the product stays exact and the lane reads 2⁻²⁴.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx_kernels_round_the_product_before_adding() {
+        let a = 1.0f32 + (2.0f32).powi(-12);
+        let (mut x, mut y) = ([0.0f32; 16], [0.0f32; 16]);
+        (x[0], y[0]) = (-(1.0 + (2.0f32).powi(-11)), 1.0);
+        (x[8], y[8]) = (a, a);
+        assert_eq!(dot(&x, &y).to_bits(), 0.0f32.to_bits());
+        for (name, kernel) in avx_kernels() {
+            assert_eq!(kernel(&x, &y).to_bits(), 0.0f32.to_bits(), "{name}");
+        }
+    }
+
+    /// Runs a stage through the reference `outputs` loop, whatever the CPU.
+    fn run_reference(
+        st: &mut RationalFir,
+        i: &[f32],
+        q: &[f32],
+        oi: &mut Vec<f32>,
+        oq: &mut Vec<f32>,
+    ) {
+        let base = st.consumed;
+        let end = base + i.len() as u64;
+        st.hist_i.extend_from_slice(i);
+        st.hist_q.extend_from_slice(q);
+        st.outputs(base, end, oi, oq);
+        st.consumed = end;
+        let drop = st.hist_i.len() - (st.t - 1);
+        st.hist_i.drain(..drop);
+        st.hist_q.drain(..drop);
+    }
+
+    #[test]
+    fn stage_output_is_the_bits_of_the_reference_loop() {
+        // Per-phase lengths on both sides of TWO_OUTPUT_MIN_TAPS, ratios with one phase and many,
+        // and cuts that leave a last output alone at the end of a block.
+        for (l, m, transition) in [
+            (1usize, 2usize, 0.05),
+            (1, 2, 0.004),
+            (3, 4, 0.05),
+            (3, 4, 0.004),
+            (16, 25, 0.002),
+        ] {
+            let proto = lowpass(
+                0.4 / (l.max(m) as f64),
+                transition / (l.max(m) as f64),
+                l as f64,
+            );
+            let i: Vec<f32> = (0..7_001).map(|k| (k as f32 * 0.37).sin()).collect();
+            let q: Vec<f32> = (0..7_001).map(|k| (k as f32 * 0.11).cos()).collect();
+            let (mut st, mut reference) = (
+                RationalFir::new(l, m, &proto),
+                RationalFir::new(l, m, &proto),
+            );
+            let (mut oi, mut oq, mut ri, mut rq) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let mut last = 0;
+            for cut in [1usize, 2, 3, 500, 501, 4_000, 7_001] {
+                st.process(&i[last..cut], &q[last..cut], &mut oi, &mut oq);
+                run_reference(
+                    &mut reference,
+                    &i[last..cut],
+                    &q[last..cut],
+                    &mut ri,
+                    &mut rq,
+                );
+                last = cut;
+            }
+            let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert!(!oi.is_empty());
+            assert_eq!(bits(&oi), bits(&ri), "{l}/{m} I, {} taps", proto.len());
+            assert_eq!(bits(&oq), bits(&rq), "{l}/{m} Q, {} taps", proto.len());
+        }
+    }
+
+    /// Either side of TWO_OUTPUT_MIN_TAPS, exactly: per-phase lengths 127, 128 and 129, with one
+    /// phase and with three. The threshold moves cost, so it must not move a bit.
+    #[test]
+    fn two_output_threshold_does_not_change_the_output() {
+        for (l, m) in [(1usize, 2usize), (3, 4)] {
+            for per_phase in [127usize, 128, 129] {
+                let proto: Vec<f32> = (0..per_phase * l)
+                    .map(|k| ((k * 31 % 97) as f32 - 48.0) * 1e-3)
+                    .collect();
+                let i: Vec<f32> = (0..2_000).map(|k| (k as f32 * 0.37).sin()).collect();
+                let q: Vec<f32> = (0..2_000).map(|k| (k as f32 * 0.11).cos()).collect();
+                let (mut oi, mut oq, mut ri, mut rq) =
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                RationalFir::new(l, m, &proto).process(&i, &q, &mut oi, &mut oq);
+                run_reference(
+                    &mut RationalFir::new(l, m, &proto),
+                    &i,
+                    &q,
+                    &mut ri,
+                    &mut rq,
+                );
+                let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                assert!(!oi.is_empty());
+                assert_eq!(bits(&oi), bits(&ri), "{l}/{m} {per_phase} I");
+                assert_eq!(bits(&oq), bits(&rq), "{l}/{m} {per_phase} Q");
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(300))]
+        // Every length from empty through several chunks and tails, with magnitudes far enough
+        // apart that a different addition order would round differently.
+        #[test]
+        fn avx_kernels_match_the_reference_bits(
+            pairs in proptest::collection::vec((-1e6f32..1e6, -1e-3f32..1e-3), 0..70),
+        ) {
+            let (a, b): (Vec<f32>, Vec<f32>) = pairs.into_iter().unzip();
+            let want = dot(&a, &b).to_bits();
+            for (name, kernel) in avx_kernels() {
+                prop_assert_eq!(kernel(&a, &b).to_bits(), want, "{}", name);
+            }
         }
     }
 

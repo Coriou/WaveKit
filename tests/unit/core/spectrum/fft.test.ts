@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest"
 import * as fc from "fast-check"
 import {
 	accumulateShiftedPower,
+	binPowerDb,
 	defaultFftSize,
 	Fft,
 	hannWindow,
 	POWER_FLOOR_DB,
+	powerScale,
 	powerToDb,
 } from "../../../../src/core/spectrum/fft.js"
 import {
@@ -177,6 +179,41 @@ describe("spectrum helpers", () => {
 			POWER_FLOOR_DB,
 			POWER_FLOOR_DB,
 		])
+	})
+
+	it("binPowerDb stores bit-identically to powerToDb, including non-finite and non-positive sums", () => {
+		// Feature: spectrum-linear-power, Property 4: one-bin dB equals the array pass
+		// Validates: the linear short path's dB fallback and burst peak reuse powerToDb's exact value
+		fc.assert(
+			fc.property(
+				fc.array(
+					fc.oneof(
+						fc.double({ noNaN: false }),
+						fc.constantFrom(
+							0,
+							-0,
+							Number.NaN,
+							Infinity,
+							-Infinity,
+							Number.MIN_VALUE,
+						),
+					),
+					{ minLength: 1, maxLength: 64 },
+				),
+				fc.integer({ min: 0, max: 100 }),
+				(sums, frames) => {
+					const acc = Float64Array.from(sums)
+					const db = new Float32Array(acc.length)
+					powerToDb(acc, frames, db)
+					const scale = powerScale(acc.length, frames)
+					for (let i = 0; i < acc.length; i++)
+						expect(
+							Object.is(Math.fround(binPowerDb(acc[i]!, scale)), db[i]),
+						).toBe(true)
+				},
+			),
+			{ numRuns: 200 },
+		)
 	})
 
 	it("derives fftSize for RBW 0.8–1.6 kHz (§ 4.2)", () => {
