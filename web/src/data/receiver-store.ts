@@ -160,8 +160,9 @@ export class ReceiverStore extends Store<ReceiverStoreState> {
 	}
 
 	/**
-	 * Manual gain at `tenthsDb`: switches the tuner to manual first unless the core already reports
-	 * manual mode as known (rtl_tcp ignores a gain while the tuner AGC runs).
+	 * Manual gain at `tenthsDb`: writes manual mode first unless the core reports manual as known
+	 * and no other mode write is pending, then the gain. Only some tuners (R820T, R828D) leave AGC
+	 * on a gain write; on the others the gain alone would leave the tuner in AGC.
 	 */
 	async setManualGain(sourceId: string, tenthsDb: number): Promise<boolean> {
 		const state = this.options.tunerState(sourceId)

@@ -35,6 +35,50 @@ async function pollResponse(payload: unknown): Promise<SdrHostStatus> {
 	}
 }
 
+describe("SdrHostPoller device facts", () => {
+	it("maps a failed USB check to no device fact", async () => {
+		const status = await pollResponse({
+			dongle: { present: false, probeFailed: true },
+			rtlTcp: { running: false },
+		})
+		expect(status.receiverFacts).toEqual({
+			deviceFound: null,
+			rtlTcpRunning: false,
+			deviceProbe: "failed",
+		})
+		expect(status.dongle?.probeFailed).toBe(true)
+	})
+
+	it("marks an answered USB check as an observation", async () => {
+		const status = await pollResponse({
+			dongle: { present: false, probeFailed: false },
+		})
+		expect(status.receiverFacts).toMatchObject({
+			deviceFound: false,
+			deviceProbe: "observed",
+		})
+		expect(status.dongle).not.toHaveProperty("probeFailed")
+	})
+
+	it("reads a host without the field as it always did", async () => {
+		const status = await pollResponse({ dongle: { present: false } })
+		expect(status.receiverFacts).toEqual({
+			deviceFound: false,
+			rtlTcpRunning: null,
+		})
+	})
+
+	it("states no device from a malformed probe field", async () => {
+		const status = await pollResponse({
+			dongle: { present: false, probeFailed: "no" },
+		})
+		expect(status.receiverFacts).toEqual({
+			deviceFound: null,
+			rtlTcpRunning: null,
+		})
+	})
+})
+
 describe("SdrHostPoller API compatibility", () => {
 	it("reports dongle presence from the actual SDR host status response", async () => {
 		const status = await pollResponse({

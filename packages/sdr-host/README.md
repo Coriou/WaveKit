@@ -420,12 +420,20 @@ injected by the preview only and never ships to the Pi.
 Returns service health status (200 OK or 503 Service Unavailable) from USB and
 process presence, unchanged for the Docker healthcheck. The informational
 `sampling` field carries the upstream sampling state; it does not affect the
-verdict.
+verdict. `checks.dongle` is `ok`, `error` (`lsusb` answered without the dongle) or
+`unknown` (`lsusb` failed or passed its 3 s limit, so the device state is unknown);
+`unknown` reads unhealthy, like `error`.
 
 ### GET /api/status
 
 Returns dongle info, process states and the legacy `rtlmux.stats` shape, plus:
 
+- `dongle.probeFailed`: `false` when `lsusb` answered, so `present` is an
+  observation; `true` when it failed or passed its 3 s limit, so `present: false`
+  observes nothing. A WaveKit core makes no device claim from a failed check, and
+  `ready` stays `false` with the warning "USB check failed; device state unknown."
+  A failed check does not restart rtl_tcp: only a check that answered and differs
+  from the last state handled does.
 - `sampling` (`SdrHostSampling`): `streaming` only while rtlmux's upstream byte
   count grows by real sample data within 10 s; `waiting`, `stale`,
   `disconnected` or `unknown` otherwise. Zero downstream clients never implies
@@ -451,7 +459,8 @@ what the service observed since it started.
 
 ### GET /api/fix
 
-Returns copy-paste fix commands when issues are detected.
+Returns copy-paste fix commands when issues are detected. A failed USB check is
+not one: it says nothing about the dongle.
 
 ## Ports
 

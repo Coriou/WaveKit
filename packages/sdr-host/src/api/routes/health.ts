@@ -5,7 +5,8 @@ export interface HealthResponse {
 	healthy: boolean
 	uptime: number
 	checks: {
-		dongle: "ok" | "error"
+		/** `unknown`: the USB check failed, so it observed nothing. Reads unhealthy, like `error`. */
+		dongle: "ok" | "error" | "unknown"
 		rtlTcp: "ok" | "error"
 		rtlmux: "ok" | "error"
 	}
@@ -29,9 +30,11 @@ export function registerHealthRoutes(fastify: FastifyInstance): void {
 		const rtlmuxState = processManager.getRtlmuxState()
 
 		const checks = {
-			dongle: preflightResult.dongle.present
-				? ("ok" as const)
-				: ("error" as const),
+			dongle: preflightResult.dongle.probeFailed
+				? ("unknown" as const)
+				: preflightResult.dongle.present
+					? ("ok" as const)
+					: ("error" as const),
 			rtlTcp: rtlTcpState.running ? ("ok" as const) : ("error" as const),
 			rtlmux: rtlmuxState.running ? ("ok" as const) : ("error" as const),
 		}
@@ -48,6 +51,8 @@ export function registerHealthRoutes(fastify: FastifyInstance): void {
 		// Add reason if unhealthy
 		if (!healthy) {
 			const reasons: string[] = []
+			if (checks.dongle === "unknown")
+				reasons.push("USB check failed; device state unknown")
 			if (checks.dongle === "error") reasons.push("dongle not detected")
 			if (checks.rtlTcp === "error") reasons.push("rtl_tcp not running")
 			if (checks.rtlmux === "error") reasons.push("rtlmux not running")

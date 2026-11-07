@@ -398,13 +398,11 @@ function changeOf(opts: TunerWriteOptions): {
 	}
 }
 
-/** Relay commands from which applyExternalCommand infers manual gain mode. */
-const MANUAL_GAIN_COMMANDS: ReadonlySet<number> = new Set([
-	RTL_TCP_COMMANDS.SET_GAIN,
-	RTL_TCP_COMMANDS.SET_IF_GAIN,
-	RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX,
-	RTL_TCP_COMMANDS.SET_TUNER_IF_GAIN,
-])
+/**
+ * rtl_tcp header tuner types (R820T 5, R828D 6) whose `rtlsdr_set_tuner_gain` selects manual gain.
+ * Other tuners set the gain mode apart, so a gain write there proves nothing about it.
+ */
+const MANUAL_ON_GAIN_TUNER_TYPES: ReadonlySet<number> = new Set([5, 6])
 
 /** Placeholder-capable fields, in TunerState order, for `unknownFields`. */
 const STATE_FIELDS: readonly TunerStateField[] = [
@@ -1123,6 +1121,8 @@ export class TunerController extends EventEmitter {
 	 * and reports the field unknown until a value is written, accepted or inferred.
 	 */
 	private unverifiedFields: Map<string, Set<TunerStateField>> = new Map()
+	/** setGainMode calls whose frame may be out while the state still shows the old mode. */
+	private readonly gainModeWritesInFlight: Map<string, number> = new Map()
 	/**
 	 * The sample rate adoptObservedSampleRate took from the stream's measured rate, per source.
 	 * Reported as `measuredFields` only while the rate is still unverified and the state still
@@ -1435,9 +1435,10 @@ export class TunerController extends EventEmitter {
 		// The relay forwards raw bytes upstream before any check below, so even a value this
 		// controller ignores may have moved the receiver: the client did it either way.
 		this.noteFieldWrite(sourceId, stateFieldOf(command))
-		// Gain commands imply manual mode on the relay path (state below).
-		if (MANUAL_GAIN_COMMANDS.has(command))
-			this.noteFieldWrite(sourceId, "gainMode")
+		// A gain or gain index frame may move the gain mode (gainFrameMode; state below). IF gain
+		// frames never do.
+		const relayGainMode = this.gainFrameMode(sourceId, command, value)
+		if (relayGainMode !== "none") this.noteFieldWrite(sourceId, "gainMode")
 		this.noteChange(sourceId, cmdName, value, {
 			actor: "relay",
 			reason: "relay-command",
@@ -1499,7 +1500,6 @@ export class TunerController extends EventEmitter {
 			case RTL_TCP_COMMANDS.SET_GAIN:
 				if (this.isWithinRange(value, VALIDATION.gain)) {
 					state.gain = value
-					state.gainMode = "manual"
 					updated = true
 				} else {
 					this.log.warn(
@@ -1524,7 +1524,6 @@ export class TunerController extends EventEmitter {
 			case RTL_TCP_COMMANDS.SET_IF_GAIN:
 				if (this.isWithinRange(value, VALIDATION.uint32)) {
 					state.ifGain = value
-					state.gainMode = "manual"
 					updated = true
 				} else {
 					this.log.warn(
@@ -1592,7 +1591,6 @@ export class TunerController extends EventEmitter {
 			case RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX:
 				if (this.isWithinRange(value, VALIDATION.uint16)) {
 					state.tunerGainIndex = value
-					state.gainMode = "manual"
 					updated = true
 				} else {
 					this.log.warn(
@@ -1613,7 +1611,6 @@ export class TunerController extends EventEmitter {
 					this.isWithinRange(gain, VALIDATION.uint16)
 				) {
 					state.tunerIfGain = { stage, gain }
-					state.gainMode = "manual"
 					updated = true
 				} else {
 					this.log.warn(
@@ -1652,18 +1649,17 @@ export class TunerController extends EventEmitter {
 				this.markAccepted(sourceId, command)
 				this.markConnectionWrite(sourceId, command)
 			}
-			// Gain commands imply manual mode on the relay path (state above).
-			if (
-				command !== RTL_TCP_COMMANDS.SET_GAIN_MODE &&
-				state.gainMode === "manual" &&
-				MANUAL_GAIN_COMMANDS.has(command)
-			)
-				this.markInferred(sourceId, "gainMode")
+			// A gain or gain index frame selects manual only where gainFrameMode says so.
+			if (relayGainMode !== "none")
+				this.noteGainFrameMode(sourceId, relayGainMode)
 			delete state.lastError
 			this.log.debug(
 				{ sourceId, command: cmdName, value },
 				"Applied relay command update",
 			)
+		} else if (relayGainMode !== "none") {
+			// A value this controller ignores still went upstream: the mode it left is not known.
+			this.noteGainFrameMode(sourceId, "unknown")
 		}
 
 		this.emitStateChanged(sourceId)
@@ -1826,9 +1822,19 @@ export class TunerController extends EventEmitter {
 		const value = mode === "manual" ? 1 : 0
 		this.appliedBandGain.delete(sourceId)
 		const mine = this.nextFieldWrite(sourceId, "gainMode")
-		await this.countedGainWrite(sourceId, opts, () =>
-			this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_GAIN_MODE, value, opts),
+		this.gainModeWritesInFlight.set(
+			sourceId,
+			(this.gainModeWritesInFlight.get(sourceId) ?? 0) + 1,
 		)
+		try {
+			await this.countedGainWrite(sourceId, opts, () =>
+				this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_GAIN_MODE, value, opts),
+			)
+		} finally {
+			const left = (this.gainModeWritesInFlight.get(sourceId) ?? 1) - 1
+			if (left > 0) this.gainModeWritesInFlight.set(sourceId, left)
+			else this.gainModeWritesInFlight.delete(sourceId)
+		}
 		if (this.supersededWrite(sourceId, "gainMode", mine)) return
 		state.gainMode = mode
 		this.noteOperatorGainWrite(sourceId, opts)
@@ -1851,6 +1857,103 @@ export class TunerController extends EventEmitter {
 		state.gain = tenthsDb
 		this.noteOperatorGainWrite(sourceId, opts)
 		this.emitStateChanged(sourceId)
+	}
+
+	/**
+	 * What a gain frame does to the tuner's gain mode. rtl_tcp SET_GAIN and SET_TUNER_GAIN_INDEX
+	 * go through `rtlsdr_set_tuner_gain`; on an R820T or R828D (rtl_tcp header tuner type 5 or 6)
+	 * that selects manual gain. Other tuners set the mode apart (E4000, FC0012, FC0013, FC2580), an
+	 * unknown tuner or server may do anything, and rtl_tcp ignores a gain index outside the
+	 * advertised gain table. So "manual" only on those two tuners with a gain table and, for an
+	 * index, one inside it; any other gain frame makes the mode "unknown", never a guess. "none"
+	 * for a frame that never changes the mode (IF gain and every other command).
+	 */
+	private gainFrameMode(
+		sourceId: string,
+		cmd: number,
+		value: number,
+	): "manual" | "unknown" | "none" {
+		if (
+			cmd !== RTL_TCP_COMMANDS.SET_GAIN &&
+			cmd !== RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX
+		)
+			return "none"
+		const header = this.rtlTcpHeader(sourceId)
+		if (
+			header === undefined ||
+			!MANUAL_ON_GAIN_TUNER_TYPES.has(header.tunerType) ||
+			header.gainCount <= 0
+		)
+			return "unknown"
+		if (
+			cmd === RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX &&
+			value >= header.gainCount
+		)
+			return "unknown"
+		return "manual"
+	}
+
+	/** The source's parsed rtl_tcp header; a source manager without one (a partial double) has none. */
+	private rtlTcpHeader(
+		sourceId: string,
+	): { tunerType: number; gainCount: number } | undefined {
+		const manager: Partial<Pick<SourceManager, "getRtlTcpInfo">> =
+			this.sourceManager
+		return manager.getRtlTcpInfo?.(sourceId)
+	}
+
+	/**
+	 * The advertised gain table length of the source's rtl_tcp header, when it gives one
+	 * (undefined without a header or with no table): valid gain indexes are 0 to count - 1.
+	 */
+	tunerGainCount(sourceId: string): number | undefined {
+		const count = this.rtlTcpHeader(sourceId)?.gainCount
+		return count !== undefined && count > 0 ? count : undefined
+	}
+
+	/**
+	 * The gain mode after a gain frame (gainFrameMode). Manual: the state says so (inferred), so it
+	 * never claims AGC on a manual tuner, and a later AGC request differs and writes the mode. An
+	 * accepted gain mode keeps its place in the replay and is replayed before the gain written after
+	 * it. Unknown: the mode is unverified, so it is never claimed and the next mode request writes.
+	 * No gain frame selects AGC, so a proven manual mode stays manual, unless a mode write is in
+	 * flight: its frame may already have changed the mode the state still shows.
+	 */
+	private noteGainFrameMode(
+		sourceId: string,
+		mode: "manual" | "unknown",
+	): void {
+		const state = this.tunerStates.get(sourceId)
+		if (!state) return
+		const provenManual =
+			state.gainMode === "manual" && !this.isUnproven(sourceId, "gainMode")
+		if (mode === "unknown") {
+			if (!provenManual || this.gainModeWritesInFlight.has(sourceId))
+				this.markGainModeUnknown(sourceId)
+			return
+		}
+		if (provenManual) return
+		state.gainMode = "manual"
+		this.markInferred(sourceId, "gainMode")
+	}
+
+	/** The gain mode may have changed in a way nothing proves: unknown until the next mode write. */
+	private markGainModeUnknown(sourceId: string): void {
+		this.inferredFields.get(sourceId)?.delete("gainMode")
+		let unverified = this.unverifiedFields.get(sourceId)
+		if (!unverified) {
+			unverified = new Set()
+			this.unverifiedFields.set(sourceId, unverified)
+		}
+		unverified.add("gainMode")
+	}
+
+	private noteLeftAgc(sourceId: string, cmd: number, value: number): void {
+		const mode = this.gainFrameMode(sourceId, cmd, value)
+		if (mode === "none") return
+		// A gain mode setter still waiting on its own frame is overridden by this one.
+		this.noteFieldWrite(sourceId, "gainMode")
+		this.noteGainFrameMode(sourceId, mode)
 	}
 
 	async setPpm(
@@ -2119,14 +2222,46 @@ export class TunerController extends EventEmitter {
 			this.withoutCommand(() => this.onOperatorSampleRate?.(sourceId))
 			this.emitStateChanged(sourceId)
 		}
-		if (updates.gainMode !== undefined && updates.gainMode !== state.gainMode) {
-			await this.setGainMode(sourceId, updates.gainMode, opts)
-		} else if (updates.gainMode !== undefined)
-			this.noteUnchangedGainChoice(sourceId, opts)
-		if (updates.gain !== undefined && updates.gain !== state.gain) {
-			await this.setGain(sourceId, updates.gain, opts)
-		} else if (updates.gain !== undefined)
-			this.noteUnchangedGainChoice(sourceId, opts, true)
+		// As a tune (applyTune): a value in place and proven sends nothing, an unproven one is
+		// written, and one not accepted yet is accepted beside a held partner. rtl_tcp SET_GAIN
+		// switches the tuner to manual, so for AGC the gain goes first and the mode last.
+		const inPlace: Array<"gainMode" | "gain"> = []
+		const operator = opts.origin === "rest"
+		const notAccepted = (field: "gainMode" | "gain") =>
+			this.desiredFields.get(sourceId)?.has(field) !== true
+		const gainMode = updates.gainMode
+		const gain = updates.gain
+		let wroteMode = false
+		const writeMode = async (mode: TunerGainMode) => {
+			if (mode !== state.gainMode || this.isUnproven(sourceId, "gainMode")) {
+				await this.setGainMode(sourceId, mode, opts)
+				wroteMode = true
+			} else {
+				this.noteUnchangedGainChoice(sourceId, opts)
+				if (operator && notAccepted("gainMode")) inPlace.push("gainMode")
+			}
+		}
+		// A written gain mode is followed by a written gain: a tuner switched to manual may reset it.
+		const writeGain = async (tenthsDb: number) => {
+			if (
+				tenthsDb !== state.gain ||
+				wroteMode ||
+				this.isUnproven(sourceId, "gain")
+			)
+				await this.setGain(sourceId, tenthsDb, opts)
+			else {
+				this.noteUnchangedGainChoice(sourceId, opts, true)
+				if (operator && notAccepted("gain")) inPlace.push("gain")
+			}
+		}
+		if (gainMode === "agc") {
+			if (gain !== undefined) await writeGain(gain)
+			await writeMode(gainMode)
+		} else {
+			if (gainMode !== undefined) await writeMode(gainMode)
+			if (gain !== undefined) await writeGain(gain)
+		}
+		if (inPlace.length > 0) this.acceptBesideHeld(sourceId, inPlace)
 		if (updates.ppm !== undefined && updates.ppm !== state.ppm) {
 			await this.setPpm(sourceId, updates.ppm, opts)
 		}
@@ -2287,6 +2422,10 @@ export class TunerController extends EventEmitter {
 
 		let wroteGain = leftAgc
 		let wroteMode = false
+		// Operator values in place that sent no frame and are not accepted yet (acceptBesideHeld).
+		const inPlace: Array<"gainMode" | "gain"> = []
+		const notAccepted = (field: "gainMode" | "gain") =>
+			this.desiredFields.get(sourceId)?.has(field) !== true
 		const writeMode = async (mode: TunerGainMode) => {
 			if (
 				changed("gainMode", mode !== state.gainMode) ||
@@ -2294,14 +2433,20 @@ export class TunerController extends EventEmitter {
 			) {
 				await this.setGainMode(sourceId, mode, opts)
 				wroteMode = true
-			} else if (operator) this.noteUnchangedGainChoice(sourceId, opts)
+			} else if (operator) {
+				this.noteUnchangedGainChoice(sourceId, opts)
+				if (notAccepted("gainMode")) inPlace.push("gainMode")
+			}
 			applied("gainMode")
 		}
 		const writeGain = async (tenthsDb: number) => {
 			if (changed("gain", tenthsDb !== state.gain) || wroteMode) {
 				await this.setGain(sourceId, tenthsDb, opts)
 				wroteGain = true
-			} else if (operator) this.noteUnchangedGainChoice(sourceId, opts, true)
+			} else if (operator) {
+				this.noteUnchangedGainChoice(sourceId, opts, true)
+				if (notAccepted("gain")) inPlace.push("gain")
+			}
 			applied("gain")
 		}
 		// rtl_tcp SET_GAIN switches the tuner to manual: for AGC the mode goes last.
@@ -2312,6 +2457,7 @@ export class TunerController extends EventEmitter {
 			if (values.gainMode !== undefined) await writeMode(values.gainMode)
 			if (values.gain !== undefined) await writeGain(values.gain)
 		}
+		if (inPlace.length > 0) this.acceptBesideHeld(sourceId, inPlace)
 	}
 
 	/** What a temporary tune must remember to put the tuner back. */
@@ -2518,6 +2664,14 @@ export class TunerController extends EventEmitter {
 		const written: Array<{ value: number; name: string }> = []
 		let failure: Error | undefined
 		const plan = desired ? this.buildReplayPlan(state, desired) : []
+		// A gain mode inferred on the last connection (a gain frame's manual, or a mode written and
+		// not accepted) is not replayed: this connection may reach another receiver, so only a gain
+		// frame replayed on it, judged against its own header, proves the mode again. An accepted
+		// mode is replayed and proven by its own frame.
+		const inferredMode =
+			desired?.has("gainMode") !== true &&
+			this.inferredFields.get(sourceId)?.has("gainMode") === true
+		let lastGainFrame: [number, number] | undefined
 		for (const [cmd, value] of plan) {
 			try {
 				this.writeFrame(sourceId, cmd, value)
@@ -2533,6 +2687,24 @@ export class TunerController extends EventEmitter {
 			this.markConnectionWrite(sourceId, cmd)
 			const field = stateFieldOf(cmd)
 			if (field !== undefined) this.clearIgnoredRelayField(sourceId, field)
+			if (cmd === RTL_TCP_COMMANDS.SET_GAIN_MODE) lastGainFrame = undefined
+			else if (this.gainFrameMode(sourceId, cmd, value) !== "none")
+				lastGainFrame = [cmd, value]
+		}
+		// A gain frame replayed after the mode moves it as a live one does (gainFrameMode).
+		const replayedMode =
+			lastGainFrame === undefined
+				? "none"
+				: this.gainFrameMode(sourceId, ...lastGainFrame)
+		if (inferredMode) {
+			if (replayedMode === "manual") {
+				state.gainMode = "manual"
+				this.markInferred(sourceId, "gainMode")
+			} else {
+				this.markGainModeUnknown(sourceId)
+			}
+		} else if (replayedMode !== "none") {
+			this.noteGainFrameMode(sourceId, replayedMode)
 		}
 
 		if (written.length > 0) {
@@ -2570,6 +2742,7 @@ export class TunerController extends EventEmitter {
 			plan.length > 0 ||
 			capsChanged ||
 			forgotTuning ||
+			inferredMode ||
 			configured?.attempted === true
 		)
 			this.emitStateChanged(sourceId)
@@ -3228,6 +3401,54 @@ export class TunerController extends EventEmitter {
 		inferred.add(field)
 	}
 
+	/**
+	 * An operator tune's gain mode or gain already in place, proven and not accepted: no frame was
+	 * sent. While its partner (gain for the mode, the mode for the gain) is not accepted either, the
+	 * next connection's configured frames write the pair, as before the tune: nothing to do. Once the
+	 * partner is accepted the configured pair is skipped, so the value the tune asked for would come
+	 * back unknown after a reconnect (a rate change's: TUNER_TUNE_PARTIAL). It is accepted then,
+	 * placed beside the partner in the replay order the writes keep: a manual mode before its gain,
+	 * a gain before AGC. Every other accepted field keeps its place.
+	 */
+	private acceptBesideHeld(
+		sourceId: string,
+		fields: ReadonlyArray<"gainMode" | "gain">,
+	): void {
+		const desired = this.desiredFields.get(sourceId)
+		const state = this.tunerStates.get(sourceId)
+		if (!desired || !state) return
+		for (const field of fields) {
+			// A held tuner gain index also skips the configured pair, so it partners the mode too.
+			const partner =
+				field === "gain"
+					? "gainMode"
+					: desired.has("gain")
+						? "gain"
+						: "tunerGainIndex"
+			const partnerSeq = desired.get(partner)
+			if (partnerSeq === undefined || desired.has(field)) continue
+			this.sourceManager.assertTunerCommandActive()
+			const modeFirst = state.gainMode === "manual"
+			// Manual: the mode goes before its gain or gain index. AGC: after them, since either one
+			// written after AGC selects manual on the receiver.
+			const before = (field === "gainMode") === modeFirst
+			// Strictly between the partner and its neighbour on that side, so no other field moves;
+			// never past the newest sequence, which a pause marker compares with.
+			let neighbour = before ? partnerSeq - 1 : Number.POSITIVE_INFINITY
+			for (const seq of desired.values()) {
+				if (before && seq < partnerSeq && seq > neighbour) neighbour = seq
+				if (!before && seq > partnerSeq && seq < neighbour) neighbour = seq
+			}
+			this.clearIgnoredRelayField(sourceId, field)
+			desired.set(
+				field,
+				neighbour === Number.POSITIVE_INFINITY
+					? ++this.acceptanceSeq
+					: (partnerSeq + neighbour) / 2,
+			)
+		}
+	}
+
 	private markAccepted(sourceId: string, cmd: number): void {
 		const field = COMMAND_FIELDS[cmd]
 		if (!field) return
@@ -3402,6 +3623,8 @@ export class TunerController extends EventEmitter {
 		try {
 			this.writeFrame(sourceId, cmd, value)
 			this.noteFieldWrite(sourceId, stateFieldOf(cmd))
+			// In the same step as the frame: no other write can see the old mode in between.
+			this.noteLeftAgc(sourceId, cmd, value)
 			if (opts.accept === false) this.markWrittenNotAccepted(sourceId, cmd)
 			else this.markAccepted(sourceId, cmd)
 			this.markConnectionWrite(sourceId, cmd)
@@ -3591,6 +3814,15 @@ export class TunerController extends EventEmitter {
 					unverified?.has(field) !== true,
 			),
 		}
+	}
+
+	/** Declared only or unknown: a value equal to it is still written. */
+	private isUnproven(sourceId: string, field: TunerStateField): boolean {
+		const proof = this.fieldProof(sourceId)
+		return (
+			proof.unknownFields.includes(field) ||
+			proof.declaredOnlyFields.includes(field)
+		)
 	}
 
 	private isSameTunerIfGain(

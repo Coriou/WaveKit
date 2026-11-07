@@ -38,6 +38,12 @@ export interface ActivityDecoderBinding {
 	 * the full source capture: the observed tuner rate). Absent: unknown.
 	 */
 	inputSampleRateHz?: number
+	/**
+	 * Source centre in Hz when the decoder last started, while the tuner is still there (a decoder on
+	 * the full source capture). What rtl_433's `-f` holds, frozen at its start, so its `freq` estimate
+	 * is absolute around this. Absent after a retune with no restart, or when unknown.
+	 */
+	captureCentreHz?: number
 }
 
 /**

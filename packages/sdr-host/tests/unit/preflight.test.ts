@@ -34,6 +34,25 @@ describe("runPreflight", () => {
 		expect(result.warnings.length).toBe(0)
 	})
 
+	it("stays not ready on a failed USB check, with no claim about the dongle", async () => {
+		detectDongleMock.mockResolvedValueOnce({
+			present: false,
+			product: null,
+			serial: null,
+			usb: null,
+			driverConflict: false,
+			conflictingDriver: null,
+			probeFailed: true,
+		})
+
+		const { runPreflight } = await import("../../src/supervisor/preflight.js")
+		const result = await runPreflight(logger)
+
+		expect(result.ready).toBe(false)
+		expect(result.errors).toEqual([])
+		expect(result.warnings).toEqual(["USB check failed; device state unknown."])
+	})
+
 	it("adds warning when driver conflict detected", async () => {
 		detectDongleMock.mockResolvedValueOnce({
 			present: true,
@@ -183,4 +202,112 @@ it("serializes recovery, waits on shutdown and retries failed recovery", async (
 		await stop()
 		vi.useRealTimers()
 	}
+})
+
+function failedProbe() {
+	const snapshot = usbSnapshot(null)
+	return {
+		...snapshot,
+		ready: false,
+		dongle: { ...snapshot.dongle, probeFailed: true },
+		warnings: ["USB check failed; device state unknown."],
+	}
+}
+
+/** Polls `sequence` once each, the last one repeating; resolves with the restart mock. */
+async function restartsOver(
+	boot: ReturnType<typeof usbSnapshot>,
+	sequence: ReadonlyArray<ReturnType<typeof usbSnapshot>>,
+	recover = vi.fn(async () => {}),
+) {
+	vi.useFakeTimers()
+	const { startPreflightMonitoring } =
+		await import("../../src/supervisor/preflight.js")
+	let polled = 0
+	const shared = { ...boot }
+	const stop = startPreflightMonitoring(shared, logger, {
+		intervalMs: 100,
+		refresh: async () => {
+			const next = sequence[Math.min(polled, sequence.length - 1)]
+			polled += 1
+			return next ?? boot
+		},
+		onDeviceChange: recover,
+	})
+	try {
+		await vi.advanceTimersByTimeAsync(100 * sequence.length)
+		expect(polled).toBe(sequence.length)
+	} finally {
+		await stop()
+		vi.useRealTimers()
+	}
+	return { recover, shared }
+}
+
+describe("USB monitoring around a failed check", () => {
+	it("does not restart for one failed check between two that agree", async () => {
+		const { recover } = await restartsOver(usbSnapshot(4), [
+			usbSnapshot(4),
+			failedProbe(),
+			usbSnapshot(4),
+		])
+		expect(recover).not.toHaveBeenCalled()
+	})
+
+	it("does not restart while checks flap between failed and present", async () => {
+		const { recover } = await restartsOver(usbSnapshot(4), [
+			failedProbe(),
+			usbSnapshot(4),
+			failedProbe(),
+			usbSnapshot(4),
+			failedProbe(),
+			usbSnapshot(4),
+		])
+		expect(recover).not.toHaveBeenCalled()
+	})
+
+	it("reports the failed check in the shared status, not ready", async () => {
+		const { shared } = await restartsOver(usbSnapshot(4), [failedProbe()])
+		expect(shared.ready).toBe(false)
+		expect(shared.dongle).toMatchObject({ probeFailed: true })
+	})
+
+	it("restarts once when the boot check failed and the device is then there", async () => {
+		const { recover } = await restartsOver(failedProbe(), [
+			failedProbe(),
+			usbSnapshot(4),
+			usbSnapshot(4),
+		])
+		expect(recover).toHaveBeenCalledTimes(1)
+	})
+
+	it("restarts once for an unplug seen after a failed check", async () => {
+		const { recover } = await restartsOver(usbSnapshot(4), [
+			failedProbe(),
+			usbSnapshot(null),
+			usbSnapshot(null),
+		])
+		expect(recover).toHaveBeenCalledTimes(1)
+	})
+
+	it("restarts once for a replug seen after a failed check", async () => {
+		const { recover } = await restartsOver(usbSnapshot(4), [
+			failedProbe(),
+			usbSnapshot(5),
+			usbSnapshot(5),
+		])
+		expect(recover).toHaveBeenCalledTimes(1)
+	})
+
+	it("retries a real change whose restart failed, through a failed check", async () => {
+		const recover = vi
+			.fn(async () => {})
+			.mockRejectedValueOnce(new Error("s6 unavailable"))
+		const { recover: called } = await restartsOver(
+			usbSnapshot(4),
+			[usbSnapshot(5), failedProbe(), usbSnapshot(5), usbSnapshot(5)],
+			recover,
+		)
+		expect(called).toHaveBeenCalledTimes(2)
+	})
 })

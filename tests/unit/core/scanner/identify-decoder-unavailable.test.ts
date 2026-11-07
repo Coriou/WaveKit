@@ -167,7 +167,8 @@ describe("identify decoder-unavailable (WG9 5.4)", () => {
 
 /** Recorded from the frozen code (5669c187): output, then exit 127, ran the hold out. */
 const GOLDEN_OUTPUT_THEN_127 = {
-	dmr: "no-sync",
+	// One checked line is output awaiting its pair, not silence.
+	dmr: "timeout",
 	aprs: "no-sync",
 	"analog-fm": "unsupported/no-decoder",
 	dstar: "no-sync",

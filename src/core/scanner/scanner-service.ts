@@ -67,6 +67,7 @@ import type {
 	ScannerProbeDecoderType,
 	ScannerTrialOutcome,
 	DiscoveryTrialMemory,
+	ScannerLeaseRefusal,
 	ScannerPassiveReason,
 	ScannerRecorderDiscovery,
 } from "@wavekit/api-types"
@@ -170,7 +171,11 @@ import { tuningTrustOf } from "../tuning-trust.js"
 import { JobHits, emptyHitStats } from "./job-hits.js"
 import {
 	IDENTIFY_KEEP_JOBS,
+	IDENTIFY_MAX_ALIVE_JOBS,
 	IdentifyRunner,
+	identifyFullNextStep,
+	identifyNextStep,
+	identifyTargetNextStep,
 	inWindow,
 	normaliseIdentify,
 	type NormalisedIdentify,
@@ -271,6 +276,7 @@ import {
 	HOLE_STREAK_RESET_MS,
 	snapshotIntervalMs,
 } from "./store/snapshot-cadence.js"
+import { LastReasons, leaseRefusal, safeReasonCode } from "./last-reason.js"
 import { MEASURING_REASON, PassiveGuard } from "./passive-guard.js"
 import { PASSIVE_COST_LIMIT_DEFAULT } from "./passive-cost-contract.js"
 import {
@@ -1074,6 +1080,11 @@ export class ScannerService extends EventEmitter {
 	/** Sources whose free lease could not be handed to a waiter for lack of data: done when data returns. */
 	private readonly handBackOwed = new Set<string>()
 	private readonly passiveDisabled = new Map<string, string>()
+	private readonly passiveStartFailures = new LastReasons<{
+		code: string
+		at: string
+	}>()
+	private readonly leaseRefusals = new LastReasons<ScannerLeaseRefusal>()
 	private readonly probeOutcomes = new Map<string, ProbeTrialBook>()
 	/** WG11 req 6.3: observations a detection capture was tried for (once each) and their capture ids. */
 	private readonly iqTried = new Set<string>()
@@ -2627,6 +2638,16 @@ export class ScannerService extends EventEmitter {
 	// === identify (spec § 10.8) ===
 
 	async identify(req: ScannerIdentifyRequest): Promise<ScanJob> {
+		return (await this.identifyOrJoin(req)).job
+	}
+
+	/**
+	 * The job that answers `req`: a new one, or (`joined`) a running one that already asks the same
+	 * thing (identifyRequestJoins). Refusals come first, so a window that moved never joins.
+	 */
+	async identifyOrJoin(
+		req: ScannerIdentifyRequest,
+	): Promise<{ job: ScanJob; joined: boolean }> {
 		if (!this.settings().enabled)
 			throw new ScannerApiError(
 				"The scanner is disabled",
@@ -2659,7 +2680,11 @@ export class ScannerService extends EventEmitter {
 				`A sweep (scanner job ${holder.jobId}) holds this source's tuner; identify works in a still window`,
 				"SCANNER_SOURCE_BUSY",
 				409,
-				{ reason: "held", holderJobId: holder.jobId },
+				{
+					reason: "held",
+					holderJobId: holder.jobId,
+					...this.identifyBusyNext(n.sourceId, identify.target),
+				},
 			)
 		}
 		const target = identify.target
@@ -2679,17 +2704,30 @@ export class ScannerService extends EventEmitter {
 					"The target is outside the tuned window; tune first",
 					"OUT_OF_WINDOW",
 					409,
-					window
-						? {
-								window: {
-									startHz: window.centreHz - half,
-									endHz: window.centreHz + half,
-								},
-							}
-						: undefined,
+					{
+						...(window
+							? {
+									window: {
+										startHz: window.centreHz - half,
+										endHz: window.centreHz + half,
+									},
+								}
+							: {}),
+						next: identifyTargetNextStep(n.sourceId, target, window, false),
+					},
 				)
 			}
 		}
+		const running = this.runningIdentifyFor(n.sourceId, identify)
+		if (running) return { job: this.toDto(running), joined: true }
+		const alive = this.aliveIdentifyJobs(n.sourceId)
+		if (alive.length >= IDENTIFY_MAX_ALIVE_JOBS)
+			throw new ScannerApiError(
+				"Too many identify jobs are running on this source",
+				"SCANNER_IDENTIFY_BUSY",
+				409,
+				{ next: identifyFullNextStep(alive.map(r => r.id)) },
+			)
 		const now = this.now()
 		const record: JobRecord = {
 			id: `j_${ulid(now)}`,
@@ -2727,7 +2765,42 @@ export class ScannerService extends EventEmitter {
 		this.pruneIdentifyJobs()
 		const dto = this.toDto(record)
 		this.emit("job", dto)
-		return dto
+		return { job: dto, joined: false }
+	}
+
+	/** At most the identify jobs alive on the source: the ended ones fail on their state first. */
+	private runningIdentifyFor(
+		sourceId: string,
+		identify: NormalisedIdentify,
+	): JobRecord | null {
+		for (const record of this.aliveIdentifyJobs(sourceId)) {
+			const driver = this.drivers.get(record.id)
+			if (driver instanceof IdentifyRunner && driver.joins(identify))
+				return record
+		}
+		return null
+	}
+
+	private aliveIdentifyJobs(sourceId: string): JobRecord[] {
+		return [...this.jobs.values()].filter(
+			record =>
+				record.spec.sourceId === sourceId &&
+				record.spec.kind === "identify" &&
+				["pending", "starting", "running"].includes(record.state),
+		)
+	}
+
+	/** `details.next` of a held tuner. A window target names its frequency; the whole window, the centre it stays on. */
+	private identifyBusyNext(
+		sourceId: string,
+		target: NormalisedIdentify["target"],
+	): { next?: Record<string, unknown> } {
+		const window = this.identifyWindow(sourceId)
+		if (!("all" in target))
+			return { next: identifyTargetNextStep(sourceId, target, window, true) }
+		return window
+			? { next: identifyNextStep(sourceId, window.centreHz, true) }
+			: {}
 	}
 
 	// === discoveries and evidence ===
@@ -7064,12 +7137,18 @@ export class ScannerService extends EventEmitter {
 					// Gone already: a plain resume put this sweep on hold for the operator (holdBootResumes).
 					const wanted = this.bootResumeInFlight.delete(id)
 					if (
-						wanted &&
 						err instanceof ScannerApiError &&
 						err.code === "SCANNER_SOURCE_DOWN"
-					)
-						this.requeueBootResume(sourceId, id)
-					else this.log.warn({ err, jobId: id }, "Boot resume refused")
+					) {
+						if (wanted) this.requeueBootResume(sourceId, id)
+						else this.log.warn({ err, jobId: id }, "Boot resume refused")
+					} else {
+						this.leaseRefusals.set(
+							sourceId,
+							leaseRefusal("boot-resume", err, Date.now()),
+						)
+						this.log.warn({ err, jobId: id }, "Boot resume refused")
+					}
 				},
 			)
 		}
@@ -7577,6 +7656,14 @@ export class ScannerService extends EventEmitter {
 		return this.toDto(record)
 	}
 
+	private arbitrationFailed(sourceId: string, err: unknown): void {
+		this.leaseRefusals.set(
+			sourceId,
+			leaseRefusal("arbitration", err, Date.now()),
+		)
+		this.log.warn({ err, sourceId }, "Lease arbitration failed")
+	}
+
 	/** Runs arbitrateLeases on the source's serialised chain; never rejects. */
 	private arbitrate(
 		sourceId: string,
@@ -7584,9 +7671,7 @@ export class ScannerService extends EventEmitter {
 	): Promise<void> {
 		return this.onArbitrationChain(sourceId, () =>
 			this.arbitrateLeases(sourceId, eligible),
-		).catch((err: unknown) =>
-			this.log.warn({ err, sourceId }, "Lease arbitration failed"),
-		)
+		).catch((err: unknown) => this.arbitrationFailed(sourceId, err))
 	}
 
 	/** Runs `fn` on the source's serialised arbitration chain; its result or error goes to the caller only. */
@@ -7623,9 +7708,7 @@ export class ScannerService extends EventEmitter {
 			const filter = this.arbitrationQueued.get(sourceId) ?? null
 			this.arbitrationQueued.delete(sourceId)
 			return this.arbitrateLeases(sourceId, filter ?? undefined)
-		}).catch((err: unknown) =>
-			this.log.warn({ err, sourceId }, "Lease arbitration failed"),
-		)
+		}).catch((err: unknown) => this.arbitrationFailed(sourceId, err))
 	}
 
 	/**
@@ -7725,6 +7808,10 @@ export class ScannerService extends EventEmitter {
 					!(err instanceof ScannerApiError) ||
 					err.code !== "SCANNER_SOURCE_DOWN"
 				) {
+					this.leaseRefusals.set(
+						sourceId,
+						leaseRefusal("hand-back", err, Date.now()),
+					)
 					this.log.warn({ err, jobId: best }, "Lease hand-back refused")
 					return
 				}
@@ -7928,9 +8015,14 @@ export class ScannerService extends EventEmitter {
 			this.hits.delete(id)
 			try {
 				await driver.start()
+				this.passiveStartFailures.delete(cfg.id)
 			} catch (err) {
 				// The start rolled back (no lease, hold or engine kept). Drop the job so the next
 				// connected / caps-changed / source-up rebuilds it (boot-time caps are often absent).
+				this.passiveStartFailures.set(cfg.id, {
+					code: safeReasonCode(err),
+					at: new Date().toISOString(),
+				})
 				this.log.warn(
 					{ err, sourceId: cfg.id },
 					"Passive job failed to start; retrying when the source changes",
@@ -8323,6 +8415,8 @@ export class ScannerService extends EventEmitter {
 			hopSamples: pc ? pc.fftSize * (1 - (pc.overlap ?? 0)) : null,
 			...this.knownGain(cfg.id),
 		})
+		const startFailure = this.passiveStartFailures.get(cfg.id)
+		const leaseRefused = this.leaseRefusals.get(cfg.id)
 		return {
 			sourceId: cfg.id,
 			state: engine
@@ -8369,6 +8463,8 @@ export class ScannerService extends EventEmitter {
 				: null,
 			...(error ? { lastError: error } : {}),
 			...(overloadHint ? { overloadHint } : {}),
+			...(startFailure ? { lastPassiveStartFailure: startFailure } : {}),
+			...(leaseRefused ? { lastLeaseRefusal: leaseRefused } : {}),
 		}
 	}
 

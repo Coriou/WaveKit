@@ -13,6 +13,8 @@ import {
 	DECODER_INPUT_STATES,
 	DECODER_RECEPTION_HINTS,
 	DECODER_VERDICT_CODES,
+	SCANNER_IDENTIFY_VERDICT_CODES,
+	SCANNER_IDENTIFY_VERDICT_WHY,
 	SCANNER_PASSIVE_REASONS,
 	SCANNER_RECORDER_DECISIONS,
 	SOURCE_DEVICE_FACTS,
@@ -281,6 +283,12 @@ describe("GET /api/enums", () => {
 		})
 		expect(API_ENUMS.scanner.recorderDecisions).toBe(SCANNER_RECORDER_DECISIONS)
 		expect(API_ENUMS.scanner.passiveReasons).toBe(SCANNER_PASSIVE_REASONS)
+		expect(API_ENUMS.scanner.identifyVerdictCodes).toBe(
+			SCANNER_IDENTIFY_VERDICT_CODES,
+		)
+		expect(API_ENUMS.scanner.identifyVerdictWhy).toBe(
+			SCANNER_IDENTIFY_VERDICT_WHY,
+		)
 		expect(API_ENUMS.sources).toEqual({
 			verdictCodes: SOURCE_VERDICT_CODES,
 			deviceFacts: SOURCE_DEVICE_FACTS,

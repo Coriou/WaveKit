@@ -10,6 +10,7 @@ import {
 	TunerValidationError,
 } from "../../../src/core/tuner-controller.js"
 import type {
+	RtlTcpHeaderInfo,
 	SourceCaps,
 	SourceManager,
 } from "../../../src/core/source-manager.js"
@@ -21,6 +22,9 @@ function createMockSourceManager() {
 		assertTunerCommandActive: () => {},
 		writeToSource: vi.fn<(id: string, payload: Buffer) => boolean>(),
 		isRtlTcpSource: vi.fn<(id: string) => boolean>().mockReturnValue(true),
+		getRtlTcpInfo: vi
+			.fn<(id: string) => RtlTcpHeaderInfo | undefined>()
+			.mockReturnValue(undefined),
 		updateSourceCaps:
 			vi.fn<
 				(id: string, updates: Partial<SourceCaps>) => SourceCaps | undefined
@@ -218,7 +222,12 @@ describe("TunerController", () => {
 		expect(state?.ppm).toBe(-1)
 	})
 
-	it("marks manual gain mode for relay gain commands", () => {
+	it("marks manual gain mode for relay gain commands on an R820T", () => {
+		sourceManager.getRtlTcpInfo.mockReturnValue({
+			magic: "RTL0",
+			tunerType: 5,
+			gainCount: 29,
+		})
 		controller.initializeSource("rtl-1", makeCaps())
 		controller.applyExternalCommand("rtl-1", 0x04, 250)
 		let state = controller.getState("rtl-1")

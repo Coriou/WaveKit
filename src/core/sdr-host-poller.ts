@@ -71,23 +71,31 @@ export function parseReceiverEndpoints(
 const DongleFactSchema = z.object({
 	present: z.boolean().optional(),
 	found: z.boolean().optional(),
+	probeFailed: z.boolean().optional(),
 })
 const RtlTcpFactSchema = z.object({ running: z.boolean() })
 
 /**
  * The status body's device and rtl_tcp facts, each null unless stated as a boolean: a claim about
- * the receiver reads these, never a default. `present` wins over the legacy `found`.
+ * the receiver reads these, never a default. `present` wins over the legacy `found`. A failed USB
+ * probe states no device fact, whatever `present` says; a body without `probeFailed` is an older
+ * host and reads as it always did. A non-boolean `probeFailed` fails the parse: no claim.
  */
 export function parseReceiverFacts(
 	body: Record<string, unknown>,
 ): NonNullable<SdrHostStatus["receiverFacts"]> {
 	const dongle = DongleFactSchema.safeParse(body["dongle"])
 	const rtlTcp = RtlTcpFactSchema.safeParse(body["rtlTcp"])
+	const probeFailed = dongle.success ? dongle.data.probeFailed : undefined
 	return {
-		deviceFound: dongle.success
-			? (dongle.data.present ?? dongle.data.found ?? null)
-			: null,
+		deviceFound:
+			dongle.success && probeFailed !== true
+				? (dongle.data.present ?? dongle.data.found ?? null)
+				: null,
 		rtlTcpRunning: rtlTcp.success ? rtlTcp.data.running : null,
+		...(probeFailed === undefined
+			? {}
+			: { deviceProbe: probeFailed ? "failed" : "observed" }),
 	}
 }
 
@@ -495,6 +503,7 @@ export class SdrHostPoller extends EventEmitter {
 				dongle?: {
 					present?: boolean
 					found?: boolean
+					probeFailed?: boolean
 					vendor?: string
 					product?: string
 					serial?: string
@@ -596,6 +605,9 @@ export class SdrHostPoller extends EventEmitter {
 							vendor: data.dongle.vendor ?? null,
 							product: data.dongle.product ?? null,
 							serial: data.dongle.serial ?? null,
+							...(data.dongle.probeFailed === true
+								? { probeFailed: true }
+								: {}),
 						}
 					: null,
 				warnings: data.warnings ?? [],

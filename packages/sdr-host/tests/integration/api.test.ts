@@ -158,6 +158,38 @@ describe("sdr-host API", () => {
 		).toMatchObject({ dongle: { present: false }, errors: missing.errors })
 	})
 
+	it("says the device state is unknown after a failed USB check, with no fix advice", async () => {
+		fastify = await createApiServer({
+			hostTelemetry: emptyHost,
+			config: SdrHostConfigSchema.parse({}),
+			logger,
+			processManager: createProcessManager(),
+			preflightResult: createPreflightResult({
+				ready: false,
+				dongle: {
+					present: false,
+					product: null,
+					serial: null,
+					usb: null,
+					driverConflict: false,
+					conflictingDriver: null,
+					probeFailed: true,
+				},
+				warnings: ["USB check failed; device state unknown."],
+			}),
+		})
+		const health = await fastify.inject({ method: "GET", url: "/health" })
+		expect(health.statusCode).toBe(503)
+		expect(health.json()).toMatchObject({
+			healthy: false,
+			checks: { dongle: "unknown" },
+			reason: "USB check failed; device state unknown",
+		})
+		expect(health.body).not.toMatch(/not detected/)
+		const fix = await fastify.inject({ method: "GET", url: "/api/fix" })
+		expect(fix.statusCode).toBe(204)
+	})
+
 	it("returns healthy status when services are running", async () => {
 		const config = SdrHostConfigSchema.parse({})
 		fastify = await createApiServer({

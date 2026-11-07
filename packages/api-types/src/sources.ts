@@ -175,14 +175,16 @@ export type SourceVerdictCode = (typeof SOURCE_VERDICT_CODES)[number]
 
 /**
  * What the receiver's status API can say about its device: `present` or `absent` from a fresh
- * answer; `malformed` it answered without a boolean device state; `stale` its last answer is too
- * old; `unreachable` it does not answer now; `none` this core polls no status API for the source.
- * Only `present` and `absent` assert a device state.
+ * answer; `malformed` it answered without a boolean device state; `probe-failed` it answered, but
+ * its USB check failed or timed out; `stale` its last answer is too old; `unreachable` it does not
+ * answer now; `none` this core polls no status API for the source. Only `present` and `absent`
+ * assert a device state.
  */
 export const SOURCE_DEVICE_FACTS = [
 	"present",
 	"absent",
 	"malformed",
+	"probe-failed",
 	"stale",
 	"unreachable",
 	"none",

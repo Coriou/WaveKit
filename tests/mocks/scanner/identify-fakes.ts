@@ -29,7 +29,7 @@ import type {
 	TrackSnapshot,
 } from "../../../src/core/spectrum/types.js"
 import { testSettings } from "./engine-fakes.js"
-import { flushAsync, poolHarness } from "./probe-fakes.js"
+import { flushAsync, poolHarness, type PoolConfirm } from "./probe-fakes.js"
 
 /** 25 kHz above the FakeEngineView centre (446.1 MHz at 2.048 Msps). */
 export const TARGET_HZ = 446_125_000
@@ -85,6 +85,12 @@ export function viewOf(
 		discoveryId,
 		track,
 	}
+}
+
+/** The same window with nothing at the target: every bin on the floor. */
+export function quietSummaryOf(): BlockSummary {
+	const summary = summaryOf()
+	return { ...summary, bins: summary.bins.map(() => summary.floorDbfs) }
 }
 
 /** Block summary of the FakeEngineView window: floor −80 dBFS, one −50 dBFS bin at TARGET_HZ. */
@@ -213,6 +219,13 @@ export function identifyHarness(
 		patch?: (s: ScannerSettings) => void
 		/** Pool transports (default `[offsetTransport]`); Task 40 passes the post-channelizer order. */
 		transports?: readonly TransportStrategy[]
+		gatedAt?: (
+			sourceId: string,
+			hz: number,
+			toleranceHz: number,
+		) => { startSample: number; atMs: number } | null
+		/** Shared acceptance as the composed core has it (real ConfirmMemory on the harness clock). */
+		confirm?: PoolConfirm
 	} = {},
 ) {
 	const settings = testSettings(opts.patch)
@@ -220,6 +233,7 @@ export function identifyHarness(
 		settings,
 		cpuPercent: opts.cpuPercent ?? null,
 		...(opts.transports ? { transports: opts.transports } : {}),
+		...(opts.confirm ? { confirm: opts.confirm } : {}),
 	})
 	const record = identifyRecord()
 	const inner = fakeInner(record, () => pool.clock.now)
@@ -228,7 +242,13 @@ export function identifyHarness(
 	const state: {
 		artefact: ArtefactKind | null | "stale"
 		summary: BlockSummary | null
-	} = { artefact: opts.artefact ?? null, summary: summaryOf() }
+		/** IQ blocks reach the runner while the clock advances; false: the receiver stopped. */
+		iqFlowing: boolean
+	} = {
+		artefact: opts.artefact ?? null,
+		summary: summaryOf(),
+		iqFlowing: true,
+	}
 	const events: ScannerIdentifyEventData[] = []
 	const runner = new IdentifyRunner({
 		record,
@@ -251,10 +271,29 @@ export function identifyHarness(
 		emit: d => events.push(structuredClone(d)),
 		logger: pino({ level: "silent" }),
 		now: () => pool.clock.now,
+		...(opts.gatedAt ? { gatedAt: opts.gatedAt } : {}),
 	})
+	let lastBlockAt: number | null = null
+	let endSample = 0
+	/** Blocks every 50 ms up to `to`, as the engine delivers them to the driver. */
+	const feedBlocks = (to: number): void => {
+		lastBlockAt ??= pool.clock.now
+		// A clock a test jumped by a minute or more is a stream that stopped: no blocks fill it in.
+		if (to - lastBlockAt > 60_000) lastBlockAt = to - 50
+		while (lastBlockAt + 50 <= to) {
+			lastBlockAt += 50
+			pool.clock.now = lastBlockAt
+			endSample += 102_400
+			runner.onBlock(endSample, false)
+		}
+		pool.clock.now = to
+	}
 	/** Advances the clock, ticks the runner and pumps the pool (as ScannerService.tick does), then lets spawns and releases settle. */
 	const advance = async (ms: number): Promise<void> => {
-		pool.clock.now += ms
+		const to = pool.clock.now + ms
+		if (state.iqFlowing) feedBlocks(to)
+		else lastBlockAt = null
+		pool.clock.now = to
 		runner.tick(pool.clock.now)
 		pool.pool.pump()
 		await flushAsync()

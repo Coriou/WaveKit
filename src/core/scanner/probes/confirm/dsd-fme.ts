@@ -48,8 +48,15 @@ const CallDataSchema = z
 	})
 	.passthrough()
 
-/** Internal flag consumed by the DC gate before evidence enters the public DTO. */
-export type DsdFmeDecodeEvidence = DecodeEvidence & { voiceLc?: boolean }
+/**
+ * Internal fields, both removed before evidence enters the public DTO. `voiceLc` is for the DC gate.
+ * `acceptedAgeMs`: this identity came from the shared acceptance rather than a pair made by this
+ * line, and that long ago was its last occurrence before this event.
+ */
+export type DsdFmeDecodeEvidence = DecodeEvidence & {
+	voiceLc?: boolean
+	acceptedAgeMs?: number
+}
 
 export type DsdFmeCallData = z.infer<typeof CallDataSchema>
 export type DsdFmeScannerEvent =
@@ -88,7 +95,8 @@ export function toDsdFmeScannerEvent(
 	return { kind: out.type, at: out.timestamp.getTime(), call: parsed.data }
 }
 
-function linkProtocol(
+/** The scanner protocol a link line names: the one mapping, shared with the probe pool. */
+export function linkProtocol(
 	p: DsdFmeLinkLine["protocol"],
 	state: InterpreterState,
 ): ScannerProtocol {
@@ -108,7 +116,8 @@ function linkProtocol(
 	}
 }
 
-function identityValue(line: DsdFmeLinkLine): string | undefined {
+/** The value a link line's identity pairs on (and that accepted evidence then carries). */
+export function identityValue(line: DsdFmeLinkLine): string | undefined {
 	switch (line.protocol) {
 		case "dmr":
 		case "dpmr":
@@ -215,12 +224,16 @@ function interpretLink(
 	let encrypted = false
 	/** A clean line confirms a value already accepted, or accepts it on its second clean occurrence (H2). */
 	const hit = (key: string, value: string): boolean => {
-		const yes =
-			(clean && m.isAccepted(key, value)) || m.accept(key, value, clean)
+		const known = clean && m.isAccepted(key, value)
+		const yes = known || m.accept(key, value, clean)
+		if (known) m.touchAccepted(key, value)
 		if (yes) hits = true
 		return yes
 	}
 	const id = identityValue(line)
+	// Before the hit restarts it. Null when this line's own pair is what accepts it.
+	const earlierMs =
+		id !== undefined ? m.acceptedAgeMs(`${protocol}:id`, id) : null
 	if (id !== undefined && hit(`${protocol}:id`, id)) {
 		state.accepted.set(`${protocol}:id`, id)
 		if (line.protocol === "dstar") metadata.callsigns = [id]
@@ -245,6 +258,13 @@ function interpretLink(
 	) {
 		delete ev.identity
 		state.accepted.delete(`${protocol}:id`)
+	}
+	if (ev.identity) {
+		const age =
+			ev.identity.value === id
+				? earlierMs
+				: m.acceptedAgeMs(`${protocol}:id`, ev.identity.value)
+		if (age !== null) ev.acceptedAgeMs = age
 	}
 	if (
 		line.voiceLc === true &&
@@ -297,9 +317,14 @@ function interpretCall(
 	const encrypted = claimsEncrypted && state.match.isAccepted(`${key}:enc`, "1")
 	const protocol: ScannerProtocol =
 		c.protocol === "nxdn48" || c.protocol === "nxdn96" ? state.nxdn : c.protocol
+	const built = build(protocol, state, ev.at, metadata, encrypted, key)
+	const age = built.identity
+		? state.match.acceptedAgeMs(`${key}:id`, built.identity.value)
+		: null
 	return [
 		{
-			...build(protocol, state, ev.at, metadata, encrypted, key),
+			...built,
+			...(age !== null ? { acceptedAgeMs: age } : {}),
 			callId: c.callId,
 			...(lcPairs.get(state)?.has(lcKey(state, key, tg, src)) === true &&
 			metadata.talkgroups?.length &&
@@ -325,7 +350,11 @@ export function guardDsdFmeEvidence(
 	targetHz: number,
 	centreHz: number | undefined,
 ): DecodeEvidence {
-	const { voiceLc, ...publicEvidence } = ev as DsdFmeDecodeEvidence
+	const {
+		voiceLc,
+		acceptedAgeMs: _acceptedAgeMs,
+		...publicEvidence
+	} = ev as DsdFmeDecodeEvidence
 	if (
 		!isDsdFmeProtocol(ev.protocol) ||
 		(voiceLc === true &&

@@ -606,6 +606,28 @@ Static, and under the same read admission as `GET /api`.
 		"discoveryViews": ["full", "compact"],
 		"jobViews": ["full", "compact"],
 		"recorderDecisions": ["started", "refused:slots"],
+		"identifyVerdictCodes": [
+			"decoded",
+			"heard-digital-unconfirmed",
+			"undecodable",
+			"nothing",
+			"could-not-test"
+		],
+		"identifyVerdictWhy": [
+			"budget",
+			"unsupported-protocol",
+			"unsupported-format",
+			"decoders-unavailable",
+			"no-live-audio",
+			"window-moved",
+			"source-lost",
+			"cancelled",
+			"interrupted",
+			"artefact",
+			"unknown",
+			"no-samples",
+			"signal-nearby"
+		],
 		"passiveReasons": [
 			"passive-cost",
 			"engine-cost",
@@ -628,6 +650,7 @@ Static, and under the same read admission as `GET /api`.
 			"present",
 			"absent",
 			"malformed",
+			"probe-failed",
 			"stale",
 			"unreachable",
 			"none"
@@ -643,6 +666,88 @@ Static, and under the same read admission as `GET /api`.
 ```
 
 Some lists are shortened here; the answer holds every value.
+
+#### GET /api/diagnostics
+
+Why the core is slow, in one read, under the same access admission as every other route. One
+sample serves all callers for 2 s, so polling cannot multiply its cost.
+
+```json
+{
+	"at": "2026-11-07T10:00:02.000Z",
+	"eventLoopUtilization": 0.31,
+	"eventLoopDelay": {
+		"last": { "maxMs": 14.2, "p99Ms": 11.3 },
+		"maxMs10m": 96.1,
+		"p99MaxMs10m": 24.5,
+		"intervals10m": 300
+	},
+	"process": {
+		"windowMs": 2001,
+		"cpuCores": 0.42,
+		"userSeconds": 812.4,
+		"systemSeconds": 120.8
+	},
+	"containerCpuCores": 1.35,
+	"threads": {
+		"rows": [
+			{ "tid": 41, "name": "node", "cpuSeconds": 620.1, "cpuCores": 0.2 }
+		],
+		"truncated": false
+	},
+	"threadsTimedOut": false,
+	"channels": {
+		"rows": [
+			{
+				"id": "ch-1",
+				"sourceId": "rtl-1",
+				"decoderId": "multimon",
+				"generation": 3,
+				"centerHz": 100000000,
+				"bandwidthHz": 12500,
+				"outputRateHz": 48000,
+				"format": "cu8",
+				"filterTaps": 973,
+				"inputSampleRateHz": 2400000,
+				"stats": {
+					"outputSamples": 480000,
+					"droppedSamples": 0,
+					"saturatedSamples": 0,
+					"queueHighWaterBytes": 8192
+				}
+			}
+		],
+		"truncated": false
+	}
+}
+```
+
+| Field                  | Meaning                                                                                                                                                                                       |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `eventLoopUtilization` | Share of the time the main thread was busy over `process.windowMs`, 0 to 1. Null on the first sample                                                                                          |
+| `eventLoopDelay`       | The core's loop meter: the last 2 s interval and the worst over 10 minutes, in ms. The meter runs anyway (10 ms resolution, a fixed histogram); this route adds no timer. Null when not wired |
+| `process`              | All threads of the core together: cores averaged since the previous sample (at least 2 s), and totals since it started. `windowMs` and `cpuCores` are null on the first sample                |
+| `containerCpuCores`    | The whole container with its decoder processes, in cores. Natively on cgroup v2: the core's own service or session, null in the host's root cgroup; a v1 host outside one: the whole machine  |
+| `threads`              | Linux only, null elsewhere: each thread's name, CPU seconds since it started, and cores over the window (null when the previous sample did not read that thread), busiest first               |
+| `threadsTimedOut`      | True when the thread reads did not finish in time: `threads` is then partial with `truncated`, or null                                                                                        |
+| `channels`             | Open channelizer outputs with what they cost: filter length, input and output rate, and the process's last counters (`stats`, every 5 s, null before the first). Null without a channelizer   |
+
+A part that fails to read answers null, and the sample still serves its 2 s.
+
+A thread's `name` comes from a closed set, because any program can set a thread's kernel name to
+anything. It is one of `node`, `libuv-worker`, `V8Worker`, `DelayedTaskSche`, `SignalInspector`,
+`InspectorIo`, `WorkerThread`, `activity-writer`, `scanner-snapsho` or `aircraft-db-imp`,
+`spectrum-worker` for a spectrum worker of any source, and `other` for everything else.
+
+The core does not measure each decoder process. `containerCpuCores` minus `process.cpuCores` is
+what they use together, roughly: the two windows differ.
+
+A sample reads `/proc` with at most 1 directory read and 64 file reads, one at a time and never
+through a shell or a child process, and answers within 250 ms of starting them whatever they do;
+`truncated` says when a list was cut (64 threads, 64 channels). That is at most 32.5 reads a second
+however many clients poll. A read that hangs is left behind and holds one file-pool thread; until
+it settles, no new walk starts and each sample answers `threads: null` with `threadsTimedOut: true`.
+The answer stays under about 40 KB with ordinary ids (64 × 125 B of threads, 64 × 450 B of channels).
 
 #### GET /api/agent/status
 
@@ -782,7 +887,9 @@ curl http://localhost:9000/api/status
 `GET /api/resources` is one snapshot of the core's resource use: container CPU and memory,
 one status per SDR host, and per-source backpressure. `/api/resources/container` and
 `/api/resources/backpressure` return just one of those parts. The `resources` WebSocket
-channel pushes the same data as it changes.
+channel pushes the same data as it changes. Outside a container on cgroup v2, the "container"
+figures describe the core's own cgroup, meaning its service or login session; they are
+unavailable if the core sits in the host's root cgroup.
 
 #### GET /api/telemetry/fanout
 
@@ -869,20 +976,20 @@ curl http://localhost:9000/api/sources
 
 `verdict` says what the state means, in one closed code (listed in `GET /api/enums`): `{ code, message, deviceFacts }`. The message is fixed text, never a value from the receiver.
 
-| `code`                 | Meaning                                                                                                                                        |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ok`                   | Samples are flowing                                                                                                                            |
-| `waiting`              | Connected, the first samples are not due yet                                                                                                   |
-| `no-samples`           | Connected with no IQ; the receiver's status API says nothing that explains it                                                                  |
-| `receiver-no-device`   | The receiver reports no device (a failed USB probe reads the same): check USB. Needs `deviceFacts: "absent"`, and rtl_tcp not reported running |
-| `receiver-not-running` | The receiver reports a device, and that its rtl_tcp does not run. Needs `deviceFacts: "present"`                                               |
-| `backpressure`         | The core is not keeping up with this source                                                                                                    |
-| `disconnected`         | Not connected to the receiver                                                                                                                  |
-| `feed-paused`          | An operator holds the receiver feed off (`feed.state` `paused` or `resuming`)                                                                  |
-| `feed-error`           | Resuming the feed failed (`feed.state` `error`)                                                                                                |
-| `ended`                | A recording source reached its end                                                                                                             |
+| `code`                 | Meaning                                                                                                                                                                                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ok`                   | Samples are flowing                                                                                                                                                                                                                              |
+| `waiting`              | Connected, the first samples are not due yet                                                                                                                                                                                                     |
+| `no-samples`           | Connected with no IQ; the receiver's status API says nothing that explains it                                                                                                                                                                    |
+| `receiver-no-device`   | The receiver reports no device: re-attach USB. Needs `deviceFacts: "absent"`, and rtl_tcp not reported running. A failed USB check is not this code; only a receiver too old to report its check can still read this way, and its message hedges |
+| `receiver-not-running` | The receiver's rtl_tcp does not run. Needs `deviceFacts: "present"`, or `probe-failed`, whose message says the device state is unknown                                                                                                           |
+| `backpressure`         | The core is not keeping up with this source                                                                                                                                                                                                      |
+| `disconnected`         | Not connected to the receiver                                                                                                                                                                                                                    |
+| `feed-paused`          | An operator holds the receiver feed off (`feed.state` `paused` or `resuming`)                                                                                                                                                                    |
+| `feed-error`           | Resuming the feed failed (`feed.state` `error`)                                                                                                                                                                                                  |
+| `ended`                | A recording source reached its end                                                                                                                                                                                                               |
 
-`deviceFacts` says what the receiver's status API can tell, and only `present` and `absent` assert a device state: `present` or `absent` (a fresh answer stating a boolean), `malformed` (it answered without one), `stale` (its last answer is over 15 s old), `unreachable` (it does not answer now), `none` (this core polls no status API for the source). Samples flowing outrank any report, so a receiver that says "no device" while IQ arrives still reads `ok`. The verdict is on this route and on `source:status` events (where a change that comes only from the receiver's facts waits for the 10 s heartbeat) and, as a bare code, on `GET /api/agent/status`.
+`deviceFacts` says what the receiver's status API can tell, and only `present` and `absent` assert a device state: `present` or `absent` (a fresh answer stating a boolean), `malformed` (it answered without one), `probe-failed` (it answered, but its USB check failed or timed out), `stale` (its last answer is over 15 s old), `unreachable` (it does not answer now), `none` (this core polls no status API for the source). Samples flowing outrank any report, so a receiver that says "no device" while IQ arrives still reads `ok`. The verdict is on this route and on `source:status` events (where a change that comes only from the receiver's facts waits for the 10 s heartbeat) and, as a bare code, on `GET /api/agent/status`.
 
 **Response**:
 
@@ -1844,7 +1951,7 @@ routes below.
 | `restoreAfterS` |                          | Integer seconds, 1-3600: see [temporary tune](#temporary-tune). Optional                  |
 | `preempt`       |                          | `true` takes the tuner from a scanner job: see [below](#tune-and-a-scanner-job). Optional |
 
-At least one setting is required, and an unknown field is a 400. They are written in the order of
+At least one setting is required, and an unknown field is a 400 whose `fields` give the body's key list (`only the fields sampleRateHz, frequencyHz, gainMode, gain, restoreAfterS, preempt`). They are written in the order of
 the table: the rate first, then the centre, then the gain (for `agc`, the gain and then the mode,
 because rtl_tcp `SET_GAIN` switches the tuner to manual). A setting already at the value and proven
 is not written again. The same rules as the separate routes apply: it runs in the source's
@@ -2054,7 +2161,24 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
 - `POST /api/tuner/:sourceId/tuner-xtal` — Tuner XTAL frequency
 - `POST /api/tuner/:sourceId/tuner-gain-index` — Gain index value
 - `PATCH /api/tuner/:sourceId/config` — Bulk update, with the field names and units of
-  `GET /api/tuner`; any other field is a 400 that lists them
+  `GET /api/tuner`; any other field is a 400 that lists them. Its `gainMode` and `gain` follow
+  the rules of [`POST /api/tuner/:sourceId/tune`](#post-apitunersourceidtune): for `agc` the gain
+  goes first, a value in place and proven is not written again, and an unproven one is
+  written.
+
+`PATCH /api/tuner/:sourceId/config` with `"gainMode": "agc"` beside `gain` or `tunerGainIndex`
+is a 400 naming the conflict: send the gain first, then `"gainMode": "agc"` alone.
+
+A `tunerGainIndex` (PATCH or `POST /api/tuner/:sourceId/tuner-gain-index`) outside the gain
+table the receiver's rtl_tcp header advertises is a 400 naming the valid range; rtl_tcp would
+ignore it. With no gain table in the header the index is not range-checked.
+
+On R820T and R828D tuners (rtl_tcp header tuner type 5 or 6) a gain, or a tuner gain index
+inside the advertised gain table, written in AGC leaves AGC: rtl_tcp `SET_GAIN` and
+`SET_TUNER_GAIN_INDEX` select manual gain there, so `gainMode` then reads `manual`, and a later
+request for `agc` writes the mode again. On other tuners, or without a header, such a write
+lists `gainMode` in `unknownFields` until the mode is written again. An IF gain write never
+changes `gainMode`.
 
 Every 400 from these routes names the field that failed, by its schema name, and the fields it
 expects, their types and units, for example `Invalid request body at gain; expected {"gain":
@@ -2806,7 +2930,10 @@ capture rate is 250 ksps to 2.4 Msps: the band plan decides whether it runs,
 never which part of the capture it hears, so a device just past the band-plan
 edge still decodes. Its placement then has `reach: "raw"` and no `channelHz`. rtl_433 runs with `-f`
 set to the centre of the IQ it reads and `-M level`, so each of its events
-also carries `freq` (MHz), `rssi`, `snr` and `noise`.
+also carries `freq` (MHz), `rssi`, `snr` and `noise`. An Activity row from a placement with no
+target frequency takes `frequencyHz` from that `freq` when it lies within the usable 80 % of
+the capture around the centre rtl_433 started on, and is null otherwise, also after a retune
+with no restart, since `-f` is fixed at its start. Older rows stay null.
 At faster captures it narrows a channel (1 MHz down to 250 kHz) to fit. A band-plan channel inside the
 window whose passband the window cannot hold is a fit failure too. A fit failure
 is physical: it is reported for `always`, operator starts and band opt-outs as
@@ -3612,6 +3739,14 @@ is unknown, and from older cores.
 `passive.disabledAt` when the guard turned it off for cost; both are gone once it is back.
 `passive.disabledReason` explains a passive job switched off by the cost rule
 (for example `engine-cpu 31 % of a core`).
+`lastPassiveStartFailure` (`{ code, at }`) says why the passive job last failed to start;
+the next successful start removes it. `lastLeaseRefusal` (`{ kind, code, at, holderJobId? }`)
+is the last lease step the core tried on its own and was refused: `kind` is `arbitration`
+(picking the next holder failed), `hand-back` (a preempted job did not take the lease back) or
+`boot-resume` (a job could not resume after a restart). The next refusal replaces it, and nothing
+else clears it, so read `at`. `code` comes from a fixed list of the scanner, spectrum and tuner
+codes those steps raise, `UNKNOWN` for anything else, never an error's text. The core keeps one of
+each per source, for at most 64 sources.
 
 `recorder` (`ScannerRecorderStatus`, absent from older cores) shows the analog voice
 recorder: `sessions` (one per channel being demodulated: `sourceId`, `observationId`,
@@ -4794,7 +4929,8 @@ Also 409 `LIVE_AUDIO_UNAVAILABLE` (live audio not configured), 409
 #### POST /api/scanner/identify
 
 Identify a signal in the current window: every plausible decoder tries it,
-without retuning. Body: `sourceId?`, `target` (exactly one of
+without retuning and without moving live audio. For the short version an agent
+needs, see [Is that DMR at this frequency?](AGENTS-API.md#is-that-dmr-at-this-frequency). Body: `sourceId?`, `target` (exactly one of
 `{frequencyHz, bandwidthHz?}` or `{all: true}`), `timeoutMs` (1000–120000,
 default 15000; bounds only the wait for a signal), `protocols?`,
 `exhaustive?` (default false: stop at the first accepted decode), `record?`
@@ -4807,7 +4943,33 @@ from job creation. With no usable IQ, the job fails with `tuner-unavailable`;
 a single target reports `unidentified`, empty trials and null nullable RF
 statistics, while `all` reports no measured targets. A transmission found
 within the signal-wait budget may finish its bounded decoder trials afterward;
-`timeoutMs` is not an overall job-duration limit. An epoch change preserves an
+`timeoutMs` is not an overall job-duration limit, except with `waitUntilSignal`.
+`waitUntilSignal: true` stays waiting for a gated transmission for up to `waitMs`
+(1000 to 600000, default 300000; only with `waitUntilSignal`); `timeoutMs` then
+counts from that transmission and also ends its trials. No transmission in time:
+`result.ended: "no-signal"`.
+
+A decode awaiting its pair keeps its run for 3080 ms (`IDENTIFY_PAIR_WAIT_MS`,
+once per run): acceptance needs a second decode at least 2000 ms later, and the
+1800 ms DMR hold alone cannot reach it. A run with no decode keeps its plain hold.
+With a first decode at the end of the hold, a DMR run lasts at most
+1800 + 400 + 3080 = 5280 ms at the default 400 ms start latency.
+
+A point request that a running job already answers returns that job with **200**
+instead of **201**, and starts no second probe. It joins when it asks the same question:
+the same source, the same `frequencyHz` and the same `max(1 kHz, bw/2)`. An offset or
+narrower request gets its own job, since a job resolves the nearest track within its own
+tolerance and that may be another signal. Its `protocols` must be contained in the running
+job's; it must ask no more than that job does (`exhaustive`, `record`, a longer `timeoutMs`,
+a wait the job does not have), and a plain request does not join a `waitUntilSignal` job,
+which can take up to 10 min and end `no-signal`; and the job's remaining wait covers at least 90 % of what the request asks (`IDENTIFY_JOIN_COVERED_FRACTION`).
+At the default 15 s, a repeat joins for the first 1.5 s, so a client retry starts nothing
+and still gets at least 13.5 s of listening; a job that has its signal and is running
+trials joins at any time, unless a gated timeout will cut them first. A later request is a new job with
+its own full wait. If another job holds the probe slot, its runs queue for up to 3 s, then
+end `skipped-budget` (`could-not-test`, `why: "budget"`). A running job with no
+`protocols` contains a named one only once its plan holds a runnable trial for it. A
+finished job or a finished target never joins, and `target.all` never does. An epoch change preserves an
 established single-target deadline; collected `all` targets may receive a
 bounded re-resolution wait. Disconnect during active identify ends it with
 the results collected so far.
@@ -4892,19 +5054,96 @@ given, or a bound is broken:
 }
 ```
 
-409 `OUT_OF_WINDOW` with `details.window`:
+409 `OUT_OF_WINDOW` with `details.window` and `details.next`, the call that fixes it.
+The room is the usable half span minus half the target's `bandwidthHz`. The suggested
+centre is half the room below the target, at most 100 kHz (above it when below would pass the
+tuner's lower limit of 24 MHz); when that would land inside
+the 12.5 kHz DC exclusion it is the middle of what is left past it. So the target stays inside
+the window and off the DC spike. With under 12 501 Hz of room, or a target outside the tuner's
+24 to 1900 MHz, no centre fits, and `next`
+holds only `effect`, saying so, with no call to make:
 
 ```json
 {
 	"error": "ScannerApiError",
 	"code": "OUT_OF_WINDOW",
 	"message": "The target is outside the tuned window; tune first",
-	"details": { "window": { "startHz": 445180800, "endHz": 446819200 } }
+	"details": {
+		"window": { "startHz": 445180800, "endHz": 446819200 },
+		"next": {
+			"method": "POST",
+			"path": "/api/tuner/rtl/tune",
+			"body": { "frequencyHz": 446900000 },
+			"effect": "Moves the receiver, and anything listening in the old window with it. Then repeat this identify request; the centre suggested keeps the target off the DC spike.",
+			"then": { "method": "POST", "path": "/api/scanner/identify" }
+		}
+	}
 }
 ```
 
 409 `SCANNER_SOURCE_BUSY` while a sweep holds the source's tuner
-(`details.reason: "held"`, `details.holderJobId`); 503 `SCANNER_DISABLED`. The job is listed,
+(`details.reason: "held"`, `details.holderJobId`, and `details.next` as above with
+`preempt: true` in its `body` and what that does to the job in its `effect`; for
+`target.all` its frequency is the current centre); 503 `SCANNER_DISABLED`. A
+`SCANNER_SOURCE_BUSY` for a relay client (`details.reason: "relay"`) has no `next`:
+no call takes the tuner from it.
+
+409 `SCANNER_IDENTIFY_BUSY` when a new request finds 8 identify jobs alive on the source
+(`IDENTIFY_MAX_ALIVE_JOBS`); a request that joins one does not count. `details.next` holds
+`effect` and `jobs` (`id`, `path`), the jobs to wait for or cancel. It is 409 and not 429
+because this is a state of the source that ends when a job does, not a request rate, and a
+client retrying on 429 would only add requests. The probe slot takes one run at a time and a
+run queues for at most 3 s, so 8 runs of at most 5.28 s (42 s) are already far past what the
+slot can answer, and each new job preempts scan and passive probes again. Jobs waiting on a
+gate hold no slot, so 8 still leaves room for several of them.
+
+Each final target carries `verdict`, the answer in one closed code. The lists are
+`scanner.identifyVerdictCodes` and `scanner.identifyVerdictWhy` in `GET /api/enums`:
+
+| `verdict.code`              | Meaning                                                                                             |
+| --------------------------- | --------------------------------------------------------------------------------------------------- |
+| `decoded`                   | A confirmed identity that met acceptance. `protocol` is what it is, which may not be what you named |
+| `heard-digital-unconfirmed` | A lone sync, one decode, or an identity capped by a leak flag. Never `decoded`                      |
+| `undecodable`               | A signal is there and every plausible trial ran and found nothing                                   |
+| `nothing`                   | No signal, with the proof below                                                                     |
+| `could-not-test`            | See `verdict.why`                                                                                   |
+
+`verdict.why`, only on `could-not-test`: `budget`, `unsupported-protocol`,
+`unsupported-format`, `decoders-unavailable`, `no-live-audio`, `window-moved`,
+`source-lost`, `cancelled`, `interrupted` (a trial was cut short), `artefact`, `unknown`,
+`no-samples`, `signal-nearby`.
+
+`nothing` needs proof of all three, fixed when the target ends. IQ blocks of the current epoch
+kept arriving: their end sample advanced since the job began, the newest block is no older than
+10 block times (500 ms at the default 50 ms), and a gap (two blocks more than 10 block times
+apart) was followed by at least 40 block times (2 000 ms) of blocks with no further gap by the
+deadline, so a stall early in a long wait is forgiven and one in its last 2 s is not.
+`measurements.snrDb` is not null, and the level over the inner part of the tolerance (the
+strongest spectrum bin centred within the tolerance less one bin, at least half a bin) is below
+the block's `thresholdDb`; `measurements.snrDb` itself reads the whole tolerance and may be
+higher. No live track, other than a spur or an IQ image, is within 12 500 Hz of the target.
+Without the first two it is `no-samples`: a source can stay connected at rate 0 with no
+source-down, as with a dongle pulled behind `rtl_tcp`. A level at or above the threshold or a
+track close by is `signal-nearby`. `result.nearbyHz` is then the centre of the nearest live
+track within 12 500 Hz, else of the live track whose span (half its `obwHz` plus one bin) holds
+the level's bin, else that bin's centre, which is not necessarily a signal's centre: ask again
+with `bandwidthHz`, or at the track's frequency.
+
+One plausible trial that did not run withholds `undecodable`. Analog voice with no tone
+is `undecodable`, with `result.analog` beside it and `verdict.analogHeard: true`, also set beside
+`heard-digital-unconfirmed`, where a lone sync over voice is usually the voice; a standard tone on a trusted frequency is
+`decoded` with the analog protocol. `verdict.protocol` is what was decoded or heard,
+otherwise the one protocol the request named. `verdict.confirmedAcrossJobs: true`, only on
+`decoded` from a live dsd-fme probe run, says this job heard one burst and the match came first:
+a matching decode, or the last clean occurrence of an identity already accepted on this signal,
+2 s to 5 min earlier (`CONFIRM_WINDOW_MS`). An older one does not count, though the discovery store
+keeps its acceptance: a DMR colour code has 16 values, so one false line matches an accepted value
+by luck 1 time in 16, and with no limit on age a channel that carried DMR last month would read
+`decoded` for that line for good. The job then needs its own pair (the run is kept 3080 ms for it),
+or answers `heard-digital-unconfirmed`. A POCSAG or FLEX capcode already accepted on the signal
+counts on one decode only while its last counted decode is at most 5 min old
+(`CONFIRM_WINDOW_MS`); older, the decode needs a pair or a real message body again. Pagers never
+set `confirmedAcrossJobs`. Older cores send no `verdict`. The job is listed,
 cancellable and deletable once ended, but `pause`/`resume` answer 409
 `SCANNER_IDENTIFY_NOT_PAUSABLE` and `PATCH` 409
 `SCANNER_IDENTIFY_NOT_EDITABLE`. Identify jobs are not kept across a core
@@ -4917,8 +5156,8 @@ earlier) or `unidentified`, with `result`: `protocol?`, `confidence`,
 (`source: "track" | "spectrum"`, `centreHz`, `obwHz`, `peakDbfs`, `snrDb`,
 `floorDbfs`, `dutyCycle`, `acf30?`, `acf60?`, `class`), `artefact?` (`dc`,
 `spur`, `image` at once with no trial; `rfi` only after the wait found no
-signal) and `ended?: "window-moved"` (the window moved off the target; open
-trials are `cancelled`).
+signal), `ended?: "window-moved"` (the window moved off the target; open
+trials are `cancelled`) and `nearbyHz?` (see `signal-nearby` above).
 
 **Ambient identify.** `ais`, `acars`, `vdl2` and `lora` have no probe
 decoder: identify names them from a decoder that already runs there
@@ -7857,7 +8096,7 @@ when a transmission starts or ends. Activity is shed first under load (newest wi
 #### scanner:identify
 
 One stream per identify target (`all: true` sends one per surfaced emission, with
-`targetHz` its centre): `{jobId, targetHz, state, trials, result?}`. Coalesced to at
+`targetHz` its centre): `{jobId, targetHz, state, trials, result?, verdict?}`. Coalesced to at
 most 1/s per (job, target); the latest state is always delivered.
 
 - `state`: `waiting-for-signal` → `trying` → `identified` | `candidate` | `unidentified`.
@@ -7878,6 +8117,7 @@ most 1/s per (job, target); the latest state is always delivered.
   transmission ended); see `POST /api/scanner/identify`.
 - `result`: see `POST /api/scanner/identify`, including `artefact?`,
   `ended?: "window-moved"`, and `analog?` and `decodersUnavailable?`.
+- `verdict`: on a final target only; see `POST /api/scanner/identify`.
 
 If `all: true` finds nothing within `timeoutMs`, no `scanner:identify` is sent;
 the job completes with `identify.targets: []` (`scanner:job`).
@@ -8413,6 +8653,7 @@ Scanner and spectrum routes answer with the flat body
 | `SCANNER_DISCOVERY_LOCKED_OUT`  | 409  | `listen` on a locked-out discovery                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `OUT_OF_WINDOW`                 | 409  | `listen` or `identify` outside the tuned window; identify adds `details.window {startHz, endHz}`; listen adds `details` with `liveSourceId`/`sourceId`, `offsetHz`/`usableHalfSpanHz` or `offsetHz` (see listen)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `LIVE_AUDIO_UNAVAILABLE`        | 409  | `listen` without live audio                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `SCANNER_IDENTIFY_BUSY`         | 409  | 8 identify jobs are alive on the source; `details.next` names them                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `SCANNER_IDENTIFY_NOT_PAUSABLE` | 409  | `pause` / `resume` on an identify job                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `SCANNER_IDENTIFY_NOT_EDITABLE` | 409  | `PATCH` on an identify job                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `SCANNER_SETTINGS_WRITE_FAILED` | 500  | `settings.json` could not be written; nothing changed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |

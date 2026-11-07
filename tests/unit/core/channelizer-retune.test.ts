@@ -121,6 +121,49 @@ async function setup() {
 		},
 	}
 }
+it("openChannelRows lists an open channel, its last counters and its current centre", async () => {
+	const { manager, grant, proc, refuse } = await setup()
+	const row = {
+		id: grant.channelId,
+		sourceId: "s",
+		decoderId: "d",
+		generation: 1,
+		centerHz: 162e6,
+		bandwidthHz: 45_600,
+		outputRateHz: 48_000,
+		format: "cf32",
+		filterTaps: 10,
+		inputSampleRateHz: 2_048_000,
+		stats: null,
+	}
+	expect(manager.openChannelRows()).toEqual([row])
+
+	const counters = {
+		outputSamples: 480_000,
+		queueHighWaterBytes: 4096,
+		droppedSamples: 7,
+		saturatedSamples: 2,
+	}
+	proc.emit("event", {
+		v: 1,
+		type: "stats",
+		generation: 1,
+		inputSamples: 1,
+		channels: [{ id: grant.channelId, ...counters }],
+	})
+	await manager.retuneChannel("s", grant.channelId, 162010000)
+	expect(manager.openChannelRows()).toEqual([
+		{ ...row, centerHz: 162010000, stats: counters },
+	])
+
+	// A refused retune leaves the channel where it was.
+	refuse()
+	await manager.retuneChannel("s", grant.channelId, 163e6)
+	expect(manager.openChannelRows()[0]?.centerHz).toBe(162010000)
+
+	await manager.releaseChannel(grant.channelId)
+	expect(manager.openChannelRows()).toEqual([])
+})
 it("retuneChannel sends retune and resolves retuned", async () => {
 	const { manager, grant, sent } = await setup()
 	await expect(

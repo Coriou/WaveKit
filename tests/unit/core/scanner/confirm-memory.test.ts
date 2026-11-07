@@ -67,6 +67,38 @@ function probe(shared: SharedConfirm, probeId: string): CapcodeWindows {
 const identities = (evs: DecodeEvidence[]) =>
 	evs.filter(e => e.identity !== undefined)
 
+describe("ConfirmMemory.acceptedAgeMs", () => {
+	it("is set by markAccepted, restarted by each clean occurrence, and never ends acceptance", () => {
+		let now = 1000
+		const m = new ConfirmMemory(() => now)
+		expect(m.acceptedAgeMs("s", "k", "v")).toBeNull()
+		m.markAccepted("s", "k", "v")
+		expect(m.acceptedAgeMs("s", "k", "v")).toBe(0)
+		now += CONFIRM_WINDOW_MS + 1
+		expect(m.acceptedAgeMs("s", "k", "v")).toBe(CONFIRM_WINDOW_MS + 1)
+		// Reading it, or asking whether it is accepted, is no occurrence.
+		expect(m.isAccepted("s", "k", "v")).toBe(true)
+		expect(m.acceptedAgeMs("s", "k", "v")).toBe(CONFIRM_WINDOW_MS + 1)
+		m.touchAccepted("s", "k", "v")
+		expect(m.acceptedAgeMs("s", "k", "v")).toBe(0)
+		// A value not accepted gains nothing from a touch.
+		m.touchAccepted("s", "k", "other")
+		expect(m.isAccepted("s", "k", "other")).toBe(false)
+		expect(m.acceptedAgeMs("other", "k", "v")).toBeNull()
+	})
+
+	it("an unreadable clock is an unknown age, older than any window", () => {
+		let broken = true
+		const m = new ConfirmMemory(() => {
+			if (broken) throw new Error("no clock")
+			return 5000
+		})
+		m.markAccepted("s", "k", "v")
+		broken = false
+		expect(m.acceptedAgeMs("s", "k", "v")).toBe(Number.POSITIVE_INFINITY)
+	})
+})
+
 describe("ConfirmMemory", () => {
 	it("pairs at the window bound and not 1 ms past it", () => {
 		const { clock, mem } = memory()

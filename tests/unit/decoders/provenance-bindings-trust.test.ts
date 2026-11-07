@@ -5,7 +5,11 @@
 import { AisCatcherDecoder } from "../../../src/decoders/builtin/ais-catcher.js"
 import type { DecoderConfig } from "../../../src/decoders/types.js"
 import { createActivityIngress } from "../../../src/core/activity/ingress.js"
-import type { DecodeEnvelope } from "../../../src/core/activity/types.js"
+import type {
+	ActivityProvenanceLookup,
+	DecodeEnvelope,
+} from "../../../src/core/activity/types.js"
+import { Rtl433Decoder } from "../../../src/decoders/builtin/rtl433.js"
 import { EventEmitter } from "node:events"
 import { describe, expect, it } from "vitest"
 import fc from "fast-check"
@@ -20,7 +24,14 @@ import type {
 	SourceCaps,
 	SourceManager,
 } from "../../../src/core/source-manager.js"
+import { placementKey } from "../../../src/decoders/enablement/contract.js"
 import { createLogger } from "../../../src/utils/logger.js"
+
+class ArgsRtl433Decoder extends Rtl433Decoder {
+	args(): string[] {
+		return this.getDecoderArgs()
+	}
+}
 
 interface FakeDecoder {
 	sourceId?: string
@@ -159,9 +170,228 @@ describe("verified tuning trust (WG5 req 6)", () => {
 			targetFrequenciesHz: [131_550_000],
 			tuningTrust: "commanded",
 			inputSampleRateHz: 2_400_000,
+			captureCentreHz: 131_000_000,
 		})
 		tuner.mode(MAIN, "external")
 		expect(index.lookup("a")?.tuningTrust).toBe("relay")
+	})
+
+	it("carries the centre a decoder started on only while the tuner is still there", () => {
+		const { decoders, tuner, index } = setup(tuned(434_000_000))
+		decoders.add("a", {})
+		expect(index.lookup("a")?.captureCentreHz).toBe(434_000_000)
+		// A retune with no restart: rtl_433's -f still holds the old centre.
+		tuner.set(MAIN, tuned(434_300_000))
+		expect(index.lookup("a")?.captureCentreHz).toBeUndefined()
+		// The restart captures the new centre.
+		decoders.emit("decoder:started", "a")
+		expect(index.lookup("a")?.captureCentreHz).toBe(434_300_000)
+		// A channel context hears a channel, not the capture.
+		expect(
+			index.lookup("a", { sourceId: MAIN, channelHz: 434_300_000 })
+				?.captureCentreHz,
+		).toBeUndefined()
+		// An unusable snapshot (direct sampling) proves no centre.
+		tuner.set(MAIN, { ...tuned(434_300_000), directSampling: "i" })
+		expect(index.lookup("a")?.captureCentreHz).toBeUndefined()
+	})
+
+	it("reads a raw placement's centre from its own worker, the process that holds -f", () => {
+		const { decoders, tuner, index } = setup(tuned(434_000_000))
+		const raw = { sourceId: MAIN, channelHz: null }
+		const worker = placementKey("a", MAIN, "raw", null)
+		decoders.add("a", {})
+		decoders.add(worker, { sourceId: MAIN })
+		decoders.emit("decoder:started", worker)
+		// The parent bound at another centre: only the worker's start counts.
+		tuner.set(MAIN, tuned(868_000_000))
+		decoders.emit("decoder:started", "a")
+		tuner.set(MAIN, tuned(434_000_000))
+		expect(index.lookup("a", raw)).toMatchObject({
+			captureCentreHz: 434_000_000,
+			inputSampleRateHz: 2_400_000,
+		})
+		// The capture moved and the worker has not restarted yet.
+		tuner.set(MAIN, tuned(434_300_000))
+		expect(index.lookup("a", raw)?.captureCentreHz).toBeUndefined()
+		decoders.emit("decoder:started", worker)
+		expect(index.lookup("a", raw)?.captureCentreHz).toBe(434_300_000)
+		// With no worker bound there is no proof of a centre.
+		expect(
+			index.lookup("a", { sourceId: "other", channelHz: null })
+				?.captureCentreHz,
+		).toBeUndefined()
+	})
+
+	describe("rtl_433's frequency estimate", () => {
+		const CENTRE = 434_000_000
+		const RATE = 1_024_000
+		const raw = { sourceId: MAIN, channelHz: null }
+		const frequencyOf = (lookup: ActivityProvenanceLookup, id: string) => {
+			const envelopes: DecodeEnvelope[] = []
+			createActivityIngress({
+				logger: createLogger({ level: "error" }),
+				resolveProvenance: lookup,
+				sink: envelope => {
+					envelopes.push(envelope)
+				},
+			}).publish(id, "rtl433", {
+				decoder: id,
+				timestamp: new Date(),
+				type: "signal",
+				data: { freq: 434.05 },
+				provenanceBinding: raw,
+			})
+			return envelopes[0]?.provenance.frequency?.hz ?? null
+		}
+		const placed = () => {
+			const { decoders, tuner, index } = setup(tuned(CENTRE, "internal", RATE))
+			return { decoders, tuner, index }
+		}
+
+		it("carries the centre for a primary raw placement, which runs as the decoder itself", () => {
+			const { decoders, tuner, index } = placed()
+			decoders.add("ism", { sourceId: MAIN })
+			decoders.start("ism")
+			expect(index.lookup("ism", raw)).toMatchObject({
+				captureCentreHz: CENTRE,
+				inputSampleRateHz: RATE,
+			})
+			expect(frequencyOf(index.lookup, "ism")).toBe(434_050_000)
+			// Retuned with no restart: its -f still holds the old centre.
+			tuner.set(MAIN, tuned(434_300_000, "internal", RATE))
+			expect(index.lookup("ism", raw)?.captureCentreHz).toBeUndefined()
+			decoders.start("ism")
+			expect(index.lookup("ism", raw)?.captureCentreHz).toBe(434_300_000)
+		})
+
+		it("gives a secondary worker the same answer as the primary", () => {
+			const { decoders, index } = placed()
+			const worker = placementKey("ism", MAIN, "raw", null)
+			decoders.add("ism", { sourceId: "other" })
+			decoders.add(worker, { sourceId: MAIN })
+			decoders.start(worker)
+			expect(frequencyOf(index.lookup, "ism")).toBe(434_050_000)
+		})
+
+		it("refuses a primary bound on another source", () => {
+			const { decoders, index } = placed()
+			decoders.add("ism", { sourceId: "other" })
+			expect(index.lookup("ism", raw)?.captureCentreHz).toBeUndefined()
+			expect(frequencyOf(index.lookup, "ism")).toBeNull()
+		})
+
+		/** A real adapter, so its own -f rule and the index's are tested against each other. */
+		const adapter = (extraArgs?: unknown) =>
+			new ArgsRtl433Decoder(
+				{
+					id: "ism",
+					type: "rtl433",
+					enabled: true,
+					options: {
+						outputFormat: "json",
+						inputCenterFreq: CENTRE,
+						...(extraArgs === undefined ? {} : { extraArgs }),
+					},
+				},
+				createLogger({ level: "error" }),
+			)
+		const realDecoders = (decoder: ArgsRtl433Decoder) => {
+			const { decoders, tuner } = placed()
+			decoders.getStatus = () => ({ type: "rtl433", sourceId: MAIN })
+			decoders.getDecoder = () => decoder
+			decoders.items.set("ism", {})
+			const index = createDecoderProvenanceIndex(decoders, () => MAIN, tuner)
+			return { decoders, index }
+		}
+
+		it.each([
+			["no extra args", undefined, CENTRE],
+			["an unrelated flag", ["-R", "1"], CENTRE],
+			["a capital -F", ["-F", "json"], CENTRE],
+			["-f as two entries", ["-f", "434100000"], undefined],
+			["-f joined to its value", ["-f434100000"], undefined],
+			["-f after other entries", ["-R", "1", "-f", "434100000"], undefined],
+			["-f past the extraArgs cap", [...Array(64).fill("-q"), "-f"], CENTRE],
+			["-f in a non-list value", "-f", CENTRE],
+		])(
+			"with %s, agrees with the adapter on whose -f it is",
+			(_n, extra, hz) => {
+				const decoder = adapter(extra)
+				const { index } = realDecoders(decoder)
+				expect(index.lookup("ism")?.captureCentreHz).toBe(hz)
+				expect(index.lookup("ism", raw)?.captureCentreHz).toBe(hz)
+				// The adapter adds its centre as -f exactly when the index keeps it.
+				expect(decoder.args().includes(String(CENTRE))).toBe(hz !== undefined)
+				expect(frequencyOf(index.lookup, "ism")).toBe(
+					hz === undefined ? null : 434_050_000,
+				)
+				index.dispose()
+			},
+		)
+
+		it("reads the options the adapter holds at its start", () => {
+			const decoder = adapter()
+			const { decoders, index } = realDecoders(decoder)
+			expect(index.lookup("ism", raw)?.captureCentreHz).toBe(CENTRE)
+			decoder.updateOptions({ extraArgs: ["-f", "434100000"] })
+			decoders.start("ism")
+			expect(index.lookup("ism", raw)?.captureCentreHz).toBeUndefined()
+			decoder.updateOptions({ extraArgs: [] })
+			decoders.start("ism")
+			expect(index.lookup("ism", raw)?.captureCentreHz).toBe(CENTRE)
+			index.dispose()
+		})
+
+		it("takes the override from the worker that runs the placement", () => {
+			const { decoders, tuner } = placed()
+			const worker = placementKey("ism", MAIN, "raw", null)
+			const parent = adapter()
+			const child = adapter(["-f", "434100000"])
+			decoders.getStatus = () => ({ type: "rtl433", sourceId: MAIN })
+			decoders.getDecoder = id => (id === worker ? child : parent)
+			decoders.items.set("ism", {})
+			const index = createDecoderProvenanceIndex(decoders, () => MAIN, tuner)
+			decoders.start(worker)
+			expect(index.lookup("ism", raw)?.captureCentreHz).toBeUndefined()
+			index.dispose()
+		})
+
+		it("leaves another decoder type's -f alone", () => {
+			const { decoders, tuner } = placed()
+			decoders.getStatus = () => ({ type: "other", sourceId: MAIN })
+			decoders.getDecoder = () => ({
+				caps: { input: "iq" },
+				config: { options: { extraArgs: ["-f", "1"] } },
+			})
+			decoders.items.set("x", {})
+			const index = createDecoderProvenanceIndex(decoders, () => MAIN, tuner)
+			expect(index.lookup("x")?.captureCentreHz).toBe(CENTRE)
+			index.dispose()
+		})
+	})
+
+	it("refuses another source's centre for a decoder following the default source", () => {
+		const { decoders, tuner, index, setDefault } = setup(tuned(434_000_000))
+		decoders.add("a", {})
+		tuner.set("other", tuned(434_000_000))
+		setDefault("other")
+		expect(index.lookup("a")?.sourceId).toBe("other")
+		expect(index.lookup("a")?.captureCentreHz).toBeUndefined()
+	})
+
+	it("resets the frozen binding when the centre changes with trust, rate and source the same", () => {
+		const { decoders, tuner, index } = setup(tuned(434_000_000))
+		decoders.add("a", {})
+		const before = index.lookup("a")
+		expect(index.lookup("a")).toBe(before)
+		tuner.set(MAIN, tuned(434_300_000))
+		const after = index.lookup("a")
+		expect(after).not.toBe(before)
+		expect(after?.tuningTrust).toBe(before?.tuningTrust)
+		expect(after?.inputSampleRateHz).toBe(before?.inputSampleRateHz)
+		expect(after?.captureCentreHz).toBeUndefined()
+		expect(before?.captureCentreHz).toBe(434_000_000)
 	})
 
 	it("carries the observed input rate without a channel context, and follows a rate change", () => {

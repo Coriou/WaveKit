@@ -79,6 +79,10 @@ import { enumRoutes } from "./routes/enums.js"
 import { decoderSummaryRoutes } from "./routes/decoder-summary.js"
 import { agentStatusRoutes } from "./routes/agent-status.js"
 import {
+	diagnosticsRoutes,
+	type DiagnosticsRoutesOptions,
+} from "./routes/diagnostics.js"
+import {
 	iqSnapshotRoutes,
 	type IqSnapshotOptions,
 } from "./routes/iq-snapshot.js"
@@ -218,6 +222,10 @@ export interface ApiServerDependencies {
 	liveDemod?: LiveDemodulator | undefined
 	digitalVoice?: DigitalVoiceService | undefined
 	resourceAggregator?: ResourceAggregator | undefined
+	/** What GET /api/diagnostics reads from the runtime; absent parts read null there. */
+	diagnostics?:
+		| Pick<DiagnosticsRoutesOptions, "loopDelay" | "channels">
+		| undefined
 	aircraftTracker?: AircraftTracker | undefined
 	/** Aircraft enrichment settings (GET/PUT /api/aircraft/info). */
 	aircraftInfo?: AircraftRoutesOptions["info"] | undefined
@@ -318,6 +326,7 @@ export class ApiServer {
 	private readonly liveDemod?: LiveDemodulator | undefined
 	private readonly digitalVoice?: DigitalVoiceService | undefined
 	private readonly resourceAggregator?: ResourceAggregator | undefined
+	private readonly diagnostics?: ApiServerDependencies["diagnostics"]
 	private readonly aircraftTracker?: AircraftTracker | undefined
 	private readonly aircraftInfo?: AircraftRoutesOptions["info"] | undefined
 	private readonly vesselTracker?: VesselTracker | undefined
@@ -388,6 +397,7 @@ export class ApiServer {
 		this.liveDemod = dependencies.liveDemod
 		this.digitalVoice = dependencies.digitalVoice
 		this.resourceAggregator = dependencies.resourceAggregator
+		this.diagnostics = dependencies.diagnostics
 		this.aircraftTracker = dependencies.aircraftTracker
 		this.aircraftInfo = dependencies.aircraftInfo
 		this.vesselTracker = dependencies.vesselTracker
@@ -1758,6 +1768,15 @@ export class ApiServer {
 				...(this.activityReady && activityRuntime
 					? { stats: () => activityRuntime.stats() }
 					: {}),
+			},
+		})
+
+		await this.app.register(diagnosticsRoutes, {
+			...this.diagnostics,
+			containerCpuCores: () => {
+				const percent =
+					this.resourceAggregator?.getContainerResources().cpuUsagePercent
+				return typeof percent === "number" ? percent / 100 : null
 			},
 		})
 

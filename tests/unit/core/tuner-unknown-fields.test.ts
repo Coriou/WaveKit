@@ -39,6 +39,8 @@ function caps(overrides: Partial<SourceCaps> = {}): SourceCaps {
 
 let current: SourceCaps
 let controller: TunerController
+/** An R820T header: there a gain write selects manual gain. */
+const R820T_HEADER = { magic: "RTL0", tunerType: 5, gainCount: 29 }
 
 function create(config = {}, initial = caps({ centerFreq: 1_090_000_000 })) {
 	current = initial
@@ -46,6 +48,7 @@ function create(config = {}, initial = caps({ centerFreq: 1_090_000_000 })) {
 		assertTunerCommandActive: () => {},
 		writeToSource: vi.fn(() => true),
 		isRtlTcpSource: vi.fn(() => true),
+		getRtlTcpInfo: vi.fn(() => R820T_HEADER),
 		getCaps: vi.fn(() => current),
 		updateSourceCaps: vi.fn((_id: string, updates: Partial<SourceCaps>) => {
 			current = { ...current, ...updates }
@@ -102,8 +105,8 @@ describe("TunerState.unknownFields", () => {
 		const state = controller.getState("rtl")!
 		expect(state.gain).toBe(490)
 		expect(state.unknownFields).not.toContain("gain")
-		// The relay path infers manual mode from a gain command; the state
-		// must not show that inference while also calling it unknown.
+		// The relay path infers manual mode from a gain command on an R820T; the
+		// state must not show that inference while also calling it unknown.
 		expect(state.gainMode).toBe("manual")
 		expect(state.unknownFields).not.toContain("gainMode")
 	})

@@ -27,6 +27,8 @@ export interface SharedConfirmMemory {
 	): boolean
 	isAccepted(scope: string, key: string, value: string): boolean
 	markAccepted(scope: string, key: string, value: string): void
+	acceptedAgeMs(scope: string, key: string, value: string): number | null
+	touchAccepted(scope: string, key: string, value: string): void
 }
 
 /**
@@ -62,10 +64,16 @@ export class DoubleMatch {
 	/**
 	 * True exactly once per scope: on the second CRC-clean occurrence of `value` under `key`.
 	 * With a shared scope, the shared memory alone decides and records the occurrence (its
-	 * separation and window bounds apply to repeats inside this instance too).
+	 * separation and window bounds apply to repeats inside this instance too). `again`: the value's
+	 * acceptance is too old to count (`acceptedAgeMs`), so it pairs afresh, and a pair restarts its age.
 	 */
-	accept(key: string, value: string, crcClean: boolean): boolean {
-		if (!crcClean || this.isAccepted(key, value)) return false
+	accept(
+		key: string,
+		value: string,
+		crcClean: boolean,
+		again = false,
+	): boolean {
+		if (!crcClean || (!again && this.isAccepted(key, value))) return false
 		const scope = this.scope()
 		if (scope === null && this.shared?.requireScope) return false
 		if (scope !== null) {
@@ -131,6 +139,32 @@ export class DoubleMatch {
 		if (this.accepted.size > MAX_ACCEPTED) {
 			const oldest = this.accepted.values().next()
 			if (oldest.done !== true) this.accepted.delete(oldest.value)
+		}
+	}
+
+	/**
+	 * How long ago an accepted value last occurred under the shared memory. Null when it is not
+	 * accepted there, or with no shared scope: this instance's own memory lives no longer than its
+	 * decoder, so what it accepted is never from another job.
+	 */
+	acceptedAgeMs(key: string, value: string): number | null {
+		const scope = this.scope()
+		if (scope === null) return null
+		try {
+			return this.shared!.memory.acceptedAgeMs(scope, key, value)
+		} catch {
+			return this.isAccepted(key, value) ? Number.POSITIVE_INFINITY : null
+		}
+	}
+
+	/** A clean occurrence of an accepted value restarts its age. */
+	touchAccepted(key: string, value: string): void {
+		const scope = this.scope()
+		if (scope === null) return
+		try {
+			this.shared!.memory.touchAccepted(scope, key, value)
+		} catch {
+			// the age stays older, which is the safe answer
 		}
 	}
 }

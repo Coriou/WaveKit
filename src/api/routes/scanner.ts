@@ -9,10 +9,10 @@
  *   error answer are static: code, severity and the code's fixed message (scanner-plan-issues)
  * - 404 `SCANNER_NOT_FOUND`, `SCANNER_JOB_NOT_FOUND`, `SCANNER_DISCOVERY_NOT_FOUND`
  * - 409 `SCANNER_TAKEOVER_REQUIRED` `{impact}`, `SCANNER_SOURCE_BUSY` (the message carries the
- *   arbiter's detail: "holder is starting", "releasing", "recovery pending", …),
+ *   arbiter's detail: "holder is starting", "releasing", "recovery pending", …; identify adds `{next}`),
  *   `SCANNER_SOURCE_DOWN`, `SCANNER_NO_TUNER_CONTROL`, `SCANNER_JOB_TERMINAL`, `SCANNER_JOB_NOT_TERMINAL`,
- *   `SCANNER_INVALID_TRANSITION`, `SCANNER_DISCOVERY_LOCKED_OUT`, `OUT_OF_WINDOW` `{window}`,
- *   `LIVE_AUDIO_UNAVAILABLE`, `SCANNER_IDENTIFY_NOT_PAUSABLE`, `SCANNER_IDENTIFY_NOT_EDITABLE`
+ *   `SCANNER_INVALID_TRANSITION`, `SCANNER_DISCOVERY_LOCKED_OUT`, `OUT_OF_WINDOW` `{window, next}`,
+ *   `LIVE_AUDIO_UNAVAILABLE`, `SCANNER_IDENTIFY_BUSY`, `SCANNER_IDENTIFY_NOT_PAUSABLE`, `SCANNER_IDENTIFY_NOT_EDITABLE`
  * - 500 `SCANNER_SETTINGS_WRITE_FAILED`
  * - 503 `SCANNER_DISABLED`, `SCANNER_STATE_UNAVAILABLE`
  */
@@ -122,7 +122,7 @@ export type ScannerRouteService = Pick<
 	| "recordingPath"
 	| "evidencePath"
 	| "listen"
-	| "identify"
+	| "identifyOrJoin"
 	| "listCaptures"
 	| "capturePath"
 	| "deleteCapture"
@@ -1229,8 +1229,10 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 		},
 		async (request, reply) => {
 			try {
-				const job = await scanner.identify(toIdentifyRequest(request.body))
-				return reply.code(201).send(job)
+				const { job, joined } = await scanner.identifyOrJoin(
+					toIdentifyRequest(request.body),
+				)
+				return reply.code(joined ? 200 : 201).send(job)
 			} catch (err) {
 				return sendError(reply, err)
 			}

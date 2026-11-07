@@ -20,6 +20,12 @@ export interface DongleInfo {
 	} | null
 	driverConflict: boolean
 	conflictingDriver: string | null
+	/**
+	 * False: lsusb answered, so `present` is an observation. True: lsusb failed or timed out (a
+	 * loaded host can take over the 3 s limit), so `present: false` observes nothing. Older hosts
+	 * do not send it, and their `present: false` can mean either.
+	 */
+	probeFailed?: boolean
 }
 
 /**
@@ -67,6 +73,7 @@ export async function detectDongle(
 					usb: { vid, pid, bus, device },
 					driverConflict: driverConflict.conflict,
 					conflictingDriver: driverConflict.driver,
+					probeFailed: false,
 				}
 			}
 		}
@@ -79,6 +86,7 @@ export async function detectDongle(
 			usb: null,
 			driverConflict: false,
 			conflictingDriver: null,
+			probeFailed: false,
 		}
 	} catch (error) {
 		log.error({ error }, "Failed to detect dongle")
@@ -89,6 +97,7 @@ export async function detectDongle(
 			usb: null,
 			driverConflict: false,
 			conflictingDriver: null,
+			probeFailed: true,
 		}
 	}
 }

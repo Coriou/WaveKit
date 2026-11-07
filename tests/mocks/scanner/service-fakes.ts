@@ -102,6 +102,8 @@ export function serviceHarness(
 		centreHz?: number
 		/** The live-audio status the service's impact reads (default: no live demodulator). */
 		liveDemod?: ScannerServiceDeps["liveDemod"]
+		/** The service's clock (default the wall clock). */
+		now?: () => number
 	} = {},
 ) {
 	const centre = opts.centreHz ?? CENTRE
@@ -177,6 +179,7 @@ export function serviceHarness(
 		logger: pino({ level: "silent" }),
 		engineHost: "inline",
 		tickMs: 20,
+		...(opts.now ? { now: opts.now } : {}),
 	})
 	stampLegacyGate(service, settings)
 	return {

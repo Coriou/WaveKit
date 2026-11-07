@@ -60,6 +60,116 @@ describe("sourceVerdict", () => {
 		).toMatchObject({ code: "no-samples", deviceFacts: "stale" })
 	})
 
+	it("says plainly that a device is gone only when the receiver's USB check answered", () => {
+		const of = (deviceProbe?: "observed" | "failed") =>
+			sourceVerdict(
+				status("stale"),
+				host({
+					receiverFacts: {
+						deviceFound: deviceProbe === "failed" ? null : false,
+						rtlTcpRunning: false,
+						...(deviceProbe ? { deviceProbe } : {}),
+					},
+				}),
+				now,
+			)
+		expect(of("observed")).toEqual({
+			code: "receiver-no-device",
+			message: "receiver has no device; re-attach USB",
+			deviceFacts: "absent",
+		})
+		// An older host cannot tell a failed check from an absence: same code, hedged text.
+		expect(of()).toEqual({
+			code: "receiver-no-device",
+			message:
+				"receiver reports no device; check USB and re-attach it if unplugged",
+			deviceFacts: "absent",
+		})
+		const failed = of("failed")
+		expect(failed).toMatchObject({
+			code: "receiver-not-running",
+			deviceFacts: "probe-failed",
+		})
+		expect(failed.message).not.toMatch(/re-attach/)
+	})
+
+	it("makes no device claim from a failed USB check, even with a stale present flag", () => {
+		for (const deviceFound of [true, false, null]) {
+			const verdict = sourceVerdict(
+				status("disconnected"),
+				host({
+					receiverFacts: {
+						deviceFound,
+						rtlTcpRunning: null,
+						deviceProbe: "failed",
+					},
+				}),
+				now,
+			)
+			expect(verdict.code).toBe("disconnected")
+			expect(verdict.deviceFacts).toBe("probe-failed")
+		}
+	})
+
+	it("says rtl_tcp is down after a failed USB check, with the device state unknown", () => {
+		for (const activity of ["stale", "disconnected", "waiting"] as const) {
+			for (const deviceFound of [true, false, null]) {
+				expect(
+					sourceVerdict(
+						status(activity),
+						host({
+							receiverFacts: {
+								deviceFound,
+								rtlTcpRunning: false,
+								deviceProbe: "failed",
+							},
+						}),
+						now,
+					),
+				).toEqual({
+					code: "receiver-not-running",
+					message:
+						"receiver's rtl_tcp is not running; its USB check failed, so its device state is unknown",
+					deviceFacts: "probe-failed",
+				})
+			}
+		}
+	})
+
+	it("keeps no-samples after a failed USB check while rtl_tcp runs or is not stated", () => {
+		for (const rtlTcpRunning of [true, null]) {
+			expect(
+				sourceVerdict(
+					status("stale"),
+					host({
+						receiverFacts: {
+							deviceFound: null,
+							rtlTcpRunning,
+							deviceProbe: "failed",
+						},
+					}),
+					now,
+				).code,
+			).toBe("no-samples")
+		}
+	})
+
+	it("lets samples outrank a failed USB check with rtl_tcp stated off", () => {
+		expect(
+			sourceVerdict(
+				status("streaming"),
+				host({
+					receiverFacts: {
+						deviceFound: null,
+						rtlTcpRunning: false,
+						deviceProbe: "failed",
+					},
+				}),
+				now,
+			).code,
+		).toBe("ok")
+	})
+
 	it("claims nothing when the device and rtl_tcp facts disagree", () => {
 		const verdict = sourceVerdict(
 			status("stale"),

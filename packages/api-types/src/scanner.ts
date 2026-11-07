@@ -951,6 +951,24 @@ export interface ScannerEngineStatus {
 		gain: number
 		blankedPercent: number
 	}
+	/**
+	 * Why the passive job last failed to start; removed by its next successful start. `code` is
+	 * a closed error code (`UNKNOWN` for anything else), never an error's text.
+	 */
+	lastPassiveStartFailure?: { code: string; at: string }
+	/** The last lease step the core tried on its own and was refused; kept until the next one. */
+	lastLeaseRefusal?: ScannerLeaseRefusal
+}
+/**
+ * `kind`: `arbitration` picking the next lease holder failed; `hand-back` a preempted job did not
+ * take the lease back; `boot-resume` a job could not resume after a restart. `code` as above.
+ */
+export interface ScannerLeaseRefusal {
+	kind: "arbitration" | "hand-back" | "boot-resume"
+	code: string
+	at: string
+	/** The job holding the lease, when the refusal names one. */
+	holderJobId?: string
 }
 export interface ScannerIqCaptureStatus {
 	trialCaptures?: {
@@ -1606,6 +1624,11 @@ export interface ScannerIdentifyResult {
 	analog?: ScannerIdentifyAnalog
 	/** WG10 req 3.5: probe decoder types that could not run during this job (sorted, unique); absent when none. */
 	decodersUnavailable?: ScannerProbeDecoderType[]
+	/**
+	 * Why "nothing" was withheld: the centre of a live track within 12 500 Hz of the target that did
+	 * not resolve it, or of the strongest bin at the target at or above the block threshold.
+	 */
+	nearbyHz?: number
 }
 /** `scanner:identify` (one stream per target; `all: true` gives one per surfaced emission). */
 export interface ScannerIdentifyEventData {
@@ -1614,6 +1637,8 @@ export interface ScannerIdentifyEventData {
 	state: ScannerIdentifyState
 	trials: ScannerIdentifyTrial[]
 	result?: ScannerIdentifyResult
+	/** The answer in one closed code, once the target is final. Absent on older cores and while it runs. */
+	verdict?: ScannerIdentifyVerdict
 }
 export interface ScannerIdentifyView {
 	target: ScannerIdentifyTarget
@@ -1663,4 +1688,81 @@ export interface ScannerCapture {
 	durationS: number
 	bytes: number
 	files: { iq: string; manifest: string }
+}
+
+/** Every `ScannerTrialOutcome`, for clients and for tests that must cover them all. */
+export const SCANNER_TRIAL_OUTCOMES = [
+	"pending",
+	"running",
+	"decoded",
+	"no-sync",
+	"crc-errors",
+	"timeout",
+	"skipped-budget",
+	"unsupported",
+	"not-needed",
+	"cancelled",
+	"heard",
+	"data-like",
+	"carrier-only",
+] as const satisfies readonly ScannerTrialOutcome[]
+/** Compile-time check: fails when `ScannerTrialOutcome` gains a member the list lacks. */
+export const SCANNER_TRIAL_OUTCOMES_COMPLETE: [ScannerTrialOutcome] extends [
+	(typeof SCANNER_TRIAL_OUTCOMES)[number],
+]
+	? true
+	: never = true
+
+/**
+ * `decoded`: a confirmed identity that met acceptance. `heard-digital-unconfirmed`: a lone sync or
+ * one decode, never `decoded`. `undecodable`: a signal is there and the trials found nothing.
+ * `nothing`: IQ blocks kept arriving, the target measured below the block threshold and no live
+ * track sat near it. `could-not-test`: see `SCANNER_IDENTIFY_VERDICT_WHY`.
+ */
+export const SCANNER_IDENTIFY_VERDICT_CODES = [
+	"decoded",
+	"heard-digital-unconfirmed",
+	"undecodable",
+	"nothing",
+	"could-not-test",
+] as const
+export type ScannerIdentifyVerdictCode =
+	(typeof SCANNER_IDENTIFY_VERDICT_CODES)[number]
+
+/** Why a target `could-not-test`. `unknown` is the safe answer to anything unrecognised. */
+export const SCANNER_IDENTIFY_VERDICT_WHY = [
+	"budget",
+	"unsupported-protocol",
+	"unsupported-format",
+	"decoders-unavailable",
+	"no-live-audio",
+	"window-moved",
+	"source-lost",
+	"cancelled",
+	"interrupted",
+	"artefact",
+	"unknown",
+	"no-samples",
+	"signal-nearby",
+] as const
+export type ScannerIdentifyVerdictWhy =
+	(typeof SCANNER_IDENTIFY_VERDICT_WHY)[number]
+
+export interface ScannerIdentifyVerdict {
+	code: ScannerIdentifyVerdictCode
+	/** Present only on `could-not-test`. */
+	why?: ScannerIdentifyVerdictWhy
+	/** What was decoded or heard; otherwise the one protocol the request named, when it named one. */
+	protocol?: ScannerProtocol
+	/**
+	 * Only on `decoded`: this job heard one decode, and the match that confirms it came 2 s to 5 min
+	 * earlier, before this job (another request, or a passive or scan probe, on this signal). Absent: both decodes,
+	 * or a single-shot rule, in this job.
+	 */
+	confirmedAcrossJobs?: true
+	/**
+	 * Only on `heard-digital-unconfirmed` and `undecodable`: live audio heard a transmission at the
+	 * target. A lone digital sync over voice is usually the voice.
+	 */
+	analogHeard?: true
 }

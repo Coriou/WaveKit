@@ -14,6 +14,7 @@ import {
 	type TunerState,
 } from "@wavekit/api-types"
 import { tunerRoutes } from "../../../src/api/routes/tuner.js"
+import type { SourceTunerConfig } from "../../../src/config.js"
 import {
 	ApiServer,
 	type ApiServerDependencies,
@@ -23,6 +24,7 @@ import {
 	BandGainSettingsService,
 	type BandGainFs,
 } from "../../../src/core/band-gain.js"
+import { identifyTargetNextStep } from "../../../src/core/scanner/identify.js"
 import { TunerArbiter } from "../../../src/core/scanner/tuner-arbiter.js"
 import {
 	SourceManager,
@@ -47,6 +49,7 @@ const SET_FREQUENCY = 1
 const SET_GAIN_MODE = 3
 const SET_GAIN = 4
 const SET_PPM = 5
+const SET_TUNER_GAIN_INDEX = 0x0d
 const START_RATE = 1_024_000
 const START_HZ = 100_000_000
 const OTHER_RATE = 2_400_000
@@ -73,6 +76,8 @@ async function setup(
 		payloadOnReconnect?: boolean
 		reconnectPolicy?: TunerReconnectPolicy
 		principal?: "machine" | "session"
+		/** The source's configured gain, written on each new connection. */
+		tuner?: SourceTunerConfig
 	} = {},
 ) {
 	const { payloadOnReconnect = true, principal = "machine" } = options
@@ -159,6 +164,7 @@ async function setup(
 			loop: false,
 			playbackSpeed: 1,
 			stallTimeoutMs: 0,
+			...(options.tuner ? { tuner: options.tuner } : {}),
 			caps: {
 				kind: "iq",
 				sampleRate: START_RATE,
@@ -311,6 +317,486 @@ describe("tune in one call", () => {
 		])
 		// The next command works at once: the failure this route exists to end.
 		expect((await h.post({ frequencyHz: OTHER_HZ })).json().usable).toBe(true)
+	})
+
+	describe("a setting already at the asked value is applied", () => {
+		const BODY_GAIN = 445
+		async function tuneWithRate(h: Awaited<ReturnType<typeof setup>>) {
+			const disconnected = event(h.manager, "disconnected")
+			const answer = h.post({
+				frequencyHz: TUNE_HZ,
+				sampleRateHz: OTHER_RATE,
+				gainMode: "manual",
+				gain: BODY_GAIN,
+			})
+			await disconnected
+			await vi.advanceTimersByTimeAsync(calculateBackoffDelay(1))
+			return answer
+		}
+
+		it("gain mode already manual, with a rate change: no partial", async () => {
+			const h = await setup()
+			expect(
+				(await h.post({ gainMode: "manual", gain: 200 })).json().usable,
+			).toBe(true)
+			expect(h.read().gainMode).toBe("manual")
+			h.fakeTime()
+			const res = await tuneWithRate(h)
+			expect(res.statusCode).toBe(200)
+			expect(res.json()).toMatchObject({
+				usable: true,
+				applied: ["sampleRateHz", "frequencyHz", "gainMode", "gain"],
+				notApplied: [],
+				gainMode: "manual",
+				gain: BODY_GAIN,
+			})
+		})
+
+		it("gain mode already manual, no rate change: no partial", async () => {
+			const h = await setup()
+			await h.post({ gainMode: "manual", gain: 200 })
+			const res = await h.post({
+				frequencyHz: TUNE_HZ,
+				sampleRateHz: START_RATE,
+				gainMode: "manual",
+				gain: BODY_GAIN,
+			})
+			expect(res.statusCode).toBe(200)
+			expect(res.json()).toMatchObject({
+				usable: true,
+				applied: ["sampleRateHz", "frequencyHz", "gainMode", "gain"],
+				notApplied: [],
+			})
+		})
+
+		it("gain mode manual from the configured gain only, with a rate change: no partial", async () => {
+			// The reconnect clears the configured frames' proof and skips the configured gain mode,
+			// since the tune's gain is held: the mode the tune asked for must still count.
+			const h = await setup({ tuner: { gainMode: "manual", gainDb: 20 } })
+			await until(() => h.frames.some(f => f.cmd === SET_GAIN_MODE))
+			expect(h.read().gainMode).toBe("manual")
+			expect(h.read().unknownFields ?? []).not.toContain("gainMode")
+			h.fakeTime()
+			const res = await tuneWithRate(h)
+			expect(res.statusCode).toBe(200)
+			expect(res.json()).toMatchObject({
+				usable: true,
+				applied: ["sampleRateHz", "frequencyHz", "gainMode", "gain"],
+				notApplied: [],
+				gainMode: "manual",
+				gain: BODY_GAIN,
+			})
+			expect(res.json().unknownFields ?? []).not.toContain("gainMode")
+			// and the next reconnect replays the mode with the gain: still known
+			expect(h.read().unknownFields ?? []).not.toContain("gainMode")
+		})
+
+		it("gain mode and gain both equal to the configured ones, with a rate change: no partial", async () => {
+			const h = await setup({ tuner: { gainMode: "manual", gainDb: 44.5 } })
+			await until(() => h.frames.some(f => f.cmd === SET_GAIN))
+			expect(h.read()).toMatchObject({ gainMode: "manual", gain: BODY_GAIN })
+			h.fakeTime()
+			const res = await tuneWithRate(h)
+			expect(res.statusCode).toBe(200)
+			expect(res.json()).toMatchObject({
+				usable: true,
+				applied: ["sampleRateHz", "frequencyHz", "gainMode", "gain"],
+				notApplied: [],
+			})
+			expect(res.json().unknownFields ?? []).not.toContain("gain")
+			// the new connection gets the operator's mode and gain, from the replay
+			await until(() =>
+				h.frames.some(f => f.connection === 2 && f.cmd === SET_GAIN),
+			)
+			expect(
+				h.frames
+					.filter(
+						f =>
+							f.connection === 2 &&
+							(f.cmd === SET_GAIN_MODE || f.cmd === SET_GAIN),
+					)
+					.map(f => [f.cmd, f.value]),
+			).toEqual([
+				[SET_GAIN_MODE, 1],
+				[SET_GAIN, BODY_GAIN],
+			])
+		})
+
+		it("from AGC to manual, with a rate change: no partial", async () => {
+			const h = await setup()
+			await h.post({ gainMode: "agc" })
+			expect(h.read().gainMode).toBe("agc")
+			h.fakeTime()
+			const res = await tuneWithRate(h)
+			expect(res.statusCode).toBe(200)
+			expect(res.json()).toMatchObject({
+				usable: true,
+				applied: ["sampleRateHz", "frequencyHz", "gainMode", "gain"],
+				notApplied: [],
+				gainMode: "manual",
+				gain: BODY_GAIN,
+			})
+		})
+
+		it("a fresh source whose gain mode was never written, with a rate change: no partial", async () => {
+			const h = await setup()
+			h.fakeTime()
+			const res = await tuneWithRate(h)
+			expect(res.statusCode).toBe(200)
+			expect(res.json()).toMatchObject({
+				usable: true,
+				applied: ["sampleRateHz", "frequencyHz", "gainMode", "gain"],
+				notApplied: [],
+			})
+		})
+	})
+
+	describe("a value in place keeps the reconnect replay order", () => {
+		const G = 445
+		const P = 200
+		type Mode = "agc" | "manual" | undefined
+		/** "configured mode": the configured gain differs from the tune's, so only the mode is in place. */
+		type InPlace = "no" | "configured" | "configured mode" | "tuned"
+
+		/** Drops the connection and waits for the next one's payload (fake time). */
+		async function reconnect(h: Awaited<ReturnType<typeof setup>>) {
+			const before = h.connections()
+			const back = event(h.manager, "payload-started")
+			const dropped = event(h.manager, "disconnected")
+			h.sockets[h.sockets.length - 1]!.destroy()
+			await dropped
+			for (let n = 1; h.connections() === before && n < 8; n++)
+				await vi.advanceTimersByTimeAsync(calculateBackoffDelay(n))
+			await back
+		}
+
+		/** The gain frames the connection got, once a marker frame after them has arrived. */
+		async function gainFrames(
+			h: Awaited<ReturnType<typeof setup>>,
+		): Promise<Array<[number, number]>> {
+			const connection = h.connections()
+			const marker = connection + 10
+			await h.controller.setPpm("rtl", marker)
+			await until(() =>
+				h.frames.some(
+					f =>
+						f.connection === connection &&
+						f.cmd === SET_PPM &&
+						f.value === marker,
+				),
+			)
+			return h.frames
+				.filter(
+					f =>
+						f.connection === connection &&
+						(f.cmd === SET_GAIN_MODE || f.cmd === SET_GAIN),
+				)
+				.map(f => [f.cmd, f.value])
+		}
+
+		/**
+		 * rtl_tcp's gain after the frames: SET_GAIN switches to manual, and a manual SET_GAIN_MODE may
+		 * reset the gain. What the frames leave must be what the state claims to know.
+		 */
+		function expectReplayAgrees(
+			state: TunerState,
+			frames: Array<[number, number]>,
+		) {
+			let mode: "agc" | "manual" | undefined
+			let gain: number | "reset" | undefined
+			for (const [cmd, value] of frames) {
+				if (cmd === SET_GAIN) {
+					mode = "manual"
+					gain = value
+				} else {
+					mode = value === 1 ? "manual" : "agc"
+					if (value === 1) gain = "reset"
+				}
+			}
+			const unknown = state.unknownFields ?? []
+			if (mode !== undefined && !unknown.includes("gainMode"))
+				expect(mode).toBe(state.gainMode)
+			if (
+				state.gainMode === "manual" &&
+				!unknown.includes("gain") &&
+				gain !== undefined
+			)
+				expect(gain).toBe(state.gain)
+		}
+
+		it("an AGC tune with a gain, then the same gain alone: the replay keeps the gain before AGC", async () => {
+			const h = await setup()
+			await h.post({ gainMode: "agc", gain: P })
+			await h.post({ gain: P })
+			expect(h.read()).toMatchObject({ gainMode: "agc", gain: P })
+			h.fakeTime()
+			await reconnect(h)
+			expect(await gainFrames(h)).toEqual([
+				[SET_GAIN, P],
+				[SET_GAIN_MODE, 0],
+			])
+		})
+
+		it("a manual tune with a gain, then the same mode alone: the replay keeps the mode before its gain", async () => {
+			const h = await setup()
+			await h.post({ gainMode: "manual", gain: P })
+			await h.post({ gainMode: "manual" })
+			h.fakeTime()
+			await reconnect(h)
+			expect(await gainFrames(h)).toEqual([
+				[SET_GAIN_MODE, 1],
+				[SET_GAIN, P],
+			])
+		})
+
+		it("the configured manual mode asked again keeps the configured gain on a reconnect", async () => {
+			const h = await setup({ tuner: { gainMode: "manual", gainDb: 44.5 } })
+			await until(() => h.frames.some(f => f.cmd === SET_GAIN))
+			const res = await h.post({ gainMode: "manual" })
+			expect(res.json()).toMatchObject({
+				applied: ["gainMode"],
+				notApplied: [],
+			})
+			h.fakeTime()
+			await reconnect(h)
+			expect(await gainFrames(h)).toEqual([
+				[SET_GAIN_MODE, 1],
+				[SET_GAIN, G],
+			])
+			expect(h.read()).toMatchObject({ gainMode: "manual", gain: G })
+			expect(h.read().unknownFields ?? []).not.toContain("gain")
+		})
+
+		it("the configured manual mode asked again beside a held gain index survives a reconnect", async () => {
+			const h = await setup({ tuner: { gainMode: "manual", gainDb: 44.5 } })
+			await until(() => h.frames.some(f => f.cmd === SET_GAIN))
+			await h.controller.setTunerGainIndex("rtl", 2)
+			const res = await h.post({ gainMode: "manual" })
+			expect(res.json()).toMatchObject({ notApplied: [] })
+			h.fakeTime()
+			await reconnect(h)
+			const connection = h.connections()
+			const marker = connection + 10
+			await h.controller.setPpm("rtl", marker)
+			await until(() =>
+				h.frames.some(
+					f =>
+						f.connection === connection &&
+						f.cmd === SET_PPM &&
+						f.value === marker,
+				),
+			)
+			const order = h.frames
+				.filter(
+					f =>
+						f.connection === connection &&
+						(f.cmd === SET_GAIN_MODE || f.cmd === SET_TUNER_GAIN_INDEX),
+				)
+				.map(f => [f.cmd, f.value])
+			expect(order).toEqual([
+				[SET_GAIN_MODE, 1],
+				[SET_TUNER_GAIN_INDEX, 2],
+			])
+			expect(h.read().gainMode).toBe("manual")
+			expect(h.read().unknownFields ?? []).not.toContain("gainMode")
+		})
+
+		it("an unchanged AGC beside a held gain index replays after the index", async () => {
+			const h = await setup({ tuner: { gainMode: "agc" } })
+			await until(() => h.frames.some(f => f.cmd === SET_GAIN_MODE))
+			await h.controller.setTunerGainIndex("rtl", 2)
+			await h.post({ gainMode: "agc" })
+			h.fakeTime()
+			await reconnect(h)
+			const connection = h.connections()
+			const marker = connection + 10
+			await h.controller.setPpm("rtl", marker)
+			await until(() =>
+				h.frames.some(
+					f =>
+						f.connection === connection &&
+						f.cmd === SET_PPM &&
+						f.value === marker,
+				),
+			)
+			const order = h.frames
+				.filter(
+					f =>
+						f.connection === connection &&
+						(f.cmd === SET_GAIN_MODE || f.cmd === SET_TUNER_GAIN_INDEX),
+				)
+				.map(f => [f.cmd, f.value])
+			expect(order.at(-1)).toEqual([SET_GAIN_MODE, 0])
+			expect(order).toContainEqual([SET_TUNER_GAIN_INDEX, 2])
+			expect(h.read().gainMode).toBe("agc")
+		})
+
+		it("from manual to AGC with a gain, with a rate change: no partial, gain before AGC", async () => {
+			const h = await setup({ tuner: { gainMode: "manual", gainDb: 20 } })
+			await until(() => h.frames.some(f => f.cmd === SET_GAIN))
+			h.fakeTime()
+			const disconnected = event(h.manager, "disconnected")
+			const answer = h.post({
+				frequencyHz: TUNE_HZ,
+				sampleRateHz: OTHER_RATE,
+				gainMode: "agc",
+				gain: P,
+			})
+			await disconnected
+			await vi.advanceTimersByTimeAsync(calculateBackoffDelay(1))
+			const res = await answer
+			expect(res.json()).toMatchObject({
+				usable: true,
+				notApplied: [],
+				gainMode: "agc",
+				gain: P,
+			})
+			expect(await gainFrames(h)).toEqual([
+				[SET_GAIN, P],
+				[SET_GAIN_MODE, 0],
+			])
+		})
+
+		const cases: Array<{
+			mode: Mode
+			gain: boolean
+			inPlace: InPlace
+			rate: boolean
+		}> = []
+		for (const mode of ["agc", "manual", undefined] as const)
+			for (const gain of [true, false])
+				for (const inPlace of [
+					"no",
+					"configured",
+					"configured mode",
+					"tuned",
+				] as const)
+					for (const rate of [true, false])
+						cases.push({ mode, gain, inPlace, rate })
+
+		function configFor(mode: Mode, inPlace: InPlace): SourceTunerConfig {
+			if (mode === "agc") return { gainMode: "agc" }
+			return {
+				gainMode: "manual",
+				gainDb: inPlace === "configured" ? 44.5 : 20,
+			}
+		}
+
+		function priorTune(
+			mode: Mode,
+			gain: boolean,
+			inPlace: InPlace,
+		): Record<string, unknown> | undefined {
+			if (inPlace === "tuned")
+				return {
+					...(mode !== undefined ? { gainMode: mode } : {}),
+					...(gain || mode === undefined ? { gain: G } : {}),
+				}
+			if (inPlace === "no") {
+				if (mode === "agc") return { gainMode: "manual", gain: P }
+				if (mode === "manual") return { gainMode: "agc" }
+				return gain ? { gainMode: "manual", gain: P } : undefined
+			}
+			return undefined
+		}
+
+		it.each(cases)(
+			"mode $mode, gain $gain, in place $inPlace, rate change $rate: applied, and the replay agrees with the state",
+			async ({ mode, gain, inPlace, rate }) => {
+				const h = await setup(
+					inPlace.startsWith("configured")
+						? { tuner: configFor(mode, inPlace) }
+						: {},
+				)
+				if (inPlace.startsWith("configured"))
+					await until(() => h.frames.some(f => f.cmd === SET_GAIN_MODE))
+				const prior = priorTune(mode, gain, inPlace)
+				if (prior !== undefined)
+					expect((await h.post(prior)).json().notApplied).toEqual([])
+				const before = h.read()
+				const body = {
+					frequencyHz: TUNE_HZ,
+					...(rate ? { sampleRateHz: OTHER_RATE } : {}),
+					...(mode !== undefined ? { gainMode: mode } : {}),
+					...(gain ? { gain: G } : {}),
+				}
+				h.fakeTime()
+				let res: Awaited<ReturnType<typeof h.post>>
+				if (rate) {
+					const disconnected = event(h.manager, "disconnected")
+					const answer = h.post(body)
+					await disconnected
+					await vi.advanceTimersByTimeAsync(calculateBackoffDelay(1))
+					res = await answer
+				} else {
+					res = await h.post(body)
+					await reconnect(h)
+				}
+				expect(res.statusCode).toBe(200)
+				expect(res.json()).toMatchObject({ usable: true, notApplied: [] })
+
+				const asked = (state: TunerState) => {
+					const unknown = state.unknownFields ?? []
+					if (mode !== undefined) {
+						expect(state.gainMode).toBe(mode)
+						expect(unknown).not.toContain("gainMode")
+					}
+					if (gain) {
+						expect(state.gain).toBe(G)
+						expect(unknown).not.toContain("gain")
+					}
+				}
+				// Nothing of the gain pair written: what was known before stays known (a configured
+				// gain is never dropped).
+				const wroteNothing =
+					inPlace === "tuned" ||
+					(inPlace.startsWith("configured") && !gain) ||
+					(inPlace === "configured" && mode !== "agc")
+				const kept = (state: TunerState) => {
+					if (!wroteNothing) return
+					for (const field of ["gainMode", "gain"] as const) {
+						if ((before.unknownFields ?? []).includes(field)) continue
+						if (field === "gain" && before.gainMode === "agc") continue
+						expect(state.unknownFields ?? []).not.toContain(field)
+						expect(state[field]).toBe(before[field])
+					}
+				}
+				for (let round = 0; round < 2; round++) {
+					if (round === 1) await reconnect(h)
+					const frames = await gainFrames(h)
+					const state = h.read()
+					asked(state)
+					kept(state)
+					expectReplayAgrees(state, frames)
+				}
+			},
+		)
+	})
+
+	it("names the key list for an unknown body field, before the at-least-one rule, and writes nothing", async () => {
+		const h = await setup()
+		const before = h.frames.length
+		const keys =
+			"only the fields sampleRateHz, frequencyHz, gainMode, gain, restoreAfterS, preempt"
+		for (const body of [
+			{ gainTenthsDb: 445 },
+			{ frequencyHz: TUNE_HZ, gainTenthsDb: 445 },
+		]) {
+			const res = await h.post(body)
+			expect(res.statusCode).toBe(400)
+			expect(res.json()).toEqual({
+				error: "ValidationError",
+				code: "VALIDATION_ERROR",
+				message: `Invalid request body: ${keys}`,
+				fields: [{ field: "body", expected: keys }],
+			})
+			expect(res.body).not.toContain("gainTenthsDb")
+		}
+		// an empty body still answers the at-least-one rule
+		expect((await h.post({})).json().fields[0].expected).toMatch(
+			/^at least one of/,
+		)
+		expect(h.frames.length).toBe(before)
 	})
 
 	it("needs no reconnect and answers at once without a rate change", async () => {
@@ -2939,4 +3425,36 @@ describe("POST /tune through the real ApiServer", () => {
 		const free = await tune({ frequencyHz: OTHER_HZ })
 		expect(free.json().restore.cancelledBy.job.jobName).toBe("Night sweep")
 	})
+})
+
+describe("identify's details.next through this route", () => {
+	const window = { sampleRateHz: START_RATE }
+
+	it.each([
+		["the lower edge", 24_000_000],
+		["just above the lower edge", 24_050_000],
+		["mid band", 101_000_000],
+		["high in the band", 1_766_000_000],
+		["the top edge", 1_900_000_000],
+	])("%s: the call it names is accepted", async (_name, frequencyHz) => {
+		const h = await setup()
+		const next = identifyTargetNextStep(
+			"rtl",
+			{ frequencyHz },
+			window,
+			false,
+		) as { path: string; body: { frequencyHz: number } }
+		expect(next.path).toBe("/api/tuner/rtl/tune")
+		const res = await h.post(next.body)
+		expect(res.statusCode, res.body).toBe(200)
+	})
+
+	it.each([150_000, 23_999_999, 1_900_000_001])(
+		"%i Hz is outside the tuner: it names no call",
+		frequencyHz => {
+			expect(
+				identifyTargetNextStep("rtl", { frequencyHz }, window, false),
+			).not.toHaveProperty("method")
+		},
+	)
 })

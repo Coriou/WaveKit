@@ -34,6 +34,7 @@ function deviceFactsOf(
 	if (host === undefined) return "none"
 	if (host.available !== true) return "unreachable"
 	if (!freshAt(host.lastFetchedAt, now)) return "stale"
+	if (host.receiverFacts?.deviceProbe === "failed") return "probe-failed"
 	const found = host.receiverFacts?.deviceFound
 	if (found === true) return "present"
 	if (found === false) return "absent"
@@ -46,6 +47,8 @@ const NO_SAMPLES_TEXT: Readonly<Record<SourceDeviceFacts, string>> = {
 	// Only when rtl_tcp runs: absent and running disagree, so neither is claimed.
 	absent: "connected with no IQ; the receiver's device state is inconsistent",
 	malformed: "connected with no IQ; the receiver did not state a device state",
+	"probe-failed":
+		"connected with no IQ; the receiver's USB check failed, so its device state is unknown",
 	stale:
 		"connected with no IQ; the receiver's facts are stale, so its device state is unknown",
 	unreachable:
@@ -57,6 +60,7 @@ const TEXT: Readonly<Record<Exclude<SourceVerdictCode, "no-samples">, string>> =
 	{
 		ok: "samples are flowing",
 		waiting: "connected; waiting for the first samples",
+		// An older host: its "no device" can also be a USB check that failed, so the text hedges.
 		"receiver-no-device":
 			"receiver reports no device; check USB and re-attach it if unplugged",
 		"receiver-not-running":
@@ -67,6 +71,13 @@ const TEXT: Readonly<Record<Exclude<SourceVerdictCode, "no-samples">, string>> =
 		"feed-error": "resuming the receiver feed failed; resume again to retry",
 		ended: "the recording has ended",
 	}
+
+/** `receiver-no-device` from a host whose USB check answered: an observed absence. */
+const DEVICE_ABSENCE_OBSERVED = "receiver has no device; re-attach USB"
+
+/** `receiver-not-running` from a host whose USB check failed: rtl_tcp's state does not depend on it. */
+const NOT_RUNNING_DEVICE_UNKNOWN =
+	"receiver's rtl_tcp is not running; its USB check failed, so its device state is unknown"
 
 /** One source's verdict. `host`: its poller status, undefined when none polls this source. */
 export function sourceVerdict(
@@ -90,9 +101,16 @@ export function sourceVerdict(
 	// A fresh, well-formed answer decides; `running` true with no device is a contradiction.
 	const running = host?.receiverFacts?.rtlTcpRunning
 	if (deviceFacts === "absent" && running !== true)
-		return done("receiver-no-device")
+		return host?.receiverFacts?.deviceProbe === "observed"
+			? { ...done("receiver-no-device"), message: DEVICE_ABSENCE_OBSERVED }
+			: done("receiver-no-device")
 	if (deviceFacts === "present" && running === false)
 		return done("receiver-not-running")
+	if (deviceFacts === "probe-failed" && running === false)
+		return {
+			...done("receiver-not-running"),
+			message: NOT_RUNNING_DEVICE_UNKNOWN,
+		}
 	if (activity === "disconnected") return done("disconnected")
 	if (activity === "waiting") return done("waiting")
 	return {

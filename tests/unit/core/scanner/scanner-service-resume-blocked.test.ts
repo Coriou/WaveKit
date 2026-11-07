@@ -27,9 +27,36 @@ const sweep = (priority = 50) => ({
 	resume: { autoAfterIdleMs: 30 },
 })
 
+/**
+ * The service's clock: real time, until `hold` stops it. While held the operator's idle check sees
+ * no time pass, however long the retune and the assertions after it take; `advance` moves it on and
+ * `release` lets it run on from there.
+ */
+function manualClock() {
+	let offset = 0
+	let held: number | null = null
+	const now = () => held ?? Date.now() + offset
+	return {
+		now,
+		hold: () => {
+			held = now()
+		},
+		advance: (ms: number) => {
+			if (held !== null) held += ms
+		},
+		release: () => {
+			if (held === null) return
+			offset = held - Date.now()
+			held = null
+		},
+	}
+}
+
 function setup(dir?: string) {
 	const live = { running: false, sourceId: "rtl", clientCount: 0 }
+	const clock = manualClock()
 	const h = serviceHarness({
+		now: clock.now,
 		...(dir !== undefined ? { dir } : {}),
 		patch: s => {
 			s.passive.enabled = false
@@ -56,28 +83,40 @@ function setup(dir?: string) {
 		await settled(h.service)
 		expect(done()).toBe(true)
 	}
-	return { h, live, holder, record, job, feedUntil }
+	/**
+	 * The operator retunes, the job pauses (preempted-operator), then a listener appears and the idle
+	 * check runs: resume-blocked. The clock holds from the retune until the listener is there, so the
+	 * check cannot run before it (autoAfterIdleMs 30), then moves 31 ms on.
+	 */
+	const blockByListener = async (id: string) => {
+		clock.hold()
+		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await settled(h.service)
+		expect(job(id)).toMatchObject({
+			state: "paused",
+			reason: "preempted-operator",
+		})
+		expect(h.decoders.isSourceHeld("rtl")).toBe(false)
+		live.running = true
+		live.clientCount = 1
+		clock.advance(31)
+		await settled(h.service)
+		await vi.waitFor(() => expect(job(id).reason).toBe("resume-blocked"), WAIT)
+		clock.release()
+	}
+	return { h, live, holder, record, job, feedUntil, blockByListener }
 }
 
 /** A sweep that has hopped at least once, then: retune, a listener appears, idle: paused(resume-blocked). */
 async function blocked(s: ReturnType<typeof setup>, priority = 50) {
-	const { h, live, job, feedUntil } = s
+	const { h, job, feedUntil, blockByListener } = s
 	await h.service.start()
 	const created = await h.service.createJob(sweep(priority))
 	const id = created.id
 	await feedUntil(() => job(id).state === "running")
 	const first = job(id).progress.hopIndex
 	await feedUntil(() => job(id).progress.hopIndex !== first)
-	h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
-	await settled(h.service)
-	expect(job(id)).toMatchObject({
-		state: "paused",
-		reason: "preempted-operator",
-	})
-	expect(h.decoders.isSourceHeld("rtl")).toBe(false)
-	live.running = true
-	live.clientCount = 1
-	await vi.waitFor(() => expect(job(id).reason).toBe("resume-blocked"), WAIT)
+	await blockByListener(id)
 	expect(job(id).state).toBe("paused")
 	expect(job(id).impact?.liveAudioClients).toBe(1)
 	return { id, before: job(id) }
@@ -153,7 +192,7 @@ describe("resume from paused(resume-blocked), service level", () => {
 
 	it("keeps the discoveries and hit statistics found before the pause", async () => {
 		const s = setup()
-		const { h, job, live, feedUntil } = s
+		const { h, job, feedUntil } = s
 		await h.service.start()
 		const { id } = await h.service.createJob({
 			...sweep(),
@@ -172,11 +211,7 @@ describe("resume from paused(resume-blocked), service level", () => {
 		const found = discovered()
 		expect(found.length).toBeGreaterThan(0)
 		const before = job(id)
-		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
-		await settled(h.service)
-		live.running = true
-		live.clientCount = 1
-		await vi.waitFor(() => expect(job(id).reason).toBe("resume-blocked"), WAIT)
+		await s.blockByListener(id)
 		await h.service.resumeJob(id, { takeover: true })
 		await settled(h.service)
 		expect(discovered()).toEqual(expect.arrayContaining(found))
@@ -569,18 +604,14 @@ describe("a blocked job across a restart", () => {
 
 	it("does not resume on boot, even with onBoot set", async () => {
 		const first = setup()
-		const { h: h1, job: job1, live, feedUntil } = first
+		const { h: h1, job: job1, feedUntil } = first
 		await h1.service.start()
 		const { id } = await h1.service.createJob({
 			...sweep(),
 			resume: { autoAfterIdleMs: 30, onBoot: true },
 		})
 		await feedUntil(() => job1(id).state === "running")
-		h1.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
-		await settled(h1.service)
-		live.running = true
-		live.clientCount = 1
-		await vi.waitFor(() => expect(job1(id).reason).toBe("resume-blocked"), WAIT)
+		await first.blockByListener(id)
 		await h1.service.stop()
 
 		const s = await restarted(h1.dir)

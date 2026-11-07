@@ -454,7 +454,7 @@ export const identifyBodySchema = {
 		},
 		exhaustive: { type: "boolean" },
 		record: { type: "boolean" },
-		// WG12: accepted only. The wait lands with lane ID.
+		// Stay waiting until a gated transmission (IdentifyRunner.waitStep); timeoutMs then counts from it.
 		waitUntilSignal: { type: "boolean" },
 		waitMs: {
 			type: "integer",

@@ -240,9 +240,15 @@ Each answer below is one read, no logs needed; every closed list is in `GET /api
   `web`, a core without access `unknown`.
 - **Why a source gives no samples:** `verdict` on `GET /api/sources`, its bare code as
   `sources[].verdict` here (absent when `ok`). `receiver-no-device` means fresh receiver facts say
-  so; `no-samples` claims no cause, and `deviceFacts` says why not.
+  so; `no-samples` claims no cause, and `deviceFacts` says why not (`probe-failed`: the receiver
+  answered, but its USB check failed, so the device may well be there).
 - **Why passive scanning is off:** `sources[].passive` here, `engines[].passive.reasonCode` on
-  `GET /api/scanner`.
+  `GET /api/scanner`; `engines[].lastPassiveStartFailure` when its job failed to start.
+- **Why a scan did not get the tuner back on its own:** `engines[].lastLeaseRefusal` on
+  `GET /api/scanner` (`kind`, `code`, `at`, `holderJobId` when known).
+- **Why the core is slow:** [`GET /api/diagnostics`](API.md#get-apidiagnostics): event-loop
+  delay, CPU by thread and open channels, one shared sample every 2 s, so poll it freely. Read
+  it twice: the first answer has no CPU window yet.
 - **Why a signal was not recorded:** `recorder` on `GET /api/scanner/discoveries/:id`.
 - **What a sweep was allowed to disturb:** `impact` and `consentedImpact` on the job.
 
@@ -353,6 +359,10 @@ Quiet or broken: `listening` is quiet (running, nothing decodable), even with `h
 and sparse output. `source-unavailable` with `input: none` is broken (running, no input); `failed`
 is a failing process ([table](API.md#get-apidecoderssummary)).
 
+For a failing decoder, `lastError` on `GET /api/decoders/:id` gives the cause, kept across
+automatic restarts, and [`GET /api/decoders/:id/log?lines=50`](API.md#get-apidecodersidlog) its
+recent output. That output is raw and can contain decoded data, so treat it like Activity rows.
+
 ## Read activity
 
 ```sh
@@ -392,6 +402,111 @@ while the request is admitted answers 409 `IQ_CAPTURE_SOURCE_CHANGED` (retry); a
 answers 507 ([IQ captures](API.md#named-iq-captures)). For a one-off window streamed
 straight to you without storing it, use the
 [IQ snapshot](API.md#current-window-iq-snapshot).
+
+## Is that DMR at this frequency?
+
+`POST /api/scanner/identify` answers without moving anything: it never retunes and never moves live
+audio. Ask, then poll the job until it has ended:
+
+`bandwidthHz` is the width of the channel you mean, 12500 for DMR. Without it the match reaches only 1 kHz,
+and a signal a little off its nominal frequency is not on target.
+
+```sh
+curl --fail-with-body --header "$AUTH" --header "Content-Type: application/json" \
+  --data '{"sourceId":"rtl","target":{"frequencyHz":446100000,"bandwidthHz":12500},"protocols":["dmr"]}' \
+  "$API_ORIGIN/api/scanner/identify"
+curl --fail-with-body --header "$AUTH" "$API_ORIGIN/api/scanner/jobs/<id>"
+```
+
+**201** started a job. **200** means a running job already asks this, and you have that job: same
+source, the same `frequencyHz`, the same `max(1 kHz, bw/2)`, your `protocols` contained in its own,
+asking no more than it does, and with at least 90 % of the wait you asked for still left (a job already
+running trials on the signal joins too). A request at another frequency, however close, gets its own job
+and its own answer, and so does a plain request while a `waitUntilSignal` job runs. Repeating a 15 s request
+joins for its first 1.5 s; later it starts a new job, whose runs wait up to 3 s for the probe slot if another
+job holds it, then answer `could-not-test` (`budget`). A finished job is never reused.
+
+Read `identify.targets[0].verdict` once the target is final. Say only what it says:
+
+| `verdict.code`              | Say                                                                        |
+| --------------------------- | -------------------------------------------------------------------------- |
+| `decoded`                   | It is `verdict.protocol`, which may not be the protocol you asked about    |
+| `heard-digital-unconfirmed` | Possibly `verdict.protocol`: a lone sync or one decode, not a confirmation |
+| `undecodable`               | Something is there, and the trials decoded nothing                         |
+| `nothing`                   | The receiver kept listening, and no signal came within `timeoutMs`         |
+| `could-not-test`            | No answer. `verdict.why` says why; do not read it as "not DMR"             |
+
+`nothing` needs proof of all three: IQ blocks kept arriving up to the deadline, the level at the target
+stayed below the block threshold, and no live track sat within 12.5 kHz. A pause in the blocks is forgiven
+only once 40 blocks have flowed again without a pause, over at least 2 s and with at least 2 s of samples, by
+the deadline. The level is read over the inner part of the tolerance (the tolerance less one spectrum bin),
+so the skirt of a busy neighbour one channel away, with no live track, no longer reads as a level at the
+target. A live track within 12.5 kHz still answers `signal-nearby`. Otherwise it is `could-not-test`:
+
+- `no-samples`: the blocks stopped, or nothing measured the target. The receiver may be down even though
+  the source reads connected, as with a dongle pulled behind `rtl_tcp`; check it before you ask again. A
+  busy core that holds the blocks back for 500 ms counts as a pause too, even when every sample arrives
+  afterwards: the sample count also runs over samples the core dropped, so it cannot prove none were lost.
+  If the receiver is fine, ask again.
+- `signal-nearby`: something is there that your target did not resolve. `result.nearbyHz` is the centre
+  of a live track when one is within 12.5 kHz or holds the level; otherwise it is the strongest spectrum
+  bin, where the energy is but not necessarily a channel. Ask again with `bandwidthHz` wide enough to
+  reach it, or at the track's frequency.
+
+`verdict.analogHeard: true` means live audio heard a transmission at the target. Beside
+`heard-digital-unconfirmed` it matters: a lone sync over voice is usually the voice, so say "voice, with a
+possible digital sync", not "possibly DMR".
+
+For digital voice (DMR, P25, NXDN, YSF, D-STAR, dPMR), `decoded` needs two matching decodes 2 s to 5 min
+apart, so a continuous transmission takes about 2.5 s from its first decode, and a single short burst with
+no earlier match stays `heard-digital-unconfirmed`. A pager (POCSAG, FLEX) follows its own rule: one
+decode with a real message body is enough, and otherwise a capcode needs two decodes 2 s to 5 min apart on
+this signal, from this request or an earlier one. A capcode accepted earlier counts on one decode only while
+its last counted decode is at most 5 min old; past that it needs a fresh pair, as digital voice does.
+POCSAG addresses 0 to 7 (what a stuck slicer prints) count only after 30 s without any of them within one
+probe, also once accepted; two separate probes can still pair their first decodes (a known limit). The verdict does not say which of these cases applies, so say "it is POCSAG, capcode N", not
+"two decodes just now".
+The lists are in `GET /api/enums` (`scanner.identifyVerdictCodes`, `scanner.identifyVerdictWhy`).
+
+`verdict.confirmedAcrossJobs: true` on a `decoded` means this request heard one burst and the match came
+earlier: a matching decode 2 s to 5 min ago on this signal. That earlier decode may be another request's,
+or a scan's. Say "it was DMR on this signal in the last 5 minutes and this burst matches", not "two
+decodes just now". It is set for dsd-fme protocols (DMR, P25, NXDN, YSF, D-STAR, dPMR) on a live probe run;
+a decode from an ambient decoder or a pager does not set it.
+
+An older match does not count, even for an identity accepted long ago. A DMR colour code has 16 values, so
+one false line matches an accepted value by luck 1 time in 16; with no limit on age, a channel that carried
+DMR last month would read `decoded` for 1 in 16 false lines over voice. Past 5 min the request needs its own
+two decodes, and its run waits for them; one burst alone is `heard-digital-unconfirmed`.
+
+A signal that comes and goes: send `"waitUntilSignal": true`, with `waitMs` for how long.
+
+**When it answers 409**, `details.next` is the call to make, in fixed text:
+
+- `OUT_OF_WINDOW`: the frequency is outside the tuned window (`details.window`). `next` is a
+  `POST /api/tuner/:sourceId/tune` with a `frequencyHz` that puts the target and its `bandwidthHz` inside
+  the window, off the DC spike. It moves the receiver for everyone, so decide that first; then ask again.
+  If no centre fits at this sample rate, or the target is outside the tuner's 24 to 1900 MHz, `next` has
+  only `effect`, saying so: no `method`, no call to make.
+- `SCANNER_SOURCE_BUSY`: a sweep holds the tuner, and identify needs a still window. `next` adds
+  `preempt: true`. That pauses the job (it fails if it was still starting) and no restore comes; read
+  `preempted.autoAfterIdleMs` in the answer, because `null` means it stays paused until someone calls
+  `POST /api/scanner/jobs/:id/resume`. See [When a scan holds the tuner](#when-a-scan-holds-the-tuner).
+  With `details.reason: "relay"` there is no `next`: a relay client has the tuner.
+- `SCANNER_IDENTIFY_BUSY`: 8 identify jobs are running on this source, and a request that joins one does not
+  count. `next.jobs` lists them, each with its `path`. Read one until it ends, or cancel it with
+  `POST <path>/cancel`; then ask again.
+
+**What it costs.** Each live probe run is one offset probe, 0.5 core of the 1-core `cpuBudgetCores`
+by default, one at a time; ambient and live-audio trials start no probe, they read what already runs. `timeoutMs` (default 15 s, at most 120 s) bounds the wait for a signal, not the trials.
+A DMR trial lasts about 2.2 s on silence and at most about 5.3 s after a first decode. Naming
+`protocols` keeps it to the trials you need; without it every plausible decoder takes its turn.
+
+**What it does to the rest.** Its probes preempt scan and passive probes at once (priority 101); they come
+back by themselves. For a point target with named `protocols` that time is short. `{"all":true}` is not: up
+to 16 targets x 4 runs x 5.28 s is about 338 s. A sweep blocks it (409 above), and a retune
+that moves the window off the target ends it as `could-not-test` with `why: "window-moved"`.
+`trials[].transport` says which path each trial took; this core runs every live trial as `offset`.
 
 ## Read a 400
 

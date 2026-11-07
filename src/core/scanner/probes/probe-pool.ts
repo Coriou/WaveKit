@@ -58,9 +58,12 @@ import {
 } from "./confirm/double-match.js"
 import { interpretDirewolf } from "./confirm/direwolf.js"
 import {
+	identityValue,
 	interpretDsdFme,
 	guardDsdFmeEvidence,
+	linkProtocol,
 	toDsdFmeScannerEvent,
+	type DsdFmeDecodeEvidence,
 	type DsdFmeScannerEvent,
 } from "./confirm/dsd-fme.js"
 import { interpretMultimon, PocsagLowRun } from "./confirm/multimon.js"
@@ -1819,7 +1822,20 @@ export class ProbePool extends EventEmitter {
 				if (this.isStopping(rec)) return
 				this.markOutput(rec)
 				if (this.isStopping(rec)) return
-				this.deliver(rec, interpretDsdFme({ kind: "link", line }, rec.interp))
+				const evs = interpretDsdFme({ kind: "link", line }, rec.interp)
+				const clean =
+					line.verified === true &&
+					line.crcErr === false &&
+					(line.fecErrs ?? 0) === 0
+				if (clean)
+					this.reportUnpaired(
+						rec,
+						linkProtocol(line.protocol, rec.interp),
+						evs,
+						identityValue(line),
+					)
+				if (this.isStopping(rec)) return
+				this.deliver(rec, evs)
 			}
 			rec.detach.push(() => {
 				emitter.off("link", onLink)
@@ -2134,8 +2150,18 @@ export class ProbePool extends EventEmitter {
 				return
 			}
 			case "multimon-ng": {
-				if (rec.capcodes)
-					this.deliver(rec, rec.capcodes.interpret(out, this.now()))
+				if (rec.capcodes) {
+					const evs = rec.capcodes.interpret(out, this.now())
+					const capcode = multimonCapcode(out)
+					if (capcode !== null)
+						this.reportUnpaired(
+							rec,
+							capcode.startsWith("flex:") ? "flex" : "pocsag",
+							evs,
+						)
+					if (this.isStopping(rec)) return
+					this.deliver(rec, evs)
+				}
 				return
 			}
 			case "direwolf":
@@ -2188,6 +2214,36 @@ export class ProbePool extends EventEmitter {
 		)
 	}
 
+	/**
+	 * A decode the interpreter holds for its pair yields no evidence, so without this nobody could
+	 * tell it from silence. Tells listeners (identify) a live decode awaits its second occurrence,
+	 * with the value it pairs on when known. A line of a protocol this mode does not cover says
+	 * nothing about the protocol under test (an NXDN line in a DMR `auto` run), so it is not reported.
+	 * A listener failure is logged and never blocks the output.
+	 */
+	private reportUnpaired(
+		rec: ProbeRecord,
+		protocol: ScannerProtocol,
+		evs: readonly DecodeEvidence[],
+		value?: string,
+	): void {
+		if (
+			rec.transport.kind === "replay" ||
+			rec.epochEndedAt !== null ||
+			!rec.mode.covers.includes(protocol) ||
+			evs.some(ev => ev.identity !== undefined)
+		)
+			return
+		try {
+			this.emit("unpaired-decode", rec.probeId, rec.req, protocol, value)
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err, probeId: rec.probeId },
+				"Unpaired-decode listener failed",
+			)
+		}
+	}
+
 	private trackCall(
 		rec: ProbeRecord,
 		ev: DsdFmeScannerEvent,
@@ -2238,7 +2294,11 @@ export class ProbePool extends EventEmitter {
 				held.push(ev)
 				continue
 			}
-			this.emit("evidence", rec.probeId, rec.req, ev)
+			// The identity's earlier age is for identify's verdict alone; the guard kept it out of `ev`.
+			const { acceptedAgeMs } = raw as DsdFmeDecodeEvidence
+			if (acceptedAgeMs === undefined)
+				this.emit("evidence", rec.probeId, rec.req, ev)
+			else this.emit("evidence", rec.probeId, rec.req, ev, acceptedAgeMs)
 		}
 	}
 }
