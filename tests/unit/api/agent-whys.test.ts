@@ -218,6 +218,27 @@ async function plainServer(
 	return server.getApp()
 }
 
+describe("GET /api/diagnostics access", () => {
+	it("refuses a caller without a credential and answers a machine token", async () => {
+		const env = await protectedServer(realTuner())
+		const refused = await env.app.inject({
+			url: "/api/diagnostics",
+			headers: { host },
+		})
+		expect(refused.statusCode).toBe(401)
+		const answered = await env.app.inject({
+			url: "/api/diagnostics",
+			headers: env.machine,
+		})
+		expect(answered.statusCode).toBe(200)
+		expect(answered.json()).toMatchObject({
+			containerCpuCores: null,
+			eventLoopDelay: null,
+			channels: null,
+		})
+	})
+})
+
 describe("GET /api/tuner lastChange", () => {
 	it("tells a machine-token tune from a browser session tune", async () => {
 		const env = await protectedServer(realTuner())

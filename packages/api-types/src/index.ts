@@ -51,4 +51,5 @@ export {
 } from "./station.js"
 export * from "./efficiency-budget.js"
 export * from "./agent-status.js"
+export * from "./diagnostics.js"
 export * from "./iq-captures.js"

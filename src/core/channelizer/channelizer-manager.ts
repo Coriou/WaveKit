@@ -1,3 +1,4 @@
+import type { DiagnosticsChannel } from "@wavekit/api-types"
 import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
@@ -27,6 +28,7 @@ import {
 	type RejectedEvent,
 } from "./protocol.js"
 import type {
+	ChannelFormat,
 	ChannelProvider,
 	ChannelRequestResult,
 	DecoderChannelRequest,
@@ -118,6 +120,13 @@ interface OpenChannel {
 	socket: Readable
 	stream: PassThrough
 	settlement?: SendClaim
+	/** What `openChannelRows` reports; nothing on the data path reads these. */
+	decoderId: string
+	centerHz: number
+	bandwidthHz: number
+	outputRateHz: number
+	format: ChannelFormat
+	filterTaps: number
 }
 type OpenRequest = Extract<ChannelizerRequest, { type: "open" }>
 type OpenReply = OpenedEvent | RejectedEvent
@@ -186,6 +195,8 @@ interface SourceChannelizer {
 	watchdogVerdict: ReturnType<typeof setImmediate> | undefined
 	detachFanout: () => void
 	settlement?: ProcessClaim
+	/** The channels of the last `stats` line (one per 5 s, replaced): at most one per open channel. */
+	lastStats?: Extract<ChannelizerEvent, { type: "stats" }>["channels"]
 }
 
 const message = (err: unknown) =>
@@ -359,6 +370,38 @@ export class ChannelizerManager
 		return this.generations.get(sourceId) ?? 0
 	}
 
+	/** Every open channel, for GET /api/diagnostics: O(open channels), no process or socket call. */
+	openChannelRows(): DiagnosticsChannel[] {
+		const rows: DiagnosticsChannel[] = []
+		for (const s of this.active.values()) {
+			const stats = new Map(s.lastStats?.map(entry => [entry.id, entry]))
+			for (const channel of s.channels.values()) {
+				const reported = stats.get(channel.id)
+				rows.push({
+					id: channel.id,
+					sourceId: s.sourceId,
+					decoderId: channel.decoderId,
+					generation: s.generation,
+					centerHz: channel.centerHz,
+					bandwidthHz: channel.bandwidthHz,
+					outputRateHz: channel.outputRateHz,
+					format: channel.format,
+					filterTaps: channel.filterTaps,
+					inputSampleRateHz: s.caps.sampleRate,
+					stats: reported
+						? {
+								outputSamples: reported.outputSamples,
+								droppedSamples: reported.droppedSamples,
+								saturatedSamples: reported.saturatedSamples,
+								queueHighWaterBytes: reported.queueHighWaterBytes,
+							}
+						: null,
+				})
+			}
+		}
+		return rows
+	}
+
 	/** Unexpected exits after `ready` within the current CRASH_WINDOW_MS. */
 	unexpectedExitCount(sourceId: string): number {
 		return this.recentCrashes(sourceId).length
@@ -475,6 +518,7 @@ export class ChannelizerManager
 						fail()
 						return
 					}
+					if (e.type === "retuned") ch.centerHz = centerHz
 					finish(e.type)
 				} else if (e.type === "closed" && e.id === channelId) fail()
 			}
@@ -969,6 +1013,12 @@ export class ChannelizerManager
 				...(ownedAttempt?.settlement
 					? { settlement: ownedAttempt.settlement }
 					: {}),
+				decoderId: ctx.decoderId,
+				centerHz: open.centerHz,
+				bandwidthHz: open.bandwidthHz,
+				outputRateHz: event.outputRateHz,
+				format: event.format,
+				filterTaps: event.filterTaps,
 			})
 			this.channelOwner.set(channelId, s.sourceId)
 			if (ownedAttempt?.settlement && s.settlement)
@@ -1510,6 +1560,7 @@ export class ChannelizerManager
 				break
 			}
 			case "stats":
+				s.lastStats = e.channels
 				// Task 35 parses this line.
 				this.log.info(
 					{
