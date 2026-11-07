@@ -8,6 +8,7 @@ pub mod design;
 pub mod disposal;
 mod dsp_pool;
 pub mod framing;
+pub mod input;
 pub mod iqcap;
 pub mod plan;
 mod preparation;

@@ -15,10 +15,8 @@ costs, engine utilization, main-thread event-loop utilization and delay, listene
 spans and host load. Run on an idle host and retain the JSON with the tested revision.
 
 `hotOverBusy` is (window + FFT + power + summary wire time) / worker busy time.
-`hotOverBusyWithFrameDb` adds per-frame dB conversion to that numerator, treating
-it as front-end power work. `stageFractionOfBusy.frameDb` gives that conversion's
-own share. Missing or non-finite measurements are reported as null. Compare both
-shares with utilization for requirement 9.3; these instructions give no verdict.
+Missing or non-finite measurements are reported as null. Compare that share with
+utilization for requirement 9.3; these instructions give no verdict.
 
 The opt-in channel gate bench is separate:
 

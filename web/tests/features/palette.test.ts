@@ -580,6 +580,53 @@ describe("palette: running rows", async () => {
 		}
 	}
 
+	it("Resume scan points at the scan row when it needs consent, and shows any other refusal", async () => {
+		const { ApiError } = await import("../../src/data/api-client.ts")
+		const refusal = (code: string, message: string, body: unknown) =>
+			new ApiError({
+				status: 409,
+				code,
+				message,
+				body,
+				method: "POST",
+				path: "/api/scanner/jobs/j1/resume",
+			})
+		const resumeRefusedWith = (error: Error) =>
+			runAction(
+				{
+					data: {
+						scanner: {
+							get: () => ({ sweep: { id: "j1" } }),
+							resumeJob: () => Promise.reject(error),
+						},
+					},
+				} as never,
+				{ kind: "scanJob", op: "resume" },
+				"Scan resumed",
+			)
+		expect(
+			await resumeRefusedWith(
+				refusal(
+					"SCANNER_TAKEOVER_REQUIRED",
+					"Resuming interrupts 1 live audio listener; resend with takeover: true",
+					{ details: { impact: { liveAudioClients: 1 } } },
+				),
+			),
+		).toEqual({
+			text: "Resume needs your OK: choose Resume in the scan row",
+			tone: "warn",
+		})
+		const down = await resumeRefusedWith(
+			refusal(
+				"SCANNER_SOURCE_DOWN",
+				"No data from the source: resume this job again once data returns",
+				{},
+			),
+		)
+		expect(down.tone).toBe("warn")
+		expect(down.text).toContain("once data returns")
+	})
+
 	it("sets the theme with Undo", async () => {
 		const before = themeStore.getState()
 		const f = fakes()
@@ -707,6 +754,12 @@ describe("palette: scan control", () => {
 		expect(resumeRow({ state: "running" })).toHaveLength(0)
 		// an operator pause keeps its own wording
 		expect(resumeRow({ reason: "operator" })[0]?.sub).toBe("Marine")
+	})
+
+	it("offers no Resume for the waits with no button in the scan row", () => {
+		expect(resumeRow({ reason: "source-down" })).toHaveLength(0)
+		expect(resumeRow({ reason: "preempted-job" })).toHaveLength(0)
+		expect(resumeRow({ reason: "resume-blocked" })).toHaveLength(1)
 	})
 })
 

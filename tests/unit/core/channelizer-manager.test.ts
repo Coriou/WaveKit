@@ -867,9 +867,9 @@ describe("ChannelizerManager", () => {
 			events.push(args)
 			order.push("invalidated")
 		})
-		sources.caps.set("rtl", caps(2_048_000, 163e6))
-		sources.emit("caps-changed", "rtl", caps(2_048_000, 163e6))
-		sources.emit("caps-changed", "rtl", caps(2_048_000, 163e6))
+		sources.caps.set("rtl", caps(2_400_000))
+		sources.emit("caps-changed", "rtl", caps(2_400_000))
+		sources.emit("caps-changed", "rtl", caps(2_400_000))
 		await vi.waitFor(() => expect(order).toContain("socket-closed"))
 		expect(events).toEqual([["rtl", 1, ["ais-g1"], "caps-changed"]])
 		expect(order[0]).toBe("invalidated")
@@ -877,12 +877,7 @@ describe("ChannelizerManager", () => {
 		expect(released).toContain("rtl")
 		// Feature: core-channelizer, Property 9: Generation stamping
 		// Validates: addendum §4, §12.9
-		const b = await m.requestChannel(
-			"rtl",
-			"ais",
-			req(163e6),
-			caps(2_048_000, 163e6),
-		)
+		const b = await m.requestChannel("rtl", "ais", req(), caps(2_400_000))
 		expect(b.ok && b.generation).toBe(2)
 		if (b.ok) expect(b.channelId).toBe("ais-g2")
 	})

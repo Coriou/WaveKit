@@ -36,6 +36,7 @@ function setup(initial: LiveAudioStatus, credentials = false) {
 		load: vi.fn(() => Promise.resolve()),
 		start: vi.fn(() => Promise.resolve()),
 		stop: vi.fn(() => Promise.resolve()),
+		readAutoRoute: vi.fn(() => Promise.resolve(null)),
 	} as unknown as LiveAudioStore
 	const calls: string[] = []
 	let events: PcmPlayerEvents | null = null
@@ -143,6 +144,8 @@ describe("ListenController (Web Audio path)", () => {
 			bufferedMs: 200,
 			underruns: 0,
 			droppedSamples: 0,
+			renderedMs: 0,
+			dryMs: 0,
 		})
 		expect(c.get().phase).toBe("playing")
 		events().onEnded("The audio stream ended")

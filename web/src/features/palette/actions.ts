@@ -4,7 +4,7 @@
 import type { LiveAudioConfig } from "@wavekit/api-types"
 
 import type { AppServices } from "../../app/services.ts"
-import { errorMessage } from "../../data/index.ts"
+import { errorMessage, takeoverImpact } from "../../data/index.ts"
 import { shellStore } from "../../shell/store.ts"
 import { themeStore, type ThemePrefs } from "../../shell/theme.ts"
 import { requestActivitySearchFocus } from "../activity/focus.ts"
@@ -319,8 +319,17 @@ export async function runAction(
 				const job = s.data.scanner.get().sweep
 				if (!job) return { text: "No scan is running", tone: "warn" }
 				if (action.op === "pause") await s.data.scanner.pauseJob(job.id)
-				else if (action.op === "resume") await s.data.scanner.resumeJob(job.id)
-				else await s.data.scanner.cancelJob(job.id)
+				else if (action.op === "resume") {
+					try {
+						await s.data.scanner.resumeJob(job.id)
+					} catch (error) {
+						if (!takeoverImpact(error)) throw error
+						return {
+							text: "Resume needs your OK: choose Resume in the scan row",
+							tone: "warn",
+						}
+					}
+				} else await s.data.scanner.cancelJob(job.id)
 				return { text: done }
 			}
 			case "feed": {

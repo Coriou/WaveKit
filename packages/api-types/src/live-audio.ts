@@ -103,8 +103,12 @@ export const LIVE_AUDIO_AUTO_ROUTE_PREEMPT_MAX_MS =
 	LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS
 /** Backlog the route keeps when catching up on silence. */
 export const LIVE_AUDIO_AUTO_ROUTE_TARGET_MS = 60
-/** Most blocks one pacer tick emits: 5 × 20 ms = 100 ms. */
-export const LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS = 5
+/**
+ * Most blocks one pacer tick emits: 25 × 20 ms = 500 ms, the web jitter ring's maximum, so a stall up
+ * to 500 ms loses no time. 25 × 1 920 B = 48 000 B in one tick, half of a client's 96 000 B queue
+ * (48 000 samples/s × 2 B × 1 s), so one catch-up cannot trim a client that is reading.
+ */
+export const LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS = 25
 
 export type LiveAudioAutoRouteSource = "analog" | "digital" | "none"
 
@@ -122,7 +126,13 @@ export interface LiveAudioAutoRoute {
 	wavUrl: string
 	clientCount: number
 	digitalAvailable: boolean
+	/** Output blocks with any sample missing: one sample short counts like a whole block. */
 	underruns: number
+	/**
+	 * Output samples filled with zeros because the selected source ran short, cumulative. Time lost:
+	 * samples / LIVE_AUDIO_AUTO_ROUTE_RATE. Absent from older cores.
+	 */
+	zeroFilledSamples?: number
 	droppedMs: number
 	clockRebases: number
 	/** Selected source's backlog plus one block, ms. */

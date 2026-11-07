@@ -1,13 +1,16 @@
 // The Tuner's scan hold row (docs/web/canvas/Tuner.dc.html `hold`, DESIGN.md "Scanner UX review" and "Scanner second
-// pass"): the only status and control of a running sweep. Pure: what the row says and which buttons it has for a job.
+// pass"): the main status and control of a sweep (a paused scan's Resume is also in the plan and drawer footers,
+// ResumeScan.tsx, and the palette). Pure: what the row says and which buttons it has for a job.
 import type {
 	Discovery,
+	Impact,
 	ScanJob,
 	ScanJobSpec,
 	ScannerActivityEventData,
 	ScannerProgressEventData,
 } from "@wavekit/api-types"
 
+import { errorMessage } from "../../data/api-client.ts"
 import {
 	discoveryTitle,
 	formatWait,
@@ -15,7 +18,9 @@ import {
 	scanPhaseText,
 	sweepProgress,
 } from "../../data/scanner-format.ts"
+import { takeoverImpact } from "../../data/scanner-store.ts"
 import { formatMHz } from "../format.ts"
+import { decoderLabel } from "../tuned/signal.ts"
 
 export type HoldGlyph = "scan" | "eye" | "pause" | "plug" | "warn"
 
@@ -71,6 +76,7 @@ type HoldJob = Pick<
 	| "resumeAt"
 	| "resumeHeldBy"
 	| "preemptedBy"
+	| "impact"
 	| "progress"
 	| "plan"
 >
@@ -97,8 +103,10 @@ export interface HoldRowInput {
 	held: Discovery | null
 	/** The held frequency is already a saved frequency. */
 	saved: boolean
-	/** Resume was refused for lack of consent: the names of what it would pause. */
-	consent: readonly string[] | null
+	/** Resume was refused for lack of consent: what it would interrupt. */
+	consent: Impact | null
+	/** How the row names a decoder id (decoderNamer). */
+	decoderName: (id: string) => string
 	/** Read-only access: the row only reports. */
 	readOnly?: boolean
 }
@@ -156,6 +164,196 @@ const STOP: HoldAction = {
 	title: "End the scan. The receiver and decoders are yours again.",
 	kind: "ghost",
 	icon: "stop",
+}
+
+/**
+ * Who a takeover interrupts, for its button: listeners, decoders, other scans. Decoders of one type read "2 APRS", so a
+ * changed set shows. Empty: only untouchable tuner fields.
+ */
+export function consentNames(
+	impact: Impact,
+	decoderName: (id: string) => string,
+): string[] {
+	const count = (n: number, one: string, many: string) =>
+		n === 0 ? [] : [n === 1 ? `1 ${one}` : `${n} ${many}`]
+	const scans = impact.scannerJobs.length
+	const decoders = new Map<string, number>()
+	for (const id of new Set([
+		...impact.runningDecoders,
+		...impact.pinnedDecoders,
+	])) {
+		const label = decoderName(id)
+		decoders.set(label, (decoders.get(label) ?? 0) + 1)
+	}
+	return [
+		...count(impact.liveAudioClients, "listener", "listeners"),
+		...count(
+			impact.digitalVoiceListeners,
+			"digital voice listener",
+			"digital voice listeners",
+		),
+		...[...decoders].map(([label, n]) => (n === 1 ? label : `${n} ${label}`)),
+		...(scans === 0 ? [] : [scans === 1 ? "another scan" : `${scans} scans`]),
+	]
+}
+
+/** What a refused resume means here: ask who may be interrupted, or say why not. */
+export type ResumeRefusal =
+	| { kind: "consent"; impact: Impact }
+	| { kind: "error"; message: string }
+
+export function resumeRefusal(error: unknown): ResumeRefusal {
+	const impact = takeoverImpact(error)
+	return impact
+		? { kind: "consent", impact }
+		: { kind: "error", message: errorMessage(error) }
+}
+
+/** How the scan surfaces name a decoder id: its type's label, or the id for one not listed. */
+export function decoderNamer(
+	decoders: readonly { id: string; type: string }[],
+): (id: string) => string {
+	return id => decoderLabel(decoders.find(d => d.id === id)?.type ?? id)
+}
+
+/**
+ * What a click on Resume agrees to interrupt: the impact its button came from. A confirm's impact, or, on a scan blocked
+ * by someone new, the one the job reports. Null: a plain Resume that named nobody, so it agrees to nothing. A confirm
+ * whose impact names nobody is "Resume anyway", which agrees to the tuner fields the core reported.
+ */
+export function resumeApproved(
+	job: Pick<ScanJob, "reason" | "impact">,
+	consent: Impact | null,
+): Impact | null {
+	if (consent) return consent
+	if (job.reason !== "resume-blocked" || !job.impact) return null
+	return consentNames(job.impact, id => id).length > 0 ? job.impact : null
+}
+
+/** Whether a fresh impact holds nothing beyond the approved one, by the same facts as the core's own consent check. */
+function approvedCovers(approved: Impact | null, fresh: Impact): boolean {
+	if (approved === null) return false
+	const within = (ids: readonly string[], agreed: readonly string[]) =>
+		ids.every(id => agreed.includes(id))
+	return (
+		fresh.liveAudioClients <= approved.liveAudioClients &&
+		fresh.digitalVoiceListeners <= approved.digitalVoiceListeners &&
+		within(fresh.runningDecoders, approved.runningDecoders) &&
+		within(fresh.pinnedDecoders, approved.pinnedDecoders) &&
+		within(fresh.scannerJobs, approved.scannerJobs) &&
+		within(fresh.unrestorable, approved.unrestorable)
+	)
+}
+
+/** Tells a request's response apart from one superseded by a newer request or another job. */
+export interface LatestRequest {
+	/** Starts a request; the result says whether it is still the latest. */
+	begin(): () => boolean
+	/** Supersedes the request in flight, if any. */
+	cancel(): void
+}
+
+export function latestRequest(): LatestRequest {
+	let latest = 0
+	return {
+		begin() {
+			const mine = ++latest
+			return () => mine === latest
+		},
+		cancel() {
+			latest++
+		},
+	}
+}
+
+export type ResumeOutcome =
+	| { kind: "resumed" }
+	/** Ask first: this impact becomes what the next click approves. */
+	| { kind: "confirm"; impact: Impact }
+	| { kind: "error"; message: string }
+	/** A newer request or another job took over: show nothing. */
+	| { kind: "superseded" }
+
+export interface ResumeWithConsentInput {
+	jobId: string
+	/** The impact behind the clicked button (resumeApproved). */
+	approved: Impact | null
+	resume: (id: string, options: { takeover?: boolean }) => Promise<unknown>
+	/** From latestRequest().begin(). */
+	current: () => boolean
+}
+
+/**
+ * One click on Resume. A plain resume goes first, because it may no longer need anyone's consent. A consent refusal is
+ * answered with a takeover in the same click only if the core's fresh impact holds nothing the button's did not;
+ * otherwise the fresh impact goes back to the user as a confirm. The API has no takeover bound to an impact, so someone
+ * who arrives in the tiny window between the two requests is still interrupted unnamed.
+ */
+export async function resumeWithConsent({
+	jobId,
+	approved,
+	resume,
+	current,
+}: ResumeWithConsentInput): Promise<ResumeOutcome> {
+	const attempt = async (options: {
+		takeover?: boolean
+	}): Promise<ResumeRefusal | null> => {
+		try {
+			await resume(jobId, options)
+			return null
+		} catch (err) {
+			return resumeRefusal(err)
+		}
+	}
+	const answer = (refusal: ResumeRefusal | null): ResumeOutcome => {
+		if (!current()) return { kind: "superseded" }
+		if (refusal === null) return { kind: "resumed" }
+		return refusal.kind === "consent"
+			? { kind: "confirm", impact: refusal.impact }
+			: refusal
+	}
+	const plain = await attempt({})
+	if (
+		!current() ||
+		plain?.kind !== "consent" ||
+		!approvedCovers(approved, plain.impact)
+	)
+		return answer(plain)
+	return answer(await attempt({ takeover: true }))
+}
+
+/**
+ * Whether Resume can do anything. Two waits have no button: another scan holds the receiver (preempted-job, which
+ * carries on when that scan ends) or the source is gone (source-down, which waits for it: a dropout's return carries on,
+ * and a feed resumed plainly by hand moves it to resumed-without-retune, which has a button).
+ */
+export function scanResumable(job: Pick<ScanJob, "state" | "reason">): boolean {
+	return (
+		job.state === "paused" &&
+		job.reason !== "preempted-job" &&
+		job.reason !== "source-down"
+	)
+}
+
+/** The button that names who a takeover interrupts: a confirm, or Resume on a scan blocked by someone new. */
+export function consentAction(consent: readonly string[]): HoldAction {
+	const label =
+		consent.length === 0
+			? "Resume anyway"
+			: consent.length <= 2
+				? `Resume and interrupt ${consent.join(", ")}`
+				: `Resume and interrupt ${consent.slice(0, 2).join(", ")} +${consent.length - 2}`
+	return {
+		id: "takeover",
+		label,
+		aria: label,
+		title:
+			consent.length > 0
+				? `Resumes the scan. ${consent.join(", ")} stop until the scan ends.`
+				: "Resumes the scan and takes the receiver.",
+		kind: "primary",
+		icon: "play",
+	}
 }
 
 function splitLine(line: string): { title: string; detail: string } {
@@ -264,24 +462,8 @@ export function holdRowModel(input: HoldRowInput): HoldRowModel {
 				glyph = "warn"
 				title = "Resume needs your OK"
 				detail = ""
-				const names =
-					consent.length === 0
-						? "Resume anyway"
-						: consent.length <= 2
-							? `Resume and pause ${consent.join(", ")}`
-							: `Resume and pause ${consent.slice(0, 2).join(", ")} +${consent.length - 2}`
 				actions = [
-					{
-						id: "takeover",
-						label: names,
-						aria: names,
-						title:
-							consent.length > 0
-								? `Resumes the scan. ${consent.join(", ")} pause until the scan ends.`
-								: "Resumes the scan and takes the receiver.",
-						kind: "primary",
-						icon: "play",
-					},
+					consentAction(consentNames(consent, input.decoderName)),
 					STOP,
 				]
 				break
@@ -340,9 +522,31 @@ export function holdRowModel(input: HoldRowInput): HoldRowModel {
 				case "source-down":
 					if (job.reason === "source-down") glyph = "plug"
 					title = line.title
-					detail = line.detail
+					detail = `${line.detail} · ${job.reason === "source-down" ? "waits for it to return" : "carries on when it ends"}`
 					actions = [STOP]
 					break
+				case "resume-blocked": {
+					// Automatic resume found someone new on the receiver: the button names them, so one click is
+					// an informed one. It asks first if the core reports anyone it did not name.
+					title = "Scan paused"
+					detail = " · someone else is using the receiver"
+					const approved = resumeApproved(job, null)
+					actions = [
+						approved
+							? consentAction(consentNames(approved, input.decoderName))
+							: {
+									id: "resume",
+									label: "Resume",
+									aria: "Resume",
+									title:
+										"Carry on where it left off. Asks first if it interrupts anyone.",
+									kind: "primary",
+									icon: "play",
+								},
+						STOP,
+					]
+					break
+				}
 				default:
 					title = line.title === "Paused" ? "Scan paused" : line.title
 					detail = line.detail

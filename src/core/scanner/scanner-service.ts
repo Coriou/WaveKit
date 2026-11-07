@@ -179,7 +179,7 @@ import {
 	type NormalisedIdentify,
 } from "./identify.js"
 import { artefactOf, type ArtefactKind } from "../spectrum/artefacts.js"
-import { isTerminal } from "./job-state.js"
+import { isTerminal, type JobEvent } from "./job-state.js"
 import {
 	liveAudioListen,
 	type ListenResult,
@@ -1072,6 +1072,10 @@ export class ScannerService extends EventEmitter {
 	private readonly bandBurstRanges = createBandRangeCache()
 	private readonly persistedLeases = new Map<string, PersistedLease>()
 	private readonly bootResume = new Map<string, string[]>()
+	/** Boot resumes dispatched and not yet answered: a refusal for no data puts them back. */
+	private readonly bootResumeInFlight = new Map<string, string>()
+	/** Sources whose free lease could not be handed to a waiter for lack of data: done when data returns. */
+	private readonly handBackOwed = new Set<string>()
 	private readonly passiveDisabled = new Map<string, string>()
 	private readonly passiveStartFailures = new LastReasons<{
 		code: string
@@ -6943,37 +6947,81 @@ export class ScannerService extends EventEmitter {
 	): void => {
 		if (!this.started) return
 		const plain = info?.plainResume === true
-		const boot = new Set(plain ? (this.bootResume.get(sourceId) ?? []) : [])
+		const boot = new Set(plain ? this.pendingBootResumes(sourceId) : [])
 		for (const d of this.driversOn(sourceId)) {
 			const { record } = d
-			if (record.state !== "paused") continue
+			if (isTerminal(record.state)) continue
 			const hold = plain && record.spec.mode === "sweep"
+			const event: JobEvent = hold
+				? { type: "source-up", plain: true }
+				: { type: "source-up" }
 			const resumes =
-				record.reason === "source-down" ||
-				(hold &&
-					(record.reason === "preempted-operator" ||
-						record.reason === "preempted-relay" ||
-						record.reason === "preempted-job" ||
-						(record.reason === "core-restart" && boot.has(record.id))))
-			if (!resumes) continue
-			d.dispatch(
-				hold ? { type: "source-up", plain: true } : { type: "source-up" },
-			).catch((err: unknown) =>
+				record.state === "paused" &&
+				(record.reason === "source-down" ||
+					(hold &&
+						(record.reason === "preempted-operator" ||
+							record.reason === "preempted-relay" ||
+							record.reason === "preempted-job" ||
+							(record.reason === "core-restart" && boot.has(record.id)))))
+			if (!resumes) {
+				this.recheckSourceUp(d, event)
+				continue
+			}
+			d.dispatch(event).catch((err: unknown) =>
 				this.log.warn({ err, jobId: record.id }, "source-up failed"),
 			)
 		}
 		if (plain) this.holdBootResumes(sourceId)
 		if (!this.persistedLeases.has(sourceId)) this.runBootResumes(sourceId)
+		// arbitrate() waits for the holds dispatched above, and never rejects.
+		if (this.handBackOwed.delete(sourceId)) void this.arbitrate(sourceId)
 		this.onSourceAvailable(sourceId)
+	}
+
+	/**
+	 * A job's source-down can still be queued behind work in flight when the source returns, so it
+	 * looks running here and only lands afterwards. Nothing would send source-up again: send it once
+	 * the job has applied what is queued, unless the source dropped again meanwhile.
+	 */
+	private recheckSourceUp(d: JobDriver, event: JobEvent): void {
+		const { record } = d
+		d.idle()
+			.then(() => {
+				const missed =
+					this.started &&
+					record.state === "paused" &&
+					record.reason === "source-down" &&
+					this.arbiter.isConnected(record.spec.sourceId)
+				return missed ? d.dispatch(event) : undefined
+			})
+			.catch((err: unknown) => {
+				if (
+					err instanceof ScannerApiError &&
+					err.code === "SCANNER_INVALID_TRANSITION"
+				)
+					return
+				this.log.warn({ err, jobId: record.id }, "source-up recheck failed")
+			})
 	}
 
 	/** A plain resume: the source's pending boot resumes of sweeps wait for the operator (onSourceUp). */
 	private holdBootResumes(sourceId: string): void {
+		for (const [id, source] of this.bootResumeInFlight)
+			if (source === sourceId && this.jobs.get(id)?.spec.mode === "sweep")
+				this.bootResumeInFlight.delete(id)
 		const ids = this.bootResume.get(sourceId)
 		if (!ids) return
 		const rest = ids.filter(id => this.jobs.get(id)?.spec.mode !== "sweep")
 		if (rest.length > 0) this.bootResume.set(sourceId, rest)
 		else this.bootResume.delete(sourceId)
+	}
+
+	/** The source's boot resumes not yet applied: waiting, or dispatched and not yet answered. */
+	private pendingBootResumes(sourceId: string): string[] {
+		const pending = [...(this.bootResume.get(sourceId) ?? [])]
+		for (const [id, source] of this.bootResumeInFlight)
+			if (source === sourceId) pending.push(id)
+		return pending
 	}
 
 	/** Boot-time caps are absent until SourceManager.connect(): the source's passive job is (re)built then. */
@@ -7031,20 +7079,56 @@ export class ScannerService extends EventEmitter {
 
 	private runBootResumes(sourceId: string): void {
 		if (!this.started || !this.settings().enabled) return
+		// A recovery can settle after a new dropout: keep the list for the next source-up.
+		if (!this.arbiter.isConnected(sourceId)) return
 		const ids = this.bootResume.get(sourceId)
 		if (!ids) return
 		this.bootResume.delete(sourceId)
 		for (const id of ids) {
-			this.lifecycle(id, { type: "resume", takeover: false }).catch(
+			this.bootResumeInFlight.set(id, sourceId)
+			this.lifecycle(id, { type: "resume", takeover: false }).then(
+				() => {
+					this.bootResumeInFlight.delete(id)
+				},
 				(err: unknown) => {
-					this.leaseRefusals.set(
-						sourceId,
-						leaseRefusal("boot-resume", err, Date.now()),
+					// Gone already: a plain resume put this sweep on hold for the operator (holdBootResumes).
+					const wanted = this.bootResumeInFlight.delete(id)
+					if (
+						wanted &&
+						err instanceof ScannerApiError &&
+						err.code === "SCANNER_SOURCE_DOWN"
 					)
-					this.log.warn({ err, jobId: id }, "Boot resume refused")
+						this.requeueBootResume(sourceId, id)
+					else {
+						this.leaseRefusals.set(
+							sourceId,
+							leaseRefusal("boot-resume", err, Date.now()),
+						)
+						this.log.warn({ err, jobId: id }, "Boot resume refused")
+					}
 				},
 			)
 		}
+	}
+
+	/**
+	 * The source dropped between a boot resume's dispatch and its turn, so the job is still waiting and
+	 * the next source-up must find it. Each pass needs the source connected and each refusal needs it
+	 * disconnected, so this runs at most once per dropout.
+	 */
+	private requeueBootResume(sourceId: string, id: string): void {
+		const record = this.jobs.get(id)
+		if (
+			!this.started ||
+			record?.state !== "paused" ||
+			record.reason !== "core-restart"
+		)
+			return
+		const list = this.bootResume.get(sourceId) ?? []
+		if (!list.includes(id)) list.push(id)
+		this.bootResume.set(sourceId, list)
+		// Data can return before this refusal lands, and that source-up found nothing to run.
+		if (!this.persistedLeases.has(sourceId)) this.runBootResumes(sourceId)
 	}
 
 	private async onPersistLease(
@@ -7101,6 +7185,8 @@ export class ScannerService extends EventEmitter {
 			leaseAnalogSession: sourceId =>
 				this.deps.analogTrial?.leaseSession?.(sourceId),
 			autoResumeReady: () => this.autoResumeReady(record),
+			bootResumePending: () =>
+				this.pendingBootResumes(record.spec.sourceId).includes(record.id),
 			knownProtocols: this.knownProtocols,
 			arbiter: this.arbiter,
 			probes: this.probes,
@@ -7598,7 +7684,7 @@ export class ScannerService extends EventEmitter {
 				const holder = this.arbiter.holder(sourceId)
 				if (holder)
 					throw new ScannerApiError(
-						`Lease held by scanner job ${holder.jobId}`,
+						`Lease held by scanner job ${holder.jobId}; stop that job or wait for it to end, then resume. This job stays paused with its progress.`,
 						"SCANNER_SOURCE_BUSY",
 						409,
 						{ reason: "held", holderJobId: holder.jobId },
@@ -7619,7 +7705,7 @@ export class ScannerService extends EventEmitter {
 				)
 				if (best !== record.id)
 					throw new ScannerApiError(
-						`Scanner job ${best} waits for the lease with a better claim`,
+						`Scanner job ${best} waits for the lease with a better claim; stop it or wait for it, then resume. This job stays paused with its progress.`,
 						"SCANNER_SOURCE_BUSY",
 						409,
 						{ reason: "held", waiter: best },
@@ -7643,6 +7729,12 @@ export class ScannerService extends EventEmitter {
 		if (!this.started) return
 		await Promise.all(this.driversOn(sourceId).map(d => d.idle()))
 		if (this.arbiter.holder(sourceId)) return
+		// No data: a job handed the lease now would run with nothing to hop on. A narrowed run comes back
+		// on the next tick; any other is owed to the next source-up.
+		if (!this.arbiter.isConnected(sourceId)) {
+			if (!eligible) this.handBackOwed.add(sourceId)
+			return
+		}
 		const waiting = [...this.jobs.values()].filter(
 			j =>
 				j.spec.sourceId === sourceId &&
@@ -7669,11 +7761,23 @@ export class ScannerService extends EventEmitter {
 				),
 			})
 			.catch((err: unknown) => {
-				this.leaseRefusals.set(
-					sourceId,
-					leaseRefusal("hand-back", err, Date.now()),
-				)
-				this.log.warn({ err, jobId: best }, "Lease hand-back refused")
+				if (
+					!(err instanceof ScannerApiError) ||
+					err.code !== "SCANNER_SOURCE_DOWN"
+				) {
+					this.leaseRefusals.set(
+						sourceId,
+						leaseRefusal("hand-back", err, Date.now()),
+					)
+					this.log.warn({ err, jobId: best }, "Lease hand-back refused")
+					return
+				}
+				// The data stopped after the check above. A narrowed run comes back on the next tick. Data can
+				// return before this refusal lands, and that source-up owed nothing. Each pass needs the source
+				// connected and each refusal needs it disconnected, so this repeats at most once per dropout.
+				if (eligible) return
+				if (this.arbiter.isConnected(sourceId)) this.queueArbitration(sourceId)
+				else this.handBackOwed.add(sourceId)
 			})
 		this.updateMasks(sourceId)
 	}
@@ -7759,11 +7863,13 @@ export class ScannerService extends EventEmitter {
 		this.drivers.set(record.id, driver)
 		if (isTerminal(record.state)) return
 		// An explicit Stay-here choice survives restart, even with onBoot enabled, as does a sweep
-		// held after a plain resume (it hops again only on the operator's resume).
+		// held after a plain resume (it hops again only on the operator's resume) and a blocked one
+		// (its consent gate stays: core-restart has none, and an onBoot resume would pass it unasked).
 		if (
 			record.state === "paused" &&
 			(record.reason === "operator" ||
-				record.reason === "resumed-without-retune")
+				record.reason === "resumed-without-retune" ||
+				record.reason === "resume-blocked")
 		)
 			return
 		await driver
@@ -8094,7 +8200,8 @@ export class ScannerService extends EventEmitter {
 			(record.state === "paused" &&
 				(record.reason === "preempted-operator" ||
 					record.reason === "preempted-relay") &&
-				record.spec.resume.autoAfterIdleMs !== null)
+				record.spec.resume.autoAfterIdleMs !== null &&
+				this.arbiter.isConnected(sourceId))
 			? status
 			: { resumeAt: null, resumeHeldBy: null }
 	}

@@ -182,6 +182,22 @@ const metadataSchema = z
 	})
 	.strict()
 
+/**
+ * A plain valid Date in years 0 to 9999 prints the 24 characters `timestamp` asks for and parses
+ * back to itself. Any other year prints a sign and six digits, and a subclass, an own property or
+ * an invalid time gets null, so the Zod path decides those.
+ */
+function plainDateIso(value: object): string | null {
+	if (
+		Object.getPrototypeOf(value) !== Date.prototype ||
+		Reflect.ownKeys(value).length !== 0
+	)
+		return null
+	if (!Number.isFinite(Date.prototype.getTime.call(value))) return null
+	const iso = Date.prototype.toISOString.call(value)
+	return iso.length === 24 ? iso : null
+}
+
 function dateIso(value: unknown): string {
 	if (
 		value === null ||
@@ -190,6 +206,8 @@ function dateIso(value: unknown): string {
 		!types.isDate(value)
 	)
 		return invalidEnvelope()
+	const iso = plainDateIso(value)
+	if (iso !== null) return iso
 	const projected = projectDecodedData(value)
 	if (typeof projected !== "string" || !timestamp.safeParse(projected).success)
 		return invalidEnvelope()
@@ -205,7 +223,12 @@ const validatedBytes = new WeakMap<DecodeEnvelope, number>()
 function complete(metadata: unknown, decodedData: JsonValue): DecodeEnvelope {
 	const result = metadataSchema.safeParse(metadata)
 	if (!result.success) return invalidEnvelope()
-	const envelope = { ...result.data, decodedData }
+	return finish(result.data, decodedData)
+}
+
+/** The size check and bookkeeping for metadata that has passed the schema or its guards. */
+function finish(metadata: object, decodedData: JsonValue): DecodeEnvelope {
+	const envelope = { ...metadata, decodedData }
 	const bytes = Buffer.byteLength(JSON.stringify(envelope), "utf8")
 	if (bytes > MAX_ENVELOPE_BYTES) return invalidEnvelope()
 	// Safe projection removed undefined members; Zod's optional types remain wider.
@@ -268,33 +291,377 @@ interface EnvelopeBase {
 	aircraft?: unknown
 }
 
+/** Member order is the metadata schema's, so the stored JSON does not depend on the path taken. */
+function metadataFrom(
+	base: EnvelopeBase,
+	display: ParsedPresentation,
+): Record<string, unknown> {
+	return {
+		version: 1,
+		eventId: base.eventId,
+		producedAt: base.producedAt,
+		receivedAt: base.receivedAt,
+		decoderId: base.decoderId,
+		...(base.decoderType === undefined
+			? {}
+			: { decoderType: base.decoderType }),
+		outputType: base.outputType,
+		protocol: display.protocol ?? null,
+		category: display.category ?? "other",
+		entityKey: display.entityKey ?? null,
+		...(display.position === undefined ? {} : { position: display.position }),
+		title: display.title ?? null,
+		fields: display.fields ?? [],
+		provenance: base.provenance,
+		...(base.refs === undefined ? {} : { refs: base.refs }),
+		...(base.coalesced === undefined ? {} : { coalesced: base.coalesced }),
+		...(base.aircraft === undefined ? {} : { aircraft: base.aircraft }),
+	}
+}
+
 function assemble(
 	base: EnvelopeBase,
 	display: ParsedPresentation,
 	decodedData: JsonValue,
 ): DecodeEnvelope {
-	return complete(
-		{
-			version: 1,
-			eventId: base.eventId,
-			producedAt: base.producedAt,
-			receivedAt: base.receivedAt,
-			decoderId: base.decoderId,
-			...(base.decoderType === undefined
-				? {}
-				: { decoderType: base.decoderType }),
-			outputType: base.outputType,
-			protocol: display.protocol ?? null,
-			category: display.category ?? "other",
-			entityKey: display.entityKey ?? null,
-			...(display.position === undefined ? {} : { position: display.position }),
-			title: display.title ?? null,
-			fields: display.fields ?? [],
-			provenance: base.provenance,
-			...(base.refs === undefined ? {} : { refs: base.refs }),
-			...(base.coalesced === undefined ? {} : { coalesced: base.coalesced }),
-			...(base.aircraft === undefined ? {} : { aircraft: base.aircraft }),
-		},
+	return complete(metadataFrom(base, display), decodedData)
+}
+
+/*
+ * Structural guards for the metadata the core builds per decoder output. Each one either returns
+ * what the Zod schema of the same name would return, members in the schema's order, or undefined,
+ * and undefined sends the input to Zod. So a guard can only save the parse: it never accepts what
+ * the schemas refuse (tests/unit/core/activity/envelope-guard.test.ts). Inputs a guard leaves to Zod:
+ * anything but data properties on plain objects and arrays, undefined members below the top level,
+ * unknown members and -0, which `projectJson` rewrites to 0.
+ */
+const CONTROL_CHARACTERS = /[\x00-\x1f\x7f-\x9f]/
+const ENTITY_KEY = /^[a-z][a-z0-9-]*:[^:]+$/
+const CATEGORIES: ReadonlySet<unknown> = new Set([
+	"aircraft",
+	"marine",
+	"aviation-data",
+	"voice",
+	"paging",
+	"aprs",
+	"sensors",
+	"mesh",
+	"other",
+])
+const FREQUENCY_BASES: ReadonlySet<unknown> = new Set(["channel", "probe"])
+const TUNING_TRUSTS: ReadonlySet<unknown> = new Set([
+	"commanded",
+	"relay",
+	"unverified",
+])
+
+/** UTF-16 needs at most 3 UTF-8 bytes per code unit, so a short string skips the byte count. */
+function isText(value: unknown, max: number): value is string {
+	return (
+		typeof value === "string" &&
+		value.length >= 1 &&
+		(value.length * 3 <= max || Buffer.byteLength(value, "utf8") <= max) &&
+		!CONTROL_CHARACTERS.test(value)
+	)
+}
+
+function isFiniteNumber(value: unknown): value is number {
+	return (
+		typeof value === "number" && Number.isFinite(value) && !Object.is(value, -0)
+	)
+}
+
+/** The members of a plain object of data properties, or null; `allowed` is its strict shape. */
+function plainMembers(
+	value: unknown,
+	allowed: ReadonlySet<string>,
+): Record<string, unknown> | null {
+	if (value === null || typeof value !== "object" || types.isProxy(value))
+		return null
+	const prototype: unknown = Object.getPrototypeOf(value)
+	if (prototype !== Object.prototype && prototype !== null) return null
+	const members = value as Record<string, unknown>
+	for (const key of Reflect.ownKeys(value)) {
+		if (typeof key !== "string" || !allowed.has(key)) return null
+		const descriptor = Object.getOwnPropertyDescriptor(value, key)
+		if (
+			descriptor === undefined ||
+			!descriptor.enumerable ||
+			!("value" in descriptor) ||
+			descriptor.value === undefined
+		)
+			return null
+	}
+	return members
+}
+
+const PROVENANCE_KEYS: ReadonlySet<string> = new Set([
+	"sourceId",
+	"frequency",
+	"jobId",
+	"probeId",
+	"channelId",
+])
+const FREQUENCY_KEYS: ReadonlySet<string> = new Set([
+	"hz",
+	"basis",
+	"tuningTrust",
+])
+
+function guardProvenance(value: unknown): object | undefined {
+	const p = plainMembers(value, PROVENANCE_KEYS)
+	if (p === null) return undefined
+	const sourceId = p["sourceId"]
+	if (sourceId !== null && !isText(sourceId, 128)) return undefined
+	let frequency: object | null = null
+	if (p["frequency"] !== null) {
+		const f = plainMembers(p["frequency"], FREQUENCY_KEYS)
+		if (
+			f === null ||
+			!isFiniteNumber(f["hz"]) ||
+			f["hz"] <= 0 ||
+			f["hz"] > Number.MAX_SAFE_INTEGER ||
+			!FREQUENCY_BASES.has(f["basis"]) ||
+			!TUNING_TRUSTS.has(f["tuningTrust"])
+		)
+			return undefined
+		frequency = {
+			hz: f["hz"],
+			basis: f["basis"],
+			tuningTrust: f["tuningTrust"],
+		}
+	}
+	const jobId = p["jobId"]
+	const probeId = p["probeId"]
+	const channelId = p["channelId"]
+	if (
+		(jobId !== undefined && !isText(jobId, 128)) ||
+		(probeId !== undefined && !isText(probeId, 128)) ||
+		(channelId !== undefined && !isText(channelId, 128))
+	)
+		return undefined
+	return {
+		sourceId,
+		frequency,
+		...(jobId === undefined ? {} : { jobId }),
+		...(probeId === undefined ? {} : { probeId }),
+		...(channelId === undefined ? {} : { channelId }),
+	}
+}
+
+const REFS_KEYS: ReadonlySet<string> = new Set([
+	"callId",
+	"discoveryId",
+	"observationId",
+])
+
+function guardRefs(value: unknown): object | undefined {
+	const r = plainMembers(value, REFS_KEYS)
+	if (r === null) return undefined
+	const callId = r["callId"]
+	const discoveryId = r["discoveryId"]
+	const observationId = r["observationId"]
+	if (
+		(callId !== undefined && !isText(callId, 128)) ||
+		(discoveryId !== undefined && !isText(discoveryId, 128)) ||
+		(observationId !== undefined && !isText(observationId, 128))
+	)
+		return undefined
+	return {
+		...(callId === undefined ? {} : { callId }),
+		...(discoveryId === undefined ? {} : { discoveryId }),
+		...(observationId === undefined ? {} : { observationId }),
+	}
+}
+
+const FIELD_KEYS: ReadonlySet<string> = new Set([
+	"key",
+	"label",
+	"value",
+	"unit",
+])
+/** `fieldsSchema`'s member limit. */
+const FIELDS_MAX = 64
+const FIELD_STRING_BYTES = 32768
+
+function guardFields(value: unknown): object[] | undefined {
+	if (!Array.isArray(value) || types.isProxy(value)) return undefined
+	if (
+		Object.getPrototypeOf(value) !== Array.prototype ||
+		value.length > FIELDS_MAX ||
+		Reflect.ownKeys(value).length !== value.length + 1
+	)
+		return undefined
+	const out: object[] = []
+	const seen = new Set<string>()
+	// By descriptor and index: an element may be an accessor, and with a hole the key count above still
+	// matches one extra member, which may be an own Symbol.iterator. At most `FIELDS_MAX` lookups.
+	for (let i = 0; i < value.length; i++) {
+		const element = Object.getOwnPropertyDescriptor(value, i)
+		if (element === undefined || !element.enumerable || !("value" in element))
+			return undefined
+		const f = plainMembers(element.value, FIELD_KEYS)
+		if (f === null) return undefined
+		const key = f["key"]
+		const label = f["label"]
+		const v = f["value"]
+		const unit = f["unit"]
+		if (!isText(key, 128) || !isText(label, 128) || seen.has(key))
+			return undefined
+		seen.add(key)
+		if (typeof v === "string") {
+			if (
+				(v.length * 3 > FIELD_STRING_BYTES &&
+					Buffer.byteLength(v, "utf8") > FIELD_STRING_BYTES) ||
+				CONTROL_CHARACTERS.test(v)
+			)
+				return undefined
+		} else if (v !== null && typeof v !== "boolean" && !isFiniteNumber(v))
+			return undefined
+		if (unit !== undefined && !isText(unit, 32)) return undefined
+		out.push({
+			key,
+			label,
+			value: v,
+			...(unit === undefined ? {} : { unit }),
+		})
+	}
+	return out
+}
+
+const POSITION_KEYS: ReadonlySet<string> = new Set(["lat", "lon", "altM"])
+
+function guardPosition(value: unknown): object | undefined {
+	const p = plainMembers(value, POSITION_KEYS)
+	if (p === null) return undefined
+	const lat = p["lat"]
+	const lon = p["lon"]
+	const altM = p["altM"]
+	if (
+		!isFiniteNumber(lat) ||
+		lat < -90 ||
+		lat > 90 ||
+		!isFiniteNumber(lon) ||
+		lon < -180 ||
+		lon > 180 ||
+		(altM !== undefined && !isFiniteNumber(altM))
+	)
+		return undefined
+	return { lat, lon, ...(altM === undefined ? {} : { altM }) }
+}
+
+const PRESENTATION_KEYS: ReadonlySet<string> = new Set([
+	"entityKey",
+	"position",
+	"protocol",
+	"category",
+	"title",
+	"fields",
+])
+
+/** `presentationSchema`, or undefined to ask it. */
+export function guardPresentation(
+	value: unknown,
+): ParsedPresentation | undefined {
+	const p = plainMembers(value, PRESENTATION_KEYS)
+	if (p === null) return undefined
+	const entityKey = p["entityKey"]
+	if (
+		entityKey !== undefined &&
+		entityKey !== null &&
+		!(isText(entityKey, 128) && ENTITY_KEY.test(entityKey))
+	)
+		return undefined
+	const protocol = p["protocol"]
+	if (protocol !== undefined && protocol !== null && !isText(protocol, 64))
+		return undefined
+	const category = p["category"]
+	if (category !== undefined && !CATEGORIES.has(category)) return undefined
+	const title = p["title"]
+	if (title !== undefined && title !== null && !isText(title, 256))
+		return undefined
+	const position =
+		p["position"] === undefined ? undefined : guardPosition(p["position"])
+	if (p["position"] !== undefined && position === undefined) return undefined
+	const fields =
+		p["fields"] === undefined ? undefined : guardFields(p["fields"])
+	if (p["fields"] !== undefined && fields === undefined) return undefined
+	return {
+		...(entityKey === undefined ? {} : { entityKey }),
+		...(position === undefined ? {} : { position }),
+		...(protocol === undefined ? {} : { protocol }),
+		...(category === undefined ? {} : { category }),
+		...(title === undefined ? {} : { title }),
+		...(fields === undefined ? {} : { fields }),
+	} as ParsedPresentation
+}
+
+/**
+ * `createDecodeEnvelope` without a parse: every member the metadata schema reads has passed a guard
+ * above or `dateIso` (the size check still runs). Undefined leaves the call to the schemas. Top-level
+ * undefined members count as absent, as they do after `projectJson`.
+ */
+function guardedEnvelope(
+	producer: Record<string, unknown>,
+	context: Record<string, unknown>,
+	presentation: unknown,
+	decodedData: JsonValue,
+): DecodeEnvelope | undefined {
+	for (const key of Object.keys(producer))
+		if (
+			producer[key] !== undefined &&
+			key !== "timestamp" &&
+			key !== "decoder" &&
+			key !== "type"
+		)
+			return undefined
+	const decoder = producer["decoder"]
+	const outputType = producer["type"]
+	if (!isText(decoder, 128) || !isText(outputType, 64)) return undefined
+	for (const key of Object.keys(context))
+		if (
+			context[key] !== undefined &&
+			key !== "eventId" &&
+			key !== "receivedAt" &&
+			key !== "decoderId" &&
+			key !== "decoderType" &&
+			key !== "provenance" &&
+			key !== "refs"
+		)
+			return undefined
+	const eventId = context["eventId"]
+	const decoderType = context["decoderType"]
+	if (
+		!isText(eventId, 128) ||
+		context["decoderId"] !== decoder ||
+		(decoderType !== undefined && !isText(decoderType, 128))
+	)
+		return undefined
+	const provenance =
+		context["provenance"] === undefined
+			? { sourceId: null, frequency: null }
+			: guardProvenance(context["provenance"])
+	const refs =
+		context["refs"] === undefined ? undefined : guardRefs(context["refs"])
+	if (provenance === undefined) return undefined
+	if (context["refs"] !== undefined && refs === undefined) return undefined
+	const display =
+		presentation === undefined ? {} : guardPresentation(presentation)
+	if (display === undefined) return undefined
+	return finish(
+		metadataFrom(
+			{
+				eventId,
+				producedAt: producer["timestamp"] as string,
+				receivedAt: context["receivedAt"] as string,
+				decoderId: decoder,
+				decoderType,
+				outputType,
+				provenance,
+				refs,
+			},
+			display,
+		),
 		decodedData,
 	)
 }
@@ -314,41 +681,58 @@ export function createDecodeEnvelope(
 		const decodedData = projectDecodedData(producer["data"])
 		delete producer["data"]
 		delete producer["provenanceBinding"]
-		const parsedProducer = outputSchema.safeParse(
-			projectJson(producer, false, true),
-		)
-		const parsedContext = contextSchema.safeParse(
-			projectJson(metadata, false, true),
-		)
-		const parsedPresentation = presentationSchema.safeParse(
-			projectJson(presentation === undefined ? {} : presentation, false, true),
-		)
-		if (
-			!parsedProducer.success ||
-			!parsedContext.success ||
-			!parsedPresentation.success
-		)
-			return invalidEnvelope()
-		const origin = parsedProducer.data
-		const supplied = parsedContext.data
-		if (origin.decoder !== supplied.decoderId) return invalidEnvelope()
-		return assemble(
-			{
-				eventId: supplied.eventId,
-				producedAt: origin.timestamp,
-				receivedAt: supplied.receivedAt,
-				decoderId: supplied.decoderId,
-				decoderType: supplied.decoderType,
-				outputType: origin.type,
-				provenance: supplied.provenance ?? { sourceId: null, frequency: null },
-				refs: supplied.refs,
-			},
-			parsedPresentation.data,
+		const guarded = guardedEnvelope(
+			producer,
+			metadata,
+			presentation,
 			decodedData,
 		)
+		if (guarded !== undefined) return guarded
+		return parsedEnvelope(producer, metadata, presentation, decodedData)
 	} catch {
 		return invalidEnvelope()
 	}
+}
+
+/** Every input the guards leave undecided, and the reference they are tested against. */
+function parsedEnvelope(
+	producer: Record<string, unknown>,
+	metadata: Record<string, unknown>,
+	presentation: DecodePresentation | undefined,
+	decodedData: JsonValue,
+): DecodeEnvelope {
+	const parsedProducer = outputSchema.safeParse(
+		projectJson(producer, false, true),
+	)
+	const parsedContext = contextSchema.safeParse(
+		projectJson(metadata, false, true),
+	)
+	const parsedPresentation = presentationSchema.safeParse(
+		projectJson(presentation === undefined ? {} : presentation, false, true),
+	)
+	if (
+		!parsedProducer.success ||
+		!parsedContext.success ||
+		!parsedPresentation.success
+	)
+		return invalidEnvelope()
+	const origin = parsedProducer.data
+	const supplied = parsedContext.data
+	if (origin.decoder !== supplied.decoderId) return invalidEnvelope()
+	return assemble(
+		{
+			eventId: supplied.eventId,
+			producedAt: origin.timestamp,
+			receivedAt: supplied.receivedAt,
+			decoderId: supplied.decoderId,
+			decoderType: supplied.decoderType,
+			outputType: origin.type,
+			provenance: supplied.provenance ?? { sourceId: null, frequency: null },
+			refs: supplied.refs,
+		},
+		parsedPresentation.data,
+		decodedData,
+	)
 }
 
 /** Strict wire JSON only. Nested Dates are rejected; payload budgets match create. */
@@ -374,11 +758,14 @@ export function withPresentation(
 	presentation: DecodePresentation,
 ): DecodeEnvelope {
 	try {
-		const parsed = presentationSchema.safeParse(
-			projectJson(presentation, false, true),
-		)
-		if (!parsed.success) return invalidEnvelope()
-		const display = parsed.data
+		let display = guardPresentation(presentation)
+		if (display === undefined) {
+			const parsed = presentationSchema.safeParse(
+				projectJson(presentation, false, true),
+			)
+			if (!parsed.success) return invalidEnvelope()
+			display = parsed.data
+		}
 		const plainBytes = validatedBytes.get(envelope)
 		if (plainBytes !== undefined && isPlain(envelope)) {
 			// The metadata was validated when the plain envelope was built and the
@@ -517,3 +904,26 @@ function metadataOf(envelope: DecodeEnvelope): Record<string, unknown> {
 	const { decodedData: _data, ...metadata } = envelope
 	return metadata
 }
+
+/** Test seam: `createDecodeEnvelope` by the schemas alone, the reference for the guards. */
+export function createDecodeEnvelopeBySchema(
+	output: DecoderOutput,
+	context: DecodeEnvelopeContext,
+	presentation?: DecodePresentation,
+): DecodeEnvelope {
+	try {
+		const producer = ownRecord(output)
+		const metadata = ownRecord(context)
+		producer["timestamp"] = dateIso(producer["timestamp"])
+		metadata["receivedAt"] = dateIso(metadata["receivedAt"])
+		const decodedData = projectDecodedData(producer["data"])
+		delete producer["data"]
+		delete producer["provenanceBinding"]
+		return parsedEnvelope(producer, metadata, presentation, decodedData)
+	} catch {
+		return invalidEnvelope()
+	}
+}
+
+/** Test seam: the schema `guardPresentation` must agree with. */
+export const presentationSchemaForTests = presentationSchema

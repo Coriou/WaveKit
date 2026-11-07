@@ -36,6 +36,8 @@ interface OpenTrackView {
 interface TrackerView {
 	open: OpenTrackView[]
 	blockNo: number
+	/** This block's segments joined across a spur line. */
+	lineJoined: Segment[]
 }
 const view = (t: Tracker): TrackerView => t as unknown as TrackerView
 
@@ -373,10 +375,14 @@ function checkBlock(h: Harness, summary: BlockSummary): number {
 	const current = v.open.filter(t => t.lastOnBlock === v.blockNo)
 	let tracked = 0
 	for (const t of summary.tracks) {
-		const owner = current.find(
-			o =>
-				rfLow(o.lastSeg.startBin) === t.startHz &&
-				rfLow(o.lastSeg.endBin) === t.endHz,
+		// A track joined across a spur line holds the whole span and its frames carry the pieces; any
+		// other track's frame is its own segment, exactly.
+		const owner = current.find(o =>
+			v.lineJoined.includes(o.lastSeg)
+				? rfLow(o.lastSeg.startBin) <= t.startHz &&
+					rfLow(o.lastSeg.endBin) >= t.endHz
+				: rfLow(o.lastSeg.startBin) === t.startHz &&
+					rfLow(o.lastSeg.endBin) === t.endHz,
 		)
 		if (t.trackId === undefined) {
 			expect(owner).toBeUndefined()

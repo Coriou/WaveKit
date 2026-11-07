@@ -830,6 +830,9 @@ export class SpectrumService extends EventEmitter {
 			void engine.stop().catch(() => undefined)
 			throw err
 		}
+		// Always on, also without display clients: the scanner reads summary bins (PSD evidence,
+		// spectrum identify) and every block, occupancy reads summary tracks, and backfill and
+		// status read the ring. `frames` already skips the per-client build with no recipient.
 		engine.setSpectrumFeed(true)
 		this.errors.delete(sourceId)
 		this.entries.set(sourceId, entry)

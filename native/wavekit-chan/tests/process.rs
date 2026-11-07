@@ -146,6 +146,7 @@ fn serves_a_channel_and_exits_zero_at_eof() {
     let ready = p.next(5);
     assert_eq!(ready["type"], "ready");
     assert!(ready["pid"].as_u64().unwrap() > 0);
+    assert_eq!(ready["recenter"], true, "the capability the parent reads");
 
     p.send("not json");
     let e = p.next(5);
@@ -192,6 +193,131 @@ fn serves_a_channel_and_exits_zero_at_eof() {
         4_800 * 8,
         "the queue was drained to the client (A7)"
     );
+}
+
+/// The channel's bytes for `iq` written to stdin `chunk` bytes at a time, with `pause` between chunks.
+fn channel_bytes(iq: &[u8], chunk: usize, pause: Duration) -> Vec<u8> {
+    let mut p = Proc::spawn(7);
+    assert_eq!(p.next(7)["type"], "ready");
+    p.send(OPEN);
+    let opened = p.next(7);
+    assert_eq!(opened["type"], "opened", "{opened}");
+    let mut client = UnixStream::connect(opened["socket"].as_str().unwrap()).unwrap();
+    client.set_read_timeout(Some(WAIT)).unwrap();
+    let reader = thread::spawn(move || {
+        let mut out = Vec::new();
+        client.read_to_end(&mut out).unwrap();
+        out
+    });
+    let mut stdin = p.stdin.take().unwrap();
+    for c in iq.chunks(chunk) {
+        stdin.write_all(c).unwrap();
+        stdin.flush().unwrap();
+        thread::sleep(pause);
+    }
+    drop(stdin);
+    assert_eq!(p.wait_exit(), Some(0));
+    reader.join().unwrap()
+}
+
+#[test]
+fn recenter_moves_admission_on_the_running_process() {
+    let mut p = Proc::spawn(8);
+    let ready = p.next(8);
+    assert_eq!(ready["type"], "ready");
+    p.send(r#"{"v":1,"type":"recenter","centerHz":170000000,"atInputBytes":0}"#);
+    let moved = p.next(8);
+    assert_eq!(moved["type"], "recentered", "{moved}");
+    assert_eq!(moved["centerHz"], 170000000.0);
+    assert_eq!(moved["atInputBytes"], 0);
+    // The old air is outside the capture now; a line after it proves the order on the pipe.
+    p.send(OPEN);
+    assert_eq!(p.next(8)["reasonCode"], "channel-outside-capture");
+    p.send(r#"{"v":1,"type":"recenter","centerHz":162000000,"atInputBytes":0}"#);
+    assert_eq!(p.next(8)["type"], "recentered");
+    p.send(OPEN);
+    let opened = p.next(8);
+    assert_eq!(opened["type"], "opened", "{opened}");
+    assert_eq!(opened["generation"], 8);
+    p.send(r#"{"v":1,"type":"shutdown"}"#);
+    assert_eq!(p.next(8)["type"], "closed");
+    assert_eq!(p.wait_exit(), Some(0));
+}
+
+/// The bytes of channel `OPEN`, on the running process, for `iq` written to stdin after `lines` and the open.
+fn channel_bytes_after(lines: &[&str], iq: &[u8]) -> Vec<u8> {
+    let mut p = Proc::spawn(10);
+    assert_eq!(p.next(10)["type"], "ready");
+    for line in lines {
+        p.send(line);
+    }
+    p.send(OPEN);
+    // A move whose position the empty input has reached is answered before the open.
+    let mut opened = p.next(10);
+    while opened["type"] == "recentered" {
+        opened = p.next(10);
+    }
+    assert_eq!(opened["type"], "opened", "{opened}");
+    let mut client = UnixStream::connect(opened["socket"].as_str().unwrap()).unwrap();
+    client.set_read_timeout(Some(WAIT)).unwrap();
+    let reader = thread::spawn(move || {
+        let mut out = Vec::new();
+        client.read_to_end(&mut out).unwrap();
+        out
+    });
+    let mut stdin = p.stdin.take().unwrap();
+    stdin.write_all(iq).unwrap();
+    drop(stdin);
+    assert_eq!(p.wait_exit(), Some(0));
+    reader.join().unwrap()
+}
+
+// 250 ms at 2.048 Msps is 1 024 000 bytes. The channel is open before a byte of it arrives, so only the position in the
+// line can keep it out, and the bytes after it must match a channel that never saw it.
+#[test]
+fn queued_old_centre_iq_never_reaches_a_channel_opened_after_the_move() {
+    let old: Vec<u8> = (0..1_024_000u32).map(|k| (k * 13 % 251) as u8).collect();
+    let new: Vec<u8> = (0..2 * 102_400u32).map(|k| (k * 7 % 241) as u8).collect();
+    let settled = r#"{"v":1,"type":"recenter","centerHz":162000001,"atInputBytes":0}"#;
+    let expected = channel_bytes_after(&[settled], &new);
+    assert_eq!(expected.len(), 2_400 * 8);
+    let mut both = old.clone();
+    both.extend_from_slice(&new);
+    let line = r#"{"v":1,"type":"recenter","centerHz":162000001,"atInputBytes":1024000}"#;
+    assert_eq!(channel_bytes_after(&[line], &both), expected);
+    // Only old IQ arrived: nothing at all, not 12 000 samples.
+    assert!(channel_bytes_after(&[line], &old).is_empty());
+}
+
+#[test]
+fn a_process_with_a_demod_channel_refuses_a_move_with_an_event() {
+    let mut p = Proc::spawn(11);
+    assert_eq!(p.next(11)["type"], "ready");
+    p.send(r#"{"v":1,"type":"open","id":"d","kind":"demod","centerHz":162000000,"bandwidthHz":12500,"modulation":"nfm","format":"s16le","queueBytes":65536,"squelch":{"mode":"off"},"metrics":false}"#);
+    let opened = p.next(11);
+    assert_eq!(opened["type"], "opened", "{opened}");
+    p.send(r#"{"v":1,"type":"recenter","centerHz":170000000,"atInputBytes":0}"#);
+    let refused = p.next(11);
+    assert_eq!(
+        (refused["type"].as_str(), refused["reason"].as_str()),
+        (Some("recenter-refused"), Some("demod-channels")),
+        "{refused}"
+    );
+    p.send(r#"{"v":1,"type":"shutdown"}"#);
+    assert_eq!(p.next(11)["type"], "closed");
+    assert_eq!(p.wait_exit(), Some(0));
+}
+
+// Feature: core-channelizer, Property 4: Chunk-split independence (process)
+// Validates: addendum §12.4
+#[test]
+fn a_channels_bytes_do_not_depend_on_how_stdin_is_chunked() {
+    let iq: Vec<u8> = (0..2 * 102_400u32).map(|k| (k * 13 % 251) as u8).collect();
+    let whole = channel_bytes(&iq, iq.len(), Duration::ZERO);
+    assert_eq!(whole.len(), 2_400 * 8);
+    // Paced small chunks take the reader's waiting path, unpaced ones its backlog path.
+    assert_eq!(channel_bytes(&iq, 1_448, Duration::from_millis(1)), whole);
+    assert_eq!(channel_bytes(&iq, 4_099, Duration::ZERO), whole);
 }
 
 #[test]

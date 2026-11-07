@@ -1,0 +1,703 @@
+/**
+ * Offline spectrum worker profile (measurement only, never a CI gate).
+ *
+ *   node scripts/profile-spectrum-build.mjs
+ *   nice -n 10 node output/bench/profile-spectrum.mjs [--seconds 30] [--rate 2400000]
+ *     [--fft auto|<n>] [--overlap 0|0.5] [--feed on|off] [--mode stages|bare|proto]
+ *     [--iq <path.cu8>] [--json]
+ *
+ * Drives a real SpectrumPipeline (no worker thread) as fast as it will go with
+ * seeded synthetic CU8: Gaussian noise, CW and NFM carriers and Mode-S-like PPM
+ * bursts. No socket, no state dir, nothing written.
+ *
+ * Modes:
+ * - `stages`: wraps the prototype methods of every pipeline stage in the harness
+ *   (self time on a call stack, so nested stages are not double counted) and turns
+ *   on the pipeline's own opt-in profile as a cross check. Block summaries are
+ *   wire-encoded and structured-cloned (the postMessage copy), then decoded and
+ *   observed by an OccupancyHistory like the main thread does.
+ * - `bare`: no wrapping and no profile; one clock around each handle(). Use this
+ *   for the total and under `node --cpu-prof`.
+ * - `proto`: FFT prototypes (Float32 tables, radix-4, real-input pair) on the
+ *   same frames, against the production Fft.
+ *
+ * `--iq` reads a private capture for an offline run; report only aggregate CPU.
+ */
+import { readFileSync } from "node:fs"
+import os from "node:os"
+import { performance } from "node:perf_hooks"
+import process from "node:process"
+import { ScannerConfigSchema } from "../src/config.js"
+import { Detector } from "../src/core/spectrum/detector.js"
+import { Tracker } from "../src/core/spectrum/emissions/tracker.js"
+import {
+	Fft,
+	accumulateShiftedPower,
+	defaultFftSize,
+	powerToDb,
+} from "../src/core/spectrum/fft.js"
+import { FrameSource } from "../src/core/spectrum/frame-source.js"
+import { ImpulseBlanker } from "../src/core/spectrum/impulse-blanker.js"
+import { NoiseFloor } from "../src/core/spectrum/noise-floor.js"
+import { OccupancyHistory } from "../src/core/spectrum/occupancy.js"
+import {
+	PIPELINE_PROFILE_STAGES,
+	SpectrumPipeline,
+	type PipelineProfile,
+} from "../src/core/spectrum/pipeline.js"
+import { ProvisionalSpurs } from "../src/core/spectrum/provisional-spurs.js"
+import {
+	DEFAULT_TUNING,
+	USABLE_FRACTION,
+	buildPipelineConfig,
+} from "../src/core/spectrum/spectrum-engine.js"
+import { SpurMap } from "../src/core/spectrum/spur-map.js"
+import { synthesizeCu8 } from "./profile-spectrum-iq.js"
+import {
+	decodeEventsFromWire,
+	encodeEventsForWire,
+} from "../src/core/spectrum/summary-wire.js"
+import { WaveKitError } from "../src/utils/errors.js"
+import type {
+	BlockSummary,
+	PipelineEvent,
+	SpectrumSettings,
+} from "../src/core/spectrum/types.js"
+
+/** Synthetic centre: not a real allocation, only a frequency label for the RF maths. */
+const CENTRE_HZ = 1_000_000_000
+const CHUNK_BYTES = 131_072 // the engine's DEFAULT_BATCH_BYTES
+
+function flag(name: string): string | undefined {
+	const i = process.argv.indexOf(`--${name}`)
+	return i >= 0 ? process.argv[i + 1] : undefined
+}
+
+function num(name: string, fallback: number): number {
+	const v = Number(flag(name))
+	return Number.isFinite(v) && v > 0 ? v : fallback
+}
+
+const SECONDS = num("seconds", 30)
+const RATE = num("rate", 2_400_000)
+const FFT_ARG = flag("fft") ?? "auto"
+const OVERLAP = flag("overlap") === "0.5" ? 0.5 : 0
+const FEED = flag("feed") !== "off"
+const MODE = flag("mode") ?? "stages"
+const IQ_PATH = flag("iq")
+const JSON_OUT = process.argv.includes("--json")
+
+function loadIq(): Uint8Array {
+	if (IQ_PATH) {
+		const buf = readFileSync(IQ_PATH)
+		// Whole IQ pairs only: an odd trailing byte is dropped, and an empty corpus
+		// would spin the chunk-fill loop forever.
+		const max = Math.min(buf.length, Math.round(RATE * 2 * SECONDS)) & ~1
+		if (max < 2)
+			throw new WaveKitError(
+				`--iq ${IQ_PATH} holds no complete IQ pair (${buf.length} bytes)`,
+				"PROFILE_IQ",
+			)
+		return new Uint8Array(buf.buffer, buf.byteOffset, max)
+	}
+	return synthesizeCu8(RATE, Math.min(SECONDS, 4))
+}
+
+// ---- self-time accounting ----
+
+const self = new Map<string, number>()
+const calls = new Map<string, number>()
+const stack: { label: string; t0: number; child: number }[] = []
+let wrapping = false
+
+function charge(label: string, ms: number): void {
+	self.set(label, (self.get(label) ?? 0) + ms)
+}
+
+type AnyFn = (this: unknown, ...args: unknown[]) => unknown
+
+function wrapMethod(
+	proto: Record<string, unknown>,
+	name: string,
+	label: string,
+): void {
+	const original = proto[name]
+	if (typeof original !== "function") return
+	const fn = original as AnyFn
+	proto[name] = function (this: unknown, ...args: unknown[]): unknown {
+		if (!wrapping) return fn.apply(this, args)
+		const frame = { label, t0: performance.now(), child: 0 }
+		stack.push(frame)
+		try {
+			return fn.apply(this, args)
+		} finally {
+			stack.pop()
+			const total = performance.now() - frame.t0
+			charge(label, total - frame.child)
+			calls.set(label, (calls.get(label) ?? 0) + 1)
+			const parent = stack[stack.length - 1]
+			if (parent) parent.child += total
+		}
+	}
+}
+
+function wrapClass(
+	cls: { prototype: object },
+	label: string,
+	only?: readonly string[],
+): void {
+	const proto = cls.prototype as Record<string, unknown>
+	for (const name of Object.getOwnPropertyNames(proto)) {
+		if (name === "constructor") continue
+		if (only && !only.includes(name)) continue
+		const d = Object.getOwnPropertyDescriptor(proto, name)
+		if (!d || typeof d.value !== "function") continue
+		wrapMethod(proto, name, label)
+	}
+}
+
+/** Private pipeline methods by stage. Anything unlisted stays in its caller's self time. */
+const PIPELINE_METHODS: Record<string, string> = {
+	handle: "pipeline other (handle/dispatch)",
+	onFrame: "power accumulate + block sum (onFrame inline)",
+	shortFrame: "short path window (5 ms burst)",
+	resumShort: "short path window (5 ms burst)",
+	resetShort: "short path window (5 ms burst)",
+	finishBlockWork: "block finalize inline (powerToDb, segment, masks)",
+	resetBlock: "block finalize inline (powerToDb, segment, masks)",
+	mergeBursts: "burst merge",
+	mergedPower: "burst merge",
+	withoutLines: "provisional spurs / lines",
+	observeLines: "provisional spurs / lines",
+	applyChannelGate: "channel gate",
+	prepareGate: "channel gate",
+	interruptGate: "channel gate",
+	openGate: "channel gate",
+	fillGateMask: "channel gate",
+	summary: "summary build (bins + tracks)",
+	frameAssociation: "summary build (bins + tracks)",
+	emitWithImages: "emissions: iq-image + events",
+	emit: "emissions: iq-image + events",
+	persistentFeatures: "retune alarm / classify",
+	classify: "retune alarm / classify",
+	isStale: "retune alarm / classify",
+	segmentRf: "retune alarm / classify",
+	noteActivity: "activity mask",
+	widebandSegment: "emissions tracker (block)",
+	maybeStats: "pipeline other (handle/dispatch)",
+}
+
+function installWraps(): void {
+	wrapClass(Fft, "fft")
+	wrapClass(FrameSource, "window + cu8 convert (FrameSource)")
+	wrapClass(ImpulseBlanker, "impulse blanker")
+	wrapClass(NoiseFloor, "noise floor")
+	wrapClass(SpurMap, "spur map")
+	wrapClass(ProvisionalSpurs, "provisional spurs / lines")
+	wrapClass(Detector, "detector (CFAR)")
+	wrapClass(Tracker, "frame tracks (Tracker.frame)", ["frame"])
+	wrapClass(
+		Tracker,
+		"emissions tracker (block)",
+		Object.getOwnPropertyNames(Tracker.prototype).filter(
+			n => n !== "frame" && n !== "constructor",
+		),
+	)
+	const proto = SpectrumPipeline.prototype as unknown as Record<string, unknown>
+	for (const [name, label] of Object.entries(PIPELINE_METHODS))
+		wrapMethod(proto, name, label)
+}
+
+// ---- run ----
+
+interface RunResult {
+	wallMs: number
+	handleMs: number
+	frames: number
+	blocks: number
+	summaries: number
+	iqSeconds: number
+	wire: { encodeMs: number; cloneMs: number; decodeMs: number }
+	occupancyMs: number
+	profile: PipelineProfile | null
+}
+
+function settings(): SpectrumSettings {
+	return ScannerConfigSchema.parse({}) as unknown as SpectrumSettings
+}
+
+function run(iq: Uint8Array): RunResult {
+	const s = settings()
+	const fftSize = FFT_ARG === "auto" ? null : Number(FFT_ARG)
+	const base = buildPipelineConfig("bench", "U8_IQ", RATE, s, {
+		...DEFAULT_TUNING,
+		fftSize,
+	})
+	const cfg = { ...base, overlap: OVERLAP as 0 | 0.5 }
+	const pipeline = new SpectrumPipeline(
+		cfg,
+		MODE === "stages" ? { profile: { sampleEvery: 1 } } : {},
+	)
+	const occupancy = new OccupancyHistory()
+	const half = (RATE * USABLE_FRACTION) / 2
+	pipeline.handle({
+		kind: "new-stream",
+		stream: 1,
+		centreHz: CENTRE_HZ,
+		sampleRateHz: RATE,
+		gainKey: "bench",
+		tuningTrust: "commanded",
+	})
+	pipeline.handle({ kind: "spectrum-feed", enabled: FEED })
+	const totalBytes = Math.round(RATE * 2 * SECONDS) & ~1
+	const wire = { encodeMs: 0, cloneMs: 0, decodeMs: 0 }
+	let occupancyMs = 0
+	let handleMs = 0
+	let blocks = 0
+	let summaries = 0
+	let sample = 0
+	let offset = 0
+	const chunk = new Uint8Array(CHUNK_BYTES)
+	wrapping = MODE === "stages"
+	const wall0 = performance.now()
+	for (let done = 0; done < totalBytes; done += CHUNK_BYTES) {
+		const len = Math.min(CHUNK_BYTES, totalBytes - done)
+		for (let w = 0; w < len; ) {
+			const take = Math.min(len - w, iq.length - offset)
+			chunk.set(iq.subarray(offset, offset + take), w)
+			w += take
+			offset = (offset + take) % iq.length
+		}
+		const bytes = len === CHUNK_BYTES ? chunk : chunk.subarray(0, len)
+		const t0 = performance.now()
+		const events = pipeline.handle({
+			kind: "bytes",
+			startSample: sample,
+			bytes,
+		})
+		handleMs += performance.now() - t0
+		sample += len / 2
+		if (events.length === 0) continue
+		for (const ev of events) {
+			if (ev.kind === "block-summary") summaries++
+			if (ev.kind === "block-summary" || ev.kind === "stale-discard") blocks++
+		}
+		if (MODE !== "stages") continue
+		let t = performance.now()
+		const transfer: ArrayBuffer[] = []
+		encodeEventsForWire(events, transfer)
+		wire.encodeMs += performance.now() - t
+		t = performance.now()
+		const copy = structuredClone(events) as PipelineEvent[]
+		wire.cloneMs += performance.now() - t
+		t = performance.now()
+		decodeEventsFromWire(copy)
+		wire.decodeMs += performance.now() - t
+		t = performance.now()
+		for (const ev of copy) {
+			if (ev.kind !== "block-summary") continue
+			const sum: BlockSummary = ev.summary
+			if (sum.overload) continue
+			occupancy.observe(
+				Date.now(),
+				{ startHz: sum.centreHz - half, endHz: sum.centreHz + half },
+				sum.tracks,
+				cfg.integrationMs,
+			)
+		}
+		occupancyMs += performance.now() - t
+	}
+	const wallMs = performance.now() - wall0
+	wrapping = false
+	const state = pipeline.exportEngineState() as { profile?: PipelineProfile }
+	const n = cfg.fftSize
+	return {
+		wallMs,
+		handleMs,
+		frames: Math.floor(sample / (n * (1 - OVERLAP))),
+		blocks,
+		summaries,
+		iqSeconds: sample / RATE,
+		wire,
+		occupancyMs,
+		profile: state.profile ?? null,
+	}
+}
+
+// ---- FFT prototypes ----
+
+/** Production algorithm, Float32 twiddles (V8 still computes in f64; only memory traffic changes). */
+class Fft32 {
+	private readonly cos: Float32Array
+	private readonly sin: Float32Array
+	private readonly rev: Uint32Array
+	constructor(readonly size: number) {
+		const half = size >> 1
+		this.cos = new Float32Array(half)
+		this.sin = new Float32Array(half)
+		for (let k = 0; k < half; k++) {
+			this.cos[k] = Math.cos((2 * Math.PI * k) / size)
+			this.sin[k] = -Math.sin((2 * Math.PI * k) / size)
+		}
+		this.rev = bitReverse(size)
+	}
+	transform(re: Float32Array, im: Float32Array): void {
+		const n = this.size
+		const rev = this.rev
+		for (let i = 0; i < n; i++) {
+			const j = rev[i]!
+			if (j > i) {
+				const tr = re[i]!
+				re[i] = re[j]!
+				re[j] = tr
+				const ti = im[i]!
+				im[i] = im[j]!
+				im[j] = ti
+			}
+		}
+		for (let len = 2; len <= n; len <<= 1) {
+			const h = len >> 1
+			const step = n / len
+			for (let s = 0; s < n; s += len) {
+				for (let j = 0, k = 0; j < h; j++, k += step) {
+					const wr = this.cos[k]!
+					const wi = this.sin[k]!
+					const a = s + j
+					const b = a + h
+					const br = re[b]!
+					const bi = im[b]!
+					const xr = br * wr - bi * wi
+					const xi = br * wi + bi * wr
+					const ar = re[a]!
+					const ai = im[a]!
+					re[b] = ar - xr
+					im[b] = ai - xi
+					re[a] = ar + xr
+					im[a] = ai + xi
+				}
+			}
+		}
+	}
+}
+
+function bitReverse(size: number): Uint32Array {
+	const bits = 31 - Math.clz32(size)
+	const rev = new Uint32Array(size)
+	for (let i = 0; i < size; i++) {
+		let r = 0
+		for (let b = 0; b < bits; b++) r |= ((i >>> b) & 1) << (bits - 1 - b)
+		rev[i] = r
+	}
+	return rev
+}
+
+/**
+ * Radix-2 with the first two stages fused (trivial twiddles ±1, ±j) and per-stage
+ * contiguous twiddle tables (no strided `k += step` reads).
+ */
+class FftFused {
+	private readonly rev: Uint32Array
+	/** Per stage len ≥ 8: twiddles for j = 0..len/2−1, interleaved re/im, stages concatenated. */
+	private readonly tw: Float64Array
+	constructor(readonly size: number) {
+		this.rev = bitReverse(size)
+		let total = 0
+		for (let len = 8; len <= size; len <<= 1) total += len
+		this.tw = new Float64Array(Math.max(2, total))
+		let o = 0
+		for (let len = 8; len <= size; len <<= 1) {
+			for (let j = 0; j < len >> 1; j++) {
+				this.tw[o++] = Math.cos((2 * Math.PI * j) / len)
+				this.tw[o++] = -Math.sin((2 * Math.PI * j) / len)
+			}
+		}
+	}
+	transform(re: Float32Array, im: Float32Array): void {
+		const n = this.size
+		const rev = this.rev
+		for (let i = 0; i < n; i++) {
+			const j = rev[i]!
+			if (j > i) {
+				const tr = re[i]!
+				re[i] = re[j]!
+				re[j] = tr
+				const ti = im[i]!
+				im[i] = im[j]!
+				im[j] = ti
+			}
+		}
+		// stages len 2 and 4 fused: a 4-point DFT per group
+		for (let s = 0; s < n; s += 4) {
+			const r0 = re[s]!
+			const i0 = im[s]!
+			const r1 = re[s + 1]!
+			const i1 = im[s + 1]!
+			const r2 = re[s + 2]!
+			const i2 = im[s + 2]!
+			const r3 = re[s + 3]!
+			const i3 = im[s + 3]!
+			const ar = r0 + r1
+			const ai = i0 + i1
+			const br = r0 - r1
+			const bi = i0 - i1
+			const cr = r2 + r3
+			const ci = i2 + i3
+			const dr = r2 - r3
+			const di = i2 - i3
+			re[s] = ar + cr
+			im[s] = ai + ci
+			re[s + 2] = ar - cr
+			im[s + 2] = ai - ci
+			// (dr + j di)·(−j) = di − j dr
+			re[s + 1] = br + di
+			im[s + 1] = bi - dr
+			re[s + 3] = br - di
+			im[s + 3] = bi + dr
+		}
+		const tw = this.tw
+		let o = 0
+		for (let len = 8; len <= n; len <<= 1) {
+			const h = len >> 1
+			for (let s = 0; s < n; s += len) {
+				for (let j = 0; j < h; j++) {
+					const wr = tw[o + 2 * j]!
+					const wi = tw[o + 2 * j + 1]!
+					const a = s + j
+					const b = a + h
+					const br = re[b]!
+					const bi = im[b]!
+					const xr = br * wr - bi * wi
+					const xi = br * wi + bi * wr
+					const ar = re[a]!
+					const ai = im[a]!
+					re[b] = ar - xr
+					im[b] = ai - xi
+					re[a] = ar + xr
+					im[a] = ai + xi
+				}
+			}
+			o += len
+		}
+	}
+}
+
+const LOG_VIEW = new Float32Array(1)
+const LOG_BITS = new Int32Array(LOG_VIEW.buffer)
+const DB_PER_LOG2 = 10 * Math.LOG10E * Math.LN2
+
+/** powerToDb with a bit-trick log2 (degree-4 mantissa polynomial, < 0.001 dB error). */
+function powerToDbFast(
+	acc: Float64Array,
+	frames: number,
+	out: Float32Array,
+): void {
+	const n = acc.length
+	const scale = 1 / (Math.max(1, frames) * (n / 2) * (n / 2))
+	for (let i = 0; i < n; i++) {
+		const p = acc[i]! * scale
+		if (!(p > 1e-20)) {
+			out[i] = -200
+			continue
+		}
+		LOG_VIEW[0] = p
+		const bits = LOG_BITS[0]!
+		const e = ((bits >> 23) & 255) - 127
+		LOG_BITS[0] = (bits & 0x007fffff) | 0x3f800000
+		const m = LOG_VIEW[0]! - 1
+		// log2(1 + m), m in [0, 1)
+		const l =
+			m *
+			(1.4425449 +
+				m *
+					(-0.7181452 +
+						m *
+							(0.4575485 +
+								m * (-0.2779042 + m * 0.121797 - 0.0258411 * m * m))))
+		out[i] = Math.max(-200, (e + l) * DB_PER_LOG2)
+	}
+}
+
+function dbRun(
+	iq: Uint8Array,
+	n: number,
+	frames: number,
+): Record<string, number> {
+	const fft = new Fft(n)
+	const re = new Float32Array(n)
+	const im = new Float32Array(n)
+	const acc = new Float64Array(n)
+	const a = new Float32Array(n)
+	const b = new Float32Array(n)
+	let slow = 0
+	let fast = 0
+	let accum = 0
+	let err = 0
+	for (let f = 0; f < frames; f++) {
+		const base = ((f * n) % Math.floor(iq.length / 2 - n)) * 2
+		for (let i = 0; i < n; i++) {
+			re[i] = ((iq[base + 2 * i] ?? 127) - 127.5) / 127.5
+			im[i] = ((iq[base + 2 * i + 1] ?? 127) - 127.5) / 127.5
+		}
+		fft.transform(re, im)
+		let t = performance.now()
+		acc.fill(0)
+		accumulateShiftedPower(re, im, acc)
+		accum += performance.now() - t
+		t = performance.now()
+		powerToDb(acc, 1, a)
+		slow += performance.now() - t
+		t = performance.now()
+		powerToDbFast(acc, 1, b)
+		fast += performance.now() - t
+		if (f % 97 === 0)
+			for (let i = 0; i < n; i++)
+				if ((a[i] ?? 0) > -199)
+					err = Math.max(err, Math.abs((a[i] ?? 0) - (b[i] ?? 0)))
+	}
+	return {
+		"accumulateShiftedPower+fill msPerSecIq": accum / SECONDS,
+		"powerToDb (Math.log10) msPerSecIq per pass": slow / SECONDS,
+		"powerToDb fast log2 msPerSecIq per pass": fast / SECONDS,
+		"powerToDb fast maxAbsErr dB": err,
+	}
+}
+
+function protoRun(iq: Uint8Array): Record<string, number> {
+	const n =
+		FFT_ARG === "auto" ? defaultFftSize(RATE) : Math.max(2, Number(FFT_ARG))
+	const frames = Math.floor((RATE * SECONDS) / n)
+	const re = new Float32Array(n)
+	const im = new Float32Array(n)
+	const fill = (f: number): void => {
+		const base = ((f * n) % Math.floor(iq.length / 2 - n)) * 2
+		for (let i = 0; i < n; i++) {
+			re[i] = ((iq[base + 2 * i] ?? 127) - 127.5) / 127.5
+			im[i] = ((iq[base + 2 * i + 1] ?? 127) - 127.5) / 127.5
+		}
+	}
+	const variants: [
+		string,
+		{ transform: (r: Float32Array, i: Float32Array) => void },
+	][] = [
+		["production Fft (f64 tables)", new Fft(n)],
+		["f32 tables", new Fft32(n)],
+		["fused r4 first stages + contiguous twiddles", new FftFused(n)],
+	]
+	// correctness: same input, max abs difference vs production
+	const ref = new Fft(n)
+	const r0 = new Float32Array(n)
+	const i0 = new Float32Array(n)
+	fill(3)
+	r0.set(re)
+	i0.set(im)
+	ref.transform(r0, i0)
+	const out: Record<string, number> = {}
+	for (const [name, v] of variants) {
+		fill(3)
+		v.transform(re, im)
+		let err = 0
+		for (let i = 0; i < n; i++)
+			err = Math.max(
+				err,
+				Math.abs((re[i] ?? 0) - (r0[i] ?? 0)),
+				Math.abs((im[i] ?? 0) - (i0[i] ?? 0)),
+			)
+		out[`${name} maxAbsErr`] = err
+		// warm
+		for (let f = 0; f < 200; f++) {
+			fill(f)
+			v.transform(re, im)
+		}
+		let fftMs = 0
+		for (let f = 0; f < frames; f++) {
+			fill(f)
+			const t0 = performance.now()
+			v.transform(re, im)
+			fftMs += performance.now() - t0
+		}
+		out[`${name} msPerSecIq`] = fftMs / SECONDS
+		out[`${name} usPerFrame`] = (fftMs * 1000) / frames
+	}
+	return { ...out, ...dbRun(iq, n, frames) }
+}
+
+// ---- report ----
+
+function fmt(v: number, d = 1): string {
+	return v.toFixed(d)
+}
+
+function main(): void {
+	const iq = loadIq()
+	const load = os.loadavg().map(v => v.toFixed(1))
+	if (MODE === "proto") {
+		const out = protoRun(iq)
+		const end = os.loadavg().map(v => v.toFixed(1))
+		if (JSON_OUT) {
+			process.stdout.write(`${JSON.stringify({ load, end, out })}\n`)
+			return
+		}
+		process.stdout.write(
+			`FFT prototypes, ${RATE} S/s, ${SECONDS} s, load ${load.join(" ")} -> ${end.join(" ")}\n`,
+		)
+		for (const [k, v] of Object.entries(out))
+			process.stdout.write(`  ${k.padEnd(60)} ${v.toPrecision(4)}\n`)
+		return
+	}
+	if (MODE === "stages") installWraps()
+	const r = run(iq)
+	const end = os.loadavg().map(v => v.toFixed(1))
+	const perSec = (ms: number): number => ms / r.iqSeconds
+	const perFrame = (ms: number): number => (ms * 1000) / Math.max(1, r.frames)
+	const head =
+		`spectrum pipeline ${MODE}, ${RATE} S/s, fft ${FFT_ARG}, overlap ${OVERLAP}, feed ${FEED ? "on" : "off"}, ` +
+		`${fmt(r.iqSeconds)} s IQ${IQ_PATH ? " (capture)" : " (synthetic)"}, load ${load.join(" ")} -> ${end.join(" ")}`
+	const rows: [string, number][] = []
+	if (MODE === "stages") {
+		for (const [k, v] of self) rows.push([k, v])
+		rows.push(["wire encode (encodeEventsForWire)", r.wire.encodeMs])
+		rows.push(["postMessage copy (structuredClone)", r.wire.cloneMs])
+		rows.push(["[main] wire decode", r.wire.decodeMs])
+		rows.push(["[main] occupancy observe", r.occupancyMs])
+		rows.sort((a, b) => b[1] - a[1])
+	}
+	if (JSON_OUT) {
+		process.stdout.write(
+			`${JSON.stringify({ head, ...r, rows, calls: Object.fromEntries(calls) })}\n`,
+		)
+		return
+	}
+	process.stdout.write(`${head}\n`)
+	process.stdout.write(
+		`frames ${r.frames} (${fmt(r.frames / r.iqSeconds)}/s), blocks ${r.blocks} (${fmt(r.blocks / r.iqSeconds)}/s), summaries ${r.summaries}\n`,
+	)
+	process.stdout.write(
+		`handle() total ${fmt(perSec(r.handleMs))} CPU-ms per s IQ (${fmt(perSec(r.handleMs) / 10)} % core), ${fmt(perFrame(r.handleMs), 2)} µs/frame, ${fmt(RATE / (r.handleMs / r.iqSeconds) / 1000, 2)}x realtime-equivalent Msps\n`,
+	)
+	if (MODE !== "stages") return
+	process.stdout.write(
+		`\n${"stage (self time)".padEnd(52)} ${"µs/frame".padStart(9)} ${"ms/s IQ".padStart(9)} ${"%".padStart(6)} ${"calls/s".padStart(9)}\n`,
+	)
+	const workerTotal = r.handleMs + r.wire.encodeMs + r.wire.cloneMs
+	for (const [k, v] of rows) {
+		const c = calls.get(k)
+		process.stdout.write(
+			`${k.padEnd(52)} ${fmt(perFrame(v), 2).padStart(9)} ${fmt(perSec(v), 2).padStart(9)} ${fmt((100 * v) / workerTotal).padStart(6)} ${(c === undefined ? "" : fmt(c / r.iqSeconds, 0)).padStart(9)}\n`,
+		)
+	}
+	process.stdout.write(
+		`worker total (handle + encode + clone) ${fmt(perSec(workerTotal))} ms/s IQ; wrap overhead is inside these numbers\n`,
+	)
+	const p = r.profile
+	if (p) {
+		process.stdout.write(
+			`\nbuilt-in pipeline profile (inclusive spans): blocks ${p.blocks}, busy ${fmt(perSec(p.busyMs))} ms/s IQ\n`,
+		)
+		for (const st of PIPELINE_PROFILE_STAGES)
+			process.stdout.write(
+				`  ${st.padEnd(10)} ${fmt(perSec(p.stages[st]), 2).padStart(9)} ms/s IQ\n`,
+			)
+	}
+}
+
+main()

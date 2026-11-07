@@ -18,6 +18,7 @@ use crate::{
     },
     dsp_pool::{resolve_dsp_helpers, DspPool, Job, DSP_HELPERS_ENV},
     framing::{self, FrameSink},
+    input::{fill_block, Coalesce, FdInput, InputEnd, InputSource},
     preparation::{Planner, Prepared, SubmitError},
     protocol::{
         parse_observed_request, parse_request, DemodOpen, ObservedRequest, OpenReq, Request,
@@ -27,9 +28,9 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, VecDeque};
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::net::Shutdown;
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsFd, FromRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -56,6 +57,19 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 /// accept poll or a failing write left). The list therefore holds at most the writers of closes from the last 500 ms.
 const CLOSE_JOIN_BUDGET: Duration = Duration::from_millis(500);
 const EOF_DRAIN_BUDGET: Duration = Duration::from_secs(2);
+/// Centre moves received but not yet reached by the input: a safety cap, not a limit a sweep can be proved to stay under.
+/// A move waits while the bytes before its position are on their way, and the parent's position counts everything up to
+/// the input plus its settle margin: at 2.048 Msps (4 096 000 B/s) with the defaults, the 2 s burst absorber 8 192 000 B +
+/// both sides of the input branch 2 × 1 024 000 B + the kernel's stdin socket, taken at Linux's default 212 992 B
+/// (`wmem_default`, not measured here) + the reader's 32 768 B target + the 35 ms margin 143 360 B = 10 629 120 B, 2 595 ms.
+/// Hops 5 ms apart (the default PLL settle, without the counter run or dwell a real hop adds) make that 519 moves, past
+/// this cap, so such a run costs one respawn; a real 185 ms hop makes 15. A larger absorber or input mark, a shorter settle
+/// or retunes not paced by a sweep can pass it too, and the parent's silence watchdog does not stop that: a lagging reader
+/// that progresses stays alive. So at 24 bytes each the list holds at most about 12 KiB, and past it the move is refused
+/// (`recenter-refused`): the parent retires this generation and the next request starts another, one respawn.
+const MAX_PENDING_RECENTERS: usize = 512;
+/// The `rejected` detail once a move was refused: this process no longer knows the capture centre.
+const CENTRE_REFUSED: &str = "capture centre unknown after a refused recenter";
 const WRITE_CHUNK: usize = 1 << 16;
 /// accept() polling backs off from the first to the second, so a channel whose client never
 /// connects costs ~20 wakeups/s, while a prompt client is still taken within a few ms.
@@ -148,6 +162,13 @@ impl Job for ChannelJob {
     }
 }
 
+/// A centre move the input has not reached: stdin byte `at_input_bytes` is the first at `center_hz`.
+struct PendingRecenter {
+    seq: u64,
+    at_input_bytes: u64,
+    center_hz: f64,
+}
+
 struct Open {
     /// Distinguishes this channel from an earlier one with the same id, so a late `client-gone`
     /// from the old writer cannot close the new channel.
@@ -168,6 +189,9 @@ struct Open {
     observed: Option<RuntimePermits>,
     /// Framed demod output (A18): record-aware queue writes. `None` writes raw bytes as before.
     framer: Option<FrameSink>,
+    /// The last centre move received when the channel was installed: its offset is from that move's centre, and it gets
+    /// no sample until the input reaches that move (`Runtime::applied_recenter`).
+    centre_seq: u64,
 }
 
 impl Open {
@@ -285,6 +309,13 @@ pub struct Runtime {
     terminated: bool,
     /// Marked gaps not yet reached by the input, in arrival order: (atInputByte, droppedInputBytes).
     pending_gaps: VecDeque<(u64, u64)>,
+    /// Centre moves the input has not reached, in arrival order, at most [`MAX_PENDING_RECENTERS`].
+    pending_recenters: VecDeque<PendingRecenter>,
+    /// Centre moves received, and the last one applied; equal when none is pending.
+    received_recenter: u64,
+    applied_recenter: u64,
+    /// A move was refused: opens and retunes are refused until the parent retires this process.
+    centre_refused: bool,
     last_stats: Instant,
     /// Writers of closed channels, with the instant after which an unreturned one is detached ([`CLOSE_JOIN_BUDGET`]).
     closed_writers: Vec<(thread::JoinHandle<()>, Instant)>,
@@ -303,6 +334,8 @@ pub struct Runtime {
     /// One input block's converted I and Q, kept between blocks so `on_input` does not allocate.
     input_i: Vec<f32>,
     input_q: Vec<f32>,
+    /// The serial loop's encoded output for one channel's block, kept between blocks.
+    serial_out: Vec<u8>,
 }
 
 /// An echoed request id cut to the schema's 64 (PF7). Cutting at ≤ 64 UTF-8 bytes on a char
@@ -349,6 +382,10 @@ impl Runtime {
             pending: BTreeMap::new(),
             terminated: false,
             pending_gaps: VecDeque::new(),
+            pending_recenters: VecDeque::new(),
+            received_recenter: 0,
+            applied_recenter: 0,
+            centre_refused: false,
             last_stats: Instant::now(),
             closed_writers: Vec::new(),
             gone_tx,
@@ -361,6 +398,7 @@ impl Runtime {
             scratch: Vec::new(),
             input_i: Vec::new(),
             input_q: Vec::new(),
+            serial_out: Vec::new(),
         }
     }
 
@@ -406,6 +444,10 @@ impl Runtime {
                 channel_id,
                 center_hz,
             } => self.retune_iq(channel_id, center_hz),
+            Request::Recenter {
+                center_hz,
+                at_input_bytes,
+            } => self.recenter(center_hz, at_input_bytes),
             Request::Squelch(req) => self.squelch(req),
             Request::Close { id } => self.close(&id, "requested"),
             Request::MarkGap {
@@ -494,6 +536,12 @@ impl Runtime {
                 attempt,
             );
         }
+        if self.centre_refused {
+            let detail = CENTRE_REFUSED.to_string();
+            return self.reject_attempt(o, "channel-request-invalid", detail, attempt);
+        }
+        // A channel opened now starts at the last move received, so it admits against that centre.
+        let capture = self.capture_centre();
         let a = &self.args;
         let offset = match admission::admit(
             o.center_hz,
@@ -501,7 +549,7 @@ impl Runtime {
             o.transition_hz,
             o.output_rate_hz,
             a.input_rate,
-            a.input_center,
+            capture,
             a.usable_fraction,
         ) {
             Ok(off) => off,
@@ -610,12 +658,49 @@ impl Runtime {
         o: OpenReq,
         serial: u64,
         Prepared {
-            dsp,
+            mut dsp,
             queue,
             payload,
         }: Prepared,
         observed: Option<RuntimePermits>,
     ) {
+        // A recenter may have landed while this open was being prepared.
+        let admitted = if self.centre_refused {
+            Err(admission::Reject {
+                code: "channel-request-invalid",
+                detail: CENTRE_REFUSED.to_string(),
+            })
+        } else {
+            dsp.admit_retune(
+                o.center_hz,
+                self.capture_centre(),
+                self.args.usable_fraction,
+            )
+        };
+        match admitted {
+            Ok(offset) => {
+                if offset != dsp.offset_hz() {
+                    dsp.retune(offset);
+                }
+            }
+            Err(r) => {
+                let id = o.id.clone();
+                drop(o);
+                drop(dsp);
+                drop(queue);
+                if let Some(p) = observed {
+                    p.writer.publish();
+                    self.reject(&id, r.code, r.detail);
+                    if let Some(payload) = payload {
+                        payload.publish();
+                    }
+                    p.logical.publish();
+                } else {
+                    self.reject(&id, r.code, r.detail);
+                }
+                return;
+            }
+        }
         let socket = self.args.socket_dir.join(format!("{}.sock", o.id));
         let _ = std::fs::remove_file(&socket);
         // Listening before `opened` (§11): a client may connect as soon as it reads the event.
@@ -669,10 +754,11 @@ impl Runtime {
                 dropped: 0,
                 saturated: 0,
                 run: None,
-                opened_at_byte: self.received_bytes(),
+                opened_at_byte: self.opened_at_byte(),
                 payload,
                 observed,
                 framer: None,
+                centre_seq: self.received_recenter,
             },
         );
         self.emit(json!({
@@ -695,6 +781,15 @@ impl Runtime {
                 "channel-request-invalid",
                 "duplicate channel id".into(),
             );
+        }
+        // A demod channel mixes against the centre it opened on and cannot follow a move, so it opens on a settled centre.
+        if self.centre_refused {
+            let detail = CENTRE_REFUSED.to_string();
+            return self.reject(&o.id, "channel-request-invalid", detail);
+        }
+        if !self.pending_recenters.is_empty() {
+            let detail = "capture centre is moving".to_string();
+            return self.reject(&o.id, "channel-request-invalid", detail);
         }
         let sample_bytes = o.format.sample_bytes();
         if o.queue_bytes < sample_bytes {
@@ -769,6 +864,7 @@ impl Runtime {
                 payload: None,
                 observed: None,
                 framer,
+                centre_seq: self.received_recenter,
             },
         );
         let mut opened = json!({
@@ -789,22 +885,144 @@ impl Runtime {
     }
 
     fn retune_iq(&mut self, channel_id: String, center_hz: f64) {
-        let admitted = self.channels.get_mut(&channel_id).is_some_and(|ch| {
-            if let Engine::Iq(dsp) = &mut ch.dsp {
-                if let Ok(offset) =
-                    dsp.admit_retune(center_hz, self.args.input_center, self.args.usable_fraction)
-                {
-                    dsp.retune(offset);
-                    return true;
+        let capture = self
+            .channels
+            .get(&channel_id)
+            .map_or(self.args.input_center, |ch| self.centre_of(ch.centre_seq));
+        let (refused, fraction) = (self.centre_refused, self.args.usable_fraction);
+        let admitted = !refused
+            && self.channels.get_mut(&channel_id).is_some_and(|ch| {
+                if let Engine::Iq(dsp) = &mut ch.dsp {
+                    if let Ok(offset) = dsp.admit_retune(center_hz, capture, fraction) {
+                        dsp.retune(offset);
+                        return true;
+                    }
                 }
-            }
-            false
-        });
+                false
+            });
         if admitted {
             self.emit(json!({"type": "retuned", "channelId": channel_id, "centerHz": center_hz}));
         } else {
             self.emit(json!({"type": "refused", "channelId": channel_id, "reason": "admission"}));
         }
+    }
+
+    /// The capture centre once every move received has been reached.
+    fn capture_centre(&self) -> f64 {
+        self.pending_recenters
+            .back()
+            .map_or(self.args.input_center, |r| r.center_hz)
+    }
+
+    /// The centre a channel's offset is measured from: the pending move it waits for, or the current centre.
+    fn centre_of(&self, seq: u64) -> f64 {
+        self.pending_recenters
+            .iter()
+            .find(|r| r.seq == seq)
+            .map_or(self.args.input_center, |r| r.center_hz)
+    }
+
+    /// The `opened_at_byte` of a channel installed now: it sees no byte before the last move received, so a gap at or
+    /// before that move never reached it. An odd position rounds up to the whole sample the channel really starts at, as
+    /// a move's seam does; otherwise a gap at that sample would count as inside the channel, or not, depending on whether
+    /// its line arrived before or after the input reached the move.
+    fn opened_at_byte(&self) -> u64 {
+        let moved_at = self
+            .pending_recenters
+            .back()
+            .map_or(0, |r| r.at_input_bytes.div_ceil(2).saturating_mul(2));
+        self.received_bytes().max(moved_at)
+    }
+
+    /// The capture centre moves at stdin byte `at_input_bytes`; the sample rate and format do not, so nothing restarts.
+    /// Control and stdin are read independently, so the bytes before that position may still be on their way. The move
+    /// is applied when the input reaches it (at once if it has), in the order received. Until then a channel opened
+    /// after this line admits against the new centre and receives nothing: it never sees IQ of the old centre.
+    ///
+    /// A demod channel mixes against the centre it opened on, and only the live demodulator opens one, on a process
+    /// that is never recentred. A move on such a process, or past [`MAX_PENDING_RECENTERS`], is refused: the parent is
+    /// told, the centre stays and later opens are refused, because this process no longer knows where the capture is.
+    ///
+    /// The centre may be unchanged: the parent then only names a position, so that channels opened after this line skip
+    /// the IQ before it (what a burst absorber holds when a generation starts). Already reached, that is nothing to do.
+    /// Every move taken ends in one `recentered` line, in the order received, so the parent can tell an answered move
+    /// from a process that ignored it.
+    fn recenter(&mut self, center_hz: f64, at_input_bytes: u64) {
+        if self.centre_refused {
+            return;
+        }
+        if self.pending_recenters.is_empty()
+            && self.capture_centre() == center_hz
+            && at_input_bytes.div_ceil(2) <= self.asm.consumed_bytes / 2
+        {
+            self.emit_recentered(center_hz, at_input_bytes);
+            return;
+        }
+        if self
+            .channels
+            .values()
+            .any(|ch| matches!(ch.dsp, Engine::Demod(_)))
+        {
+            return self.refuse_recenter("demod-channels");
+        }
+        if self.pending_recenters.len() >= MAX_PENDING_RECENTERS {
+            return self.refuse_recenter("too-many-pending");
+        }
+        self.received_recenter += 1;
+        self.pending_recenters.push_back(PendingRecenter {
+            seq: self.received_recenter,
+            at_input_bytes,
+            center_hz,
+        });
+        // Whole samples already consumed: a byte is reached once the first whole sample at or after it would be next.
+        let next_sample = self.asm.consumed_bytes / 2;
+        while self
+            .pending_recenters
+            .front()
+            .is_some_and(|r| r.at_input_bytes.div_ceil(2) <= next_sample)
+        {
+            self.apply_next_recenter();
+        }
+    }
+
+    fn refuse_recenter(&mut self, reason: &str) {
+        self.centre_refused = true;
+        self.emit(json!({"type": "recenter-refused", "reason": reason}));
+    }
+
+    fn emit_recentered(&mut self, center_hz: f64, at_input_bytes: u64) {
+        self.emit(
+            json!({"type": "recentered", "centerHz": center_hz, "atInputBytes": at_input_bytes}),
+        );
+    }
+
+    /// The input reached the oldest pending move. A channel that started from this move or a later one already has its
+    /// offset; an older IQ channel keeps its absolute frequency with an in-place NCO retune, or closes if the capture no
+    /// longer holds it.
+    fn apply_next_recenter(&mut self) {
+        let Some(moved) = self.pending_recenters.pop_front() else {
+            return;
+        };
+        let previous = self.args.input_center;
+        self.args.input_center = moved.center_hz;
+        self.applied_recenter = moved.seq;
+        let fraction = self.args.usable_fraction;
+        let mut outside = Vec::new();
+        for (id, ch) in self.channels.iter_mut() {
+            if ch.centre_seq >= moved.seq {
+                continue;
+            }
+            if let Engine::Iq(dsp) = &mut ch.dsp {
+                match dsp.admit_retune(previous + dsp.offset_hz(), moved.center_hz, fraction) {
+                    Ok(offset) => dsp.retune(offset),
+                    Err(_) => outside.push(id.clone()),
+                }
+            }
+        }
+        for id in outside {
+            self.close(&id, "requested");
+        }
+        self.emit_recentered(moved.center_hz, moved.at_input_bytes);
     }
 
     fn retune(&mut self, req: RetuneReq) {
@@ -1011,17 +1229,34 @@ impl Runtime {
         let first_sample = self.asm.consumed_bytes / 2;
         self.asm.push(bytes, i, q);
         let mut start = 0usize;
-        // A2: each gap resets at the first whole sample at or after its byte.
-        while let Some(&(at, dropped_in)) = self.pending_gaps.front() {
-            let seam = at.div_ceil(2).saturating_sub(first_sample);
+        // A2: each gap resets at the first whole sample at or after its byte. A centre move splits the block at the same
+        // place: a sample holding any byte before the position still belongs to the old centre. A tie goes to the gap.
+        loop {
+            let seam_of = |at: u64| at.div_ceil(2).saturating_sub(first_sample);
+            let gap = self.pending_gaps.front().map(|&(at, _)| seam_of(at));
+            let moved = self
+                .pending_recenters
+                .front()
+                .map(|r| seam_of(r.at_input_bytes));
+            let (seam, is_gap) = match (gap, moved) {
+                (None, None) => break,
+                (Some(g), Some(m)) if g <= m => (g, true),
+                (Some(g), None) => (g, true),
+                (_, Some(m)) => (m, false),
+            };
             if seam > i.len() as u64 {
                 break;
             }
             let seam = (seam as usize).max(start);
             self.feed(&i[start..seam], &q[start..seam]);
             start = seam;
-            self.pending_gaps.pop_front();
-            self.input_gap(at, dropped_in);
+            if is_gap {
+                if let Some((at, dropped_in)) = self.pending_gaps.pop_front() {
+                    self.input_gap(at, dropped_in);
+                }
+            } else {
+                self.apply_next_recenter();
+            }
         }
         self.feed(&i[start..], &q[start..]);
     }
@@ -1030,9 +1265,11 @@ impl Runtime {
     fn input_gap(&mut self, at: u64, dropped_in: u64) {
         let fs = self.args.input_rate;
         let mut events = Vec::new();
+        let applied = self.applied_recenter;
         for (id, ch) in self.channels.iter_mut() {
-            if ch.opened_at_byte >= at {
-                // Opened at or after the marked byte (a late mark): no input before the gap, no seam.
+            if ch.opened_at_byte >= at || ch.centre_seq > applied {
+                // Opened at or after the marked byte (a late mark), or still waiting for its centre: no input before
+                // the gap, no seam.
                 continue;
             }
             if let (Some(sink), Engine::Demod(dsp)) = (&ch.framer, &mut ch.dsp) {
@@ -1070,19 +1307,29 @@ impl Runtime {
         if i.is_empty() {
             return;
         }
-        if self.pool.helpers() > 0 && self.channels.len() > 1 && i.len() >= PARALLEL_MIN_SAMPLES {
+        // A channel opened after a move the input has not reached sits this block out.
+        let applied = self.applied_recenter;
+        let live = if self.received_recenter == applied {
+            self.channels.len()
+        } else {
+            let waiting = |c: &&Open| c.centre_seq > applied;
+            self.channels.len() - self.channels.values().filter(waiting).count()
+        };
+        if self.pool.helpers() > 0 && live > 1 && i.len() >= PARALLEL_MIN_SAMPLES {
             return self.feed_parallel(i, q);
         }
         let mut events = Vec::new();
-        let mut out = Vec::new();
         let input_samples = self.asm.consumed_bytes / 2;
         for (id, ch) in self.channels.iter_mut() {
-            out.clear();
-            let r = ch.dsp.process(i, q, &mut out, &mut events);
+            if ch.centre_seq > applied {
+                continue;
+            }
+            self.serial_out.clear();
+            let r = ch.dsp.process(i, q, &mut self.serial_out, &mut events);
             ch.saturated += r.saturated;
             let first = ch.out_samples;
             ch.out_samples += r.samples;
-            push_output(id, ch, &out, first, &mut events);
+            push_output(id, ch, &self.serial_out, first, &mut events);
             self.out.step(input_samples);
         }
         for e in events {
@@ -1094,7 +1341,12 @@ impl Runtime {
     /// output is queued; queueing and events then follow the serial loop's channel order, so the
     /// bytes, counters and event order are the same as `feed`'s.
     fn feed_parallel(&mut self, i: &[f32], q: &[f32]) {
-        for ch in self.channels.values_mut() {
+        let applied = self.applied_recenter;
+        for ch in self
+            .channels
+            .values_mut()
+            .filter(|c| c.centre_seq <= applied)
+        {
             let (out, events) = self.scratch.pop().unwrap_or_default();
             self.jobs.push(ChannelJob {
                 engine: std::mem::replace(&mut ch.dsp, Engine::Lent),
@@ -1111,7 +1363,11 @@ impl Runtime {
         self.pool
             .run_ticking(&mut self.jobs, i, q, &mut || reporter.step(input_samples));
         let mut events = Vec::new();
-        for ((id, ch), job) in self.channels.iter_mut().zip(self.jobs.drain(..)) {
+        let live = self
+            .channels
+            .iter_mut()
+            .filter(|(_, c)| c.centre_seq <= applied);
+        for ((id, ch), job) in live.zip(self.jobs.drain(..)) {
             let ChannelJob {
                 engine,
                 mut out,
@@ -1534,30 +1790,31 @@ fn read_control_mode<R: BufRead>(
 /// being read into. Spent buffers go back to the reader, which allocates only when none is free.
 const INPUT_BUFFERS: usize = 3;
 
-/// The stdin reader: reads of at most `block` bytes into recycled buffers, then `InputEof`.
+/// The stdin reader: blocks of at most `block` bytes (see [`fill_block`]) in recycled buffers, then
+/// `InputEof`.
 fn read_input(
-    mut input: impl Read,
+    mut input: impl InputSource,
     block: usize,
+    policy: Coalesce,
     tx: &mpsc::SyncSender<Msg>,
     free: &mpsc::Receiver<Vec<u8>>,
 ) {
     loop {
         let mut buf = free.try_recv().unwrap_or_default();
         buf.resize(block, 0);
-        match input.read(&mut buf) {
-            Ok(0) => {
-                let _ = tx.send(Msg::InputEof);
+        let filled = fill_block(&mut input, &mut buf, policy, &mut thread::sleep);
+        if filled.bytes > 0 {
+            buf.truncate(filled.bytes);
+            if tx.send(Msg::Input(buf)).is_err() {
                 return;
             }
-            Ok(n) => {
-                buf.truncate(n);
-                if tx.send(Msg::Input(buf)).is_err() {
-                    return;
+        }
+        match filled.end {
+            None => {}
+            Some(end) => {
+                if let InputEnd::Failed(e) = end {
+                    eprintln!("wavekit-chan: stdin: {e}");
                 }
-            }
-            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-            Err(e) => {
-                eprintln!("wavekit-chan: stdin: {e}");
                 let _ = tx.send(Msg::InputEof);
                 return;
             }
@@ -1588,7 +1845,8 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
     if observed {
         let mut stdout = std::io::stdout().lock();
         let ready = json!({"v": 1, "type": "ready", "generation": args.generation,
-            "pid": std::process::id(), "observerCapability": disposal::CAPABILITY});
+            "pid": std::process::id(), "observerCapability": disposal::CAPABILITY,
+            "recenter": true});
         if serde_json::to_writer(&mut stdout, &ready).is_err()
             || stdout.write_all(b"\n").is_err()
             || stdout.flush().is_err()
@@ -1601,7 +1859,16 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
     {
         let tx = tx.clone();
         let block = args.block_samples * 2;
-        thread::spawn(move || read_input(std::io::stdin().lock(), block, &tx, &free_rx));
+        let policy = Coalesce::new(block, args.input_rate);
+        thread::spawn(
+            move || match std::io::stdin().as_fd().try_clone_to_owned() {
+                Ok(fd) => read_input(FdInput::new(fd), block, policy, &tx, &free_rx),
+                Err(e) => {
+                    eprintln!("wavekit-chan: stdin: {e}");
+                    let _ = tx.send(Msg::InputEof);
+                }
+            },
+        );
     }
     {
         let fd = args.control_fd;
@@ -1626,7 +1893,7 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
     let mut rt = Runtime::new(args, sink);
     rt.disposal = disposal;
     if !observed {
-        rt.emit(json!({"type": "ready", "pid": std::process::id()}));
+        rt.emit(json!({"type": "ready", "pid": std::process::id(), "recenter": true}));
     }
     loop {
         let wait = if rt.pending.is_empty() {
@@ -1773,6 +2040,571 @@ mod tests {
         );
         assert_eq!(last(&ev)["type"], "retuned");
         assert_eq!(last(&ev)["centerHz"], 162010000.0);
+        r.shutdown();
+    }
+
+    fn iq_offset(r: &Runtime, id: &str) -> f64 {
+        match &r.channels[id].dsp {
+            Engine::Iq(dsp) => dsp.offset_hz(),
+            Engine::Demod(_) | Engine::Lent => unreachable!(),
+        }
+    }
+
+    fn recenter(center_hz: f64) -> Request {
+        recenter_at(center_hz, 0)
+    }
+
+    fn recenter_at(center_hz: f64, at_input_bytes: u64) -> Request {
+        parse_request(&format!(
+            r#"{{"v":1,"type":"recenter","centerHz":{center_hz},"atInputBytes":{at_input_bytes}}}"#
+        ))
+        .unwrap()
+    }
+
+    fn popped(r: &Runtime, id: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        r.channels[id].queue.try_pop_for_test(&mut out);
+        out
+    }
+
+    /// The bytes a channel opened on `center` emits for `input`, fed whole with nothing before it.
+    fn fresh_channel_bytes(center: f64, input: &[u8]) -> Vec<u8> {
+        let dir = TempDir::new();
+        let (mut r, _ev) = rt(&dir.0);
+        r.on_request(recenter(center));
+        r.request_and_wait(open("c", center, 1 << 20));
+        r.on_input(input);
+        let out = popped(&r, "c");
+        r.shutdown();
+        out
+    }
+
+    fn noise(bytes: usize, seed: u32) -> Vec<u8> {
+        (0..bytes as u32)
+            .map(|k| (k.wrapping_mul(13).wrapping_add(seed) % 251) as u8)
+            .collect()
+    }
+
+    // 250 ms at 2.048 Msps is 1 024 000 bytes of old-centre IQ still on its way when the line arrives: at 48 kHz it would
+    // be 12 000 output samples attributed to the new frequency.
+    #[test]
+    fn a_channel_opened_after_a_move_gets_nothing_from_the_queued_old_centre_iq() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.request_and_wait(open("old", 162e6, 1 << 16));
+        r.request_and_wait(Request::Close { id: "old".into() });
+        r.on_request(recenter_at(170e6, 1_024_000));
+        r.request_and_wait(open("new", 170e6, 1 << 20));
+        assert_eq!(
+            last(&ev)["type"],
+            "opened",
+            "opened before the input arrives"
+        );
+        let old = noise(1_024_000, 1);
+        for chunk in old.chunks(8_192) {
+            r.on_input(chunk);
+        }
+        assert_eq!(r.channels["new"].out_samples, 0);
+        assert!(popped(&r, "new").is_empty());
+        assert!(of_cause(&ev, "input-gap").is_empty());
+        // The position is reached, and only now does the capture sit on the new centre.
+        assert_eq!(r.args.input_center, 170e6);
+        let new = noise(204_800, 2);
+        r.on_input(&new);
+        assert_eq!(popped(&r, "new"), fresh_channel_bytes(170e6, &new));
+        r.shutdown();
+    }
+
+    #[test]
+    fn a_move_applies_at_its_byte_and_not_one_byte_sooner() {
+        let dir = TempDir::new();
+        let (mut r, _ev) = rt(&dir.0);
+        r.on_request(recenter_at(170e6, 4_096));
+        r.on_input(&[128; 4_094]);
+        assert_eq!(
+            r.args.input_center, 162e6,
+            "one sample short of the position"
+        );
+        assert_eq!(r.capture_centre(), 170e6);
+        r.on_input(&[128; 2]);
+        assert_eq!(r.args.input_center, 170e6, "at the position");
+        // An odd position: the sample straddling it holds an old byte, so the next one is the first at the new centre.
+        r.on_request(recenter_at(171e6, 4_099));
+        r.on_input(&[128; 2]);
+        assert_eq!(r.args.input_center, 170e6, "bytes 4 096 and 4 097 are old");
+        r.on_input(&[128; 2]);
+        assert_eq!(
+            r.args.input_center, 171e6,
+            "bytes 4 098 and 4 099 end the old input"
+        );
+        r.shutdown();
+    }
+
+    #[test]
+    fn a_position_already_passed_applies_at_once_and_a_new_channel_only_sees_later_input() {
+        let dir = TempDir::new();
+        let (mut r, _ev) = rt(&dir.0);
+        r.on_input(&noise(4_096, 1));
+        // At the bytes received, then before them.
+        r.on_request(recenter_at(170e6, 4_096));
+        assert_eq!(r.args.input_center, 170e6);
+        r.on_request(recenter_at(171e6, 2_048));
+        assert_eq!(r.args.input_center, 171e6);
+        assert!(r.pending_recenters.is_empty());
+        r.request_and_wait(open("c", 171e6, 1 << 20));
+        let later = noise(204_800, 2);
+        r.on_input(&later);
+        assert_eq!(popped(&r, "c"), fresh_channel_bytes(171e6, &later));
+        r.shutdown();
+    }
+
+    fn recentered_lines(ev: &Events) -> Vec<(f64, u64)> {
+        ev.lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == "recentered")
+            .map(|e| {
+                (
+                    e["centerHz"].as_f64().unwrap(),
+                    e["atInputBytes"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_move_is_answered_once_when_it_applies_in_the_order_received() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.on_request(recenter_at(170e6, 1_000));
+        r.on_request(recenter_at(171e6, 1_000));
+        assert!(recentered_lines(&ev).is_empty(), "not reached yet");
+        r.on_input(&[128; 998]);
+        assert!(recentered_lines(&ev).is_empty(), "one sample short");
+        r.on_input(&[128; 2]);
+        assert_eq!(
+            recentered_lines(&ev),
+            [(170e6, 1_000), (171e6, 1_000)],
+            "answered in order, with the position the line carried"
+        );
+        // A position the input has passed is answered at once.
+        r.on_request(recenter_at(172e6, 500));
+        assert_eq!(recentered_lines(&ev).last(), Some(&(172e6, 500)));
+        r.shutdown();
+    }
+
+    #[test]
+    fn an_unchanged_centre_with_a_position_holds_a_new_channel_back_to_it() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        // What a burst absorber holds when a generation starts: old IQ, already described by the capture's centre.
+        let held = noise(8_192, 1);
+        r.on_request(recenter_at(162e6, held.len() as u64));
+        r.request_and_wait(open("c", 162e6, 1 << 20));
+        r.on_input(&held);
+        assert_eq!(r.channels["c"].out_samples, 0);
+        assert_eq!(recentered_lines(&ev), [(162e6, 8_192)]);
+        assert!(of_cause(&ev, "input-gap").is_empty());
+        let later = noise(204_800, 2);
+        r.on_input(&later);
+        assert_eq!(popped(&r, "c"), fresh_channel_bytes(162e6, &later));
+        r.shutdown();
+    }
+
+    #[test]
+    fn an_unchanged_centre_at_a_reached_position_changes_nothing_and_is_answered() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.on_input(&[128; 4_096]);
+        r.on_request(recenter_at(162e6, 4_096));
+        assert!(r.pending_recenters.is_empty());
+        assert_eq!(r.received_recenter, 0);
+        assert_eq!(recentered_lines(&ev), [(162e6, 4_096)]);
+        r.on_request(recenter_at(162e6, 4_097));
+        assert_eq!(
+            r.pending_recenters.len(),
+            1,
+            "a byte past the input: the sample holding it is not whole yet"
+        );
+        r.shutdown();
+    }
+
+    #[test]
+    fn pending_moves_apply_in_order_and_each_channel_follows_from_its_own_centre() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.request_and_wait(open("live", 162e6, 1 << 20));
+        r.on_request(recenter_at(162.1e6, 1_000));
+        r.request_and_wait(open("second", 162.1e6, 1 << 20));
+        r.on_request(recenter_at(162.2e6, 2_000));
+        r.request_and_wait(open("third", 162.2e6, 1 << 20));
+        // Same position as the last: two moves with no byte between them.
+        r.on_request(recenter_at(162.3e6, 2_000));
+        assert_eq!(r.capture_centre(), 162.3e6);
+        assert_eq!(r.args.input_center, 162e6);
+        assert_eq!(iq_offset(&r, "second"), 0.0);
+        assert_eq!(iq_offset(&r, "third"), 0.0);
+        r.on_input(&[128; 1_000]);
+        assert_eq!(r.args.input_center, 162.1e6);
+        assert!((iq_offset(&r, "live") + 100_000.0).abs() < 1e-3);
+        assert_eq!(iq_offset(&r, "second"), 0.0);
+        assert_eq!(r.channels["second"].out_samples, 0);
+        r.on_input(&[128; 1_000]);
+        assert_eq!(r.args.input_center, 162.3e6);
+        assert!((iq_offset(&r, "live") + 300_000.0).abs() < 1e-3);
+        assert!((iq_offset(&r, "second") + 200_000.0).abs() < 1e-3);
+        assert!((iq_offset(&r, "third") + 100_000.0).abs() < 1e-3);
+        assert!(r.pending_recenters.is_empty());
+        // A retune of a channel admits against the centre it now sits on.
+        r.on_request(
+            parse_request(r#"{"v":1,"type":"retune","channelId":"third","centerHz":162400000}"#)
+                .unwrap(),
+        );
+        assert_eq!(last(&ev)["type"], "retuned");
+        assert!((iq_offset(&r, "third") - 100_000.0).abs() < 1e-3);
+        r.shutdown();
+    }
+
+    #[test]
+    fn a_channel_waiting_for_its_centre_retunes_against_that_centre() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.on_request(recenter_at(170e6, 1_000));
+        r.request_and_wait(open("c", 170e6, 4096));
+        r.on_request(
+            parse_request(r#"{"v":1,"type":"retune","channelId":"c","centerHz":170100000}"#)
+                .unwrap(),
+        );
+        assert_eq!(last(&ev)["type"], "retuned");
+        assert!((iq_offset(&r, "c") - 100_000.0).abs() < 1e-3);
+        r.on_input(&[128; 1_000]);
+        assert!(
+            (iq_offset(&r, "c") - 100_000.0).abs() < 1e-3,
+            "already on it"
+        );
+        r.shutdown();
+    }
+
+    #[test]
+    fn a_gap_before_a_channels_boundary_is_not_its_gap() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.request_and_wait(open("live", 162e6, 1 << 20));
+        // The gap lands on the move's byte and on a later byte of the same straddling sample.
+        r.on_request(Request::MarkGap {
+            at_input_byte: Some(4_096),
+            dropped_input_bytes: Some(1_024),
+        });
+        r.on_request(recenter_at(162.1e6, 4_095));
+        r.request_and_wait(open("new", 162.1e6, 1 << 20));
+        r.on_request(Request::MarkGap {
+            at_input_byte: Some(4_095),
+            dropped_input_bytes: Some(1_024),
+        });
+        r.on_input(&[128; 8_192]);
+        let gaps = of_cause(&ev, "input-gap");
+        assert_eq!(
+            gaps.len(),
+            2,
+            "both gaps, on the live channel only: {gaps:?}"
+        );
+        assert!(gaps.iter().all(|e| e["id"] == "live"));
+        r.shutdown();
+    }
+
+    // Byte 4 095 is the odd half of sample 2 047, so the first whole sample at the new centre is byte 4 096, where the gap
+    // also lands: it is before the new channel's first sample whichever line arrives first.
+    #[test]
+    fn a_gap_at_an_odd_moves_first_whole_sample_is_not_the_channels_in_either_order() {
+        let gap = || Request::MarkGap {
+            at_input_byte: Some(4_096),
+            dropped_input_bytes: Some(1_024),
+        };
+        let start = |r: &mut Runtime| {
+            r.request_and_wait(open("live", 162e6, 1 << 20));
+            r.on_request(recenter_at(162.1e6, 4_095));
+            r.request_and_wait(open("new", 162.1e6, 1 << 20));
+            assert_eq!(r.channels["new"].opened_at_byte, 4_096);
+        };
+        let check = |ev: &Events| {
+            let gaps = of_cause(ev, "input-gap");
+            assert_eq!(gaps.len(), 1, "the live channel's only: {gaps:?}");
+            assert_eq!(gaps[0]["id"], "live");
+        };
+        // The input reaches the move, then the line arrives.
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        start(&mut r);
+        r.on_input(&[128; 4_096]);
+        assert_eq!(r.args.input_center, 162.1e6);
+        r.on_request(gap());
+        r.on_input(&[128; 8_192]);
+        check(&ev);
+        r.shutdown();
+        // The line arrives, then the input reaches both.
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        start(&mut r);
+        r.on_request(gap());
+        r.on_input(&[128; 4_096 + 8_192]);
+        check(&ev);
+        r.shutdown();
+    }
+
+    #[test]
+    fn a_gap_one_whole_sample_after_an_odd_move_is_the_channels_in_either_order() {
+        let gap = || Request::MarkGap {
+            at_input_byte: Some(4_098),
+            dropped_input_bytes: Some(1_024),
+        };
+        let start = |r: &mut Runtime| {
+            r.on_request(recenter_at(162.1e6, 4_095));
+            r.request_and_wait(open("new", 162.1e6, 1 << 20));
+        };
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        start(&mut r);
+        r.on_input(&[128; 4_098]);
+        r.on_request(gap());
+        r.on_input(&[128; 8_192]);
+        let gaps = of_cause(&ev, "input-gap");
+        assert_eq!(gaps.len(), 1, "after its first sample: {gaps:?}");
+        r.shutdown();
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        start(&mut r);
+        r.on_request(gap());
+        r.on_input(&[128; 4_098 + 8_192]);
+        let gaps = of_cause(&ev, "input-gap");
+        assert_eq!(gaps.len(), 1, "after its first sample: {gaps:?}");
+        r.shutdown();
+    }
+
+    #[test]
+    fn the_pending_moves_are_bounded_and_past_the_bound_the_parent_is_told() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let top = MAX_PENDING_RECENTERS as u64;
+        for k in 1..=top {
+            r.on_request(recenter_at(162e6 + k as f64, k * 1_000));
+        }
+        assert_eq!(r.pending_recenters.len(), MAX_PENDING_RECENTERS);
+        assert!(ev
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|e| e["type"] != "recenter-refused"));
+        r.on_request(recenter_at(170e6, (top + 1) * 1_000));
+        assert_eq!(last(&ev)["type"], "recenter-refused");
+        assert_eq!(last(&ev)["reason"], "too-many-pending");
+        assert_eq!(r.pending_recenters.len(), MAX_PENDING_RECENTERS);
+        // The process no longer knows the centre: nothing opens against a guess, and it says so once.
+        r.request_and_wait(open("c", 162e6, 4096));
+        assert_eq!(last(&ev)["reasonCode"], "channel-request-invalid");
+        assert_eq!(last(&ev)["detail"], CENTRE_REFUSED);
+        r.on_request(recenter_at(171e6, (top + 2) * 1_000));
+        let refused = ev
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == "recenter-refused")
+            .count();
+        assert_eq!(refused, 1);
+        r.shutdown();
+    }
+
+    #[test]
+    fn an_open_preparing_when_a_move_is_refused_is_rejected_at_install() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.request_and_wait(demod_open("d", 1 << 20, false));
+        let (entered, release) = block_next_preparation(&mut r);
+        r.on_request(open("c", 162e6, 4096));
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        r.on_request(recenter(170e6));
+        assert_eq!(last(&ev)["type"], "recenter-refused");
+        release.send(()).unwrap();
+        finish_preparations(&mut r);
+        assert!(!r.channels.contains_key("c"));
+        assert_eq!(last(&ev)["detail"], CENTRE_REFUSED);
+        r.shutdown();
+    }
+
+    #[test]
+    fn a_process_with_a_demod_channel_refuses_a_move_and_keeps_its_centre() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.request_and_wait(demod_open("d", 1 << 20, false));
+        // The same centre is not a move.
+        r.on_request(recenter(162e6));
+        assert!(ev
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|e| e["type"] != "recenter-refused"));
+        r.on_request(recenter(170e6));
+        assert_eq!(last(&ev)["type"], "recenter-refused");
+        assert_eq!(last(&ev)["reason"], "demod-channels");
+        assert_eq!(r.args.input_center, 162e6);
+        assert!(
+            r.channels.contains_key("d"),
+            "the channel is the parent's to end"
+        );
+        r.on_request(
+            parse_request(r#"{"v":1,"type":"retune","channelId":"d","centerHz":162000000}"#)
+                .unwrap(),
+        );
+        assert_eq!(last(&ev)["type"], "refused");
+        r.request_and_wait(demod_open("d2", 1 << 20, false));
+        assert_eq!(last(&ev)["detail"], CENTRE_REFUSED);
+        r.shutdown();
+    }
+
+    #[test]
+    fn a_demod_channel_does_not_open_while_a_move_is_pending_and_opens_once_it_lands() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.on_request(recenter_at(162e6 + 1.0, 1_000));
+        r.request_and_wait(demod_open("d", 1 << 20, false));
+        assert_eq!(last(&ev)["detail"], "capture centre is moving");
+        assert!(!r.channels.contains_key("d"));
+        r.on_input(&[128; 1_000]);
+        r.request_and_wait(demod_open("d", 1 << 20, false));
+        assert_eq!(last(&ev)["type"], "opened");
+        r.shutdown();
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+        // Feature: core-channelizer, Property 4: Chunk-split independence (across a centre move)
+        // Validates: addendum §12.4
+        #[test]
+        fn blocks_split_exactly_at_a_move_whatever_the_chunks(
+            position in 0usize..40_000,
+            tail in 2_048usize..40_000,
+            mut cuts in proptest::collection::vec(0usize..80_000, 0..12),
+            helpers in 0usize..2,
+        ) {
+            let input = noise(position + tail, 7);
+            cuts.iter_mut().for_each(|c| *c %= input.len());
+            cuts.sort_unstable();
+            let run = |cuts: &[usize], helpers: usize| {
+                let dir = TempDir::new();
+                let (mut r, _ev) = rt_with_helpers(&dir.0, helpers * crate::dsp_pool::MAX_DSP_HELPERS);
+                r.request_and_wait(open("before", 162e6, 1 << 20));
+                r.on_request(recenter_at(162.1e6, position as u64));
+                r.request_and_wait(open("after", 162.1e6, 1 << 20));
+                r.request_and_wait(open("after2", 162.2e6, 1 << 20));
+                let mut from = 0;
+                for &cut in cuts {
+                    r.on_input(&input[from..cut]);
+                    from = cut;
+                }
+                r.on_input(&input[from..]);
+                let out = (popped(&r, "before"), popped(&r, "after"), popped(&r, "after2"));
+                prop_assert_eq!(r.args.input_center, 162.1e6);
+                r.shutdown();
+                Ok(out)
+            };
+            let (before, after, after2) = run(&cuts, helpers)?;
+            let (whole_before, whole_after, whole_after2) = run(&[], 0)?;
+            prop_assert_eq!(&before, &whole_before);
+            prop_assert_eq!(&after, &whole_after);
+            prop_assert_eq!(&after2, &whole_after2);
+            // What a channel opened after the move emits is exactly a fresh channel fed from the first whole sample at
+            // or after the position: nothing of the earlier samples.
+            let first = position.div_ceil(2) * 2;
+            prop_assert_eq!(&after, &fresh_channel_bytes(162.1e6, &input[first..]));
+        }
+    }
+
+    // The capture is 2.048 Msps at fraction 0.8: |offset| + 45 600 / 2 + 1 200 ≤ 819 200.
+    #[test]
+    fn recenter_keeps_channels_in_the_capture_on_their_frequency_and_closes_the_rest() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.request_and_wait(open("near", 162e6, 4096));
+        r.request_and_wait(open("far", 162.5e6, 4096));
+        // At the admission bound for "far" (795 200 Hz away), then one hertz past it.
+        r.on_request(recenter(162.5e6 - 795_200.0));
+        assert_eq!(iq_offset(&r, "far"), 795_200.0);
+        assert_eq!(iq_offset(&r, "near"), 295_200.0);
+        r.on_request(recenter(162.5e6 + 795_201.0));
+        assert!(!r.channels.contains_key("far"));
+        assert!(!r.channels.contains_key("near"));
+        let events = ev.lock().unwrap().clone();
+        let closed: Vec<_> = events
+            .iter()
+            .filter(|e| e["type"] == "closed")
+            .map(|e| (e["id"].as_str().unwrap(), e["reason"].as_str().unwrap()))
+            .collect();
+        assert_eq!(closed, [("far", "requested"), ("near", "requested")]);
+        r.shutdown();
+    }
+
+    #[test]
+    fn later_opens_and_retunes_admit_against_the_new_centre() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.on_request(recenter(170e6));
+        r.request_and_wait(open("old-air", 162e6, 4096));
+        assert_eq!(last(&ev)["reasonCode"], "channel-outside-capture");
+        r.request_and_wait(open("new-air", 170.1e6, 4096));
+        assert_eq!(last(&ev)["type"], "opened");
+        assert!((iq_offset(&r, "new-air") - 100_000.0).abs() < 1e-3);
+        r.on_request(
+            parse_request(r#"{"v":1,"type":"retune","channelId":"new-air","centerHz":162000000}"#)
+                .unwrap(),
+        );
+        assert_eq!(last(&ev)["type"], "refused");
+        r.shutdown();
+    }
+
+    #[test]
+    fn a_preparing_open_installs_against_the_centre_current_at_install() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.on_request(open("follows", 162.1e6, 4096));
+        r.on_request(open("left-behind", 162e6, 4096));
+        r.on_request(recenter(162.8e6)); // 700 kHz away fits the 795 200 Hz bound; 800 kHz does not
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !r.pending.is_empty() {
+            r.poll_prepared();
+            assert!(Instant::now() < deadline, "preparation did not finish");
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!((iq_offset(&r, "follows") + 700_000.0).abs() < 1e-3);
+        assert!(!r.channels.contains_key("left-behind"));
+        let rejected = ev
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| e["type"] == "rejected")
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            (rejected["id"].as_str(), rejected["reasonCode"].as_str()),
+            (Some("left-behind"), Some("channel-outside-capture"))
+        );
+        r.shutdown();
+    }
+
+    #[test]
+    fn a_same_centre_move_already_reached_waits_behind_a_pending_one() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let line = |at: u64| {
+            parse_request(&format!(
+                r#"{{"v":1,"type":"recenter","centerHz":170000000,"atInputBytes":{at}}}"#
+            ))
+            .unwrap()
+        };
+        r.on_request(line(4096));
+        r.on_request(line(0));
+        assert!(
+            !ev.lock().unwrap().iter().any(|e| e["type"] == "recentered"),
+            "the answers keep the order received, so neither is due before the input reaches 4096"
+        );
         r.shutdown();
     }
 
@@ -3536,7 +4368,16 @@ mod tests {
         let spare = Vec::with_capacity(4096);
         let spare_at = spare.as_ptr();
         free_tx.try_send(spare).unwrap();
-        read_input(std::io::Cursor::new(input.clone()), 4096, &tx, &free_rx);
+        read_input(
+            crate::input::tests::Memory(std::io::Cursor::new(input.clone())),
+            4096,
+            Coalesce {
+                target_bytes: 1,
+                wait: Duration::ZERO,
+            },
+            &tx,
+            &free_rx,
+        );
         let mut got = Vec::new();
         let mut reads = Vec::new();
         while let Ok(m) = rx.try_recv() {

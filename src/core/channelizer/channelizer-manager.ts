@@ -50,6 +50,59 @@ export const CRASH_WINDOW_MS = 60_000
 const OPEN_TIMEOUT_MS = 5000
 const CLOSE_TIMEOUT_MS = 250
 /**
+ * How long a process with no channels waits after a centre move for its decoders to re-request, when no longer idle
+ * stop is configured: the decoder manager's 300 ms caps debounce plus a decoder's 5000 ms graceful stop, rounded up. A
+ * decoder later than this costs one respawn, as every centre move did before.
+ */
+export const RECENTER_LINGER_MS = 6000
+/**
+ * Each move restarts that wait, so a sweep with no grants would hold a channel-less process for as long as it sweeps,
+ * with the source's whole byte rate still going down its stdin. This ends it: at most this long after the first move
+ * since the last grant, one linger for the decoders that move stopped and one for a re-request a later move answered
+ * with `race`, 2 × 6000 ms. A hop every 185 ms is then 65 moves, not a process for life. Past it the next request costs
+ * one respawn, as every centre move did before; a grant starts a new cap.
+ */
+export const RECENTER_LINGER_MAX_MS = 2 * RECENTER_LINGER_MS
+/**
+ * How much input after a centre move a reopened channel skips, in ms at the input rate. The caps change only once the
+ * frequency command is written (`writeFrequency` in tuner-controller.ts), so the tuner has not moved yet: IQ of the old
+ * centre, then its settling, still arrives after the position the parent can count. 35 ms is a heuristic, not a
+ * measurement of command-to-clean-IQ latency: the assumed 30 ms marker counter run (`MARKER_RUN_ASSUMED_MS`,
+ * docs/SCANNER.md worked example) + the default 5 ms `scanner.sweep.pllSettleMs`. The move's position is that much later, so the process discards it by stream
+ * position, and no time is spent waiting: a channel opened at least 35 ms of input after the move loses nothing.
+ *
+ * No production consumer opens sooner: decoders reopen after a 300 ms debounce, a scanner tap after a track passes. A
+ * larger margin would cost nothing today either; this one stays until a real latency is measured, since any other figure
+ * would be just as assumed. A channel opened at the move still gets what comes later than the margin: lateness minus 35 ms.
+ */
+export const RECENTER_SETTLE_MS = 35
+/** Whole samples, so 143 360 B at 2.048 Msps and 168 000 B at 2.4 Msps. */
+export function recenterSettleBytes(sampleRateHz: number): number {
+	return Math.ceil((sampleRateHz * RECENTER_SETTLE_MS) / 1000) * 2
+}
+/**
+ * A process that advertised `recenter` answers each move with `recentered`. Input acknowledged this far past a move's
+ * position with no answer means the process ignored it, and it may be mixing against the old centre, so it is retired.
+ * Bytes, not time: a stalled host or a stalled source spends none of it. The line can be read late, because stdin and
+ * control share a channel in the process: at most 2 input blocks in flight + the one being filled + one more for the
+ * control thread's turn, 4 blocks. One second of input (4 096 000 B at 2.048 Msps) leaves far more room for scheduling at
+ * the default 16 384-sample block, where 4 blocks are 131 072 B. A false verdict costs one respawn. A process ignoring
+ * moves shows wrong IQ for at most this much input, plus RECENTER_SETTLE_MS (the position includes it and such a process does
+ * not discard it), plus the 100 ms a `progress` line can wait (PROGRESS_EVERY).
+ */
+export function unansweredMoveBytes(
+	sampleRateHz: number,
+	blockSamples: number,
+): number {
+	return Math.max(sampleRateHz * 2, 4 * blockSamples * 2)
+}
+/**
+ * Moves written and not yet answered. With no input `unansweredMoveBytes` never comes due, but a live process refuses
+ * past 512 pending (MAX_PENDING_RECENTERS in runtime.rs). Another 512 leaves room for answers still on their way when
+ * moves come faster than they return; past 1024 entries of two numbers each the process is retired.
+ */
+export const MAX_UNANSWERED_MOVES = 1024
+/**
  * Generation watchdog: a process that owes work (a control reply, or stdin bytes written but not yet acknowledged) and
  * wrote no event line for this long is wedged and retired. The runtime writes `progress` after every unit of main-loop
  * work, at most every 100 ms (PROGRESS_EVERY in native/wavekit-chan/src/runtime.rs), so a live one has 2000 / 100 = 20
@@ -94,7 +147,9 @@ function sanitize(id: string): string {
 
 export interface ChannelizerManagerDeps {
 	sourceManager: Pick<SourceManager, "getCaps" | "on" | "off">
-	routing: Pick<SourceFanoutRouter, "getFanout" | "releaseUnused">
+	/** `linkBurst` is what lets a centre move count IQ a burst absorber holds; without it nothing is taken as held. */
+	routing: Pick<SourceFanoutRouter, "getFanout" | "releaseUnused"> &
+		Partial<Pick<SourceFanoutRouter, "linkBurst">>
 	config: ChannelizerConfig
 	logger: Logger
 	createProcess?: (
@@ -137,6 +192,8 @@ interface RequestContext {
 	sends: number
 	observed?: ObservedAcquisitionHandle
 	transaction?: ObservedTransaction
+	/** The source's centre moves when this request began; a later count means its request may be stale. */
+	centreMoves?: number
 }
 interface OpenAttempt {
 	/** Updated synchronously on wire events, before any promise continuation. */
@@ -161,6 +218,7 @@ interface SourceChannelizer {
 	dir: string
 	fanout: FanoutManager
 	branchId: string
+	branch: PassThrough
 	channels: Map<string, OpenChannel>
 	waiters: Map<string, OpenAttempt>
 	closing: Map<string, Closing>
@@ -170,6 +228,14 @@ interface SourceChannelizer {
 	pending: number
 	idleTimer?: ReturnType<typeof setTimeout>
 	idleCause?: string
+	/** `openNow()` until which an empty process waits for re-requests after a centre move; a grant ends it. */
+	recenterLingerUntil?: number
+	/** `openNow()` of the first move since the last grant: `recenterLingerUntil` never passes it by RECENTER_LINGER_MAX_MS. */
+	recenterLingerSince?: number
+	/** Centres of the moves of this turn, in order, waiting for `postMoves` to read their position. */
+	movesToPost: number[]
+	/** Settles once `postMoves` ran; an `open` waits for it, so it follows the `recenter` line of its centre. */
+	movesPosted?: Promise<void>
 	gapAtByte: number | null
 	droppedAtGap: number
 	invalidated: boolean
@@ -197,6 +263,10 @@ interface SourceChannelizer {
 	settlement?: ProcessClaim
 	/** The channels of the last `stats` line (one per 5 s, replaced): at most one per open channel. */
 	lastStats?: Extract<ChannelizerEvent, { type: "stats" }>["channels"]
+	/** This binary's `ready` said it takes `recenter`. One that did not is restarted on a move instead. */
+	takesRecenter: boolean
+	/** `recenter` lines written and not yet answered, oldest first; the process answers in this order. */
+	movesUnanswered: { centerHz: number; atInputBytes: number }[]
 }
 
 const message = (err: unknown) =>
@@ -205,6 +275,12 @@ const unavailable = (detail: string): ChannelRequestResult => ({
 	ok: false,
 	reasonCode: "channelizer-unavailable",
 	detail,
+})
+const centreMoved = (): ChannelRequestResult => ({
+	ok: false,
+	reasonCode: "channelizer-unavailable",
+	detail: "capture centre moved during the channel request",
+	race: true,
 })
 const invalid = (detail: string): ChannelRequestResult => ({
 	ok: false,
@@ -268,9 +344,9 @@ function defaultConnect(path: string, signal?: AbortSignal): Promise<Readable> {
 
 /**
  * One `wavekit-chan` per source (addendum §4, §6; plan A2, A14): a raw-fanout consumer spawned lazily on the first
- * channel request and stopped when its last channel is released. Every spawn is a new generation; caps changes,
- * source loss and unexpected exits invalidate the generation's channels, and nothing respawns until the next request.
- * Channel opens, closes and retunes are control lines to the running generation: a slow reply never restarts it or
+ * channel request and stopped when its last channel is released. Every spawn is a new generation; a rate or format
+ * change, source loss and unexpected exits invalidate the generation's channels, and nothing respawns until the next
+ * request. A capture-centre move only re-wires the channels: the process stays (`recenter`). Channel opens, closes and retunes are control lines to the running generation: a slow reply never restarts it or
  * re-creates its fanout branch (only a wedged process, one that owes work and wrote nothing for WEDGE_MS, is retired).
  */
 export class ChannelizerManager
@@ -286,6 +362,10 @@ export class ChannelizerManager
 	private readonly crashes = new Map<string, number[]>()
 	/** Per source: bumped on every `disconnected`/`removed`, so a spawn that raced a loss is not used. */
 	private readonly losses = new Map<string, number>()
+	/** Per source: bumped on every centre move, so a request that spans one is answered, not granted. */
+	private readonly centreMoves = new Map<string, number>()
+	/** Sources already warned about a binary without `recenter`: it would log on every hop otherwise. */
+	private readonly warnedNoRecenter = new Set<string>()
 	/** Process stops in flight; `destroy()` awaits them all (PF14). */
 	private readonly stops = new Set<Promise<void>>()
 	private readonly releases = new Map<string, Promise<void>>()
@@ -312,7 +392,9 @@ export class ChannelizerManager
 	private destroyed = false
 	private readonly onCaps = (sourceId: string, caps: SourceCaps) => {
 		const s = this.active.get(sourceId)
-		if (s && this.capsDiffer(s, caps)) this.invalidate(sourceId, "caps-changed")
+		if (!s) return
+		if (this.capsDiffer(s, caps)) this.invalidate(sourceId, "caps-changed")
+		else this.followCentre(s, caps)
 	}
 	private readonly onGone = (sourceId: string) => {
 		this.losses.set(sourceId, (this.losses.get(sourceId) ?? 0) + 1)
@@ -419,6 +501,9 @@ export class ChannelizerManager
 			decoderId,
 			req,
 		)
+		// A request behind another one waits in the queue with no RequestContext yet: its count starts when it runs. The
+		// centre it was computed for is the one at this call, so a move during the wait is answered here.
+		const queuedCentre = this.deps.sourceManager.getCaps(sourceId)?.centerFreq
 		// A queued cancellation settles the caller now; its eventual queue callback
 		// remains a no-op. Running work settles through bounded ownership cleanup.
 		return new Promise((resolve, reject) => {
@@ -428,6 +513,10 @@ export class ChannelizerManager
 			const run = () => {
 				signal?.removeEventListener("abort", cancelled)
 				if (signal?.aborted) return unavailable(this.cancellationDetail())
+				if (
+					this.deps.sourceManager.getCaps(sourceId)?.centerFreq !== queuedCentre
+				)
+					return centreMoved()
 				const transaction = observed
 					? this.deps.settlementObserver?.tryReserveObservedTransaction(
 							observed,
@@ -619,6 +708,7 @@ export class ChannelizerManager
 	): Promise<ChannelRequestResult> {
 		if (this.destroyed) return unavailable("channelizer manager destroyed")
 		if (ctx.signal?.aborted) return unavailable(this.cancellationDetail())
+		if (this.movedSince(sourceId, ctx)) return centreMoved()
 		if (this.remaining(ctx) <= 0) return this.timeout()
 		const caps = this.deps.sourceManager.getCaps(sourceId)
 		if (!caps || !isCu8Iq(caps))
@@ -660,13 +750,16 @@ export class ChannelizerManager
 			}
 		const queueBytes = this.queueBytes(req)
 		if (typeof queueBytes === "string") return invalid(queueBytes)
-		if (
-			s &&
-			(s.caps.sampleRate !== caps.sampleRate || s.caps.centerHz !== centerHz)
-		) {
+		if (s && s.caps.sampleRate !== caps.sampleRate) {
 			this.invalidate(sourceId, "caps-changed")
 			s = undefined
+		} else if (s && s.caps.centerHz !== centerHz) {
+			this.recenter(s, centerHz)
+			if (s.invalidated) s = undefined
 		}
+		// A move this request found is already in its caps; only a later one makes the request stale.
+		ctx.centreMoves ??= this.centreMoves.get(sourceId) ?? 0
+		if (this.movedSince(sourceId, ctx)) return centreMoved()
 		const generation = s?.generation ?? this.currentGeneration(sourceId) + 1
 		const channelId = `${sanitize(decoderId)}-g${generation}`
 		const closing = s?.closing.get(channelId)
@@ -743,6 +836,7 @@ export class ChannelizerManager
 				return Promise.resolve(unavailable(this.cancellationDetail()))
 			if (this.destroyed)
 				return Promise.resolve(unavailable("channelizer manager destroyed"))
+			if (this.movedSince(sourceId, ctx)) return Promise.resolve(centreMoved())
 			if (this.remaining(ctx) <= 0) return Promise.resolve(this.timeout())
 			if (ctx.sends >= MAX_OPEN_SENDS)
 				return Promise.resolve(unavailable("channel open send limit reached"))
@@ -777,6 +871,10 @@ export class ChannelizerManager
 				this.invalidate(sourceId, "changed-during-spawn")
 				return superseded()
 			}
+			this.followCentre(s, now)
+			if (s.invalidated) return superseded()
+			this.skipHeldAtStart(s)
+			if (s.invalidated) return superseded()
 		}
 		if (
 			ctx.transaction &&
@@ -815,11 +913,17 @@ export class ChannelizerManager
 				const caps = this.deps.sourceManager.getCaps(s.sourceId)
 				if (!s.invalidated && (!caps || this.capsDiffer(s, caps)))
 					this.invalidate(s.sourceId, "caps-changed")
+				if (!s.invalidated && caps) this.followCentre(s, caps)
 				if (s.invalidated || this.active.get(s.sourceId) !== s)
 					return await superseded()
+				if (this.movedSince(s.sourceId, ctx)) return centreMoved()
 				if (this.remaining(ctx) <= 0) return this.timeout()
 				if (ctx.sends >= MAX_OPEN_SENDS)
 					return unavailable("channel open send limit reached")
+				if (s.movesPosted) {
+					await s.movesPosted
+					continue
+				}
 				const attempt: OpenAttempt = {
 					pending: true,
 					opened: false,
@@ -855,12 +959,13 @@ export class ChannelizerManager
 				})
 				if (reply === "superseded") return await superseded()
 				if (reply === "cancelled" || reply === null) {
-					await this.closeOwned(
-						s,
-						channelId,
-						attempt.pending,
-						this.remaining(ctx),
-					)
+					if (!attempt.closed)
+						await this.closeOwned(
+							s,
+							channelId,
+							attempt.pending,
+							this.remaining(ctx),
+						)
 					return reply === null
 						? this.timeout()
 						: unavailable(this.cancellationDetail())
@@ -902,8 +1007,7 @@ export class ChannelizerManager
 				event = reply
 				break
 			}
-			if (ownedAttempt?.closed)
-				return unavailable("channel closed during acquisition")
+			if (ownedAttempt?.closed) return this.closedDuringAcquisition(s, ctx)
 			if (ctx.signal?.aborted || this.remaining(ctx) <= 0) {
 				await this.closeOwned(s, channelId, false, this.remaining(ctx))
 				return ctx.signal?.aborted
@@ -974,7 +1078,7 @@ export class ChannelizerManager
 					connected !== "cancelled" &&
 					connected !== null
 				)
-					return unavailable("channel closed during acquisition")
+					return this.closedDuringAcquisition(s, ctx)
 				return connected === "cancelled"
 					? unavailable(this.cancellationDetail())
 					: connected === null
@@ -993,8 +1097,7 @@ export class ChannelizerManager
 				ownedAttempt?.closed
 			) {
 				socket.destroy()
-				if (ownedAttempt?.closed)
-					return unavailable("channel closed during acquisition")
+				if (ownedAttempt?.closed) return this.closedDuringAcquisition(s, ctx)
 				if (s.invalidated) return await superseded()
 				await this.closeOwned(s, channelId, false, this.remaining(ctx))
 				return ctx.signal?.aborted
@@ -1006,6 +1109,8 @@ export class ChannelizerManager
 				this.log.debug({ err, channelId }, "Channel stream error"),
 			)
 			socket.pipe(stream, { end: false })
+			delete s.recenterLingerUntil
+			delete s.recenterLingerSince
 			s.channels.set(channelId, {
 				id: channelId,
 				socket,
@@ -1052,6 +1157,23 @@ export class ChannelizerManager
 			s.pending--
 			this.stopIfIdle(s, "no-channels")
 		}
+	}
+
+	private movedSince(sourceId: string, ctx: RequestContext): boolean {
+		return (
+			ctx.centreMoves !== undefined &&
+			(this.centreMoves.get(sourceId) ?? 0) !== ctx.centreMoves
+		)
+	}
+
+	/** `closed` ended the attempt, or a centre move did (its close line was the move's). */
+	private closedDuringAcquisition(
+		s: SourceChannelizer,
+		ctx: RequestContext,
+	): ChannelRequestResult {
+		return this.movedSince(s.sourceId, ctx)
+			? centreMoved()
+			: unavailable("channel closed during acquisition")
 	}
 
 	private remaining(ctx: RequestContext): number {
@@ -1342,8 +1464,11 @@ export class ChannelizerManager
 		if (settlement) this.processClaims.set(proc, settlement)
 		if (directoryOwner) this.directoryClaims.set(proc, directoryOwner)
 		let readyGeneration: number | undefined
+		let takesRecenter = false
 		const onReady = (e: ChannelizerEvent) => {
-			if (e.type === "ready") readyGeneration = e.generation
+			if (e.type !== "ready") return
+			readyGeneration = e.generation
+			takesRecenter = e.recenter === true
 		}
 		proc.on("event", onReady)
 		try {
@@ -1410,6 +1535,14 @@ export class ChannelizerManager
 				})
 			s.gapAtByte = null
 		}
+		const branch = fanout.addBranch({
+			id: branchId,
+			sourceId,
+			highWaterMark: channelizerInputMark(
+				this.deps.config.inputHighWaterMark,
+				caps.sampleRate,
+			),
+		})
 		const s: SourceChannelizer = {
 			sourceId,
 			generation,
@@ -1418,12 +1551,14 @@ export class ChannelizerManager
 			dir,
 			fanout,
 			branchId,
+			branch,
 			channels: new Map(),
 			waiters: new Map(),
 			closing: new Map(),
 			interruptions: new Set(),
 			retuning: new Set(),
 			pending: 0,
+			movesToPost: [],
 			gapAtByte: null,
 			droppedAtGap: 0,
 			invalidated: false,
@@ -1440,15 +1575,9 @@ export class ChannelizerManager
 				fanout.off("drain", onDrain)
 			},
 			...(settlement ? { settlement } : {}),
+			takesRecenter,
+			movesUnanswered: [],
 		}
-		const branch = fanout.addBranch({
-			id: branchId,
-			sourceId,
-			highWaterMark: channelizerInputMark(
-				this.deps.config.inputHighWaterMark,
-				caps.sampleRate,
-			),
-		})
 		void pipeline(branch, proc.input).catch((err: unknown) =>
 			this.log.debug(
 				{ err, sourceId, generation },
@@ -1506,6 +1635,15 @@ export class ChannelizerManager
 			case "opened":
 			case "rejected":
 				{
+					// A line the process could not parse has no id to answer. Only a `recenter` waits with no id of its own.
+					if (
+						e.type === "rejected" &&
+						e.id === "" &&
+						s.movesUnanswered.length
+					) {
+						this.moveNotTaken(s, `rejected: ${e.detail}`)
+						break
+					}
 					const closing = s.closing.get(e.id)
 					if (closing) {
 						if (e.type === "rejected" && closing.pendingOpen) closing.finish()
@@ -1590,7 +1728,28 @@ export class ChannelizerManager
 					"Channelizer input EOF",
 				)
 				break
-			case "progress":
+			case "recenter-refused":
+				// A restart is safe; a process that no longer knows the capture centre is not.
+				this.log.warn(
+					{
+						sourceId: s.sourceId,
+						generation: s.generation,
+						reason: e.reason,
+					},
+					"wavekit-chan refused a centre move; retiring it",
+				)
+				this.invalidate(s.sourceId, "recenter-refused")
+				break
+			case "recentered": {
+				const oldest = s.movesUnanswered.shift()
+				if (
+					oldest?.centerHz !== e.centerHz ||
+					oldest.atInputBytes !== e.atInputBytes
+				)
+					this.moveNotTaken(s, "answered a move it was not asked next")
+				break
+			}
+			case "progress": {
 				s.sawProgress = true
 				// Liveness is recorded above. The ack only grows and never passes what was written: a smaller count never
 				// un-owes input, and a count past it cannot hide input written later.
@@ -1598,7 +1757,19 @@ export class ChannelizerManager
 					s.inputAcked,
 					Math.min(e.inputBytes, s.inputWritten),
 				)
+				const waiting = s.movesUnanswered[0]
+				if (
+					waiting &&
+					s.inputAcked >=
+						waiting.atInputBytes +
+							unansweredMoveBytes(
+								s.caps.sampleRate,
+								this.deps.config.blockSamples,
+							)
+				)
+					this.moveNotTaken(s, "input passed its position unanswered")
 				break
+			}
 			case "ready":
 				break
 		}
@@ -1715,19 +1886,30 @@ export class ChannelizerManager
 	private stopIfIdle(s: SourceChannelizer, cause: string): void {
 		if (!s.invalidated && s.channels.size === 0 && s.pending === 0) {
 			const idleStopMs = this.deps.idleStopMs ?? 0
-			if (
-				idleStopMs > 0 &&
-				(cause === "last-channel-released" ||
-					cause === "last-channel-died" ||
-					cause === "no-channels")
-			) {
+			// The recentre deadline outlives the acquisitions that cleared the timer: cleaning one up must not stop a process
+			// whose decoders are still on their way back. A move does not touch a running timer, so a timer that comes due
+			// before a later move's deadline waits out the rest: at most one timer per linger, however fast the hops.
+			const recenterMs = (s.recenterLingerUntil ?? 0) - this.openNow()
+			const lingers =
+				cause === "recentered" ||
+				cause === "last-channel-released" ||
+				cause === "last-channel-died" ||
+				cause === "no-channels"
+			const lingerMs =
+				cause === "idle-timeout"
+					? recenterMs
+					: lingers
+						? Math.max(idleStopMs, recenterMs)
+						: 0
+			if (lingerMs > 0) {
 				if (s.idleTimer === undefined) {
-					s.idleCause = cause
+					// `idleCause` restores a linger a request interrupted, so it never is the timer's own cause.
+					s.idleCause = cause === "idle-timeout" ? "no-channels" : cause
 					s.idleTimer = setTimeout(() => {
 						delete s.idleTimer
 						delete s.idleCause
 						this.stopIfIdle(s, "idle-timeout")
-					}, idleStopMs)
+					}, lingerMs)
 					s.idleTimer.unref()
 				}
 				return
@@ -1807,12 +1989,231 @@ export class ChannelizerManager
 		this.stops.add(stop)
 	}
 
+	/** Only these end a generation (docs/PERFORMANCE.md rule 5); a centre move goes through `recenter`. */
 	private capsDiffer(s: SourceChannelizer, caps: SourceCaps): boolean {
-		return (
-			!isCu8Iq(caps) ||
-			s.caps.sampleRate !== caps.sampleRate ||
-			(caps.centerFreq !== undefined && s.caps.centerHz !== caps.centerFreq)
+		return !isCu8Iq(caps) || s.caps.sampleRate !== caps.sampleRate
+	}
+
+	private followCentre(s: SourceChannelizer, caps: SourceCaps): void {
+		if (caps.centerFreq !== undefined && s.caps.centerHz !== caps.centerFreq)
+			this.recenter(s, caps.centerFreq)
+	}
+
+	/**
+	 * The stdin byte the next delivered chunk will be: every chunk the fanout counted and did not drop reaches the
+	 * branch, and the pipeline passes those bytes on in order, so the count is the process's own stdin position. Bytes
+	 * dropped under backpressure never reach stdin, so they are outside it, as in `mark-gap`'s `atInputByte`. The count
+	 * is on the write side, unlike `inputWritten`: it includes what still sits in the branch.
+	 *
+	 * A burst absorber sits before the fanout: what it holds came from the old centre and is distributed later, so it is
+	 * added. The sum can only err late, never early. The absorber's release may drop some of those bytes for this branch
+	 * (it stopped waiting for this branch as a laggard), and the count cannot know that yet: the process then starts a
+	 * reopened channel up to that many bytes into the new centre, at most the absorber's capacity. Its other discards,
+	 * a flush at a disconnect, removal or rate change, end this generation anyway.
+	 *
+	 * Only right between distributions: the absorber takes a chunk off its held count before distributing it, and the
+	 * fanout counts it branch by branch, so during one a callback on an earlier branch finds the chunk in neither count.
+	 * `postMoves` reads it once that has finished; `recenter` reads it at once only to see if it can be trusted at all.
+	 *
+	 * Undefined when it cannot be trusted: no telemetry, a branch no longer taking writes (the fanout counts a chunk it
+	 * refused there as neither written nor dropped), a count behind the bytes the branch has already emitted, or a held
+	 * count that is no byte count.
+	 */
+	private inputPosition(s: SourceChannelizer): number | undefined {
+		const t = s.fanout.getBranchTelemetry(s.branchId)
+		if (!t || s.branch.destroyed || s.branch.writableEnded) return undefined
+		const delivered = t.totalBytesWritten - t.droppedBytesTotal
+		const held =
+			this.deps.routing.linkBurst?.(s.sourceId)?.absorber?.counters()
+				.heldBytes ?? 0
+		const at = delivered + held
+		return Number.isSafeInteger(at) && held >= 0 && delivered >= s.inputWritten
+			? at
+			: undefined
+	}
+
+	/**
+	 * The capture centre moved at the same rate and format. The process, its fanout branch and the generation stay.
+	 * Open channels are invalidated as before, because a decoder's request may follow the centre and only it can
+	 * recompute that: it re-requests through the usual stale-channel path, on the same id once `closed` lifts the fence.
+	 * A request in flight is answered instead of granted, for the same reason: it was computed for the old centre.
+	 *
+	 * The close lines are written before listeners run and an `open` waits for `movesPosted`, so a request from a listener
+	 * opens at the new centre. The `recenter` line carries the stdin position of the move, because control and stdin are
+	 * read independently: the process gives a channel opened after it nothing before that byte. A move can land inside a
+	 * distribution, so the line is written in a microtask (`postMoves`). No close or retune can need it first: this move
+	 * emptied `channels` and every `open` waits. Without a position it can trust, the generation ends instead. IQ older
+	 * than the fanout and not in an absorber (the tuner's own settling, a socket) has no position here: the line adds
+	 * RECENTER_SETTLE_MS of input for it, and what comes later than that reaches a channel opened that early.
+	 *
+	 * A binary whose `ready` did not offer `recenter` would ignore the line and keep mixing against the old centre, so it
+	 * is restarted instead, as every move once did.
+	 */
+	private recenter(s: SourceChannelizer, centerHz: number): void {
+		this.centreMoves.set(
+			s.sourceId,
+			(this.centreMoves.get(s.sourceId) ?? 0) + 1,
 		)
+		if (!s.takesRecenter) {
+			if (!this.warnedNoRecenter.has(s.sourceId)) {
+				this.warnedNoRecenter.add(s.sourceId)
+				this.log.warn(
+					{
+						sourceId: s.sourceId,
+						generation: s.generation,
+						binaryPath: this.deps.config.binaryPath,
+					},
+					"wavekit-chan does not take recenter (an older binary); restarting it on every centre move",
+				)
+			}
+			this.invalidate(s.sourceId, "caps-changed")
+			return
+		}
+		if (!Number.isFinite(centerHz) || this.inputPosition(s) === undefined) {
+			// No line could carry this move, and this runs inside a foreign emitter.
+			this.log.warn(
+				{ sourceId: s.sourceId, generation: s.generation, centerHz },
+				"Centre move without a trustworthy input position; retiring the channelizer",
+			)
+			this.invalidate(s.sourceId, "caps-changed")
+			return
+		}
+		s.caps.centerHz = centerHz
+		const movedAt = this.openNow()
+		s.recenterLingerSince ??= movedAt
+		s.recenterLingerUntil = Math.min(
+			movedAt + RECENTER_LINGER_MS,
+			s.recenterLingerSince + RECENTER_LINGER_MAX_MS,
+		)
+		const channels = [...s.channels.values()]
+		const ids = channels.map(ch => ch.id)
+		for (const ch of channels) {
+			if (ch.settlement)
+				this.deps.settlementObserver?.endGrant(ch.settlement, "caps-changed")
+			this.channelOwner.delete(ch.id)
+		}
+		s.channels.clear()
+		this.log.debug(
+			{
+				sourceId: s.sourceId,
+				generation: s.generation,
+				channels: ids.length,
+			},
+			"Capture centre moved; keeping the channelizer process",
+		)
+		for (const id of ids) void this.closeOwned(s, id, false)
+		// `closed` marks the close as this move's: the attempt must not send a second one, which nothing would answer.
+		for (const [id, attempt] of s.waiters) {
+			if (attempt.closed) continue
+			attempt.closed = true
+			void this.closeOwned(s, id, attempt.pending)
+		}
+		s.movesToPost.push(centerHz)
+		s.movesPosted ??= Promise.resolve().then(() => this.postMoves(s))
+		for (const wake of [...s.interruptions]) wake()
+		try {
+			if (ids.length > 0)
+				this.emit(
+					"channel-invalidated",
+					s.sourceId,
+					s.generation,
+					ids,
+					"caps-changed",
+				)
+		} catch (err: unknown) {
+			this.log.error(
+				{ err, sourceId: s.sourceId, generation: s.generation },
+				"channel-invalidated listener threw",
+			)
+		}
+		for (const ch of channels) {
+			ch.socket.destroy()
+			ch.stream.destroy()
+		}
+		if (ids.length > 0) this.stopIfIdle(s, "recentered")
+	}
+
+	/**
+	 * Writes the `recenter` lines of this turn's moves. A microtask runs only once the whole synchronous stack has
+	 * returned, so any distribution the move landed in has reached every branch and the position can no longer miss its
+	 * chunk. It can only be later than the move: a chunk distributed in the same turn after it counts as before it, and
+	 * that errs late, never early. Moves of one turn share a position, and the process applies them in order. Each carries
+	 * RECENTER_SETTLE_MS more, which every channel of this generation can afford: this move closed them all.
+	 */
+	private postMoves(s: SourceChannelizer): void {
+		const centres = s.movesToPost
+		s.movesToPost = []
+		delete s.movesPosted
+		if (s.invalidated) return
+		const atInputBytes = this.inputPosition(s)
+		if (atInputBytes === undefined) {
+			this.log.warn(
+				{ sourceId: s.sourceId, generation: s.generation },
+				"Centre move lost its input position; retiring the channelizer",
+			)
+			this.invalidate(s.sourceId, "caps-changed")
+			return
+		}
+		this.sendMoves(
+			s,
+			centres,
+			atInputBytes + recenterSettleBytes(s.caps.sampleRate),
+		)
+	}
+
+	private sendMoves(
+		s: SourceChannelizer,
+		centres: number[],
+		atInputBytes: number,
+	): void {
+		if (s.movesUnanswered.length + centres.length > MAX_UNANSWERED_MOVES) {
+			this.moveNotTaken(s, "too many moves unanswered")
+			return
+		}
+		try {
+			for (const centerHz of centres) {
+				s.process.send({ v: 1, type: "recenter", centerHz, atInputBytes })
+				s.movesUnanswered.push({ centerHz, atInputBytes })
+			}
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err, sourceId: s.sourceId, generation: s.generation },
+				"Centre move could not be sent; retiring the channelizer",
+			)
+			this.invalidate(s.sourceId, "caps-changed")
+		}
+	}
+
+	/**
+	 * What an absorber holds when a generation starts is older than this request, and a restart does not discard it: it
+	 * goes to the new branch. So the first channel starts after it, by a line on the unchanged centre that an `open` follows.
+	 * Called with nothing on the stack, so the count is between distributions. Nothing is added for the tuner: no move is
+	 * known here, and a spawn already takes the time. A binary without `recenter` cannot do this and receives the IQ.
+	 */
+	private skipHeldAtStart(s: SourceChannelizer): void {
+		if (!s.takesRecenter || s.movesPosted) return
+		const held =
+			this.deps.routing.linkBurst?.(s.sourceId)?.absorber?.counters()
+				.heldBytes ?? 0
+		if (!(held > 0)) return
+		const atInputBytes = this.inputPosition(s)
+		if (atInputBytes !== undefined)
+			this.sendMoves(s, [s.caps.centerHz], atInputBytes)
+	}
+
+	/** A `recenter` that was neither applied nor refused: where this process mixes is unknown, and a restart is safe. */
+	private moveNotTaken(s: SourceChannelizer, reason: string): void {
+		this.log.warn(
+			{
+				sourceId: s.sourceId,
+				generation: s.generation,
+				reason,
+				unanswered: s.movesUnanswered.length,
+				inputAcked: s.inputAcked,
+			},
+			"wavekit-chan did not take a centre move; retiring it",
+		)
+		this.invalidate(s.sourceId, "recenter-unanswered")
 	}
 
 	/** channelQueueMs of output samples, within the process's 1 sample..=MAX_QUEUE_BYTES; a detail string when not. */

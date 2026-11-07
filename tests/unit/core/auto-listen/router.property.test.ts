@@ -2,7 +2,11 @@ import { EventEmitter } from "node:events"
 import type * as http from "node:http"
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
-import { LIVE_AUDIO_AUTO_ROUTE_PREEMPT_MAX_MS } from "@wavekit/api-types"
+import {
+	LIVE_AUDIO_AUTO_ROUTE_BLOCK_MS,
+	LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS,
+	LIVE_AUDIO_AUTO_ROUTE_PREEMPT_MAX_MS,
+} from "@wavekit/api-types"
 import type { LiveAudioAutoRouteLevel } from "@wavekit/api-types"
 import { AUTO_ROUTE_STREAM } from "../../../../src/core/auto-listen/contract.js"
 import type {
@@ -22,6 +26,9 @@ import { feed, lcg } from "./helpers.js"
 
 const logger = createLogger({ level: "fatal" })
 const BLOCK = 960
+/** The latest tick that still catches up whole: 25 × 20 ms = 500 ms. */
+const LATE_MS =
+	LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS * LIVE_AUDIO_AUTO_ROUTE_BLOCK_MS
 
 class FakeClock implements AutoRouteClock {
 	t = 0
@@ -533,13 +540,14 @@ function checkOvers(
 describe("AutoListenRouter properties", { timeout: 120_000 }, () => {
 	// Feature: auto-listen-route, Property 3: Bounded pacing
 	// Validates: Requirements 2.6, 2.7
-	it("paces at 48 kHz, at most 5 blocks per tick, rebasing only on stalls", () => {
+	it("paces at 48 kHz, at most CATCHUP_MAX_BLOCKS blocks per tick, rebasing only on stalls", () => {
 		fc.assert(
 			fc.property(
 				fc.array(
 					fc.oneof(
 						fc.integer({ min: 0, max: 100 }),
-						fc.integer({ min: 0, max: 600 }),
+						// past the 500 ms bound, so rebases are exercised
+						fc.integer({ min: 0, max: 1_300 }),
 					),
 					{ minLength: 1, maxLength: 120 },
 				),
@@ -557,17 +565,22 @@ describe("AutoListenRouter properties", { timeout: 120_000 }, () => {
 						if (g > 0) sim.analog(noise(g * 48, rand), rand() < 0.7)
 						const before = sim.produced.length
 						sim.step(g)
-						late = late || g > 100
+						late = late || g > LATE_MS
 						const t = sim.clock.t
 						const due = Math.floor((t - start) * 48)
-						const n = Math.min(Math.floor((due - emitted) / BLOCK), 5)
+						const n = Math.min(
+							Math.floor((due - emitted) / BLOCK),
+							LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS,
+						)
 						if (n > 0) emitted += n * BLOCK
 						if (due - emitted >= BLOCK) {
 							start = t - emitted / 48
 							rebases++
 						}
 						const blocks = sim.produced.length - before
-						expect(blocks).toBeLessThanOrEqual(5)
+						expect(blocks).toBeLessThanOrEqual(
+							LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS,
+						)
 						expect(sim.router.emittedSamples).toBe(emitted)
 						expect(sim.router.clockRebases).toBe(rebases)
 						expect(emitted).toBeLessThanOrEqual(Math.floor(t * 48))

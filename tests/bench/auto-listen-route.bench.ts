@@ -9,6 +9,7 @@
 import { EventEmitter } from "node:events"
 import type * as http from "node:http"
 import { bench, describe } from "vitest"
+import { LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS } from "@wavekit/api-types"
 import { AUTO_ROUTE_STREAM } from "../../src/core/auto-listen/contract.js"
 import type {
 	AutoRouteClock,
@@ -252,10 +253,13 @@ describe("auto listen route, single call (requirement 8.2: under 1 ms at 200 kHz
 	const t = setup(false)
 	const c25 = analogChunk(25_000, "s16le")
 	const s25: StreamFormat = { rate: 25_000, format: "s16le" }
-	bench("one pacer tick emitting 5 blocks (catch-up maximum)", () => {
-		for (let i = 0; i < 5; i++)
-			t.router.pushAnalog(c25, 0, c25.length, true, s25)
-		t.clock.t += 100
-		t.clock.fn?.()
-	})
+	bench(
+		`one pacer tick emitting ${LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS} blocks (catch-up maximum)`,
+		() => {
+			for (let i = 0; i < LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS; i++)
+				t.router.pushAnalog(c25, 0, c25.length, true, s25)
+			t.clock.t += 20 * LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS
+			t.clock.fn?.()
+		},
+	)
 })

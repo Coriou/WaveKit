@@ -66,7 +66,7 @@ Condensed + Noto Sans, Tabler-based icons).
 | Tuned card, every signal type | Gallery of the card for all 18 mocked signals (voice, fleets, messages, sensors, audio only, unknown) | Active |
 | Tuner island | Digit tuning, typed entry with suggestions, mode, bandwidth, step, saved frequencies | Active |
 | Receiver island | Sample rate, gain table, AGC, bias-T, PPM, advanced (direct sampling, DC removal, IQ correction) | Active |
-| Listen island | Listen, squelch meter with auto/off, tone squelch ("Waiting for 88.5 Hz" in the header while the gate holds, tweak `toneDemo`), volume, analog vs decoded voice, AGC, filters, Record audio (a WAV saved in the browser's downloads, its file name said after) | Active |
+| Listen island | Listen, squelch meter with auto/off, tone squelch ("Waiting for 88.5 Hz" in the header while the gate holds, tweak `toneDemo`), volume, analog vs decoded voice, AGC, filters, Record audio (a WAV saved in the browser's downloads, its file name said after); breaking up (`Breaking up · 71% heard` beside Listening while over 10% of the last 10 s of expected audio did not play, the figure and total missing in Audio options) | Active |
 | Decoded messages + Decode card | One card anatomy for every decoder; JSON fallback for unknown rtl_433 models | Active |
 | JSON viewer | Syntax colours, wrap, copy pretty / one line | Active |
 | Activity | The drawer (search with typed chips, one list, detail pushed in with Back, audio replay, transcripts, live feed) plus its columns pane: pinned searches side by side, attached to the drawer's left; a switcher row when there is no room. `mode` tweak: wide / drawer / narrow | Active, wide mode reworked |
@@ -695,8 +695,9 @@ Condensed + Noto Sans, Tabler-based icons).
     settle set the speed. Rejected: one job-wide step (wrong for Marine 25 + PMR 12.5) and hiding
     it. The Tuner keeps "Tuning step" (manual tuning); the planner says "Channel spacing".
   - *One running surface:* the band strip island is removed (board deleted). The Tuner hold row
-    is the only status and control (glyph, name, pass-progress line, current frequency, Pause,
-    Stop; Skip / Ignore / Save while holding); clicking it opens the planner in running mode,
+    is the only status and control of a running scan (glyph, name, pass-progress line, current
+    frequency, Pause, Stop; Skip / Ignore / Save while holding; a paused scan's Resume is also in
+    the plan and drawer footers and the palette); clicking it opens the planner in running mode,
     which is the readable "where is it" (big ruler, current hop lit, discovery ticks, ranges
     switchable). The tuned card says only "Scanning · 146.9625"; Listen keeps "Following the
     scan"; the drawer keeps one count.
@@ -734,7 +735,7 @@ Condensed + Noto Sans, Tabler-based icons).
     as a screen with "‹ Scanner".
   - *Running ownership:* the Tuner hold row is the only place with Pause, Stop, the current frequency
     and progress. The running pane has no Pause or Stop; its footer reads "Pass 3 · 62 % · full pass ≈
-    10 s". Range on/off, protocols and skips can change mid-run and wait in an amber "N changes waiting
+    10 s", with Resume once the scan is paused. Range on/off, protocols and skips can change mid-run and wait in an amber "N changes waiting
     · Discard · Apply" bar (core applies job edits at the next hop); edges and channel spacing are
     locked while running ("Stop to change edges"). The drawer's running block is only "Show plan / Hide
     plan", and its header "Scan a band" button hides while a scan runs.

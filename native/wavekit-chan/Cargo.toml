@@ -13,6 +13,8 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [dev-dependencies]
 proptest = "1"
+# spike only: examples/frame_path_bench.rs (MIT OR Apache-2.0); not linked into any shipped binary
+rustfft = "6"
 
 [profile.release]
 lto = "thin"

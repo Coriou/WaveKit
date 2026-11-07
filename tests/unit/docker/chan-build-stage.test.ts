@@ -33,6 +33,22 @@ describe("wavekit-chan image integration (addendum §10)", () => {
 		expect(dockerfile).toContain("wavekit-chan --version")
 		expect(dockerfile).toContain("ldd /usr/local/bin/wavekit-chan")
 	})
+	it("never reuses another build's binary from the shared target cache, and refuses one without recenter", () => {
+		const stage = dockerfile.slice(
+			dockerfile.indexOf("AS chan-build"),
+			dockerfile.indexOf("AS final-base"),
+		)
+		const touch = stage.indexOf("find src -type f -exec touch {} +")
+		const build = stage.indexOf("cargo build --release --locked")
+		expect(touch).toBeGreaterThan(-1)
+		expect(touch).toBeLessThan(build)
+		const check = stage.indexOf(`grep -q '"recenter":true'`)
+		expect(check).toBeGreaterThan(stage.indexOf("install -m 0755"))
+		// A binary without the line fails the RUN; the check is not a `;` away from being ignored.
+		expect(stage.slice(check)).toMatch(
+			/^grep -q '"recenter":true' \|\| \{ echo [^;]+; exit 1; \}/,
+		)
+	})
 	it("adds wavekit-chan to final-base only, so final-sdrpp and final-demod stay unchanged", () => {
 		const stage = (name: string) => {
 			const start = dockerfile.search(new RegExp(`^FROM \\S+ AS ${name}$`, "m"))

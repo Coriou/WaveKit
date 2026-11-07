@@ -952,7 +952,7 @@ describe("band plan service", { timeout: 60_000 }, () => {
 		expect(JSON.parse(await readFile(stateFile(path), "utf8")).revision).toBe(1)
 	})
 
-	it("returns detached views, memoizes resolution per revision, and projects stored layers", async () => {
+	it("returns frozen views, memoizes resolution per revision, and projects stored layers", async () => {
 		const path = await root()
 		const storage = await BandPlanStorage.open({ stateDir: path })
 		const seeded = validateBandPlanState({
@@ -1048,7 +1048,9 @@ describe("band plan service", { timeout: 60_000 }, () => {
 		const shipped = pack.pack.bands[0] as { name: string } | undefined
 		if (!shipped) throw new Error("missing built-in band")
 		shipped.name = "mutated"
-		;(view.edits as unknown as unknown[]).splice(0, view.edits.length)
+		expect(() =>
+			(view.edits as unknown as unknown[]).splice(0, view.edits.length),
+		).toThrow(TypeError)
 		expect(service.pack("builtin-eu").pack.bands[0]?.name).toBe("Airband")
 		expect(service.view().edits).toHaveLength(2)
 		expect(resolves()).toBe(1)
@@ -1065,6 +1067,49 @@ describe("band plan service", { timeout: 60_000 }, () => {
 		})
 		expect(resolves()).toBe(2)
 		expect(service.view().context.effectiveCountry).toBe("FR")
+	})
+
+	it("view and resolved are one deep-frozen snapshot per revision", async () => {
+		const path = await root()
+		const { service } = await open(path)
+		const first = service.view()
+		const resolved = service.resolved()
+		expect(service.view()).toBe(first)
+		expect(service.resolved()).toBe(resolved)
+		const deepFrozen = (value: unknown): boolean =>
+			typeof value !== "object" ||
+			value === null ||
+			(Object.isFrozen(value) && Object.values(value).every(deepFrozen))
+		expect(deepFrozen(first)).toBe(true)
+		expect(deepFrozen(resolved)).toBe(true)
+		// a mutation attempt throws and cannot reach the store
+		expect(() => {
+			;(first.store as { revision: number }).revision = 99
+		}).toThrow(TypeError)
+		expect(() => {
+			;(resolved.bands as unknown[]).push({})
+		}).toThrow(TypeError)
+		expect(() => {
+			;(first.capabilities.importFormats as unknown[]).push("x")
+		}).toThrow(TypeError)
+		const written = await service.mutate(setStack(token(service), "builtin-ca"))
+		const next = service.view()
+		expect(next).not.toBe(first)
+		expect(service.resolved()).not.toBe(resolved)
+		expect(written.view).toBe(next)
+		expect(next.store).not.toEqual(first.store)
+		expect(deepFrozen(next)).toBe(true)
+		expect(first.stack.entries).not.toEqual(next.stack.entries)
+	})
+
+	it("a closed service stops serving the open revision's snapshot", async () => {
+		const path = await root()
+		const { service } = await open(path)
+		await service.mutate(setStack(token(service), "builtin-ca"))
+		expect(service.view().store.state).toBe("available")
+		await service.close()
+		expect(service.view().store.state).toBe("unavailable")
+		expect(service.resolved().store.state).toBe("unavailable")
 	})
 
 	it("forwards import overrides and leaves an invalid preview unpersisted", async () => {

@@ -7,6 +7,7 @@ import {
 	JobRunner,
 	chooseLeaseHolder,
 	impactGrew,
+	impactWords,
 	undecodedForDeferral,
 	undecodedForProbe,
 	type JobRecord,
@@ -167,6 +168,10 @@ class RunnerArbiter {
 	}
 	holder() {
 		return this.lease ?? undefined
+	}
+	connected = true
+	isConnected() {
+		return this.connected
 	}
 	/** The other job named by `refuseHolder` holds at an equal priority: the acquire is refused. */
 	holderPriority() {
@@ -532,6 +537,79 @@ describe("JobRunner resume of an operator pause without its lease (R4)", () => {
 		})
 		expect(record).toMatchObject({ state: "paused", reason: "resume-blocked" })
 	})
+
+	it("a transient refusal says to retry and leaves a blocked job blocked", async () => {
+		const { runner, arbiter, record } = await pausedWithoutLease()
+		record.reason = "resume-blocked"
+		arbiter.refuse = "releasing"
+		await expect(
+			runner.dispatch({ type: "resume", takeover: true }),
+		).rejects.toMatchObject({
+			code: "SCANNER_SOURCE_BUSY",
+			message: expect.stringContaining("retry in a few seconds") as string,
+		})
+		expect(record).toMatchObject({ state: "paused", reason: "resume-blocked" })
+		expect(record.consentedImpact).toBeNull()
+	})
+
+	it("a start keeps the arbiter's bare detail; only a resume adds what to do", async () => {
+		const { runner, arbiter, record } = runnerHarness()
+		arbiter.refuse = "Lease held by scanner job j_other"
+		await expect(runner.start()).rejects.toMatchObject({
+			message: "Lease held by scanner job j_other",
+		})
+		expect(record.state).toBe("pending")
+	})
+
+	it("a resume during a dropout says the job continues by itself", async () => {
+		const h = runnerHarness()
+		await h.runner.start()
+		await flush()
+		h.runner.onEpochStarted(epochAt(11, HOP0))
+		h.arbiter.retunes[0]!.resolve(pendingFor(11, HOP0))
+		await flush()
+		await h.runner.dispatch({ type: "source-down" })
+		h.arbiter.connected = false
+		expect(h.record).toMatchObject({ state: "paused", reason: "source-down" })
+		await expect(
+			h.runner.dispatch({ type: "resume", takeover: false }),
+		).rejects.toMatchObject({
+			statusCode: 409,
+			code: "SCANNER_SOURCE_DOWN",
+			details: { reason: "source-down" },
+		})
+		expect(h.record).toMatchObject({ state: "paused", reason: "source-down" })
+	})
+})
+
+describe("impactWords", () => {
+	const none = {
+		liveAudioClients: 0,
+		digitalVoiceListeners: 0,
+		runningDecoders: [],
+		pinnedDecoders: [],
+		scannerJobs: [],
+		unrestorable: [],
+	}
+	it("names everyone a takeover interrupts, one decoder once", () => {
+		expect(
+			impactWords({
+				liveAudioClients: 2,
+				digitalVoiceListeners: 1,
+				runningDecoders: ["a", "b"],
+				pinnedDecoders: ["b"],
+				scannerJobs: ["j_1"],
+				unrestorable: ["gain"],
+			}),
+		).toBe(
+			"2 live audio listeners, 1 digital voice listener, decoders a, b, scanner job j_1, tuner settings it cannot restore (gain)",
+		)
+		expect(impactWords({ ...none, runningDecoders: ["a"] })).toBe("decoder a")
+		expect(impactWords({ ...none, liveAudioClients: 1 })).toBe(
+			"1 live audio listener",
+		)
+		expect(impactWords(none)).toBe("")
+	})
 })
 
 describe("JobRunner startup deadline (review F2)", () => {
@@ -569,6 +647,18 @@ describe("automatic resume reentry", () => {
 		expect(h.record.state).toBe("running")
 		expect(h.arbiter.holder()).toBeDefined()
 	})
+	it("refuses a job hand-back with no data, so the service can owe it", async () => {
+		const h = runnerHarness()
+		h.record.state = "paused"
+		h.record.reason = "preempted-job"
+		h.arbiter.connected = false
+		await expect(
+			h.runner.dispatch({ type: "preemptor-idle", impactGrew: false }),
+		).rejects.toMatchObject({ code: "SCANNER_SOURCE_DOWN" })
+		expect(h.record).toMatchObject({ state: "paused", reason: "preempted-job" })
+		expect(h.arbiter.holder()).toBeUndefined()
+		expect(h.arbiter.retunes).toHaveLength(0)
+	})
 	it("a queued idle event cannot acquire after activity starts", async () => {
 		let quiet = true
 		const h = runnerHarness(() => quiet)
@@ -583,6 +673,42 @@ describe("automatic resume reentry", () => {
 		expect(h.record.state).toBe("paused")
 		expect(h.arbiter.holder()).toBeUndefined()
 		expect(h.arbiter.retunes).toHaveLength(0)
+	})
+	const idlePreempted = () => {
+		const h = runnerHarness()
+		h.record.state = "paused"
+		h.record.reason = "preempted-operator"
+		h.record.spec.resume = { autoAfterIdleMs: 1000, onBoot: false }
+		h.arbiter.operatorIdleSince = () => 0 as unknown as null
+		return h
+	}
+	it("an idle timeout does nothing with no data, and resumes on the first tick after data returns", async () => {
+		const h = idlePreempted()
+		h.arbiter.connected = false
+		h.runner.tick(1000)
+		await flush()
+		expect(h.record).toMatchObject({
+			state: "paused",
+			reason: "preempted-operator",
+		})
+		expect(h.arbiter.holder()).toBeUndefined()
+		h.arbiter.connected = true
+		h.runner.tick(1000)
+		await flush()
+		await h.runner.idle()
+		expect(h.record.state).toBe("running")
+	})
+	it("an idle resume queued before the data stopped does not acquire", async () => {
+		const h = idlePreempted()
+		h.runner.tick(1000)
+		h.arbiter.connected = false
+		await flush()
+		await h.runner.idle()
+		expect(h.record).toMatchObject({
+			state: "paused",
+			reason: "preempted-operator",
+		})
+		expect(h.arbiter.holder()).toBeUndefined()
 	})
 })
 

@@ -111,6 +111,21 @@ export interface TrackSnapshot {
 	dutyCycle: number
 	acf30?: number
 	acf60?: number
+	/**
+	 * How fast the track's power moves between bins: the mean, over pairs of consecutive on
+	 * blocks, of the absolute change of the block's concentration (strongest bin over the
+	 * segment's total power, dB). A drifting carrier barely moves from block to block. Absent
+	 * until two consecutive on blocks, on an FFT or block too short for a steady reading, on a spur
+	 * line until the track's span has held for 2 s and its spread reaches a line's own bound, and
+	 * while the concentration repeats regularly, as data keyed against a carrier does.
+	 */
+	blockSwingDb?: number
+	/**
+	 * How far the track's power moves between bins: the standard deviation of that concentration
+	 * over the track's blocks, dB. Speech goes between a bare carrier and sidebands; a digital
+	 * mode's spectrum is stationary. Present with `blockSwingDb`.
+	 */
+	blockSpreadDb?: number
 	spectralShape: "flat" | "peaked" | "narrow"
 	/** Width at -6 dB below the peak of the mean spectrum (Hz, whole bins). Absent on older producers. */
 	obw6Hz?: number

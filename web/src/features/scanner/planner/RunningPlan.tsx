@@ -2,8 +2,8 @@
 // range bars, the capture window as a bracket at its real width moved by transform at the progress rate, the pass
 // fill, hatched skips and discovery ticks (solid decoded, hollow maybe, pulsing active; click tunes); amber while
 // paused. Range on/off, protocols and skips change mid-run behind "N changes waiting · Discard · Apply"; edges and
-// spacing are locked. No Pause or Stop here: the Tuner's hold row owns them. Only RunWindow and RunFooter read
-// the 2 Hz progress store.
+// spacing are locked. No Pause or Stop here: the Tuner's hold row owns them; a full-screen plan hides that row, so
+// the footer offers Resume on a paused scan. Only RunWindow and RunFooter read the 2 Hz progress store.
 import {
 	memo,
 	useEffect,
@@ -32,6 +32,7 @@ import {
 import { planIssues } from "../../../data/scanner-store.ts"
 import { useStore } from "../../../data/store.ts"
 import { Button } from "../../../ui/Button.tsx"
+import { ResumeScan } from "../ResumeScan.tsx"
 import { Switch } from "../../../ui/Switch.tsx"
 import { formatMHz } from "../../format.ts"
 import { useNow, useTunerState } from "../../hooks.ts"
@@ -449,6 +450,7 @@ export function RunningPlan({
 			) : (
 				<footer className="wk-pl-foot">
 					<RunFooter job={job} />
+					<ResumeScan job={job} />
 				</footer>
 			)}
 

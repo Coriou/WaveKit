@@ -2373,13 +2373,16 @@ Fields:
   `open`. Optional in `@wavekit/api-types`; absent while stopped and from older cores.
 - `autoRoute` — the auto listen route (`GET /auto`), present whenever the live
   audio HTTP server listens: `{ active, protocol?, decoderId?, slot?, since,
-httpUrl, wavUrl, clientCount, digitalAvailable, underruns, droppedMs,
-clockRebases, latencyMs }`. `active` is `analog`, `digital` or `none`;
+httpUrl, wavUrl, clientCount, digitalAvailable, underruns, zeroFilledSamples?,
+droppedMs, clockRebases, latencyMs }`. `active` is `analog`, `digital` or `none`;
   `protocol` (when the call reports one), `decoderId` and `slot` (a number or
   `null`) are present only while `active` is `digital`. `since` is the ISO time of
   the last switch. `httpUrl` and `wavUrl` follow the `/stream` URL rules above
   (public origin, legacy `Host` rewrite). `digitalAvailable` is `false` when the
-  core routes analog only. `underruns` counts output blocks short of audio,
+  core routes analog only. `underruns` counts output blocks short of audio, by
+  any amount; `zeroFilledSamples` (cumulative, absent from older cores) counts the
+  samples those blocks filled with zeros, so the time lost is that divided by 48 000,
+  except the wait after a digital call's last frame, which counts only if the call goes on;
   `droppedMs` the audio dropped on overflow, preemption or invalidation,
   `clockRebases` the pacer resets after an event-loop stall, and `latencyMs` the
   selected source's backlog plus one 20 ms block. Optional in `@wavekit/api-types`;
@@ -2570,6 +2573,18 @@ source plays at a time; digital wins over analog after the analog over releases
   and source rate changes; only the stall timeout, a server stop or shutdown
   closes them. The per-client queue bound and the 30 s stall disconnect of
   `/stream` apply.
+- Delivery is paced in 20 ms blocks, but a late pacer catches up in one tick, so a
+  reader can receive up to 500 ms of audio (48 000 bytes) at once. A jitter buffer
+  smaller than 500 ms can overflow on that burst; size for it or expect to discard.
+- Above 500 ms the pacer stops catching up: it sends those 500 ms, skips the rest of
+  the time and counts one `autoRoute.clockRebases`. The audio it did not send stays
+  queued, up to 3 s, so latency rises and a reader that keeps a short buffer can
+  discard back to its target (the web app's does).
+- Catch-up does not recover audio lost to IQ congestion inside the core. Audio that
+  never reached the route becomes zeros at full rate: the byte rate looks perfect
+  and the listener hears holes. `autoRoute.zeroFilledSamples` counts them and
+  `autoRoute.underruns` the 20 ms blocks they fell in.
+  The root cause is core load.
 - Same server, access rules, stream leases and CORS as `/stream` (below).
 - Status: `autoRoute` on [GET /api/live-audio/status](#get-apilive-audiostatus) and
   on `live-audio:level`.
@@ -4399,20 +4414,58 @@ Each returns the `ScanJob`. `resume` takes an optional body
 - from `paused(core-restart)`: re-acquires the lease, re-opens the engine and
   restarts the sweep from its first hop (boot resumes with `resume.onBoot` do
   the same once the source's data starts);
-- from `paused(resume-blocked)`: needs `takeover: true` (the impact grew
-  beyond what was consented);
+- from `paused(resume-blocked)` (automatic resume found more to disturb than was
+  consented, or an earlier resume was refused): re-acquires the lease and carries on
+  with its progress. While the impact is still grown, a plain resume answers 409
+  `SCANNER_TAKEOVER_REQUIRED` with `details.impact`, and `message` names who a resend
+  with `takeover: true` interrupts; once those consumers are gone a plain resume is
+  enough. A job of equal or higher priority holding the lease answers 409
+  `SCANNER_SOURCE_BUSY` with or without `takeover`: stop that job or wait for it, then
+  resume. A takeover accepted here becomes the new consent for later automatic resumes;
 - from `paused(preempted-*)`: arbitrates at once; `takeover` is not required
   (sending it records the current impact as consented for later
   auto-resumes); 409
   `SCANNER_SOURCE_BUSY` while another job holds the lease
   (`details.holderJobId`) or a better-placed job waits for it
-  (`details.waiter`).
+  (`details.waiter`);
+- from `paused(source-down)` after a dropout: 409 `SCANNER_SOURCE_DOWN` while the source
+  sends no data (a TCP reconnect without data still counts). There is nothing to resume
+  yet; the job continues by itself when data returns, or `cancel` ends it (on a feed
+  paused by hand the answer is 409 `SOURCE_PAUSED`: resume the feed first). Once data
+  is back a resume carries the job on, in case it is still waiting;
+- from any other paused reason while the source sends no data: 409
+  `SCANNER_SOURCE_DOWN`, with or without `takeover`. The job keeps its reason. No
+  automatic resume runs while the source sends no data. When data returns a job with
+  `resume.autoAfterIdleMs` in `paused(preempted-*)` resumes once its idle time has passed, a
+  `paused(preempted-job)` whose holder ended meanwhile gets the lease, and a
+  `paused(core-restart)` with a pending `resume.onBoot` restarts; any other waits for
+  another resume. The `message` says which.
+
+| Paused reason                                          | Source has no data                                                                                                                                                   | Source has data                                                        |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `source-down`                                          | `SCANNER_SOURCE_DOWN`; waits                                                                                                                                         | carries on (normally by itself already)                                |
+| `operator`, `resumed-without-retune`, `resume-blocked` | `SCANNER_SOURCE_DOWN`; stays                                                                                                                                         | resumes, with the 409s above                                           |
+| `preempted-*`                                          | `SCANNER_SOURCE_BUSY` while a job holds the lease or waits with a better claim, else `SCANNER_SOURCE_DOWN`; stays, and no idle timeout resumes it until data returns | arbitrates, with the 409s above; resumes by itself after its idle time |
+| `core-restart`                                         | `SCANNER_SOURCE_DOWN`; stays, and a pending `resume.onBoot` waits for data                                                                                           | restarts from its first hop; by itself with `resume.onBoot`            |
+
+A feed paused by hand answers 409 `SOURCE_PAUSED` before any of these. A source that has
+sent no data since the core started counts as no data.
+
+A refused resume changes nothing but the reason (`SCANNER_SOURCE_BUSY` moves
+`paused(operator)` and `paused(resumed-without-retune)` to `paused(resume-blocked)`,
+as above), and the job keeps its pass, hop statistics, discoveries and `startedAt`.
+A resumed job hops again from where it was, except from `paused(core-restart)`, which
+starts again from its first hop. A `paused(resume-blocked)` job stays blocked across a
+core restart, even with `resume.onBoot`: it does not resume by itself, and its first
+resume after the restart asks for consent again; its hops restart from the first. The
+`reason` plus the answer's `code` and `message` always give the next step; `job.impact`
+holds the impact last reported.
 
 `pause` on `paused(preempted-*)` is **Stay here**: the job becomes
 `paused(operator)` without taking the lease back and no longer auto-resumes.
 
 A `ScanJob` carries `resumeAt` (ISO time of the automatic resume, `null` when none is
-scheduled or while held) and `resumeHeldBy` (`audio`, `identify`, `recording` or
+scheduled, while held, or while the source sends no data) and `resumeHeldBy` (`audio`, `identify`, `recording` or
 `null`). An elapsed deadline reads as the time it was first seen elapsed and stays fixed while resume is pending.
 These activity holds apply to automatic resume after operator or relay preemption;
 job-to-job lease hand-back is unaffected. The idle clock is held while an identify
@@ -4422,7 +4475,9 @@ threshold below 0, or auto), plus 3 s after the squelch closes; it then restarts
 from the full `resume.autoAfterIdleMs`. Recording activity does not hold it yet.
 
 409 `SCANNER_INVALID_TRANSITION` when the action does not apply to the
-current state, 409 `SCANNER_IDENTIFY_NOT_PAUSABLE` for pause/resume on an
+current state (`resume` of a job that is not paused, whose `message` names the state
+and the next step, such as "already running; nothing is needed"; every paused reason
+answers as above), 409 `SCANNER_IDENTIFY_NOT_PAUSABLE` for pause/resume on an
 identify job.
 
 `cancel` of a job that already ended (`completed`, `cancelled` or `failed`,
@@ -8490,8 +8545,9 @@ Scanner and spectrum routes answer with the flat body
 | `SCANNER_JOB_NOT_FOUND`         | 404  | Service level: an action on a missing job                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `SCANNER_DISCOVERY_NOT_FOUND`   | 404  | Service level: an action on a missing discovery (observations, PATCH, listen)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `SPECTRUM_SOURCE_NOT_FOUND`     | 404  | Occupancy query: no history for the source                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `SCANNER_TAKEOVER_REQUIRED`     | 409  | The sweep (or the resume of a `paused(operator)` sweep that lost its lease) disturbs other consumers; `details.impact`; resend with `takeover: true`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `SCANNER_TAKEOVER_REQUIRED`     | 409  | The sweep (or the resume of a paused sweep without the lease: `paused(operator)`, `paused(resumed-without-retune)` or `paused(resume-blocked)`) disturbs other consumers; `details.impact`, and on a resume `message` names them; resend with `takeover: true`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `SCANNER_SOURCE_BUSY`           | 409  | The tuner is not available; the detail is in `message` (a relay client controls the tuner, "holder is starting", "releasing", "recovery pending", lease held by another job). `details.reason`: `"releasing"` (the previous lease is still restoring), `"recovery-pending"` (a crash or outage recovery waits for the source's data), `"holder-starting"` (the holder is still starting), `"relay"` (a relay client controls the tuner) or `"held"` (another scanner job holds the lease, or waits for it with a better claim). The first three clear by themselves within seconds; retry. `relay` and `held` last until the relay or the holder lets go. `details.holderJobId` when a job holds the source; `details.waiter` when a better-placed job waits; `details.issues` when the preview found it |
+| `SCANNER_SOURCE_DOWN`           | 409  | `resume` while the source sends no data. A job in `paused(source-down)` continues by itself when data returns; any other paused job keeps its reason, and `message` says whether it resumes by itself then or needs another resume; `details.reason`: `"source-down"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `SCANNER_NO_TUNER_CONTROL`      | 409  | The source has no rtl_tcp tuner control (sweep)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `SCANNER_JOB_TERMINAL`          | 409  | Edit or action on an ended job                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `SCANNER_JOB_NOT_TERMINAL`      | 409  | `DELETE` of a job that has not ended                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |

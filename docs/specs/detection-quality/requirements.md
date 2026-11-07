@@ -849,6 +849,10 @@ A window starts:
 A window shorter than 60 000 ms, or one whose samples are null or non-finite, is **no
 measurement**.
 
+Utilization counts the worker's CPU time, `active` being capped at it where Node reports it
+(`WorkerCostMeter`). A worker starved by other work on the host therefore reads its CPU share and
+not 1.0: its falling behind is the host's fault, not passive's, and accepted as such.
+
 8.3 **Baseline.** While the engine is open and passive is off, every completed window gives
 the baseline `B`, stamped with the engine instance, the worker generation and the sorted
 list of the other consumers. `B` is **valid** while the engine instance and the other
@@ -863,15 +867,22 @@ max(0, U - B)`, `limit` is `scanner.passive.maxEngineUtilization ?? 0.25`.
 | --- | --------------------- | ---------------------------------------- | -------------------------------- |
 | 1   | any                   | no measurement (8.2)                     | keep                             |
 | 2   | enabled, sole         | -                                        | WG11 rule on `U` (unchanged)     |
-| 3   | enabled, shared       | `U >= PASSIVE_SATURATION` (0.95)         | disable (baseline irrelevant)    |
+| 3   | enabled, shared       | `U >= PASSIVE_SATURATION` (0.95)\*       | disable (baseline irrelevant)    |
 | 4   | enabled, shared       | `B` valid                                | WG11 rule on `M`                 |
 | 5   | enabled, shared       | `B` unavailable, `U <= limit`            | keep                             |
 | 6   | enabled, shared       | `B` unavailable, baseline window allowed | start a baseline window          |
 | 7   | enabled, shared       | `B` unavailable, window not allowed      | keep                             |
-| 8   | disabled, engine open | `U <= limit x 0.8` (WG11 clear rule)     | clear                            |
+| 8   | disabled, engine open | `U <= limit x 0.8`, not held\*\*         | clear                            |
 | 9   | disabled, engine open | trial due (8.6) and `B` valid            | start a trial (passive restored) |
 | 10  | disabled, engine open | otherwise                                | keep (record `B`)                |
 | 11  | disabled, engine shut | WG11 probation due                       | clear (today)                    |
+
+\* `U` is CPU time (8.2), so this row sees a worker saturating its own core, and not one starved
+below 95 % of a core by the host.
+
+\*\* Held: the guard disabled passive by row 4, or by row 3 with `U - B` over the limit, and the other
+consumers are still the same. A cheap engine without passive then proves nothing, so the source
+waits for its trial (8.6). A whole-engine disable with nothing to compare against is not held.
 
 A malformed `B` (non-finite) is discarded and counts as unavailable; a malformed `U` is row
 

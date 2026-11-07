@@ -153,6 +153,53 @@ function withinBins(hz: number, bins: number, binHz: number): boolean {
 	return hz <= bins * binHz * (1 + 1e-6)
 }
 
+/**
+ * `speechModulated`: the reading needs this many blocks, 1 s at the default 50 ms: at most one
+ * syllable and its gap fit in 600 ms, so 1 s holds a change of modulation. A younger track keeps its
+ * width class (a young FM voice and narrow digital read alike there, and nothing in one snapshot
+ * tells them apart). Spread needs at least 2 values; 20 keeps its scatter below the margin.
+ */
+export const VOICE_MIN_BLOCKS = 20
+/**
+ * `speechModulated`: the spread that only modulation reaches. Measured through the pipeline on
+ * stationary synthetic digital (DMR, dPMR, NXDN, D-STAR, YSF, P25, POCSAG, GMSK; 8 to 30 dB, 20 to
+ * 60 blocks, at 50 and at 35 frames per block): at most 0.52 dB, and 0.51 dB under TDMA, which
+ * `tdma-ms` takes first. Synthetic speech driven to about 40 % of a 5 kHz limiter measured from 0.59 dB.
+ */
+export const VOICE_SPREAD_MIN_DB = 0.6
+/**
+ * `speechModulated`: the block-to-block change only modulation reaches. Carriers, on a bin or
+ * off it, with or without slow drift, measured at most 0.06 dB (a carrier drifting over a bin moves
+ * its spread slowly, never its change from one block to the next); synthetic speech from 0.23 dB.
+ */
+export const VOICE_SWING_MIN_DB = 0.2
+
+/**
+ * Speech on this track: its power moves between bins from block to block and by more than any
+ * stationary signal's does (the reasoning at `VOICE_SPREAD_MIN_DB`). Width and shape cannot say
+ * this: a young track, a narrow talker or a voice in a quiet moment reads as narrow as D-STAR, and its -20 dB width
+ * only opens up with time. Under-modulated synthetic speech measures like digital (0.18 to 0.41 dB) and stays
+ * its width class: that is honest, not a miss this rule can fix. Absent or malformed readings
+ * and tracks too young are not speech (the safe answer: the width class).
+ */
+export function speechModulated(track: {
+	blocks: number
+	blockSpreadDb?: number | undefined
+	blockSwingDb?: number | undefined
+}): boolean {
+	const { blocks, blockSpreadDb: spread, blockSwingDb: swing } = track
+	return (
+		typeof blocks === "number" &&
+		blocks >= VOICE_MIN_BLOCKS &&
+		typeof spread === "number" &&
+		Number.isFinite(spread) &&
+		spread >= VOICE_SPREAD_MIN_DB &&
+		typeof swing === "number" &&
+		Number.isFinite(swing) &&
+		swing >= VOICE_SWING_MIN_DB
+	)
+}
+
 const LEAK_MIN_DB = 20
 
 export const CLASS_HYPOTHESES: Readonly<
@@ -368,6 +415,16 @@ export function classOf(
 	// A steady carrier line (`carrierLine`), before the flat-top branch (a flat line is one only
 	// with a narrow -6 dB width; a 3-bin flat top keeps its digital trials).
 	if (steadyLine(track) === true) return "carrier"
+	// Speech in a track of any shape up to analog FM's width, where the width classes below would
+	// call a weak voice digital. Never at a carrier's width, whatever its shape (`spectralShape`
+	// absent: `carrierLine` judges the width alone): a line gains no voice class.
+	if (
+		speechModulated(track) &&
+		track.obwHz > 0 &&
+		track.obwHz <= ANALOG_MAX_HZ &&
+		!carrierLine({ obwHz: track.obwHz, binHz: track.binHz })
+	)
+		return "analog-fm"
 	if (track.spectralShape === "flat") {
 		if (track.obwHz <= FSK4_6K25_MAX_HZ) return "fsk4-6k25"
 		if (track.obwHz <= FSK4_12K5_MAX_HZ) return "fsk4-12k5"

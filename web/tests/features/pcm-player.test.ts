@@ -60,8 +60,10 @@ describe("PcmPlayer without AudioWorklet (plain-http page)", () => {
 		)
 		const stats: RingStats[] = []
 		const ended: string[] = []
+		const onData = vi.fn()
 		const player = new PcmPlayer({
 			onStats: s => void stats.push(s),
+			onData,
 			onEnded: r => void ended.push(r),
 			onBlocked: () => undefined,
 		})
@@ -72,6 +74,7 @@ describe("PcmPlayer without AudioWorklet (plain-http page)", () => {
 			rate: 16_000,
 		})
 		await vi.waitFor(() => expect(ended).toHaveLength(1))
+		expect(onData).toHaveBeenCalled()
 		const node = nodes[0]
 		expect(node).toBeDefined()
 		const out = new FakeBuffer()

@@ -3,6 +3,7 @@
  * squelch, offsetHz...), and the `live-audio` channel (status, config, level).
  */
 import type {
+	LiveAudioAutoRoute,
 	LiveAudioConfig,
 	LiveAudioLevel,
 	LiveAudioStatus,
@@ -20,6 +21,14 @@ export interface LiveAudioState {
 	busy: boolean
 	error: string | null
 }
+
+/**
+ * How long this client waits for one `/auto` reading: 2.5 × Listen's 2 000 ms cadence. Readings are single
+ * flight, so a slow one only delays the next and its cumulative counters still count; a shorter bound would
+ * throw away every answer from a slow core. A hung request costs 5 000 ms. This bounds the client's wait; it
+ * does nothing for the slowness itself.
+ */
+export const AUTO_ROUTE_READ_TIMEOUT_MS = 5_000
 
 /** PATCH body: any config field; `agc: null` returns to the modulation default. */
 export type LiveAudioConfigPatch = Partial<Omit<LiveAudioConfig, "agc">> & {
@@ -74,6 +83,33 @@ export class LiveAudioStore extends Store<LiveAudioState> {
 			this.update(s => ({ ...s, status, loaded: true, error: null }))
 		} catch (error) {
 			this.update(s => ({ ...s, error: errorMessage(error) }))
+		}
+	}
+
+	/**
+	 * The `/auto` counters now, or null. The core broadcasts status only when something changes, so these
+	 * counters are read on demand. Nothing lands in the store: a fresh status redraws everything showing one.
+	 * Ends within AUTO_ROUTE_READ_TIMEOUT_MS, or as soon as `signal` aborts.
+	 */
+	async readAutoRoute(
+		signal?: AbortSignal,
+	): Promise<LiveAudioAutoRoute | null> {
+		const bound = new AbortController()
+		const abort = () => bound.abort()
+		const timer = setTimeout(abort, AUTO_ROUTE_READ_TIMEOUT_MS)
+		if (signal?.aborted) abort()
+		signal?.addEventListener("abort", abort, { once: true })
+		try {
+			const status = await this.api.get<LiveAudioStatus>(
+				"/api/live-audio/status",
+				{ signal: bound.signal },
+			)
+			return status.autoRoute ?? null
+		} catch {
+			return null
+		} finally {
+			clearTimeout(timer)
+			signal?.removeEventListener("abort", abort)
 		}
 	}
 

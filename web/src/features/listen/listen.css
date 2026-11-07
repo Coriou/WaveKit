@@ -1,0 +1,7 @@
+/* The Listen card's own state; the rest of the island lives in shell.css and features.css. */
+@layer wk-app {
+	/* Same colour as the panel's warnings (.wkf-warn), which loses to .wk-shell-sub on source order. */
+	.wk-shell-sub[data-breaking] {
+		color: var(--wk-amber);
+	}
+}

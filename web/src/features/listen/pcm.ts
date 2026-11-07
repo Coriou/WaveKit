@@ -102,6 +102,10 @@ export interface RingStats {
 	bufferedMs: number
 	underruns: number
 	droppedSamples: number
+	/** Output time rendered since this ring was made, ms. */
+	renderedMs: number
+	/** The part of `renderedMs` with no stream audio (priming or dry), ms. */
+	dryMs: number
 }
 
 /**
@@ -119,6 +123,8 @@ export class PcmRing {
 	private primed = false
 	underruns = 0
 	droppedSamples = 0
+	renderedMs = 0
+	dryMs = 0
 
 	constructor(options: RingOptions) {
 		this.rate = Math.max(1, options.rate)
@@ -206,9 +212,13 @@ export class PcmRing {
 	 * Returns true when any of `out` came from the stream.
 	 */
 	render(out: Float32Array, step = 1): boolean {
+		// one output sample lasts `step` stream samples, whatever the two rates are
+		const msPerOut = (step / this.rate) * 1000
+		this.renderedMs += out.length * msPerOut
 		if (!this.primed) {
 			if (this.buffered < this.target) {
 				out.fill(0)
+				this.dryMs += out.length * msPerOut
 				return false
 			}
 			this.primed = true
@@ -218,6 +228,7 @@ export class PcmRing {
 		for (let i = 0; i < out.length; i++) {
 			if (this.readIdx + 1 >= this.writeIdx) {
 				out.fill(0, i)
+				this.dryMs += (out.length - i) * msPerOut
 				this.primed = false
 				this.underruns += 1
 				return i > 0
@@ -239,6 +250,8 @@ export class PcmRing {
 			bufferedMs: this.bufferedMs,
 			underruns: this.underruns,
 			droppedSamples: this.droppedSamples,
+			renderedMs: this.renderedMs,
+			dryMs: this.dryMs,
 		}
 	}
 }

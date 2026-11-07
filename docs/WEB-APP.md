@@ -202,6 +202,28 @@ that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what op
 **Open on CTCSS**. The `autoSquelch` field of
 [`GET /api/live-audio/status`](API.md#get-apilive-audiostatus) reports the gate.
 
+**Connecting…** means Listen is starting, no audio has played for about 2 s, or the stream ended and is
+being reattached. If no data at all arrives for 5 s, Listen reattaches by itself; after about 28 s of
+failed attempts it shows **No audio** with the reason, and stays there while it keeps trying, until
+audio returns.
+
+A short gap on an open stream keeps **Listening**. When over 10% of the audio you should be hearing
+did not play in the last 10 s, the card says so next to it, for example
+**Listening** `Breaking up · 71% heard`, until the figure is back within 5%. It needs at least 5 s of open
+signal to judge, and silence from a closed squelch never counts. **Audio options** gives the figure and
+the total missing since Listen started, next to the latency, for example `71% heard · 17.4 s missing`;
+hover it for what the core reported. The web app reads the core's figure every 2 s, so it can lag a little;
+a reading that fails is made up by the next one. After 10 s of playback with no reading it only knows what
+this browser played: it gives a percentage only if that alone is breaking up, and a card already breaking up
+stays that way, without a percentage if it has none, until a reading arrives.
+Time this browser was not playing the stream (a suspended tab's audio, a reattach, another stream) never
+counts as missing.
+The latency includes audio waiting in the core.
+
+Breaking up usually means the core is too busy. It catches up a late stream by up to 500 ms at once, which
+hides short stalls, but it cannot recover audio it never received: when the receiver's data backs up inside
+the core (`Branch congested` in its log), the holes stay until the load comes down. The `<audio>` fallback, used where the browser lacks Web Audio, reattaches the same way but shows no figure.
+
 ## Drawers
 
 ![Activity: a searchable log of decoded events, with category filters along the top](assets/screenshots/activity.png)
@@ -283,7 +305,14 @@ waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads
   you pause waits; **Resume at 161.500 MHz** continues it, but a plain **Resume** leaves it held so it
   does not retune the receiver away from SDR++: the scan row reads `Scan paused · receiver resumed
   without retuning` with **Resume scan**, which retunes to the scan's current hop (also **Resume scan**
-  in the ⌘K palette). The resumed scan hops without a band gain, and when it ends nothing is put
+  in the ⌘K palette). If resuming would interrupt someone (a listener, a decoder started since, another
+  scan), the scan row first reads `Resume needs your OK` with a button naming them, such as `Resume and
+  interrupt 1 listener, APRS`. A scan that could not resume by itself because of someone new already
+  names them on its first button, so one click resumes it. If anyone else has arrived by the time you
+  click, nothing is interrupted and the button names them instead. The Resume in the scan plan's footer
+  and the Scanner drawer's footer works the same way. A scan that keeps its place by itself has no Resume: `Paused by Marine VHF · carries on
+  when it ends` and `Source down · waits for it to return`. A Resume clicked on a paused scan while the source sends no data does nothing and says to try
+  again once data returns. In the ⌘K palette, a Resume scan that would interrupt someone asks you to choose Resume in the scan row. The resumed scan hops without a band gain, and when it ends nothing is put
   back: the receiver keeps whatever it was last tuned to. With more than one
   receiver, the Receiver island, the palette's receiver commands (pause, resume, gain, sample rate,
   bias tee, RTL AGC) and `P` act on the receiver the waterfall shows: the first connected one, which

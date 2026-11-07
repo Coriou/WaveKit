@@ -1,3 +1,4 @@
+import fc from "fast-check"
 import { describe, expect, it, vi } from "vitest"
 import type {
 	Band,
@@ -6,6 +7,7 @@ import type {
 } from "@wavekit/api-types"
 import type { Bandplan } from "../../../../src/core/scanner/bandplan/index.js"
 import {
+	CHANNEL_LOOKUP_MEMO_MAX,
 	createBandplanChannelLookup,
 	createBandplanRangeLookup,
 	createVfoTracker,
@@ -476,5 +478,253 @@ describe("scanner range lookup", () => {
 			expect(
 				createBandplanRangeLookup({ scannerPlans })("s", 150, ["pocsag"]),
 			).toBe(false)
+	})
+})
+
+describe("createBandplanChannelLookup memo", () => {
+	const freeze = <T>(value: T): T => {
+		if (typeof value === "object" && value !== null) {
+			Object.freeze(value)
+			for (const member of Object.values(value)) freeze(member)
+		}
+		return value
+	}
+	const view = (hz: number[]) =>
+		({
+			bands: [
+				{
+					band: {
+						startHz: 100,
+						endHz: 900,
+						channels: hz.map(frequencyHz => ({ frequencyHz })),
+					},
+					segments: [{ startHz: 100, endHz: 900 }],
+				},
+			],
+		}) as unknown as ResolvedBandPlanView
+	const plan = (protocols: string[]) =>
+		({ ranges: [{ startHz: 100, endHz: 900, protocols }] }) as never
+	const WINDOW = { sourceId: "s", minHz: 100, maxHz: 900 }
+
+	it("sees an element replaced in the provider's one stable array", () => {
+		const plans = [plan(["a"])]
+		const snapshot = freeze(view([200]))
+		const lookup = createBandplanChannelLookup({
+			getResolved: () => snapshot,
+			scannerPlans: () => plans,
+		})
+		expect(lookup(WINDOW, ["a"])).toEqual([200])
+		plans[0] = plan(["b"])
+		expect(lookup(WINDOW, ["a"])).toEqual([])
+		expect(lookup(WINDOW, ["b"])).toEqual([200])
+	})
+
+	/** Plain lookups with a fresh, unfrozen copy each call are the reference. */
+	const reference = (v: ResolvedBandPlanView, plans: never[]) =>
+		createBandplanChannelLookup({
+			getResolved: () => structuredClone(v),
+			scannerPlans: () => plans,
+		})
+
+	// Feature: spectrum-main-thread, Property 1: a memoised lookup equals a fresh one
+	// Validates: docs/PERFORMANCE.md rule on memoised placement lookups
+	it("answers exactly as an unmemoised lookup over windows, protocols and revisions", () => {
+		const plans = [plan(["a"]), plan(["b"])]
+		fc.assert(
+			fc.property(
+				fc.array(
+					fc.record({
+						minHz: fc.integer({ min: 0, max: 1000 }),
+						maxHz: fc.integer({ min: 0, max: 1000 }),
+						protocols: fc.array(fc.constantFrom("a", "b", "c", ""), {
+							maxLength: 2,
+						}),
+						revision: fc.integer({ min: 0, max: 2 }),
+					}),
+					{ minLength: 1, maxLength: 12 },
+				),
+				queries => {
+					const snapshots = [
+						view([200, 300]),
+						view([300, 400]),
+						view([500]),
+					].map(freeze)
+					let revision = 0
+					const memoised = createBandplanChannelLookup({
+						getResolved: () => snapshots[revision],
+						scannerPlans: () => [...plans],
+					})
+					for (const q of queries) {
+						revision = q.revision
+						const window = { sourceId: "s", minHz: q.minHz, maxHz: q.maxHz }
+						expect(memoised(window, q.protocols)).toEqual(
+							reference(snapshots[revision]!, plans)(window, q.protocols),
+						)
+					}
+				},
+			),
+			{ numRuns: 200 },
+		)
+	})
+
+	it("parses a frozen snapshot once per revision, not per lookup", () => {
+		let reads = 0
+		const channels = [200, 300]
+		const band = {
+			startHz: 100,
+			endHz: 900,
+			get channels() {
+				reads++
+				return channels.map(frequencyHz => ({ frequencyHz }))
+			},
+		}
+		const snapshot = Object.freeze({
+			bands: Object.freeze([
+				Object.freeze({
+					band,
+					segments: [{ startHz: 100, endHz: 900 }],
+				}),
+			]),
+		}) as never
+		const plans = [plan(["a"])]
+		const lookup = createBandplanChannelLookup({
+			getResolved: () => snapshot,
+			scannerPlans: () => [...plans],
+		})
+		expect(lookup(WINDOW, ["a"])).toEqual([200, 300])
+		const first = reads
+		expect(lookup(WINDOW, ["a"])).toEqual([200, 300])
+		expect(lookup({ ...WINDOW, maxHz: 250 }, ["a"])).toEqual([200])
+		expect(reads).toBe(first)
+	})
+
+	it("every input in the key changes the answer", () => {
+		const a = freeze(view([200, 300]))
+		const b = freeze(view([400]))
+		let current = a
+		let plans = [plan(["a"])]
+		const lookup = createBandplanChannelLookup({
+			getResolved: () => current,
+			scannerPlans: () => plans,
+		})
+		expect(lookup(WINDOW, ["a"])).toEqual([200, 300])
+		// window
+		expect(lookup({ ...WINDOW, minHz: 250 }, ["a"])).toEqual([300])
+		// protocols
+		expect(lookup(WINDOW, ["b"])).toEqual([])
+		// the revision's snapshot
+		current = b
+		expect(lookup(WINDOW, ["a"])).toEqual([400])
+		// plans: same revision, another plan object
+		plans = [plan(["b"])]
+		expect(lookup(WINDOW, ["a"])).toEqual([])
+		expect(lookup(WINDOW, ["b"])).toEqual([400])
+	})
+
+	it("an unfrozen view is never remembered, so an in-place edit is seen", () => {
+		const v = view([200])
+		const lookup = createBandplanChannelLookup({
+			getResolved: () => v,
+			scannerPlans: () => [plan(["a"])],
+		})
+		expect(lookup(WINDOW, ["a"])).toEqual([200])
+		const edited = v.bands[0]!.band.channels as unknown as {
+			frequencyHz: number
+		}[]
+		edited[0] = { frequencyHz: 300 }
+		expect(lookup(WINDOW, ["a"])).toEqual([300])
+	})
+
+	it("a caller cannot edit the remembered answer", () => {
+		const frozenTwo = freeze(view([200, 300]))
+		const lookup = createBandplanChannelLookup({
+			getResolved: () => frozenTwo,
+			scannerPlans: () => [plan(["a"])],
+		})
+		const got = lookup(WINDOW, ["a"]) as number[]
+		got.length = 0
+		expect(lookup(WINDOW, ["a"])).toEqual([200, 300])
+	})
+
+	it("past the cap it starts over and stays correct", () => {
+		const snapshot = freeze(view([200]))
+		const lookup = createBandplanChannelLookup({
+			getResolved: () => snapshot,
+			scannerPlans: () => [plan(["a"])],
+		})
+		for (let i = 0; i <= CHANNEL_LOOKUP_MEMO_MAX + 1; i++)
+			expect(lookup({ ...WINDOW, maxHz: 200 + i }, ["a"])).toEqual([200])
+		expect(lookup(WINDOW, ["a"])).toEqual([200])
+	})
+
+	it("a missing view, a throw and bad input stay empty", () => {
+		const good = freeze(view([200]))
+		expect(
+			createBandplanChannelLookup({
+				getResolved: () => undefined,
+				scannerPlans: () => [plan(["a"])],
+			})(WINDOW, ["a"]),
+		).toEqual([])
+		expect(
+			createBandplanChannelLookup({
+				getResolved: () => {
+					throw new Error("closed")
+				},
+				scannerPlans: () => [plan(["a"])],
+			})(WINDOW, ["a"]),
+		).toEqual([])
+		const lookup = createBandplanChannelLookup({
+			getResolved: () => good,
+			scannerPlans: () => [plan(["a"])],
+		})
+		expect(lookup({ ...WINDOW, maxHz: Number.NaN }, ["a"])).toEqual([])
+		expect(lookup({ ...WINDOW, maxHz: 0 }, ["a"])).toEqual([])
+		expect(lookup(WINDOW, [""])).toEqual([])
+		expect(lookup(WINDOW, ["a"])).toEqual([200])
+	})
+})
+
+describe("createBandplanRangeLookup parse", () => {
+	it("re-reads plans as soon as an element differs", () => {
+		let plans = [
+			{ ranges: [{ startHz: 100, endHz: 200, protocols: ["a"] }] },
+		] as never[]
+		const lookup = createBandplanRangeLookup({ scannerPlans: () => [...plans] })
+		expect(lookup("s", 150, ["a"])).toBe(true)
+		plans = [
+			{ ranges: [{ startHz: 300, endHz: 400, protocols: ["a"] }] },
+		] as never[]
+		expect(lookup("s", 150, ["a"])).toBe(false)
+		expect(lookup("s", 350, ["a"])).toBe(true)
+	})
+
+	it("sees an element replaced in the provider's one stable array", () => {
+		const plans = [
+			{ ranges: [{ startHz: 100, endHz: 200, protocols: ["a"] }] },
+		] as never[]
+		const lookup = createBandplanRangeLookup({ scannerPlans: () => plans })
+		expect(lookup("s", 150, ["a"])).toBe(true)
+		plans[0] = {
+			ranges: [{ startHz: 300, endHz: 400, protocols: ["a"] }],
+		} as never
+		expect(lookup("s", 150, ["a"])).toBe(false)
+		expect(lookup("s", 350, ["a"])).toBe(true)
+	})
+
+	it("keeps the parse while the stable array holds the same elements", () => {
+		let reads = 0
+		const plans = [
+			{
+				get ranges() {
+					reads++
+					return [{ startHz: 100, endHz: 200, protocols: ["a"] }]
+				},
+			},
+		] as never[]
+		const lookup = createBandplanRangeLookup({ scannerPlans: () => plans })
+		expect(lookup("s", 150, ["a"])).toBe(true)
+		const first = reads
+		expect(lookup("s", 160, ["a"])).toBe(true)
+		expect(reads).toBe(first)
 	})
 })
