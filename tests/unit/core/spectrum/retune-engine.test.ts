@@ -412,8 +412,12 @@ describe("SpectrumEngine operator retune window (WG9 R3 minors)", () => {
 
 	it("prunes the network-settle entry of an older stream's pending epoch at the new stream's start", async () => {
 		const { engine, sources, fanout, hosts, p } = await retuned()
-		const verifiedFrom = (): Map<number, number> =>
-			(engine as unknown as { verifiedFrom: Map<number, number> }).verifiedFrom
+		const starts = (): { key: number; verifiedFrom: number | null }[] =>
+			(
+				engine as unknown as {
+					starts: { key: number; verifiedFrom: number | null }[]
+				}
+			).starts
 		// the first stream's own start, then the retune is pending
 		hosts[0]!.handlers.events([
 			{
@@ -423,7 +427,7 @@ describe("SpectrumEngine operator retune window (WG9 R3 minors)", () => {
 				settleMode: "none",
 			},
 		])
-		expect(verifiedFrom().has(p.epoch)).toBe(true)
+		expect(starts().find(s => s.key === p.epoch)?.verifiedFrom).not.toBeNull()
 		// the source reconnects before the retune's epoch started
 		sources.emit("disconnected", "rtl")
 		sources.emit("payload-started", "rtl")
@@ -439,7 +443,7 @@ describe("SpectrumEngine operator retune window (WG9 R3 minors)", () => {
 				settleMode: "none",
 			},
 		])
-		expect(verifiedFrom().size).toBe(0)
+		expect(starts()).toEqual([])
 		await engine.stop()
 	})
 })

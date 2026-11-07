@@ -918,7 +918,9 @@ export class JobRunner implements JobDriver {
 	}
 
 	onEpochStarted(epoch: EngineEpoch): void {
-		let own = this.ownEpochs.has(epoch.epoch)
+		// The engine names the id the arbiter returned when the pipeline started it as another
+		// (a renumbered post, or a hop held through a restart): ownership follows that id.
+		let own = this.ownEpochs.has(epoch.requestedEpoch ?? epoch.epoch)
 		if (!own && this.inFlightEpoch(epoch)) {
 			own = true
 			this.addOwnEpoch(epoch.epoch)
@@ -946,6 +948,19 @@ export class JobRunner implements JobDriver {
 		// A new stream the job did not start (a rate-change restart dropped the hop's pending epoch,
 		// a reconfigure, a reconnect): re-send the hop so it gets a normal pending epoch of its own.
 		if (!own && epoch.settleMode === "none") this.resendForStream(epoch.stream)
+		// The job's own hop, held through a restart, was re-posted on another rate than it asked
+		// for (`unverified`, no dwell) or dropped unstarted: the engine answered it, so it is
+		// re-sent once more unless this stream's opening already did. The R1 budget starts afresh:
+		// a re-send that changes the rate restarts the stream, and that stream's re-send is its own.
+		const superseded = epoch.supersededEpoch
+		if (
+			superseded !== undefined &&
+			this.ownEpochs.has(superseded) &&
+			this.resendStream !== epoch.stream
+		) {
+			this.resendStream = null
+			this.onUntrackedRetune()
+		}
 	}
 
 	/** At most one re-send until an own epoch starts (R1). */

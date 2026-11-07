@@ -122,6 +122,20 @@ export interface EngineEpoch {
 	gainKey: string
 	tuningTrust: TuningTrust
 	settleMode: SettleMode | null
+	/**
+	 * On an `epoch-started` event only, never in `currentEpoch()`: the id its poster was given
+	 * (`allocateEpoch`, or a scanner hop's id when it was held through a restart and re-posted)
+	 * when the pipeline started it as another. The label is still the one posted for it.
+	 */
+	requestedEpoch?: number
+	/**
+	 * On an `epoch-started` event only: the id its poster was given (`requestedEpoch`) for a scanner
+	 * hop held through a restart whose rate was not the restarted stream's. Such a hop is re-posted
+	 * `unverified` at the stream's real centre and rate (never on the rate it asked for); this names
+	 * it on its own start, or on the first start after it was dropped unstarted (a newer post
+	 * replaced it), so its poster learns its hop was superseded and re-sends it (no dwell credit).
+	 */
+	supersededEpoch?: number
 }
 
 export interface EngineMasks {
@@ -324,10 +338,70 @@ interface Batch {
 	start: number
 }
 
+/** A stream boundary queued at `atBranchByte`. */
+interface StreamMark {
+	kind: "stream"
+	atBranchByte: number
+	trust: TuningTrust
+	/** Its place among epoch triggers (`SpectrumEngine.ticket`). */
+	ticket: number
+}
+
 /** Something that happens when the engine's branch byte counter reaches `atBranchByte`. */
 type BranchMark =
 	| { kind: "gap"; atBranchByte: number; droppedBytes: number }
-	| { kind: "stream"; atBranchByte: number; trust: TuningTrust }
+	| StreamMark
+
+/** An operator, relay or reconnect command's epoch still to be posted (`queueExternal`). */
+interface ExternalCommand {
+	trust: TuningTrust
+	/** WG9 req 3.3: the centre a set-frequency command wrote (one epoch per retune). */
+	centreHz?: number
+	/**
+	 * WG9 req 3.1/3.2: merge the shared state rule into `trust` at flush, after the
+	 * tuner finished the update that fired the event (a relay command updates caps
+	 * before it records the accepted value; reconnect reconciliation before replay events).
+	 */
+	checkState: boolean
+	/** Its place among epoch triggers (`SpectrumEngine.ticket`): the first command it merges. */
+	ticket: number
+	/**
+	 * The ticket of the newest command merged into it (absent: `ticket`). Its label and centre are
+	 * that command's, so it is ordered against a held scanner hop by this one (postCarried).
+	 */
+	newest?: number
+	/**
+	 * Posted from `carried` into a later stream: an explicit centre is only a claim about the
+	 * tuner when the command was written, so it must still agree with caps when posted.
+	 */
+	kept?: boolean
+}
+
+/** A scanner hop submitted while the pipeline restarted, re-posted into the stream that follows. */
+interface HeldHop {
+	pending: PendingEpoch
+	ticket: number
+	/** The id the arbiter returned for it (the re-post takes a new one). */
+	requested: number
+}
+
+/**
+ * A pending epoch posted to the host whose start has not arrived yet, in post order. The
+ * pipeline numbers it `max(key, last id + 1)` (SpectrumPipeline.onPending), so an untracked
+ * epoch the engine had not heard of yet moves it, and the ones after it, to later ids: its
+ * start is found by replaying that numbering over the queue, never by its key.
+ */
+interface PendingStart {
+	/** The id posted (`PendingEpoch.epoch`). */
+	key: number
+	/** The id its caller was given (`key`, or a held hop's original). */
+	requested: number
+	/** WG9 req 3.4: a non-scanner epoch's first sample past the network settle. */
+	verifiedFrom: number | null
+	/** A held hop re-posted on another rate than its own (EngineEpoch.supersededEpoch). */
+	superseded?: true
+	meta: EngineEpoch
+}
 
 export class SpectrumEngine extends EventEmitter implements EpochClock {
 	readonly sourceId: string
@@ -378,24 +452,43 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	// Epochs
 	private lastEpoch = 0
 	private suppressed = 0
-	private externalPending: {
-		trust: TuningTrust
-		commandSample: number
-		bufferedSamples: number
-		/** WG9 req 3.3: the centre a set-frequency command wrote (one epoch per retune). */
-		centreHz?: number
-		/**
-		 * WG9 req 3.1/3.2: merge the shared state rule into `trust` at flush, after the
-		 * tuner finished the update that fired the event (a relay command updates caps
-		 * before it records the accepted value; reconnect reconciliation before replay events).
-		 */
-		checkState: boolean
-	} | null = null
-	private readonly pendingMeta = new Map<number, EngineEpoch>()
-	/** WG9 req 3.4: per non-scanner epoch, the first sample past the network settle. */
-	private readonly verifiedFrom = new Map<number, number>()
+	private externalPending:
+		| (ExternalCommand & { commandSample: number; bufferedSamples: number })
+		| null = null
 	/**
-	 * The current epoch's entry of `verifiedFrom` (null: no unverified window). Events whose
+	 * Orders epoch triggers: each command's epoch, stream boundary and source disconnect takes the
+	 * next value, so a command can tell whether it came after a boundary or a disconnect.
+	 */
+	private ticket = 0
+	/** The ticket of the source's last disconnect (0: none since start). */
+	private disconnectTicket = 0
+	/**
+	 * Commands that came while the pipeline restarted, or after a stream boundary the delivered
+	 * bytes have not reached yet: they belong to a stream that starts later, and are posted into
+	 * it once it has started (beginStream), never dropped. One entry per stream, in ticket order:
+	 * commands for the same stream share an entry, a queued boundary between two keeps them
+	 * apart. A command older than the source's last disconnect tuned a connection that is gone,
+	 * and is dropped.
+	 */
+	private readonly carried: ExternalCommand[] = []
+	/**
+	 * The newest scanner hop submitted during a restart (only the newest: an older hop's epoch
+	 * would end where the next one starts). The old host can no longer take it, and the job's
+	 * own re-send may already be spent on the reconnect that preceded the restart.
+	 */
+	private heldHop: HeldHop | null = null
+	/** Pending epochs posted to the current host whose start has not arrived (PendingStart). */
+	private readonly starts: PendingStart[] = []
+	/** A superseded held hop's requested id dropped unstarted; the next start names it (PendingStart.superseded). */
+	private supersededLost: number | null = null
+	/** The current host's last epoch id, from the events it has delivered (they arrive in order). */
+	private startedThrough = 0
+	/** The label of the untracked epoch the pipeline just announced, until its own start. */
+	private untrackedStart: EngineEpoch | null = null
+	/** A stream whose posted epochs no longer match the host's starts (takeStart): none is named. */
+	private unnamedStream: number | null = null
+	/**
+	 * The current epoch's `PendingStart.verifiedFrom` (null: no unverified window). Events whose
 	 * data starts before it are `unverified` for the whole epoch.
 	 */
 	private currentVerifiedFrom: number | null = null
@@ -506,9 +599,13 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.bpMark = null
 		this.awaitingPayload = false
 		this.streamStartByte = 0
-		this.pendingMeta.clear()
-		this.verifiedFrom.clear()
+		this.starts.length = 0
+		this.supersededLost = null
+		this.untrackedStart = null
 		this.openingStreams.length = 0
+		// A command carried by an earlier run tuned before this branch existed.
+		this.carried.length = 0
+		this.heldHop = null
 		this.beginStream(this.initialTrust())
 		const reader = this.deps.hostCentre ?? nullHostCentreReader
 		if (reader !== nullHostCentreReader) {
@@ -605,7 +702,28 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	}
 
 	submitEpoch(pending: PendingEpoch): void {
-		if (!this.running || !this.host || this.restarting) return
+		this.postEpoch(pending, pending.epoch)
+	}
+
+	/**
+	 * `requested`: the id the epoch's caller was given (a held hop's is the arbiter's own).
+	 * `superseded`: a held hop re-posted on the stream's rate instead of its own (takeHeldHop).
+	 */
+	private postEpoch(
+		pending: PendingEpoch,
+		requested: number,
+		superseded = false,
+	): void {
+		if (!this.running || !this.host) return
+		if (this.restarting) {
+			// Only the scanner submits here during a restart (external commands are carried before).
+			this.heldHop = {
+				pending: { ...pending },
+				ticket: ++this.ticket,
+				requested,
+			}
+			return
+		}
 		if (pending.sampleRateHz !== this.cfg?.sampleRateHz) {
 			this.log.info(
 				{ from: this.cfg?.sampleRateHz, to: pending.sampleRateHz },
@@ -615,15 +733,21 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			return
 		}
 		this.flushBatch()
-		this.pendingMeta.set(pending.epoch, {
-			stream: this.stream,
-			epoch: pending.epoch,
-			startSample: null,
-			centreHz: pending.centreHz,
-			sampleRateHz: pending.sampleRateHz,
-			gainKey: pending.gainKey,
-			tuningTrust: pending.tuningTrust,
-			settleMode: null,
+		this.starts.push({
+			key: pending.epoch,
+			requested,
+			verifiedFrom: pending.verifiedFromSample ?? null,
+			...(superseded ? { superseded: true as const } : {}),
+			meta: {
+				stream: this.stream,
+				epoch: pending.epoch,
+				startSample: null,
+				centreHz: pending.centreHz,
+				sampleRateHz: pending.sampleRateHz,
+				gainKey: pending.gainKey,
+				tuningTrust: pending.tuningTrust,
+				settleMode: null,
+			},
 		})
 		this.send({ kind: "pending-epoch", pending })
 	}
@@ -631,6 +755,40 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	suppressExternal(on: boolean): void {
 		this.suppressed = Math.max(0, this.suppressed + (on ? 1 : -1))
 		if (!on && this.suppressed === 0) this.checkSuppressedCentre()
+	}
+
+	/**
+	 * Takes the pending epoch the pipeline started as `epoch`. The pipeline handles posts in order
+	 * and numbers each `max(key, last + 1)`; one still settling when the next post (or a
+	 * new-stream) arrives never starts, and no untracked epoch starts while one settles, so after
+	 * the last id the host delivered the next starts follow the queue in order. Replaying that
+	 * numbering from `startedThrough` names the entry exactly; the ones before it never start.
+	 * Only the current stream's entries can start before its next opening. Null when none
+	 * matches: the queue no longer describes the host, so it is dropped (fail closed).
+	 */
+	private takeStart(epoch: number): PendingStart | null {
+		let id = this.startedThrough
+		let i = 0
+		for (; i < this.starts.length; i++) {
+			const entry = this.starts[i]!
+			if (entry.meta.stream !== this.current.stream) break
+			id = Math.max(entry.key, id + 1)
+			if (id < epoch) continue
+			if (id > epoch) break
+			this.dropStarts(i)
+			this.starts.shift()
+			return entry
+		}
+		while (this.starts[i]?.meta.stream === this.current.stream) i += 1
+		if (i > 0) this.unnamedStream = this.current.stream
+		this.dropStarts(i)
+		return null
+	}
+
+	/** Drops the first `count` pending starts, which never start; a superseded hop among them is named on the next start. */
+	private dropStarts(count: number): void {
+		for (const entry of this.starts.splice(0, count))
+			if (entry.superseded === true) this.supersededLost = entry.requested
 	}
 
 	/**
@@ -771,6 +929,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			this.deps.binsCap?.(),
 		)
 		this.cfg = cfg
+		// A new host's pipeline numbers its epochs from zero.
+		this.startedThrough = 0
 		const generation = ++this.generation
 		const handlers: PipelineHostHandlers = {
 			events: events => {
@@ -823,6 +983,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.restarting = true
 		this.flushBatch()
 		const old = this.host
+		const since = this.ticket
 		try {
 			this.persisted =
 				(await old.exportState().catch(() => this.persisted)) ?? this.persisted
@@ -841,8 +1002,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			this.inflightBytes = 0
 			this.pool.length = 0
 			// The old host's pending epochs and stream starts never arrive.
-			this.pendingMeta.clear()
-			this.verifiedFrom.clear()
+			this.dropStarts(this.starts.length)
+			this.untrackedStart = null
 			this.openingStreams.length = 0
 			this.host = this.createHost(caps.sampleRate)
 			if (this.masks) this.send({ kind: "masks", ...this.masks })
@@ -851,7 +1012,18 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			if (this.spectrumFeed) this.send({ kind: "spectrum-feed", enabled: true })
 			this.restarting = false
 			this.dropStaleBranchMarks()
-			this.beginStream(trust)
+			// A disconnect during the restart: its boundary was discarded with the old bytes, so the
+			// stream that starts now is a new connection's, which nothing proved yet. The replay
+			// that proves it was carried (flushExternal) and follows as this stream's next epoch.
+			// A command or hop kept for this stream likewise: the bytes still buffered can predate
+			// it, so only its own epoch, after its settle, may carry its label.
+			const kept =
+				this.carried.length > 0 ||
+				this.externalPending !== null ||
+				this.heldHop !== null
+			this.beginStream(
+				this.disconnectTicket > since || kept ? "unverified" : trust,
+			)
 		} finally {
 			this.restarting = false
 		}
@@ -890,7 +1062,11 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		return trust
 	}
 
-	private beginStream(trust: TuningTrust): void {
+	/**
+	 * `boundaryTicket`: the queued boundary this stream starts at; absent for a start or a restart,
+	 * whose commands still pending all came after the stream they replace stopped taking epochs.
+	 */
+	private beginStream(trust: TuningTrust, boundaryTicket?: number): void {
 		this.flushBatch()
 		const caps = this.deps.sources.getCaps(this.sourceId)
 		const sampleRateHz = this.cfg?.sampleRateHz ?? caps?.sampleRate ?? 0
@@ -898,8 +1074,15 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.nextSample = 0
 		this.remainder = new Uint8Array(0)
 		this.skipBytes = 0
-		// The old stream's pendingMeta stays until this stream's own epoch-started (onEvents).
+		// The old stream's pending starts stay until this stream's own epoch-started (onEvents).
+		// A command queued before the boundary was the old stream's; one after it is this one's.
+		const pending = this.externalPending
 		this.externalPending = null
+		if (
+			pending &&
+			(boundaryTicket === undefined || pending.ticket > boundaryTicket)
+		)
+			this.carry(pending)
 		const ringSeconds = Math.max(
 			this.deps.settings().ringSeconds,
 			this.ringSecondsMin,
@@ -932,6 +1115,167 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			gainKey,
 			tuningTrust: trust,
 		})
+		this.postCarried(boundaryTicket)
+	}
+
+	/**
+	 * Posts the carried commands into the stream that just started, in order, each as an epoch
+	 * timed from this stream's clock; one still behind a queued boundary is carried again
+	 * (flushExternal). Each label is the newest command's own, merged with the state rule when it
+	 * is posted (checkState), so a value really unknown then keeps it `unverified`.
+	 */
+	private postCarried(boundaryTicket?: number): void {
+		const hop = this.takeHeldHop(boundaryTicket)
+		if (this.carried.length === 0) return
+		const carried = this.carried.splice(0)
+		for (const command of carried) {
+			if (command.ticket < this.disconnectTicket) continue
+			// A command older than the hop posted just now would end where the hop starts. A merged
+			// entry carries its newest command's state, so that command's ticket orders it: an
+			// operator write after the hop is posted after it, even folded into an older write.
+			if (hop && (command.newest ?? command.ticket) < hop.ticket) continue
+			this.queueExternal(
+				command.trust,
+				command.centreHz,
+				true,
+				command.ticket,
+				true,
+				command.newest,
+			)
+		}
+	}
+
+	/**
+	 * m3: re-posts the scanner hop held during a restart into this stream, before any newer kept
+	 * command, under the scanner's own rules: its label (the hop's state rule), its settle and
+	 * gain, timed from this stream's clock with every buffered byte counted (never earlier than
+	 * the hop's writes), and no marker (its bytes went with the old stream). Its centre is the
+	 * hop's target only while caps holds it: caps follows the frequency write, so a hop whose
+	 * write has not landed, or one another writer moved since, is `unverified` at the caps centre
+	 * (the write landing later gets the suppression-window epoch, checkSuppressedCentre).
+	 * It takes a new epoch id (an id is only ever the next one allocated, so the pipeline numbers
+	 * it as asked or later, never onto another's); the job learns it from `requestedEpoch`.
+	 * A hop whose rate is not this stream's (the source rate changed again before the restart
+	 * completed) is never trusted on the wrong rate nor lost: it starts `unverified` at the
+	 * stream's real centre and rate, settles scaled to that rate, and its start (or, if a newer
+	 * post replaces it first, the start that did) names it in `supersededEpoch`, so the job sees
+	 * its hop superseded, gets no dwell credit and re-sends it (JobRunner).
+	 * Returns the hop posted, or null.
+	 */
+	private takeHeldHop(boundaryTicket?: number): HeldHop | null {
+		const held = this.heldHop
+		if (!held) return null
+		// A hop before the last disconnect, or before this boundary, tuned a stream that is gone.
+		if (
+			held.ticket < this.disconnectTicket ||
+			(boundaryTicket !== undefined && held.ticket < boundaryTicket)
+		) {
+			this.heldHop = null
+			return null
+		}
+		// Behind a boundary still queued: it belongs to the stream that starts there.
+		if (this.boundaryAhead(held.ticket)) return null
+		this.heldHop = null
+		const caps = this.deps.sources.getCaps(this.sourceId)
+		const hop = held.pending
+		const clock = this.sampleClock()
+		const superseded = hop.sampleRateHz !== clock.sampleRateHz
+		const inPlace =
+			!superseded &&
+			caps?.centerFreq === hop.centreHz &&
+			this.centreOverride === null
+		const centreHz = inPlace
+			? hop.centreHz
+			: (this.centreOverride ?? caps?.centerFreq ?? hop.centreHz)
+		const scale = (samples: number) =>
+			superseded && hop.sampleRateHz > 0
+				? Math.round((samples * clock.sampleRateHz) / hop.sampleRateHz)
+				: samples
+		this.postEpoch(
+			{
+				...hop,
+				epoch: this.allocateEpoch(),
+				commandSample: clock.commandSample,
+				bufferedSamples: clock.bufferedSamples,
+				settleSamples: scale(hop.settleSamples),
+				pllSettleSamples: scale(hop.pllSettleSamples),
+				expectMarker: false,
+				markerTimeoutSamples: 0,
+				centreHz,
+				sampleRateHz: clock.sampleRateHz,
+				tuningTrust: inPlace
+					? hop.tuningTrust
+					: mergeTrust(hop.tuningTrust, "unverified"),
+				centreChanged: centreHz !== (caps?.centerFreq ?? 0),
+			},
+			held.requested,
+			superseded,
+		)
+		return held
+	}
+
+	/** Keeps a command that cannot be posted now for the stream it belongs to, which starts later. */
+	private carry(command: ExternalCommand): void {
+		if (command.ticket < this.disconnectTicket) return
+		const held = this.carried[this.carried.length - 1]
+		if (
+			held &&
+			held.ticket >= this.disconnectTicket &&
+			!this.boundaryBetween(
+				Math.min(held.ticket, command.ticket),
+				Math.max(held.ticket, command.ticket),
+			)
+		) {
+			this.supersede(held, command)
+			return
+		}
+		// Entries from before the last disconnect tuned a connection that is gone. Dropping them here
+		// bounds the list by the stream boundaries queued since that disconnect.
+		let kept = 0
+		for (const entry of this.carried)
+			if (entry.ticket >= this.disconnectTicket) this.carried[kept++] = entry
+		this.carried.length = kept
+		this.carried.push({
+			trust: command.trust,
+			...(command.centreHz !== undefined ? { centreHz: command.centreHz } : {}),
+			checkState: command.checkState,
+			ticket: command.ticket,
+			...(command.newest !== undefined ? { newest: command.newest } : {}),
+		})
+	}
+
+	/**
+	 * Folds `command` into `held`, a command for the same stream. The newer one's label and centre
+	 * win: an older command's weaker label described a state the newer one superseded. The state
+	 * rule is always applied when the result is posted (checkState), so an upgrade never survives
+	 * a value still unknown or only declared then, and a host-centre mismatch still demotes it.
+	 */
+	private supersede(held: ExternalCommand, command: ExternalCommand): void {
+		// The newer command's centre wins even when it names none: an older explicit centre may be
+		// one another writer (a relay) has since moved away from, so the posting then reads the
+		// source's own centre. An older command never adds a centre to a newer one.
+		if (command.ticket >= held.ticket) {
+			held.trust = command.trust
+			if (command.centreHz !== undefined) held.centreHz = command.centreHz
+			else delete held.centreHz
+		}
+		held.checkState = true
+		const newest = Math.max(
+			held.newest ?? held.ticket,
+			command.newest ?? command.ticket,
+		)
+		held.ticket = Math.min(held.ticket, command.ticket)
+		if (newest !== held.ticket) held.newest = newest
+		else delete held.newest
+		// Either side kept makes the merge kept: its centre check is never lost by folding.
+		if (command.kept === true) held.kept = true
+	}
+
+	/** True when a stream boundary still queued in the branch took a ticket between `from` and `to`. */
+	private boundaryBetween(from: number, to: number): boolean {
+		return this.branchQueue.some(
+			mark => mark.kind === "stream" && mark.ticket > from && mark.ticket < to,
+		)
 	}
 
 	private send(input: WorkerPipelineInput, transfer?: ArrayBuffer): void {
@@ -998,7 +1342,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	private applyMark(mark: BranchMark): void {
 		if (mark.kind === "gap") this.applyGap(mark.droppedBytes)
-		else this.beginStream(mark.trust)
+		else this.beginStream(mark.trust, mark.ticket)
 	}
 
 	/** Bytes the fanout accepted into the branch so far (written minus dropped). */
@@ -1025,7 +1369,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			}
 			this.bpMark = { atBranchByte: at, droppedAt: t.droppedBytesTotal }
 		}
-		this.branchQueue.push({ kind: "stream", atBranchByte: at, trust })
+		this.branchQueue.push({
+			kind: "stream",
+			atBranchByte: at,
+			trust,
+			ticket: ++this.ticket,
+		})
 		this.streamStartByte = at
 		this.applyDueMarks()
 	}
@@ -1208,24 +1557,38 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		for (const ev of events) {
 			if (ev.kind === "epoch-started") {
 				this.lastEpoch = Math.max(this.lastEpoch, ev.epoch)
-				// An untracked retune (below) registers its meta under the epoch the pipeline started.
-				let meta = this.pendingMeta.get(ev.epoch) ?? null
-				this.pendingMeta.delete(ev.epoch)
-				if (!meta && ev.settleMode === "none") {
+				let meta: EngineEpoch | null = null
+				let start: PendingStart | null = null
+				if (this.untrackedStart?.epoch === ev.epoch) {
+					// The untracked retune announced just before (below), under the pipeline's own id.
+					meta = this.untrackedStart
+					this.untrackedStart = null
+				} else if (ev.settleMode !== "none") {
+					// A posted pending epoch's start, found by the pipeline's numbering, never by key.
+					start = this.takeStart(ev.epoch)
+					// None matches while this stream has posts the host may still start: the engine
+					// cannot name it, so it trusts it with nothing. With none posted it keeps the label.
+					meta =
+						start?.meta ??
+						(this.unnamedStream === this.current.stream
+							? { ...this.current, tuningTrust: "unverified" }
+							: null)
+				} else {
 					// A stream's own start: each new-stream is answered by exactly one, in order.
 					meta = this.openingStreams.shift() ?? null
 					// Epochs the older stream still had pending can no longer start.
 					const stream = meta?.stream
 					if (stream !== undefined) {
-						for (const [epoch, m] of this.pendingMeta) {
-							if (m.stream < stream) this.pendingMeta.delete(epoch)
-						}
-						// WG9 R3: and their network-settle entries (every live entry has its meta).
-						for (const epoch of this.verifiedFrom.keys()) {
-							if (!this.pendingMeta.has(epoch)) this.verifiedFrom.delete(epoch)
-						}
+						let stale = 0
+						while (
+							this.starts[stale] &&
+							this.starts[stale]!.meta.stream < stream
+						)
+							stale += 1
+						this.dropStarts(stale)
 					}
 				}
+				this.startedThrough = ev.epoch
 				// Late old-stream events keep the old stream's labels (thread host).
 				this.current = {
 					...(meta ?? this.current),
@@ -1235,10 +1598,29 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					settleMode: ev.settleMode,
 				}
 				if (ev.settleMode === "marker") this.marker = true
-				this.currentVerifiedFrom = this.verifiedFrom.get(ev.epoch) ?? null
+				this.currentVerifiedFrom = start?.verifiedFrom ?? null
 				this.currentVerifiedEpoch = ev.epoch
 				this.statusWindowOpen = this.currentVerifiedFrom !== null
-				this.verifiedFrom.delete(ev.epoch)
+				const superseded =
+					start?.superseded === true ? start.requested : this.supersededLost
+				this.supersededLost = null
+				if (start && start.requested !== ev.epoch) {
+					// The caller knows this epoch by the id it was given: say so on its start only
+					// (never in `current`). The label above is still the one posted for it.
+					this.emit("pipeline", ev, {
+						...this.epochFor(ev),
+						requestedEpoch: start.requested,
+						...(superseded !== null ? { supersededEpoch: superseded } : {}),
+					})
+					continue
+				}
+				if (superseded !== null) {
+					this.emit("pipeline", ev, {
+						...this.epochFor(ev),
+						supersededEpoch: superseded,
+					})
+					continue
+				}
 			} else if (ev.kind === "untracked-retune" && ev.newEpoch === false) {
 				// WG10 req 2.9: a strong transmission ended: no epoch, warn only; not forwarded
 				// (the scanner would re-send its hop for a retune that did not happen).
@@ -1251,8 +1633,9 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			} else if (ev.kind === "untracked-retune") {
 				// § 4.7: the pipeline already started an unverified epoch (Task 10b); record it, post nothing.
 				this.lastEpoch = Math.max(this.lastEpoch, ev.epoch)
+				this.startedThrough = ev.epoch
 				const caps = this.deps.sources.getCaps(this.sourceId)
-				this.pendingMeta.set(ev.epoch, {
+				this.untrackedStart = {
 					...this.current,
 					epoch: ev.epoch,
 					startSample: null,
@@ -1260,7 +1643,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 						this.centreOverride ?? caps?.centerFreq ?? this.current.centreHz,
 					tuningTrust: "unverified",
 					settleMode: null,
-				})
+				}
 				this.warn(
 					"untracked-retune",
 					ev.deltaHz,
@@ -1344,6 +1727,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private readonly onDisconnected = (sourceId: string): void => {
 		if (sourceId !== this.sourceId || !this.running) return
 		this.awaitingPayload = true
+		this.disconnectTicket = ++this.ticket
 		this.queueStreamBoundary("unverified")
 	}
 
@@ -1431,7 +1815,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private expectedCentre(): number {
 		let expected = this.current.centreHz
 		for (const meta of this.openingStreams) expected = meta.centreHz
-		for (const meta of this.pendingMeta.values()) expected = meta.centreHz
+		for (const start of this.starts) expected = start.meta.centreHz
 		const queued = this.externalPending?.centreHz
 		return queued ?? expected
 	}
@@ -1505,13 +1889,32 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		trust: TuningTrust,
 		centreHz?: number,
 		checkState = false,
+		ticket?: number,
+		kept = false,
+		newest?: number,
 	): void {
 		if (!this.running) return
-		if (this.externalPending) {
-			if (centreHz !== undefined) this.externalPending.centreHz = centreHz
-			if (checkState) this.externalPending.checkState = true
-			this.externalPending.trust = mergeTrust(this.externalPending.trust, trust)
-			return
+		const own = ticket ?? ++this.ticket
+		const held = this.externalPending
+		if (held) {
+			// Never merge across a stream boundary or a disconnect: the held command belongs to the
+			// stream before it and is posted into that stream now, as its microtask would (carried
+			// instead during a restart, and then dropped if a disconnect came since); this one takes
+			// its own entry, ticket and clock, so it can never inherit the old stream's place.
+			if (!this.boundaryBetween(held.ticket, own)) {
+				this.supersede(held, {
+					trust,
+					...(centreHz !== undefined ? { centreHz } : {}),
+					checkState,
+					ticket: own,
+					...(kept ? { kept } : {}),
+					...(newest !== undefined ? { newest } : {}),
+				})
+				return
+			}
+			this.flushExternal()
+			// Flushing can restart the pipeline, which takes this command as a carried one.
+			if (!this.running) return
 		}
 		const clock = this.sampleClock()
 		this.externalPending = {
@@ -1520,14 +1923,31 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			bufferedSamples: clock.bufferedSamples,
 			...(centreHz !== undefined ? { centreHz } : {}),
 			checkState,
+			ticket: own,
+			...(kept ? { kept } : {}),
+			...(newest !== undefined ? { newest } : {}),
 		}
 		queueMicrotask(() => this.flushExternal())
+	}
+
+	/** True while a stream boundary queued before the command `ticket` is still ahead in the branch. */
+	private boundaryAhead(ticket: number): boolean {
+		return this.branchQueue.some(
+			mark => mark.kind === "stream" && mark.ticket < ticket,
+		)
 	}
 
 	private flushExternal(): void {
 		const pending = this.externalPending
 		this.externalPending = null
-		if (!pending || !this.running || this.restarting) return
+		if (!pending || !this.running) return
+		// A restart or a boundary still ahead in the branch: the command's epoch belongs to the
+		// stream that starts next (its clock is not this one's). Dropping it would leave that stream
+		// on the label it started with, `unverified` after a reconnect, until another command.
+		if (this.restarting || this.boundaryAhead(pending.ticket)) {
+			this.carry(pending)
+			return
+		}
 		if (pending.checkState)
 			pending.trust = mergeTrust(pending.trust, this.stateTrust())
 		const caps = this.deps.sources.getCaps(this.sourceId)
@@ -1545,6 +1965,20 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			sampleRateHz: fs,
 			networkSettleMs: s.sweep.settleMs.network,
 		})
+		// B1: a kept command's explicit centre was the tuner's when it was written; the scanner (its
+		// writes post no external epoch), a relay or a later reconnect may have moved it before
+		// this stream posted it. Caps follows every frequency write, so the label is only kept
+		// when both still name the same centre; otherwise the epoch reads caps, `unverified`.
+		// Fail closed by construction: a stale centre, a caps that lags the command, or a caps
+		// without a centre all disagree, and each demotes rather than trusts either witness.
+		if (
+			pending.kept === true &&
+			pending.centreHz !== undefined &&
+			pending.centreHz !== caps.centerFreq
+		) {
+			pending.trust = mergeTrust(pending.trust, "unverified")
+			delete pending.centreHz
+		}
 		// A host-reported centre that disagrees with ours is never `commanded` or `relay`.
 		if (this.centreOverride !== null)
 			pending.trust = mergeTrust(pending.trust, "unverified")
@@ -1554,8 +1988,6 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			caps.centerFreq ??
 			this.current.centreHz
 		const epoch = this.allocateEpoch()
-		if (timing.verifiedFromSample !== null)
-			this.verifiedFrom.set(epoch, timing.verifiedFromSample)
 		this.submitEpoch({
 			epoch,
 			commandSample: pending.commandSample,
