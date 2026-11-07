@@ -174,6 +174,12 @@ export const IDENTIFY_IQ_FRESH_BLOCKS = 10
  * busy event loop, a receiver that came back) then no longer withholds `nothing` for the rest of the
  * job, while a gap in the last 2 s before the deadline (13 % of the default 15 s wait) still does: the
  * receiver has not shown it is back. An unknown sample rate never forgives a gap.
+ *
+ * A gap is a silence in block arrivals, so a stalled event loop that then delivers every sample at
+ * once is a gap as well (a known limit: `no-samples` then points at a healthy receiver). End-sample
+ * progress cannot clear it: the engine's sample index also advances over samples it dropped (a branch
+ * under backpressure, a worker behind), and the block summary does not say a block held a drop, so
+ * full progress after a stall does not prove that no sample was lost.
  */
 export const IDENTIFY_IQ_RECOVER_BLOCKS = 40
 /**

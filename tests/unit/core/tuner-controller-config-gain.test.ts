@@ -600,7 +600,9 @@ describe("configured gain review fixes", () => {
 		h.connect()
 		const s = h.snapshot()
 		expect(s.frames).toEqual(["0800000001", "040000012c"])
-		expect(s.state.unknownFields ?? []).toContain("gainMode")
+		// The replayed SET_GAIN selects manual on the receiver, as the first write did.
+		expect(s.state.gainMode).toBe("manual")
+		expect(s.state.unknownFields ?? []).not.toContain("gainMode")
 	})
 
 	it("a new connection clears the configured proof until its first payload writes again", () => {

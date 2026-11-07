@@ -266,6 +266,17 @@ describe("an IQ gap recovers once blocks flow again", () => {
 		expect((await gapThen(past))?.why).toBe("no-samples")
 	})
 
+	it("a stall that then delivers every sample at once is still a gap", async () => {
+		// The backlog of the silence arrives in one burst, then blocks flow for 1 500 ms: full sample
+		// progress, 41 blocks, but under 2 000 ms since the gap. The sample index also advances over
+		// dropped samples, so the progress cannot prove the stall lost nothing (a known limit).
+		const burst = [
+			...blocks(11, 0, BLOCK_SAMPLES),
+			...blocks(30, BLOCK_MS, BLOCK_SAMPLES),
+		]
+		expect((await gapThen(burst))?.why).toBe("no-samples")
+	})
+
 	it("a block later than the fresh bound inside the run restarts it", async () => {
 		// 500 ms between blocks is fresh, 501 ms a gap: 40 blocks with one 501 ms step are no recovery
 		const fresh = [

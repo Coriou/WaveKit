@@ -2161,7 +2161,14 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
 - `POST /api/tuner/:sourceId/tuner-xtal` — Tuner XTAL frequency
 - `POST /api/tuner/:sourceId/tuner-gain-index` — Gain index value
 - `PATCH /api/tuner/:sourceId/config` — Bulk update, with the field names and units of
-  `GET /api/tuner`; any other field is a 400 that lists them
+  `GET /api/tuner`; any other field is a 400 that lists them. Its `gainMode` and `gain` follow
+  the rules of [`POST /api/tuner/:sourceId/tune`](#post-apitunersourceidtune): for `agc` the gain
+  goes first, a value in place and proven is not written again, and an unproven one is
+  written.
+
+A gain or a tuner gain index written in AGC leaves AGC: rtl_tcp `SET_GAIN` and
+`SET_TUNER_GAIN_INDEX` select manual gain, so `gainMode` then reads `manual`, and a later request
+for `agc` writes the mode again.
 
 Every 400 from these routes names the field that failed, by its schema name, and the fields it
 expects, their types and units, for example `Invalid request body at gain; expected {"gain":

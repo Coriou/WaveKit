@@ -444,7 +444,10 @@ so the skirt of a busy neighbour one channel away, with no live track, no longer
 target. A live track within 12.5 kHz still answers `signal-nearby`. Otherwise it is `could-not-test`:
 
 - `no-samples`: the blocks stopped, or nothing measured the target. The receiver may be down even though
-  the source reads connected, as with a dongle pulled behind `rtl_tcp`; check it before you ask again.
+  the source reads connected, as with a dongle pulled behind `rtl_tcp`; check it before you ask again. A
+  busy core that holds the blocks back for 500 ms counts as a pause too, even when every sample arrives
+  afterwards: the sample count also runs over samples the core dropped, so it cannot prove none were lost.
+  If the receiver is fine, ask again.
 - `signal-nearby`: something is there that your target did not resolve. `result.nearbyHz` is the centre
   of a live track when one is within 12.5 kHz or holds the level; otherwise it is the strongest spectrum
   bin, where the energy is but not necessarily a channel. Ask again with `bandwidthHz` wide enough to
@@ -460,8 +463,8 @@ no earlier match stays `heard-digital-unconfirmed`. A pager (POCSAG, FLEX) follo
 decode with a real message body is enough, and otherwise a capcode needs two decodes 2 s to 5 min apart on
 this signal, from this request or an earlier one. A capcode accepted earlier counts on one decode only while
 its last counted decode is at most 5 min old; past that it needs a fresh pair, as digital voice does.
-POCSAG addresses 0 to 7 (what a stuck slicer prints) count only after 30 s without any of them, also once
-accepted. The verdict does not say which of these cases applies, so say "it is POCSAG, capcode N", not
+POCSAG addresses 0 to 7 (what a stuck slicer prints) count only after 30 s without any of them within one
+probe, also once accepted; two separate probes can still pair their first decodes (a known limit). The verdict does not say which of these cases applies, so say "it is POCSAG, capcode N", not
 "two decodes just now".
 The lists are in `GET /api/enums` (`scanner.identifyVerdictCodes`, `scanner.identifyVerdictWhy`).
 
