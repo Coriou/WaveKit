@@ -74,7 +74,11 @@ import type {
 	ScannerRecorderSession,
 	ScannerRecorderStatus,
 } from "@wavekit/api-types"
-import { VOICE_MIN_FINAL_FRAMES } from "./voice-activity.js"
+import {
+	VOICE_BLOCK_FRAMES,
+	VOICE_MIN_FINAL_FRAMES,
+	VOICE_WINDOW_BLOCKS,
+} from "./voice-activity.js"
 import { RecorderDecisions, type ReceiptDetail } from "./recorder-decisions.js"
 import type { RecordingActivity } from "../scheduler.js"
 
@@ -273,9 +277,29 @@ export function lateFlagKept(
  * last word answers true (the sweep keeps the hop within L only) at most 1000 + 2000 + 500 =
  * 3500 ms after that word, and the sweep sees it at its next 250 ms re-check: 3.75 s. A squelch
  * close answers false at once (the track's close, not the audio). In samples: 2000 × fs / 1000
- * (2 048 000 at 1.024 Msps).
+ * (2 048 000 at 1.024 Msps). Each voice answer carries how long the judged audio has been quiet
+ * (VoiceOnAir.quietMs, the longest since the last answer): once its hold reached L the sweep asks
+ * for less (VOICE_QUIET_PAST_L_MS).
  */
 export const WIDEBAND_VOICE_ON_AIR_MS = 2_000
+/**
+ * Earliest the recorder can answer voice for a session that started with its first block of voice:
+ * its audio is judged WIDEBAND_HOLDBACK_MS behind the air, and the gate needs one window of it:
+ * 1000 + 5 × 100 = 1500 ms. A sweep holds a voiced landing at least this long (capFor).
+ */
+export const WIDEBAND_VOICE_ANSWER_MS =
+	WIDEBAND_HOLDBACK_MS +
+	(VOICE_WINDOW_BLOCKS * VOICE_BLOCK_FRAMES * 1000) / ANALOG_AUDIO_RATE_HZ
+/**
+ * Latest a classed session still answers "judging" (RecordingActivity), counted from its first
+ * in-track audio: four gate windows heard (WIDEBAND_EVICT_MIN_HEARD_FRAMES, 2 s), judged
+ * WIDEBAND_HOLDBACK_MS behind the air: 2000 + 1000 = 3000 ms. A voice qualifies on one window,
+ * usually in its first second; a session past this is a carrier or a pause to the sweep, whatever
+ * its file gate says later.
+ */
+export const WIDEBAND_VOICE_JUDGE_MS =
+	(WIDEBAND_EVICT_MIN_HEARD_FRAMES * 1000) / ANALOG_AUDIO_RATE_HZ +
+	WIDEBAND_HOLDBACK_MS
 /**
  * A file whose first readable sample is more than this (one 50 ms engine block) after its
  * planned start (onset − preRoll) lost its pre-roll or onset (the ring did not reach back):
@@ -675,6 +699,11 @@ interface Session {
 	meterTo: number
 	/** Input sample at the end of the last voiced meter window; null before any. */
 	voiceAt: number | null
+	/**
+	 * Longest stretch between two voiced meter windows (input samples) since the last voice answer,
+	 * so a quiet that ended between two answers still reads in the next one (VoiceOnAir.quietMs).
+	 */
+	quietGap: number
 	/** Input sample past the newest frame the gate judged (in-track or not). */
 	judgedTo: number
 	/**
@@ -919,9 +948,11 @@ export class WidebandAnalogRecorder {
 	 * the name stays the same, RecordingActivity); true while a track is open with no
 	 * voice that recent (a carrier or a repeater hang after the voice, a stuck carrier: kept within
 	 * L only); false once no joined track is open (the over's squelch closed: the recorder's
-	 * `hangMs` still joins the next over into the same file, the sweep does not wait for it). A
-	 * shadow, a session not voiced yet, or one of another stream or an older epoch (the previous
-	 * hop's window) answers false.
+	 * `hangMs` still joins the next over into the same file, the sweep does not wait for it).
+	 * "judging" while a classed session with an open track has not been voiced and has heard under
+	 * WIDEBAND_EVICT_MIN_HEARD_FRAMES (WIDEBAND_VOICE_JUDGE_MS from its first audio): its answer is
+	 * still to come, whichever way it goes. A shadow or one of another stream or an older epoch (the
+	 * previous hop's window) answers false, so an unclassed shadow on a carrier costs a visit nothing.
 	 */
 	recordingActive(
 		sourceId: string,
@@ -934,13 +965,17 @@ export class WidebandAnalogRecorder {
 				s.sourceId !== sourceId ||
 				s.stream !== at.stream ||
 				s.epoch !== at.epoch ||
-				!s.classed ||
-				!s.qualified
+				!s.classed
 			)
 				continue
+			if (!s.qualified) {
+				if (s.heard < WIDEBAND_EVICT_MIN_HEARD_FRAMES && voicedSpan(s).open)
+					answer = "judging"
+				continue
+			}
 			const v = this.voiceOnAir(s)
 			if (typeof v === "object") return v
-			answer ||= v
+			if (answer === false) answer = v
 		}
 		return answer
 	}
@@ -955,7 +990,9 @@ export class WidebandAnalogRecorder {
 		if (!open) s.voiceTx = null
 		if (voiced === null) return open
 		s.voiceTx ??= voiced
-		return { voice: s.voiceTx }
+		const quiet = Math.max(s.quietGap, s.judgedTo - (s.voiceAt ?? s.judgedTo))
+		s.quietGap = 0
+		return { voice: s.voiceTx, quietMs: (quiet * 1000) / s.fs }
 	}
 
 	/** Status block (ScannerStatus.recorder): live sessions, parked ones and the decision log. */
@@ -1502,6 +1539,7 @@ export class WidebandAnalogRecorder {
 			mask: new Uint8Array(0),
 			meterTo: Number.NEGATIVE_INFINITY,
 			voiceAt: null,
+			quietGap: 0,
 			voiceTx: null,
 			judgedTo: Number.NEGATIVE_INFINITY,
 			observations: new Set([input.observationId]),
@@ -2368,7 +2406,11 @@ export class WidebandAnalogRecorder {
 				// or the first after the gate latched): no meter window joins the two.
 				if (runFrom - s.meterTo > perFrame / 2) s.meter.reset()
 				const voicedTo = s.meter.push(pcm, m, j)
-				if (voicedTo > 0) s.voiceAt = from + voicedTo * perFrame
+				if (voicedTo > 0) {
+					const at = from + voicedTo * perFrame
+					s.quietGap = Math.max(s.quietGap, at - (s.voiceAt ?? at))
+					s.voiceAt = at
+				}
 				s.meterTo = from + j * perFrame
 			}
 			i = j

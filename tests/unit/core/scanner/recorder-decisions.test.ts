@@ -328,7 +328,8 @@ describe("WidebandAnalogRecorder decisions (synthetic signals)", () => {
 				JSON.stringify(h.rec.recordingActive("rtl", { stream: 1, epoch: 1 })),
 			)
 		})
-		expect([...seen]).toEqual(["false"])
+		// Its voice answer is to come for 2 s of heard audio (WIDEBAND_VOICE_JUDGE_MS), never voice.
+		expect([...seen]).toEqual(['"judging"', "false"])
 		expect(h.rec.diagnostics().recent.map(e => e.code)).toEqual([
 			"started",
 			"discarded:unvoiced",

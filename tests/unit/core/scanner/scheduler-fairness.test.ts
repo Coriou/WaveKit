@@ -1,4 +1,5 @@
 // tests/unit/core/scanner/scheduler-fairness.test.ts
+import { WIDEBAND_VOICE_ANSWER_MS } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
@@ -1402,7 +1403,8 @@ describe("hold evidence across restarts, the long-hold lock and confirm bounds",
 		)
 		expect(long.length).toBeGreaterThan(2)
 		// A visit's time past its dwell is its holds, and a dwell lengthened by up to 4 blocks for
-		// the class of a young track (a new call's first blocks).
+		// the class of a young track (a new call's first blocks). A visit landing once L is spent still
+		// follows voice to the recorder's first possible answer (WIDEBAND_VOICE_ANSWER_MS).
 		const own = r.visits.filter(v => v.hopIndex === 2)
 		for (let k = 1; k < own.length; k++) {
 			const between = r.visits.filter(
@@ -1416,7 +1418,10 @@ describe("hold evidence across restarts, the long-hold lock and confirm bounds",
 				0,
 			)
 			expect(heldMs).toBeLessThanOrEqual(
-				longFollowMs(3) + BLOCK_MS + between.length * 4 * BLOCK_MS,
+				longFollowMs(3) +
+					BLOCK_MS +
+					between.length * 4 * BLOCK_MS +
+					Math.max(0, between.length - 1) * WIDEBAND_VOICE_ANSWER_MS,
 			)
 		}
 	})
