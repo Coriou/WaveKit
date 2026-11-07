@@ -64,10 +64,16 @@ export class DoubleMatch {
 	/**
 	 * True exactly once per scope: on the second CRC-clean occurrence of `value` under `key`.
 	 * With a shared scope, the shared memory alone decides and records the occurrence (its
-	 * separation and window bounds apply to repeats inside this instance too).
+	 * separation and window bounds apply to repeats inside this instance too). `again`: the value's
+	 * acceptance is too old to count (`acceptedAgeMs`), so it pairs afresh, and a pair restarts its age.
 	 */
-	accept(key: string, value: string, crcClean: boolean): boolean {
-		if (!crcClean || this.isAccepted(key, value)) return false
+	accept(
+		key: string,
+		value: string,
+		crcClean: boolean,
+		again = false,
+	): boolean {
+		if (!crcClean || (!again && this.isAccepted(key, value))) return false
 		const scope = this.scope()
 		if (scope === null && this.shared?.requireScope) return false
 		if (scope !== null) {

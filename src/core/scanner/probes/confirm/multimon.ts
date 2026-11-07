@@ -132,9 +132,10 @@ function pairPocsag(
 	pairKey: string,
 	capcode: string,
 	at: number,
+	again: boolean,
 ): boolean {
 	if (state.match.scope() !== null) {
-		if (!state.match.accept(pairKey, capcode, true)) return false
+		if (!state.match.accept(pairKey, capcode, true, again)) return false
 		if (pairKey !== key) state.match.markAccepted(key, capcode)
 		return true
 	}
@@ -199,6 +200,23 @@ function pocsagBodyReal(
 	return good / body.length >= POCSAG_NUMERIC_MIN_RATIO
 }
 
+/**
+ * Whether an accepted capcode still names this decode on its own: its last counted decode is at
+ * most `CONFIRM_WINDOW_MS` (5 min) old, the window a pair is made in, so a beacon about every 60 s
+ * keeps it with 5x margin. Older, the decode is one decode again and needs its pair or a page, as
+ * dsd-fme's identities do: acceptance itself never ages, but a capcode accepted once, maybe from two
+ * chance syncs, must not let any later false line identify. With no shared memory the age is null:
+ * that acceptance lives no longer than its decoder, so it always counts.
+ */
+function acceptanceCounts(
+	state: InterpreterState,
+	key: string,
+	capcode: string,
+): boolean {
+	const age = state.match.acceptedAgeMs(key, capcode)
+	return age === null || age <= CONFIRM_WINDOW_MS
+}
+
 export function interpretMultimon(
 	out: DecoderOutputLike,
 	state: InterpreterState,
@@ -244,16 +262,19 @@ export function interpretMultimon(
 		}
 		quiet = run.note(at)
 	}
-	// once accepted, every later decode of the capcode is evidence again (ambient refreshes lastConfirm)
-	if (!state.match.isAccepted(key, capcode)) {
-		if (plausible && !state.requirePair) state.match.markAccepted(key, capcode)
-		else if (protocol === "flex") {
-			if (!state.match.accept(key, capcode, true)) return []
-		} else if (zeroWord && !plausible && !quiet) return []
-		else {
-			const pairKey = run && !plausible ? run.pairKey(key) : key
-			if (!pairPocsag(state, key, pairKey, capcode, at)) return []
-		}
+	const accepted = state.match.isAccepted(key, capcode)
+	if (accepted && acceptanceCounts(state, key, capcode)) {
+		// A stuck slicer's run stays a run after acceptance: only a decode after the quiet gap counts.
+		if (zeroWord && !plausible && !quiet) return []
+		state.match.touchAccepted(key, capcode)
+	} else if (plausible && !state.requirePair) {
+		state.match.markAccepted(key, capcode)
+	} else if (protocol === "flex") {
+		if (!state.match.accept(key, capcode, true, accepted)) return []
+	} else if (zeroWord && !plausible && !quiet) return []
+	else {
+		const pairKey = run && !plausible ? run.pairKey(key) : key
+		if (!pairPocsag(state, key, pairKey, capcode, at, accepted)) return []
 	}
 	return [
 		{

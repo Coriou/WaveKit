@@ -437,12 +437,17 @@ Read `identify.targets[0].verdict` once the target is final. Say only what it sa
 | `could-not-test`            | No answer. `verdict.why` says why; do not read it as "not DMR"             |
 
 `nothing` needs proof of all three: IQ blocks kept arriving up to the deadline, the level at the target
-stayed below the block threshold, and no live track sat within 12.5 kHz. Otherwise it is `could-not-test`:
+stayed below the block threshold, and no live track sat within 12.5 kHz. A pause in the blocks counts only
+if they had not flowed again for 2 s by the deadline. The level is read over the inner part of the
+tolerance (the tolerance less one spectrum bin), so a busy neighbour one channel away does not hold back
+`nothing`. Otherwise it is `could-not-test`:
 
 - `no-samples`: the blocks stopped, or nothing measured the target. The receiver may be down even though
   the source reads connected, as with a dongle pulled behind `rtl_tcp`; check it before you ask again.
-- `signal-nearby`: something is there that your target did not resolve, centred at `result.nearbyHz`. Ask
-  again with `bandwidthHz` wide enough to reach it, or with that frequency.
+- `signal-nearby`: something is there that your target did not resolve. `result.nearbyHz` is the centre
+  of a live track when one is within 12.5 kHz or holds the level; otherwise it is the strongest spectrum
+  bin, where the energy is but not necessarily a channel. Ask again with `bandwidthHz` wide enough to
+  reach it, or at the track's frequency.
 
 `verdict.analogHeard: true` means live audio heard a transmission at the target. Beside
 `heard-digital-unconfirmed` it matters: a lone sync over voice is usually the voice, so say "voice, with a
@@ -450,10 +455,13 @@ possible digital sync", not "possibly DMR".
 
 For digital voice (DMR, P25, NXDN, YSF, D-STAR, dPMR), `decoded` needs two matching decodes 2 s to 5 min
 apart, so a continuous transmission takes about 2.5 s from its first decode, and a single short burst with
-no earlier match stays `heard-digital-unconfirmed`. A pager follows its own rule: one decode with a plausible
-message can be enough, and one decode of a capcode already accepted on this signal counts at any age, since
-a false line naming that capcode out of about 2 million is unlikely. Say "this capcode, seen here before",
-which does not mean a second decode just now.
+no earlier match stays `heard-digital-unconfirmed`. A pager (POCSAG, FLEX) follows its own rule: one
+decode with a real message body is enough, and otherwise a capcode needs two decodes 2 s to 5 min apart on
+this signal, from this request or an earlier one. A capcode accepted earlier counts on one decode only while
+its last counted decode is at most 5 min old; past that it needs a fresh pair, as digital voice does.
+POCSAG addresses 0 to 7 (what a stuck slicer prints) count only after 30 s without any of them, also once
+accepted. The verdict does not say which of these cases applies, so say "it is POCSAG, capcode N", not
+"two decodes just now".
 The lists are in `GET /api/enums` (`scanner.identifyVerdictCodes`, `scanner.identifyVerdictWhy`).
 
 `verdict.confirmedAcrossJobs: true` on a `decoded` means this request heard one burst and the match came

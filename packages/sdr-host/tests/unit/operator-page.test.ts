@@ -833,3 +833,53 @@ describe("operator page keeps its shape", () => {
 		expect(sources.find(f => f.term === "CPU")?.note?.length).toBeGreaterThan(0)
 	})
 })
+
+describe("a failed USB check", () => {
+	/** lsusb failed or timed out: `present: false` observed nothing. */
+	function probeFailed(s: SdrHostSampling): StatusPayload {
+		const payload = status(s, false)
+		const dongle = { ...payload.dongle!, probeFailed: true }
+		payload.dongle = dongle
+		return payload
+	}
+
+	it("never says the dongle is missing, on the stream or in the verdict", () => {
+		const failed = probeFailed(
+			sampling({
+				state: "stale",
+				reason: "upstream byte count stopped growing",
+				sampleAgeMs: 45_000,
+			}),
+		)
+		expect(stream(failed)?.dongle).toEqual({
+			state: "unknown",
+			text: "USB check failed",
+			sub: "Device state unknown",
+		})
+		const v = verdict({ status: failed, host: null, fresh: true })
+		expect(v.detail).not.toContain("No dongle is detected")
+		expect(v.detail).toContain("The USB check failed")
+		expect(JSON.stringify(stream(failed))).not.toContain("Not detected")
+	})
+
+	it("while samples flow, the verdict stays the flow's", () => {
+		const v = verdict({
+			status: probeFailed(sampling()),
+			host: null,
+			fresh: true,
+		})
+		expect(v).toMatchObject({ state: "ok", title: "Sampling" })
+	})
+
+	it("an answered check that saw no dongle still says so", () => {
+		const s = status(sampling({ state: "stale", sampleAgeMs: 45_000 }), false)
+		s.dongle = { ...s.dongle!, ...{ probeFailed: false } }
+		expect(stream(s)?.dongle).toMatchObject({
+			state: "fault",
+			text: "Not detected",
+		})
+		expect(verdict({ status: s, host: null, fresh: true }).detail).toContain(
+			"No dongle is detected on USB.",
+		)
+	})
+})

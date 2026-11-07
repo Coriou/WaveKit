@@ -157,11 +157,21 @@ export const IDENTIFY_PAIR_WAIT_MS =
 export const IDENTIFY_OWN_DECODES_MAX = 256
 /**
  * Saying `nothing` needs blocks arriving through the deadline: the newest no older than this many
- * block times, and no longer gap while the job listened. 10 × 50 ms (the default integration) =
+ * block times, and no longer gap while the job listened unless blocks flowed again for
+ * IDENTIFY_IQ_RECOVER_BLOCKS after it. 10 × 50 ms (the default integration) =
  * 500 ms, five ticks of the 100 ms service timer, so scheduling jitter does not trip it. A receiver
  * that stops within the last 500 ms of the default 15 s wait (3.3 % of it) is not seen.
  */
 export const IDENTIFY_IQ_FRESH_BLOCKS = 10
+/**
+ * A gap (a silence past the fresh bound between two blocks) is forgiven once blocks have advanced
+ * unbroken for this many block times after it: 40 × 50 ms = 2 000 ms at the default integration,
+ * four times the longest silence the proof allows. A stall early in a long wait (a busy event loop,
+ * a receiver that came back) then no longer withholds `nothing` for the rest of the job, while a gap
+ * in the last 2 s before the deadline (13 % of the default 15 s wait) still does: the receiver has
+ * not shown it is back. Every later gap restarts the count.
+ */
+export const IDENTIFY_IQ_RECOVER_BLOCKS = 40
 /**
  * A live track this close that did not resolve the target withholds `nothing`: one 12.5 kHz channel.
  * The default tolerance is 1 kHz and a bin 0.71 to 1.41 kHz at the default FFT size, so a real signal
@@ -1377,6 +1387,63 @@ function strongestBin(
 	return best
 }
 
+/**
+ * Half-width of the inner part of a target's tolerance, where the absence check reads the level:
+ * tolerance − binHz, at least binHz / 2. A summary bin is a max-hold over its span and the FFT
+ * window spreads a signal into the bins next to its own, so a bin centred within tolerance − binHz
+ * spans and draws from the tolerance alone: a neighbour channel's skirt at the tolerance's edge (an
+ * FM carrier one 12.5 kHz channel away, asked about with `bandwidthHz` 12 500) is not read as a level
+ * at the target. The floor of binHz / 2 always keeps the bin that holds the target itself. With the
+ * default 1 kHz tolerance and a 0.71 to 1.41 kHz bin that is the target's own bin.
+ */
+export function identifyInnerHalfWidthHz(
+	toleranceHz: number,
+	binHz: number,
+): number {
+	return Math.max(toleranceHz - binHz, binHz / 2)
+}
+
+/** The strongest summary bin whose centre lies within `halfWidthHz` of the target (inner level). */
+function strongestInnerBin(
+	summary: BlockSummary,
+	targetHz: number,
+	halfWidthHz: number,
+): { dbfs: number; centreHz: number } | null {
+	const lo = Math.max(
+		0,
+		Math.ceil((targetHz - halfWidthHz - summary.startHz) / summary.binHz - 0.5),
+	)
+	const hi = Math.min(
+		summary.bins.length - 1,
+		Math.floor(
+			(targetHz + halfWidthHz - summary.startHz) / summary.binHz - 0.5,
+		),
+	)
+	let best: { dbfs: number; centreHz: number } | null = null
+	for (let i = lo; i <= hi; i++) {
+		const b = summary.bins[i]
+		if (b !== undefined && (best === null || b > best.dbfs))
+			best = { dbfs: b, centreHz: summary.startHz + (i + 0.5) * summary.binHz }
+	}
+	return best
+}
+
+/** The level over the inner part of the tolerance above the block floor, in dB; null: no bin. */
+export function identifyInnerLevel(
+	summary: BlockSummary,
+	targetHz: number,
+	toleranceHz: number,
+): { snrDb: number; centreHz: number } | null {
+	const bin = strongestInnerBin(
+		summary,
+		targetHz,
+		identifyInnerHalfWidthHz(toleranceHz, summary.binHz),
+	)
+	return bin
+		? { snrDb: bin.dbfs - summary.floorDbfs, centreHz: bin.centreHz }
+		: null
+}
+
 /** § 10.8 measurements: from the track, else the strongest summary bin within the tolerance. */
 export function measureTarget(
 	track: TrackSnapshot | null,
@@ -1669,9 +1736,9 @@ export class IdentifyRunner implements JobDriver {
 		firstEnd: number | null
 		lastEnd: number | null
 		lastAt: number | null
-		/** A block came later than the freshness bound after the one before it. */
-		gap: boolean
-	} = { firstEnd: null, lastEnd: null, lastAt: null, gap: false }
+		/** When the latest block that came later than the freshness bound after the one before it came. */
+		gapAt: number | null
+	} = { firstEnd: null, lastEnd: null, lastAt: null, gapAt: null }
 
 	constructor(private readonly deps: IdentifyDeps) {
 		this.record = deps.record
@@ -1872,7 +1939,7 @@ export class IdentifyRunner implements JobDriver {
 	onBlock(endSample: number, overload: boolean): void {
 		const now = this.deps.now()
 		const iq = this.iq
-		if (iq.lastAt !== null && now - iq.lastAt > this.iqFreshMs()) iq.gap = true
+		if (iq.lastAt !== null && now - iq.lastAt > this.iqFreshMs()) iq.gapAt = now
 		// A repeated or older end sample is no new signal, so only progress keeps the proof fresh.
 		if (iq.lastEnd !== null && endSample <= iq.lastEnd) {
 			this.deps.inner.onBlock(endSample, overload)
@@ -1888,11 +1955,19 @@ export class IdentifyRunner implements JobDriver {
 		return IDENTIFY_IQ_FRESH_BLOCKS * this.record.spec.integrationMs
 	}
 
-	/** Blocks of this epoch advanced, with no gap, and the newest is fresh (a source can stay connected at rate 0). */
+	/**
+	 * Blocks of this epoch advanced, with no gap or with an unbroken run of IDENTIFY_IQ_RECOVER_BLOCKS
+	 * block times since the latest one, and the newest is fresh (a source can stay connected at rate 0).
+	 */
 	private iqFresh(now: number): boolean {
-		const { firstEnd, lastEnd, lastAt, gap } = this.iq
+		const { firstEnd, lastEnd, lastAt, gapAt } = this.iq
+		const recovered =
+			gapAt === null ||
+			(lastAt !== null &&
+				lastAt - gapAt >=
+					IDENTIFY_IQ_RECOVER_BLOCKS * this.record.spec.integrationMs)
 		return (
-			!gap &&
+			recovered &&
 			firstEnd !== null &&
 			lastEnd !== null &&
 			lastEnd > firstEnd &&
@@ -1903,17 +1978,21 @@ export class IdentifyRunner implements JobDriver {
 
 	/**
 	 * What withholds `nothing` when no track resolved the target: the nearest live track within
-	 * IDENTIFY_NEARBY_HZ (a spur or an IQ image is no signal), else a level at the target at or above
-	 * the block threshold.
+	 * IDENTIFY_NEARBY_HZ (a spur or an IQ image is no signal), else a level at or above the block
+	 * threshold over the inner part of the tolerance (`identifyInnerHalfWidthHz`). For a level, the
+	 * centre named is that of the live track whose span (obwHz / 2, plus one bin) holds the strongest
+	 * inner bin, else that bin's centre, which is where the energy is and not a signal's centre.
 	 */
 	private nearbyHz(
 		t: TargetState,
 		summary: BlockSummary | null,
 	): number | null {
+		const live = this.currentTracks()
+			.map(v => v.track)
+			.filter(track => !track.flags.spur && !track.flags.iqImage)
 		let nearest: number | null = null
 		let distance = Number.POSITIVE_INFINITY
-		for (const { track } of this.currentTracks()) {
-			if (track.flags.spur || track.flags.iqImage) continue
+		for (const track of live) {
 			const d = Math.abs(track.centreHz - t.targetHz)
 			if (d <= IDENTIFY_NEARBY_HZ && d < distance) {
 				nearest = track.centreHz
@@ -1921,10 +2000,18 @@ export class IdentifyRunner implements JobDriver {
 			}
 		}
 		if (nearest !== null || !summary) return nearest
-		const bin = strongestBin(summary, t.targetHz, t.toleranceHz)
-		return bin && bin.dbfs - summary.floorDbfs >= summary.thresholdDb
-			? bin.centreHz
-			: null
+		const level = identifyInnerLevel(summary, t.targetHz, t.toleranceHz)
+		if (!level || level.snrDb < summary.thresholdDb) return null
+		let holder: number | null = null
+		distance = Number.POSITIVE_INFINITY
+		for (const track of live) {
+			const d = Math.abs(track.centreHz - level.centreHz)
+			if (d <= track.obwHz / 2 + summary.binHz && d < distance) {
+				holder = track.centreHz
+				distance = d
+			}
+		}
+		return holder ?? level.centreHz
 	}
 
 	/** Fixes what a final target's verdict may say about absence, and returns the centre to name. */
@@ -1932,9 +2019,13 @@ export class IdentifyRunner implements JobDriver {
 		t: TargetState,
 		summary: BlockSummary | null,
 	): number | null {
+		const level = summary
+			? identifyInnerLevel(summary, t.targetHz, t.toleranceHz)
+			: null
 		t.absence = {
 			iqFresh: this.iqFresh(this.deps.now()),
 			thresholdDb: summary?.thresholdDb ?? null,
+			innerSnrDb: level?.snrDb ?? null,
 		}
 		return this.nearbyHz(t, summary)
 	}

@@ -38,6 +38,11 @@ export interface IdentifyAbsenceProof {
 	iqFresh: boolean
 	/** The block threshold the measurement compares with; null: no block measured. */
 	thresholdDb: number | null
+	/**
+	 * The level over the inner part of the tolerance (identifyInnerHalfWidthHz), what the threshold is
+	 * compared with; null: no bin there. Absent, the measurement's own `snrDb` stands for it.
+	 */
+	innerSnrDb?: number | null
 }
 
 const KNOWN_OUTCOMES: ReadonlySet<ScannerTrialOutcome> = new Set(
@@ -116,18 +121,26 @@ function couldNotTest(
 /**
  * `nothing` claims an absence, so it needs proof of each part. Blocks that stopped, or no measurement
  * at the target, are `no-samples`: the receiver may have nothing to give, and a stale block measures
- * nothing. A live track close by or a level at the block threshold is `signal-nearby`: something is
+ * nothing. A live track close by or a level at the block threshold, over the inner part of the
+ * tolerance, is `signal-nearby`: something is
  * there that this target's tolerance did not resolve.
  */
 function nothingOrWhy(
 	v: IdentifyVerdictInput,
 	r: ScannerIdentifyResult,
 ): ScannerIdentifyVerdictWhy | null {
-	const snr = r.measurements.snrDb
+	const measured = r.measurements.snrDb
+	const level =
+		v.absence?.innerSnrDb !== undefined ? v.absence.innerSnrDb : measured
 	const threshold = v.absence?.thresholdDb ?? null
-	if (v.absence?.iqFresh !== true || snr === null || threshold === null)
+	if (
+		v.absence?.iqFresh !== true ||
+		measured === null ||
+		level === null ||
+		threshold === null
+	)
 		return "no-samples"
-	return r.nearbyHz !== undefined || snr >= threshold ? "signal-nearby" : null
+	return r.nearbyHz !== undefined || level >= threshold ? "signal-nearby" : null
 }
 
 function mapVerdict(v: IdentifyVerdictInput): ScannerIdentifyVerdict {

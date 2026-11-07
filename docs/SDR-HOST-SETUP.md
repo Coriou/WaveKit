@@ -174,7 +174,9 @@ WaveKit running on your computer. It is read-only.
 - **IQ stream**: the endpoint to paste into WaveKit, the dongle, the tuning and
   each client. "Falling behind" means rtlmux skipped data for a client more
   than 4 MiB behind (slow client or network); it is not loss at the antenna. No
-  clients means delivery is idle; sampling continues.
+  clients means delivery is idle; sampling continues. When the USB check itself
+  fails (lsusb errors or times out), the dongle reads "USB check failed" and
+  "Device state unknown", never "Not detected", since nothing was observed.
 - **This Pi**: power (under-voltage now, from the kernel's `rpi_volt` sensor,
   and dips counted since the receiver service started), network (Wi-Fi signal
   as bars with the dBm value, or the wired link speed), storage backing Docker and uptime. On images,

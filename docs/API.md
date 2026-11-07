@@ -5062,13 +5062,20 @@ Each final target carries `verdict`, the answer in one closed code. The lists ar
 `no-samples`, `signal-nearby`.
 
 `nothing` needs proof of all three, fixed when the target ends. IQ blocks of the current epoch
-kept arriving: their end sample advanced since the job began, with no gap and no newest block
-older than 10 block times (500 ms at the default 50 ms). `measurements.snrDb` is not null and is
-below the block's `thresholdDb`. No live track, other than a spur or an IQ image, is within
-12 500 Hz of the target. Without the first two it is `no-samples`: a source can stay connected
-at rate 0 with no source-down, as with a dongle pulled behind `rtl_tcp`. A level at or above the
-threshold or a track close by is `signal-nearby`, with its centre in `result.nearbyHz`: ask again
-with `bandwidthHz`, or at that frequency.
+kept arriving: their end sample advanced since the job began, the newest block is no older than
+10 block times (500 ms at the default 50 ms), and a gap (two blocks more than 10 block times
+apart) was followed by at least 40 block times (2 000 ms) of blocks with no further gap by the
+deadline, so a stall early in a long wait is forgiven and one in its last 2 s is not.
+`measurements.snrDb` is not null, and the level over the inner part of the tolerance (the
+strongest spectrum bin centred within the tolerance less one bin, at least half a bin) is below
+the block's `thresholdDb`; `measurements.snrDb` itself reads the whole tolerance and may be
+higher. No live track, other than a spur or an IQ image, is within 12 500 Hz of the target.
+Without the first two it is `no-samples`: a source can stay connected at rate 0 with no
+source-down, as with a dongle pulled behind `rtl_tcp`. A level at or above the threshold or a
+track close by is `signal-nearby`. `result.nearbyHz` is then the centre of the nearest live
+track within 12 500 Hz, else of the live track whose span (half its `obwHz` plus one bin) holds
+the level's bin, else that bin's centre, which is not necessarily a signal's centre: ask again
+with `bandwidthHz`, or at the track's frequency.
 
 One plausible trial that did not run withholds `undecodable`. Analog voice with no tone
 is `undecodable`, with `result.analog` beside it and `verdict.analogHeard: true`, also set beside
@@ -5081,7 +5088,10 @@ a matching decode, or the last clean occurrence of an identity already accepted 
 keeps its acceptance: a DMR colour code has 16 values, so one false line matches an accepted value
 by luck 1 time in 16, and with no limit on age a channel that carried DMR last month would read
 `decoded` for that line for good. The job then needs its own pair (the run is kept 3080 ms for it),
-or answers `heard-digital-unconfirmed`. Older cores send no `verdict`. The job is listed,
+or answers `heard-digital-unconfirmed`. A POCSAG or FLEX capcode already accepted on the signal
+counts on one decode only while its last counted decode is at most 5 min old
+(`CONFIRM_WINDOW_MS`); older, the decode needs a pair or a real message body again. Pagers never
+set `confirmedAcrossJobs`. Older cores send no `verdict`. The job is listed,
 cancellable and deletable once ended, but `pause`/`resume` answer 409
 `SCANNER_IDENTIFY_NOT_PAUSABLE` and `PATCH` 409
 `SCANNER_IDENTIFY_NOT_EDITABLE`. Identify jobs are not kept across a core

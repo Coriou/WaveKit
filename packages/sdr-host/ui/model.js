@@ -201,6 +201,9 @@ export function verdict({ status, host, fresh, failures = 0 }) {
 }
 
 function likelyCause(status, host) {
+	// A failed USB check observed nothing: `present: false` then says nothing about the dongle.
+	if (status.dongle?.probeFailed === true)
+		return "The USB check failed, so the dongle's state is unknown."
 	if (status.dongle && status.dongle.present === false)
 		return "No dongle is detected on USB."
 	if (status.dongle?.driverConflict)
@@ -311,26 +314,33 @@ export function stream(status, piNow = null) {
 	const receiving = clients.filter(c => c.state === "ok").length
 	return {
 		endpoint: status.rtlmux?.endpoint ?? null,
-		dongle: !dongle.present
-			? {
-					state: "fault",
-					text: "Not detected",
-					sub: "Check the USB connection",
-				}
-			: dongle.driverConflict
+		dongle:
+			dongle.probeFailed === true
 				? {
-						state: "fault",
-						text: "Claimed by another driver",
-						sub: `${dongle.conflictingDriver ?? "A kernel driver"} holds the device`,
+						state: "unknown",
+						text: "USB check failed",
+						sub: "Device state unknown",
 					}
-				: {
-						state: "ok",
-						text: dongle.product ?? "RTL-SDR",
-						sub:
-							restarts > 0
-								? `IQ server restarted ${restarts} time${restarts === 1 ? "" : "s"}`
-								: "",
-					},
+				: !dongle.present
+					? {
+							state: "fault",
+							text: "Not detected",
+							sub: "Check the USB connection",
+						}
+					: dongle.driverConflict
+						? {
+								state: "fault",
+								text: "Claimed by another driver",
+								sub: `${dongle.conflictingDriver ?? "A kernel driver"} holds the device`,
+							}
+						: {
+								state: "ok",
+								text: dongle.product ?? "RTL-SDR",
+								sub:
+									restarts > 0
+										? `IQ server restarted ${restarts} time${restarts === 1 ? "" : "s"}`
+										: "",
+							},
 		tuning:
 			status.sampling?.upstream?.rateBasis === "client-controlled"
 				? {
