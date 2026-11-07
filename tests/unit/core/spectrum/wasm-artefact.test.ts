@@ -167,12 +167,12 @@ describe.each(LOADERS)("$kernel artefact reasons", l => {
 		)
 	})
 
-	it("an artefact with another digest is older than its sources", () => {
+	it("an artefact with another digest names both digests and both rebuilds", () => {
 		const r = l.compile(wasmModule({ exports: l.exports(1), digest: B }), {
 			digest: A,
 		})
 		expect(!r.ok && r.reason).toBe(
-			`artefact older than its sources: ${l.file} was built from bbbbbbbbbbbb, the bundle from aaaaaaaaaaaa (rebuild with native/wavekit-${l.kernel}/build.sh)`,
+			`source digest differs: kernel bbbbbbbbbbbb, bundle aaaaaaaaaaaa; rebuild the stale side (native/wavekit-${l.kernel}/build.sh for the kernel, pnpm run build for the bundle)`,
 		)
 		// a malformed digest is no digest
 		const bad = l.compile(

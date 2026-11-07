@@ -5,6 +5,7 @@
  * snapshots. Synthetic signals only.
  */
 import { afterEach, describe, expect, it } from "vitest"
+import "./recorder-dsp-required.js"
 import type {
 	WidebandAnalogRecorder,
 	WidebandTrackInput,

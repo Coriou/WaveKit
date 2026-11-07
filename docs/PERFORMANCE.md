@@ -642,11 +642,11 @@ script on the build platform and copies the file into `/app/dist`; a final-stage
 image whose kernels do not validate under its Node or whose source digests differ from the bundles'.
 
 **Stale artefacts.** `build.sh` embeds a source digest (sha256 over the crate's `build.sh`,
-`Cargo.toml`, `Cargo.lock` and `src/`, `scripts/kernel-digest.mjs`) as the custom section
+`Cargo.toml`, `Cargo.lock` and `src/`, computed by `scripts/kernel-digest.mjs`) as the custom section
 `wavekit.source-digest`, and `pnpm run build` bundles the digest of the sources as they are then. The
-loader refuses an artefact whose digest differs or is missing and runs JS with the reason `artefact
-older than its sources`, so an old `dist/*.wasm` never runs after the crate changed; rebuild it with
-`build.sh`. `pnpm run dev` recomputes the bundled digest when a crate file changes. The digest covers
+loader refuses an artefact whose digest is missing (`artefact older than its sources`) or differs
+(`source digest differs`, naming both digests), and runs JS, so an old `dist/*.wasm` never runs after
+the crate changed; rebuild the stale side: `build.sh` for the kernel, `pnpm run build` for the bundle. `pnpm run dev` recomputes the bundled digest when a crate file changes. The digest covers
 the crate, not the JS reference: a JS frame-path or chain edit is caught by the equivalence tests,
 not by the loader. Unbundled runs (vitest, tsx) skip the loader's check; the test harnesses check
 the digest themselves. Other reasons the path line can give: the file or a configured path not found

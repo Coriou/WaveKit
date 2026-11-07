@@ -169,11 +169,9 @@ export function compileWasmArtefact(
 			return {
 				ok: false,
 				reason:
-					`artefact older than its sources: ${opts.file} ` +
-					(embedded === null
-						? "carries no source digest"
-						: `was built from ${embedded.slice(0, 12)}, the bundle from ${opts.digest.slice(0, 12)}`) +
-					` (rebuild with ${opts.crate}/build.sh)`,
+					embedded === null
+						? `artefact older than its sources: ${opts.file} carries no source digest (rebuild with ${opts.crate}/build.sh)`
+						: `source digest differs: kernel ${embedded.slice(0, 12)}, bundle ${opts.digest.slice(0, 12)}; rebuild the stale side (${opts.crate}/build.sh for the kernel, pnpm run build for the bundle)`,
 			}
 	}
 	return { ok: true, module }
