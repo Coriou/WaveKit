@@ -1159,29 +1159,41 @@ export class SpectrumPipeline {
 
 	// ---- frames and blocks ----
 
-	private onFrame(f: Frame): void {
+	/**
+	 * A frame's block: −1 drops the frame (no epoch, still resolving, before the settled start, or
+	 * handled again under the epoch its block's finalisation raised); otherwise the block before f's
+	 * is finished if f opens a new one, and f's block end is returned.
+	 */
+	private enterFrame(f: Frame): number {
 		const ep = this.ep
-		if (!ep) return
+		if (!ep) return -1
 		if (this.resolving) {
 			this.checkMarkerTimeout(f.startSample)
-			if (this.resolving) return
+			if (this.resolving) return -1
 		}
 		const s0 = ep.settledStart
-		if (s0 === null || f.startSample < s0) return
+		if (s0 === null || f.startSample < s0) return -1
 		// A frame belongs to the block it starts in. After a seam (or with overlap) the last frame of a block
 		// may overhang into the next one (same epoch only: frames before s0 are dropped above, and nothing
 		// past a command is ever pushed before it).
 		const bi = Math.floor((f.startSample - s0) / this.blockSamples)
 		const blockEnd = s0 + (bi + 1) * this.blockSamples
 		if (bi !== this.blockIndex) {
+			// on the wasm path this flushes the kernel, which can fault and fall back to JS (onFrame)
 			if (this.blockFrames > 0) this.finishBlock()
 			if (this.ep !== ep) {
 				this.onFrame(f) // finishBlock raised an untracked-retune epoch that starts at or before f
-				return
+				return -1
 			}
 			this.blockIndex = bi
 			if (this.profileOn) this.armSample()
 		}
+		return blockEnd
+	}
+
+	private onFrame(f: Frame): void {
+		const blockEnd = this.enterFrame(f)
+		if (blockEnd < 0) return
 		const sample = this.profileOn && this.sampling
 		const frameStart = sample ? this.profileClock() : 0
 		if (this.pendingWindowMs > 0) {
@@ -1205,6 +1217,9 @@ export class SpectrumPipeline {
 			if (f.startSample + this.hop >= blockEnd) this.finishBlock()
 			return
 		}
+		// f was emitted raw when the kernel fell back to JS since (a fault in the flush above): convert it
+		// now, so it counts as on the JS path; only the discarded block's frames are lost
+		const clipped = this.frames.convertRawFrame() ?? f.clipped
 		if (!sample) {
 			this.fft.transform(f.re, f.im)
 			this.frameAcc.fill(0)
@@ -1218,7 +1233,7 @@ export class SpectrumPipeline {
 			accumulateShiftedPower(f.re, f.im, this.frameAcc)
 			this.take(true, "power", t)
 		}
-		this.blockClipped += f.clipped
+		this.blockClipped += clipped
 		this.blockFrames++
 		// § 4.9 (Task 7a): a blanked frame, or a pending one in an epoch's first block, is neither integrated,
 		// short-pathed nor enveloped; the frame after it is a seam for shortFrame, so the 5 ms window restarts
@@ -1315,7 +1330,9 @@ export class SpectrumPipeline {
 	 * A trap or a kernel error: the staged frames are lost and the kernel's state is suspect, so the
 	 * open block is discarded and the short window restarts (as after a seam). A fresh instance takes
 	 * over up to FRAME_KERNEL_MAX_RESTARTS times; after that this worker keeps the JS frame path,
-	 * which runs on the same arrays. One warn line at the first fault and one at the switch to JS.
+	 * which runs on the same arrays; a frame already emitted raw when that happens (the fault came
+	 * from finishing the block before it) is converted and runs on JS, so only the discarded block's
+	 * frames are lost. One warn line at the first fault and one at the switch to JS.
 	 */
 	private kernelFault(fault: string): void {
 		const k = this.kernel
@@ -1340,6 +1357,11 @@ export class SpectrumPipeline {
 			)
 			this.kernelFaultLogged = true
 		}
+		this.discardFaultedBlock()
+	}
+
+	/** A kernel fault's reset: the open block is discarded and the short window restarts. */
+	private discardFaultedBlock(): void {
 		this.shortOn.fill(0)
 		this.resetShort()
 		this.discardBlock()

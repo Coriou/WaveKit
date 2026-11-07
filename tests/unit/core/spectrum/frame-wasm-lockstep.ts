@@ -5,6 +5,7 @@ import type {
 } from "../../../../src/core/spectrum/types.js"
 import type { WorkerPipelineInput } from "../../../../src/core/spectrum/worker-protocol.js"
 import type { FrameKernel } from "../../../../src/core/spectrum/frame-wasm.js"
+import type { Frame } from "../../../../src/core/spectrum/frame-source.js"
 import { frameWasm } from "./frame-wasm-harness.js"
 import { Harness } from "./pipeline-harness.js"
 
@@ -13,6 +14,12 @@ import { Harness } from "./pipeline-harness.js"
  * input the events must be identical and so must every piece of frame-path state, compared with
  * SameValue (NaN equals NaN, −0 differs from +0): bit for bit up to NaN payloads, which no decision
  * reads.
+ *
+ * Kernel faults (a test arms `trapNextRunForTest` or `failForTest` on the wasm side) are mirrored on
+ * the JS side, so the comparison holds through them, and after the switch to JS: the frames the
+ * fault lost (staged since the last good run) are dropped there too, and the faulted block is
+ * discarded the same way right after the last of them (`discardFaultedBlock`). Nothing between that
+ * frame and the wasm fault point touches frame-path state; both sides are compared after the input.
  */
 
 /** Pipeline state the frame path writes or reads (private fields, read for the comparison only). */
@@ -96,6 +103,60 @@ export interface LockstepResult {
 	wasmAtEnd: boolean
 	/** Frames the blanker left out (wasm side), on offer and among pending frames. */
 	blanked: number
+	/** Kernel faults on the wasm side (each mirrored on the JS side). */
+	faults: number
+	/** Per fault, the start samples of the frames it lost. */
+	lost: number[][]
+}
+
+/** Wasm-side private members the fault mirror reads. */
+interface FaultSide {
+	kernel: FrameKernel | null
+	kernelFault(fault: string): void
+}
+
+/** JS-side private members the fault mirror drives (pipeline.ts). */
+interface MirrorSide {
+	hop: number
+	blockFrames: number
+	onFrame(f: Frame): void
+	enterFrame(f: Frame): number
+	discardFaultedBlock(): void
+	finishBlock(): void
+}
+
+/**
+ * Mirrors wasm kernel faults on the JS pipeline: returns `expect(lost)`, which queues the start
+ * samples of the frames one fault lost, and `pending()`, the frames not seen yet.
+ */
+function mirrorFaults(js: Harness): {
+	expect: (lost: Set<number>) => void
+	pending: () => number
+} {
+	const p = js.pipeline as unknown as MirrorSide
+	const proto = Object.getPrototypeOf(p) as MirrorSide
+	const queue: Set<number>[] = []
+	p.onFrame = (f: Frame): void => {
+		const lost = queue[0]
+		if (!lost?.has(f.startSample)) {
+			proto.onFrame.call(p, f)
+			return
+		}
+		// as on the wasm path: the block bookkeeping, then the frame is staged and lost
+		const blockEnd = p.enterFrame(f)
+		if (blockEnd < 0) return
+		lost.delete(f.startSample)
+		p.blockFrames++
+		if (lost.size === 0) {
+			queue.shift()
+			p.discardFaultedBlock()
+		}
+		if (f.startSample + p.hop >= blockEnd) p.finishBlock()
+	}
+	return {
+		expect: lost => queue.push(lost),
+		pending: () => queue.reduce((n, q) => n + q.size, 0),
+	}
 }
 
 export interface LockstepOptions {
@@ -133,12 +194,31 @@ export function lockstep(
 	if (kernel && opts.perturb) opts.perturb(kernel)
 	const diffs: string[] = []
 	let inputs = 0
+	let faults = 0
+	const lost: number[][] = []
+	const lostNow: Set<number>[] = []
+	const wp = wasm.pipeline as unknown as FaultSide
+	const kernelFault = (Object.getPrototypeOf(wp) as FaultSide).kernelFault
+	wp.kernelFault = (fault: string): void => {
+		const k = wp.kernel
+		const starts = k ? Array.from(k.starts.subarray(0, k.count)) : []
+		lost.push(starts)
+		lostNow.push(new Set(starts))
+		faults++
+		kernelFault.call(wp, fault)
+	}
+	const mirror = mirrorFaults(js)
 	const every = opts.stateEvery ?? 1
 	const send = wasm.send.bind(wasm)
 	wasm.send = (input: WorkerPipelineInput): PipelineEvent[] => {
 		const ev = send(input)
+		for (const set of lostNow.splice(0)) mirror.expect(set)
 		const evJs = js.send(input)
 		inputs++
+		if (mirror.pending() > 0 && diffs.length < 8)
+			diffs.push(
+				`input ${inputs}: ${mirror.pending()} lost frames not seen by JS`,
+			)
 		if (diffs.length < 8) {
 			if (!isDeepStrictEqual(ev, evJs))
 				diffs.push(`input ${inputs}: events (${ev.length} vs ${evJs.length})`)
@@ -162,5 +242,7 @@ export function lockstep(
 		blanked: (
 			(wasm.pipeline as unknown as Bag)["blanker"] as { blankedFrames: number }
 		).blankedFrames,
+		faults,
+		lost,
 	}
 }

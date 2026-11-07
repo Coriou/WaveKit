@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
+import process from "node:process"
 import pino from "pino"
 import {
 	InlinePipelineHost,
@@ -120,11 +121,16 @@ function decisions(events: PipelineEvent[]): unknown[] {
 }
 
 // The bundled worker loads dist/spectrum-frame.wasm beside it (native/wavekit-frame/build.sh); the
-// inline host is the JS frame path. Skipped unless both are built.
-describe.skipIf(!existsSync(WORKER) || !existsSync(KERNEL))(
+// inline host is the JS frame path. Skipped unless both are built; with WAVEKIT_REQUIRE_FRAME_WASM=1
+// a built worker without the kernel runs, and fails, instead (frame-wasm-harness.ts).
+const SKIP_WASM_WORKER =
+	!existsSync(WORKER) ||
+	(!existsSync(KERNEL) && process.env["WAVEKIT_REQUIRE_FRAME_WASM"] !== "1")
+describe.skipIf(SKIP_WASM_WORKER)(
 	"built spectrum worker with the wasm frame kernel",
 	() => {
 		it("decides like the inline JS pipeline on a signal scene", async () => {
+			expect(existsSync(KERNEL), KERNEL).toBe(true)
 			const fs = 1_024_000
 			const cfg = buildPipelineConfig("rtl", "U8_IQ", fs, testSettings(), {
 				fftSize: null,

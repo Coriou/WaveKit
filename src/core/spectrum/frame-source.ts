@@ -24,7 +24,8 @@
  *   transform them in place.
  * - Raw mode (`raw: true`, the wasm frame kernel): frames are not converted; `re`/`im` are stale,
  *   `clipped` is 0, and `copyFrame` hands the frame's bytes to the callee during the callback.
- *   Framing, seams, counter runs and hold-back are the same in both modes.
+ *   `convertRawFrame` converts that frame after all (the kernel fell back to JS inside the
+ *   callback). Framing, seams, counter runs and hold-back are the same in both modes.
  */
 import { Buffer } from "node:buffer"
 import { WaveKitError } from "../../utils/errors.js"
@@ -81,6 +82,8 @@ export class FrameSource {
 	/** `buf` as a Buffer, for an allocation-free `copyFrame`. */
 	private bufBytes = Buffer.from(this.buf.buffer)
 	private raw: boolean
+	/** The frame in the current `onFrame` callback was emitted raw and is not converted yet. */
+	private rawFrame = false
 	/** Unconsumed bytes are buf[head, tail); buf[head] is the first byte of sample bufStartSample. */
 	private head = 0
 	private tail = 0
@@ -122,6 +125,17 @@ export class FrameSource {
 	/** Raw mode on or off; takes effect from the next frame (the kernel's JS fallback turns it off). */
 	setRaw(raw: boolean): void {
 		this.raw = raw
+	}
+
+	/**
+	 * During `onFrame` only: converts the current frame into `re`/`im` if it was emitted raw and
+	 * returns its clipped count; null when the frame was already converted (then `frame.clipped`
+	 * holds it). Raw mode turned off inside the callback leaves the frame in hand unconverted.
+	 */
+	convertRawFrame(): number | null {
+		if (!this.rawFrame) return null
+		this.rawFrame = false
+		return this.convert(this.head)
 	}
 
 	/** During `onFrame` only: copies the current frame's raw bytes to `dst` at `dstOffset`. */
@@ -256,6 +270,7 @@ export class FrameSource {
 
 	private emitFrames(limit: number, onFrame: (frame: Frame) => void): void {
 		while (limit - this.head >= this.frameBytes) {
+			this.rawFrame = this.raw
 			const clipped = this.raw ? 0 : this.convert(this.head)
 			onFrame({
 				startSample: this.bufStartSample,
@@ -263,6 +278,7 @@ export class FrameSource {
 				im: this.im,
 				clipped,
 			})
+			this.rawFrame = false
 			this.head += this.hopBytes
 			this.bufStartSample += this.hopSamples
 		}

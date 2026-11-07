@@ -583,7 +583,8 @@ block sum, the 5 ms short path with its bracketed threshold compare, and the per
 `Tracker.frame`. Block stages, `ImpulseBlanker.endBlock`, the threshold brackets and the envelope
 buckets stay JS and read the kernel's arrays through typed-array views of its memory. Framing, seams,
 counter runs and hold-back stay in `FrameSource` (raw mode copies each frame's bytes; the counter
-scan remains a per-byte JS loop). No JS object is made per frame.
+scan remains a per-byte JS loop). Kernel execution makes no JS object per frame; `FrameSource` still
+hands the pipeline one small frame record per frame, as on the JS path.
 
 **Equivalence is bit for bit.** The kernel takes every table JS computes (window, twiddles, bit
 reversal, U8 lookup, rise factor, track floor) from JS, keeps the JS operand order in f64, stores
@@ -620,7 +621,12 @@ frames past P (only possible with sample indices replayed into one block) are a 
 **Faults.** A trap or a kernel error never leaves the worker: the open block is discarded, the
 short window restarts (as after a seam), and a fresh instance on the same memory takes over, at most
 `FRAME_KERNEL_MAX_RESTARTS` (2) times; the next fault keeps the JS path for that worker. One warn
-line for the first fault and one for the switch, fields `fault`, `restarts`, `path` only.
+line for the first fault and one for the switch, fields `fault`, `restarts`, `path` only. When the
+fault comes from finishing a block as the next block's first frame arrives, that frame was already
+handed over raw; after the switch to JS it is converted then, so it runs on the JS path and only the
+discarded block's frames are lost. The lockstep comparison covers faults at a batch cut, at a block
+change after a counter run, at a seam, in an epoch's first block, at a held-back frame and with 50 %
+overlap: the JS side drops the same frames and discards the same block, and both then match.
 
 **Selection** (no config key): `WAVEKIT_SPECTRUM_FRAME_PATH=js` forces JS, `=wasm` logs a warning
 when the kernel is unavailable, unset means auto; `WAVEKIT_SPECTRUM_FRAME_WASM` names another
