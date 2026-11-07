@@ -407,6 +407,191 @@ describe("kept commands and scanner hops across a restart or a queued boundary",
 	})
 })
 
+/** The inline pipeline's internals a scene drives: its alarm's epoch transition. */
+interface PipelineProbe {
+	out: PipelineEvent[]
+	ep: { epoch: number; centreHz: number }
+	observedSamples: number
+	startUntrackedEpoch(
+		ep: unknown,
+		startSample: number,
+		deltaHz: number | null,
+		suspected: "external-control",
+	): void
+}
+
+function pipelineOf(host: RecordingHost): PipelineProbe {
+	return (host as unknown as { inner: { pipeline: PipelineProbe } }).inner
+		.pipeline
+}
+
+async function feed(t: Harness): Promise<void> {
+	for (let i = 0; i < 32; i++) {
+		t.fanout.write(Buffer.alloc(16_384, 127))
+		await settle()
+	}
+}
+
+interface Started {
+	raw: number
+	centreHz: number
+	tuningTrust: TuningTrust
+	requestedEpoch: number | undefined
+}
+
+/**
+ * The host's events are held (a worker's delivery lagging) while the pipeline's alarm starts
+ * `untracked` epochs of its own, then the scanner hops to F1 and F0; the pipeline numbers each
+ * hop after the untracked ones, above the ids the engine asked for. Returns, per hop, the id and
+ * centre the pipeline really started, the id the arbiter returned, and each start as labelled.
+ */
+async function renumberedHops(t: Harness, held: Lease, untracked: number) {
+	const host = t.hosts.at(-1)!
+	const pipeline = pipelineOf(host)
+	const deliver = host.handlers.events
+	const queued: PipelineEvent[][] = []
+	host.handlers.events = events => queued.push(events)
+	pipeline.out = []
+	for (let i = 0; i < untracked; i++)
+		pipeline.startUntrackedEpoch(
+			pipeline.ep,
+			pipeline.observedSamples,
+			null,
+			"external-control",
+		)
+	queued.push(pipeline.out.slice())
+	pipeline.out = []
+	const starts: Started[] = []
+	t.engine.on("pipeline", (ev: PipelineEvent, epoch: EngineEpoch) => {
+		if (ev.kind !== "epoch-started") return
+		starts.push({
+			raw: ev.epoch,
+			centreHz: epoch.centreHz,
+			tuningTrust: epoch.tuningTrust,
+			requestedEpoch: epoch.requestedEpoch,
+		})
+	})
+	const hops: { epoch: number; centreHz: number; returned: number }[] = []
+	for (const centreHz of [F1, F0]) {
+		const pending = await t.arbiter.retune(held, {
+			centreHz,
+			gainTenthsDb: null,
+			sampleRateHz: null,
+		})
+		await feed(t)
+		hops.push({
+			epoch: pipeline.ep.epoch,
+			centreHz: pipeline.ep.centreHz,
+			returned: pending.epoch,
+		})
+	}
+	host.handlers.events = deliver
+	for (const events of queued) deliver(events)
+	return { hops, starts }
+}
+
+describe("a pending epoch the pipeline numbers after an untracked epoch the engine has not heard of", () => {
+	it("after a held hop, each hop's start keeps its own label, never the next hop's", async () => {
+		const t = await ready({ inline: true })
+		const held = lease(t)
+		try {
+			const finish = await heldRestart(t)
+			await hop(t, held, HOP)
+			await finish()
+			await feed(t)
+			expect(t.engine.currentEpoch()).toMatchObject({
+				centreHz: HOP,
+				tuningTrust: "commanded",
+			})
+			const { hops, starts } = await renumberedHops(t, held, 2)
+			for (const h of hops) {
+				// The scene renumbers: the pipeline started each hop above the id it was posted as.
+				expect(h.epoch).toBeGreaterThan(h.returned)
+				expect(starts.filter(s => s.raw === h.epoch)).toEqual([
+					{
+						raw: h.epoch,
+						centreHz: h.centreHz,
+						tuningTrust: "commanded",
+						requestedEpoch: h.returned,
+					},
+				])
+			}
+			expect(t.engine.currentEpoch()).toMatchObject({
+				epoch: hops[1]!.epoch,
+				centreHz: F0,
+				tuningTrust: "commanded",
+			})
+		} finally {
+			await t.engine.stop()
+		}
+	})
+
+	it("with no restart, a hop's start never takes the label of the hop posted after it", async () => {
+		const t = await ready({ inline: true })
+		const held = lease(t)
+		try {
+			await hop(t, held, HOP)
+			await feed(t)
+			const { hops, starts } = await renumberedHops(t, held, 1)
+			for (const h of hops) {
+				expect(h.epoch).toBeGreaterThan(h.returned)
+				expect(starts.filter(s => s.raw === h.epoch)).toEqual([
+					{
+						raw: h.epoch,
+						centreHz: h.centreHz,
+						tuningTrust: "commanded",
+						requestedEpoch: h.returned,
+					},
+				])
+			}
+			// The untracked epoch is never labelled as a hop.
+			const hopIds = new Set(hops.map(h => h.epoch))
+			expect(
+				starts.filter(s => !hopIds.has(s.raw)).map(s => s.tuningTrust),
+			).toEqual(["unverified"])
+		} finally {
+			await t.engine.stop()
+		}
+	})
+
+	it("a start the posted epochs cannot be numbered to is unverified, and so is the rest of its stream", async () => {
+		const t = await ready()
+		const held = lease(t)
+		try {
+			const host = t.hosts[0]!
+			host.handlers.events([
+				{ kind: "epoch-started", epoch: 1, startSample: 0, settleMode: "none" },
+			])
+			await hop(t, held, HOP)
+			const posted = t.epochs(0).at(-1)!.epoch
+			// Past every id the posted queue can be numbered to.
+			host.handlers.events([
+				{
+					kind: "epoch-started",
+					epoch: posted + 5,
+					startSample: 0,
+					settleMode: "timer",
+				},
+			])
+			expect(t.engine.currentEpoch()).toMatchObject({
+				epoch: posted + 5,
+				tuningTrust: "unverified",
+			})
+			host.handlers.events([
+				{
+					kind: "epoch-started",
+					epoch: posted + 6,
+					startSample: 0,
+					settleMode: "timer",
+				},
+			])
+			expect(t.engine.currentEpoch().tuningTrust).toBe("unverified")
+		} finally {
+			await t.engine.stop()
+		}
+	})
+})
+
 describe("real thread pipeline host: rate change, write, reconnect, replay, hop", () => {
 	const dir = mkdtempSync(join(tmpdir(), "wavekit-kept-centre-"))
 	const worker = join(dir, "spectrum-worker.mjs")
@@ -511,7 +696,7 @@ describe("real thread pipeline host: rate change, write, reconnect, replay, hop"
 })
 
 describe("a scanner job whose re-sent hop was held during a restart", () => {
-	it("owns the held hop's epoch under the id the arbiter returned and reaches its dwell", async () => {
+	it("owns the held hop's re-posted epoch by the id the arbiter returned and reaches its dwell", async () => {
 		const t = await ready({ inline: true })
 		const record: JobRecord = {
 			id: "j_held",
@@ -578,10 +763,10 @@ describe("a scanner job whose re-sent hop was held during a restart", () => {
 			now: () => 0,
 			activity: () => ({ capturing: 0, replaying: null, replayQueueDepth: 0 }),
 		})
-		const started: number[] = []
+		const started = new Map<number, number | undefined>()
 		t.engine.on("pipeline", (ev: PipelineEvent, epoch: EngineEpoch) => {
 			if (ev.kind !== "epoch-started") return
-			started.push(ev.epoch)
+			started.set(ev.epoch, epoch.requestedEpoch)
 			runner.onEpochStarted(epoch)
 		})
 		const restarting = () =>
@@ -629,18 +814,20 @@ describe("a scanner job whose re-sent hop was held during a restart", () => {
 				await settle()
 			}
 			for (let i = 0; i < 5; i++) await settle()
-			// The job dwells on the held hop's epoch: it is the one the arbiter returned.
+			// The job dwells on the held hop's epoch: posted under a new id, its start names the
+			// one the arbiter returned.
 			expect(runner.progress().phase).toBe("watching")
 			expect(record.state).toBe("running")
 			const posted = t.epochs(1).at(-1)
 			expect(posted).toMatchObject({ centreHz: HOP, tuningTrust: "commanded" })
-			expect(posted?.epoch).toBe(returned[1])
-			expect(started).toContain(returned[1])
+			expect(posted?.epoch).toBeGreaterThan(returned[1]!)
+			expect(started.get(posted!.epoch)).toBe(returned[1])
 			expect(t.engine.currentEpoch()).toMatchObject({
-				epoch: returned[1],
+				epoch: posted?.epoch,
 				centreHz: HOP,
 				tuningTrust: "commanded",
 			})
+			expect(t.engine.currentEpoch().requestedEpoch).toBeUndefined()
 		} finally {
 			old.exportState = exportState
 			release()

@@ -918,7 +918,9 @@ export class JobRunner implements JobDriver {
 	}
 
 	onEpochStarted(epoch: EngineEpoch): void {
-		let own = this.ownEpochs.has(epoch.epoch)
+		// The engine names the id the arbiter returned when the pipeline started it as another
+		// (a renumbered post, or a hop held through a restart): ownership follows that id.
+		let own = this.ownEpochs.has(epoch.requestedEpoch ?? epoch.epoch)
 		if (!own && this.inFlightEpoch(epoch)) {
 			own = true
 			this.addOwnEpoch(epoch.epoch)
