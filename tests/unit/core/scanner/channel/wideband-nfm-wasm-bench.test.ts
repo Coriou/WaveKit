@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest"
 import {
 	MAX_SLICE_SAMPLES,
 	WidebandNfmChain,
+	widebandNfmKernelForTest,
 } from "../../../../../src/core/scanner/channel/wideband-nfm.js"
 import { NfmSource } from "../wideband-nfm-fixtures.js"
 import { nfmWasmAvailable, testRuntime, wasmChain } from "./nfm-wasm-harness.js"
@@ -140,4 +141,29 @@ describe.skipIf(!BENCH || !nfmWasmAvailable)("wideband NFM chain bench", () => {
 		}
 		expect(lines.length).toBeGreaterThan(0)
 	}, 600_000)
+
+	it("reports the fault snapshot's cost per process call against a 25 ms slice", () => {
+		for (const fs of [64_000, 1_024_000, 2_400_000]) {
+			const { runtime } = testRuntime()
+			const chain = wasmChain(runtime, { inputRateHz: fs, offsetHz: fs / 10 })
+			const kernel = widebandNfmKernelForTest(chain)!
+			const slice = new NfmSource({ fs, offsetHz: fs / 10 }).next(
+				Math.round((SLICE_MS * fs) / 1000),
+				true,
+			)
+			for (let i = 0; i < 200; i++) chain.process(slice)
+			const reps = 200_000
+			let t0 = performance.now()
+			for (let i = 0; i < reps; i++) kernel.takeSnapshot()
+			const snapNs = ((performance.now() - t0) * 1e6) / reps
+			const slices = 400
+			t0 = performance.now()
+			for (let i = 0; i < slices; i++) chain.process(slice)
+			const sliceNs = ((performance.now() - t0) * 1e6) / slices
+			process.stderr.write(
+				`[nfm-bench] snapshot fs ${fs}: ${kernel.snapshotBytes} B, ${snapNs.toFixed(0)} ns per copy; 25 ms slice ${(sliceNs / 1e3).toFixed(1)} µs (the copy is ${((100 * snapNs) / sliceNs).toFixed(3)} %)\n`,
+			)
+			expect(snapNs).toBeGreaterThan(0)
+		}
+	}, 120_000)
 })

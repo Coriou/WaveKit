@@ -25,6 +25,7 @@ import {
 	recorderDspChoice,
 } from "./wideband-nfm-wasm.js"
 import type {
+	NfmChainState,
 	NfmKernelDims,
 	NfmWasmLoad,
 	NfmWasmModule,
@@ -55,6 +56,40 @@ const U8_TO_FLOAT = Float32Array.from(
 )
 /** The NCO recurrence is renormalised this often (magnitude drift stays below 1e-12). */
 const RENORM_EVERY = 4096
+/** fm-audio.ts `FmAudioDemod`: 48 kHz to 8 kHz. */
+const DEMOD_DECIMATION = 6
+
+/**
+ * `FmAudioDemod`'s stream fields (fm-audio.ts keeps them private; the wasm handover writes them).
+ * Checked on each use, so a renamed field throws instead of being written as a new property.
+ */
+interface DemodFields {
+	history: Float64Array
+	head: number
+	phase: number
+	lastI: number
+	lastQ: number
+	deemph: number
+	pendingI: number | null
+}
+
+function demodFields(demod: FmAudioDemod): DemodFields {
+	const f = demod as unknown as Partial<DemodFields>
+	if (
+		!(f.history instanceof Float64Array) ||
+		typeof f.head !== "number" ||
+		typeof f.phase !== "number" ||
+		typeof f.lastI !== "number" ||
+		typeof f.lastQ !== "number" ||
+		typeof f.deemph !== "number" ||
+		!("pendingI" in f)
+	)
+		throw new WaveKitError(
+			"FmAudioDemod fields changed: the NFM handover no longer maps them",
+			"SCANNER_NFM_KERNEL",
+		)
+	return f as DemodFields
+}
 
 export interface DecimationFactors {
 	/** CIC-equivalent factor (stage 1). */
@@ -142,6 +177,16 @@ export class Biquad {
 	get coefficients(): readonly number[] {
 		return [this.b0, this.b1, this.b2, this.a1, this.a2]
 	}
+	/** (x1, x2, y1, y2): the stream state (the wasm handover writes it). */
+	get state(): readonly [number, number, number, number] {
+		return [this.x1, this.x2, this.y1, this.y2]
+	}
+	set state(s: readonly [number, number, number, number]) {
+		this.x1 = s[0]
+		this.x2 = s[1]
+		this.y1 = s[2]
+		this.y2 = s[3]
+	}
 	step(x: number): number {
 		const y =
 			this.b0 * x +
@@ -173,6 +218,26 @@ class ComplexFir {
 	constructor(private readonly taps: Float32Array) {
 		this.hre = new Float32Array(taps.length)
 		this.him = new Float32Array(taps.length)
+	}
+	get length(): number {
+		return this.taps.length
+	}
+	/** The delay line as (re, im) per slot, and the next slot written (the handover's terms). */
+	get line(): { pairs: Float64Array; head: number } {
+		const pairs = new Float64Array(2 * this.taps.length)
+		for (let j = 0; j < this.taps.length; j++) {
+			pairs[2 * j] = this.hre[j]!
+			pairs[2 * j + 1] = this.him[j]!
+		}
+		return { pairs, head: this.head }
+	}
+	/** Writes the line (the caller checked its length and the head's range). */
+	load(pairs: Float64Array, head: number): void {
+		for (let j = 0; j < this.taps.length; j++) {
+			this.hre[j] = pairs[2 * j]!
+			this.him[j] = pairs[2 * j + 1]!
+		}
+		this.head = head
 	}
 	push(xr: number, xi: number): void {
 		this.hre[this.head] = xr
@@ -257,7 +322,8 @@ export class WidebandNfmChain {
 	private readonly toneLp = butterworth4("low")
 	private tone = new Int16Array(0)
 	private toneLength = 0
-	private readonly demodIn: Float32Array
+	/** The 48 kHz slice buffer, made on the first JS `process` (a wasm chain never needs it). */
+	private demodIn: Float32Array | null = null
 
 	constructor(opts: WidebandNfmOptions) {
 		if (!widebandNfmSupported(opts.inputRateHz, opts.offsetHz))
@@ -279,10 +345,11 @@ export class WidebandNfmChain {
 		)
 		this.step = rateHz / DEMOD_RATE_HZ
 		this.hp = opts.highPass === false ? [] : butterworth4("high")
-		// r / 48 kHz ≥ 1, so the 48 kHz stream never outnumbers the r stream (+1 for a carry).
-		this.demodIn = new Float32Array(
-			2 * (Math.ceil(MAX_SLICE_SAMPLES / (k * m)) + 2),
-		)
+	}
+
+	/** Bytes of the JS chain's slice buffers now (the 48 kHz buffer once made, the tone copy). */
+	get jsBufferBytes(): number {
+		return (this.demodIn?.byteLength ?? 0) + this.tone.byteLength
 	}
 
 	/** CU8 (whole IQ pairs, at most MAX_SLICE_SAMPLES) in, 8 kHz s16 out (after the high-pass). */
@@ -296,7 +363,10 @@ export class WidebandNfmChain {
 		const m = this.factors.m
 		const lut = U8_TO_FLOAT
 		const exact = this.step === 1
-		const out = this.demodIn
+		// r / 48 kHz ≥ 1, so the 48 kHz stream never outnumbers the r stream (+1 for a carry).
+		const out = (this.demodIn ??= new Float32Array(
+			2 * (Math.ceil(MAX_SLICE_SAMPLES / (k * m)) + 2),
+		))
 		let o = 0
 		let phRe = this.phRe
 		let phIm = this.phIm
@@ -378,6 +448,129 @@ export class WidebandNfmChain {
 			pcm[i] = y > 32767 ? 32767 : y < -32768 ? -32768 : Math.round(y)
 		}
 		return pcm
+	}
+
+	/**
+	 * This JS chain's stream state in the kernel's terms (`NfmChainState`): the inverse of
+	 * `adoptHandoverState`, for tests that compare it field by field with a kernel's. On a chain
+	 * still running its kernel these are the idle inherited fields; the kernel's own state is
+	 * `NfmKernel.state`.
+	 */
+	handoverState(): NfmChainState {
+		const d = demodFields(this.demod)
+		const s2 = this.stage2.line
+		const ch = this.channel.line
+		const biquads = new Float64Array(16)
+		this.hp.forEach((b, q) => biquads.set(b.state, 4 * q))
+		this.toneLp.forEach((b, q) => biquads.set(b.state, 8 + 4 * q))
+		return {
+			phase: this.phase,
+			sinceRenorm: this.sinceRenorm,
+			phRe: this.phRe,
+			phIm: this.phIm,
+			curRe: this.curRe,
+			curIm: this.curIm,
+			nxtRe: this.nxtRe,
+			nxtIm: this.nxtIm,
+			s2Phase: this.stage2Phase,
+			s2Line: s2.pairs,
+			s2Head: s2.head,
+			chLine: ch.pairs,
+			chHead: ch.head,
+			frac: this.frac,
+			prevRe: this.prevRe,
+			prevIm: this.prevIm,
+			lastI: d.lastI,
+			lastQ: d.lastQ,
+			deemph: d.deemph,
+			dmHist: d.history.slice(),
+			dmHead: d.head,
+			dmPhase: d.phase,
+			biquads,
+		}
+	}
+
+	/**
+	 * Continues from `s` (a kernel's state at the start of a slice): every stream field of this
+	 * chain is overwritten, so the next `process` runs as a chain that saw the kernel's input. A
+	 * state out of range (a phase, head or count past its bound, a line of the wrong length, a
+	 * non-finite value) is refused before anything is written: false, this chain unchanged.
+	 */
+	adoptHandoverState(s: NfmChainState): boolean {
+		const { k, m } = this.factors
+		const d = demodFields(this.demod)
+		const below = (v: number, bound: number): boolean =>
+			Number.isInteger(v) && v >= 0 && v < bound
+		const finite = (a: ArrayLike<number>): boolean => {
+			for (let i = 0; i < a.length; i++)
+				if (!Number.isFinite(a[i])) return false
+			return true
+		}
+		const scalars = [
+			s.phRe,
+			s.phIm,
+			s.curRe,
+			s.curIm,
+			s.nxtRe,
+			s.nxtIm,
+			s.frac,
+			s.prevRe,
+			s.prevIm,
+			s.lastI,
+			s.lastQ,
+			s.deemph,
+		]
+		if (
+			!below(s.phase, k) ||
+			!below(s.sinceRenorm, RENORM_EVERY) ||
+			!below(s.s2Phase, m) ||
+			!below(s.s2Head, this.stage2.length) ||
+			!below(s.chHead, this.channel.length) ||
+			!below(s.dmHead, d.history.length) ||
+			!below(s.dmPhase, DEMOD_DECIMATION) ||
+			s.s2Line.length !== 2 * this.stage2.length ||
+			s.chLine.length !== 2 * this.channel.length ||
+			s.dmHist.length !== d.history.length ||
+			s.biquads.length !== 16 ||
+			!finite(scalars) ||
+			!finite(s.s2Line) ||
+			!finite(s.chLine) ||
+			!finite(s.dmHist) ||
+			!finite(s.biquads) ||
+			// The resampler keeps frac in [0, step) between calls (exact path: 0).
+			!(s.frac >= 0 && s.frac < this.step)
+		)
+			return false
+		this.phase = s.phase
+		this.sinceRenorm = s.sinceRenorm
+		this.phRe = s.phRe
+		this.phIm = s.phIm
+		this.curRe = s.curRe
+		this.curIm = s.curIm
+		this.nxtRe = s.nxtRe
+		this.nxtIm = s.nxtIm
+		this.stage2Phase = s.s2Phase
+		this.stage2.load(s.s2Line, s.s2Head)
+		this.channel.load(s.chLine, s.chHead)
+		this.frac = s.frac
+		this.prevRe = s.prevRe
+		this.prevIm = s.prevIm
+		d.lastI = s.lastI
+		d.lastQ = s.lastQ
+		d.deemph = s.deemph
+		d.history.set(s.dmHist)
+		d.head = s.dmHead
+		d.phase = s.dmPhase
+		d.pendingI = null
+		const quad = (q: number): [number, number, number, number] => [
+			s.biquads[4 * q]!,
+			s.biquads[4 * q + 1]!,
+			s.biquads[4 * q + 2]!,
+			s.biquads[4 * q + 3]!,
+		]
+		this.hp.forEach((b, q) => (b.state = quad(q)))
+		this.toneLp.forEach((b, q) => (b.state = quad(2 + q)))
+		return true
 	}
 
 	/**
@@ -500,6 +693,7 @@ export class WidebandNfmRuntime {
 		cause: "trap" | "status" | "instance",
 		error: string,
 		factors: DecimationFactors,
+		handover?: "state" | "reset",
 	): void {
 		this.faults++
 		const log = this.logger()
@@ -510,6 +704,7 @@ export class WidebandNfmRuntime {
 					error,
 					k: factors.k,
 					m: factors.m,
+					...(handover === undefined ? {} : { handover }),
 					faults: this.faults,
 					maxFaults: NFM_WASM_MAX_FAULTS,
 				},
@@ -545,8 +740,10 @@ export class WidebandNfmRuntime {
 }
 
 /**
- * The JS chain's stages in the wasm kernel. Constructed by WidebandNfmRuntime; the JS state it
- * inherits stays untouched while the kernel runs, so a fault falls back to a fresh JS chain.
+ * The JS chain's stages in the wasm kernel. Constructed by WidebandNfmRuntime. The JS fields it
+ * inherits are idle while the kernel runs; on a fault the kernel's state at the start of the
+ * faulted slice is written into them and the slice runs again in JS, so the stream continues as
+ * if JS had run it all along.
  */
 class WasmWidebandNfmChain extends WidebandNfmChain {
 	private kernel: NfmKernel | null = null
@@ -616,14 +813,24 @@ class WasmWidebandNfmChain extends WidebandNfmChain {
 		try {
 			return kernel.process(cu8)
 		} catch (err) {
-			// A trap or a kernel error: drop the kernel (its state is suspect) and run this slice and
-			// every later one in the inherited JS chain, whose state is still the initial one.
+			// A trap or a kernel error: drop the kernel (its memory is suspect) and continue in the
+			// inherited JS chain from the state the kernel copied aside before this slice, then run
+			// this slice and every later one in JS. A state out of range is refused (the JS fields
+			// stay initial: the transient of a new chain) and the fault line says which.
 			this.kernel = null
+			let handover = false
+			try {
+				// Throws only if fm-audio.ts renamed a field (checked before anything is written).
+				handover = this.adoptHandoverState(kernel.state("slice-start"))
+			} catch {
+				handover = false
+			}
 			const trap = !(err instanceof WaveKitError)
 			this.runtime.fault(
 				trap ? "trap" : "status",
 				err instanceof Error ? (trap ? err.name : err.message) : "unknown",
 				this.factors,
+				handover ? "state" : "reset",
 			)
 			return super.process(cu8)
 		}

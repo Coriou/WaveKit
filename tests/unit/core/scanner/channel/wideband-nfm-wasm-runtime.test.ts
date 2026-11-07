@@ -187,7 +187,7 @@ describe.skipIf(!nfmWasmAvailable)(
 			expect(runtime.faults).toBe(0)
 		})
 
-		it("a trap mid-session: no throw, this slice and the rest run on a fresh JS chain", () => {
+		it("a trap mid-session: no throw, the chain continues in JS from the slice's start state", () => {
 			const { runtime, log } = testRuntime()
 			const src = new NfmSource({
 				fs: FS,
@@ -198,16 +198,17 @@ describe.skipIf(!nfmWasmAvailable)(
 			const tail = src.next(Math.round(0.5 * FS), true)
 			const chain = wasmChain(runtime, OPTS)
 			const before = runChain(chain, head, () => SLICE)
-			const ref = runChain(new WidebandNfmChain(OPTS), head, () => SLICE)
+			const refChain = new WidebandNfmChain(OPTS)
+			const ref = runChain(refChain, head, () => SLICE)
 			expect(lsbDiff(ref.pcm, before.pcm).max).toBeLessThanOrEqual(1)
 			kernel(chain).trapNextRunForTest()
 			const after = runChain(chain, tail, () => SLICE)
 			expect(widebandNfmChainPath(chain)).toBe("js")
-			// The transient: a fresh JS chain from the faulting slice on (filters and the
-			// discriminator start from rest), so the slice is not lost and nothing is duplicated.
-			const fresh = runChain(new WidebandNfmChain(OPTS), tail, () => SLICE)
-			expect(after.pcm).toEqual(fresh.pcm)
-			expect(after.tone).toEqual(fresh.tone)
+			// No transient: the faulted slice and the rest match a JS chain that ran the whole
+			// stream (wideband-nfm-wasm-handover.test.ts covers the rates and fault points).
+			const cont = runChain(refChain, tail, () => SLICE)
+			expect(lsbDiff(cont.pcm, after.pcm).max).toBeLessThanOrEqual(1)
+			expect(lsbDiff(cont.tone, after.tone).max).toBeLessThanOrEqual(1)
 			expect(runtime.faults).toBe(1)
 			const warns = log.lines.filter(l => l.level === "warn")
 			expect(warns).toEqual([
@@ -218,6 +219,7 @@ describe.skipIf(!nfmWasmAvailable)(
 						error: "RuntimeError",
 						k: 7,
 						m: 3,
+						handover: "state",
 						faults: 1,
 						maxFaults: NFM_WASM_MAX_FAULTS,
 					},

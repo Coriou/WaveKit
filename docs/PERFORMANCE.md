@@ -703,23 +703,59 @@ sample to `MAX_SLICE_SAMPLES`): 0 LSB difference on every pcm and tone sample. T
 `ToneClassEvidence` (result, speech counts, gap rule). A fast-check property (100 runs) holds the
 wasm chain's output identical under random chunk splits.
 
-**Faults.** A trap or a kernel error code never reaches the recorder: the chain drops its kernel and
-runs that same slice, and every later one, in the JS chain it inherits, whose state is still the
-initial one. The transient is that of a new chain: the filters, discriminator and biquads start from
-rest (a few ms of settling, the 300 Hz high-pass the longest); no audio is lost or duplicated. One
-warn line per fault (fields `cause`, `error`, `k`, `m`, `faults`, `maxFaults`; no IQ, audio or
-frequency). After `NFM_WASM_MAX_FAULTS` (3) faults in a process every new chain is JS, logged once.
+**Faults.** A trap or a kernel error code never reaches the recorder, and the stream continues as if
+JS had run it all along. At the start of every `process` call the kernel copies its whole stream
+state aside: the 576-byte control block (stage phases, NCO, triangle accumulators, resampler,
+discriminator and biquad state) and the delay-line span from the stage-2 line to the discriminator
+history (with the channel and discriminator taps between them): 6 512 bytes below 96 kHz input
+(k · m = 1), 7 152 at 1.024 Msps, 7 792 at 2.4 Msps, about 100 to 130 ns per call, 0.02 to 0.06 % of
+a 25 ms slice (the opt-in bench reports it). On a fault the chain drops its kernel, writes that copy into the JS
+chain it inherits (`WidebandNfmChain.adoptHandoverState`: every field of the NCO, the sum-and-dump,
+both FIR delay lines and heads, the resampler, `FmAudioDemod` and the four biquads) and runs the
+faulted slice again in JS, then every later one. Nothing is lost or duplicated and there is no
+settling transient: `tests/unit/core/scanner/channel/wideband-nfm-wasm-handover.test.ts` compares the
+output with a JS chain that ran the whole stream, at 48 kHz (the exact resampler path), 64 kHz
+(k · m = 1), 1.024 and 2.4 Msps, with traps on the first slice, mid-stream and right after slices
+ending with carries (59 999 samples then 1 at 2.4 Msps keeps its frame), plus a fast-check property
+(100 runs) over random fault points and chunk splits: within the stated ±1 LSB, 0 measured (512 000
+samples of syllabic voice after a fault at 512 001: 0 samples differ). The handed-over state matches
+a JS chain's field by field: integers and stage 1 exactly, the FIR lines, discriminator and biquad
+state within 1e-12 relative (the four-accumulator summation above), and a JS chain that adopts it
+holds it exactly. A copied state out of range (a phase or head past its bound, a non-finite value) is
+refused before anything is written: the chain then continues from the initial JS state, with the
+transient of a new chain (a few ms of filter settling, the 300 Hz high-pass the longest). One warn
+line per fault (fields `cause`, `error`, `k`, `m`, `handover` = `state` or `reset`, `faults`,
+`maxFaults`; no IQ, audio or frequency). After `NFM_WASM_MAX_FAULTS` (3) faults in a process every new
+chain is JS, logged once.
 
-**Memory is fixed.** Each chain imports its own `WebAssembly.Memory` with `initial = maximum`, sized by
-`nfmKernelLayout` from its factors and `MAX_SLICE_SAMPLES`; it cannot grow and nothing is allocated
-per slice beyond the returned pcm. Bytes: 128 KiB reserved for the 64 KiB stack and static data
-(`__heap_base` 66 368), a 576-byte control block, the 2 KiB U8 table, taps (8 bytes each), doubled
-delay lines (32 bytes per complex tap, 16 per discriminator tap), the 256 KiB CU8 piece
-(2 · `MAX_SLICE_SAMPLES`) and pcm and tone of `floor((5 + ceil(MAX_SLICE_SAMPLES / (k · m)) + 2) / 6) + 1`
-frames each. 1.024 Msps (k 7, m 3): 406 852 bytes, 7 pages (448 KiB); 2.4 Msps (k 10, m 5): 7 pages;
-the densest case, 48 to 96 kHz input (k · m = 1): 8 pages (512 KiB). The inherited JS chain adds its
-own fixed buffers (50 KB at 1.024 Msps). Two sessions: under 1.1 MiB. A chain is freed with its
-session (garbage collected; nothing else holds it): a test makes and drops 1000 chains and finds none
+**Memory is fixed per chain.** Each chain imports its own `WebAssembly.Memory` with
+`initial = maximum`, sized by `nfmKernelLayout` from its factors and `MAX_SLICE_SAMPLES`; it cannot
+grow and nothing is allocated per slice beyond the returned pcm. Bytes: 128 KiB reserved for the
+64 KiB stack and static data (`__heap_base` 66 368), a 576-byte control block, the 2 KiB U8 table,
+taps (8 bytes each), doubled delay lines (32 bytes per complex tap, 16 per discriminator tap), the
+256 KiB CU8 piece (2 · `MAX_SLICE_SAMPLES`) and pcm and tone of
+`floor((5 + ceil(MAX_SLICE_SAMPLES / (k · m)) + 2) / 6) + 1` frames each. Alongside it the chain keeps
+the slice-start copy above and the JS chain's filter state (taps, delay lines, the discriminator's
+history: about 3 KB). The JS chain's slice buffers (the 48 kHz buffer, 8 · (ceil(`MAX_SLICE_SAMPLES`
+/ (k · m)) + 2) bytes, and the tone copy) are made on its first JS `process` only, so a wasm chain
+holds none until it falls back. Per chain:
+
+| Input rate (k, m)          | Wasm memory      | Slice-start copy | After a fallback: JS slice buffers |
+| -------------------------- | ---------------- | ---------------- | ---------------------------------- |
+| 48 to < 96 kHz (k · m = 1) | 8 pages, 512 KiB | 6 512 B          | 1 048 592 + up to 43 694 B         |
+| 1.024 Msps (7, 3)          | 7 pages, 448 KiB | 7 152 B          | 49 952 + up to 2 084 B             |
+| 2.4 Msps (10, 5)           | 7 pages, 448 KiB | 7 792 B          | 20 992 + up to 878 B               |
+
+Two live sessions on the wasm path: about 1.07 MB at k · m = 1 and 0.94 MB at 1.024 or 2.4 Msps. A
+chain that fell back holds its JS buffers instead (1.09 MB at k · m = 1), and its dropped kernel's
+memory until a garbage collection frees it, so two fallen-back chains at k · m = 1 can briefly hold
+about 3.2 MB. This module does not bound how many chains exist: the recorder's session lifecycle
+does. Live sessions are at most `widebandRecordingCap` (at most `MAX_ACTIVE_ANALOG_PER_SOURCE`, 2) per
+source; a retune-ended session parked for its close keeps its chain (the session holds it) and at
+most `WIDEBAND_MAX_PARKED` (4) are parked per recorder, the oldest discarded past it; a session
+waiting in the recorder's turn queue or referenced by a pending store or writer callback keeps its
+chain until that settles, which nothing here bounds. A chain is freed with its session (garbage
+collected; nothing in this module holds it): a test makes and drops 1000 chains and finds none
 retained after a GC.
 
 **Selection** (no config key): `WAVEKIT_RECORDER_DSP=js` forces JS, `=wasm` logs a warning when the

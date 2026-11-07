@@ -11,6 +11,8 @@
  * - Memory: one imported memory per chain, `initial === maximum`, sized from the chain's factors
  *   and MAX_SLICE_SAMPLES by `nfmKernelLayout`; it cannot grow, so views never detach and nothing
  *   is allocated per slice beyond the returned pcm copy (the JS chain allocates the same).
+ * - Faults: each call first copies the stream state (control block and delay lines, 6.5 to 7.8 KB)
+ *   into a preallocated buffer; `state("slice-start")` hands it to the JS chain after a fault.
  */
 import { readFileSync } from "node:fs"
 import { WaveKitError } from "../../../utils/errors.js"
@@ -42,6 +44,13 @@ const C_MAX_IN = 8
 const C_OUT_CAP = 9
 const C_N_IN = 10
 const C_N_OUT = 11
+const C_PHASE = 12
+const C_S2_PHASE = 13
+const C_SINCE_RENORM = 14
+const C_S2_HEAD = 15
+const C_CH_HEAD = 16
+const C_DM_HEAD = 17
+const C_DM_PHASE = 18
 const C_END = 19
 const C_REGION = 20
 const F_ROT_RE = 0
@@ -52,6 +61,19 @@ const F_SCALE = 4
 const F_ALPHA = 5
 const F_BIQUAD = 6
 const F_PH_RE = 26
+const F_PH_IM = 27
+const F_CUR_RE = 28
+const F_CUR_IM = 29
+const F_NXT_RE = 30
+const F_NXT_IM = 31
+const F_FRAC = 32
+const F_PREV_RE = 33
+const F_PREV_IM = 34
+const F_LAST_I = 35
+const F_LAST_Q = 36
+const F_DEEMPH = 37
+/** (x1, x2, y1, y2) of high-pass 0 and 1, then tone low-pass 0 and 1. */
+const F_BIQUAD_STATE = 38
 
 /** lib.rs `E_*`. */
 export const NFM_KERNEL_ERRORS: Readonly<Record<number, string>> = {
@@ -252,6 +274,43 @@ export interface NfmKernelInputs {
 	lowPass: readonly (readonly number[])[]
 }
 
+/**
+ * One chain's whole stream state, in the JS chain's terms (wideband-nfm.ts `WidebandNfmChain`
+ * `handoverState` / `adoptHandoverState` map it onto its fields). Everything else in the kernel's
+ * memory is a constant (tables, taps, coefficients) or a per-call buffer (input, pcm, tone).
+ */
+export interface NfmChainState {
+	/** Stage 1: sum-and-dump phase (0 to k − 1), NCO steps since renormalisation (0 to 4095). */
+	phase: number
+	sinceRenorm: number
+	phRe: number
+	phIm: number
+	curRe: number
+	curIm: number
+	nxtRe: number
+	nxtIm: number
+	/** Stage 2: decimation phase (0 to m − 1), delay line (re, im) per slot, next slot written. */
+	s2Phase: number
+	s2Line: Float64Array
+	s2Head: number
+	/** The channel FIR's delay line and next slot. */
+	chLine: Float64Array
+	chHead: number
+	/** The resampler: position of the next output, the previous r sample. */
+	frac: number
+	prevRe: number
+	prevIm: number
+	/** The discriminator: last 48 kHz sample, de-emphasis, low-pass history, next slot, 6:1 phase. */
+	lastI: number
+	lastQ: number
+	deemph: number
+	dmHist: Float64Array
+	dmHead: number
+	dmPhase: number
+	/** (x1, x2, y1, y2) of high-pass 0 and 1, then tone low-pass 0 and 1 (16 values). */
+	biquads: Float64Array
+}
+
 type Exports = {
 	nfm_abi: () => number
 	nfm_check: (ctl: number) => number
@@ -281,6 +340,11 @@ export class NfmKernel {
 	private readonly tone: Int16Array
 	private toneLength = 0
 	private exports: Exports
+	/** The control block and the delay lines (s2Line to dmHist) in the kernel's memory. */
+	private readonly liveCtl: Uint8Array
+	private readonly liveLines: Uint8Array
+	/** Their copy at the start of the last `process` call: the state a fault hands over. */
+	private readonly snapshot: Uint8Array
 
 	private constructor(
 		api: WasmApi,
@@ -301,6 +365,13 @@ export class NfmKernel {
 		this.input = new Uint8Array(buf, o.input, 2 * dims.maxIn)
 		this.pcm = new Int16Array(buf, o.pcm, this.outCap)
 		this.tone = new Int16Array(buf, o.tone, this.outCap)
+		this.liveCtl = new Uint8Array(buf, layout.ctl, CTL_BYTES)
+		this.liveLines = new Uint8Array(
+			buf,
+			o.s2Line,
+			o.dmHist + regionBytes("dmHist", dims) - o.s2Line,
+		)
+		this.snapshot = new Uint8Array(CTL_BYTES + this.liveLines.length)
 		if (inputs.lut.length !== 256 || inputs.lowPass.length !== 2)
 			throw new WaveKitError("NFM kernel inputs", "SCANNER_NFM_KERNEL")
 		if (inputs.highPass.length !== 0 && inputs.highPass.length !== 2)
@@ -419,6 +490,7 @@ export class NfmKernel {
 	 * throws a WaveKitError, a trap throws WebAssembly.RuntimeError: the caller owns recovery.
 	 */
 	process(cu8: Uint8Array): Int16Array {
+		this.takeSnapshot()
 		this.input.set(cu8)
 		const c = this.ctlU32
 		c[C_N_IN] = cu8.length >> 1
@@ -436,6 +508,73 @@ export class NfmKernel {
 			)
 		this.toneLength = n
 		return this.pcm.slice(0, n)
+	}
+
+	/**
+	 * Bytes copied per `process` call to keep the slice-start state: the 576-byte control block
+	 * and the delay-line span (s2Line to dmHist, with the channel and discriminator taps between).
+	 */
+	get snapshotBytes(): number {
+		return this.snapshot.length
+	}
+
+	/** Copies the stream state aside (the start of a slice; also the bench's unit). */
+	takeSnapshot(): void {
+		this.snapshot.set(this.liveCtl)
+		this.snapshot.set(this.liveLines, CTL_BYTES)
+	}
+
+	/**
+	 * The stream state at the start of the last `process` call ("slice-start": what a fault hands
+	 * to JS) or as the memory holds it now ("now": after the last successful call). A copy.
+	 */
+	state(which: "slice-start" | "now"): NfmChainState {
+		let snap = this.snapshot
+		if (which === "now") {
+			snap = new Uint8Array(this.snapshot.length)
+			snap.set(this.liveCtl)
+			snap.set(this.liveLines, CTL_BYTES)
+		}
+		const u = new Uint32Array(snap.buffer, snap.byteOffset, CTL_U32)
+		const f = new Float64Array(
+			snap.buffer,
+			snap.byteOffset + CTL_U32 * 4,
+			CTL_F64,
+		)
+		const o = this.layout.offsets
+		const line = (r: Region, n: number): Float64Array =>
+			new Float64Array(
+				snap.buffer,
+				snap.byteOffset + CTL_BYTES + (o[r] - o.s2Line),
+				n,
+			).slice()
+		const d = this.dims
+		return {
+			phase: u[C_PHASE]!,
+			sinceRenorm: u[C_SINCE_RENORM]!,
+			phRe: f[F_PH_RE]!,
+			phIm: f[F_PH_IM]!,
+			curRe: f[F_CUR_RE]!,
+			curIm: f[F_CUR_IM]!,
+			nxtRe: f[F_NXT_RE]!,
+			nxtIm: f[F_NXT_IM]!,
+			s2Phase: u[C_S2_PHASE]!,
+			// The doubled lines hold each sample at slot and slot + T: the first copy is the line.
+			s2Line: line("s2Line", 2 * d.stage2Taps),
+			s2Head: u[C_S2_HEAD]!,
+			chLine: line("chLine", 2 * d.channelTaps),
+			chHead: u[C_CH_HEAD]!,
+			frac: f[F_FRAC]!,
+			prevRe: f[F_PREV_RE]!,
+			prevIm: f[F_PREV_IM]!,
+			lastI: f[F_LAST_I]!,
+			lastQ: f[F_LAST_Q]!,
+			deemph: f[F_DEEMPH]!,
+			dmHist: line("dmHist", d.demodTaps),
+			dmHead: u[C_DM_HEAD]!,
+			dmPhase: u[C_DM_PHASE]!,
+			biquads: f.slice(F_BIQUAD_STATE, F_BIQUAD_STATE + 16),
+		}
 	}
 
 	/** Tone-band audio of the last `process` call (a view of the kernel's memory: copy to keep). */

@@ -670,7 +670,10 @@ pub unsafe fn check_only(mem: Mem, ctl: usize) -> u32 {
 /// Runs the chain over the `N_IN` CU8 samples in `Input`; writes `N_OUT` frames to `Pcm` and
 /// `Tone` and the state back to the control block. `E_ABI`, `E_LAYOUT`, `E_STATE` and `E_INPUT`
 /// are returned before anything is touched; `E_OUTPUT` (more frames than `OUT_CAP`, which the
-/// host's sizing rules out) stops mid-run and leaves the chain unusable.
+/// host's sizing rules out) stops mid-run and leaves the chain unusable. The state slots are
+/// written only at the end of a successful run, but the delay lines change in place, so the host
+/// copies the control block and the lines aside before each call and, after any failure or trap,
+/// continues in its JS chain from that copy (wideband-nfm-wasm.ts `NfmKernel.state`).
 ///
 /// # Safety
 /// `mem` is the module's memory (or a host buffer) of `mem.size` bytes.
