@@ -150,17 +150,41 @@ describe("a voice hold past L", () => {
 		)
 	}
 
-	it("keeps a quiet of 1150 ms, the limit, to the voice's end", () => {
-		expect(VOICE_QUIET_PAST_L_MS).toBe(1_150)
+	it("keeps a quiet of 1000 ms, the limit, to the voice's end", () => {
+		expect(VOICE_QUIET_PAST_L_MS).toBe(1_000)
 		const d = held(() => VOICE_QUIET_PAST_L_MS, 30_000)
 		expect(d.stayed(0, 1)).toBeGreaterThanOrEqual(COARSE_MS + 30_000)
 	})
 
-	it("is left at the first re-check past L that reads 1151 ms", () => {
+	it("is left at the first re-check past L that reads 1001 ms", () => {
 		const d = held(into => (into >= L3 + 2_000 ? VOICE_QUIET_PAST_L_MS + 1 : 0))
 		const stay = d.stayed(0, 1)
 		expect(stay).toBeGreaterThanOrEqual(COARSE_MS + L3 + 2_000)
 		expect(stay).toBeLessThanOrEqual(COARSE_MS + L3 + 2_000 + RECHECK_MS)
+	})
+
+	/**
+	 * The recorder's reading of a pause after the last word: judged audio runs 1000 ms behind the air
+	 * and the last voiced window ends 500 ms after the word, then the quiet grows in 100 ms steps.
+	 */
+	const quantized = (lastWord: number) => (into: number) =>
+		Math.max(0, Math.floor((into - lastWord - 1_500) / 100) * 100)
+
+	it("past L with readings in 100 ms steps: 1000 still holds, 1100 (2600 ms after the word) leaves, by 2850", () => {
+		const lastWord = L3 + 901
+		const d = held(quantized(lastWord))
+		const after = d.stayed(0, 1) - COARSE_MS - lastWord
+		expect(after).toBeGreaterThanOrEqual(1_500 + 1_100)
+		expect(after).toBeLessThanOrEqual(1_000 + 500 + 1_100 + RECHECK_MS)
+	})
+
+	it("past L, quiet reading the limit and no more is not left", () => {
+		const lastWord = L3 + 901
+		const d = held(
+			into => Math.min(VOICE_QUIET_PAST_L_MS, quantized(lastWord)(into)),
+			40_000,
+		)
+		expect(d.stayed(0, 1)).toBeGreaterThanOrEqual(COARSE_MS + 40_000)
 	})
 
 	it("before L a quiet up to the recorder's 2 s does not end it", () => {
@@ -398,9 +422,14 @@ describe("a voice beside a line with carrier evidence", () => {
 		expect(secondVisit([4_000, 8_000])).toBeLessThan(COARSE_MS + 9_000)
 	})
 
-	it("one that widens past it (8001 Hz) while the hop listens is a voice keying up: held to the voice's end", () => {
-		expect(secondVisit([4_000, 8_001])).toBeGreaterThanOrEqual(
-			COARSE_MS + 20_000,
+	it("one that widens past it (8001 Hz) while the hop listens on a later visit is still the line: width is no evidence", () => {
+		expect(secondVisit([4_000, 8_001])).toBeLessThan(COARSE_MS + 9_000)
+		expect(secondVisit([4_000, 14_000])).toBeLessThan(COARSE_MS + 9_000)
+	})
+
+	it("the carrier's own track widening within a later visit keeps its cap", () => {
+		expect(secondVisit([4_000, 14_000], { id: "c", offsetHz: 0 })).toBeLessThan(
+			COARSE_MS + 9_000,
 		)
 	})
 
@@ -415,10 +444,72 @@ describe("a voice beside a line with carrier evidence", () => {
 		).toBeLessThan(COARSE_MS + 9_000)
 	})
 
-	it("the line's track widening during its watch still leaves the line's own width as the carrier's", () => {
-		expect(
-			secondVisit([4_000, 14_000], { lineWidensTo: 14_000 }),
-		).toBeGreaterThanOrEqual(COARSE_MS + 20_000)
+	it("a watch that heard the step spares its own visit only: the next visit's widening track is the carrier", () => {
+		expect(secondVisit([4_000, 14_000], { lineWidensTo: 14_000 })).toBeLessThan(
+			COARSE_MS + 9_000,
+		)
+	})
+})
+
+describe("the watch that gives a line its first carrier evidence after its track widened", () => {
+	/**
+	 * Visit 1 of hop 0 watches track "c" (onset unseen) read 4 kHz, then `widthHz` (a voice keying
+	 * up beside the line joins its track), while the recorder answers `answer(ms into the visit)`:
+	 * a recording that is not voice, with no voice answer before the watch's evidence.
+	 */
+	const firstVisit = (
+		widthHz: number,
+		answer: (intoMs: number) => RecordingActivity,
+	) => {
+		const d = drive(
+			(hop, ms) => (hop === 0 && ms < 60_000 ? answer(ms - SETTLE_MS) : false),
+			(hop, s, visit) => {
+				if (hop !== 0 || visit !== 1) return
+				for (const obwHz of [4_000, widthHz])
+					s.onTrack({ ...sighting("c", hopHz(0)), obwHz }, false, 0, {
+						followOnAir: true,
+					})
+			},
+		)
+		return d
+	}
+
+	it("read 8 kHz (twice the line) at the evidence: the line, left at its watch", () => {
+		const d = firstVisit(8_000, () => true)
+		const stay = d.stayed(0, 1)
+		expect(stay).toBeGreaterThan(COARSE_MS + 7_000)
+		expect(stay).toBeLessThan(COARSE_MS + 9_000)
+	})
+
+	it("read 8001 Hz: its recording is kept on that visit, to what L has left", () => {
+		const d = firstVisit(8_001, () => true)
+		const stay = d.stayed(0, 1)
+		expect(stay).toBeGreaterThanOrEqual(COARSE_MS + L3)
+		expect(stay).toBeLessThanOrEqual(COARSE_MS + L3 + RECHECK_MS)
+	})
+
+	it("and a voice answer after the evidence gets its voice hold, to the voice's end", () => {
+		const d = firstVisit(8_001, into =>
+			into < 10_000 ? true : into < 30_000 ? voiceAnswer() : false,
+		)
+		const stay = d.stayed(0, 1)
+		expect(stay).toBeGreaterThanOrEqual(COARSE_MS + 30_000 - BLOCK_MS * 3)
+		expect(stay).toBeLessThanOrEqual(COARSE_MS + 30_000 + RECHECK_MS)
+	})
+
+	it("the next visit of that frequency is under the carrier rules, the same widening and answer again", () => {
+		const d = drive(
+			(hop, ms) => hop === 0 && ms < 120_000,
+			(hop, s, visit) => {
+				if (hop !== 0) return
+				for (const obwHz of [4_000, 8_001])
+					s.onTrack({ ...sighting(`c${visit}`, hopHz(0)), obwHz }, false, 0, {
+						followOnAir: true,
+					})
+			},
+		)
+		expect(d.stayed(0, 1)).toBeGreaterThanOrEqual(COARSE_MS + L3)
+		expect(d.stayed(0, 2)).toBeLessThan(COARSE_MS + 9_000)
 	})
 })
 

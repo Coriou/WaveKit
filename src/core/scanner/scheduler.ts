@@ -142,30 +142,31 @@ export interface VoiceOnAir {
 }
 
 /**
- * Quiet a voice hold that reached L may still answer: 1150 ms. Before L the recorder's 2 s limit
+ * Quiet a voice hold that reached L may still answer: 1000 ms. Before L the recorder's 2 s limit
  * (WIDEBAND_VOICE_ON_AIR_MS) carries a hold through a speaker's pauses, and under a repeater's hang
  * through a turnaround too, since the track never closes. Past L a hold must be continuous voice, so
  * the hold of one over does not run on into the next. The recorder knows the quiet, the scheduler L,
- * so the answer carries the quiet and the scheduler applies this. A pause of p ms reads about
- * p − 300 (p less the voiced window's tail, plus the time the next window takes to read voiced:
- * synthetic voice, pauses of 600 to 2000 ms, each read exactly p − 300); readings land in 100 ms
- * steps, so the first that ends a hold is 1200 and the shortest pause that does is about
- * 1200 + 300 = 1500 ms. Synthetic speakers of 3 to 5.5 syllables a second with breaths of 0.25 to
- * 1.2 s read up to 900, under the limit. No quiet threshold separates a speaker's long pauses from
- * a turnaround under a hang: a pause of 1.4 to 1.9 s reads 1100 to 1600, and a 1.5 s turnaround (a
- * reply keyed at the hang's end) reads 1100 to 1600 as well, so some of each fall on either side of
- * any limit in that range. The limit is set low in that overlap because the two errors cost
- * differently: a long pause past L read as a
+ * so the answer carries the quiet and the scheduler applies this. The recorder's voice windows slide
+ * by one 100 ms block, so a quiet that has ended reads in 100 ms steps (the first that ends a hold
+ * is 1100); one still running grows with the judged audio, in the source's chunks (25 ms in the
+ * scene tests), so it may first read just over 1000. A pause of p ms reads about p − 300 (p less the voiced window's tail, plus the time the next window
+ * takes to read voiced: synthetic voice, pauses of 600 to 2000 ms, each read exactly p − 300), so
+ * the shortest pause that ends a hold is about 1100 + 300 = 1400 ms. Synthetic speakers of 3 to 5.5
+ * syllables a second with breaths of 0.25 to 1.2 s read up to 900, under the limit. No quiet
+ * threshold separates a speaker's long pauses from a turnaround under a hang: a pause of 1.4 to
+ * 1.9 s reads 1100 to 1600, and a 1.5 s turnaround (a reply keyed at the hang's end) reads 1100 to
+ * 1600 as well, so some of each fall on either side of any limit in that range. The limit sits at
+ * the bottom of that overlap because the two errors cost differently: a long pause past L read as a
  * turnaround ends the hold, and the rest of that transmission is a second file when the sweep comes
  * back while it is still on air (a split file; the ID itself was heard from the catch to L, about
  * 26 s on a large plan), while a turnaround read as a pause holds the hop on into the reply, up to
  * `hold.maxHoldMs` with nobody new heard, and other hops' IDs are lost. Arithmetic: judged audio
- * runs 1000 ms behind the air and a voiced window ends up to 500 ms after the last word; 1150 of
- * quiet and the 250 ms re-check: past L the hold falls back at most 1000 + 500 + 1150 + 250 =
- * 2900 ms after the last word (3750 ms before L), or at the re-check after the reply's first voiced
- * window.
+ * runs 1000 ms behind the air and a voiced window ends up to 500 ms after the last word; the first
+ * leaving reading, 1100 at most, and the 250 ms re-check: past L the hold falls back at most
+ * 1000 + 500 + 1100 + 250 = 2850 ms after the last word (before L, 2 s of quiet: 3750 ms), or at
+ * the re-check after the reply's first voiced window.
  */
-export const VOICE_QUIET_PAST_L_MS = 1_150
+export const VOICE_QUIET_PAST_L_MS = 1_000
 
 /** Whether a recording check answered voice on air (RecordingActivity). */
 export function isVoiceOnAir(a: RecordingActivity): a is VoiceOnAir {
@@ -254,6 +255,12 @@ interface FrequencyMemory {
 	 * none did (CARRIER_WIDTH_FACTOR).
 	 */
 	carrierObwHz: number
+	/**
+	 * The hold that gave it its first carrier evidence heard its track already wider than
+	 * CARRIER_WIDTH_FACTOR times that evidence's width: that visit (Visit.serial) and track, null
+	 * otherwise (widerThanCarrier).
+	 */
+	carrierStep: { visit: number; trackId: string } | null
 	/** A full visit of a hop holding it missed it before this sighting: its onset was seen. */
 	onsetSeen: boolean
 	/** Retry budget of a carrier: not held again before this clock. */
@@ -386,8 +393,7 @@ interface TrackInfo {
 	/**
 	 * Narrowest occupied bandwidth of its snapshots in the visit: the width carrier evidence from it
 	 * records (FrequencyMemory.carrierObwHz), so a line whose track a voice joined during its watch
-	 * is remembered as the line; and, with its latest width, the step that shows a voice keying up
-	 * beside a carrier while the hop listened (CARRIER_WIDTH_FACTOR).
+	 * is remembered as the line (CARRIER_WIDTH_FACTOR).
 	 */
 	narrowestObwHz: number
 	needsConfirm: boolean
@@ -808,28 +814,37 @@ function spread(n: number): number {
 
 /**
  * A track this many times as wide as the widest track that gave its frequency carrier evidence
- * (FrequencyMemory.carrierObwHz) may be another transmission than that carrier: 2. A steady carrier
+ * (FrequencyMemory.carrierObwHz) may hold another transmission than that carrier: 2. A steady carrier
  * line reads at most 4 FFT bins at -20 dB (4 kHz at 1.024 Msps, 4.7 kHz at 2.4 Msps) and FM voice
  * 7.5 kHz or more, so a voice that keys up beside a line, and whose track takes the line in (the two
  * then match one frequency, the track being wider), reads past twice the line's width (at most
- * 2 × 4 = 8 kHz is still the carrier, 8001 Hz is not). Width alone is no evidence: a carrier that
- * reads wider with a neighbour or noise on a later visit would escape its rules. So the track must
- * also have been seen in this visit at no more than that width before it widened (TrackInfo
- * narrowestObwHz): the step itself, heard while the hop listened, shows a transmission keying up
- * beside the line. A landing that already reads wide (the voice keyed up while the sweep was away)
- * stays under the carrier rules, the price of not letting a carrier out on its width. Only the
- * recording check reads it (recordedTrack): such a voice gets its voice hold, and the frequency
- * keeps its evidence for everything else.
+ * 2 × 4 = 8 kHz is still the carrier, 8001 Hz is not). Width, even a widening seen within a visit,
+ * is no evidence of another transmission (noise, a merged neighbour, drift), and nothing else the
+ * sweep knows names one there: such a voice joins the line's track, so no track opens after a gap
+ * and the recording is of the line's own track (whose id the next epoch does not keep). So it
+ * counts once only: the hold that gave the frequency its first carrier evidence (a watch of the line
+ * that heard the voice key up) had already heard its track read past that bound (FrequencyMemory
+ * carrierStep), and on that visit only the recording of that track, while it still reads past it, is
+ * not the carrier's (recordedTrack): it is kept, and gets its voice hold. Any later visit applies
+ * the carrier rules whatever the width, so a carrier is spared them once at most. The price: a
+ * voice that keys up beside a line with carrier evidence, on a later visit (heard keying up or
+ * already on air at the landing), is held under the carrier rules, and an ID there is cut to them.
  */
 const CARRIER_WIDTH_FACTOR = 2
 
 function widerThanCarrier(
-	t: { obwHz: number; narrowestObwHz: number },
-	m: { carrierObwHz?: number },
+	t: { obwHz: number },
+	trackId: string,
+	visit: number,
+	m: { carrierObwHz: number; carrierStep: FrequencyMemory["carrierStep"] },
 ): boolean {
-	const carrierObwHz = m.carrierObwHz ?? 0
-	const bound = CARRIER_WIDTH_FACTOR * carrierObwHz
-	return carrierObwHz > 0 && t.narrowestObwHz <= bound && t.obwHz > bound
+	const step = m.carrierStep
+	return (
+		step !== null &&
+		step.visit === visit &&
+		step.trackId === trackId &&
+		t.obwHz > CARRIER_WIDTH_FACTOR * m.carrierObwHz
+	)
 }
 
 function sameFrequency(
@@ -1740,10 +1755,9 @@ export class SweepScheduler {
 
 	/**
 	 * Track a `record` hold reports (progress `holdingOn`), or null when the recording can only be of
-	 * frequencies with carrier evidence (a track this visit saw at most CARRIER_WIDTH_FACTOR times as
-	 * wide as the one that gave that evidence, then wider, is not that carrier). recordingActive names
-	 * the window, not the frequency, so
-	 * every open analog voice of the visit is a candidate: null when each has carrier evidence, else
+	 * frequencies with carrier evidence (on the visit whose watch gave that evidence, its track while
+	 * it reads past CARRIER_WIDTH_FACTOR times that width is not the carrier: widerThanCarrier).
+	 * recordingActive names the window, not the frequency, so every open analog voice of the visit is a candidate: null when each has carrier evidence, else
 	 * the track just held if it is one without, else the strongest without. With no open analog
 	 * voice: the track just held if it is still open, else the visit's strongest open track (null
 	 * when it has carrier evidence); "" when none is open.
@@ -1751,28 +1765,29 @@ export class SweepScheduler {
 	private recordedTrack(heldId: string | undefined): string | null {
 		const v = this.visit
 		if (v === null) return ""
-		const carrier = (t: TrackInfo): boolean => {
+		const carrier = (id: string, t: TrackInfo): boolean => {
 			const m = this.memoryOf(t)
-			return m?.evidence === "carrier" && !widerThanCarrier(t, m)
+			return m?.evidence === "carrier" && !widerThanCarrier(t, id, v.serial, m)
 		}
 		let voice = false
 		let best: { id: string; t: TrackInfo } | null = null
 		for (const [id, t] of v.tracks) {
 			if (!t.open || t.flagged || !t.followOnAir) continue
 			voice = true
-			if (carrier(t)) continue
+			if (carrier(id, t)) continue
 			if (id === heldId) return id
 			if (best === null || t.snrDb > best.t.snrDb) best = { id, t }
 		}
 		if (voice) return best?.id ?? null
 		const held = heldId === undefined ? undefined : v.tracks.get(heldId)
-		if (held?.open === true) return carrier(held) ? null : (heldId ?? "")
+		if (heldId !== undefined && held?.open === true)
+			return carrier(heldId, held) ? null : heldId
 		for (const [id, t] of v.tracks) {
 			if (!t.open || t.flagged) continue
 			if (best === null || t.snrDb > best.t.snrDb) best = { id, t }
 		}
 		if (best === null) return ""
-		return carrier(best.t) ? null : best.id
+		return carrier(best.id, best.t) ? null : best.id
 	}
 
 	/**
@@ -2094,6 +2109,7 @@ export class SweepScheduler {
 				flapListenMs: 0,
 				wasTraffic: false,
 				carrierObwHz: 0,
+				carrierStep: null,
 				// New on a hop that already had a full visit: that visit missed it.
 				onsetSeen: (this.hops[v.hopIndex]?.fullVisits ?? 0) >= 1,
 				restUntil: 0,
@@ -2900,9 +2916,19 @@ export class SweepScheduler {
 				m.evidence === "traffic" || sampled
 					? this.spec.hold.maxHoldMs
 					: CARRIER_WATCH_MS
-			if (now - from >= unbroken && !voiceOnAir)
+			if (now - from >= unbroken && !voiceOnAir) {
+				const first = m.evidence !== "carrier"
 				this.markCarrier(m, false, t.narrowestObwHz)
-			else if ((sampled || voiceOnAir) && hold.watch && now >= hold.cap) {
+				// The watch heard its track step past the line's width before it gave the evidence
+				// (widerThanCarrier): only that visit's recording of that track is spared the carrier
+				// rules, and only for the frequency's first evidence, so a retry never re-arms it.
+				if (
+					first &&
+					this.visit !== null &&
+					t.obwHz > CARRIER_WIDTH_FACTOR * m.carrierObwHz
+				)
+					m.carrierStep = { visit: this.visit.serial, trackId: hold.trackId }
+			} else if ((sampled || voiceOnAir) && hold.watch && now >= hold.cap) {
 				// Every hop gets a coarse visit before it is held again; no carrier hold lengthens
 				// that sweep (a carrier's retry waits one sweep more).
 				m.watchAfter = this.coarseVisits + this.plan.hops.length
