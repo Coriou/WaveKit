@@ -3728,26 +3728,29 @@ export class ScannerService extends EventEmitter {
 
 	/**
 	 * Whether `track`'s spur or IQ-image flag is not the artefact verdict for `live`: a placed
-	 * observation that a classed, voiced recording keeps over it (keepsOverArtefact), sticky for
-	 * the observation once true. Then neither the store's retraction nor the analog trial's
-	 * `spur-image` refusal applies, and the recording keeps its association to the end. A flag
-	 * before the voice or before placement, a truncated track, or one the recorder would not
-	 * keep is still the verdict.
+	 * observation whose classed, voiced recording the recorder still keeps over it, asked with what
+	 * its next track() or closed() call for this snapshot will be given (keepsOverArtefact: every
+	 * recorder veto checked first; a veto or refusal of the recording ends the waiver). Then neither
+	 * the store's retraction nor the analog trial's `spur-image` refusal applies, and the recording
+	 * keeps its association. A flag before the voice or before placement, a truncated track, or one
+	 * the recorder would not keep is still the verdict. Asked anew on every flagged snapshot: there
+	 * is no service-side copy of the answer.
 	 */
 	private artefactKept(live: LiveObservation, track: TrackSnapshot): boolean {
 		// Read defensively: a partial snapshot (a test's, a replayed one) may carry no flags.
 		const flags = track.flags as TrackSnapshot["flags"] | undefined
 		if (flags === undefined || (!flags.iqImage && flags.spur !== true))
 			return false
-		if (live.artefactKept === true) return true
-		if (
-			live.discoveryId === null ||
-			flags.truncated ||
-			!this.widebandAnalog.keepsOverArtefact(live.observationId, track)
+		return (
+			live.discoveryId !== null &&
+			!flags.truncated &&
+			this.widebandAnalog.keepsOverArtefact(live.observationId, track, {
+				analogFm: live.classification.class === "analog-fm",
+				nonAnalog: definitelyNotAnalogFm(live),
+				encrypted: live.encrypted,
+				recordAllowed: this.widebandRecordAllowed(live),
+			})
 		)
-			return false
-		live.artefactKept = true
-		return true
 	}
 
 	private hitsOf(jobId: string): JobHits {

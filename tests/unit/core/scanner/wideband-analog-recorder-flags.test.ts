@@ -773,7 +773,7 @@ describe("a voiced, classed session over a late minority flag", () => {
 		for (let i = 0; i < 400; i++) {
 			await h.feed(0.025, true)
 			const t = flagged(snapshot("o", onset, h.engine.liveEdge()), "iqImage")
-			const kept = h.rec.keepsOverArtefact("o", t)
+			const kept = h.rec.keepsOverArtefact("o", t, input("o", t))
 			h.rec.track(input("o", t))
 			expect(h.rec.owns("o")).toBe(kept)
 			answers++
@@ -785,12 +785,8 @@ describe("a voiced, classed session over a late minority flag", () => {
 		expect(last.unclean).toMatchObject({ kept: false, flagged: answers })
 		expect(last.unclean!.flagged * 2).toBe(last.unclean!.snapshots)
 		// Nothing left to keep: the observation is no longer recorded.
-		expect(
-			h.rec.keepsOverArtefact(
-				"o",
-				flagged(snapshot("o", onset, h.engine.liveEdge()), "spur"),
-			),
-		).toBe(false)
+		const after = flagged(snapshot("o", onset, h.engine.liveEdge()), "spur")
+		expect(h.rec.keepsOverArtefact("o", after, input("o", after))).toBe(false)
 	}, 60_000)
 
 	it("keepsOverArtefact is false before the voice, for a stricter flag and for a clean track", async () => {
@@ -799,12 +795,10 @@ describe("a voiced, classed session over a late minority flag", () => {
 		const at = early.engine.liveEdge()
 		early.rec.track(input("o", snapshot("o", at, early.engine.liveEdge())))
 		await early.pump()
-		expect(
-			early.rec.keepsOverArtefact(
-				"o",
-				flagged(snapshot("o", at, early.engine.liveEdge()), "spur"),
-			),
-		).toBe(false)
+		const first = flagged(snapshot("o", at, early.engine.liveEdge()), "spur")
+		expect(early.rec.keepsOverArtefact("o", first, input("o", first))).toBe(
+			false,
+		)
 
 		const h = harness()
 		const onset = await voiced(h, 2)
@@ -812,17 +806,88 @@ describe("a voiced, classed session over a late minority flag", () => {
 			flagged(snapshot("o", onset, h.engine.liveEdge()), "spur"),
 			"edge",
 		)
-		expect(h.rec.keepsOverArtefact("o", edge)).toBe(false)
+		expect(h.rec.keepsOverArtefact("o", edge, input("o", edge))).toBe(false)
+		const truncated = flagged(snapshot("o", onset, h.engine.liveEdge()), "spur")
+		truncated.flags.truncated = true
+		expect(h.rec.keepsOverArtefact("o", truncated, input("o", truncated))).toBe(
+			false,
+		)
+		const clean = snapshot("o", onset, h.engine.liveEdge())
+		expect(h.rec.keepsOverArtefact("o", clean, input("o", clean))).toBe(false)
+		const spur = flagged(snapshot("o", onset, h.engine.liveEdge()), "spur")
+		expect(h.rec.keepsOverArtefact("o", spur, input("o", spur))).toBe(true)
 		expect(
-			h.rec.keepsOverArtefact("o", snapshot("o", onset, h.engine.liveEdge())),
+			h.rec.keepsOverArtefact("unknown", edge, input("unknown", edge)),
 		).toBe(false)
-		expect(
-			h.rec.keepsOverArtefact(
-				"o",
-				flagged(snapshot("o", onset, h.engine.liveEdge()), "spur"),
-			),
-		).toBe(true)
-		expect(h.rec.keepsOverArtefact("unknown", edge)).toBe(false)
+	}, 60_000)
+
+	it("keepsOverArtefact checks the snapshot's other vetoes first: the next call refuses the session and the waiver is gone", async () => {
+		for (const [veto, code] of [
+			[{ encrypted: true }, "refused:encrypted"],
+			[{ recordAllowed: false }, "refused:record-disabled"],
+		] as const) {
+			const h = harness()
+			const onset = await voiced(h, 2)
+			// A first late spur snapshot with no other veto would be kept.
+			const plain = flagged(snapshot("o", onset, h.engine.liveEdge()), "spur")
+			expect(h.rec.keepsOverArtefact("o", plain, input("o", plain))).toBe(true)
+			const t = flagged(snapshot("o", onset, h.engine.liveEdge()), "spur")
+			expect(h.rec.keepsOverArtefact("o", t, input("o", t, veto))).toBe(false)
+			h.rec.track(input("o", t, veto))
+			expect(h.rec.owns("o")).toBe(false)
+			expect(decided(h).at(-1)!.code).toBe(code)
+			// The refusal ended it: a later plain spur snapshot is the artefact verdict.
+			const later = flagged(snapshot("o", onset, h.engine.liveEdge()), "spur")
+			expect(h.rec.keepsOverArtefact("o", later, input("o", later))).toBe(false)
+		}
+	}, 60_000)
+
+	it("a waiver ends when its session is refused for another flag", async () => {
+		const h = harness()
+		const onset = await voiced(h, 2)
+		const spur = flagged(snapshot("o", onset, h.engine.liveEdge()), "spur")
+		expect(h.rec.keepsOverArtefact("o", spur, input("o", spur))).toBe(true)
+		h.rec.track(input("o", spur))
+		expect(h.rec.owns("o")).toBe(true)
+		const edge = flagged(snapshot("o", onset, h.engine.liveEdge()), "edge")
+		expect(h.rec.keepsOverArtefact("o", edge, input("o", edge))).toBe(false)
+		h.rec.track(input("o", edge))
+		expect(h.rec.owns("o")).toBe(false)
+		const later = flagged(snapshot("o", onset, h.engine.liveEdge()), "spur")
+		expect(h.rec.keepsOverArtefact("o", later, input("o", later))).toBe(false)
+	}, 60_000)
+
+	it("a waiver outlives a session a retune finished until the track closes, unless the close is vetoed", async () => {
+		for (const closeVeto of [false, true]) {
+			const h = harness()
+			const onset = await voiced(h, 2)
+			const spur = flagged(snapshot("o", onset, h.engine.liveEdge()), "spur")
+			expect(h.rec.keepsOverArtefact("o", spur, input("o", spur))).toBe(true)
+			h.rec.track(input("o", spur))
+			// The tuner moves on before the track's close: the file ends at the new epoch's start.
+			h.engine.epoch = {
+				...h.engine.epoch,
+				epoch: h.engine.epoch.epoch + 1,
+				startSample: h.engine.liveEdge(),
+			}
+			await h.feed(0.5, false)
+			expect(h.rec.owns("o")).toBe(false)
+			expect(h.ops.map(o => o.cut)).toEqual(["epoch-changed"])
+			const close = flagged(snapshot("o", onset, h.engine.liveEdge()), "spur")
+			const info = input("o", close, closeVeto ? { encrypted: true } : {})
+			// No session counts its snapshots any more: the waiver stands, a veto still ends it.
+			expect(h.rec.keepsOverArtefact("o", close, info)).toBe(!closeVeto)
+			expect(h.rec.keepsOverArtefact("o", close, input("o", close))).toBe(
+				!closeVeto,
+			)
+			h.rec.closed("o", close, "epoch-changed", {
+				analogFm: true,
+				discoveryId: "d_1",
+			})
+			// Closed: nothing asks for it any more.
+			expect(h.rec.keepsOverArtefact("o", close, input("o", close))).toBe(false)
+			await h.rec.idle()
+		}
 	}, 60_000)
 
 	it("a late edge flag (not a spur or an image) still discards it", async () => {

@@ -157,12 +157,6 @@ export interface LiveObservation {
 	evidenceDeleted?: boolean
 	/** Accepted identity of this observation, never borrowed from a retained discovery. */
 	acceptedIdentity?: { identity: Identity; stream: number; epoch: number }
-	/**
-	 * Set once a classed, voiced recording kept this placed observation over a late spur or IQ
-	 * image flag (WidebandAnalogRecorder.keepsOverArtefact): its later ingests keep it on its
-	 * discovery (DiscoveryStore ingest `artefactWaived`), the recording's end included.
-	 */
-	artefactKept?: boolean
 }
 
 export interface JobDriver {

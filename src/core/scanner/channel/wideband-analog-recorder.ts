@@ -593,6 +593,17 @@ export interface WidebandTrackInput {
 	readonly channelOwned: boolean
 }
 
+/**
+ * What the next track() or closed() call for a snapshot will say about its observation
+ * (keepsOverArtefact): the recorder's vetoes besides the track's own flags.
+ */
+export interface WidebandArtefactInfo {
+	readonly analogFm: boolean
+	readonly nonAnalog?: boolean
+	readonly encrypted: boolean
+	readonly recordAllowed: boolean
+}
+
 /** What the closing snapshot says about the observation (its class may arrive only there). */
 export interface WidebandCloseInfo {
 	readonly analogFm: boolean
@@ -870,6 +881,69 @@ function barredSnapshot(
 	return null
 }
 
+/** What counting one more snapshot does to a session (countSnapshot); snapshotBar commits it. */
+interface SnapshotCount {
+	readonly snapshots: number
+	readonly flagged: number
+	readonly flaggedInChannel: number
+	readonly flagLate: boolean
+	/** The snapshot's unclean flag when `barred` is refused:unclean, else null (nothing counted). */
+	readonly flag: ScannerRecorderFlag | null
+	/** What bars the session with this snapshot counted; null when it keeps recording. */
+	readonly bar: ScannerRecorderDecision | null
+}
+
+/**
+ * The session's counts with one more snapshot of it (`barred` as barredSnapshot says), and what
+ * then bars it: `barred` as given, or null when the only bar is an unclean track the session keeps
+ * recording over (an in-channel wide reading at any time, WIDEBAND_KEPT_WIDE_OBW_HZ, or a late
+ * flag, lateFlagKept). Reads only: snapshotBar commits it, keepsOverArtefact asks it ahead.
+ */
+function countSnapshot(
+	s: Session,
+	track: TrackSnapshot,
+	barred: ScannerRecorderDecision | null,
+): SnapshotCount {
+	const snapshots = s.snapshots + 1
+	const flag = barred === "refused:unclean" ? uncleanFlag(track) : null
+	if (flag === null)
+		return {
+			snapshots,
+			flagged: s.flagged,
+			flaggedInChannel: s.flaggedInChannel,
+			flagLate: s.flagLate,
+			flag: null,
+			bar: barred,
+		}
+	// Before the voice verdict too: a neighbouring line can widen a voice's reading from its start.
+	const inChannel = inChannelWide(track)
+	const flagLate =
+		!inChannel && s.flagged === s.flaggedInChannel
+			? s.classed && s.qualified
+			: s.flagLate
+	const flagged = s.flagged + 1
+	const flaggedInChannel = s.flaggedInChannel + (inChannel ? 1 : 0)
+	const kept =
+		inChannel ||
+		lateFlagKept(flag, flagLate, flagged - flaggedInChannel, snapshots)
+	return {
+		snapshots,
+		flagged,
+		flaggedInChannel,
+		flagLate,
+		flag,
+		bar: kept ? null : barred,
+	}
+}
+
+/**
+ * Whether a snapshot's class discards the session (classify): a definite other class (a verified
+ * decode, the channel tier) while the session is a shadow or classed by its own audio only.
+ */
+function classVetoes(s: Session, info: ClassInfo): boolean {
+	return !info.analogFm && (!s.classed || s.toneOnly) && info.nonAnalog === true
+}
+
 function bindingKey(binding: RecordingBinding): string {
 	return JSON.stringify(
 		Object.entries(binding).sort(([a], [b]) => (a < b ? -1 : 1)),
@@ -958,6 +1032,12 @@ export class WidebandAnalogRecorder {
 	private readonly unsettled = new Map<string, number>()
 	private readonly refused = new Set<string>()
 	/**
+	 * Observations a classed, voiced recording keeps over a late spur or IQ-image flag
+	 * (keepsOverArtefact), until a veto or refusal of their session revokes it (revokeWaivers) or
+	 * they close (bounded by MAX_REMEMBERED).
+	 */
+	private readonly waived = new Set<string>()
+	/**
 	 * Observations whose spectrally digital shadow expired (WIDEBAND_DIGITAL_CLASS_MS), with the
 	 * visit (stream and epoch) it expired in: no other shadow starts for them in that visit
 	 * (bounded by MAX_REMEMBERED); an analog-fm snapshot still may, and so may a snapshot of a
@@ -1040,30 +1120,67 @@ export class WidebandAnalogRecorder {
 	}
 
 	/**
-	 * Whether this recorder keeps recording `observationId` over `track`'s spur or IQ-image flag:
-	 * a classed, voiced session holds it, the flag is the snapshot's only unclean one apart from a
-	 * wide reading (uncleanFlag), and snapshotBar would keep the session with this snapshot counted
-	 * (lateFlagKept: first raised after the class and the voice, on under half of its snapshots).
-	 * Read only, so it may be asked before the snapshot reaches track() or closed(). The service then
-	 * keeps the observation on its discovery (DiscoveryStore ingest `artefactWaived`), so the file
-	 * still has its association when it settles. A flag seen before the voice, or a stricter one, is
-	 * the artefact verdict and answers false.
+	 * Whether this recorder keeps `observationId`'s recording over `track`'s spur or IQ-image flag,
+	 * asked before the snapshot reaches track() or closed() with what that call will be given
+	 * (`info`), so the answer is the recorder's own for this snapshot after all its checks: a
+	 * classed, voiced session holds the observation, the flag is the snapshot's only unclean one
+	 * apart from a wide reading (uncleanFlag: never an edge or truncated track), no other veto
+	 * applies (encrypted, record.analog lost, a verified other class on a session classed by its own
+	 * audio: barredSnapshot, classVetoes), and snapshotBar keeps the session with this snapshot
+	 * counted (countSnapshot: first raised after the class and the voice, on under half of its
+	 * snapshots). Reads the session only; a true answer is remembered as the observation's waiver.
+	 * The service then keeps the observation on its discovery (DiscoveryStore ingest
+	 * `artefactWaived`), so the file still has its association when it settles.
+	 *
+	 * The waiver lasts while the recorder keeps the recording: any veto or refusal of the session
+	 * (this answer false, a cancel, a failed file or receipt: revokeWaivers) ends it, so the next
+	 * ingest retracts the observation. Once its session ended with its file finishing or finalized
+	 * (no session holds the observation any more), the waiver stands for the rest of the track's
+	 * spur or image snapshots that no other veto bars: the recording exists and no session counts
+	 * its snapshots, so a later majority of flags no longer retracts it.
 	 */
-	keepsOverArtefact(observationId: string, track: TrackSnapshot): boolean {
-		const id = this.byObservation.get(observationId)
-		const s = id === undefined ? undefined : this.sessions.get(id)
-		if (!s || s.done || !s.classed || !s.qualified) return false
+	keepsOverArtefact(
+		observationId: string,
+		track: TrackSnapshot,
+		info: WidebandArtefactInfo,
+	): boolean {
 		const flag = uncleanFlag(track)
 		if (flag !== "spur" && flag !== "iq-image") return false
-		// snapshotBar's counts with this snapshot: its first flag past in-channel wide readings is
-		// late now (classed and voiced), a later one keeps the session's first verdict.
-		const late = s.flagged === s.flaggedInChannel || s.flagLate
-		return lateFlagKept(
-			flag,
-			late,
-			s.flagged - s.flaggedInChannel + 1,
-			s.snapshots + 1,
+		const barred = barredSnapshot(info.encrypted, info.recordAllowed, false)
+		if (barred !== "refused:unclean") return this.revoke(observationId)
+		const id = this.byObservation.get(observationId)
+		const s = id === undefined ? undefined : this.sessions.get(id)
+		if (!s || s.done) return this.waived.has(observationId)
+		// The session's next call would refuse it (a flag before the class and the voice is never
+		// late, countSnapshot): the artefact verdict.
+		if (
+			!s.classed ||
+			!s.qualified ||
+			countSnapshot(s, track, barred).bar !== null ||
+			classVetoes(s, { ...info, discoveryId: null })
 		)
+			return this.revoke(observationId)
+		remember(this.waived, observationId)
+		return true
+	}
+
+	/** Ends `observationId`'s waiver (keepsOverArtefact); false, the answer it then gives. */
+	private revoke(observationId: string): false {
+		this.waived.delete(observationId)
+		return false
+	}
+
+	/** A veto, refusal or failed file of `s`: none of its observations keeps a waiver. */
+	private revokeWaivers(s: Session): void {
+		for (const id of s.observations) this.waived.delete(id)
+	}
+
+	/**
+	 * A file of `s` will not be kept (failed, aborted, never admitted): its waivers end unless a
+	 * later file of the live session still records (that one keeps the observation's association).
+	 */
+	private fileLost(s: Session): void {
+		if (s.done || s.file === null) this.revokeWaivers(s)
 	}
 
 	/**
@@ -1182,6 +1299,8 @@ export class WidebandAnalogRecorder {
 		cut: AnalogCut | null,
 		info?: WidebandCloseInfo,
 	): void {
+		// Its closing ingest came first: the observation asks for no waiver any more.
+		this.waived.delete(observationId)
 		// An association first given at the close still names the observation's earlier decisions.
 		if (info !== undefined && info.discoveryId !== null)
 			this.decisions.bindDiscovery(observationId, info.discoveryId)
@@ -1957,6 +2076,7 @@ export class WidebandAnalogRecorder {
 				operationId: file.handle?.operationId ?? receipt.operationId,
 			},
 		)
+		if (receipt.outcome !== "finalized") this.fileLost(s)
 		if (receipt.outcome !== "finalized" || this.deps.recordTone === undefined)
 			return
 		// A class of the recorder's own audio stays the recorder's: no discovery evidence from it.
@@ -2013,6 +2133,7 @@ export class WidebandAnalogRecorder {
 	 */
 	private storeFailed(s: Session, file: FileState): void {
 		file.failed = true
+		this.fileLost(s)
 		if (s.file !== file || s.done) {
 			const at = s.waiting.indexOf(file)
 			if (at >= 0) s.waiting.splice(at, 1)
@@ -2204,24 +2325,14 @@ export class WidebandAnalogRecorder {
 		barred: ScannerRecorderDecision | null,
 		via: ScannerRecorderFlagSource,
 	): ScannerRecorderDecision | null {
-		s.snapshots++
-		if (barred !== "refused:unclean") return barred
-		const flag = uncleanFlag(track)
-		if (flag === null) return barred
-		// Before the voice verdict too: a neighbouring line can widen a voice's reading from its start.
-		const inChannel = inChannelWide(track)
-		if (!inChannel && s.flagged === s.flaggedInChannel)
-			s.flagLate = s.classed && s.qualified
-		s.flagged++
-		if (inChannel) s.flaggedInChannel++
-		const kept =
-			inChannel ||
-			lateFlagKept(
-				flag,
-				s.flagLate,
-				s.flagged - s.flaggedInChannel,
-				s.snapshots,
-			)
+		const c = countSnapshot(s, track, barred)
+		s.snapshots = c.snapshots
+		if (c.flag === null) return c.bar
+		const flag = c.flag
+		s.flagLate = c.flagLate
+		s.flagged = c.flagged
+		s.flaggedInChannel = c.flaggedInChannel
+		const kept = c.bar === null
 		const atMs = Math.max(
 			0,
 			Math.round(((track.lastSample - s.onset) * 1000) / s.fs),
@@ -2768,6 +2879,7 @@ export class WidebandAnalogRecorder {
 		const endFrames = this.framesAt(s, file, endedAt)
 		this.judge(s, file, endFrames)
 		if (file.failed) {
+			this.revokeWaivers(s)
 			if (s.file === file) s.file = null
 			if (!s.done) this.dispose(s)
 			return
@@ -2962,6 +3074,7 @@ export class WidebandAnalogRecorder {
 			}
 		this.terminate(s, dropped, code)
 		s.waiting.length = 0
+		this.revokeWaivers(s)
 		for (const id of s.observations) {
 			if (this.byObservation.get(id) === s.id) this.byObservation.delete(id)
 			if (refuse) remember(this.refused, id)
@@ -2971,6 +3084,7 @@ export class WidebandAnalogRecorder {
 	/** Writes the rest of a finishing file's queue, then finishes its operation. */
 	private completeFinish(s: Session, file: FileState): void {
 		if (file.failed) {
+			this.fileLost(s)
 			file.handle?.cancel("cancelled")
 			s.files.delete(file)
 			// Every failure notes its decision; this only guards a file that would end without one.
@@ -2998,6 +3112,7 @@ export class WidebandAnalogRecorder {
 				}
 				// Not voiced, never classed or no discovery: nothing was written, nothing is kept.
 				file.failed = true
+				this.fileLost(s)
 				s.files.delete(file)
 				const code = this.unwrittenCode(s, file)
 				this.endFile(s, file, code)
@@ -3078,6 +3193,7 @@ export class WidebandAnalogRecorder {
 				s.files.delete(f)
 				files.push(f)
 			}
+		this.revokeWaivers(s)
 		this.dispose(s)
 		return files
 	}
