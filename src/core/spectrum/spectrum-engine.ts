@@ -414,11 +414,13 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private disconnectTicket = 0
 	/**
 	 * Commands that came while the pipeline restarted, or after a stream boundary the delivered
-	 * bytes have not reached yet: they belong to the stream that starts next, and are posted
-	 * into it once it has started (beginStream), never dropped. A command older than the
-	 * source's last disconnect tuned a connection that is gone, and is dropped.
+	 * bytes have not reached yet: they belong to a stream that starts later, and are posted into
+	 * it once it has started (beginStream), never dropped. One entry per stream, in ticket order:
+	 * commands for the same stream share an entry, a queued boundary between two keeps them
+	 * apart. A command older than the source's last disconnect tuned a connection that is gone,
+	 * and is dropped.
 	 */
-	private carried: ExternalCommand | null = null
+	private readonly carried: ExternalCommand[] = []
 	private readonly pendingMeta = new Map<number, EngineEpoch>()
 	/** WG9 req 3.4: per non-scanner epoch, the first sample past the network settle. */
 	private readonly verifiedFrom = new Map<number, number>()
@@ -538,7 +540,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.verifiedFrom.clear()
 		this.openingStreams.length = 0
 		// A command carried by an earlier run tuned before this branch existed.
-		this.carried = null
+		this.carried.length = 0
 		this.beginStream(this.initialTrust())
 		const reader = this.deps.hostCentre ?? nullHostCentreReader
 		if (reader !== nullHostCentreReader) {
@@ -981,35 +983,66 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	}
 
 	/**
-	 * Posts the carried command into the stream that just started, as its next epoch, timed from
-	 * this stream's clock. Its label is still the command's own merged with the state rule at
-	 * flush, so an unproven tuning stays `unverified`.
+	 * Posts the carried commands into the stream that just started, in order, each as an epoch
+	 * timed from this stream's clock; one still behind a queued boundary is carried again
+	 * (flushExternal). Each label is the newest command's own, merged with the state rule when it
+	 * is posted (checkState), so a value really unknown then keeps it `unverified`.
 	 */
 	private postCarried(): void {
-		const carried = this.carried
-		this.carried = null
-		if (!carried || carried.ticket < this.disconnectTicket) return
-		this.queueExternal(carried.trust, carried.centreHz, true, carried.ticket)
+		if (this.carried.length === 0) return
+		const carried = this.carried.splice(0)
+		for (const command of carried) {
+			if (command.ticket < this.disconnectTicket) continue
+			this.queueExternal(command.trust, command.centreHz, true, command.ticket)
+		}
 	}
 
-	/** Keeps a command that cannot be posted now for the stream that starts next. */
+	/** Keeps a command that cannot be posted now for the stream it belongs to, which starts later. */
 	private carry(command: ExternalCommand): void {
 		if (command.ticket < this.disconnectTicket) return
-		const held = this.carried
-		if (!held || held.ticket < this.disconnectTicket) {
-			this.carried = {
-				trust: command.trust,
-				...(command.centreHz !== undefined
-					? { centreHz: command.centreHz }
-					: {}),
-				checkState: command.checkState,
-				ticket: command.ticket,
-			}
+		const held = this.carried[this.carried.length - 1]
+		if (
+			held &&
+			held.ticket >= this.disconnectTicket &&
+			!this.boundaryBetween(
+				Math.min(held.ticket, command.ticket),
+				Math.max(held.ticket, command.ticket),
+			)
+		) {
+			this.supersede(held, command)
 			return
 		}
-		held.trust = mergeTrust(held.trust, command.trust)
-		if (command.centreHz !== undefined) held.centreHz = command.centreHz
-		if (command.checkState) held.checkState = true
+		this.carried.push({
+			trust: command.trust,
+			...(command.centreHz !== undefined ? { centreHz: command.centreHz } : {}),
+			checkState: command.checkState,
+			ticket: command.ticket,
+		})
+	}
+
+	/**
+	 * Folds `command` into `held`, a command for the same stream. The newer one's label and centre
+	 * win: an older command's weaker label described a state the newer one superseded. The state
+	 * rule is always applied when the result is posted (checkState), so an upgrade never survives
+	 * a value still unknown or only declared then, and a host-centre mismatch still demotes it.
+	 */
+	private supersede(held: ExternalCommand, command: ExternalCommand): void {
+		const newer = command.ticket >= held.ticket
+		if (newer) held.trust = command.trust
+		if (
+			command.centreHz !== undefined &&
+			(newer || held.centreHz === undefined)
+		)
+			held.centreHz = command.centreHz
+		held.checkState = true
+		held.ticket = Math.min(held.ticket, command.ticket)
+	}
+
+	/** True when a stream boundary still queued in the branch took a ticket between `from` and `to`. */
+	private boundaryBetween(from: number, to: number): boolean {
+		return this.branchQueue.some(
+			mark => mark.kind === "stream" && mark.ticket > from && mark.ticket < to,
+		)
 	}
 
 	private send(input: WorkerPipelineInput, transfer?: ArrayBuffer): void {
@@ -1592,11 +1625,25 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		ticket?: number,
 	): void {
 		if (!this.running) return
-		if (this.externalPending) {
-			if (centreHz !== undefined) this.externalPending.centreHz = centreHz
-			if (checkState) this.externalPending.checkState = true
-			this.externalPending.trust = mergeTrust(this.externalPending.trust, trust)
-			return
+		const own = ticket ?? ++this.ticket
+		const held = this.externalPending
+		if (held) {
+			// Never merge across a stream boundary or a disconnect: the held command belongs to the
+			// stream before it and is posted into that stream now, as its microtask would (carried
+			// instead during a restart, and then dropped if a disconnect came since); this one takes
+			// its own entry, ticket and clock, so it can never inherit the old stream's place.
+			if (!this.boundaryBetween(held.ticket, own)) {
+				this.supersede(held, {
+					trust,
+					...(centreHz !== undefined ? { centreHz } : {}),
+					checkState,
+					ticket: own,
+				})
+				return
+			}
+			this.flushExternal()
+			// Flushing can restart the pipeline, which takes this command as a carried one.
+			if (!this.running) return
 		}
 		const clock = this.sampleClock()
 		this.externalPending = {
@@ -1605,7 +1652,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			bufferedSamples: clock.bufferedSamples,
 			...(centreHz !== undefined ? { centreHz } : {}),
 			checkState,
-			ticket: ticket ?? ++this.ticket,
+			ticket: own,
 		}
 		queueMicrotask(() => this.flushExternal())
 	}

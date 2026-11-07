@@ -245,10 +245,37 @@ async function setup(options: { declareCentre?: boolean } = {}) {
 			},
 		)
 	}
+	/**
+	 * Holds the next pipeline restart's old-host close until `release()`: the commands sent
+	 * meanwhile land inside the restart.
+	 */
+	const holdRestart = () => {
+		let release = () => {}
+		const held = new Promise<void>(resolve => {
+			release = resolve
+		})
+		const close = InlinePipelineHost.prototype.close
+		vi.spyOn(InlinePipelineHost.prototype, "close").mockImplementationOnce(
+			async function (this: InlinePipelineHost) {
+				await held
+				return close.call(this)
+			},
+		)
+		return () => release()
+	}
+	/** The engine's fanout branch: pausing it keeps accepted bytes buffered ahead of the engine. */
+	const branch = () => {
+		const found = fanout.branches.get("scanner-rtl")
+		if (!found) throw new Error("no scanner branch")
+		return found.stream
+	}
 	return {
 		controller,
+		service,
 		engine,
 		manager,
+		holdRestart,
+		branch,
 		started,
 		post,
 		trustBecomes,
@@ -390,5 +417,82 @@ describe("the spectrum epoch after a tune", { timeout: 30_000 }, () => {
 			})
 		}, WAIT)
 		expect(h.engine.currentEpoch().tuningTrust).toBe("unverified")
+	})
+
+	it("a proven command after an unproven one during a restart leaves a commanded epoch", async () => {
+		// Declared centre and rate: the rate written in place first is unproven (the centre is still
+		// only declared), the centre written next proves both.
+		const h = await setup()
+		await h.trustBecomes("unverified")
+		const release = h.holdRestart()
+		const restart = h.engine.reconfigure()
+		expect((await h.post("sample-rate", { hz: START_RATE })).statusCode).toBe(
+			200,
+		)
+		expect((await h.post("frequency", { hz: START_HZ })).statusCode).toBe(200)
+		expect(h.controller.getState("rtl")?.declaredOnlyFields ?? []).toEqual([])
+		release()
+		await restart
+		await h.trustBecomes("commanded")
+		// The recorder's tuning admission reads this label (the harness tone needs the tune rate).
+		await settled(h.service)
+		expect(h.engine.currentEpoch().tuningTrust).toBe("commanded")
+	})
+
+	it("two commands during one restart post in order with the newest label", async () => {
+		const h = await setup()
+		await h.trustBecomes("unverified")
+		const before = h.engine.currentEpoch()
+		const release = h.holdRestart()
+		const restart = h.engine.reconfigure()
+		expect((await h.post("sample-rate", { hz: START_RATE })).statusCode).toBe(
+			200,
+		)
+		expect((await h.post("frequency", { hz: TUNE_HZ })).statusCode).toBe(200)
+		release()
+		await restart
+		await h.trustBecomes("commanded")
+		expect(h.engine.currentEpoch()).toMatchObject({ centreHz: TUNE_HZ })
+		// Nothing after the restart reverts to the earlier command's label or centre.
+		const after = h.started.filter(e => e.stream > before.stream)
+		const last = after[after.length - 1]
+		expect(last).toMatchObject({ centreHz: TUNE_HZ, tuningTrust: "commanded" })
+		// The recorder's tuning admission reads this label (the harness tone needs the tune rate).
+		await settled(h.service)
+		expect(h.engine.currentEpoch().tuningTrust).toBe("commanded")
+	})
+
+	it("a replay right after a disconnect proves the new stream, never the old one", async () => {
+		const h = await setup()
+		expect((await h.post("tune", RATE_CHANGE_TUNE)).statusCode).toBe(200)
+		await h.trustBecomes("commanded")
+		const before = h.engine.currentEpoch()
+		const stream = h.branch()
+		stream.pause()
+		try {
+			// Accepted bytes wait in the branch, so the disconnect's boundary is still ahead.
+			await vi.waitFor(() => {
+				expect(stream.readableLength).toBeGreaterThan(0)
+			}, WAIT)
+			// One tick: an old-connection command, the disconnect, the new connection's replay.
+			h.controller.emit("command-sent", "rtl", "set-frequency", TUNE_HZ, "rest")
+			h.manager.emit("disconnected", "rtl")
+			h.controller.emit(
+				"command-sent",
+				"rtl",
+				"set-frequency",
+				TUNE_HZ,
+				"replay",
+			)
+		} finally {
+			stream.resume()
+		}
+		await vi.waitFor(async () => {
+			await settled(h.service)
+			const epoch = h.engine.currentEpoch()
+			expect(epoch.stream).toBeGreaterThan(before.stream)
+			expect(epoch.tuningTrust).toBe("commanded")
+		}, WAIT)
+		await h.transmissionAdmitted()
 	})
 })
