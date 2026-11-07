@@ -666,6 +666,65 @@ describe("a voiced, classed session over a late minority flag", () => {
 		expect(h.ops.map(o => o.cancelled)).toEqual(["cancelled"])
 	}, 60_000)
 
+	it("keepsOverArtefact answers before each snapshot what snapshotBar then does, up to and at the share bound", async () => {
+		const h = harness()
+		const onset = await voiced(h, 2)
+		let answers = 0
+		for (let i = 0; i < 400; i++) {
+			await h.feed(0.025, true)
+			const t = flagged(snapshot("o", onset, h.engine.liveEdge()), "iqImage")
+			const kept = h.rec.keepsOverArtefact("o", t)
+			h.rec.track(input("o", t))
+			expect(h.rec.owns("o")).toBe(kept)
+			answers++
+			if (!kept) break
+		}
+		// It said false exactly once, at the snapshot that reached half (flagged · 2 = snapshots).
+		expect(h.rec.owns("o")).toBe(false)
+		const last = decided(h).at(-1)!
+		expect(last.unclean).toMatchObject({ kept: false, flagged: answers })
+		expect(last.unclean!.flagged * 2).toBe(last.unclean!.snapshots)
+		// Nothing left to keep: the observation is no longer recorded.
+		expect(
+			h.rec.keepsOverArtefact(
+				"o",
+				flagged(snapshot("o", onset, h.engine.liveEdge()), "spur"),
+			),
+		).toBe(false)
+	}, 60_000)
+
+	it("keepsOverArtefact is false before the voice, for a stricter flag and for a clean track", async () => {
+		const early = harness()
+		await early.feed(0.5, false)
+		const at = early.engine.liveEdge()
+		early.rec.track(input("o", snapshot("o", at, early.engine.liveEdge())))
+		await early.pump()
+		expect(
+			early.rec.keepsOverArtefact(
+				"o",
+				flagged(snapshot("o", at, early.engine.liveEdge()), "spur"),
+			),
+		).toBe(false)
+
+		const h = harness()
+		const onset = await voiced(h, 2)
+		const edge = flagged(
+			flagged(snapshot("o", onset, h.engine.liveEdge()), "spur"),
+			"edge",
+		)
+		expect(h.rec.keepsOverArtefact("o", edge)).toBe(false)
+		expect(
+			h.rec.keepsOverArtefact("o", snapshot("o", onset, h.engine.liveEdge())),
+		).toBe(false)
+		expect(
+			h.rec.keepsOverArtefact(
+				"o",
+				flagged(snapshot("o", onset, h.engine.liveEdge()), "spur"),
+			),
+		).toBe(true)
+		expect(h.rec.keepsOverArtefact("unknown", edge)).toBe(false)
+	}, 60_000)
+
 	it("a late edge flag (not a spur or an image) still discards it", async () => {
 		const h = harness()
 		await voiced(h, 2)

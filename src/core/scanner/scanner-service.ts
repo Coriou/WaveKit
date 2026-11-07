@@ -3634,6 +3634,7 @@ export class ScannerService extends EventEmitter {
 		const dcCentred =
 			tuned !== undefined &&
 			dcCentredOf(track.centreHz, track.obwHz, tuned.centreHz)
+		const waived = this.artefactKept(live, track)
 		const res = this.store.ingest(
 			{
 				...(dcCentred ? { dcCentred: true } : {}),
@@ -3653,7 +3654,10 @@ export class ScannerService extends EventEmitter {
 				...(live.hopIndex !== undefined ? { hopIndex: live.hopIndex } : {}),
 				singleBlockSurfacingAllowed: sweep,
 			},
-			decode ? { decode } : {},
+			{
+				...(decode ? { decode } : {}),
+				...(waived ? { artefactWaived: true } : {}),
+			},
 		)
 		live.lastIngestAt = now
 		if (res.change === "transient" || res.discoveryId === null) {
@@ -3720,6 +3724,30 @@ export class ScannerService extends EventEmitter {
 		}
 		this.dirty = true
 		return reported
+	}
+
+	/**
+	 * Whether `track`'s spur or IQ-image flag is not the artefact verdict for `live`: a placed
+	 * observation that a classed, voiced recording keeps over it (keepsOverArtefact), sticky for
+	 * the observation once true. Then neither the store's retraction nor the analog trial's
+	 * `spur-image` refusal applies, and the recording keeps its association to the end. A flag
+	 * before the voice or before placement, a truncated track, or one the recorder would not
+	 * keep is still the verdict.
+	 */
+	private artefactKept(live: LiveObservation, track: TrackSnapshot): boolean {
+		// Read defensively: a partial snapshot (a test's, a replayed one) may carry no flags.
+		const flags = track.flags as TrackSnapshot["flags"] | undefined
+		if (flags === undefined || (!flags.iqImage && flags.spur !== true))
+			return false
+		if (live.artefactKept === true) return true
+		if (
+			live.discoveryId === null ||
+			flags.truncated ||
+			!this.widebandAnalog.keepsOverArtefact(live.observationId, track)
+		)
+			return false
+		live.artefactKept = true
+		return true
 	}
 
 	private hitsOf(jobId: string): JobHits {
@@ -5407,13 +5435,17 @@ export class ScannerService extends EventEmitter {
 			channelHz,
 			spacingHz,
 		)
+		// A late spur or image flag a voiced recording keeps over is not this trial's verdict either.
+		const artefact =
+			(track.flags.spur === true || track.flags.iqImage) &&
+			!this.artefactKept(live, track)
 		const reason = !eligible
 			? "not-allowed"
 			: this.discoveryLockedOut(live.discoveryId)
 				? "lockout"
 				: live.discoveryId === null
 					? "no-discovery"
-					: track.flags.spur || track.flags.iqImage
+					: artefact
 						? "spur-image"
 						: track.flags.edge
 							? "edge"

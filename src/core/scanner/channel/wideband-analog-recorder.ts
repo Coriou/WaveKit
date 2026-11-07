@@ -1007,6 +1007,33 @@ export class WidebandAnalogRecorder {
 	}
 
 	/**
+	 * Whether this recorder keeps recording `observationId` over `track`'s spur or IQ-image flag:
+	 * a classed, voiced session holds it, the flag is the snapshot's only unclean one apart from a
+	 * wide reading (uncleanFlag), and snapshotBar would keep the session with this snapshot counted
+	 * (lateFlagKept: first raised after the class and the voice, on under half of its snapshots).
+	 * Read only, so it may be asked before the snapshot reaches track() or closed(). The service then
+	 * keeps the observation on its discovery (DiscoveryStore ingest `artefactWaived`), so the file
+	 * still has its association when it settles. A flag seen before the voice, or a stricter one, is
+	 * the artefact verdict and answers false.
+	 */
+	keepsOverArtefact(observationId: string, track: TrackSnapshot): boolean {
+		const id = this.byObservation.get(observationId)
+		const s = id === undefined ? undefined : this.sessions.get(id)
+		if (!s || s.done || !s.classed || !s.qualified) return false
+		const flag = uncleanFlag(track)
+		if (flag !== "spur" && flag !== "iq-image") return false
+		// snapshotBar's counts with this snapshot: its first flag past in-channel wide readings is
+		// late now (classed and voiced), a later one keeps the session's first verdict.
+		const late = s.flagged === s.flaggedInChannel || s.flagLate
+		return lateFlagKept(
+			flag,
+			late,
+			s.flagged - s.flaggedInChannel + 1,
+			s.snapshots + 1,
+		)
+	}
+
+	/**
 	 * The sweep-hold hook, per transmission: for a session on this source, stream and epoch that is
 	 * classed analog-fm and has been voiced (`qualified`, sticky for its files), voice (`{ voice }`,
 	 * named by that track's observation id: the same over keeps its name, the next over after a

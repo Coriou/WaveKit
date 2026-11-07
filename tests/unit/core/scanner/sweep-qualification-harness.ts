@@ -240,6 +240,8 @@ export function qualificationWorld(opts: {
 	centreHz: number
 	patch?: (s: ScannerSettings) => void
 	logger?: Logger
+	/** Called before each chunk with the world's time and the tuned centre (a test's own clock). */
+	onChunk?: (atMs: number, centreHz: number) => void
 }) {
 	const dir = makeTmpDir("wk-qualify-")
 	const sources = new FakeSources("rtl", {
@@ -393,6 +395,7 @@ export function qualificationWorld(opts: {
 			const chunks = Math.round(ms / CHUNK_MS)
 			for (let i = 0; i < chunks; i++) {
 				noteVisit()
+				opts.onChunk?.(clock() - T0, tunedHz())
 				const iq = opts.world(CHUNK, tunedHz(), clock() - T0)
 				samples += CHUNK
 				fanout.write(Buffer.from(iq))
@@ -563,6 +566,8 @@ export interface SceneConfig {
 	job?: Record<string, unknown>
 	patch?: (s: ScannerSettings) => void
 	logger?: Logger
+	/** Called before each chunk with the world's time and the tuned centre (qualificationWorld). */
+	onChunk?: (atMs: number, centreHz: number) => void
 }
 
 export interface SceneTarget extends Span {
@@ -599,6 +604,10 @@ export interface SceneReport {
 	wavSeconds: number[]
 	/** WAVs no target's frequency and time matched. */
 	unattributedWavSeconds: number[]
+	/** Every finalized WAV, with its discovery's frequency when that discovery is in the store. */
+	wavFiles: WavLog[]
+	/** The recorder's recent decisions at the scene's end (ScannerStatus.recorder.recent). */
+	decisions: { code: string; receipt?: unknown }[]
 	/** Per hop: the median and the longest time between two starts of a visit. */
 	period: { medianMs: number | null; longestMs: number | null }[]
 	/**
@@ -641,6 +650,7 @@ export async function runScene(config: SceneConfig): Promise<SceneReport> {
 			config.patch?.(s)
 		},
 		...(config.logger ? { logger: config.logger } : {}),
+		...(config.onChunk ? { onChunk: config.onChunk } : {}),
 	})
 	try {
 		await w.service.start()
@@ -656,7 +666,11 @@ export async function runScene(config: SceneConfig): Promise<SceneReport> {
 		} as never)
 		await w.advance(config.durationMs)
 		w.scanWavs()
-		return sceneReport(w, config, job.plan.hops, settleMs)
+		const decisions = (w.service.status().recorder?.recent ?? []).map(d => ({
+			code: d.code,
+			...(d.receipt === undefined ? {} : { receipt: d.receipt }),
+		}))
+		return { ...sceneReport(w, config, job.plan.hops, settleMs), decisions }
 	} finally {
 		await w.stop()
 	}
@@ -670,7 +684,7 @@ function sceneReport(
 		covered: { startHz: number; endHz: number }
 	}[],
 	settleMs: number,
-): SceneReport {
+): Omit<SceneReport, "decisions"> {
 	const hopOf = (hz: number): number | null => {
 		const i = hops.findIndex(
 			h => hz >= h.covered.startHz && hz <= h.covered.endHz,
@@ -751,6 +765,7 @@ function sceneReport(
 		holds,
 		wavSeconds: wavs.map(f => f.seconds),
 		unattributedWavSeconds: wavs.filter(f => !owner.has(f)).map(f => f.seconds),
+		wavFiles: wavs,
 		period,
 		unpaidSweeps,
 	}
