@@ -4,10 +4,15 @@
  * - `process.cpuUsage`, event-loop utilization, the meter and channel rows: O(1) or O(channels)
  *   memory reads on the main thread, no per-sample IQ work;
  * - on Linux: 1 async directory read and at most `threadsMax` async file reads, one at a time, so
- *   at most one file-pool thread is taken; no shell and no child process;
+ *   at most one file-pool thread is taken; no shell and no child process. One one-shot timer bounds
+ *   the wait (`threadReadBudgetMs`); a read that hangs past it is left behind, and no new walk
+ *   starts until it settles, so hung reads hold 1 file-pool thread at most however long they last;
  * - the container reading: the cgroup files GET /api/resources/container reads, small and in-memory.
+ *   Those reads are synchronous on the main thread, after the walk: no timer can interrupt them, and
+ *   were one to hang, the whole core would hang with it. The monitor's own 2 s poll makes the same
+ *   reads, so this route adds no new way to hang.
  * The event-loop delay comes from the loop meter the core runs anyway (10 ms resolution, a native
- * timer recording into a fixed histogram): this route adds no timer of its own.
+ * timer recording into a fixed histogram): this route adds no meter of its own.
  */
 import { readdir, readFile } from "node:fs/promises"
 import { performance, type EventLoopUtilization } from "node:perf_hooks"
@@ -27,6 +32,60 @@ import type { FastifyPluginAsync } from "fastify"
 const TICKS_PER_SECOND = 100
 
 const TASK_DIR = "/proc/self/task"
+
+/**
+ * Thread names shown as they are: Node's own and the workers this core names, each as the kernel
+ * holds it, cut to 15 bytes. Any program may set a name to anything, so everything else reads
+ * `other`: a name is reported only when it could not have carried a value from outside.
+ */
+const KNOWN_THREAD_NAMES: ReadonlySet<string> = new Set([
+	"node",
+	"libuv-worker",
+	"V8Worker",
+	"DelayedTaskSche",
+	"SignalInspector",
+	"InspectorIo",
+	"WorkerThread",
+	"activity-writer",
+	"scanner-snapsho",
+	"aircraft-db-imp",
+])
+const SPECTRUM_WORKER_PREFIX = "spectrum-"
+const OTHER_THREAD = "other"
+
+/** A spectrum worker's name ends in its source id, operator text, so only the kind is kept. */
+function safeThreadName(raw: string): string {
+	if (KNOWN_THREAD_NAMES.has(raw)) return raw
+	return raw.startsWith(SPECTRUM_WORKER_PREFIX)
+		? "spectrum-worker"
+		: OTHER_THREAD
+}
+
+/** A part the runtime supplies; absent or failing, it reads null and the sample still stands. */
+function partOrNull<T>(read: (() => T) | undefined): T | null {
+	try {
+		return read?.() ?? null
+	} catch {
+		return null
+	}
+}
+
+interface ThreadRow {
+	tid: number
+	name: string
+	ticks: number
+}
+
+interface ThreadRead {
+	rows: ThreadRow[]
+	truncated: boolean
+}
+
+/** One walk of `/proc/self/task`. The deadline reads it as it stands and abandons it. */
+interface ThreadWalk extends ThreadRead {
+	listed: boolean
+	abandoned: boolean
+}
 
 export interface DiagnosticsDeps {
 	platform: NodeJS.Platform
@@ -62,11 +121,7 @@ export function parseThreadStat(
 	if (!Number.isSafeInteger(utime) || !Number.isSafeInteger(stime)) return null
 	if (utime < 0 || stime < 0) return null
 	return {
-		// The kernel caps a name at 15 bytes; any program may set it, so it is never trusted.
-		name: text
-			.slice(open + 1, close)
-			.slice(0, 15)
-			.replace(/[^\x20-\x7e]/g, "?"),
+		name: safeThreadName(text.slice(open + 1, close)),
 		ticks: utime + stime,
 	}
 }
@@ -75,6 +130,8 @@ export function parseThreadStat(
 export class DiagnosticsSampler {
 	private cached: { at: number; value: Diagnostics } | null = null
 	private inFlight: Promise<Diagnostics> | null = null
+	/** The walk under way; once abandoned it stays here until its hung read settles. */
+	private walk: ThreadWalk | null = null
 	private previous: {
 		at: number
 		cpu: NodeJS.CpuUsage
@@ -100,7 +157,7 @@ export class DiagnosticsSampler {
 	private async sample(): Promise<Diagnostics> {
 		const { deps, previous } = this
 		const ticks = new Map<number, number>()
-		const threadRead = await this.readThreads()
+		const { threads: threadRead, timedOut } = await this.readThreads()
 		const at = deps.monoNow()
 		const cpu = deps.cpuUsage()
 		const loop = deps.utilization()
@@ -127,13 +184,13 @@ export class DiagnosticsSampler {
 			(a, b) =>
 				(b.cpuCores ?? -1) - (a.cpuCores ?? -1) || b.cpuSeconds - a.cpuSeconds,
 		)
-		const channels = deps.channels?.()
+		const channels = partOrNull(deps.channels)
 		const value: Diagnostics = {
 			at: new Date(deps.now()).toISOString(),
 			eventLoopUtilization: previous
 				? deps.utilization(loop, previous.loop).utilization
 				: null,
-			eventLoopDelay: deps.loopDelay?.() ?? null,
+			eventLoopDelay: partOrNull(deps.loopDelay),
 			process: {
 				windowMs,
 				cpuCores: previous
@@ -148,8 +205,9 @@ export class DiagnosticsSampler {
 				userSeconds: cpu.user / 1e6,
 				systemSeconds: cpu.system / 1e6,
 			},
-			containerCpuCores: deps.containerCpuCores?.() ?? null,
+			containerCpuCores: partOrNull(deps.containerCpuCores),
 			threads: threadRead && { rows, truncated: threadRead.truncated },
+			threadsTimedOut: timedOut,
 			channels: channels
 				? {
 						rows: channels.slice(0, DIAGNOSTICS_LIMITS.channelsMax),
@@ -162,39 +220,75 @@ export class DiagnosticsSampler {
 		return value
 	}
 
-	/** Null off Linux or when the list cannot be read; an unreadable thread (it ended) is skipped. */
+	/**
+	 * Answers within `threadReadBudgetMs` whatever the reads do. Samples never overlap (`inFlight`),
+	 * so a walk still here at the start of one was abandoned: at most one is ever outstanding, and
+	 * while it hangs this starts no other.
+	 */
 	private async readThreads(): Promise<{
-		rows: { tid: number; name: string; ticks: number }[]
-		truncated: boolean
-	} | null> {
+		threads: ThreadRead | null
+		timedOut: boolean
+	}> {
+		if (this.deps.platform !== "linux")
+			return { threads: null, timedOut: false }
+		if (this.walk) return { threads: null, timedOut: true }
+		const walk: ThreadWalk = {
+			rows: [],
+			truncated: false,
+			listed: false,
+			abandoned: false,
+		}
+		this.walk = walk
+		const done = this.walkThreads(walk).finally(() => {
+			this.walk = null
+		})
+		let timer: NodeJS.Timeout | undefined
+		const deadline = new Promise<"deadline">(resolve => {
+			timer = setTimeout(
+				() => resolve("deadline"),
+				DIAGNOSTICS_LIMITS.threadReadBudgetMs,
+			)
+			timer.unref()
+		})
+		const outcome = await Promise.race([done, deadline])
+		clearTimeout(timer)
+		if (outcome !== "deadline") return { threads: outcome, timedOut: false }
+		walk.abandoned = true
+		walk.truncated = true
+		return { threads: walk.listed ? walk : null, timedOut: true }
+	}
+
+	/** Null when the list cannot be read; an unreadable thread (it ended) is skipped. Never rejects. */
+	private async walkThreads(walk: ThreadWalk): Promise<ThreadRead | null> {
 		const { deps } = this
-		if (deps.platform !== "linux") return null
+		const started = deps.monoNow()
 		let names: readonly string[]
 		try {
 			names = await deps.listThreads()
 		} catch {
 			return null
 		}
+		if (walk.abandoned) return null
+		walk.listed = true
 		const tids = names
 			.map(Number)
 			.filter(tid => Number.isSafeInteger(tid) && tid > 0)
 			.sort((a, b) => a - b)
-		const rows: { tid: number; name: string; ticks: number }[] = []
-		const started = deps.monoNow()
-		let truncated = tids.length > DIAGNOSTICS_LIMITS.threadsMax
+		walk.truncated = tids.length > DIAGNOSTICS_LIMITS.threadsMax
 		for (const tid of tids.slice(0, DIAGNOSTICS_LIMITS.threadsMax)) {
+			if (walk.abandoned) break
 			if (deps.monoNow() - started > DIAGNOSTICS_LIMITS.threadReadBudgetMs) {
-				truncated = true
+				walk.truncated = true
 				break
 			}
 			try {
 				const parsed = parseThreadStat(await deps.readThreadStat(String(tid)))
-				if (parsed) rows.push({ tid, ...parsed })
+				if (parsed && !walk.abandoned) walk.rows.push({ tid, ...parsed })
 			} catch {
 				// It ended between the list and the read.
 			}
 		}
-		return { rows, truncated }
+		return walk
 	}
 }
 

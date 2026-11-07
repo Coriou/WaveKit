@@ -1,7 +1,9 @@
+import { readFileSync } from "node:fs"
 import { rm } from "node:fs/promises"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { ScannerApiError } from "../../../../src/core/scanner/errors.js"
 import {
+	LAST_REASON_CODES,
 	LAST_REASON_SOURCES_MAX,
 	LastReasons,
 	leaseRefusal,
@@ -32,22 +34,44 @@ const engineOf = (h: ReturnType<typeof harness>) =>
 	h.service.status().engines.find(engine => engine.sourceId === "rtl")
 
 describe("safeReasonCode", () => {
-	it("passes a closed code and nothing else", () => {
-		expect(safeReasonCode({ code: "TUNER_LEASE_HELD" })).toBe(
-			"TUNER_LEASE_HELD",
-		)
+	it("passes every listed code and nothing else", () => {
+		for (const code of LAST_REASON_CODES)
+			expect(safeReasonCode({ code })).toBe(code)
 		for (const err of [
 			new Error("connect ECONNREFUSED receiver.invalid"),
 			{ code: "/etc/passwd" },
 			{ code: "lower case" },
-			{ code: "A".repeat(65) },
+			{ code: "SECRET_CUSTOMER_TOKEN" },
+			{ code: "ENOENT" },
 			{ code: 7 },
 			null,
 			undefined,
-			"TUNER_LEASE_HELD",
+			"SCANNER_SOURCE_BUSY",
 		])
 			expect(safeReasonCode(err)).toBe("UNKNOWN")
-		expect(safeReasonCode({ code: "A".repeat(64) })).toBe("A".repeat(64))
+	})
+
+	it("lists exactly the codes the refusal paths raise", () => {
+		const raisedBy = (path: string): string[] =>
+			readFileSync(new URL(`../../../../src/${path}`, import.meta.url), "utf8")
+				.match(/"(?:SCANNER|SPECTRUM|TUNER)_[A-Z0-9_]+"/g)
+				?.map(literal => literal.slice(1, -1)) ?? []
+		const raised = new Set(
+			[
+				"core/scanner/job-runner.ts",
+				"core/scanner/tuner-arbiter.ts",
+				"core/spectrum/spectrum-service.ts",
+				"core/spectrum/spectrum-engine.ts",
+				"core/spectrum/pipeline-host.ts",
+				"core/tuner-controller.ts",
+			].flatMap(raisedBy),
+		)
+		// Only logged by the job runner: it never leaves a dispatch.
+		raised.delete("SCANNER_ACTIVITY_VIEW")
+		// From the service itself and from the tuner's ownership check, whose code has another prefix.
+		raised.add("SCANNER_JOB_NOT_FOUND")
+		raised.add("ACCESS_UNAVAILABLE")
+		expect([...LAST_REASON_CODES].sort()).toEqual([...raised].sort())
 	})
 })
 
@@ -56,12 +80,14 @@ describe("leaseRefusal", () => {
 		const of = (holderJobId: unknown) =>
 			leaseRefusal(
 				"hand-back",
-				new ScannerApiError("held", "SCANNER_LEASE_HELD", 409, { holderJobId }),
+				new ScannerApiError("held", "SCANNER_SOURCE_BUSY", 409, {
+					holderJobId,
+				}),
 				0,
 			)
 		expect(of("job-1")).toEqual({
 			kind: "hand-back",
-			code: "SCANNER_LEASE_HELD",
+			code: "SCANNER_SOURCE_BUSY",
 			at: "1970-01-01T00:00:00.000Z",
 			holderJobId: "job-1",
 		})
@@ -97,7 +123,7 @@ describe("scanner status last reasons", () => {
 					Promise.reject(
 						new ScannerApiError(
 							"no engine at /private/path",
-							"SCANNER_ENGINE_UNAVAILABLE",
+							"SCANNER_ENGINE_FAILED",
 							503,
 						),
 					)
@@ -106,7 +132,7 @@ describe("scanner status last reasons", () => {
 		await h.service.start()
 		await vi.waitFor(() =>
 			expect(engineOf(h)?.lastPassiveStartFailure?.code).toBe(
-				"SCANNER_ENGINE_UNAVAILABLE",
+				"SCANNER_ENGINE_FAILED",
 			),
 		)
 		expect(JSON.stringify(engineOf(h))).not.toContain("/private/path")

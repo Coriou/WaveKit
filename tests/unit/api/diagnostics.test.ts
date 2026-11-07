@@ -1,6 +1,10 @@
-import { DIAGNOSTICS_LIMITS, type DiagnosticsChannel } from "@wavekit/api-types"
+import {
+	DIAGNOSTICS_LIMITS,
+	type Diagnostics,
+	type DiagnosticsChannel,
+} from "@wavekit/api-types"
 import Fastify from "fastify"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ApiServerDependencies } from "../../../src/api/server.js"
 import {
 	DiagnosticsSampler,
@@ -20,7 +24,7 @@ function harness(patch: Partial<DiagnosticsDeps> = {}) {
 	const ticks = new Map<string, number>()
 	const listThreads = vi.fn(() => Promise.resolve([...ticks.keys()]))
 	const readThreadStat = vi.fn((tid: string) =>
-		Promise.resolve(stat(Number(tid), "worker", ticks.get(tid) ?? 0)),
+		Promise.resolve(stat(Number(tid), "libuv-worker", ticks.get(tid) ?? 0)),
 	)
 	const usage = { user: 1_000_000, system: 500_000 }
 	const deps: DiagnosticsDeps = {
@@ -54,14 +58,41 @@ function harness(patch: Partial<DiagnosticsDeps> = {}) {
 describe("parseThreadStat", () => {
 	it("reads the CPU fields after a name with spaces and parentheses", () => {
 		expect(parseThreadStat(stat(7, "a) b (c", 120, 30))).toEqual({
-			name: "a) b (c",
+			name: "other",
 			ticks: 150,
 		})
 	})
 
-	it("never passes a control character or a long name through", () => {
-		const parsed = parseThreadStat(stat(7, `a\u0007\n${"x".repeat(40)}`, 1))
-		expect(parsed?.name).toBe(`a??${"x".repeat(12)}`)
+	it.each([
+		"node",
+		"libuv-worker",
+		"V8Worker",
+		"DelayedTaskSche",
+		"SignalInspector",
+		"InspectorIo",
+		"WorkerThread",
+		"activity-writer",
+		"scanner-snapsho",
+		"aircraft-db-imp",
+	])("shows the known thread name %s", name => {
+		expect(parseThreadStat(stat(7, name, 1))?.name).toBe(name)
+	})
+
+	it.each([
+		"/private/token",
+		"SECRET_TOKEN",
+		"Node",
+		"libuv-worker2",
+		`a\u0007\n${"x".repeat(40)}`,
+		"",
+	])("reads the unknown thread name %j as other", name => {
+		expect(parseThreadStat(stat(7, name, 1))?.name).toBe("other")
+	})
+
+	it("keeps only the kind of a spectrum worker, never its source id", () => {
+		expect(parseThreadStat(stat(7, "spectrum-/tmp/ke", 1))?.name).toBe(
+			"spectrum-worker",
+		)
 	})
 
 	it.each([
@@ -84,7 +115,7 @@ describe("DiagnosticsSampler", () => {
 		expect(first.eventLoopUtilization).toBeNull()
 		expect(first.threads?.rows[0]).toEqual({
 			tid: 10,
-			name: "worker",
+			name: "libuv-worker",
 			cpuSeconds: 10,
 			cpuCores: null,
 		})
@@ -198,6 +229,139 @@ describe("DiagnosticsSampler", () => {
 		expect(rows.map(row => row.tid)).toEqual([2, 1, 4])
 	})
 
+	describe("when a thread read hangs", () => {
+		beforeEach(() => {
+			vi.useFakeTimers()
+		})
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		/** Moves the fake clock and the deadline's timer together. */
+		const pass = async (h: ReturnType<typeof harness>, ms: number) => {
+			h.advance(ms)
+			await vi.advanceTimersByTimeAsync(ms)
+		}
+
+		it("answers at the deadline with what it read, and not a moment before", async () => {
+			const h = harness()
+			h.ticks.set("1", 100)
+			h.ticks.set("2", 100)
+			h.ticks.set("3", 100)
+			h.readThreadStat
+				.mockImplementationOnce(tid =>
+					Promise.resolve(stat(Number(tid), "node", 100)),
+				)
+				.mockImplementationOnce(() => new Promise<string>(() => undefined))
+			let answer: Diagnostics | undefined
+			void h.sampler.read().then(value => {
+				answer = value
+			})
+			await pass(h, DIAGNOSTICS_LIMITS.threadReadBudgetMs - 1)
+			expect(answer).toBeUndefined()
+			await pass(h, 1)
+			expect(answer?.threadsTimedOut).toBe(true)
+			expect(answer?.threads?.truncated).toBe(true)
+			expect(answer?.threads?.rows.map(row => row.tid)).toEqual([1])
+		})
+
+		it("reads null with the flag when the list itself hangs", async () => {
+			const h = harness()
+			h.listThreads.mockImplementationOnce(
+				() => new Promise<string[]>(() => undefined),
+			)
+			const read = h.sampler.read()
+			await pass(h, DIAGNOSTICS_LIMITS.threadReadBudgetMs)
+			const answer = await read
+			expect(answer.threads).toBeNull()
+			expect(answer.threadsTimedOut).toBe(true)
+		})
+
+		it("shares the bounded answer between callers already waiting", async () => {
+			const h = harness()
+			h.ticks.set("1", 1)
+			h.readThreadStat.mockImplementationOnce(
+				() => new Promise<string>(() => undefined),
+			)
+			const reads = Array.from({ length: 50 }, () => h.sampler.read())
+			await pass(h, DIAGNOSTICS_LIMITS.threadReadBudgetMs)
+			const answers = await Promise.all(reads)
+			expect(answers.every(a => a.threadsTimedOut)).toBe(true)
+			expect(h.listThreads).toHaveBeenCalledTimes(1)
+		})
+
+		it("starts no new walk while one hangs, and walks again once it settles", async () => {
+			const h = harness()
+			h.ticks.set("1", 1)
+			h.ticks.set("2", 1)
+			let settle: (text: string) => void = () => undefined
+			h.readThreadStat.mockImplementationOnce(
+				() =>
+					new Promise<string>(resolve => {
+						settle = resolve
+					}),
+			)
+			const first = h.sampler.read()
+			await pass(h, DIAGNOSTICS_LIMITS.threadReadBudgetMs)
+			await first
+
+			// Each later sample answers at once, with no timer and no read of its own.
+			for (let round = 0; round < 3; round++) {
+				await pass(h, DIAGNOSTICS_LIMITS.cacheMs)
+				const later = await h.sampler.read()
+				expect(later.threads).toBeNull()
+				expect(later.threadsTimedOut).toBe(true)
+			}
+			expect(h.listThreads).toHaveBeenCalledTimes(1)
+			expect(h.readThreadStat).toHaveBeenCalledTimes(1)
+
+			// The left-behind walk ends at its hung read: it starts nothing more for thread 2.
+			settle(stat(1, "node", 1))
+			await vi.advanceTimersByTimeAsync(0)
+			expect(h.readThreadStat).toHaveBeenCalledTimes(1)
+
+			await pass(h, DIAGNOSTICS_LIMITS.cacheMs)
+			const recovered = await h.sampler.read()
+			expect(recovered.threadsTimedOut).toBe(false)
+			expect(recovered.threads?.truncated).toBe(false)
+			expect(recovered.threads?.rows.map(row => row.tid)).toEqual([1, 2])
+			expect(h.listThreads).toHaveBeenCalledTimes(2)
+		})
+
+		it("leaves no timer behind when the reads finish in time", async () => {
+			const h = harness()
+			h.ticks.set("1", 1)
+			const answer = await h.sampler.read()
+			expect(answer.threadsTimedOut).toBe(false)
+			expect(vi.getTimerCount()).toBe(0)
+		})
+	})
+
+	it("caches a sample whose part failed, with that part null", async () => {
+		const channels = vi.fn((): readonly DiagnosticsChannel[] => {
+			throw new Error("channel list failed")
+		})
+		const h = harness({
+			channels,
+			loopDelay: () => {
+				throw new Error("meter failed")
+			},
+			containerCpuCores: () => {
+				throw new Error("cgroup failed")
+			},
+		})
+		h.ticks.set("1", 1)
+		const first = await h.sampler.read()
+		expect(first.channels).toBeNull()
+		expect(first.eventLoopDelay).toBeNull()
+		expect(first.containerCpuCores).toBeNull()
+		expect(first.threads?.rows).toHaveLength(1)
+		h.advance(DIAGNOSTICS_LIMITS.cacheMs - 1)
+		await h.sampler.read()
+		expect(channels).toHaveBeenCalledTimes(1)
+		expect(h.listThreads).toHaveBeenCalledTimes(1)
+	})
+
 	it("cuts the channel list at its bound and says so", async () => {
 		const row = {} as DiagnosticsChannel
 		const of = async (count: number) =>
@@ -254,6 +418,7 @@ describe("GET /api/diagnostics", () => {
 			eventLoopDelay: { last: { maxMs: 2, p99Ms: 1 }, intervals10m: 1 },
 			containerCpuCores: 1.5,
 			threads: null,
+			threadsTimedOut: false,
 			channels: { rows: [channel], truncated: false },
 		})
 	})

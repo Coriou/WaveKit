@@ -693,6 +693,7 @@ sample serves all callers for 2 s, so polling cannot multiply its cost.
 		],
 		"truncated": false
 	},
+	"threadsTimedOut": false,
 	"channels": {
 		"rows": [
 			{
@@ -725,16 +726,26 @@ sample serves all callers for 2 s, so polling cannot multiply its cost.
 | `eventLoopDelay`       | The core's loop meter: the last 2 s interval and the worst over 10 minutes, in ms. The meter runs anyway (10 ms resolution, a fixed histogram); this route adds no timer. Null when not wired |
 | `process`              | All threads of the core together: cores averaged since the previous sample (at least 2 s), and totals since it started. `windowMs` and `cpuCores` are null on the first sample                |
 | `containerCpuCores`    | The whole container, decoder processes included, in cores: the same reading as `GET /api/resources/container`. Null outside a container                                                       |
-| `threads`              | Linux only, null elsewhere: each thread's kernel name, CPU seconds since it started, and cores over the window (null when a thread is first seen), busiest first                              |
+| `threads`              | Linux only, null elsewhere: each thread's name, CPU seconds since it started, and cores over the window (null when the previous sample did not read that thread), busiest first               |
+| `threadsTimedOut`      | True when the thread reads did not finish in time: `threads` is then partial with `truncated`, or null                                                                                        |
 | `channels`             | Open channelizer outputs with what they cost: filter length, input and output rate, and the process's last counters (`stats`, every 5 s, null before the first). Null without a channelizer   |
+
+A part that fails to read answers null, and the sample still serves its 2 s.
+
+A thread's `name` comes from a closed set, because any program can set a thread's kernel name to
+anything. It is one of `node`, `libuv-worker`, `V8Worker`, `DelayedTaskSche`, `SignalInspector`,
+`InspectorIo`, `WorkerThread`, `activity-writer`, `scanner-snapsho` or `aircraft-db-imp`,
+`spectrum-worker` for a spectrum worker of any source, and `other` for everything else.
 
 The core does not measure each decoder process. `containerCpuCores` minus `process.cpuCores` is
 what they use together, roughly: the two windows differ.
 
 A sample reads `/proc` with at most 1 directory read and 64 file reads, one at a time and never
-through a shell or a child process, and stops starting reads 250 ms in; `truncated` says when a
-list was cut (64 threads, 64 channels). That is at most 32.5 reads a second however many clients
-poll. The answer stays under about 40 KB with ordinary ids (64 × 125 B of threads, 64 × 450 B of channels).
+through a shell or a child process, and answers within 250 ms of starting them whatever they do;
+`truncated` says when a list was cut (64 threads, 64 channels). That is at most 32.5 reads a second
+however many clients poll. A read that hangs is left behind and holds one file-pool thread; until
+it settles, no new walk starts and each sample answers `threads: null` with `threadsTimedOut: true`.
+The answer stays under about 40 KB with ordinary ids (64 × 125 B of threads, 64 × 450 B of channels).
 
 #### GET /api/agent/status
 
@@ -3694,8 +3705,9 @@ the next successful start removes it. `lastLeaseRefusal` (`{ kind, code, at, hol
 is the last lease step the core tried on its own and was refused: `kind` is `arbitration`
 (picking the next holder failed), `hand-back` (a preempted job did not take the lease back) or
 `boot-resume` (a job could not resume after a restart). The next refusal replaces it, and nothing
-else clears it, so read `at`. `code` is the error's closed code, `UNKNOWN` for anything else,
-never its text. The core keeps one of each per source, for at most 64 sources.
+else clears it, so read `at`. `code` comes from a fixed list of the scanner, spectrum and tuner
+codes those steps raise, `UNKNOWN` for anything else, never an error's text. The core keeps one of
+each per source, for at most 64 sources.
 
 `recorder` (`ScannerRecorderStatus`, absent from older cores) shows the analog voice
 recorder: `sessions` (one per channel being demodulated: `sourceId`, `observationId`,
