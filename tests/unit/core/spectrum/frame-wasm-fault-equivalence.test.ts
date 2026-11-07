@@ -293,3 +293,82 @@ describe.skipIf(!frameWasm)(
 		})
 	},
 )
+
+/** Internals the partial-trap case reaches into (test only). */
+interface KernelInternals {
+	imports: { env: { short_db: (i: number, a: number, was: number) => number } }
+	exports: { fp_trap: () => number }
+	recreate(): boolean
+	restarts: number
+	run(s: unknown): unknown
+	onLo: Float64Array
+	onHi: Float64Array
+	offLo: Float64Array
+	offHi: Float64Array
+}
+
+describe.skipIf(!frameWasm)(
+	`a real trap partway through a batch (${WASM_LABEL})`,
+	() => {
+		beforeEach(yieldToRpc)
+
+		it("only the scratch frame sum differs, until the next frame overwrites it; events and decisions match", () => {
+			const r = lockstep(
+				h => {
+					h.start()
+					h.pushBytes(scene(1, 4 * BLOCK), 4096)
+					const k =
+						h.pipeline.frameKernelForTest() as unknown as KernelInternals
+					const original = k.imports.env.short_db
+					let armed = false
+					let frames = 0
+					let first = -1
+					// The trap fires inside the kernel's third frame of the batch, from the dB fallback import.
+					k.imports.env.short_db = (i, a, was) => {
+						if (armed) {
+							if (first < 0) first = i
+							if (i === first) frames++
+							if (frames === 3) {
+								armed = false
+								return k.exports.fp_trap()
+							}
+						}
+						return original(i, a, was)
+					}
+					k.recreate()
+					k.restarts = 0
+					const run = k.run.bind(k)
+					// Empty brackets while armed, so every short sum calls the import.
+					k.run = (state: unknown) => {
+						const arrays = [k.onLo, k.onHi, k.offLo, k.offHi]
+						const saved = arrays.map(a => a.slice())
+						if (armed) {
+							k.onLo.fill(-Infinity)
+							k.offLo.fill(-Infinity)
+							k.onHi.fill(Infinity)
+							k.offHi.fill(Infinity)
+						}
+						try {
+							return run(state)
+						} finally {
+							arrays.forEach((a, i) => a.set(saved[i]!))
+						}
+					}
+					for (let i = 0; i < 3; i++) {
+						armed = true
+						frames = 0
+						first = -1
+						h.pushBytes(scene(10 + i, 7 * 256), BIG)
+					}
+					after(h, 20)
+				},
+				{ frameBatchFrames: 7 },
+			)
+			expect(r.faults).toBe(3)
+			expect(r.wasmAtEnd).toBe(false)
+			// Departures are allowed only in the per-frame scratch sum, never in events or decision state.
+			for (const d of r.diffs) expect(d).toMatch(/frameAcc/)
+			expect(summaries(r.events)).toBeGreaterThanOrEqual(8)
+		})
+	},
+)

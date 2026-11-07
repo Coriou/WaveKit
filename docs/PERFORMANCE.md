@@ -626,7 +626,9 @@ fault comes from finishing a block as the next block's first frame arrives, that
 handed over raw; after the switch to JS it is converted then, so it runs on the JS path and only the
 discarded block's frames are lost. The lockstep comparison covers faults at a batch cut, at a block
 change after a counter run, at a seam, in an epoch's first block, at a held-back frame and with 50 %
-overlap: the JS side drops the same frames and discards the same block, and both then match.
+overlap: the JS side drops the same frames and discards the same block, and both then match. A real trap
+partway through a batch can leave the per-frame scratch sum (`frameAcc`) different from JS until the
+next frame overwrites it; events, decisions and every state a decision reads still match (tested).
 
 **Selection** (no config key): `WAVEKIT_SPECTRUM_FRAME_PATH=js` forces JS, `=wasm` logs a warning
 when the kernel is unavailable, unset means auto; `WAVEKIT_SPECTRUM_FRAME_WASM` names another
