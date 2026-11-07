@@ -628,6 +628,7 @@ Static, and under the same read admission as `GET /api`.
 			"present",
 			"absent",
 			"malformed",
+			"probe-failed",
 			"stale",
 			"unreachable",
 			"none"
@@ -643,6 +644,77 @@ Static, and under the same read admission as `GET /api`.
 ```
 
 Some lists are shortened here; the answer holds every value.
+
+#### GET /api/diagnostics
+
+Why the core is slow, in one read, under the same access admission as every other route. One
+sample serves all callers for 2 s, so polling cannot multiply its cost.
+
+```json
+{
+	"at": "2026-11-07T10:00:02.000Z",
+	"eventLoopUtilization": 0.31,
+	"eventLoopDelay": {
+		"last": { "maxMs": 14.2, "p99Ms": 11.3 },
+		"maxMs10m": 96.1,
+		"p99MaxMs10m": 24.5,
+		"intervals10m": 300
+	},
+	"process": {
+		"windowMs": 2001,
+		"cpuCores": 0.42,
+		"userSeconds": 812.4,
+		"systemSeconds": 120.8
+	},
+	"containerCpuCores": 1.35,
+	"threads": {
+		"rows": [
+			{ "tid": 41, "name": "node", "cpuSeconds": 620.1, "cpuCores": 0.2 }
+		],
+		"truncated": false
+	},
+	"channels": {
+		"rows": [
+			{
+				"id": "ch-1",
+				"sourceId": "rtl-1",
+				"decoderId": "multimon",
+				"generation": 3,
+				"centerHz": 100000000,
+				"bandwidthHz": 12500,
+				"outputRateHz": 48000,
+				"format": "cu8",
+				"filterTaps": 973,
+				"inputSampleRateHz": 2400000,
+				"stats": {
+					"outputSamples": 480000,
+					"droppedSamples": 0,
+					"saturatedSamples": 0,
+					"queueHighWaterBytes": 8192
+				}
+			}
+		],
+		"truncated": false
+	}
+}
+```
+
+| Field                  | Meaning                                                                                                                                                                                       |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `eventLoopUtilization` | Share of the time the main thread was busy over `process.windowMs`, 0 to 1. Null on the first sample                                                                                          |
+| `eventLoopDelay`       | The core's loop meter: the last 2 s interval and the worst over 10 minutes, in ms. The meter runs anyway (10 ms resolution, a fixed histogram); this route adds no timer. Null when not wired |
+| `process`              | All threads of the core together: cores averaged since the previous sample (at least 2 s), and totals since it started. `windowMs` and `cpuCores` are null on the first sample                |
+| `containerCpuCores`    | The whole container, decoder processes included, in cores: the same reading as `GET /api/resources/container`. Null outside a container                                                       |
+| `threads`              | Linux only, null elsewhere: each thread's kernel name, CPU seconds since it started, and cores over the window (null when a thread is first seen), busiest first                              |
+| `channels`             | Open channelizer outputs with what they cost: filter length, input and output rate, and the process's last counters (`stats`, every 5 s, null before the first). Null without a channelizer   |
+
+The core does not measure each decoder process. `containerCpuCores` minus `process.cpuCores` is
+what they use together, roughly: the two windows differ.
+
+A sample reads `/proc` with at most 1 directory read and 64 file reads, one at a time and never
+through a shell or a child process, and stops starting reads 250 ms in; `truncated` says when a
+list was cut (64 threads, 64 channels). That is at most 32.5 reads a second however many clients
+poll. The answer stays under about 40 KB with ordinary ids (64 × 125 B of threads, 64 × 450 B of channels).
 
 #### GET /api/agent/status
 
@@ -869,20 +941,20 @@ curl http://localhost:9000/api/sources
 
 `verdict` says what the state means, in one closed code (listed in `GET /api/enums`): `{ code, message, deviceFacts }`. The message is fixed text, never a value from the receiver.
 
-| `code`                 | Meaning                                                                                                                                        |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ok`                   | Samples are flowing                                                                                                                            |
-| `waiting`              | Connected, the first samples are not due yet                                                                                                   |
-| `no-samples`           | Connected with no IQ; the receiver's status API says nothing that explains it                                                                  |
-| `receiver-no-device`   | The receiver reports no device (a failed USB probe reads the same): check USB. Needs `deviceFacts: "absent"`, and rtl_tcp not reported running |
-| `receiver-not-running` | The receiver reports a device, and that its rtl_tcp does not run. Needs `deviceFacts: "present"`                                               |
-| `backpressure`         | The core is not keeping up with this source                                                                                                    |
-| `disconnected`         | Not connected to the receiver                                                                                                                  |
-| `feed-paused`          | An operator holds the receiver feed off (`feed.state` `paused` or `resuming`)                                                                  |
-| `feed-error`           | Resuming the feed failed (`feed.state` `error`)                                                                                                |
-| `ended`                | A recording source reached its end                                                                                                             |
+| `code`                 | Meaning                                                                                                                                                                                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ok`                   | Samples are flowing                                                                                                                                                                                                                              |
+| `waiting`              | Connected, the first samples are not due yet                                                                                                                                                                                                     |
+| `no-samples`           | Connected with no IQ; the receiver's status API says nothing that explains it                                                                                                                                                                    |
+| `receiver-no-device`   | The receiver reports no device: re-attach USB. Needs `deviceFacts: "absent"`, and rtl_tcp not reported running. A failed USB check is not this code; only a receiver too old to report its check can still read this way, and its message hedges |
+| `receiver-not-running` | The receiver reports a device, and that its rtl_tcp does not run. Needs `deviceFacts: "present"`                                                                                                                                                 |
+| `backpressure`         | The core is not keeping up with this source                                                                                                                                                                                                      |
+| `disconnected`         | Not connected to the receiver                                                                                                                                                                                                                    |
+| `feed-paused`          | An operator holds the receiver feed off (`feed.state` `paused` or `resuming`)                                                                                                                                                                    |
+| `feed-error`           | Resuming the feed failed (`feed.state` `error`)                                                                                                                                                                                                  |
+| `ended`                | A recording source reached its end                                                                                                                                                                                                               |
 
-`deviceFacts` says what the receiver's status API can tell, and only `present` and `absent` assert a device state: `present` or `absent` (a fresh answer stating a boolean), `malformed` (it answered without one), `stale` (its last answer is over 15 s old), `unreachable` (it does not answer now), `none` (this core polls no status API for the source). Samples flowing outrank any report, so a receiver that says "no device" while IQ arrives still reads `ok`. The verdict is on this route and on `source:status` events (where a change that comes only from the receiver's facts waits for the 10 s heartbeat) and, as a bare code, on `GET /api/agent/status`.
+`deviceFacts` says what the receiver's status API can tell, and only `present` and `absent` assert a device state: `present` or `absent` (a fresh answer stating a boolean), `malformed` (it answered without one), `probe-failed` (it answered, but its USB check failed or timed out), `stale` (its last answer is over 15 s old), `unreachable` (it does not answer now), `none` (this core polls no status API for the source). Samples flowing outrank any report, so a receiver that says "no device" while IQ arrives still reads `ok`. The verdict is on this route and on `source:status` events (where a change that comes only from the receiver's facts waits for the 10 s heartbeat) and, as a bare code, on `GET /api/agent/status`.
 
 **Response**:
 
@@ -3597,6 +3669,13 @@ is unknown, and from older cores.
 `passive.disabledAt` when the guard turned it off for cost; both are gone once it is back.
 `passive.disabledReason` explains a passive job switched off by the cost rule
 (for example `engine-cpu 31 % of a core`).
+`lastPassiveStartFailure` (`{ code, at }`) says why the passive job last failed to start;
+the next successful start removes it. `lastLeaseRefusal` (`{ kind, code, at, holderJobId? }`)
+is the last lease step the core tried on its own and was refused: `kind` is `arbitration`
+(picking the next holder failed), `hand-back` (a preempted job did not take the lease back) or
+`boot-resume` (a job could not resume after a restart). The next refusal replaces it, and nothing
+else clears it, so read `at`. `code` is the error's closed code, `UNKNOWN` for anything else,
+never its text. The core keeps one of each per source, for at most 64 sources.
 
 `recorder` (`ScannerRecorderStatus`, absent from older cores) shows the analog voice
 recorder: `sessions` (one per channel being demodulated: `sourceId`, `observationId`,

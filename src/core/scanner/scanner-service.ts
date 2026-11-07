@@ -67,6 +67,7 @@ import type {
 	ScannerProbeDecoderType,
 	ScannerTrialOutcome,
 	DiscoveryTrialMemory,
+	ScannerLeaseRefusal,
 	ScannerPassiveReason,
 	ScannerRecorderDiscovery,
 } from "@wavekit/api-types"
@@ -271,6 +272,7 @@ import {
 	HOLE_STREAK_RESET_MS,
 	snapshotIntervalMs,
 } from "./store/snapshot-cadence.js"
+import { LastReasons, leaseRefusal, safeReasonCode } from "./last-reason.js"
 import { MEASURING_REASON, PassiveGuard } from "./passive-guard.js"
 import { PASSIVE_COST_LIMIT_DEFAULT } from "./passive-cost-contract.js"
 import {
@@ -1069,6 +1071,11 @@ export class ScannerService extends EventEmitter {
 	private readonly persistedLeases = new Map<string, PersistedLease>()
 	private readonly bootResume = new Map<string, string[]>()
 	private readonly passiveDisabled = new Map<string, string>()
+	private readonly passiveStartFailures = new LastReasons<{
+		code: string
+		at: string
+	}>()
+	private readonly leaseRefusals = new LastReasons<ScannerLeaseRefusal>()
 	private readonly probeOutcomes = new Map<string, ProbeTrialBook>()
 	/** WG11 req 6.3: observations a detection capture was tried for (once each) and their capture ids. */
 	private readonly iqTried = new Set<string>()
@@ -6976,8 +6983,13 @@ export class ScannerService extends EventEmitter {
 		this.bootResume.delete(sourceId)
 		for (const id of ids) {
 			this.lifecycle(id, { type: "resume", takeover: false }).catch(
-				(err: unknown) =>
-					this.log.warn({ err, jobId: id }, "Boot resume refused"),
+				(err: unknown) => {
+					this.leaseRefusals.set(
+						sourceId,
+						leaseRefusal("boot-resume", err, Date.now()),
+					)
+					this.log.warn({ err, jobId: id }, "Boot resume refused")
+				},
 			)
 		}
 	}
@@ -7462,6 +7474,14 @@ export class ScannerService extends EventEmitter {
 		return this.toDto(record)
 	}
 
+	private arbitrationFailed(sourceId: string, err: unknown): void {
+		this.leaseRefusals.set(
+			sourceId,
+			leaseRefusal("arbitration", err, Date.now()),
+		)
+		this.log.warn({ err, sourceId }, "Lease arbitration failed")
+	}
+
 	/** Runs arbitrateLeases on the source's serialised chain; never rejects. */
 	private arbitrate(
 		sourceId: string,
@@ -7469,9 +7489,7 @@ export class ScannerService extends EventEmitter {
 	): Promise<void> {
 		return this.onArbitrationChain(sourceId, () =>
 			this.arbitrateLeases(sourceId, eligible),
-		).catch((err: unknown) =>
-			this.log.warn({ err, sourceId }, "Lease arbitration failed"),
-		)
+		).catch((err: unknown) => this.arbitrationFailed(sourceId, err))
 	}
 
 	/** Runs `fn` on the source's serialised arbitration chain; its result or error goes to the caller only. */
@@ -7508,9 +7526,7 @@ export class ScannerService extends EventEmitter {
 			const filter = this.arbitrationQueued.get(sourceId) ?? null
 			this.arbitrationQueued.delete(sourceId)
 			return this.arbitrateLeases(sourceId, filter ?? undefined)
-		}).catch((err: unknown) =>
-			this.log.warn({ err, sourceId }, "Lease arbitration failed"),
-		)
+		}).catch((err: unknown) => this.arbitrationFailed(sourceId, err))
 	}
 
 	/**
@@ -7599,9 +7615,13 @@ export class ScannerService extends EventEmitter {
 					record.consentedImpact,
 				),
 			})
-			.catch((err: unknown) =>
-				this.log.warn({ err, jobId: best }, "Lease hand-back refused"),
-			)
+			.catch((err: unknown) => {
+				this.leaseRefusals.set(
+					sourceId,
+					leaseRefusal("hand-back", err, Date.now()),
+				)
+				this.log.warn({ err, jobId: best }, "Lease hand-back refused")
+			})
 		this.updateMasks(sourceId)
 	}
 
@@ -7793,9 +7813,14 @@ export class ScannerService extends EventEmitter {
 			this.hits.delete(id)
 			try {
 				await driver.start()
+				this.passiveStartFailures.delete(cfg.id)
 			} catch (err) {
 				// The start rolled back (no lease, hold or engine kept). Drop the job so the next
 				// connected / caps-changed / source-up rebuilds it (boot-time caps are often absent).
+				this.passiveStartFailures.set(cfg.id, {
+					code: safeReasonCode(err),
+					at: new Date().toISOString(),
+				})
 				this.log.warn(
 					{ err, sourceId: cfg.id },
 					"Passive job failed to start; retrying when the source changes",
@@ -8187,6 +8212,8 @@ export class ScannerService extends EventEmitter {
 			hopSamples: pc ? pc.fftSize * (1 - (pc.overlap ?? 0)) : null,
 			...this.knownGain(cfg.id),
 		})
+		const startFailure = this.passiveStartFailures.get(cfg.id)
+		const leaseRefused = this.leaseRefusals.get(cfg.id)
 		return {
 			sourceId: cfg.id,
 			state: engine
@@ -8233,6 +8260,8 @@ export class ScannerService extends EventEmitter {
 				: null,
 			...(error ? { lastError: error } : {}),
 			...(overloadHint ? { overloadHint } : {}),
+			...(startFailure ? { lastPassiveStartFailure: startFailure } : {}),
+			...(leaseRefused ? { lastLeaseRefusal: leaseRefused } : {}),
 		}
 	}
 

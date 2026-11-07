@@ -240,9 +240,15 @@ Each answer below is one read, no logs needed; every closed list is in `GET /api
   `web`, a core without access `unknown`.
 - **Why a source gives no samples:** `verdict` on `GET /api/sources`, its bare code as
   `sources[].verdict` here (absent when `ok`). `receiver-no-device` means fresh receiver facts say
-  so; `no-samples` claims no cause, and `deviceFacts` says why not.
+  so; `no-samples` claims no cause, and `deviceFacts` says why not (`probe-failed`: the receiver
+  answered, but its USB check failed, so the device may well be there).
 - **Why passive scanning is off:** `sources[].passive` here, `engines[].passive.reasonCode` on
-  `GET /api/scanner`.
+  `GET /api/scanner`; `engines[].lastPassiveStartFailure` when its job failed to start.
+- **Why a scan did not get the tuner back on its own:** `engines[].lastLeaseRefusal` on
+  `GET /api/scanner` (`kind`, `code`, `at`, `holderJobId` when known).
+- **Why the core is slow:** [`GET /api/diagnostics`](API.md#get-apidiagnostics): event-loop
+  delay, CPU by thread and open channels, one shared sample every 2 s, so poll it freely. Read
+  it twice: the first answer has no CPU window yet.
 - **Why a signal was not recorded:** `recorder` on `GET /api/scanner/discoveries/:id`.
 - **What a sweep was allowed to disturb:** `impact` and `consentedImpact` on the job.
 
@@ -352,6 +358,10 @@ started, `perMin` over the last minute) on the summary route.
 Quiet or broken: `listening` is quiet (running, nothing decodable), even with `health: idle`
 and sparse output. `source-unavailable` with `input: none` is broken (running, no input); `failed`
 is a failing process ([table](API.md#get-apidecoderssummary)).
+
+For a failing decoder, `lastError` on `GET /api/decoders/:id` gives the cause, kept across
+automatic restarts, and [`GET /api/decoders/:id/log?lines=50`](API.md#get-apidecodersidlog) its
+recent output. That output is raw and can contain decoded data, so treat it like Activity rows.
 
 ## Read activity
 

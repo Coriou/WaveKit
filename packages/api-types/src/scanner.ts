@@ -932,6 +932,24 @@ export interface ScannerEngineStatus {
 		gain: number
 		blankedPercent: number
 	}
+	/**
+	 * Why the passive job last failed to start; removed by its next successful start. `code` is
+	 * a closed error code (`UNKNOWN` for anything else), never an error's text.
+	 */
+	lastPassiveStartFailure?: { code: string; at: string }
+	/** The last lease step the core tried on its own and was refused; kept until the next one. */
+	lastLeaseRefusal?: ScannerLeaseRefusal
+}
+/**
+ * `kind`: `arbitration` picking the next lease holder failed; `hand-back` a preempted job did not
+ * take the lease back; `boot-resume` a job could not resume after a restart. `code` as above.
+ */
+export interface ScannerLeaseRefusal {
+	kind: "arbitration" | "hand-back" | "boot-resume"
+	code: string
+	at: string
+	/** The job holding the lease, when the refusal names one. */
+	holderJobId?: string
 }
 export interface ScannerIqCaptureStatus {
 	trialCaptures?: {
