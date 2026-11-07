@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto"
 import { beforeEach, describe, expect, it } from "vitest"
 import type { PipelineEvent } from "../../../../src/core/spectrum/types.js"
 import {
@@ -11,43 +10,54 @@ import {
 	zerosIq,
 } from "../../../mocks/scanner/signals.js"
 import type { Iq } from "../../../mocks/scanner/signals.js"
+import { projectionDigest, shortInDb } from "./linear-golden-projection.js"
 import { FS, Harness, yieldToRpc } from "./pipeline-harness.js"
 
 /**
- * Linear-power short path: the pipeline's full event stream on seeded synthetic scenes must be
- * byte-identical to the dB-path pipeline. First recorded at base c838f93d, with the short path
- * converting every frame to dB. Re-recorded at 64ebbe99, which had moved five scenes through
- * unrelated tracker changes, just before Tracker.frame went linear; the recording strips acf30
- * and acf60 (see digest).
+ * Linear-power short path against the dB short path, on what the change could move
+ * (linear-golden-projection.ts states the fields and why). `projection` is the sha256 of
+ * `project(events)`, recorded by running the helper on base 64ebbe99 (`git archive` with this
+ * file's scenes); this tree gives the same digests. On the dB short path itself (base c838f93d,
+ * before the linear change) `noise`, `bursts` and `zero` give these digests too; the other four
+ * had one track-update fewer per track there, from tracker changes made between the two bases.
+ * `shortInDb` sends every short-path decision through its dB comparison in the test, as
+ * Detector.detect made it, and must give the same digests; with a 1 dB fault it must not.
  */
-const GOLDEN: Record<string, { events: number; sha256: string }> = {
+const GOLDEN: Record<string, { events: number; projection: string }> = {
 	noise: {
 		events: 17,
-		sha256: "632320aaf46d233778cc1abcb76356d37fb98757e7add6f5ae5405fc2cac1588",
+		projection:
+			"994d6d9c69cc0d1a089b26ec2ed697bfdd123397f9acf00425f984d2219982ab",
 	},
 	cw: {
 		events: 20,
-		sha256: "8bc4e007532d12f1b6bdb8b93007a81a20e1ba52bfcbcff08f43edd43ddf0209",
+		projection:
+			"6c2265615a553f1e4b5a658a9df00f63c045842c4714d7eff9a378d108ad0c16",
 	},
 	nfm: {
 		events: 20,
-		sha256: "f3e38880b646249ae8c4363adf7f193f56081f1bcf890cf516161009eeca71e1",
+		projection:
+			"183a5960de287173ac58c669422f7c79e8db82744b4f6b2cb11eb4973764408d",
 	},
 	modeS: {
 		events: 21,
-		sha256: "9aa05457bf4eba93ceab172331115968536a3b5e98eb779267c8cb8d7c613be2",
+		projection:
+			"4b7f6ba52d992e4b589c157d2b36bd847d56988471adfff526864225a3fab721",
 	},
 	bursts: {
 		events: 28,
-		sha256: "76609f9525dc7ef512465e8e0e966481cb4909e83542d6d21f4810dc2d4cc24c",
+		projection:
+			"0d9d0ff20b3d452b7cd09cbb2131affa973cbb87c282396017231e6b0cea290e",
 	},
 	zero: {
 		events: 17,
-		sha256: "add58f2a3dc984677b42b768c989e549a25a5bfcd9910ec490e08e940da18096",
+		projection:
+			"994d6d9c69cc0d1a089b26ec2ed697bfdd123397f9acf00425f984d2219982ab",
 	},
 	nonFinite: {
 		events: 23,
-		sha256: "f202b33499c0550a06564dc04be427c330a1ce10da4e4391e166f50703b6034c",
+		projection:
+			"eae997ca0ec9c3630ca1dcd65dda40dea38c8ab9de86437787227d75afdfa871",
 	},
 }
 
@@ -119,24 +129,20 @@ const SCENES: Record<string, () => Iq> = {
 	},
 }
 
-function run(name: string): PipelineEvent[] {
+function run(name: string, setup?: (h: Harness) => void): PipelineEvent[] {
 	const scene = SCENES[name]
 	if (!scene) throw new Error(`no scene ${name}`)
 	const h = new Harness({ format: "FLOAT32LE" })
+	setup?.(h)
 	h.start({ feed: true })
 	h.push(scene(), 8192)
 	return h.events
 }
 
-/** acf30 and acf60 read the frame envelope; pipeline-frame-linear-golden.test.ts bounds them. */
-const digest = (events: PipelineEvent[]): string =>
-	createHash("sha256")
-		.update(
-			JSON.stringify(events, (key, value: unknown) =>
-				key === "acf30" || key === "acf60" ? undefined : value,
-			),
-		)
-		.digest("hex")
+const summary = (events: PipelineEvent[]) => ({
+	events: events.length,
+	projection: projectionDigest(events),
+})
 
 describe("linear short path equals the dB short path (pre-change goldens)", () => {
 	beforeEach(yieldToRpc)
@@ -160,9 +166,24 @@ describe("linear short path equals the dB short path (pre-change goldens)", () =
 
 	for (const name of Object.keys(SCENES)) {
 		it(`scene ${name}`, () => {
-			const events = run(name)
-			const got = { events: events.length, sha256: digest(events) }
-			expect(got).toEqual(GOLDEN[name])
+			expect(summary(run(name))).toEqual(GOLDEN[name])
+		})
+
+		it(`scene ${name}: every short-path decision taken in dB gives the same stream`, () => {
+			expect(summary(run(name, h => shortInDb(h)))).toEqual(GOLDEN[name])
 		})
 	}
+
+	it("a 1 dB fault in the short path's dB comparison fails the comparison", () => {
+		// The accumulator read 1 dB high before its dB comparison: near-threshold bursts flip.
+		for (const name of ["modeS", "bursts"]) {
+			const events = run(name, h =>
+				shortInDb(
+					h,
+					exact => (d, i, a, was) => exact(d, i, a * 10 ** 0.1, was),
+				),
+			)
+			expect(summary(events)).not.toEqual(GOLDEN[name])
+		}
+	})
 })
