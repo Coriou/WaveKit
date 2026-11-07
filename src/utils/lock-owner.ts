@@ -476,6 +476,21 @@ export async function startLockHeartbeat(
 	const timer = setInterval(() => {
 		pending = pending.then(async () => {
 			if (lost || stopped) return
+			// File system calls can hang past the lease, and a contender may then reclaim. This
+			// deadline needs no I/O to settle. A check that returns in time keeps the lock, even
+			// after an event loop stall, because it proves the identity first.
+			const leaseEnd = setTimeout(
+				() => {
+					try {
+						log?.warn("Storage lock check outlived the lease; latching")
+						lose()
+					} catch {
+						/* An onLost failure must not escape a timer. */
+					}
+				},
+				Math.max(0, refreshedAt + HEARTBEAT_STALE_MS - performance.now()),
+			)
+			leaseEnd.unref()
 			try {
 				if (!(await verifyOwnership())) return
 				const now = new Date()
@@ -488,6 +503,8 @@ export async function startLockHeartbeat(
 				} catch {
 					/* An onLost failure must not reject the chain stop() awaits. */
 				}
+			} finally {
+				clearTimeout(leaseEnd)
 			}
 		})
 	}, HEARTBEAT_MS)

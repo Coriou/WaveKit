@@ -585,9 +585,12 @@ describe("heartbeat leases", () => {
 		expect((await fs.stat(path)).mtimeMs).toBe(0)
 		await vi.advanceTimersByTimeAsync(1)
 		await stop()
-		expect((await fs.stat(path)).mtimeMs).toBe(Date.now())
+		// utimes goes through double seconds, so a written millisecond can read back just under.
+		expect(Math.round((await fs.stat(path)).mtimeMs)).toBe(Date.now())
 		await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
-		expect((await fs.stat(path)).mtimeMs).toBe(Date.now() - HEARTBEAT_MS)
+		expect(Math.round((await fs.stat(path)).mtimeMs)).toBe(
+			Date.now() - HEARTBEAT_MS,
+		)
 	})
 	it("releases by renaming even with contender claim files", async () => {
 		const lock = await lockPath()
@@ -694,7 +697,8 @@ describe("ownership loss and monotonic observation", () => {
 		await first.release()
 		expect(first.lost).toBe(true)
 		expect(lost).toHaveBeenCalledTimes(1)
-		expect(vi.getTimerCount()).toBe(1)
+		// The second handle's tick holds its lease deadline until its file calls return.
+		await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
 		expect(await second.check()).toBe(true)
 		await second.release()
 		expect(vi.getTimerCount()).toBe(0)
@@ -807,6 +811,36 @@ describe("ownership loss and monotonic observation", () => {
 			await failedTick(heartbeat)
 			expect(heartbeat.lost).toBe(true)
 			expect(lost).toHaveBeenCalledTimes(1)
+			await heartbeat()
+		})
+
+		it("a check that hangs past the lease latches with the file call still pending", async () => {
+			const path = await lockPath()
+			await fs.rmdir(path)
+			await fs.writeFile(path, "owner")
+			vi.useFakeTimers({
+				toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"],
+			})
+			const lost = vi.fn()
+			const heartbeat = await startLockHeartbeat(path, { onLost: lost })
+			let release = () => {}
+			const held = new Promise<void>(resolve => {
+				release = resolve
+			})
+			const lstat = fs.lstat.bind(fs)
+			vi.spyOn(fs, "lstat").mockImplementation(async (...args) => {
+				await held
+				return lstat(...(args as Parameters<typeof lstat>))
+			})
+			await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
+			// performance.now is real here, so the deadline is a whole lease from the tick.
+			await vi.advanceTimersByTimeAsync(HEARTBEAT_STALE_MS - 200)
+			expect(heartbeat.lost).toBe(false)
+			await vi.advanceTimersByTimeAsync(200)
+			expect(heartbeat.lost).toBe(true)
+			expect(lost).toHaveBeenCalledTimes(1)
+			release()
+			vi.useRealTimers()
 			await heartbeat()
 		})
 
