@@ -189,6 +189,21 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 			await h.service.stop()
 		})
 
+		it("a wider target does not inherit a narrower job's answer", async () => {
+			const h = serviceHarness(noPassive)
+			await h.service.start()
+			const target = (bandwidthHz: number) => ({
+				sourceId: "rtl",
+				target: { frequencyHz: CENTRE + 100_000, bandwidthHz },
+				protocols: ["dmr" as const],
+			})
+			const first = await h.service.identifyOrJoin(target(2_000))
+			const wider = await h.service.identifyOrJoin(target(20_000))
+			expect(wider.joined).toBe(false)
+			expect(wider.job.id).not.toBe(first.job.id)
+			await h.service.stop()
+		})
+
 		it("starts a new job for a protocol the running job does not cover", async () => {
 			const h = serviceHarness(noPassive)
 			await h.service.start()

@@ -365,6 +365,9 @@ export function identifyRequestJoins(
 	if ("all" in a || "all" in b) return false
 	if (!(Math.abs(a.frequencyHz - b.frequencyHz) <= toleranceHz(a.bandwidthHz)))
 		return false
+	// A wider request reaches tracks the running job would not resolve, so it may not inherit
+	// that job's "nothing".
+	if (toleranceHz(b.bandwidthHz) > toleranceHz(a.bandwidthHz)) return false
 	if (targets.some(t => FINAL.has(t.state))) return false
 	if (req.exhaustive && !running.exhaustive) return false
 	if (req.record && !running.record) return false
