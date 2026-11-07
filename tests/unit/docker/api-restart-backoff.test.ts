@@ -64,6 +64,10 @@ describe("wavekit-api finish script", () => {
 		expect(await sleepsAfter(exitCode, signal)).toBe("")
 	})
 
+	it("holds back the core's own close watchdog, signal 9", async () => {
+		expect(await sleepsAfter("256", "9")).toBe("4")
+	})
+
 	it("stays within s6-supervise's default 5 s limit for a finish script", async () => {
 		const seconds = Number(await sleepsAfter("1"))
 		expect(seconds).toBeLessThan(5)

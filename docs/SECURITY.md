@@ -59,8 +59,10 @@ Once latched, the core exits (below). In the seconds before it does:
 - `GET /health` answers 503 with `reason` `access_authority_lost`, and `GET /health/live`
   stays 200, until the listener closes.
 
-**The core exits and restarts.** It logs the loss, closes (at most 10 seconds) and exits with
-code 1, whatever else is running: a locked-out core cannot be read, steered or stopped by
+**The core exits and restarts.** It logs the loss, closes and exits with code 1. A close still
+running after 10 seconds ends with SIGKILL, even with file system calls hung. A call that hangs
+after the close finished, or one the kernel cannot interrupt, holds the process until it returns.
+It exits whatever else is running: a locked-out core cannot be read, steered or stopped by
 anyone, and only a new start can load the state another owner may have rotated.
 
 The close differs from a stop in one way: another owner may hold the state and the tuner by
@@ -71,11 +73,15 @@ gain**; a restart reads what was last on disk, and a scan's recovery record stay
 decoder children and listeners still go. Stores with a lock of their own close as usual, because
 that lock still proves them theirs: Activity holds a kernel lock, and band plans and operator
 data check their writer lock before each write. Station and decoder settings and recording keeps
-start no write on close; they only wait for one already running.
+start no write on close; they only wait for one already running. The wideband recorder is not
+fenced: it finishes its voice files on the way out and can still write its `.analog-operations`
+records, which belong to those files.
 
 In the image, s6 starts it again, about 5 seconds after the exit. What you see:
 
-- A recording in progress ends. The file and every decode so far stay on disk.
+- A recording in progress ends, as on any stop. Finished recordings and every decode so far stay
+  on disk. A voice recording closes its file. A named IQ capture in progress loses its partial
+  file and its request fails, and a scanner capture in progress is discarded.
 - Decoders stop, and their output to external sinks is gone for those seconds. Clients are cut
   off and reconnect once the API is back.
 - The tuning is not kept: the core returns to its configured baseline, and a pending

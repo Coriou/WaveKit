@@ -1153,7 +1153,11 @@ async function main(): Promise<void> {
 	const closeAndExit = (exitCode: 0 | 1) => {
 		if (exitProtected) return
 		exitProtected = true
-		const watchdog = setTimeout(() => process.exit(1), 10_000)
+		// Not process.exit: exiting waits for the thread pool, so a hung file call would hold it.
+		const watchdog = setTimeout(
+			() => process.kill(process.pid, "SIGKILL"),
+			10_000,
+		)
 		void closeProtected().then(
 			() => {
 				clearTimeout(watchdog)
