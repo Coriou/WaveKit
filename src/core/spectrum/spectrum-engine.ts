@@ -352,6 +352,11 @@ interface ExternalCommand {
 	/** Its place among epoch triggers (`SpectrumEngine.ticket`): the first command it merges. */
 	ticket: number
 	/**
+	 * The ticket of the newest command merged into it (absent: `ticket`). Its label and centre are
+	 * that command's, so it is ordered against a held scanner hop by this one (postCarried).
+	 */
+	newest?: number
+	/**
 	 * Posted from `carried` into a later stream: an explicit centre is only a claim about the
 	 * tuner when the command was written, so it must still agree with caps when posted.
 	 */
@@ -412,6 +417,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private flushTimer: NodeJS.Timeout | null = null
 	// Epochs
 	private lastEpoch = 0
+	/**
+	 * The highest epoch id the current host can have used, as far as the engine knows: each
+	 * new-stream takes the next one, a pending epoch its own id or the next one (the pipeline
+	 * renumbers an id at or below its last), and every epoch the host reports raises it.
+	 */
+	private hostEpochs = 0
 	private suppressed = 0
 	private externalPending:
 		| (ExternalCommand & { commandSample: number; bufferedSamples: number })
@@ -670,6 +681,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			return
 		}
 		this.flushBatch()
+		this.hostEpochs =
+			pending.epoch > this.hostEpochs ? pending.epoch : this.hostEpochs + 1
 		this.pendingMeta.set(pending.epoch, {
 			stream: this.stream,
 			epoch: pending.epoch,
@@ -826,6 +839,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			this.deps.binsCap?.(),
 		)
 		this.cfg = cfg
+		// A new host's pipeline numbers its epochs from zero.
+		this.hostEpochs = 0
 		const generation = ++this.generation
 		const handlers: PipelineHostHandlers = {
 			events: events => {
@@ -990,6 +1005,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		})
 		const gainKey = gainKeyOf(this.deps.tuner?.getState(this.sourceId))
 		this.lastEpoch += 1
+		this.hostEpochs += 1
 		this.openingStreams.push({
 			stream: this.stream,
 			epoch: this.lastEpoch,
@@ -1025,14 +1041,17 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const carried = this.carried.splice(0)
 		for (const command of carried) {
 			if (command.ticket < this.disconnectTicket) continue
-			// A command older than the hop posted just now would end where the hop starts.
-			if (hop && command.ticket < hop.ticket) continue
+			// A command older than the hop posted just now would end where the hop starts. A merged
+			// entry carries its newest command's state, so that command's ticket orders it: an
+			// operator write after the hop is posted after it, even folded into an older write.
+			if (hop && (command.newest ?? command.ticket) < hop.ticket) continue
 			this.queueExternal(
 				command.trust,
 				command.centreHz,
 				true,
 				command.ticket,
 				true,
+				command.newest,
 			)
 		}
 	}
@@ -1045,6 +1064,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	 * hop's target only while caps holds it: caps follows the frequency write, so a hop whose
 	 * write has not landed, or one another writer moved since, is `unverified` at the caps centre
 	 * (the write landing later gets the suppression-window epoch, checkSuppressedCentre).
+	 * It keeps the epoch id the arbiter returned whenever the host can still take it.
 	 * Returns the hop posted, or null.
 	 */
 	private takeHeldHop(boundaryTicket?: number): HeldHop | null {
@@ -1069,9 +1089,13 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			? hop.centreHz
 			: (this.centreOverride ?? caps?.centerFreq ?? hop.centreHz)
 		const clock = this.sampleClock()
+		// Its own id when the host has used none at or above it (the usual case: a fresh host has
+		// only numbered its opening stream), so the arbiter's verified epoch and the job's own
+		// epochs name it; the pipeline would renumber an id at or below its last, so then a new one.
+		const epoch = hop.epoch > this.hostEpochs ? hop.epoch : this.allocateEpoch()
 		this.submitEpoch({
 			...hop,
-			epoch: this.allocateEpoch(),
+			epoch,
 			commandSample: clock.commandSample,
 			bufferedSamples: clock.bufferedSamples,
 			expectMarker: false,
@@ -1111,6 +1135,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			...(command.centreHz !== undefined ? { centreHz: command.centreHz } : {}),
 			checkState: command.checkState,
 			ticket: command.ticket,
+			...(command.newest !== undefined ? { newest: command.newest } : {}),
 		})
 	}
 
@@ -1130,7 +1155,13 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			else delete held.centreHz
 		}
 		held.checkState = true
+		const newest = Math.max(
+			held.newest ?? held.ticket,
+			command.newest ?? command.ticket,
+		)
 		held.ticket = Math.min(held.ticket, command.ticket)
+		if (newest !== held.ticket) held.newest = newest
+		else delete held.newest
 		// Either side kept makes the merge kept: its centre check is never lost by folding.
 		if (command.kept === true) held.kept = true
 	}
@@ -1421,6 +1452,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		for (const ev of events) {
 			if (ev.kind === "epoch-started") {
 				this.lastEpoch = Math.max(this.lastEpoch, ev.epoch)
+				this.hostEpochs = Math.max(this.hostEpochs, ev.epoch)
 				// An untracked retune (below) registers its meta under the epoch the pipeline started.
 				let meta = this.pendingMeta.get(ev.epoch) ?? null
 				this.pendingMeta.delete(ev.epoch)
@@ -1464,6 +1496,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			} else if (ev.kind === "untracked-retune") {
 				// § 4.7: the pipeline already started an unverified epoch (Task 10b); record it, post nothing.
 				this.lastEpoch = Math.max(this.lastEpoch, ev.epoch)
+				this.hostEpochs = Math.max(this.hostEpochs, ev.epoch)
 				const caps = this.deps.sources.getCaps(this.sourceId)
 				this.pendingMeta.set(ev.epoch, {
 					...this.current,
@@ -1721,6 +1754,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		checkState = false,
 		ticket?: number,
 		kept = false,
+		newest?: number,
 	): void {
 		if (!this.running) return
 		const own = ticket ?? ++this.ticket
@@ -1737,6 +1771,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					checkState,
 					ticket: own,
 					...(kept ? { kept } : {}),
+					...(newest !== undefined ? { newest } : {}),
 				})
 				return
 			}
@@ -1753,6 +1788,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			checkState,
 			ticket: own,
 			...(kept ? { kept } : {}),
+			...(newest !== undefined ? { newest } : {}),
 		}
 		queueMicrotask(() => this.flushExternal())
 	}
