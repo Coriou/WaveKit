@@ -438,12 +438,12 @@ export async function startLockHeartbeat(
 	/** From here a fault latches; unset until the first fault since a refresh or a stall. */
 	let faultGraceEnd: number | undefined
 	/** The last tick or fault, which tells a stall from the regular H between ticks. */
-	let lastRanAt = refreshedAt
+	let previousRunAt = refreshedAt
 	/** What came before a stall says nothing about now, so a fault after one gets its own grace. */
 	const noteRunning = (): number => {
 		const now = performance.now()
-		if (now - lastRanAt >= STALL_GAP_MS) faultGraceEnd = undefined
-		lastRanAt = now
+		if (now - previousRunAt >= STALL_GAP_MS) faultGraceEnd = undefined
+		previousRunAt = now
 		return now
 	}
 	const lose = () => {
