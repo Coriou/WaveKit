@@ -382,9 +382,12 @@ curl http://localhost:9000/health
 ```
 
 A protected core that lost its private access directory answers `/health` with
-503 and `reason` `access_authority_lost`, so the container reads `unhealthy`. Docker
-does not restart an unhealthy container and s6 does not watch health, so restart it
-yourself: [what happens and why](SECURITY.md#when-a-core-loses-its-private-directory).
+503 and `reason` `access_authority_lost` while it closes, then exits with code 1. s6
+starts it again inside the container about 5 seconds later, with no Docker restart: a
+recording in progress ends, decoder output stops for those seconds, and tuning and a
+running sweep come back as after any restart. If another core still owns the directory
+the restart is refused and retried at a limited rate, without touching the tuner:
+[what happens and why](SECURITY.md#when-a-core-loses-its-private-directory).
 
 `sdrpp-server` does not expose HTTP. Its healthcheck probes TCP 5259
 directly via `bash -c '</dev/tcp/localhost/5259'`.

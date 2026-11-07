@@ -1143,20 +1143,22 @@ async function main(): Promise<void> {
 		})()
 		return closing
 	}
+	// A signal and a latch can arrive together: the first decides how the process ends.
+	let exitProtected = false
+	const closeAndExit = (exitCode: 0 | 1) => {
+		if (exitProtected) return
+		exitProtected = true
+		const watchdog = setTimeout(() => process.exit(1), 10_000)
+		void closeProtected().then(
+			() => {
+				clearTimeout(watchdog)
+				process.exit(exitCode)
+			},
+			() => process.exit(1),
+		)
+	}
 	if (protectedMode) {
-		let signaled = false
-		const signal = () => {
-			if (signaled) return
-			signaled = true
-			const watchdog = setTimeout(() => process.exit(1), 10_000)
-			void closeProtected().then(
-				() => {
-					clearTimeout(watchdog)
-					process.exit(0)
-				},
-				() => process.exit(1),
-			)
-		}
+		const signal = () => closeAndExit(0)
 		process.on("SIGTERM", signal)
 		process.on("SIGINT", signal)
 	}
@@ -1201,6 +1203,14 @@ async function main(): Promise<void> {
 				directory: process.env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] ?? "",
 				ownership: "single-host-pid-namespace",
 				logger,
+			})
+			// Another owner may have rotated the state, and only a new start can load it. A core kept
+			// up without it serves nobody, so it goes: s6 starts it again, /health reads 503 till then.
+			access.api.policy.onCredentialAuthorityLost(() => {
+				log.error(
+					"Private access ownership lost; exiting so that a restart can load the current state",
+				)
+				closeAndExit(1)
 			})
 			checkpoint()
 		}

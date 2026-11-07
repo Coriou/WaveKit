@@ -57,7 +57,9 @@ URL (`/api/access/bootstrap` on the API origin), a one-time pairing code, and
 the private directory path. It does not print the machine credential. Ctrl-C,
 SIGHUP, SIGQUIT, or SIGTERM stops the server and deletes that directory.
 Closing the terminal sends SIGHUP; the command still stops the server and
-deletes the directory.
+deletes the directory. A server that
+[loses its private directory](SECURITY.md#when-a-core-loses-its-private-directory)
+exits with code 1, and nothing restarts it outside the image: start it again.
 
 `--keep` leaves the directory in place and prints its path. While that server
 is still running, another terminal can request a new code:

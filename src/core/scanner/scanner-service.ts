@@ -41,7 +41,11 @@ import { readdir } from "node:fs/promises"
 import { existsSync, lstatSync } from "node:fs"
 import { join } from "node:path"
 import { ZodError } from "zod"
-import type { DiscoveryCompactPage, ScanJobCompact } from "@wavekit/api-types"
+import type {
+	DiscoveryCompactPage,
+	ScanJobCompact,
+	TunePreemptionWaiter,
+} from "@wavekit/api-types"
 import type {
 	Bandplan as BandplanDto,
 	ScanJob,
@@ -69,6 +73,7 @@ import type {
 import {
 	SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
 	SOURCE_PAUSED_MESSAGE,
+	TUNE_WAITERS_MAX,
 } from "@wavekit/api-types"
 import type {
 	RecordingProtection,
@@ -2372,6 +2377,8 @@ export class ScannerService extends EventEmitter {
 		name: string | null
 		autoAfterIdleMs: number | null
 		starting: boolean
+		reason: string | null
+		waiters: TunePreemptionWaiter[]
 	} | null {
 		const jobId = this.tunerLeaseHolder(sourceId)
 		if (jobId === null) return null
@@ -2381,7 +2388,39 @@ export class ScannerService extends EventEmitter {
 			name: record?.name ?? null,
 			autoAfterIdleMs: record?.spec.resume.autoAfterIdleMs ?? null,
 			starting: record?.state === "starting",
+			reason: record?.state === "paused" ? (record.reason ?? null) : null,
+			waiters: this.tunerLeaseWaiters(sourceId, jobId),
 		}
+	}
+
+	/**
+	 * Who can take the tuner once it is idle: as `resumeIdleWaiters` reads them, a job waiting on
+	 * another's lease with an automatic resume. The soonest first; ties by id, so the answer is stable.
+	 */
+	private tunerLeaseWaiters(
+		sourceId: string,
+		holderId: string,
+	): TunePreemptionWaiter[] {
+		const waiters: TunePreemptionWaiter[] = []
+		for (const job of this.jobs.values()) {
+			const autoAfterIdleMs = job.spec.resume.autoAfterIdleMs
+			if (
+				job.id !== holderId &&
+				job.spec.sourceId === sourceId &&
+				job.spec.mode === "sweep" &&
+				job.state === "paused" &&
+				job.reason === "preempted-job" &&
+				autoAfterIdleMs !== null
+			)
+				waiters.push({ jobId: job.id, jobName: job.name, autoAfterIdleMs })
+		}
+		return waiters
+			.sort(
+				(a, b) =>
+					a.autoAfterIdleMs - b.autoAfterIdleMs ||
+					a.jobId.localeCompare(b.jobId),
+			)
+			.slice(0, TUNE_WAITERS_MAX)
 	}
 
 	listJobs(): ScanJob[] {

@@ -130,6 +130,8 @@ async function setup(
 		name: "Night sweep",
 		autoAfterIdleMs: 60_000,
 		starting: false,
+		reason: null,
+		waiters: [],
 	}
 	let receiver: SdrHostStatus | undefined
 	const app = Fastify()
@@ -708,7 +710,25 @@ describe("tune in one call", () => {
 			expect(h.read()).toMatchObject({ frequency: TUNE_HZ, gain: 300 })
 		})
 
-		it("with preempt and no frame left to send, it takes nothing", async () => {
+		it("with preempt and a setting left at its value, that setting's frame takes it", async () => {
+			const { h, arbiter, lost, onTuneFrame } = await leasable()
+			await h.post({ gainMode: "manual", gain: 200 })
+			await until(() => h.frames.some(f => f.cmd === SET_GAIN))
+			h.frames.length = 0
+			onTuneFrame()
+			const res = await h.post({
+				frequencyHz: TUNE_HZ,
+				gain: 200,
+				preempt: true,
+			})
+			expect(res.statusCode).toBe(200)
+			expect(res.json().preempted.jobId).toBe("job")
+			expect(lost).toEqual(["preempted-operator"])
+			expect(arbiter.holder("rtl")).toBeUndefined()
+			await until(() => h.frames.some(f => f.cmd === SET_GAIN))
+		})
+
+		it("with preempt and no setting left at all, the tune was over before the lease came", async () => {
 			const { h, arbiter, lost, onTuneFrame } = await leasable()
 			onTuneFrame()
 			const res = await h.post({ frequencyHz: TUNE_HZ, preempt: true })
@@ -2193,25 +2213,62 @@ describe("a tune with preempt: true under a scanner lease", () => {
 		expect(h.read().frequency).toBe(434_000_000)
 	})
 
-	it("a tune with nothing to write takes nothing and restores nothing", async () => {
-		const { h, lost, arbiter, lease } = await leased()
+	it("a tune to the values already in place sends one frame, takes the lease, restores nothing", async () => {
+		const { h, lost, arbiter } = await leased()
 		const res = await h.post({
 			frequencyHz: 433_000_000,
 			restoreAfterS: 5,
 			preempt: true,
 		})
 		expect(res.statusCode).toBe(200)
-		expect(res.json()).not.toHaveProperty("preempted")
-		expect(lost).toEqual([])
-		expect(arbiter.holder("rtl")).toBe(lease)
+		expect(res.json().preempted.jobId).toBe("job")
+		expect(lost).toEqual(["preempted-operator"])
+		expect(arbiter.holder("rtl")).toBeUndefined()
+		await until(() => h.frames.some(f => f.value === 433_000_000))
 		expect(restoreOf(res.json()).cancelledBy).toMatchObject({
-			actor: "scanner-job",
-			reason: "scanner-lease",
+			reason: "scanner-preempted",
 			job: { jobId: "job" },
 		})
 		h.frames.length = 0
 		await vi.advanceTimersByTimeAsync(10_000)
 		expect(h.frames).toEqual([])
+	})
+
+	it("sends a value in place only until one frame took the lease", async () => {
+		const { h, lost } = await leased()
+		const res = await h.post({
+			frequencyHz: 433_000_000,
+			gainMode: "manual",
+			gain: 450,
+			preempt: true,
+		})
+		expect(res.statusCode).toBe(200)
+		expect(lost).toEqual(["preempted-operator"])
+		await until(() => h.frames.some(f => f.value === 433_000_000))
+		// The frame sent took the lease; a second one for this tune's centre would show here.
+		expect(h.frames.filter(f => f.value === 433_000_000)).toHaveLength(1)
+		expect(h.read()).toMatchObject({ frequency: 433_000_000, gain: 450 })
+	})
+
+	it("says a job paused for a reason that never resumes by itself needs a resume", async () => {
+		for (const reason of ["operator", "resumed-without-retune"]) {
+			const { h } = await leased()
+			h.describeLeaseJob({ reason })
+			const res = await h.post({ frequencyHz: TUNE_HZ, preempt: true })
+			expect(res.json().preempted.autoAfterIdleMs).toBeNull()
+			expect(res.json().preempted.message).toContain(`stays paused (${reason})`)
+			expect(res.json().preempted.message).toContain(
+				"POST /api/scanner/jobs/job/resume",
+			)
+		}
+	})
+
+	it("any other pause keeps the job's own automatic resume", async () => {
+		const { h } = await leased()
+		h.describeLeaseJob({ reason: "source-down" })
+		const res = await h.post({ frequencyHz: TUNE_HZ, preempt: true })
+		expect(res.json().preempted.autoAfterIdleMs).toBe(60_000)
+		expect(res.json().preempted.message).toContain("resumes by itself")
 	})
 
 	it("changes nothing with no lease held", async () => {
@@ -2802,6 +2859,8 @@ describe("POST /tune through the real ApiServer", () => {
 			name: string
 			autoAfterIdleMs: null
 			starting: false
+			reason: null
+			waiters: never[]
 		} | null = null
 		const server = new ApiServer(
 			{
@@ -2848,6 +2907,8 @@ describe("POST /tune through the real ApiServer", () => {
 			name: "Night sweep",
 			autoAfterIdleMs: null,
 			starting: false,
+			reason: null,
+			waiters: [],
 		}
 		await vi.advanceTimersByTimeAsync(5_000)
 		const read = await app.inject({ url: "/api/tuner/rtl" })

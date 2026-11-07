@@ -30,6 +30,7 @@ import {
 	TUNE_RESTORE_MAX_S,
 	TUNE_RESTORE_STATUSES,
 	TUNE_SETTINGS,
+	TUNE_WAITERS_MAX,
 	sourceVerdictSchema,
 } from "@wavekit/api-types"
 import type { AccessPrincipal } from "../../access/types.js"
@@ -121,9 +122,29 @@ const tunePreemptionSchema = {
 		jobName: { type: "string", nullable: true },
 		job: { type: "string", enum: ["paused", "failed"] },
 		autoAfterIdleMs: { type: "integer", nullable: true },
+		waiters: {
+			type: "array",
+			maxItems: TUNE_WAITERS_MAX,
+			items: {
+				type: "object",
+				properties: {
+					jobId: { type: "string" },
+					jobName: { type: "string", nullable: true },
+					autoAfterIdleMs: { type: "integer" },
+				},
+				required: ["jobId", "jobName", "autoAfterIdleMs"],
+			},
+		},
 		message: { type: "string" },
 	},
-	required: ["jobId", "jobName", "job", "autoAfterIdleMs", "message"],
+	required: [
+		"jobId",
+		"jobName",
+		"job",
+		"autoAfterIdleMs",
+		"waiters",
+		"message",
+	],
 } as const
 
 const tuneRestoreSchema = {

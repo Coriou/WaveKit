@@ -1,7 +1,72 @@
 import Fastify from "fastify"
 import swagger from "@fastify/swagger"
 import { expect, it } from "vitest"
-import { installRouteIndex } from "../../../src/api/routes/route-index.js"
+import { activityRoutes } from "../../../src/api/routes/activity.js"
+import {
+	installRouteIndex,
+	toOpenApi31Forms,
+} from "../../../src/api/routes/route-index.js"
+
+function* schemasIn(value: unknown): Generator<Record<string, unknown>> {
+	if (Array.isArray(value)) {
+		for (const item of value) yield* schemasIn(item)
+	} else if (typeof value === "object" && value !== null) {
+		const record = value as Record<string, unknown>
+		yield record
+		for (const child of Object.values(record)) yield* schemasIn(child)
+	}
+}
+
+it("turns a tuple into prefixItems, and nothing else named items", () => {
+	expect(
+		toOpenApi31Forms({
+			tuple: {
+				type: "array",
+				items: [{ type: "number", nullable: true }, { type: "string" }],
+				minItems: 2,
+				maxItems: 2,
+			},
+			list: { type: "array", items: { type: "string" } },
+			properties: { items: { type: "array", items: { type: "number" } } },
+			required: ["items"],
+		}),
+	).toEqual({
+		tuple: {
+			type: "array",
+			prefixItems: [{ type: ["number", "null"] }, { type: "string" }],
+			minItems: 2,
+			maxItems: 2,
+		},
+		list: { type: "array", items: { type: "string" } },
+		properties: { items: { type: "array", items: { type: "number" } } },
+		required: ["items"],
+	})
+})
+
+it("documents the activity trails tuple with no array-valued items", async () => {
+	const app = Fastify()
+	await app.register(swagger, {
+		openapi: { openapi: "3.1.0", info: { title: "test", version: "1" } },
+	})
+	await app.register(activityRoutes, { service: {} as never, enabled: true })
+	try {
+		await app.ready()
+		const { paths } = toOpenApi31Forms(
+			(
+				app as unknown as {
+					swagger(): { paths: Record<string, unknown> }
+				}
+			).swagger(),
+		)
+		const trails = paths["/api/activity/trails"]
+		expect(trails).toBeDefined()
+		const schemas = [...schemasIn(trails)]
+		expect(schemas.some(node => Array.isArray(node["prefixItems"]))).toBe(true)
+		expect(schemas.filter(node => Array.isArray(node["items"]))).toEqual([])
+	} finally {
+		await app.close()
+	}
+})
 
 it("indexes every method, encapsulated route and schema including itself", async () => {
 	const app = Fastify()

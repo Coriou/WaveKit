@@ -1,3 +1,11 @@
 #!/bin/sh
 /usr/local/bin/finish-api.sh "$@"
+# A failed exit is restarted at once, and a start refused by a live owner of the private directory
+# fails again within a second or two, forever. 4 s after each one holds that to one start in about
+# 5 s (720 an hour), inside s6-supervise's default 5 s limit for this script. A clean exit (0) or a
+# signal (256) has nothing to wait for: container stop stays prompt.
+case "${1:-0}" in
+	0 | 256) ;;
+	*) sleep 4 ;;
+esac
 exit 0

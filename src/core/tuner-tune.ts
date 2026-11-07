@@ -11,6 +11,7 @@ import type {
 	SdrHostStatus,
 	SourceVerdict,
 	TunePreemption,
+	TunePreemptionWaiter,
 	TuneRequest,
 	TuneRestore,
 	TuneRestoreCancelReason,
@@ -56,6 +57,10 @@ export interface TunerLeaseJob {
 	autoAfterIdleMs: number | null
 	/** A job still starting fails when it loses the lease, it does not pause. */
 	starting: boolean
+	/** Its reason when paused, else null: some pauses do not end by themselves. */
+	reason: string | null
+	/** Jobs waiting for this tuner that can take it once it is idle: at most TUNE_WAITERS_MAX. */
+	waiters: TunePreemptionWaiter[]
 }
 
 /** The job holding a source's tuner lease, else null. Only a core with a scanner has one. */
@@ -70,7 +75,18 @@ const UNNAMED_JOB: TunerLeaseJob = {
 	name: null,
 	autoAfterIdleMs: null,
 	starting: false,
+	reason: null,
+	waiters: [],
 }
+
+/**
+ * A job paused for these reasons keeps that pause after losing the lease, whatever its
+ * `resume.autoAfterIdleMs`: only POST /api/scanner/jobs/:id/resume moves it (SCANNER.md).
+ */
+const PAUSED_UNTIL_RESUMED: ReadonlySet<string> = new Set([
+	"operator",
+	"resumed-without-retune",
+])
 
 /** POST /tune finds a job's lease and was not told to take it: nothing was written. */
 export class TunerLeaseHeldError extends TunerControllerError {
@@ -101,13 +117,28 @@ function preemptionOf(job: TunerLeaseJob, temporary: boolean): TunePreemption {
 	const restore = temporary
 		? " No restore comes: nothing goes back when restoreAfterS passes, neither the job's hop nor the tuning from before the job."
 		: ""
-	const base = { jobId: job.jobId, jobName: job.name }
+	const base = { jobId: job.jobId, jobName: job.name, waiters: job.waiters }
+	const waiting =
+		job.waiters.length === 0
+			? ""
+			: ` Waiting for this tuner and able to take it once it is idle: ${job.waiters
+					.map(waiter => `${waiter.jobId} after ${waiter.autoAfterIdleMs} ms`)
+					.join(", ")}.`
 	if (job.starting)
 		return {
 			...base,
 			job: "failed",
 			autoAfterIdleMs: job.autoAfterIdleMs,
-			message: `Scanner job ${job.jobId} was still starting and failed when it lost the tuner; start it again when you are done.${restore}`,
+			message: `Scanner job ${job.jobId} was still starting and failed when it lost the tuner; start it again when you are done.${waiting}${restore}`,
+		}
+	const resumeRoute = `POST /api/scanner/jobs/${job.jobId}/resume when you are done.`
+	if (job.reason !== null && PAUSED_UNTIL_RESUMED.has(job.reason))
+		return {
+			...base,
+			job: "paused",
+			// As its pause reads: this one has no automatic resume, whatever the job's rule says.
+			autoAfterIdleMs: null,
+			message: `Scanner job ${job.jobId} lost the tuner and stays paused (${job.reason}): nothing resumes it by itself. ${resumeRoute}${waiting}${restore}`,
 		}
 	return {
 		...base,
@@ -115,8 +146,8 @@ function preemptionOf(job: TunerLeaseJob, temporary: boolean): TunePreemption {
 		autoAfterIdleMs: job.autoAfterIdleMs,
 		message:
 			job.autoAfterIdleMs === null
-				? `Scanner job ${job.jobId} lost the tuner and stays paused for good: its resume.autoAfterIdleMs is null. POST /api/scanner/jobs/${job.jobId}/resume when you are done.${restore}`
-				: `Scanner job ${job.jobId} lost the tuner and is paused. It resumes by itself ${job.autoAfterIdleMs} ms after the last operator write to this tuner or later (activity can hold it), even with a longer restoreAfterS, and then retunes.${restore}`,
+				? `Scanner job ${job.jobId} lost the tuner and stays paused for good: its resume.autoAfterIdleMs is null. ${resumeRoute}${waiting}${restore}`
+				: `Scanner job ${job.jobId} lost the tuner and is paused. It resumes by itself ${job.autoAfterIdleMs} ms after the last operator write to this tuner or later (activity can hold it), even with a longer restoreAfterS, and then retunes.${waiting}${restore}`,
 	}
 }
 
@@ -513,6 +544,14 @@ export class TunerTuning {
 				...opts,
 				beforeWrite: beforeFrame,
 				run: run.write,
+				// A value already in place sends nothing, and the lease goes only with a frame: until
+				// one has gone out, each setting sends its own. The job then stops as for any write.
+				...(request.preempt === true
+					? {
+							forceWrite: () =>
+								run.preempted === undefined && this.leaseJob(sourceId) !== null,
+						}
+					: {}),
 			}
 			await this.controller.applyTune(sourceId, values, writing, setting => {
 				applied.add(setting)

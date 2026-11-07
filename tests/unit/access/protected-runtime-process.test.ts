@@ -903,12 +903,66 @@ describe("built protected runtime process", () => {
 				"WaveKit startup failed: WaveKitError [ACCESS_STORAGE_BUSY]: startup could not complete\n",
 			)
 			expect(core.stdout() + core.stderr()).not.toContain(env.directory)
+			// One log line and the refusal: a start a supervisor repeats adds no more than this.
+			expect(core.stdout().trim().split("\n")).toHaveLength(1)
 			for (const port of [env.api, env.analog, env.digital, env.raw, env.relay])
 				expect(await listening(port)).toBe(false)
 		} finally {
 			await holder.close()
 		}
 	}, 15_000)
+
+	it("exits 1 when it loses its private directory, ignoring a signal on the way, and a restart serves again", async () => {
+		const env = await fixture()
+		const storage = await PrivateAccessStorage.open({
+			directory: env.directory,
+			mode: "provision",
+			ownership: "single-host-pid-namespace",
+		})
+		await storage.close()
+		await env.releasePorts()
+		const first = run(env.configFile, env.directory)
+		await started(first)
+		expect((await http(env.api, "/health")).status).toBe(200)
+		const owner = (await readdir(env.directory)).find(name =>
+			name.startsWith("owner-"),
+		)
+		if (owner === undefined) throw new Error("Expected the core's owner file")
+		let exited = false
+		void first.exited.then(() => {
+			exited = true
+		})
+		// A signal right after the latch must not start a second close or change the code.
+		void marker(first, "exiting so that a restart can load").then(
+			() => first.child.kill("SIGTERM"),
+			() => undefined,
+		)
+		// The next heartbeat tick (within H = 10 s) finds the file gone.
+		await rm(join(env.directory, owner))
+		const statuses: (number | undefined)[] = []
+		while (!exited) {
+			await http(env.api, "/health").then(
+				response => statuses.push(response.status),
+				() => undefined,
+			)
+			await delay(20)
+		}
+		expect(await first.exited).toEqual({ code: 1, signal: null })
+		expect(first.stdout()).toContain("Private access ownership lost; exiting")
+		// Honest to the end: once it reads 503 it never reads healthy again. Here the close can be
+		// over before a poll lands, so no 503 is required: protected-server.test.ts shows the answer.
+		const lost = statuses.indexOf(503)
+		if (lost >= 0)
+			expect(statuses.slice(lost).every(status => status === 503)).toBe(true)
+		expect(first.stdout() + first.stderr()).not.toContain(env.directory)
+		for (const port of [env.api, env.analog, env.digital, env.raw, env.relay])
+			expect(await listening(port)).toBe(false)
+		// What s6 does next: the same start, which owns the directory again.
+		const second = run(env.configFile, env.directory)
+		await started(second)
+		expect((await http(env.api, "/health")).status).toBe(200)
+		expect(await stop(second)).toEqual({ code: 0, signal: null })
+	}, 40_000)
 
 	it("mounts admission, disables raw listeners and drains SIGTERM before a durable browser restart", async () => {
 		const env = await fixture()

@@ -181,6 +181,20 @@ export interface TuneRequest {
 	preempt?: boolean
 }
 
+/**
+ * Most waiters a tune's answer names, the soonest first: each is about 100 bytes of a small answer
+ * (8 x 100 B = under 1 KiB), and a source running more waiting jobs than this is not a real setup.
+ */
+export const TUNE_WAITERS_MAX = 8
+
+/** A job waiting for the tuner a tune took, able to take it once the tuner is idle. */
+export interface TunePreemptionWaiter {
+	jobId: string
+	jobName: string | null
+	/** How long after the last operator write it may take the tuner; activity can hold it longer. */
+	autoAfterIdleMs: number
+}
+
 /** What a tune with `preempt: true` did to the scanner job that held the tuner's lease. */
 export interface TunePreemption {
 	jobId: string
@@ -192,6 +206,11 @@ export interface TunePreemption {
 	 * write, whatever a `restoreAfterS` says. Null: it stays paused until someone resumes it.
 	 */
 	autoAfterIdleMs: number | null
+	/**
+	 * Other jobs that can take this tuner while you are on it, at most TUNE_WAITERS_MAX: the job
+	 * above is not the only thing that can move the receiver. Empty when none can.
+	 */
+	waiters: TunePreemptionWaiter[]
 	/** The same in a sentence, with what to do next. */
 	message: string
 }

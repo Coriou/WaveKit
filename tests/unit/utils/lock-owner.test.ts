@@ -949,16 +949,107 @@ describe("ownership loss and monotonic observation", () => {
 			await heartbeat()
 		})
 
-		it("a fault with the last refresh a whole lease old latches at once", async () => {
+		describe.each([HEARTBEAT_STALE_MS, HEARTBEAT_STALE_MS + 1])(
+			"stalled for %i ms, the lease being 30 s",
+			age => {
+				it("one failing write check does not end it; only H of faults does", async () => {
+					const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+					const { failing, lost, heartbeat } = await faulty()
+					failing.code = "EIO"
+					now.mockReturnValue(1000 + age)
+					expect(await heartbeat.check()).toBe(false)
+					expect(heartbeat.lost).toBe(false)
+					now.mockReturnValue(1000 + age + HEARTBEAT_MS - 1)
+					expect(await heartbeat.check()).toBe(false)
+					expect(heartbeat.lost).toBe(false)
+					now.mockReturnValue(1000 + age + HEARTBEAT_MS)
+					expect(await heartbeat.check()).toBe(false)
+					expect(heartbeat.lost).toBe(true)
+					expect(lost).toHaveBeenCalledOnce()
+					await heartbeat()
+				})
+
+				it("one failing tick does not end it, and the next good one keeps the lock", async () => {
+					fakeTicks()
+					const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+					const { path, failing, lost, heartbeat } = await faulty()
+					failing.code = "EIO"
+					now.mockReturnValue(1000 + age)
+					await failedTick(heartbeat)
+					expect(heartbeat.lost).toBe(false)
+					failing.code = null
+					await goodTick(path)
+					failing.code = "EIO"
+					// The refresh started the lease over: this fault has all of it again.
+					now.mockReturnValue(1000 + age + HEARTBEAT_STALE_MS - 1)
+					expect(await heartbeat.check()).toBe(false)
+					expect(lost).not.toHaveBeenCalled()
+					await heartbeat()
+				})
+
+				it("a tick failing H after the first ends it, on two failed ticks", async () => {
+					fakeTicks()
+					const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+					const { failing, heartbeat } = await faulty()
+					failing.code = "EIO"
+					now.mockReturnValue(1000 + age)
+					await failedTick(heartbeat)
+					now.mockReturnValue(1000 + age + HEARTBEAT_MS - 1)
+					expect(await heartbeat.check()).toBe(false)
+					expect(heartbeat.lost).toBe(false)
+					now.mockReturnValue(1000 + age + HEARTBEAT_MS)
+					await failedTick(heartbeat)
+					expect(heartbeat.lost).toBe(true)
+					await heartbeat()
+				})
+			},
+		)
+
+		it("a fault under a stall gets no fresh grace: 2H between runs is the first that does", async () => {
 			const now = vi.spyOn(performance, "now").mockReturnValue(1000)
 			const { failing, heartbeat } = await faulty()
 			failing.code = "EIO"
-			now.mockReturnValue(1000 + HEARTBEAT_STALE_MS - 1)
+			now.mockReturnValue(1000 + HEARTBEAT_MS)
+			expect(await heartbeat.check()).toBe(false)
+			// Just under 2H: still on the first fault's grace, which ends 3H after the refresh.
+			now.mockReturnValue(1000 + 3 * HEARTBEAT_MS - 1)
 			expect(await heartbeat.check()).toBe(false)
 			expect(heartbeat.lost).toBe(false)
-			now.mockReturnValue(1000 + HEARTBEAT_STALE_MS)
+			now.mockReturnValue(1000 + 3 * HEARTBEAT_MS)
 			expect(await heartbeat.check()).toBe(false)
 			expect(heartbeat.lost).toBe(true)
+			await heartbeat()
+		})
+
+		it("a fault, a stall of 2H, and one more fault: what came before the stall does not count", async () => {
+			const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+			const { failing, heartbeat } = await faulty()
+			failing.code = "EIO"
+			now.mockReturnValue(1000 + HEARTBEAT_MS)
+			expect(await heartbeat.check()).toBe(false)
+			now.mockReturnValue(1000 + 3 * HEARTBEAT_MS)
+			expect(await heartbeat.check()).toBe(false)
+			expect(heartbeat.lost).toBe(false)
+			now.mockReturnValue(1000 + 4 * HEARTBEAT_MS)
+			expect(await heartbeat.check()).toBe(false)
+			expect(heartbeat.lost).toBe(true)
+			await heartbeat()
+		})
+
+		it("a permanent fault still latches at the third failed tick, however long the stalls", async () => {
+			fakeTicks()
+			const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+			const { failing, lost, heartbeat } = await faulty()
+			failing.code = "EIO"
+			for (const stalls of [1, 2]) {
+				now.mockReturnValue(1000 + stalls * 2 * HEARTBEAT_STALE_MS)
+				await failedTick(heartbeat)
+				expect(heartbeat.lost).toBe(false)
+			}
+			now.mockReturnValue(1000 + 3 * 2 * HEARTBEAT_STALE_MS)
+			await failedTick(heartbeat)
+			expect(heartbeat.lost).toBe(true)
+			expect(lost).toHaveBeenCalledOnce()
 			await heartbeat()
 		})
 

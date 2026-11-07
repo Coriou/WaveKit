@@ -45,26 +45,55 @@ refresh retries, the error is logged and counted, and admission carries on. If t
 goes unrefreshed for the whole 30 seconds it latches too, because at that age another
 owner may take it. A core that was stalled past those 30 seconds (a suspended laptop, say)
 still gets 10 seconds to prove the lock is unchanged, and keeps it if it is; a check that
-hangs for those 10 seconds latches.
+hangs for those 10 seconds latches, and so do errors that last those 10 seconds. One error
+right after the stall does not. Three failed refreshes in a row always latch, so a permanent
+fault cannot hold the core up for ever.
 
-Once latched, until the core restarts:
+Once latched, the core exits (below). In the seconds before it does:
 
 - Every bearer, cookie and audio request answers 503 `ACCESS_UNAVAILABLE`: another owner
   may have rotated the credential, so what the core holds in memory proves nothing.
 - Open WebSockets, audio streams and downloads are closed, for browser sessions and for
   the machine credential alike. WebSockets get close code 1008, and one that does not
   finish closing within a second is cut.
-- `GET /health` answers 503 with `reason` `access_authority_lost`, so the healthchecks in
-  `compose.yaml` report the container unhealthy. The image's built-in `HEALTHCHECK` only asks
-  s6 whether the process is up, so without Compose read `/health` yourself.
-  `GET /health/live` stays 200.
+- `GET /health` answers 503 with `reason` `access_authority_lost`, and `GET /health/live`
+  stays 200, until the listener closes.
 
-**Restart it yourself.** The core does not exit, and nothing restarts it: Docker's restart
-policy acts on an exit, not on an unhealthy container, and s6 watches the process, not its
-health. That is deliberate. The decoders and recordings keep running, while a restart drops
-the tuning (the core does not save it) and pauses a running sweep unless the job resumes on
-boot. So the latch never costs you the radio on its own, but somebody has to act on it. A
-restart loads the current credential, or refuses with a stable code if the state needs repair.
+**The core exits and restarts.** It logs the loss, closes as on a stop (at most 10 seconds) and
+exits with code 1, whatever else is running: a locked-out core cannot be read, steered or
+stopped by anyone, and only a new start can load the state another owner may have rotated.
+
+In the image, s6 starts it again, about 5 seconds after the exit. What you see:
+
+- A recording in progress ends. The file and every decode so far stay on disk.
+- Decoders stop, and their output to external sinks is gone for those seconds. Clients are cut
+  off and reconnect once the API is back.
+- The tuning is not kept: the core returns to its configured baseline, and a pending
+  [temporary tune's restore](API.md#temporary-tune-and-restart) is dropped.
+- A running sweep comes back as `paused` with reason `core-restart` and goes on only with
+  `resume.onBoot`. A job paused by an operator stays paused.
+
+The new start loads the current credential, or refuses with a stable code if the state needs
+repair.
+
+**If another core still owns the directory, the restart is refused, and it keeps trying.** A
+refused start never touches the tuner: it checks the locks and opens the private directory
+before it creates any source. Each failed exit waits 4 seconds in the finish script, and s6
+starts the service at most once a second, so the attempts run at:
+
+| The other owner       | Refusal                                                      | Time for one attempt                                                       | Attempts            |
+| --------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------- | ------------------- |
+| In the same container | `ACCESS_STORAGE_BUSY`, at once                               | At least 1 s of start and 4 s of wait: 5 s or more                         | at most 720 an hour |
+| In another container  | `ACCESS_STORAGE_FOREIGN_OWNER`, after watching its heartbeat | 40 s + 40 s (the startup check, then the open) and 4 s of wait: about 85 s | about 40 an hour    |
+
+Each attempt logs a few lines: `Starting WaveKit`, the refusal with its code (and, in the second
+case, two `Waiting for storage lock heartbeat` lines), and a start and stop line in
+`/var/log/wavekit/system.log`. A volume that stays broken loops the same way. `/health` stays
+down meanwhile, and the logs say why. Stop the other core and the next attempt succeeds.
+
+Run natively, as with `make dev-protected` or `node dist/index.js`, nothing restarts the process:
+it ends with code 1 and that log line, and you start it again. `make dev-protected` ends with its
+server, so it deletes its throwaway directory as on any other exit.
 
 Band plans and operator data have locks of their own under the same rule. Losing one of those
 touches no credential: only that store goes unavailable until a restart.

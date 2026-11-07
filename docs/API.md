@@ -424,12 +424,13 @@ replaced, because a failed directory sync cannot tell; rotate again and export a
 A live owner refreshes its lock every 10 seconds, and a lock unchanged for 30 seconds
 can be reclaimed, so a core stalled that long (a paused container, for example) can
 lose the directory to a rotation. Within one refresh of resuming, that core notices
-and answers every bearer, cookie and audio request with 503 `ACCESS_UNAVAILABLE` until
-it is restarted: it can no longer tell whether its in-memory credential is current. It
-also logs an error, closes the WebSockets, audio streams and downloads it had admitted,
-and answers `GET /health` with 503 and `reason` `access_authority_lost`. Nothing restarts
-it for you. An error that does not prove a new owner, such as a failed read of the lock, is
-retried and does not latch unless the lock goes unrefreshed for the full 30 seconds. See
+and answers every bearer, cookie and audio request with 503 `ACCESS_UNAVAILABLE`: it can
+no longer tell whether its in-memory credential is current. It also logs an error, closes
+the WebSockets, audio streams and downloads it had admitted, answers `GET /health` with
+503 and `reason` `access_authority_lost`, and exits with code 1 once it has closed. In the
+image s6 starts it again. An error that does not prove a new owner, such as a failed read
+of the lock, is retried and does not latch unless the lock goes unrefreshed for the full 30
+seconds. See
 [When a core loses its private directory](SECURITY.md#when-a-core-loses-its-private-directory).
 
 A write such a core had already started can still land after the rotation and put the
@@ -556,7 +557,7 @@ what is wrong in its body as well as its status code.
 
 A 503 from `/health` answers `{ "status": "unhealthy", "reason": "<code>", "timestamp": "..." }`
 with `reason` `all_decoders_down` (every configured decoder is down), `api_down`, or
-`access_authority_lost` (every credential is denied until the core restarts:
+`access_authority_lost` (every credential is denied, and the core is about to exit and restart:
 [what it means](SECURITY.md#when-a-core-loses-its-private-directory)). A 503 from
 `/health/ready` answers `{ "status": "not_ready", "reason": "<code>", "timestamp": "..." }` with
 `reason` `no_source_connected`, `no_decoder_running` or `api_down`. The reasons are fixed codes,
@@ -1895,16 +1896,19 @@ pausing a job keeps its lease). The separate routes below and the web app do not
 they always have.
 
 With `preempt: true` and a lease held, the next frame takes the lease (`preempted-operator`), and the
-answer carries `preempted`, which `lastTune` repeats. A lease that arrived during the tune is taken and
-reported the same way. A tune with no frame left to send preempts nothing and has no `preempted`.
+answer carries `preempted`, which `lastTune` repeats. A value already in place is written anyway until
+one frame has gone out, so a tune to the job's own hop or gain takes the lease as well. A lease that
+arrives during the tune is taken and reported the same way while a setting is left to write; one that
+arrives after the last setting's frame follows the tune, and is not taken.
 
-| `preempted` field | Content                                                                                                                                                   |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `jobId`           | The job                                                                                                                                                   |
-| `jobName`         | Its name, or `null`                                                                                                                                       |
-| `job`             | `paused`, or `failed` for a job that was still starting                                                                                                   |
-| `autoAfterIdleMs` | Its `resume.autoAfterIdleMs`. `null`: **it stays paused until someone calls `POST /api/scanner/jobs/:id/resume`**, however short the look was meant to be |
-| `message`         | All of this in a sentence, with what to do next                                                                                                           |
+| `preempted` field | Content                                                                                                                                                                                                                                                                           |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `jobId`           | The job                                                                                                                                                                                                                                                                           |
+| `jobName`         | Its name, or `null`                                                                                                                                                                                                                                                               |
+| `job`             | `paused`, or `failed` for a job that was still starting                                                                                                                                                                                                                           |
+| `autoAfterIdleMs` | Its `resume.autoAfterIdleMs`. `null`: **it stays paused until someone calls `POST /api/scanner/jobs/:id/resume`**, however short the look was meant to be. Also `null` for a job already paused with reason `operator` or `resumed-without-retune`, which never resumes by itself |
+| `waiters`         | Other jobs waiting for this tuner that can take it once it is idle: `{ jobId, jobName, autoAfterIdleMs }`, the soonest first, at most 8. Empty when none can                                                                                                                      |
+| `message`         | All of this in a sentence, with what to do next                                                                                                                                                                                                                                   |
 
 A paused job resumes by its own rules, whatever the tune says: `autoAfterIdleMs` after the last
 operator write to this tuner, or later if activity holds it. The default is 60 s, so a job can take the
@@ -5958,7 +5962,7 @@ submitted value. Statuses are pinned in `RECORDING_ERROR_STATUS`.
 
 ```bash
 # <id> URL-encoded, as listed by GET /api/recordings
-curl -X PUT -H "Authorization: Bearer $TOKEN" \
+curl -X PUT --header "@$HOME/.config/wavekit/machine-token.header" \
   http://localhost:9000/api/recordings/<id>/keep
 ```
 

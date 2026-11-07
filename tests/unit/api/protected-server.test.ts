@@ -239,6 +239,8 @@ describe("OpenAPI document of a protected core", () => {
 			expect(typeof node["nullable"]).not.toBe("boolean")
 			expect(typeof node["exclusiveMinimum"]).not.toBe("boolean")
 			expect(typeof node["exclusiveMaximum"]).not.toBe("boolean")
+			// A tuple is prefixItems in 2020-12; a property named "items" holds an object.
+			expect(Array.isArray(node["items"])).toBe(false)
 			if (typeof node["exclusiveMinimum"] === "number") forms.exclusive++
 			if (node["type"] === "null") forms.nullType++
 		}

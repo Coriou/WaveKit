@@ -53,6 +53,8 @@ import type {
  * lease's, or with origin "rest" a temporary tune's; that one is no operator gain choice).
  * `beforeWrite` runs in the same synchronous section as each frame of the write, band gain and rate
  * proof included: a throw stops it with nothing sent. `run` says which tune a write belongs to.
+ * `forceWrite` is read by `applyTune` for each setting: true sends the frame even for a value in
+ * place and proven, as a tune that takes a job's lease needs one for the arbiter to see.
  */
 export interface TunerWriteOptions {
 	origin?: TunerCommandOrigin
@@ -62,6 +64,7 @@ export interface TunerWriteOptions {
 	restore?: boolean
 	beforeWrite?: () => void
 	run?: TuneWriteRun
+	forceWrite?: () => boolean
 }
 
 /**
@@ -2201,7 +2204,7 @@ export class TunerController extends EventEmitter {
 	 * replays them), then the centre, then the gain. An operator's tune follows the bulk update's
 	 * rules: the rate policy and the rate proof run only without an explicit rate, a band gain
 	 * applies after the centre, and an explicit gain overrides it. A field already at the value and
-	 * proven is not written, but still counts as applied.
+	 * proven is not written, unless `opts.forceWrite` says so, but still counts as applied.
 	 *
 	 * `opts.restore` puts a temporary tune's prior tuning back: exactly the given values, only
 	 * where they differ (never a write to prove a value nobody changed), with no rate policy and no
@@ -2230,7 +2233,7 @@ export class TunerController extends EventEmitter {
 			)
 		}
 		const changed = (field: TunerStateField, differs: boolean): boolean =>
-			differs || (!restoring && unproven(field))
+			differs || (!restoring && unproven(field)) || opts.forceWrite?.() === true
 
 		const hz = values.sampleRate
 		if (hz !== undefined) {
@@ -2350,6 +2353,13 @@ export class TunerController extends EventEmitter {
 	 */
 	noteTuneKept(sourceId: string, choseGain: boolean): void {
 		if (choseGain) {
+			const dropped = this.operatorGainBeforeBand.get(sourceId)
+			// Nothing else can tell the operator afterwards what the record held.
+			if (dropped)
+				this.log.info(
+					{ sourceId, gainMode: dropped.gainMode, gain: dropped.gain },
+					"A temporary tune with its own gain stays; the gain saved before the band is dropped",
+				)
 			this.dropOperatorGain(sourceId)
 			return
 		}

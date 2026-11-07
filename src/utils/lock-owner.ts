@@ -21,7 +21,10 @@ import type { Logger } from "./logger.js"
  * refresh error proves nothing: that write is refused, the next tick retries, and
  * the holder latches at 3H without a refresh, when a contender may reclaim. After an
  * event loop stall its next tick still has H to prove the identity, so an unchanged lock
- * survives the stall and a check that hangs latches by max(3H, tick start + H).
+ * survives the stall and a check that hangs latches by max(3H, tick start + H). An error
+ * follows the same rule: once faults begin, or begin again after a stall, they may not latch
+ * for max(3H since the refresh, H from that fault), so one error after a stall never ends it.
+ * Three failed ticks in a row always do, so a permanent fault latches whatever the stalls.
  */
 export const lockOwnerSchema = z.object({
 	pid: z.number().int().positive(),
@@ -398,6 +401,8 @@ export interface LockHeartbeat {
 }
 // 3H / H = 3 failed ticks in a row reach the age at which a contender may reclaim.
 const STALE_TICKS = HEARTBEAT_STALE_MS / HEARTBEAT_MS
+// Ticks run H apart, so 2H without one means at least one was missed: the process stalled.
+const STALL_GAP_MS = 2 * HEARTBEAT_MS
 function lockErrorCode(error: unknown): string {
 	return typeof error === "object" &&
 		error !== null &&
@@ -430,6 +435,17 @@ export async function startLockHeartbeat(
 	let refreshedAt = performance.now()
 	/** The running tick's lease deadline. Only one runs: ticks queue on `pending`. */
 	let leaseEnd: NodeJS.Timeout | undefined
+	/** From here a fault latches; unset until the first fault since a refresh or a stall. */
+	let faultGraceEnd: number | undefined
+	/** The last tick or fault, which tells a stall from the regular H between ticks. */
+	let lastRanAt = refreshedAt
+	/** What came before a stall says nothing about now, so a fault after one gets its own grace. */
+	const noteRunning = (): number => {
+		const now = performance.now()
+		if (now - lastRanAt >= STALL_GAP_MS) faultGraceEnd = undefined
+		lastRanAt = now
+		return now
+	}
 	const lose = () => {
 		// Stopping is not a loss: a shutdown waiting for a check latches nothing, whatever it finds.
 		if (lost || stopping) return
@@ -461,8 +477,14 @@ export async function startLockHeartbeat(
 		}
 		transientFaults++
 		if (tick) failedTicks++
-		const staleFor = performance.now() - refreshedAt
-		const expired = failedTicks >= STALE_TICKS || staleFor >= HEARTBEAT_STALE_MS
+		const now = noteRunning()
+		// On schedule the first fault leaves 3H since the refresh. Past 2H, only a stall gets there,
+		// and H is what a tick has after one (the lease deadline below): an error alone never ends it.
+		faultGraceEnd ??= Math.max(
+			refreshedAt + HEARTBEAT_STALE_MS,
+			now + HEARTBEAT_MS,
+		)
+		const expired = failedTicks >= STALE_TICKS || now >= faultGraceEnd
 		log?.warn(
 			{ code: lockErrorCode(error), failedTicks, faults: transientFaults },
 			expired
@@ -483,6 +505,7 @@ export async function startLockHeartbeat(
 	const timer = setInterval(() => {
 		pending = pending.then(async () => {
 			if (lost || stopped) return
+			noteRunning()
 			// File system calls can hang past the lease, and a contender may then reclaim. This
 			// deadline needs no I/O to settle. A loop resumed past the lease has 0 ms left, and a
 			// 0 ms timer would fire before any check returns, losing an unchanged lock. So a tick
@@ -510,6 +533,7 @@ export async function startLockHeartbeat(
 				await handle.utimes(now, now)
 				refreshedAt = performance.now()
 				failedTicks = 0
+				faultGraceEnd = undefined
 			} catch (error) {
 				try {
 					fault(error, true)

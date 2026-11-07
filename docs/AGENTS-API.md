@@ -92,11 +92,11 @@ Then point the recipes below at that file. `curl --header @file` reads the heade
 AUTH="@$HOME/.config/wavekit/machine-token.header"
 ```
 
-| Answer                   | Meaning                                                       | What to do                                                                                                               |
-| ------------------------ | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| 401 `AUTH_REQUIRED`      | The token is not the current credential: it was rotated       | Re-read the file once and retry once, then ask an operator                                                               |
-| 503 `ACCESS_UNAVAILABLE` | The core cannot vouch for its credentials and needs a restart | Ask an operator; the token may still be fine. `GET /health`, which needs no token, then says 503 `access_authority_lost` |
-| Connection failure       | The core is stopped, for example during a rotation            | Retry with a delay; do not change the token                                                                              |
+| Answer                   | Meaning                                                     | What to do                                                                                                                  |
+| ------------------------ | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| 401 `AUTH_REQUIRED`      | The token is not the current credential: it was rotated     | Re-read the file once and retry once, then ask an operator                                                                  |
+| 503 `ACCESS_UNAVAILABLE` | The core cannot vouch for its credentials and is restarting | Retry with a delay; the token may still be fine. `GET /health`, which needs no token, then says 503 `access_authority_lost` |
+| Connection failure       | The core is stopped, for example during a rotation          | Retry with a delay; do not change the token                                                                                 |
 
 ### Rotate and revoke
 
@@ -174,13 +174,21 @@ curl --fail-with-body --header "$AUTH" --header "Content-Type: application/json"
   --data '{"frequencyHz":100000000,"restoreAfterS":30,"preempt":true}' "$API_ORIGIN/api/tuner/rtl/tune"
 ```
 
+This holds for a tune to where the scan already sits, too: asking to stay on the job's hop, or for a
+gain already in place, sends a frame so that the job really stops and the tuner stays.
+
 The 200 then carries `preempted`: `jobId`, `jobName`, `job` (`paused`, or `failed` if it was still
-starting), `autoAfterIdleMs` and `message`. Read `autoAfterIdleMs` before you rely on the job coming
-back:
+starting), `autoAfterIdleMs`, `waiters` and `message`. Read `autoAfterIdleMs` before you rely on the job
+coming back:
 
 - A number: the job resumes by itself that long after the last operator write (60 s by default), or
   later if activity holds it, even in the middle of a longer `restoreAfterS`.
-- `null`: **a short look stops the scan until someone calls `POST /api/scanner/jobs/:id/resume`.**
+- `null`: **a short look stops the scan until someone calls `POST /api/scanner/jobs/:id/resume`.** A job
+  somebody had already paused reads `null` too, whatever its own rule: it never resumes by itself.
+
+`waiters` lists other jobs that were waiting for this tuner and can take it once it is idle, each with
+its own `autoAfterIdleMs`, so the job you stopped may not be the one that moves the receiver next. Cancel
+one if you need longer.
 
 ### Tune for a while
 
@@ -195,8 +203,8 @@ curl --fail --header "$AUTH" --request DELETE "$API_ORIGIN/api/tuner/rtl/tune/re
 
 The person at the receiver wins: any later write to this tuner from anyone, including the web app,
 an external client such as SDR++ or a scanner job, cancels the restore for good and never gets
-overwritten. A scanner job taking the tuner's lease cancels it as well: a restore itself never preempts
-a job. `restore` in `GET /api/tuner` says what happened: `status`, `at`, `state` (what goes back) and
+overwritten. A scanner job taking the tuner's lease cancels it as well, and the receiver ends on your
+temporary tuning when the job ends: a restore itself never preempts a job. `restore` in `GET /api/tuner` says what happened: `status`, `at`, `state` (what goes back) and
 `cancelledBy`. A core restart drops a pending restore: read
 [what a restart does](API.md#temporary-tune-and-restart) before relying on one.
 
