@@ -7107,12 +7107,12 @@ export class ScannerService extends EventEmitter {
 					// Gone already: a plain resume put this sweep on hold for the operator (holdBootResumes).
 					const wanted = this.bootResumeInFlight.delete(id)
 					if (
-						wanted &&
 						err instanceof ScannerApiError &&
 						err.code === "SCANNER_SOURCE_DOWN"
-					)
-						this.requeueBootResume(sourceId, id)
-					else {
+					) {
+						if (wanted) this.requeueBootResume(sourceId, id)
+						else this.log.warn({ err, jobId: id }, "Boot resume refused")
+					} else {
 						this.leaseRefusals.set(
 							sourceId,
 							leaseRefusal("boot-resume", err, Date.now()),
