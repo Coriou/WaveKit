@@ -2166,9 +2166,19 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
   goes first, a value in place and proven is not written again, and an unproven one is
   written.
 
-A gain or a tuner gain index written in AGC leaves AGC: rtl_tcp `SET_GAIN` and
-`SET_TUNER_GAIN_INDEX` select manual gain, so `gainMode` then reads `manual`, and a later request
-for `agc` writes the mode again.
+`PATCH /api/tuner/:sourceId/config` with `"gainMode": "agc"` beside `gain` or `tunerGainIndex`
+is a 400 naming the conflict: send the gain first, then `"gainMode": "agc"` alone.
+
+A `tunerGainIndex` (PATCH or `POST /api/tuner/:sourceId/tuner-gain-index`) outside the gain
+table the receiver's rtl_tcp header advertises is a 400 naming the valid range; rtl_tcp would
+ignore it. With no gain table in the header the index is not range-checked.
+
+On R820T and R828D tuners (rtl_tcp header tuner type 5 or 6) a gain, or a tuner gain index
+inside the advertised gain table, written in AGC leaves AGC: rtl_tcp `SET_GAIN` and
+`SET_TUNER_GAIN_INDEX` select manual gain there, so `gainMode` then reads `manual`, and a later
+request for `agc` writes the mode again. On other tuners, or without a header, such a write
+lists `gainMode` in `unknownFields` until the mode is written again. An IF gain write never
+changes `gainMode`.
 
 Every 400 from these routes names the field that failed, by its schema name, and the fields it
 expects, their types and units, for example `Invalid request body at gain; expected {"gain":

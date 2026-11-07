@@ -44,7 +44,19 @@ const event = (emitter: EventEmitter, name: string): Promise<void> =>
 
 type Frame = { cmd: number; value: number; connection: number }
 
-async function setup(tuner?: SourceTunerConfig) {
+/** The fake's rtl_tcp header: tuner type and gain count (an R820T unless a test says otherwise). */
+type Header = { tunerType: number; gainCount: number }
+const R820T: Header = { tunerType: 5, gainCount: 29 }
+
+function headerBytes({ tunerType, gainCount }: Header): Buffer {
+	const header = Buffer.alloc(12)
+	header.write("RTL0", 0, "ascii")
+	header.writeUInt32BE(tunerType, 4)
+	header.writeUInt32BE(gainCount, 8)
+	return header
+}
+
+async function setup(tuner?: SourceTunerConfig, header: Header = R820T) {
 	let connections = 0
 	const sockets: net.Socket[] = []
 	const frames: Frame[] = []
@@ -64,9 +76,7 @@ async function setup(tuner?: SourceTunerConfig) {
 				pending = pending.subarray(5)
 			}
 		})
-		socket.write(
-			Buffer.concat([Buffer.from("RTL0"), Buffer.alloc(8), Buffer.alloc(8)]),
-		)
+		socket.write(Buffer.concat([headerBytes(header), Buffer.alloc(8)]))
 	})
 	server.listen(0, "127.0.0.1")
 	await once(server, "listening")
@@ -171,8 +181,9 @@ async function setup(tuner?: SourceTunerConfig) {
 }
 
 /**
- * rtl_tcp's gain mode after the frames it got: SET_GAIN and SET_TUNER_GAIN_INDEX both go through
- * `rtlsdr_set_tuner_gain`, which selects manual. The receiver keeps its mode across connections.
+ * rtl_tcp's gain mode after the frames it got on an R820T: SET_GAIN and SET_TUNER_GAIN_INDEX both go
+ * through `rtlsdr_set_tuner_gain`, which selects manual there. The receiver keeps its mode across
+ * connections.
  */
 function modelMode(frames: readonly Frame[]): "agc" | "manual" | undefined {
 	let mode: "agc" | "manual" | undefined
@@ -310,9 +321,9 @@ const CASES: Array<{
 		],
 	},
 	{
-		name: "AGC with a gain from manual",
+		name: "a gain, then AGC from manual",
 		tuner: MANUAL_445,
-		steps: [{ write: { gainMode: "agc", gain: 300 } }],
+		steps: [{ write: { gain: 300 } }, { write: { gainMode: "agc" } }],
 	},
 	{
 		name: "AGC on a fresh tuner whose mode was never set",
@@ -456,9 +467,200 @@ describe("a gain write leaves AGC, as on the receiver", () => {
 		await reconnect()
 		await tune({ gain: 220 })
 		expect(h.read().gainMode).toBe("manual")
-		await patch({ gainMode: "agc", gain: 220 })
+		await patch({ gain: 220 })
+		await patch({ gainMode: "agc" })
 		expect(h.read().gainMode).toBe("agc")
 		await reconnect()
 		expect(h.read().gainMode).toBe("agc")
+	})
+})
+
+describe("a gain write leaves AGC only where the tuner does", () => {
+	const unknownMode = (state: TunerState) =>
+		(state.unknownFields ?? []).includes("gainMode")
+
+	it.each([
+		{ name: "R820T", header: { tunerType: 5, gainCount: 29 } },
+		{ name: "R828D", header: { tunerType: 6, gainCount: 29 } },
+	])(
+		"$name: a gain and a gain index from AGC read manual",
+		async ({ header }) => {
+			const h = await setup(AGC, header)
+			await h.flushed()
+			await h.controller.setGain("rtl", 300, { origin: "rest" })
+			expect(h.read().gainMode).toBe("manual")
+			expect(unknownMode(h.read())).toBe(false)
+			await h.controller.setGainMode("rtl", "agc", { origin: "rest" })
+			await h.controller.setTunerGainIndex("rtl", 28, { origin: "rest" })
+			expect(h.read().gainMode).toBe("manual")
+			expect(unknownMode(h.read())).toBe(false)
+		},
+	)
+
+	it.each([
+		{ name: "E4000", header: { tunerType: 1, gainCount: 14 } },
+		{ name: "FC0013", header: { tunerType: 3, gainCount: 23 } },
+		{ name: "no gain table", header: { tunerType: 0, gainCount: 0 } },
+	])(
+		"$name: a gain or gain index from AGC leaves the mode unknown",
+		async ({ header }) => {
+			const h = await setup(AGC, header)
+			await h.flushed()
+			expect(h.read().gainMode).toBe("agc")
+			expect(unknownMode(h.read())).toBe(false)
+			await h.controller.setGain("rtl", 300, { origin: "rest" })
+			expect(unknownMode(h.read())).toBe(true)
+			// The next AGC request is written, and proves the mode again.
+			const res = await h.app.inject({
+				method: "PATCH",
+				url: "/api/tuner/rtl/config",
+				payload: { gainMode: "agc" },
+			})
+			expect(res.statusCode).toBe(200)
+			await h.flushed()
+			expect(h.gainFrames(1).at(-1)).toEqual([SET_GAIN_MODE, 0])
+			expect(unknownMode(h.read())).toBe(false)
+			await h.controller.setTunerGainIndex("rtl", 0, { origin: "rest" })
+			expect(unknownMode(h.read())).toBe(true)
+		},
+	)
+
+	it("E4000: a gain written while an AGC write is in flight never keeps the old manual", async () => {
+		const h = await setup(MANUAL_445, { tunerType: 1, gainCount: 14 })
+		await h.flushed()
+		expect(h.read().gainMode).toBe("manual")
+		expect(unknownMode(h.read())).toBe(false)
+		const agc = h.controller.setGainMode("rtl", "agc", { origin: "rest" })
+		const gain = h.controller.setGain("rtl", 300, { origin: "rest" })
+		await Promise.all([agc, gain])
+		await h.flushed()
+		expect(h.gainFrames(1).slice(-2)).toEqual([
+			[SET_GAIN_MODE, 0],
+			[SET_GAIN, 300],
+		])
+		// The receiver is in AGC (E4000 gain writes keep the mode): never claim manual.
+		expect(unknownMode(h.read())).toBe(true)
+	})
+
+	it("a gain index rtl_tcp ignores (past the gain table) leaves the mode unknown", async () => {
+		const h = await setup(AGC, { tunerType: 5, gainCount: 3 })
+		await h.flushed()
+		await h.controller.setTunerGainIndex("rtl", 3, { origin: "rest" })
+		expect(unknownMode(h.read())).toBe(true)
+	})
+
+	it("an IF gain from a relay client never moves the gain mode", async () => {
+		const h = await setup(AGC)
+		await h.flushed()
+		h.controller.applyExternalCommand("rtl", 0x06, 5)
+		expect(h.read().gainMode).toBe("agc")
+		expect(unknownMode(h.read())).toBe(false)
+		h.controller.applyExternalCommand("rtl", 0x0e, (1 << 16) | 30)
+		expect(h.read().gainMode).toBe("agc")
+		expect(unknownMode(h.read())).toBe(false)
+	})
+
+	it("relay gain frames follow the same rule", async () => {
+		const r820t = await setup(AGC)
+		await r820t.flushed()
+		r820t.controller.applyExternalCommand("rtl", SET_TUNER_GAIN_INDEX, 99)
+		expect(unknownMode(r820t.read())).toBe(true)
+		r820t.controller.applyExternalCommand("rtl", SET_TUNER_GAIN_INDEX, 4)
+		expect(r820t.read().gainMode).toBe("manual")
+		expect(unknownMode(r820t.read())).toBe(false)
+		for (const close of cleanup.splice(0).reverse()) await close()
+		const e4000 = await setup(AGC, { tunerType: 1, gainCount: 14 })
+		await e4000.flushed()
+		e4000.controller.applyExternalCommand("rtl", SET_GAIN, 300)
+		expect(unknownMode(e4000.read())).toBe(true)
+	})
+})
+
+describe("PATCH /config and the gain index route refuse what rtl_tcp would not do", () => {
+	const patch = (
+		h: Awaited<ReturnType<typeof setup>>,
+		payload: Record<string, unknown>,
+	) => h.app.inject({ method: "PATCH", url: "/api/tuner/rtl/config", payload })
+
+	it.each([
+		{ gainMode: "agc", gain: 317 },
+		{ gainMode: "agc", tunerGainIndex: 7 },
+		{ gainMode: "agc", gain: 317, tunerGainIndex: 7 },
+	])(
+		"AGC beside a gain or gain index: 400 naming the conflict, nothing written (%o)",
+		async payload => {
+			const h = await setup(MANUAL_445)
+			await h.flushed()
+			const before = h.gainFrames(1)
+			const res = await patch(h, payload)
+			expect(res.statusCode).toBe(400)
+			const body = res.json<{
+				code: string
+				message: string
+				fields: unknown
+			}>()
+			expect(body.code).toBe("VALIDATION_ERROR")
+			expect(body.message).toContain(
+				'"gainMode" "agc" cannot be sent with "gain" or "tunerGainIndex"',
+			)
+			expect(body.fields).toEqual([
+				{
+					field: "gainMode",
+					expected: expect.stringContaining("in one update"),
+				},
+			])
+			expect(res.body).not.toContain("317")
+			expect(res.body).not.toMatch(/\b7\b/)
+			await h.flushed()
+			expect(h.gainFrames(1)).toEqual(before)
+			expect(h.read().gainMode).toBe("manual")
+		},
+	)
+
+	it.each([29, 30, 1000])(
+		"a gain index at or past the gain table (%i) is a 400 naming the range",
+		async index => {
+			const h = await setup(MANUAL_445)
+			await h.flushed()
+			const before = h.gainFrames(1)
+			const expected =
+				"integer, tuner gain table index (0-28) for this receiver"
+			const viaPatch = await patch(h, { tunerGainIndex: index })
+			expect(viaPatch.statusCode).toBe(400)
+			expect(viaPatch.json()).toMatchObject({
+				code: "VALIDATION_ERROR",
+				message: `Invalid tuner value at tunerGainIndex; expected ${expected}`,
+				fields: [{ field: "tunerGainIndex", expected }],
+			})
+			const viaPost = await h.app.inject({
+				method: "POST",
+				url: "/api/tuner/rtl/tuner-gain-index",
+				payload: { index },
+			})
+			expect(viaPost.statusCode).toBe(400)
+			expect(viaPost.json()).toMatchObject({
+				message: `Invalid tuner value at index; expected ${expected}`,
+				fields: [{ field: "index", expected }],
+			})
+			await h.flushed()
+			expect(h.gainFrames(1)).toEqual(before)
+		},
+	)
+
+	it("the last index in the gain table is written", async () => {
+		const h = await setup(MANUAL_445)
+		await h.flushed()
+		const res = await patch(h, { tunerGainIndex: 28 })
+		expect(res.statusCode).toBe(200)
+		await h.flushed()
+		expect(h.gainFrames(1).at(-1)).toEqual([SET_TUNER_GAIN_INDEX, 28])
+	})
+
+	it("with no gain table in the header the index is not range-checked (the mode goes unknown)", async () => {
+		const h = await setup(AGC, { tunerType: 0, gainCount: 0 })
+		await h.flushed()
+		const res = await patch(h, { tunerGainIndex: 5 })
+		expect(res.statusCode).toBe(200)
+		expect(h.read().unknownFields ?? []).toContain("gainMode")
 	})
 })

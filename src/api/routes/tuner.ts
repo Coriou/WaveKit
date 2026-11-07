@@ -425,6 +425,10 @@ const EXPECTED_BODY: Readonly<Record<string, string>> = Object.freeze({
 		'an object of tuner fields only: "frequency" (Hz), "sampleRate" (Hz), "gain" (tenths of a dB, 0-500), "gainMode" ("manual" | "agc"), "ppm", "agcMode", "biasTee", "directSampling", "offsetTuning", "ifGain", "tunerIfGain", "testMode", "rtlXtal" (Hz), "tunerXtal" (Hz), "tunerGainIndex", "controlMode"',
 })
 
+/** PATCH /config: AGC with a gain or gain index in the same update (fixed text). */
+const CONFIG_AGC_CONFLICT =
+	'"gainMode" "agc" cannot be sent with "gain" or "tunerGainIndex" in one update: a gain write can leave AGC; send the gain first, then "gainMode" "agc" alone'
+
 /** Per-field text where the schema alone cannot state the unit or range (route url -> field). */
 const FIELD_EXPECTED: Readonly<
 	Record<string, Readonly<Record<string, string>>>
@@ -663,6 +667,25 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 			? await options.sourceManager.runTunerCommand(id, command)
 			: await command()
 		return tunerController.getState(id) ?? result
+	}
+	// rtl_tcp ignores a gain index outside the gain table its header advertises: a 400 naming the
+	// valid range (from the header, never the client's value). No header count: no check here.
+	const gainIndexOutOfRange = (
+		reply: FastifyReply,
+		sourceId: string,
+		index: number | undefined,
+		field: string,
+	): FastifyReply | undefined => {
+		if (index === undefined) return undefined
+		const count = tunerController.tunerGainCount(sourceId)
+		if (count === undefined || index < count) return undefined
+		const expected = `integer, tuner gain table index (0-${count - 1}) for this receiver`
+		return reply.status(400).send({
+			error: "ValidationError",
+			code: "VALIDATION_ERROR",
+			message: `Invalid tuner value at ${field}; expected ${expected}`,
+			fields: [{ field, expected }],
+		})
 	}
 
 	// GET /api/tuner - List all tuner states
@@ -1289,6 +1312,13 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 			},
 		},
 		async (request, reply) => {
+			const outOfRange = gainIndexOutOfRange(
+				reply,
+				request.params.sourceId,
+				request.body.index,
+				"index",
+			)
+			if (outOfRange) return outOfRange
 			try {
 				return await run(request.params.sourceId, async () => {
 					await tunerController.setTunerGainIndex(
@@ -1417,6 +1447,25 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 			),
 		},
 		async (request, reply) => {
+			const { gainMode, gain, tunerGainIndex } = request.body
+			// A gain or gain index write can leave AGC (R820T/R828D): AGC beside one is a conflict.
+			if (
+				gainMode === "agc" &&
+				(gain !== undefined || tunerGainIndex !== undefined)
+			)
+				return reply.status(400).send({
+					error: "ValidationError",
+					code: "VALIDATION_ERROR",
+					message: `Invalid tuner values; ${CONFIG_AGC_CONFLICT}`,
+					fields: [{ field: "gainMode", expected: CONFIG_AGC_CONFLICT }],
+				})
+			const outOfRange = gainIndexOutOfRange(
+				reply,
+				request.params.sourceId,
+				tunerGainIndex,
+				"tunerGainIndex",
+			)
+			if (outOfRange) return outOfRange
 			try {
 				return await run(request.params.sourceId, async () => {
 					await tunerController.configure(

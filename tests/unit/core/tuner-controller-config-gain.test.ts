@@ -18,12 +18,19 @@ import {
 import { wireTunerControl } from "../../../src/core/tuner-wiring.js"
 import type { SourceTunerConfig } from "../../../src/config.js"
 import type {
+	RtlTcpHeaderInfo,
 	SourceCaps,
 	SourceManager,
 } from "../../../src/core/source-manager.js"
 import type { TunerRelay } from "../../../src/core/tuner-relay.js"
 
 const SRC = "rtl-1"
+/** An R820T header: there a gain write selects manual gain. */
+const R820T_HEADER: RtlTcpHeaderInfo = {
+	magic: "RTL0",
+	tunerType: 5,
+	gainCount: 29,
+}
 
 interface Snapshot {
 	frames: string[]
@@ -43,7 +50,10 @@ interface Snapshot {
 	tuningWritten: boolean
 }
 
-function harness(policy: TunerReconnectPolicy = "restore") {
+function harness(
+	policy: TunerReconnectPolicy = "restore",
+	header: RtlTcpHeaderInfo | null = R820T_HEADER,
+) {
 	const caps: SourceCaps = {
 		kind: "iq",
 		sampleRate: 2_048_000,
@@ -63,6 +73,7 @@ function harness(policy: TunerReconnectPolicy = "restore") {
 			return true
 		}),
 		isRtlTcpSource: vi.fn(() => true),
+		getRtlTcpInfo: vi.fn(() => header ?? undefined),
 		updateSourceCaps: vi.fn((_id: string, updates: Partial<SourceCaps>) =>
 			Object.assign(caps, updates),
 		),
@@ -176,8 +187,9 @@ const UNKNOWN_REST = [
 function configured(
 	tuner: SourceTunerConfig | undefined,
 	policy: TunerReconnectPolicy = "restore",
+	header: RtlTcpHeaderInfo | null = R820T_HEADER,
 ) {
-	const h = harness(policy)
+	const h = harness(policy, header)
 	h.sources.emit("connected", SRC)
 	h.controller.setConfiguredTuning(SRC, tuner)
 	h.snapshot()
@@ -605,6 +617,29 @@ describe("configured gain review fixes", () => {
 		expect(s.state.unknownFields ?? []).not.toContain("gainMode")
 	})
 
+	it("config agc plus a REST gain with no tuner header: the gain mode stays unknown across the replay", async () => {
+		const h = configured({ gainMode: "agc", agcMode: true }, "restore", null)
+		h.sources.emit("payload-started", SRC)
+		await h.controller.setGain(SRC, 300, { origin: "rest" })
+		expect(h.snapshot().state.unknownFields ?? []).toContain("gainMode")
+		h.connect()
+		const s = h.snapshot()
+		expect(s.frames).toEqual(["0800000001", "040000012c"])
+		expect(s.state.unknownFields ?? []).toContain("gainMode")
+	})
+
+	it("an AGC replayed before a gain with no tuner header leaves the gain mode unknown", async () => {
+		const h = configured(undefined, "restore", null)
+		h.sources.emit("payload-started", SRC)
+		await h.controller.setGainMode(SRC, "agc", { origin: "rest" })
+		await h.controller.setGain(SRC, 300, { origin: "rest" })
+		h.snapshot()
+		h.connect()
+		const s = h.snapshot()
+		expect(s.frames).toEqual(["0300000000", "040000012c"])
+		expect(s.state.unknownFields ?? []).toContain("gainMode")
+	})
+
 	it("a new connection clears the configured proof until its first payload writes again", () => {
 		const h = configured(MANUAL_496)
 		h.connect()
@@ -689,7 +724,8 @@ describe("configured gain (M1, M2)", () => {
 	})
 
 	it("M2: a held REST tunerGainIndex suppresses the configured gain and gain mode and their proof", async () => {
-		const h = configured(MANUAL_496)
+		// No tuner header: the replayed gain index proves no gain mode.
+		const h = configured(MANUAL_496, "restore", null)
 		h.sources.emit("payload-started", SRC)
 		await h.controller.setTunerGainIndex(SRC, 5, { origin: "rest" })
 		h.snapshot()
@@ -704,5 +740,18 @@ describe("configured gain (M1, M2)", () => {
 		expect(s.state.unknownFields ?? []).toEqual(
 			expect.arrayContaining(["gainMode", "gain"]),
 		)
+	})
+
+	it("M2 on an R820T: the replayed gain index proves manual", async () => {
+		const h = configured(MANUAL_496)
+		h.sources.emit("payload-started", SRC)
+		await h.controller.setTunerGainIndex(SRC, 5, { origin: "rest" })
+		h.snapshot()
+		h.connect()
+		const s = h.snapshot()
+		expect(s.frames.at(-1)).toBe("0d00000005")
+		expect(s.state.gainMode).toBe("manual")
+		expect(s.state.unknownFields ?? []).not.toContain("gainMode")
+		expect(s.state.unknownFields ?? []).toContain("gain")
 	})
 })

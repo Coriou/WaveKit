@@ -58,6 +58,12 @@ function harness(policy: TunerReconnectPolicy = "restore") {
 			return true
 		}),
 		isRtlTcpSource: vi.fn(() => true),
+		// An R820T header: there a gain write selects manual gain.
+		getRtlTcpInfo: vi.fn(() => ({
+			magic: "RTL0",
+			tunerType: 5,
+			gainCount: 29,
+		})),
 		updateSourceCaps: vi.fn((_id: string, updates: Partial<SourceCaps>) =>
 			Object.assign(caps, updates),
 		),
