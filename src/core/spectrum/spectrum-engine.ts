@@ -351,6 +351,17 @@ interface ExternalCommand {
 	checkState: boolean
 	/** Its place among epoch triggers (`SpectrumEngine.ticket`): the first command it merges. */
 	ticket: number
+	/**
+	 * Posted from `carried` into a later stream: an explicit centre is only a claim about the
+	 * tuner when the command was written, so it must still agree with caps when posted.
+	 */
+	kept?: boolean
+}
+
+/** A scanner hop submitted while the pipeline restarted, re-posted into the stream that follows. */
+interface HeldHop {
+	pending: PendingEpoch
+	ticket: number
 }
 
 export class SpectrumEngine extends EventEmitter implements EpochClock {
@@ -421,6 +432,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	 * and is dropped.
 	 */
 	private readonly carried: ExternalCommand[] = []
+	/**
+	 * The newest scanner hop submitted during a restart (only the newest: an older hop's epoch
+	 * would end where the next one starts). The old host can no longer take it, and the job's
+	 * own re-send may already be spent on the reconnect that preceded the restart.
+	 */
+	private heldHop: HeldHop | null = null
 	private readonly pendingMeta = new Map<number, EngineEpoch>()
 	/** WG9 req 3.4: per non-scanner epoch, the first sample past the network settle. */
 	private readonly verifiedFrom = new Map<number, number>()
@@ -541,6 +558,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.openingStreams.length = 0
 		// A command carried by an earlier run tuned before this branch existed.
 		this.carried.length = 0
+		this.heldHop = null
 		this.beginStream(this.initialTrust())
 		const reader = this.deps.hostCentre ?? nullHostCentreReader
 		if (reader !== nullHostCentreReader) {
@@ -637,7 +655,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	}
 
 	submitEpoch(pending: PendingEpoch): void {
-		if (!this.running || !this.host || this.restarting) return
+		if (!this.running || !this.host) return
+		if (this.restarting) {
+			// Only the scanner submits here during a restart (external commands are carried before).
+			this.heldHop = { pending: { ...pending }, ticket: ++this.ticket }
+			return
+		}
 		if (pending.sampleRateHz !== this.cfg?.sampleRateHz) {
 			this.log.info(
 				{ from: this.cfg?.sampleRateHz, to: pending.sampleRateHz },
@@ -887,7 +910,15 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			// A disconnect during the restart: its boundary was discarded with the old bytes, so the
 			// stream that starts now is a new connection's, which nothing proved yet. The replay
 			// that proves it was carried (flushExternal) and follows as this stream's next epoch.
-			this.beginStream(this.disconnectTicket > since ? "unverified" : trust)
+			// A command or hop kept for this stream likewise: the bytes still buffered can predate
+			// it, so only its own epoch, after its settle, may carry its label.
+			const kept =
+				this.carried.length > 0 ||
+				this.externalPending !== null ||
+				this.heldHop !== null
+			this.beginStream(
+				this.disconnectTicket > since || kept ? "unverified" : trust,
+			)
 		} finally {
 			this.restarting = false
 		}
@@ -979,7 +1010,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			gainKey,
 			tuningTrust: trust,
 		})
-		this.postCarried()
+		this.postCarried(boundaryTicket)
 	}
 
 	/**
@@ -988,13 +1019,70 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	 * (flushExternal). Each label is the newest command's own, merged with the state rule when it
 	 * is posted (checkState), so a value really unknown then keeps it `unverified`.
 	 */
-	private postCarried(): void {
+	private postCarried(boundaryTicket?: number): void {
+		const hop = this.takeHeldHop(boundaryTicket)
 		if (this.carried.length === 0) return
 		const carried = this.carried.splice(0)
 		for (const command of carried) {
 			if (command.ticket < this.disconnectTicket) continue
-			this.queueExternal(command.trust, command.centreHz, true, command.ticket)
+			// A command older than the hop posted just now would end where the hop starts.
+			if (hop && command.ticket < hop.ticket) continue
+			this.queueExternal(
+				command.trust,
+				command.centreHz,
+				true,
+				command.ticket,
+				true,
+			)
 		}
+	}
+
+	/**
+	 * m3: re-posts the scanner hop held during a restart into this stream, before any newer kept
+	 * command, under the scanner's own rules: its label (the hop's state rule), its settle and
+	 * gain, timed from this stream's clock with every buffered byte counted (never earlier than
+	 * the hop's writes), and no marker (its bytes went with the old stream). Its centre is the
+	 * hop's target only while caps holds it: caps follows the frequency write, so a hop whose
+	 * write has not landed, or one another writer moved since, is `unverified` at the caps centre
+	 * (the write landing later gets the suppression-window epoch, checkSuppressedCentre).
+	 * Returns the hop posted, or null.
+	 */
+	private takeHeldHop(boundaryTicket?: number): HeldHop | null {
+		const held = this.heldHop
+		if (!held) return null
+		// A hop before the last disconnect, or before this boundary, tuned a stream that is gone.
+		if (
+			held.ticket < this.disconnectTicket ||
+			(boundaryTicket !== undefined && held.ticket < boundaryTicket)
+		) {
+			this.heldHop = null
+			return null
+		}
+		// Behind a boundary still queued: it belongs to the stream that starts there.
+		if (this.boundaryAhead(held.ticket)) return null
+		this.heldHop = null
+		const caps = this.deps.sources.getCaps(this.sourceId)
+		const hop = held.pending
+		const inPlace =
+			caps?.centerFreq === hop.centreHz && this.centreOverride === null
+		const centreHz = inPlace
+			? hop.centreHz
+			: (this.centreOverride ?? caps?.centerFreq ?? hop.centreHz)
+		const clock = this.sampleClock()
+		this.submitEpoch({
+			...hop,
+			epoch: this.allocateEpoch(),
+			commandSample: clock.commandSample,
+			bufferedSamples: clock.bufferedSamples,
+			expectMarker: false,
+			markerTimeoutSamples: 0,
+			centreHz,
+			tuningTrust: inPlace
+				? hop.tuningTrust
+				: mergeTrust(hop.tuningTrust, "unverified"),
+			centreChanged: centreHz !== (caps?.centerFreq ?? 0),
+		})
+		return held
 	}
 
 	/** Keeps a command that cannot be posted now for the stream it belongs to, which starts later. */
@@ -1043,6 +1131,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		}
 		held.checkState = true
 		held.ticket = Math.min(held.ticket, command.ticket)
+		// Either side kept makes the merge kept: its centre check is never lost by folding.
+		if (command.kept === true) held.kept = true
 	}
 
 	/** True when a stream boundary still queued in the branch took a ticket between `from` and `to`. */
@@ -1630,6 +1720,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		centreHz?: number,
 		checkState = false,
 		ticket?: number,
+		kept = false,
 	): void {
 		if (!this.running) return
 		const own = ticket ?? ++this.ticket
@@ -1645,6 +1736,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					...(centreHz !== undefined ? { centreHz } : {}),
 					checkState,
 					ticket: own,
+					...(kept ? { kept } : {}),
 				})
 				return
 			}
@@ -1660,6 +1752,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			...(centreHz !== undefined ? { centreHz } : {}),
 			checkState,
 			ticket: own,
+			...(kept ? { kept } : {}),
 		}
 		queueMicrotask(() => this.flushExternal())
 	}
@@ -1699,6 +1792,20 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			sampleRateHz: fs,
 			networkSettleMs: s.sweep.settleMs.network,
 		})
+		// B1: a kept command's explicit centre was the tuner's when it was written; the scanner (its
+		// writes post no external epoch), a relay or a later reconnect may have moved it before
+		// this stream posted it. Caps follows every frequency write, so the label is only kept
+		// when both still name the same centre; otherwise the epoch reads caps, `unverified`.
+		// Fail closed by construction: a stale centre, a caps that lags the command, or a caps
+		// without a centre all disagree, and each demotes rather than trusts either witness.
+		if (
+			pending.kept === true &&
+			pending.centreHz !== undefined &&
+			pending.centreHz !== caps.centerFreq
+		) {
+			pending.trust = mergeTrust(pending.trust, "unverified")
+			delete pending.centreHz
+		}
 		// A host-reported centre that disagrees with ours is never `commanded` or `relay`.
 		if (this.centreOverride !== null)
 			pending.trust = mergeTrust(pending.trust, "unverified")
