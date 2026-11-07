@@ -1927,6 +1927,7 @@ export class ScannerService extends EventEmitter {
 				truncated = plan.truncated
 				if (plan.groups.length === 0) return
 				groups = plan.groups
+				if (this.ownershipLost()) return
 				await this.persistence.writeConsolidationPlan({
 					createdAt: new Date(this.now()).toISOString(),
 					groups,
@@ -1962,6 +1963,8 @@ export class ScannerService extends EventEmitter {
 			// Unfinished as far as disk knows: the owner's next load resumes the plan.
 			if (this.ownershipLost()) return
 			await this.persistence.writeSnapshotOf(this.store)
+			// A loss during that write: the plan may be the new owner's now.
+			if (this.ownershipLost()) return
 			await this.persistence.removeConsolidationPlan()
 		} catch (err: unknown) {
 			this.log.warn(
