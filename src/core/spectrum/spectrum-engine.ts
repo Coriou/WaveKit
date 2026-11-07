@@ -128,6 +128,14 @@ export interface EngineEpoch {
 	 * when the pipeline started it as another. The label is still the one posted for it.
 	 */
 	requestedEpoch?: number
+	/**
+	 * On an `epoch-started` event only: the id its poster was given (`requestedEpoch`) for a scanner
+	 * hop held through a restart whose rate was not the restarted stream's. Such a hop is re-posted
+	 * `unverified` at the stream's real centre and rate (never on the rate it asked for); this names
+	 * it on its own start, or on the first start after it was dropped unstarted (a newer post
+	 * replaced it), so its poster learns its hop was superseded and re-sends it (no dwell credit).
+	 */
+	supersededEpoch?: number
 }
 
 export interface EngineMasks {
@@ -390,6 +398,8 @@ interface PendingStart {
 	requested: number
 	/** WG9 req 3.4: a non-scanner epoch's first sample past the network settle. */
 	verifiedFrom: number | null
+	/** A held hop re-posted on another rate than its own (EngineEpoch.supersededEpoch). */
+	superseded?: true
 	meta: EngineEpoch
 }
 
@@ -469,6 +479,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private heldHop: HeldHop | null = null
 	/** Pending epochs posted to the current host whose start has not arrived (PendingStart). */
 	private readonly starts: PendingStart[] = []
+	/** A superseded held hop's requested id dropped unstarted; the next start names it (PendingStart.superseded). */
+	private supersededLost: number | null = null
 	/** The current host's last epoch id, from the events it has delivered (they arrive in order). */
 	private startedThrough = 0
 	/** The label of the untracked epoch the pipeline just announced, until its own start. */
@@ -588,6 +600,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.awaitingPayload = false
 		this.streamStartByte = 0
 		this.starts.length = 0
+		this.supersededLost = null
 		this.untrackedStart = null
 		this.openingStreams.length = 0
 		// A command carried by an earlier run tuned before this branch existed.
@@ -692,8 +705,15 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.postEpoch(pending, pending.epoch)
 	}
 
-	/** `requested`: the id the epoch's caller was given (a held hop's is the arbiter's own). */
-	private postEpoch(pending: PendingEpoch, requested: number): void {
+	/**
+	 * `requested`: the id the epoch's caller was given (a held hop's is the arbiter's own).
+	 * `superseded`: a held hop re-posted on the stream's rate instead of its own (takeHeldHop).
+	 */
+	private postEpoch(
+		pending: PendingEpoch,
+		requested: number,
+		superseded = false,
+	): void {
 		if (!this.running || !this.host) return
 		if (this.restarting) {
 			// Only the scanner submits here during a restart (external commands are carried before).
@@ -717,6 +737,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			key: pending.epoch,
 			requested,
 			verifiedFrom: pending.verifiedFromSample ?? null,
+			...(superseded ? { superseded: true as const } : {}),
 			meta: {
 				stream: this.stream,
 				epoch: pending.epoch,
@@ -754,13 +775,20 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			id = Math.max(entry.key, id + 1)
 			if (id < epoch) continue
 			if (id > epoch) break
-			this.starts.splice(0, i + 1)
+			this.dropStarts(i)
+			this.starts.shift()
 			return entry
 		}
 		while (this.starts[i]?.meta.stream === this.current.stream) i += 1
 		if (i > 0) this.unnamedStream = this.current.stream
-		this.starts.splice(0, i)
+		this.dropStarts(i)
 		return null
+	}
+
+	/** Drops the first `count` pending starts, which never start; a superseded hop among them is named on the next start. */
+	private dropStarts(count: number): void {
+		for (const entry of this.starts.splice(0, count))
+			if (entry.superseded === true) this.supersededLost = entry.requested
 	}
 
 	/**
@@ -974,7 +1002,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			this.inflightBytes = 0
 			this.pool.length = 0
 			// The old host's pending epochs and stream starts never arrive.
-			this.starts.length = 0
+			this.dropStarts(this.starts.length)
 			this.untrackedStart = null
 			this.openingStreams.length = 0
 			this.host = this.createHost(caps.sampleRate)
@@ -1127,6 +1155,11 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	 * (the write landing later gets the suppression-window epoch, checkSuppressedCentre).
 	 * It takes a new epoch id (an id is only ever the next one allocated, so the pipeline numbers
 	 * it as asked or later, never onto another's); the job learns it from `requestedEpoch`.
+	 * A hop whose rate is not this stream's (the source rate changed again before the restart
+	 * completed) is never trusted on the wrong rate nor lost: it starts `unverified` at the
+	 * stream's real centre and rate, settles scaled to that rate, and its start (or, if a newer
+	 * post replaces it first, the start that did) names it in `supersededEpoch`, so the job sees
+	 * its hop superseded, gets no dwell credit and re-sends it (JobRunner).
 	 * Returns the hop posted, or null.
 	 */
 	private takeHeldHop(boundaryTicket?: number): HeldHop | null {
@@ -1145,27 +1178,38 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.heldHop = null
 		const caps = this.deps.sources.getCaps(this.sourceId)
 		const hop = held.pending
+		const clock = this.sampleClock()
+		const superseded = hop.sampleRateHz !== clock.sampleRateHz
 		const inPlace =
-			caps?.centerFreq === hop.centreHz && this.centreOverride === null
+			!superseded &&
+			caps?.centerFreq === hop.centreHz &&
+			this.centreOverride === null
 		const centreHz = inPlace
 			? hop.centreHz
 			: (this.centreOverride ?? caps?.centerFreq ?? hop.centreHz)
-		const clock = this.sampleClock()
+		const scale = (samples: number) =>
+			superseded && hop.sampleRateHz > 0
+				? Math.round((samples * clock.sampleRateHz) / hop.sampleRateHz)
+				: samples
 		this.postEpoch(
 			{
 				...hop,
 				epoch: this.allocateEpoch(),
 				commandSample: clock.commandSample,
 				bufferedSamples: clock.bufferedSamples,
+				settleSamples: scale(hop.settleSamples),
+				pllSettleSamples: scale(hop.pllSettleSamples),
 				expectMarker: false,
 				markerTimeoutSamples: 0,
 				centreHz,
+				sampleRateHz: clock.sampleRateHz,
 				tuningTrust: inPlace
 					? hop.tuningTrust
 					: mergeTrust(hop.tuningTrust, "unverified"),
 				centreChanged: centreHz !== (caps?.centerFreq ?? 0),
 			},
 			held.requested,
+			superseded,
 		)
 		return held
 	}
@@ -1541,7 +1585,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 							this.starts[stale]!.meta.stream < stream
 						)
 							stale += 1
-						this.starts.splice(0, stale)
+						this.dropStarts(stale)
 					}
 				}
 				this.startedThrough = ev.epoch
@@ -1557,12 +1601,23 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				this.currentVerifiedFrom = start?.verifiedFrom ?? null
 				this.currentVerifiedEpoch = ev.epoch
 				this.statusWindowOpen = this.currentVerifiedFrom !== null
+				const superseded =
+					start?.superseded === true ? start.requested : this.supersededLost
+				this.supersededLost = null
 				if (start && start.requested !== ev.epoch) {
 					// The caller knows this epoch by the id it was given: say so on its start only
 					// (never in `current`). The label above is still the one posted for it.
 					this.emit("pipeline", ev, {
 						...this.epochFor(ev),
 						requestedEpoch: start.requested,
+						...(superseded !== null ? { supersededEpoch: superseded } : {}),
+					})
+					continue
+				}
+				if (superseded !== null) {
+					this.emit("pipeline", ev, {
+						...this.epochFor(ev),
+						supersededEpoch: superseded,
 					})
 					continue
 				}

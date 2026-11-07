@@ -695,80 +695,88 @@ describe("real thread pipeline host: rate change, write, reconnect, replay, hop"
 	}, 60_000)
 })
 
+/** A sweep job on the harness's real arbiter: the ids the arbiter returned, and each start's `requestedEpoch`. */
+function jobScene(t: Harness) {
+	const record: JobRecord = {
+		id: "j_held",
+		name: null,
+		passive: false,
+		rawSpec: { sourceId: "rtl", mode: "sweep" },
+		spec: makeNormalisedSpec({ sourceId: "rtl" }),
+		plan: makeHopPlan([HOP]),
+		issues: [],
+		impact: null,
+		consentedImpact: null,
+		state: "pending",
+		createdAt: 0,
+		updatedAt: 0,
+		unrestorable: [],
+		counts: { observations: 0, transients: 0 },
+	}
+	const returned: number[] = []
+	const retune = t.arbiter.retune.bind(t.arbiter)
+	t.arbiter.retune = async (...args: Parameters<TunerArbiter["retune"]>) => {
+		const pending = await retune(...args)
+		returned.push(pending.epoch)
+		return pending
+	}
+	const runner = new JobRunner({
+		record,
+		arbiter: t.arbiter,
+		probes: {
+			request: () => ({ deferred: "budget" as const }),
+			release: () => Promise.resolve(),
+			releaseJob: () => Promise.resolve(),
+			follow: () => undefined,
+			status: () => [],
+			startLatencyMs: () => 400,
+		},
+		decoders: {
+			holdSource: () => Promise.resolve(),
+			releaseSource: () => Promise.resolve(),
+		},
+		settings: () => testSettings(),
+		openEngine: () => Promise.resolve(t.engine),
+		closeEngine: () => Promise.resolve(),
+		engine: () => t.engine,
+		refreshTuning: () => Promise.resolve(),
+		impact: () => ({
+			liveAudioClients: 0,
+			digitalVoiceListeners: 0,
+			runningDecoders: [],
+			pinnedDecoders: [],
+			scannerJobs: [],
+			unrestorable: [],
+		}),
+		undecoded: () => undefined,
+		discoveryCounts: () => ({
+			activity: 0,
+			candidate: 0,
+			classified: 0,
+			decoded: 0,
+		}),
+		awaitRestoredCaps: () => Promise.resolve(),
+		persist: () => undefined,
+		changed: () => undefined,
+		logger,
+		now: () => 0,
+		activity: () => ({ capturing: 0, replaying: null, replayQueueDepth: 0 }),
+	})
+	const started = new Map<number, number | undefined>()
+	const starts: EngineEpoch[] = []
+	t.engine.on("pipeline", (ev: PipelineEvent, epoch: EngineEpoch) => {
+		if (ev.kind !== "epoch-started") return
+		started.set(ev.epoch, epoch.requestedEpoch)
+		starts.push(epoch)
+		runner.onEpochStarted(epoch)
+	})
+	return { record, runner, returned, started, starts }
+}
+
 describe("a scanner job whose re-sent hop was held during a restart", () => {
 	it("owns the held hop's re-posted epoch by the id the arbiter returned and reaches its dwell", async () => {
 		const t = await ready({ inline: true })
-		const record: JobRecord = {
-			id: "j_held",
-			name: null,
-			passive: false,
-			rawSpec: { sourceId: "rtl", mode: "sweep" },
-			spec: makeNormalisedSpec({ sourceId: "rtl" }),
-			plan: makeHopPlan([HOP]),
-			issues: [],
-			impact: null,
-			consentedImpact: null,
-			state: "pending",
-			createdAt: 0,
-			updatedAt: 0,
-			unrestorable: [],
-			counts: { observations: 0, transients: 0 },
-		}
-		const returned: number[] = []
-		const retune = t.arbiter.retune.bind(t.arbiter)
-		t.arbiter.retune = async (...args: Parameters<TunerArbiter["retune"]>) => {
-			const pending = await retune(...args)
-			returned.push(pending.epoch)
-			return pending
-		}
-		const runner = new JobRunner({
-			record,
-			arbiter: t.arbiter,
-			probes: {
-				request: () => ({ deferred: "budget" as const }),
-				release: () => Promise.resolve(),
-				releaseJob: () => Promise.resolve(),
-				follow: () => undefined,
-				status: () => [],
-				startLatencyMs: () => 400,
-			},
-			decoders: {
-				holdSource: () => Promise.resolve(),
-				releaseSource: () => Promise.resolve(),
-			},
-			settings: () => testSettings(),
-			openEngine: () => Promise.resolve(t.engine),
-			closeEngine: () => Promise.resolve(),
-			engine: () => t.engine,
-			refreshTuning: () => Promise.resolve(),
-			impact: () => ({
-				liveAudioClients: 0,
-				digitalVoiceListeners: 0,
-				runningDecoders: [],
-				pinnedDecoders: [],
-				scannerJobs: [],
-				unrestorable: [],
-			}),
-			undecoded: () => undefined,
-			discoveryCounts: () => ({
-				activity: 0,
-				candidate: 0,
-				classified: 0,
-				decoded: 0,
-			}),
-			awaitRestoredCaps: () => Promise.resolve(),
-			persist: () => undefined,
-			changed: () => undefined,
-			logger,
-			now: () => 0,
-			activity: () => ({ capturing: 0, replaying: null, replayQueueDepth: 0 }),
-		})
-		const started = new Map<number, number | undefined>()
-		t.engine.on("pipeline", (ev: PipelineEvent, epoch: EngineEpoch) => {
-			if (ev.kind !== "epoch-started") return
-			started.set(ev.epoch, epoch.requestedEpoch)
-			runner.onEpochStarted(epoch)
-		})
+		const { record, runner, returned, started } = jobScene(t)
 		const restarting = () =>
 			(t.engine as unknown as { restarting: boolean }).restarting
 		const heldHop = () => (t.engine as unknown as { heldHop: unknown }).heldHop
@@ -828,6 +836,139 @@ describe("a scanner job whose re-sent hop was held during a restart", () => {
 				tuningTrust: "commanded",
 			})
 			expect(t.engine.currentEpoch().requestedEpoch).toBeUndefined()
+		} finally {
+			old.exportState = exportState
+			release()
+			if (restart) await restart
+			await runner.dispose()
+			await t.engine.stop()
+		}
+	})
+})
+
+describe("a scanner hop held through a restart while the source rate changes again", () => {
+	async function heldHopOnNewRate(suppressCaps: boolean) {
+		const t = await ready({ inline: true })
+		const held = lease(t)
+		const starts: EngineEpoch[] = []
+		t.engine.on("pipeline", (ev: PipelineEvent, epoch: EngineEpoch) => {
+			if (ev.kind === "epoch-started") starts.push(epoch)
+		})
+		const finish = await heldRestart(t)
+		const pending = await t.arbiter.retune(held, {
+			centreHz: HOP,
+			gainTenthsDb: null,
+			sampleRateHz: null,
+		})
+		await settle()
+		expect(pending.sampleRateHz).toBe(RATE)
+		// The source reports another rate before the restart completes.
+		if (suppressCaps) t.engine.suppressExternal(true)
+		t.sources.setCaps("rtl", { sampleRate: FAST_RATE })
+		if (suppressCaps) t.engine.suppressExternal(false)
+		await settle()
+		await finish()
+		await feed(t)
+		return { t, pending, starts }
+	}
+
+	it("the hop's own start is named, unverified at the stream's real centre and rate", async () => {
+		const { t, pending, starts } = await heldHopOnNewRate(true)
+		try {
+			const named = starts.filter(s => s.requestedEpoch === pending.epoch)
+			expect(named).toEqual([
+				expect.objectContaining({
+					centreHz: HOP,
+					sampleRateHz: FAST_RATE,
+					tuningTrust: "unverified",
+					supersededEpoch: pending.epoch,
+				}),
+			])
+			// Never posted on the rate it asked for, and no further restart for it.
+			expect(t.hosts).toHaveLength(2)
+			expect(t.epochs(1).filter(e => e.sampleRateHz !== FAST_RATE)).toEqual([])
+			expect(t.epochs(1).at(-1)).toMatchObject({
+				settleSamples: (100 * FAST_RATE) / 1000,
+			})
+		} finally {
+			await t.engine.stop()
+		}
+	})
+
+	it("a newer command that replaces the hop before it starts names the hop on its own start", async () => {
+		const { t, pending, starts } = await heldHopOnNewRate(false)
+		try {
+			const named = starts.filter(s => s.supersededEpoch === pending.epoch)
+			expect(named).toHaveLength(1)
+			expect(named[0]?.sampleRateHz).toBe(FAST_RATE)
+			// No start claims the hop's id on the old rate, nor as commanded.
+			expect(
+				starts.filter(
+					s =>
+						s.requestedEpoch === pending.epoch &&
+						(s.sampleRateHz !== FAST_RATE || s.tuningTrust === "commanded"),
+				),
+			).toEqual([])
+		} finally {
+			await t.engine.stop()
+		}
+	})
+})
+
+describe("a scanner job whose held hop the restarted stream cannot take at its rate", () => {
+	it("sees its hop superseded, takes no dwell on it, and re-sends it", async () => {
+		const t = await ready({ inline: true })
+		const { record, runner, returned, starts } = jobScene(t)
+		const old = t.hosts[0]!
+		const exportState = old.exportState.bind(old)
+		let release: () => void = () => undefined
+		let restart: Promise<void> | null = null
+		try {
+			await runner.start()
+			for (let i = 0; i < 5; i++) await settle()
+			expect(returned).toHaveLength(1)
+			expect(runner.progress().phase).toBe("watching")
+			const gate = new Promise<void>(resolve => {
+				release = resolve
+			})
+			old.exportState = async () => {
+				await gate
+				return exportState()
+			}
+			// A reconnect spends the job's one re-send, which a restart in the same tick holds.
+			t.sources.emit("disconnected", "rtl")
+			t.sources.emit("payload-started", "rtl")
+			restart = t.engine.reconfigure()
+			for (let i = 0; i < 10; i++) await settle()
+			expect(returned).toHaveLength(2)
+			// The source reports another rate before the restart completes.
+			t.sources.setCaps("rtl", { sampleRate: FAST_RATE })
+			for (let i = 0; i < 5; i++) await settle()
+			release()
+			await restart
+			restart = null
+			for (let i = 0; i < 32; i++) {
+				t.fanout.write(Buffer.alloc(16_384, 127))
+				await settle()
+			}
+			for (let i = 0; i < 10; i++) await settle()
+			const held = returned[1]!
+			// The engine names the held hop on a start at the stream's rate, never as commanded.
+			const named = starts.filter(s => s.supersededEpoch === held)
+			expect(named).toHaveLength(1)
+			expect(named[0]).toMatchObject({ sampleRateHz: FAST_RATE })
+			expect(
+				starts.filter(
+					s => s.requestedEpoch === held && s.tuningTrust === "commanded",
+				),
+			).toEqual([])
+			// The job re-sent its hop. The fake caps never follow the tuner's rate, so that re-send
+			// restarts the stream again, whose opening takes its own one re-send, then R1 stops it.
+			expect(returned).toHaveLength(4)
+			for (let i = 0; i < 20; i++) await settle()
+			expect(returned).toHaveLength(4)
+			expect(record.state).toBe("running")
+			expect(runner.progress().phase).not.toBe("watching")
 		} finally {
 			old.exportState = exportState
 			release()
