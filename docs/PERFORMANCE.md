@@ -668,6 +668,91 @@ Live, the worker's line `spectrum frame path` says which path runs; `worker.cpuU
 guard's figure) compares them with `WAVEKIT_SPECTRUM_FRAME_PATH=js` and unset. With `--mode stages`
 or the pipeline's opt-in profile on the wasm path, the `fft` stage holds the whole kernel call.
 
+## Wideband recorder NFM chain in wasm (2026-11-07)
+
+The wideband analog recorder demodulates each recording on the main thread
+(`WidebandAnalogRecorder.readSlice`, `WidebandNfmChain.process` per slice). `createWidebandNfmChain`
+runs the same chain in a wasm32 kernel, `native/wavekit-nfm`, when the artefact
+`dist/wideband-nfm.wasm` validates and instantiates; otherwise it builds the JS chain, which stays the
+reference and the fallback. One info line per process (`wideband NFM chain path`) names the path and
+the reason.
+
+**Scope.** One `nfm_run` call per slice piece (at most `MAX_SLICE_SAMPLES` IQ pairs) runs every stage
+of `wideband-nfm.ts`: the NCO mix and triangular sum-and-dump, the stage-2 and ±8 kHz channel FIRs,
+the resampler to 48 kHz, the `FmAudioDemod` discriminator (de-emphasis, 127-tap low-pass, 6:1) and
+the 300 Hz high- and low-pass biquads. JS copies the CU8 piece into the kernel's memory and copies the
+pcm out (a new array per call, as the JS chain returns); `toneAudio()` is a view of the kernel's
+memory, which the recorder copies as before.
+
+**Equivalence is stated, not bit for bit: pcm and tone within ±1 LSB, the same verdicts.** JS hands
+the kernel every table and constant (U8 lookup, NCO rotation, all taps, biquad coefficients,
+discriminator scale and de-emphasis factor). Stage 1 runs in f64x2 lanes with the JS operand order
+per lane (a subtraction is the addition of an exactly negated product), values JS stores in a
+Float32Array are rounded to f32 at the same points, `Math.hypot` (the NCO renormalisation) is V8's
+algorithm, `Math.round` is half-up, and `atan2` is the fdlibm algorithm V8 also uses. The one
+deliberate difference: the stage-2, channel and discriminator FIRs sum with four partial
+accumulators, which moves a few f64 ULP before the next f32 rounding. Measured over every scene of
+`tests/unit/core/scanner/channel/wideband-nfm-wasm-equivalence.test.ts` (an NFM QSO with CTCSS in two
+overs, a speech-like voice ID, an unmodulated carrier, noise, a 4FSK burst, a retune to new chains at
+a new offset, high-pass off, at 1.024 and 2.4 Msps and at 64 kHz, 250 kHz and 3.2 Msps, chunks of 1
+sample to `MAX_SLICE_SAMPLES`): 0 LSB difference on every pcm and tone sample. The test bounds it at
+1 LSB and requires identical verdicts from the recorder's judges on both outputs: `VoiceActivityGate`
+(latch frame and conclusion), `VoiceOnAirMeter`, the `CtcssBank` result and per-block winners, and
+`ToneClassEvidence` (result, speech counts, gap rule). A fast-check property (100 runs) holds the
+wasm chain's output identical under random chunk splits.
+
+**Faults.** A trap or a kernel error code never reaches the recorder: the chain drops its kernel and
+runs that same slice, and every later one, in the JS chain it inherits, whose state is still the
+initial one. The transient is that of a new chain: the filters, discriminator and biquads start from
+rest (a few ms of settling, the 300 Hz high-pass the longest); no audio is lost or duplicated. One
+warn line per fault (fields `cause`, `error`, `k`, `m`, `faults`, `maxFaults`; no IQ, audio or
+frequency). After `NFM_WASM_MAX_FAULTS` (3) faults in a process every new chain is JS, logged once.
+
+**Memory is fixed.** Each chain imports its own `WebAssembly.Memory` with `initial = maximum`, sized by
+`nfmKernelLayout` from its factors and `MAX_SLICE_SAMPLES`; it cannot grow and nothing is allocated
+per slice beyond the returned pcm. Bytes: 128 KiB reserved for the 64 KiB stack and static data
+(`__heap_base` 66 368), a 576-byte control block, the 2 KiB U8 table, taps (8 bytes each), doubled
+delay lines (32 bytes per complex tap, 16 per discriminator tap), the 256 KiB CU8 piece
+(2 · `MAX_SLICE_SAMPLES`) and pcm and tone of `floor((5 + ceil(MAX_SLICE_SAMPLES / (k · m)) + 2) / 6) + 1`
+frames each. 1.024 Msps (k 7, m 3): 406 852 bytes, 7 pages (448 KiB); 2.4 Msps (k 10, m 5): 7 pages;
+the densest case, 48 to 96 kHz input (k · m = 1): 8 pages (512 KiB). The inherited JS chain adds its
+own fixed buffers (50 KB at 1.024 Msps). Two sessions: under 1.1 MiB. A chain is freed with its
+session (garbage collected; nothing else holds it): a test makes and drops 1000 chains and finds none
+retained after a GC.
+
+**Selection** (no config key): `WAVEKIT_RECORDER_DSP=js` forces JS, `=wasm` logs a warning when the
+kernel is unavailable, unset means auto; `WAVEKIT_RECORDER_DSP_WASM` names another artefact.
+
+**Build.** One artefact for amd64 and arm64 (12.5 KB, `no_std`, no crates.io dependency). Locally,
+with Rust 1.98.1 and the `wasm32-unknown-unknown` target: `native/wavekit-nfm/build.sh` writes
+`dist/wideband-nfm.wasm` next to `dist/index.js`. Without it, `pnpm run build` and `make dev-local`
+run the JS chain and log why. The Dockerfile's `frame-wasm` stage builds it with the frame kernel and
+copies it into `/app/dist`.
+
+The recorder's per-slice block (25 ms slices, `process` then the tone copy) on synthetic NFM voice with
+CTCSS, 10 s of IQ per run after 0.5 s of warm-up, thread CPU (`process.threadCpuUsage`) per second of
+IQ, JS and wasm alternated over 3 rounds, Mac i5, load average 11.2 to 11.9:
+
+| Chain, CPU ms per IQ second | 1.024 Msps, 1 session | 1.024 Msps, 2 sessions | 2.4 Msps, 1 session | 2.4 Msps, 2 sessions |
+| --------------------------- | --------------------- | ---------------------- | ------------------- | -------------------- |
+| JS                          | 35.3 - 40.4           | 66.3 - 74.7            | 51.6 - 56.9         | 104.3 - 108.1        |
+| wasm                        | 15.0 - 18.0           | 28.6 - 30.9            | 25.3 - 28.5         | 46.1 - 50.1          |
+
+That is 2.2 to 2.5 times less main-thread CPU at 1.024 Msps and 2.0 to 2.3 times at 2.4 Msps. A
+catch-up turn (1 s of IQ back to back, one session) took 34 to 39 ms in JS and 14 to 17 ms in wasm at
+1.024 Msps, 49 to 61 ms and 19 to 40 ms at 2.4 Msps. The p99 slice was 1.4 to 3.9 ms in JS and 0.7 to
+1.5 ms in wasm at 1.024 Msps; the worst single slices (1.5 to 15 ms) are wall time on a loaded host
+and follow preemption, not the path. `WIDEBAND_CPU_FIXED_MS` and `WIDEBAND_CPU_MS_PER_MSPS` (the
+recorder's CPU reservation) are still the JS chain's figures.
+
+```bash
+native/wavekit-nfm/build.sh                       # dist/wideband-nfm.wasm
+WAVEKIT_NFM_BENCH=1 nice -n 10 pnpm exec vitest run --maxWorkers=1 \
+  tests/unit/core/scanner/channel/wideband-nfm-wasm-bench.test.ts
+WAVEKIT_NFM_EVIDENCE=1 pnpm exec vitest run --maxWorkers=1 \
+  tests/unit/core/scanner/channel/wideband-nfm-wasm-equivalence.test.ts
+```
+
 ## Frame tracks and main-thread reads (2026-11-06)
 
 **`Tracker.frame` sums linear power.** It used to read a per-frame dB array and take `10 ** (dB/10)`

@@ -593,11 +593,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=chan-cargo-registry-$
 
 # ============================================================================
 # Stage: frame-wasm
-# Purpose: Build the spectrum worker's frame kernel (native/wavekit-frame,
-#          AGPL-3.0-or-later, no dependencies) for wasm32 with SIMD. One
-#          artefact serves amd64 and arm64, so it builds once on the build
-#          platform with the pinned toolchain; the worker falls back to JS
-#          when it is missing or does not validate.
+# Purpose: Build the wasm32 SIMD kernels (AGPL-3.0-or-later, no dependencies):
+#          the spectrum worker's frame kernel (native/wavekit-frame) and the
+#          wideband recorder's NFM chain (native/wavekit-nfm). One artefact
+#          each serves amd64 and arm64, so they build once on the build
+#          platform with the pinned toolchain; each falls back to JS when it
+#          is missing or does not validate.
 # ============================================================================
 FROM --platform=$BUILDPLATFORM ${RUST_IMAGE} AS frame-wasm
 
@@ -610,6 +611,14 @@ COPY native/wavekit-frame/src ./src
 
 RUN CARGO_TARGET_DIR=/tmp/frame-target sh ./build.sh /out/spectrum-frame.wasm && \
     test "$(head -c 4 /out/spectrum-frame.wasm | od -An -tx1 | tr -d ' ')" = "0061736d"
+
+WORKDIR /src/wavekit-nfm
+
+COPY native/wavekit-nfm/Cargo.toml native/wavekit-nfm/Cargo.lock native/wavekit-nfm/build.sh ./
+COPY native/wavekit-nfm/src ./src
+
+RUN CARGO_TARGET_DIR=/tmp/nfm-target sh ./build.sh /out/wideband-nfm.wasm && \
+    test "$(head -c 4 /out/wideband-nfm.wasm | od -An -tx1 | tr -d ' ')" = "0061736d"
 
 # ============================================================================
 # Stage: final-base
@@ -718,6 +727,9 @@ COPY --from=node-build /app/dist /app/dist
 # wasm frame kernel beside dist/spectrum-worker.js (frame-wasm stage)
 COPY --from=frame-wasm /out/spectrum-frame.wasm /app/dist/spectrum-frame.wasm
 COPY native/wavekit-frame/LICENSES.md /usr/share/doc/wavekit-frame/LICENSES.md
+# wasm NFM chain beside dist/index.js, where the wideband recorder looks (frame-wasm stage)
+COPY --from=frame-wasm /out/wideband-nfm.wasm /app/dist/wideband-nfm.wasm
+COPY native/wavekit-nfm/LICENSES.md /usr/share/doc/wavekit-nfm/LICENSES.md
 COPY --from=node-build /app/node_modules /app/node_modules
 COPY --from=node-build /app/packages/shared/package.json /app/packages/shared/package.json
 COPY --from=node-build /app/packages/shared/dist /app/packages/shared/dist

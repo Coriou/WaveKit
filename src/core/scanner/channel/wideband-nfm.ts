@@ -8,9 +8,28 @@
  * 5. a 4th-order 300 Hz Butterworth high-pass (RBJ biquads) that removes a CTCSS sub-tone from
  *    the written audio. `toneAudio()` is the same audio low-passed at 300 Hz (4th order) for a
  *    CTCSS bank, so voice energy just above the sub-audible band does not swamp its band test.
+ *
+ * `createWidebandNfmChain` runs the same stages in a wasm kernel (native/wavekit-nfm,
+ * wideband-nfm-wasm.ts) when it loads, else in this JS chain, which stays the reference and the
+ * fallback: pcm and tone within ±1 LSB of it, the same voice gate, tone class and CTCSS verdicts
+ * (tests/unit/core/scanner/channel/wideband-nfm-wasm*.test.ts).
  */
+import process from "node:process"
 import { WaveKitError } from "../../../utils/errors.js"
+import { createComponentLogger, createLogger } from "../../../utils/logger.js"
 import { ANALOG_AUDIO_RATE_HZ, FmAudioDemod } from "./fm-audio.js"
+import {
+	NFM_WASM_FILE,
+	NfmKernel,
+	loadNfmWasm,
+	recorderDspChoice,
+} from "./wideband-nfm-wasm.js"
+import type {
+	NfmKernelDims,
+	NfmWasmLoad,
+	NfmWasmModule,
+	RecorderDspChoice,
+} from "./wideband-nfm-wasm.js"
 
 const DEMOD_RATE_HZ = 48_000
 /** Half the 16 kHz OBW bound of the recorder's trigger: a 25 kHz NFM channel's Carson band. */
@@ -118,6 +137,10 @@ export class Biquad {
 		this.b2 = edge / a0
 		this.a1 = (-2 * cos) / a0
 		this.a2 = (1 - alpha) / a0
+	}
+	/** (b0, b1, b2, a1, a2), for the wasm chain (it takes them instead of recomputing them). */
+	get coefficients(): readonly number[] {
+		return [this.b0, this.b1, this.b2, this.a1, this.a2]
 	}
 	step(x: number): number {
 		const y =
@@ -370,4 +393,280 @@ export class WidebandNfmChain {
 	toneAudio(): Int16Array {
 		return this.tone.subarray(0, this.toneLength)
 	}
+}
+
+// ---- the wasm-backed chain ----
+
+/** fm-audio.ts `lowpass()`, the discriminator's 127-tap 3 kHz FIR at 48 kHz (the same arithmetic). */
+const DISCRIMINATOR_TAPS = 127
+function discriminatorTaps(): Float64Array {
+	const h = new Float64Array(DISCRIMINATOR_TAPS)
+	let sum = 0
+	for (let k = 0; k < DISCRIMINATOR_TAPS; k++) {
+		const t = k - (DISCRIMINATOR_TAPS - 1) / 2
+		const x = ((2 * 3000) / DEMOD_RATE_HZ) * t
+		const sinc = t === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x)
+		const window =
+			0.42 -
+			0.5 * Math.cos((2 * Math.PI * k) / (DISCRIMINATOR_TAPS - 1)) +
+			0.08 * Math.cos((4 * Math.PI * k) / (DISCRIMINATOR_TAPS - 1))
+		h[k] = sinc * window
+		sum += h[k]!
+	}
+	return h.map(value => value / sum)
+}
+
+/** fm-audio.ts `FmAudioDemod` defaults (5 kHz deviation, 750 µs de-emphasis), the same arithmetic. */
+export function discriminatorTables(): {
+	taps: Float64Array
+	scale: number
+	alpha: number
+} {
+	return {
+		taps: discriminatorTaps(),
+		scale: DEMOD_RATE_HZ / (2 * Math.PI * 5000),
+		alpha: 1 - Math.exp(-1 / (DEMOD_RATE_HZ * 750 * 1e-6)),
+	}
+}
+
+/** Wasm faults (traps, kernel errors, failed instances) after which a process stops trying wasm. */
+export const NFM_WASM_MAX_FAULTS = 3
+
+/** The log lines the runtime writes (a component logger; tests pass a recorder of calls). */
+export interface WidebandNfmLog {
+	info(obj: object, msg: string): void
+	warn(obj: object, msg: string): void
+}
+
+export interface WidebandNfmRuntimeOptions {
+	choice: RecorderDspChoice
+	/** The artefact (read once, on the first chain). */
+	location: string | URL
+	/** Default: a "WidebandNfm" component logger at info, created on the first line. */
+	log?: WidebandNfmLog
+}
+
+/**
+ * Chooses and builds chains for one process: compiles the artefact once, logs the path once,
+ * counts wasm faults and stops trying wasm after NFM_WASM_MAX_FAULTS of them (logged once).
+ */
+export class WidebandNfmRuntime {
+	/** Wasm faults so far (each logged, at most NFM_WASM_MAX_FAULTS lines). */
+	faults = 0
+	private load: NfmWasmLoad | null = null
+	private pathLogged = false
+	private disabledLogged = false
+	private log: WidebandNfmLog | null
+
+	constructor(private readonly opts: WidebandNfmRuntimeOptions) {
+		this.log = opts.log ?? null
+	}
+
+	/** The compiled module, or why not (compiled on the first call). */
+	wasm(): NfmWasmLoad {
+		if (this.opts.choice === "js")
+			return { ok: false, reason: "WAVEKIT_RECORDER_DSP=js" }
+		this.load ??= loadNfmWasm(this.opts.location)
+		return this.load
+	}
+
+	/** True once faults reached the bound: new chains are JS. */
+	get disabled(): boolean {
+		return this.faults >= NFM_WASM_MAX_FAULTS
+	}
+
+	chain(opts: WidebandNfmOptions): WidebandNfmChain {
+		const js = (reason: string): WidebandNfmChain => {
+			const chain = new WidebandNfmChain(opts)
+			this.logPath("js", reason)
+			return chain
+		}
+		if (this.disabled) return js(`wasm disabled after ${this.faults} faults`)
+		const load = this.wasm()
+		if (!load.ok) return js(load.reason)
+		// Throws for options the JS chain refuses, before any memory is made.
+		const chain = new WasmWidebandNfmChain(opts, this)
+		const made = chain.attach(load.module)
+		if (!made.ok) {
+			this.fault("instance", made.reason, chain.factors)
+			return js(made.reason)
+		}
+		this.logPath("wasm", "the kernel validated and instantiated")
+		return chain
+	}
+
+	/** One wasm fault (no IQ, no audio, no frequency in the line). */
+	fault(
+		cause: "trap" | "status" | "instance",
+		error: string,
+		factors: DecimationFactors,
+	): void {
+		this.faults++
+		const log = this.logger()
+		if (this.faults <= NFM_WASM_MAX_FAULTS)
+			log.warn(
+				{
+					cause,
+					error,
+					k: factors.k,
+					m: factors.m,
+					faults: this.faults,
+					maxFaults: NFM_WASM_MAX_FAULTS,
+				},
+				"wideband NFM wasm fault: the chain continues in JS",
+			)
+		if (this.disabled && !this.disabledLogged) {
+			this.disabledLogged = true
+			log.warn(
+				{ faults: this.faults },
+				"wideband NFM wasm disabled for this process: new chains run in JS",
+			)
+		}
+	}
+
+	private logPath(path: "js" | "wasm", reason: string): void {
+		if (this.pathLogged) return
+		this.pathLogged = true
+		if (this.opts.choice === "wasm" && path !== "wasm")
+			this.logger().warn(
+				{ path, reason },
+				"wideband NFM chain path (wasm unavailable)",
+			)
+		else this.logger().info({ path, reason }, "wideband NFM chain path")
+	}
+
+	private logger(): WidebandNfmLog {
+		this.log ??= createComponentLogger(
+			createLogger({ level: "info" }),
+			"WidebandNfm",
+		)
+		return this.log
+	}
+}
+
+/**
+ * The JS chain's stages in the wasm kernel. Constructed by WidebandNfmRuntime; the JS state it
+ * inherits stays untouched while the kernel runs, so a fault falls back to a fresh JS chain.
+ */
+class WasmWidebandNfmChain extends WidebandNfmChain {
+	private kernel: NfmKernel | null = null
+
+	constructor(
+		private readonly opts: WidebandNfmOptions,
+		private readonly runtime: WidebandNfmRuntime,
+	) {
+		super(opts)
+	}
+
+	/** Builds the kernel from this chain's own tables (computed as the JS chain computes them). */
+	attach(module: NfmWasmModule): { ok: true } | { ok: false; reason: string } {
+		const { k, m, rateHz } = this.factors
+		const w = (-2 * Math.PI * this.opts.offsetHz) / this.opts.inputRateHz
+		const stage2Taps = blackmanSinc(STAGE2_TAPS_PER_DECIMATION * m + 1, 0.5 / m)
+		const channelTaps = blackmanSinc(CHANNEL_TAPS, CHANNEL_CUTOFF_HZ / rateHz)
+		const demod = discriminatorTables()
+		const dims: NfmKernelDims = {
+			k,
+			m,
+			stage2Taps: stage2Taps.length,
+			channelTaps: channelTaps.length,
+			demodTaps: demod.taps.length,
+			maxIn: MAX_SLICE_SAMPLES,
+		}
+		const made = NfmKernel.create(module, dims, {
+			lut: U8_TO_FLOAT,
+			rotRe: Math.cos(w),
+			rotIm: Math.sin(w),
+			cicScale: 1 / (k * k),
+			step: rateHz / DEMOD_RATE_HZ,
+			stage2Taps,
+			channelTaps,
+			demodTaps: demod.taps,
+			demodScale: demod.scale,
+			demodAlpha: demod.alpha,
+			highPass:
+				this.opts.highPass === false
+					? []
+					: butterworth4("high").map(b => b.coefficients),
+			lowPass: butterworth4("low").map(b => b.coefficients),
+		})
+		if (!made.ok) return made
+		this.kernel = made.kernel
+		return { ok: true }
+	}
+
+	/** Which stages run this chain now ("js" from the start, or after a fault). */
+	get path(): "js" | "wasm" {
+		return this.kernel === null ? "js" : "wasm"
+	}
+
+	/** The kernel (tests: memory size, trap hooks); null on the JS path. */
+	get kernelForTest(): NfmKernel | null {
+		return this.kernel
+	}
+
+	override process(cu8: Uint8Array): Int16Array {
+		const kernel = this.kernel
+		if (kernel === null) return super.process(cu8)
+		if (cu8.length % 2 !== 0 || cu8.length / 2 > MAX_SLICE_SAMPLES)
+			throw new WaveKitError(
+				"Invalid wideband NFM slice",
+				"SCANNER_AUDIO_INPUT",
+			)
+		try {
+			return kernel.process(cu8)
+		} catch (err) {
+			// A trap or a kernel error: drop the kernel (its state is suspect) and run this slice and
+			// every later one in the inherited JS chain, whose state is still the initial one.
+			this.kernel = null
+			const trap = !(err instanceof WaveKitError)
+			this.runtime.fault(
+				trap ? "trap" : "status",
+				err instanceof Error ? (trap ? err.name : err.message) : "unknown",
+				this.factors,
+			)
+			return super.process(cu8)
+		}
+	}
+
+	override toneAudio(): Int16Array {
+		return this.kernel === null ? super.toneAudio() : this.kernel.toneAudio()
+	}
+}
+
+let defaultRuntime: WidebandNfmRuntime | null = null
+
+/** The process's runtime: `WAVEKIT_RECORDER_DSP` and `WAVEKIT_RECORDER_DSP_WASM` (read once). */
+export function widebandNfmRuntime(): WidebandNfmRuntime {
+	defaultRuntime ??= new WidebandNfmRuntime({
+		choice: recorderDspChoice(process.env["WAVEKIT_RECORDER_DSP"]),
+		location:
+			process.env["WAVEKIT_RECORDER_DSP_WASM"] ??
+			new URL(`./${NFM_WASM_FILE}`, import.meta.url),
+	})
+	return defaultRuntime
+}
+
+/**
+ * A recording chain: the wasm kernel when it loads and instantiates, else the JS chain (the path
+ * and its reason logged once per process). Same interface and options as `new WidebandNfmChain`;
+ * throws for the same options. A wasm fault never reaches the caller: the chain continues in JS.
+ */
+export function createWidebandNfmChain(
+	opts: WidebandNfmOptions,
+	runtime: WidebandNfmRuntime = widebandNfmRuntime(),
+): WidebandNfmChain {
+	return runtime.chain(opts)
+}
+
+/** The path a chain from `createWidebandNfmChain` runs on now. */
+export function widebandNfmChainPath(chain: WidebandNfmChain): "js" | "wasm" {
+	return chain instanceof WasmWidebandNfmChain ? chain.path : "js"
+}
+
+/** Test access to a chain's kernel (null: JS). */
+export function widebandNfmKernelForTest(
+	chain: WidebandNfmChain,
+): NfmKernel | null {
+	return chain instanceof WasmWidebandNfmChain ? chain.kernelForTest : null
 }
