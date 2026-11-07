@@ -384,7 +384,7 @@ curl http://localhost:9000/health
 A protected core that lost its private access directory answers `/health` with
 503 and `reason` `access_authority_lost` while it closes, then exits with code 1. s6
 starts it again inside the container about 5 seconds later, with no Docker restart: a
-recording in progress ends, decoder output stops for those seconds, and tuning and a
+recording in progress ends (an IQ capture in progress is lost), decoder output stops for those seconds, and tuning and a
 running sweep come back as after any restart. If another core still owns the directory
 the restart is refused and retried at a limited rate, without touching the tuner:
 [what happens and why](SECURITY.md#when-a-core-loses-its-private-directory).

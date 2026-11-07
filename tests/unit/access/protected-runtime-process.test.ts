@@ -150,6 +150,14 @@ export class ScannerService extends EventEmitter {
 		this.owner.ownCleanup("service", async () => {
 			process.stdout.write("scanner-stop-real\\n")
 			process.stdout.write("close-lost-ownership " + options.lostOwnership() + " " + options.tuner.config.lostOwnership() + "\\n")
+			if (process.env.R14_PROCESS_CASE?.startsWith("hung-file-calls:")) {
+				// More calls than the default 4 pool threads, each stuck opening a FIFO with no writer.
+				const fifo = process.env.R14_PROCESS_CASE.slice("hung-file-calls:".length)
+				const { open } = await import("node:fs/promises")
+				for (let call = 0; call < 8; call++) void open(fifo, "r")
+				process.stdout.write("close-file-calls-hung\\n")
+				await new Promise(() => {})
+			}
 			if (process.env.R14_PROCESS_CASE === "legacy-held") {
 				// Listen before announcing: the parent signals on the marker, and an
 				// unhandled SIGUSR2 would kill this process.
@@ -988,6 +996,42 @@ describe("built protected runtime process", () => {
 		expect(await lost.exited).toEqual({ code: 1, signal: null })
 		expect(lost.stdout()).toContain("close-lost-ownership true true")
 	}, 40_000)
+
+	it("ends a close stuck on hung file calls with SIGKILL, which plain process exit would wait for", async () => {
+		const env = await fixture()
+		const storage = await PrivateAccessStorage.open({
+			directory: env.directory,
+			mode: "provision",
+			ownership: "single-host-pid-namespace",
+		})
+		await storage.close()
+		await env.releasePorts()
+		const scratch = await mkdtemp(join(tmpdir(), "wavekit-hung-close-"))
+		const fifo = join(scratch, "fifo")
+		await new Promise<void>((resolve, reject) => {
+			const made = spawn("mkfifo", [fifo], { stdio: "ignore" })
+			made.once("error", reject)
+			made.once("close", () => resolve())
+		})
+		try {
+			const core = run(
+				env.configFile,
+				env.directory,
+				scannerPhasesEntry,
+				`hung-file-calls:${fifo}`,
+			)
+			await started(core)
+			const owner = (await readdir(env.directory)).find(name =>
+				name.startsWith("owner-"),
+			)
+			if (owner === undefined) throw new Error("Expected the core's owner file")
+			await rm(join(env.directory, owner))
+			expect(await core.exited).toEqual({ code: null, signal: "SIGKILL" })
+			expect(core.stdout()).toContain("close-file-calls-hung")
+		} finally {
+			await rm(scratch, { recursive: true, force: true })
+		}
+	}, 60_000)
 
 	it("mounts admission, disables raw listeners and drains SIGTERM before a durable browser restart", async () => {
 		const env = await fixture()

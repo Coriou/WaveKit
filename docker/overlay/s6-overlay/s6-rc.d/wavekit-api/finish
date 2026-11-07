@@ -3,9 +3,10 @@
 # A failed exit is restarted at once, and a start refused by a live owner of the private directory
 # fails again within a second or two, forever. 4 s after each one holds that to one start in about
 # 5 s (720 an hour), inside s6-supervise's default 5 s limit for this script. A clean exit (0) or a
-# signal (256) has nothing to wait for: container stop stays prompt.
-case "${1:-0}" in
-	0 | 256) ;;
+# stop signal (TERM, INT, QUIT) has nothing to wait for: container stop stays prompt. Any other
+# signal is a failed exit like the others, including 9 from the core's own close watchdog.
+case "${1:-0}:${2:-0}" in
+	0:* | 256:15 | 256:2 | 256:3) ;;
 	*) sleep 4 ;;
 esac
 exit 0
