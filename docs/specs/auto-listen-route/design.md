@@ -100,7 +100,7 @@ Constants in `packages/api-types/src/live-audio.ts` (exported, pinned by a contr
 | `LIVE_AUDIO_AUTO_ROUTE_DIGITAL_RELEASE_MS` | 300       | 4.4                                        |
 | `LIVE_AUDIO_AUTO_ROUTE_PREEMPT_MAX_MS`     | 1 500     | = `LIVE_AUDIO_AUTO_SQUELCH_PREROLL_MAX_MS` |
 | `LIVE_AUDIO_AUTO_ROUTE_TARGET_MS`          | 60        | 4.7                                        |
-| `LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS` | 5         | 2.7, 100 ms per tick                       |
+| `LIVE_AUDIO_AUTO_ROUTE_CATCHUP_MAX_BLOCKS` | 25        | 2.7, 500 ms and 48 000 B per tick          |
 
 DTOs:
 
@@ -471,13 +471,21 @@ it.
 The pacer targets `due = floor((now − start) × 48 000 / 1 000)` samples. Each tick emits
 `min(due − emitted, CATCHUP_MAX_BLOCKS × 960)` samples in whole 960-sample blocks:
 
-- **Normal jitter** (a tick late by up to 100 ms) is caught up in the same tick; the long-run
-  rate is exact.
-- **Stall** (event loop blocked for more than 100 ms beyond the last tick): after emitting the
+- **Normal jitter and short stalls** (a tick late by up to 500 ms) are caught up in the same tick;
+  the long-run rate is exact. The bound equals the web jitter ring's maximum (`RING_MAX_MS`), and
+  48 000 B is half of a client's 96 000 B queue. A client's buffer must take a 500 ms burst; one
+  already holding audio can overflow, and the web ring then discards back to its target. All
+  blocks of a burst decide on the tick's `now`, the true time. A digital source can therefore
+  release mid-burst when a stall of 300 ms or more drains its queue and its late frames arrive
+  after the tick: one extra switch to `none` and back, with nothing dropped.
+- **Stall** (event loop blocked for more than 500 ms beyond the last tick): after emitting the
   capped amount, the clock is **rebased**: `start` moves forward so that `due − emitted = 0`,
   `clockRebases` counts it. The output then has a timing discontinuity (the client's own buffer
   underruns), but no source sample is dropped or repeated: the FIFOs keep their audio, so the
   backlog grows by the stall and is reduced by catch-up (4.7) in the next silence.
+- **Lost source audio is not recovered.** Catch-up restores time only. Audio the source never
+  delivered (IQ congestion) leaves the FIFO short, so those blocks are zeros at full rate, counted
+  in `underruns`: the byte rate looks perfect and the listener hears holes.
 - **Backlog bound**: each source FIFO is capped at `FIFO_MS` (overflow drops oldest, counted),
   so `latencyMs` never exceeds `FIFO_MS + BLOCK_MS`.
 - A monotonic clock step backwards (not expected from `performance.now()`) emits nothing until
@@ -666,7 +674,7 @@ synthetic PCM, a fake voice source, a fake coverage port and an injected clock.
    out within ±0.5 dB and tones above `0.5 m` are attenuated by at least 50 dB. _Validates 2.2,
    2.3._
 3. **Bounded pacing.** For random tick schedules: emitted never exceeds due; after every tick
-   `due − emitted < 960` or a rebase was counted; with no tick later than 100 ms the long-run
+   `due − emitted < 960` or a rebase was counted; with no tick later than 500 ms the long-run
    count equals `floor(elapsed × 48)` within one block and `clockRebases` is 0; one tick emits at
    most `CATCHUP_MAX_BLOCKS` blocks; across a rebase no
    source sample is lost or repeated. _Validates 2.6, 2.7._
@@ -751,8 +759,9 @@ fake coverage port, and an injected clock. It registers an in-memory `/auto` cli
   beyond the queue bound.
 - Short digital overs queued during an analog handover still play; queued digital audio is
   invalidated by encryption, detach, retune or loss of verified coverage.
-- A stall over 100 ms rebases the output clock (a client-visible gap) rather than bursting
-  seconds of audio.
+- A stall over 500 ms rebases the output clock (a client-visible gap) rather than bursting
+  seconds of audio. The bound was 100 ms until a 290 ms stall each second proved to lose a fifth of
+  real time at the client while the source FIFO climbed to its 3 s cap.
 - Silent samples of a non-selected source are discarded, so a source cannot replay old silence
   after a handover.
 - 300 ms release times both ways: the evidence pre-roll already bridges syllable gaps; long

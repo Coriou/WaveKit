@@ -100,6 +100,7 @@ export function jobHarness(opts: HarnessOptions = {}) {
 			},
 			setAgc: () => Promise.resolve(),
 			holder: () => lease ?? undefined,
+			isConnected: () => true,
 			holderPriority: () => undefined,
 			operatorIdleSince: () => null,
 		} as never,

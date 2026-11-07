@@ -130,7 +130,7 @@ export interface ArbiterDeps {
 	tuner: ArbiterTuner
 	sources: Pick<SourceManager, "on" | "off" | "isRtlTcpSource"> &
 		// Optional: test doubles of the source manager predate pause / resume.
-		Partial<Pick<SourceManager, "resumeKind">>
+		Partial<Pick<SourceManager, "resumeKind" | "getStatus">>
 	epochs: (sourceId: string) => EpochClock | undefined
 	settings: () => ScannerSettings
 	/** Timer-mode settle class of the source's transport (§ 4.6). */
@@ -221,6 +221,8 @@ export class TunerArbiter extends EventEmitter {
 	private readonly recoveryRunning = new Set<string>()
 	/** Sources with a payload-started since their last disconnect. */
 	private readonly connected = new Set<string>()
+	/** Sources that lost their link (disconnect or teardown) with no payload-started since. */
+	private readonly linkLost = new Set<string>()
 	/** Leases carrying a crashed sweep's record (adopted, or handed over from an adopted lease). */
 	private readonly adopted = new WeakSet<Lease>()
 	/** Sources whose released lease is still sending TEST_MODE 0 and the restore. */
@@ -375,6 +377,17 @@ export class TunerArbiter extends EventEmitter {
 		return this.leases.has(sourceId)
 			? (this.priorities.get(sourceId) ?? 0)
 			: undefined
+	}
+
+	/**
+	 * False from a seen disconnect or teardown until the source's next payload, so a TCP reconnect
+	 * without data still reads false, and false for a source that never sent data (unreachable at boot
+	 * emits no disconnect). That reads the manager's sample time, not an event, so none can be missed.
+	 */
+	isConnected(sourceId: string): boolean {
+		if (this.linkLost.has(sourceId)) return false
+		const activity = this.deps.sources.getStatus?.(sourceId)?.activity
+		return activity ? activity.lastSampleAt !== null : true
 	}
 
 	acquire(
@@ -1293,6 +1306,7 @@ export class TunerArbiter extends EventEmitter {
 	private readonly onDisconnected = (sourceId: string): void => {
 		this.clearVerified(sourceId)
 		this.connected.delete(sourceId)
+		this.linkLost.add(sourceId)
 		this.emit("source-down", sourceId)
 	}
 
@@ -1300,12 +1314,14 @@ export class TunerArbiter extends EventEmitter {
 	private readonly onRemoved = (sourceId: string): void => {
 		this.clearVerified(sourceId)
 		this.connected.delete(sourceId)
+		this.linkLost.add(sourceId)
 	}
 
 	private readonly onPayloadStarted = (sourceId: string): void => {
 		// A payload restart is a new connection: the previous acceptance is stale.
 		this.clearVerified(sourceId)
 		this.connected.add(sourceId)
+		this.linkLost.delete(sourceId)
 		if (this.deps.sources.resumeKind?.(sourceId) === "plain") {
 			this.settlePlainResume(sourceId)
 			this.emit("source-up", sourceId, { plainResume: true })

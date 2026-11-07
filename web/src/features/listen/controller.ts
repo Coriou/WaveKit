@@ -5,6 +5,12 @@
 import { errorMessage, Store } from "../../data/index.ts"
 import type { LiveAudioStore } from "../../data/index.ts"
 import type { AudioStreamSource } from "./audio.ts"
+import {
+	AudioHealthTracker,
+	audioExpected,
+	NO_AUDIO_HEALTH,
+} from "./audio-health.ts"
+import type { AudioHealth } from "./audio-health.ts"
 import { PcmPlayer, pcmPlayerSupported } from "./pcm-player.ts"
 import type { RingStats } from "./pcm.ts"
 import { WavRecorder } from "./recorder.ts"
@@ -24,8 +30,10 @@ export interface ListenState {
 	hear: HearChoice
 	/** Listen › Record audio: seconds recorded, null when not recording. */
 	recording: { seconds: number; startedAt: number } | null
-	/** Output latency while playing (jitter buffer plus the device), ms; null otherwise. */
+	/** Output latency while playing (core backlog on `/auto`, jitter buffer and the device), ms; null otherwise. */
 	latencyMs: number | null
+	/** How much of the expected audio played: the card's "breaking up" and Audio options' detail. */
+	audio: AudioHealth
 }
 
 /** The part of PcmPlayer the controller drives (a fake in tests). */
@@ -55,6 +63,32 @@ export interface ListenControllerOptions {
 const VOLUME_KEY = "wavekit.web.volume"
 const REATTACH_DELAY_MS = 250
 const RETRY_MS = [1000, 2000, 5000] as const
+/**
+ * How long a dry jitter ring on an open stream stays "playing" before Listen says Connecting…. A busy core
+ * holds its 20 ms pacer for up to about 1.3 s, then the ring needs RING_TARGET_MS (200 ms) to prime again:
+ * 1 500 ms, rounded up. A real stall shows at most 2 000 + 200 ms (the ring draining) after its last byte.
+ */
+export const STALL_GRACE_MS = 2000
+/**
+ * No byte for this long on an open stream: reattach through fail(). `/auto` and decoded voice send bytes all
+ * the time (exact silence while squelched or between calls), so their longest gap is the core's 1 300 ms
+ * stall. `/stream` sends nothing while its source has no IQ (feed paused or dropped); there the retries end
+ * in the error state, which holds until audio returns. 2.5 × STALL_GRACE_MS = 5 000 ms is 3.8 times that, and leaves Connecting… on the
+ * card for 2 800 ms first. With RETRY_MS an unanswering core reaches the error state 5 + 1 + 5 + 2 + 5 + 5 + 5
+ * = 28 s after the attach.
+ */
+export const DEAD_STREAM_MS = 2.5 * STALL_GRACE_MS
+/**
+ * How often the core's `/auto` counters are read while playing there, in ring time. Status broadcasts only
+ * on a change, so this is the zero-fill figure's source: 5 readings per 10 s window, one small GET each 2 s.
+ */
+export const ROUTE_POLL_MS = 2000
+/**
+ * Stats arrive every 250 ms of rendering. Over 4 of those periods with none, the ring was not rendering
+ * (suspended, or a blocked page), so the core's counters since the last reading are not about this Listen.
+ * Time under the bound can credit at most 1 000 ms: 10% of the 10 s window, which is not yet breaking up.
+ */
+export const STATS_GAP_MS = 1_000
 
 function readVolume(): number {
 	try {
@@ -81,6 +115,16 @@ export class ListenController extends Store<ListenState> {
 	private attachedKey: string | null = null
 	private timer: ReturnType<typeof setTimeout> | null = null
 	private retries = 0
+	private stallTimer: ReturnType<typeof setTimeout> | null = null
+	private deadTimer: ReturnType<typeof setTimeout> | null = null
+	private lastDataAt = 0
+	private health = new AudioHealthTracker()
+	/** The route reading in flight; one that comes back after being replaced here is ignored. */
+	private routeRead: AbortController | null = null
+	private routePolledAt = Number.NEGATIVE_INFINITY
+	private lastStatsAt = 0
+	private routeSourceId: string | undefined
+	private routeLatencyMs = 0
 	private readonly liveAudio: LiveAudioStore
 	private readonly player: ListenPlayer | null
 	private unbind: (() => void) | null = null
@@ -101,10 +145,12 @@ export class ListenController extends Store<ListenState> {
 			hear: readHearChoice(),
 			recording: null,
 			latencyMs: null,
+			audio: NO_AUDIO_HEALTH,
 		})
 		this.liveAudio = liveAudio
 		const events = {
 			onStats: (stats: RingStats) => this.onStats(stats),
+			onData: () => this.noteData(),
 			onEnded: (reason: string) => this.fail(reason),
 			onBlocked: () => {
 				if (this.get().wanted) this.setPhase("blocked")
@@ -139,9 +185,13 @@ export class ListenController extends Store<ListenState> {
 		const offs = [
 			on("playing", () => {
 				this.retries = 0
+				this.clearStall()
 				this.setPhase("playing")
 			}),
-			on("waiting", () => this.get().wanted && this.setPhase("connecting")),
+			on("waiting", () => this.noteDry()),
+			// the element's only signs of bytes: it fetched more, or is playing what it fetched
+			on("progress", () => this.noteData()),
+			on("timeupdate", () => this.noteData()),
 			on("error", () => this.fail("The audio stream could not be played")),
 			on("ended", () => this.fail("The audio stream ended")),
 		]
@@ -167,8 +217,18 @@ export class ListenController extends Store<ListenState> {
 
 	/** User gesture: start the core's live audio if needed and play here. */
 	async start(): Promise<void> {
-		this.set({ ...this.get(), wanted: true, phase: "connecting", error: null })
+		this.set({
+			...this.get(),
+			wanted: true,
+			phase: "connecting",
+			error: null,
+			audio: NO_AUDIO_HEALTH,
+		})
 		this.retries = 0
+		this.health = new AudioHealthTracker()
+		this.abortRouteRead()
+		this.routePolledAt = Number.NEGATIVE_INFINITY
+		this.routeLatencyMs = 0
 		// unlock audio inside the gesture so the browser allows sound later on
 		const status = this.liveAudio.get().status
 		try {
@@ -357,18 +417,115 @@ export class ListenController extends Store<ListenState> {
 	private onStats(stats: RingStats): void {
 		const s = this.get()
 		if (!s.wanted || this.attachedKey === null || s.phase === "blocked") return
+		const auto = this.source?.route === "auto"
+		const { status, level } = this.liveAudio.get()
+		const now = Date.now()
+		if (
+			now - this.lastStatsAt > STATS_GAP_MS ||
+			status?.sourceId !== this.routeSourceId
+		)
+			this.rebaseRoute()
+		this.lastStatsAt = now
+		if (auto) this.readRoute(stats.renderedMs)
+		const audio = this.health.noteStats(
+			stats,
+			audioExpected(status, level, auto),
+			auto,
+		)
 		// to 10 ms: a reading that changes every stats tick would redraw the panel for nothing
 		const latency = stats.playing
 			? Math.round(
-					(stats.bufferedMs + (this.player?.outputLatencyMs?.() ?? 0)) / 10,
+					(stats.bufferedMs +
+						(auto ? this.routeLatencyMs : 0) +
+						(this.player?.outputLatencyMs?.() ?? 0)) /
+						10,
 				) * 10
 			: null
-		if (latency !== s.latencyMs)
-			this.update(x => ({ ...x, latencyMs: latency }))
+		const error = stats.playing ? null : s.error
+		if (latency !== s.latencyMs || audio !== s.audio || error !== s.error)
+			this.update(x => ({ ...x, latencyMs: latency, audio, error }))
 		if (stats.playing) {
 			this.retries = 0
+			this.clearStall()
 			this.setPhase("playing")
-		} else if (s.phase === "playing") this.setPhase("connecting")
+		} else this.noteDry()
+	}
+
+	/** One reading at a time; a failed one is skipped and the next says what happened since. */
+	private readRoute(renderedMs: number): void {
+		if (this.routeRead || renderedMs - this.routePolledAt < ROUTE_POLL_MS)
+			return
+		const read = new AbortController()
+		this.routeRead = read
+		this.routePolledAt = renderedMs
+		void this.liveAudio.readAutoRoute(read.signal).then(route => {
+			if (this.routeRead !== read) return
+			this.routeRead = null
+			if (!route) return
+			this.health.noteRoute(route)
+			this.routeLatencyMs = route.latencyMs
+		})
+	}
+
+	private abortRouteRead(): void {
+		this.routeRead?.abort()
+		this.routeRead = null
+	}
+
+	/**
+	 * What the core counted from here on is about this Listen again; what it counted before is not: a
+	 * suspended ring, a new stream, or another source. The base comes from a reading taken now.
+	 */
+	private rebaseRoute(): void {
+		this.abortRouteRead()
+		this.routePolledAt = Number.NEGATIVE_INFINITY
+		this.health.rebaseRoute()
+		this.lastStatsAt = Date.now()
+		this.routeSourceId = this.liveAudio.get().status?.sourceId
+	}
+
+	/**
+	 * The buffer ran dry on a stream that is still open. An underrun is not a reconnect: nothing was torn
+	 * down, and a core that paces late causes one a second. Connecting… is for a dry spell past the bound;
+	 * a stream that failed or ended goes through fail() at once, and one that went quiet at DEAD_STREAM_MS.
+	 */
+	private noteDry(): void {
+		if (this.get().phase !== "playing" || this.stallTimer) return
+		this.stallTimer = setTimeout(() => {
+			this.stallTimer = null
+			if (this.get().phase === "playing") this.setPhase("connecting")
+		}, STALL_GRACE_MS)
+	}
+
+	/** Called for every read of the stream, so it only stamps the time; the timer re-arms itself. */
+	private noteData(): void {
+		this.lastDataAt = Date.now()
+	}
+
+	private armDeadTimer(ms: number): void {
+		this.deadTimer = setTimeout(() => {
+			this.deadTimer = null
+			const s = this.get()
+			if (!s.wanted || this.attachedKey === null) return
+			const quiet = Date.now() - this.lastDataAt
+			if (quiet < DEAD_STREAM_MS) this.armDeadTimer(DEAD_STREAM_MS - quiet)
+			// a reattach would hide "Tap to play"; without the gesture nothing can sound anyway
+			else if (s.phase === "blocked") this.armDeadTimer(DEAD_STREAM_MS)
+			else this.fail(`No audio arrived for ${DEAD_STREAM_MS / 1000} s`)
+		}, ms)
+	}
+
+	/** A new stream has the full bound to send its first byte (a fetch may hang before any headers). */
+	private watchStream(): void {
+		this.clearDead()
+		this.lastDataAt = Date.now()
+		this.armDeadTimer(DEAD_STREAM_MS)
+	}
+
+	/** A retry after the error state keeps it: the card does not flip back to Connecting… every few seconds. */
+	private showAttaching(): void {
+		const { phase } = this.get()
+		if (phase !== "playing" && phase !== "error") this.setPhase("connecting")
 	}
 
 	private schedule(ms: number): void {
@@ -386,7 +543,9 @@ export class ListenController extends Store<ListenState> {
 		if (this.player) {
 			if (!source.httpUrl) return
 			this.attachedKey = this.key
-			if (this.get().phase !== "playing") this.setPhase("connecting")
+			this.watchStream()
+			this.rebaseRoute()
+			this.showAttaching()
 			this.player.play({
 				url: source.httpUrl,
 				format: source.format,
@@ -398,12 +557,13 @@ export class ListenController extends Store<ListenState> {
 		const el = this.el
 		if (!el || !source.wavUrl) return
 		this.attachedKey = this.key
+		this.watchStream()
 		// set before src: the element fetches with the session cookie on a protected core
 		if (source.credentials) el.crossOrigin = "use-credentials"
 		else el.removeAttribute("crossorigin")
 		el.src = source.wavUrl
 		el.volume = this.outVolume()
-		if (this.get().phase !== "playing") this.setPhase("connecting")
+		this.showAttaching()
 		el.play().catch((error: unknown) => {
 			if (error instanceof DOMException && error.name === "NotAllowedError")
 				this.update(s => ({ ...s, phase: "blocked" }))
@@ -412,6 +572,9 @@ export class ListenController extends Store<ListenState> {
 	}
 
 	private detach(): void {
+		this.clearStall()
+		this.clearDead()
+		this.abortRouteRead()
 		this.attachedKey = null
 		this.player?.stop()
 		const el = this.el
@@ -424,6 +587,8 @@ export class ListenController extends Store<ListenState> {
 	private fail(message: string): void {
 		const s = this.get()
 		if (!s.wanted || this.attachedKey === null) return
+		this.clearStall()
+		this.clearDead()
 		const delay = RETRY_MS[Math.min(this.retries, RETRY_MS.length - 1)] ?? 5000
 		this.retries += 1
 		this.update(x => ({
@@ -441,5 +606,15 @@ export class ListenController extends Store<ListenState> {
 	private clearTimer(): void {
 		if (this.timer) clearTimeout(this.timer)
 		this.timer = null
+	}
+
+	private clearStall(): void {
+		if (this.stallTimer) clearTimeout(this.stallTimer)
+		this.stallTimer = null
+	}
+
+	private clearDead(): void {
+		if (this.deadTimer) clearTimeout(this.deadTimer)
+		this.deadTimer = null
 	}
 }

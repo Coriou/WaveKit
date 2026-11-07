@@ -100,6 +100,8 @@ export function serviceHarness(
 		ambientTrust?: ScannerServiceDeps["ambientTrust"]
 		/** Source and tuner centre (default CENTRE). */
 		centreHz?: number
+		/** The live-audio status the service's impact reads (default: no live demodulator). */
+		liveDemod?: ScannerServiceDeps["liveDemod"]
 	} = {},
 ) {
 	const centre = opts.centreHz ?? CENTRE
@@ -171,7 +173,7 @@ export function serviceHarness(
 		tuner: tuner as never,
 		decoders: decoders as never,
 		digitalVoice: null,
-		liveDemod: null,
+		liveDemod: opts.liveDemod ?? null,
 		logger: pino({ level: "silent" }),
 		engineHost: "inline",
 		tickMs: 20,

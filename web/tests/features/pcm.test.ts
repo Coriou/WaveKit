@@ -118,6 +118,34 @@ describe("PcmRing", () => {
 		expect(ring.render(new Float32Array(8))).toBe(false)
 	})
 
+	it("accounts rendered and dry time, whatever the rates", () => {
+		const ring = new PcmRing({ rate: RATE, targetMs: 20, maxMs: 1_000 })
+		const out = new Float32Array(100)
+		const ms = (samples: number) => (samples / RATE) * 1000
+		// priming: all of it dry
+		ring.render(out)
+		expect(ring.renderedMs).toBeCloseTo(ms(100))
+		expect(ring.dryMs).toBeCloseTo(ms(100))
+		// 300 samples play two whole renders with no more dry
+		ring.push(ramp(300))
+		ring.render(out)
+		ring.render(out)
+		expect(ring.dryMs).toBeCloseTo(ms(100))
+		// the third runs out one sample early: a read needs the next sample to interpolate
+		ring.render(out)
+		expect(ring.underruns).toBe(1)
+		expect(ring.renderedMs).toBeCloseTo(ms(400))
+		expect(ring.dryMs).toBeCloseTo(ms(101))
+		expect(ring.stats()).toMatchObject({
+			renderedMs: ring.renderedMs,
+			dryMs: ring.dryMs,
+		})
+		// step 2: each output sample is 2 stream samples of time
+		const fast = new PcmRing({ rate: RATE, targetMs: 20, maxMs: 1_000 })
+		fast.render(out, 2)
+		expect(fast.renderedMs).toBeCloseTo(ms(200))
+	})
+
 	it("drops the oldest audio back to the target when the buffer grows past the max", () => {
 		const ring = new PcmRing({ rate: RATE, targetMs: 200, maxMs: 500 })
 		ring.push(ramp(400))

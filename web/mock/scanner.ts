@@ -3181,7 +3181,8 @@ export function registerScannerMock(
 			now.digitalVoiceListeners > consented.digitalVoiceListeners ||
 			more(now.runningDecoders, consented.runningDecoders) ||
 			more(now.pinnedDecoders, consented.pinnedDecoders) ||
-			more(now.scannerJobs, consented.scannerJobs)
+			more(now.scannerJobs, consented.scannerJobs) ||
+			more(now.unrestorable, consented.unrestorable)
 		)
 	}
 	const sourceBusy = (holder: JobRec) =>
@@ -3191,6 +3192,29 @@ export function registerScannerMock(
 			409,
 			{ reason: "held", holderJobId: holder.id },
 		)
+	/** The core's job-runner `impactWords`. */
+	const impactWords = (i: Impact): string => {
+		const decoders = [...new Set([...i.runningDecoders, ...i.pinnedDecoders])]
+		return [
+			i.liveAudioClients > 0
+				? `${i.liveAudioClients} live audio listener${i.liveAudioClients === 1 ? "" : "s"}`
+				: "",
+			i.digitalVoiceListeners > 0
+				? `${i.digitalVoiceListeners} digital voice listener${i.digitalVoiceListeners === 1 ? "" : "s"}`
+				: "",
+			decoders.length > 0
+				? `decoder${decoders.length === 1 ? "" : "s"} ${decoders.join(", ")}`
+				: "",
+			i.scannerJobs.length > 0
+				? `scanner job${i.scannerJobs.length === 1 ? "" : "s"} ${i.scannerJobs.join(", ")}`
+				: "",
+			i.unrestorable.length > 0
+				? `tuner settings it cannot restore (${i.unrestorable.join(", ")})`
+				: "",
+		]
+			.filter(part => part !== "")
+			.join(", ")
+	}
 
 	/** Replans the live sweeps whose lockout exclusions changed (WG2 req 12). */
 	const replanLockouts = () => {
@@ -3244,8 +3268,17 @@ export function registerScannerMock(
 					now >= r.resumeAt &&
 					tuner.controlMode === "internal" &&
 					!leaseHolder()
-				)
-					resumeSweep(r)
+				) {
+					const impact = impactFor(r.spec, r.id)
+					if (impactGrew(impact, r.consentedImpact)) {
+						// More to disturb than was consented: as the core's preemptor-idle, Resume asks first.
+						r.reason = "resume-blocked"
+						r.impact = impact
+						r.resumeAt = null
+						touch(r)
+						emitJob(r)
+					} else resumeSweep(r)
+				}
 				if (isActive(r.state) || r.state === "starting") emitProgress(r)
 			} else if (tick % 4 === 0 && isActive(r.state)) emitProgress(r)
 		}
@@ -3528,10 +3561,34 @@ export function registerScannerMock(
 		emitProgress(r)
 	}
 
+	/** The core's job-runner `notPausedMessage`. */
+	const notPaused = (r: JobRec): ScannerApiError => {
+		const ended =
+			r.state === "completed" || r.state === "cancelled" || r.state === "failed"
+		return new ScannerApiError(
+			r.state === "running"
+				? `Job ${r.id} is already running; nothing is needed.`
+				: r.state === "holding"
+					? `Job ${r.id} is running and holding on a signal; nothing is needed. It moves on when the signal ends.`
+					: ended
+						? `Job ${r.id} has ended (${r.state}) and cannot resume; start a new scan.`
+						: `Job ${r.id} is still starting; nothing is needed. It runs as soon as it has started.`,
+			"SCANNER_INVALID_TRANSITION",
+			409,
+		)
+	}
+
 	const resumeJob = (r: JobRec, takeover: boolean): void => {
-		if (r.state !== "paused") throw invalid(r.id, "resume", r.state)
+		if (r.state !== "paused") throw notPaused(r)
+		// The mock's only source-down is a feed paused by hand: the core's route answers it the same way.
+		if (r.reason === "source-down")
+			throw new ScannerApiError(
+				"The receiver feed is paused; resume it first",
+				"SOURCE_PAUSED",
+				409,
+				{ reason: "source-paused" },
+			)
 		if (r.spec.mode !== "sweep") {
-			if (r.reason !== "operator") throw invalid(r.id, "resume", r.state)
 			r.state = "running"
 			delete r.reason
 			touch(r)
@@ -3539,24 +3596,50 @@ export function registerScannerMock(
 			return
 		}
 		const holder = leaseHolder()
-		if (r.reason === "operator" || r.reason === "resumed-without-retune") {
+		if (
+			r.reason === "operator" ||
+			r.reason === "resumed-without-retune" ||
+			r.reason === "resume-blocked"
+		) {
 			if (!r.lease) {
-				if (holder && holder !== r) throw sourceBusy(holder)
+				// As the core: a holder at or above this priority refuses, a lower one hands over with consent.
+				if (holder && holder !== r && holder.spec.priority >= r.spec.priority) {
+					const held = sourceBusy(holder)
+					r.reason = "resume-blocked"
+					r.impact = impactFor(r.spec, r.id)
+					touch(r)
+					emitJob(r)
+					throw new ScannerApiError(
+						`${held.message} at equal or higher priority; stop that job or wait for it to end, then resume. This job stays paused with its progress.`,
+						"SCANNER_SOURCE_BUSY",
+						409,
+						{ reason: "held", holderJobId: holder.id },
+					)
+				}
 				const impact = impactFor(r.spec, r.id)
 				if (!takeover && impactGrew(impact, r.consentedImpact))
 					throw new ScannerApiError(
-						"Resuming disturbs consumers started since the operator took the tuner; resend with takeover",
+						`Resuming interrupts ${impactWords(impact)}; resend with takeover: true to interrupt them, or resume again once they have stopped. This job stays paused with its progress.`,
 						"SCANNER_TAKEOVER_REQUIRED",
 						409,
 						{ impact },
 					)
+				if (holder && holder !== r) {
+					pauseFor(holder, "preempted-job", false)
+					emitJob(holder)
+				}
 			}
+			if (takeover) r.consentedImpact = impactFor(r.spec, r.id)
 			resumeSweep(r)
 			return
 		}
-		if (r.reason === "resume-blocked" && !takeover)
-			throw invalid(r.id, "resume", r.state)
-		if (holder && holder !== r) throw sourceBusy(holder)
+		if (holder && holder !== r)
+			throw new ScannerApiError(
+				`${sourceBusy(holder).message}; stop that job or wait for it to end, then resume. This job stays paused with its progress.`,
+				"SCANNER_SOURCE_BUSY",
+				409,
+				{ reason: "held", holderJobId: holder.id },
+			)
 		const best = [...records.values()]
 			.filter(
 				j =>
@@ -3570,9 +3653,9 @@ export function registerScannerMock(
 				(a, b) =>
 					b.spec.priority - a.spec.priority || a.createdAt - b.createdAt,
 			)[0]
-		if (best && best !== r && r.reason !== "resume-blocked")
+		if (best && best !== r)
 			throw new ScannerApiError(
-				`Scanner job ${best.id} waits for the lease with a better claim`,
+				`Scanner job ${best.id} waits for the lease with a better claim; stop it or wait for it, then resume. This job stays paused with its progress.`,
 				"SCANNER_SOURCE_BUSY",
 				409,
 				{ reason: "held", waiter: best.id },

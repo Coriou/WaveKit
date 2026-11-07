@@ -1,0 +1,256 @@
+// How much of the audio this Listen expected actually played. Ring time is the clock: elapsed time is what
+// the ring rendered, so a suspended context counts nothing. Missing is the time the ring had nothing to play
+// plus the time the core filled with zeros because its source had no audio. Those zeros arrive at full rate
+// and look perfect to the ring; only `autoRoute.zeroFilledSamples` shows them. That counter is global, so a
+// reading is only trusted for the time this Listen was hearing `/auto`: the controller rebases it across
+// anything else. Another client cannot move it faster: the route has one pacer however many listen
+// (src/core/auto-listen/router.ts). Time with the squelch closed is not counted at all: exact silence is
+// correct there, so it cannot read as breaking up. A failed or slow reading moves nothing: the next one says
+// what happened since, and is credited to the window it lands in.
+import { LIVE_AUDIO_AUTO_ROUTE_RATE } from "@wavekit/api-types"
+import type {
+	LiveAudioAutoRoute,
+	LiveAudioLevel,
+	LiveAudioStatus,
+} from "@wavekit/api-types"
+import type { RingStats } from "./pcm.ts"
+import { autoRouteNow } from "./sound.ts"
+
+/** The figure changes at most once a bucket: 1 s, so the card does not flicker with the 250 ms stats. */
+export const HEALTH_BUCKET_MS = 1_000
+/** 10 buckets × 1 s = the last 10 s. */
+export const HEALTH_WINDOW_BUCKETS = 10
+const HEALTH_WINDOW_MS = HEALTH_BUCKET_MS * HEALTH_WINDOW_BUCKETS
+/** No verdict on under half the window (5 s of expected audio): one stall in a short over says little. */
+export const HEALTH_MIN_EXPECTED_MS = 5_000
+/**
+ * Breaking up: over 10% missing, 1 000 ms of a full window. One 1 300 ms stall, the longest seen, loses
+ * 1 300 − 500 caught up = 800 ms, 8%: it does not show. A second one inside the window does.
+ */
+export const BREAKING_MISSING_OVER = 0.1
+/** Clears at 5% or less, 500 ms of a full window, so a figure near 10% does not make the card flicker. */
+export const BREAKING_CLEARS_AT = 0.05
+/**
+ * On `/auto`, past 10 000 ms of ring time with no reading the figure is unknown: 5 readings at one per 2 s
+ * lost, so the whole window is time the core has said nothing about. Up to it the window still holds the last
+ * reading's credit, so a sustained loss cannot read as a clean 100%: it either shows or the figure is withheld.
+ */
+export const ROUTE_UNKNOWN_AFTER_MS = HEALTH_WINDOW_MS
+
+export interface AudioHealth {
+	/**
+	 * Percent of the expected audio that played in the window (rounded down), null without enough of it, or
+	 * without a recent reading from the core unless the ring's own loss already shows.
+	 */
+	heardPct: number | null
+	breaking: boolean
+	/** Since Listen started, whole 100 ms: all missing audio, and the part the core filled with zeros. */
+	missingMs: number
+	coreFilledMs: number
+	/** Times the core's pacer gave up on catching up, since Listen started. */
+	rebases: number
+}
+
+export const NO_AUDIO_HEALTH: AudioHealth = Object.freeze({
+	heardPct: null,
+	breaking: false,
+	missingMs: 0,
+	coreFilledMs: 0,
+	rebases: 0,
+})
+
+/** True while the core says something should be audible on this stream. */
+export function audioExpected(
+	status: LiveAudioStatus | null,
+	level: LiveAudioLevel | null,
+	autoRoute: boolean,
+): boolean {
+	if (autoRoute) {
+		const now = autoRouteNow(status, level)
+		if (now) return now.active !== "none"
+	}
+	if (!(level?.squelchOpen ?? status?.squelchOpen ?? true)) return false
+	if ((level?.autoSquelch ?? status?.autoSquelch)?.state === "waiting")
+		return false
+	return status?.toneSquelch?.state !== "waiting"
+}
+
+interface Bucket {
+	expectedMs: number
+	missingMs: number
+}
+
+export class AudioHealthTracker {
+	private started = false
+	private lastRenderedMs = 0
+	private lastDryMs = 0
+	/** The route base: null until a reading after the start or the last rebase. */
+	private lastFilledSamples: number | null = null
+	private lastRebases = 0
+	private expectedSinceReadingMs = 0
+	/** All ring time since the last reading, squelch closed included: the span a late reading covers. */
+	private renderedSinceReadingMs = 0
+	private drySinceReadingMs = 0
+	/** Ring time on `/auto` since a reading last spoke for it. A base does not: it covers nothing. */
+	private unreadMs = 0
+	private readonly buckets: Bucket[] = []
+	private bucketRenderedMs = 0
+	private bucket: Bucket = { expectedMs: 0, missingMs: 0 }
+	private pendingFilledMs = 0
+	private pendingWindowMs = 0
+	private totalMissingMs = 0
+	private totalFilledMs = 0
+	private totalRebases = 0
+	private health = NO_AUDIO_HEALTH
+
+	/**
+	 * The core's counters; the first reading is only a base (they outlive a Listen). One reading credits at
+	 * most the expected time since the last one less what the ring already counted as dry, so missing can
+	 * never exceed expected. A reading covering more than the window goes in at its rate, 30% of 30 s as 30%
+	 * of 10 s: the window holds 10 s of it, and all of it would read as nothing heard. The total keeps it all.
+	 */
+	noteRoute(
+		route: Pick<LiveAudioAutoRoute, "zeroFilledSamples" | "clockRebases">,
+	): void {
+		// an older core has no sample count: its rebases still show, no fill does
+		const samples = route.zeroFilledSamples ?? 0
+		if (this.lastFilledSamples !== null && this.started) {
+			// a lower count is a restarted core: nothing is known about the time between
+			const filled = Math.max(0, samples - this.lastFilledSamples)
+			const creditMs = Math.min(
+				(filled / LIVE_AUDIO_AUTO_ROUTE_RATE) * 1000,
+				Math.max(0, this.expectedSinceReadingMs - this.drySinceReadingMs),
+			)
+			this.pendingFilledMs += creditMs
+			this.pendingWindowMs +=
+				creditMs * Math.min(1, HEALTH_WINDOW_MS / this.renderedSinceReadingMs)
+			this.unreadMs = 0
+			this.totalRebases += Math.max(0, route.clockRebases - this.lastRebases)
+		}
+		this.lastFilledSamples = samples
+		this.lastRebases = route.clockRebases
+		this.expectedSinceReadingMs = 0
+		this.renderedSinceReadingMs = 0
+		this.drySinceReadingMs = 0
+	}
+
+	/** This browser was not hearing `/auto` for a while: the next reading is a new base. */
+	rebaseRoute(): void {
+		this.lastFilledSamples = null
+		this.expectedSinceReadingMs = 0
+		this.renderedSinceReadingMs = 0
+		this.drySinceReadingMs = 0
+	}
+
+	/** One ring report; the same object back unless the readout changed. `onRoute`: this Listen hears `/auto`. */
+	noteStats(stats: RingStats, expected: boolean, onRoute = false): AudioHealth {
+		if (!this.started) {
+			// priming at the start of a Listen is not a fault: count from the first audio
+			if (!stats.playing) return this.health
+			this.started = true
+			this.lastRenderedMs = stats.renderedMs
+			this.lastDryMs = stats.dryMs
+			return this.health
+		}
+		const renderedMs = Math.max(0, stats.renderedMs - this.lastRenderedMs)
+		const dryMs = Math.max(0, stats.dryMs - this.lastDryMs)
+		this.lastRenderedMs = stats.renderedMs
+		this.lastDryMs = stats.dryMs
+		this.unreadMs = onRoute ? this.unreadMs + renderedMs : 0
+		this.renderedSinceReadingMs += renderedMs
+		const b = this.bucket
+		if (expected) {
+			b.expectedMs += renderedMs
+			b.missingMs += dryMs
+			this.totalMissingMs += dryMs
+			this.expectedSinceReadingMs += renderedMs
+			this.drySinceReadingMs += dryMs
+		}
+		// the core only counts these while a source is selected, so they are always missing audio
+		b.missingMs += this.pendingWindowMs
+		this.pendingWindowMs = 0
+		this.totalMissingMs += this.pendingFilledMs
+		this.totalFilledMs += this.pendingFilledMs
+		this.pendingFilledMs = 0
+		this.bucketRenderedMs += renderedMs
+		if (this.bucketRenderedMs < HEALTH_BUCKET_MS) return this.health
+		this.bucketRenderedMs -= HEALTH_BUCKET_MS
+		this.buckets.push(b)
+		if (this.buckets.length > HEALTH_WINDOW_BUCKETS) this.buckets.shift()
+		this.bucket = { expectedMs: 0, missingMs: 0 }
+		return this.evaluate()
+	}
+
+	private evaluate(): AudioHealth {
+		let expectedMs = 0
+		let missingMs = 0
+		for (const b of this.buckets) {
+			expectedMs += b.expectedMs
+			missingMs += b.missingMs
+		}
+		const enough = expectedMs >= HEALTH_MIN_EXPECTED_MS
+		const missing = enough ? Math.min(1, missingMs / expectedMs) : 0
+		const over =
+			missing >
+			(this.health.breaking ? BREAKING_CLEARS_AT : BREAKING_MISSING_OVER)
+		// Unread, only what the ring itself counted is known: a loss past the bound still shows, at most this
+		// much heard. Short of that there is no figure, and nothing to raise or clear breaking up with.
+		const unread = this.unreadMs > ROUTE_UNKNOWN_AFTER_MS
+		const next: AudioHealth = {
+			heardPct:
+				enough && (over || !unread) ? 100 - Math.ceil(missing * 100) : null,
+			breaking: enough && (over || (unread && this.health.breaking)),
+			missingMs: Math.floor(this.totalMissingMs / 100) * 100,
+			coreFilledMs: Math.floor(this.totalFilledMs / 100) * 100,
+			rebases: this.totalRebases,
+		}
+		const h = this.health
+		if (
+			next.heardPct !== h.heardPct ||
+			next.breaking !== h.breaking ||
+			next.missingMs !== h.missingMs ||
+			next.coreFilledMs !== h.coreFilledMs ||
+			next.rebases !== h.rebases
+		)
+			this.health = next
+		return this.health
+	}
+}
+
+/** For the card: "Breaking up · 71% heard", or no figure while the core is unread; null while the audio is fine. */
+export function breakingUpText(health: AudioHealth): string | null {
+	if (!health.breaking) return null
+	return health.heardPct === null
+		? "Breaking up"
+		: `Breaking up · ${health.heardPct}% heard`
+}
+
+function seconds(ms: number): string {
+	return `${(ms / 1000).toFixed(1)} s`
+}
+
+/** For Audio options: "71% heard · 17.4 s missing", null when nothing has gone missing. */
+export function audioHealthText(health: AudioHealth): string | null {
+	if (health.missingMs === 0) return null
+	const missing = `${seconds(health.missingMs)} missing`
+	return health.heardPct === null
+		? missing
+		: `${health.heardPct}% heard · ${missing}`
+}
+
+/** The readout's detail. */
+export function audioHealthTitle(health: AudioHealth): string {
+	const parts = [
+		"Heard: the share of the last 10 s of expected audio that played. Missing: all the time this Listen had no audio to play while a signal was open.",
+	]
+	if (health.coreFilledMs > 0)
+		parts.push(
+			`The core had no audio for ${seconds(health.coreFilledMs)} of it and sent silence in its place.`,
+		)
+	if (health.rebases > 0)
+		parts.push(
+			`It fell too far behind to catch up ${health.rebases} ${health.rebases === 1 ? "time" : "times"}.`,
+		)
+	parts.push("Both usually mean the core is too busy.")
+	return parts.join(" ")
+}

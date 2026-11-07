@@ -239,6 +239,90 @@ export function impactGrew(now: Impact, consented: Impact | null): boolean {
 	)
 }
 
+/** Who a takeover interrupts, in words for the 409 message; the same facts are in `details.impact`. */
+export function impactWords(i: Impact): string {
+	const counted = (n: number, what: string): string =>
+		`${n} ${what}${n === 1 ? "" : "s"}`
+	const named = (ids: readonly string[], what: string): string =>
+		`${what}${ids.length === 1 ? "" : "s"} ${ids.join(", ")}`
+	const decoders = [...new Set([...i.runningDecoders, ...i.pinnedDecoders])]
+	return [
+		i.liveAudioClients > 0
+			? counted(i.liveAudioClients, "live audio listener")
+			: "",
+		i.digitalVoiceListeners > 0
+			? counted(i.digitalVoiceListeners, "digital voice listener")
+			: "",
+		decoders.length > 0 ? named(decoders, "decoder") : "",
+		i.scannerJobs.length > 0 ? named(i.scannerJobs, "scanner job") : "",
+		i.unrestorable.length > 0
+			? `tuner settings it cannot restore (${i.unrestorable.join(", ")})`
+			: "",
+	]
+		.filter(part => part !== "")
+		.join(", ")
+}
+
+const KEEPS_PROGRESS = "This job stays paused with its progress."
+
+/** A refused resume: the arbiter's detail first (API contract), then what to do about it. */
+function resumeRefusalMessage(r: { detail: string; reason?: string }): string {
+	if (TRANSIENT_REFUSALS.has(r.detail))
+		return `${r.detail}: the tuner is not free yet; retry in a few seconds. ${KEEPS_PROGRESS}`
+	if (r.reason === "held")
+		return `${r.detail} at equal or higher priority; stop that job or wait for it to end, then resume. ${KEEPS_PROGRESS}`
+	if (r.reason === "relay")
+		return `${r.detail}; wait for it to give control back, then resume. ${KEEPS_PROGRESS}`
+	return `${r.detail}; it cannot resume until the source has tuner control. ${KEEPS_PROGRESS}`
+}
+
+/**
+ * A resume with no data from the source. What it says follows what happens next: a job in source-down, a
+ * pending boot resume and an automatic resume after preemption all carry on without the operator; any other
+ * job waits for them.
+ */
+function noDataRefusal(
+	record: JobRecord,
+	bootResumePending: boolean,
+): ScannerApiError {
+	const { reason } = record
+	const preempted =
+		reason === "preempted-operator" ||
+		reason === "preempted-relay" ||
+		reason === "preempted-job"
+	let next = `No data from the source: resume this job again once data returns, or cancel it to end it. ${KEEPS_PROGRESS}`
+	if (reason === "source-down")
+		next = `No data from the source: this job continues by itself when data returns. Nothing to resume yet; cancel it to end it. ${KEEPS_PROGRESS}`
+	else if (bootResumePending)
+		next = `No data from the source: this job restarts by itself when data returns. Nothing to resume yet; cancel it to end it. ${KEEPS_PROGRESS}`
+	else if (reason === "preempted-job")
+		next = `No data from the source: this job takes the tuner back by itself when data returns, if no other job holds it. Nothing to resume yet; cancel it to end it. ${KEEPS_PROGRESS}`
+	else if (preempted && record.spec.resume.autoAfterIdleMs !== null)
+		next = `No data from the source: this job resumes by itself once data returns and the tuner has been idle for its resume delay. Resume it again then to go sooner, or cancel it to end it. ${KEEPS_PROGRESS}`
+	return new ScannerApiError(next, "SCANNER_SOURCE_DOWN", 409, {
+		reason: "source-down",
+	})
+}
+
+/** A resume of a job that is not paused: its state and what to do next. */
+function notPausedMessage(id: string, state: JobState): string {
+	switch (state) {
+		case "running":
+			return `Job ${id} is already running; nothing is needed.`
+		case "holding":
+			return `Job ${id} is running and holding on a signal; nothing is needed. It moves on when the signal ends.`
+		case "pending":
+		case "starting":
+			return `Job ${id} is still starting; nothing is needed. It runs as soon as it has started.`
+		case "completed":
+		case "cancelled":
+		case "failed":
+			return `Job ${id} has ended (${state}) and cannot resume; start a new scan.`
+		case "paused":
+			return `Job ${id} cannot resume in state paused; cancel it and start a new scan.`
+	}
+}
+
 type Deferral = Extract<
 	ReturnType<ProbePool["request"]>,
 	{ deferred: unknown }
@@ -289,6 +373,8 @@ export interface JobRunnerDeps {
 	leaseAnalogSession?: (sourceId: string) => (() => void) | undefined
 	/** Rechecked on the serial dispatch chain before an automatic acquisition. */
 	autoResumeReady?: () => boolean
+	/** A boot resume of this job is still waiting for data: it restarts without the operator. */
+	bootResumePending?: () => boolean
 	record: JobRecord
 	arbiter: Pick<
 		TunerArbiter,
@@ -299,6 +385,7 @@ export interface JobRunnerDeps {
 		| "holder"
 		| "holderPriority"
 		| "operatorIdleSince"
+		| "isConnected"
 	>
 	probes: Pick<
 		ProbePool,
@@ -383,10 +470,12 @@ const ACTIVE: ReadonlySet<JobState> = new Set([
 /**
  * Pauses that hold the job until an explicit resume and may lose the lease meanwhile: a lease-less
  * resume of one needs consent like createJob, and a refused acquire moves it to resume-blocked.
+ * resume-blocked is one itself: it never holds the lease, and a refused resume leaves it as it is.
  */
 const HELD_PAUSES: ReadonlySet<string | undefined> = new Set([
 	"operator",
 	"resumed-without-retune",
+	"resume-blocked",
 ])
 
 const LOST_EVENTS: ReadonlySet<JobEvent["type"]> = new Set([
@@ -804,6 +893,8 @@ export class JobRunner implements JobDriver {
 			if (
 				idleSince !== null &&
 				now - idleSince >= spec.resume.autoAfterIdleMs &&
+				// No data: nothing to hop on. The next tick after data returns resumes it.
+				this.deps.arbiter.isConnected(this.sourceId) &&
 				(this.deps.autoResumeReady?.() ?? true) &&
 				!this.deps.arbiter.holder(this.sourceId)
 			) {
@@ -1205,11 +1296,34 @@ export class JobRunner implements JobDriver {
 
 	private async apply(e: JobEvent): Promise<void> {
 		const { record } = this
+		if (e.type === "resume" && record.state === "paused") {
+			// A paused feed answers SOURCE_PAUSED in the service, before it gets here.
+			if (!this.deps.arbiter.isConnected(this.sourceId))
+				throw noDataRefusal(record, this.deps.bootResumePending?.() ?? false)
+			// The source is back and this job missed its source-up: the resume carries it on. It holds
+			// the lease through source-down, so there is no one new to ask consent for.
+			if (record.reason === "source-down")
+				return this.apply({ type: "source-up" })
+		}
 		const operatorAutoResume =
 			e.type === "preemptor-idle" &&
 			(record.reason === "preempted-operator" ||
 				record.reason === "preempted-relay")
-		if (operatorAutoResume && !(this.deps.autoResumeReady?.() ?? true)) return
+		// Queued before the data stopped, or before activity began: a later tick asks again.
+		if (
+			operatorAutoResume &&
+			(!this.deps.arbiter.isConnected(this.sourceId) ||
+				!(this.deps.autoResumeReady?.() ?? true))
+		)
+			return
+		// A hand-back queued before the data stopped: this job gets no source-up for it, so the service
+		// has to hear of the refusal and owe it to the next one.
+		if (
+			e.type === "preemptor-idle" &&
+			record.reason === "preempted-job" &&
+			!this.deps.arbiter.isConnected(this.sourceId)
+		)
+			throw noDataRefusal(record, false)
 		if (e.type === "resume" || e.type === "start")
 			this.autoResumeGuardActive = false
 		if (e.type === "preemptor-idle")
@@ -1228,7 +1342,9 @@ export class JobRunner implements JobDriver {
 		})
 		if ("invalid" in t) {
 			throw new ScannerApiError(
-				`Job ${record.id} cannot handle "${e.type}" in state ${record.state}`,
+				e.type === "resume"
+					? notPausedMessage(record.id, record.state)
+					: `Job ${record.id} cannot handle "${e.type}" in state ${record.state}`,
 				"SCANNER_INVALID_TRANSITION",
 				409,
 			)
@@ -1249,7 +1365,7 @@ export class JobRunner implements JobDriver {
 			const impact = this.deps.impact()
 			if (impactGrew(impact, record.consentedImpact))
 				throw new ScannerApiError(
-					"Resuming disturbs consumers started since the operator took the tuner; resend with takeover",
+					`Resuming interrupts ${impactWords(impact)}; resend with takeover: true to interrupt them, or resume again once they have stopped. ${KEEPS_PROGRESS}`,
 					"SCANNER_TAKEOVER_REQUIRED",
 					409,
 					{ impact },
@@ -1291,7 +1407,7 @@ export class JobRunner implements JobDriver {
 						: {}),
 				}
 				throw new ScannerApiError(
-					r.detail,
+					e.type === "resume" ? resumeRefusalMessage(r) : r.detail,
 					r.code,
 					409,
 					Object.keys(details).length > 0 ? details : undefined,
@@ -1310,8 +1426,9 @@ export class JobRunner implements JobDriver {
 		record.updatedAt = now
 		if (t.state === "running" && record.startedAt === undefined)
 			record.startedAt = now
-		if (e.type === "resume" && e.takeover)
-			record.consentedImpact = this.deps.impact()
+		// Read before the actions change what is on the source; it counts only once they succeed.
+		const consented =
+			e.type === "resume" && e.takeover ? this.deps.impact() : null
 		try {
 			for (const action of this.ordered(actions)) {
 				await this.run(action)
@@ -1323,6 +1440,7 @@ export class JobRunner implements JobDriver {
 			this.scheduler?.setAccountingActive(this.driving)
 			throw err
 		}
+		if (consented) record.consentedImpact = consented
 		if (!this.driving) this.epochOwn = false
 		if (isTerminal(t.state)) {
 			this.releaseAnalogSession?.()

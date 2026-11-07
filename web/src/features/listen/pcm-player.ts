@@ -28,6 +28,8 @@ export interface PcmSource {
 export interface PcmPlayerEvents {
 	/** The worklet started or stopped producing stream audio (stats arrive a few times a second). */
 	onStats(stats: RingStats): void
+	/** Bytes arrived on the open stream (every read: keep it cheap). */
+	onData(): void
 	/** The stream failed or ended on its own (not after stop()/play()). */
 	onEnded(reason: string): void
 	/** The context is still suspended: needs a user gesture (unlock()). */
@@ -263,6 +265,7 @@ export class PcmPlayer {
 			for (;;) {
 				const { done, value } = await reader.read()
 				if (done) break
+				if (value.length > 0) this.events.onData()
 				const samples = decoder.push(value)
 				if (samples.length > 0 && this.tap) this.tap(samples.slice(), rate)
 				if (samples.length > 0)

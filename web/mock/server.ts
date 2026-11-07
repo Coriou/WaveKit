@@ -846,6 +846,7 @@ export async function buildMockServer(
 				clientCount: live.autoClients,
 				digitalAvailable: true,
 				underruns: 0,
+				zeroFilledSamples: 0,
 				droppedMs: 0,
 				clockRebases: 0,
 				latencyMs: 80,

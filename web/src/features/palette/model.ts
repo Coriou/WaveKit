@@ -1255,7 +1255,11 @@ export class PaletteModel {
 				does: "Retunes the receiver to the scan's current hop · the scan holds until you choose this",
 				done: "Scan resumed",
 			})
-		else if (s === "paused")
+		else if (
+			s === "paused" &&
+			sweep.reason !== "source-down" &&
+			sweep.reason !== "preempted-job"
+		)
 			out.push({
 				id: "scan:resume",
 				title: "Resume scan",

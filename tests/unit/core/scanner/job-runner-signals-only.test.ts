@@ -61,6 +61,9 @@ class RunnerArbiter {
 	holder() {
 		return this.lease ?? undefined
 	}
+	isConnected() {
+		return true
+	}
 	holderPriority() {
 		return this.lease ? 50 : undefined
 	}
