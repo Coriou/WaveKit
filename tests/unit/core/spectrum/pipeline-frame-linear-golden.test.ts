@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto"
 import { beforeEach, describe, expect, it } from "vitest"
 import type { PipelineEvent } from "../../../../src/core/spectrum/types.js"
 import {
@@ -11,43 +10,56 @@ import {
 	zerosIq,
 } from "../../../mocks/scanner/signals.js"
 import type { Iq } from "../../../mocks/scanner/signals.js"
+import {
+	acfOf,
+	projectionDigest,
+	withDbFrame,
+} from "./linear-golden-projection.js"
 import { FS, Harness, yieldToRpc } from "./pipeline-harness.js"
 
 /**
- * Linear-power Tracker.frame against the per-frame dB path it replaced. The goldens were recorded
- * from the dB path (base 64ebbe99) before the change. Everything but `acf30`/`acf60` must stay
- * byte-identical. Those two read the 1 ms envelope, which the dB path rounded through a Float32 dB
- * value, so they move by the bound stated in `ACF_BOUND`. The scene `zero` has no noise at all: its
- * envelopes are flat to rounding, the ACF of that rounding is numeric noise on either path, and it
- * is compared only with the fields stripped.
+ * Linear-power Tracker.frame against the per-frame dB path it replaced, on what that change could
+ * move (linear-golden-projection.ts states the fields and why). `projection` is the sha256 of
+ * `project(events)`, recorded by running the helper on the dB-path code (base 64ebbe99, `git
+ * archive` with this file's scenes); this tree gives the same digests. `acf` holds that code's
+ * `acf30`/`acf60` values. The dB path rounded the 1 ms envelope through a Float32 dB value, so the
+ * linear path moves them by the bound stated in `ACF_BOUND`. The scene `zero` has no noise at
+ * all: its envelopes are flat to rounding, the ACF of that rounding is numeric noise on either
+ * path, and only its count is compared. `withDbFrame` rebuilds the dB path in the test and must
+ * reproduce both columns exactly; with a fault in its dB values the comparison must fail.
  */
 const GOLDEN: Record<
 	string,
-	{ events: number; sha256: string; acf: number[] }
+	{ events: number; projection: string; acf: number[] }
 > = {
 	noise: {
 		events: 33,
-		sha256: "91e4aba9fa25d64b4961687c7abd773b40b01ca60c5345396c922101bdc49a78",
+		projection:
+			"05592e1b68041743b7607adc5196e176649e4df1d661150f275c1fb6be65ea4c",
 		acf: [],
 	},
 	cw: {
 		events: 37,
-		sha256: "c0b1b4bc01c0a972b41bbf0a04e899c2db1688c55532b1d0f0f54743ecab0f8e",
+		projection:
+			"f6e27072e88c3b4af40d5c64c1cb988bfd3084e2b7e3579c6b0162f33cefc89f",
 		acf: [0.04057896916927682, -0.02756246331495417],
 	},
 	cwStrong: {
 		events: 37,
-		sha256: "b393b606ecf622dd3463435678905bb6b79ee604e374ed0daaaef6a04d27a1ba",
+		projection:
+			"e95de1295b5b018f620ce34fa7761523ce0e9c3689fe967a798e246153eaada7",
 		acf: [0.0323721015966609, 0.02886589603602508],
 	},
 	nfm: {
 		events: 37,
-		sha256: "b8589b34a42ec2ee8f94997648a27895e2a0d8fd1167e308833704bd6c437007",
+		projection:
+			"ce6937c28c169c85e0d3d307696fbc6591a5bb3de1f698dd46bf37b29197d8fd",
 		acf: [0.02244488898011183, 0.0009855362102007415],
 	},
 	tdma: {
 		events: 39,
-		sha256: "ce7c828bfada389084b2d375da7c5d6540127a784914d140879c29fbcef0f3a6",
+		projection:
+			"f5e2b2a4ce01a3a1164d81499b9c8ccfe15daf7c0ac503035f905c5d8d0e2bfb",
 		acf: [
 			-0.5232384454408819, 0.49629799371891264, -0.1152309844862664,
 			0.12459217561651906,
@@ -55,7 +67,8 @@ const GOLDEN: Record<
 	},
 	zero: {
 		events: 105,
-		sha256: "feb1f2ea85a63b662708b81aff435f92210eab84f31f1caf6332381b1a5dcbb3",
+		projection:
+			"1c8c97544af0b56c1c04298eaa4a7ef52213a2bf3c6b37e3aaf6799c8fa96a06",
 		acf: [
 			0, 0, 0.30960545444433824, 0.6068878904778973, 0.270996536895976,
 			0.24194408468023712, 0, 0, 0.030841570888188438, -0.8160886582694195,
@@ -70,11 +83,11 @@ const GOLDEN: Record<
 	},
 	nonFinite: {
 		events: 41,
-		sha256: "b9b17613c03b265554167383bef212cc2588de0a0fe6d01a7675a7d99d818996",
+		projection:
+			"723d465bab7d8501c08b5e4033413a69ac59621182e109f041a80d7a343bed01",
 		acf: [0.036420584268504405, 0.013959193852030097],
 	},
 }
-
 /** Noisy scenes move ACF by at most about 2e-6: 1.08e-6 here (50 dB SNR carrier); see docs/PERFORMANCE.md. */
 const ACF_BOUND = 2e-6
 
@@ -112,58 +125,76 @@ const SCENES: Record<string, () => Iq> = {
 	},
 }
 
-/** A run is deterministic and takes seconds on a busy host, so each scene runs once. */
-const runs = new Map<string, PipelineEvent[]>()
-function run(name: string): PipelineEvent[] {
-	const done = runs.get(name)
-	if (done) return done
+function play(name: string): PipelineEvent[] {
 	const scene = SCENES[name]
 	if (!scene) throw new Error(`no scene ${name}`)
 	const h = new Harness({ format: "FLOAT32LE" })
 	h.start({ feed: true })
 	h.push(scene(), 8192)
-	runs.set(name, h.events)
 	return h.events
 }
 
-function acfOf(events: PipelineEvent[]): number[] {
-	const out: number[] = []
-	JSON.stringify(events, (key, value: unknown) => {
-		if ((key === "acf30" || key === "acf60") && typeof value === "number")
-			out.push(value)
-		return value
-	})
-	return out
+/** A run is deterministic and takes seconds on a busy host, so each scene runs once per path. */
+const runs = new Map<string, PipelineEvent[]>()
+function run(name: string): PipelineEvent[] {
+	const done = runs.get(name)
+	if (done) return done
+	const events = play(name)
+	runs.set(name, events)
+	return events
 }
 
-const digest = (events: PipelineEvent[]): string =>
-	createHash("sha256")
-		.update(
-			JSON.stringify(events, (key, value: unknown) =>
-				key === "acf30" || key === "acf60" ? undefined : value,
-			),
-		)
-		.digest("hex")
+/** Where `events` departs from the recorded dB path; `acfBound` 0 asks for the exact values. */
+function departures(
+	name: string,
+	events: PipelineEvent[],
+	acfBound: number,
+): string[] {
+	const golden = GOLDEN[name]!
+	const out: string[] = []
+	if (events.length !== golden.events)
+		out.push(`events ${events.length}, recorded ${golden.events}`)
+	if (projectionDigest(events) !== golden.projection) out.push("projection")
+	const acf = acfOf(events)
+	if (acf.length !== golden.acf.length)
+		out.push(`acf count ${acf.length}, recorded ${golden.acf.length}`)
+	else if (name !== "zero" || acfBound === 0)
+		acf.forEach((v, i) => {
+			const d = Math.abs(v - golden.acf[i]!)
+			if (!(d <= acfBound)) out.push(`acf[${i}] moved ${d}`)
+		})
+	return out
+}
 
 describe("linear Tracker.frame against the dB path's recorded event streams", () => {
 	beforeEach(yieldToRpc)
 
 	for (const name of Object.keys(SCENES)) {
 		it(`scene ${name}`, () => {
-			const events = run(name)
-			const golden = GOLDEN[name]!
-			expect({ events: events.length, sha256: digest(events) }).toEqual({
-				events: golden.events,
-				sha256: golden.sha256,
-			})
-			const acf = acfOf(events)
-			expect(acf.length).toBe(golden.acf.length)
-			if (name === "zero") return
-			acf.forEach((v, i) => {
-				expect(Math.abs(v - golden.acf[i]!)).toBeLessThanOrEqual(ACF_BOUND)
-			})
+			expect(departures(name, run(name), ACF_BOUND)).toEqual([])
+		})
+
+		it(`scene ${name}: the dB path rebuilt in the test gives the recorded stream exactly`, () => {
+			expect(
+				departures(
+					name,
+					withDbFrame(() => play(name)),
+					0,
+				),
+			).toEqual([])
 		})
 	}
+
+	it("a fault in the per-frame dB values fails the comparison", () => {
+		// The dB path with its Float32 values rounded to 0.5 dB, as a coarser conversion would.
+		const halfDb = (db: Float32Array): void => {
+			for (let i = 0; i < db.length; i++) db[i] = Math.round(db[i]! * 2) / 2
+		}
+		for (const name of ["cw", "tdma"]) {
+			const events = withDbFrame(() => play(name), halfDb)
+			expect(departures(name, events, ACF_BOUND)).not.toEqual([])
+		}
+	})
 
 	it("the scenes reach the TDMA rule and every noisy scene with a signal has an ACF", () => {
 		for (const name of ["cw", "cwStrong", "nfm", "tdma", "nonFinite"])
