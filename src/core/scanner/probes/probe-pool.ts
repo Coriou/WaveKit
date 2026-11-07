@@ -63,7 +63,7 @@ import {
 	toDsdFmeScannerEvent,
 	type DsdFmeScannerEvent,
 } from "./confirm/dsd-fme.js"
-import { interpretMultimon } from "./confirm/multimon.js"
+import { interpretMultimon, PocsagLowRun } from "./confirm/multimon.js"
 import { interpretRtl433 } from "./confirm/rtl433.js"
 import { interpretRasterReplay } from "./replay-interpret.js"
 import { interpretMeshtastic } from "./confirm/meshtastic.js"
@@ -609,6 +609,8 @@ export class CapcodeWindows {
 	>()
 	/** Accepted capcodes and their states, oldest first. */
 	private readonly accepted = new Map<string, InterpreterState>()
+	/** Outlives every window: a stuck slicer's run is longer than one. */
+	private readonly lowRun = new PocsagLowRun()
 
 	constructor(
 		private readonly holdMs: number,
@@ -620,9 +622,9 @@ export class CapcodeWindows {
 		const key = multimonCapcode(out)
 		if (key === null) return []
 		const kept = this.accepted.get(key)
-		if (kept) return interpretMultimon(out, kept)
+		if (kept) return interpretMultimon(out, kept, this.lowRun)
 		const state = this.windowState(key, at)
-		const evs = interpretMultimon(out, state)
+		const evs = interpretMultimon(out, state, this.lowRun)
 		if (evs.some(ev => ev.identity !== undefined)) {
 			this.windows.delete(key)
 			this.accepted.set(key, state)

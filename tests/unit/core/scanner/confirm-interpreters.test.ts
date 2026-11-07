@@ -30,14 +30,19 @@ const pocsag = (
 	message: string,
 	fn = 3,
 	messageType = "alpha",
+	at = T0,
 ) =>
-	out("message", {
-		protocol: "POCSAG1200",
-		address,
-		function: fn,
-		messageType,
-		message,
-	})
+	out(
+		"message",
+		{
+			protocol: "POCSAG1200",
+			address,
+			function: fn,
+			messageType,
+			message,
+		},
+		at,
+	)
 
 describe("DoubleMatch", () => {
 	it("accepts a value exactly once, on its second CRC-clean occurrence", () => {
@@ -373,7 +378,9 @@ describe("interpretMultimon", () => {
 		expect(
 			interpretMultimon(pocsag(7654321, "<NUL><ETX>x<SOH><DEL>"), s),
 		).toEqual([])
-		expect(interpretMultimon(pocsag(7654321, "Q<ETB>"), s)).toHaveLength(1)
+		expect(
+			interpretMultimon(pocsag(7654321, "Q<ETB>", 3, "alpha", T0 + 2_000), s),
+		).toHaveLength(1)
 		expect(interpretMultimon(pocsag(1111111, "VALID TEXT", 6), s)).toEqual([])
 		expect(interpretMultimon(pocsag(2222222, "", 0, "tone only"), s)).toEqual(
 			[],
@@ -425,7 +432,13 @@ describe("interpretMultimon", () => {
 				const emitted = new Map<string, number[]>()
 				decodes.forEach((d, i) => {
 					const ev = interpretMultimon(
-						pocsag(d.cap, d.plausible ? d.good : d.bad, d.fn),
+						pocsag(
+							d.cap,
+							d.plausible ? d.good : d.bad,
+							d.fn,
+							"alpha",
+							T0 + i * 2_000,
+						),
 						s,
 					)
 					expect(ev.length).toBeLessThanOrEqual(1)

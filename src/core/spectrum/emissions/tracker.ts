@@ -12,6 +12,7 @@ import type {
 	TrackSnapshot,
 	TuningTrust,
 } from "../types.js"
+import { DIP_FLOOR_FRACTION, DIP_SPLIT_DB } from "./segmenter.js"
 import type { Segment } from "./segmenter.js"
 import type { PersistentFeature } from "../retune-alarm.js"
 import { frameTrust } from "../retune-settle.js"
@@ -76,6 +77,106 @@ const ENV_MAX_MS = 1000
 const ACF_MIN_MS = 300
 const SPEC_PAD_BINS = 2
 const OBW_MIN_SNR_DB = 20
+/**
+ * `TrackSnapshot.blockSwingDb` needs a steady reading of a stationary signal: at least 35 FFT
+ * frames per block (per-bin scatter 1/sqrt(35), 0.7 dB). The default FFT's narrowest bin is
+ * 707 Hz (`defaultFftSize`: fs / 1 000 rounded to a power of two, so within a factor sqrt(2) of
+ * 1 kHz), and 707 Hz x 50 ms = 35 frames. A shorter block or a finer FFT publishes no reading, so
+ * the classifier keeps its width-based answer.
+ */
+const SWING_MIN_FRAMES = 35
+/**
+ * `Tracker.joinAcrossLines`: the widest hole two pieces may join across. 18 kHz is analog FM's
+ * widest class, so a wider hole changes no class; this is 18 bins at 1 kHz bins, 26 at the
+ * default FFT's finest 707 Hz. Each hole has its own bound, and pieces chain only hole by hole.
+ */
+export const LINE_WALK_MAX_HZ = 18_000
+/**
+ * `Tracker.joinAcrossLines`: the segmenter's sideband rule (the pipeline's `SIDEBAND_DB`): a piece
+ * more than this below its neighbour is its sideband, whatever the valley between them.
+ */
+export const LINE_SIDEBAND_DB = 10
+/** The sideband rule's reach: the pipeline's `FAR_SKIRT_REACH_HZ`, 2.5 channels of 12.5 kHz. */
+const LINE_SIDEBAND_REACH_HZ = 31_250
+/**
+ * `Tracker.joinAcrossLines`: the valley is measured on the power smoothed over this (the pipeline's
+ * `DIP_SMOOTH_HZ`, 3 bins at 1 kHz), as the segmenter's dip split does: one bin of scatter is no valley.
+ */
+export const LINE_SMOOTH_HZ = 2_000
+/**
+ * `Tracker.joinAcrossLines`: a piece with no piece across a line takes the line only if the line's
+ * strongest bin stands this far over what it holds when idle: that power came with a signal, where
+ * a spur's own is there with or without one. 6 dB is a doubling of the voltage, far over a 50-frame
+ * block's scatter (under 1 dB).
+ */
+export const LINE_GAIN_DB = 6
+/**
+ * `Tracker.noteLineIdle`: an idle line's level falls at once and rises this fast (minimum
+ * statistics). A bare carrier too short to open a track moves it 1 dB per second it lasts, so
+ * `LINE_GAIN_DB` of it takes 6 s to teach, and a spur that comes up is learned at the same pace.
+ */
+const LINE_IDLE_RISE_DB_PER_S = 1
+/**
+ * `Tracker.joinHolds`: a track holding a join gives it up after this many consecutive blocks whose
+ * evidence refuses it, 200 ms at 50 ms blocks: one block's peaks wander with the modulation, two
+ * emitters refuse again and again. It is also the age from which a track's identity counts. A hop
+ * of 3 to 7 blocks loses nothing, since a first join is immediate. Synthetic, from 10 to 30 dB: one
+ * voice crossed by a line did not part, and a voice beside a carrier parted within seconds.
+ */
+export const LINE_PART_BLOCKS = 4
+/**
+ * `Tracker.walkOverLine`: a line never seen idle in this epoch (a signal on air before it could be)
+ * shows no gain. A signal's flat top reads level with its piece, a real spur usually does not, so
+ * the walk goes on only to masked power at most this far over the piece's peak: the segmenter's own
+ * sideband margin, inside which it calls two neighbours one emitter's parts.
+ */
+export const LINE_ON_AIR_DB = LINE_SIDEBAND_DB
+/**
+ * A track on a spur line publishes `blockSwingDb` and `blockSpreadDb` only after this many blocks on
+ * an unchanged span, 2 s at 50 ms at the least, twice the classifier's `VOICE_MIN_BLOCKS` (20). Each
+ * widening restarts the count, so a track on a line usually gets its reading after several seconds.
+ * Synthetic YSF crossed by a line at 12 dB measured 0.62 dB of spread at 20 blocks: a line adds
+ * scatter. Without a reading the width class stands.
+ */
+const LINE_READING_MIN_BLOCKS = 40
+/**
+ * On a spur line a spread under this publishes no reading. Over 40 blocks, line-crossed synthetic
+ * digital reached 0.60 dB (YSF, 8 to 30 dB), the classifier's own threshold, so a line needs a
+ * margin of its own: 0.05 dB over that. Speech under it keeps its width class.
+ */
+const LINE_SPREAD_MIN_DB = 0.65
+/**
+ * Regular keying: blocks of concentration `keyingScore` reads, 3.2 s at 50 ms, the window where voice
+ * and keying stand furthest apart. Four bytes a block, released with the track.
+ */
+export const KEYING_WINDOW_BLOCKS = 64
+/** The score needs this many blocks, the classifier's `VOICE_MIN_BLOCKS`: one 250 ms period twice. */
+export const KEYING_MIN_BLOCKS = 20
+/**
+ * From this `keyingScore` a track's concentration repeats, as keying does, and a cadence is all it
+ * says: a talker can hold one too. Data keyed 100/100, 200/200 and 75/75 ms against a bare carrier
+ * (synthetic D-STAR, NXDN, DMR, 8 to 30 dB) scored 0.89 or more on 32 blocks and over, synthetic speech
+ * of random syllables at most 0.84 on 32 blocks and 0.70 elsewhere, and speech of evenly spaced
+ * syllables up to 0.99. `keyingEdgeShare` tells those last two apart.
+ */
+export const KEYING_SCORE_MIN = 0.85
+/**
+ * `keyingEdgeShare`: a step of this much of the window's range in one block is an edge. Two levels
+ * keyed against each other cross all of it within a block, or over two when a block straddles the
+ * edge. A syllable's rise and fall take 2 blocks or more (it lasts 120 to 400 ms, so 2 to 4 blocks
+ * each way at 50 ms blocks, with the concentration following the envelope).
+ */
+export const KEYING_EDGE_RANGE = 0.7
+/**
+ * From this `keyingEdgeShare` a regular track is keyed and publishes no reading. Synthetic keying
+ * on block edges (100/100, 200/200 ms) carried over 0.7 of its movement in edges, 75/75 ms about
+ * 0.5 (a straddling block splits one edge in every period) and 125/125 ms from 0.33. Evenly spaced
+ * synthetic speech carried under 0.25 at up to 1.5 times the limiter's level; at 3 times, a square
+ * envelope with the limiter always clipping, it reached 0.39, where a width over 7.5 kHz reads it
+ * as `analog-fm` anyway. Keying it lets through at a low SNR costs a bounded recorder hold and a
+ * discarded file; a voice held back is a miss.
+ */
+export const KEYING_EDGE_SHARE_MIN = 0.3
 const MATCH_TOLERANCE_BINS = 1
 /**
  * FSK pair: two tones of one 2FSK emission show as two segments when the valley between them
@@ -169,6 +270,12 @@ class SpectrumAccumulator {
 		}
 	}
 
+	/** Forgets what was added; the next `add` starts a new window. */
+	reset(): void {
+		this.lo = 0
+		this.hi = 0
+	}
+
 	/** Mean PSD in dB over the window; index 0 is bin `lo`. Reuses one buffer. */
 	meanDb(): Float32Array {
 		const n = this.hi - this.lo
@@ -229,6 +336,12 @@ export interface GateTrace {
 	fromTrackId: string | null
 }
 
+/**
+ * What a track has decided about pieces across a line: nothing yet, it holds a join, or it has
+ * parted from its neighbour.
+ */
+type LineJoin = "none" | "held" | "parted"
+
 interface OpenTrack {
 	id: string
 	epoch: EpochInfo
@@ -241,12 +354,35 @@ interface OpenTrack {
 	lastSeg: Segment
 	onMin: number
 	onMax: number
+	/** A segment of this track met a spur line: its concentration is read on [onMin, onMax). */
+	onLine: boolean
+	/** `Tracker.joinHolds`: five numbers, released with the track. */
+	lineJoin: LineJoin
+	lineRefusals: number
+	lineRefusedAt: number
+	/**
+	 * Where it was before a neighbour could have come: the span [lo, hi) it held before its join, or
+	 * at `LINE_PART_BLOCKS` blocks if it joined younger. -1 until then and once it has parted.
+	 */
+	lineSoloLo: number
+	lineSoloHi: number
 	maxWidthBins: number
 	blocks: number
 	misses: number
 	peakDbfs: number
 	maxBlockSnrDb: number
 	bandLinSum: number
+	/** Blocks in `bandLinSum`: `blocks`, until a parting restarts the sum. */
+	bandBlocks: number
+	/** `TrackSnapshot.blockSwingDb` and `blockSpreadDb`: six numbers, released with the track. */
+	spreadBlocks: number
+	swingLastDb: number
+	swingSumDb: number
+	swingPairs: number
+	spreadMeanDb: number
+	spreadM2: number
+	/** Latest `KEYING_WINDOW_BLOCKS` concentrations, at `spreadBlocks` modulo its length. */
+	keyingRing: Float32Array
 	/** Sum and count of per-block local SNRs (dB). */
 	localSnrSum: number
 	localSnrBlocks: number
@@ -378,6 +514,36 @@ export class Tracker {
 	private fuseReach: Uint16Array<ArrayBufferLike> = new Uint16Array(0)
 	private readonly fuseSorted: Segment[] = []
 	private readonly fuseOut: Segment[] = []
+	/** This block's spur lines, from `flagSpurs`; null until then. Read by `joinAcrossLines`. */
+	private lineMask: Uint8Array | null = null
+	/** `joinAcrossLines` scratch, reused block to block as `fusePairs`'s is. */
+	private readonly lineSorted: Segment[] = []
+	private readonly lineOut: Segment[] = []
+	/** This block's joined segments; `lineParts[k]` holds the pieces of `lineJoined[k]`. */
+	private readonly lineJoined: Segment[] = []
+	private readonly lineParts: Segment[][] = []
+	private readonly lineSegs: Segment[] = []
+	private readonly lineSegTaken: number[] = []
+	private lineStamp = 0
+	private readonly lineTaken = new Set<OpenTrack>()
+	/**
+	 * Where a line kept two pieces apart this block: `lineOut[i]` and `lineOut[i + 1]` for each `i`.
+	 * `matchSegment` reads them. Reused block to block as the rest of this scratch is.
+	 */
+	private readonly lineApartAt: number[] = []
+	private readonly lineBurst = new Set<Segment>()
+	/** What each line bin holds when idle, dB (`noteLineIdle`); NaN: not seen idle in this epoch. */
+	private lineIdleDb = new Float32Array(0)
+	private lineBusy = new Uint8Array(0)
+	private readonly lineBlockOut: TrackerBlock = {
+		endSample: 0,
+		powerDb: new Float32Array(0),
+		floorDb: new Float32Array(0),
+		blockFloorDb: 0,
+		thresholdDb: 0,
+		gap: false,
+		overload: false,
+	}
 	private readonly fuseParts = new Map<Segment, Segment[]>()
 	private readonly fusePool: Segment[][] = []
 	private readonly fuseBurst = new Set<Segment>()
@@ -462,6 +628,7 @@ export class Tracker {
 	}): PipelineEvent[] {
 		const events = this.closeAll("retune")
 		this.epochBlocks = 0
+		this.lineIdleDb.fill(NaN)
 		this.epoch = {
 			stream: e.stream,
 			epoch: e.epoch,
@@ -669,8 +836,11 @@ export class Tracker {
 		return this.gateExtra
 	}
 
-	block(input: Segment[], blockIn: TrackerBlock): PipelineEvent[] {
+	block(raw: Segment[], rawBlock: TrackerBlock): PipelineEvent[] {
 		this.epochBlocks++
+		const joined = this.joinAcrossLines(raw, rawBlock)
+		const input = joined ? this.lineOut : raw
+		const blockIn = joined ? this.lineBlockOut : rawBlock
 		const fused = this.fusePairs(input, blockIn)
 		const segments = fused ? this.fuseOut : input
 		const b = fused ? this.fuseBlock : blockIn
@@ -695,7 +865,7 @@ export class Tracker {
 		for (const idx of order) {
 			const s = segments[idx]
 			if (s === undefined) continue
-			const t = this.bestMatch(s, matched)
+			const t = this.matchSegment(s, segments, matched)
 			if (t) {
 				matched.add(t)
 				this.extend(t, s, b, n)
@@ -761,6 +931,11 @@ export class Tracker {
 				const nt = this.openTrack(seg, b, n, blockSamples)
 				nt.justOpened = false
 				nt.paired = t.paired
+				nt.lineJoin = t.lineJoin
+				nt.lineRefusals = t.lineRefusals
+				nt.lineRefusedAt = t.lineRefusedAt
+				nt.lineSoloLo = t.lineSoloLo
+				nt.lineSoloHi = t.lineSoloHi
 				if (t.paired) {
 					// the successor keeps the pair's span and tone: one tone alone still matches it
 					nt.onMin = Math.min(nt.onMin, t.onMin)
@@ -789,6 +964,15 @@ export class Tracker {
 				t.flagsChanged = false
 				events.push({ kind: "track-update", track: this.snapshot(t, n) })
 			}
+		}
+		// The pipeline asks for the segments it passed in: each piece maps to the joined track.
+		for (let k = 0; k < this.lineJoined.length; k++) {
+			const t = this.assoc.get(this.lineJoined[k]!)
+			if (t === undefined) continue
+			const parts = this.lineParts[k]!
+			// A walk over a line is one piece: it decides nothing about a neighbour.
+			if (parts.length > 1) t.lineJoin = "held"
+			for (let i = 0; i < parts.length; i++) this.assoc.set(parts[i]!, t)
 		}
 		return events
 	}
@@ -908,6 +1092,7 @@ export class Tracker {
 	 * a spur line and returns their updates. Their segments are dropped from now on, so they close after the hang.
 	 */
 	flagSpurs(lineMask: Uint8Array): PipelineEvent[] {
+		this.lineMask = lineMask
 		const events: PipelineEvent[] = []
 		for (const t of this.open) {
 			if (t.flags.spur || t.endBin <= t.startBin) continue
@@ -1082,7 +1267,12 @@ export class Tracker {
 				list.push(sorted[k]!)
 				if (!burst.has(sorted[k]!)) allBurst = false
 			}
-			const s = joinSegments(list, b.powerDb, b.floorDb, this.freeFuseSeg())
+			const s = joinSegments(
+				list,
+				b.powerDb,
+				b.floorDb,
+				this.freeSeg(this.fuseSegs, this.fuseSegTaken, this.fuseStamp),
+			)
 			// A fused segment is a burst only when every part was one.
 			if (allBurst) burst.add(s)
 			parts.set(s, list)
@@ -1172,17 +1362,16 @@ export class Tracker {
 		)
 	}
 
-	/** A fused segment no open track holds and this `fusePairs` call has not taken. */
-	private freeFuseSeg(): Segment {
-		const pool = this.fuseSegs
+	/** A pooled segment no open track holds and this block's join has not taken. */
+	private freeSeg(pool: Segment[], taken: number[], stamp: number): Segment {
 		for (let i = 0; i < pool.length; i++) {
 			const s = pool[i]!
-			if (this.fuseSegTaken[i] === this.fuseStamp) continue
+			if (taken[i] === stamp) continue
 			let held = false
 			for (let o = 0; o < this.open.length && !held; o++)
 				held = this.open[o]!.lastSeg === s
 			if (held) continue
-			this.fuseSegTaken[i] = this.fuseStamp
+			taken[i] = stamp
 			return s
 		}
 		const s: Segment = {
@@ -1194,7 +1383,7 @@ export class Tracker {
 			flags: { truncated: false, skirt: false, edge: false },
 		}
 		pool.push(s)
-		this.fuseSegTaken.push(this.fuseStamp)
+		taken.push(stamp)
 		return s
 	}
 
@@ -1248,6 +1437,41 @@ export class Tracker {
 		)
 	}
 
+	/**
+	 * `bestMatch`, except for two pieces a line kept apart this block: association goes strongest
+	 * first, and a track whose segment walked the line touches what lies past it, so a stronger piece
+	 * there would take the track from the weaker piece that lies on it. Any other segment goes by
+	 * `bestMatch` alone, and a block with no such pieces pays one read. O(pieces kept apart) per
+	 * segment, and no allocation.
+	 */
+	private matchSegment(
+		s: Segment,
+		segments: readonly Segment[],
+		matched: Set<OpenTrack>,
+	): OpenTrack | undefined {
+		const t = this.bestMatch(s, matched)
+		if (t === undefined || t.paired) return t
+		const apart = this.lineApartAt
+		for (let i = 0; i < apart.length; i++) {
+			const lower = this.lineOut[apart[i]!]!
+			const upper = this.lineOut[apart[i]! + 1]!
+			const x = lower === s ? upper : upper === s ? lower : undefined
+			// A piece that went into a fused pair is no segment of this block.
+			if (
+				x === undefined ||
+				this.assoc.has(x) ||
+				matchOverlap(x, t) <= matchOverlap(s, t) ||
+				!segments.includes(x)
+			)
+				continue
+			matched.add(t)
+			const next = this.bestMatch(s, matched)
+			matched.delete(t)
+			return next
+		}
+		return t
+	}
+
 	private bestMatch(
 		s: Segment,
 		taken: ReadonlySet<OpenTrack>,
@@ -1265,9 +1489,7 @@ export class Tracker {
 					farNarrower(s, t.toneBins))
 			)
 				continue
-			const overlap =
-				Math.min(s.endBin + MATCH_TOLERANCE_BINS, matchHi(t)) -
-				Math.max(s.startBin - MATCH_TOLERANCE_BINS, matchLo(t))
+			const overlap = matchOverlap(s, t)
 			if (overlap > bestOverlap) {
 				bestOverlap = overlap
 				best = t
@@ -1294,12 +1516,26 @@ export class Tracker {
 			lastSeg: s,
 			onMin: s.startBin,
 			onMax: s.endBin,
+			onLine: false,
+			lineJoin: "none",
+			lineRefusals: 0,
+			lineRefusedAt: 0,
+			lineSoloLo: -1,
+			lineSoloHi: -1,
 			maxWidthBins: 0,
 			blocks: 0,
 			misses: 0,
 			peakDbfs: -Infinity,
 			maxBlockSnrDb: -Infinity,
 			bandLinSum: 0,
+			bandBlocks: 0,
+			spreadBlocks: 0,
+			swingLastDb: Number.NaN,
+			swingSumDb: 0,
+			swingPairs: 0,
+			spreadMeanDb: 0,
+			spreadM2: 0,
+			keyingRing: new Float32Array(KEYING_WINDOW_BLOCKS),
 			localSnrSum: 0,
 			localSnrBlocks: 0,
 			matchedSnrDb: Number.NaN,
@@ -1369,20 +1605,64 @@ export class Tracker {
 		t.lastSeg = s
 		t.blocks++
 		t.misses = 0
+		const followsOn = t.lastOnBlock === this.blockNo - 1
 		t.lastOnBlock = this.blockNo
 		t.lastSample = b.endSample
 		t.thresholdDb = b.thresholdDb
 		let band = 0
 		let floor = 0
 		let maxSnr = -Infinity
+		let top = -Infinity
+		const mask = this.lineMask
+		let onLine =
+			t.onLine ||
+			(mask !== null && (mask[s.endBin] === 1 || mask[s.startBin - 1] === 1))
 		for (let i = s.startBin; i < s.endBin; i++) {
 			const p = b.powerDb[i] ?? -200
 			const f = b.floorDb[i] ?? -200
 			band += 10 ** (p / 10)
 			floor += 10 ** (f / 10)
 			maxSnr = Math.max(maxSnr, p - f)
+			top = Math.max(top, p)
+			// A piece's edge bins may lie on a line's skirt; the bins between joined pieces lie on it.
+			if (mask?.[i] === 1 && i > s.startBin && i < s.endBin - 1) onLine = true
 		}
 		t.bandLinSum += band
+		t.bandBlocks++
+		const widened = s.startBin < t.onMin || s.endBin > t.onMax
+		t.onMin = Math.min(t.onMin, s.startBin)
+		t.onMax = Math.max(t.onMax, s.endBin)
+		// A track that joined young has no solo span to remember: this is the nearest to one.
+		if (
+			t.blocks === LINE_PART_BLOCKS &&
+			t.lineSoloLo < 0 &&
+			t.lineJoin !== "parted"
+		) {
+			t.lineSoloLo = t.onMin
+			t.lineSoloHi = t.onMax
+		}
+		const wasOnLine = t.onLine
+		t.onLine = onLine
+		// On a line the block's own span comes and goes with the masked bins' power, and the
+		// concentration of a flat signal follows its width (3 bins or 8 is 4 dB), so a stationary
+		// signal would read as modulated. The track's whole span holds still, and a reading only
+		// counts while it does.
+		let measured = band
+		if (t.onLine) {
+			if (widened || !wasOnLine) restartConcentration(t)
+			measured = 0
+			top = -Infinity
+			for (let i = t.onMin; i < t.onMax; i++) {
+				const p = b.powerDb[i] ?? -200
+				measured += 10 ** (p / 10)
+				top = Math.max(top, p)
+			}
+		}
+		this.noteConcentration(
+			t,
+			top - 10 * Math.log10(Math.max(measured, 1e-30)),
+			followsOn,
+		)
 		const local = this.localSnr(t, s, b.powerDb, band)
 		if (local !== null) {
 			t.localSnrSum += local
@@ -1395,14 +1675,24 @@ export class Tracker {
 		const weight = Math.max(band - floor, 1e-30)
 		t.centroidNum += s.centroidBin * weight
 		t.centroidDen += weight
-		t.onMin = Math.min(t.onMin, s.startBin)
-		t.onMax = Math.max(t.onMax, s.endBin)
 		t.maxWidthBins = Math.max(t.maxWidthBins, s.endBin - s.startBin)
-		t.spectrum.add(
-			b.powerDb,
-			Math.max(0, s.startBin - SPEC_PAD_BINS),
-			Math.min(n, s.endBin + SPEC_PAD_BINS),
+		// The pad measures a skirt beside the segment. A line beside it holds a spur's power, which
+		// would read as this signal's mean spectrum, unless a join already took that line in.
+		let padLo = s.startBin
+		while (
+			padLo > 0 &&
+			s.startBin - padLo < SPEC_PAD_BINS &&
+			(mask?.[padLo - 1] !== 1 || padLo > t.onMin)
 		)
+			padLo--
+		let padHi = s.endBin
+		while (
+			padHi < n &&
+			padHi - s.endBin < SPEC_PAD_BINS &&
+			(mask?.[padHi] !== 1 || padHi < t.onMax)
+		)
+			padHi++
+		t.spectrum.add(b.powerDb, padLo, padHi)
 		this.raise(t, "overload", b.overload)
 		this.raise(t, "gap", b.gap)
 		this.raise(t, "truncated", s.flags.truncated)
@@ -1413,6 +1703,450 @@ export class Tracker {
 		const wasBurst = t.flags.burst
 		t.flags.burst = t.blocks === 1 ? isBurst : wasBurst && isBurst
 		if (wasBurst && !t.flags.burst) t.flagsChanged = true
+	}
+
+	/**
+	 * A learned spur line switches its bins off in the detector, so a line inside an emission cuts
+	 * it into pieces, and a piece's width, shape and envelope are not the emission's. Those bins
+	 * still hold their measured power, but a real spur's power is measured there too. Pieces on both
+	 * sides of a line are the evidence that the power between them is one signal (`oneAcrossLine`);
+	 * a piece with no piece across takes the line only if the line's power came with the signal
+	 * (`walkOverLine`), since what it would walk onto may be the spur, stronger than it or not. The
+	 * joined segment's peak and centre come from the pieces' own bins (`joinSegments`), so a spur
+	 * between them pulls neither. A segment on a line alone
+	 * never gets here (the pipeline dropped it) and a track already on a line keeps its bins, so
+	 * `flagSpurs` flags what it flagged.
+	 *
+	 * False when nothing joined: off a line this is two reads per segment. True leaves the block's
+	 * segments in `lineOut`, the block in `lineBlockOut` and each joined segment with its pieces in
+	 * `lineJoined` and `lineParts`. All of it is the tracker's own scratch.
+	 */
+	private joinAcrossLines(raw: Segment[], b: TrackerBlock): boolean {
+		this.lineJoined.length = 0
+		this.lineApartAt.length = 0
+		const mask = this.lineMask
+		if (mask === null) return false
+		this.noteLineIdle(raw, b, mask)
+		const m = raw.length
+		let meets = false
+		for (let i = 0; i < m && !meets; i++) {
+			const s = raw[i]!
+			meets = mask[s.endBin] === 1 || mask[s.startBin - 1] === 1
+		}
+		if (!meets) return false
+		const sorted = this.lineSorted
+		// Insertion sort by first bin: the segmenter emits bin order, so one pass.
+		for (let i = 0; i < m; i++) {
+			const s = raw[i]!
+			let j = i
+			for (; j > 0 && sorted[j - 1]!.startBin > s.startBin; j--)
+				sorted[j] = sorted[j - 1]!
+			sorted[j] = s
+		}
+		sorted.length = m
+		const out = this.lineOut
+		out.length = 0
+		this.lineStamp++
+		const burstIn = b.burstSegments
+		const burst = this.lineBurst
+		burst.clear()
+		if (burstIn !== undefined && burstIn.size > 0)
+			for (const s of burstIn) burst.add(s)
+		const joinedAt = this.lineJoined
+		for (let k = 0; k < m; ) {
+			let j = k + 1
+			while (j < m && this.joinHolds(sorted[j - 1]!, sorted[j]!, b, mask)) j++
+			// This group's segment goes in `out` next, and the next group's right after it.
+			if (j < m && this.holeHasLine(sorted[j - 1]!, sorted[j]!, mask))
+				this.lineApartAt.push(out.length)
+			const first = sorted[k]!
+			const last = sorted[j - 1]!
+			const lo = this.walkOverLine(
+				first,
+				-1,
+				k > 0 ? sorted[k - 1]!.endBin : 0,
+				b,
+				mask,
+			)
+			const hi = this.walkOverLine(
+				last,
+				1,
+				j < m ? sorted[j]!.startBin : mask.length,
+				b,
+				mask,
+			)
+			if (j === k + 1 && lo === first.startBin && hi === first.endBin) {
+				out.push(first)
+				k = j
+				continue
+			}
+			const g = joinedAt.length
+			let list = this.lineParts[g]
+			if (list === undefined) {
+				list = []
+				this.lineParts.push(list)
+			}
+			list.length = 0
+			let allBurst = true
+			for (let i = k; i < j; i++) {
+				list.push(sorted[i]!)
+				if (!burst.has(sorted[i]!)) allBurst = false
+			}
+			const s = joinSegments(
+				list,
+				b.powerDb,
+				b.floorDb,
+				this.freeSeg(this.lineSegs, this.lineSegTaken, this.lineStamp),
+			)
+			s.startBin = lo
+			s.endBin = hi
+			// A joined segment is a burst only when every piece was one.
+			if (allBurst) burst.add(s)
+			joinedAt.push(s)
+			out.push(s)
+			k = j
+		}
+		if (joinedAt.length === 0) return false
+		const block = this.lineBlockOut
+		Object.assign(block, b)
+		// Object.assign leaves a key the block does not have: last block's reach would stay.
+		if (b.pairReachBins === undefined) delete block.pairReachBins
+		block.burstSegments = burst
+		return true
+	}
+
+	/**
+	 * `oneAcrossLine` reads one block, and a voice's peak wanders, so its answer alone would flip a
+	 * track's identity block by block. A decision therefore stays with the tracks it made:
+	 *
+	 * - A piece no open track holds has no identity to lose: this block's evidence decides at once,
+	 *   so a voice whose pieces come up together joins on its first block.
+	 * - A track holding a join across both pieces keeps it until `LINE_PART_BLOCKS` consecutive blocks
+	 *   refuse it, then goes on as the piece on the span it held before the join, so a neighbour that
+	 *   came up across the line opens its own track whatever its level; with neither piece more on
+	 *   that span, the stronger one. A track that lost its piece to that join is only in its hang, no
+	 *   neighbour: it gets the other piece back at the parting, not before.
+	 * - Two tracks under `LINE_PART_BLOCKS` old go by this block's evidence: a refusal or two is not a
+	 *   decision. From that age, or once either has parted, they stay two until one closes.
+	 *
+	 * Five numbers per track, released with it; three `bestMatch` scans, each O(open tracks), per pair
+	 * of pieces with a line between them, and no allocation.
+	 */
+	private joinHolds(
+		p: Segment,
+		q: Segment,
+		b: TrackerBlock,
+		mask: Uint8Array,
+	): boolean {
+		if (!this.holeHasLine(p, q, mask)) return false
+		const verdict = this.oneAcrossLine(p, q, b, mask)
+		const taken = this.lineTaken
+		taken.clear()
+		const strong = p.peakDb >= q.peakDb ? p : q
+		const weak = strong === p ? q : p
+		// The piece the track belongs to chooses first; a stronger piece beside it takes what is left.
+		const mine = this.bestMatch(strong, taken)
+		const first =
+			mine !== undefined && this.prefers(mine, weak, strong) ? weak : strong
+		const second = first === p ? q : p
+		const onFirst = this.bestMatch(first, taken)
+		if (onFirst !== undefined) taken.add(onFirst)
+		const onSecond = this.bestMatch(second, taken)
+		// The track on air last: the only one that can hold a join over the other, which then hangs.
+		const secondLast =
+			onSecond !== undefined &&
+			(onFirst === undefined || onSecond.lastOnBlock > onFirst.lastOnBlock)
+		const t = secondLast ? onSecond : onFirst
+		if (t === undefined) return verdict
+		const piece = secondLast ? second : first
+		const across = secondLast ? first : second
+		const other = secondLast ? onFirst : onSecond
+		if (
+			t.lineJoin !== "held" ||
+			across.startBin < t.onMin - MATCH_TOLERANCE_BINS ||
+			across.endBin > t.onMax + MATCH_TOLERANCE_BINS ||
+			(other !== undefined &&
+				(other.lineJoin === "parted" || other.lastOnBlock === t.lastOnBlock))
+		) {
+			if (
+				other === undefined ||
+				(t.lineJoin !== "parted" &&
+					other.lineJoin !== "parted" &&
+					Math.min(t.blocks, other.blocks) < LINE_PART_BLOCKS)
+			) {
+				if (verdict && t.lineJoin !== "held") noteSoloSpan(t)
+				return verdict
+			}
+			partLine(t, piece)
+			partLine(other, across)
+			return false
+		}
+		if (verdict) return true
+		// `blockNo` steps in `block()`, after this: one stamp per block, and a block with no refusal
+		// restarts the run.
+		const stamp = this.blockNo + 1
+		if (t.lineRefusedAt !== stamp) {
+			t.lineRefusals = t.lineRefusedAt === stamp - 1 ? t.lineRefusals + 1 : 1
+			t.lineRefusedAt = stamp
+		}
+		if (t.lineRefusals < LINE_PART_BLOCKS) return true
+		partLine(t, piece)
+		if (other !== undefined) partLine(other, across)
+		return false
+	}
+
+	/**
+	 * Track `t` belongs to `a` rather than the stronger `b`. A track holding a join goes by the span
+	 * it held on its own, and with none remembered by strength: both pieces lie on its span now. A
+	 * track holding no join goes by the span of its last segment, where a piece past a line it walked
+	 * only touches it.
+	 */
+	private prefers(t: OpenTrack, a: Segment, b: Segment): boolean {
+		if (t.lineJoin !== "held") return matchOverlap(a, t) > matchOverlap(b, t)
+		const lo = t.lineSoloLo
+		const hi = t.lineSoloHi
+		if (lo < 0) return false
+		// A piece off that span holds none of it, however near it lies.
+		return (
+			Math.min(a.endBin, hi) - Math.max(a.startBin, lo) >
+			Math.max(0, Math.min(b.endBin, hi) - Math.max(b.startBin, lo))
+		)
+	}
+
+	/** The hole between `p` and `q` holds a line and is at most `LINE_WALK_MAX_HZ` wide. */
+	private holeHasLine(p: Segment, q: Segment, mask: Uint8Array): boolean {
+		const from = p.endBin
+		const to = q.startBin
+		if (to <= from || to - from > Math.ceil(LINE_WALK_MAX_HZ / this.opts.binHz))
+			return false
+		for (let i = from; i < to; i++) if (mask[i] === 1) return true
+		return false
+	}
+
+	/**
+	 * Whether the neighbours `p` and `q` are one emission cut by a line: the hole between them holds
+	 * a line at an edge, is at most `LINE_WALK_MAX_HZ` wide and every bin of it is over the threshold
+	 * (what the segmenter would have seen without the mask), and `partedAcross` does not part them.
+	 */
+	private oneAcrossLine(
+		p: Segment,
+		q: Segment,
+		b: TrackerBlock,
+		mask: Uint8Array,
+	): boolean {
+		const from = p.endBin
+		const to = q.startBin
+		if (
+			to <= from ||
+			to - from > Math.ceil(LINE_WALK_MAX_HZ / this.opts.binHz) ||
+			(mask[from] !== 1 && mask[to - 1] !== 1)
+		)
+			return false
+		for (let i = from; i < to; i++) if (!overThreshold(b, i)) return false
+		return !this.partedAcross(
+			p.peakBin,
+			p.peakDb,
+			q.peakBin,
+			q.peakDb,
+			from,
+			to,
+			b,
+		)
+	}
+
+	/**
+	 * The edge of `s` on side `dir` after a walk over a line with no piece across it, on bins over
+	 * the threshold. A voice's carrier can sit on the line and outreach its skirts, so level alone
+	 * says little; a real spur holds its power with or without a signal, so the evidence is the
+	 * line's strongest bin standing `LINE_GAIN_DB` over what it holds idle (`noteLineIdle`). A line
+	 * never seen idle has only level left (`LINE_ON_AIR_DB`). Without evidence `s` keeps its edge,
+	 * and so too on reaching a neighbour `oneAcrossLine` refused (`stop`, so a refused hole goes to
+	 * neither side) or where `partedAcross` parts it from what shows past the line. At most
+	 * `LINE_WALK_MAX_HZ`; constant state.
+	 */
+	private walkOverLine(
+		s: Segment,
+		dir: 1 | -1,
+		stop: number,
+		b: TrackerBlock,
+		mask: Uint8Array,
+	): number {
+		const from = dir > 0 ? s.endBin : s.startBin
+		if (mask[dir > 0 ? from : from - 1] !== 1) return from
+		const reach = Math.ceil(LINE_WALK_MAX_HZ / this.opts.binHz)
+		let lineTop = -Infinity
+		let lineTopBin = -1
+		let farTop = -Infinity
+		let farBin = -1
+		let farStart = from
+		let edge = from
+		for (let k = 0; k < reach; k++) {
+			if (edge === stop) return from
+			const i = dir > 0 ? edge : edge - 1
+			if (i < 0 || i >= mask.length || !overThreshold(b, i)) break
+			const p = b.powerDb[i]!
+			edge += dir
+			if (mask[i] === 1) {
+				if (p > lineTop) {
+					lineTop = p
+					lineTopBin = i
+				}
+				if (farBin < 0) farStart = edge
+			} else if (p > farTop) {
+				farTop = p
+				farBin = i
+			}
+		}
+		if (lineTopBin < 0) return from
+		const idle = this.lineIdleDb[lineTopBin] ?? NaN
+		if (
+			Number.isNaN(idle)
+				? lineTop > s.peakDb + LINE_ON_AIR_DB
+				: lineTop < idle + LINE_GAIN_DB
+		)
+			return from
+		if (
+			farBin >= 0 &&
+			this.partedAcross(
+				s.peakBin,
+				s.peakDb,
+				farBin,
+				farTop,
+				Math.min(from, farStart),
+				Math.max(from, farStart),
+				b,
+			)
+		)
+			return from
+		// A neighbour that parted may just be in its hang: its bins are not this piece's to take.
+		const walkLo = Math.min(from, edge)
+		const walkHi = Math.max(from, edge)
+		for (let k = 0; k < this.open.length; k++) {
+			const t = this.open[k]!
+			if (t.lineJoin === "parted" && t.onMin < walkHi && t.onMax > walkLo)
+				return from
+		}
+		return edge
+	}
+
+	/**
+	 * Learns what each line bin holds with no signal on it: bins of no segment (with its pad) and of
+	 * no open track's span, on a measured block. Falls at once, rises `LINE_IDLE_RISE_DB_PER_S`.
+	 * One array per tracker, O(FFT size) on a block with lines; a block with no line reads the mask
+	 * once. The epoch's start forgets it: a retune moves everything under a baseband line.
+	 */
+	private noteLineIdle(
+		raw: readonly Segment[],
+		b: TrackerBlock,
+		mask: Uint8Array,
+	): void {
+		if (b.gap || b.overload) return
+		const n = mask.length
+		if (this.lineIdleDb.length !== n) {
+			this.lineIdleDb = new Float32Array(n).fill(NaN)
+			this.lineBusy = new Uint8Array(n)
+		}
+		const rise = (LINE_IDLE_RISE_DB_PER_S * this.opts.blockMs) / 1000
+		let prepared = false
+		for (let i = 0; i < n; i++) {
+			if (mask[i] !== 1) continue
+			if (!prepared) {
+				prepared = true
+				const busy = this.lineBusy
+				busy.fill(0)
+				for (let k = 0; k < raw.length; k++) {
+					const s = raw[k]!
+					busy.fill(
+						1,
+						Math.max(0, s.startBin - SPEC_PAD_BINS),
+						s.endBin + SPEC_PAD_BINS,
+					)
+				}
+				for (let k = 0; k < this.open.length; k++) {
+					const t = this.open[k]!
+					busy.fill(1, Math.max(0, t.onMin - 1), t.onMax + 1)
+				}
+			}
+			if (this.lineBusy[i] === 1) continue
+			const p = b.powerDb[i]
+			if (p === undefined || !Number.isFinite(p)) continue
+			const idle = this.lineIdleDb[i]!
+			this.lineIdleDb[i] = Number.isNaN(idle) ? p : Math.min(p, idle + rise)
+		}
+	}
+
+	/**
+	 * Whether the segmenter's rules would keep two peaks with the hole [from, to) between them apart,
+	 * on what the tracker knows. A peak over `LINE_SIDEBAND_DB` below the other and within reach is
+	 * its sideband: not apart. `pairReachBins` holds the plan's channel limit: peaks that far apart
+	 * or more are apart, and closer ones are one emitter whatever the valley (two FSK tones with a
+	 * line between them), up to `LINE_WALK_MAX_HZ` where a burst range's far wider pair reach says
+	 * nothing about one channel. Otherwise a valley `DIP_SPLIT_DB` under the lower peak in the lower
+	 * `DIP_FLOOR_FRACTION` of its height over the floor parts them. O(hole x smoothing), no allocation.
+	 */
+	private partedAcross(
+		aBin: number,
+		aDb: number,
+		cBin: number,
+		cDb: number,
+		from: number,
+		to: number,
+		b: TrackerBlock,
+	): boolean {
+		const binHz = this.opts.binHz
+		const lower = Math.min(aDb, cDb)
+		const apart = Math.abs(aBin - cBin)
+		if (
+			Math.max(aDb, cDb) - lower > LINE_SIDEBAND_DB &&
+			apart <= Math.floor(LINE_SIDEBAND_REACH_HZ / binHz)
+		)
+			return false
+		const reach = b.pairReachBins
+		if (reach !== undefined) {
+			const limit = Math.min(reach[aBin] ?? 0, reach[cBin] ?? 0)
+			if (limit > 0 && apart >= limit) return true
+			if (limit > 0 && apart * binHz <= LINE_WALK_MAX_HZ) return false
+		}
+		const half = Math.max(0, Math.round(LINE_SMOOTH_HZ / binHz) >> 1)
+		for (let i = from; i < to; i++) {
+			let sum = 0
+			let count = 0
+			for (let c = i - half; c <= i + half; c++) {
+				const v = b.powerDb[c]
+				if (v === undefined) continue
+				sum += v
+				count++
+			}
+			const valley = sum / count
+			const floor = b.floorDb[i] ?? -200
+			if (
+				lower - valley >= DIP_SPLIT_DB &&
+				valley - floor <= (lower - floor) * DIP_FLOOR_FRACTION
+			)
+				return true
+		}
+		return false
+	}
+
+	/**
+	 * One block's concentration (strongest bin over the segment's power, dB). Welford's update:
+	 * constant state and one call per on block per track.
+	 */
+	private noteConcentration(
+		t: OpenTrack,
+		concentrationDb: number,
+		followsOn: boolean,
+	): void {
+		if (followsOn && !Number.isNaN(t.swingLastDb)) {
+			t.swingSumDb += Math.abs(concentrationDb - t.swingLastDb)
+			t.swingPairs++
+		}
+		t.swingLastDb = concentrationDb
+		t.keyingRing[t.spreadBlocks % KEYING_WINDOW_BLOCKS] = concentrationDb
+		t.spreadBlocks++
+		const delta = concentrationDb - t.spreadMeanDb
+		t.spreadMeanDb += delta / t.spreadBlocks
+		t.spreadM2 += delta * (concentrationDb - t.spreadMeanDb)
 	}
 
 	private raise(t: OpenTrack, flag: keyof TrackFlags, value: boolean): void {
@@ -2013,7 +2747,7 @@ export class Tracker {
 		const useDb = t.maxBlockSnrDb >= OBW_MIN_SNR_DB
 		const f = this.features(t)
 		const blocks = Math.max(1, t.blocks)
-		const bandMean = t.bandLinSum / blocks
+		const bandMean = t.bandLinSum / Math.max(1, t.bandBlocks)
 		const centreHz = this.rf(this.centroidBin(t), n, t.epoch.centreHz)
 		const obwHz = useDb
 			? this.cappedObw(t, obwAtDb(mean, a, e, binHz, 20))
@@ -2072,6 +2806,18 @@ export class Tracker {
 		}
 		if (f.acf30 !== undefined) snap.acf30 = f.acf30
 		if (f.acf60 !== undefined) snap.acf60 = f.acf60
+		const spreadDb = Math.sqrt(t.spreadM2 / Math.max(1, t.spreadBlocks))
+		if (
+			t.swingPairs > 0 &&
+			(this.opts.blockMs * binHz) / 1000 >= SWING_MIN_FRAMES &&
+			(!t.onLine ||
+				(t.spreadBlocks >= LINE_READING_MIN_BLOCKS &&
+					spreadDb >= LINE_SPREAD_MIN_DB)) &&
+			!keyedConcentration(t)
+		) {
+			snap.blockSwingDb = t.swingSumDb / t.swingPairs
+			snap.blockSpreadDb = spreadDb
+		}
 		if (
 			twoTone(
 				mean,
@@ -2152,9 +2898,158 @@ function chainBaseOf(prev: OpenTrack, next: OpenTrack): ChainBase {
 }
 
 /**
- * One segment from FSK pair parts (sorted by peak bin), written into `out`: their whole span,
- * the strongest peak, the excess-power centroid of the parts' own bins (not the hole between
- * them) and the union of their flags.
+ * How regularly `count` values of the ring `x` repeat, oldest at `head` (or 0 while not yet full):
+ * the best, over periods of 2 to count / 4 blocks, of the lesser autocorrelation at the period and
+ * at twice it. Data keyed against a carrier repeats at both; speech's syllables do not hold a period
+ * twice. Under `KEYING_MIN_BLOCKS`, on no variance or on non-finite values: 0, not keying. At most 16
+ * periods x 2 lags x 64 products, at each snapshot, no allocation.
+ */
+export function keyingScore(
+	x: Float32Array,
+	count: number,
+	head: number,
+): number {
+	if (count < KEYING_MIN_BLOCKS) return 0
+	const size = x.length
+	const first = count < size ? 0 : head
+	let mean = 0
+	for (let i = 0; i < count; i++) mean += x[(first + i) % size]!
+	mean /= count
+	let variance = 0
+	for (let i = 0; i < count; i++)
+		variance += (x[(first + i) % size]! - mean) ** 2
+	variance /= count
+	if (!(variance > 0) || !Number.isFinite(variance)) return 0
+	const lagged = (lag: number): number => {
+		let sum = 0
+		for (let i = 0; i + lag < count; i++)
+			sum +=
+				(x[(first + i) % size]! - mean) * (x[(first + i + lag) % size]! - mean)
+		return sum / ((count - lag) * variance)
+	}
+	let best = 0
+	for (let period = 2; period <= count >> 2; period++)
+		best = Math.max(best, Math.min(lagged(period), lagged(2 * period)))
+	return best
+}
+
+/**
+ * How much of the movement of `count` values of the ring `x` (oldest at `head`, or 0 while not yet
+ * full) lies in steps of at least `KEYING_EDGE_RANGE` of their range, from 0 to 1. On no movement or
+ * on non-finite values: 0, not keying. One pass of at most 64 values, no allocation.
+ */
+export function keyingEdgeShare(
+	x: Float32Array,
+	count: number,
+	head: number,
+): number {
+	const size = x.length
+	const first = count < size ? 0 : head
+	let lo = Infinity
+	let hi = -Infinity
+	for (let i = 0; i < count; i++) {
+		const v = x[(first + i) % size]!
+		lo = Math.min(lo, v)
+		hi = Math.max(hi, v)
+	}
+	const edge = (hi - lo) * KEYING_EDGE_RANGE
+	let moved = 0
+	let onEdges = 0
+	for (let i = 1; i < count; i++) {
+		const step = Math.abs(x[(first + i) % size]! - x[(first + i - 1) % size]!)
+		moved += step
+		if (step >= edge) onEdges += step
+	}
+	return moved > 0 && Number.isFinite(moved) ? onEdges / moved : 0
+}
+
+/** Regular keying: the concentration repeats and moves in edges. */
+function keyedConcentration(t: OpenTrack): boolean {
+	const count = Math.min(t.spreadBlocks, KEYING_WINDOW_BLOCKS)
+	const head = t.spreadBlocks % KEYING_WINDOW_BLOCKS
+	return (
+		keyingScore(t.keyingRing, count, head) >= KEYING_SCORE_MIN &&
+		keyingEdgeShare(t.keyingRing, count, head) >= KEYING_EDGE_SHARE_MIN
+	)
+}
+
+/** Over the threshold in this block; unknown or non-finite power or floor is not. */
+function overThreshold(b: TrackerBlock, i: number): boolean {
+	return (b.powerDb[i] ?? -200) - (b.floorDb[i] ?? Infinity) >= b.thresholdDb
+}
+
+/**
+ * Track `t` is about to hold a join: what it held until now, if it is old enough for that to mean
+ * something. It reads the span before this block's join widens it.
+ */
+function noteSoloSpan(t: OpenTrack): void {
+	if (t.blocks < LINE_PART_BLOCKS) return
+	t.lineSoloLo = t.onMin
+	t.lineSoloHi = t.onMax
+}
+
+/**
+ * Track `t` has parted from its neighbour and goes on as piece `s`. If it held a join, what it
+ * measured over both pieces was never that piece's: its span, width, centre, mean spectrum,
+ * concentration, envelope, power totals and peak start over. The SNR is a ratio of the two totals,
+ * so it needs no block count of its own.
+ */
+function partLine(t: OpenTrack, s: Segment): void {
+	const held = t.lineJoin === "held"
+	t.lineJoin = "parted"
+	t.lineSoloLo = -1
+	t.lineSoloHi = -1
+	if (!held) return
+	t.onMin = s.startBin
+	t.onMax = s.endBin
+	// This block's association matches on these: over the joined span the stronger piece would win.
+	t.startBin = s.startBin
+	t.endBin = s.endBin
+	t.onLine = false
+	t.maxWidthBins = 0
+	t.centroidNum = 0
+	t.centroidDen = 0
+	t.spectrum.reset()
+	restartConcentration(t)
+	t.envLen = 0
+	t.envOrigin = -1
+	t.envBucket = 0
+	t.envSum = 0
+	t.envFrames = 0
+	t.frozen = null
+	t.bandLinSum = 0
+	t.bandBlocks = 0
+	t.floorLinSum = 0
+	t.localSnrSum = 0
+	t.localSnrBlocks = 0
+	t.matchedSnrDb = Number.NaN
+	t.peakDbfs = -Infinity
+	t.maxBlockSnrDb = -Infinity
+	// What the chain held before a rollover was the join's too. It keeps its id, start and block count.
+	if (t.chain !== null)
+		t.chain = {
+			...t.chain,
+			bandLinSum: 0,
+			floorLinSum: 0,
+			peakDbfs: -Infinity,
+			maxBlockSnrDb: -Infinity,
+		}
+}
+
+/** Drops the concentration readings of a track whose span just changed. */
+function restartConcentration(t: OpenTrack): void {
+	t.spreadBlocks = 0
+	t.swingLastDb = Number.NaN
+	t.swingSumDb = 0
+	t.swingPairs = 0
+	t.spreadMeanDb = 0
+	t.spreadM2 = 0
+}
+
+/**
+ * One segment from the pieces of one emission (FSK pair parts, or pieces cut by a spur line; sorted
+ * by bin), written into `out`: their whole span, the strongest peak, the excess-power centroid of
+ * the parts' own bins (not the hole between them) and the union of their flags.
  */
 function joinSegments(
 	parts: readonly Segment[],
@@ -2202,6 +3097,14 @@ function farNarrower(s: Segment, toneBins: number): boolean {
 /** Within `FSK_PAIR_DB` in level and `FSK_PAIR_WIDTH_RATIO` in width: two tones of one pair. */
 function pairLevel(a: Segment, b: Segment): boolean {
 	return Math.abs(a.peakDb - b.peakDb) <= FSK_PAIR_DB && similarWidth(a, b)
+}
+
+/** Bins of `s`, with the match tolerance, on the span `t` matches on; 0 or less is none. */
+function matchOverlap(s: Segment, t: OpenTrack): number {
+	return (
+		Math.min(s.endBin + MATCH_TOLERANCE_BINS, matchHi(t)) -
+		Math.max(s.startBin - MATCH_TOLERANCE_BINS, matchLo(t))
+	)
 }
 
 /** A paired track matches over its whole span: one tone may key alone on a block. */

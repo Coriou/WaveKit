@@ -659,8 +659,8 @@ describe("ProbePool", () => {
 		h.clock.now += 4000 + 2000 + 1
 		h.decoders.emitOutput(decoderId, pocsag(1234567, h.clock.now))
 		expect(h.evidence).toEqual([])
-		// that decode opened a fresh window: the next one 1 s later pairs
-		h.clock.now += 1000
+		// that decode opened a fresh window: the next one 2 s later pairs
+		h.clock.now += 2000
 		h.decoders.emitOutput(decoderId, pocsag(1234567, h.clock.now))
 		expect(h.evidence).toHaveLength(1)
 	})
@@ -837,7 +837,7 @@ describe("ProbePool", () => {
 		await flushAsync()
 		const decoderId = h.pool.status()[0]!.decoderId
 		h.decoders.emitOutput(decoderId, pocsag(1234567, h.clock.now))
-		h.clock.now += 1000
+		h.clock.now += 2000
 		h.decoders.emitOutput(decoderId, pocsag(1234567, h.clock.now))
 		expect(h.evidence).toHaveLength(1)
 		h.clock.now += 5 * 60_000
