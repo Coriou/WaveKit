@@ -450,6 +450,264 @@ describe("tune in one call", () => {
 		})
 	})
 
+	describe("a value in place keeps the reconnect replay order", () => {
+		const G = 445
+		const P = 200
+		type Mode = "agc" | "manual" | undefined
+		/** "configured mode": the configured gain differs from the tune's, so only the mode is in place. */
+		type InPlace = "no" | "configured" | "configured mode" | "tuned"
+
+		/** Drops the connection and waits for the next one's payload (fake time). */
+		async function reconnect(h: Awaited<ReturnType<typeof setup>>) {
+			const before = h.connections()
+			const back = event(h.manager, "payload-started")
+			const dropped = event(h.manager, "disconnected")
+			h.sockets[h.sockets.length - 1]!.destroy()
+			await dropped
+			for (let n = 1; h.connections() === before && n < 8; n++)
+				await vi.advanceTimersByTimeAsync(calculateBackoffDelay(n))
+			await back
+		}
+
+		/** The gain frames the connection got, once a marker frame after them has arrived. */
+		async function gainFrames(
+			h: Awaited<ReturnType<typeof setup>>,
+		): Promise<Array<[number, number]>> {
+			const connection = h.connections()
+			const marker = connection + 10
+			await h.controller.setPpm("rtl", marker)
+			await until(() =>
+				h.frames.some(
+					f =>
+						f.connection === connection &&
+						f.cmd === SET_PPM &&
+						f.value === marker,
+				),
+			)
+			return h.frames
+				.filter(
+					f =>
+						f.connection === connection &&
+						(f.cmd === SET_GAIN_MODE || f.cmd === SET_GAIN),
+				)
+				.map(f => [f.cmd, f.value])
+		}
+
+		/**
+		 * rtl_tcp's gain after the frames: SET_GAIN switches to manual, and a manual SET_GAIN_MODE may
+		 * reset the gain. What the frames leave must be what the state claims to know.
+		 */
+		function expectReplayAgrees(
+			state: TunerState,
+			frames: Array<[number, number]>,
+		) {
+			let mode: "agc" | "manual" | undefined
+			let gain: number | "reset" | undefined
+			for (const [cmd, value] of frames) {
+				if (cmd === SET_GAIN) {
+					mode = "manual"
+					gain = value
+				} else {
+					mode = value === 1 ? "manual" : "agc"
+					if (value === 1) gain = "reset"
+				}
+			}
+			const unknown = state.unknownFields ?? []
+			if (mode !== undefined && !unknown.includes("gainMode"))
+				expect(mode).toBe(state.gainMode)
+			if (
+				state.gainMode === "manual" &&
+				!unknown.includes("gain") &&
+				gain !== undefined
+			)
+				expect(gain).toBe(state.gain)
+		}
+
+		it("an AGC tune with a gain, then the same gain alone: the replay keeps the gain before AGC", async () => {
+			const h = await setup()
+			await h.post({ gainMode: "agc", gain: P })
+			await h.post({ gain: P })
+			expect(h.read()).toMatchObject({ gainMode: "agc", gain: P })
+			h.fakeTime()
+			await reconnect(h)
+			expect(await gainFrames(h)).toEqual([
+				[SET_GAIN, P],
+				[SET_GAIN_MODE, 0],
+			])
+		})
+
+		it("a manual tune with a gain, then the same mode alone: the replay keeps the mode before its gain", async () => {
+			const h = await setup()
+			await h.post({ gainMode: "manual", gain: P })
+			await h.post({ gainMode: "manual" })
+			h.fakeTime()
+			await reconnect(h)
+			expect(await gainFrames(h)).toEqual([
+				[SET_GAIN_MODE, 1],
+				[SET_GAIN, P],
+			])
+		})
+
+		it("the configured manual mode asked again keeps the configured gain on a reconnect", async () => {
+			const h = await setup({ tuner: { gainMode: "manual", gainDb: 44.5 } })
+			await until(() => h.frames.some(f => f.cmd === SET_GAIN))
+			const res = await h.post({ gainMode: "manual" })
+			expect(res.json()).toMatchObject({
+				applied: ["gainMode"],
+				notApplied: [],
+			})
+			h.fakeTime()
+			await reconnect(h)
+			expect(await gainFrames(h)).toEqual([
+				[SET_GAIN_MODE, 1],
+				[SET_GAIN, G],
+			])
+			expect(h.read()).toMatchObject({ gainMode: "manual", gain: G })
+			expect(h.read().unknownFields ?? []).not.toContain("gain")
+		})
+
+		it("from manual to AGC with a gain, with a rate change: no partial, gain before AGC", async () => {
+			const h = await setup({ tuner: { gainMode: "manual", gainDb: 20 } })
+			await until(() => h.frames.some(f => f.cmd === SET_GAIN))
+			h.fakeTime()
+			const disconnected = event(h.manager, "disconnected")
+			const answer = h.post({
+				frequencyHz: TUNE_HZ,
+				sampleRateHz: OTHER_RATE,
+				gainMode: "agc",
+				gain: P,
+			})
+			await disconnected
+			await vi.advanceTimersByTimeAsync(calculateBackoffDelay(1))
+			const res = await answer
+			expect(res.json()).toMatchObject({
+				usable: true,
+				notApplied: [],
+				gainMode: "agc",
+				gain: P,
+			})
+			expect(await gainFrames(h)).toEqual([
+				[SET_GAIN, P],
+				[SET_GAIN_MODE, 0],
+			])
+		})
+
+		const cases: Array<{
+			mode: Mode
+			gain: boolean
+			inPlace: InPlace
+			rate: boolean
+		}> = []
+		for (const mode of ["agc", "manual", undefined] as const)
+			for (const gain of [true, false])
+				for (const inPlace of [
+					"no",
+					"configured",
+					"configured mode",
+					"tuned",
+				] as const)
+					for (const rate of [true, false])
+						cases.push({ mode, gain, inPlace, rate })
+
+		function configFor(mode: Mode, inPlace: InPlace): SourceTunerConfig {
+			if (mode === "agc") return { gainMode: "agc" }
+			return {
+				gainMode: "manual",
+				gainDb: inPlace === "configured" ? 44.5 : 20,
+			}
+		}
+
+		function priorTune(
+			mode: Mode,
+			gain: boolean,
+			inPlace: InPlace,
+		): Record<string, unknown> | undefined {
+			if (inPlace === "tuned")
+				return {
+					...(mode !== undefined ? { gainMode: mode } : {}),
+					...(gain || mode === undefined ? { gain: G } : {}),
+				}
+			if (inPlace === "no") {
+				if (mode === "agc") return { gainMode: "manual", gain: P }
+				if (mode === "manual") return { gainMode: "agc" }
+				return gain ? { gainMode: "manual", gain: P } : undefined
+			}
+			return undefined
+		}
+
+		it.each(cases)(
+			"mode $mode, gain $gain, in place $inPlace, rate change $rate: applied, and the replay agrees with the state",
+			async ({ mode, gain, inPlace, rate }) => {
+				const h = await setup(
+					inPlace.startsWith("configured")
+						? { tuner: configFor(mode, inPlace) }
+						: {},
+				)
+				if (inPlace.startsWith("configured"))
+					await until(() => h.frames.some(f => f.cmd === SET_GAIN_MODE))
+				const prior = priorTune(mode, gain, inPlace)
+				if (prior !== undefined)
+					expect((await h.post(prior)).json().notApplied).toEqual([])
+				const before = h.read()
+				const body = {
+					frequencyHz: TUNE_HZ,
+					...(rate ? { sampleRateHz: OTHER_RATE } : {}),
+					...(mode !== undefined ? { gainMode: mode } : {}),
+					...(gain ? { gain: G } : {}),
+				}
+				h.fakeTime()
+				let res: Awaited<ReturnType<typeof h.post>>
+				if (rate) {
+					const disconnected = event(h.manager, "disconnected")
+					const answer = h.post(body)
+					await disconnected
+					await vi.advanceTimersByTimeAsync(calculateBackoffDelay(1))
+					res = await answer
+				} else {
+					res = await h.post(body)
+					await reconnect(h)
+				}
+				expect(res.statusCode).toBe(200)
+				expect(res.json()).toMatchObject({ usable: true, notApplied: [] })
+
+				const asked = (state: TunerState) => {
+					const unknown = state.unknownFields ?? []
+					if (mode !== undefined) {
+						expect(state.gainMode).toBe(mode)
+						expect(unknown).not.toContain("gainMode")
+					}
+					if (gain) {
+						expect(state.gain).toBe(G)
+						expect(unknown).not.toContain("gain")
+					}
+				}
+				// Nothing of the gain pair written: what was known before stays known (a configured
+				// gain is never dropped).
+				const wroteNothing =
+					inPlace === "tuned" ||
+					(inPlace.startsWith("configured") && !gain) ||
+					(inPlace === "configured" && mode !== "agc")
+				const kept = (state: TunerState) => {
+					if (!wroteNothing) return
+					for (const field of ["gainMode", "gain"] as const) {
+						if ((before.unknownFields ?? []).includes(field)) continue
+						if (field === "gain" && before.gainMode === "agc") continue
+						expect(state.unknownFields ?? []).not.toContain(field)
+						expect(state[field]).toBe(before[field])
+					}
+				}
+				for (let round = 0; round < 2; round++) {
+					if (round === 1) await reconnect(h)
+					const frames = await gainFrames(h)
+					const state = h.read()
+					asked(state)
+					kept(state)
+					expectReplayAgrees(state, frames)
+				}
+			},
+		)
+	})
+
 	it("names the key list for an unknown body field, before the at-least-one rule, and writes nothing", async () => {
 		const h = await setup()
 		const before = h.frames.length

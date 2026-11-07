@@ -2287,6 +2287,10 @@ export class TunerController extends EventEmitter {
 
 		let wroteGain = leftAgc
 		let wroteMode = false
+		// Operator values in place that sent no frame and are not accepted yet (acceptBesideHeld).
+		const inPlace: Array<"gainMode" | "gain"> = []
+		const notAccepted = (field: "gainMode" | "gain") =>
+			this.desiredFields.get(sourceId)?.has(field) !== true
 		const writeMode = async (mode: TunerGainMode) => {
 			if (
 				changed("gainMode", mode !== state.gainMode) ||
@@ -2296,7 +2300,7 @@ export class TunerController extends EventEmitter {
 				wroteMode = true
 			} else if (operator) {
 				this.noteUnchangedGainChoice(sourceId, opts)
-				this.acceptUnchanged(sourceId, RTL_TCP_COMMANDS.SET_GAIN_MODE)
+				if (notAccepted("gainMode")) inPlace.push("gainMode")
 			}
 			applied("gainMode")
 		}
@@ -2306,7 +2310,7 @@ export class TunerController extends EventEmitter {
 				wroteGain = true
 			} else if (operator) {
 				this.noteUnchangedGainChoice(sourceId, opts, true)
-				this.acceptUnchanged(sourceId, RTL_TCP_COMMANDS.SET_GAIN)
+				if (notAccepted("gain")) inPlace.push("gain")
 			}
 			applied("gain")
 		}
@@ -2318,6 +2322,7 @@ export class TunerController extends EventEmitter {
 			if (values.gainMode !== undefined) await writeMode(values.gainMode)
 			if (values.gain !== undefined) await writeGain(values.gain)
 		}
+		if (inPlace.length > 0) this.acceptBesideHeld(sourceId, inPlace)
 	}
 
 	/** What a temporary tune must remember to put the tuner back. */
@@ -3235,15 +3240,43 @@ export class TunerController extends EventEmitter {
 	}
 
 	/**
-	 * An operator tune's gain mode or gain already in place and proven: no frame, but the value is
-	 * now the operator's, as if written. Proof by the configured frames alone lasts one connection,
-	 * and the next one skips the configured mode once the tune's gain is held, so without this a
-	 * rate change's reconnect left the mode the tune asked for unknown (TUNER_TUNE_PARTIAL). Accepted,
-	 * the reconnect replays it with the gain.
+	 * An operator tune's gain mode or gain already in place, proven and not accepted: no frame was
+	 * sent. While its partner (gain for the mode, the mode for the gain) is not accepted either, the
+	 * next connection's configured frames write the pair, as before the tune: nothing to do. Once the
+	 * partner is accepted the configured pair is skipped, so the value the tune asked for would come
+	 * back unknown after a reconnect (a rate change's: TUNER_TUNE_PARTIAL). It is accepted then,
+	 * placed beside the partner in the replay order the writes keep: a manual mode before its gain,
+	 * a gain before AGC. Every other accepted field keeps its place.
 	 */
-	private acceptUnchanged(sourceId: string, cmd: number): void {
-		this.sourceManager.assertTunerCommandActive()
-		this.markAccepted(sourceId, cmd)
+	private acceptBesideHeld(
+		sourceId: string,
+		fields: ReadonlyArray<"gainMode" | "gain">,
+	): void {
+		const desired = this.desiredFields.get(sourceId)
+		const state = this.tunerStates.get(sourceId)
+		if (!desired || !state) return
+		for (const field of fields) {
+			const partner = field === "gain" ? "gainMode" : "gain"
+			const partnerSeq = desired.get(partner)
+			if (partnerSeq === undefined || desired.has(field)) continue
+			this.sourceManager.assertTunerCommandActive()
+			const modeFirst = state.gainMode === "manual"
+			const before = (field === "gainMode") === modeFirst
+			// Strictly between the partner and its neighbour on that side, so no other field moves;
+			// never past the newest sequence, which a pause marker compares with.
+			let neighbour = before ? partnerSeq - 1 : Number.POSITIVE_INFINITY
+			for (const seq of desired.values()) {
+				if (before && seq < partnerSeq && seq > neighbour) neighbour = seq
+				if (!before && seq > partnerSeq && seq < neighbour) neighbour = seq
+			}
+			this.clearIgnoredRelayField(sourceId, field)
+			desired.set(
+				field,
+				neighbour === Number.POSITIVE_INFINITY
+					? ++this.acceptanceSeq
+					: (partnerSeq + neighbour) / 2,
+			)
+		}
 	}
 
 	private markAccepted(sourceId: string, cmd: number): void {
