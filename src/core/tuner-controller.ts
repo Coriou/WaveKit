@@ -667,7 +667,13 @@ export class TunerController extends EventEmitter {
 	 */
 	private gainChoices: Map<
 		string,
-		{ seq: number; done: number; inFlight: Set<number> }
+		{
+			seq: number
+			done: number
+			inFlight: Set<number>
+			operatorDone: number
+			temporary: Set<number>
+		}
 	> = new Map()
 	/** The scanner's gain restore of a lost lease per source; an operator band gain waits for it. */
 	private gainRestoreHolds: Map<string, Promise<void>> = new Map()
@@ -725,14 +731,35 @@ export class TunerController extends EventEmitter {
 		return mark
 	}
 
+	/**
+	 * `gainChoiceCount` without a pending temporary tune's writes. A saved gain is superseded only
+	 * by a choice that stays; a temporary tune that stays settles the record in `noteTuneKept`.
+	 */
+	private savedGainChoiceCount(sourceId: string): number {
+		const marks = this.gainChoices.get(sourceId)
+		if (!marks) return 0
+		let mark = marks.operatorDone
+		for (const seq of marks.inFlight)
+			if (seq > mark && !marks.temporary.has(seq)) mark = seq
+		return mark
+	}
+
 	private gainChoiceMarks(sourceId: string): {
 		seq: number
 		done: number
 		inFlight: Set<number>
+		operatorDone: number
+		temporary: Set<number>
 	} {
 		let marks = this.gainChoices.get(sourceId)
 		if (!marks) {
-			marks = { seq: 0, done: 0, inFlight: new Set() }
+			marks = {
+				seq: 0,
+				done: 0,
+				inFlight: new Set(),
+				operatorDone: 0,
+				temporary: new Set(),
+			}
 			this.gainChoices.set(sourceId, marks)
 		}
 		return marks
@@ -772,8 +799,14 @@ export class TunerController extends EventEmitter {
 			return null
 		const marks = this.gainChoiceMarks(sourceId)
 		marks.seq += 1
-		if (inFlight) marks.inFlight.add(marks.seq)
-		else marks.done = marks.seq
+		const temporary = opts.run?.keepsSavedGain === true
+		if (inFlight) {
+			marks.inFlight.add(marks.seq)
+			if (temporary) marks.temporary.add(marks.seq)
+		} else {
+			marks.done = marks.seq
+			if (!temporary) marks.operatorDone = marks.seq
+		}
 		return marks.seq
 	}
 
@@ -788,9 +821,16 @@ export class TunerController extends EventEmitter {
 		try {
 			await write()
 			this.sourceManager.assertTunerCommandActive()
-			if (seq !== null && marks && seq > marks.done) marks.done = seq
+			if (seq !== null && marks) {
+				if (seq > marks.done) marks.done = seq
+				if (!marks.temporary.has(seq) && seq > marks.operatorDone)
+					marks.operatorDone = seq
+			}
 		} finally {
-			if (seq !== null) marks?.inFlight.delete(seq)
+			if (seq !== null) {
+				marks?.inFlight.delete(seq)
+				marks?.temporary.delete(seq)
+			}
 		}
 	}
 
@@ -823,7 +863,7 @@ export class TunerController extends EventEmitter {
 		saved: SavedOperatorGain | null,
 	): Promise<"saved" | "failed" | "superseded"> {
 		const record = { value: saved }
-		const choices = this.gainChoiceCount(sourceId)
+		const choices = this.savedGainChoiceCount(sourceId)
 		this.operatorGainBeforeBand.set(sourceId, saved)
 		this.savedRecords.set(sourceId, record)
 		const durable =
@@ -836,7 +876,7 @@ export class TunerController extends EventEmitter {
 						),
 					)
 		const current = this.savedRecords.get(sourceId) === record
-		if (current && this.gainChoiceCount(sourceId) > choices) {
+		if (current && this.savedGainChoiceCount(sourceId) > choices) {
 			this.dropOperatorGain(sourceId)
 			return "superseded"
 		}

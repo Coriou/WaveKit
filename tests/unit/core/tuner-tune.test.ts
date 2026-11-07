@@ -2652,6 +2652,35 @@ describe("a temporary tune and the gain saved before a band", () => {
 			expect(h.read().gain).toBe(200)
 		})
 
+		it("a temporary tune during its slow save does not supersede the record", async () => {
+			const { h, settled, saved } = await outsideBands()
+			await h.post({ frequencyHz: BAND_HZ, restoreAfterS: 5 })
+			const service = h.controller.bandGainSettings()
+			if (service === null) throw new Error("no band gain service")
+			const save = service.saveOperatorGains.bind(service)
+			let release = () => {}
+			const held = new Promise<void>(resolve => {
+				release = resolve
+			})
+			vi.spyOn(service, "saveOperatorGains").mockImplementationOnce(
+				async (...args) => {
+					await held
+					return save(...args)
+				},
+			)
+			await del(h)
+			await h.post({ frequencyHz: OUTSIDE_HZ, gain: 300, restoreAfterS: 5 })
+			release()
+			await settled()
+			expect(saved()).toContain('"gain": 200')
+			await vi.advanceTimersByTimeAsync(5_000)
+			await until(() => restoreOf(h.read()).status === "restored")
+			await settled()
+			expect(saved()).toContain('"gain": 200')
+			await h.post({ frequencyHz: OUTSIDE_HZ })
+			expect(h.read().gain).toBe(200)
+		})
+
 		it("a failed save takes it back, with the tune still standing", async () => {
 			const { h, settled, saved } = await outsideBands()
 			await h.post({ frequencyHz: BAND_HZ, restoreAfterS: 5 })
