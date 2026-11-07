@@ -60,6 +60,8 @@ async function setup(tuner?: SourceTunerConfig, header: Header = R820T) {
 	let connections = 0
 	const sockets: net.Socket[] = []
 	const frames: Frame[] = []
+	// The header the next connection gets: a reconnect may reach another receiver.
+	let current = header
 	const server = net.createServer(socket => {
 		sockets.push(socket)
 		const connection = ++connections
@@ -76,7 +78,7 @@ async function setup(tuner?: SourceTunerConfig, header: Header = R820T) {
 				pending = pending.subarray(5)
 			}
 		})
-		socket.write(Buffer.concat([headerBytes(header), Buffer.alloc(8)]))
+		socket.write(Buffer.concat([headerBytes(current), Buffer.alloc(8)]))
 	})
 	server.listen(0, "127.0.0.1")
 	await once(server, "listening")
@@ -171,12 +173,16 @@ async function setup(tuner?: SourceTunerConfig, header: Header = R820T) {
 	return {
 		app,
 		controller,
+		manager,
 		frames,
 		read,
 		flushed,
 		reconnect,
 		gainFrames,
 		connections: () => connections,
+		setHeader: (next: Header) => {
+			current = next
+		},
 	}
 }
 
@@ -663,4 +669,100 @@ describe("PATCH /config and the gain index route refuse what rtl_tcp would not d
 		expect(res.statusCode).toBe(200)
 		expect(h.read().unknownFields ?? []).toContain("gainMode")
 	})
+})
+
+describe("a gain mode proven by a gain frame is proven again by each connection", () => {
+	const E4000: Header = { tunerType: 1, gainCount: 14 }
+	const unknownMode = (state: TunerState) =>
+		(state.unknownFields ?? []).includes("gainMode")
+
+	it("R820T then an E4000 on reconnect: the replayed gain proves nothing, the mode is unknown", async () => {
+		const h = await setup(AGC)
+		await h.flushed()
+		await h.controller.setGain("rtl", 300, { origin: "rest" })
+		expect(h.read().gainMode).toBe("manual")
+		expect(unknownMode(h.read())).toBe(false)
+		h.setHeader(E4000)
+		await h.reconnect()
+		await h.flushed()
+		expect(h.gainFrames(2)).toEqual([[SET_GAIN, 300]])
+		expect(unknownMode(h.read())).toBe(true)
+	})
+
+	it("R820T then an R820T on reconnect: the replayed gain proves manual again", async () => {
+		const h = await setup(AGC)
+		await h.flushed()
+		await h.controller.setGain("rtl", 300, { origin: "rest" })
+		await h.reconnect()
+		await h.flushed()
+		expect(h.gainFrames(2)).toEqual([[SET_GAIN, 300]])
+		expect(h.read().gainMode).toBe("manual")
+		expect(unknownMode(h.read())).toBe(false)
+	})
+
+	it("an accepted manual mode replayed stays manual on an E4000", async () => {
+		const h = await setup(AGC)
+		await h.flushed()
+		await h.controller.setGainMode("rtl", "manual", { origin: "rest" })
+		await h.controller.setGain("rtl", 300, { origin: "rest" })
+		h.setHeader(E4000)
+		await h.reconnect()
+		await h.flushed()
+		expect(h.gainFrames(2)).toEqual([
+			[SET_GAIN_MODE, 1],
+			[SET_GAIN, 300],
+		])
+		expect(h.read().gainMode).toBe("manual")
+		expect(unknownMode(h.read())).toBe(false)
+	})
+
+	it.each([
+		{
+			name: "POST /tuner-gain-index",
+			url: "/api/tuner/rtl/tuner-gain-index",
+			method: "POST" as const,
+			payload: { index: 20 },
+			field: "index",
+		},
+		{
+			name: "PATCH /config",
+			url: "/api/tuner/rtl/config",
+			method: "PATCH" as const,
+			payload: { tunerGainIndex: 20 },
+			field: "tunerGainIndex",
+		},
+	])(
+		"$name: an index queued behind a reconnect to a smaller gain table is a 400, nothing written",
+		async ({ url, method, payload, field }) => {
+			const h = await setup(MANUAL_445)
+			await h.flushed()
+			// Hold the command queue while the receiver changes under the queued request.
+			let release: () => void = () => {}
+			const held = new Promise<void>(resolve => {
+				release = resolve
+			})
+			const blocker = h.manager.runTunerCommand("rtl", () => held)
+			const request = h.app.inject({ method, url, payload })
+			await new Promise<void>(resolve => {
+				setImmediate(resolve)
+			})
+			h.setHeader(E4000)
+			await h.reconnect()
+			release()
+			await blocker
+			const res = await request
+			const expected =
+				"integer, tuner gain table index (0-13) for this receiver"
+			expect(res.statusCode).toBe(400)
+			expect(res.json()).toMatchObject({
+				code: "VALIDATION_ERROR",
+				message: `Invalid tuner value at ${field}; expected ${expected}`,
+				fields: [{ field, expected }],
+			})
+			await h.flushed()
+			expect(
+				h.frames.some(f => f.cmd === SET_TUNER_GAIN_INDEX && f.value === 20),
+			).toBe(false)
+		},
+	)
 })

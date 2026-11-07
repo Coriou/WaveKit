@@ -2664,6 +2664,13 @@ export class TunerController extends EventEmitter {
 		const written: Array<{ value: number; name: string }> = []
 		let failure: Error | undefined
 		const plan = desired ? this.buildReplayPlan(state, desired) : []
+		// A gain mode inferred on the last connection (a gain frame's manual, or a mode written and
+		// not accepted) is not replayed: this connection may reach another receiver, so only a gain
+		// frame replayed on it, judged against its own header, proves the mode again. An accepted
+		// mode is replayed and proven by its own frame.
+		const inferredMode =
+			desired?.has("gainMode") !== true &&
+			this.inferredFields.get(sourceId)?.has("gainMode") === true
 		let lastGainFrame: [number, number] | undefined
 		for (const [cmd, value] of plan) {
 			try {
@@ -2685,9 +2692,19 @@ export class TunerController extends EventEmitter {
 				lastGainFrame = [cmd, value]
 		}
 		// A gain frame replayed after the mode moves it as a live one does (gainFrameMode).
-		if (lastGainFrame !== undefined) {
-			const mode = this.gainFrameMode(sourceId, ...lastGainFrame)
-			if (mode !== "none") this.noteGainFrameMode(sourceId, mode)
+		const replayedMode =
+			lastGainFrame === undefined
+				? "none"
+				: this.gainFrameMode(sourceId, ...lastGainFrame)
+		if (inferredMode) {
+			if (replayedMode === "manual") {
+				state.gainMode = "manual"
+				this.markInferred(sourceId, "gainMode")
+			} else {
+				this.markGainModeUnknown(sourceId)
+			}
+		} else if (replayedMode !== "none") {
+			this.noteGainFrameMode(sourceId, replayedMode)
 		}
 
 		if (written.length > 0) {
@@ -2725,6 +2742,7 @@ export class TunerController extends EventEmitter {
 			plan.length > 0 ||
 			capsChanged ||
 			forgotTuning ||
+			inferredMode ||
 			configured?.attempted === true
 		)
 			this.emitStateChanged(sourceId)

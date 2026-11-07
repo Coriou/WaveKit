@@ -670,15 +670,20 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 	}
 	// rtl_tcp ignores a gain index outside the gain table its header advertises: a 400 naming the
 	// valid range (from the header, never the client's value). No header count: no check here.
-	const gainIndexOutOfRange = (
-		reply: FastifyReply,
+	// The gain table length when `index` is past it, else undefined.
+	const gainIndexLimit = (
 		sourceId: string,
 		index: number | undefined,
-		field: string,
-	): FastifyReply | undefined => {
+	): number | undefined => {
 		if (index === undefined) return undefined
 		const count = tunerController.tunerGainCount(sourceId)
-		if (count === undefined || index < count) return undefined
+		return count === undefined || index < count ? undefined : count
+	}
+	const sendGainIndexRange = (
+		reply: FastifyReply,
+		field: string,
+		count: number,
+	): FastifyReply => {
 		const expected = `integer, tuner gain table index (0-${count - 1}) for this receiver`
 		return reply.status(400).send({
 			error: "ValidationError",
@@ -686,6 +691,31 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 			message: `Invalid tuner value at ${field}; expected ${expected}`,
 			fields: [{ field, expected }],
 		})
+	}
+	/**
+	 * Runs a write carrying a gain index once the range check passes: before the command queue, and
+	 * again inside it against the receiver getting the write (a reconnect while queued may bring
+	 * another header). Out of range either way: the same 400, and nothing is written.
+	 */
+	const runGainIndexWrite = async (
+		reply: FastifyReply,
+		sourceId: string,
+		index: number | undefined,
+		field: string,
+		write: () => Promise<void>,
+	): Promise<unknown> => {
+		const early = gainIndexLimit(sourceId, index)
+		if (early !== undefined) return sendGainIndexRange(reply, field, early)
+		let queuedLimit: number | undefined
+		const result = await run(sourceId, async () => {
+			queuedLimit = gainIndexLimit(sourceId, index)
+			if (queuedLimit !== undefined) return undefined
+			await write()
+			return tunerController.getState(sourceId)
+		})
+		return queuedLimit !== undefined
+			? sendGainIndexRange(reply, field, queuedLimit)
+			: result
 	}
 
 	// GET /api/tuner - List all tuner states
@@ -1312,22 +1342,19 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 			},
 		},
 		async (request, reply) => {
-			const outOfRange = gainIndexOutOfRange(
-				reply,
-				request.params.sourceId,
-				request.body.index,
-				"index",
-			)
-			if (outOfRange) return outOfRange
 			try {
-				return await run(request.params.sourceId, async () => {
-					await tunerController.setTunerGainIndex(
-						request.params.sourceId,
-						request.body.index,
-						rest(request),
-					)
-					return tunerController.getState(request.params.sourceId)
-				})
+				return await runGainIndexWrite(
+					reply,
+					request.params.sourceId,
+					request.body.index,
+					"index",
+					() =>
+						tunerController.setTunerGainIndex(
+							request.params.sourceId,
+							request.body.index,
+							rest(request),
+						),
+				)
 			} catch (err) {
 				return handleTunerError(
 					reply,
@@ -1459,22 +1486,19 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					message: `Invalid tuner values; ${CONFIG_AGC_CONFLICT}`,
 					fields: [{ field: "gainMode", expected: CONFIG_AGC_CONFLICT }],
 				})
-			const outOfRange = gainIndexOutOfRange(
-				reply,
-				request.params.sourceId,
-				tunerGainIndex,
-				"tunerGainIndex",
-			)
-			if (outOfRange) return outOfRange
 			try {
-				return await run(request.params.sourceId, async () => {
-					await tunerController.configure(
-						request.params.sourceId,
-						request.body,
-						rest(request),
-					)
-					return tunerController.getState(request.params.sourceId)
-				})
+				return await runGainIndexWrite(
+					reply,
+					request.params.sourceId,
+					tunerGainIndex,
+					"tunerGainIndex",
+					() =>
+						tunerController.configure(
+							request.params.sourceId,
+							request.body,
+							rest(request),
+						),
+				)
 			} catch (err) {
 				return handleTunerError(
 					reply,
