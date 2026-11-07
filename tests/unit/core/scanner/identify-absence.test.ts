@@ -138,7 +138,7 @@ describe("an IQ gap recovers once blocks flow again", () => {
 		let endSample = 0
 		const block = (at: number) => {
 			h.clock.now = at
-			endSample += 51_200
+			endSample += 102_400
 			h.runner.onBlock(endSample, false)
 		}
 		let at = h.clock.now
@@ -198,5 +198,87 @@ describe("an IQ gap recovers once blocks flow again", () => {
 		await h.advance(10)
 		expect(h.last()?.verdict?.why).toBe("no-samples")
 		await h.pool.destroy()
+	})
+
+	/** One block at the default 50 ms integration of the fake 2.048 Msps engine: 102 400 samples. */
+	const BLOCK_SAMPLES = 102_400
+
+	/**
+	 * Blocks every 50 ms, a silence of GAP_MS, then the block that ends the gap and `after` blocks
+	 * ([ms after the previous one, samples it advances]), the last of them at the 5 s deadline.
+	 */
+	async function gapThen(after: readonly (readonly [number, number])[]) {
+		const timeoutMs = 5_000
+		const h = identifyHarness({ request: { timeoutMs, protocols: ["dmr"] } })
+		h.state.summary = quietSummaryOf()
+		h.state.iqFlowing = false
+		await h.runner.start()
+		const deadline = (h.record.startedAt ?? 0) + timeoutMs
+		const gapAt = deadline - after.reduce((sum, [dt]) => sum + dt, 0)
+		await h.advance(10)
+		let endSample = 0
+		const block = (at: number, samples: number) => {
+			h.clock.now = at
+			endSample += samples
+			h.runner.onBlock(endSample, false)
+		}
+		let at = h.clock.now
+		for (; at <= gapAt - GAP_MS; at += BLOCK_MS) block(at, BLOCK_SAMPLES)
+		at = gapAt
+		block(at, BLOCK_SAMPLES)
+		for (const [dt, samples] of after) block((at += dt), samples)
+		h.clock.now = deadline
+		h.runner.tick(h.clock.now)
+		await flushAsync()
+		await flushAsync()
+		const verdict = h.last()?.verdict
+		await h.pool.destroy()
+		return verdict
+	}
+	const blocks = (n: number, dt: number, samples: number) =>
+		Array.from({ length: n }, () => [dt, samples] as const)
+
+	it("five blocks 500 ms apart over the last 2 s after a gap are no recovery", async () => {
+		// 2 000 ms of time and full sample progress (10 blocks' samples each), but 4 blocks, not 40
+		const v = await gapThen(blocks(4, 500, 10 * BLOCK_SAMPLES))
+		expect(v?.why).toBe("no-samples")
+	})
+
+	it("states the block bound: 40 blocks after the gap recover, 39 do not", async () => {
+		expect((await gapThen(blocks(40, BLOCK_MS, BLOCK_SAMPLES)))?.code).toBe(
+			"nothing",
+		)
+		// 39 blocks at 50 ms and one more 100 ms later: 2 000 ms and 40 blocks' samples, 39 blocks
+		const short = [
+			...blocks(38, BLOCK_MS, BLOCK_SAMPLES),
+			[2 * BLOCK_MS, 2 * BLOCK_SAMPLES] as const,
+		]
+		expect((await gapThen(short))?.why).toBe("no-samples")
+	})
+
+	it("states the sample bound: 40 × 102 400 = 4 096 000 samples recover, one fewer does not", async () => {
+		const at = blocks(40, BLOCK_MS, BLOCK_SAMPLES)
+		expect((await gapThen(at))?.code).toBe("nothing")
+		const past = [
+			...blocks(39, BLOCK_MS, BLOCK_SAMPLES),
+			[BLOCK_MS, BLOCK_SAMPLES - 1] as const,
+		]
+		expect((await gapThen(past))?.why).toBe("no-samples")
+	})
+
+	it("a block later than the fresh bound inside the run restarts it", async () => {
+		// 500 ms between blocks is fresh, 501 ms a gap: 40 blocks with one 501 ms step are no recovery
+		const fresh = [
+			...blocks(20, BLOCK_MS, BLOCK_SAMPLES),
+			[IDENTIFY_IQ_FRESH_BLOCKS * BLOCK_MS, BLOCK_SAMPLES] as const,
+			...blocks(19, BLOCK_MS, BLOCK_SAMPLES),
+		]
+		expect((await gapThen(fresh))?.code).toBe("nothing")
+		const late = [
+			...blocks(20, BLOCK_MS, BLOCK_SAMPLES),
+			[IDENTIFY_IQ_FRESH_BLOCKS * BLOCK_MS + 1, BLOCK_SAMPLES] as const,
+			...blocks(19, BLOCK_MS, BLOCK_SAMPLES),
+		]
+		expect((await gapThen(late))?.why).toBe("no-samples")
 	})
 })

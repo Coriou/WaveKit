@@ -283,7 +283,7 @@ export function identifyHarness(
 		while (lastBlockAt + 50 <= to) {
 			lastBlockAt += 50
 			pool.clock.now = lastBlockAt
-			endSample += 51_200
+			endSample += 102_400
 			runner.onBlock(endSample, false)
 		}
 		pool.clock.now = to

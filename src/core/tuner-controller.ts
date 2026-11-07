@@ -2294,14 +2294,20 @@ export class TunerController extends EventEmitter {
 			) {
 				await this.setGainMode(sourceId, mode, opts)
 				wroteMode = true
-			} else if (operator) this.noteUnchangedGainChoice(sourceId, opts)
+			} else if (operator) {
+				this.noteUnchangedGainChoice(sourceId, opts)
+				this.acceptUnchanged(sourceId, RTL_TCP_COMMANDS.SET_GAIN_MODE)
+			}
 			applied("gainMode")
 		}
 		const writeGain = async (tenthsDb: number) => {
 			if (changed("gain", tenthsDb !== state.gain) || wroteMode) {
 				await this.setGain(sourceId, tenthsDb, opts)
 				wroteGain = true
-			} else if (operator) this.noteUnchangedGainChoice(sourceId, opts, true)
+			} else if (operator) {
+				this.noteUnchangedGainChoice(sourceId, opts, true)
+				this.acceptUnchanged(sourceId, RTL_TCP_COMMANDS.SET_GAIN)
+			}
 			applied("gain")
 		}
 		// rtl_tcp SET_GAIN switches the tuner to manual: for AGC the mode goes last.
@@ -3226,6 +3232,18 @@ export class TunerController extends EventEmitter {
 			this.inferredFields.set(sourceId, inferred)
 		}
 		inferred.add(field)
+	}
+
+	/**
+	 * An operator tune's gain mode or gain already in place and proven: no frame, but the value is
+	 * now the operator's, as if written. Proof by the configured frames alone lasts one connection,
+	 * and the next one skips the configured mode once the tune's gain is held, so without this a
+	 * rate change's reconnect left the mode the tune asked for unknown (TUNER_TUNE_PARTIAL). Accepted,
+	 * the reconnect replays it with the gain.
+	 */
+	private acceptUnchanged(sourceId: string, cmd: number): void {
+		this.sourceManager.assertTunerCommandActive()
+		this.markAccepted(sourceId, cmd)
 	}
 
 	private markAccepted(sourceId: string, cmd: number): void {

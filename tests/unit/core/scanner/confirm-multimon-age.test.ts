@@ -67,8 +67,24 @@ function discovery() {
 		return (out: ReturnType<typeof pocsag> | ReturnType<typeof flex>) =>
 			interpretMultimon(out, state, run).some(e => e.identity !== undefined)
 	}
-	return { clock, probe }
+	return { clock, memory, probe }
 }
+
+function page(at: number, address: number) {
+	return {
+		type: "message",
+		timestamp: new Date(at),
+		data: {
+			protocol: "POCSAG1200",
+			address,
+			function: 3,
+			messageType: "alpha",
+			message: "SYNTHETIC TEST PAGE",
+		},
+	}
+}
+
+const CAP_KEY = "pocsag:cap"
 
 describe("an accepted pager capcode ages", () => {
 	it("a stuck slicer never identifies, also across two runs 45 s apart and for 10 min after", () => {
@@ -177,5 +193,73 @@ describe("an accepted pager capcode ages", () => {
 		expect(hit(T0)).toBe(false)
 		expect(hit(T0 + 60 * SECOND)).toBe(true)
 		expect(hit(T0 + 30 * DAY)).toBe(true)
+	})
+})
+
+describe("only a decode that counts on its own restarts the age", () => {
+	it("a lone decode counted by age leaves the age where it was", () => {
+		const { clock, memory, probe } = discovery()
+		expect(probe()(page(clock.now, REAL_ADDRESS))).toBe(true)
+		clock.now += CONFIRM_WINDOW_MS
+		expect(probe()(pocsag(clock.now, REAL_ADDRESS))).toBe(true)
+		// counted by age alone: no body, no earlier decode to pair with, so the age goes on from the page
+		expect(
+			memory.acceptedAgeMs("d:disc-1", CAP_KEY, String(REAL_ADDRESS)),
+		).toBe(CONFIRM_WINDOW_MS)
+		// 5 min + 1 ms later the age is 10 min + 1 ms and the gap is past the pair window: nothing
+		for (let k = 0; k < 20; k++) {
+			clock.now += CONFIRM_WINDOW_MS + 1
+			expect(probe()(pocsag(clock.now, REAL_ADDRESS))).toBe(false)
+		}
+	})
+
+	it("decodes exactly 300 000 ms apart: only the first counts by age, the rest only as pairs", () => {
+		// The pair window is inclusive (2 s to 5 min), so each decode pairs with the one before it at
+		// the bound, as it would with no acceptance at all: the acceptance adds the first decode only.
+		const run = (accepted: boolean) => {
+			const { clock, probe } = discovery()
+			if (accepted) {
+				expect(probe()(page(clock.now, REAL_ADDRESS))).toBe(true)
+			}
+			let hits = 0
+			for (let k = 0; k < 100; k++) {
+				clock.now += CONFIRM_WINDOW_MS
+				if (probe()(pocsag(clock.now, REAL_ADDRESS))) hits++
+			}
+			return hits
+		}
+		expect(run(false)).toBe(99)
+		expect(run(true)).toBe(100)
+	})
+
+	it("a chance doublet every 5 min (1.5 s apart, 299.5 s gaps) dies with the age", () => {
+		// Each doublet's second decode is under the 2 s separation, so never a pair, and each doublet
+		// begins 301 s after the last one began: no pair either. Before, every decode within age
+		// restarted it, so this pattern identified for ever off one page.
+		const { clock, probe } = discovery()
+		expect(probe()(page(clock.now, REAL_ADDRESS))).toBe(true)
+		clock.now += CONFIRM_WINDOW_MS
+		const got: boolean[] = []
+		for (let k = 0; k < 10; k++) {
+			got.push(probe()(pocsag(clock.now, REAL_ADDRESS)))
+			clock.now += 1_500
+			got.push(probe()(pocsag(clock.now, REAL_ADDRESS)))
+			clock.now += 299_500
+		}
+		// only the first decode, 5 min after the page, counts by age
+		expect(got[0]).toBe(true)
+		expect(got.slice(1).every(g => !g)).toBe(true)
+	})
+
+	it("a bodyless beacon every 60 s keeps identifying for 30 min, its age reset by each pair", () => {
+		const { clock, memory, probe } = discovery()
+		expect(probe()(pocsag(clock.now, REAL_ADDRESS))).toBe(false)
+		for (let k = 1; k <= 30; k++) {
+			clock.now += 60 * SECOND
+			expect(probe()(pocsag(clock.now, REAL_ADDRESS))).toBe(true)
+			expect(
+				memory.acceptedAgeMs("d:disc-1", CAP_KEY, String(REAL_ADDRESS)),
+			).toBe(0)
+		}
 	})
 })

@@ -1491,7 +1491,9 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 						503: tuneFailureSchema,
 					},
 				},
-				preValidation: rejectUnknownBodyFields(tuneBodySchema, TUNE_EXPECTED),
+				// An unknown field is named by the key list, as on the other routes, and wins over
+				// "at least one of": the client's own key text is never echoed.
+				preValidation: rejectUnknownBodyFields(tuneBodySchema),
 			},
 			async (request, reply) => {
 				const { sampleRateHz, frequencyHz, gainMode, gain } = request.body

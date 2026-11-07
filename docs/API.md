@@ -1951,7 +1951,7 @@ routes below.
 | `restoreAfterS` |                          | Integer seconds, 1-3600: see [temporary tune](#temporary-tune). Optional                  |
 | `preempt`       |                          | `true` takes the tuner from a scanner job: see [below](#tune-and-a-scanner-job). Optional |
 
-At least one setting is required, and an unknown field is a 400. They are written in the order of
+At least one setting is required, and an unknown field is a 400 whose `fields` give the body's key list (`only the fields sampleRateHz, frequencyHz, gainMode, gain, restoreAfterS, preempt`). They are written in the order of
 the table: the rate first, then the centre, then the gain (for `agc`, the gain and then the mode,
 because rtl_tcp `SET_GAIN` switches the tuner to manual). A setting already at the value and proven
 is not written again. The same rules as the separate routes apply: it runs in the source's

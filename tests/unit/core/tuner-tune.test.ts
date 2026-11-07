@@ -14,6 +14,7 @@ import {
 	type TunerState,
 } from "@wavekit/api-types"
 import { tunerRoutes } from "../../../src/api/routes/tuner.js"
+import type { SourceTunerConfig } from "../../../src/config.js"
 import {
 	ApiServer,
 	type ApiServerDependencies,
@@ -74,6 +75,8 @@ async function setup(
 		payloadOnReconnect?: boolean
 		reconnectPolicy?: TunerReconnectPolicy
 		principal?: "machine" | "session"
+		/** The source's configured gain, written on each new connection. */
+		tuner?: SourceTunerConfig
 	} = {},
 ) {
 	const { payloadOnReconnect = true, principal = "machine" } = options
@@ -160,6 +163,7 @@ async function setup(
 			loop: false,
 			playbackSpeed: 1,
 			stallTimeoutMs: 0,
+			...(options.tuner ? { tuner: options.tuner } : {}),
 			caps: {
 				kind: "iq",
 				sampleRate: START_RATE,
@@ -312,6 +316,164 @@ describe("tune in one call", () => {
 		])
 		// The next command works at once: the failure this route exists to end.
 		expect((await h.post({ frequencyHz: OTHER_HZ })).json().usable).toBe(true)
+	})
+
+	describe("a setting already at the asked value is applied", () => {
+		const BODY_GAIN = 445
+		async function tuneWithRate(h: Awaited<ReturnType<typeof setup>>) {
+			const disconnected = event(h.manager, "disconnected")
+			const answer = h.post({
+				frequencyHz: TUNE_HZ,
+				sampleRateHz: OTHER_RATE,
+				gainMode: "manual",
+				gain: BODY_GAIN,
+			})
+			await disconnected
+			await vi.advanceTimersByTimeAsync(calculateBackoffDelay(1))
+			return answer
+		}
+
+		it("gain mode already manual, with a rate change: no partial", async () => {
+			const h = await setup()
+			expect(
+				(await h.post({ gainMode: "manual", gain: 200 })).json().usable,
+			).toBe(true)
+			expect(h.read().gainMode).toBe("manual")
+			h.fakeTime()
+			const res = await tuneWithRate(h)
+			expect(res.statusCode).toBe(200)
+			expect(res.json()).toMatchObject({
+				usable: true,
+				applied: ["sampleRateHz", "frequencyHz", "gainMode", "gain"],
+				notApplied: [],
+				gainMode: "manual",
+				gain: BODY_GAIN,
+			})
+		})
+
+		it("gain mode already manual, no rate change: no partial", async () => {
+			const h = await setup()
+			await h.post({ gainMode: "manual", gain: 200 })
+			const res = await h.post({
+				frequencyHz: TUNE_HZ,
+				sampleRateHz: START_RATE,
+				gainMode: "manual",
+				gain: BODY_GAIN,
+			})
+			expect(res.statusCode).toBe(200)
+			expect(res.json()).toMatchObject({
+				usable: true,
+				applied: ["sampleRateHz", "frequencyHz", "gainMode", "gain"],
+				notApplied: [],
+			})
+		})
+
+		it("gain mode manual from the configured gain only, with a rate change: no partial", async () => {
+			// The reconnect clears the configured frames' proof and skips the configured gain mode,
+			// since the tune's gain is held: the mode the tune asked for must still count.
+			const h = await setup({ tuner: { gainMode: "manual", gainDb: 20 } })
+			await until(() => h.frames.some(f => f.cmd === SET_GAIN_MODE))
+			expect(h.read().gainMode).toBe("manual")
+			expect(h.read().unknownFields ?? []).not.toContain("gainMode")
+			h.fakeTime()
+			const res = await tuneWithRate(h)
+			expect(res.statusCode).toBe(200)
+			expect(res.json()).toMatchObject({
+				usable: true,
+				applied: ["sampleRateHz", "frequencyHz", "gainMode", "gain"],
+				notApplied: [],
+				gainMode: "manual",
+				gain: BODY_GAIN,
+			})
+			expect(res.json().unknownFields ?? []).not.toContain("gainMode")
+			// and the next reconnect replays the mode with the gain: still known
+			expect(h.read().unknownFields ?? []).not.toContain("gainMode")
+		})
+
+		it("gain mode and gain both equal to the configured ones, with a rate change: no partial", async () => {
+			const h = await setup({ tuner: { gainMode: "manual", gainDb: 44.5 } })
+			await until(() => h.frames.some(f => f.cmd === SET_GAIN))
+			expect(h.read()).toMatchObject({ gainMode: "manual", gain: BODY_GAIN })
+			h.fakeTime()
+			const res = await tuneWithRate(h)
+			expect(res.statusCode).toBe(200)
+			expect(res.json()).toMatchObject({
+				usable: true,
+				applied: ["sampleRateHz", "frequencyHz", "gainMode", "gain"],
+				notApplied: [],
+			})
+			expect(res.json().unknownFields ?? []).not.toContain("gain")
+			// the new connection gets the operator's mode and gain, from the replay
+			await until(() =>
+				h.frames.some(f => f.connection === 2 && f.cmd === SET_GAIN),
+			)
+			expect(
+				h.frames
+					.filter(
+						f =>
+							f.connection === 2 &&
+							(f.cmd === SET_GAIN_MODE || f.cmd === SET_GAIN),
+					)
+					.map(f => [f.cmd, f.value]),
+			).toEqual([
+				[SET_GAIN_MODE, 1],
+				[SET_GAIN, BODY_GAIN],
+			])
+		})
+
+		it("from AGC to manual, with a rate change: no partial", async () => {
+			const h = await setup()
+			await h.post({ gainMode: "agc" })
+			expect(h.read().gainMode).toBe("agc")
+			h.fakeTime()
+			const res = await tuneWithRate(h)
+			expect(res.statusCode).toBe(200)
+			expect(res.json()).toMatchObject({
+				usable: true,
+				applied: ["sampleRateHz", "frequencyHz", "gainMode", "gain"],
+				notApplied: [],
+				gainMode: "manual",
+				gain: BODY_GAIN,
+			})
+		})
+
+		it("a fresh source whose gain mode was never written, with a rate change: no partial", async () => {
+			const h = await setup()
+			h.fakeTime()
+			const res = await tuneWithRate(h)
+			expect(res.statusCode).toBe(200)
+			expect(res.json()).toMatchObject({
+				usable: true,
+				applied: ["sampleRateHz", "frequencyHz", "gainMode", "gain"],
+				notApplied: [],
+			})
+		})
+	})
+
+	it("names the key list for an unknown body field, before the at-least-one rule, and writes nothing", async () => {
+		const h = await setup()
+		const before = h.frames.length
+		const keys =
+			"only the fields sampleRateHz, frequencyHz, gainMode, gain, restoreAfterS, preempt"
+		for (const body of [
+			{ gainTenthsDb: 445 },
+			{ frequencyHz: TUNE_HZ, gainTenthsDb: 445 },
+		]) {
+			const res = await h.post(body)
+			expect(res.statusCode).toBe(400)
+			expect(res.json()).toEqual({
+				error: "ValidationError",
+				code: "VALIDATION_ERROR",
+				message: `Invalid request body: ${keys}`,
+				fields: [{ field: "body", expected: keys }],
+			})
+			expect(res.body).not.toContain("gainTenthsDb")
+		}
+		// an empty body still answers the at-least-one rule
+		expect((await h.post({})).json().fields[0].expected).toMatch(
+			/^at least one of/,
+		)
+		expect(h.frames.length).toBe(before)
 	})
 
 	it("needs no reconnect and answers at once without a rate change", async () => {

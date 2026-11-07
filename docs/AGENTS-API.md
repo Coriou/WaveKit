@@ -437,10 +437,11 @@ Read `identify.targets[0].verdict` once the target is final. Say only what it sa
 | `could-not-test`            | No answer. `verdict.why` says why; do not read it as "not DMR"             |
 
 `nothing` needs proof of all three: IQ blocks kept arriving up to the deadline, the level at the target
-stayed below the block threshold, and no live track sat within 12.5 kHz. A pause in the blocks counts only
-if they had not flowed again for 2 s by the deadline. The level is read over the inner part of the
-tolerance (the tolerance less one spectrum bin), so a busy neighbour one channel away does not hold back
-`nothing`. Otherwise it is `could-not-test`:
+stayed below the block threshold, and no live track sat within 12.5 kHz. A pause in the blocks is forgiven
+only once 40 blocks have flowed again without a pause, over at least 2 s and with at least 2 s of samples, by
+the deadline. The level is read over the inner part of the tolerance (the tolerance less one spectrum bin),
+so the skirt of a busy neighbour one channel away, with no live track, no longer reads as a level at the
+target. A live track within 12.5 kHz still answers `signal-nearby`. Otherwise it is `could-not-test`:
 
 - `no-samples`: the blocks stopped, or nothing measured the target. The receiver may be down even though
   the source reads connected, as with a dongle pulled behind `rtl_tcp`; check it before you ask again.

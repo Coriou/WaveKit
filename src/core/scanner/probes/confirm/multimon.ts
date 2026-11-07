@@ -201,20 +201,29 @@ function pocsagBodyReal(
 }
 
 /**
- * Whether an accepted capcode still names this decode on its own: its last counted decode is at
- * most `CONFIRM_WINDOW_MS` (5 min) old, the window a pair is made in, so a beacon about every 60 s
- * keeps it with 5x margin. Older, the decode is one decode again and needs its pair or a page, as
- * dsd-fme's identities do: acceptance itself never ages, but a capcode accepted once, maybe from two
- * chance syncs, must not let any later false line identify. With no shared memory the age is null:
- * that acceptance lives no longer than its decoder, so it always counts.
+ * Whether an accepted capcode still names this decode on its own: its last refreshed decode is at
+ * most `CONFIRM_WINDOW_MS` (5 min) old, the window a pair is made in. Older, the decode is one decode
+ * again and needs its pair or a page, as dsd-fme's identities do: acceptance itself never ages, but a
+ * capcode accepted once, maybe from two chance syncs, must not let any later false line identify.
+ * With no shared memory the age is null: that acceptance lives no longer than its decoder, so it
+ * always counts.
+ *
+ * Only a decode that would count without the acceptance refreshes the age: a real body
+ * (`pocsagBodyReal`, outside `requirePair`) or a fresh pair (2 s to 5 min after the decode before
+ * it, see `ConfirmMemory`). A lone decode counted by age alone leaves the age where it was, or one
+ * line within each 5 min would keep a false capcode alive for ever; it is still recorded, so the
+ * next decode can pair with it. A beacon about every 60 s pairs on each decode and stays fresh.
  */
-function acceptanceCounts(
+function acceptanceAge(
 	state: InterpreterState,
 	key: string,
 	capcode: string,
-): boolean {
+): { counts: boolean; shared: boolean } {
 	const age = state.match.acceptedAgeMs(key, capcode)
-	return age === null || age <= CONFIRM_WINDOW_MS
+	return {
+		counts: age === null || age <= CONFIRM_WINDOW_MS,
+		shared: age !== null,
+	}
 }
 
 export function interpretMultimon(
@@ -263,10 +272,20 @@ export function interpretMultimon(
 		quiet = run.note(at)
 	}
 	const accepted = state.match.isAccepted(key, capcode)
-	if (accepted && acceptanceCounts(state, key, capcode)) {
+	const age = accepted ? acceptanceAge(state, key, capcode) : undefined
+	if (age?.counts === true) {
 		// A stuck slicer's run stays a run after acceptance: only a decode after the quiet gap counts.
 		if (zeroWord && !plausible && !quiet) return []
-		state.match.touchAccepted(key, capcode)
+		if (age.shared) {
+			if (plausible && !state.requirePair)
+				state.match.touchAccepted(key, capcode)
+			else if (protocol === "flex") state.match.accept(key, capcode, true, true)
+			else {
+				// A pair marks `key` accepted again, which restarts its age; a lone decode does not.
+				const pairKey = run && !plausible ? run.pairKey(key) : key
+				pairPocsag(state, key, pairKey, capcode, at, true)
+			}
+		}
 	} else if (plausible && !state.requirePair) {
 		state.match.markAccepted(key, capcode)
 	} else if (protocol === "flex") {

@@ -164,12 +164,16 @@ export const IDENTIFY_OWN_DECODES_MAX = 256
  */
 export const IDENTIFY_IQ_FRESH_BLOCKS = 10
 /**
- * A gap (a silence past the fresh bound between two blocks) is forgiven once blocks have advanced
- * unbroken for this many block times after it: 40 × 50 ms = 2 000 ms at the default integration,
- * four times the longest silence the proof allows. A stall early in a long wait (a busy event loop,
- * a receiver that came back) then no longer withholds `nothing` for the rest of the job, while a gap
- * in the last 2 s before the deadline (13 % of the default 15 s wait) still does: the receiver has
- * not shown it is back. Every later gap restarts the count.
+ * A gap (a silence past the fresh bound between two blocks) is forgiven once this many blocks have
+ * advanced after it, all three of: 40 blocks counted one by one, none later than the fresh bound
+ * after the one before it (a later one is a gap and restarts the count); at least 40 block times
+ * between the gap and the newest block, 40 × 50 ms = 2 000 ms at the default integration, four times
+ * the longest silence the proof allows; and sample progress over those blocks of at least 40 blocks'
+ * samples, 40 × round(2 048 000 × 50 / 1000) = 40 × 102 400 = 4 096 000 at 2.048 Msps. Time alone is
+ * no proof: five blocks 500 ms apart span 2 s but carry a tenth of it. A stall early in a long wait (a
+ * busy event loop, a receiver that came back) then no longer withholds `nothing` for the rest of the
+ * job, while a gap in the last 2 s before the deadline (13 % of the default 15 s wait) still does: the
+ * receiver has not shown it is back. An unknown sample rate never forgives a gap.
  */
 export const IDENTIFY_IQ_RECOVER_BLOCKS = 40
 /**
@@ -1738,7 +1742,17 @@ export class IdentifyRunner implements JobDriver {
 		lastAt: number | null
 		/** When the latest block that came later than the freshness bound after the one before it came. */
 		gapAt: number | null
-	} = { firstEnd: null, lastEnd: null, lastAt: null, gapAt: null }
+		/** Advancing blocks since `gapAt`, and the samples they advanced (IDENTIFY_IQ_RECOVER_BLOCKS). */
+		recoverBlocks: number
+		recoverSamples: number
+	} = {
+		firstEnd: null,
+		lastEnd: null,
+		lastAt: null,
+		gapAt: null,
+		recoverBlocks: 0,
+		recoverSamples: 0,
+	}
 
 	constructor(private readonly deps: IdentifyDeps) {
 		this.record = deps.record
@@ -1939,11 +1953,21 @@ export class IdentifyRunner implements JobDriver {
 	onBlock(endSample: number, overload: boolean): void {
 		const now = this.deps.now()
 		const iq = this.iq
-		if (iq.lastAt !== null && now - iq.lastAt > this.iqFreshMs()) iq.gapAt = now
+		const gap = iq.lastAt !== null && now - iq.lastAt > this.iqFreshMs()
+		if (gap) {
+			iq.gapAt = now
+			iq.recoverBlocks = 0
+			iq.recoverSamples = 0
+		}
 		// A repeated or older end sample is no new signal, so only progress keeps the proof fresh.
 		if (iq.lastEnd !== null && endSample <= iq.lastEnd) {
 			this.deps.inner.onBlock(endSample, overload)
 			return
+		}
+		// The block that ends a gap is not one of the run after it; the first block of an epoch adds none.
+		if (iq.gapAt !== null && !gap) {
+			iq.recoverBlocks++
+			if (iq.lastEnd !== null) iq.recoverSamples += endSample - iq.lastEnd
 		}
 		iq.firstEnd ??= endSample
 		iq.lastEnd = endSample
@@ -1956,23 +1980,32 @@ export class IdentifyRunner implements JobDriver {
 	}
 
 	/**
-	 * Blocks of this epoch advanced, with no gap or with an unbroken run of IDENTIFY_IQ_RECOVER_BLOCKS
-	 * block times since the latest one, and the newest is fresh (a source can stay connected at rate 0).
+	 * Blocks of this epoch advanced, with no gap or with the run IDENTIFY_IQ_RECOVER_BLOCKS asks for
+	 * since the latest one, and the newest is fresh (a source can stay connected at rate 0).
 	 */
 	private iqFresh(now: number): boolean {
 		const { firstEnd, lastEnd, lastAt, gapAt } = this.iq
-		const recovered =
-			gapAt === null ||
-			(lastAt !== null &&
-				lastAt - gapAt >=
-					IDENTIFY_IQ_RECOVER_BLOCKS * this.record.spec.integrationMs)
 		return (
-			recovered &&
+			(gapAt === null || this.iqRecovered()) &&
 			firstEnd !== null &&
 			lastEnd !== null &&
 			lastEnd > firstEnd &&
 			lastAt !== null &&
 			now - lastAt <= this.iqFreshMs()
+		)
+	}
+
+	/** The run after the latest gap: blocks, block times and samples (IDENTIFY_IQ_RECOVER_BLOCKS). */
+	private iqRecovered(): boolean {
+		const { lastAt, gapAt, recoverBlocks, recoverSamples } = this.iq
+		const integrationMs = this.record.spec.integrationMs
+		const fs = this.deps.engine(this.sourceId)?.currentEpoch().sampleRateHz ?? 0
+		if (!(fs > 0) || gapAt === null || lastAt === null) return false
+		const blockSamples = Math.round((fs * integrationMs) / 1000)
+		return (
+			recoverBlocks >= IDENTIFY_IQ_RECOVER_BLOCKS &&
+			lastAt - gapAt >= IDENTIFY_IQ_RECOVER_BLOCKS * integrationMs &&
+			recoverSamples >= IDENTIFY_IQ_RECOVER_BLOCKS * blockSamples
 		)
 	}
 
