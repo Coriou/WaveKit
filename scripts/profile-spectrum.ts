@@ -4,7 +4,7 @@
  *   node scripts/profile-spectrum-build.mjs
  *   nice -n 10 node output/bench/profile-spectrum.mjs [--seconds 30] [--rate 2400000]
  *     [--fft auto|<n>] [--overlap 0|0.5] [--feed on|off] [--mode stages|bare|proto]
- *     [--wire] [--iq <path.cu8>] [--json]
+ *     [--wire] [--iq <path.cu8>] [--json] [--path js|wasm] [--wasm <spectrum-frame.wasm>]
  *
  * Drives a real SpectrumPipeline (no worker thread) as fast as it will go with
  * seeded synthetic CU8: Gaussian noise, CW and NFM carriers and Mode-S-like PPM
@@ -30,6 +30,10 @@
  *   same frames, against the production Fft. Wall clock only.
  *
  * `--iq` reads a private capture for an offline run; report only aggregate CPU.
+ *
+ * `--path wasm` runs the frame path in the wasm kernel (src/core/spectrum/frame-wasm.ts) as the
+ * worker does when dist/spectrum-frame.wasm is present (`--wasm` names another file); the default
+ * `js` is the JS frame path. Build the kernel with native/wavekit-frame/build.sh.
  */
 import { readFileSync } from "node:fs"
 import os from "node:os"
@@ -60,6 +64,8 @@ import {
 	buildPipelineConfig,
 } from "../src/core/spectrum/spectrum-engine.js"
 import { SpurMap } from "../src/core/spectrum/spur-map.js"
+import { loadFrameWasm } from "../src/core/spectrum/frame-wasm.js"
+import type { FrameWasmModule } from "../src/core/spectrum/frame-wasm.js"
 import { synthesizeCu8 } from "./profile-spectrum-iq.js"
 import {
 	decodeEventsFromWire,
@@ -95,6 +101,8 @@ const MODE = flag("mode") ?? "stages"
 const IQ_PATH = flag("iq")
 const JSON_OUT = process.argv.includes("--json")
 const WIRE = process.argv.includes("--wire")
+const FRAME_PATH = flag("path") === "wasm" ? "wasm" : "js"
+const WASM_FILE = flag("wasm") ?? "dist/spectrum-frame.wasm"
 
 function loadIq(): Uint8Array {
 	if (IQ_PATH) {
@@ -352,10 +360,22 @@ function run(iq: Uint8Array): RunResult {
 		fftSize,
 	})
 	const cfg = { ...base, overlap: OVERLAP as 0 | 0.5 }
-	const pipeline = new SpectrumPipeline(
-		cfg,
-		MODE === "stages" ? { profile: { sampleEvery: 1 } } : {},
-	)
+	let frameWasm: FrameWasmModule | null = null
+	if (FRAME_PATH === "wasm") {
+		const load = loadFrameWasm(WASM_FILE)
+		if (!load.ok)
+			throw new WaveKitError(`--path wasm: ${load.reason}`, "PROFILE_WASM")
+		frameWasm = load.module
+	}
+	const pipeline = new SpectrumPipeline(cfg, {
+		...(MODE === "stages" ? { profile: { sampleEvery: 1 } } : {}),
+		frameWasm,
+	})
+	if (pipeline.framePath.path !== FRAME_PATH)
+		throw new WaveKitError(
+			`frame path ${pipeline.framePath.path}: ${pipeline.framePath.reason}`,
+			"PROFILE_WASM",
+		)
 	const occupancy = new OccupancyHistory()
 	const half = (RATE * USABLE_FRACTION) / 2
 	pipeline.handle({
@@ -793,7 +813,7 @@ function main(): void {
 	const perSec = (ms: number): number => ms / r.iqSeconds
 	const perFrame = (ms: number): number => (ms * 1000) / Math.max(1, r.frames)
 	const head =
-		`spectrum pipeline ${MODE}, ${RATE} S/s, fft ${FFT_ARG}, overlap ${OVERLAP}, feed ${FEED ? "on" : "off"}, ` +
+		`spectrum pipeline ${MODE}, frame path ${FRAME_PATH}, ${RATE} S/s, fft ${FFT_ARG}, overlap ${OVERLAP}, feed ${FEED ? "on" : "off"}, ` +
 		`${fmt(r.iqSeconds)} s IQ${IQ_PATH ? " (capture)" : " (synthetic)"}, load ${load.join(" ")} -> ${end.join(" ")}`
 	const rows: [string, { wallMs: number; cpuMs: number }][] = []
 	if (MODE === "stages") {

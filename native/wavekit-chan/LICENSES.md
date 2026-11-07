@@ -26,9 +26,15 @@ Used only at build time (procedural macros; no code of theirs is in the binary):
 
 Dev only, not shipped: proptest and its dependencies (MIT OR Apache-2.0).
 
-No FFT crate and no GPL code (addendum §10 refined by plan assumption A5).
+No FFT crate and no GPL code (addendum §10 refined by plan assumption A5). The same holds for
+the spectrum frame kernel below: it ports the JS radix-2 transform rather than linking an FFT crate.
 Regenerate the lists with `cargo tree --manifest-path native/wavekit-chan/Cargo.toml -e normal`
 and each crate's `license` field.
+
+The spectrum frame kernel (`native/wavekit-frame`, shipped as `/app/dist/spectrum-frame.wasm`)
+is a separate artefact with no crates.io dependencies; its licences, Rust's `core` and
+`compiler_builtins`, are in `native/wavekit-frame/LICENSES.md` (in the image at
+`/usr/share/doc/wavekit-frame/LICENSES.md`).
 
 WaveKit uses each dual-licensed crate under its MIT terms (the Apache-2.0 alternative:
 https://www.apache.org/licenses/LICENSE-2.0).

@@ -2,7 +2,7 @@ import { performance } from "node:perf_hooks"
 import { WaveKitError } from "../../utils/errors.js"
 import { segment } from "./emissions/segmenter.js"
 import type { Segment, SegmentOptions } from "./emissions/segmenter.js"
-import { Tracker } from "./emissions/tracker.js"
+import { FRAME_POWER_FLOOR, Tracker } from "./emissions/tracker.js"
 import type { GateTrace, TrackerBlock } from "./emissions/tracker.js"
 import { blockTrackOf, isFrameTrackId } from "./frame-tracks.js"
 import type { TrackAssociation } from "./frame-tracks.js"
@@ -36,16 +36,25 @@ import {
 	binPowerDb,
 	dbThresholdBracket,
 	Fft,
+	hannWindow,
 	powerScale,
 	powerToDb,
 } from "./fft.js"
+import { FrameKernel, FRAME_KERNEL_ERRORS } from "./frame-wasm.js"
+import type { FrameWasmModule } from "./frame-wasm.js"
 import { bytesPerSample, FrameSource } from "./frame-source.js"
 import type { Frame } from "./frame-source.js"
 import { NoiseFloor } from "./noise-floor.js"
 import { SpurMap } from "./spur-map.js"
 import { ACTIVITY_HOLD_MS } from "./artefacts.js"
 import type { ArtefactMasks, ArtefactSpurLine } from "./artefacts.js"
-import { ImpulseBlanker } from "./impulse-blanker.js"
+import {
+	BLANK_RISE,
+	BLANK_TINY,
+	blankSpan,
+	ImpulseBlanker,
+} from "./impulse-blanker.js"
+import type { FrameVerdict } from "./impulse-blanker.js"
 import { PROVISIONAL_WINDOW_MS, ProvisionalSpurs } from "./provisional-spurs.js"
 import type { BinRange } from "./provisional-spurs.js"
 import {
@@ -138,6 +147,19 @@ export const ALARM_CO_BIRTH_S = 1
 const IMAGE_TOLERANCE_HZ = 1000
 const IMAGE_MIN_REJECTION_DB = 20
 const IMAGE_MAX_REJECTION_DB = 65
+/**
+ * Fresh kernel instances after a trap or a kernel error before the worker keeps the JS frame path.
+ * Each fault discards the open block; a deterministic fault therefore costs at most 3 blocks.
+ */
+export const FRAME_KERNEL_MAX_RESTARTS = 2
+/** wasm verdict codes (native/wavekit-frame VERDICT_*). */
+const KERNEL_VERDICTS: readonly FrameVerdict[] = ["keep", "blank", "pending"]
+
+/** Which frame path a pipeline runs, and why (spectrum-worker.ts logs it once). */
+export interface FramePathInfo {
+	path: "wasm" | "js"
+	reason: string
+}
 /** Returned when `publishGate` asks and the gate has not been created yet. */
 const IDLE_GATE: ChannelGateReading = {
 	state: "pending",
@@ -152,7 +174,8 @@ const IDLE_GATE: ChannelGateReading = {
 
 /**
  * Stage names recorded by an opt-in pipeline profile (R 9.2). `gate` stays 0 until a channel plan is
- * set.
+ * set. On the wasm frame path `fft` holds the whole kernel call (convert to track sums) and `window`
+ * the counter scan.
  */
 export const PIPELINE_PROFILE_STAGES = [
 	"window",
@@ -410,6 +433,10 @@ export class SpectrumPipeline {
 	private channelPlan: ChannelPlan | null = null
 	private planActive = false
 	private readonly gateNow: (() => number) | undefined
+	/** The wasm frame kernel; null runs the JS frame path (the reference). */
+	private kernel: FrameKernel | null = null
+	private framePathReason: string
+	private kernelFaultLogged = false
 
 	constructor(
 		private readonly cfg: PipelineConfig,
@@ -424,6 +451,12 @@ export class SpectrumPipeline {
 			profile?: { sampleEvery: number }
 			/** Profile spans. Default `performance.now`. Not called when profiling is off. */
 			profileNow?: () => number
+			/** The compiled frame kernel (frame-wasm.ts); absent or null runs the JS frame path. */
+			frameWasm?: FrameWasmModule | null
+			/** Why there is no `frameWasm`, for `framePath` (the worker's selection). */
+			frameWasmReason?: string
+			/** Frames per kernel call (default one block's); a test knob for batch cuts. */
+			frameBatchFrames?: number
 		} = {},
 	) {
 		this.logger = deps.logger ?? null
@@ -489,11 +522,6 @@ export class SpectrumPipeline {
 		// The strong track closes one hang after it vanished; its close is visible a block later.
 		this.alarmWaitBlocks = hangBlocks + 2
 		this.fft = new Fft(this.n)
-		this.frames = new FrameSource({
-			format: cfg.format,
-			fftSize: this.n,
-			overlap,
-		})
 		this.floor = new NoiseFloor({
 			fftSize: this.n,
 			framesPerBlock:
@@ -548,8 +576,24 @@ export class SpectrumPipeline {
 			maxTrackBlocks,
 			idPrefix: idPrefix.wideband,
 		})
-		this.frameAcc = new Float64Array(this.n)
-		this.blockAcc = new Float64Array(this.n)
+		const span = blankSpan({
+			fftSize: this.n,
+			usableStartBin: this.edgeBins,
+			usableEndBin: this.n - this.edgeBins + 1,
+		})
+		this.framePathReason = deps.frameWasmReason ?? "no kernel given"
+		const kernel = deps.frameWasm
+			? this.createKernel(deps.frameWasm, span, deps.frameBatchFrames)
+			: null
+		this.kernel = kernel
+		this.frames = new FrameSource({
+			format: cfg.format,
+			fftSize: this.n,
+			overlap,
+			raw: kernel !== null,
+		})
+		this.frameAcc = kernel?.frameAcc ?? new Float64Array(this.n)
+		this.blockAcc = kernel?.blockAcc ?? new Float64Array(this.n)
 		this.gatePower = new Float64Array(this.n)
 		this.gateMask = new Uint8Array(this.n)
 		this.frameScale = powerScale(this.n, 1)
@@ -561,16 +605,18 @@ export class SpectrumPipeline {
 		this.joined = new Uint8Array(this.n)
 		this.lastTrackBins = new Uint8Array(this.n)
 		this.exclusionMask = new Uint8Array(this.n)
-		this.shortAcc = new Float64Array(this.n)
-		this.shortRing = new Float64Array(this.n * Math.max(1, this.framesPerShort))
+		this.shortAcc = kernel?.shortAcc ?? new Float64Array(this.n)
+		this.shortRing =
+			kernel?.shortRing ??
+			new Float64Array(this.n * Math.max(1, this.framesPerShort))
 		this.shortScale = powerScale(this.n, this.framesPerShort)
-		this.shortOnLo = new Float64Array(this.n)
-		this.shortOnHi = new Float64Array(this.n)
-		this.shortOffLo = new Float64Array(this.n)
-		this.shortOffHi = new Float64Array(this.n)
-		this.shortOn = new Uint8Array(this.n)
-		this.burstCount = new Uint8Array(this.n)
-		this.burstPeakAcc = new Float64Array(this.n)
+		this.shortOnLo = kernel?.onLo ?? new Float64Array(this.n)
+		this.shortOnHi = kernel?.onHi ?? new Float64Array(this.n)
+		this.shortOffLo = kernel?.offLo ?? new Float64Array(this.n)
+		this.shortOffHi = kernel?.offHi ?? new Float64Array(this.n)
+		this.shortOn = kernel?.shortOn ?? new Uint8Array(this.n)
+		this.burstCount = kernel?.burstCount ?? new Uint8Array(this.n)
+		this.burstPeakAcc = kernel?.burstPeak ?? new Float64Array(this.n)
 		this.burstCountDone = new Uint8Array(this.n)
 		this.burstPeakDone = new Float32Array(this.n).fill(NO_FLOOR_DBFS)
 		this.burstOn = new Uint8Array(this.n)
@@ -581,6 +627,7 @@ export class SpectrumPipeline {
 			usableStartBin: this.edgeBins,
 			usableEndBin: this.n - this.edgeBins + 1,
 			sampleRateHz: this.fs,
+			...(kernel ? { storage: { raw: kernel.raw, ref: kernel.ref } } : {}),
 		})
 		this.provisional = new ProvisionalSpurs({
 			fftSize: this.n,
@@ -601,6 +648,57 @@ export class SpectrumPipeline {
 			)
 			this.provisional.importState(persisted)
 		}
+	}
+
+	/** The frame path this pipeline runs now, and why. */
+	get framePath(): FramePathInfo {
+		return this.kernel
+			? { path: "wasm", reason: "kernel instantiated" }
+			: { path: "js", reason: this.framePathReason }
+	}
+
+	/** Test hook: the live kernel (null on the JS path). */
+	frameKernelForTest(): FrameKernel | null {
+		return this.kernel
+	}
+
+	private createKernel(
+		module: FrameWasmModule,
+		span: { lo: number; hi: number; need: number },
+		batchFrames: number | undefined,
+	): FrameKernel | null {
+		// A block holds at most blockSamples / hop frames: frames start hop apart inside it.
+		const framesPerBlock = this.blockSamples / this.hop
+		const made = FrameKernel.create(
+			module,
+			{
+				format: this.cfg.format,
+				fftSize: this.n,
+				pendingCap: framesPerBlock,
+				shortFrames: this.framesPerShort,
+				batchCap: Math.max(
+					1,
+					Math.min(framesPerBlock, batchFrames ?? framesPerBlock),
+				),
+				trackCap: Math.max(1, this.cfg.maxTracks - 1),
+			},
+			{
+				window: hannWindow(this.n),
+				fillFftTables: (cos, sin, rev) =>
+					new Fft(this.n).copyTables(cos, sin, rev),
+				hop: this.hop,
+				blank: { ...span, rise: BLANK_RISE, tiny: BLANK_TINY },
+				frameScale: powerScale(this.n, 1),
+				trackFloor: FRAME_POWER_FLOOR,
+				shortDb: (i, a, was) =>
+					this.shortOnInDb(this.shortDetector!, i, a, was),
+			},
+		)
+		if (!made.ok) {
+			this.framePathReason = made.reason
+			return null
+		}
+		return made.kernel
 	}
 
 	handle(input: WorkerPipelineInput): PipelineEvent[] {
@@ -908,6 +1006,7 @@ export class SpectrumPipeline {
 			format: this.cfg.format,
 			fftSize: this.n,
 			overlap: this.cfg.overlap ?? 0,
+			raw: this.kernel !== null,
 		})
 		this.gaps = []
 		this.resolving = null
@@ -1020,6 +1119,7 @@ export class SpectrumPipeline {
 				f => this.onFrame(f),
 				r => this.onCounterRun(r),
 			)
+			this.flushFrames()
 			return
 		}
 		// U8 conversion and windowing run inside FrameSource. A chunk that
@@ -1036,6 +1136,7 @@ export class SpectrumPipeline {
 			},
 			r => this.onCounterRun(r),
 		)
+		this.flushFrames()
 		const tail = this.profileClock() - cursor
 		if (!(tail > 0)) return
 		if (this.sampling) {
@@ -1090,6 +1191,20 @@ export class SpectrumPipeline {
 			}
 			this.pendingWindowMs = 0
 		}
+		const k = this.kernel
+		if (k) {
+			// wasm: stage the raw frame; the kernel runs the rest at the next flush (a full batch, a
+			// block end, a discard or the end of this chunk), in order, before anything reads its state
+			this.blockFrames++
+			this.frames.copyFrame(k.staging, k.count * k.frameBytes)
+			k.starts[k.count] = f.startSample
+			k.count++
+			// the flush charges itself (to `fft`), so the frame's own span ends before it
+			if (sample) this.chargeBusy(this.profileClock() - frameStart)
+			if (k.count === k.batchCap) this.flushFrames()
+			if (f.startSample + this.hop >= blockEnd) this.finishBlock()
+			return
+		}
 		if (!sample) {
 			this.fft.transform(f.re, f.im)
 			this.frameAcc.fill(0)
@@ -1127,6 +1242,107 @@ export class SpectrumPipeline {
 		// later frame calls it after a gap (before that frame's clock starts).
 		if (sample) this.chargeBusy(this.profileClock() - frameStart)
 		if (f.startSample + this.hop >= blockEnd) this.finishBlock()
+	}
+
+	/**
+	 * Runs the staged frames through the kernel, then replays what JS keeps per frame: the
+	 * blanker's timing and pending list, and Tracker.frame's envelope step from the kernel's sums.
+	 * A flush at any point gives the same state as the JS path frame by frame, so it is safe
+	 * wherever JS is about to read or change frame-path state.
+	 */
+	private flushFrames(): void {
+		const k = this.kernel
+		if (!k || k.count === 0) return
+		const sample = this.profileOn && this.sampling
+		const t0 = sample ? this.profileClock() : 0
+		const count = k.count
+		const trackCount =
+			this.tracker.openCount > 0
+				? this.tracker.frameBins(k.trackBins, k.trackCap)
+				: 0
+		if (trackCount < 0) {
+			this.kernelFault("tracks")
+			return
+		}
+		if (this.shortDetector) k.mask.set(this.shortDetector.unmasked())
+		const pendingBefore = this.blanker.pendingCount
+		let status: number
+		try {
+			status = k.run({
+				pendingCount: pendingBefore,
+				hasRef: this.blanker.hasReference,
+				shortSlot: this.shortSlot,
+				shortFill: this.shortFill,
+				shortNext: this.shortNext,
+				floorReady: this.floorReady,
+				trackCount,
+			})
+		} catch {
+			this.kernelFault("trap")
+			return
+		}
+		if (status !== 0) {
+			this.kernelFault(FRAME_KERNEL_ERRORS[status] ?? "error")
+			return
+		}
+		k.count = 0
+		this.shortSlot = k.shortSlot
+		this.shortFill = k.shortFill
+		this.shortNext = k.shortNext
+		this.blockClipped += k.clipped
+		let pend = pendingBefore
+		for (let j = 0; j < count; j++) {
+			const verdict = KERNEL_VERDICTS[k.verdict[j]!] ?? "keep"
+			const start = k.starts[j]!
+			this.blanker.noteOffer(
+				start,
+				verdict,
+				verdict === "pending" ? (k.pending[pend++] ?? null) : null,
+			)
+			if (verdict === "keep" && trackCount > 0)
+				this.tracker.frameSums(k.sums, j * k.trackCap, start, this.n)
+		}
+		if (sample) {
+			const dt = this.profileClock() - t0
+			if (dt > 0) {
+				this.stageFft += dt
+				this.chargeBusy(dt)
+			}
+		}
+	}
+
+	/**
+	 * A trap or a kernel error: the staged frames are lost and the kernel's state is suspect, so the
+	 * open block is discarded and the short window restarts (as after a seam). A fresh instance takes
+	 * over up to FRAME_KERNEL_MAX_RESTARTS times; after that this worker keeps the JS frame path,
+	 * which runs on the same arrays. One warn line at the first fault and one at the switch to JS.
+	 */
+	private kernelFault(fault: string): void {
+		const k = this.kernel
+		if (!k) return
+		k.count = 0
+		const restart = k.restarts < FRAME_KERNEL_MAX_RESTARTS && k.recreate()
+		if (!restart) {
+			this.kernel = null
+			this.framePathReason = `kernel fault (${fault}) after ${k.restarts} restarts`
+			this.frames.setRaw(false)
+		}
+		this.logger ??= createComponentLogger(
+			createLogger({ level: "warn" }),
+			"SpectrumPipeline",
+		)
+		if (!this.kernelFaultLogged || !restart) {
+			this.logger.warn(
+				{ fault, restarts: k.restarts, path: restart ? "wasm" : "js" },
+				restart
+					? "spectrum frame kernel fault; open block discarded, kernel restarted"
+					: "spectrum frame kernel fault; open block discarded, JS frame path from now on",
+			)
+			this.kernelFaultLogged = true
+		}
+		this.shortOn.fill(0)
+		this.resetShort()
+		this.discardBlock()
 	}
 
 	/**
@@ -1231,6 +1447,7 @@ export class SpectrumPipeline {
 	}
 
 	private discardBlock(): void {
+		this.flushFrames()
 		if (this.sampling) this.closeSample()
 		this.resetBlock()
 		this.blockIndex = -1
@@ -1239,6 +1456,7 @@ export class SpectrumPipeline {
 
 	/** Block finalization is timed once on every path, then offered to the worker as wire. */
 	private finishBlock(): void {
+		this.flushFrames()
 		const sample = this.sampling
 		const t0 = sample ? this.profileClock() : 0
 		this.finishBlockWork()

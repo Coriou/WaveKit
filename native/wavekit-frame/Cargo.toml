@@ -1,0 +1,32 @@
+# The spectrum worker's per-frame kernel, built for wasm32-unknown-unknown with SIMD (build.sh).
+# No dependencies: only Rust's `core` is linked into the artefact. A package of its own, so the
+# shipped wavekit-chan manifest, lockfile and binaries stay as they are.
+[package]
+name = "wavekit-frame"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[workspace]
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+
+[profile.dev]
+panic = "abort"
+
+[profile.test]
+opt-level = 3

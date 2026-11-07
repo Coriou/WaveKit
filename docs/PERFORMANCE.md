@@ -570,6 +570,98 @@ copied out: about 1.4 ms of CPU per second of IQ at 2.4 Msps. rustfft's wasm SIM
 differ from the JS ones by up to 0.011 dB over 2000 frames (0.0032 dB above -100 dB); the JS transform
 stores Float32 at every stage, the likely cause. The native and wasm32 f64 builds agree within 1e-10 dB.
 
+## Spectrum frame path in wasm (2026-11-07)
+
+The spectrum worker runs its per-frame path in a wasm32 kernel, `native/wavekit-frame`, when the
+artefact `dist/spectrum-frame.wasm` validates and instantiates; otherwise it runs the JS path. The
+JS path stays the reference and the fallback. One info line per worker names the path and the reason.
+
+**Scope.** One `fp_run` call per batch: the frames of an input chunk, cut where a block ends or a
+block is discarded. Per frame the kernel converts and windows the raw IQ (U8, S16 or FLOAT32), runs
+the FFT, the shifted power, the blanker's raw sum and rise test (or holds the frame as pending), the
+block sum, the 5 ms short path with its bracketed threshold compare, and the per-track power sums of
+`Tracker.frame`. Block stages, `ImpulseBlanker.endBlock`, the threshold brackets and the envelope
+buckets stay JS and read the kernel's arrays through typed-array views of its memory. Framing, seams,
+counter runs and hold-back stay in `FrameSource` (raw mode copies each frame's bytes; the counter
+scan remains a per-byte JS loop). No JS object is made per frame.
+
+**Equivalence is bit for bit.** The kernel takes every table JS computes (window, twiddles, bit
+reversal, U8 lookup, rise factor, track floor) from JS, keeps the JS operand order in f64, stores
+Float32 after each FFT stage as `fft.ts` does, and uses no fused multiply-add. SIMD lanes run the same
+IEEE operations as scalar code. A short sum inside its bracket calls back into the JS `shortOnInDb`,
+so even the `Math.log10` comparison is the JS one. `tests/unit/core/spectrum/frame-wasm-lockstep.ts`
+feeds both paths the same inputs and compares the events and every piece of frame-path state after
+each input (SameValue: NaN equal, −0 apart): noise, carriers with a QSO and a Morse ID, bursts at the
+short threshold (U8 and FLOAT32), Mode S at 2.4 Msps, zeros, non-finite samples, clipping, S16,
+50 % overlap, broadband impulses (blanked on offer and as pending frames), seams, gaps, a marker epoch
+with its counter run, a new stream, 1-sample to 64 Ki chunks, batch cuts of 1 and 7 frames, a timer
+epoch, and a carrier on a learned spur line with a voice across it. A one-ulp change to one window
+coefficient fails it. Both linear goldens run on both paths, and the built worker matches the inline
+JS host. Deterministic block decisions follow: detections, tracks, duty, `isDataBurst` and short-path
+verdicts are the JS ones at every threshold, not only on these scenes.
+
+Why not rustfft: its mixed-radix kernels round differently. The earlier 0.011 dB gap between Rust
+and JS power bins is the Float32 storage of the JS transform: the same radix-2 code with Float64
+storage differs from it by up to 5.3e-3 dB over 2000 frames of the profiler scene (1.3e-3 dB above
+−100 dB; the Float32 input rounding alone 1.3e-3 dB), while f64 implementations agree to about
+1e-10 dB. Reproducing that rounding exactly was preferred over bounding it, since a bound cannot
+rule out flips at the thresholds.
+
+**Memory is fixed.** The module imports a `WebAssembly.Memory` with `initial = maximum`, sized by
+`frameKernelLayout` from the pipeline config; it cannot grow and nothing is allocated per chunk.
+Bytes: 256 KiB reserved for the kernel's 64 KiB stack and static data, a 384-byte control block, then
+ten f64 arrays of N plus two twiddle tables (12·8·N), cos/sin (8·N), window, re, im and bit reversal
+(16·N), the 2 KiB U8 table, pending frames 8·N·P with P = frames per block, the short ring
+8·N·max(1, F), three u8 arrays of N, staging (frame bytes · P), 8·P starts, P verdicts, 8·T track bins
+and 8·P·T sums with T = maxTracks − 1, each region 16-byte aligned. At 2.4 Msps, FFT 2048, P 59,
+F 6, T 511: 1 806 387 bytes of regions, 32 pages (2 MiB). A layout over 256 MiB runs JS. Pending
+frames past P (only possible with sample indices replayed into one block) are a kernel error.
+
+**Faults.** A trap or a kernel error never leaves the worker: the open block is discarded, the
+short window restarts (as after a seam), and a fresh instance on the same memory takes over, at most
+`FRAME_KERNEL_MAX_RESTARTS` (2) times; the next fault keeps the JS path for that worker. One warn
+line for the first fault and one for the switch, fields `fault`, `restarts`, `path` only.
+
+**Selection** (no config key): `WAVEKIT_SPECTRUM_FRAME_PATH=js` forces JS, `=wasm` logs a warning
+when the kernel is unavailable, unset means auto; `WAVEKIT_SPECTRUM_FRAME_WASM` names another
+artefact. Neither variable has a `__`, so the config loader ignores them.
+
+**Build.** One artefact for amd64 and arm64. Locally, with Rust 1.98.1 and the
+`wasm32-unknown-unknown` target: `native/wavekit-frame/build.sh` writes `dist/spectrum-frame.wasm`
+next to `dist/spectrum-worker.js` (`pnpm run build` leaves it there). Without it, `pnpm run build`
+and `make dev-local` run the JS path and log why. The Dockerfile's `frame-wasm` stage runs the same
+script on the build platform and copies the file into `/app/dist`.
+
+`scripts/profile-spectrum.ts`, `bare --wire`, synthetic scene, FFT 2048 at 2.4 Msps and 1024 at
+1.024 Msps, overlap 0, thread CPU of `handle()` plus the worker's encode and postMessage copy, Mac i5,
+runs alternated, load average at start of each run:
+
+| Frame path, core fraction | 2.4 Msps      | Load     | 1.024 Msps    | Load     |
+| ------------------------- | ------------- | -------- | ------------- | -------- |
+| JS                        | 0.285 - 0.358 | 17 to 36 | 0.113 - 0.168 | 24 to 40 |
+| wasm kernel               | 0.171 - 0.220 | 15 to 28 | 0.076 - 0.099 | 23 to 44 |
+
+The kernel call itself takes 63 to 79 µs per 2048-point frame (0.074 to 0.093 core at 2.4 Msps,
+load 15 to 55); the exact FFT is most of it. The rest of the worker (block stages, the counter scan,
+the frame copy and the envelope replay) is unchanged JS. Two code-generation facts matter here:
+LLVM scalarises `f32x4.demote_f64x2_zero` when it can see that only some result lanes are used (a
+constant shuffle or a 64-bit lane store after it), so the FFT packs two demotes with a swizzle whose
+index vector is read from memory; that took the kernel from about 107 to 71 µs per frame. V8 runs
+the kernel optimised (`--no-liftoff` changes nothing).
+
+```bash
+native/wavekit-frame/build.sh                       # dist/spectrum-frame.wasm
+node scripts/profile-spectrum-build.mjs
+nice -n 10 node output/bench/profile-spectrum.mjs --mode bare --wire --seconds 20 --rate 2400000 --path js
+nice -n 10 node output/bench/profile-spectrum.mjs --mode bare --wire --seconds 20 --rate 2400000 --path wasm
+nice -n 10 node output/bench/profile-spectrum.mjs --mode bare --wire --seconds 20 --rate 1024000 --path js
+nice -n 10 node output/bench/profile-spectrum.mjs --mode bare --wire --seconds 20 --rate 1024000 --path wasm
+```
+
+Live, the worker's line `spectrum frame path` says which path runs; `worker.cpuUsage()` (the passive
+guard's figure) compares them with `WAVEKIT_SPECTRUM_FRAME_PATH=js` and unset. With `--mode stages`
+or the pipeline's opt-in profile on the wasm path, the `fft` stage holds the whole kernel call.
+
 ## Frame tracks and main-thread reads (2026-11-06)
 
 **`Tracker.frame` sums linear power.** It used to read a per-frame dB array and take `10 ** (dB/10)`
