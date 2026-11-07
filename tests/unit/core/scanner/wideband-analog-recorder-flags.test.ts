@@ -15,6 +15,8 @@ import {
 	WIDEBAND_MAX_OBW_HZ,
 	WIDEBAND_MAX_RETARGETS,
 	WIDEBAND_QUALIFY_MS,
+	WIDEBAND_RESTART_CHANNEL_HZ,
+	WIDEBAND_RESTART_WINDOW_MS,
 	WIDEBAND_RETARGET_HZ,
 	lateFlagKept,
 	uncleanFlag,
@@ -561,6 +563,104 @@ describe("a session whose own track's centre moves before the voice", () => {
 			[],
 		)
 		expect(h.rec.owns("o")).toBe(true)
+	}, 60_000)
+
+	/** Observation `id`'s snapshot `atHz` from the channel, its last sample at `last`; its decisions. */
+	const read = async (
+		h: Harness,
+		id: string,
+		onset: number,
+		atHz: number,
+		last = h.engine.liveEdge(),
+	): Promise<string[]> => {
+		const before = decided(h).length
+		h.rec.track(
+			input(
+				id,
+				snapshot(id, onset, last, { centreHz: CENTRE + OFFSET + atHz }),
+				extra,
+			),
+		)
+		await h.pump()
+		return decided(h)
+			.slice(before)
+			.map(d => d.code)
+	}
+	/**
+	 * Observation "o" spends the channel's restarts: three moves up of 2001 Hz. Its session ends at
+	 * +6003 Hz; a successor "o2" starts at the channel's centre, outside that session's 5 kHz join
+	 * tolerance and within WIDEBAND_RESTART_CHANNEL_HZ of every restart, unless `successor` is false
+	 * (the second slot stays free). Returns the first restart's last sample.
+	 */
+	const spent = async (
+		h: Harness,
+		onset: number,
+		successor = true,
+	): Promise<number> => {
+		const first = h.engine.liveEdge()
+		const step = WIDEBAND_RETARGET_HZ + 1
+		for (let i = 1; i <= WIDEBAND_MAX_RETARGETS; i++)
+			expect(await read(h, "o", onset, i * step, first)).toEqual([
+				"discarded:unvoiced",
+				"shadow",
+			])
+		if (successor)
+			expect(await read(h, "o2", onset, 0, first)).toEqual(["shadow"])
+		return first
+	}
+
+	it(`a successor observation of the channel shares the ${WIDEBAND_MAX_RETARGETS} restarts up to ${WIDEBAND_RESTART_WINDOW_MS / 1000} s after the first, the bound included, and has one past it`, async () => {
+		expect(WIDEBAND_RESTART_WINDOW_MS).toBe(240_000)
+		expect(WIDEBAND_RESTART_CHANNEL_HZ).toBe(12_500)
+		const { h, onset } = await shadow()
+		const first = await spent(h, onset)
+		const window = (WIDEBAND_RESTART_WINDOW_MS * h.fs) / 1000
+		// Moving down keeps it away from o's session at +6003 Hz.
+		const down = -(WIDEBAND_RETARGET_HZ + 1)
+		expect(await read(h, "o2", onset, down, first + window)).toEqual([])
+		expect(h.rec.owns("o2")).toBe(true)
+		expect(await read(h, "o2", onset, down, first + window + 1)).toEqual([
+			"discarded:unvoiced",
+			"shadow",
+		])
+	}, 60_000)
+
+	it(`another channel, past ${WIDEBAND_RESTART_CHANNEL_HZ} Hz from every restart, has its own`, async () => {
+		const { h, onset } = await shadow()
+		const first = await spent(h, onset, false)
+		// The restarts were from the centre, +2001 and +4002 Hz: 12 501 Hz below the centre is
+		// past the channel of the nearest one.
+		const far = -(WIDEBAND_RESTART_CHANNEL_HZ + 1)
+		expect(await read(h, "o3", onset, far, first)).toEqual(["shadow"])
+		expect(
+			await read(h, "o3", onset, far - WIDEBAND_RETARGET_HZ - 1, first),
+		).toEqual(["discarded:unvoiced", "shadow"])
+	}, 60_000)
+
+	it("a voiced session of the channel gives it its restarts back", async () => {
+		// The voice sits where o's last session demodulates (+6003 Hz).
+		const step = WIDEBAND_RETARGET_HZ + 1
+		const h = harness({ offset: OFFSET + WIDEBAND_MAX_RETARGETS * step })
+		await h.feed(0.5, false)
+		const onset = h.engine.liveEdge()
+		h.rec.track(input("o", snapshot("o", onset, h.engine.liveEdge()), extra))
+		await h.pump()
+		await spent(h, onset)
+		await h.feed(2.5, true, () =>
+			h.rec.track(
+				input(
+					"o",
+					snapshot("o", onset, h.engine.liveEdge(), {
+						centreHz: CENTRE + OFFSET + WIDEBAND_MAX_RETARGETS * step,
+					}),
+				),
+			),
+		)
+		expect(decided(h).map(d => d.code)).toContain("voiced")
+		expect(await read(h, "o2", onset, -(WIDEBAND_RETARGET_HZ + 1))).toEqual([
+			"discarded:unvoiced",
+			"shadow",
+		])
 	}, 60_000)
 
 	it("a voiced session is never moved", async () => {

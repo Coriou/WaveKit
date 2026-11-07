@@ -443,9 +443,30 @@ export const WIDEBAND_RETARGET_HZ = 2_000
  * a voice 6 to 10 kHz away in steps of about 2 kHz a snapshot, or a key-up's one wide reading.
  * Each new session has its own WIDEBAND_QUALIFY_MS, so a track whose centre keeps wandering and
  * never sounds like voice holds a slot for at most (1 + 3) × (8 + 1) = 36 s of signal (each
- * judged 1 s late), once per observation (remembered like refusals, MAX_REMEMBERED).
+ * judged 1 s late), once per observation (remembered like refusals, MAX_REMEMBERED), and once per
+ * channel in any WIDEBAND_RESTART_WINDOW_MS, whatever observation its track is now
+ * (WIDEBAND_RESTART_CHANNEL_HZ).
  */
 export const WIDEBAND_MAX_RETARGETS = 3
+/**
+ * Window in which one channel shares the WIDEBAND_MAX_RETARGETS budget, in stream time: 240 000 ms.
+ * A track rolls over to a successor observation every 120 s (the tracker's maxTrackMs), and with
+ * it the per-observation budget would renew: a wandering carrier would restart 3 times per 120 s
+ * for as long as it stays on air. A session restarts only before its voice, so an observation's
+ * restarts lie within 36 s of its onset (WIDEBAND_MAX_RETARGETS); its successor's, within
+ * 120 + 36 = 156 s of the predecessor's onset, inside 240 s, so a chain and its successor share one
+ * budget of 3. A channel then spends at most 3 restarts in any 240 s, (1 + 3) × 9 = 36 s of slot
+ * time on unvoiced sessions that start again, against 3 per 120 s before. A session of the channel
+ * that voices clears it (forgetRestarts): the restarts found a voice, so the next transmission
+ * beside the same line (the next over of a QSO) has its own 3.
+ */
+export const WIDEBAND_RESTART_WINDOW_MS = 240_000
+/**
+ * Restarts this close to a session's centre are of its channel: 12 500 Hz, half a 25 kHz channel.
+ * A centroid that walks from a line onto a voice 6 to 10 kHz away moves the session's centre by at
+ * most that much over its restarts, so they all stay one channel's.
+ */
+export const WIDEBAND_RESTART_CHANNEL_HZ = 12_500
 /** Observations remembered as refused, and as retried once, per manager. */
 const MAX_REMEMBERED = 1024
 /** Remembered file ends per manager (pre-roll clamp of the next file on the same channel). */
@@ -963,6 +984,18 @@ export class WidebandAnalogRecorder {
 	private readonly retried = new Set<string>()
 	/** Sessions each observation started again (retarget, wideRestart), oldest first. */
 	private readonly retargeted = new Map<string, number>()
+	/**
+	 * Restarts per channel, oldest first: where (the ended session's centre) and when (the
+	 * snapshot's last sample, on its source's stream at its rate), pruned past
+	 * WIDEBAND_RESTART_WINDOW_MS and at MAX_REMEMBERED.
+	 */
+	private readonly channelRestarts: {
+		sourceId: string
+		stream: number
+		fs: number
+		hz: number
+		atSample: number
+	}[] = []
 	private readonly recentEnds: {
 		sourceId: string
 		stream: number
@@ -1999,7 +2032,7 @@ export class WidebandAnalogRecorder {
 	 * A session not voiced yet whose own track's centre moved more than WIDEBAND_RETARGET_HZ from the
 	 * centre it demodulates (`targetHz`) ends without refusing its observations, so the snapshot
 	 * starts a session at the new centre (true), at most WIDEBAND_MAX_RETARGETS times per
-	 * observation. A steady line opens a track (and a session); a voice keying up 6 to 10 kHz away
+	 * observation and per channel in WIDEBAND_RESTART_WINDOW_MS. A steady line opens a track (and a session); a voice keying up 6 to 10 kHz away
 	 * joins that track, whose power-weighted centre then walks from the line onto the voice over a
 	 * few snapshots: demodulated where it started, the voice sits at or past the edge of the
 	 * ±8 kHz channel and is not heard as voice, and the session would end unvoiced after
@@ -2014,10 +2047,10 @@ export class WidebandAnalogRecorder {
 	): boolean {
 		if (
 			Math.abs(track.centreHz - s.targetHz) <= WIDEBAND_RETARGET_HZ ||
-			!this.restartable(s, observationId)
+			!this.restartable(s, observationId, track)
 		)
 			return false
-		this.restart(s, observationId, "discarded:unvoiced")
+		this.restart(s, observationId, track, "discarded:unvoiced")
 		return true
 	}
 
@@ -2039,29 +2072,88 @@ export class WidebandAnalogRecorder {
 		if (
 			bar !== "refused:unclean" ||
 			uncleanFlag(track) !== "wide" ||
-			!this.restartable(s, observationId)
+			!this.restartable(s, observationId, track)
 		)
 			return false
-		this.restart(s, observationId, bar)
+		this.restart(s, observationId, track, bar)
 		return true
 	}
 
-	/** Whether the session of `observationId` (its owner, not voiced yet) may end and start again. */
-	private restartable(s: Session, observationId: string): boolean {
+	/**
+	 * Whether the session of `observationId` (its owner, not voiced yet) may end and start again:
+	 * under WIDEBAND_MAX_RETARGETS for the observation and for its channel over the window.
+	 */
+	private restartable(
+		s: Session,
+		observationId: string,
+		track: TrackSnapshot,
+	): boolean {
 		return (
 			observationId === s.owner &&
 			!s.qualified &&
 			!s.done &&
-			(this.retargeted.get(observationId) ?? 0) < WIDEBAND_MAX_RETARGETS
+			(this.retargeted.get(observationId) ?? 0) < WIDEBAND_MAX_RETARGETS &&
+			this.channelRestartsOf(s, track.lastSample) < WIDEBAND_MAX_RETARGETS
 		)
+	}
+
+	/**
+	 * Restarts of `s`'s channel (same source, stream and rate, within WIDEBAND_RESTART_CHANNEL_HZ) in
+	 * the WIDEBAND_RESTART_WINDOW_MS up to `atSample`, the bound included (240 000 × fs / 1000
+	 * samples: 245 760 000 at 1.024 Msps); older entries of that clock, any channel, are dropped
+	 * (another stream's samples are not this one's).
+	 */
+	private channelRestartsOf(s: Session, atSample: number): number {
+		const window = (WIDEBAND_RESTART_WINDOW_MS * s.fs) / 1000
+		const list = this.channelRestarts
+		let kept = 0
+		let n = 0
+		for (const e of list) {
+			const sameClock =
+				e.sourceId === s.sourceId && e.stream === s.stream && e.fs === s.fs
+			if (sameClock && atSample - e.atSample > window) continue
+			list[kept++] = e
+			if (
+				sameClock &&
+				Math.abs(e.hz - s.targetHz) <= WIDEBAND_RESTART_CHANNEL_HZ
+			)
+				n++
+		}
+		list.length = kept
+		return n
+	}
+
+	/** A session of the channel voiced: its restarts found the voice, the channel's budget is whole. */
+	private forgetRestarts(s: Session): void {
+		const list = this.channelRestarts
+		let kept = 0
+		for (const e of list)
+			if (
+				e.sourceId !== s.sourceId ||
+				e.stream !== s.stream ||
+				e.fs !== s.fs ||
+				Math.abs(e.hz - s.targetHz) > WIDEBAND_RESTART_CHANNEL_HZ
+			)
+				list[kept++] = e
+		list.length = kept
 	}
 
 	/** Ends `s` as `code` without refusing its observations; one of its owner's restarts. */
 	private restart(
 		s: Session,
 		observationId: string,
+		track: TrackSnapshot,
 		code: ScannerRecorderDecision,
 	): void {
+		this.channelRestarts.push({
+			sourceId: s.sourceId,
+			stream: s.stream,
+			fs: s.fs,
+			hz: s.targetHz,
+			atSample: track.lastSample,
+		})
+		if (this.channelRestarts.length > MAX_REMEMBERED)
+			this.channelRestarts.shift()
 		const done = this.retargeted.get(observationId) ?? 0
 		this.retargeted.delete(observationId)
 		this.retargeted.set(observationId, done + 1)
@@ -2459,7 +2551,10 @@ export class WidebandAnalogRecorder {
 			file.judged += n
 		}
 		if (file.gate.voiced) {
-			if (!s.qualified) this.decide(s, "voiced")
+			if (!s.qualified) {
+				this.decide(s, "voiced")
+				this.forgetRestarts(s)
+			}
 			s.qualified = true
 			if (!s.classed) this.classByTone(s, file.toneClass?.result() ?? null)
 			this.admit(s, file)
@@ -2886,7 +2981,10 @@ export class WidebandAnalogRecorder {
 			// Never admitted: every frame was judged, so this is the last chance. A file too short
 			// for one gate window is judged on all of it.
 			if (file.gate.conclude()) {
-				if (!s.qualified) this.decide(s, "voiced")
+				if (!s.qualified) {
+					this.decide(s, "voiced")
+					this.forgetRestarts(s)
+				}
 				s.qualified = true
 			}
 			this.admit(s, file)

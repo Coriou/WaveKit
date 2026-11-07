@@ -710,6 +710,23 @@ describe("hop phases", () => {
 		return { log, stats: s.hopStats() }
 	}
 
+	it("adds up over a hold paused and resumed, then a tick and another dwell with a track to confirm", () => {
+		const steps: Step[] = [
+			{ op: "toHold" },
+			{ op: "pause" },
+			{ op: "wait", ms: 1 },
+			{ op: "resume" },
+			{ op: "tick" },
+			{ op: "toHold" },
+		]
+		// The first hold's tick after the resume reads the paused millisecond as held; the restart
+		// keeps what was held when the pause began (0 ms), so the phases sum to timeMs (300 ms).
+		const read = run(steps, "confirm", false, true)
+		const silent = run(steps, "confirm", false, false)
+		expect(read.log).toEqual(silent.log)
+		expect(read.stats).toEqual(silent.stats)
+	})
+
 	const sceneArb = fc.record({
 		steps: fc.array(stepArb, { maxLength: 150 }),
 		policy: fc.constantFrom<"confirm" | "hold">("confirm", "hold"),

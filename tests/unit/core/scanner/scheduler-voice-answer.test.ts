@@ -150,13 +150,13 @@ describe("a voice hold past L", () => {
 		)
 	}
 
-	it("keeps a quiet of 1300 ms, the limit, to the voice's end", () => {
-		expect(VOICE_QUIET_PAST_L_MS).toBe(1_300)
+	it("keeps a quiet of 1150 ms, the limit, to the voice's end", () => {
+		expect(VOICE_QUIET_PAST_L_MS).toBe(1_150)
 		const d = held(() => VOICE_QUIET_PAST_L_MS, 30_000)
 		expect(d.stayed(0, 1)).toBeGreaterThanOrEqual(COARSE_MS + 30_000)
 	})
 
-	it("is left at the first re-check past L that reads 1301 ms", () => {
+	it("is left at the first re-check past L that reads 1151 ms", () => {
 		const d = held(into => (into >= L3 + 2_000 ? VOICE_QUIET_PAST_L_MS + 1 : 0))
 		const stay = d.stayed(0, 1)
 		expect(stay).toBeGreaterThanOrEqual(COARSE_MS + L3 + 2_000)
@@ -350,10 +350,14 @@ describe("a watch's long-hold lock and a voice on its hop", () => {
 describe("a voice beside a line with carrier evidence", () => {
 	/**
 	 * Visit 1 of hop 0 watches a 4 kHz line 8 s with its onset unseen: carrier evidence. Visit 2 hears
-	 * a track of `obwHz` on the same frequency (the line taken into a voice's track) and the recorder
-	 * answers voice for 20 s from that landing.
+	 * track `id` on the same frequency read the widths `widths` in turn (the line taken into a voice's
+	 * track, or the carrier itself reading wider) and the recorder answers voice for 20 s from that
+	 * landing, whether or not anyone talks.
 	 */
-	const secondVisit = (obwHz: number, lineWidensTo: number | null = null) => {
+	const secondVisit = (
+		widths: readonly number[],
+		opts: { lineWidensTo?: number; id?: string; offsetHz?: number } = {},
+	) => {
 		let voiceFrom: number | null = null
 		const d = drive(
 			(hop, ms) =>
@@ -366,10 +370,10 @@ describe("a voice beside a line with carrier evidence", () => {
 					s.onTrack({ ...sighting("c", hopHz(0)), obwHz: 4_000 }, false, 0, {
 						followOnAir: true,
 					})
-					// A voice joins the line's track during its watch: the track reads wider.
-					if (lineWidensTo !== null)
+					// The line's track reads wider during its watch.
+					if (opts.lineWidensTo !== undefined)
 						s.onTrack(
-							{ ...sighting("c", hopHz(0)), obwHz: lineWidensTo },
+							{ ...sighting("c", hopHz(0)), obwHz: opts.lineWidensTo },
 							false,
 							0,
 							{ followOnAir: true },
@@ -377,9 +381,12 @@ describe("a voice beside a line with carrier evidence", () => {
 				}
 				if (visit === 2) {
 					voiceFrom = d.now()
-					s.onTrack({ ...sighting("v", hopHz(0) + 1_000), obwHz }, false, 0, {
-						followOnAir: true,
-					})
+					const id = opts.id ?? "v"
+					const hz = hopHz(0) + (opts.offsetHz ?? 1_000)
+					for (const obwHz of widths)
+						s.onTrack({ ...sighting(id, hz), obwHz }, false, 0, {
+							followOnAir: true,
+						})
 				}
 			},
 		)
@@ -387,18 +394,31 @@ describe("a voice beside a line with carrier evidence", () => {
 		return d.stayed(0, 2)
 	}
 
-	it("a track twice the line's width (8 kHz) is the line: no voice hold", () => {
-		expect(secondVisit(8_000)).toBeLessThan(COARSE_MS + 9_000)
+	it("a track seen at the line's width that widens to twice it (8 kHz) is the line: no voice hold", () => {
+		expect(secondVisit([4_000, 8_000])).toBeLessThan(COARSE_MS + 9_000)
 	})
 
-	it("one past it (8001 Hz) is a voice: held to the voice's end", () => {
-		expect(secondVisit(8_001)).toBeGreaterThanOrEqual(COARSE_MS + 20_000)
+	it("one that widens past it (8001 Hz) while the hop listens is a voice keying up: held to the voice's end", () => {
+		expect(secondVisit([4_000, 8_001])).toBeGreaterThanOrEqual(
+			COARSE_MS + 20_000,
+		)
+	})
+
+	it("a landing that already reads past it is width alone: the carrier rules still apply", () => {
+		expect(secondVisit([8_001])).toBeLessThan(COARSE_MS + 9_000)
+		expect(secondVisit([14_000])).toBeLessThan(COARSE_MS + 9_000)
+	})
+
+	it("a carrier whose watch read 4 then 14 kHz, landed on at 14 kHz with a voice answer, is still the carrier", () => {
+		expect(
+			secondVisit([14_000], { lineWidensTo: 14_000, id: "c", offsetHz: 0 }),
+		).toBeLessThan(COARSE_MS + 9_000)
 	})
 
 	it("the line's track widening during its watch still leaves the line's own width as the carrier's", () => {
-		expect(secondVisit(14_000, 14_000)).toBeGreaterThanOrEqual(
-			COARSE_MS + 20_000,
-		)
+		expect(
+			secondVisit([4_000, 14_000], { lineWidensTo: 14_000 }),
+		).toBeGreaterThanOrEqual(COARSE_MS + 20_000)
 	})
 })
 
