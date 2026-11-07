@@ -352,6 +352,27 @@ describe('a voice answer still to come ("judging")', () => {
 			)
 	})
 
+	it("renews on each visit: a session that never answers costs its 3000 ms every time", () => {
+		const d = drive(
+			hop => (hop === 0 ? "judging" : false),
+			(hop, s, visit) => {
+				if (hop === 0) s.onTrack(sighting(`v${visit}`, hopHz(0)), false, 0)
+			},
+		)
+		for (const visit of [1, 2, 3]) {
+			const stay = d.stayed(0, visit) - COARSE_MS
+			expect(stay).toBeGreaterThanOrEqual(3_000)
+			expect(stay).toBeLessThanOrEqual(3_000 + BLOCK_MS)
+		}
+	})
+
+	it("adds to the voice floor with no L left: up to 1500 + 3000 ms past the dwell", () => {
+		const { landing } = budgetZeroLanding(() => "judging")
+		const { heldMs } = landing()
+		expect(heldMs).toBeGreaterThanOrEqual(3 * BLOCK_MS + 1_500)
+		expect(heldMs).toBeLessThanOrEqual(3 * BLOCK_MS + 1_500 + 3_000 + BLOCK_MS)
+	})
+
 	it("after the visit's voice hold ended, it keeps only what L has left", () => {
 		const stay = keptFor(into => (into < 5_000 ? voiceAnswer() : "judging"))
 		expect(stay).toBeGreaterThanOrEqual(L3)

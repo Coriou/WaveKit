@@ -64,11 +64,15 @@ const MAX_FREQUENCY_MEMORY = 256
  */
 const FORGET_MISSES = 10
 /**
- * Off-air time that proves traffic. A gap is read from the close (the end of the first block off
- * air) to the sighting of the reopening (minSurfaceBlocks blocks after it went on air), so a gap of
- * g ms reads g + 50 ms ± one block in 50 ms blocks: a QSO turnaround (1 s or more) reads 1000 ms or
- * more, a carrier flapping with gaps of up to 0.9 s reads less. A close and reopen heard less than
- * this apart is a flap: carrier evidence.
+ * Off-air time that proves traffic. A reopening's gap is read on air (gapOnAirMs), from the closed
+ * track's last block to the reopening's first: the engine's close comes about 500 ms after that last
+ * block and a gate passes the reopening up to 350 ms after its first, and neither counts. A block
+ * that is on air for part of its length counts as on, so in 50 ms blocks a gap of g ms spans whole
+ * off blocks of more than g − 100 and at most g ms; one block is added, so it reads more than g − 50
+ * and at most g + 50: a QSO turnaround (1 s or more) reads 1000 ms or more, a carrier flapping with
+ * gaps of up to 0.9 s reads at most 950 (between the two, either). A close and reopen read less than
+ * this apart is a flap: carrier evidence. A close with no reopening is read from the close to the end
+ * of the visit (noteHeardGaps), since a reopening may still wait for its gate when the visit ends.
  */
 const TRAFFIC_GAP_MS = 1_000
 /**
@@ -267,9 +271,15 @@ interface FrequencyMemory {
 	misses: number
 	/**
 	 * Its last track closed with no other track of the visit on it: visit, block count and clock
-	 * of the close. A sighting in the same block is a rollover of the same transmission.
+	 * of the close, and the end of that track's last block on air. A sighting in the same block is
+	 * a rollover of the same transmission.
 	 */
-	closedAt: { visit: number; block: number; at: number } | null
+	closedAt: {
+		visit: number
+		block: number
+		at: number
+		lastSample: number
+	} | null
 }
 
 interface HopState {
@@ -371,6 +381,8 @@ interface TrackInfo {
 	ageBlocks: number
 	/** The track was a candidate of this visit before its gate passed (awaitsClass). */
 	qualified: boolean
+	/** End of its last block on air, from its latest snapshot (the closing one at a close). */
+	lastSample: number
 }
 
 /** Energy on the hop the channel gate has not answered yet (onCandidate): no observation yet. */
@@ -1152,8 +1164,10 @@ export class SweepScheduler {
 				openBlocks: 0,
 				ageBlocks: track.blocks,
 				qualified,
+				lastSample: track.lastSample,
 			})
 		} else {
+			known.lastSample = track.lastSample
 			known.snrDb = track.snrDb
 			known.centreHz = track.centreHz
 			known.obwHz = track.obwHz
@@ -2042,7 +2056,8 @@ export class SweepScheduler {
 			if (closed.block !== v.blocks) {
 				entry.runFrom = now
 				entry.watchAfter = 0
-				if (now - closed.at >= TRAFFIC_GAP_MS) this.markTraffic(entry)
+				if (this.gapOnAirMs(closed.lastSample, track) >= TRAFFIC_GAP_MS)
+					this.markTraffic(entry)
 				else {
 					// flapPairMs: a known call flaps for its rest only twice in time.
 					const since =
@@ -2167,7 +2182,29 @@ export class SweepScheduler {
 		if (memory === undefined) return
 		for (const other of v.tracks.values())
 			if (other.open && this.memoryOf(other) === memory) return
-		memory.closedAt = { visit: v.serial, block: v.blocks, at: this.now() }
+		memory.closedAt = {
+			visit: v.serial,
+			block: v.blocks,
+			at: this.now(),
+			lastSample: t.lastSample,
+		}
+	}
+
+	/**
+	 * The on-air gap between a closed track and a track that opened since, as TRAFFIC_GAP_MS reads it:
+	 * from sample positions, so neither the close's lag nor the reopening's wait for its gate counts.
+	 * The first block of the run is the earlier of the track's start and its on-air blocks back from
+	 * its last sample (the sweep preview's snapshots start at their current block).
+	 */
+	private gapOnAirMs(closedLastSample: number, track: TrackSnapshot): number {
+		const first = Math.min(
+			track.startSample,
+			track.lastSample - track.blocks * this.blockSamples,
+		)
+		return (
+			((first - closedLastSample + this.blockSamples) * 1000) /
+			this.sampleRateHz
+		)
 	}
 
 	/** The visit heard it on air: as a track, or as a candidate its gate has not answered yet. */
