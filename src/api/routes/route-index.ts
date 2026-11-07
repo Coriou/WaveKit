@@ -7,19 +7,27 @@ import {
 } from "@wavekit/api-types"
 
 /**
- * Route schemas use Ajv's `nullable` and its tuple form `items: [...]`, which OpenAPI 3.1 does not
- * have: left in, a reader would take those fields as never null, and a strict tool refuses the
- * tuple. A copy, because the schemas themselves still drive validation.
+ * Route schemas use Ajv's `nullable` and its tuple form `items: [...]` with `additionalItems`,
+ * which OpenAPI 3.1 does not have: left in, a reader would take those fields as never null, and a
+ * strict tool refuses the tuple. A copy, because the schemas themselves still drive validation.
  */
 export function toOpenApi31Forms<T>(value: T): T
 export function toOpenApi31Forms(value: unknown): unknown {
 	if (Array.isArray(value)) return value.map(item => toOpenApi31Forms(item))
 	if (typeof value !== "object" || value === null) return value
 	const { nullable, ...rest } = value as Record<string, unknown>
+	// A property named "items" holds a schema, never an array: only a tuple is one.
+	const tuple = Array.isArray(rest["items"])
 	const copy = Object.fromEntries(
 		Object.entries(rest).map(([key, child]) => [
-			// A property named "items" holds a schema, never an array: only a tuple is one.
-			key === "items" && Array.isArray(child) ? "prefixItems" : key,
+			!tuple
+				? key
+				: key === "items"
+					? "prefixItems"
+					: // What follows the tuple's positions: 3.1 says so with `items`.
+						key === "additionalItems"
+						? "items"
+						: key,
 			toOpenApi31Forms(child),
 		]),
 	)

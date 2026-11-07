@@ -10,6 +10,8 @@ import pino from "pino"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { tunerRoutes } from "../../../src/api/routes/tuner.js"
 import { ScannerService } from "../../../src/core/scanner/scanner-service.js"
+import { ScannerPersistence } from "../../../src/core/scanner/store/persistence.js"
+import { TrialMemory } from "../../../src/core/scanner/trial-memory.js"
 import { SourceManager } from "../../../src/core/source-manager.js"
 import { TunerController } from "../../../src/core/tuner-controller.js"
 import type { TunerRelay } from "../../../src/core/tuner-relay.js"
@@ -32,6 +34,7 @@ const START_HZ = 446_100_000
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
 	for (const close of cleanup.splice(0).reverse()) await close()
+	vi.restoreAllMocks()
 })
 
 const quiet = createLogger({ level: "fatal" })
@@ -50,7 +53,7 @@ const sweep = (priority: number, autoAfterIdleMs: number | null = 60_000) => ({
 	resume: { autoAfterIdleMs },
 })
 
-async function setup() {
+async function setup(options: { lostOwnership?: () => boolean } = {}) {
 	const frames: Array<{ cmd: number; value: number }> = []
 	const sockets: net.Socket[] = []
 	const server = net.createServer(socket => {
@@ -88,7 +91,11 @@ async function setup() {
 	const manager = new SourceManager(quiet)
 	cleanup.push(() => manager.disconnectAll())
 	manager.on("error", () => {})
-	const controller = new TunerController(quiet, manager, {})
+	const controller = new TunerController(
+		quiet,
+		manager,
+		options.lostOwnership ? { lostOwnership: options.lostOwnership } : {},
+	)
 	controller.on("error", () => {})
 	wireTunerControl({
 		log: quiet,
@@ -100,6 +107,7 @@ async function setup() {
 	const dir = makeTmpDir("wk-preempt-")
 	const fanout = new FakeFanout()
 	const service = new ScannerService({
+		...(options.lostOwnership ? { lostOwnership: options.lostOwnership } : {}),
 		settings: testSettings(s => {
 			s.sweep.markers = false
 			s.sweep.settleMs.local = 50
@@ -183,7 +191,30 @@ async function setup() {
 		)
 		return frames.filter(frame => frame.cmd !== SET_PPM)
 	}
-	return { controller, drained, frames, post, feed, running, service }
+	/** Past everything written so far, and not through the controller, which may be refusing. */
+	const flushed = async () => {
+		const mark = 100 + frames.length
+		const frame = Buffer.alloc(5)
+		frame.writeUInt8(SET_PPM, 0)
+		frame.writeUInt32BE(mark, 1)
+		manager.writeToSource("rtl", frame)
+		await vi.waitFor(
+			() => expect(frames).toContainEqual({ cmd: SET_PPM, value: mark }),
+			WAIT,
+		)
+		return frames.length
+	}
+	return {
+		controller,
+		drained,
+		flushed,
+		frames,
+		manager,
+		post,
+		feed,
+		running,
+		service,
+	}
 }
 
 describe("preempt: true for a value already on the tuner", () => {
@@ -350,5 +381,139 @@ describe("what the answer says about the job and the jobs behind it", () => {
 		})
 		expect(res.json().preempted.message).toContain(`${able.id} after 300 ms`)
 		expect(res.json().preempted.message).not.toContain(unable.id)
+	})
+
+	it("names a job that lost the tuner to an operator: it retakes the tuner too", async () => {
+		const h = await setup()
+		const behind = await h.service.createJob(sweep(30))
+		await h.running(behind.id)
+		const first = await h.service.createJob(sweep(60, 300))
+		await h.running(first.id)
+		await h.service.pauseJob(behind.id)
+		await settled(h.service)
+		const took = await h.post({ frequencyHz: 120_000_000, preempt: true })
+		expect(took.statusCode).toBe(200)
+		await settled(h.service)
+		expect(h.service.getJob(first.id)?.reason).toBe("preempted-operator")
+		await h.service.resumeJob(behind.id, { takeover: true })
+		await settled(h.service)
+		expect(h.service.tunerLeaseHolder("rtl")).toBe(behind.id)
+		const res = await h.post({ frequencyHz: 121_000_000, preempt: true })
+		expect(res.statusCode).toBe(200)
+		expect(res.json().preempted).toMatchObject({
+			jobId: behind.id,
+			waiters: [
+				{ jobId: first.id, jobName: "Night sweep", autoAfterIdleMs: 300 },
+			],
+		})
+		// What the answer promised.
+		await vi.waitFor(
+			() => expect(h.service.tunerLeaseHolder("rtl")).toBe(first.id),
+			WAIT,
+		)
+	})
+})
+
+describe("the close after a lost private lock", () => {
+	const spyOnStateWrites = () => ({
+		jobs: vi.spyOn(ScannerPersistence.prototype, "writeJobs"),
+		snapshot: vi.spyOn(ScannerPersistence.prototype, "writeSnapshotOf"),
+		engine: vi.spyOn(ScannerPersistence.prototype, "writeEngine"),
+		occupancy: vi.spyOn(ScannerPersistence.prototype, "writeOccupancy"),
+		journal: vi.spyOn(ScannerPersistence.prototype, "append"),
+		trials: vi.spyOn(TrialMemory.prototype, "flush"),
+	})
+	const scannerRunning = async (h: Awaited<ReturnType<typeof setup>>) => {
+		const job = await h.service.createJob(sweep(50))
+		await h.running(job.id)
+		expect(h.service.tunerLeaseHolder("rtl")).toBe(job.id)
+		return job
+	}
+
+	it("sends no frame and writes no state with a lease held, and the scanner still closes", async () => {
+		let lost = false
+		const h = await setup({ lostOwnership: () => lost })
+		await scannerRunning(h)
+		lost = true
+		const writes = spyOnStateWrites()
+		const before = await h.flushed()
+		await h.service.stop()
+		const after = await h.flushed()
+		// The one frame between the marks is the test's own.
+		expect(after - before).toBe(1)
+		for (const write of Object.values(writes))
+			expect(write).not.toHaveBeenCalled()
+	})
+
+	it("an ordinary stop still restores the tuner and writes the state", async () => {
+		let lost = false
+		const h = await setup({ lostOwnership: () => lost })
+		await scannerRunning(h)
+		const writes = spyOnStateWrites()
+		const before = await h.flushed()
+		await h.service.stop()
+		await h.flushed()
+		expect(h.frames.slice(before)).toContainEqual({
+			cmd: SET_FREQUENCY,
+			value: START_HZ,
+		})
+		expect(writes.jobs).toHaveBeenCalled()
+		expect(writes.snapshot).toHaveBeenCalled()
+		expect(writes.trials).toHaveBeenCalled()
+		expect(lost).toBe(false)
+	})
+
+	it("refuses a direct write, one queued before the loss and a reconnect's replay", async () => {
+		let lost = false
+		const h = await setup({ lostOwnership: () => lost })
+		await h.controller.setFrequency("rtl", 120_000_000, { origin: "rest" })
+		const replayed = h.controller.synchronizeOnConnect("rtl")
+		expect(replayed.commands.length).toBeGreaterThan(0)
+		let open: (() => void) | undefined
+		const held = h.manager.runTunerCommand(
+			"rtl",
+			() =>
+				new Promise<void>(resolve => {
+					open = resolve
+				}),
+		)
+		const queued = h.manager.runTunerCommand("rtl", () =>
+			h.controller.setFrequency("rtl", 121_000_000, { origin: "rest" }),
+		)
+		await vi.waitFor(() => expect(open).toBeDefined(), WAIT)
+		lost = true
+		const before = await h.flushed()
+		open?.()
+		await held
+		const refused = { code: "ACCESS_UNAVAILABLE", statusCode: 503 }
+		await expect(queued).rejects.toMatchObject(refused)
+		await expect(
+			h.controller.setFrequency("rtl", 122_000_000, { origin: "scanner" }),
+		).rejects.toMatchObject(refused)
+		expect(h.controller.synchronizeOnConnect("rtl").commands).toEqual([])
+		expect((await h.flushed()) - before).toBe(1)
+	})
+
+	it("writes no saved gain", async () => {
+		let lost = false
+		const h = await setup({ lostOwnership: () => lost })
+		const saveOperatorGains = vi.fn(() => Promise.resolve(true))
+		h.controller.setBandGain({
+			saveOperatorGains,
+			savedOperatorGains: () => [],
+			applyToMyTuning: () => false,
+			gainAt: () => "keep",
+			labelAt: () => undefined,
+		} as never)
+		const save = (
+			h.controller as unknown as {
+				saveOperatorGain(id: string, saved: null): Promise<string>
+			}
+		).saveOperatorGain.bind(h.controller)
+		await expect(save("rtl", null)).resolves.toBe("saved")
+		expect(saveOperatorGains).toHaveBeenCalledTimes(1)
+		lost = true
+		await expect(save("rtl", null)).resolves.toBe("failed")
+		expect(saveOperatorGains).toHaveBeenCalledTimes(1)
 	})
 })

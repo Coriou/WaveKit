@@ -149,6 +149,7 @@ export class ScannerService extends EventEmitter {
 		this.owner = options.construction ?? options.channelOwnership?.construction ?? new ScannerLifecycleOwner()
 		this.owner.ownCleanup("service", async () => {
 			process.stdout.write("scanner-stop-real\\n")
+			process.stdout.write("close-lost-ownership " + options.lostOwnership() + " " + options.tuner.config.lostOwnership() + "\\n")
 			if (process.env.R14_PROCESS_CASE === "legacy-held") {
 				// Listen before announcing: the parent signals on the marker, and an
 				// unhandled SIGUSR2 would kill this process.
@@ -962,6 +963,30 @@ describe("built protected runtime process", () => {
 		await started(second)
 		expect((await http(env.api, "/health")).status).toBe(200)
 		expect(await stop(second)).toEqual({ code: 0, signal: null })
+	}, 40_000)
+
+	it("hands the close mode to the scanner and the tuner: off on a stop, on from the latch", async () => {
+		const env = await fixture()
+		const storage = await PrivateAccessStorage.open({
+			directory: env.directory,
+			mode: "provision",
+			ownership: "single-host-pid-namespace",
+		})
+		await storage.close()
+		await env.releasePorts()
+		const stopped = run(env.configFile, env.directory, scannerPhasesEntry)
+		await started(stopped)
+		expect(await stop(stopped)).toEqual({ code: 0, signal: null })
+		expect(stopped.stdout()).toContain("close-lost-ownership false false")
+		const lost = run(env.configFile, env.directory, scannerPhasesEntry)
+		await started(lost)
+		const owner = (await readdir(env.directory)).find(name =>
+			name.startsWith("owner-"),
+		)
+		if (owner === undefined) throw new Error("Expected the core's owner file")
+		await rm(join(env.directory, owner))
+		expect(await lost.exited).toEqual({ code: 1, signal: null })
+		expect(lost.stdout()).toContain("close-lost-ownership true true")
 	}, 40_000)
 
 	it("mounts admission, disables raw listeners and drains SIGTERM before a durable browser restart", async () => {

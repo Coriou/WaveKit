@@ -184,10 +184,11 @@ coming back:
 - A number: the job resumes by itself that long after the last operator write (60 s by default), or
   later if activity holds it, even in the middle of a longer `restoreAfterS`.
 - `null`: **a short look stops the scan until someone calls `POST /api/scanner/jobs/:id/resume`.** A job
-  somebody had already paused reads `null` too, whatever its own rule: it never resumes by itself.
+  somebody had already paused reads `null` too, whatever its own rule: it never resumes by itself. So
+  does a job that was still starting: it failed, and only a new start brings it back.
 
-`waiters` lists other jobs that were waiting for this tuner and can take it once it is idle, each with
-its own `autoAfterIdleMs`, so the job you stopped may not be the one that moves the receiver next. Cancel
+`waiters` lists other jobs that lost this tuner, to a job or to an operator, and can take it once it is
+idle, each with its own `autoAfterIdleMs`, so the job you stopped may not be the one that moves the receiver next. Cancel
 one if you need longer.
 
 ### Tune for a while

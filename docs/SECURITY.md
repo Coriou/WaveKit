@@ -59,9 +59,19 @@ Once latched, the core exits (below). In the seconds before it does:
 - `GET /health` answers 503 with `reason` `access_authority_lost`, and `GET /health/live`
   stays 200, until the listener closes.
 
-**The core exits and restarts.** It logs the loss, closes as on a stop (at most 10 seconds) and
-exits with code 1, whatever else is running: a locked-out core cannot be read, steered or
-stopped by anyone, and only a new start can load the state another owner may have rotated.
+**The core exits and restarts.** It logs the loss, closes (at most 10 seconds) and exits with
+code 1, whatever else is running: a locked-out core cannot be read, steered or stopped by
+anyone, and only a new start can load the state another owner may have rotated.
+
+The close differs from a stop in one way: another owner may hold the state and the tuner by
+now. From the latch on, the core sends **no tuner frame**: no scanner or temporary tune restore,
+no queued write, no reconnect replay, so the receiver stays where it was. It writes **no scanner
+state** (jobs, snapshot, journal, engine and occupancy state, trial memory) and **no saved band
+gain**; a restart reads what was last on disk, and a scan's recovery record stays there. Sockets,
+decoder children and listeners still go. Stores with a lock of their own close as usual, because
+that lock still proves them theirs: Activity holds a kernel lock, and band plans and operator
+data check their writer lock before each write. Station and decoder settings and recording keeps
+start no write on close; they only wait for one already running.
 
 In the image, s6 starts it again, about 5 seconds after the exit. What you see:
 
@@ -107,7 +117,8 @@ Two gaps stay open:
   that reaches the core in that window is checked against the old credential and can be
   admitted, and a stream it opens lasts until the check finishes.
 - **A request already admitted finishes.** A plain HTTP request past admission when the latch
-  comes gets its answer.
+  comes gets its answer, and a write already running or queued at a store can still land. No
+  fencing token stops it.
 
 ### Backups and the fence
 

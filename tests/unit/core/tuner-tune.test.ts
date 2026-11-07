@@ -2193,7 +2193,12 @@ describe("a tune with preempt: true under a scanner lease", () => {
 		const { h } = await leased()
 		h.describeLeaseJob({ starting: true })
 		const res = await h.post({ frequencyHz: TUNE_HZ, preempt: true })
-		expect(res.json().preempted.job).toBe("failed")
+		expect(res.json().preempted).toMatchObject({
+			job: "failed",
+			// Its rule says 60 s, and a failed job still never comes back by itself.
+			autoAfterIdleMs: null,
+		})
+		expect(res.json().preempted.message).not.toContain("by itself")
 	})
 
 	it("an auto-resume inside a longer restoreAfterS finds nothing to fight", async () => {

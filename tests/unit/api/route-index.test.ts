@@ -43,6 +43,29 @@ it("turns a tuple into prefixItems, and nothing else named items", () => {
 	})
 })
 
+it("turns what follows a tuple into items, and the old key goes", () => {
+	expect(
+		toOpenApi31Forms({
+			closed: { items: [{ type: "number" }], additionalItems: false },
+			open: {
+				items: [{ type: "number" }],
+				additionalItems: { type: "string", nullable: true },
+			},
+			// A property of that name, and a list where the keyword means nothing: both stay.
+			properties: { additionalItems: { type: "string" } },
+			list: { items: { type: "string" }, additionalItems: false },
+		}),
+	).toEqual({
+		closed: { prefixItems: [{ type: "number" }], items: false },
+		open: {
+			prefixItems: [{ type: "number" }],
+			items: { type: ["string", "null"] },
+		},
+		properties: { additionalItems: { type: "string" } },
+		list: { items: { type: "string" }, additionalItems: false },
+	})
+})
+
 it("documents the activity trails tuple with no array-valued items", async () => {
 	const app = Fastify()
 	await app.register(swagger, {

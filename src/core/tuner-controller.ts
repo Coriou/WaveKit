@@ -497,6 +497,11 @@ export interface TunerControllerConfig {
 	defaultSampleRate?: number
 	/** Reconnect behaviour for accepted tuner state (default "restore"). */
 	reconnectPolicy?: TunerReconnectPolicy
+	/**
+	 * True once this core lost private ownership: the tuner and tuner-band-gain.json may be another
+	 * owner's. From then on nothing writes either, whoever asks and however long it waited in a queue.
+	 */
+	lostOwnership?: () => boolean
 }
 
 type ControlModeOrigin = "user" | "relay"
@@ -872,12 +877,7 @@ export class TunerController extends EventEmitter {
 		const durable =
 			this.bandGain === null
 				? true
-				: await withSaveTimeout(
-						this.bandGain.saveOperatorGains(
-							this.operatorGainBeforeBand,
-							sourceId,
-						),
-					)
+				: await withSaveTimeout(this.saveOperatorGains(sourceId))
 		const current = this.savedRecords.get(sourceId) === record
 		if (current && this.savedGainChoiceCount(sourceId) > choices) {
 			this.dropOperatorGain(sourceId)
@@ -888,7 +888,7 @@ export class TunerController extends EventEmitter {
 			this.operatorGainBeforeBand.delete(sourceId)
 			// A save that timed out may still land later: the next save in the service's chain
 			// writes the gains without this record, so it never comes back from disk.
-			void this.bandGain?.saveOperatorGains(this.operatorGainBeforeBand)
+			void this.saveOperatorGains()
 		}
 		if (!current) return "superseded"
 		return durable ? "saved" : "failed"
@@ -898,7 +898,17 @@ export class TunerController extends EventEmitter {
 		this.tuneGainSaves.delete(sourceId)
 		this.savedRecords.delete(sourceId)
 		if (!this.operatorGainBeforeBand.delete(sourceId)) return
-		void this.bandGain?.saveOperatorGains(this.operatorGainBeforeBand)
+		void this.saveOperatorGains()
+	}
+
+	/** False when nothing was written: no service, or no ownership left to write it under. */
+	private saveOperatorGains(required?: string): Promise<boolean> {
+		if (this.bandGain === null || this.config.lostOwnership?.() === true)
+			return Promise.resolve(false)
+		return this.bandGain.saveOperatorGains(
+			this.operatorGainBeforeBand,
+			required,
+		)
 	}
 
 	/**
@@ -2510,7 +2520,7 @@ export class TunerController extends EventEmitter {
 		const plan = desired ? this.buildReplayPlan(state, desired) : []
 		for (const [cmd, value] of plan) {
 			try {
-				this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
+				this.writeFrame(sourceId, cmd, value)
 			} catch (err) {
 				failure =
 					err instanceof Error
@@ -2629,7 +2639,7 @@ export class TunerController extends EventEmitter {
 		let failure: Error | undefined
 		for (const [cmd, value] of this.buildReplayPlan(state, kept)) {
 			try {
-				this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
+				this.writeFrame(sourceId, cmd, value)
 			} catch (err) {
 				failure =
 					err instanceof Error
@@ -2876,7 +2886,7 @@ export class TunerController extends EventEmitter {
 		let failure: Error | undefined
 		for (const [cmd, value] of frames) {
 			try {
-				this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
+				this.writeFrame(sourceId, cmd, value)
 			} catch (err) {
 				failure =
 					err instanceof Error
@@ -3360,6 +3370,21 @@ export class TunerController extends EventEmitter {
 		return (this.fieldWrites.get(sourceId)?.get(field) ?? 0) !== mine
 	}
 
+	/** Every frame this controller writes passes here. */
+	private writeFrame(sourceId: string, cmd: number, value: number): void {
+		this.assertOwnsTuner()
+		this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
+	}
+
+	private assertOwnsTuner(): void {
+		if (this.config.lostOwnership?.() === true)
+			throw new TunerControllerError(
+				"This core no longer owns its state, so it writes nothing to the tuner",
+				"ACCESS_UNAVAILABLE",
+				503,
+			)
+	}
+
 	private async sendCommand(
 		sourceId: string,
 		cmd: number,
@@ -3367,13 +3392,15 @@ export class TunerController extends EventEmitter {
 		opts: TunerWriteOptions = {},
 	): Promise<void> {
 		this.sourceManager.assertTunerCommandActive()
+		// Not a failed write: no error event and no lastError for a refusal by design.
+		this.assertOwnsTuner()
 		const hookTune =
 			opts.origin === "decoder-rate"
 				? this.retuneHookTune.getStore()
 				: undefined
 		;(opts.beforeWrite ?? hookTune?.beforeWrite)?.()
 		try {
-			this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
+			this.writeFrame(sourceId, cmd, value)
 			this.noteFieldWrite(sourceId, stateFieldOf(cmd))
 			if (opts.accept === false) this.markWrittenNotAccepted(sourceId, cmd)
 			else this.markAccepted(sourceId, cmd)

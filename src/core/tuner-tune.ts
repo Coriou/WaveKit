@@ -128,7 +128,8 @@ function preemptionOf(job: TunerLeaseJob, temporary: boolean): TunePreemption {
 		return {
 			...base,
 			job: "failed",
-			autoAfterIdleMs: job.autoAfterIdleMs,
+			// A failed job never resumes, whatever its rule says: only a new start brings it back.
+			autoAfterIdleMs: null,
 			message: `Scanner job ${job.jobId} was still starting and failed when it lost the tuner; start it again when you are done.${waiting}${restore}`,
 		}
 	const resumeRoute = `POST /api/scanner/jobs/${job.jobId}/resume when you are done.`

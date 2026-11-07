@@ -1114,6 +1114,11 @@ async function main(): Promise<void> {
 	let admissionFailed = false
 	let closing: Promise<void> | undefined
 	let closeLegacy: (() => Promise<void>) | undefined
+	// The close after a lost private lock: the tuner and every store without a lock of its own may
+	// be another owner's, so the tuner controller and the scanner read this and write neither. It
+	// holds from the latch on, also for a close a signal already began.
+	let ownershipLost = false
+	const lostOwnership = () => ownershipLost
 	const closeProtected = (): Promise<void> => {
 		stopping = true
 		for (const gate of admissionGates) {
@@ -1207,6 +1212,7 @@ async function main(): Promise<void> {
 			// Another owner may have rotated the state, and only a new start can load it. A core kept
 			// up without it serves nobody, so it goes: s6 starts it again, /health reads 503 till then.
 			access.api.policy.onCredentialAuthorityLost(() => {
+				ownershipLost = true
 				log.error(
 					"Private access ownership lost; exiting so that a restart can load the current state",
 				)
@@ -1334,6 +1340,7 @@ async function main(): Promise<void> {
 		own(80, () => tunerRelay.stop())
 		const tunerController = new TunerController(logger, sourceManager, {
 			reconnectPolicy: config.tuner.reconnectPolicy,
+			lostOwnership,
 		})
 		// Per-band gain: tuner.bandGain, replaced by <stateDir>/tuner-band-gain.json once PUT.
 		const bandGain = new BandGainSettingsService({
@@ -2009,6 +2016,7 @@ async function main(): Promise<void> {
 				analogEvidence,
 				recordingProtection: keeps,
 				construction: scannerConstruction,
+				lostOwnership,
 				channels,
 				channelUsableFraction: config.channelizer.usableFraction,
 				channelTier: Object.freeze({ ...channelTier }),
