@@ -322,6 +322,38 @@ describe("nothing through the runner", () => {
 		await h.pool.destroy()
 	})
 
+	it("a silence from readiness to the first block: no-samples", async () => {
+		const h = silent()
+		h.state.summary = quietSummaryOf()
+		await h.runner.start()
+		await h.advance(900)
+		h.runner.onBlock(1000, false)
+		await h.advance(50)
+		h.runner.onBlock(2000, false)
+		await h.advance(1000)
+		await flushAsync()
+		await h.advance(10)
+		expect(h.last()?.verdict?.why).toBe("no-samples")
+		await h.pool.destroy()
+	})
+
+	it("repeated end samples through the deadline do not keep the proof fresh", async () => {
+		const h = silent()
+		h.state.summary = quietSummaryOf()
+		await h.runner.start()
+		h.runner.onBlock(1000, false)
+		await h.advance(50)
+		h.runner.onBlock(2000, false)
+		for (let i = 0; i < 40; i++) {
+			await h.advance(50)
+			h.runner.onBlock(2000, false)
+		}
+		await flushAsync()
+		await h.advance(10)
+		expect(h.last()?.verdict?.why).toBe("no-samples")
+		await h.pool.destroy()
+	})
+
 	it("the verdict is fixed when the target ends: a later read does not age it", async () => {
 		const h = silent()
 		h.state.summary = quietSummaryOf()

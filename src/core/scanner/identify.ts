@@ -1856,6 +1856,8 @@ export class IdentifyRunner implements JobDriver {
 			)
 			return
 		}
+		// The wait counts from readiness: a silence before the first block is a gap as well.
+		if (this.record.state !== "starting") this.iq.lastAt ??= now
 		this.deps.inner.tick(now)
 		this.step(now)
 	}
@@ -1871,6 +1873,11 @@ export class IdentifyRunner implements JobDriver {
 		const now = this.deps.now()
 		const iq = this.iq
 		if (iq.lastAt !== null && now - iq.lastAt > this.iqFreshMs()) iq.gap = true
+		// A repeated or older end sample is no new signal, so only progress keeps the proof fresh.
+		if (iq.lastEnd !== null && endSample <= iq.lastEnd) {
+			this.deps.inner.onBlock(endSample, overload)
+			return
+		}
 		iq.firstEnd ??= endSample
 		iq.lastEnd = endSample
 		iq.lastAt = now
