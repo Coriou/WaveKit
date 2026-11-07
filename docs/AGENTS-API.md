@@ -159,13 +159,14 @@ answer is the tuner state of `GET /api/tuner` (`sampleRate`, `frequency`, `gainM
 `usable`, `applied` and `notApplied`. It takes up to 18 s; give your client a longer timeout. Past
 that, or when a write fails, the answer is an error that still says what was and was not applied.
 A 503 with `usable: false` also carries `sourceVerdict`, the reason the source is silent. A 409
-`TUNER_TUNE_OVERRIDDEN` means someone else changed the tuner after your tune: read `state.lastChange`
-before tuning again. Read the [whole contract](API.md#post-apitunersourceidtune).
+`TUNER_TUNE_OVERRIDDEN` means someone else changed the tuner during or after your tune, and any setting
+not yet written was not sent: read `state.lastChange` before tuning again. Read the [whole contract](API.md#post-apitunersourceidtune).
 
 ### When a scan holds the tuner
 
 A tune never takes the receiver from a running scan unasked. While a job holds the tuner's lease the
-answer is 409 `TUNER_LEASE_HELD` with `jobId` and `jobName`, and nothing is written. Decide with
+answer is 409 `TUNER_LEASE_HELD` with `jobId` and `jobName`, and nothing is written. A lease that
+arrives while your tune is writing stops it the same way, and `applied` says what stands. Decide with
 whoever runs the scan, then send `"preempt": true`:
 
 ```sh

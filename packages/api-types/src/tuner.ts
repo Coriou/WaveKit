@@ -175,8 +175,8 @@ export interface TuneRequest {
 	/** Integer seconds, 1 to TUNE_RESTORE_MAX_S: put the prior tuning back after this long. */
 	restoreAfterS?: number
 	/**
-	 * Take the tuner from a scanner job holding its lease. Without it such a tune answers 409
-	 * TUNER_LEASE_HELD and writes nothing.
+	 * Take the tuner from a scanner job holding its lease, whenever the lease came. Without it such
+	 * a tune answers 409 TUNER_LEASE_HELD and writes nothing, or nothing more if it was mid-way.
 	 */
 	preempt?: boolean
 }

@@ -573,6 +573,152 @@ describe("tune in one call", () => {
 		expect(h.frames.length).toBe(frames)
 	})
 
+	describe("with a lease that arrives after the tune's turn has come", () => {
+		async function leasable() {
+			const h = await setup()
+			const { arbiter, lost } = arbiterOn(h)
+			h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
+			const acquire = () => {
+				expect(arbiter.acquire("job", "rtl", 50).ok).toBe(true)
+			}
+			const inRetuneHook = () =>
+				h.controller.setBeforeOperatorRetune(() => {
+					acquire()
+					return Promise.resolve()
+				})
+			const onTuneFrame = () => {
+				const frame = (_id: string, _command: string, value: number) => {
+					if (value !== TUNE_HZ) return
+					h.controller.off("command-sent", frame)
+					acquire()
+				}
+				h.controller.on("command-sent", frame)
+			}
+			return { h, arbiter, lost, acquire, inRetuneHook, onTuneFrame }
+		}
+
+		it("stops at 409 before its first frame, the lease untouched", async () => {
+			const { h, arbiter, lost, inRetuneHook } = await leasable()
+			inRetuneHook()
+			const frames = h.frames.length
+			const res = await h.post({ frequencyHz: TUNE_HZ, gain: 300 })
+			expect(res.statusCode).toBe(409)
+			expect(res.json()).toMatchObject({
+				code: "TUNER_LEASE_HELD",
+				jobId: "job",
+				applied: [],
+				notApplied: ["frequencyHz", "gain"],
+			})
+			expect(res.json()).not.toHaveProperty("preempted")
+			expect(res.json().message).toContain("nothing was written")
+			expect(lost).toEqual([])
+			expect(arbiter.holder("rtl")?.jobId).toBe("job")
+			expect(h.frames.length).toBe(frames)
+		})
+
+		it("refuses the rate policy's own frame in the hook as well", async () => {
+			const { h, arbiter, lost, acquire } = await leasable()
+			h.controller.setBeforeOperatorRetune(async sourceId => {
+				acquire()
+				await h.controller.setPpm(sourceId, 1, { origin: "decoder-rate" })
+			})
+			const frames = h.frames.length
+			const res = await h.post({ frequencyHz: TUNE_HZ })
+			expect(res.statusCode).toBe(409)
+			expect(res.json().code).toBe("TUNER_LEASE_HELD")
+			expect(lost).toEqual([])
+			expect(arbiter.holder("rtl")?.jobId).toBe("job")
+			expect(h.frames.length).toBe(frames)
+		})
+
+		it("stops between frames and reports what already applied", async () => {
+			const { h, arbiter, lost, onTuneFrame } = await leasable()
+			onTuneFrame()
+			const res = await h.post({ frequencyHz: TUNE_HZ, gain: 300 })
+			expect(res.statusCode).toBe(409)
+			expect(res.json()).toMatchObject({
+				code: "TUNER_LEASE_HELD",
+				jobId: "job",
+				applied: ["frequencyHz"],
+				notApplied: ["gain"],
+				state: { frequency: TUNE_HZ },
+			})
+			expect(res.json().message).toContain("nothing more was written")
+			expect(lost).toEqual([])
+			expect(arbiter.holder("rtl")?.jobId).toBe("job")
+			expect(h.frames.some(f => f.cmd === SET_GAIN)).toBe(false)
+		})
+
+		it("a temporary tune stopped by it leaves no restore over the job", async () => {
+			const { h, onTuneFrame } = await leasable()
+			await h.post({ gainMode: "manual", gain: 200 })
+			onTuneFrame()
+			const res = await h.post({
+				frequencyHz: TUNE_HZ,
+				gain: 300,
+				restoreAfterS: 1,
+			})
+			expect(res.statusCode).toBe(409)
+			expect(res.json().code).toBe("TUNER_LEASE_HELD")
+			expect(restoreOf(h.read())).toMatchObject({
+				status: "cancelled",
+				cancelledBy: { actor: "scanner-job", reason: "scanner-lease" },
+			})
+		})
+
+		it("with preempt takes it and reports it as a lease found at the start", async () => {
+			const { h, arbiter, lost, inRetuneHook } = await leasable()
+			inRetuneHook()
+			const res = await h.post({
+				frequencyHz: TUNE_HZ,
+				restoreAfterS: 5,
+				preempt: true,
+			})
+			expect(res.statusCode).toBe(200)
+			expect(lost).toEqual(["preempted-operator"])
+			expect(arbiter.holder("rtl")).toBeUndefined()
+			expect(res.json().preempted).toMatchObject({
+				jobId: "job",
+				job: "paused",
+			})
+			expect(res.json().preempted.message).toContain("No restore comes")
+			expect(h.read().lastTune?.preempted?.jobId).toBe("job")
+			expect(restoreOf(h.read())).toMatchObject({
+				status: "cancelled",
+				state: {},
+				cancelledBy: {
+					reason: "scanner-preempted",
+					job: { jobId: "job" },
+				},
+			})
+			expect(restoreOf(h.read()).state).toEqual({})
+		})
+
+		it("with preempt between frames, the next frame takes it", async () => {
+			const { h, lost, onTuneFrame } = await leasable()
+			onTuneFrame()
+			const res = await h.post({
+				frequencyHz: TUNE_HZ,
+				gain: 300,
+				preempt: true,
+			})
+			expect(res.statusCode).toBe(200)
+			expect(lost).toEqual(["preempted-operator"])
+			expect(res.json().preempted.jobId).toBe("job")
+			expect(h.read()).toMatchObject({ frequency: TUNE_HZ, gain: 300 })
+		})
+
+		it("with preempt and no frame left to send, it takes nothing", async () => {
+			const { h, arbiter, lost, onTuneFrame } = await leasable()
+			onTuneFrame()
+			const res = await h.post({ frequencyHz: TUNE_HZ, preempt: true })
+			expect(res.statusCode).toBe(200)
+			expect(res.json()).not.toHaveProperty("preempted")
+			expect(lost).toEqual([])
+			expect(arbiter.holder("rtl")?.jobId).toBe("job")
+		})
+	})
+
 	it("refuses when the lease cannot be read, unless told to preempt", async () => {
 		const h = await setup()
 		h.useLeases(() => {
@@ -1798,6 +1944,94 @@ describe("the user always wins over a temporary tune", () => {
 		expect(h.read().frequency).toBe(TUNE_HZ + 1)
 	})
 
+	describe("with another write landing while the tune runs", () => {
+		const relayCentre = (h: Awaited<ReturnType<typeof setup>>) =>
+			h.controller.applyExternalCommand("rtl", SET_FREQUENCY, OTHER_HZ + 1)
+
+		it.each([
+			["temporary", { restoreAfterS: 5 }, "external-control"],
+			["that stays", {}, undefined],
+		])(
+			"a relay frequency in the retune hook stands over a tune %s",
+			async (_name, extra, reason) => {
+				const h = await ready()
+				h.controller.setBeforeOperatorRetune(() => {
+					relayCentre(h)
+					return Promise.resolve()
+				})
+				const res = await h.post({ frequencyHz: TUNE_HZ, ...extra })
+				expect(res.statusCode).toBe(409)
+				expect(res.headers).not.toHaveProperty("retry-after")
+				expect(res.json()).toMatchObject({
+					code: "TUNER_TUNE_OVERRIDDEN",
+					applied: [],
+					notApplied: ["frequencyHz"],
+					state: {
+						frequency: OTHER_HZ + 1,
+						lastChange: { actor: "relay" },
+						lastTune: { code: "TUNER_TUNE_OVERRIDDEN" },
+					},
+				})
+				expect(h.frames).toEqual([])
+				if (reason !== undefined)
+					expect(restoreOf(h.read())).toMatchObject({
+						status: "cancelled",
+						cancelledBy: { actor: "relay", reason },
+					})
+				await vi.advanceTimersByTimeAsync(10_000)
+				expect(h.frames).toEqual([])
+				expect(h.read().frequency).toBe(OTHER_HZ + 1)
+			},
+		)
+
+		it("a write landing between its frames stops the frames left, and says what applied", async () => {
+			const h = await ready()
+			const frame = (_id: string, _command: string, value: number) => {
+				if (value !== TUNE_HZ) return
+				h.controller.off("command-sent", frame)
+				h.controller.applyExternalCommand("rtl", SET_GAIN, 123)
+			}
+			h.controller.on("command-sent", frame)
+			const res = await h.post({ frequencyHz: TUNE_HZ, gain: 300 })
+			expect(res.statusCode).toBe(409)
+			expect(res.json()).toMatchObject({
+				code: "TUNER_TUNE_OVERRIDDEN",
+				applied: ["frequencyHz"],
+				notApplied: ["gain"],
+				state: { frequency: TUNE_HZ, gain: 123 },
+			})
+			await until(() => h.frames.length >= 1)
+			expect(h.frames.map(f => f.cmd)).toEqual([SET_FREQUENCY])
+		})
+
+		it("a REST write in the hook counts as much as a relay's", async () => {
+			const h = await ready()
+			let once = true
+			h.controller.setBeforeOperatorRetune(async sourceId => {
+				if (!once) return
+				once = false
+				await h.controller.setPpm(sourceId, 3, { origin: "rest", actor: "web" })
+			})
+			const res = await h.post({ frequencyHz: TUNE_HZ })
+			expect(res.statusCode).toBe(409)
+			expect(res.json()).toMatchObject({
+				code: "TUNER_TUNE_OVERRIDDEN",
+				state: { frequency: OTHER_HZ, lastChange: { actor: "web" } },
+			})
+		})
+
+		it("a write queued ahead of the tune is older, and stops nothing", async () => {
+			const h = await ready()
+			const queued = vi.spyOn(h.manager, "runTunerCommand")
+			const user = inject("POST", "ppm", { ppm: 3 })(h)
+			await until(() => queued.mock.calls.length === 1)
+			const res = await h.post({ frequencyHz: TUNE_HZ, gain: 300 })
+			expect((await user).statusCode).toBe(200)
+			expect(res.statusCode).toBe(200)
+			expect(h.read()).toMatchObject({ frequency: TUNE_HZ, gain: 300 })
+		})
+	})
+
 	it("a tune that stays ends a restore already writing, and queues behind it", async () => {
 		const h = await ready()
 		await h.post({ frequencyHz: TUNE_HZ, restoreAfterS: 1 })
@@ -2115,17 +2349,167 @@ describe("a temporary tune and the gain saved before a band", () => {
 		expect(h.read()).toMatchObject({ frequency: OUTSIDE_HZ, gain: 200 })
 	})
 
-	it("kept by DELETE, it stays as an operator tune stays: the gain it used is gone", async () => {
-		const { h, write, settled, saved } = await inBand()
-		await h.post({ frequencyHz: OUTSIDE_HZ, restoreAfterS: 5 })
-		await h.app.inject({
-			method: "DELETE",
-			url: "/api/tuner/rtl/tune/restore",
+	// Every way a restore can fail to run: none of them changes the saved gain, on disk or in memory.
+	type Band = Awaited<ReturnType<typeof inBand>>
+	const CANCELS: Array<[string, (band: Band, body: object) => Promise<void>]> =
+		[
+			[
+				"DELETE",
+				async ({ h }, body) => {
+					await h.post(body)
+					await h.app.inject({
+						method: "DELETE",
+						url: "/api/tuner/rtl/tune/restore",
+					})
+					expect(restoreOf(h.read()).status).toBe("cancelled")
+				},
+			],
+			[
+				"a user's write to another field",
+				async ({ h, write }, body) => {
+					await h.post(body)
+					await write("ppm", { ppm: 3 })
+					expect(restoreOf(h.read()).status).toBe("cancelled")
+				},
+			],
+			[
+				"a scanner lease",
+				async ({ h }, body) => {
+					const { arbiter } = arbiterOn(h)
+					h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
+					await h.post(body)
+					expect(arbiter.acquire("job", "rtl", 50).ok).toBe(true)
+					await vi.advanceTimersByTimeAsync(5_000)
+					expect(restoreOf(h.read()).cancelledBy?.reason).toBe("scanner-lease")
+				},
+			],
+			[
+				"preempting a job",
+				async ({ h }, body) => {
+					const { arbiter } = arbiterOn(h)
+					h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
+					expect(arbiter.acquire("job", "rtl", 50).ok).toBe(true)
+					const res = await h.post({ ...body, preempt: true })
+					expect(res.statusCode).toBe(200)
+					expect(restoreOf(h.read()).cancelledBy?.reason).toBe(
+						"scanner-preempted",
+					)
+				},
+			],
+			[
+				"a failed restore",
+				async ({ h }, body) => {
+					await h.post(body)
+					vi.spyOn(h.manager, "writeToSource").mockImplementation(() => {
+						throw Object.assign(new Error("Source rtl is not connected"), {
+							code: "SOURCE_DISCONNECTED",
+						})
+					})
+					await vi.advanceTimersByTimeAsync(5_000)
+					await until(() => restoreOf(h.read()).status === "failed")
+				},
+			],
+			[
+				"shutdown",
+				async ({ h }, body) => {
+					await h.post(body)
+					await h.app.close()
+				},
+			],
+			[
+				"the source's removal",
+				async ({ h }, body) => {
+					await h.post(body)
+					await h.manager.disconnect("rtl")
+				},
+			],
+		]
+
+	describe.each([
+		["the centre alone", {}],
+		["an explicit gain", { gain: 300 }],
+	])("with %s", (_tune, extra) => {
+		it.each(CANCELS)(
+			"the saved file stays byte-identical through %s",
+			async (_path, cancel) => {
+				const band = await inBand()
+				await cancel(band, {
+					frequencyHz: OUTSIDE_HZ,
+					restoreAfterS: 5,
+					...extra,
+				})
+				await band.settled()
+				expect(band.saved()).toBe(band.before)
+			},
+		)
+	})
+
+	describe("kept by DELETE, a later retune and the record it left", () => {
+		const keep = async (body: object) => {
+			const band = await inBand()
+			await band.h.post({
+				frequencyHz: OUTSIDE_HZ,
+				restoreAfterS: 5,
+				...body,
+			})
+			await band.h.app.inject({
+				method: "DELETE",
+				url: "/api/tuner/rtl/tune/restore",
+			})
+			await band.settled()
+			expect(band.saved()).toBe(band.before)
+			return band
+		}
+
+		it("gives the saved gain back and clears it, as any exit from a band", async () => {
+			const { h, write, settled, saved } = await keep({})
+			await write("frequency", { hz: OUTSIDE_HZ + 1 })
+			await settled()
+			expect(h.read().gain).toBe(200)
+			expect(saved()).not.toContain('"gain": 200')
 		})
-		await settled()
-		expect(saved()).not.toContain('"gain": 200')
-		await write("frequency", { hz: OUTSIDE_HZ + 1 })
-		expect(h.read().gain).toBe(200)
+
+		it("still holds it through a return to the band, and gives it back on leaving", async () => {
+			const { h, write, settled, before, saved } = await keep({})
+			await write("frequency", { hz: BAND_HZ })
+			await settled()
+			expect(h.read().gain).toBe(297)
+			expect(saved()).toBe(before)
+			await write("frequency", { hz: OUTSIDE_HZ })
+			await settled()
+			expect(h.read().gain).toBe(200)
+			expect(saved()).not.toContain('"gain": 200')
+		})
+
+		it("never writes it over the gain the kept tune set: it is retired instead", async () => {
+			const { h, write, settled, saved } = await keep({ gain: 300 })
+			await write("frequency", { hz: OUTSIDE_HZ + 1 })
+			await settled()
+			expect(h.read().gain).toBe(300)
+			expect(saved()).not.toContain('"gain": 200')
+		})
+
+		it("a retune into a band saves the kept tune's gain in its place", async () => {
+			const { h, write, settled, saved } = await keep({ gain: 300 })
+			await write("frequency", { hz: BAND_HZ })
+			await settled()
+			expect(h.read().gain).toBe(297)
+			expect(saved()).toContain('"gain": 300')
+			await write("frequency", { hz: OUTSIDE_HZ })
+			expect(h.read().gain).toBe(300)
+		})
+
+		it("the next temporary tune leaves it alone too, and writes it nowhere", async () => {
+			const { h, before, saved, settled } = await keep({ gain: 300 })
+			await h.post({ frequencyHz: OUTSIDE_HZ + 1, restoreAfterS: 5 })
+			expect(h.read().gain).toBe(300)
+			await settled()
+			expect(saved()).toBe(before)
+			await vi.advanceTimersByTimeAsync(5_000)
+			await until(() => restoreOf(h.read()).status === "restored")
+			await settled()
+			expect(saved()).toBe(before)
+		})
 	})
 
 	it("cancelled by a user's gain, that gain stands and the saved one is gone", async () => {
@@ -2139,36 +2523,13 @@ describe("a temporary tune and the gain saved before a band", () => {
 		expect(h.read().gain).toBe(150)
 	})
 
-	it("cancelled by a user's other write, the explicit gain of the tune stays with it", async () => {
+	it("cancelled by a user's retune, the explicit gain of the tune stays with it", async () => {
 		const { h, write, settled, saved } = await inBand()
 		await h.post({ frequencyHz: OUTSIDE_HZ, gain: 300, restoreAfterS: 5 })
-		await write("ppm", { ppm: 3 })
-		await settled()
-		expect(saved()).not.toContain('"gain": 200')
 		await write("frequency", { hz: OUTSIDE_HZ + 1 })
+		await settled()
+		expect(restoreOf(h.read()).status).toBe("cancelled")
 		expect(h.read().gain).toBe(300)
-	})
-
-	it("on shutdown with the restore pending, the saved gain is what it was before the tune", async () => {
-		const { h, before, saved, settled } = await inBand()
-		await h.post({ frequencyHz: OUTSIDE_HZ, restoreAfterS: 5 })
-		await h.app.close()
-		await settled()
-		expect(saved()).toBe(before)
-	})
-
-	it("preempting a job, nothing goes back, so it uses the saved gain as any operator tune", async () => {
-		const { h, settled, saved } = await inBand()
-		const { arbiter } = arbiterOn(h)
-		h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
-		expect(arbiter.acquire("job", "rtl", 50).ok).toBe(true)
-		const res = await h.post({
-			frequencyHz: OUTSIDE_HZ,
-			restoreAfterS: 5,
-			preempt: true,
-		})
-		expect(res.statusCode).toBe(200)
-		await settled()
 		expect(saved()).not.toContain('"gain": 200')
 	})
 })

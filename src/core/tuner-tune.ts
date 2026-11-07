@@ -76,18 +76,25 @@ const UNNAMED_JOB: TunerLeaseJob = {
 export class TunerLeaseHeldError extends TunerControllerError {
 	readonly job: TunerLeaseJob
 
-	constructor(job: TunerLeaseJob) {
+	/** `wrote`: the tune met the lease between its frames, so some of it may stand. */
+	constructor(job: TunerLeaseJob, wrote = false) {
 		const named = job.name !== null ? ` "${job.name}"` : ""
+		const written = wrote
+			? "nothing more was written: `applied` says what stands"
+			: "nothing was written"
 		super(
 			job.jobId === UNNAMED_JOB.jobId
-				? `The scanner lease of this tuner could not be read, so a job may hold it, and nothing was written. Send "preempt": true to tune anyway, or retry`
-				: `Scanner job ${job.jobId}${named} holds this tuner, and nothing was written. Send "preempt": true to take it: the job stops and its own resume rules apply. Or wait for the job to end, or cancel it with POST /api/scanner/jobs/${job.jobId}/cancel`,
+				? `The scanner lease of this tuner could not be read, so a job may hold it, and ${written}. Send "preempt": true to tune anyway, or retry`
+				: `Scanner job ${job.jobId}${named} holds this tuner, and ${written}. Send "preempt": true to take it: the job stops and its own resume rules apply. Or wait for the job to end, or cancel it with POST /api/scanner/jobs/${job.jobId}/cancel`,
 			"TUNER_LEASE_HELD",
 			409,
 		)
 		this.job = job
 	}
 }
+
+/** What a temporary tune under a job's lease would go back to: nothing, never the job's hop. */
+const NO_SNAPSHOT: TuneSnapshot = { state: {}, savedOperatorGain: false }
 
 /** What a tune that took a job's lease tells its client, once a frame has gone out. */
 function preemptionOf(job: TunerLeaseJob, temporary: boolean): TunePreemption {
@@ -135,8 +142,8 @@ interface RestoreRecord {
 	expected: TuneValues
 	/** The temporary tune wrote a gain: rtl_tcp then left AGC whatever the state shows. */
 	wroteGain: boolean
-	/** It used the gain saved before a band: that gain goes if it never comes back. */
-	savedGainUsed: boolean
+	/** It set a gain or gain mode: if it stays, that gain is newer than any saved before a band. */
+	choseGain: boolean
 	/** While pending, the time it is due; while restoring, its deadline. */
 	timer: NodeJS.Timeout | undefined
 	/** Ends its usability waits once it is over, however it ended. */
@@ -144,6 +151,10 @@ interface RestoreRecord {
 }
 
 interface ActiveTune {
+	/** Its turn in the command queue has come: a later write by another actor is newer than it. */
+	started: boolean
+	/** Another actor's write or choice landed since it started: it sends no further frame. */
+	otherWrite: boolean
 	/** The temporary tune has started writing: its own writes cancel nothing. */
 	owned: boolean
 	/** Another actor wrote while it ran, or the restore was cancelled before it armed. */
@@ -154,8 +165,10 @@ interface ActiveTune {
 	write: TuneWriteRun
 	/** A frame of this tune went out. */
 	wrote: boolean
-	/** The job whose lease this tune found and may take, with `preempt: true`. */
+	/** The job whose lease this tune met; it takes it with `preempt: true`, else it stops. */
 	leaseJob: TunerLeaseJob | undefined
+	/** The job whose lease a frame of this tune took. */
+	preempted: TunerLeaseJob | undefined
 }
 
 /** Writes that nobody chose: a replay of what is accepted, and the configured tuning. */
@@ -303,12 +316,15 @@ export class TunerTuning {
 		// A tune that stays is the newest word: the restore ends here, and this queues behind it.
 		if (restoring) this.cancel(sourceId, opts.actor ?? "unknown", "tuner-write")
 		const run: ActiveTune = {
+			started: false,
+			otherWrite: false,
 			owned: false,
 			overriddenBy: undefined,
 			abort: new AbortController(),
-			write: { keepsSavedGain: false, savedGainUsed: false },
+			write: { keepsSavedGain: temporary },
 			wrote: false,
 			leaseJob: undefined,
+			preempted: undefined,
 		}
 		const { signal } = run.abort
 		this.active.set(sourceId, run)
@@ -316,14 +332,34 @@ export class TunerTuning {
 		const applied = new Set<TuneSetting>()
 		const deadline = Date.now() + TUNE_DEADLINE_MS
 		let expired = false
-		let started = false
 		let error: unknown
+		// Why the tune stopped: a band gain write logs its own failure, so `applied` throws it again.
+		let refused: unknown
 		let carried: RestoreRecord | undefined
 		let snapshot: TuneSnapshot | undefined
 		// Timers can run late: the clock decides as well as `expired`, in the frame's own section.
 		const stopIfHalted = () => {
 			if (expired || signal.aborted || Date.now() >= deadline)
 				throw new TuneStopped()
+		}
+		const refuse = (err: unknown): void => {
+			refused ??= err
+			throw err
+		}
+		// A lease held now counts the same whenever it came: on arrival, in the queue, between frames.
+		const meetLease = () => {
+			const holder = this.leaseJob(sourceId)
+			if (holder === null) return
+			run.leaseJob = holder
+			if (request.preempt !== true)
+				refuse(new TunerLeaseHeldError(holder, run.wrote))
+			this.cancel(sourceId, "scanner-job", "scanner-lease", holder)
+		}
+		// Runs in the frame's own synchronous section: no write or lease can land between the two.
+		const beforeFrame = () => {
+			stopIfHalted()
+			if (run.otherWrite) refuse(this.overridden())
+			meetLease()
 		}
 
 		const finish = (usable: boolean, stateNow = this.state(sourceId)) => {
@@ -335,20 +371,15 @@ export class TunerTuning {
 			const notApplied = settings.filter(setting => !done.includes(setting))
 			if (usable && error === undefined && notApplied.length > 0)
 				error = this.writtenOver(sourceId, run)
-					? new TunerControllerError(
-							"Another write changed the tuner after this tune, and it stands. Read lastChange in the state before tuning again",
-							"TUNER_TUNE_OVERRIDDEN",
-							409,
-						)
+					? this.overridden()
 					: new WaveKitError(
 							"The source came back without some settings; read notApplied and the tuner state",
 							"TUNER_TUNE_PARTIAL",
 						)
 			if (!usable && error === undefined) error = this.notUsable()
-			const preempted =
-				run.leaseJob !== undefined && run.wrote
-					? preemptionOf(run.leaseJob, temporary)
-					: undefined
+			const preempted = run.preempted
+				? preemptionOf(run.preempted, temporary)
+				: undefined
 			if (!signal.aborted && this.controller.getState(sourceId) !== undefined) {
 				this.lastTunes.set(sourceId, {
 					at: new Date().toISOString(),
@@ -391,25 +422,26 @@ export class TunerTuning {
 			const due = new Date(
 				Date.now() + request.restoreAfterS! * 1_000,
 			).toISOString()
+			const choseGain = applied.has("gain") || applied.has("gainMode")
 			if (run.overriddenBy !== undefined) {
 				this.endWithoutRestore(
 					sourceId,
 					carried,
 					snapshot,
 					run.overriddenBy,
-					run.write.savedGainUsed,
+					choseGain,
 					due,
 				)
 				return
 			}
 			// The tuning under a lease is the job's hop: never something to go back to.
 			if (run.leaseJob !== undefined) {
-				const job = jobOf(run.leaseJob)
+				const job = jobOf(run.preempted ?? run.leaseJob)
 				this.endWithoutRestore(
 					sourceId,
 					undefined,
-					snapshot,
-					run.wrote
+					NO_SNAPSHOT,
+					run.preempted
 						? {
 								...this.cancelledBy(
 									opts.actor ?? "unknown",
@@ -418,7 +450,7 @@ export class TunerTuning {
 								job,
 							}
 						: { ...this.cancelledBy("scanner-job", "scanner-lease"), job },
-					false,
+					choseGain || carried?.choseGain === true,
 					due,
 				)
 				return
@@ -431,10 +463,10 @@ export class TunerTuning {
 					snapshot,
 					request.restoreAfterS! * 1_000,
 					applied.has("gain") || carried?.wroteGain === true,
-					run.write.savedGainUsed || carried?.savedGainUsed === true,
+					choseGain || carried?.choseGain === true,
 				)
 			else if (carried !== undefined) {
-				if (run.write.savedGainUsed) carried.savedGainUsed = true
+				if (choseGain) carried.choseGain = true
 				this.rearm(sourceId, carried, Date.parse(carried.view.at) - Date.now())
 			}
 		}
@@ -451,16 +483,10 @@ export class TunerTuning {
 
 		const command = this.source.runTunerCommand(sourceId, async () => {
 			stopIfHalted()
-			// Its turn has come: a lease taken while it queued counts as one found on arrival.
-			const holder = this.leaseJob(sourceId)
-			if (holder !== null) {
-				if (request.preempt !== true) throw new TunerLeaseHeldError(holder)
-				run.leaseJob = holder
-				this.yieldToLease(sourceId)
-			}
-			started = true
+			meetLease()
+			run.started = true
 			if (temporary && run.leaseJob !== undefined) {
-				snapshot = { state: {}, savedOperatorGain: false }
+				snapshot = NO_SNAPSHOT
 				run.owned = true
 			} else if (temporary) {
 				const prior = this.restores.get(sourceId)
@@ -476,7 +502,6 @@ export class TunerTuning {
 					)
 				snapshot = taken
 				run.owned = true
-				run.write.keepsSavedGain = true
 				if (carried?.timer !== undefined) {
 					clearTimeout(carried.timer)
 					carried.timer = undefined
@@ -484,7 +509,7 @@ export class TunerTuning {
 			}
 			const writing: TunerWriteOptions = {
 				...opts,
-				beforeWrite: stopIfHalted,
+				beforeWrite: beforeFrame,
 				run: run.write,
 			}
 			await this.controller.applyTune(sourceId, values, writing, setting => {
@@ -493,6 +518,10 @@ export class TunerTuning {
 				if (!temporary)
 					this.cancel(sourceId, opts.actor ?? "unknown", "tuner-write")
 				stopIfHalted()
+				if (refused !== undefined) throw refused
+				// A setting still to come, even one with no frame to send, is not chosen over that write.
+				if (run.otherWrite && applied.size < settings.length)
+					refuse(this.overridden())
 			})
 		})
 		const settled = command.then(
@@ -527,7 +556,7 @@ export class TunerTuning {
 		if (first === "deadline") {
 			expired = true
 			const outcome = finish(false)
-			if (!started) return outcome
+			if (!run.started) return outcome
 			return { ...outcome, inFlight: true }
 		}
 		// A recovery that ran out of its own window still counts if the source returns in time.
@@ -667,6 +696,14 @@ export class TunerTuning {
 		return this.controller.lastChangeRun(sourceId) !== run.write
 	}
 
+	private overridden(): TunerControllerError {
+		return new TunerControllerError(
+			"Another write changed the tuner during or after this tune, and it stands; any setting of the tune not yet written was not sent. Read lastChange in the state before tuning again",
+			"TUNER_TUNE_OVERRIDDEN",
+			409,
+		)
+	}
+
 	private notUsable(): WaveKitError {
 		return new WaveKitError(
 			"The source is not usable yet; the settings below say what was applied",
@@ -741,7 +778,9 @@ export class TunerTuning {
 				? { job: jobOf(job) }
 				: {}),
 		}
-		if (record.savedGainUsed) this.controller.noteTuneKept(sourceId)
+		// A gain the restore already put back is not one the tune leaves on the tuner.
+		if (record.choseGain && record.view.restored?.includes("gain") !== true)
+			this.controller.noteTuneKept(sourceId)
 		this.log.info({ sourceId, actor, reason }, "Temporary tune stays")
 		this.controller.publishState(sourceId)
 		return true
@@ -753,11 +792,11 @@ export class TunerTuning {
 		carried: RestoreRecord | undefined,
 		snapshot: TuneSnapshot,
 		cancelledBy: NonNullable<TuneRestore["cancelledBy"]>,
-		savedGainUsed: boolean,
+		choseGain: boolean,
 		due: string,
 	): void {
 		clearTimeout(carried?.timer)
-		if (savedGainUsed || carried?.savedGainUsed === true)
+		if (choseGain || carried?.choseGain === true)
 			this.controller.noteTuneKept(sourceId)
 		this.restores.set(sourceId, {
 			view: {
@@ -769,7 +808,7 @@ export class TunerTuning {
 			snapshot,
 			expected: {},
 			wroteGain: false,
-			savedGainUsed: false,
+			choseGain: false,
 			timer: undefined,
 			abort: new AbortController(),
 		})
@@ -781,7 +820,7 @@ export class TunerTuning {
 		snapshot: TuneSnapshot,
 		delayMs: number,
 		wroteGain: boolean,
-		savedGainUsed: boolean,
+		choseGain: boolean,
 	): void {
 		const state = this.controller.tuneSnapshot(sourceId)?.state ?? {}
 		const record: RestoreRecord = {
@@ -793,7 +832,7 @@ export class TunerTuning {
 			snapshot,
 			expected: state,
 			wroteGain,
-			savedGainUsed,
+			choseGain,
 			timer: undefined,
 			abort: new AbortController(),
 		}
@@ -944,6 +983,17 @@ export class TunerTuning {
 		})
 	}
 
+	/** Somebody else moved the tuner during a tune: nothing of the tune goes out over it. */
+	private noteOtherWrite(
+		run: ActiveTune | undefined,
+		actor: TunerChangeActor,
+		reason: TuneRestoreCancelReason,
+	): void {
+		if (run?.started !== true) return
+		run.otherWrite = true
+		if (run.owned) run.overriddenBy ??= this.cancelledBy(actor, reason)
+	}
+
 	private readonly onLastChange = (
 		sourceId: string,
 		change: TunerLastChange,
@@ -956,17 +1006,16 @@ export class TunerTuning {
 		// By identity, not by what the write looks like: the next command in the queue can start
 		// before this tune's `settle`, and it is somebody else's whatever its actor and reason.
 		const own = run !== undefined && write === run.write
-		if (own) run.wrote = true
+		if (own) {
+			run.wrote = true
+			// The frame that "command-sent" is about to report to the arbiter takes the lease.
+			if (run.leaseJob !== undefined) run.preempted = run.leaseJob
+		}
 		// The operator's gain coming back after this tune took the lease is part of taking it.
 		const leaseHandback =
 			run?.leaseJob !== undefined && change.reason === "scanner-restore"
-		if (
-			run?.owned === true &&
-			!own &&
-			!leaseHandback &&
-			change.reason !== "tune-restore"
-		)
-			run.overriddenBy ??= this.cancelledBy(change.actor, "tuner-write")
+		if (!own && !leaseHandback && change.reason !== "tune-restore")
+			this.noteOtherWrite(run, change.actor, "tuner-write")
 		const record = this.restores.get(sourceId)
 		if (record === undefined) return
 		if (record.view.status === "restoring" && change.reason === "tune-restore")
@@ -982,9 +1031,7 @@ export class TunerTuning {
 		sourceId: string,
 		actor: TunerChangeActor,
 	): void => {
-		const run = this.active.get(sourceId)
-		if (run?.owned === true)
-			run.overriddenBy ??= this.cancelledBy(actor, "tuner-write")
+		this.noteOtherWrite(this.active.get(sourceId), actor, "tuner-write")
 		this.cancel(sourceId, actor, "tuner-write")
 	}
 
@@ -1002,9 +1049,7 @@ export class TunerTuning {
 		mode: TunerState["controlMode"],
 	): void => {
 		if (mode !== "external") return
-		const run = this.active.get(sourceId)
-		if (run?.owned === true)
-			run.overriddenBy ??= this.cancelledBy("relay", "external-control")
+		this.noteOtherWrite(this.active.get(sourceId), "relay", "external-control")
 		this.cancel(sourceId, "relay", "external-control")
 	}
 

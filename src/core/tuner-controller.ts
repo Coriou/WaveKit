@@ -66,13 +66,11 @@ export interface TunerWriteOptions {
 
 /**
  * One POST /tune, by identity: "last-change" hands it back, so a tune tells its own writes from
- * anybody else's whatever their actor or reason. A temporary tune sets `keepsSavedGain`: the gain
- * saved before a band is left as it is, and `savedGainUsed` says an operator tune would have used
- * it up, which then happens only if the temporary tune stays (TunerController.noteTuneKept).
+ * anybody else's whatever their actor or reason. A temporary tune sets `keepsSavedGain`: it never
+ * changes the gain saved before a band, however it ends (TunerController.noteTuneKept).
  */
 export interface TuneWriteRun {
 	keepsSavedGain: boolean
-	savedGainUsed: boolean
 }
 
 /**
@@ -643,6 +641,11 @@ export class TunerController extends EventEmitter {
 		new Map()
 	/** Sources whose band gain write is in flight (its own gain writes keep the saved gain). */
 	private applyingBandGain: Set<string> = new Set()
+	/**
+	 * Sources whose saved gain is older than a gain a kept temporary tune set (noteTuneKept). In
+	 * memory only, as the record on disk stays untouched: a restart makes the record live again.
+	 */
+	private keptGainOverSaved: Set<string> = new Set()
 	/** The saveOperatorGain call that wrote each saved gain (a drop or newer save replaces it). */
 	private savedRecords: Map<string, { value: SavedOperatorGain | null }> =
 		new Map()
@@ -820,6 +823,7 @@ export class TunerController extends EventEmitter {
 	): Promise<"saved" | "failed" | "superseded"> {
 		const record = { value: saved }
 		const choices = this.gainChoiceCount(sourceId)
+		this.keptGainOverSaved.delete(sourceId)
 		this.operatorGainBeforeBand.set(sourceId, saved)
 		this.savedRecords.set(sourceId, record)
 		const durable =
@@ -848,6 +852,7 @@ export class TunerController extends EventEmitter {
 	}
 
 	private dropOperatorGain(sourceId: string): void {
+		this.keptGainOverSaved.delete(sourceId)
 		this.savedRecords.delete(sourceId)
 		if (!this.operatorGainBeforeBand.delete(sourceId)) return
 		void this.bandGain?.saveOperatorGains(this.operatorGainBeforeBand)
@@ -870,8 +875,19 @@ export class TunerController extends EventEmitter {
 		const state = this.tunerStates.get(sourceId)
 		if (!state || state.controlMode !== "internal") return
 		const target = this.bandGainFor(sourceId, hz)
+		// The next tune that stays retires a record older than the gain a kept tune set: it never
+		// goes on over that gain, and entering a band saves that gain instead.
+		if (
+			this.keptGainOverSaved.has(sourceId) &&
+			opts.run?.keepsSavedGain !== true
+		)
+			this.dropOperatorGain(sourceId)
 		const saved = this.operatorGainBeforeBand.get(sourceId)
-		if (target === null && saved === undefined) return
+		if (
+			target === null &&
+			(saved === undefined || this.keptGainOverSaved.has(sourceId))
+		)
+			return
 		this.applyingBandGain.add(sourceId)
 		try {
 			if (target !== null) {
@@ -1010,10 +1026,9 @@ export class TunerController extends EventEmitter {
 			this.useSavedGain(sourceId, opts)
 	}
 
-	/** An operator tune uses the saved gain up; a temporary one only says it would have. */
+	/** An operator tune uses the saved gain up; a temporary one leaves it. */
 	private useSavedGain(sourceId: string, opts: TunerWriteOptions): void {
-		if (opts.run?.keepsSavedGain === true) opts.run.savedGainUsed = true
-		else this.dropOperatorGain(sourceId)
+		if (opts.run?.keepsSavedGain !== true) this.dropOperatorGain(sourceId)
 	}
 
 	private readonly log: Logger
@@ -1029,8 +1044,8 @@ export class TunerController extends EventEmitter {
 	 * source. A reconnect frame equal to it moves nothing, so it leaves `lastChange` alone.
 	 */
 	private readonly frameValues = new Map<string, Map<string, number>>()
-	/** The tune whose rate policy hook is running: that hook's write belongs to it. */
-	private readonly retuneHookRun = new AsyncLocalStorage<TuneWriteRun>()
+	/** The write options of the tune whose rate policy hook is running: its frames are the tune's. */
+	private readonly retuneHookTune = new AsyncLocalStorage<TunerWriteOptions>()
 	/**
 	 * Frames that went out per source and state field, whoever wrote them: at most one counter per
 	 * closed field per source, gone with the source (removeSource).
@@ -1184,6 +1199,7 @@ export class TunerController extends EventEmitter {
 
 	removeSource(sourceId: string): void {
 		// The saved pre-band gain stays (as on disk): a reconnect still restores it on leaving a band.
+		this.keptGainOverSaved.delete(sourceId)
 		this.appliedBandGain.delete(sourceId)
 		// WG11: configured tuning belongs to the removed source's config; a source
 		// re-added under the same id brings its own (resolved on `connected`).
@@ -2197,7 +2213,7 @@ export class TunerController extends EventEmitter {
 				const hook = this.beforeOperatorRetune
 				if (hook !== null) {
 					await (opts.run
-						? this.retuneHookRun.run(opts.run, () =>
+						? this.retuneHookTune.run(opts, () =>
 								hook(sourceId, frequency, opts),
 							)
 						: hook(sourceId, frequency, opts))
@@ -2286,11 +2302,13 @@ export class TunerController extends EventEmitter {
 	}
 
 	/**
-	 * A temporary tune is not going back and used the saved gain: it stays as any operator tune
-	 * stays, so the saved gain goes as it would have gone.
+	 * A temporary tune that set a gain or gain mode is not going back. The saved gain stays exactly
+	 * as it was, on disk too, but it is now older than the gain on the tuner, so it is never written
+	 * over it: the next operator retune retires it instead (applyOperatorBandGain).
 	 */
 	noteTuneKept(sourceId: string): void {
-		this.dropOperatorGain(sourceId)
+		if (this.operatorGainBeforeBand.has(sourceId))
+			this.keptGainOverSaved.add(sourceId)
 	}
 
 	/** The tune behind the current `lastChange`, if a tune wrote it. */
@@ -3289,7 +3307,11 @@ export class TunerController extends EventEmitter {
 		opts: TunerWriteOptions = {},
 	): Promise<void> {
 		this.sourceManager.assertTunerCommandActive()
-		opts.beforeWrite?.()
+		const hookTune =
+			opts.origin === "decoder-rate"
+				? this.retuneHookTune.getStore()
+				: undefined
+		;(opts.beforeWrite ?? hookTune?.beforeWrite)?.()
 		try {
 			this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
 			this.noteFieldWrite(sourceId, stateFieldOf(cmd))
@@ -3312,10 +3334,7 @@ export class TunerController extends EventEmitter {
 					cmdName,
 					value,
 					changeOf(opts),
-					opts.run ??
-						(opts.origin === "decoder-rate"
-							? this.retuneHookRun.getStore()
-							: undefined),
+					opts.run ?? hookTune?.run,
 				)
 			this.emit("command-sent", sourceId, cmdName, value, opts.origin)
 			this.log.debug(

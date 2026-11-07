@@ -1865,10 +1865,10 @@ IQ on its current connection, after any reconnect restore. As with every tuner r
 | ------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 503    | `TUNER_NOT_USABLE`            | The source was not usable within 18 s (or its feed is paused, which answers at once). `sourceVerdict` says why. `applied` can be non-empty: those settings were written and return with the source. `inFlight: true`: one was being written at the deadline and may still land |
 | 503    | `TUNER_TUNE_PARTIAL`          | The source is usable but shows other values, as after a `tuner.reconnectPolicy: reset` reconnect discards what was written                                                                                                                                                     |
-| 409    | `TUNER_TUNE_OVERRIDDEN`       | Another write changed the tuner after this tune, and it stands. `state.lastChange` says who. No `Retry-After`: tuning again would overwrite that choice, so decide first                                                                                                       |
+| 409    | `TUNER_TUNE_OVERRIDDEN`       | Another write changed the tuner during or after this tune, and it stands. The tune sends no further frame after it, temporary or not; `applied` says what stands. `state.lastChange` says who. No `Retry-After`: tuning again would overwrite that choice, so decide first     |
 | 503    | `SOURCE_DISCONNECTED`         | The source dropped during the writes; `applied` stops where it did                                                                                                                                                                                                             |
 | 409    | `TUNER_CONTROL_EXTERNAL`      | An external client has the tuner                                                                                                                                                                                                                                               |
-| 409    | `TUNER_LEASE_HELD`            | A scanner job holds the tuner's lease and the body has no `preempt: true`. `jobId` and `jobName` name it; nothing was written. See [tune and a scanner job](#tune-and-a-scanner-job)                                                                                           |
+| 409    | `TUNER_LEASE_HELD`            | A scanner job holds the tuner's lease and the body has no `preempt: true`. `jobId` and `jobName` name it; nothing more was written, and `applied` says what stands. See [tune and a scanner job](#tune-and-a-scanner-job)                                                      |
 | 409    | `TUNER_TUNE_BUSY`             | One tune per source: another is running, or `restoreAfterS` while a restore is putting tuning back. It is not queued; retry when it answers. A tune without `restoreAfterS` during a restore ends the restore and queues behind it                                             |
 | 409    | `TUNER_RESTORE_PRIOR_UNKNOWN` | `restoreAfterS` with a setting whose prior value the core does not know (see `unknownFields`): nothing is written. Set it first, or tune without a restore                                                                                                                     |
 | 404    | `TUNER_SOURCE_NOT_FOUND`      | No tuner for this source                                                                                                                                                                                                                                                       |
@@ -1887,14 +1887,16 @@ how it ended.
 
 A tune never takes the tuner from a scan silently. While a scanner job holds the tuner's lease, or a
 lease cannot be read, the tune answers 409 `TUNER_LEASE_HELD` with `jobId` and `jobName` and writes
-nothing. This is checked on arrival and again when the tune's turn in the command queue comes. To go
+nothing. This is checked on arrival, when the tune's turn in the command queue comes, and before each
+frame. A lease that arrives between frames stops the tune there: what already went out stands, `applied`
+and `notApplied` say which, and with `restoreAfterS` no restore comes (reason `scanner-lease`). To go
 ahead, send `preempt: true`, wait for the job to end, or cancel it (`POST /api/scanner/jobs/:id/cancel`;
 pausing a job keeps its lease). The separate routes below and the web app do not ask: they preempt as
 they always have.
 
-With `preempt: true` and a lease held, the first frame takes the lease (`preempted-operator`), and the
-answer carries `preempted`, which `lastTune` repeats. A tune that finds every value in place sends no
-frame, so it preempts nothing and has no `preempted`.
+With `preempt: true` and a lease held, the next frame takes the lease (`preempted-operator`), and the
+answer carries `preempted`, which `lastTune` repeats. A lease that arrived during the tune is taken and
+reported the same way. A tune with no frame left to send preempts nothing and has no `preempted`.
 
 | `preempted` field | Content                                                                                                                                                   |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1944,6 +1946,11 @@ those moments, with no hop, moved nothing and does not cancel it. A pending rest
 A write that lands while a restore is writing wins too: the restore sends nothing more, and neither
 the state nor a reconnect's replay ever shows the value the restore had just sent.
 
+So does a write that lands while the tune itself runs, temporary or not. A relay client, another REST
+write or the control going external stops the tune's remaining frames. It answers 409
+`TUNER_TUNE_OVERRIDDEN` with no `Retry-After`, and `applied` says what stands. A write that finished
+ahead of the tune's turn in the queue is older than the tune and stops nothing.
+
 `restore` in `GET /api/tuner` shows the source's one restore, the pending one or how the last one
 ended, until the next temporary tune or the source's removal:
 
@@ -1962,17 +1969,25 @@ The restore's writes read `actor: restore`, `reason: tune-restore` in `lastChang
 tuner state; with no restore pending it is 404 `TUNER_RESTORE_NOT_PENDING`.
 
 A temporary tune leaves the gain saved before a band ([per-band gain](CORE-REFERENCE.md#per-band-gain),
-`applyToMyTuning`) as it was, on disk too: when the restore has run, leaving the band gives your gain
-back as if the tune had never been. If it goes back to where no gain was saved, what the tune itself
-saved on entering a band goes. If the restore never runs, it depends on why:
+`applyToMyTuning`) exactly as it was, on disk too, however it ends: restored, cancelled (`DELETE`, a
+later write, a scanner lease), `preempt: true`, failed, shutdown or the source's removal. When the
+restore has run, leaving the band gives your gain back as if the tune had never been. If the tune went
+back to where no gain was saved, what it saved itself on entering a band goes. If the restore never
+ran, a gain it saved on entering a band is kept for leaving it.
 
-- **Cancelled** (a later write, `DELETE`, a scanner lease): the tune stays, as an operator tune stays. A
-  saved gain it would have used up (by leaving the band, or with its own `gain`) is gone, and one it
-  saved on entering a band is kept for leaving it.
-- **Failed:** the saved gain stays, so a later retune out of the band can still give it back.
-- **Shutdown or the source's removal:** the saved gain stays as it was on disk, including one the tune
-  saved on entering a band.
-- **`preempt: true` under a lease:** no restore was ever armed, so it counts as any operator tune.
+What a later operator retune does with the record, when the restore never ran:
+
+- **The tune set no gain or gain mode:** the record is still yours. A retune that ends outside the bands
+  writes it and clears it, as any exit from a band does, even if the temporary tune had already left the
+  band. A retune back into a band keeps it for the next exit.
+- **The tune set a gain or gain mode and was not put back:** that gain is newer and it stays. The next
+  retune never writes the older record over it: the record is cleared with no gain write, and a retune
+  into a band saves the current gain in its place. A failed restore does not count here: it was meant
+  to go back, so the record still stands. The core remembers this in memory only, so after a restart the
+  record on disk is live again, and the next exit from a band writes it.
+
+Your own gain, gain mode or gain index write replaces the saved gain whatever the restore is doing, as
+it always does: it is the newest gain, and the saved one must not come back over it.
 
 A new temporary tune during a pending one keeps the original snapshot and takes the new time: the
 tuner goes back to where it was before the first. If the new tune writes nothing, the pending restore
