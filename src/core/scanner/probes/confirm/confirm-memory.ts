@@ -15,6 +15,9 @@
  * - Acceptance is kept per scope too (isAccepted / markAccepted): an identity accepted on one
  *   discovery is never accepted on another through the same decoder. At most
  *   CONFIRM_MAX_ENTRIES accepted entries, least recently used evicted first.
+ * - An accepted entry keeps its last occurrence (acceptedAgeMs): markAccepted sets it and each clean
+ *   occurrence refreshes it (touchAccepted). This never changes acceptance, which does not age. It
+ *   is for a caller that must not read a match from long ago as a match now (identify's verdict).
  * - Content-aware ambient callers use pairMessage: two distinct payloads also need the separation guard;
  *   identical payloads never pair. Other callers keep pair() and its separation guard.
  * - Invalid scope, key, value or clock reading: no pairing (the safe answer).
@@ -47,8 +50,8 @@ export class ConfirmMemory {
 	/** Entry id → time recorded, least recently recorded first. */
 	private readonly messages = new Map<string, { at: number; message: string }>()
 	private readonly seen = new Map<string, number>()
-	/** Accepted entry ids, least recently used first. */
-	private readonly accepted = new Set<string>()
+	/** Accepted entry id → its last occurrence, least recently used first. */
+	private readonly accepted = new Map<string, number>()
 
 	constructor(private readonly now: () => number) {}
 
@@ -133,9 +136,10 @@ export class ConfirmMemory {
 	isAccepted(scope: string, key: string, value: string): boolean {
 		if (!validPart(scope) || !validPart(key) || !validPart(value)) return false
 		const id = `${scope}\u0000${key}\u0000${value}`
-		if (!this.accepted.has(id)) return false
+		const at = this.accepted.get(id)
+		if (at === undefined) return false
 		this.accepted.delete(id)
-		this.accepted.add(id)
+		this.accepted.set(id, at)
 		return true
 	}
 
@@ -143,12 +147,33 @@ export class ConfirmMemory {
 		if (!validPart(scope) || !validPart(key) || !validPart(value)) return
 		const id = `${scope}\u0000${key}\u0000${value}`
 		this.accepted.delete(id)
-		this.accepted.add(id)
+		this.accepted.set(id, this.clock())
 		while (this.accepted.size > CONFIRM_MAX_ENTRIES) {
-			const oldest = this.accepted.values().next()
+			const oldest = this.accepted.keys().next()
 			if (oldest.done === true) break
 			this.accepted.delete(oldest.value)
 		}
+	}
+
+	/**
+	 * How long ago an accepted value last occurred, or null when it is not accepted. An unreadable
+	 * clock on either side is an unknown age: Infinity, older than any window (the safe answer).
+	 */
+	acceptedAgeMs(scope: string, key: string, value: string): number | null {
+		if (!validPart(scope) || !validPart(key) || !validPart(value)) return null
+		const at = this.accepted.get(`${scope}\u0000${key}\u0000${value}`)
+		if (at === undefined) return null
+		const age = this.clock() - at
+		return Number.isFinite(age) ? age : Number.POSITIVE_INFINITY
+	}
+
+	/** A clean occurrence of an accepted value: read acceptedAgeMs first, this restarts it. */
+	touchAccepted(scope: string, key: string, value: string): void {
+		if (!validPart(scope) || !validPart(key) || !validPart(value)) return
+		const id = `${scope}\u0000${key}\u0000${value}`
+		if (!this.accepted.has(id)) return
+		this.accepted.delete(id)
+		this.accepted.set(id, this.clock())
 	}
 
 	get acceptedSize(): number {
@@ -159,6 +184,15 @@ export class ConfirmMemory {
 		this.messages.clear()
 		this.seen.clear()
 		this.accepted.clear()
+	}
+
+	/** The clock, or NaN when it cannot be read. */
+	private clock(): number {
+		try {
+			return this.now()
+		} catch {
+			return Number.NaN
+		}
 	}
 
 	/** Drops entries older than the window, oldest first (insertion order is recording order). */

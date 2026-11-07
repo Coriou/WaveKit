@@ -624,7 +624,9 @@ Static, and under the same read admission as `GET /api`.
 			"cancelled",
 			"interrupted",
 			"artefact",
-			"unknown"
+			"unknown",
+			"no-samples",
+			"signal-nearby"
 		],
 		"passiveReasons": [
 			"passive-cost",
@@ -4897,11 +4899,13 @@ With a first decode at the end of the hold, a DMR run lasts at most
 1800 + 400 + 3080 = 5280 ms at the default 400 ms start latency.
 
 A point request that a running job already answers returns that job with **200**
-instead of **201**, and starts no second probe. It joins when it has the same source;
-its frequency is within the running job's `max(1 kHz, bw/2)`; its `protocols` are
-contained in the running job's; and it asks no more than that job does (`exhaustive`,
-`record`, a longer `timeoutMs`, a wait the job does not have); and the job's remaining
-wait covers at least 90 % of what the request asks (`IDENTIFY_JOIN_COVERED_FRACTION`).
+instead of **201**, and starts no second probe. It joins when it asks the same question:
+the same source, the same `frequencyHz` and the same `max(1 kHz, bw/2)`. An offset or
+narrower request gets its own job, since a job resolves the nearest track within its own
+tolerance and that may be another signal. Its `protocols` must be contained in the running
+job's; it must ask no more than that job does (`exhaustive`, `record`, a longer `timeoutMs`,
+a wait the job does not have), and a plain request does not join a `waitUntilSignal` job,
+which can take up to 10 min and end `no-signal`; and the job's remaining wait covers at least 90 % of what the request asks (`IDENTIFY_JOIN_COVERED_FRACTION`).
 At the default 15 s, a repeat joins for the first 1.5 s, so a client retry starts nothing
 and still gets at least 13.5 s of listening; a job that has its signal and is running
 trials joins at any time, unless a gated timeout will cut them first. A later request is a new job with
@@ -4995,9 +4999,11 @@ given, or a bound is broken:
 
 409 `OUT_OF_WINDOW` with `details.window` and `details.next`, the call that fixes it.
 The room is the usable half span minus half the target's `bandwidthHz`. The suggested
-centre is half the room from the target, at most 100 kHz; when that would land inside
+centre is half the room below the target, at most 100 kHz (above it when below would pass the
+tuner's lower limit of 24 MHz); when that would land inside
 the 12.5 kHz DC exclusion it is the middle of what is left past it. So the target stays inside
-the window and off the DC spike. With under 12 501 Hz of room no centre fits, and `next`
+the window and off the DC spike. With under 12 501 Hz of room, or a target outside the tuner's
+24 to 1900 MHz, no centre fits, and `next`
 holds only `effect`, saying so, with no call to make:
 
 ```json
@@ -5025,6 +5031,15 @@ holds only `effect`, saying so, with no call to make:
 `SCANNER_SOURCE_BUSY` for a relay client (`details.reason: "relay"`) has no `next`:
 no call takes the tuner from it.
 
+409 `SCANNER_IDENTIFY_BUSY` when a new request finds 8 identify jobs alive on the source
+(`IDENTIFY_MAX_ALIVE_JOBS`); a request that joins one does not count. `details.next` holds
+`effect` and `jobs` (`id`, `path`), the jobs to wait for or cancel. It is 409 and not 429
+because this is a state of the source that ends when a job does, not a request rate, and a
+client retrying on 429 would only add requests. The probe slot takes one run at a time and a
+run queues for at most 3 s, so 8 runs of at most 5.28 s (42 s) are already far past what the
+slot can answer, and each new job preempts scan and passive probes again. Jobs waiting on a
+gate hold no slot, so 8 still leaves room for several of them.
+
 Each final target carries `verdict`, the answer in one closed code. The lists are
 `scanner.identifyVerdictCodes` and `scanner.identifyVerdictWhy` in `GET /api/enums`:
 
@@ -5033,19 +5048,35 @@ Each final target carries `verdict`, the answer in one closed code. The lists ar
 | `decoded`                   | A confirmed identity that met acceptance. `protocol` is what it is, which may not be what you named |
 | `heard-digital-unconfirmed` | A lone sync, one decode, or an identity capped by a leak flag. Never `decoded`                      |
 | `undecodable`               | A signal is there and every plausible trial ran and found nothing                                   |
-| `nothing`                   | No signal                                                                                           |
+| `nothing`                   | No signal, with the proof below                                                                     |
 | `could-not-test`            | See `verdict.why`                                                                                   |
 
 `verdict.why`, only on `could-not-test`: `budget`, `unsupported-protocol`,
 `unsupported-format`, `decoders-unavailable`, `no-live-audio`, `window-moved`,
-`source-lost`, `cancelled`, `interrupted` (a trial was cut short), `artefact`, `unknown`.
+`source-lost`, `cancelled`, `interrupted` (a trial was cut short), `artefact`, `unknown`,
+`no-samples`, `signal-nearby`.
+
+`nothing` needs proof of all three, fixed when the target ends. IQ blocks of the current epoch
+kept arriving: their end sample advanced since the job began, with no gap and no newest block
+older than 10 block times (500 ms at the default 50 ms). `measurements.snrDb` is not null and is
+below the block's `thresholdDb`. No live track, other than a spur or an IQ image, is within
+12 500 Hz of the target. Without the first two it is `no-samples`: a source can stay connected
+at rate 0 with no source-down, as with a dongle pulled behind `rtl_tcp`. A level at or above the
+threshold or a track close by is `signal-nearby`, with its centre in `result.nearbyHz`: ask again
+with `bandwidthHz`, or at that frequency.
+
 One plausible trial that did not run withholds `undecodable`. Analog voice with no tone
-is `undecodable`, with `result.analog` beside it; a standard tone on a trusted frequency is
+is `undecodable`, with `result.analog` beside it and `verdict.analogHeard: true`, also set beside
+`heard-digital-unconfirmed`, where a lone sync over voice is usually the voice; a standard tone on a trusted frequency is
 `decoded` with the analog protocol. `verdict.protocol` is what was decoded or heard,
 otherwise the one protocol the request named. `verdict.confirmedAcrossJobs: true`, only on
 `decoded` from a live dsd-fme probe run, says this job heard one burst and the match came first:
-a matching decode within the last 5 min on this signal, or an identity already accepted on it.
-Older cores send no `verdict`. The job is listed,
+a matching decode, or the last clean occurrence of an identity already accepted on this signal,
+2 s to 5 min earlier (`CONFIRM_WINDOW_MS`). An older one does not count, though the discovery store
+keeps its acceptance: a DMR colour code has 16 values, so one false line matches an accepted value
+by luck 1 time in 16, and with no limit on age a channel that carried DMR last month would read
+`decoded` for that line for good. The job then needs its own pair (the run is kept 3080 ms for it),
+or answers `heard-digital-unconfirmed`. Older cores send no `verdict`. The job is listed,
 cancellable and deletable once ended, but `pause`/`resume` answer 409
 `SCANNER_IDENTIFY_NOT_PAUSABLE` and `PATCH` 409
 `SCANNER_IDENTIFY_NOT_EDITABLE`. Identify jobs are not kept across a core
@@ -5058,8 +5089,8 @@ earlier) or `unidentified`, with `result`: `protocol?`, `confidence`,
 (`source: "track" | "spectrum"`, `centreHz`, `obwHz`, `peakDbfs`, `snrDb`,
 `floorDbfs`, `dutyCycle`, `acf30?`, `acf60?`, `class`), `artefact?` (`dc`,
 `spur`, `image` at once with no trial; `rfi` only after the wait found no
-signal) and `ended?: "window-moved"` (the window moved off the target; open
-trials are `cancelled`).
+signal), `ended?: "window-moved"` (the window moved off the target; open
+trials are `cancelled`) and `nearbyHz?` (see `signal-nearby` above).
 
 **Ambient identify.** `ais`, `acars`, `vdl2` and `lora` have no probe
 decoder: identify names them from a decoder that already runs there
@@ -8555,6 +8586,7 @@ Scanner and spectrum routes answer with the flat body
 | `SCANNER_DISCOVERY_LOCKED_OUT`  | 409  | `listen` on a locked-out discovery                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `OUT_OF_WINDOW`                 | 409  | `listen` or `identify` outside the tuned window; identify adds `details.window {startHz, endHz}`; listen adds `details` with `liveSourceId`/`sourceId`, `offsetHz`/`usableHalfSpanHz` or `offsetHz` (see listen)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `LIVE_AUDIO_UNAVAILABLE`        | 409  | `listen` without live audio                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `SCANNER_IDENTIFY_BUSY`         | 409  | 8 identify jobs are alive on the source; `details.next` names them                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `SCANNER_IDENTIFY_NOT_PAUSABLE` | 409  | `pause` / `resume` on an identify job                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `SCANNER_IDENTIFY_NOT_EDITABLE` | 409  | `PATCH` on an identify job                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `SCANNER_SETTINGS_WRITE_FAILED` | 500  | `settings.json` could not be written; nothing changed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |

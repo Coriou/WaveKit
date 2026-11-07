@@ -173,7 +173,7 @@ describe("identifyTargetVerdict", () => {
 		).toEqual({ code: "decoded", protocol: "p25p1" })
 	})
 
-	it("a decode anchor and an analog tone are decoded; analog voice alone is not", () => {
+	it("a decode anchor and an analog tone are decoded; analog voice alone is not, and says it heard voice", () => {
 		expect(
 			identifyTargetVerdict(
 				input({
@@ -215,7 +215,26 @@ describe("identifyTargetVerdict", () => {
 					],
 				}),
 			),
-		).toEqual({ code: "undecodable" })
+		).toEqual({ code: "undecodable", analogHeard: true })
+	})
+
+	it("a lone sync over analog voice stays heard-digital-unconfirmed, and says voice was heard", () => {
+		const voice = trialOf("heard", {
+			protocol: "analog-fm",
+			decoder: "live-audio",
+		})
+		expect(
+			identifyTargetVerdict(input({ heard: "dmr", trials: [voice] })),
+		).toEqual({
+			code: "heard-digital-unconfirmed",
+			protocol: "dmr",
+			analogHeard: true,
+		})
+		expect(
+			identifyTargetVerdict(
+				input({ heard: "dmr", trials: [trialOf("no-sync")] }),
+			),
+		).toEqual({ code: "heard-digital-unconfirmed", protocol: "dmr" })
 	})
 
 	it("a lone sync on another protocol than the one named is heard, not undecodable", () => {
@@ -246,18 +265,90 @@ describe("identifyTargetVerdict", () => {
 		).toEqual({ code: "undecodable" })
 	})
 
-	it("no signal is nothing; a track with no trial could not be tested", () => {
-		expect(
-			identifyTargetVerdict(input({ result: resultOf({}, "spectrum") })),
-		).toEqual({ code: "nothing" })
-		expect(
-			identifyTargetVerdict(
-				input({
-					requested: ["dmr"],
-					result: resultOf({ ended: "no-signal" }, "spectrum"),
-				}),
-			),
-		).toEqual({ code: "nothing", protocol: "dmr" })
+	describe("nothing needs evidence of nothing", () => {
+		const measured = (
+			snrDb: number | null,
+			over: Partial<ScannerIdentifyResult> = {},
+		): ScannerIdentifyResult => {
+			const r = resultOf(over, "spectrum")
+			return { ...r, measurements: { ...r.measurements, snrDb } }
+		}
+		const proof = { iqFresh: true, thresholdDb: 6 }
+
+		it("fresh blocks, a level below the threshold and no track near: nothing", () => {
+			expect(
+				identifyTargetVerdict(input({ result: measured(5.9), absence: proof })),
+			).toEqual({ code: "nothing" })
+			expect(
+				identifyTargetVerdict(
+					input({
+						requested: ["dmr"],
+						result: measured(0, { ended: "no-signal" }),
+						absence: proof,
+					}),
+				),
+			).toEqual({ code: "nothing", protocol: "dmr" })
+		})
+
+		it.each([
+			["no proof at all", measured(0), undefined],
+			["blocks that stopped", measured(0), { ...proof, iqFresh: false }],
+			["no measurement", measured(null), proof],
+			["no block threshold", measured(0), { ...proof, thresholdDb: null }],
+			[
+				"no-signal with blocks that stopped",
+				measured(0, { ended: "no-signal" }),
+				{ ...proof, iqFresh: false },
+			],
+		])("%s: no-samples", (_name, result, absence) => {
+			expect(
+				identifyTargetVerdict(
+					input({
+						requested: ["dmr"],
+						result,
+						...(absence ? { absence } : {}),
+					}),
+				),
+			).toEqual({
+				code: "could-not-test",
+				why: "no-samples",
+				protocol: "dmr",
+			})
+		})
+
+		it("a level at the threshold, or a track near, is signal-nearby", () => {
+			const nearby = { code: "could-not-test", why: "signal-nearby" }
+			expect(
+				identifyTargetVerdict(input({ result: measured(6), absence: proof })),
+			).toEqual(nearby)
+			expect(
+				identifyTargetVerdict(
+					input({
+						result: measured(0, { nearbyHz: 446_101_500 }),
+						absence: proof,
+					}),
+				),
+			).toEqual(nearby)
+		})
+
+		it("blocks that stopped outrank a stale level: the block measured no signal now", () => {
+			expect(
+				identifyTargetVerdict(
+					input({
+						result: measured(30, { nearbyHz: 1 }),
+						absence: { ...proof, iqFresh: false },
+					}),
+				).why,
+			).toBe("no-samples")
+		})
+
+		it("both new reasons are on the closed list", () => {
+			expect(SCANNER_IDENTIFY_VERDICT_WHY).toContain("no-samples")
+			expect(SCANNER_IDENTIFY_VERDICT_WHY).toContain("signal-nearby")
+		})
+	})
+
+	it("a track with no trial could not be tested", () => {
 		expect(identifyTargetVerdict(input())).toEqual({
 			code: "could-not-test",
 			why: "unsupported-protocol",
@@ -427,36 +518,31 @@ describe("identifyRequestJoins", () => {
 		})
 	const waiting = [{ state: "waiting-for-signal", trials: [] }] as const
 
-	it("the tolerance is max(1 kHz, bw/2): at it joins, past it does not", () => {
-		expect(
-			identifyRequestJoins(
-				request(),
-				waiting,
-				request({ target: { frequencyHz: HZ + 1000 } }),
-			),
-		).toBe(true)
-		expect(
-			identifyRequestJoins(
-				request(),
-				waiting,
-				request({ target: { frequencyHz: HZ + 1001 } }),
-			),
-		).toBe(false)
-		const wide = request({ target: { frequencyHz: HZ, bandwidthHz: 12_500 } })
-		expect(
-			identifyRequestJoins(
-				wide,
-				waiting,
-				request({ target: { frequencyHz: HZ + 6250 } }),
-			),
-		).toBe(true)
-		expect(
-			identifyRequestJoins(
-				wide,
-				waiting,
-				request({ target: { frequencyHz: HZ + 6251 } }),
-			),
-		).toBe(false)
+	it("joins only the same question: the same frequency and the same tolerance", () => {
+		expect(identifyRequestJoins(request(), waiting, request())).toBe(true)
+		const at = (frequencyHz: number, bandwidthHz?: number) =>
+			request({
+				target: {
+					frequencyHz,
+					...(bandwidthHz !== undefined ? { bandwidthHz } : {}),
+				},
+			})
+		const wide = at(HZ, 12_500)
+		expect(identifyRequestJoins(wide, waiting, at(HZ, 12_500))).toBe(true)
+		// bw/2 under 1 kHz: the same tolerance as no bandwidth at all.
+		expect(identifyRequestJoins(request(), waiting, at(HZ, 2000))).toBe(true)
+		for (const offsetHz of [1, 900, 1000, 6000, 6250]) {
+			expect(identifyRequestJoins(request(), waiting, at(HZ + offsetHz))).toBe(
+				false,
+			)
+			expect(
+				identifyRequestJoins(wide, waiting, at(HZ - offsetHz, 12_500)),
+			).toBe(false)
+		}
+		// Narrower: the job could resolve a track outside this request's tolerance.
+		expect(identifyRequestJoins(wide, waiting, at(HZ))).toBe(false)
+		// Wider: it reaches tracks the job would not resolve.
+		expect(identifyRequestJoins(request(), waiting, wide)).toBe(false)
 	})
 
 	it("needs the protocols contained in the running job's", () => {
@@ -510,7 +596,13 @@ describe("identifyRequestJoins", () => {
 			),
 		).toBe(false)
 		const gated = request({ waitUntilSignal: true, waitMs: 5000 })
-		expect(identifyRequestJoins(gated, waiting, request())).toBe(true)
+		expect(
+			identifyRequestJoins(
+				gated,
+				waiting,
+				request({ waitUntilSignal: true, waitMs: 5000 }),
+			),
+		).toBe(true)
 		expect(
 			identifyRequestJoins(
 				gated,
@@ -518,6 +610,11 @@ describe("identifyRequestJoins", () => {
 				request({ waitUntilSignal: true, waitMs: 5001 }),
 			),
 		).toBe(false)
+	})
+
+	it("a plain request does not inherit a job blocked on a gate", () => {
+		const gated = request({ waitUntilSignal: true, waitMs: 5000 })
+		expect(identifyRequestJoins(gated, waiting, request())).toBe(false)
 	})
 })
 

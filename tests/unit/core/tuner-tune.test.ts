@@ -23,6 +23,7 @@ import {
 	BandGainSettingsService,
 	type BandGainFs,
 } from "../../../src/core/band-gain.js"
+import { identifyTargetNextStep } from "../../../src/core/scanner/identify.js"
 import { TunerArbiter } from "../../../src/core/scanner/tuner-arbiter.js"
 import {
 	SourceManager,
@@ -2939,4 +2940,36 @@ describe("POST /tune through the real ApiServer", () => {
 		const free = await tune({ frequencyHz: OTHER_HZ })
 		expect(free.json().restore.cancelledBy.job.jobName).toBe("Night sweep")
 	})
+})
+
+describe("identify's details.next through this route", () => {
+	const window = { sampleRateHz: START_RATE }
+
+	it.each([
+		["the lower edge", 24_000_000],
+		["just above the lower edge", 24_050_000],
+		["mid band", 101_000_000],
+		["high in the band", 1_766_000_000],
+		["the top edge", 1_900_000_000],
+	])("%s: the call it names is accepted", async (_name, frequencyHz) => {
+		const h = await setup()
+		const next = identifyTargetNextStep(
+			"rtl",
+			{ frequencyHz },
+			window,
+			false,
+		) as { path: string; body: { frequencyHz: number } }
+		expect(next.path).toBe("/api/tuner/rtl/tune")
+		const res = await h.post(next.body)
+		expect(res.statusCode, res.body).toBe(200)
+	})
+
+	it.each([150_000, 23_999_999, 1_900_000_001])(
+		"%i Hz is outside the tuner: it names no call",
+		frequencyHz => {
+			expect(
+				identifyTargetNextStep("rtl", { frequencyHz }, window, false),
+			).not.toHaveProperty("method")
+		},
+	)
 })

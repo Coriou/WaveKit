@@ -6,6 +6,7 @@
 import {
 	SCANNER_TRIAL_OUTCOMES,
 	type ScannerIdentifyEventData,
+	type ScannerIdentifyResult,
 	type ScannerIdentifyTrial,
 	type ScannerIdentifyVerdict,
 	type ScannerIdentifyVerdictWhy,
@@ -27,6 +28,16 @@ export interface IdentifyVerdictInput {
 	stopped: IdentifyStopCause | null
 	/** The decode that gave the identity pairs with a match from before this job. */
 	confirmedAcrossJobs?: boolean
+	/** What the job knew when the target ended, for saying nothing is there; absent: no proof. */
+	absence?: IdentifyAbsenceProof
+}
+
+/** What `nothing` needs besides the target's own measurement and `result.nearbyHz`. */
+export interface IdentifyAbsenceProof {
+	/** Fresh IQ blocks of the current epoch through the deadline (IdentifyRunner.iqFresh). */
+	iqFresh: boolean
+	/** The block threshold the measurement compares with; null: no block measured. */
+	thresholdDb: number | null
 }
 
 const KNOWN_OUTCOMES: ReadonlySet<ScannerTrialOutcome> = new Set(
@@ -102,11 +113,40 @@ function couldNotTest(
 	}
 }
 
+/**
+ * `nothing` claims an absence, so it needs proof of each part. Blocks that stopped, or no measurement
+ * at the target, are `no-samples`: the receiver may have nothing to give, and a stale block measures
+ * nothing. A live track close by or a level at the block threshold is `signal-nearby`: something is
+ * there that this target's tolerance did not resolve.
+ */
+function nothingOrWhy(
+	v: IdentifyVerdictInput,
+	r: ScannerIdentifyResult,
+): ScannerIdentifyVerdictWhy | null {
+	const snr = r.measurements.snrDb
+	const threshold = v.absence?.thresholdDb ?? null
+	if (v.absence?.iqFresh !== true || snr === null || threshold === null)
+		return "no-samples"
+	return r.nearbyHz !== undefined || snr >= threshold ? "signal-nearby" : null
+}
+
 function mapVerdict(v: IdentifyVerdictInput): ScannerIdentifyVerdict {
 	const { result: r, requested } = v
 	const sole = requested.length === 1 ? requested[0] : undefined
 	const withSole = <T extends ScannerIdentifyVerdict>(x: T): T =>
 		sole !== undefined ? { ...x, protocol: sole } : x
+	const nothing = (result: ScannerIdentifyResult): ScannerIdentifyVerdict => {
+		const why = nothingOrWhy(v, result)
+		return why === null
+			? withSole({ code: "nothing" })
+			: couldNotTest(why, requested)
+	}
+	// Voice at the target beside a lone sync or a run of no-syncs: said apart, for whoever speaks the answer.
+	const voice =
+		r?.analog !== undefined ||
+		v.trials.some(t => ANALOG.has(t.protocol) && t.outcome === "heard")
+	const withVoice = <T extends ScannerIdentifyVerdict>(x: T): T =>
+		voice ? { ...x, analogHeard: true as const } : x
 	if (
 		!r ||
 		!["identified", "candidate", "unidentified"].includes(v.state) ||
@@ -142,16 +182,16 @@ function mapVerdict(v: IdentifyVerdictInput): ScannerIdentifyVerdict {
 	)
 	const heard = capped ?? v.heard ?? lone?.protocol
 	if (heard !== undefined)
-		return { code: "heard-digital-unconfirmed", protocol: heard }
+		return withVoice({ code: "heard-digital-unconfirmed", protocol: heard })
 	if (v.stopped) return couldNotTest(v.stopped, requested)
 	if (r.ended === "window-moved") return couldNotTest("window-moved", requested)
-	if (r.ended === "no-signal") return withSole({ code: "nothing" })
+	if (r.ended === "no-signal") return nothing(r)
 	if (r.decodersUnavailable && r.decodersUnavailable.length > 0)
 		return couldNotTest("decoders-unavailable", requested)
 	// A plan exists only for a resolved track, so an empty one on the spectrum measurement saw no signal.
 	if (v.trials.length === 0)
 		return r.measurements.source === "spectrum"
-			? withSole({ code: "nothing" })
+			? nothing(r)
 			: couldNotTest("unsupported-protocol", requested)
 	// An explicit request is answered for what it named. Otherwise every plausible trial counts, except the analog
 	// trials that have no probe decoder at all: they say nothing about a digital signal.
@@ -168,7 +208,7 @@ function mapVerdict(v: IdentifyVerdictInput): ScannerIdentifyVerdict {
 	const why = WHY_ORDER.find(x => whys.has(x))
 	if (why !== undefined) return couldNotTest(why, requested)
 	if (inScope.some(t => t.outcome !== "not-needed"))
-		return withSole({ code: "undecodable" })
+		return withVoice(withSole({ code: "undecodable" }))
 	return couldNotTest("unknown", requested)
 }
 

@@ -17,11 +17,16 @@ import {
 	CHANNEL_ANCHOR_PROTOCOLS,
 } from "./store/decode-anchor.js"
 import { DQ_DATA_HOLD_MS } from "./data-decode-gate.js"
-import { CONFIRM_MIN_SEPARATION_MS } from "./probes/confirm/confirm-memory.js"
+import {
+	CONFIRM_MIN_SEPARATION_MS,
+	CONFIRM_WINDOW_MS,
+} from "./probes/confirm/confirm-memory.js"
 import { isDsdFmeProtocol } from "./probes/confirm/dsd-fme.js"
 import { DQ_DC_ADMIT_HZ } from "./detection-quality-contract.js"
+import { TUNER_VALUE_BOUNDS } from "../tuner-controller.js"
 import {
 	identifyTargetVerdict,
+	type IdentifyAbsenceProof,
 	type IdentifyStopCause,
 } from "./identify-verdict.js"
 import type {
@@ -150,6 +155,28 @@ export const IDENTIFY_PAIR_WAIT_MS =
  * heard here: `confirmedAcrossJobs`, the stricter thing to say.
  */
 export const IDENTIFY_OWN_DECODES_MAX = 256
+/**
+ * Saying `nothing` needs blocks arriving through the deadline: the newest no older than this many
+ * block times, and no longer gap while the job listened. 10 × 50 ms (the default integration) =
+ * 500 ms, five ticks of the 100 ms service timer, so scheduling jitter does not trip it. A receiver
+ * that stops within the last 500 ms of the default 15 s wait (3.3 % of it) is not seen.
+ */
+export const IDENTIFY_IQ_FRESH_BLOCKS = 10
+/**
+ * A live track this close that did not resolve the target withholds `nothing`: one 12.5 kHz channel.
+ * The default tolerance is 1 kHz and a bin 0.71 to 1.41 kHz at the default FFT size, so a real signal
+ * can sit past the tolerance and still be the one asked about.
+ */
+export const IDENTIFY_NEARBY_HZ = 12_500
+/**
+ * Identify jobs alive per source; the next new one answers 409 (a join starts nothing, so it does not
+ * count). The probe slot takes one run at a time and a run queues for at most 3 s, so jobs past a few
+ * end `skipped-budget` anyway: 8 runs of at most 5.28 s are 42 s of slot, 14 times that queue limit.
+ * Each new request also preempts passive and job probes (priority 101), so without a bound a chatty
+ * client keeps them out indefinitely. 8 still leaves room for 7 jobs waiting up to 600 s on a gate
+ * (they hold no slot) beside one being answered.
+ */
+export const IDENTIFY_MAX_ALIVE_JOBS = 8
 /**
  * A running job answers a new request once it can still listen for this share of what the request
  * asks. A repeat of the default 15 000 ms request joins for its first 1 500 ms (a client retry, or a
@@ -346,11 +373,13 @@ export function toleranceHz(bandwidthHz: number | undefined): number {
 
 /**
  * Whether a new request is already answered by a running point-target job, so a voice assistant
- * asking twice does not start a second probe. The match: the frequency lies within the running
- * job's tolerance, max(1 kHz, bw/2), which is what resolves one track; its protocols are contained
- * in the running job's; and it asks no more than that job does (exhaustive, recording, a longer
- * wait). A running job with no explicit protocols contains a named protocol only once its plan
- * holds a runnable trial for it: "every plausible" need not include it. Any doubt is a new job.
+ * asking twice does not start a second probe. It must be the same question: the same frequency and
+ * the same tolerance. A job resolves the nearest track within its own tolerance, which may lie
+ * outside an offset or narrower request's, so such a request would be told about another signal.
+ * Its protocols are contained in the running job's, and it asks no more than that job does
+ * (exhaustive, recording, a longer wait). A running job with no explicit protocols contains a named
+ * protocol only once its plan holds a runnable trial for it: "every plausible" need not include it.
+ * Any doubt is a new job.
  */
 export function identifyRequestJoins(
 	running: NormalisedIdentify,
@@ -363,15 +392,19 @@ export function identifyRequestJoins(
 	const a = running.target
 	const b = req.target
 	if ("all" in a || "all" in b) return false
-	if (!(Math.abs(a.frequencyHz - b.frequencyHz) <= toleranceHz(a.bandwidthHz)))
+	if (
+		a.frequencyHz !== b.frequencyHz ||
+		toleranceHz(a.bandwidthHz) !== toleranceHz(b.bandwidthHz)
+	)
 		return false
-	// A wider request reaches tracks the running job would not resolve, so it may not inherit
-	// that job's "nothing".
-	if (toleranceHz(b.bandwidthHz) > toleranceHz(a.bandwidthHz)) return false
 	if (targets.some(t => FINAL.has(t.state))) return false
 	if (req.exhaustive && !running.exhaustive) return false
 	if (req.record && !running.record) return false
 	if (req.timeoutMs > running.timeoutMs) return false
+	// A job blocked on a gate can take up to 600 s and may end "no-signal": a plain request would
+	// have tried a live track at once, so it does not inherit that wait or that answer.
+	if (running.waitUntilSignal === true && req.waitUntilSignal !== true)
+		return false
 	if (req.waitUntilSignal === true) {
 		if (running.waitUntilSignal !== true) return false
 		if (
@@ -452,6 +485,19 @@ export function pairPredatesJob(
 	)
 }
 
+/**
+ * Whether an earlier match may stand in for this job's own pair: at least CONFIRM_MIN_SEPARATION_MS
+ * old (closer is one transmission heard twice) and at most CONFIRM_WINDOW_MS. The bound is what stops
+ * "decoded" from resting on the distant past. A DMR colour code has 16 values, so one false verified
+ * line matches an accepted value by luck 1 time in 16 (6.25 %), more often for a common value like CC1.
+ * Acceptance never ages, so with no bound a channel that carried DMR last month would read `decoded`
+ * for 1 in 16 false lines over analog voice, for good. Inside 5 min the earlier decode is recent proof
+ * that this signal was digital, the same bar a pair of decodes has to meet.
+ */
+export function earlierMatchCounts(ageMs: number): boolean {
+	return ageMs >= CONFIRM_MIN_SEPARATION_MS && ageMs <= CONFIRM_WINDOW_MS
+}
+
 /** How far a suggested tune puts the target from the new centre at most. */
 const IDENTIFY_TUNE_OFFSET_HZ = 100_000
 /** The DC exclusion is `offset > DQ_DC_ADMIT_HZ`: the smallest whole Hz past it. */
@@ -465,12 +511,17 @@ const IDENTIFY_TUNE_MIN_OFFSET_HZ = DQ_DC_ADMIT_HZ + 1
  * it is 90 000 Hz, so 45 kHz. When half the room would fall inside the DC exclusion the offset is
  * the middle of what is left: 225 001 Hz and 150 000 Hz leave 15 000.4 Hz of room, so about 13 750 Hz,
  * about 1 250 Hz from either limit. Null when no offset fits: under 12 501 Hz of room.
+ *
+ * The answer is a value the tune route accepts, TUNER_VALUE_BOUNDS.frequency (24 to 1 900 MHz): a
+ * target close above the lower edge is approached from above, and one outside the range has no centre.
  */
 export function identifyTuneCentreHz(
 	targetHz: number,
 	window: { sampleRateHz: number } | null,
 	bandwidthHz = 0,
 ): number | null {
+	const { min, max } = TUNER_VALUE_BOUNDS.frequency
+	if (!tunerReaches(targetHz)) return null
 	const room =
 		(window ? (window.sampleRateHz * USABLE_FRACTION) / 2 : Infinity) -
 		bandwidthHz / 2
@@ -480,7 +531,9 @@ export function identifyTuneCentreHz(
 		half >= IDENTIFY_TUNE_MIN_OFFSET_HZ
 			? half
 			: (IDENTIFY_TUNE_MIN_OFFSET_HZ + room) / 2
-	const centreHz = Math.round(targetHz - offset)
+	const below = Math.round(targetHz - offset)
+	const centreHz = below >= min ? below : Math.round(targetHz + offset)
+	if (centreHz > max) return null
 	// Rounding moves the offset by up to 0.5 Hz: the answer is checked as the service will check it.
 	const fits =
 		Math.abs(targetHz - centreHz) > DQ_DC_ADMIT_HZ &&
@@ -494,10 +547,19 @@ export function identifyTuneCentreHz(
 	return fits ? centreHz : null
 }
 
+function tunerReaches(hz: number): boolean {
+	const { min, max } = TUNER_VALUE_BOUNDS.frequency
+	return hz >= min && hz <= max
+}
+
+const NEXT_OUT_OF_RANGE_EFFECT =
+	"No retune helps: the tuner reaches 24 MHz to 1900 MHz, and this frequency is outside that."
 const NEXT_NO_CENTRE_EFFECT =
 	"No retune helps at this sample rate: the target's bandwidth does not fit the usable window clear of the DC spike. Ask again with a smaller bandwidthHz, or raise the sample rate first."
 const NEXT_TUNE_EFFECT =
 	"Moves the receiver, and anything listening in the old window with it. Then repeat this identify request; the centre suggested keeps the target off the DC spike."
+const NEXT_FULL_EFFECT =
+	"Too many identify jobs are running on this source. Read each one with GET path until it has ended, then ask again; or end one with POST path + /cancel."
 const NEXT_PREEMPT_EFFECT =
 	"preempt: true takes the tuner from the sweep holding it. The job pauses (fails if it was still starting) and no restore comes. It resumes by its own rules: preempted.autoAfterIdleMs in the answer says when, and null means it stays paused until POST /api/scanner/jobs/:id/resume. Then repeat this identify request."
 
@@ -528,9 +590,25 @@ export function identifyTargetNextStep(
 		window,
 		target.bandwidthHz ?? 0,
 	)
-	return centreHz === null
-		? { effect: NEXT_NO_CENTRE_EFFECT }
-		: identifyNextStep(sourceId, centreHz, preempt)
+	if (centreHz !== null) return identifyNextStep(sourceId, centreHz, preempt)
+	return {
+		effect: tunerReaches(target.frequencyHz)
+			? NEXT_NO_CENTRE_EFFECT
+			: NEXT_OUT_OF_RANGE_EFFECT,
+	}
+}
+
+/** `details.next` when the source has IDENTIFY_MAX_ALIVE_JOBS: job ids are generated, the text fixed. */
+export function identifyFullNextStep(
+	jobIds: readonly string[],
+): Record<string, unknown> {
+	return {
+		effect: NEXT_FULL_EFFECT,
+		jobs: jobIds.map(id => ({
+			id,
+			path: `/api/scanner/jobs/${encodeURIComponent(id)}`,
+		})),
+	}
 }
 
 export function inWindow(
@@ -1275,6 +1353,30 @@ export function applyUnavailableMemo(
 	return { trials, skip, used: [...used].sort() }
 }
 
+/** The strongest summary bin within `halfWidthHz` of the target, at least its own width. */
+function strongestBin(
+	summary: BlockSummary,
+	targetHz: number,
+	halfWidthHz: number,
+): { dbfs: number; centreHz: number } | null {
+	const half = Math.max(halfWidthHz, summary.binHz / 2)
+	const lo = Math.max(
+		0,
+		Math.floor((targetHz - half - summary.startHz) / summary.binHz),
+	)
+	const hi = Math.min(
+		summary.bins.length - 1,
+		Math.floor((targetHz + half - summary.startHz) / summary.binHz),
+	)
+	let best: { dbfs: number; centreHz: number } | null = null
+	for (let i = lo; i <= hi; i++) {
+		const b = summary.bins[i]
+		if (b !== undefined && (best === null || b > best.dbfs))
+			best = { dbfs: b, centreHz: summary.startHz + (i + 0.5) * summary.binHz }
+	}
+	return best
+}
+
 /** § 10.8 measurements: from the track, else the strongest summary bin within the tolerance. */
 export function measureTarget(
 	track: TrackSnapshot | null,
@@ -1296,22 +1398,9 @@ export function measureTarget(
 			class: classOf(track),
 		}
 	}
-	let peak: number | null = null
-	if (summary) {
-		const half = Math.max(halfWidthHz, summary.binHz / 2)
-		const lo = Math.max(
-			0,
-			Math.floor((targetHz - half - summary.startHz) / summary.binHz),
-		)
-		const hi = Math.min(
-			summary.bins.length - 1,
-			Math.floor((targetHz + half - summary.startHz) / summary.binHz),
-		)
-		for (let i = lo; i <= hi; i++) {
-			const b = summary.bins[i]
-			if (b !== undefined && (peak === null || b > peak)) peak = b
-		}
-	}
+	const peak = summary
+		? (strongestBin(summary, targetHz, halfWidthHz)?.dbfs ?? null)
+		: null
 	const floor = summary?.floorDbfs ?? null
 	return {
 		source: "spectrum",
@@ -1521,6 +1610,8 @@ interface TargetState {
 	confirmedAcrossJobs: boolean
 	/** What stopped the job before this target finished, if anything did. */
 	stopped: IdentifyStopCause | null
+	/** Fixed when the target ended: a later view must not read how old the blocks have become since. */
+	absence: IdentifyAbsenceProof | null
 }
 
 const FINAL: ReadonlySet<ScannerIdentifyState> = new Set([
@@ -1572,6 +1663,15 @@ export class IdentifyRunner implements JobDriver {
 	private aborting = false
 	/** Stamped on each target that finishes after the job was told to stop. */
 	private stopCause: IdentifyStopCause | null = null
+	/** The IQ blocks this job saw, for saying nothing is there. See IDENTIFY_IQ_FRESH_BLOCKS. */
+	private readonly iq: {
+		/** End samples of this epoch's first and newest block: a stream that stopped never advances. */
+		firstEnd: number | null
+		lastEnd: number | null
+		lastAt: number | null
+		/** A block came later than the freshness bound after the one before it. */
+		gap: boolean
+	} = { firstEnd: null, lastEnd: null, lastAt: null, gap: false }
 
 	constructor(private readonly deps: IdentifyDeps) {
 		this.record = deps.record
@@ -1761,11 +1861,75 @@ export class IdentifyRunner implements JobDriver {
 	}
 
 	onEpochStarted(epoch: EngineEpoch): void {
+		// Blocks of a former epoch prove nothing here. `lastAt` stays, so a long silence across it is a gap.
+		this.iq.firstEnd = null
+		this.iq.lastEnd = null
 		this.deps.inner.onEpochStarted(epoch)
 	}
 
 	onBlock(endSample: number, overload: boolean): void {
+		const now = this.deps.now()
+		const iq = this.iq
+		if (iq.lastAt !== null && now - iq.lastAt > this.iqFreshMs()) iq.gap = true
+		iq.firstEnd ??= endSample
+		iq.lastEnd = endSample
+		iq.lastAt = now
 		this.deps.inner.onBlock(endSample, overload)
+	}
+
+	private iqFreshMs(): number {
+		return IDENTIFY_IQ_FRESH_BLOCKS * this.record.spec.integrationMs
+	}
+
+	/** Blocks of this epoch advanced, with no gap, and the newest is fresh (a source can stay connected at rate 0). */
+	private iqFresh(now: number): boolean {
+		const { firstEnd, lastEnd, lastAt, gap } = this.iq
+		return (
+			!gap &&
+			firstEnd !== null &&
+			lastEnd !== null &&
+			lastEnd > firstEnd &&
+			lastAt !== null &&
+			now - lastAt <= this.iqFreshMs()
+		)
+	}
+
+	/**
+	 * What withholds `nothing` when no track resolved the target: the nearest live track within
+	 * IDENTIFY_NEARBY_HZ (a spur or an IQ image is no signal), else a level at the target at or above
+	 * the block threshold.
+	 */
+	private nearbyHz(
+		t: TargetState,
+		summary: BlockSummary | null,
+	): number | null {
+		let nearest: number | null = null
+		let distance = Number.POSITIVE_INFINITY
+		for (const { track } of this.currentTracks()) {
+			if (track.flags.spur || track.flags.iqImage) continue
+			const d = Math.abs(track.centreHz - t.targetHz)
+			if (d <= IDENTIFY_NEARBY_HZ && d < distance) {
+				nearest = track.centreHz
+				distance = d
+			}
+		}
+		if (nearest !== null || !summary) return nearest
+		const bin = strongestBin(summary, t.targetHz, t.toleranceHz)
+		return bin && bin.dbfs - summary.floorDbfs >= summary.thresholdDb
+			? bin.centreHz
+			: null
+	}
+
+	/** Fixes what a final target's verdict may say about absence, and returns the centre to name. */
+	private noteAbsence(
+		t: TargetState,
+		summary: BlockSummary | null,
+	): number | null {
+		t.absence = {
+			iqFresh: this.iqFresh(this.deps.now()),
+			thresholdDb: summary?.thresholdDb ?? null,
+		}
+		return this.nearbyHz(t, summary)
 	}
 
 	onStale(blocks: number): void {
@@ -1948,6 +2112,7 @@ export class IdentifyRunner implements JobDriver {
 			ownDecodes: new Map(),
 			confirmedAcrossJobs: false,
 			stopped: null,
+			absence: null,
 		}
 		this.targets.push(t)
 		this.emitTarget(t)
@@ -2218,16 +2383,14 @@ export class IdentifyRunner implements JobDriver {
 		for (const trial of t.trials)
 			if (trial.outcome === "pending" || trial.outcome === "running")
 				trial.outcome = "cancelled"
+		const summary = this.deps.lastSummary(this.sourceId)
+		const nearbyHz = this.noteAbsence(t, summary)
 		t.result = {
 			confidence: "activity",
 			metadata: emptyMetadata(),
-			measurements: measureTarget(
-				null,
-				this.deps.lastSummary(this.sourceId),
-				t.targetHz,
-				t.toleranceHz,
-			),
+			measurements: measureTarget(null, summary, t.targetHz, t.toleranceHz),
 			ended: "no-signal",
+			...(nearbyHz !== null ? { nearbyHz } : {}),
 		}
 		t.state = "unidentified"
 		if (!this.aborting) this.settleTarget(t)
@@ -2616,6 +2779,13 @@ export class IdentifyRunner implements JobDriver {
 			latest?.observationId ?? "identify",
 			this.deps.now(),
 		)
+		// After a window move the latest summary shows another window: measure from the track or not at all.
+		const summary =
+			ended || unavailable ? null : this.deps.lastSummary(this.sourceId)
+		const nearbyHz =
+			track || artefact || ended || unavailable
+				? null
+				: this.noteAbsence(t, summary)
 		t.result = {
 			...(proof && !analog && !t.decoded && !artefact ? { proof } : {}),
 			...(!protocol && track && !artefact ? { hint: classOf(track) } : {}),
@@ -2632,13 +2802,7 @@ export class IdentifyRunner implements JobDriver {
 					: baseMetadata,
 			...(discovery ? { discoveryId: discovery.id } : {}),
 			...(latest ? { observationId: latest.observationId } : {}),
-			// After a window move the latest summary shows another window: measure from the track or not at all.
-			measurements: measureTarget(
-				track,
-				ended || unavailable ? null : this.deps.lastSummary(this.sourceId),
-				t.targetHz,
-				t.toleranceHz,
-			),
+			measurements: measureTarget(track, summary, t.targetHz, t.toleranceHz),
 			...(artefact ? { artefact } : {}),
 			...(ended ? { ended } : {}),
 			// A digital decode won: the analog evidence is not part of the result (beside a classified digital
@@ -2647,6 +2811,7 @@ export class IdentifyRunner implements JobDriver {
 			...(unavailableTypes.length > 0
 				? { decodersUnavailable: unavailableTypes }
 				: {}),
+			...(nearbyHz !== null ? { nearbyHz } : {}),
 		}
 		t.state = state
 		// WG11 req 6.8: the result exists; its claimed captures are discarded (after the probes on abort).
@@ -2814,6 +2979,7 @@ export class IdentifyRunner implements JobDriver {
 		probeId: string,
 		req: ProbeRequest,
 		ev: DecodeEvidence,
+		acceptedAgeMs?: number,
 	): void => {
 		if (req.jobId !== this.record.id) return
 		const hit = this.findRun(r => r.probeId === probeId)
@@ -2825,6 +2991,18 @@ export class IdentifyRunner implements JobDriver {
 		}
 		seen.output = true
 		if (!ev.crcClean) seen.crcFailures += 1
+		if (
+			ev.identity &&
+			seen.identity === null &&
+			acceptedAgeMs !== undefined &&
+			!this.acceptedMatchCounts(hit.t, ev, ev.identity.value, acceptedAgeMs)
+		) {
+			hit.r.seen.set(ev.protocol, seen)
+			// The store keeps its own acceptance. This job treats the line as one decode awaiting its pair.
+			if (hit.r.run.mode.covers.includes(ev.protocol))
+				this.awaitPair(hit.t, hit.r, ev.protocol, ev.identity.value)
+			return
+		}
 		// H2: the interpreters attach an identity only after the second CRC-clean line with the same value.
 		if (ev.identity) seen.identity = ev.identity
 		hit.r.seen.set(ev.protocol, seen)
@@ -2855,6 +3033,25 @@ export class IdentifyRunner implements JobDriver {
 	}
 
 	/**
+	 * Whether an identity the shared memory had already accepted may answer this job: this job's own
+	 * lines at least CONFIRM_MIN_SEPARATION_MS apart, or an earlier match that still counts. A call
+	 * record restates the line it came from, so it is never an occurrence of its own.
+	 */
+	private acceptedMatchCounts(
+		t: TargetState,
+		ev: DecodeEvidence,
+		value: string,
+		acceptedAgeMs: number,
+	): boolean {
+		if (ev.callId !== undefined) return false
+		const first = t.ownDecodes.get(`${ev.protocol}\u0000${value}`)
+		return (
+			!pairPredatesJob(first, this.deps.now()) ||
+			earlierMatchCounts(acceptedAgeMs)
+		)
+	}
+
+	/**
 	 * A checked decode awaiting its pair (it yields no evidence yet). The run now has output, and
 	 * gets the time acceptance needs, once: see IDENTIFY_PAIR_WAIT_MS.
 	 */
@@ -2867,16 +3064,24 @@ export class IdentifyRunner implements JobDriver {
 		if (req.jobId !== this.record.id) return
 		const hit = this.findRun(r => r.probeId === probeId)
 		if (!hit) return
-		const { t, r } = hit
-		if (value !== undefined)
-			noteOwnDecode(t.ownDecodes, `${protocol}\u0000${value}`, this.deps.now())
-		const seen = r.seen.get(protocol) ?? {
+		const seen = hit.r.seen.get(protocol) ?? {
 			output: false,
 			crcFailures: 0,
 			identity: null,
 		}
 		seen.output = true
-		r.seen.set(protocol, seen)
+		hit.r.seen.set(protocol, seen)
+		this.awaitPair(hit.t, hit.r, protocol, value)
+	}
+
+	private awaitPair(
+		t: TargetState,
+		r: RunState,
+		protocol: ScannerProtocol,
+		value: string | undefined,
+	): void {
+		if (value !== undefined)
+			noteOwnDecode(t.ownDecodes, `${protocol}\u0000${value}`, this.deps.now())
 		t.heard ??= protocol
 		if (r.pairExtended === true || r.endsAt === null) return
 		r.pairExtended = true
@@ -3890,6 +4095,7 @@ export class IdentifyRunner implements JobDriver {
 							heard: t.heard,
 							stopped: t.stopped,
 							confirmedAcrossJobs: t.confirmedAcrossJobs,
+							...(t.absence ? { absence: t.absence } : {}),
 						}),
 					}
 				: {}),

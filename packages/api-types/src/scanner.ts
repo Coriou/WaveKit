@@ -1572,6 +1572,11 @@ export interface ScannerIdentifyResult {
 	analog?: ScannerIdentifyAnalog
 	/** WG10 req 3.5: probe decoder types that could not run during this job (sorted, unique); absent when none. */
 	decodersUnavailable?: ScannerProbeDecoderType[]
+	/**
+	 * Why "nothing" was withheld: the centre of a live track within 12 500 Hz of the target that did
+	 * not resolve it, or of the strongest bin at the target at or above the block threshold.
+	 */
+	nearbyHz?: number
 }
 /** `scanner:identify` (one stream per target; `all: true` gives one per surfaced emission). */
 export interface ScannerIdentifyEventData {
@@ -1659,7 +1664,8 @@ export const SCANNER_TRIAL_OUTCOMES_COMPLETE: [ScannerTrialOutcome] extends [
 /**
  * `decoded`: a confirmed identity that met acceptance. `heard-digital-unconfirmed`: a lone sync or
  * one decode, never `decoded`. `undecodable`: a signal is there and the trials found nothing.
- * `nothing`: no signal. `could-not-test`: see `SCANNER_IDENTIFY_VERDICT_WHY`.
+ * `nothing`: IQ blocks kept arriving, the target measured below the block threshold and no live
+ * track sat near it. `could-not-test`: see `SCANNER_IDENTIFY_VERDICT_WHY`.
  */
 export const SCANNER_IDENTIFY_VERDICT_CODES = [
 	"decoded",
@@ -1684,6 +1690,8 @@ export const SCANNER_IDENTIFY_VERDICT_WHY = [
 	"interrupted",
 	"artefact",
 	"unknown",
+	"no-samples",
+	"signal-nearby",
 ] as const
 export type ScannerIdentifyVerdictWhy =
 	(typeof SCANNER_IDENTIFY_VERDICT_WHY)[number]
@@ -1695,9 +1703,14 @@ export interface ScannerIdentifyVerdict {
 	/** What was decoded or heard; otherwise the one protocol the request named, when it named one. */
 	protocol?: ScannerProtocol
 	/**
-	 * Only on `decoded`: this job heard one decode, and the match that confirms it came before the
-	 * job started (another request, or a passive or scan probe, on this signal). Absent: both decodes,
+	 * Only on `decoded`: this job heard one decode, and the match that confirms it came 2 s to 5 min
+	 * earlier, before this job (another request, or a passive or scan probe, on this signal). Absent: both decodes,
 	 * or a single-shot rule, in this job.
 	 */
 	confirmedAcrossJobs?: true
+	/**
+	 * Only on `heard-digital-unconfirmed` and `undecodable`: live audio heard a transmission at the
+	 * target. A lone digital sync over voice is usually the voice.
+	 */
+	analogHeard?: true
 }

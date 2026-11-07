@@ -257,11 +257,15 @@ const CHANGED: Readonly<Record<string, Record<string, unknown>>> = {
 	"spawn-enoent-unavailable": { decodersUnavailable: ["multimon-ng"] },
 }
 
-/** The goldens stay frozen: `verdict` is additive and has its own table (identify-verdict.test.ts). */
+/** The goldens stay frozen: `verdict` and `result.nearbyHz` are additive, with their own tables (identify-verdict.test.ts). */
 function withoutVerdict(
 	events: ScannerIdentifyEventData[],
 ): ScannerIdentifyEventData[] {
-	return events.map(({ verdict: _verdict, ...e }) => e)
+	return events.map(({ verdict: _verdict, ...e }) => {
+		if (!e.result) return e
+		const { nearbyHz: _nearbyHz, ...result } = e.result
+		return { ...e, result }
+	})
 }
 
 function withAdded(

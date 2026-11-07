@@ -63,6 +63,7 @@ import {
 	guardDsdFmeEvidence,
 	linkProtocol,
 	toDsdFmeScannerEvent,
+	type DsdFmeDecodeEvidence,
 	type DsdFmeScannerEvent,
 } from "./confirm/dsd-fme.js"
 import { interpretMultimon, PocsagLowRun } from "./confirm/multimon.js"
@@ -2293,7 +2294,11 @@ export class ProbePool extends EventEmitter {
 				held.push(ev)
 				continue
 			}
-			this.emit("evidence", rec.probeId, rec.req, ev)
+			// The identity's earlier age is for identify's verdict alone; the guard kept it out of `ev`.
+			const { acceptedAgeMs } = raw as DsdFmeDecodeEvidence
+			if (acceptedAgeMs === undefined)
+				this.emit("evidence", rec.probeId, rec.req, ev)
+			else this.emit("evidence", rec.probeId, rec.req, ev, acceptedAgeMs)
 		}
 	}
 }

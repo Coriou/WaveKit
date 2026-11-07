@@ -3,10 +3,15 @@ import { describe, expect, it } from "vitest"
 import {
 	IDENTIFY_OWN_DECODES_MAX,
 	IDENTIFY_PAIR_WAIT_MS,
+	earlierMatchCounts,
 	noteOwnDecode,
 	pairPredatesJob,
 } from "../../../../src/core/scanner/identify.js"
-import { ConfirmMemory } from "../../../../src/core/scanner/probes/confirm/confirm-memory.js"
+import {
+	CONFIRM_MIN_SEPARATION_MS,
+	CONFIRM_WINDOW_MS,
+	ConfirmMemory,
+} from "../../../../src/core/scanner/probes/confirm/confirm-memory.js"
 import { createInterpreterState } from "../../../../src/core/scanner/probes/confirm/double-match.js"
 import { linkProtocol } from "../../../../src/core/scanner/probes/confirm/dsd-fme.js"
 import {
@@ -68,15 +73,127 @@ describe("confirmedAcrossJobs", () => {
 		})
 	})
 
-	it("an identity accepted before the job reads the same, whatever its age", async () => {
-		const { h, memory } = harness()
-		memory().markAccepted(SCOPE, "dmr:id", "1")
-		h.clock.now += 3_600_000
-		const id = await probeOf(h)
-		await runTo(h, ms => {
-			if (ms === 300) h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now))
+	describe("an identity accepted before the job counts only within the 5 min window", () => {
+		/** The identity's last occurrence lies `ageMs` before the job's first line. */
+		const accept = (h: Harness, memory: ConfirmMemory, ageMs: number): void => {
+			const now = h.clock.now
+			h.clock.now = now - ageMs
+			memory.markAccepted(SCOPE, "dmr:id", "1")
+			h.clock.now = now
+		}
+		const oneLine = async (ageMs: number) => {
+			const { h, memory } = harness()
+			const id = await probeOf(h)
+			await runTo(h, ms => {
+				if (ms !== 300) return
+				accept(h, memory(), ageMs)
+				h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now))
+			})
+			return h
+		}
+
+		it.each([CONFIRM_MIN_SEPARATION_MS, 180_000, CONFIRM_WINDOW_MS])(
+			"%i ms old: decoded across jobs, on one line",
+			async ageMs => {
+				const h = await oneLine(ageMs)
+				expect(h.last()?.verdict).toEqual({
+					code: "decoded",
+					protocol: "dmr",
+					confirmedAcrossJobs: true,
+				})
+			},
+		)
+
+		it.each([CONFIRM_WINDOW_MS + 1, 86_400_000, 30 * 86_400_000])(
+			"%i ms old: one line is unconfirmed, and keeps the run for its pair",
+			async ageMs => {
+				const { h, memory } = harness()
+				const id = await probeOf(h)
+				const from = h.clock.now
+				await runTo(h, ms => {
+					if (ms !== 300) return
+					accept(h, memory(), ageMs)
+					h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now))
+				})
+				expect(h.last()?.state).not.toBe("identified")
+				expect(h.last()?.verdict).toEqual({
+					code: "heard-digital-unconfirmed",
+					protocol: "dmr",
+				})
+				expect(h.clock.now - from).toBeGreaterThanOrEqual(
+					300 + IDENTIFY_PAIR_WAIT_MS,
+				)
+				// The store's acceptance does not age: the same line is still accepted there.
+				expect(memory().isAccepted(SCOPE, "dmr:id", "1")).toBe(true)
+			},
+		)
+
+		it("under the 2 s separation it is one transmission heard twice: no match", async () => {
+			const h = await oneLine(CONFIRM_MIN_SEPARATION_MS - 1)
+			expect(h.last()?.verdict?.code).toBe("heard-digital-unconfirmed")
 		})
-		expect(h.last()?.verdict?.confirmedAcrossJobs).toBe(true)
+
+		it("too old: the job's own pair still decodes, and does not claim another job", async () => {
+			const { h, memory } = harness()
+			const id = await probeOf(h)
+			await runTo(h, ms => {
+				if (ms === 300) accept(h, memory(), CONFIRM_WINDOW_MS + 1)
+				if (ms === 300 || ms === 660 || ms === 2300)
+					h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now))
+			})
+			expect(h.last()).toMatchObject({
+				state: "identified",
+				result: { protocol: "dmr", identity: { value: "1" } },
+			})
+			expect(h.last()?.verdict).toEqual({ code: "decoded", protocol: "dmr" })
+		})
+
+		it("too old: a call record after the one line adds nothing", async () => {
+			const { h, memory } = harness()
+			const id = await probeOf(h)
+			await runTo(h, ms => {
+				if (ms === 300) {
+					accept(h, memory(), CONFIRM_WINDOW_MS + 1)
+					h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now))
+				}
+				if (ms === 2500)
+					h.decoders.emitOutput(id, {
+						type: "call_start",
+						timestamp: new Date(h.clock.now),
+						data: {
+							callId: "c1",
+							protocol: "dmr",
+							startedAt: new Date(h.clock.now).toISOString(),
+							talkgroup: null,
+							source: null,
+						},
+					})
+			})
+			expect(h.last()?.verdict?.code).toBe("heard-digital-unconfirmed")
+		})
+
+		it("a clean occurrence refreshes the age, so a repeat within the window counts again", async () => {
+			const { h, memory } = harness()
+			const id = await probeOf(h)
+			await runTo(h, ms => {
+				if (ms === 300) {
+					accept(h, memory(), CONFIRM_WINDOW_MS)
+					h.decoders.emitLink(id, verifiedLinkLine(1, h.clock.now))
+				}
+			})
+			expect(memory().acceptedAgeMs(SCOPE, "dmr:id", "1")).toBeLessThan(
+				CONFIRM_WINDOW_MS,
+			)
+		})
+
+		it("the bound and the separation, at and past each", () => {
+			expect(earlierMatchCounts(CONFIRM_MIN_SEPARATION_MS - 1)).toBe(false)
+			expect(earlierMatchCounts(CONFIRM_MIN_SEPARATION_MS)).toBe(true)
+			expect(earlierMatchCounts(CONFIRM_WINDOW_MS)).toBe(true)
+			expect(earlierMatchCounts(CONFIRM_WINDOW_MS + 1)).toBe(false)
+			expect(earlierMatchCounts(Number.POSITIVE_INFINITY)).toBe(false)
+			expect(earlierMatchCounts(-1)).toBe(false)
+		})
 	})
 
 	it("one burst with no earlier decode stays unconfirmed", async () => {

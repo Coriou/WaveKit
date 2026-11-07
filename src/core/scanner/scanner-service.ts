@@ -171,7 +171,9 @@ import { tuningTrustOf } from "../tuning-trust.js"
 import { JobHits, emptyHitStats } from "./job-hits.js"
 import {
 	IDENTIFY_KEEP_JOBS,
+	IDENTIFY_MAX_ALIVE_JOBS,
 	IdentifyRunner,
+	identifyFullNextStep,
 	identifyNextStep,
 	identifyTargetNextStep,
 	inWindow,
@@ -2717,6 +2719,14 @@ export class ScannerService extends EventEmitter {
 		}
 		const running = this.runningIdentifyFor(n.sourceId, identify)
 		if (running) return { job: this.toDto(running), joined: true }
+		const alive = this.aliveIdentifyJobs(n.sourceId)
+		if (alive.length >= IDENTIFY_MAX_ALIVE_JOBS)
+			throw new ScannerApiError(
+				"Too many identify jobs are running on this source",
+				"SCANNER_IDENTIFY_BUSY",
+				409,
+				{ next: identifyFullNextStep(alive.map(r => r.id)) },
+			)
 		const now = this.now()
 		const record: JobRecord = {
 			id: `j_${ulid(now)}`,
@@ -2762,18 +2772,21 @@ export class ScannerService extends EventEmitter {
 		sourceId: string,
 		identify: NormalisedIdentify,
 	): JobRecord | null {
-		for (const record of this.jobs.values()) {
-			if (
-				record.spec.sourceId !== sourceId ||
-				record.spec.kind !== "identify" ||
-				!["pending", "starting", "running"].includes(record.state)
-			)
-				continue
+		for (const record of this.aliveIdentifyJobs(sourceId)) {
 			const driver = this.drivers.get(record.id)
 			if (driver instanceof IdentifyRunner && driver.joins(identify))
 				return record
 		}
 		return null
+	}
+
+	private aliveIdentifyJobs(sourceId: string): JobRecord[] {
+		return [...this.jobs.values()].filter(
+			record =>
+				record.spec.sourceId === sourceId &&
+				record.spec.kind === "identify" &&
+				["pending", "starting", "running"].includes(record.state),
+		)
 	}
 
 	/** `details.next` of a held tuner. A window target names its frequency; the whole window, the centre it stays on. */

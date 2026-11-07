@@ -2,7 +2,10 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import type { ScannerIdentifyEventData } from "@wavekit/api-types"
-import { IDENTIFY_KEEP_JOBS } from "../../../../src/core/scanner/identify.js"
+import {
+	IDENTIFY_KEEP_JOBS,
+	IDENTIFY_MAX_ALIVE_JOBS,
+} from "../../../../src/core/scanner/identify.js"
 import type { JobDriver } from "../../../../src/core/scanner/job-runner.js"
 import type { ScannerSettings } from "../../../../src/core/scanner/types.js"
 import {
@@ -180,14 +183,87 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 			expect(first.joined).toBe(false)
 			const again = await ask(h)
 			expect(again).toMatchObject({ joined: true, job: { id: first.job.id } })
-			// At the 1 kHz tolerance it is one track; past it, another target.
-			const edge = await ask(h, { frequencyHz: CENTRE + 101_000 })
-			expect(edge).toMatchObject({ joined: true, job: { id: first.job.id } })
-			const past = await ask(h, { frequencyHz: CENTRE + 101_001 })
-			expect(past.joined).toBe(false)
-			expect(past.job.id).not.toBe(first.job.id)
 			await h.service.stop()
 		})
+
+		it.each([1, 900, 1000, 6000, 6250])(
+			"a request %i Hz off gets its own job: never another signal's answer",
+			async offsetHz => {
+				const h = serviceHarness(noPassive)
+				await h.service.start()
+				const first = await ask(h)
+				const off = await ask(h, { frequencyHz: CENTRE + 100_000 + offsetHz })
+				expect(off.joined).toBe(false)
+				expect(off.job.id).not.toBe(first.job.id)
+				await h.service.stop()
+			},
+		)
+
+		it("a narrower request at the same frequency gets its own job", async () => {
+			const h = serviceHarness(noPassive)
+			await h.service.start()
+			const first = await h.service.identifyOrJoin({
+				sourceId: "rtl",
+				target: { frequencyHz: CENTRE + 100_000, bandwidthHz: 12_500 },
+				protocols: ["dmr"],
+			})
+			const narrower = await ask(h)
+			expect(narrower.joined).toBe(false)
+			expect(narrower.job.id).not.toBe(first.job.id)
+			await h.service.stop()
+		})
+
+		it(`at ${IDENTIFY_MAX_ALIVE_JOBS} alive jobs a new request is refused, a repeat still joins`, async () => {
+			const h = serviceHarness(noPassive)
+			await h.service.start()
+			const ids: string[] = []
+			for (let i = 0; i < IDENTIFY_MAX_ALIVE_JOBS; i++) {
+				const { job, joined } = await ask(h, {
+					frequencyHz: CENTRE + 100_000 + i * 12_500,
+				})
+				expect(joined).toBe(false)
+				ids.push(job.id)
+			}
+			const refused: unknown = await ask(h, {
+				frequencyHz: CENTRE + 300_000,
+			}).catch((err: unknown) => err)
+			expect(refused).toMatchObject({
+				statusCode: 409,
+				code: "SCANNER_IDENTIFY_BUSY",
+			})
+			const { next } = (
+				refused as {
+					details: { next: { jobs: { id: string; path: string }[] } }
+				}
+			).details
+			expect(next.jobs.map(j => j.id)).toEqual(ids)
+			expect(next.jobs[0]?.path).toBe(`/api/scanner/jobs/${ids[0]}`)
+			expect(h.service.listJobs()).toHaveLength(IDENTIFY_MAX_ALIVE_JOBS)
+			// The same question joins: it starts nothing.
+			const repeat = await ask(h)
+			expect(repeat).toMatchObject({ joined: true, job: { id: ids[0] } })
+			// One ended makes room, and an ended job is not counted.
+			await h.service.cancelJob(ids[1]!)
+			await settled(h.service)
+			const room = await ask(h, { frequencyHz: CENTRE + 300_000 })
+			expect(room.joined).toBe(false)
+			await h.service.stop()
+		}, 20_000)
+
+		it("the bound is per source, and counts a whole-window job", async () => {
+			const h = serviceHarness(noPassive)
+			await h.service.start()
+			for (let i = 0; i < IDENTIFY_MAX_ALIVE_JOBS - 1; i++)
+				await ask(h, { frequencyHz: CENTRE + 100_000 + i * 12_500 })
+			await h.service.identifyOrJoin({
+				sourceId: "rtl",
+				target: { all: true },
+			})
+			await expect(
+				ask(h, { frequencyHz: CENTRE + 300_000 }),
+			).rejects.toMatchObject({ code: "SCANNER_IDENTIFY_BUSY" })
+			await h.service.stop()
+		}, 20_000)
 
 		it("a wider target does not inherit a narrower job's answer", async () => {
 			const h = serviceHarness(noPassive)
@@ -225,6 +301,73 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 			expect(next.job.id).not.toBe(first.job.id)
 			await h.service.stop()
 		})
+	})
+
+	describe("nothing through the real service, on its own clock", () => {
+		const CHUNK_MS = 50
+		const clocked = () => {
+			const clock = { now: 1_000_000 }
+			const h = serviceHarness({ ...noPassive, now: () => clock.now })
+			return { h, clock }
+		}
+		/** One 50 ms block of noise, on the service clock: wall-clock delays cannot make a gap. */
+		const feedBlock = async (
+			h: ReturnType<typeof serviceHarness>,
+			clock: { now: number },
+			seed: number,
+		): Promise<void> => {
+			feedTone(h.fanout, CHUNK_MS / 1000, 0, 0, seed)
+			await settled(h.service)
+			clock.now += CHUNK_MS
+			await tick(30)
+		}
+		const ask = (h: ReturnType<typeof serviceHarness>) =>
+			h.service.identify({
+				sourceId: "rtl",
+				target: { frequencyHz: CENTRE + 100_000 },
+				protocols: ["dmr"],
+				timeoutMs: 1000,
+				record: false,
+			})
+
+		it("noise through the deadline: nothing", async () => {
+			const { h, clock } = clocked()
+			await h.service.start()
+			const job = await ask(h)
+			for (let i = 0; i < 400; i++) {
+				await feedBlock(h, clock, 100 + i)
+				if (h.service.getJob(job.id)?.state === "completed") break
+			}
+			const target = h.service.getJob(job.id)!.identify!.targets[0]!
+			expect(target.verdict).toEqual({ code: "nothing", protocol: "dmr" })
+			expect(target.result?.measurements.snrDb).not.toBeNull()
+			await h.service.stop()
+		}, 60_000)
+
+		it("the source stays connected at rate 0 after real blocks: no-samples, not nothing", async () => {
+			const { h, clock } = clocked()
+			await h.service.start()
+			const job = await ask(h)
+			for (let i = 0; i < 400; i++) {
+				await feedBlock(h, clock, 100 + i)
+				if (h.service.getJob(job.id)?.state === "running") break
+			}
+			expect(h.service.getJob(job.id)?.state).toBe("running")
+			for (let i = 0; i < 4; i++) await feedBlock(h, clock, 600 + i)
+			// The dongle is pulled behind rtl_tcp: connected, no bytes, no source-down.
+			for (let i = 0; i < 400; i++) {
+				clock.now += CHUNK_MS
+				await tick(30)
+				if (h.service.getJob(job.id)?.state === "completed") break
+			}
+			const target = h.service.getJob(job.id)!.identify!.targets[0]!
+			expect(target.verdict).toEqual({
+				code: "could-not-test",
+				why: "no-samples",
+				protocol: "dmr",
+			})
+			await h.service.stop()
+		}, 60_000)
 	})
 
 	it("refuses kind: identify on POST /jobs (identify has its own route)", async () => {

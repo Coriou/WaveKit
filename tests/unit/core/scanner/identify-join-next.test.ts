@@ -3,7 +3,9 @@ import fc from "fast-check"
 import pino from "pino"
 import { describe, expect, it } from "vitest"
 import {
+	IDENTIFY_IQ_FRESH_BLOCKS,
 	IDENTIFY_JOIN_COVERED_FRACTION,
+	IDENTIFY_NEARBY_HZ,
 	IDENTIFY_QUEUE_WAIT_MS,
 	IdentifyRunner,
 	identifyTargetNextStep,
@@ -14,11 +16,13 @@ import {
 } from "../../../../src/core/scanner/identify.js"
 import { DQ_DC_ADMIT_HZ } from "../../../../src/core/scanner/detection-quality-contract.js"
 import { USABLE_FRACTION } from "../../../../src/core/spectrum/spectrum-engine.js"
+import { TUNER_VALUE_BOUNDS } from "../../../../src/core/tuner-controller.js"
 import {
 	TARGET_HZ,
 	fakeInner,
 	identifyHarness,
 	identifyRecord,
+	quietSummaryOf,
 	summaryOf,
 	trackOf,
 	viewOf,
@@ -93,10 +97,15 @@ describe("joining compares what is left with what is asked", () => {
 		expect(h.runner.joins(waitAsk)).toBe(true)
 		h.clock.now = started + 1001
 		expect(h.runner.joins(waitAsk)).toBe(false)
-		// A plain request's timeoutMs must be covered by the wait too.
-		h.clock.now = started + 8199
-		expect(h.runner.joins(ask({ timeoutMs: 2000 }))).toBe(true)
-		h.clock.now = started + 8201
+	})
+
+	it("a plain request never joins a job blocked on a gate, however much wait is left", async () => {
+		const h = identifyHarness({
+			request: { timeoutMs: 2000, waitUntilSignal: true, waitMs: 10_000 },
+			gatedAt: () => null,
+		})
+		await h.runner.start()
+		await h.advance(10)
 		expect(h.runner.joins(ask({ timeoutMs: 2000 }))).toBe(false)
 	})
 
@@ -173,6 +182,28 @@ describe("joining compares what is left with what is asked", () => {
 
 describe("the suggested centre", () => {
 	const HZ = 446_100_000
+	const { min, max } = TUNER_VALUE_BOUNDS.frequency
+
+	it("near the lower edge it goes up; at the edge it stays a value the tuner takes", () => {
+		const window = { sampleRateHz: 1_024_000 }
+		expect(identifyTuneCentreHz(24_050_000, window)).toBe(24_150_000)
+		expect(identifyTuneCentreHz(min, window)).toBe(min + 100_000)
+		expect(identifyTuneCentreHz(min + 100_000, window)).toBe(min)
+		expect(identifyTuneCentreHz(min + 99_999, window)).toBe(min + 199_999)
+		expect(identifyTuneCentreHz(max, window)).toBe(max - 100_000)
+	})
+
+	it("a target outside the tuner's range has no centre, and next says why", () => {
+		const window = { sampleRateHz: 1_024_000 }
+		for (const hz of [150_000, min - 1, max + 1]) {
+			expect(identifyTuneCentreHz(hz, window)).toBeNull()
+			expect(
+				identifyTargetNextStep("rtl", { frequencyHz: hz }, window, false),
+			).toEqual({
+				effect: expect.stringContaining("the tuner reaches") as string,
+			})
+		}
+	})
 
 	it("225 001 Hz and 150 000 Hz: inside the window, past the DC exclusion", () => {
 		const centre = identifyTuneCentreHz(HZ, { sampleRateHz: 225_001 }, 150_000)
@@ -251,6 +282,8 @@ describe("the suggested centre", () => {
 					expect(Math.abs(frequencyHz - centreHz)).toBeGreaterThan(
 						DQ_DC_ADMIT_HZ,
 					)
+					expect(centreHz).toBeGreaterThanOrEqual(min)
+					expect(centreHz).toBeLessThanOrEqual(max)
 					expect(
 						inWindow(
 							frequencyHz,
@@ -263,5 +296,171 @@ describe("the suggested centre", () => {
 			),
 			{ numRuns: 500 },
 		)
+	})
+})
+
+describe("nothing through the runner", () => {
+	// Feature: identify verdict, bounds of IDENTIFY_IQ_FRESH_BLOCKS and IDENTIFY_NEARBY_HZ
+	const silent = (over: Parameters<typeof identifyHarness>[0] = {}) =>
+		identifyHarness({
+			request: { timeoutMs: 1000, protocols: ["dmr"] },
+			...over,
+		})
+	const finish = async (h: ReturnType<typeof silent>, ms = 1000) => {
+		await h.runner.start()
+		await h.advance(10)
+		await h.advance(ms)
+		await flushAsync()
+		await h.advance(10)
+	}
+
+	it("blocks through the deadline, a quiet target and no track: nothing", async () => {
+		const h = silent()
+		h.state.summary = quietSummaryOf()
+		await finish(h)
+		expect(h.last()?.verdict).toEqual({ code: "nothing", protocol: "dmr" })
+		await h.pool.destroy()
+	})
+
+	it("the verdict is fixed when the target ends: a later read does not age it", async () => {
+		const h = silent()
+		h.state.summary = quietSummaryOf()
+		await finish(h)
+		h.clock.now += 600_000
+		expect(h.runner.view().targets[0]?.verdict?.code).toBe("nothing")
+		await h.pool.destroy()
+	})
+
+	it("blocks that stopped: no-samples, whatever the last block measured", async () => {
+		const h = silent()
+		h.state.summary = quietSummaryOf()
+		await h.runner.start()
+		await h.advance(100)
+		h.state.iqFlowing = false
+		await h.advance(1000)
+		await flushAsync()
+		await h.advance(10)
+		expect(h.last()?.verdict).toEqual({
+			code: "could-not-test",
+			why: "no-samples",
+			protocol: "dmr",
+		})
+		await h.pool.destroy()
+	})
+
+	it.each([
+		["no block at all", []],
+		["one block that never advanced", [1000]],
+		["a repeated end sample", [1000, 1000]],
+	])("%s: no-samples", async (_name, blocks) => {
+		const h = silent()
+		h.state.summary = quietSummaryOf()
+		h.state.iqFlowing = false
+		await h.runner.start()
+		await h.advance(10)
+		for (const endSample of blocks) h.runner.onBlock(endSample, false)
+		await h.advance(1000)
+		await flushAsync()
+		await h.advance(10)
+		expect(h.last()?.verdict?.why).toBe("no-samples")
+		await h.pool.destroy()
+	})
+
+	it.each([
+		[IDENTIFY_IQ_FRESH_BLOCKS * 50, "nothing"],
+		[IDENTIFY_IQ_FRESH_BLOCKS * 50 + 1, "could-not-test"],
+	] as const)(
+		"the newest block %i ms old when the wait ends: %s",
+		async (ageMs, code) => {
+			const h = silent()
+			h.state.summary = quietSummaryOf()
+			h.state.iqFlowing = false
+			await h.runner.start()
+			const deadline = (h.record.startedAt ?? 0) + 1000
+			await h.advance(10)
+			let endSample = 0
+			for (let at = h.clock.now; at < deadline - ageMs; at += 50) {
+				h.clock.now = at
+				endSample += 1000
+				h.runner.onBlock(endSample, false)
+			}
+			h.clock.now = deadline - ageMs
+			h.runner.onBlock(endSample + 1000, false)
+			h.clock.now = deadline
+			h.runner.tick(h.clock.now)
+			await flushAsync()
+			await flushAsync()
+			expect(h.last()?.verdict?.code).toBe(code)
+			await h.pool.destroy()
+		},
+	)
+
+	it("a gap inside the wait is no proof, even with blocks at the deadline", async () => {
+		const h = silent()
+		h.state.summary = quietSummaryOf()
+		await h.runner.start()
+		await h.advance(100)
+		h.clock.now += 501
+		h.runner.onBlock(99_999_999, false)
+		await h.advance(1000)
+		await flushAsync()
+		await h.advance(10)
+		expect(h.last()?.verdict?.why).toBe("no-samples")
+		await h.pool.destroy()
+	})
+
+	it.each([
+		[1500, "could-not-test"],
+		[IDENTIFY_NEARBY_HZ, "could-not-test"],
+		[IDENTIFY_NEARBY_HZ + 1, "nothing"],
+	])("a live track %i Hz off the target: %s", async (offsetHz, code) => {
+		const h = silent()
+		h.state.summary = quietSummaryOf()
+		h.tracks.push(viewOf(trackOf({ centreHz: TARGET_HZ + offsetHz })))
+		await finish(h)
+		expect(h.last()?.verdict?.code).toBe(code)
+		if (code === "could-not-test") {
+			expect(h.last()?.verdict?.why).toBe("signal-nearby")
+			expect(h.last()?.result?.nearbyHz).toBe(TARGET_HZ + offsetHz)
+		} else expect(h.last()?.result?.nearbyHz).toBeUndefined()
+		await h.pool.destroy()
+	})
+
+	it("a spur or an image close by is no signal", async () => {
+		const h = silent()
+		h.state.summary = quietSummaryOf()
+		const track = trackOf({ centreHz: TARGET_HZ + 1500 })
+		h.tracks.push(viewOf({ ...track, flags: { ...track.flags, spur: true } }))
+		await finish(h)
+		expect(h.last()?.verdict?.code).toBe("nothing")
+		await h.pool.destroy()
+	})
+
+	it("a level at the target with no track names the bin", async () => {
+		const h = silent()
+		await finish(h)
+		expect(h.last()?.result?.measurements.snrDb).toBe(30)
+		expect(h.last()?.verdict?.why).toBe("signal-nearby")
+		expect(
+			Math.abs((h.last()?.result?.nearbyHz ?? 0) - TARGET_HZ),
+		).toBeLessThanOrEqual(2000)
+		await h.pool.destroy()
+	})
+
+	it("a gate that never opened on a track that is live: signal-nearby, not nothing", async () => {
+		const h = identifyHarness({
+			request: {
+				protocols: ["dmr"],
+				waitUntilSignal: true,
+				waitMs: 1000,
+			},
+			gatedAt: () => null,
+		})
+		h.state.summary = quietSummaryOf()
+		h.tracks.push(viewOf(trackOf({})))
+		await finish(h)
+		expect(h.last()?.result?.ended).toBe("no-signal")
+		expect(h.last()?.verdict?.why).toBe("signal-nearby")
+		await h.pool.destroy()
 	})
 })
