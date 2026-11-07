@@ -1694,4 +1694,10 @@ export interface ScannerIdentifyVerdict {
 	why?: ScannerIdentifyVerdictWhy
 	/** What was decoded or heard; otherwise the one protocol the request named, when it named one. */
 	protocol?: ScannerProtocol
+	/**
+	 * Only on `decoded`: this job heard one decode, and the match that confirms it came before the
+	 * job started (another request, or a passive or scan probe, on this signal). Absent: both decodes,
+	 * or a single-shot rule, in this job.
+	 */
+	confirmedAcrossJobs?: true
 }

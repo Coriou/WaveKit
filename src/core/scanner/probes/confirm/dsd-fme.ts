@@ -88,7 +88,8 @@ export function toDsdFmeScannerEvent(
 	return { kind: out.type, at: out.timestamp.getTime(), call: parsed.data }
 }
 
-function linkProtocol(
+/** The scanner protocol a link line names: the one mapping, shared with the probe pool. */
+export function linkProtocol(
 	p: DsdFmeLinkLine["protocol"],
 	state: InterpreterState,
 ): ScannerProtocol {
@@ -108,7 +109,8 @@ function linkProtocol(
 	}
 }
 
-function identityValue(line: DsdFmeLinkLine): string | undefined {
+/** The value a link line's identity pairs on (and that accepted evidence then carries). */
+export function identityValue(line: DsdFmeLinkLine): string | undefined {
 	switch (line.protocol) {
 		case "dmr":
 		case "dpmr":

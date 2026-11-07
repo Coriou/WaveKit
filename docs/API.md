@@ -4845,7 +4845,13 @@ A point request that a running job already answers returns that job with **200**
 instead of **201**, and starts no second probe. It joins when it has the same source;
 its frequency is within the running job's `max(1 kHz, bw/2)`; its `protocols` are
 contained in the running job's; and it asks no more than that job does (`exhaustive`,
-`record`, a longer `timeoutMs`, a wait the job does not have). A running job with no
+`record`, a longer `timeoutMs`, a wait the job does not have); and the job's remaining
+wait covers at least 90 % of what the request asks (`IDENTIFY_JOIN_COVERED_FRACTION`).
+At the default 15 s, a repeat joins for the first 1.5 s, so a client retry starts nothing
+and still gets at least 13.5 s of listening; a job that has its signal and is running
+trials joins at any time, unless a gated timeout will cut them first. A later request is a new job with
+its own full wait. If another job holds the probe slot, its runs queue for up to 3 s, then
+end `skipped-budget` (`could-not-test`, `why: "budget"`). A running job with no
 `protocols` contains a named one only once its plan holds a runnable trial for it. A
 finished job or a finished target never joins, and `target.all` never does. An epoch change preserves an
 established single-target deadline; collected `all` targets may receive a
@@ -4933,8 +4939,11 @@ given, or a bound is broken:
 ```
 
 409 `OUT_OF_WINDOW` with `details.window` and `details.next`, the call that fixes it.
-The suggested centre is half the usable half span from the target, at most 100 kHz,
-so the target does not land on the DC spike:
+The room is the usable half span minus half the target's `bandwidthHz`. The suggested
+centre is half the room from the target, at most 100 kHz; when that would land inside
+the 12.5 kHz DC exclusion it is the middle of what is left past it. So the target stays inside
+the window and off the DC spike. With under 12 501 Hz of room no centre fits, and `next`
+holds only `effect`, saying so, with no call to make:
 
 ```json
 {
@@ -4978,7 +4987,10 @@ Each final target carries `verdict`, the answer in one closed code. The lists ar
 One plausible trial that did not run withholds `undecodable`. Analog voice with no tone
 is `undecodable`, with `result.analog` beside it; a standard tone on a trusted frequency is
 `decoded` with the analog protocol. `verdict.protocol` is what was decoded or heard,
-otherwise the one protocol the request named. Older cores send no `verdict`. The job is listed,
+otherwise the one protocol the request named. `verdict.confirmedAcrossJobs: true`, only on
+`decoded` from a live dsd-fme probe run, says this job heard one burst and the match came first:
+a matching decode within the last 5 min on this signal, or an identity already accepted on it.
+Older cores send no `verdict`. The job is listed,
 cancellable and deletable once ended, but `pause`/`resume` answer 409
 `SCANNER_IDENTIFY_NOT_PAUSABLE` and `PATCH` 409
 `SCANNER_IDENTIFY_NOT_EDITABLE`. Identify jobs are not kept across a core

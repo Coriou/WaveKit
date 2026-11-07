@@ -58,8 +58,10 @@ import {
 } from "./confirm/double-match.js"
 import { interpretDirewolf } from "./confirm/direwolf.js"
 import {
+	identityValue,
 	interpretDsdFme,
 	guardDsdFmeEvidence,
+	linkProtocol,
 	toDsdFmeScannerEvent,
 	type DsdFmeScannerEvent,
 } from "./confirm/dsd-fme.js"
@@ -420,21 +422,6 @@ function dsd(
 	holdMs: number,
 ): ProbeMode {
 	return { decoderType: "dsd-fme", protocol, covers, options: { mode }, holdMs }
-}
-
-/** The scanner protocol a dsd-fme link line names (the same mapping the confirm interpreter keys on). */
-function linkLineProtocol(
-	line: DsdFmeLinkLine,
-	interp: InterpreterState,
-): ScannerProtocol {
-	switch (line.protocol) {
-		case "p25":
-			return "p25p1"
-		case "nxdn":
-			return interp.nxdn
-		default:
-			return line.protocol
-	}
 }
 
 function keepRequested(
@@ -1838,7 +1825,12 @@ export class ProbePool extends EventEmitter {
 					line.crcErr === false &&
 					(line.fecErrs ?? 0) === 0
 				if (clean)
-					this.reportUnpaired(rec, linkLineProtocol(line, rec.interp), evs)
+					this.reportUnpaired(
+						rec,
+						linkProtocol(line.protocol, rec.interp),
+						evs,
+						identityValue(line),
+					)
 				if (this.isStopping(rec)) return
 				this.deliver(rec, evs)
 			}
@@ -2221,22 +2213,26 @@ export class ProbePool extends EventEmitter {
 
 	/**
 	 * A decode the interpreter holds for its pair yields no evidence, so without this nobody could
-	 * tell it from silence. Tells listeners (identify) a live decode awaits its second occurrence.
+	 * tell it from silence. Tells listeners (identify) a live decode awaits its second occurrence,
+	 * with the value it pairs on when known. A line of a protocol this mode does not cover says
+	 * nothing about the protocol under test (an NXDN line in a DMR `auto` run), so it is not reported.
 	 * A listener failure is logged and never blocks the output.
 	 */
 	private reportUnpaired(
 		rec: ProbeRecord,
 		protocol: ScannerProtocol,
 		evs: readonly DecodeEvidence[],
+		value?: string,
 	): void {
 		if (
 			rec.transport.kind === "replay" ||
 			rec.epochEndedAt !== null ||
+			!rec.mode.covers.includes(protocol) ||
 			evs.some(ev => ev.identity !== undefined)
 		)
 			return
 		try {
-			this.emit("unpaired-decode", rec.probeId, rec.req, protocol)
+			this.emit("unpaired-decode", rec.probeId, rec.req, protocol, value)
 		} catch (err: unknown) {
 			this.log.warn(
 				{ err, probeId: rec.probeId },

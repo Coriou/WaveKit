@@ -25,6 +25,8 @@ export interface IdentifyVerdictInput {
 	/** A protocol a live trial heard without confirming it (a sync, or one checked decode). */
 	heard: ScannerProtocol | null
 	stopped: IdentifyStopCause | null
+	/** The decode that gave the identity pairs with a match from before this job. */
+	confirmedAcrossJobs?: boolean
 }
 
 const KNOWN_OUTCOMES: ReadonlySet<ScannerTrialOutcome> = new Set(
@@ -121,7 +123,13 @@ function mapVerdict(v: IdentifyVerdictInput): ScannerIdentifyVerdict {
 		r.protocol !== undefined &&
 		(r.identity !== undefined || r.alreadyDecoded !== undefined || tone)
 	)
-		return { code: "decoded", protocol: r.protocol }
+		return {
+			code: "decoded",
+			protocol: r.protocol,
+			...(v.confirmedAcrossJobs === true && r.identity !== undefined
+				? { confirmedAcrossJobs: true as const }
+				: {}),
+		}
 	// An identity capped below decoded, a lone sync, or one checked decode. Never `decoded`.
 	const capped =
 		r.identity !== undefined &&

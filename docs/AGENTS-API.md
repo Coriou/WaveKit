@@ -416,8 +416,11 @@ curl --fail-with-body --header "$AUTH" "$API_ORIGIN/api/scanner/jobs/<id>"
 ```
 
 **201** started a job. **200** means a running job already asks this, and you have that job: same
-source, a frequency within its `max(1 kHz, bw/2)`, your `protocols` contained in its own, and asking
-no more than it does. A finished job is never reused.
+source, a frequency within its `max(1 kHz, bw/2)`, your `protocols` contained in its own, asking no
+more than it does, and with at least 90 % of the wait you asked for still left (a job already running
+trials on the signal joins too). Repeating a 15 s request joins for its first 1.5 s; later it starts a new job, whose
+runs wait up to 3 s for the probe slot if another job holds it, then answer `could-not-test` (`budget`).
+A finished job is never reused.
 
 Read `identify.targets[0].verdict` once the target is final. Say only what it says:
 
@@ -429,25 +432,32 @@ Read `identify.targets[0].verdict` once the target is final. Say only what it sa
 | `nothing`                   | No signal within `timeoutMs`                                               |
 | `could-not-test`            | No answer. `verdict.why` says why; do not read it as "not DMR"             |
 
-`decoded` needs two decodes at least 2 s apart, so a continuous transmission takes about 2.5 s from
-its first decode and a single short burst stays `heard-digital-unconfirmed`. The lists are in `GET /api/enums`
-(`scanner.identifyVerdictCodes`, `scanner.identifyVerdictWhy`).
+`decoded` needs two matching decodes 2 s to 5 min apart, so a continuous transmission takes about 2.5 s
+from its first decode, and a single short burst with no earlier match stays `heard-digital-unconfirmed`.
+The lists are in `GET /api/enums` (`scanner.identifyVerdictCodes`, `scanner.identifyVerdictWhy`).
+
+`verdict.confirmedAcrossJobs: true` on a `decoded` means this request heard one burst and the match came
+earlier: a matching decode within the last 5 min on this signal, or an identity already accepted on it.
+That earlier decode may be another request's, or a scan's. Say "it was DMR on this signal a moment ago and
+this burst matches", not "two decodes just now". It is set for dsd-fme protocols (DMR, P25, NXDN, YSF,
+D-STAR, dPMR) on a live probe run; a decode from an ambient decoder or a pager does not set it.
 
 A signal that comes and goes: send `"waitUntilSignal": true`, with `waitMs` for how long.
 
 **When it answers 409**, `details.next` is the call to make, in fixed text:
 
 - `OUT_OF_WINDOW`: the frequency is outside the tuned window (`details.window`). `next` is a
-  `POST /api/tuner/:sourceId/tune` with a `frequencyHz` that puts the target off the DC spike. It moves
-  the receiver for everyone, so decide that first; then ask again.
+  `POST /api/tuner/:sourceId/tune` with a `frequencyHz` that puts the target and its `bandwidthHz` inside
+  the window, off the DC spike. It moves the receiver for everyone, so decide that first; then ask again.
+  If no centre fits at this sample rate, `next` has only `effect`, saying so: no `method`, no call to make.
 - `SCANNER_SOURCE_BUSY`: a sweep holds the tuner, and identify needs a still window. `next` adds
   `preempt: true`. That pauses the job (it fails if it was still starting) and no restore comes; read
   `preempted.autoAfterIdleMs` in the answer, because `null` means it stays paused until someone calls
   `POST /api/scanner/jobs/:id/resume`. See [When a scan holds the tuner](#when-a-scan-holds-the-tuner).
   With `details.reason: "relay"` there is no `next`: a relay client has the tuner.
 
-**What it costs.** Each trial is one offset probe, 0.5 core of the 1-core `cpuBudgetCores` by default,
-one at a time. `timeoutMs` (default 15 s, at most 120 s) bounds the wait for a signal, not the trials.
+**What it costs.** Each live probe run is one offset probe, 0.5 core of the 1-core `cpuBudgetCores`
+by default, one at a time; ambient and live-audio trials start no probe, they read what already runs. `timeoutMs` (default 15 s, at most 120 s) bounds the wait for a signal, not the trials.
 A DMR trial lasts about 2.2 s on silence and at most about 5.3 s after a first decode. Naming
 `protocols` keeps it to the trials you need; without it every plausible decoder takes its turn.
 

@@ -18,6 +18,8 @@ import {
 } from "./store/decode-anchor.js"
 import { DQ_DATA_HOLD_MS } from "./data-decode-gate.js"
 import { CONFIRM_MIN_SEPARATION_MS } from "./probes/confirm/confirm-memory.js"
+import { isDsdFmeProtocol } from "./probes/confirm/dsd-fme.js"
+import { DQ_DC_ADMIT_HZ } from "./detection-quality-contract.js"
 import {
 	identifyTargetVerdict,
 	type IdentifyStopCause,
@@ -141,6 +143,19 @@ export const IDENTIFY_MIN_HOLD_MS = 1800
 export const IDENTIFY_PAIR_SLACK_MS = 1080
 export const IDENTIFY_PAIR_WAIT_MS =
 	CONFIRM_MIN_SEPARATION_MS + IDENTIFY_PAIR_SLACK_MS
+/**
+ * First decodes one target remembers, for telling a pair inside the job from one that reaches back
+ * before it. A run hears at most 5 280 / 60 = 88 lines (a 60 ms DMR burst each), so 256 holds about
+ * three runs of all-different values. Past it the oldest goes, and a value forgotten reads as not
+ * heard here: `confirmedAcrossJobs`, the stricter thing to say.
+ */
+export const IDENTIFY_OWN_DECODES_MAX = 256
+/**
+ * A running job answers a new request once it can still listen for this share of what the request
+ * asks. A repeat of the default 15 000 ms request joins for its first 1 500 ms (a client retry, or a
+ * voice assistant asking twice) and gets at least 13 500 ms; later it is a new job.
+ */
+export const IDENTIFY_JOIN_COVERED_FRACTION = 0.9
 /** A run that gets no probe slot within this time is reported `skipped-budget`. */
 export const IDENTIFY_QUEUE_WAIT_MS = 3000
 /** Trials are planned once the track has 300 ms of envelope at 50 ms blocks (the § 6.2 ACF test), or closed. */
@@ -373,23 +388,111 @@ export function identifyRequestJoins(
 	)
 }
 
+/**
+ * What is left of a running job's wait for a new request to compare, or null when there is no wait
+ * left to compare: the job has its signal and its trials are bounded by their holds.
+ */
+export type IdentifyWaitLeft = {
+	ms: number
+	/** Still waiting for a gated transmission (`waitUntilSignal`), so `ms` compares with `waitMs`. */
+	awaitingGate: boolean
+} | null
+
+/**
+ * Whether a running job's remaining wait covers what `req` asks: `waitMs` while the job still waits
+ * for a gate and the request would too, else `timeoutMs`; see IDENTIFY_JOIN_COVERED_FRACTION. A
+ * request this says no to is a new job (it gets its own full wait, and queues for a probe slot like
+ * any other run: IDENTIFY_QUEUE_WAIT_MS, then `skipped-budget`, when the slot stays taken).
+ */
+export function identifyWaitCovered(
+	req: NormalisedIdentify,
+	left: IdentifyWaitLeft,
+): boolean {
+	if (left === null) return true
+	const asked =
+		left.awaitingGate && req.waitUntilSignal === true
+			? Math.min(
+					Math.max(
+						req.waitMs ?? IDENTIFY_WAIT_DEFAULT_MS,
+						IDENTIFY_WAIT_MIN_MS,
+					),
+					IDENTIFY_WAIT_MAX_MS,
+				)
+			: req.timeoutMs
+	return left.ms >= asked * IDENTIFY_JOIN_COVERED_FRACTION
+}
+
+/** Remembers a decode's first time on this target; see IDENTIFY_OWN_DECODES_MAX. */
+export function noteOwnDecode(
+	seen: Map<string, number>,
+	key: string,
+	at: number,
+): void {
+	if (seen.has(key)) return
+	seen.set(key, at)
+	if (seen.size <= IDENTIFY_OWN_DECODES_MAX) return
+	const oldest = seen.keys().next()
+	if (oldest.done !== true) seen.delete(oldest.value)
+}
+
+/**
+ * Whether an accepted identity's pair reaches back before this job. Acceptance needs two decodes
+ * at least CONFIRM_MIN_SEPARATION_MS apart, so a first decode here closer than that (or none) cannot
+ * be the other half: the match is older than anything this job heard.
+ */
+export function pairPredatesJob(
+	firstOwnAt: number | undefined,
+	now: number,
+): boolean {
+	return (
+		firstOwnAt === undefined || now - firstOwnAt < CONFIRM_MIN_SEPARATION_MS
+	)
+}
+
 /** How far a suggested tune puts the target from the new centre at most. */
 const IDENTIFY_TUNE_OFFSET_HZ = 100_000
+/** The DC exclusion is `offset > DQ_DC_ADMIT_HZ`: the smallest whole Hz past it. */
+const IDENTIFY_TUNE_MIN_OFFSET_HZ = DQ_DC_ADMIT_HZ + 1
 
 /**
  * The centre to tune so a target is identifiable: never the target itself, where the DC mask answers
- * "dc" without a trial and DQ_DC_ADMIT_HZ (12.5 kHz) refuses most identities. Half of the usable
- * half span, at most 100 kHz: at 1.024 Msps the usable half span is 409.6 kHz, so 100 kHz; at the
- * lowest rate, 225 001 Hz, it is 90 000 Hz, so 45 kHz. Both are past 12.5 kHz and inside the window.
+ * "dc" without a trial and DQ_DC_ADMIT_HZ (12.5 kHz) refuses most identities. The room is the usable
+ * half span minus half the target's bandwidth. The offset is half of it, at most 100 kHz: at 1.024
+ * Msps and no bandwidth the usable half span is 409.6 kHz, so 100 kHz; at the lowest rate, 225 001 Hz,
+ * it is 90 000 Hz, so 45 kHz. When half the room would fall inside the DC exclusion the offset is
+ * the middle of what is left: 225 001 Hz and 150 000 Hz leave 15 000.4 Hz of room, so about 13 750 Hz,
+ * about 1 250 Hz from either limit. Null when no offset fits: under 12 501 Hz of room.
  */
 export function identifyTuneCentreHz(
 	targetHz: number,
 	window: { sampleRateHz: number } | null,
-): number {
-	const half = window ? (window.sampleRateHz * USABLE_FRACTION) / 2 : Infinity
-	return Math.round(targetHz - Math.min(IDENTIFY_TUNE_OFFSET_HZ, half / 2))
+	bandwidthHz = 0,
+): number | null {
+	const room =
+		(window ? (window.sampleRateHz * USABLE_FRACTION) / 2 : Infinity) -
+		bandwidthHz / 2
+	if (room < IDENTIFY_TUNE_MIN_OFFSET_HZ) return null
+	const half = Math.min(IDENTIFY_TUNE_OFFSET_HZ, room / 2)
+	const offset =
+		half >= IDENTIFY_TUNE_MIN_OFFSET_HZ
+			? half
+			: (IDENTIFY_TUNE_MIN_OFFSET_HZ + room) / 2
+	const centreHz = Math.round(targetHz - offset)
+	// Rounding moves the offset by up to 0.5 Hz: the answer is checked as the service will check it.
+	const fits =
+		Math.abs(targetHz - centreHz) > DQ_DC_ADMIT_HZ &&
+		(!window ||
+			inWindow(
+				targetHz,
+				bandwidthHz,
+				{ centreHz, sampleRateHz: window.sampleRateHz },
+				USABLE_FRACTION,
+			))
+	return fits ? centreHz : null
 }
 
+const NEXT_NO_CENTRE_EFFECT =
+	"No retune helps at this sample rate: the target's bandwidth does not fit the usable window clear of the DC spike. Ask again with a smaller bandwidthHz, or raise the sample rate first."
 const NEXT_TUNE_EFFECT =
 	"Moves the receiver, and anything listening in the old window with it. Then repeat this identify request; the centre suggested keeps the target off the DC spike."
 const NEXT_PREEMPT_EFFECT =
@@ -408,6 +511,23 @@ export function identifyNextStep(
 		effect: preempt ? NEXT_PREEMPT_EFFECT : NEXT_TUNE_EFFECT,
 		then: { method: "POST", path: "/api/scanner/identify" },
 	}
+}
+
+/** `details.next` for a point target: the tune that fits it, or fixed text saying none does. */
+export function identifyTargetNextStep(
+	sourceId: string,
+	target: { frequencyHz: number; bandwidthHz?: number },
+	window: { sampleRateHz: number } | null,
+	preempt: boolean,
+): Record<string, unknown> {
+	const centreHz = identifyTuneCentreHz(
+		target.frequencyHz,
+		window,
+		target.bandwidthHz ?? 0,
+	)
+	return centreHz === null
+		? { effect: NEXT_NO_CENTRE_EFFECT }
+		: identifyNextStep(sourceId, centreHz, preempt)
 }
 
 export function inWindow(
@@ -1392,6 +1512,10 @@ interface TargetState {
 	analogDue: Map<AbortController, number>
 	/** A protocol a live trial heard without confirming it: a sync, or one checked decode. */
 	heard: ScannerProtocol | null
+	/** This target's first checked decode per protocol and value; see IDENTIFY_OWN_DECODES_MAX. */
+	ownDecodes: Map<string, number>
+	/** `decoded` paired with a match from before this job. */
+	confirmedAcrossJobs: boolean
 	/** What stopped the job before this target finished, if anything did. */
 	stopped: IdentifyStopCause | null
 }
@@ -1476,11 +1600,32 @@ export class IdentifyRunner implements JobDriver {
 	/** Whether `req` is answered by this job (see identifyRequestJoins). */
 	joins(req: NormalisedIdentify): boolean {
 		if (this.phase === "finished") return false
-		return identifyRequestJoins(
-			this.deps.identify,
-			this.targets.map(t => ({ state: t.state, trials: t.trials })),
-			req,
+		return (
+			identifyRequestJoins(
+				this.deps.identify,
+				this.targets.map(t => ({ state: t.state, trials: t.trials })),
+				req,
+			) && identifyWaitCovered(req, this.waitLeft(this.deps.now()))
 		)
+	}
+
+	/** What is left of this point-target job's wait; see IdentifyWaitLeft. */
+	private waitLeft(now: number): IdentifyWaitLeft {
+		const t = this.targets[0]
+		const identify = this.deps.identify
+		if (!t) return { ms: identify.timeoutMs, awaitingGate: false }
+		if (this.blockingOnGate(t))
+			return {
+				ms: this.signalStarted() + this.signalWaitMs() - now,
+				awaitingGate: true,
+			}
+		// A gate's timeout ends the trials too, so it is a wait left even while they run.
+		if (t.gate === null && t.view !== null) return null
+		// An infinite deadline is one that already passed (the last artefact check is running).
+		return {
+			ms: Number.isFinite(t.deadline) ? t.deadline - now : 0,
+			awaitingGate: false,
+		}
 	}
 
 	// === JobDriver ===
@@ -1797,6 +1942,8 @@ export class IdentifyRunner implements JobDriver {
 			analogAbort: [],
 			analogDue: new Map(),
 			heard: null,
+			ownDecodes: new Map(),
+			confirmedAcrossJobs: false,
 			stopped: null,
 		}
 		this.targets.push(t)
@@ -2679,12 +2826,26 @@ export class IdentifyRunner implements JobDriver {
 		if (ev.identity) seen.identity = ev.identity
 		hit.r.seen.set(ev.protocol, seen)
 		if (!ev.identity) {
-			// CRC failures are `crc-errors` (undecodable), not a protocol heard.
-			if (ev.crcClean) hit.t.heard ??= ev.protocol
+			// CRC failures are `crc-errors` (undecodable), not a protocol heard. Nor is a protocol this
+			// mode does not cover: a sync of it says nothing about what this run tests.
+			if (ev.crcClean && hit.r.run.mode.covers.includes(ev.protocol))
+				hit.t.heard ??= ev.protocol
 			return
 		}
 		this.countDecode(hit.t)
-		hit.t.decoded ??= { protocol: ev.protocol, identity: ev.identity }
+		if (!hit.t.decoded) {
+			hit.t.decoded = { protocol: ev.protocol, identity: ev.identity }
+			// dsd-fme identities only ever come from a pair, and the pool reports each covered decode
+			// that does not complete one. Other decoders may accept one message alone: not knowable here.
+			hit.t.confirmedAcrossJobs =
+				!hit.r.replay &&
+				isDsdFmeProtocol(ev.protocol) &&
+				hit.r.run.mode.covers.includes(ev.protocol) &&
+				pairPredatesJob(
+					hit.t.ownDecodes.get(`${ev.protocol}\u0000${ev.identity.value}`),
+					this.deps.now(),
+				)
+		}
 		// WG11 req 6.5: a live decode discards the observation's captures that were not replayed yet.
 		if (!hit.r.replay) this.confirmLive(req.observationId)
 		if (!this.deps.identify.exhaustive) this.endRun(hit.t, hit.r, "decoded")
@@ -2698,11 +2859,14 @@ export class IdentifyRunner implements JobDriver {
 		probeId: string,
 		req: ProbeRequest,
 		protocol: ScannerProtocol,
+		value?: string,
 	): void => {
 		if (req.jobId !== this.record.id) return
 		const hit = this.findRun(r => r.probeId === probeId)
 		if (!hit) return
 		const { t, r } = hit
+		if (value !== undefined)
+			noteOwnDecode(t.ownDecodes, `${protocol}\u0000${value}`, this.deps.now())
 		const seen = r.seen.get(protocol) ?? {
 			output: false,
 			crcFailures: 0,
@@ -3722,6 +3886,7 @@ export class IdentifyRunner implements JobDriver {
 							requested: this.deps.identify.protocols,
 							heard: t.heard,
 							stopped: t.stopped,
+							confirmedAcrossJobs: t.confirmedAcrossJobs,
 						}),
 					}
 				: {}),

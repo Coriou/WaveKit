@@ -111,6 +111,14 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 				},
 			},
 		})
+		// 1 MHz of bandwidth does not fit ± 409.6 kHz anywhere: no call, and a reason.
+		const tooWide = { frequencyHz: CENTRE + 600_000, bandwidthHz: 1_000_000 }
+		const refusal = await h.service
+			.identify({ sourceId: "rtl", target: tooWide })
+			.catch((err: unknown) => err as { details: { next: object } })
+		expect((refusal as { details: { next: object } }).details.next).toEqual({
+			effect: expect.stringContaining("No retune helps") as string,
+		})
 		await h.service.createJob({
 			sourceId: "rtl",
 			mode: "sweep",
@@ -119,6 +127,14 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 			resume: { autoAfterIdleMs: null },
 		})
 		await settled(h.service)
+		await expect(
+			h.service.identify({ sourceId: "rtl", target: tooWide }),
+		).rejects.toMatchObject({
+			code: "SCANNER_SOURCE_BUSY",
+			details: {
+				next: { effect: expect.stringContaining("No retune helps") as string },
+			},
+		})
 		await expect(
 			h.service.identify({ sourceId: "rtl", target: { frequencyHz: CENTRE } }),
 		).rejects.toMatchObject({

@@ -173,7 +173,7 @@ import {
 	IDENTIFY_KEEP_JOBS,
 	IdentifyRunner,
 	identifyNextStep,
-	identifyTuneCentreHz,
+	identifyTargetNextStep,
 	inWindow,
 	normaliseIdentify,
 	type NormalisedIdentify,
@@ -2706,11 +2706,7 @@ export class ScannerService extends EventEmitter {
 									},
 								}
 							: {}),
-						next: identifyNextStep(
-							n.sourceId,
-							identifyTuneCentreHz(target.frequencyHz, window),
-							false,
-						),
+						next: identifyTargetNextStep(n.sourceId, target, window, false),
 					},
 				)
 			}
@@ -2782,13 +2778,11 @@ export class ScannerService extends EventEmitter {
 		target: NormalisedIdentify["target"],
 	): { next?: Record<string, unknown> } {
 		const window = this.identifyWindow(sourceId)
-		const frequencyHz =
-			"all" in target
-				? window?.centreHz
-				: identifyTuneCentreHz(target.frequencyHz, window)
-		return frequencyHz === undefined
-			? {}
-			: { next: identifyNextStep(sourceId, frequencyHz, true) }
+		if (!("all" in target))
+			return { next: identifyTargetNextStep(sourceId, target, window, true) }
+		return window
+			? { next: identifyNextStep(sourceId, window.centreHz, true) }
+			: {}
 	}
 
 	// === discoveries and evidence ===
