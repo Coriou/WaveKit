@@ -3267,9 +3267,9 @@ export class TunerController extends EventEmitter {
 			if (partnerSeq === undefined || desired.has(field)) continue
 			this.sourceManager.assertTunerCommandActive()
 			const modeFirst = state.gainMode === "manual"
-			// A gain index is a manual gain: the mode goes first.
-			const before =
-				partner === "tunerGainIndex" || (field === "gainMode") === modeFirst
+			// Manual: the mode goes before its gain or gain index. AGC: after them, since either one
+			// written after AGC selects manual on the receiver.
+			const before = (field === "gainMode") === modeFirst
 			// Strictly between the partner and its neighbour on that side, so no other field moves;
 			// never past the newest sequence, which a pause marker compares with.
 			let neighbour = before ? partnerSeq - 1 : Number.POSITIVE_INFINITY

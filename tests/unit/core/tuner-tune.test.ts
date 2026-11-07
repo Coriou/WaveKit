@@ -601,6 +601,36 @@ describe("tune in one call", () => {
 			expect(h.read().unknownFields ?? []).not.toContain("gainMode")
 		})
 
+		it("an unchanged AGC beside a held gain index replays after the index", async () => {
+			const h = await setup({ tuner: { gainMode: "agc" } })
+			await until(() => h.frames.some(f => f.cmd === SET_GAIN_MODE))
+			await h.controller.setTunerGainIndex("rtl", 2)
+			await h.post({ gainMode: "agc" })
+			h.fakeTime()
+			await reconnect(h)
+			const connection = h.connections()
+			const marker = connection + 10
+			await h.controller.setPpm("rtl", marker)
+			await until(() =>
+				h.frames.some(
+					f =>
+						f.connection === connection &&
+						f.cmd === SET_PPM &&
+						f.value === marker,
+				),
+			)
+			const order = h.frames
+				.filter(
+					f =>
+						f.connection === connection &&
+						(f.cmd === SET_GAIN_MODE || f.cmd === SET_TUNER_GAIN_INDEX),
+				)
+				.map(f => [f.cmd, f.value])
+			expect(order.at(-1)).toEqual([SET_GAIN_MODE, 0])
+			expect(order).toContainEqual([SET_TUNER_GAIN_INDEX, 2])
+			expect(h.read().gainMode).toBe("agc")
+		})
+
 		it("from manual to AGC with a gain, with a rate change: no partial, gain before AGC", async () => {
 			const h = await setup({ tuner: { gainMode: "manual", gainDb: 20 } })
 			await until(() => h.frames.some(f => f.cmd === SET_GAIN))
