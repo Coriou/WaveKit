@@ -264,6 +264,7 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > status DTO while runn
       "since": "<iso>",
       "underruns": 0,
       "wavUrl": "http://localhost:45678/auto.wav",
+      "zeroFilledSamples": 0,
     },
     "autoSquelch": {
       "state": "off",
@@ -322,6 +323,7 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > status DTO while runn
       "since": "<iso>",
       "underruns": 0,
       "wavUrl": "http://localhost:45678/auto.wav",
+      "zeroFilledSamples": 0,
     },
     "autoSquelch": {
       "state": "off",
