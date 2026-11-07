@@ -3256,12 +3256,20 @@ export class TunerController extends EventEmitter {
 		const state = this.tunerStates.get(sourceId)
 		if (!desired || !state) return
 		for (const field of fields) {
-			const partner = field === "gain" ? "gainMode" : "gain"
+			// A held tuner gain index also skips the configured pair, so it partners the mode too.
+			const partner =
+				field === "gain"
+					? "gainMode"
+					: desired.has("gain")
+						? "gain"
+						: "tunerGainIndex"
 			const partnerSeq = desired.get(partner)
 			if (partnerSeq === undefined || desired.has(field)) continue
 			this.sourceManager.assertTunerCommandActive()
 			const modeFirst = state.gainMode === "manual"
-			const before = (field === "gainMode") === modeFirst
+			// A gain index is a manual gain: the mode goes first.
+			const before =
+				partner === "tunerGainIndex" || (field === "gainMode") === modeFirst
 			// Strictly between the partner and its neighbour on that side, so no other field moves;
 			// never past the newest sequence, which a pause marker compares with.
 			let neighbour = before ? partnerSeq - 1 : Number.POSITIVE_INFINITY

@@ -49,6 +49,7 @@ const SET_FREQUENCY = 1
 const SET_GAIN_MODE = 3
 const SET_GAIN = 4
 const SET_PPM = 5
+const SET_TUNER_GAIN_INDEX = 0x0d
 const START_RATE = 1_024_000
 const START_HZ = 100_000_000
 const OTHER_RATE = 2_400_000
@@ -564,6 +565,40 @@ describe("tune in one call", () => {
 			])
 			expect(h.read()).toMatchObject({ gainMode: "manual", gain: G })
 			expect(h.read().unknownFields ?? []).not.toContain("gain")
+		})
+
+		it("the configured manual mode asked again beside a held gain index survives a reconnect", async () => {
+			const h = await setup({ tuner: { gainMode: "manual", gainDb: 44.5 } })
+			await until(() => h.frames.some(f => f.cmd === SET_GAIN))
+			await h.controller.setTunerGainIndex("rtl", 2)
+			const res = await h.post({ gainMode: "manual" })
+			expect(res.json()).toMatchObject({ notApplied: [] })
+			h.fakeTime()
+			await reconnect(h)
+			const connection = h.connections()
+			const marker = connection + 10
+			await h.controller.setPpm("rtl", marker)
+			await until(() =>
+				h.frames.some(
+					f =>
+						f.connection === connection &&
+						f.cmd === SET_PPM &&
+						f.value === marker,
+				),
+			)
+			const order = h.frames
+				.filter(
+					f =>
+						f.connection === connection &&
+						(f.cmd === SET_GAIN_MODE || f.cmd === SET_TUNER_GAIN_INDEX),
+				)
+				.map(f => [f.cmd, f.value])
+			expect(order).toEqual([
+				[SET_GAIN_MODE, 1],
+				[SET_TUNER_GAIN_INDEX, 2],
+			])
+			expect(h.read().gainMode).toBe("manual")
+			expect(h.read().unknownFields ?? []).not.toContain("gainMode")
 		})
 
 		it("from manual to AGC with a gain, with a rate change: no partial, gain before AGC", async () => {
