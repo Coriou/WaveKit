@@ -26,6 +26,11 @@ export const accessBootstrapRoutes: FastifyPluginAsync<
 		method: ["GET", "HEAD"],
 		url: "/api/access/bootstrap",
 		exposeHeadRoute: false,
+		schema: {
+			summary: "What a browser needs to start pairing",
+			tags: ["access"],
+			security: [],
+		},
 		// WebSocket's route wrapper runs before the HTTP handler; reject upgrades here.
 		preHandler: (request, reply, done) => {
 			reply.serializer(value => JSON.stringify(value))

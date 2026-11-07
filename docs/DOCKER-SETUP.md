@@ -381,6 +381,11 @@ curl http://localhost:9000/health
 # {"status":"ok","timestamp":"..."}
 ```
 
+A protected core that lost its private access directory answers `/health` with
+503 and `reason` `access_authority_lost`, so the container reads `unhealthy`. Docker
+does not restart an unhealthy container and s6 does not watch health, so restart it
+yourself: [what happens and why](SECURITY.md#when-a-core-loses-its-private-directory).
+
 `sdrpp-server` does not expose HTTP. Its healthcheck probes TCP 5259
 directly via `bash -c '</dev/tcp/localhost/5259'`.
 
@@ -734,7 +739,8 @@ the host file; it needs no `docker exec`. The credential lives in
 and a recreated container. `docker compose down -v` deletes that volume and the
 credential with it; a new setup creates a different one. See
 [Get a machine token](AGENTS-API.md#get-a-machine-token) for how a client uses
-the file.
+the file, including the private header file that keeps the token off a `curl`
+command line.
 
 #### Rotate the machine credential
 
@@ -787,6 +793,10 @@ or a stalled core's last write landed after it. The old token stays refused. Run
 the first rotation command above again, then export the token and start the core.
 `--keep-sessions` is refused in this state and changes nothing, so every browser
 pairs again. See [Protected runtime](API.md#protected-runtime-opt-in).
+
+After restoring the private volume from a backup, rotate before starting the core,
+and never delete `credential-fence.json`. An `ACCESS_STORAGE_UNSAFE` refusal has its
+repair in the same place: [Backups and the fence](SECURITY.md#backups-and-the-fence).
 
 #### Exposure audit
 

@@ -58,13 +58,26 @@ const livenessResponseSchema = {
 } as const
 
 /**
+ * Protected mode: this core lost its private access directory and denies every credential until
+ * it restarts. A status code, not a 200 "degraded": the compose healthchecks go by it (curl
+ * --fail), and the CLI's probe knows only "ok" and "unhealthy".
+ */
+const ACCESS_AUTHORITY_LOST = "access_authority_lost"
+
+/** OpenAPI: these two need no credential, whatever the document's global bearer says. */
+const PUBLIC_OPERATION = { security: [] }
+
+/**
  * GET /health 503 body: the health check is unhealthy, with a fixed reason code
  */
 const unhealthyResponseSchema = {
 	type: "object",
 	properties: {
 		status: { type: "string", enum: ["unhealthy"] },
-		reason: { type: "string", enum: ["api_down", "all_decoders_down"] },
+		reason: {
+			type: "string",
+			enum: ["api_down", "all_decoders_down", ACCESS_AUTHORITY_LOST],
+		},
 		timestamp: { type: "string", format: "date-time" },
 	},
 	required: ["status", "reason", "timestamp"],
@@ -310,7 +323,7 @@ export interface LivenessResponse {
 /** GET /health 503 body */
 export interface UnhealthyResponse {
 	status: "unhealthy"
-	reason: UnhealthyReason
+	reason: UnhealthyReason | typeof ACCESS_AUTHORITY_LOST
 	timestamp: string
 }
 
@@ -359,6 +372,8 @@ export interface HealthRoutesOptions {
 	tunerRelay?: TunerRelay | undefined
 	/** Whether SDR++ server is expected to be running (full mode) */
 	sdrppEnabled?: boolean | undefined
+	/** Protected mode only: true once only a restart can bring credentials back. */
+	accessAuthorityLost?: (() => boolean) | undefined
 }
 
 /**
@@ -376,6 +391,7 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 		audioConfig,
 		tunerRelay,
 		sdrppEnabled,
+		accessAuthorityLost,
 	} = options
 
 	/**
@@ -391,6 +407,7 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 				summary: "Health check",
 				description:
 					"Returns quick liveness status. Returns 200 OK when healthy, 503 with the reason when unhealthy.",
+				...PUBLIC_OPERATION,
 				response: {
 					200: livenessResponseSchema,
 					503: unhealthyResponseSchema,
@@ -403,6 +420,15 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 			})
 
 			const timestamp = new Date().toISOString()
+
+			if (accessAuthorityLost?.()) {
+				const body: UnhealthyResponse = {
+					status: "unhealthy",
+					reason: ACCESS_AUTHORITY_LOST,
+					timestamp,
+				}
+				return reply.status(503).send(body)
+			}
 
 			// Return 503 if unhealthy (Requirement 4.2)
 			if (healthStatus.status === "unhealthy") {
@@ -467,6 +493,7 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 				tags: ["health"],
 				summary: "Liveness probe",
 				description: "Returns 200 when process is alive.",
+				...PUBLIC_OPERATION,
 				response: {
 					200: livenessResponseSchema,
 				},

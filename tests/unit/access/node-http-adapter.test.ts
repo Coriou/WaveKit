@@ -90,6 +90,8 @@ async function fixture(
 	})
 	const created = await sessions.create()
 	if (created.kind !== "created") throw new Error("Expected session")
+	let authorityLost = false
+	const lossListeners = new Set<() => void>()
 	const policy = new AccessPolicy({
 		listenerScheme: "http",
 		allowedAuthorities: [authority],
@@ -97,6 +99,11 @@ async function fixture(
 		sessionCookieName: "wavekit_session",
 		machineSecretDigest: digest,
 		sessions,
+		credentialAuthorityLost: () => authorityLost,
+		onCredentialAuthorityLost: listener => {
+			lossListeners.add(listener)
+			return () => lossListeners.delete(listener)
+		},
 	})
 	const clock = timers()
 	const manager = new ConnectionLeases(sessions, {
@@ -170,6 +177,11 @@ async function fixture(
 		handle: (replacement: typeof handler) => {
 			handler = replacement
 		},
+		lossListeners,
+		loseAuthority: () => {
+			authorityLost = true
+			for (const listener of [...lossListeners]) listener()
+		},
 	}
 }
 
@@ -233,6 +245,45 @@ function bearer(token: string) {
 function cookie(value: string) {
 	return ["Cookie", `wavekit_session=${value}`, "Origin", origin]
 }
+
+describe("credential authority lost", () => {
+	it("cuts machine and session audio streams and denies new ones", async () => {
+		const env = await fixture({ live: true })
+		const machine = await open(env.port, bearer(env.token))
+		const session = await open(env.port, cookie(env.created.cookieValue))
+		expect(env.activeClients()).toBe(2)
+		env.loseAuthority()
+		await Promise.all([machine.ended, session.ended])
+		expect(env.activeClients()).toBe(0)
+		expect(env.cleanup).toHaveBeenCalledTimes(2)
+		const denied = await read(env.port, bearer(env.token))
+		expect(denied.status).toBe(503)
+		expect(JSON.parse(denied.body.toString())).toEqual({
+			code: "ACCESS_UNAVAILABLE",
+		})
+	})
+
+	it("refuses a stream a request admitted before the loss tries to open after it", async () => {
+		const env = await fixture({ live: true })
+		const outcome: string[] = []
+		env.handle((req, res) => {
+			const context = env.adapter.admit(req, res)
+			if (!context) return
+			env.loseAuthority()
+			outcome.push(env.adapter.leaseStream(context, res, () => {}).kind)
+		})
+		const answer = await read(env.port, bearer(env.token))
+		expect(outcome).toEqual(["rejected"])
+		expect(answer.status).toBe(503)
+	})
+
+	it("unsubscribes when disposed", async () => {
+		const env = await fixture()
+		expect(env.lossListeners.size).toBe(1)
+		env.adapter.dispose()
+		expect(env.lossListeners.size).toBe(0)
+	})
+})
 
 describe("unmounted original-request Node HTTP audio boundary", () => {
 	it("denies anonymous audio and audio /health before WAV bytes or client admission", async () => {

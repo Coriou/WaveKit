@@ -37,6 +37,7 @@ import Fastify, { type FastifyInstance, type FastifyError } from "fastify"
 import fastifyCors from "@fastify/cors"
 import fastifyWebsocket from "@fastify/websocket"
 import fastifySwagger from "@fastify/swagger"
+import type { SwaggerTransformObject } from "@fastify/swagger"
 import fastifySwaggerUi from "@fastify/swagger-ui"
 import {
 	createComponentLogger,
@@ -73,7 +74,7 @@ import { decoderOptionDescriptors } from "../decoders/options/index.js"
 import type { Config } from "../config.js"
 import { accessBootstrapRoutes } from "./routes/access-bootstrap.js"
 import { sourceRoutes } from "./routes/sources.js"
-import { registerRouteIndex } from "./routes/route-index.js"
+import { installRouteIndex, toOpenApi31Forms } from "./routes/route-index.js"
 import { enumRoutes } from "./routes/enums.js"
 import { decoderSummaryRoutes } from "./routes/decoder-summary.js"
 import { agentStatusRoutes } from "./routes/agent-status.js"
@@ -1141,7 +1142,7 @@ export class ApiServer {
 	 * Registers all Fastify plugins.
 	 */
 	private async registerPlugins(): Promise<void> {
-		registerRouteIndex(this.app)
+		const mountRouteIndex = installRouteIndex(this.app)
 		// CORS support for browser clients
 		if (!this.access)
 			await this.app.register(fastifyCors, {
@@ -1167,8 +1168,16 @@ export class ApiServer {
 
 		// Swagger/OpenAPI documentation
 		await this.app.register(fastifySwagger, {
+			transformObject: ((document: Parameters<SwaggerTransformObject>[0]) =>
+				toOpenApi31Forms(
+					"openapiObject" in document
+						? document.openapiObject
+						: document.swaggerObject,
+				)) satisfies SwaggerTransformObject,
 			openapi: {
-				openapi: "3.0.0",
+				// The route schemas use JSON Schema 2020-12 forms (numeric exclusiveMinimum,
+				// type "null"), which only 3.1 accepts; transformObject converts the rest.
+				openapi: "3.1.0",
 				info: {
 					title: "WaveKit API",
 					description: "SDR stream processing framework REST API",
@@ -1189,6 +1198,10 @@ export class ApiServer {
 				tags: [
 					{ name: "system", description: "API discovery" },
 					{ name: "health", description: "Health check endpoints" },
+					{
+						name: "access",
+						description: "Browser pairing, sessions and devices",
+					},
 					{ name: "recordings", description: "Recording inventory" },
 					{ name: "sources", description: "SDR source management" },
 					{ name: "decoders", description: "Decoder management" },
@@ -1210,6 +1223,9 @@ export class ApiServer {
 				],
 			},
 		})
+
+		// After swagger: its onRoute hook documents only the routes added once it loaded.
+		mountRouteIndex()
 
 		this.log.debug("Swagger plugin registered")
 
@@ -1500,6 +1516,9 @@ export class ApiServer {
 			audioOutput: this.audioOutput,
 			audioConfig: this.audioConfig,
 			tunerRelay: this.tunerRelay,
+			accessAuthorityLost: this.access
+				? () => this.access?.api.policy.credentialAuthorityLost === true
+				: undefined,
 		})
 
 		// Register source routes (Requirement 9.3, 9.4, 9.5)

@@ -11,6 +11,7 @@ import type {
 	NamedAccessRuntimeContext,
 	NamedAccessRuntimeOptions,
 } from "../../../src/access/runtime-context.js"
+import { toOpenApi31Forms } from "../../../src/api/routes/route-index.js"
 import { ApiServer } from "../../../src/api/server.js"
 import type { ApiServerDependencies } from "../../../src/api/server.js"
 import { ActivityQueryBusyError } from "../../../src/core/activity/query/errors.js"
@@ -196,6 +197,221 @@ async function setup() {
 		pair,
 	}
 }
+
+/** Every schema object below the OpenAPI operations, by walking the whole value. */
+function* walk(value: unknown): Generator<Record<string, unknown>> {
+	if (Array.isArray(value)) {
+		for (const item of value) yield* walk(item)
+	} else if (typeof value === "object" && value !== null) {
+		const record = value as Record<string, unknown>
+		yield record
+		for (const child of Object.values(record)) yield* walk(child)
+	}
+}
+
+interface OpenApiDocument {
+	openapi: string
+	security?: unknown
+	paths: Record<
+		string,
+		Record<string, { security?: unknown[]; summary?: string }>
+	>
+}
+
+describe("OpenAPI document of a protected core", () => {
+	async function documentOf() {
+		const env = await setup()
+		await env.server.start()
+		const response = await env.app.inject({
+			url: "/docs/json",
+			headers: env.machine,
+		})
+		expect(response.statusCode).toBe(200)
+		return { env, document: response.json<OpenApiDocument>() }
+	}
+
+	it("declares 3.1 and uses only 3.1 schema forms", async () => {
+		const { document } = await documentOf()
+		expect(document.openapi).toBe("3.1.0")
+		const forms = { exclusive: 0, nullType: 0 }
+		for (const node of walk(document.paths)) {
+			// The forms 3.1 removed; a property merely named "nullable" holds a schema.
+			expect(typeof node["nullable"]).not.toBe("boolean")
+			expect(typeof node["exclusiveMinimum"]).not.toBe("boolean")
+			expect(typeof node["exclusiveMaximum"]).not.toBe("boolean")
+			if (typeof node["exclusiveMinimum"] === "number") forms.exclusive++
+			if (node["type"] === "null") forms.nullType++
+		}
+		// The check above saw the 3.1 forms the declaration exists for.
+		expect(forms.exclusive).toBeGreaterThan(0)
+		expect(forms.nullType).toBeGreaterThan(0)
+	})
+
+	it("marks what the access policy really leaves public, and nothing else", async () => {
+		const { env, document } = await documentOf()
+		expect(document.security).toEqual([{ machineToken: [] }])
+		const open: string[] = []
+		for (const [path, item] of Object.entries(document.paths))
+			for (const [method, operation] of Object.entries(item))
+				if (operation.security?.length === 0)
+					open.push(`${method.toUpperCase()} ${path}`)
+		expect(open.sort()).toEqual([
+			"GET /api/access/bootstrap",
+			"GET /health",
+			"GET /health/live",
+			"HEAD /api/access/bootstrap",
+			"POST /api/access/pair",
+		])
+		// Each is answered with no credential at all, which is what the mark claims.
+		const headers = { host: browser.host }
+		for (const url of ["/health", "/health/live", "/api/access/bootstrap"])
+			expect((await env.app.inject({ url, headers })).statusCode).not.toBe(401)
+		const pair = await env.app.inject({
+			method: "POST",
+			url: "/api/access/pair",
+			headers: browser,
+			payload: { code: "wrong" },
+		})
+		expect(pair.statusCode).not.toBe(401)
+		// A route left under the global bearer does refuse without one.
+		for (const url of ["/health/ready", "/api", "/api/access/session"])
+			expect((await env.app.inject({ url, headers })).statusCode).toBe(401)
+	})
+
+	it("documents GET /api and gives every access route a summary", async () => {
+		const { document } = await documentOf()
+		expect(document.paths["/api"]?.["get"]?.summary).toBe(
+			"List registered routes",
+		)
+		const access = Object.entries(document.paths).filter(([path]) =>
+			path.startsWith("/api/access/"),
+		)
+		expect(access.length).toBeGreaterThan(0)
+		for (const [path, item] of access)
+			for (const [method, operation] of Object.entries(item))
+				expect(operation.summary, `${method} ${path}`).toBeTruthy()
+	})
+
+	it("serves the explorer page from the same document", async () => {
+		const { env } = await documentOf()
+		const page = await env.app.inject({
+			url: "/docs/",
+			headers: env.machine,
+		})
+		expect(page.statusCode).toBe(200)
+		expect(page.body).toContain("swagger-ui")
+	})
+
+	it("turns a 3.0 nullable into the 3.1 form, keeping null accepted", async () => {
+		expect(
+			toOpenApi31Forms({
+				plain: { type: "string", nullable: true },
+				listed: { type: "string", enum: ["a"], nullable: true },
+				either: { type: ["string", "number"], nullable: true },
+				reference: { $ref: "#/x", nullable: true },
+				notNull: { type: "string", nullable: false },
+				properties: { nullable: { type: "boolean" } },
+			}),
+		).toEqual({
+			plain: { type: ["string", "null"] },
+			listed: { type: ["string", "null"], enum: ["a", null] },
+			either: { type: ["string", "number", "null"] },
+			reference: { anyOf: [{ $ref: "#/x" }, { type: "null" }] },
+			notNull: { type: "string" },
+			properties: { nullable: { type: "boolean" } },
+		})
+	})
+
+	it("leaves the route's own schema alone, as validation still reads it", () => {
+		const schema = { type: "string", nullable: true }
+		toOpenApi31Forms({ schema })
+		expect(schema).toEqual({ type: "string", nullable: true })
+	})
+})
+
+describe("a protected core that lost its private directory", () => {
+	const ownerFile = async (directory: string) => {
+		const name = (await fs.readdir(directory)).find(entry =>
+			entry.startsWith("owner-"),
+		)
+		if (!name) throw new Error("Expected the core's owner file")
+		return join(directory, name)
+	}
+	const health = async (env: Awaited<ReturnType<typeof setup>>) =>
+		env.app.inject({ url: "/health", headers: { host: browser.host } })
+
+	it("reports it on /health with a fixed code, and denies credentials", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+		try {
+			const env = await setup()
+			await env.server.start()
+			expect((await health(env)).statusCode).toBe(200)
+			await fs.rm(await ownerFile(env.directory))
+			vi.advanceTimersByTime(10_000)
+			await vi.waitFor(
+				async () => {
+					expect((await health(env)).statusCode).toBe(503)
+				},
+				{ timeout: 5000 },
+			)
+			const body = (await health(env)).json<Record<string, unknown>>()
+			expect(body).toMatchObject({
+				status: "unhealthy",
+				reason: "access_authority_lost",
+			})
+			expect(Object.keys(body).sort()).toEqual([
+				"reason",
+				"status",
+				"timestamp",
+			])
+			expect(
+				(
+					await env.app.inject({
+						url: "/health/live",
+						headers: { host: browser.host },
+					})
+				).statusCode,
+			).toBe(200)
+			const denied = await env.app.inject({ url: "/api", headers: env.machine })
+			expect(denied.statusCode).toBe(503)
+			expect(denied.json()).toEqual({ code: "ACCESS_UNAVAILABLE" })
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it("stays healthy and admitting through an I/O error on its lock", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+		try {
+			const env = await setup()
+			await env.server.start()
+			const path = await ownerFile(env.directory)
+			const lstat = fs.lstat.bind(fs)
+			let ticked = 0
+			const spy = vi.spyOn(fs, "lstat").mockImplementation(((
+				target: string,
+			) => {
+				if (target === path) {
+					ticked++
+					throw Object.assign(new Error("fault"), { code: "EIO" })
+				}
+				return lstat(target)
+			}) as typeof fs.lstat)
+			vi.advanceTimersByTime(10_000)
+			await vi.waitFor(() => expect(ticked).toBe(1), { timeout: 5000 })
+			// The rejection reaches the tick's handler before the next macrotask.
+			await new Promise(resolve => setImmediate(resolve))
+			spy.mockRestore()
+			expect((await health(env)).statusCode).toBe(200)
+			expect(
+				(await env.app.inject({ url: "/api", headers: env.machine }))
+					.statusCode,
+			).toBe(200)
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+})
 
 function address(server: ApiServer): string {
 	const bound = server.getApp().addresses()[0]

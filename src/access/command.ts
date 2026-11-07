@@ -457,6 +457,8 @@ function rotationFailure(code: string, changed: "no" | "unknown"): string {
 		return `${code}: The stored credential does not match the last rotation, so its remembered browser sessions cannot be trusted and --keep-sessions was refused. Private state did not change. Run rotate-credential again without --keep-sessions; every browser pairs again.`
 	if (code === "ACCESS_STORAGE_BUSY" || code === "ACCESS_STORAGE_FOREIGN_OWNER")
 		return `${code}: Stop the core and retry credential rotation.`
+	if (code === "ACCESS_STORAGE_UNSAFE")
+		return `${code}: Credential rotation did not change private state: something in the private directory is not private. Stop the core, then make the directory mode 0700 and its files mode 0600, owned by this user, and retry. If credential-fence.json is a link, a directory or oversized, move it out of the directory and run rotate-credential at once, before the core starts; never just delete it. See docs/SECURITY.md.`
 	return `${code}: Credential rotation did not change private state.`
 }
 

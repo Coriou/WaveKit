@@ -140,7 +140,7 @@ pending ─► starting ─► running ⇄ holding
 `completed`, `cancelled` (reason `source-paused` when a paused receiver feed ended an identify job) and `failed` (`source-removed`, `tuner-unavailable`, `invalid`) are terminal; only terminal jobs can be deleted. Pause reasons:
 
 - `operator`: paused by `POST …/pause`; probes stop, the lease and the decoder hold are kept until an operator or relay write takes the tuner, which drops both (the job stays `paused(operator)`, it never auto-resumes).
-- `preempted-operator`: a REST tuner write (`origin: "rest"`) on the leased source; the lease is lost and never restored over.
+- `preempted-operator`: a REST tuner write (`origin: "rest"`) on the leased source; the lease is lost and never restored over. Any REST write preempting applies to the individual routes: `POST /api/tuner/:sourceId/tune` refuses with 409 unless `preempt` is true.
 - `preempted-relay`: an SDR++ relay client took control (`control-mode-changed` → `external`).
 - `preempted-job`: a higher-priority scanner job took the lease (it keeps the original snapshot). The waiting job keeps its decoder hold while that job holds the tuner; when an operator or relay write takes it, the waiter releases the decoders too, and holds them again when the lease comes back.
 - `source-down`: the source disconnected; the job resumes on the next payload with a new epoch.

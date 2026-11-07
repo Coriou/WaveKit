@@ -122,6 +122,8 @@ export class FastifyAccessController {
 	#downloads = new Set<() => void>()
 	#disposed = false
 	#stopped = false
+	#authorityLost = false
+	#unsubscribeAuthorityLost: () => void
 
 	constructor(options: FastifyAccessOptions) {
 		const grace = options.webSocketCloseGraceMs ?? 1000
@@ -141,6 +143,25 @@ export class FastifyAccessController {
 		this.#ownsLeases = options.leases === undefined
 		this.#leases = options.leases ?? new ConnectionLeases(options.sessions)
 		this.#grace = grace
+		this.#unsubscribeAuthorityLost = this.#policy.onCredentialAuthorityLost(
+			() => this.#closeStreamsOnAuthorityLoss(),
+		)
+	}
+
+	/**
+	 * Admission already denies credentials. This ends what they opened earlier, session or
+	 * machine, with or without an expiry. Plain HTTP keeps answering, as /health must.
+	 */
+	#closeStreamsOnAuthorityLoss(): void {
+		this.#authorityLost = true
+		for (const entry of [...this.#pending]) this.#invalidate(entry)
+		for (const stop of [...this.#downloads]) {
+			try {
+				stop()
+			} catch {
+				/* Continue cleanup after a producer failure. */
+			}
+		}
 	}
 
 	/** Synchronous gate; transport disposal is a separate shutdown step. */
@@ -235,7 +256,7 @@ export class FastifyAccessController {
 		request: FastifyRequest,
 	): { status: 401 | 429 | 503; code: string } | undefined {
 		const principal = this.#principals.get(request)
-		if (this.admissionStopped)
+		if (this.admissionStopped || this.#authorityLost)
 			return { status: 503, code: "ACCESS_UNAVAILABLE" }
 		if (!principal) return { status: 401, code: "AUTH_REQUIRED" }
 		// Bound machine reservations too, including close fallback timers.
@@ -281,7 +302,13 @@ export class FastifyAccessController {
 	/** Call synchronously before registering the socket with any broadcaster. */
 	adoptWebSocket(request: FastifyRequest, socket: WebSocket): boolean {
 		const entry = this.#upgrades.get(request)
-		if (!entry || entry.closed || entry.socket || this.admissionStopped) {
+		if (
+			!entry ||
+			entry.closed ||
+			entry.socket ||
+			this.admissionStopped ||
+			this.#authorityLost
+		) {
 			socket.terminate()
 			return false
 		}
@@ -368,6 +395,7 @@ export class FastifyAccessController {
 			return { kind: "rejected", reason: "invalidated" }
 		const principal = this.#principals.get(request)
 		if (this.admissionStopped) return { kind: "rejected", reason: "disposed" }
+		if (this.#authorityLost) return { kind: "rejected", reason: "unavailable" }
 		if (!principal) return { kind: "rejected", reason: "invalidated" }
 		if (this.#downloads.size >= 512)
 			return { kind: "rejected", reason: "capacity" }
@@ -439,6 +467,7 @@ export class FastifyAccessController {
 		if (this.#disposed) return
 		this.stopAdmission()
 		this.#disposed = true
+		this.#unsubscribeAuthorityLost()
 		for (const entry of [...this.#pending]) {
 			if (entry.socket) {
 				try {

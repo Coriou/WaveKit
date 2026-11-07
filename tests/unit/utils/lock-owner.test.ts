@@ -26,6 +26,7 @@ import {
 	ownerHasRecentHeartbeat,
 } from "../../../src/utils/lock-owner.js"
 import type {
+	LockHeartbeat,
 	LockOwner,
 	OwnerReader,
 	WriterLock,
@@ -725,6 +726,176 @@ describe("ownership loss and monotonic observation", () => {
 		await heartbeat()
 		expect(heartbeat.lost).toBe(true)
 		expect((await fs.stat(detached)).mtimeMs).toBe(0)
+	})
+	describe("what a failed check proves", () => {
+		const fault = (code: string) =>
+			Object.assign(new Error("fault"), { code }) as NodeJS.ErrnoException
+		/** A heartbeat whose lstat of its own file throws while `failing` holds a code. */
+		async function faulty() {
+			const lock = await lockPath()
+			const path = join(lock, "owner.json")
+			await fs.writeFile(path, "owner")
+			const failing: { code: string | null } = { code: null }
+			const lstat = fs.lstat.bind(fs)
+			vi.spyOn(fs, "lstat").mockImplementation(((target: string) => {
+				if (target === path && failing.code) throw fault(failing.code)
+				return lstat(target)
+			}) as typeof fs.lstat)
+			const lost = vi.fn()
+			const heartbeat = await startLockHeartbeat(path, { onLost: lost })
+			return { path, failing, lost, heartbeat }
+		}
+		/** Ticks do real I/O: each waits for what it must have counted, on real timers. */
+		async function failedTick(heartbeat: LockHeartbeat) {
+			const faults = heartbeat.transientFaults
+			vi.advanceTimersByTime(HEARTBEAT_MS)
+			await vi.waitFor(() => expect(heartbeat.transientFaults).toBe(faults + 1))
+		}
+		async function goodTick(path: string) {
+			await fs.utimes(path, new Date(0), new Date(0))
+			vi.advanceTimersByTime(HEARTBEAT_MS)
+			await vi.waitFor(async () =>
+				expect((await fs.stat(path)).mtimeMs).toBeGreaterThan(0),
+			)
+		}
+		const fakeTicks = () =>
+			vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+		afterEach(() => {
+			vi.restoreAllMocks()
+			vi.useRealTimers()
+		})
+
+		it("retries an I/O error, refusing the write, and recovers without a latch", async () => {
+			fakeTicks()
+			const { path, failing, lost, heartbeat } = await faulty()
+			failing.code = "EIO"
+			expect(await heartbeat.check()).toBe(false)
+			await failedTick(heartbeat)
+			await failedTick(heartbeat)
+			expect(heartbeat.lost).toBe(false)
+			expect(heartbeat.transientFaults).toBe(3)
+			failing.code = null
+			expect(await heartbeat.check()).toBe(true)
+			await goodTick(path)
+			expect(lost).not.toHaveBeenCalled()
+			await heartbeat()
+		})
+
+		it("a good refresh restarts the count: 2 failed ticks, 1 good, 2 failed stay held", async () => {
+			fakeTicks()
+			const { path, failing, heartbeat } = await faulty()
+			failing.code = "EBUSY"
+			await failedTick(heartbeat)
+			await failedTick(heartbeat)
+			failing.code = null
+			await goodTick(path)
+			failing.code = "EBUSY"
+			await failedTick(heartbeat)
+			await failedTick(heartbeat)
+			expect(heartbeat.lost).toBe(false)
+			expect(heartbeat.transientFaults).toBe(4)
+			await heartbeat()
+		})
+
+		it("latches at the third failed tick (3 x H = the lease), not the second", async () => {
+			fakeTicks()
+			const { failing, lost, heartbeat } = await faulty()
+			failing.code = "EIO"
+			await failedTick(heartbeat)
+			await failedTick(heartbeat)
+			expect(heartbeat.lost).toBe(false)
+			await failedTick(heartbeat)
+			expect(heartbeat.lost).toBe(true)
+			expect(lost).toHaveBeenCalledTimes(1)
+			await heartbeat()
+		})
+
+		it("repeated write checks during a fault do not use up the ticks", async () => {
+			const { failing, heartbeat } = await faulty()
+			failing.code = "EIO"
+			for (let check = 0; check < 10; check++)
+				expect(await heartbeat.check()).toBe(false)
+			expect(heartbeat.lost).toBe(false)
+			expect(heartbeat.transientFaults).toBe(10)
+			await heartbeat()
+		})
+
+		it("a fault with the last refresh a whole lease old latches at once", async () => {
+			const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+			const { failing, heartbeat } = await faulty()
+			failing.code = "EIO"
+			now.mockReturnValue(1000 + HEARTBEAT_STALE_MS - 1)
+			expect(await heartbeat.check()).toBe(false)
+			expect(heartbeat.lost).toBe(false)
+			now.mockReturnValue(1000 + HEARTBEAT_STALE_MS)
+			expect(await heartbeat.check()).toBe(false)
+			expect(heartbeat.lost).toBe(true)
+			await heartbeat()
+		})
+
+		it("a missing file latches at the first check", async () => {
+			const { failing, lost, heartbeat } = await faulty()
+			failing.code = "ENOENT"
+			expect(await heartbeat.check()).toBe(false)
+			expect(heartbeat.lost).toBe(true)
+			expect(heartbeat.transientFaults).toBe(0)
+			expect(lost).toHaveBeenCalledTimes(1)
+			await heartbeat()
+		})
+
+		it("a replaced file latches on the next tick, whatever faults came before", async () => {
+			fakeTicks()
+			const { path, failing, heartbeat } = await faulty()
+			failing.code = "EIO"
+			await failedTick(heartbeat)
+			failing.code = null
+			await fs.rename(path, `${path}.old`)
+			await fs.writeFile(path, "successor")
+			vi.advanceTimersByTime(HEARTBEAT_MS)
+			await vi.waitFor(() => expect(heartbeat.lost).toBe(true))
+			await heartbeat()
+		})
+
+		it("a failing refresh counts like a failing read", async () => {
+			fakeTicks()
+			const lock = await lockPath()
+			const path = join(lock, "owner.json")
+			await fs.writeFile(path, "owner")
+			const open = fs.open.bind(fs)
+			vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+				const handle = await open(...args)
+				handle.utimes = () => Promise.reject(fault("EROFS"))
+				return handle
+			})
+			const heartbeat = await startLockHeartbeat(path)
+			await failedTick(heartbeat)
+			await failedTick(heartbeat)
+			expect(heartbeat.lost).toBe(false)
+			await failedTick(heartbeat)
+			expect(heartbeat.lost).toBe(true)
+			await heartbeat()
+		})
+
+		it("a band-plan or operator-data writer lock only refuses the write during a fault", async () => {
+			const lock = await lockPath()
+			await fs.rmdir(lock)
+			const lost = vi.fn()
+			const handle = await acquireHandle(lock, { onLost: lost })
+			if (!handle) throw new Error("missing handle")
+			const readFile = fs.readFile.bind(fs)
+			const spy = vi.spyOn(fs, "readFile").mockImplementation(((
+				...args: Parameters<typeof fs.readFile>
+			) => {
+				if (args[0] === join(lock, "owner.json")) throw fault("EIO")
+				return readFile(...args)
+			}) as typeof fs.readFile)
+			expect(await handle.check()).toBe(false)
+			expect(handle.lost).toBe(false)
+			spy.mockRestore()
+			expect(await handle.check()).toBe(true)
+			expect(lost).not.toHaveBeenCalled()
+			await handle.release()
+		})
 	})
 })
 

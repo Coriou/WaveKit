@@ -625,7 +625,9 @@ describe("private single-operator persistence", () => {
 				return stat
 			})
 			await storage.close()
-			expect(refreshed).toBe(Date.now())
+			// utimes goes through double seconds, which the file system truncates to its
+			// own resolution, so the mtime can read just under the written millisecond.
+			expect(Math.abs(refreshed - Date.now())).toBeLessThan(1)
 			await vi.advanceTimersByTimeAsync(HEARTBEAT_MS)
 			expect(await fs.readdir(directory)).not.toContain(name)
 		} finally {

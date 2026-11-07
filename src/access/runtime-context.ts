@@ -230,6 +230,8 @@ export async function openAccessRuntime(
 			machineSecretDigest: storage.machineSecretDigest(),
 			sessions,
 			credentialAuthorityLost: () => ownedStorage.ownershipLost,
+			onCredentialAuthorityLost: (listener: () => void) =>
+				ownedStorage.onOwnershipLost(listener),
 		}
 		const apiPolicy = new AccessPolicy({
 			...common,

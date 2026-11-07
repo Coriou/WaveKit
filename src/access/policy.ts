@@ -122,6 +122,7 @@ export class AccessPolicy {
 	#digest: Uint8Array
 	#sessions: SessionStore
 	#authorityLost: () => boolean
+	#subscribeAuthorityLost: (listener: () => void) => () => void
 
 	constructor(options: AccessPolicyOptions) {
 		const parsed = accessPolicySchema.safeParse(options)
@@ -129,7 +130,9 @@ export class AccessPolicy {
 			!parsed.success ||
 			!(options.sessions instanceof SessionStore) ||
 			(options.credentialAuthorityLost !== undefined &&
-				typeof options.credentialAuthorityLost !== "function")
+				typeof options.credentialAuthorityLost !== "function") ||
+			(options.onCredentialAuthorityLost !== undefined &&
+				typeof options.onCredentialAuthorityLost !== "function")
 		)
 			throw new WaveKitError(
 				"Invalid access policy configuration",
@@ -168,6 +171,18 @@ export class AccessPolicy {
 			)
 		this.#sessions = options.sessions
 		this.#authorityLost = options.credentialAuthorityLost ?? (() => false)
+		this.#subscribeAuthorityLost =
+			options.onCredentialAuthorityLost ?? (() => () => {})
+	}
+
+	/** True once this core can no longer vouch for its credentials; only a restart clears it. */
+	get credentialAuthorityLost(): boolean {
+		return this.#authorityLost()
+	}
+
+	/** For transports: end what was admitted before the loss. Returns the unsubscribe. */
+	onCredentialAuthorityLost(listener: () => void): () => void {
+		return this.#subscribeAuthorityLost(listener)
 	}
 
 	get sessionCookieName(): string {

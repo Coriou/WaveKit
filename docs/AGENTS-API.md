@@ -22,7 +22,7 @@ protected core answers 401):
 
 ```sh
 curl --fail --header "$AUTH" "$API_ORIGIN/api"           # every route, plus the two URLs below
-curl --fail --header "$AUTH" "$API_ORIGIN/docs/json"     # OpenAPI 3: parameters, bodies, bounds
+curl --fail --header "$AUTH" "$API_ORIGIN/docs/json"     # OpenAPI 3.1: parameters, bodies, bounds
 curl --fail --header "$AUTH" "$API_ORIGIN/api/enums"     # accepted values of the closed lists
 ```
 
@@ -75,21 +75,28 @@ without `--keep`) destroys the credential: a new `setup` creates a different one
 
 ### Use
 
-The client reads the file once when it starts and sends the header on every request. In a shell,
-load the header the recipes below send:
+The client reads the file once when it starts and sends the header on every request. For `curl`,
+keep the header in a private file beside the token, so the token is never on a command line where
+`ps` shows it. Create it once, and again after every rotation (`printf` is a shell builtin, so this
+line does not show the token either):
 
 ```sh
-AUTH="Authorization: Bearer $(cat "$HOME/.config/wavekit/machine-token")"
+install -m 600 /dev/null "$HOME/.config/wavekit/machine-token.header"
+printf 'Authorization: Bearer %s\n' "$(cat "$HOME/.config/wavekit/machine-token")" \
+  > "$HOME/.config/wavekit/machine-token.header"
 ```
 
-On a host shared with other users, `curl --header "$AUTH"` shows the token in `ps`. Use a client
-that reads the file itself there.
+Then point the recipes below at that file. `curl --header @file` reads the header from it:
 
-| Answer                   | Meaning                                                       | What to do                                                 |
-| ------------------------ | ------------------------------------------------------------- | ---------------------------------------------------------- |
-| 401 `AUTH_REQUIRED`      | The token is not the current credential: it was rotated       | Re-read the file once and retry once, then ask an operator |
-| 503 `ACCESS_UNAVAILABLE` | The core cannot vouch for its credentials and needs a restart | Ask an operator; the token may still be fine               |
-| Connection failure       | The core is stopped, for example during a rotation            | Retry with a delay; do not change the token                |
+```sh
+AUTH="@$HOME/.config/wavekit/machine-token.header"
+```
+
+| Answer                   | Meaning                                                       | What to do                                                                                                               |
+| ------------------------ | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| 401 `AUTH_REQUIRED`      | The token is not the current credential: it was rotated       | Re-read the file once and retry once, then ask an operator                                                               |
+| 503 `ACCESS_UNAVAILABLE` | The core cannot vouch for its credentials and needs a restart | Ask an operator; the token may still be fine. `GET /health`, which needs no token, then says 503 `access_authority_lost` |
+| Connection failure       | The core is stopped, for example during a rotation            | Retry with a delay; do not change the token                                                                              |
 
 ### Rotate and revoke
 
@@ -253,8 +260,22 @@ no `state`: a discovery is a record, not a process, and only a job has one. Pass
 ([compact rows](API.md#compact-rows)). A page can come back short of `limit` when a record is
 merged during the read, so stop on the cursor, not on the row count.
 
+While a sweep runs, walk with `sort=frequency`. The cursor is an offset into the order of that
+moment, and the default order follows `lastSeen`: every re-heard signal jumps to the front and pushes
+the rest down, so the next page repeats some rows and never shows others. Being heard again does not
+move a record in this order:
+
+```sh
+curl --fail --header "$AUTH" "$API_ORIGIN/api/scanner/discoveries?view=compact&sort=frequency&limit=100"
+```
+
+A record new to the store can still shift the offset by a row, so keep rows by `id`.
+
 `GET /api/scanner/jobs?view=compact` is the same for jobs: `id`, `name`, `kind`, `state`, `reason`,
-`sourceId` and `updatedAt`, without the plan.
+`sourceId` and `updatedAt`, without the plan. It tells you whether a job is still going, and has no
+progress by design. To follow a sweep, poll `progress` on the one job:
+`GET /api/scanner/jobs/<id>` (`sweepIndex`, `hopIndex`, `hopCount`, `coverage`, `counts`). That answer
+carries the whole plan too, about 160 bytes per hop, so poll it at human pace, not in a tight loop.
 
 ## Set gain
 

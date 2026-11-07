@@ -211,6 +211,7 @@ export class PrivateAccessStorage {
 	#directoryIdentity: { dev: number; ino: number }
 	#stopHeartbeat: LockHeartbeat | undefined
 	#ownershipLost = false
+	#ownershipListeners = new Set<() => void>()
 	#owner = ""
 	#ownerIdentity: { dev: number; ino: number } | undefined
 	#state: PrivateState | undefined
@@ -379,6 +380,15 @@ export class PrivateAccessStorage {
 	get ownershipLost(): boolean {
 		return this.#ownershipLost
 	}
+	/** Fires once, at the latch, or at once if it already happened. Returns the unsubscribe. */
+	onOwnershipLost(listener: () => void): () => void {
+		if (this.#ownershipLost) {
+			listener()
+			return () => {}
+		}
+		this.#ownershipListeners.add(listener)
+		return () => this.#ownershipListeners.delete(listener)
+	}
 	/** Only a `rotate` open can see true here; `load` refuses instead. */
 	get credentialMismatch(): boolean {
 		return this.#credentialMismatch
@@ -528,8 +538,17 @@ export class PrivateAccessStorage {
 					this.#unavailable = true
 					if (options?.logger)
 						createComponentLogger(options.logger, "PrivateAccessStorage").error(
-							"Private access ownership lost; denying credentials until the core restarts",
+							"Private access ownership lost; denying credentials and closing streams until the core restarts",
 						)
+					const listeners = [...this.#ownershipListeners]
+					this.#ownershipListeners.clear()
+					for (const listener of listeners) {
+						try {
+							listener()
+						} catch {
+							/* One listener's cleanup must not skip the next one. */
+						}
+					}
 				},
 			},
 		)

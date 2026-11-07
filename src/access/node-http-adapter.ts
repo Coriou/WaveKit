@@ -70,6 +70,8 @@ export class NodeHttpAccessAdapter {
 	#admissions = new WeakMap<AudioAccessContext, AdmissionState>()
 	#streams = new Set<ActiveStream>()
 	#disposed = false
+	#authorityLost = false
+	#unsubscribeAuthorityLost: () => void
 
 	constructor(options: NodeHttpAccessOptions) {
 		const parsed = optionsSchema.safeParse(options)
@@ -86,6 +88,14 @@ export class NodeHttpAccessAdapter {
 		this.#ownsLeases = options.leases === undefined
 		this.#leases = options.leases ?? new ConnectionLeases(options.sessions)
 		this.#maxStreams = parsed.data.maxStreams
+		// Admission already denies; this ends streams opened earlier, machine ones included.
+		this.#unsubscribeAuthorityLost = options.policy.onCredentialAuthorityLost(
+			() => {
+				this.#authorityLost = true
+				for (const stream of [...this.#streams])
+					this.#safe(() => stream.close(true))
+			},
+		)
 	}
 
 	#safe(callback: () => void): void {
@@ -187,7 +197,8 @@ export class NodeHttpAccessAdapter {
 			this.#deny(response, status, code, state.headers)
 			return { kind: "rejected" }
 		}
-		if (this.#disposed) return reject(503, "ACCESS_UNAVAILABLE")
+		if (this.#disposed || this.#authorityLost)
+			return reject(503, "ACCESS_UNAVAILABLE")
 		if (
 			response.headersSent ||
 			response.writableEnded ||
@@ -277,6 +288,7 @@ export class NodeHttpAccessAdapter {
 	dispose(): void {
 		if (this.#disposed) return
 		this.#disposed = true
+		this.#unsubscribeAuthorityLost()
 		for (const stream of [...this.#streams])
 			this.#safe(() => stream.close(true))
 		if (this.#ownsLeases) this.#safe(() => this.#leases.dispose())

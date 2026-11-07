@@ -8,7 +8,7 @@ import {
 } from "../../../src/access/credentials.js"
 import { SessionStore } from "../../../src/access/sessions.js"
 import { AccessPolicy } from "../../../src/access/policy.js"
-import { registerRouteIndex } from "../../../src/api/routes/route-index.js"
+import { installRouteIndex } from "../../../src/api/routes/route-index.js"
 import { decoderSummaryRoutes } from "../../../src/api/routes/decoder-summary.js"
 
 it("requires the same authenticated read admission for the index and summary", async () => {
@@ -28,7 +28,7 @@ it("requires the same authenticated read admission for the index and summary", a
 	})
 	const app = Fastify()
 	installAccessHooks(app, { policy, sessions })
-	registerRouteIndex(app)
+	installRouteIndex(app)()
 	await app.register(decoderSummaryRoutes, {
 		decoderManager: { getAllStatus: () => [] },
 	})

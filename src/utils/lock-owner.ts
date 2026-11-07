@@ -17,6 +17,9 @@ import type { Logger } from "./logger.js"
  * ownership, then resume its pending rename after a successor reclaims the lock.
  * That one in-flight write may overwrite the successor's newer committed state.
  * The holder detects ownership loss within H = 10 s and stops further writes.
+ * Only a changed identity or a missing file proves that loss. Any other stat or
+ * refresh error proves nothing: that write is refused, the next tick retries, and
+ * the holder latches at 3H without a refresh, when a contender may reclaim.
  */
 export const lockOwnerSchema = z.object({
 	pid: z.number().int().positive(),
@@ -384,8 +387,22 @@ export async function observeStartupLocks(
 }
 export interface LockHeartbeat {
 	(): Promise<void>
+	/** Latched: a changed identity, a missing file, or 3H without a refresh. */
 	readonly lost: boolean
+	/** All unproven stat or refresh errors so far, whether or not they latched. */
+	readonly transientFaults: number
+	/** False also during a transient fault: refuse this write, nothing is latched. */
 	check: () => Promise<boolean>
+}
+// 3H / H = 3 failed ticks in a row reach the age at which a contender may reclaim.
+const STALE_TICKS = HEARTBEAT_STALE_MS / HEARTBEAT_MS
+function lockErrorCode(error: unknown): string {
+	return typeof error === "object" &&
+		error !== null &&
+		"code" in error &&
+		typeof error.code === "string"
+		? error.code
+		: "unknown"
 }
 export async function startLockHeartbeat(
 	path: string,
@@ -403,46 +420,76 @@ export async function startLockHeartbeat(
 	let lost = false
 	let stopped = false
 	let pending = Promise.resolve()
+	let transientFaults = 0
+	let failedTicks = 0
+	// Monotonic: what a contender observes is this refresh, not any wall clock.
+	let refreshedAt = performance.now()
 	const lose = () => {
 		if (lost) return
 		lost = true
 		clearInterval(timer)
 		options.onLost?.()
 	}
+	/** Throws what it could not read; false means another owner is proven. */
+	const verifyOwnership = async () => {
+		const [actual, opened] = await Promise.all([fs.lstat(path), handle.stat()])
+		if (
+			actual.dev !== opened.dev ||
+			actual.ino !== opened.ino ||
+			actual.dev !== identity.dev ||
+			actual.ino !== identity.ino ||
+			(options.verify && !(await options.verify()))
+		) {
+			lose()
+			return false
+		}
+		return !lost && !stopped
+	}
+	const fault = (error: unknown, tick: boolean) => {
+		if (lost || stopped) return
+		if (hasLockCode(error, "ENOENT")) {
+			log?.warn("Storage lock file is gone")
+			lose()
+			return
+		}
+		transientFaults++
+		if (tick) failedTicks++
+		const staleFor = performance.now() - refreshedAt
+		const expired = failedTicks >= STALE_TICKS || staleFor >= HEARTBEAT_STALE_MS
+		log?.warn(
+			{ code: lockErrorCode(error), failedTicks, faults: transientFaults },
+			expired
+				? "Storage lock unverified for the whole lease; latching"
+				: "Storage lock check failed; retrying",
+		)
+		if (expired) lose()
+	}
 	const check = async () => {
 		if (lost || stopped) return false
 		try {
-			const [actual, opened] = await Promise.all([
-				fs.lstat(path),
-				handle.stat(),
-			])
-			if (
-				actual.dev !== opened.dev ||
-				actual.ino !== opened.ino ||
-				actual.dev !== identity.dev ||
-				actual.ino !== identity.ino ||
-				(options.verify && !(await options.verify()))
-			) {
-				lose()
-				return false
-			}
-			return !lost && !stopped
-		} catch {
-			lose()
+			return await verifyOwnership()
+		} catch (error) {
+			fault(error, false)
 			return false
 		}
 	}
 	const timer = setInterval(() => {
-		pending = pending
-			.then(async () => {
-				if (!(await check())) return
+		pending = pending.then(async () => {
+			if (lost || stopped) return
+			try {
+				if (!(await verifyOwnership())) return
 				const now = new Date()
 				await handle.utimes(now, now)
-			})
-			.catch(() => {
-				lose()
-				log?.warn("Storage lock heartbeat refresh failed")
-			})
+				refreshedAt = performance.now()
+				failedTicks = 0
+			} catch (error) {
+				try {
+					fault(error, true)
+				} catch {
+					/* An onLost failure must not reject the chain stop() awaits. */
+				}
+			}
+		})
 	}, HEARTBEAT_MS)
 	timer.unref()
 	let closing: Promise<void> | undefined
@@ -456,6 +503,9 @@ export async function startLockHeartbeat(
 		return closing
 	}
 	Object.defineProperty(stop, "lost", { get: () => lost })
+	Object.defineProperty(stop, "transientFaults", {
+		get: () => transientFaults,
+	})
 	return Object.assign(stop, { check }) as LockHeartbeat
 }
 const OWNER = "owner.json"

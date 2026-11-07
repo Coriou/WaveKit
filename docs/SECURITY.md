@@ -24,17 +24,87 @@ the RTL-TCP relay are disabled in protected mode.
   copies it into a private `0600` file without a container shell and never prints it.
   It writes inside the directory it checked, never into the private directory even
   if a path is swapped for a link mid-way. It survives restarts while the private
-  directory persists. `rotate-credential` is the only revocation and revokes every
-  copy; a stalled core that lost the directory to a rotation answers 503 until it is
-  restarted, so it cannot keep admitting the old credential. If that core's last write
-  puts the old credential back on disk, a restart refuses with
-  `ACCESS_STORAGE_CREDENTIAL_MISMATCH` until you run `rotate-credential` again, so
-  the revoked token is not accepted. An export that overlaps a rotation can still
-  write the old token to its file; that copy answers 401, so export again after the
-  rotation finishes. See
+  directory persists. `rotate-credential` is the only revocation. It revokes every
+  copy the running private directory could admit, not one restored from before it:
+  see [Backups and the fence](#backups-and-the-fence). An export that overlaps a
+  rotation can still write the old token to its file; that copy answers 401, so
+  export again after the rotation finishes. See
   [Get a machine token](AGENTS-API.md#get-a-machine-token).
+- A core that loses its private directory stops admitting: see
+  [When a core loses its private directory](#when-a-core-loses-its-private-directory).
 - In the default legacy mode the core checks no credential: a token adds nothing, and
   the bind address above is the only boundary.
+
+### When a core loses its private directory
+
+A core proves it still owns the private directory by refreshing a lock file every 10
+seconds, and a lock unchanged for 30 seconds can be reclaimed. Only proof of a new owner
+latches: the lock file replaced or gone. Another error reading or refreshing it (an I/O
+error on a bind mount, say) proves nothing. That check's write is refused, the next
+refresh retries, the error is logged and counted, and admission carries on. If the lock
+goes unrefreshed for the whole 30 seconds it latches too, because at that age another
+owner may take it.
+
+Once latched, until the core restarts:
+
+- Every bearer, cookie and audio request answers 503 `ACCESS_UNAVAILABLE`: another owner
+  may have rotated the credential, so what the core holds in memory proves nothing.
+- Open WebSockets, audio streams and downloads are closed, for browser sessions and for
+  the machine credential alike. WebSockets get close code 1008, and one that does not
+  finish closing within a second is cut.
+- `GET /health` answers 503 with `reason` `access_authority_lost`, so the healthchecks in
+  `compose.yaml` report the container unhealthy. The image's built-in `HEALTHCHECK` only asks
+  s6 whether the process is up, so without Compose read `/health` yourself.
+  `GET /health/live` stays 200.
+
+**Restart it yourself.** The core does not exit, and nothing restarts it: Docker's restart
+policy acts on an exit, not on an unhealthy container, and s6 watches the process, not its
+health. That is deliberate. The decoders and recordings keep running, while a restart drops
+the tuning (the core does not save it) and pauses a running sweep unless the job resumes on
+boot. So the latch never costs you the radio on its own, but somebody has to act on it. A
+restart loads the current credential, or refuses with a stable code if the state needs repair.
+
+Band plans and operator data have locks of their own under the same rule. Losing one of those
+touches no credential: only that store goes unavailable until a restart.
+
+Two gaps stay open:
+
+- **Detection is not instant.** A latch comes at the first check after the event: up to 10
+  seconds after the lock is replaced or removed under a running core. A core that was stalled
+  (a paused container) and lost the directory meanwhile runs that check first thing on
+  resuming, and it takes one file system round trip, usually a few milliseconds. A request
+  that reaches the core in that window is checked against the old credential and can be
+  admitted, and a stream it opens lasts until the check finishes.
+- **A request already admitted finishes.** A plain HTTP request past admission when the latch
+  comes gets its answer.
+
+### Backups and the fence
+
+Every rotation first records a hash of the new credential in `credential-fence.json` in the
+private directory. A stored credential that does not match it is refused with
+`ACCESS_STORAGE_CREDENTIAL_MISMATCH`, so a stalled core's late write cannot bring a revoked
+token back: a restart refuses until you run `rotate-credential` again.
+
+The fence is only as current as the directory it sits in:
+
+- **After restoring a private volume from backup, rotate before starting the core.** A full
+  restore brings back the fence with the state it matched, from before any later rotation, so
+  every token revoked since is accepted again until you rotate. Nothing outside the volume can
+  tell the core otherwise. Export the token again afterwards.
+- **Never delete the fence.** Without it, a stale state file loads with nothing to compare it
+  against, and a revoked token works again.
+
+A fence that is unsafe (mode not `0600`, wrong owner, a link, a directory, oversized) refuses
+load and rotation with `ACCESS_STORAGE_UNSAFE`, and changes nothing. A volume copied without
+its modes reaches this. With the core stopped:
+
+1. If only the mode or owner is wrong, repair them: `chown` it to the core's user and
+   `chmod 600 credential-fence.json`; the directory itself is `0700`. Then start the core. The
+   same repair applies when another file in the directory reports this code.
+2. If it is a link, a directory or oversized, its content cannot be trusted. Move it out of the
+   private directory and run `rotate-credential` straight away, before the core starts: that
+   writes a new fence and revokes every older token, so nothing was opened by going without one.
+   Then export the token again. Every browser pairs again.
 
 ## Decoder versions
 

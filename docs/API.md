@@ -14,9 +14,14 @@ and the core may be running:
 
 ```sh
 node dist/access-command.js machine-token --private-directory "$PRIVATE_DIRECTORY" --out "$HOME/.config/wavekit/machine-token"
-curl --fail --header "Authorization: Bearer $(cat "$HOME/.config/wavekit/machine-token")" \
-  "$API_ORIGIN/api/agent/status"
+install -m 600 /dev/null "$HOME/.config/wavekit/machine-token.header"
+printf 'Authorization: Bearer %s\n' "$(cat "$HOME/.config/wavekit/machine-token")" > "$HOME/.config/wavekit/machine-token.header"
+curl --fail --header "@$HOME/.config/wavekit/machine-token.header" "$API_ORIGIN/api/agent/status"
 ```
+
+`curl --header @file` reads the header from a private file, so the token never reaches a command
+line or `ps`; `printf` is a shell builtin, so neither does the line that writes it. Write the header
+file again after every rotation.
 
 The command creates the file with mode `0600` and never prints the credential.
 The file's directory must already exist, must not be writable by group or others,
@@ -421,7 +426,11 @@ can be reclaimed, so a core stalled that long (a paused container, for example) 
 lose the directory to a rotation. Within one refresh of resuming, that core notices
 and answers every bearer, cookie and audio request with 503 `ACCESS_UNAVAILABLE` until
 it is restarted: it can no longer tell whether its in-memory credential is current. It
-also logs an error. `/health` stays public. Streams admitted before the loss are not cut.
+also logs an error, closes the WebSockets, audio streams and downloads it had admitted,
+and answers `GET /health` with 503 and `reason` `access_authority_lost`. Nothing restarts
+it for you. An error that does not prove a new owner, such as a failed read of the lock, is
+retried and does not latch unless the lock goes unrefreshed for the full 30 seconds. See
+[When a core loses its private directory](SECURITY.md#when-a-core-loses-its-private-directory).
 
 A write such a core had already started can still land after the rotation and put the
 old credential back on disk. It is not accepted: every rotation first records a hash of
@@ -541,12 +550,14 @@ what is wrong in its body as well as its status code.
 
 | Route           | 200                     | 503                                                                                                                   |
 | --------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `/health`       | Healthy or `degraded`   | The overall health check is `unhealthy`                                                                               |
+| `/health`       | Healthy or `degraded`   | The overall health check is `unhealthy`, or a protected core has lost its private access directory                    |
 | `/health/ready` | Ready to accept traffic | Sources are configured but none is connected, or decoders are configured (and not deliberately stopped) but none runs |
 | `/health/live`  | The process answers     | Never                                                                                                                 |
 
 A 503 from `/health` answers `{ "status": "unhealthy", "reason": "<code>", "timestamp": "..." }`
-with `reason` `all_decoders_down` (every configured decoder is down) or `api_down`. A 503 from
+with `reason` `all_decoders_down` (every configured decoder is down), `api_down`, or
+`access_authority_lost` (every credential is denied until the core restarts:
+[what it means](SECURITY.md#when-a-core-loses-its-private-directory)). A 503 from
 `/health/ready` answers `{ "status": "not_ready", "reason": "<code>", "timestamp": "..." }` with
 `reason` `no_source_connected`, `no_decoder_running` or `api_down`. The reasons are fixed codes,
 never error messages, because `/health` is public even in protected mode.
@@ -571,9 +582,11 @@ without schemas: `{ "openapi": "/docs/json", "enums": "/api/enums", "routes":
 ["system"] }] }`. Summaries and tags come from the route schema; missing summaries
 are null and missing tags are empty. The index uses the same authenticated read
 admission as other API reads, and so do `/docs` and `/docs/json`: a protected core
-answers 401 without a credential and accepts the machine token. The OpenAPI document
-states the bearer scheme on a protected core and has no `servers` entry: its paths
-are relative to the origin that served it.
+answers 401 without a credential and accepts the machine token. The document is
+OpenAPI 3.1. On a protected core it states the bearer scheme, with `security: []` on
+the routes that need no credential (`/health`, `/health/live`, `/api/access/bootstrap`,
+`/api/access/pair`). It has no `servers` entry: its paths are relative to the origin
+that served it.
 
 #### GET /api/enums
 
@@ -671,7 +684,7 @@ take one, and a sweep the operator paused keeps it until it is released.
 The DTO and its Zod schema are `AgentStatus` and `agentStatusSchema` in `@wavekit/api-types`.
 
 ```bash
-curl --header "Authorization: Bearer $(cat "$HOME/.config/wavekit/machine-token")" \
+curl --header "@$HOME/.config/wavekit/machine-token.header" \
   https://wavekit.example:9443/api/agent/status
 ```
 
@@ -4028,6 +4041,11 @@ only).
 plan, progress or probes: `id`, `name` (null when unnamed), `kind`, `state`, `reason` (null when the
 job has none), `sourceId` and `updatedAt`. A full job carries its whole plan, about 160 bytes per
 hop; a compact row is about 165 bytes. `view=full` is the default.
+
+A compact row tells you whether a job is still going, not how far it got. It has no progress on
+purpose: only the running driver knows the hop, and a row reads the stored job alone, so that a poll
+costs nothing per job. For sweep progress read `progress` on `GET /api/scanner/jobs/:id`
+(`sweepIndex`, `hopIndex`, `hopCount`, `coverage`, `counts`).
 
 `impact` is what the job would disturb as last reported: set at creation, and again when a resume is refused or an auto-resume finds it grew. `consentedImpact` is what the operator agreed to, with `takeover: true` at creation or on a resume, and null when no consent was given. A job auto-resumes only while its current impact fits `consentedImpact`.
 

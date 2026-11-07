@@ -517,7 +517,7 @@ describe("API Server", () => {
 			expect(response.statusCode).toBe(200)
 
 			const spec = JSON.parse(response.body)
-			expect(spec.openapi).toBe("3.0.0")
+			expect(spec.openapi).toBe("3.1.0")
 			expect(spec.info.title).toBe("WaveKit API")
 			expect(spec.info.version).toBe("1.0.0")
 		})

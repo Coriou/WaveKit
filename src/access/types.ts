@@ -24,6 +24,8 @@ export interface AccessPolicyOptions {
 	 * still prove a credential is current. Latched by the storage owner.
 	 */
 	credentialAuthorityLost?: () => boolean
+	/** Fires once at that latch, or at once if it already happened. Returns the unsubscribe. */
+	onCredentialAuthorityLost?: (listener: () => void) => () => void
 }
 
 export interface AccessPrincipal {

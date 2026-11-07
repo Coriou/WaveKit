@@ -1,12 +1,13 @@
 import Fastify from "fastify"
 import swagger from "@fastify/swagger"
 import { expect, it } from "vitest"
-import { registerRouteIndex } from "../../../src/api/routes/route-index.js"
+import { installRouteIndex } from "../../../src/api/routes/route-index.js"
 
 it("indexes every method, encapsulated route and schema including itself", async () => {
 	const app = Fastify()
-	registerRouteIndex(app)
+	const mountRouteIndex = installRouteIndex(app)
 	await app.register(swagger)
+	mountRouteIndex()
 	await app.register(async child => {
 		child.route({
 			method: ["GET", "POST"],
