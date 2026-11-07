@@ -324,10 +324,34 @@ interface Batch {
 	start: number
 }
 
+/** A stream boundary queued at `atBranchByte`. */
+interface StreamMark {
+	kind: "stream"
+	atBranchByte: number
+	trust: TuningTrust
+	/** Its place among epoch triggers (`SpectrumEngine.ticket`). */
+	ticket: number
+}
+
 /** Something that happens when the engine's branch byte counter reaches `atBranchByte`. */
 type BranchMark =
 	| { kind: "gap"; atBranchByte: number; droppedBytes: number }
-	| { kind: "stream"; atBranchByte: number; trust: TuningTrust }
+	| StreamMark
+
+/** An operator, relay or reconnect command's epoch still to be posted (`queueExternal`). */
+interface ExternalCommand {
+	trust: TuningTrust
+	/** WG9 req 3.3: the centre a set-frequency command wrote (one epoch per retune). */
+	centreHz?: number
+	/**
+	 * WG9 req 3.1/3.2: merge the shared state rule into `trust` at flush, after the
+	 * tuner finished the update that fired the event (a relay command updates caps
+	 * before it records the accepted value; reconnect reconciliation before replay events).
+	 */
+	checkState: boolean
+	/** Its place among epoch triggers (`SpectrumEngine.ticket`): the first command it merges. */
+	ticket: number
+}
 
 export class SpectrumEngine extends EventEmitter implements EpochClock {
 	readonly sourceId: string
@@ -378,19 +402,23 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	// Epochs
 	private lastEpoch = 0
 	private suppressed = 0
-	private externalPending: {
-		trust: TuningTrust
-		commandSample: number
-		bufferedSamples: number
-		/** WG9 req 3.3: the centre a set-frequency command wrote (one epoch per retune). */
-		centreHz?: number
-		/**
-		 * WG9 req 3.1/3.2: merge the shared state rule into `trust` at flush, after the
-		 * tuner finished the update that fired the event (a relay command updates caps
-		 * before it records the accepted value; reconnect reconciliation before replay events).
-		 */
-		checkState: boolean
-	} | null = null
+	private externalPending:
+		| (ExternalCommand & { commandSample: number; bufferedSamples: number })
+		| null = null
+	/**
+	 * Orders epoch triggers: each command's epoch, stream boundary and source disconnect takes the
+	 * next value, so a command can tell whether it came after a boundary or a disconnect.
+	 */
+	private ticket = 0
+	/** The ticket of the source's last disconnect (0: none since start). */
+	private disconnectTicket = 0
+	/**
+	 * Commands that came while the pipeline restarted, or after a stream boundary the delivered
+	 * bytes have not reached yet: they belong to the stream that starts next, and are posted
+	 * into it once it has started (beginStream), never dropped. A command older than the
+	 * source's last disconnect tuned a connection that is gone, and is dropped.
+	 */
+	private carried: ExternalCommand | null = null
 	private readonly pendingMeta = new Map<number, EngineEpoch>()
 	/** WG9 req 3.4: per non-scanner epoch, the first sample past the network settle. */
 	private readonly verifiedFrom = new Map<number, number>()
@@ -509,6 +537,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.pendingMeta.clear()
 		this.verifiedFrom.clear()
 		this.openingStreams.length = 0
+		// A command carried by an earlier run tuned before this branch existed.
+		this.carried = null
 		this.beginStream(this.initialTrust())
 		const reader = this.deps.hostCentre ?? nullHostCentreReader
 		if (reader !== nullHostCentreReader) {
@@ -823,6 +853,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.restarting = true
 		this.flushBatch()
 		const old = this.host
+		const since = this.ticket
 		try {
 			this.persisted =
 				(await old.exportState().catch(() => this.persisted)) ?? this.persisted
@@ -851,7 +882,10 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			if (this.spectrumFeed) this.send({ kind: "spectrum-feed", enabled: true })
 			this.restarting = false
 			this.dropStaleBranchMarks()
-			this.beginStream(trust)
+			// A disconnect during the restart: its boundary was discarded with the old bytes, so the
+			// stream that starts now is a new connection's, which nothing proved yet. The replay
+			// that proves it was carried (flushExternal) and follows as this stream's next epoch.
+			this.beginStream(this.disconnectTicket > since ? "unverified" : trust)
 		} finally {
 			this.restarting = false
 		}
@@ -890,7 +924,11 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		return trust
 	}
 
-	private beginStream(trust: TuningTrust): void {
+	/**
+	 * `boundaryTicket`: the queued boundary this stream starts at; absent for a start or a restart,
+	 * whose commands still pending all came after the stream they replace stopped taking epochs.
+	 */
+	private beginStream(trust: TuningTrust, boundaryTicket?: number): void {
 		this.flushBatch()
 		const caps = this.deps.sources.getCaps(this.sourceId)
 		const sampleRateHz = this.cfg?.sampleRateHz ?? caps?.sampleRate ?? 0
@@ -899,7 +937,14 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.remainder = new Uint8Array(0)
 		this.skipBytes = 0
 		// The old stream's pendingMeta stays until this stream's own epoch-started (onEvents).
+		// A command queued before the boundary was the old stream's; one after it is this one's.
+		const pending = this.externalPending
 		this.externalPending = null
+		if (
+			pending &&
+			(boundaryTicket === undefined || pending.ticket > boundaryTicket)
+		)
+			this.carry(pending)
 		const ringSeconds = Math.max(
 			this.deps.settings().ringSeconds,
 			this.ringSecondsMin,
@@ -932,6 +977,39 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			gainKey,
 			tuningTrust: trust,
 		})
+		this.postCarried()
+	}
+
+	/**
+	 * Posts the carried command into the stream that just started, as its next epoch, timed from
+	 * this stream's clock. Its label is still the command's own merged with the state rule at
+	 * flush, so an unproven tuning stays `unverified`.
+	 */
+	private postCarried(): void {
+		const carried = this.carried
+		this.carried = null
+		if (!carried || carried.ticket < this.disconnectTicket) return
+		this.queueExternal(carried.trust, carried.centreHz, true, carried.ticket)
+	}
+
+	/** Keeps a command that cannot be posted now for the stream that starts next. */
+	private carry(command: ExternalCommand): void {
+		if (command.ticket < this.disconnectTicket) return
+		const held = this.carried
+		if (!held || held.ticket < this.disconnectTicket) {
+			this.carried = {
+				trust: command.trust,
+				...(command.centreHz !== undefined
+					? { centreHz: command.centreHz }
+					: {}),
+				checkState: command.checkState,
+				ticket: command.ticket,
+			}
+			return
+		}
+		held.trust = mergeTrust(held.trust, command.trust)
+		if (command.centreHz !== undefined) held.centreHz = command.centreHz
+		if (command.checkState) held.checkState = true
 	}
 
 	private send(input: WorkerPipelineInput, transfer?: ArrayBuffer): void {
@@ -998,7 +1076,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	private applyMark(mark: BranchMark): void {
 		if (mark.kind === "gap") this.applyGap(mark.droppedBytes)
-		else this.beginStream(mark.trust)
+		else this.beginStream(mark.trust, mark.ticket)
 	}
 
 	/** Bytes the fanout accepted into the branch so far (written minus dropped). */
@@ -1025,7 +1103,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			}
 			this.bpMark = { atBranchByte: at, droppedAt: t.droppedBytesTotal }
 		}
-		this.branchQueue.push({ kind: "stream", atBranchByte: at, trust })
+		this.branchQueue.push({
+			kind: "stream",
+			atBranchByte: at,
+			trust,
+			ticket: ++this.ticket,
+		})
 		this.streamStartByte = at
 		this.applyDueMarks()
 	}
@@ -1344,6 +1427,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private readonly onDisconnected = (sourceId: string): void => {
 		if (sourceId !== this.sourceId || !this.running) return
 		this.awaitingPayload = true
+		this.disconnectTicket = ++this.ticket
 		this.queueStreamBoundary("unverified")
 	}
 
@@ -1505,6 +1589,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		trust: TuningTrust,
 		centreHz?: number,
 		checkState = false,
+		ticket?: number,
 	): void {
 		if (!this.running) return
 		if (this.externalPending) {
@@ -1520,14 +1605,29 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			bufferedSamples: clock.bufferedSamples,
 			...(centreHz !== undefined ? { centreHz } : {}),
 			checkState,
+			ticket: ticket ?? ++this.ticket,
 		}
 		queueMicrotask(() => this.flushExternal())
+	}
+
+	/** True while a stream boundary queued before the command `ticket` is still ahead in the branch. */
+	private boundaryAhead(ticket: number): boolean {
+		return this.branchQueue.some(
+			mark => mark.kind === "stream" && mark.ticket < ticket,
+		)
 	}
 
 	private flushExternal(): void {
 		const pending = this.externalPending
 		this.externalPending = null
-		if (!pending || !this.running || this.restarting) return
+		if (!pending || !this.running) return
+		// A restart or a boundary still ahead in the branch: the command's epoch belongs to the
+		// stream that starts next (its clock is not this one's). Dropping it would leave that stream
+		// on the label it started with, `unverified` after a reconnect, until another command.
+		if (this.restarting || this.boundaryAhead(pending.ticket)) {
+			this.carry(pending)
+			return
+		}
 		if (pending.checkState)
 			pending.trust = mergeTrust(pending.trust, this.stateTrust())
 		const caps = this.deps.sources.getCaps(this.sourceId)
