@@ -3734,6 +3734,16 @@ listings, then from the observations listing their recordings), and `unresolved`
 could not be traced and stay on disk, kept by every retention pass. Nothing is moved or
 deleted. One info line at startup carries the same two counts.
 
+`recordingsQuota` is present only while the last retention pass left the recordings quota
+(`storage.maxRecordingsMb`) exceeded after removing every file its rules allow, so everything
+left is protected (kept, recent, held by a kept discovery, or with an owner the scanner cannot
+resolve) and quota retention frees nothing:
+`{ "state": "exceeded", "reason": "storage-cap", "capBytes": 536870912, "usedBytes": 601882624, "overBytes": 65011712 }`.
+Meanwhile new analog recordings are refused with the receipt error `storage-cap`; other writes
+stop only at the free-disk threshold (`disk-low`). It is absent within the quota and from older
+cores. One warning line names `storage-cap` with the same numbers when it starts, and one info
+line when it clears.
+
 `blankedFrames` counts frames blanked as broadband impulses;
 `broadbandRfi` is `{ periodMs }` while periodic broadband RFI is active.
 `overloadHint` is present only while the gain mode is manual and at least 5 % of frames

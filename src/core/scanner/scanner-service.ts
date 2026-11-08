@@ -60,6 +60,7 @@ import type {
 	ScannerIdentifyRequest,
 	ScannerProgressEventData,
 	ScannerSettingsView,
+	ScannerRecordingsQuotaStatus,
 	ScannerStatus,
 	SpectrumBinsCapView,
 	SpectrumFrameTrackScanner,
@@ -1505,6 +1506,7 @@ export class ScannerService extends EventEmitter {
 					heldFileNames: (id, removing) =>
 						this.store.heldFileNames(id, removing),
 					heldRecordingOwner: id => this.store.heldRecordingOwner(id),
+					heldFolderUnknown: id => this.store.heldFolderUnknown(id),
 				},
 				...(deps.recordingProtection
 					? { protection: deps.recordingProtection }
@@ -1799,6 +1801,7 @@ export class ScannerService extends EventEmitter {
 			...(loaded.heldRecordings
 				? { heldRecordings: loaded.heldRecordings }
 				: {}),
+			...(loaded.heldOverflow ? { heldOverflow: loaded.heldOverflow } : {}),
 		}
 		try {
 			// In slices with event-loop turns between them (SCANNER_LOAD_SLICE_ITEMS): a large
@@ -2250,6 +2253,7 @@ export class ScannerService extends EventEmitter {
 			},
 			disk: this.disk,
 			...(this.folderMigration ? { folders: { ...this.folderMigration } } : {}),
+			...this.recordingsQuotaStatus(),
 			jobs: {
 				active: [...this.jobs.values()].filter(j => !isTerminal(j.state))
 					.length,
@@ -9004,6 +9008,26 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
+	 * `status().recordingsQuota`: present while the last retention pass left the recordings quota
+	 * exceeded with nothing more it may remove (counts from the evidence store only).
+	 */
+	private recordingsQuotaStatus(): {
+		recordingsQuota?: ScannerRecordingsQuotaStatus
+	} {
+		const q = this.evidence.recordingsQuotaExceeded
+		if (q === null) return {}
+		return {
+			recordingsQuota: {
+				state: "exceeded",
+				reason: "storage-cap",
+				capBytes: q.capBytes,
+				usedBytes: q.usedBytes,
+				overBytes: q.overBytes,
+			},
+		}
+	}
+
+	/**
 	 * Load-time migration of folders whose merge alias was released past the bound before
 	 * folders were checked: each is re-attached to its owner (journal alias listings, then the
 	 * observations listing its recordings), journaled; nothing moves or is deleted. The counts
@@ -9082,8 +9106,10 @@ export class ScannerService extends EventEmitter {
 			.catch((err: unknown) => this.log.warn({ err }, "Retention failed"))
 		// Ownership of recordings listed in other folders ends with their files.
 		if (!this.ownershipLost())
-			this.store.pruneHeldRecordings(id =>
-				this.evidence.recordingFileExists(id),
+			this.store.pruneHeldRecordings(
+				id => this.evidence.recordingFileExists(id),
+				// A folder the last listing did not find holds nothing: its overflow mark ends.
+				id => this.evidence.folders.holds(id),
 			)
 		await this.captures
 			.retention(s.storage.maxCapturesMb * 1024 * 1024)

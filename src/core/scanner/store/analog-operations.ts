@@ -260,6 +260,11 @@ interface Context {
 	protection?: RecordingProtection
 	/** Fixed-text count log of kept artifacts a deleter left in place. */
 	keptSkipped?: (count: number) => void
+	/**
+	 * True when a live discovery may list a file of `folderId` the ownership table could not
+	 * record (it was full): such a file's owner is unknown and it is kept (heldElsewhere null).
+	 */
+	heldUnknown?: (folderId: string) => boolean
 }
 interface Inventory {
 	bytes: number
@@ -357,6 +362,8 @@ export class AnalogOperations {
 	private initialized = false
 	/** Artifacts the last retention pass kept because no live discovery owns them. */
 	unresolvedRetained = 0
+	/** Artifacts the last retention pass kept because their owner is unknown (table full). */
+	unknownHeldRetained = 0
 	private recovery: Promise<AnalogReconciliation[]> | null = null
 	private root: string
 	private rootAnchored = false
@@ -1623,7 +1630,8 @@ export class AnalogOperations {
 				) ||
 				[...this.inventory.intents.values()].some(
 					intent =>
-						intent.discoveryId === id && !this.heldElsewhere(intent, [id]),
+						intent.discoveryId === id &&
+						this.heldElsewhere(intent, [id]) === undefined,
 				)
 			)
 		})
@@ -1632,18 +1640,20 @@ export class AnalogOperations {
 	 * The live discovery that owns this intent's committed file, when it is not one of `removing`:
 	 * after a co-channel split the file stays in the folder it was written to, and the twin whose
 	 * observation lists it owns it (DiscoveryStore.recordingAssociation). No deleter of that
-	 * folder may reach it. Undefined when nobody else lists it.
+	 * folder may reach it. Undefined when nobody else lists it; null (fail closed) when no
+	 * association names it but the folder's ownership is unknown (the ownership table was full).
 	 */
 	private heldElsewhere(
 		intent: Intent,
 		removing: readonly string[],
-	): string | undefined {
+	): string | null | undefined {
 		const association = this.context.adapter.association(
 			intent.discoveryId,
 			intent.observationId,
 			intent.binding,
 		)
-		if (!association?.aliasIds.includes(intent.alias)) return undefined
+		if (!association?.aliasIds.includes(intent.alias))
+			return this.heldUnknown(intent.discoveryId) ? null : undefined
 		const owner = association.ownerId ?? intent.discoveryId
 		if (
 			owner === intent.discoveryId ||
@@ -1652,6 +1662,14 @@ export class AnalogOperations {
 		)
 			return undefined
 		return owner
+	}
+	/** Fail closed: a throwing lookup answers "unknown owner". */
+	private heldUnknown(folderId: string): boolean {
+		try {
+			return this.context.heldUnknown?.(folderId) ?? false
+		} catch {
+			return true
+		}
 	}
 	/** The intent's file is admitted through its folder, or through the live discovery owning it. */
 	private admitsFile(
@@ -1865,9 +1883,15 @@ export class AnalogOperations {
 		const deleted: string[] = []
 		let skipped = 0
 		let unresolved = 0
+		let unknownHeld = 0
 		for (const intent of [...this.inventory.intents.values()]) {
 			// An operator keep of the discovery owning the file (a split twin) protects it too.
 			const owner = this.heldElsewhere(intent, [])
+			// An owner that is unknown (the ownership table was full): kept, never unkept.
+			if (owner === null) {
+				unknownHeld++
+				continue
+			}
 			// A file no live discovery owns (its folder's and no listing) is kept, never unkept.
 			if (owner === undefined && !this.context.admits(intent.discoveryId)) {
 				unresolved++
@@ -1902,6 +1926,7 @@ export class AnalogOperations {
 		}
 		if (skipped > 0) this.context.keptSkipped?.(skipped)
 		this.unresolvedRetained = unresolved
+		this.unknownHeldRetained = unknownHeld
 		return deleted
 	}
 	private async retire(intent: Intent, deleted: string[]): Promise<void> {

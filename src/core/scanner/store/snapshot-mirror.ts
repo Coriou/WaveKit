@@ -38,6 +38,8 @@ export interface SnapshotHead {
 	aliases: string | null
 	/** `JSON.stringify(heldRecordings)` when there is at least one entry; absent otherwise. */
 	heldRecordings?: string
+	/** `JSON.stringify(heldOverflow)` when there are overflow marks; absent otherwise. */
+	heldOverflow?: string
 }
 
 export interface MirrorCounts {
@@ -48,7 +50,11 @@ export interface MirrorCounts {
 /** Small parts of a store snapshot, the shape `snapshotHeadOf` reads. */
 export type SnapshotParts = Pick<
 	StoreSnapshot,
-	"corrections" | "recordingOperations" | "aliases" | "heldRecordings"
+	| "corrections"
+	| "recordingOperations"
+	| "aliases"
+	| "heldRecordings"
+	| "heldOverflow"
 >
 
 /** The head for `parts` exactly as `writeSnapshot` stringifies them; `recordingOperations` already validated. */
@@ -67,6 +73,9 @@ export function snapshotHeadOf(
 		aliases: aliases && aliases.length > 0 ? JSON.stringify(aliases) : null,
 		...(parts.heldRecordings && parts.heldRecordings.length > 0
 			? { heldRecordings: JSON.stringify(parts.heldRecordings) }
+			: {}),
+		...(parts.heldOverflow
+			? { heldOverflow: JSON.stringify(parts.heldOverflow) }
 			: {}),
 	}
 }
@@ -372,6 +381,7 @@ export function* snapshotChunks(
 		(h.heldRecordings === undefined
 			? ""
 			: `,"heldRecordings":${h.heldRecordings}`) +
+		(h.heldOverflow === undefined ? "" : `,"heldOverflow":${h.heldOverflow}`) +
 		"}"
 }
 

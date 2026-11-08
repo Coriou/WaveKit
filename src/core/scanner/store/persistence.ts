@@ -53,8 +53,15 @@ import {
 } from "./recording-operation.js"
 import type { PreparedRecordingMetadata } from "./recording-operation.js"
 import type { StoreMutation } from "./schemas.js"
-import { HeldRecordingsSchema } from "./held-recordings.js"
-import type { HeldRecordingEntry } from "./held-recordings.js"
+import {
+	HeldOverflowSchema,
+	HeldRecordingsSchema,
+	heldPayloadWithinBounds,
+} from "./held-recordings.js"
+import type {
+	HeldOverflowState,
+	HeldRecordingEntry,
+} from "./held-recordings.js"
 import type { JournalEntry, StoreSnapshot } from "./discovery-store.js"
 import { atomicWrite } from "./atomic-write.js"
 import { snapshotHeadOf } from "./snapshot-mirror.js"
@@ -170,6 +177,8 @@ export interface LoadedState {
 	aliases?: { id: string; aliases: string[] }[]
 	/** Recording ownership outside folders (held-recordings.ts); journal entries replay on top. */
 	heldRecordings?: HeldRecordingEntry[]
+	/** The ownership table's overflow marks from the snapshot (held-recordings.ts). */
+	heldOverflow?: HeldOverflowState
 	recoveryHealth: "healthy" | "degraded"
 	/** Seqs missing from the replayed journal tail (recovery is then degraded); absent when none. */
 	journalGap?: JournalGap
@@ -407,6 +416,7 @@ const SnapshotFileSchema = z
 			.default([]),
 		aliases: z.array(DiscoveryAliasEntrySchema).optional(),
 		heldRecordings: HeldRecordingsSchema.optional(),
+		heldOverflow: HeldOverflowSchema.optional(),
 	})
 	.strict()
 /**
@@ -740,6 +750,7 @@ export class ScannerPersistence {
 			...(snapshot.heldRecordings
 				? { heldRecordings: snapshot.heldRecordings }
 				: {}),
+			...(snapshot.heldOverflow ? { heldOverflow: snapshot.heldOverflow } : {}),
 			recoveryHealth: this.authorityHealth,
 			...(journal.gap ? { journalGap: journal.gap } : {}),
 		}
@@ -777,6 +788,9 @@ export class ScannerPersistence {
 		const line = `${JSON.stringify({ seq, at: entry.at, op: entry.op, payload: entry.payload })}\n`
 		// Every seq, refused ones too: the mirror follows the store, not the disk.
 		this.writer?.feed(line)
+		// The writer never emits what its reader rejects: a payload past the held-recording bounds
+		// (a cheap length check) is refused like a full backlog, and a snapshot covers it.
+		if (!heldPayloadWithinBounds(entry.payload)) return this.refuse(seq)
 		const cost = line.length * 2 + APPEND_OVERHEAD_BYTES
 		const overCap =
 			opts.reserved !== true &&
@@ -1132,6 +1146,7 @@ export class ScannerPersistence {
 			...(s.heldRecordings && s.heldRecordings.length > 0
 				? { heldRecordings: s.heldRecordings }
 				: {}),
+			...(s.heldOverflow ? { heldOverflow: s.heldOverflow } : {}),
 		})
 		return { text, lastSeq }
 	}
@@ -1514,6 +1529,7 @@ export class ScannerPersistence {
 				recordingOperations: data.recordingOperations ?? [],
 				...(data.aliases ? { aliases: data.aliases } : {}),
 				...(data.heldRecordings ? { heldRecordings: data.heldRecordings } : {}),
+				...(data.heldOverflow ? { heldOverflow: data.heldOverflow } : {}),
 				lastSeq: data.lastSeq,
 			},
 		}
@@ -1588,6 +1604,11 @@ export class ScannerPersistence {
 			this.log.warn(
 				{ invalid: history.invalid },
 				"Skipped unreadable journal alias listings",
+			)
+		if (history.truncated > 0)
+			this.log.warn(
+				{ truncated: history.truncated },
+				"Journal alias listings past the history bound were skipped; their folders stay in place",
 			)
 		return history.owners
 	}

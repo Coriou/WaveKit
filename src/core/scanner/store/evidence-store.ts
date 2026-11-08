@@ -92,6 +92,13 @@ export interface LinkCandidate {
 	encrypted: boolean
 }
 
+/** The recordings quota left exceeded after retention removed every file its rules allow. */
+export interface RecordingsQuotaExceeded {
+	capBytes: number
+	usedBytes: number
+	overBytes: number
+}
+
 interface StoredFile {
 	path: string
 	rel: string
@@ -375,6 +382,10 @@ export class EvidenceStore {
 	readonly folders = new FolderIndex()
 	/** Folders the last retention pass kept because no live discovery owns them. */
 	private unresolvedFolders = 0
+	/** Recording files the last retention pass kept because their owner is unknown (table full). */
+	private unknownHeldFiles = 0
+	/** The recordings quota the last retention pass left exceeded; null within it. */
+	private quotaExceeded: RecordingsQuotaExceeded | null = null
 
 	constructor(opts: {
 		dir: string
@@ -430,14 +441,42 @@ export class EvidenceStore {
 		}
 	}
 
-	/** Names in `folderId`'s folders another live discovery lists (analog and every other kind). */
-	private heldNames(
+	/** Fail closed: a throwing lookup answers "unknown" (every recording file kept). */
+	private heldFolderUnknown(folderId: string): boolean {
+		try {
+			return this.aliases?.heldFolderUnknown?.(folderId) ?? false
+		} catch {
+			return true
+		}
+	}
+
+	/**
+	 * Names in `folderId`'s folders another live discovery lists (analog and every other kind).
+	 * When the ownership table could not list them all (it was full), every recording file in
+	 * the folder counts as held: none is reached, and the count is logged.
+	 */
+	private async heldNames(
 		folderId: string,
 		removing: readonly string[],
-	): ReadonlySet<string> {
+	): Promise<ReadonlySet<string>> {
 		const analog =
 			this.analog?.heldArtifactNames(folderId, removing) ?? NO_NAMES
 		const listed = this.aliases?.heldFileNames?.(folderId, removing) ?? NO_NAMES
+		if (this.heldFolderUnknown(folderId)) {
+			const all = new Set([...analog, ...listed])
+			const before = all.size
+			for (const kind of RECORDING_KINDS)
+				for (const name of await listDir(
+					join(this.root, "recordings", kind, folderId),
+				))
+					all.add(name)
+			if (all.size > before)
+				this.log.warn(
+					{ kept: all.size - before },
+					"Scanner removal kept recordings whose owner is unknown (ownership table full)",
+				)
+			return all
+		}
 		if (listed.size === 0) return analog
 		if (analog.size === 0) return listed
 		return new Set([...analog, ...listed])
@@ -460,6 +499,21 @@ export class EvidenceStore {
 	/** Folders the last retention pass left in place because no live discovery owns them. */
 	get unresolvedFolderCount(): number {
 		return this.unresolvedFolders
+	}
+
+	/** Recording files the last retention pass kept because their owner is unknown (table full). */
+	get unknownHeldFileCount(): number {
+		return this.unknownHeldFiles + (this.analog?.unknownHeldRetained ?? 0)
+	}
+
+	/**
+	 * The recordings quota the last retention pass left exceeded after removing every file its
+	 * rules allow (everything left is protected: kept, recent, unresolved or held); null within
+	 * the quota. Analog admission then refuses with `storage-cap`; other writes rely on the free
+	 * disk threshold.
+	 */
+	get recordingsQuotaExceeded(): RecordingsQuotaExceeded | null {
+		return this.quotaExceeded === null ? null : { ...this.quotaExceeded }
 	}
 
 	/**
@@ -549,6 +603,7 @@ export class EvidenceStore {
 			adapter,
 			admits: id => this.admits(id),
 			serialise: (id, job) => this.serialise(id, job),
+			heldUnknown: id => this.heldFolderUnknown(id),
 			legacyBytes: async () =>
 				(await this.collect())
 					.filter(file => file.category === "recordings")
@@ -580,8 +635,17 @@ export class EvidenceStore {
 				"Analog metadata authority not configured",
 				"SCANNER_ANALOG_ADMISSION_DENIED",
 			)
-		this.folders.mark(input.discoveryId)
-		return this.analog.begin(input)
+		// The folder mark lasts until the operation settled (a listing meanwhile keeps it).
+		const settled = this.folders.mark(input.discoveryId)
+		let handle: AnalogHandle
+		try {
+			handle = this.analog.begin(input)
+		} catch (err) {
+			settled()
+			throw err
+		}
+		void handle.settled.then(settled, settled)
+		return handle
 	}
 	recoverAnalog(): Promise<AnalogReconciliation[]> {
 		return this.analog?.recover() ?? Promise.resolve([])
@@ -721,7 +785,7 @@ export class EvidenceStore {
 				await rm(f.path, { force: true })
 				continue
 			}
-			this.folders.mark(c.discoveryId)
+			const moved = this.folders.mark(c.discoveryId)
 			// Reserve before any await: DELETE drains this accepted move before acknowledging.
 			await this.serialise(c.discoveryId, async () => {
 				if (!this.admits(c.discoveryId)) return
@@ -737,7 +801,7 @@ export class EvidenceStore {
 					observationId: c.observationId,
 					recordingId: `${c.discoveryId}~${f.name}`,
 				})
-			})
+			}).finally(moved)
 		}
 	}
 
@@ -771,7 +835,7 @@ export class EvidenceStore {
 	): Promise<boolean> {
 		assertDiscoveryId(discoveryId)
 		if (!this.admits(discoveryId)) return false
-		this.folders.mark(discoveryId)
+		const written = this.folders.mark(discoveryId)
 		return this.serialise(discoveryId, async () => {
 			if (!this.admits(discoveryId) || (await this.diskState()) === "disk-low")
 				return false
@@ -797,7 +861,7 @@ export class EvidenceStore {
 				}),
 			)
 			return true
-		})
+		}).finally(written)
 	}
 
 	async writeIq(
@@ -817,7 +881,7 @@ export class EvidenceStore {
 				"SCANNER_INVALID_IQ_METADATA",
 			)
 		if (!this.admits(discoveryId)) return null
-		this.folders.mark(discoveryId)
+		const written = this.folders.mark(discoveryId)
 		return this.serialise(discoveryId, async () => {
 			if (!this.admits(discoveryId) || (await this.diskState()) === "disk-low")
 				return null
@@ -847,7 +911,7 @@ export class EvidenceStore {
 				}),
 			)
 			return name
-		})
+		}).finally(written)
 	}
 
 	recordingPath(recordingId: string): string | null {
@@ -998,7 +1062,7 @@ export class EvidenceStore {
 					// Files in this folder another live discovery lists (a split twin's recording, of
 					// any kind, however old its observation): they and the folder stay; never a delete
 					// path to them.
-					const held = this.heldNames(id, removing)
+					const held = await this.heldNames(id, removing)
 					if (this.protection) {
 						await this.removeGuarded(id, held)
 						return
@@ -1196,6 +1260,7 @@ export class EvidenceStore {
 		// A folder no live discovery owns is kept and counted, never treated as unkept; a file
 		// another live discovery lists belongs to that discovery (its keep protects it).
 		const unresolved = new Set<string>()
+		const unknownHeld = new Set<string>()
 		const ownedElsewhere = (f: StoredFile): boolean => {
 			if (f.category !== "recordings" || f.probe) return false
 			const holder = this.heldOwner(
@@ -1203,7 +1268,13 @@ export class EvidenceStore {
 				f.path.split("/").at(-1) ?? "",
 			)
 			if (holder === undefined) return false
-			return holder === null || keep.has(holder) || !this.folderResolved(holder)
+			// An unknown owner (the ownership table was full): kept and counted.
+			if (holder === null) {
+				unknownHeld.add(f.path)
+				return true
+			}
+			// Otherwise the file follows its holder's policy, like the holder's own files.
+			return keep.has(holder) || !this.folderResolved(holder)
 		}
 		const unowned = (f: StoredFile): boolean => {
 			if (f.probe || this.folderResolved(f.discoveryId)) return false
@@ -1254,6 +1325,7 @@ export class EvidenceStore {
 			["recordings", this.caps.maxRecordingsMb * MIB],
 			["evidence", this.caps.maxEvidenceMb * MIB],
 		]
+		let recordingsLeft = 0
 		for (const [category, capBytes] of caps) {
 			let total = 0
 			for (const f of files)
@@ -1264,6 +1336,7 @@ export class EvidenceStore {
 					continue
 				if (await remove(f)) total -= f.bytes
 			}
+			if (category === "recordings") recordingsLeft = total
 		}
 		if (this.analog)
 			deleted.push(
@@ -1279,6 +1352,13 @@ export class EvidenceStore {
 			this.log.debug({ err }, "Scanner folder listing failed"),
 		)
 		this.unresolvedFolders = unresolved.size
+		this.unknownHeldFiles = unknownHeld.size
+		this.noteQuota(recordingsLeft + (this.analog?.managedBytes ?? 0))
+		if (unknownHeld.size > 0)
+			this.log.debug(
+				{ kept: unknownHeld.size },
+				"Scanner retention kept recordings whose owner is unknown",
+			)
 		if (unresolved.size > 0)
 			this.log.debug(
 				{ unresolved: unresolved.size },
@@ -1290,6 +1370,38 @@ export class EvidenceStore {
 				"Scanner retention removed files",
 			)
 		return { deleted }
+	}
+
+	/**
+	 * The recordings left after a retention pass against the quota: entering or leaving the
+	 * exceeded state logs once (numbers only).
+	 */
+	private noteQuota(usedBytes: number): void {
+		const capBytes = this.caps.maxRecordingsMb * MIB
+		const next =
+			Number.isFinite(usedBytes) && usedBytes > capBytes
+				? {
+						capBytes,
+						usedBytes,
+						overBytes: usedBytes - capBytes,
+					}
+				: null
+		if (next !== null && this.quotaExceeded === null)
+			this.log.warn(
+				{
+					reason: "storage-cap",
+					capBytes: next.capBytes,
+					usedBytes: next.usedBytes,
+					overBytes: next.overBytes,
+				},
+				"Scanner recordings quota exceeded and retention may remove nothing more; analog recordings are refused (storage-cap)",
+			)
+		else if (next === null && this.quotaExceeded !== null)
+			this.log.info(
+				{ reason: "storage-cap", capBytes },
+				"Scanner recordings quota no longer exceeded; analog recordings are admitted again",
+			)
+		this.quotaExceeded = next
 	}
 
 	async diskState(): Promise<"ok" | "disk-low"> {

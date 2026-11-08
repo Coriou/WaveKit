@@ -327,7 +327,8 @@ export class SnapshotWriter {
 				(head.corrections?.length ?? 0) +
 				head.recordingOperations.length +
 				(head.aliases?.length ?? 0) +
-				(head.heldRecordings?.length ?? 0)) *
+				(head.heldRecordings?.length ?? 0) +
+				(head.heldOverflow?.length ?? 0)) *
 				2 +
 			MESSAGE_OVERHEAD_BYTES
 		if (!this.admit(charged)) return null

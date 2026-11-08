@@ -1,4 +1,5 @@
-// The scanner status carries the load-time folder migration counts (`folders`) unchanged.
+// The scanner status carries the load-time folder migration counts (`folders`) and the
+// recordings quota state (`recordingsQuota`) unchanged.
 import Fastify, { type FastifyInstance } from "fastify"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { ScannerStatus } from "@wavekit/api-types"
@@ -38,5 +39,22 @@ describe("GET /api/scanner folders", () => {
 		const server = await build({ enabled: true })
 		const res = await server.inject({ url: "/api/scanner" })
 		expect(res.json()).not.toHaveProperty("folders")
+	})
+
+	it("passes the recordings quota state through, and omits it within the quota", async () => {
+		const quota = {
+			state: "exceeded" as const,
+			reason: "storage-cap" as const,
+			capBytes: 4096,
+			usedBytes: 12288,
+			overBytes: 8192,
+		}
+		const server = await build({ enabled: true, recordingsQuota: quota })
+		const res = await server.inject({ url: "/api/scanner" })
+		expect(res.json().recordingsQuota).toEqual(quota)
+		await app?.close()
+		const within = await build({ enabled: true })
+		const res2 = await within.inject({ url: "/api/scanner" })
+		expect(res2.json()).not.toHaveProperty("recordingsQuota")
 	})
 })

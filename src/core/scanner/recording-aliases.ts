@@ -36,8 +36,16 @@ export interface DiscoveryAliasLookup {
 		folderId: string,
 		removing: readonly string[],
 	): ReadonlySet<string>
-	/** The live discovery listing `recordingId` outside its folder's owner. */
-	heldRecordingOwner?(recordingId: string): string | undefined
+	/**
+	 * The live discovery listing `recordingId` outside its folder's owner; null when one may and
+	 * its identity is unknown (the ownership table was full: fail closed, keep the file).
+	 */
+	heldRecordingOwner?(recordingId: string): string | null | undefined
+	/**
+	 * True when every recording file in `folderId` counts as listed by an unknown live discovery
+	 * (the ownership table was full): no deleter of the folder may reach any of them.
+	 */
+	heldFolderUnknown?(folderId: string): boolean
 }
 
 const NONE: readonly string[] = Object.freeze([])

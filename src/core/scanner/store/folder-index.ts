@@ -3,7 +3,10 @@
  * `recordings/dv/<id>`, `recordings/analog/<id>`), in memory. Built from one directory listing at
  * load and on every retention pass; marked before any write that may create a folder, so the
  * answer over-approximates the disk (a marked id whose write failed holds nothing until the next
- * listing). Merge aliases read it on the hot path: a Set lookup, never a stat.
+ * listing). A write's mark lasts its whole pending lifetime: `mark` returns its end, and every
+ * listing that finishes while the write is pending, or that ran while it was, keeps the id (the
+ * listing may have read the directory before the write created the folder). Merge aliases read
+ * it on the hot path: a Set lookup, never a stat.
  *
  * Fail closed: until the first listing finished, every id answers "holds a folder".
  */
@@ -12,6 +15,8 @@ export class FolderIndex {
 	private built = false
 	/** Per running listing, the ids marked since it began (listings may overlap). */
 	private readonly listings = new Set<Set<string>>()
+	/** Ids with a write still pending, and how many. */
+	private readonly pending = new Map<string, number>()
 
 	get ready(): boolean {
 		return this.built
@@ -26,10 +31,29 @@ export class FolderIndex {
 		return !this.built || this.ids.has(id)
 	}
 
-	/** A write that may create `id`'s folder is about to run. */
-	mark(id: string): void {
+	/**
+	 * A write that may create `id`'s folder is about to run; call the returned function once it
+	 * settled (idempotent). Until then every finished listing keeps `id`.
+	 */
+	mark(id: string): () => void {
 		this.ids.add(id)
 		for (const marked of this.listings) marked.add(id)
+		this.pending.set(id, (this.pending.get(id) ?? 0) + 1)
+		let ended = false
+		return () => {
+			if (ended) return
+			ended = true
+			const n = (this.pending.get(id) ?? 1) - 1
+			if (n > 0) this.pending.set(id, n)
+			else this.pending.delete(id)
+			// A listing running now may have read the directory before this write created it.
+			for (const marked of this.listings) marked.add(id)
+		}
+	}
+
+	/** Ids with a write pending (tests and diagnostics). */
+	get pendingWrites(): number {
+		return this.pending.size
 	}
 
 	/** Starts a listing; pass the token to `finishListing` or `abandonListing`. */
@@ -39,11 +63,15 @@ export class FolderIndex {
 		return { marked }
 	}
 
-	/** The listing's ids replace the index, plus every id marked since it began. */
+	/**
+	 * The listing's ids replace the index, plus every id marked or settled since it began and
+	 * every id whose write is still pending.
+	 */
 	finishListing(token: ListingToken, listed: Iterable<string>): void {
 		this.listings.delete(token.marked)
 		const next = new Set(listed)
 		for (const id of token.marked) next.add(id)
+		for (const id of this.pending.keys()) next.add(id)
 		this.ids = next
 		this.built = true
 	}

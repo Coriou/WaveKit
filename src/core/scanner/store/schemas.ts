@@ -11,8 +11,14 @@ import {
 } from "./recording-operation.js"
 import type { PreparedRecordingMetadata } from "./recording-operation.js"
 import { DISCOVERY_RECORDING_ALIASES_STORED_MAX } from "../recording-aliases.js"
-import { HeldRecordingChangesSchema } from "./held-recordings.js"
-import type { HeldRecordingChange } from "./held-recordings.js"
+import {
+	HeldOverflowSchema,
+	HeldRecordingChangesSchema,
+} from "./held-recordings.js"
+import type {
+	HeldOverflowState,
+	HeldRecordingChange,
+} from "./held-recordings.js"
 import type {
 	DecodeEvidence,
 	Discovery,
@@ -324,6 +330,8 @@ export interface StoreMutation {
 	aliases?: { id: string; aliases: string[] }[]
 	/** Ownership changes of recordings listed outside their folder's owner (held-recordings.ts). */
 	heldRecordings?: HeldRecordingChange[]
+	/** The overflow marks of the ownership table as now held (written whole when they change). */
+	heldOverflow?: HeldOverflowState
 }
 
 /**
@@ -373,6 +381,7 @@ export const StoreMutationSchema = z
 			.optional(),
 		aliases: z.array(DiscoveryAliasEntrySchema).optional(),
 		heldRecordings: HeldRecordingChangesSchema.optional(),
+		heldOverflow: HeldOverflowSchema.optional(),
 	})
 	.strict()
 export type StoreMutationCheck = Assert<
