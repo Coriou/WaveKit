@@ -1127,6 +1127,17 @@ export class WidebandAnalogRecorder {
 		string,
 		{ sourceId: string; candidate: string; until: number }
 	>()
+	/**
+	 * Voiced transmissions whose session gave its slot up (evict) while their track is still open,
+	 * by name (VoiceOnAir.voice) → the window they are on air in and their open observations
+	 * (noteUnrecorded): recordingActive lists each as "unrecorded" (Transmissions) until the last
+	 * of those observations closes, so an eviction is never read as the transmission's end.
+	 * Bounded by MAX_REMEMBERED (the oldest dropped).
+	 */
+	private readonly unrecorded = new Map<
+		string,
+		{ sourceId: string; stream: number; epoch: number; open: Set<string> }
+	>()
 	/** Observations whose store admission failed once: the next failure refuses them. */
 	private readonly retried = new Set<string>()
 	/** Sessions each observation started again (retarget, wideRestart), oldest first. */
@@ -1293,6 +1304,11 @@ export class WidebandAnalogRecorder {
 	 * transmission still on air in the window, by name (VoiceOnAir.transmissions): the scheduler
 	 * judges the transmission it heard by its own state, never by another channel's (a neighbour's
 	 * voice is no end of it). A `true` answer then becomes `{ recording: true }` to carry them.
+	 * A voiced transmission whose session gave its slot up while its track is still open (evict,
+	 * noteUnrecorded) is listed too, as "unrecorded", until that track closes, whatever else the
+	 * window holds: an eviction is no end of the transmission. With no answer of a session to carry
+	 * the list (false, "judging"), the answer is `{ recording: true, bare, transmissions }`, `bare`
+	 * being that answer, which is what it reads as for any transmission not listed.
 	 */
 	recordingActive(
 		sourceId: string,
@@ -1301,7 +1317,8 @@ export class WidebandAnalogRecorder {
 		let answer: RecordingActivity = false
 		let voice: VoiceOnAir | null = null
 		let sessions = 0
-		const transmissions: Record<string, VoiceOnAir | "quiet"> = {}
+		const transmissions: Record<string, VoiceOnAir | "quiet" | "unrecorded"> =
+			{}
 		for (const s of this.sessions.values()) {
 			if (
 				s.done ||
@@ -1336,9 +1353,29 @@ export class WidebandAnalogRecorder {
 			)
 				answer = v
 		}
+		// Evicted while on air (Session evict, noteUnrecorded): listed, no session records it.
+		let unrecorded = 0
+		for (const [name, u] of this.unrecorded) {
+			if (
+				u.sourceId !== sourceId ||
+				u.stream !== at.stream ||
+				u.epoch !== at.epoch ||
+				Object.hasOwn(transmissions, name)
+			)
+				continue
+			transmissions[name] = "unrecorded"
+			unrecorded++
+		}
 		const first = voice ?? answer
+		// Nothing records the window: the list, and what the window answers otherwise (`bare`).
+		if (unrecorded > 0 && (typeof first === "string" || first === false))
+			return { recording: true, bare: first, transmissions }
 		// One session: its own answer says it all.
-		if (sessions < 2 || typeof first === "string" || first === false)
+		if (
+			(sessions < 2 && unrecorded === 0) ||
+			typeof first === "string" ||
+			first === false
+		)
 			return first
 		return first === true
 			? { recording: true, transmissions }
@@ -1442,6 +1479,7 @@ export class WidebandAnalogRecorder {
 	): void {
 		// Its closing ingest came first: the observation asks for no waiver any more.
 		this.waived.delete(observationId)
+		this.closeUnrecorded(observationId)
 		// An association first given at the close still names the observation's earlier decisions.
 		if (info !== undefined && info.discoveryId !== null)
 			this.decisions.bindDiscovery(observationId, info.discoveryId)
@@ -1537,6 +1575,7 @@ export class WidebandAnalogRecorder {
 	 */
 	async stop(): Promise<void> {
 		this.stopped = true
+		this.unrecorded.clear()
 		for (const s of [...this.parked.values()])
 			this.dropParked(s, false, "discarded:park-expired")
 		for (const s of [...this.sessions.values()]) this.endSession(s, "shutdown")
@@ -1854,8 +1893,54 @@ export class WidebandAnalogRecorder {
 		}
 		if (spent) this.expireDigital(spent, "evicted")
 		else if (by !== "none" && digital) this.refuse(digital, "evicted", true)
-		else if (tone) this.yieldToneOnly(tone, candidate)
-		else if (by === "analog" && other) this.refuse(other, "evicted", true)
+		else if (tone) {
+			this.noteUnrecorded(tone)
+			this.yieldToneOnly(tone, candidate)
+		} else if (by === "analog" && other) {
+			this.noteUnrecorded(other)
+			this.refuse(other, "evicted", true)
+		}
+	}
+
+	/**
+	 * A session giving its slot up (evict) whose voiced transmission is still on air: the one
+	 * recordingActive names (Session.voiceTx, or the voiced span), voiced now or quiet with its
+	 * track open and not ended (no reopen since its voice), as recordingActive would list it. It
+	 * stays listed "unrecorded" until every open observation of the session closes
+	 * (closeUnrecorded). A session not voiced (unclassed, or classed and not past the voice gate)
+	 * leaves nothing.
+	 */
+	private noteUnrecorded(s: Session): void {
+		if (!s.classed || !s.qualified) return
+		const { open, voiced } = voicedSpan(s)
+		const name = s.voiceTx ?? voiced
+		if (!open || name === null) return
+		const ended =
+			voiced === null &&
+			s.voiceAt !== null &&
+			s.reopenAt !== null &&
+			s.voiceAt < s.reopenAt
+		if (ended) return
+		const tracks = new Set<string>()
+		for (const [id, a] of s.activity) if (a.open) tracks.add(id)
+		this.unrecorded.delete(name)
+		this.unrecorded.set(name, {
+			sourceId: s.sourceId,
+			stream: s.stream,
+			epoch: s.epoch,
+			open: tracks,
+		})
+		if (this.unrecorded.size > MAX_REMEMBERED) {
+			const oldest = this.unrecorded.keys().next()
+			if (oldest.done !== true) this.unrecorded.delete(oldest.value)
+		}
+	}
+
+	/** An observation closed: an unrecorded transmission ends with the last of its open ones. */
+	private closeUnrecorded(observationId: string): void {
+		for (const [name, u] of this.unrecorded)
+			if (u.open.delete(observationId) && u.open.size === 0)
+				this.unrecorded.delete(name)
 	}
 
 	/**

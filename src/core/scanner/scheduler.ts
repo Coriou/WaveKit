@@ -152,18 +152,29 @@ export interface RecordedSession {
 	readonly voiceEnded?: true
 	/** Every voiced transmission still on air in the window (VoiceOnAir.transmissions). */
 	readonly transmissions?: Transmissions
+	/**
+	 * No session of the window records: the answer only carries the list, whose transmissions are
+	 * all "unrecorded", and `bare` is what it reads as for any transmission not listed (false, or
+	 * "judging"). Absent: the answer is a recording's.
+	 */
+	readonly bare?: false | "judging"
 }
 
 /**
  * Every voiced transmission still on air in the recorded window, by name (VoiceOnAir.voice): its
  * own voice answer while voice is on air in it, "quiet" while its track is still open with no voice
- * that recent (a pause, a carrier after the voice). A transmission not listed has ended (its
+ * that recent (a pause, a carrier after the voice), "unrecorded" while its track is still open but
+ * its session gave its slot up (the recorder evicted it for another candidate): on air, no longer
+ * metered, so neither its voice nor its quiet is known. A transmission not listed has ended (its
  * squelch closed, or it was turned around). The recorder gives it when the window holds more than
- * one voiced session (two channels), whose answers would hide each other: the answer names only
- * the first voiced one, so another channel's voice is no end of the transmission a hold heard
- * (askRecording judges that one by its own entry). Absent: the answer is the only session's own.
+ * one voiced session (two channels), whose answers would hide each other, or any unrecorded one:
+ * the answer names only the first voiced one, so another channel's voice, or an eviction, is no
+ * end of the transmission a hold heard (askRecording judges that one by its own entry). Absent:
+ * the answer is the only session's own.
  */
-export type Transmissions = Readonly<Record<string, VoiceOnAir | "quiet">>
+export type Transmissions = Readonly<
+	Record<string, VoiceOnAir | "quiet" | "unrecorded">
+>
 
 /** Voice on air in a recorded transmission (RecordingActivity). */
 export interface VoiceOnAir {
@@ -192,17 +203,26 @@ export interface VoiceOnAir {
 /**
  * The answer as the transmission named `id` sees it (Transmissions): the answer itself when it
  * names `id` or lists no transmissions; that transmission's own voice answer, or true while it is
- * quiet; null when the list shows it ended.
+ * quiet; null when the list shows it ended. Unrecorded (on air, its session evicted): still voice
+ * of it, with no quiet known (the transmission the visit remembers was voiced in it, and only its
+ * track's close or `hold.maxHoldMs` ends a voice hold on it). With no remembered transmission
+ * (`id` null): the answer itself, or what it reads as when only unrecorded transmissions carry it
+ * (RecordedSession.bare): the ordinary rules, an evicted transmission no visit heard keeps nothing.
  */
 function answerOf(
 	answer: RecordingActivity,
-	id: string,
+	id: string | null,
 ): RecordingActivity | null {
 	if (typeof answer !== "object" || answer.transmissions === undefined)
 		return answer
+	if (id === null)
+		return "bare" in answer && answer.bare !== undefined ? answer.bare : answer
 	if (isVoiceOnAir(answer) && answer.voice === id) return answer
 	const own = answer.transmissions[id]
 	if (own === undefined) return null
+	// Evicted from its recorder slot while still on air: no file is being made of it, so it holds
+	// like any recording that is not voice, within L, never to hold.maxHoldMs; but it has not ended.
+	if (own === "unrecorded") return true
 	return own === "quiet" ? true : own
 }
 
@@ -401,7 +421,8 @@ interface HopState {
 	waitMs: number
 	/**
 	 * The hops (indices in the plan in force) that still owe a coarse visit before a voiced recording
-	 * may keep this hop again: every other hop when a visit's voice hold ends (Visit.voice), so the
+	 * may keep this hop again: every other hop when a visit's voice hold ends (Visit.voice), or a
+	 * visit leaves a voiced transmission its analog hold heard (Visit.heardVoiceId), so the
 	 * sweep's return to this hop may hold the next transmission. No activity revisit comes back here
 	 * meanwhile (pickRevisit). Per hop: a long hold elsewhere never takes a transmission's voice hold
 	 * away. Named hops, not a count: a plan change has to know which of them were paid
@@ -568,7 +589,8 @@ interface Visit {
 	 * not a voice hold ran (a probe, follow or hang of analog voice, sampleVoice): one transmission,
 	 * then the sweep. Its end (the squelch closed, the recorder's `voiceEnded`, or voice named
 	 * otherwise) spends the visit's voice hold as a voice hold's end does (askRecording), so a reply
-	 * never gets a voice hold of its own before the forced coarse sweep. Kept for the visit.
+	 * never gets a voice hold of its own before the forced coarse sweep. Kept for the visit: a visit
+	 * that leaves with it still on air (a hold cut at L) owes the sweep too (endVisit, voiceLock).
 	 */
 	heardVoiceId: string | null
 	/** Clock the recording check was last asked during an analog hold (sampleVoice's pace only). */
@@ -1834,7 +1856,7 @@ export class SweepScheduler {
 		// (Transmissions): a neighbouring channel's voice named first is no end of it. Listed as
 		// ended: its end, with another transmission on air.
 		const id = v === null ? null : v.voice === "on" ? v.voiceId : v.heardVoiceId
-		const own = id === null ? raw : answerOf(raw, id)
+		const own = answerOf(raw, id)
 		if (own === null && v !== null) {
 			this.spendVoice(v)
 			this.askEnded = true
@@ -3388,8 +3410,12 @@ export class SweepScheduler {
 		if (!v.revisit) for (const h of this.hops) h.voiceLock.delete(v.hopIndex)
 		const voiceHeld = v.voice !== "no"
 		// A follow that heard a squelch close with no session to name it owes the same visits
-		// before the hop's next voice hold (Visit.voiceBarred), without the long-hold lock.
-		if (voiceHeld || v.voiceBarred) {
+		// before the hop's next voice hold (Visit.voiceBarred), without the long-hold lock. So does
+		// a visit that leaves while the voiced transmission an analog hold heard is still on air
+		// (Visit.heardVoiceId with no voice hold: its end would have spent one), say a hold cut at L
+		// with that transmission evicted from its recorder slot: one transmission, then the sweep,
+		// with no activity revisit holding it again meanwhile (pickRevisit).
+		if (voiceHeld || v.voiceBarred || v.heardVoiceId !== null) {
 			hop.voiceLock = HopBits.allBut(this.plan.hops.length, v.hopIndex)
 		}
 		// A long hold that used more than one coarse sweep, a decoded follow that ran to L, or
