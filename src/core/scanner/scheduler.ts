@@ -531,6 +531,25 @@ interface Visit {
 	voiceId: string | null
 	/** Clock the recording check was last asked while Visit.voice was "on" (sampleVoice's pace only). */
 	voiceAskedAt: number | null
+	/**
+	 * The voiced transmission (VoiceOnAir.voice) the recorder named while an analog hold that is
+	 * not a voice hold ran (a probe, follow or hang of analog voice, sampleVoice): one transmission,
+	 * then the sweep. Its end (the squelch closed, the recorder's `voiceEnded`, or voice named
+	 * otherwise) spends the visit's voice hold as a voice hold's end does (askRecording), so a reply
+	 * never gets a voice hold of its own before the forced coarse sweep. Kept for the visit.
+	 */
+	heardVoiceId: string | null
+	/** Clock the recording check was last asked during an analog hold (sampleVoice's pace only). */
+	followAskedAt: number | null
+	/** The recording check answered anything but false during this visit: the recorder has a session. */
+	sessionSeen: boolean
+	/**
+	 * An analog follow heard its track's squelch close while the recorder had no session to name
+	 * the transmission (sessionSeen false): no voice hold for the rest of the visit, and the hop
+	 * owes every other hop its coarse visit before its next voice hold (HopState.voiceLock), as
+	 * after a voice hold. Unlike a voice hold it locks no long follow elsewhere (longHoldLock).
+	 */
+	voiceBarred: boolean
 	/** The visit's one keep for a voice answer still to come (RecordingActivity "judging") was used. */
 	judged: boolean
 	/** A carrier on air since before any visit saw it start showed itself: the hop's past score was it. */
@@ -895,6 +914,12 @@ export class SweepScheduler {
 	 * long hold every hop gets its dwell first (set to the hop count, one less per coarse visit).
 	 */
 	private longHoldLock = 0
+	/**
+	 * The last askRecording answer showed the voiced transmission ended with another on air (the
+	 * recorder's `voiceEnded`, or voice named otherwise than Visit.heardVoiceId): an analog hold
+	 * that is no voice hold ends at once (askDuringFollow).
+	 */
+	private askEnded = false
 	/**
 	 * Hop whose long hold set the long-hold lock. While the lock holds, voice on traffic there is
 	 * probed, not followed (capFor): a busy hop is visited again before the lock clears (its own
@@ -1469,6 +1494,20 @@ export class SweepScheduler {
 			(this.phase !== "hold" || this.hold?.mode !== "record")
 		)
 			this.askRecording(this.now())
+		else if (
+			v !== null &&
+			this.hold?.trackId === trackId &&
+			this.holdsAnalog()
+		) {
+			// The analog hold's own track closed: the squelch close of the transmission it heard
+			// (Visit.heardVoiceId), seen now rather than at the next re-check. With no recorder
+			// session to name it, the close alone owes the sweep before any later voice hold
+			// (Visit.voiceBarred): a reply in the hang is never a voice hold of its own.
+			if (this.askDuringFollow(v, this.now()))
+				return this.leaveHop([{ type: "stop-probes" }])
+			if (!v.sessionSeen && this.recordingActive !== undefined)
+				v.voiceBarred = true
+		}
 		if (
 			this.phase === "hold" &&
 			this.hold?.trackId === trackId &&
@@ -1531,7 +1570,9 @@ export class SweepScheduler {
 
 	tick(now: number): SchedulerAction[] {
 		this.heardAt = now
-		this.sampleVoice(now)
+		// The voiced transmission an analog hold heard ended and another is on air: the hold ends
+		// and the hop owes its coarse sweep (Visit.voice spent).
+		if (this.sampleVoice(now)) return this.leaveHop([{ type: "stop-probes" }])
 		if (this.phase !== "hold" || this.hold === null) return []
 		// Forced: `hold.maxHoldMs` from the start of the visit's holds, a recording too.
 		if (now >= this.maxHoldDeadline())
@@ -1559,6 +1600,7 @@ export class SweepScheduler {
 			v !== null &&
 			isVoiceOnAir(active) &&
 			v.voice === "no" &&
+			!v.voiceBarred &&
 			!this.voiceLocked(v) &&
 			this.recordedTrack(hold.trackId) !== null
 		) {
@@ -1570,7 +1612,8 @@ export class SweepScheduler {
 		// (keepForRecording's non-voice cap).
 		if (
 			active === true ||
-			((isVoiceOnAir(active) || active === "judging") && v?.voice === "spent")
+			((isVoiceOnAir(active) || active === "judging") &&
+				(v?.voice === "spent" || v?.voiceBarred === true))
 		)
 			hold.cap = Math.min(hold.cap, this.holdOrigin() + this.followBudgetMs())
 		if (now >= hold.cap || active === false) return this.leaveHop([])
@@ -1631,9 +1674,10 @@ export class SweepScheduler {
 		const active = this.askRecording(now)
 		if (active === false) return false
 		const judging = active === "judging"
-		if (judging && (v.voice !== "no" || v.judged)) return false
-		// Voice on air in the current transmission, and the visit's voice hold not spent yet.
-		const voice = isVoiceOnAir(active) && v.voice !== "spent"
+		if (judging && (v.voice !== "no" || v.judged || v.voiceBarred)) return false
+		// Voice on air in the current transmission, and the visit's voice hold not spent yet (nor
+		// barred by a follow that heard a squelch close with no session to name it).
+		const voice = isVoiceOnAir(active) && v.voice !== "spent" && !v.voiceBarred
 		// A revisit of the hop whose long hold set the long-hold lock (an 8 s watch, say) holds no
 		// voice either: the others have not had the coarse visit that hold owes them yet.
 		if (
@@ -1711,6 +1755,8 @@ export class SweepScheduler {
 		if (typeof answer === "object" && answer.recordedHz !== undefined)
 			this.noteVoiced(answer.recordedHz)
 		const v = this.visit
+		this.askEnded = false
+		if (v !== null && answer !== false) v.sessionSeen = true
 		// The voiced transmission ended (its squelch closed and another track opened): as the end of
 		// a voice hold, whether or not one ran, and whatever the frequency's voice history. The hop
 		// is not kept for what follows (a reply, a kerchunk) and owes every hop its coarse visit
@@ -1722,7 +1768,20 @@ export class SweepScheduler {
 			answer.voiceEnded === true
 		) {
 			if (v !== null) this.spendVoice(v)
+			this.askEnded = true
 			return false
+		}
+		// A voiced transmission an analog hold heard without its voice hold (Visit.heardVoiceId)
+		// ends as a voice hold's does: at its squelch close (false), or once another transmission is
+		// voiced (a reply the event loop or the pace hid the turnaround of). The visit's voice hold is
+		// spent and the reply is no recording to keep the hop for.
+		if (v !== null && v.voice !== "on" && v.heardVoiceId !== null) {
+			if (answer === false) this.spendVoice(v)
+			else if (isVoiceOnAir(answer) && answer.voice !== v.heardVoiceId) {
+				this.spendVoice(v)
+				this.askEnded = true
+				return false
+			}
 		}
 		// A recorded session with no voice on air now is a recording that is not voice.
 		const active =
@@ -1781,13 +1840,47 @@ export class SweepScheduler {
 	 * RECORD_RECHECK_MS, so the voice hold's end is seen whatever hold runs. A `record` hold asks
 	 * at its own re-checks.
 	 */
-	private sampleVoice(now: number): void {
+	private sampleVoice(now: number): boolean {
 		const v = this.visit
-		if (v === null || v.voice !== "on") return
-		if (this.phase === "hold" && this.hold?.mode === "record") return
-		if (v.voiceAskedAt !== null && now - v.voiceAskedAt < RECORD_RECHECK_MS)
-			return
-		this.askRecording(now)
+		if (v === null) return false
+		if (this.phase === "hold" && this.hold?.mode === "record") return false
+		if (v.voice === "on") {
+			if (v.voiceAskedAt !== null && now - v.voiceAskedAt < RECORD_RECHECK_MS)
+				return false
+			this.askRecording(now)
+			return false
+		}
+		if (!this.holdsAnalog()) return false
+		if (v.followAskedAt !== null && now - v.followAskedAt < RECORD_RECHECK_MS)
+			return false
+		return this.askDuringFollow(v, now)
+	}
+
+	/**
+	 * Whether the current hold probes, follows or hangs on analog voice (TrackInfo.followOnAir)
+	 * that no decoder confirmed: the holds sampleVoice asks the recorder during when no voice
+	 * hold is on.
+	 */
+	private holdsAnalog(): boolean {
+		const hold = this.hold
+		if (this.phase !== "hold" || hold === null || hold.decoded) return false
+		if (hold.mode === "record") return false
+		return this.visit?.tracks.get(hold.trackId)?.followOnAir === true
+	}
+
+	/**
+	 * Asks the recorder during an analog hold that is no voice hold (holdsAnalog): the first voiced
+	 * transmission it names is the one the visit heard (Visit.heardVoiceId). True when the hold
+	 * must end now, the hop owing its coarse sweep: that transmission ended and another is on air
+	 * (the recorder's `voiceEnded`, a reply joined by its hang, or voice named otherwise). Its
+	 * squelch close alone spends the voice hold (askRecording) and leaves the hold to its hang.
+	 */
+	private askDuringFollow(v: Visit, now: number): boolean {
+		v.followAskedAt = now
+		const active = this.askRecording(now)
+		if (this.askEnded) return true
+		if (isVoiceOnAir(active)) v.heardVoiceId ??= active.voice
+		return false
 	}
 
 	/**
@@ -2376,6 +2469,10 @@ export class SweepScheduler {
 			voice: "no",
 			voiceId: null,
 			voiceAskedAt: null,
+			heardVoiceId: null,
+			followAskedAt: null,
+			sessionSeen: false,
+			voiceBarred: false,
 			judged: false,
 			newlyQuiet: false,
 			clock: { ...emptyPhases(), kind: "command", at: now, heardMs: 0 },
@@ -3200,7 +3297,9 @@ export class SweepScheduler {
 		hop.waitMs = 0
 		if (!v.revisit) for (const h of this.hops) h.voiceLock.delete(v.hopIndex)
 		const voiceHeld = v.voice !== "no"
-		if (voiceHeld) {
+		// A follow that heard a squelch close with no session to name it owes the same visits
+		// before the hop's next voice hold (Visit.voiceBarred), without the long-hold lock.
+		if (voiceHeld || v.voiceBarred) {
 			hop.voiceLock = HopBits.allBut(this.plan.hops.length, v.hopIndex)
 		}
 		// A long hold that used more than one coarse sweep, a decoded follow that ran to L, or

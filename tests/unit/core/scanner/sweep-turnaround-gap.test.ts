@@ -95,13 +95,28 @@ describe("a turnaround is read on air", () => {
 	const laterVisits = (w: Awaited<ReturnType<typeof turnaround>>["w"]) =>
 		w.visits.filter(v => v.centreHz === SIGNAL_HOP_HZ && v.atMs > 9_500)
 
-	it("a 1,031 ms turnaround keeps the hop for the voice that follows it", async () => {
-		const { w, entry } = await turnaround(1_031, 0, 30_000)
+	// The follow of the first over asks the recorder: once the reply, keyed 1,031 ms after the over,
+	// joins the recorder's session by its hang, the over's transmission has ended, so the follow ends
+	// and the hop owes its coarse sweep; the reply is held on the hop's next visit. (Before, the follow
+	// never asked, ran on into the reply, and the reply got a voice hold of its own on the same visit.)
+	it("a 1,031 ms turnaround: the sweep runs after the over, and the reply is held on the hop's next visit", async () => {
+		const gapMs = 1_031
+		const { w, entry } = await turnaround(gapMs, 0, 30_000)
 		expect(entry?.evidence).toBe("traffic")
-		// One visit from the first over's first hold to past the end of the scene.
-		expect(laterVisits(w)).toEqual([])
-		expect(w.visits.at(-1)?.centreHz).toBe(SIGNAL_HOP_HZ)
-		expect(w.visits.at(-1)?.endMs).toBeNull()
+		const held = w.visits.find(v => v.centreHz === SIGNAL_HOP_HZ)!
+		// Left once the reply surfaced (up to 350 ms after it keyed up) at the next 250 ms re-check,
+		// the gap classed first.
+		expect(held.endMs).not.toBeNull()
+		expect(held.endMs!).toBeGreaterThanOrEqual(FIRST_OVER_MS.toMs + gapMs)
+		expect(held.endMs!).toBeLessThanOrEqual(
+			FIRST_OVER_MS.toMs + gapMs + 350 + 250 + 50,
+		)
+		expect(sweptAfter(w, held)).toEqual(otherHops(w))
+		// The reply is caught on the next visit and held to past the end of the scene.
+		const next = laterVisits(w)
+		expect(next).toHaveLength(1)
+		expect(next[0]!.atMs).toBeLessThan(30_000)
+		expect(next[0]!.endMs).toBeNull()
 	}, 60_000)
 
 	/** Every hop of the plan is visited between the end of `held` and the signal hop's next visit. */

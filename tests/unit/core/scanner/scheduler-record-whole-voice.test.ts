@@ -203,21 +203,22 @@ describe("record whole voice: the busy-band scene (900 s, 152 IDs over 8 runs pe
 	// (that scheduler path keeps L). A recorder answering voice for its whole session (every over
 	// and hang of it, one name) measured on the same scene: 3 hops 41 of 152 IDs missed, QSO
 	// 3 877 550 ms, 21 IDs heard ≥ 25 s; 7 hops 23 missed, 3 125 550 ms, 7 heard ≥ 25 s.
-	// The accepted cost of "record whole voice": IDs on another hop missed while an over is held
-	// to its end (3 hops 12 of 152, 7 hops 1). Each hop's voice hold is its own: an ID caught
-	// during the sweep forced after an over is kept whole too (heard ≥ 25 s: 27 and 23, none with
-	// the "true" recorder). The QSO is heard 1 % less than with the "true" recorder on 3 hops and
-	// 9 % more on 7 hops. A revisit of the hop whose long hold set the long-hold lock holds no voice
-	// (keepForRecording): 3 hops 3 372 200 → 3 369 700 ms, 7 hops 25 → 23 IDs heard ≥ 25 s and
-	// 2 617 700 → 2 663 500 ms.
+	// One transmission, then the sweep: a follow of the QSO asks the recorder too, so the end of the
+	// over it heard ends the hold, and the next over is held only when the sweep is back (before, a
+	// follow ran on into the next over within L, which then got a voice hold of its own: 3 hops 12
+	// of 152 IDs missed, 27 heard ≥ 25 s, QSO 3 369 700 ms; 7 hops 1, 23 and 2 663 500 ms). Each
+	// hop's voice hold is its own: an ID caught during the sweep forced after an over is kept whole
+	// too (heard ≥ 25 s: 45 and 42, none with the "true" recorder). The cost: the QSO is heard 20 %
+	// less than with the "true" recorder on 3 hops and 13 % less on 7 hops (less than with no
+	// recorder, whose follows run on into the next over within L).
 	const table: [number, Model, number, number, number][] = [
 		// hops, model, IDs missed, IDs heard ≥ 25 s, QSO heard (Σ ms over the eight runs)
 		[3, "none", 0, 0, 3_373_050],
 		[3, "true", 0, 0, 3_399_600],
-		[3, "voice", 12, 27, 3_369_700],
+		[3, "voice", 0, 45, 2_721_100],
 		[7, "none", 0, 0, 2_373_750],
 		[7, "true", 0, 0, 2_453_750],
-		[7, "voice", 1, 23, 2_663_500],
+		[7, "voice", 0, 42, 2_128_350],
 	]
 	for (const [hops, model, missed, whole, qsoMs] of table)
 		it(`${hops} hops, recorder ${model}: ${missed} of 152 other-hop IDs missed, ${whole} heard ≥ 25 s, QSO heard ${qsoMs} ms`, () => {
@@ -314,8 +315,8 @@ describe("record whole voice: the busy-band QSO through a repeater (repeater han
 	// The known cost: a repeater's hang carrier keeps the over's track open across turnarounds
 	// shorter than the hang, and voice stays on air VOICE_TAIL_MS past the last word, so a
 	// turnaround under about 1.75 s is never seen and the hold runs across overs up to
-	// hold.maxHoldMs (60 s). More IDs on another hop are missed than on simplex (3 hops 12, 7 hops
-	// 1 of 152). Measured with this simulator; asserted so a change shows here. A track per
+	// hold.maxHoldMs (60 s). More IDs on another hop are missed than on simplex (none of 152 on 3
+	// or 7 hops). Measured with this simulator; asserted so a change shows here. A track per
 	// carrier: a watch whose run is speech marks no carrier, so a repeater on air from the job's
 	// start stays callable and its voice is held. With a 3 s hang most turnarounds never close the
 	// carrier, and the hop holds again as soon as the sweep is back, so about as many IDs are missed
@@ -323,14 +324,16 @@ describe("record whole voice: the busy-band QSO through a repeater (repeater han
 	const table: [number, number, "overs" | "carrier", number, number, number][] =
 		[
 			// hops, hang (ms), sweep view, IDs missed, IDs heard ≥ 25 s, longest hop-0 visit (ms)
-			[3, 1_500, "overs", 26, 30, 61_150],
-			[3, 3_000, "overs", 32, 15, 61_150],
-			[7, 1_500, "overs", 24, 25, 61_150],
-			[7, 3_000, "overs", 38, 26, 61_150],
-			// 9 before a revisit of the lock's hop stopped holding voice (keepForRecording).
-			[3, 1_500, "carrier", 10, 81, 61_150],
-			[3, 3_000, "carrier", 36, 33, 61_150],
-			[7, 1_500, "carrier", 8, 81, 61_150],
+			[3, 1_500, "overs", 15, 33, 61_150],
+			[3, 3_000, "overs", 34, 13, 61_150],
+			[7, 1_500, "overs", 14, 39, 61_150],
+			[7, 3_000, "overs", 38, 23, 61_150],
+			// Before follows asked the recorder (one transmission, then the sweep), per row: 26 and
+			// 30, 32 and 15, 24 and 25, 38 and 26; a track per carrier 10 and 81, 36 and 33, 8 and 81,
+			// 41 and 22.
+			[3, 1_500, "carrier", 5, 94, 61_150],
+			[3, 3_000, "carrier", 35, 33, 61_150],
+			[7, 1_500, "carrier", 8, 70, 61_150],
 			[7, 3_000, "carrier", 41, 22, 61_150],
 		]
 	for (const [hops, hangMs, view, missed, whole, longest] of table)

@@ -405,6 +405,15 @@ export const WIDEBAND_MAX_SILENCE_GAP_MS = 1_000
  */
 export const WIDEBAND_GATE_EDGE_TRIM_MS = 100
 /**
+ * A track opening while none of its session is open is a squelch reopening (Session.reopenAt:
+ * the transmission before it ended) only when it starts more than this after the last close's
+ * last sample: one 50 ms engine block, the step the engine reports a track's samples in. The
+ * tracker's max-duration rollover closes a track and opens its successor at the same sample, with
+ * no RF silence between, and the service reports that close as it does a squelch close; a real
+ * squelch close needs the tracker's quiet hang first, far longer than a block.
+ */
+export const WIDEBAND_REOPEN_GAP_MS = 50
+/**
  * Activity intervals kept per session (open tracks and closed ones not yet judged). Past it the
  * oldest closed span goes; when every one is open the new span is not kept (an older open span
  * covers it up to now). At most 64 entries of 3 numbers per session.
@@ -815,9 +824,26 @@ interface Session {
 	 * (the squelch had closed and reopened, a turnaround: another transmission, joined by `hangMs`);
 	 * null before any. A voice heard before it (`voiceAt` earlier) belongs to a transmission that has
 	 * ended (RecordedSession.voiceEnded). A track split or handoff opens while another is open, so it
-	 * never moves this.
+	 * never moves this, and neither does an administrative close (lastClose): a track opening
+	 * within WIDEBAND_REOPEN_GAP_MS of that close's last sample (the tracker's max-duration rollover
+	 * closes one track and opens the next at the same sample, with no RF silence between), or
+	 * after a close the service cut (a retune, a stream change).
 	 */
 	reopenAt: number | null
+	/**
+	 * The close that left no track of the session open, if the latest: its last input sample,
+	 * whether the service cut it (`cut` not null) rather than ending it on the air (a squelch
+	 * close or a max-duration rollover, which the service both reports with `cut` null), the
+	 * closed track's start and the voiced name it ended with. A rollover's successor carries the
+	 * last two on (noteActivity): it is the same transmission. Null while a track is open or before
+	 * any close.
+	 */
+	lastClose: {
+		readonly at: number
+		readonly cut: boolean
+		readonly start: number
+		readonly voiceTx: string | null
+	} | null
 	/**
 	 * The store admitted a file operation of this session (its `ready` resolved): only then is the
 	 * session the frequency's verified voice history (recordedHz). Sticky for the session.
@@ -1437,7 +1463,16 @@ export class WidebandAnalogRecorder {
 			span.last = Math.max(span.last, track.lastSample)
 			span.open = false
 		}
-		if (![...s.activity.values()].some(a => a.open)) s.voiceTx = null
+		if (![...s.activity.values()].some(a => a.open)) {
+			// What a track opening next is measured against (noteActivity, Session.reopenAt).
+			s.lastClose = {
+				at: track.lastSample,
+				cut: cut !== null,
+				start: span?.start ?? track.startSample,
+				voiceTx: s.voiceTx,
+			}
+			s.voiceTx = null
+		}
 		const bar = this.snapshotBar(
 			s,
 			track,
@@ -1905,6 +1940,7 @@ export class WidebandAnalogRecorder {
 			quietGap: 0,
 			voiceTx: null,
 			reopenAt: null,
+			lastClose: null,
 			admitted: false,
 			judgedTo: Number.NEGATIVE_INFINITY,
 			observations: new Set([input.observationId]),
@@ -2134,11 +2170,26 @@ export class WidebandAnalogRecorder {
 			span.last = Math.max(span.last, track.lastSample)
 			return
 		}
-		// Opened while no track was: the squelch closed and reopened (Session.reopenAt).
-		if (![...s.activity.values()].some(a => a.open))
-			s.reopenAt = track.startSample
+		// Opened while no track was, after RF silence: the squelch closed and reopened
+		// (Session.reopenAt). An administrative close is no turnaround: a close the service cut, or
+		// a max-duration rollover (the next track opens at the close's sample, or within one
+		// engine block of it), whose successor goes on with the same transmission: its span
+		// starts where the closed track did, so the voice heard before the rollover is voice of
+		// the open track, and it keeps the voiced name (voicedSpan, Session.voiceTx).
+		let start = track.startSample
+		const close = s.lastClose
+		if (close !== null && ![...s.activity.values()].some(a => a.open)) {
+			const gap = track.startSample - close.at
+			if (gap > (WIDEBAND_REOPEN_GAP_MS * s.fs) / 1000) {
+				if (!close.cut) s.reopenAt = track.startSample
+			} else if (!close.cut) {
+				start = Math.min(start, close.start)
+				s.voiceTx ??= close.voiceTx
+			}
+		}
+		s.lastClose = null
 		s.activity.set(observationId, {
-			start: track.startSample,
+			start,
 			last: track.lastSample,
 			open: true,
 		})

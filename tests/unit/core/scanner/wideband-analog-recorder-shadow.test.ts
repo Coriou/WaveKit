@@ -608,6 +608,80 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		expect(h.ops[0]!.outcome).toBe("finalized")
 	}, 60_000)
 
+	/**
+	 * A voiced over "a", closed with the service's null cut (a squelch close and the tracker's
+	 * max-duration rollover read the same) and followed by "b" opening `gapSamples` after the close's
+	 * last sample, with voice on air throughout unless `silenceS` of RF silence is fed first.
+	 */
+	async function closeThenOpen(gapSamples: number, silenceS = 0) {
+		const h = harness()
+		await h.feed(1, false)
+		const a = await voicedOver(h, "a", 3)
+		expect(h.rec.recordingActive("rtl", at)).toMatchObject({ voice: "a" })
+		const end = h.engine.liveEdge()
+		h.rec.closed("a", snapshot("a", a.onset, end), null)
+		if (silenceS > 0) await h.feed(silenceS, false)
+		else await h.feed(0.075, true)
+		const onsetB = end + gapSamples
+		const reportB = () =>
+			h.rec.track(input("b", snapshot("b", onsetB, h.engine.liveEdge())))
+		reportB()
+		return { h, reportB }
+	}
+	const BLOCK = (50 * FS) / 1000
+
+	for (const [label, gap] of [
+		["at the same sample", 0],
+		["one engine block (50 ms) apart", BLOCK],
+	] as const)
+		it(`a max-duration rollover ${label}, voice unbroken, is the same transmission: never voiceEnded, the voice keeps its name`, async () => {
+			const { h, reportB } = await closeThenOpen(gap)
+			expect(h.rec.recordingActive("rtl", at)).toMatchObject({ voice: "a" })
+			await h.feed(0.5, true, reportB)
+			expect(h.rec.recordingActive("rtl", at)).toMatchObject({ voice: "a" })
+			// Voice stops on the successor's carrier: a recording of the same transmission.
+			h.src.setVoice(false)
+			await h.feed(3.5, true, reportB)
+			expect(h.rec.recordingActive("rtl", at)).toEqual(RECORDED)
+		}, 60_000)
+
+	it("one sample past one engine block between the close and the next open is a reopening: the voiced transmission ended", async () => {
+		const { h } = await closeThenOpen(BLOCK + 1)
+		expect(h.rec.recordingActive("rtl", at)).toEqual({
+			...RECORDED,
+			voiceEnded: true,
+		})
+	}, 60_000)
+
+	it("a real gap (300 ms of RF silence) between the close and the next open is a reopening: the voiced transmission ended", async () => {
+		const { h } = await closeThenOpen((0.3 * FS) | 0, 0.3)
+		expect(h.rec.recordingActive("rtl", at)).toEqual({
+			...RECORDED,
+			voiceEnded: true,
+		})
+	}, 60_000)
+
+	it("a close the service cut never makes the next open a reopening", async () => {
+		const h = harness()
+		await h.feed(1, false)
+		const a = await voicedOver(h, "a", 3)
+		const end = h.engine.liveEdge()
+		h.rec.closed("a", snapshot("a", a.onset, end), "epoch-changed")
+		await h.feed(0.3, false)
+		const onsetB = h.engine.liveEdge()
+		h.rec.track(input("b", snapshot("b", onsetB, onsetB)))
+		expect(h.rec.recordingActive("rtl", at)).not.toHaveProperty("voiceEnded")
+		const sessions = [
+			...(
+				h.rec as unknown as {
+					sessions: Map<string, { reopenAt: number | null }>
+				}
+			).sessions.values(),
+		]
+		expect(sessions.length).toBeGreaterThan(0)
+		for (const s of sessions) expect(s.reopenAt).toBeNull()
+	}, 60_000)
+
 	it(`the window bound: voice with the newest judged audio exactly ${WIDEBAND_VOICE_ON_AIR_MS} ms (2 048 000 samples at 1.024 Msps) past the last voiced window, true one sample later`, async () => {
 		const h = harness()
 		await h.feed(1, false)
