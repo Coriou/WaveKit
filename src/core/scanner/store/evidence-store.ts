@@ -76,6 +76,7 @@ const CALL_WAV =
 /** dsd-fme open_wav_file, left behind when the call is cut. */
 const TEMP_WAV = /^TEMP_(\d{8})_(\d{6})_[0-9A-F]{4}\.wav$/
 const RECORDING_KINDS = ["dv", "analog"] as const
+const NO_NAMES: ReadonlySet<string> = new Set()
 const MATCH_SLACK_MS = 2_000
 const MIB = 1024 * 1024
 const DAY_MS = 86_400_000
@@ -763,15 +764,13 @@ export class EvidenceStore {
 		const m = RECORDING_ID.exec(recordingId)
 		const discoveryId = m?.[1]
 		const file = m?.[2]
-		if (
-			discoveryId === undefined ||
-			file === undefined ||
-			file.includes("..") ||
-			!this.admits(discoveryId)
-		)
+		if (discoveryId === undefined || file === undefined || file.includes(".."))
 			return null
+		// An analog file is admitted per file: through its folder, or through the live discovery
+		// owning it after a split (AnalogOperations.path).
 		if (/^analog-[0-9a-f-]{36}\.wav$/i.test(file))
 			return this.analog?.path(recordingId) ?? null
+		if (!this.admits(discoveryId)) return null
 		for (const kind of RECORDING_KINDS) {
 			const path = join(this.root, "recordings", kind, discoveryId, file)
 			if (existsSync(path)) return path
@@ -889,9 +888,11 @@ export class EvidenceStore {
 						"SCANNER_EVIDENCE_CLEANUP_PENDING",
 					)
 				// Long analog settlement drains outside the publication queue it may itself need.
+				const removing = [discoveryId, ...aliases]
 				if (this.analog) {
-					await this.analog.deleteDiscovery(discoveryId)
-					for (const alias of aliases) await this.analog.deleteDiscovery(alias)
+					await this.analog.deleteDiscovery(discoveryId, removing)
+					for (const alias of aliases)
+						await this.analog.deleteDiscovery(alias, removing)
 				}
 				const removeFolders = async (id: string): Promise<void> => {
 					if (!(await this.rootIntact()))
@@ -899,19 +900,27 @@ export class EvidenceStore {
 							"Scanner storage root changed",
 							"SCANNER_EVIDENCE_CLEANUP_PENDING",
 						)
+					// Files in this folder another live discovery owns (a split twin's committed
+					// recording): they and the folder stay; never a delete path to them.
+					const held = this.analog?.heldArtifactNames(id, removing) ?? NO_NAMES
 					if (this.protection) {
-						await this.removeGuarded(id)
+						await this.removeGuarded(id, held)
 						return
 					}
 					await rm(join(this.root, "evidence", id), {
 						recursive: true,
 						force: true,
 					})
-					for (const kind of RECORDING_KINDS)
-						await rm(join(this.root, "recordings", kind, id), {
-							recursive: true,
-							force: true,
-						})
+					for (const kind of RECORDING_KINDS) {
+						const dir = join(this.root, "recordings", kind, id)
+						if (kind !== "analog" || held.size === 0) {
+							await rm(dir, { recursive: true, force: true })
+							continue
+						}
+						for (const name of await listDir(dir))
+							if (!held.has(name))
+								await rm(join(dir, name), { recursive: true, force: true })
+					}
 				}
 				await this.serialise(discoveryId, async () => {
 					await removeFolders(discoveryId)
@@ -953,7 +962,10 @@ export class EvidenceStore {
 	 * synchronous turn as its protection answer, so a Keep that commits during the drain
 	 * survives. A protected file stops the removal and leaves the folders in place.
 	 */
-	private async removeGuarded(discoveryId: string): Promise<void> {
+	private async removeGuarded(
+		discoveryId: string,
+		held: ReadonlySet<string> = NO_NAMES,
+	): Promise<void> {
 		const refuse = (): never => {
 			throw new ScannerApiError(
 				"Discovery holds kept recordings",
@@ -1022,8 +1034,11 @@ export class EvidenceStore {
 				if (errorCode(err) === "ENOENT") continue
 				throw err
 			}
+			// Another live discovery's file: never reached, and its folder stays.
+			const keepHeld = kind === "analog" && held.size > 0
 			for (const entry of entries) {
 				const path = join(dir, entry.name)
+				if (keepHeld && held.has(entry.name)) continue
 				if (entry.isDirectory()) {
 					// Retention never lists nested folders, so they hold no inventoried media; rm does not follow links.
 					// The folder and its ancestors must still be the real ones listed, or rm would recurse into an alias.
@@ -1056,6 +1071,7 @@ export class EvidenceStore {
 				again.ino !== top.ino
 			)
 				pending()
+			if (keepHeld) continue
 			// Only non-media entries remain; rm -rf on the lstat-verified folder does not follow links.
 			await rm(dir, { recursive: true, force: true })
 		}

@@ -317,6 +317,7 @@ describe("Task42 private prepared metadata", () => {
 		).toBeNull()
 		expect(store.recordingAssociation(discoveryId, "o1")).toEqual({
 			aliasIds: [],
+			ownerId: discoveryId,
 		})
 		const historical = {
 			...metadata.binding,
@@ -328,6 +329,7 @@ describe("Task42 private prepared metadata", () => {
 		}
 		expect(store.recordingAssociation(discoveryId, "o1", historical)).toEqual({
 			aliasIds: [],
+			ownerId: discoveryId,
 		})
 		expect(
 			store.recordingAssociation(discoveryId, "o1", {

@@ -170,6 +170,47 @@ describe("a voiced transmission on a known discovery with a sync hint", () => {
 	})
 })
 
+/** dsd-fme DMR voice with checked talkgroup and source (verified TG/SRC) but no colour code. */
+const checkedDmr = (at: number) => {
+	const ev = evidence("dmr", at, { talkgroups: ["9"] })
+	return { ...ev, metadata: { ...ev.metadata, sources: ["1234"] } }
+}
+
+describe("checked DMR content without a colour code names the digital family", () => {
+	it("verified TG/SRC: an analog tone on the channel splits off it", () => {
+		const { store } = newStore()
+		const known = store.ingest(voice("old", T0, false)).discoveryId ?? ""
+		const checked = checkedDmr(T0 + 500)
+		expect(store.appendObservationEvidence("old", checked)).toBe(true)
+		store.applyEvidence(known, checked)
+		const proof = store.get(known)?.proof
+		expect(proof?.kind).toBe("digital-undecoded")
+		expect(proof?.identity).toBeUndefined()
+		expect(proof?.tgSrcVerified).toBe(true)
+		const at = T0 + 60_000
+		expect(store.ingest(voice("id", at)).discoveryId).toBe(known)
+		expect(store.recordAnalog("id", tone(at + 3_000))).toBe(true)
+		const twin = store.discoveryIdOf("id") ?? ""
+		expect(twin).not.toBe(known)
+		expect(store.discoveryIdOf("old")).toBe(known)
+		expect(store.get(twin)?.coChannel).toEqual([known])
+	})
+
+	it("the unchecked hint beside it (no content of any kind) still splits nothing", () => {
+		const { store } = newStore()
+		const known = knownWithHint(store)
+		const proof = store.get(known)?.proof
+		expect(proof?.tgSrcVerified).toBeUndefined()
+		expect(proof?.talkgroup).toBeUndefined()
+		expect(proof?.encrypted).toBe(false)
+		const at = T0 + 60_000
+		expect(store.ingest(voice("id", at)).discoveryId).toBe(known)
+		expect(store.recordAnalog("id", tone(at + 3_000))).toBe(true)
+		expect(store.discoveryIdOf("id")).toBe(known)
+		expect(store.snapshot().discoveries).toHaveLength(1)
+	})
+})
+
 describe("a co-channel split on real identity evidence", () => {
 	it("still splits an analog tone off a decoded identity, and the recording follows the move", () => {
 		const { store } = newStore()

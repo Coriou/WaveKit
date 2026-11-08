@@ -373,6 +373,18 @@ export interface RecordingCommitPlan {
 	readonly recordingCount: number
 }
 
+/** A recording's current association (DiscoveryStore.recordingAssociation). */
+export interface RecordingAssociation {
+	readonly aliasIds: readonly string[]
+	/** The live discovery that owns the recording now (lists its file once committed). */
+	readonly ownerId?: string
+	/**
+	 * Only committed files the owner lists in another discovery's folder: their storage belongs to
+	 * the owner, but an operation still writing for that folder is association-lost.
+	 */
+	readonly held?: true
+}
+
 /**
  * WG2 req 13.1: an observation newly credited to jobs by one ingest (its first placement, or jobs
  * joining a placed observation).
@@ -397,6 +409,20 @@ function syncOnlyProof(proof: ScannerProof | null): boolean {
 		proof !== null &&
 		proof.kind === "digital-undecoded" &&
 		isDsdFmeProtocol(proof.protocol)
+	)
+}
+/**
+ * A sync hint with no checked content of any kind: a dsd-fme `digital-undecoded` proof without
+ * verified TG/SRC, talkgroup or encryption (checked voice LC without a colour code still names a
+ * family). Such a hint names no family for a co-channel split.
+ */
+function uncheckedSyncHint(proof: ScannerProof | null): boolean {
+	return (
+		syncOnlyProof(proof) &&
+		proof !== null &&
+		proof.tgSrcVerified !== true &&
+		proof.talkgroup === undefined &&
+		proof.encrypted !== true
 	)
 }
 function publishedOf(view: DiscoveryProofView): EvidenceLabel {
@@ -3527,21 +3553,22 @@ export class DiscoveryStore
 	/**
 	 * Exact current association, without pagination or any identity repair. The observation
 	 * must still belong to the recording's discovery, to the survivor of its merge or to the
-	 * co-channel twin a split moved it onto (recordingOwner).
+	 * co-channel twin a split moved it onto (recordingOwner). `ownerId` names that discovery.
+	 *
+	 * Storage ownership of a committed file: a file is owned by the live discovery whose
+	 * observation lists its recording id, wherever its folder lives. A split never moves the file,
+	 * so the folder can name a discovery that was deleted, folded away or is still live but no
+	 * longer holds the observation. When that strict path fails, the observation's live discovery
+	 * still answers as the `held` owner of the ids it lists in `discoveryId`'s folder (and only
+	 * those), so no deleter of that folder reaches them and its playback stays admitted.
 	 */
 	recordingAssociation(
 		discoveryId: string,
 		observationId: string,
 		binding?: RecordingBinding,
-	): { aliasIds: readonly string[] } | null {
+	): RecordingAssociation | null {
 		const observation = this.observationIndex.get(observationId)
-		const owner = this.recordingOwner(discoveryId, observation)
-		if (
-			observation === undefined ||
-			owner === undefined ||
-			observation.discoveryId !== owner.id
-		)
-			return null
+		if (observation === undefined) return null
 		if (
 			binding !== undefined &&
 			(observation.sourceId !== binding.sourceId ||
@@ -3549,7 +3576,14 @@ export class DiscoveryStore
 				observation.sampleRange.epoch !== binding.epoch)
 		)
 			return null
-		return { aliasIds: [...observation.recordingIds] }
+		const owner = this.recordingOwner(discoveryId, observation)
+		if (owner !== undefined && observation.discoveryId === owner.id)
+			return { aliasIds: [...observation.recordingIds], ownerId: owner.id }
+		const holder = this.discoveries.get(observation.discoveryId)
+		const prefix = `${discoveryId}~`
+		const held = observation.recordingIds.filter(id => id.startsWith(prefix))
+		if (holder === undefined || held.length === 0) return null
+		return { aliasIds: held, ownerId: holder.id, held: true }
 	}
 
 	buildRecordingCommitPlan(operationId: string): RecordingCommitPlan | null {
@@ -5522,16 +5556,16 @@ export class DiscoveryStore
 	 * observation's own proof counts, including a decode stored for another
 	 * identity. When no sibling names one, a co-channel decode this discovery
 	 * claims does. Unknown when nothing does, so a lone observation is not split.
-	 * A digital-voice sync hint (an unchecked dsd-fme decode, which keeps no identity) is weak
-	 * evidence and establishes no family: one emitter heard by dsd-fme as a false sync stays one
-	 * discovery when its voice is proven.
+	 * A digital-voice sync hint with no checked content (uncheckedSyncHint) is weak evidence and
+	 * establishes no family: one emitter heard by dsd-fme as a false sync stays one discovery when
+	 * its voice is proven. Checked content (verified DMR TG/SRC without a colour code) still does.
 	 */
 	private establishedFamily(d: Discovery, skipId: string): ProtocolFamily {
 		const own: ScannerProof[] = []
 		for (const observation of this.byDiscovery.get(d.id) ?? []) {
 			if (observation.id === skipId) continue
 			const proof = this.observationAssessment(observation).proof
-			if (proof !== null && !syncOnlyProof(proof)) own.push(proof)
+			if (proof !== null && !uncheckedSyncHint(proof)) own.push(proof)
 		}
 		const bestOwn = strongestKnownProof(own)
 		if (bestOwn !== null) return this.labelOfProof(d, bestOwn).family
@@ -5539,7 +5573,11 @@ export class DiscoveryStore
 		for (const source of this.proofSources(d)) {
 			if (!source.foreign || source.observation.id === skipId) continue
 			const proof = this.observationAssessment(source.observation).proof
-			if (proof !== null && !syncOnlyProof(proof) && this.proofCounts(d, proof))
+			if (
+				proof !== null &&
+				!uncheckedSyncHint(proof) &&
+				this.proofCounts(d, proof)
+			)
 				foreign.push(proof)
 		}
 		const bestForeign = strongestKnownProof(foreign)
@@ -5556,8 +5594,9 @@ export class DiscoveryStore
 		const d = this.discoveries.get(observation.discoveryId)
 		if (d === undefined) return false
 		const assessed = this.observationAssessment(observation)
-		// A sync hint is weak evidence: it moves nothing off a proven discovery either.
-		if (assessed.proof === null || syncOnlyProof(assessed.proof)) return false
+		// An unchecked sync hint is weak evidence: it moves nothing off a proven discovery either.
+		if (assessed.proof === null || uncheckedSyncHint(assessed.proof))
+			return false
 		const rest = this.establishedFamily(d, observation.id)
 		if (!familiesIncompatible(assessed.label.family, rest)) return false
 		const family = assessed.label.family

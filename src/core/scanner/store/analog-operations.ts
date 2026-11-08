@@ -26,7 +26,10 @@ import {
 import { SCANNER_DISCOVERY_HOLDS_KEPT_CODE } from "@wavekit/api-types"
 import type { RecordingProtection } from "../../recordings/contract.js"
 import { ScannerApiError } from "../errors.js"
-import type { RecordingCommitPlan } from "./discovery-store.js"
+import type {
+	RecordingAssociation,
+	RecordingCommitPlan,
+} from "./discovery-store.js"
 import {
 	MAX_OPERATION_METADATA_BYTES,
 	MAX_RECOVERY_OPERATIONS,
@@ -212,7 +215,7 @@ export interface AnalogMetadataAdapter {
 		discoveryId: string,
 		observationId: string,
 		binding?: RecordingBinding,
-	): { aliasIds: readonly string[] } | null
+	): RecordingAssociation | null
 	prepare(metadata: PreparedRecordingMetadata): Promise<void>
 	inverse(operationId: string): Promise<void>
 	buildCommitPlan(operationId: string): RecordingCommitPlan | null
@@ -504,13 +507,13 @@ export class AnalogOperations {
 		if (op.cancelled) return "cancelled"
 		if (!this.context.adapter.authorityHealthy()) return "authority-unhealthy"
 		if (!this.context.admits(op.intent.discoveryId)) return "discovery-removed"
-		if (
-			!this.context.adapter.association(
-				op.intent.discoveryId,
-				op.intent.observationId,
-				op.intent.binding,
-			)
+		const association = this.context.adapter.association(
+			op.intent.discoveryId,
+			op.intent.observationId,
+			op.intent.binding,
 		)
+		// A held answer covers committed files only: an operation still writing has lost it.
+		if (association === null || association.held === true)
 			return "association-lost"
 		const b = op.intent.binding
 		if (
@@ -1555,7 +1558,7 @@ export class AnalogOperations {
 			)
 			if (
 				!association?.aliasIds.includes(intent.alias) ||
-				!this.context.admits(intent.discoveryId)
+				!this.admitsFile(intent, association)
 			)
 				return result("quarantined", "recovery-ambiguous")
 			// Deliberately no public state/count changes: later authoritative mutations survive replay.
@@ -1617,12 +1620,68 @@ export class AnalogOperations {
 					item => item.discoveryId === id,
 				) ||
 				[...this.inventory.intents.values()].some(
-					intent => intent.discoveryId === id,
+					intent =>
+						intent.discoveryId === id && !this.heldElsewhere(intent, [id]),
 				)
 			)
 		})
 	}
-	async deleteDiscovery(id: string): Promise<void> {
+	/**
+	 * The live discovery that owns this intent's committed file, when it is not one of `removing`:
+	 * after a co-channel split the file stays in the folder it was written to, and the twin whose
+	 * observation lists it owns it (DiscoveryStore.recordingAssociation). No deleter of that
+	 * folder may reach it. Undefined when nobody else lists it.
+	 */
+	private heldElsewhere(
+		intent: Intent,
+		removing: readonly string[],
+	): string | undefined {
+		const association = this.context.adapter.association(
+			intent.discoveryId,
+			intent.observationId,
+			intent.binding,
+		)
+		if (!association?.aliasIds.includes(intent.alias)) return undefined
+		const owner = association.ownerId ?? intent.discoveryId
+		if (
+			owner === intent.discoveryId ||
+			removing.includes(owner) ||
+			!this.context.admits(owner)
+		)
+			return undefined
+		return owner
+	}
+	/** The intent's file is admitted through its folder, or through the live discovery owning it. */
+	private admitsFile(
+		intent: Intent,
+		association: RecordingAssociation,
+	): boolean {
+		if (this.context.admits(intent.discoveryId)) return true
+		const owner = association.ownerId
+		return owner !== undefined && this.context.admits(owner)
+	}
+	/**
+	 * File names in `folderId`'s analog folder that another live discovery owns (heldElsewhere):
+	 * the folder removal of `removing` must leave them, and the folder, in place.
+	 */
+	heldArtifactNames(
+		folderId: string,
+		removing: readonly string[],
+	): ReadonlySet<string> {
+		const names = new Set<string>()
+		for (const intent of this.inventory.intents.values())
+			if (
+				intent.discoveryId === folderId &&
+				this.heldElsewhere(intent, removing) !== undefined
+			)
+				names.add(intent.artifact.split("/").at(-1) ?? "")
+		names.delete("")
+		return names
+	}
+	async deleteDiscovery(
+		id: string,
+		removing: readonly string[] = [id],
+	): Promise<void> {
 		await this.cancelDiscovery(id)
 		await this.exclusive(async () => {
 			if (!this.context.adapter.authorityHealthy())
@@ -1636,8 +1695,11 @@ export class AnalogOperations {
 				)
 			)
 				throw coded("cleanup-failed", "Writer closure remains unverifiable")
+			// A file another live discovery owns (a split twin) is not this removal's to delete.
 			const owned = [...this.inventory.intents.values()].filter(
-				intent => intent.discoveryId === id,
+				intent =>
+					intent.discoveryId === id &&
+					this.heldElsewhere(intent, removing) === undefined,
 			)
 			// WG9 R2: refuse before the first mutation when any owned artifact is kept now.
 			if (owned.some(intent => this.keptArtifact(intent))) throw keptRefusal()
@@ -1658,7 +1720,9 @@ export class AnalogOperations {
 					item => item.discoveryId === id,
 				) ||
 				[...this.inventory.intents.values()].some(
-					intent => intent.discoveryId === id,
+					intent =>
+						intent.discoveryId === id &&
+						this.heldElsewhere(intent, removing) === undefined,
 				)
 			)
 				throw coded("cleanup-failed", "Owned recording cleanup pending")
@@ -1746,16 +1810,15 @@ export class AnalogOperations {
 	path(alias: string): string | null {
 		if (!this.ready) return null
 		const item = this.available.get(alias)
+		if (!item?.available) return null
+		const association = this.context.adapter.association(
+			item.intent.discoveryId,
+			item.intent.observationId,
+			item.intent.binding,
+		)
 		if (
-			!item?.available ||
-			!this.context.admits(item.intent.discoveryId) ||
-			!this.context.adapter
-				.association(
-					item.intent.discoveryId,
-					item.intent.observationId,
-					item.intent.binding,
-				)
-				?.aliasIds.includes(alias)
+			!association?.aliasIds.includes(alias) ||
+			!this.admitsFile(item.intent, association)
 		)
 			return null
 		try {
@@ -1800,8 +1863,11 @@ export class AnalogOperations {
 		const deleted: string[] = []
 		let skipped = 0
 		for (const intent of [...this.inventory.intents.values()]) {
+			// An operator keep of the discovery owning the file (a split twin) protects it too.
+			const owner = this.heldElsewhere(intent, [])
 			if (
 				keep.has(intent.discoveryId) ||
+				(owner !== undefined && keep.has(owner)) ||
 				this.closureUncertain(intent.operationId) ||
 				this.protectedDiscovery(intent.discoveryId) ||
 				this.keptArtifact(intent)
