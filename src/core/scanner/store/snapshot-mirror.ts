@@ -36,6 +36,8 @@ export interface SnapshotHead {
 	recordingOperations: string
 	/** `JSON.stringify(aliases)` when there is at least one entry; null otherwise (field omitted). */
 	aliases: string | null
+	/** `JSON.stringify(heldRecordings)` when there is at least one entry; absent otherwise. */
+	heldRecordings?: string
 }
 
 export interface MirrorCounts {
@@ -46,7 +48,7 @@ export interface MirrorCounts {
 /** Small parts of a store snapshot, the shape `snapshotHeadOf` reads. */
 export type SnapshotParts = Pick<
 	StoreSnapshot,
-	"corrections" | "recordingOperations" | "aliases"
+	"corrections" | "recordingOperations" | "aliases" | "heldRecordings"
 >
 
 /** The head for `parts` exactly as `writeSnapshot` stringifies them; `recordingOperations` already validated. */
@@ -63,6 +65,9 @@ export function snapshotHeadOf(
 		corrections: JSON.stringify(parts.corrections) as string | undefined,
 		recordingOperations: JSON.stringify(recordingOperations),
 		aliases: aliases && aliases.length > 0 ? JSON.stringify(aliases) : null,
+		...(parts.heldRecordings && parts.heldRecordings.length > 0
+			? { heldRecordings: JSON.stringify(parts.heldRecordings) }
+			: {}),
 	}
 }
 
@@ -364,6 +369,9 @@ export function* snapshotChunks(
 		(h.corrections === undefined ? "" : `,"corrections":${h.corrections}`) +
 		`,"recordingOperations":${h.recordingOperations}` +
 		(h.aliases === null ? "" : `,"aliases":${h.aliases}`) +
+		(h.heldRecordings === undefined
+			? ""
+			: `,"heldRecordings":${h.heldRecordings}`) +
 		"}"
 }
 

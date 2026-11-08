@@ -48,6 +48,7 @@ import type { Logger } from "../../../utils/logger.js"
 import { atomicWrite } from "./persistence.js"
 import { holdsKeptWithAliases, withAliasFolders } from "../recording-aliases.js"
 import type { DiscoveryAliasLookup } from "../recording-aliases.js"
+import { FolderIndex } from "./folder-index.js"
 import {
 	AnalogOperations,
 	type AnalogHandle,
@@ -370,6 +371,10 @@ export class EvidenceStore {
 	private readonly recordingDeleteFs: RecordingDeleteFs | undefined
 	/** WG10 req 1.5: merge aliases (none without the lookup). */
 	private readonly aliases: DiscoveryAliasLookup | undefined
+	/** The ids owning a folder on disk; merge aliases never release one (recording-aliases.ts). */
+	readonly folders = new FolderIndex()
+	/** Folders the last retention pass kept because no live discovery owns them. */
+	private unresolvedFolders = 0
 
 	constructor(opts: {
 		dir: string
@@ -415,6 +420,87 @@ export class EvidenceStore {
 	}
 	private readonly aliasesOf = (id: string): readonly string[] =>
 		this.aliases?.aliasesOf(id) ?? []
+
+	/** Fail closed: a throwing lookup answers "another discovery owns it". */
+	private heldOwner(folderId: string, name: string): string | null | undefined {
+		try {
+			return this.aliases?.heldRecordingOwner?.(`${folderId}~${name}`)
+		} catch {
+			return null
+		}
+	}
+
+	/** Names in `folderId`'s folders another live discovery lists (analog and every other kind). */
+	private heldNames(
+		folderId: string,
+		removing: readonly string[],
+	): ReadonlySet<string> {
+		const analog =
+			this.analog?.heldArtifactNames(folderId, removing) ?? NO_NAMES
+		const listed = this.aliases?.heldFileNames?.(folderId, removing) ?? NO_NAMES
+		if (listed.size === 0) return analog
+		if (analog.size === 0) return listed
+		return new Set([...analog, ...listed])
+	}
+
+	/**
+	 * A folder whose owner nothing resolves (not live, no live alias owner): retention keeps it.
+	 * A throwing lookup answers unresolved (kept).
+	 */
+	private folderResolved(folderId: string): boolean {
+		try {
+			if (this.isDiscoveryLive(folderId)) return true
+			const owner = this.aliases?.aliasOwner(folderId)
+			return owner !== undefined && this.isDiscoveryLive(owner)
+		} catch {
+			return false
+		}
+	}
+
+	/** Folders the last retention pass left in place because no live discovery owns them. */
+	get unresolvedFolderCount(): number {
+		return this.unresolvedFolders
+	}
+
+	/**
+	 * Lists the folder ids on disk into `folders` (evidence, dv and analog recordings). Ids
+	 * marked while it runs stay. A failed listing leaves the index as it was.
+	 */
+	async loadFolderIndex(): Promise<string[]> {
+		const token = this.folders.beginListing()
+		try {
+			const ids = new Set<string>()
+			for (const base of [
+				...RECORDING_KINDS.map(k => join(this.root, "recordings", k)),
+				join(this.root, "evidence"),
+			])
+				for (const name of await listDir(base))
+					if (DISCOVERY_ID.test(name)) ids.add(name)
+			this.folders.finishListing(token, ids)
+			return [...ids]
+		} catch (err) {
+			this.folders.abandonListing(token)
+			throw err
+		}
+	}
+
+	/** Whether a recording file named by `recordingId` exists in a dv or analog folder. */
+	recordingFileExists(recordingId: string): boolean {
+		const m = RECORDING_ID.exec(recordingId)
+		const discoveryId = m?.[1]
+		const file = m?.[2]
+		if (discoveryId === undefined || file === undefined || file.includes(".."))
+			return false
+		return RECORDING_KINDS.some(kind => {
+			try {
+				lstatSync(join(this.root, "recordings", kind, discoveryId, file))
+				return true
+			} catch (err) {
+				const code = errorCode(err)
+				return code !== "ENOENT" && code !== "ENOTDIR"
+			}
+		})
+	}
 
 	/**
 	 * WG9 R2 (pinned root only): true while the real root is still the directory first resolved.
@@ -494,6 +580,7 @@ export class EvidenceStore {
 				"Analog metadata authority not configured",
 				"SCANNER_ANALOG_ADMISSION_DENIED",
 			)
+		this.folders.mark(input.discoveryId)
 		return this.analog.begin(input)
 	}
 	recoverAnalog(): Promise<AnalogReconciliation[]> {
@@ -634,6 +721,7 @@ export class EvidenceStore {
 				await rm(f.path, { force: true })
 				continue
 			}
+			this.folders.mark(c.discoveryId)
 			// Reserve before any await: DELETE drains this accepted move before acknowledging.
 			await this.serialise(c.discoveryId, async () => {
 				if (!this.admits(c.discoveryId)) return
@@ -683,6 +771,7 @@ export class EvidenceStore {
 	): Promise<boolean> {
 		assertDiscoveryId(discoveryId)
 		if (!this.admits(discoveryId)) return false
+		this.folders.mark(discoveryId)
 		return this.serialise(discoveryId, async () => {
 			if (!this.admits(discoveryId) || (await this.diskState()) === "disk-low")
 				return false
@@ -728,6 +817,7 @@ export class EvidenceStore {
 				"SCANNER_INVALID_IQ_METADATA",
 			)
 		if (!this.admits(discoveryId)) return null
+		this.folders.mark(discoveryId)
 		return this.serialise(discoveryId, async () => {
 			if (!this.admits(discoveryId) || (await this.diskState()) === "disk-low")
 				return null
@@ -770,7 +860,12 @@ export class EvidenceStore {
 		// owning it after a split (AnalogOperations.path).
 		if (/^analog-[0-9a-f-]{36}\.wav$/i.test(file))
 			return this.analog?.path(recordingId) ?? null
-		if (!this.admits(discoveryId)) return null
+		if (!this.admits(discoveryId)) {
+			// A recording another live discovery lists here (a split): admitted through it.
+			const holder = this.heldOwner(discoveryId, file)
+			if (holder === undefined || holder === null || !this.admits(holder))
+				return null
+		}
 		for (const kind of RECORDING_KINDS) {
 			const path = join(this.root, "recordings", kind, discoveryId, file)
 			if (existsSync(path)) return path
@@ -900,20 +995,21 @@ export class EvidenceStore {
 							"Scanner storage root changed",
 							"SCANNER_EVIDENCE_CLEANUP_PENDING",
 						)
-					// Files in this folder another live discovery owns (a split twin's committed
-					// recording): they and the folder stay; never a delete path to them.
-					const held = this.analog?.heldArtifactNames(id, removing) ?? NO_NAMES
+					// Files in this folder another live discovery lists (a split twin's recording, of
+					// any kind, however old its observation): they and the folder stay; never a delete
+					// path to them.
+					const held = this.heldNames(id, removing)
 					if (this.protection) {
 						await this.removeGuarded(id, held)
 						return
 					}
-					await rm(join(this.root, "evidence", id), {
-						recursive: true,
-						force: true,
-					})
-					for (const kind of RECORDING_KINDS) {
-						const dir = join(this.root, "recordings", kind, id)
-						if (kind !== "analog" || held.size === 0) {
+					for (const dir of [
+						join(this.root, "evidence", id),
+						...RECORDING_KINDS.map(kind =>
+							join(this.root, "recordings", kind, id),
+						),
+					]) {
+						if (held.size === 0) {
 							await rm(dir, { recursive: true, force: true })
 							continue
 						}
@@ -1034,8 +1130,8 @@ export class EvidenceStore {
 				if (errorCode(err) === "ENOENT") continue
 				throw err
 			}
-			// Another live discovery's file: never reached, and its folder stays.
-			const keepHeld = kind === "analog" && held.size > 0
+			// Another live discovery's file (any kind): never reached, and its folder stays.
+			const keepHeld = held.size > 0
 			for (const entry of entries) {
 				const path = join(dir, entry.name)
 				if (keepHeld && held.has(entry.name)) continue
@@ -1077,10 +1173,14 @@ export class EvidenceStore {
 		}
 		if (this.holdsKept(discoveryId)) refuse()
 		if (refused || !(await safeAncestor(join(this.root, "evidence")))) pending()
-		await rm(join(this.root, "evidence", discoveryId), {
-			recursive: true,
-			force: true,
-		})
+		const evidenceDir = join(this.root, "evidence", discoveryId)
+		if (held.size === 0) {
+			await rm(evidenceDir, { recursive: true, force: true })
+			return
+		}
+		for (const name of await listDir(evidenceDir))
+			if (!held.has(name))
+				await rm(join(evidenceDir, name), { recursive: true, force: true })
 	}
 
 	async retention(
@@ -1092,10 +1192,36 @@ export class EvidenceStore {
 		const files = await this.collect()
 		// WG10 req 1.5: an operator keep of a survivor protects its alias folders.
 		keepDiscoveryIds = withAliasFolders(keepDiscoveryIds, this.aliasesOf)
+		const keep = keepDiscoveryIds
+		// A folder no live discovery owns is kept and counted, never treated as unkept; a file
+		// another live discovery lists belongs to that discovery (its keep protects it).
+		const unresolved = new Set<string>()
+		const ownedElsewhere = (f: StoredFile): boolean => {
+			if (f.category !== "recordings" || f.probe) return false
+			const holder = this.heldOwner(
+				f.discoveryId,
+				f.path.split("/").at(-1) ?? "",
+			)
+			if (holder === undefined) return false
+			return holder === null || keep.has(holder) || !this.folderResolved(holder)
+		}
+		const unowned = (f: StoredFile): boolean => {
+			if (f.probe || this.folderResolved(f.discoveryId)) return false
+			if (
+				f.category === "recordings" &&
+				this.heldOwner(f.discoveryId, f.path.split("/").at(-1) ?? "") !==
+					undefined
+			)
+				return false
+			unresolved.add(f.discoveryId)
+			return true
+		}
 		const isProtected = (f: StoredFile): boolean =>
 			f.probe ||
 			now - f.mtimeMs < RECORDING_IN_PROGRESS_MS ||
 			keepDiscoveryIds.has(f.discoveryId) ||
+			unowned(f) ||
+			ownedElsewhere(f) ||
 			(this.analog?.protectedDiscovery(f.discoveryId) ?? false) ||
 			/^analog-[0-9a-f-]{36}\.wav$/i.test(f.path.split("/").at(-1) ?? "") ||
 			this.keptFile(f)
@@ -1148,6 +1274,16 @@ export class EvidenceStore {
 				)),
 			)
 		await this.removeEmptyDirs()
+		// The folders left on disk: an alias whose folder retention emptied may be released again.
+		await this.loadFolderIndex().catch((err: unknown) =>
+			this.log.debug({ err }, "Scanner folder listing failed"),
+		)
+		this.unresolvedFolders = unresolved.size
+		if (unresolved.size > 0)
+			this.log.debug(
+				{ unresolved: unresolved.size },
+				"Scanner retention kept folders without an owner",
+			)
 		if (deleted.length > 0)
 			this.log.info(
 				{ deleted: deleted.length },

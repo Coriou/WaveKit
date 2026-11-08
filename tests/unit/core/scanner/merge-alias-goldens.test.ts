@@ -49,10 +49,10 @@ describe("WG10 base goldens (req 1.11)", () => {
 				isDiscoveryLive: id => id === "d_A" || id === "d_B",
 			})
 			const { deleted } = await store.retention(new Set(["d_A"]))
+			// d_C's folder has no live owner: retention keeps it (never treated as unkept).
 			expect([...deleted].sort()).toEqual([
 				"evidence/d_B/psd.json",
 				"recordings/dv/d_B/old.wav",
-				"recordings/dv/d_C/old.wav",
 			])
 			const rel = (p: string | null): string | null =>
 				p === null ? null : relative(root, p)

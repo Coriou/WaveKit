@@ -111,6 +111,9 @@ import type { Raster, TrackSnapshot } from "../../spectrum/types.js"
 import { parseStoreMutation } from "./schemas.js"
 import type { StoredDiscovery as Discovery, StoreMutation } from "./schemas.js"
 import { RecordingAliasTable } from "../recording-aliases.js"
+import type { FolderLookup } from "../recording-aliases.js"
+import { HeldRecordingTable, splitRecordingId } from "./held-recordings.js"
+import type { HeldRecordingEntry } from "./held-recordings.js"
 import { DISCOVERY_RECORDING_ALIASES_MAX } from "../../recordings/contract.js"
 import type { DiscoveryAliasEntry } from "../recording-aliases.js"
 import {
@@ -357,6 +360,8 @@ export interface StoreSnapshot {
 	recordingOperations?: PreparedRecordingMetadata[]
 	/** WG10 req 1.5: merge aliases per survivor (absent in state written before WG10). */
 	aliases?: DiscoveryAliasEntry[]
+	/** Recordings listed outside their folder's owner (HeldRecordingTable); absent when none. */
+	heldRecordings?: HeldRecordingEntry[]
 }
 
 /** Construct after the last await. References are existing plain internal objects. */
@@ -1249,6 +1254,8 @@ export class DiscoveryStore
 	private keptBlockedWarned = 0
 	/** WG10 req 1.5: merge aliases (O(1) owner lookup). */
 	private readonly aliasTable = new RecordingAliasTable()
+	/** Ownership of recordings listed outside their folder's owner, independent of the window. */
+	private readonly heldTable = new HeldRecordingTable()
 	/** Band inspection UX req 3.1: absorbed id -> survivor, in memory only. */
 	private readonly absorbedIndex = new AbsorbedIdIndex()
 	/** DQ 10.6: where the next fragment pass resumes examining candidates (memory only). */
@@ -3568,7 +3575,8 @@ export class DiscoveryStore
 		binding?: RecordingBinding,
 	): RecordingAssociation | null {
 		const observation = this.observationIndex.get(observationId)
-		if (observation === undefined) return null
+		if (observation === undefined)
+			return this.heldAssociation(discoveryId, observationId)
 		if (
 			binding !== undefined &&
 			(observation.sourceId !== binding.sourceId ||
@@ -3582,8 +3590,30 @@ export class DiscoveryStore
 		const holder = this.discoveries.get(observation.discoveryId)
 		const prefix = `${discoveryId}~`
 		const held = observation.recordingIds.filter(id => id.startsWith(prefix))
-		if (holder === undefined || held.length === 0) return null
+		if (holder === undefined || held.length === 0)
+			return this.heldAssociation(discoveryId, observationId)
 		return { aliasIds: held, ownerId: holder.id, held: true }
+	}
+
+	/**
+	 * The ownership table's answer once the observation left the window (or no longer lists the
+	 * file): the live owner of the recordings that observation listed in `discoveryId`'s folder.
+	 */
+	private heldAssociation(
+		discoveryId: string,
+		observationId: string,
+	): RecordingAssociation | null {
+		let ownerId: string | undefined
+		const aliasIds: string[] = []
+		for (const e of this.heldTable.inFolder(discoveryId)) {
+			if (e.observationId !== observationId || !this.discoveries.has(e.ownerId))
+				continue
+			if (ownerId !== undefined && ownerId !== e.ownerId) return null
+			ownerId = e.ownerId
+			aliasIds.push(e.id)
+		}
+		if (ownerId === undefined) return null
+		return { aliasIds: aliasIds.sort(compareText), ownerId, held: true }
 	}
 
 	buildRecordingCommitPlan(operationId: string): RecordingCommitPlan | null {
@@ -3651,6 +3681,7 @@ export class DiscoveryStore
 		plan.observation.recordingIds = plan.recordingIds
 		plan.observation.recording = plan.recordingState
 		plan.evidence.recordings = plan.recordingCount
+		this.noteListings(plan.observation)
 		// LO-locked spurs: a recording is sticky protection (published by publishRecordingCommit).
 		this.loProtect(plan.discovery.id)
 	}
@@ -3663,6 +3694,8 @@ export class DiscoveryStore
 			this.discoveries.get(plan.discovery.id) !== plan.discovery
 		)
 			return
+		this.noteListings(plan.observation)
+		const heldRecordings = this.heldTable.takeChanges()
 		const entry: Omit<JournalEntry, "seq"> = {
 			at,
 			op: "evidence",
@@ -3670,6 +3703,7 @@ export class DiscoveryStore
 				discoveries: [clone(plan.discovery)],
 				observations: [clone(plan.observation)],
 				deleted: [],
+				...(heldRecordings.length > 0 ? { heldRecordings } : {}),
 			} satisfies StoreMutation,
 		}
 		let failure: unknown
@@ -3717,6 +3751,7 @@ export class DiscoveryStore
 		const added = recordingIds.filter(r => !o.recordingIds.includes(r))
 		o.recordingIds = [...o.recordingIds, ...added]
 		o.recording = state
+		this.noteListings(o)
 		d.evidence.recordings += added.length
 		const op = newOp()
 		op.discoveries.add(d.id)
@@ -3738,6 +3773,7 @@ export class DiscoveryStore
 			if (d === undefined) return false
 			o.recordingIds = o.recordingIds.filter(r => r !== recordingId)
 			d.evidence.recordings = Math.max(0, d.evidence.recordings - 1)
+			this.heldTable.drop(recordingId)
 			const op = newOp()
 			op.discoveries.add(d.id)
 			op.observations.add(o.id)
@@ -3745,7 +3781,17 @@ export class DiscoveryStore
 			this.finish("evidence", op)
 			return true
 		}
-		return false
+		// Only the ownership table still lists it (its observation left the window).
+		const held = this.heldTable.get(recordingId)
+		const d = held && this.discoveries.get(held.ownerId)
+		if (held === undefined || d === undefined) return false
+		this.heldTable.drop(recordingId)
+		d.evidence.recordings = Math.max(0, d.evidence.recordings - 1)
+		const op = newOp()
+		op.discoveries.add(d.id)
+		mark(op, d.id, "updated")
+		this.finish("evidence", op)
+		return true
 	}
 
 	/**
@@ -3775,6 +3821,149 @@ export class DiscoveryStore
 	/** WG10 req 1.5: forgets a deleted owner's aliases once its evidence removal settled. */
 	releaseAliases(discoveryId: string): void {
 		if (!this.discoveries.has(discoveryId)) this.aliasTable.release(discoveryId)
+	}
+
+	/**
+	 * Which ids own an evidence or recording folder on disk (the evidence store's FolderIndex): a
+	 * merge past the alias bound never releases such an alias, so its files keep their owner.
+	 */
+	setFolderLookup(lookup: FolderLookup): void {
+		this.aliasTable.setFolderLookup(lookup)
+	}
+
+	/**
+	 * The live discovery whose files `folderId`'s folder holds: itself, or the owner of the alias.
+	 * Undefined for a folder nobody owns (an alias released before folders were checked, a
+	 * removal that did not finish).
+	 */
+	folderOwner(folderId: string): string | undefined {
+		if (this.discoveries.has(folderId)) return folderId
+		const owner = this.aliasTable.aliasOwner(folderId)
+		return owner !== undefined && this.discoveries.has(owner)
+			? owner
+			: undefined
+	}
+
+	/**
+	 * Records the storage ownership of every recording `o` lists outside its discovery's own
+	 * folder (a split twin's file, or a merged discovery's file in an alias folder) in the
+	 * HeldRecordingTable, so it outlives the observation window. A listing back in the
+	 * discovery's own folder ends an entry the observation's id made.
+	 */
+	private noteListings(o: Observation): void {
+		for (const rid of o.recordingIds) {
+			const parts = splitRecordingId(rid)
+			if (parts === null) continue
+			if (parts.folderId !== o.discoveryId)
+				this.heldTable.hold(rid, o.discoveryId, o.id)
+			else if (this.heldTable.get(rid)?.observationId === o.id)
+				this.heldTable.drop(rid)
+		}
+	}
+
+	/** The live discovery that lists `recordingId` outside its folder's owner; undefined otherwise. */
+	heldRecordingOwner(recordingId: string): string | undefined {
+		const owner = this.heldTable.get(recordingId)?.ownerId
+		return owner !== undefined && this.discoveries.has(owner)
+			? owner
+			: undefined
+	}
+
+	/**
+	 * File names in `folderId`'s folders (any kind) that a live discovery outside `removing`
+	 * lists: no deleter of that folder may reach them, however old their observation.
+	 */
+	heldFileNames(
+		folderId: string,
+		removing: readonly string[] = [],
+	): ReadonlySet<string> {
+		const names = new Set<string>()
+		for (const e of this.heldTable.inFolder(folderId))
+			if (this.discoveries.has(e.ownerId) && !removing.includes(e.ownerId)) {
+				const name = splitRecordingId(e.id)?.name
+				if (name !== undefined) names.add(name)
+			}
+		return names
+	}
+
+	/**
+	 * Maintenance: drops ownership entries whose owner is gone or whose file `exists` no longer
+	 * finds (one journaled entry). Returns how many went. A throwing `exists` keeps the entry.
+	 */
+	pruneHeldRecordings(exists: (recordingId: string) => boolean): number {
+		let dropped = 0
+		for (const e of this.heldTable.entries()) {
+			let keep = this.discoveries.has(e.ownerId)
+			if (keep)
+				try {
+					keep = exists(e.id)
+				} catch {
+					keep = true
+				}
+			if (keep) continue
+			this.heldTable.drop(e.id)
+			dropped++
+		}
+		if (dropped > 0) this.finish("evidence", newOp())
+		return dropped
+	}
+
+	/**
+	 * Load-time migration of folders whose alias was released past the bound: each folder in
+	 * `folderIds` nobody owns is re-attached as an alias of its owner, found from `history` (the
+	 * owner of its last journaled alias listing, followed through later merges to a live
+	 * discovery), else from the observations listing recordings in that folder (one live
+	 * discovery only). Moves no file. One journaled entry carries every changed owner's list, so a
+	 * restart replays it and a repeated run finds nothing left to attach. A folder no source
+	 * resolves is left in place and counted.
+	 */
+	reattachOrphanFolders(
+		folderIds: Iterable<string>,
+		history: ReadonlyMap<string, string>,
+	): { reattached: number; unresolved: number } {
+		const orphans = [...new Set(folderIds)]
+			.filter(id => this.folderOwner(id) === undefined)
+			.sort(compareText)
+		if (orphans.length === 0) return { reattached: 0, unresolved: 0 }
+		const throughHistory = (id: string): string | undefined => {
+			const seen = new Set<string>([id])
+			let at = history.get(id)
+			while (at !== undefined && !seen.has(at)) {
+				const owner = this.folderOwner(at)
+				if (owner !== undefined) return owner
+				seen.add(at)
+				at = history.get(at)
+			}
+			return undefined
+		}
+		const wanted = new Set(orphans)
+		const byRecordings = new Map<string, Set<string>>()
+		for (const o of this.observationIndex.values())
+			for (const rid of o.recordingIds) {
+				const folder = rid.slice(0, Math.max(0, rid.indexOf("~")))
+				if (!wanted.has(folder)) continue
+				const owner = this.folderOwner(o.discoveryId)
+				if (owner === undefined) continue
+				let owners = byRecordings.get(folder)
+				if (owners === undefined) byRecordings.set(folder, (owners = new Set()))
+				owners.add(owner)
+			}
+		const op = newOp()
+		let reattached = 0
+		let unresolved = 0
+		for (const id of orphans) {
+			let owner = throughHistory(id)
+			if (owner === undefined) {
+				const owners = byRecordings.get(id)
+				if (owners?.size === 1) owner = [...owners][0]
+			}
+			if (owner !== undefined && this.aliasTable.attach(owner, id)) {
+				op.aliases.add(owner)
+				reattached++
+			} else unresolved++
+		}
+		this.finish("rekey", op)
+		return { reattached, unresolved }
 	}
 
 	setEvidenceFlags(
@@ -4495,6 +4684,9 @@ export class DiscoveryStore
 				? { recordingOperations: parts.recordingOperations }
 				: {}),
 			...(parts.aliases !== undefined ? { aliases: parts.aliases } : {}),
+			...(parts.heldRecordings !== undefined
+				? { heldRecordings: parts.heldRecordings }
+				: {}),
 			corrections: parts.corrections,
 		}
 	}
@@ -4502,14 +4694,16 @@ export class DiscoveryStore
 	/** WG11 req 3.5: the non-record fields of `snapshot()` (same presence rules, copies, no record clones). */
 	snapshotParts(): Pick<
 		StoreSnapshot,
-		"corrections" | "recordingOperations" | "aliases"
+		"corrections" | "recordingOperations" | "aliases" | "heldRecordings"
 	> {
 		const aliases = this.aliasTable.entries()
+		const heldRecordings = this.heldTable.entries()
 		return {
 			...(this.recordingOperations.size > 0
 				? { recordingOperations: this.preparedRecordingOperations() }
 				: {}),
 			...(aliases.length > 0 ? { aliases } : {}),
+			...(heldRecordings.length > 0 ? { heldRecordings } : {}),
 			corrections: [...this.corrections]
 				.sort(([a], [b]) => compareText(a, b))
 				.map(([sourceId, hz]) => ({ sourceId, hz })),
@@ -4661,6 +4855,13 @@ export class DiscoveryStore
 				if (tick()) yield
 			}
 			this.aliasTable.restore(s.aliases ?? [], id => this.discoveries.has(id))
+			// The persisted ownership, then every listing still in the window (state written
+			// before the table existed); owners that are not live are dropped.
+			this.heldTable.restore(
+				(s.heldRecordings ?? []).filter(e => this.discoveries.has(e.ownerId)),
+			)
+			for (const o of this.observationIndex.values()) this.noteListings(o)
+			this.heldTable.takeChanges()
 			// Journaled receiver-spur flags: pending until their offset is learned again.
 			for (const d of this.discoveries.values())
 				if (d.receiverSpur !== undefined) this.loRestoreFlag(d.id)
@@ -6210,6 +6411,8 @@ export class DiscoveryStore
 		const released = this.aliasTable.adopt(keep, drop)
 		op.aliases.add(keep)
 		op.aliases.add(drop)
+		// drop's recordings in other folders (its own folder's included) now belong to keep.
+		this.heldTable.moveOwner(drop, keep)
 		if (released === 0) return
 		const log =
 			this.injectedLog ??
@@ -7334,6 +7537,8 @@ export class DiscoveryStore
 		this.medians.delete(id)
 		this.unlinked.delete(id)
 		this.aliasTable.detach(id)
+		// Its recordings in other folders now belong to those folders again.
+		this.heldTable.dropOwner(id)
 		this.markDirty(id)
 	}
 
@@ -7354,6 +7559,8 @@ export class DiscoveryStore
 			i--
 		}
 		list.splice(i, 0, o)
+		// Before the trim: a listing that leaves the window keeps its ownership.
+		this.noteListings(o)
 		this.trimObservations(list)
 		this.observationProofCache.delete(o.id)
 		// Trim may have dropped `o` itself. Bearing follows only what is still stored.
@@ -7580,6 +7787,8 @@ export class DiscoveryStore
 			if (this.discoveries.has(a.id) || a.aliases.length === 0)
 				this.aliasTable.set(a.id, a.aliases, id => this.discoveries.has(id))
 		}
+		// The journaled ownership changes last: they are the state this entry left.
+		this.heldTable.apply(m.heldRecordings ?? [])
 		// A replayed record's journaled receiver-spur flag, as of this entry.
 		for (const d of m.discoveries) this.loRestoreFlag(d.id)
 	}
@@ -7682,7 +7891,8 @@ export class DiscoveryStore
 			op.deleted.length === 0 &&
 			removed.length === 0 &&
 			op.correction === undefined &&
-			op.aliases.size === 0
+			op.aliases.size === 0 &&
+			this.heldTable.pendingChanges === 0
 		) {
 			this.flushRemoval()
 			this.emitPending(pending, notified)
@@ -7699,6 +7909,8 @@ export class DiscoveryStore
 			payload.aliases = [...op.aliases]
 				.sort(compareText)
 				.map(id => this.aliasTable.entryOf(id))
+		const heldRecordings = this.heldTable.takeChanges()
+		if (heldRecordings.length > 0) payload.heldRecordings = heldRecordings
 		const entry: Omit<JournalEntry, "seq"> = {
 			at: iso(this.now()),
 			op: kind,

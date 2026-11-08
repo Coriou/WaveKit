@@ -1248,6 +1248,12 @@ export interface ScannerStatus {
 		source: "os" | "cgroup"
 	}
 	disk: "ok" | "disk-low"
+	/**
+	 * Recording and evidence folders the load re-attached to their discovery after a merge
+	 * released them (`reattached`), and folders no discovery could be traced to, kept in place
+	 * (`unresolved`). Absent on older cores and before the scanner state loaded.
+	 */
+	folders?: { reattached: number; unresolved: number } | undefined
 	jobs: { active: number; total: number }
 }
 

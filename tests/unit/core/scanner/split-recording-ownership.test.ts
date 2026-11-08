@@ -5,16 +5,21 @@
  * A (discovery delete, inactive prune, capacity eviction, a fold of A into another discovery that
  * is then deleted) reaches it, it stays playable, and an operator keep of B protects it from
  * retention by age and by size. With or without a recording protection port.
+ *
+ * The ownership outlives the bounded observation window (it is persisted and journaled apart
+ * from it), and it covers every kind: a digital recording listed by the twin is guarded like an
+ * analog one.
  */
 import { randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
-import { mkdtemp, realpath, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import type { RecordingProtection } from "../../../../src/core/recordings/contract.js"
 import type { AnalogMetadataAdapter } from "../../../../src/core/scanner/store/analog-operations.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
+import type { JournalEntry } from "../../../../src/core/scanner/store/discovery-store.js"
 import type { Discovery } from "../../../../src/core/scanner/types.js"
 import { EvidenceStore } from "../../../../src/core/scanner/store/evidence-store.js"
 import type { StorageCaps } from "../../../../src/core/scanner/store/evidence-store.js"
@@ -131,9 +136,12 @@ async function evidenceOver(
 			aliasOwner: id => store.aliasOwner(id),
 			aliasesOf: id => store.aliasesOf(id),
 			releaseAliases: id => store.releaseAliases(id),
+			heldFileNames: (id, removing) => store.heldFileNames(id, removing),
+			heldRecordingOwner: id => store.heldRecordingOwner(id),
 		},
 		...(protection ? { protection } : {}),
 	})
+	store.setFolderLookup(id => ev.folders.holds(id))
 	ev.configureAnalog(adapterOf(store))
 	await ev.recoverAnalog()
 	return ev
@@ -364,3 +372,124 @@ describe("a split twin's recording after its folder's discovery is gone", () => 
 		twinKeeps(s)
 	})
 })
+
+/** Tone-confirmed analog overs on the twin's channel until `id` has left the twin's window. */
+function rotateWindow(s: Scene): void {
+	const start = T0 + 120_000
+	for (let i = 0; i < 257; i++) {
+		const id = `n${i}`
+		const at = start + i * 2_000
+		s.store.ingest(voice(id, at, false))
+		s.store.recordAnalog(id, tone(at + 500))
+		expect(s.store.discoveryIdOf(id)).toBe(s.b)
+	}
+	expect(s.store.snapshot().observations.some(o => o.id === "id")).toBe(false)
+}
+
+for (const [mode, protection] of [
+	["without a protection port", undefined],
+	["with a protection port", keepsNothing],
+] as const) {
+	describe(`ownership outlives the observation window (${mode})`, () => {
+		it("A's deletion after the twin's window rotated leaves the twin's file", async () => {
+			const s = await splitScene(protection)
+			s.store.setOperator(s.b, { keep: true })
+			rotateWindow(s)
+			expect(s.store.recordingAssociation(s.a, "id")?.ownerId).toBe(s.b)
+			expect(s.store.delete(s.a)).toBe(true)
+			await s.ev.removeDiscovery(s.a)
+			expect(existsSync(s.ownFile)).toBe(false)
+			twinKeeps(s)
+			expect(s.store.recordingAssociation(s.a, "id")?.ownerId).toBe(s.b)
+		})
+
+		it("survives a snapshot, a journal replay and an evidence store restart", async () => {
+			const s = await splitScene(protection)
+			const base = s.store.snapshot()
+			const entries: JournalEntry[] = []
+			s.store.on("mutation", (e: Omit<JournalEntry, "seq">) =>
+				entries.push({ ...e, seq: entries.length + 1 }),
+			)
+			rotateWindow(s)
+			expect(s.store.delete(s.a)).toBe(true)
+			const fresh = (): DiscoveryStore =>
+				new DiscoveryStore({
+					maxDiscoveries: 100,
+					now: () => T0,
+					newId: counterIds(),
+					rasters: () => PMR,
+				})
+			const restored = fresh()
+			restored.restore(s.store.snapshot())
+			const replayed = fresh()
+			replayed.restore(base)
+			for (const e of entries) replayed.replay(e)
+			for (const store of [restored, replayed]) {
+				expect(store.recordingAssociation(s.a, "id")?.ownerId).toBe(s.b)
+				expect(store.heldFileNames(s.a, [s.a]).size).toBe(1)
+			}
+			await s.ev.stopAnalog()
+			const next = await evidenceOver(s.root, restored, s.clock, protection)
+			await next.removeDiscovery(s.a)
+			expect(existsSync(s.file)).toBe(true)
+			expect(next.recordingPath(s.alias)).toBe(s.file)
+		})
+	})
+
+	describe(`a digital recording the twin lists is guarded too (${mode})`, () => {
+		async function digitalScene() {
+			const root = await realpath(
+				await mkdtemp(join(tmpdir(), "wavekit-split-dv-")),
+			)
+			dirs.push(root)
+			const clock = { now: T0 }
+			const store = new DiscoveryStore({
+				maxDiscoveries: 100,
+				now: () => T0,
+				newId: counterIds(),
+				rasters: () => PMR,
+			})
+			const ev = await evidenceOver(root, store, clock, protection)
+			const a = store.ingest(voice("old", T0, false)).discoveryId ?? ""
+			const decoded = evidence("dmr", T0 + 500, { identity: dmrCc(1) })
+			expect(store.appendObservationEvidence("old", decoded)).toBe(true)
+			store.applyEvidence(a, decoded)
+			const dir = join(root, "recordings", "dv", a)
+			await mkdir(dir, { recursive: true })
+			const file = join(dir, "clip.wav")
+			await writeFile(file, Buffer.alloc(64))
+			const own = join(dir, "own.wav")
+			await writeFile(own, Buffer.alloc(64))
+			const at = T0 + 60_000
+			expect(store.ingest(voice("id", at)).discoveryId).toBe(a)
+			const rid = `${a}~clip.wav`
+			expect(store.attachRecordings("id", [rid], "linked")).toBe(true)
+			expect(store.recordAnalog("id", tone(at + 3_000))).toBe(true)
+			const b = store.discoveryIdOf("id") ?? ""
+			expect(b).not.toBe(a)
+			const listed = store.snapshot().observations.find(o => o.id === "id")
+			expect(listed?.discoveryId).toBe(b)
+			expect(listed?.recordingIds).toEqual([rid])
+			return { root, clock, store, ev, a, b, rid, file, own }
+		}
+
+		it("A's deletion does not reach the WAV the twin lists", async () => {
+			const s = await digitalScene()
+			s.store.setOperator(s.b, { keep: true })
+			expect(s.store.delete(s.a)).toBe(true)
+			await s.ev.removeDiscovery(s.a)
+			expect(existsSync(s.own)).toBe(false)
+			expect(existsSync(s.file)).toBe(true)
+			expect(s.ev.recordingPath(s.rid)).toBe(s.file)
+		})
+
+		it("retention by age and by size keeps it with the twin kept", async () => {
+			const s = await digitalScene()
+			s.clock.now = Date.now() + 31 * DAY
+			s.ev.setCaps({ ...CAPS, maxRecordingsMb: 0 })
+			const { deleted } = await s.ev.retention(new Set([s.b]))
+			expect(deleted).toContain(s.own.slice(s.root.length + 1))
+			expect(existsSync(s.file)).toBe(true)
+		})
+	})
+}

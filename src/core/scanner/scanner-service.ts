@@ -1236,6 +1236,9 @@ export class ScannerService extends EventEmitter {
 		probeStartMs: null,
 	}
 	private disk: "ok" | "disk-low" = "ok"
+	/** The load-time folder migration's counts (status `folders`); null until it ran. */
+	private folderMigration: { reattached: number; unresolved: number } | null =
+		null
 	private dirty = false
 	/** False when the persisted state could not be read: the journal and snapshot are not written this run. */
 	private stateLoaded = false
@@ -1499,11 +1502,16 @@ export class ScannerService extends EventEmitter {
 					aliasOwner: id => this.store.aliasOwner(id),
 					aliasesOf: id => this.store.aliasesOf(id),
 					releaseAliases: id => this.store.releaseAliases(id),
+					heldFileNames: (id, removing) =>
+						this.store.heldFileNames(id, removing),
+					heldRecordingOwner: id => this.store.heldRecordingOwner(id),
 				},
 				...(deps.recordingProtection
 					? { protection: deps.recordingProtection }
 					: {}),
 			})
+			// A merge past the alias bound never releases an alias that owns a folder on disk.
+			this.store.setFolderLookup(id => this.evidence.folders.holds(id))
 			// WG10 req 1.6: a capacity eviction removes the evicted folders like an inactive prune.
 			this.store.on("evicted", this.onStoreEvicted)
 			this.recordingDeleter = createScannerRecordingDeleter({
@@ -1788,6 +1796,9 @@ export class ScannerService extends EventEmitter {
 			observations: loaded.observations,
 			corrections: loaded.corrections,
 			...(loaded.aliases ? { aliases: loaded.aliases } : {}),
+			...(loaded.heldRecordings
+				? { heldRecordings: loaded.heldRecordings }
+				: {}),
 		}
 		try {
 			// In slices with event-loop turns between them (SCANNER_LOAD_SLICE_ITEMS): a large
@@ -1836,6 +1847,8 @@ export class ScannerService extends EventEmitter {
 		// § 7.4: report the restored estimate; re-keying waits for the next decoded upgrade (rasters need the jobs).
 		for (const cfg of this.deps.sourceConfigs)
 			this.updateFrequencyError(cfg.id, { rekey: false })
+		// Before analog recovery: a migrated folder's WAV is re-attached, not quarantined.
+		await this.migrateOrphanFolders()
 		await this.evidence
 			.recoverAnalog()
 			.then(results => {
@@ -2236,6 +2249,7 @@ export class ScannerService extends EventEmitter {
 				source: this.deps.cpuMeter?.mode ?? "os",
 			},
 			disk: this.disk,
+			...(this.folderMigration ? { folders: { ...this.folderMigration } } : {}),
 			jobs: {
 				active: [...this.jobs.values()].filter(j => !isTerminal(j.state))
 					.length,
@@ -8989,6 +9003,42 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
+	/**
+	 * Load-time migration of folders whose merge alias was released past the bound before
+	 * folders were checked: each is re-attached to its owner (journal alias listings, then the
+	 * observations listing its recordings), journaled; nothing moves or is deleted. The counts
+	 * are logged once and kept for `status().folders`. Without a loaded state only the folder
+	 * index is built (no journal write).
+	 */
+	private async migrateOrphanFolders(): Promise<void> {
+		let folderIds: string[]
+		try {
+			folderIds = await this.evidence.loadFolderIndex()
+		} catch (err: unknown) {
+			this.log.warn({ err }, "Listing the scanner folders failed")
+			return
+		}
+		if (!this.stateLoaded) return
+		const orphans = folderIds.filter(
+			id => this.store.folderOwner(id) === undefined,
+		)
+		if (orphans.length === 0) {
+			this.folderMigration = { reattached: 0, unresolved: 0 }
+			return
+		}
+		try {
+			const history = await this.persistence.aliasHistory(new Set(orphans))
+			const result = this.store.reattachOrphanFolders(orphans, history)
+			this.folderMigration = result
+			this.log.info(
+				{ reattached: result.reattached, unresolved: result.unresolved },
+				"Scanner folders without an owner re-attached; the rest are kept in place",
+			)
+		} catch (err: unknown) {
+			this.log.warn({ err }, "Re-attaching scanner folders failed")
+		}
+	}
+
 	private async maintenance(): Promise<void> {
 		if (this.ownershipLost()) return
 		const s = this.settings()
@@ -9030,6 +9080,11 @@ export class ScannerService extends EventEmitter {
 		await this.evidence
 			.retention(keep)
 			.catch((err: unknown) => this.log.warn({ err }, "Retention failed"))
+		// Ownership of recordings listed in other folders ends with their files.
+		if (!this.ownershipLost())
+			this.store.pruneHeldRecordings(id =>
+				this.evidence.recordingFileExists(id),
+			)
 		await this.captures
 			.retention(s.storage.maxCapturesMb * 1024 * 1024)
 			.catch((err: unknown) =>

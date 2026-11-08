@@ -10,7 +10,9 @@ import {
 	MAX_RECOVERY_OPERATIONS,
 } from "./recording-operation.js"
 import type { PreparedRecordingMetadata } from "./recording-operation.js"
-import { DISCOVERY_RECORDING_ALIASES_MAX } from "../../recordings/contract.js"
+import { DISCOVERY_RECORDING_ALIASES_STORED_MAX } from "../recording-aliases.js"
+import { HeldRecordingChangesSchema } from "./held-recordings.js"
+import type { HeldRecordingChange } from "./held-recordings.js"
 import type {
 	DecodeEvidence,
 	Discovery,
@@ -320,9 +322,15 @@ export interface StoreMutation {
 	}
 	/** WG10 req 1.5: each changed owner's merge alias list as written (empty: none left). */
 	aliases?: { id: string; aliases: string[] }[]
+	/** Ownership changes of recordings listed outside their folder's owner (held-recordings.ts). */
+	heldRecordings?: HeldRecordingChange[]
 }
 
-/** WG10 req 1.5: one owner's merge aliases (bounded; absent in state written before WG10). */
+/**
+ * WG10 req 1.5: one owner's merge aliases (bounded; absent in state written before WG10). Lists
+ * past 64 hold aliases that still own folders on disk (RecordingAliasTable.adopt); state written
+ * with at most 64 still loads.
+ */
 export const DiscoveryAliasEntrySchema = z
 	.object({
 		id: z
@@ -336,7 +344,7 @@ export const DiscoveryAliasEntrySchema = z
 					.max(64)
 					.regex(/^d_[0-9A-Za-z]+$/),
 			)
-			.max(DISCOVERY_RECORDING_ALIASES_MAX),
+			.max(DISCOVERY_RECORDING_ALIASES_STORED_MAX),
 	})
 	.strict()
 export const StoreMutationSchema = z
@@ -364,6 +372,7 @@ export const StoreMutationSchema = z
 			})
 			.optional(),
 		aliases: z.array(DiscoveryAliasEntrySchema).optional(),
+		heldRecordings: HeldRecordingChangesSchema.optional(),
 	})
 	.strict()
 export type StoreMutationCheck = Assert<

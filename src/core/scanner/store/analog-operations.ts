@@ -355,6 +355,8 @@ export class AnalogOperations {
 	>()
 	private stopped = false
 	private initialized = false
+	/** Artifacts the last retention pass kept because no live discovery owns them. */
+	unresolvedRetained = 0
 	private recovery: Promise<AnalogReconciliation[]> | null = null
 	private root: string
 	private rootAnchored = false
@@ -1862,9 +1864,15 @@ export class AnalogOperations {
 		if (!this.ready) return []
 		const deleted: string[] = []
 		let skipped = 0
+		let unresolved = 0
 		for (const intent of [...this.inventory.intents.values()]) {
 			// An operator keep of the discovery owning the file (a split twin) protects it too.
 			const owner = this.heldElsewhere(intent, [])
+			// A file no live discovery owns (its folder's and no listing) is kept, never unkept.
+			if (owner === undefined && !this.context.admits(intent.discoveryId)) {
+				unresolved++
+				continue
+			}
 			if (
 				keep.has(intent.discoveryId) ||
 				(owner !== undefined && keep.has(owner)) ||
@@ -1893,6 +1901,7 @@ export class AnalogOperations {
 			}
 		}
 		if (skipped > 0) this.context.keptSkipped?.(skipped)
+		this.unresolvedRetained = unresolved
 		return deleted
 	}
 	private async retire(intent: Intent, deleted: string[]): Promise<void> {
