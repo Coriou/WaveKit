@@ -3419,7 +3419,12 @@ export class DiscoveryStore
 		return { merged: op.merged }
 	}
 
-	/** Only private metadata is changed; register exact append correlation before emitting. */
+	/**
+	 * Only private metadata is changed; register exact append correlation before emitting.
+	 * The analog operation prepares at the recording's end, so the discovery it began for may
+	 * have merged away or been split from its observation meanwhile: the current owner
+	 * (recordingOwner) is checked, as the association and the commit plan check it.
+	 */
 	prepareRecording(
 		value: PreparedRecordingMetadata,
 		beforeEmit?: (entry: Omit<JournalEntry, "seq">) => void,
@@ -3432,7 +3437,7 @@ export class DiscoveryStore
 			)
 		const metadata = parsed.data
 		const o = this.observationIndex.get(metadata.observationId)
-		const d = this.discoveries.get(metadata.discoveryId)
+		const d = this.recordingOwner(metadata.discoveryId, o)
 		if (
 			o === undefined ||
 			d === undefined ||
@@ -3490,17 +3495,39 @@ export class DiscoveryStore
 	 * the survivor that adopted its folder in a merge, so a recording whose
 	 * discovery merged mid-recording is reattached to the survivor (its file stays in the adopted
 	 * folder). Undefined when neither is live (a deletion, or an alias released past its bound).
+	 * A co-channel split that moved the recording's observation onto a linked twin is followed the
+	 * same way: the twin, linked both ways to that discovery, takes the recording (its file stays in
+	 * the original discovery's folder). An observation on any other discovery is not followed.
 	 */
-	private recordingOwner(discoveryId: string): Discovery | undefined {
-		const d = this.discoveries.get(discoveryId)
-		if (d !== undefined) return d
-		const owner = this.aliasTable.aliasOwner(discoveryId)
-		return owner === undefined ? undefined : this.discoveries.get(owner)
+	private recordingOwner(
+		discoveryId: string,
+		observation: Observation | undefined,
+	): Discovery | undefined {
+		let d = this.discoveries.get(discoveryId)
+		if (d === undefined) {
+			const owner = this.aliasTable.aliasOwner(discoveryId)
+			d = owner === undefined ? undefined : this.discoveries.get(owner)
+		}
+		if (
+			d === undefined ||
+			observation === undefined ||
+			observation.discoveryId === d.id
+		)
+			return d
+		const twin = this.discoveries.get(observation.discoveryId)
+		if (
+			twin !== undefined &&
+			twin.coChannel.includes(d.id) &&
+			d.coChannel.includes(twin.id)
+		)
+			return twin
+		return d
 	}
 
 	/**
 	 * Exact current association, without pagination or any identity repair. The observation
-	 * must still belong to the recording's discovery or to the survivor of its merge (recordingOwner).
+	 * must still belong to the recording's discovery, to the survivor of its merge or to the
+	 * co-channel twin a split moved it onto (recordingOwner).
 	 */
 	recordingAssociation(
 		discoveryId: string,
@@ -3508,7 +3535,7 @@ export class DiscoveryStore
 		binding?: RecordingBinding,
 	): { aliasIds: readonly string[] } | null {
 		const observation = this.observationIndex.get(observationId)
-		const owner = this.recordingOwner(discoveryId)
+		const owner = this.recordingOwner(discoveryId, observation)
 		if (
 			observation === undefined ||
 			owner === undefined ||
@@ -3529,8 +3556,8 @@ export class DiscoveryStore
 		const metadata = this.recordingOperations.get(operationId)
 		if (metadata === undefined) return null
 		const observation = this.observationIndex.get(metadata.observationId)
-		// A merge since the recording began: the survivor takes it (recordingOwner).
-		const discovery = this.recordingOwner(metadata.discoveryId)
+		// A merge or split since the recording began: the survivor or twin takes it (recordingOwner).
+		const discovery = this.recordingOwner(metadata.discoveryId, observation)
 		if (
 			observation === undefined ||
 			discovery === undefined ||
@@ -3572,7 +3599,8 @@ export class DiscoveryStore
 				plan.metadata &&
 			this.observationIndex.get(plan.metadata.observationId) ===
 				plan.observation &&
-			this.recordingOwner(plan.metadata.discoveryId) === plan.discovery &&
+			this.recordingOwner(plan.metadata.discoveryId, plan.observation) ===
+				plan.discovery &&
 			plan.observation.discoveryId === plan.discovery.id &&
 			plan.observation.sourceId === plan.metadata.binding.sourceId &&
 			plan.observation.sampleRange.stream === plan.metadata.binding.stream &&
@@ -5494,13 +5522,16 @@ export class DiscoveryStore
 	 * observation's own proof counts, including a decode stored for another
 	 * identity. When no sibling names one, a co-channel decode this discovery
 	 * claims does. Unknown when nothing does, so a lone observation is not split.
+	 * A digital-voice sync hint (an unchecked dsd-fme decode, which keeps no identity) is weak
+	 * evidence and establishes no family: one emitter heard by dsd-fme as a false sync stays one
+	 * discovery when its voice is proven.
 	 */
 	private establishedFamily(d: Discovery, skipId: string): ProtocolFamily {
 		const own: ScannerProof[] = []
 		for (const observation of this.byDiscovery.get(d.id) ?? []) {
 			if (observation.id === skipId) continue
 			const proof = this.observationAssessment(observation).proof
-			if (proof !== null) own.push(proof)
+			if (proof !== null && !syncOnlyProof(proof)) own.push(proof)
 		}
 		const bestOwn = strongestKnownProof(own)
 		if (bestOwn !== null) return this.labelOfProof(d, bestOwn).family
@@ -5508,7 +5539,8 @@ export class DiscoveryStore
 		for (const source of this.proofSources(d)) {
 			if (!source.foreign || source.observation.id === skipId) continue
 			const proof = this.observationAssessment(source.observation).proof
-			if (proof !== null && this.proofCounts(d, proof)) foreign.push(proof)
+			if (proof !== null && !syncOnlyProof(proof) && this.proofCounts(d, proof))
+				foreign.push(proof)
 		}
 		const bestForeign = strongestKnownProof(foreign)
 		if (bestForeign === null) return "unknown"
@@ -5524,7 +5556,8 @@ export class DiscoveryStore
 		const d = this.discoveries.get(observation.discoveryId)
 		if (d === undefined) return false
 		const assessed = this.observationAssessment(observation)
-		if (assessed.proof === null) return false
+		// A sync hint is weak evidence: it moves nothing off a proven discovery either.
+		if (assessed.proof === null || syncOnlyProof(assessed.proof)) return false
 		const rest = this.establishedFamily(d, observation.id)
 		if (!familiesIncompatible(assessed.label.family, rest)) return false
 		const family = assessed.label.family
