@@ -25,6 +25,10 @@ import { runGolden } from "./__goldens__/store-golden-driver.js"
 // lines 71,80,129,137,146,158,192,210,2106–2110 add contentVerified:true.
 // Same-identity observation proof and checked merge provenance now persist;
 // checked talkgroups and every other field match the pre-cab741cd goldens.
+// Ownership listings re-baseline: every M journal entry's payload ends with the held-recording
+// format marker "heldFormat":3 (seed 1: 436, seed 7: 457, seed 42: 562 entries; the only
+// added bytes). The synthetic recording ids carry no folder, so no heldRecordings,
+// heldOverflow or heldGuard field appears; entry counts, R, C and E lines and S snapshot texts are byte-identical. No other field changed.
 const DIR = join(import.meta.dirname, "__goldens__")
 const CASES: { seed: number; steps: number; slots?: number }[] = [
 	{ seed: 1, steps: 700 },
