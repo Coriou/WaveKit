@@ -12,13 +12,14 @@ import {
 import type { PreparedRecordingMetadata } from "./recording-operation.js"
 import { DISCOVERY_RECORDING_ALIASES_STORED_MAX } from "../recording-aliases.js"
 import {
-	HELD_JOURNAL_FORMAT,
 	HeldGuardSchema,
+	HeldJournalFormatSchema,
 	HeldOverflowSchema,
 	HeldRecordingChangesSchema,
 } from "./held-recordings.js"
 import type {
 	HeldGuardState,
+	HeldJournalFormat,
 	HeldOverflowState,
 	HeldRecordingChange,
 } from "./held-recordings.js"
@@ -331,7 +332,7 @@ export interface StoreMutation {
 	}
 	/** WG10 req 1.5: each changed owner's merge alias list as written (empty: none left). */
 	aliases?: { id: string; aliases: string[] }[]
-	/** Ownership changes of recordings listed outside their folder's owner (held-recordings.ts). */
+	/** Ownership changes, one per listing of a recording (held-recordings.ts). */
 	heldRecordings?: HeldRecordingChange[]
 	/** The overflow marks of the ownership table as now held (written whole when they change). */
 	heldOverflow?: HeldOverflowState
@@ -341,9 +342,10 @@ export interface StoreMutation {
 	heldGuardEnd?: HeldGuardState
 	/**
 	 * The held-recording journal format (HELD_JOURNAL_FORMAT) on every entry this writer emits;
-	 * only an entry carrying it is trusted to journal every refusal's outcome.
+	 * only an entry carrying it is trusted to journal every refusal's outcome. An earlier marker
+	 * (one holder per file) still loads and replays as held-recordings.ts describes.
 	 */
-	heldFormat?: typeof HELD_JOURNAL_FORMAT
+	heldFormat?: HeldJournalFormat
 }
 
 /**
@@ -396,7 +398,7 @@ export const StoreMutationSchema = z
 		heldOverflow: HeldOverflowSchema.optional(),
 		heldGuard: HeldGuardSchema.optional(),
 		heldGuardEnd: HeldGuardSchema.optional(),
-		heldFormat: z.literal(HELD_JOURNAL_FORMAT).optional(),
+		heldFormat: HeldJournalFormatSchema.optional(),
 	})
 	.strict()
 export type StoreMutationCheck = Assert<

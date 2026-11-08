@@ -3649,7 +3649,12 @@ export class DiscoveryStore
 		let ownerId: string | undefined
 		const aliasIds: string[] = []
 		for (const e of this.heldTable.inFolder(discoveryId)) {
-			if (e.observationId !== observationId || !this.discoveries.has(e.ownerId))
+			// The folder's own listings are no held answer (its strict path answers those).
+			if (
+				e.observationId !== observationId ||
+				e.ownerId === discoveryId ||
+				!this.discoveries.has(e.ownerId)
+			)
 				continue
 			if (ownerId !== undefined && ownerId !== e.ownerId) return null
 			ownerId = e.ownerId
@@ -3826,10 +3831,11 @@ export class DiscoveryStore
 			this.finish("evidence", op)
 			return true
 		}
-		// Only the ownership table still lists it (its observation left the window).
-		const held = this.heldTable.get(recordingId)
-		const d = held && this.discoveries.get(held.ownerId)
-		if (held === undefined || d === undefined) return false
+		// Only the ownership table still lists it (its observations left the window).
+		const d = this.heldRecordingHolders(recordingId)
+			.map(id => this.discoveries.get(id))
+			.find(x => x !== undefined)
+		if (d === undefined) return false
 		this.heldTable.drop(recordingId)
 		d.evidence.recordings = Math.max(0, d.evidence.recordings - 1)
 		const op = newOp()
@@ -3890,47 +3896,96 @@ export class DiscoveryStore
 	}
 
 	/**
-	 * Records the storage ownership of every recording `o` lists outside its discovery's own
-	 * folder (a split twin's file, or a merged discovery's file in an alias folder) in the
-	 * HeldRecordingTable, so it outlives the observation window. A listing back in the
-	 * discovery's own folder ends an entry the observation's id made.
+	 * Records every listing of `o` the HeldRecordingTable keeps, so it outlives the observation
+	 * window: each recording `o` lists outside its discovery's own folder (a split twin's file, a
+	 * merged discovery's file in an alias folder), and each it lists in its own folder whose file
+	 * another listing already holds (the folder's discovery is then one of the file's holders).
+	 * The entry is keyed by `o`, so a moved observation re-points its own listing only. A listing
+	 * back in the discovery's own folder of a file nobody else holds ends `o`'s entry.
 	 */
 	private noteListings(o: Observation): void {
 		for (const rid of o.recordingIds) {
 			const parts = splitRecordingId(rid)
 			if (parts === null) continue
-			if (parts.folderId !== o.discoveryId)
-				this.heldTable.hold(rid, o.discoveryId, o.id)
-			else if (this.heldTable.get(rid)?.observationId === o.id)
-				this.heldTable.drop(rid)
+			if (parts.folderId !== o.discoveryId) {
+				const fresh = !this.heldTable.has(rid)
+				if (this.heldTable.hold(rid, o.discoveryId, o.id) && fresh)
+					this.noteFolderListings(rid, parts.folderId)
+				continue
+			}
+			const others = this.heldTable
+				.listingsOf(rid)
+				.some(e => e.observationId !== o.id)
+			if (others) this.heldTable.hold(rid, o.discoveryId, o.id)
+			else this.heldTable.release(rid, o.id)
 		}
 	}
 
 	/**
-	 * The deleters' answer: the live discovery that lists `recordingId` outside its folder's
-	 * owner. Null (fail closed) whenever the folder is marked (HeldRecordingTable.overflowed),
-	 * checked first, before any listed owner: a live discovery may list a recording there the
-	 * table could not record, so no delete path reaches any recording file of that folder and
-	 * retention keeps it. Undefined when nobody else lists it (a text that is no recording id is
-	 * never listed; EvidenceStore checks the folder mark for every file itself).
+	 * A file just gained its first held listing: the listings of its folder's own discovery still
+	 * in the window become entries too, so that discovery stays one of its holders once they age
+	 * out. Bounded by the window (OBSERVATIONS_PER_DISCOVERY observations).
 	 */
-	heldRecordingOwner(recordingId: string): string | null | undefined {
-		const folderId = splitRecordingId(recordingId)?.folderId
-		if (folderId !== undefined && this.heldTable.overflowed(folderId))
-			return null
-		return this.heldRecordingHolder(recordingId)
+	private noteFolderListings(rid: string, folderId: string): void {
+		for (const o of this.byDiscovery.get(folderId) ?? [])
+			if (o.recordingIds.includes(rid)) this.heldTable.hold(rid, folderId, o.id)
 	}
 
 	/**
-	 * The playback answer: the live discovery the table records as listing `recordingId` outside
-	 * its folder's owner, whatever the folder's mark (admission, never deletion). Undefined when
-	 * none.
+	 * The deleters' answer, asked in the same synchronous turn as an unlink: every live discovery
+	 * the table records as listing `recordingId` (sorted; the folder's own discovery included
+	 * when it lists the file and another listing exists). Empty when the table holds no listing
+	 * of it: the file follows its folder's owner. Null (fail closed) whenever the folder is marked
+	 * (HeldRecordingTable.overflowed), checked first: a live discovery may list a recording there
+	 * the table could not record, so no delete path reaches any recording file of that folder and
+	 * retention keeps it. A text that is no recording id is never listed (empty).
+	 */
+	heldRecordingListers(recordingId: string): readonly string[] | null {
+		const folderId = splitRecordingId(recordingId)?.folderId
+		if (folderId === undefined) return []
+		if (this.heldTable.overflowed(folderId)) return null
+		return this.heldRecordingHolders(recordingId)
+	}
+
+	/**
+	 * Every live discovery the table records as listing `recordingId`, whatever the folder's
+	 * mark (playback admission, never a delete decision). Sorted; empty when none.
+	 */
+	heldRecordingHolders(recordingId: string): string[] {
+		return this.heldTable
+			.holders(recordingId)
+			.filter(id => this.discoveries.has(id))
+	}
+
+	/**
+	 * One listing discovery other than the folder's own (null when the folder is marked,
+	 * undefined when there is none): the single answer of the lookups that predate
+	 * `heldRecordingListers`. Deleters ask for every lister (`heldRecordingListers`).
+	 */
+	heldRecordingOwner(recordingId: string): string | null | undefined {
+		const listers = this.heldRecordingListers(recordingId)
+		if (listers === null) return null
+		return this.otherThanFolderOwner(recordingId, listers)
+	}
+
+	/**
+	 * The playback answer of the lookups that predate `heldRecordingHolders`: one live discovery
+	 * other than the folder's own listing `recordingId`, whatever the folder's mark.
 	 */
 	heldRecordingHolder(recordingId: string): string | undefined {
-		const owner = this.heldTable.get(recordingId)?.ownerId
-		return owner !== undefined && this.discoveries.has(owner)
-			? owner
-			: undefined
+		return this.otherThanFolderOwner(
+			recordingId,
+			this.heldRecordingHolders(recordingId),
+		)
+	}
+
+	/** The first lister that is not the folder's own discovery (a self listing). */
+	private otherThanFolderOwner(
+		recordingId: string,
+		listers: readonly string[],
+	): string | undefined {
+		const folderId = splitRecordingId(recordingId)?.folderId
+		return listers.find(id => id !== folderId)
 	}
 
 	/**
@@ -3993,19 +4048,39 @@ export class DiscoveryStore
 				if (gone && this.heldTable.releaseOverflow(id)) released++
 			}
 		let dropped = 0
+		let repointed = 0
 		for (const e of this.heldTable.entries()) {
 			let keep = this.discoveries.has(e.ownerId)
+			// A listing whose observation is still in the window follows it: gone when it no longer
+			// lists the file (a stale entry an earlier format left), re-pointed when it moved.
+			const o = this.observationIndex.get(e.observationId)
+			if (keep && o !== undefined && !o.recordingIds.includes(e.id))
+				keep = false
 			if (keep)
 				try {
 					keep = exists(e.id)
 				} catch {
 					keep = true
 				}
-			if (keep) continue
-			this.heldTable.drop(e.id)
-			dropped++
+			if (!keep) {
+				this.heldTable.release(e.id, e.observationId)
+				dropped++
+			} else if (o !== undefined && o.discoveryId !== e.ownerId) {
+				this.heldTable.hold(e.id, o.discoveryId, o.id)
+				repointed++
+			}
 		}
-		if (dropped > 0 || released > 0) this.finish("evidence", newOp())
+		// A file whose only holder is its folder's own discovery follows that discovery anyway.
+		for (const id of new Set(this.heldTable.entries().map(e => e.id))) {
+			const folderId = splitRecordingId(id)?.folderId
+			const holders = this.heldTable.holders(id)
+			if (holders.length === 1 && holders[0] === folderId) {
+				dropped += this.heldTable.listingsOf(id).length
+				this.heldTable.drop(id)
+			}
+		}
+		if (dropped > 0 || released > 0 || repointed > 0)
+			this.finish("evidence", newOp())
 		return dropped
 	}
 
@@ -7920,7 +7995,7 @@ export class DiscoveryStore
 		// replace of the marks never touches an open guard or a replay safety mark, so interleaved
 		// sequences keep theirs.
 		if (m.heldGuard !== undefined) this.heldTable.openGuard(m.heldGuard)
-		this.heldTable.apply(m.heldRecordings ?? [])
+		this.heldTable.apply(m.heldRecordings ?? [], m.heldFormat)
 		if (m.heldOverflow !== undefined) this.heldTable.setOverflow(m.heldOverflow)
 		if (m.heldGuardEnd !== undefined) this.heldTable.closeGuard(m.heldGuardEnd)
 		// A replayed record's journaled receiver-spur flag, as of this entry.

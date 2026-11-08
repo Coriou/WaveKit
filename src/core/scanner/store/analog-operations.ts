@@ -266,10 +266,10 @@ interface Context {
 	 */
 	heldUnknown?: (folderId: string) => boolean
 	/**
-	 * The live discovery the ownership table records as listing `name` of `folderId` (null: the
-	 * folder is marked, owner unknown; undefined: nobody else lists it).
+	 * Every live discovery the ownership table records as listing `name` of `folderId` (null:
+	 * the folder is marked, its listers are unknown; empty: the table holds no listing).
 	 */
-	listedOwner?: (folderId: string, name: string) => string | null | undefined
+	listers?: (folderId: string, name: string) => readonly string[] | null
 }
 interface Inventory {
 	bytes: number
@@ -1534,10 +1534,13 @@ export class AnalogOperations {
 				intent.observationId,
 				intent.binding,
 			)
-			// A marked folder (the ownership table was full) keeps every file: never cleaned here.
+			// A marked folder (the ownership table was full) keeps every file, and a file anyone
+			// lists is theirs: never cleaned here.
+			const listers = this.listersOf(intent)
 			if (
 				association?.aliasIds.includes(intent.alias) ||
-				this.heldUnknown(intent.discoveryId)
+				listers === null ||
+				listers.length > 0
 			)
 				return result("quarantined", "recovery-ambiguous")
 			try {
@@ -1646,50 +1649,46 @@ export class AnalogOperations {
 		})
 	}
 	/**
-	 * The live discovery that owns this intent's committed file, when it is not one of `removing`:
-	 * after a co-channel split the file stays in the folder it was written to, and the twin whose
-	 * observation lists it owns it (DiscoveryStore.recordingAssociation). No deleter of that
-	 * folder may reach it. Undefined when nobody else lists it. Null (fail closed) whenever the
-	 * folder is marked (the ownership table was full), checked first, before any association: a
-	 * live discovery may list the file unrecorded, so its owner is unknown and it is kept.
+	 * A live discovery other than the folder's own and outside `removing` that lists this
+	 * intent's committed file (any of them; undefined when none): after a co-channel split the
+	 * file stays in the folder it was written to, and the twin whose observation lists it holds
+	 * it (DiscoveryStore.recordingAssociation); several may list one file. No deleter of that
+	 * folder may reach it. Null (fail closed) whenever the listers are unknown (`listersOf`).
 	 */
 	private heldElsewhere(
 		intent: Intent,
 		removing: readonly string[],
 	): string | null | undefined {
-		if (this.heldUnknown(intent.discoveryId)) return null
-		// A listing the ownership table records (any observation, not only the association's).
-		const listed = this.listedOwner(intent)
-		if (listed === null) return null
-		if (
-			listed !== undefined &&
-			listed !== intent.discoveryId &&
-			!removing.includes(listed) &&
-			this.context.admits(listed)
+		const listers = this.listersOf(intent)
+		if (listers === null) return null
+		return listers.find(
+			id => id !== intent.discoveryId && !removing.includes(id),
 		)
-			return listed
-		const association = this.context.adapter.association(
-			intent.discoveryId,
-			intent.observationId,
-			intent.binding,
-		)
-		if (!association?.aliasIds.includes(intent.alias)) return undefined
-		const owner = association.ownerId ?? intent.discoveryId
-		if (
-			owner === intent.discoveryId ||
-			removing.includes(owner) ||
-			!this.context.admits(owner)
-		)
-			return undefined
-		return owner
 	}
-	/** Fail closed: a throwing lookup answers "unknown owner" (null). */
-	private listedOwner(intent: Intent): string | null | undefined {
+	/**
+	 * Every live discovery listing this intent's committed file: the ownership table's listers
+	 * and the owner of the intent's association when it lists the alias (the folder's own
+	 * discovery when its observation still holds it). Null (fail closed) when the folder is
+	 * marked (checked first: a live discovery may list the file unrecorded) or a lookup throws.
+	 */
+	private listersOf(intent: Intent): string[] | null {
+		if (this.heldUnknown(intent.discoveryId)) return null
 		try {
 			const name = intent.artifact.split("/").at(-1)
-			return name === undefined
-				? undefined
-				: this.context.listedOwner?.(intent.discoveryId, name)
+			const table =
+				name === undefined
+					? []
+					: (this.context.listers?.(intent.discoveryId, name) ?? [])
+			if (table === null) return null
+			const out = new Set(table)
+			const association = this.context.adapter.association(
+				intent.discoveryId,
+				intent.observationId,
+				intent.binding,
+			)
+			if (association?.aliasIds.includes(intent.alias))
+				out.add(association.ownerId ?? intent.discoveryId)
+			return [...out]
 		} catch {
 			return null
 		}
@@ -1977,26 +1976,18 @@ export class AnalogOperations {
 		let unresolved = 0
 		let unknownHeld = 0
 		for (const intent of [...this.inventory.intents.values()]) {
-			// An operator keep of the discovery owning the file (a split twin) protects it too.
-			const owner = this.heldElsewhere(intent, [])
-			// An owner that is unknown (the ownership table was full): kept, never unkept.
-			if (owner === null) {
+			const hold = this.retentionHold(intent, keep)
+			// An unknown lister (the ownership table was full): kept, never unkept.
+			if (hold === "unknown") {
 				unknownHeld++
 				continue
 			}
-			// A file no live discovery owns (its folder's and no listing) is kept, never unkept.
-			if (owner === undefined && !this.context.admits(intent.discoveryId)) {
+			// A folder no live discovery owns: kept, never unkept.
+			if (hold === "unresolved") {
 				unresolved++
 				continue
 			}
-			if (
-				keep.has(intent.discoveryId) ||
-				(owner !== undefined && keep.has(owner)) ||
-				this.closureUncertain(intent.operationId) ||
-				this.protectedDiscovery(intent.discoveryId) ||
-				this.keptArtifact(intent)
-			)
-				continue
+			if (hold) continue
 			let old = false
 			try {
 				old = now - (await lstat(this.finalPath(intent))).mtimeMs > maxAgeMs
@@ -2009,19 +2000,10 @@ export class AnalogOperations {
 					this.context.limits().maxBytes
 			)
 				continue
-			// The pass's decision, asked again before the retire and in the media unlink's turn: a
-			// split, a mark, a keep or an unresolved folder since keeps the file.
-			const decided = owner
-			const stillRetirable = (): boolean => {
-				const current = this.heldElsewhere(intent, [])
-				if (current !== decided) return false
-				if (current === undefined && !this.context.admits(intent.discoveryId))
-					return false
-				return (
-					!keep.has(intent.discoveryId) &&
-					(current === undefined || !keep.has(current))
-				)
-			}
+			// The whole policy again before the retire and in the media unlink's own turn: a
+			// listing, a mark, a keep or an unresolved folder since keeps the file.
+			const stillRetirable = (): boolean =>
+				this.retentionHold(intent, keep) === false
 			if (!stillRetirable()) continue
 			try {
 				await this.retire(intent, deleted, stillRetirable)
@@ -2034,6 +2016,30 @@ export class AnalogOperations {
 		this.unresolvedRetained = unresolved
 		this.unknownHeldRetained = unknownHeld
 		return deleted
+	}
+	/**
+	 * Retention's policy for one artifact, synchronous so it can run in the media unlink's turn:
+	 * `unknown` (its listers are unknown) and `unresolved` (no live discovery owns its folder)
+	 * keep it, counted; true keeps it; false lets age or the quota remove it. A file the ownership
+	 * table or its association records listers for follows them (the folder's own discovery only
+	 * when it is one of them): kept while any lister is kept. Any other follows its folder's
+	 * owner (`keep` holds alias folders of a kept survivor too).
+	 */
+	private retentionHold(
+		intent: Intent,
+		keep: ReadonlySet<string>,
+	): "unknown" | "unresolved" | boolean {
+		const listers = this.listersOf(intent)
+		if (listers === null) return "unknown"
+		if (!this.context.admits(intent.discoveryId)) return "unresolved"
+		if (
+			this.closureUncertain(intent.operationId) ||
+			this.protectedDiscovery(intent.discoveryId) ||
+			this.keptArtifact(intent)
+		)
+			return true
+		if (listers.length === 0) return keep.has(intent.discoveryId)
+		return listers.some(id => keep.has(id) || !this.context.admits(id))
 	}
 	private async retire(
 		intent: Intent,

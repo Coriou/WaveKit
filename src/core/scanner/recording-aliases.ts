@@ -37,14 +37,24 @@ export interface DiscoveryAliasLookup {
 		removing: readonly string[],
 	): ReadonlySet<string>
 	/**
-	 * The deleters' answer: the live discovery listing `recordingId` outside its folder's owner;
-	 * null whenever the folder is marked overflowed (checked before any listed owner: one may
-	 * list it unrecorded, fail closed, keep the file).
+	 * The deleters' answer: every live discovery the ownership table records as listing
+	 * `recordingId` (the folder's own discovery included when it lists the file itself and
+	 * another listing exists); empty when none (the file follows its folder's owner); null
+	 * whenever the folder is marked overflowed (one may list it unrecorded: fail closed, keep the
+	 * file). Asked in the same synchronous turn as each unlink.
+	 */
+	heldRecordingListers?(recordingId: string): readonly string[] | null
+	/** Playback: every live discovery recorded as listing `recordingId`, whatever the mark. */
+	heldRecordingHolders?(recordingId: string): readonly string[]
+	/**
+	 * The single answer of earlier lookups (used only without `heldRecordingListers`): one live
+	 * discovery listing `recordingId` outside its folder's owner; null whenever the folder is
+	 * marked overflowed (checked before any listed owner: fail closed, keep the file).
 	 */
 	heldRecordingOwner?(recordingId: string): string | null | undefined
 	/**
-	 * The playback answer: the live discovery recorded as listing `recordingId` outside its
-	 * folder's owner, whatever the folder's mark (admission only, never a delete decision).
+	 * The single playback answer of earlier lookups (used only without `heldRecordingHolders`):
+	 * one live discovery listing `recordingId` outside its folder's owner, whatever the mark.
 	 */
 	heldRecordingHolder?(recordingId: string): string | undefined
 	/**

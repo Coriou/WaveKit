@@ -1,25 +1,38 @@
 /**
- * Storage ownership of recordings a discovery lists in another discovery's folder (a co-channel
- * split moved the observation, or a merge made that folder an alias; the file stayed where it
- * was written). The observation window is
- * bounded (OBSERVATIONS_PER_DISCOVERY), so a listing can age out of it; this table keeps the
- * ownership independently of the window: an entry is made whenever an observation lists a
- * recording outside its discovery's own folders, and it lasts until the recording is forgotten,
- * the owner is deleted, or the file is gone from disk (maintenance prune). A merge moves the
- * owner's entries to the survivor. Persisted in the snapshot and journaled as changes, so it
- * survives a snapshot, a restart and a replay. Every kind (analog, digital) is covered: the key
- * is the recording id `<folderId>~<file>`.
+ * Storage ownership of recordings listed by more than their folder's own discovery (a co-channel
+ * split moved the observation, a merge made that folder an alias, or several observations list
+ * one file; the file stays where it was written). The observation window is bounded
+ * (OBSERVATIONS_PER_DISCOVERY), so a listing can age out of it; this table keeps every listing
+ * independently of the window.
  *
- * Bound: one entry per recording file listed outside its folder's owner, at most
- * HELD_RECORDINGS_MAX (65,536; about 150 B each in memory, under 10 MiB). At the bound a new
- * entry is refused, and the refusal fails closed: the folder of the refused recording is marked
- * overflowed (`overflowed`), and while it is, every recording file in that folder counts as held
- * by an unknown live discovery. No delete path of the folder's own discovery (delete, prune,
- * evict, fold) reaches those files, and retention keeps them (counted), because the owner whose
- * policy they follow is unknown. At most HELD_OVERFLOW_FOLDERS_MAX (4,096) folders are marked one
- * by one; past that every folder counts as overflowed (`all`). The marks are persisted and
- * journaled like the entries; a folder's mark ends only when the folder is gone from disk, `all`
- * never ends by itself.
+ * Model: one entry per listing, keyed by the recording id `<folderId>~<file>` and the
+ * observation that lists it, naming the live discovery that observation belongs to (`ownerId`,
+ * the holder). A file's holders are the distinct holders of its entries: every live discovery
+ * that lists it, the folder's own discovery included once the file has any other holder (so the
+ * folder's discovery counts only when it lists the file itself). An entry is made whenever an
+ * observation lists a recording outside its discovery's own folder, and for every listing in the
+ * folder's own discovery of a file that already has an entry. It lasts until the file is
+ * forgotten (deleted), its holder is deleted (only that holder's entries go, never the file's
+ * other entries), the observation moves (the entry follows it) or the file is gone from disk
+ * (maintenance prune). A merge moves the dropped discovery's entries to the survivor. Persisted in
+ * the snapshot and journaled as changes, so it survives a snapshot, a restart and a replay. Every
+ * kind (analog, digital) is covered.
+ *
+ * Earlier state: an entry written by an earlier format (one holder per file) is one listing of
+ * the new shape, so a snapshot loads as is. A journaled change of an earlier format
+ * (HELD_JOURNAL_FORMAT below 3) re-pointed or dropped the file's single entry; replayed, a hold
+ * adds its listing and a drop removes nothing (fail closed: a stale listing keeps the file until
+ * the maintenance prune finds its file gone, its holder gone or its observation no longer listing
+ * it).
+ *
+ * Bound: at most HELD_RECORDINGS_MAX (65,536) entries (about 200 B each in memory, under
+ * 16 MiB). At the bound a new entry is refused, and the refusal fails closed: the folder of the
+ * refused recording is marked overflowed (`overflowed`), and while it is, every recording file in
+ * that folder counts as held by an unknown live discovery. No delete path reaches those files,
+ * and retention keeps them (counted), because the holders whose policy they follow are unknown.
+ * At most HELD_OVERFLOW_FOLDERS_MAX (4,096) folders are marked one by one; past that every folder
+ * counts as overflowed (`all`). The marks are persisted and journaled like the entries; a
+ * folder's mark ends only when the folder is gone from disk, `all` never ends by itself.
  *
  * Journal bound: one entry carries at most HELD_RECORDING_CHANGES_MAX changes. A larger change
  * set (a consolidation group that drops and adds many) is split over several journal entries by
@@ -56,24 +69,34 @@ export const HELD_OVERFLOW_FOLDERS_MAX = 4096
 export const HELD_OPEN_GUARDS_MAX = 64
 /**
  * The format marker (`heldFormat`) on every journal entry this writer emits: such an entry
- * journals the outcome of every refusal (the change, or the mark), so a replay trusts it. An
- * entry without it (an earlier format, which journaled held changes but no overflow marks) is
- * never trusted: a refusal its replay re-derives marks the folder.
+ * journals one change per listing (recording id and observation) and the outcome of every
+ * refusal (the change, or the mark), so a replay trusts it. An entry without it, or with an
+ * earlier marker (HELD_JOURNAL_FORMAT_SINGLE: one holder per file), is never trusted: a refusal
+ * its replay re-derives marks the folder, and its changes replay as described above.
  */
-export const HELD_JOURNAL_FORMAT = 2
+export const HELD_JOURNAL_FORMAT = 3
+/** The earlier marker: entries that journaled one holder per file, and their overflow marks. */
+export const HELD_JOURNAL_FORMAT_SINGLE = 2
+/** The markers a journal entry may carry (older ones still load). */
+export type HeldJournalFormat =
+	| typeof HELD_JOURNAL_FORMAT_SINGLE
+	| typeof HELD_JOURNAL_FORMAT
 
 const RECORDING = /^(d_[0-9A-Za-z]+)~([A-Za-z0-9_.-]+\.wav)$/
 
 export interface HeldRecordingEntry {
 	/** The recording id, `<folderId>~<file>`. */
 	id: string
-	/** The live discovery that lists it. */
+	/** The live discovery the listing observation belongs to (the holder). */
 	ownerId: string
-	/** The observation that listed it (the analog recovery association key). */
+	/** The observation that lists it (the analog recovery association key). */
 	observationId: string
 }
 
-/** One journaled change: the entry as now held, or `ownerId: null` when it was dropped. */
+/**
+ * One journaled change: the listing (`id`, `observationId`) as now held, or `ownerId: null` when
+ * it was dropped. Earlier formats wrote a drop without `observationId` (the file's only entry).
+ */
 export interface HeldRecordingChange {
 	id: string
 	ownerId: string | null
@@ -130,6 +153,10 @@ export const HeldRecordingsSchema = z
 export const HeldRecordingChangesSchema = z
 	.array(HeldRecordingChangeSchema)
 	.max(HELD_RECORDING_CHANGES_MAX)
+export const HeldJournalFormatSchema = z.union([
+	z.literal(HELD_JOURNAL_FORMAT_SINGLE),
+	z.literal(HELD_JOURNAL_FORMAT),
+])
 export const HeldOverflowSchema = z
 	.object({
 		folders: z.array(DiscoveryIdSchema).max(HELD_OVERFLOW_FOLDERS_MAX),
@@ -190,15 +217,38 @@ export function splitRecordingId(
 
 const compareId = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
 
+/** One listing, held as one record so its key is built (and hashed) once. */
+interface Listing {
+	readonly id: string
+	readonly observationId: string
+	ownerId: string
+}
+
+/** A change since the last take: the listing, and whether it was held at that take. */
+interface Touched {
+	readonly id: string
+	readonly observationId: string
+	readonly wasHeld: boolean
+}
+
 export class HeldRecordingTable {
-	private readonly byId = new Map<string, HeldRecordingEntry>()
-	private readonly byFolder = new Map<string, Set<string>>()
-	private readonly byOwner = new Map<string, Set<string>>()
 	/**
-	 * Ids changed since the last take (journaled with the next store entry), each with whether it
-	 * was held at that take.
+	 * Per recording id: its one listing, or its listings by observation id (most files have one,
+	 * held without a map of their own).
 	 */
-	private readonly touched = new Map<string, boolean>()
+	private readonly byId = new Map<string, Listing | Map<string, Listing>>()
+	private count = 0
+	private readonly byFolder = new Map<string, Set<string>>()
+	/** Per holder: its listings. */
+	private readonly byOwner = new Map<string, Set<Listing>>()
+	/**
+	 * Listings changed since the last take (journaled with the next store entry), by recording
+	 * id then observation id, each with whether it was held at that take.
+	 */
+	private readonly touched = new Map<string, Map<string, Touched>>()
+	private touchedCount = 0
+	/** False while a restore or a replayed change set is applied (nothing to journal). */
+	private tracking = true
 	/** Entries refused at the bound since the last `takeRefused`. */
 	private refused = 0
 	/** Folders with a refused entry (fail closed: their recordings count as held). */
@@ -239,13 +289,14 @@ export class HeldRecordingTable {
 	 */
 	private refusals: "runtime" | "quiet" | "safety" = "runtime"
 
+	/** Entries (listings) held. */
 	get size(): number {
-		return this.byId.size
+		return this.count
 	}
 
 	/** Changes not yet journaled (entries, and the overflow marks). */
 	get pendingChanges(): number {
-		return this.touched.size + (this.overflowDirty ? 1 : 0)
+		return this.touchedCount + (this.overflowDirty ? 1 : 0)
 	}
 
 	/**
@@ -399,109 +450,207 @@ export class HeldRecordingTable {
 		this.overflowDirty = true
 	}
 
-	private touch(id: string, wasHeld: boolean): void {
-		if (!this.touched.has(id)) this.touched.set(id, wasHeld)
+	private touch(id: string, observationId: string, wasHeld: boolean): void {
+		if (!this.tracking) return
+		let m = this.touched.get(id)
+		if (m === undefined) this.touched.set(id, (m = new Map()))
+		if (m.has(observationId)) return
+		m.set(observationId, { id, observationId, wasHeld })
+		this.touchedCount++
 	}
 
-	get(id: string): HeldRecordingEntry | undefined {
-		return this.byId.get(id)
+	/** True when the table holds any listing of `id`. */
+	has(id: string): boolean {
+		return this.byId.has(id)
 	}
 
-	/** The entries of one folder (any owner). */
+	/** The holder of one listing; undefined when the table does not hold it. */
+	holderOf(id: string, observationId: string): string | undefined {
+		return this.listing(id, observationId)?.ownerId
+	}
+
+	private listing(id: string, observationId: string): Listing | undefined {
+		const v = this.byId.get(id)
+		if (v === undefined || v instanceof Map) return v?.get(observationId)
+		return v.observationId === observationId ? v : undefined
+	}
+
+	private listingsIn(id: string): readonly Listing[] {
+		const v = this.byId.get(id)
+		if (v === undefined) return []
+		return v instanceof Map ? [...v.values()] : [v]
+	}
+
+	/** The distinct holders of `id`, sorted (empty when the table holds no listing of it). */
+	holders(id: string): string[] {
+		const v = this.byId.get(id)
+		if (v === undefined) return []
+		if (!(v instanceof Map)) return [v.ownerId]
+		const out = new Set<string>()
+		for (const l of v.values()) out.add(l.ownerId)
+		return [...out].sort(compareId)
+	}
+
+	/** The listings of `id`. */
+	listingsOf(id: string): HeldRecordingEntry[] {
+		return this.listingsIn(id).map(l => ({
+			id,
+			ownerId: l.ownerId,
+			observationId: l.observationId,
+		}))
+	}
+
+	/** The listings of one folder's files (any holder). */
 	inFolder(folderId: string): HeldRecordingEntry[] {
 		const ids = this.byFolder.get(folderId)
 		if (ids === undefined) return []
 		const out: HeldRecordingEntry[] = []
-		for (const id of ids) {
-			const e = this.byId.get(id)
-			if (e !== undefined) out.push(e)
-		}
+		for (const id of ids) out.push(...this.listingsOf(id))
 		return out
 	}
 
+	/** The recording ids `ownerId` holds a listing of. */
 	ownedBy(ownerId: string): string[] {
-		return [...(this.byOwner.get(ownerId) ?? [])]
+		const listings = this.byOwner.get(ownerId)
+		if (listings === undefined) return []
+		return [...new Set([...listings].map(l => l.id))]
 	}
 
 	/**
-	 * Records (or re-points) one entry. False at the bound: the entry is refused and its folder is
+	 * Records (or re-points) the listing of `id` by `observationId`, now held by `ownerId` (the
+	 * folder's own discovery included). False at the bound: the entry is refused and its folder is
 	 * marked overflowed (fail closed, see the bound above).
 	 */
 	hold(id: string, ownerId: string, observationId: string): boolean {
-		const parts = splitRecordingId(id)
-		if (parts === null || parts.folderId === ownerId) return false
-		const previous = this.byId.get(id)
-		if (
-			previous !== undefined &&
-			previous.ownerId === ownerId &&
-			previous.observationId === observationId
-		)
+		const v = this.byId.get(id)
+		const previous =
+			v === undefined
+				? undefined
+				: v instanceof Map
+					? v.get(observationId)
+					: v.observationId === observationId
+						? v
+						: undefined
+		if (previous !== undefined) {
+			if (previous.ownerId === ownerId) return true
+			this.touch(id, observationId, true)
+			this.unindexOwner(previous)
+			previous.ownerId = ownerId
+			this.indexOwner(previous)
 			return true
-		if (previous === undefined && this.byId.size >= HELD_RECORDINGS_MAX) {
+		}
+		// Only a recording id is held (the id of a listed file already is one).
+		const folderId =
+			v === undefined ? splitRecordingId(id)?.folderId : undefined
+		if (v === undefined && folderId === undefined) return false
+		if (this.count >= HELD_RECORDINGS_MAX) {
 			if (this.refusals === "quiet") return false
+			const marked = folderId ?? splitRecordingId(id)?.folderId
+			if (marked === undefined) return false
 			this.refused++
-			if (this.refusals === "safety") this.markSafety(parts.folderId)
-			else this.markOverflow(parts.folderId)
+			if (this.refusals === "safety") this.markSafety(marked)
+			else this.markOverflow(marked)
 			return false
 		}
-		this.touch(id, previous !== undefined)
-		if (previous !== undefined) this.unindex(previous)
-		const entry = { id, ownerId, observationId }
-		this.byId.set(id, entry)
-		this.index(entry, parts.folderId)
+		this.touch(id, observationId, false)
+		const listing: Listing = { id, observationId, ownerId }
+		if (v === undefined) {
+			this.byId.set(id, listing)
+			if (folderId !== undefined) {
+				let f = this.byFolder.get(folderId)
+				if (f === undefined) this.byFolder.set(folderId, (f = new Set()))
+				f.add(id)
+			}
+		} else if (v instanceof Map) v.set(observationId, listing)
+		else
+			this.byId.set(
+				id,
+				new Map([
+					[v.observationId, v],
+					[observationId, listing],
+				]),
+			)
+		this.count++
+		this.indexOwner(listing)
 		return true
 	}
 
-	drop(id: string): void {
-		const previous = this.byId.get(id)
-		if (previous === undefined) return
-		this.touch(id, true)
-		this.unindex(previous)
-		this.byId.delete(id)
-	}
-
-	/** A merge: every entry of `from` now belongs to `to` (an entry in `to`'s own folder goes). */
-	moveOwner(from: string, to: string): void {
-		for (const id of this.ownedBy(from)) {
-			const e = this.byId.get(id)
-			if (e === undefined) continue
-			if (splitRecordingId(id)?.folderId === to) this.drop(id)
-			else this.hold(id, to, e.observationId)
+	/** Drops one listing (the file's other listings stay). */
+	release(id: string, observationId: string): void {
+		const v = this.byId.get(id)
+		const previous = this.listing(id, observationId)
+		if (v === undefined || previous === undefined) return
+		this.touch(id, observationId, true)
+		this.unindexOwner(previous)
+		this.count--
+		if (!(v instanceof Map)) {
+			this.forgetId(id)
+			return
 		}
+		v.delete(observationId)
+		const [only, more] = v.values()
+		if (only !== undefined && more === undefined) this.byId.set(id, only)
 	}
 
+	/** Drops every listing of `id` (the file was deleted, or is gone from disk). */
+	drop(id: string): void {
+		for (const l of this.listingsIn(id)) this.release(id, l.observationId)
+	}
+
+	/**
+	 * A merge: every listing `from` holds is now held by `to` (the file's others stay). A file in
+	 * `to`'s own folder that only `to` lists now follows `to` anyway: its listings go.
+	 */
+	moveOwner(from: string, to: string): void {
+		if (from === to) return
+		const ids = new Set<string>()
+		for (const l of [...(this.byOwner.get(from) ?? [])]) {
+			// A re-point: never refused at the bound.
+			this.hold(l.id, to, l.observationId)
+			ids.add(l.id)
+		}
+		for (const id of ids)
+			if (
+				splitRecordingId(id)?.folderId === to &&
+				this.holders(id).every(h => h === to)
+			)
+				this.drop(id)
+	}
+
+	/** A deleted holder: only its own listings go, never a listing another discovery holds. */
 	dropOwner(ownerId: string): void {
-		for (const id of this.ownedBy(ownerId)) this.drop(id)
+		for (const l of [...(this.byOwner.get(ownerId) ?? [])])
+			this.release(l.id, l.observationId)
 	}
 
 	/**
 	 * Journal changes since the last call, in chunks of at most HELD_RECORDING_CHANGES_MAX: the
-	 * re-pointed entries, then the dropped ones, then the added ones (each sorted by id), so a
-	 * replay in that order never holds more than HELD_RECORDINGS_MAX. An id added and dropped
-	 * since the last call is no change. Empty when nothing changed.
+	 * re-pointed listings, then the dropped ones, then the added ones (each sorted by recording
+	 * id, then observation id), so a replay in that order never holds more than
+	 * HELD_RECORDINGS_MAX. A listing added and dropped since the last call is no change. Empty
+	 * when nothing changed.
 	 */
 	takeChangeChunks(): HeldRecordingChange[][] {
-		if (this.touched.size === 0) return []
-		const repointed: string[] = []
-		const dropped: string[] = []
-		const added: string[] = []
-		for (const [id, wasHeld] of this.touched) {
-			const held = this.byId.has(id)
-			if (wasHeld && held) repointed.push(id)
-			else if (wasHeld) dropped.push(id)
-			else if (held) added.push(id)
+		if (this.touchedCount === 0) return []
+		const repointed: HeldRecordingChange[] = []
+		const dropped: HeldRecordingChange[] = []
+		const added: HeldRecordingChange[] = []
+		for (const id of [...this.touched.keys()].sort(compareId)) {
+			const changes = this.touched.get(id)
+			if (changes === undefined) continue
+			for (const t of [...changes.values()].sort((a, b) =>
+				compareId(a.observationId, b.observationId),
+			)) {
+				const ownerId = this.listing(id, t.observationId)?.ownerId ?? null
+				const change = { id, ownerId, observationId: t.observationId }
+				if (t.wasHeld && ownerId !== null) repointed.push(change)
+				else if (t.wasHeld) dropped.push(change)
+				else if (ownerId !== null) added.push(change)
+			}
 		}
 		this.touched.clear()
-		const ordered = [
-			...repointed.sort(compareId),
-			...dropped.sort(compareId),
-			...added.sort(compareId),
-		].map((id): HeldRecordingChange => {
-			const e = this.byId.get(id)
-			return e === undefined
-				? { id, ownerId: null }
-				: { id, ownerId: e.ownerId, observationId: e.observationId }
-		})
+		this.touchedCount = 0
+		const ordered = [...repointed, ...dropped, ...added]
 		const chunks: HeldRecordingChange[][] = []
 		for (let i = 0; i < ordered.length; i += HELD_RECORDING_CHANGES_MAX)
 			chunks.push(ordered.slice(i, i + HELD_RECORDING_CHANGES_MAX))
@@ -561,6 +710,7 @@ export class HeldRecordingTable {
 	/** Discards the changes and overflow-mark changes not yet journaled (a restore derived them). */
 	discardChanges(): void {
 		this.touched.clear()
+		this.touchedCount = 0
 		this.overflowDirty = false
 	}
 
@@ -572,18 +722,30 @@ export class HeldRecordingTable {
 
 	/**
 	 * Replay: the journaled changes as written, drops first (an entry written by an older core
-	 * may interleave them). A hold refused at the bound gives its folder a replay safety mark
-	 * (fail closed; no later replacement of the marks clears it).
+	 * may interleave them). `format`: the entry's marker. This writer's changes name one listing
+	 * each. An earlier format's re-pointed or dropped the file's single entry: a hold adds its
+	 * listing and a drop removes nothing (fail closed, see above). A hold refused at the bound
+	 * gives its folder a replay safety mark (fail closed; no later replacement of the marks
+	 * clears it).
 	 */
-	apply(changes: readonly HeldRecordingChange[]): void {
+	apply(
+		changes: readonly HeldRecordingChange[],
+		format: number | undefined = HELD_JOURNAL_FORMAT,
+	): void {
 		const mode = this.refusals
 		this.refusals = "safety"
-		for (const c of changes)
-			if (c.ownerId === null || c.observationId === undefined) this.drop(c.id)
+		this.tracking = false
+		const pairs = format === HELD_JOURNAL_FORMAT
+		if (pairs)
+			for (const c of changes)
+				if (c.ownerId === null && c.observationId !== undefined)
+					this.release(c.id, c.observationId)
 		for (const c of changes)
 			if (c.ownerId !== null && c.observationId !== undefined)
 				this.hold(c.id, c.ownerId, c.observationId)
+		this.tracking = true
 		this.touched.clear()
+		this.touchedCount = 0
 		this.refusals = mode
 	}
 
@@ -602,26 +764,38 @@ export class HeldRecordingTable {
 		}
 	}
 
+	/** Every listing, sorted by recording id then observation id. */
 	entries(): HeldRecordingEntry[] {
-		return [...this.byId.values()]
-			.sort((a, b) => compareId(a.id, b.id))
-			.map(e => ({ ...e }))
+		const out: HeldRecordingEntry[] = []
+		for (const id of [...this.byId.keys()].sort(compareId))
+			out.push(
+				...this.listingsOf(id).sort((a, b) =>
+					compareId(a.observationId, b.observationId),
+				),
+			)
+		return out
 	}
 
+	/** Restore: the persisted listings (an earlier format's single entries load as listings). */
 	restore(entries: readonly HeldRecordingEntry[]): void {
 		this.clear()
 		const mode = this.refusals
 		this.refusals = "safety"
+		this.tracking = false
 		for (const e of entries) this.hold(e.id, e.ownerId, e.observationId)
+		this.tracking = true
 		this.refusals = mode
 		this.touched.clear()
+		this.touchedCount = 0
 	}
 
 	clear(): void {
 		this.byId.clear()
+		this.count = 0
 		this.byFolder.clear()
 		this.byOwner.clear()
 		this.touched.clear()
+		this.touchedCount = 0
 		this.refused = 0
 		this.overflow.clear()
 		this.overflowAll = false
@@ -631,24 +805,24 @@ export class HeldRecordingTable {
 		this.guards.clear()
 	}
 
-	private index(e: HeldRecordingEntry, folderId: string): void {
-		let f = this.byFolder.get(folderId)
-		if (f === undefined) this.byFolder.set(folderId, (f = new Set()))
-		f.add(e.id)
-		let o = this.byOwner.get(e.ownerId)
-		if (o === undefined) this.byOwner.set(e.ownerId, (o = new Set()))
-		o.add(e.id)
+	private indexOwner(l: Listing): void {
+		let o = this.byOwner.get(l.ownerId)
+		if (o === undefined) this.byOwner.set(l.ownerId, (o = new Set()))
+		o.add(l)
 	}
 
-	private unindex(e: HeldRecordingEntry): void {
-		const folderId = splitRecordingId(e.id)?.folderId
-		if (folderId !== undefined) {
-			const f = this.byFolder.get(folderId)
-			f?.delete(e.id)
-			if (f?.size === 0) this.byFolder.delete(folderId)
-		}
-		const o = this.byOwner.get(e.ownerId)
-		o?.delete(e.id)
-		if (o?.size === 0) this.byOwner.delete(e.ownerId)
+	private unindexOwner(l: Listing): void {
+		const o = this.byOwner.get(l.ownerId)
+		o?.delete(l)
+		if (o?.size === 0) this.byOwner.delete(l.ownerId)
+	}
+
+	private forgetId(id: string): void {
+		this.byId.delete(id)
+		const folderId = splitRecordingId(id)?.folderId
+		if (folderId === undefined) return
+		const f = this.byFolder.get(folderId)
+		f?.delete(id)
+		if (f?.size === 0) this.byFolder.delete(folderId)
 	}
 }
