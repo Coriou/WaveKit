@@ -34,6 +34,15 @@
  * open when replay ends (the sequence never finished) stays a mark until its folder is gone from
  * disk. A sequence never replaces the marks, so a mark released in the same take as a sequence
  * may come back on replay: fail closed, the next maintenance prune releases it again.
+ *
+ * Replay safety marks: a guard made a mark at once (past HELD_OPEN_GUARDS_MAX open guards, or a
+ * repeated id) and a hold refused while replaying (a journaled change, or a listing re-derived
+ * from an entry without this writer's format marker, HELD_JOURNAL_FORMAT) or restoring are kept
+ * in a set of their own. No whole-set replacement of the marks (an entry's `heldOverflow`)
+ * clears them, since the runtime that wrote it never met that refusal; they end only when their
+ * folder is gone from disk. They count as marks everywhere and are persisted with them in the
+ * snapshot (and in the next whole set the runtime journals). Bound: HELD_OVERFLOW_FOLDERS_MAX
+ * folders; past it every folder counts as marked, which never ends by itself.
  */
 import { randomBytes } from "node:crypto"
 import { z } from "zod"
@@ -45,6 +54,13 @@ export const HELD_RECORDING_CHANGES_MAX = HELD_RECORDINGS_MAX
 export const HELD_OVERFLOW_FOLDERS_MAX = 4096
 /** Temporary guards a replay keeps open at once; one more is made a mark at once (fail closed). */
 export const HELD_OPEN_GUARDS_MAX = 64
+/**
+ * The format marker (`heldFormat`) on every journal entry this writer emits: such an entry
+ * journals the outcome of every refusal (the change, or the mark), so a replay trusts it. An
+ * entry without it (an earlier format, which journaled held changes but no overflow marks) is
+ * never trusted: a refusal its replay re-derives marks the folder.
+ */
+export const HELD_JOURNAL_FORMAT = 2
 
 const RECORDING = /^(d_[0-9A-Za-z]+)~([A-Za-z0-9_.-]+\.wav)$/
 
@@ -191,6 +207,17 @@ export class HeldRecordingTable {
 	/** The overflow marks changed since the last take. */
 	private overflowDirty = false
 	/**
+	 * Replay safety marks: a guard promoted at once (past HELD_OPEN_GUARDS_MAX, or a repeated
+	 * id) and a hold refused while replaying or restoring. They count as marks everywhere and are
+	 * persisted with them (`overflowState`), but no whole-set replacement (`setOverflow`) clears
+	 * them: the entry that replaces the marks was written by a runtime that never met that
+	 * refusal. A folder's safety mark ends only when the folder is gone from disk
+	 * (`releaseOverflow`). Bound: HELD_OVERFLOW_FOLDERS_MAX folders; past it every folder counts
+	 * as marked (`safetyAll`), which never ends by itself.
+	 */
+	private readonly safety = new Set<string>()
+	private safetyAll = false
+	/**
 	 * Replay only: the temporary guards of split sequences whose last entry is not replayed yet,
 	 * by sequence id. Each counts as marks (`overflowed`); never journaled by themselves (the
 	 * snapshot holds them as marks). Empty at runtime unless a sequence never finished.
@@ -203,13 +230,14 @@ export class HeldRecordingTable {
 	private readonly guardPrefix = randomBytes(6).toString("hex")
 	private guardSeq = 0
 	/**
-	 * Replay of an entry that journals its own held changes (`replayJournaled`): a listing the
-	 * replay re-derives may meet the full table before the entry's own drops are applied. Its
-	 * refusal marks nothing (the runtime journaled the outcome: the change, or the mark), so a
-	 * replay leaves no mark the runtime never held. The journaled changes themselves (`apply`)
-	 * still mark on refusal.
+	 * What a hold refused at the bound does. `runtime`: marks its folder (journaled). `quiet`:
+	 * nothing; replay of an entry carrying this writer's format marker (`replayJournaled`), where
+	 * a listing the replay re-derives may meet the full table before the entry's own drops are
+	 * applied, and the runtime journaled the outcome (the change, or the mark). `safety`: a
+	 * replay safety mark; replay of any other entry, the journaled changes themselves (`apply`)
+	 * and a restore.
 	 */
-	private quietRefusals = false
+	private refusals: "runtime" | "quiet" | "safety" = "runtime"
 
 	get size(): number {
 		return this.byId.size
@@ -226,6 +254,7 @@ export class HeldRecordingTable {
 	 */
 	overflowed(folderId: string): boolean {
 		if (this.overflowAll || this.overflow.has(folderId)) return true
+		if (this.safetyAll || this.safety.has(folderId)) return true
 		for (const g of this.guards.values())
 			if (g.all || g.folders.has(folderId)) return true
 		return false
@@ -233,8 +262,9 @@ export class HeldRecordingTable {
 
 	/** The marks and every open guard as one set (`all`: every folder counts as marked). */
 	private markedState(): { folders: Set<string>; all: boolean } {
-		let all = this.overflowAll
+		let all = this.overflowAll || this.safetyAll
 		const folders = new Set(this.overflow)
+		for (const id of this.safety) folders.add(id)
 		for (const g of this.guards.values()) {
 			if (g.all) all = true
 			for (const id of g.folders) folders.add(id)
@@ -268,8 +298,8 @@ export class HeldRecordingTable {
 	}
 
 	/**
-	 * Restore and replay: the marks exactly as persisted (absent: none). Open guards are kept (a
-	 * restore clears them first, `restore`).
+	 * Restore and replay: the marks exactly as persisted (absent: none). Open guards and replay
+	 * safety marks are kept (a restore clears them first, `restore`).
 	 */
 	setOverflow(state: HeldOverflowState | undefined): void {
 		this.overflow.clear()
@@ -291,6 +321,10 @@ export class HeldRecordingTable {
 		let released = false
 		for (const g of this.guards.values())
 			if (g.folders.delete(folderId)) released = true
+		if (this.safety.delete(folderId)) {
+			this.overflowDirty = true
+			released = true
+		}
 		if (this.overflow.delete(folderId)) {
 			this.overflowDirty = true
 			released = true
@@ -298,9 +332,10 @@ export class HeldRecordingTable {
 		return released
 	}
 
-	/** Every folder id with a mark or an open guard (a copy). */
+	/** Every folder id with a mark, a replay safety mark or an open guard (a copy). */
 	overflowFolders(): string[] {
 		const folders = new Set(this.overflow)
+		for (const id of this.safety) folders.add(id)
 		for (const g of this.guards.values())
 			for (const id of g.folders) folders.add(id)
 		return [...folders]
@@ -308,12 +343,14 @@ export class HeldRecordingTable {
 
 	/**
 	 * Replay of a split sequence's first entry: opens its guard (its folders count as marked until
-	 * `closeGuard` with the same id). Past HELD_OPEN_GUARDS_MAX open guards it is made a mark at
-	 * once (fail closed: kept until its folders are gone from disk).
+	 * `closeGuard` with the same id). Past HELD_OPEN_GUARDS_MAX open guards, or under an id
+	 * already open, it is made a replay safety mark at once (fail closed: kept until its folders
+	 * are gone from disk, whatever replaces the marks meanwhile).
 	 */
 	openGuard(guard: HeldGuardState): void {
 		if (this.guards.has(guard.id) || this.guards.size >= HELD_OPEN_GUARDS_MAX) {
-			this.addMarks(guard)
+			if (guard.all) this.markSafetyAll()
+			else for (const id of guard.folders) this.markSafety(id)
 			return
 		}
 		this.guards.set(guard.id, {
@@ -339,6 +376,18 @@ export class HeldRecordingTable {
 			this.overflowAll = true
 		} else for (const id of marks.folders) this.markOverflow(id)
 		this.overflowDirty = dirty
+	}
+
+	/** A replay safety mark (never journaled by itself: a replay derives it again). */
+	private markSafety(folderId: string): void {
+		if (this.safetyAll || this.safety.has(folderId)) return
+		if (this.safety.size >= HELD_OVERFLOW_FOLDERS_MAX) this.markSafetyAll()
+		else this.safety.add(folderId)
+	}
+
+	private markSafetyAll(): void {
+		this.safety.clear()
+		this.safetyAll = true
 	}
 
 	private markOverflow(folderId: string): void {
@@ -389,9 +438,10 @@ export class HeldRecordingTable {
 		)
 			return true
 		if (previous === undefined && this.byId.size >= HELD_RECORDINGS_MAX) {
-			if (this.quietRefusals) return false
+			if (this.refusals === "quiet") return false
 			this.refused++
-			this.markOverflow(parts.folderId)
+			if (this.refusals === "safety") this.markSafety(parts.folderId)
+			else this.markOverflow(parts.folderId)
 			return false
 		}
 		this.touch(id, previous !== undefined)
@@ -522,31 +572,33 @@ export class HeldRecordingTable {
 
 	/**
 	 * Replay: the journaled changes as written, drops first (an entry written by an older core
-	 * may interleave them). A hold refused at the bound marks its folder (fail closed).
+	 * may interleave them). A hold refused at the bound gives its folder a replay safety mark
+	 * (fail closed; no later replacement of the marks clears it).
 	 */
 	apply(changes: readonly HeldRecordingChange[]): void {
-		const quiet = this.quietRefusals
-		this.quietRefusals = false
+		const mode = this.refusals
+		this.refusals = "safety"
 		for (const c of changes)
 			if (c.ownerId === null || c.observationId === undefined) this.drop(c.id)
 		for (const c of changes)
 			if (c.ownerId !== null && c.observationId !== undefined)
 				this.hold(c.id, c.ownerId, c.observationId)
 		this.touched.clear()
-		this.quietRefusals = quiet
+		this.refusals = mode
 	}
 
 	/**
-	 * Replay of one entry: `run` with re-derived refusals quiet when the entry journals its own
-	 * held changes (`journaled`); an entry without them (an older core's) marks as at runtime.
+	 * Replay of one entry: `run` with re-derived refusals quiet when the entry is trusted to
+	 * journal the outcome of every refusal (`journaled`: it carries this writer's format marker,
+	 * HELD_JOURNAL_FORMAT); any other entry gives a refused folder a replay safety mark.
 	 */
 	replayJournaled<T>(journaled: boolean, run: () => T): T {
-		const quiet = this.quietRefusals
-		this.quietRefusals = journaled
+		const mode = this.refusals
+		this.refusals = journaled ? "quiet" : "safety"
 		try {
 			return run()
 		} finally {
-			this.quietRefusals = quiet
+			this.refusals = mode
 		}
 	}
 
@@ -558,7 +610,10 @@ export class HeldRecordingTable {
 
 	restore(entries: readonly HeldRecordingEntry[]): void {
 		this.clear()
+		const mode = this.refusals
+		this.refusals = "safety"
 		for (const e of entries) this.hold(e.id, e.ownerId, e.observationId)
+		this.refusals = mode
 		this.touched.clear()
 	}
 
@@ -571,6 +626,8 @@ export class HeldRecordingTable {
 		this.overflow.clear()
 		this.overflowAll = false
 		this.overflowDirty = false
+		this.safety.clear()
+		this.safetyAll = false
 		this.guards.clear()
 	}
 

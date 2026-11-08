@@ -113,6 +113,7 @@ import type { StoredDiscovery as Discovery, StoreMutation } from "./schemas.js"
 import { RecordingAliasTable } from "../recording-aliases.js"
 import type { FolderLookup } from "../recording-aliases.js"
 import {
+	HELD_JOURNAL_FORMAT,
 	HELD_RECORDINGS_MAX,
 	HeldRecordingTable,
 	splitRecordingId,
@@ -591,15 +592,23 @@ function newStoreEpoch(): string {
 	return `${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`
 }
 
-/** One journal part's held-recording payload fields (absent ones omitted). */
+/**
+ * One journal part's held-recording payload fields (absent ones omitted), with the format marker
+ * every entry this writer emits carries.
+ */
 function heldFields(
 	part: HeldJournalPart | undefined,
 ): Pick<
 	StoreMutation,
-	"heldRecordings" | "heldOverflow" | "heldGuard" | "heldGuardEnd"
+	| "heldRecordings"
+	| "heldOverflow"
+	| "heldGuard"
+	| "heldGuardEnd"
+	| "heldFormat"
 > {
-	if (part === undefined) return {}
+	if (part === undefined) return { heldFormat: HELD_JOURNAL_FORMAT }
 	return {
+		heldFormat: HELD_JOURNAL_FORMAT,
 		...(part.heldRecordings.length > 0
 			? { heldRecordings: part.heldRecordings }
 			: {}),
@@ -3768,6 +3777,7 @@ export class DiscoveryStore
 				observations: [],
 				deleted: [],
 				preparedRecordingOperations: patch,
+				heldFormat: HELD_JOURNAL_FORMAT,
 			} satisfies StoreMutation,
 		}
 		beforeEmit?.(entry)
@@ -7815,13 +7825,16 @@ export class DiscoveryStore
 	private applyMutation(m: StoreMutation): void {
 		this.proofQuiet++
 		try {
-			// An entry that journals held changes carries the runtime's outcome of every listing;
-			// a listing re-derived here before its drops are applied marks nothing.
+			// Only an entry of this writer's format that journals held changes carries the runtime's
+			// outcome of every listing: a listing re-derived here before its drops are applied marks
+			// nothing. Any other entry (an earlier format journaled held changes but no marks) gives
+			// a refused folder a replay safety mark.
 			const journaled =
-				m.heldRecordings !== undefined ||
-				m.heldOverflow !== undefined ||
-				m.heldGuard !== undefined ||
-				m.heldGuardEnd !== undefined
+				m.heldFormat === HELD_JOURNAL_FORMAT &&
+				(m.heldRecordings !== undefined ||
+					m.heldOverflow !== undefined ||
+					m.heldGuard !== undefined ||
+					m.heldGuardEnd !== undefined)
 			this.heldTable.replayJournaled(journaled, () =>
 				this.applyStoredMutation(m),
 			)
@@ -7900,7 +7913,8 @@ export class DiscoveryStore
 		}
 		// The journaled ownership changes last: they are the state this entry left. A split
 		// sequence's guard opens before its first changes and closes after its last ones; the
-		// replace of the marks never touches an open guard, so interleaved sequences keep theirs.
+		// replace of the marks never touches an open guard or a replay safety mark, so interleaved
+		// sequences keep theirs.
 		if (m.heldGuard !== undefined) this.heldTable.openGuard(m.heldGuard)
 		this.heldTable.apply(m.heldRecordings ?? [])
 		if (m.heldOverflow !== undefined) this.heldTable.setOverflow(m.heldOverflow)

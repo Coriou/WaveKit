@@ -12,6 +12,7 @@ import {
 import type { PreparedRecordingMetadata } from "./recording-operation.js"
 import { DISCOVERY_RECORDING_ALIASES_STORED_MAX } from "../recording-aliases.js"
 import {
+	HELD_JOURNAL_FORMAT,
 	HeldGuardSchema,
 	HeldOverflowSchema,
 	HeldRecordingChangesSchema,
@@ -338,6 +339,11 @@ export interface StoreMutation {
 	heldGuard?: HeldGuardState
 	/** A split sequence's last entry: these marks are added, then its own guard closes. */
 	heldGuardEnd?: HeldGuardState
+	/**
+	 * The held-recording journal format (HELD_JOURNAL_FORMAT) on every entry this writer emits;
+	 * only an entry carrying it is trusted to journal every refusal's outcome.
+	 */
+	heldFormat?: typeof HELD_JOURNAL_FORMAT
 }
 
 /**
@@ -390,6 +396,7 @@ export const StoreMutationSchema = z
 		heldOverflow: HeldOverflowSchema.optional(),
 		heldGuard: HeldGuardSchema.optional(),
 		heldGuardEnd: HeldGuardSchema.optional(),
+		heldFormat: z.literal(HELD_JOURNAL_FORMAT).optional(),
 	})
 	.strict()
 export type StoreMutationCheck = Assert<
