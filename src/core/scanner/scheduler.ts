@@ -124,7 +124,57 @@ const RECORD_RECHECK_MS = 250
  * of the window has started and its voice answer is still to come (WIDEBAND_VOICE_JUDGE_MS): the
  * hop is kept for that answer, once per visit, so a landing is not split by leaving just before it.
  */
-export type RecordingActivity = boolean | VoiceOnAir | "judging"
+export type RecordingActivity =
+	| boolean
+	| VoiceOnAir
+	| RecordedSession
+	| "judging"
+
+/**
+ * A recording runs (as `true`) of a session the recorder classed analog FM and that sounded like
+ * voice, with no voice on air at this moment (a pause, the hang or a line after the voice), and
+ * the recorder says more about it than `true` does.
+ */
+export interface RecordedSession {
+	readonly recording: true
+	/**
+	 * That session's frequency, given only once the store admitted a file operation of it: its
+	 * verified voice history (FrequencyMemory.voiced), as VoiceOnAir.recordedHz. Absent: none.
+	 */
+	readonly recordedHz?: number
+	/**
+	 * The voiced transmission ended: its voice lies before the squelch last closed and reopened, so
+	 * the open track is another transmission not voiced yet (a reply joined by the recorder's
+	 * `hangMs`, or a kerchunk). That ends the visit's voice hold as a squelch close does, whatever
+	 * the frequency's voice history: the hop is not kept and owes its forced coarse sweep (askRecording).
+	 * Absent: the open track is still the voiced transmission's (a pause, the hang after it).
+	 */
+	readonly voiceEnded?: true
+	/** Every voiced transmission still on air in the window (VoiceOnAir.transmissions). */
+	readonly transmissions?: Transmissions
+	/**
+	 * No session of the window records: the answer only carries the list, whose transmissions are
+	 * all "unrecorded", and `bare` is what it reads as for any transmission not listed (false, or
+	 * "judging"). Absent: the answer is a recording's.
+	 */
+	readonly bare?: false | "judging"
+}
+
+/**
+ * Every voiced transmission still on air in the recorded window, by name (VoiceOnAir.voice): its
+ * own voice answer while voice is on air in it, "quiet" while its track is still open with no voice
+ * that recent (a pause, a carrier after the voice), "unrecorded" while its track is still open but
+ * its session gave its slot up (the recorder evicted it for another candidate): on air, no longer
+ * metered, so neither its voice nor its quiet is known. A transmission not listed has ended (its
+ * squelch closed, or it was turned around). The recorder gives it when the window holds more than
+ * one voiced session (two channels), whose answers would hide each other, or any unrecorded one:
+ * the answer names only the first voiced one, so another channel's voice, or an eviction, is no
+ * end of the transmission a hold heard (askRecording judges that one by its own entry). Absent:
+ * the answer is the only session's own.
+ */
+export type Transmissions = Readonly<
+	Record<string, VoiceOnAir | "quiet" | "unrecorded">
+>
 
 /** Voice on air in a recorded transmission (RecordingActivity). */
 export interface VoiceOnAir {
@@ -139,6 +189,41 @@ export interface VoiceOnAir {
 	 * loop adds nothing, and a quiet that ended between two answers still reads. Absent: none.
 	 */
 	readonly quietMs?: number
+	/**
+	 * Frequency (Hz) of the session that answered, given only by a recorder that recorded it: a
+	 * session it classed analog FM that sounded like voice in a file the store admitted. It is
+	 * that frequency's verified voice history (FrequencyMemory.voiced), which carrier evidence never
+	 * caps. Absent: a bare voice answer, no history (it cannot lift a carrier's cap).
+	 */
+	readonly recordedHz?: number
+	/** Every voiced transmission still on air in the window, this one among them (Transmissions). */
+	readonly transmissions?: Transmissions
+}
+
+/**
+ * The answer as the transmission named `id` sees it (Transmissions): the answer itself when it
+ * names `id` or lists no transmissions; that transmission's own voice answer, or true while it is
+ * quiet; null when the list shows it ended. Unrecorded (on air, its session evicted): still voice
+ * of it, with no quiet known (the transmission the visit remembers was voiced in it, and only its
+ * track's close or `hold.maxHoldMs` ends a voice hold on it). With no remembered transmission
+ * (`id` null): the answer itself, or what it reads as when only unrecorded transmissions carry it
+ * (RecordedSession.bare): the ordinary rules, an evicted transmission no visit heard keeps nothing.
+ */
+function answerOf(
+	answer: RecordingActivity,
+	id: string | null,
+): RecordingActivity | null {
+	if (typeof answer !== "object" || answer.transmissions === undefined)
+		return answer
+	if (id === null)
+		return "bare" in answer && answer.bare !== undefined ? answer.bare : answer
+	if (isVoiceOnAir(answer) && answer.voice === id) return answer
+	const own = answer.transmissions[id]
+	if (own === undefined) return null
+	// Evicted from its recorder slot while still on air: no file is being made of it, so it holds
+	// like any recording that is not voice, within L, never to hold.maxHoldMs; but it has not ended.
+	if (own === "unrecorded") return true
+	return own === "quiet" ? true : own
 }
 
 /**
@@ -170,7 +255,7 @@ export const VOICE_QUIET_PAST_L_MS = 1_000
 
 /** Whether a recording check answered voice on air (RecordingActivity). */
 export function isVoiceOnAir(a: RecordingActivity): a is VoiceOnAir {
-	return typeof a === "object"
+	return typeof a === "object" && "voice" in a
 }
 /**
  * Retry budget of a frequency with carrier evidence: after a hold of d ms it rests K × d × f ms,
@@ -225,7 +310,9 @@ export const CONFIRM_FLOOR_MS = 12_000
  *   CARRIER_WATCH_MS (a traffic frequency: `hold.maxHoldMs`, with no decode), or heard it close and
  *   reopen less than TRAFFIC_GAP_MS apart (a flap). Held only when its retry budget has refilled
  *   (restUntil; not for a suspect one, missed by a full visit since), one carrier hold per coarse
- *   sweep, each at most one coarse sweep and at most CARRIER_WATCH_MS. A dwell that misses one that
+ *   sweep, each at most one coarse sweep and at most CARRIER_WATCH_MS; a recording of it at most
+ *   L and never the voice hold, unless it has verified voice history (FrequencyMemory.voiced). A
+ *   dwell that misses one that
  *   never flapped while its retry is due listens on for a gap (listenForGap). Traffic evidence
  *   makes it traffic again.
  */
@@ -251,16 +338,20 @@ interface FrequencyMemory {
 	/** It was traffic at some time: KNOWN_CALL_REST_FACTOR applies when it is a carrier. */
 	wasTraffic: boolean
 	/**
-	 * Widest occupied bandwidth (Hz) of a track whose hold or flap gave it carrier evidence, 0 while
-	 * none did (CARRIER_WIDTH_FACTOR).
+	 * Verified voice history: the recorder recorded a classed, voiced session on it, in a file the
+	 * store admitted (an answer naming it, VoiceOnAir.recordedHz, RecordedSession.recordedHz). It
+	 * lifts the carrier cap on a recording of a voiced transmission only: the end of that
+	 * transmission (RecordedSession.voiceEnded) still ends the hold and owes the coarse sweep. A
+	 * decode on the frequency leaves it: the decode makes the frequency traffic (markTraffic), where
+	 * no carrier cap applies, and a mixed analog and digital channel keeps its analog history.
+	 * Carrier evidence never caps a frequency with it (recordedTrack): a repeater that earned carrier evidence (a kerchunk, a fade, its idle carrier)
+	 * still has its ID recorded whole, on the first catch since too. Kept across visits and
+	 * re-plans with the entry, and only with it: forgetting the frequency (FORGET_MISSES visits
+	 * missing it, or eviction past MAX_FREQUENCY_MEMORY) clears its evidence and this together, so a
+	 * frequency heard again is unknown with no history, and no carrier keeps an exemption it earned
+	 * before an absence (the next verified session earns it again).
 	 */
-	carrierObwHz: number
-	/**
-	 * The hold that gave it its first carrier evidence heard its track already wider than
-	 * CARRIER_WIDTH_FACTOR times that evidence's width: that visit (Visit.serial) and track, null
-	 * otherwise (widerThanCarrier).
-	 */
-	carrierStep: { visit: number; trackId: string } | null
+	voiced: boolean
 	/** A full visit of a hop holding it missed it before this sighting: its onset was seen. */
 	onsetSeen: boolean
 	/** Retry budget of a carrier: not held again before this clock. */
@@ -330,7 +421,8 @@ interface HopState {
 	waitMs: number
 	/**
 	 * The hops (indices in the plan in force) that still owe a coarse visit before a voiced recording
-	 * may keep this hop again: every other hop when a visit's voice hold ends (Visit.voice), so the
+	 * may keep this hop again: every other hop when a visit's voice hold ends (Visit.voice), or a
+	 * visit leaves a voiced transmission its analog hold heard (Visit.heardVoiceId), so the
 	 * sweep's return to this hop may hold the next transmission. No activity revisit comes back here
 	 * meanwhile (pickRevisit). Per hop: a long hold elsewhere never takes a transmission's voice hold
 	 * away. Named hops, not a count: a plan change has to know which of them were paid
@@ -390,12 +482,6 @@ interface TrackInfo {
 	snrDb: number
 	centreHz: number
 	obwHz: number
-	/**
-	 * Narrowest occupied bandwidth of its snapshots in the visit: the width carrier evidence from it
-	 * records (FrequencyMemory.carrierObwHz), so a line whose track a voice joined during its watch
-	 * is remembered as the line (CARRIER_WIDTH_FACTOR).
-	 */
-	narrowestObwHz: number
 	needsConfirm: boolean
 	confirmHoldMs: number
 	/** Analog voice: a hold follows it while it stays on air (bounded by `hold.maxHoldMs`). */
@@ -498,6 +584,26 @@ interface Visit {
 	voiceId: string | null
 	/** Clock the recording check was last asked while Visit.voice was "on" (sampleVoice's pace only). */
 	voiceAskedAt: number | null
+	/**
+	 * The voiced transmission (VoiceOnAir.voice) the recorder named while an analog hold that is
+	 * not a voice hold ran (a probe, follow or hang of analog voice, sampleVoice): one transmission,
+	 * then the sweep. Its end (the squelch closed, the recorder's `voiceEnded`, or voice named
+	 * otherwise) spends the visit's voice hold as a voice hold's end does (askRecording), so a reply
+	 * never gets a voice hold of its own before the forced coarse sweep. Kept for the visit: a visit
+	 * that leaves with it still on air (a hold cut at L) owes the sweep too (endVisit, voiceLock).
+	 */
+	heardVoiceId: string | null
+	/** Clock the recording check was last asked during an analog hold (sampleVoice's pace only). */
+	followAskedAt: number | null
+	/** The recording check answered anything but false during this visit: the recorder has a session. */
+	sessionSeen: boolean
+	/**
+	 * An analog follow heard its track's squelch close while the recorder had no session to name
+	 * the transmission (sessionSeen false): no voice hold for the rest of the visit, and the hop
+	 * owes every other hop its coarse visit before its next voice hold (HopState.voiceLock), as
+	 * after a voice hold. Unlike a voice hold it locks no long follow elsewhere (longHoldLock).
+	 */
+	voiceBarred: boolean
 	/** The visit's one keep for a voice answer still to come (RecordingActivity "judging") was used. */
 	judged: boolean
 	/** A carrier on air since before any visit saw it start showed itself: the hop's past score was it. */
@@ -812,41 +918,6 @@ function spread(n: number): number {
 	return (h >>> 0) / 2 ** 32
 }
 
-/**
- * A track this many times as wide as the widest track that gave its frequency carrier evidence
- * (FrequencyMemory.carrierObwHz) may hold another transmission than that carrier: 2. A steady carrier
- * line reads at most 4 FFT bins at -20 dB (4 kHz at 1.024 Msps, 4.7 kHz at 2.4 Msps) and FM voice
- * 7.5 kHz or more, so a voice that keys up beside a line, and whose track takes the line in (the two
- * then match one frequency, the track being wider), reads past twice the line's width (at most
- * 2 × 4 = 8 kHz is still the carrier, 8001 Hz is not). Width, even a widening seen within a visit,
- * is no evidence of another transmission (noise, a merged neighbour, drift), and nothing else the
- * sweep knows names one there: such a voice joins the line's track, so no track opens after a gap
- * and the recording is of the line's own track (whose id the next epoch does not keep). So it
- * counts once only: the hold that gave the frequency its first carrier evidence (a watch of the line
- * that heard the voice key up) had already heard its track read past that bound (FrequencyMemory
- * carrierStep), and on that visit only the recording of that track, while it still reads past it, is
- * not the carrier's (recordedTrack): it is kept, and gets its voice hold. Any later visit applies
- * the carrier rules whatever the width, so a carrier is spared them once at most. The price: a
- * voice that keys up beside a line with carrier evidence, on a later visit (heard keying up or
- * already on air at the landing), is held under the carrier rules, and an ID there is cut to them.
- */
-const CARRIER_WIDTH_FACTOR = 2
-
-function widerThanCarrier(
-	t: { obwHz: number },
-	trackId: string,
-	visit: number,
-	m: { carrierObwHz: number; carrierStep: FrequencyMemory["carrierStep"] },
-): boolean {
-	const step = m.carrierStep
-	return (
-		step !== null &&
-		step.visit === visit &&
-		step.trackId === trackId &&
-		t.obwHz > CARRIER_WIDTH_FACTOR * m.carrierObwHz
-	)
-}
-
 function sameFrequency(
 	a: { centreHz: number; halfWidthHz: number },
 	centreHz: number,
@@ -897,6 +968,21 @@ export class SweepScheduler {
 	 * long hold every hop gets its dwell first (set to the hop count, one less per coarse visit).
 	 */
 	private longHoldLock = 0
+	/**
+	 * The last askRecording answer showed the voiced transmission ended with another on air (the
+	 * recorder's `voiceEnded`, or voice named otherwise than Visit.heardVoiceId): an analog hold
+	 * that is no voice hold ends at once (askDuringFollow).
+	 */
+	private askEnded = false
+	/**
+	 * A track close whose recording check waits for the next block (onBlock): the tracker reports a
+	 * max-duration rollover as a close and its successor's open in the same block, both before the
+	 * block's summary, and the recorder names the transmission again only once the successor opened.
+	 * Asked at the close itself, the check would read the rollover as the transmission's end. A
+	 * squelch close is seen one block later than at the close, and a tick asks it if no block came
+	 * within one block's time. Null: none.
+	 */
+	private closeAsk: { visit: Visit; trackId: string; at: number } | null = null
 	/**
 	 * Hop whose long hold set the long-hold lock. While the lock holds, voice on traffic there is
 	 * probed, not followed (capFor): a busy hop is visited again before the lock clears (its own
@@ -1060,6 +1146,8 @@ export class SweepScheduler {
 	}
 
 	onBlock(endSample: number): SchedulerAction[] {
+		const left = this.runCloseAsk(this.now())
+		if (left !== null) return left
 		const v = this.visit
 		if (v === null || (this.phase !== "dwell" && this.phase !== "hold"))
 			return []
@@ -1222,7 +1310,6 @@ export class SweepScheduler {
 				snrDb: track.snrDb,
 				centreHz: track.centreHz,
 				obwHz: track.obwHz,
-				narrowestObwHz: track.obwHz,
 				needsConfirm: needsConfirm && !flagged,
 				confirmHoldMs,
 				followOnAir,
@@ -1240,7 +1327,6 @@ export class SweepScheduler {
 			known.snrDb = track.snrDb
 			known.centreHz = track.centreHz
 			known.obwHz = track.obwHz
-			if (track.obwHz < known.narrowestObwHz) known.narrowestObwHz = track.obwHz
 			known.open = true
 			if (flagged) known.needsConfirm = false
 			else known.needsConfirm ||= needsConfirm
@@ -1466,13 +1552,19 @@ export class SweepScheduler {
 			t.open = false
 			this.noteClosed(v, t)
 		}
-		// A close may be the voiced transmission's: while another hold runs (a `record` hold
-		// re-checks on its own), the voice hold is checked now.
+		// A close may be the voiced transmission's: it is checked at the next block (closeAsk), once
+		// a max-duration rollover's successor, reported in the same block, has opened.
+		// Of several closes in a block, the analog hold's own is the one kept.
+		const own = this.hold?.trackId === trackId && this.holdsAnalog()
 		if (
-			v?.voice === "on" &&
-			(this.phase !== "hold" || this.hold?.mode !== "record")
+			v !== null &&
+			(v.voice === "on" || own) &&
+			(own ||
+				this.closeAsk === null ||
+				this.closeAsk.visit !== v ||
+				this.closeAsk.trackId !== this.hold?.trackId)
 		)
-			this.askRecording(this.now())
+			this.closeAsk = { visit: v, trackId, at: this.now() }
 		if (
 			this.phase === "hold" &&
 			this.hold?.trackId === trackId &&
@@ -1482,6 +1574,33 @@ export class SweepScheduler {
 			this.hold.deadline = this.hangDeadline(this.hold.cap)
 		}
 		return []
+	}
+
+	/**
+	 * The recording check a track close waits for (closeAsk), at the next block: while the visit's
+	 * voice hold is on and another hold runs (a `record` hold re-checks on its own), the voice hold
+	 * is checked; else, when the analog hold's own track closed, the squelch close of the
+	 * transmission it heard (Visit.heardVoiceId) is seen now rather than at the next re-check. With
+	 * no recorder session to name it, the close alone owes the sweep before any later voice hold
+	 * (Visit.voiceBarred): a reply in the hang is never a voice hold of its own. Null: the hop is
+	 * kept; else the actions that leave it.
+	 */
+	private runCloseAsk(now: number): SchedulerAction[] | null {
+		const ask = this.closeAsk
+		this.closeAsk = null
+		const v = this.visit
+		if (ask === null || v === null || ask.visit !== v) return null
+		if (v.voice === "on") {
+			if (this.phase !== "hold" || this.hold?.mode !== "record")
+				this.askRecording(now)
+			return null
+		}
+		if (this.hold?.trackId !== ask.trackId || !this.holdsAnalog()) return null
+		if (this.askDuringFollow(v, now))
+			return this.leaveHop([{ type: "stop-probes" }])
+		if (!v.sessionSeen && this.recordingActive !== undefined)
+			v.voiceBarred = true
+		return null
 	}
 
 	/**
@@ -1535,7 +1654,19 @@ export class SweepScheduler {
 
 	tick(now: number): SchedulerAction[] {
 		this.heardAt = now
-		this.sampleVoice(now)
+		// No block came within one block's time of the close (a stalled source): asked now.
+		if (
+			this.closeAsk !== null &&
+			now - this.closeAsk.at >= (this.blockSamples * 1000) / this.sampleRateHz
+		) {
+			const left = this.runCloseAsk(now)
+			if (left !== null) return left
+		}
+		// The voiced transmission an analog hold heard ended and another is on air: the hold ends
+		// and the hop owes its coarse sweep (Visit.voice spent). Not while a close waits for its
+		// block (closeAsk): that ask stands for this one, after the successor of a rollover opened.
+		if (this.closeAsk === null && this.sampleVoice(now))
+			return this.leaveHop([{ type: "stop-probes" }])
 		if (this.phase !== "hold" || this.hold === null) return []
 		// Forced: `hold.maxHoldMs` from the start of the visit's holds, a recording too.
 		if (now >= this.maxHoldDeadline())
@@ -1563,6 +1694,7 @@ export class SweepScheduler {
 			v !== null &&
 			isVoiceOnAir(active) &&
 			v.voice === "no" &&
+			!v.voiceBarred &&
 			!this.voiceLocked(v) &&
 			this.recordedTrack(hold.trackId) !== null
 		) {
@@ -1574,7 +1706,8 @@ export class SweepScheduler {
 		// (keepForRecording's non-voice cap).
 		if (
 			active === true ||
-			((isVoiceOnAir(active) || active === "judging") && v?.voice === "spent")
+			((isVoiceOnAir(active) || active === "judging") &&
+				(v?.voice === "spent" || v?.voiceBarred === true))
 		)
 			hold.cap = Math.min(hold.cap, this.holdOrigin() + this.followBudgetMs())
 		if (now >= hold.cap || active === false) return this.leaveHop([])
@@ -1613,7 +1746,8 @@ export class SweepScheduler {
 	 * `hold.policy: "never"`. A hold that ran past one coarse sweep locks the next long follow out
 	 * (endVisit). The held
 	 * frequency's evidence is charged as on any leave; the `record` hold itself brings none. Never
-	 * when every frequency the recording can be of has carrier evidence (recordedTrack). A session
+	 * when every frequency the recording can be of has carrier evidence and no verified voice
+	 * history (recordedTrack). A session
 	 * whose voice answer is still to come ("judging") keeps the hop for that answer as voice does, at
 	 * most WIDEBAND_VOICE_JUDGE_MS (3000 ms) and once per visit, spending L as a recording hold does;
 	 * then the answer rules (recheckRecording).
@@ -1634,9 +1768,10 @@ export class SweepScheduler {
 		const active = this.askRecording(now)
 		if (active === false) return false
 		const judging = active === "judging"
-		if (judging && (v.voice !== "no" || v.judged)) return false
-		// Voice on air in the current transmission, and the visit's voice hold not spent yet.
-		const voice = isVoiceOnAir(active) && v.voice !== "spent"
+		if (judging && (v.voice !== "no" || v.judged || v.voiceBarred)) return false
+		// Voice on air in the current transmission, and the visit's voice hold not spent yet (nor
+		// barred by a follow that heard a squelch close with no session to name it).
+		const voice = isVoiceOnAir(active) && v.voice !== "spent" && !v.voiceBarred
 		// A revisit of the hop whose long hold set the long-hold lock (an 8 s watch, say) holds no
 		// voice either: the others have not had the coarse visit that hold owes them yet.
 		if (
@@ -1710,8 +1845,59 @@ export class SweepScheduler {
 	 * VOICE_QUIET_PAST_L_MS. How long the check went unasked never spends it.
 	 */
 	private askRecording(now: number): RecordingActivity {
-		const active = this.recordingActive?.() ?? false
+		const raw = this.recordingActive?.() ?? false
+		if (typeof raw === "object" && raw.recordedHz !== undefined)
+			this.noteVoiced(raw.recordedHz)
 		const v = this.visit
+		this.askEnded = false
+		if (v !== null && raw !== false) v.sessionSeen = true
+		// The transmission the visit remembers (its voice hold's, or the one an analog hold heard)
+		// is judged by its own state when the recorder lists the window's transmissions
+		// (Transmissions): a neighbouring channel's voice named first is no end of it. Listed as
+		// ended: its end, with another transmission on air.
+		const id = v === null ? null : v.voice === "on" ? v.voiceId : v.heardVoiceId
+		const own = answerOf(raw, id)
+		if (own === null && v !== null) {
+			this.spendVoice(v)
+			this.askEnded = true
+			return false
+		}
+		const answer = own ?? raw
+		if (
+			answer !== raw &&
+			isVoiceOnAir(answer) &&
+			answer.recordedHz !== undefined
+		)
+			this.noteVoiced(answer.recordedHz)
+		// The voiced transmission ended (its squelch closed and another track opened): as the end of
+		// a voice hold, whether or not one ran, and whatever the frequency's voice history. The hop
+		// is not kept for what follows (a reply, a kerchunk) and owes every hop its coarse visit
+		// (Visit.voice, endVisit): history only lifts the carrier cap on a recording of that
+		// transmission (recordedTrack), never a hold across its turnaround.
+		if (
+			typeof answer === "object" &&
+			!isVoiceOnAir(answer) &&
+			answer.voiceEnded === true
+		) {
+			if (v !== null) this.spendVoice(v)
+			this.askEnded = true
+			return false
+		}
+		// A voiced transmission an analog hold heard without its voice hold (Visit.heardVoiceId)
+		// ends as a voice hold's does: at its squelch close (false), or once another transmission is
+		// voiced (a reply the event loop or the pace hid the turnaround of). The visit's voice hold is
+		// spent and the reply is no recording to keep the hop for.
+		if (v !== null && v.voice !== "on" && v.heardVoiceId !== null) {
+			if (answer === false) this.spendVoice(v)
+			else if (isVoiceOnAir(answer) && answer.voice !== v.heardVoiceId) {
+				this.spendVoice(v)
+				this.askEnded = true
+				return false
+			}
+		}
+		// A recorded session with no voice on air now is a recording that is not voice.
+		const active =
+			typeof answer === "object" && !isVoiceOnAir(answer) ? true : answer
 		if (v === null || v.voice !== "on") return active
 		if (
 			!isVoiceOnAir(active) ||
@@ -1722,6 +1908,28 @@ export class SweepScheduler {
 			this.spendVoice(v)
 		else v.voiceAskedAt = now
 		return active
+	}
+
+	/**
+	 * The recorder recorded a classed, voiced session at `hz`: verified voice history of the
+	 * frequency there (FrequencyMemory.voiced), and of every open track of the visit whose occupied
+	 * band holds `hz` (the recording is of that track: a voice whose track took in a line beside it
+	 * reads centred between them, while the line's frequency is remembered at the line). Never of a
+	 * frequency not remembered, nor of a track beside the session that does not reach it.
+	 */
+	private noteVoiced(hz: number): void {
+		const m = this.memoryAt(hz, 0)
+		if (m !== undefined) m.voiced = true
+		for (const t of this.visit?.tracks.values() ?? []) {
+			if (!t.open || t.flagged) continue
+			if (
+				Math.abs(t.centreHz - hz) >
+				Math.max(SAME_FREQUENCY_FLOOR_HZ, t.obwHz / 2)
+			)
+				continue
+			const own = this.memoryOf(t)
+			if (own !== undefined) own.voiced = true
+		}
 	}
 
 	/**
@@ -1744,19 +1952,55 @@ export class SweepScheduler {
 	 * RECORD_RECHECK_MS, so the voice hold's end is seen whatever hold runs. A `record` hold asks
 	 * at its own re-checks.
 	 */
-	private sampleVoice(now: number): void {
+	private sampleVoice(now: number): boolean {
 		const v = this.visit
-		if (v === null || v.voice !== "on") return
-		if (this.phase === "hold" && this.hold?.mode === "record") return
-		if (v.voiceAskedAt !== null && now - v.voiceAskedAt < RECORD_RECHECK_MS)
-			return
-		this.askRecording(now)
+		if (v === null) return false
+		if (this.phase === "hold" && this.hold?.mode === "record") return false
+		if (v.voice === "on") {
+			if (v.voiceAskedAt !== null && now - v.voiceAskedAt < RECORD_RECHECK_MS)
+				return false
+			this.askRecording(now)
+			return false
+		}
+		if (!this.holdsAnalog()) return false
+		if (v.followAskedAt !== null && now - v.followAskedAt < RECORD_RECHECK_MS)
+			return false
+		return this.askDuringFollow(v, now)
+	}
+
+	/**
+	 * Whether the current hold probes, follows or hangs on analog voice (TrackInfo.followOnAir)
+	 * that no decoder confirmed: the holds sampleVoice asks the recorder during when no voice
+	 * hold is on.
+	 */
+	private holdsAnalog(): boolean {
+		const hold = this.hold
+		if (this.phase !== "hold" || hold === null || hold.decoded) return false
+		if (hold.mode === "record") return false
+		return this.visit?.tracks.get(hold.trackId)?.followOnAir === true
+	}
+
+	/**
+	 * Asks the recorder during an analog hold that is no voice hold (holdsAnalog): the first voiced
+	 * transmission it names is the one the visit heard (Visit.heardVoiceId). True when the hold
+	 * must end now, the hop owing its coarse sweep: that transmission ended and another is on air
+	 * (the recorder's `voiceEnded`, a reply joined by its hang, or voice named otherwise). Its
+	 * squelch close alone spends the voice hold (askRecording) and leaves the hold to its hang.
+	 */
+	private askDuringFollow(v: Visit, now: number): boolean {
+		v.followAskedAt = now
+		const active = this.askRecording(now)
+		if (this.askEnded) return true
+		if (isVoiceOnAir(active)) v.heardVoiceId ??= active.voice
+		return false
 	}
 
 	/**
 	 * Track a `record` hold reports (progress `holdingOn`), or null when the recording can only be of
-	 * frequencies with carrier evidence (on the visit whose watch gave that evidence, its track while
-	 * it reads past CARRIER_WIDTH_FACTOR times that width is not the carrier: widerThanCarrier).
+	 * frequencies with carrier evidence and no verified voice history (FrequencyMemory.voiced). Width
+	 * is no exception: a voice whose track took in a line beside it reads wider, and so may the line
+	 * itself (noise, drift, a merged neighbour), so a frequency with carrier evidence gets at most L
+	 * for a recording and never the voice hold until the recorder verifies voice on it.
 	 * recordingActive names the window, not the frequency, so every open analog voice of the visit is a candidate: null when each has carrier evidence, else
 	 * the track just held if it is one without, else the strongest without. With no open analog
 	 * voice: the track just held if it is still open, else the visit's strongest open track (null
@@ -1765,29 +2009,29 @@ export class SweepScheduler {
 	private recordedTrack(heldId: string | undefined): string | null {
 		const v = this.visit
 		if (v === null) return ""
-		const carrier = (id: string, t: TrackInfo): boolean => {
+		const carrier = (t: TrackInfo): boolean => {
 			const m = this.memoryOf(t)
-			return m?.evidence === "carrier" && !widerThanCarrier(t, id, v.serial, m)
+			return m?.evidence === "carrier" && !m.voiced
 		}
 		let voice = false
 		let best: { id: string; t: TrackInfo } | null = null
 		for (const [id, t] of v.tracks) {
 			if (!t.open || t.flagged || !t.followOnAir) continue
 			voice = true
-			if (carrier(id, t)) continue
+			if (carrier(t)) continue
 			if (id === heldId) return id
 			if (best === null || t.snrDb > best.t.snrDb) best = { id, t }
 		}
 		if (voice) return best?.id ?? null
 		const held = heldId === undefined ? undefined : v.tracks.get(heldId)
 		if (heldId !== undefined && held?.open === true)
-			return carrier(heldId, held) ? null : heldId
+			return carrier(held) ? null : heldId
 		for (const [id, t] of v.tracks) {
 			if (!t.open || t.flagged) continue
 			if (best === null || t.snrDb > best.t.snrDb) best = { id, t }
 		}
 		if (best === null) return ""
-		return carrier(best.id, best.t) ? null : best.id
+		return carrier(best.t) ? null : best.id
 	}
 
 	/**
@@ -2108,8 +2352,7 @@ export class SweepScheduler {
 				flapAt: null,
 				flapListenMs: 0,
 				wasTraffic: false,
-				carrierObwHz: 0,
-				carrierStep: null,
+				voiced: false,
 				// New on a hop that already had a full visit: that visit missed it.
 				onsetSeen: (this.hops[v.hopIndex]?.fullVisits ?? 0) >= 1,
 				restUntil: 0,
@@ -2151,7 +2394,7 @@ export class SweepScheduler {
 					entry.flapListenMs = 0
 					if (pair || !(entry.wasTraffic || entry.onsetSeen))
 						entry.flapRest = true
-					this.markCarrier(entry, true, track.obwHz)
+					this.markCarrier(entry, true)
 				}
 			}
 		} else if (isNew && entry.seenVisit !== v.serial) {
@@ -2210,11 +2453,10 @@ export class SweepScheduler {
 	 * Positive carrier evidence (a flap, or a hold that heard it on air without a break): from now
 	 * on it is held only under the carrier rules, and a follow of it in progress is cut to them.
 	 */
-	private markCarrier(m: FrequencyMemory, flap: boolean, obwHz: number): void {
+	private markCarrier(m: FrequencyMemory, flap: boolean): void {
 		if (m.evidence !== "carrier" && !m.onsetSeen && this.visit !== null)
 			this.visit.newlyQuiet = true
 		m.evidence = "carrier"
-		if (Number.isFinite(obwHz)) m.carrierObwHz = Math.max(m.carrierObwHz, obwHz)
 		m.flaps ||= flap
 		if (flap) m.suspect = false
 		this.recapHold(m)
@@ -2339,6 +2581,10 @@ export class SweepScheduler {
 			voice: "no",
 			voiceId: null,
 			voiceAskedAt: null,
+			heardVoiceId: null,
+			followAskedAt: null,
+			sessionSeen: false,
+			voiceBarred: false,
 			judged: false,
 			newlyQuiet: false,
 			clock: { ...emptyPhases(), kind: "command", at: now, heardMs: 0 },
@@ -2916,19 +3162,8 @@ export class SweepScheduler {
 				m.evidence === "traffic" || sampled
 					? this.spec.hold.maxHoldMs
 					: CARRIER_WATCH_MS
-			if (now - from >= unbroken && !voiceOnAir) {
-				const first = m.evidence !== "carrier"
-				this.markCarrier(m, false, t.narrowestObwHz)
-				// The watch heard its track step past the line's width before it gave the evidence
-				// (widerThanCarrier): only that visit's recording of that track is spared the carrier
-				// rules, and only for the frequency's first evidence, so a retry never re-arms it.
-				if (
-					first &&
-					this.visit !== null &&
-					t.obwHz > CARRIER_WIDTH_FACTOR * m.carrierObwHz
-				)
-					m.carrierStep = { visit: this.visit.serial, trackId: hold.trackId }
-			} else if ((sampled || voiceOnAir) && hold.watch && now >= hold.cap) {
+			if (now - from >= unbroken && !voiceOnAir) this.markCarrier(m, false)
+			else if ((sampled || voiceOnAir) && hold.watch && now >= hold.cap) {
 				// Every hop gets a coarse visit before it is held again; no carrier hold lengthens
 				// that sweep (a carrier's retry waits one sweep more).
 				m.watchAfter = this.coarseVisits + this.plan.hops.length
@@ -3174,7 +3409,13 @@ export class SweepScheduler {
 		hop.waitMs = 0
 		if (!v.revisit) for (const h of this.hops) h.voiceLock.delete(v.hopIndex)
 		const voiceHeld = v.voice !== "no"
-		if (voiceHeld) {
+		// A follow that heard a squelch close with no session to name it owes the same visits
+		// before the hop's next voice hold (Visit.voiceBarred), without the long-hold lock. So does
+		// a visit that leaves while the voiced transmission an analog hold heard is still on air
+		// (Visit.heardVoiceId with no voice hold: its end would have spent one), say a hold cut at L
+		// with that transmission evicted from its recorder slot: one transmission, then the sweep,
+		// with no activity revisit holding it again meanwhile (pickRevisit).
+		if (voiceHeld || v.voiceBarred || v.heardVoiceId !== null) {
 			hop.voiceLock = HopBits.allBut(this.plan.hops.length, v.hopIndex)
 		}
 		// A long hold that used more than one coarse sweep, a decoded follow that ran to L, or

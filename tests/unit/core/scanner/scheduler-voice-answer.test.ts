@@ -42,15 +42,25 @@ interface Visit {
 /** Hop `n` of the plan. */
 const hopHz = (n: number): number => BASE_HZ + n * STEP_HZ + 100_437
 
-/** A 3-hop sweep; `land` opens tracks on each epoch, `answer` is the recorder for the tuned hop. */
+/**
+ * A 3-hop sweep; `land` opens tracks on each epoch, `answer` is the recorder for the tuned hop,
+ * `during` runs after each block (ms since the epoch started).
+ */
 function drive(
 	answer: (hop: number, ms: number) => RecordingActivity,
 	land: (hop: number, s: SweepScheduler, visit: number) => void,
 	share = 0,
+	during?: (
+		hop: number,
+		s: SweepScheduler,
+		visit: number,
+		intoMs: number,
+	) => void,
 ) {
 	let clock = 0
 	let hop = 0
 	let settleAt: number | null = null
+	let epochAt = 0
 	const plan = makeHopPlan(
 		[0, 1, 2].map(i => BASE_HZ + i * STEP_HZ),
 		HALF_SPAN_HZ,
@@ -89,12 +99,14 @@ function drive(
 			if (clock >= settleAt) {
 				settleAt = null
 				apply(s.onEpochStarted(clock))
+				epochAt = clock
 				land(hop, s, visits.filter(v => v.hop === hop).length)
 			} else clock = settleAt
 			return
 		}
 		clock += BLOCK_MS
 		apply(s.onBlock(clock))
+		during?.(hop, s, visits.filter(v => v.hop === hop).length, clock - epochAt)
 		apply(s.tick(clock))
 	}
 	return {
@@ -130,6 +142,13 @@ const sighting = (id: string, hz: number, blocks = 8): TrackSnapshot => ({
 const voiceAnswer = (quietMs = 0): RecordingActivity => ({
 	voice: "a",
 	quietMs,
+})
+
+/** A voice answer of a session the recorder recorded at `hz` (verified voice history there). */
+const recordedVoice = (hz: number): RecordingActivity => ({
+	voice: "a",
+	quietMs: 0,
+	recordedHz: hz,
 })
 
 /** Visit of `hop` with nothing but the settle and its dwell. */
@@ -380,13 +399,21 @@ describe("a voice beside a line with carrier evidence", () => {
 	 */
 	const secondVisit = (
 		widths: readonly number[],
-		opts: { lineWidensTo?: number; id?: string; offsetHz?: number } = {},
+		opts: {
+			lineWidensTo?: number
+			id?: string
+			offsetHz?: number
+			answer?: RecordingActivity
+			voiceMs?: number
+		} = {},
 	) => {
 		let voiceFrom: number | null = null
 		const d = drive(
 			(hop, ms) =>
-				hop === 0 && voiceFrom !== null && ms < voiceFrom + 20_000
-					? voiceAnswer()
+				hop === 0 &&
+				voiceFrom !== null &&
+				ms < voiceFrom + (opts.voiceMs ?? 20_000)
+					? (opts.answer ?? voiceAnswer())
 					: false,
 			(hop, s, visit) => {
 				if (hop !== 0) return
@@ -449,13 +476,56 @@ describe("a voice beside a line with carrier evidence", () => {
 			COARSE_MS + 9_000,
 		)
 	})
+	/** A 29 s ID from the landing, recorded by the recorder (verified voice history). */
+	const VOICED_ID_MS = 29_000
+
+	it("the first catch after the evidence: a voice the recorder recorded there is held to its end", () => {
+		const verified = recordedVoice(hopHz(0) + 1_000)
+		const stay = secondVisit([4_000, 14_000], {
+			answer: verified,
+			voiceMs: VOICED_ID_MS,
+		})
+		expect(stay).toBeGreaterThanOrEqual(SETTLE_MS + VOICED_ID_MS)
+		expect(stay).toBeLessThanOrEqual(
+			SETTLE_MS + VOICED_ID_MS + RECHECK_MS + BLOCK_MS,
+		)
+	})
+
+	it("the carrier's own track, verified: held to its end too (a repeater's ID on its idle carrier)", () => {
+		const stay = secondVisit([4_000], {
+			id: "c",
+			offsetHz: 0,
+			answer: recordedVoice(hopHz(0)),
+			voiceMs: VOICED_ID_MS,
+		})
+		expect(stay).toBeGreaterThanOrEqual(SETTLE_MS + VOICED_ID_MS)
+	})
+
+	// The voice's session sits 9 kHz from the line (outside the line's 6.25 kHz), inside the track
+	// that took the line in (centred 4 kHz from the line, 12 kHz wide): its recording is of that track.
+	it("a session within the band of the track that took the line in is that frequency's history", () => {
+		const stay = secondVisit([4_000, 12_000], {
+			offsetHz: 4_000,
+			answer: recordedVoice(hopHz(0) + 9_000),
+			voiceMs: VOICED_ID_MS,
+		})
+		expect(stay).toBeGreaterThanOrEqual(SETTLE_MS + VOICED_ID_MS)
+	})
+
+	it("a session recorded 50 kHz away is no history of this frequency: capped", () => {
+		const stay = secondVisit([4_000, 14_000], {
+			answer: recordedVoice(hopHz(0) + 50_000),
+			voiceMs: VOICED_ID_MS,
+		})
+		expect(stay).toBeLessThan(COARSE_MS + 9_000)
+	})
 })
 
 describe("the watch that gives a line its first carrier evidence after its track widened", () => {
 	/**
 	 * Visit 1 of hop 0 watches track "c" (onset unseen) read 4 kHz, then `widthHz` (a voice keying
-	 * up beside the line joins its track), while the recorder answers `answer(ms into the visit)`:
-	 * a recording that is not voice, with no voice answer before the watch's evidence.
+	 * up beside the line joins its track), while the recorder answers `answer(ms into the visit)`.
+	 * Width is no exception: the visit that earns the evidence is under the carrier rules as any.
 	 */
 	const firstVisit = (
 		widthHz: number,
@@ -474,30 +544,49 @@ describe("the watch that gives a line its first carrier evidence after its track
 		return d
 	}
 
-	it("read 8 kHz (twice the line) at the evidence: the line, left at its watch", () => {
-		const d = firstVisit(8_000, () => true)
-		const stay = d.stayed(0, 1)
-		expect(stay).toBeGreaterThan(COARSE_MS + 7_000)
+	for (const widthHz of [8_000, 8_001, 14_000])
+		it(`read ${widthHz} Hz at the evidence, a recording that is not voice: left at its watch`, () => {
+			const stay = firstVisit(widthHz, () => true).stayed(0, 1)
+			expect(stay).toBeGreaterThan(COARSE_MS + 7_000)
+			expect(stay).toBeLessThan(COARSE_MS + 9_000)
+		})
+
+	// Review repro: a false voice answer from 11 to 50 s on the visit that earned the evidence held
+	// the hop 50 150 ms (the L bound is 19 800).
+	it("a bare voice answer from 11 to 50 s after the evidence stays under the L bound: left at its watch", () => {
+		const stay = firstVisit(14_000, into =>
+			into < 11_000 ? true : into < 50_000 ? voiceAnswer() : false,
+		).stayed(0, 1)
+		expect(stay).toBeLessThan(COARSE_MS + L3)
 		expect(stay).toBeLessThan(COARSE_MS + 9_000)
 	})
 
-	it("read 8001 Hz: its recording is kept on that visit, to what L has left", () => {
-		const d = firstVisit(8_001, () => true)
-		const stay = d.stayed(0, 1)
+	// The recorder voiced the session before the watch's end, with no voice on air at that moment:
+	// verified voice history all the same, so the evidence does not cap it.
+	it("a recorded session with no voice on air at the evidence is history: kept to what L has left", () => {
+		const recorded: RecordingActivity = {
+			recording: true,
+			recordedHz: hopHz(0) + 3_000,
+		}
+		const stay = firstVisit(14_000, () => recorded).stayed(0, 1)
 		expect(stay).toBeGreaterThanOrEqual(COARSE_MS + L3)
 		expect(stay).toBeLessThanOrEqual(COARSE_MS + L3 + RECHECK_MS)
 	})
 
-	it("and a voice answer after the evidence gets its voice hold, to the voice's end", () => {
-		const d = firstVisit(8_001, into =>
-			into < 10_000 ? true : into < 30_000 ? voiceAnswer() : false,
-		)
-		const stay = d.stayed(0, 1)
+	it("and its voice answering after the evidence gets the voice hold, to the voice's end", () => {
+		const hz = hopHz(0) + 3_000
+		const stay = firstVisit(14_000, into =>
+			into < 10_000
+				? { recording: true, recordedHz: hz }
+				: into < 30_000
+					? recordedVoice(hz)
+					: false,
+		).stayed(0, 1)
 		expect(stay).toBeGreaterThanOrEqual(COARSE_MS + 30_000 - BLOCK_MS * 3)
 		expect(stay).toBeLessThanOrEqual(COARSE_MS + 30_000 + RECHECK_MS)
 	})
 
-	it("the next visit of that frequency is under the carrier rules, the same widening and answer again", () => {
+	it("the next visit of that frequency is under the carrier rules too, the same widening and answer again", () => {
 		const d = drive(
 			(hop, ms) => hop === 0 && ms < 120_000,
 			(hop, s, visit) => {
@@ -508,8 +597,133 @@ describe("the watch that gives a line its first carrier evidence after its track
 					})
 			},
 		)
-		expect(d.stayed(0, 1)).toBeGreaterThanOrEqual(COARSE_MS + L3)
+		expect(d.stayed(0, 1)).toBeLessThan(COARSE_MS + 9_000)
 		expect(d.stayed(0, 2)).toBeLessThan(COARSE_MS + 9_000)
+	})
+})
+
+describe("verified voice history: carrier evidence never caps it", () => {
+	/**
+	 * Visit 1 of hop 0 watches line "c" (carrier evidence); visit 2 the recorder records a voiced
+	 * session on it for 3 s; then hop 0 hears nothing for `silentVisits` visits; on the next it
+	 * hears the frequency flap (a close and a reopen one block apart: carrier evidence again) and the
+	 * recorder answers bare voice for 25 s from the landing.
+	 */
+	const afterHistory = (silentVisits: number) => {
+		const back = 3 + silentVisits
+		let voiceFrom: number | null = null
+		let verifiedTo: number | null = null
+		const d = drive(
+			(hop, ms) => {
+				if (hop !== 0) return false
+				if (verifiedTo !== null && ms < verifiedTo)
+					return recordedVoice(hopHz(0))
+				return voiceFrom !== null && ms >= voiceFrom && ms < voiceFrom + 25_000
+					? voiceAnswer()
+					: false
+			},
+			(hop, s, visit) => {
+				if (hop !== 0) return
+				if (visit === 1)
+					s.onTrack({ ...sighting("c", hopHz(0)), obwHz: 4_000 }, false, 0, {
+						followOnAir: true,
+					})
+				if (visit === 2) {
+					verifiedTo = d.now() + 3_000
+					s.onTrack({ ...sighting("c2", hopHz(0)), obwHz: 4_000 }, false, 0, {
+						followOnAir: true,
+					})
+				}
+				if (visit === back) {
+					voiceFrom = d.now()
+					s.onTrack({ ...sighting("f1", hopHz(0)), obwHz: 4_000 }, false, 0, {
+						followOnAir: true,
+					})
+				}
+			},
+			0,
+			(hop, s, visit, intoMs) => {
+				if (hop !== 0 || visit !== back) return
+				if (intoMs === BLOCK_MS) s.onTrackClosed("f1")
+				if (intoMs === BLOCK_MS * 2)
+					s.onTrack({ ...sighting("f2", hopHz(0)), obwHz: 4_000 }, false, 0, {
+						followOnAir: true,
+					})
+			},
+		)
+		expect(d.stayed(0, 1)).toBeGreaterThan(COARSE_MS + 7_000)
+		expect(d.stayed(0, 2)).toBeGreaterThanOrEqual(SETTLE_MS + 3_000)
+		return d.stayed(0, back)
+	}
+
+	it("is kept across visits: 9 silent visits later, a flap and a bare voice answer still get the voice hold", () => {
+		expect(afterHistory(9)).toBeGreaterThan(COARSE_MS + L3 + 2_000)
+	})
+
+	it("forgetting (10 silent visits) clears it with the evidence: the returning carrier is capped again", () => {
+		expect(afterHistory(10)).toBeLessThan(COARSE_MS + 9_000)
+	})
+})
+
+describe("a voiced transmission whose squelch closed under the recorder's hang (voiceEnded)", () => {
+	/**
+	 * Hop 0: a recorded voice for `voiceMs` from the landing, then the recorder's recording with no
+	 * voice (`after`) for 2 s (the reply joined in its hang, not voiced yet), then the reply's voice,
+	 * another name, also recorded, for 25 s.
+	 */
+	const reply = (
+		after: RecordingActivity,
+		voiceMs = 5_000,
+		landWith: "voice" | "after" = "voice",
+	) => {
+		let landedAt: number | null = null
+		const d = drive(
+			(hop, ms) => {
+				if (hop !== 0 || landedAt === null) return false
+				const into = ms - landedAt
+				const first = landWith === "voice" ? voiceMs : 0
+				if (into < first) return recordedVoice(hopHz(0))
+				if (into < first + 2_000) return after
+				if (into < first + 27_000)
+					return { voice: "b", quietMs: 0, recordedHz: hopHz(0) }
+				return false
+			},
+			(hop, s, visit) => {
+				if (hop !== 0 || visit !== 1) return
+				landedAt = d.now()
+				s.onTrack(sighting("a", hopHz(0)), false, 0)
+			},
+		)
+		return d
+	}
+	const ended: RecordingActivity = {
+		recording: true,
+		recordedHz: hopHz(0),
+		voiceEnded: true,
+	}
+
+	it("ends the voice hold at the first re-check that reads it, history or not: the forced sweep follows", () => {
+		const d = reply(ended)
+		const stay = d.stayed(0, 1)
+		expect(stay).toBeGreaterThanOrEqual(SETTLE_MS + 5_000)
+		expect(stay).toBeLessThanOrEqual(SETTLE_MS + 5_000 + RECHECK_MS)
+		d.stayed(0, 2)
+		expect(d.visits.slice(0, 4).map(v => v.hop)).toEqual([0, 1, 2, 0])
+	})
+
+	it("a recording still of the voiced transmission (no voiceEnded) is kept, to what L has left", () => {
+		const d = reply({ recording: true, recordedHz: hopHz(0) })
+		// Kept past the 2 s without voice, and the reply's voice then rides the spent hold to L.
+		expect(d.stayed(0, 1)).toBeGreaterThanOrEqual(SETTLE_MS + L3 - RECHECK_MS)
+	})
+
+	it("read at the keep, with no voice hold before it, it is not kept and still owes the coarse sweep", () => {
+		const d = reply(ended, 0, "after")
+		expect(d.stayed(0, 1)).toBeLessThanOrEqual(COARSE_MS + RECHECK_MS)
+		d.stayed(0, 2)
+		expect(d.visits.slice(0, 4).map(v => v.hop)).toEqual([0, 1, 2, 0])
+		// The reply on air at the next visit is a transmission of its own: it gets its voice hold.
+		expect(d.stayed(0, 2)).toBeGreaterThan(COARSE_MS + L3)
 	})
 })
 

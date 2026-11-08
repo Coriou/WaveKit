@@ -16,11 +16,20 @@ import { CTCSS_TEST_HZ, NfmSource } from "./wideband-nfm-fixtures.js"
 import {
 	CENTRE,
 	FS,
+	LOW,
+	LOW_FS,
+	LOW_OFFSET,
 	OFFSET,
 	harness,
 	input,
 	snapshot,
 } from "./wideband-recorder-harness.js"
+
+/**
+ * A recording that is not voice of a classed, voiced session: its frequency is the sweep's verified
+ * voice history (RecordedSession).
+ */
+const RECORDED = { recording: true, recordedHz: CENTRE + OFFSET }
 
 type Harness = ReturnType<typeof harness>
 
@@ -410,6 +419,56 @@ describe("WidebandAnalogRecorder sweep-hold hook", () => {
 	}, 60_000)
 })
 
+describe("WidebandAnalogRecorder verified voice history (recordedHz)", () => {
+	it("a voiced, classed session the store never admitted answers voice with no recordedHz, and no history after it", async () => {
+		const at = { stream: 1, epoch: 1 }
+		const h = harness({ fs: LOW_FS, offset: LOW_OFFSET })
+		await h.feed(1, false)
+		const onset = h.engine.liveEdge()
+		// No association: classed analog-fm and voiced, but no file operation can begin.
+		const report = () =>
+			h.rec.track(
+				input("o", snapshot("o", onset, h.engine.liveEdge(), LOW), {
+					analogFm: true,
+					discoveryId: null,
+				}),
+			)
+		await h.feed(3, true, report)
+		expect(h.ops).toEqual([])
+		const voice = h.rec.recordingActive("rtl", at)
+		expect(voice).toMatchObject({ voice: "o" })
+		expect(voice).not.toHaveProperty("recordedHz")
+		// The carrier after the voice: a recording, as true, never the session's history.
+		h.src.setVoice(false)
+		await h.feed(4, true, report)
+		expect(h.rec.recordingActive("rtl", at)).toBe(true)
+	}, 60_000)
+
+	it("the same session answers recordedHz from the store's admission of its file on", async () => {
+		const at = { stream: 1, epoch: 1 }
+		const h = harness({ fs: LOW_FS, offset: LOW_OFFSET })
+		await h.feed(1, false)
+		const onset = h.engine.liveEdge()
+		let discoveryId: string | null = null
+		const report = () =>
+			h.rec.track(
+				input("o", snapshot("o", onset, h.engine.liveEdge(), LOW), {
+					analogFm: true,
+					discoveryId,
+				}),
+			)
+		await h.feed(3, true, report)
+		expect(h.rec.recordingActive("rtl", at)).not.toHaveProperty("recordedHz")
+		discoveryId = "d_1"
+		await h.feed(0.5, true, report)
+		expect(h.ops).toHaveLength(1)
+		expect(h.rec.recordingActive("rtl", at)).toMatchObject({
+			voice: "o",
+			recordedHz: CENTRE + LOW_OFFSET,
+		})
+	}, 60_000)
+})
+
 describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", () => {
 	/** A classed, voiced over "o" on air for `voiceS` seconds of voice; returns its onset. */
 	async function voicedOver(h: Harness, id: string, voiceS: number) {
@@ -434,9 +493,9 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		// stated upper bound, pinned: 1.5 + 2 s fed).
 		await h.feed(2, true, report)
 		// The carrier stays keyed with no voice: the sweep keeps the hop within L only.
-		expect(h.rec.recordingActive("rtl", at)).toBe(true)
+		expect(h.rec.recordingActive("rtl", at)).toEqual(RECORDED)
 		await h.feed(5, true, report)
-		expect(h.rec.recordingActive("rtl", at)).toBe(true)
+		expect(h.rec.recordingActive("rtl", at)).toEqual(RECORDED)
 		const end = h.engine.liveEdge()
 		await h.feed(0.3, false)
 		h.rec.closed("o", snapshot("o", onset, end), null)
@@ -497,6 +556,12 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 			h.rec.track(input("b", snapshot("b", onsetB, h.engine.liveEdge())))
 		await h.feed(1, true, reportB)
 		expect(h.rec.recordingActive("rtl", at)).toMatchObject({ voice: "a" })
+		// A split or handoff opened while "a" was open: once the voice is quiet, the same over's
+		// recording, never an ended one.
+		h.src.setVoice(false)
+		await h.feed(3.5, true, reportB)
+		expect(h.rec.recordingActive("rtl", at)).toEqual(RECORDED)
+		h.src.setVoice(true)
 		const endB = h.engine.liveEdge()
 		await h.feed(0.3, false)
 		h.rec.closed("b", snapshot("b", onsetB, endB), null)
@@ -523,7 +588,12 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		const report2 = () =>
 			h.rec.track(input("o2", snapshot("o2", onset2, h.engine.liveEdge())))
 		await h.feed(0.4, true, report2)
-		expect(h.rec.recordingActive("rtl", at)).toBe(true)
+		// The first over's voice lies before the squelch reopened: that transmission ended, and the
+		// sweep owes its coarse sweep rather than keep the hop for the reply.
+		expect(h.rec.recordingActive("rtl", at)).toEqual({
+			...RECORDED,
+			voiceEnded: true,
+		})
 		h.src.setVoice(true)
 		await h.feed(1.5, true, report2)
 		// A scheduler that never saw the false answers (an event-loop stall across the
@@ -536,6 +606,80 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		await h.feed(3.5, false)
 		expect(h.ops).toHaveLength(1)
 		expect(h.ops[0]!.outcome).toBe("finalized")
+	}, 60_000)
+
+	/**
+	 * A voiced over "a", closed with the service's null cut (a squelch close and the tracker's
+	 * max-duration rollover read the same) and followed by "b" opening `gapSamples` after the close's
+	 * last sample, with voice on air throughout unless `silenceS` of RF silence is fed first.
+	 */
+	async function closeThenOpen(gapSamples: number, silenceS = 0) {
+		const h = harness()
+		await h.feed(1, false)
+		const a = await voicedOver(h, "a", 3)
+		expect(h.rec.recordingActive("rtl", at)).toMatchObject({ voice: "a" })
+		const end = h.engine.liveEdge()
+		h.rec.closed("a", snapshot("a", a.onset, end), null)
+		if (silenceS > 0) await h.feed(silenceS, false)
+		else await h.feed(0.075, true)
+		const onsetB = end + gapSamples
+		const reportB = () =>
+			h.rec.track(input("b", snapshot("b", onsetB, h.engine.liveEdge())))
+		reportB()
+		return { h, reportB }
+	}
+	const BLOCK = (50 * FS) / 1000
+
+	for (const [label, gap] of [
+		["at the same sample", 0],
+		["one engine block (50 ms) apart", BLOCK],
+	] as const)
+		it(`a max-duration rollover ${label}, voice unbroken, is the same transmission: never voiceEnded, the voice keeps its name`, async () => {
+			const { h, reportB } = await closeThenOpen(gap)
+			expect(h.rec.recordingActive("rtl", at)).toMatchObject({ voice: "a" })
+			await h.feed(0.5, true, reportB)
+			expect(h.rec.recordingActive("rtl", at)).toMatchObject({ voice: "a" })
+			// Voice stops on the successor's carrier: a recording of the same transmission.
+			h.src.setVoice(false)
+			await h.feed(3.5, true, reportB)
+			expect(h.rec.recordingActive("rtl", at)).toEqual(RECORDED)
+		}, 60_000)
+
+	it("one sample past one engine block between the close and the next open is a reopening: the voiced transmission ended", async () => {
+		const { h } = await closeThenOpen(BLOCK + 1)
+		expect(h.rec.recordingActive("rtl", at)).toEqual({
+			...RECORDED,
+			voiceEnded: true,
+		})
+	}, 60_000)
+
+	it("a real gap (300 ms of RF silence) between the close and the next open is a reopening: the voiced transmission ended", async () => {
+		const { h } = await closeThenOpen((0.3 * FS) | 0, 0.3)
+		expect(h.rec.recordingActive("rtl", at)).toEqual({
+			...RECORDED,
+			voiceEnded: true,
+		})
+	}, 60_000)
+
+	it("a close the service cut never makes the next open a reopening", async () => {
+		const h = harness()
+		await h.feed(1, false)
+		const a = await voicedOver(h, "a", 3)
+		const end = h.engine.liveEdge()
+		h.rec.closed("a", snapshot("a", a.onset, end), "epoch-changed")
+		await h.feed(0.3, false)
+		const onsetB = h.engine.liveEdge()
+		h.rec.track(input("b", snapshot("b", onsetB, onsetB)))
+		expect(h.rec.recordingActive("rtl", at)).not.toHaveProperty("voiceEnded")
+		const sessions = [
+			...(
+				h.rec as unknown as {
+					sessions: Map<string, { reopenAt: number | null }>
+				}
+			).sessions.values(),
+		]
+		expect(sessions.length).toBeGreaterThan(0)
+		for (const s of sessions) expect(s.reopenAt).toBeNull()
 	}, 60_000)
 
 	it(`the window bound: voice with the newest judged audio exactly ${WIDEBAND_VOICE_ON_AIR_MS} ms (2 048 000 samples at 1.024 Msps) past the last voiced window, true one sample later`, async () => {
@@ -556,7 +700,7 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		session.judgedTo = voiceAt + window
 		expect(h.rec.recordingActive("rtl", at)).toMatchObject({ voice: "o" })
 		session.judgedTo = voiceAt + window + 1
-		expect(h.rec.recordingActive("rtl", at)).toBe(true)
+		expect(h.rec.recordingActive("rtl", at)).toEqual(RECORDED)
 		report()
 	}, 60_000)
 })

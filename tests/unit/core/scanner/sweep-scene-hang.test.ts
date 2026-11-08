@@ -29,6 +29,23 @@ const L_MS = 18_400
 const FALL_BACK_MS = 1_000 + 500 + 1_100 + 250
 /** What the tune and the two 25 ms chunks either side of it add to a hold as the report reads it. */
 const READ_MS = 100
+/** Longest hold of a QSO under a hang: L, the rest of the 8 s over it fell in, the fall-back. */
+const OVER_MS = 8_000
+const HOLD_BOUND_MS = L_MS + OVER_MS + FALL_BACK_MS + READ_MS
+/** The QSOs' last word. */
+const QSO_END_MS = 60_000
+/**
+ * Scene end of the hold-bound tests: the bound past the last word, with a second to spare, so a
+ * hold that started late is released before the scene ends instead of being cut by it (a cut
+ * hold would read short and pass the bound whatever its length).
+ */
+const BOUND_SCENE_MS = QSO_END_MS + HOLD_BOUND_MS + 1_000
+
+/** Every hold of `hop` was released before the scene ended (none was cut by the end). */
+const released = (r: SceneReport, hop: number, durationMs: number) =>
+	r.holds
+		.filter(h => h.hopIndex === hop)
+		.every(h => h.atMs + SETTLE_MS + h.ms < durationMs)
 
 const heldOn = (r: SceneReport, hop: number) =>
 	r.holds.filter(h => h.hopIndex === hop).map(h => h.ms)
@@ -51,11 +68,10 @@ describe("a QSO through a repeater's hang", () => {
 	// A 2 s turnaround under a 2.5 s hang: it reads about 1700 ms of quiet, over the 1000 ms limit
 	// past L.
 	it("the hold ends at the first turnaround past L, the forced sweep runs, and the next hold follows", async () => {
-		const OVER_MS = 8_000
 		const talk = qso({
 			hz: SIGNAL_HZ,
 			fromMs: 2_000,
-			toMs: 60_000,
+			toMs: QSO_END_MS,
 			seed: 1,
 			overMs: [OVER_MS, OVER_MS],
 			replyMs: [2_000, 2_000],
@@ -64,16 +80,16 @@ describe("a QSO through a repeater's hang", () => {
 		// One carrier from the first word to the last: the track never closes.
 		expect(talk.emitters).toHaveLength(1)
 		const r = await scene(
-			65_000,
+			BOUND_SCENE_MS,
 			talk.emitters,
 			talk.overs.map(o => ({ hz: SIGNAL_HZ, ...o })),
 		)
 		expect(r.hops).toEqual(HOPS)
 		const holds = heldOn(r, SIGNAL_HOP)
 		expect(holds.length).toBeGreaterThanOrEqual(2)
+		expect(released(r, SIGNAL_HOP, BOUND_SCENE_MS)).toBe(true)
 		// L, then the rest of the over it fell in, then the fall-back; never to hold.maxHoldMs.
-		for (const ms of holds)
-			expect(ms).toBeLessThanOrEqual(L_MS + OVER_MS + FALL_BACK_MS + READ_MS)
+		for (const ms of holds) expect(ms).toBeLessThanOrEqual(HOLD_BOUND_MS)
 		expect(r.unpaidSweeps).toBe(0)
 	}, 300_000)
 
@@ -83,11 +99,10 @@ describe("a QSO through a repeater's hang", () => {
 	// to `hold.maxHoldMs` with nobody talking. A speaker's pause of 1.4 s or more past L reads the same
 	// and is cut too (the split file).
 	it("1.5 s turnarounds under a 1.5 s hang: each hold ends at its first turnaround past L, never at hold.maxHoldMs", async () => {
-		const OVER_MS = 8_000
 		const talk = qso({
 			hz: SIGNAL_HZ,
 			fromMs: 2_000,
-			toMs: 60_000,
+			toMs: QSO_END_MS,
 			seed: 1,
 			overMs: [OVER_MS, OVER_MS],
 			replyMs: [1_500, 1_500],
@@ -95,15 +110,15 @@ describe("a QSO through a repeater's hang", () => {
 		})
 		expect(talk.emitters).toHaveLength(1)
 		const r = await scene(
-			65_000,
+			BOUND_SCENE_MS,
 			talk.emitters,
 			talk.overs.map(o => ({ hz: SIGNAL_HZ, ...o })),
 		)
 		expect(r.hops).toEqual(HOPS)
 		const holds = heldOn(r, SIGNAL_HOP)
 		expect(holds.length).toBeGreaterThanOrEqual(2)
-		for (const ms of holds)
-			expect(ms).toBeLessThanOrEqual(L_MS + OVER_MS + FALL_BACK_MS + READ_MS)
+		expect(released(r, SIGNAL_HOP, BOUND_SCENE_MS)).toBe(true)
+		for (const ms of holds) expect(ms).toBeLessThanOrEqual(HOLD_BOUND_MS)
 		expect(r.unpaidSweeps).toBe(0)
 	}, 300_000)
 

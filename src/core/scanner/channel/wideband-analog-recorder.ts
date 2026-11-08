@@ -82,7 +82,7 @@ import {
 	VOICE_WINDOW_BLOCKS,
 } from "./voice-activity.js"
 import { RecorderDecisions, type ReceiptDetail } from "./recorder-decisions.js"
-import type { RecordingActivity } from "../scheduler.js"
+import type { RecordingActivity, VoiceOnAir } from "../scheduler.js"
 
 /** Same bound as the channel-tier trigger: a 25 kHz NFM channel's occupied bandwidth. */
 export const WIDEBAND_MAX_OBW_HZ = 16_000
@@ -405,6 +405,15 @@ export const WIDEBAND_MAX_SILENCE_GAP_MS = 1_000
  * after a carrier drops (which is loud and not a carrier's quieted audio) stays out.
  */
 export const WIDEBAND_GATE_EDGE_TRIM_MS = 100
+/**
+ * A track opening while none of its session is open is a squelch reopening (Session.reopenAt:
+ * the transmission before it ended) only when it starts more than this after the last close's
+ * last sample: one 50 ms engine block, the step the engine reports a track's samples in. The
+ * tracker's max-duration rollover closes a track and opens its successor at the same sample, with
+ * no RF silence between, and the service reports that close as it does a squelch close; a real
+ * squelch close needs the tracker's quiet hang first, far longer than a block.
+ */
+export const WIDEBAND_REOPEN_GAP_MS = 50
 /**
  * Activity intervals kept per session (open tracks and closed ones not yet judged). Past it the
  * oldest closed span goes; when every one is open the new span is not kept (an older open span
@@ -811,6 +820,36 @@ interface Session {
 	 * no track is open (the squelch closed: the next over gets a new name).
 	 */
 	voiceTx: string | null
+	/**
+	 * Start (input sample) of the latest track that opened while no track of the session was open
+	 * (the squelch had closed and reopened, a turnaround: another transmission, joined by `hangMs`);
+	 * null before any. A voice heard before it (`voiceAt` earlier) belongs to a transmission that has
+	 * ended (RecordedSession.voiceEnded). A track split or handoff opens while another is open, so it
+	 * never moves this, and neither does an administrative close (lastClose): a track opening
+	 * within WIDEBAND_REOPEN_GAP_MS of that close's last sample (the tracker's max-duration rollover
+	 * closes one track and opens the next at the same sample, with no RF silence between), or
+	 * after a close the service cut (a retune, a stream change).
+	 */
+	reopenAt: number | null
+	/**
+	 * The close that left no track of the session open, if the latest: its last input sample,
+	 * whether the service cut it (`cut` not null) rather than ending it on the air (a squelch
+	 * close or a max-duration rollover, which the service both reports with `cut` null), the
+	 * closed track's start and the voiced name it ended with. A rollover's successor carries the
+	 * last two on (noteActivity): it is the same transmission. Null while a track is open or before
+	 * any close.
+	 */
+	lastClose: {
+		readonly at: number
+		readonly cut: boolean
+		readonly start: number
+		readonly voiceTx: string | null
+	} | null
+	/**
+	 * The store admitted a file operation of this session (its `ready` resolved): only then is the
+	 * session the frequency's verified voice history (recordedHz). Sticky for the session.
+	 */
+	admitted: boolean
 	readonly observations: Set<string>
 	/** Track spans per observation (open: still active), the voice gate's input window. */
 	readonly activity: Map<string, { start: number; last: number; open: boolean }>
@@ -959,6 +998,11 @@ function visitKey(at: {
 	return `${at.stream}:${at.epoch}`
 }
 
+/** A RecordedSession answer whose voiced transmission ended (RecordedSession.voiceEnded). */
+function voiceEnded(a: RecordingActivity): boolean {
+	return typeof a === "object" && "recording" in a && a.voiceEnded === true
+}
+
 /**
  * Whether any joined track of `s` is open, and the voiced one (voiceOnAir): the open span the
  * last voiced meter window lies in, judged at most WIDEBAND_VOICE_ON_AIR_MS ago; of several, the
@@ -1007,6 +1051,24 @@ function raisedBy(
 	return observationId === s.owner ? "snapshot" : "joined"
 }
 
+/**
+ * Grants `id` a waiver with its class provenance (`toneOnly`) in one bounded map: a grant is the
+ * newest entry, and past `limit` (MAX_REMEMBERED) the oldest waiver goes with its provenance.
+ */
+export function rememberWaiver(
+	map: Map<string, boolean>,
+	id: string,
+	toneOnly: boolean,
+	limit = MAX_REMEMBERED,
+): void {
+	map.delete(id)
+	map.set(id, toneOnly)
+	if (map.size > limit) {
+		const oldest = map.keys().next()
+		if (oldest.done !== true) map.delete(oldest.value)
+	}
+}
+
 /** Adds `id` to a bounded remembered set (the oldest entry goes past MAX_REMEMBERED). */
 function remember(set: Set<string>, id: string): void {
 	set.add(id)
@@ -1035,15 +1097,14 @@ export class WidebandAnalogRecorder {
 	/**
 	 * Observations a classed, voiced recording keeps over a late spur or IQ-image flag
 	 * (keepsOverArtefact), until a veto or refusal of their session revokes it (revokeWaivers) or
-	 * they close (bounded by MAX_REMEMBERED).
+	 * they close (bounded by MAX_REMEMBERED, the oldest evicted), each with its class provenance:
+	 * true while its session is classed by its own audio only (`toneOnly`), so a definite other
+	 * class (classVetoes) still ends the waiver once the session itself is gone. A snapshot that
+	 * classes the session analog-fm clears it (classedBySnapshot): the session was classed for
+	 * real, and a later digital verdict no longer revokes what it recorded. One structure, so a
+	 * waiver and its provenance are evicted together.
 	 */
-	private readonly waived = new Set<string>()
-	/**
-	 * Of `waived`, the observations whose session was classed by its own audio only (`toneOnly`) when
-	 * the waiver was granted: a definite other class (classVetoes) still ends their waiver once the
-	 * session itself is gone. Same bound and life as `waived`.
-	 */
-	private readonly waivedToneOnly = new Set<string>()
+	private readonly waived = new Map<string, boolean>()
 	/**
 	 * Observations whose spectrally digital shadow expired (WIDEBAND_DIGITAL_CLASS_MS), with the
 	 * visit (stream and epoch) it expired in: no other shadow starts for them in that visit
@@ -1066,6 +1127,17 @@ export class WidebandAnalogRecorder {
 	private readonly yieldedTo = new Map<
 		string,
 		{ sourceId: string; candidate: string; until: number }
+	>()
+	/**
+	 * Voiced transmissions whose session gave its slot up (evict) while their track is still open,
+	 * by name (VoiceOnAir.voice) → the window they are on air in and their open observations
+	 * (noteUnrecorded): recordingActive lists each as "unrecorded" (Transmissions) until the last
+	 * of those observations closes, so an eviction is never read as the transmission's end.
+	 * Bounded by MAX_REMEMBERED (the oldest dropped).
+	 */
+	private readonly unrecorded = new Map<
+		string,
+		{ sourceId: string; stream: number; epoch: number; open: Set<string> }
 	>()
 	/** Observations whose store admission failed once: the next failure refuses them. */
 	private readonly retried = new Set<string>()
@@ -1158,14 +1230,11 @@ export class WidebandAnalogRecorder {
 		const id = this.byObservation.get(observationId)
 		const s = id === undefined ? undefined : this.sessions.get(id)
 		if (!s || s.done) {
-			if (!this.waived.has(observationId)) return false
+			const toneOnly = this.waived.get(observationId)
+			if (toneOnly === undefined) return false
 			// The session is gone, its class provenance is not: a verified other class still vetoes
 			// a recording classed by its own audio only.
-			if (
-				this.waivedToneOnly.has(observationId) &&
-				!info.analogFm &&
-				info.nonAnalog === true
-			)
+			if (toneOnly && !info.analogFm && info.nonAnalog === true)
 				return this.revoke(observationId)
 			return true
 		}
@@ -1178,25 +1247,28 @@ export class WidebandAnalogRecorder {
 			classVetoes(s, { ...info, discoveryId: null })
 		)
 			return this.revoke(observationId)
-		remember(this.waived, observationId)
-		if (s.toneOnly) remember(this.waivedToneOnly, observationId)
-		else this.waivedToneOnly.delete(observationId)
+		rememberWaiver(this.waived, observationId, s.toneOnly)
 		return true
 	}
 
 	/** Ends `observationId`'s waiver (keepsOverArtefact); false, the answer it then gives. */
 	private revoke(observationId: string): false {
 		this.waived.delete(observationId)
-		this.waivedToneOnly.delete(observationId)
 		return false
+	}
+
+	/**
+	 * A snapshot classed `s` analog-fm after a class by its own audio only (`toneOnly` cleared): its
+	 * waivers' provenance follows, so a later digital verdict cannot revoke them once `s` is gone.
+	 */
+	private classedBySnapshot(s: Session, observationId: string): void {
+		for (const id of [observationId, ...s.observations])
+			if (this.waived.get(id) === true) this.waived.set(id, false)
 	}
 
 	/** A veto, refusal or failed file of `s`: none of its observations keeps a waiver. */
 	private revokeWaivers(s: Session): void {
-		for (const id of s.observations) {
-			this.waived.delete(id)
-			this.waivedToneOnly.delete(id)
-		}
+		for (const id of s.observations) this.waived.delete(id)
 	}
 
 	/**
@@ -1214,20 +1286,40 @@ export class WidebandAnalogRecorder {
 	 * turnaround opens another track) while voice is on air in a track still open: the last voiced
 	 * meter window lies inside an open track's span and the newest judged audio is at most
 	 * WIDEBAND_VOICE_ON_AIR_MS past it (the scheduler may keep the hop up to `hold.maxHoldMs` while
-	 * the name stays the same, RecordingActivity); true while a track is open with no
-	 * voice that recent (a carrier or a repeater hang after the voice, a stuck carrier: kept within
-	 * L only); false once no joined track is open (the over's squelch closed: the recorder's
-	 * `hangMs` still joins the next over into the same file, the sweep does not wait for it).
+	 * the name stays the same, RecordingActivity); a recording that is not voice while a track is
+	 * open with no voice that recent (a carrier or a repeater hang after the voice, a stuck carrier:
+	 * kept within L only), as true, or as a RecordedSession when it says more: `voiceEnded` when that
+	 * voice lies before the squelch last closed and reopened (Session.reopenAt: the voiced
+	 * transmission ended, the open track is another one; the sweep owes its coarse sweep and is not
+	 * kept); false once no joined track is open (the over's squelch closed: the recorder's `hangMs`
+	 * still joins the next over into the same file, the sweep does not wait for it). Either answer
+	 * names the session's frequency as `recordedHz` (its verified voice history) only once the store
+	 * admitted a file operation of the session (Session.admitted): a voiced session that was never
+	 * admitted (no association, a refused store) records nothing and grants no history.
 	 * "judging" while a classed session with an open track has not been voiced and has heard under
 	 * WIDEBAND_EVICT_MIN_HEARD_FRAMES (WIDEBAND_VOICE_JUDGE_MS from its first audio): its answer is
 	 * still to come, whichever way it goes. A shadow or one of another stream or an older epoch (the
 	 * previous hop's window) answers false, so an unclassed shadow on a carrier costs a visit nothing.
+	 * Of several classed, voiced sessions in the window (two channels), the first voiced one answers
+	 * (a session opened earlier first), and an object answer then also carries every voiced
+	 * transmission still on air in the window, by name (VoiceOnAir.transmissions): the scheduler
+	 * judges the transmission it heard by its own state, never by another channel's (a neighbour's
+	 * voice is no end of it). A `true` answer then becomes `{ recording: true }` to carry them.
+	 * A voiced transmission whose session gave its slot up while its track is still open (evict,
+	 * noteUnrecorded) is listed too, as "unrecorded", until that track closes, whatever else the
+	 * window holds: an eviction is no end of the transmission. With no answer of a session to carry
+	 * the list (false, "judging"), the answer is `{ recording: true, bare, transmissions }`, `bare`
+	 * being that answer, which is what it reads as for any transmission not listed.
 	 */
 	recordingActive(
 		sourceId: string,
 		at: { readonly stream: number; readonly epoch: number },
 	): RecordingActivity {
 		let answer: RecordingActivity = false
+		let voice: VoiceOnAir | null = null
+		let sessions = 0
+		const transmissions: Record<string, VoiceOnAir | "quiet" | "unrecorded"> =
+			{}
 		for (const s of this.sessions.values()) {
 			if (
 				s.done ||
@@ -1242,11 +1334,53 @@ export class WidebandAnalogRecorder {
 					answer = "judging"
 				continue
 			}
+			// Every session is judged on every ask (its name and its quiet since the last answer),
+			// not only until the first voiced one: each one's state is reported.
+			sessions++
 			const v = this.voiceOnAir(s)
-			if (typeof v === "object") return v
-			if (answer === false) answer = v
+			if (typeof v === "object" && "voice" in v) {
+				transmissions[v.voice] = v
+				voice ??= v
+				continue
+			}
+			// Voiced earlier in the transmission still open (a pause, a carrier after the voice).
+			if (s.voiceTx !== null && v !== false && !voiceEnded(v))
+				transmissions[s.voiceTx] = "quiet"
+			// A recording still running (true, or one not past its voice) outranks one whose voiced
+			// transmission ended (voiceEnded): the window still records a transmission.
+			if (
+				answer === false ||
+				(voiceEnded(answer) && v !== false && !voiceEnded(v))
+			)
+				answer = v
 		}
-		return answer
+		// Evicted while on air (Session evict, noteUnrecorded): listed, no session records it.
+		let unrecorded = 0
+		for (const [name, u] of this.unrecorded) {
+			if (
+				u.sourceId !== sourceId ||
+				u.stream !== at.stream ||
+				u.epoch !== at.epoch ||
+				Object.hasOwn(transmissions, name)
+			)
+				continue
+			transmissions[name] = "unrecorded"
+			unrecorded++
+		}
+		const first = voice ?? answer
+		// Nothing records the window: the list, and what the window answers otherwise (`bare`).
+		if (unrecorded > 0 && (typeof first === "string" || first === false))
+			return { recording: true, bare: first, transmissions }
+		// One session: its own answer says it all.
+		if (
+			(sessions < 2 && unrecorded === 0) ||
+			typeof first === "string" ||
+			first === false
+		)
+			return first
+		return first === true
+			? { recording: true, transmissions }
+			: { ...first, transmissions }
 	}
 
 	/**
@@ -1257,11 +1391,32 @@ export class WidebandAnalogRecorder {
 	private voiceOnAir(s: Session): RecordingActivity {
 		const { open, voiced } = voicedSpan(s)
 		if (!open) s.voiceTx = null
-		if (voiced === null) return open
+		// Classed and voiced (`qualified`) with a file the store admitted (`admitted`): the
+		// frequency's verified voice history for the sweep, voice on air now or not
+		// (RecordedSession, VoiceOnAir.recordedHz). Voiced but never admitted (no association, a
+		// refused store): no history, the answer alone.
+		const history = s.admitted ? { recordedHz: s.targetHz } : {}
+		if (voiced === null) {
+			if (!open) return false
+			// The voice lies before the squelch last reopened: its transmission ended and the open
+			// track is another one, not voiced yet (RecordedSession.voiceEnded).
+			const ended =
+				s.voiceAt !== null && s.reopenAt !== null && s.voiceAt < s.reopenAt
+			if (!ended && !s.admitted) return true
+			return {
+				recording: true,
+				...history,
+				...(ended ? { voiceEnded: true as const } : {}),
+			}
+		}
 		s.voiceTx ??= voiced
 		const quiet = Math.max(s.quietGap, s.judgedTo - (s.voiceAt ?? s.judgedTo))
 		s.quietGap = 0
-		return { voice: s.voiceTx, quietMs: (quiet * 1000) / s.fs }
+		return {
+			voice: s.voiceTx,
+			quietMs: (quiet * 1000) / s.fs,
+			...history,
+		}
 	}
 
 	/** Status block (ScannerStatus.recorder): live sessions, parked ones and the decision log. */
@@ -1332,7 +1487,7 @@ export class WidebandAnalogRecorder {
 	): void {
 		// Its closing ingest came first: the observation asks for no waiver any more.
 		this.waived.delete(observationId)
-		this.waivedToneOnly.delete(observationId)
+		this.closeUnrecorded(observationId)
 		// An association first given at the close still names the observation's earlier decisions.
 		if (info !== undefined && info.discoveryId !== null)
 			this.decisions.bindDiscovery(observationId, info.discoveryId)
@@ -1378,7 +1533,16 @@ export class WidebandAnalogRecorder {
 			span.last = Math.max(span.last, track.lastSample)
 			span.open = false
 		}
-		if (![...s.activity.values()].some(a => a.open)) s.voiceTx = null
+		if (![...s.activity.values()].some(a => a.open)) {
+			// What a track opening next is measured against (noteActivity, Session.reopenAt).
+			s.lastClose = {
+				at: track.lastSample,
+				cut: cut !== null,
+				start: span?.start ?? track.startSample,
+				voiceTx: s.voiceTx,
+			}
+			s.voiceTx = null
+		}
 		const bar = this.snapshotBar(
 			s,
 			track,
@@ -1419,6 +1583,7 @@ export class WidebandAnalogRecorder {
 	 */
 	async stop(): Promise<void> {
 		this.stopped = true
+		this.unrecorded.clear()
 		for (const s of [...this.parked.values()])
 			this.dropParked(s, false, "discarded:park-expired")
 		for (const s of [...this.sessions.values()]) this.endSession(s, "shutdown")
@@ -1452,6 +1617,7 @@ export class WidebandAnalogRecorder {
 			s.digital = info.spectralDigital === true && !info.analogFm
 		}
 		if (info.analogFm) {
+			if (s.toneOnly) this.classedBySnapshot(s, observationId)
 			s.toneOnly = false
 			if (!s.classed) {
 				s.classed = true
@@ -1735,8 +1901,54 @@ export class WidebandAnalogRecorder {
 		}
 		if (spent) this.expireDigital(spent, "evicted")
 		else if (by !== "none" && digital) this.refuse(digital, "evicted", true)
-		else if (tone) this.yieldToneOnly(tone, candidate)
-		else if (by === "analog" && other) this.refuse(other, "evicted", true)
+		else if (tone) {
+			this.noteUnrecorded(tone)
+			this.yieldToneOnly(tone, candidate)
+		} else if (by === "analog" && other) {
+			this.noteUnrecorded(other)
+			this.refuse(other, "evicted", true)
+		}
+	}
+
+	/**
+	 * A session giving its slot up (evict) whose voiced transmission is still on air: the one
+	 * recordingActive names (Session.voiceTx, or the voiced span), voiced now or quiet with its
+	 * track open and not ended (no reopen since its voice), as recordingActive would list it. It
+	 * stays listed "unrecorded" until every open observation of the session closes
+	 * (closeUnrecorded). A session not voiced (unclassed, or classed and not past the voice gate)
+	 * leaves nothing.
+	 */
+	private noteUnrecorded(s: Session): void {
+		if (!s.classed || !s.qualified) return
+		const { open, voiced } = voicedSpan(s)
+		const name = s.voiceTx ?? voiced
+		if (!open || name === null) return
+		const ended =
+			voiced === null &&
+			s.voiceAt !== null &&
+			s.reopenAt !== null &&
+			s.voiceAt < s.reopenAt
+		if (ended) return
+		const tracks = new Set<string>()
+		for (const [id, a] of s.activity) if (a.open) tracks.add(id)
+		this.unrecorded.delete(name)
+		this.unrecorded.set(name, {
+			sourceId: s.sourceId,
+			stream: s.stream,
+			epoch: s.epoch,
+			open: tracks,
+		})
+		if (this.unrecorded.size > MAX_REMEMBERED) {
+			const oldest = this.unrecorded.keys().next()
+			if (oldest.done !== true) this.unrecorded.delete(oldest.value)
+		}
+	}
+
+	/** An observation closed: an unrecorded transmission ends with the last of its open ones. */
+	private closeUnrecorded(observationId: string): void {
+		for (const [name, u] of this.unrecorded)
+			if (u.open.delete(observationId) && u.open.size === 0)
+				this.unrecorded.delete(name)
 	}
 
 	/**
@@ -1844,6 +2056,9 @@ export class WidebandAnalogRecorder {
 			voiceAt: null,
 			quietGap: 0,
 			voiceTx: null,
+			reopenAt: null,
+			lastClose: null,
+			admitted: false,
 			judgedTo: Number.NEGATIVE_INFINITY,
 			observations: new Set([input.observationId]),
 			activity: new Map([
@@ -2048,6 +2263,8 @@ export class WidebandAnalogRecorder {
 		handle.ready.then(
 			() => {
 				file.ready = true
+				// Admitted by the store: a file of this session is written (Session.admitted).
+				s.admitted = true
 				if (file.finishing) this.completeFinish(s, file)
 				else this.wake(s)
 			},
@@ -2070,8 +2287,26 @@ export class WidebandAnalogRecorder {
 			span.last = Math.max(span.last, track.lastSample)
 			return
 		}
+		// Opened while no track was, after RF silence: the squelch closed and reopened
+		// (Session.reopenAt). An administrative close is no turnaround: a close the service cut, or
+		// a max-duration rollover (the next track opens at the close's sample, or within one
+		// engine block of it), whose successor goes on with the same transmission: its span
+		// starts where the closed track did, so the voice heard before the rollover is voice of
+		// the open track, and it keeps the voiced name (voicedSpan, Session.voiceTx).
+		let start = track.startSample
+		const close = s.lastClose
+		if (close !== null && ![...s.activity.values()].some(a => a.open)) {
+			const gap = track.startSample - close.at
+			if (gap > (WIDEBAND_REOPEN_GAP_MS * s.fs) / 1000) {
+				if (!close.cut) s.reopenAt = track.startSample
+			} else if (!close.cut) {
+				start = Math.min(start, close.start)
+				s.voiceTx ??= close.voiceTx
+			}
+		}
+		s.lastClose = null
 		s.activity.set(observationId, {
-			start: track.startSample,
+			start,
 			last: track.lastSample,
 			open: true,
 		})
@@ -3038,6 +3273,7 @@ export class WidebandAnalogRecorder {
 				this.decisions.bindDiscovery(s.owner, info.discoveryId)
 			}
 			if (info.analogFm) {
+				if (s.toneOnly) this.classedBySnapshot(s, observationId)
 				s.toneOnly = false
 				if (!s.classed) {
 					s.classed = true
