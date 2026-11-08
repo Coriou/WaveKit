@@ -580,6 +580,8 @@ const COVERAGE_EVENTS = [
 
 const MAINTENANCE_EVERY_MS = 5 * 60_000
 const STATUS_EVERY_MS = 1_000
+/** Per-item quarantine lines one analog recovery logs; the rest are one suppressed count. */
+export const QUARANTINE_LOG_LINES = 32
 /** WG15 DQ 7.8: consolidation groups applied per event-loop turn at start-up. */
 const CONSOLIDATE_SLICE_GROUPS = 16
 const RECENT_KEEP_MS = 10_000
@@ -1534,6 +1536,9 @@ export class ScannerService extends EventEmitter {
 					this.widebandAnalog?.bindingLive(binding) === true,
 				association: (discoveryId, observationId, binding) =>
 					this.store.recordingAssociation(discoveryId, observationId, binding),
+				// A finalized file outlives its observation: it follows its folder's live owner.
+				retainedOwner: (discoveryId, observationId, alias) =>
+					this.store.retainedRecordingOwner(discoveryId, observationId, alias),
 				prepare: metadata =>
 					this.acknowledgeRecordingMutation(beforeEmit => {
 						this.store.prepareRecording(metadata, beforeEmit)
@@ -1865,6 +1870,23 @@ export class ScannerService extends EventEmitter {
 					this.log.warn(
 						{ quarantined },
 						"Scanner recording recovery quarantined artifacts",
+					)
+				// One line per quarantined operation (schema-validated ids, a closed reason), at most
+				// QUARANTINE_LOG_LINES per recovery; the rest as one suppressed count.
+				const items = this.evidence.analogQuarantine()
+				for (const item of items.slice(0, QUARANTINE_LOG_LINES))
+					this.log.warn(
+						{
+							operationId: item.operationId,
+							discoveryId: item.discoveryId,
+							reason: item.reason,
+						},
+						"Scanner recording quarantined",
+					)
+				if (items.length > QUARANTINE_LOG_LINES)
+					this.log.warn(
+						{ suppressed: items.length - QUARANTINE_LOG_LINES },
+						"Scanner recording quarantine lines suppressed",
 					)
 				if (!this.evidence.analogAuthorityReady)
 					this.log.warn(

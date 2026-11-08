@@ -216,6 +216,16 @@ export interface AnalogMetadataAdapter {
 		observationId: string,
 		binding?: RecordingBinding,
 	): RecordingAssociation | null
+	/**
+	 * A finalized file's live owner once its observation left the window (association has
+	 * nothing to answer from): DiscoveryStore.retainedRecordingOwner. Undefined while the
+	 * observation is stored or when no live discovery resolves. Absent: no such answer.
+	 */
+	retainedOwner?(
+		discoveryId: string,
+		observationId: string,
+		alias: string,
+	): string | undefined
 	prepare(metadata: PreparedRecordingMetadata): Promise<void>
 	inverse(operationId: string): Promise<void>
 	buildCommitPlan(operationId: string): RecordingCommitPlan | null
@@ -238,6 +248,35 @@ export interface AnalogReconciliation {
 	status: "available" | "cleaned" | "quarantined"
 	errorCode: AnalogError | null
 	residueBytes: number | null
+}
+/**
+ * Why recovery quarantined an operation (closed; one check each). Finalized files: a receipt
+ * that is not finalized, does not match its intent, media that fails its size or header check,
+ * prepared metadata that disagrees, no live owner, an owner not admitted. Unfinalized ones: no
+ * receipt while something lists the file. Any: unreadable receipt, unknown inventory, unhealthy
+ * authority, unconfirmed descriptor closure, a failed cleanup, an unexpected error.
+ */
+export const ANALOG_QUARANTINE_REASONS = [
+	"not-finalized",
+	"receipt-mismatch",
+	"media-invalid",
+	"prepared-mismatch",
+	"owner-unresolved",
+	"owner-not-admitted",
+	"unfinalized-listed",
+	"receipt-unreadable",
+	"inventory-unknown",
+	"authority-unhealthy",
+	"closure-uncertain",
+	"cleanup-failed",
+	"recovery-error",
+] as const
+export type AnalogQuarantineReason = (typeof ANALOG_QUARANTINE_REASONS)[number]
+/** One quarantined operation: schema-validated ids (intent.json) and a closed reason. */
+export interface AnalogQuarantine {
+	readonly operationId: string
+	readonly discoveryId: string
+	readonly reason: AnalogQuarantineReason
 }
 export interface AnalogOperationIo {
 	wavIo?: WavIo
@@ -367,6 +406,10 @@ export class AnalogOperations {
 	private initialized = false
 	/** Artifacts the last retention pass kept because no live discovery owns them. */
 	unresolvedRetained = 0
+	/** Artifacts the last retention pass kept because recovery quarantined them. */
+	quarantinedRetained = 0
+	/** Why the last recovery quarantined each operation it did not admit (closed reasons). */
+	private readonly quarantine = new Map<string, AnalogQuarantine>()
 	/** Artifacts the last retention pass kept because their owner is unknown (table full). */
 	unknownHeldRetained = 0
 	private recovery: Promise<AnalogReconciliation[]> | null = null
@@ -1433,6 +1476,10 @@ export class AnalogOperations {
 			next.unknown = true
 		}
 		if (this.unconfirmedReads.size) next.unknown = true
+		// An explicit delete removed it: no longer quarantined (a doubtful scan keeps every entry).
+		if (!next.unknown)
+			for (const id of [...this.quarantine.keys()])
+				if (!next.intents.has(id)) this.quarantine.delete(id)
 		this.inventory = next
 	}
 
@@ -1443,6 +1490,7 @@ export class AnalogOperations {
 		}
 		this.recovery ??= this.exclusive(async () => {
 			this.available.clear()
+			this.quarantine.clear()
 			if (!this.context.adapter.authorityHealthy()) {
 				this.initialized = false
 				return [
@@ -1459,6 +1507,12 @@ export class AnalogOperations {
 			const results: AnalogReconciliation[] = []
 			if (this.inventory.unknown) {
 				this.initialized = true
+				for (const intent of this.inventory.intents.values())
+					this.quarantine.set(intent.operationId, {
+						operationId: intent.operationId,
+						discoveryId: intent.discoveryId,
+						reason: "inventory-unknown",
+					})
 				return [...this.inventory.intents.values()].map(intent => ({
 					operationId: intent.operationId,
 					discoveryId: intent.discoveryId,
@@ -1479,6 +1533,16 @@ export class AnalogOperations {
 		})
 		return this.recovery
 	}
+	/** The last recovery's quarantined operations still on disk, by operation id. */
+	quarantined(): AnalogQuarantine[] {
+		return [...this.quarantine.values()].sort((a, b) =>
+			a.operationId < b.operationId
+				? -1
+				: a.operationId > b.operationId
+					? 1
+					: 0,
+		)
+	}
 	/** A same-owner stop/recover is not a process lifetime boundary for retained descriptors. */
 	private closureUncertain(operationId: string): boolean {
 		return (
@@ -1495,26 +1559,36 @@ export class AnalogOperations {
 		const result = (
 			status: AnalogReconciliation["status"],
 			errorCode: AnalogError | null,
-		): AnalogReconciliation => ({
-			operationId: intent.operationId,
-			discoveryId: intent.discoveryId,
-			status,
-			errorCode,
-			residueBytes: this.closureUncertain(intent.operationId)
-				? null
-				: (this.inventory.opBytes.get(intent.operationId) ?? null),
-		})
+			reason?: AnalogQuarantineReason,
+		): AnalogReconciliation => {
+			if (status === "quarantined")
+				this.quarantine.set(intent.operationId, {
+					operationId: intent.operationId,
+					discoveryId: intent.discoveryId,
+					reason: reason ?? "recovery-error",
+				})
+			else this.quarantine.delete(intent.operationId)
+			return {
+				operationId: intent.operationId,
+				discoveryId: intent.discoveryId,
+				status,
+				errorCode,
+				residueBytes: this.closureUncertain(intent.operationId)
+					? null
+					: (this.inventory.opBytes.get(intent.operationId) ?? null),
+			}
+		}
 		if (this.closureUncertain(intent.operationId))
-			return result("quarantined", "cleanup-failed")
+			return result("quarantined", "cleanup-failed", "closure-uncertain")
 		if (!this.context.adapter.authorityHealthy())
-			return result("quarantined", "recovery-incomplete")
+			return result("quarantined", "recovery-incomplete", "authority-unhealthy")
 		if (this.inventory.cleanup.has(intent.operationId)) {
 			try {
 				await this.context.adapter.inverse(intent.operationId)
 				await this.cleanupOwned(intent, true, false)
 				return { ...result("cleaned", null), residueBytes: 0 }
 			} catch {
-				return result("quarantined", "cleanup-failed")
+				return result("quarantined", "cleanup-failed", "cleanup-failed")
 			}
 		}
 		let marker: AnalogReceipt
@@ -1528,7 +1602,11 @@ export class AnalogOperations {
 			)
 		} catch (cause) {
 			if (nativeCode(cause) !== "ENOENT")
-				return result("quarantined", "recovery-incomplete")
+				return result(
+					"quarantined",
+					"recovery-incomplete",
+					"receipt-unreadable",
+				)
 			const association = this.context.adapter.association(
 				intent.discoveryId,
 				intent.observationId,
@@ -1542,24 +1620,29 @@ export class AnalogOperations {
 				listers === null ||
 				listers.length > 0
 			)
-				return result("quarantined", "recovery-ambiguous")
+				return result("quarantined", "recovery-ambiguous", "unfinalized-listed")
 			try {
 				await this.context.adapter.inverse(intent.operationId)
 				if (!this.context.adapter.authorityHealthy())
-					return result("quarantined", "recovery-incomplete")
+					return result(
+						"quarantined",
+						"recovery-incomplete",
+						"authority-unhealthy",
+					)
 				await this.cleanupOwned(intent, true, true)
 				return { ...result("cleaned", null), residueBytes: 0 }
 			} catch (cause) {
 				if (cause instanceof ScannerApiError) this.context.keptSkipped?.(1)
-				return result("quarantined", "cleanup-failed")
+				return result("quarantined", "cleanup-failed", "cleanup-failed")
 			}
 		}
 		try {
-			if (
-				!this.matches(intent, marker) ||
-				!(await this.mediaValid(intent, marker))
-			)
-				return result("quarantined", "recovery-incomplete")
+			if (marker.outcome !== "finalized")
+				return result("quarantined", "recovery-incomplete", "not-finalized")
+			if (!this.matches(intent, marker))
+				return result("quarantined", "recovery-incomplete", "receipt-mismatch")
+			if (!(await this.mediaValid(intent, marker)))
+				return result("quarantined", "recovery-incomplete", "media-invalid")
 			const prepared = this.context.adapter.buildCommitPlan(
 				intent.operationId,
 			)?.metadata
@@ -1571,17 +1654,15 @@ export class AnalogOperations {
 					prepared.artifact !== intent.artifact ||
 					JSON.stringify(prepared.binding) !== JSON.stringify(intent.binding))
 			)
-				return result("quarantined", "recovery-incomplete")
-			const association = this.context.adapter.association(
-				intent.discoveryId,
-				intent.observationId,
-				intent.binding,
-			)
-			if (
-				!association?.aliasIds.includes(intent.alias) ||
-				!this.admitsFile(intent, association)
-			)
-				return result("quarantined", "recovery-ambiguous")
+				return result("quarantined", "recovery-incomplete", "prepared-mismatch")
+			// A finalized, matching file: its observation is not required, a live owner is
+			// (finalizedAssociation). An earlier start's quarantine wrote nothing, so the same rule
+			// re-admits it here with every file left as it is.
+			const association = this.finalizedAssociation(intent)
+			if (!association?.aliasIds.includes(intent.alias))
+				return result("quarantined", "recovery-ambiguous", "owner-unresolved")
+			if (!this.admitsFile(intent, association))
+				return result("quarantined", "recovery-ambiguous", "owner-not-admitted")
 			// Deliberately no public state/count changes: later authoritative mutations survive replay.
 			this.available.set(intent.alias, {
 				intent,
@@ -1598,7 +1679,7 @@ export class AnalogOperations {
 			}
 			return result("available", null)
 		} catch {
-			return result("quarantined", "recovery-incomplete")
+			return result("quarantined", "recovery-incomplete", "recovery-error")
 		}
 	}
 
@@ -1681,17 +1762,47 @@ export class AnalogOperations {
 					: (this.context.listers?.(intent.discoveryId, name) ?? [])
 			if (table === null) return null
 			const out = new Set(table)
-			const association = this.context.adapter.association(
-				intent.discoveryId,
-				intent.observationId,
-				intent.binding,
-			)
+			// An admitted (finalized) file whose observation left the window follows its owner.
+			const association = this.available.get(intent.alias)?.available
+				? this.finalizedAssociation(intent)
+				: this.context.adapter.association(
+						intent.discoveryId,
+						intent.observationId,
+						intent.binding,
+					)
 			if (association?.aliasIds.includes(intent.alias))
 				out.add(association.ownerId ?? intent.discoveryId)
 			return [...out]
 		} catch {
 			return null
 		}
+	}
+	/**
+	 * A finalized file's association (a receipt that matches its intent and media): the strict
+	 * one while its observation lists it, else, once that observation left the window, the live
+	 * discovery its folder resolves to (itself or a merge survivor) or the ownership table names
+	 * (adapter.retainedOwner). Null or the strict answer otherwise: no live owner, no admission.
+	 * Callers use it only for a receipt-proven commit; an unfinalized intent keeps the strict one.
+	 */
+	private finalizedAssociation(intent: Intent): RecordingAssociation | null {
+		const association = this.context.adapter.association(
+			intent.discoveryId,
+			intent.observationId,
+			intent.binding,
+		)
+		if (association?.aliasIds.includes(intent.alias)) return association
+		let ownerId: string | undefined
+		try {
+			ownerId = this.context.adapter.retainedOwner?.(
+				intent.discoveryId,
+				intent.observationId,
+				intent.alias,
+			)
+		} catch {
+			ownerId = undefined
+		}
+		if (ownerId === undefined) return association
+		return { aliasIds: [intent.alias], ownerId, held: true }
 	}
 	/** Fail closed: a throwing lookup answers "unknown owner". */
 	private heldUnknown(folderId: string): boolean {
@@ -1922,11 +2033,7 @@ export class AnalogOperations {
 		if (!this.ready) return null
 		const item = this.available.get(alias)
 		if (!item?.available) return null
-		const association = this.context.adapter.association(
-			item.intent.discoveryId,
-			item.intent.observationId,
-			item.intent.binding,
-		)
+		const association = this.finalizedAssociation(item.intent)
 		if (
 			!association?.aliasIds.includes(alias) ||
 			!this.admitsFile(item.intent, association)
@@ -1975,8 +2082,14 @@ export class AnalogOperations {
 		let skipped = 0
 		let unresolved = 0
 		let unknownHeld = 0
+		let quarantined = 0
 		for (const intent of [...this.inventory.intents.values()]) {
 			const hold = this.retentionHold(intent, keep)
+			// Quarantined at recovery (whatever the reason): kept, counted, until a start admits it.
+			if (hold === "quarantined") {
+				quarantined++
+				continue
+			}
 			// An unknown lister (the ownership table was full): kept, never unkept.
 			if (hold === "unknown") {
 				unknownHeld++
@@ -2015,6 +2128,7 @@ export class AnalogOperations {
 		if (skipped > 0) this.context.keptSkipped?.(skipped)
 		this.unresolvedRetained = unresolved
 		this.unknownHeldRetained = unknownHeld
+		this.quarantinedRetained = quarantined
 		return deleted
 	}
 	/**
@@ -2023,14 +2137,17 @@ export class AnalogOperations {
 	 * keep it, counted; true keeps it; false lets age or the quota remove it. A file the ownership
 	 * table or its association records listers for follows them (the folder's own discovery only
 	 * when it is one of them): kept while any lister is kept. Any other follows its folder's
-	 * owner (`keep` holds alias folders of a kept survivor too).
+	 * owner (`keep` holds alias folders of a kept survivor too). `quarantined` (right after
+	 * `unknown`, which counts a marked folder's file first): recovery did not admit it, for any reason (no live owner, a failed check): kept, counted,
+	 * never aged or quota-removed, pending re-admission at a later start (fail closed).
 	 */
 	private retentionHold(
 		intent: Intent,
 		keep: ReadonlySet<string>,
-	): "unknown" | "unresolved" | boolean {
+	): "quarantined" | "unknown" | "unresolved" | boolean {
 		const listers = this.listersOf(intent)
 		if (listers === null) return "unknown"
+		if (this.quarantine.has(intent.operationId)) return "quarantined"
 		if (!this.context.admits(intent.discoveryId)) return "unresolved"
 		if (
 			this.closureUncertain(intent.operationId) ||
@@ -2055,6 +2172,8 @@ export class AnalogOperations {
 			)
 				return
 			await this.exclusive(async () => {
+				// Another pass retired it meanwhile (its list was taken before): nothing left to do.
+				if (!this.inventory.intents.has(intent.operationId)) return
 				// A folder marked meanwhile keeps the file (its owner is unknown).
 				if (
 					this.closureUncertain(intent.operationId) ||

@@ -55,6 +55,7 @@ import {
 	type AnalogInput,
 	type AnalogMetadataAdapter,
 	type AnalogOperationIo,
+	type AnalogQuarantine,
 	type AnalogReconciliation,
 } from "./analog-operations.js"
 
@@ -593,6 +594,19 @@ export class EvidenceStore {
 	/** Folders the last retention pass left in place because no live discovery owns them. */
 	get unresolvedFolderCount(): number {
 		return this.unresolvedFolders
+	}
+
+	/**
+	 * Analog recordings the last retention pass kept because recovery quarantined them (pending
+	 * re-admission at a later start; only an explicit delete under strict ownership removes them).
+	 */
+	get quarantinedRecordingCount(): number {
+		return this.analog?.quarantinedRetained ?? 0
+	}
+
+	/** The last recovery's quarantined analog operations, with their closed reasons. */
+	analogQuarantine(): AnalogQuarantine[] {
+		return this.analog?.quarantined() ?? []
 	}
 
 	/** Recording files the last retention pass kept because their owner is unknown (table full). */
@@ -1552,6 +1566,11 @@ export class EvidenceStore {
 			this.log.debug(
 				{ unresolved: unresolved.size },
 				"Scanner retention kept folders without an owner",
+			)
+		if (this.quarantinedRecordingCount > 0)
+			this.log.debug(
+				{ quarantined: this.quarantinedRecordingCount },
+				"Scanner retention kept quarantined recordings",
 			)
 		if (deleted.length > 0)
 			this.log.info(
