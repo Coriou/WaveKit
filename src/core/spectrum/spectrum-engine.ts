@@ -417,6 +417,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		(startSample: number, bytes: Uint8Array) => void
 	>()
 	private masks: EngineMasks | null = null
+	/** Signals the scanner confirmed real (setRealRanges), sent with every masks message. */
+	private realRanges: FreqRange[] = []
 	private channelPlan: ChannelPlan | null = null
 	private channelPlanSet = false
 	private spectrumFeed = false
@@ -698,7 +700,22 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	setMasks(masks: EngineMasks): void {
 		this.masks = masks
-		this.send({ kind: "masks", ...masks })
+		this.sendMasks()
+	}
+
+	/** Signals the scanner confirmed real (voice, decode, proof): no spur mask covers their bins. */
+	setRealRanges(ranges: FreqRange[]): void {
+		this.realRanges = ranges
+		this.sendMasks()
+	}
+
+	private sendMasks(): void {
+		if (!this.masks) return
+		this.send({
+			kind: "masks",
+			...this.masks,
+			...(this.realRanges.length > 0 ? { realRanges: this.realRanges } : {}),
+		})
 	}
 
 	setChannelPlan(plan: ChannelPlan | null): void {
@@ -845,7 +862,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			this.verifiedFrom.clear()
 			this.openingStreams.length = 0
 			this.host = this.createHost(caps.sampleRate)
-			if (this.masks) this.send({ kind: "masks", ...this.masks })
+			this.sendMasks()
 			if (this.channelPlanSet)
 				this.send({ kind: "channel-plan", plan: this.channelPlan })
 			if (this.spectrumFeed) this.send({ kind: "spectrum-feed", enabled: true })

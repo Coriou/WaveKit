@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest"
-import { SpurMap } from "../../../../src/core/spectrum/spur-map.js"
+import {
+	SPUR_MAX_LEVEL_DB,
+	SPUR_TTL_MS,
+	SpurMap,
+} from "../../../../src/core/spectrum/spur-map.js"
 import { mulberry32 } from "../../../mocks/scanner/signals.js"
 
 const N = 2048
@@ -171,7 +175,7 @@ describe("SpurMap", () => {
 		expect(masked(map)).toEqual([])
 	})
 
-	it("keeps a classified spur after it is masked out of the on bits", () => {
+	it("keeps masking a confirmed spur its own mask hid from the detector, and lets it go once it is gone", () => {
 		const map = newMap()
 		for (const [e, c] of [
 			[1, 446e6],
@@ -180,8 +184,17 @@ describe("SpurMap", () => {
 		] as const)
 			feed(map, e, c, 4, { baseband: [SPUR_BIN] })
 		expect(masked(map)).toEqual([SPUR_BIN])
-		feed(map, 4, 451e6, 30, {})
+		// masked: the detector no longer sees it, the line re-test still does, under every centre
+		for (let e = 4; e < 10; e++)
+			lineEpoch(map, e, 446e6 + e * 100_000, 5 * 60_000, {
+				bins: [SPUR_BIN],
+				masked: true,
+			})
 		expect(masked(map)).toEqual([SPUR_BIN])
+		// gone: the first epoch that misses it un-confirms it
+		lineEpoch(map, 10, 452e6, 60_000, {})
+		lineEpoch(map, 11, 453e6, 1000, {})
+		expect(masked(map)).toEqual([])
 	})
 
 	it("round-trips spurs and carriers through the engine state", () => {
@@ -192,30 +205,190 @@ describe("SpurMap", () => {
 			[3, 449.2e6],
 		] as const)
 			feed(map, e, c, 4, { baseband: [SPUR_BIN] })
-		feed(map, 4, 446_400_000, 6, { rfHz: [447_000_000] })
-		feed(map, 5, 447_350_000, 6, { rfHz: [447_000_000] })
+		feed(map, 4, 446_400_000, 6, { rfHz: [447_000_000], baseband: [SPUR_BIN] })
+		feed(map, 5, 447_350_000, 6, { rfHz: [447_000_000], baseband: [SPUR_BIN] })
 		const state = map.exportState()
 		expect(state.spurs.filter(s => s.kind === "baseband")).toEqual([
 			{ key: KEY, basebandBin: SPUR_BIN, widthBins: 1, kind: "baseband" },
 		])
 		const restored = newMap()
 		restored.importState(state)
-		expect(masked(restored)).toEqual([SPUR_BIN])
+		expect(masked(restored)).toEqual([]) // restored lines are unverified
+		expect(restored.exportState()).toEqual(state) // and persisted again until they expire
 		expect(restored.rfCarriers()).toEqual(map.rfCarriers())
 	})
 
-	it("promotes comb lines to baseband spurs at once, sticky and persisted (Task 7a fast path)", () => {
+	it("promotes comb lines to candidates that mask and persist only once two LO centres confirm them", () => {
 		const map = newMap()
 		map.promote(KEY, BIN_HZ, [
 			{ startBin: 700, endBin: 703 },
 			{ startBin: 1500, endBin: 1503 },
 		])
 		const bins = [700, 701, 702, 1500, 1501, 1502]
+		expect(masked(map)).toEqual([])
+		expect(map.exportState().spurs).toEqual([])
+		lineEpoch(map, 1, 446e6, 2000, { bins: [701, 1501] })
+		lineEpoch(map, 2, 446.5e6, 2000, { bins: [701, 1501] })
+		expect(masked(map)).toEqual([]) // the second centre's epoch has not closed
+		lineEpoch(map, 3, 447e6, 1000, { bins: [701, 1501] })
 		expect(masked(map)).toEqual(bins)
-		feed(map, 9, 446_000_000, 1, {}) // a quiet minute never un-learns them
-		expect(masked(map)).toEqual(bins)
+		expect(
+			map.exportState().spurs.map(s => [s.basebandBin, s.widthBins]),
+		).toEqual([
+			[700, 3],
+			[1500, 3],
+		])
+	})
+})
+
+const FLOOR_DB = -60
+const FLOOR = new Float32Array(N).fill(FLOOR_DB)
+const ALL_BINS = new Uint8Array(N).fill(1)
+
+/**
+ * One epoch of `ms` in BLOCK_MS blocks. `bins` are line bins: on for the line learner, and on for
+ * the detector unless `masked`. `perBinDb` measures every block with the bins that far over a flat
+ * floor (a 1-bin line at x dB reads 10·log10((10^(x/10) + 12) / 13) over a 13-bin slot).
+ */
+function lineEpoch(
+	map: SpurMap,
+	epoch: number,
+	centreHz: number,
+	ms: number,
+	opts: { bins?: number[]; masked?: boolean; perBinDb?: number },
+): void {
+	for (let t = 0; t < ms; t += BLOCK_MS) {
+		if (opts.perBinDb !== undefined) {
+			const powerDb = new Float32Array(N).fill(FLOOR_DB)
+			for (const b of opts.bins ?? []) powerDb[b] = FLOOR_DB + opts.perBinDb
+			map.measure(powerDb, FLOOR, BIN_HZ)
+		}
+		const line = new Uint8Array(N)
+		for (const b of opts.bins ?? []) line[b] = 1
+		const on = opts.masked === true ? new Uint8Array(N) : line
+		map.observe(KEY, { epoch, centreHz, binHz: BIN_HZ }, on, BLOCK_MS, {
+			on: line,
+			observable: ALL_BINS,
+		})
+	}
+}
+
+const C = 446_000_000
+/** 13 slot bins + 3 line bins + 2 skirt bins at 1 kHz. */
+const SEPARATION_HZ = 18 * BIN_HZ
+
+describe("SpurMap verification", () => {
+	it("confirms a baseband spur from two centres at least 18 bins apart, not 17", () => {
+		const near = newMap()
+		const far = newMap()
+		for (const [map, second] of [
+			[near, C + SEPARATION_HZ - BIN_HZ],
+			[far, C + SEPARATION_HZ],
+		] as const) {
+			map.promote(KEY, BIN_HZ, [{ startBin: SPUR_BIN, endBin: SPUR_BIN + 1 }])
+			lineEpoch(map, 1, C, 2000, { bins: [SPUR_BIN] })
+			lineEpoch(map, 2, second, 2000, { bins: [SPUR_BIN] })
+			lineEpoch(map, 3, second, 1000, { bins: [SPUR_BIN] })
+		}
+		expect(masked(near)).toEqual([])
+		expect(far.verified(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(true)
+		expect(masked(far)).toEqual([SPUR_BIN])
+	})
+
+	it("never learns a line at the gate's pass level, and lifts a confirmed mask while a strong signal sits on it", () => {
+		// 13 dB in one bin reads 10·log10((20 + 12) / 13) = 3.9 dB; 16 dB reads 10·log10((39.8 + 12) / 13) = 6.0 dB
+		expect(SPUR_MAX_LEVEL_DB).toBe(6)
+		const strong = newMap()
+		for (const [e, c] of [
+			[1, 446e6],
+			[2, 447.6e6],
+			[3, 449.2e6],
+			[4, 450.8e6],
+		] as const)
+			lineEpoch(strong, e, c, 4 * 60_000, { bins: [SPUR_BIN], perBinDb: 16.1 })
+		expect(strong.exportState().spurs).toEqual([]) // not even a slow-path candidate
+		strong.promote(KEY, BIN_HZ, [{ startBin: SPUR_BIN, endBin: SPUR_BIN + 1 }])
+		lineEpoch(strong, 5, 452e6, 1000, { bins: [SPUR_BIN], perBinDb: 16.1 })
+		expect(masked(strong)).toEqual([])
+		const weak = newMap()
+		weak.promote(KEY, BIN_HZ, [{ startBin: SPUR_BIN, endBin: SPUR_BIN + 1 }])
+		lineEpoch(weak, 1, C, 2000, { bins: [SPUR_BIN], perBinDb: 13 })
+		lineEpoch(weak, 2, C + 1e6, 2000, { bins: [SPUR_BIN], perBinDb: 13 })
+		lineEpoch(weak, 3, C + 2e6, 1000, { bins: [SPUR_BIN], perBinDb: 13 })
+		expect(masked(weak)).toEqual([SPUR_BIN])
+		lineEpoch(weak, 3, C + 2e6, 1000, { bins: [SPUR_BIN], perBinDb: 25 })
+		expect(masked(weak)).toEqual([]) // a voice on top: suspended this block
+		lineEpoch(weak, 3, C + 2e6, 1000, { bins: [SPUR_BIN], perBinDb: 13 })
+		expect(masked(weak)).toEqual([SPUR_BIN])
+	})
+
+	it("needs the hits without a miss between them: two real emitters at one offset under far hops do not confirm", () => {
+		const map = newMap()
+		map.promote(KEY, BIN_HZ, [{ startBin: SPUR_BIN, endBin: SPUR_BIN + 1 }])
+		lineEpoch(map, 1, C, 2000, { bins: [SPUR_BIN] })
+		lineEpoch(map, 2, C + 1e6, 2000, {}) // quiet and off: a miss
+		lineEpoch(map, 3, C + 2e6, 2000, { bins: [SPUR_BIN] })
+		lineEpoch(map, 4, C + 3e6, 1000, {})
+		expect(masked(map)).toEqual([])
+		const spur = newMap()
+		spur.promote(KEY, BIN_HZ, [{ startBin: SPUR_BIN, endBin: SPUR_BIN + 1 }])
+		for (let e = 1; e <= 4; e++)
+			lineEpoch(spur, e, C + e * 1e6, 2000, { bins: [SPUR_BIN] })
+		expect(masked(spur)).toEqual([SPUR_BIN])
+	})
+
+	it("expires an unconfirmed candidate at its TTL, not a block before", () => {
+		const map = newMap()
+		map.promote(KEY, BIN_HZ, [{ startBin: SPUR_BIN, endBin: SPUR_BIN + 1 }])
+		lineEpoch(map, 1, C, SPUR_TTL_MS - BLOCK_MS, { bins: [SPUR_BIN] })
+		expect(map.alive(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(true)
+		expect(map.exportState().spurs).toEqual([]) // unconfirmed: never persisted
+		lineEpoch(map, 1, C, BLOCK_MS, { bins: [SPUR_BIN] })
+		expect(map.alive(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(false)
+	})
+
+	it("stops masking a confirmed spur unseen for the TTL, not a block before", () => {
+		const map = newMap()
+		map.promote(KEY, BIN_HZ, [{ startBin: SPUR_BIN, endBin: SPUR_BIN + 1 }])
+		lineEpoch(map, 1, C, 2000, { bins: [SPUR_BIN] })
+		lineEpoch(map, 2, C + 1e6, 2000, { bins: [SPUR_BIN] })
+		lineEpoch(map, 3, C + 2e6, 1000, { bins: [SPUR_BIN] }) // last seen here
+		expect(masked(map)).toEqual([SPUR_BIN])
+		lineEpoch(map, 3, C + 2e6, SPUR_TTL_MS - BLOCK_MS, {}) // parked: no epoch closes, no miss
+		expect(masked(map)).toEqual([SPUR_BIN])
+		lineEpoch(map, 3, C + 2e6, BLOCK_MS, {})
+		expect(masked(map)).toEqual([])
+		expect(map.alive(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(false)
+	})
+
+	it("re-verifies a persisted line after a restart before it masks", () => {
+		const map = newMap()
+		map.promote(KEY, BIN_HZ, [{ startBin: SPUR_BIN, endBin: SPUR_BIN + 1 }])
+		for (let e = 1; e <= 3; e++)
+			lineEpoch(map, e, C + e * 1e6, 2000, { bins: [SPUR_BIN] })
+		expect(masked(map)).toEqual([SPUR_BIN])
 		const restored = newMap()
 		restored.importState(map.exportState())
-		expect(masked(restored)).toEqual(bins)
+		expect(masked(restored)).toEqual([])
+		lineEpoch(restored, 1, C, 2000, { bins: [SPUR_BIN] })
+		expect(masked(restored)).toEqual([]) // one centre since the restart
+		lineEpoch(restored, 2, C + 1e6, 2000, { bins: [SPUR_BIN] })
+		lineEpoch(restored, 3, C + 2e6, 1000, { bins: [SPUR_BIN] })
+		expect(masked(restored)).toEqual([SPUR_BIN])
+	})
+
+	it("leaves protected bins unmasked and counts them", () => {
+		const map = newMap()
+		map.promote(KEY, BIN_HZ, [{ startBin: SPUR_BIN - 1, endBin: SPUR_BIN + 2 }])
+		for (let e = 1; e <= 3; e++)
+			lineEpoch(map, e, C + e * 1e6, 2000, { bins: [SPUR_BIN] })
+		const protect = new Uint8Array(N)
+		protect[SPUR_BIN + 1] = 1
+		const out = new Uint8Array(N)
+		expect(map.mask(KEY, out, protect)).toBe(1)
+		expect([...out.keys()].filter(i => out[i] === 1)).toEqual([
+			SPUR_BIN - 1,
+			SPUR_BIN,
+		])
 	})
 })

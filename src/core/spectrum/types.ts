@@ -217,6 +217,11 @@ export interface PipelineStats {
 	blankedFrames: number
 	/** Periodic broadband RFI (`broadband-rfi`, § 4.9): its period while active, else null. */
 	broadbandRfi: { periodMs: number } | null
+	/**
+	 * Spur masks suspended on a confirmed signal's bins since the pipeline started: blocks with any
+	 * suspended bin, and how many runs of such blocks began. Absent from older pipelines.
+	 */
+	spurMask?: { suspensions: number; suspendedBlocks: number }
 }
 
 // Single-line variants: prettier would align them with spaces after tabs (no-mixed-spaces-and-tabs).
@@ -226,8 +231,8 @@ export type PipelineInput =
 	| { kind: "gap"; startSample: number; samples: number }
 	| { kind: "pending-epoch"; pending: PendingEpoch }
 	| { kind: "new-stream"; stream: number; centreHz: number; sampleRateHz: number; gainKey: string; tuningTrust: TuningTrust }
-	/** inWindow: true while no sweep lease holds the source; truncated segments then report as `edge` (§ 6.2). */
-	| { kind: "masks"; exclusions: FreqRange[]; cfarRanges: CfarMaskRange[]; burstRanges: FreqRange[]; rasters: MaskRaster[]; obwHz: number[]; inWindow: boolean }
+	/** inWindow: true while no sweep lease holds the source; truncated segments then report as `edge` (§ 6.2). realRanges: signals the scanner confirmed real (voice, decode, proof); no spur mask covers them. */
+	| { kind: "masks"; exclusions: FreqRange[]; cfarRanges: CfarMaskRange[]; burstRanges: FreqRange[]; rasters: MaskRaster[]; obwHz: number[]; inWindow: boolean; realRanges?: FreqRange[] }
 	| { kind: "spectrum-feed"; enabled: boolean }
 
 export type ObservationEndReason =

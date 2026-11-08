@@ -6,27 +6,72 @@
  * by whether it moves with the centre:
  *
  * - on at the same baseband bins in epochs with ≥ 3 different centres →
- *   baseband spur: masked (mask()), never reported as an RF discovery;
+ *   baseband spur candidate (sticky until it expires), never reported as an RF discovery;
  * - on at the same RF frequency in epochs with ≥ 2 different centres →
  *   RF-fixed carrier (rfCarriers()): reported once as a `carrier`, excluded
  *   from probe allocation, not from detection.
  *
- * An epoch counts for a centre when the bin was on for ≥ onFraction of that
- * epoch's observed time. Classification runs after every observed block; its
- * results are sticky per key (masking a spur does not un-learn it) and
- * persist via exportState(). RF positions are quantised to the key's bin
- * width; an RF entry counts as on when a window bin within ±1 bin of it is
- * on, so carriers that straddle a bin edge under different centres still
+ * A candidate (learned here, promoted by the comb fast path, or restored from disk) masks only
+ * while it is verified (`mask`, `masks`):
+ *
+ * - Level. A bin counts as a line only while its slot level, Σ power / Σ floor over a 12.5 kHz
+ *   slot centred on it (the channel gate's measure), is under SPUR_MAX_LEVEL_DB: the gate's own
+ *   pass level, k 3 dB + margin 3 dB = 6 dB. Real receiver lines measured at most +3.5 dB, 2.5 dB
+ *   under it; a carrier or a voice the gate would pass is no receiver line, is never learned, and
+ *   lifts a mask on its bins while it is on air.
+ * - LO confirmation. A baseband spur stays at its baseband bin when the LO moves; a real emission
+ *   moves with RF. An epoch credits its centre to a bin when the bin was a line for ≥ onFraction
+ *   of the epoch, and a miss (an epoch of ≥ SPUR_MISS_MIN_MS where the bin was quiet and a line
+ *   for under half the time) clears the bin's credits: a receiver spur is under every centre.
+ *   A bin is confirmed with MIN_CONFIRM_CENTRES (2) credited centres at least
+ *   `ceil(12.5 kHz / bin) + maxWidthBins + 2` bins apart (18 at 1 kHz): one centre cannot tell
+ *   baseband from RF, and between two such centres a real emission of up to one 12.5 kHz
+ *   channel plus the line's width and its ±1-bin skirt has left the line's bins entirely. The
+ *   miss rule keeps two real emitters at one offset under far-apart hops from confirming it.
+ *   Credits are never persisted: after a restart every line is unverified until re-confirmed.
+ * - Expiry. Time is the key's settled observation time. A candidate expires SPUR_TTL_MS (10 min,
+ *   the time the slow path needs to learn a line) after it was flagged or last seen while
+ *   confirmed, whichever is later; a confirmed line unseen for SPUR_TTL_MS stops masking.
+ *
+ * Only confirmed candidates and restored ones not yet expired persist (exportState). Bins a
+ * mask may not cover (a confirmed real signal there, `protect`) are left unmasked and counted.
+ * RF positions are quantised to the key's bin width; an RF entry counts as on when a window bin
+ * within ±1 bin of it is on, so carriers that straddle a bin edge under different centres still
  * accumulate in one entry.
  *
  * Callers pass only settled, gap-free, non-overload blocks.
  */
+import {
+	CHANNEL_GATE_DEFAULT_WIDTH_HZ,
+	CHANNEL_GATE_K_DB,
+	CHANNEL_GATE_MARGIN_DB,
+} from "../scanner/scanner-redesign-contract.js"
+import type { LineGate } from "./provisional-spurs.js"
 import type { EngineState } from "./types.js"
 
 export const MIN_BASEBAND_CENTRES = 3
 export const MIN_RF_CENTRES = 2
+/** Credited centres, pairwise separated, a bin needs before it masks. */
+export const MIN_CONFIRM_CENTRES = 2
+/** Slot level at or over which a bin is a real signal, not a receiver line: the gate's pass level (3 + 3 dB). */
+export const SPUR_MAX_LEVEL_DB = CHANNEL_GATE_K_DB + CHANNEL_GATE_MARGIN_DB
+/** Width of the slot the level is measured over (the gate's default channel). */
+export const SPUR_LEVEL_SLOT_HZ = CHANNEL_GATE_DEFAULT_WIDTH_HZ
+/** Settled observation time of a key after which an unconfirmed or unseen candidate expires. */
+export const SPUR_TTL_MS = 600_000
+/** Shortest epoch that can be a miss: 2 blocks at 50 ms. */
+export const SPUR_MISS_MIN_MS = 100
+/**
+ * Confirmed real signals a source's masks may carry (`realRanges`): the scanner keeps the most
+ * recently seen. 4096 × 12.5 kHz = 51.2 MHz of back-to-back voice channels, past any band set a
+ * source watches; the pipeline maps each once per mask change or epoch, O(ranges).
+ */
+export const MAX_REAL_RANGES = 4096
+const SPUR_MISS_ON_FRACTION = 0.5
 const MAX_CENTRES_KEPT = 8
 const MAX_RF_ENTRIES = 16_384
+const DB_TO_LN = Math.LN10 / 10
+const MAX_LEVEL_RATIO = 10 ** (SPUR_MAX_LEVEL_DB / 10)
 
 interface EpochRef {
 	epoch: number
@@ -47,14 +92,32 @@ interface RfEntry {
 
 interface KeyState {
 	binHz: number
+	/** Minimum distance (Hz) between two credited centres that confirm a bin. */
+	separationHz: number
 	epoch: number | null
 	centreHz: number
+	/** Settled observation time of this key (ms): the clock of expiry. */
+	clockMs: number
 	onMs: Float64Array
 	observedMs: Float64Array
 	epochOnMs: Float64Array
 	epochObservedMs: Float64Array
+	/** Time in this epoch the bin was at or over the level bound. */
+	epochLoudMs: Float64Array
+	/** Credited centres since the bin's last miss. */
 	centres: number[][]
+	/** 1 = MIN_CONFIRM_CENTRES separated centres in `centres`. */
+	confirmed: Uint8Array
+	/** Clock of the last block the bin was a line (−∞ never). */
+	lastSeenMs: Float64Array
+	/** Candidate flags (learned, promoted or restored). */
 	baseband: Uint8Array
+	/** Clock a candidate bin was flagged. */
+	bornMs: Float64Array
+	/** Latest clock a candidate bin was seen while confirmed (−∞ never). */
+	keepMs: Float64Array
+	/** 1 = the candidate came from disk and has not expired. */
+	imported: Uint8Array
 	rf: Map<number, RfEntry>
 	rfConfirmed: Map<
 		number,
@@ -62,7 +125,7 @@ interface KeyState {
 	>
 }
 
-export class SpurMap {
+export class SpurMap implements LineGate {
 	private readonly fftSize: number
 	private readonly minObservedMs: number
 	private readonly onFraction: number
@@ -70,6 +133,12 @@ export class SpurMap {
 	private readonly keys = new Map<string, KeyState>()
 	private readonly dilated: Uint8Array
 	private readonly qualifies: Uint8Array
+	/** Slot level of the last measured block, linear (power / floor); 0 until measured, +∞ unknown. */
+	private readonly level: Float32Array
+	private readonly sumP: Float64Array
+	private readonly sumF: Float64Array
+	/** False after a measurement without a floor: the block is no evidence for the baseband learner. */
+	private levelKnown = true
 
 	constructor(opts: {
 		fftSize: number
@@ -83,13 +152,60 @@ export class SpurMap {
 		this.maxWidthBins = opts.maxWidthBins
 		this.dilated = new Uint8Array(opts.fftSize)
 		this.qualifies = new Uint8Array(opts.fftSize)
+		this.level = new Float32Array(opts.fftSize)
+		this.sumP = new Float64Array(opts.fftSize + 1)
+		this.sumF = new Float64Array(opts.fftSize + 1)
 	}
 
+	/**
+	 * This block's slot level per bin: Σ power / Σ floor over the bins of a SPUR_LEVEL_SLOT_HZ
+	 * slot centred on it (13 bins at 1 kHz), from prefix sums (2 exp per bin, no allocation).
+	 * `floorDb` null (no floor of this key yet) makes every bin unknown: nothing masks, and the
+	 * block counts neither for nor against a line. `mask`, `masks` and `observe` read the last measurement.
+	 */
+	measure(
+		powerDb: Float32Array,
+		floorDb: Float32Array | null,
+		binHz: number,
+	): void {
+		const n = this.fftSize
+		const lv = this.level
+		this.levelKnown = floorDb !== null && binHz > 0
+		if (floorDb === null || !(binHz > 0)) {
+			lv.fill(Number.POSITIVE_INFINITY)
+			return
+		}
+		const p = this.sumP
+		const f = this.sumF
+		for (let i = 0; i < n; i++) {
+			const v = powerDb[i]!
+			const fl = floorDb[i]!
+			p[i + 1] = p[i]! + (Number.isFinite(v) ? Math.exp(v * DB_TO_LN) : 0)
+			f[i + 1] = f[i]! + (Number.isFinite(fl) ? Math.exp(fl * DB_TO_LN) : 0)
+		}
+		const w = Math.max(1, Math.round(SPUR_LEVEL_SLOT_HZ / binHz))
+		const lo = (w - 1) >> 1
+		const hi = w - lo
+		for (let i = 0; i < n; i++) {
+			const a = i - lo < 0 ? 0 : i - lo
+			const b = i + hi > n ? n : i + hi
+			const fs = f[b]! - f[a]!
+			lv[i] = fs > 0 ? (p[b]! - p[a]!) / fs : Number.POSITIVE_INFINITY
+		}
+	}
+
+	/**
+	 * One block. `onBins` (the detector output) feeds the RF-carrier learner. `line` feeds the
+	 * baseband learner: `on` = the bin is on as a line (the caller re-tests bins its own mask
+	 * hid), `observable` = the bin could be seen at all (not DC, edge or an exclusion). Without
+	 * `line`, `onBins` and every bin. A bin at or over the level bound is no line.
+	 */
 	observe(
 		key: string,
 		epoch: EpochRef,
 		onBins: Uint8Array,
 		blockMs: number,
+		line?: { on: Uint8Array; observable: Uint8Array },
 	): void {
 		const n = this.fftSize
 		const s = this.state(key, epoch.binHz)
@@ -98,12 +214,22 @@ export class SpurMap {
 			s.epoch = epoch.epoch
 			s.centreHz = epoch.centreHz
 		}
-		for (let i = 0; i < n; i++) {
+		s.clockMs += blockMs
+		const lineOn = line?.on ?? onBins
+		const observable = line?.observable
+		const lv = this.level
+		for (let i = 0; i < n && this.levelKnown; i++) {
+			if (observable !== undefined && observable[i] !== 1) continue
 			s.observedMs[i] = s.observedMs[i]! + blockMs
 			s.epochObservedMs[i] = s.epochObservedMs[i]! + blockMs
-			if (onBins[i] === 1) {
+			if (!(lv[i]! < MAX_LEVEL_RATIO)) {
+				s.epochLoudMs[i] = s.epochLoudMs[i]! + blockMs
+				continue
+			}
+			if (lineOn[i] === 1) {
 				s.onMs[i] = s.onMs[i]! + blockMs
 				s.epochOnMs[i] = s.epochOnMs[i]! + blockMs
+				s.lastSeenMs[i] = s.clockMs
 			}
 		}
 		const d = this.dilated
@@ -153,11 +279,13 @@ export class SpurMap {
 			for (let k = 0; s.rf.size > MAX_RF_ENTRIES; k++) s.rf.delete(byOn[k]![0])
 		}
 		this.classify(s)
+		this.expire(s)
 	}
 
 	/**
-	 * Makes `ranges` baseband spurs of `key` at once (sticky, persisted like learned ones): the comb
-	 * fast path of spec § 4.9 (Task 7a's ProvisionalSpurs returns the ranges, widened by ±1 bin).
+	 * Flags `ranges` as baseband spur candidates of `key` (the comb fast path of spec § 4.9:
+	 * ProvisionalSpurs returns the ranges, widened by ±1 bin). They mask once verified, like
+	 * learned ones, and expire like them.
 	 */
 	promote(
 		key: string,
@@ -166,18 +294,56 @@ export class SpurMap {
 	): void {
 		const s = this.state(key, binHz)
 		for (const r of ranges)
-			s.baseband.fill(
-				1,
-				Math.max(0, r.startBin),
-				Math.min(this.fftSize, r.endBin),
+			for (
+				let i = Math.max(0, r.startBin);
+				i < Math.min(this.fftSize, r.endBin);
+				i++
 			)
+				this.flag(s, i)
 	}
 
-	/** Sets out[i] = 1 on the key's baseband spur bins (other bins untouched). */
-	mask(key: string, out: Uint8Array): void {
+	/**
+	 * Sets out[i] = 1 on the key's verified baseband spur bins that are quiet in the last measured
+	 * block (other bins untouched). A bin with protect[i] = 1 stays unmasked; returns how many.
+	 */
+	mask(key: string, out: Uint8Array, protect?: Uint8Array): number {
 		const s = this.keys.get(key)
-		if (s === undefined) return
-		for (let i = 0; i < this.fftSize; i++) if (s.baseband[i] === 1) out[i] = 1
+		if (s === undefined) return 0
+		let suspended = 0
+		for (let i = 0; i < this.fftSize; i++) {
+			if (s.baseband[i] !== 1 || !this.active(s, i)) continue
+			if (protect !== undefined && protect[i] === 1) suspended++
+			else out[i] = 1
+		}
+		return suspended
+	}
+
+	/** LineGate: the line [startBin, endBin) is verified and every bin of it is quiet now. */
+	masks(key: string, startBin: number, endBin: number): boolean {
+		const s = this.keys.get(key)
+		if (s === undefined || !this.verifiedIn(s, startBin, endBin)) return false
+		for (let i = Math.max(0, startBin); i < Math.min(this.fftSize, endBin); i++)
+			if (!(this.level[i]! < MAX_LEVEL_RATIO)) return false
+		return true
+	}
+
+	/** LineGate: a bin of [startBin − 1, endBin] is confirmed and was seen within the TTL. */
+	verified(key: string, startBin: number, endBin: number): boolean {
+		const s = this.keys.get(key)
+		return s !== undefined && this.verifiedIn(s, startBin, endBin)
+	}
+
+	/** LineGate: a candidate bin of [startBin − 1, endBin] has not expired. */
+	alive(key: string, startBin: number, endBin: number): boolean {
+		const s = this.keys.get(key)
+		if (s === undefined) return false
+		for (
+			let i = Math.max(0, startBin - 1);
+			i <= Math.min(this.fftSize - 1, endBin);
+			i++
+		)
+			if (s.baseband[i] === 1) return true
+		return false
 	}
 
 	rfCarriers(): { rfHz: number; widthBins: number }[] {
@@ -189,16 +355,19 @@ export class SpurMap {
 		return [...out.values()].sort((a, b) => a.rfHz - b.rfHz)
 	}
 
+	/** Confirmed candidates, and restored ones not yet expired (a new line persists once confirmed). */
 	exportState(): Pick<EngineState, "spurs"> {
 		const spurs: EngineState["spurs"] = []
+		const keep = (s: KeyState, i: number): boolean =>
+			s.baseband[i] === 1 && (s.imported[i] === 1 || this.confirmedNear(s, i))
 		for (const [key, s] of this.keys) {
 			for (let i = 0; i < this.fftSize; ) {
-				if (s.baseband[i] !== 1) {
+				if (!keep(s, i)) {
 					i++
 					continue
 				}
 				let j = i
-				while (j < this.fftSize && s.baseband[j] === 1) j++
+				while (j < this.fftSize && keep(s, j)) j++
 				spurs.push({ key, basebandBin: i, widthBins: j - i, kind: "baseband" })
 				i = j
 			}
@@ -214,6 +383,7 @@ export class SpurMap {
 		return { spurs }
 	}
 
+	/** Restored baseband lines are candidates with no credits: unverified until re-confirmed. */
 	importState(st: Pick<EngineState, "spurs">): void {
 		for (const sp of st.spurs) {
 			// key = `${fs}:${gainKey}:${fftSize}`; one SpurMap serves one fftSize
@@ -226,7 +396,10 @@ export class SpurMap {
 					i < sp.basebandBin + sp.widthBins && i < this.fftSize;
 					i++
 				)
-					if (i >= 0) s.baseband[i] = 1
+					if (i >= 0) {
+						this.flag(s, i)
+						s.imported[i] = 1
+					}
 			} else if (sp.rfHz !== undefined) {
 				s.rfConfirmed.set(Math.round(sp.rfHz / binHz), {
 					rfHz: sp.rfHz,
@@ -241,16 +414,26 @@ export class SpurMap {
 		let s = this.keys.get(key)
 		if (s === undefined) {
 			const n = this.fftSize
+			const separationBins =
+				Math.ceil(SPUR_LEVEL_SLOT_HZ / binHz) + this.maxWidthBins + 2
 			s = {
 				binHz,
+				separationHz: separationBins * binHz,
 				epoch: null,
 				centreHz: 0,
+				clockMs: 0,
 				onMs: new Float64Array(n),
 				observedMs: new Float64Array(n),
 				epochOnMs: new Float64Array(n),
 				epochObservedMs: new Float64Array(n),
+				epochLoudMs: new Float64Array(n),
 				centres: Array.from({ length: n }, () => []),
+				confirmed: new Uint8Array(n),
+				lastSeenMs: new Float64Array(n).fill(Number.NEGATIVE_INFINITY),
 				baseband: new Uint8Array(n),
+				bornMs: new Float64Array(n),
+				keepMs: new Float64Array(n).fill(Number.NEGATIVE_INFINITY),
+				imported: new Uint8Array(n),
 				rf: new Map(),
 				rfConfirmed: new Map(),
 			}
@@ -259,15 +442,93 @@ export class SpurMap {
 		return s
 	}
 
+	private flag(s: KeyState, i: number): void {
+		if (s.baseband[i] === 1) return
+		s.baseband[i] = 1
+		s.bornMs[i] = s.clockMs
+		s.keepMs[i] = Number.NEGATIVE_INFINITY
+		s.imported[i] = 0
+	}
+
+	/** Verified now and quiet in the last measured block. */
+	private active(s: KeyState, i: number): boolean {
+		return (
+			this.level[i]! < MAX_LEVEL_RATIO &&
+			this.confirmedNear(s, i) &&
+			s.clockMs - this.seenNear(s, i) < SPUR_TTL_MS
+		)
+	}
+
+	private verifiedIn(s: KeyState, startBin: number, endBin: number): boolean {
+		for (
+			let i = Math.max(0, startBin - 1);
+			i <= Math.min(this.fftSize - 1, endBin);
+			i++
+		)
+			if (s.confirmed[i] === 1 && s.clockMs - s.lastSeenMs[i]! < SPUR_TTL_MS)
+				return true
+		return false
+	}
+
+	/** A bin within ±1 is confirmed (a promoted range carries a ±1-bin skirt). */
+	private confirmedNear(s: KeyState, i: number): boolean {
+		return (
+			s.confirmed[i] === 1 ||
+			(i > 0 && s.confirmed[i - 1] === 1) ||
+			(i + 1 < this.fftSize && s.confirmed[i + 1] === 1)
+		)
+	}
+
+	private seenNear(s: KeyState, i: number): number {
+		let t = s.lastSeenMs[i]!
+		if (i > 0 && s.lastSeenMs[i - 1]! > t) t = s.lastSeenMs[i - 1]!
+		if (i + 1 < this.fftSize && s.lastSeenMs[i + 1]! > t)
+			t = s.lastSeenMs[i + 1]!
+		return t
+	}
+
+	/** Refreshes candidates seen while confirmed; drops those past the TTL. */
+	private expire(s: KeyState): void {
+		for (let i = 0; i < this.fftSize; i++) {
+			if (s.baseband[i] !== 1) continue
+			if (this.confirmedNear(s, i)) {
+				const seen = this.seenNear(s, i)
+				if (seen > s.keepMs[i]!) s.keepMs[i] = seen
+			}
+			const since = Math.max(s.bornMs[i]!, s.keepMs[i]!)
+			if (s.clockMs - since >= SPUR_TTL_MS) {
+				s.baseband[i] = 0
+				s.imported[i] = 0
+			}
+		}
+	}
+
+	/** Credits the closing epoch's centre to its line bins; a miss clears a bin's credits. */
 	private closeBasebandEpoch(s: KeyState): void {
 		if (s.epoch === null) return
+		let changed = false
 		for (let i = 0; i < this.fftSize; i++) {
 			const obs = s.epochObservedMs[i]!
-			if (obs > 0 && s.epochOnMs[i]! >= this.onFraction * obs)
-				addCentre(s.centres[i]!, s.centreHz)
+			if (obs <= 0) continue
+			const on = s.epochOnMs[i]!
+			if (on >= this.onFraction * obs) {
+				changed = addCentre(s.centres[i]!, s.centreHz) || changed
+			} else if (
+				obs >= SPUR_MISS_MIN_MS &&
+				on < SPUR_MISS_ON_FRACTION * obs &&
+				s.epochLoudMs[i]! < SPUR_MISS_ON_FRACTION * obs &&
+				s.centres[i]!.length > 0
+			) {
+				s.centres[i]!.length = 0
+				changed = true
+			}
 		}
 		s.epochOnMs.fill(0)
 		s.epochObservedMs.fill(0)
+		s.epochLoudMs.fill(0)
+		if (!changed) return
+		for (let i = 0; i < this.fftSize; i++)
+			s.confirmed[i] = separated(s.centres[i]!, s.separationHz) ? 1 : 0
 	}
 
 	private closeRfEpoch(e: RfEntry): void {
@@ -280,7 +541,7 @@ export class SpurMap {
 		e.epochObservedMs = 0
 	}
 
-	/** Promotes qualifying narrow runs to sticky baseband spurs / RF carriers. */
+	/** Flags qualifying narrow runs as baseband spur candidates; confirms RF carriers. */
 	private classify(s: KeyState): void {
 		const n = this.fftSize
 		const q = this.qualifies
@@ -309,7 +570,7 @@ export class SpurMap {
 			let j = i
 			while (j < n && q[j] === 1) j++
 			if (j - i <= this.maxWidthBins)
-				for (let k = i; k < j; k++) s.baseband[k] = 1
+				for (let k = i; k < j; k++) this.flag(s, k)
 			i = j
 		}
 		const qualifying: number[] = []
@@ -358,7 +619,23 @@ export class SpurMap {
 	}
 }
 
-function addCentre(list: number[], centreHz: number): void {
-	if (!list.includes(centreHz) && list.length < MAX_CENTRES_KEPT)
-		list.push(centreHz)
+/** Adds a centre once; past MAX_CENTRES_KEPT the oldest leaves, so fresh evidence still counts. */
+function addCentre(list: number[], centreHz: number): boolean {
+	if (list.includes(centreHz)) return false
+	if (list.length >= MAX_CENTRES_KEPT) list.shift()
+	list.push(centreHz)
+	return true
+}
+
+/** MIN_CONFIRM_CENTRES centres of `list` pairwise at least `minHz` apart (greedy over the sorted list). */
+function separated(list: readonly number[], minHz: number): boolean {
+	if (list.length < MIN_CONFIRM_CENTRES) return false
+	let lo = Number.POSITIVE_INFINITY
+	let hi = Number.NEGATIVE_INFINITY
+	for (const c of list) {
+		if (c < lo) lo = c
+		if (c > hi) hi = c
+	}
+	// MIN_CONFIRM_CENTRES = 2: two centres that far apart exist iff the extremes are.
+	return hi - lo >= minHz
 }
