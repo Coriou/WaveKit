@@ -810,6 +810,19 @@ interface Session {
 	 * no track is open (the squelch closed: the next over gets a new name).
 	 */
 	voiceTx: string | null
+	/**
+	 * Start (input sample) of the latest track that opened while no track of the session was open
+	 * (the squelch had closed and reopened, a turnaround: another transmission, joined by `hangMs`);
+	 * null before any. A voice heard before it (`voiceAt` earlier) belongs to a transmission that has
+	 * ended (RecordedSession.voiceEnded). A track split or handoff opens while another is open, so it
+	 * never moves this.
+	 */
+	reopenAt: number | null
+	/**
+	 * The store admitted a file operation of this session (its `ready` resolved): only then is the
+	 * session the frequency's verified voice history (recordedHz). Sticky for the session.
+	 */
+	admitted: boolean
 	readonly observations: Set<string>
 	/** Track spans per observation (open: still active), the voice gate's input window. */
 	readonly activity: Map<string, { start: number; last: number; open: boolean }>
@@ -956,6 +969,11 @@ function visitKey(at: {
 	readonly epoch: number
 }): string {
 	return `${at.stream}:${at.epoch}`
+}
+
+/** A RecordedSession answer whose voiced transmission ended (RecordedSession.voiceEnded). */
+function voiceEnded(a: RecordingActivity): boolean {
+	return typeof a === "object" && "recording" in a && a.voiceEnded === true
 }
 
 /**
@@ -1226,15 +1244,20 @@ export class WidebandAnalogRecorder {
 	/**
 	 * The sweep-hold hook, per transmission: for a session on this source, stream and epoch that is
 	 * classed analog-fm and has been voiced (`qualified`, sticky for its files), voice (`{ voice }`,
-	 * named by that track's observation id, with the session's frequency as `recordedHz`: the same over keeps its name, the next over after a
+	 * named by that track's observation id: the same over keeps its name, the next over after a
 	 * turnaround opens another track) while voice is on air in a track still open: the last voiced
 	 * meter window lies inside an open track's span and the newest judged audio is at most
 	 * WIDEBAND_VOICE_ON_AIR_MS past it (the scheduler may keep the hop up to `hold.maxHoldMs` while
-	 * the name stays the same, RecordingActivity); a recording that is not voice (RecordedSession,
-	 * naming the session's frequency as `recordedHz`) while a track is open with no
-	 * voice that recent (a carrier or a repeater hang after the voice, a stuck carrier: kept within
-	 * L only); false once no joined track is open (the over's squelch closed: the recorder's
-	 * `hangMs` still joins the next over into the same file, the sweep does not wait for it).
+	 * the name stays the same, RecordingActivity); a recording that is not voice while a track is
+	 * open with no voice that recent (a carrier or a repeater hang after the voice, a stuck carrier:
+	 * kept within L only), as true, or as a RecordedSession when it says more: `voiceEnded` when that
+	 * voice lies before the squelch last closed and reopened (Session.reopenAt: the voiced
+	 * transmission ended, the open track is another one; the sweep owes its coarse sweep and is not
+	 * kept); false once no joined track is open (the over's squelch closed: the recorder's `hangMs`
+	 * still joins the next over into the same file, the sweep does not wait for it). Either answer
+	 * names the session's frequency as `recordedHz` (its verified voice history) only once the store
+	 * admitted a file operation of the session (Session.admitted): a voiced session that was never
+	 * admitted (no association, a refused store) records nothing and grants no history.
 	 * "judging" while a classed session with an open track has not been voiced and has heard under
 	 * WIDEBAND_EVICT_MIN_HEARD_FRAMES (WIDEBAND_VOICE_JUDGE_MS from its first audio): its answer is
 	 * still to come, whichever way it goes. A shadow or one of another stream or an older epoch (the
@@ -1261,7 +1284,13 @@ export class WidebandAnalogRecorder {
 			}
 			const v = this.voiceOnAir(s)
 			if (typeof v === "object" && "voice" in v) return v
-			if (answer === false) answer = v
+			// A recording still running (true, or one not past its voice) outranks one whose voiced
+			// transmission ended (voiceEnded): the window still records a transmission.
+			if (
+				answer === false ||
+				(voiceEnded(answer) && v !== false && !voiceEnded(v))
+			)
+				answer = v
 		}
 		return answer
 	}
@@ -1274,17 +1303,31 @@ export class WidebandAnalogRecorder {
 	private voiceOnAir(s: Session): RecordingActivity {
 		const { open, voiced } = voicedSpan(s)
 		if (!open) s.voiceTx = null
-		// Classed and voiced (`qualified`: a file of it sounded like voice): the frequency's verified
-		// voice history for the sweep, voice on air now or not (RecordedSession, VoiceOnAir.recordedHz).
-		if (voiced === null)
-			return open ? { recording: true, recordedHz: s.targetHz } : false
+		// Classed and voiced (`qualified`) with a file the store admitted (`admitted`): the
+		// frequency's verified voice history for the sweep, voice on air now or not
+		// (RecordedSession, VoiceOnAir.recordedHz). Voiced but never admitted (no association, a
+		// refused store): no history, the answer alone.
+		const history = s.admitted ? { recordedHz: s.targetHz } : {}
+		if (voiced === null) {
+			if (!open) return false
+			// The voice lies before the squelch last reopened: its transmission ended and the open
+			// track is another one, not voiced yet (RecordedSession.voiceEnded).
+			const ended =
+				s.voiceAt !== null && s.reopenAt !== null && s.voiceAt < s.reopenAt
+			if (!ended && !s.admitted) return true
+			return {
+				recording: true,
+				...history,
+				...(ended ? { voiceEnded: true as const } : {}),
+			}
+		}
 		s.voiceTx ??= voiced
 		const quiet = Math.max(s.quietGap, s.judgedTo - (s.voiceAt ?? s.judgedTo))
 		s.quietGap = 0
 		return {
 			voice: s.voiceTx,
 			quietMs: (quiet * 1000) / s.fs,
-			recordedHz: s.targetHz,
+			...history,
 		}
 	}
 
@@ -1861,6 +1904,8 @@ export class WidebandAnalogRecorder {
 			voiceAt: null,
 			quietGap: 0,
 			voiceTx: null,
+			reopenAt: null,
+			admitted: false,
 			judgedTo: Number.NEGATIVE_INFINITY,
 			observations: new Set([input.observationId]),
 			activity: new Map([
@@ -2065,6 +2110,8 @@ export class WidebandAnalogRecorder {
 		handle.ready.then(
 			() => {
 				file.ready = true
+				// Admitted by the store: a file of this session is written (Session.admitted).
+				s.admitted = true
 				if (file.finishing) this.completeFinish(s, file)
 				else this.wake(s)
 			},
@@ -2087,6 +2134,9 @@ export class WidebandAnalogRecorder {
 			span.last = Math.max(span.last, track.lastSample)
 			return
 		}
+		// Opened while no track was: the squelch closed and reopened (Session.reopenAt).
+		if (![...s.activity.values()].some(a => a.open))
+			s.reopenAt = track.startSample
 		s.activity.set(observationId, {
 			start: track.startSample,
 			last: track.lastSample,

@@ -132,13 +132,24 @@ export type RecordingActivity =
 
 /**
  * A recording runs (as `true`) of a session the recorder classed analog FM and that sounded like
- * voice in a file it wrote or is writing, with no voice on air at this moment (a pause, the hang
- * or a line after the voice): `recordedHz` is that session's frequency, its verified voice history
- * (FrequencyMemory.voiced), as VoiceOnAir.recordedHz.
+ * voice, with no voice on air at this moment (a pause, the hang or a line after the voice), and
+ * the recorder says more about it than `true` does.
  */
 export interface RecordedSession {
 	readonly recording: true
-	readonly recordedHz: number
+	/**
+	 * That session's frequency, given only once the store admitted a file operation of it: its
+	 * verified voice history (FrequencyMemory.voiced), as VoiceOnAir.recordedHz. Absent: none.
+	 */
+	readonly recordedHz?: number
+	/**
+	 * The voiced transmission ended: its voice lies before the squelch last closed and reopened, so
+	 * the open track is another transmission not voiced yet (a reply joined by the recorder's
+	 * `hangMs`, or a kerchunk). That ends the visit's voice hold as a squelch close does, whatever
+	 * the frequency's voice history: the hop is not kept and owes its forced coarse sweep (askRecording).
+	 * Absent: the open track is still the voiced transmission's (a pause, the hang after it).
+	 */
+	readonly voiceEnded?: true
 }
 
 /** Voice on air in a recorded transmission (RecordingActivity). */
@@ -156,7 +167,7 @@ export interface VoiceOnAir {
 	readonly quietMs?: number
 	/**
 	 * Frequency (Hz) of the session that answered, given only by a recorder that recorded it: a
-	 * session it classed analog FM that sounded like voice in a file it wrote or is writing. It is
+	 * session it classed analog FM that sounded like voice in a file the store admitted. It is
 	 * that frequency's verified voice history (FrequencyMemory.voiced), which carrier evidence never
 	 * caps. Absent: a bare voice answer, no history (it cannot lift a carrier's cap).
 	 */
@@ -275,9 +286,13 @@ interface FrequencyMemory {
 	/** It was traffic at some time: KNOWN_CALL_REST_FACTOR applies when it is a carrier. */
 	wasTraffic: boolean
 	/**
-	 * Verified voice history: the recorder recorded a classed, voiced session on it (a voice answer
-	 * naming it, VoiceOnAir.recordedHz). Carrier evidence never caps a frequency with it
-	 * (recordedTrack): a repeater that earned carrier evidence (a kerchunk, a fade, its idle carrier)
+	 * Verified voice history: the recorder recorded a classed, voiced session on it, in a file the
+	 * store admitted (an answer naming it, VoiceOnAir.recordedHz, RecordedSession.recordedHz). It
+	 * lifts the carrier cap on a recording of a voiced transmission only: the end of that
+	 * transmission (RecordedSession.voiceEnded) still ends the hold and owes the coarse sweep. A
+	 * decode on the frequency leaves it: the decode makes the frequency traffic (markTraffic), where
+	 * no carrier cap applies, and a mixed analog and digital channel keeps its analog history.
+	 * Carrier evidence never caps a frequency with it (recordedTrack): a repeater that earned carrier evidence (a kerchunk, a fade, its idle carrier)
 	 * still has its ID recorded whole, on the first catch since too. Kept across visits and
 	 * re-plans with the entry, and only with it: forgetting the frequency (FORGET_MISSES visits
 	 * missing it, or eviction past MAX_FREQUENCY_MEMORY) clears its evidence and this together, so a
@@ -1695,10 +1710,23 @@ export class SweepScheduler {
 		const answer = this.recordingActive?.() ?? false
 		if (typeof answer === "object" && answer.recordedHz !== undefined)
 			this.noteVoiced(answer.recordedHz)
+		const v = this.visit
+		// The voiced transmission ended (its squelch closed and another track opened): as the end of
+		// a voice hold, whether or not one ran, and whatever the frequency's voice history. The hop
+		// is not kept for what follows (a reply, a kerchunk) and owes every hop its coarse visit
+		// (Visit.voice, endVisit): history only lifts the carrier cap on a recording of that
+		// transmission (recordedTrack), never a hold across its turnaround.
+		if (
+			typeof answer === "object" &&
+			!isVoiceOnAir(answer) &&
+			answer.voiceEnded === true
+		) {
+			if (v !== null) this.spendVoice(v)
+			return false
+		}
 		// A recorded session with no voice on air now is a recording that is not voice.
 		const active =
 			typeof answer === "object" && !isVoiceOnAir(answer) ? true : answer
-		const v = this.visit
 		if (v === null || v.voice !== "on") return active
 		if (
 			!isVoiceOnAir(active) ||

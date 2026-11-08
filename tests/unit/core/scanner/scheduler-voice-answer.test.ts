@@ -665,6 +665,68 @@ describe("verified voice history: carrier evidence never caps it", () => {
 	})
 })
 
+describe("a voiced transmission whose squelch closed under the recorder's hang (voiceEnded)", () => {
+	/**
+	 * Hop 0: a recorded voice for `voiceMs` from the landing, then the recorder's recording with no
+	 * voice (`after`) for 2 s (the reply joined in its hang, not voiced yet), then the reply's voice,
+	 * another name, also recorded, for 25 s.
+	 */
+	const reply = (
+		after: RecordingActivity,
+		voiceMs = 5_000,
+		landWith: "voice" | "after" = "voice",
+	) => {
+		let landedAt: number | null = null
+		const d = drive(
+			(hop, ms) => {
+				if (hop !== 0 || landedAt === null) return false
+				const into = ms - landedAt
+				const first = landWith === "voice" ? voiceMs : 0
+				if (into < first) return recordedVoice(hopHz(0))
+				if (into < first + 2_000) return after
+				if (into < first + 27_000)
+					return { voice: "b", quietMs: 0, recordedHz: hopHz(0) }
+				return false
+			},
+			(hop, s, visit) => {
+				if (hop !== 0 || visit !== 1) return
+				landedAt = d.now()
+				s.onTrack(sighting("a", hopHz(0)), false, 0)
+			},
+		)
+		return d
+	}
+	const ended: RecordingActivity = {
+		recording: true,
+		recordedHz: hopHz(0),
+		voiceEnded: true,
+	}
+
+	it("ends the voice hold at the first re-check that reads it, history or not: the forced sweep follows", () => {
+		const d = reply(ended)
+		const stay = d.stayed(0, 1)
+		expect(stay).toBeGreaterThanOrEqual(SETTLE_MS + 5_000)
+		expect(stay).toBeLessThanOrEqual(SETTLE_MS + 5_000 + RECHECK_MS)
+		d.stayed(0, 2)
+		expect(d.visits.slice(0, 4).map(v => v.hop)).toEqual([0, 1, 2, 0])
+	})
+
+	it("a recording still of the voiced transmission (no voiceEnded) is kept, to what L has left", () => {
+		const d = reply({ recording: true, recordedHz: hopHz(0) })
+		// Kept past the 2 s without voice, and the reply's voice then rides the spent hold to L.
+		expect(d.stayed(0, 1)).toBeGreaterThanOrEqual(SETTLE_MS + L3 - RECHECK_MS)
+	})
+
+	it("read at the keep, with no voice hold before it, it is not kept and still owes the coarse sweep", () => {
+		const d = reply(ended, 0, "after")
+		expect(d.stayed(0, 1)).toBeLessThanOrEqual(COARSE_MS + RECHECK_MS)
+		d.stayed(0, 2)
+		expect(d.visits.slice(0, 4).map(v => v.hop)).toEqual([0, 1, 2, 0])
+		// The reply on air at the next visit is a transmission of its own: it gets its voice hold.
+		expect(d.stayed(0, 2)).toBeGreaterThan(COARSE_MS + L3)
+	})
+})
+
 describe('a voice answer still to come ("judging")', () => {
 	const keptFor = (answer: (intoMs: number) => RecordingActivity) => {
 		const startedAt = SETTLE_MS + 3 * BLOCK_MS

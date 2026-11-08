@@ -30,18 +30,28 @@ afterEach(async () => {
 	for (const stop of stops.splice(0).reverse()) await stop()
 })
 
-async function turnaround(gapMs: number, phaseMs = 0, durationMs = 11_000) {
-	const off = FIRST_OVER_MS.toMs + phaseMs
+async function turnaround(
+	gapMs: number,
+	phaseMs = 0,
+	durationMs = 11_000,
+	over: { fromMs: number; toMs: number } = FIRST_OVER_MS,
+) {
+	const off = over.toMs + phaseMs
 	const w = qualificationWorld({
 		centreHz: CENTRE_HZ,
 		world: synthWorld([
 			{
 				hz: SIGNAL_HZ,
 				kind: "voice",
-				fromMs: FIRST_OVER_MS.fromMs,
+				fromMs: over.fromMs,
 				toMs: off,
 			},
-			{ hz: SIGNAL_HZ, kind: "voice", fromMs: off + gapMs, toMs: 30_000 },
+			{
+				hz: SIGNAL_HZ,
+				kind: "voice",
+				fromMs: off + gapMs,
+				toMs: Math.max(30_000, off + 20_000),
+			},
 		]),
 		patch: s => {
 			s.sweep.settleMs.local = SETTLE_MS
@@ -94,16 +104,58 @@ describe("a turnaround is read on air", () => {
 		expect(w.visits.at(-1)?.endMs).toBeNull()
 	}, 60_000)
 
-	// The first over was recorded voiced: verified voice history, which carrier evidence never caps,
-	// so the flap's evidence does not cut the voice that follows it (as a 1,031 ms turnaround's does
-	// not, above).
-	it("a 900 ms gap is a flap, but on a frequency whose voice was recorded the hop is kept for the voice that follows it", async () => {
+	/** Every hop of the plan is visited between the end of `held` and the signal hop's next visit. */
+	const sweptAfter = (
+		w: Awaited<ReturnType<typeof turnaround>>["w"],
+		held: { endMs: number | null },
+	) => {
+		const i = w.visits.indexOf(held as (typeof w.visits)[number])
+		const back = w.visits.findIndex(
+			(v, j) => j > i && v.centreHz === SIGNAL_HOP_HZ,
+		)
+		const between = w.visits.slice(i + 1, back === -1 ? undefined : back)
+		return new Set(between.map(v => v.centreHz))
+	}
+	const otherHops = (w: Awaited<ReturnType<typeof turnaround>>["w"]) =>
+		new Set(w.visits.map(v => v.centreHz).filter(hz => hz !== SIGNAL_HOP_HZ))
+
+	// The first over was recorded voiced (verified voice history), then its squelch closed and the
+	// reply opened 900 ms later, joined into the recorder's session by its hang: the over's
+	// transmission ended, so the hop owes its coarse sweep whatever its history, and the reply is
+	// not held across the turnaround (history only lifts the carrier cap on a recording of the
+	// voiced transmission itself).
+	it("a 900 ms gap after a recorded over: the sweep runs after the over, not on into the reply", async () => {
 		const { w, entry } = await turnaround(900, 0, 30_000)
 		expect(entry?.flaps).toBe(true)
 		expect(entry?.evidence).toBe("carrier")
 		expect(entry?.voiced).toBe(true)
-		expect(laterVisits(w)).toEqual([])
-		expect(w.visits.at(-1)?.centreHz).toBe(SIGNAL_HOP_HZ)
-		expect(w.visits.at(-1)?.endMs).toBeNull()
+		const held = w.visits.find(v => v.centreHz === SIGNAL_HOP_HZ)!
+		// Left within the turnaround's close and reopening (the over ends at 8 s, the reply at 8.9 s
+		// surfaces up to 350 ms later), not held on into the reply.
+		expect(held.endMs).not.toBeNull()
+		expect(held.endMs!).toBeGreaterThanOrEqual(FIRST_OVER_MS.toMs)
+		expect(held.endMs!).toBeLessThanOrEqual(FIRST_OVER_MS.toMs + 1_500)
+		expect(sweptAfter(w, held)).toEqual(otherHops(w))
+		expect(laterVisits(w).length).toBeGreaterThanOrEqual(4)
 	}, 60_000)
+
+	// An over longer than L is held as voice (the recorder answered it, so the frequency has its
+	// verified voice history before the turnaround), then its squelch closes: its voice hold ends
+	// there, and the forced coarse sweep runs before the hop is held again, whether the reply comes
+	// 1,031 ms later (a turnaround) or 900 ms later (a flap).
+	for (const gapMs of [1_031, 900])
+		it(`a ${gapMs} ms turnaround after a voice-held over with voice history: the sweep runs after the over`, async () => {
+			const over = { fromMs: 2_000, toMs: 24_000 }
+			const { w, entry } = await turnaround(gapMs, 0, 32_000, over)
+			expect(entry?.voiced).toBe(true)
+			// Left at the close, before the reopening: the gap is not classed on this visit.
+			expect(entry?.evidence).toBe("unknown")
+			const held = w.visits.find(v => v.centreHz === SIGNAL_HOP_HZ)!
+			// Held past L for the over's voice, left at its squelch close: the hold falls back at most
+			// 2.85 s after the last word, before the reply is on air for long.
+			expect(held.endMs).not.toBeNull()
+			expect(held.endMs!).toBeGreaterThanOrEqual(over.toMs)
+			expect(held.endMs!).toBeLessThanOrEqual(over.toMs + 2_850)
+			expect(sweptAfter(w, held)).toEqual(otherHops(w))
+		}, 90_000)
 })
