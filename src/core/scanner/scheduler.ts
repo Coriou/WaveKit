@@ -422,13 +422,23 @@ interface HopState {
 	/**
 	 * The hops (indices in the plan in force) that still owe a coarse visit before a voiced recording
 	 * may keep this hop again: every other hop when a visit's voice hold ends (Visit.voice), or a
-	 * visit leaves a voiced transmission its analog hold heard (Visit.heardVoiceId), so the
+	 * visit leaves a voiced transmission its analog hold heard and could have held
+	 * (Visit.heardVoiceId, heardVoiceHoldable; else revisitLock), so the
 	 * sweep's return to this hop may hold the next transmission. No activity revisit comes back here
 	 * meanwhile (pickRevisit). Per hop: a long hold elsewhere never takes a transmission's voice hold
 	 * away. Named hops, not a count: a plan change has to know which of them were paid
 	 * (carryVoiceLocks).
 	 */
 	voiceLock: HopBits
+	/**
+	 * The hops that still owe a coarse visit before an activity revisit may come back here
+	 * (pickRevisit), with no bar on a voice hold: every other hop when a visit barred from a voice
+	 * hold (Visit.heardVoiceHoldable false) leaves a voiced transmission it heard still on air. The
+	 * hop's next coarse landing may hold that transmission, as it recorded none of it; a revisit
+	 * would only give the hop more of a transmission's time before the sweep. Carried across a plan
+	 * change as voiceLock is.
+	 */
+	revisitLock: HopBits
 }
 
 /** Measured ms per phase of a visit (or of a hop's ended visits). Never read by a decision. */
@@ -590,9 +600,20 @@ interface Visit {
 	 * then the sweep. Its end (the squelch closed, the recorder's `voiceEnded`, or voice named
 	 * otherwise) spends the visit's voice hold as a voice hold's end does (askRecording), so a reply
 	 * never gets a voice hold of its own before the forced coarse sweep. Kept for the visit: a visit
-	 * that leaves with it still on air (a hold cut at L) owes the sweep too (endVisit, voiceLock).
+	 * that leaves with it still on air (a hold cut at L) owes the sweep too (endVisit, voiceLock),
+	 * when the visit could have held it (Visit.heardVoiceHoldable); else only activity revisits
+	 * wait for the sweep (HopState.revisitLock).
 	 */
 	heardVoiceId: string | null
+	/**
+	 * Whether a voice hold of the transmission named Visit.heardVoiceId was allowed while the
+	 * recorder named it (mayHoldVoice): no voice lock on the hop, no revisit of the hop that set the
+	 * long-hold lock, the voice hold not spent or barred, and a track the recording can be of
+	 * (recordedTrack). A visit barred from that hold (the revisit right after a carrier watch of the
+	 * hop, say) recorded nothing of the transmission and owes no sweep for it: the hop's next
+	 * landing may hold it.
+	 */
+	heardVoiceHoldable: boolean
 	/** Clock the recording check was last asked during an analog hold (sampleVoice's pace only). */
 	followAskedAt: number | null
 	/** The recording check answered anything but false during this visit: the recorder has a session. */
@@ -1991,8 +2012,29 @@ export class SweepScheduler {
 		v.followAskedAt = now
 		const active = this.askRecording(now)
 		if (this.askEnded) return true
-		if (isVoiceOnAir(active)) v.heardVoiceId ??= active.voice
+		if (isVoiceOnAir(active)) {
+			v.heardVoiceId ??= active.voice
+			if (active.voice === v.heardVoiceId)
+				v.heardVoiceHoldable ||= this.mayHoldVoice(v)
+		}
 		return false
+	}
+
+	/**
+	 * Whether the visit may still give voice on air its voice hold (keepForRecording's bars, the
+	 * cap aside): its voice hold is neither spent nor barred, the hop owes no sweep for its last
+	 * voice hold (voiceLocked), the visit is no revisit of the hop whose long hold set the long-hold
+	 * lock (lockedOut), and the recording can be of a track with no carrier evidence
+	 * (recordedTrack).
+	 */
+	private mayHoldVoice(v: Visit): boolean {
+		return (
+			v.voice !== "spent" &&
+			!v.voiceBarred &&
+			!this.voiceLocked(v) &&
+			!(v.revisit && this.lockedOut(v.hopIndex)) &&
+			this.recordedTrack(this.hold?.trackId) !== null
+		)
 	}
 
 	/**
@@ -2270,6 +2312,7 @@ export class SweepScheduler {
 			phases: emptyPhases(),
 			waitMs: 0,
 			voiceLock: NO_HOPS,
+			revisitLock: NO_HOPS,
 		}
 	}
 
@@ -2582,6 +2625,7 @@ export class SweepScheduler {
 			voiceId: null,
 			voiceAskedAt: null,
 			heardVoiceId: null,
+			heardVoiceHoldable: false,
 			followAskedAt: null,
 			sessionSeen: false,
 			voiceBarred: false,
@@ -3407,17 +3451,30 @@ export class SweepScheduler {
 			for (const [i, other] of this.hops.entries())
 				if (i !== v.hopIndex) other.waitMs += heldMs
 		hop.waitMs = 0
-		if (!v.revisit) for (const h of this.hops) h.voiceLock.delete(v.hopIndex)
+		if (!v.revisit)
+			for (const h of this.hops) {
+				h.voiceLock.delete(v.hopIndex)
+				h.revisitLock.delete(v.hopIndex)
+			}
 		const voiceHeld = v.voice !== "no"
 		// A follow that heard a squelch close with no session to name it owes the same visits
 		// before the hop's next voice hold (Visit.voiceBarred), without the long-hold lock. So does
 		// a visit that leaves while the voiced transmission an analog hold heard is still on air
 		// (Visit.heardVoiceId with no voice hold: its end would have spent one), say a hold cut at L
 		// with that transmission evicted from its recorder slot: one transmission, then the sweep,
-		// with no activity revisit holding it again meanwhile (pickRevisit).
-		if (voiceHeld || v.voiceBarred || v.heardVoiceId !== null) {
+		// with no activity revisit holding it again meanwhile (pickRevisit). Only when the visit
+		// could have held it (Visit.heardVoiceHoldable): a visit barred from that voice hold (the
+		// revisit right after a carrier watch of the hop, a kerchunk before an ID) recorded none of
+		// it, so the hop's next coarse landing may hold it whole; only activity revisits wait for the
+		// sweep (HopState.revisitLock).
+		if (
+			voiceHeld ||
+			v.voiceBarred ||
+			(v.heardVoiceId !== null && v.heardVoiceHoldable)
+		) {
 			hop.voiceLock = HopBits.allBut(this.plan.hops.length, v.hopIndex)
-		}
+		} else if (v.heardVoiceId !== null)
+			hop.revisitLock = HopBits.allBut(this.plan.hops.length, v.hopIndex)
 		// A long hold that used more than one coarse sweep, a decoded follow that ran to L, or
 		// budgeted holds that kept a hop waiting L (lockAfterMs), or a voice hold (Visit.voice):
 		// every hop gets a coarse visit before the next long follow, and the hop is probed, not
@@ -3584,7 +3641,12 @@ export class SweepScheduler {
 		let best: number | null = null
 		let bestScore = 0
 		for (const [i, hop] of this.hops.entries()) {
-			if (i === next || hop.lastVisit === null || hop.voiceLock.size > 0)
+			if (
+				i === next ||
+				hop.lastVisit === null ||
+				hop.voiceLock.size > 0 ||
+				hop.revisitLock.size > 0
+			)
 				continue
 			const score =
 				hop.activityScore *
@@ -3644,13 +3706,22 @@ export class SweepScheduler {
 		this.hops = mapped.map(
 			(state, i) => state ?? this.freshHop(pending.plan.hops[i]),
 		)
+		const spans = old.hops.map(hop => hop.covered)
+		const nextSpans = pending.plan.hops.map(hop => hop.covered)
 		const { locks } = carryVoiceLocks(
-			old.hops.map(hop => hop.covered),
+			spans,
 			oldHops.map(hop => hop.voiceLock),
-			pending.plan.hops.map(hop => hop.covered),
+			nextSpans,
 		)
-		for (const [i, hop] of this.hops.entries())
+		const { locks: revisitLocks } = carryVoiceLocks(
+			spans,
+			oldHops.map(hop => hop.revisitLock),
+			nextSpans,
+		)
+		for (const [i, hop] of this.hops.entries()) {
 			hop.voiceLock = locks[i] ?? NO_HOPS
+			hop.revisitLock = revisitLocks[i] ?? NO_HOPS
+		}
 		this.visited = visited
 		this.lockHop = null
 		this.coarseIndex = nearestNew(oldCoarseCentre)
