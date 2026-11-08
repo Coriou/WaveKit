@@ -3794,8 +3794,9 @@ own track; `joined`, another track merged into the recording; `close`, a closing
 `atMs` (ms of signal from the recording's onset to that snapshot's end), `flagged` and
 `snapshots` (unclean snapshots and all snapshots of the recording so far) and `kept` (true: a
 late spur or IQ-image flag, or a wide reading past 25 kHz, on fewer than half of the snapshots
-of a classed, voiced recording, or a wide reading up to 25 kHz on any share of them, whose files
-are written without tone evidence; false: the flag ended the recording). Absent on
+of a classed, voiced recording, or a wide reading up to 25 kHz on any share of them, before or
+after the class and voice, the recording's first snapshot included; its files are written without
+tone evidence; false: the flag ended the recording). Absent on
 older cores and when every snapshot was clean. A recording's tone evidence is published once it
 has ended and all its files are written, and only when none of its snapshots was unclean.
 

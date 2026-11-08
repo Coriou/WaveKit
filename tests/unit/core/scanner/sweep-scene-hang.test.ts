@@ -21,8 +21,12 @@ const SETTLE_MS = 1_000
 const SIGNAL_HOP = 1
 /** L on 3 hops of 1150 ms: 28 000 − 4600 − 5000. */
 const L_MS = 18_400
-/** Past L a hold falls back at most this long after the last word (VOICE_QUIET_PAST_L_MS). */
-const FALL_BACK_MS = 2_750
+/**
+ * Past L a hold falls back at most this long after the last word (VOICE_QUIET_PAST_L_MS): judged
+ * audio 1000 ms late, the voiced window's 500 ms tail, the first reading past the limit (1100 at
+ * most: an ended quiet reads in 100 ms steps) and the 250 ms re-check.
+ */
+const FALL_BACK_MS = 1_000 + 500 + 1_100 + 250
 /** What the tune and the two 25 ms chunks either side of it add to a hold as the report reads it. */
 const READ_MS = 100
 
@@ -44,6 +48,8 @@ const scene = (
 	})
 
 describe("a QSO through a repeater's hang", () => {
+	// A 2 s turnaround under a 2.5 s hang: it reads about 1700 ms of quiet, over the 1000 ms limit
+	// past L.
 	it("the hold ends at the first turnaround past L, the forced sweep runs, and the next hold follows", async () => {
 		const OVER_MS = 8_000
 		const talk = qso({
@@ -52,8 +58,8 @@ describe("a QSO through a repeater's hang", () => {
 			toMs: 60_000,
 			seed: 1,
 			overMs: [OVER_MS, OVER_MS],
-			replyMs: [1_500, 1_500],
-			hangMs: 1_500,
+			replyMs: [2_000, 2_000],
+			hangMs: 2_500,
 		})
 		// One carrier from the first word to the last: the track never closes.
 		expect(talk.emitters).toHaveLength(1)
@@ -71,6 +77,37 @@ describe("a QSO through a repeater's hang", () => {
 		expect(r.unpaidSweeps).toBe(0)
 	}, 300_000)
 
+	// A 1.5 s turnaround under a 1.5 s hang, each reply keyed at the hang's end: one carrier from the
+	// first word to the last, and a quiet of 1100 to 1600 ms at each turnaround, all over the 1000 ms
+	// limit (VOICE_QUIET_PAST_L_MS), so every hold ends at its first turnaround past L and none runs
+	// to `hold.maxHoldMs` with nobody talking. A speaker's pause of 1.4 s or more past L reads the same
+	// and is cut too (the split file).
+	it("1.5 s turnarounds under a 1.5 s hang: each hold ends at its first turnaround past L, never at hold.maxHoldMs", async () => {
+		const OVER_MS = 8_000
+		const talk = qso({
+			hz: SIGNAL_HZ,
+			fromMs: 2_000,
+			toMs: 60_000,
+			seed: 1,
+			overMs: [OVER_MS, OVER_MS],
+			replyMs: [1_500, 1_500],
+			hangMs: 1_500,
+		})
+		expect(talk.emitters).toHaveLength(1)
+		const r = await scene(
+			65_000,
+			talk.emitters,
+			talk.overs.map(o => ({ hz: SIGNAL_HZ, ...o })),
+		)
+		expect(r.hops).toEqual(HOPS)
+		const holds = heldOn(r, SIGNAL_HOP)
+		expect(holds.length).toBeGreaterThanOrEqual(2)
+		for (const ms of holds)
+			expect(ms).toBeLessThanOrEqual(L_MS + OVER_MS + FALL_BACK_MS + READ_MS)
+		expect(r.unpaidSweeps).toBe(0)
+	}, 300_000)
+
+	// 2 s turnarounds, as above.
 	it("an ID on another hop is reached between holds", async () => {
 		const talk = qso({
 			hz: SIGNAL_HZ,
@@ -78,8 +115,8 @@ describe("a QSO through a repeater's hang", () => {
 			toMs: 60_000,
 			seed: 2,
 			overMs: [5_000, 12_000],
-			replyMs: [1_500, 1_500],
-			hangMs: 1_500,
+			replyMs: [2_000, 2_000],
+			hangMs: 2_500,
 		})
 		const other = ids({
 			hz: OTHER_HZ,

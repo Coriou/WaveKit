@@ -264,6 +264,14 @@ export interface IngestOptions {
 	 * places a track whose gate has not passed.
 	 */
 	decode?: DecodeEvidence
+	/**
+	 * A classed, voiced recording keeps this observation over the snapshot's late spur or IQ
+	 * image flag (WidebandAnalogRecorder.keepsOverArtefact): an observation already placed and
+	 * never flagged before stays on its discovery instead of being retracted, so the recording
+	 * keeps its association. A truncated track, an unplaced observation or one flagged earlier is
+	 * retracted as before.
+	 */
+	artefactWaived?: boolean
 }
 
 /** LO-locked spurs: a line's width as the tracker compares it (floor `DQ_LO_LOCK_WIDTH_FLOOR_HZ`). */
@@ -1940,10 +1948,16 @@ export class DiscoveryStore
 			return TRANSIENT
 		}
 		this.sweepPendingIfDue()
-		const flagged = this.rememberStickyFlags(input) // may be raised late (P3, § 4.9)
+		const known = this.observationIndex.get(input.id)
+		const waived =
+			known !== undefined &&
+			opts.artefactWaived === true &&
+			input.track.flags.truncated !== true &&
+			!this.flaggedIds.has(input.id)
+		// may be raised late (P3, § 4.9); a waived late artefact is not remembered
+		const flagged = !waived && this.rememberStickyFlags(input)
 		// DQ 1.4: a flagged observation's pending evidence stops counting.
 		if (flagged) this.pending.forget(input.sourceId, input.id)
-		const known = this.observationIndex.get(input.id)
 		if (known !== undefined) {
 			if (flagged) return this.retract(known)
 			return this.reingest(known, input)
@@ -3471,17 +3485,34 @@ export class DiscoveryStore
 		return [...this.recordingOperations.values()].map(clone)
 	}
 
-	/** Exact current association, without pagination or any identity repair. */
+	/**
+	 * The live discovery a recording begun for `discoveryId` belongs to now: that discovery, or
+	 * the survivor that adopted its folder in a merge, so a recording whose
+	 * discovery merged mid-recording is reattached to the survivor (its file stays in the adopted
+	 * folder). Undefined when neither is live (a deletion, or an alias released past its bound).
+	 */
+	private recordingOwner(discoveryId: string): Discovery | undefined {
+		const d = this.discoveries.get(discoveryId)
+		if (d !== undefined) return d
+		const owner = this.aliasTable.aliasOwner(discoveryId)
+		return owner === undefined ? undefined : this.discoveries.get(owner)
+	}
+
+	/**
+	 * Exact current association, without pagination or any identity repair. The observation
+	 * must still belong to the recording's discovery or to the survivor of its merge (recordingOwner).
+	 */
 	recordingAssociation(
 		discoveryId: string,
 		observationId: string,
 		binding?: RecordingBinding,
 	): { aliasIds: readonly string[] } | null {
 		const observation = this.observationIndex.get(observationId)
+		const owner = this.recordingOwner(discoveryId)
 		if (
 			observation === undefined ||
-			observation.discoveryId !== discoveryId ||
-			!this.discoveries.has(discoveryId)
+			owner === undefined ||
+			observation.discoveryId !== owner.id
 		)
 			return null
 		if (
@@ -3498,7 +3529,8 @@ export class DiscoveryStore
 		const metadata = this.recordingOperations.get(operationId)
 		if (metadata === undefined) return null
 		const observation = this.observationIndex.get(metadata.observationId)
-		const discovery = this.discoveries.get(metadata.discoveryId)
+		// A merge since the recording began: the survivor takes it (recordingOwner).
+		const discovery = this.recordingOwner(metadata.discoveryId)
 		if (
 			observation === undefined ||
 			discovery === undefined ||
@@ -3540,7 +3572,7 @@ export class DiscoveryStore
 				plan.metadata &&
 			this.observationIndex.get(plan.metadata.observationId) ===
 				plan.observation &&
-			this.discoveries.get(plan.metadata.discoveryId) === plan.discovery &&
+			this.recordingOwner(plan.metadata.discoveryId) === plan.discovery &&
 			plan.observation.discoveryId === plan.discovery.id &&
 			plan.observation.sourceId === plan.metadata.binding.sourceId &&
 			plan.observation.sampleRange.stream === plan.metadata.binding.stream &&

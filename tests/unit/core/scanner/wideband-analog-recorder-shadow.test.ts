@@ -192,10 +192,19 @@ describe("WidebandAnalogRecorder shadow sessions", () => {
 		h.rec.track(
 			input("c", snapshot("c", at, at + 10), { ...SHADOW, nonAnalog: true }),
 		)
+		// Wider than a channel, or over 16 kHz without a peaked shape (startsWide).
 		h.rec.track(
-			input("d", snapshot("d", at, at + 10, { obwHz: 16_001 }), SHADOW),
+			input("d", snapshot("d", at, at + 10, { obwHz: 25_001 }), SHADOW),
 		)
-		expect(["a", "b", "c", "d"].map(id => h.rec.owns(id))).toEqual([
+		h.rec.track(
+			input(
+				"f",
+				snapshot("f", at, at + 10, { obwHz: 16_001, spectralShape: "flat" }),
+				SHADOW,
+			),
+		)
+		expect(["a", "b", "c", "d", "f"].map(id => h.rec.owns(id))).toEqual([
+			false,
 			false,
 			false,
 			false,

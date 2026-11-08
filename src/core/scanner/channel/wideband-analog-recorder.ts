@@ -1,6 +1,7 @@
 /**
  * Default-on analog voice recorder fed from the scanner's own wideband IQ ring. It needs no
- * channelizer and no channel tier. A clean narrow track starts one session per channel, which
+ * channelizer and no channel tier. A clean narrow track (or a peaked one a neighbouring line
+ * widens within a channel, startsWide) starts one session per channel, which
  * reads the engine ring from `hold.preRollMs` before the onset, demodulates NFM
  * (`WidebandNfmChain`) and writes 8 kHz WAV files through the evidence store's analog
  * operations (`recordings/analog/<discoveryId>/`, storage cap, disk-low and retention apply).
@@ -234,21 +235,49 @@ export function toneOnlyYields(
  * can raise on some snapshots of a real voice) or a wide reading past a channel
  * (WIDEBAND_KEPT_WIDE_OBW_HZ), first seen after the session was classed and voiced, and on fewer
  * than this share of its snapshots so far: 0.5, flagged · 2 < snapshots (e.g. 49 of 100 is kept,
- * 50 of 100 is not). Its files are written but give no tone evidence. Any other flag, a flag seen
- * before the class and the voice, or one on half of the snapshots or more, discards the session
- * as before.
+ * 50 of 100 is not). In-channel wide readings count in neither (always kept). Its files are
+ * written but give no tone evidence. Any other flag, a flag seen before the class and the voice,
+ * or one on half of the snapshots or more, discards the session as before.
  */
 export const WIDEBAND_LATE_FLAG_MAX_SHARE = 0.5
 /**
- * A classed, voiced session keeps recording over a wide reading up to this, on any share of its
- * snapshots: one 25 kHz channel, the line above which the classifier calls a signal `wideband`
- * (classOf). The bound of WIDEBAND_MAX_OBW_HZ decides what may start a recording; a voice already
- * heard reads over it when the -20 dB width of its mean spectrum runs one 1 kHz bin wider, and the
- * demodulator hears the same ±8 kHz channel (CHANNEL_CUTOFF_HZ) whatever the reading says. With no
- * voice after it, the sweep's answer falls back by itself (WIDEBAND_VOICE_ON_AIR_MS). Past a
- * channel the reading counts as a late flag (lateFlagKept), and an unknown width too.
+ * A session keeps recording over a wide reading up to this, on any share of its snapshots, before
+ * its voice verdict and after it: one 25 kHz channel, the line above which the classifier calls a
+ * signal `wideband` (classOf). WIDEBAND_MAX_OBW_HZ is a clean track's bound; a voice reads over it
+ * when the -20 dB width of its mean spectrum runs one 1 kHz bin wider, or when a weak steady line
+ * 6 to 10 kHz away (a spur, a neighbour's carrier) joins its track, which then reads 17 to 22 kHz
+ * from the voice's first snapshot on. The demodulator hears the same ±8 kHz channel
+ * (CHANNEL_CUTOFF_HZ) whatever the reading says. Such a reading with a peaked shape (FM voice's
+ * hump, not a data signal's flat top or a line's narrow peak) may also start a session
+ * (startsWide). What ends a signal kept this way that is not voice: a file is written only once
+ * its audio sounds like voice (VoiceActivityGate), and a session not voiced after
+ * WIDEBAND_QUALIFY_MS (8 s) of in-track audio, 3 s for a spectrally digital one, is discarded and
+ * its observations refused (one slot for at most 8 + 1 s once per observation); the sweep keeps a
+ * hop for its answer at most WIDEBAND_VOICE_JUDGE_MS once per visit, and for voice only while voice
+ * is on air (WIDEBAND_VOICE_ON_AIR_MS), up to `hold.maxHoldMs`. A kept session gives no tone
+ * evidence (publishTones). Past a channel the reading counts as a late flag (lateFlagKept), and an
+ * unknown width too; any stricter flag on the same snapshot rules (uncleanFlag).
  */
 export const WIDEBAND_KEPT_WIDE_OBW_HZ = 25_000
+
+/** A wide reading within a channel (WIDEBAND_KEPT_WIDE_OBW_HZ), the track's only unclean flag. */
+export function inChannelWide(track: TrackSnapshot): boolean {
+	return (
+		uncleanFlag(track) === "wide" &&
+		Number.isFinite(track.obwHz) &&
+		track.obwHz <= WIDEBAND_KEPT_WIDE_OBW_HZ
+	)
+}
+
+/**
+ * Whether a first snapshot that is unclean only for an in-channel wide reading starts a session
+ * (WIDEBAND_KEPT_WIDE_OBW_HZ): its shape is peaked. A flat top (wideband data) or a narrow peak
+ * (a line whose skirt or neighbour widens the reading) is refused at the start as before; a later
+ * snapshot of the same observation may still start one.
+ */
+export function startsWide(track: TrackSnapshot): boolean {
+	return inChannelWide(track) && track.spectralShape === "peaked"
+}
 
 /**
  * The first reason `track` is not clean (cleanTrack), or null when it is. Hardest to keep a session
@@ -401,6 +430,44 @@ export const WIDEBAND_PARK_MS = 2_000
  * Each holds at most WIDEBAND_MAX_BUFFERED_FRAMES (960 KB): 4 · 960 KB = 3.84 MB at most.
  */
 export const WIDEBAND_MAX_PARKED = 4
+/**
+ * How far a session not voiced yet may sit from its own track's centre before it starts again there
+ * (retarget): 2000 Hz. The demodulator hears ±8 kHz (CHANNEL_CUTOFF_HZ) around `targetHz`; an NFM
+ * voice deviates up to ±5 kHz and a track's centre reads in 1 kHz bins at 1.024 Msps, so a voice
+ * whose centre is within 8000 − 5000 − 1000 = 2000 Hz of the session stays inside the channel (at
+ * 2.4 Msps, 1.17 kHz bins, its widest peaks may reach 8.2 kHz).
+ */
+export const WIDEBAND_RETARGET_HZ = 2_000
+/**
+ * Times one observation's session may start again, at a new centre (retarget) or after a reading
+ * past a channel before its voice (wideRestart): 3, enough for a centroid that walks from a line onto
+ * a voice 6 to 10 kHz away in steps of about 2 kHz a snapshot, or a key-up's one wide reading.
+ * Each new session has its own WIDEBAND_QUALIFY_MS, so a track whose centre keeps wandering and
+ * never sounds like voice holds a slot for at most (1 + 3) × (8 + 1) = 36 s of signal (each
+ * judged 1 s late), once per observation (remembered like refusals, MAX_REMEMBERED), and once per
+ * channel in any WIDEBAND_RESTART_WINDOW_MS, whatever observation its track is now
+ * (WIDEBAND_RESTART_CHANNEL_HZ).
+ */
+export const WIDEBAND_MAX_RETARGETS = 3
+/**
+ * Window in which one channel shares the WIDEBAND_MAX_RETARGETS budget, in stream time: 240 000 ms.
+ * A track rolls over to a successor observation every 120 s (the tracker's maxTrackMs), and with
+ * it the per-observation budget would renew: a wandering carrier would restart 3 times per 120 s
+ * for as long as it stays on air. A session restarts only before its voice, so an observation's
+ * restarts lie within 36 s of its onset (WIDEBAND_MAX_RETARGETS); its successor's, within
+ * 120 + 36 = 156 s of the predecessor's onset, inside 240 s, so a chain and its successor share one
+ * budget of 3. A channel then spends at most 3 restarts in any 240 s, (1 + 3) × 9 = 36 s of slot
+ * time on unvoiced sessions that start again, against 3 per 120 s before. A session of the channel
+ * that voices clears it (forgetRestarts): the restarts found a voice, so the next transmission
+ * beside the same line (the next over of a QSO) has its own 3.
+ */
+export const WIDEBAND_RESTART_WINDOW_MS = 240_000
+/**
+ * Restarts this close to a session's centre are of its channel: 12 500 Hz, half a 25 kHz channel.
+ * A centroid that walks from a line onto a voice 6 to 10 kHz away moves the session's centre by at
+ * most that much over its restarts, so they all stay one channel's.
+ */
+export const WIDEBAND_RESTART_CHANNEL_HZ = 12_500
 /** Observations remembered as refused, and as retried once, per manager. */
 const MAX_REMEMBERED = 1024
 /** Remembered file ends per manager (pre-roll clamp of the next file on the same channel). */
@@ -525,6 +592,17 @@ export interface WidebandTrackInput {
 	readonly recordAllowed: boolean
 	/** The channel-tier recorder owns this observation: stand down. */
 	readonly channelOwned: boolean
+}
+
+/**
+ * What the next track() or closed() call for a snapshot will say about its observation
+ * (keepsOverArtefact): the recorder's vetoes besides the track's own flags.
+ */
+export interface WidebandArtefactInfo {
+	readonly analogFm: boolean
+	readonly nonAnalog?: boolean
+	readonly encrypted: boolean
+	readonly recordAllowed: boolean
 }
 
 /** What the closing snapshot says about the observation (its class may arrive only there). */
@@ -690,7 +768,10 @@ interface Session {
 	flagged: number
 	/** Of those, wide readings within WIDEBAND_KEPT_WIDE_OBW_HZ: outside any flag's share. */
 	flaggedInChannel: number
-	/** The session's first flag came after it was classed and voiced. */
+	/**
+	 * The session's first flag other than an in-channel wide reading came after it was classed and
+	 * voiced.
+	 */
 	flagLate: boolean
 	/**
 	 * The unclean detail its decisions carry, with the counts above (null while every snapshot was
@@ -801,6 +882,69 @@ function barredSnapshot(
 	return null
 }
 
+/** What counting one more snapshot does to a session (countSnapshot); snapshotBar commits it. */
+interface SnapshotCount {
+	readonly snapshots: number
+	readonly flagged: number
+	readonly flaggedInChannel: number
+	readonly flagLate: boolean
+	/** The snapshot's unclean flag when `barred` is refused:unclean, else null (nothing counted). */
+	readonly flag: ScannerRecorderFlag | null
+	/** What bars the session with this snapshot counted; null when it keeps recording. */
+	readonly bar: ScannerRecorderDecision | null
+}
+
+/**
+ * The session's counts with one more snapshot of it (`barred` as barredSnapshot says), and what
+ * then bars it: `barred` as given, or null when the only bar is an unclean track the session keeps
+ * recording over (an in-channel wide reading at any time, WIDEBAND_KEPT_WIDE_OBW_HZ, or a late
+ * flag, lateFlagKept). Reads only: snapshotBar commits it, keepsOverArtefact asks it ahead.
+ */
+function countSnapshot(
+	s: Session,
+	track: TrackSnapshot,
+	barred: ScannerRecorderDecision | null,
+): SnapshotCount {
+	const snapshots = s.snapshots + 1
+	const flag = barred === "refused:unclean" ? uncleanFlag(track) : null
+	if (flag === null)
+		return {
+			snapshots,
+			flagged: s.flagged,
+			flaggedInChannel: s.flaggedInChannel,
+			flagLate: s.flagLate,
+			flag: null,
+			bar: barred,
+		}
+	// Before the voice verdict too: a neighbouring line can widen a voice's reading from its start.
+	const inChannel = inChannelWide(track)
+	const flagLate =
+		!inChannel && s.flagged === s.flaggedInChannel
+			? s.classed && s.qualified
+			: s.flagLate
+	const flagged = s.flagged + 1
+	const flaggedInChannel = s.flaggedInChannel + (inChannel ? 1 : 0)
+	const kept =
+		inChannel ||
+		lateFlagKept(flag, flagLate, flagged - flaggedInChannel, snapshots)
+	return {
+		snapshots,
+		flagged,
+		flaggedInChannel,
+		flagLate,
+		flag,
+		bar: kept ? null : barred,
+	}
+}
+
+/**
+ * Whether a snapshot's class discards the session (classify): a definite other class (a verified
+ * decode, the channel tier) while the session is a shadow or classed by its own audio only.
+ */
+function classVetoes(s: Session, info: ClassInfo): boolean {
+	return !info.analogFm && (!s.classed || s.toneOnly) && info.nonAnalog === true
+}
+
 function bindingKey(binding: RecordingBinding): string {
 	return JSON.stringify(
 		Object.entries(binding).sort(([a], [b]) => (a < b ? -1 : 1)),
@@ -889,6 +1033,18 @@ export class WidebandAnalogRecorder {
 	private readonly unsettled = new Map<string, number>()
 	private readonly refused = new Set<string>()
 	/**
+	 * Observations a classed, voiced recording keeps over a late spur or IQ-image flag
+	 * (keepsOverArtefact), until a veto or refusal of their session revokes it (revokeWaivers) or
+	 * they close (bounded by MAX_REMEMBERED).
+	 */
+	private readonly waived = new Set<string>()
+	/**
+	 * Of `waived`, the observations whose session was classed by its own audio only (`toneOnly`) when
+	 * the waiver was granted: a definite other class (classVetoes) still ends their waiver once the
+	 * session itself is gone. Same bound and life as `waived`.
+	 */
+	private readonly waivedToneOnly = new Set<string>()
+	/**
 	 * Observations whose spectrally digital shadow expired (WIDEBAND_DIGITAL_CLASS_MS), with the
 	 * visit (stream and epoch) it expired in: no other shadow starts for them in that visit
 	 * (bounded by MAX_REMEMBERED); an analog-fm snapshot still may, and so may a snapshot of a
@@ -913,6 +1069,20 @@ export class WidebandAnalogRecorder {
 	>()
 	/** Observations whose store admission failed once: the next failure refuses them. */
 	private readonly retried = new Set<string>()
+	/** Sessions each observation started again (retarget, wideRestart), oldest first. */
+	private readonly retargeted = new Map<string, number>()
+	/**
+	 * Restarts per channel, oldest first: where (the ended session's centre) and when (the
+	 * snapshot's last sample, on its source's stream at its rate), pruned past
+	 * WIDEBAND_RESTART_WINDOW_MS and at MAX_REMEMBERED.
+	 */
+	private readonly channelRestarts: {
+		sourceId: string
+		stream: number
+		fs: number
+		hz: number
+		atSample: number
+	}[] = []
 	private readonly recentEnds: {
 		sourceId: string
 		stream: number
@@ -954,6 +1124,87 @@ export class WidebandAnalogRecorder {
 
 	owns(observationId: string): boolean {
 		return this.byObservation.has(observationId)
+	}
+
+	/**
+	 * Whether this recorder keeps `observationId`'s recording over `track`'s spur or IQ-image flag,
+	 * asked before the snapshot reaches track() or closed() with what that call will be given
+	 * (`info`), so the answer is the recorder's own for this snapshot after all its checks: a
+	 * classed, voiced session holds the observation, the flag is the snapshot's only unclean one
+	 * apart from a wide reading (uncleanFlag: never an edge or truncated track), no other veto
+	 * applies (encrypted, record.analog lost, a verified other class on a session classed by its own
+	 * audio: barredSnapshot, classVetoes), and snapshotBar keeps the session with this snapshot
+	 * counted (countSnapshot: first raised after the class and the voice, on under half of its
+	 * snapshots). Reads the session only; a true answer is remembered as the observation's waiver.
+	 * The service then keeps the observation on its discovery (DiscoveryStore ingest
+	 * `artefactWaived`), so the file still has its association when it settles.
+	 *
+	 * The waiver lasts while the recorder keeps the recording: any veto or refusal of the session
+	 * (this answer false, a cancel, a failed file or receipt: revokeWaivers) ends it, so the next
+	 * ingest retracts the observation. Once its session ended with its file finishing or finalized
+	 * (no session holds the observation any more), the waiver stands for the rest of the track's
+	 * spur or image snapshots that no other veto bars: the recording exists and no session counts
+	 * its snapshots, so a later majority of flags no longer retracts it.
+	 */
+	keepsOverArtefact(
+		observationId: string,
+		track: TrackSnapshot,
+		info: WidebandArtefactInfo,
+	): boolean {
+		const flag = uncleanFlag(track)
+		if (flag !== "spur" && flag !== "iq-image") return false
+		const barred = barredSnapshot(info.encrypted, info.recordAllowed, false)
+		if (barred !== "refused:unclean") return this.revoke(observationId)
+		const id = this.byObservation.get(observationId)
+		const s = id === undefined ? undefined : this.sessions.get(id)
+		if (!s || s.done) {
+			if (!this.waived.has(observationId)) return false
+			// The session is gone, its class provenance is not: a verified other class still vetoes
+			// a recording classed by its own audio only.
+			if (
+				this.waivedToneOnly.has(observationId) &&
+				!info.analogFm &&
+				info.nonAnalog === true
+			)
+				return this.revoke(observationId)
+			return true
+		}
+		// The session's next call would refuse it (a flag before the class and the voice is never
+		// late, countSnapshot): the artefact verdict.
+		if (
+			!s.classed ||
+			!s.qualified ||
+			countSnapshot(s, track, barred).bar !== null ||
+			classVetoes(s, { ...info, discoveryId: null })
+		)
+			return this.revoke(observationId)
+		remember(this.waived, observationId)
+		if (s.toneOnly) remember(this.waivedToneOnly, observationId)
+		else this.waivedToneOnly.delete(observationId)
+		return true
+	}
+
+	/** Ends `observationId`'s waiver (keepsOverArtefact); false, the answer it then gives. */
+	private revoke(observationId: string): false {
+		this.waived.delete(observationId)
+		this.waivedToneOnly.delete(observationId)
+		return false
+	}
+
+	/** A veto, refusal or failed file of `s`: none of its observations keeps a waiver. */
+	private revokeWaivers(s: Session): void {
+		for (const id of s.observations) {
+			this.waived.delete(id)
+			this.waivedToneOnly.delete(id)
+		}
+	}
+
+	/**
+	 * A file of `s` will not be kept (failed, aborted, never admitted): its waivers end unless a
+	 * later file of the live session still records (that one keeps the observation's association).
+	 */
+	private fileLost(s: Session): void {
+		if (s.done || s.file === null) this.revokeWaivers(s)
 	}
 
 	/**
@@ -1079,6 +1330,9 @@ export class WidebandAnalogRecorder {
 		cut: AnalogCut | null,
 		info?: WidebandCloseInfo,
 	): void {
+		// Its closing ingest came first: the observation asks for no waiver any more.
+		this.waived.delete(observationId)
+		this.waivedToneOnly.delete(observationId)
 		// An association first given at the close still names the observation's earlier decisions.
 		if (info !== undefined && info.discoveryId !== null)
 			this.decisions.bindDiscovery(observationId, info.discoveryId)
@@ -1237,12 +1491,21 @@ export class WidebandAnalogRecorder {
 			}
 			const s = this.sessions.get(joinedId)
 			if (!s) return
-			s.lastActive = Math.max(s.lastActive, track.lastSample)
-			this.noteActivity(s, observationId, track)
-			const bar = this.snapshotBar(s, track, barred, raisedBy(s, observationId))
-			if (bar !== null) this.refuse(s, bar, true)
-			else this.classify(s, observationId, input)
-			return
+			if (!this.retarget(s, observationId, track)) {
+				s.lastActive = Math.max(s.lastActive, track.lastSample)
+				this.noteActivity(s, observationId, track)
+				const bar = this.snapshotBar(
+					s,
+					track,
+					barred,
+					raisedBy(s, observationId),
+				)
+				if (bar === null) this.classify(s, observationId, input)
+				else if (!this.wideRestart(s, observationId, track, bar))
+					this.refuse(s, bar, true)
+				return
+			}
+			// Retargeted: this snapshot may start the observation's session at its new centre.
 		}
 		if (this.refused.has(observationId)) return
 		// An expired digital shadow already has its decision: only an analog-fm class restarts it.
@@ -1302,7 +1565,8 @@ export class WidebandAnalogRecorder {
 			if (this.classify(s, observationId, input)) this.wake(s)
 			return
 		}
-		if (barred !== null) {
+		const wide = barred === "refused:unclean" && startsWide(track)
+		if (barred !== null && !wide) {
 			const flag = barred === "refused:unclean" ? uncleanFlag(track) : null
 			this.decisions.note(
 				barred,
@@ -1321,7 +1585,8 @@ export class WidebandAnalogRecorder {
 			)
 			return
 		}
-		// A shadow needs a clean, narrow (cleanTrack), non-burst track where analog FM may be.
+		// A shadow needs a clean, narrow (cleanTrack) or a peaked in-channel wide (startsWide),
+		// non-burst track where analog FM may be.
 		const shadow =
 			input.shadowAllowed === true &&
 			input.nonAnalog !== true &&
@@ -1398,7 +1663,7 @@ export class WidebandAnalogRecorder {
 			release()
 		}
 		try {
-			this.startSession(input, engine, epoch, settings, releaseOnce)
+			this.startSession(input, engine, epoch, settings, releaseOnce, wide)
 		} catch (err: unknown) {
 			// Any failure while starting gives the reservation back and refuses the observation
 			// (no retry each snapshot): a started part is cancelled, nothing was admitted.
@@ -1508,6 +1773,7 @@ export class WidebandAnalogRecorder {
 		epoch: ReturnType<WidebandEngineView["currentEpoch"]>,
 		settings: { preRollMs: number; hangMs: number; ringSeconds?: number },
 		releaseCores: () => void,
+		wide: boolean,
 	): void {
 		const { track } = input
 		const trust = epoch.tuningTrust
@@ -1556,10 +1822,20 @@ export class WidebandAnalogRecorder {
 			pendingTones: new Map(),
 			inTrack: 0,
 			snapshots: 1,
-			flagged: 0,
-			flaggedInChannel: 0,
+			// Started on an in-channel wide reading (startsWide): kept over it from the start.
+			flagged: wide ? 1 : 0,
+			flaggedInChannel: wide ? 1 : 0,
 			flagLate: false,
-			unclean: null,
+			unclean: wide
+				? {
+						flag: "wide",
+						raisedBy: "snapshot",
+						atMs: 0,
+						flagged: 1,
+						snapshots: 1,
+						kept: true,
+					}
+				: null,
 			qualified: false,
 			heard: 0,
 			meter: new VoiceOnAirMeter(),
@@ -1832,6 +2108,7 @@ export class WidebandAnalogRecorder {
 				operationId: file.handle?.operationId ?? receipt.operationId,
 			},
 		)
+		if (receipt.outcome !== "finalized") this.fileLost(s)
 		if (receipt.outcome !== "finalized" || this.deps.recordTone === undefined)
 			return
 		// A class of the recorder's own audio stays the recorder's: no discovery evidence from it.
@@ -1888,6 +2165,7 @@ export class WidebandAnalogRecorder {
 	 */
 	private storeFailed(s: Session, file: FileState): void {
 		file.failed = true
+		this.fileLost(s)
 		if (s.file !== file || s.done) {
 			const at = s.waiting.indexOf(file)
 			if (at >= 0) s.waiting.splice(at, 1)
@@ -1901,6 +2179,144 @@ export class WidebandAnalogRecorder {
 			return
 		}
 		this.refuse(s, "refused:store")
+	}
+
+	/**
+	 * A session not voiced yet whose own track's centre moved more than WIDEBAND_RETARGET_HZ from the
+	 * centre it demodulates (`targetHz`) ends without refusing its observations, so the snapshot
+	 * starts a session at the new centre (true), at most WIDEBAND_MAX_RETARGETS times per
+	 * observation and per channel in WIDEBAND_RESTART_WINDOW_MS. A steady line opens a track (and a session); a voice keying up 6 to 10 kHz away
+	 * joins that track, whose power-weighted centre then walks from the line onto the voice over a
+	 * few snapshots: demodulated where it started, the voice sits at or past the edge of the
+	 * ±8 kHz channel and is not heard as voice, and the session would end unvoiced after
+	 * WIDEBAND_QUALIFY_MS and refuse the voice's observation for good. Nothing was written (no store
+	 * operation before the voice). The new session reads the ring back from the track's onset (the
+	 * pre-roll; an onset older than the ring reads as `source-lost`).
+	 */
+	private retarget(
+		s: Session,
+		observationId: string,
+		track: TrackSnapshot,
+	): boolean {
+		if (
+			Math.abs(track.centreHz - s.targetHz) <= WIDEBAND_RETARGET_HZ ||
+			!this.restartable(s, observationId, track)
+		)
+			return false
+		this.restart(s, observationId, track, "discarded:unvoiced")
+		return true
+	}
+
+	/**
+	 * A wide reading past a channel (or with no width) on the owner of a session not voiced yet, as
+	 * `bar` (refused:unclean): the session ends, but its observation is not refused for good while
+	 * it may still start again (restartable), so a later snapshot within a channel starts one (true).
+	 * The onset of a voice beside a steady line reads 26 kHz or more on one snapshot (the line, the
+	 * voice and its key-up transient in one track) and within a channel from the next one on; a
+	 * signal that stays wider never starts again (startsWide), and one that keeps coming back
+	 * shares the WIDEBAND_MAX_RETARGETS budget, so its slot time stays within that bound.
+	 */
+	private wideRestart(
+		s: Session,
+		observationId: string,
+		track: TrackSnapshot,
+		bar: ScannerRecorderDecision,
+	): boolean {
+		if (
+			bar !== "refused:unclean" ||
+			uncleanFlag(track) !== "wide" ||
+			!this.restartable(s, observationId, track)
+		)
+			return false
+		this.restart(s, observationId, track, bar)
+		return true
+	}
+
+	/**
+	 * Whether the session of `observationId` (its owner, not voiced yet) may end and start again:
+	 * under WIDEBAND_MAX_RETARGETS for the observation and for its channel over the window.
+	 */
+	private restartable(
+		s: Session,
+		observationId: string,
+		track: TrackSnapshot,
+	): boolean {
+		return (
+			observationId === s.owner &&
+			!s.qualified &&
+			!s.done &&
+			(this.retargeted.get(observationId) ?? 0) < WIDEBAND_MAX_RETARGETS &&
+			this.channelRestartsOf(s, track.lastSample) < WIDEBAND_MAX_RETARGETS
+		)
+	}
+
+	/**
+	 * Restarts of `s`'s channel (same source, stream and rate, within WIDEBAND_RESTART_CHANNEL_HZ) in
+	 * the WIDEBAND_RESTART_WINDOW_MS up to `atSample`, the bound included (240 000 × fs / 1000
+	 * samples: 245 760 000 at 1.024 Msps); older entries of that clock, any channel, are dropped
+	 * (another stream's samples are not this one's).
+	 */
+	private channelRestartsOf(s: Session, atSample: number): number {
+		const window = (WIDEBAND_RESTART_WINDOW_MS * s.fs) / 1000
+		const list = this.channelRestarts
+		let kept = 0
+		let n = 0
+		for (const e of list) {
+			const sameClock =
+				e.sourceId === s.sourceId && e.stream === s.stream && e.fs === s.fs
+			if (sameClock && atSample - e.atSample > window) continue
+			list[kept++] = e
+			if (
+				sameClock &&
+				Math.abs(e.hz - s.targetHz) <= WIDEBAND_RESTART_CHANNEL_HZ
+			)
+				n++
+		}
+		list.length = kept
+		return n
+	}
+
+	/** A session of the channel voiced: its restarts found the voice, the channel's budget is whole. */
+	private forgetRestarts(s: Session): void {
+		const list = this.channelRestarts
+		let kept = 0
+		for (const e of list)
+			if (
+				e.sourceId !== s.sourceId ||
+				e.stream !== s.stream ||
+				e.fs !== s.fs ||
+				Math.abs(e.hz - s.targetHz) > WIDEBAND_RESTART_CHANNEL_HZ
+			)
+				list[kept++] = e
+		list.length = kept
+	}
+
+	/** Ends `s` as `code` without refusing its observations; one of its owner's restarts. */
+	private restart(
+		s: Session,
+		observationId: string,
+		track: TrackSnapshot,
+		code: ScannerRecorderDecision,
+	): void {
+		this.channelRestarts.push({
+			sourceId: s.sourceId,
+			stream: s.stream,
+			fs: s.fs,
+			hz: s.targetHz,
+			atSample: track.lastSample,
+		})
+		if (this.channelRestarts.length > MAX_REMEMBERED)
+			this.channelRestarts.shift()
+		const done = this.retargeted.get(observationId) ?? 0
+		this.retargeted.delete(observationId)
+		this.retargeted.set(observationId, done + 1)
+		if (this.retargeted.size > MAX_REMEMBERED) {
+			const oldest = this.retargeted.keys().next()
+			if (oldest.done !== true) this.retargeted.delete(oldest.value)
+		}
+		const ids = [...s.observations]
+		this.refuse(s, code, true)
+		for (const id of ids) this.refused.delete(id)
 	}
 
 	/** A shadow whose class never came: nothing of it is kept, and its observations are done. */
@@ -1932,8 +2348,8 @@ export class WidebandAnalogRecorder {
 	/**
 	 * Counts one snapshot of a joined observation of `s` (raised by `via`) and returns what bars
 	 * the session: `barred` as given, or null when the only bar is an unclean track the session
-	 * keeps recording over (WIDEBAND_KEPT_WIDE_OBW_HZ, lateFlagKept). An unclean snapshot updates
-	 * the session's detail.
+	 * keeps recording over (an in-channel wide reading at any time, WIDEBAND_KEPT_WIDE_OBW_HZ, or a
+	 * late flag, lateFlagKept). An unclean snapshot updates the session's detail.
 	 */
 	private snapshotBar(
 		s: Session,
@@ -1941,23 +2357,14 @@ export class WidebandAnalogRecorder {
 		barred: ScannerRecorderDecision | null,
 		via: ScannerRecorderFlagSource,
 	): ScannerRecorderDecision | null {
-		s.snapshots++
-		if (barred !== "refused:unclean") return barred
-		const flag = uncleanFlag(track)
-		if (flag === null) return barred
-		if (s.flagged === 0) s.flagLate = s.classed && s.qualified
-		s.flagged++
-		const inChannel =
-			flag === "wide" && track.obwHz <= WIDEBAND_KEPT_WIDE_OBW_HZ
-		if (inChannel) s.flaggedInChannel++
-		const kept =
-			(inChannel && s.flagLate) ||
-			lateFlagKept(
-				flag,
-				s.flagLate,
-				s.flagged - s.flaggedInChannel,
-				s.snapshots,
-			)
+		const c = countSnapshot(s, track, barred)
+		s.snapshots = c.snapshots
+		if (c.flag === null) return c.bar
+		const flag = c.flag
+		s.flagLate = c.flagLate
+		s.flagged = c.flagged
+		s.flaggedInChannel = c.flaggedInChannel
+		const kept = c.bar === null
 		const atMs = Math.max(
 			0,
 			Math.round(((track.lastSample - s.onset) * 1000) / s.fs),
@@ -1984,7 +2391,7 @@ export class WidebandAnalogRecorder {
 					uncleanFlagged: s.flagged,
 					uncleanSnapshots: s.snapshots,
 				},
-				"Analog recorder keeps a voiced session over a late flag",
+				"Analog recorder keeps a session over an unclean reading",
 			)
 		return null
 	}
@@ -2287,7 +2694,10 @@ export class WidebandAnalogRecorder {
 			file.judged += n
 		}
 		if (file.gate.voiced) {
-			if (!s.qualified) this.decide(s, "voiced")
+			if (!s.qualified) {
+				this.decide(s, "voiced")
+				this.forgetRestarts(s)
+			}
 			s.qualified = true
 			if (!s.classed) this.classByTone(s, file.toneClass?.result() ?? null)
 			this.admit(s, file)
@@ -2501,6 +2911,7 @@ export class WidebandAnalogRecorder {
 		const endFrames = this.framesAt(s, file, endedAt)
 		this.judge(s, file, endFrames)
 		if (file.failed) {
+			this.revokeWaivers(s)
 			if (s.file === file) s.file = null
 			if (!s.done) this.dispose(s)
 			return
@@ -2695,6 +3106,7 @@ export class WidebandAnalogRecorder {
 			}
 		this.terminate(s, dropped, code)
 		s.waiting.length = 0
+		this.revokeWaivers(s)
 		for (const id of s.observations) {
 			if (this.byObservation.get(id) === s.id) this.byObservation.delete(id)
 			if (refuse) remember(this.refused, id)
@@ -2704,6 +3116,7 @@ export class WidebandAnalogRecorder {
 	/** Writes the rest of a finishing file's queue, then finishes its operation. */
 	private completeFinish(s: Session, file: FileState): void {
 		if (file.failed) {
+			this.fileLost(s)
 			file.handle?.cancel("cancelled")
 			s.files.delete(file)
 			// Every failure notes its decision; this only guards a file that would end without one.
@@ -2714,7 +3127,10 @@ export class WidebandAnalogRecorder {
 			// Never admitted: every frame was judged, so this is the last chance. A file too short
 			// for one gate window is judged on all of it.
 			if (file.gate.conclude()) {
-				if (!s.qualified) this.decide(s, "voiced")
+				if (!s.qualified) {
+					this.decide(s, "voiced")
+					this.forgetRestarts(s)
+				}
 				s.qualified = true
 			}
 			this.admit(s, file)
@@ -2728,6 +3144,7 @@ export class WidebandAnalogRecorder {
 				}
 				// Not voiced, never classed or no discovery: nothing was written, nothing is kept.
 				file.failed = true
+				this.fileLost(s)
 				s.files.delete(file)
 				const code = this.unwrittenCode(s, file)
 				this.endFile(s, file, code)
@@ -2808,6 +3225,7 @@ export class WidebandAnalogRecorder {
 				s.files.delete(f)
 				files.push(f)
 			}
+		this.revokeWaivers(s)
 		this.dispose(s)
 		return files
 	}
