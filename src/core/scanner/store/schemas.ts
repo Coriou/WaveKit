@@ -327,7 +327,7 @@ export interface StoreMutation {
 }
 
 /**
- * WG10 req 1.5: one owner's merge aliases (bounded; absent in state written before WG10). Lists
+ * One owner's merge aliases (bounded; absent in older state). Lists
  * past 64 hold aliases that still own folders on disk (RecordingAliasTable.adopt); state written
  * with at most 64 still loads.
  */
