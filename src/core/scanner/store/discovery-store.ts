@@ -118,8 +118,8 @@ import {
 	splitRecordingId,
 } from "./held-recordings.js"
 import type {
+	HeldJournalPart,
 	HeldOverflowState,
-	HeldRecordingChange,
 	HeldRecordingEntry,
 } from "./held-recordings.js"
 import { DISCOVERY_RECORDING_ALIASES_MAX } from "../../recordings/contract.js"
@@ -589,6 +589,21 @@ interface Op {
 /** Band inspection UX req 3.3: an opaque epoch, unique per store start (time plus 32 random bits). */
 function newStoreEpoch(): string {
 	return `${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`
+}
+
+/** One journal part's held-recording payload fields (absent ones omitted). */
+function heldFields(
+	part: HeldJournalPart | undefined,
+): Pick<StoreMutation, "heldRecordings" | "heldOverflow"> {
+	if (part === undefined) return {}
+	return {
+		...(part.heldRecordings.length > 0
+			? { heldRecordings: part.heldRecordings }
+			: {}),
+		...(part.heldOverflow !== undefined
+			? { heldOverflow: part.heldOverflow }
+			: {}),
+	}
 }
 
 function newOp(): Op {
@@ -3707,8 +3722,7 @@ export class DiscoveryStore
 		)
 			return
 		this.noteListings(plan.observation)
-		const [heldRecordings = [], ...heldRest] = this.heldTable.takeChangeChunks()
-		const heldOverflow = this.heldTable.takeOverflowChange()
+		const [held, ...heldRest] = this.heldTable.takeJournalParts()
 		const entry: Omit<JournalEntry, "seq"> = {
 			at,
 			op: "evidence",
@@ -3716,8 +3730,7 @@ export class DiscoveryStore
 				discoveries: [clone(plan.discovery)],
 				observations: [clone(plan.observation)],
 				deleted: [],
-				...(heldRecordings.length > 0 ? { heldRecordings } : {}),
-				...(heldOverflow !== undefined ? { heldOverflow } : {}),
+				...heldFields(held),
 			} satisfies StoreMutation,
 		}
 		let failure: unknown
@@ -3877,17 +3890,29 @@ export class DiscoveryStore
 	}
 
 	/**
-	 * The live discovery that lists `recordingId` outside its folder's owner. Null (fail closed)
-	 * when the table was full and a live discovery may list a recording of that folder it could
-	 * not record (HeldRecordingTable.overflowed): the owner is unknown, so no delete path reaches
-	 * the file and retention keeps it. Undefined when nobody else lists it.
+	 * The deleters' answer: the live discovery that lists `recordingId` outside its folder's
+	 * owner. Null (fail closed) whenever the folder is marked (HeldRecordingTable.overflowed),
+	 * checked first, before any listed owner: a live discovery may list a recording there the
+	 * table could not record, so no delete path reaches any recording file of that folder and
+	 * retention keeps it. Undefined when nobody else lists it (a text that is no recording id is
+	 * never listed; EvidenceStore checks the folder mark for every file itself).
 	 */
 	heldRecordingOwner(recordingId: string): string | null | undefined {
-		const owner = this.heldTable.get(recordingId)?.ownerId
-		if (owner !== undefined && this.discoveries.has(owner)) return owner
 		const folderId = splitRecordingId(recordingId)?.folderId
-		return folderId !== undefined && this.heldTable.overflowed(folderId)
-			? null
+		if (folderId !== undefined && this.heldTable.overflowed(folderId))
+			return null
+		return this.heldRecordingHolder(recordingId)
+	}
+
+	/**
+	 * The playback answer: the live discovery the table records as listing `recordingId` outside
+	 * its folder's owner, whatever the folder's mark (admission, never deletion). Undefined when
+	 * none.
+	 */
+	heldRecordingHolder(recordingId: string): string | undefined {
+		const owner = this.heldTable.get(recordingId)?.ownerId
+		return owner !== undefined && this.discoveries.has(owner)
+			? owner
 			: undefined
 	}
 
@@ -7957,8 +7982,7 @@ export class DiscoveryStore
 			id => !this.observationIndex.has(id),
 		)
 		this.warnHeldRefused()
-		const [heldRecordings = [], ...heldRest] = this.heldTable.takeChangeChunks()
-		const heldOverflow = this.heldTable.takeOverflowChange()
+		const [held, ...heldRest] = this.heldTable.takeJournalParts()
 		if (
 			discoveries.length === 0 &&
 			observations.length === 0 &&
@@ -7966,8 +7990,7 @@ export class DiscoveryStore
 			removed.length === 0 &&
 			op.correction === undefined &&
 			op.aliases.size === 0 &&
-			heldRecordings.length === 0 &&
-			heldOverflow === undefined
+			held === undefined
 		) {
 			this.flushRemoval()
 			this.emitPending(pending, notified)
@@ -7984,8 +8007,7 @@ export class DiscoveryStore
 			payload.aliases = [...op.aliases]
 				.sort(compareText)
 				.map(id => this.aliasTable.entryOf(id))
-		if (heldRecordings.length > 0) payload.heldRecordings = heldRecordings
-		if (heldOverflow !== undefined) payload.heldOverflow = heldOverflow
+		Object.assign(payload, heldFields(held))
 		const entry: Omit<JournalEntry, "seq"> = {
 			at: iso(this.now()),
 			op: kind,
@@ -8004,15 +8026,16 @@ export class DiscoveryStore
 	}
 
 	/**
-	 * The ownership changes past the first entry's bound, one more journal entry per chunk (only
-	 * `heldRecordings`), after the entry that carried the first chunk.
+	 * The ownership changes past the first entry's bound, one more journal entry per part (only
+	 * the held-recording fields), after the entry that carried the first part. The first part's
+	 * widened overflow marks keep every prefix of the sequence safe (takeJournalParts).
 	 */
 	private emitHeldRest(
 		at: string,
 		kind: JournalEntry["op"],
-		chunks: readonly HeldRecordingChange[][],
+		parts: readonly HeldJournalPart[],
 	): void {
-		for (const heldRecordings of chunks)
+		for (const part of parts)
 			this.emit("mutation", {
 				at,
 				op: kind,
@@ -8020,7 +8043,7 @@ export class DiscoveryStore
 					discoveries: [],
 					observations: [],
 					deleted: [],
-					heldRecordings,
+					...heldFields(part),
 				} satisfies StoreMutation,
 			} satisfies Omit<JournalEntry, "seq">)
 	}

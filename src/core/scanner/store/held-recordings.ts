@@ -23,8 +23,11 @@
  *
  * Journal bound: one entry carries at most HELD_RECORDING_CHANGES_MAX changes. A larger change
  * set (a consolidation group that drops and adds many) is split over several journal entries by
- * `takeChangeChunks`, ordered re-points, drops, adds, so a replay never holds more than the
- * bound at any point.
+ * `takeJournalParts`, ordered re-points, drops, adds, so a replay never holds more than the
+ * bound at any point. Every prefix of that sequence is safe (a crash or a refused append can end
+ * the durable journal after any entry): the first entry also marks overflowed every folder a
+ * later entry adds to or re-points into, so until the change that protects a file is replayed
+ * the whole folder is kept; the last entry carries the marks as the table really holds them.
  */
 import { z } from "zod"
 
@@ -56,6 +59,12 @@ export interface HeldRecordingChange {
 export interface HeldOverflowState {
 	folders: string[]
 	all: boolean
+}
+
+/** The held-recording fields of one journal entry (`takeJournalParts`). */
+export interface HeldJournalPart {
+	heldRecordings: HeldRecordingChange[]
+	heldOverflow?: HeldOverflowState
 }
 
 const RecordingIdSchema = z.string().max(256).regex(RECORDING)
@@ -326,6 +335,49 @@ export class HeldRecordingTable {
 		for (let i = 0; i < ordered.length; i += HELD_RECORDING_CHANGES_MAX)
 			chunks.push(ordered.slice(i, i + HELD_RECORDING_CHANGES_MAX))
 		return chunks
+	}
+
+	/**
+	 * The held-recording fields of the journal entries for the changes since the last call (both
+	 * the entries and the overflow marks), one part per entry, in order; empty when nothing
+	 * changed. One part carries its changes and, when they changed, the marks. Several parts (past
+	 * HELD_RECORDING_CHANGES_MAX): the first carries the marks widened by every folder a later part
+	 * holds an entry in (past HELD_OVERFLOW_FOLDERS_MAX, `all`), the last the marks as now held,
+	 * so a replay that stops after any part keeps every file a later part would protect.
+	 */
+	takeJournalParts(): HeldJournalPart[] {
+		const chunks = this.takeChangeChunks()
+		const marks = this.takeOverflowChange()
+		if (chunks.length <= 1) {
+			const heldRecordings = chunks[0] ?? []
+			if (heldRecordings.length === 0 && marks === undefined) return []
+			return [
+				{
+					heldRecordings,
+					...(marks !== undefined ? { heldOverflow: marks } : {}),
+				},
+			]
+		}
+		const guard = new Set(this.overflow)
+		for (const chunk of chunks.slice(1))
+			for (const c of chunk) {
+				if (c.ownerId === null) continue
+				const folderId = splitRecordingId(c.id)?.folderId
+				if (folderId !== undefined) guard.add(folderId)
+			}
+		const guarded: HeldOverflowState =
+			this.overflowAll || guard.size > HELD_OVERFLOW_FOLDERS_MAX
+				? { folders: [], all: true }
+				: { folders: [...guard].sort(compareId), all: false }
+		const held = this.overflowState() ?? { folders: [], all: false }
+		const last = chunks.length - 1
+		return chunks.map((heldRecordings, i) =>
+			i === 0
+				? { heldRecordings, heldOverflow: guarded }
+				: i === last
+					? { heldRecordings, heldOverflow: held }
+					: { heldRecordings },
+		)
 	}
 
 	/** Discards the changes and overflow-mark changes not yet journaled (a restore derived them). */

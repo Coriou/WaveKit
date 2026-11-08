@@ -1506,6 +1506,7 @@ export class ScannerService extends EventEmitter {
 					heldFileNames: (id, removing) =>
 						this.store.heldFileNames(id, removing),
 					heldRecordingOwner: id => this.store.heldRecordingOwner(id),
+					heldRecordingHolder: id => this.store.heldRecordingHolder(id),
 					heldFolderUnknown: id => this.store.heldFolderUnknown(id),
 				},
 				...(deps.recordingProtection

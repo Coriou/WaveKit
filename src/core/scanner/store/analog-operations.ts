@@ -1529,7 +1529,11 @@ export class AnalogOperations {
 				intent.observationId,
 				intent.binding,
 			)
-			if (association?.aliasIds.includes(intent.alias))
+			// A marked folder (the ownership table was full) keeps every file: never cleaned here.
+			if (
+				association?.aliasIds.includes(intent.alias) ||
+				this.heldUnknown(intent.discoveryId)
+			)
 				return result("quarantined", "recovery-ambiguous")
 			try {
 				await this.context.adapter.inverse(intent.operationId)
@@ -1640,20 +1644,21 @@ export class AnalogOperations {
 	 * The live discovery that owns this intent's committed file, when it is not one of `removing`:
 	 * after a co-channel split the file stays in the folder it was written to, and the twin whose
 	 * observation lists it owns it (DiscoveryStore.recordingAssociation). No deleter of that
-	 * folder may reach it. Undefined when nobody else lists it; null (fail closed) when no
-	 * association names it but the folder's ownership is unknown (the ownership table was full).
+	 * folder may reach it. Undefined when nobody else lists it. Null (fail closed) whenever the
+	 * folder is marked (the ownership table was full), checked first, before any association: a
+	 * live discovery may list the file unrecorded, so its owner is unknown and it is kept.
 	 */
 	private heldElsewhere(
 		intent: Intent,
 		removing: readonly string[],
 	): string | null | undefined {
+		if (this.heldUnknown(intent.discoveryId)) return null
 		const association = this.context.adapter.association(
 			intent.discoveryId,
 			intent.observationId,
 			intent.binding,
 		)
-		if (!association?.aliasIds.includes(intent.alias))
-			return this.heldUnknown(intent.discoveryId) ? null : undefined
+		if (!association?.aliasIds.includes(intent.alias)) return undefined
 		const owner = association.ownerId ?? intent.discoveryId
 		if (
 			owner === intent.discoveryId ||

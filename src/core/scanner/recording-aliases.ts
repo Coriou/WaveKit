@@ -37,10 +37,16 @@ export interface DiscoveryAliasLookup {
 		removing: readonly string[],
 	): ReadonlySet<string>
 	/**
-	 * The live discovery listing `recordingId` outside its folder's owner; null when one may and
-	 * its identity is unknown (the ownership table was full: fail closed, keep the file).
+	 * The deleters' answer: the live discovery listing `recordingId` outside its folder's owner;
+	 * null whenever the folder is marked overflowed (checked before any listed owner: one may
+	 * list it unrecorded, fail closed, keep the file).
 	 */
 	heldRecordingOwner?(recordingId: string): string | null | undefined
+	/**
+	 * The playback answer: the live discovery recorded as listing `recordingId` outside its
+	 * folder's owner, whatever the folder's mark (admission only, never a delete decision).
+	 */
+	heldRecordingHolder?(recordingId: string): string | undefined
 	/**
 	 * True when every recording file in `folderId` counts as listed by an unknown live discovery
 	 * (the ownership table was full): no deleter of the folder may reach any of them.

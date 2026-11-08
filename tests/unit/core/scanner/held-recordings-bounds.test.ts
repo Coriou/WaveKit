@@ -18,6 +18,7 @@
 import { randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import {
+	appendFile,
 	mkdir,
 	mkdtemp,
 	realpath,
@@ -858,4 +859,274 @@ describe("a recordings quota exceeded with nothing removable is visible", () => 
 			await h.service.stop()
 		}
 	})
+})
+
+describe("a folder mark comes before any ownership answer, at every deleter", () => {
+	it("a digital file B lists in a marked folder: kept by retention (B unkept, aged, zero quota) and by A's delete", async () => {
+		const root = await tempRoot()
+		const first = newStore()
+		const a = await discovery(first, root, 1)
+		const b = await discovery(first, root, 2)
+		const heldPath = await writeWav(root, a, "held.wav")
+		first.attachRecordings("o2", [`${a}~held.wav`], "linked")
+		const aOwn = join(root, "recordings", "dv", a, "call.wav")
+		await age(heldPath, aOwn)
+		const store = restored({
+			...first.snapshot(),
+			heldOverflow: { folders: [a], all: false },
+		})
+		// The table still names B; the mark wins for every deleter.
+		expect(store.heldRecordingOwner(`${a}~held.wav`)).toBeNull()
+		// Playback still goes through the listing holder.
+		expect(store.heldRecordingHolder(`${a}~held.wav`)).toBe(b)
+		const ev = evidenceFor(root, () => store)
+		await ev.loadFolderIndex()
+		ev.setCaps({ ...CAPS, maxRecordingsMb: 0 })
+		const { deleted } = await ev.retention(new Set())
+		expect(deleted).not.toContain(`recordings/dv/${a}/held.wav`)
+		expect(deleted).not.toContain(`recordings/dv/${a}/call.wav`)
+		expect(existsSync(heldPath)).toBe(true)
+		expect(ev.unknownHeldFileCount).toBe(2)
+		expect(store.delete(a)).toBe(true)
+		await ev.removeDiscovery(a)
+		expect(existsSync(heldPath)).toBe(true)
+		expect(existsSync(aOwn)).toBe(true)
+		// B's own folder is not marked: B's own aged file goes as before.
+		const bOwn = join(root, "recordings", "dv", b, "call.wav")
+		await age(bOwn)
+		await ev.retention(new Set())
+		expect(existsSync(bOwn)).toBe(false)
+		expect(existsSync(heldPath)).toBe(true)
+	})
+
+	it("an analog file whose observation A still holds, in a marked folder: kept by retention (aged, zero quota) and by A's delete", async () => {
+		const root = await tempRoot()
+		const store = newStore()
+		const ev = evidenceFor(root, () => store)
+		ev.configureAnalog(adapterOf(store))
+		await ev.recoverAnalog()
+		const a =
+			store.ingest(
+				makeObs({
+					id: "va",
+					centreHz: BASE_HZ,
+					startedAt: T0,
+					cls: "analog-fm",
+					open: true,
+					gate: "passed",
+				}),
+			).discoveryId ?? ""
+		const receipt = await recordAnalog(ev, a, "va")
+		const path = join(root, receipt.artifact ?? "")
+		expect(existsSync(path)).toBe(true)
+		await ev.stopAnalog()
+		// The observation stays: the association names A itself, the mark still wins.
+		const next = restored({
+			...store.snapshot(),
+			heldOverflow: { folders: [a], all: false },
+		})
+		const ev2 = evidenceFor(root, () => next)
+		ev2.configureAnalog(adapterOf(next))
+		await ev2.recoverAnalog()
+		ev2.setCaps({ ...CAPS, maxRecordingsMb: 0, maxAgeDays: 0 })
+		await ev2.retention(new Set())
+		expect(existsSync(path)).toBe(true)
+		expect(ev2.unknownHeldFileCount).toBe(1)
+		expect(next.delete(a)).toBe(true)
+		await ev2.removeDiscovery(a)
+		expect(existsSync(path)).toBe(true)
+		await ev2.stopAnalog()
+	})
+
+	it("without a mark the same analog file follows A's policy (zero quota removes it)", async () => {
+		const root = await tempRoot()
+		const store = newStore()
+		const ev = evidenceFor(root, () => store)
+		ev.configureAnalog(adapterOf(store))
+		await ev.recoverAnalog()
+		const a =
+			store.ingest(
+				makeObs({
+					id: "va",
+					centreHz: BASE_HZ,
+					startedAt: T0,
+					cls: "analog-fm",
+					open: true,
+					gate: "passed",
+				}),
+			).discoveryId ?? ""
+		const receipt = await recordAnalog(ev, a, "va")
+		const path = join(root, receipt.artifact ?? "")
+		ev.setCaps({ ...CAPS, maxRecordingsMb: 0, maxAgeDays: 0 })
+		await ev.retention(new Set())
+		expect(existsSync(path)).toBe(false)
+		await ev.stopAnalog()
+	})
+})
+
+describe("every prefix of a split journal sequence keeps every listed file", () => {
+	/** The 65,536-drop group of the split test above: B's entries in A's folder go, C's call.wav is added. */
+	async function splitGroup() {
+		const root = await tempRoot()
+		const first = newStore()
+		const a = await discovery(first, root, 1)
+		const b = await discovery(first, root, 2)
+		const c = await discovery(first, root, 3)
+		const snapshot: StoreSnapshot = {
+			...first.snapshot(),
+			heldRecordings: heldEntries(HELD_RECORDINGS_MAX, b, a),
+		}
+		const store = restored(snapshot)
+		const emitted: JournalEntry[] = []
+		store.on("mutation", (e: Omit<JournalEntry, "seq">) =>
+			emitted.push({ ...e, seq: emitted.length + 1 }),
+		)
+		store.applyConsolidation({ groups: [{ survivor: a, members: [b, c] }] })
+		expect(emitted.length).toBeGreaterThan(1)
+		return { root, snapshot, store, emitted, a, b, c }
+	}
+
+	/**
+	 * After a replay of `entries` on the snapshot, the folders of the merged B and C: their own
+	 * delete paths keep the call.wav each that survivor A lists.
+	 */
+	async function mergedKept(
+		root: string,
+		start: StoreSnapshot,
+		entries: readonly JournalEntry[],
+		merged: readonly string[],
+	): Promise<void> {
+		const replayed = restored(start)
+		for (const e of entries) replayed.replay(e)
+		const ev = evidenceFor(root, () => replayed)
+		for (const id of merged) {
+			// A survivor lists it: the answer is that survivor or unknown, never nobody.
+			expect(replayed.heldRecordingOwner(`${id}~call.wav`)).not.toBeUndefined()
+			await ev.removeDiscovery(id)
+			expect(existsSync(join(root, "recordings", "dv", id, "call.wav"))).toBe(
+				true,
+			)
+		}
+	}
+
+	it("replaying emitted[0..k] for every k: C's delete never reaches the file A lists; the last entry ends the temporary marks", async () => {
+		const s = await splitGroup()
+		for (let k = 0; k < s.emitted.length; k++)
+			await mergedKept(s.root, s.snapshot, s.emitted.slice(0, k + 1), [
+				s.b,
+				s.c,
+			])
+		// The whole sequence leaves no mark the live store does not hold.
+		const whole = restored(s.snapshot)
+		for (const e of s.emitted) whole.replay(e)
+		expect(whole.heldRecordingCounts).toEqual(s.store.heldRecordingCounts)
+		for (const id of [s.a, s.b, s.c])
+			expect(whole.heldFolderUnknown(id)).toBe(s.store.heldFolderUnknown(id))
+		expect(whole.heldFolderUnknown(s.c)).toBe(false)
+		expect(whole.heldRecordingOwner(`${s.c}~call.wav`)).toBe(s.a)
+		// The first entry marks the folders the later entries add to; the last one carries the
+		// marks the live table holds (B's, refused while the table was still full mid-group).
+		expect(payloadOf(s.emitted[0])?.heldOverflow).toEqual({
+			folders: [s.b, s.c].sort(),
+			all: false,
+		})
+		expect(s.store.heldFolderUnknown(s.b)).toBe(true)
+		expect(payloadOf(s.emitted.at(-1))?.heldOverflow).toEqual({
+			folders: [s.b],
+			all: false,
+		})
+		for (const e of s.emitted)
+			expect(StoreMutationSchema.safeParse(e.payload).success).toBe(true)
+	})
+
+	it("a split past the folder-mark bound marks every folder in the first entry", () => {
+		const table = new HeldRecordingTable()
+		table.restore(heldEntries(HELD_RECORDINGS_MAX, "d_B", "d_A"))
+		for (const e of heldEntries(HELD_RECORDINGS_MAX, "d_B", "d_A"))
+			table.drop(e.id)
+		// One more folder than the mark bound receives an added entry.
+		for (let i = 0; i <= HELD_OVERFLOW_FOLDERS_MAX; i++)
+			table.hold(`d_N${i}~n.wav`, "d_C", "o")
+		const parts = table.takeJournalParts()
+		expect(parts).toHaveLength(2)
+		expect(parts[0]?.heldOverflow).toEqual({ folders: [], all: true })
+		expect(parts[1]?.heldOverflow).toEqual({ folders: [], all: false })
+		// At the bound exactly the folders are listed one by one.
+		const exact = new HeldRecordingTable()
+		exact.restore(heldEntries(HELD_RECORDINGS_MAX, "d_B", "d_A"))
+		for (const e of heldEntries(HELD_RECORDINGS_MAX, "d_B", "d_A"))
+			exact.drop(e.id)
+		for (let i = 0; i < HELD_OVERFLOW_FOLDERS_MAX; i++)
+			exact.hold(`d_N${i}~n.wav`, "d_C", "o")
+		const first = exact.takeJournalParts()[0]?.heldOverflow
+		expect(first?.all).toBe(false)
+		expect(first?.folders).toHaveLength(HELD_OVERFLOW_FOLDERS_MAX)
+	})
+
+	it("one entry needs no temporary mark", () => {
+		const table = new HeldRecordingTable()
+		table.hold("d_A~x.wav", "d_B", "o")
+		expect(table.takeJournalParts()).toEqual([
+			{
+				heldRecordings: [
+					{ id: "d_A~x.wav", ownerId: "d_B", observationId: "o" },
+				],
+			},
+		])
+		expect(table.takeJournalParts()).toEqual([])
+	})
+
+	for (const crash of ["torn", "refused"] as const)
+		it(`a crash before the covering snapshot (${crash} second line) restarts with the file still kept`, async () => {
+			const s = await splitGroup()
+			const dir = await tempRoot()
+			let calls = 0
+			const p = new ScannerPersistence({
+				dir,
+				logger,
+				now: () => T0,
+				appendFile: async (path, data) => {
+					calls++
+					if (crash === "torn") {
+						// The process dies after the first line is durable.
+						const cut = data.indexOf("\n") + 1
+						await appendFile(path, data.slice(0, cut))
+						return new Promise<void>(() => undefined)
+					}
+					if (calls > 1) throw new Error("synthetic write failure")
+					await appendFile(path, data)
+				},
+			})
+			await p.load()
+			await p.writeSnapshot(s.snapshot)
+			const [e0, ...rest] = s.emitted
+			if (e0 === undefined) throw new Error("no entry")
+			if (crash === "torn") {
+				void p.append(e0).catch(() => undefined)
+				for (const e of rest) void p.append(e).catch(() => undefined)
+				await new Promise(resolve => setTimeout(resolve, 50))
+			} else {
+				await p.append(e0)
+				for (const e of rest)
+					await expect(p.append(e)).rejects.toBeInstanceOf(Error)
+			}
+			// No snapshot follows: the restart sees the snapshot and the first entry only.
+			const loaded = await new ScannerPersistence({
+				dir,
+				logger,
+				now: () => T0,
+			}).load()
+			expect(loaded.entries).toHaveLength(1)
+			const start: StoreSnapshot = {
+				discoveries: loaded.discoveries,
+				observations: loaded.observations,
+				corrections: loaded.corrections,
+				...(loaded.aliases ? { aliases: loaded.aliases } : {}),
+				...(loaded.heldRecordings
+					? { heldRecordings: loaded.heldRecordings }
+					: {}),
+				...(loaded.heldOverflow ? { heldOverflow: loaded.heldOverflow } : {}),
+			}
+			await mergedKept(s.root, start, loaded.entries, [s.b, s.c])
+		})
 })

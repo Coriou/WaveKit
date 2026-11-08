@@ -441,6 +441,24 @@ export class EvidenceStore {
 		}
 	}
 
+	/**
+	 * Playback only: the live discovery the table records as listing the file, whatever its
+	 * folder's mark; the deleters' answer (`heldOwner`) when the lookup has no such method.
+	 */
+	private heldHolder(
+		folderId: string,
+		name: string,
+	): string | null | undefined {
+		try {
+			const lookup = this.aliases
+			if (lookup?.heldRecordingHolder === undefined)
+				return this.heldOwner(folderId, name)
+			return lookup.heldRecordingHolder(`${folderId}~${name}`)
+		} catch {
+			return null
+		}
+	}
+
 	/** Fail closed: a throwing lookup answers "unknown" (every recording file kept). */
 	private heldFolderUnknown(folderId: string): boolean {
 		try {
@@ -926,7 +944,7 @@ export class EvidenceStore {
 			return this.analog?.path(recordingId) ?? null
 		if (!this.admits(discoveryId)) {
 			// A recording another live discovery lists here (a split): admitted through it.
-			const holder = this.heldOwner(discoveryId, file)
+			const holder = this.heldHolder(discoveryId, file)
 			if (holder === undefined || holder === null || !this.admits(holder))
 				return null
 		}
@@ -1263,6 +1281,12 @@ export class EvidenceStore {
 		const unknownHeld = new Set<string>()
 		const ownedElsewhere = (f: StoredFile): boolean => {
 			if (f.category !== "recordings" || f.probe) return false
+			// A marked folder (the ownership table was full) comes first, before any listed owner:
+			// every recording file in it is kept and counted, whatever its name.
+			if (this.heldFolderUnknown(f.discoveryId)) {
+				unknownHeld.add(f.path)
+				return true
+			}
 			const holder = this.heldOwner(
 				f.discoveryId,
 				f.path.split("/").at(-1) ?? "",
