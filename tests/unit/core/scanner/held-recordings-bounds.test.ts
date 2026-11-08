@@ -264,6 +264,30 @@ describe("the ownership table at and past its bound fails closed", () => {
 		expect(s.ev.unknownHeldFileCount).toBe(2)
 	})
 
+	it("a refusal while a restore derives listings again is a safety mark: a later replacement of the marks does not clear it", async () => {
+		const s = await full(HELD_RECORDINGS_MAX)
+		// A snapshot whose table is full and whose B observation lists A~held.wav, with no mark saved.
+		const { heldOverflow: _dropped, ...unmarked } = s.store.snapshot()
+		const store = restored(unmarked)
+		expect(store.heldFolderUnknown(s.a)).toBe(true)
+		const template = s.emitted.at(-1)!
+		store.replay({
+			...template,
+			seq: Number.MAX_SAFE_INTEGER - 1,
+			payload: {
+				...payloadOf(template)!,
+				heldFormat: 2,
+				heldOverflow: { folders: [], all: false },
+			},
+		})
+		expect(store.heldFolderUnknown(s.a)).toBe(true)
+		const ev = evidenceFor(s.root, () => store)
+		await ev.loadFolderIndex()
+		expect(store.delete(s.a)).toBe(true)
+		await ev.removeDiscovery(s.a)
+		expect(existsSync(s.heldPath)).toBe(true)
+	})
+
 	it("the marks survive a snapshot and a replay, and end when the folder is gone", async () => {
 		const s = await full(HELD_RECORDINGS_MAX)
 		const again = restored(s.store.snapshot())

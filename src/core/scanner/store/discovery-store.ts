@@ -4971,7 +4971,11 @@ export class DiscoveryStore
 				(s.heldRecordings ?? []).filter(e => this.discoveries.has(e.ownerId)),
 			)
 			this.heldTable.setOverflow(s.heldOverflow)
-			for (const o of this.observationIndex.values()) this.noteListings(o)
+			// A refusal while listings are derived again gives its folder a replay safety mark,
+			// which no later replacement of the marks clears (fail closed).
+			this.heldTable.replayJournaled(false, () => {
+				for (const o of this.observationIndex.values()) this.noteListings(o)
+			})
 			// Derived again on every restore (a refusal here marks its folder the same way).
 			this.heldTable.discardChanges()
 			// Journaled receiver-spur flags: pending until their offset is learned again.
