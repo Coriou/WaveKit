@@ -265,6 +265,11 @@ interface Context {
 	 * record (it was full): such a file's owner is unknown and it is kept (heldElsewhere null).
 	 */
 	heldUnknown?: (folderId: string) => boolean
+	/**
+	 * The live discovery the ownership table records as listing `name` of `folderId` (null: the
+	 * folder is marked, owner unknown; undefined: nobody else lists it).
+	 */
+	listedOwner?: (folderId: string, name: string) => string | null | undefined
 }
 interface Inventory {
 	bytes: number
@@ -1653,6 +1658,16 @@ export class AnalogOperations {
 		removing: readonly string[],
 	): string | null | undefined {
 		if (this.heldUnknown(intent.discoveryId)) return null
+		// A listing the ownership table records (any observation, not only the association's).
+		const listed = this.listedOwner(intent)
+		if (listed === null) return null
+		if (
+			listed !== undefined &&
+			listed !== intent.discoveryId &&
+			!removing.includes(listed) &&
+			this.context.admits(listed)
+		)
+			return listed
 		const association = this.context.adapter.association(
 			intent.discoveryId,
 			intent.observationId,
@@ -1667,6 +1682,17 @@ export class AnalogOperations {
 		)
 			return undefined
 		return owner
+	}
+	/** Fail closed: a throwing lookup answers "unknown owner" (null). */
+	private listedOwner(intent: Intent): string | null | undefined {
+		try {
+			const name = intent.artifact.split("/").at(-1)
+			return name === undefined
+				? undefined
+				: this.context.listedOwner?.(intent.discoveryId, name)
+		} catch {
+			return null
+		}
 	}
 	/** Fail closed: a throwing lookup answers "unknown owner". */
 	private heldUnknown(folderId: string): boolean {
@@ -1703,6 +1729,25 @@ export class AnalogOperations {
 		names.delete("")
 		return names
 	}
+	/**
+	 * One file's answer for a folder removal of `removing`, asked in the same turn as its unlink:
+	 * true when an inventoried artifact named `name` in `folderId`'s analog folder is owned by
+	 * another live discovery or its folder is marked (heldElsewhere not undefined).
+	 */
+	heldArtifact(
+		folderId: string,
+		name: string,
+		removing: readonly string[],
+	): boolean {
+		for (const intent of this.inventory.intents.values())
+			if (
+				intent.discoveryId === folderId &&
+				intent.artifact.split("/").at(-1) === name &&
+				this.heldElsewhere(intent, removing) !== undefined
+			)
+				return true
+		return false
+	}
 	async deleteDiscovery(
 		id: string,
 		removing: readonly string[] = [id],
@@ -1732,11 +1777,27 @@ export class AnalogOperations {
 				// WG9 R2: a Keep committed during an earlier intent's awaits refuses here, in the same
 				// exclusive section, before the alias, the marker or the metadata is touched.
 				if (this.keptArtifact(intent)) throw keptRefusal()
+				// Owned when the removal began; asked again before each step and in the media
+				// unlink's own turn: a split or a mark since leaves the file to its new owner.
+				const stillOwned = (): boolean =>
+					this.heldElsewhere(intent, removing) === undefined
+				if (!stillOwned()) continue
+				const slot = this.available.get(intent.alias)
 				this.available.delete(intent.alias)
 				// Explicit DELETE may remove quarantined media only under strict matching ownership.
 				await this.validateCleanupMarker(intent)
+				if (!stillOwned()) {
+					if (slot) this.available.set(intent.alias, slot)
+					continue
+				}
 				await this.context.adapter.inverse(intent.operationId)
-				await this.cleanupOwned(intent, true, true)
+				try {
+					await this.cleanupOwned(intent, true, true, stillOwned)
+				} catch (cause) {
+					// Held elsewhere since: the file and its operation stay whole (its new owner's).
+					if (!(cause instanceof ScannerApiError) || stillOwned()) throw cause
+					if (slot) this.available.set(intent.alias, slot)
+				}
 			}
 			await this.scanInventory()
 			if (
@@ -1773,16 +1834,29 @@ export class AnalogOperations {
 	 * Removes an operation's files. Every caller reaches the committed file only here, so the
 	 * folder mark is checked here itself, whoever calls: a marked folder (the ownership table was
 	 * full, some live discovery may list the file) refuses before anything is removed, and again
-	 * in the same turn as the media unlink. The operation stays whole and inventoried, so
-	 * recovery quarantines it (recovery-ambiguous) and retention keeps it.
+	 * in the same turn as the media unlink. So is `stillOwned` (by default: no other live
+	 * discovery owns the file, heldElsewhere): a split since the caller decided refuses too. The
+	 * operation stays whole and inventoried, so recovery quarantines it (recovery-ambiguous) and
+	 * retention keeps it.
 	 */
 	private async cleanupOwned(
 		intent: Intent,
 		ownedIntent: boolean,
 		ownedMedia: boolean,
+		stillOwned: () => boolean = () =>
+			this.heldElsewhere(intent, [intent.discoveryId]) === undefined,
 	): Promise<void> {
+		// Fail closed: a throwing ownership answer keeps the media.
+		const ownedNow = (): boolean => {
+			try {
+				return stillOwned()
+			} catch {
+				return false
+			}
+		}
 		this.requireCleanupClosure(intent.operationId)
-		if (ownedMedia && this.heldUnknown(intent.discoveryId)) throw heldRefusal()
+		if (ownedMedia && (this.heldUnknown(intent.discoveryId) || !ownedNow()))
+			throw heldRefusal()
 		if (ownedIntent) await this.validateCleanupMarker(intent)
 		const remove = async (path: string): Promise<void> => {
 			this.requireCleanupClosure(intent.operationId)
@@ -1796,7 +1870,10 @@ export class AnalogOperations {
 				this.requireCleanupClosure(intent.operationId)
 				// WG9 req 2.5: the deletion decision runs in the same turn as the media unlink.
 				if (path === final && this.keptArtifact(intent)) throw keptRefusal()
-				if (path === final && this.heldUnknown(intent.discoveryId))
+				if (
+					path === final &&
+					(this.heldUnknown(intent.discoveryId) || !ownedNow())
+				)
 					throw heldRefusal()
 				await this.io.unlink(path)
 			} catch (cause) {
@@ -1932,8 +2009,22 @@ export class AnalogOperations {
 					this.context.limits().maxBytes
 			)
 				continue
+			// The pass's decision, asked again before the retire and in the media unlink's turn: a
+			// split, a mark, a keep or an unresolved folder since keeps the file.
+			const decided = owner
+			const stillRetirable = (): boolean => {
+				const current = this.heldElsewhere(intent, [])
+				if (current !== decided) return false
+				if (current === undefined && !this.context.admits(intent.discoveryId))
+					return false
+				return (
+					!keep.has(intent.discoveryId) &&
+					(current === undefined || !keep.has(current))
+				)
+			}
+			if (!stillRetirable()) continue
 			try {
-				await this.retire(intent, deleted)
+				await this.retire(intent, deleted, stillRetirable)
 			} catch (cause) {
 				if (!(cause instanceof ScannerApiError)) throw cause
 				skipped++
@@ -1944,7 +2035,11 @@ export class AnalogOperations {
 		this.unknownHeldRetained = unknownHeld
 		return deleted
 	}
-	private async retire(intent: Intent, deleted: string[]): Promise<void> {
+	private async retire(
+		intent: Intent,
+		deleted: string[],
+		stillRetirable: () => boolean,
+	): Promise<void> {
 		await this.context.serialise(intent.discoveryId, async () => {
 			if (
 				this.protectedDiscovery(intent.discoveryId) ||
@@ -1962,8 +2057,9 @@ export class AnalogOperations {
 				)
 					return
 				await this.validateCleanupMarker(intent)
+				if (!stillRetirable()) return
 				await this.context.adapter.inverse(intent.operationId)
-				await this.cleanupOwned(intent, true, true)
+				await this.cleanupOwned(intent, true, true, stillRetirable)
 				this.available.delete(intent.alias)
 				deleted.push(intent.artifact)
 				await this.scanInventory()
