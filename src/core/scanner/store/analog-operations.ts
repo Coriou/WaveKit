@@ -1769,12 +1769,20 @@ export class AnalogOperations {
 			if (nativeCode(cause) !== "ENOENT") throw cause
 		}
 	}
+	/**
+	 * Removes an operation's files. Every caller reaches the committed file only here, so the
+	 * folder mark is checked here itself, whoever calls: a marked folder (the ownership table was
+	 * full, some live discovery may list the file) refuses before anything is removed, and again
+	 * in the same turn as the media unlink. The operation stays whole and inventoried, so
+	 * recovery quarantines it (recovery-ambiguous) and retention keeps it.
+	 */
 	private async cleanupOwned(
 		intent: Intent,
 		ownedIntent: boolean,
 		ownedMedia: boolean,
 	): Promise<void> {
 		this.requireCleanupClosure(intent.operationId)
+		if (ownedMedia && this.heldUnknown(intent.discoveryId)) throw heldRefusal()
 		if (ownedIntent) await this.validateCleanupMarker(intent)
 		const remove = async (path: string): Promise<void> => {
 			this.requireCleanupClosure(intent.operationId)
@@ -1788,6 +1796,8 @@ export class AnalogOperations {
 				this.requireCleanupClosure(intent.operationId)
 				// WG9 req 2.5: the deletion decision runs in the same turn as the media unlink.
 				if (path === final && this.keptArtifact(intent)) throw keptRefusal()
+				if (path === final && this.heldUnknown(intent.discoveryId))
+					throw heldRefusal()
 				await this.io.unlink(path)
 			} catch (cause) {
 				if (nativeCode(cause) !== "ENOENT") throw cause
@@ -1939,13 +1949,16 @@ export class AnalogOperations {
 			if (
 				this.protectedDiscovery(intent.discoveryId) ||
 				this.closureUncertain(intent.operationId) ||
-				this.keptArtifact(intent)
+				this.keptArtifact(intent) ||
+				this.heldUnknown(intent.discoveryId)
 			)
 				return
 			await this.exclusive(async () => {
+				// A folder marked meanwhile keeps the file (its owner is unknown).
 				if (
 					this.closureUncertain(intent.operationId) ||
-					this.keptArtifact(intent)
+					this.keptArtifact(intent) ||
+					this.heldUnknown(intent.discoveryId)
 				)
 					return
 				await this.validateCleanupMarker(intent)
@@ -1963,6 +1976,18 @@ export class AnalogOperations {
 function keptRefusal(): ScannerApiError {
 	return new ScannerApiError(
 		"Discovery holds kept recordings",
+		SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
+		409,
+	)
+}
+
+/**
+ * Sentinel: the media unlink met a marked folder (a live discovery may list the file, its owner
+ * is unknown); the file is left in place. A refusal like a kept artifact's, counted the same way.
+ */
+function heldRefusal(): ScannerApiError {
+	return new ScannerApiError(
+		"Recording folder ownership is unknown",
 		SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
 		409,
 	)

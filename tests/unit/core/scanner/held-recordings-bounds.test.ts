@@ -44,13 +44,17 @@ import { EvidenceStore } from "../../../../src/core/scanner/store/evidence-store
 import type { StorageCaps } from "../../../../src/core/scanner/store/evidence-store.js"
 import { FolderIndex } from "../../../../src/core/scanner/store/folder-index.js"
 import {
+	HELD_OPEN_GUARDS_MAX,
 	HELD_OVERFLOW_FOLDERS_MAX,
 	HELD_RECORDING_CHANGES_MAX,
 	HELD_RECORDINGS_MAX,
 	HeldRecordingTable,
 	heldPayloadWithinBounds,
 } from "../../../../src/core/scanner/store/held-recordings.js"
-import type { HeldRecordingEntry } from "../../../../src/core/scanner/store/held-recordings.js"
+import type {
+	HeldJournalPart,
+	HeldRecordingEntry,
+} from "../../../../src/core/scanner/store/held-recordings.js"
 import { ScannerPersistence } from "../../../../src/core/scanner/store/persistence.js"
 import type { RecordingBinding } from "../../../../src/core/scanner/store/recording-operation.js"
 import { StoreMutationSchema } from "../../../../src/core/scanner/store/schemas.js"
@@ -1024,17 +1028,17 @@ describe("every prefix of a split journal sequence keeps every listed file", () 
 			expect(whole.heldFolderUnknown(id)).toBe(s.store.heldFolderUnknown(id))
 		expect(whole.heldFolderUnknown(s.c)).toBe(false)
 		expect(whole.heldRecordingOwner(`${s.c}~call.wav`)).toBe(s.a)
-		// The first entry marks the folders the later entries add to; the last one carries the
-		// marks the live table holds (B's, refused while the table was still full mid-group).
-		expect(payloadOf(s.emitted[0])?.heldOverflow).toEqual({
-			folders: [s.b, s.c].sort(),
-			all: false,
-		})
+		// The first entry opens a guard of the folders the later entries add to; the last one adds
+		// the marks the live table holds (B's, refused while the table was still full mid-group)
+		// and closes that guard, under the same sequence id. Neither replaces the marks.
+		const opened = payloadOf(s.emitted[0])?.heldGuard
+		expect(opened).toMatchObject({ folders: [s.b, s.c].sort(), all: false })
 		expect(s.store.heldFolderUnknown(s.b)).toBe(true)
-		expect(payloadOf(s.emitted.at(-1))?.heldOverflow).toEqual({
-			folders: [s.b],
-			all: false,
-		})
+		const closed = payloadOf(s.emitted.at(-1))?.heldGuardEnd
+		expect(closed).toMatchObject({ folders: [s.b], all: false })
+		expect(closed?.id).toBe(opened?.id)
+		for (const e of s.emitted)
+			expect(payloadOf(e)?.heldOverflow).toBeUndefined()
 		for (const e of s.emitted)
 			expect(StoreMutationSchema.safeParse(e.payload).success).toBe(true)
 	})
@@ -1049,8 +1053,9 @@ describe("every prefix of a split journal sequence keeps every listed file", () 
 			table.hold(`d_N${i}~n.wav`, "d_C", "o")
 		const parts = table.takeJournalParts()
 		expect(parts).toHaveLength(2)
-		expect(parts[0]?.heldOverflow).toEqual({ folders: [], all: true })
-		expect(parts[1]?.heldOverflow).toEqual({ folders: [], all: false })
+		expect(parts[0]?.heldGuard).toMatchObject({ folders: [], all: true })
+		expect(parts[1]?.heldGuardEnd).toMatchObject({ folders: [], all: false })
+		expect(parts[1]?.heldGuardEnd?.id).toBe(parts[0]?.heldGuard?.id)
 		// At the bound exactly the folders are listed one by one.
 		const exact = new HeldRecordingTable()
 		exact.restore(heldEntries(HELD_RECORDINGS_MAX, "d_B", "d_A"))
@@ -1058,7 +1063,7 @@ describe("every prefix of a split journal sequence keeps every listed file", () 
 			exact.drop(e.id)
 		for (let i = 0; i < HELD_OVERFLOW_FOLDERS_MAX; i++)
 			exact.hold(`d_N${i}~n.wav`, "d_C", "o")
-		const first = exact.takeJournalParts()[0]?.heldOverflow
+		const first = exact.takeJournalParts()[0]?.heldGuard
 		expect(first?.all).toBe(false)
 		expect(first?.folders).toHaveLength(HELD_OVERFLOW_FOLDERS_MAX)
 	})
@@ -1076,7 +1081,7 @@ describe("every prefix of a split journal sequence keeps every listed file", () 
 		expect(table.takeJournalParts()).toEqual([])
 	})
 
-	for (const crash of ["torn", "refused"] as const)
+	for (const crash of ["torn", "cut at its newline", "refused"] as const)
 		it(`a crash before the covering snapshot (${crash} second line) restarts with the file still kept`, async () => {
 			const s = await splitGroup()
 			const dir = await tempRoot()
@@ -1087,9 +1092,22 @@ describe("every prefix of a split journal sequence keeps every listed file", () 
 				now: () => T0,
 				appendFile: async (path, data) => {
 					calls++
-					if (crash === "torn") {
-						// The process dies after the first line is durable.
-						const cut = data.indexOf("\n") + 1
+					if (crash !== "refused") {
+						// One batch holds every line; the process dies after the first line is
+						// durable, and half the second one when torn.
+						const first = data.indexOf("\n") + 1
+						const second = data.indexOf("\n", first)
+						expect(first).toBeGreaterThan(0)
+						expect(second).toBeGreaterThan(first)
+						const cut =
+							crash === "torn"
+								? first + Math.floor((second - first) / 2)
+								: first
+						if (crash === "torn") {
+							const tail = data.slice(first, cut)
+							expect(tail.length).toBeGreaterThan(1)
+							expect(tail).not.toContain("\n")
+						}
 						await appendFile(path, data.slice(0, cut))
 						return new Promise<void>(() => undefined)
 					}
@@ -1101,7 +1119,7 @@ describe("every prefix of a split journal sequence keeps every listed file", () 
 			await p.writeSnapshot(s.snapshot)
 			const [e0, ...rest] = s.emitted
 			if (e0 === undefined) throw new Error("no entry")
-			if (crash === "torn") {
+			if (crash !== "refused") {
 				void p.append(e0).catch(() => undefined)
 				for (const e of rest) void p.append(e).catch(() => undefined)
 				await new Promise(resolve => setTimeout(resolve, 50))
@@ -1117,6 +1135,7 @@ describe("every prefix of a split journal sequence keeps every listed file", () 
 				now: () => T0,
 			}).load()
 			expect(loaded.entries).toHaveLength(1)
+			expect(loaded.droppedLines).toBe(crash === "torn" ? 1 : 0)
 			const start: StoreSnapshot = {
 				discoveries: loaded.discoveries,
 				observations: loaded.observations,
@@ -1129,4 +1148,365 @@ describe("every prefix of a split journal sequence keeps every listed file", () 
 			}
 			await mergedKept(s.root, start, loaded.entries, [s.b, s.c])
 		})
+})
+
+describe("interleaved split sequences never undo each other's protection", () => {
+	/**
+	 * Two split sequences taken one after the other from one full table: A re-points 65,533
+	 * entries, drops two and adds X1 and X2 (its second part adds X2, its first guards X2's
+	 * folder); B re-points the same 65,533, drops two others (E and X1) and adds Y1 and Y2.
+	 */
+	async function sequences() {
+		const root = await tempRoot()
+		const first = newStore()
+		const p = await discovery(first, root, 1)
+		const q = await discovery(first, root, 2)
+		const r = await discovery(first, root, 3)
+		const repointed = heldEntries(HELD_RECORDINGS_MAX - 3, p)
+		const others = ["d_GD~d1.wav", "d_GD~d2.wav", "d_GE~e.wav"].map(id => ({
+			id,
+			ownerId: p,
+			observationId: "og",
+		}))
+		const initial = [...repointed, ...others]
+		const snapshot: StoreSnapshot = {
+			...first.snapshot(),
+			heldRecordings: initial,
+		}
+		const table = new HeldRecordingTable()
+		table.restore(initial)
+		for (const e of repointed) table.hold(e.id, q, "oq")
+		table.drop("d_GD~d1.wav")
+		table.drop("d_GD~d2.wav")
+		expect(table.hold("d_X1~x1.wav", q, "oq")).toBe(true)
+		expect(table.hold("d_X2~x2.wav", q, "oq")).toBe(true)
+		const a = table.takeJournalParts()
+		for (const e of repointed) table.hold(e.id, r, "or")
+		table.drop("d_GE~e.wav")
+		table.drop("d_X1~x1.wav")
+		expect(table.hold("d_Y1~y1.wav", r, "or")).toBe(true)
+		expect(table.hold("d_Y2~y2.wav", r, "or")).toBe(true)
+		const b = table.takeJournalParts()
+		expect(a).toHaveLength(2)
+		expect(b).toHaveLength(2)
+		expect(a[1]?.heldRecordings).toEqual([
+			{ id: "d_X2~x2.wav", ownerId: q, observationId: "oq" },
+		])
+		expect(a[0]?.heldGuard?.folders).toEqual(["d_X2"])
+		expect(b[0]?.heldGuard?.folders).toEqual(["d_Y2"])
+		expect(a[0]?.heldGuard?.id).not.toBe(b[0]?.heldGuard?.id)
+		const entry = (part: HeldJournalPart): Omit<JournalEntry, "seq"> => ({
+			at: new Date(T0).toISOString(),
+			op: "evidence",
+			payload: {
+				discoveries: [],
+				observations: [],
+				deleted: [],
+				...part,
+			} satisfies StoreMutation,
+		})
+		const parts = {
+			A0: entry(a[0] as HeldJournalPart),
+			A1: entry(a[1] as HeldJournalPart),
+			B0: entry(b[0] as HeldJournalPart),
+			B1: entry(b[1] as HeldJournalPart),
+		}
+		return { root, snapshot, parts, repointed, table }
+	}
+
+	type Name = "A0" | "A1" | "B0" | "B1"
+	/** Every order of the four parts that keeps each sequence's own order. */
+	const ORDERS: Name[][] = [
+		["A0", "A1", "B0", "B1"],
+		["A0", "B0", "A1", "B1"],
+		["A0", "B0", "B1", "A1"],
+		["B0", "A0", "A1", "B1"],
+		["B0", "A0", "B1", "A1"],
+		["B0", "B1", "A0", "A1"],
+	]
+
+	/**
+	 * After replaying `names`: every file a replayed sequence lists is protected (its entry or a
+	 * mark answers for it, never "nobody"), whatever the other sequence's progress.
+	 */
+	function checkPrefix(
+		store: DiscoveryStore,
+		names: readonly Name[],
+		repointed: readonly HeldRecordingEntry[],
+	): void {
+		const listed: string[] = []
+		if (names.includes("A0")) {
+			listed.push("d_X2~x2.wav")
+			// X1 is A's until B drops it.
+			if (!names.includes("B0")) listed.push("d_X1~x1.wav")
+		}
+		if (names.includes("B0")) listed.push("d_Y1~y1.wav", "d_Y2~y2.wav")
+		for (const id of listed)
+			expect(
+				store.heldRecordingOwner(id),
+				`${id} after ${names.join(",")}`,
+			).not.toBeUndefined()
+		for (const e of [repointed[0], repointed.at(-1)])
+			if (e !== undefined)
+				expect(store.heldRecordingOwner(e.id)).not.toBeUndefined()
+	}
+
+	it("one real persistence batch A0,B0,B1,A1: every prefix keeps X2, and the whole leaves no temporary mark", async () => {
+		const s = await sequences()
+		const dir = await tempRoot()
+		const p = new ScannerPersistence({ dir, logger, now: () => T0 })
+		await p.load()
+		await p.writeSnapshot(s.snapshot)
+		const order: Name[] = ["A0", "B0", "B1", "A1"]
+		await Promise.all(order.map(n => p.append(s.parts[n])))
+		const loaded = await new ScannerPersistence({
+			dir,
+			logger,
+			now: () => T0,
+		}).load()
+		expect(loaded.entries).toHaveLength(4)
+		for (let k = 1; k <= order.length; k++) {
+			const replayed = restored(s.snapshot)
+			for (const e of loaded.entries.slice(0, k)) replayed.replay(e)
+			checkPrefix(replayed, order.slice(0, k), s.repointed)
+			if (k === 2) {
+				// The bug this guards against: B0 replacing the marks dropped X2's guard.
+				expect(replayed.heldFolderUnknown("d_X2")).toBe(true)
+				expect(replayed.heldFolderUnknown("d_Y2")).toBe(true)
+			}
+		}
+		const whole = restored(s.snapshot)
+		for (const e of loaded.entries) whole.replay(e)
+		for (const f of ["d_X1", "d_X2", "d_Y1", "d_Y2", "d_GD", "d_GE"])
+			expect(whole.heldFolderUnknown(f)).toBe(false)
+		expect(whole.heldRecordingCounts.entries).toBe(s.table.size)
+		expect(whole.heldRecordingCounts.overflowFolders).toBe(0)
+	})
+
+	for (const order of ORDERS)
+		it(`replay order ${order.join(",")}: every prefix keeps every listed file; the whole closes both guards`, async () => {
+			const s = await sequences()
+			const entries = order.map((n, i) => ({ ...s.parts[n], seq: i + 1 }))
+			for (let k = 1; k <= order.length; k++) {
+				const replayed = restored(s.snapshot)
+				for (const e of entries.slice(0, k)) replayed.replay(e)
+				checkPrefix(replayed, order.slice(0, k), s.repointed)
+			}
+			const whole = restored(s.snapshot)
+			for (const e of entries) whole.replay(e)
+			for (const id of ["d_X2~x2.wav", "d_Y1~y1.wav", "d_Y2~y2.wav"])
+				expect(whole.heldRecordingOwner(id)).not.toBeUndefined()
+			// In the order the runtime took them (A's first part first) both guards close and no
+			// mark is left. B's drop of X1 replayed before A adds it leaves X1 held, so a later
+			// hold meets the full table and marks its folder: fail closed, never a lost file.
+			if (order[0] === "A0")
+				for (const f of ["d_X1", "d_X2", "d_Y1", "d_Y2", "d_GD", "d_GE"])
+					expect(whole.heldFolderUnknown(f)).toBe(false)
+		})
+})
+
+describe("temporary guards at their bounds", () => {
+	const guard = (id: string, folders: string[], all = false) => ({
+		id,
+		folders,
+		all,
+	})
+
+	it("a replace of the marks keeps every open guard; closing one keeps the others and adds its marks", () => {
+		const table = new HeldRecordingTable()
+		table.openGuard(guard("a-1", ["d_X"]))
+		table.openGuard(guard("b-1", ["d_X", "d_Y"]))
+		table.setOverflow({ folders: ["d_L"], all: false })
+		expect(table.overflowed("d_X")).toBe(true)
+		expect(table.overflowed("d_Y")).toBe(true)
+		expect(table.overflowed("d_L")).toBe(true)
+		table.closeGuard(guard("a-1", ["d_M"]))
+		// B's guard still holds X though A, which also guarded X, closed.
+		expect(table.overflowed("d_X")).toBe(true)
+		expect(table.overflowed("d_M")).toBe(true)
+		expect(table.overflowed("d_L")).toBe(true)
+		table.closeGuard(guard("b-1", []))
+		expect(table.overflowed("d_X")).toBe(false)
+		expect(table.overflowed("d_Y")).toBe(false)
+		expect(table.overflowState()).toEqual({
+			folders: ["d_L", "d_M"],
+			all: false,
+		})
+		// Replay marks are already journaled: nothing to write again.
+		expect(table.takeOverflowChange()).toBeUndefined()
+	})
+
+	it("a guard never closed counts as marks, is persisted as marks, and ends when its folder is gone", () => {
+		const table = new HeldRecordingTable()
+		table.openGuard(guard("a-1", ["d_X"]))
+		expect(table.overflowCount).toEqual({ folders: 1, all: false })
+		expect(table.overflowState()).toEqual({ folders: ["d_X"], all: false })
+		expect(table.overflowFolders()).toEqual(["d_X"])
+		expect(table.releaseOverflow("d_X")).toBe(true)
+		expect(table.overflowed("d_X")).toBe(false)
+		const all = new HeldRecordingTable()
+		all.openGuard(guard("a-2", [], true))
+		expect(all.overflowed("d_ANY")).toBe(true)
+		expect(all.overflowState()).toEqual({ folders: [], all: true })
+		all.closeGuard(guard("a-2", []))
+		expect(all.overflowed("d_ANY")).toBe(false)
+	})
+
+	it(`at ${HELD_OPEN_GUARDS_MAX} open guards each still closes; one more is a mark at once`, () => {
+		const table = new HeldRecordingTable()
+		for (let i = 0; i < HELD_OPEN_GUARDS_MAX; i++)
+			table.openGuard(guard(`g-${i}`, [`d_G${i}`]))
+		table.openGuard(guard("g-past", ["d_P"]))
+		for (let i = 0; i < HELD_OPEN_GUARDS_MAX; i++)
+			table.closeGuard(guard(`g-${i}`, []))
+		for (let i = 0; i < HELD_OPEN_GUARDS_MAX; i++)
+			expect(table.overflowed(`d_G${i}`)).toBe(false)
+		// Past the bound: kept, its close no longer ends it (fail closed).
+		table.closeGuard(guard("g-past", []))
+		expect(table.overflowed("d_P")).toBe(true)
+	})
+
+	it("a restore clears open guards; the guard schema and the writer's bound check hold the folder bound", () => {
+		const table = new HeldRecordingTable()
+		table.openGuard(guard("a-1", ["d_X"]))
+		table.restore([])
+		expect(table.overflowed("d_X")).toBe(false)
+		const folders = Array.from(
+			{ length: HELD_OVERFLOW_FOLDERS_MAX + 1 },
+			(_, i) => `d_F${i}`,
+		)
+		for (const key of ["heldGuard", "heldGuardEnd"] as const) {
+			expect(heldPayloadWithinBounds({ [key]: guard("a-1", folders) })).toBe(
+				false,
+			)
+			expect(
+				heldPayloadWithinBounds({ [key]: guard("a-1", folders.slice(1)) }),
+			).toBe(true)
+			const base = { discoveries: [], observations: [], deleted: [] }
+			expect(
+				StoreMutationSchema.safeParse({
+					...base,
+					[key]: guard("a-1", folders.slice(1)),
+				}).success,
+			).toBe(true)
+			expect(
+				StoreMutationSchema.safeParse({
+					...base,
+					[key]: guard("a-1", folders),
+				}).success,
+			).toBe(false)
+		}
+	})
+})
+
+describe("an analog failure cleanup never removes a file in a marked folder", () => {
+	/** A's analog recording whose metadata step throws once the final WAV exists. */
+	async function failedRecording(mark: boolean) {
+		const root = await tempRoot()
+		const first = newStore()
+		const a =
+			first.ingest(
+				makeObs({
+					id: "va",
+					centreHz: BASE_HZ,
+					startedAt: T0,
+					cls: "analog-fm",
+					open: true,
+					gate: "passed",
+				}),
+			).discoveryId ?? ""
+		expect(a).not.toBe("")
+		const store = restored({
+			...first.snapshot(),
+			...(mark ? { heldOverflow: { folders: [a], all: false } } : {}),
+		})
+		expect(store.heldFolderUnknown(a)).toBe(mark)
+		const ev = evidenceFor(root, () => store)
+		let finalPath = ""
+		ev.configureAnalog({
+			...adapterOf(store),
+			prepare: async metadata => {
+				finalPath = join(root, metadata.artifact)
+				expect(existsSync(finalPath)).toBe(true)
+				throw new Error("synthetic metadata failure")
+			},
+		})
+		await ev.recoverAnalog()
+		const op = ev.beginAnalog({
+			discoveryId: a,
+			observationId: "va",
+			binding: bindingOf(BASE_HZ),
+		})
+		await op.ready
+		await op.push(new Int16Array([1, -2, 3, -4]))
+		const receipt = await op.finish()
+		expect(receipt.outcome).toBe("failed")
+		expect(finalPath).not.toBe("")
+		return { root, store, ev, a, finalPath, receipt }
+	}
+
+	it("marked: the WAV stays, cleanup pending; a restart quarantines it and retention keeps it", async () => {
+		const s = await failedRecording(true)
+		expect(existsSync(s.finalPath)).toBe(true)
+		expect(s.receipt.cleanup).toBe("pending")
+		await s.ev.stopAnalog()
+		const next = restored(s.store.snapshot())
+		const ev2 = evidenceFor(s.root, () => next)
+		ev2.configureAnalog(adapterOf(next))
+		await ev2.recoverAnalog()
+		ev2.setCaps({ ...CAPS, maxRecordingsMb: 0, maxAgeDays: 0 })
+		await ev2.retention(new Set())
+		expect(existsSync(s.finalPath)).toBe(true)
+		expect(next.delete(s.a)).toBe(true)
+		await ev2.removeDiscovery(s.a)
+		expect(existsSync(s.finalPath)).toBe(true)
+		await ev2.stopAnalog()
+	})
+
+	it("unmarked: the same failure removes its own WAV (the path the mark guards)", async () => {
+		const s = await failedRecording(false)
+		expect(existsSync(s.finalPath)).toBe(false)
+		expect(s.receipt.cleanup).toBe("complete")
+		await s.ev.stopAnalog()
+	})
+
+	it("a folder marked while retention retires the file: the media unlink checks the mark itself", async () => {
+		const root = await tempRoot()
+		const store = newStore()
+		let current = store
+		const ev = evidenceFor(root, () => current)
+		const a =
+			store.ingest(
+				makeObs({
+					id: "va",
+					centreHz: BASE_HZ,
+					startedAt: T0,
+					cls: "analog-fm",
+					open: true,
+					gate: "passed",
+				}),
+			).discoveryId ?? ""
+		let markOnInverse = false
+		ev.configureAnalog({
+			...adapterOf(store),
+			inverse: async id => {
+				store.removePreparedRecording(id)
+				// The mark lands after retention's own checks, before the media unlink.
+				if (markOnInverse)
+					current = restored({
+						...store.snapshot(),
+						heldOverflow: { folders: [a], all: false },
+					})
+			},
+		})
+		await ev.recoverAnalog()
+		const receipt = await recordAnalog(ev, a, "va")
+		const path = join(root, receipt.artifact ?? "")
+		markOnInverse = true
+		ev.setCaps({ ...CAPS, maxRecordingsMb: 0, maxAgeDays: 0 })
+		await ev.retention(new Set())
+		expect(current.heldFolderUnknown(a)).toBe(true)
+		expect(existsSync(path)).toBe(true)
+		await ev.stopAnalog()
+	})
 })

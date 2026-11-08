@@ -12,10 +12,12 @@ import {
 import type { PreparedRecordingMetadata } from "./recording-operation.js"
 import { DISCOVERY_RECORDING_ALIASES_STORED_MAX } from "../recording-aliases.js"
 import {
+	HeldGuardSchema,
 	HeldOverflowSchema,
 	HeldRecordingChangesSchema,
 } from "./held-recordings.js"
 import type {
+	HeldGuardState,
 	HeldOverflowState,
 	HeldRecordingChange,
 } from "./held-recordings.js"
@@ -332,6 +334,10 @@ export interface StoreMutation {
 	heldRecordings?: HeldRecordingChange[]
 	/** The overflow marks of the ownership table as now held (written whole when they change). */
 	heldOverflow?: HeldOverflowState
+	/** A split sequence's first entry: its temporary guard opens (held-recordings.ts). */
+	heldGuard?: HeldGuardState
+	/** A split sequence's last entry: these marks are added, then its own guard closes. */
+	heldGuardEnd?: HeldGuardState
 }
 
 /**
@@ -382,6 +388,8 @@ export const StoreMutationSchema = z
 		aliases: z.array(DiscoveryAliasEntrySchema).optional(),
 		heldRecordings: HeldRecordingChangesSchema.optional(),
 		heldOverflow: HeldOverflowSchema.optional(),
+		heldGuard: HeldGuardSchema.optional(),
+		heldGuardEnd: HeldGuardSchema.optional(),
 	})
 	.strict()
 export type StoreMutationCheck = Assert<

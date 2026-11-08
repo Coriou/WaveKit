@@ -594,7 +594,10 @@ function newStoreEpoch(): string {
 /** One journal part's held-recording payload fields (absent ones omitted). */
 function heldFields(
 	part: HeldJournalPart | undefined,
-): Pick<StoreMutation, "heldRecordings" | "heldOverflow"> {
+): Pick<
+	StoreMutation,
+	"heldRecordings" | "heldOverflow" | "heldGuard" | "heldGuardEnd"
+> {
 	if (part === undefined) return {}
 	return {
 		...(part.heldRecordings.length > 0
@@ -602,6 +605,10 @@ function heldFields(
 			: {}),
 		...(part.heldOverflow !== undefined
 			? { heldOverflow: part.heldOverflow }
+			: {}),
+		...(part.heldGuard !== undefined ? { heldGuard: part.heldGuard } : {}),
+		...(part.heldGuardEnd !== undefined
+			? { heldGuardEnd: part.heldGuardEnd }
 			: {}),
 	}
 }
@@ -7808,7 +7815,16 @@ export class DiscoveryStore
 	private applyMutation(m: StoreMutation): void {
 		this.proofQuiet++
 		try {
-			this.applyStoredMutation(m)
+			// An entry that journals held changes carries the runtime's outcome of every listing;
+			// a listing re-derived here before its drops are applied marks nothing.
+			const journaled =
+				m.heldRecordings !== undefined ||
+				m.heldOverflow !== undefined ||
+				m.heldGuard !== undefined ||
+				m.heldGuardEnd !== undefined
+			this.heldTable.replayJournaled(journaled, () =>
+				this.applyStoredMutation(m),
+			)
 		} finally {
 			this.proofQuiet--
 			this.pendingProof.clear()
@@ -7882,9 +7898,13 @@ export class DiscoveryStore
 			if (this.discoveries.has(a.id) || a.aliases.length === 0)
 				this.aliasTable.set(a.id, a.aliases, id => this.discoveries.has(id))
 		}
-		// The journaled ownership changes last: they are the state this entry left.
+		// The journaled ownership changes last: they are the state this entry left. A split
+		// sequence's guard opens before its first changes and closes after its last ones; the
+		// replace of the marks never touches an open guard, so interleaved sequences keep theirs.
+		if (m.heldGuard !== undefined) this.heldTable.openGuard(m.heldGuard)
 		this.heldTable.apply(m.heldRecordings ?? [])
 		if (m.heldOverflow !== undefined) this.heldTable.setOverflow(m.heldOverflow)
+		if (m.heldGuardEnd !== undefined) this.heldTable.closeGuard(m.heldGuardEnd)
 		// A replayed record's journaled receiver-spur flag, as of this entry.
 		for (const d of m.discoveries) this.loRestoreFlag(d.id)
 	}
@@ -8028,7 +8048,8 @@ export class DiscoveryStore
 	/**
 	 * The ownership changes past the first entry's bound, one more journal entry per part (only
 	 * the held-recording fields), after the entry that carried the first part. The first part's
-	 * widened overflow marks keep every prefix of the sequence safe (takeJournalParts).
+	 * guard (its own sequence id) keeps every prefix of the sequence safe, whatever other entries
+	 * a replay meets in between (takeJournalParts).
 	 */
 	private emitHeldRest(
 		at: string,
