@@ -13,6 +13,7 @@ import {
 	WIDEBAND_TONE_ONLY_HOLD_FRAMES,
 	WIDEBAND_TONE_ONLY_ON_AIR_FRAMES,
 	digitalExpiry,
+	rememberWaiver,
 	toneOnlyYields,
 	type WidebandCloseInfo,
 	type WidebandTrackInput,
@@ -315,6 +316,76 @@ describe("a verified digital class still vetoes a tone-classed recording", () =>
 			await h.rec.idle()
 		}
 	}, 120_000)
+
+	it("a snapshot classing a tone-only session analog-fm clears its waivers' provenance: a later digital verdict keeps them", async () => {
+		for (const promoted of [false, true]) {
+			const h = lowHarness(SPEECH)
+			await h.feed(1, false)
+			const chunk = h.fs / 40
+			const onset = h.engine.liveEdge()
+			for (let i = 0; i < 6 * 40 && !codes(h).includes("classed"); i++) {
+				h.engine.write(h.src.next(chunk, true))
+				const edge = h.engine.liveEdge()
+				if (edge - onset >= 0.1 * h.fs)
+					h.rec.track(input("o", snapshot("o", onset, edge, LOW), SHADOW))
+				await h.pump()
+			}
+			expect(codes(h)).toContain("classed")
+			// The waiver is granted while the session is classed by its own audio only.
+			const spur = snapshot("o", onset, h.engine.liveEdge(), LOW)
+			spur.flags.spur = true
+			expect(h.rec.keepsOverArtefact("o", spur, input("o", spur, SHADOW))).toBe(
+				true,
+			)
+			h.rec.track(input("o", spur, SHADOW))
+			if (promoted) {
+				h.engine.write(h.src.next(chunk, true))
+				const clean = snapshot("o", onset, h.engine.liveEdge(), LOW)
+				h.rec.track(input("o", clean, { analogFm: true }))
+				await h.pump()
+			}
+			h.engine.epoch = {
+				...h.engine.epoch,
+				epoch: h.engine.epoch.epoch + 1,
+				startSample: h.engine.liveEdge(),
+			}
+			await quiet(h, 0.5, h.src)
+			expect(h.rec.owns("o")).toBe(false)
+			const later = snapshot("o", onset, h.engine.liveEdge(), LOW)
+			later.flags.spur = true
+			const info = input("o", later, { ...SHADOW, nonAnalog: true })
+			// Classed analog-fm by a snapshot: no digital verdict revokes it; tone-only: it does.
+			expect(h.rec.keepsOverArtefact("o", later, info)).toBe(promoted)
+			h.rec.closed("o", later, "epoch-changed", NOT_ANALOG)
+			await h.rec.idle()
+		}
+	}, 120_000)
+
+	it("a waiver and its provenance are one bounded entry: evicted together, the oldest first", () => {
+		const waived = new Map<string, boolean>()
+		rememberWaiver(waived, "a", true, 2)
+		rememberWaiver(waived, "b", false, 2)
+		// A grant again is the newest: "b" is now the oldest.
+		rememberWaiver(waived, "a", true, 2)
+		rememberWaiver(waived, "c", true, 2)
+		expect([...waived]).toEqual([
+			["a", true],
+			["c", true],
+		])
+		// Past the limit the oldest waiver and its tone-only provenance go at once, never one of them.
+		rememberWaiver(waived, "d", false, 2)
+		expect(waived.has("a")).toBe(false)
+		expect([...waived]).toEqual([
+			["c", true],
+			["d", false],
+		])
+		const full = new Map<string, boolean>()
+		for (let i = 0; i <= 1_024; i++) rememberWaiver(full, `o${i}`, i % 2 === 0)
+		expect(full.size).toBe(1_024)
+		expect(full.has("o0")).toBe(false)
+		expect(full.get("o1")).toBe(false)
+		expect(full.get("o1024")).toBe(true)
+	})
 
 	it("a session a snapshot classed analog-fm keeps its parent behaviour (the class is sticky)", async () => {
 		const h = lowHarness(SPEECH)

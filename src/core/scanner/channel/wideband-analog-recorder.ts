@@ -1006,6 +1006,24 @@ function raisedBy(
 	return observationId === s.owner ? "snapshot" : "joined"
 }
 
+/**
+ * Grants `id` a waiver with its class provenance (`toneOnly`) in one bounded map: a grant is the
+ * newest entry, and past `limit` (MAX_REMEMBERED) the oldest waiver goes with its provenance.
+ */
+export function rememberWaiver(
+	map: Map<string, boolean>,
+	id: string,
+	toneOnly: boolean,
+	limit = MAX_REMEMBERED,
+): void {
+	map.delete(id)
+	map.set(id, toneOnly)
+	if (map.size > limit) {
+		const oldest = map.keys().next()
+		if (oldest.done !== true) map.delete(oldest.value)
+	}
+}
+
 /** Adds `id` to a bounded remembered set (the oldest entry goes past MAX_REMEMBERED). */
 function remember(set: Set<string>, id: string): void {
 	set.add(id)
@@ -1034,15 +1052,14 @@ export class WidebandAnalogRecorder {
 	/**
 	 * Observations a classed, voiced recording keeps over a late spur or IQ-image flag
 	 * (keepsOverArtefact), until a veto or refusal of their session revokes it (revokeWaivers) or
-	 * they close (bounded by MAX_REMEMBERED).
+	 * they close (bounded by MAX_REMEMBERED, the oldest evicted), each with its class provenance:
+	 * true while its session is classed by its own audio only (`toneOnly`), so a definite other
+	 * class (classVetoes) still ends the waiver once the session itself is gone. A snapshot that
+	 * classes the session analog-fm clears it (classedBySnapshot): the session was classed for
+	 * real, and a later digital verdict no longer revokes what it recorded. One structure, so a
+	 * waiver and its provenance are evicted together.
 	 */
-	private readonly waived = new Set<string>()
-	/**
-	 * Of `waived`, the observations whose session was classed by its own audio only (`toneOnly`) when
-	 * the waiver was granted: a definite other class (classVetoes) still ends their waiver once the
-	 * session itself is gone. Same bound and life as `waived`.
-	 */
-	private readonly waivedToneOnly = new Set<string>()
+	private readonly waived = new Map<string, boolean>()
 	/**
 	 * Observations whose spectrally digital shadow expired (WIDEBAND_DIGITAL_CLASS_MS), with the
 	 * visit (stream and epoch) it expired in: no other shadow starts for them in that visit
@@ -1157,14 +1174,11 @@ export class WidebandAnalogRecorder {
 		const id = this.byObservation.get(observationId)
 		const s = id === undefined ? undefined : this.sessions.get(id)
 		if (!s || s.done) {
-			if (!this.waived.has(observationId)) return false
+			const toneOnly = this.waived.get(observationId)
+			if (toneOnly === undefined) return false
 			// The session is gone, its class provenance is not: a verified other class still vetoes
 			// a recording classed by its own audio only.
-			if (
-				this.waivedToneOnly.has(observationId) &&
-				!info.analogFm &&
-				info.nonAnalog === true
-			)
+			if (toneOnly && !info.analogFm && info.nonAnalog === true)
 				return this.revoke(observationId)
 			return true
 		}
@@ -1177,25 +1191,28 @@ export class WidebandAnalogRecorder {
 			classVetoes(s, { ...info, discoveryId: null })
 		)
 			return this.revoke(observationId)
-		remember(this.waived, observationId)
-		if (s.toneOnly) remember(this.waivedToneOnly, observationId)
-		else this.waivedToneOnly.delete(observationId)
+		rememberWaiver(this.waived, observationId, s.toneOnly)
 		return true
 	}
 
 	/** Ends `observationId`'s waiver (keepsOverArtefact); false, the answer it then gives. */
 	private revoke(observationId: string): false {
 		this.waived.delete(observationId)
-		this.waivedToneOnly.delete(observationId)
 		return false
+	}
+
+	/**
+	 * A snapshot classed `s` analog-fm after a class by its own audio only (`toneOnly` cleared): its
+	 * waivers' provenance follows, so a later digital verdict cannot revoke them once `s` is gone.
+	 */
+	private classedBySnapshot(s: Session, observationId: string): void {
+		for (const id of [observationId, ...s.observations])
+			if (this.waived.get(id) === true) this.waived.set(id, false)
 	}
 
 	/** A veto, refusal or failed file of `s`: none of its observations keeps a waiver. */
 	private revokeWaivers(s: Session): void {
-		for (const id of s.observations) {
-			this.waived.delete(id)
-			this.waivedToneOnly.delete(id)
-		}
+		for (const id of s.observations) this.waived.delete(id)
 	}
 
 	/**
@@ -1209,11 +1226,12 @@ export class WidebandAnalogRecorder {
 	/**
 	 * The sweep-hold hook, per transmission: for a session on this source, stream and epoch that is
 	 * classed analog-fm and has been voiced (`qualified`, sticky for its files), voice (`{ voice }`,
-	 * named by that track's observation id: the same over keeps its name, the next over after a
+	 * named by that track's observation id, with the session's frequency as `recordedHz`: the same over keeps its name, the next over after a
 	 * turnaround opens another track) while voice is on air in a track still open: the last voiced
 	 * meter window lies inside an open track's span and the newest judged audio is at most
 	 * WIDEBAND_VOICE_ON_AIR_MS past it (the scheduler may keep the hop up to `hold.maxHoldMs` while
-	 * the name stays the same, RecordingActivity); true while a track is open with no
+	 * the name stays the same, RecordingActivity); a recording that is not voice (RecordedSession,
+	 * naming the session's frequency as `recordedHz`) while a track is open with no
 	 * voice that recent (a carrier or a repeater hang after the voice, a stuck carrier: kept within
 	 * L only); false once no joined track is open (the over's squelch closed: the recorder's
 	 * `hangMs` still joins the next over into the same file, the sweep does not wait for it).
@@ -1242,7 +1260,7 @@ export class WidebandAnalogRecorder {
 				continue
 			}
 			const v = this.voiceOnAir(s)
-			if (typeof v === "object") return v
+			if (typeof v === "object" && "voice" in v) return v
 			if (answer === false) answer = v
 		}
 		return answer
@@ -1256,11 +1274,18 @@ export class WidebandAnalogRecorder {
 	private voiceOnAir(s: Session): RecordingActivity {
 		const { open, voiced } = voicedSpan(s)
 		if (!open) s.voiceTx = null
-		if (voiced === null) return open
+		// Classed and voiced (`qualified`: a file of it sounded like voice): the frequency's verified
+		// voice history for the sweep, voice on air now or not (RecordedSession, VoiceOnAir.recordedHz).
+		if (voiced === null)
+			return open ? { recording: true, recordedHz: s.targetHz } : false
 		s.voiceTx ??= voiced
 		const quiet = Math.max(s.quietGap, s.judgedTo - (s.voiceAt ?? s.judgedTo))
 		s.quietGap = 0
-		return { voice: s.voiceTx, quietMs: (quiet * 1000) / s.fs }
+		return {
+			voice: s.voiceTx,
+			quietMs: (quiet * 1000) / s.fs,
+			recordedHz: s.targetHz,
+		}
 	}
 
 	/** Status block (ScannerStatus.recorder): live sessions, parked ones and the decision log. */
@@ -1324,7 +1349,6 @@ export class WidebandAnalogRecorder {
 	): void {
 		// Its closing ingest came first: the observation asks for no waiver any more.
 		this.waived.delete(observationId)
-		this.waivedToneOnly.delete(observationId)
 		// An association first given at the close still names the observation's earlier decisions.
 		if (info !== undefined && info.discoveryId !== null)
 			this.decisions.bindDiscovery(observationId, info.discoveryId)
@@ -1444,6 +1468,7 @@ export class WidebandAnalogRecorder {
 			s.digital = info.spectralDigital === true && !info.analogFm
 		}
 		if (info.analogFm) {
+			if (s.toneOnly) this.classedBySnapshot(s, observationId)
 			s.toneOnly = false
 			if (!s.classed) {
 				s.classed = true
@@ -3030,6 +3055,7 @@ export class WidebandAnalogRecorder {
 				this.decisions.bindDiscovery(s.owner, info.discoveryId)
 			}
 			if (info.analogFm) {
+				if (s.toneOnly) this.classedBySnapshot(s, observationId)
 				s.toneOnly = false
 				if (!s.classed) {
 					s.classed = true

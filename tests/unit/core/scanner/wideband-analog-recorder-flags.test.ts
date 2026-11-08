@@ -34,6 +34,12 @@ import {
 	snapshot,
 } from "./wideband-recorder-harness.js"
 
+/**
+ * A recording that is not voice of a classed, voiced session: its frequency is the sweep's verified
+ * voice history (RecordedSession).
+ */
+const RECORDED = { recording: true, recordedHz: CENTRE + OFFSET }
+
 type Harness = ReturnType<typeof harness>
 type Flag = "spur" | "iqImage" | "edge"
 
@@ -213,7 +219,9 @@ describe("a voiced, classed session over a wide reading", () => {
 			await h.pump()
 		}
 		expect(h.rec.owns("o")).toBe(true)
-		expect(h.rec.recordingActive("rtl", { stream: 1, epoch: 1 })).toBe(true)
+		expect(h.rec.recordingActive("rtl", { stream: 1, epoch: 1 })).toEqual(
+			RECORDED,
+		)
 		await closeAll(h, onset, (_, t) => ({ ...t, obwHz: 20_000 }))
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
 	}, 60_000)

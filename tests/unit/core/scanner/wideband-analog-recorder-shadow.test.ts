@@ -22,6 +22,12 @@ import {
 	snapshot,
 } from "./wideband-recorder-harness.js"
 
+/**
+ * A recording that is not voice of a classed, voiced session: its frequency is the sweep's verified
+ * voice history (RecordedSession).
+ */
+const RECORDED = { recording: true, recordedHz: CENTRE + OFFSET }
+
 type Harness = ReturnType<typeof harness>
 
 const SHADOW: Partial<WidebandTrackInput> = {
@@ -434,9 +440,9 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		// stated upper bound, pinned: 1.5 + 2 s fed).
 		await h.feed(2, true, report)
 		// The carrier stays keyed with no voice: the sweep keeps the hop within L only.
-		expect(h.rec.recordingActive("rtl", at)).toBe(true)
+		expect(h.rec.recordingActive("rtl", at)).toEqual(RECORDED)
 		await h.feed(5, true, report)
-		expect(h.rec.recordingActive("rtl", at)).toBe(true)
+		expect(h.rec.recordingActive("rtl", at)).toEqual(RECORDED)
 		const end = h.engine.liveEdge()
 		await h.feed(0.3, false)
 		h.rec.closed("o", snapshot("o", onset, end), null)
@@ -523,7 +529,7 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		const report2 = () =>
 			h.rec.track(input("o2", snapshot("o2", onset2, h.engine.liveEdge())))
 		await h.feed(0.4, true, report2)
-		expect(h.rec.recordingActive("rtl", at)).toBe(true)
+		expect(h.rec.recordingActive("rtl", at)).toEqual(RECORDED)
 		h.src.setVoice(true)
 		await h.feed(1.5, true, report2)
 		// A scheduler that never saw the false answers (an event-loop stall across the
@@ -556,7 +562,7 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		session.judgedTo = voiceAt + window
 		expect(h.rec.recordingActive("rtl", at)).toMatchObject({ voice: "o" })
 		session.judgedTo = voiceAt + window + 1
-		expect(h.rec.recordingActive("rtl", at)).toBe(true)
+		expect(h.rec.recordingActive("rtl", at)).toEqual(RECORDED)
 		report()
 	}, 60_000)
 })

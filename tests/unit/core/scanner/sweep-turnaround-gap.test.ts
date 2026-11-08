@@ -22,6 +22,7 @@ interface MemoryView {
 	centreHz: number
 	evidence: string
 	flaps: boolean
+	voiced: boolean
 }
 
 const stops: (() => Promise<void>)[] = []
@@ -93,13 +94,16 @@ describe("a turnaround is read on air", () => {
 		expect(w.visits.at(-1)?.endMs).toBeNull()
 	}, 60_000)
 
-	it("a 900 ms gap rests like a flap: later visits only dwell while voice goes on", async () => {
+	// The first over was recorded voiced: verified voice history, which carrier evidence never caps,
+	// so the flap's evidence does not cut the voice that follows it (as a 1,031 ms turnaround's does
+	// not, above).
+	it("a 900 ms gap is a flap, but on a frequency whose voice was recorded the hop is kept for the voice that follows it", async () => {
 		const { w, entry } = await turnaround(900, 0, 30_000)
 		expect(entry?.flaps).toBe(true)
-		const later = laterVisits(w)
-		expect(later.length).toBeGreaterThanOrEqual(4)
-		// Settle, dwell and the two 25 ms chunks either side of a tune.
-		for (const v of later.slice(0, -1))
-			expect(v.endMs! - v.atMs).toBeLessThanOrEqual(SETTLE_MS + 300)
+		expect(entry?.evidence).toBe("carrier")
+		expect(entry?.voiced).toBe(true)
+		expect(laterVisits(w)).toEqual([])
+		expect(w.visits.at(-1)?.centreHz).toBe(SIGNAL_HOP_HZ)
+		expect(w.visits.at(-1)?.endMs).toBeNull()
 	}, 60_000)
 })
