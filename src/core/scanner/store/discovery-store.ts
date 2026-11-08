@@ -3666,9 +3666,10 @@ export class DiscoveryStore
 
 	/**
 	 * The live owner of a committed recording file whose observation left the window, where
-	 * recordingAssociation has nothing to answer from: the folder's own discovery or the
-	 * survivor holding the folder as a merge alias (re-attached ones included), else a live
-	 * discovery the ownership table records as listing the file. Undefined while the observation
+	 * recordingAssociation has nothing to answer from: a live discovery the ownership table
+	 * records as listing the file (its listers' policy decides), else the folder's own discovery
+	 * or the survivor holding the folder as a merge alias (re-attached ones included) when no
+	 * lister is recorded. Undefined while the observation
 	 * is still stored (its association decides) or when no live discovery resolves. Only for a
 	 * file whose finalized receipt proves the commit (the analog recovery and playback rule).
 	 */
@@ -3681,7 +3682,7 @@ export class DiscoveryStore
 		if (splitRecordingId(recordingId)?.folderId !== discoveryId)
 			return undefined
 		return (
-			this.folderOwner(discoveryId) ?? this.heldRecordingHolders(recordingId)[0]
+			this.heldRecordingHolders(recordingId)[0] ?? this.folderOwner(discoveryId)
 		)
 	}
 

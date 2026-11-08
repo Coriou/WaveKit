@@ -1750,26 +1750,32 @@ export class AnalogOperations {
 	 * Every live discovery listing this intent's committed file: the ownership table's listers
 	 * and the owner of the intent's association when it lists the alias (the folder's own
 	 * discovery when its observation still holds it). Null (fail closed) when the folder is
-	 * marked (checked first: a live discovery may list the file unrecorded) or a lookup throws.
+	 * marked (checked first: a live discovery may list the file unrecorded), the table's answer
+	 * is unknown (its lookup answers null) or a lookup throws. Only an absent lookup means "no
+	 * table". An admitted file whose observation left the window adds its retained owner only
+	 * when the table records no lister (the folder's owner is the fallback, never an extra one).
 	 */
 	private listersOf(intent: Intent): string[] | null {
 		if (this.heldUnknown(intent.discoveryId)) return null
 		try {
 			const name = intent.artifact.split("/").at(-1)
+			const lookup = this.context.listers
 			const table =
-				name === undefined
+				name === undefined || lookup === undefined
 					? []
-					: (this.context.listers?.(intent.discoveryId, name) ?? [])
+					: lookup(intent.discoveryId, name)
 			if (table === null) return null
 			const out = new Set(table)
-			// An admitted (finalized) file whose observation left the window follows its owner.
-			const association = this.available.get(intent.alias)?.available
-				? this.finalizedAssociation(intent)
-				: this.context.adapter.association(
-						intent.discoveryId,
-						intent.observationId,
-						intent.binding,
-					)
+			// An admitted (finalized) file whose observation left the window follows its owner,
+			// when no lister is recorded; otherwise the table's listers are its owners.
+			const association =
+				out.size === 0 && this.available.get(intent.alias)?.available
+					? this.finalizedAssociation(intent)
+					: this.context.adapter.association(
+							intent.discoveryId,
+							intent.observationId,
+							intent.binding,
+						)
 			if (association?.aliasIds.includes(intent.alias))
 				out.add(association.ownerId ?? intent.discoveryId)
 			return [...out]
@@ -1779,9 +1785,9 @@ export class AnalogOperations {
 	}
 	/**
 	 * A finalized file's association (a receipt that matches its intent and media): the strict
-	 * one while its observation lists it, else, once that observation left the window, the live
-	 * discovery its folder resolves to (itself or a merge survivor) or the ownership table names
-	 * (adapter.retainedOwner). Null or the strict answer otherwise: no live owner, no admission.
+	 * one while its observation lists it, else, once that observation left the window, a live
+	 * discovery the ownership table names, or, when none is recorded, the live discovery its
+	 * folder resolves to (itself or a merge survivor) (adapter.retainedOwner). Null or the strict answer otherwise: no live owner, no admission.
 	 * Callers use it only for a receipt-proven commit; an unfinalized intent keeps the strict one.
 	 */
 	private finalizedAssociation(intent: Intent): RecordingAssociation | null {
