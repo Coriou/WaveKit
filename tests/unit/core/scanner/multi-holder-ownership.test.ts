@@ -664,6 +664,135 @@ for (const [mode, protection] of MODES)
 		})
 	})
 
+for (const [mode, protection] of MODES)
+	describe(`a retracted observation releases its own listings (${mode})`, () => {
+		/**
+		 * A's o1 lists A~call.wav and o1k (A's keep.wav) keeps A live; B's o2 lists A~call.wav too,
+		 * so both listings are entries. o1 then turns truncated: it is retracted, not aged out.
+		 */
+		async function scene() {
+			const root = await tempRoot()
+			const store = newStore()
+			const a = await discovery(store, root, 1)
+			expect(
+				store.ingest(
+					makeObs({
+						id: "o1k",
+						centreHz: BASE_HZ + 100_000,
+						startedAt: T0 + 11_000,
+						cls: "analog-fm",
+						open: false,
+						gate: "passed",
+					}),
+				).discoveryId,
+			).toBe(a.id)
+			const keep = await writeWav(root, a.id, "keep.wav")
+			store.attachRecordings("o1k", [`${a.id}~keep.wav`], "linked")
+			const b = await discovery(store, root, 2)
+			const rid = `${a.id}~call.wav`
+			expect(store.attachRecordings("o2", [rid], "linked")).toBe(true)
+			expect(store.heldRecordingListers(rid)).toEqual([a.id, b.id].sort())
+			const base = store.snapshot()
+			const entries: JournalEntry[] = []
+			store.on("mutation", (e: Omit<JournalEntry, "seq">) =>
+				entries.push({ ...e, seq: entries.length + 1 }),
+			)
+			store.ingest(
+				makeObs({
+					id: "o1",
+					centreHz: BASE_HZ + 100_000,
+					startedAt: T0 + 1_000,
+					cls: "analog-fm",
+					open: false,
+					gate: "passed",
+					truncated: true,
+				}),
+			)
+			expect(store.discoveryIdOf("o1")).toBeUndefined()
+			expect(store.get(a.id)).toBeDefined()
+			return { root, store, a, b, rid, keep, base, entries }
+		}
+
+		it("B alone lists the file (snapshot and replay too); only A kept, it ages out with B's own", async () => {
+			const s = await scene()
+			const fromSnapshot = newStore()
+			fromSnapshot.restore(s.store.snapshot())
+			const replayed = newStore()
+			replayed.restore(s.base)
+			for (const e of s.entries) replayed.replay(e)
+			for (const store of [s.store, fromSnapshot, replayed]) {
+				expect(store.heldRecordingListers(s.rid)).toEqual([s.b.id])
+				// Nothing stale is left for the prune.
+				expect(store.pruneHeldRecordings(() => true)).toBe(0)
+				expect(store.heldRecordingListers(s.rid)).toEqual([s.b.id])
+				await writeWav(s.root, s.a.id, "call.wav")
+				await writeWav(s.root, s.a.id, "keep.wav")
+				await writeWav(s.root, s.b.id, "call.wav")
+				await age(s.a.own, s.keep, s.b.own)
+				const ev = evidenceFor(s.root, () => store, protection)
+				await ev.loadFolderIndex()
+				await ev.retention(new Set([s.a.id]))
+				expect(existsSync(s.a.own)).toBe(false)
+				expect(existsSync(s.b.own)).toBe(false)
+				expect(existsSync(s.keep)).toBe(true)
+			}
+		})
+
+		it("a retraction journaled without its drop (an earlier writer): the prune drops the unmarked listing", async () => {
+			const s = await scene()
+			const legacy = s.entries.map(e => {
+				const m = e.payload as StoreMutation
+				if (!(m.removedObservations ?? []).includes("o1")) return e
+				return {
+					...e,
+					payload: {
+						...m,
+						heldRecordings: (m.heldRecordings ?? []).filter(
+							c => c.observationId !== "o1",
+						),
+					},
+				}
+			})
+			expect(legacy).not.toEqual(s.entries)
+			const replayed = newStore()
+			replayed.restore(s.base)
+			for (const e of legacy) replayed.replay(e)
+			// The stale listing, as the earlier writer left it.
+			expect(replayed.heldRecordingListers(s.rid)).toEqual(
+				[s.a.id, s.b.id].sort(),
+			)
+			// A snapshot of it cannot tell the listing from an aged one: kept (fail closed).
+			const fromSnapshot = newStore()
+			fromSnapshot.restore(replayed.snapshot())
+			expect(fromSnapshot.pruneHeldRecordings(() => true)).toBe(0)
+			expect(fromSnapshot.heldRecordingListers(s.rid)).toEqual(
+				[s.a.id, s.b.id].sort(),
+			)
+			// Live, the unmarked listing of an observation no longer stored was retracted.
+			expect(replayed.pruneHeldRecordings(() => true)).toBe(1)
+			expect(replayed.heldRecordingListers(s.rid)).toEqual([s.b.id])
+		})
+
+		it("a listing that aged out keeps its mark through the snapshot; one in the window carries none", async () => {
+			const s = await scene()
+			pushOutOfWindow(s.store, 1, s.a.id, 270)
+			expect(s.store.discoveryIdOf("o1k")).toBeUndefined()
+			const held = s.store.snapshot().heldRecordings ?? []
+			expect(held).toContainEqual({
+				id: `${s.a.id}~keep.wav`,
+				ownerId: s.a.id,
+				observationId: "o1k",
+				aged: true,
+			})
+			expect(held).toContainEqual({
+				id: s.rid,
+				ownerId: s.b.id,
+				observationId: "o2",
+			})
+			expect(held.some(e => e.observationId === "o1")).toBe(false)
+		})
+	})
+
 describe("a merge keeps a listing that left the window", () => {
 	it("a file only the survivor lists keeps its aged listing; one in the window collapses", () => {
 		const table = new HeldRecordingTable()

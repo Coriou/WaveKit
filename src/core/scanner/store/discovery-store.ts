@@ -3924,18 +3924,30 @@ export class DiscoveryStore
 	/**
 	 * An observation leaving the window: each file it lists in its discovery's own folder keeps
 	 * that listing as an entry, so a lister that arrives later finds the folder's discovery among
-	 * the file's holders (noteFolderListings recovers only listings still in the window). A listing
-	 * that already has its entry (the file had another holder) keeps it as is. Cost: one entry per
-	 * such listing whose file is still on disk; the maintenance prune drops it once the file is
-	 * gone or its discovery is deleted, and a merge moves it with the discovery's others. At the
-	 * table's bound the refusal marks the folder (fail closed, HeldRecordingTable).
+	 * the file's holders (noteFolderListings recovers only listings still in the window). Every
+	 * listing of it the table holds (its own folder's or another's) is marked aged: the only
+	 * listings that outlive their observation (a retracted one is released instead,
+	 * releaseListings, and the prune drops an unmarked one whose observation is gone). Cost: one
+	 * entry per such listing whose file is still on disk; the maintenance prune drops it once the
+	 * file is gone or its discovery is deleted, and a merge moves it with the discovery's others.
+	 * At the table's bound the refusal marks the folder (fail closed, HeldRecordingTable).
 	 */
 	private noteAgedListings(o: Observation): void {
 		for (const rid of o.recordingIds) {
-			if (splitRecordingId(rid)?.folderId !== o.discoveryId) continue
-			if (this.heldTable.holderOf(rid, o.id) !== undefined) continue
-			this.heldTable.hold(rid, o.discoveryId, o.id)
+			const holder = this.heldTable.holderOf(rid, o.id)
+			if (holder !== undefined) this.heldTable.hold(rid, holder, o.id, true)
+			else if (splitRecordingId(rid)?.folderId === o.discoveryId)
+				this.heldTable.hold(rid, o.discoveryId, o.id, true)
 		}
+	}
+
+	/**
+	 * An observation retracted (removed for cause, never aged out of the window): it no longer
+	 * lists anything, so exactly its own listings go (journaled with the retraction); every other
+	 * observation's listing of the same files stays.
+	 */
+	private releaseListings(o: Observation): void {
+		for (const rid of o.recordingIds) this.heldTable.release(rid, o.id)
 	}
 
 	/**
@@ -4070,10 +4082,13 @@ export class DiscoveryStore
 		for (const e of this.heldTable.entries()) {
 			let keep = this.discoveries.has(e.ownerId)
 			// A listing whose observation is still in the window follows it: gone when it no longer
-			// lists the file (a stale entry an earlier format left), re-pointed when it moved.
+			// lists the file (a stale entry an earlier format left), re-pointed when it moved. One
+			// whose observation is gone outlives it only when it aged out of the window; without the
+			// mark the observation was retracted and listed nothing any more.
 			const o = this.observationIndex.get(e.observationId)
 			if (keep && o !== undefined && !o.recordingIds.includes(e.id))
 				keep = false
+			if (keep && o === undefined && e.aged !== true) keep = false
 			if (keep)
 				try {
 					keep = exists(e.id)
@@ -4089,8 +4104,8 @@ export class DiscoveryStore
 			}
 		}
 		// A file whose only holder is its folder's own discovery follows that discovery anyway,
-		// unless a listing of it left the window: that one is the only record that the discovery
-		// listed the file, needed once another lister arrives (noteAgedListings).
+		// unless a listing of it left the window (aged): that one is the only record that the
+		// discovery listed the file, needed once another lister arrives (noteAgedListings).
 		for (const id of new Set(this.heldTable.entries().map(e => e.id))) {
 			const folderId = splitRecordingId(id)?.folderId
 			const holders = this.heldTable.holders(id)
@@ -4099,7 +4114,9 @@ export class DiscoveryStore
 				holders[0] === folderId &&
 				this.heldTable
 					.listingsOf(id)
-					.every(l => this.observationIndex.has(l.observationId))
+					.every(
+						l => l.aged !== true && this.observationIndex.has(l.observationId),
+					)
 			) {
 				dropped += this.heldTable.listingsOf(id).length
 				this.heldTable.drop(id)
@@ -5067,9 +5084,17 @@ export class DiscoveryStore
 			}
 			this.aliasTable.restore(s.aliases ?? [], id => this.discoveries.has(id))
 			// The persisted ownership, then every listing still in the window (state written
-			// before the table existed); owners that are not live are dropped.
+			// before the table existed); owners that are not live are dropped. An entry whose
+			// observation is not stored and that carries no aged mark was written before the mark
+			// existed: it may have aged out, so it counts as aged (fail closed).
 			this.heldTable.restore(
-				(s.heldRecordings ?? []).filter(e => this.discoveries.has(e.ownerId)),
+				(s.heldRecordings ?? [])
+					.filter(e => this.discoveries.has(e.ownerId))
+					.map(e =>
+						e.aged === true || this.observationIndex.has(e.observationId)
+							? e
+							: { ...e, aged: true as const },
+					),
 			)
 			this.heldTable.setOverflow(s.heldOverflow)
 			// A refusal while listings are derived again gives its folder a replay safety mark,
@@ -5461,6 +5486,7 @@ export class DiscoveryStore
 		const op = newOp()
 		this.forgetEvidence(known.id)
 		this.bumpProof(known.discoveryId)
+		this.releaseListings(known)
 		this.unlinkObservation(known)
 		op.removedObservations.push(known.id)
 		d.observationCount = Math.max(0, d.observationCount - 1)
@@ -8023,6 +8049,20 @@ export class DiscoveryStore
 		// sequences keep theirs.
 		if (m.heldGuard !== undefined) this.heldTable.openGuard(m.heldGuard)
 		this.heldTable.apply(m.heldRecordings ?? [], m.heldFormat)
+		// A journaled listing with no aged mark whose observation this entry leaves unstored was
+		// written before the mark existed (this writer journals the mark, or the drop of a
+		// retracted listing): it may have aged out, so it counts as aged (fail closed).
+		for (const c of m.heldRecordings ?? [])
+			if (
+				c.ownerId !== null &&
+				c.observationId !== undefined &&
+				c.aged !== true &&
+				!this.observationIndex.has(c.observationId)
+			) {
+				const holder = this.heldTable.holderOf(c.id, c.observationId)
+				if (holder !== undefined)
+					this.heldTable.hold(c.id, holder, c.observationId, true)
+			}
 		if (m.heldOverflow !== undefined) this.heldTable.setOverflow(m.heldOverflow)
 		if (m.heldGuardEnd !== undefined) this.heldTable.closeGuard(m.heldGuardEnd)
 		// A replayed record's journaled receiver-spur flag, as of this entry.

@@ -15,8 +15,13 @@
  * file in its discovery's own folder leaves the window (that listing is then the only record
  * that the folder's discovery lists the file, kept for a lister that arrives later). It lasts
  * until the file is forgotten (deleted), its holder is deleted (only that holder's entries go,
- * never the file's other entries), the observation moves (the entry follows it) or the file is
- * gone from disk (maintenance prune). A merge moves the dropped discovery's entries to the survivor. Persisted in
+ * never the file's other entries), the observation moves (the entry follows it), the observation
+ * is retracted (truncated, spur or image, removed for cause: only its own entries go) or the file
+ * is gone from disk (maintenance prune). An entry whose observation left the window carries the
+ * `aged` mark (persisted and journaled): only such an entry outlives its observation; one whose
+ * observation is no longer stored without the mark was retracted, and the prune drops it. State
+ * written before the mark existed loads with every entry whose observation is not stored marked
+ * aged (fail closed: it cannot tell the two apart). A merge moves the dropped discovery's entries to the survivor. Persisted in
  * the snapshot and journaled as changes, so it survives a snapshot, a restart and a replay. Every
  * kind (analog, digital) is covered.
  *
@@ -97,6 +102,12 @@ export interface HeldRecordingEntry {
 	ownerId: string
 	/** The observation that lists it (the analog recovery association key). */
 	observationId: string
+	/**
+	 * Set once that observation left the observation window (aged out): the entry is then the
+	 * only record of the listing and outlives the observation. An entry without it whose
+	 * observation is no longer stored was retracted, and the maintenance prune drops it.
+	 */
+	aged?: true | undefined
 }
 
 /**
@@ -107,6 +118,8 @@ export interface HeldRecordingChange {
 	id: string
 	ownerId: string | null
 	observationId?: string
+	/** The listing as now held left the observation window (HeldRecordingEntry.aged). */
+	aged?: true | undefined
 }
 
 /** Folders whose held recordings the table could not list (see the bound above). */
@@ -142,6 +155,7 @@ export const HeldRecordingEntrySchema = z
 		id: RecordingIdSchema,
 		ownerId: DiscoveryIdSchema,
 		observationId: z.string().min(1).max(128),
+		aged: z.literal(true).optional(),
 	})
 	.strict()
 
@@ -150,6 +164,7 @@ export const HeldRecordingChangeSchema = z
 		id: RecordingIdSchema,
 		ownerId: DiscoveryIdSchema.nullable(),
 		observationId: z.string().min(1).max(128).optional(),
+		aged: z.literal(true).optional(),
 	})
 	.strict()
 
@@ -228,6 +243,8 @@ interface Listing {
 	readonly id: string
 	readonly observationId: string
 	ownerId: string
+	/** The observation left the window (HeldRecordingEntry.aged); never cleared. */
+	aged: boolean
 }
 
 /** A change since the last take: the listing, and whether it was held at that take. */
@@ -503,6 +520,7 @@ export class HeldRecordingTable {
 			id,
 			ownerId: l.ownerId,
 			observationId: l.observationId,
+			...(l.aged ? { aged: true as const } : {}),
 		}))
 	}
 
@@ -524,10 +542,16 @@ export class HeldRecordingTable {
 
 	/**
 	 * Records (or re-points) the listing of `id` by `observationId`, now held by `ownerId` (the
-	 * folder's own discovery included). False at the bound: the entry is refused and its folder is
-	 * marked overflowed (fail closed, see the bound above).
+	 * folder's own discovery included). `aged`: the observation left the window, marked on the
+	 * listing (an existing listing keeps a mark it has). False at the bound: the entry is refused
+	 * and its folder is marked overflowed (fail closed, see the bound above).
 	 */
-	hold(id: string, ownerId: string, observationId: string): boolean {
+	hold(
+		id: string,
+		ownerId: string,
+		observationId: string,
+		aged = false,
+	): boolean {
 		const v = this.byId.get(id)
 		const previous =
 			v === undefined
@@ -538,8 +562,11 @@ export class HeldRecordingTable {
 						? v
 						: undefined
 		if (previous !== undefined) {
-			if (previous.ownerId === ownerId) return true
+			const marks = aged && !previous.aged
+			if (previous.ownerId === ownerId && !marks) return true
 			this.touch(id, observationId, true)
+			if (marks) previous.aged = true
+			if (previous.ownerId === ownerId) return true
 			this.unindexOwner(previous)
 			previous.ownerId = ownerId
 			this.indexOwner(previous)
@@ -559,7 +586,7 @@ export class HeldRecordingTable {
 			return false
 		}
 		this.touch(id, observationId, false)
-		const listing: Listing = { id, observationId, ownerId }
+		const listing: Listing = { id, observationId, ownerId, aged }
 		if (v === undefined) {
 			this.byId.set(id, listing)
 			if (folderId !== undefined) {
@@ -606,8 +633,9 @@ export class HeldRecordingTable {
 	/**
 	 * A merge: every listing `from` holds is now held by `to` (the file's others stay). A file in
 	 * `to`'s own folder that only `to` lists now follows `to` anyway: its listings go, unless one
-	 * of them is no `collapsible` listing (the caller's: a listing that left the observation
-	 * window is the only record that `to` lists the file, so the file keeps every listing).
+	 * of them is aged or no `collapsible` listing (the caller's: a listing that left the
+	 * observation window is the only record that `to` lists the file, so the file keeps every
+	 * listing).
 	 */
 	moveOwner(
 		from: string,
@@ -625,7 +653,7 @@ export class HeldRecordingTable {
 			if (
 				splitRecordingId(id)?.folderId === to &&
 				this.holders(id).every(h => h === to) &&
-				this.listingsIn(id).every(l => collapsible(l.observationId))
+				this.listingsIn(id).every(l => !l.aged && collapsible(l.observationId))
 			)
 				this.drop(id)
 	}
@@ -654,8 +682,14 @@ export class HeldRecordingTable {
 			for (const t of [...changes.values()].sort((a, b) =>
 				compareId(a.observationId, b.observationId),
 			)) {
-				const ownerId = this.listing(id, t.observationId)?.ownerId ?? null
-				const change = { id, ownerId, observationId: t.observationId }
+				const now = this.listing(id, t.observationId)
+				const ownerId = now?.ownerId ?? null
+				const change: HeldRecordingChange = {
+					id,
+					ownerId,
+					observationId: t.observationId,
+					...(now?.aged === true ? { aged: true as const } : {}),
+				}
 				if (t.wasHeld && ownerId !== null) repointed.push(change)
 				else if (t.wasHeld) dropped.push(change)
 				else if (ownerId !== null) added.push(change)
@@ -755,7 +789,7 @@ export class HeldRecordingTable {
 					this.release(c.id, c.observationId)
 		for (const c of changes)
 			if (c.ownerId !== null && c.observationId !== undefined)
-				this.hold(c.id, c.ownerId, c.observationId)
+				this.hold(c.id, c.ownerId, c.observationId, c.aged === true)
 		this.tracking = true
 		this.touched.clear()
 		this.touchedCount = 0
@@ -795,7 +829,8 @@ export class HeldRecordingTable {
 		const mode = this.refusals
 		this.refusals = "safety"
 		this.tracking = false
-		for (const e of entries) this.hold(e.id, e.ownerId, e.observationId)
+		for (const e of entries)
+			this.hold(e.id, e.ownerId, e.observationId, e.aged === true)
 		this.tracking = true
 		this.refusals = mode
 		this.touched.clear()

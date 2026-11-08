@@ -11,7 +11,8 @@
  * filled to within a few entries of its bound (real refusals and marks, and a real return below
  * the bound when the filler's holder is deleted or the prune drops the filler). Steps: record
  * (digital and analog, in the discovery's own folder or listed by another, nested files at any
- * depth), another listing of an existing file, co-channel split, merge, overflow mark, discovery
+ * depth), another listing of an existing file, co-channel split, merge, overflow mark, retraction
+ * of a stored observation (re-ingested truncated: its listings no longer count), discovery
  * delete, inactive prune (with the ownership table's prune), capacity eviction, retention (age
  * and quota), restart (snapshot or not, journal replay, optionally a torn last line), probe
  * publication of a call file whose name may already be taken in the folder (same device through
@@ -20,7 +21,7 @@
  * Interleavings: every filesystem call (lstat, stat, readdir, readFile, open and every FileHandle
  * method, unlink, rm, rmdir, rename, link, realpath, mkdir, writes) and every await of the analog
  * metadata adapter (prepare, inverse) counts while an async step runs; up to three synchronous
- * steps (a listing, a mark, a merge, a store delete) run when the n-th call settles, before its
+ * steps (a listing, a mark, a merge, a retraction, a store delete) run when the n-th call settles, before its
  * caller resumes. No timers.
  *
  * Oracle: every unlink and rm of a recording file is checked in its own call (the same
@@ -69,6 +70,7 @@ import {
 	evidence,
 	makeObs,
 } from "../../../mocks/scanner/observations.js"
+import type { ObsSpec } from "../../../mocks/scanner/observations.js"
 
 type FsPromises = typeof FsPromisesModule
 
@@ -210,6 +212,7 @@ type SyncStep =
 	| { k: "list"; f: number; by: number }
 	| { k: "mark"; f: number }
 	| { k: "merge"; s: number; m: number }
+	| { k: "retract"; o: number }
 	| { k: "drop"; d: number }
 interface Interleave {
 	at: number
@@ -223,6 +226,7 @@ type Step =
 	| { k: "list"; f: number; by: number }
 	| { k: "split" }
 	| { k: "merge"; s: number; m: number }
+	| { k: "retract"; o: number }
 	| { k: "mark"; d: number }
 	| { k: "delete"; d: number; il: Interleave[] }
 	| { k: "prune"; il: Interleave[] }
@@ -258,6 +262,7 @@ const syncStep: fc.Arbitrary<SyncStep> = fc.oneof(
 	fc.record({ k: fc.constant("list" as const), f: idx, by: idx }),
 	fc.record({ k: fc.constant("mark" as const), f: idx }),
 	fc.record({ k: fc.constant("merge" as const), s: idx, m: idx }),
+	fc.record({ k: fc.constant("retract" as const), o: idx }),
 	fc.record({ k: fc.constant("drop" as const), d: idx }),
 )
 /** Up to three interleaved steps, early (the first 15 calls) or anywhere in the first 200. */
@@ -307,6 +312,10 @@ const step: fc.Arbitrary<Step> = fc.oneof(
 	{ arbitrary: fc.record({ k: fc.constant("split" as const) }), weight: 1 },
 	{
 		arbitrary: fc.record({ k: fc.constant("merge" as const), s: idx, m: idx }),
+		weight: 2,
+	},
+	{
+		arbitrary: fc.record({ k: fc.constant("retract" as const), o: idx }),
 		weight: 2,
 	},
 	{
@@ -421,6 +430,8 @@ class World {
 	readonly listings: { rid: string; obs: string }[] = []
 	/** Every observation id ingested (their discovery follows the store: splits, merges). */
 	readonly observations: string[] = []
+	/** The spec each observation was ingested with (a retraction re-ingests it truncated). */
+	private readonly specs = new Map<string, ObsSpec>()
 	/** Every discovery id seen (live ones are those the store still holds). */
 	readonly known = new Set<string>()
 	readonly clock = { now: Date.now() }
@@ -537,21 +548,34 @@ class World {
 	ingest(): string | undefined {
 		this.n++
 		const id = `o${this.n}`
-		const d = this.seen(
-			this.store.ingest(
-				makeObs({
-					id,
-					centreHz: BASE_HZ + this.n * 100_000,
-					startedAt: T0 + this.n * 1_000,
-					cls: "analog-fm",
-					open: false,
-					gate: "passed",
-				}),
-			).discoveryId,
-		)
+		const spec: ObsSpec = {
+			id,
+			centreHz: BASE_HZ + this.n * 100_000,
+			startedAt: T0 + this.n * 1_000,
+			cls: "analog-fm",
+			open: false,
+			gate: "passed",
+		}
+		const d = this.seen(this.store.ingest(makeObs(spec)).discoveryId)
 		if (d === undefined) return undefined
 		this.observations.push(id)
+		this.specs.set(id, spec)
 		return d
+	}
+
+	/**
+	 * A stored observation's track turns truncated late: re-ingested, it is retracted (its
+	 * discovery may go with it when nothing else is left). Its listings stop counting: the
+	 * ground truth follows the observations the store still holds (`listersOf`).
+	 */
+	retract(o: number): void {
+		const stored = this.observations.filter(
+			id => this.store.discoveryIdOf(id) !== undefined,
+		)
+		const id = stored[o % Math.max(1, stored.length)]
+		const spec = id === undefined ? undefined : this.specs.get(id)
+		if (spec === undefined) return
+		this.store.ingest(makeObs({ ...spec, truncated: true }))
 	}
 
 	list(rid: string, obs: string): void {
@@ -649,15 +673,18 @@ class World {
 		const old = `s${this.n}a`
 		const id = `s${this.n}b`
 		const at = T0 + this.n * 1_000
-		const voice = (oid: string, startedAt: number, open: boolean) =>
-			makeObs({
+		const voice = (oid: string, startedAt: number, open: boolean) => {
+			const spec: ObsSpec = {
 				id: oid,
 				centreHz: hz,
 				startedAt,
 				cls: "analog-fm",
 				open,
 				gate: "passed",
-			})
+			}
+			this.specs.set(oid, spec)
+			return makeObs(spec)
+		}
 		const a = this.seen(this.store.ingest(voice(old, at, false)).discoveryId)
 		if (a === undefined) return
 		this.observations.push(old)
@@ -861,6 +888,9 @@ function runSync(w: World, s: SyncStep, ledger: Ledger): void {
 		case "merge":
 			w.merge(w.pick(s.s), w.pick(s.m))
 			return
+		case "retract":
+			w.retract(s.o)
+			return
 		case "drop": {
 			const d = w.pick(s.d)
 			if (d !== undefined) w.store.delete(d)
@@ -933,6 +963,9 @@ async function runStep(w: World, s: Step): Promise<void> {
 			break
 		case "merge":
 			w.merge(w.pick(s.s), w.pick(s.m))
+			break
+		case "retract":
+			w.retract(s.o)
 			break
 		case "mark": {
 			const d = w.pick(s.d)
