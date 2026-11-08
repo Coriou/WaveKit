@@ -150,7 +150,20 @@ export interface RecordedSession {
 	 * Absent: the open track is still the voiced transmission's (a pause, the hang after it).
 	 */
 	readonly voiceEnded?: true
+	/** Every voiced transmission still on air in the window (VoiceOnAir.transmissions). */
+	readonly transmissions?: Transmissions
 }
+
+/**
+ * Every voiced transmission still on air in the recorded window, by name (VoiceOnAir.voice): its
+ * own voice answer while voice is on air in it, "quiet" while its track is still open with no voice
+ * that recent (a pause, a carrier after the voice). A transmission not listed has ended (its
+ * squelch closed, or it was turned around). The recorder gives it when the window holds more than
+ * one voiced session (two channels), whose answers would hide each other: the answer names only
+ * the first voiced one, so another channel's voice is no end of the transmission a hold heard
+ * (askRecording judges that one by its own entry). Absent: the answer is the only session's own.
+ */
+export type Transmissions = Readonly<Record<string, VoiceOnAir | "quiet">>
 
 /** Voice on air in a recorded transmission (RecordingActivity). */
 export interface VoiceOnAir {
@@ -172,6 +185,25 @@ export interface VoiceOnAir {
 	 * caps. Absent: a bare voice answer, no history (it cannot lift a carrier's cap).
 	 */
 	readonly recordedHz?: number
+	/** Every voiced transmission still on air in the window, this one among them (Transmissions). */
+	readonly transmissions?: Transmissions
+}
+
+/**
+ * The answer as the transmission named `id` sees it (Transmissions): the answer itself when it
+ * names `id` or lists no transmissions; that transmission's own voice answer, or true while it is
+ * quiet; null when the list shows it ended.
+ */
+function answerOf(
+	answer: RecordingActivity,
+	id: string,
+): RecordingActivity | null {
+	if (typeof answer !== "object" || answer.transmissions === undefined)
+		return answer
+	if (isVoiceOnAir(answer) && answer.voice === id) return answer
+	const own = answer.transmissions[id]
+	if (own === undefined) return null
+	return own === "quiet" ? true : own
 }
 
 /**
@@ -921,6 +953,15 @@ export class SweepScheduler {
 	 */
 	private askEnded = false
 	/**
+	 * A track close whose recording check waits for the next block (onBlock): the tracker reports a
+	 * max-duration rollover as a close and its successor's open in the same block, both before the
+	 * block's summary, and the recorder names the transmission again only once the successor opened.
+	 * Asked at the close itself, the check would read the rollover as the transmission's end. A
+	 * squelch close is seen one block later than at the close, and a tick asks it if no block came
+	 * within one block's time. Null: none.
+	 */
+	private closeAsk: { visit: Visit; trackId: string; at: number } | null = null
+	/**
 	 * Hop whose long hold set the long-hold lock. While the lock holds, voice on traffic there is
 	 * probed, not followed (capFor): a busy hop is visited again before the lock clears (its own
 	 * coarse visit, and revisits), and a follow of one coarse sweep on each of those visits (8050
@@ -1083,6 +1124,8 @@ export class SweepScheduler {
 	}
 
 	onBlock(endSample: number): SchedulerAction[] {
+		const left = this.runCloseAsk(this.now())
+		if (left !== null) return left
 		const v = this.visit
 		if (v === null || (this.phase !== "dwell" && this.phase !== "hold"))
 			return []
@@ -1487,27 +1530,19 @@ export class SweepScheduler {
 			t.open = false
 			this.noteClosed(v, t)
 		}
-		// A close may be the voiced transmission's: while another hold runs (a `record` hold
-		// re-checks on its own), the voice hold is checked now.
+		// A close may be the voiced transmission's: it is checked at the next block (closeAsk), once
+		// a max-duration rollover's successor, reported in the same block, has opened.
+		// Of several closes in a block, the analog hold's own is the one kept.
+		const own = this.hold?.trackId === trackId && this.holdsAnalog()
 		if (
-			v?.voice === "on" &&
-			(this.phase !== "hold" || this.hold?.mode !== "record")
-		)
-			this.askRecording(this.now())
-		else if (
 			v !== null &&
-			this.hold?.trackId === trackId &&
-			this.holdsAnalog()
-		) {
-			// The analog hold's own track closed: the squelch close of the transmission it heard
-			// (Visit.heardVoiceId), seen now rather than at the next re-check. With no recorder
-			// session to name it, the close alone owes the sweep before any later voice hold
-			// (Visit.voiceBarred): a reply in the hang is never a voice hold of its own.
-			if (this.askDuringFollow(v, this.now()))
-				return this.leaveHop([{ type: "stop-probes" }])
-			if (!v.sessionSeen && this.recordingActive !== undefined)
-				v.voiceBarred = true
-		}
+			(v.voice === "on" || own) &&
+			(own ||
+				this.closeAsk === null ||
+				this.closeAsk.visit !== v ||
+				this.closeAsk.trackId !== this.hold?.trackId)
+		)
+			this.closeAsk = { visit: v, trackId, at: this.now() }
 		if (
 			this.phase === "hold" &&
 			this.hold?.trackId === trackId &&
@@ -1517,6 +1552,33 @@ export class SweepScheduler {
 			this.hold.deadline = this.hangDeadline(this.hold.cap)
 		}
 		return []
+	}
+
+	/**
+	 * The recording check a track close waits for (closeAsk), at the next block: while the visit's
+	 * voice hold is on and another hold runs (a `record` hold re-checks on its own), the voice hold
+	 * is checked; else, when the analog hold's own track closed, the squelch close of the
+	 * transmission it heard (Visit.heardVoiceId) is seen now rather than at the next re-check. With
+	 * no recorder session to name it, the close alone owes the sweep before any later voice hold
+	 * (Visit.voiceBarred): a reply in the hang is never a voice hold of its own. Null: the hop is
+	 * kept; else the actions that leave it.
+	 */
+	private runCloseAsk(now: number): SchedulerAction[] | null {
+		const ask = this.closeAsk
+		this.closeAsk = null
+		const v = this.visit
+		if (ask === null || v === null || ask.visit !== v) return null
+		if (v.voice === "on") {
+			if (this.phase !== "hold" || this.hold?.mode !== "record")
+				this.askRecording(now)
+			return null
+		}
+		if (this.hold?.trackId !== ask.trackId || !this.holdsAnalog()) return null
+		if (this.askDuringFollow(v, now))
+			return this.leaveHop([{ type: "stop-probes" }])
+		if (!v.sessionSeen && this.recordingActive !== undefined)
+			v.voiceBarred = true
+		return null
 	}
 
 	/**
@@ -1570,9 +1632,19 @@ export class SweepScheduler {
 
 	tick(now: number): SchedulerAction[] {
 		this.heardAt = now
+		// No block came within one block's time of the close (a stalled source): asked now.
+		if (
+			this.closeAsk !== null &&
+			now - this.closeAsk.at >= (this.blockSamples * 1000) / this.sampleRateHz
+		) {
+			const left = this.runCloseAsk(now)
+			if (left !== null) return left
+		}
 		// The voiced transmission an analog hold heard ended and another is on air: the hold ends
-		// and the hop owes its coarse sweep (Visit.voice spent).
-		if (this.sampleVoice(now)) return this.leaveHop([{ type: "stop-probes" }])
+		// and the hop owes its coarse sweep (Visit.voice spent). Not while a close waits for its
+		// block (closeAsk): that ask stands for this one, after the successor of a rollover opened.
+		if (this.closeAsk === null && this.sampleVoice(now))
+			return this.leaveHop([{ type: "stop-probes" }])
 		if (this.phase !== "hold" || this.hold === null) return []
 		// Forced: `hold.maxHoldMs` from the start of the visit's holds, a recording too.
 		if (now >= this.maxHoldDeadline())
@@ -1751,12 +1823,30 @@ export class SweepScheduler {
 	 * VOICE_QUIET_PAST_L_MS. How long the check went unasked never spends it.
 	 */
 	private askRecording(now: number): RecordingActivity {
-		const answer = this.recordingActive?.() ?? false
-		if (typeof answer === "object" && answer.recordedHz !== undefined)
-			this.noteVoiced(answer.recordedHz)
+		const raw = this.recordingActive?.() ?? false
+		if (typeof raw === "object" && raw.recordedHz !== undefined)
+			this.noteVoiced(raw.recordedHz)
 		const v = this.visit
 		this.askEnded = false
-		if (v !== null && answer !== false) v.sessionSeen = true
+		if (v !== null && raw !== false) v.sessionSeen = true
+		// The transmission the visit remembers (its voice hold's, or the one an analog hold heard)
+		// is judged by its own state when the recorder lists the window's transmissions
+		// (Transmissions): a neighbouring channel's voice named first is no end of it. Listed as
+		// ended: its end, with another transmission on air.
+		const id = v === null ? null : v.voice === "on" ? v.voiceId : v.heardVoiceId
+		const own = id === null ? raw : answerOf(raw, id)
+		if (own === null && v !== null) {
+			this.spendVoice(v)
+			this.askEnded = true
+			return false
+		}
+		const answer = own ?? raw
+		if (
+			answer !== raw &&
+			isVoiceOnAir(answer) &&
+			answer.recordedHz !== undefined
+		)
+			this.noteVoiced(answer.recordedHz)
 		// The voiced transmission ended (its squelch closed and another track opened): as the end of
 		// a voice hold, whether or not one ran, and whatever the frequency's voice history. The hop
 		// is not kept for what follows (a reply, a kerchunk) and owes every hop its coarse visit

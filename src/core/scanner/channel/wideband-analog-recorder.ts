@@ -81,7 +81,7 @@ import {
 	VOICE_WINDOW_BLOCKS,
 } from "./voice-activity.js"
 import { RecorderDecisions, type ReceiptDetail } from "./recorder-decisions.js"
-import type { RecordingActivity } from "../scheduler.js"
+import type { RecordingActivity, VoiceOnAir } from "../scheduler.js"
 
 /** Same bound as the channel-tier trigger: a 25 kHz NFM channel's occupied bandwidth. */
 export const WIDEBAND_MAX_OBW_HZ = 16_000
@@ -1288,12 +1288,20 @@ export class WidebandAnalogRecorder {
 	 * WIDEBAND_EVICT_MIN_HEARD_FRAMES (WIDEBAND_VOICE_JUDGE_MS from its first audio): its answer is
 	 * still to come, whichever way it goes. A shadow or one of another stream or an older epoch (the
 	 * previous hop's window) answers false, so an unclassed shadow on a carrier costs a visit nothing.
+	 * Of several classed, voiced sessions in the window (two channels), the first voiced one answers
+	 * (a session opened earlier first), and an object answer then also carries every voiced
+	 * transmission still on air in the window, by name (VoiceOnAir.transmissions): the scheduler
+	 * judges the transmission it heard by its own state, never by another channel's (a neighbour's
+	 * voice is no end of it). A `true` answer then becomes `{ recording: true }` to carry them.
 	 */
 	recordingActive(
 		sourceId: string,
 		at: { readonly stream: number; readonly epoch: number },
 	): RecordingActivity {
 		let answer: RecordingActivity = false
+		let voice: VoiceOnAir | null = null
+		let sessions = 0
+		const transmissions: Record<string, VoiceOnAir | "quiet"> = {}
 		for (const s of this.sessions.values()) {
 			if (
 				s.done ||
@@ -1308,8 +1316,18 @@ export class WidebandAnalogRecorder {
 					answer = "judging"
 				continue
 			}
+			// Every session is judged on every ask (its name and its quiet since the last answer),
+			// not only until the first voiced one: each one's state is reported.
+			sessions++
 			const v = this.voiceOnAir(s)
-			if (typeof v === "object" && "voice" in v) return v
+			if (typeof v === "object" && "voice" in v) {
+				transmissions[v.voice] = v
+				voice ??= v
+				continue
+			}
+			// Voiced earlier in the transmission still open (a pause, a carrier after the voice).
+			if (s.voiceTx !== null && v !== false && !voiceEnded(v))
+				transmissions[s.voiceTx] = "quiet"
 			// A recording still running (true, or one not past its voice) outranks one whose voiced
 			// transmission ended (voiceEnded): the window still records a transmission.
 			if (
@@ -1318,7 +1336,13 @@ export class WidebandAnalogRecorder {
 			)
 				answer = v
 		}
-		return answer
+		const first = voice ?? answer
+		// One session: its own answer says it all.
+		if (sessions < 2 || typeof first === "string" || first === false)
+			return first
+		return first === true
+			? { recording: true, transmissions }
+			: { ...first, transmissions }
 	}
 
 	/**
