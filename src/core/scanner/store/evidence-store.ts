@@ -16,13 +16,13 @@ import {
 } from "node:fs"
 import {
 	copyFile,
+	link,
 	lstat,
 	mkdir,
 	open,
 	readdir,
 	readFile,
 	realpath,
-	rename,
 	rm,
 	rmdir,
 	stat,
@@ -335,14 +335,58 @@ async function wavDirs(dir: string): Promise<string[]> {
 	return out
 }
 
-async function moveFile(from: string, to: string): Promise<void> {
-	try {
-		await rename(from, to)
-	} catch (err) {
-		if (errorCode(err) !== "EXDEV") throw err
-		await copyFile(from, to)
+/** Names a probe publication tries before it refuses (the first is the file's own name). */
+export const PUBLISH_NAME_TRIES = 16
+/** link() errors that mean "no hard link here" (another device, or a filesystem without them). */
+const NO_LINK = new Set(["EXDEV", "EPERM", "ENOTSUP", "EOPNOTSUPP", "EMLINK"])
+const CALL_STEM = /^(\d{8}_\d{6}_\d{5})_/
+
+/**
+ * The `n`-th fresh name for a probe recording whose own name is taken: `_dup<n>` after the call
+ * stamp, so the name still parses as the same call (time, talkgroup, source). Undefined for a
+ * name without the stamp (never published).
+ */
+function freshName(name: string, n: number): string | undefined {
+	return CALL_STEM.test(name)
+		? name.replace(CALL_STEM, `$1_dup${n}_`)
+		: undefined
+}
+
+/**
+ * Publishes the probe file `from` into the recording folder `dir` without ever replacing a file
+ * there (one another discovery may list): link() fails with EEXIST on a taken name, and on
+ * another device (or a filesystem without hard links) copyFile with COPYFILE_EXCL does too. A
+ * taken name moves on to a fresh one (`freshName`); the source goes only once the new file
+ * exists. Returns the name published, or undefined when every name tried was taken (the probe
+ * file is then dropped with its probe folder; the existing files stay untouched). A copy that
+ * fails part-way may leave its own new, unlisted file behind (never one it did not create).
+ */
+async function publishFile(
+	from: string,
+	dir: string,
+	name: string,
+): Promise<string | undefined> {
+	for (let n = 0; n < PUBLISH_NAME_TRIES; n++) {
+		const candidate = n === 0 ? name : freshName(name, n)
+		if (candidate === undefined) return undefined
+		const to = join(dir, candidate)
+		try {
+			await link(from, to)
+		} catch (err) {
+			const code = errorCode(err)
+			if (code === "EEXIST") continue
+			if (code === undefined || !NO_LINK.has(code)) throw err
+			try {
+				await copyFile(from, to, fsConstants.COPYFILE_EXCL)
+			} catch (copyErr) {
+				if (errorCode(copyErr) === "EEXIST") continue
+				throw copyErr
+			}
+		}
 		await rm(from, { force: true })
+		return candidate
 	}
+	return undefined
 }
 
 /** Unlinks one entry as itself (never followed); one already gone is harmless. */
@@ -842,15 +886,24 @@ export class EvidenceStore {
 				if (!this.admits(c.discoveryId)) return
 				const target = join(this.root, "recordings", "dv", c.discoveryId)
 				await mkdir(target, { recursive: true })
+				// Never over a file already there: another discovery may list it.
+				let name: string | undefined
 				try {
-					await moveFile(f.path, join(target, f.name))
+					name = await publishFile(f.path, target, f.name)
 				} catch (err) {
 					if (errorCode(err) === "ENOENT") return
 					throw err
 				}
+				if (name === undefined) {
+					this.log.warn(
+						{ discoveryId: c.discoveryId, file: f.name },
+						"Dropped a probe recording: every name tried is taken",
+					)
+					return
+				}
 				linked.push({
 					observationId: c.observationId,
-					recordingId: `${c.discoveryId}~${f.name}`,
+					recordingId: `${c.discoveryId}~${name}`,
 				})
 			}).finally(moved)
 		}

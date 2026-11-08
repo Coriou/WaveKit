@@ -170,16 +170,21 @@ async function age(...paths: string[]): Promise<void> {
 	for (const p of paths) await utimes(p, old, old)
 }
 
-/** `count` entries owned by `ownerId`, in folders `d_F<i>` (or in `folderId` when given). */
+/**
+ * `count` entries owned by `ownerId`, in folders `d_F<i>` (or in `folderId` when given), each
+ * listed by an observation `oh<i>` outside the window, or by `observationId` when given (one in
+ * the window: a merge into the folder's own discovery may collapse those, never aged ones).
+ */
 function heldEntries(
 	count: number,
 	ownerId: string,
 	folderId?: string,
+	observationId?: string,
 ): HeldRecordingEntry[] {
 	return Array.from({ length: count }, (_, i) => ({
 		id: `${folderId ?? `d_F${i}`}~f${i}.wav`,
 		ownerId,
-		observationId: `oh${i}`,
+		observationId: observationId ?? `oh${i}`,
 	}))
 }
 
@@ -378,10 +383,10 @@ describe("a journal entry never exceeds its own schema", () => {
 		const a = await discovery(first, root, 1)
 		const b = await discovery(first, root, 2)
 		const c = await discovery(first, root, 3)
-		// B lists 65,536 recordings in A's folder.
+		// B's observation in the window lists 65,536 recordings in A's folder.
 		const snapshot: StoreSnapshot = {
 			...first.snapshot(),
-			heldRecordings: heldEntries(HELD_RECORDINGS_MAX, b, a),
+			heldRecordings: heldEntries(HELD_RECORDINGS_MAX, b, a, "o2"),
 		}
 		const store = restored(snapshot)
 		const emitted: JournalEntry[] = []
@@ -1003,7 +1008,7 @@ describe("every prefix of a split journal sequence keeps every listed file", () 
 		const c = await discovery(first, root, 3)
 		const snapshot: StoreSnapshot = {
 			...first.snapshot(),
-			heldRecordings: heldEntries(HELD_RECORDINGS_MAX, b, a),
+			heldRecordings: heldEntries(HELD_RECORDINGS_MAX, b, a, "o2"),
 		}
 		const store = restored(snapshot)
 		const emitted: JournalEntry[] = []

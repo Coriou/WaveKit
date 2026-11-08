@@ -11,10 +11,12 @@
  * that lists it, the folder's own discovery included once the file has any other holder (so the
  * folder's discovery counts only when it lists the file itself). An entry is made whenever an
  * observation lists a recording outside its discovery's own folder, and for every listing in the
- * folder's own discovery of a file that already has an entry. It lasts until the file is
- * forgotten (deleted), its holder is deleted (only that holder's entries go, never the file's
- * other entries), the observation moves (the entry follows it) or the file is gone from disk
- * (maintenance prune). A merge moves the dropped discovery's entries to the survivor. Persisted in
+ * folder's own discovery of a file that already has an entry, and when an observation listing a
+ * file in its discovery's own folder leaves the window (that listing is then the only record
+ * that the folder's discovery lists the file, kept for a lister that arrives later). It lasts
+ * until the file is forgotten (deleted), its holder is deleted (only that holder's entries go,
+ * never the file's other entries), the observation moves (the entry follows it) or the file is
+ * gone from disk (maintenance prune). A merge moves the dropped discovery's entries to the survivor. Persisted in
  * the snapshot and journaled as changes, so it survives a snapshot, a restart and a replay. Every
  * kind (analog, digital) is covered.
  *
@@ -26,9 +28,13 @@
  * it).
  *
  * Bound: at most HELD_RECORDINGS_MAX (65,536) entries (about 200 B each in memory, under
- * 16 MiB). At the bound a new entry is refused, and the refusal fails closed: the folder of the
- * refused recording is marked overflowed (`overflowed`), and while it is, every recording file in
- * that folder counts as held by an unknown live discovery. No delete path reaches those files,
+ * 16 MiB). The listings that left the window are one entry per such recording still on disk:
+ * at the default recordings quota (512 MiB) and a few seconds of call audio per file (tens of
+ * KiB), a few thousand to about 20,000, well inside the bound; only a very large quota or many
+ * kept files reach it, and then the refusal fails closed as below. At the bound a new entry is
+ * refused, and the refusal fails closed: the folder of the refused recording is marked
+ * overflowed (`overflowed`), and while it is, every recording file in that folder counts as held
+ * by an unknown live discovery. No delete path reaches those files,
  * and retention keeps them (counted), because the holders whose policy they follow are unknown.
  * At most HELD_OVERFLOW_FOLDERS_MAX (4,096) folders are marked one by one; past that every folder
  * counts as overflowed (`all`). The marks are persisted and journaled like the entries; a
@@ -599,9 +605,15 @@ export class HeldRecordingTable {
 
 	/**
 	 * A merge: every listing `from` holds is now held by `to` (the file's others stay). A file in
-	 * `to`'s own folder that only `to` lists now follows `to` anyway: its listings go.
+	 * `to`'s own folder that only `to` lists now follows `to` anyway: its listings go, unless one
+	 * of them is no `collapsible` listing (the caller's: a listing that left the observation
+	 * window is the only record that `to` lists the file, so the file keeps every listing).
 	 */
-	moveOwner(from: string, to: string): void {
+	moveOwner(
+		from: string,
+		to: string,
+		collapsible: (observationId: string) => boolean = () => true,
+	): void {
 		if (from === to) return
 		const ids = new Set<string>()
 		for (const l of [...(this.byOwner.get(from) ?? [])]) {
@@ -612,7 +624,8 @@ export class HeldRecordingTable {
 		for (const id of ids)
 			if (
 				splitRecordingId(id)?.folderId === to &&
-				this.holders(id).every(h => h === to)
+				this.holders(id).every(h => h === to) &&
+				this.listingsIn(id).every(l => collapsible(l.observationId))
 			)
 				this.drop(id)
 	}

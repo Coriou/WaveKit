@@ -10,12 +10,19 @@
  * - State written by the single-holder format loads (snapshot entries, journaled changes,
  *   format marker 2) and fails closed.
  * - Every listing counts against the bound; at it the refused listing marks its folder.
+ * - The folder's own listing outlives the observation window: A lists its file, 270 later
+ *   observations push that listing out of the window, B then lists the file; A kept keeps it.
+ *   A file A never listed still follows B alone.
+ * - A probe publication never replaces a file already in the folder (same device: link; another
+ *   device: copy with COPYFILE_EXCL): a taken name publishes under a fresh one.
  */
 import { existsSync } from "node:fs"
 import type * as FsPromisesModule from "node:fs/promises"
 import {
 	mkdir,
 	mkdtemp,
+	readFile,
+	readdir,
 	realpath,
 	rm,
 	utimes,
@@ -30,7 +37,10 @@ import type {
 	JournalEntry,
 	StoreSnapshot,
 } from "../../../../src/core/scanner/store/discovery-store.js"
-import { EvidenceStore } from "../../../../src/core/scanner/store/evidence-store.js"
+import {
+	EvidenceStore,
+	PUBLISH_NAME_TRIES,
+} from "../../../../src/core/scanner/store/evidence-store.js"
 import type { StorageCaps } from "../../../../src/core/scanner/store/evidence-store.js"
 import {
 	HELD_JOURNAL_FORMAT,
@@ -51,6 +61,8 @@ const hook = vi.hoisted(() => ({
 	dir: null as string | null,
 	listed: false,
 	step: null as (() => void) | null,
+	/** link() fails with EXDEV (another device: the copy fallback publishes). */
+	exdev: false,
 }))
 
 vi.mock("node:fs/promises", async importOriginal => {
@@ -69,7 +81,14 @@ vi.mock("node:fs/promises", async importOriginal => {
 		}
 		return result
 	}) as FsPromises["lstat"]
-	const wrapped = { readdir, lstat }
+	const link = (async (...args: Parameters<FsPromises["link"]>) => {
+		if (hook.exdev)
+			throw Object.assign(new Error("EXDEV: cross-device link"), {
+				code: "EXDEV",
+			})
+		return actual.link(...args)
+	}) as FsPromises["link"]
+	const wrapped = { readdir, lstat, link }
 	return { ...actual, ...wrapped, default: { ...actual, ...wrapped } }
 })
 
@@ -99,6 +118,7 @@ afterEach(async () => {
 	hook.dir = null
 	hook.listed = false
 	hook.step = null
+	hook.exdev = false
 	await Promise.all(
 		dirs.splice(0).map(d => rm(d, { recursive: true, force: true })),
 	)
@@ -184,6 +204,28 @@ async function discovery(
 async function age(...paths: string[]): Promise<void> {
 	const old = new Date(T0 - 60 * DAY)
 	for (const p of paths) await utimes(p, old, old)
+}
+
+/** `count` further observations of discovery n, pushing its earliest out of the window. */
+function pushOutOfWindow(
+	store: DiscoveryStore,
+	n: number,
+	id: string,
+	count: number,
+): void {
+	for (let i = 0; i < count; i++)
+		expect(
+			store.ingest(
+				makeObs({
+					id: `o${n}w${i}`,
+					centreHz: BASE_HZ + n * 100_000,
+					startedAt: T0 + n * 1_000 + (i + 1) * 10_000,
+					cls: "analog-fm",
+					open: false,
+					gate: "passed",
+				}),
+			).discoveryId,
+		).toBe(id)
 }
 
 /** `count` listings held by `ownerId` of files in folders `d_F<i>` (no file on disk). */
@@ -560,5 +602,186 @@ describe("every listing counts against the bound", () => {
 		expect(store.heldFolderUnknown(a.id)).toBe(true)
 		const snapshot: StoreSnapshot = store.snapshot()
 		expect(snapshot.heldOverflow?.folders).toContain(a.id)
+	})
+})
+
+for (const [mode, protection] of MODES)
+	describe(`the folder's own listing outlives the observation window (${mode})`, () => {
+		it("A lists its file, 270 observations later B lists it too: A kept keeps it (snapshot, replay and prune too)", async () => {
+			const root = await tempRoot()
+			const store = newStore()
+			const a = await discovery(store, root, 1)
+			const base = store.snapshot()
+			const entries: JournalEntry[] = []
+			store.on("mutation", (e: Omit<JournalEntry, "seq">) =>
+				entries.push({ ...e, seq: entries.length + 1 }),
+			)
+			pushOutOfWindow(store, 1, a.id, 270)
+			// A's listing left the window.
+			expect(store.discoveryIdOf("o1")).toBeUndefined()
+			// The maintenance prune keeps that listing: it is the only record of it.
+			expect(store.pruneHeldRecordings(() => true)).toBe(0)
+			const b = await discovery(store, root, 2)
+			const rid = `${a.id}~call.wav`
+			expect(store.attachRecordings("o2", [rid], "linked")).toBe(true)
+			expect(store.heldRecordingListers(rid)).toEqual([a.id, b.id].sort())
+			const fromSnapshot = newStore()
+			fromSnapshot.restore(store.snapshot())
+			const replayed = newStore()
+			replayed.restore(base)
+			for (const e of entries) replayed.replay(e)
+			await age(b.own)
+			for (const s of [store, fromSnapshot, replayed]) {
+				expect(s.heldRecordingListers(rid)).toEqual([a.id, b.id].sort())
+				const ev = evidenceFor(root, () => s, protection)
+				await age(a.own)
+				await ev.loadFolderIndex()
+				await ev.retention(new Set([a.id]))
+				expect(existsSync(a.own)).toBe(true)
+				ev.setCaps({ ...CAPS, maxRecordingsMb: 0 })
+				await ev.retention(new Set([a.id]))
+				expect(existsSync(a.own)).toBe(true)
+			}
+			// B's own file went (B not kept): the pass is not trivially keeping everything.
+			expect(existsSync(b.own)).toBe(false)
+		})
+
+		it("a file A never listed, past the window too, still follows B alone", async () => {
+			const root = await tempRoot()
+			const store = newStore()
+			const ev = evidenceFor(root, () => store, protection)
+			const a = await discovery(store, root, 1)
+			pushOutOfWindow(store, 1, a.id, 270)
+			const b = await discovery(store, root, 2)
+			const held = await writeWav(root, a.id, "held.wav")
+			store.attachRecordings("o2", [`${a.id}~held.wav`], "linked")
+			expect(store.heldRecordingListers(`${a.id}~held.wav`)).toEqual([b.id])
+			await age(held, a.own, b.own)
+			await ev.loadFolderIndex()
+			await ev.retention(new Set([a.id]))
+			expect(existsSync(held)).toBe(false)
+			expect(existsSync(a.own)).toBe(true)
+		})
+	})
+
+describe("a merge keeps a listing that left the window", () => {
+	it("a file only the survivor lists keeps its aged listing; one in the window collapses", () => {
+		const table = new HeldRecordingTable()
+		table.hold("d_A~aged.wav", "d_A", "oAged")
+		table.hold("d_A~aged.wav", "d_B", "o1")
+		table.hold("d_A~fresh.wav", "d_A", "o2")
+		table.hold("d_A~fresh.wav", "d_B", "o3")
+		table.moveOwner("d_B", "d_A", id => id !== "oAged")
+		expect(table.holders("d_A~aged.wav")).toEqual(["d_A"])
+		expect(table.has("d_A~fresh.wav")).toBe(false)
+	})
+})
+
+describe("a probe publication never replaces a file in the folder", () => {
+	const NAME = "20261009_120000_00001_x_GROUP_TGT_100_SRC_200.wav"
+	for (const exdev of [false, true])
+		it(`B lists A's ${NAME.slice(0, 15)}… and a probe file of that name arrives (${exdev ? "copy fallback" : "same device"})`, async () => {
+			const root = await tempRoot()
+			const store = newStore()
+			const ev = evidenceFor(root, () => store, undefined)
+			const a = await discovery(store, root, 1)
+			await discovery(store, root, 2)
+			const original = join(root, "recordings", "dv", a.id, NAME)
+			await writeFile(original, "original")
+			store.attachRecordings("o2", [`${a.id}~${NAME}`], "linked")
+			// A second probe file, one name further, also taken: the next fresh name.
+			const dup1 = NAME.replace("_00001_", "_00001_dup1_")
+			await writeFile(join(root, "recordings", "dv", a.id, dup1), "taken")
+			const probe = join(root, "recordings", "dv", "probe-1")
+			await mkdir(probe, { recursive: true })
+			await writeFile(join(probe, NAME), "probe")
+			await ev.loadFolderIndex()
+			hook.exdev = exdev
+			const at = new Date(2026, 9, 9, 12, 0, 0).getTime()
+			const out = await ev.linkProbeRecordings(probe, [
+				{
+					observationId: "o1",
+					discoveryId: a.id,
+					talkgroup: "100",
+					source: "200",
+					startedAt: at,
+					endedAt: at + 5_000,
+					encrypted: false,
+				},
+			])
+			expect(await readFile(original, "utf8")).toBe("original")
+			expect(
+				await readFile(join(root, "recordings", "dv", a.id, dup1), "utf8"),
+			).toBe("taken")
+			const fresh = NAME.replace("_00001_", "_00001_dup2_")
+			expect(out.linked).toEqual([
+				{ observationId: "o1", recordingId: `${a.id}~${fresh}` },
+			])
+			expect(
+				await readFile(join(root, "recordings", "dv", a.id, fresh), "utf8"),
+			).toBe("probe")
+			expect(existsSync(probe)).toBe(false)
+			expect(
+				(await readdir(join(root, "recordings", "dv", a.id))).sort(),
+			).toEqual(["call.wav", NAME, dup1, fresh].sort())
+		})
+
+	it(`every one of the ${PUBLISH_NAME_TRIES} names taken: nothing is published and nothing replaced`, async () => {
+		const root = await tempRoot()
+		const store = newStore()
+		const ev = evidenceFor(root, () => store, undefined)
+		const a = await discovery(store, root, 1)
+		const folder = join(root, "recordings", "dv", a.id)
+		const taken = [
+			NAME,
+			...Array.from({ length: PUBLISH_NAME_TRIES - 1 }, (_, i) =>
+				NAME.replace("_00001_", `_00001_dup${i + 1}_`),
+			),
+		]
+		for (const n of taken) await writeFile(join(folder, n), "taken")
+		const probe = join(root, "recordings", "dv", "probe-3")
+		await mkdir(probe, { recursive: true })
+		await writeFile(join(probe, NAME), "probe")
+		const at = new Date(2026, 9, 9, 12, 0, 0).getTime()
+		const out = await ev.linkProbeRecordings(probe, [
+			{
+				observationId: "o1",
+				discoveryId: a.id,
+				startedAt: at,
+				endedAt: at + 5_000,
+				encrypted: false,
+			},
+		])
+		expect(out.linked).toEqual([])
+		for (const n of taken)
+			expect(await readFile(join(folder, n), "utf8")).toBe("taken")
+		expect((await readdir(folder)).length).toBe(taken.length + 1)
+		expect(existsSync(probe)).toBe(false)
+	})
+
+	it("a free name publishes as itself and the probe file goes", async () => {
+		const root = await tempRoot()
+		const store = newStore()
+		const ev = evidenceFor(root, () => store, undefined)
+		const a = await discovery(store, root, 1)
+		const probe = join(root, "recordings", "dv", "probe-2")
+		await mkdir(probe, { recursive: true })
+		await writeFile(join(probe, NAME), "probe")
+		const at = new Date(2026, 9, 9, 12, 0, 0).getTime()
+		const out = await ev.linkProbeRecordings(probe, [
+			{
+				observationId: "o1",
+				discoveryId: a.id,
+				startedAt: at,
+				endedAt: at + 5_000,
+				encrypted: false,
+			},
+		])
+		expect(out.linked).toEqual([
+			{ observationId: "o1", recordingId: `${a.id}~${NAME}` },
+		])
+		expect(
+			await readFile(join(root, "recordings", "dv", a.id, NAME), "utf8"),
+		).toBe("probe")
 	})
 })

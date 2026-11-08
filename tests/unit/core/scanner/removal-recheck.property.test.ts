@@ -13,7 +13,9 @@
  * (digital and analog, in the discovery's own folder or listed by another, nested files at any
  * depth), another listing of an existing file, co-channel split, merge, overflow mark, discovery
  * delete, inactive prune (with the ownership table's prune), capacity eviction, retention (age
- * and quota), restart (snapshot or not, journal replay, optionally a torn last line).
+ * and quota), restart (snapshot or not, journal replay, optionally a torn last line), probe
+ * publication of a call file whose name may already be taken in the folder (same device through
+ * link, or another device through the copy fallback: link fails with EXDEV).
  *
  * Interleavings: every filesystem call (lstat, stat, readdir, readFile, open and every FileHandle
  * method, unlink, rm, rmdir, rename, link, realpath, mkdir, writes) and every await of the analog
@@ -26,13 +28,14 @@
  * made, followed through splits and merges to the live discoveries now holding them. A
  * recursive rm of a recording folder fails at once. After each step: the files of marked or
  * unresolved folders still exist, and without an interleave an unkept file nobody else lists is
- * deleted (the property is not trivially satisfied).
+ * deleted (the property is not trivially satisfied). A probe publication leaves every file
+ * already in the target folder in place with its bytes.
  *
  * Seeds: fast-check prints the seed and the shrunk counterexample on failure; replay with
  * `fc.assert(..., { seed, path })`. `SCANNER_PROPERTY_SEED` fixes the seed of the random run.
  */
 import { randomUUID } from "node:crypto"
-import { existsSync, readdirSync, statSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import type * as FsPromisesModule from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
 import {
@@ -80,6 +83,8 @@ const sched = vi.hoisted(() => ({
 	tick: null as (() => Promise<void>) | null,
 	onUnlink: null as ((path: string) => void) | null,
 	onRecursive: null as ((path: string) => void) | null,
+	/** link() fails with EXDEV (another device: the copy fallback publishes). */
+	exdev: false,
 }))
 
 vi.mock("node:fs/promises", async importOriginal => {
@@ -154,7 +159,14 @@ vi.mock("node:fs/promises", async importOriginal => {
 		realpath: gated(actual.realpath),
 		open: (async (...args: Parameters<FsPromises["open"]>) =>
 			handle(await after(actual.open(...args)))) as FsPromises["open"],
-		link: gated(actual.link),
+		link: gated(((...args: Parameters<FsPromises["link"]>) =>
+			sched.exdev
+				? Promise.reject(
+						Object.assign(new Error("EXDEV: cross-device link"), {
+							code: "EXDEV",
+						}),
+					)
+				: actual.link(...args)) as FsPromises["link"]),
 		rename: gated(actual.rename),
 		mkdir: gated(actual.mkdir),
 	}
@@ -217,10 +229,20 @@ type Step =
 	| { k: "evict"; il: Interleave[] }
 	| RetentionStep
 	| { k: "restart"; snapshot: boolean; torn: boolean }
+	| ProbeStep
 interface RetentionStep {
 	k: "retention"
 	mode: "age" | "quota"
 	victim: number
+	il: Interleave[]
+}
+
+/** A probe call file for discovery `d`; talkgroup `tg` of three, so names repeat. */
+interface ProbeStep {
+	k: "probe"
+	d: number
+	tg: number
+	exdev: boolean
 	il: Interleave[]
 }
 
@@ -323,6 +345,16 @@ const step: fc.Arbitrary<Step> = fc.oneof(
 			torn: fc.boolean(),
 		}),
 		weight: 1,
+	},
+	{
+		arbitrary: fc.record({
+			k: fc.constant("probe" as const),
+			d: idx,
+			tg: fc.nat({ max: 2 }),
+			exdev: fc.boolean(),
+			il: interleaves,
+		}),
+		weight: 3,
 	},
 )
 const run: fc.Arbitrary<Run> = fc.record({
@@ -536,6 +568,51 @@ class World {
 		await writeFile(join(dir, name), Buffer.alloc(2048))
 		await this.ev.loadFolderIndex()
 		this.list(`${d}~${name}`, obs)
+	}
+
+	/**
+	 * A dsd-fme call file in a probe folder, published into `d`'s folder and listed by `d`'s
+	 * observation; its name repeats per talkgroup, so it may already be taken there (listed by
+	 * anyone). Every file already in that folder must keep its bytes.
+	 */
+	async probe(d: string, tg: number): Promise<void> {
+		const obs = this.obsOf(d)
+		if (obs === undefined) return
+		const name = `20261009_120000_00001_p_GROUP_TGT_${tg}_SRC_1.wav`
+		const target = join(this.root, "recordings", "dv", d)
+		const before = new Map<string, string>()
+		for (const n of existsSync(target) ? readdirSync(target) : []) {
+			const path = join(target, n)
+			if (statSync(path).isFile())
+				before.set(path, readFileSync(path).toString("base64"))
+		}
+		const dir = join(this.root, "recordings", "dv", `probe-${++this.file}`)
+		await mkdir(dir, { recursive: true })
+		await writeFile(join(dir, name), `probe ${this.file}`)
+		const at = new Date(2026, 9, 9, 12, 0, 0).getTime()
+		const out = await this.ev.linkProbeRecordings(dir, [
+			{
+				observationId: obs,
+				discoveryId: d,
+				startedAt: at,
+				endedAt: at + 5_000,
+				encrypted: false,
+			},
+		])
+		for (const [path, bytes] of before) {
+			// Only a sync step's own deleter could remove one (none runs inside a probe step).
+			if (!existsSync(path)) {
+				this.violations.push(`probe removed ${relative(this.root, path)}`)
+				continue
+			}
+			if (readFileSync(path).toString("base64") !== bytes)
+				this.violations.push(`probe replaced ${relative(this.root, path)}`)
+		}
+		for (const l of out.linked) {
+			if (before.has(join(target, l.recordingId.split("~")[1] ?? "")))
+				this.violations.push(`probe published over ${l.recordingId}`)
+			this.list(l.recordingId, l.observationId)
+		}
 	}
 
 	/** A file below the folder (no recording id names it). */
@@ -927,6 +1004,17 @@ async function runStep(w: World, s: Step): Promise<void> {
 		case "restart":
 			await w.restart(s.snapshot, s.torn)
 			break
+		case "probe": {
+			const d = w.pick(s.d)
+			if (d === undefined) break
+			sched.exdev = s.exdev
+			try {
+				await interleaved(w, s.il, ledger, () => w.probe(d, s.tg))
+			} finally {
+				sched.exdev = false
+			}
+			break
+		}
 	}
 	w.ctx = { k: "other" }
 	await w.flush()
@@ -1031,6 +1119,7 @@ async function scenario(opts: Run, steps: readonly Step[]): Promise<void> {
 		for (const s of steps) await runStep(w, s)
 	} finally {
 		sched.due = []
+		sched.exdev = false
 		sched.onUnlink = null
 		sched.onRecursive = null
 		await w.flush()

@@ -3922,9 +3922,27 @@ export class DiscoveryStore
 	}
 
 	/**
+	 * An observation leaving the window: each file it lists in its discovery's own folder keeps
+	 * that listing as an entry, so a lister that arrives later finds the folder's discovery among
+	 * the file's holders (noteFolderListings recovers only listings still in the window). A listing
+	 * that already has its entry (the file had another holder) keeps it as is. Cost: one entry per
+	 * such listing whose file is still on disk; the maintenance prune drops it once the file is
+	 * gone or its discovery is deleted, and a merge moves it with the discovery's others. At the
+	 * table's bound the refusal marks the folder (fail closed, HeldRecordingTable).
+	 */
+	private noteAgedListings(o: Observation): void {
+		for (const rid of o.recordingIds) {
+			if (splitRecordingId(rid)?.folderId !== o.discoveryId) continue
+			if (this.heldTable.holderOf(rid, o.id) !== undefined) continue
+			this.heldTable.hold(rid, o.discoveryId, o.id)
+		}
+	}
+
+	/**
 	 * A file just gained its first held listing: the listings of its folder's own discovery still
 	 * in the window become entries too, so that discovery stays one of its holders once they age
-	 * out. Bounded by the window (OBSERVATIONS_PER_DISCOVERY observations).
+	 * out. Bounded by the window (OBSERVATIONS_PER_DISCOVERY observations); the listings that left
+	 * the window already have theirs (noteAgedListings).
 	 */
 	private noteFolderListings(rid: string, folderId: string): void {
 		for (const o of this.byDiscovery.get(folderId) ?? [])
@@ -4070,11 +4088,19 @@ export class DiscoveryStore
 				repointed++
 			}
 		}
-		// A file whose only holder is its folder's own discovery follows that discovery anyway.
+		// A file whose only holder is its folder's own discovery follows that discovery anyway,
+		// unless a listing of it left the window: that one is the only record that the discovery
+		// listed the file, needed once another lister arrives (noteAgedListings).
 		for (const id of new Set(this.heldTable.entries().map(e => e.id))) {
 			const folderId = splitRecordingId(id)?.folderId
 			const holders = this.heldTable.holders(id)
-			if (holders.length === 1 && holders[0] === folderId) {
+			if (
+				holders.length === 1 &&
+				holders[0] === folderId &&
+				this.heldTable
+					.listingsOf(id)
+					.every(l => this.observationIndex.has(l.observationId))
+			) {
 				dropped += this.heldTable.listingsOf(id).length
 				this.heldTable.drop(id)
 			}
@@ -6603,7 +6629,7 @@ export class DiscoveryStore
 		op.aliases.add(keep)
 		op.aliases.add(drop)
 		// drop's recordings in other folders (its own folder's included) now belong to keep.
-		this.heldTable.moveOwner(drop, keep)
+		this.heldTable.moveOwner(drop, keep, id => this.observationIndex.has(id))
 		if (released === 0) return
 		const log =
 			this.injectedLog ??
@@ -7800,6 +7826,7 @@ export class DiscoveryStore
 			for (const index of next) pinned.add(index)
 			if (this.carriesProofInput(dropped)) this.forgetEvidence(dropped.id)
 			else this.observationProofCache.delete(dropped.id)
+			this.noteAgedListings(dropped)
 			this.observationIndex.delete(dropped.id)
 			this.removal.observations.push(dropped.id) // no journal entry names it (WG11 req 3.5)
 		}
