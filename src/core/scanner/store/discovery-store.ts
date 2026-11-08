@@ -111,6 +111,18 @@ import type { Raster, TrackSnapshot } from "../../spectrum/types.js"
 import { parseStoreMutation } from "./schemas.js"
 import type { StoredDiscovery as Discovery, StoreMutation } from "./schemas.js"
 import { RecordingAliasTable } from "../recording-aliases.js"
+import type { FolderLookup } from "../recording-aliases.js"
+import {
+	HELD_JOURNAL_FORMAT,
+	HELD_RECORDINGS_MAX,
+	HeldRecordingTable,
+	splitRecordingId,
+} from "./held-recordings.js"
+import type {
+	HeldJournalPart,
+	HeldOverflowState,
+	HeldRecordingEntry,
+} from "./held-recordings.js"
 import { DISCOVERY_RECORDING_ALIASES_MAX } from "../../recordings/contract.js"
 import type { DiscoveryAliasEntry } from "../recording-aliases.js"
 import {
@@ -357,6 +369,10 @@ export interface StoreSnapshot {
 	recordingOperations?: PreparedRecordingMetadata[]
 	/** WG10 req 1.5: merge aliases per survivor (absent in state written before WG10). */
 	aliases?: DiscoveryAliasEntry[]
+	/** Recordings listed outside their folder's owner (HeldRecordingTable); absent when none. */
+	heldRecordings?: HeldRecordingEntry[]
+	/** Folders the full ownership table could not list (fail closed); absent when none. */
+	heldOverflow?: HeldOverflowState
 }
 
 /** Construct after the last await. References are existing plain internal objects. */
@@ -371,6 +387,18 @@ export interface RecordingCommitPlan {
 	readonly recordingIds: string[]
 	readonly recordingState: "linked" | "cut"
 	readonly recordingCount: number
+}
+
+/** A recording's current association (DiscoveryStore.recordingAssociation). */
+export interface RecordingAssociation {
+	readonly aliasIds: readonly string[]
+	/** The live discovery that owns the recording now (lists its file once committed). */
+	readonly ownerId?: string
+	/**
+	 * Only committed files the owner lists in another discovery's folder: their storage belongs to
+	 * the owner, but an operation still writing for that folder is association-lost.
+	 */
+	readonly held?: true
 }
 
 /**
@@ -397,6 +425,20 @@ function syncOnlyProof(proof: ScannerProof | null): boolean {
 		proof !== null &&
 		proof.kind === "digital-undecoded" &&
 		isDsdFmeProtocol(proof.protocol)
+	)
+}
+/**
+ * A sync hint with no checked content of any kind: a dsd-fme `digital-undecoded` proof without
+ * verified TG/SRC, talkgroup or encryption (checked voice LC without a colour code still names a
+ * family). Such a hint names no family for a co-channel split.
+ */
+function uncheckedSyncHint(proof: ScannerProof | null): boolean {
+	return (
+		syncOnlyProof(proof) &&
+		proof !== null &&
+		proof.tgSrcVerified !== true &&
+		proof.talkgroup === undefined &&
+		proof.encrypted !== true
 	)
 }
 function publishedOf(view: DiscoveryProofView): EvidenceLabel {
@@ -548,6 +590,36 @@ interface Op {
 /** Band inspection UX req 3.3: an opaque epoch, unique per store start (time plus 32 random bits). */
 function newStoreEpoch(): string {
 	return `${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`
+}
+
+/**
+ * One journal part's held-recording payload fields (absent ones omitted), with the format marker
+ * every entry this writer emits carries.
+ */
+function heldFields(
+	part: HeldJournalPart | undefined,
+): Pick<
+	StoreMutation,
+	| "heldRecordings"
+	| "heldOverflow"
+	| "heldGuard"
+	| "heldGuardEnd"
+	| "heldFormat"
+> {
+	if (part === undefined) return { heldFormat: HELD_JOURNAL_FORMAT }
+	return {
+		heldFormat: HELD_JOURNAL_FORMAT,
+		...(part.heldRecordings.length > 0
+			? { heldRecordings: part.heldRecordings }
+			: {}),
+		...(part.heldOverflow !== undefined
+			? { heldOverflow: part.heldOverflow }
+			: {}),
+		...(part.heldGuard !== undefined ? { heldGuard: part.heldGuard } : {}),
+		...(part.heldGuardEnd !== undefined
+			? { heldGuardEnd: part.heldGuardEnd }
+			: {}),
+	}
 }
 
 function newOp(): Op {
@@ -1223,6 +1295,10 @@ export class DiscoveryStore
 	private keptBlockedWarned = 0
 	/** WG10 req 1.5: merge aliases (O(1) owner lookup). */
 	private readonly aliasTable = new RecordingAliasTable()
+	/** Ownership of recordings listed outside their folder's owner, independent of the window. */
+	private readonly heldTable = new HeldRecordingTable()
+	/** The full-table warning was logged for the current episode. */
+	private heldFullWarned = false
 	/** Band inspection UX req 3.1: absorbed id -> survivor, in memory only. */
 	private readonly absorbedIndex = new AbsorbedIdIndex()
 	/** DQ 10.6: where the next fragment pass resumes examining candidates (memory only). */
@@ -3419,7 +3495,12 @@ export class DiscoveryStore
 		return { merged: op.merged }
 	}
 
-	/** Only private metadata is changed; register exact append correlation before emitting. */
+	/**
+	 * Only private metadata is changed; register exact append correlation before emitting.
+	 * The analog operation prepares at the recording's end, so the discovery it began for may
+	 * have merged away or been split from its observation meanwhile: the current owner
+	 * (recordingOwner) is checked, as the association and the commit plan check it.
+	 */
 	prepareRecording(
 		value: PreparedRecordingMetadata,
 		beforeEmit?: (entry: Omit<JournalEntry, "seq">) => void,
@@ -3432,7 +3513,7 @@ export class DiscoveryStore
 			)
 		const metadata = parsed.data
 		const o = this.observationIndex.get(metadata.observationId)
-		const d = this.discoveries.get(metadata.discoveryId)
+		const d = this.recordingOwner(metadata.discoveryId, o)
 		if (
 			o === undefined ||
 			d === undefined ||
@@ -3490,31 +3571,55 @@ export class DiscoveryStore
 	 * the survivor that adopted its folder in a merge, so a recording whose
 	 * discovery merged mid-recording is reattached to the survivor (its file stays in the adopted
 	 * folder). Undefined when neither is live (a deletion, or an alias released past its bound).
+	 * A co-channel split that moved the recording's observation onto a linked twin is followed the
+	 * same way: the twin, linked both ways to that discovery, takes the recording (its file stays in
+	 * the original discovery's folder). An observation on any other discovery is not followed.
 	 */
-	private recordingOwner(discoveryId: string): Discovery | undefined {
-		const d = this.discoveries.get(discoveryId)
-		if (d !== undefined) return d
-		const owner = this.aliasTable.aliasOwner(discoveryId)
-		return owner === undefined ? undefined : this.discoveries.get(owner)
+	private recordingOwner(
+		discoveryId: string,
+		observation: Observation | undefined,
+	): Discovery | undefined {
+		let d = this.discoveries.get(discoveryId)
+		if (d === undefined) {
+			const owner = this.aliasTable.aliasOwner(discoveryId)
+			d = owner === undefined ? undefined : this.discoveries.get(owner)
+		}
+		if (
+			d === undefined ||
+			observation === undefined ||
+			observation.discoveryId === d.id
+		)
+			return d
+		const twin = this.discoveries.get(observation.discoveryId)
+		if (
+			twin !== undefined &&
+			twin.coChannel.includes(d.id) &&
+			d.coChannel.includes(twin.id)
+		)
+			return twin
+		return d
 	}
 
 	/**
 	 * Exact current association, without pagination or any identity repair. The observation
-	 * must still belong to the recording's discovery or to the survivor of its merge (recordingOwner).
+	 * must still belong to the recording's discovery, to the survivor of its merge or to the
+	 * co-channel twin a split moved it onto (recordingOwner). `ownerId` names that discovery.
+	 *
+	 * Storage ownership of a committed file: a file is owned by the live discovery whose
+	 * observation lists its recording id, wherever its folder lives. A split never moves the file,
+	 * so the folder can name a discovery that was deleted, folded away or is still live but no
+	 * longer holds the observation. When that strict path fails, the observation's live discovery
+	 * still answers as the `held` owner of the ids it lists in `discoveryId`'s folder (and only
+	 * those), so no deleter of that folder reaches them and its playback stays admitted.
 	 */
 	recordingAssociation(
 		discoveryId: string,
 		observationId: string,
 		binding?: RecordingBinding,
-	): { aliasIds: readonly string[] } | null {
+	): RecordingAssociation | null {
 		const observation = this.observationIndex.get(observationId)
-		const owner = this.recordingOwner(discoveryId)
-		if (
-			observation === undefined ||
-			owner === undefined ||
-			observation.discoveryId !== owner.id
-		)
-			return null
+		if (observation === undefined)
+			return this.heldAssociation(discoveryId, observationId)
 		if (
 			binding !== undefined &&
 			(observation.sourceId !== binding.sourceId ||
@@ -3522,15 +3627,71 @@ export class DiscoveryStore
 				observation.sampleRange.epoch !== binding.epoch)
 		)
 			return null
-		return { aliasIds: [...observation.recordingIds] }
+		const owner = this.recordingOwner(discoveryId, observation)
+		if (owner !== undefined && observation.discoveryId === owner.id)
+			return { aliasIds: [...observation.recordingIds], ownerId: owner.id }
+		const holder = this.discoveries.get(observation.discoveryId)
+		const prefix = `${discoveryId}~`
+		const held = observation.recordingIds.filter(id => id.startsWith(prefix))
+		if (holder === undefined || held.length === 0)
+			return this.heldAssociation(discoveryId, observationId)
+		return { aliasIds: held, ownerId: holder.id, held: true }
+	}
+
+	/**
+	 * The ownership table's answer once the observation left the window (or no longer lists the
+	 * file): the live owner of the recordings that observation listed in `discoveryId`'s folder.
+	 */
+	private heldAssociation(
+		discoveryId: string,
+		observationId: string,
+	): RecordingAssociation | null {
+		let ownerId: string | undefined
+		const aliasIds: string[] = []
+		for (const e of this.heldTable.inFolder(discoveryId)) {
+			// The folder's own listings are no held answer (its strict path answers those).
+			if (
+				e.observationId !== observationId ||
+				e.ownerId === discoveryId ||
+				!this.discoveries.has(e.ownerId)
+			)
+				continue
+			if (ownerId !== undefined && ownerId !== e.ownerId) return null
+			ownerId = e.ownerId
+			aliasIds.push(e.id)
+		}
+		if (ownerId === undefined) return null
+		return { aliasIds: aliasIds.sort(compareText), ownerId, held: true }
+	}
+
+	/**
+	 * The live owner of a committed recording file whose observation left the window, where
+	 * recordingAssociation has nothing to answer from: a live discovery the ownership table
+	 * records as listing the file (its listers' policy decides), else the folder's own discovery
+	 * or the survivor holding the folder as a merge alias (re-attached ones included) when no
+	 * lister is recorded. Undefined while the observation
+	 * is still stored (its association decides) or when no live discovery resolves. Only for a
+	 * file whose finalized receipt proves the commit (the analog recovery and playback rule).
+	 */
+	retainedRecordingOwner(
+		discoveryId: string,
+		observationId: string,
+		recordingId: string,
+	): string | undefined {
+		if (this.observationIndex.has(observationId)) return undefined
+		if (splitRecordingId(recordingId)?.folderId !== discoveryId)
+			return undefined
+		return (
+			this.heldRecordingHolders(recordingId)[0] ?? this.folderOwner(discoveryId)
+		)
 	}
 
 	buildRecordingCommitPlan(operationId: string): RecordingCommitPlan | null {
 		const metadata = this.recordingOperations.get(operationId)
 		if (metadata === undefined) return null
 		const observation = this.observationIndex.get(metadata.observationId)
-		// A merge since the recording began: the survivor takes it (recordingOwner).
-		const discovery = this.recordingOwner(metadata.discoveryId)
+		// A merge or split since the recording began: the survivor or twin takes it (recordingOwner).
+		const discovery = this.recordingOwner(metadata.discoveryId, observation)
 		if (
 			observation === undefined ||
 			discovery === undefined ||
@@ -3572,7 +3733,8 @@ export class DiscoveryStore
 				plan.metadata &&
 			this.observationIndex.get(plan.metadata.observationId) ===
 				plan.observation &&
-			this.recordingOwner(plan.metadata.discoveryId) === plan.discovery &&
+			this.recordingOwner(plan.metadata.discoveryId, plan.observation) ===
+				plan.discovery &&
 			plan.observation.discoveryId === plan.discovery.id &&
 			plan.observation.sourceId === plan.metadata.binding.sourceId &&
 			plan.observation.sampleRange.stream === plan.metadata.binding.stream &&
@@ -3589,6 +3751,7 @@ export class DiscoveryStore
 		plan.observation.recordingIds = plan.recordingIds
 		plan.observation.recording = plan.recordingState
 		plan.evidence.recordings = plan.recordingCount
+		this.noteListings(plan.observation)
 		// LO-locked spurs: a recording is sticky protection (published by publishRecordingCommit).
 		this.loProtect(plan.discovery.id)
 	}
@@ -3601,6 +3764,8 @@ export class DiscoveryStore
 			this.discoveries.get(plan.discovery.id) !== plan.discovery
 		)
 			return
+		this.noteListings(plan.observation)
+		const [held, ...heldRest] = this.heldTable.takeJournalParts()
 		const entry: Omit<JournalEntry, "seq"> = {
 			at,
 			op: "evidence",
@@ -3608,11 +3773,13 @@ export class DiscoveryStore
 				discoveries: [clone(plan.discovery)],
 				observations: [clone(plan.observation)],
 				deleted: [],
+				...heldFields(held),
 			} satisfies StoreMutation,
 		}
 		let failure: unknown
 		try {
 			this.emit("mutation", entry)
+			this.emitHeldRest(at, "evidence", heldRest)
 		} catch (err) {
 			failure = err
 		}
@@ -3637,6 +3804,7 @@ export class DiscoveryStore
 				observations: [],
 				deleted: [],
 				preparedRecordingOperations: patch,
+				heldFormat: HELD_JOURNAL_FORMAT,
 			} satisfies StoreMutation,
 		}
 		beforeEmit?.(entry)
@@ -3655,6 +3823,7 @@ export class DiscoveryStore
 		const added = recordingIds.filter(r => !o.recordingIds.includes(r))
 		o.recordingIds = [...o.recordingIds, ...added]
 		o.recording = state
+		this.noteListings(o)
 		d.evidence.recordings += added.length
 		const op = newOp()
 		op.discoveries.add(d.id)
@@ -3676,6 +3845,7 @@ export class DiscoveryStore
 			if (d === undefined) return false
 			o.recordingIds = o.recordingIds.filter(r => r !== recordingId)
 			d.evidence.recordings = Math.max(0, d.evidence.recordings - 1)
+			this.heldTable.drop(recordingId)
 			const op = newOp()
 			op.discoveries.add(d.id)
 			op.observations.add(o.id)
@@ -3683,7 +3853,18 @@ export class DiscoveryStore
 			this.finish("evidence", op)
 			return true
 		}
-		return false
+		// Only the ownership table still lists it (its observations left the window).
+		const d = this.heldRecordingHolders(recordingId)
+			.map(id => this.discoveries.get(id))
+			.find(x => x !== undefined)
+		if (d === undefined) return false
+		this.heldTable.drop(recordingId)
+		d.evidence.recordings = Math.max(0, d.evidence.recordings - 1)
+		const op = newOp()
+		op.discoveries.add(d.id)
+		mark(op, d.id, "updated")
+		this.finish("evidence", op)
+		return true
 	}
 
 	/**
@@ -3713,6 +3894,317 @@ export class DiscoveryStore
 	/** WG10 req 1.5: forgets a deleted owner's aliases once its evidence removal settled. */
 	releaseAliases(discoveryId: string): void {
 		if (!this.discoveries.has(discoveryId)) this.aliasTable.release(discoveryId)
+	}
+
+	/**
+	 * Which ids own an evidence or recording folder on disk (the evidence store's FolderIndex): a
+	 * merge past the alias bound never releases such an alias, so its files keep their owner.
+	 */
+	setFolderLookup(lookup: FolderLookup): void {
+		this.aliasTable.setFolderLookup(lookup)
+	}
+
+	/**
+	 * The live discovery whose files `folderId`'s folder holds: itself, or the owner of the alias.
+	 * Undefined for a folder nobody owns (an alias released before folders were checked, a
+	 * removal that did not finish).
+	 */
+	folderOwner(folderId: string): string | undefined {
+		if (this.discoveries.has(folderId)) return folderId
+		const owner = this.aliasTable.aliasOwner(folderId)
+		return owner !== undefined && this.discoveries.has(owner)
+			? owner
+			: undefined
+	}
+
+	/**
+	 * Records every listing of `o` the HeldRecordingTable keeps, so it outlives the observation
+	 * window: each recording `o` lists outside its discovery's own folder (a split twin's file, a
+	 * merged discovery's file in an alias folder), and each it lists in its own folder whose file
+	 * another listing already holds (the folder's discovery is then one of the file's holders).
+	 * The entry is keyed by `o`, so a moved observation re-points its own listing only. A listing
+	 * back in the discovery's own folder of a file nobody else holds ends `o`'s entry.
+	 */
+	private noteListings(o: Observation): void {
+		for (const rid of o.recordingIds) {
+			const parts = splitRecordingId(rid)
+			if (parts === null) continue
+			if (parts.folderId !== o.discoveryId) {
+				const fresh = !this.heldTable.has(rid)
+				if (this.heldTable.hold(rid, o.discoveryId, o.id) && fresh)
+					this.noteFolderListings(rid, parts.folderId)
+				continue
+			}
+			const others = this.heldTable
+				.listingsOf(rid)
+				.some(e => e.observationId !== o.id)
+			if (others) this.heldTable.hold(rid, o.discoveryId, o.id)
+			else this.heldTable.release(rid, o.id)
+		}
+	}
+
+	/**
+	 * An observation leaving the window: each file it lists in its discovery's own folder keeps
+	 * that listing as an entry, so a lister that arrives later finds the folder's discovery among
+	 * the file's holders (noteFolderListings recovers only listings still in the window). Every
+	 * listing of it the table holds (its own folder's or another's) is marked aged: the only
+	 * listings that outlive their observation (a retracted one is released instead,
+	 * releaseListings, and the prune drops an unmarked one whose observation is gone). Cost: one
+	 * entry per such listing whose file is still on disk; the maintenance prune drops it once the
+	 * file is gone or its discovery is deleted, and a merge moves it with the discovery's others.
+	 * At the table's bound the refusal marks the folder (fail closed, HeldRecordingTable).
+	 */
+	private noteAgedListings(o: Observation): void {
+		for (const rid of o.recordingIds) {
+			const holder = this.heldTable.holderOf(rid, o.id)
+			if (holder !== undefined) this.heldTable.hold(rid, holder, o.id, true)
+			else if (splitRecordingId(rid)?.folderId === o.discoveryId)
+				this.heldTable.hold(rid, o.discoveryId, o.id, true)
+		}
+	}
+
+	/**
+	 * An observation retracted (removed for cause, never aged out of the window): it no longer
+	 * lists anything, so exactly its own listings go (journaled with the retraction); every other
+	 * observation's listing of the same files stays.
+	 */
+	private releaseListings(o: Observation): void {
+		for (const rid of o.recordingIds) this.heldTable.release(rid, o.id)
+	}
+
+	/**
+	 * A file just gained its first held listing: the listings of its folder's own discovery still
+	 * in the window become entries too, so that discovery stays one of its holders once they age
+	 * out. Bounded by the window (OBSERVATIONS_PER_DISCOVERY observations); the listings that left
+	 * the window already have theirs (noteAgedListings).
+	 */
+	private noteFolderListings(rid: string, folderId: string): void {
+		for (const o of this.byDiscovery.get(folderId) ?? [])
+			if (o.recordingIds.includes(rid)) this.heldTable.hold(rid, folderId, o.id)
+	}
+
+	/**
+	 * The deleters' answer, asked in the same synchronous turn as an unlink: every live discovery
+	 * the table records as listing `recordingId` (sorted; the folder's own discovery included
+	 * when it lists the file and another listing exists). Empty when the table holds no listing
+	 * of it: the file follows its folder's owner. Null (fail closed) whenever the folder is marked
+	 * (HeldRecordingTable.overflowed), checked first: a live discovery may list a recording there
+	 * the table could not record, so no delete path reaches any recording file of that folder and
+	 * retention keeps it. A text that is no recording id is never listed (empty).
+	 */
+	heldRecordingListers(recordingId: string): readonly string[] | null {
+		const folderId = splitRecordingId(recordingId)?.folderId
+		if (folderId === undefined) return []
+		if (this.heldTable.overflowed(folderId)) return null
+		return this.heldRecordingHolders(recordingId)
+	}
+
+	/**
+	 * Every live discovery the table records as listing `recordingId`, whatever the folder's
+	 * mark (playback admission, never a delete decision). Sorted; empty when none.
+	 */
+	heldRecordingHolders(recordingId: string): string[] {
+		return this.heldTable
+			.holders(recordingId)
+			.filter(id => this.discoveries.has(id))
+	}
+
+	/**
+	 * One listing discovery other than the folder's own (null when the folder is marked,
+	 * undefined when there is none): the single answer of the lookups that predate
+	 * `heldRecordingListers`. Deleters ask for every lister (`heldRecordingListers`).
+	 */
+	heldRecordingOwner(recordingId: string): string | null | undefined {
+		const listers = this.heldRecordingListers(recordingId)
+		if (listers === null) return null
+		return this.otherThanFolderOwner(recordingId, listers)
+	}
+
+	/**
+	 * The playback answer of the lookups that predate `heldRecordingHolders`: one live discovery
+	 * other than the folder's own listing `recordingId`, whatever the folder's mark.
+	 */
+	heldRecordingHolder(recordingId: string): string | undefined {
+		return this.otherThanFolderOwner(
+			recordingId,
+			this.heldRecordingHolders(recordingId),
+		)
+	}
+
+	/** The first lister that is not the folder's own discovery (a self listing). */
+	private otherThanFolderOwner(
+		recordingId: string,
+		listers: readonly string[],
+	): string | undefined {
+		const folderId = splitRecordingId(recordingId)?.folderId
+		return listers.find(id => id !== folderId)
+	}
+
+	/**
+	 * True when every recording file in `folderId` must be treated as listed by an unknown live
+	 * discovery (the ownership table was full when one was listed): deleters keep them all.
+	 */
+	heldFolderUnknown(folderId: string): boolean {
+		return this.heldTable.overflowed(folderId)
+	}
+
+	/** The ownership table's size and its overflow marks (status and tests). */
+	get heldRecordingCounts(): {
+		entries: number
+		overflowFolders: number
+		overflowAll: boolean
+	} {
+		const o = this.heldTable.overflowCount
+		return {
+			entries: this.heldTable.size,
+			overflowFolders: o.folders,
+			overflowAll: o.all,
+		}
+	}
+
+	/**
+	 * File names in `folderId`'s folders (any kind) that a live discovery outside `removing`
+	 * lists: no deleter of that folder may reach them, however old their observation.
+	 */
+	heldFileNames(
+		folderId: string,
+		removing: readonly string[] = [],
+	): ReadonlySet<string> {
+		const names = new Set<string>()
+		for (const e of this.heldTable.inFolder(folderId))
+			if (this.discoveries.has(e.ownerId) && !removing.includes(e.ownerId)) {
+				const name = splitRecordingId(e.id)?.name
+				if (name !== undefined) names.add(name)
+			}
+		return names
+	}
+
+	/**
+	 * Maintenance: drops ownership entries whose owner is gone or whose file `exists` no longer
+	 * finds, and the overflow mark of every folder `folderExists` no longer finds (one journaled
+	 * entry). Returns how many entries went. A throwing check keeps the entry or the mark.
+	 */
+	pruneHeldRecordings(
+		exists: (recordingId: string) => boolean,
+		folderExists?: (folderId: string) => boolean,
+	): number {
+		let released = 0
+		if (folderExists !== undefined)
+			for (const id of this.heldTable.overflowFolders()) {
+				let gone = false
+				try {
+					gone = !folderExists(id)
+				} catch {
+					gone = false
+				}
+				if (gone && this.heldTable.releaseOverflow(id)) released++
+			}
+		let dropped = 0
+		let repointed = 0
+		for (const e of this.heldTable.entries()) {
+			let keep = this.discoveries.has(e.ownerId)
+			// A listing whose observation is still in the window follows it: gone when it no longer
+			// lists the file (a stale entry an earlier format left), re-pointed when it moved. One
+			// whose observation is gone outlives it only when it aged out of the window; without the
+			// mark the observation was retracted and listed nothing any more.
+			const o = this.observationIndex.get(e.observationId)
+			if (keep && o !== undefined && !o.recordingIds.includes(e.id))
+				keep = false
+			if (keep && o === undefined && e.aged !== true) keep = false
+			if (keep)
+				try {
+					keep = exists(e.id)
+				} catch {
+					keep = true
+				}
+			if (!keep) {
+				this.heldTable.release(e.id, e.observationId)
+				dropped++
+			} else if (o !== undefined && o.discoveryId !== e.ownerId) {
+				this.heldTable.hold(e.id, o.discoveryId, o.id)
+				repointed++
+			}
+		}
+		// A file whose only holder is its folder's own discovery follows that discovery anyway,
+		// unless a listing of it left the window (aged): that one is the only record that the
+		// discovery listed the file, needed once another lister arrives (noteAgedListings).
+		for (const id of new Set(this.heldTable.entries().map(e => e.id))) {
+			const folderId = splitRecordingId(id)?.folderId
+			const holders = this.heldTable.holders(id)
+			if (
+				holders.length === 1 &&
+				holders[0] === folderId &&
+				this.heldTable
+					.listingsOf(id)
+					.every(
+						l => l.aged !== true && this.observationIndex.has(l.observationId),
+					)
+			) {
+				dropped += this.heldTable.listingsOf(id).length
+				this.heldTable.drop(id)
+			}
+		}
+		if (dropped > 0 || released > 0 || repointed > 0)
+			this.finish("evidence", newOp())
+		return dropped
+	}
+
+	/**
+	 * Load-time migration of folders whose alias was released past the bound: each folder in
+	 * `folderIds` nobody owns is re-attached as an alias of its owner, found from `history` (the
+	 * owner of its last journaled alias listing, followed through later merges to a live
+	 * discovery), else from the observations listing recordings in that folder (one live
+	 * discovery only). Moves no file. One journaled entry carries every changed owner's list, so a
+	 * restart replays it and a repeated run finds nothing left to attach. A folder no source
+	 * resolves is left in place and counted.
+	 */
+	reattachOrphanFolders(
+		folderIds: Iterable<string>,
+		history: ReadonlyMap<string, string>,
+	): { reattached: number; unresolved: number } {
+		const orphans = [...new Set(folderIds)]
+			.filter(id => this.folderOwner(id) === undefined)
+			.sort(compareText)
+		if (orphans.length === 0) return { reattached: 0, unresolved: 0 }
+		const throughHistory = (id: string): string | undefined => {
+			const seen = new Set<string>([id])
+			let at = history.get(id)
+			while (at !== undefined && !seen.has(at)) {
+				const owner = this.folderOwner(at)
+				if (owner !== undefined) return owner
+				seen.add(at)
+				at = history.get(at)
+			}
+			return undefined
+		}
+		const wanted = new Set(orphans)
+		const byRecordings = new Map<string, Set<string>>()
+		for (const o of this.observationIndex.values())
+			for (const rid of o.recordingIds) {
+				const folder = rid.slice(0, Math.max(0, rid.indexOf("~")))
+				if (!wanted.has(folder)) continue
+				const owner = this.folderOwner(o.discoveryId)
+				if (owner === undefined) continue
+				let owners = byRecordings.get(folder)
+				if (owners === undefined) byRecordings.set(folder, (owners = new Set()))
+				owners.add(owner)
+			}
+		const op = newOp()
+		let reattached = 0
+		let unresolved = 0
+		for (const id of orphans) {
+			let owner = throughHistory(id)
+			if (owner === undefined) {
+				const owners = byRecordings.get(id)
+				if (owners?.size === 1) owner = [...owners][0]
+			}
+			if (owner !== undefined && this.aliasTable.attach(owner, id)) {
+				op.aliases.add(owner)
+				reattached++
+			} else unresolved++
+		}
+		this.finish("rekey", op)
+		return { reattached, unresolved }
 	}
 
 	setEvidenceFlags(
@@ -4433,6 +4925,12 @@ export class DiscoveryStore
 				? { recordingOperations: parts.recordingOperations }
 				: {}),
 			...(parts.aliases !== undefined ? { aliases: parts.aliases } : {}),
+			...(parts.heldRecordings !== undefined
+				? { heldRecordings: parts.heldRecordings }
+				: {}),
+			...(parts.heldOverflow !== undefined
+				? { heldOverflow: parts.heldOverflow }
+				: {}),
 			corrections: parts.corrections,
 		}
 	}
@@ -4440,14 +4938,22 @@ export class DiscoveryStore
 	/** WG11 req 3.5: the non-record fields of `snapshot()` (same presence rules, copies, no record clones). */
 	snapshotParts(): Pick<
 		StoreSnapshot,
-		"corrections" | "recordingOperations" | "aliases"
+		| "corrections"
+		| "recordingOperations"
+		| "aliases"
+		| "heldRecordings"
+		| "heldOverflow"
 	> {
 		const aliases = this.aliasTable.entries()
+		const heldRecordings = this.heldTable.entries()
+		const heldOverflow = this.heldTable.overflowState()
 		return {
 			...(this.recordingOperations.size > 0
 				? { recordingOperations: this.preparedRecordingOperations() }
 				: {}),
 			...(aliases.length > 0 ? { aliases } : {}),
+			...(heldRecordings.length > 0 ? { heldRecordings } : {}),
+			...(heldOverflow !== undefined ? { heldOverflow } : {}),
 			corrections: [...this.corrections]
 				.sort(([a], [b]) => compareText(a, b))
 				.map(([sourceId, hz]) => ({ sourceId, hz })),
@@ -4599,6 +5105,27 @@ export class DiscoveryStore
 				if (tick()) yield
 			}
 			this.aliasTable.restore(s.aliases ?? [], id => this.discoveries.has(id))
+			// The persisted ownership, then every listing still in the window (state written
+			// before the table existed); owners that are not live are dropped. An entry whose
+			// observation is not stored and that carries no aged mark was written before the mark
+			// existed: it may have aged out, so it counts as aged (fail closed).
+			this.heldTable.restore(
+				(s.heldRecordings ?? [])
+					.filter(e => this.discoveries.has(e.ownerId))
+					.map(e =>
+						e.aged === true || this.observationIndex.has(e.observationId)
+							? e
+							: { ...e, aged: true as const },
+					),
+			)
+			this.heldTable.setOverflow(s.heldOverflow)
+			// A refusal while listings are derived again gives its folder a replay safety mark,
+			// which no later replacement of the marks clears (fail closed).
+			this.heldTable.replayJournaled(false, () => {
+				for (const o of this.observationIndex.values()) this.noteListings(o)
+			})
+			// Derived again on every restore (a refusal here marks its folder the same way).
+			this.heldTable.discardChanges()
 			// Journaled receiver-spur flags: pending until their offset is learned again.
 			for (const d of this.discoveries.values())
 				if (d.receiverSpur !== undefined) this.loRestoreFlag(d.id)
@@ -4981,6 +5508,7 @@ export class DiscoveryStore
 		const op = newOp()
 		this.forgetEvidence(known.id)
 		this.bumpProof(known.discoveryId)
+		this.releaseListings(known)
 		this.unlinkObservation(known)
 		op.removedObservations.push(known.id)
 		d.observationCount = Math.max(0, d.observationCount - 1)
@@ -5494,13 +6022,16 @@ export class DiscoveryStore
 	 * observation's own proof counts, including a decode stored for another
 	 * identity. When no sibling names one, a co-channel decode this discovery
 	 * claims does. Unknown when nothing does, so a lone observation is not split.
+	 * A digital-voice sync hint with no checked content (uncheckedSyncHint) is weak evidence and
+	 * establishes no family: one emitter heard by dsd-fme as a false sync stays one discovery when
+	 * its voice is proven. Checked content (verified DMR TG/SRC without a colour code) still does.
 	 */
 	private establishedFamily(d: Discovery, skipId: string): ProtocolFamily {
 		const own: ScannerProof[] = []
 		for (const observation of this.byDiscovery.get(d.id) ?? []) {
 			if (observation.id === skipId) continue
 			const proof = this.observationAssessment(observation).proof
-			if (proof !== null) own.push(proof)
+			if (proof !== null && !uncheckedSyncHint(proof)) own.push(proof)
 		}
 		const bestOwn = strongestKnownProof(own)
 		if (bestOwn !== null) return this.labelOfProof(d, bestOwn).family
@@ -5508,7 +6039,12 @@ export class DiscoveryStore
 		for (const source of this.proofSources(d)) {
 			if (!source.foreign || source.observation.id === skipId) continue
 			const proof = this.observationAssessment(source.observation).proof
-			if (proof !== null && this.proofCounts(d, proof)) foreign.push(proof)
+			if (
+				proof !== null &&
+				!uncheckedSyncHint(proof) &&
+				this.proofCounts(d, proof)
+			)
+				foreign.push(proof)
 		}
 		const bestForeign = strongestKnownProof(foreign)
 		if (bestForeign === null) return "unknown"
@@ -5524,7 +6060,9 @@ export class DiscoveryStore
 		const d = this.discoveries.get(observation.discoveryId)
 		if (d === undefined) return false
 		const assessed = this.observationAssessment(observation)
-		if (assessed.proof === null) return false
+		// An unchecked sync hint is weak evidence: it moves nothing off a proven discovery either.
+		if (assessed.proof === null || uncheckedSyncHint(assessed.proof))
+			return false
 		const rest = this.establishedFamily(d, observation.id)
 		if (!familiesIncompatible(assessed.label.family, rest)) return false
 		const family = assessed.label.family
@@ -6138,6 +6676,8 @@ export class DiscoveryStore
 		const released = this.aliasTable.adopt(keep, drop)
 		op.aliases.add(keep)
 		op.aliases.add(drop)
+		// drop's recordings in other folders (its own folder's included) now belong to keep.
+		this.heldTable.moveOwner(drop, keep, id => this.observationIndex.has(id))
 		if (released === 0) return
 		const log =
 			this.injectedLog ??
@@ -7262,6 +7802,8 @@ export class DiscoveryStore
 		this.medians.delete(id)
 		this.unlinked.delete(id)
 		this.aliasTable.detach(id)
+		// Its recordings in other folders now belong to those folders again.
+		this.heldTable.dropOwner(id)
 		this.markDirty(id)
 	}
 
@@ -7282,6 +7824,8 @@ export class DiscoveryStore
 			i--
 		}
 		list.splice(i, 0, o)
+		// Before the trim: a listing that leaves the window keeps its ownership.
+		this.noteListings(o)
 		this.trimObservations(list)
 		this.observationProofCache.delete(o.id)
 		// Trim may have dropped `o` itself. Bearing follows only what is still stored.
@@ -7330,6 +7874,7 @@ export class DiscoveryStore
 			for (const index of next) pinned.add(index)
 			if (this.carriesProofInput(dropped)) this.forgetEvidence(dropped.id)
 			else this.observationProofCache.delete(dropped.id)
+			this.noteAgedListings(dropped)
 			this.observationIndex.delete(dropped.id)
 			this.removal.observations.push(dropped.id) // no journal entry names it (WG11 req 3.5)
 		}
@@ -7434,7 +7979,19 @@ export class DiscoveryStore
 	private applyMutation(m: StoreMutation): void {
 		this.proofQuiet++
 		try {
-			this.applyStoredMutation(m)
+			// Only an entry of this writer's format that journals held changes carries the runtime's
+			// outcome of every listing: a listing re-derived here before its drops are applied marks
+			// nothing. Any other entry (an earlier format journaled held changes but no marks) gives
+			// a refused folder a replay safety mark.
+			const journaled =
+				m.heldFormat === HELD_JOURNAL_FORMAT &&
+				(m.heldRecordings !== undefined ||
+					m.heldOverflow !== undefined ||
+					m.heldGuard !== undefined ||
+					m.heldGuardEnd !== undefined)
+			this.heldTable.replayJournaled(journaled, () =>
+				this.applyStoredMutation(m),
+			)
 		} finally {
 			this.proofQuiet--
 			this.pendingProof.clear()
@@ -7508,6 +8065,28 @@ export class DiscoveryStore
 			if (this.discoveries.has(a.id) || a.aliases.length === 0)
 				this.aliasTable.set(a.id, a.aliases, id => this.discoveries.has(id))
 		}
+		// The journaled ownership changes last: they are the state this entry left. A split
+		// sequence's guard opens before its first changes and closes after its last ones; the
+		// replace of the marks never touches an open guard or a replay safety mark, so interleaved
+		// sequences keep theirs.
+		if (m.heldGuard !== undefined) this.heldTable.openGuard(m.heldGuard)
+		this.heldTable.apply(m.heldRecordings ?? [], m.heldFormat)
+		// A journaled listing with no aged mark whose observation this entry leaves unstored was
+		// written before the mark existed (this writer journals the mark, or the drop of a
+		// retracted listing): it may have aged out, so it counts as aged (fail closed).
+		for (const c of m.heldRecordings ?? [])
+			if (
+				c.ownerId !== null &&
+				c.observationId !== undefined &&
+				c.aged !== true &&
+				!this.observationIndex.has(c.observationId)
+			) {
+				const holder = this.heldTable.holderOf(c.id, c.observationId)
+				if (holder !== undefined)
+					this.heldTable.hold(c.id, holder, c.observationId, true)
+			}
+		if (m.heldOverflow !== undefined) this.heldTable.setOverflow(m.heldOverflow)
+		if (m.heldGuardEnd !== undefined) this.heldTable.closeGuard(m.heldGuardEnd)
 		// A replayed record's journaled receiver-spur flag, as of this entry.
 		for (const d of m.discoveries) this.loRestoreFlag(d.id)
 	}
@@ -7604,13 +8183,16 @@ export class DiscoveryStore
 		const removed = op.removedObservations.filter(
 			id => !this.observationIndex.has(id),
 		)
+		this.warnHeldRefused()
+		const [held, ...heldRest] = this.heldTable.takeJournalParts()
 		if (
 			discoveries.length === 0 &&
 			observations.length === 0 &&
 			op.deleted.length === 0 &&
 			removed.length === 0 &&
 			op.correction === undefined &&
-			op.aliases.size === 0
+			op.aliases.size === 0 &&
+			held === undefined
 		) {
 			this.flushRemoval()
 			this.emitPending(pending, notified)
@@ -7627,6 +8209,7 @@ export class DiscoveryStore
 			payload.aliases = [...op.aliases]
 				.sort(compareText)
 				.map(id => this.aliasTable.entryOf(id))
+		Object.assign(payload, heldFields(held))
 		const entry: Omit<JournalEntry, "seq"> = {
 			at: iso(this.now()),
 			op: kind,
@@ -7634,6 +8217,7 @@ export class DiscoveryStore
 		}
 		this.publish([...op.discoveries, ...op.deleted, ...op.changes.keys()])
 		this.emit("mutation", entry)
+		this.emitHeldRest(entry.at, kind, heldRest)
 		this.flushRemoval()
 		for (const [id, change] of op.changes) {
 			if (change === "merged")
@@ -7641,6 +8225,57 @@ export class DiscoveryStore
 			else this.emit("change", id, change)
 		}
 		this.emitPending(pending, notified)
+	}
+
+	/**
+	 * The ownership changes past the first entry's bound, one more journal entry per part (only
+	 * the held-recording fields), after the entry that carried the first part. The first part's
+	 * guard (its own sequence id) keeps every prefix of the sequence safe, whatever other entries
+	 * a replay meets in between (takeJournalParts).
+	 */
+	private emitHeldRest(
+		at: string,
+		kind: JournalEntry["op"],
+		parts: readonly HeldJournalPart[],
+	): void {
+		for (const part of parts)
+			this.emit("mutation", {
+				at,
+				op: kind,
+				payload: {
+					discoveries: [],
+					observations: [],
+					deleted: [],
+					...heldFields(part),
+				} satisfies StoreMutation,
+			} satisfies Omit<JournalEntry, "seq">)
+	}
+
+	/** One warning per refusal episode of the full ownership table (counts only). */
+	private warnHeldRefused(): void {
+		const refused = this.heldTable.takeRefused()
+		if (refused === 0) {
+			if (this.heldTable.size < HELD_RECORDINGS_MAX) this.heldFullWarned = false
+			return
+		}
+		if (this.heldFullWarned) return
+		this.heldFullWarned = true
+		const o = this.heldTable.overflowCount
+		const log =
+			this.injectedLog ??
+			(fallbackLog ??= createComponentLogger(
+				createLogger({ level: "info" }),
+				"DiscoveryStore",
+			))
+		log.warn(
+			{
+				refused,
+				entries: this.heldTable.size,
+				overflowFolders: o.folders,
+				overflowAll: o.all,
+			},
+			"Recording ownership table full; folders with unlisted recordings are kept whole",
+		)
 	}
 
 	/** Ids absorbed into `survivor` by this operation, sorted, at most 64. */

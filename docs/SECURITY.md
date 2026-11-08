@@ -157,6 +157,12 @@ its modes reaches this. With the core stopped:
    writes a new fence and revokes every older token, so nothing was opened by going without one.
    Then export the token again. Every browser pairs again.
 
+**Threat model of the state directory.** The core's state and storage directories are trusted:
+keep them owned by the core's user with mode `0700`. The scanner's recording-ownership rule (no
+discovery's delete path reaches a file another discovery lists) protects recordings against the
+core's own code paths only. It does not protect them against another local process that can
+write to those directories: such a process can delete or replace files there directly.
+
 ## Decoder versions
 
 WaveKit integrates multiple third-party decoder binaries (dsd-fme, multimon-ng, rtl_433, readsb, acarsdec, dumpvdl2, AIS-catcher, Dire Wolf, gr-lora_sdr). These external dependencies require careful version management and security monitoring to maintain a secure deployment.

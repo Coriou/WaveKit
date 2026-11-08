@@ -1,8 +1,16 @@
 /**
  * WG10 req 1.5: merge aliases. A merge never moves or rekeys a recording folder: the survivor
  * adopts the dropped discovery's folder (and the dropped discovery's own aliases) as aliases.
- * Pure bookkeeping, owned by the DiscoveryStore; at most `DISCOVERY_RECORDING_ALIASES_MAX` per
- * owner (the oldest is released and its folder becomes an orphan, req 1.7). O(1) owner lookup.
+ * Pure bookkeeping, owned by the DiscoveryStore. O(1) owner lookup.
+ *
+ * Bound: past `DISCOVERY_RECORDING_ALIASES_MAX` per owner the oldest aliases that own no folder on
+ * disk are released (req 1.7). An alias that still owns an evidence or recording folder is never
+ * released, so its files keep their owner (listing, Keep, retention, recovery). A list therefore
+ * holds at most 64 folderless aliases plus the aliases with folders on disk, and those are capped
+ * by retention (it deletes old files of unkept owners and then their empty folders). The hard
+ * ceiling `DISCOVERY_RECORDING_ALIASES_STORED_MAX` only bounds the persisted schema; reaching it
+ * needs that many folders under one owner. Memory: one alias id (28 characters) in the owner map
+ * and its owner's list, about 60 to 80 B per entry, so 4096 aliases are under 0.4 MiB.
  */
 import { DISCOVERY_RECORDING_ALIASES_MAX } from "../recordings/contract.js"
 import type { RecordingProtection } from "../recordings/contract.js"
@@ -20,9 +28,53 @@ export interface DiscoveryAliasLookup {
 	aliasesOf(discoveryId: string): readonly string[]
 	/** Forgets the aliases of a deleted owner once its removal settled (no-op otherwise). */
 	releaseAliases?(discoveryId: string): void
+	/**
+	 * File names in a folder that a live discovery outside `removing` lists (a split moved its
+	 * observation; the file stayed): no deleter of that folder may reach them.
+	 */
+	heldFileNames?(
+		folderId: string,
+		removing: readonly string[],
+	): ReadonlySet<string>
+	/**
+	 * The deleters' answer: every live discovery the ownership table records as listing
+	 * `recordingId` (the folder's own discovery included when it lists the file itself and
+	 * another listing exists); empty when none (the file follows its folder's owner); null
+	 * whenever the folder is marked overflowed (one may list it unrecorded: fail closed, keep the
+	 * file). Asked in the same synchronous turn as each unlink.
+	 */
+	heldRecordingListers?(recordingId: string): readonly string[] | null
+	/** Playback: every live discovery recorded as listing `recordingId`, whatever the mark. */
+	heldRecordingHolders?(recordingId: string): readonly string[]
+	/**
+	 * The single answer of earlier lookups (used only without `heldRecordingListers`): one live
+	 * discovery listing `recordingId` outside its folder's owner; null whenever the folder is
+	 * marked overflowed (checked before any listed owner: fail closed, keep the file).
+	 */
+	heldRecordingOwner?(recordingId: string): string | null | undefined
+	/**
+	 * The single playback answer of earlier lookups (used only without `heldRecordingHolders`):
+	 * one live discovery listing `recordingId` outside its folder's owner, whatever the mark.
+	 */
+	heldRecordingHolder?(recordingId: string): string | undefined
+	/**
+	 * True when every recording file in `folderId` counts as listed by an unknown live discovery
+	 * (the ownership table was full): no deleter of the folder may reach any of them.
+	 */
+	heldFolderUnknown?(folderId: string): boolean
 }
 
 const NONE: readonly string[] = Object.freeze([])
+
+/**
+ * The persisted bound of one owner's alias list (schema and restore). Folder-owning aliases are
+ * never released below it; at it the oldest is released whatever it owns (retention still keeps
+ * the files of a folder whose owner it cannot resolve).
+ */
+export const DISCOVERY_RECORDING_ALIASES_STORED_MAX = 4096
+
+/** Answers whether an id owns an evidence or recording folder on disk (FolderIndex.holds). */
+export type FolderLookup = (id: string) => boolean
 
 export class RecordingAliasTable {
 	private readonly byOwner = new Map<string, string[]>()
@@ -30,7 +82,17 @@ export class RecordingAliasTable {
 	/** Aliases of owners deleted (not merged) since; kept in memory until their removal settles. */
 	private readonly detachedByOwner = new Map<string, string[]>()
 
-	constructor(private readonly max: number = DISCOVERY_RECORDING_ALIASES_MAX) {}
+	/** Without a lookup no id owns a folder (a standalone store); production wires the index. */
+	private holdsFolder: FolderLookup = () => false
+
+	constructor(
+		private readonly max: number = DISCOVERY_RECORDING_ALIASES_MAX,
+		private readonly storedMax: number = DISCOVERY_RECORDING_ALIASES_STORED_MAX,
+	) {}
+
+	setFolderLookup(lookup: FolderLookup): void {
+		this.holdsFolder = lookup
+	}
 
 	aliasOwner(id: string): string | undefined {
 		return this.owners.get(id)
@@ -42,7 +104,8 @@ export class RecordingAliasTable {
 
 	/**
 	 * `drop` merged into `keep`: keep's list gains drop's aliases then drop itself (oldest first).
-	 * Returns how many of the oldest were released past the bound.
+	 * Past the bound the oldest aliases without a folder on disk are released; an alias with a
+	 * folder stays (only the stored ceiling releases one). Returns how many were released.
 	 */
 	adopt(keep: string, drop: string): number {
 		if (keep === drop) return 0
@@ -54,7 +117,28 @@ export class RecordingAliasTable {
 		for (const id of [...inherited, drop])
 			if (id !== keep && !list.includes(id)) list.push(id)
 		let released = 0
-		while (list.length > this.max) {
+		if (list.length > this.max) {
+			let excess = list.length - this.max
+			const kept: string[] = []
+			for (const id of list) {
+				// Fail closed: a throwing lookup answers "owns a folder".
+				let folder = true
+				if (excess > 0)
+					try {
+						folder = this.holdsFolder(id)
+					} catch {
+						folder = true
+					}
+				if (excess > 0 && !folder) {
+					this.owners.delete(id)
+					excess--
+					released++
+				} else kept.push(id)
+			}
+			list.length = 0
+			list.push(...kept)
+		}
+		while (list.length > this.storedMax) {
 			const old = list.shift()
 			if (old !== undefined) this.owners.delete(old)
 			released++
@@ -78,6 +162,22 @@ export class RecordingAliasTable {
 		this.detachedByOwner.delete(owner)
 	}
 
+	/**
+	 * Re-attaches a folder whose alias was released before folders were checked: `id` becomes
+	 * `owner`'s oldest alias. False (nothing changed) when `id` is the owner, already owned or the
+	 * list is at the stored ceiling.
+	 */
+	attach(owner: string, id: string): boolean {
+		if (id === owner || this.owners.has(id) || this.byOwner.has(id))
+			return false
+		const list = this.byOwner.get(owner) ?? []
+		if (list.length >= this.storedMax) return false
+		list.unshift(id)
+		this.byOwner.set(owner, list)
+		this.owners.set(id, owner)
+		return true
+	}
+
 	/** Journal replay: the owner's list as written (empty removes it). Invalid ids are skipped. */
 	set(
 		owner: string,
@@ -90,9 +190,10 @@ export class RecordingAliasTable {
 				if (this.owners.get(id) === owner) this.owners.delete(id)
 		this.byOwner.delete(owner)
 		const list: string[] = []
+		const seen = new Set<string>()
 		for (const id of aliases) {
-			if (list.length >= this.max) break
-			if (id === owner || live(id) || list.includes(id)) continue
+			if (list.length >= this.storedMax) break
+			if (id === owner || live(id) || seen.has(id)) continue
 			const other = this.owners.get(id)
 			if (other !== undefined && other !== owner) {
 				// A later entry moves the alias (a merge chain); the earlier owner forgets it.
@@ -104,6 +205,7 @@ export class RecordingAliasTable {
 				}
 			}
 			list.push(id)
+			seen.add(id)
 			this.owners.set(id, owner)
 		}
 		if (list.length > 0) this.byOwner.set(owner, list)
@@ -130,9 +232,8 @@ export class RecordingAliasTable {
 			if (!live(e.id)) continue
 			const list: string[] = []
 			for (const id of e.aliases) {
-				if (list.length >= this.max) break
-				if (id === e.id || live(id) || this.owners.has(id) || list.includes(id))
-					continue
+				if (list.length >= this.storedMax) break
+				if (id === e.id || live(id) || this.owners.has(id)) continue
 				list.push(id)
 				this.owners.set(id, e.id)
 			}

@@ -100,6 +100,8 @@ interface Loose {
 	corrections?: unknown
 	recordingOperations?: unknown
 	aliases?: unknown
+	heldRecordings?: unknown
+	heldOverflow?: unknown
 	bytes?: unknown
 	buildMs?: unknown
 	writeMs?: unknown
@@ -131,7 +133,9 @@ function isHead(v: unknown): v is SnapshotHead {
 		typeof v.savedAt === "string" &&
 		(v.corrections === undefined || typeof v.corrections === "string") &&
 		typeof v.recordingOperations === "string" &&
-		(v.aliases === null || typeof v.aliases === "string")
+		(v.aliases === null || typeof v.aliases === "string") &&
+		(v.heldRecordings === undefined || typeof v.heldRecordings === "string") &&
+		(v.heldOverflow === undefined || typeof v.heldOverflow === "string")
 	)
 }
 

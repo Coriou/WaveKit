@@ -3722,9 +3722,27 @@ curl http://localhost:9000/api/scanner
 	},
 	"cpuGuard": { "percent": 41.5, "limitPercent": 90, "source": "os" },
 	"disk": "ok",
+	"folders": { "reattached": 0, "unresolved": 0 },
 	"jobs": { "active": 2, "total": 5 }
 }
 ```
+
+`folders` (absent from older cores and before the scanner state loaded) counts what the
+start did with recording and evidence folders that no discovery owned: `reattached` folders
+were given back to the discovery they were merged into (found from the journal's merge alias
+listings, then from the observations listing their recordings), and `unresolved` folders
+could not be traced and stay on disk, kept by every retention pass. Nothing is moved or
+deleted. One info line at startup carries the same two counts.
+
+`recordingsQuota` is present only while the last retention pass left the recordings quota
+(`storage.maxRecordingsMb`) exceeded after removing every file its rules allow, so everything
+left is protected (kept, recent, held by a kept discovery, or with an owner the scanner cannot
+resolve) and quota retention frees nothing:
+`{ "state": "exceeded", "reason": "storage-cap", "capBytes": 536870912, "usedBytes": 601882624, "overBytes": 65011712 }`.
+Meanwhile new analog recordings are refused with the receipt error `storage-cap`; other writes
+stop only at the free-disk threshold (`disk-low`). It is absent within the quota and from older
+cores. One warning line names `storage-cap` with the same numbers when it starts, and one info
+line when it clears.
 
 `blankedFrames` counts frames blanked as broadband impulses;
 `broadbandRfi` is `{ periodMs }` while periodic broadband RFI is active.
@@ -6242,16 +6260,27 @@ anything else (including older-format `recording` entries) is left and counted. 
 info line with counts, never a name or path. Legacy mode does not sweep.
 
 Discovery merges (both modes): the dropped discovery's recording and evidence
-folders stay where they are and the survivor adopts them as aliases (persisted, at
-most 64 per discovery; past that the oldest is released and its folder becomes an
-orphan, warned as a count). Alias folders count as the survivor's: its Keep protects
+folders stay where they are and the survivor adopts them as aliases (persisted). Past
+64 aliases per discovery the oldest aliases that no longer have a folder on disk are
+released (warned as a count); an alias that still has a recording or evidence folder is
+never released, so a survivor keeps every folder it adopted until retention empties it.
+At startup, folders an older core released are given back to their survivor (see
+`folders` in `GET /api/scanner`). A folder no discovery owns is never deleted by
+retention. Alias folders count as the survivor's: its Keep protects
 them in retention, their recording ids keep resolving, a kept file in any alias makes
 the survivor hold kept recordings (409 on its removal), and removing the survivor
 removes the alias folders too, file by file through the keep decision. A capacity
 eviction now removes the evicted discovery's folders and aliases like an inactive
 prune (a discovery holding kept recordings is still never evicted, and kept files
-stay). Merges and evictions made before the 2026-10-17 core keep their orphan folders, which follow
-the normal age and size caps.
+stay). Merges and evictions made before the 2026-10-17 core keep their orphan folders: those
+the startup cannot trace stay on disk untouched.
+
+A recording a discovery lists in another discovery's folder (a co-channel split moved its
+observation onto a twin, or a merge made that folder an alias; the file never moves) belongs
+to the discovery listing it, for every kind (analog and digital). The ownership is kept apart
+from the 256-observation window (persisted and journaled), so it lasts after that
+observation ages out: deleting, pruning or evicting the folder's discovery never deletes the
+file, it stays playable, and the owner's Keep protects it from retention.
 
 A configured recording root that is itself a symbolic link (a dsd-fme recording
 directory such as `data/recordings -> /Volumes/usb/recs`, or the scanner storage

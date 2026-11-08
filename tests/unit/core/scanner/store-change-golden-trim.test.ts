@@ -20,6 +20,10 @@ import { runGolden } from "./__goldens__/store-golden-driver.js"
 // -> {"identity":{"kind":"dmr-cc","value":"1"},"contentVerified":true}.
 // Only these added fields differ semantically: no unverifiedCc/tgSrcVerified,
 // identity, confidence, metadata, association, R return value or C event changes.
+// Ownership listings re-baseline: every M journal entry's payload ends with the held-recording
+// format marker "heldFormat":3 (2 060 (seed 9) entries; the only added bytes). The synthetic
+// recording ids carry no folder, so no heldRecordings, heldOverflow or heldGuard field appears;
+// entry counts, R, C and E lines and S snapshot texts are byte-identical. No other field changed.
 const DIR = join(import.meta.dirname, "__goldens__")
 const CASES: { seed: number; steps: number; slots?: number }[] = [
 	{ seed: 9, steps: 2600, slots: 1 },

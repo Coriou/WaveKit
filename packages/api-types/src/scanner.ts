@@ -1248,7 +1248,30 @@ export interface ScannerStatus {
 		source: "os" | "cgroup"
 	}
 	disk: "ok" | "disk-low"
+	/**
+	 * Recording and evidence folders the load re-attached to their discovery after a merge
+	 * released them (`reattached`), and folders no discovery could be traced to, kept in place
+	 * (`unresolved`). Absent on older cores and before the scanner state loaded.
+	 */
+	folders?: { reattached: number; unresolved: number } | undefined
+	/**
+	 * Present while the last retention pass left the recordings quota (`maxRecordingsMb`) exceeded
+	 * after removing every file its rules allow: everything left is protected. Analog recordings
+	 * are refused (`storage-cap`) until it clears. Absent within the quota and on older cores.
+	 */
+	recordingsQuota?: ScannerRecordingsQuotaStatus | undefined
 	jobs: { active: number; total: number }
+}
+
+/** `ScannerStatus.recordingsQuota`: the recordings quota exceeded with nothing removable. */
+export interface ScannerRecordingsQuotaStatus {
+	state: "exceeded"
+	/** The refusal analog admission gives meanwhile. */
+	reason: "storage-cap"
+	capBytes: number
+	usedBytes: number
+	/** `usedBytes - capBytes`. */
+	overBytes: number
 }
 
 /** The bare settings object (core `ScannerSettings`). */

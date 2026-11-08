@@ -22,6 +22,7 @@ import {
 	truncate,
 } from "node:fs/promises"
 import { readJournalFiles } from "./journal-reader.js"
+import { readAliasHistory } from "./alias-history.js"
 import { DQ_CONSOLIDATE_GROUP_MAX } from "../detection-quality-contract.js"
 import { join, resolve } from "node:path"
 import { z } from "zod"
@@ -52,6 +53,15 @@ import {
 } from "./recording-operation.js"
 import type { PreparedRecordingMetadata } from "./recording-operation.js"
 import type { StoreMutation } from "./schemas.js"
+import {
+	HeldOverflowSchema,
+	HeldRecordingsSchema,
+	heldPayloadWithinBounds,
+} from "./held-recordings.js"
+import type {
+	HeldOverflowState,
+	HeldRecordingEntry,
+} from "./held-recordings.js"
 import type { JournalEntry, StoreSnapshot } from "./discovery-store.js"
 import { atomicWrite } from "./atomic-write.js"
 import { snapshotHeadOf } from "./snapshot-mirror.js"
@@ -165,6 +175,10 @@ export interface LoadedState {
 	recordingOperations?: PreparedRecordingMetadata[]
 	/** WG10 req 1.5: merge aliases from the snapshot (journal entries replay on top). */
 	aliases?: { id: string; aliases: string[] }[]
+	/** Recording ownership outside folders (held-recordings.ts); journal entries replay on top. */
+	heldRecordings?: HeldRecordingEntry[]
+	/** The ownership table's overflow marks from the snapshot (held-recordings.ts). */
+	heldOverflow?: HeldOverflowState
 	recoveryHealth: "healthy" | "degraded"
 	/** Seqs missing from the replayed journal tail (recovery is then degraded); absent when none. */
 	journalGap?: JournalGap
@@ -401,6 +415,8 @@ const SnapshotFileSchema = z
 			.array(z.object({ sourceId: z.string().min(1), hz: z.number() }))
 			.default([]),
 		aliases: z.array(DiscoveryAliasEntrySchema).optional(),
+		heldRecordings: HeldRecordingsSchema.optional(),
+		heldOverflow: HeldOverflowSchema.optional(),
 	})
 	.strict()
 /**
@@ -731,6 +747,10 @@ export class ScannerPersistence {
 			droppedLines: journal.dropped,
 			recordingOperations: snapshot.recordingOperations ?? [],
 			...(snapshot.aliases ? { aliases: snapshot.aliases } : {}),
+			...(snapshot.heldRecordings
+				? { heldRecordings: snapshot.heldRecordings }
+				: {}),
+			...(snapshot.heldOverflow ? { heldOverflow: snapshot.heldOverflow } : {}),
 			recoveryHealth: this.authorityHealth,
 			...(journal.gap ? { journalGap: journal.gap } : {}),
 		}
@@ -768,6 +788,9 @@ export class ScannerPersistence {
 		const line = `${JSON.stringify({ seq, at: entry.at, op: entry.op, payload: entry.payload })}\n`
 		// Every seq, refused ones too: the mirror follows the store, not the disk.
 		this.writer?.feed(line)
+		// The writer never emits what its reader rejects: a payload past the held-recording bounds
+		// (a cheap length check) is refused like a full backlog, and a snapshot covers it.
+		if (!heldPayloadWithinBounds(entry.payload)) return this.refuse(seq)
 		const cost = line.length * 2 + APPEND_OVERHEAD_BYTES
 		const overCap =
 			opts.reserved !== true &&
@@ -1120,6 +1143,10 @@ export class ScannerPersistence {
 			corrections: s.corrections,
 			recordingOperations: prepared.data,
 			...(s.aliases && s.aliases.length > 0 ? { aliases: s.aliases } : {}),
+			...(s.heldRecordings && s.heldRecordings.length > 0
+				? { heldRecordings: s.heldRecordings }
+				: {}),
+			...(s.heldOverflow ? { heldOverflow: s.heldOverflow } : {}),
 		})
 		return { text, lastSeq }
 	}
@@ -1501,6 +1528,8 @@ export class ScannerPersistence {
 				corrections: data.corrections,
 				recordingOperations: data.recordingOperations ?? [],
 				...(data.aliases ? { aliases: data.aliases } : {}),
+				...(data.heldRecordings ? { heldRecordings: data.heldRecordings } : {}),
+				...(data.heldOverflow ? { heldOverflow: data.heldOverflow } : {}),
 				lastSeq: data.lastSeq,
 			},
 		}
@@ -1553,6 +1582,35 @@ export class ScannerPersistence {
 					? null
 					: { firstMissing: read.gap.firstMissing, missing: read.gap.missing },
 		}
+	}
+
+	/**
+	 * Load-time folder migration: the owner each of `wanted` was last listed under in the
+	 * journal's alias listings (every day file, read only). Empty without a journal.
+	 */
+	async aliasHistory(
+		wanted: ReadonlySet<string>,
+	): Promise<Map<string, string>> {
+		if (wanted.size === 0) return new Map()
+		const dir = join(this.root, JOURNAL_DIR)
+		let names: string[]
+		try {
+			names = (await readdir(dir)).filter(n => JOURNAL_NAME.test(n)).sort()
+		} catch {
+			return new Map()
+		}
+		const history = await readAliasHistory({ dir, names, wanted })
+		if (history.invalid > 0)
+			this.log.warn(
+				{ invalid: history.invalid },
+				"Skipped unreadable journal alias listings",
+			)
+		if (history.truncated > 0)
+			this.log.warn(
+				{ truncated: history.truncated },
+				"Journal alias listings past the history bound were skipped; their folders stay in place",
+			)
+		return history.owners
 	}
 
 	/** Validate aggregate prepared authority across snapshot+journal without changing S1 fallback. */

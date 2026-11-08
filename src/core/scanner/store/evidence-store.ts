@@ -16,13 +16,13 @@ import {
 } from "node:fs"
 import {
 	copyFile,
+	link,
 	lstat,
 	mkdir,
 	open,
 	readdir,
 	readFile,
 	realpath,
-	rename,
 	rm,
 	rmdir,
 	stat,
@@ -48,12 +48,14 @@ import type { Logger } from "../../../utils/logger.js"
 import { atomicWrite } from "./persistence.js"
 import { holdsKeptWithAliases, withAliasFolders } from "../recording-aliases.js"
 import type { DiscoveryAliasLookup } from "../recording-aliases.js"
+import { FolderIndex } from "./folder-index.js"
 import {
 	AnalogOperations,
 	type AnalogHandle,
 	type AnalogInput,
 	type AnalogMetadataAdapter,
 	type AnalogOperationIo,
+	type AnalogQuarantine,
 	type AnalogReconciliation,
 } from "./analog-operations.js"
 
@@ -88,6 +90,13 @@ export interface LinkCandidate {
 	startedAt: number
 	endedAt: number
 	encrypted: boolean
+}
+
+/** The recordings quota left exceeded after retention removed every file its rules allow. */
+export interface RecordingsQuotaExceeded {
+	capBytes: number
+	usedBytes: number
+	overBytes: number
 }
 
 interface StoredFile {
@@ -327,13 +336,77 @@ async function wavDirs(dir: string): Promise<string[]> {
 	return out
 }
 
-async function moveFile(from: string, to: string): Promise<void> {
-	try {
-		await rename(from, to)
-	} catch (err) {
-		if (errorCode(err) !== "EXDEV") throw err
-		await copyFile(from, to)
+/** Names a probe publication tries before it refuses (the first is the file's own name). */
+export const PUBLISH_NAME_TRIES = 16
+/** link() errors that mean "no hard link here" (another device, or a filesystem without them). */
+const NO_LINK = new Set(["EXDEV", "EPERM", "ENOTSUP", "EOPNOTSUPP", "EMLINK"])
+const CALL_STEM = /^(\d{8}_\d{6}_\d{5})_/
+
+/**
+ * The `n`-th fresh name for a probe recording whose own name is taken: `_dup<n>` after the call
+ * stamp, so the name still parses as the same call (time, talkgroup, source). Undefined for a
+ * name without the stamp (never published).
+ */
+function freshName(name: string, n: number): string | undefined {
+	return CALL_STEM.test(name)
+		? name.replace(CALL_STEM, `$1_dup${n}_`)
+		: undefined
+}
+
+/**
+ * Publishes the probe file `from` into the recording folder `dir` without ever replacing a file
+ * there (one another discovery may list): link() fails with EEXIST on a taken name, and on
+ * another device (or a filesystem without hard links) copyFile with COPYFILE_EXCL does too. A
+ * taken name moves on to a fresh one (`freshName`); the source goes only once the new file
+ * exists. Returns the name published, or undefined when every name tried was taken (the probe
+ * file is then dropped with its probe folder; the existing files stay untouched). A copy that
+ * fails part-way may leave its own new, unlisted file behind (never one it did not create).
+ */
+async function publishFile(
+	from: string,
+	dir: string,
+	name: string,
+): Promise<string | undefined> {
+	for (let n = 0; n < PUBLISH_NAME_TRIES; n++) {
+		const candidate = n === 0 ? name : freshName(name, n)
+		if (candidate === undefined) return undefined
+		const to = join(dir, candidate)
+		try {
+			await link(from, to)
+		} catch (err) {
+			const code = errorCode(err)
+			if (code === "EEXIST") continue
+			if (code === undefined || !NO_LINK.has(code)) throw err
+			try {
+				await copyFile(from, to, fsConstants.COPYFILE_EXCL)
+			} catch (copyErr) {
+				if (errorCode(copyErr) === "EEXIST") continue
+				throw copyErr
+			}
+		}
 		await rm(from, { force: true })
+		return candidate
+	}
+	return undefined
+}
+
+/** Unlinks one entry as itself (never followed); one already gone is harmless. */
+async function unlinkGone(path: string): Promise<void> {
+	try {
+		await unlink(path)
+	} catch (err) {
+		if (errorCode(err) !== "ENOENT") throw err
+	}
+}
+
+/** Removes a folder only when empty: one a kept file (or anything left) holds stays, harmlessly. */
+async function rmdirIfEmpty(dir: string): Promise<void> {
+	try {
+		await rmdir(dir)
+	} catch (err) {
+		const code = errorCode(err)
+		if (code === "ENOENT" || code === "ENOTEMPTY" || code === "EEXIST") return
+		throw err
 	}
 }
 
@@ -369,6 +442,14 @@ export class EvidenceStore {
 	private readonly recordingDeleteFs: RecordingDeleteFs | undefined
 	/** WG10 req 1.5: merge aliases (none without the lookup). */
 	private readonly aliases: DiscoveryAliasLookup | undefined
+	/** The ids owning a folder on disk; merge aliases never release one (recording-aliases.ts). */
+	readonly folders = new FolderIndex()
+	/** Folders the last retention pass kept because no live discovery owns them. */
+	private unresolvedFolders = 0
+	/** Recording files the last retention pass kept because their owner is unknown (table full). */
+	private unknownHeldFiles = 0
+	/** The recordings quota the last retention pass left exceeded; null within it. */
+	private quotaExceeded: RecordingsQuotaExceeded | null = null
 
 	constructor(opts: {
 		dir: string
@@ -414,6 +495,174 @@ export class EvidenceStore {
 	}
 	private readonly aliasesOf = (id: string): readonly string[] =>
 		this.aliases?.aliasesOf(id) ?? []
+
+	/**
+	 * The deleters' answer for the recording file `name` of `folderId`, asked in the same
+	 * synchronous turn as its unlink: every live discovery the ownership table records as listing
+	 * it (the folder's own discovery included when it lists the file itself and another listing
+	 * exists); empty when the table holds no listing (the file follows its folder's owner). Null,
+	 * fail closed, when the folder is marked (its listers are unknown) or a lookup throws.
+	 */
+	private listers(folderId: string, name: string): readonly string[] | null {
+		try {
+			if (this.heldFolderUnknown(folderId)) return null
+			const lookup = this.aliases
+			const id = `${folderId}~${name}`
+			if (lookup?.heldRecordingListers !== undefined)
+				return lookup.heldRecordingListers(id)
+			// A lookup with the single answer only (one listing discovery other than the owner).
+			const owner = lookup?.heldRecordingOwner?.(id)
+			if (owner === null) return null
+			return owner === undefined ? [] : [owner]
+		} catch {
+			return null
+		}
+	}
+
+	/**
+	 * Playback only: the live discoveries the table records as listing the file, whatever its
+	 * folder's mark (admission, never a delete decision). A throwing lookup admits nothing.
+	 */
+	private holders(folderId: string, name: string): readonly string[] {
+		try {
+			const lookup = this.aliases
+			const id = `${folderId}~${name}`
+			if (lookup?.heldRecordingHolders !== undefined)
+				return lookup.heldRecordingHolders(id)
+			const holder =
+				lookup?.heldRecordingHolder !== undefined
+					? lookup.heldRecordingHolder(id)
+					: lookup?.heldRecordingOwner?.(id)
+			return typeof holder === "string" ? [holder] : []
+		} catch {
+			return []
+		}
+	}
+
+	/** Fail closed: a throwing lookup answers "unknown" (every recording file kept). */
+	private heldFolderUnknown(folderId: string): boolean {
+		try {
+			return this.aliases?.heldFolderUnknown?.(folderId) ?? false
+		} catch {
+			return true
+		}
+	}
+
+	/**
+	 * The removal's per-file answer, asked in the same synchronous turn as that file's unlink and
+	 * never carried across an await: true when the recording file `name` of `folderId` must stay
+	 * because its folder is marked (the ownership table was full, so every recording file there
+	 * counts as listed by an unknown live discovery), or because any live discovery outside
+	 * `removing` lists it (every lister counts, any kind; an analog file through its association
+	 * too). Fails closed: a throwing lookup keeps the file.
+	 */
+	private removalKeeps(
+		folderId: string,
+		name: string,
+		removing: readonly string[],
+	): boolean {
+		try {
+			const listers = this.listers(folderId, name)
+			if (listers === null) return true
+			if (listers.some(id => !removing.includes(id))) return true
+			// A lookup without every lister: its per-folder names answer too.
+			if (
+				this.aliases?.heldRecordingListers === undefined &&
+				this.aliases?.heldFileNames?.(folderId, removing).has(name) === true
+			)
+				return true
+			return this.analog?.heldArtifact(folderId, name, removing) ?? false
+		} catch {
+			return true
+		}
+	}
+
+	/**
+	 * A folder whose owner nothing resolves (not live, no live alias owner): retention keeps it.
+	 * A throwing lookup answers unresolved (kept).
+	 */
+	private folderResolved(folderId: string): boolean {
+		try {
+			if (this.isDiscoveryLive(folderId)) return true
+			const owner = this.aliases?.aliasOwner(folderId)
+			return owner !== undefined && this.isDiscoveryLive(owner)
+		} catch {
+			return false
+		}
+	}
+
+	/** Folders the last retention pass left in place because no live discovery owns them. */
+	get unresolvedFolderCount(): number {
+		return this.unresolvedFolders
+	}
+
+	/**
+	 * Analog recordings the last retention pass kept because recovery quarantined them (pending
+	 * re-admission at a later start; only an explicit delete under strict ownership removes them).
+	 */
+	get quarantinedRecordingCount(): number {
+		return this.analog?.quarantinedRetained ?? 0
+	}
+
+	/** The last recovery's quarantined analog operations, with their closed reasons. */
+	analogQuarantine(): AnalogQuarantine[] {
+		return this.analog?.quarantined() ?? []
+	}
+
+	/** Recording files the last retention pass kept because their owner is unknown (table full). */
+	get unknownHeldFileCount(): number {
+		return this.unknownHeldFiles + (this.analog?.unknownHeldRetained ?? 0)
+	}
+
+	/**
+	 * The recordings quota the last retention pass left exceeded after removing every file its
+	 * rules allow (everything left is protected: kept, recent, unresolved or held); null within
+	 * the quota. Analog admission then refuses with `storage-cap`; other writes rely on the free
+	 * disk threshold.
+	 */
+	get recordingsQuotaExceeded(): RecordingsQuotaExceeded | null {
+		return this.quotaExceeded === null ? null : { ...this.quotaExceeded }
+	}
+
+	/**
+	 * Lists the folder ids on disk into `folders` (evidence, dv and analog recordings). Ids
+	 * marked while it runs stay. A failed listing leaves the index as it was.
+	 */
+	async loadFolderIndex(): Promise<string[]> {
+		const token = this.folders.beginListing()
+		try {
+			const ids = new Set<string>()
+			for (const base of [
+				...RECORDING_KINDS.map(k => join(this.root, "recordings", k)),
+				join(this.root, "evidence"),
+			])
+				for (const name of await listDir(base))
+					if (DISCOVERY_ID.test(name)) ids.add(name)
+			this.folders.finishListing(token, ids)
+			return [...ids]
+		} catch (err) {
+			this.folders.abandonListing(token)
+			throw err
+		}
+	}
+
+	/** Whether a recording file named by `recordingId` exists in a dv or analog folder. */
+	recordingFileExists(recordingId: string): boolean {
+		const m = RECORDING_ID.exec(recordingId)
+		const discoveryId = m?.[1]
+		const file = m?.[2]
+		if (discoveryId === undefined || file === undefined || file.includes(".."))
+			return false
+		return RECORDING_KINDS.some(kind => {
+			try {
+				lstatSync(join(this.root, "recordings", kind, discoveryId, file))
+				return true
+			} catch (err) {
+				const code = errorCode(err)
+				return code !== "ENOENT" && code !== "ENOTDIR"
+			}
+		})
+	}
 
 	/**
 	 * WG9 R2 (pinned root only): true while the real root is still the directory first resolved.
@@ -462,6 +711,8 @@ export class EvidenceStore {
 			adapter,
 			admits: id => this.admits(id),
 			serialise: (id, job) => this.serialise(id, job),
+			heldUnknown: id => this.heldFolderUnknown(id),
+			listers: (id, name) => this.listers(id, name),
 			legacyBytes: async () =>
 				(await this.collect())
 					.filter(file => file.category === "recordings")
@@ -493,7 +744,17 @@ export class EvidenceStore {
 				"Analog metadata authority not configured",
 				"SCANNER_ANALOG_ADMISSION_DENIED",
 			)
-		return this.analog.begin(input)
+		// The folder mark lasts until the operation settled (a listing meanwhile keeps it).
+		const settled = this.folders.mark(input.discoveryId)
+		let handle: AnalogHandle
+		try {
+			handle = this.analog.begin(input)
+		} catch (err) {
+			settled()
+			throw err
+		}
+		void handle.settled.then(settled, settled)
+		return handle
 	}
 	recoverAnalog(): Promise<AnalogReconciliation[]> {
 		return this.analog?.recover() ?? Promise.resolve([])
@@ -633,22 +894,32 @@ export class EvidenceStore {
 				await rm(f.path, { force: true })
 				continue
 			}
+			const moved = this.folders.mark(c.discoveryId)
 			// Reserve before any await: DELETE drains this accepted move before acknowledging.
 			await this.serialise(c.discoveryId, async () => {
 				if (!this.admits(c.discoveryId)) return
 				const target = join(this.root, "recordings", "dv", c.discoveryId)
 				await mkdir(target, { recursive: true })
+				// Never over a file already there: another discovery may list it.
+				let name: string | undefined
 				try {
-					await moveFile(f.path, join(target, f.name))
+					name = await publishFile(f.path, target, f.name)
 				} catch (err) {
 					if (errorCode(err) === "ENOENT") return
 					throw err
 				}
+				if (name === undefined) {
+					this.log.warn(
+						{ discoveryId: c.discoveryId, file: f.name },
+						"Dropped a probe recording: every name tried is taken",
+					)
+					return
+				}
 				linked.push({
 					observationId: c.observationId,
-					recordingId: `${c.discoveryId}~${f.name}`,
+					recordingId: `${c.discoveryId}~${name}`,
 				})
-			})
+			}).finally(moved)
 		}
 	}
 
@@ -682,6 +953,7 @@ export class EvidenceStore {
 	): Promise<boolean> {
 		assertDiscoveryId(discoveryId)
 		if (!this.admits(discoveryId)) return false
+		const written = this.folders.mark(discoveryId)
 		return this.serialise(discoveryId, async () => {
 			if (!this.admits(discoveryId) || (await this.diskState()) === "disk-low")
 				return false
@@ -707,7 +979,7 @@ export class EvidenceStore {
 				}),
 			)
 			return true
-		})
+		}).finally(written)
 	}
 
 	async writeIq(
@@ -727,6 +999,7 @@ export class EvidenceStore {
 				"SCANNER_INVALID_IQ_METADATA",
 			)
 		if (!this.admits(discoveryId)) return null
+		const written = this.folders.mark(discoveryId)
 		return this.serialise(discoveryId, async () => {
 			if (!this.admits(discoveryId) || (await this.diskState()) === "disk-low")
 				return null
@@ -756,22 +1029,25 @@ export class EvidenceStore {
 				}),
 			)
 			return name
-		})
+		}).finally(written)
 	}
 
 	recordingPath(recordingId: string): string | null {
 		const m = RECORDING_ID.exec(recordingId)
 		const discoveryId = m?.[1]
 		const file = m?.[2]
-		if (
-			discoveryId === undefined ||
-			file === undefined ||
-			file.includes("..") ||
-			!this.admits(discoveryId)
-		)
+		if (discoveryId === undefined || file === undefined || file.includes(".."))
 			return null
+		// An analog file is admitted per file: through its folder, or through the live discovery
+		// owning it after a split (AnalogOperations.path).
 		if (/^analog-[0-9a-f-]{36}\.wav$/i.test(file))
 			return this.analog?.path(recordingId) ?? null
+		// A recording another live discovery lists here (a split): admitted through it.
+		if (
+			!this.admits(discoveryId) &&
+			!this.holders(discoveryId, file).some(id => this.admits(id))
+		)
+			return null
 		for (const kind of RECORDING_KINDS) {
 			const path = join(this.root, "recordings", kind, discoveryId, file)
 			if (existsSync(path)) return path
@@ -889,9 +1165,11 @@ export class EvidenceStore {
 						"SCANNER_EVIDENCE_CLEANUP_PENDING",
 					)
 				// Long analog settlement drains outside the publication queue it may itself need.
+				const removing = [discoveryId, ...aliases]
 				if (this.analog) {
-					await this.analog.deleteDiscovery(discoveryId)
-					for (const alias of aliases) await this.analog.deleteDiscovery(alias)
+					await this.analog.deleteDiscovery(discoveryId, removing)
+					for (const alias of aliases)
+						await this.analog.deleteDiscovery(alias, removing)
 				}
 				const removeFolders = async (id: string): Promise<void> => {
 					if (!(await this.rootIntact()))
@@ -899,19 +1177,23 @@ export class EvidenceStore {
 							"Scanner storage root changed",
 							"SCANNER_EVIDENCE_CLEANUP_PENDING",
 						)
+					// Files in this folder another live discovery lists (a split twin's recording, of
+					// any kind, however old its observation) or of a marked folder: they and the folder
+					// stay; never a delete path to them. Asked again before each unlink, never cached.
+					const keeps = (name: string): boolean =>
+						this.removalKeeps(id, name, removing)
 					if (this.protection) {
-						await this.removeGuarded(id)
+						await this.removeGuarded(id, keeps)
 						return
 					}
-					await rm(join(this.root, "evidence", id), {
-						recursive: true,
-						force: true,
-					})
-					for (const kind of RECORDING_KINDS)
-						await rm(join(this.root, "recordings", kind, id), {
-							recursive: true,
-							force: true,
-						})
+					await this.removeFolder(join(this.root, "evidence", id), () => false)
+					for (const kind of RECORDING_KINDS) {
+						const kept = await this.removeFolder(
+							join(this.root, "recordings", kind, id),
+							(name, top) => (top ? keeps(name) : this.heldFolderUnknown(id)),
+						)
+						this.noteKeptUnknown(id, kept)
+					}
 				}
 				await this.serialise(discoveryId, async () => {
 					await removeFolders(discoveryId)
@@ -949,24 +1231,116 @@ export class EvidenceStore {
 	}
 
 	/**
-	 * WG9 req 2.6 with a protection port: each recording file is unlinked only in the same
-	 * synchronous turn as its protection answer, so a Keep that commits during the drain
-	 * survives. A protected file stops the removal and leaves the folders in place.
+	 * Without a protection port: one folder of a removal (a recording or an evidence folder),
+	 * walked file by file and never removed recursively (removeTree). A symlinked or
+	 * non-directory discovery entry is unlinked as itself, never its target. The folder goes only
+	 * once empty. Returns the entries kept.
 	 */
-	private async removeGuarded(discoveryId: string): Promise<void> {
+	private async removeFolder(
+		dir: string,
+		keeps: (name: string, top: boolean) => boolean,
+	): Promise<number> {
+		const top = await realDirectory(dir)
+		if (top === null) {
+			await unlinkGone(dir).catch((err: unknown) => {
+				// A real directory now (made since): left for the next removal.
+				const code = errorCode(err)
+				if (code !== "EISDIR" && code !== "EPERM" && code !== "ENOTDIR")
+					throw err
+			})
+			return 0
+		}
+		const kept = await this.removeTree(
+			dir,
+			[{ path: dir, ...top }],
+			keeps,
+			true,
+		)
+		await rmdirIfEmpty(dir)
+		return kept
+	}
+
+	/**
+	 * One directory of a removal, depth first and never recursively, so no entry is reached
+	 * without its own decision. Each entry is unlinked as itself (a symlink is never followed) in
+	 * the same synchronous turn as `keeps(name, top)` (`top`: directly in the discovery folder,
+	 * where a recording id names a file; deeper ones no id names), after every directory of
+	 * `chain` (the listed real directories down to this one) is verified again, so a swap for an
+	 * alias stops the removal (pending). A nested directory is descended only when lstat shows a
+	 * real one, and removed (rmdir) only once empty: a kept file, or anything written since,
+	 * keeps it. Returns the entries kept.
+	 */
+	private async removeTree(
+		dir: string,
+		chain: readonly DirIdentity[],
+		keeps: (name: string, top: boolean) => boolean,
+		top: boolean,
+	): Promise<number> {
+		const pending = (): never => {
+			throw new WaveKitError(
+				"Scanner evidence cleanup remains pending",
+				"SCANNER_EVIDENCE_CLEANUP_PENDING",
+			)
+		}
+		let entries
+		try {
+			entries = await readdir(dir, { withFileTypes: true })
+		} catch (err) {
+			if (errorCode(err) === "ENOENT" || errorCode(err) === "ENOTDIR") return 0
+			throw err
+		}
+		let kept = 0
+		for (const entry of entries) {
+			const path = join(dir, entry.name)
+			if (entry.isDirectory()) {
+				const id = await realDirectory(path)
+				if (id !== null) {
+					const inner = [...chain, { path, ...id }]
+					kept += await this.removeTree(path, inner, keeps, false)
+					if (!(await chainIntact(inner))) pending()
+					await rmdirIfEmpty(path)
+					continue
+				}
+				// No real directory any more (a link or a file now): unlinked as itself below.
+			}
+			if (!(await chainIntact(chain))) pending()
+			// From here to the unlink nothing awaits: the decision and the unlink share one turn.
+			if (keeps(entry.name, top)) {
+				kept++
+				continue
+			}
+			await unlinkGone(path)
+		}
+		return kept
+	}
+
+	/** One log line when a removal kept files of a marked folder (numbers only). */
+	private noteKeptUnknown(folderId: string, kept: number): void {
+		if (kept > 0 && this.heldFolderUnknown(folderId))
+			this.log.warn(
+				{ kept },
+				"Scanner removal kept recordings whose owner is unknown (ownership table full)",
+			)
+	}
+
+	/**
+	 * WG9 req 2.6 with a protection port: each recording file is unlinked only in the same
+	 * synchronous turn as its protection answer and its keep answer (`keeps`: listed by any live
+	 * discovery outside the removal, or a marked folder; a nested file by the mark alone), so a
+	 * Keep, a listing or a mark that commits during the drain survives. A protected file stops the
+	 * removal and leaves the folders in place; a kept one leaves its directories in place. Never a
+	 * recursive removal, at any depth (removeTree).
+	 */
+	private async removeGuarded(
+		discoveryId: string,
+		keeps: (name: string) => boolean,
+	): Promise<void> {
 		const refuse = (): never => {
 			throw new ScannerApiError(
 				"Discovery holds kept recordings",
 				SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
 				409,
 			)
-		}
-		const unlinkGone = async (path: string): Promise<void> => {
-			try {
-				await unlink(path)
-			} catch (err) {
-				if (errorCode(err) !== "ENOENT") throw err
-			}
 		}
 		const pending = (): never => {
 			throw new WaveKitError(
@@ -1015,37 +1389,30 @@ export class EvidenceStore {
 				chain.push({ path, ...id })
 			}
 			if (chain[2]?.dev !== top.dev || chain[2]?.ino !== top.ino) pending()
-			let entries
-			try {
-				entries = await readdir(dir, { withFileTypes: true })
-			} catch (err) {
-				if (errorCode(err) === "ENOENT") continue
-				throw err
-			}
-			for (const entry of entries) {
-				const path = join(dir, entry.name)
-				if (entry.isDirectory()) {
-					// Retention never lists nested folders, so they hold no inventoried media; rm does not follow links.
-					// The folder and its ancestors must still be the real ones listed, or rm would recurse into an alias.
-					if (!(await chainIntact(chain))) pending()
-					await rm(path, { recursive: true, force: true })
-					continue
-				}
-				// Regular files and symlinks (unlinked as links, never followed); anything else goes with the folder.
-				if (!entry.isFile() && !entry.isSymbolicLink()) continue
-				// The folder and its ancestors must still be the real ones listed: a swap for an alias stops here.
-				if (!(await chainIntact(chain))) pending()
-				let kept = true
-				try {
-					kept =
-						this.protection?.isScannerFileProtected(discoveryId, entry.name) !==
-						false
-				} catch {
-					kept = true
-				}
-				if (kept) refuse()
-				await unlinkGone(path)
-			}
+			// Every entry at any depth through its own decision, in its unlink's turn: a file directly
+			// in the folder by its keep answer (listed by another live discovery, or a marked
+			// folder) and then the protection port (a protected file stops the removal); a deeper
+			// one (no recording id names it) by the folder's mark alone.
+			const kept = await this.removeTree(
+				dir,
+				chain,
+				(name, atTop) => {
+					if (!atTop) return this.heldFolderUnknown(discoveryId)
+					if (keeps(name)) return true
+					let protectedFile = true
+					try {
+						protectedFile =
+							this.protection?.isScannerFileProtected(discoveryId, name) !==
+							false
+					} catch {
+						protectedFile = true
+					}
+					if (protectedFile) refuse()
+					return false
+				},
+				true,
+			)
+			this.noteKeptUnknown(discoveryId, kept)
 			if (this.holdsKept(discoveryId)) refuse()
 			// The folder and its ancestors must still be the ones first lstat-verified.
 			const again = await realDirectory(dir)
@@ -1056,15 +1423,35 @@ export class EvidenceStore {
 				again.ino !== top.ino
 			)
 				pending()
-			// Only non-media entries remain; rm -rf on the lstat-verified folder does not follow links.
-			await rm(dir, { recursive: true, force: true })
+			// Only an empty folder goes; one a kept file (or anything left) holds fails harmlessly.
+			await rmdirIfEmpty(dir)
 		}
 		if (this.holdsKept(discoveryId)) refuse()
-		if (refused || !(await safeAncestor(join(this.root, "evidence")))) pending()
-		await rm(join(this.root, "evidence", discoveryId), {
-			recursive: true,
-			force: true,
-		})
+		const evidence = join(this.root, "evidence")
+		if (refused || !(await safeAncestor(evidence))) pending()
+		// The evidence folder holds no recording file (a recording id names one under recordings/
+		// only), but it is walked the same way: nothing is removed recursively.
+		const evidenceId = await realDirectory(evidence)
+		const evidenceDir = join(evidence, discoveryId)
+		const top = evidenceId === null ? null : await realDirectory(evidenceDir)
+		if (evidenceId === null || top === null) {
+			await unlinkGone(evidenceDir).catch((err: unknown) => {
+				const code = errorCode(err)
+				if (code !== "EISDIR" && code !== "EPERM" && code !== "ENOTDIR")
+					throw err
+			})
+			return
+		}
+		await this.removeTree(
+			evidenceDir,
+			[
+				{ path: evidence, ...evidenceId },
+				{ path: evidenceDir, ...top },
+			],
+			() => false,
+			true,
+		)
+		await rmdirIfEmpty(evidenceDir)
 	}
 
 	async retention(
@@ -1076,10 +1463,43 @@ export class EvidenceStore {
 		const files = await this.collect()
 		// WG10 req 1.5: an operator keep of a survivor protects its alias folders.
 		keepDiscoveryIds = withAliasFolders(keepDiscoveryIds, this.aliasesOf)
+		const keep = keepDiscoveryIds
+		const unresolved = new Set<string>()
+		const unknownHeld = new Set<string>()
+		/**
+		 * One recording file's policy, asked again in its unlink's own turn: true keeps it. A
+		 * marked folder or an unknown lister keeps it (counted), before anything else; so does a
+		 * folder whose owner nothing resolves (counted). A file the ownership table records
+		 * listers for follows them, the folder's own discovery only when it is one of them: kept
+		 * while any lister is kept, otherwise aged and quota-removed like their own files. Any
+		 * other file follows its folder's owner (an alias folder's survivor included).
+		 */
+		const recordingKept = (f: StoredFile): boolean => {
+			const listers = this.listers(
+				f.discoveryId,
+				f.path.split("/").at(-1) ?? "",
+			)
+			if (listers === null) {
+				unknownHeld.add(f.path)
+				return true
+			}
+			if (!this.folderResolved(f.discoveryId)) {
+				unresolved.add(f.discoveryId)
+				return true
+			}
+			if (listers.length === 0) return keep.has(f.discoveryId)
+			return listers.some(id => keep.has(id) || !this.folderResolved(id))
+		}
+		/** An evidence file follows its folder's owner; an unresolved folder keeps it (counted). */
+		const evidenceKept = (f: StoredFile): boolean => {
+			if (this.folderResolved(f.discoveryId)) return keep.has(f.discoveryId)
+			unresolved.add(f.discoveryId)
+			return true
+		}
 		const isProtected = (f: StoredFile): boolean =>
 			f.probe ||
 			now - f.mtimeMs < RECORDING_IN_PROGRESS_MS ||
-			keepDiscoveryIds.has(f.discoveryId) ||
+			(f.category === "recordings" ? recordingKept(f) : evidenceKept(f)) ||
 			(this.analog?.protectedDiscovery(f.discoveryId) ?? false) ||
 			/^analog-[0-9a-f-]{36}\.wav$/i.test(f.path.split("/").at(-1) ?? "") ||
 			this.keptFile(f)
@@ -1090,17 +1510,13 @@ export class EvidenceStore {
 		const gone = new Set<string>()
 		const deleted: string[] = []
 		const remove = async (f: StoredFile): Promise<boolean> => {
-			if (this.protection) {
-				// WG9 req 2.5: every listed directory is re-verified first (a swapped one skips the
-				// file); then the decision and a single-syscall unlink share one turn (rm lstats first).
-				if (!(await chainIntact(f.chain ?? []))) return false
-				if (this.keptFile(f)) return false
-				try {
-					await unlink(f.path)
-				} catch (err) {
-					if (errorCode(err) !== "ENOENT") throw err
-				}
-			} else await rm(f.path, { force: true })
+			// WG9 req 2.5: every listed directory is re-verified first (a swapped one skips the file).
+			if (this.protection && !(await chainIntact(f.chain ?? []))) return false
+			// The whole decision again, then a single-syscall unlink in the same turn (rm lstats
+			// first): a listing, a folder mark, a split or a Keep that landed during an await of
+			// this pass keeps the file.
+			if (isProtected(f)) return false
+			await unlinkGone(f.path)
 			gone.add(f.path)
 			deleted.push(f.rel)
 			return true
@@ -1112,6 +1528,7 @@ export class EvidenceStore {
 			["recordings", this.caps.maxRecordingsMb * MIB],
 			["evidence", this.caps.maxEvidenceMb * MIB],
 		]
+		let recordingsLeft = 0
 		for (const [category, capBytes] of caps) {
 			let total = 0
 			for (const f of files)
@@ -1122,6 +1539,7 @@ export class EvidenceStore {
 					continue
 				if (await remove(f)) total -= f.bytes
 			}
+			if (category === "recordings") recordingsLeft = total
 		}
 		if (this.analog)
 			deleted.push(
@@ -1132,12 +1550,66 @@ export class EvidenceStore {
 				)),
 			)
 		await this.removeEmptyDirs()
+		// The folders left on disk: an alias whose folder retention emptied may be released again.
+		await this.loadFolderIndex().catch((err: unknown) =>
+			this.log.debug({ err }, "Scanner folder listing failed"),
+		)
+		this.unresolvedFolders = unresolved.size
+		this.unknownHeldFiles = unknownHeld.size
+		this.noteQuota(recordingsLeft + (this.analog?.managedBytes ?? 0))
+		if (unknownHeld.size > 0)
+			this.log.debug(
+				{ kept: unknownHeld.size },
+				"Scanner retention kept recordings whose owner is unknown",
+			)
+		if (unresolved.size > 0)
+			this.log.debug(
+				{ unresolved: unresolved.size },
+				"Scanner retention kept folders without an owner",
+			)
+		if (this.quarantinedRecordingCount > 0)
+			this.log.debug(
+				{ quarantined: this.quarantinedRecordingCount },
+				"Scanner retention kept quarantined recordings",
+			)
 		if (deleted.length > 0)
 			this.log.info(
 				{ deleted: deleted.length },
 				"Scanner retention removed files",
 			)
 		return { deleted }
+	}
+
+	/**
+	 * The recordings left after a retention pass against the quota: entering or leaving the
+	 * exceeded state logs once (numbers only).
+	 */
+	private noteQuota(usedBytes: number): void {
+		const capBytes = this.caps.maxRecordingsMb * MIB
+		const next =
+			Number.isFinite(usedBytes) && usedBytes > capBytes
+				? {
+						capBytes,
+						usedBytes,
+						overBytes: usedBytes - capBytes,
+					}
+				: null
+		if (next !== null && this.quotaExceeded === null)
+			this.log.warn(
+				{
+					reason: "storage-cap",
+					capBytes: next.capBytes,
+					usedBytes: next.usedBytes,
+					overBytes: next.overBytes,
+				},
+				"Scanner recordings quota exceeded and retention may remove nothing more; analog recordings are refused (storage-cap)",
+			)
+		else if (next === null && this.quotaExceeded !== null)
+			this.log.info(
+				{ reason: "storage-cap", capBytes },
+				"Scanner recordings quota no longer exceeded; analog recordings are admitted again",
+			)
+		this.quotaExceeded = next
 	}
 
 	async diskState(): Promise<"ok" | "disk-low"> {

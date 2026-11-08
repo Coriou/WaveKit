@@ -10,7 +10,19 @@ import {
 	MAX_RECOVERY_OPERATIONS,
 } from "./recording-operation.js"
 import type { PreparedRecordingMetadata } from "./recording-operation.js"
-import { DISCOVERY_RECORDING_ALIASES_MAX } from "../../recordings/contract.js"
+import { DISCOVERY_RECORDING_ALIASES_STORED_MAX } from "../recording-aliases.js"
+import {
+	HeldGuardSchema,
+	HeldJournalFormatSchema,
+	HeldOverflowSchema,
+	HeldRecordingChangesSchema,
+} from "./held-recordings.js"
+import type {
+	HeldGuardState,
+	HeldJournalFormat,
+	HeldOverflowState,
+	HeldRecordingChange,
+} from "./held-recordings.js"
 import type {
 	DecodeEvidence,
 	Discovery,
@@ -320,9 +332,27 @@ export interface StoreMutation {
 	}
 	/** WG10 req 1.5: each changed owner's merge alias list as written (empty: none left). */
 	aliases?: { id: string; aliases: string[] }[]
+	/** Ownership changes, one per listing of a recording (held-recordings.ts). */
+	heldRecordings?: HeldRecordingChange[]
+	/** The overflow marks of the ownership table as now held (written whole when they change). */
+	heldOverflow?: HeldOverflowState
+	/** A split sequence's first entry: its temporary guard opens (held-recordings.ts). */
+	heldGuard?: HeldGuardState
+	/** A split sequence's last entry: these marks are added, then its own guard closes. */
+	heldGuardEnd?: HeldGuardState
+	/**
+	 * The held-recording journal format (HELD_JOURNAL_FORMAT) on every entry this writer emits;
+	 * only an entry carrying it is trusted to journal every refusal's outcome. An earlier marker
+	 * (one holder per file) still loads and replays as held-recordings.ts describes.
+	 */
+	heldFormat?: HeldJournalFormat
 }
 
-/** WG10 req 1.5: one owner's merge aliases (bounded; absent in state written before WG10). */
+/**
+ * One owner's merge aliases (bounded; absent in older state). Lists
+ * past 64 hold aliases that still own folders on disk (RecordingAliasTable.adopt); state written
+ * with at most 64 still loads.
+ */
 export const DiscoveryAliasEntrySchema = z
 	.object({
 		id: z
@@ -336,7 +366,7 @@ export const DiscoveryAliasEntrySchema = z
 					.max(64)
 					.regex(/^d_[0-9A-Za-z]+$/),
 			)
-			.max(DISCOVERY_RECORDING_ALIASES_MAX),
+			.max(DISCOVERY_RECORDING_ALIASES_STORED_MAX),
 	})
 	.strict()
 export const StoreMutationSchema = z
@@ -364,6 +394,11 @@ export const StoreMutationSchema = z
 			})
 			.optional(),
 		aliases: z.array(DiscoveryAliasEntrySchema).optional(),
+		heldRecordings: HeldRecordingChangesSchema.optional(),
+		heldOverflow: HeldOverflowSchema.optional(),
+		heldGuard: HeldGuardSchema.optional(),
+		heldGuardEnd: HeldGuardSchema.optional(),
+		heldFormat: HeldJournalFormatSchema.optional(),
 	})
 	.strict()
 export type StoreMutationCheck = Assert<
