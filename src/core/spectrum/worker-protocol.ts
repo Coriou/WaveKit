@@ -13,6 +13,7 @@ import {
 } from "../scanner/scanner-redesign-contract.js"
 import type { ArtefactMasks } from "./artefacts.js"
 import { EngineStateSchema } from "./engine-state.js"
+import { MAX_REAL_RANGES } from "./spur-map.js"
 import { wireEventProblem } from "./summary-wire.js"
 import type {
 	EngineState,
@@ -127,6 +128,7 @@ export const PipelineInputSchema = z
 			rasters: z.array(RasterSchema),
 			obwHz: z.array(z.number().positive()),
 			inWindow: z.boolean(),
+			realRanges: z.array(FreqRangeSchema).max(MAX_REAL_RANGES).optional(),
 		}),
 		z.object({ kind: z.literal("spectrum-feed"), enabled: z.boolean() }),
 		z.object({

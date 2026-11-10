@@ -32,6 +32,8 @@ const NOISE_BIN_POWER = (SIGMA * SIGMA * 1.5) / N // tone-calibrated per-bin noi
 const POOL_SIZE = 1 << 20
 /** P24: the injected provisional-line window (the pipeline default is 30 s). */
 const WINDOW_MS = 3_000
+/** A second LO centre 100 kHz away: 100 bins, past the 18-bin separation a confirmation needs. */
+const HOP_HZ = 100_000
 const POOL = gaussianNoise(mulberry32(20261010), POOL_SIZE, SIGMA)
 
 function noiseAt(offset: number, n: number): Iq {
@@ -111,20 +113,25 @@ describe("SpectrumPipeline artefact rejection", () => {
 		)
 	}, 180_000)
 
-	it("masks a 7-tooth comb within one line window of settled data (30 s by default) while a real 9 kHz emission between teeth is still detected", async () => {
+	it("masks a 7-tooth comb once two LO centres confirm it, while a real 9 kHz emission between teeth is still detected", async () => {
 		// Feature: signal-discovery-scanner, Property 24: Comb masking
 		// Validates: spec § 4.9
 		// The line window is injected at 3 s (default PROVISIONAL_WINDOW_MS = 30 s, covered by Task 7a's module
-		// half): the same 0.1 s masking margin, at a tenth of the simulated time.
-		const total = ((WINDOW_MS + 1500) * FS) / 1000
-		const emitFrom = ((WINDOW_MS + 500) * FS) / 1000
-		const maskedBy = ((WINDOW_MS + 100) * FS) / 1000
+		// half). The comb is found at the first centre; it masks once the epoch of a second centre 100 kHz
+		// away (≥ 18 bins) has closed with the teeth still at their baseband bins, within 0.1 s.
+		const ms = (t: number): number => (t * FS) / 1000
+		const firstEnd = ms(WINDOW_MS + 300)
+		const secondEnd = firstEnd + ms(500)
+		const total = secondEnd + ms(1500)
+		const emitFrom = secondEnd + ms(500)
+		const maskedBy = secondEnd + ms(100)
 		await fc.assert(
 			fc.asyncProperty(
 				fc.integer({ min: 20, max: 26 }), // tooth spacing in bins (kHz)
 				fc.double({ min: 0, max: 1, noNaN: true }), // comb position around DC
 				fc.double({ min: -0.3, max: 0.3, noNaN: true }), // common sub-bin offset of the teeth
-				fc.double({ min: 15, max: 26, noNaN: true }), // tooth per-bin SNR
+				// tooth per-bin SNR: receiver lines read under the gate's 6 dB pass level in a 12.5 kHz slot
+				fc.double({ min: 8, max: 10, noNaN: true }),
 				fc.constantFrom(0, 1, 4, 5), // the gap that holds the emission (DC sits in gap 2)
 				fc.integer({ min: 0, max: POOL_SIZE - 1 }),
 				fc.integer({ min: 1, max: 2 ** 31 - 1 }),
@@ -151,8 +158,13 @@ describe("SpectrumPipeline artefact rejection", () => {
 						{ provisionalWindowMs: WINDOW_MS },
 					)
 					h.start()
-					for (let at = 0; at < total; at += FS / 2) {
-						const len = Math.min(FS / 2, total - at)
+					const step = ms(100)
+					for (let at = 0; at < total; at += step) {
+						if (at === firstEnd)
+							h.pending({ epoch: 2, centreHz: CENTRE + HOP_HZ, staleMaxMs: 0 })
+						if (at === secondEnd)
+							h.pending({ epoch: 3, centreHz: CENTRE, staleMaxMs: 0 })
+						const len = Math.min(step, total - at)
 						const iq = addInto(
 							noiseAt(offset + at, len),
 							toneComb(len, FS, teethHz, amps, at),
@@ -165,18 +177,11 @@ describe("SpectrumPipeline artefact rejection", () => {
 						teethHz.some(
 							hz => Math.abs(t.centreHz - (CENTRE + hz)) <= 2 * BIN_HZ,
 						)
-					const teeth = tracks.filter(onTooth)
-					expect(teeth.length).toBeGreaterThanOrEqual(7)
-					expect(teeth.every(t => t.flags.spur)).toBe(true)
-					// the bound itself: the first snapshot that carries `spur` ends no later than one line window (+ 0.1 s)
-					for (const t of teeth) {
-						const firstSpur = h
-							.tracks()
-							.find(s => s.trackId === t.trackId && s.flags.spur)
-						expect(firstSpur?.lastSample ?? Infinity).toBeLessThanOrEqual(
-							maskedBy,
-						)
-					}
+					// the bound itself: no tooth is tracked unflagged past the second centre's epoch (+ 0.1 s)
+					const late = tracks.filter(
+						t => onTooth(t) && !t.flags.spur && t.lastSample > maskedBy,
+					)
+					expect(late).toEqual([])
 					const found = tracks.filter(
 						t =>
 							!t.flags.spur &&
@@ -184,18 +189,59 @@ describe("SpectrumPipeline artefact rejection", () => {
 							Math.abs(t.centreHz - (CENTRE + emissionHz)) <= 2 * BIN_HZ,
 					)
 					expect(found.length).toBeGreaterThan(0)
+					// the two teeth beside the emission may read its bins in their 12.5 kHz slot: their
+					// mask lifts while it is on air, the other five stay masked
 					const masks = h.pipeline.artefactMasks()
-					expect(masks.spurs.filter(s => s.origin === "comb")).toHaveLength(7)
-					for (const hz of teethHz)
-						expect(artefactOf(CENTRE + hz, masks.epoch, masks)).toBe("spur")
+					const combs = masks.spurs.filter(s => s.origin === "comb").length
+					expect(combs).toBeGreaterThanOrEqual(5)
+					expect(combs).toBeLessThanOrEqual(7)
+					teethHz.forEach((hz, k) => {
+						if (k !== gap && k !== gap + 1)
+							expect(artefactOf(CENTRE + hz, masks.epoch, masks)).toBe("spur")
+					})
 					expect(artefactOf(CENTRE + emissionHz, masks.epoch, masks)).toBeNull()
 				},
 			),
 			{ numRuns: 100, seed: 24 },
 		)
-	}, 120_000)
+	}, 180_000)
 
-	it("starts masked after a restart: persisted comb lines drop their segments from the first block", () => {
+	it("never masks a comb seen from one centre only: a parked comb stays tracked", () => {
+		const toothBins = [70, 95, 120 + 25, 170]
+		const teethHz = toothBins.map(b => (b - N / 2) * BIN_HZ)
+		const h = new Harness(
+			{ format: "FLOAT32LE" },
+			{ provisionalWindowMs: WINDOW_MS },
+		)
+		h.start()
+		const n = ((WINDOW_MS + 1500) * FS) / 1000
+		h.push(
+			addInto(
+				noiseAt(0, n),
+				toneComb(
+					n,
+					FS,
+					teethHz,
+					teethHz.map(() => toneAmp(9)),
+				),
+			),
+			16_384,
+		)
+		const masks = h.pipeline.artefactMasks()
+		const last = lastSnapshots(h)
+		expect(masks.spurs).toEqual([])
+		for (const hz of teethHz)
+			expect(
+				last.some(
+					t =>
+						!t.flags.spur &&
+						t.lastSample >= ((WINDOW_MS + 1000) * FS) / 1000 &&
+						Math.abs(t.centreHz - (CENTRE + hz)) <= 2 * BIN_HZ,
+				),
+			).toBe(true)
+	})
+
+	it("starts unverified after a restart: persisted lines over carriers mask nothing until two centres re-confirm them", () => {
 		const toothBins = [70, 95, 160, 185]
 		const persistedEngine: EngineState = {
 			version: 1,
@@ -214,34 +260,113 @@ describe("SpectrumPipeline artefact rejection", () => {
 				comb: true,
 			})),
 		}
-		const n = 2 * FS
+		const ms = (t: number): number => (t * FS) / 1000
 		const teethHz = toothBins.map(b => (b - N / 2) * BIN_HZ)
-		const betweenHz = (120 - N / 2) * BIN_HZ
-		const tones = [...teethHz, betweenHz]
-		const h = run(
-			addInto(
-				noiseAt(0, n),
-				toneComb(
-					n,
-					FS,
-					tones,
-					tones.map(() => toneAmp(25)),
-				),
-			),
-			{ persistedEngine },
-		)
-		const near = (hz: number): TrackSnapshot[] =>
-			h.tracks().filter(t => Math.abs(t.centreHz - (CENTRE + hz)) <= 2 * BIN_HZ)
-		for (const hz of teethHz) expect(near(hz)).toEqual([])
-		expect(near(betweenHz).length).toBeGreaterThan(0)
+		// a strong carrier on the first tooth (the restart case of a channel under a stale line), weak lines on the rest
+		const amps = toothBins.map((_, i) => toneAmp(i === 0 ? 25 : 9))
+		const h = new Harness({ format: "FLOAT32LE", persistedEngine })
+		h.start()
+		const near = (hz: number, from: number): TrackSnapshot[] =>
+			h
+				.tracks()
+				.filter(
+					t =>
+						t.lastSample >= from &&
+						Math.abs(t.centreHz - (CENTRE + hz)) <= 2 * BIN_HZ,
+				)
+		let at = 0
+		const play = (len: number): void => {
+			h.push(
+				addInto(noiseAt(at, len), toneComb(len, FS, teethHz, amps, at)),
+				16_384,
+			)
+			at += len
+		}
+		play(ms(1000))
+		for (const hz of teethHz) expect(near(hz, 0).length).toBeGreaterThan(0)
+		expect(h.pipeline.artefactMasks().spurs).toEqual([])
+		h.pending({ epoch: 2, centreHz: CENTRE + HOP_HZ, staleMaxMs: 0 })
+		play(ms(500))
+		h.pending({ epoch: 3, centreHz: CENTRE, staleMaxMs: 0 })
+		play(ms(1000))
+		const from = at - ms(500)
+		// the strong carrier is above the gate's pass level: never re-confirmed, still tracked
+		expect(near(teethHz[0] ?? 0, from).some(t => !t.flags.spur)).toBe(true)
+		for (const hz of teethHz.slice(1))
+			expect(near(hz, from).filter(t => !t.flags.spur)).toEqual([])
 		const masks = h.pipeline.artefactMasks()
-		expect(masks.spurs.map(s => s.origin)).toEqual([
-			"comb",
-			"comb",
-			"comb",
-			"comb",
-		])
-		for (const hz of teethHz)
+		expect(
+			artefactOf(CENTRE + (teethHz[0] ?? 0), masks.epoch, masks),
+		).toBeNull()
+		for (const hz of teethHz.slice(1))
 			expect(artefactOf(CENTRE + hz, masks.epoch, masks)).toBe("spur")
+	})
+
+	it("suspends a verified mask on the bins of a confirmed signal and counts it", () => {
+		const toothBins = [70, 95, 160, 185]
+		const teethHz = toothBins.map(b => (b - N / 2) * BIN_HZ)
+		const amps = toothBins.map(() => toneAmp(9))
+		const ms = (t: number): number => (t * FS) / 1000
+		const h = new Harness(
+			{ format: "FLOAT32LE" },
+			{ provisionalWindowMs: WINDOW_MS },
+		)
+		h.start()
+		let at = 0
+		const play = (len: number): void => {
+			h.push(
+				addInto(noiseAt(at, len), toneComb(len, FS, teethHz, amps, at)),
+				16_384,
+			)
+			at += len
+		}
+		play(ms(WINDOW_MS + 300))
+		h.pending({ epoch: 2, centreHz: CENTRE + HOP_HZ, staleMaxMs: 0 })
+		play(ms(500))
+		h.pending({ epoch: 3, centreHz: CENTRE, staleMaxMs: 0 })
+		play(ms(500))
+		const masked = h.pipeline.artefactMasks()
+		for (const hz of teethHz)
+			expect(artefactOf(CENTRE + hz, masked.epoch, masked)).toBe("spur")
+		// the scanner confirmed the second tooth's frequency real (a voice, a decode, a proof)
+		const real = CENTRE + (teethHz[1] ?? 0)
+		h.send({
+			kind: "masks",
+			exclusions: [],
+			cfarRanges: [],
+			burstRanges: [],
+			rasters: [],
+			obwHz: [],
+			inWindow: true,
+			realRanges: [{ startHz: real - 2000, endHz: real + 2000 }],
+		})
+		const from = at
+		play(ms(6000)) // past the 5 s stats interval
+		// the tooth is tracked again on the real bins (a track keeps a spur flag it once got: Tracker's rule)
+		const tracked = h
+			.tracks()
+			.filter(
+				t =>
+					t.lastSample > from + FS && Math.abs(t.centreHz - real) <= 2 * BIN_HZ,
+			)
+		expect(tracked.length).toBeGreaterThan(0)
+		for (const hz of [teethHz[0], teethHz[2], teethHz[3]])
+			expect(
+				h
+					.tracks()
+					.filter(
+						t =>
+							t.lastSample > from + FS &&
+							Math.abs(t.centreHz - (CENTRE + (hz ?? 0))) <= 2 * BIN_HZ,
+					),
+			).toEqual([])
+		const after = h.pipeline.artefactMasks()
+		expect(artefactOf(real, after.epoch, after)).toBeNull()
+		expect(artefactOf(CENTRE + (teethHz[0] ?? 0), after.epoch, after)).toBe(
+			"spur",
+		)
+		const stats = h.of("stats").at(-1)?.stats.spurMask
+		expect(stats?.suspensions).toBe(1)
+		expect(stats?.suspendedBlocks).toBeGreaterThan(0)
 	})
 })

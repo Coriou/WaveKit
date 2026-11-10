@@ -398,6 +398,20 @@ export class SpectrumPipeline {
 	private readonly lineMask: Uint8Array
 	/** This block's spur + provisional + comb core bins (withoutLines); the summary reports them. */
 	private readonly lineScratch: Uint8Array
+	/** This block's verified, unprotected baseband spur bins (SpurMap.mask). */
+	private readonly spurBins: Uint8Array
+	/** Bins of signals the scanner confirmed real (masks.realRanges, ±1 bin): no spur mask covers them. */
+	private readonly realMask: Uint8Array
+	/** The detector mask without spurs (DC, edges, exclusions) for this epoch: where a line can be seen. */
+	private readonly baseUsable: Uint8Array
+	/** Line bins for the baseband learner: detector output, and spur-masked bins re-tested. */
+	private readonly lineOn: Uint8Array
+	/** Key whose per-bin floor `floorDb` holds (null before the first block). */
+	private floorKey: string | null = null
+	/** Blocks in which a spur mask met a confirmed signal and was suspended there, and how often that began. */
+	private spurSuspendedBlocks = 0
+	private spurSuspensions = 0
+	private spurSuspendedLast = false
 	private readonly lastActive: Float64Array
 	private lastActivityEnd = 0
 	/** IQ-image tracks of the last block, for artefactMasks() and the block summary's `iqImage` (emitWithImages). */
@@ -636,6 +650,10 @@ export class SpectrumPipeline {
 		})
 		this.lineMask = new Uint8Array(this.n)
 		this.lineScratch = new Uint8Array(this.n)
+		this.spurBins = new Uint8Array(this.n)
+		this.realMask = new Uint8Array(this.n)
+		this.baseUsable = new Uint8Array(this.n)
+		this.lineOn = new Uint8Array(this.n)
 		this.lastActive = new Float64Array(this.n).fill(Number.NEGATIVE_INFINITY)
 		const persisted = cfg.persistedEngine
 		if (persisted) {
@@ -756,7 +774,8 @@ export class SpectrumPipeline {
 			version: 1,
 			absoluteFloors: this.floor.exportState().absoluteFloors,
 			spurs: this.spurs.exportState().spurs,
-			provisionalSpurs: this.provisional.exportState().provisionalSpurs,
+			provisionalSpurs: this.provisional.exportState(this.spurs)
+				.provisionalSpurs,
 			kByRange: this.detector.stats().map(s => {
 				const r = parseKey(s.key)
 				return { startHz: r.startHz, endHz: r.endHz, k: s.k }
@@ -865,7 +884,14 @@ export class SpectrumPipeline {
 				activity: [],
 			}
 		const n = this.n
-		const lines = this.provisional.lines(ep.absKey)
+		// only lines that mask now (verified, quiet, not on a confirmed signal) are artefacts
+		const lines = this.provisional
+			.lines(ep.absKey)
+			.filter(
+				l =>
+					this.spurs.masks(ep.absKey, l.startBin, l.endBin) &&
+					!this.realMask.subarray(l.startBin, l.endBin).includes(1),
+			)
 		const spurs = lines.map(
 			(l): ArtefactSpurLine => ({
 				startHz: this.rfLow(ep, Math.max(0, l.startBin - 1)),
@@ -874,7 +900,7 @@ export class SpectrumPipeline {
 			}),
 		)
 		const baseband = new Uint8Array(n)
-		this.spurs.mask(ep.absKey, baseband)
+		this.spurs.mask(ep.absKey, baseband, this.realMask)
 		for (const run of runsOf(baseband)) {
 			// a promoted comb tooth is listed once, as its comb line
 			if (
@@ -1537,8 +1563,17 @@ export class SpectrumPipeline {
 		this.gaps = this.gaps.filter(g => g.end > blockEnd)
 
 		t = this.mark(sample)
+		// Slot levels against the key's last per-bin floor: a line at the gate's pass level is no spur.
+		this.spurs.measure(
+			this.powerDb,
+			this.floorKey === ep.absKey ? this.floorDb : null,
+			this.binHz,
+		)
+		this.spurBins.fill(0)
+		const suspended = this.spurs.mask(ep.absKey, this.spurBins, this.realMask)
 		this.extra.set(this.exclusionMask)
-		this.spurs.mask(ep.absKey, this.extra)
+		for (let i = 0; i < this.n; i++)
+			if (this.spurBins[i] === 1) this.extra[i] = 1
 		const masks = {
 			dcGuardBins: this.dcBins,
 			edgeBins: this.edgeBins,
@@ -1552,6 +1587,7 @@ export class SpectrumPipeline {
 		this.floor.perBinFloor(this.floorDb, effective)
 		this.setShortThresholds()
 		this.floorReady = true
+		this.floorKey = ep.absKey
 		this.take(sample, "floor", t)
 		// recordNoiseEdges assumes adjacent blocks: after a skipped, stale, gap, overload or excluded block, start afresh
 		if (this.blockIndex !== this.noiseEdgeBlock + 1) this.detector.reset()
@@ -1587,6 +1623,7 @@ export class SpectrumPipeline {
 		const segs = this.withoutLines(
 			ep,
 			segment(this.on, this.powerDb, this.floorDb, segOpts),
+			suspended,
 		)
 		this.take(sample, "tracker", t)
 
@@ -1682,11 +1719,26 @@ export class SpectrumPipeline {
 				ep.absKey,
 			)
 			this.take(sample, "floor", t)
+			// A bin the spur mask hid is re-tested against the detector's held threshold, so a
+			// masked line is still seen (or missed) under every centre.
+			const h = this.cfg.hysteresisDb
+			for (let i = 0; i < this.n; i++) {
+				let lineOn = 0
+				if (this.baseUsable[i] === 1) {
+					if (unmasked[i] === 1) lineOn = this.on[i] ?? 0
+					else if (this.spurBins[i] === 1) {
+						const held = (this.floorDb[i] ?? 0) + this.detector.kFor(i) - h
+						lineOn = (this.powerDb[i] ?? -Infinity) >= held ? 1 : 0
+					}
+				}
+				this.lineOn[i] = lineOn
+			}
 			this.spurs.observe(
 				ep.absKey,
 				{ epoch: ep.epoch, centreHz: ep.centreHz, binHz: this.binHz },
 				this.on,
 				this.blockMs,
+				{ on: this.lineOn, observable: this.baseUsable },
 			)
 			this.observeLines(ep)
 		}
@@ -2065,10 +2117,25 @@ export class SpectrumPipeline {
 	 * Spec § 4.9: drops segments that lie wholly on a spur line (baseband, provisional or comb), ±1 bin of Hann skirt.
 	 * Also drops segments that only hysteresis holds on (§ 4.5): no bin over floor + k in this block.
 	 */
-	private withoutLines(ep: EpochState, segs: Segment[]): Segment[] {
-		this.lineScratch.fill(0)
-		this.spurs.mask(ep.absKey, this.lineScratch)
-		this.provisional.mask(ep.absKey, this.lineScratch)
+	private withoutLines(
+		ep: EpochState,
+		segs: Segment[],
+		spurSuspended: number,
+	): Segment[] {
+		this.lineScratch.set(this.spurBins)
+		const suspended =
+			spurSuspended +
+			this.provisional.mask(
+				ep.absKey,
+				this.lineScratch,
+				this.spurs,
+				this.realMask,
+			)
+		if (suspended > 0) {
+			this.spurSuspendedBlocks++
+			if (!this.spurSuspendedLast) this.spurSuspensions++
+		}
+		this.spurSuspendedLast = suspended > 0
 		this.lineMask.fill(0)
 		for (let i = 0; i < this.n; i++) {
 			if (this.lineScratch[i] === 1)
@@ -2107,6 +2174,7 @@ export class SpectrumPipeline {
 			this.powerDb,
 			this.detector.unmasked(),
 			this.blockMs,
+			this.spurs,
 		)
 		if (promoted.length > 0) this.spurs.promote(ep.absKey, this.binHz, promoted)
 	}
@@ -2498,6 +2566,13 @@ export class SpectrumPipeline {
 			edgeBins: this.edgeBins,
 			extra: this.exclusionMask,
 		})
+		this.baseUsable.set(this.detector.unmasked())
+		this.realMask.fill(0)
+		for (const x of this.masks.realRanges ?? []) {
+			const first = Math.max(0, Math.ceil(binOf(x.startHz)) - 1)
+			const last = Math.min(n - 1, Math.floor(binOf(x.endHz)) + 1)
+			if (first <= last) this.realMask.fill(1, first, last + 1)
+		}
 		this.shortDetector?.setMasks({
 			dcGuardBins: this.dcBins,
 			edgeBins: this.edgeBins,
@@ -2667,6 +2742,10 @@ export class SpectrumPipeline {
 			observedSamples: this.observedSamples,
 			blankedFrames: this.blanker.blankedFrames,
 			broadbandRfi: this.rfiStats(),
+			spurMask: {
+				suspensions: this.spurSuspensions,
+				suspendedBlocks: this.spurSuspendedBlocks,
+			},
 		}
 		this.out.push({ kind: "stats", stats })
 		const run = this.frames.activeCounterRun

@@ -208,6 +208,7 @@ import {
 	planRetirement,
 } from "./fragment-retirement.js"
 import type { FragmentPlan, FragmentRecord } from "./fragment-retirement.js"
+import { confirmedRealRange } from "../real-ranges.js"
 import { SCANNER_LOAD_SLICE_ITEMS, yieldToEventLoop } from "./slices.js"
 import type { YieldTurn } from "./slices.js"
 
@@ -4964,6 +4965,33 @@ export class DiscoveryStore
 		this.assertNotRestoring()
 		const steps = this.restoreSteps(s, Number.POSITIVE_INFINITY)
 		while (!steps.next().done);
+	}
+
+	/**
+	 * The RF extent of every discovery of `sourceId` whose content is confirmed real (a decode, an
+	 * identity, a kept voice recording or a proof), most recently seen first: spur masks never
+	 * cover these (spectrum/spur-map.ts). Decode anchors carry no RF extent and are left out.
+	 */
+	confirmedRealRanges(
+		sourceId: string,
+	): { id: string; startHz: number; endHz: number; seenMs: number }[] {
+		const out: {
+			id: string
+			startHz: number
+			endHz: number
+			seenMs: number
+		}[] = []
+		for (const d of this.discoveries.values()) {
+			if (!d.sourceIds.includes(sourceId)) continue
+			const range =
+				confirmedRealRange(d) ??
+				(this.discoveryView(d).proof !== null
+					? confirmedRealRange({ ...d, proof: true })
+					: null)
+			if (range !== null)
+				out.push({ id: d.id, ...range, seenMs: Date.parse(d.lastSeenAt) })
+		}
+		return out.sort((a, b) => b.seenMs - a.seenMs)
 	}
 
 	/** True while restoreInSlices runs: ingest is refused until it completes. */

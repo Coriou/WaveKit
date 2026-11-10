@@ -11,6 +11,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { Tracker } from "../../../../src/core/spectrum/emissions/tracker.js"
 import { ProvisionalSpurs } from "../../../../src/core/spectrum/provisional-spurs.js"
+import type { LineGate } from "../../../../src/core/spectrum/provisional-spurs.js"
 import {
 	FS,
 	runScene,
@@ -47,9 +48,11 @@ function spurLineFrom(fromMs: number): void {
 		this: ProvisionalSpurs,
 		key: string,
 		out: Uint8Array,
+		gate: LineGate,
+		protect?: Uint8Array,
 	) {
-		mask.call(this, key, out)
-		if (atMs < fromMs || tunedHz !== HOPS[1]) return
+		const suspended = mask.call(this, key, out, gate, protect)
+		if (atMs < fromMs || tunedHz !== HOPS[1]) return suspended
 		// Bin i of an FFT-shifted block spans centre + (i - n/2 - 0.5) × binHz (pipeline rfLow).
 		const n = out.length
 		const binHz = FS / n
@@ -59,6 +62,7 @@ function spurLineFrom(fromMs: number): void {
 			Math.max(0, Math.floor(at(SIGNAL_HZ - SPAN_HZ))),
 			Math.min(n, Math.ceil(at(SIGNAL_HZ + SPAN_HZ)) + 1),
 		)
+		return suspended
 	})
 }
 
