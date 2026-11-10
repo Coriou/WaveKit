@@ -9,6 +9,7 @@ import {
 	open,
 	opendir,
 	realpath,
+	rename,
 	rmdir,
 	unlink,
 	type FileHandle,
@@ -47,6 +48,41 @@ export const MAX_ACTIVE_ANALOG_OPERATIONS = 8
 export const MAX_ACTIVE_ANALOG_PER_SOURCE = 2
 export const MAX_ANALOG_FILE_BYTES = 1_920_044
 const RESERVATION = MAX_ANALOG_FILE_BYTES + MAX_OPERATION_METADATA_BYTES
+/**
+ * Incomplete operation folders (crash residue holding no media) a scan moved aside into
+ * `.analog-operations/.set-aside/`, kept for diagnosis. Each holds only the intent files
+ * (intent.json, intent.tmp), together at most MAX_OPERATION_METADATA_BYTES (16 KiB), so the
+ * folder holds at most 32 × 16 KiB = 512 KiB. Past the bound the oldest entries are deleted.
+ */
+export const ANALOG_SET_ASIDE_MAX = 32
+/**
+ * Why a folder was set aside (closed): a staging folder creation never published
+ * (`staging-residue`), an operation folder without intent.json (`missing-intent`, an older
+ * image's crash between mkdir and the intent link), an unreadable intent.json with no receipt and
+ * no media anywhere (`invalid-intent`).
+ */
+export const ANALOG_SET_ASIDE_REASONS = [
+	"staging-residue",
+	"missing-intent",
+	"invalid-intent",
+] as const
+export type AnalogSetAsideReason = (typeof ANALOG_SET_ASIDE_REASONS)[number]
+/** `ScannerStatus.analogOperations`: present once something is held set aside. */
+export interface AnalogSetAsideStatus {
+	setAside: number
+	lastReason?: AnalogSetAsideReason
+}
+/** A creation in progress: invisible to recovery until renamed to its operation id. */
+const STAGING_PREFIX = ".staging-"
+const SET_ASIDE_DIR = ".set-aside"
+/** `<13-digit ms stamp>-<operation uuid>`: name order is set-aside order. */
+const SET_ASIDE_ENTRY = /^(\d{13})-[0-9a-f-]{36}$/i
+/**
+ * Bound of the media search an unreadable intent.json needs before it may be set aside: one
+ * lstat per `recordings/analog/<folder>/`, at most MAX_RECOVERY_OPERATIONS (4096) folders, once
+ * per such operation (a hit is remembered); more folders: not searched, kept fail closed.
+ */
+const MEDIA_SEARCH_FOLDERS = MAX_RECOVERY_OPERATIONS
 const PRODUCER_RUN_ID = randomUUID()
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 export const AnalogCutSchema = z.enum([
@@ -283,6 +319,8 @@ export interface AnalogOperationIo {
 	readOpen?: (path: string, flags: number) => Promise<FileHandle>
 	metadataOpen?: (path: string) => Promise<WavHandle>
 	rmdir?: (path: string) => Promise<void>
+	/** Directory renames: a staging folder's publication and set-aside moves. */
+	rename?: (from: string, to: string) => Promise<void>
 	unlink(path: string): Promise<void>
 	checkpoint(name: string, operationId: string): Promise<void>
 }
@@ -309,6 +347,12 @@ interface Context {
 	 * the folder is marked, its listers are unknown; empty: the table holds no listing).
 	 */
 	listers?: (folderId: string, name: string) => readonly string[] | null
+	/** Fixed-text count log of one scan's set-aside work (no names). */
+	setAsideLogged?: (counts: {
+		moved: number
+		evicted: number
+		held: number
+	}) => void
 }
 interface Inventory {
 	bytes: number
@@ -340,6 +384,8 @@ interface Operation {
 	metadataAck: boolean
 	ownedIntent: boolean
 	ownedDirectory: boolean
+	/** The owned folder still carries its staging name (never published). */
+	staged: boolean
 	ownedMedia: boolean
 	foreignMarker: boolean
 	reservation: boolean
@@ -413,6 +459,11 @@ export class AnalogOperations {
 	/** Artifacts the last retention pass kept because their owner is unknown (table full). */
 	unknownHeldRetained = 0
 	private recovery: Promise<AnalogReconciliation[]> | null = null
+	/** Folders held in `.set-aside/` at the last scan (at most ANALOG_SET_ASIDE_MAX, see there). */
+	private setAsideHeld = 0
+	private lastSetAsideReason: AnalogSetAsideReason | null = null
+	/** Operation ids whose unreadable intent has media somewhere (searched once each). */
+	private readonly mediaBearing = new Set<string>()
 	private root: string
 	private rootAnchored = false
 	constructor(private readonly context: Context) {
@@ -448,6 +499,12 @@ export class AnalogOperations {
 	}
 	private opDir(id: string): string {
 		return join(this.root, ".analog-operations", id)
+	}
+	private stagingDir(id: string): string {
+		return join(this.root, ".analog-operations", `${STAGING_PREFIX}${id}`)
+	}
+	private setAsideDir(): string {
+		return join(this.root, ".analog-operations", SET_ASIDE_DIR)
 	}
 	private finalPath(intent: Intent): string {
 		return join(this.root, intent.artifact)
@@ -499,6 +556,7 @@ export class AnalogOperations {
 			ownedIntent: false,
 			descriptors: new Set(),
 			ownedDirectory: false,
+			staged: false,
 			ownedMedia: false,
 			foreignMarker: false,
 			reservation: false,
@@ -633,13 +691,33 @@ export class AnalogOperations {
 				true,
 				op,
 			)
-			await mkdir(this.opDir(op.intent.operationId))
+			// Built under a staging name, published by one rename once intent.json is synced: a
+			// crash anywhere before leaves a folder recovery recognises as residue (no media).
+			const id = op.intent.operationId
+			const staging = this.stagingDir(id)
+			await mkdir(staging)
 			op.ownedDirectory = true
-			await this.safeDirectory(this.opDir(op.intent.operationId), false, op)
+			op.staged = true
+			await this.checkpoint("staging-dir", id)
+			await this.safeDirectory(staging, false, op)
 			this.valid(op)
-			await this.publishIntent(op)
+			await this.publishIntent(op, staging)
 			this.valid(op)
-			await this.checkpoint("intent", op.intent.operationId)
+			await this.syncDirectory(staging)
+			await this.checkpoint("staging-synced", id)
+			this.valid(op)
+			await this.safeDirectory(dirname(this.opDir(id)), false, op)
+			try {
+				await lstat(this.opDir(id))
+				throw coded("recovery-ambiguous", "Operation folder already exists")
+			} catch (cause) {
+				if (nativeCode(cause) !== "ENOENT") throw cause
+			}
+			await this.moveDirectory(staging, this.opDir(id))
+			op.staged = false
+			await this.syncDirectory(dirname(this.opDir(id)))
+			this.valid(op)
+			await this.checkpoint("intent", id)
 			this.valid(op)
 			op.writer = await WavFileWriter.open(this.stagePath(op.intent), 8000, {
 				io: this.writerIo(op),
@@ -723,18 +801,58 @@ export class AnalogOperations {
 					},
 		}
 	}
-	private async publishIntent(op: Operation): Promise<void> {
-		const dir = this.opDir(op.intent.operationId)
+	private async publishIntent(op: Operation, dir: string): Promise<void> {
 		const temp = join(dir, "intent.tmp")
 		await this.writeSynced(temp, boundedJson(op.intent), op)
+		await this.checkpoint("intent-written", op.intent.operationId)
 		this.valid(op)
 		await this.safeTarget(join(dir, "intent.json"), op)
 		this.valid(op)
 		await link(temp, join(dir, "intent.json"))
 		op.ownedIntent = true
+		await this.checkpoint("intent-linked", op.intent.operationId)
 		this.valid(op)
 		await this.io.unlink(temp)
 		this.valid(op)
+	}
+	private moveDirectory(from: string, to: string): Promise<void> {
+		return this.io.rename?.(from, to) ?? rename(from, to)
+	}
+	/** fsync of a directory's entries; a file system that cannot sync directories is accepted. */
+	private async syncDirectory(path: string): Promise<void> {
+		const handle = await open(path, constants.O_RDONLY)
+		try {
+			await handle.sync()
+		} catch (cause) {
+			const code = nativeCode(cause)
+			if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EISDIR")
+				throw cause
+		} finally {
+			await handle.close()
+		}
+	}
+	/** Removes a never-published staging folder: it holds intent metadata only, nothing listed. */
+	private async cleanupStaging(intent: Intent): Promise<void> {
+		const id = intent.operationId
+		const dir = this.stagingDir(id)
+		this.requireCleanupClosure(id)
+		for (const name of ["intent.tmp", "intent.json"]) {
+			const path = join(dir, name)
+			await this.safeTarget(path)
+			this.requireCleanupClosure(id)
+			try {
+				await this.io.unlink(path)
+			} catch (cause) {
+				if (nativeCode(cause) !== "ENOENT") throw cause
+			}
+			await this.checkpoint("staging-cleanup", id)
+		}
+		this.requireCleanupClosure(id)
+		try {
+			await (this.io.rmdir?.(dir) ?? rmdir(dir))
+		} catch (cause) {
+			if (nativeCode(cause) !== "ENOENT") throw cause
+		}
 	}
 	private async writeSynced(
 		path: string,
@@ -983,7 +1101,9 @@ export class AnalogOperations {
 						)
 					if (op.prepared)
 						await this.context.adapter.inverse(op.intent.operationId)
-					if (op.ownedDirectory)
+					if (op.ownedDirectory && op.staged)
+						await this.cleanupStaging(op.intent)
+					else if (op.ownedDirectory)
 						await this.cleanupOwned(op.intent, op.ownedIntent, op.ownedMedia)
 				} catch {
 					cleanup = "pending"
@@ -1325,6 +1445,144 @@ export class AnalogOperations {
 	private cleanupPath(id: string): string {
 		return join(this.root, ".analog-operations", `${id}.cleanup`)
 	}
+	/** Null while nothing is held set aside. */
+	setAsideStatus(): AnalogSetAsideStatus | null {
+		if (this.setAsideHeld === 0) return null
+		return {
+			setAside: this.setAsideHeld,
+			...(this.lastSetAsideReason
+				? { lastReason: this.lastSetAsideReason }
+				: {}),
+		}
+	}
+	/**
+	 * True when `dir` holds only regular files named in `allowed`, together at most
+	 * MAX_OPERATION_METADATA_BYTES: intent metadata, never media or a receipt. Any doubt: false.
+	 */
+	private async metadataOnly(
+		dir: string,
+		allowed: readonly string[],
+	): Promise<boolean> {
+		try {
+			let bytes = 0
+			for (const name of await this.children(dir, allowed.length)) {
+				if (!allowed.includes(name)) return false
+				const info = await lstat(join(dir, name))
+				if (info.isSymbolicLink() || !info.isFile()) return false
+				bytes += info.size
+			}
+			return bytes <= MAX_OPERATION_METADATA_BYTES
+		} catch {
+			return false
+		}
+	}
+	/** No `recordings/analog/<folder>/analog-<id>.wav` anywhere (bounded, see MEDIA_SEARCH_FOLDERS). */
+	private async mediaAbsent(id: string): Promise<boolean> {
+		if (this.mediaBearing.has(id)) return false
+		const analogRoot = join(this.root, "recordings", "analog")
+		let folders: string[]
+		try {
+			await this.safeDirectory(analogRoot)
+			folders = await this.children(analogRoot, MEDIA_SEARCH_FOLDERS)
+		} catch (cause) {
+			return nativeCode(cause) === "ENOENT"
+		}
+		for (const folder of folders) {
+			try {
+				await lstat(join(analogRoot, folder, `analog-${id}.wav`))
+				this.mediaBearing.add(id)
+				return false
+			} catch (cause) {
+				const code = nativeCode(cause)
+				if (code !== "ENOENT" && code !== "ENOTDIR") return false
+			}
+		}
+		return true
+	}
+	/**
+	 * Moves verified residue into `.set-aside/` (one rename each, atomic: a crash leaves it either
+	 * place, both handled) and deletes the oldest entries past ANALOG_SET_ASIDE_MAX. A residue
+	 * folder that cannot move stays where it is: it was verified harmless, so it never poisons.
+	 * An unsafe `.set-aside` (a symlink, a file) is tampering: fail closed.
+	 */
+	private async tendSetAside(
+		base: string,
+		residue: readonly {
+			name: string
+			id: string
+			reason: AnalogSetAsideReason
+		}[],
+		next: Inventory,
+	): Promise<void> {
+		const dir = this.setAsideDir()
+		try {
+			await this.safeDirectory(dir, residue.length > 0)
+		} catch {
+			next.unknown = true
+			return
+		}
+		let entries: string[]
+		try {
+			// Our own moves add at most one entry per base child (MAX_RECOVERY_OPERATIONS * 2).
+			entries = (
+				await this.children(
+					dir,
+					ANALOG_SET_ASIDE_MAX + MAX_RECOVERY_OPERATIONS * 2,
+				)
+			)
+				.filter(name => SET_ASIDE_ENTRY.test(name))
+				.sort()
+		} catch {
+			next.unknown = true
+			return
+		}
+		let stamp = Date.now()
+		for (const name of entries)
+			stamp = Math.max(stamp, Number(name.slice(0, 13)) + 1)
+		let moved = 0
+		for (const item of residue) {
+			const target = `${String(stamp++).padStart(13, "0")}-${item.id}`
+			try {
+				await this.moveDirectory(join(base, item.name), join(dir, target))
+			} catch {
+				continue
+			}
+			entries.push(target)
+			moved++
+			this.lastSetAsideReason = item.reason
+			next.opBytes.delete(item.id)
+			await this.checkpoint("set-aside", item.id)
+		}
+		let evicted = 0
+		for (
+			let i = 0;
+			i < entries.length && entries.length > ANALOG_SET_ASIDE_MAX;
+		) {
+			if (await this.evictSetAside(join(dir, entries[i]!))) {
+				entries.splice(i, 1)
+				evicted++
+				await this.checkpoint("set-aside-evicted", "")
+			} else i++
+		}
+		this.setAsideHeld = entries.length
+		if (moved || evicted)
+			this.context.setAsideLogged?.({ moved, evicted, held: entries.length })
+	}
+	/** Deletes one set-aside entry holding only intent metadata; anything else is left. */
+	private async evictSetAside(path: string): Promise<boolean> {
+		try {
+			const info = await lstat(path)
+			if (info.isSymbolicLink() || !info.isDirectory()) return false
+			if (!(await this.metadataOnly(path, ["intent.tmp", "intent.json"])))
+				return false
+			for (const name of await this.children(path, 2))
+				await this.io.unlink(join(path, name))
+			await (this.io.rmdir?.(path) ?? rmdir(path))
+			return true
+		} catch {
+			return false
+		}
+	}
 	private async scanInventory(): Promise<void> {
 		if (this.unconfirmedReads.size) {
 			this.inventory.unknown = true
@@ -1370,7 +1628,18 @@ export class AnalogOperations {
 			await this.safeDirectory(this.root, true)
 			const base = join(this.root, ".analog-operations")
 			await this.safeDirectory(base, true)
-			const names = await this.children(base, MAX_RECOVERY_OPERATIONS * 2)
+			const all = await this.children(base, MAX_RECOVERY_OPERATIONS * 2)
+			const setAsidePresent = all.includes(SET_ASIDE_DIR)
+			const stagingNames = all.filter(name => name.startsWith(STAGING_PREFIX))
+			const names = all.filter(
+				name => name !== SET_ASIDE_DIR && !name.startsWith(STAGING_PREFIX),
+			)
+			/** Verified crash residue (no media, nothing published) to move aside. */
+			const residue: {
+				name: string
+				id: string
+				reason: AnalogSetAsideReason
+			}[] = []
 			const operationIds = new Set(
 				names.map(name =>
 					name.endsWith(".cleanup") ? name.slice(0, -8) : name,
@@ -1396,6 +1665,29 @@ export class AnalogOperations {
 				} catch {
 					next.unknown = true
 				}
+			}
+			for (const name of stagingNames) {
+				const id = name.slice(STAGING_PREFIX.length)
+				const dir = this.stagingDir(id)
+				if (!UUIDSchema.safeParse(id).success) {
+					next.unknown = true
+					continue
+				}
+				try {
+					await this.safeDirectory(dir)
+				} catch {
+					next.unknown = true
+					continue
+				}
+				if (this.active.has(id) || this.uncertainResidue.has(id)) {
+					// This process's own creation, or its unverifiable residue: counted and kept.
+					for (const child of await this.children(dir, 8))
+						await account(join(dir, child), id, true)
+					continue
+				}
+				if (await this.metadataOnly(dir, ["intent.tmp", "intent.json"]))
+					residue.push({ name, id, reason: "staging-residue" })
+				else next.unknown = true
 			}
 			for (const id of names.filter(name => !name.endsWith(".cleanup"))) {
 				if (!UUIDSchema.safeParse(id).success) {
@@ -1456,10 +1748,36 @@ export class AnalogOperations {
 						continue
 					}
 					if (nativeCode(cause) === "ENOENT" && next.intents.has(id)) continue
-					// Pre-intent crash residue is quarantined and counted; its media ownership is unknown.
-					if (!this.active.has(id)) next.unknown = true
+					// An operation of this process mid-cleanup (cleanup runs outside the lock).
+					if (this.active.has(id)) continue
+					if (cleanup.has(id) || this.uncertainResidue.has(id)) {
+						next.unknown = true
+						continue
+					}
+					// Crash residue of an older image (mkdir before the intent link) or an intent
+					// that cannot parse: set aside only when provably holding no media and no
+					// receipt; anything else (a read error, other files) stays fail closed.
+					const parseFailure =
+						cause instanceof SyntaxError || cause instanceof z.ZodError
+					let reason: AnalogSetAsideReason | null = null
+					if (nativeCode(cause) === "ENOENT") {
+						if (await this.metadataOnly(dir, ["intent.tmp"]))
+							reason = "missing-intent"
+					} else if (
+						parseFailure &&
+						(await this.metadataOnly(dir, ["intent.json", "intent.tmp"])) &&
+						(await this.mediaAbsent(id))
+					)
+						reason = "invalid-intent"
+					if (reason) residue.push({ name: id, id, reason })
+					else next.unknown = true
 				}
 			}
+			for (const id of [...this.mediaBearing])
+				if (!operationIds.has(id)) this.mediaBearing.delete(id)
+			if (residue.length || setAsidePresent)
+				await this.tendSetAside(base, residue, next)
+			else this.setAsideHeld = 0
 			if (next.intents.size > MAX_RECOVERY_OPERATIONS) next.unknown = true
 			for (const [id, intent] of cleanup) {
 				await account(this.finalPath(intent), id, false)
@@ -1995,6 +2313,7 @@ export class AnalogOperations {
 			} catch (cause) {
 				if (nativeCode(cause) !== "ENOENT") throw cause
 			}
+			await this.checkpoint("cleanup-removed", intent.operationId)
 		}
 		const final = this.finalPath(intent)
 		// Transfer strict cleanup authority before removing the directory's last file.
@@ -2025,6 +2344,7 @@ export class AnalogOperations {
 				if (JSON.stringify(prior) !== JSON.stringify(intent))
 					throw coded("cleanup-failed", "Foreign cleanup ownership")
 			}
+			await this.checkpoint("cleanup-transferred", intent.operationId)
 			await remove(join(dir, "intent.json"))
 		}
 		this.requireCleanupClosure(intent.operationId)
@@ -2033,6 +2353,7 @@ export class AnalogOperations {
 		} catch (cause) {
 			if (nativeCode(cause) !== "ENOENT") throw cause
 		}
+		await this.checkpoint("cleanup-rmdir", intent.operationId)
 		if (ownedIntent) await remove(this.cleanupPath(intent.operationId))
 	}
 	path(alias: string): string | null {

@@ -2279,6 +2279,7 @@ export class ScannerService extends EventEmitter {
 			disk: this.disk,
 			...(this.folderMigration ? { folders: { ...this.folderMigration } } : {}),
 			...this.recordingsQuotaStatus(),
+			...this.analogOperationsStatus(),
 			jobs: {
 				active: [...this.jobs.values()].filter(j => !isTerminal(j.state))
 					.length,
@@ -9030,6 +9031,12 @@ export class ScannerService extends EventEmitter {
 				else this.evidenceInFlight.set(id, n)
 			}
 		}
+	}
+
+	/** `status().analogOperations`: crash-residue folders set aside; absent while none is held. */
+	private analogOperationsStatus(): Pick<ScannerStatus, "analogOperations"> {
+		const held = this.evidence.analogOperationsStatus()
+		return held ? { analogOperations: held } : {}
 	}
 
 	/**
