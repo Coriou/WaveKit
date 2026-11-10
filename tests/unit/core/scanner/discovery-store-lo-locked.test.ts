@@ -603,6 +603,59 @@ describe("LO-locked spur flags are sticky-safe (a real signal is never wrongly h
 		expect(listed(store, true)).toEqual(spurIds)
 	})
 
+	it("a restored flag reads as a possible spur (unverified) until its offset is learned again, then as a spur, published; never stored", () => {
+		const first = setup()
+		const spurIds = flaggedSweep(first.clock, first.store)
+		// a flag the tracker set in this run is verified
+		for (const id of spurIds)
+			expect(first.store.get(id)?.possibleSpur).toBeUndefined()
+		const snap = JSON.parse(
+			JSON.stringify(first.store.snapshot()),
+		) as ReturnType<DiscoveryStore["snapshot"]>
+		const { clock, store } = setup({ newId: restartIds() })
+		clock.now = first.clock.now + 60_000
+		store.restore(snap)
+		for (const id of spurIds) {
+			const d = store.get(id)
+			expect(d?.receiverSpur?.offsetHz).toBe(SPUR)
+			expect(d?.possibleSpur).toEqual({ reason: "restored" })
+		}
+		const shown = store
+			.list({ limit: 500, includeReceiverSpurs: true })
+			.items.filter(d => d.possibleSpur !== undefined)
+			.map(d => d.id)
+			.sort()
+		expect(shown).toEqual(spurIds)
+		// computed on read: the snapshot and the journal never carry it
+		for (const d of store.snapshot().discoveries)
+			expect("possibleSpur" in d).toBe(false)
+		// what a client reads on each published change
+		const seen = new Map<string, unknown>()
+		const journaled: string[] = []
+		store.on("change", (id: string) =>
+			seen.set(id, store.get(id)?.possibleSpur ?? null),
+		)
+		store.on("mutation", (e: Omit<JournalEntry, "seq">) => {
+			for (const d of (e.payload as StoreMutation).discoveries) {
+				expect("possibleSpur" in d).toBe(false)
+				journaled.push(d.id)
+			}
+		})
+		// one sweep cycle (3 hops) learns the offset again: verified, an ordinary flag
+		clock.now += 500
+		dwells(clock, store, [...SWEEP], { rf: c => c + SPUR, prefix: "again-" })
+		expect(store.loLockedOffsets("src-1")).toEqual([SPUR])
+		for (const id of spurIds) {
+			const d = store.get(id)
+			expect(d?.receiverSpur?.offsetHz).toBe(SPUR)
+			expect(d?.possibleSpur).toBeUndefined()
+		}
+		// the last change published for each record already reads verified
+		for (const id of spurIds) expect(seen.get(id)).toBeNull()
+		expect(journaled.length).toBeGreaterThan(0)
+		expect(listed(store)).toEqual([])
+	})
+
 	it("repro: an offset learned again only after the restored deadline does not keep the restored flags", () => {
 		const first = setup()
 		const spurIds = flaggedSweep(first.clock, first.store)

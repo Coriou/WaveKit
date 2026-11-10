@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import type { BlockSummary } from "../../../../src/core/spectrum/types.js"
 import {
+	COMB_BINS,
 	richScenario,
 	sha256,
 	stripTrackFields,
@@ -12,19 +13,24 @@ import { makeService } from "./frame-tracks-service-harness.js"
  * WG11 lane TR goldens (req 5.1, 5.6; common brief §5): recorded from the frozen code at
  * 14f2feaa before any lane edit. With the WG11 frame-track fields stripped, block summaries and
  * every frame the service sends (live, snapshot, backfill) stay byte-identical.
+ *
+ * The rich goldens were re-recorded once the spur masks needed verification: the scenario's comb
+ * is now a weak receiver comb seen under three centres (it masks in epoch 3), and the old comb
+ * fast path no longer masks the real tones it had joined to the comb (33.3 and 60.5 kHz, the
+ * image). Every other summary field and frame was left as the frozen code had it.
  */
 const GOLDEN = {
 	richSummaries: {
-		blocks: 62,
-		sha256: "950dbf910fc03e51b4eeed5bb05726222e6e7b1026a70acaee6b8d219bcb91c8",
+		blocks: 74,
+		sha256: "499df05d572ed7d5540d4c28f6a71dc86becf3ee42ff9432bc6293cec440886f",
 	},
 	untrackedSummaries: {
 		blocks: 24,
 		sha256: "31b881c9dac2b310dfb23d83cabf7ce0064d04e156feb767c9adf38ba3c738a3",
 	},
 	serviceOutput: {
-		frames: 38,
-		sha256: "65b0e9be20523fd82201f289ec773fff4b06387e426170dd8959d3c50ba1e2e8",
+		frames: 47,
+		sha256: "84369de38f6f1a1891f92331855cc7da556a973c30a3efe1e5410c5dd28d560d",
 	},
 }
 
@@ -72,11 +78,37 @@ describe("WG11 TR goldens (frozen code)", () => {
 		const segs = summaries.flatMap(s => s.tracks)
 		expect(segs.some(t => t.flags.burst)).toBe(true)
 		expect(segs.some(t => t.flags.iqImage)).toBe(true)
-		expect(new Set(summaries.map(s => s.epoch))).toEqual(new Set([1, 2]))
+		expect(new Set(summaries.map(s => s.epoch))).toEqual(new Set([1, 2, 3]))
 		// WG11: tracked segments carry the fields, a spur track among them
 		expect(segs.filter(t => t.trackId !== undefined).length).toBeGreaterThan(0)
 		expect(segs.some(t => t.flags.spur === true)).toBe(true)
 		expect(segs.some(t => t.flags.burst && t.trackId !== undefined)).toBe(true)
+	})
+
+	it("the comb masks only once verified under two centres, and the real tones stay tracks", () => {
+		const { summaries } = RICH
+		const offsets = (s: BlockSummary) =>
+			s.tracks.map(t => (t.startHz + t.endHz) / 2 - s.centreHz)
+		const has = (s: BlockSummary, hz: number) =>
+			offsets(s).some(o => Math.abs(o - hz) <= 2_500)
+		const toothHz = COMB_BINS.map(b => (b - 128 + 0.1) * 1_000)
+		const byEpoch = (e: number) => summaries.filter(s => s.epoch === e)
+		// one centre (epoch 1), then two (epoch 2): no line masks, every tooth is a track
+		for (const s of [...byEpoch(1), ...byEpoch(2)])
+			expect(s.masks.spurRanges).toEqual([])
+		const lastOne = byEpoch(1).at(-1)!
+		for (const hz of toothHz) expect(has(lastOne, hz)).toBe(true)
+		// the real tones the comb fast path used to mask are tracks to the end of epoch 1
+		for (const hz of [33_300, 60_500, -60_500])
+			expect(has(lastOne, hz)).toBe(true)
+		// epoch 3: verified, the teeth mask after its first block; the fresh tone stays a track
+		const three = byEpoch(3)
+		const masked = three.slice(1).filter(s => s.masks.spurRanges.length > 0)
+		expect(masked.length).toBeGreaterThan(0)
+		const quiet = three.at(-1)!
+		expect(quiet.masks.spurRanges).toHaveLength(COMB_BINS.length)
+		for (const hz of toothHz) expect(has(quiet, hz)).toBe(false)
+		expect(has(quiet, 62_500)).toBe(true)
 	})
 
 	it("untracked segments (maxTracks 1) are byte-identical, fields and all", () => {

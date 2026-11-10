@@ -1767,8 +1767,8 @@ export class DiscoveryStore
 	}
 
 	/**
-	 * Restored flags whose offset is learned again within their deadline become ordinary flags. A
-	 * restored flag past its deadline is never confirmed (learning it late does not extend it): it
+	 * Restored flags whose offset is learned again within their deadline become ordinary flags
+	 * (verified: their read loses `possibleSpur`, so each is published). A restored flag past its deadline is never confirmed (learning it late does not extend it): it
 	 * stays pending so `loFlagStands` fails and the next settle lifts it.
 	 */
 	private loRestoredConfirm(): void {
@@ -1779,8 +1779,11 @@ export class DiscoveryStore
 			if (
 				f !== undefined &&
 				this.loSpurs.isLearned(f.sourceId, f.sampleRateHz, f.offsetHz, now)
-			)
+			) {
 				this.loRestored.delete(id)
+				// verified now: its `possibleSpur` goes, published like any change
+				this.loDirtied(id)
+			}
 		}
 	}
 
@@ -7738,6 +7741,10 @@ export class DiscoveryStore
 		const spur = this.spurFlagOf(d.id)
 		if (spur !== undefined) copy.receiverSpur = spur
 		else delete copy.receiverSpur
+		// A restored flag stands (hidden) until its offset is learned again: suspected, not verified.
+		if (spur !== undefined && this.loRestored.has(d.id))
+			copy.possibleSpur = { reason: "restored" }
+		else delete copy.possibleSpur
 		copy.evidenceLevel = view.evidence
 		copy.revision = this.published.get(d.id) ?? 1
 		return copy

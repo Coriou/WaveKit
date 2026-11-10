@@ -167,8 +167,21 @@ export function identityLine(d: Discovery): string {
 	return parts.join(" · ")
 }
 
+/**
+ * A receiver-spur suspicion in words: a verified flag is a spur; one the core has not verified
+ * (`possibleSpur`) is only possible, never a spur and never a clean signal. Null when neither.
+ */
+export function spurText(
+	d: Pick<Discovery, "receiverSpur" | "possibleSpur">,
+): string | null {
+	if (d.possibleSpur !== undefined) return "Possible spur (unverified)"
+	if (d.receiverSpur !== undefined) return "Receiver spur"
+	return null
+}
+
 export function reasonText(d: Discovery): string | null {
 	const parts = [
+		spurText(d),
 		confidenceCapText(d.confidenceCap),
 		d.confidence !== "decoded" ? undecodedReasonText(d.undecodedReason) : null,
 	].filter((x): x is string => x !== null)
