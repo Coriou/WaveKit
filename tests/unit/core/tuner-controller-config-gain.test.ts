@@ -174,6 +174,20 @@ const MANUAL_496: SourceTunerConfig = {
 	agcMode: false,
 }
 const DECLARED_BOTH = ["frequency", "sampleRate"]
+/** Each connection's declared rate (2.048 Msps) and centre (100 MHz), before the gain frames. */
+const DECL = ["02001f4000", "0105f5e100"]
+const DECL_SENT: Array<[string, number, TunerCommandOrigin]> = [
+	["set-sample-rate", 2_048_000, "config"],
+	["set-frequency", 100_000_000, "config"],
+]
+/** `command-sent` events of the configured gain alone (origin config, not the declared tuning). */
+const gainConfig = (sent: Snapshot["sent"]) =>
+	sent.filter(
+		e =>
+			e[2] === "config" &&
+			e[0] !== "set-sample-rate" &&
+			e[0] !== "set-frequency",
+	)
 const UNKNOWN_REST = [
 	"ppm",
 	"biasTee",
@@ -225,8 +239,9 @@ describe("WG11 GN: configured gain and AGC on connect", () => {
 		)
 		h.sources.emit("payload-started", SRC)
 		expect(h.snapshot()).toEqual({
-			frames: ["0300000001", "04000001f0", "0800000000"],
+			frames: [...DECL, "0300000001", "04000001f0", "0800000000"],
 			sent: [
+				...DECL_SENT,
 				["set-gain-mode", 1, "config"],
 				["set-gain", 496, "config"],
 				["set-agc-mode", 0, "config"],
@@ -238,13 +253,13 @@ describe("WG11 GN: configured gain and AGC on connect", () => {
 				gain: 496,
 				agcMode: false,
 				controlMode: "internal",
-				commandCount: 3,
+				commandCount: 5,
 				unknownFields: UNKNOWN_REST,
-				declaredOnlyFields: DECLARED_BOTH,
+				declaredOnlyFields: undefined,
 				lastError: undefined,
 			},
-			// Frequency/rate trust is the golden one: nothing proved them.
-			tuningWritten: false,
+			// The declared rate and centre were written on this connection, so they are proven.
+			tuningWritten: true,
 		})
 		expect(states.length).toBeGreaterThan(0)
 		expect(h.caps.sampleRate).toBe(2_048_000)
@@ -255,19 +270,19 @@ describe("WG11 GN: configured gain and AGC on connect", () => {
 		const a = configured({ gainMode: "agc" })
 		a.sources.emit("payload-started", SRC)
 		const sa = a.snapshot()
-		expect(sa.frames).toEqual(["0300000000"])
-		expect(sa.sent).toEqual([["set-gain-mode", 0, "config"]])
+		expect(sa.frames).toEqual([...DECL, "0300000000"])
+		expect(sa.sent).toEqual([...DECL_SENT, ["set-gain-mode", 0, "config"]])
 		expect(sa.state.unknownFields).toContain("gain")
 		expect(sa.state.unknownFields).toContain("agcMode")
 		const b = configured({ gainMode: "agc", agcMode: true })
 		b.sources.emit("payload-started", SRC)
-		expect(b.snapshot().frames).toEqual(["0300000000", "0800000001"])
+		expect(b.snapshot().frames).toEqual([...DECL, "0300000000", "0800000001"])
 	})
 
 	it("once per connection: a repeated payload-started writes nothing more", () => {
 		const h = configured(MANUAL_496)
 		h.sources.emit("payload-started", SRC)
-		expect(h.snapshot().frames).toHaveLength(3)
+		expect(h.snapshot().frames).toHaveLength(5)
 		h.sources.emit("payload-started", SRC)
 		const again = h.snapshot()
 		expect(again.frames).toEqual([])
@@ -280,6 +295,7 @@ describe("WG11 GN: configured gain and AGC on connect", () => {
 		h.snapshot()
 		h.connect()
 		expect(h.snapshot().frames).toEqual([
+			...DECL,
 			"0300000001",
 			"04000001f0",
 			"0800000000",
@@ -293,8 +309,9 @@ describe("WG11 GN: configured gain and AGC on connect", () => {
 		h.snapshot()
 		h.connect()
 		const s = h.snapshot()
-		expect(s.frames).toEqual(["0800000000", "040000012c"])
+		expect(s.frames).toEqual([...DECL, "0800000000", "040000012c"])
 		expect(s.sent).toEqual([
+			...DECL_SENT,
 			["set-agc-mode", 0, "config"],
 			["set-gain", 300, "replay"],
 		])
@@ -308,7 +325,7 @@ describe("WG11 GN: configured gain and AGC on connect", () => {
 		h.snapshot()
 		h.connect()
 		const s = h.snapshot()
-		expect(s.frames).toEqual(["0800000000", "0300000000"])
+		expect(s.frames).toEqual([...DECL, "0800000000", "0300000000"])
 		expect(s.state.gainMode).toBe("agc")
 	})
 
@@ -338,8 +355,9 @@ describe("WG11 GN: configured gain and AGC on connect", () => {
 		h.snapshot()
 		h.connect()
 		const s = h.snapshot()
-		expect(s.frames).toEqual(["0800000000", "0400000118"])
+		expect(s.frames).toEqual([...DECL, "0800000000", "0400000118"])
 		expect(s.sent).toEqual([
+			...DECL_SENT,
 			["set-agc-mode", 0, "config"],
 			["set-gain", 280, "replay"],
 		])
@@ -365,16 +383,20 @@ describe("WG11 GN: configured gain and AGC on connect", () => {
 		h.snapshot()
 		const errors: Error[] = []
 		h.controller.on("error", (_id: string, err: Error) => errors.push(err))
-		h.failAfterWrites(1)
+		// The declared rate goes first (the REST centre is replayed), then the gain mode; the gain fails.
+		h.failAfterWrites(2)
 		const result = h.controller.synchronizeOnConnect(SRC)
 		expect(result.error).toBe(
 			"Tuner state restore failed: Source rtl-1 socket is not writable",
 		)
-		expect(result.commands).toEqual(["set-gain-mode"])
+		expect(result.commands).toEqual(["set-sample-rate", "set-gain-mode"])
 		expect(errors).toHaveLength(1)
 		const s = h.snapshot()
-		expect(s.frames).toEqual(["0300000001"])
-		expect(s.sent).toEqual([["set-gain-mode", 1, "config"]])
+		expect(s.frames).toEqual(["02001f4000", "0300000001"])
+		expect(s.sent).toEqual([
+			["set-sample-rate", 2_048_000, "config"],
+			["set-gain-mode", 1, "config"],
+		])
 		expect(s.state.lastError).toBe(result.error)
 		expect(s.state.unknownFields).toEqual(
 			expect.arrayContaining(["gainMode", "gain", "agcMode"]),
@@ -385,6 +407,7 @@ describe("WG11 GN: configured gain and AGC on connect", () => {
 		h.connect()
 		const next = h.snapshot()
 		expect(next.frames).toEqual([
+			"02001f4000",
 			"0300000001",
 			"04000001f0",
 			"0800000000",
@@ -400,11 +423,11 @@ describe("WG11 GN: configured gain and AGC on connect", () => {
 		h.snapshot()
 		h.sources.emit("payload-started", SRC)
 		const s = h.snapshot()
-		expect(s.frames).toEqual([])
+		expect(s.frames).toEqual(DECL)
 		expect(s.state.gainMode).toBe("agc")
 		expect(s.state.gain).toBe(0)
 		expect(s.state.agcMode).toBe(true)
-		expect(s.state.commandCount).toBe(0)
+		expect(s.state.commandCount).toBe(2)
 	})
 
 	it("a changed configuration is unknown until written again", () => {
@@ -522,9 +545,12 @@ describe("WG11 GN Property 9", () => {
 							out.push(hex(8, tuner.agcMode ? 1 : 0))
 						return out
 					}
+					// The declared rate and centre lead each internal connection's writes under the
+					// restore policy (the reset policy writes no tuning); none were set by the operator.
+					const decl = () => (policy === "restore" && !external ? DECL : [])
 					// The first connection had no operator values.
 					const first = h.snapshot()
-					expect(first.frames).toEqual(expected())
+					expect(first.frames).toEqual([...decl(), ...expected()])
 					for (const action of actions) {
 						if (action.kind === "external") {
 							external = action.on
@@ -576,12 +602,18 @@ describe("WG11 GN Property 9", () => {
 							h.connect()
 						} else h.sources.emit("payload-started", SRC)
 						const s = h.snapshot()
-						const configSent = s.sent.filter(e => e[2] === "config")
+						const configSent = gainConfig(s.sent)
+						const lead = isConnect ? decl() : []
 						const want = isConnect ? expected() : []
-						expect(s.frames.slice(0, want.length)).toEqual(want)
+						expect(s.frames.slice(0, lead.length + want.length)).toEqual([
+							...lead,
+							...want,
+						])
 						expect(configSent).toHaveLength(want.length)
 						expect(
-							s.sent.slice(0, want.length).every(e => e[2] === "config"),
+							s.sent
+								.slice(0, lead.length + want.length)
+								.every(e => e[2] === "config"),
 						).toBe(true)
 						// Written and known, never claimed before.
 						if (isConnect && tuner && !external)
@@ -611,7 +643,7 @@ describe("configured gain review fixes", () => {
 		h.snapshot()
 		h.connect()
 		const s = h.snapshot()
-		expect(s.frames).toEqual(["0800000001", "040000012c"])
+		expect(s.frames).toEqual([...DECL, "0800000001", "040000012c"])
 		// The replayed SET_GAIN selects manual on the receiver, as the first write did.
 		expect(s.state.gainMode).toBe("manual")
 		expect(s.state.unknownFields ?? []).not.toContain("gainMode")
@@ -624,7 +656,7 @@ describe("configured gain review fixes", () => {
 		expect(h.snapshot().state.unknownFields ?? []).toContain("gainMode")
 		h.connect()
 		const s = h.snapshot()
-		expect(s.frames).toEqual(["0800000001", "040000012c"])
+		expect(s.frames).toEqual([...DECL, "0800000001", "040000012c"])
 		expect(s.state.unknownFields ?? []).toContain("gainMode")
 	})
 
@@ -636,7 +668,7 @@ describe("configured gain review fixes", () => {
 		h.snapshot()
 		h.connect()
 		const s = h.snapshot()
-		expect(s.frames).toEqual(["0300000000", "040000012c"])
+		expect(s.frames).toEqual([...DECL, "0300000000", "040000012c"])
 		expect(s.state.unknownFields ?? []).toContain("gainMode")
 	})
 
@@ -676,13 +708,13 @@ describe("configured gain (M1, M2)", () => {
 		let live: SourceTunerConfig | undefined = MANUAL_496
 		withLiveConfig(h, () => live)
 		h.connect()
-		expect(h.snapshot().sent.filter(c => c[2] === "config")).toHaveLength(3)
+		expect(gainConfig(h.snapshot().sent)).toHaveLength(3)
 		h.sources.emit("removed", SRC)
 		live = undefined
 		h.connect()
 		const s = h.snapshot()
-		expect(s.sent.filter(c => c[2] === "config")).toEqual([])
-		expect(s.frames).toEqual([])
+		expect(gainConfig(s.sent)).toEqual([])
+		expect(s.frames).toEqual(DECL)
 		expect(s.state.gainMode).toBe("agc")
 		expect(s.state.gain).toBe(0)
 	})
@@ -692,12 +724,17 @@ describe("configured gain (M1, M2)", () => {
 		let live: SourceTunerConfig | undefined
 		withLiveConfig(h, () => live)
 		h.connect()
-		expect(h.snapshot().frames).toEqual([])
+		expect(h.snapshot().frames).toEqual(DECL)
 		h.sources.emit("removed", SRC)
 		live = MANUAL_496
 		h.connect()
 		const s = h.snapshot()
-		expect(s.frames).toEqual(["0300000001", "04000001f0", "0800000000"])
+		expect(s.frames).toEqual([
+			...DECL,
+			"0300000001",
+			"04000001f0",
+			"0800000000",
+		])
 		expect(s.state.unknownFields ?? []).not.toContain("gain")
 	})
 
@@ -705,7 +742,7 @@ describe("configured gain (M1, M2)", () => {
 		const h = configured(MANUAL_496)
 		h.sources.emit("removed", SRC)
 		h.connect()
-		expect(h.snapshot().frames).toEqual([])
+		expect(h.snapshot().frames).toEqual(DECL)
 	})
 
 	it("M1: an unchanged live config does not churn state or proof", () => {
@@ -717,6 +754,7 @@ describe("configured gain (M1, M2)", () => {
 		h.connect()
 		expect(spy).not.toHaveBeenCalled()
 		expect(h.snapshot().frames).toEqual([
+			...DECL,
 			"0300000001",
 			"04000001f0",
 			"0800000000",
@@ -731,9 +769,7 @@ describe("configured gain (M1, M2)", () => {
 		h.snapshot()
 		h.connect()
 		const s = h.snapshot()
-		expect(s.sent.filter(c => c[2] === "config")).toEqual([
-			["set-agc-mode", 0, "config"],
-		])
+		expect(gainConfig(s.sent)).toEqual([["set-agc-mode", 0, "config"]])
 		expect(s.frames).not.toContain("0300000001")
 		expect(s.frames).not.toContain("04000001f0")
 		expect(s.frames.at(-1)).toBe("0d00000005")

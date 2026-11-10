@@ -26,6 +26,7 @@ import type {
 import type { SpectrumService } from "../../../src/core/spectrum/spectrum-service.js"
 import type { PipelineEvent } from "../../../src/core/spectrum/types.js"
 import { TunerController } from "../../../src/core/tuner-controller.js"
+import type { TunerReconnectPolicy } from "../../../src/core/tuner-controller.js"
 import type { TunerRelay } from "../../../src/core/tuner-relay.js"
 import { wireTunerControl } from "../../../src/core/tuner-wiring.js"
 import { createLogger } from "../../../src/utils/logger.js"
@@ -71,7 +72,17 @@ function block(withTone: boolean): Buffer {
 	return Buffer.from(packCu8(iq.re, iq.im))
 }
 
-async function setup(options: { declareCentre?: boolean } = {}) {
+/**
+ * `reconnectPolicy: "reset"` writes no tuning on connect, so a declared centre and rate stay
+ * declared only (unverified) until a command writes them; the default `restore` writes them on
+ * each connection, which proves them.
+ */
+async function setup(
+	options: {
+		declareCentre?: boolean
+		reconnectPolicy?: TunerReconnectPolicy
+	} = {},
+) {
 	// Equal-jitter backoff at its floor: a reconnect comes after half the base delay.
 	vi.spyOn(Math, "random").mockReturnValue(0)
 	const quietBlock = block(false)
@@ -113,7 +124,13 @@ async function setup(options: { declareCentre?: boolean } = {}) {
 	const manager = new SourceManager(quiet)
 	cleanup.push(() => manager.disconnectAll())
 	manager.on("error", () => {})
-	const controller = new TunerController(quiet, manager, {})
+	const controller = new TunerController(
+		quiet,
+		manager,
+		options.reconnectPolicy === undefined
+			? {}
+			: { reconnectPolicy: options.reconnectPolicy },
+	)
 	controller.on("error", () => {})
 	wireTunerControl({
 		log: quiet,
@@ -386,8 +403,15 @@ describe("the spectrum epoch after a tune", { timeout: 30_000 }, () => {
 		await h.transmissionAdmitted()
 	})
 
-	it("a declared centre and rate a tune writes in place become commanded", async () => {
+	it("the connect write makes a declared centre and rate commanded", async () => {
 		const h = await setup()
+		await h.trustBecomes("commanded")
+		expect(h.controller.getState("rtl")?.declaredOnlyFields ?? []).toEqual([])
+		expect(h.connections()).toBe(1)
+	})
+
+	it("a declared centre and rate a tune writes in place become commanded", async () => {
+		const h = await setup({ reconnectPolicy: "reset" })
 		await h.trustBecomes("unverified")
 		const res = await h.post("tune", {
 			frequencyHz: START_HZ,
@@ -422,7 +446,7 @@ describe("the spectrum epoch after a tune", { timeout: 30_000 }, () => {
 	it("a proven command after an unproven one during a restart leaves a commanded epoch", async () => {
 		// Declared centre and rate: the rate written in place first is unproven (the centre is still
 		// only declared), the centre written next proves both.
-		const h = await setup()
+		const h = await setup({ reconnectPolicy: "reset" })
 		await h.trustBecomes("unverified")
 		const release = h.holdRestart()
 		const restart = h.engine.reconfigure()
@@ -440,7 +464,7 @@ describe("the spectrum epoch after a tune", { timeout: 30_000 }, () => {
 	})
 
 	it("two commands during one restart post in order with the newest label", async () => {
-		const h = await setup()
+		const h = await setup({ reconnectPolicy: "reset" })
 		await h.trustBecomes("unverified")
 		const before = h.engine.currentEpoch()
 		const release = h.holdRestart()

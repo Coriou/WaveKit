@@ -1070,6 +1070,28 @@ activeHost, reason, at }` (also on `source:status` and in `/api/status`); `url`
 stays the configured address. Other sources never carry `endpoint`. See
 [receiver-endpoints](specs/receiver-endpoints/design.md).
 
+**Connect failures.** While a network source is not connected after a failed attempt,
+its entry carries `connectFailure`: `target` (the attempt's `host:port`, omitted when the host
+is not a plain name or address), `errorClass` (`refused`, `timeout`, `unreachable`,
+`not-found`, `reset`, `stalled` or `other`), `attempts` (failed attempts since the last
+successful connect), `lastAttemptAt` (ISO time) and a short fixed `hint`, for example:
+
+```json
+"connectFailure": {
+	"target": "receiver.local:1234",
+	"errorClass": "refused",
+	"attempts": 3,
+	"lastAttemptAt": "2026-01-01T00:00:00.000Z",
+	"hint": "Nothing listening at receiver.local:1234: is the bridge or rtl_tcp running?"
+}
+```
+
+The class comes from the socket error code (`ECONNREFUSED` is `refused`, `ETIMEDOUT` or the
+core's connect timeout `timeout`, `EHOSTUNREACH`/`ENETUNREACH`/`EHOSTDOWN` `unreachable`,
+`ENOTFOUND`/`EAI_AGAIN` `not-found`, `ECONNRESET`/`EPIPE` `reset`, the stall watchdog
+`stalled`, anything else `other`); the hint is fixed text per class and never repeats the
+error message. A successful connect removes the field.
+
 **Stall watchdog (rtl_tcp U8_IQ sources).** An rtl_tcp IQ stream never pauses while
 it is healthy. After a session has delivered payload, a gap of `stallTimeoutMs`
 (source config, default 15000, `0` disables) means the peer is dead or the
@@ -1791,9 +1813,15 @@ has an active control client.
 Tuner values are the last _commanded_ desired values, not hardware readback:
 rtl_tcp has no positive acknowledgement. When an rtl_tcp source reconnects, the
 `tuner.reconnectPolicy` config decides what happens. With `restore` (the default),
-core re-sends the fields that were accepted through this API or the relay (never
-config defaults) and counts them in `commandCount`/`lastCommandAt`; a failed
-restore sets `lastError` and is retried on the next connection. Relay commands
+core re-sends the fields that were accepted through this API or the relay and counts
+them in `commandCount`/`lastCommandAt`; a failed restore sets `lastError` and is
+retried on the next connection. Before that, on every new connection under internal
+control, it writes a `sampleRate` and then a `frequency` that are only declared (by
+config or the source caps; see `declaredOnlyFields` below), with origin `config`: a
+shared rtlmux keeps the last client's tuning, so without that write the core would
+show a tuning it never set. Those written values are then proven for the connection.
+Nothing is written under external control, after a plain resume of a paused feed, or
+under `reset`. Relay commands
 received while the source is down become desired state and are sent on
 reconnect. With `reset`, core sends nothing and returns tuner state and source
 caps to the configured baseline. With either policy, source caps
@@ -1872,8 +1900,10 @@ declare it. A `frequency` or `sampleRate` a relay client set to a value the
 controller ignored is also listed until the next accepted value (the relay
 forwards the raw command upstream, so the receiver may be there).
 **`declaredOnlyFields`** lists `frequency`/`sampleRate` whose value comes
-only from that declared baseline: nothing wrote or observed it since the start or
-the last reset reconnect. Absent when empty. On a source whose gain was set on the SDR host this reads e.g.
+only from that declared baseline: nothing wrote or observed it on this connection
+(under `restore` the connect write proves them, so they are listed only under
+`reset`, under external control, after a failed connect write or between a
+connection and its first payload). Absent when empty. On a source whose gain was set on the SDR host this reads e.g.
 `["gainMode", "gain", "ppm", …]`; render those fields as unknown instead of
 "AGC 0.0 dB". A gain mode the relay path infers from a client's gain command
 counts as observed (it is not replayed on reconnect). The field values keep

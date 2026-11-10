@@ -146,7 +146,52 @@ export interface SourceStatus {
 	endpoint?: SourceEndpoint
 	/** Pause / resume state of a network source; omitted for recordings. */
 	feed?: SourceFeed
+	/** Why the last connection attempt failed; only while a network source is not connected. */
+	connectFailure?: SourceConnectFailure
 }
+
+/**
+ * The closed class of a failed connection attempt: `refused` (ECONNREFUSED), `timeout`
+ * (ETIMEDOUT or the core's connect timeout), `unreachable` (EHOSTUNREACH, ENETUNREACH,
+ * EHOSTDOWN), `not-found` (ENOTFOUND, EAI_AGAIN), `reset` (ECONNRESET, EPIPE), `stalled`
+ * (connected but no samples), `other` for anything else.
+ */
+export const SOURCE_CONNECT_ERROR_CLASSES = [
+	"refused",
+	"timeout",
+	"unreachable",
+	"not-found",
+	"reset",
+	"stalled",
+	"other",
+] as const
+export type SourceConnectErrorClass =
+	(typeof SOURCE_CONNECT_ERROR_CLASSES)[number]
+
+/** A network source's last failed connection attempt (SourceStatus.connectFailure). */
+export interface SourceConnectFailure {
+	/** `host:port` the attempt went to; omitted when the host is not a plain name or address. */
+	target?: string
+	errorClass: SourceConnectErrorClass
+	/** Failed attempts since the last successful connect. */
+	attempts: number
+	/** ISO time the last attempt failed. */
+	lastAttemptAt: string
+	/** A short fixed hint for the class, e.g. "Nothing listening at host:port: ...". */
+	hint: string
+}
+
+export const sourceConnectFailureSchema = {
+	type: "object",
+	properties: {
+		target: { type: "string" },
+		errorClass: { type: "string", enum: SOURCE_CONNECT_ERROR_CLASSES },
+		attempts: { type: "integer", minimum: 1 },
+		lastAttemptAt: { type: "string", format: "date-time" },
+		hint: { type: "string" },
+	},
+	required: ["errorClass", "attempts", "lastAttemptAt", "hint"],
+} as const
 
 export interface DecoderAssignment {
 	decoderId: string

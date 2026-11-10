@@ -31,11 +31,17 @@ import { PassThrough } from "node:stream"
 import { SOURCE_RESUME_FAILED_MESSAGE } from "@wavekit/api-types"
 import type {
 	SourceActivity,
+	SourceConnectFailure,
 	SourceEndpoint,
 	SourceFeed,
 	SourceFeedRestoreTuning,
 	SourceFeedState,
 } from "@wavekit/api-types"
+import {
+	connectFailureStatus,
+	noteConnectFailure,
+} from "./source-manager-connect-failure.js"
+import type { ConnectFailureRecord } from "./source-manager-connect-failure.js"
 import type { Logger } from "../utils/logger.js"
 import { SourceConnectionError, WaveKitError } from "../utils/errors.js"
 import type { SourceConfig, SourceCaps } from "../config.js"
@@ -170,6 +176,8 @@ export interface SourceStatus {
 	endpoint?: SourceEndpoint | undefined
 	/** Pause / resume state; network sources only (recordings omit it). */
 	feed?: SourceFeed | undefined
+	/** The last failed connection attempt; only while a network source is not connected. */
+	connectFailure?: SourceConnectFailure | undefined
 }
 
 /**
@@ -346,6 +354,8 @@ interface SourceState {
 	metricTicksSinceConnect: number
 	lastError?: string | undefined
 	reconnectAttempts: number
+	/** Failed attempts since the last connect (source-manager-connect-failure.ts); null after one. */
+	connectFailure: ConnectFailureRecord | null
 	reconnectTimer: ReturnType<typeof setTimeout> | null
 	/** Host override from endpoint selection; null uses config.host. */
 	activeHost: string | null
@@ -888,6 +898,7 @@ export class SourceManager extends EventEmitter {
 			lastMetricTime: Date.now(),
 			dataRate: 0,
 			reconnectAttempts: 0,
+			connectFailure: null,
 			reconnectTimer: null,
 			activeHost: null,
 			endpoint: null,
@@ -1570,6 +1581,7 @@ export class SourceManager extends EventEmitter {
 					state.pausedSinceLastMetric = false
 					state.reconnectAttempts = 0
 					state.lastError = undefined
+					state.connectFailure = null
 					// A resume's connection: the feed is live before "connected" fires.
 					if (state.feed.state === "resuming")
 						state.feed = { state: "live", since: Date.now() }
@@ -1757,7 +1769,16 @@ export class SourceManager extends EventEmitter {
 					stopOwnWatchdog()
 				}
 				try {
-					if (current) this.handleConnectionError(id, err, state, attempt)
+					if (current) {
+						state.connectFailure = noteConnectFailure(
+							state.connectFailure,
+							err,
+							host,
+							config.port,
+							Date.now(),
+						)
+						this.handleConnectionError(id, err, state, attempt)
+					}
 				} finally {
 					if (isInitialAttempt && !hadConnected)
 						safeReject(new SourceConnectionError(host, config.port!, err))
@@ -2714,6 +2735,11 @@ export class SourceManager extends EventEmitter {
 			...(state.endpoint ? { endpoint: { ...state.endpoint } } : {}),
 			...(state.config.type !== "recording"
 				? { feed: this.feedOf(state) }
+				: {}),
+			...(state.connectFailure !== null &&
+			!state.connected &&
+			state.config.type !== "recording"
+				? { connectFailure: connectFailureStatus(state.connectFailure) }
 				: {}),
 		}
 	}

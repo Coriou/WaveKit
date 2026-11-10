@@ -27,6 +27,14 @@ import { DQ_CONSOLIDATE_GROUP_MAX } from "../detection-quality-contract.js"
 import { join, resolve } from "node:path"
 import { z } from "zod"
 import { WaveKitError } from "../../../utils/errors.js"
+import {
+	ensurePreMigrationBackup,
+	SCANNER_STATE_FILE_VERSION,
+} from "../../state-backup.js"
+import type {
+	PreMigrationBackupOptions,
+	StateBackupOutcome,
+} from "../../state-backup.js"
 import { createComponentLogger } from "../../../utils/logger.js"
 import type { Logger } from "../../../utils/logger.js"
 import type {
@@ -89,7 +97,8 @@ import {
 	DiscoveryAliasEntrySchema,
 } from "./schemas.js"
 
-const FILE_VERSION = 1
+/** state-backup.ts owns the number so its format marker follows every version bump. */
+const FILE_VERSION = SCANNER_STATE_FILE_VERSION
 const SNAPSHOT_FILE = "discoveries.json"
 const JOBS_FILE = "jobs.json"
 const SETTINGS_FILE = "settings.json"
@@ -652,6 +661,17 @@ export class ScannerPersistence {
 	private readonly buildClock: () => number
 	private loaded = false
 	private authorityHealth: "healthy" | "degraded" = "degraded"
+	/** The pre-migration backup check runs once per process, before the first load reads anything. */
+	private backupOutcome: StateBackupOutcome | null = null
+	private readonly backupOptions: Pick<
+		PreMigrationBackupOptions,
+		"statfs" | "link"
+	>
+
+	/** Outcome of the pre-migration backup check (null before the first load). */
+	preMigrationBackup(): StateBackupOutcome | null {
+		return this.backupOutcome
+	}
 
 	/** S1 can load fallback state; Task42 must require complete restored authority. */
 	recoveryHealth(): "healthy" | "degraded" {
@@ -678,7 +698,10 @@ export class ScannerPersistence {
 		 * `performance.now` by default.
 		 */
 		buildClock?: () => number
+		/** Test seams of the pre-migration backup (state-backup.ts). */
+		backup?: Pick<PreMigrationBackupOptions, "statfs" | "link">
 	}) {
+		this.backupOptions = opts.backup ?? {}
 		this.yieldTurn = opts.yieldTurn ?? yieldToEventLoop
 		this.loadSliceClock = opts.loadSliceClock ?? (() => deadlineSliceClock())
 		this.buildClock = opts.buildClock ?? (() => performance.now())
@@ -694,6 +717,13 @@ export class ScannerPersistence {
 	}
 
 	async load(): Promise<LoadedState> {
+		// Before any read can set a file aside or a later write migrate it (never throws).
+		this.backupOutcome ??= await ensurePreMigrationBackup({
+			dir: this.root,
+			logger: this.log,
+			now: this.now,
+			...this.backupOptions,
+		})
 		try {
 			return await this.loadState()
 		} catch (err) {

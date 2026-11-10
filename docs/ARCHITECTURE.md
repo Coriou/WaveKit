@@ -65,6 +65,8 @@ Manages TCP connections to SDR sources with automatic reconnection.
 - Auto-reconnect with exponential backoff (2s → 4s → 8s → max 30s)
 - Emit connection events and data rate metrics
 - Track source capabilities (sample rate, format, exclusivity)
+- Report why the last connection attempt failed (`connectFailure`: a closed error class and a
+  fixed hint, `src/core/source-manager-connect-failure.ts`)
 
 **Key interfaces**:
 
@@ -310,6 +312,15 @@ client such as SDR++).
   leased snapshot, including a gain-only restore when an operator or relay write takes the
   lease; operator retunes apply it only with `tuner.bandGain.applyToMyTuning` (serialised per
   source, the pre-band gain persisted by `BandGainSettingsService`)
+- On each new connection under the `restore` policy and internal control, write a sample rate
+  and centre that are only declared (config or caps), then the configured gain, so a shared
+  rtlmux never leaves the core believing a tuning it did not set
+
+### State backup
+
+`src/core/state-backup.ts` takes one bounded backup of the scanner state directory before a
+build that writes another format reads it (`ScannerPersistence.load`): see the rollback note in
+[SCANNER.md](SCANNER.md).
 
 ### TunerRelay
 

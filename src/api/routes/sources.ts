@@ -16,6 +16,7 @@ import { z } from "zod"
 import {
 	SOURCE_RESUME_FAILED_MESSAGE,
 	sourceActivitySchema,
+	sourceConnectFailureSchema,
 	sourceFeedSchema,
 	sourceRateMismatchSchema,
 	sourceSignalFlatSchema,
@@ -154,6 +155,7 @@ const extendedSourceStatusSchema = {
 		signalLevelDbfs: { type: "number" },
 		endpoint: sourceEndpointSchema,
 		feed: sourceFeedSchema,
+		connectFailure: sourceConnectFailureSchema,
 		verdict: sourceVerdictSchema,
 		assignments: {
 			type: "array",
@@ -442,17 +444,19 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 			const consumersBySourceId = countConsumersBySource(fanoutManager)
 			const hosts = sdrHostsBySource(sdrHostStatuses)
 			const now = Date.now()
-			return sourceManager
-				.getAllStatus()
-				.map(status =>
-					toApiExtendedSourceStatus(
-						status,
-						sourceManager,
-						consumersBySourceId,
-						hosts,
-						now,
-					),
-				)
+			return sourceManager.getAllStatus().map(status => ({
+				...toApiExtendedSourceStatus(
+					status,
+					sourceManager,
+					consumersBySourceId,
+					hosts,
+					now,
+				),
+				// Why the last attempt failed, while not connected (fixed class and hint).
+				...(status.connectFailure !== undefined
+					? { connectFailure: { ...status.connectFailure } }
+					: {}),
+			}))
 		},
 	)
 
