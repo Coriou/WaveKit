@@ -51,8 +51,10 @@ const RESERVATION = MAX_ANALOG_FILE_BYTES + MAX_OPERATION_METADATA_BYTES
 /**
  * Incomplete operation folders (crash residue holding no media) a scan moved aside into
  * `.analog-operations/.set-aside/`, kept for diagnosis. Each holds only the intent files
- * (intent.json, intent.tmp), together at most MAX_OPERATION_METADATA_BYTES (16 KiB), so the
- * folder holds at most 32 × 16 KiB = 512 KiB. Past the bound the oldest entries are deleted.
+ * (intent.json, intent.tmp), together at most MAX_OPERATION_METADATA_BYTES (16 KiB). Past the
+ * bound the oldest entries are deleted, but only entries proven to hold intent metadata alone:
+ * an entry that cannot be proven media-free (changed by hand, unreadable) is kept and counted,
+ * so the bound is strict for the 32 × 16 KiB = 512 KiB of evictable entries only.
  */
 export const ANALOG_SET_ASIDE_MAX = 32
 /**
@@ -459,7 +461,7 @@ export class AnalogOperations {
 	/** Artifacts the last retention pass kept because their owner is unknown (table full). */
 	unknownHeldRetained = 0
 	private recovery: Promise<AnalogReconciliation[]> | null = null
-	/** Folders held in `.set-aside/` at the last scan (at most ANALOG_SET_ASIDE_MAX, see there). */
+	/** Folders held in `.set-aside/` at the last scan (ANALOG_SET_ASIDE_MAX evictable, see there). */
 	private setAsideHeld = 0
 	private lastSetAsideReason: AnalogSetAsideReason | null = null
 	/** Operation ids whose unreadable intent has media somewhere (searched once each). */
@@ -707,6 +709,10 @@ export class AnalogOperations {
 			await this.checkpoint("staging-synced", id)
 			this.valid(op)
 			await this.safeDirectory(dirname(this.opDir(id)), false, op)
+			// rename(2) silently replaces an existing empty directory on Linux and macOS, so the
+			// lstat below is a check, not an exclusive create. Acceptable: the id is a fresh random
+			// UUID and admission holds the lock, so only an outside writer guessing it between this
+			// lstat and the rename could be replaced, and only by an empty directory (no media lost).
 			try {
 				await lstat(this.opDir(id))
 				throw coded("recovery-ambiguous", "Operation folder already exists")
@@ -1501,7 +1507,8 @@ export class AnalogOperations {
 	}
 	/**
 	 * Moves verified residue into `.set-aside/` (one rename each, atomic: a crash leaves it either
-	 * place, both handled) and deletes the oldest entries past ANALOG_SET_ASIDE_MAX. A residue
+	 * place, both handled) and deletes the oldest evictable entries past ANALOG_SET_ASIDE_MAX; an
+	 * entry not proven media-free is kept and counted, so `setAsideHeld` may exceed it. A residue
 	 * folder that cannot move stays where it is: it was verified harmless, so it never poisons.
 	 * An unsafe `.set-aside` (a symlink, a file) is tampering: fail closed.
 	 */
@@ -1541,6 +1548,10 @@ export class AnalogOperations {
 			stamp = Math.max(stamp, Number(name.slice(0, 13)) + 1)
 		let moved = 0
 		for (const item of residue) {
+			// The target name carries a stamp past every entry listed and a random UUID, and the
+			// scan holds the lock, so it never names an existing entry. rename(2) would replace an
+			// empty directory there (Linux, macOS); none can exist short of an outside writer, and
+			// an empty one holds nothing to lose.
 			const target = `${String(stamp++).padStart(13, "0")}-${item.id}`
 			try {
 				await this.moveDirectory(join(base, item.name), join(dir, target))
@@ -1550,6 +1561,13 @@ export class AnalogOperations {
 			entries.push(target)
 			moved++
 			this.lastSetAsideReason = item.reason
+			// An operation folder's files were counted as metadata by the scan; a staging folder's
+			// never were (its name differs from the id). Moved out, they no longer count.
+			if (item.name === item.id) {
+				const bytes = next.opBytes.get(item.id) ?? 0
+				next.bytes -= bytes
+				next.metadataBytes -= bytes
+			}
 			next.opBytes.delete(item.id)
 			await this.checkpoint("set-aside", item.id)
 		}
@@ -1629,6 +1647,8 @@ export class AnalogOperations {
 			const base = join(this.root, ".analog-operations")
 			await this.safeDirectory(base, true)
 			const all = await this.children(base, MAX_RECOVERY_OPERATIONS * 2)
+			// Cleanups run outside the lock: any listed entry may vanish from here on.
+			await this.checkpoint("inventory-listed", "")
 			const setAsidePresent = all.includes(SET_ASIDE_DIR)
 			const stagingNames = all.filter(name => name.startsWith(STAGING_PREFIX))
 			const names = all.filter(
@@ -1673,14 +1693,17 @@ export class AnalogOperations {
 					next.unknown = true
 					continue
 				}
+				// Ownership first: this process's own creation, or its unverifiable residue, is
+				// counted and kept whatever its state, and a staging folder never holds media, so
+				// one gone since the listing (a concurrent cleanupStaging) is simply gone.
+				const owned = this.active.has(id) || this.uncertainResidue.has(id)
 				try {
 					await this.safeDirectory(dir)
-				} catch {
-					next.unknown = true
+				} catch (cause) {
+					if (nativeCode(cause) !== "ENOENT") next.unknown = true
 					continue
 				}
-				if (this.active.has(id) || this.uncertainResidue.has(id)) {
-					// This process's own creation, or its unverifiable residue: counted and kept.
+				if (owned) {
 					for (const child of await this.children(dir, 8))
 						await account(join(dir, child), id, true)
 					continue
@@ -1695,10 +1718,13 @@ export class AnalogOperations {
 					continue
 				}
 				const dir = this.opDir(id)
+				// An operation of this process mid-cleanup, or one a cleanup marker governs, may
+				// remove its folder after the listing: gone, not unknown. Anyone else's: fail closed.
+				const removable = this.active.has(id) || cleanup.has(id)
 				try {
 					await this.safeDirectory(dir)
-				} catch {
-					next.unknown = true
+				} catch (cause) {
+					if (!removable || nativeCode(cause) !== "ENOENT") next.unknown = true
 					continue
 				}
 				let metadataBytes = 0

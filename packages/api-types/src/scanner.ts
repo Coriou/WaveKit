@@ -1262,8 +1262,9 @@ export interface ScannerStatus {
 	recordingsQuota?: ScannerRecordingsQuotaStatus | undefined
 	/**
 	 * Incomplete analog recording operation folders (crash residue holding no media) the core set
-	 * aside instead of refusing recordings: `setAside` held now (at most 32, oldest deleted past
-	 * it), `lastReason` of the last one this run. Absent while none is held and on older cores.
+	 * aside instead of refusing recordings: `setAside` held now (at most 32 evictable ones, oldest
+	 * deleted past it; one that cannot be proven media-free is kept and counted, so it can exceed
+	 * 32), `lastReason` of the last one this run. Absent while none is held and on older cores.
 	 */
 	analogOperations?: {
 		setAside: number

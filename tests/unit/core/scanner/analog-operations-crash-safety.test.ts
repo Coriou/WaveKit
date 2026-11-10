@@ -318,6 +318,122 @@ describe("analog operation crash safety: leftovers never poison the inventory", 
 		expect(after).toHaveLength(ANALOG_SET_ASIDE_MAX)
 		for (const name of held.slice(0, 3)) expect(after).not.toContain(name)
 	})
+	it("keeps and counts set-aside entries that cannot be proven media-free, even past the bound", async () => {
+		const { root, store } = await fresh()
+		await start(root, store)
+		const held: string[] = []
+		for (let i = 0; i <= ANALOG_SET_ASIDE_MAX; i++) {
+			const name = `${String(1000 + i).padStart(13, "0")}-${randomUUID()}`
+			const entry = join(ops(root), ".set-aside", name)
+			await mkdir(entry, { recursive: true })
+			// A file no intent folder holds: possibly media, never deleted.
+			await writeFile(join(entry, "other.bin"), "x")
+			held.push(name)
+		}
+		const restarted = await start(root, store)
+		expect(restarted.evidence.analogAuthorityReady).toBe(true)
+		expect(restarted.evidence.analogOperationsStatus()?.setAside).toBe(
+			ANALOG_SET_ASIDE_MAX + 1,
+		)
+		expect((await readdir(join(ops(root), ".set-aside"))).sort()).toEqual(held)
+	})
+	it("evicts a half-evicted set-aside entry (one file or every file already gone)", async () => {
+		const { root, store } = await fresh()
+		await start(root, store)
+		const names: string[] = []
+		for (let i = 0; i < ANALOG_SET_ASIDE_MAX + 2; i++) {
+			const name = `${String(1000 + i).padStart(13, "0")}-${randomUUID()}`
+			const entry = join(ops(root), ".set-aside", name)
+			await mkdir(entry, { recursive: true })
+			// The oldest lost intent.tmp, the next lost both files (a crash mid-eviction).
+			if (i !== 1) await writeFile(join(entry, "intent.json"), "{}")
+			if (i > 1) await writeFile(join(entry, "intent.tmp"), "{")
+			names.push(name)
+		}
+		const restarted = await start(root, store)
+		expect(restarted.evidence.analogAuthorityReady).toBe(true)
+		expect(restarted.evidence.analogOperationsStatus()?.setAside).toBe(
+			ANALOG_SET_ASIDE_MAX,
+		)
+		expect((await readdir(join(ops(root), ".set-aside"))).sort()).toEqual(
+			names.slice(2),
+		)
+	})
+	it("keeps an unparseable intent fail closed when recordings/analog has more folders than the search bound", async () => {
+		const { root, store } = await fresh()
+		const p = await start(root, store)
+		await record(p)
+		const analog = join(root, "recordings", "analog")
+		const existing = (await readdir(analog)).length
+		// One past MAX_RECOVERY_OPERATIONS (4096): empty folders are cheap.
+		const extra: string[] = []
+		for (let i = existing; i <= 4096; i++) {
+			const folder = join(analog, `f${i}`)
+			await mkdir(folder)
+			extra.push(folder)
+		}
+		expect((await readdir(analog)).length).toBe(4097)
+		const orphan = join(ops(root), randomUUID())
+		await mkdir(orphan)
+		await writeFile(join(orphan, "intent.json"), "not json")
+		const over = await start(root, store)
+		expect(over.evidence.analogAuthorityReady).toBe(false)
+		expect(existsSync(join(orphan, "intent.json"))).toBe(true)
+		expect(over.evidence.analogOperationsStatus()).toBeNull()
+		// At the bound the search completes and the residue is set aside.
+		await rmdir(extra[extra.length - 1]!)
+		const at = await start(root, store)
+		expect(at.evidence.analogAuthorityReady).toBe(true)
+		expect(existsSync(orphan)).toBe(false)
+		expect(at.evidence.analogOperationsStatus()).toEqual({
+			setAside: 1,
+			lastReason: "invalid-intent",
+		})
+	}, 60_000)
+	it("a staging folder removed between the listing and its check does not refuse another admission", async () => {
+		const { root, store } = await fresh()
+		await start(root, store)
+		let vanish: string | null = null
+		const evidence = new EvidenceStore({
+			dir: root,
+			caps,
+			logger,
+			now: () => NOW,
+			statfs: async () => ({ freeBytes: 1e9 }),
+			isDiscoveryLive: id => !!store.get(id),
+			analogIo: {
+				unlink: path => unlink(path),
+				rmdir: path => rmdir(path),
+				checkpoint: async name => {
+					// A concurrent cleanupStaging finishing right after the admission scan listed.
+					if (name !== "inventory-listed" || !vanish) return
+					const dir = vanish
+					vanish = null
+					await unlink(join(dir, "intent.tmp"))
+					await rmdir(dir)
+				},
+			},
+		})
+		evidence.configureAnalog(adapterFor(store))
+		await evidence.recoverAnalog()
+		expect(evidence.analogAuthorityReady).toBe(true)
+		const staging = join(ops(root), `.staging-${randomUUID()}`)
+		await mkdir(staging)
+		await writeFile(join(staging, "intent.tmp"), "{")
+		vanish = staging
+		const op = evidence.beginAnalog({
+			discoveryId: store.list({}).items[0]!.id,
+			observationId: "o1",
+			binding: binding(),
+		})
+		await op.ready
+		await op.push(new Int16Array([1, -2, 3]))
+		const receipt = await op.finish()
+		expect(vanish).toBeNull()
+		expect(existsSync(staging)).toBe(false)
+		expect(receipt.outcome).toBe("finalized")
+		expect(evidence.analogAuthorityReady).toBe(true)
+	})
 	it("a second restart changes nothing on disk", async () => {
 		const { root, store } = await fresh()
 		const p = await start(root, store)
