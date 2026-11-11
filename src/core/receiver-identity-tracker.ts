@@ -7,7 +7,8 @@
  * (an answer or a failure; `noteSdrHostResult`), event-driven: the connection kicks a poll
  * (`kickSdrHostPoll`) and settles as soon as the result is in, with the header seen. Epoch rule:
  * a result belongs to the connection when its poll's request started at or after the
- * connection opened (`startedAt >= openedAt`, both Date.now()); an older one (a boot poll that
+ * connection opened (`startedAt >= openedAt`, both performance.now(): monotonic, so a wall-clock
+ * step cannot misplace a result); an older one (a boot poll that
  * answered before the connect) is ignored, and the kicked poll answers instead. The hard bound
  * `sdrHostWaitMs` is only a safety net (see RECEIVER_SDR_HOST_WAIT_MS); past it the identity
  * settles with what it has. A later answer only ever upgrades it (model -> unit); a failed or
@@ -67,7 +68,7 @@ export interface ReceiverIdentityTrackerOptions {
 	sdrHostWaitMs?: number
 	/** Asks for an sdr-host poll now (SdrHostPoller.pollNow); called at every connection. */
 	kickSdrHostPoll?: (sourceId: string) => void
-	/** Clock of the epoch rule (default Date.now, the poller's clock). */
+	/** Monotonic clock of the epoch rule (default performance.now, the poller's clock). */
 	now?: () => number
 }
 
@@ -109,7 +110,7 @@ export class ReceiverIdentityTracker extends EventEmitter {
 		super()
 		this.log = createComponentLogger(options.logger, "ReceiverIdentity")
 		this.waitMs = options.sdrHostWaitMs ?? RECEIVER_SDR_HOST_WAIT_MS
-		this.now = options.now ?? Date.now
+		this.now = options.now ?? (() => performance.now())
 		options.sources.on("connected", id => {
 			this.onConnected(id)
 			if (!this.stopped) this.emit("connection", id)

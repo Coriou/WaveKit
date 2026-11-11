@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import * as fc from "fast-check"
 import {
+	SDR_HOST_FIRST_ANSWER_ATTEMPTS,
 	SdrHostPoller,
 	sanitizeHostVersion,
 } from "../../../src/core/sdr-host-poller.js"
@@ -361,7 +362,7 @@ describe("SdrHostPoller identity results", () => {
 			{ fetchFn, pollIntervalMs: 60_000 },
 		)
 		try {
-			const before = Date.now()
+			const before = performance.now()
 			const result = new Promise(resolve =>
 				poller.once("identity-result", (_id, r) => resolve(r)),
 			)
@@ -398,6 +399,69 @@ describe("SdrHostPoller identity results", () => {
 			poller.start()
 			expect(await result).toMatchObject({ ok: false, facts: null })
 			expect(poller.hasAnswered("rtl")).toBe(false)
+		} finally {
+			poller.stop()
+		}
+	})
+
+	it("awaits the first answer until SDR_HOST_FIRST_ANSWER_ATTEMPTS polls failed, at the backoff", async () => {
+		vi.useFakeTimers()
+		try {
+			const fetchFn = vi.fn<typeof fetch>().mockRejectedValue(new Error("down"))
+			const poller = new SdrHostPoller(
+				logger,
+				[{ sourceId: "rtl", apiUrl: "http://sdr-host.invalid" }],
+				{ fetchFn },
+			)
+			poller.on("error", () => {})
+			const awaited: boolean[] = []
+			poller.on("identity-result", id =>
+				awaited.push(poller.awaitingFirstAnswer(id)),
+			)
+			expect(SDR_HOST_FIRST_ANSWER_ATTEMPTS).toBe(3)
+			// Before any poll: awaited.
+			expect(poller.awaitingFirstAnswer("rtl")).toBe(true)
+			expect(poller.awaitingFirstAnswer("other")).toBe(false)
+			poller.start()
+			await vi.advanceTimersByTimeAsync(0)
+			// Backoff 2 s, then 4 s: the third failure is about 6 s after the first.
+			await vi.advanceTimersByTimeAsync(2_000)
+			expect(awaited).toEqual([true, true])
+			await vi.advanceTimersByTimeAsync(4_000)
+			expect(awaited).toEqual([true, true, false])
+			poller.stop()
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it("an answer ends the wait for good (a later failure is not awaited again)", async () => {
+		let up = true
+		const fetchFn = vi.fn<typeof fetch>(async () => {
+			if (!up) throw new Error("down")
+			return new Response(JSON.stringify({ unitId: UNIT }), { status: 200 })
+		})
+		const poller = new SdrHostPoller(
+			logger,
+			[{ sourceId: "rtl", apiUrl: "http://sdr-host.invalid" }],
+			{ fetchFn, pollIntervalMs: 60_000 },
+		)
+		poller.on("error", () => {})
+		try {
+			const first = new Promise(resolve =>
+				poller.once("identity-result", resolve),
+			)
+			poller.start()
+			await first
+			expect(poller.awaitingFirstAnswer("rtl")).toBe(false)
+			expect(poller.hasAnswered("rtl")).toBe(true)
+			up = false
+			const failed = new Promise(resolve =>
+				poller.once("identity-result", resolve),
+			)
+			poller.pollNow("rtl")
+			await failed
+			expect(poller.awaitingFirstAnswer("rtl")).toBe(false)
 		} finally {
 			poller.stop()
 		}

@@ -30,6 +30,12 @@ const DEFAULT_POLL_INTERVAL_MS = 3000
 const DEFAULT_TIMEOUT_MS = 2000
 const BASE_BACKOFF_MS = 2000
 const MAX_BACKOFF_MS = 30000
+/**
+ * An auto-detected sdr-host that never answered is still awaited (a weak receiver key does not
+ * adopt the learned state from before namespacing) until this many polls failed: with the backoff
+ * above, about 2 + 4 s after the first failure (pollNow at a connection can shorten it).
+ */
+export const SDR_HOST_FIRST_ANSWER_ATTEMPTS = 3
 
 /** Pass a version string through only when it is short printable ASCII. */
 export function sanitizeHostVersion(value: unknown): string | null {
@@ -160,7 +166,11 @@ export interface SdrHostPollerEvents {
 
 /** One poll's identity outcome (SdrHostPoller "identity-result"). */
 export interface SdrHostIdentityResult {
-	/** Date.now() when the poll's request started: the tracker's connection epoch rule reads it. */
+	/**
+	 * performance.now() (monotonic) when the poll's request started: the tracker's connection
+	 * epoch rule compares it with its own performance.now() at the connection, so a wall-clock
+	 * step never puts a result in the wrong connection.
+	 */
 	startedAt: number
 	/** The sdr-host answered `/api/status` (redirected or not). */
 	ok: boolean
@@ -302,6 +312,19 @@ export class SdrHostPoller extends EventEmitter {
 	}
 
 	/**
+	 * True while the source's sdr-host may still give its first answer: it never answered and
+	 * fewer than SDR_HOST_FIRST_ANSWER_ATTEMPTS polls failed (false for an unknown source).
+	 */
+	awaitingFirstAnswer(sourceId: string): boolean {
+		const state = this.pollers.get(sourceId)
+		return (
+			state !== undefined &&
+			!state.answered &&
+			state.consecutiveFailures < SDR_HOST_FIRST_ANSWER_ATTEMPTS
+		)
+	}
+
+	/**
 	 * Polls the source's sdr-host now (a new connection wants an answer from after it opened):
 	 * a poll running now is followed by another right after it; a scheduled one (also a failure
 	 * backoff) is brought forward. The failure count is kept, so backoff after it still grows.
@@ -397,7 +420,7 @@ export class SdrHostPoller extends EventEmitter {
 		}
 		state.inFlight = true
 		state.rerun = false
-		const startedAt = Date.now()
+		const startedAt = performance.now()
 		let next: number
 		try {
 			next = await this.pollOnce(sourceId, state, startedAt)

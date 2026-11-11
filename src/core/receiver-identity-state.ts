@@ -24,7 +24,9 @@
  * tuner), the spectrum files as soon as the scanner store is writable while that receiver is bound.
  * Who may adopt: a stable key (`unit:` or a strong `serial:`) always; the source-scoped key only
  * when the source has no sdr-host (`sdrHostConfigured` false). With an sdr-host the adoption waits
- * for its stable answer, so a header-only key never wins it.
+ * for its stable answer, so a header-only key never wins it. When the answer stops being awaited
+ * (an auto-detected sdr-host that never answered: `recheckAdoption`), the bound source-scoped key
+ * adopts then, within its connection.
  *
  * Take-over: a stable key bound for the first time on a source that does not adopt the legacy
  * state now (another key adopted it) starts from that source's weak namespace for the same model
@@ -153,8 +155,9 @@ export interface ReceiverLearnedStateOptions {
 	/** Learned state outside the spectrum (the tuner: pre-band gain, accepted tuning). */
 	onBound?: (sourceId: string, binding: ReceiverBinding) => void
 	/**
-	 * The source has an sdr-host that can name a stable unit: a weak key then never adopts the
-	 * state from before namespacing (default: none).
+	 * The source has an sdr-host that can name a stable unit, or one may still answer: a weak key
+	 * then does not adopt the state from before namespacing (default: none). When it turns false
+	 * for a bound weak key, call `recheckAdoption`.
 	 */
 	sdrHostConfigured?: (sourceId: string) => boolean
 	fs?: {
@@ -218,6 +221,8 @@ export class ReceiverLearnedState {
 	private fileChain: Promise<unknown> = Promise.resolve()
 	/** Spectrum adoptions queued by a write or a load, one per source. */
 	private readonly adopting = new Set<string>()
+	/** The identity of the last settle per source (`recheckAdoption` binds it again). */
+	private readonly settledIdentity = new Map<string, ReceiverIdentity>()
 
 	constructor(private readonly options: ReceiverLearnedStateOptions) {
 		this.log = createComponentLogger(options.logger, "ReceiverLearnedState")
@@ -545,6 +550,30 @@ export class ReceiverLearnedState {
 		)
 	}
 
+	/**
+	 * `sdrHostConfigured` may have turned false for the source (its auto-detected sdr-host never
+	 * answered): the bound weak key adopts the state from before namespacing now when no receiver
+	 * adopted it yet. Nothing happens while a connection is pending (its settle decides), for
+	 * another key than the settled one, or when the adoption is not allowed yet.
+	 */
+	recheckAdoption(sourceId: string): Promise<void> {
+		if (!this.options.tracked(sourceId)) return Promise.resolve()
+		const boundary = this.boundaries.get(sourceId) ?? 0
+		return this.enqueue(sourceId, async () => {
+			const identity = this.settledIdentity.get(sourceId)
+			if (
+				identity === undefined ||
+				this.pending.has(sourceId) ||
+				(this.boundaries.get(sourceId) ?? 0) !== boundary ||
+				this.bound.get(sourceId) !== identity.key ||
+				(this.records.get(sourceId)?.adoptedBy ?? null) !== null ||
+				!this.mayAdopt(sourceId, identity)
+			)
+				return
+			await this.switchTo(sourceId, identity, identity, boundary, true)
+		})
+	}
+
 	private enqueue(sourceId: string, task: () => Promise<void>): Promise<void> {
 		const run = (this.chains.get(sourceId) ?? Promise.resolve())
 			.then(task)
@@ -684,6 +713,7 @@ export class ReceiverLearnedState {
 		identity: ReceiverIdentity,
 		previous: ReceiverIdentity | undefined,
 		boundary: number,
+		recheck = false,
 	): Promise<void> {
 		const from = this.bound.get(sourceId) ?? null
 		const to = identity.strength === "unknown" ? null : identity.key
@@ -691,8 +721,9 @@ export class ReceiverLearnedState {
 		const stale = (this.boundaries.get(sourceId) ?? 0) !== boundary
 		if (stale) return
 		const wasPending = this.pending.has(sourceId)
-		// Nothing changed (a repeated settle within one connection).
+		// Nothing changed (a repeated settle within one connection); a recheck may adopt.
 		if (
+			!recheck &&
 			!wasPending &&
 			from === to &&
 			this.views.get(sourceId)?.key === identity.key
@@ -764,6 +795,9 @@ export class ReceiverLearnedState {
 						: known
 							? "resumed"
 							: "fresh"
+				// A recheck that moved nothing keeps what the settle said.
+				if (recheck && state !== "adopted")
+					state = this.views.get(sourceId)?.namespaceState ?? state
 				record.keys = [...record.keys.filter(k => k !== to), to].slice(
 					-RECEIVER_NAMESPACES_MAX_KEYS,
 				)
@@ -772,6 +806,7 @@ export class ReceiverLearnedState {
 			}
 			this.bind(sourceId, to)
 			this.pending.delete(sourceId)
+			this.settledIdentity.set(sourceId, { ...identity })
 			if (this.spectrum && store) {
 				// Which state the engine runs from now; undefined: what it has (no swap).
 				let next: LearnedSnapshot | undefined
@@ -812,18 +847,24 @@ export class ReceiverLearnedState {
 			this.options.onBound?.(sourceId, binding)
 			// Keys are built from validated components only, so they are safe to log.
 			const same = previous?.key === identity.key
-			this.log.info(
-				{
-					sourceId,
-					from: previous?.key ?? "none",
-					to: identity.key,
-					strength: identity.strength,
-					learnedState: state,
-				},
-				same
-					? `Receiver reconnected: ${identity.key}; learned state ${state}`
-					: `Receiver changed: ${previous?.key ?? "none"} -> ${identity.key}; learned state ${state}`,
-			)
+			if (recheck)
+				this.log.info(
+					{ sourceId, key: identity.key, learnedState: state },
+					"No sdr-host answered: the receiver identified by model adopts the learned state from before namespacing",
+				)
+			else
+				this.log.info(
+					{
+						sourceId,
+						from: previous?.key ?? "none",
+						to: identity.key,
+						strength: identity.strength,
+						learnedState: state,
+					},
+					same
+						? `Receiver reconnected: ${identity.key}; learned state ${state}`
+						: `Receiver changed: ${previous?.key ?? "none"} -> ${identity.key}; learned state ${state}`,
+				)
 			if (identity.strength === "model" && !same)
 				this.log.info(
 					{ sourceId, key: identity.key },

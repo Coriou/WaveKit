@@ -301,6 +301,37 @@ describe("pre-band gain from before namespacing", () => {
 		}
 	})
 
+	it("a deferred adoption of the receiver bound now (same key) takes the legacy record", async () => {
+		const W = "source:rtl|model:5:29"
+		const disk = memoryFs(legacy)
+		const { controller } = await setup(disk.fs)
+		controller.noteReceiverBound("rtl", { key: W, adoptLegacy: false })
+		await controller.setFrequency("rtl", UHF, REST)
+		expect(controller.getState("rtl")?.gain).not.toBe(150)
+		// No sdr-host answered: the same key adopts within its connection.
+		controller.noteReceiverBound("rtl", { key: W, adoptLegacy: true })
+		await settle()
+		expect(JSON.parse(disk.files.get(RECEIVERS_PATH) ?? "null")).toEqual({
+			version: 1,
+			sources: [{ sourceId: "rtl", receiverKey: W, saved: saved(150) }],
+		})
+		await controller.setFrequency("rtl", UHF, REST)
+		expect(controller.getState("rtl")?.gain).toBe(150)
+	})
+
+	it("a deferred adoption keeps the bound receiver's own record", async () => {
+		const W = "source:rtl|model:5:29"
+		const disk = memoryFs(legacy, {
+			version: 1,
+			sources: [{ sourceId: "rtl", receiverKey: W, saved: saved(120) }],
+		})
+		const { controller } = await setup(disk.fs)
+		controller.noteReceiverBound("rtl", { key: W, adoptLegacy: false })
+		controller.noteReceiverBound("rtl", { key: W, adoptLegacy: true })
+		await controller.setFrequency("rtl", UHF, REST)
+		expect(controller.getState("rtl")?.gain).toBe(120)
+	})
+
 	it("the receiver's keyed record wins over the legacy one at the adoption", async () => {
 		const disk = memoryFs(legacy, {
 			version: 1,

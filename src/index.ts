@@ -1340,13 +1340,16 @@ async function main(): Promise<void> {
 			stateDir: config.stateDir,
 			logger,
 			tracked: receiverTracked,
-			// An sdr-host is there: configured explicitly, or auto-detected and it has answered.
-			// Only then does a weak (source-scoped) key wait for a stable one to adopt.
+			// An sdr-host is there: configured explicitly, or auto-detected and it has answered or
+			// may still answer first (fewer than SDR_HOST_FIRST_ANSWER_ATTEMPTS failed polls). Only
+			// then does a weak (source-scoped) key wait for a stable one to adopt; the poller's
+			// failed results recheck it (below).
 			sdrHostConfigured: id =>
 				identityPoller?.getStatus(id) !== undefined &&
 				(config.sources.find(source => source.id === id)?.sdrHost?.apiUrl !==
 					undefined ||
-					identityPoller.hasAnswered(id)),
+					identityPoller.hasAnswered(id) ||
+					identityPoller.awaitingFirstAnswer(id)),
 			// The controller is built below; nothing binds before the first connection.
 			onBound: receiverBoundToTuner(receiverIdentity, () => tunerController),
 		})
@@ -2267,9 +2270,17 @@ async function main(): Promise<void> {
 					timeoutMs: config.resources.sdrHostPoller.timeoutMs,
 				})
 				identityPoller = sdrHostPoller
-				sdrHostPoller.on("identity-result", (sourceId, result) =>
-					receiverIdentity.noteSdrHostResult(sourceId, result),
-				)
+				const poller = sdrHostPoller
+				poller.on("identity-result", (sourceId, result) => {
+					receiverIdentity.noteSdrHostResult(sourceId, result)
+					// An auto-detected sdr-host that stopped being awaited: the weak key may adopt now.
+					if (
+						!result.ok &&
+						!poller.hasAnswered(sourceId) &&
+						!poller.awaitingFirstAnswer(sourceId)
+					)
+						void receiverState.recheckAdoption(sourceId)
+				})
 				log.info(
 					{
 						count: sdrHostConfigs.length,

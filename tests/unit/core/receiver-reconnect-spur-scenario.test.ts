@@ -8,13 +8,17 @@
  * lines: they never move with the tuning). The receiver's namespace holds a learned spur map that
  * covers those lines. The fake drops the connection and the core reconnects to the same receiver:
  * no scanner discovery may appear in the reconnect window (a fresh engine would lose the spur map
- * and report the lines as signals). No request leaves the process.
+ * and report the lines as signals). A variant adds an in-process fake sdr-host (HTTP on an
+ * ephemeral loopback port) reporting a fixed unit id, polled by the production SdrHostPoller:
+ * each connection kicks a poll (pollNow) whose identity result settles the unit key. No request
+ * leaves the process.
  */
+import http from "node:http"
 import net from "node:net"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { createLogger } from "../../../src/utils/logger.js"
 import { SourceManager } from "../../../src/core/source-manager.js"
 import { FanoutManager } from "../../../src/core/fanout-manager.js"
@@ -29,7 +33,12 @@ import { ScannerPersistence } from "../../../src/core/scanner/store/persistence.
 import type { EngineState } from "../../../src/core/spectrum/types.js"
 import { ScannerConfigSchema, type SourceConfig } from "../../../src/config.js"
 import type { ScannerSettings } from "../../../src/core/scanner/types.js"
-import { ReceiverIdentityTracker } from "../../../src/core/receiver-identity-tracker.js"
+import {
+	ReceiverIdentityTracker,
+	receiverSdrHostWaitMs,
+} from "../../../src/core/receiver-identity-tracker.js"
+import { SdrHostPoller } from "../../../src/core/sdr-host-poller.js"
+import { SpectrumEngine } from "../../../src/core/spectrum/spectrum-engine.js"
 import { ReceiverLearnedState } from "../../../src/core/receiver-identity-state.js"
 import {
 	receiverBoundToTuner,
@@ -67,6 +76,39 @@ const LEARNED: EngineState = {
 }
 /** Header-only identity (no sdr-host): the source-scoped model key of tuner 5 with 29 gains. */
 const RECEIVER_KEY = "source:rtl|model:5:29"
+/** The fake sdr-host's persisted unit id, and the key it gives the receiver. */
+const UNIT_ID = "0123456789abcdef0123456789abcdef"
+const UNIT_KEY = `unit:${UNIT_ID}`
+
+/** A fake sdr-host status API on an ephemeral loopback port: a fixed unit id, no /api/host. */
+async function fakeSdrHost() {
+	let statusRequests = 0
+	const server = http.createServer((req, res) => {
+		if (req.url === "/api/status") {
+			statusRequests += 1
+			res.writeHead(200, { "Content-Type": "application/json" })
+			res.end(
+				JSON.stringify({
+					version: "1.0.0",
+					receiverId: "f".repeat(32),
+					unitId: UNIT_ID,
+				}),
+			)
+			return
+		}
+		res.writeHead(404)
+		res.end()
+	})
+	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))
+	return {
+		apiUrl: `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`,
+		statusRequests: () => statusRequests,
+		close: async () => {
+			server.closeAllConnections()
+			await new Promise<void>(resolve => server.close(() => resolve()))
+		},
+	}
+}
 
 /** Noise plus fixed tones in 20 ms chunks; `drop()` ends every client connection. */
 async function spurRtlTcp() {
@@ -122,134 +164,183 @@ afterEach(async () => {
 	for (const fn of cleanup.splice(0).reverse()) await fn()
 })
 
+/**
+ * The scenario; `withSdrHost`: the source has a configured sdr-host (the fake), so both settles
+ * wait for this connection's kicked poll and land on the unit key.
+ */
+async function runScenario(withSdrHost: boolean): Promise<void> {
+	const server = await spurRtlTcp()
+	cleanup.push(() => server.close())
+	const stateDir = await mkdtemp(join(tmpdir(), "wk-spur-scenario-"))
+	cleanup.push(() => rm(stateDir, { recursive: true, force: true }))
+	const logger = createLogger({ level: "fatal" })
+	const sdrHost = withSdrHost ? await fakeSdrHost() : null
+	if (sdrHost) cleanup.push(() => sdrHost.close())
+	const key = sdrHost ? UNIT_KEY : RECEIVER_KEY
+	// The receiver's namespace already holds its learned spur map.
+	await new ScannerPersistence({
+		dir: join(stateDir, "scanner"),
+		logger,
+		now: Date.now,
+	}).writeEngineIn("rtl", key, LEARNED)
+	const source: SourceConfig = {
+		id: "rtl",
+		type: "rtl_tcp",
+		host: "127.0.0.1",
+		port: server.port,
+		loop: false,
+		playbackSpeed: 1,
+		caps: {
+			kind: "iq",
+			format: "U8_IQ",
+			sampleRate: FS,
+			centerFreq: CENTRE,
+			exclusive: false,
+		},
+		...(sdrHost ? { sdrHost: { apiUrl: sdrHost.apiUrl } } : {}),
+	} as SourceConfig
+	const sourceManager = new SourceManager(logger)
+	sourceManager.on("error", () => undefined)
+	const fanout = new FanoutManager(logger)
+	const routing = new SourceFanoutRouter(sourceManager, fanout, logger, "rtl")
+	const tracked = (id: string) => id === "rtl"
+	// As src/index.ts: the poller with the source's configured apiUrl, its identity results
+	// into the tracker, a kicked poll at every connection.
+	const poller = sdrHost
+		? new SdrHostPoller(logger, [{ sourceId: "rtl", apiUrl: sdrHost.apiUrl }], {
+				pollIntervalMs: 60_000,
+				timeoutMs: 2_000,
+			})
+		: undefined
+	poller?.on("error", () => undefined)
+	const tracker = new ReceiverIdentityTracker({
+		sources: sourceManager,
+		logger,
+		sdrHostApplies: id =>
+			poller?.getStatus(id) !== undefined &&
+			(sourceManager.getSelectedCandidate(id)?.index ?? 0) === 0,
+		sdrHostWaitMs: receiverSdrHostWaitMs(2_000),
+		kickSdrHostPoll: id => poller?.pollNow(id),
+	})
+	poller?.on("identity-result", (id, result) =>
+		tracker.noteSdrHostResult(id, result),
+	)
+	let tuner: TunerController | undefined
+	const learned = new ReceiverLearnedState({
+		stateDir,
+		logger,
+		tracked,
+		onBound: receiverBoundToTuner(tracker, () => tuner),
+		sdrHostConfigured: id => poller?.getStatus(id) !== undefined,
+	})
+	await learned.load()
+	wireReceiverTracker(tracker, learned)
+	tuner = new TunerController(logger, sourceManager, {
+		receiverIdentity: id => (tracked(id) ? tracker.provisional(id) : undefined),
+		receiverTracked: tracked,
+	})
+	wireTunerControl({
+		log: logger,
+		sourceManager,
+		tunerController: tuner,
+		tunerRelay: new TunerRelay(
+			logger,
+			sourceManager,
+			new FanoutManager(logger),
+			{
+				enabled: false,
+				host: "127.0.0.1",
+				port: 1,
+				controlPolicy: "shared",
+			},
+		),
+		relayEnabled: false,
+	})
+	const decoders = new DecoderManager(new DecoderRegistry(), fanout, logger)
+	decoders.setSourceManager(sourceManager, routing)
+	const settings = ScannerConfigSchema.parse({
+		storage: { dir: join(stateDir, "scanner") },
+	}) as ScannerSettings
+	const scanner = new ScannerService({
+		settings,
+		learnedState: (store, gated, writable) =>
+			learned.attach(store, gated, writable),
+		sourceConfigs: [source],
+		decoderConfigs: [],
+		region: "EU",
+		stateDir,
+		sources: sourceManager,
+		routing,
+		tuner,
+		decoders,
+		digitalVoice: null,
+		liveDemod: null,
+		logger,
+		engineHost: "inline",
+	})
+	learned.setSpectrum(scanner.spectrum)
+	cleanup.push(async () => {
+		poller?.stop()
+		await scanner.stop()
+		await decoders.destroy()
+		tracker.stop()
+		await sourceManager.disconnectAll()
+	})
+	// Every spectrum pipeline built (a new host is a pipeline restart).
+	const builds = vi.spyOn(
+		SpectrumEngine.prototype as unknown as {
+			createHost: (rate: number) => unknown
+		},
+		"createHost",
+	)
+	cleanup.push(() => builds.mockRestore())
+	const settled: string[] = []
+	tracker.on("settled", (_id: string, identity: { key: string }) =>
+		settled.push(identity.key),
+	)
+	const discoveries = () => scanner.listDiscoveries({ limit: 50 }).items
+	let swaps = 0
+	const replace = scanner.spectrum.replaceLearnedState.bind(scanner.spectrum)
+	scanner.spectrum.replaceLearnedState = async (id, next) => {
+		swaps += 1
+		await replace(id, next)
+	}
+	await scanner.start()
+	poller?.start()
+	await sourceManager.connect(source)
+	await waitFor(() => settled.length === 1, 10_000)
+	expect(settled).toEqual([key])
+	await learned.idle("rtl")
+	// The seeded map is in use: the lines are no discovery.
+	await new Promise(resolve => setTimeout(resolve, 3_000))
+	expect(discoveries()).toEqual([])
+	const swapsBefore = swaps
+	const buildsBefore = builds.mock.calls.length
+	const statusBefore = sdrHost?.statusRequests() ?? 0
+	expect(buildsBefore).toBeGreaterThan(0)
+
+	// The link drops; the core reconnects to the same receiver.
+	server.drop()
+	await waitFor(() => server.accepts() === 2, 20_000)
+	await waitFor(() => settled.length === 2, 10_000)
+	expect(settled).toEqual([key, key])
+	// The reconnect asked the sdr-host again (its kicked poll settled the unit key).
+	if (sdrHost) expect(sdrHost.statusRequests()).toBeGreaterThan(statusBefore)
+	// The reconnect window and well past it: nothing new, and the engine was never swapped.
+	await new Promise(resolve => setTimeout(resolve, 6_000))
+	expect(discoveries()).toEqual([])
+	expect(swaps).toBe(swapsBefore)
+	expect(builds.mock.calls.length).toBe(buildsBefore)
+	expect(learned.view("rtl")?.namespaceState).toBe("resumed")
+	expect(learned.view("rtl")?.key).toBe(key)
+}
+
 describe("scenario: reconnect to the same receiver with spur lines in the IQ", () => {
 	it("keeps the spur map across the reconnect: no discovery in the reconnect window", async () => {
-		const server = await spurRtlTcp()
-		cleanup.push(() => server.close())
-		const stateDir = await mkdtemp(join(tmpdir(), "wk-spur-scenario-"))
-		cleanup.push(() => rm(stateDir, { recursive: true, force: true }))
-		const logger = createLogger({ level: "fatal" })
-		// The receiver's namespace already holds its learned spur map.
-		await new ScannerPersistence({
-			dir: join(stateDir, "scanner"),
-			logger,
-			now: Date.now,
-		}).writeEngineIn("rtl", RECEIVER_KEY, LEARNED)
-		const source: SourceConfig = {
-			id: "rtl",
-			type: "rtl_tcp",
-			host: "127.0.0.1",
-			port: server.port,
-			loop: false,
-			playbackSpeed: 1,
-			caps: {
-				kind: "iq",
-				format: "U8_IQ",
-				sampleRate: FS,
-				centerFreq: CENTRE,
-				exclusive: false,
-			},
-		}
-		const sourceManager = new SourceManager(logger)
-		sourceManager.on("error", () => undefined)
-		const fanout = new FanoutManager(logger)
-		const routing = new SourceFanoutRouter(sourceManager, fanout, logger, "rtl")
-		const tracked = (id: string) => id === "rtl"
-		const tracker = new ReceiverIdentityTracker({
-			sources: sourceManager,
-			logger,
-			sdrHostApplies: () => false,
-		})
-		let tuner: TunerController | undefined
-		const learned = new ReceiverLearnedState({
-			stateDir,
-			logger,
-			tracked,
-			onBound: receiverBoundToTuner(tracker, () => tuner),
-		})
-		await learned.load()
-		wireReceiverTracker(tracker, learned)
-		tuner = new TunerController(logger, sourceManager, {
-			receiverIdentity: id =>
-				tracked(id) ? tracker.provisional(id) : undefined,
-			receiverTracked: tracked,
-		})
-		wireTunerControl({
-			log: logger,
-			sourceManager,
-			tunerController: tuner,
-			tunerRelay: new TunerRelay(
-				logger,
-				sourceManager,
-				new FanoutManager(logger),
-				{
-					enabled: false,
-					host: "127.0.0.1",
-					port: 1,
-					controlPolicy: "shared",
-				},
-			),
-			relayEnabled: false,
-		})
-		const decoders = new DecoderManager(new DecoderRegistry(), fanout, logger)
-		decoders.setSourceManager(sourceManager, routing)
-		const settings = ScannerConfigSchema.parse({
-			storage: { dir: join(stateDir, "scanner") },
-		}) as ScannerSettings
-		const scanner = new ScannerService({
-			settings,
-			learnedState: (store, gated, writable) =>
-				learned.attach(store, gated, writable),
-			sourceConfigs: [source],
-			decoderConfigs: [],
-			region: "EU",
-			stateDir,
-			sources: sourceManager,
-			routing,
-			tuner,
-			decoders,
-			digitalVoice: null,
-			liveDemod: null,
-			logger,
-			engineHost: "inline",
-		})
-		learned.setSpectrum(scanner.spectrum)
-		cleanup.push(async () => {
-			await scanner.stop()
-			await decoders.destroy()
-			tracker.stop()
-			await sourceManager.disconnectAll()
-		})
-		const settled: string[] = []
-		tracker.on("settled", (_id: string, identity: { key: string }) =>
-			settled.push(identity.key),
-		)
-		const discoveries = () => scanner.listDiscoveries({ limit: 50 }).items
-		let swaps = 0
-		const replace = scanner.spectrum.replaceLearnedState.bind(scanner.spectrum)
-		scanner.spectrum.replaceLearnedState = async (id, next) => {
-			swaps += 1
-			await replace(id, next)
-		}
-		await scanner.start()
-		await sourceManager.connect(source)
-		await waitFor(() => settled.length === 1, 10_000)
-		expect(settled).toEqual([RECEIVER_KEY])
-		await learned.idle("rtl")
-		// The seeded map is in use: the lines are no discovery.
-		await new Promise(resolve => setTimeout(resolve, 3_000))
-		expect(discoveries()).toEqual([])
-		const swapsBefore = swaps
+		await runScenario(false)
+	}, 60_000)
 
-		// The link drops; the core reconnects to the same receiver.
-		server.drop()
-		await waitFor(() => server.accepts() === 2, 20_000)
-		await waitFor(() => settled.length === 2, 10_000)
-		expect(settled).toEqual([RECEIVER_KEY, RECEIVER_KEY])
-		// The reconnect window and well past it: nothing new, and the engine was never swapped.
-		await new Promise(resolve => setTimeout(resolve, 6_000))
-		expect(discoveries()).toEqual([])
-		expect(swaps).toBe(swapsBefore)
-		expect(learned.view("rtl")?.namespaceState).toBe("resumed")
+	it("with a fake sdr-host: both settles are the unit key, no swap, no pipeline rebuild, no discovery", async () => {
+		await runScenario(true)
 	}, 60_000)
 })

@@ -41,6 +41,9 @@ export function registerStatusRoutes(
 			receiverId: fastify.receiverId,
 			// Stable across restarts and image updates (null: not persisted, so none).
 			unitId: fastify.unitId,
+			// Why unitId is null: "state-not-persistent" (the state dir is not a mounted volume),
+			// "state-unreadable" or "state-unwritable"; null while an id is reported.
+			unitIdReason: fastify.unitIdReason,
 			uptime,
 			dongle: preflightResult.dongle,
 			rtlTcp: {

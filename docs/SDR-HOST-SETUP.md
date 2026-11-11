@@ -290,16 +290,33 @@ lead to the same receiver. It changes when sdr-host restarts.
 
 `unitId` is the receiver's stable ID: 32 hex characters generated once and kept
 in `unit-id.json` in sdr-host's state directory (`/state` in the container,
-`SDR_HOST_STATE__DIR` to change it). `docker-compose.yml` mounts
-`/var/lib/wavekit/sdr-host` from the host there (`WAVEKIT_SDR_HOST_STATE_DIR`
-to change it), so the ID survives restarts and image updates. A missing or
-damaged file gets a new ID; when the directory is not writable sdr-host reports
-`unitId: null` rather than an ID that would change at the next start. WaveKit
-keys the receiver's learned state (spur map, noise floors, occupancy, saved
-gain) by `unitId`; without it the receiver is known only by its tuner model.
-An install made before `unitId` existed gets the volume with the updated
-compose file (`make sdr-host-compose-update`, or the next image); until then the
-ID lives in the container and changes when the container is recreated.
+`SDR_HOST_STATE__DIR` to change it). The ID is only as stable as that
+directory, so in a container `/state` must be a mounted volume.
+`docker-compose.yml` mounts `/var/lib/wavekit/sdr-host` from the host there
+(`WAVEKIT_SDR_HOST_STATE_DIR` to change it), so the ID survives restarts,
+container recreates and image updates. The image also declares `/state` as a
+volume, so a compose file without a mount still keeps the ID when the container
+is recreated, until the stack is removed (`docker compose down`); give it a
+named volume or a host directory to keep it for good.
+
+When `/state` is not a mount point (the ID would live in the container layer
+and change at every recreate), sdr-host reports `unitId: null` with
+`unitIdReason: "state-not-persistent"` and logs a warning naming the fix. A
+missing or damaged `unit-id.json` gets a new ID, written to a temporary file,
+flushed to disk and renamed into place. Any other read error (no permission, a
+disk error, a directory in its place) leaves the file alone and reports
+`unitIdReason: "state-unreadable"`; a directory that cannot be written reports
+`"state-unwritable"`. `unitIdReason` is `null` whenever an ID is reported.
+Outside a container (sdr-host run directly on the host) the state directory
+needs no mount.
+
+WaveKit keys the receiver's learned state (spur map, noise floors, occupancy,
+saved gain) by `unitId`. Without it, the receiver is keyed by its dongle's USB
+serial when that serial is strong (not a factory default, see below), else by
+the source plus the tuner model, which every dongle of that model on that
+source shares. To give an install made before `unitId` existed its state
+volume, update its compose file (`make sdr-host-compose-update`) and recreate
+the container; a new image alone does not add the mount.
 
 `dongle.serial` is the dongle's USB serial string, read from sysfs, when it is
 readable and plain (letters, digits, `.`, `_`, `-`, at most 32). Many dongles

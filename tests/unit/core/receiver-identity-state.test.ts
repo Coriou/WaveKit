@@ -777,6 +777,60 @@ describe("ReceiverLearnedState: who adopts the state from before namespacing", (
 		expect(fake.now().engine).toEqual(engine(-88))
 	})
 
+	it("an awaited sdr-host that never answers: the bound weak key adopts at the recheck, once", async () => {
+		await writeLegacy()
+		let awaited = true
+		const { learned, fake, bound } = await makeWith(() => awaited)
+		await learned.onIdentity("rtl", WEAK, undefined)
+		expect(bound.at(-1)).toEqual({ key: WEAK.key, adoptLegacy: false })
+		expect(learned.view("rtl")?.namespaceState).toBe("fresh")
+		// Still awaited: a recheck changes nothing.
+		await learned.recheckAdoption("rtl")
+		expect(bound).toHaveLength(1)
+		// Given up (failed polls, never answered): the weak key adopts now, within its connection.
+		awaited = false
+		const swaps = fake.replaced.length
+		await learned.recheckAdoption("rtl")
+		expect(bound.at(-1)).toMatchObject({ key: WEAK.key, adoptLegacy: true })
+		expect(learned.view("rtl")?.namespaceState).toBe("adopted")
+		expect(fake.replaced).toHaveLength(swaps + 1)
+		expect(fake.now().engine).toEqual(engine(-88))
+		const record = JSON.parse(
+			await readFile(join(stateDir, RECEIVER_NAMESPACES_FILE_NAME), "utf8"),
+		) as { sources: Array<{ adoptedBy: string | null }> }
+		expect(record.sources[0]?.adoptedBy).toBe(WEAK.key)
+		// Once: a later recheck binds nothing again.
+		await learned.recheckAdoption("rtl")
+		expect(bound).toHaveLength(2)
+	})
+
+	it("a recheck while a connection is pending does nothing (its settle decides)", async () => {
+		await writeLegacy()
+		let awaited = true
+		const { learned, bound } = await makeWith(() => awaited)
+		await learned.onIdentity("rtl", WEAK, undefined)
+		void learned.onConnection("rtl")
+		awaited = false
+		await learned.recheckAdoption("rtl")
+		// Only the boundary's suspension (nothing applies until the settle), no adoption.
+		expect(bound).toEqual([
+			{ key: WEAK.key, adoptLegacy: false },
+			{ key: null, adoptLegacy: false },
+		])
+		// The next settle adopts (the sdr-host is no longer awaited).
+		await learned.onIdentity("rtl", WEAK, WEAK)
+		expect(bound.at(-1)).toMatchObject({ key: WEAK.key, adoptLegacy: true })
+	})
+
+	it("a recheck never makes a stable-key source adopt with an sdr-host that answered", async () => {
+		await writeLegacy()
+		const { learned, bound } = await makeWith(() => true)
+		await learned.onIdentity("rtl", WEAK, undefined)
+		await learned.recheckAdoption("rtl")
+		expect(bound).toEqual([{ key: WEAK.key, adoptLegacy: false }])
+		expect(learned.view("rtl")?.namespaceState).toBe("fresh")
+	})
+
 	it("a stable key arriving later takes over the weak namespace once (same model), without a swap within the connection", async () => {
 		await writeLegacy()
 		let sdrHost = false

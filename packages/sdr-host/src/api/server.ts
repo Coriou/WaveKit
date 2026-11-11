@@ -11,6 +11,7 @@ import { registerFixRoutes } from "./routes/fix.js"
 import { registerHostRoutes } from "./routes/host.js"
 import { registerUiRoutes } from "./routes/ui.js"
 import { createReceiverId } from "../telemetry/endpoints.js"
+import type { UnitIdReason } from "../telemetry/unit-id.js"
 
 /** The part of HostCollector the API reads; requests never trigger I/O. */
 export interface HostTelemetrySource {
@@ -29,6 +30,8 @@ export interface ApiServerDependencies {
 	receiverId?: string
 	/** The persisted unit id (telemetry/unit-id.ts); null or omitted: none is reported. */
 	unitId?: string | null
+	/** Why no unit id is reported (null or omitted while one is, or none was asked for). */
+	unitIdReason?: UnitIdReason | null
 }
 
 /**
@@ -69,6 +72,10 @@ export async function createApiServer(
 	fastify.decorate("hostTelemetry", hostTelemetry)
 	fastify.decorate("receiverId", deps.receiverId ?? createReceiverId())
 	fastify.decorate("unitId", deps.unitId ?? null)
+	fastify.decorate(
+		"unitIdReason",
+		deps.unitId ? null : (deps.unitIdReason ?? null),
+	)
 
 	// Register routes
 	registerHealthRoutes(fastify)
@@ -108,5 +115,6 @@ declare module "fastify" {
 		hostTelemetry: HostTelemetrySource
 		receiverId: string
 		unitId: string | null
+		unitIdReason: UnitIdReason | null
 	}
 }

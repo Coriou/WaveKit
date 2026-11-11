@@ -14,7 +14,7 @@ import {
 } from "./supervisor/preflight.js"
 import { createApiServer, startApiServer } from "./api/server.js"
 import { HostCollector } from "./telemetry/host.js"
-import { loadOrCreateUnitId } from "./telemetry/unit-id.js"
+import { loadUnitIdAtStartup } from "./telemetry/unit-id.js"
 
 async function main(): Promise<void> {
 	// Load configuration
@@ -46,14 +46,27 @@ async function main(): Promise<void> {
 	})
 	hostCollector.start()
 
-	// The stable unit id (kept in the state directory); none when it cannot be persisted.
-	const unit = await loadOrCreateUnitId(config.state.dir)
-	if (unit.unitId === null)
+	// The stable unit id (kept in the state directory); none when it would not be stable.
+	const unit = await loadUnitIdAtStartup(config.state.dir)
+	const { result } = unit
+	if (result.reason === "state-not-persistent")
 		logger.warn(
 			{ stateDir: config.state.dir },
-			"State directory not writable: no stable unit id is reported",
+			"State directory is not a mounted volume: no stable unit id is reported. Mount a volume there (docker-compose.yml mounts /var/lib/wavekit/sdr-host at /state)",
 		)
-	else logger.info({ source: unit.source }, "Unit id ready")
+	else if (result.reason !== null)
+		logger.warn(
+			{ stateDir: config.state.dir, reason: result.reason },
+			"State directory not readable or writable: no stable unit id is reported",
+		)
+	else {
+		if (unit.persistence === "unknown")
+			logger.warn(
+				{ stateDir: config.state.dir },
+				"Could not tell whether the state directory is a mounted volume; the unit id may change when the container is recreated",
+			)
+		logger.info({ source: result.source }, "Unit id ready")
+	}
 
 	// Create API server
 	const fastify = await createApiServer({
@@ -62,7 +75,8 @@ async function main(): Promise<void> {
 		processManager,
 		preflightResult,
 		hostTelemetry: hostCollector,
-		unitId: unit.unitId,
+		unitId: result.unitId,
+		unitIdReason: result.reason,
 	})
 
 	// Handle shutdown

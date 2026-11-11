@@ -766,7 +766,15 @@ export class TunerController extends EventEmitter {
 		identity?: ReceiverIdentity,
 	): void {
 		const before = this.gainOwner.get(sourceId)
-		if (before !== binding.key) {
+		if (before === binding.key && binding.adoptLegacy && binding.key !== null) {
+			// A deferred adoption (ReceiverLearnedState recheckAdoption) of the receiver bound now:
+			// the pre-band gain from before namespacing, unless this receiver has its own already.
+			const legacy = this.gainStash.get(sourceId)
+			if (!this.operatorGainBeforeBand.has(sourceId) && legacy?.has("")) {
+				this.operatorGainBeforeBand.set(sourceId, legacy.get("") ?? null)
+				void this.saveOperatorGains()
+			}
+		} else if (before !== binding.key) {
 			const active = this.operatorGainBeforeBand.get(sourceId)
 			if (this.operatorGainBeforeBand.has(sourceId)) {
 				if (typeof before === "string")
