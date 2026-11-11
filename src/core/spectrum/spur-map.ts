@@ -36,8 +36,10 @@
  *   (× 0.251), the energy belongs to a wider emission (a voice's FM band over the line) or to a
  *   neighbour, and the mask holds. Such an emission is never hidden by it (the tracker joins its
  *   pieces across a masked line), and lifting for it made the mask flicker and split or join its
- *   track. A carrier on the footprint keeps its Hann main lobe there: its flank reads at most
- *   0.2 of the footprint (−7 dB, a bin-centred tone on the footprint's edge bin).
+ *   track. The flank starts one guard bin past the footprint, so a carrier on the footprint keeps
+ *   its Hann main lobe off it: the flank reads nothing for a bin-centred tone and at most 0.04 of
+ *   the footprint (−14 dB) for a tone half a bin off the edge. A flank holds the mask only when it
+ *   is also loud on its own (it alone would put a slot at 6 dB); a faint spill lifts it.
  * - LO confirmation. A baseband spur stays at its baseband bin when the LO moves; a real emission
  *   moves with RF. An epoch credits its centre to a bin when the bin was a line for ≥ onFraction
  *   of the epoch, and a miss (an epoch of ≥ SPUR_MISS_MIN_MS where the bin was quiet and a line
