@@ -57,6 +57,7 @@ import {
 	type AnalogOperationIo,
 	type AnalogQuarantine,
 	type AnalogReconciliation,
+	type AnalogSetAsideStatus,
 } from "./analog-operations.js"
 
 export interface StorageCaps {
@@ -609,6 +610,11 @@ export class EvidenceStore {
 		return this.analog?.quarantined() ?? []
 	}
 
+	/** Incomplete analog operation folders set aside at load (crash residue); null: none held. */
+	analogOperationsStatus(): AnalogSetAsideStatus | null {
+		return this.analog?.setAsideStatus() ?? null
+	}
+
 	/** Recording files the last retention pass kept because their owner is unknown (table full). */
 	get unknownHeldFileCount(): number {
 		return this.unknownHeldFiles + (this.analog?.unknownHeldRetained ?? 0)
@@ -722,6 +728,16 @@ export class EvidenceStore {
 				minFreeBytes: this.caps.minFreeDiskMb * MIB,
 			}),
 			freeBytes: async () => (await this.statfs(this.root)).freeBytes,
+			directorySyncTolerated: (code, kind) =>
+				this.log.warn(
+					{ code, kind },
+					"Directory fsync unsupported here; analog operation folders are not synced",
+				),
+			setAsideLogged: counts =>
+				this.log.warn(
+					counts,
+					"Set aside incomplete analog operation folders (crash residue)",
+				),
 			...(this.analogIo ? { io: this.analogIo } : {}),
 			...(this.protection
 				? {

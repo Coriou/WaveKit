@@ -527,9 +527,16 @@ describe("Task42 owned prepared-link operations", () => {
 						closure: "unknown",
 						residueBytes: null,
 					})
-					expect(
-						existsSync(join(privateDir(h.root, operation.operationId), name)),
-					).toBe(true)
+					// A creation that never published keeps its staging name.
+					const folder =
+						name === "intent.tmp"
+							? join(
+									h.root,
+									".analog-operations",
+									`.staging-${operation.operationId}`,
+								)
+							: privateDir(h.root, operation.operationId)
+					expect(existsSync(join(folder, name))).toBe(true)
 					if (name === "receipt.tmp") {
 						const final = join(
 							h.root,
@@ -1046,9 +1053,13 @@ describe("Task42 owned prepared-link operations", () => {
 		await expect(h.evidence.hasAnalogCleanup(h.discoveryId)).rejects.toThrow(
 			"authority",
 		)
+		// Residue that cannot be proven media-free (a receipt without its intent) stays fail
+		// closed; a folder holding only a partial intent.tmp is set aside instead
+		// (analog-operations-crash-safety.test.ts).
 		const orphan = randomUUID()
 		await mkdir(privateDir(h.root, orphan), { recursive: true })
 		await writeFile(join(privateDir(h.root, orphan), "intent.tmp"), "partial")
+		await writeFile(join(privateDir(h.root, orphan), "receipt.json"), "partial")
 		const restarted = await harness({ root: h.root, store: h.store })
 		expect(restarted.evidence.analogAuthorityReady).toBe(false)
 		await expect(
