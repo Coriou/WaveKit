@@ -195,3 +195,18 @@ export function classifyAlarm(input: {
 		return "signal-change"
 	return "external-control"
 }
+
+/**
+ * Blocks a pending untracked-retune alarm waits for a strong track's close before it fires as
+ * external-control: the track closes one hang (`trackHangMs`, at least one block) after it
+ * vanished and its close is visible a block later, so hang blocks + 2. The pipeline fires on the
+ * block after this many pending ones (alarmWaitBlocks + 1 blocks after its reference block).
+ */
+export function alarmWaitBlocksOf(
+	trackHangMs: number,
+	blockSamples: number,
+	sampleRateHz: number,
+): number {
+	const blockMs = (blockSamples / sampleRateHz) * 1000
+	return Math.max(1, Math.round(trackHangMs / blockMs)) + 2
+}

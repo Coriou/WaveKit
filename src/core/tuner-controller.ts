@@ -1708,7 +1708,8 @@ export class TunerController extends EventEmitter {
 
 	/**
 	 * Runs a call that may write several frames with an `onReceipt` that fires once for the whole
-	 * call (TunerWriteOptions.onReceipt). A nested call inside one keeps the outer scope.
+	 * call (TunerWriteOptions.onReceipt); a call that throws reports null. A nested call inside one
+	 * keeps the outer scope. A frame written after the call returned is not reported (ReceiptOnce).
 	 */
 	private async withReceiptOnce<T>(
 		opts: TunerWriteOptions,
@@ -1722,6 +1723,9 @@ export class TunerController extends EventEmitter {
 		this.receiptScopes.set(scoped, once)
 		try {
 			return await run({ ...opts, onReceipt: scoped })
+		} catch (err) {
+			once.fail()
+			throw err
 		} finally {
 			once.end()
 		}

@@ -99,6 +99,8 @@ describe("cause (golden): a genuine untracked retune", () => {
 				epoch: 2,
 				stream: 1,
 				startSample: 2_726_400,
+				// The reference block: the one before the alarm block (12 800 samples each).
+				referenceStartSample: 2_726_400 - 2 * 12_800,
 				deltaHz: -24999.900947779417,
 				suspected: "external-control",
 			},
@@ -129,6 +131,8 @@ describe("cause 1: I/Q byte slip", () => {
 				epoch: 2,
 				stream: 1,
 				startSample: 2_726_400,
+				// The reference block: the one before the alarm block (12 800 samples each).
+				referenceStartSample: 2_726_400 - 2 * 12_800,
 				deltaHz: -49997.98462638259,
 				suspected: "iq-byte-slip",
 			},

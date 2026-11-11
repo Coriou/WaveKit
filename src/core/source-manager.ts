@@ -2182,9 +2182,9 @@ export class SourceManager extends EventEmitter {
 			...(state.metricStartMark ? { startMark: state.metricStartMark } : {}),
 		})
 		if (transition === "flagged") {
-			// The receiver may run another rate than any receipt says, from the start of the
-			// mismatching window on (a window started outside the live session: its start, 0).
-			const mark = state.rateTruth.runStartMark
+			// The receiver may run another rate than any receipt says from the start of the
+			// newest agreeing interval on (none, or outside the live session: its start, 0).
+			const mark = state.rateTruth.doubtFromMark
 			const live = this.ledger.position(id)
 			this.ledger.raiseDoubt(
 				id,

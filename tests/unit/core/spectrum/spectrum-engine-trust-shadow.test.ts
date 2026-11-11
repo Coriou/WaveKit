@@ -9,6 +9,7 @@ import type {
 	PipelineHostHandlers,
 } from "../../../../src/core/spectrum/pipeline-host.js"
 import { blockSamplesOf } from "../../../../src/core/spectrum/retune-settle.js"
+import { alarmWaitBlocksOf } from "../../../../src/core/spectrum/retune-alarm.js"
 import type {
 	BlockSummary,
 	EngineState,
@@ -103,6 +104,8 @@ async function make() {
 	await engine.start()
 	const cfg = engine.config()!
 	const block = blockSamplesOf(cfg.integrationMs, cfg.sampleRateHz, cfg.fftSize)
+	// The pipeline's alarm wait for this config (blocks a pending alarm is held).
+	const wait = alarmWaitBlocksOf(cfg.trackHangMs, block, cfg.sampleRateHz)
 	let samples = 0
 	/** Source bytes: counted by the ledger session and offered to the branch, in order. */
 	const feed = async (n: number) => {
@@ -144,6 +147,7 @@ async function make() {
 		emitBlock,
 		emitAt,
 		block,
+		wait,
 		sources,
 		fanout,
 		host: () => host!,
@@ -309,26 +313,66 @@ describe("SpectrumEngine tuning-ledger shadow", () => {
 		await engine.stop()
 	})
 
-	it("raises an untracked-retune doubt at the lower bound of the alarm's samples", async () => {
-		const { engine, ledger, conn, feed, block, host, samples } = await make()
+	it("raises an untracked-retune doubt at the start of the alarm's reference block", async () => {
+		const { engine, ledger, conn, feed, block, wait, host, samples } =
+			await make()
 		conn.write(Buffer.concat([frame(0x01, CENTRE), frame(0x02, RATE)]), {
 			writer: "operator",
 		})(null)
-		await feed(block * 10)
+		await feed(block * 20)
 		engine.on("warning", () => undefined)
+		expect(wait).toBeGreaterThan(2)
+		// Held pending for its full wait, then fired: its reference block started wait + 2
+		// blocks before the firing block's end, far more than two blocks back.
+		const reference = samples() - (wait + 2) * block
+		expect(reference).toBeGreaterThan(0)
 		host().handlers.events([
 			{
 				kind: "untracked-retune",
 				epoch: engine.currentEpoch().epoch + 1,
+				stream: 0,
 				startSample: samples(),
+				referenceStartSample: reference,
 				deltaHz: 25_000,
+				suspected: "external-control",
 			},
 		])
 		const doubt = ledger.doubts("rtl").at(-1)!
 		expect(doubt.reason).toBe("untracked-retune")
-		// Two blocks before the alarm's sample, one sample of gap rounding, 2 bytes each.
-		expect(doubt.pos).toBe((samples() - 2 * block - 1) * 2)
+		// One sample of gap rounding, 2 bytes each.
+		expect(doubt.pos).toBe((reference - 1) * 2)
 		expect(doubt.pos).toBeLessThan(ledger.position("rtl")!.pos)
+		await engine.stop()
+	})
+
+	it("without a reference sample reaches back the pipeline's alarm wait; without a stream, the session start", async () => {
+		const { engine, ledger, conn, feed, block, wait, host, samples } =
+			await make()
+		conn.write(Buffer.concat([frame(0x01, CENTRE), frame(0x02, RATE)]), {
+			writer: "operator",
+		})(null)
+		await feed(block * 20)
+		engine.on("warning", () => undefined)
+		const alarm = (stream?: number) =>
+			host().handlers.events([
+				{
+					kind: "untracked-retune",
+					epoch: engine.currentEpoch().epoch + 1,
+					...(stream !== undefined ? { stream } : {}),
+					startSample: samples(),
+					deltaHz: 25_000,
+				},
+			])
+		alarm(0)
+		expect(ledger.doubts("rtl").at(-1)!.pos).toBe(
+			(samples() - (wait + 2) * block - 1) * 2,
+		)
+		// No stream on the event: its samples cannot be mapped, so the session start.
+		alarm()
+		expect(ledger.doubts("rtl").map(d => d.pos)).toEqual([
+			0,
+			(samples() - (wait + 2) * block - 1) * 2,
+		])
 		await engine.stop()
 	})
 
@@ -345,49 +389,56 @@ describe("SpectrumEngine tuning-ledger shadow", () => {
 		await engine.reconfigure()
 		await feed(block * 4)
 		engine.on("warning", () => undefined)
-		const alarm = (stream?: number) =>
+		const alarm = (stream: number) =>
 			host().handlers.events([
 				{
 					kind: "untracked-retune",
 					epoch: engine.currentEpoch().epoch + 1,
-					...(stream !== undefined ? { stream } : {}),
+					stream,
 					startSample: oldEnd,
+					referenceStartSample: oldEnd - 2 * block,
 					deltaHz: 25_000,
 				},
 			])
-		// Stream 0's map: two of its blocks before the alarm, one sample of gap rounding.
+		// Stream 0's map: its reference block, one sample of gap rounding.
 		const expected = (oldEnd - 2 * block - 1) * 2
 		alarm(0)
 		expect(ledger.doubts("rtl").at(-1)!.pos).toBe(expected)
-		// No stream on the event: the minimum over the kept stream maps (stream 0's here).
-		alarm()
-		expect(ledger.doubts("rtl").at(-1)!.pos).toBe(expected)
 		// A stream whose map is not kept: the session start (doubts are in position order).
 		alarm(99)
-		expect(ledger.doubts("rtl").map(d => d.pos)).toEqual([
-			0,
-			expected,
-			expected,
-		])
+		expect(ledger.doubts("rtl").map(d => d.pos)).toEqual([0, expected])
 		await engine.stop()
 	})
 
-	it("doubts a pipeline error from the oldest sample not reported yet", async () => {
-		const { engine, ledger, conn, feed, emitBlock, block, host, samples } =
-			await make()
+	it("doubts a pipeline error from the oldest sample a pending alarm may still be owed for", async () => {
+		const {
+			engine,
+			ledger,
+			conn,
+			feed,
+			emitBlock,
+			block,
+			wait,
+			host,
+			samples,
+		} = await make()
 		conn.write(Buffer.concat([frame(0x01, CENTRE), frame(0x02, RATE)]), {
 			writer: "operator",
 		})(null)
-		await feed(block * 10)
+		await feed(block * 20)
+		// An alarm pending since the reference block below would fire on the block reported
+		// now (its summary first); the error loses it.
 		emitBlock()
 		const reported = samples()
+		const reference = reported - (wait + 2) * block
+		expect(reference).toBeGreaterThan(0)
 		await feed(block * 5)
 		engine.on("error", () => undefined)
 		host().handlers.error(new Error("worker hiccup"))
 		const doubt = ledger.doubts("rtl").at(-1)!
 		expect(doubt.reason).toBe("pipeline-error")
-		// A lost alarm of the next block reaches back to two blocks before the reported end.
-		expect(doubt.pos).toBe((reported - 2 * block - 1) * 2)
+		// At the lost alarm's reference block, one sample of gap rounding, 2 bytes each.
+		expect(doubt.pos).toBe((reference - 1) * 2)
 		expect(doubt.pos).toBeLessThan(ledger.position("rtl")!.pos)
 		await engine.stop()
 	})

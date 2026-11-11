@@ -516,11 +516,18 @@ describe("TuningLedger", () => {
 			trust: "unverified",
 			reason: "settling",
 		})
+		// Read where 2.4 Msps has settled (5.8 MB) but 3.2 Msps would not (1 MB + 6.4 MB = 7.4 MB).
+		session.pos = 8_000_000
+		caps = 250_000
+		expect(ledger.trustAt("rtl", 1, 6_000_000, 6_100_000).trust).toBe(
+			"commanded",
+		)
 		// A caps rate raised after the session start is honoured as well (max of both).
 		caps = 3_200_000
-		expect(ledger.trustAt("rtl", 1, 1_600_000, 1_700_000).reason).toBe(
-			"settling",
-		)
+		expect(ledger.trustAt("rtl", 1, 6_000_000, 6_100_000)).toMatchObject({
+			trust: "unverified",
+			reason: "settling",
+		})
 	})
 
 	it("limits the settle rate to rates that can be in effect from the receipt on", () => {

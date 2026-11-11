@@ -284,8 +284,12 @@ export type ReceiptCallback = (receipt: TuningReceipt | null) => void
 /**
  * Folds the per-frame receipts of one multi-frame call into one: `callback` runs exactly once,
  * after `end()` and once every frame `frame()` issued has settled, with the receipt of the last
- * frame to settle (frames settle in socket order), or null when any frame got none or no frame
- * was issued.
+ * frame to settle (frames settle in socket order), or null when any frame got none, no frame
+ * was issued, or the call failed (`fail()`: frames it meant to write never went out).
+ *
+ * A frame written after the call returned (after `end()`, e.g. from work the call started but
+ * did not await) is not reported: once the callback has fired, a later `frame()` never reaches
+ * it, so the receipt describes only what the call wrote before it returned.
  */
 export class ReceiptOnce {
 	private open = 0
@@ -308,6 +312,11 @@ export class ReceiptOnce {
 			else this.last = receipt
 			this.settle()
 		}
+	}
+
+	/** The call failed part-way: whatever it wrote, it reports null. */
+	fail(): void {
+		this.missing = true
 	}
 
 	/** The call issues no more frames. */
