@@ -802,7 +802,7 @@ describe("ReceiverLearnedState: who adopts the state from before namespacing", (
 		expect(record.sources[0]?.adoptedBy).toBe(A.key)
 	})
 
-	it("the first stable key takes the weak namespace over when it is newer than the legacy files; its gain first", async () => {
+	it("legacy wins: the first stable key adopts the legacy files even when they are older than the weak namespace", async () => {
 		await writeLegacy()
 		const past = Date.now() / 1000 - 3600
 		await utimes(join(scannerDir, "engine", "rtl.json"), past, past)
@@ -815,22 +815,22 @@ describe("ReceiverLearnedState: who adopts the state from before namespacing", (
 			persistence.generation?.("rtl"),
 		)
 		fake.learn(engine(-71), occupancy(12_500))
-		const swaps = fake.replaced.length
-		// The sdr-host is updated: the first unit key adopts, and the newer weak state wins.
+		// The sdr-host is updated: the first unit key adopts the legacy state, never the weak one.
 		await learned.onIdentity("rtl", A, WEAK)
 		expect(bound.at(-1)).toEqual({
 			key: A.key,
 			adoptLegacy: true,
 			legacyRecorded: true,
-			takeOverFrom: WEAK.key,
-			preferTakeOver: true,
 		})
 		expect(learned.view("rtl")?.namespaceState).toBe("adopted")
-		// Within the connection the engine already runs on the weak state: kept, no swap.
-		expect(fake.replaced).toHaveLength(swaps)
-		expect(fake.now().engine).toEqual(engine(-71))
-		// The legacy files were not copied into A's namespace.
-		expect(await exists(nsFile(A, "engine.json"))).toBe(false)
+		expect(fake.now().engine).toEqual(engine(-88))
+		// The legacy files were copied into A's namespace; the weak namespace is untouched.
+		expect(
+			JSON.parse(await readFile(nsFile(A, "engine.json"), "utf8")),
+		).toEqual(engine(-88))
+		expect(
+			JSON.parse(await readFile(nsFile(WEAK, "engine.json"), "utf8")),
+		).toEqual(engine(-71))
 		const record = JSON.parse(
 			await readFile(join(stateDir, RECEIVER_NAMESPACES_FILE_NAME), "utf8"),
 		) as {
@@ -840,10 +840,8 @@ describe("ReceiverLearnedState: who adopts the state from before namespacing", (
 				takenOver?: Array<{ from: string; by: string }>
 			}>
 		}
-		expect(record.sources[0]).toMatchObject({
-			adoptedBy: A.key,
-			takenOver: [{ from: WEAK.key, by: A.key }],
-		})
+		expect(record.sources[0]?.adoptedBy).toBe(A.key)
+		expect(record.sources[0]?.takenOver).toBeUndefined()
 		expect(record.sources[0]?.owed).toBeUndefined()
 	})
 
@@ -864,8 +862,8 @@ describe("ReceiverLearnedState: who adopts the state from before namespacing", (
 		await learned.onIdentity("rtl", A, WEAK)
 		expect(bound.at(-1)).toMatchObject({
 			key: A.key,
+			adoptLegacy: true,
 			takeOverFrom: WEAK.key,
-			preferTakeOver: true,
 		})
 		expect(learned.view("rtl")?.namespaceState).toBe("adopted")
 		// The weak namespace's saved state, not what the unsettled connection learned.

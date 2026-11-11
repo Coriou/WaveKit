@@ -35,9 +35,9 @@
  * (`source:<id>|model:<its model>`) when one was learned and no other stable key took it over
  * before (`takenOver`, once per weak key). The weak namespace itself stays as it was. The first
  * stable key on a source whose weak key learned while no receiver adopted (an sdr-host without
- * `unitId`, updated later) adopts too, and takes the weak namespace over when the legacy files are
- * absent or older (the weak engine file's mtime is newer than the legacy one's); else the legacy
- * files win. Its pre-band gain follows the same choice (`preferTakeOver`).
+ * `unitId`, updated later) adopts too, and takes the weak namespace over only when no legacy
+ * engine or occupancy file exists; else the legacy files win, whatever their age (legacy wins).
+ * Its pre-band gain follows the same rule: the legacy record first, the weak key's only without one.
  *
  * A pending window that spans more than one new connection (an unsettled connection to another
  * receiver, then back) reloads the settled key's saved state even when it is the key bound
@@ -131,8 +131,9 @@ export interface ReceiverScopedStore extends Omit<
 	adoptLegacyInto(sourceId: string, key: string): Promise<boolean>
 	/**
 	 * Modification times (ms) of a namespace's engine and occupancy files, or of the files from
-	 * before namespacing when `key` is null; null for a missing file. Optional: without it the
-	 * legacy files always win the first adoption.
+	 * before namespacing when `key` is null; null for a missing file. Only presence is read (the
+	 * legacy files win whenever one exists). Optional: without it the legacy files always win the
+	 * first adoption.
 	 */
 	learnedFileTimes?(
 		sourceId: string,
@@ -162,14 +163,11 @@ export interface ReceiverBinding {
 	 * record from before namespacing is kept either way (a rollback reads it).
 	 */
 	legacyRecorded?: boolean
-	/** A stable key's first binding that takes over this weak key's state (copied, never moved). */
-	takeOverFrom?: string
 	/**
-	 * With adoptLegacy and takeOverFrom: the weak key's state is newer than the one from before
-	 * namespacing and wins (the pre-band gain from the weak key first, the legacy one only when the
-	 * weak key has none).
+	 * A stable key's first binding that takes over this weak key's state (copied, never moved).
+	 * With adoptLegacy the legacy pre-band gain record still comes first when one exists.
 	 */
-	preferTakeOver?: boolean
+	takeOverFrom?: string
 }
 
 export interface ReceiverLearnedStateOptions {
@@ -768,9 +766,9 @@ export class ReceiverLearnedState {
 	}
 
 	/**
-	 * For the first stable key of a source with no adopter yet: the weak key of its model when its
-	 * learned state should win over the legacy files (none of those, or its engine file is newer
-	 * than theirs; a held export is newer than any file), else null. Reads file times only.
+	 * For the first stable key of a source with no adopter yet: the weak key of its model when it
+	 * learned something (a file or a held export) and no legacy engine or occupancy file exists,
+	 * else null: the legacy files win whatever their age. Reads file presence only.
 	 */
 	private async weakTakeOverChoice(
 		sourceId: string,
@@ -807,11 +805,7 @@ export class ReceiverLearnedState {
 		)
 			return null
 		const legacy = await times(null)
-		if (legacy.engine === null && legacy.occupancy === null) return weak
-		if (held) return weak
-		return (weakTimes?.engine ?? -Infinity) > (legacy.engine ?? -Infinity)
-			? weak
-			: null
+		return legacy.engine === null && legacy.occupancy === null ? weak : null
 	}
 
 	/** True when a weak key may adopt the legacy state: only a source without an sdr-host. */
@@ -861,7 +855,6 @@ export class ReceiverLearnedState {
 			let legacyRecorded = false
 			let moved = false
 			let takeOverFrom: string | null = null
-			let preferTakeOver = false
 			if (to !== null) {
 				const record = this.records.get(sourceId) ?? {
 					adoptedBy: null,
@@ -878,7 +871,8 @@ export class ReceiverLearnedState {
 					record.owed = new Set(["spectrum", "gain"])
 					changed = true
 					// The first stable key of a source whose weak key learned meanwhile: the weak
-					// state wins when it is newer than the legacy files (or there are none).
+					// state is taken over only when there are no legacy files (legacy wins). The
+					// legacy pre-band gain stays owed and still comes first when it exists.
 					if (
 						weakChoice !== null &&
 						!known &&
@@ -886,7 +880,6 @@ export class ReceiverLearnedState {
 						record.keys.includes(weakChoice)
 					) {
 						takeOverFrom = weakChoice
-						preferTakeOver = true
 						record.takenOver.set(weakChoice, to)
 						record.owed.delete("spectrum")
 					}
@@ -981,7 +974,6 @@ export class ReceiverLearnedState {
 				? { key: to, adoptLegacy, legacyRecorded }
 				: { key: to, adoptLegacy }
 			if (takeOverFrom !== null) binding.takeOverFrom = takeOverFrom
-			if (preferTakeOver && adoptLegacy) binding.preferTakeOver = true
 			this.options.onBound?.(sourceId, binding)
 			// Keys are built from validated components only, so they are safe to log.
 			const same = previous?.key === identity.key

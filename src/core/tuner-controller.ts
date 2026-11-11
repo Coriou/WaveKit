@@ -762,7 +762,6 @@ export class TunerController extends EventEmitter {
 			adoptLegacy: boolean
 			legacyRecorded?: boolean
 			takeOverFrom?: string
-			preferTakeOver?: boolean
 		},
 		identity?: ReceiverIdentity,
 	): void {
@@ -785,20 +784,17 @@ export class TunerController extends EventEmitter {
 			}
 			const byKey = this.gainStash.get(sourceId)
 			if (binding.key !== null && byKey) {
-				// The receiver's own record wins; else the one from before namespacing (adopted once);
-				// else a weak key's this stable key takes over (once). `preferTakeOver`: the weak key's
-				// state is newer than the one from before namespacing, so it comes first.
+				// The receiver's own record wins; else the one from before namespacing (adopted once,
+				// whatever its age: legacy wins); else a weak key's this stable key takes over (once),
+				// only when no legacy record exists.
 				const takeOver = binding.takeOverFrom
-				const takeOverHas = takeOver !== undefined && byKey.has(takeOver)
 				const own = byKey.has(binding.key)
 					? binding.key
-					: binding.preferTakeOver === true && takeOverHas
-						? takeOver
-						: binding.adoptLegacy && byKey.has("")
-							? ""
-							: takeOverHas
-								? takeOver
-								: undefined
+					: binding.adoptLegacy && byKey.has("")
+						? ""
+						: takeOver !== undefined && byKey.has(takeOver)
+							? takeOver
+							: undefined
 				if (own !== undefined) {
 					this.operatorGainBeforeBand.set(sourceId, byKey.get(own) ?? null)
 					// Only the receiver's own record moves (saved under its key below). The record from

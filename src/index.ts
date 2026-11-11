@@ -1322,29 +1322,6 @@ async function main(): Promise<void> {
 			return s?.type === "rtl_tcp" && s.caps.format === "U8_IQ"
 		}
 		let identityPoller: SdrHostPoller | undefined
-		const receiverIdentity = new ReceiverIdentityTracker({
-			sources: sourceManager,
-			logger,
-			// The configured sdr-host describes the primary endpoint only, never a candidate.
-			sdrHostApplies: id =>
-				identityPoller?.getStatus(id) !== undefined &&
-				(sourceManager.getSelectedCandidate(id)?.index ?? 0) === 0,
-			// Waits for this connection's first poll result; the bound is only a safety net.
-			sdrHostWaitMs: receiverSdrHostWaitMs(
-				config.resources.sdrHostPoller.timeoutMs,
-			),
-			kickSdrHostPoll: (id, retry) => identityPoller?.pollNow(id, retry),
-			// A unit answer is expected (a failed poll at a reconnect is retried until the bound, not
-			// settled on the model): the sdr-host is configured, answered before, or the source's last
-			// receiver (persisted) was a unit.
-			sdrHostExpected: (id): boolean =>
-				identityPoller?.getStatus(id) !== undefined &&
-				(config.sources.find(source => source.id === id)?.sdrHost?.apiUrl !==
-					undefined ||
-					identityPoller.hasAnswered(id) ||
-					receiverState.lastKey(id)?.startsWith("unit:") === true),
-		})
-		own(100, () => receiverIdentity.stop())
 		const receiverState = new ReceiverLearnedState({
 			stateDir: config.stateDir,
 			logger,
@@ -1361,9 +1338,37 @@ async function main(): Promise<void> {
 					identityPoller.awaitingFirstAnswer(id)),
 			// While that first answer is still awaited, the weak key writes nothing learned.
 			sdrHostAwaited: id => identityPoller?.awaitingFirstAnswer(id) === true,
-			// The controller is built below; nothing binds before the first connection.
-			onBound: receiverBoundToTuner(receiverIdentity, () => tunerController),
+			// The tracker and the controller are built below; nothing binds before the first
+			// connection, so both are read late (an earlier call throws, never reads stale state).
+			onBound: receiverBoundToTuner(
+				{ current: id => receiverIdentity.current(id) },
+				() => tunerController,
+			),
 		})
+		const receiverIdentity = new ReceiverIdentityTracker({
+			sources: sourceManager,
+			logger,
+			// The configured sdr-host describes the primary endpoint only, never a candidate.
+			sdrHostApplies: id =>
+				identityPoller?.getStatus(id) !== undefined &&
+				(sourceManager.getSelectedCandidate(id)?.index ?? 0) === 0,
+			// Waits for this connection's first poll result; the bound is only a safety net.
+			sdrHostWaitMs: receiverSdrHostWaitMs(
+				config.resources.sdrHostPoller.timeoutMs,
+			),
+			kickSdrHostPoll: (id, retry) => identityPoller?.pollNow(id, retry),
+			// A unit answer is expected (a failed poll at a reconnect is retried until the bound, not
+			// settled on the model): the sdr-host is configured, answered before, or the source's last
+			// receiver (persisted) was a unit. receiverState is declared above, so this never reads
+			// it uninitialised.
+			sdrHostExpected: (id): boolean =>
+				identityPoller?.getStatus(id) !== undefined &&
+				(config.sources.find(source => source.id === id)?.sdrHost?.apiUrl !==
+					undefined ||
+					identityPoller.hasAnswered(id) ||
+					receiverState.lastKey(id)?.startsWith("unit:") === true),
+		})
+		own(100, () => receiverIdentity.stop())
 		await receiverState.load()
 		wireReceiverTracker(receiverIdentity, receiverState)
 		const composed = composeLinkBurst({ log: logger })

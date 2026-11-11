@@ -327,8 +327,8 @@ the container; a new image alone does not add the mount.
 Update sdr-host with or before the WaveKit core. While an older sdr-host
 answers without `unitId`, the core keys the receiver by source and tuner model
 and learns under that key. When the updated sdr-host first reports a `unitId`,
-that key takes the model key's learned state over if it is newer than the state
-from before namespacing (or there is none); otherwise the older state wins.
+that key takes the model key's learned state over only when there is no state
+from before namespacing; when there is, that state wins, whatever its age.
 
 `unitId` names the sdr-host install (its state directory), not the dongle.
 Swapping the dongle on the same sdr-host keeps the receiver key, so the new

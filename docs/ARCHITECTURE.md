@@ -143,8 +143,9 @@ spurs, floors or pre-band gain never apply to the Pi receiver.
   moved) once the scanner store is writable while that receiver is bound. A `unit` key new on a
   source that does not adopt starts from the source's `model` namespace of its model, once per
   `model` key. The first `unit` key on a source whose `model` key learned while nobody adopted (an
-  sdr-host without `unitId`, updated later) adopts, and takes that `model` namespace over when the
-  legacy files are missing or older than it (engine file mtime); else the legacy files win. A
+  sdr-host without `unitId`, updated later) adopts, and takes that `model` namespace over only
+  when no legacy file exists; else the legacy files win whatever their age, and the legacy
+  pre-band gain record comes before the `model` key's. A
   pending window that spans more than one new connection (an unsettled connection to another
   receiver, then back) reloads the settled key's saved state instead of keeping what the engine
   learned in memory meanwhile (one swap). `unit:` names the sdr-host install (its state

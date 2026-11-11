@@ -13,11 +13,13 @@
  * each connection kicks a poll (pollNow) whose identity result settles the unit key. A third
  * variant is a Pi reboot: the sdr-host API answers 503 from the drop until 2 s after the reconnect
  * (rtlmux listens first); the failed polls are retried and the unit key still settles, with no
- * swap through the weak key. No request leaves the process.
+ * swap through the weak key. A fourth is a slow sdr-host API at boot (it answers 10 s after
+ * rtlmux, past the 7 s bound): the model key settles at the bound, the late answer swaps to the
+ * unit key once. No request leaves the process.
  */
 import http from "node:http"
 import net from "node:net"
-import { mkdtemp, readdir, rm } from "node:fs/promises"
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -41,7 +43,10 @@ import {
 } from "../../../src/core/receiver-identity-tracker.js"
 import { SdrHostPoller } from "../../../src/core/sdr-host-poller.js"
 import { SpectrumEngine } from "../../../src/core/spectrum/spectrum-engine.js"
-import { ReceiverLearnedState } from "../../../src/core/receiver-identity-state.js"
+import {
+	RECEIVER_NAMESPACES_FILE_NAME,
+	ReceiverLearnedState,
+} from "../../../src/core/receiver-identity-state.js"
 import {
 	receiverBoundToTuner,
 	wireReceiverTracker,
@@ -189,6 +194,7 @@ afterEach(async () => {
 async function runScenario(
 	withSdrHost: boolean,
 	sdrHostLate = false,
+	bootLateMs = 0,
 ): Promise<void> {
 	const server = await spurRtlTcp()
 	cleanup.push(() => server.close())
@@ -204,6 +210,15 @@ async function runScenario(
 		logger,
 		now: Date.now,
 	}).writeEngineIn("rtl", key, LEARNED)
+	// A slow-boot run restarts a core that knew the unit receiver (its key is on record).
+	if (bootLateMs > 0)
+		await writeFile(
+			join(stateDir, RECEIVER_NAMESPACES_FILE_NAME),
+			JSON.stringify({
+				version: 1,
+				sources: [{ sourceId: "rtl", adoptedBy: UNIT_KEY, keys: [UNIT_KEY] }],
+			}),
+		)
 	const source: SourceConfig = {
 		id: "rtl",
 		type: "rtl_tcp",
@@ -332,8 +347,35 @@ async function runScenario(
 		await replace(id, next)
 	}
 	await scanner.start()
+	if (bootLateMs > 0) sdrHost?.setDown(true)
 	poller?.start()
 	await sourceManager.connect(source)
+	if (bootLateMs > 0 && sdrHost) {
+		// The API answers bootLateMs after rtlmux took the connection, past the hard bound: the
+		// identity settles on the source-scoped model at the bound, then the late answer upgrades
+		// it to the unit key (one swap). The engine runs before the first settle with nothing
+		// loaded, so the lines may be discoveries in that window (not asserted here).
+		await waitFor(() => server.accepts() === 1, 5_000)
+		await new Promise(resolve => setTimeout(resolve, bootLateMs))
+		expect(settled).toEqual([RECEIVER_KEY])
+		expect(sdrHost.failedRequests()).toBeGreaterThan(1)
+		const swapsAtModel = swaps
+		const buildsAtModel = builds.mock.calls.length
+		sdrHost.setDown(false)
+		await waitFor(() => settled.length === 2, 5_000)
+		expect(settled).toEqual([RECEIVER_KEY, UNIT_KEY])
+		await learned.idle("rtl")
+		const seen = new Set(discoveries().map(d => d.id))
+		// Past the upgrade: exactly one swap (model -> unit; a swap restarts the pipeline once), the
+		// unit's spur map in use, so no discovery after it.
+		await new Promise(resolve => setTimeout(resolve, 4_000))
+		expect(swaps).toBe(swapsAtModel + 1)
+		expect(discoveries().filter(d => !seen.has(d.id))).toEqual([])
+		expect(builds.mock.calls.length).toBe(buildsAtModel + 1)
+		expect(learned.view("rtl")?.key).toBe(UNIT_KEY)
+		expect(learned.view("rtl")?.namespaceState).toBe("resumed")
+		return
+	}
 	await waitFor(() => settled.length === 1, 10_000)
 	expect(settled).toEqual([key])
 	await learned.idle("rtl")
@@ -383,6 +425,10 @@ describe("scenario: reconnect to the same receiver with spur lines in the IQ", (
 
 	it("with a fake sdr-host: both settles are the unit key, no swap, no pipeline rebuild, no discovery", async () => {
 		await runScenario(true)
+	}, 60_000)
+
+	it("a slow sdr-host API at boot (answers 10 s after rtlmux, past the 7 s bound): model key at the bound, then one swap to the unit key, no discovery after it", async () => {
+		await runScenario(true, false, 10_000)
 	}, 60_000)
 
 	it("a Pi reboot (the sdr-host API answers 503 until 2 s after the reconnect): the unit key settles, no swap, no pipeline rebuild, no discovery", async () => {
