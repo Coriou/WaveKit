@@ -204,8 +204,8 @@ const nodeProbe: StatePersistenceProbe = {
 	},
 }
 
-/** An anonymous Docker volume's data directory (its name is 64 lower-case hex). */
-const ANONYMOUS_VOLUME = /\/docker\/volumes\/[0-9a-f]{64}\/_data$/
+/** An anonymous Docker or Podman volume's data directory (64 lower-case hex name), under any storage root. */
+const ANONYMOUS_VOLUME = /\/volumes\/[0-9a-f]{64}\/_data$/
 
 /** mountinfo escapes space, tab, newline and backslash as octal (`\040`). */
 function unescapeMountField(field: string): string {
