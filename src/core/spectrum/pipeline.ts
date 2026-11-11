@@ -1876,6 +1876,10 @@ export class SpectrumPipeline {
 	 * Spec § 4.10: short-path segments that were on for ≤ BURST_MAX_ON_MS (≤ burstMaxOnFrames on-window
 	 * frames in the block) and are either unseen by the long path or ≥ BURST_DILUTION_DB stronger than its
 	 * peak replace the overlapping long segments and are marked as bursts; everything else stays with the long path.
+	 * A short-path segment wholly on this block's spur lines is dropped as `withoutLines` drops a long one
+	 * (§ 4.9): the short detector masks a line's own bins but not the ±1 bin of skirt `lineMask` adds, so
+	 * a voice's wandering skirt spills a one-block piece onto that skirt bin, which would open a track of
+	 * its own that `flagSpurs` then flags.
 	 */
 	private mergeBursts(
 		segs: Segment[],
@@ -1897,7 +1901,7 @@ export class SpectrumPipeline {
 			let onFrames = 0
 			for (let i = b.startBin; i < b.endBin; i++)
 				onFrames = Math.max(onFrames, this.burstCountDone[i] ?? 0)
-			if (onFrames > this.burstMaxOnFrames) continue
+			if (onFrames > this.burstMaxOnFrames || this.onLines(b)) continue
 			const overlapping = segs.filter(
 				s => s.startBin < b.endBin && s.endBin > b.startBin,
 			)
@@ -2197,12 +2201,17 @@ export class SpectrumPipeline {
 			if (this.lineScratch[i] === 1)
 				this.lineMask.fill(1, Math.max(0, i - 1), Math.min(this.n, i + 2))
 		}
-		return segs.filter(s => {
-			if (!this.crossesK(s)) return false
-			for (let i = s.startBin; i < s.endBin; i++)
-				if (this.lineMask[i] !== 1) return true
-			return false
-		})
+		return segs.filter(s => this.crossesK(s) && !this.onLines(s))
+	}
+
+	/**
+	 * Every bin of `s` lies on this block's spur lines (`lineMask`, set by `withoutLines`): the
+	 * segment is only a line, or the Hann skirt of one.
+	 */
+	private onLines(s: Segment): boolean {
+		for (let i = s.startBin; i < s.endBin; i++)
+			if (this.lineMask[i] !== 1) return false
+		return true
 	}
 
 	/**

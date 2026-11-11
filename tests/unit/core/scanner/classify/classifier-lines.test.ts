@@ -55,8 +55,9 @@ function settled(
 	seed: number,
 	seconds: number,
 	lines: readonly SeededLine[],
+	warmUp = lines.length > 0,
 ): TrackSnapshot[] {
-	return runVisit(signal(name), snrDb, seed, seconds, 50, lines).filter(
+	return runVisit(signal(name), snrDb, seed, seconds, 50, lines, warmUp).filter(
 		t => t.blocks >= 20 && !t.flags.spur,
 	)
 }
@@ -161,12 +162,41 @@ describe("spectral class under learned spur lines", () => {
 		120_000,
 	)
 
-	it("a real spur on its learned line opens no track", () => {
+	// A carrier at a receiver line's level: its channel SNR -2 and 1 dB give a slot level of
+	// 10·log10(1 + 10^-0.2) ≈ 2.1 dB and 10·log10(1 + 10^0.1) ≈ 3.5 dB, under the 6 dB a line
+	// must stay under (spur-map.ts), as the real receiver lines measured.
+	it("a spur at a receiver line's level on its learned line opens no track", () => {
+		for (const snrDb of [-2, 1]) {
+			const long = (t: TrackSnapshot) => !t.flags.spur && t.blocks >= 5
+			const lined = runVisit(signal("carrier-on-bin"), snrDb, 4500, 3, 50, [
+				[ON_THE_SIGNAL, 1],
+			])
+			expect(`${snrDb} dB: ${lined.filter(long).length}`).toBe(`${snrDb} dB: 0`)
+			// The control: with no line the same carrier is a long track, so the mask hid it.
+			const plain = runVisit(
+				signal("carrier-on-bin"),
+				snrDb,
+				4500,
+				3,
+				50,
+				[],
+				true,
+			)
+			expect(
+				`${snrDb} dB: ${plain.some(t => !t.flags.spur && t.blocks >= 20)}`,
+			).toBe(`${snrDb} dB: true`)
+		}
+	}, 60_000)
+
+	it("a carrier far over a receiver line's level on a learned line is tracked as a real signal", () => {
 		for (const snrDb of [12, 30]) {
 			const tracks = runVisit(signal("carrier-on-bin"), snrDb, 4500, 3, 50, [
 				[ON_THE_SIGNAL, 1],
 			])
-			expect(tracks.filter(t => !t.flags.spur && t.blocks >= 5)).toEqual([])
+			const real = new Set(
+				tracks.filter(t => !t.flags.spur && t.blocks >= 5).map(t => t.trackId),
+			)
+			expect(`${snrDb} dB: ${real.size}`).toBe(`${snrDb} dB: 1`)
 		}
 	}, 60_000)
 
@@ -174,7 +204,7 @@ describe("spectral class under learned spur lines", () => {
 		["3", [[ON_THE_SIGNAL - 1, 3]]],
 		["5", [[ON_THE_SIGNAL - 2, 5]]],
 	] as const)(
-		"a repeater's long bare carrier on a line of %s bins leaves its speech its width and class",
+		"a repeater's long bare carrier on a line of %s bins is tracked as a real signal, as on no line",
 		(_name, lines) => {
 			// 40 s teaches the line the carrier: 1 dB per second, the carrier some 31 dB over a bin's noise.
 			const leadS = 40
@@ -183,36 +213,23 @@ describe("spectral class under learned spur lines", () => {
 				gen: (rng: () => number, n: number, amp: number) =>
 					speechFm(rng, n, amp, { leadMs: leadS * 1000, ctcssHz: 88.5 }),
 			}
-			const after = runVisit(repeater, 20, 4701, leadS + 6, 50, lines).filter(
-				t => t.blocks >= 20,
-			)
-			const cold = runVisit(
-				{
-					name: "cold",
-					gen: (rng: () => number, n: number, amp: number) =>
-						speechFm(rng, n, amp, { ctcssHz: 88.5 }),
-				},
-				20,
-				4701,
-				6,
-				50,
-				lines,
-			).filter(t => t.blocks >= 20)
-			expect(after.length).toBeGreaterThan(0)
-			expect(concurrent(after)).toBe(false)
-			for (const t of after) {
-				expect(t.obwHz).toBeGreaterThanOrEqual(
-					Math.min(...cold.map(c => c.obwHz)) - 2000,
-				)
-				expect(productionClass(t)).toBe("analog-fm")
-			}
+			const read = (tracks: readonly TrackSnapshot[]) =>
+				tracks
+					.filter(t => t.blocks >= 20)
+					.map(t => [t.flags.spur, t.obwHz, productionClass(t)])
+			const after = runVisit(repeater, 20, 4701, leadS + 6, 50, lines)
+			const plain = runVisit(repeater, 20, 4701, leadS + 6, 50, [], true)
+			expect(read(after).length).toBeGreaterThan(0)
+			expect(concurrent(after.filter(t => t.blocks >= 20))).toBe(false)
+			expect(read(after)).toEqual(read(plain))
 		},
 		120_000,
 	)
 
 	it("a voice on no line reads the same with or without a distant map", () => {
 		const far: SeededLine[] = [[60, 4]]
-		const plain = settled("voice", 12, 4601, 6, [])
+		// The same warm-up with nothing on air: the warm-up itself is part of the visit history.
+		const plain = settled("voice", 12, 4601, 6, [], true)
 		const lined = settled("voice", 12, 4601, 6, far)
 		expect(lined.map(t => [t.obwHz, t.blockSpreadDb])).toEqual(
 			plain.map(t => [t.obwHz, t.blockSpreadDb]),
