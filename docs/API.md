@@ -771,18 +771,18 @@ JSON, decoder protocols to 16, job names to 32 and reasons to 24, and
 `truncated` is `true` when a list or an id was cut or that count stopped; read the
 fuller route then.
 
-| Field            | Summary of                   | Content                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ---------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `at`             |                              | ISO time of the answer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `truncated`      |                              | `true` when a list was cut at its cap, an id was shortened or `scanner.discoveries` stopped at its cap (a shortened job name alone does not set it)                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `tuners`         | `GET /api/tuner`             | `sourceId`, `frequencyHz`, `sampleRateHz`, `gainMode`, `gain` (tenths of a dB; null in AGC), `owner` (`wavekit`, `external` while an external client such as SDR++ controls it, `scanner` while a scanner job holds the tuner lease), `declaredOnly` (frequency or rate only from config). Unknown values are null                                                                                                                                                                                                                                                          |
-| `sources`        | `GET /api/sources`           | `id`, `connected`, `state` (the source activity state), `sampleAgeMs`, `warnings` (`rate-mismatch`, `signal-flat`), `feed` (the receiver feed state: `live`, `paused`, `resuming`, `error`), `tuningUnverified` (`true` while the tuner's frequency, sample rate, gain or gain mode is unknown, for example after a plain resume), `verdict` (the [`verdict.code`](#get-apisources) of `GET /api/sources`, absent when it reads `ok`), `passive` (why the cost guard holds passive scanning off: a [`reasonCode`](#get-apiscanner) of `GET /api/scanner`, absent otherwise) |
-| `liveAudio`      | `GET /api/live-audio/status` | `running`, `health`, `sourceId`, `modulation`, `offsetHz`, `clients`, `squelchOpen` (null while stopped); null without live audio                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `scanner`        | `GET /api/scanner`           | `enabled`, `activeJobs` (not yet ended), `heldJobs` (sweeps paused with reason `resumed-without-retune`), `discoveries` (records in the discovery store; null if this core cannot say), `job` (the most recently updated held sweep, else the most recently updated active job: `id`, `name`, `kind`, `state`, `reason`, `sourceId`) or null; null without the scanner                                                                                                                                                                                                      |
-| `decoders`       | `GET /api/decoders/summary`  | one row per decoder instance, problem verdicts first, then configuration order: `id`, `protocol` (the decoder type) and the same `verdict` `code` and `actions` (at most three, most helpful first), with `cause` (`host` or `decoder`, whose loss stopped it) only on a loss verdict (`efficiency-drops`, `efficiency-late-drops`, `efficiency-cpu`, at most two actions) and never `retryAt` (read the summary route for it); the verdict sentence is on the summary route. A `listening` row may add the summary's `reception` (`heard-undecoded` or `nothing-heard`)    |
-| `hiddenProblems` | `GET /api/decoders/summary`  | number of decoders with a problem verdict cut from `decoders` by its cap (0 when every problem shows)                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `activity`       | `GET /api/activity/status`   | `state` (`disabled`, `opening`, `retrying`, `available`, `unavailable`) and `rows` (null unless available)                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `lastDecode`     | `GET /api/decoders/summary`  | `{ protocol, at }` per protocol with output (over every decoder), newest first                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Field            | Summary of                   | Content                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ---------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `at`             |                              | ISO time of the answer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `truncated`      |                              | `true` when a list was cut at its cap, an id was shortened or `scanner.discoveries` stopped at its cap (a shortened job name alone does not set it)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `tuners`         | `GET /api/tuner`             | `sourceId`, `frequencyHz`, `sampleRateHz`, `gainMode`, `gain` (tenths of a dB; null in AGC), `owner` (`wavekit`, `external` while an external client such as SDR++ controls it, `scanner` while a scanner job holds the tuner lease), `declaredOnly` (frequency or rate only from config). Unknown values are null                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `sources`        | `GET /api/sources`           | `id`, `connected`, `state` (the source activity state), `sampleAgeMs`, `warnings` (`rate-mismatch`, `signal-flat`), `feed` (the receiver feed state: `live`, `paused`, `resuming`, `error`), `tuningUnverified` (`true` while the tuner's frequency, sample rate, gain or gain mode is unknown, for example after a plain resume), `verdict` (the [`verdict.code`](#get-apisources) of `GET /api/sources`, absent when it reads `ok`), `passive` (why the cost guard holds passive scanning off: a [`reasonCode`](#get-apiscanner) of `GET /api/scanner`, absent otherwise), `receiver` (`strength`, `learnedState`, `tuningRestored`: the [receiver fields](#receiver-and-candidate-fields) of `GET /api/sources`, absent before the receiver is identified) |
+| `liveAudio`      | `GET /api/live-audio/status` | `running`, `health`, `sourceId`, `modulation`, `offsetHz`, `clients`, `squelchOpen` (null while stopped); null without live audio                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `scanner`        | `GET /api/scanner`           | `enabled`, `activeJobs` (not yet ended), `heldJobs` (sweeps paused with reason `resumed-without-retune`), `discoveries` (records in the discovery store; null if this core cannot say), `job` (the most recently updated held sweep, else the most recently updated active job: `id`, `name`, `kind`, `state`, `reason`, `sourceId`) or null; null without the scanner                                                                                                                                                                                                                                                                                                                                                                                        |
+| `decoders`       | `GET /api/decoders/summary`  | one row per decoder instance, problem verdicts first, then configuration order: `id`, `protocol` (the decoder type) and the same `verdict` `code` and `actions` (at most three, most helpful first), with `cause` (`host` or `decoder`, whose loss stopped it) only on a loss verdict (`efficiency-drops`, `efficiency-late-drops`, `efficiency-cpu`, at most two actions) and never `retryAt` (read the summary route for it); the verdict sentence is on the summary route. A `listening` row may add the summary's `reception` (`heard-undecoded` or `nothing-heard`)                                                                                                                                                                                      |
+| `hiddenProblems` | `GET /api/decoders/summary`  | number of decoders with a problem verdict cut from `decoders` by its cap (0 when every problem shows)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `activity`       | `GET /api/activity/status`   | `state` (`disabled`, `opening`, `retrying`, `available`, `unavailable`) and `rows` (null unless available)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `lastDecode`     | `GET /api/decoders/summary`  | `{ protocol, at }` per protocol with output (over every decoder), newest first                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
 A scanner job owns a tuner only while it holds the tuner lease: passive jobs never
 take one, and a sweep the operator paused keeps it until it is released.
@@ -1069,6 +1069,108 @@ only on the configured API port. Upgrades are at least
 activeHost, reason, at }` (also on `source:status` and in `/api/status`); `url`
 stays the configured address. Other sources never carry `endpoint`. See
 [receiver-endpoints](specs/receiver-endpoints/design.md).
+
+**Connect failures.** While a network source is not connected after a failed attempt,
+its entry carries `connectFailure`: `target` (the attempt's `host:port`, omitted when the host
+is not a plain name or address), `errorClass` (`refused`, `timeout`, `unreachable`,
+`not-found`, `reset`, `closed`, `stalled`, `silent` or `other`), `attempts` (failed attempts since a connection
+last delivered data), `lastAttemptAt` (ISO time) and a short fixed `hint`, for example:
+
+```json
+"connectFailure": {
+	"target": "receiver.local:1234",
+	"errorClass": "refused",
+	"attempts": 3,
+	"lastAttemptAt": "2026-01-01T00:00:00.000Z",
+	"hint": "Nothing listening at receiver.local:1234: is the bridge or rtl_tcp running?"
+}
+```
+
+The class comes from the socket error code (`ECONNREFUSED` is `refused`, `ETIMEDOUT` or the
+core's connect timeout `timeout`, `EHOSTUNREACH`/`ENETUNREACH`/`EHOSTDOWN` `unreachable`,
+`ENOTFOUND`/`EAI_AGAIN` `not-found`, `ECONNRESET`/`EPIPE` `reset`, a close by the peer
+without an error `closed`, the stall watchdog `stalled`, a source with candidates whose endpoint
+sent no data payload within 10 s of the connect `silent`, anything else `other`); the hint is fixed text per class and never repeats the
+error message. The field goes once a connection delivers its first data (the rtl_tcp header),
+not when the TCP connection is accepted: a receiver that accepts and then resets before
+sending anything keeps counting attempts; any first data clears the record, so a stall or
+reset after data starts again at 1. Pausing the feed clears it too (a deliberate close is no
+failure). A peer close after a healthy session (payload seen) is a disconnect and starts no
+record. While connected the field is not shown.
+
+#### Receiver and candidate fields
+
+**`candidate`** (only `rtl_tcp` `U8_IQ` sources with `candidates` in the config): the endpoint in
+use. `index` (0 is the configured `host`/`port`, 1 onwards the candidates in config order),
+`count` (all endpoints), `label` (the candidate's label, if any), `target` (`host:port`, null when
+the host is not a plain name or address), `selectedBecause`, `delivering` (it sent a data
+payload since it was selected; a header alone does not count, and an endpoint that sends bytes
+without a valid `RTL0` header delivers with an unknown receiver), `failures` (losses since then)
+and `retries` (losses after which a delivering endpoint is left, 3). `selectedBecause` reads
+`configured` before any attempt, `first reachable`, `previous failed: <class>` once it delivered
+after a switch (the class is a `connectFailure.errorClass` or `lost`, with `(N losses)` when the
+endpoint left had delivered), or `trying: previous failed: <class>` while it is being tried.
+An endpoint that accepts the connection but sends no data payload (a header alone does not
+count) within 10 s of the connect (twice the 5 s connect timeout) fails as `silent` and the next
+endpoint is tried.
+
+**`receiver`** (tracked `rtl_tcp` `U8_IQ` sources, once their first connection identified the
+receiver): which receiver the source reaches and whose learned state applies.
+
+```json
+"receiver": {
+	"key": "unit:0123456789abcdef0123456789abcdef",
+	"strength": "unit",
+	"tunerType": 5,
+	"serial": "SDR04711",
+	"candidateLabel": "usb",
+	"selectedBecause": "previous failed: refused",
+	"learnedStateNamespace": "engine/receivers/rtl/unit%3A0123456789abcdef0123456789abcdef",
+	"namespaceState": "resumed",
+	"restoredTuning": { "restored": true, "reason": "same receiver" }
+}
+```
+
+- `key` and `strength`: `unit:<unitId>` (the sdr-host's stable unit id, kept across sdr-host
+  restarts and image updates) or `serial:<vendor>:<product>:<serial>` (the dongle's USB ids and
+  serial, only for a serial that is not a shared factory default such as `00000001`) are a
+  `unit`; `source:<source>|model:<tunerType>:<gainCount>` (`rtl_tcp` header only) is a `model`,
+  shared by every dongle of that model on that source; `unknown` means nothing usable was
+  reported. The sdr-host's `receiverId` changes at every sdr-host restart and never forms a key;
+  an sdr-host without `unitId` (an older one) gives the `model` key. Every part is validated
+  (letters, digits, `.`, `_`, `-`, bounded length); anything else is dropped, which only weakens
+  the identity.
+- `serial` (as validated) and `candidateLabel` are present only when known.
+- `learnedStateNamespace`: where the spectrum engine state and occupancy of this receiver live,
+  relative to the scanner state directory; null while the receiver is unknown.
+- `namespaceState`: `fresh` (new receiver), `resumed` (its own earlier state), `adopted` (a copy
+  of learned state taken over once: the state saved before receiver namespacing, or, for a unit
+  identified for the first time, what the source learned under its `model` key) or `none`
+  (unknown receiver: nothing learned applies, nothing is written). The state saved before
+  namespacing goes to a `unit` key, or to the `model` key only on a source without an sdr-host;
+  the original files stay for an older version.
+- After a connect the identity waits for the sdr-host's first answer (or failure) since that
+  connection, at most 7 s by default (three sdr-host request timeouts plus 1 s). Until then
+  `receiver` still shows the last identified receiver and its learned state stays applied, but
+  nothing is saved. The same receiver again resumes without any change to the spectrum engine;
+  another receiver switches to its own state. Learned state that cannot be saved yet (the scanner
+  store not writable) is kept in memory for its receiver and saved once the store is writable.
+- While a tracked source's receiver is not identified (unknown, or in that window), a retune
+  with `applyToMyTuning` applies no band gain and keeps your gain: the gain it would replace
+  could not be saved for the right receiver. This is the intended safe answer; the log line
+  `Band gain not applied: the receiver is not identified yet` carries the reason
+  `receiver not identified`.
+- `restoredTuning`: whether the tuning accepted through the API or the relay was replayed on
+  this connection, and why (`same receiver`, `this receiver's tuning from earlier`, `another
+receiver: configured tuning`, `receiver unknown: nothing restored`, ...). It is replayed only to
+  the receiver it was accepted on, except that a same-model unit may get it until the sdr-host
+  identity settles (never corrected on a candidate endpoint without sdr-host). Tuning accepted
+  while the source's receiver is unknown (the first connection's receiver not identified yet,
+  or an unidentifiable one) belongs to no receiver: it is dropped, not replayed on a later
+  connection.
+
+`GET /api/agent/status` carries a compact `receiver` per source: `strength`, `learnedState`
+(the `namespaceState`) and `tuningRestored`.
 
 **Stall watchdog (rtl_tcp U8_IQ sources).** An rtl_tcp IQ stream never pauses while
 it is healthy. After a session has delivered payload, a gap of `stallTimeoutMs`
@@ -3722,7 +3824,16 @@ curl http://localhost:9000/api/scanner
 	},
 	"cpuGuard": { "percent": 41.5, "limitPercent": 90, "source": "os" },
 	"disk": "ok",
-	"folders": { "reattached": 0, "unresolved": 0 },
+	"folders": {
+		"reattached": 0,
+		"unresolved": 1,
+		"unresolvedBy": { "noAlias": 1, "aliasWithoutOwner": 0 }
+	},
+	"stateBackup": {
+		"outcome": "none",
+		"reason": "same-format",
+		"toFormat": "f1-h3-r1"
+	},
 	"jobs": { "active": 2, "total": 5 }
 }
 ```
@@ -3731,8 +3842,17 @@ curl http://localhost:9000/api/scanner
 start did with recording and evidence folders that no discovery owned: `reattached` folders
 were given back to the discovery they were merged into (found from the journal's merge alias
 listings, then from the observations listing their recordings), and `unresolved` folders
-could not be traced and stay on disk, kept by every retention pass. Nothing is moved or
-deleted. One info line at startup carries the same two counts.
+could not be traced and stay on disk, kept by every retention pass. `unresolvedBy` splits
+them: `noAlias`, no merge alias names the folder; `aliasWithoutOwner`, its alias chain ends at
+no live discovery (either way no observation listing its recordings named a single owner).
+Nothing is moved or deleted. One info line at startup carries the same counts.
+
+`stateBackup` (absent from older cores and before the scanner state loaded) is this start's
+pre-migration backup of the scanner state ([SCANNER.md](SCANNER.md), upgrade and rollback):
+`outcome` `taken` with `fromFormat`, `toFormat` and `path` (relative to `scanner.storage.dir`,
+`.backups/pre-<format>.<ms>`); `skipped` with `fromFormat`, `toFormat` and a fixed `reason`
+(`unreadable`, `low-disk`, `disk-unknown`, `too-many-files`, `copy-failed`: one file could not
+be read or copied, and no backup was kept); or `none` with `reason` `same-format` or `fresh`.
 
 `recordingsQuota` is present only while the last retention pass left the recordings quota
 (`storage.maxRecordingsMb`) exceeded after removing every file its rules allow, so everything

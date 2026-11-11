@@ -319,6 +319,8 @@ describe("a state directory written by an earlier core", () => {
 			expect(first.service.status().folders).toEqual({
 				reattached: RELEASED,
 				unresolved: 1,
+				// The stray folder: no merge alias names it.
+				unresolvedBy: { noAlias: 1, aliasWithoutOwner: 0 },
 			})
 			for (const id of o.merged)
 				expect(first.store.aliasOwner(id)).toBe(o.survivor)
@@ -347,6 +349,7 @@ describe("a state directory written by an earlier core", () => {
 			expect(second.service.status().folders).toEqual({
 				reattached: 0,
 				unresolved: 1,
+				unresolvedBy: { noAlias: 1, aliasWithoutOwner: 0 },
 			})
 			expect(stateOf(second, o)).toEqual(firstState)
 			expect(filesUnder(o.dir)).toEqual(before)

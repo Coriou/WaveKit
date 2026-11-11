@@ -3205,12 +3205,12 @@ describe("a temporary tune and the gain saved before a band", () => {
 			await h.post({ frequencyHz: BAND_HZ, restoreAfterS: 5 })
 			const service = h.controller.bandGainSettings()
 			if (service === null) throw new Error("no band gain service")
-			const save = service.saveOperatorGains.bind(service)
+			const save = service.saveOperatorGainRecords.bind(service)
 			let release = () => {}
 			const held = new Promise<void>(resolve => {
 				release = resolve
 			})
-			vi.spyOn(service, "saveOperatorGains").mockImplementationOnce(
+			vi.spyOn(service, "saveOperatorGainRecords").mockImplementationOnce(
 				async (...args) => {
 					await held
 					return save(...args)
@@ -3234,7 +3234,7 @@ describe("a temporary tune and the gain saved before a band", () => {
 			await h.post({ frequencyHz: BAND_HZ, restoreAfterS: 5 })
 			const service = h.controller.bandGainSettings()
 			if (service === null) throw new Error("no band gain service")
-			vi.spyOn(service, "saveOperatorGains").mockResolvedValue(false)
+			vi.spyOn(service, "saveOperatorGainRecords").mockResolvedValue(false)
 			await del(h)
 			await settled()
 			expect(saved()).toBeUndefined()

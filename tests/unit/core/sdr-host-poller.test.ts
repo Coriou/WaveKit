@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import * as fc from "fast-check"
 import {
+	SDR_HOST_FIRST_ANSWER_ATTEMPTS,
 	SdrHostPoller,
 	sanitizeHostVersion,
 } from "../../../src/core/sdr-host-poller.js"
@@ -338,6 +339,209 @@ describe("SdrHostPoller receiver endpoints (receiver-endpoints 1.1, 3.6)", () =>
 			expect(await report).toBeNull()
 		} finally {
 			poller.stop()
+		}
+	})
+})
+
+describe("SdrHostPoller identity results", () => {
+	const UNIT = "fedcba9876543210fedcba9876543210"
+
+	it("emits each poll's result after /api/status, before /api/host answers", async () => {
+		let releaseHost!: () => void
+		const hostGate = new Promise<void>(resolve => (releaseHost = resolve))
+		const fetchFn = vi.fn<typeof fetch>(async input => {
+			if (String(input).endsWith("/api/host")) {
+				await hostGate
+				return new Response("{}", { status: 200 })
+			}
+			return new Response(JSON.stringify({ unitId: UNIT }), { status: 200 })
+		})
+		const poller = new SdrHostPoller(
+			logger,
+			[{ sourceId: "rtl", apiUrl: "http://sdr-host.invalid" }],
+			{ fetchFn, pollIntervalMs: 60_000 },
+		)
+		try {
+			const before = performance.now()
+			const result = new Promise(resolve =>
+				poller.once("identity-result", (_id, r) => resolve(r)),
+			)
+			poller.start()
+			const r = (await result) as {
+				startedAt: number
+				ok: boolean
+				facts: unknown
+			}
+			expect(r.ok).toBe(true)
+			expect(r.facts).toEqual({ unitId: UNIT })
+			expect(r.startedAt).toBeGreaterThanOrEqual(before)
+			// /api/host is still pending: the result did not wait for it.
+			expect(fetchFn).toHaveBeenCalledTimes(2)
+			expect(poller.hasAnswered("rtl")).toBe(true)
+		} finally {
+			releaseHost()
+			poller.stop()
+		}
+	})
+
+	it("a failed poll is a result too (ok false, no facts), and answers nothing", async () => {
+		const fetchFn = vi.fn<typeof fetch>().mockRejectedValue(new Error("down"))
+		const poller = new SdrHostPoller(
+			logger,
+			[{ sourceId: "rtl", apiUrl: "http://sdr-host.invalid" }],
+			{ fetchFn },
+		)
+		poller.on("error", () => {})
+		try {
+			const result = new Promise(resolve =>
+				poller.once("identity-result", (_id, r) => resolve(r)),
+			)
+			poller.start()
+			expect(await result).toMatchObject({ ok: false, facts: null })
+			expect(poller.hasAnswered("rtl")).toBe(false)
+		} finally {
+			poller.stop()
+		}
+	})
+
+	it("awaits the first answer until SDR_HOST_FIRST_ANSWER_ATTEMPTS polls failed, at the backoff", async () => {
+		vi.useFakeTimers()
+		try {
+			const fetchFn = vi.fn<typeof fetch>().mockRejectedValue(new Error("down"))
+			const poller = new SdrHostPoller(
+				logger,
+				[{ sourceId: "rtl", apiUrl: "http://sdr-host.invalid" }],
+				{ fetchFn },
+			)
+			poller.on("error", () => {})
+			const awaited: boolean[] = []
+			poller.on("identity-result", id =>
+				awaited.push(poller.awaitingFirstAnswer(id)),
+			)
+			expect(SDR_HOST_FIRST_ANSWER_ATTEMPTS).toBe(3)
+			// Before any poll: awaited.
+			expect(poller.awaitingFirstAnswer("rtl")).toBe(true)
+			expect(poller.awaitingFirstAnswer("other")).toBe(false)
+			poller.start()
+			await vi.advanceTimersByTimeAsync(0)
+			// Backoff 2 s, then 4 s: the third failure is about 6 s after the first.
+			await vi.advanceTimersByTimeAsync(2_000)
+			expect(awaited).toEqual([true, true])
+			await vi.advanceTimersByTimeAsync(4_000)
+			expect(awaited).toEqual([true, true, false])
+			poller.stop()
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it("an answer ends the wait for good (a later failure is not awaited again)", async () => {
+		let up = true
+		const fetchFn = vi.fn<typeof fetch>(async () => {
+			if (!up) throw new Error("down")
+			return new Response(JSON.stringify({ unitId: UNIT }), { status: 200 })
+		})
+		const poller = new SdrHostPoller(
+			logger,
+			[{ sourceId: "rtl", apiUrl: "http://sdr-host.invalid" }],
+			{ fetchFn, pollIntervalMs: 60_000 },
+		)
+		poller.on("error", () => {})
+		try {
+			const first = new Promise(resolve =>
+				poller.once("identity-result", resolve),
+			)
+			poller.start()
+			await first
+			expect(poller.awaitingFirstAnswer("rtl")).toBe(false)
+			expect(poller.hasAnswered("rtl")).toBe(true)
+			up = false
+			const failed = new Promise(resolve =>
+				poller.once("identity-result", resolve),
+			)
+			poller.pollNow("rtl")
+			await failed
+			expect(poller.awaitingFirstAnswer("rtl")).toBe(false)
+		} finally {
+			poller.stop()
+		}
+	})
+
+	it("pollNow brings a scheduled poll (also a failure backoff) forward, and reruns once after one in flight", async () => {
+		vi.useFakeTimers()
+		try {
+			let calls = 0
+			let releaseStatus: (() => void) | null = null
+			const fetchFn = vi.fn<typeof fetch>(async input => {
+				if (String(input).endsWith("/api/host"))
+					return new Response("{}", { status: 200 })
+				calls++
+				if (calls === 1) throw new Error("down")
+				if (calls === 2)
+					await new Promise<void>(resolve => (releaseStatus = resolve))
+				return new Response(JSON.stringify({ unitId: UNIT }), { status: 200 })
+			})
+			const poller = new SdrHostPoller(
+				logger,
+				[{ sourceId: "rtl", apiUrl: "http://sdr-host.invalid" }],
+				{ fetchFn, pollIntervalMs: 60_000, timeoutMs: 10_000 },
+			)
+			poller.on("error", () => {})
+			const results: boolean[] = []
+			poller.on("identity-result", (_id, r) => results.push(r.ok))
+			poller.start()
+			await vi.advanceTimersByTimeAsync(0)
+			// The first poll failed: the next one is 2 s away; pollNow starts it now.
+			expect(results).toEqual([false])
+			poller.pollNow("rtl")
+			await vi.advanceTimersByTimeAsync(0)
+			expect(calls).toBe(2)
+			// While it runs, a second pollNow queues exactly one more right after it.
+			poller.pollNow("rtl")
+			poller.pollNow("rtl")
+			releaseStatus!()
+			await vi.advanceTimersByTimeAsync(0)
+			await vi.advanceTimersByTimeAsync(0)
+			expect(calls).toBe(3)
+			expect(results).toEqual([false, true, true])
+			// Then back to the normal interval: nothing more for 60 s.
+			await vi.advanceTimersByTimeAsync(59_000)
+			expect(calls).toBe(3)
+			poller.stop()
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+	it("a retry poll (pollNow with retry) runs now and its failure does not grow the backoff or use up the first-answer attempts", async () => {
+		vi.useFakeTimers()
+		try {
+			const fetchFn = vi.fn<typeof fetch>().mockRejectedValue(new Error("down"))
+			const poller = new SdrHostPoller(
+				logger,
+				[{ sourceId: "rtl", apiUrl: "http://sdr-host.invalid" }],
+				{ fetchFn, pollIntervalMs: 60_000 },
+			)
+			poller.on("error", () => {})
+			let results = 0
+			poller.on("identity-result", () => results++)
+			poller.start()
+			await vi.advanceTimersByTimeAsync(0)
+			expect(results).toBe(1)
+			// Five quick retries, each past the 2 s backoff, each failing.
+			for (let i = 0; i < 5; i++) {
+				poller.pollNow("rtl", true)
+				await vi.advanceTimersByTimeAsync(0)
+			}
+			expect(results).toBe(6)
+			// One failure counted: still awaited, and the next scheduled poll is 2 s away.
+			expect(poller.awaitingFirstAnswer("rtl")).toBe(true)
+			await vi.advanceTimersByTimeAsync(1_999)
+			expect(results).toBe(6)
+			await vi.advanceTimersByTimeAsync(1)
+			expect(results).toBe(7)
+			poller.stop()
+		} finally {
+			vi.useRealTimers()
 		}
 	})
 })

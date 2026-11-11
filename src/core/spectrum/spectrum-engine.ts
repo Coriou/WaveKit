@@ -429,6 +429,11 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private stopping: Promise<EngineState | null> | null = null
 	private restarting = false
 	private persisted: EngineState | undefined
+	/**
+	 * Learned state queued by swapLearnedState for the next host (undefined: fresh).
+	 * Applied in createHost, so a restart already in flight picks it up too.
+	 */
+	private learnedSwap: { state: EngineState | undefined } | null = null
 	// Stream and sample accounting
 	private stream = -1
 	private nextSample = 0
@@ -910,6 +915,34 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		return this.host?.eluSample?.() ?? null
 	}
 
+	/**
+	 * Replaces the learned state (spur map, floors, k, provisional spurs) with another
+	 * receiver's, or with nothing (fresh). Resolves the state it replaced (for persisting under
+	 * the previous receiver), or null when there was none. A running pipeline is recreated.
+	 */
+	async swapLearnedState(
+		next: EngineState | null,
+	): Promise<EngineState | null> {
+		const previous = await this.exportState().catch(
+			() => this.persisted ?? null,
+		)
+		const swap = { state: next ?? undefined }
+		this.learnedSwap = swap
+		// A restart already in flight may be past its createHost: wait for it (bounded, 100 x 20 ms
+		// = 2 s, far above a pipeline restart) and restart again until this swap was applied.
+		for (let i = 0; i < 100 && this.learnedSwap === swap; i++) {
+			if (!this.host || !this.running || this.failed) break
+			if (!this.restarting) await this.restartPipeline(this.current.tuningTrust)
+			else await new Promise(resolve => setTimeout(resolve, 20))
+		}
+		if (this.learnedSwap === swap) {
+			// No pipeline (stopped, failed or not started): the next one starts from it.
+			this.persisted = swap.state
+			this.learnedSwap = null
+		}
+		return previous
+	}
+
 	/** Applies new tuning (fftSize, integration, k) by recreating the pipeline. */
 	async reconfigure(): Promise<void> {
 		await this.restartPipeline(this.current.tuningTrust)
@@ -919,6 +952,10 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	private createHost(sampleRateHz: number): PipelineHost {
 		const tuning = this.deps.tuning?.() ?? DEFAULT_TUNING
+		if (this.learnedSwap) {
+			this.persisted = this.learnedSwap.state
+			this.learnedSwap = null
+		}
 		const cfg = buildPipelineConfig(
 			this.sourceId,
 			this.fmt,

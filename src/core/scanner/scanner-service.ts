@@ -73,10 +73,12 @@ import type {
 	ScannerRecorderDiscovery,
 } from "@wavekit/api-types"
 import {
+	RECORDING_KEEPS_FILE_NAME,
 	SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
 	SOURCE_PAUSED_MESSAGE,
 	TUNE_WAITERS_MAX,
 } from "@wavekit/api-types"
+import { backupStatusOf } from "../state-backup.js"
 import type {
 	RecordingProtection,
 	ScannerRecordingDeleter,
@@ -249,6 +251,7 @@ import {
 	type SpectrumEngine,
 } from "../spectrum/spectrum-engine.js"
 import { SpectrumService } from "../spectrum/spectrum-service.js"
+import type { SpectrumPersistence } from "../spectrum/spectrum-service.js"
 import {
 	DiscoveryStore,
 	estimateFrequencyError,
@@ -491,6 +494,15 @@ export interface ScannerServiceDeps {
 	 * writes no state, while its close still ends sockets, children and listeners.
 	 */
 	readonly lostOwnership?: () => boolean
+	/**
+	 * Namespaces learned engine state per receiver (ReceiverLearnedState.attach). Gets
+	 * the store, the gated persistence used without it, and the same write gate.
+	 */
+	readonly learnedState?: (
+		store: ScannerPersistence,
+		gated: SpectrumPersistence,
+		writable: () => boolean,
+	) => SpectrumPersistence
 	/** WG11 req 6: IQ capture on detection and replay; absent keeps today's behaviour. */
 	readonly analogTrial?: AnalogTrialRunner
 	readonly iqCapture?: ScannerIqCapture
@@ -1240,8 +1252,7 @@ export class ScannerService extends EventEmitter {
 	}
 	private disk: "ok" | "disk-low" = "ok"
 	/** The load-time folder migration's counts (status `folders`); null until it ran. */
-	private folderMigration: { reattached: number; unresolved: number } | null =
-		null
+	private folderMigration: NonNullable<ScannerStatus["folders"]> | null = null
 	private dirty = false
 	/** False when the persisted state could not be read: the journal and snapshot are not written this run. */
 	private stateLoaded = false
@@ -1421,6 +1432,8 @@ export class ScannerService extends EventEmitter {
 				dir: this.storageDir,
 				logger: deps.logger,
 				now: this.now,
+				// The recording keep store (RecordingKeepStore, `<stateDir>`) goes into the backup's outside/.
+				backup: { keepsFile: join(deps.stateDir, RECORDING_KEEPS_FILE_NAME) },
 			})
 			this.spectrum = new SpectrumService({
 				sources: deps.sources,
@@ -1430,7 +1443,7 @@ export class ScannerService extends EventEmitter {
 				settings: () => this.settings(),
 				tuning: sourceId => this.engineTuning(sourceId),
 				// Engine state keeps the config-load gate (Task 35): never written when jobs and settings could not be read.
-				persistence: {
+				persistence: this.learnedPersistence(deps, {
 					writeEngine: (sourceId, state) =>
 						this.writeEngineState(sourceId, state),
 					loadEngine: sourceId => this.persistence.loadEngine(sourceId),
@@ -1440,7 +1453,7 @@ export class ScannerService extends EventEmitter {
 							? this.persistence.writeOccupancy(sourceId, state)
 							: Promise.resolve(),
 					loadOccupancy: sourceId => this.persistence.loadOccupancy(sourceId),
-				},
+				}),
 				logger: deps.logger,
 				now: this.now,
 				engineHost: deps.engineHost ?? "thread",
@@ -2278,6 +2291,7 @@ export class ScannerService extends EventEmitter {
 			},
 			disk: this.disk,
 			...(this.folderMigration ? { folders: { ...this.folderMigration } } : {}),
+			...withBackup(backupStatusOf(this.persistence.preMigrationBackup())),
 			...this.recordingsQuotaStatus(),
 			...this.analogOperationsStatus(),
 			jobs: {
@@ -9085,9 +9099,18 @@ export class ScannerService extends EventEmitter {
 		try {
 			const history = await this.persistence.aliasHistory(new Set(orphans))
 			const result = this.store.reattachOrphanFolders(orphans, history)
-			this.folderMigration = result
+			const left = orphans.filter(
+				id => this.store.folderOwner(id) === undefined,
+			)
+			const noAlias = left.filter(id => !history.has(id)).length
+			const unresolvedBy = { noAlias, aliasWithoutOwner: left.length - noAlias }
+			this.folderMigration = { ...result, unresolvedBy }
 			this.log.info(
-				{ reattached: result.reattached, unresolved: result.unresolved },
+				{
+					reattached: result.reattached,
+					unresolved: result.unresolved,
+					unresolvedBy,
+				},
 				"Scanner folders without an owner re-attached; the rest are kept in place",
 			)
 		} catch (err: unknown) {
@@ -9217,6 +9240,20 @@ export class ScannerService extends EventEmitter {
 			}
 			await this.refreshPassive()
 		}
+	}
+
+	/** The per-receiver wrapper when wired, else the gated persistence as before. */
+	private learnedPersistence(
+		deps: ScannerServiceDeps,
+		gated: SpectrumPersistence,
+	): SpectrumPersistence {
+		return deps.learnedState
+			? deps.learnedState(
+					this.persistence,
+					gated,
+					() => this.configLoaded && !this.ownershipLost(),
+				)
+			: gated
 	}
 
 	/** Engine state is never written when the persisted state could not be read at all. */
@@ -9533,3 +9570,8 @@ export function dcCentredOf(
 	const half = Number.isFinite(obwHz) && obwHz > 0 ? obwHz / 2 : 0
 	return Math.abs(centreHz - tunedHz) - half <= DQ_DC_ADMIT_HZ
 }
+
+const withBackup = (
+	b: ReturnType<typeof backupStatusOf>,
+): { stateBackup?: NonNullable<ScannerStatus["stateBackup"]> } =>
+	b === null ? {} : { stateBackup: b }

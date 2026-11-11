@@ -57,4 +57,71 @@ describe("usb-dongle", () => {
 		expect(result.conflict).toBe(false)
 		expect(result.driver).toBeNull()
 	})
+
+	describe("USB serial from sysfs", () => {
+		const sysfsOf = (nodes: Record<string, Record<string, string>>) => ({
+			readdir: async () => Object.keys(nodes),
+			readFile: async (path: string) => {
+				const parts = path.split("/")
+				const file = parts.pop()!
+				const node = parts.pop()!
+				const value = nodes[node]?.[file]
+				if (value === undefined) throw new Error("ENOENT")
+				return value
+			},
+		})
+		const lsusb = () =>
+			vi
+				.fn()
+				.mockResolvedValueOnce({
+					stdout: "Bus 001 Device 004: ID 0bda:2838 Realtek RTL2838UHIDIR",
+				})
+				.mockResolvedValueOnce({ stdout: "" })
+
+		it("reports the serial of the matching bus/device node", async () => {
+			const { detectDongle } = await import("../../src/utils/usb-dongle.js")
+			const sysfs = sysfsOf({
+				usb1: { busnum: "1\n", devnum: "1\n" },
+				"1-1": { busnum: "1\n", devnum: "4\n", serial: "SDR4711\n" },
+				"1-1:1.0": { busnum: "1\n", devnum: "4\n", serial: "WRONG" },
+			})
+			const result = await detectDongle(logger, lsusb(), sysfs)
+			expect(result.serial).toBe("SDR4711")
+			expect(result.serialWeak).toBe(false)
+		})
+
+		it.each(["00000001", "0", "00000000", "1"])(
+			"marks the default serial %s weak",
+			async serial => {
+				const { detectDongle } = await import("../../src/utils/usb-dongle.js")
+				const sysfs = sysfsOf({
+					"1-1": { busnum: "1", devnum: "4", serial },
+				})
+				const result = await detectDongle(logger, lsusb(), sysfs)
+				expect(result.serial).toBe(serial)
+				expect(result.serialWeak).toBe(true)
+			},
+		)
+
+		it("reports no serial when unreadable, absent or not plain", async () => {
+			const { detectDongle } = await import("../../src/utils/usb-dongle.js")
+			for (const nodes of [
+				{ "1-1": { busnum: "1", devnum: "4" } },
+				{ "1-1": { busnum: "1", devnum: "4", serial: "has space" } },
+				{ "1-1": { busnum: "1", devnum: "4", serial: "x".repeat(33) } },
+				{ "1-1": { busnum: "2", devnum: "4", serial: "OTHERBUS" } },
+			]) {
+				const result = await detectDongle(logger, lsusb(), sysfsOf(nodes))
+				expect(result.serial).toBeNull()
+				expect(result.serialWeak).toBeUndefined()
+			}
+			const failing = {
+				readdir: () => Promise.reject(new Error("no sysfs")),
+				readFile: () => Promise.reject(new Error("no sysfs")),
+			}
+			const result = await detectDongle(logger, lsusb(), failing)
+			expect(result.present).toBe(true)
+			expect(result.serial).toBeNull()
+		})
+	})
 })

@@ -205,6 +205,16 @@ import {
 import { ContainerMonitor } from "./core/container-monitor.js"
 import { SdrHostPoller, type SdrHostConfig } from "./core/sdr-host-poller.js"
 import {
+	ReceiverIdentityTracker,
+	receiverSdrHostWaitMs,
+} from "./core/receiver-identity-tracker.js"
+import { ReceiverLearnedState } from "./core/receiver-identity-state.js"
+import {
+	receiverBoundToTuner,
+	wireReceiverStatus,
+	wireReceiverTracker,
+} from "./core/receiver-identity-wiring.js"
+import {
 	EndpointSelector,
 	type EndpointSelectionTarget,
 } from "./core/endpoint-selector.js"
@@ -1306,6 +1316,61 @@ async function main(): Promise<void> {
 			await disposeReceiverAfterApi()
 			await sourceManager.disconnectAll()
 		})
+		// Receiver identity and per-receiver learned state (rtl_tcp U8_IQ sources).
+		const receiverTracked = (id: string): boolean => {
+			const s = config.sources.find(source => source.id === id)
+			return s?.type === "rtl_tcp" && s.caps.format === "U8_IQ"
+		}
+		let identityPoller: SdrHostPoller | undefined
+		const receiverState = new ReceiverLearnedState({
+			stateDir: config.stateDir,
+			logger,
+			tracked: receiverTracked,
+			// An sdr-host is there: configured explicitly, or auto-detected and it has answered or
+			// may still answer first (fewer than SDR_HOST_FIRST_ANSWER_ATTEMPTS failed polls). Only
+			// then does a weak (source-scoped) key wait for a stable one to adopt; the poller's
+			// failed results recheck it (below).
+			sdrHostConfigured: id =>
+				identityPoller?.getStatus(id) !== undefined &&
+				(config.sources.find(source => source.id === id)?.sdrHost?.apiUrl !==
+					undefined ||
+					identityPoller.hasAnswered(id) ||
+					identityPoller.awaitingFirstAnswer(id)),
+			// While that first answer is still awaited, the weak key writes nothing learned.
+			sdrHostAwaited: id => identityPoller?.awaitingFirstAnswer(id) === true,
+			// The tracker and the controller are built below; nothing binds before the first
+			// connection, so both are read late (an earlier call throws, never reads stale state).
+			onBound: receiverBoundToTuner(
+				{ current: id => receiverIdentity.current(id) },
+				() => tunerController,
+			),
+		})
+		const receiverIdentity = new ReceiverIdentityTracker({
+			sources: sourceManager,
+			logger,
+			// The configured sdr-host describes the primary endpoint only, never a candidate.
+			sdrHostApplies: id =>
+				identityPoller?.getStatus(id) !== undefined &&
+				(sourceManager.getSelectedCandidate(id)?.index ?? 0) === 0,
+			// Waits for this connection's first poll result; the bound is only a safety net.
+			sdrHostWaitMs: receiverSdrHostWaitMs(
+				config.resources.sdrHostPoller.timeoutMs,
+			),
+			kickSdrHostPoll: (id, retry) => identityPoller?.pollNow(id, retry),
+			// A unit answer is expected (a failed poll at a reconnect is retried until the bound, not
+			// settled on the model): the sdr-host is configured, answered before, or the source's last
+			// receiver (persisted) was a unit. receiverState is declared above, so this never reads
+			// it uninitialised.
+			sdrHostExpected: (id): boolean =>
+				identityPoller?.getStatus(id) !== undefined &&
+				(config.sources.find(source => source.id === id)?.sdrHost?.apiUrl !==
+					undefined ||
+					identityPoller.hasAnswered(id) ||
+					receiverState.lastKey(id)?.startsWith("unit:") === true),
+		})
+		own(100, () => receiverIdentity.stop())
+		await receiverState.load()
+		wireReceiverTracker(receiverIdentity, receiverState)
 		const composed = composeLinkBurst({ log: logger })
 		own(20, composed.dispose)
 		const fanoutManager = new FanoutManager(logger)
@@ -1345,7 +1410,11 @@ async function main(): Promise<void> {
 		const tunerController = new TunerController(logger, sourceManager, {
 			reconnectPolicy: config.tuner.reconnectPolicy,
 			lostOwnership,
+			receiverIdentity: id =>
+				receiverTracked(id) ? receiverIdentity.provisional(id) : undefined,
+			receiverTracked,
 		})
+		wireReceiverStatus(sourceManager, receiverState, tunerController)
 		// Per-band gain: tuner.bandGain, replaced by <stateDir>/tuner-band-gain.json once PUT.
 		const bandGain = new BandGainSettingsService({
 			stateDir: config.stateDir,
@@ -2012,6 +2081,8 @@ async function main(): Promise<void> {
 			scannerConstructionStarted = true
 			scanner = new ScannerService({
 				settings: scannerSettings,
+				learnedState: (store, gated, writable) =>
+					receiverState.attach(store, gated, writable),
 				...(iqCapture ? { iqCapture } : {}),
 				// Stage 1: no coverage predicate (no sample-arrival timestamps yet), so every
 				// gate-passed track is captured within the existing budget.
@@ -2095,6 +2166,7 @@ async function main(): Promise<void> {
 				cpuMeter: efficiencyCpu,
 			})
 			scannerConstructionSettled = true
+			receiverState.setSpectrum(scanner.spectrum)
 			scannerConstruction.completeConstruction({ ok: true })
 			await iqCapture?.start()
 			await scanner.start()
@@ -2212,6 +2284,18 @@ async function main(): Promise<void> {
 				sdrHostPoller = new SdrHostPoller(logger, sdrHostConfigs, {
 					pollIntervalMs: config.resources.sdrHostPoller.pollIntervalMs,
 					timeoutMs: config.resources.sdrHostPoller.timeoutMs,
+				})
+				identityPoller = sdrHostPoller
+				const poller = sdrHostPoller
+				poller.on("identity-result", (sourceId, result) => {
+					receiverIdentity.noteSdrHostResult(sourceId, result)
+					// An auto-detected sdr-host that stopped being awaited: the weak key may adopt now.
+					if (
+						!result.ok &&
+						!poller.hasAnswered(sourceId) &&
+						!poller.awaitingFirstAnswer(sourceId)
+					)
+						void receiverState.recheckAdoption(sourceId)
 				})
 				log.info(
 					{

@@ -155,7 +155,10 @@ mode is unknown (right after a restart, before any gain write) they write no ban
 tuning (the API, the web app, a dwell you drive through the API) keeps your gain unless
 `applyToMyTuning` is true; then tuning into a listed range applies its gain and tuning out puts
 yours back, from `<stateDir>/tuner-band-gain-saved.json` after a restart (the band gain goes
-on only once that file is written; a failed write keeps your gain).
+on only once that file is written; a failed write keeps your gain). For an rtl_tcp IQ source the
+saved gain is kept per receiver in `<stateDir>/tuner-band-gain-saved-receivers.json`, and while
+that source's receiver is not identified yet (unknown, or the first seconds after a reconnect)
+no band gain is applied to your retunes: your gain stays, and the log gives the reason.
 
 ```yaml
 tuner:
@@ -423,6 +426,82 @@ WAVEKIT_TUNER_RELAY__PORT=1234
 
 `WAVEKIT_SOURCES_<index>_...` and `WAVEKIT_DECODERS_<index>_...` only change an entry that the
 YAML file already defines; they cannot add one. Startup fails if the index does not exist.
+
+### Several receivers for one source (`candidates`)
+
+An `rtl_tcp` source with `U8_IQ` IQ can list other endpoints to use when its own `host` and
+`port` do not answer, for example a USB dongle served on the Mac and a Pi receiver:
+
+```yaml
+sources:
+  - id: "rtl"
+    type: "rtl_tcp"
+    host: "<pi-address>" # tried first
+    port: 5555
+    caps: { kind: "iq", format: "U8_IQ", sampleRate: 2048000 }
+    candidates: # at most 8, tried in this order
+      - host: "<usb-host>"
+        port: 1234
+        label: "usb" # optional, printable ASCII, at most 48 characters
+```
+
+- The source tries `host`/`port`, then each candidate in order, with the usual reconnect backoff.
+  The first endpoint that delivers samples wins; a header alone does not.
+- An endpoint that never delivered samples is left after one failed attempt (one that sends a
+  header and then stalls or closes too). Once one delivers, a loss is retried 3 times (about 14
+  to 43 s with the backoff) before the next endpoint is tried, so an rtlmux restart or a short
+  network drop keeps the receiver; the count starts over only when samples flow again.
+- WaveKit contacts only the endpoints you list. It never discovers or scans for others.
+  `sdrHost.endpointSelection` applies to the primary host only.
+- GET /api/sources shows the endpoint in use and why under `candidate` (see
+  [API.md](API.md#receiver-and-candidate-fields)).
+
+An existing entry can be overridden from the environment, in either form:
+`WAVEKIT_SOURCES_0_CANDIDATES_0_HOST=...` or `WAVEKIT_SOURCES__0__CANDIDATES__0__PORT=1234`.
+
+### Learned state per receiver
+
+The core learns things about a receiver: its spur map and noise floors, band occupancy, the gain
+you had before a band gain changed it, and the tuning you set. That state is kept per receiver,
+so a USB dongle's spurs or gain are never applied to the Pi receiver, or the other way round.
+
+- Identity comes from the sdr-host's stable `unitId` (or the dongle's USB ids and serial, when the
+  serial is not a shared factory default) when the configured sdr-host describes the connected
+  receiver, otherwise from the rtl_tcp header (tuner model and gain count) on that source. The
+  sdr-host keeps its unit id across restarts and image updates (see
+  [SDR-HOST-SETUP.md](SDR-HOST-SETUP.md)); an older sdr-host without one is identified by model.
+  After a connection opens WaveKit asks the sdr-host at once and waits for its answer or failure
+  (at most 7 s by default).
+- A receiver seen before gets its own state back. A new one starts fresh, except that a unit
+  identified for the first time takes over what the source learned under its model (once). A
+  receiver known only by its model shares state with every dongle of that model on that source
+  (the log says so). An unknown receiver gets nothing learned and nothing is saved for it.
+- The tuning you set is replayed on a reconnect to the receiver it was set on, gain included.
+  Another receiver gets the configured tuning. A receiver told apart only by its model is the
+  exception: another dongle of the same model may get the replay until the sdr-host names the
+  unit (then it is not replayed again). On a candidate endpoint, which the sdr-host never
+  describes, that is never corrected.
+- After a plain resume (another client tunes the receiver), a switch to another receiver keeps
+  the values shown, marked unverified, instead of the configured tuning.
+- Tuning you set while the receiver was unknown belongs to no receiver: it is not replayed to the
+  next receiver identified, and a receiver coming back gets its own earlier tuning.
+- After a disconnect, nothing learned is saved until the next connection's receiver is
+  identified: the state so far is saved under the receiver it was learned on and stays applied
+  meanwhile. The same receiver coming back keeps it without any change to the spectrum engine;
+  another receiver switches to its own state, so it never inherits the previous one's. State
+  that cannot be saved yet (the scanner still loading) is kept in memory for its receiver.
+- On the first start after the upgrade, the first receiver identified by unit on each source
+  takes over the state saved before (once), and no other receiver ever does; on a source without
+  an sdr-host the model identity takes it. Its gain from before is taken over at once; the
+  spectrum files are copied as soon as the scanner can write (later, if the scanner is off or
+  still loading, while that same receiver is connected). The original files and the old gain
+  record in `tuner-band-gain-saved.json` stay, so an older version you go back to still finds
+  them.
+- Scanner discoveries and recordings are shared by every receiver.
+
+The log shows one line per change, for example
+`Receiver changed: source:rtl|model:5:29 -> unit:<id>; learned state adopted`, and the same receiver
+coming back after a reconnect logs `Receiver reconnected: <key>; learned state resumed`.
 
 ## RTL-SDR Setup
 

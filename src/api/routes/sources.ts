@@ -16,6 +16,9 @@ import { z } from "zod"
 import {
 	SOURCE_RESUME_FAILED_MESSAGE,
 	sourceActivitySchema,
+	sourceConnectFailureSchema,
+	sourceCandidateStatusSchema,
+	sourceReceiverStatusSchema,
 	sourceFeedSchema,
 	sourceRateMismatchSchema,
 	sourceSignalFlatSchema,
@@ -154,6 +157,9 @@ const extendedSourceStatusSchema = {
 		signalLevelDbfs: { type: "number" },
 		endpoint: sourceEndpointSchema,
 		feed: sourceFeedSchema,
+		connectFailure: sourceConnectFailureSchema,
+		candidate: sourceCandidateStatusSchema,
+		receiver: sourceReceiverStatusSchema,
 		verdict: sourceVerdictSchema,
 		assignments: {
 			type: "array",
@@ -442,17 +448,31 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 			const consumersBySourceId = countConsumersBySource(fanoutManager)
 			const hosts = sdrHostsBySource(sdrHostStatuses)
 			const now = Date.now()
-			return sourceManager
-				.getAllStatus()
-				.map(status =>
-					toApiExtendedSourceStatus(
-						status,
-						sourceManager,
-						consumersBySourceId,
-						hosts,
-						now,
-					),
-				)
+			return sourceManager.getAllStatus().map(status => ({
+				...toApiExtendedSourceStatus(
+					status,
+					sourceManager,
+					consumersBySourceId,
+					hosts,
+					now,
+				),
+				// Why the last attempt failed, while not connected (fixed class and hint).
+				...(status.connectFailure !== undefined
+					? { connectFailure: { ...status.connectFailure } }
+					: {}),
+				// The selected endpoint and the receiver whose learned state applies.
+				...(status.candidate !== undefined
+					? { candidate: { ...status.candidate } }
+					: {}),
+				...(status.receiver !== undefined
+					? {
+							receiver: {
+								...status.receiver,
+								restoredTuning: { ...status.receiver.restoredTuning },
+							},
+						}
+					: {}),
+			}))
 		},
 	)
 

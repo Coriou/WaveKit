@@ -499,8 +499,8 @@ describe("the close after a lost private lock", () => {
 		const h = await setup({ lostOwnership: () => lost })
 		const saveOperatorGains = vi.fn(() => Promise.resolve(true))
 		h.controller.setBandGain({
-			saveOperatorGains,
-			savedOperatorGains: () => [],
+			saveOperatorGainRecords: saveOperatorGains,
+			savedOperatorGainRecords: () => [],
 			applyToMyTuning: () => false,
 			gainAt: () => "keep",
 			labelAt: () => undefined,

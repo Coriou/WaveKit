@@ -34,6 +34,8 @@ services:
       # Sanitized first-boot progress for the status page (read-only). Only this
       # directory is shared; Docker creates it empty on installs without it.
       - ${WAVEKIT_HOST_STATUS_DIR:-/var/lib/wavekit/status}:/host-status:ro
+      # sdr-host's own state (the stable unit id); kept across image updates.
+      - ${WAVEKIT_SDR_HOST_STATE_DIR:-/var/lib/wavekit/sdr-host}:/state:rw
     device_cgroup_rules:
       - "c 189:* rmw" # USB char devices
 

@@ -77,6 +77,16 @@ export const SdrHostConfigSchema = z.object({
 		})
 		.default({}),
 
+	state: z
+		.object({
+			/**
+			 * Writable directory for what must outlive the process and image updates (the stable
+			 * unit id). A host volume in docker-compose.yml.
+			 */
+			dir: z.string().min(1).default("/state"),
+		})
+		.default({}),
+
 	logging: z
 		.object({
 			level: z

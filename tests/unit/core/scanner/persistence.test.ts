@@ -15,6 +15,10 @@ import fc from "fast-check"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import type { JournalEntry } from "../../../../src/core/scanner/store/discovery-store.js"
 import { ScannerPersistence } from "../../../../src/core/scanner/store/persistence.js"
+import {
+	BACKUPS_DIR,
+	STATE_FORMAT_FILE,
+} from "../../../../src/core/state-backup.js"
 import type { PersistedJob } from "../../../../src/core/scanner/store/persistence.js"
 import type {
 	EngineState,
@@ -191,7 +195,12 @@ describe("ScannerPersistence journal", () => {
 				now: () => T0,
 			}).load()
 			expect(loaded.corrections).toEqual([])
-			expect(await readdir(dir)).toEqual(["discoveries.json"])
+			// Nothing set aside; the pre-migration backup's marker and backup are the only additions.
+			expect((await readdir(dir)).sort()).toEqual([
+				BACKUPS_DIR,
+				"discoveries.json",
+				STATE_FORMAT_FILE,
+			])
 		})
 	})
 

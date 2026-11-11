@@ -111,6 +111,14 @@ RUN case "${TARGETARCH}" in \
 
 # Prepare s6-overlay directories
 RUN mkdir -p /run/service && chmod 755 /run/service
+# sdr-host state (unit id); docker-compose.yml mounts a host directory here. With
+# VOLUME /state a run without a mount gets an anonymous volume: compose keeps it across
+# `up` recreates, but `docker compose down` + `up`, `docker rm` + `run`, `down -v` and
+# `run --rm` all start a new empty one (and a new id), so a named volume or host
+# directory is required for a stable id. sdr-host detects an anonymous volume
+# (mountinfo) and a tmpfs here and reports no unit id for either.
+RUN mkdir -p /state
+VOLUME /state
 
 # Copy binaries
 COPY --from=rtlmux-build /usr/local/bin/rtlmux /usr/local/bin/

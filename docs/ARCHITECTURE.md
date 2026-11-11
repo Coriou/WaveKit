@@ -65,6 +65,13 @@ Manages TCP connections to SDR sources with automatic reconnection.
 - Auto-reconnect with exponential backoff (2s → 4s → 8s → max 30s)
 - Emit connection events and data rate metrics
 - Track source capabilities (sample rate, format, exclusivity)
+- Report why the last connection attempt failed (`connectFailure`: a closed error class and a
+  fixed hint, `src/core/source-manager-connect-failure.ts`)
+- Rotate an rtl_tcp U8_IQ source through its configured `candidates` (primary first; an endpoint
+  that never delivered a data payload is left after one failure (a header alone does not count;
+  one that sends bytes without an `RTL0` header delivers, with an unknown receiver), a
+  delivering one after `SOURCE_CANDIDATE_RETRIES` losses) and report the endpoint in use
+  (`candidate`)
 
 **Key interfaces**:
 
@@ -93,6 +100,69 @@ interface SourceCaps {
 - `data` — Raw data received
 - `metrics` — Data rate metrics (every 5s)
 - `caps-changed` — Source capabilities updated (e.g., sample rate change via TunerRelay)
+- `rtl-tcp-header` — A session's rtl_tcp header was read (before its first payload)
+
+### Receiver identity
+
+Learned state is kept per physical receiver, inside the one state directory, so a USB dongle's
+spurs, floors or pre-band gain never apply to the Pi receiver.
+
+- `src/core/receiver-identity.ts` (pure): the key `unit:<unitId>` (the sdr-host's persisted
+  unit id) or `serial:<vendor>:<product>:<serial>` (non-default serials only; strength `unit`),
+  `source:<source>|model:<tunerType>:<gainCount>` from the rtl_tcp header (`model`), or
+  `unknown`. The sdr-host's per-process `receiverId` never forms a key. Every component is
+  Zod/charset- and length-checked first; `pathSegment` turns any string into one collision-free
+  path segment.
+- `src/core/receiver-identity-tracker.ts`: per connection, the identity from the header,
+  upgraded by a validated sdr-host answer while the source is on its primary endpoint. Each
+  connection kicks a poll (`SdrHostPoller.pollNow`) and waits for the first poll result
+  (`identity-result`, emitted right after `/api/status`, success or failure) whose request
+  started at or after the connection opened; a hard bound (3 request timeouts + 1 s, 7 s by
+  default) is only a safety net. When a unit answer is expected (the sdr-host is configured,
+  answered before, or the source's last receiver was a `unit` key), a failed result does not end
+  the wait: a Pi reboot or sdr-host restart has rtlmux listening before the sdr-host API, so the
+  connection asks again every second (`pollNow(id, true)`, past the failure backoff and without
+  growing it) and settles on the `model` key only at the bound. It never downgrades within a
+  connection and is recomputed on each new connection. It emits `connection` on every disconnect and connect, `settled` on every
+  settle and `identity` on a change; `src/core/receiver-identity-wiring.ts` connects it to the
+  learned state, the tuner (`noteReceiverBound`) and the source status (`setReceiverStatusSource`).
+- `src/core/receiver-identity-state.ts`: binds each tracked source (rtl_tcp U8_IQ) to its
+  receiver's namespace `engine/receivers/<source>/<key>/` in the scanner state directory for the
+  spectrum engine state and occupancy. On a change it saves the running state under the old
+  receiver and loads the new one's (`SpectrumService.replaceLearnedState`, which recreates the
+  pipeline, and first waits for an engine still opening). A connection boundary makes the source
+  pending until the next settle: the state so far is exported under the bound receiver and stays
+  applied read-only (loads read it, writes are dropped); the same key settling again costs no
+  swap and no pipeline restart. Exports the store cannot take yet are held in memory per receiver
+  (at most 4 per source) and written once it is writable. A per-source generation makes a load
+  that a switch overtook read again, and drops a write whose export straddled a switch. An
+  unknown receiver gets nothing applied and nothing written. The un-namespaced state from before
+  is adopted once (`<stateDir>/receiver-namespaces.json` records `adoptedBy`, what it still
+  `owed`, and `takenOver`): by a `unit` key, or by the `model` key only on a source without an
+  sdr-host; the pre-band gain at that binding (no scanner needed), the spectrum files copied (not
+  moved) once the scanner store is writable while that receiver is bound. A `unit` key new on a
+  source that does not adopt starts from the source's `model` namespace of its model, once per
+  `model` key. The first `unit` key on a source whose `model` key learned while nobody adopted (an
+  sdr-host without `unitId`, updated later) adopts, and takes that `model` namespace over only
+  when no legacy file exists; else the legacy files win whatever their age, and the legacy
+  pre-band gain record comes before the `model` key's. A
+  pending window that spans more than one new connection (an unsettled connection to another
+  receiver, then back) reloads the settled key's saved state instead of keeping what the engine
+  learned in memory meanwhile (one swap). `unit:` names the sdr-host install (its state
+  directory), not the dongle: a dongle swapped on the same sdr-host keeps the namespace, so give
+  the install a new unit id after a swap (docs/SDR-HOST-SETUP.md). One INFO line
+  per change: `Receiver changed: <old> -> <new>; learned state <fresh|resumed|adopted|none>`.
+- `TunerController` keeps the pre-band gain records per receiver key
+  (`tuner-band-gain-saved-receivers.json`; `tuner-band-gain-saved.json` keeps the un-keyed
+  format older images read) and gates the reconnect restore: accepted tuning (gain included)
+  is replayed only to the receiver it was accepted on (a unit owner also matches a header-only
+  identity of the same model until the sdr-host answers, so another unit of that model may get
+  the replay; on a candidate endpoint without sdr-host that is never corrected). Another
+  receiver gets the configured baseline (under a plain-resume hold: the values stay, unverified),
+  and its own earlier tuning comes back if it had one. Tuning accepted while the receiver was
+  unknown is dropped at the next identified receiver.
+- Scanner discoveries and recordings stay shared. GET /api/sources shows `receiver` and
+  `candidate`.
 
 ### FanoutManager
 
@@ -310,6 +380,12 @@ client such as SDR++).
   leased snapshot, including a gain-only restore when an operator or relay write takes the
   lease; operator retunes apply it only with `tuner.bandGain.applyToMyTuning` (serialised per
   source, the pre-band gain persisted by `BandGainSettingsService`)
+
+### State backup
+
+`src/core/state-backup.ts` takes one bounded backup of the scanner state directory before a
+build that writes another format reads it (`ScannerPersistence.load`): see the rollback note in
+[SCANNER.md](SCANNER.md).
 
 ### TunerRelay
 
