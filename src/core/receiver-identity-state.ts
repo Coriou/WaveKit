@@ -224,8 +224,9 @@ export class ReceiverLearnedState {
 					keys: [...r.keys],
 					owed: new Set(r.owed ?? []),
 				}
-				// A record that names receivers but no adopter: the first receiver recorded is the
-				// one the state from before namespacing belongs to, adopted when it is next bound.
+				// A record that names receivers but no adopter (an earlier format): keys are ordered by
+				// binding, so keys[0] is the least recently bound receiver, the best available guess
+				// for the one the state from before namespacing belongs to; adopted when next bound.
 				const first = record.keys[0]
 				if (record.adoptedBy === null && first !== undefined) {
 					record.adoptedBy = first
@@ -355,13 +356,18 @@ export class ReceiverLearnedState {
 			await this.saveRecords()
 			// Every write or export started before the adoption is of the fresh state: dropped.
 			this.bind(sourceId, key)
-			if (moved && this.spectrum)
+			// Always from the namespace: an engine opened while the adoption was owed runs fresh,
+			// even when the namespace already held state (nothing moved), and must not overwrite it.
+			if (this.spectrum) {
 				await this.spectrum.replaceLearnedState(sourceId, {
 					engine: await store.loadEngineIn(sourceId, key).catch(() => null),
 					occupancy: await store
 						.loadOccupancyIn(sourceId, key)
 						.catch(() => null),
 				})
+				// A persist that started between the bind and the swap exported the fresh state.
+				this.bumpGeneration(sourceId)
+			}
 			const view = this.views.get(sourceId)
 			if (view?.key === key)
 				this.views.set(sourceId, {
@@ -422,6 +428,10 @@ export class ReceiverLearnedState {
 
 	private bind(sourceId: string, key: string | null): void {
 		this.bound.set(sourceId, key)
+		this.bumpGeneration(sourceId)
+	}
+
+	private bumpGeneration(sourceId: string): void {
 		this.generation.set(sourceId, (this.generation.get(sourceId) ?? 0) + 1)
 	}
 
@@ -592,6 +602,8 @@ export class ReceiverLearnedState {
 									.catch(() => null),
 							}
 				await this.spectrum.replaceLearnedState(sourceId, next)
+				// A persist that started between the bind and the swap exported the previous state.
+				this.bumpGeneration(sourceId)
 			}
 			this.views.set(sourceId, {
 				key: identity.key,
