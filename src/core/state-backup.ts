@@ -9,16 +9,20 @@
  * its own walk) so a hard link never crosses a volume and a state directory never writes next to
  * itself (a custom `scanner.storage.dir` may sit anywhere). The backup carries the marker it was
  * taken under (none for unmarked state) and, when the caller names it, a copy of the recording
- * keep store, which lives outside the scanner directory, under `outside/`.
+ * keep store, which lives outside the scanner directory, under `outside/` (the scanner does not
+ * name it yet, so the user docs do not promise it).
  *
  * Retention (pruneBackups): at most one backup per source format, at most BACKUP_MAX_KEPT in all,
  * and never the one whose source format is this build's (the state this build wrote before an
  * older build migrated it away), so an upgrade, a downgrade and the next upgrade each keep the
- * copy that undoes them. A new backup is renamed into place before any older one is deleted, so
- * a crash in between leaves an extra complete backup, pruned on the next start. A backup expires
- * (noteCleanLoad) once it is BACKUP_EXPIRY_MS old and the state has loaded cleanly
- * BACKUP_EXPIRY_CLEAN_LOADS times on the format it migrated to: its hard-linked recordings keep
- * their disk space until then.
+ * copy that undoes them. Order is the receipt's `seq` (one more than the highest kept when taken),
+ * then its time: a sequence, so a wall clock stepped back never makes the newest look oldest. A
+ * new backup is renamed into place before any older one is deleted, so a crash in between leaves
+ * an extra complete backup, pruned on the next start. A backup expires (noteCleanLoad) once it is
+ * BACKUP_EXPIRY_MS old and the state has loaded cleanly BACKUP_EXPIRY_CLEAN_LOADS times on the
+ * format it migrated to (`cleanLoads`); this build's own-format backup instead once it is that old
+ * and this build has loaded cleanly that many times since (`ownFormatCleanLoads`), when its
+ * retention protection lapses too. Its hard-linked recordings keep their disk space until then.
  *
  * Files under `recordings/`, `captures/` and `iq-captures/` are hard links (finished files are
  * renamed into place, removed by unlink, never rewritten; staging `.tmp` paths excepted), everything
@@ -84,7 +88,8 @@ export const BACKUP_MAX_FILES = 200_000
 /**
  * Backups kept at most: 2 = the pre-upgrade copy (older format, taken by a newer build) plus
  * the pre-downgrade copy (newer format, taken by an older build started on it). One per source
- * format; a third format change deletes the oldest by receipt time, never this build's own.
+ * format; a third format change deletes the oldest (by `seq`), never this build's own while
+ * its protection holds (see noteCleanLoad).
  */
 export const BACKUP_MAX_KEPT = 2
 /**
@@ -97,6 +102,12 @@ export const BACKUP_EXPIRY_MS = 14 * 86_400_000
  * receipt, one per process start): an age alone could expire a backup on a core that never ran.
  */
 export const BACKUP_EXPIRY_CLEAN_LOADS = 3
+/**
+ * Highest value of a receipt counter (`cleanLoads`, `ownFormatCleanLoads`, `seq`): the schema's
+ * bound, so a counter stops there and the receipt stays valid (1,000,000 loads is centuries of
+ * restarts; the expiry thresholds are far below it).
+ */
+export const BACKUP_RECEIPT_COUNT_MAX = 1_000_000
 /** Folder inside a backup for files from outside the state directory (the keep store). */
 export const BACKUP_OUTSIDE_DIR = "outside"
 /**
@@ -351,13 +362,24 @@ const ReceiptSchema = z.object({
 	toFormat: z.string().max(64),
 	takenAt: z.string().max(64),
 	takenAtMs: z.number().int().min(0).optional(),
-	cleanLoads: z.number().int().min(0).max(1_000_000).optional(),
+	cleanLoads: z.number().int().min(0).max(BACKUP_RECEIPT_COUNT_MAX).optional(),
+	ownFormatCleanLoads: z
+		.number()
+		.int()
+		.min(0)
+		.max(BACKUP_RECEIPT_COUNT_MAX)
+		.optional(),
+	seq: z.number().int().min(0).max(BACKUP_RECEIPT_COUNT_MAX).optional(),
 })
 type Receipt = z.infer<typeof ReceiptSchema>
 
 interface KeptBackup {
 	name: string
-	/** null: no readable receipt (oldest, never expires, its own source format). */
+	/**
+	 * null: no readable receipt (missing, corrupt or invalid). Its source format is then unknown,
+	 * so it is never protected as this build's own: it groups alone, sorts oldest, counts no clean
+	 * loads and never expires by age, but retention deletes it first once past BACKUP_MAX_KEPT.
+	 */
 	receipt: Receipt | null
 	/** Receipt time in ms; 0 without one. */
 	at: number
@@ -416,22 +438,28 @@ async function listBackups(
 
 /**
  * Which complete backups retention deletes: all but the newest of each source format, then the
- * oldest by receipt time until BACKUP_MAX_KEPT remain, never `keep` (the one just taken) nor the
- * one whose source format is `ownFormat` (this build's). Pure, so the rule is testable alone.
+ * oldest until BACKUP_MAX_KEPT remain, never `keep` (the one just taken) nor the one whose source
+ * format is `ownFormat` (this build's) unless its protection has lapsed (`ownLapsed`, see
+ * noteCleanLoad). Newest means the highest `seq` (0 without one), then the latest receipt time,
+ * then the name. Pure, so the rule is testable alone.
  */
 export function backupsToPrune(
 	backups: ReadonlyArray<{
 		name: string
 		fromFormat: string | null
 		at: number
+		seq?: number
+		ownLapsed?: boolean
 	}>,
 	ownFormat: string,
 	keep: string | null,
 ): string[] {
-	// The just-taken one first (it wins its format even past a clock step back), then newest first.
+	// The just-taken one first, then newest first by sequence: crash recovery (keep null) picks
+	// the survivor of a format by `seq`, which a clock stepped back between two starts cannot invert.
 	const order = [...backups].sort(
 		(a, b) =>
 			Number(b.name === keep) - Number(a.name === keep) ||
+			(b.seq ?? 0) - (a.seq ?? 0) ||
 			b.at - a.at ||
 			(a.name < b.name ? 1 : -1),
 	)
@@ -448,7 +476,10 @@ export function backupsToPrune(
 	}
 	// Oldest first among the deletable ones.
 	const deletable = kept
-		.filter(b => b.name !== keep && b.fromFormat !== ownFormat)
+		.filter(
+			b =>
+				b.name !== keep && (b.fromFormat !== ownFormat || b.ownLapsed === true),
+		)
 		.reverse()
 	let count = kept.length
 	for (const b of deletable) {
@@ -459,10 +490,19 @@ export function backupsToPrune(
 	return doomed
 }
 
+/** Whether this build's own-format backup has served its time (see noteCleanLoad). */
+function ownFormatLapsed(b: KeptBackup, nowMs: number): boolean {
+	return (
+		nowMs - b.at >= BACKUP_EXPIRY_MS &&
+		(b.receipt?.ownFormatCleanLoads ?? 0) >= BACKUP_EXPIRY_CLEAN_LOADS
+	)
+}
+
 async function pruneBackups(
 	backupsDir: string,
 	ownFormat: string,
 	keep: string | null,
+	nowMs: number,
 	remove: (path: string) => Promise<void>,
 	log: Logger,
 ): Promise<number> {
@@ -474,6 +514,8 @@ async function pruneBackups(
 			name: b.name,
 			fromFormat: b.receipt?.fromFormat ?? null,
 			at: b.at,
+			seq: b.receipt?.seq ?? 0,
+			ownLapsed: ownFormatLapsed(b, nowMs),
 		})),
 		ownFormat,
 		keep,
@@ -556,7 +598,7 @@ async function decide(
 	const disk = await readDiskFormat(dir)
 	if (disk.kind === "format" && sameFormat(disk.format, current)) {
 		// Finishes a retention an earlier start could not (a crash after its rename).
-		await pruneBackups(backupsDir, toFormat, null, remove, log)
+		await pruneBackups(backupsDir, toFormat, null, opts.now(), remove, log)
 		return { kind: "none", reason: "same-format", toFormat }
 	}
 	const fromFormat =
@@ -602,9 +644,14 @@ async function decide(
 		return skipped("low-disk", { neededBytes: copyBytes, freeBytes })
 
 	// Leftover partial copies of a crashed start go first; complete backups stay for now.
-	const { partial } = await listBackups(backupsDir)
+	const { partial, complete } = await listBackups(backupsDir)
 	for (const p of partial)
 		await remove(join(backupsDir, p)).catch(() => undefined)
+	// One more than the highest kept: the order retention trusts over the wall clock.
+	const seq = Math.min(
+		complete.reduce((m, b) => Math.max(m, b.receipt?.seq ?? 0), 0) + 1,
+		BACKUP_RECEIPT_COUNT_MAX,
+	)
 
 	const takenAtMs = opts.now()
 	const partialDir = join(backupsDir, `.pre-${fromFormat}.partial-${takenAtMs}`)
@@ -644,7 +691,9 @@ async function decide(
 			toFormat,
 			takenAt: new Date(takenAtMs).toISOString(),
 			takenAtMs,
+			seq,
 			cleanLoads: 0,
+			ownFormatCleanLoads: 0,
 			files: plan.files.length,
 			copiedBytes: copyBytes,
 			linkedFiles,
@@ -665,6 +714,7 @@ async function decide(
 		backupsDir,
 		toFormat,
 		finalName,
+		takenAtMs,
 		remove,
 		log,
 	)
@@ -704,9 +754,12 @@ export interface CleanLoadOptions {
 
 /**
  * After a clean load of the state (once per process): counts it in the receipt of every backup
- * taken on the way to this build's format, and deletes one that is BACKUP_EXPIRY_MS old with
- * BACKUP_EXPIRY_CLEAN_LOADS clean loads counted (the load in the process that took it counts).
- * Returns the names deleted. Never throws.
+ * taken on the way to this build's format (`cleanLoads`; the load in the process that took it
+ * counts) and of the one whose source format is this build's (`ownFormatCleanLoads`: the state
+ * this build wrote before an older build migrated it, so every such load is after it was taken).
+ * Deletes one that is BACKUP_EXPIRY_MS old with BACKUP_EXPIRY_CLEAN_LOADS of its counter, so a
+ * newer build back on its format after a downgrade does not keep its own old copy forever.
+ * Counters stop at BACKUP_RECEIPT_COUNT_MAX. Returns the names deleted. Never throws.
  */
 export async function noteCleanLoad(opts: CleanLoadOptions): Promise<string[]> {
 	const log = createComponentLogger(opts.logger, "StateBackup")
@@ -715,20 +768,26 @@ export async function noteCleanLoad(opts: CleanLoadOptions): Promise<string[]> {
 	const remove = opts.remove ?? defaultRemove
 	const expired: string[] = []
 	const { complete } = await listBackups(backupsDir)
+	const bump = (n: number | undefined): number =>
+		Math.min((n ?? 0) + 1, BACKUP_RECEIPT_COUNT_MAX)
 	for (const b of complete) {
-		if (b.receipt === null || b.receipt.toFormat !== own) continue
+		if (b.receipt === null) continue
+		const field =
+			b.receipt.toFormat === own
+				? "cleanLoads"
+				: b.receipt.fromFormat === own
+					? "ownFormatCleanLoads"
+					: null
+		if (field === null) continue
 		const receiptPath = join(backupsDir, b.name, BACKUP_RECEIPT_FILE)
-		const cleanLoads = (b.receipt.cleanLoads ?? 0) + 1
+		const count = bump(b.receipt[field])
 		const ageMs = opts.now() - b.at
 		try {
-			if (
-				ageMs >= BACKUP_EXPIRY_MS &&
-				cleanLoads >= BACKUP_EXPIRY_CLEAN_LOADS
-			) {
+			if (ageMs >= BACKUP_EXPIRY_MS && count >= BACKUP_EXPIRY_CLEAN_LOADS) {
 				await remove(join(backupsDir, b.name))
 				expired.push(b.name)
 				log.info(
-					{ backup: b.name, ageMs, cleanLoads },
+					{ backup: b.name, ageMs, [field]: count },
 					"Removed an expired scanner state backup (its recordings' space is freed)",
 				)
 				continue
@@ -741,7 +800,7 @@ export async function noteCleanLoad(opts: CleanLoadOptions): Promise<string[]> {
 					: {}
 			await atomicWrite(
 				receiptPath,
-				`${JSON.stringify({ ...fields, cleanLoads }, null, "\t")}\n`,
+				`${JSON.stringify({ ...fields, [field]: count }, null, "\t")}\n`,
 			)
 		} catch (err) {
 			log.warn(

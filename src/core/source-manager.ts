@@ -1581,8 +1581,9 @@ export class SourceManager extends EventEmitter {
 					state.pausedSinceLastMetric = false
 					state.reconnectAttempts = 0
 					state.lastError = undefined
-					// connectFailure stays until the first payload (onData): an accept that resets or
-					// stalls before the rtl_tcp header keeps counting as a failed attempt.
+					// connectFailure stays until the first payload (onData): a receiver that accepts and
+					// then resets before sending anything keeps counting attempts; any first data clears
+					// the record, so a stall or reset after data starts again at 1.
 					// A resume's connection: the feed is live before "connected" fires.
 					if (state.feed.state === "resuming")
 						state.feed = { state: "live", since: Date.now() }

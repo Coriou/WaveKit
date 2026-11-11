@@ -1091,8 +1091,9 @@ core's connect timeout `timeout`, `EHOSTUNREACH`/`ENETUNREACH`/`EHOSTDOWN` `unre
 `ENOTFOUND`/`EAI_AGAIN` `not-found`, `ECONNRESET`/`EPIPE` `reset`, the stall watchdog
 `stalled`, anything else `other`); the hint is fixed text per class and never repeats the
 error message. The field goes once a connection delivers its first data (the rtl_tcp header),
-not when the TCP connection is accepted: a receiver that accepts and then resets or stalls
-keeps counting attempts. While connected the field is not shown.
+not when the TCP connection is accepted: a receiver that accepts and then resets before
+sending anything keeps counting attempts; any first data clears the record, so a stall or
+reset after data starts again at 1. While connected the field is not shown.
 
 **Stall watchdog (rtl_tcp U8_IQ sources).** An rtl_tcp IQ stream never pauses while
 it is healthy. After a session has delivered payload, a gap of `stallTimeoutMs`

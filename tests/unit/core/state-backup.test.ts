@@ -17,6 +17,7 @@ import {
 	BACKUP_MAX_KEPT,
 	BACKUP_MIN_FREE_BYTES,
 	BACKUP_OUTSIDE_DIR,
+	BACKUP_RECEIPT_COUNT_MAX,
 	BACKUP_RECEIPT_FILE,
 	BACKUPS_DIR,
 	CURRENT_SCANNER_STATE_FORMAT,
@@ -61,6 +62,21 @@ async function seedState(): Promise<number> {
 
 async function writeMarker(value: unknown): Promise<void> {
 	await writeFile(join(dir, STATE_FORMAT_FILE), JSON.stringify(value))
+}
+
+const receiptOf = async (name: string): Promise<Record<string, unknown>> =>
+	JSON.parse(
+		await readFile(join(dir, BACKUPS_DIR, name, BACKUP_RECEIPT_FILE), "utf8"),
+	) as Record<string, unknown>
+
+async function patchReceipt(
+	name: string,
+	patch: Record<string, unknown>,
+): Promise<void> {
+	await writeFile(
+		join(dir, BACKUPS_DIR, name, BACKUP_RECEIPT_FILE),
+		JSON.stringify({ ...(await receiptOf(name)), ...patch }),
+	)
 }
 
 const backups = async (): Promise<string[]> =>
@@ -702,6 +718,165 @@ describe("pre-migration backup of scanner state", () => {
 				}),
 			).toEqual([])
 		expect(await backups()).toEqual([`pre-unmarked.${NOW}`])
+	})
+
+	it("after upgrade, downgrade, upgrade the newer build's own-format copy expires at 14 days and 3 own clean loads", async () => {
+		const A: StateFormat = { fileVersion: 1, heldJournalFormat: 2, revision: 1 }
+		const B: StateFormat = { fileVersion: 2, heldJournalFormat: 2, revision: 1 }
+		const a = formatLabel(A)
+		const b = formatLabel(B)
+		await seedState()
+		await writeMarker(A)
+		const step = (format: StateFormat, at: number) =>
+			ensurePreMigrationBackup({
+				dir,
+				logger,
+				now: () => at,
+				statfs: roomy,
+				format,
+			})
+		await step(B, NOW)
+		await step(A, NOW + 1)
+		await step(B, NOW + 2)
+		const preA = `pre-${a}.${NOW + 2}`
+		const preB = `pre-${b}.${NOW + 1}`
+		expect(await backups()).toEqual([preA, preB])
+		const load = (at: number) =>
+			noteCleanLoad({ dir, logger, now: () => at, format: B })
+		// Old enough but 1, then 2 own clean loads: both kept.
+		expect(await load(NOW + 2 + BACKUP_EXPIRY_MS)).toEqual([])
+		expect(await load(NOW + 2 + BACKUP_EXPIRY_MS)).toEqual([])
+		expect(await receiptOf(preB)).toMatchObject({ ownFormatCleanLoads: 2 })
+		expect(await receiptOf(preA)).toMatchObject({ cleanLoads: 2 })
+		// The third load 1 ms short of 14 days for the own-format copy: kept.
+		expect(await load(NOW + BACKUP_EXPIRY_MS)).toEqual([])
+		expect(await receiptOf(preB)).toMatchObject({ ownFormatCleanLoads: 3 })
+		// Exactly 14 days for pre-B (pre-A 1 ms short): only pre-B goes.
+		expect(await load(NOW + 1 + BACKUP_EXPIRY_MS)).toEqual([preB])
+		expect(await backups()).toEqual([preA])
+		// Past both bounds for pre-A: it goes too.
+		expect(await load(NOW + 3 + BACKUP_EXPIRY_MS)).toEqual([preA])
+		expect(await backups()).toEqual([])
+	})
+
+	it("retention protects this build's own-format copy until it has lapsed", () => {
+		const list = [
+			{ name: "x", fromFormat: "own", at: 1, seq: 1 },
+			{ name: "y", fromFormat: "f2", at: 2, seq: 2 },
+			{ name: "z", fromFormat: "f3", at: 3, seq: 3 },
+		]
+		expect(backupsToPrune(list, "own", "z")).toEqual(["y"])
+		expect(
+			backupsToPrune(
+				list.map(b => (b.name === "x" ? { ...b, ownLapsed: true } : b)),
+				"own",
+				"z",
+			),
+		).toEqual(["x"])
+	})
+
+	it("crash recovery keeps the latest-taken backup of a format by sequence, even after a clock step back", async () => {
+		await seedState()
+		await writeMarker({ fileVersion: 9, heldJournalFormat: 9, revision: 9 })
+		await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW + 10_000,
+			statfs: roomy,
+		})
+		await writeMarker({ fileVersion: 9, heldJournalFormat: 9, revision: 9 })
+		// The wall clock stepped back 10 s; the second start dies before its deletes.
+		await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: roomy,
+			remove: () => Promise.reject(new Error("killed")),
+		})
+		const older = `pre-f9-h9-r9.${NOW + 10_000}`
+		const newer = `pre-f9-h9-r9.${NOW}`
+		expect(await receiptOf(older)).toMatchObject({ seq: 1 })
+		expect(await receiptOf(newer)).toMatchObject({ seq: 2 })
+		await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW + 1,
+			statfs: roomy,
+		})
+		expect(await backups()).toEqual([newer])
+	})
+
+	it("receipt counters stop at the schema bound and the receipt stays valid", async () => {
+		expect(BACKUP_RECEIPT_COUNT_MAX).toBe(1_000_000)
+		await seedState()
+		await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: roomy,
+		})
+		const name = `pre-unmarked.${NOW}`
+		await patchReceipt(name, { cleanLoads: BACKUP_RECEIPT_COUNT_MAX - 1 })
+		const load = (at: number) => noteCleanLoad({ dir, logger, now: () => at })
+		// One short of the bound, then at it, then past it: stays at the bound.
+		expect(await load(NOW + 1)).toEqual([])
+		expect(await receiptOf(name)).toMatchObject({
+			cleanLoads: BACKUP_RECEIPT_COUNT_MAX,
+		})
+		expect(await load(NOW + 1)).toEqual([])
+		expect(await receiptOf(name)).toMatchObject({
+			cleanLoads: BACKUP_RECEIPT_COUNT_MAX,
+		})
+		// Still a valid receipt: it expires at 14 days instead of being read as unreadable.
+		expect(await load(NOW + BACKUP_EXPIRY_MS)).toEqual([name])
+	})
+
+	it("the own-format counter and the sequence stop at the bound too", async () => {
+		await seedState()
+		await writeMarker(CURRENT_SCANNER_STATE_FORMAT)
+		const other: StateFormat = {
+			fileVersion: 7,
+			heldJournalFormat: 7,
+			revision: 7,
+		}
+		// An older build (other) starts on this build's state: the copy's source is this build's.
+		await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: roomy,
+			format: other,
+		})
+		const own = `pre-${CURRENT}.${NOW}`
+		await patchReceipt(own, {
+			ownFormatCleanLoads: BACKUP_RECEIPT_COUNT_MAX,
+			seq: BACKUP_RECEIPT_COUNT_MAX,
+		})
+		expect(await noteCleanLoad({ dir, logger, now: () => NOW + 1 })).toEqual([])
+		expect(await receiptOf(own)).toMatchObject({
+			ownFormatCleanLoads: BACKUP_RECEIPT_COUNT_MAX,
+		})
+		// The next backup's sequence is clamped, not one past the schema.
+		const taken = await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW + 2,
+			statfs: roomy,
+		})
+		expect(taken).toMatchObject({
+			kind: "taken",
+			fromFormat: formatLabel(other),
+		})
+		expect(
+			await receiptOf(`pre-${formatLabel(other)}.${NOW + 2}`),
+		).toMatchObject({ seq: BACKUP_RECEIPT_COUNT_MAX })
+		expect(
+			await noteCleanLoad({
+				dir,
+				logger,
+				now: () => NOW + 2 + BACKUP_EXPIRY_MS,
+			}),
+		).toEqual([own])
 	})
 
 	it("ScannerPersistence.load counts one clean load per instance", async () => {
