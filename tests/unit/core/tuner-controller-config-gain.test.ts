@@ -99,10 +99,12 @@ function harness(
 			controlPolicy: "shared" as const,
 		})),
 	})
+	// These tests are about the configured gain frames: assert's declared centre and rate are off
+	// (tuner.writeDeclaredTuningOnConnect false; tests/unit/core/tuner-assert.test.ts covers them).
 	const controller = new TunerController(
 		createLogger({ level: "fatal" }),
 		sources as unknown as SourceManager,
-		{ reconnectPolicy: policy },
+		{ reconnectPolicy: policy, writeDeclaredTuningOnConnect: false },
 	)
 	wireTunerControl({
 		log: createLogger({ level: "fatal" }),

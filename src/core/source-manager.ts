@@ -1061,7 +1061,8 @@ export class SourceManager extends EventEmitter {
 				)
 		}
 		// The ledger session opens before its first payload byte reaches the stream; after that
-		// only a counter add per chunk (hot path).
+		// only a counter add per chunk (hot path). Bytes a destroyed stream never takes are no
+		// position: nothing downstream can hold them.
 		if (attempt !== null && chunk.length > 0) {
 			if (attempt.ledger.session === null) {
 				const session = attempt.ledger.start()
@@ -1069,7 +1070,8 @@ export class SourceManager extends EventEmitter {
 				if (!current()) return false
 			}
 			const session = attempt.ledger.session
-			if (session !== null) session.pos += chunk.length
+			if (session !== null && !state.stream.destroyed)
+				session.pos += chunk.length
 		}
 		let canWrite = true
 		if (!state.stream.destroyed) {
@@ -2192,11 +2194,15 @@ export class SourceManager extends EventEmitter {
 				"rate-truth-mismatch",
 				mark && live && mark.session === live.session ? mark.pos : 0,
 			)
+			// While the mismatch stands no rate receipt proves the rate (one re-write may fix the
+			// receiver; until the measurement agrees again, sustained, nothing is trusted).
+			this.ledger.setHold(id, "sampleRate", "rate-truth-mismatch")
 			this.logger.warn(
 				{ sourceId: id, ...state.rateTruth.mismatch },
 				"Source delivers a different sample rate than its caps declare; caps left unchanged (check external tuner clients)",
 			)
 		} else if (transition === "cleared") {
+			this.ledger.setHold(id, "sampleRate", null)
 			this.logger.info(
 				{ sourceId: id, declaredSampleRateHz: caps.sampleRate },
 				"Source rate matches its caps again",
@@ -2206,8 +2212,11 @@ export class SourceManager extends EventEmitter {
 	}
 
 	private resetRateTruth(id: string, state: SourceState): void {
-		if (this.isCurrent(state) && state.rateTruth.reset())
+		if (this.isCurrent(state) && state.rateTruth.reset()) {
+			// The measurement starts over: no mismatch stands (a new session has no hold anyway).
+			this.ledger.setHold(id, "sampleRate", null)
 			this.emit("rate-truth-changed", id)
+		}
 	}
 
 	private createSignalLevelTracker(config: SourceConfig): SignalLevelTracker {
@@ -2246,6 +2255,7 @@ export class SourceManager extends EventEmitter {
 				"Source IQ level is flat (near-zero gain?); decoders will hear nothing (check external tuner clients)",
 			)
 		} else if (transition === "cleared") {
+			// The level says nothing about the rate: a rate-truth hold stays while its mismatch does.
 			this.logger.info(
 				{ sourceId: id, levelDbfs: state.signalLevel.levelDbfs },
 				"Source IQ level recovered",
@@ -3107,6 +3117,12 @@ export class SourceManager extends EventEmitter {
 		}
 	>()
 
+	/**
+	 * Sockets that already raised an unledgered-write doubt: one per socket, so a doubt never
+	 * feeds itself (doubt → assert writes → the same stray socket → doubt).
+	 */
+	private readonly unledgeredDoubted = new WeakSet<net.Socket>()
+
 	private readonly tunerCommandContext = new AsyncLocalStorage<{
 		id: string
 		signal: AbortSignal
@@ -3407,6 +3423,13 @@ export class SourceManager extends EventEmitter {
 						}
 					})
 				: socket.write(payload)
+		// A socket that is not the live attempt's has no ledger connection: the frame went out
+		// unrecorded, so nothing about the live session can be proven past it.
+		// Once per socket (unledgeredDoubted).
+		if (!ledger && !this.unledgeredDoubted.has(socket)) {
+			this.unledgeredDoubted.add(socket)
+			this.ledger.raiseDoubt(id, "both", "unledgered-write")
+		}
 		if (rateChange) {
 			// First retry: <= 4 s equal-jitter backoff (2^1 × 2 s) + 5 s
 			// connect timeout = 9 s. A later retry needs a new caller request.

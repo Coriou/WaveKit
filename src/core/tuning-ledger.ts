@@ -24,12 +24,13 @@
  * over-estimating `posB` can only make the answer stricter. Gain and every other field are recorded
  * and never gate trust.
  *
- * Step 1 (additive): nothing reads the ledger's verdict except the spectrum engine's shadow counter.
+ * Readers: the TunerController (assert, the skip rule, the API's per-field proof) and the spectrum
+ * engine's shadow counter. Trust labels of consumers do not read it yet.
  */
 import type { TuningTrust } from "./spectrum/types.js"
 import { settleBytes, type SettleLink } from "./spectrum/network-settle.js"
 
-/** Who wrote a frame. `assert` is reserved for the controller's automatic re-proof (step 2). */
+/** Who wrote a frame. `assert` is the controller's automatic write of an unproven field. */
 export type TuningWriter = "operator" | "scanner" | "assert" | "relay"
 
 export interface TuningWriterTag {
@@ -132,7 +133,11 @@ export interface TuningDoubt {
  * (MAX_INFLIGHT_BYTES 4 MiB ≈ 0.87 s at 2.4 Msps U8), while the densest writer, a scanner hop,
  * writes at most 4 frames (test mode on, rate, frequency, test mode off) per hop and hops no faster
  * than the local settle (300 ms): 64 / 4 × 0.3 s = 4.8 s of history, and a reconnect replay writes
- * at most one frame per rtl_tcp field (15). A block older than the ring reads `unverified`.
+ * at most one frame per rtl_tcp field (15). A block that ends before a field's newest evicted
+ * receipt reads `unverified` (older than the ring); each field's newest evicted receipt still
+ * proves reads past it, so a long session keeps its proof at the live edge. A read proven by an
+ * evicted receipt that ends at or before the newest evicted receipt of any field is older than the
+ * ring too: frames that may have pushed its boundary left with that one.
  */
 export const TUNING_LEDGER_RING = 64
 
@@ -187,7 +192,24 @@ export interface FieldState {
 	queued: QueuedFrameState | null
 	reason?: UnverifiedReason
 	doubtReason?: string
+	/**
+	 * A standing hold on the field (setHold) while it lasts: the field reads `unverified` with
+	 * the hold's reason whatever its receipts say. `answered`: a frame of the field was flushed or
+	 * queued after the hold was set (a re-write cannot clear a hold, so one answer is enough).
+	 * `withoutHold`: the state the field would have without the hold.
+	 */
+	hold?: { reason: string; answered: boolean; withoutHold: FieldProofState }
 }
+
+/** What changed in the ledger (TuningLedger.subscribe). */
+export type LedgerChange =
+	| { kind: "session-started"; session: number }
+	| { kind: "session-ended"; session: number }
+	| { kind: "receipt"; field: TuningField; receipt: TuningReceipt }
+	| { kind: "doubt"; field: DoubtField }
+	| { kind: "hold"; field: GatedField }
+
+export type LedgerListener = (sourceId: string, change: LedgerChange) => void
 
 /** The live session's counter: SourceManager adds forwarded payload bytes to `pos`. */
 export interface LedgerSession {
@@ -227,6 +249,24 @@ class SessionRecord implements LedgerSession {
 	/** Receipts of each field evicted from the ring (or from the pre-session queue). */
 	readonly evicted = new Map<TuningField, number>()
 	/**
+	 * The newest receipt of each field evicted from the ring: still the field's last receipt for
+	 * any read ending past it with no newer receipt of the field in the ring (a long session keeps
+	 * its proof at the live edge); a read ending at or before it is older than the ring.
+	 */
+	readonly pinned = new Map<TuningField, TuningReceipt>()
+	/**
+	 * Position of the newest receipt of any field evicted from the ring (-1: none). A read proven
+	 * by a pinned receipt and ending at or before it is older than the ring: of the movers evicted
+	 * between the two only the newest is kept, and it may lie past the read while an older one,
+	 * gone, pushed the read's boundary.
+	 */
+	evictedMaxPos = -1
+	/** The newest centre- and rate-moving receipts evicted (they still push later boundaries). */
+	readonly evictedMovers: {
+		centre: TuningReceipt | null
+		rate: TuningReceipt | null
+	} = { centre: null, rate: null }
+	/**
 	 * The highest valid rate receipted in this session, kept across eviction: the settle rate
 	 * when the rate in effect at a receipt has left the ring. 0: none.
 	 */
@@ -245,6 +285,23 @@ class SessionRecord implements LedgerSession {
 		frequency: null,
 		sampleRate: null,
 	}
+	/**
+	 * Standing holds per gated field (setHold): the reason, the source's seq when set and the
+	 * position it was set at.
+	 */
+	readonly holds = new Map<
+		GatedField,
+		{ reason: string; afterSeq: number; start: number }
+	>()
+	/**
+	 * Cleared holds per gated field, `[start, end)` in position order: a block overlapping one
+	 * reads unverified (the hold's reason) after the clear too. At most TUNING_LEDGER_RING per
+	 * field; past it the two oldest merge into one span (covering the gap between: stricter).
+	 */
+	readonly heldRanges: Record<
+		GatedField,
+		{ start: number; end: number; reason: string }[]
+	> = { frequency: [], sampleRate: [] }
 	constructor(
 		readonly sourceId: string,
 		readonly session: number,
@@ -504,6 +561,10 @@ export class LedgerConnection {
 				last = null
 			}
 		}
+		this.ledger.notify(this.sourceId, {
+			kind: "session-started",
+			session: session.session,
+		})
 		return session
 	}
 
@@ -597,9 +658,33 @@ export class LedgerConnection {
 export class TuningLedger {
 	private readonly sources = new Map<string, SourceRecord>()
 	private readonly opts: TuningLedgerOptions
+	private readonly listeners = new Set<LedgerListener>()
 
 	constructor(opts: TuningLedgerOptions = {}) {
 		this.opts = opts
+	}
+
+	/**
+	 * Hears every session start and end, receipt, doubt and hold change, synchronously where it
+	 * happens (inside a socket write callback for a receipt): a listener that acts must defer.
+	 * A throwing listener is ignored. Returns the unsubscribe function.
+	 */
+	subscribe(listener: LedgerListener): () => void {
+		this.listeners.add(listener)
+		return () => {
+			this.listeners.delete(listener)
+		}
+	}
+
+	/** @internal Tells the listeners. */
+	notify(sourceId: string, change: LedgerChange): void {
+		for (const listener of this.listeners) {
+			try {
+				listener(sourceId, change)
+			} catch {
+				// A listener never breaks the ledger or the socket callback.
+			}
+		}
 	}
 
 	/** A new connection of `sourceId` (its session starts at its first payload). */
@@ -639,7 +724,12 @@ export class TuningLedger {
 	finishSession(session: SessionRecord): void {
 		session.ended = true
 		const record = this.sources.get(session.sourceId)
-		if (record?.live === session) record.live = null
+		if (record?.live !== session) return
+		record.live = null
+		this.notify(session.sourceId, {
+			kind: "session-ended",
+			session: session.session,
+		})
 	}
 
 	/** @internal LedgerConnection.close: the source's newest connection is gone. */
@@ -670,8 +760,18 @@ export class TuningLedger {
 		if (live.receipts.length > TUNING_LEDGER_RING) {
 			const gone = live.receipts.shift()!
 			live.evicted.set(gone.field, (live.evicted.get(gone.field) ?? 0) + 1)
+			live.pinned.set(gone.field, gone)
+			live.evictedMaxPos = Math.max(live.evictedMaxPos, gone.pos)
+			if (CENTRE_MOVERS.has(gone.field)) live.evictedMovers.centre = gone
+			if (RATE_MOVERS.has(gone.field)) live.evictedMovers.rate = gone
+			// A pinned receipt keeps no marker-lowered boundary (fail closed: the full settle).
 			live.lowered.delete(gone.seq)
 		}
+		this.notify(live.sourceId, {
+			kind: "receipt",
+			field: frame.field,
+			receipt: { ...receipt },
+		})
 		return receipt
 	}
 
@@ -717,6 +817,47 @@ export class TuningLedger {
 					: { minPos: gone.pos, maxAfterSeq: gone.afterSeq }
 			}
 		}
+		this.notify(live.sourceId, { kind: "doubt", field })
+	}
+
+	/**
+	 * A standing hold on `field` of the live session (`reason`, a fixed string), or none (null):
+	 * while it stands the field reads `unverified` (reason `doubt`, doubtReason the hold's) however
+	 * many receipts follow, for evidence that lasts rather than happens once (a sustained
+	 * rate-truth mismatch). It ends with the session. Cleared, it keeps covering the blocks that
+	 * overlap its period (from the position it was set at to the one it was cleared at). False
+	 * without a live session.
+	 */
+	setHold(sourceId: string, field: GatedField, reason: string | null): boolean {
+		const record = this.sources.get(sourceId)
+		const live = record?.live
+		if (!record || !live) return false
+		const had = live.holds.get(field)
+		if (reason === null) {
+			if (!had) return true
+			live.holds.delete(field)
+			const ranges = live.heldRanges[field]
+			ranges.push({ start: had.start, end: live.pos, reason: had.reason })
+			if (ranges.length > TUNING_LEDGER_RING) {
+				const a = ranges.shift()!
+				const b = ranges[0]!
+				ranges[0] = {
+					start: Math.min(a.start, b.start),
+					end: Math.max(a.end, b.end),
+					reason: b.reason,
+				}
+			}
+		} else {
+			if (had?.reason === reason) return true
+			// A reason change keeps the period's start.
+			live.holds.set(field, {
+				reason,
+				afterSeq: record.seq,
+				start: had?.start ?? live.pos,
+			})
+		}
+		this.notify(sourceId, { kind: "hold", field })
+		return true
 	}
 
 	/**
@@ -847,8 +988,23 @@ export class TuningLedger {
 			const end = live.pos + 1
 			const gated = (field: GatedField): FieldState => {
 				const queued = queuedOf(field)
-				const proof = this.proveField(live, field, live.pos, end)
-				if (proof.ok)
+				const hold = live.holds.get(field)
+				const proof = this.proveField(live, field, live.pos, end, true)
+				const last = this.lastReceipt(live, field, end)
+				const stateOf = (p: FieldProof): FieldProofState =>
+					p.ok ? "proven" : p.reason === "settling" ? "settling" : "unverified"
+				const holdInfo = hold
+					? {
+							hold: {
+								reason: hold.reason,
+								answered:
+									queued !== null ||
+									(last !== null && last.seq > hold.afterSeq),
+								withoutHold: stateOf(proof),
+							},
+						}
+					: {}
+				if (proof.ok && !hold)
 					return {
 						state: "proven",
 						value: proof.receipt.value,
@@ -857,18 +1013,23 @@ export class TuningLedger {
 						receipt: proof.receipt.seq,
 						queued,
 					}
-				const last = this.lastReceipt(live, field, end)
 				const base: FieldState = {
-					state: proof.reason === "settling" ? "settling" : "unverified",
+					state: hold ? "unverified" : stateOf(proof),
 					value: last?.value ?? null,
 					writer: last?.writer ?? null,
 					session: live.session,
 					receipt: last?.seq ?? null,
 					queued,
-					reason: proof.reason,
+					...holdInfo,
 				}
-				if (proof.doubtReason !== undefined)
-					base.doubtReason = proof.doubtReason
+				if (hold) {
+					base.reason = "doubt"
+					base.doubtReason = hold.reason
+				} else if (!proof.ok) {
+					base.reason = proof.reason
+					if (proof.doubtReason !== undefined)
+						base.doubtReason = proof.doubtReason
+				}
 				return base
 			}
 			// Gain never gates: its state is "proven" once a gain frame settled, as information.
@@ -962,7 +1123,11 @@ export class TuningLedger {
 		}
 	}
 
-	/** The last receipt of `field` with `pos < posB` in the ring, or null. */
+	/**
+	 * The last receipt of `field` with `pos < posB`: in the ring, else the field's newest evicted
+	 * receipt when it lies before `posB` (no ring receipt of the field does, and every older one is
+	 * older still); else null.
+	 */
 	private lastReceipt(
 		live: SessionRecord,
 		field: TuningField,
@@ -972,7 +1137,8 @@ export class TuningLedger {
 			const r = live.receipts[i]!
 			if (r.field === field && r.pos < posB) return r
 		}
-		return null
+		const pinned = live.pinned.get(field)
+		return pinned && pinned.pos < posB ? pinned : null
 	}
 
 	private proveField(
@@ -980,6 +1146,7 @@ export class TuningLedger {
 		field: GatedField,
 		posA: number,
 		posB: number,
+		ignoreHold = false,
 	): FieldProof {
 		const receipt = this.lastReceipt(live, field, posB)
 		if (!receipt)
@@ -988,9 +1155,19 @@ export class TuningLedger {
 				reason:
 					(live.evicted.get(field) ?? 0) > 0 ? "older-than-ring" : "no-receipt",
 			}
+		// A pinned (evicted) proof holds only for reads ending past every evicted receipt.
+		if (live.pinned.get(field) === receipt && posB <= live.evictedMaxPos)
+			return { ok: false, reason: "older-than-ring" }
 		if (receipt.writer === undefined) return { ok: false, reason: "no-writer" }
 		if (!validValue(field, receipt.value))
 			return { ok: false, reason: "invalid-value" }
+		// A standing hold covers every read while it stands (it ends with the session).
+		const hold = ignoreHold ? undefined : live.holds.get(field)
+		if (hold) return { ok: false, reason: "doubt", doubtReason: hold.reason }
+		// A cleared hold still covers the blocks that overlap its period.
+		for (const h of live.heldRanges[field])
+			if (posA < h.end && posB > h.start)
+				return { ok: false, reason: "doubt", doubtReason: h.reason }
 		// A doubt unproves the receipts raised before it (by seq), from its position on; equal
 		// positions do not matter: a receipt after the doubt re-proves.
 		const evicted = live.evictedDoubt[field]
@@ -1007,13 +1184,24 @@ export class TuningLedger {
 		const lowered = live.lowered.get(receipt.seq)
 		if (lowered !== undefined)
 			boundary = Math.max(receipt.pos, Math.min(boundary, lowered))
-		// Centre- (and rate-) moving frames flushed after the receipt push its boundary.
+		// Centre- (and rate-) moving frames flushed after the receipt push its boundary; of the
+		// evicted ones the newest has the highest position, so it alone can push further.
 		const movers = field === "frequency" ? CENTRE_MOVERS : RATE_MOVERS
 		for (const r of live.receipts) {
 			if (r.seq <= receipt.seq || r.pos >= posB || !movers.has(r.field))
 				continue
 			boundary = Math.max(boundary, r.pos + settle)
 		}
+		const evictedMover =
+			field === "frequency"
+				? live.evictedMovers.centre
+				: live.evictedMovers.rate
+		if (
+			evictedMover &&
+			evictedMover.seq > receipt.seq &&
+			evictedMover.pos < posB
+		)
+			boundary = Math.max(boundary, evictedMover.pos + settle)
 		if (!(posA >= boundary)) return { ok: false, reason: "settling" }
 		return { ok: true, receipt, boundary }
 	}

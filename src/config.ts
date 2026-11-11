@@ -285,6 +285,14 @@ export const TunerConfigSchema = z.object({
 	 */
 	reconnectPolicy: z.enum(["restore", "reset"]).default("restore"),
 	/**
+	 * Every new connection starts unproven: the core writes the centre and rate it holds (the last
+	 * accepted ones, else the declared config/caps values) unless a relay client is attached, a
+	 * scanner lease holds the tuner (its hop is re-sent) or a plain resume holds it. False: the
+	 * declared fallback is never written (a field nothing accepted stays unverified until set);
+	 * accepted values are still written.
+	 */
+	writeDeclaredTuningOnConnect: z.boolean().default(true),
+	/**
 	 * Per-band gain table (src/core/band-gain-schema.ts states the defaults and their
 	 * reasons). Scanner hops, dwells and jobs apply it; an operator retune applies it only
 	 * with `applyToMyTuning`. The runtime route PUT /api/tuner-band-gain overrides it.

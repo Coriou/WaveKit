@@ -19,6 +19,11 @@ import type {
 import type { SourceTunerConfig } from "../config.js"
 import {
 	ReceiptOnce,
+	TuningLedger,
+	type FieldState,
+	type GatedField,
+	type LedgerChange,
+	type LedgerConnection,
 	type ReceiptCallback,
 	type TuningWriterTag,
 } from "./tuning-ledger.js"
@@ -44,6 +49,8 @@ import type {
 	TuneRestoreTuning,
 	TuneSetting,
 	TunerLastTune,
+	TunerFieldProof,
+	TunerTuningProof,
 } from "@wavekit/api-types"
 
 /**
@@ -385,6 +392,33 @@ const CHANGE_FIELDS: ReadonlyMap<string, TunerChangeField> = new Map<
 ])
 
 const OPERATOR_WRITER: TuningWriterTag = Object.freeze({ writer: "operator" })
+const ASSERT_WRITER: TuningWriterTag = Object.freeze({ writer: "assert" })
+const RELAY_WRITER: TuningWriterTag = Object.freeze({ writer: "relay" })
+
+/** The two fields trust depends on, in assert's write order (rate before centre). */
+const GATED_FIELDS: readonly GatedField[] = ["sampleRate", "frequency"]
+
+/**
+ * Why assert writes nothing for an unproven field (the API's `proof.reason`): rule 1 (a relay
+ * client attached, external control, a plain resume's hold, lost ownership), rule 2 (a scanner
+ * lease: its holder re-sends its hop) or rule 3 without a held value (`declared-write-off`:
+ * nothing accepted and tuner.writeDeclaredTuningOnConnect false).
+ */
+type AssertBlock =
+	| "lost-ownership"
+	| "plain-resume"
+	| "relay-attached"
+	| "external-control"
+	| "scanner-lease"
+	| "declared-write-off"
+
+/** A scanner lease as the controller sees it (TunerArbiter.setLeaseView). */
+export interface TunerLeaseView {
+	/** True while a scanner job holds the source's lease. */
+	holds(sourceId: string): boolean
+	/** The holder re-sends its current hop (assert rule 2); never throws. */
+	resend(sourceId: string): void
+}
 
 /** The tuning-ledger writer of a write: the scanner's for its origin, else the operator's. */
 function writerOf(opts: TunerWriteOptions): TuningWriterTag {
@@ -518,6 +552,12 @@ export interface TunerControllerConfig {
 	defaultSampleRate?: number
 	/** Reconnect behaviour for accepted tuner state (default "restore"). */
 	reconnectPolicy?: TunerReconnectPolicy
+	/**
+	 * `tuner.writeDeclaredTuningOnConnect` (default true): assert writes the declared centre and
+	 * rate (config or caps) to a connection on which nothing proves them when nothing was ever
+	 * accepted for them. False: such a field stays unverified until somebody sets it.
+	 */
+	writeDeclaredTuningOnConnect?: boolean
 	/**
 	 * True once this core lost private ownership: the tuner and tuner-band-gain.json may be another
 	 * owner's. From then on nothing writes either, whoever asks and however long it waited in a queue.
@@ -1169,24 +1209,26 @@ export class TunerController extends EventEmitter {
 	private plainResumeHold: Set<string> = new Set()
 	private acceptanceSeq = 0
 	/**
-	 * WG9 req 3.2: frequency/sampleRate written on the current connection, by this core
-	 * (an API write or a reconnect replay) or by an accepted relay command. Cleared when a
-	 * new connection is synchronised, so a value proven on an earlier connection and not
-	 * re-sent on this one never backs a `commanded` or `relay` label.
+	 * Intent: the last accepted (operator or relay) centre and rate per source, the value assert
+	 * writes back (rule 3); without one, the declared value. A scanner hop (accept: false) is not
+	 * one. Proof is the tuning ledger's alone: nothing here says what a connection carries.
 	 */
-	private connectionTuningWrites: Map<string, Set<TunerStateField>> = new Map()
+	private acceptedTuning: Map<string, Partial<Record<GatedField, number>>> =
+		new Map()
 	/**
-	 * WG10 req 2.8: sources whose held sample rate an operator frequency write already
-	 * proved on the current connection. Reset with `connectionTuningWrites`.
+	 * The ledger of a source manager without one (test doubles: every write flushes at once, with
+	 * no settle): one session per connection the controller is told of.
 	 */
-	private rateProvedOnConnection: Set<string> = new Set()
-	/** In-flight proof write per source, tagged with the connection epoch it serves. */
-	private rateProofInFlight: Map<
-		string,
-		{ epoch: number; promise: Promise<boolean> }
-	> = new Map()
-	/** Per-source connection epoch, advanced where the proof flag resets. */
-	private rateProofEpoch: Map<string, number> = new Map()
+	private standInLedger: TuningLedger | null = null
+	private readonly standInConnections = new Map<string, LedgerConnection>()
+	/** The scanner's lease view (TunerArbiter): assert rule 2. */
+	private leaseView: TunerLeaseView | null = null
+	/** True while a tuner relay client is attached to the source (assert rule 1). */
+	private relayAttached: ((sourceId: string) => boolean) | null = null
+	/** Sources with an assert check queued (one microtask per source at a time). */
+	private readonly assertQueued = new Set<string>()
+	/** Sources whose published state is due after the queued check (doubt, hold, session end). */
+	private readonly publishQueued = new Set<string>()
 	/** Caps metadata as first registered, before any accepted command. */
 	private baselineCaps: Map<string, SourceCaps | undefined> = new Map()
 	/**
@@ -1221,6 +1263,329 @@ export class TunerController extends EventEmitter {
 		this.log = createComponentLogger(logger, "TunerController")
 		this.sourceManager = sourceManager
 		this.config = config
+		this.ledger().subscribe(this.onLedgerChange)
+	}
+
+	// === Tuning ledger: proof, assert and the skip rule ===
+
+	/** The source manager's tuning ledger, else the stand-in (test doubles). */
+	private ledger(): TuningLedger {
+		const real = (
+			this.sourceManager as Partial<Pick<SourceManager, "tuningLedger">> | null
+		)?.tuningLedger
+		if (real) return real
+		this.standInLedger ??= new TuningLedger({
+			// A double's write flushes when it returns: no settle, no in-flight bytes.
+			settleLink: () => ({ configuredSettleMs: 0, inFlightBytes: 0 }),
+			frameBytes: () => 2,
+			capsRate: () => 1,
+		})
+		return this.standInLedger
+	}
+
+	/** Starts a new stand-in session for the source (a double's new connection). */
+	private standInSession(sourceId: string): void {
+		if (this.standInLedger === null) return
+		this.standInConnections.get(sourceId)?.close()
+		const conn = this.standInLedger.connection(sourceId)
+		this.standInConnections.set(sourceId, conn)
+		conn.start()
+	}
+
+	/** Records a frame a double took (its write returned) in the stand-in ledger. */
+	private standInFrame(
+		sourceId: string,
+		cmd: number,
+		value: number,
+		writer: TuningWriterTag,
+	): void {
+		const conn = this.standInConnections.get(sourceId)
+		if (!conn) return
+		conn.write(this.encodeFrame(cmd, value), writer)(null)
+	}
+
+	/**
+	 * The scanner's lease view (TunerArbiter): while a lease is held, assert writes nothing and
+	 * asks the holder to re-send its hop. Null detaches it.
+	 */
+	setLeaseView(view: TunerLeaseView | null): void {
+		this.leaseView = view
+	}
+
+	/** Whether a tuner relay client is attached to a source (assert writes nothing then). */
+	setRelayAttachedView(view: ((sourceId: string) => boolean) | null): void {
+		this.relayAttached = view
+	}
+
+	/**
+	 * A trigger of assert (relay client detached, scanner lease released): re-checks the source on
+	 * a later microtask. Writes only what the ledger says is unproven.
+	 */
+	requestAssert(sourceId: string): void {
+		this.scheduleAssert(sourceId, false)
+	}
+
+	private readonly onLedgerChange = (
+		sourceId: string,
+		change: LedgerChange,
+	): void => {
+		if (!this.tunerStates.has(sourceId)) return
+		switch (change.kind) {
+			// The connect sync asserts (wired to the session's start).
+			case "session-started":
+				return
+			case "receipt":
+				// Only an untagged frame of either field leaves it unproven (a tagged one settles).
+				if (
+					change.receipt.writer === undefined &&
+					(change.field === "frequency" || change.field === "sampleRate")
+				)
+					this.scheduleAssert(sourceId, true)
+				return
+			case "session-ended":
+			case "doubt":
+			case "hold":
+				this.scheduleAssert(sourceId, true)
+				return
+		}
+	}
+
+	/** One check per source per microtask, out of any tuner command context. */
+	private scheduleAssert(sourceId: string, publish: boolean): void {
+		if (publish) this.publishQueued.add(sourceId)
+		if (this.assertQueued.has(sourceId)) return
+		this.assertQueued.add(sourceId)
+		queueMicrotask(() => {
+			this.assertQueued.delete(sourceId)
+			const published = this.publishQueued.delete(sourceId)
+			this.withoutCommand(() => {
+				try {
+					const wrote = this.runAssert(sourceId)
+					if (published && !wrote) this.emitStateChanged(sourceId)
+				} catch (err) {
+					this.log.warn(
+						{ sourceId, err: safeErrorFields(err) },
+						"Asserting the held tuning failed",
+					)
+				}
+			})
+		})
+	}
+
+	/** Assert outside a connect sync: writes, publishes and reports. True when it wrote. */
+	private runAssert(sourceId: string): boolean {
+		const state = this.tunerStates.get(sourceId)
+		if (!state) return false
+		const { written, failure } = this.writeAssertFrames(sourceId, state)
+		if (written.length === 0 && !failure) return false
+		if (written.length > 0) {
+			state.commandCount += written.length
+			state.lastCommandAt = new Date().toISOString()
+		}
+		if (failure) {
+			state.lastError = `Tuner state assert failed: ${failure.message}`
+			this.log.warn(
+				{ sourceId, err: failure.message },
+				"Writing the held tuning failed; retried on the next trigger",
+			)
+		} else delete state.lastError
+		this.reconcileCaps(sourceId, state)
+		if (written.length > 0)
+			this.log.info(
+				{ sourceId, commands: written.map(w => w.name) },
+				"Asserted the held tuning on an unproven connection",
+			)
+		for (const { name, value, shown } of written) {
+			this.noteReconnectFrame(sourceId, name, value, "replay", shown)
+			this.emit("command-sent", sourceId, name, value, "replay")
+		}
+		if (failure) this.emit("error", sourceId, failure)
+		this.emitStateChanged(sourceId)
+		return true
+	}
+
+	/**
+	 * The declared value of a field: the configured default, else the source's caps as first
+	 * registered. Undefined when neither declares it.
+	 */
+	private declaredValue(
+		sourceId: string,
+		field: GatedField,
+	): number | undefined {
+		const caps = this.baselineCaps.get(sourceId)
+		return field === "frequency"
+			? (this.config.defaultFrequency ?? caps?.centerFreq)
+			: (this.config.defaultSampleRate ?? caps?.sampleRate)
+	}
+
+	/** What assert writes for a field (rule 3): last accepted, else declared (kill switch aside). */
+	private heldValue(sourceId: string, field: GatedField): number | null {
+		const accepted = this.acceptedTuning.get(sourceId)?.[field]
+		const value =
+			accepted ??
+			(this.config.writeDeclaredTuningOnConnect === false
+				? undefined
+				: this.declaredValue(sourceId, field))
+		if (value === undefined) return null
+		const valid =
+			field === "frequency"
+				? this.isWithinRange(value, VALIDATION.frequency)
+				: isValidRtlSampleRate(value)
+		return valid ? value : null
+	}
+
+	/** Why assert writes nothing for the source now (rules 1 and 2), or null. */
+	private assertBlock(sourceId: string, state: TunerState): AssertBlock | null {
+		if (this.config.lostOwnership?.() === true) return "lost-ownership"
+		if (this.plainResumeHold.has(sourceId)) return "plain-resume"
+		if (this.relayAttached?.(sourceId) === true) return "relay-attached"
+		if (state.controlMode === "external") return "external-control"
+		if (this.leaseView?.holds(sourceId) === true) return "scanner-lease"
+		return null
+	}
+
+	/**
+	 * A field assert owes a write: unproven in the live session with no frame of it settling or
+	 * waiting to leave. A standing hold (rate-truth mismatch) is owed one write after it was set.
+	 */
+	private static assertDue(fs: FieldState): boolean {
+		if (fs.queued !== null) return false
+		if (fs.hold)
+			return !fs.hold.answered || fs.hold.withoutHold === "unverified"
+		return fs.state === "unverified"
+	}
+
+	/**
+	 * Assert (the only automatic writer of centre and rate): for each field the live session does
+	 * not prove, with nothing settling or queued for it, writes per rule: nothing under a relay
+	 * client, external control, a plain resume's hold or lost ownership; under a scanner lease the
+	 * holder re-sends its hop; otherwise the held value (heldValue). Rate before centre. Updates
+	 * the state; the caller reconciles caps, publishes and emits.
+	 */
+	private writeAssertFrames(
+		sourceId: string,
+		state: TunerState,
+	): {
+		written: Array<{ value: number; name: string; shown: number }>
+		failure?: Error
+	} {
+		const written: Array<{ value: number; name: string; shown: number }> = []
+		const ledger = this.ledger()
+		if (ledger.position(sourceId) === null) return { written }
+		const fields = ledger.fieldState(sourceId)
+		const due = GATED_FIELDS.filter(field =>
+			TunerController.assertDue(fields[field]),
+		)
+		if (due.length === 0) return { written }
+		const block = this.assertBlock(sourceId, state)
+		if (block === "scanner-lease") {
+			try {
+				this.leaseView?.resend(sourceId)
+			} catch (err) {
+				this.log.warn(
+					{ sourceId, err: safeErrorFields(err) },
+					"The scanner lease holder's hop re-send failed",
+				)
+			}
+			return { written }
+		}
+		if (block !== null) return { written }
+		for (const field of due) {
+			const value = this.heldValue(sourceId, field)
+			if (value === null) continue
+			const cmd =
+				field === "frequency"
+					? RTL_TCP_COMMANDS.SET_FREQUENCY
+					: RTL_TCP_COMMANDS.SET_SAMPLE_RATE
+			try {
+				this.writeFrame(sourceId, cmd, value, ASSERT_WRITER)
+			} catch (err) {
+				return {
+					written,
+					failure:
+						err instanceof Error
+							? err
+							: new WaveKitError(String(err), "TUNER_RESTORE_FAILED"),
+				}
+			}
+			// A setter waiting on its own frame of this field is superseded by this one.
+			this.noteFieldWrite(sourceId, field)
+			const shown = state[field]
+			if (field === "frequency") {
+				if (state.frequency !== value) this.appliedBandGain.delete(sourceId)
+				state.frequency = value
+			} else state.sampleRate = value
+			this.clearIgnoredRelayField(sourceId, field)
+			written.push({
+				value,
+				name: COMMAND_NAMES[cmd] ?? `cmd-0x${cmd}`,
+				shown,
+			})
+		}
+		return { written }
+	}
+
+	/** The ledger's state of the source's two gated fields (and gain). */
+	private ledgerFields(
+		sourceId: string,
+	): Record<GatedField | "gain", FieldState> {
+		return this.ledger().fieldState(sourceId)
+	}
+
+	/**
+	 * The skip rule: a write of `value` to `field` may be skipped only when the live session
+	 * proves it, or a frame of it at that value is settling or waiting to leave.
+	 */
+	private ledgerHolds(
+		sourceId: string,
+		field: GatedField,
+		value: number,
+		fields = this.ledgerFields(sourceId),
+	): boolean {
+		const fs = fields[field]
+		if (fs.queued !== null) return fs.queued.value === value
+		return fs.state !== "unverified" && fs.value === value
+	}
+
+	/** The API's per-field proof (TunerState.proof); absent without the source manager's ledger. */
+	private proofOf(state: TunerState): TunerTuningProof | undefined {
+		const real = (
+			this.sourceManager as Partial<Pick<SourceManager, "tuningLedger">> | null
+		)?.tuningLedger
+		if (!real) return undefined
+		const fields = real.fieldState(state.sourceId)
+		const block = this.assertBlock(state.sourceId, state)
+		const one = (field: GatedField): TunerFieldProof => {
+			const fs = fields[field]
+			if (fs.queued !== null)
+				return {
+					state: "settling",
+					writer: fs.queued.writer,
+					session: fs.session,
+					reason: "queued",
+				}
+			if (fs.state === "proven")
+				return {
+					state: fs.writer === "relay" ? "relay" : "commanded",
+					writer: fs.writer,
+					session: fs.session,
+				}
+			if (fs.state === "settling")
+				return { state: "settling", writer: fs.writer, session: fs.session }
+			const blocked =
+				block ??
+				(this.heldValue(state.sourceId, field) === null &&
+				this.config.writeDeclaredTuningOnConnect === false
+					? "declared-write-off"
+					: null)
+			return {
+				state: "unverified",
+				writer: fs.writer,
+				session: fs.session,
+				reason: fs.doubtReason ?? blocked ?? fs.reason ?? "unverified",
+			}
+		}
+		return { frequency: one("frequency"), sampleRate: one("sampleRate") }
 	}
 
 	// === Lifecycle ===
@@ -1268,6 +1633,8 @@ export class TunerController extends EventEmitter {
 		this.baselineCaps.set(sourceId, caps ? { ...caps } : undefined)
 		this.tunerStates.set(sourceId, state)
 		this.controlModeOrigins.set(sourceId, "user")
+		// A double's source counts as connected from here (its writes return when taken).
+		this.standInSession(sourceId)
 		this.log.info({ sourceId }, "Tuner source initialized")
 		this.emitStateChanged(sourceId)
 	}
@@ -1295,13 +1662,9 @@ export class TunerController extends EventEmitter {
 		this.measuredRates.delete(sourceId)
 		this.pausedAtSeq.delete(sourceId)
 		this.plainResumeHold.delete(sourceId)
-		this.connectionTuningWrites.delete(sourceId)
-		this.rateProvedOnConnection.delete(sourceId)
-		this.rateProofInFlight.delete(sourceId)
-		this.rateProofEpoch.set(
-			sourceId,
-			(this.rateProofEpoch.get(sourceId) ?? 0) + 1,
-		)
+		this.acceptedTuning.delete(sourceId)
+		this.standInConnections.get(sourceId)?.close()
+		this.standInConnections.delete(sourceId)
 		this.baselineCaps.delete(sourceId)
 		this.configWriteDue.delete(sourceId)
 		this.configProvenFields.delete(sourceId)
@@ -1400,6 +1763,9 @@ export class TunerController extends EventEmitter {
 		this.log.info({ sourceId, mode }, "Control mode changed")
 		this.emit("control-mode-changed", sourceId, mode)
 		this.emitStateChanged(sourceId)
+		// A relay client handed control back: an unproven centre or rate is asserted (rule 3),
+		// unless a rule holds. A user's own switch is followed by the user's own writes.
+		if (mode === "internal" && origin === "relay") this.requestAssert(sourceId)
 	}
 
 	/**
@@ -1460,6 +1826,9 @@ export class TunerController extends EventEmitter {
 		// The relay forwards raw bytes upstream before any check below, so even a value this
 		// controller ignores may have moved the receiver: the client did it either way.
 		this.noteFieldWrite(sourceId, stateFieldOf(command))
+		// A double's relay frames reach no ledger: the stand-in records them (the real relay writes
+		// through the source manager, whose ledger receipts them at flush).
+		this.standInFrame(sourceId, command, value, RELAY_WRITER)
 		// A gain or gain index frame may move the gain mode (gainFrameMode; state below). IF gain
 		// frames never do.
 		const relayGainMode = this.gainFrameMode(sourceId, command, value)
@@ -1671,8 +2040,7 @@ export class TunerController extends EventEmitter {
 			if (command === RTL_TCP_COMMANDS.SET_TEST_MODE) {
 				this.markWrittenNotAccepted(sourceId, command)
 			} else {
-				this.markAccepted(sourceId, command)
-				this.markConnectionWrite(sourceId, command)
+				this.markAccepted(sourceId, command, value)
 			}
 			// A gain or gain index frame selects manual only where gainFrameMode says so.
 			if (relayGainMode !== "none")
@@ -1711,12 +2079,21 @@ export class TunerController extends EventEmitter {
 	 * call (TunerWriteOptions.onReceipt); a call that throws reports null. A nested call inside one
 	 * keeps the outer scope. A frame written after the call returned is not reported (ReceiptOnce).
 	 */
-	private async withReceiptOnce<T>(
+	private withReceiptOnce<T>(
 		opts: TunerWriteOptions,
 		run: (opts: TunerWriteOptions) => Promise<T>,
 	): Promise<T> {
 		const target = opts.onReceipt
+		// Without a receipt to fold: the call itself, with no extra promise or microtask tick.
 		if (!target || this.receiptScopes.has(target)) return run(opts)
+		return this.withReceiptScope(target, opts, run)
+	}
+
+	private async withReceiptScope<T>(
+		target: ReceiptCallback,
+		opts: TunerWriteOptions,
+		run: (opts: TunerWriteOptions) => Promise<T>,
+	): Promise<T> {
 		const once = new ReceiptOnce(target)
 		// Called directly (not through writeFrame), the scoped callback counts as one frame.
 		const scoped: ReceiptCallback = receipt => once.frame()(receipt)
@@ -1769,16 +2146,16 @@ export class TunerController extends EventEmitter {
 	}
 
 	/**
-	 * WG10 req 2.8: before an operator frequency write, writes the sample rate the core
-	 * already holds (value unchanged, origin from `opts`, normally `rest`), so the trust
-	 * label can become `commanded`. Writes only in internal control, when the held rate is
-	 * known (not unknown/placeholder, not an ignored relay value, a valid RTL rate) and
-	 * unproven on this connection (declared only, or not written on it), and at most once
-	 * per connection epoch. Returns true when it wrote. A failed write throws the tuner
-	 * error of `setSampleRate` (the caller then writes no frequency) and leaves the
-	 * epoch unproven. The scanner path never calls this (WG9 hop rule unchanged).
-	 * `frequencyHz`, when given, is the frequency about to be written: outside the
-	 * frequency range nothing is written (the frequency write then fails as today).
+	 * WG10 req 2.8: before an operator frequency write, writes the sample rate the core holds
+	 * (value unchanged, origin from `opts`, normally `rest`) when the live session does not prove
+	 * it (the skip rule: proven, settling or queued at that value skips), so the trust label can
+	 * become `commanded`. Writes only in internal control and for a held rate (accepted, or the
+	 * declared one the state still shows) that is a valid RTL rate. Returns true when it wrote. A
+	 * failed write throws the tuner error of `setSampleRate` (the caller then writes no
+	 * frequency). Concurrent callers share the first one's frame (queued at once, so the rest
+	 * skip). The scanner path never calls this (WG9 hop rule unchanged). `frequencyHz`, when
+	 * given, is the frequency about to be written: outside the frequency range nothing is
+	 * written (the frequency write then fails as today).
 	 */
 	async proveSampleRateForFrequency(
 		sourceId: string,
@@ -1797,44 +2174,29 @@ export class TunerController extends EventEmitter {
 			)
 		)
 			return false
-		if (this.rateProvedOnConnection.has(sourceId)) return false
-		const proof = this.fieldProof(sourceId)
-		if (proof.unknownFields.includes("sampleRate")) return false
-		const hz = state.sampleRate
+		// A rate a plain resume left unverified, or a relay value the controller ignored, is a
+		// placeholder: never written to prove it.
 		if (
+			this.unverifiedFields.get(sourceId)?.has("sampleRate") === true ||
+			this.ignoredRelayFields.get(sourceId)?.has("sampleRate") === true
+		)
+			return false
+		const hz = state.sampleRate
+		const held =
+			this.acceptedTuning.get(sourceId)?.sampleRate === hz ||
+			this.declaredValue(sourceId, "sampleRate") === hz
+		if (
+			!held ||
 			!Number.isInteger(hz) ||
 			hz < VALIDATION.sampleRate.min ||
 			hz > VALIDATION.sampleRate.max ||
 			!isValidRtlSampleRate(hz)
 		)
 			return false
-		const writtenHere =
-			this.connectionTuningWrites.get(sourceId)?.has("sampleRate") === true
-		if (!proof.declaredOnlyFields.includes("sampleRate") && writtenHere) {
-			this.rateProvedOnConnection.add(sourceId)
-			return false
-		}
-		// Concurrent callers on the same connection share one write (and its failure).
-		const epoch = this.rateProofEpoch.get(sourceId) ?? 0
-		const pending = this.rateProofInFlight.get(sourceId)
-		if (pending !== undefined && pending.epoch === epoch) {
-			await pending.promise
-			return false
-		}
-		const promise = this.withoutCommand(async () => {
-			try {
-				await this.setSampleRate(sourceId, hz, opts)
-				this.sourceManager.assertTunerCommandActive()
-				if ((this.rateProofEpoch.get(sourceId) ?? 0) === epoch)
-					this.rateProvedOnConnection.add(sourceId)
-				return true
-			} finally {
-				if (this.rateProofInFlight.get(sourceId)?.epoch === epoch)
-					this.rateProofInFlight.delete(sourceId)
-			}
-		})
-		this.rateProofInFlight.set(sourceId, { epoch, promise })
-		return promise
+		if (this.ledgerHolds(sourceId, "sampleRate", hz)) return false
+		await this.withoutCommand(() => this.setSampleRate(sourceId, hz, opts))
+		this.sourceManager.assertTunerCommandActive()
+		return true
 	}
 
 	async setSampleRate(
@@ -2206,7 +2568,8 @@ export class TunerController extends EventEmitter {
 
 	// === Bulk Update ===
 
-	async configure(
+	/** Not async itself: without `onReceipt` the call is configureNow's promise (no extra tick). */
+	configure(
 		sourceId: string,
 		updates: Partial<TunerState>,
 		opts: TunerWriteOptions = {},
@@ -2250,15 +2613,14 @@ export class TunerController extends EventEmitter {
 			await this.proveSampleRateForFrequency(sourceId, opts, updates.frequency)
 		}
 
-		const proof = this.fieldProof(sourceId)
-		const unproven = new Set<TunerStateField>([
-			...proof.declaredOnlyFields,
-			...proof.unknownFields,
-		])
+		// The skip rule: centre and rate are written unless the live session proves them (or a
+		// frame of that value is settling or waiting to leave).
 		if (
 			updates.frequency !== undefined &&
-			(updates.frequency !== state.frequency || unproven.has("frequency"))
-		) {
+			this.ledgerHolds(sourceId, "frequency", updates.frequency)
+		)
+			this.acceptSkipped(sourceId, "frequency", updates.frequency, opts)
+		else if (updates.frequency !== undefined) {
 			if (policyBulk) {
 				const hz = updates.frequency
 				const retune = async () => {
@@ -2272,17 +2634,16 @@ export class TunerController extends EventEmitter {
 		}
 		if (
 			updates.sampleRate !== undefined &&
-			(updates.sampleRate !== state.sampleRate || unproven.has("sampleRate"))
+			!this.ledgerHolds(sourceId, "sampleRate", updates.sampleRate)
 		) {
 			await this.setSampleRate(sourceId, updates.sampleRate, opts)
-		} else if (
-			updates.sampleRate !== undefined &&
-			opts.origin === "rest" &&
-			this.onOperatorSampleRate
-		) {
-			this.sourceManager.assertTunerCommandActive()
-			this.withoutCommand(() => this.onOperatorSampleRate?.(sourceId))
-			this.emitStateChanged(sourceId)
+		} else if (updates.sampleRate !== undefined) {
+			this.acceptSkipped(sourceId, "sampleRate", updates.sampleRate, opts)
+			if (opts.origin === "rest" && this.onOperatorSampleRate) {
+				this.sourceManager.assertTunerCommandActive()
+				this.withoutCommand(() => this.onOperatorSampleRate?.(sourceId))
+				this.emitStateChanged(sourceId)
+			}
 		}
 		// As a tune (applyTune): a value in place and proven sends nothing, an unproven one is
 		// written, and one not accepted yet is accepted beside a held partner. rtl_tcp SET_GAIN
@@ -2419,9 +2780,12 @@ export class TunerController extends EventEmitter {
 	 * `leftAgc`: a gain written since the mode was (rtl_tcp SET_GAIN switches the tuner to manual
 	 * and the state does not show it), so going back to AGC writes the mode even when it matches.
 	 * A written gain mode is always followed by a written gain: a tuner switched to manual may
-	 * reset its gain.
+	 * reset its gain. A centre or rate the skip rule leaves unwritten is still accepted (unless
+	 * `accept: false`).
+	 *
+	 * Not async itself: without `onReceipt` the call is applyTuneNow's promise (no extra tick).
 	 */
-	async applyTune(
+	applyTune(
 		sourceId: string,
 		values: TuneValues,
 		opts: TunerWriteOptions,
@@ -2453,15 +2817,21 @@ export class TunerController extends EventEmitter {
 		}
 		const changed = (field: TunerStateField, differs: boolean): boolean =>
 			differs || (!restoring && unproven(field)) || opts.forceWrite?.() === true
+		// Centre and rate follow the skip rule alone (a restore too: an unproven field is written).
+		const gatedChanged = (field: GatedField, value: number): boolean =>
+			!this.ledgerHolds(sourceId, field, value) || opts.forceWrite?.() === true
 
 		const hz = values.sampleRate
 		if (hz !== undefined) {
-			if (changed("sampleRate", hz !== state.sampleRate))
+			if (gatedChanged("sampleRate", hz))
 				await this.setSampleRate(sourceId, hz, opts)
-			else if (operator && this.onOperatorSampleRate) {
-				this.sourceManager.assertTunerCommandActive()
-				this.withoutCommand(() => this.onOperatorSampleRate?.(sourceId))
-				this.emitStateChanged(sourceId)
+			else {
+				this.acceptSkipped(sourceId, "sampleRate", hz, opts)
+				if (operator && this.onOperatorSampleRate) {
+					this.sourceManager.assertTunerCommandActive()
+					this.withoutCommand(() => this.onOperatorSampleRate?.(sourceId))
+					this.emitStateChanged(sourceId)
+				}
 			}
 			applied("sampleRateHz")
 		}
@@ -2481,7 +2851,7 @@ export class TunerController extends EventEmitter {
 				}
 				await this.proveSampleRateForFrequency(sourceId, opts, frequency)
 			}
-			if (changed("frequency", frequency !== state.frequency)) {
+			if (gatedChanged("frequency", frequency)) {
 				const retune = async () => {
 					await this.writeFrequency(sourceId, frequency, opts, state)
 					if (operator)
@@ -2490,7 +2860,7 @@ export class TunerController extends EventEmitter {
 				await (operator && this.bandGain?.applyToMyTuning() === true
 					? this.serialRestRetune(sourceId, retune)
 					: retune())
-			}
+			} else this.acceptSkipped(sourceId, "frequency", frequency, opts)
 			applied("frequencyHz")
 		}
 
@@ -2653,14 +3023,8 @@ export class TunerController extends EventEmitter {
 		const pausedAt = this.pausedAtSeq.get(sourceId)
 		this.pausedAtSeq.delete(sourceId)
 		const desired = this.desiredFields.get(sourceId)
-		// A new connection: nothing is written on it yet (WG9 req 3.2).
-		this.connectionTuningWrites.delete(sourceId)
-		this.rateProvedOnConnection.delete(sourceId)
-		this.rateProofInFlight.delete(sourceId)
-		this.rateProofEpoch.set(
-			sourceId,
-			(this.rateProofEpoch.get(sourceId) ?? 0) + 1,
-		)
+		// A double's new connection: a new stand-in session (the real ledger opened one already).
+		this.standInSession(sourceId)
 		// WG11 req 4.2: the configured frames are considered once per connection.
 		const configDue = this.configWriteDue.delete(sourceId)
 		if (configDue) this.configProvenFields.delete(sourceId)
@@ -2686,6 +3050,7 @@ export class TunerController extends EventEmitter {
 			const hold = this.plainResumeHold.has(sourceId)
 			if (hold) this.holdUnverified(sourceId, desired)
 			this.desiredFields.delete(sourceId)
+			this.acceptedTuning.delete(sourceId)
 			this.inferredFields.delete(sourceId)
 			this.ignoredRelayFields.delete(sourceId)
 			if (!hold) this.unverifiedFields.delete(sourceId)
@@ -2703,20 +3068,45 @@ export class TunerController extends EventEmitter {
 			const configured = configDue
 				? this.writeConfiguredTuning(sourceId, state)
 				: undefined
+			// Nothing accepted is left: assert writes the declared centre and rate (kill switch aside).
+			const asserted =
+				configured?.error === undefined
+					? this.writeAssertFrames(sourceId, state)
+					: { written: [] }
+			if (asserted.written.length > 0) {
+				state.commandCount += asserted.written.length
+				state.lastCommandAt = new Date().toISOString()
+			}
+			if (asserted.failure)
+				state.lastError = `Tuner state assert failed: ${asserted.failure.message}`
 			const capsChanged = this.reconcileCaps(sourceId, state)
-			if (reset || forgot || capsChanged || configured?.attempted === true)
+			for (const { name, value, shown } of asserted.written) {
+				this.noteReconnectFrame(sourceId, name, value, "replay", shown)
+				this.emit("command-sent", sourceId, name, value, "replay")
+			}
+			if (asserted.failure) this.emit("error", sourceId, asserted.failure)
+			if (
+				reset ||
+				forgot ||
+				capsChanged ||
+				configured?.attempted === true ||
+				asserted.written.length > 0
+			)
 				this.emitStateChanged(sourceId)
-			const commands = configured?.commands ?? []
-			return configured?.error !== undefined
-				? { policy, commands, reset, error: configured.error }
+			const commands = [
+				...(configured?.commands ?? []),
+				...asserted.written.map(w => w.name),
+			]
+			const error = configured?.error ?? state.lastError
+			return configured?.error !== undefined || asserted.failure
+				? { policy, commands, reset, ...(error ? { error } : {}) }
 				: { policy, commands, reset }
 		}
 
-		// An inferred (written, not accepted) centre or rate is never replayed, so after a
-		// reconnect the receiver may be elsewhere: drop its proof and, unless an accepted
-		// value is replayed below, return it to the baseline (WG5 R2). A restore resume does
-		// the same: in production only test mode is written unaccepted (setTestMode).
-		const forgotTuning = this.forgetInferredTuning(sourceId, state, desired)
+		// Centre and rate are not replayed: assert writes them where the new session does not
+		// prove them (writeAssertFrames), in the replay's place (after the sampling path, crystals
+		// and ppm, before the front end and gain). An unaccepted centre (a scanner hop) is no held
+		// value: under the lease its holder re-sends it, without one the held value goes back.
 
 		// WG11 req 4.2, 4.3: configured fields not held by the operator, before the
 		// restore; a failed configured write stops the restore too (today's failure).
@@ -2725,8 +3115,7 @@ export class TunerController extends EventEmitter {
 			: undefined
 		if (configured?.error !== undefined) {
 			const capsChanged = this.reconcileCaps(sourceId, state)
-			if (configured.attempted || capsChanged || forgotTuning)
-				this.emitStateChanged(sourceId)
+			if (configured.attempted || capsChanged) this.emitStateChanged(sourceId)
 			return {
 				policy,
 				commands: configured.commands,
@@ -2735,9 +3124,12 @@ export class TunerController extends EventEmitter {
 			}
 		}
 
-		const written: Array<{ value: number; name: string }> = []
+		const written: Array<{ value: number; name: string; shown?: number }> = []
 		let failure: Error | undefined
-		const plan = desired ? this.buildReplayPlan(state, desired) : []
+		const replay = desired
+			? this.buildReplayPlan(state, desired, true)
+			: { before: [], after: [] }
+		const plan = [...replay.before, ...replay.after]
 		// A gain mode inferred on the last connection (a gain frame's manual, or a mode written and
 		// not accepted) is not replayed: this connection may reach another receiver, so only a gain
 		// frame replayed on it, judged against its own header, proves the mode again. An accepted
@@ -2746,7 +3138,17 @@ export class TunerController extends EventEmitter {
 			desired?.has("gainMode") !== true &&
 			this.inferredFields.get(sourceId)?.has("gainMode") === true
 		let lastGainFrame: [number, number] | undefined
-		for (const [cmd, value] of plan) {
+		let assertedAny = false
+		for (const [i, [cmd, value]] of plan.entries()) {
+			if (i === replay.before.length) {
+				const asserted = this.writeAssertFrames(sourceId, state)
+				written.push(...asserted.written)
+				if (asserted.written.length > 0) assertedAny = true
+				if (asserted.failure) {
+					failure = asserted.failure
+					break
+				}
+			}
 			try {
 				this.writeFrame(sourceId, cmd, value)
 			} catch (err) {
@@ -2758,12 +3160,18 @@ export class TunerController extends EventEmitter {
 			}
 			const name = COMMAND_NAMES[cmd] ?? `cmd-0x${cmd.toString(16)}`
 			written.push({ value, name })
-			this.markConnectionWrite(sourceId, cmd)
 			const field = stateFieldOf(cmd)
 			if (field !== undefined) this.clearIgnoredRelayField(sourceId, field)
 			if (cmd === RTL_TCP_COMMANDS.SET_GAIN_MODE) lastGainFrame = undefined
 			else if (this.gainFrameMode(sourceId, cmd, value) !== "none")
 				lastGainFrame = [cmd, value]
+		}
+		// No frame after the sampling path: assert still runs (centre and rate are always due).
+		if (!failure && replay.after.length === 0) {
+			const asserted = this.writeAssertFrames(sourceId, state)
+			written.push(...asserted.written)
+			if (asserted.written.length > 0) assertedAny = true
+			if (asserted.failure) failure = asserted.failure
 		}
 		// A gain frame replayed after the mode moves it as a live one does (gainFrameMode).
 		const replayedMode =
@@ -2807,15 +3215,15 @@ export class TunerController extends EventEmitter {
 			)
 		}
 
-		for (const { name, value } of written) {
-			this.noteReconnectFrame(sourceId, name, value, "replay")
+		for (const { name, value, shown } of written) {
+			this.noteReconnectFrame(sourceId, name, value, "replay", shown)
 			this.emit("command-sent", sourceId, name, value, "replay")
 		}
 		if (failure) this.emit("error", sourceId, failure)
 		if (
 			plan.length > 0 ||
+			assertedAny ||
 			capsChanged ||
-			forgotTuning ||
 			inferredMode ||
 			configured?.attempted === true
 		)
@@ -2861,6 +3269,9 @@ export class TunerController extends EventEmitter {
 		}
 		if (kept.size > 0) this.desiredFields.set(sourceId, kept)
 		else this.desiredFields.delete(sourceId)
+		const accepted = this.acceptedTuning.get(sourceId)
+		for (const field of GATED_FIELDS)
+			if (accepted && !kept.has(field)) delete accepted[field]
 		// A pre-pause inferred value is no more proven than an accepted one.
 		this.inferredFields.delete(sourceId)
 		// The gain saved before a band gain is a pre-pause snapshot too: leaving the band later
@@ -2884,9 +3295,19 @@ export class TunerController extends EventEmitter {
 
 		const written: Array<{ value: number; name: string }> = []
 		let failure: Error | undefined
-		for (const [cmd, value] of this.buildReplayPlan(state, kept)) {
+		// Fields accepted during the pause are the operator's newest: written (centre and rate too,
+		// tagged assert: the core puts them back, nobody asked for them on this connection).
+		for (const [cmd, value] of this.buildReplayPlan(state, kept).before) {
 			try {
-				this.writeFrame(sourceId, cmd, value)
+				this.writeFrame(
+					sourceId,
+					cmd,
+					value,
+					cmd === RTL_TCP_COMMANDS.SET_FREQUENCY ||
+						cmd === RTL_TCP_COMMANDS.SET_SAMPLE_RATE
+						? ASSERT_WRITER
+						: OPERATOR_WRITER,
+				)
 			} catch (err) {
 				failure =
 					err instanceof Error
@@ -2896,7 +3317,6 @@ export class TunerController extends EventEmitter {
 			}
 			const name = COMMAND_NAMES[cmd] ?? `cmd-0x${cmd.toString(16)}`
 			written.push({ value, name })
-			this.markConnectionWrite(sourceId, cmd)
 		}
 		if (written.length > 0) {
 			state.commandCount += written.length
@@ -3049,9 +3469,15 @@ export class TunerController extends EventEmitter {
 	private reconcileCaps(sourceId: string, state: TunerState): boolean {
 		const accepted = this.desiredFields.get(sourceId)
 		const unverified = this.unverifiedFields.get(sourceId)
+		const inferred = this.inferredFields.get(sourceId)
+		// A written centre or rate (accepted, asserted, or a scanner hop's) is what caps show; an
+		// unverified one keeps its last known value.
 		const desired = {
 			has: (field: "frequency" | "sampleRate") =>
-				accepted?.has(field) === true || unverified?.has(field) === true,
+				accepted?.has(field) === true ||
+				unverified?.has(field) === true ||
+				inferred?.has(field) === true ||
+				this.acceptedTuning.get(sourceId)?.[field] !== undefined,
 		}
 		const baseline = this.baselineCaps.get(sourceId)
 		const current = this.sourceManager.getCaps(sourceId)
@@ -3228,33 +3654,17 @@ export class TunerController extends EventEmitter {
 	// === State Accessors ===
 
 	/**
-	 * WG9 req 3.2: true only when both frequency and sample rate were written on the
-	 * current connection (an API write, a reconnect replay, or an accepted relay command).
-	 * A caps change from reconnect reconciliation with no such write is `unverified`.
+	 * WG9 req 3.2: true only when the tuning ledger's live session holds a frame of both frequency
+	 * and sample rate that no doubt has undone (settled, settling or waiting to leave), whoever
+	 * wrote it. A caps change with no such frame is `unverified`.
 	 */
 	tuningWrittenOnConnection(sourceId: string): boolean {
-		const written = this.connectionTuningWrites.get(sourceId)
-		return (
-			written !== undefined &&
-			written.has("frequency") &&
-			written.has("sampleRate")
-		)
-	}
-
-	private markConnectionWrite(sourceId: string, cmd: number): void {
-		const field =
-			cmd === RTL_TCP_COMMANDS.SET_FREQUENCY
-				? "frequency"
-				: cmd === RTL_TCP_COMMANDS.SET_SAMPLE_RATE
-					? "sampleRate"
-					: undefined
-		if (field === undefined || !this.tunerStates.has(sourceId)) return
-		let written = this.connectionTuningWrites.get(sourceId)
-		if (!written) {
-			written = new Set()
-			this.connectionTuningWrites.set(sourceId, written)
-		}
-		written.add(field)
+		if (!this.tunerStates.has(sourceId)) return false
+		const fields = this.ledgerFields(sourceId)
+		return GATED_FIELDS.every(field => {
+			const fs = fields[field]
+			return fs.queued !== null || fs.state !== "unverified"
+		})
 	}
 
 	getState(sourceId: string): TunerState | undefined {
@@ -3395,33 +3805,6 @@ export class TunerController extends EventEmitter {
 		return value > 0x7fffffff ? value - 0x100000000 : value
 	}
 
-	/** Drops inferred frequency/sampleRate proof; true when one was dropped. */
-	private forgetInferredTuning(
-		sourceId: string,
-		state: TunerState,
-		desired: ReadonlyMap<DesiredField, number> | undefined,
-	): boolean {
-		const inferred = this.inferredFields.get(sourceId)
-		if (!inferred) return false
-		const caps = this.baselineCaps.get(sourceId)
-		let forgot = false
-		if (inferred.delete("frequency")) {
-			forgot = true
-			if (!desired?.has("frequency"))
-				state.frequency =
-					this.config.defaultFrequency ?? caps?.centerFreq ?? DEFAULT_FREQUENCY
-		}
-		if (inferred.delete("sampleRate")) {
-			forgot = true
-			if (!desired?.has("sampleRate"))
-				state.sampleRate =
-					this.config.defaultSampleRate ??
-					caps?.sampleRate ??
-					DEFAULT_SAMPLE_RATE
-		}
-		return forgot
-	}
-
 	/** Reset tunable fields to the startup baseline (control mode/counters kept). */
 	private applyBaselineFields(state: TunerState, caps?: SourceCaps): void {
 		state.frequency =
@@ -3523,9 +3906,38 @@ export class TunerController extends EventEmitter {
 		}
 	}
 
-	private markAccepted(sourceId: string, cmd: number): void {
+	/**
+	 * A centre or rate the skip rule did not write (the live session proves it, or a frame of it
+	 * is settling or queued) is accepted as a written one would be (sendCommand): an operator
+	 * naming the value a scanner hop left in place makes it the held value assert writes back.
+	 * `accept: false` (a scanner hop) accepts nothing.
+	 */
+	private acceptSkipped(
+		sourceId: string,
+		field: GatedField,
+		value: number,
+		opts: TunerWriteOptions,
+	): void {
+		if (opts.accept === false) return
+		this.sourceManager.assertTunerCommandActive()
+		this.markAccepted(
+			sourceId,
+			field === "frequency"
+				? RTL_TCP_COMMANDS.SET_FREQUENCY
+				: RTL_TCP_COMMANDS.SET_SAMPLE_RATE,
+			value,
+		)
+		this.emitStateChanged(sourceId)
+	}
+
+	private markAccepted(sourceId: string, cmd: number, value: number): void {
 		const field = COMMAND_FIELDS[cmd]
 		if (!field) return
+		if (field === "frequency" || field === "sampleRate") {
+			const held = this.acceptedTuning.get(sourceId) ?? {}
+			held[field] = value
+			this.acceptedTuning.set(sourceId, held)
+		}
 		const stateField = stateFieldOf(cmd)
 		if (stateField !== undefined)
 			this.clearIgnoredRelayField(sourceId, stateField)
@@ -3546,12 +3958,25 @@ export class TunerController extends EventEmitter {
 		if (field !== undefined) this.markInferred(sourceId, field)
 	}
 
+	/**
+	 * The replay of accepted fields in REPLAY_PHASES order. `withoutTuning`: centre and rate left
+	 * out (assert writes them), the frames split where they would have gone: `before` (sampling
+	 * path, crystals, ppm) and `after` (front end, gain).
+	 */
 	private buildReplayPlan(
 		state: TunerState,
 		desired: ReadonlyMap<DesiredField, number>,
-	): Array<[number, number]> {
-		const plan: Array<[number, number]> = []
+		withoutTuning = false,
+	): { before: Array<[number, number]>; after: Array<[number, number]> } {
+		const before: Array<[number, number]> = []
+		const after: Array<[number, number]> = []
+		let plan = before
 		for (const phase of REPLAY_PHASES) {
+			const tuning = phase.fields.includes("frequency")
+			if (tuning && withoutTuning) {
+				plan = after
+				continue
+			}
 			const fields = phase.fields.filter(field => desired.has(field))
 			if (phase.byAcceptance) {
 				fields.sort((a, b) => (desired.get(a) ?? 0) - (desired.get(b) ?? 0))
@@ -3561,7 +3986,7 @@ export class TunerController extends EventEmitter {
 				if (frame) plan.push(frame)
 			}
 		}
-		return plan
+		return { before, after }
 	}
 
 	private encodeDesiredField(
@@ -3693,6 +4118,7 @@ export class TunerController extends EventEmitter {
 			if (scope) frameReceipt?.(null)
 			throw err
 		}
+		this.standInFrame(sourceId, cmd, value, writer)
 	}
 
 	private assertOwnsTuner(): void {
@@ -3724,8 +4150,7 @@ export class TunerController extends EventEmitter {
 			// In the same step as the frame: no other write can see the old mode in between.
 			this.noteLeftAgc(sourceId, cmd, value)
 			if (opts.accept === false) this.markWrittenNotAccepted(sourceId, cmd)
-			else this.markAccepted(sourceId, cmd)
-			this.markConnectionWrite(sourceId, cmd)
+			else this.markAccepted(sourceId, cmd, value)
 			const state = this.tunerStates.get(sourceId)
 			if (state) {
 				state.commandCount++
@@ -3775,9 +4200,14 @@ export class TunerController extends EventEmitter {
 		commandName: string,
 		value: number,
 		origin: "replay" | "config",
+		shown?: number,
 	): void {
 		// As framed: a relay's negative value arrives as its unsigned 32 bits.
-		if (this.frameValues.get(sourceId)?.get(commandName) === value >>> 0) return
+		const last = this.frameValues.get(sourceId)?.get(commandName)
+		if (last === value >>> 0) return
+		// The first frame of a command writing the value the state already showed (assert's
+		// declared centre or rate) moves nothing either.
+		if (last === undefined && shown === value) return
 		this.noteChange(sourceId, commandName, value, changeOf({ origin }))
 	}
 
@@ -3834,6 +4264,7 @@ export class TunerController extends EventEmitter {
 			unknownFields: _stale,
 			declaredOnlyFields: _staleDeclared,
 			measuredFields: _staleMeasured,
+			proof: _staleProof,
 			...fields
 		} = state
 		const { unknownFields, declaredOnlyFields } = this.fieldProof(
@@ -3845,6 +4276,7 @@ export class TunerController extends EventEmitter {
 			unknownFields.includes("sampleRate") &&
 			this.measuredRates.get(state.sourceId) === state.sampleRate
 		const lastChange = this.lastChanges.get(state.sourceId)
+		const proof = this.proofOf(state)
 		return {
 			...fields,
 			...this.tuneStatus?.(state.sourceId),
@@ -3859,6 +4291,7 @@ export class TunerController extends EventEmitter {
 			...(declaredOnlyFields.length > 0 ? { declaredOnlyFields } : {}),
 			...(measured ? { measuredFields: ["sampleRate" as const] } : {}),
 			...(bandGain ? { bandGain } : {}),
+			...(proof ? { proof } : {}),
 		}
 	}
 
@@ -3897,19 +4330,41 @@ export class TunerController extends EventEmitter {
 			accepted?.has(field) === true ||
 			inferred?.has(field) === true ||
 			configWritten?.has(field) === true
+		// Centre and rate say where the shown value comes from, as for every field: known when a
+		// frame of it stands on the live connection (the tuning ledger: proven, settling or
+		// waiting to leave) or it was accepted or written; declared-only when only the declared
+		// baseline backs it; unknown when it is a placeholder. Whether the live connection proves
+		// it is `proof` and tuningWrittenOnConnection (the ledger), not these lists.
+		const state = this.tunerStates.get(sourceId)
+		const live = state ? this.ledger().position(sourceId) !== null : false
+		const fields = state && live ? this.ledgerFields(sourceId) : null
+		const gated = (
+			field: TunerStateField,
+		): "known" | "declared" | "unknown" => {
+			if (field !== "frequency" && field !== "sampleRate") return "known"
+			if (ignored?.has(field) === true || unverified?.has(field) === true)
+				return "unknown"
+			const fs = fields?.[field]
+			if (fs && (fs.queued !== null || fs.state !== "unverified"))
+				return "known"
+			if (proven(field)) return "known"
+			return declared.has(field) ? "declared" : "unknown"
+		}
 		return {
-			unknownFields: STATE_FIELDS.filter(
-				field =>
-					ignored?.has(field) === true ||
-					unverified?.has(field) === true ||
-					(!declared.has(field) && !proven(field)),
+			unknownFields: STATE_FIELDS.filter(field =>
+				field === "frequency" || field === "sampleRate"
+					? gated(field) === "unknown"
+					: ignored?.has(field) === true ||
+						unverified?.has(field) === true ||
+						(!declared.has(field) && !proven(field)),
 			),
-			declaredOnlyFields: STATE_FIELDS.filter(
-				field =>
-					declared.has(field) &&
-					!proven(field) &&
-					ignored?.has(field) !== true &&
-					unverified?.has(field) !== true,
+			declaredOnlyFields: STATE_FIELDS.filter(field =>
+				field === "frequency" || field === "sampleRate"
+					? gated(field) === "declared"
+					: declared.has(field) &&
+						!proven(field) &&
+						ignored?.has(field) !== true &&
+						unverified?.has(field) !== true,
 			),
 		}
 	}

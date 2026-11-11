@@ -168,6 +168,22 @@ export interface SpectrumTrustShadow {
 	mismatch: number
 	/** The last 32 disagreements, oldest first (older ones stay in the counters). */
 	disagreements: SpectrumTrustDisagreement[]
+	/**
+	 * Measured delay from a centre or rate frame's flush to the first block summary whose content
+	 * shows the change (payload bytes, and ms at the engine's rate; lower bounds). p50 and max over
+	 * the last 64; null before the first. `undetected`: changes not seen (a quiet band, another
+	 * bin grid, a newer frame first, or nothing within 5 s of payload). Diagnostics only.
+	 */
+	retuneDelay?: SpectrumRetuneDelay
+}
+
+export interface SpectrumRetuneDelay {
+	count: number
+	p50Ms: number | null
+	maxMs: number | null
+	p50Bytes: number | null
+	maxBytes: number | null
+	undetected: number
 }
 
 export interface SpectrumTrustDisagreement {

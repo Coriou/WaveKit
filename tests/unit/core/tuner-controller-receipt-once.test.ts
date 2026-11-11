@@ -165,3 +165,59 @@ describe("TunerController onReceipt: once per call", () => {
 		expect(calls[0]).toMatchObject({ field: "gain", value: 297 })
 	})
 })
+
+/** Microtask turns until `p` settles (the counting loop costs the same for every call). */
+async function ticks(p: Promise<unknown>): Promise<number> {
+	let done = false
+	void p.then(
+		() => {
+			done = true
+		},
+		() => {
+			done = true
+		},
+	)
+	let n = 0
+	while (!done && n < 1000) {
+		await Promise.resolve()
+		n += 1
+	}
+	return n
+}
+
+describe("TunerController withReceiptOnce without onReceipt (review: no extra tick)", () => {
+	it("a call without onReceipt settles on the same turn as its body", async () => {
+		const { controller } = setup()
+		const inner = controller as unknown as {
+			configureNow(
+				id: string,
+				updates: Record<string, unknown>,
+				opts: object,
+			): Promise<void>
+			applyTuneNow(
+				id: string,
+				values: Record<string, unknown>,
+				opts: object,
+				applied: () => void,
+				leftAgc: boolean,
+			): Promise<void>
+			setFrequencyNow(id: string, hz: number, opts: object): Promise<void>
+		}
+		expect(await ticks(controller.configure("rtl", { ppm: 1 }))).toBe(
+			await ticks(inner.configureNow("rtl", { ppm: 2 }, {})),
+		)
+		expect(
+			await ticks(
+				controller.applyTune("rtl", { gain: 100 }, {}, () => undefined),
+			),
+		).toBe(
+			await ticks(
+				inner.applyTuneNow("rtl", { gain: 200 }, {}, () => undefined, false),
+			),
+		)
+		// setFrequency was async before the receipt scope: one async layer over its body, still.
+		expect(await ticks(controller.setFrequency("rtl", UHF + 1))).toBe(
+			await ticks((async () => inner.setFrequencyNow("rtl", UHF + 2, {}))()),
+		)
+	})
+})

@@ -144,6 +144,46 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/gain \
   -H "Content-Type: application/json" -d '{"gain":372}'
 ```
 
+#### Centre and rate on every connection
+
+`rtl_tcp` cannot report where the receiver is tuned, and a receiver that reconnects (a network
+blip, an rtlmux restart, a replugged dongle) may be anywhere. So the core treats every new
+connection as unproven and writes the centre and sample rate it holds as soon as the first
+samples arrive: the last ones you (or a relay client) set, else the declared ones from the
+source's `caps`. Proof is kept per connection: a centre or rate counts as proven only once its
+frame has gone out on this connection and the network settle has passed. GET `/api/tuner` shows
+it per field in `proof` ([API.md](API.md#get-apituner)).
+
+The core writes nothing for those two fields while:
+
+- a client is attached to the core's [tuner relay](#rtl-tcp-relay), or the relay holds control:
+  its own frames prove the tuning (`proof.state: relay`). When it leaves, anything left unproven
+  is written back.
+- a scanner job holds the tuner: the job re-sends its own hop instead, never the configured
+  centre.
+- a paused feed was resumed plainly (the default resume), until a restore resume.
+
+It also writes again after evidence that the receiver moved (an untracked retune, a centre the
+receiver reports differently, a pipeline error, a sustained rate mismatch).
+
+A client such as SDR++ connected **straight to a shared rtlmux** (not through the core's relay)
+is retuned to the core's held values whenever the core's connection starts again. Put SDR++ on
+the core's relay instead, or turn the declared fallback off:
+
+```yaml
+tuner:
+  writeDeclaredTuningOnConnect: true # false: never write the config/caps centre and rate
+```
+
+With `false` a centre or rate nobody set stays unverified until somebody sets it (values you set
+are still written back). The other opt-out is the plain resume of a paused feed.
+
+`tuner.reconnectPolicy: reset` forgets the values you set when the connection comes back, so the
+core then writes the declared centre and rate (it no longer leaves the receiver where it was).
+For a core that touches nothing on a reconnect, combine `reconnectPolicy: reset` with
+`writeDeclaredTuningOnConnect: false` (and configure no tuner gain: configured gain settings
+are still written to every connection).
+
 #### Per-band gain
 
 A gain that suits one band can overload the dongle in another. At 868 MHz a manual 49.6 dB

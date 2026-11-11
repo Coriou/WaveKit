@@ -794,12 +794,15 @@ describe("trust from a real TunerController (WG5 R1)", () => {
 		expect(trust()).toBe("commanded")
 	})
 
-	it("a reset reconnect is unverified until re-commanded", async () => {
+	it("a reset reconnect discards the commanded tuning; assert commands the declared one", async () => {
 		const { tuner, trust, command } = setupReal("reset")
 		await command()
 		expect(trust()).toBe("commanded")
-		expect(tuner.synchronizeOnConnect(AIS).reset).toBe(true)
-		expect(trust()).toBe("unverified")
+		const result = tuner.synchronizeOnConnect(AIS)
+		expect(result.reset).toBe(true)
+		expect(result.commands).toEqual(["set-sample-rate", "set-frequency"])
+		// Commanded at the declared values (written on this connection), never the discarded ones.
+		expect(trust()).toBe("commanded")
 		await command()
 		expect(trust()).toBe("commanded")
 	})

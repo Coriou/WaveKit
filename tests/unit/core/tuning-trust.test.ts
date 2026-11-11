@@ -259,12 +259,14 @@ describe("analog transmission frequency trust (WG9 req 3.1, 3.2)", () => {
 		expect(at(controller)).toBe("relay")
 	})
 
-	it("is unverified after a reset reconnect until this core commands again", async () => {
+	it("is commanded at the declared baseline after a reset reconnect (assert writes it)", async () => {
 		const { controller } = makeController("reset")
 		await controller.setSampleRate("rtl", 1_024_000)
 		await controller.setFrequency("rtl", 446_200_000)
 		controller.synchronizeOnConnect("rtl")
-		expect(at(controller)).toBe("unverified")
+		// The accepted tuning is discarded; assert wrote the declared values on the new connection.
+		expect(at(controller)).toBe("commanded")
+		expect(controller.getState("rtl")?.frequency).not.toBe(446_200_000)
 		await controller.setSampleRate("rtl", 1_024_000)
 		await controller.setFrequency("rtl", 446_200_000)
 		expect(at(controller)).toBe("commanded")
@@ -279,7 +281,7 @@ describe("analog transmission frequency trust (WG9 req 3.1, 3.2)", () => {
 		expect(at(controller)).toBe("commanded")
 		failWrites(true)
 		controller.synchronizeOnConnect("rtl")
-		// still accepted (replayed next time), but not written on this connection
+		// still accepted (asserted next time), but not written on this connection
 		expect(controller.getState("rtl")?.declaredOnlyFields).toBeUndefined()
 		expect(controller.tuningWrittenOnConnection("rtl")).toBe(false)
 		expect(at(controller)).toBe("unverified")

@@ -143,6 +143,34 @@ export interface TunerState {
 	restore?: TuneRestore
 	/** How the last POST /api/tuner/:sourceId/tune ended, for a client that lost its answer. */
 	lastTune?: TunerLastTune
+	/**
+	 * What proves `frequency` and `sampleRate` on the receiver's current connection (the core's
+	 * tuning ledger: every tuning frame flushed to the receiver, at its payload position). Absent
+	 * on cores without a ledger.
+	 */
+	proof?: TunerTuningProof
+}
+
+/** TunerState.proof. */
+export interface TunerTuningProof {
+	frequency: TunerFieldProof
+	sampleRate: TunerFieldProof
+}
+
+/**
+ * One field's proof on the current connection: `commanded` (a frame of the core or the scanner
+ * went out and settled), `relay` (a relay client's frame settled), `settling` (a frame went out, or
+ * waits to leave, and its settle has not passed) or `unverified` (nothing on this connection
+ * proves it; `reason` says why, a fixed code such as `no-receipt`, `untracked-retune`,
+ * `rate-truth-mismatch`, `relay-attached`, `scanner-lease`, `plain-resume` or `declared-write-off`).
+ */
+export interface TunerFieldProof {
+	state: "unverified" | "settling" | "commanded" | "relay"
+	/** Who wrote the frame that proves (or is settling) it, else null. */
+	writer: "operator" | "scanner" | "assert" | "relay" | null
+	/** The connection's ledger session (numbered per source from 1); null without one. */
+	session: number | null
+	reason?: string
 }
 
 /**

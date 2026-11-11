@@ -178,17 +178,18 @@ describe("TunerState.unknownFields", () => {
 			])
 		})
 
-		it("a reset reconnect makes the fields declared-only again and says so", async () => {
+		it("a reset reconnect asserts the declared fields, which the new connection then proves", async () => {
 			create({ reconnectPolicy: "reset" })
 			await controller.setFrequency("rtl", 1_090_000_000, { accept: false })
 			const events: unknown[] = []
 			controller.on("state-changed", (_id, state) => events.push(state))
-			expect(controller.synchronizeOnConnect("rtl").reset).toBe(false)
+			const result = controller.synchronizeOnConnect("rtl")
+			expect(result.reset).toBe(false)
+			expect(result.commands).toEqual(["set-sample-rate", "set-frequency"])
 			expect(events).toHaveLength(1)
-			expect(controller.getState("rtl")!.declaredOnlyFields).toEqual([
-				"frequency",
-				"sampleRate",
-			])
+			expect(controller.getState("rtl")).not.toHaveProperty(
+				"declaredOnlyFields",
+			)
 		})
 
 		it("an ignored relay frequency or rate is unknown until the next accepted value", async () => {
@@ -212,13 +213,19 @@ describe("TunerState.unknownFields", () => {
 			)
 		})
 
-		it("a restore replay clears an ignored relay value", async () => {
+		it("an ignored relay value stays unknown under the relay; assert clears it once control is back", async () => {
 			await controller.setFrequency("rtl", 1_090_000_000)
 			controller.applyExternalCommand("rtl", 0x01, 14_200_000)
-			expect(controller.synchronizeOnConnect("rtl").commands).toContain(
+			// External control (assert rule 1): the core writes no centre.
+			expect(controller.synchronizeOnConnect("rtl").commands).not.toContain(
 				"set-frequency",
 			)
-			expect(controller.getState("rtl")!.unknownFields).not.toContain(
+			expect(controller.getState("rtl")!.unknownFields).toContain("frequency")
+			// The relay client leaves: control comes back and assert writes the held centre.
+			controller.syncExternalControl("rtl", false)
+			await new Promise(resolve => setImmediate(resolve))
+			expect(controller.getState("rtl")!.frequency).toBe(1_090_000_000)
+			expect(controller.getState("rtl")!.unknownFields ?? []).not.toContain(
 				"frequency",
 			)
 		})
@@ -228,17 +235,20 @@ describe("TunerState.unknownFields", () => {
 			expect(controller.getState("rtl")!.directSampling).toBe("q")
 		})
 
-		it("a restore reconnect drops an inferred centre and rate back to the baseline (WG5 R2)", async () => {
+		it("a restore reconnect asserts the declared centre and rate over inferred ones (WG5 R2)", async () => {
 			await controller.setFrequency("rtl", 162_000_000, { accept: false })
 			await controller.setSampleRate("rtl", 2_400_000, { accept: false })
 			const events: unknown[] = []
 			controller.on("state-changed", (_id, state) => events.push(state))
-			expect(controller.synchronizeOnConnect("rtl").commands).toEqual([])
+			expect(controller.synchronizeOnConnect("rtl").commands).toEqual([
+				"set-sample-rate",
+				"set-frequency",
+			])
 			expect(events).toHaveLength(1)
 			const state = controller.getState("rtl")!
 			expect(state.frequency).toBe(1_090_000_000)
 			expect(state.sampleRate).toBe(2_048_000)
-			expect(state.declaredOnlyFields).toEqual(["frequency", "sampleRate"])
+			expect(state).not.toHaveProperty("declaredOnlyFields")
 		})
 
 		it("a restore resume drops an inferred centre and rate as a dropout does (WG5 R2)", async () => {
@@ -247,7 +257,7 @@ describe("TunerState.unknownFields", () => {
 			await controller.setSampleRate("rtl", 2_400_000, { accept: false })
 			expect(
 				controller.synchronizeOnConnect("rtl", { resume: "restore" }).commands,
-			).toEqual([])
+			).toEqual(["set-sample-rate", "set-frequency"])
 			expect(controller.getState("rtl")!.frequency).toBe(1_090_000_000)
 			expect(current).toMatchObject({
 				centerFreq: 1_090_000_000,
@@ -255,13 +265,13 @@ describe("TunerState.unknownFields", () => {
 			})
 		})
 
-		it("a restore resume restores a relay client's centre and rate", () => {
-			// SDR++ through the relay: its writes are accepted and replayed on any restore.
+		it("a restore resume leaves a relay client's centre and rate to the relay client", () => {
+			// SDR++ through the relay holds control: its frames prove the connection (assert rule 1).
 			controller.applyExternalCommand("rtl", 0x01, 162_000_000)
 			controller.applyExternalCommand("rtl", 0x02, 2_400_000)
 			expect(
 				controller.synchronizeOnConnect("rtl", { resume: "restore" }).commands,
-			).toEqual(["set-sample-rate", "set-frequency"])
+			).toEqual([])
 			expect(controller.getState("rtl")!.frequency).toBe(162_000_000)
 			expect(current).toMatchObject({
 				centerFreq: 162_000_000,
@@ -287,12 +297,14 @@ describe("TunerState.unknownFields", () => {
 		it("a restore reconnect replays an accepted centre and keeps it proven", async () => {
 			await controller.setFrequency("rtl", 162_000_000)
 			await controller.setFrequency("rtl", 162_025_000, { accept: false })
+			// The held centre is the accepted one, never the unaccepted write after it.
 			expect(controller.synchronizeOnConnect("rtl").commands).toEqual([
+				"set-sample-rate",
 				"set-frequency",
 			])
 			const state = controller.getState("rtl")!
-			expect(state.frequency).toBe(162_025_000)
-			expect(state.declaredOnlyFields).toEqual(["sampleRate"])
+			expect(state.frequency).toBe(162_000_000)
+			expect(state).not.toHaveProperty("declaredOnlyFields")
 		})
 
 		it("a reset that only forgets inferred values returns them to the baseline (WG5 R2)", async () => {

@@ -141,16 +141,14 @@ describe("proveSampleRateForFrequency (WG10 req 2.8)", () => {
 			false,
 		)
 		expect(t.rateWrites()).toHaveLength(replayed)
-		// A connection without a replay (reset policy) needs one more write.
+		// A reset reconnect discards the accepted rate, and assert writes the declared one on
+		// the new connection itself: the proof finds it proven and writes nothing more.
 		const r = make()
 		;(
 			r.controller as unknown as { config: { reconnectPolicy: string } }
 		).config.reconnectPolicy = "reset"
 		await r.controller.proveSampleRateForFrequency("rtl-1", REST)
 		r.controller.synchronizeOnConnect("rtl-1")
-		expect(await r.controller.proveSampleRateForFrequency("rtl-1", REST)).toBe(
-			true,
-		)
 		expect(await r.controller.proveSampleRateForFrequency("rtl-1", REST)).toBe(
 			false,
 		)
@@ -254,6 +252,7 @@ describe("Property 7", () => {
 					for (const op of ops) {
 						if (op === "reconnect") {
 							t.controller.synchronizeOnConnect("rtl-1")
+							// Assert may have proved the declared rate on the new connection.
 							epochWrites = 0
 						} else if (op === "external")
 							t.controller.setControlMode("rtl-1", "external")
@@ -287,7 +286,14 @@ describe("Property 7", () => {
 						for (const f of t.rateWrites()) expect(f.readUInt32BE(1)).toBe(held)
 						expect(t.controller.getState("rtl-1")!.sampleRate).toBe(held)
 					}
-					expect(t.frames.every(f => f[0] === SET_SAMPLE_RATE)).toBe(true)
+					// Besides the proof's rate, only assert's declared centre on a reconnect.
+					expect(
+						t.frames.every(
+							f =>
+								f[0] === SET_SAMPLE_RATE ||
+								(f[0] === SET_FREQUENCY && f.readUInt32BE(1) === 100_000_000),
+						),
+					).toBe(true)
 				},
 			),
 			{ numRuns: 100 },

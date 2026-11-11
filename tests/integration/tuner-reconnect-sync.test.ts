@@ -104,7 +104,7 @@ afterEach(async () => {
 })
 
 describe("tuner reconnect synchronization over rtl_tcp", () => {
-	it("replays accepted API and relay state after reconnect; newer relay commands win", async () => {
+	it("asserts on each session; under an attached relay client only the other fields replay; newer relay commands win", async () => {
 		// Minimum jittered backoff (2 s) keeps the reconnect quick and deterministic.
 		vi.spyOn(Math, "random").mockReturnValue(0)
 
@@ -159,11 +159,16 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 			() => sourceManager.getStatus("rtl-1")?.activity.state === "streaming",
 		)
 		const first = upstream.connections[0]!
-		expect(first.frames).toEqual([]) // config defaults are never pushed
+		// Assert: nothing proves the new session's rate and centre, so the declared ones go out.
+		await waitFor(() => first.frames.length === 2)
+		expect(first.frames).toEqual([
+			[0x02, 2_048_000],
+			[0x01, 100_000_000],
+		])
 
 		await tuner.setSampleRate("rtl-1", 2_400_000)
 		await tuner.setFrequency("rtl-1", 145_000_000)
-		await waitFor(() => first.frames.length === 2)
+		await waitFor(() => first.frames.length === 4)
 
 		await relay.start()
 		cleanups.push(() => relay.stop())
@@ -172,7 +177,7 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 		cleanups.push(() => void sdrpp.destroy())
 		await waitFor(() => tuner.getState("rtl-1")?.controlMode === "external")
 		sdrpp.write(frame(0x01, 162_000_000))
-		await waitFor(() => first.frames.length === 3)
+		await waitFor(() => first.frames.length === 5)
 
 		const capsEvents: SourceCaps[] = []
 		sourceManager.on("caps-changed", (_id, caps) => capsEvents.push(caps))
@@ -187,19 +192,18 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 
 		await waitFor(() => upstream.connections.length === 2)
 		const second = upstream.connections[1]!
-		await waitFor(() => second.frames.length === 3)
-		expect(second.frames).toEqual([
-			[0x02, 2_400_000],
-			[0x01, 162_000_000],
-			[0x04, 300],
-		])
+		await waitFor(() => second.frames.length === 1)
+		await new Promise(resolve => setTimeout(resolve, 100))
+		// SDR++ is still attached: its frames prove centre and rate (assert rule 1); the gain it
+		// set during the outage is replayed.
+		expect(second.frames).toEqual([[0x04, 300]])
 		expect(capsEvents).toEqual([]) // unchanged state: no decoder restart
 		// The outage-time forward error is not left behind after reconnect+replay.
 		expect(relay.getStatus().lastError).toBeUndefined()
 
 		sdrpp.write(frame(0x01, 163_000_000))
-		await waitFor(() => second.frames.length === 4)
-		expect(second.frames[3]).toEqual([0x01, 163_000_000])
+		await waitFor(() => second.frames.length === 2)
+		expect(second.frames[1]).toEqual([0x01, 163_000_000])
 
 		const state = tuner.getState("rtl-1")
 		expect(state?.frequency).toBe(163_000_000)
@@ -210,7 +214,7 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 		expect(upstream.connections).toHaveLength(2)
 	}, 20_000)
 
-	it("reset policy writes nothing after reconnect and returns caps to the configured baseline once", async () => {
+	it("reset policy asserts only the declared rate after reconnect and returns caps to the configured baseline once", async () => {
 		vi.spyOn(Math, "random").mockReturnValue(0)
 
 		const upstream = await startFakeRtlTcp()
@@ -256,10 +260,12 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 			() => sourceManager.getStatus("rtl-1")?.activity.state === "streaming",
 		)
 		const first = upstream.connections[0]!
+		// Assert: the declared rate (no centre is declared).
+		await waitFor(() => first.frames.length === 1)
 
 		await tuner.setSampleRate("rtl-1", 2_160_000)
 		await tuner.setFrequency("rtl-1", 446_866_968)
-		await waitFor(() => first.frames.length === 2)
+		await waitFor(() => first.frames.length === 3)
 		expect(sourceManager.getCaps("rtl-1")?.sampleRate).toBe(2_160_000)
 
 		const capsEvents: SourceCaps[] = []
@@ -270,7 +276,8 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 		// Give any stray replay time to arrive before asserting silence.
 		await new Promise(resolve => setTimeout(resolve, 100))
 
-		expect(upstream.connections[1]!.frames).toEqual([])
+		// The accepted tuning is discarded; assert writes the declared rate, never the old values.
+		expect(upstream.connections[1]!.frames).toEqual([[0x02, 2_048_000]])
 		expect(capsEvents).toHaveLength(1)
 		const caps = sourceManager.getCaps("rtl-1")
 		expect(caps?.sampleRate).toBe(2_048_000)
@@ -339,14 +346,16 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 		const capsEvents: SourceCaps[] = []
 		sourceManager.on("caps-changed", (_id, caps) => capsEvents.push(caps))
 
+		// The first payload's assert wrote the declared rate (frame 1).
+		expect(conn.frames).toEqual([[0x02, 2_048_000]])
 		sdrpp.write(frame(0x02, 3_500_000)) // out of range: rejected by controller
-		await waitFor(() => conn.frames.length === 1) // relay handlers have run
+		await waitFor(() => conn.frames.length === 2) // relay handlers have run
 		expect(capsEvents).toEqual([])
 		expect(sourceManager.getCaps("rtl-1")?.sampleRate).toBe(2_048_000)
 		expect(tuner.getState("rtl-1")?.sampleRate).toBe(2_048_000)
 
 		sdrpp.write(frame(0x02, 2_400_000)) // accepted: exactly one caps change
-		await waitFor(() => conn.frames.length === 2)
+		await waitFor(() => conn.frames.length === 3)
 		expect(capsEvents).toHaveLength(1)
 		expect(capsEvents[0]?.sampleRate).toBe(2_400_000)
 	}, 20_000)
@@ -395,7 +404,8 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 		const first = upstream.connections[0]!
 		await tuner.setSampleRate("rtl-1", 2_400_000)
 		await tuner.setFrequency("rtl-1", 145_000_000)
-		await waitFor(() => first.frames.length === 2)
+		// The declared rate from assert, then the two writes.
+		await waitFor(() => first.frames.length === 3)
 
 		// rtlmux accepts and sends its header, but its dongle is not back yet.
 		upstream.setHoldPayload(true)
@@ -412,11 +422,13 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 		await waitFor(() => second.frames.length === 1)
 
 		second.sendPayload() // upstream back: first payload of the session
-		await waitFor(() => second.frames.length === 3)
+		await waitFor(() => second.frames.length === 2)
+		await new Promise(resolve => setTimeout(resolve, 100))
+		// The gap command already proves the centre on this session (receipted at its start):
+		// assert writes only the rate, never the older centre over it.
 		expect(second.frames).toEqual([
 			[0x01, 146_000_000],
 			[0x02, 2_400_000],
-			[0x01, 146_000_000],
 		])
 		expect(tuner.getState("rtl-1")?.frequency).toBe(146_000_000)
 		expect(capsEvents).toHaveLength(1) // the gap command only; replay adds none

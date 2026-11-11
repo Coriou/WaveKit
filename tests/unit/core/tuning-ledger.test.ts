@@ -278,16 +278,38 @@ describe("TuningLedger", () => {
 		const { conn, session } = started(ledger)
 		flush(conn, Buffer.concat([frame(1, 5), frame(2, RATE)]), OP)
 		session.pos = 10
-		// 62 gain frames: exactly TUNING_LEDGER_RING receipts, the two tuning ones still held.
-		for (let i = 0; i < TUNING_LEDGER_RING - 2; i++)
-			flush(conn, frame(4, i), OP)
+		flush(conn, frame(1, 6), OP)
 		session.pos = 20
+		// 61 gain frames: exactly TUNING_LEDGER_RING receipts, the three tuning ones still held.
+		for (let i = 0; i < TUNING_LEDGER_RING - 3; i++)
+			flush(conn, frame(4, i), OP)
+		session.pos = 30
 		expect(ledger.receipts("rtl")).toHaveLength(TUNING_LEDGER_RING)
-		expect(ledger.trustAt("rtl", 1, 0, 10).trust).toBe("commanded")
-		// One more evicts the frequency receipt.
+		expect(ledger.trustAt("rtl", 1, 0, 10)).toMatchObject({
+			trust: "commanded",
+			frequency: 5,
+		})
+		// Two more evict the first centre and the rate: each is still its field's newest evicted
+		// receipt and lies before the block's end, so the block still reads (exactly).
+		flush(conn, frame(4, 98), OP)
 		flush(conn, frame(4, 99), OP)
 		expect(ledger.receipts("rtl")).toHaveLength(TUNING_LEDGER_RING)
+		expect(ledger.trustAt("rtl", 1, 0, 10)).toMatchObject({
+			trust: "commanded",
+			frequency: 5,
+		})
+		// One more evicts the second centre: the first one is gone for good, so a block ending
+		// before the second is older than the ring; the live edge keeps the second.
+		flush(conn, frame(4, 100), OP)
 		expect(ledger.trustAt("rtl", 1, 0, 10).reason).toBe("older-than-ring")
+		expect(ledger.trustAt("rtl", 1, 10, 30)).toMatchObject({
+			trust: "commanded",
+			frequency: 6,
+		})
+		expect(ledger.fieldState("rtl").frequency).toMatchObject({
+			state: "proven",
+			value: 6,
+		})
 	})
 
 	it("an evicted doubt keeps unproving every receipt it may follow", () => {
@@ -431,16 +453,25 @@ describe("TuningLedger", () => {
 	it("reads unverified once the proving receipt left the ring", () => {
 		fc.assert(
 			fc.property(fc.integer({ min: 0, max: 40 }), extra => {
+				// The block's proving centre is followed by a newer centre; once that newer one has
+				// left the ring too, the block's own proof is gone (older than the ring).
 				const ledger = ledgerWith()
 				const { conn, session } = started(ledger)
 				flush(conn, Buffer.concat([frame(1, 5), frame(2, RATE)]), OP)
 				session.pos = 10
-				const gains = TUNING_LEDGER_RING - 2 + extra
+				flush(conn, frame(1, 6), OP)
+				const gains = TUNING_LEDGER_RING - 3 + extra
 				for (let i = 0; i < gains; i++) flush(conn, frame(4, i), OP)
 				session.pos = 20
 				const v = ledger.trustAt("rtl", 1, 0, 10)
-				if (extra === 0) expect(v.trust).toBe("commanded")
+				if (extra < 3)
+					expect(v).toMatchObject({ trust: "commanded", frequency: 5 })
 				else expect(v.reason).toBe("older-than-ring")
+				// The live edge always keeps the newest centre and rate.
+				expect(ledger.trustAt("rtl", 1, 10, 20)).toMatchObject({
+					trust: "commanded",
+					frequency: 6,
+				})
 			}),
 			{ numRuns: 100 },
 		)
@@ -803,5 +834,328 @@ describe("TuningLedger", () => {
 		session.pos = 10
 		expect(ledger.receipts("rtl")).toHaveLength(TUNING_LEDGER_RING)
 		expect(ledger.trustAt("rtl", 1, 0, 10).reason).toBe("older-than-ring")
+	})
+})
+
+describe("TuningLedger listeners and holds (step 2)", () => {
+	it("tells listeners of session start and end, receipts, doubts and holds; a throwing one is ignored", () => {
+		const ledger = ledgerWith()
+		const seen: string[] = []
+		ledger.subscribe(() => {
+			throw new Error("listener bug")
+		})
+		const off = ledger.subscribe((id, change) =>
+			seen.push(`${id}:${change.kind}`),
+		)
+		const { conn } = started(ledger)
+		flush(conn, frame(1, 5), OP)
+		ledger.raiseDoubt("rtl", "both", "test")
+		ledger.setHold("rtl", "sampleRate", "rate-truth-mismatch")
+		conn.close()
+		off()
+		started(ledger)
+		expect(seen).toEqual([
+			"rtl:session-started",
+			"rtl:receipt",
+			"rtl:doubt",
+			"rtl:hold",
+			"rtl:session-ended",
+		])
+	})
+
+	it("a hold unproves every read of its field until cleared, receipts after it included", () => {
+		const ledger = ledgerWith()
+		const { conn, session } = started(ledger)
+		flush(conn, Buffer.concat([frame(1, 5), frame(2, RATE)]), OP)
+		session.pos = 10
+		expect(ledger.setHold("rtl", "sampleRate", "rate-truth-mismatch")).toBe(
+			true,
+		)
+		expect(ledger.trustAt("rtl", 1, 0, 10)).toMatchObject({
+			trust: "unverified",
+			doubtReason: "rate-truth-mismatch",
+		})
+		expect(ledger.fieldState("rtl").sampleRate.hold).toEqual({
+			reason: "rate-truth-mismatch",
+			answered: false,
+			withoutHold: "proven",
+		})
+		flush(conn, frame(2, RATE), { writer: "assert" })
+		session.pos = 20
+		expect(ledger.fieldState("rtl").sampleRate).toMatchObject({
+			state: "unverified",
+			hold: { answered: true, withoutHold: "proven" },
+		})
+		// Frequency never held.
+		expect(ledger.fieldState("rtl").frequency.state).toBe("proven")
+		ledger.setHold("rtl", "sampleRate", null)
+		expect(ledger.trustNow("rtl").trust).toBe("commanded")
+		// A hold ends with its session; none without a live one.
+		ledger.setHold("rtl", "sampleRate", "rate-truth-mismatch")
+		conn.close()
+		expect(ledger.setHold("rtl", "sampleRate", "x")).toBe(false)
+		const next = started(ledger)
+		flush(next.conn, Buffer.concat([frame(1, 5), frame(2, RATE)]), OP)
+		next.session.pos = 10
+		expect(ledger.trustNow("rtl").trust).toBe("commanded")
+	})
+
+	it("an evicted centre mover still pushes the boundary of an older receipt", () => {
+		const ledger = ledgerWith(5)
+		const { conn, session } = started(ledger)
+		flush(conn, Buffer.concat([frame(1, 5), frame(2, RATE)]), OP)
+		session.pos = 100
+		flush(conn, frame(5, 1), OP) // ppm at 100: the centre settles again by 105
+		session.pos = 101
+		for (let i = 0; i < TUNING_LEDGER_RING; i++) flush(conn, frame(4, i), OP)
+		session.pos = 200
+		// Every receipt above has left the ring but the live edge keeps the centre and rate.
+		expect(ledger.receipts("rtl").every(r => r.field === "gain")).toBe(true)
+		expect(ledger.trustAt("rtl", 1, 101, 150).reason).toBe("settling")
+		expect(ledger.trustAt("rtl", 1, 105, 150).trust).toBe("commanded")
+	})
+})
+
+describe("TuningLedger eviction never loosens a verdict (fix round 1)", () => {
+	it("a block an evicted mover pushed stays unproven once a newer mover is the one kept", () => {
+		// 1 ms at 1.024 Msps × 2 B = 2048 B of settle.
+		const ledger = new TuningLedger({
+			settleLink: () => ({ configuredSettleMs: 1, inFlightBytes: 0 }),
+			frameBytes: () => 2,
+			capsRate: () => 1_024_000,
+		})
+		const { conn, session } = started(ledger)
+		flush(conn, Buffer.concat([frame(2, 1_024_000), frame(1, 5)]), OP)
+		session.pos = 10_000
+		flush(conn, frame(5, 1), OP) // ppm at 10 000: the centre settles again by 12 048
+		session.pos = 11_500
+		expect(ledger.trustAt("rtl", 1, 11_000, 11_500).reason).toBe("settling")
+		session.pos = 50_000
+		flush(conn, frame(5, 2), OP)
+		session.pos = 60_000
+		// Evicts the rate, the centre and both ppm frames: the newest evicted mover (50 000) lies
+		// past the block, the one that pushed it is gone.
+		for (let i = 0; i < TUNING_LEDGER_RING; i++) flush(conn, frame(4, i), OP)
+		session.pos = 70_000
+		const v = ledger.trustAt("rtl", 1, 11_000, 11_500)
+		expect(v.trust).toBe("unverified")
+		expect(v.reason).toBe("older-than-ring")
+		// The live edge keeps its proof.
+		expect(ledger.trustAt("rtl", 1, 60_000, 70_000).trust).toBe("commanded")
+	})
+
+	// Feature: tuning-trust-ledger, Property 3: eviction never makes a verdict looser
+	// Validates: Requirements 1.1
+	it("re-reading any block after more writes, doubts and evictions is never looser", () => {
+		// Weighted towards what eviction can lose: centre movers (ppm), queries while a mover's
+		// settle runs, and bursts that push several of them out of the ring at once.
+		const op = fc.oneof(
+			{
+				arbitrary: fc.record({
+					k: fc.constant("advance" as const),
+					n: fc.integer({ min: 0, max: 200 }),
+				}),
+				weight: 4,
+			},
+			{
+				arbitrary: fc.record({
+					k: fc.constant("write" as const),
+					field: fc.constantFrom(
+						1 as const,
+						2 as const,
+						4 as const,
+						5 as const,
+						5 as const,
+					),
+					value: fc.integer({ min: 1, max: 4 }),
+				}),
+				weight: 4,
+			},
+			{
+				arbitrary: fc.record({
+					k: fc.constant("burst" as const),
+					n: fc.integer({ min: 1, max: TUNING_LEDGER_RING + 8 }),
+				}),
+				weight: 1,
+			},
+			{
+				arbitrary: fc.record({
+					k: fc.constant("doubt" as const),
+					field: fc.constantFrom(
+						"frequency" as const,
+						"sampleRate" as const,
+						"both" as const,
+					),
+					back: fc.integer({ min: 0, max: 600 }),
+				}),
+				weight: 1,
+			},
+			{
+				arbitrary: fc.record({
+					k: fc.constant("query" as const),
+					x: fc.nat(),
+					y: fc.nat(),
+				}),
+				weight: 3,
+			},
+		)
+		fc.assert(
+			fc.property(
+				fc.array(op, { maxLength: 80 }),
+				fc.integer({ min: 0, max: 400 }),
+				(ops, settle) => {
+					const ledger = ledgerWith(settle)
+					const { conn, session } = started(ledger)
+					const asked: {
+						a: number
+						b: number
+						v: ReturnType<TuningLedger["trustAt"]>
+					}[] = []
+					for (const o of ops) {
+						if (o.k === "advance") session.pos += o.n
+						else if (o.k === "write")
+							flush(
+								conn,
+								frame(o.field, o.field === 2 ? RATE * o.value : o.value),
+								OP,
+							)
+						else if (o.k === "burst")
+							for (let i = 0; i < o.n; i++) flush(conn, frame(4, i), OP)
+						else if (o.k === "doubt")
+							ledger.raiseDoubt(
+								"rtl",
+								o.field,
+								"test",
+								Math.max(0, session.pos - o.back),
+							)
+						else {
+							// Near the live edge, where settles still run.
+							const back = o.x % 600
+							const a = Math.max(0, session.pos - back)
+							const b = Math.max(a, session.pos - (o.y % (back + 1)))
+							asked.push({ a, b, v: ledger.trustAt("rtl", 1, a, b) })
+						}
+					}
+					for (const { a, b, v } of asked) {
+						const later = ledger.trustAt("rtl", 1, a, b)
+						if (later.trust === "unverified") continue
+						expect(later.trust).toBe(v.trust)
+						expect(later.frequency).toBe(v.frequency)
+						expect(later.sampleRate).toBe(v.sampleRate)
+					}
+				},
+			),
+			{ numRuns: 300 },
+		)
+	})
+})
+
+describe("TuningLedger eviction interleavings (fix round 1)", () => {
+	// Feature: tuning-trust-ledger, Property 3: eviction never makes a verdict looser
+	// Validates: Requirements 1.1
+	it("centre movers at rising positions, reads between them, then a burst: never looser", () => {
+		fc.assert(
+			fc.property(
+				fc.integer({ min: 1, max: 500 }),
+				fc.array(fc.integer({ min: 1, max: 2_000 }), {
+					minLength: 1,
+					maxLength: 6,
+				}),
+				fc.array(fc.tuple(fc.nat(), fc.nat()), { minLength: 1, maxLength: 8 }),
+				fc.integer({ min: 0, max: TUNING_LEDGER_RING + 8 }),
+				fc.boolean(),
+				(settle, gaps, reads, burst, rateMover) => {
+					const ledger = ledgerWith(settle)
+					const { conn, session } = started(ledger)
+					flush(conn, Buffer.concat([frame(2, RATE), frame(1, 5)]), OP)
+					const asked: {
+						a: number
+						b: number
+						v: ReturnType<TuningLedger["trustAt"]>
+					}[] = []
+					gaps.forEach((gap, i) => {
+						session.pos += gap
+						// ppm moves centre and rate; the tuner crystal (0x0c) too.
+						flush(conn, frame(rateMover && i % 2 === 1 ? 0x0c : 5, i + 1), OP)
+						session.pos += gap
+						for (const [x, y] of reads) {
+							const a = x % (session.pos + 1)
+							const b = a + (y % (session.pos - a + 1))
+							asked.push({ a, b, v: ledger.trustAt("rtl", 1, a, b) })
+						}
+					})
+					session.pos += 1
+					for (let i = 0; i < burst; i++) flush(conn, frame(4, i), OP)
+					session.pos += 1
+					for (const { a, b, v } of asked) {
+						const later = ledger.trustAt("rtl", 1, a, b)
+						if (later.trust === "unverified") continue
+						expect(v.trust).toBe(later.trust)
+						expect(later.frequency).toBe(v.frequency)
+						expect(later.sampleRate).toBe(v.sampleRate)
+					}
+				},
+			),
+			{ numRuns: 300 },
+		)
+	})
+})
+
+describe("TuningLedger hold range (fix round 1)", () => {
+	it("a cleared hold keeps unproving the blocks inside its period", () => {
+		const ledger = ledgerWith()
+		const { conn, session } = started(ledger)
+		flush(conn, Buffer.concat([frame(1, 5), frame(2, RATE)]), OP)
+		session.pos = 10
+		ledger.setHold("rtl", "sampleRate", "rate-truth-mismatch")
+		session.pos = 15
+		flush(conn, frame(2, RATE), { writer: "assert" })
+		session.pos = 30
+		ledger.setHold("rtl", "sampleRate", null)
+		session.pos = 40
+		// Inside the hold period (10 to 30): never re-proven by the clear.
+		for (const [a, b] of [
+			[12, 25],
+			[0, 11],
+			[20, 31],
+		] as const)
+			expect(ledger.trustAt("rtl", 1, a, b)).toMatchObject({
+				trust: "unverified",
+				reason: "doubt",
+				doubtReason: "rate-truth-mismatch",
+			})
+		// Before it and after it: proven.
+		expect(ledger.trustAt("rtl", 1, 0, 10).trust).toBe("commanded")
+		expect(ledger.trustAt("rtl", 1, 30, 40)).toMatchObject({
+			trust: "commanded",
+			sampleRate: RATE,
+		})
+		expect(ledger.trustNow("rtl").trust).toBe("commanded")
+		expect(ledger.fieldState("rtl").sampleRate.state).toBe("proven")
+	})
+
+	it(`keeps ${TUNING_LEDGER_RING} cleared holds per field; older ones merge into one span (stricter)`, () => {
+		const ledger = ledgerWith()
+		const { conn, session } = started(ledger)
+		flush(conn, Buffer.concat([frame(1, 5), frame(2, RATE)]), OP)
+		// Holds at [100 + 10i, 105 + 10i) for i in 0..RING (one past the bound).
+		for (let i = 0; i <= TUNING_LEDGER_RING; i++) {
+			session.pos = 100 + 10 * i
+			ledger.setHold("rtl", "sampleRate", "rate-truth-mismatch")
+			session.pos = 105 + 10 * i
+			ledger.setHold("rtl", "sampleRate", null)
+		}
+		session.pos = 2000
+		// The first two merged into [100, 115): the gap between them reads unverified now.
+		expect(ledger.trustAt("rtl", 1, 106, 109).trust).toBe("unverified")
+		// A gap between two kept holds still reads.
+		const k = TUNING_LEDGER_RING - 1
+		expect(ledger.trustAt("rtl", 1, 106 + 10 * k, 109 + 10 * k).trust).toBe(
+			"commanded",
+		)
+		expect(ledger.trustAt("rtl", 1, 101 + 10 * k, 102 + 10 * k).trust).toBe(
+			"unverified",
+		)
+		expect(ledger.trustNow("rtl").trust).toBe("commanded")
 	})
 })

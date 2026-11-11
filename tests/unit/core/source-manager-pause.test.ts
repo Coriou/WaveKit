@@ -352,7 +352,8 @@ describe("SourceManager feed pause / resume", () => {
 		await tuner.setFrequency("rtl", 145_000_000)
 		await tuner.setGainMode("rtl", "manual")
 		await tuner.setGain("rtl", 297)
-		await waitFor(() => upstream.connections[0]!.frames.length === 4)
+		// Assert's declared rate and centre on the first payload, then the four writes above.
+		await waitFor(() => upstream.connections[0]!.frames.length === 6)
 		await manager.pause("rtl")
 		await waitFor(() => upstream.connections[0]!.closed)
 		return { ...ctx, tuner, bytes: () => bytes }
@@ -593,10 +594,13 @@ describe("SourceManager feed pause / resume", () => {
 			...config(upstream.port),
 			tuner: { gainMode: "manual", gainDb: 30 },
 		})
-		const first = await settledSession(manager, upstream, 0, 2)
+		const first = await settledSession(manager, upstream, 0, 4)
+		// The configured gain, then assert's declared rate and centre (the first session).
 		expect(first.frames).toEqual([
 			[0x03, 1],
 			[0x04, 300],
+			[0x02, 2_048_000],
+			[0x01, 100_000_000],
 		])
 		await manager.pause("rtl")
 		await waitFor(() => first.closed)

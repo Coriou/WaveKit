@@ -176,6 +176,13 @@ async function setup(
 		await payload
 	}
 	await connect()
+	// Assert writes the declared rate and centre to the first session (nothing proves them),
+	// after any configured gain frames: the tests below count the frames without those two.
+	await until(() => frames.some(f => f.cmd === 0x01))
+	for (const cmd of [0x02, 0x01]) {
+		const i = frames.findIndex(f => f.cmd === cmd)
+		if (i >= 0) frames.splice(i, 1)
+	}
 	const post = (body: unknown) =>
 		app.inject({
 			method: "POST",
@@ -1463,8 +1470,9 @@ describe("a temporary tune", () => {
 			gain: 200,
 		})
 		expect(prior.statusCode).toBe(200)
-		// The rate proof, the centre, the mode and the gain have all arrived.
-		await until(() => h.frames.length === 4)
+		// The centre, the mode and the gain have all arrived (assert proved the rate on connect,
+		// so the rate proof skips).
+		await until(() => h.frames.length === 3)
 		h.frames.length = 0
 		h.fakeTime()
 		return h
@@ -2315,7 +2323,8 @@ describe("the user always wins over a temporary tune", () => {
 	async function ready() {
 		const h = await setup()
 		await h.post({ frequencyHz: OTHER_HZ, gainMode: "manual", gain: 200 })
-		await until(() => h.frames.length === 4)
+		// Centre, mode, gain (assert proved the rate on connect: no rate proof frame).
+		await until(() => h.frames.length === 3)
 		h.frames.length = 0
 		h.fakeTime()
 		return h
@@ -2602,7 +2611,8 @@ describe("a tune with preempt: true under a scanner lease", () => {
 	async function leased() {
 		const h = await setup()
 		await h.post({ frequencyHz: OTHER_HZ, gainMode: "manual", gain: 200 })
-		await until(() => h.frames.length === 4)
+		// Centre, mode, gain (assert proved the rate on connect: no rate proof frame).
+		await until(() => h.frames.length === 3)
 		const { arbiter, lost } = arbiterOn(h)
 		h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
 		const lease = arbiter.acquire("job", "rtl", 50)
@@ -2772,7 +2782,8 @@ describe("a tune with preempt: true under a scanner lease", () => {
 	it("a job that returns during a restore armed with no lease ends it, naming the job", async () => {
 		const h = await setup()
 		await h.post({ frequencyHz: OTHER_HZ, gainMode: "manual", gain: 200 })
-		await until(() => h.frames.length === 4)
+		// Centre, mode, gain (assert proved the rate on connect: no rate proof frame).
+		await until(() => h.frames.length === 3)
 		const { arbiter, lost } = arbiterOn(h)
 		h.useLeases(id => arbiter.holder(id)?.jobId ?? null)
 		h.fakeTime()

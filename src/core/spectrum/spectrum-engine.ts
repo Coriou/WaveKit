@@ -20,7 +20,12 @@ import type { SourceFanoutRouter } from "../source-fanout-router.js"
 import type { SourceManager } from "../source-manager.js"
 import type { TunerController } from "../tuner-controller.js"
 import { tuningTrustOf } from "../tuning-trust.js"
-import type { TrustVerdict, TuningLedger } from "../tuning-ledger.js"
+import type {
+	LedgerListener,
+	TrustVerdict,
+	TuningLedger,
+} from "../tuning-ledger.js"
+import { RetuneDelayMeter, type RetuneDelayStatus } from "./retune-delay.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import type { ChannelPlan } from "../scanner/scanner-redesign-contract.js"
 import { WaveKitError } from "../../utils/errors.js"
@@ -209,7 +214,9 @@ export interface SpectrumEngineEvents {
 export type EngineLedger = Pick<
 	TuningLedger,
 	"trustAt" | "position" | "raiseDoubt"
->
+> &
+	// Receipts feed the retune-delay measurement; a ledger without it measures nothing.
+	Partial<Pick<TuningLedger, "subscribe">>
 
 /**
  * Tuning-ledger shadow (trust step 1): every block summary is labelled by the ledger beside the
@@ -225,6 +232,11 @@ export interface EngineTrustShadow {
 	mismatch: number
 	/** The last SHADOW_DISAGREEMENTS disagreements, oldest first. */
 	disagreements: EngineTrustDisagreement[]
+	/**
+	 * Measured delay from a centre or rate frame's flush to the first block showing it
+	 * (retune-delay.ts): diagnostics for the settle, which it never changes.
+	 */
+	retuneDelay: RetuneDelayStatus
 }
 
 export interface EngineTrustDisagreement {
@@ -657,13 +669,15 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private hostCentreOkAt: { session: number; pos: number } | null = null
 	/** Dropped branch bytes applied as gaps since the branch was created. */
 	private appliedDropBytes = 0
-	private readonly shadow: EngineTrustShadow = {
+	private readonly shadow: Omit<EngineTrustShadow, "retuneDelay"> = {
 		agree: 0,
 		ledgerStricter: 0,
 		ledgerLooser: 0,
 		mismatch: 0,
 		disagreements: [],
 	}
+	private readonly retuneDelay = new RetuneDelayMeter()
+	private unsubscribeLedger: (() => void) | null = null
 
 	constructor(private readonly deps: SpectrumEngineDeps) {
 		super()
@@ -1878,6 +1892,9 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.deps.sources.on("payload-started", this.onPayloadStarted)
 		this.deps.sources.on("session-started", this.onSessionStarted)
 		this.deps.sources.on("caps-changed", this.onCapsChanged)
+		this.unsubscribeLedger?.()
+		this.unsubscribeLedger =
+			this.ledger()?.subscribe?.(this.onLedgerChange) ?? null
 		const tuner = this.deps.tuner
 		if (tuner) {
 			tuner.on("command-sent", this.onCommandSent)
@@ -1891,6 +1908,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.deps.sources.off("payload-started", this.onPayloadStarted)
 		this.deps.sources.off("session-started", this.onSessionStarted)
 		this.deps.sources.off("caps-changed", this.onCapsChanged)
+		this.unsubscribeLedger?.()
+		this.unsubscribeLedger = null
 		this.deps.tuner?.off("command-sent", this.onCommandSent)
 		this.deps.tuner?.off("state-changed", this.onStateChanged)
 	}
@@ -2199,7 +2218,34 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		return {
 			...this.shadow,
 			disagreements: this.shadow.disagreements.map(d => ({ ...d })),
+			retuneDelay: this.retuneDelay.status(),
 		}
+	}
+
+	/** A centre or rate frame flushed: the retune-delay measurement starts from it. */
+	private readonly onLedgerChange: LedgerListener = (sourceId, change) => {
+		if (sourceId !== this.sourceId || change.kind !== "receipt") return
+		const r = change.receipt
+		const cfg = this.cfg
+		if (r.field === "testMode") {
+			// A scanner marker bracket: its frames and blocks are skipped (retune-delay.ts).
+			this.retuneDelay.onTestMode(
+				{ session: r.session, on: r.value !== 0, pos: r.pos },
+				cfg ? cfg.sampleRateHz * this.bps : null,
+			)
+			return
+		}
+		if (r.field !== "frequency" && r.field !== "sampleRate") return
+		const epoch = this.running ? this.currentEpoch() : null
+		this.retuneDelay.onReceipt(
+			{ session: r.session, field: r.field, value: r.value, pos: r.pos },
+			epoch
+				? r.field === "frequency"
+					? epoch.centreHz
+					: epoch.sampleRateHz
+				: null,
+			cfg ? cfg.sampleRateHz * this.bps : null,
+		)
 	}
 
 	private ledger(): EngineLedger | null {
@@ -2307,6 +2353,14 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		} catch {
 			read = unmappedRead("lookup-failed")
 		}
+		if (read.session !== null && read.posA !== null && read.posB !== null)
+			this.retuneDelay.onBlock({
+				session: read.session,
+				posA: read.posA,
+				posB: read.posB,
+				bins: ev.summary.bins,
+				binHz: ev.summary.binHz,
+			})
 		const verdict = read.verdict
 		const engineTrust = epoch.tuningTrust
 		const ledgerTrust = verdict.trust

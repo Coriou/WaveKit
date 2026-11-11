@@ -1352,6 +1352,7 @@ async function main(): Promise<void> {
 		own(80, () => tunerRelay.stop())
 		const tunerController = new TunerController(logger, sourceManager, {
 			reconnectPolicy: config.tuner.reconnectPolicy,
+			writeDeclaredTuningOnConnect: config.tuner.writeDeclaredTuningOnConnect,
 			lostOwnership,
 		})
 		// Per-band gain: tuner.bandGain, replaced by <stateDir>/tuner-band-gain.json once PUT.
