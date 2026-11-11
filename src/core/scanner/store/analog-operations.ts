@@ -323,6 +323,10 @@ export interface AnalogOperationIo {
 	rmdir?: (path: string) => Promise<void>
 	/** Directory renames: a staging folder's publication and set-aside moves. */
 	rename?: (from: string, to: string) => Promise<void>
+	/** fsync of a directory (durability only, see DIRECTORY_SYNC_TOLERATED). */
+	fsyncDir?: (path: string) => Promise<void>
+	/** The per-folder media probe of a residue proof (`recordings/analog/<folder>/analog-<id>.wav`). */
+	mediaLstat?: (path: string) => Promise<unknown>
 	unlink(path: string): Promise<void>
 	checkpoint(name: string, operationId: string): Promise<void>
 }
@@ -349,6 +353,11 @@ interface Context {
 	 * the folder is marked, its listers are unknown; empty: the table holds no listing).
 	 */
 	listers?: (folderId: string, name: string) => readonly string[] | null
+	/**
+	 * Fixed-text warning, once per process, that a directory fsync failed with a tolerated
+	 * code (closed set, see DIRECTORY_SYNC_TOLERATED) and a fixed folder kind: no paths.
+	 */
+	directorySyncTolerated?: (code: string, kind: AnalogDirectorySyncKind) => void
 	/** Fixed-text count log of one scan's set-aside work (no names). */
 	setAsideLogged?: (counts: {
 		moved: number
@@ -391,6 +400,36 @@ interface Operation {
 	ownedMedia: boolean
 	foreignMarker: boolean
 	reservation: boolean
+}
+/**
+ * A directory fsync is durability only (the entries are already written): a file system or
+ * sandbox that refuses it with one of these codes is accepted, any other failure is not.
+ */
+const DIRECTORY_SYNC_TOLERATED: ReadonlySet<string> = new Set([
+	"EINVAL",
+	"ENOTSUP",
+	"EISDIR",
+	"EPERM",
+	"EACCES",
+	"EBADF",
+	"ENOSYS",
+	"EOPNOTSUPP",
+])
+/** Which folder a directory fsync was for: a fixed label, safe to log. */
+export type AnalogDirectorySyncKind = "staging" | "operations"
+/** Per process: the tolerated-fsync warning is logged once, whatever the store instance. */
+let directorySyncWarned = false
+/** Test hook: lets the next tolerated directory fsync warn again. */
+export function resetDirectorySyncWarning(): void {
+	directorySyncWarned = false
+}
+async function fsyncDirectory(path: string): Promise<void> {
+	const handle = await open(path, constants.O_RDONLY)
+	try {
+		await handle.sync()
+	} finally {
+		await handle.close()
+	}
 }
 const defaultIo: AnalogOperationIo = {
 	unlink,
@@ -466,6 +505,12 @@ export class AnalogOperations {
 	private lastSetAsideReason: AnalogSetAsideReason | null = null
 	/** Operation ids whose missing or unreadable intent has media somewhere (searched once each). */
 	private readonly mediaBearing = new Set<string>()
+	/**
+	 * Operation ids proven media-free by a complete search, with the `recordings/analog/` folder
+	 * count it saw: a residue whose set-aside move keeps failing is not searched again until
+	 * that count changes. Errors and an over-bound listing are never recorded here.
+	 */
+	private readonly mediaFree = new Map<string, number>()
 	private root: string
 	private rootAnchored = false
 	constructor(private readonly context: Context) {
@@ -705,7 +750,7 @@ export class AnalogOperations {
 			this.valid(op)
 			await this.publishIntent(op, staging)
 			this.valid(op)
-			await this.syncDirectory(staging)
+			await this.syncDirectory(staging, "staging")
 			await this.checkpoint("staging-synced", id)
 			this.valid(op)
 			await this.safeDirectory(dirname(this.opDir(id)), false, op)
@@ -721,7 +766,7 @@ export class AnalogOperations {
 			}
 			await this.moveDirectory(staging, this.opDir(id))
 			op.staged = false
-			await this.syncDirectory(dirname(this.opDir(id)))
+			await this.syncDirectory(dirname(this.opDir(id)), "operations")
 			this.valid(op)
 			await this.checkpoint("intent", id)
 			this.valid(op)
@@ -824,17 +869,21 @@ export class AnalogOperations {
 	private moveDirectory(from: string, to: string): Promise<void> {
 		return this.io.rename?.(from, to) ?? rename(from, to)
 	}
-	/** fsync of a directory's entries; a file system that cannot sync directories is accepted. */
-	private async syncDirectory(path: string): Promise<void> {
-		const handle = await open(path, constants.O_RDONLY)
+	/** fsync of a directory's entries; a tolerated refusal (DIRECTORY_SYNC_TOLERATED) is accepted. */
+	private async syncDirectory(
+		path: string,
+		kind: AnalogDirectorySyncKind,
+	): Promise<void> {
 		try {
-			await handle.sync()
+			await (this.io.fsyncDir?.(path) ?? fsyncDirectory(path))
 		} catch (cause) {
 			const code = nativeCode(cause)
-			if (code !== "EINVAL" && code !== "ENOTSUP" && code !== "EISDIR")
+			if (typeof code !== "string" || !DIRECTORY_SYNC_TOLERATED.has(code))
 				throw cause
-		} finally {
-			await handle.close()
+			if (!directorySyncWarned) {
+				directorySyncWarned = true
+				this.context.directorySyncTolerated?.(code, kind)
+			}
 		}
 	}
 	/** Removes a never-published staging folder: it holds intent metadata only, nothing listed. */
@@ -1498,9 +1547,12 @@ export class AnalogOperations {
 		} catch (cause) {
 			return nativeCode(cause) === "ENOENT"
 		}
+		if (this.mediaFree.get(id) === folders.length) return true
+		this.mediaFree.delete(id)
+		const probe = this.io.mediaLstat ?? lstat
 		for (const folder of folders) {
 			try {
-				await lstat(join(analogRoot, folder, `analog-${id}.wav`))
+				await probe(join(analogRoot, folder, `analog-${id}.wav`))
 				this.mediaBearing.add(id)
 				return false
 			} catch (cause) {
@@ -1508,6 +1560,7 @@ export class AnalogOperations {
 				if (code !== "ENOENT" && code !== "ENOTDIR") return false
 			}
 		}
+		this.mediaFree.set(id, folders.length)
 		return true
 	}
 	/**
@@ -1810,6 +1863,8 @@ export class AnalogOperations {
 			}
 			for (const id of [...this.mediaBearing])
 				if (!operationIds.has(id)) this.mediaBearing.delete(id)
+			for (const id of [...this.mediaFree.keys()])
+				if (!operationIds.has(id)) this.mediaFree.delete(id)
 			if (residue.length || setAsidePresent)
 				await this.tendSetAside(base, residue, next)
 			else this.setAsideHeld = 0

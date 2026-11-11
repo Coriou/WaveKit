@@ -728,6 +728,11 @@ export class EvidenceStore {
 				minFreeBytes: this.caps.minFreeDiskMb * MIB,
 			}),
 			freeBytes: async () => (await this.statfs(this.root)).freeBytes,
+			directorySyncTolerated: (code, kind) =>
+				this.log.warn(
+					{ code, kind },
+					"Directory fsync unsupported here; analog operation folders are not synced",
+				),
 			setAsideLogged: counts =>
 				this.log.warn(
 					counts,

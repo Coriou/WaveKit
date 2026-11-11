@@ -31,6 +31,7 @@ import {
 	type AnalogMetadataAdapter,
 	type AnalogOperationIo,
 	type AnalogReceipt,
+	resetDirectorySyncWarning,
 } from "../../../../src/core/scanner/store/analog-operations.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import { EvidenceStore } from "../../../../src/core/scanner/store/evidence-store.js"
@@ -778,4 +779,134 @@ describe("analog operation crash safety: a crash at any step", () => {
 			{ numRuns: 100 },
 		)
 	}, 300_000)
+})
+
+/** One process lifetime on `root` with an injected analog io and an optional log sink. */
+async function startWithIo(
+	root: string,
+	store: DiscoveryStore,
+	io: AnalogOperationIo,
+	lines?: string[],
+) {
+	const sink = new Writable({
+		write(chunk: Buffer, _encoding, done) {
+			lines?.push(chunk.toString())
+			done()
+		},
+	})
+	const evidence = new EvidenceStore({
+		dir: root,
+		caps,
+		logger: lines ? pino({ level: "warn" }, sink) : logger,
+		now: () => NOW,
+		statfs: async () => ({ freeBytes: 1e9 }),
+		isDiscoveryLive: id => !!store.get(id),
+		analogIo: io,
+	})
+	evidence.configureAnalog(adapterFor(store))
+	const reconciliation = await evidence.recoverAnalog()
+	const discoveryId = store.list({}).items[0]!.id
+	return {
+		evidence,
+		reconciliation,
+		discoveryId,
+		begin: () =>
+			evidence.beginAnalog({
+				discoveryId,
+				observationId: "o1",
+				binding: binding(),
+			}),
+	}
+}
+function codedError(code: string): Error {
+	return Object.assign(new Error(`fsync ${code}`), { code })
+}
+
+describe("analog operation crash safety: directory fsync and repeated residue searches", () => {
+	afterEach(() => resetDirectorySyncWarning())
+	it("a tolerated directory fsync refusal (EPERM) admits and finalizes, warning once without paths", async () => {
+		resetDirectorySyncWarning()
+		const { root, store } = await fresh()
+		const lines: string[] = []
+		let syncs = 0
+		const life = await startWithIo(
+			root,
+			store,
+			{
+				unlink: path => unlink(path),
+				fsyncDir: async () => {
+					syncs++
+					throw codedError("EPERM")
+				},
+				checkpoint: async () => undefined,
+			},
+			lines,
+		)
+		const first = await record(life)
+		const second = await record(life)
+		expect(first.outcome).toBe("finalized")
+		expect(second.outcome).toBe("finalized")
+		expect(life.evidence.recordingPath(second.alias!)).not.toBeNull()
+		expect(syncs).toBeGreaterThanOrEqual(4)
+		const warned = lines.filter(line => line.includes("Directory fsync"))
+		expect(warned).toHaveLength(1)
+		expect(JSON.parse(warned[0]!)).toMatchObject({
+			code: "EPERM",
+			kind: "staging",
+		})
+		expect(warned[0]).not.toContain(root)
+	})
+	it("a directory fsync failure outside the tolerated set (EIO) refuses the recording", async () => {
+		const { root, store } = await fresh()
+		const life = await startWithIo(root, store, {
+			unlink: path => unlink(path),
+			fsyncDir: async () => {
+				throw codedError("EIO")
+			},
+			checkpoint: async () => undefined,
+		})
+		const op = life.begin()
+		await expect(op.ready).rejects.toThrow()
+		await op.push(new Int16Array([1, -2, 3])).catch(() => undefined)
+		const refused = await op.finish()
+		await op.settled
+		expect(refused.outcome).not.toBe("finalized")
+	})
+	it("a residue whose set-aside move keeps failing is searched for media once while the folder count holds", async () => {
+		const { root, store } = await fresh()
+		await record(await start(root, store))
+		const id = randomUUID()
+		await mkdir(join(ops(root), id))
+		const probe = `analog-${id}.wav`
+		let probes = 0
+		let refused = 0
+		const life = await startWithIo(root, store, {
+			unlink: path => unlink(path),
+			rmdir: path => rmdir(path),
+			rename: async (from, to) => {
+				if (to.includes(".set-aside")) {
+					refused++
+					throw new Error("rename refused")
+				}
+				await rename(from, to)
+			},
+			mediaLstat: async path => {
+				if (path.endsWith(probe)) probes++
+				return lstat(path)
+			},
+			checkpoint: async () => undefined,
+		})
+		// Start, then each admission's and settlement's scan: one folder searched once.
+		expect((await record(life)).outcome).toBe("finalized")
+		expect((await record(life)).outcome).toBe("finalized")
+		expect(refused).toBeGreaterThanOrEqual(3)
+		expect(probes).toBe(1)
+		// A new analog folder may hold the media: the next scan searches again (two folders).
+		await mkdir(join(root, "recordings", "analog", "d_new"))
+		const before = refused
+		expect((await record(life)).outcome).toBe("finalized")
+		expect(refused).toBeGreaterThan(before)
+		expect(probes).toBe(3)
+		expect(existsSync(join(ops(root), id))).toBe(true)
+	})
 })
