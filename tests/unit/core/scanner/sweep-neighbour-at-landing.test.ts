@@ -54,12 +54,28 @@ const NEIGHBOUR_OVERS = [
 ]
 /** sweep.settleMs.network in config/default.yaml. */
 const SETTLE_MS = 1_000
+/** The harness's default settle (sweep-qualification-harness.ts). */
+const HARNESS_SETTLE_MS = 50
+/**
+ * The keyed neighbour: 3 s on, 3 s off, from 6 s before each ID to its end. From -6 s to 28 s
+ * that is 34 s: overs at -6, 0, 6, 12, 18 and 24 s (3 s each, the last ends at 27 s, inside the ID).
+ */
+const KEYED_ON_MS = 3_000
+const KEYED_PERIOD_MS = 6_000
+const KEYED_LEAD_MS = 6_000
+const KEYED_OVERS = Array.from(
+	{ length: Math.ceil((KEYED_LEAD_MS + ID_MS) / KEYED_PERIOD_MS) },
+	(_, k) => ({
+		fromMs: -KEYED_LEAD_MS + k * KEYED_PERIOD_MS,
+		toMs: -KEYED_LEAD_MS + k * KEYED_PERIOD_MS + KEYED_ON_MS,
+	}),
+)
 
-/** The neighbour's two overs in each ID. */
-function neighbour(): Emitter[] {
+/** The neighbour's overs (ms from each ID's start) for every ID. */
+function neighbour(overs: readonly Over[]): Emitter[] {
 	return Array.from({ length: COUNT }, (_, i) => {
 		const idFrom = FIRST_MS + i * EVERY_MS
-		return NEIGHBOUR_OVERS.map(o => ({
+		return overs.map(o => ({
 			hz: NEIGHBOUR_HZ,
 			kind: "voice" as const,
 			fromMs: idFrom + o.fromMs,
@@ -69,6 +85,10 @@ function neighbour(): Emitter[] {
 	}).flat()
 }
 
+interface Over {
+	fromMs: number
+	toMs: number
+}
 interface Band {
 	centreHz: number
 }
@@ -112,6 +132,8 @@ interface Naming {
 	refusedSlots: number
 	/** Distinct observations on the ID's channel refused a slot at least once. */
 	refusedSlotObservations: number
+	/** Per ID: refused:slots notes for observations on the ID's channel during it. */
+	refusedSlotsPerId: number[]
 	/**
 	 * Per ID: visits of its hop whose listening (settle end to leave) overlaps both the ID and one
 	 * of the neighbour's overs.
@@ -125,7 +147,10 @@ interface Naming {
  * (voiceTx → targetHz), never in the answer, and every slot refusal of an observation on the ID's
  * channel is counted.
  */
-async function neighbourAtLandingScene(): Promise<{
+async function neighbourAtLandingScene(scene: {
+	overs: readonly Over[]
+	settleMs: number
+}): Promise<{
 	r: SceneReport
 	naming: Naming
 }> {
@@ -136,6 +161,7 @@ async function neighbourAtLandingScene(): Promise<{
 		neighbourFirstVisits: 0,
 		refusedSlots: 0,
 		refusedSlotObservations: 0,
+		refusedSlotsPerId: Array.from({ length: COUNT }, () => 0),
 		landingsInOver: [],
 	}
 	let visits: readonly {
@@ -160,8 +186,8 @@ async function neighbourAtLandingScene(): Promise<{
 		centreHz: CENTRE_HZ,
 		ranges: [RANGE],
 		durationMs: DURATION_MS,
-		settleMs: SETTLE_MS,
-		emitters: [...targetIds, ...neighbour()],
+		settleMs: scene.settleMs,
+		emitters: [...targetIds, ...neighbour(scene.overs)],
 		targets: targetIds.map((e, i) => ({
 			hz: e.hz,
 			fromMs: e.fromMs,
@@ -242,6 +268,10 @@ async function neighbourAtLandingScene(): Promise<{
 				) {
 					naming.refusedSlots++
 					refusedObs.add(ref.observationId)
+					const k = targetIds.findIndex(
+						t => w.nowMs() >= t.fromMs && w.nowMs() < t.toMs + EVERY_MS - ID_MS,
+					)
+					if (k >= 0) naming.refusedSlotsPerId[k]!++
 				}
 				;(note as (...a: unknown[]) => void)(code, ref, ...rest)
 			}
@@ -260,12 +290,12 @@ async function neighbourAtLandingScene(): Promise<{
 	naming.landingsInOver = targetIds.map(
 		t =>
 			visits.filter(v => {
-				const from = v.atMs + SETTLE_MS
+				const from = v.atMs + scene.settleMs
 				const to = v.endMs ?? DURATION_MS
 				return (
 					v.centreHz === HOPS[1] &&
 					overlaps(from, to, t.fromMs, t.toMs) &&
-					NEIGHBOUR_OVERS.some(o =>
+					scene.overs.some(o =>
 						overlaps(from, to, t.fromMs + o.fromMs, t.fromMs + o.toMs),
 					)
 				)
@@ -278,7 +308,10 @@ async function neighbourAtLandingScene(): Promise<{
 
 describe("a follow landing while a neighbour talks", () => {
 	it("remembers and holds by name only the transmission on the ID's channel, never the neighbour's", async () => {
-		const { r, naming } = await neighbourAtLandingScene()
+		const { r, naming } = await neighbourAtLandingScene({
+			overs: NEIGHBOUR_OVERS,
+			settleMs: SETTLE_MS,
+		})
 		expect(r.hops).toEqual(HOPS)
 		const perId = r.targets.map(t => t.wavSeconds)
 		const report = JSON.stringify({ perId, naming })
@@ -302,5 +335,46 @@ describe("a follow landing while a neighbour talks", () => {
 			),
 			report,
 		).toEqual([])
+	}, 1_800_000)
+
+	/**
+	 * The discriminating composition: the neighbour keyed 3 s on, 3 s off from 6 s before each ID
+	 * (KEYED_OVERS), 3 hops, 5 IDs, and the harness's default 50 ms settle, used because it puts
+	 * landings on the ID's hop inside the neighbour's overs (a short settle lands within 3 s
+	 * windows the 1 s production settle steps over), so the recorder names the neighbour first
+	 * while the hold is on the ID's track (neighbourFirst counts it). Whether it does depends on
+	 * event-loop timing: in some runs the neighbour is never named first, and then the scene cannot
+	 * tell a scheduler that adopts the first name it is given from this one. Whole-ID files
+	 * and counts are not asserted: the recorder's 2-slot cap (store/analog-operations.ts) refuses
+	 * the ID's observations while the neighbour and an earlier session hold both slots, so an ID
+	 * may record in part or not at all (refusedSlotsPerId is reported, not asserted). Every
+	 * frequency comes from the recorder's own sessions, not from the production formula.
+	 */
+	it("with a keyed neighbour and landings inside its overs, adopts only the ID's transmissions", async () => {
+		const { r, naming } = await neighbourAtLandingScene({
+			overs: KEYED_OVERS,
+			settleMs: HARNESS_SETTLE_MS,
+		})
+		expect(r.hops).toEqual(HOPS)
+		const perId = r.targets.map(t => t.wavSeconds)
+		const report = JSON.stringify({ perId, naming })
+		for (const n of naming.landingsInOver)
+			expect(n, report).toBeGreaterThanOrEqual(1)
+		expect(naming.adopted.length, report).toBeGreaterThan(0)
+		expect(
+			naming.adopted.filter(
+				a =>
+					a.hz === undefined || Math.abs(a.hz - TARGET_HZ) >= SAME_CHANNEL_HZ,
+			),
+			report,
+		).toEqual([])
+		expect(
+			naming.adopted.filter(
+				a =>
+					a.hz !== undefined && Math.abs(a.hz - NEIGHBOUR_HZ) < SAME_CHANNEL_HZ,
+			),
+			report,
+		).toEqual([])
+		process.stdout.write(`[neighbour-keyed] ${report}\n`)
 	}, 1_800_000)
 })

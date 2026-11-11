@@ -226,8 +226,9 @@ interface EpochState {
 	staleLeft: number
 	staleRef: Uint8Array | null
 	/**
-	 * Bins of the receiver-line candidates alive at the retune (provisional and comb lines,
-	 * SpurMap candidates), ±1 bin of Hann skirt: old track bins there are no stale evidence.
+	 * Bins of the old key's receiver-line candidates alive at the retune (SpurMap candidates, comb
+	 * lines, provisional lines under the 6 dB slot level; none on a confirmed real signal), ±1 bin
+	 * of Hann skirt: old track bins there are no stale evidence (lineCandidates).
 	 */
 	staleLines: Uint8Array | null
 }
@@ -989,7 +990,7 @@ export class SpectrumPipeline {
 			this.ep && p.centreChanged ? Uint8Array.from(this.lastTrackBins) : null
 		const absKey = this.absKey(p.gainKey)
 		const staleLines =
-			staleRef && this.ep ? this.lineCandidates([this.ep.absKey, absKey]) : null
+			staleRef && this.ep ? this.lineCandidates(this.ep.absKey) : null
 		this.lastTrackBins.fill(0)
 		const epoch = p.epoch > this.epochCounter ? p.epoch : this.epochCounter + 1
 		this.epochCounter = epoch
@@ -1026,25 +1027,38 @@ export class SpectrumPipeline {
 	}
 
 	/**
-	 * Receiver-line candidates of `keys` alive now, verified or not and whatever their level: the
-	 * provisional and comb lines' core bins and SpurMap's candidate bins, each widened by ±1 bin of
-	 * Hann skirt (the footprint withoutLines drops once a line masks). A candidate sits at the same
-	 * baseband bins under every centre, so seeing it again after a retune says nothing about stale
-	 * samples. A real carrier steady long enough to be a provisional line (on ≥ 95 % of the window
-	 * at one centre) is such a candidate too: when it was the only pre-retune track, stale samples
-	 * of it are not caught (a known limit); any other old track still is.
+	 * Receiver-line candidates of the pre-retune key `key` alive now: SpurMap's candidate bins and
+	 * the comb lines' core bins, verified or not, and a non-comb provisional line's core bins only
+	 * while its 12.5 kHz slot level in the last measured block is under SPUR_MAX_LEVEL_DB (the
+	 * channel gate's 6 dB pass level, SpurMap.quiet). No line overlapping a signal the scanner
+	 * confirmed real (realMask) counts. Each line is widened by ±1 bin of Hann skirt (the footprint
+	 * withoutLines drops once a line masks); only that footprint is exempt, never bins beside it.
+	 * A candidate sits at the same baseband bins under every centre, so seeing it again after a
+	 * retune says nothing about stale samples. A real carrier parked ≥ 30 s is a provisional line
+	 * too, but one at the gate's pass level is no exemption: its old-centre samples stay stale.
+	 * The old key alone: the pre-retune track bins were seen under it, whatever gain comes next.
 	 */
-	private lineCandidates(keys: readonly string[]): Uint8Array {
-		const core = new Uint8Array(this.n)
-		for (const key of new Set(keys)) {
-			for (const l of this.provisional.lines(key))
-				core.fill(1, Math.max(0, l.startBin), Math.min(this.n, l.endBin))
-			this.spurs.candidates(key, core)
+	private lineCandidates(key: string): Uint8Array {
+		const n = this.n
+		const core = new Uint8Array(n)
+		this.spurs.candidates(key, core)
+		for (const l of this.provisional.lines(key)) {
+			if (!l.comb && !this.spurs.quiet(l.startBin, l.endBin)) continue
+			core.fill(1, Math.max(0, l.startBin), Math.min(n, l.endBin))
 		}
-		const out = new Uint8Array(this.n)
-		for (let i = 0; i < this.n; i++)
-			if (core[i] === 1)
-				out.fill(1, Math.max(0, i - 1), Math.min(this.n, i + 2))
+		const out = new Uint8Array(n)
+		for (let i = 0; i < n; ) {
+			if (core[i] !== 1) {
+				i++
+				continue
+			}
+			let j = i
+			while (j < n && core[j] === 1) j++
+			// one run of line bins and its ±1-bin skirt; dropped whole when a bin is on a real signal
+			if (!this.realMask.subarray(i, j).includes(1))
+				out.fill(1, Math.max(0, i - 1), Math.min(n, j + 1))
+			i = j
+		}
 		return out
 	}
 
@@ -1920,8 +1934,9 @@ export class SpectrumPipeline {
 	/**
 	 * Spec §4.6: a segment at the baseband bins of a pre-epoch track that no known emitter explains.
 	 * Bins of a receiver-line candidate alive at the retune (staleLines) are no such evidence: the
-	 * line is under every centre, so an unverified comb or a strong line never discards a block,
-	 * while a segment reaching old track bins off the lines (a real emitter) still does.
+	 * line is under every centre, so an unverified comb or a weak line never discards a block,
+	 * while a segment reaching old track bins off the lines' ±1-bin footprint (a real emitter), or
+	 * on a provisional line at the gate's pass level (a parked carrier), still does.
 	 */
 	private isStale(segs: Segment[], ep: EpochState): boolean {
 		const ref = ep.staleRef

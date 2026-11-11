@@ -322,6 +322,14 @@ export class SpurMap implements LineGate {
 	masks(key: string, startBin: number, endBin: number): boolean {
 		const s = this.keys.get(key)
 		if (s === undefined || !this.verifiedIn(s, startBin, endBin)) return false
+		return this.quiet(startBin, endBin)
+	}
+
+	/**
+	 * Every bin of [startBin, endBin) had a slot level under SPUR_MAX_LEVEL_DB in the last measured
+	 * block (an unknown level, no floor yet, is not quiet). Key-free: the level is the block's own.
+	 */
+	quiet(startBin: number, endBin: number): boolean {
 		for (let i = Math.max(0, startBin); i < Math.min(this.fftSize, endBin); i++)
 			if (!(this.level[i]! < MAX_LEVEL_RATIO)) return false
 		return true
