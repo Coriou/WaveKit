@@ -32,6 +32,8 @@ function state(): TunerState {
 				writer: null,
 				session: null,
 				reason: "untracked-retune",
+				blocked: "scanner-lease",
+				lastReceipt: { seq: 7, pos: 4096, at: "2026-01-02T03:04:05.000Z" },
 			},
 			sampleRate: { state: "commanded", writer: "assert", session: 3 },
 			assertFights: 4,

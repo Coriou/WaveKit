@@ -25,6 +25,7 @@ const A_CENTRE = 145_000_000
 const B_CENTRE = 433_000_000
 const SET_FREQUENCY = 0x01
 const SET_GAIN = 0x04
+const SET_SAMPLE_RATE = 0x02
 
 const cleanup: Array<() => Promise<void> | void> = []
 afterEach(async () => {
@@ -170,15 +171,14 @@ describe("receiver gate on the reconnect restore", () => {
 				restored: false,
 			})
 
-			// Another receiver: nothing of A is replayed; the state is the configured baseline,
-			// declared only (no tuning frame is written on connect).
+			// Another receiver: nothing of A is replayed or asserted; the state is the configured
+			// baseline, and assert holds only the declared centre (its fallback, rule 3).
 			const onB = await flapTo([1, 14])
-			expect(onB.some(([cmd]) => cmd === SET_FREQUENCY)).toBe(false)
+			expect(onB.filter(([cmd]) => cmd === SET_FREQUENCY)).toEqual([
+				[SET_FREQUENCY, CENTRE],
+			])
 			expect(onB).not.toContainEqual([SET_GAIN, 280])
 			expect(controller.getState("rtl")?.frequency).toBe(CENTRE)
-			expect(controller.getState("rtl")?.declaredOnlyFields).toContain(
-				"frequency",
-			)
 			expect(controller.getState("rtl")?.gainMode).not.toBe("manual")
 			expect(controller.receiverTuningRestore("rtl")).toEqual({
 				restored: false,
@@ -326,7 +326,10 @@ describe("receiver gate: an unknown interlude", () => {
 		connect(ID_UNKNOWN)
 		await controller.setFrequency("rtl", X_CENTRE)
 		const onB = connect(ID_B)
-		expect(onB.some(([cmd]) => cmd === SET_FREQUENCY)).toBe(false)
+		// Assert holds the declared centre only: neither A's nor the unknown one's.
+		expect(onB.filter(([cmd]) => cmd === SET_FREQUENCY)).toEqual([
+			[SET_FREQUENCY, CENTRE],
+		])
 		expect(controller.getState("rtl")?.frequency).toBe(CENTRE)
 		expect(controller.receiverTuningRestore("rtl")).toEqual({
 			restored: false,
@@ -365,5 +368,57 @@ describe("receiver gate after a plain resume", () => {
 		expect(state?.unknownFields).toEqual(
 			expect.arrayContaining(["frequency", "gain", "gainMode"]),
 		)
+	})
+})
+
+const UNIT = (unitId: string) =>
+	resolveReceiverIdentity("rtl", HDR(5, 29), { unitId })
+const ID_UNIT_A = UNIT("a".repeat(32))
+const ID_UNIT_B = UNIT("b".repeat(32))
+const ID_MODEL_A = resolveReceiverIdentity("rtl", HDR(5, 29), null)
+
+describe("receiver gate: what assert holds follows the receiver", () => {
+	it("a swapped unit of the same model is asserted the declared centre, never the other unit's", async () => {
+		const { controller, connect } = direct()
+		connect(ID_UNIT_A)
+		await controller.setFrequency("rtl", A_CENTRE)
+		const onB = connect(ID_UNIT_B)
+		expect(onB.filter(([cmd]) => cmd === SET_FREQUENCY)).toEqual([
+			[SET_FREQUENCY, CENTRE],
+		])
+		// Back on A: its own accepted centre is held (and asserted) again.
+		expect(connect(ID_UNIT_A)).toContainEqual([SET_FREQUENCY, A_CENTRE])
+		expect(controller.getState("rtl")?.frequency).toBe(A_CENTRE)
+	})
+
+	it("a unit answer after the restore names another unit: its later sessions hold the declared centre", async () => {
+		const { controller, connect } = direct()
+		connect(ID_UNIT_A)
+		await controller.setFrequency("rtl", A_CENTRE)
+		// The header alone matches A's model: restored (and asserted) as the same receiver.
+		expect(connect(ID_MODEL_A)).toContainEqual([SET_FREQUENCY, A_CENTRE])
+		// Then the sdr-host names another unit: A's tuning is set aside.
+		controller.noteReceiverBound(
+			"rtl",
+			{ key: ID_UNIT_B.key, adoptLegacy: false },
+			ID_UNIT_B,
+		)
+		const again = connect(ID_UNIT_B)
+		expect(again).not.toContainEqual([SET_FREQUENCY, A_CENTRE])
+		expect(again.filter(([cmd]) => cmd === SET_FREQUENCY)).toEqual([
+			[SET_FREQUENCY, CENTRE],
+		])
+		// A keeps its own.
+		expect(connect(ID_UNIT_A)).toContainEqual([SET_FREQUENCY, A_CENTRE])
+	})
+
+	it("an unknown receiver is asserted no accepted rate either", async () => {
+		const { controller, connect } = direct()
+		connect(ID_A)
+		await controller.setSampleRate("rtl", 2_400_000)
+		const unknown = connect(ID_UNKNOWN)
+		expect(unknown).not.toContainEqual([SET_SAMPLE_RATE, 2_400_000])
+		expect(unknown).toContainEqual([SET_SAMPLE_RATE, RATE])
+		expect(connect(ID_A)).toContainEqual([SET_SAMPLE_RATE, 2_400_000])
 	})
 })

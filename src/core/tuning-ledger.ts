@@ -115,6 +115,8 @@ export interface TuningReceipt {
 	writer: TuningWriter | undefined
 	jobId?: string
 	pos: number
+	/** Wall-clock time of the receipt (ms since the epoch; TuningLedgerOptions.now): status only. */
+	at: number
 }
 
 export interface TuningDoubt {
@@ -199,6 +201,8 @@ export interface FieldState {
 	 * `withoutHold`: the state the field would have without the hold.
 	 */
 	hold?: { reason: string; answered: boolean; withoutHold: FieldProofState }
+	/** The field's last receipt in the live session (the one `receipt` names); absent without one. */
+	lastReceipt?: { seq: number; pos: number; at: number }
 }
 
 /** What changed in the ledger (TuningLedger.subscribe). */
@@ -232,6 +236,8 @@ export interface TuningLedgerOptions {
 	 * first rate receipt; null = none.
 	 */
 	capsRate?: (sourceId: string) => number | null
+	/** The wall clock of receipts (TuningReceipt.at). Default Date.now. */
+	now?: () => number
 }
 
 /** Default configured settle: `scanner.sweep.settleMs.network`'s schema default. */
@@ -753,6 +759,7 @@ export class TuningLedger {
 			writer: frame.tag?.writer,
 			...(frame.tag?.jobId !== undefined ? { jobId: frame.tag.jobId } : {}),
 			pos: live.pos,
+			at: (this.opts.now ?? Date.now)(),
 		}
 		if (frame.field === "sampleRate" && validValue("sampleRate", frame.value))
 			live.maxRate = Math.max(live.maxRate, frame.value)
@@ -991,6 +998,9 @@ export class TuningLedger {
 				const hold = live.holds.get(field)
 				const proof = this.proveField(live, field, live.pos, end, true)
 				const last = this.lastReceipt(live, field, end)
+				const lastInfo = last
+					? { lastReceipt: { seq: last.seq, pos: last.pos, at: last.at } }
+					: {}
 				const stateOf = (p: FieldProof): FieldProofState =>
 					p.ok ? "proven" : p.reason === "settling" ? "settling" : "unverified"
 				const holdInfo = hold
@@ -1012,6 +1022,7 @@ export class TuningLedger {
 						session: live.session,
 						receipt: proof.receipt.seq,
 						queued,
+						...lastInfo,
 					}
 				const base: FieldState = {
 					state: hold ? "unverified" : stateOf(proof),
@@ -1021,6 +1032,7 @@ export class TuningLedger {
 					receipt: last?.seq ?? null,
 					queued,
 					...holdInfo,
+					...lastInfo,
 				}
 				if (hold) {
 					base.reason = "doubt"
@@ -1047,6 +1059,11 @@ export class TuningLedger {
 						session: live.session,
 						receipt: gainReceipt.seq,
 						queued: gainQueued,
+						lastReceipt: {
+							seq: gainReceipt.seq,
+							pos: gainReceipt.pos,
+							at: gainReceipt.at,
+						},
 					}
 				: { ...none("no-receipt", gainQueued), session: live.session }
 			return {

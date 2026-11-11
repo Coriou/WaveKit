@@ -211,6 +211,16 @@ const fieldProofSchema = {
 		},
 		session: { type: ["integer", "null"] },
 		reason: { type: "string" },
+		blocked: { type: "string" },
+		lastReceipt: {
+			type: "object",
+			properties: {
+				seq: { type: "integer" },
+				pos: { type: "integer" },
+				at: { type: "string", format: "date-time" },
+			},
+			required: ["seq", "pos", "at"],
+		},
 	},
 	required: ["state", "writer", "session"],
 } as const

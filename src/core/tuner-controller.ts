@@ -593,6 +593,8 @@ interface ReceiverTuningStash {
 	identity: ReceiverIdentity
 	desired: Map<DesiredField, number>
 	values: Partial<Record<DesiredField, unknown>>
+	/** Its accepted centre and rate: what assert holds for it (acceptedTuning). */
+	accepted: Partial<Record<GatedField, number>>
 }
 
 /** Whether a connection's accepted tuning was restored, and why (GET /api/sources receiver). */
@@ -891,9 +893,11 @@ export class TunerController extends EventEmitter {
 		if (!sameModel || identity.strength !== "unit") return
 		if (owner.strength === "unit") {
 			// Restored for a model match, then the sdr-host named another unit: the tuning stays on
-			// the wire (written, so proven) but is not this receiver's to replay.
+			// the wire (written, so proven) but is not this receiver's to replay, nor to assert
+			// again after a doubt: only its declared value is held from here.
 			this.stashTuning(sourceId, owner)
 			this.desiredFields.delete(sourceId)
+			this.acceptedTuning.delete(sourceId)
 			this.tuningRestores.set(sourceId, {
 				restored: false,
 				reason:
@@ -915,9 +919,12 @@ export class TunerController extends EventEmitter {
 
 	private stashTuning(sourceId: string, owner: ReceiverIdentity): void {
 		if (owner.strength === "unknown") return
-		const desired = this.desiredFields.get(sourceId)
+		const desired =
+			this.desiredFields.get(sourceId) ?? new Map<DesiredField, number>()
+		const accepted = { ...this.acceptedTuning.get(sourceId) }
 		const state = this.tunerStates.get(sourceId)
-		if (!state || !desired || desired.size === 0) return
+		if (!state || (desired.size === 0 && Object.keys(accepted).length === 0))
+			return
 		const values: Partial<Record<DesiredField, unknown>> = {}
 		const record = state as unknown as Record<string, unknown>
 		for (const field of desired.keys())
@@ -932,6 +939,7 @@ export class TunerController extends EventEmitter {
 			identity: { ...owner },
 			desired: new Map(desired),
 			values,
+			accepted,
 		})
 		while (byKey.size > RECEIVER_TUNING_STASH_MAX) {
 			const oldest = byKey.keys().next().value
@@ -1002,6 +1010,9 @@ export class TunerController extends EventEmitter {
 		const hold = this.plainResumeHold.has(sourceId)
 		if (hold) this.holdUnverified(sourceId, desired)
 		this.desiredFields.delete(sourceId)
+		// What assert holds goes with it: another or an unknown receiver gets the declared value
+		// only (declaredBlock applies), never the previous receiver's accepted centre or rate.
+		this.acceptedTuning.delete(sourceId)
 		this.inferredFields.delete(sourceId)
 		this.ignoredRelayFields.delete(sourceId)
 		if (!hold) {
@@ -1029,6 +1040,8 @@ export class TunerController extends EventEmitter {
 		if (own && byKey) {
 			byKey.delete(own.identity.key)
 			this.desiredFields.set(sourceId, new Map(own.desired))
+			if (Object.keys(own.accepted).length > 0)
+				this.acceptedTuning.set(sourceId, { ...own.accepted })
 			const record = state as unknown as Record<string, unknown>
 			for (const [field, value] of Object.entries(own.values))
 				record[field] = structuredClone(value)
@@ -1300,18 +1313,23 @@ export class TunerController extends EventEmitter {
 
 	/**
 	 * An operator retune applies the band gain only with "apply to my tuning". A failed
-	 * gain write is logged: the retune itself already succeeded.
+	 * gain write is logged: the retune itself already succeeded. `live` (assert's re-apply,
+	 * reapplyBandGain) is checked before every gain write, after each await: once false, nothing
+	 * more is written.
 	 */
 	private async applyOperatorBandGain(
 		sourceId: string,
 		hz: number,
 		opts: TunerWriteOptions,
+		live?: () => boolean,
 	): Promise<void> {
 		if (opts.origin !== "rest" || this.bandGain?.applyToMyTuning() !== true)
 			return
+		const stale = () => live !== undefined && !live()
 		// This retune may have taken a scanner lease: its gain restore runs first.
 		const hold = this.gainRestoreHolds.get(sourceId)
 		if (hold !== undefined) await hold
+		if (stale()) return
 		const state = this.tunerStates.get(sourceId)
 		if (!state || state.controlMode !== "internal") return
 		const target = this.bandGainFor(sourceId, hz)
@@ -1339,12 +1357,15 @@ export class TunerController extends EventEmitter {
 						if (outcome !== "saved") return
 					}
 				}
+				if (stale()) return
 				const now = this.tunerStates.get(sourceId) ?? state
 				const proof = this.fieldProof(sourceId).unknownFields
 				if (now.gainMode !== "manual" || proof.includes("gainMode"))
 					await this.setGainMode(sourceId, "manual", opts)
+				if (stale()) return
 				if (now.gain !== target || proof.includes("gain"))
 					await this.setGain(sourceId, target, opts)
+				if (stale()) return
 				this.noteBandGainApplied(sourceId, target, "user", hz)
 				return
 			}
@@ -1358,12 +1379,15 @@ export class TunerController extends EventEmitter {
 			// first and the mode last, so the tuner ends in AGC with the exact saved gain.
 			if (saved.gainMode === "agc") {
 				if (saved.gain !== null) await this.setGain(sourceId, saved.gain, opts)
+				if (stale()) return
 				await this.setGainMode(sourceId, "agc", opts)
 			} else if (saved.gain !== null) {
 				if (state.gainMode !== "manual")
 					await this.setGainMode(sourceId, "manual", opts)
+				if (stale()) return
 				await this.setGain(sourceId, saved.gain, opts)
 			}
+			if (stale()) return
 			this.useSavedGain(sourceId, opts)
 		} catch (err) {
 			this.log.warn(
@@ -1923,18 +1947,28 @@ export class TunerController extends EventEmitter {
 	/**
 	 * After assert moved the centre: the band gain at `hz` under the operator retune's rule, on a
 	 * later microtask (assert writes synchronously, the band gain awaits its saved gain). Failures
-	 * are logged by applyOperatorBandGain; the retune itself already went out.
+	 * are logged by applyOperatorBandGain; the retune itself already went out. Every gain write
+	 * re-checks that the centre is still the asserted one and that no scanner lease is held,
+	 * handed back or recovering (TunerLeaseView.holds): a retune or a lease taken meanwhile owns
+	 * the gain from then on, so nothing stale is written over it.
 	 */
 	private reapplyBandGain(sourceId: string, hz: number): void {
 		if (this.bandGain?.applyToMyTuning() !== true) return
+		const live = () =>
+			this.tunerStates.get(sourceId)?.frequency === hz &&
+			this.leaseView?.holds(sourceId) !== true
 		queueMicrotask(() => {
 			this.withoutCommand(() => {
-				this.applyOperatorBandGain(sourceId, hz, { origin: "rest" }).catch(
-					(err: unknown) =>
-						this.log.warn(
-							{ sourceId, err: safeErrorFields(err) },
-							"Applying the band gain after an assert failed",
-						),
+				this.applyOperatorBandGain(
+					sourceId,
+					hz,
+					{ origin: "rest" },
+					live,
+				).catch((err: unknown) =>
+					this.log.warn(
+						{ sourceId, err: safeErrorFields(err) },
+						"Applying the band gain after an assert failed",
+					),
 				)
 			})
 		})
@@ -1972,21 +2006,37 @@ export class TunerController extends EventEmitter {
 		const block = this.assertBlock(state.sourceId, state)
 		const one = (field: GatedField): TunerFieldProof => {
 			const fs = fields[field]
+			const last = fs.lastReceipt
+				? {
+						lastReceipt: {
+							seq: fs.lastReceipt.seq,
+							pos: fs.lastReceipt.pos,
+							at: new Date(fs.lastReceipt.at).toISOString(),
+						},
+					}
+				: {}
 			if (fs.queued !== null)
 				return {
 					state: "settling",
 					writer: fs.queued.writer,
 					session: fs.session,
 					reason: "queued",
+					...last,
 				}
 			if (fs.state === "proven")
 				return {
 					state: fs.writer === "relay" ? "relay" : "commanded",
 					writer: fs.writer,
 					session: fs.session,
+					...last,
 				}
 			if (fs.state === "settling")
-				return { state: "settling", writer: fs.writer, session: fs.session }
+				return {
+					state: "settling",
+					writer: fs.writer,
+					session: fs.session,
+					...last,
+				}
 			const blocked =
 				block ??
 				(this.heldValue(state.sourceId, field) === null
@@ -1997,6 +2047,8 @@ export class TunerController extends EventEmitter {
 				writer: fs.writer,
 				session: fs.session,
 				reason: fs.doubtReason ?? blocked ?? fs.reason ?? "unverified",
+				...(blocked !== null ? { blocked } : {}),
+				...last,
 			}
 		}
 		const fights = this.assertFights.get(state.sourceId)

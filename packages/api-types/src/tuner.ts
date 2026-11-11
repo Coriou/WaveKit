@@ -178,6 +178,19 @@ export interface TunerFieldProof {
 	/** The connection's ledger session (numbered per source from 1); null without one. */
 	session: number | null
 	reason?: string
+	/**
+	 * When unverified: why the core writes nothing for the field now (`relay-attached`,
+	 * `external-control`, `scanner-lease`, `lost-ownership`, or, with nothing accepted to write,
+	 * `plain-resume`, `reset-policy`, `declared-write-off`). Shown beside a doubt's `reason`, which
+	 * it would otherwise hide.
+	 */
+	blocked?: string
+	/**
+	 * The field's last frame flushed to the receiver on this connection: its ledger `seq` (per
+	 * source, increasing), the payload byte position it left at (`pos`) and when (`at`, ISO 8601).
+	 * Absent before the connection's first frame of the field.
+	 */
+	lastReceipt?: { seq: number; pos: number; at: string }
 }
 
 /**

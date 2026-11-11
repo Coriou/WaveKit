@@ -207,9 +207,25 @@ describe("assert on a fresh parked core", () => {
 			[SET_SAMPLE_RATE, RATE],
 			[SET_FREQUENCY, F0],
 		])
+		const [rate, centre] = h.sessionReceipts(1)
+		const lastOf = (r: TuningReceipt) => ({
+			seq: r.seq,
+			pos: r.pos,
+			at: new Date(r.at).toISOString(),
+		})
 		expect(h.proofOf()).toEqual({
-			frequency: { state: "commanded", writer: "assert", session: 1 },
-			sampleRate: { state: "commanded", writer: "assert", session: 1 },
+			frequency: {
+				state: "commanded",
+				writer: "assert",
+				session: 1,
+				lastReceipt: lastOf(centre!),
+			},
+			sampleRate: {
+				state: "commanded",
+				writer: "assert",
+				session: 1,
+				lastReceipt: lastOf(rate!),
+			},
 		})
 		expect(h.ledger.trustNow("rtl")).toMatchObject({
 			trust: "commanded",
@@ -229,12 +245,14 @@ describe("assert on a fresh parked core", () => {
 				writer: null,
 				session: 1,
 				reason: "declared-write-off",
+				blocked: "declared-write-off",
 			},
 			sampleRate: {
 				state: "unverified",
 				writer: null,
 				session: 1,
 				reason: "declared-write-off",
+				blocked: "declared-write-off",
 			},
 		})
 		// An accepted value is still written: the switch is only for the declared fallback.
@@ -612,6 +630,44 @@ describe("a fight with a client retuning past the relay (Main gate minor 3)", ()
 		}
 		// GET /api/tuner shows it on the published state.
 		expect(h.controller.getAllStates()[0]?.proof?.assertFights).toBe(2)
+	}, 30_000)
+})
+
+describe("proof status per field (step 4)", () => {
+	it("names the last receipt, and the block beside a doubt's reason", async () => {
+		const h = await harness()
+		await h.sessionFlowing(1)
+		await until(() => h.proofOf().frequency.state === "commanded")
+		const last = h
+			.sessionReceipts(1)
+			.filter(r => r.field === "frequency")
+			.at(-1)!
+		expect(h.proofOf().frequency).toEqual({
+			state: "commanded",
+			writer: "assert",
+			session: 1,
+			lastReceipt: {
+				seq: last.seq,
+				pos: last.pos,
+				at: new Date(last.at).toISOString(),
+			},
+		})
+		// A relay client attached, then a doubt: the doubt is the reason, the block says why
+		// nothing is written back.
+		const client = net.connect(h.relay.getStatus().port, "127.0.0.1")
+		cleanups.push(() => client.destroy())
+		client.on("data", () => undefined)
+		client.on("error", () => undefined)
+		await once(client, "connect")
+		await until(() => h.relay.getStatus().clientsConnected === 1)
+		h.ledger.raiseDoubt("rtl", "frequency", "untracked-retune")
+		await wait(100)
+		expect(h.proofOf().frequency).toMatchObject({
+			state: "unverified",
+			reason: "untracked-retune",
+			blocked: "relay-attached",
+			lastReceipt: { seq: last.seq, pos: last.pos },
+		})
 	}, 30_000)
 })
 

@@ -186,7 +186,9 @@ the connection comes back the core forgets the values you set, and it never writ
 centre and rate (as with `writeDeclaredTuningOnConnect: false`): the receiver stays where it is,
 `proof` reading `unverified` with `reason: reset-policy`. Only a centre or rate you set on the
 current connection is written back, after evidence that the receiver moved; a value set on an
-earlier connection, or while the source was down, is not. A restore resume of a paused feed
+earlier connection, or while the source was down, is not. The current connection starts at its
+first payload (its ledger session), not at the TCP connect: a value set between the connect and
+the first IQ byte is forgotten too. A restore resume of a paused feed
 still restores, declared values included, for its own connection. Configured gain settings are
 still written to every connection: configure no tuner gain for a core that touches nothing on a
 reconnect.

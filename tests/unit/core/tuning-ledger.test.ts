@@ -93,6 +93,7 @@ describe("ReceiptOnce", () => {
 		value: seq,
 		writer: "operator" as const,
 		pos: 0,
+		at: 0,
 	})
 
 	it("fires once, after the end and every frame, with the last frame's receipt", () => {
@@ -1157,5 +1158,53 @@ describe("TuningLedger hold range (fix round 1)", () => {
 			"unverified",
 		)
 		expect(ledger.trustNow("rtl").trust).toBe("commanded")
+	})
+})
+
+describe("TuningLedger receipt status (step 4)", () => {
+	it("stamps each receipt with its flush time and shows the field's last receipt", () => {
+		let now = 1_000
+		const ledger = new TuningLedger({
+			settleLink: () => ({ configuredSettleMs: 0, inFlightBytes: 100 }),
+			frameBytes: () => 2,
+			capsRate: () => RATE,
+			now: () => now,
+		})
+		const { conn, session } = started(ledger)
+		expect(ledger.fieldState("rtl").frequency.lastReceipt).toBeUndefined()
+		session.pos = 40
+		const done = conn.write(frame(1, 446_000_000), OP)
+		now = 2_000
+		// Behind backpressure: no receipt, so no last receipt, until the flush.
+		expect(ledger.fieldState("rtl").frequency.lastReceipt).toBeUndefined()
+		session.pos = 60
+		done(null)
+		expect(ledger.receipts("rtl")[0]).toMatchObject({ pos: 60, at: 2_000 })
+		// Settling, then proven: the same last receipt.
+		expect(ledger.fieldState("rtl").frequency).toMatchObject({
+			state: "settling",
+			lastReceipt: { seq: 1, pos: 60, at: 2_000 },
+		})
+		session.pos = 500
+		expect(ledger.fieldState("rtl").frequency).toMatchObject({
+			state: "proven",
+			lastReceipt: { seq: 1, pos: 60, at: 2_000 },
+		})
+		// A doubt: unverified, the last receipt still named.
+		ledger.raiseDoubt("rtl", "frequency", "test")
+		expect(ledger.fieldState("rtl").frequency).toMatchObject({
+			state: "unverified",
+			lastReceipt: { seq: 1, pos: 60, at: 2_000 },
+		})
+		flush(conn, frame(4, 280), OP)
+		expect(ledger.fieldState("rtl").gain.lastReceipt).toEqual({
+			seq: 2,
+			pos: 500,
+			at: 2_000,
+		})
+		// A new session: nothing of the old one.
+		conn.close()
+		started(ledger)
+		expect(ledger.fieldState("rtl").frequency.lastReceipt).toBeUndefined()
 	})
 })

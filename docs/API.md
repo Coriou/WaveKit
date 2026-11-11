@@ -1906,12 +1906,17 @@ caps to the configured baseline.
 Centre and sample rate follow one rule (**assert**): every new connection starts
 unproven, and as its first payload arrives the core writes the values it holds,
 the last accepted ones (API or relay; never a scanner hop's), else the declared
-baseline (config or caps). The declared fallback is off when
+baseline (config or caps). Accepted values belong to the receiver they were
+accepted on: when the connection reaches another receiver (another dongle behind
+the same endpoint, or a source candidate) the core holds only the declared values
+for it, and an unknown receiver gets no accepted value either; the first
+receiver's values come back when it does. The declared fallback is off when
 `tuner.writeDeclaredTuningOnConnect` is `false`, after a plain resume of a paused
 feed (until a restore resume; values accepted after the resume are still written)
 and under `reconnectPolicy: reset` (another operator may own the receiver: values
 accepted on an earlier connection are discarded, so only a value accepted on the
-current connection is written back, after a doubt). A restore resume writes the
+current connection, which starts at its first payload, is written back, after a
+doubt). A restore resume writes the
 held values, the declared centre and rate included when nothing is accepted, also
 after a plain resume and under `reset`. It writes nothing for them while a tuner
 relay client is attached or holds control, while a scanner lease holds the tuner
@@ -1938,7 +1943,12 @@ unverified, a fixed `reason`: the doubt's own (`untracked-retune`,
 `external-control`, `scanner-lease`, `lost-ownership`, or, with nothing accepted to
 write, why the declared fallback is off: `plain-resume`, `reset-policy`,
 `declared-write-off`) or the ledger's (`no-receipt`, `session-ended`,
-`no-writer`, …). `unknownFields`/`declaredOnlyFields` keep saying where a shown
+`no-writer`, …). A doubt's reason comes first; `blocked` (unverified only) names
+why nothing is written back whatever the `reason` (same codes as above, from
+`relay-attached` to `declared-write-off`). `lastReceipt` `{ seq, pos, at }` names
+the field's last frame flushed on this connection: its ledger number (per source,
+increasing), the payload byte position it left at and when (ISO 8601); absent
+before the first. `unknownFields`/`declaredOnlyFields` keep saying where a shown
 value comes from; `proof` says whether this connection carries it.
 `proof.assertFights` (absent before the first) counts the centre and rate frames
 the core wrote back because an untracked retune left them unproven, since it
