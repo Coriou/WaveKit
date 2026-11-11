@@ -3744,6 +3744,14 @@ stop only at the free-disk threshold (`disk-low`). It is absent within the quota
 cores. One warning line names `storage-cap` with the same numbers when it starts, and one info
 line when it clears.
 
+`analogOperations` is present only while the start set aside incomplete analog recording
+operation folders that hold no recording (crash leftovers, kept in
+`.analog-operations/.set-aside/`): `{ "setAside": 1, "lastReason": "missing-intent" }`.
+`setAside` counts the folders held now (at most 32 provably empty ones are kept, the oldest deleted
+past that; a folder that cannot be proven empty is kept and counted too), and `lastReason` is
+`staging-residue`, `missing-intent` or `invalid-intent` for the last one set aside since the
+start. Recordings and the scanner stay available meanwhile. Absent from older cores.
+
 `blankedFrames` counts frames blanked as broadband impulses;
 `broadbandRfi` is `{ periodMs }` while periodic broadband RFI is active.
 `overloadHint` is present only while the gain mode is manual and at least 5 % of frames
