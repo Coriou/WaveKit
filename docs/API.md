@@ -1876,19 +1876,9 @@ has an active control client.
 Tuner values are the last _commanded_ desired values, not hardware readback:
 rtl_tcp has no positive acknowledgement. When an rtl_tcp source reconnects, the
 `tuner.reconnectPolicy` config decides what happens. With `restore` (the default),
-core re-sends the fields that were accepted through this API or the relay and counts
-them in `commandCount`/`lastCommandAt`; a failed restore sets `lastError` and is
-retried on the next connection. Before that, on every new connection under internal
-control, it writes a `sampleRate` and then a `frequency` that are only declared (by
-config or the source caps; see `declaredOnlyFields` below): a shared rtlmux keeps the last
-client's tuning, so without that write the core would show a tuning it never set. Each
-field is decided on its own: it writes the declared value (origin `config`) while nothing
-tuned that field since the core started; after a core write of it that was not accepted (and
-so is not replayed; scanner hops are accepted and replayed by the restore), it writes that
-value again (origin `replay`); after a relay client's tuning of it, nothing (the value stays
-declared only). Those written values are then proven for the connection. Nothing is
-written under external control, after a plain resume of a paused feed, under `reset`, or
-with `tuner.writeDeclaredTuningOnConnect: false`. Relay commands
+core re-sends the fields that were accepted through this API or the relay (never
+config defaults) and counts them in `commandCount`/`lastCommandAt`; a failed
+restore sets `lastError` and is retried on the next connection. Relay commands
 received while the source is down become desired state and are sent on
 reconnect. With `reset`, core sends nothing and returns tuner state and source
 caps to the configured baseline. With either policy, source caps
@@ -1967,10 +1957,8 @@ declare it. A `frequency` or `sampleRate` a relay client set to a value the
 controller ignored is also listed until the next accepted value (the relay
 forwards the raw command upstream, so the receiver may be there).
 **`declaredOnlyFields`** lists `frequency`/`sampleRate` whose value comes
-only from that declared baseline: nothing wrote or observed it on this connection
-(under `restore` the connect write proves them, so they are listed only under
-`reset`, under external control, after a failed connect write or between a
-connection and its first payload). Absent when empty. On a source whose gain was set on the SDR host this reads e.g.
+only from that declared baseline: nothing wrote or observed it since the start or
+the last reset reconnect. Absent when empty. On a source whose gain was set on the SDR host this reads e.g.
 `["gainMode", "gain", "ppm", …]`; render those fields as unknown instead of
 "AGC 0.0 dB". A gain mode the relay path infers from a client's gain command
 counts as observed (it is not replayed on reconnect). The field values keep

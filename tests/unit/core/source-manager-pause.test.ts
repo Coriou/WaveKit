@@ -309,11 +309,8 @@ describe("SourceManager feed pause / resume", () => {
 		manager: SourceManager,
 		reconnectPolicy: "restore" | "reset" = "restore",
 	) {
-		// Frame-exact pause and resume tests from a declared-only start: the connect-time write of
-		// the declared tuning is off (covered by tuner-connect-tuning.test.ts, plain resume included).
 		const tuner = new TunerController(pino({ level: "silent" }), manager, {
 			reconnectPolicy,
-			writeDeclaredTuningOnConnect: false,
 		})
 		wireTunerControl({
 			log: pino({ level: "silent" }),
@@ -531,9 +528,7 @@ describe("SourceManager feed pause / resume", () => {
 
 	it("with the tuner relay enabled, a relay client's retune during the pause is written on a plain resume", async () => {
 		const { upstream, manager } = await started()
-		const tuner = new TunerController(pino({ level: "silent" }), manager, {
-			writeDeclaredTuningOnConnect: false,
-		})
+		const tuner = new TunerController(pino({ level: "silent" }), manager, {})
 		const relay = new TunerRelay(
 			pino({ level: "silent" }),
 			manager,

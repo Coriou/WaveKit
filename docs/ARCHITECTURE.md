@@ -352,12 +352,6 @@ client such as SDR++).
   leased snapshot, including a gain-only restore when an operator or relay write takes the
   lease; operator retunes apply it only with `tuner.bandGain.applyToMyTuning` (serialised per
   source, the pre-band gain persisted by `BandGainSettingsService`)
-- On each new connection under the `restore` policy and internal control, write a sample rate
-  and centre that are only declared, then the configured gain, so a shared rtlmux never leaves
-  the core believing a tuning it did not set, decided per field: the config or caps value while
-  nothing tuned that field since start, else the core's own last unaccepted write of it (a
-  test-mode style write; accepted scanner hops are replayed by the restore), never a config
-  value over another tuning (`tuner.writeDeclaredTuningOnConnect: false` turns it off)
 
 ### State backup
 

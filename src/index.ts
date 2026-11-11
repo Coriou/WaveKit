@@ -1378,7 +1378,6 @@ async function main(): Promise<void> {
 		own(80, () => tunerRelay.stop())
 		const tunerController = new TunerController(logger, sourceManager, {
 			reconnectPolicy: config.tuner.reconnectPolicy,
-			writeDeclaredTuningOnConnect: config.tuner.writeDeclaredTuningOnConnect,
 			lostOwnership,
 			receiverIdentity: id =>
 				receiverTracked(id) ? receiverIdentity.provisional(id) : undefined,

@@ -167,11 +167,15 @@ describe("receiver gate on the reconnect restore", () => {
 				restored: false,
 			})
 
+			// Another receiver: nothing of A is replayed; the state is the configured baseline,
+			// declared only (no tuning frame is written on connect).
 			const onB = await flapTo([1, 14])
-			expect(onB).toContainEqual([SET_FREQUENCY, CENTRE])
-			expect(onB).not.toContainEqual([SET_FREQUENCY, A_CENTRE])
+			expect(onB.some(([cmd]) => cmd === SET_FREQUENCY)).toBe(false)
 			expect(onB).not.toContainEqual([SET_GAIN, 280])
 			expect(controller.getState("rtl")?.frequency).toBe(CENTRE)
+			expect(controller.getState("rtl")?.declaredOnlyFields).toContain(
+				"frequency",
+			)
 			expect(controller.getState("rtl")?.gainMode).not.toBe("manual")
 			expect(controller.receiverTuningRestore("rtl")).toEqual({
 				restored: false,

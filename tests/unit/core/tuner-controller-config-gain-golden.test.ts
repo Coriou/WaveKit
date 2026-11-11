@@ -3,9 +3,7 @@
  * recorded before the configured gain change and hardcoded as literals. With
  * no `tuner` configured they must stay byte-identical: rtl_tcp 5-byte frames in
  * order, `command-sent` events and origins, and the frequency/rate trust and
- * `unknownFields` / `declaredOnlyFields` state after each connect. One change since:
- * each connection's first sync writes a declared-only rate and centre (origin
- * `config`, rate first), so they are proven instead of declared only.
+ * `unknownFields` / `declaredOnlyFields` state after each connect.
  *
  * In-memory fake transport only (no socket).
  */
@@ -158,12 +156,7 @@ const UNKNOWN_ALL_GAIN = [
 	"tunerIfGain",
 	"testMode",
 ]
-/** The connect write of the declared rate (2.048 Msps) and centre (100 MHz), rate first. */
-const DECLARED_FRAMES = ["02001f4000", "0105f5e100"]
-const DECLARED_SENT: Array<[string, number, TunerCommandOrigin]> = [
-	["set-sample-rate", 2_048_000, "config"],
-	["set-frequency", 100_000_000, "config"],
-]
+const DECLARED_BOTH = ["frequency", "sampleRate"]
 
 const baseState = {
 	frequency: 100_000_000,
@@ -184,31 +177,25 @@ describe("WG11 GN goldens: connect writes without a configured tuner", () => {
 		vi.useRealTimers()
 	})
 
-	it("no desired fields: the declared tuning on each connect, nothing on a repeat", () => {
+	it("no desired fields: nothing written on connect, repeat or reconnect", () => {
 		const h = harness()
 		h.connect()
-		const connected = (commandCount: number) => ({
-			frames: DECLARED_FRAMES,
-			sent: DECLARED_SENT,
-			state: {
-				...baseState,
-				commandCount,
-				unknownFields: UNKNOWN_ALL_GAIN,
-				declaredOnlyFields: undefined,
-			},
-			tuningWritten: true,
-		})
-		expect(h.snapshot()).toEqual(connected(2))
-		// Once per connection, as the configured gain: the proof stays, the per-sync write record goes.
-		h.sources.emit("payload-started", SRC)
-		expect(h.snapshot()).toEqual({
-			...connected(2),
+		const idle = {
 			frames: [],
 			sent: [],
+			state: {
+				...baseState,
+				commandCount: 0,
+				unknownFields: UNKNOWN_ALL_GAIN,
+				declaredOnlyFields: DECLARED_BOTH,
+			},
 			tuningWritten: false,
-		})
+		}
+		expect(h.snapshot()).toEqual(idle)
+		h.sources.emit("payload-started", SRC)
+		expect(h.snapshot()).toEqual(idle)
 		h.connect()
-		expect(h.snapshot()).toEqual(connected(4))
+		expect(h.snapshot()).toEqual(idle)
 	})
 
 	it("desired gain via REST: replayed with origin replay on every payload-started", async () => {
@@ -227,7 +214,7 @@ describe("WG11 GN goldens: connect writes without a configured tuner", () => {
 				...baseState,
 				gainMode: "manual",
 				gain: 300,
-				commandCount: 4,
+				commandCount: 2,
 				unknownFields: [
 					"ppm",
 					"agcMode",
@@ -238,18 +225,13 @@ describe("WG11 GN goldens: connect writes without a configured tuner", () => {
 					"tunerIfGain",
 					"testMode",
 				],
-				declaredOnlyFields: undefined,
+				declaredOnlyFields: DECLARED_BOTH,
 			},
-			tuningWritten: true,
+			tuningWritten: false,
 		})
-		const replayed = (commandCount: number, declared: boolean) => ({
-			frames: [
-				...(declared ? DECLARED_FRAMES : []),
-				"0300000001",
-				"040000012c",
-			],
+		const replayed = (commandCount: number) => ({
+			frames: ["0300000001", "040000012c"],
 			sent: [
-				...(declared ? DECLARED_SENT : []),
 				["set-gain-mode", 1, "replay"],
 				["set-gain", 300, "replay"],
 			],
@@ -268,18 +250,15 @@ describe("WG11 GN goldens: connect writes without a configured tuner", () => {
 					"tunerIfGain",
 					"testMode",
 				],
-				declaredOnlyFields: undefined,
+				declaredOnlyFields: DECLARED_BOTH,
 			},
-			tuningWritten: true,
-		})
-		h.connect()
-		expect(h.snapshot()).toEqual(replayed(8, true))
-		// A second payload-started on the same connection replays again today (the declared tuning once).
-		h.sources.emit("payload-started", SRC)
-		expect(h.snapshot()).toEqual({
-			...replayed(10, false),
 			tuningWritten: false,
 		})
+		h.connect()
+		expect(h.snapshot()).toEqual(replayed(4))
+		// A second payload-started on the same connection replays again today.
+		h.sources.emit("payload-started", SRC)
+		expect(h.snapshot()).toEqual(replayed(6))
 	})
 
 	it("relay-accepted gain: replayed after the relay client leaves", () => {
@@ -296,7 +275,7 @@ describe("WG11 GN goldens: connect writes without a configured tuner", () => {
 				...baseState,
 				gainMode: "manual",
 				gain: 280,
-				commandCount: 3,
+				commandCount: 1,
 				unknownFields: [
 					"ppm",
 					"agcMode",
@@ -307,19 +286,19 @@ describe("WG11 GN goldens: connect writes without a configured tuner", () => {
 					"tunerIfGain",
 					"testMode",
 				],
-				declaredOnlyFields: undefined,
+				declaredOnlyFields: DECLARED_BOTH,
 			},
-			tuningWritten: true,
+			tuningWritten: false,
 		})
 		h.connect()
 		expect(h.snapshot()).toEqual({
-			frames: [...DECLARED_FRAMES, "0400000118"],
-			sent: [...DECLARED_SENT, ["set-gain", 280, "replay"]],
+			frames: ["0400000118"],
+			sent: [["set-gain", 280, "replay"]],
 			state: {
 				...baseState,
 				gainMode: "manual",
 				gain: 280,
-				commandCount: 6,
+				commandCount: 2,
 				unknownFields: [
 					"ppm",
 					"agcMode",
@@ -330,9 +309,9 @@ describe("WG11 GN goldens: connect writes without a configured tuner", () => {
 					"tunerIfGain",
 					"testMode",
 				],
-				declaredOnlyFields: undefined,
+				declaredOnlyFields: DECLARED_BOTH,
 			},
-			tuningWritten: true,
+			tuningWritten: false,
 		})
 	})
 
@@ -345,7 +324,6 @@ describe("WG11 GN goldens: connect writes without a configured tuner", () => {
 		await h.controller.setFrequency(SRC, 145_000_000, { origin: "rest" })
 		h.snapshot()
 		h.connect()
-		// The reset policy writes no tuning: centre and rate are declared only again.
 		expect(h.snapshot()).toEqual({
 			frames: [],
 			sent: [],
@@ -353,7 +331,7 @@ describe("WG11 GN goldens: connect writes without a configured tuner", () => {
 				...baseState,
 				commandCount: 3,
 				unknownFields: UNKNOWN_ALL_GAIN,
-				declaredOnlyFields: ["frequency", "sampleRate"],
+				declaredOnlyFields: DECLARED_BOTH,
 			},
 			tuningWritten: false,
 		})
@@ -379,7 +357,7 @@ describe("WG11 GN goldens: connect writes without a configured tuner", () => {
 				frequency: 145_000_000,
 				sampleRate: 2_400_000,
 				controlMode: "external",
-				commandCount: 6,
+				commandCount: 4,
 				unknownFields: UNKNOWN_ALL_GAIN,
 				declaredOnlyFields: undefined,
 			},
@@ -407,7 +385,7 @@ describe("WG11 GN goldens: connect writes without a configured tuner", () => {
 				...baseState,
 				frequency: 145_000_000,
 				sampleRate: 2_400_000,
-				commandCount: 6,
+				commandCount: 4,
 				unknownFields: UNKNOWN_ALL_GAIN,
 				declaredOnlyFields: undefined,
 			},

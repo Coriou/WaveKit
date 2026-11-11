@@ -257,17 +257,10 @@ describe("TunerController reconnect synchronization", () => {
 					gainDb: 30,
 					agcMode: false,
 				})
-				// The first connection writes the configured gain, after the declared rate and
-				// centre under the restore policy (the reset policy writes no tuning).
+				// The first connection writes the configured gain.
 				controller.noteSourceConnected("rtl-1")
 				controller.synchronizeOnConnect("rtl-1")
 				expect(transport.frames).toEqual([
-					...(reconnectPolicy === "restore"
-						? [
-								[0x02, 2_048_000],
-								[0x01, 100_000_000],
-							]
-						: []),
 					[0x03, 1],
 					[0x04, 300],
 					[0x08, 0],

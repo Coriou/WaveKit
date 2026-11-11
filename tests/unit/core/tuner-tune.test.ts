@@ -118,15 +118,11 @@ async function setup(
 	})
 	const manager = new SourceManager(quiet)
 	cleanup.push(() => manager.disconnectAll())
-	// These tests pin tune semantics from a declared-only start (frame counts, the rate
-	// proof), so the connect-time write of the declared tuning is off here; it is covered by
-	// tuner-connect-tuning.test.ts and the connect goldens.
-	const controller = new TunerController(quiet, manager, {
-		writeDeclaredTuningOnConnect: false,
-		...(options.reconnectPolicy
-			? { reconnectPolicy: options.reconnectPolicy }
-			: {}),
-	})
+	const controller = new TunerController(
+		quiet,
+		manager,
+		options.reconnectPolicy ? { reconnectPolicy: options.reconnectPolicy } : {},
+	)
 	wireTunerControl({
 		log: quiet,
 		sourceManager: manager,

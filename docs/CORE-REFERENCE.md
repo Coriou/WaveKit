@@ -193,28 +193,6 @@ saved gain and the band gain. Change the table at runtime with `PUT /api/tuner-b
 ([API.md](API.md#per-band-gain-get-and-put-apituner-band-gain)); a saved PUT replaces this
 whole section until `<stateDir>/tuner-band-gain.json` is deleted.
 
-#### Tuning written on connect
-
-rtl_tcp cannot report its tuning, and a shared rtlmux keeps the last client's. So under
-`tuner.reconnectPolicy: restore` (the default), each new connection first writes the sample
-rate and then the centre that WaveKit holds but has not proven, before it replays what you set.
-Each of the two is decided on its own:
-
-- nothing tuned that value since the core started: the configured value (`caps.sampleRate` or
-  `caps.centerFreq`), even when the other one was tuned;
-- the core wrote it without accepting it (a test-mode style write that the restore does not
-  replay): that write again, never the configured value. Scanner hops are accepted, so the
-  restore replays them and a reconnect does not move a held job off its centre;
-- a relay client (SDR++) tuned it: nothing, the value stays unverified.
-
-Nothing is written under external control, after a plain resume of a paused feed, or under
-`reset`. To turn the connect write off (the values then stay unverified until you set them):
-
-```yaml
-tuner:
-  writeDeclaredTuningOnConnect: false # env: WAVEKIT_TUNER__WRITE_DECLARED_TUNING_ON_CONNECT=false
-```
-
 ### RTL-TCP relay
 
 Optional. Expose the receiver's IQ stream as an RTL-TCP compatible endpoint, so another
