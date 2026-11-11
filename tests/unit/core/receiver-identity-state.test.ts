@@ -235,8 +235,23 @@ describe("ReceiverLearnedState: one-time adoption of the files from before names
 		expect(first.fake.replaced.at(-1)?.engine?.absoluteFloors[0]?.dbfs).toBe(
 			-88,
 		)
-		expect(await exists(join(scannerDir, "engine", "rtl.json"))).toBe(false)
-		expect(await exists(nsFile(A, "engine.json"))).toBe(true)
+		// Copied, not moved: an older image rolled back still reads the originals.
+		expect(
+			JSON.parse(
+				await readFile(join(scannerDir, "engine", "rtl.json"), "utf8"),
+			),
+		).toEqual(engine(-88))
+		expect(
+			JSON.parse(
+				await readFile(
+					join(scannerDir, "engine", "occupancy", "rtl.json"),
+					"utf8",
+				),
+			),
+		).toEqual(occupancy(12_500))
+		expect(
+			JSON.parse(await readFile(nsFile(A, "engine.json"), "utf8")),
+		).toEqual(engine(-88))
 		expect(await exists(nsFile(A, "occupancy.json"))).toBe(true)
 
 		// A legacy file appearing later (an older core wrote it) is never adopted by another receiver.
@@ -282,6 +297,69 @@ describe("ReceiverLearnedState: one-time adoption of the files from before names
 		expect(lines.some(l => JSON.stringify(l).includes("../../x"))).toBe(false)
 		await learned.onIdentity("rtl", A, undefined)
 		expect(learned.view("rtl")?.namespaceState).toBe("fresh")
+	})
+})
+
+describe("ReceiverLearnedState: the pending window of a reconnect", () => {
+	it("a boundary writes the state so far under the old key, then reads and writes nothing until the settle", async () => {
+		const { learned, persistence, fake, bound } = await make()
+		await learned.onIdentity("rtl", A, undefined)
+		fake.learn(engine(-91), occupancy(12_500))
+		await learned.onConnection("rtl")
+		// A's latest state went under A; memory is fresh; the tuner is unbound too.
+		expect(
+			JSON.parse(await readFile(nsFile(A, "engine.json"), "utf8")),
+		).toMatchObject({ absoluteFloors: [{ dbfs: -91 }] })
+		expect(fake.replaced.at(-1)).toEqual({ engine: null, occupancy: null })
+		expect(bound.at(-1)).toEqual({ key: null, adoptLegacy: false })
+		const aBytes = await readFile(nsFile(A, "engine.json"))
+		expect(await persistence.loadEngine("rtl")).toBeNull()
+		expect(await persistence.loadOccupancy("rtl")).toBeNull()
+		await persistence.writeEngine("rtl", engine(-50))
+		await persistence.writeOccupancy("rtl", occupancy(1))
+		expect(await readFile(nsFile(A, "engine.json"))).toEqual(aBytes)
+		// A second boundary (disconnect, then connect) is idempotent: nothing exported again.
+		fake.learn(engine(-50), occupancy(1))
+		await learned.onConnection("rtl")
+		expect(await readFile(nsFile(A, "engine.json"))).toEqual(aBytes)
+		await learned.onIdentity("rtl", B, A)
+		expect(await readFile(nsFile(A, "engine.json"))).toEqual(aBytes)
+		expect(await exists(nsFile(B, "engine.json"))).toBe(false)
+		expect(learned.view("rtl")?.namespaceState).toBe("fresh")
+	})
+
+	it("a settle from before a newer boundary binds nothing: the newer connection's settle does", async () => {
+		const { learned, persistence, fake } = await make()
+		await learned.onIdentity("rtl", A, undefined)
+		fake.learn(engine(-91), occupancy(12_500))
+		void learned.onConnection("rtl")
+		const stale = learned.onIdentity("rtl", B, A)
+		void learned.onConnection("rtl")
+		await stale
+		await learned.idle("rtl")
+		expect(learned.view("rtl")?.key).toBe(A.key)
+		expect(await persistence.loadEngine("rtl")).toBeNull()
+		await learned.onIdentity("rtl", A, A)
+		expect(learned.view("rtl")?.namespaceState).toBe("resumed")
+		expect(await persistence.loadEngine("rtl")).toMatchObject({
+			absoluteFloors: [{ dbfs: -91 }],
+		})
+	})
+
+	it("the same receiver reconnecting is logged as a reconnect, not a change", async () => {
+		const { logger, lines } = capture()
+		const { learned } = await make(logger)
+		await learned.onIdentity("rtl", A, undefined)
+		await learned.onConnection("rtl")
+		await learned.onIdentity("rtl", A, A)
+		expect(
+			lines.filter(l => l.msg?.startsWith("Receiver changed:")),
+		).toHaveLength(1)
+		expect(
+			lines.some(
+				l => l.msg === `Receiver reconnected: ${A.key}; learned state resumed`,
+			),
+		).toBe(true)
 	})
 })
 

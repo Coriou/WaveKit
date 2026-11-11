@@ -787,7 +787,9 @@ export class TunerController extends EventEmitter {
 						: undefined
 				if (own !== undefined) {
 					this.operatorGainBeforeBand.set(sourceId, byKey.get(own) ?? null)
-					byKey.delete(own)
+					// The record from before namespacing stays in the legacy file (an older image
+					// rolled back still reads it); adoptLegacy is true once, so it is applied once.
+					if (own !== "") byKey.delete(own)
 				}
 			}
 			this.gainOwner.set(sourceId, binding.key)
@@ -1289,8 +1291,20 @@ export class TunerController extends EventEmitter {
 	}
 
 	private logGainSaveFailed(sourceId: string): void {
+		// Lane RS: a tracked source whose receiver is not bound (unknown, or between a reconnect
+		// and its identity) refuses on purpose: the gain could not be restored to its receiver.
+		if (
+			this.config.receiverTracked?.(sourceId) === true &&
+			typeof this.gainOwner.get(sourceId) !== "string"
+		) {
+			this.log.warn(
+				{ sourceId, reason: "receiver not identified" },
+				"Band gain not applied: the receiver is not identified yet, so the gain from before the band could not be saved for it",
+			)
+			return
+		}
 		this.log.warn(
-			{ sourceId },
+			{ sourceId, reason: "save failed" },
 			"Saving the gain from before the band failed; band gain not applied",
 		)
 	}

@@ -167,14 +167,21 @@ export function resolveReceiverIdentity(
 export const PATH_SEGMENT_MAX_LENGTH = 200
 
 /**
- * A single, collision-free path segment for any string: percent-encoded with every `.` encoded
- * too (so never `.` or `..`, and never a separator), or past PATH_SEGMENT_MAX_LENGTH `%h` and a
- * SHA-256 (encodeURIComponent never emits `%h`, so the two forms cannot collide).
+ * A single, collision-free path segment for any string: percent-encoded with every `.` and every
+ * upper-case letter encoded too (so never `.` or `..`, never a separator, and two strings that
+ * differ only in case stay apart on a case-insensitive file system: the only upper-case
+ * characters left are the hex digits of escapes, which are never emitted in lower case), or past
+ * PATH_SEGMENT_MAX_LENGTH `%h` and a SHA-256 (encodeURIComponent never emits `%h`, so the two
+ * forms cannot collide).
  */
 export function pathSegment(value: string): string {
 	let encoded = ""
 	try {
-		encoded = encodeURIComponent(value).replace(/\./g, "%2E")
+		encoded = encodeURIComponent(value).replace(/%[0-9A-F]{2}|[A-Z.]/g, m =>
+			m.length === 3
+				? m
+				: `%${m.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`,
+		)
 	} catch {
 		// A lone surrogate cannot be encoded: hashed below.
 	}

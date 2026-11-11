@@ -225,6 +225,25 @@ describe("ReceiverIdentityTracker", () => {
 		})
 	})
 
+	it("every connection boundary emits connection, and every settle emits settled (the same receiver too)", async () => {
+		const { rtl, manager, tracker, events } = await setup({})
+		const boundaries: string[] = []
+		const settled: string[] = []
+		tracker.on("connection", (id: string) => boundaries.push(id))
+		tracker.on("settled", (_s: string, id: ReceiverIdentity) =>
+			settled.push(id.key),
+		)
+		await connect(manager, rtl.port)
+		await waitFor(() => settled.length === 1)
+		rtl.drop()
+		await waitFor(() => settled.length === 2, 10_000)
+		// connected, disconnected, connected.
+		expect(boundaries).toEqual(["rtl", "rtl", "rtl"])
+		expect(settled).toEqual(["model:5:29", "model:5:29"])
+		// "identity" still fires only on a change.
+		expect(events).toHaveLength(1)
+	}, 15_000)
+
 	it("recomputes on each connection: another dongle model behind the same endpoint is a change", async () => {
 		let model = 5
 		const { rtl, manager, events } = await setup({

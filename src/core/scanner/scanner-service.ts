@@ -9235,7 +9235,6 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
-	/** Engine state is never written when the persisted state could not be read at all. */
 	/** Lane RS: the per-receiver wrapper when wired, else the gated persistence as before. */
 	private learnedPersistence(
 		deps: ScannerServiceDeps,
@@ -9250,6 +9249,7 @@ export class ScannerService extends EventEmitter {
 			: gated
 	}
 
+	/** Engine state is never written when the persisted state could not be read at all. */
 	private async writeEngineState(
 		sourceId: string,
 		state: EngineState,

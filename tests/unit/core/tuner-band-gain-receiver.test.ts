@@ -1,14 +1,17 @@
 /**
- * Lane RS: the saved pre-band gain is kept per receiver. Each record of tuner-band-gain-saved.json
- * names its receiver; a tracked source applies only its current receiver's record, the one from
- * before namespacing (no key) only when the first receiver adopts the legacy state, and nothing
- * while the receiver is unknown. Real controller and settings service over an in-memory file.
+ * Lane RS: the saved pre-band gain is kept per receiver. Each record of
+ * tuner-band-gain-saved-receivers.json names its receiver; tuner-band-gain-saved.json keeps the
+ * format older images read (no receiver keys). A tracked source applies only its current
+ * receiver's record, the one from before namespacing (no key) only when the first receiver adopts
+ * the legacy state, and nothing while the receiver is unknown. Real controller and settings
+ * service over an in-memory file system.
  */
 import { describe, expect, it, vi } from "vitest"
 import pino from "pino"
 import { TunerController } from "../../../src/core/tuner-controller.js"
 import {
 	BAND_GAIN_SAVED_FILE_NAME,
+	BAND_GAIN_SAVED_RECEIVERS_FILE_NAME,
 	BandGainSettingsService,
 	type BandGainFs,
 } from "../../../src/core/band-gain.js"
@@ -21,12 +24,15 @@ const logger = pino({ level: "silent" })
 const UHF = 455_500_000
 const REST = { origin: "rest" as const }
 const SAVED_PATH = `/state/${BAND_GAIN_SAVED_FILE_NAME}`
+const RECEIVERS_PATH = `/state/${BAND_GAIN_SAVED_RECEIVERS_FILE_NAME}`
 const A = "sdrhost:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 const B = "sdrhost:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
-function memoryFs(initial?: unknown) {
+function memoryFs(initial?: unknown, receivers?: unknown) {
 	const files = new Map<string, string>()
 	if (initial !== undefined) files.set(SAVED_PATH, JSON.stringify(initial))
+	if (receivers !== undefined)
+		files.set(RECEIVERS_PATH, JSON.stringify(receivers))
 	const fs: BandGainFs = {
 		readFile: path => {
 			const text = files.get(path)
@@ -84,7 +90,7 @@ const settle = () => new Promise<void>(resolve => setImmediate(resolve))
 
 describe("pre-band gain per receiver", () => {
 	it("restores only the current receiver's saved gain on leaving a band", async () => {
-		const disk = memoryFs({
+		const disk = memoryFs(undefined, {
 			version: 1,
 			sources: [{ sourceId: "rtl", receiverKey: A, saved: saved(100) }],
 		})
@@ -106,16 +112,54 @@ describe("pre-band gain per receiver", () => {
 	})
 
 	it("keeps another receiver's record on disk, tagged, while this one is bound", async () => {
-		const disk = memoryFs({
+		const disk = memoryFs(undefined, {
 			version: 1,
 			sources: [{ sourceId: "rtl", receiverKey: A, saved: saved(100) }],
 		})
 		const { controller } = await setup(disk.fs)
 		controller.noteReceiverBound("rtl", { key: B, adoptLegacy: false })
 		await settle()
-		expect(JSON.parse(disk.files.get(SAVED_PATH) ?? "null")).toEqual({
+		expect(JSON.parse(disk.files.get(RECEIVERS_PATH) ?? "null")).toEqual({
 			version: 1,
 			sources: [{ sourceId: "rtl", receiverKey: A, saved: saved(100) }],
+		})
+		// The legacy file holds no receiver keys (older images refuse them).
+		expect(JSON.parse(disk.files.get(SAVED_PATH) ?? "null")).toEqual({
+			version: 1,
+			sources: [],
+		})
+	})
+
+	it("a keyed record in the legacy file (an earlier build) moves to the receivers file", async () => {
+		const disk = memoryFs({
+			version: 1,
+			sources: [
+				{ sourceId: "other", saved: saved(50) },
+				{ sourceId: "rtl", receiverKey: A, saved: saved(100) },
+			],
+		})
+		const { controller, bandGain } = await setup(disk.fs)
+		expect(bandGain.savedOperatorGainRecords()).toHaveLength(2)
+		controller.noteReceiverBound("rtl", { key: B, adoptLegacy: false })
+		await settle()
+		expect(JSON.parse(disk.files.get(SAVED_PATH) ?? "null")).toEqual({
+			version: 1,
+			sources: [{ sourceId: "other", saved: saved(50) }],
+		})
+		expect(JSON.parse(disk.files.get(RECEIVERS_PATH) ?? "null")).toEqual({
+			version: 1,
+			sources: [{ sourceId: "rtl", receiverKey: A, saved: saved(100) }],
+		})
+	})
+
+	it("an untracked source alone never creates the receivers file", async () => {
+		const disk = memoryFs()
+		const { bandGain } = await setup(disk.fs)
+		await bandGain.saveOperatorGains(new Map([["other", saved(50)]]))
+		expect(disk.files.has(RECEIVERS_PATH)).toBe(false)
+		expect(JSON.parse(disk.files.get(SAVED_PATH) ?? "null")).toEqual({
+			version: 1,
+			sources: [{ sourceId: "other", saved: saved(50) }],
 		})
 	})
 
@@ -133,21 +177,76 @@ describe("pre-band gain per receiver", () => {
 		const second = await setup(disk.fs)
 		second.controller.noteReceiverBound("rtl", { key: A, adoptLegacy: true })
 		await settle()
-		// Adopted: written back under A's key.
-		expect(JSON.parse(disk.files.get(SAVED_PATH) ?? "null")).toEqual({
+		// Adopted: written under A's key in the receivers file; the legacy record stays for an
+		// older image rolled back.
+		expect(JSON.parse(disk.files.get(RECEIVERS_PATH) ?? "null")).toEqual({
 			version: 1,
 			sources: [{ sourceId: "rtl", receiverKey: A, saved: saved(150) }],
 		})
+		expect(JSON.parse(disk.files.get(SAVED_PATH) ?? "null")).toEqual(legacy)
 		await second.controller.setFrequency("rtl", UHF, REST)
 		expect(second.controller.getState("rtl")?.gain).toBe(150)
 	})
 
 	it("a record with a malformed receiver key makes the file invalid (ignored, nothing applied)", async () => {
-		const disk = memoryFs({
+		const bad = {
 			version: 1,
 			sources: [{ sourceId: "rtl", receiverKey: "../../x", saved: saved(100) }],
+		}
+		expect(
+			(await setup(memoryFs(bad).fs)).bandGain.savedOperatorGainRecords(),
+		).toEqual([])
+		expect(
+			(
+				await setup(memoryFs(undefined, bad).fs)
+			).bandGain.savedOperatorGainRecords(),
+		).toEqual([])
+	})
+
+	it("refuses the band gain while the receiver is not bound, with the reason logged", async () => {
+		const lines: Array<{ msg?: string; reason?: string }> = []
+		const capture = pino(
+			{ level: "warn" },
+			{
+				write: (line: string) => {
+					lines.push(JSON.parse(line) as { msg?: string; reason?: string })
+				},
+			},
+		)
+		const sourceManager = {
+			assertTunerCommandActive: () => {},
+			writeToSource: vi.fn(() => true),
+			isRtlTcpSource: () => true,
+			updateSourceCaps: vi.fn(),
+			getCaps: () => undefined,
+		}
+		const controller = new TunerController(
+			capture,
+			sourceManager as unknown as SourceManager,
+			{ receiverTracked: id => id === "rtl" },
+		)
+		controller.initializeSource("rtl", {
+			kind: "iq",
+			sampleRate: 2_048_000,
+			format: "U8_IQ",
+			exclusive: false,
+			centerFreq: UHF,
 		})
-		const { bandGain } = await setup(disk.fs)
-		expect(bandGain.savedOperatorGainRecords()).toEqual([])
+		const bandGain = new BandGainSettingsService({
+			stateDir: "/state",
+			config: {
+				applyToMyTuning: true,
+				entries: [{ minHz: 863_000_000, maxHz: 870_000_000, gain: 297 }],
+			},
+			logger,
+			fs: memoryFs().fs,
+		})
+		await bandGain.load()
+		controller.setBandGain(bandGain)
+		await controller.setGainMode("rtl", "manual", REST)
+		await controller.setGain("rtl", 100, REST)
+		await controller.setFrequency("rtl", 868_000_000, REST)
+		expect(controller.getState("rtl")?.gain).toBe(100)
+		expect(lines.some(l => l.reason === "receiver not identified")).toBe(true)
 	})
 })

@@ -1127,16 +1127,26 @@ receiver): which receiver the source reaches and whose learned state applies.
 ```
 
 - `key` and `strength`: `sdrhost:<receiverId>` or `serial:<vendor>:<product>:<serial>` are a
-  `unit`; `model:<tunerType>:<gainCount>` (rtl*tcp header only) is a `model`, shared by every
+  `unit`; `model:<tunerType>:<gainCount>` (`rtl_tcp` header only) is a `model`, shared by every
   dongle of that model; `unknown` means nothing usable was reported. Every part is validated
-  (letters, digits, `.`, `*`, `-`, bounded length); anything else is dropped, which only weakens
+  (letters, digits, `.`, `_`, `-`, bounded length); anything else is dropped, which only weakens
   the identity.
 - `serial` (as validated) and `candidateLabel` are present only when known.
 - `learnedStateNamespace`: where the spectrum engine state and occupancy of this receiver live,
   relative to the scanner state directory; null while the receiver is unknown.
-- `namespaceState`: `fresh` (new receiver), `resumed` (its own earlier state), `adopted` (the
-  state saved before receiver namespacing, taken over once by the first receiver identified) or
-  `none` (unknown receiver: nothing learned applies, nothing is written).
+- `namespaceState`: `fresh` (new receiver), `resumed` (its own earlier state), `adopted` (a copy
+  of the state saved before receiver namespacing, taken over once by the first receiver
+  identified; the original files stay for an older version) or `none` (unknown receiver: nothing
+  learned applies, nothing is written).
+- Between a disconnect or a new connection and that connection's identity (at most 5 s by
+  default), `receiver` still shows the last identified receiver, but nothing learned applies:
+  the state learned so far was saved under that receiver, the spectrum engine runs fresh, and
+  nothing is saved under any receiver until the identity settles.
+- While a tracked source's receiver is not identified (unknown, or in that window), a retune
+  with `applyToMyTuning` applies no band gain and keeps your gain: the gain it would replace
+  could not be saved for the right receiver. This is the intended safe answer; the log line
+  `Band gain not applied: the receiver is not identified yet` carries the reason
+  `receiver not identified`.
 - `restoredTuning`: whether the tuning accepted through the API or the relay was replayed on
   this connection, and why (`same receiver`, `this receiver's tuning from earlier`, `another
 receiver: configured tuning`, `receiver unknown: nothing restored`, ...). It is replayed only to

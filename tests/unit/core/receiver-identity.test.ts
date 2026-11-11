@@ -195,7 +195,43 @@ describe("pathSegment", () => {
 				fc.string({ unit: "binary", maxLength: 20 }),
 				fc.string({ unit: "binary", maxLength: 20 }),
 				(x, y) => {
-					if (x !== y) expect(pathSegment(x)).not.toBe(pathSegment(y))
+					// Compared case-folded: a case-insensitive file system must keep them apart too.
+					if (x !== y)
+						expect(pathSegment(x).toLowerCase()).not.toBe(
+							pathSegment(y).toLowerCase(),
+						)
+				},
+			),
+			{ numRuns: 300 },
+		)
+	})
+
+	// Feature: receiver-identity, Property 2: segments stay apart on a case-insensitive file system
+	// Validates: lane RS design 1 (one namespace per receiver key)
+	it("two strings that differ only in case get segments that differ case-folded", () => {
+		expect(pathSegment("serial:Realtek:RTL2838:A1").toLowerCase()).not.toBe(
+			pathSegment("serial:realtek:rtl2838:a1").toLowerCase(),
+		)
+		expect(pathSegment("Ab")).toBe("%41b")
+		fc.assert(
+			fc.property(
+				fc.string({ minLength: 1, maxLength: 40 }),
+				fc.nat(),
+				(x, seed) => {
+					// Flip the case of one letter, when there is one.
+					const chars = [...x]
+					const letters = chars.flatMap((c, i) =>
+						c.toLowerCase() !== c.toUpperCase() ? [i] : [],
+					)
+					fc.pre(letters.length > 0)
+					const at = letters[seed % letters.length]!
+					const c = chars[at]!
+					chars[at] = c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()
+					const y = chars.join("")
+					fc.pre(y !== x)
+					expect(pathSegment(x).toLowerCase()).not.toBe(
+						pathSegment(y).toLowerCase(),
+					)
 				},
 			),
 			{ numRuns: 300 },

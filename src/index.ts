@@ -207,6 +207,11 @@ import { SdrHostPoller, type SdrHostConfig } from "./core/sdr-host-poller.js"
 import { ReceiverIdentityTracker } from "./core/receiver-identity-tracker.js"
 import { ReceiverLearnedState } from "./core/receiver-identity-state.js"
 import {
+	receiverBoundToTuner,
+	wireReceiverStatus,
+	wireReceiverTracker,
+} from "./core/receiver-identity-wiring.js"
+import {
 	EndpointSelector,
 	type EndpointSelectionTarget,
 } from "./core/endpoint-selector.js"
@@ -1330,17 +1335,11 @@ async function main(): Promise<void> {
 			stateDir: config.stateDir,
 			logger,
 			tracked: receiverTracked,
-			onBound: (id, binding) =>
-				tunerController.noteReceiverBound(
-					id,
-					binding,
-					receiverIdentity.current(id),
-				),
+			// The controller is built below; nothing binds before the first connection.
+			onBound: receiverBoundToTuner(receiverIdentity, () => tunerController),
 		})
 		await receiverState.load()
-		receiverIdentity.on("identity", (id, identity, previous) => {
-			void receiverState.onIdentity(id, identity, previous)
-		})
+		wireReceiverTracker(receiverIdentity, receiverState)
 		const composed = composeLinkBurst({ log: logger })
 		own(20, composed.dispose)
 		const fanoutManager = new FanoutManager(logger)
@@ -1385,27 +1384,7 @@ async function main(): Promise<void> {
 				receiverTracked(id) ? receiverIdentity.provisional(id) : undefined,
 			receiverTracked,
 		})
-		sourceManager.setReceiverStatusSource(id => {
-			const view = receiverState.view(id)
-			if (!view) return undefined
-			const candidate = sourceManager.getSelectedCandidate(id)
-			return {
-				key: view.key,
-				strength: view.strength,
-				...(view.tunerType !== undefined ? { tunerType: view.tunerType } : {}),
-				...(view.serial !== undefined ? { serial: view.serial } : {}),
-				...(candidate?.label !== undefined
-					? { candidateLabel: candidate.label }
-					: {}),
-				selectedBecause: candidate?.selectedBecause ?? "configured",
-				learnedStateNamespace: view.learnedStateNamespace,
-				namespaceState: view.namespaceState,
-				restoredTuning: tunerController.receiverTuningRestore(id) ?? {
-					restored: false,
-					reason: "not connected yet",
-				},
-			}
-		})
+		wireReceiverStatus(sourceManager, receiverState, tunerController)
 		// Per-band gain: tuner.bandGain, replaced by <stateDir>/tuner-band-gain.json once PUT.
 		const bandGain = new BandGainSettingsService({
 			stateDir: config.stateDir,

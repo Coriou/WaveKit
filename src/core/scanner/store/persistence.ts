@@ -1507,13 +1507,15 @@ export class ScannerPersistence {
 	}
 
 	/**
-	 * Moves a source's files from before receiver namespacing (`engine/<source>.json`,
+	 * Copies a source's files from before receiver namespacing (`engine/<source>.json`,
 	 * `engine/occupancy/<source>.json`) into a receiver's namespace, unless it already has its
-	 * own. Serialised with the writes; resolves true when a file moved.
+	 * own. The originals stay (an older image rolled back to still reads them); the caller records
+	 * the adoption so it happens once. Serialised with the writes; resolves true when a file was
+	 * copied.
 	 */
 	adoptLegacyInto(sourceId: string, receiverKey: string): Promise<boolean> {
 		return this.enqueue(async () => {
-			let moved = false
+			let copied = false
 			const pairs: Array<[string, string]> = [
 				[
 					this.engineFile(sourceId),
@@ -1525,13 +1527,13 @@ export class ScannerPersistence {
 				],
 			]
 			for (const [from, to] of pairs) {
-				if ((await readJson(from)).kind === "missing") continue
+				const legacy = await readJson(from)
+				if (legacy.kind !== "ok") continue
 				if ((await readJson(to)).kind !== "missing") continue
-				await mkdir(join(to, ".."), { recursive: true })
-				await rename(from, to)
-				moved = true
+				await atomicWrite(to, JSON.stringify(legacy.value))
+				copied = true
 			}
-			return moved
+			return copied
 		})
 	}
 

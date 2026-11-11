@@ -1,6 +1,6 @@
 /**
  * Candidate endpoints of an rtl_tcp source (lane RS): the primary, then the candidates in order,
- * with the usual backoff; the first that sends a valid header wins; a delivering endpoint is
+ * with the usual backoff; the first that delivers a payload wins (a header alone does not); a delivering endpoint is
  * retried SOURCE_CANDIDATE_RETRIES times after a loss before the next one is tried. Loopback only:
  * fake rtl_tcp servers and closed ports this test opened itself (port 0). Real timers.
  */
@@ -213,6 +213,47 @@ describe("SourceManager candidates", () => {
 				`previous failed: refused (${SOURCE_CANDIDATE_RETRIES + 1} losses)`,
 			)
 			expect(backup.accepts()).toBe(1)
+		},
+	)
+
+	it(
+		"an endpoint that sends a header but never a payload is left: the next one is tried",
+		{ timeout: 30_000 },
+		async () => {
+			vi.spyOn(Math, "random").mockReturnValue(0)
+			// Header, then the connection closes before any sample: every time.
+			let headerOnlyAccepts = 0
+			const headerOnly = net.createServer(socket => {
+				headerOnlyAccepts += 1
+				socket.on("error", () => {})
+				socket.write(HEADER, () => setTimeout(() => socket.destroy(), 50))
+			})
+			headerOnly.listen(0, "127.0.0.1")
+			await once(headerOnly, "listening")
+			cleanup.push(
+				() => new Promise<void>(resolve => headerOnly.close(() => resolve())),
+			)
+			const port = (headerOnly.address() as net.AddressInfo).port
+			const backup = await fakeRtlTcp()
+			const m = manager()
+			await m
+				.connect(source(port, [{ host: "127.0.0.1", port: backup.port }]))
+				.catch(() => undefined)
+			await waitFor(() => m.getStatus("rtl")?.candidate?.index === 1, 10_000)
+			await waitFor(
+				() => m.getStatus("rtl")?.candidate?.delivering === true,
+				10_000,
+			)
+			expect(headerOnlyAccepts).toBeGreaterThanOrEqual(1)
+			expect(headerOnlyAccepts).toBeLessThanOrEqual(
+				SOURCE_CANDIDATE_RETRIES + 1,
+			)
+			expect(backup.accepts()).toBe(1)
+			expect(m.getStatus("rtl")?.candidate).toMatchObject({
+				index: 1,
+				delivering: true,
+				failures: 0,
+			})
 		},
 	)
 

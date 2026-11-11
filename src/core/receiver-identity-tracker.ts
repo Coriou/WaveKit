@@ -6,7 +6,10 @@
  * primary endpoint), the identity waits up to `sdrHostWaitMs` for an sdr-host answer received
  * after the connection opened, then settles with what it has. A later answer only ever upgrades
  * it (model -> unit); a failed or malformed poll, or another unit key, never changes a settled
- * identity within the connection. "identity" fires when the settled key differs from the last one.
+ * identity within the connection. "identity" fires when the settled key differs from the last one;
+ * "settled" fires on every settle (also the same receiver again after a reconnect), and
+ * "connection" on every connection boundary (a disconnect or a new connection), so the learned
+ * state can stop applying the previous receiver's before the next identity is known.
  */
 import { EventEmitter } from "node:events"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
@@ -25,6 +28,7 @@ export const RECEIVER_SDR_HOST_WAIT_MS = 3000 + 2000
 
 export interface ReceiverIdentitySources {
 	on(event: "connected", fn: (sourceId: string) => void): unknown
+	on(event: "disconnected", fn: (sourceId: string) => void): unknown
 	on(
 		event: "rtl-tcp-header",
 		fn: (
@@ -59,6 +63,12 @@ export interface ReceiverIdentityEvents {
 		identity: ReceiverIdentity,
 		previous: ReceiverIdentity | undefined,
 	) => void
+	settled: (
+		sourceId: string,
+		identity: ReceiverIdentity,
+		previous: ReceiverIdentity | undefined,
+	) => void
+	connection: (sourceId: string) => void
 }
 
 export class ReceiverIdentityTracker extends EventEmitter {
@@ -72,7 +82,15 @@ export class ReceiverIdentityTracker extends EventEmitter {
 		super()
 		this.log = createComponentLogger(options.logger, "ReceiverIdentity")
 		this.waitMs = options.sdrHostWaitMs ?? RECEIVER_SDR_HOST_WAIT_MS
-		options.sources.on("connected", id => this.onConnected(id))
+		options.sources.on("connected", id => {
+			this.onConnected(id)
+			if (!this.stopped) this.emit("connection", id)
+		})
+		options.sources.on("disconnected", id => {
+			this.clearTimer(id)
+			this.connections.delete(id)
+			if (!this.stopped) this.emit("connection", id)
+		})
 		options.sources.on("rtl-tcp-header", (id, info) => this.onHeader(id, info))
 		options.sources.on("removed", id => this.clearTimer(id))
 	}
@@ -184,6 +202,7 @@ export class ReceiverIdentityTracker extends EventEmitter {
 		conn.settled = identity
 		const previous = this.last.get(sourceId)
 		this.last.set(sourceId, identity)
+		this.emit("settled", sourceId, { ...identity }, previous)
 		if (previous?.key === identity.key) return
 		this.emit("identity", sourceId, { ...identity }, previous)
 	}

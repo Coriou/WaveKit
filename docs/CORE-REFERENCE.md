@@ -155,7 +155,10 @@ mode is unknown (right after a restart, before any gain write) they write no ban
 tuning (the API, the web app, a dwell you drive through the API) keeps your gain unless
 `applyToMyTuning` is true; then tuning into a listed range applies its gain and tuning out puts
 yours back, from `<stateDir>/tuner-band-gain-saved.json` after a restart (the band gain goes
-on only once that file is written; a failed write keeps your gain).
+on only once that file is written; a failed write keeps your gain). For an rtl_tcp IQ source the
+saved gain is kept per receiver in `<stateDir>/tuner-band-gain-saved-receivers.json`, and while
+that source's receiver is not identified yet (unknown, or the first seconds after a reconnect)
+no band gain is applied to your retunes: your gain stays, and the log gives the reason.
 
 ```yaml
 tuner:
@@ -465,10 +468,11 @@ sources:
 ```
 
 - The source tries `host`/`port`, then each candidate in order, with the usual reconnect backoff.
-  The first endpoint that sends a valid rtl_tcp header wins.
-- An endpoint that never sent a header is left after one failed attempt. Once one delivers, a
-  loss is retried 3 times (about 14 to 43 s with the backoff) before the next endpoint is tried,
-  so an rtlmux restart or a short network drop keeps the receiver.
+  The first endpoint that delivers samples wins; a header alone does not.
+- An endpoint that never delivered samples is left after one failed attempt (one that sends a
+  header and then stalls or closes too). Once one delivers, a loss is retried 3 times (about 14
+  to 43 s with the backoff) before the next endpoint is tried, so an rtlmux restart or a short
+  network drop keeps the receiver; the count starts over only when samples flow again.
 - WaveKit contacts only the endpoints you list. It never discovers or scans for others.
   `sdrHost.endpointSelection` applies to the primary host only.
 - GET /api/sources shows the endpoint in use and why under `candidate` (see
@@ -492,12 +496,17 @@ so a USB dongle's spurs or gain are never applied to the Pi receiver, or the oth
   receiver gets nothing learned and nothing is saved for it.
 - The tuning you set is replayed on a reconnect only to the receiver it was set on, gain
   included. Another receiver gets the configured tuning.
+- After a disconnect, nothing learned applies until the next connection's receiver is identified
+  (at most 5 s by default): the state so far is saved under the receiver it was learned on, and
+  the spectrum engine runs fresh meanwhile, so the next receiver never inherits it.
 - On the first start after the upgrade, the first receiver identified on each source takes over
-  the state saved before (once).
+  a copy of the state saved before (once). The original files stay, so an older version you go
+  back to still finds them.
 - Scanner discoveries and recordings are shared by every receiver.
 
 The log shows one line per change, for example
-`Receiver changed: model:5:29 -> sdrhost:<id>; learned state resumed`.
+`Receiver changed: model:5:29 -> sdrhost:<id>; learned state resumed`, and the same receiver
+coming back after a reconnect logs `Receiver reconnected: <key>; learned state resumed`.
 
 ## RTL-SDR Setup
 

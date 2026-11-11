@@ -8,6 +8,10 @@
  * - another key: its own namespace, nothing of another receiver's applied;
  * - a `model` key: only the same model key's state (logged as weak);
  * - `unknown`: nothing learned is applied (fresh in memory) and nothing is written.
+ * Between a connection boundary (disconnect or connect, `onConnection`) and the new connection's
+ * settled identity the source is pending: the state learned so far is written under the receiver
+ * it was learned on, the engine runs fresh in memory, loads return nothing and writes are dropped,
+ * so the next receiver's IQ never trains or reads the previous receiver's state.
  * The files from before namespacing are adopted once per source, by the first receiver
  * identified after the upgrade (`<stateDir>/receiver-namespaces.json` records it). Scanner
  * discoveries and recordings stay shared. A source the tracker does not follow keeps the
@@ -130,9 +134,17 @@ export class ReceiverLearnedState {
 	/** The bound receiver key per tracked source; absent or null: unknown (nothing applies). */
 	private readonly bound = new Map<string, string | null>()
 	private readonly views = new Map<string, ReceiverNamespaceView>()
-	/** Serialised switches per source; writes are dropped and loads wait while one runs. */
+	/** Serialised switches per source; writes are dropped and loads return nothing while one runs. */
 	private readonly chains = new Map<string, Promise<void>>()
 	private readonly switching = new Set<string>()
+	/** Sources between a connection boundary and that connection's settled identity. */
+	private readonly pending = new Set<string>()
+	/** Connection boundaries seen per source; a settle clears `pending` only if none came since. */
+	private readonly boundaries = new Map<string, number>()
+	/** Bumped on every binding change; a load that read across one reads again. */
+	private readonly generation = new Map<string, number>()
+	/** The in-memory learned state is known fresh (unbound since the last boundary). */
+	private readonly neutral = new Set<string>()
 	private spectrum: LearnedSpectrum | null = null
 	private store: ReceiverScopedStore | null = null
 	private writable: () => boolean = () => true
@@ -210,32 +222,71 @@ export class ReceiverLearnedState {
 			writeEngine: async (sourceId, s) => {
 				if (!this.options.tracked(sourceId))
 					return legacy.writeEngine(sourceId, s)
-				const key = this.bound.get(sourceId) ?? null
-				// Unknown receiver or a switch in progress: nothing is written under any key.
-				if (key === null || this.switching.has(sourceId) || !writable()) return
+				// Unknown receiver, pending or a switch in progress: nothing is written under any key.
+				const key = this.writableKey(sourceId)
+				if (key === null) return
 				return store.writeEngineIn(sourceId, key, s)
 			},
 			loadEngine: async sourceId => {
 				if (!this.options.tracked(sourceId)) return legacy.loadEngine(sourceId)
-				await this.idle(sourceId)
-				const key = this.bound.get(sourceId) ?? null
-				return key === null ? null : store.loadEngineIn(sourceId, key)
+				return this.loadBound(sourceId, key =>
+					store.loadEngineIn(sourceId, key),
+				)
 			},
 			writeOccupancy: async (sourceId, s) => {
 				if (!this.options.tracked(sourceId))
 					return legacy.writeOccupancy(sourceId, s)
-				const key = this.bound.get(sourceId) ?? null
-				if (key === null || this.switching.has(sourceId) || !writable()) return
+				const key = this.writableKey(sourceId)
+				if (key === null) return
 				return store.writeOccupancyIn(sourceId, key, s)
 			},
 			loadOccupancy: async sourceId => {
 				if (!this.options.tracked(sourceId))
 					return legacy.loadOccupancy(sourceId)
-				await this.idle(sourceId)
-				const key = this.bound.get(sourceId) ?? null
-				return key === null ? null : store.loadOccupancyIn(sourceId, key)
+				return this.loadBound(sourceId, key =>
+					store.loadOccupancyIn(sourceId, key),
+				)
 			},
 		}
+	}
+
+	/** The key a write goes under now; null: dropped (unknown, pending, switching, gated). */
+	private writableKey(sourceId: string): string | null {
+		const key = this.bound.get(sourceId) ?? null
+		if (
+			key === null ||
+			this.pending.has(sourceId) ||
+			this.switching.has(sourceId) ||
+			!this.writable()
+		)
+			return null
+		return key
+	}
+
+	/**
+	 * The bound receiver's state, or null while unbound, pending or switching (the switch then
+	 * hands the state to the engine itself: replaceLearnedState waits for an open in flight). A
+	 * read that a binding change overtook reads again for the binding now.
+	 */
+	private async loadBound<T>(
+		sourceId: string,
+		read: (key: string) => Promise<T | null>,
+	): Promise<T | null> {
+		for (let attempt = 0; attempt < 4; attempt++) {
+			if (this.pending.has(sourceId) || this.switching.has(sourceId))
+				return null
+			const key = this.bound.get(sourceId) ?? null
+			if (key === null) return null
+			const gen = this.generation.get(sourceId) ?? 0
+			const value = await read(key)
+			if ((this.generation.get(sourceId) ?? 0) === gen) return value
+		}
+		return null
+	}
+
+	private bind(sourceId: string, key: string | null): void {
+		this.bound.set(sourceId, key)
+		this.generation.set(sourceId, (this.generation.get(sourceId) ?? 0) + 1)
 	}
 
 	view(sourceId: string): ReceiverNamespaceView | undefined {
@@ -248,15 +299,38 @@ export class ReceiverLearnedState {
 		return this.chains.get(sourceId) ?? Promise.resolve()
 	}
 
-	/** A settled identity (ReceiverIdentityTracker "identity"); serialised per source. */
+	/**
+	 * A connection boundary of a tracked source (ReceiverIdentityTracker "connection": a
+	 * disconnect or a new connection). From now until that connection's identity settles nothing
+	 * learned is read or written; queued, the state learned so far is written under the receiver
+	 * it was learned on and the engine continues fresh in memory.
+	 */
+	onConnection(sourceId: string): Promise<void> {
+		if (!this.options.tracked(sourceId)) return Promise.resolve()
+		this.pending.add(sourceId)
+		this.boundaries.set(sourceId, (this.boundaries.get(sourceId) ?? 0) + 1)
+		return this.enqueue(sourceId, () => this.unbind(sourceId))
+	}
+
+	/**
+	 * A settled identity (ReceiverIdentityTracker "settled": every settle, also of the same
+	 * receiver again after a reconnect); serialised per source.
+	 */
 	onIdentity(
 		sourceId: string,
 		identity: ReceiverIdentity,
 		previous: ReceiverIdentity | undefined,
 	): Promise<void> {
 		if (!this.options.tracked(sourceId)) return Promise.resolve()
+		const boundary = this.boundaries.get(sourceId) ?? 0
+		return this.enqueue(sourceId, () =>
+			this.switchTo(sourceId, identity, previous, boundary),
+		)
+	}
+
+	private enqueue(sourceId: string, task: () => Promise<void>): Promise<void> {
 		const run = (this.chains.get(sourceId) ?? Promise.resolve())
-			.then(() => this.switchTo(sourceId, identity, previous))
+			.then(task)
 			.catch((err: unknown) =>
 				this.log.warn({ err, sourceId }, "Switching the receiver state failed"),
 			)
@@ -267,38 +341,71 @@ export class ReceiverLearnedState {
 		return run
 	}
 
+	/** The pending side of a connection boundary (queued after any switch before it). */
+	private async unbind(sourceId: string): Promise<void> {
+		const from = this.bound.get(sourceId) ?? null
+		this.switching.add(sourceId)
+		try {
+			if (from !== null) await this.exportUnder(sourceId, from)
+			this.bind(sourceId, null)
+			if (from !== null)
+				this.options.onBound?.(sourceId, { key: null, adoptLegacy: false })
+			if (this.spectrum && !this.neutral.has(sourceId)) {
+				// Whatever is in memory belongs to the previous connection: the next one starts fresh.
+				await this.spectrum.replaceLearnedState(sourceId, {
+					engine: null,
+					occupancy: null,
+				})
+				this.neutral.add(sourceId)
+			}
+		} finally {
+			this.switching.delete(sourceId)
+		}
+	}
+
+	/** Writes the spectrum's learned state now under `key` (the receiver it was learned on). */
+	private async exportUnder(sourceId: string, key: string): Promise<void> {
+		const store = this.store
+		if (!this.spectrum || !store || !this.writable()) return
+		const now = await this.spectrum.exportLearnedState(sourceId)
+		if (now.engine)
+			await store
+				.writeEngineIn(sourceId, key, now.engine)
+				.catch((err: unknown) =>
+					this.log.warn({ err, sourceId }, "Engine state write failed"),
+				)
+		if (now.occupancy)
+			await store
+				.writeOccupancyIn(sourceId, key, now.occupancy)
+				.catch((err: unknown) =>
+					this.log.warn({ err, sourceId }, "Occupancy write failed"),
+				)
+	}
+
 	private async switchTo(
 		sourceId: string,
 		identity: ReceiverIdentity,
 		previous: ReceiverIdentity | undefined,
+		boundary: number,
 	): Promise<void> {
 		const from = this.bound.get(sourceId) ?? null
 		const to = identity.strength === "unknown" ? null : identity.key
+		// The settle of a connection after a newer boundary: that one's settle binds.
+		const stale = (this.boundaries.get(sourceId) ?? 0) !== boundary
+		if (stale) return
+		const wasPending = this.pending.has(sourceId)
+		// Nothing changed (a repeated settle within one connection).
+		if (
+			!wasPending &&
+			from === to &&
+			this.views.get(sourceId)?.key === identity.key
+		)
+			return
 		this.switching.add(sourceId)
 		try {
 			// The learned state so far belongs to the receiver it was learned on (nothing for unknown).
 			const store = this.store
-			if (
-				this.spectrum &&
-				store &&
-				from !== null &&
-				from !== to &&
-				this.writable()
-			) {
-				const now = await this.spectrum.exportLearnedState(sourceId)
-				if (now.engine)
-					await store
-						.writeEngineIn(sourceId, from, now.engine)
-						.catch((err: unknown) =>
-							this.log.warn({ err, sourceId }, "Engine state write failed"),
-						)
-				if (now.occupancy)
-					await store
-						.writeOccupancyIn(sourceId, from, now.occupancy)
-						.catch((err: unknown) =>
-							this.log.warn({ err, sourceId }, "Occupancy write failed"),
-						)
-			}
+			if (from !== null && from !== to) await this.exportUnder(sourceId, from)
 			let state: ReceiverNamespaceState = "none"
 			let adoptLegacy = false
 			if (to !== null) {
@@ -328,7 +435,9 @@ export class ReceiverLearnedState {
 				this.records.set(sourceId, record)
 				await this.saveRecords()
 			}
-			this.bound.set(sourceId, to)
+			this.bind(sourceId, to)
+			this.pending.delete(sourceId)
+			this.neutral.delete(sourceId)
 			if (this.spectrum && store && from !== to) {
 				const next =
 					to === null
@@ -358,6 +467,7 @@ export class ReceiverLearnedState {
 			})
 			this.options.onBound?.(sourceId, { key: to, adoptLegacy })
 			// Keys are built from validated components only, so they are safe to log.
+			const same = previous?.key === identity.key
 			this.log.info(
 				{
 					sourceId,
@@ -366,9 +476,11 @@ export class ReceiverLearnedState {
 					strength: identity.strength,
 					learnedState: state,
 				},
-				`Receiver changed: ${previous?.key ?? "none"} -> ${identity.key}; learned state ${state}`,
+				same
+					? `Receiver reconnected: ${identity.key}; learned state ${state}`
+					: `Receiver changed: ${previous?.key ?? "none"} -> ${identity.key}; learned state ${state}`,
 			)
-			if (identity.strength === "model")
+			if (identity.strength === "model" && !same)
 				this.log.info(
 					{ sourceId, key: identity.key },
 					"Receiver identified by model only: learned state is shared by every dongle of this model",

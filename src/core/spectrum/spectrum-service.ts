@@ -520,13 +520,16 @@ export class SpectrumService extends EventEmitter {
 
 	/**
 	 * Lane RS: replaces a source's learned state with another receiver's (null: fresh). A running
-	 * engine recreates its pipeline with it; an engine opened later loads from persistence. The
-	 * occupancy history is replaced (validated; another bucket size starts fresh).
+	 * engine recreates its pipeline with it, and so does one still opening (its load may have read
+	 * the binding before this switch): the open is awaited first. An engine opened later loads from
+	 * persistence. The occupancy history is replaced (validated; another bucket size starts fresh).
 	 */
 	async replaceLearnedState(
 		sourceId: string,
 		next: { engine: EngineState | null; occupancy: OccupancyState | null },
 	): Promise<void> {
+		const opening = this.opening.get(sourceId)
+		if (opening) await opening.catch(() => undefined)
 		const history = new OccupancyHistory()
 		if (next.occupancy !== null) {
 			const parsed = OccupancyStateSchema.safeParse(next.occupancy)

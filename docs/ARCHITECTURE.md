@@ -112,17 +112,24 @@ spurs, floors or pre-band gain never apply to the Pi receiver.
 - `src/core/receiver-identity-tracker.ts`: per connection, the identity from the header,
   upgraded by a validated sdr-host answer (`SdrHostPoller` `receiver-identity`) while the source
   is on its primary endpoint. It waits at most one poll interval plus the poll timeout before it
-  settles, never downgrades within a connection, and is recomputed on each new connection.
+  settles, never downgrades within a connection, and is recomputed on each new connection. It
+  emits `connection` on every disconnect and connect, `settled` on every settle and `identity`
+  on a change; `src/core/receiver-identity-wiring.ts` connects it to the learned state, the
+  tuner (`noteReceiverBound`) and the source status (`setReceiverStatusSource`).
 - `src/core/receiver-identity-state.ts`: binds each tracked source (rtl_tcp U8_IQ) to its
   receiver's namespace `engine/receivers/<source>/<key>/` in the scanner state directory for the
   spectrum engine state and occupancy. On a change it saves the running state under the old
   receiver and loads the new one's (`SpectrumService.replaceLearnedState`, which recreates the
-  pipeline). An unknown receiver gets nothing applied and nothing written. The un-namespaced
-  files from before are adopted once per source by the first receiver identified
-  (`<stateDir>/receiver-namespaces.json` records it). One INFO line per change:
-  `Receiver changed: <old> -> <new>; learned state <fresh|resumed|adopted|none>`.
+  pipeline, and first waits for an engine still opening). A connection boundary makes the source
+  pending until the next settle: the state so far is written under the old receiver, the engine
+  is swapped to fresh, loads return nothing and writes are dropped. A per-source generation makes
+  a load that a switch overtook read again. An unknown receiver gets nothing applied and nothing
+  written. The un-namespaced files from before are copied (not moved) once per source into the
+  first receiver identified (`<stateDir>/receiver-namespaces.json` records it). One INFO line
+  per change: `Receiver changed: <old> -> <new>; learned state <fresh|resumed|adopted|none>`.
 - `TunerController` keeps the pre-band gain records per receiver key
-  (`tuner-band-gain-saved.json`) and gates the reconnect restore: accepted tuning (gain included)
+  (`tuner-band-gain-saved-receivers.json`; `tuner-band-gain-saved.json` keeps the un-keyed
+  format older images read) and gates the reconnect restore: accepted tuning (gain included)
   is replayed only to the receiver it was accepted on (a unit owner also matches a header-only
   identity of the same model until the sdr-host answers). Another receiver gets the configured
   baseline, and its own earlier tuning comes back if it had one.

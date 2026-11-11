@@ -1104,6 +1104,8 @@ export class SourceManager extends EventEmitter {
 		this.emit("data", id, chunk)
 		if (!current()) return false
 		if (firstPayload) {
+			// A header alone wins nothing: an endpoint that answers and then stalls is left.
+			if (state.config.type === "rtl_tcp") this.noteCandidateWon(id, state)
 			this.emit("payload-started", id)
 			// Its listeners (tuner sync, scanner recovery) have read the resume kind.
 			if (current()) state.pendingResume = null
@@ -1790,8 +1792,6 @@ export class SourceManager extends EventEmitter {
 									"Captured RTL-TCP header from source",
 								)
 								if (!this.isActiveAttempt(state, attempt)) return
-								if (state.rtlTcpHeaderInfo?.magic === "RTL0")
-									this.noteCandidateWon(id, state)
 								this.emit("rtl-tcp-header", id, state.rtlTcpHeaderInfo)
 								if (!this.isActiveAttempt(state, attempt)) return
 							}
@@ -2592,11 +2592,6 @@ export class SourceManager extends EventEmitter {
 		}
 	}
 
-	/**
-	 * Supplies a held feed's `restoreTuning`: what a restore resume would write back (the tuner
-	 * controller's accepted centre, rate and gain; wired in core/tuner-wiring.ts). Read on every
-	 * feed answer, so it follows relay commands made during the pause.
-	 */
 	/** Lane RS: supplies `receiver` on getStatus (null removes it). */
 	setReceiverStatusSource(
 		source: ((id: string) => SourceReceiverStatus | undefined) | null,
@@ -2612,6 +2607,11 @@ export class SourceManager extends EventEmitter {
 		}
 	}
 
+	/**
+	 * Supplies a held feed's `restoreTuning`: what a restore resume would write back (the tuner
+	 * controller's accepted centre, rate and gain; wired in core/tuner-wiring.ts). Read on every
+	 * feed answer, so it follows relay commands made during the pause.
+	 */
 	setPausedTuningSource(
 		source: ((id: string) => SourceFeedRestoreTuning | undefined) | null,
 	): void {
@@ -2908,7 +2908,7 @@ export class SourceManager extends EventEmitter {
 		return this.candidateStatus(state)
 	}
 
-	/** A valid header: this endpoint wins (again); its failure count starts over. */
+	/** The first payload of a connection: this endpoint wins (again); its failure count starts over. */
 	private noteCandidateWon(id: string, state: SourceState): void {
 		if (this.candidatesOf(state).length === 0) return
 		state.candidateFailures = 0
@@ -2932,7 +2932,8 @@ export class SourceManager extends EventEmitter {
 
 	/**
 	 * A lost or failed connection (not a deliberate switch or a pause): an endpoint that never
-	 * delivered a header is left at once; one that did is retried SOURCE_CANDIDATE_RETRIES times.
+	 * delivered a payload is left at once; one that did is retried SOURCE_CANDIDATE_RETRIES times,
+	 * the count starting over only when a connection delivers a payload again.
 	 */
 	private noteCandidateFailure(id: string, state: SourceState): void {
 		const candidates = this.candidatesOf(state)
