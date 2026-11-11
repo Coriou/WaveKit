@@ -97,6 +97,7 @@ describe("cause (golden): a genuine untracked retune", () => {
 			{
 				kind: "untracked-retune",
 				epoch: 2,
+				stream: 1,
 				startSample: 2_726_400,
 				deltaHz: -24999.900947779417,
 				suspected: "external-control",
@@ -126,6 +127,7 @@ describe("cause 1: I/Q byte slip", () => {
 			{
 				kind: "untracked-retune",
 				epoch: 2,
+				stream: 1,
 				startSample: 2_726_400,
 				deltaHz: -49997.98462638259,
 				suspected: "iq-byte-slip",

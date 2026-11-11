@@ -46,6 +46,14 @@ export interface RateTruthSample {
 	bytesPerSample: number
 	/** False when the interval cannot be trusted (paused, reconnecting). */
 	stable: boolean
+	/** Where the interval started in the source's tuning ledger (absent: unknown). */
+	startMark?: RateWindowMark
+}
+
+/** A tuning-ledger session and position. */
+export interface RateWindowMark {
+	session: number
+	pos: number
 }
 
 export interface RateMismatch {
@@ -63,6 +71,7 @@ interface Run {
 	startedAtMs: number
 	elapsedMs: number
 	bytes: number
+	startMark: RateWindowMark | undefined
 }
 
 export class RateTruthTracker {
@@ -75,6 +84,12 @@ export class RateTruthTracker {
 		private readonly tolerance = RATE_TRUTH_TOLERANCE,
 		private readonly sustainMs = RATE_TRUTH_SUSTAIN_MS,
 	) {}
+
+	/** Where the current run's first interval started (undefined: unknown or no run). */
+	get runStartMark(): RateWindowMark | undefined {
+		const mark = this.run?.startMark
+		return mark ? { ...mark } : undefined
+	}
 
 	get mismatch(): RateMismatch | undefined {
 		return this.flagged ? { ...this.flagged } : undefined
@@ -135,6 +150,7 @@ export class RateTruthTracker {
 				startedAtMs: sample.atMs,
 				elapsedMs: sample.elapsedMs,
 				bytes: sample.bytes,
+				startMark: sample.startMark ? { ...sample.startMark } : undefined,
 			}
 		}
 		const sustained = this.run.elapsedMs >= this.sustainMs

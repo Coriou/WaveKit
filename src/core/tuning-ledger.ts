@@ -248,6 +248,13 @@ class SessionRecord implements LedgerSession {
 	constructor(
 		readonly sourceId: string,
 		readonly session: number,
+		/**
+		 * The caps rate when the session began: a rate in effect before the session's first rate
+		 * receipt even after caps moves to the written rate (the controller updates caps right
+		 * after the write). 0: none; +Infinity: the lookup threw (nothing settles before a rate
+		 * receipt, fail closed).
+		 */
+		readonly capsAtStart: number = 0,
 	) {}
 }
 
@@ -273,6 +280,48 @@ export interface PendingFrame {
  * queue).
  */
 export type ReceiptCallback = (receipt: TuningReceipt | null) => void
+
+/**
+ * Folds the per-frame receipts of one multi-frame call into one: `callback` runs exactly once,
+ * after `end()` and once every frame `frame()` issued has settled, with the receipt of the last
+ * frame to settle (frames settle in socket order), or null when any frame got none or no frame
+ * was issued.
+ */
+export class ReceiptOnce {
+	private open = 0
+	private ended = false
+	private fired = false
+	private missing = false
+	private last: TuningReceipt | null = null
+
+	constructor(private readonly target: ReceiptCallback) {}
+
+	/** A callback for one frame; only its first call counts. */
+	frame(): ReceiptCallback {
+		this.open += 1
+		let settled = false
+		return receipt => {
+			if (settled) return
+			settled = true
+			this.open -= 1
+			if (receipt === null) this.missing = true
+			else this.last = receipt
+			this.settle()
+		}
+	}
+
+	/** The call issues no more frames. */
+	end(): void {
+		this.ended = true
+		this.settle()
+	}
+
+	private settle(): void {
+		if (!this.ended || this.open > 0 || this.fired) return
+		this.fired = true
+		safeReceiptCallback(this.target, this.missing ? null : this.last)
+	}
+}
 
 const UNVERIFIED_BASE = {
 	trust: "unverified" as const,
@@ -556,9 +605,25 @@ export class TuningLedger {
 		const record = this.sourceRecord(sourceId)
 		if (record.live) record.live.ended = true
 		record.sessions += 1
-		const session = new SessionRecord(sourceId, record.sessions)
+		const session = new SessionRecord(
+			sourceId,
+			record.sessions,
+			this.capsSnapshot(sourceId),
+		)
 		record.live = session
 		return session
+	}
+
+	/** The caps rate now, for a session's start (see SessionRecord.capsAtStart). */
+	private capsSnapshot(sourceId: string): number {
+		try {
+			const caps = this.opts.capsRate?.(sourceId) ?? 0
+			return typeof caps === "number" && Number.isFinite(caps) && caps > 0
+				? caps
+				: 0
+		} catch {
+			return Number.POSITIVE_INFINITY
+		}
 	}
 
 	/** @internal LedgerConnection.close. */
@@ -948,7 +1013,8 @@ export class TuningLedger {
 	 * Settle in bytes for receipt `receipt` read up to `posB`: a configured time settle is more bytes
 	 * at a higher rate, so at the highest rate that can be in effect over `[receipt.pos, posB)`: the
 	 * rate in effect before the receipt (its rate receipt; the session's running maximum when that
-	 * left the ring or is invalid; the caps rate when the session has written no rate before it),
+	 * left the ring or is invalid; the higher of the caps rate at the session start and now when
+	 * the session has written no rate before it),
 	 * and every valid rate receipted from the receipt on before `posB`. No usable rate: +Infinity
 	 * (nothing settles).
 	 */
@@ -976,6 +1042,9 @@ export class TuningLedger {
 		else if ((live.evicted.get("sampleRate") ?? 0) > 0)
 			rate = Math.max(rate, live.maxRate)
 		else {
+			// The caps rate at the session start or now, whichever is higher: caps may already
+			// show the rate the first rate receipt wrote.
+			rate = Math.max(rate, live.capsAtStart)
 			const caps = this.opts.capsRate?.(live.sourceId) ?? 0
 			if (typeof caps === "number" && Number.isFinite(caps))
 				rate = Math.max(rate, caps)

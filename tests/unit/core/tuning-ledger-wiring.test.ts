@@ -273,6 +273,32 @@ describe("tuning ledger wiring (real SourceManager, TunerRelay, stamped fake rtl
 		)
 	}, 20_000)
 
+	it("hands a multi-frame controller call one receipt, its last frame's", async () => {
+		const { manager, sessions } = await harness()
+		await until(() => (sessions.get(1)?.length ?? 0) > 2)
+		const controller = new TunerController(logger, manager)
+		controller.initializeSource("rtl", config(0).caps)
+		const calls: (TuningReceipt | null)[] = []
+		const before = manager.tuningLedger.receipts("rtl").length
+		await controller.configure(
+			"rtl",
+			{ frequency: F1, sampleRate: 250_000 },
+			{ onReceipt: r => calls.push(r) },
+		)
+		await until(() => manager.tuningLedger.receipts("rtl").length >= before + 2)
+		await until(() => calls.length > 0)
+		// Every frame of the call has flushed: any further call would have run by now.
+		await wait(50)
+		const written = manager.tuningLedger.receipts("rtl").slice(before)
+		expect(written.map(r => r.field)).toEqual(["frequency", "sampleRate"])
+		expect(calls).toHaveLength(1)
+		expect(calls[0]).toMatchObject({
+			field: "sampleRate",
+			value: 250_000,
+			seq: written.at(-1)!.seq,
+		})
+	}, 20_000)
+
 	it("reads the source's live settle at each read", async () => {
 		const fake = await startStampedRtlTcp({ initialHz: F0, initialRate: RATE })
 		cleanups.push(() => fake.close())

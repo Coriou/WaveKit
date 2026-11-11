@@ -331,4 +331,79 @@ describe("SpectrumEngine tuning-ledger shadow", () => {
 		expect(doubt.pos).toBeLessThan(ledger.position("rtl")!.pos)
 		await engine.stop()
 	})
+
+	it("maps a late untracked-retune alarm through its own older stream", async () => {
+		const { engine, ledger, conn, sources, feed, block, host, samples } =
+			await make()
+		conn.write(Buffer.concat([frame(0x01, CENTRE), frame(0x02, RATE)]), {
+			writer: "operator",
+		})(null)
+		await feed(block * 4)
+		const oldEnd = samples()
+		// Stream 1 at twice the rate starts at source position block * 8.
+		sources.setCaps("rtl", { sampleRate: RATE * 2 })
+		await engine.reconfigure()
+		await feed(block * 4)
+		engine.on("warning", () => undefined)
+		const alarm = (stream?: number) =>
+			host().handlers.events([
+				{
+					kind: "untracked-retune",
+					epoch: engine.currentEpoch().epoch + 1,
+					...(stream !== undefined ? { stream } : {}),
+					startSample: oldEnd,
+					deltaHz: 25_000,
+				},
+			])
+		// Stream 0's map: two of its blocks before the alarm, one sample of gap rounding.
+		const expected = (oldEnd - 2 * block - 1) * 2
+		alarm(0)
+		expect(ledger.doubts("rtl").at(-1)!.pos).toBe(expected)
+		// No stream on the event: the minimum over the kept stream maps (stream 0's here).
+		alarm()
+		expect(ledger.doubts("rtl").at(-1)!.pos).toBe(expected)
+		// A stream whose map is not kept: the session start (doubts are in position order).
+		alarm(99)
+		expect(ledger.doubts("rtl").map(d => d.pos)).toEqual([
+			0,
+			expected,
+			expected,
+		])
+		await engine.stop()
+	})
+
+	it("doubts a pipeline error from the oldest sample not reported yet", async () => {
+		const { engine, ledger, conn, feed, emitBlock, block, host, samples } =
+			await make()
+		conn.write(Buffer.concat([frame(0x01, CENTRE), frame(0x02, RATE)]), {
+			writer: "operator",
+		})(null)
+		await feed(block * 10)
+		emitBlock()
+		const reported = samples()
+		await feed(block * 5)
+		engine.on("error", () => undefined)
+		host().handlers.error(new Error("worker hiccup"))
+		const doubt = ledger.doubts("rtl").at(-1)!
+		expect(doubt.reason).toBe("pipeline-error")
+		// A lost alarm of the next block reaches back to two blocks before the reported end.
+		expect(doubt.pos).toBe((reported - 2 * block - 1) * 2)
+		expect(doubt.pos).toBeLessThan(ledger.position("rtl")!.pos)
+		await engine.stop()
+	})
+
+	it("doubts a pipeline error before any block summary from the stream's start", async () => {
+		const { engine, ledger, conn, feed, block, host } = await make()
+		conn.write(Buffer.concat([frame(0x01, CENTRE), frame(0x02, RATE)]), {
+			writer: "operator",
+		})(null)
+		await feed(block * 10)
+		engine.on("error", () => undefined)
+		engine.on("fatal", () => undefined)
+		host().handlers.fatal!(new Error("worker gone"))
+		const doubt = ledger.doubts("rtl").at(-1)!
+		expect(doubt.reason).toBe("pipeline-error")
+		expect(doubt.pos).toBe(0)
+		await engine.stop()
+	})
 })

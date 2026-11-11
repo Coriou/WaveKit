@@ -1,6 +1,7 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
+	ReceiptOnce,
 	RtlTcpFrameAssembler,
 	TUNING_LEDGER_RING,
 	TuningLedger,
@@ -81,6 +82,45 @@ describe("RtlTcpFrameAssembler", () => {
 		expect(a.push(f.subarray(2), RELAY)).toEqual([
 			{ field: "frequency", value: 300, tag: undefined },
 		])
+	})
+})
+
+describe("ReceiptOnce", () => {
+	const receipt = (seq: number) => ({
+		session: 1,
+		seq,
+		field: "frequency" as const,
+		value: seq,
+		writer: "operator" as const,
+		pos: 0,
+	})
+
+	it("fires once, after the end and every frame, with the last frame's receipt", () => {
+		const calls: unknown[] = []
+		const once = new ReceiptOnce(r => calls.push(r?.seq ?? null))
+		const a = once.frame()
+		const b = once.frame()
+		a(receipt(1))
+		once.end()
+		expect(calls).toEqual([])
+		b(receipt(2))
+		b(receipt(3))
+		expect(calls).toEqual([2])
+		once.end()
+		expect(calls).toEqual([2])
+	})
+
+	it("fires null when any frame got none, or when no frame was issued", () => {
+		const calls: unknown[] = []
+		const once = new ReceiptOnce(r => calls.push(r?.seq ?? null))
+		const a = once.frame()
+		const b = once.frame()
+		a(null)
+		b(receipt(2))
+		once.end()
+		const none = new ReceiptOnce(r => calls.push(r?.seq ?? null))
+		none.end()
+		expect(calls).toEqual([null, null])
 	})
 })
 
@@ -456,6 +496,31 @@ describe("TuningLedger", () => {
 			trust: "unverified",
 			reason: "settling",
 		})
+	})
+
+	it("settles the first rate receipt at the caps rate of the session start, not the caps updated after the write", () => {
+		let caps = 2_400_000
+		const ledger = new TuningLedger({
+			settleLink: () => ({ configuredSettleMs: 1000, inFlightBytes: 0 }),
+			frameBytes: () => 2,
+			capsRate: () => caps,
+		})
+		const { conn, session } = started(ledger)
+		session.pos = 1_000_000
+		flush(conn, Buffer.concat([frame(2, 250_000), frame(1, 100_000_000)]), OP)
+		// The controller updates caps right after the write: the rate before the receipt was 2.4 Msps.
+		caps = 250_000
+		session.pos = 3_000_000
+		// 2.4 Msps × 2 B × 1 s = 4.8 MB settle from pos 1 MB: settled only from 5.8 MB.
+		expect(ledger.trustAt("rtl", 1, 1_600_000, 1_700_000)).toMatchObject({
+			trust: "unverified",
+			reason: "settling",
+		})
+		// A caps rate raised after the session start is honoured as well (max of both).
+		caps = 3_200_000
+		expect(ledger.trustAt("rtl", 1, 1_600_000, 1_700_000).reason).toBe(
+			"settling",
+		)
 	})
 
 	it("limits the settle rate to rates that can be in effect from the receipt on", () => {

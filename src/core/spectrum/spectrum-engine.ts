@@ -40,6 +40,7 @@ import type {
 	SpectrumSettings,
 	SettleMode,
 	TuningTrust,
+	UntrackedRetuneEvent,
 } from "./types.js"
 import { bytesPerSample } from "./frame-source.js"
 import type { ArtefactMasks } from "./artefacts.js"
@@ -635,6 +636,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		gaps: number
 		bps: number
 		blockSamples: number | null
+		/** End sample of this stream's newest block summary (0: none yet). */
+		summarised: number
 	}[] = []
 	/**
 	 * Accepted branch bytes up to the byte being handled, also inside a chunk (branchBytes keeps
@@ -1079,8 +1082,9 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			},
 			error: err => {
 				if (generation !== this.generation || this.failed) return
-				// A pipeline error can lose an untracked-retune alarm (Main decision Q2).
-				this.ledger()?.raiseDoubt(this.sourceId, "both", "pipeline-error")
+				// A pipeline error can lose an untracked-retune alarm (Main decision Q2) of any sample
+				// not reported yet.
+				this.raisePipelineDoubt()
 				this.log.error({ err }, "Spectrum pipeline error")
 				this.emit("error", err)
 			},
@@ -1097,7 +1101,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	private fail(err: Error): void {
 		if (this.failed || !this.running) return
-		this.ledger()?.raiseDoubt(this.sourceId, "both", "pipeline-error")
+		this.raisePipelineDoubt()
 		this.failed = true
 		this.generation++
 		this.lastStats = null
@@ -1790,12 +1794,13 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					settleMode: null,
 				}
 				// Lower bound: the alarm compares its block with the one before it, so the move lies
-				// at or after the start of the previous block (unmapped: the session start).
+				// at or after the start of the previous block, mapped through the alarm's own stream
+				// (a late alarm can belong to an older one; unmapped: the session start).
 				this.ledger()?.raiseDoubt(
 					this.sourceId,
 					"both",
 					"untracked-retune",
-					this.ledgerLowerBound(this.stream, ev.startSample, 2) ?? 0,
+					this.alarmLowerBound(ev),
 				)
 				this.warn(
 					"untracked-retune",
@@ -2264,6 +2269,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				? this.shadowBranchByte + t.droppedBytesTotal
 				: Number.POSITIVE_INFINITY,
 			gaps: 0,
+			summarised: 0,
 			bps: this.bps,
 			blockSamples: cfg
 				? blockSamplesOf(cfg.integrationMs, cfg.sampleRateHz, cfg.fftSize)
@@ -2278,6 +2284,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	): void {
 		const ledger = this.ledger()
 		if (!ledger) return
+		const map = this.streamMaps.find(m => m.stream === ev.summary.stream)
+		if (map) map.summarised = Math.max(map.summarised, ev.summary.endSample)
 		let read: ShadowRead
 		try {
 			read = this.ledgerVerdict(ledger, ev)
@@ -2348,6 +2356,45 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const first = sample - blocksBefore * map.blockSamples
 		const pos = map.oLow0 + (first - map.gaps - 1) * map.bps - anchor.oHigh
 		return Math.max(0, pos)
+	}
+
+	/**
+	 * A pipeline error doubts both fields from the oldest sample the pipeline may still owe an
+	 * alarm for: per kept stream, two blocks before its newest summary's end (an alarm compares a
+	 * block with the one before it, and may follow its block's summary), the minimum over streams;
+	 * any unmappable stream or none kept: 0 (session start).
+	 */
+	private raisePipelineDoubt(): void {
+		const ledger = this.ledger()
+		if (!ledger) return
+		let low = this.streamMaps.length === 0 ? 0 : Number.POSITIVE_INFINITY
+		for (const map of this.streamMaps) {
+			const pos = this.ledgerLowerBound(map.stream, map.summarised, 2)
+			if (pos === null) {
+				low = 0
+				break
+			}
+			low = Math.min(low, pos)
+		}
+		ledger.raiseDoubt(this.sourceId, "both", "pipeline-error", low)
+	}
+
+	/**
+	 * Lower bound of an untracked-retune alarm's move: two blocks before its sample in its own
+	 * stream; without a stream, the minimum over the kept stream maps (the true stream's bound is
+	 * one of them, so the minimum is no later); an unmappable or unkept stream: 0 (session start).
+	 */
+	private alarmLowerBound(ev: UntrackedRetuneEvent): number {
+		if (ev.stream !== undefined)
+			return this.ledgerLowerBound(ev.stream, ev.startSample, 2) ?? 0
+		if (this.streamMaps.length === 0) return 0
+		let low = Number.POSITIVE_INFINITY
+		for (const map of this.streamMaps) {
+			const pos = this.ledgerLowerBound(map.stream, ev.startSample, 2)
+			if (pos === null) return 0
+			low = Math.min(low, pos)
+		}
+		return low
 	}
 
 	/** Bytes the absorber lost since the anchor break the offered-byte map. */

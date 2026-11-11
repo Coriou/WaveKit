@@ -82,6 +82,25 @@ describe("source rate truth", () => {
 		expect(changes).toEqual(["iq", "iq"])
 	}, 20_000)
 
+	it("doubts the rate from the start of the mismatching measurement window", async () => {
+		await connect()
+		const perInterval = Math.round((2_160_000 * 2 * TICK) / 1000)
+		const ledger = manager.tuningLedger
+		await interval(2_160_000) // not trusted: the run starts with the next interval
+		const windowStart = ledger.position("iq")!.pos
+		for (let i = 0; i < 6; i++) await interval(2_160_000)
+		expect(manager.getStatus("iq")!.rateMismatch).toBeDefined()
+		expect(ledger.position("iq")!.pos).toBe(windowStart + 6 * perInterval)
+		const doubt = ledger.doubts("iq").at(-1)!
+		expect(doubt).toMatchObject({
+			field: "sampleRate",
+			reason: "rate-truth-mismatch",
+		})
+		// The window's first interval began after the untrusted one: one interval's bytes in.
+		expect(doubt.pos).toBe(windowStart)
+		expect(windowStart).toBeGreaterThan(0)
+	}, 20_000)
+
 	it("does not flag a connected source that sends nothing (e.g. rtlmux without dongle)", async () => {
 		await connect()
 		for (let i = 0; i < 10; i++) {

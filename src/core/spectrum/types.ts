@@ -258,6 +258,8 @@ export interface UntrackedRetuneEvent {
 	kind: "untracked-retune"
 	epoch: number
 	startSample: number
+	/** The engine stream `startSample` counts in (absent: unknown, mapped strictest). */
+	stream?: number
 	deltaHz: number | null
 	/** WG10 req 2.9: the alarm's classification (absent: `external-control`). */
 	suspected?: SpectrumWarningSuspect

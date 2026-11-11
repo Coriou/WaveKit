@@ -1655,6 +1655,7 @@ export class SpectrumPipeline {
 						kind: "untracked-retune",
 						epoch: ep.epoch,
 						startSample: blockEnd,
+						stream: ep.stream,
 						deltaHz: null,
 						suspected,
 						newEpoch: false,
@@ -2049,6 +2050,7 @@ export class SpectrumPipeline {
 		this.out.push({
 			kind: "untracked-retune",
 			epoch,
+			stream: ep.stream,
 			startSample,
 			deltaHz,
 			suspected,

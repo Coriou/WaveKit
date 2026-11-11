@@ -17,7 +17,11 @@ import type {
 	SourceManager,
 } from "./source-manager.js"
 import type { SourceTunerConfig } from "../config.js"
-import type { ReceiptCallback, TuningWriterTag } from "./tuning-ledger.js"
+import {
+	ReceiptOnce,
+	type ReceiptCallback,
+	type TuningWriterTag,
+} from "./tuning-ledger.js"
 import { configuredTuningFrames } from "./tuner-config-gain.js"
 import { nearestGainStep } from "./band-gain-schema.js"
 import type { BandGainSettingsService, SavedOperatorGain } from "./band-gain.js"
@@ -67,8 +71,11 @@ export interface TunerWriteOptions {
 	run?: TuneWriteRun
 	forceWrite?: () => boolean
 	/**
-	 * The frame's tuning-ledger receipt once it left the socket, or null when none was recorded
-	 * (SourceManager.writeToSource). Information only: it changes nothing in the write.
+	 * The call's tuning-ledger receipt once its frames left the socket: called at most once per
+	 * call, with the receipt of its last frame, or null when any frame got none. A call that can
+	 * write several frames (setFrequency with the band gain or rate proof, configure, applyTune)
+	 * folds them into exactly one call, null when it wrote none. Information only: it changes
+	 * nothing in the write.
 	 */
 	onReceipt?: ReceiptCallback
 }
@@ -1110,6 +1117,8 @@ export class TunerController extends EventEmitter {
 	private readonly frameValues = new Map<string, Map<string, number>>()
 	/** The write options of the tune whose rate policy hook is running: its frames are the tune's. */
 	private readonly retuneHookTune = new AsyncLocalStorage<TunerWriteOptions>()
+	/** Scoped onReceipt callbacks of running multi-frame calls (withReceiptOnce). */
+	private readonly receiptScopes = new WeakMap<ReceiptCallback, ReceiptOnce>()
 	/**
 	 * Frames that went out per source and state field, whoever wrote them: at most one counter per
 	 * closed field per source, gone with the source (removeSource).
@@ -1688,11 +1697,34 @@ export class TunerController extends EventEmitter {
 		hz: number,
 		opts: TunerWriteOptions = {},
 	): Promise<void> {
-		if (opts.origin === "rest" && this.bandGain?.applyToMyTuning() === true)
-			return this.serialRestRetune(sourceId, () =>
-				this.setFrequencyNow(sourceId, hz, opts),
-			)
-		return this.setFrequencyNow(sourceId, hz, opts)
+		return this.withReceiptOnce(opts, opts => {
+			if (opts.origin === "rest" && this.bandGain?.applyToMyTuning() === true)
+				return this.serialRestRetune(sourceId, () =>
+					this.setFrequencyNow(sourceId, hz, opts),
+				)
+			return this.setFrequencyNow(sourceId, hz, opts)
+		})
+	}
+
+	/**
+	 * Runs a call that may write several frames with an `onReceipt` that fires once for the whole
+	 * call (TunerWriteOptions.onReceipt). A nested call inside one keeps the outer scope.
+	 */
+	private async withReceiptOnce<T>(
+		opts: TunerWriteOptions,
+		run: (opts: TunerWriteOptions) => Promise<T>,
+	): Promise<T> {
+		const target = opts.onReceipt
+		if (!target || this.receiptScopes.has(target)) return run(opts)
+		const once = new ReceiptOnce(target)
+		// Called directly (not through writeFrame), the scoped callback counts as one frame.
+		const scoped: ReceiptCallback = receipt => once.frame()(receipt)
+		this.receiptScopes.set(scoped, once)
+		try {
+			return await run({ ...opts, onReceipt: scoped })
+		} finally {
+			once.end()
+		}
 	}
 
 	private async setFrequencyNow(
@@ -2175,6 +2207,16 @@ export class TunerController extends EventEmitter {
 		updates: Partial<TunerState>,
 		opts: TunerWriteOptions = {},
 	): Promise<void> {
+		return this.withReceiptOnce(opts, opts =>
+			this.configureNow(sourceId, updates, opts),
+		)
+	}
+
+	private async configureNow(
+		sourceId: string,
+		updates: Partial<TunerState>,
+		opts: TunerWriteOptions,
+	): Promise<void> {
 		const state = this.validateSource(sourceId)
 		const hasCommandUpdates = this.hasCommandUpdates(updates)
 
@@ -2381,6 +2423,18 @@ export class TunerController extends EventEmitter {
 		opts: TunerWriteOptions,
 		applied: (setting: TuneSetting) => void,
 		leftAgc = false,
+	): Promise<void> {
+		return this.withReceiptOnce(opts, opts =>
+			this.applyTuneNow(sourceId, values, opts, applied, leftAgc),
+		)
+	}
+
+	private async applyTuneNow(
+		sourceId: string,
+		values: TuneValues,
+		opts: TunerWriteOptions,
+		applied: (setting: TuneSetting) => void,
+		leftAgc: boolean,
 	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateUpdates(values)
@@ -3620,12 +3674,21 @@ export class TunerController extends EventEmitter {
 		onReceipt?: ReceiptCallback,
 	): void {
 		this.assertOwnsTuner()
-		this.sourceManager.writeToSource(
-			sourceId,
-			this.encodeFrame(cmd, value),
-			writer,
-			onReceipt,
-		)
+		// Inside a multi-frame call: this frame's receipt joins the call's one (withReceiptOnce).
+		const scope = onReceipt ? this.receiptScopes.get(onReceipt) : undefined
+		const frameReceipt = scope ? scope.frame() : onReceipt
+		try {
+			this.sourceManager.writeToSource(
+				sourceId,
+				this.encodeFrame(cmd, value),
+				writer,
+				frameReceipt,
+			)
+		} catch (err) {
+			// writeToSource calls no callback when it throws: this frame has no receipt.
+			if (scope) frameReceipt?.(null)
+			throw err
+		}
 	}
 
 	private assertOwnsTuner(): void {

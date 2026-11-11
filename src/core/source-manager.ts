@@ -52,6 +52,7 @@ import {
 	RateTruthTracker,
 	bytesPerSampleFor,
 	type RateMismatch,
+	type RateWindowMark,
 } from "./rate-truth.js"
 import {
 	SignalLevelTracker,
@@ -358,6 +359,8 @@ interface SourceState {
 	sessionBytesReceived: number
 	bytesReceivedSinceLastMetric: number
 	lastMetricTime: number
+	/** Ledger session and position at `lastMetricTime` (null: no live session then). */
+	metricStartMark: RateWindowMark | null
 	dataRate: number
 	/** Measured versus declared rate; network sources only. */
 	rateTruth: RateTruthTracker
@@ -929,6 +932,7 @@ export class SourceManager extends EventEmitter {
 			pausedSinceLastMetric: false,
 			metricTicksSinceConnect: 0,
 			lastMetricTime: Date.now(),
+			metricStartMark: null,
 			dataRate: 0,
 			reconnectAttempts: 0,
 			reconnectTimer: null,
@@ -1623,6 +1627,7 @@ export class SourceManager extends EventEmitter {
 					state.dataRate = 0
 					state.bytesReceivedSinceLastMetric = 0
 					state.lastMetricTime = Date.now()
+					state.metricStartMark = this.ledger.position(id)
 					state.metricTicksSinceConnect = 0
 					state.pausedSinceLastMetric = false
 					state.reconnectAttempts = 0
@@ -2128,6 +2133,7 @@ export class SourceManager extends EventEmitter {
 		if (!current()) return
 		state.bytesReceivedSinceLastMetric = 0
 		state.lastMetricTime = now
+		state.metricStartMark = this.ledger.position(id)
 
 		this.emit("metrics", id, {
 			bytesReceived: state.bytesReceived,
@@ -2173,10 +2179,19 @@ export class SourceManager extends EventEmitter {
 			declaredSampleRateHz: caps.sampleRate,
 			bytesPerSample,
 			stable,
+			...(state.metricStartMark ? { startMark: state.metricStartMark } : {}),
 		})
 		if (transition === "flagged") {
-			// The receiver may run another rate than any receipt says.
-			this.ledger.raiseDoubt(id, "sampleRate", "rate-truth-mismatch")
+			// The receiver may run another rate than any receipt says, from the start of the
+			// mismatching window on (a window started outside the live session: its start, 0).
+			const mark = state.rateTruth.runStartMark
+			const live = this.ledger.position(id)
+			this.ledger.raiseDoubt(
+				id,
+				"sampleRate",
+				"rate-truth-mismatch",
+				mark && live && mark.session === live.session ? mark.pos : 0,
+			)
 			this.logger.warn(
 				{ sourceId: id, ...state.rateTruth.mismatch },
 				"Source delivers a different sample rate than its caps declare; caps left unchanged (check external tuner clients)",
