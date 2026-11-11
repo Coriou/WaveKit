@@ -1,6 +1,6 @@
 /**
  * Connect-failure status of a network source: closed error classes, a validated target, a fixed
- * hint, the attempt count and time, cleared by a successful connect, and carried by
+ * hint, the attempt count and time, cleared by the first payload (not the accept), and carried by
  * GET /api/sources. Loopback only: a port this test opened and closed itself.
  */
 import * as net from "node:net"
@@ -192,6 +192,73 @@ describe("SourceManager connect failure status", () => {
 			})
 			await once(manager, "connected")
 			expect(manager.getStatus("rtl")?.connectFailure).toBeUndefined()
+		},
+	)
+})
+
+describe("SourceManager connect failure across accepted connections", () => {
+	it(
+		"an accept that resets before any payload keeps counting; the first payload clears the record",
+		{ timeout: 20_000 },
+		async () => {
+			const manager = new SourceManager(log)
+			manager.on("error", () => {})
+			vi.spyOn(Math, "random").mockReturnValue(0)
+			// "reset": accept, then RST before sending anything; "header": send the rtl_tcp header, then RST.
+			let mode: "reset" | "header" = "reset"
+			const sockets = new Set<net.Socket>()
+			const server = net.createServer(socket => {
+				sockets.add(socket)
+				socket.on("error", () => {})
+				if (mode === "header")
+					socket.write(Buffer.from("RTL0\0\0\0\x05\0\0\0\x1d", "binary"), () =>
+						setTimeout(() => socket.resetAndDestroy(), 50),
+					)
+				else socket.resetAndDestroy()
+			})
+			server.listen(0, "127.0.0.1")
+			await once(server, "listening")
+			const port = (server.address() as net.AddressInfo).port
+			cleanup.push(async () => {
+				await manager.disconnectAll()
+				for (const socket of sockets) socket.destroy()
+				await new Promise<void>(resolve => server.close(() => resolve()))
+			})
+			const attempts = () => manager.getStatus("rtl")?.connectFailure?.attempts
+			await manager
+				.connect({
+					id: "rtl",
+					type: "rtl_tcp",
+					host: "127.0.0.1",
+					port,
+					loop: false,
+					playbackSpeed: 1,
+					stallTimeoutMs: 0,
+					caps: {
+						kind: "iq",
+						sampleRate: 2_048_000,
+						format: "U8_IQ",
+						exclusive: false,
+					},
+				})
+				.catch(() => undefined)
+			// Each accept resets the backoff, but not the failure count.
+			await vi.waitFor(
+				() => {
+					expect(attempts()).toBeGreaterThanOrEqual(3)
+				},
+				{ timeout: 15_000, interval: 20 },
+			)
+			expect(manager.getStatus("rtl")?.connectFailure?.errorClass).toBe("reset")
+
+			// A connection that delivers the header clears the record; its later reset starts over at 1.
+			mode = "header"
+			await vi.waitFor(
+				() => {
+					expect(attempts()).toBe(1)
+				},
+				{ timeout: 15_000, interval: 5 },
+			)
 		},
 	)
 })

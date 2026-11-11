@@ -29,6 +29,7 @@ import { z } from "zod"
 import { WaveKitError } from "../../../utils/errors.js"
 import {
 	ensurePreMigrationBackup,
+	noteCleanLoad,
 	SCANNER_STATE_FILE_VERSION,
 } from "../../state-backup.js"
 import type {
@@ -665,8 +666,10 @@ export class ScannerPersistence {
 	private backupOutcome: StateBackupOutcome | null = null
 	private readonly backupOptions: Pick<
 		PreMigrationBackupOptions,
-		"statfs" | "link"
+		"statfs" | "link" | "keepsFile"
 	>
+	/** A clean load is counted toward the backup's expiry once per process (noteCleanLoad). */
+	private cleanLoadNoted = false
 
 	/** Outcome of the pre-migration backup check (null before the first load). */
 	preMigrationBackup(): StateBackupOutcome | null {
@@ -698,8 +701,11 @@ export class ScannerPersistence {
 		 * `performance.now` by default.
 		 */
 		buildClock?: () => number
-		/** Test seams of the pre-migration backup (state-backup.ts). */
-		backup?: Pick<PreMigrationBackupOptions, "statfs" | "link">
+		/**
+		 * The pre-migration backup (state-backup.ts): `keepsFile`, the recording keep store outside
+		 * this directory, is copied into the backup; `statfs` and `link` are test seams.
+		 */
+		backup?: Pick<PreMigrationBackupOptions, "statfs" | "link" | "keepsFile">
 	}) {
 		this.backupOptions = opts.backup ?? {}
 		this.yieldTurn = opts.yieldTurn ?? yieldToEventLoop
@@ -724,13 +730,20 @@ export class ScannerPersistence {
 			now: this.now,
 			...this.backupOptions,
 		})
+		let loaded: LoadedState
 		try {
-			return await this.loadState()
+			loaded = await this.loadState()
 		} catch (err) {
 			this.authorityHealth = "degraded"
 			this.loaded = false
 			throw err
 		}
+		if (this.authorityHealth === "healthy" && !this.cleanLoadNoted) {
+			this.cleanLoadNoted = true
+			// Counts toward the backup's expiry; never throws.
+			await noteCleanLoad({ dir: this.root, logger: this.log, now: this.now })
+		}
+		return loaded
 	}
 
 	private async loadState(): Promise<LoadedState> {

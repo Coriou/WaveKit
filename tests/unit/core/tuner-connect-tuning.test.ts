@@ -261,3 +261,45 @@ it("a failed connect write proves nothing and says so in lastError", async () =>
 	)
 	expect(tuningTrustOf(state)).toBe("unverified")
 })
+
+it("a rate write that went out stays proven when the frequency write after it fails", async () => {
+	let calls = 0
+	const { rtl, controller } = await setup({}, manager => {
+		const write = manager.writeToSource.bind(manager)
+		vi.spyOn(manager, "writeToSource").mockImplementation((id, payload) => {
+			calls++
+			// The first frame (the rate) goes out; the second (the frequency) is refused.
+			if (calls === 2) throw new Error("socket is not writable")
+			return write(id, payload)
+		})
+	})
+	await rtl.framesOn(0, 1)
+	expect(tuningFrames(rtl.frames[0])).toEqual([[SET_SAMPLE_RATE, RATE]])
+	const state = controller.getState("rtl")
+	expect(state?.declaredOnlyFields).toEqual(["frequency"])
+	expect(state?.lastError).toBe(
+		"Tuner state restore failed: socket is not writable",
+	)
+	expect(tuningTrustOf(state)).toBe("unverified")
+})
+
+it("the connect proof lapses when the held value changes unwritten, and holds again on the written value", async () => {
+	const { rtl, controller } = await setup()
+	await rtl.framesOn(0, 2)
+	expect(controller.getState("rtl")?.declaredOnlyFields).toBeUndefined()
+	// A change of the held state this core never wrote to the receiver (white-box stand-in).
+	const held = (
+		controller as unknown as {
+			tunerStates: Map<string, { frequency: number }>
+		}
+	).tunerStates.get("rtl")
+	if (held === undefined) throw new Error("no tuner state")
+	held.frequency = CENTRE + 1_000_000
+	expect(controller.getState("rtl")?.declaredOnlyFields).toEqual(["frequency"])
+	expect(tuningTrustOf(controller.getState("rtl"))).toBe("unverified")
+	// Back on the value written on this connection: proven again, with no new frame.
+	held.frequency = CENTRE
+	expect(controller.getState("rtl")?.declaredOnlyFields).toBeUndefined()
+	expect(tuningTrustOf(controller.getState("rtl"))).toBe("commanded")
+	expect(tuningFrames(rtl.frames[0])).toHaveLength(2)
+})

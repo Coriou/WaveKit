@@ -77,7 +77,10 @@ export function connectHint(
 	}
 }
 
-/** The per-source record SourceManager keeps; reset on a successful connect. */
+/**
+ * The per-source record SourceManager keeps; cleared by the first payload of a connection (the
+ * rtl_tcp header), not by the TCP accept, so an accept-then-reset or a stall keeps counting.
+ */
 export interface ConnectFailureRecord {
 	target: string | null
 	errorClass: SourceConnectErrorClass

@@ -1581,7 +1581,8 @@ export class SourceManager extends EventEmitter {
 					state.pausedSinceLastMetric = false
 					state.reconnectAttempts = 0
 					state.lastError = undefined
-					state.connectFailure = null
+					// connectFailure stays until the first payload (onData): an accept that resets or
+					// stalls before the rtl_tcp header keeps counting as a failed attempt.
 					// A resume's connection: the feed is live before "connected" fires.
 					if (state.feed.state === "resuming")
 						state.feed = { state: "live", since: Date.now() }
@@ -1610,6 +1611,8 @@ export class SourceManager extends EventEmitter {
 				)
 					return
 				if (state.sessionBytesReceived === 0) {
+					// The peer sent something (the rtl_tcp header first): the connect succeeded.
+					state.connectFailure = null
 					this.logger.info(
 						{ sourceId: id, firstChunkSize: chunk.length },
 						"First data chunk received from source",

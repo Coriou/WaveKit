@@ -1073,8 +1073,8 @@ stays the configured address. Other sources never carry `endpoint`. See
 **Connect failures.** While a network source is not connected after a failed attempt,
 its entry carries `connectFailure`: `target` (the attempt's `host:port`, omitted when the host
 is not a plain name or address), `errorClass` (`refused`, `timeout`, `unreachable`,
-`not-found`, `reset`, `stalled` or `other`), `attempts` (failed attempts since the last
-successful connect), `lastAttemptAt` (ISO time) and a short fixed `hint`, for example:
+`not-found`, `reset`, `stalled` or `other`), `attempts` (failed attempts since a connection
+last delivered data), `lastAttemptAt` (ISO time) and a short fixed `hint`, for example:
 
 ```json
 "connectFailure": {
@@ -1090,7 +1090,9 @@ The class comes from the socket error code (`ECONNREFUSED` is `refused`, `ETIMED
 core's connect timeout `timeout`, `EHOSTUNREACH`/`ENETUNREACH`/`EHOSTDOWN` `unreachable`,
 `ENOTFOUND`/`EAI_AGAIN` `not-found`, `ECONNRESET`/`EPIPE` `reset`, the stall watchdog
 `stalled`, anything else `other`); the hint is fixed text per class and never repeats the
-error message. A successful connect removes the field.
+error message. The field goes once a connection delivers its first data (the rtl_tcp header),
+not when the TCP connection is accepted: a receiver that accepts and then resets or stalls
+keeps counting attempts. While connected the field is not shown.
 
 **Stall watchdog (rtl_tcp U8_IQ sources).** An rtl_tcp IQ stream never pauses while
 it is healthy. After a session has delivered payload, a gap of `stallTimeoutMs`
