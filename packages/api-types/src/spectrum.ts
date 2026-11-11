@@ -152,7 +152,41 @@ export interface SpectrumSourceStatus {
 	summaryHz: number | null
 	/** The latest block summary at the default profile. */
 	latestFrame: SpectrumFrameEventData | null
+	/**
+	 * Tuning-ledger shadow: block summaries the ledger labelled like the engine (`agree`), stricter
+	 * (`ledgerStricter`: unverified where the engine trusts), looser (`ledgerLooser`), or with
+	 * another label, centre or rate (`mismatch`). Diagnostics only; absent without a ledger.
+	 */
+	trustShadow?: SpectrumTrustShadow
 	lastError?: string
+}
+
+export interface SpectrumTrustShadow {
+	agree: number
+	ledgerStricter: number
+	ledgerLooser: number
+	mismatch: number
+	/** The last 32 disagreements, oldest first (older ones stay in the counters). */
+	disagreements: SpectrumTrustDisagreement[]
+}
+
+export interface SpectrumTrustDisagreement {
+	kind: "ledger-stricter" | "ledger-looser" | "mismatch"
+	at: string
+	/** Ledger session and payload-position bounds the block was read at (null: not mapped). */
+	session: number | null
+	posA: number | null
+	posB: number | null
+	engineTrust: "commanded" | "relay" | "unverified"
+	ledgerTrust: "commanded" | "relay" | "unverified"
+	engineCentreHz: number
+	ledgerCentreHz: number | null
+	engineSampleRateHz: number
+	ledgerSampleRateHz: number | null
+	/** Fixed code of the ledger's first failing check (e.g. "settling", "doubt", "before-session"). */
+	reason?: string
+	/** The doubt's fixed reason when `reason` is "doubt" (e.g. "untracked-retune"). */
+	doubtReason?: string
 }
 
 /** `options.spectrum` of a WS `subscribe` that includes "spectrum". Omitted options = the default selection. */

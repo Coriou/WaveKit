@@ -5537,7 +5537,25 @@ operator retune's frames are still `unverified`, until the first block at or pas
 the network settle), `warnings`
 (`untracked-retune` | `host-centre-mismatch`, with `deltaHz` and `at`), the summary
 budget actually delivered (`summaryBinCount`, `summaryBinHz`, `summaryHz`),
-`latestFrame` (at the default profile) and `lastError?`.
+`latestFrame` (at the default profile), `trustShadow?` and `lastError?`.
+
+`trustShadow` (diagnostics, since 2026-11-11) compares the engine's label of each
+block summary with the tuning ledger's: the core's record of every tuning frame
+flushed to the receiver, at the payload position it was flushed at, per connection.
+The ledger trusts a block only when the last frequency and sample-rate frames
+before it were flushed on the same connection, the block starts at least the
+network settle after them, and no doubt (untracked retune, host-centre mismatch,
+pipeline error, rate mismatch) was raised since. Counters: `agree`,
+`ledgerStricter` (the ledger says `unverified` where the engine trusts),
+`ledgerLooser` (the reverse) and `mismatch` (both trust, with another label,
+centre or rate), plus `disagreements`: the last 32, oldest first, each with
+`kind`, `at`, the ledger `session` and payload positions `posA`/`posB` the block
+was read at (null when it could not be mapped), both labels (`engineTrust`,
+`ledgerTrust`), both centres and rates (`engineCentreHz`, `ledgerCentreHz`,
+`engineSampleRateHz`, `ledgerSampleRateHz`), `reason?` (a fixed code such as
+`settling`, `doubt`, `no-receipt` or `before-session`) and `doubtReason?` (the
+doubt's own code, e.g. `untracked-retune`). Nothing reads the ledger's label yet;
+absent without a ledger.
 
 Untracked-retune warnings carry two optional fields, absent on
 `host-centre-mismatch`. `suspected`: `iq-byte-slip` (the vanished features reappear

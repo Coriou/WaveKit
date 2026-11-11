@@ -14,6 +14,7 @@ import { iqClientBufferLimit } from "./client-buffer.js"
 import type { BranchConfig, FanoutManager } from "./fanout-manager.js"
 import type { SourceFanoutRouter } from "./source-fanout-router.js"
 import { WaveKitError } from "../utils/errors.js"
+import type { TuningWriterTag } from "./tuning-ledger.js"
 import type {
 	RtlTcpHeaderInfo,
 	SourceCaps,
@@ -21,6 +22,9 @@ import type {
 } from "./source-manager.js"
 
 export type TunerRelayControlPolicy = "exclusive" | "shared"
+
+/** Tuning-ledger writer of every frame a relay client sends upstream. */
+const RELAY_WRITER: TuningWriterTag = Object.freeze({ writer: "relay" })
 
 export interface TunerRelayConfig {
 	enabled: boolean
@@ -530,7 +534,11 @@ export class TunerRelay extends EventEmitter {
 		}
 
 		try {
-			this.sourceManager.writeToSource(this.config.sourceId, payload)
+			this.sourceManager.writeToSource(
+				this.config.sourceId,
+				payload,
+				RELAY_WRITER,
+			)
 			this.clearForwardError()
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err)

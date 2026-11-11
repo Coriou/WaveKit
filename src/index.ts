@@ -124,7 +124,7 @@ import type {
 	ProviderLifetime,
 } from "./core/channelizer/settlement-observer.js"
 import { ScannerLifecycleOwner } from "./core/scanner/channel/consumer-lifecycle.js"
-import { ScannerService } from "./core/scanner/scanner-service.js"
+import { linkOf, ScannerService } from "./core/scanner/scanner-service.js"
 import {
 	createChannelActivityRanker,
 	type ChannelActivityRanker,
@@ -1301,6 +1301,13 @@ async function main(): Promise<void> {
 			signalFlatHoldMs: config.health?.signalFlatHoldMs,
 			// Paused feeds persist in <stateDir>/source-feed.json across restarts.
 			stateDir: config.stateDir,
+			// Tuning-ledger settle: the live settle of the source's link, the value the arbiter
+			// reads (the scanner's current settings once it exists, else the configured ones).
+			tuningSettleMs: sourceId => {
+				const cfg = config.sources.find(c => c.id === sourceId)
+				const sweep = (scanner?.settings() ?? config.scanner).sweep
+				return sweep.settleMs[cfg ? linkOf(cfg) : "network"]
+			},
 		})
 		own(100, async () => {
 			await disposeReceiverAfterApi()

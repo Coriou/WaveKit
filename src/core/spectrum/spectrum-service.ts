@@ -1729,7 +1729,24 @@ export class SpectrumService extends EventEmitter {
 							reduceMaxHold(summary.bins, def.bins),
 						)
 					: null,
+			...this.trustShadowOf(engine),
 			...(error ? { lastError: error } : {}),
+		}
+	}
+
+	private trustShadowOf(
+		engine: SpectrumEngine | undefined,
+	): Pick<SpectrumSourceStatus, "trustShadow"> {
+		const shadow = engine?.trustShadow() ?? null
+		if (!shadow) return {}
+		return {
+			trustShadow: {
+				...shadow,
+				disagreements: shadow.disagreements.map(d => ({
+					...d,
+					at: new Date(d.at).toISOString(),
+				})),
+			},
 		}
 	}
 }

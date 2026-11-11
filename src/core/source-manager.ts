@@ -40,6 +40,13 @@ import type { Logger } from "../utils/logger.js"
 import { SourceConnectionError, WaveKitError } from "../utils/errors.js"
 import type { SourceConfig, SourceCaps } from "../config.js"
 import { detectAudioFormat } from "../utils/audio-analyzer.js"
+import {
+	DEFAULT_LEDGER_SETTLE_MS,
+	TuningLedger,
+	type LedgerConnection,
+	type ReceiptCallback,
+	type TuningWriterTag,
+} from "./tuning-ledger.js"
 import { convertFloat32ToS16LE } from "../utils/converters.js"
 import {
 	RateTruthTracker,
@@ -203,6 +210,14 @@ export interface SourceManagerOptions {
 	stateDir?: string | undefined
 	/** Overrides the store built from `stateDir` (tests). */
 	feedPersistence?: SourceFeedPersistence | undefined
+	/**
+	 * The configured settle of a source's link the tuning ledger uses (the live
+	 * `scanner.sweep.settleMs[link]` the arbiter reads), read at each ledger read so a settings
+	 * change is seen at once. Default DEFAULT_LEDGER_SETTLE_MS (the network default, 1000 ms).
+	 */
+	tuningSettleMs?: ((sourceId: string) => number) | undefined
+	/** Overrides the ledger's in-flight estimate (IN_FLIGHT_BOUND_BYTES, 512 KiB): tests, measured links. */
+	tuningInFlightBytes?: number | undefined
 }
 
 /**
@@ -255,6 +270,12 @@ export interface SourceManagerEvents {
 	 * per connection. Through rtlmux this means the upstream dongle is back.
 	 */
 	"payload-started": (sourceId: string) => void
+	/**
+	 * A tuning-ledger session (`session`, numbered per source from 1) starts: emitted once per
+	 * connection, before its first payload byte is written to the source stream (so before the
+	 * first "data" and "payload-started"). Recordings have no session.
+	 */
+	"session-started": (sourceId: string, session: number) => void
 	/**
 	 * A selected endpoint failed repeatedly and the source went back to its
 	 * configured host (receiver-endpoints 3.4); `host` is the endpoint left.
@@ -317,6 +338,8 @@ interface SourceAttempt {
 	headerBuffer: Buffer | null
 	headerAt: number | null
 	watchdog: ReturnType<typeof setInterval> | null
+	/** This connection in the tuning ledger (frames written, its session once payload flows). */
+	ledger: LedgerConnection
 }
 
 interface SourceState {
@@ -509,6 +532,7 @@ export class SourceManager extends EventEmitter {
 	private pausedTuningSource:
 		| ((id: string) => SourceFeedRestoreTuning | undefined)
 		| null = null
+	private readonly ledger: TuningLedger
 
 	constructor(logger: Logger, options: SourceManagerOptions = {}) {
 		super()
@@ -521,6 +545,25 @@ export class SourceManager extends EventEmitter {
 				? new SourceFeedStore({ stateDir: options.stateDir, logger })
 				: null)
 		this.feedsLoaded = this.feedPersistence === null
+		this.ledger = new TuningLedger({
+			settleLink: id => ({
+				configuredSettleMs:
+					options.tuningSettleMs?.(id) ?? DEFAULT_LEDGER_SETTLE_MS,
+				...(options.tuningInFlightBytes !== undefined
+					? { inFlightBytes: options.tuningInFlightBytes }
+					: {}),
+			}),
+			frameBytes: id => {
+				const caps = this.sources.get(id)?.config.caps
+				return caps ? iqFrameBytes(caps) : null
+			},
+			capsRate: id => this.sources.get(id)?.config.caps.sampleRate ?? null,
+		})
+	}
+
+	/** The tuning ledger of every network source (sessions, positions, receipts, doubts). */
+	get tuningLedger(): TuningLedger {
+		return this.ledger
 	}
 
 	private plainSourceData<T>(value: T): T {
@@ -1013,6 +1056,17 @@ export class SourceManager extends EventEmitter {
 					recovery.deadline > Date.now() && !recovery.owner.aborted,
 				)
 		}
+		// The ledger session opens before its first payload byte reaches the stream; after that
+		// only a counter add per chunk (hot path).
+		if (attempt !== null && chunk.length > 0) {
+			if (attempt.ledger.session === null) {
+				const session = attempt.ledger.start()
+				if (session) this.emit("session-started", id, session.session)
+				if (!current()) return false
+			}
+			const session = attempt.ledger.session
+			if (session !== null) session.pos += chunk.length
+		}
 		let canWrite = true
 		if (!state.stream.destroyed) {
 			canWrite = state.stream.write(chunk)
@@ -1503,8 +1557,11 @@ export class SourceManager extends EventEmitter {
 						: null,
 				headerAt: null,
 				watchdog: null,
+				ledger: this.ledger.connection(id),
 			}
+			const previous = state.attempt
 			state.attempt = attempt
+			previous?.ledger.close()
 			state.socket = socket
 			state.connected = false
 			state.lastSampleAt = null
@@ -1745,6 +1802,7 @@ export class SourceManager extends EventEmitter {
 				const current = this.isActiveAttempt(state, attempt)
 				const hadConnected = attempt.phase === "connected"
 				if (current) {
+					attempt.ledger.close()
 					attempt.phase = "failed"
 					attempt.sessionId = null
 					attempt.lastSampleAt = null
@@ -1777,6 +1835,7 @@ export class SourceManager extends EventEmitter {
 				const wasConnected = state.connected
 				if (owns) this.noteEndpointClose(id, state)
 				if (owns) {
+					attempt.ledger.close()
 					attempt.phase = "closed"
 					attempt.sessionId = null
 					attempt.lastSampleAt = null
@@ -2116,6 +2175,8 @@ export class SourceManager extends EventEmitter {
 			stable,
 		})
 		if (transition === "flagged") {
+			// The receiver may run another rate than any receipt says.
+			this.ledger.raiseDoubt(id, "sampleRate", "rate-truth-mismatch")
 			this.logger.warn(
 				{ sourceId: id, ...state.rateTruth.mismatch },
 				"Source delivers a different sample rate than its caps declare; caps left unchanged (check external tuner clients)",
@@ -2240,6 +2301,7 @@ export class SourceManager extends EventEmitter {
 
 		state.stopping = true
 		if (state.attempt) {
+			state.attempt.ledger.close()
 			state.attempt.phase = "closed"
 			state.attempt.sessionId = null
 			state.attempt.headerAt = null
@@ -2597,6 +2659,7 @@ export class SourceManager extends EventEmitter {
 		const socket = attempt.socket
 		const connected = attempt.phase === "connected"
 		// No more payload from this session; the close handler still reports "disconnected".
+		attempt.ledger.close()
 		attempt.phase = "closed"
 		attempt.sessionId = null
 		attempt.lastSampleAt = null
@@ -3267,9 +3330,18 @@ export class SourceManager extends EventEmitter {
 	 *
 	 * @param id - Source ID
 	 * @param payload - Raw control bytes to send
+	 * @param writer - Who writes (tuning ledger receipts); absent = no writer (reads unverified)
+	 * @param onReceipt - Runs once when the payload left the socket: the tuning-ledger receipt of its
+	 *   last complete frame, or null when none was recorded (session ended first, write error, no
+	 *   ledger connection). Not called when this method throws.
 	 * @returns true if write buffer accepted the data
 	 */
-	writeToSource(id: string, payload: Buffer): boolean {
+	writeToSource(
+		id: string,
+		payload: Buffer,
+		writer?: TuningWriterTag,
+		onReceipt?: ReceiptCallback,
+	): boolean {
 		// Async context follows controller awaits, so cancelled callbacks cannot
 		// write later, even after a replacement source registers the same id.
 		this.assertTunerCommandActive()
@@ -3306,7 +3378,20 @@ export class SourceManager extends EventEmitter {
 			payload.length === 5 &&
 			payload[0] === 0x02 &&
 			payload.readUInt32BE(1) !== state.config.caps.sampleRate
-		const accepted = socket.write(payload)
+		// Frames are parsed in socket order now and receipted when they leave (write callback).
+		const ledger =
+			state.attempt?.socket === socket ? state.attempt.ledger : null
+		const accepted = ledger
+			? socket.write(payload, ledger.write(payload, writer, onReceipt))
+			: onReceipt
+				? socket.write(payload, () => {
+						try {
+							onReceipt(null)
+						} catch {
+							// A caller's callback never breaks the socket callback.
+						}
+					})
+				: socket.write(payload)
 		if (rateChange) {
 			// First retry: <= 4 s equal-jitter backoff (2^1 × 2 s) + 5 s
 			// connect timeout = 9 s. A later retry needs a new caller request.

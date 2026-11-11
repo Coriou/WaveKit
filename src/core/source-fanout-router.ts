@@ -405,6 +405,23 @@ export class SourceFanoutRouter extends EventEmitter {
 		return counters
 	}
 
+	/**
+	 * The burst absorber between the source stream and its fanout, if any: bytes it holds now and
+	 * bytes it lost so far (overflow plus flushes), which never reach a branch. Null without an
+	 * absorber. Reads counters only; never creates anything.
+	 */
+	ingestCounters(
+		sourceId: string,
+	): { heldBytes: number; lostBytesTotal: number } | null {
+		const absorber = this.bursts.get(sourceId)?.handles.absorber
+		if (!absorber) return null
+		const counters = absorber.counters()
+		return {
+			heldBytes: counters.heldBytes,
+			lostBytesTotal: counters.overflowBytesTotal + counters.flushedBytesTotal,
+		}
+	}
+
 	/** Read existing counters only; never creates a fanout or touches the IQ path. */
 	branchDropTotals(sourceId: string): {
 		droppedBytesTotal: number

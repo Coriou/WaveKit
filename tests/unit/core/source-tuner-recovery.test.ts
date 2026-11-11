@@ -259,7 +259,8 @@ it("bounds hung execution at 9 s, advances the FIFO and blocks a late write", as
 	expect(lateError).toBeInstanceOf(WaveKitError)
 	expect(lateError).toMatchObject({ code: "TUNER_COMMAND_TIMEOUT" })
 	expect(write).toHaveBeenCalledTimes(1)
-	expect(write).toHaveBeenCalledWith(frame(4, 42))
+	// The second argument is the tuning ledger's flush callback (its receipt).
+	expect(write).toHaveBeenCalledWith(frame(4, 42), expect.any(Function))
 })
 
 it("removing a source rejects hung and queued commands immediately", async () => {

@@ -20,6 +20,7 @@ import type { SourceFanoutRouter } from "../source-fanout-router.js"
 import type { SourceManager } from "../source-manager.js"
 import type { TunerController } from "../tuner-controller.js"
 import { tuningTrustOf } from "../tuning-trust.js"
+import type { TrustVerdict, TuningLedger } from "../tuning-ledger.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import type { ChannelPlan } from "../scanner/scanner-redesign-contract.js"
 import { WaveKitError } from "../../utils/errors.js"
@@ -202,11 +203,107 @@ export interface SpectrumEngineEvents {
 	warning: (code: EngineWarning["code"], deltaHz: number | null) => void
 }
 
+/** What the engine reads from the tuning ledger (shadow label) and the doubts it raises. */
+export type EngineLedger = Pick<
+	TuningLedger,
+	"trustAt" | "position" | "raiseDoubt"
+>
+
+/**
+ * Tuning-ledger shadow (trust step 1): every block summary is labelled by the ledger beside the
+ * engine's own label, and the two are counted. Nothing reads the ledger label yet.
+ * `ledgerStricter`: the ledger says `unverified` where the engine trusts; `ledgerLooser`: the
+ * ledger trusts where the engine says `unverified`; `mismatch`: both trust, with another label,
+ * centre or rate.
+ */
+export interface EngineTrustShadow {
+	agree: number
+	ledgerStricter: number
+	ledgerLooser: number
+	mismatch: number
+	/** The last SHADOW_DISAGREEMENTS disagreements, oldest first. */
+	disagreements: EngineTrustDisagreement[]
+}
+
+export interface EngineTrustDisagreement {
+	kind: "ledger-stricter" | "ledger-looser" | "mismatch"
+	at: number
+	/** The ledger session and position bounds the block was read at (null: not mapped). */
+	session: number | null
+	posA: number | null
+	posB: number | null
+	engineTrust: TuningTrust
+	ledgerTrust: TuningTrust
+	engineCentreHz: number
+	ledgerCentreHz: number | null
+	engineSampleRateHz: number
+	ledgerSampleRateHz: number | null
+	/** Fixed code of the ledger's first failing check. */
+	reason?: string
+	/** The doubt's own fixed reason when `reason` is `doubt`. */
+	doubtReason?: string
+}
+
+/**
+ * Disagreements kept for status. The step-1 acceptance explains every disagreement of a 30 min
+ * run line by line from the status poll (1 s): disagreements come in bursts of one per block
+ * summary around a tuning event (integration 100 ms default: 10 per second over a ≤ 1 s settle),
+ * so 32 holds a whole burst plus its neighbours between two polls; older ones stay in the counters.
+ */
+export const SHADOW_DISAGREEMENTS = 32
+
+/** Where a ledger session's position 0 lies in a branch's offered bytes, as bounds. */
+interface LedgerAnchor {
+	session: number
+	oLow: number
+	oHigh: number
+	/** The absorber's lost bytes when anchored (bytes lost after it break the map). */
+	lost: number | null
+}
+
+/** A shadow read: the ledger's verdict and where it was read (null: not mapped). */
+interface ShadowRead {
+	verdict: Pick<
+		TrustVerdict,
+		"trust" | "frequency" | "sampleRate" | "doubtReason"
+	> & { reason?: string }
+	session: number | null
+	posA: number | null
+	posB: number | null
+}
+
+function unmappedRead(reason: string): ShadowRead {
+	return {
+		verdict: {
+			trust: "unverified",
+			frequency: null,
+			sampleRate: null,
+			reason,
+		},
+		session: null,
+		posA: null,
+		posB: null,
+	}
+}
+
+function writableBacklog(stream: Readable | undefined): number {
+	const length = (stream as { writableLength?: unknown } | undefined)
+		?.writableLength
+	return typeof length === "number" && Number.isFinite(length) ? length : 0
+}
+
+/** Engine streams whose sample-to-branch-byte map is kept for late block summaries. */
+const SHADOW_STREAM_MAPS = 4
+
 export interface SpectrumEngineDeps {
 	sourceId: string
 	sources: Pick<SourceManager, "getCaps" | "getStream"> &
+		Partial<Pick<SourceManager, "tuningLedger">> &
 		Pick<EventEmitter, "on" | "off">
-	routing: Pick<SourceFanoutRouter, "getFanout" | "releaseUnused">
+	routing: Pick<SourceFanoutRouter, "getFanout" | "releaseUnused"> &
+		Partial<Pick<SourceFanoutRouter, "ingestCounters">>
+	/** The tuning ledger; absent = `sources.tuningLedger` (the real SourceManager's), else none. */
+	ledger?: EngineLedger | null
 	/**
 	 * WG9 req 3.2: `tuningWrittenOnConnection` is present on the real TunerController
 	 * (SpectrumService passes it through); when present and false, a label the state rule
@@ -522,6 +619,39 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private warnSuppressed = 0
 	private centreOverride: number | null = null
 	private hostTimer: NodeJS.Timeout | null = null
+	// Tuning-ledger shadow (trust step 1). Positions are mapped through the branch's offered bytes
+	// (`totalBytesWritten`: accepted plus dropped, in source order), always as a lower bound for a
+	// block's first byte and an upper bound for its end, so the ledger can only be stricter.
+	/** Where the live ledger session's position 0 lies in offered branch bytes, as bounds. */
+	private ledgerAnchor: LedgerAnchor | null = null
+	/**
+	 * Per engine stream: offered-byte bounds of its sample 0, gaps applied in it, and its own
+	 * bytes per sample and block length (a late block of an older stream maps by its stream's).
+	 */
+	private readonly streamMaps: {
+		stream: number
+		oLow0: number
+		oHigh0: number
+		gaps: number
+		bps: number
+		blockSamples: number | null
+	}[] = []
+	/**
+	 * Accepted branch bytes up to the byte being handled, also inside a chunk (branchBytes keeps
+	 * the chunk-start value there for its existing readers): the shadow's stream map reads this.
+	 */
+	private shadowBranchByte = 0
+	/** Ledger position at the last host-centre poll that matched caps (lower bound of a move). */
+	private hostCentreOkAt: { session: number; pos: number } | null = null
+	/** Dropped branch bytes applied as gaps since the branch was created. */
+	private appliedDropBytes = 0
+	private readonly shadow: EngineTrustShadow = {
+		agree: 0,
+		ledgerStricter: 0,
+		ledgerLooser: 0,
+		mismatch: 0,
+		disagreements: [],
+	}
 
 	constructor(private readonly deps: SpectrumEngineDeps) {
 		super()
@@ -595,6 +725,10 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.branch = branch
 		// A fresh branch counts from byte 0.
 		this.branchBytes = 0
+		this.shadowBranchByte = 0
+		this.appliedDropBytes = 0
+		this.streamMaps.length = 0
+		this.anchorAtBranchStart()
 		this.branchQueue.length = 0
 		this.bpMark = null
 		this.awaitingPayload = false
@@ -945,6 +1079,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			},
 			error: err => {
 				if (generation !== this.generation || this.failed) return
+				// A pipeline error can lose an untracked-retune alarm (Main decision Q2).
+				this.ledger()?.raiseDoubt(this.sourceId, "both", "pipeline-error")
 				this.log.error({ err }, "Spectrum pipeline error")
 				this.emit("error", err)
 			},
@@ -961,6 +1097,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	private fail(err: Error): void {
 		if (this.failed || !this.running) return
+		this.ledger()?.raiseDoubt(this.sourceId, "both", "pipeline-error")
 		this.failed = true
 		this.generation++
 		this.lastStats = null
@@ -1074,6 +1211,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.nextSample = 0
 		this.remainder = new Uint8Array(0)
 		this.skipBytes = 0
+		this.mapStream()
 		// The old stream's pending starts stay until this stream's own epoch-started (onEvents).
 		// A command queued before the boundary was the old stream's; one after it is this one's.
 		const pending = this.externalPending
@@ -1307,6 +1445,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		if (this.externalPending) this.flushExternal()
 		if (!this.running || this.restarting) {
 			this.branchBytes += chunk.length
+			this.shadowBranchByte = this.branchBytes
 			return
 		}
 		let pos = this.branchBytes
@@ -1315,6 +1454,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			const mark = this.branchQueue[0]
 			if (mark && mark.atBranchByte <= pos) {
 				this.branchQueue.shift()
+				// The shadow's stream map sees the branch position the mark applies at.
+				this.shadowBranchByte = pos
 				this.applyMark(mark)
 				continue
 			}
@@ -1326,6 +1467,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			off = limit
 		}
 		this.branchBytes = pos
+		this.shadowBranchByte = pos
 		this.applyDueMarks()
 	}
 
@@ -1429,6 +1571,9 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	/** `droppedBytes` were lost at the current position (fanout drop-on-congestion). */
 	private applyGap(droppedBytes: number): void {
+		this.appliedDropBytes += droppedBytes
+		const map = this.streamMaps.at(-1)
+		if (map?.stream === this.stream) map.gaps += 1
 		const lost = droppedBytes + this.remainder.length
 		this.remainder = new Uint8Array(0)
 		const rem = lost % this.bps
@@ -1644,6 +1789,14 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					tuningTrust: "unverified",
 					settleMode: null,
 				}
+				// Lower bound: the alarm compares its block with the one before it, so the move lies
+				// at or after the start of the previous block (unmapped: the session start).
+				this.ledger()?.raiseDoubt(
+					this.sourceId,
+					"both",
+					"untracked-retune",
+					this.ledgerLowerBound(this.stream, ev.startSample, 2) ?? 0,
+				)
 				this.warn(
 					"untracked-retune",
 					ev.deltaHz,
@@ -1653,7 +1806,9 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				this.lastStats = ev.stats
 				if (ev.stats.stuckTestMode) this.marker = false
 			}
-			this.emit("pipeline", ev, this.epochFor(ev))
+			const epoch = this.epochFor(ev)
+			if (ev.kind === "block-summary") this.shadowBlock(ev, epoch)
+			this.emit("pipeline", ev, epoch)
 		}
 	}
 
@@ -1707,6 +1862,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private subscribe(): void {
 		this.deps.sources.on("disconnected", this.onDisconnected)
 		this.deps.sources.on("payload-started", this.onPayloadStarted)
+		this.deps.sources.on("session-started", this.onSessionStarted)
 		this.deps.sources.on("caps-changed", this.onCapsChanged)
 		const tuner = this.deps.tuner
 		if (tuner) {
@@ -1719,6 +1875,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private unsubscribe(): void {
 		this.deps.sources.off("disconnected", this.onDisconnected)
 		this.deps.sources.off("payload-started", this.onPayloadStarted)
+		this.deps.sources.off("session-started", this.onSessionStarted)
 		this.deps.sources.off("caps-changed", this.onCapsChanged)
 		this.deps.tuner?.off("command-sent", this.onCommandSent)
 		this.deps.tuner?.off("state-changed", this.onStateChanged)
@@ -1874,12 +2031,24 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const caps = this.deps.sources.getCaps(this.sourceId)?.centerFreq
 		if (caps === undefined) return
 		const mismatch = Math.abs(reported - caps) > HOST_CENTRE_TOLERANCE_HZ
+		const ledger = this.ledger()
 		if (!mismatch) {
 			this.centreOverride = null
+			// The host matched now: a later move lies past what the core had forwarded by now.
+			this.hostCentreOkAt = ledger?.position(this.sourceId) ?? null
 			return
 		}
 		if (this.centreOverride === reported) return
 		this.centreOverride = reported
+		// Lower bound: the last poll that matched in this session, else the session start.
+		const live = ledger?.position(this.sourceId) ?? null
+		const ok = this.hostCentreOkAt
+		ledger?.raiseDoubt(
+			this.sourceId,
+			"frequency",
+			"host-centre-mismatch",
+			ok && live && ok.session === live.session ? ok.pos : 0,
+		)
 		this.warn("host-centre-mismatch", reported - caps)
 		this.queueExternal("unverified")
 	}
@@ -2006,6 +2175,228 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				? { verifiedFromSample: timing.verifiedFromSample }
 				: {}),
 		})
+	}
+
+	// === Tuning-ledger shadow (trust step 1) ===
+
+	/** The shadow counters; null when the engine has no ledger. */
+	trustShadow(): EngineTrustShadow | null {
+		if (!this.ledger()) return null
+		return {
+			...this.shadow,
+			disagreements: this.shadow.disagreements.map(d => ({ ...d })),
+		}
+	}
+
+	private ledger(): EngineLedger | null {
+		if (this.deps.ledger !== undefined) return this.deps.ledger
+		return this.deps.sources.tuningLedger ?? null
+	}
+
+	/** Bytes between the source manager's write and this branch: source stream buffers and absorber. */
+	private upstreamBuffered(): { bytes: number; lost: number | null } {
+		const stream = this.deps.sources.getStream(this.sourceId)
+		const ingest = this.deps.routing.ingestCounters?.(this.sourceId) ?? null
+		return {
+			bytes:
+				(stream?.readableLength ?? 0) +
+				// The source stream is a PassThrough: its writable side can hold bytes too.
+				writableBacklog(stream) +
+				(ingest?.heldBytes ?? 0),
+			lost: ingest?.lostBytesTotal ?? null,
+		}
+	}
+
+	/**
+	 * A new branch (offered byte 0) during a live session at `pos`: the next byte offered has a
+	 * position in [pos − buffered upstream, pos], so the session's position 0 lies at offered byte
+	 * [−pos, buffered − pos].
+	 */
+	private anchorAtBranchStart(): void {
+		this.ledgerAnchor = null
+		const ledger = this.ledger()
+		if (!ledger) return
+		const at = ledger.position(this.sourceId)
+		if (!at) return
+		const upstream = this.upstreamBuffered()
+		this.ledgerAnchor = {
+			session: at.session,
+			oLow: -at.pos,
+			oHigh: upstream.bytes - at.pos,
+			lost: upstream.lost,
+		}
+	}
+
+	/**
+	 * Emitted before the session's first byte is written: every byte offered to the branch so far,
+	 * and every byte still upstream, is the old session's.
+	 */
+	private readonly onSessionStarted = (
+		sourceId: string,
+		session: number,
+	): void => {
+		if (sourceId !== this.sourceId || !this.running || !this.fanout) return
+		const t = this.fanout.getBranchTelemetry(this.branchId)
+		if (!t) {
+			this.ledgerAnchor = null
+			return
+		}
+		const upstream = this.upstreamBuffered()
+		this.ledgerAnchor = {
+			session,
+			oLow: t.totalBytesWritten,
+			oHigh: t.totalBytesWritten + upstream.bytes,
+			lost: upstream.lost,
+		}
+	}
+
+	/**
+	 * Sample 0 of the stream that starts now is the next byte after `shadowBranchByte` accepted bytes,
+	 * preceded by at least the drops applied so far and at most every drop counted so far.
+	 */
+	private mapStream(): void {
+		const t = this.fanout?.getBranchTelemetry(this.branchId)
+		const cfg = this.cfg
+		this.streamMaps.push({
+			stream: this.stream,
+			oLow0: this.shadowBranchByte + this.appliedDropBytes,
+			oHigh0: t
+				? this.shadowBranchByte + t.droppedBytesTotal
+				: Number.POSITIVE_INFINITY,
+			gaps: 0,
+			bps: this.bps,
+			blockSamples: cfg
+				? blockSamplesOf(cfg.integrationMs, cfg.sampleRateHz, cfg.fftSize)
+				: null,
+		})
+		if (this.streamMaps.length > SHADOW_STREAM_MAPS) this.streamMaps.shift()
+	}
+
+	private shadowBlock(
+		ev: Extract<PipelineEvent, { kind: "block-summary" }>,
+		epoch: EngineEpoch,
+	): void {
+		const ledger = this.ledger()
+		if (!ledger) return
+		let read: ShadowRead
+		try {
+			read = this.ledgerVerdict(ledger, ev)
+		} catch {
+			read = unmappedRead("lookup-failed")
+		}
+		const verdict = read.verdict
+		const engineTrust = epoch.tuningTrust
+		const ledgerTrust = verdict.trust
+		let kind: EngineTrustDisagreement["kind"] | null = null
+		if (engineTrust !== "unverified" && ledgerTrust === "unverified")
+			kind = "ledger-stricter"
+		else if (engineTrust === "unverified" && ledgerTrust !== "unverified")
+			kind = "ledger-looser"
+		else if (
+			engineTrust !== "unverified" &&
+			(engineTrust !== ledgerTrust ||
+				verdict.frequency !== epoch.centreHz ||
+				verdict.sampleRate !== epoch.sampleRateHz)
+		)
+			kind = "mismatch"
+		if (kind === null) {
+			this.shadow.agree += 1
+			return
+		}
+		if (kind === "ledger-stricter") this.shadow.ledgerStricter += 1
+		else if (kind === "ledger-looser") this.shadow.ledgerLooser += 1
+		else this.shadow.mismatch += 1
+		const ring = this.shadow.disagreements
+		ring.push({
+			kind,
+			at: this.now(),
+			session: read.session,
+			posA: read.posA,
+			posB: read.posB,
+			engineTrust,
+			ledgerTrust,
+			engineCentreHz: epoch.centreHz,
+			ledgerCentreHz: verdict.frequency,
+			engineSampleRateHz: epoch.sampleRateHz,
+			ledgerSampleRateHz: verdict.sampleRate,
+			...(verdict.reason !== undefined ? { reason: verdict.reason } : {}),
+			...(verdict.doubtReason !== undefined
+				? { doubtReason: verdict.doubtReason }
+				: {}),
+		})
+		if (ring.length > SHADOW_DISAGREEMENTS) ring.shift()
+	}
+
+	/**
+	 * Lower bound of the ledger position of sample `sample` of engine stream `stream`, minus
+	 * `blocksBefore` of that stream's blocks, clamped to 0; null when it cannot be mapped (no
+	 * anchor, no map, upstream loss, another session).
+	 */
+	private ledgerLowerBound(
+		stream: number,
+		sample: number,
+		blocksBefore = 0,
+	): number | null {
+		const ledger = this.ledger()
+		const anchor = this.ledgerAnchor
+		if (!ledger || !anchor || !Number.isFinite(sample)) return null
+		if (this.upstreamLost(anchor)) return null
+		const map = this.streamMaps.find(m => m.stream === stream)
+		if (!map || map.blockSamples === null) return null
+		const live = ledger.position(this.sourceId)
+		if (!live || live.session !== anchor.session) return null
+		const first = sample - blocksBefore * map.blockSamples
+		const pos = map.oLow0 + (first - map.gaps - 1) * map.bps - anchor.oHigh
+		return Math.max(0, pos)
+	}
+
+	/** Bytes the absorber lost since the anchor break the offered-byte map. */
+	private upstreamLost(anchor: LedgerAnchor): boolean {
+		if (anchor.lost === null) return false
+		const lost =
+			this.deps.routing.ingestCounters?.(this.sourceId)?.lostBytesTotal ?? null
+		return lost !== anchor.lost
+	}
+
+	/**
+	 * The ledger's label of a block summary's samples, mapped through the block's own stream (its
+	 * bytes per sample and block length), fail closed on every missing map. A block whose lower
+	 * bound falls before the session's position 0 may hold the previous session's bytes:
+	 * `before-session`.
+	 */
+	private ledgerVerdict(
+		ledger: EngineLedger,
+		ev: Extract<PipelineEvent, { kind: "block-summary" }>,
+	): ShadowRead {
+		const anchor = this.ledgerAnchor
+		if (!anchor) return unmappedRead("no-anchor")
+		if (this.upstreamLost(anchor)) return unmappedRead("upstream-loss")
+		const map = this.streamMaps.find(m => m.stream === ev.summary.stream)
+		if (!map || map.blockSamples === null) return unmappedRead("no-stream-map")
+		const end = ev.summary.endSample
+		const start = end - map.blockSamples
+		// Lower bound of the first byte: each applied gap can round its samples up by one.
+		const posA = map.oLow0 + (start - map.gaps - 1) * map.bps - anchor.oHigh
+		const posB = map.oHigh0 + end * map.bps - anchor.oLow
+		const live = ledger.position(this.sourceId)
+		if (!live || live.session !== anchor.session)
+			return unmappedRead("session-ended")
+		// Never past what the source manager handed out (a valid upper bound too).
+		const upper = Math.min(posB, live.pos)
+		const at = {
+			session: anchor.session,
+			posA: Math.max(0, posA),
+			posB: Math.max(0, upper),
+		}
+		if (posA < 0)
+			return {
+				...at,
+				verdict: { ...unmappedRead("before-session").verdict },
+			}
+		return {
+			...at,
+			verdict: ledger.trustAt(this.sourceId, anchor.session, posA, upper),
+		}
 	}
 
 	/** Diagnostics for status (§ 12.1). */

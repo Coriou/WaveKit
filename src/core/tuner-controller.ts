@@ -17,6 +17,7 @@ import type {
 	SourceManager,
 } from "./source-manager.js"
 import type { SourceTunerConfig } from "../config.js"
+import type { ReceiptCallback, TuningWriterTag } from "./tuning-ledger.js"
 import { configuredTuningFrames } from "./tuner-config-gain.js"
 import { nearestGainStep } from "./band-gain-schema.js"
 import type { BandGainSettingsService, SavedOperatorGain } from "./band-gain.js"
@@ -65,6 +66,11 @@ export interface TunerWriteOptions {
 	beforeWrite?: () => void
 	run?: TuneWriteRun
 	forceWrite?: () => boolean
+	/**
+	 * The frame's tuning-ledger receipt once it left the socket, or null when none was recorded
+	 * (SourceManager.writeToSource). Information only: it changes nothing in the write.
+	 */
+	onReceipt?: ReceiptCallback
 }
 
 /**
@@ -370,6 +376,16 @@ const CHANGE_FIELDS: ReadonlyMap<string, TunerChangeField> = new Map<
 	),
 	["set-test-mode", "testMode"],
 ])
+
+const OPERATOR_WRITER: TuningWriterTag = Object.freeze({ writer: "operator" })
+
+/** The tuning-ledger writer of a write: the scanner's for its origin, else the operator's. */
+function writerOf(opts: TunerWriteOptions): TuningWriterTag {
+	if (opts.origin !== "scanner") return OPERATOR_WRITER
+	return opts.jobId !== undefined
+		? { writer: "scanner", jobId: opts.jobId }
+		: { writer: "scanner" }
+}
 
 /** Who and why, from what the core itself knows of a write; any gap reads `unknown`. */
 function changeOf(opts: TunerWriteOptions): {
@@ -3591,10 +3607,25 @@ export class TunerController extends EventEmitter {
 		return (this.fieldWrites.get(sourceId)?.get(field) ?? 0) !== mine
 	}
 
-	/** Every frame this controller writes passes here. */
-	private writeFrame(sourceId: string, cmd: number, value: number): void {
+	/**
+	 * Every frame this controller writes passes here. `writer` tags the tuning-ledger receipt:
+	 * the controller's own writes (API, replay, configured tuning) are the operator's; a scanner
+	 * hop's are the scanner's (writerOf). `onReceipt` hears the frame's receipt at flush.
+	 */
+	private writeFrame(
+		sourceId: string,
+		cmd: number,
+		value: number,
+		writer: TuningWriterTag = OPERATOR_WRITER,
+		onReceipt?: ReceiptCallback,
+	): void {
 		this.assertOwnsTuner()
-		this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
+		this.sourceManager.writeToSource(
+			sourceId,
+			this.encodeFrame(cmd, value),
+			writer,
+			onReceipt,
+		)
 	}
 
 	private assertOwnsTuner(): void {
@@ -3621,7 +3652,7 @@ export class TunerController extends EventEmitter {
 				: undefined
 		;(opts.beforeWrite ?? hookTune?.beforeWrite)?.()
 		try {
-			this.writeFrame(sourceId, cmd, value)
+			this.writeFrame(sourceId, cmd, value, writerOf(opts), opts.onReceipt)
 			this.noteFieldWrite(sourceId, stateFieldOf(cmd))
 			// In the same step as the frame: no other write can see the old mode in between.
 			this.noteLeftAgc(sourceId, cmd, value)
