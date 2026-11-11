@@ -6,19 +6,34 @@
  * directory fsynced; the temporary file is removed when any step fails. Any other read error
  * (EACCES, EIO, EISDIR, ...) keeps the file as it is and reports no id. In a container the state
  * dir must be a mount point (a volume): otherwise it lives in the container layer and changes at
- * every recreate, so no id is reported. Whenever the id would not be stable it is not reported at
+ * every recreate, so no id is reported; a tmpfs state dir (Linux magic 0x01021994) is lost at
+ * every restart, so it reports no id either, in a container or not. A directory fsync after the
+ * rename that the filesystem does not support (EINVAL, ENOTSUP, EPERM, EISDIR) is best effort: the
+ * id is kept and the error is returned for a log line. Whenever the id would not be stable it is not reported at
  * all (null, with a reason): an id that would change must never be taken for a stable one.
  * `receiverId` (one running process) is separate and unchanged.
  */
 import { randomBytes } from "node:crypto"
 import { existsSync } from "node:fs"
-import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises"
+import {
+	mkdir,
+	open,
+	readFile,
+	rename,
+	stat,
+	statfs,
+	unlink,
+} from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 
 export const UNIT_ID_FILE_NAME = "unit-id.json"
 /** The file holds one short JSON object; anything larger is malformed. */
 export const UNIT_ID_FILE_MAX_BYTES = 1024
 const UNIT_ID = /^[0-9a-f]{32}$/
+/** statfs f_type of tmpfs on Linux (TMPFS_MAGIC). */
+export const TMPFS_MAGIC = 0x01021994
+/** Directory fsync errors that mean "not supported here", not "not written". */
+const DIR_SYNC_UNSUPPORTED = new Set(["EINVAL", "ENOTSUP", "EPERM", "EISDIR"])
 
 /** Why no unit id is reported (null while one is). */
 export type UnitIdReason =
@@ -85,8 +100,16 @@ function errorCode(err: unknown): string | undefined {
 	return typeof code === "string" ? code : undefined
 }
 
+export interface UnitIdLoaded {
+	unitId: string
+	source: "read" | "created"
+	reason: null
+	/** Set when the directory fsync after the rename was unsupported (best effort). */
+	dirSyncError?: string
+}
+
 export type LoadUnitIdResult =
-	| { unitId: string; source: "read" | "created"; reason: null }
+	| UnitIdLoaded
 	| { unitId: null; source: "unavailable"; reason: UnitIdReason }
 
 /** Reads the unit id from `dir`, or creates and persists one. Never throws. */
@@ -125,9 +148,17 @@ export async function loadOrCreateUnitId(
 		}
 		await fs.rename(tmp, path)
 		tmpCreated = false
-		await fs.syncDir(dir)
 	} catch {
 		if (tmpCreated) await fs.unlink(tmp).catch(() => undefined)
+		return { unitId: null, source: "unavailable", reason: "state-unwritable" }
+	}
+	try {
+		await fs.syncDir(dir)
+	} catch (err) {
+		const code = errorCode(err)
+		// Some filesystems cannot fsync a directory; the renamed file is still there.
+		if (code !== undefined && DIR_SYNC_UNSUPPORTED.has(code))
+			return { unitId, source: "created", reason: null, dirSyncError: code }
 		return { unitId: null, source: "unavailable", reason: "state-unwritable" }
 	}
 	return { unitId, source: "created", reason: null }
@@ -137,6 +168,7 @@ export async function loadOrCreateUnitId(
 export type StatePersistence =
 	| "mount"
 	| "not-mount"
+	| "tmpfs"
 	| "not-container"
 	| "unknown"
 
@@ -145,25 +177,31 @@ export interface StatePersistenceProbe {
 	deviceOf(path: string): Promise<number>
 	/** True when this process runs in a container. */
 	inContainer(): boolean
+	/** The statfs f_type of a path (rejects like fs.statfs). */
+	fsTypeOf(path: string): Promise<number>
 }
 
 const nodeProbe: StatePersistenceProbe = {
 	deviceOf: async path => (await stat(path)).dev,
 	inContainer: () =>
 		existsSync("/.dockerenv") || existsSync("/run/.containerenv"),
+	fsTypeOf: async path => (await statfs(path)).type,
 }
 
 /**
  * Outside a container the state dir is on the host's own disk ("not-container"). In one it must
  * be a mount point (its st_dev differs from its parent's), else it lives in the container layer.
  * A missing dir is not a mount; any other stat failure is "unknown" (the id is kept, with a log).
+ * A tmpfs dir ("tmpfs") never persists, in a container or not; a statfs failure skips that check.
  */
 export async function stateDirPersistence(
 	dir: string,
 	probe: StatePersistenceProbe = nodeProbe,
 ): Promise<StatePersistence> {
-	if (!probe.inContainer()) return "not-container"
 	const abs = resolve(dir)
+	const fsType = await probe.fsTypeOf(abs).catch(() => null)
+	if (fsType === TMPFS_MAGIC) return "tmpfs"
+	if (!probe.inContainer()) return "not-container"
 	const parent = dirname(abs)
 	if (parent === abs) return "mount"
 	let own: number
@@ -194,7 +232,7 @@ export async function loadUnitIdAtStartup(
 	} = {},
 ): Promise<UnitIdStartup> {
 	const persistence = await stateDirPersistence(dir, deps.probe)
-	if (persistence === "not-mount")
+	if (persistence === "not-mount" || persistence === "tmpfs")
 		return {
 			persistence,
 			result: {

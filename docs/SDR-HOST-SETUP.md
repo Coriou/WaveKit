@@ -295,12 +295,14 @@ directory, so in a container `/state` must be a mounted volume.
 `docker-compose.yml` mounts `/var/lib/wavekit/sdr-host` from the host there
 (`WAVEKIT_SDR_HOST_STATE_DIR` to change it), so the ID survives restarts,
 container recreates and image updates. The image also declares `/state` as a
-volume, so a compose file without a mount still keeps the ID when the container
-is recreated, until the stack is removed (`docker compose down`); give it a
-named volume or a host directory to keep it for good.
+volume, so a run without a mount gets an anonymous volume: compose keeps it when
+the container is recreated, but `docker compose down -v` or `docker run --rm`
+deletes it and the receiver gets a new ID. A named volume or a host directory is
+required for a stable ID.
 
 When `/state` is not a mount point (the ID would live in the container layer
-and change at every recreate), sdr-host reports `unitId: null` with
+and change at every recreate), or is a tmpfs (lost at every restart, in a
+container or not), sdr-host reports `unitId: null` with
 `unitIdReason: "state-not-persistent"` and logs a warning naming the fix. A
 missing or damaged `unit-id.json` gets a new ID, written to a temporary file,
 flushed to disk and renamed into place. Any other read error (no permission, a

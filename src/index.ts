@@ -1350,6 +1350,8 @@ async function main(): Promise<void> {
 					undefined ||
 					identityPoller.hasAnswered(id) ||
 					identityPoller.awaitingFirstAnswer(id)),
+			// While that first answer is still awaited, the weak key writes nothing learned.
+			sdrHostAwaited: id => identityPoller?.awaitingFirstAnswer(id) === true,
 			// The controller is built below; nothing binds before the first connection.
 			onBound: receiverBoundToTuner(receiverIdentity, () => tunerController),
 		})

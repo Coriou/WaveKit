@@ -715,7 +715,10 @@ describe("ReceiverLearnedState: who adopts the state from before namespacing", (
 			JSON.stringify(engine(-88)),
 		)
 	}
-	async function makeWith(sdrHostConfigured: () => boolean) {
+	async function makeWith(
+		sdrHostConfigured: () => boolean,
+		sdrHostAwaited?: () => boolean,
+	) {
 		const store = new ScannerPersistence({
 			dir: scannerDir,
 			logger: silent,
@@ -732,6 +735,7 @@ describe("ReceiverLearnedState: who adopts the state from before namespacing", (
 			tracked: id => id === "rtl",
 			onBound: (_id, b) => bound.push(b),
 			sdrHostConfigured,
+			...(sdrHostAwaited ? { sdrHostAwaited } : {}),
 		})
 		await learned.load()
 		const persistence = learned.attach(store, store, () => true)
@@ -802,6 +806,47 @@ describe("ReceiverLearnedState: who adopts the state from before namespacing", (
 		// Once: a later recheck binds nothing again.
 		await learned.recheckAdoption("rtl")
 		expect(bound).toHaveLength(2)
+	})
+
+	it("while the sdr-host is awaited the weak key takes no writes, so the recheck still adopts the legacy state", async () => {
+		await writeLegacy()
+		let awaited = true
+		const { learned, persistence, fake } = await makeWith(
+			() => awaited,
+			() => awaited,
+		)
+		await learned.onIdentity("rtl", WEAK, undefined)
+		// A persist in the awaited window (also a stop's final write) is dropped; reads still work.
+		await persistence.writeEngine(
+			"rtl",
+			engine(-70),
+			persistence.generation?.("rtl"),
+		)
+		await persistence.writeOccupancy(
+			"rtl",
+			occupancy(12_500),
+			persistence.generation?.("rtl"),
+		)
+		expect(await exists(nsFile(WEAK, "engine.json"))).toBe(false)
+		expect(await exists(nsFile(WEAK, "occupancy.json"))).toBe(false)
+		expect(await persistence.loadEngine("rtl")).toBeNull()
+		// Given up: the recheck copies the legacy spectrum into the still-empty namespace.
+		awaited = false
+		await learned.recheckAdoption("rtl")
+		expect(learned.view("rtl")?.namespaceState).toBe("adopted")
+		expect(fake.now().engine).toEqual(engine(-88))
+		expect(
+			JSON.parse(await readFile(nsFile(WEAK, "engine.json"), "utf8")),
+		).toEqual(engine(-88))
+		// Adopted: writes go to the namespace again.
+		await persistence.writeEngine(
+			"rtl",
+			engine(-66),
+			persistence.generation?.("rtl"),
+		)
+		expect(
+			JSON.parse(await readFile(nsFile(WEAK, "engine.json"), "utf8")),
+		).toEqual(engine(-66))
 	})
 
 	it("a recheck while a connection is pending does nothing (its settle decides)", async () => {

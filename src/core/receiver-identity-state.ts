@@ -26,7 +26,9 @@
  * when the source has no sdr-host (`sdrHostConfigured` false). With an sdr-host the adoption waits
  * for its stable answer, so a header-only key never wins it. When the answer stops being awaited
  * (an auto-detected sdr-host that never answered: `recheckAdoption`), the bound source-scoped key
- * adopts then, within its connection.
+ * adopts then, within its connection. While the answer is still awaited (`sdrHostAwaited`) and
+ * no receiver adopted yet, that key takes no writes (reads are fine): its namespace stays empty,
+ * so the later adoption copies the legacy files in.
  *
  * Take-over: a stable key bound for the first time on a source that does not adopt the legacy
  * state now (another key adopted it) starts from that source's weak namespace for the same model
@@ -160,6 +162,13 @@ export interface ReceiverLearnedStateOptions {
 	 * for a bound weak key, call `recheckAdoption`.
 	 */
 	sdrHostConfigured?: (sourceId: string) => boolean
+	/**
+	 * The source's sdr-host may still give its first answer (never answered, not given up on):
+	 * while it does, a bound weak key that no receiver adopted for yet takes no learned-state
+	 * writes (reads are fine), so the legacy adoption a later `recheckAdoption` makes finds its
+	 * namespace empty and copies the legacy files in. Default: never awaited.
+	 */
+	sdrHostAwaited?: (sourceId: string) => boolean
 	fs?: {
 		readFile: (path: string, maxBytes: number) => Promise<Buffer>
 		atomicWrite: (path: string, data: string) => Promise<void>
@@ -361,7 +370,23 @@ export class ReceiverLearnedState {
 			this.kickAdoption(sourceId)
 			return null
 		}
+		if (this.adoptionAwaited(sourceId, key)) return null
 		return key
+	}
+
+	/**
+	 * True while `key` is the settled weak key, no receiver adopted the legacy state yet and the
+	 * source's sdr-host is still awaited: the adoption is deferred, so nothing is written under the
+	 * key (a written file would make the later adoption copy nothing).
+	 */
+	private adoptionAwaited(sourceId: string, key: string): boolean {
+		const identity = this.settledIdentity.get(sourceId)
+		return (
+			identity?.key === key &&
+			identity.strength === "model" &&
+			(this.records.get(sourceId)?.adoptedBy ?? null) === null &&
+			this.options.sdrHostAwaited?.(sourceId) === true
+		)
 	}
 
 	private spectrumOwed(sourceId: string, key: string): boolean {
@@ -608,7 +633,7 @@ export class ReceiverLearnedState {
 	 * the store takes it, else held in memory until it does.
 	 */
 	private async exportUnder(sourceId: string, key: string): Promise<void> {
-		if (!this.spectrum) return
+		if (!this.spectrum || this.adoptionAwaited(sourceId, key)) return
 		const now = await this.spectrum.exportLearnedState(sourceId)
 		if (now.engine === null && now.occupancy === null) return
 		if (await this.writeSnapshot(sourceId, key, now)) {

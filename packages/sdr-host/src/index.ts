@@ -51,8 +51,10 @@ async function main(): Promise<void> {
 	const { result } = unit
 	if (result.reason === "state-not-persistent")
 		logger.warn(
-			{ stateDir: config.state.dir },
-			"State directory is not a mounted volume: no stable unit id is reported. Mount a volume there (docker-compose.yml mounts /var/lib/wavekit/sdr-host at /state)",
+			{ stateDir: config.state.dir, persistence: unit.persistence },
+			unit.persistence === "tmpfs"
+				? "State directory is a tmpfs (lost at every restart): no stable unit id is reported. Mount a disk-backed volume there (docker-compose.yml mounts /var/lib/wavekit/sdr-host at /state)"
+				: "State directory is not a mounted volume: no stable unit id is reported. Mount a volume there (docker-compose.yml mounts /var/lib/wavekit/sdr-host at /state)",
 		)
 	else if (result.reason !== null)
 		logger.warn(
@@ -64,6 +66,11 @@ async function main(): Promise<void> {
 			logger.warn(
 				{ stateDir: config.state.dir },
 				"Could not tell whether the state directory is a mounted volume; the unit id may change when the container is recreated",
+			)
+		if (result.dirSyncError !== undefined)
+			logger.warn(
+				{ stateDir: config.state.dir, code: result.dirSyncError },
+				"State directory cannot be fsynced; the unit id was written but its rename may not survive a power loss",
 			)
 		logger.info({ source: result.source }, "Unit id ready")
 	}

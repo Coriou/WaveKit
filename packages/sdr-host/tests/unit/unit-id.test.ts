@@ -6,6 +6,7 @@ import {
 	loadOrCreateUnitId,
 	loadUnitIdAtStartup,
 	stateDirPersistence,
+	TMPFS_MAGIC,
 	UNIT_ID_FILE_NAME,
 	type StatePersistenceProbe,
 	type UnitIdFs,
@@ -29,12 +30,13 @@ function recordingFs(
 	options: {
 		read?: () => Promise<Buffer>
 		fail?: "open" | "write" | "sync" | "rename" | "syncDir"
+		failCode?: string
 	} = {},
 ): { fs: UnitIdFs; calls: string[] } {
 	const calls: string[] = []
 	const step = async (name: string, what: string): Promise<void> => {
 		calls.push(what)
-		if (options.fail === name) throw codeError("EIO")
+		if (options.fail === name) throw codeError(options.failCode ?? "EIO")
 	}
 	const fs: UnitIdFs = {
 		readFile: options.read ?? (() => Promise.reject(codeError("ENOENT"))),
@@ -197,14 +199,37 @@ describe("sdr-host unit id", () => {
 		// Renamed already: there is no temporary file left to remove.
 		expect(calls.some(c => c.startsWith("unlink"))).toBe(false)
 	})
+
+	it.each(["EINVAL", "ENOTSUP", "EPERM", "EISDIR"])(
+		"keeps the id when the directory fsync is unsupported (%s, best effort)",
+		async code => {
+			const { fs, calls } = recordingFs({ fail: "syncDir", failCode: code })
+			expect(
+				await loadOrCreateUnitId("/state", fs, () => "9".repeat(32)),
+			).toEqual({
+				unitId: "9".repeat(32),
+				source: "created",
+				reason: null,
+				dirSyncError: code,
+			})
+			expect(calls.at(-1)).toBe("fsync dir /state")
+			expect(calls.some(c => c.startsWith("unlink"))).toBe(false)
+		},
+	)
 })
 
 describe("sdr-host state dir persistence", () => {
 	const probe = (
 		devices: Record<string, number | string>,
 		inContainer = true,
+		fsTypes: Record<string, number | string> = {},
 	): StatePersistenceProbe => ({
 		inContainer: () => inContainer,
+		fsTypeOf: async path => {
+			const type = fsTypes[path] ?? 0xef53
+			if (typeof type === "string") throw codeError(type)
+			return type
+		},
 		deviceOf: async path => {
 			const dev = devices[path]
 			if (dev === undefined) throw codeError("ENOENT")
@@ -245,6 +270,46 @@ describe("sdr-host state dir persistence", () => {
 				probe({ "/state": 1, "/": 1 }, false),
 			),
 		).toBe("not-container")
+	})
+
+	it.each([true, false])(
+		"rejects a tmpfs state dir (in a container: %s)",
+		async inContainer => {
+			expect(
+				await stateDirPersistence(
+					"/state",
+					probe({ "/state": 2, "/": 1 }, inContainer, {
+						"/state": TMPFS_MAGIC,
+					}),
+				),
+			).toBe("tmpfs")
+		},
+	)
+
+	it("skips the tmpfs check when statfs fails", async () => {
+		expect(
+			await stateDirPersistence(
+				"/state",
+				probe({ "/state": 2, "/": 1 }, true, { "/state": "ENOSYS" }),
+			),
+		).toBe("mount")
+	})
+
+	it("reports state-not-persistent for a tmpfs state dir at startup and writes nothing", async () => {
+		const { fs, calls } = recordingFs()
+		const startup = await loadUnitIdAtStartup("/state", {
+			fs,
+			probe: probe({ "/state": 2, "/": 1 }, true, { "/state": TMPFS_MAGIC }),
+		})
+		expect(startup).toEqual({
+			persistence: "tmpfs",
+			result: {
+				unitId: null,
+				source: "unavailable",
+				reason: "state-not-persistent",
+			},
+		})
+		expect(calls).toEqual([])
 	})
 
 	it("reports state-not-persistent at startup and writes nothing", async () => {

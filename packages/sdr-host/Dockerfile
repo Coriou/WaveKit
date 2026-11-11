@@ -111,9 +111,11 @@ RUN case "${TARGETARCH}" in \
 
 # Prepare s6-overlay directories
 RUN mkdir -p /run/service && chmod 755 /run/service
-# sdr-host state (unit id); docker-compose.yml mounts a host volume here. VOLUME keeps
-# an anonymous volume across container recreates when no mount is given; without any
-# mount sdr-host reports no unit id (the container layer is not persistent).
+# sdr-host state (unit id); docker-compose.yml mounts a host directory here. With
+# VOLUME /state a run without a mount gets an anonymous volume: compose keeps it across
+# a recreate, but `docker compose down -v` or `docker run --rm` deletes it (and a new id
+# follows), so a named volume or host directory is required for a stable id. A tmpfs
+# here is rejected (no unit id is reported: it is lost at every restart).
 RUN mkdir -p /state
 VOLUME /state
 
