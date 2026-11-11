@@ -7,19 +7,21 @@
 import { randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import {
+	link,
 	lstat,
 	mkdir,
 	mkdtemp,
 	readdir,
 	realpath,
 	rm,
+	rename,
 	rmdir,
 	symlink,
 	unlink,
 	writeFile,
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { Writable } from "node:stream"
 import fc from "fast-check"
 import pino from "pino"
@@ -443,6 +445,133 @@ describe("analog operation crash safety: leftovers never poison the inventory", 
 		const once = await listing(root)
 		await start(root, store)
 		expect(await listing(root)).toEqual(once)
+	})
+})
+
+/** One process lifetime on `root` whose directory renames go through `rename`. */
+async function startRenaming(
+	root: string,
+	store: DiscoveryStore,
+	renameDir: (from: string, to: string) => Promise<void>,
+) {
+	const evidence = new EvidenceStore({
+		dir: root,
+		caps,
+		logger,
+		now: () => NOW,
+		statfs: async () => ({ freeBytes: 1e9 }),
+		isDiscoveryLive: id => !!store.get(id),
+		analogIo: {
+			unlink: path => unlink(path),
+			rmdir: path => rmdir(path),
+			rename: renameDir,
+			checkpoint: async () => undefined,
+		},
+	})
+	evidence.configureAnalog(adapterFor(store))
+	const reconciliation = await evidence.recoverAnalog()
+	const discoveryId = store.list({}).items[0]!.id
+	return {
+		evidence,
+		reconciliation,
+		discoveryId,
+		begin: () =>
+			evidence.beginAnalog({
+				discoveryId,
+				observationId: "o1",
+				binding: binding(),
+			}),
+	}
+}
+
+describe("analog operation crash safety: residue proofs and failed renames", () => {
+	it("never sets aside an operation folder without intent.json whose media exists", async () => {
+		const { root, store } = await fresh()
+		const p = await start(root, store)
+		const kept = await record(p)
+		const id = randomUUID()
+		const orphan = join(ops(root), id)
+		await mkdir(orphan)
+		// The media an older image's operation may have left beside the finalized one.
+		const media = join(dirname(join(root, kept.artifact!)), `analog-${id}.wav`)
+		await writeFile(media, "RIFF")
+		const restarted = await start(root, store)
+		expect(restarted.evidence.analogAuthorityReady).toBe(false)
+		expect(existsSync(orphan)).toBe(true)
+		expect(existsSync(media)).toBe(true)
+		expect(restarted.evidence.analogOperationsStatus()).toBeNull()
+	})
+	it("measures hard-linked intent files once (a crash at intent-linked)", async () => {
+		const { root, store } = await fresh()
+		await start(root, store)
+		const staging = join(ops(root), `.staging-${randomUUID()}`)
+		await mkdir(staging)
+		// Between 8 and 16 KiB: within the bound once, past it if counted twice.
+		await writeFile(join(staging, "intent.tmp"), "x".repeat(12 * 1024))
+		await link(join(staging, "intent.tmp"), join(staging, "intent.json"))
+		const restarted = await start(root, store)
+		expect(restarted.evidence.analogAuthorityReady).toBe(true)
+		expect(existsSync(staging)).toBe(false)
+		expect(restarted.evidence.analogOperationsStatus()).toEqual({
+			setAside: 1,
+			lastReason: "staging-residue",
+		})
+	})
+	it("a failed set-aside move leaves the residue in place, never poisons, and a later scan moves it", async () => {
+		const { root, store } = await fresh()
+		const kept = await record(await start(root, store))
+		const orphan = join(ops(root), randomUUID())
+		await mkdir(orphan)
+		let refused = 0
+		const failing = await startRenaming(root, store, async (from, to) => {
+			if (to.includes(".set-aside")) {
+				refused++
+				throw new Error("rename refused")
+			}
+			await rename(from, to)
+		})
+		expect(refused).toBeGreaterThanOrEqual(1)
+		expect(failing.evidence.analogAuthorityReady).toBe(true)
+		expect(existsSync(orphan)).toBe(true)
+		expect(failing.evidence.analogOperationsStatus()).toBeNull()
+		expect(failing.evidence.recordingPath(kept.alias!)).not.toBeNull()
+		const next = await record(failing)
+		expect(next.outcome).toBe("finalized")
+		await failing.evidence.stopAnalog()
+
+		const restarted = await start(root, store)
+		expect(restarted.evidence.analogAuthorityReady).toBe(true)
+		expect(existsSync(orphan)).toBe(false)
+		expect(restarted.evidence.analogOperationsStatus()).toEqual({
+			setAside: 1,
+			lastReason: "missing-intent",
+		})
+	})
+	it("a failed staging publication cleans its staging folder, refuses that recording only, and the next one is admitted", async () => {
+		const { root, store } = await fresh()
+		let failNext = true
+		const life = await startRenaming(root, store, async (from, to) => {
+			if (failNext && from.includes(".staging-")) {
+				failNext = false
+				throw new Error("rename refused")
+			}
+			await rename(from, to)
+		})
+		const op = life.begin()
+		await op.ready.catch(() => undefined)
+		await op.push(new Int16Array([1, -2, 3])).catch(() => undefined)
+		const refused = await op.finish()
+		await op.settled
+		expect(failNext).toBe(false)
+		expect(refused.outcome).not.toBe("finalized")
+		const left = (await readdir(ops(root))).filter(
+			name => name.startsWith(".staging-") || name === refused.operationId,
+		)
+		expect(left).toEqual([])
+		expect(life.evidence.analogAuthorityReady).toBe(true)
+		const next = await record(life)
+		expect(next.outcome).toBe("finalized")
+		expect(life.evidence.recordingPath(next.alias!)).not.toBeNull()
 	})
 })
 

@@ -59,7 +59,7 @@ const RESERVATION = MAX_ANALOG_FILE_BYTES + MAX_OPERATION_METADATA_BYTES
 export const ANALOG_SET_ASIDE_MAX = 32
 /**
  * Why a folder was set aside (closed): a staging folder creation never published
- * (`staging-residue`), an operation folder without intent.json (`missing-intent`, an older
+ * (`staging-residue`), an operation folder without intent.json and no media anywhere (`missing-intent`, an older
  * image's crash between mkdir and the intent link), an unreadable intent.json with no receipt and
  * no media anywhere (`invalid-intent`).
  */
@@ -80,7 +80,7 @@ const SET_ASIDE_DIR = ".set-aside"
 /** `<13-digit ms stamp>-<operation uuid>`: name order is set-aside order. */
 const SET_ASIDE_ENTRY = /^(\d{13})-[0-9a-f-]{36}$/i
 /**
- * Bound of the media search an unreadable intent.json needs before it may be set aside: one
+ * Bound of the media search a missing or unreadable intent.json needs before it may be set aside: one
  * lstat per `recordings/analog/<folder>/`, at most MAX_RECOVERY_OPERATIONS (4096) folders, once
  * per such operation (a hit is remembered); more folders: not searched, kept fail closed.
  */
@@ -464,7 +464,7 @@ export class AnalogOperations {
 	/** Folders held in `.set-aside/` at the last scan (ANALOG_SET_ASIDE_MAX evictable, see there). */
 	private setAsideHeld = 0
 	private lastSetAsideReason: AnalogSetAsideReason | null = null
-	/** Operation ids whose unreadable intent has media somewhere (searched once each). */
+	/** Operation ids whose missing or unreadable intent has media somewhere (searched once each). */
 	private readonly mediaBearing = new Set<string>()
 	private root: string
 	private rootAnchored = false
@@ -1464,6 +1464,7 @@ export class AnalogOperations {
 	/**
 	 * True when `dir` holds only regular files named in `allowed`, together at most
 	 * MAX_OPERATION_METADATA_BYTES: intent metadata, never media or a receipt. Any doubt: false.
+	 * Hard links count once (a crash at `intent-linked` leaves intent.tmp and intent.json as one file).
 	 */
 	private async metadataOnly(
 		dir: string,
@@ -1471,10 +1472,14 @@ export class AnalogOperations {
 	): Promise<boolean> {
 		try {
 			let bytes = 0
+			const inodes = new Set<string>()
 			for (const name of await this.children(dir, allowed.length)) {
 				if (!allowed.includes(name)) return false
 				const info = await lstat(join(dir, name))
 				if (info.isSymbolicLink() || !info.isFile()) return false
+				const inode = `${info.dev}:${info.ino}`
+				if (inodes.has(inode)) continue
+				inodes.add(inode)
 				bytes += info.size
 			}
 			return bytes <= MAX_OPERATION_METADATA_BYTES
@@ -1567,8 +1572,9 @@ export class AnalogOperations {
 				const bytes = next.opBytes.get(item.id) ?? 0
 				next.bytes -= bytes
 				next.metadataBytes -= bytes
+				// A staging item leaves the id's bytes alone: they belong to a published folder.
+				next.opBytes.delete(item.id)
 			}
-			next.opBytes.delete(item.id)
 			await this.checkpoint("set-aside", item.id)
 		}
 		let evicted = 0
@@ -1787,7 +1793,10 @@ export class AnalogOperations {
 						cause instanceof SyntaxError || cause instanceof z.ZodError
 					let reason: AnalogSetAsideReason | null = null
 					if (nativeCode(cause) === "ENOENT") {
-						if (await this.metadataOnly(dir, ["intent.tmp"]))
+						if (
+							(await this.metadataOnly(dir, ["intent.tmp"])) &&
+							(await this.mediaAbsent(id))
+						)
 							reason = "missing-intent"
 					} else if (
 						parseFailure &&
