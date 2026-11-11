@@ -17,6 +17,8 @@ import {
 	SOURCE_RESUME_FAILED_MESSAGE,
 	sourceActivitySchema,
 	sourceConnectFailureSchema,
+	sourceCandidateStatusSchema,
+	sourceReceiverStatusSchema,
 	sourceFeedSchema,
 	sourceRateMismatchSchema,
 	sourceSignalFlatSchema,
@@ -156,6 +158,8 @@ const extendedSourceStatusSchema = {
 		endpoint: sourceEndpointSchema,
 		feed: sourceFeedSchema,
 		connectFailure: sourceConnectFailureSchema,
+		candidate: sourceCandidateStatusSchema,
+		receiver: sourceReceiverStatusSchema,
 		verdict: sourceVerdictSchema,
 		assignments: {
 			type: "array",
@@ -455,6 +459,18 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 				// Why the last attempt failed, while not connected (fixed class and hint).
 				...(status.connectFailure !== undefined
 					? { connectFailure: { ...status.connectFailure } }
+					: {}),
+				// Lane RS: the selected endpoint and the receiver whose learned state applies.
+				...(status.candidate !== undefined
+					? { candidate: { ...status.candidate } }
+					: {}),
+				...(status.receiver !== undefined
+					? {
+							receiver: {
+								...status.receiver,
+								restoredTuning: { ...status.receiver.restoredTuning },
+							},
+						}
 					: {}),
 			}))
 		},

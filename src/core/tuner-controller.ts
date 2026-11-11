@@ -19,7 +19,12 @@ import type {
 import type { SourceTunerConfig } from "../config.js"
 import { configuredTuningFrames } from "./tuner-config-gain.js"
 import { nearestGainStep } from "./band-gain-schema.js"
-import type { BandGainSettingsService, SavedOperatorGain } from "./band-gain.js"
+import type {
+	BandGainSettingsService,
+	SavedOperatorGain,
+	SavedOperatorGainRecord,
+} from "./band-gain.js"
+import type { ReceiverIdentity } from "./receiver-identity.js"
 import type {
 	SourceFeedRestoreTuning,
 	TunerBandGain,
@@ -506,6 +511,35 @@ export interface TunerControllerConfig {
 	 * only until an operator writes them (the behaviour before; a kill switch).
 	 */
 	writeDeclaredTuningOnConnect?: boolean
+	/**
+	 * Lane RS: the receiver the current connection reaches (ReceiverIdentityTracker.provisional),
+	 * read at its first payload. Absent, or undefined for a source: no receiver gate (as before).
+	 */
+	receiverIdentity?: (sourceId: string) => ReceiverIdentity | undefined
+	/** Lane RS: sources whose pre-band gain is kept per receiver (the tracker follows them). */
+	receiverTracked?: (sourceId: string) => boolean
+}
+
+/**
+ * Lane RS: receivers whose accepted tuning one source keeps aside: the primary and the 8
+ * candidates a source can list (SOURCE_CANDIDATES_MAX) = 9; past it the oldest is dropped.
+ */
+export const RECEIVER_TUNING_STASH_MAX = 9
+
+/** One receiver's accepted tuning, kept while the source reaches another one. */
+interface ReceiverTuningStash {
+	identity: ReceiverIdentity
+	desired: Map<DesiredField, number>
+	values: Partial<Record<DesiredField, unknown>>
+	tuned:
+		| Map<"frequency" | "sampleRate", { value: number; reassert: boolean }>
+		| undefined
+}
+
+/** Whether a connection's accepted tuning was restored, and why (GET /api/sources receiver). */
+export interface ReceiverTuningRestore {
+	restored: boolean
+	reason: string
 }
 
 type ControlModeOrigin = "user" | "relay"
@@ -694,7 +728,243 @@ export class TunerController extends EventEmitter {
 
 	setBandGain(settings: BandGainSettingsService | null): void {
 		this.bandGain = settings
-		this.operatorGainBeforeBand = new Map(settings?.savedOperatorGains() ?? [])
+		this.operatorGainBeforeBand = new Map()
+		this.gainStash = new Map()
+		this.gainOwner = new Map()
+		for (const record of settings?.savedOperatorGainRecords() ?? []) {
+			// Lane RS: a tracked source applies a saved gain only once its receiver is known.
+			if (this.config.receiverTracked?.(record.sourceId) === true)
+				this.stashGain(record.sourceId, record.receiverKey ?? "", record.saved)
+			else this.operatorGainBeforeBand.set(record.sourceId, record.saved)
+		}
+	}
+
+	private stashGain(
+		sourceId: string,
+		key: string,
+		saved: SavedOperatorGain | null,
+	): void {
+		let byKey = this.gainStash.get(sourceId)
+		if (!byKey) {
+			byKey = new Map()
+			this.gainStash.set(sourceId, byKey)
+		}
+		byKey.delete(key)
+		byKey.set(key, saved)
+		while (byKey.size > RECEIVER_TUNING_STASH_MAX) {
+			const oldest = byKey.keys().next().value
+			if (oldest === undefined) break
+			byKey.delete(oldest)
+		}
+	}
+
+	/**
+	 * Lane RS: the learned state of a tracked source now belongs to `binding.key` (null: an
+	 * unknown receiver, nothing applies). Moves the pre-band gain to and from its receiver's
+	 * stash, and confirms or corrects the receiver of the accepted tuning (an sdr-host answer
+	 * after the first payload). Never writes a frame.
+	 */
+	noteReceiverBound(
+		sourceId: string,
+		binding: { key: string | null; adoptLegacy: boolean },
+		identity?: ReceiverIdentity,
+	): void {
+		const before = this.gainOwner.get(sourceId)
+		if (before !== binding.key) {
+			const active = this.operatorGainBeforeBand.get(sourceId)
+			if (this.operatorGainBeforeBand.has(sourceId)) {
+				if (typeof before === "string")
+					this.stashGain(sourceId, before, active ?? null)
+				this.operatorGainBeforeBand.delete(sourceId)
+				this.savedRecords.delete(sourceId)
+			}
+			const byKey = this.gainStash.get(sourceId)
+			if (binding.key !== null && byKey) {
+				const own = byKey.has(binding.key)
+					? binding.key
+					: binding.adoptLegacy && byKey.has("")
+						? ""
+						: undefined
+				if (own !== undefined) {
+					this.operatorGainBeforeBand.set(sourceId, byKey.get(own) ?? null)
+					byKey.delete(own)
+				}
+			}
+			this.gainOwner.set(sourceId, binding.key)
+			void this.saveOperatorGains()
+		}
+		// Before this connection's gate, the gate itself reads the identity (provisional).
+		if (
+			identity === undefined ||
+			binding.key === null ||
+			!this.gatedConnections.has(sourceId)
+		)
+			return
+		const owner = this.tuningOwner.get(sourceId)
+		if (!owner || owner.key === identity.key) return
+		const sameModel =
+			owner.tunerType !== undefined &&
+			owner.tunerType === identity.tunerType &&
+			owner.gainCount === identity.gainCount
+		// Another model was already told apart by the gate; only a unit answer after it matters.
+		if (!sameModel || identity.strength !== "unit") return
+		if (owner.strength === "unit") {
+			// Restored for a model match, then the sdr-host named another unit: the tuning stays on
+			// the wire (written, so proven) but is not this receiver's to replay.
+			this.stashTuning(sourceId, owner)
+			this.desiredFields.delete(sourceId)
+			this.tuningRestores.set(sourceId, {
+				restored: false,
+				reason:
+					"receiver changed after the restore: the replayed tuning stays until retuned",
+			})
+			this.log.warn(
+				{ sourceId, from: owner.key, to: identity.key },
+				"The receiver is another unit than the restored tuning's; not replayed again",
+			)
+		}
+		this.tuningOwner.set(sourceId, identity)
+	}
+
+	/** Lane RS: whether the current connection's accepted tuning was restored, and why. */
+	receiverTuningRestore(sourceId: string): ReceiverTuningRestore | undefined {
+		const r = this.tuningRestores.get(sourceId)
+		return r ? { ...r } : undefined
+	}
+
+	private stashTuning(sourceId: string, owner: ReceiverIdentity): void {
+		if (owner.strength === "unknown") return
+		const desired = this.desiredFields.get(sourceId)
+		const state = this.tunerStates.get(sourceId)
+		if (!state || !desired || desired.size === 0) return
+		const values: Partial<Record<DesiredField, unknown>> = {}
+		const record = state as unknown as Record<string, unknown>
+		for (const field of desired.keys())
+			values[field] = structuredClone(record[field])
+		const tuned = this.tunedSinceStart.get(sourceId)
+		let byKey = this.tuningStash.get(sourceId)
+		if (!byKey) {
+			byKey = new Map()
+			this.tuningStash.set(sourceId, byKey)
+		}
+		byKey.delete(owner.key)
+		byKey.set(owner.key, {
+			identity: { ...owner },
+			desired: new Map(desired),
+			values,
+			tuned: tuned ? new Map(tuned) : undefined,
+		})
+		while (byKey.size > RECEIVER_TUNING_STASH_MAX) {
+			const oldest = byKey.keys().next().value
+			if (oldest === undefined) break
+			byKey.delete(oldest)
+		}
+	}
+
+	/**
+	 * Lane RS, at a connection's first sync under the restore policy: the accepted tuning is
+	 * replayed only to the receiver it was accepted on. Same receiver (same key, or a unit owner
+	 * whose model matches a header-only identity): replayed as before. Another receiver: the
+	 * tuning is kept aside under its receiver, the state returns to the configured baseline (gain
+	 * included), and that receiver's own earlier tuning, if any, comes back to be replayed.
+	 * Unknown: nothing is replayed. True when the state changed.
+	 */
+	private gateReceiver(sourceId: string, state: TunerState): boolean {
+		const cur = this.config.receiverIdentity?.(sourceId)
+		if (!cur) return false
+		this.gatedConnections.add(sourceId)
+		const owner = this.tuningOwner.get(sourceId)
+		const desired = this.desiredFields.get(sourceId)
+		const has = desired !== undefined && desired.size > 0
+		const sameModel = (a: ReceiverIdentity, b: ReceiverIdentity) =>
+			a.tunerType !== undefined &&
+			a.tunerType === b.tunerType &&
+			a.gainCount === b.gainCount
+		if (cur.strength !== "unknown" && owner === undefined) {
+			this.tuningOwner.set(sourceId, cur)
+			this.tuningRestores.set(sourceId, {
+				restored: has,
+				reason: has
+					? "accepted before the first connection"
+					: "nothing to restore",
+			})
+			return false
+		}
+		if (
+			owner !== undefined &&
+			cur.strength !== "unknown" &&
+			(owner.key === cur.key ||
+				(cur.strength === "model" &&
+					owner.strength === "unit" &&
+					sameModel(owner, cur)) ||
+				(owner.strength === "model" &&
+					cur.strength === "unit" &&
+					sameModel(owner, cur)))
+		) {
+			// A model owner is weak: the first unit of that model to answer takes it over.
+			if (owner.strength === "model" && cur.strength === "unit")
+				this.tuningOwner.set(sourceId, cur)
+			this.tuningRestores.set(sourceId, {
+				restored: has,
+				reason: !has
+					? "nothing to restore"
+					: owner.key === cur.key
+						? "same receiver"
+						: "same model; the sdr-host confirms the unit",
+			})
+			return false
+		}
+		// Another receiver, or an unknown one: nothing of the previous one is applied.
+		if (owner) this.stashTuning(sourceId, owner)
+		this.desiredFields.delete(sourceId)
+		this.inferredFields.delete(sourceId)
+		this.ignoredRelayFields.delete(sourceId)
+		this.unverifiedFields.delete(sourceId)
+		this.tunedSinceStart.delete(sourceId)
+		this.applyBaselineFields(state, this.baselineCaps.get(sourceId))
+		if (cur.strength === "unknown") {
+			this.tuningOwner.delete(sourceId)
+			this.tuningRestores.set(sourceId, {
+				restored: false,
+				reason: "receiver unknown: nothing restored",
+			})
+			return true
+		}
+		const byKey = this.tuningStash.get(sourceId)
+		let own = byKey?.get(cur.key)
+		if (!own && byKey && cur.strength === "model") {
+			const matches = [...byKey.values()].filter(
+				s => s.identity.strength === "unit" && sameModel(s.identity, cur),
+			)
+			if (matches.length === 1) own = matches[0]
+		}
+		if (own && byKey) {
+			byKey.delete(own.identity.key)
+			this.desiredFields.set(sourceId, new Map(own.desired))
+			const record = state as unknown as Record<string, unknown>
+			for (const [field, value] of Object.entries(own.values))
+				record[field] = structuredClone(value)
+			if (own.tuned) this.tunedSinceStart.set(sourceId, new Map(own.tuned))
+			this.tuningOwner.set(sourceId, own.identity)
+			this.tuningRestores.set(sourceId, {
+				restored: true,
+				reason:
+					own.identity.key === cur.key
+						? "this receiver's tuning from earlier"
+						: "this model's unit tuning from earlier; the sdr-host confirms the unit",
+			})
+		} else {
+			this.tuningOwner.set(sourceId, cur)
+			this.tuningRestores.set(sourceId, {
+				restored: false,
+				reason: "another receiver: configured tuning",
+			})
+		}
+		this.log.info(
+			{ sourceId, from: owner?.key ?? "none", to: cur.key },
+			"Receiver changed: the previous receiver's accepted tuning is kept aside",
+		)
+		return true
 	}
 
 	bandGainSettings(): BandGainSettingsService | null {
@@ -909,9 +1179,35 @@ export class TunerController extends EventEmitter {
 	private saveOperatorGains(required?: string): Promise<boolean> {
 		if (this.bandGain === null || this.config.lostOwnership?.() === true)
 			return Promise.resolve(false)
-		return this.bandGain.saveOperatorGains(
-			this.operatorGainBeforeBand,
-			required,
+		const records: SavedOperatorGainRecord[] = []
+		for (const [sourceId, byKey] of this.gainStash)
+			for (const [key, saved] of byKey)
+				records.push(
+					key === ""
+						? { sourceId, saved }
+						: { sourceId, receiverKey: key, saved },
+				)
+		for (const [sourceId, saved] of this.operatorGainBeforeBand) {
+			if (this.config.receiverTracked?.(sourceId) !== true) {
+				records.push({ sourceId, saved })
+				continue
+			}
+			// Lane RS: an unknown receiver's gain is never written under any key (the save fails).
+			const key = this.gainOwner.get(sourceId)
+			if (typeof key === "string")
+				records.push({ sourceId, receiverKey: key, saved })
+		}
+		if (required === undefined)
+			return this.bandGain.saveOperatorGainRecords(records)
+		const tracked = this.config.receiverTracked?.(required) === true
+		const owner = this.gainOwner.get(required)
+		if (tracked && typeof owner !== "string") {
+			void this.bandGain.saveOperatorGainRecords(records)
+			return Promise.resolve(false)
+		}
+		return this.bandGain.saveOperatorGainRecords(
+			records,
+			r => r.sourceId === required && (!tracked || r.receiverKey === owner),
 		)
 	}
 
@@ -1202,14 +1498,28 @@ export class TunerController extends EventEmitter {
 	/**
 	 * The last frequency/sampleRate frame each source saw since its start (or its last reset
 	 * reconnect), written by this core or a relay client: one entry per field, so bounded by the
-	 * sources. `reassert` when this core wrote it unaccepted: a reconnect forgets it
-	 * (forgetInferredTuning) and nothing replays it, so the connect write puts it back. Any entry
-	 * means the source was tuned, so the connect write never sends a config value over it.
+	 * sources. `reassert` when this core wrote it unaccepted (a test-mode style write; production
+	 * scanner hops are accepted and the restore replays them): a reconnect forgets it
+	 * (forgetInferredTuning) and nothing replays it, so the connect write puts it back. An entry
+	 * means that field was tuned, so the connect write never sends a config value over it; a
+	 * field without an entry still gets its declared value (decided per field).
 	 */
 	private tunedSinceStart: Map<
 		string,
 		Map<"frequency" | "sampleRate", { value: number; reassert: boolean }>
 	> = new Map()
+	/** Lane RS: the receiver the accepted tuning of each source belongs to. */
+	private tuningOwner: Map<string, ReceiverIdentity> = new Map()
+	/** Lane RS: other receivers' accepted tuning per source, by receiver key (bounded). */
+	private tuningStash: Map<string, Map<string, ReceiverTuningStash>> = new Map()
+	private tuningRestores: Map<string, ReceiverTuningRestore> = new Map()
+	/** Lane RS: sources whose current connection already went through the receiver gate. */
+	private gatedConnections: Set<string> = new Set()
+	/** Lane RS: the receiver key the active pre-band gain of a tracked source belongs to. */
+	private gainOwner: Map<string, string | null> = new Map()
+	/** Lane RS: pre-band gains of other receivers (key "" = from before namespacing). */
+	private gainStash: Map<string, Map<string, SavedOperatorGain | null>> =
+		new Map()
 
 	constructor(
 		logger: Logger,
@@ -1364,6 +1674,8 @@ export class TunerController extends EventEmitter {
 	 */
 	noteSourceConnected(sourceId: string): void {
 		this.configWriteDue.add(sourceId)
+		// Lane RS: the receiver gate runs again at this connection's first payload.
+		this.gatedConnections.delete(sourceId)
 		// Proof is per connection: nothing is written on the new one yet.
 		const tuning = this.connectTuningWritten.delete(sourceId)
 		if (this.configProvenFields.delete(sourceId) || tuning)
@@ -2607,7 +2919,7 @@ export class TunerController extends EventEmitter {
 		// The pause is over either way. Unverified fields stay so until written (or a reset).
 		const pausedAt = this.pausedAtSeq.get(sourceId)
 		this.pausedAtSeq.delete(sourceId)
-		const desired = this.desiredFields.get(sourceId)
+		let desired = this.desiredFields.get(sourceId)
 		// A new connection: nothing is written on it yet (WG9 req 3.2).
 		this.connectionTuningWrites.delete(sourceId)
 		this.rateProvedOnConnection.delete(sourceId)
@@ -2632,6 +2944,10 @@ export class TunerController extends EventEmitter {
 			this.plainResumeHold.delete(sourceId)
 			this.forgetMeasuredRate(sourceId)
 		}
+		// Lane RS: the accepted tuning is replayed only to the receiver it was accepted on.
+		const gated =
+			policy === "restore" ? this.gateReceiver(sourceId, state) : false
+		if (gated) desired = this.desiredFields.get(sourceId)
 
 		if (policy === "reset") {
 			const reset = desired !== undefined && desired.size > 0
@@ -2678,7 +2994,8 @@ export class TunerController extends EventEmitter {
 		// reconnect the receiver may be elsewhere: drop its proof and, unless an accepted
 		// value is replayed below, return it to the baseline (WG5 R2). A restore resume does
 		// the same: in production only test mode is written unaccepted (setTestMode).
-		const forgotTuning = this.forgetInferredTuning(sourceId, state, desired)
+		const forgotTuning =
+			this.forgetInferredTuning(sourceId, state, desired) || gated
 
 		// WG11 req 4.2, 4.3: configured fields not held by the operator, before the
 		// restore; a failed configured write stops the restore too (today's failure).
@@ -3106,11 +3423,14 @@ export class TunerController extends EventEmitter {
 	 * On a connection's first sync, writes the sample rate and then the frequency when they are
 	 * declared only, so the core never believes a tuning it did not set (a shared rtlmux keeps the
 	 * last client's). It asserts the core's own tuning, never a config value over another one:
-	 * - nothing tuned the source since its start (tunedSinceStart): the declared value (config or
-	 *   caps baseline), origin `config`;
-	 * - else a field this core last wrote unaccepted (a scanner or job hop the reconnect forgot):
-	 *   that value again, origin `replay`, and the state holds it again;
-	 * - else (another field was tuned, a relay client tuned it): nothing, it stays declared only.
+	 * Decided per field (sampleRate, frequency):
+	 * - nothing tuned that field since the start (no tunedSinceStart entry for it): the declared
+	 *   value (config or caps baseline), origin `config`;
+	 * - else the field was last written unaccepted by this core (a test-mode style write; production
+	 *   scanner hops are accepted and the restore replays them): that value again, origin
+	 *   `replay`, and the state holds it again;
+	 * - else (a relay client tuned it, noted before its accept or ignore): nothing, it stays
+	 *   declared only.
 	 * Accepted fields are not declared only: the restore replays them. Each written value becomes
 	 * proven for this connection (fieldProof). Writes nothing outside internal control (a relay
 	 * client holds the tuner), after a plain resume (plainResumeHold: never fight SDR++), once
@@ -3129,7 +3449,6 @@ export class TunerController extends EventEmitter {
 			return { attempted: false, commands: [] }
 		const declared = this.fieldProof(sourceId).declaredOnlyFields
 		const tuned = this.tunedSinceStart.get(sourceId)
-		const untouched = tuned === undefined || tuned.size === 0
 		const frames: Array<{
 			cmd: number
 			value: number
@@ -3140,9 +3459,10 @@ export class TunerController extends EventEmitter {
 		for (const field of ["sampleRate", "frequency"] as const) {
 			if (!declared.includes(field)) continue
 			const own = tuned?.get(field)
+			const untouched = own === undefined
 			const value = untouched
 				? state[field]
-				: own?.reassert === true
+				: own.reassert
 					? own.value
 					: undefined
 			if (value === undefined) {
@@ -3172,7 +3492,7 @@ export class TunerController extends EventEmitter {
 		if (kept.length > 0)
 			this.log.info(
 				{ sourceId, fields: kept },
-				"Left the declared tuning unwritten on connect: the source was tuned since start, so the config value could undo that tuning",
+				"Left the declared tuning unwritten on connect: the field was tuned since start, so the config value could undo that tuning",
 			)
 		if (frames.length === 0) return { attempted: false, commands: [] }
 

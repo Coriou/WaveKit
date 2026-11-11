@@ -204,6 +204,8 @@ import {
 } from "./decoders/builtin/lora-meshtastic.js"
 import { ContainerMonitor } from "./core/container-monitor.js"
 import { SdrHostPoller, type SdrHostConfig } from "./core/sdr-host-poller.js"
+import { ReceiverIdentityTracker } from "./core/receiver-identity-tracker.js"
+import { ReceiverLearnedState } from "./core/receiver-identity-state.js"
 import {
 	EndpointSelector,
 	type EndpointSelectionTarget,
@@ -1306,6 +1308,39 @@ async function main(): Promise<void> {
 			await disposeReceiverAfterApi()
 			await sourceManager.disconnectAll()
 		})
+		// Lane RS: receiver identity and per-receiver learned state (rtl_tcp U8_IQ sources).
+		const receiverTracked = (id: string): boolean => {
+			const s = config.sources.find(source => source.id === id)
+			return s?.type === "rtl_tcp" && s.caps.format === "U8_IQ"
+		}
+		let identityPoller: SdrHostPoller | undefined
+		const receiverIdentity = new ReceiverIdentityTracker({
+			sources: sourceManager,
+			logger,
+			// The configured sdr-host describes the primary endpoint only, never a candidate.
+			sdrHostApplies: id =>
+				identityPoller?.getStatus(id) !== undefined &&
+				(sourceManager.getSelectedCandidate(id)?.index ?? 0) === 0,
+			sdrHostWaitMs:
+				config.resources.sdrHostPoller.pollIntervalMs +
+				config.resources.sdrHostPoller.timeoutMs,
+		})
+		own(100, () => receiverIdentity.stop())
+		const receiverState = new ReceiverLearnedState({
+			stateDir: config.stateDir,
+			logger,
+			tracked: receiverTracked,
+			onBound: (id, binding) =>
+				tunerController.noteReceiverBound(
+					id,
+					binding,
+					receiverIdentity.current(id),
+				),
+		})
+		await receiverState.load()
+		receiverIdentity.on("identity", (id, identity, previous) => {
+			void receiverState.onIdentity(id, identity, previous)
+		})
 		const composed = composeLinkBurst({ log: logger })
 		own(20, composed.dispose)
 		const fanoutManager = new FanoutManager(logger)
@@ -1346,6 +1381,30 @@ async function main(): Promise<void> {
 			reconnectPolicy: config.tuner.reconnectPolicy,
 			writeDeclaredTuningOnConnect: config.tuner.writeDeclaredTuningOnConnect,
 			lostOwnership,
+			receiverIdentity: id =>
+				receiverTracked(id) ? receiverIdentity.provisional(id) : undefined,
+			receiverTracked,
+		})
+		sourceManager.setReceiverStatusSource(id => {
+			const view = receiverState.view(id)
+			if (!view) return undefined
+			const candidate = sourceManager.getSelectedCandidate(id)
+			return {
+				key: view.key,
+				strength: view.strength,
+				...(view.tunerType !== undefined ? { tunerType: view.tunerType } : {}),
+				...(view.serial !== undefined ? { serial: view.serial } : {}),
+				...(candidate?.label !== undefined
+					? { candidateLabel: candidate.label }
+					: {}),
+				selectedBecause: candidate?.selectedBecause ?? "configured",
+				learnedStateNamespace: view.learnedStateNamespace,
+				namespaceState: view.namespaceState,
+				restoredTuning: tunerController.receiverTuningRestore(id) ?? {
+					restored: false,
+					reason: "not connected yet",
+				},
+			}
 		})
 		// Per-band gain: tuner.bandGain, replaced by <stateDir>/tuner-band-gain.json once PUT.
 		const bandGain = new BandGainSettingsService({
@@ -2013,6 +2072,8 @@ async function main(): Promise<void> {
 			scannerConstructionStarted = true
 			scanner = new ScannerService({
 				settings: scannerSettings,
+				learnedState: (store, gated, writable) =>
+					receiverState.attach(store, gated, writable),
 				...(iqCapture ? { iqCapture } : {}),
 				// Stage 1: no coverage predicate (no sample-arrival timestamps yet), so every
 				// gate-passed track is captured within the existing budget.
@@ -2096,6 +2157,7 @@ async function main(): Promise<void> {
 				cpuMeter: efficiencyCpu,
 			})
 			scannerConstructionSettled = true
+			receiverState.setSpectrum(scanner.spectrum)
 			scannerConstruction.completeConstruction({ ok: true })
 			await iqCapture?.start()
 			await scanner.start()
@@ -2214,6 +2276,10 @@ async function main(): Promise<void> {
 					pollIntervalMs: config.resources.sdrHostPoller.pollIntervalMs,
 					timeoutMs: config.resources.sdrHostPoller.timeoutMs,
 				})
+				identityPoller = sdrHostPoller
+				sdrHostPoller.on("receiver-identity", (sourceId, facts) =>
+					receiverIdentity.noteSdrHostFacts(sourceId, facts),
+				)
 				log.info(
 					{
 						count: sdrHostConfigs.length,

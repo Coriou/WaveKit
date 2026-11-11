@@ -797,3 +797,52 @@ describe("SpectrumEngine fatal host generations (review F5)", () => {
 		expect(errors).toHaveLength(2)
 	})
 })
+
+describe("SpectrumEngine.swapLearnedState (lane RS)", () => {
+	const learned = (dbfs: number): EngineState => ({
+		version: 1,
+		absoluteFloors: [{ key: "2048000:g:4096", dbfs }],
+		spurs: [],
+		kByRange: [],
+	})
+
+	it("recreates a running pipeline with another receiver's state, or fresh, and returns the replaced one", async () => {
+		const configs: Array<EngineState | undefined> = []
+		const { engine } = makeEngine({
+			persistedEngine: learned(-91),
+			createHost: (cfg, handlers) => {
+				configs.push(cfg.persistedEngine)
+				return new RecordingHost(handlers)
+			},
+		})
+		await engine.start()
+		expect(configs).toEqual([learned(-91)])
+		// The running host's export is what the swap hands back for the previous receiver.
+		await expect(engine.swapLearnedState(learned(-70))).resolves.toEqual(
+			EMPTY_STATE,
+		)
+		expect(configs.at(-1)).toEqual(learned(-70))
+		await engine.swapLearnedState(null)
+		expect(configs.at(-1)).toBeUndefined()
+		expect(configs).toHaveLength(3)
+		await engine.stop()
+	})
+
+	it("a stopped engine starts its next pipeline from the swapped state", async () => {
+		const configs: Array<EngineState | undefined> = []
+		const { engine } = makeEngine({
+			persistedEngine: learned(-91),
+			createHost: (cfg, handlers) => {
+				configs.push(cfg.persistedEngine)
+				return new RecordingHost(handlers)
+			},
+		})
+		await expect(engine.swapLearnedState(learned(-60))).resolves.toEqual(
+			learned(-91),
+		)
+		expect(configs).toEqual([])
+		await engine.start()
+		expect(configs).toEqual([learned(-60)])
+		await engine.stop()
+	})
+})

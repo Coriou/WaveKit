@@ -173,6 +173,15 @@ function sourceRows(
 			tuningUnverified: unverified.has(status.id),
 			...(verdict !== "ok" ? { verdict } : {}),
 			...(passive !== null ? { passive } : {}),
+			...(status.receiver
+				? {
+						receiver: {
+							strength: status.receiver.strength,
+							learnedState: status.receiver.namespaceState,
+							tuningRestored: status.receiver.restoredTuning.restored,
+						},
+					}
+				: {}),
 		}
 	})
 }

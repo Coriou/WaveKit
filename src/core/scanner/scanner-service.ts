@@ -251,6 +251,7 @@ import {
 	type SpectrumEngine,
 } from "../spectrum/spectrum-engine.js"
 import { SpectrumService } from "../spectrum/spectrum-service.js"
+import type { SpectrumPersistence } from "../spectrum/spectrum-service.js"
 import {
 	DiscoveryStore,
 	estimateFrequencyError,
@@ -493,6 +494,15 @@ export interface ScannerServiceDeps {
 	 * writes no state, while its close still ends sockets, children and listeners.
 	 */
 	readonly lostOwnership?: () => boolean
+	/**
+	 * Lane RS: namespaces learned engine state per receiver (ReceiverLearnedState.attach). Gets
+	 * the store, the gated persistence used without it, and the same write gate.
+	 */
+	readonly learnedState?: (
+		store: ScannerPersistence,
+		gated: SpectrumPersistence,
+		writable: () => boolean,
+	) => SpectrumPersistence
 	/** WG11 req 6: IQ capture on detection and replay; absent keeps today's behaviour. */
 	readonly analogTrial?: AnalogTrialRunner
 	readonly iqCapture?: ScannerIqCapture
@@ -1433,7 +1443,7 @@ export class ScannerService extends EventEmitter {
 				settings: () => this.settings(),
 				tuning: sourceId => this.engineTuning(sourceId),
 				// Engine state keeps the config-load gate (Task 35): never written when jobs and settings could not be read.
-				persistence: {
+				persistence: this.learnedPersistence(deps, {
 					writeEngine: (sourceId, state) =>
 						this.writeEngineState(sourceId, state),
 					loadEngine: sourceId => this.persistence.loadEngine(sourceId),
@@ -1443,7 +1453,7 @@ export class ScannerService extends EventEmitter {
 							? this.persistence.writeOccupancy(sourceId, state)
 							: Promise.resolve(),
 					loadOccupancy: sourceId => this.persistence.loadOccupancy(sourceId),
-				},
+				}),
 				logger: deps.logger,
 				now: this.now,
 				engineHost: deps.engineHost ?? "thread",
@@ -9226,6 +9236,20 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/** Engine state is never written when the persisted state could not be read at all. */
+	/** Lane RS: the per-receiver wrapper when wired, else the gated persistence as before. */
+	private learnedPersistence(
+		deps: ScannerServiceDeps,
+		gated: SpectrumPersistence,
+	): SpectrumPersistence {
+		return deps.learnedState
+			? deps.learnedState(
+					this.persistence,
+					gated,
+					() => this.configLoaded && !this.ownershipLost(),
+				)
+			: gated
+	}
+
 	private async writeEngineState(
 		sourceId: string,
 		state: EngineState,

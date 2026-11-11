@@ -914,6 +914,26 @@ describe("pre-migration backup of scanner state", () => {
 	})
 })
 
+describe("pre-migration backup: read-only copies", () => {
+	it("the default fsync opens a copy read-only, so a read-only state file is still backed up", async () => {
+		await seedState()
+		await writeMarker({ fileVersion: 1, heldJournalFormat: 2, revision: 1 })
+		// copyFile keeps the mode: the copy is read-only too, which an "r+" open refuses.
+		await chmod(join(dir, "jobs.json"), 0o444)
+		try {
+			const result = await ensurePreMigrationBackup({
+				dir,
+				logger,
+				now: () => NOW,
+				statfs: roomy,
+			})
+			expect(result).toMatchObject({ kind: "taken" })
+		} finally {
+			await chmod(join(dir, "jobs.json"), 0o644)
+		}
+	})
+})
+
 describe("pre-migration backup: link fallbacks and durability", () => {
 	const refuseLinks = () =>
 		Promise.reject(Object.assign(new Error("not permitted"), { code: "EPERM" }))
@@ -936,7 +956,13 @@ describe("pre-migration backup: link fallbacks and durability", () => {
 			statfs: space(copied + audio + BACKUP_MIN_FREE_BYTES - 1),
 			link: refuseLinks,
 		})
-		expect(short).toMatchObject({ kind: "skipped", reason: "low-disk" })
+		// The needed bytes include the fallback copy that tripped the check (never reserved).
+		expect(short).toMatchObject({
+			kind: "skipped",
+			reason: "low-disk",
+			neededBytes: copied + audio,
+			freeBytes: copied + audio + BACKUP_MIN_FREE_BYTES - 1,
+		})
 		expect(await backups()).toEqual([])
 		await writeMarker(old)
 		const exact = await ensurePreMigrationBackup({

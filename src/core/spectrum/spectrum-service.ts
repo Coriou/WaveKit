@@ -502,6 +502,50 @@ export class SpectrumService extends EventEmitter {
 		await this.persistOccupancy()
 	}
 
+	/**
+	 * Lane RS: a source's learned state now (the running engine's, and its occupancy history),
+	 * for persisting under the receiver it was learned on. Nulls when there is none.
+	 */
+	async exportLearnedState(sourceId: string): Promise<{
+		engine: EngineState | null
+		occupancy: OccupancyState | null
+	}> {
+		const entry = this.entries.get(sourceId)
+		const engine = entry
+			? await entry.engine.exportState().catch(() => null)
+			: null
+		const occupancy = this.histories.get(sourceId)?.exportState() ?? null
+		return { engine, occupancy }
+	}
+
+	/**
+	 * Lane RS: replaces a source's learned state with another receiver's (null: fresh). A running
+	 * engine recreates its pipeline with it; an engine opened later loads from persistence. The
+	 * occupancy history is replaced (validated; another bucket size starts fresh).
+	 */
+	async replaceLearnedState(
+		sourceId: string,
+		next: { engine: EngineState | null; occupancy: OccupancyState | null },
+	): Promise<void> {
+		const history = new OccupancyHistory()
+		if (next.occupancy !== null) {
+			const parsed = OccupancyStateSchema.safeParse(next.occupancy)
+			if (!parsed.success || !history.importState(parsed.data))
+				this.log.info(
+					{ sourceId },
+					"Receiver occupancy history unusable; starting fresh",
+				)
+		}
+		this.histories.set(sourceId, history)
+		const entry = this.entries.get(sourceId)
+		if (entry)
+			await entry.engine
+				.swapLearnedState(next.engine)
+				.catch((err: unknown) =>
+					this.log.warn({ err, sourceId }, "Swapping the learned state failed"),
+				)
+	}
+
 	/** IQ sources the scanner can read, except permanently removed ones. */
 	eligibleSources(): string[] {
 		return this.deps.sourceConfigs

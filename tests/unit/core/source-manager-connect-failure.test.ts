@@ -323,6 +323,59 @@ describe("SourceManager connect failure: peer close and pause", () => {
 	)
 
 	it(
+		"a peer close after a healthy session (payload seen) starts no record",
+		{ timeout: 20_000 },
+		async () => {
+			const manager = new SourceManager(log)
+			manager.on("error", () => {})
+			vi.spyOn(Math, "random").mockReturnValue(0)
+			const sockets = new Set<net.Socket>()
+			let accepts = 0
+			// The header and a payload, then (first connection only) a clean FIN.
+			const server = net.createServer(socket => {
+				sockets.add(socket)
+				socket.on("error", () => {})
+				accepts += 1
+				const first = accepts === 1
+				socket.write(
+					Buffer.concat([
+						Buffer.from("RTL0\0\0\0\x05\0\0\0\x1d", "binary"),
+						Buffer.alloc(512, 127),
+					]),
+					() => {
+						if (first) setTimeout(() => socket.end(), 50)
+					},
+				)
+			})
+			server.listen(0, "127.0.0.1")
+			await once(server, "listening")
+			const port = (server.address() as net.AddressInfo).port
+			cleanup.push(async () => {
+				await manager.disconnectAll()
+				for (const socket of sockets) socket.destroy()
+				await new Promise<void>(resolve => server.close(() => resolve()))
+			})
+			const payload = once(manager, "payload-started")
+			const lost = once(manager, "disconnected")
+			await manager.connect({
+				id: "rtl",
+				type: "rtl_tcp",
+				host: "127.0.0.1",
+				port,
+				loop: false,
+				playbackSpeed: 1,
+				stallTimeoutMs: 0,
+				caps: IQ_CAPS,
+			})
+			await payload
+			await lost
+			// Disconnected after a healthy session: a disconnect, not a failed connect.
+			expect(manager.getStatus("rtl")?.connected).toBe(false)
+			expect(manager.getStatus("rtl")?.connectFailure).toBeUndefined()
+		},
+	)
+
+	it(
 		"a pause clears the record and its own clean close counts nothing",
 		{ timeout: 20_000 },
 		async () => {

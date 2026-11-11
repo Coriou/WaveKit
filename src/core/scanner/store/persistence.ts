@@ -88,6 +88,7 @@ import type {
 	SnapshotWorkerStatus,
 } from "./snapshot-writer.js"
 import { OccupancyStateSchema } from "../../spectrum/occupancy.js"
+import { pathSegment } from "../../receiver-identity.js"
 import type { OccupancyState } from "../../spectrum/occupancy.js"
 import {
 	DiscoverySchema,
@@ -110,6 +111,15 @@ const JOURNAL_DIR = "journal"
 const ENGINE_DIR = "engine"
 /** A subdirectory, so readEngines (direct `engine/*.json` only) never sees these files. */
 const OCCUPANCY_DIR = join(ENGINE_DIR, "occupancy")
+/**
+ * Lane RS: learned state per receiver, `engine/receivers/<source>/<receiver key>/` holding
+ * `engine.json` and `occupancy.json`. A directory without a `.json` name, so readEngines
+ * (direct `engine/*.json` only) never sees it. Both segments come from pathSegment (never `.`,
+ * `..` or a separator).
+ */
+const RECEIVERS_DIR = join(ENGINE_DIR, "receivers")
+const NS_ENGINE_FILE = "engine.json"
+const NS_OCCUPANCY_FILE = "occupancy.json"
 const JOURNAL_NAME = /^observations-(\d{8})\.jsonl$/
 const DAY_MS = 86_400_000
 /**
@@ -1442,6 +1452,99 @@ export class ScannerPersistence {
 	/** One source's engine state; null when missing or invalid (logged). Does not need load(). */
 	loadEngine(sourceId: string): Promise<EngineState | null> {
 		return this.readEngineFile(this.engineFile(sourceId))
+	}
+
+	// === Lane RS: learned state per receiver ===
+
+	/** `engine/receivers/<source>/<receiver key>` relative to the scanner state directory. */
+	receiverNamespacePath(sourceId: string, receiverKey: string): string {
+		return join(RECEIVERS_DIR, pathSegment(sourceId), pathSegment(receiverKey))
+	}
+
+	writeEngineIn(
+		sourceId: string,
+		receiverKey: string,
+		s: EngineState,
+	): Promise<void> {
+		const text = JSON.stringify(s)
+		const file = this.namespaceFile(sourceId, receiverKey, NS_ENGINE_FILE)
+		return this.enqueue(() => atomicWrite(file, text))
+	}
+
+	loadEngineIn(
+		sourceId: string,
+		receiverKey: string,
+	): Promise<EngineState | null> {
+		return this.readEngineFile(
+			this.namespaceFile(sourceId, receiverKey, NS_ENGINE_FILE),
+		)
+	}
+
+	writeOccupancyIn(
+		sourceId: string,
+		receiverKey: string,
+		s: OccupancyState,
+	): Promise<void> {
+		const text = JSON.stringify(s)
+		const file = this.namespaceFile(sourceId, receiverKey, NS_OCCUPANCY_FILE)
+		return this.enqueue(() => atomicWrite(file, text))
+	}
+
+	async loadOccupancyIn(
+		sourceId: string,
+		receiverKey: string,
+	): Promise<OccupancyState | null> {
+		const file = this.namespaceFile(sourceId, receiverKey, NS_OCCUPANCY_FILE)
+		const read = await readJson(file)
+		if (read.kind === "missing") return null
+		const parsed =
+			read.kind === "ok" ? OccupancyStateSchema.safeParse(read.value) : null
+		if (parsed === null || !parsed.success) {
+			this.log.warn({ file }, "Ignoring an invalid occupancy history file")
+			return null
+		}
+		return parsed.data
+	}
+
+	/**
+	 * Moves a source's files from before receiver namespacing (`engine/<source>.json`,
+	 * `engine/occupancy/<source>.json`) into a receiver's namespace, unless it already has its
+	 * own. Serialised with the writes; resolves true when a file moved.
+	 */
+	adoptLegacyInto(sourceId: string, receiverKey: string): Promise<boolean> {
+		return this.enqueue(async () => {
+			let moved = false
+			const pairs: Array<[string, string]> = [
+				[
+					this.engineFile(sourceId),
+					this.namespaceFile(sourceId, receiverKey, NS_ENGINE_FILE),
+				],
+				[
+					this.occupancyFile(sourceId),
+					this.namespaceFile(sourceId, receiverKey, NS_OCCUPANCY_FILE),
+				],
+			]
+			for (const [from, to] of pairs) {
+				if ((await readJson(from)).kind === "missing") continue
+				if ((await readJson(to)).kind !== "missing") continue
+				await mkdir(join(to, ".."), { recursive: true })
+				await rename(from, to)
+				moved = true
+			}
+			return moved
+		})
+	}
+
+	private namespaceFile(
+		sourceId: string,
+		receiverKey: string,
+		name: string,
+	): string {
+		return join(
+			this.root,
+			this.receiverNamespacePath(sourceId, receiverKey),
+			name,
+		)
 	}
 
 	pruneJournal(caps: {

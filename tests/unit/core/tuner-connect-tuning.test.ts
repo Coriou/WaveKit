@@ -217,7 +217,7 @@ it("a plain resume writes no tuning (never fight another client)", async () => {
 	expect(tuningTrustOf(controller.getState("rtl"))).toBe("unverified")
 })
 
-it("an accepted frequency is replayed, not written twice, and the declared rate is left unwritten", async () => {
+it("an accepted frequency is replayed, not written twice, and the untuned declared rate is written again", async () => {
 	const { rtl, manager, controller } = await setup()
 	await rtl.framesOn(0, 2)
 	await controller.setFrequency("rtl", 145_000_000)
@@ -232,9 +232,13 @@ it("an accepted frequency is replayed, not written twice, and the declared rate 
 	await payload
 	vi.useRealTimers()
 	await rtl.framesOn(1, 1)
-	// The source was tuned since start: the declared rate is not written over that tuning.
-	expect(tuningFrames(rtl.frames[1])).toEqual([[SET_FREQUENCY, 145_000_000]])
-	expect(controller.getState("rtl")?.declaredOnlyFields).toEqual(["sampleRate"])
+	// Decided per field: nothing tuned the rate, so its declared value is written again; the
+	// accepted frequency is replayed by the restore, once.
+	expect(tuningFrames(rtl.frames[1])).toEqual([
+		[SET_SAMPLE_RATE, 2_048_000],
+		[SET_FREQUENCY, 145_000_000],
+	])
+	expect(controller.getState("rtl")?.declaredOnlyFields).toBeUndefined()
 })
 
 it("the reset policy writes no tuning: centre and rate stay declared only", async () => {
@@ -385,14 +389,16 @@ describe("a held lease across a socket flap (the core's own tuning, never config
 		const sent = sentLog(controller)
 		await flap(rtl, manager)
 		await rtl.framesOn(1, 1)
-		expect(tuningFrames(rtl.frames[1])).toEqual([[SET_FREQUENCY, JOB_CENTRE]])
+		expect(tuningFrames(rtl.frames[1])).toEqual([
+			[SET_SAMPLE_RATE, RATE],
+			[SET_FREQUENCY, JOB_CENTRE],
+		])
 		expect(sent).not.toContainEqual(["set-frequency", CENTRE, "config"])
+		expect(sent).toContainEqual(["set-sample-rate", RATE, "config"])
 		expect(controller.getState("rtl")?.frequency).toBe(JOB_CENTRE)
 		expect(manager.getCaps("rtl")?.centerFreq).toBe(JOB_CENTRE)
-		// The rate was tuned by nobody but the source was: it stays declared only, unwritten.
-		expect(controller.getState("rtl")?.declaredOnlyFields).toEqual([
-			"sampleRate",
-		])
+		// Decided per field: nobody tuned the rate, so its declared value is written again.
+		expect(controller.getState("rtl")?.declaredOnlyFields).toBeUndefined()
 		expect(arbiter.holder("rtl")).toBe(lease)
 		expect(lost).toEqual([])
 	})
@@ -410,19 +416,26 @@ describe("a held lease across a socket flap (the core's own tuning, never config
 		const sent = sentLog(controller)
 		await flap(rtl, manager)
 		await rtl.framesOn(1, 1)
-		expect(tuningFrames(rtl.frames[1])).toEqual([[SET_FREQUENCY, JOB_CENTRE]])
+		expect(tuningFrames(rtl.frames[1])).toEqual([
+			[SET_SAMPLE_RATE, RATE],
+			[SET_FREQUENCY, JOB_CENTRE],
+		])
 		expect(sent).toContainEqual(["set-frequency", JOB_CENTRE, "replay"])
+		expect(sent).toContainEqual(["set-sample-rate", RATE, "config"])
 		expect(sent).not.toContainEqual(["set-frequency", CENTRE, "config"])
 		const state = controller.getState("rtl")
 		expect(state?.frequency).toBe(JOB_CENTRE)
-		expect(state?.declaredOnlyFields).toEqual(["sampleRate"])
+		expect(state?.declaredOnlyFields).toBeUndefined()
 		expect(manager.getCaps("rtl")?.centerFreq).toBe(JOB_CENTRE)
 		expect(arbiter.holder("rtl")).toBe(lease)
 		expect(lost).toEqual([])
 		// Every later connection reasserts it too.
 		await flap(rtl, manager)
 		await rtl.framesOn(2, 1)
-		expect(tuningFrames(rtl.frames[2])).toEqual([[SET_FREQUENCY, JOB_CENTRE]])
+		expect(tuningFrames(rtl.frames[2])).toEqual([
+			[SET_SAMPLE_RATE, RATE],
+			[SET_FREQUENCY, JOB_CENTRE],
+		])
 	})
 
 	it("a relay client's tuning is never overwritten by the declared values", async () => {
@@ -432,10 +445,10 @@ describe("a held lease across a socket flap (the core's own tuning, never config
 		controller.applyExternalCommand("rtl", SET_SAMPLE_RATE, 5)
 		controller.setControlMode("rtl", "internal")
 		await flap(rtl, manager)
-		expect(tuningFrames(rtl.frames[1])).toEqual([])
-		expect(controller.getState("rtl")?.declaredOnlyFields).toEqual([
-			"frequency",
-		])
+		await rtl.framesOn(1, 1)
+		// The relay-tuned rate is never written over; the untuned frequency gets its declared value.
+		expect(tuningFrames(rtl.frames[1])).toEqual([[SET_FREQUENCY, CENTRE]])
+		expect(controller.getState("rtl")?.declaredOnlyFields).toBeUndefined()
 	})
 })
 
@@ -475,11 +488,12 @@ describe("frame sequence of a reconnect with a configured gain and a held job", 
 			[SET_FREQUENCY, JOB_CENTRE],
 			[SET_TEST_MODE, 0],
 		])
-		// Reconnect: the configured gain, the job's accepted centre replayed, TEST_MODE 0 from the
-		// arbiter. No declared rate or centre: the source was tuned since start (5 frames, 25 bytes).
+		// Reconnect: the untuned declared rate (decided per field), the configured gain, the job's
+		// accepted centre replayed, TEST_MODE 0 from the arbiter. No config centre (6 frames, 30 bytes).
 		await flap(rtl, manager)
-		await rtl.framesOn(1, 5)
+		await rtl.framesOn(1, 6)
 		expect(rtl.frames[1]).toEqual([
+			[SET_SAMPLE_RATE, RATE],
 			[SET_GAIN_MODE, 1],
 			[SET_GAIN, 496],
 			[SET_AGC_MODE, 0],

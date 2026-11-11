@@ -17,6 +17,10 @@ import { isDialableEndpoint } from "./endpoint-probe.js"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
 import type { SdrHostLinkFacts } from "./link-burst/contract.js"
 import type { SdrHostStatus } from "@wavekit/api-types"
+import {
+	parseSdrHostIdentity,
+	type SdrHostIdentityFacts,
+} from "./receiver-identity.js"
 
 // ============================================================================
 // Constants
@@ -147,6 +151,8 @@ export interface SdrHostPollerEvents {
 	) => void
 	error: (sourceId: string, error: Error) => void
 	recovered: (sourceId: string) => void
+	/** Lane RS: after each successful, unredirected poll, the validated identity fields. */
+	"receiver-identity": (sourceId: string, facts: SdrHostIdentityFacts) => void
 }
 
 export interface SdrHostPollerOptions {
@@ -346,7 +352,9 @@ export class SdrHostPoller extends EventEmitter {
 		}
 
 		try {
-			const { status, endpoints } = await this.fetchStatus(state.config)
+			const { status, endpoints, identity } = await this.fetchStatus(
+				state.config,
+			)
 			state.linkFacts = await this.fetchLinkFacts(state.config)
 
 			// Track recovery
@@ -361,6 +369,8 @@ export class SdrHostPoller extends EventEmitter {
 			this.emit("status", status)
 			if (this.pollers.get(sourceId) === state)
 				this.emit("receiver-endpoints", sourceId, endpoints)
+			if (this.pollers.get(sourceId) === state && identity !== null)
+				this.emit("receiver-identity", sourceId, identity)
 
 			// Schedule next poll at normal interval
 			this.scheduleNextPoll(sourceId, this.pollIntervalMs)
@@ -443,6 +453,7 @@ export class SdrHostPoller extends EventEmitter {
 	private async fetchStatus(config: SdrHostConfig): Promise<{
 		status: SdrHostStatus
 		endpoints: ReceiverEndpointsReport | null
+		identity: SdrHostIdentityFacts | null
 	}> {
 		const controller = new AbortController()
 		const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs)
@@ -619,6 +630,8 @@ export class SdrHostPoller extends EventEmitter {
 			return {
 				status,
 				endpoints: response.redirected ? null : parseReceiverEndpoints(body),
+				// Another server's answer never names this receiver.
+				identity: response.redirected ? null : parseSdrHostIdentity(body),
 			}
 		} finally {
 			clearTimeout(timeoutId)

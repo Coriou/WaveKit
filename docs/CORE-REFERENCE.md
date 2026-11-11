@@ -194,12 +194,14 @@ whole section until `<stateDir>/tuner-band-gain.json` is deleted.
 
 rtl_tcp cannot report its tuning, and a shared rtlmux keeps the last client's. So under
 `tuner.reconnectPolicy: restore` (the default), each new connection first writes the sample
-rate and then the centre that WaveKit holds but has not proven, before it replays what you set:
+rate and then the centre that WaveKit holds but has not proven, before it replays what you set.
+Each of the two is decided on its own:
 
-- nothing tuned the source since the core started: the configured values (`caps.sampleRate`,
-  `caps.centerFreq`);
-- a scanner job or another core write tuned it: that write again, never the configured value,
-  so a reconnect does not move a held job off its centre;
+- nothing tuned that value since the core started: the configured value (`caps.sampleRate` or
+  `caps.centerFreq`), even when the other one was tuned;
+- the core wrote it without accepting it (a test-mode style write that the restore does not
+  replay): that write again, never the configured value. Scanner hops are accepted, so the
+  restore replays them and a reconnect does not move a held job off its centre;
 - a relay client (SDR++) tuned it: nothing, the value stays unverified.
 
 Nothing is written under external control, after a plain resume of a paused feed, or under
@@ -443,6 +445,59 @@ WAVEKIT_TUNER_RELAY__PORT=1234
 
 `WAVEKIT_SOURCES_<index>_...` and `WAVEKIT_DECODERS_<index>_...` only change an entry that the
 YAML file already defines; they cannot add one. Startup fails if the index does not exist.
+
+### Several receivers for one source (`candidates`)
+
+An `rtl_tcp` source with `U8_IQ` IQ can list other endpoints to use when its own `host` and
+`port` do not answer, for example a USB dongle served on the Mac and a Pi receiver:
+
+```yaml
+sources:
+  - id: "rtl"
+    type: "rtl_tcp"
+    host: "<pi-address>" # tried first
+    port: 5555
+    caps: { kind: "iq", format: "U8_IQ", sampleRate: 2048000 }
+    candidates: # at most 8, tried in this order
+      - host: "<usb-host>"
+        port: 1234
+        label: "usb" # optional, printable ASCII, at most 48 characters
+```
+
+- The source tries `host`/`port`, then each candidate in order, with the usual reconnect backoff.
+  The first endpoint that sends a valid rtl_tcp header wins.
+- An endpoint that never sent a header is left after one failed attempt. Once one delivers, a
+  loss is retried 3 times (about 14 to 43 s with the backoff) before the next endpoint is tried,
+  so an rtlmux restart or a short network drop keeps the receiver.
+- WaveKit contacts only the endpoints you list. It never discovers or scans for others.
+  `sdrHost.endpointSelection` applies to the primary host only.
+- GET /api/sources shows the endpoint in use and why under `candidate` (see
+  [API.md](API.md#receiver-and-candidate-fields)).
+
+An existing entry can be overridden from the environment, in either form:
+`WAVEKIT_SOURCES_0_CANDIDATES_0_HOST=...` or `WAVEKIT_SOURCES__0__CANDIDATES__0__PORT=1234`.
+
+### Learned state per receiver
+
+The core learns things about a receiver: its spur map and noise floors, band occupancy, the gain
+you had before a band gain changed it, and the tuning you set. That state is kept per receiver,
+so a USB dongle's spurs or gain are never applied to the Pi receiver, or the other way round.
+
+- Identity comes from the sdr-host's `receiverId` (or its USB vendor, product and serial) when
+  the configured sdr-host describes the connected receiver, otherwise from the rtl_tcp header
+  (tuner model and gain count). WaveKit waits up to one poll interval plus the poll timeout (5 s by
+  default) for the sdr-host after a connection opens.
+- A receiver seen before gets its own state back. A new one starts fresh. A receiver known only
+  by its model shares state with every dongle of that model (the log says so). An unknown
+  receiver gets nothing learned and nothing is saved for it.
+- The tuning you set is replayed on a reconnect only to the receiver it was set on, gain
+  included. Another receiver gets the configured tuning.
+- On the first start after the upgrade, the first receiver identified on each source takes over
+  the state saved before (once).
+- Scanner discoveries and recordings are shared by every receiver.
+
+The log shows one line per change, for example
+`Receiver changed: model:5:29 -> sdrhost:<id>; learned state resumed`.
 
 ## RTL-SDR Setup
 

@@ -148,7 +148,124 @@ export interface SourceStatus {
 	feed?: SourceFeed
 	/** Why the last connection attempt failed; only while a network source is not connected. */
 	connectFailure?: SourceConnectFailure
+	/** The selected endpoint; only for rtl_tcp sources with `candidates`. Absent from older cores. */
+	candidate?: SourceCandidateStatus
+	/** Which receiver the source reaches and whose learned state applies. Absent from older cores. */
+	receiver?: SourceReceiverStatus
 }
+
+/**
+ * The endpoint a source with `candidates` uses (index 0 is the configured host/port, 1.. the
+ * candidates in config order).
+ */
+export interface SourceCandidateStatus {
+	index: number
+	/** Endpoints configured: the primary plus the candidates. */
+	count: number
+	/** The candidate's configured label (printable ASCII); absent for the primary or without one. */
+	label?: string
+	/** `host:port`; null when the host is not a plain name or address. */
+	target: string | null
+	/**
+	 * Why this endpoint: "configured" (nothing tried yet), "first reachable", "previous failed:
+	 * <class>" once it delivered a header after a rotation, "trying: previous failed: <class>"
+	 * while it is being tried. The class is a SourceConnectErrorClass or "lost" (a loss after
+	 * data), with "(N losses)" when the left endpoint had delivered.
+	 */
+	selectedBecause: string
+	/** It delivered a valid rtl_tcp header since it was selected. */
+	delivering: boolean
+	/** Losses since it last delivered a header. */
+	failures: number
+	/** Losses after which a delivering endpoint is left for the next one. */
+	retries: number
+}
+
+export const sourceCandidateStatusSchema = {
+	type: "object",
+	properties: {
+		index: { type: "integer", minimum: 0 },
+		count: { type: "integer", minimum: 1 },
+		label: { type: "string" },
+		target: { type: ["string", "null"] },
+		selectedBecause: { type: "string" },
+		delivering: { type: "boolean" },
+		failures: { type: "integer", minimum: 0 },
+		retries: { type: "integer", minimum: 0 },
+	},
+	required: [
+		"index",
+		"count",
+		"target",
+		"selectedBecause",
+		"delivering",
+		"failures",
+		"retries",
+	],
+} as const
+
+/** How strongly the receiver is identified: a unit (sdr-host id or USB serial), a model, nothing. */
+export type ReceiverIdentityStrength = "unit" | "model" | "unknown"
+
+/**
+ * What became of the receiver's learned state (spur map, floors, occupancy, pre-band gain):
+ * "fresh" a new namespace, "resumed" its own earlier one, "adopted" the files from before
+ * receiver namespacing (once, by the first receiver identified), "none" nothing applied
+ * (the receiver is unknown).
+ */
+export type ReceiverNamespaceState = "fresh" | "resumed" | "adopted" | "none"
+
+export interface SourceReceiverStatus {
+	/** `sdrhost:<id>`, `serial:<vendor>:<product>:<serial>`, `model:<tunerType>:<gainCount>` or `unknown`. */
+	key: string
+	strength: ReceiverIdentityStrength
+	/** rtl_tcp header tuner type. */
+	tunerType?: number
+	/** USB serial as validated (letters, digits, `._-`, at most 32). */
+	serial?: string
+	/** The selected candidate's label. */
+	candidateLabel?: string
+	/** Why the current endpoint was selected (SourceCandidateStatus.selectedBecause, or "configured"). */
+	selectedBecause: string
+	/** The state directory path of this receiver's learned state; null while unknown. */
+	learnedStateNamespace: string | null
+	namespaceState: ReceiverNamespaceState
+	/** Whether the accepted tuning (centre, rate, gain) of this receiver was restored. */
+	restoredTuning: { restored: boolean; reason: string }
+}
+
+export const sourceReceiverStatusSchema = {
+	type: "object",
+	properties: {
+		key: { type: "string" },
+		strength: { type: "string", enum: ["unit", "model", "unknown"] },
+		tunerType: { type: "integer", minimum: 0 },
+		serial: { type: "string" },
+		candidateLabel: { type: "string" },
+		selectedBecause: { type: "string" },
+		learnedStateNamespace: { type: ["string", "null"] },
+		namespaceState: {
+			type: "string",
+			enum: ["fresh", "resumed", "adopted", "none"],
+		},
+		restoredTuning: {
+			type: "object",
+			properties: {
+				restored: { type: "boolean" },
+				reason: { type: "string" },
+			},
+			required: ["restored", "reason"],
+		},
+	},
+	required: [
+		"key",
+		"strength",
+		"selectedBecause",
+		"learnedStateNamespace",
+		"namespaceState",
+		"restoredTuning",
+	],
+} as const
 
 /**
  * The closed class of a failed connection attempt: `refused` (ECONNREFUSED), `timeout`

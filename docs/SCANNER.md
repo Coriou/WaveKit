@@ -365,7 +365,7 @@ Discoveries read through `GET /api/scanner/discoveries` carry `coverage` when de
 Storage layout under `scanner.storage.dir`:
 
 - `discoveries.json` (snapshot), `journal/` (daily observation journals), `jobs.json`, `settings.json`;
-- `engine/` (per-source detector state) with `engine/occupancy/` (occupancy history);
+- `engine/` (per-source detector state) with `engine/occupancy/` (occupancy history); for rtl_tcp U8_IQ sources both are kept per receiver in `engine/receivers/<source>/<receiver key>/` (`engine.json`, `occupancy.json`), and the files from before are taken over once by the first receiver identified (see [CORE-REFERENCE.md](CORE-REFERENCE.md#learned-state-per-receiver));
 - `recordings/dv/<discoveryId>/` (digital voice WAVs, see [Digital voice recordings](#digital-voice-recordings)), `recordings/analog/<discoveryId>/` (analog voice WAVs, see [Analog voice recordings](#analog-voice-recordings)), `evidence/<discoveryId>/` (`psd.json`, `iq-*.cu8`);
 - `captures/` (burst IQ captures);
 - `iq-captures/` (protected mode with `iqCapture.enabled` only: short narrowband captures waiting for replay, deleted at their result; see [IQ capture on detection](#iq-capture-on-detection)).

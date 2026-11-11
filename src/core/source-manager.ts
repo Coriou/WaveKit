@@ -31,7 +31,9 @@ import { PassThrough } from "node:stream"
 import { SOURCE_RESUME_FAILED_MESSAGE } from "@wavekit/api-types"
 import type {
 	SourceActivity,
+	SourceCandidateStatus,
 	SourceConnectFailure,
+	SourceReceiverStatus,
 	SourceEndpoint,
 	SourceFeed,
 	SourceFeedRestoreTuning,
@@ -39,6 +41,7 @@ import type {
 } from "@wavekit/api-types"
 import {
 	connectFailureStatus,
+	connectTarget,
 	noteConnectFailure,
 	PEER_CLOSED,
 } from "./source-manager-connect-failure.js"
@@ -107,6 +110,15 @@ export const SOURCE_PAUSE_CLOSE_TIMEOUT_MS = 2000
  * 300 s apart never trigger it.
  */
 export const SOURCE_ENDPOINT_FALLBACK_FAILURES = 3
+/**
+ * Lane RS: a source with candidates retries the endpoint that last delivered a valid header this
+ * many times after a loss before it moves to the next one. With the 2 s base backoff the three
+ * retries wait about 2-4 s, 4-8 s and 8-16 s (equal jitter), plus up to 5 s connect timeout
+ * each: 14-43 s, so an rtlmux restart or a short network drop keeps the receiver, while an
+ * unplugged one is left within a minute. An endpoint that never delivered a header is left after
+ * its first failed attempt.
+ */
+export const SOURCE_CANDIDATE_RETRIES = 3
 export const SOURCE_ENDPOINT_FAILURE_WINDOW_MS = 10 * 60_000
 
 /** Failure times on a selected endpoint, in a sliding window. */
@@ -179,6 +191,10 @@ export interface SourceStatus {
 	feed?: SourceFeed | undefined
 	/** The last failed connection attempt; only while a network source is not connected. */
 	connectFailure?: SourceConnectFailure | undefined
+	/** Lane RS: the selected endpoint; only for rtl_tcp sources with `candidates`. */
+	candidate?: SourceCandidateStatus | undefined
+	/** Lane RS: the receiver reached and whose learned state applies (setReceiverStatusSource). */
+	receiver?: SourceReceiverStatus | undefined
 }
 
 /**
@@ -264,6 +280,11 @@ export interface SourceManagerEvents {
 	 * per connection. Through rtlmux this means the upstream dongle is back.
 	 */
 	"payload-started": (sourceId: string) => void
+	/**
+	 * Lane RS: the session's rtl_tcp header was read (once per connection, before its first
+	 * payload is forwarded). `info` is the parsed header, or null when it is not one.
+	 */
+	"rtl-tcp-header": (sourceId: string, info: RtlTcpHeaderInfo | null) => void
 	/**
 	 * A selected endpoint failed repeatedly and the source went back to its
 	 * configured host (receiver-endpoints 3.4); `host` is the endpoint left.
@@ -368,6 +389,16 @@ interface SourceState {
 	connectPending: boolean
 	/** Failures on the selected endpoint since the last switch (sliding window). */
 	endpointFailures: EndpointFailureWindow
+	/** Lane RS: index into [primary, ...candidates]; always 0 without candidates. */
+	candidateIndex: number
+	/** The selected endpoint delivered a valid rtl_tcp header since it was selected. */
+	candidateWon: boolean
+	/** Losses of the selected endpoint since it last delivered a header. */
+	candidateFailures: number
+	/** Why the selected endpoint is the one (status `selectedBecause`). */
+	candidateReason: string
+	/** What made the source leave the previous endpoint; null before any rotation. */
+	candidateCause: string | null
 
 	metricsTimer: ReturnType<typeof setInterval> | null
 	stallTimer: ReturnType<typeof setInterval> | null
@@ -516,6 +547,11 @@ export class SourceManager extends EventEmitter {
 	private feedsUnsaved = false
 	/** Generation of the latest write; only its outcome sets `feedsUnsaved`. */
 	private feedSaveGeneration = 0
+	/** Lane RS: the receiver status per source (setReceiverStatusSource). */
+	private receiverStatusSource:
+		| ((id: string) => SourceReceiverStatus | undefined)
+		| null = null
+
 	/** What a restore resume writes back, per source (setPausedTuningSource). */
 	private pausedTuningSource:
 		| ((id: string) => SourceFeedRestoreTuning | undefined)
@@ -547,6 +583,29 @@ export class SourceManager extends EventEmitter {
 				typeof item === "boolean"
 			)
 				return item
+			// Plain arrays (sources[i].candidates): own index elements only, within the node budget.
+			if (
+				Array.isArray(item) &&
+				!utilTypes.isProxy(item) &&
+				Object.getPrototypeOf(item) === Array.prototype
+			) {
+				if (
+					item.length > 32 ||
+					Reflect.ownKeys(item).length !== item.length + 1
+				)
+					throw new WaveKitError("Invalid source data", "SOURCE_CONFIG_INVALID")
+				const out: unknown[] = []
+				for (let i = 0; i < item.length; i++) {
+					const descriptor = Object.getOwnPropertyDescriptor(item, i)
+					if (!descriptor || !("value" in descriptor))
+						throw new WaveKitError(
+							"Invalid source data",
+							"SOURCE_CONFIG_INVALID",
+						)
+					out.push(copy(descriptor.value, depth + 1))
+				}
+				return out
+			}
 			if (
 				typeof item !== "object" ||
 				utilTypes.isProxy(item) ||
@@ -906,6 +965,11 @@ export class SourceManager extends EventEmitter {
 			retargetPending: false,
 			connectPending: false,
 			endpointFailures: new EndpointFailureWindow(),
+			candidateIndex: 0,
+			candidateWon: false,
+			candidateFailures: 0,
+			candidateReason: "configured",
+			candidateCause: null,
 			metricsTimer: null,
 			stallTimer: null,
 			stopping: false,
@@ -1493,7 +1557,9 @@ export class SourceManager extends EventEmitter {
 		if (state.attempt && this.isActiveAttempt(state, state.attempt))
 			return Promise.resolve()
 		const { config } = state
-		const host = state.activeHost ?? config.host!
+		const endpoint = this.currentEndpoint(state)
+		const host = endpoint.host
+		const port = endpoint.port
 		return new Promise<void>((resolve, reject) => {
 			const socket = new net.Socket()
 			if (!this.isCurrent(state)) {
@@ -1594,10 +1660,7 @@ export class SourceManager extends EventEmitter {
 					if (!this.isActiveAttempt(state, attempt)) return
 					this.resetSignalLevel(id, state)
 					if (!this.isActiveAttempt(state, attempt)) return
-					this.logger.info(
-						{ sourceId: id, host, port: config.port },
-						"Connected to source",
-					)
+					this.logger.info({ sourceId: id, host, port }, "Connected to source")
 					if (!this.isActiveAttempt(state, attempt)) return
 					this.startStallWatchdog(state, socket, onError)
 					if (!this.isActiveAttempt(state, attempt)) return
@@ -1727,6 +1790,10 @@ export class SourceManager extends EventEmitter {
 									"Captured RTL-TCP header from source",
 								)
 								if (!this.isActiveAttempt(state, attempt)) return
+								if (state.rtlTcpHeaderInfo?.magic === "RTL0")
+									this.noteCandidateWon(id, state)
+								this.emit("rtl-tcp-header", id, state.rtlTcpHeaderInfo)
+								if (!this.isActiveAttempt(state, attempt)) return
 							}
 						}
 
@@ -1779,14 +1846,14 @@ export class SourceManager extends EventEmitter {
 							state.connectFailure,
 							err,
 							host,
-							config.port,
+							port,
 							Date.now(),
 						)
 						this.handleConnectionError(id, err, state, attempt)
 					}
 				} finally {
 					if (isInitialAttempt && !hadConnected)
-						safeReject(new SourceConnectionError(host, config.port!, err))
+						safeReject(new SourceConnectionError(host, port, err))
 					else safeResolve()
 					try {
 						socket.destroy()
@@ -1802,17 +1869,20 @@ export class SourceManager extends EventEmitter {
 					state.socket === socket
 				const wasConnected = state.connected
 				// The peer ended it: no socket error (that is `failed`) and no pause, teardown or
-				// retarget of ours (those set `closed` first or are not current).
+				// retarget of ours (those set `closed` first or are not current). Only before any
+				// payload: a close after a healthy session (payload seen) is a disconnect, not a
+				// failed connect, so it starts no connect-failure record.
 				const peerClosed =
 					owns &&
 					!state.retargetPending &&
+					attempt.lastSampleAt === null &&
 					(attempt.phase === "connecting" || attempt.phase === "connected")
 				if (peerClosed)
 					state.connectFailure = noteConnectFailure(
 						state.connectFailure,
 						PEER_CLOSED,
 						host,
-						config.port,
+						port,
 						Date.now(),
 					)
 				if (owns) this.noteEndpointClose(id, state)
@@ -1858,7 +1928,7 @@ export class SourceManager extends EventEmitter {
 						safeReject(
 							new SourceConnectionError(
 								host,
-								config.port!,
+								port,
 								new WaveKitError(
 									state.lastError ??
 										"Socket closed before establishing a connection",
@@ -1890,8 +1960,7 @@ export class SourceManager extends EventEmitter {
 				)
 			})
 			socket.setTimeout(SOURCE_CONNECT_TIMEOUT_MS)
-			if (this.isActiveAttempt(state, attempt))
-				socket.connect(config.port!, host)
+			if (this.isActiveAttempt(state, attempt)) socket.connect(port, host)
 			else safeResolve()
 		})
 	}
@@ -2049,6 +2118,7 @@ export class SourceManager extends EventEmitter {
 			state.retargetPending = false
 			delay = SOURCE_RETARGET_RECONNECT_MS
 		} else {
+			this.noteCandidateFailure(id, state)
 			state.reconnectAttempts++
 			const baseDelay = calculateBackoffDelay(state.reconnectAttempts)
 			// Add small jitter to avoid thundering herd when multiple sources restart.
@@ -2410,6 +2480,8 @@ export class SourceManager extends EventEmitter {
 		const state = this.sources.get(id)
 		if (!state || state.config.type === "recording" || !state.config.host)
 			return false
+		// Endpoint selection moves the primary receiver only; a candidate is another receiver.
+		if (state.candidateIndex !== 0) return false
 		const current = state.activeHost ?? state.config.host
 		if (host === current) return true
 		state.activeHost = host === state.config.host ? null : host
@@ -2525,6 +2597,21 @@ export class SourceManager extends EventEmitter {
 	 * controller's accepted centre, rate and gain; wired in core/tuner-wiring.ts). Read on every
 	 * feed answer, so it follows relay commands made during the pause.
 	 */
+	/** Lane RS: supplies `receiver` on getStatus (null removes it). */
+	setReceiverStatusSource(
+		source: ((id: string) => SourceReceiverStatus | undefined) | null,
+	): void {
+		this.receiverStatusSource = source
+	}
+
+	private receiverStatusOf(id: string): SourceReceiverStatus | undefined {
+		try {
+			return this.receiverStatusSource?.(id)
+		} catch {
+			return undefined
+		}
+	}
+
 	setPausedTuningSource(
 		source: ((id: string) => SourceFeedRestoreTuning | undefined) | null,
 	): void {
@@ -2762,7 +2849,116 @@ export class SourceManager extends EventEmitter {
 			state.config.type !== "recording"
 				? { connectFailure: connectFailureStatus(state.connectFailure) }
 				: {}),
+			...(this.candidatesOf(state).length > 0
+				? { candidate: this.candidateStatus(state) }
+				: {}),
+			...(r => (r ? { receiver: r } : {}))(this.receiverStatusOf(id)),
 		}
+	}
+
+	// === Candidate endpoints (lane RS) ===
+
+	/** The configured candidates, only for rtl_tcp U8_IQ sources (the header decides a winner). */
+	private candidatesOf(
+		state: SourceState,
+	): NonNullable<SourceConfig["candidates"]> {
+		const { config } = state
+		if (config.type !== "rtl_tcp" || config.caps.format !== "U8_IQ") return []
+		return config.candidates ?? []
+	}
+
+	/** Where the current or next attempt dials: the primary (with endpoint selection) or a candidate. */
+	private currentEndpoint(state: SourceState): {
+		host: string
+		port: number
+		label?: string
+	} {
+		const candidate =
+			state.candidateIndex > 0
+				? this.candidatesOf(state)[state.candidateIndex - 1]
+				: undefined
+		if (candidate)
+			return candidate.label !== undefined
+				? { host: candidate.host, port: candidate.port, label: candidate.label }
+				: { host: candidate.host, port: candidate.port }
+		return {
+			host: state.activeHost ?? state.config.host!,
+			port: state.config.port!,
+		}
+	}
+
+	private candidateStatus(state: SourceState): SourceCandidateStatus {
+		const endpoint = this.currentEndpoint(state)
+		return {
+			index: state.candidateIndex,
+			count: this.candidatesOf(state).length + 1,
+			...(endpoint.label !== undefined ? { label: endpoint.label } : {}),
+			target: connectTarget(endpoint.host, endpoint.port),
+			selectedBecause: state.candidateReason,
+			delivering: state.candidateWon,
+			failures: state.candidateFailures,
+			retries: SOURCE_CANDIDATE_RETRIES,
+		}
+	}
+
+	/** The selected endpoint of a source with candidates; undefined without candidates. */
+	getSelectedCandidate(id: string): SourceCandidateStatus | undefined {
+		const state = this.sources.get(id)
+		if (!state || this.candidatesOf(state).length === 0) return undefined
+		return this.candidateStatus(state)
+	}
+
+	/** A valid header: this endpoint wins (again); its failure count starts over. */
+	private noteCandidateWon(id: string, state: SourceState): void {
+		if (this.candidatesOf(state).length === 0) return
+		state.candidateFailures = 0
+		if (state.candidateWon) return
+		state.candidateWon = true
+		state.candidateReason =
+			state.candidateCause === null
+				? "first reachable"
+				: `previous failed: ${state.candidateCause}`
+		const endpoint = this.currentEndpoint(state)
+		this.logger.info(
+			{
+				sourceId: id,
+				index: state.candidateIndex,
+				target: connectTarget(endpoint.host, endpoint.port),
+				reason: state.candidateReason,
+			},
+			"Source endpoint selected",
+		)
+	}
+
+	/**
+	 * A lost or failed connection (not a deliberate switch or a pause): an endpoint that never
+	 * delivered a header is left at once; one that did is retried SOURCE_CANDIDATE_RETRIES times.
+	 */
+	private noteCandidateFailure(id: string, state: SourceState): void {
+		const candidates = this.candidatesOf(state)
+		if (candidates.length === 0) return
+		const cause = state.connectFailure?.errorClass ?? "lost"
+		if (state.candidateWon) {
+			state.candidateFailures += 1
+			if (state.candidateFailures <= SOURCE_CANDIDATE_RETRIES) return
+		}
+		const from = state.candidateIndex
+		state.candidateIndex = (from + 1) % (candidates.length + 1)
+		state.candidateCause = state.candidateWon
+			? `${cause} (${state.candidateFailures} losses)`
+			: cause
+		state.candidateWon = false
+		state.candidateFailures = 0
+		state.candidateReason = `trying: previous failed: ${state.candidateCause}`
+		this.logger.info(
+			{
+				sourceId: id,
+				from,
+				to: state.candidateIndex,
+				cause: state.candidateCause,
+			},
+			"Source endpoint rotated",
+		)
 	}
 
 	private getActivity(state: SourceState): SourceActivity {

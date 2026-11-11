@@ -290,7 +290,8 @@ export interface PreMigrationBackupOptions {
 
 /** Thrown inside the copy when a link fallback's copy would cross BACKUP_MIN_FREE_BYTES. */
 class FallbackLowDisk extends WaveKitError {
-	constructor() {
+	/** `size`: the bytes of the copy that tripped the check, counted in the skip's neededBytes. */
+	constructor(readonly size: number) {
 		super(
 			"A hard-link fallback copy would leave less than the free-space margin",
 			"STATE_BACKUP_LOW_DISK",
@@ -298,8 +299,12 @@ class FallbackLowDisk extends WaveKitError {
 	}
 }
 
-async function defaultFsync(path: string, kind: "file" | "dir"): Promise<void> {
-	const handle = await open(path, kind === "dir" ? "r" : "r+")
+async function defaultFsync(
+	path: string,
+	_kind: "file" | "dir",
+): Promise<void> {
+	// Read-only for both: fsync needs no write access, and a copy is never written through it.
+	const handle = await open(path, "r")
 	try {
 		await handle.sync()
 	} finally {
@@ -754,7 +759,7 @@ async function decide(
 					freeBytes - copyBytes - fallbackBytes - size <
 					BACKUP_MIN_FREE_BYTES
 				)
-					throw new FallbackLowDisk()
+					throw new FallbackLowDisk(size)
 				fallbackBytes += size
 			}
 			await copyFile(src, dst, constants.COPYFILE_FICLONE)
@@ -801,7 +806,8 @@ async function decide(
 		await remove(partialDir).catch(() => undefined)
 		return err instanceof FallbackLowDisk
 			? skipped("low-disk", {
-					neededBytes: copyBytes + fallbackBytes,
+					// The copy that tripped the check is needed too (it was never reserved).
+					neededBytes: copyBytes + fallbackBytes + err.size,
 					freeBytes,
 				})
 			: skipped("copy-failed")

@@ -217,6 +217,18 @@ export const agentSourceSchema = z
 		verdict: z.enum(AGENT_SOURCE_VERDICTS).optional(),
 		/** Why the cost guard holds passive scanning off (GET /api/scanner); absent otherwise. */
 		passive: z.enum(SCANNER_PASSIVE_REASONS).optional(),
+		/**
+		 * Lane RS: GET /api/sources `receiver`, compact: identity strength, what became of the
+		 * learned state, and whether the accepted tuning was restored. Absent before it is known.
+		 */
+		receiver: z
+			.object({
+				strength: z.enum(["unit", "model", "unknown"]),
+				learnedState: z.enum(["fresh", "resumed", "adopted", "none"]),
+				tuningRestored: z.boolean(),
+			})
+			.strict()
+			.optional(),
 	})
 	.strict()
 
@@ -405,6 +417,14 @@ export const agentStatusResponseSchema = strictObject({
 					...row.properties,
 					verdict: { type: "string", enum: [...AGENT_SOURCE_VERDICTS] },
 					passive: { type: "string", enum: [...SCANNER_PASSIVE_REASONS] },
+					receiver: strictObject({
+						strength: { type: "string", enum: ["unit", "model", "unknown"] },
+						learnedState: {
+							type: "string",
+							enum: ["fresh", "resumed", "adopted", "none"],
+						},
+						tuningRestored: bool,
+					}),
 				},
 			}
 		})(),

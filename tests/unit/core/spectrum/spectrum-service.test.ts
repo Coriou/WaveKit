@@ -1496,3 +1496,47 @@ describe("fatal engine lifecycle (review F5)", () => {
 		}
 	})
 })
+
+describe("SpectrumService learned state per receiver (lane RS)", () => {
+	const learned = (dbfs: number): EngineState => ({
+		version: 1,
+		absoluteFloors: [{ key: "2048000:g:4096", dbfs }],
+		spurs: [],
+		kByRange: [],
+	})
+
+	it("replaces a running engine's learned state and the occupancy history; export reads them", async () => {
+		const { service, hostsOf } = make({ fake: true })
+		await service.start()
+		await service.acquire("rtl", "job:a")
+		expect(hostsOf("rtl")).toHaveLength(1)
+		await service.replaceLearnedState("rtl", {
+			engine: learned(-70),
+			occupancy: { version: 1, bucketHz: 12_500, buckets: [] },
+		})
+		// The pipeline was recreated from the other receiver's state.
+		expect(hostsOf("rtl")).toHaveLength(2)
+		expect(hostsOf("rtl").at(-1)?.cfg.persistedEngine).toEqual(learned(-70))
+		const now = await service.exportLearnedState("rtl")
+		expect(now.engine).not.toBeNull()
+		expect(now.occupancy?.bucketHz).toBe(12_500)
+		// Fresh: no learned state at all in the next pipeline.
+		await service.replaceLearnedState("rtl", { engine: null, occupancy: null })
+		expect(hostsOf("rtl").at(-1)?.cfg.persistedEngine).toBeUndefined()
+		await service.release("rtl", "job:a")
+		await service.stop()
+	})
+
+	it("an invalid occupancy history starts fresh instead of being imported", async () => {
+		const { service } = make({ fake: true })
+		await service.start()
+		await service.replaceLearnedState("rtl", {
+			engine: null,
+			occupancy: { version: 2, bucketHz: -1, buckets: [] } as never,
+		})
+		const now = await service.exportLearnedState("rtl")
+		expect(now.engine).toBeNull()
+		expect(now.occupancy?.bucketHz).not.toBe(-1)
+		await service.stop()
+	})
+})
