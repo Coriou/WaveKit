@@ -153,8 +153,9 @@ export interface SourceStatus {
 /**
  * The closed class of a failed connection attempt: `refused` (ECONNREFUSED), `timeout`
  * (ETIMEDOUT or the core's connect timeout), `unreachable` (EHOSTUNREACH, ENETUNREACH,
- * EHOSTDOWN), `not-found` (ENOTFOUND, EAI_AGAIN), `reset` (ECONNRESET, EPIPE), `stalled`
- * (connected but no samples), `other` for anything else.
+ * EHOSTDOWN), `not-found` (ENOTFOUND, EAI_AGAIN), `reset` (ECONNRESET, EPIPE), `closed`
+ * (the peer ended the connection without an error), `stalled` (connected but no samples),
+ * `other` for anything else.
  */
 export const SOURCE_CONNECT_ERROR_CLASSES = [
 	"refused",
@@ -162,6 +163,7 @@ export const SOURCE_CONNECT_ERROR_CLASSES = [
 	"unreachable",
 	"not-found",
 	"reset",
+	"closed",
 	"stalled",
 	"other",
 ] as const

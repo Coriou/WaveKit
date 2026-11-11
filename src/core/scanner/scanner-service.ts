@@ -73,10 +73,12 @@ import type {
 	ScannerRecorderDiscovery,
 } from "@wavekit/api-types"
 import {
+	RECORDING_KEEPS_FILE_NAME,
 	SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
 	SOURCE_PAUSED_MESSAGE,
 	TUNE_WAITERS_MAX,
 } from "@wavekit/api-types"
+import { backupStatusOf } from "../state-backup.js"
 import type {
 	RecordingProtection,
 	ScannerRecordingDeleter,
@@ -1240,8 +1242,7 @@ export class ScannerService extends EventEmitter {
 	}
 	private disk: "ok" | "disk-low" = "ok"
 	/** The load-time folder migration's counts (status `folders`); null until it ran. */
-	private folderMigration: { reattached: number; unresolved: number } | null =
-		null
+	private folderMigration: NonNullable<ScannerStatus["folders"]> | null = null
 	private dirty = false
 	/** False when the persisted state could not be read: the journal and snapshot are not written this run. */
 	private stateLoaded = false
@@ -1421,6 +1422,8 @@ export class ScannerService extends EventEmitter {
 				dir: this.storageDir,
 				logger: deps.logger,
 				now: this.now,
+				// The recording keep store (RecordingKeepStore, `<stateDir>`) goes into the backup's outside/.
+				backup: { keepsFile: join(deps.stateDir, RECORDING_KEEPS_FILE_NAME) },
 			})
 			this.spectrum = new SpectrumService({
 				sources: deps.sources,
@@ -2278,6 +2281,7 @@ export class ScannerService extends EventEmitter {
 			},
 			disk: this.disk,
 			...(this.folderMigration ? { folders: { ...this.folderMigration } } : {}),
+			...withBackup(backupStatusOf(this.persistence.preMigrationBackup())),
 			...this.recordingsQuotaStatus(),
 			jobs: {
 				active: [...this.jobs.values()].filter(j => !isTerminal(j.state))
@@ -9078,9 +9082,18 @@ export class ScannerService extends EventEmitter {
 		try {
 			const history = await this.persistence.aliasHistory(new Set(orphans))
 			const result = this.store.reattachOrphanFolders(orphans, history)
-			this.folderMigration = result
+			const left = orphans.filter(
+				id => this.store.folderOwner(id) === undefined,
+			)
+			const noAlias = left.filter(id => !history.has(id)).length
+			const unresolvedBy = { noAlias, aliasWithoutOwner: left.length - noAlias }
+			this.folderMigration = { ...result, unresolvedBy }
 			this.log.info(
-				{ reattached: result.reattached, unresolved: result.unresolved },
+				{
+					reattached: result.reattached,
+					unresolved: result.unresolved,
+					unresolvedBy,
+				},
 				"Scanner folders without an owner re-attached; the rest are kept in place",
 			)
 		} catch (err: unknown) {
@@ -9526,3 +9539,8 @@ export function dcCentredOf(
 	const half = Number.isFinite(obwHz) && obwHz > 0 ? obwHz / 2 : 0
 	return Math.abs(centreHz - tunedHz) - half <= DQ_DC_ADMIT_HZ
 }
+
+const withBackup = (
+	b: ReturnType<typeof backupStatusOf>,
+): { stateBackup?: NonNullable<ScannerStatus["stateBackup"]> } =>
+	b === null ? {} : { stateBackup: b }

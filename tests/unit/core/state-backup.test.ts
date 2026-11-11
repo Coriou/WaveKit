@@ -913,3 +913,142 @@ describe("pre-migration backup of scanner state", () => {
 		).toMatchObject({ cleanLoads: 2 })
 	})
 })
+
+describe("pre-migration backup: link fallbacks and durability", () => {
+	const refuseLinks = () =>
+		Promise.reject(Object.assign(new Error("not permitted"), { code: "EPERM" }))
+	const space = (bytes: number) => (): Promise<StatFsLike> =>
+		Promise.resolve({ bavail: bytes, bsize: 1 })
+
+	it("a link fallback copy counts against the margin: skipped one byte short, taken at exactly the margin", async () => {
+		const old = { fileVersion: 1, heldJournalFormat: 2, revision: 1 }
+		await seedState()
+		await writeMarker(old)
+		const copied =
+			Buffer.byteLength(JOBS) +
+			Buffer.byteLength(JOURNAL) +
+			Buffer.byteLength(JSON.stringify(old))
+		const audio = Buffer.byteLength(AUDIO)
+		const short = await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: space(copied + audio + BACKUP_MIN_FREE_BYTES - 1),
+			link: refuseLinks,
+		})
+		expect(short).toMatchObject({ kind: "skipped", reason: "low-disk" })
+		expect(await backups()).toEqual([])
+		await writeMarker(old)
+		const exact = await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: space(copied + audio + BACKUP_MIN_FREE_BYTES),
+			link: refuseLinks,
+		})
+		expect(exact).toMatchObject({
+			kind: "taken",
+			linkedFiles: 0,
+			copiedBytes: copied + audio,
+		})
+		// Links that work cost nothing: the same space takes the backup with one byte less.
+		await writeMarker(old)
+		const linked = await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW + 1,
+			statfs: space(copied + BACKUP_MIN_FREE_BYTES),
+		})
+		expect(linked).toMatchObject({ kind: "taken", linkedFiles: 1 })
+	})
+
+	it("flushes every copied file and directory before the rename, and the backups directory after it", async () => {
+		await seedState()
+		const keeps = await mkdtemp(join(tmpdir(), "wk-state-keeps-"))
+		try {
+			const keepsFile = join(keeps, "recording-keeps.json")
+			await writeFile(keepsFile, '{"version":1}\n')
+			const synced: Array<{ path: string; kind: string; renamed: boolean }> = []
+			const backupsDir = join(dir, BACKUPS_DIR)
+			const out = await ensurePreMigrationBackup({
+				dir,
+				logger,
+				now: () => NOW,
+				statfs: roomy,
+				keepsFile,
+				fsync: async (path, kind) => {
+					const names = await readdir(backupsDir)
+					synced.push({
+						path,
+						kind,
+						renamed: names.includes(`pre-unmarked.${NOW}`),
+					})
+				},
+			})
+			expect(out).toMatchObject({ kind: "taken" })
+			const partial = join(backupsDir, `.pre-unmarked.partial-${NOW}`)
+			const before = synced.filter(s => !s.renamed)
+			const after = synced.filter(s => s.renamed)
+			expect(before.filter(s => s.kind === "file").map(s => s.path)).toEqual(
+				expect.arrayContaining([
+					join(partial, "jobs.json"),
+					join(partial, "journal", "observations-20260101.jsonl"),
+					join(partial, BACKUP_OUTSIDE_DIR, "recording-keeps.json"),
+					join(partial, BACKUP_RECEIPT_FILE),
+				]),
+			)
+			// The hard-linked recording is not rewritten; its directory entry is flushed.
+			expect(before.map(s => s.path)).not.toContain(
+				join(partial, "recordings", "d_1", "a.wav"),
+			)
+			expect(before.filter(s => s.kind === "dir").map(s => s.path)).toEqual(
+				expect.arrayContaining([
+					partial,
+					join(partial, "recordings"),
+					join(partial, "recordings", "d_1"),
+					join(partial, "journal"),
+				]),
+			)
+			expect(after).toEqual([{ path: backupsDir, kind: "dir", renamed: true }])
+		} finally {
+			await rm(keeps, { recursive: true, force: true })
+		}
+	})
+
+	it("a failed file flush fails the backup and leaves no partial one; a refused directory flush does not", async () => {
+		await seedState()
+		const failed = await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: roomy,
+			fsync: (_path, kind) =>
+				kind === "file" ? Promise.reject(new Error("EIO")) : Promise.resolve(),
+		})
+		expect(failed).toMatchObject({ kind: "skipped", reason: "copy-failed" })
+		expect(await backups()).toEqual([])
+		await rm(join(dir, STATE_FORMAT_FILE))
+		const dirRefused = await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: roomy,
+			fsync: (_path, kind) =>
+				kind === "dir"
+					? Promise.reject(new Error("EINVAL"))
+					: Promise.resolve(),
+		})
+		expect(dirRefused).toMatchObject({ kind: "taken" })
+	})
+
+	it("the default flush works on the real file system", async () => {
+		await seedState()
+		const out = await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: roomy,
+		})
+		expect(out).toMatchObject({ kind: "taken" })
+	})
+})

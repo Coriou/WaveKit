@@ -40,6 +40,7 @@ import type {
 import {
 	connectFailureStatus,
 	noteConnectFailure,
+	PEER_CLOSED,
 } from "./source-manager-connect-failure.js"
 import type { ConnectFailureRecord } from "./source-manager-connect-failure.js"
 import type { Logger } from "../utils/logger.js"
@@ -1800,6 +1801,20 @@ export class SourceManager extends EventEmitter {
 					state.attempt === attempt &&
 					state.socket === socket
 				const wasConnected = state.connected
+				// The peer ended it: no socket error (that is `failed`) and no pause, teardown or
+				// retarget of ours (those set `closed` first or are not current).
+				const peerClosed =
+					owns &&
+					!state.retargetPending &&
+					(attempt.phase === "connecting" || attempt.phase === "connected")
+				if (peerClosed)
+					state.connectFailure = noteConnectFailure(
+						state.connectFailure,
+						PEER_CLOSED,
+						host,
+						config.port,
+						Date.now(),
+					)
 				if (owns) this.noteEndpointClose(id, state)
 				if (owns) {
 					attempt.phase = "closed"
@@ -2598,6 +2613,8 @@ export class SourceManager extends EventEmitter {
 			const persist = !this.pausedIds.has(id) || this.feedsUnsaved
 			this.pausedIds.add(id)
 			state.pendingResume = null
+			// A deliberate close is no failure; a resume's own attempts count afresh.
+			state.connectFailure = null
 			if (changed) {
 				this.logger.info({ sourceId: id }, "Pausing source feed")
 				this.setFeed(id, state, "paused")

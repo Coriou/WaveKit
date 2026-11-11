@@ -285,6 +285,14 @@ export const TunerConfigSchema = z.object({
 	 */
 	reconnectPolicy: z.enum(["restore", "reset"]).default("restore"),
 	/**
+	 * Under "restore", each new rtl_tcp connection first writes a sample rate and centre that
+	 * are only declared (config or source caps), so the shown tuning is one this core set: the
+	 * declared values when nothing tuned the source since start, else the core's own last
+	 * unaccepted hop; never a config value over another tuning. false keeps them declared only
+	 * (unverified) until an operator writes them, as before (a kill switch).
+	 */
+	writeDeclaredTuningOnConnect: z.boolean().default(true),
+	/**
 	 * Per-band gain table (src/core/band-gain-schema.ts states the defaults and their
 	 * reasons). Scanner hops, dwells and jobs apply it; an operator retune applies it only
 	 * with `applyToMyTuning`. The runtime route PUT /api/tuner-band-gain overrides it.

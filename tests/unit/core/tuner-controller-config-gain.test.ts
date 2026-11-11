@@ -383,20 +383,17 @@ describe("WG11 GN: configured gain and AGC on connect", () => {
 		h.snapshot()
 		const errors: Error[] = []
 		h.controller.on("error", (_id: string, err: Error) => errors.push(err))
-		// The declared rate goes first (the REST centre is replayed), then the gain mode; the gain fails.
+		// The REST centre tuned the source, so the declared rate is not written over it (the centre
+		// is replayed); the gain mode and gain go out, AGC fails.
 		h.failAfterWrites(2)
 		const result = h.controller.synchronizeOnConnect(SRC)
 		expect(result.error).toBe(
 			"Tuner state restore failed: Source rtl-1 socket is not writable",
 		)
-		expect(result.commands).toEqual(["set-sample-rate", "set-gain-mode"])
+		expect(result.commands).toEqual(["set-gain-mode", "set-gain"])
 		expect(errors).toHaveLength(1)
 		const s = h.snapshot()
-		expect(s.frames).toEqual(["02001f4000", "0300000001"])
-		expect(s.sent).toEqual([
-			["set-sample-rate", 2_048_000, "config"],
-			["set-gain-mode", 1, "config"],
-		])
+		expect(s.frames).toEqual(["0300000001", "04000001f0"])
 		expect(s.state.lastError).toBe(result.error)
 		expect(s.state.unknownFields).toEqual(
 			expect.arrayContaining(["gainMode", "gain", "agcMode"]),
@@ -407,7 +404,6 @@ describe("WG11 GN: configured gain and AGC on connect", () => {
 		h.connect()
 		const next = h.snapshot()
 		expect(next.frames).toEqual([
-			"02001f4000",
 			"0300000001",
 			"04000001f0",
 			"0800000000",

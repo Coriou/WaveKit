@@ -23,12 +23,17 @@
  * format it migrated to (`cleanLoads`); this build's own-format backup instead once it is that old
  * and this build has loaded cleanly that many times since (`ownFormatCleanLoads`), when its
  * retention protection lapses too. Its hard-linked recordings keep their disk space until then.
+ * Expiry trusts the wall clock (`now`): a clock far ahead (a receiver without a real-time clock
+ * before NTP corrects it) can age a backup early; the clean-load count still has to be reached.
  *
  * Files under `recordings/`, `captures/` and `iq-captures/` are hard links (finished files are
  * renamed into place, removed by unlink, never rewritten; staging `.tmp` paths excepted), everything
  * else is copied with a copy-on-write clone where the file system supports
  * one (APFS, btrfs, XFS reflink), else a plain copy: the journal is appended to and truncated in
  * place, so it must never share an inode with the backup. Symlinks are not followed or copied.
+ * A link that fails (EPERM, EXDEV) falls back to a copy, whose size is checked against the margin
+ * before it is made. Copied files, the receipt and every backup directory are flushed to disk
+ * (fsync) before the rename into place, and the backups directory after it.
  *
  * Never throws: every failure becomes a `skipped` outcome with a fixed reason, and the marker is
  * then written so the next start does not back up the already migrated state under the old name;
@@ -40,6 +45,7 @@ import {
 	link,
 	lstat,
 	mkdir,
+	open,
 	readdir,
 	readFile,
 	rename,
@@ -50,6 +56,7 @@ import {
 import { join, resolve, sep } from "node:path"
 import { z } from "zod"
 import { RECORDING_KEEPS_FILE_NAME } from "@wavekit/api-types"
+import type { ScannerStateBackupStatus } from "@wavekit/api-types"
 import { WaveKitError } from "../utils/errors.js"
 import { createComponentLogger } from "../utils/logger.js"
 import type { Logger } from "../utils/logger.js"
@@ -222,6 +229,32 @@ export type StateBackupOutcome =
 	| StateBackupSkipped
 	| StateBackupNone
 
+/** The outcome as scanner status shows it (`ScannerStatus.stateBackup`); null before the check. */
+export function backupStatusOf(
+	outcome: StateBackupOutcome | null,
+): ScannerStateBackupStatus | null {
+	if (outcome === null) return null
+	if (outcome.kind === "none")
+		return {
+			outcome: "none",
+			reason: outcome.reason,
+			toFormat: outcome.toFormat,
+		}
+	if (outcome.kind === "skipped")
+		return {
+			outcome: "skipped",
+			reason: outcome.reason,
+			fromFormat: outcome.fromFormat,
+			toFormat: outcome.toFormat,
+		}
+	return {
+		outcome: "taken",
+		fromFormat: outcome.fromFormat,
+		toFormat: outcome.toFormat,
+		path: outcome.path,
+	}
+}
+
 export interface StatFsLike {
 	bavail: bigint | number
 	bsize: bigint | number
@@ -247,6 +280,31 @@ export interface PreMigrationBackupOptions {
 	keepsFile?: string
 	/** Injectable for tests (a crash between the rename and the deletes); `fs.rm` by default. */
 	remove?: (path: string) => Promise<void>
+	/**
+	 * Injectable for tests; by default opens the path and flushes it to disk (`FileHandle.sync`).
+	 * A file's failure fails the backup (`copy-failed`); a directory's is ignored (some file
+	 * systems refuse to sync a directory, and its entries are then as durable as they get).
+	 */
+	fsync?: (path: string, kind: "file" | "dir") => Promise<void>
+}
+
+/** Thrown inside the copy when a link fallback's copy would cross BACKUP_MIN_FREE_BYTES. */
+class FallbackLowDisk extends WaveKitError {
+	constructor() {
+		super(
+			"A hard-link fallback copy would leave less than the free-space margin",
+			"STATE_BACKUP_LOW_DISK",
+		)
+	}
+}
+
+async function defaultFsync(path: string, kind: "file" | "dir"): Promise<void> {
+	const handle = await open(path, kind === "dir" ? "r" : "r+")
+	try {
+		await handle.sync()
+	} finally {
+		await handle.close()
+	}
 }
 
 function sameFormat(a: StateFormat, b: StateFormat): boolean {
@@ -656,8 +714,24 @@ async function decide(
 	const takenAtMs = opts.now()
 	const partialDir = join(backupsDir, `.pre-${fromFormat}.partial-${takenAtMs}`)
 	const doLink = opts.link ?? link
+	const doFsync = opts.fsync ?? defaultFsync
+	const syncDir = (path: string): Promise<void> =>
+		doFsync(path, "dir").catch(() => undefined)
 	let linkedFiles = 0
+	// Bytes copied where a hard link failed (EPERM, EXDEV): reserved against the margin before
+	// each such copy, in the same synchronous step as the check, so concurrent copies share it.
+	let fallbackBytes = 0
 	let finalName: string
+	const linkedCount = plan.files.filter(f => f.hardLink).length
+	log.info(
+		{
+			files: plan.files.length,
+			copyFiles: plan.files.length - linkedCount,
+			linkFiles: linkedCount,
+			copyMb: Math.round(copyBytes / (1024 * 1024)),
+		},
+		`Backing up ${plan.files.length} files (~${Math.round(copyBytes / (1024 * 1024))} MB to copy) before the scanner state format change`,
+	)
 	try {
 		await mkdir(partialDir, { recursive: true })
 		// `recursive` makes the order irrelevant: a child's mkdir creates its parent if first.
@@ -673,18 +747,29 @@ async function decide(
 					linkedFiles++
 					return
 				} catch {
-					// EXDEV, EPERM, a file system without links: fall back to a copy.
+					// EXDEV, EPERM, a file system without links: fall back to a copy, which costs space.
 				}
+				const size = (await lstat(src)).size
+				if (
+					freeBytes - copyBytes - fallbackBytes - size <
+					BACKUP_MIN_FREE_BYTES
+				)
+					throw new FallbackLowDisk()
+				fallbackBytes += size
 			}
 			await copyFile(src, dst, constants.COPYFILE_FICLONE)
+			await doFsync(dst, "file")
 		})
 		if (opts.keepsFile !== undefined && keepsSize !== null) {
 			await mkdir(join(partialDir, BACKUP_OUTSIDE_DIR), { recursive: true })
-			await copyFile(
-				opts.keepsFile,
-				join(partialDir, BACKUP_OUTSIDE_DIR, RECORDING_KEEPS_FILE_NAME),
-				constants.COPYFILE_FICLONE,
+			const keepsCopy = join(
+				partialDir,
+				BACKUP_OUTSIDE_DIR,
+				RECORDING_KEEPS_FILE_NAME,
 			)
+			await copyFile(opts.keepsFile, keepsCopy, constants.COPYFILE_FICLONE)
+			await doFsync(keepsCopy, "file")
+			await syncDir(join(partialDir, BACKUP_OUTSIDE_DIR))
 		}
 		const receipt = {
 			fromFormat,
@@ -695,20 +780,31 @@ async function decide(
 			cleanLoads: 0,
 			ownFormatCleanLoads: 0,
 			files: plan.files.length,
-			copiedBytes: copyBytes,
+			copiedBytes: copyBytes + fallbackBytes,
 			linkedFiles,
 			keepsCopied: keepsSize !== null,
 		}
-		await writeFile(
-			join(partialDir, BACKUP_RECEIPT_FILE),
-			`${JSON.stringify(receipt, null, "\t")}\n`,
+		const receiptPath = join(partialDir, BACKUP_RECEIPT_FILE)
+		await writeFile(receiptPath, `${JSON.stringify(receipt, null, "\t")}\n`)
+		await doFsync(receiptPath, "file")
+		// Every copied file is on disk, then every directory's entries (links included), before the
+		// rename: a power cut never leaves a backup counted as taken with empty copies.
+		await forEachLimited(plan.dirs, BACKUP_IO_CONCURRENCY, d =>
+			syncDir(join(partialDir, d)),
 		)
+		await syncDir(partialDir)
 		finalName = await freeName(backupsDir, `pre-${fromFormat}.${takenAtMs}`)
 		// The new backup is in place before any older one goes (pruneBackups below).
 		await rename(partialDir, join(backupsDir, finalName))
-	} catch {
+		await syncDir(backupsDir)
+	} catch (err) {
 		await remove(partialDir).catch(() => undefined)
-		return skipped("copy-failed")
+		return err instanceof FallbackLowDisk
+			? skipped("low-disk", {
+					neededBytes: copyBytes + fallbackBytes,
+					freeBytes,
+				})
+			: skipped("copy-failed")
 	}
 	const replaced = await pruneBackups(
 		backupsDir,
@@ -724,7 +820,7 @@ async function decide(
 		toFormat,
 		path: join(BACKUPS_DIR, finalName),
 		files: plan.files.length,
-		copiedBytes: copyBytes,
+		copiedBytes: copyBytes + fallbackBytes,
 		linkedFiles,
 		keepsCopied: keepsSize !== null,
 		replaced,

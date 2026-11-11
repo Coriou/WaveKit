@@ -1199,6 +1199,17 @@ export class TunerController extends EventEmitter {
 	 */
 	private connectTuningWritten: Map<string, Map<TunerStateField, number>> =
 		new Map()
+	/**
+	 * The last frequency/sampleRate frame each source saw since its start (or its last reset
+	 * reconnect), written by this core or a relay client: one entry per field, so bounded by the
+	 * sources. `reassert` when this core wrote it unaccepted: a reconnect forgets it
+	 * (forgetInferredTuning) and nothing replays it, so the connect write puts it back. Any entry
+	 * means the source was tuned, so the connect write never sends a config value over it.
+	 */
+	private tunedSinceStart: Map<
+		string,
+		Map<"frequency" | "sampleRate", { value: number; reassert: boolean }>
+	> = new Map()
 
 	constructor(
 		logger: Logger,
@@ -1270,6 +1281,7 @@ export class TunerController extends EventEmitter {
 		this.configWriteDue.delete(sourceId)
 		this.configProvenFields.delete(sourceId)
 		this.connectTuningWritten.delete(sourceId)
+		this.tunedSinceStart.delete(sourceId)
 		if (!this.tunerStates.has(sourceId)) return
 		this.tunerStates.delete(sourceId)
 		this.lastChanges.delete(sourceId)
@@ -1454,6 +1466,8 @@ export class TunerController extends EventEmitter {
 		// frames never do.
 		const relayGainMode = this.gainFrameMode(sourceId, command, value)
 		if (relayGainMode !== "none") this.noteFieldWrite(sourceId, "gainMode")
+		// Accepted or ignored, the relay client tuned the receiver: never reasserted by this core.
+		this.noteTuned(sourceId, command, value, false)
 		this.noteChange(sourceId, cmdName, value, {
 			actor: "relay",
 			reason: "relay-command",
@@ -2633,7 +2647,11 @@ export class TunerController extends EventEmitter {
 			this.desiredFields.delete(sourceId)
 			this.inferredFields.delete(sourceId)
 			this.ignoredRelayFields.delete(sourceId)
-			if (!hold) this.unverifiedFields.delete(sourceId)
+			if (!hold) {
+				this.unverifiedFields.delete(sourceId)
+				// Back to the baseline, exactly as after a fresh start.
+				this.tunedSinceStart.delete(sourceId)
+			}
 			// With nothing accepted every non-baseline value came from an inferred write or
 			// relay command, so a forget also returns the values to the baseline (WG5 R2).
 			if ((reset || forgot) && !hold)
@@ -2991,9 +3009,14 @@ export class TunerController extends EventEmitter {
 	private reconcileCaps(sourceId: string, state: TunerState): boolean {
 		const accepted = this.desiredFields.get(sourceId)
 		const unverified = this.unverifiedFields.get(sourceId)
+		// A value the connect write put on this connection (writeConnectTuning) is on the receiver.
+		const connectWritten = this.connectTuningWritten.get(sourceId)
 		const desired = {
 			has: (field: "frequency" | "sampleRate") =>
-				accepted?.has(field) === true || unverified?.has(field) === true,
+				accepted?.has(field) === true ||
+				unverified?.has(field) === true ||
+				(connectWritten?.has(field) === true &&
+					connectWritten.get(field) === state[field]),
 		}
 		const baseline = this.baselineCaps.get(sourceId)
 		const current = this.sourceManager.getCaps(sourceId)
@@ -3057,16 +3080,41 @@ export class TunerController extends EventEmitter {
 			: { attempted, commands }
 	}
 
+	/** Records a frequency/sampleRate frame (any other command is ignored). */
+	private noteTuned(
+		sourceId: string,
+		cmd: number,
+		value: number,
+		reassert: boolean,
+	): void {
+		const field =
+			cmd === RTL_TCP_COMMANDS.SET_FREQUENCY
+				? "frequency"
+				: cmd === RTL_TCP_COMMANDS.SET_SAMPLE_RATE
+					? "sampleRate"
+					: undefined
+		if (field === undefined) return
+		let tuned = this.tunedSinceStart.get(sourceId)
+		if (!tuned) {
+			tuned = new Map()
+			this.tunedSinceStart.set(sourceId, tuned)
+		}
+		tuned.set(field, { value, reassert })
+	}
+
 	/**
-	 * On a connection's first sync, writes the sample rate and then the frequency the core holds
-	 * when they are declared only (config or caps baseline, never written by this core nor
-	 * accepted from a relay client): a shared rtlmux keeps the last client's tuning, so the core
-	 * would otherwise believe a tuning it never set. Each written value becomes proven for this
-	 * connection (fieldProof), so the trust label follows from the write, never from the
-	 * declaration. Writes nothing outside internal control (a relay client holds the tuner),
-	 * after a plain resume (plainResumeHold: never fight SDR++), once this core lost ownership,
-	 * or for a value outside the tuner's ranges. Accepted fields are replayed by the restore,
-	 * and unknown or unverified fields stay so until an operator writes them.
+	 * On a connection's first sync, writes the sample rate and then the frequency when they are
+	 * declared only, so the core never believes a tuning it did not set (a shared rtlmux keeps the
+	 * last client's). It asserts the core's own tuning, never a config value over another one:
+	 * - nothing tuned the source since its start (tunedSinceStart): the declared value (config or
+	 *   caps baseline), origin `config`;
+	 * - else a field this core last wrote unaccepted (a scanner or job hop the reconnect forgot):
+	 *   that value again, origin `replay`, and the state holds it again;
+	 * - else (another field was tuned, a relay client tuned it): nothing, it stays declared only.
+	 * Accepted fields are not declared only: the restore replays them. Each written value becomes
+	 * proven for this connection (fieldProof). Writes nothing outside internal control (a relay
+	 * client holds the tuner), after a plain resume (plainResumeHold: never fight SDR++), once
+	 * this core lost ownership, with the kill switch off, or for a value outside the ranges.
 	 */
 	private writeConnectTuning(
 		sourceId: string,
@@ -3080,30 +3128,62 @@ export class TunerController extends EventEmitter {
 		)
 			return { attempted: false, commands: [] }
 		const declared = this.fieldProof(sourceId).declaredOnlyFields
-		const frames: Array<[number, number, TunerStateField]> = []
-		const hz = state.sampleRate
-		if (
-			declared.includes("sampleRate") &&
-			Number.isInteger(hz) &&
-			hz >= VALIDATION.sampleRate.min &&
-			hz <= VALIDATION.sampleRate.max &&
-			isValidRtlSampleRate(hz)
-		)
-			frames.push([RTL_TCP_COMMANDS.SET_SAMPLE_RATE, hz, "sampleRate"])
-		const freq = state.frequency
-		if (
-			declared.includes("frequency") &&
-			Number.isInteger(freq) &&
-			freq >= VALIDATION.frequency.min &&
-			freq <= VALIDATION.frequency.max
-		)
-			frames.push([RTL_TCP_COMMANDS.SET_FREQUENCY, freq, "frequency"])
+		const tuned = this.tunedSinceStart.get(sourceId)
+		const untouched = tuned === undefined || tuned.size === 0
+		const frames: Array<{
+			cmd: number
+			value: number
+			field: "sampleRate" | "frequency"
+			origin: "config" | "replay"
+		}> = []
+		const kept: TunerStateField[] = []
+		for (const field of ["sampleRate", "frequency"] as const) {
+			if (!declared.includes(field)) continue
+			const own = tuned?.get(field)
+			const value = untouched
+				? state[field]
+				: own?.reassert === true
+					? own.value
+					: undefined
+			if (value === undefined) {
+				kept.push(field)
+				continue
+			}
+			const valid =
+				field === "sampleRate"
+					? Number.isInteger(value) &&
+						value >= VALIDATION.sampleRate.min &&
+						value <= VALIDATION.sampleRate.max &&
+						isValidRtlSampleRate(value)
+					: Number.isInteger(value) &&
+						value >= VALIDATION.frequency.min &&
+						value <= VALIDATION.frequency.max
+			if (!valid) continue
+			frames.push({
+				cmd:
+					field === "sampleRate"
+						? RTL_TCP_COMMANDS.SET_SAMPLE_RATE
+						: RTL_TCP_COMMANDS.SET_FREQUENCY,
+				value,
+				field,
+				origin: untouched ? "config" : "replay",
+			})
+		}
+		if (kept.length > 0)
+			this.log.info(
+				{ sourceId, fields: kept },
+				"Left the declared tuning unwritten on connect: the source was tuned since start, so the config value could undo that tuning",
+			)
 		if (frames.length === 0) return { attempted: false, commands: [] }
 
-		const written: Array<{ value: number; name: string }> = []
+		const written: Array<{
+			value: number
+			name: string
+			origin: "config" | "replay"
+		}> = []
 		const proven = new Map<TunerStateField, number>()
 		let failure: Error | undefined
-		for (const [cmd, value, field] of frames) {
+		for (const { cmd, value, field, origin } of frames) {
 			try {
 				this.writeFrame(sourceId, cmd, value)
 			} catch (err) {
@@ -3116,8 +3196,11 @@ export class TunerController extends EventEmitter {
 			written.push({
 				value,
 				name: COMMAND_NAMES[cmd] ?? `cmd-0x${cmd.toString(16)}`,
+				origin,
 			})
 			this.markConnectionWrite(sourceId, cmd)
+			// A reasserted value is what the receiver holds again (caps follow: reconcileCaps).
+			state[field] = value
 			proven.set(field, value)
 		}
 		const commands = written.map(entry => entry.name)
@@ -3137,12 +3220,12 @@ export class TunerController extends EventEmitter {
 			delete state.lastError
 			this.log.info(
 				{ sourceId, commands },
-				"Wrote the declared tuner tuning on connect",
+				"Wrote the core's tuning on connect",
 			)
 		}
-		for (const { name, value } of written) {
-			this.noteReconnectFrame(sourceId, name, value, "config")
-			this.emit("command-sent", sourceId, name, value, "config")
+		for (const { name, value, origin } of written) {
+			this.noteReconnectFrame(sourceId, name, value, origin)
+			this.emit("command-sent", sourceId, name, value, origin)
 		}
 		if (failure) {
 			this.emit("error", sourceId, failure)
@@ -3763,6 +3846,7 @@ export class TunerController extends EventEmitter {
 		try {
 			this.writeFrame(sourceId, cmd, value)
 			this.noteFieldWrite(sourceId, stateFieldOf(cmd))
+			this.noteTuned(sourceId, cmd, value, opts.accept === false)
 			// In the same step as the frame: no other write can see the old mode in between.
 			this.noteLeftAgc(sourceId, cmd, value)
 			if (opts.accept === false) this.markWrittenNotAccepted(sourceId, cmd)

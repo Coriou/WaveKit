@@ -23,6 +23,7 @@ const CODE_CLASSES: ReadonlyMap<string, SourceConnectErrorClass> = new Map([
 	["ECONNRESET", "reset"],
 	["EPIPE", "reset"],
 	["SOURCE_STALLED", "stalled"],
+	["SOURCE_PEER_CLOSED", "closed"],
 ])
 
 /** The class of a connection error; unknown, missing or non-string codes are `other`. */
@@ -70,6 +71,8 @@ export function connectHint(
 			return `The host name of ${at} does not resolve: check the source host.`
 		case "reset":
 			return `${at} closed the connection: the server restarted or another client holds it.`
+		case "closed":
+			return `${at} ended the connection: the server stopped or dropped this client.`
 		case "stalled":
 			return `Connected to ${at} but no samples arrived: is the dongle attached?`
 		case "other":
@@ -77,9 +80,15 @@ export function connectHint(
 	}
 }
 
+/** A peer's close without a socket error: an attempt of class `closed`. */
+export const PEER_CLOSED: { code: "SOURCE_PEER_CLOSED" } = {
+	code: "SOURCE_PEER_CLOSED",
+}
+
 /**
  * The per-source record SourceManager keeps; cleared by the first payload of a connection (the
- * rtl_tcp header), not by the TCP accept, so an accept-then-reset or a stall keeps counting.
+ * rtl_tcp header), not by the TCP accept, so an accept-then-reset or a stall keeps counting;
+ * also cleared by a pause (a deliberate close is no failure).
  */
 export interface ConnectFailureRecord {
 	target: string | null

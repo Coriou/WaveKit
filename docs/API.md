@@ -1073,7 +1073,7 @@ stays the configured address. Other sources never carry `endpoint`. See
 **Connect failures.** While a network source is not connected after a failed attempt,
 its entry carries `connectFailure`: `target` (the attempt's `host:port`, omitted when the host
 is not a plain name or address), `errorClass` (`refused`, `timeout`, `unreachable`,
-`not-found`, `reset`, `stalled` or `other`), `attempts` (failed attempts since a connection
+`not-found`, `reset`, `closed`, `stalled` or `other`), `attempts` (failed attempts since a connection
 last delivered data), `lastAttemptAt` (ISO time) and a short fixed `hint`, for example:
 
 ```json
@@ -1088,12 +1088,13 @@ last delivered data), `lastAttemptAt` (ISO time) and a short fixed `hint`, for e
 
 The class comes from the socket error code (`ECONNREFUSED` is `refused`, `ETIMEDOUT` or the
 core's connect timeout `timeout`, `EHOSTUNREACH`/`ENETUNREACH`/`EHOSTDOWN` `unreachable`,
-`ENOTFOUND`/`EAI_AGAIN` `not-found`, `ECONNRESET`/`EPIPE` `reset`, the stall watchdog
-`stalled`, anything else `other`); the hint is fixed text per class and never repeats the
+`ENOTFOUND`/`EAI_AGAIN` `not-found`, `ECONNRESET`/`EPIPE` `reset`, a close by the peer
+without an error `closed`, the stall watchdog `stalled`, anything else `other`); the hint is fixed text per class and never repeats the
 error message. The field goes once a connection delivers its first data (the rtl_tcp header),
 not when the TCP connection is accepted: a receiver that accepts and then resets before
 sending anything keeps counting attempts; any first data clears the record, so a stall or
-reset after data starts again at 1. While connected the field is not shown.
+reset after data starts again at 1. Pausing the feed clears it too (a deliberate close is no
+failure). While connected the field is not shown.
 
 **Stall watchdog (rtl_tcp U8_IQ sources).** An rtl_tcp IQ stream never pauses while
 it is healthy. After a session has delivered payload, a gap of `stallTimeoutMs`
@@ -1820,11 +1821,14 @@ core re-sends the fields that were accepted through this API or the relay and co
 them in `commandCount`/`lastCommandAt`; a failed restore sets `lastError` and is
 retried on the next connection. Before that, on every new connection under internal
 control, it writes a `sampleRate` and then a `frequency` that are only declared (by
-config or the source caps; see `declaredOnlyFields` below), with origin `config`: a
-shared rtlmux keeps the last client's tuning, so without that write the core would
-show a tuning it never set. Those written values are then proven for the connection.
-Nothing is written under external control, after a plain resume of a paused feed, or
-under `reset`. Relay commands
+config or the source caps; see `declaredOnlyFields` below): a shared rtlmux keeps the last
+client's tuning, so without that write the core would show a tuning it never set. It
+writes the declared value (origin `config`) only while nothing tuned the source since the
+core started; after a scanner hop or another core write that is not replayed, it writes that
+value again (origin `replay`); after a relay client's tuning, nothing (the value stays
+declared only). Those written values are then proven for the connection. Nothing is
+written under external control, after a plain resume of a paused feed, under `reset`, or
+with `tuner.writeDeclaredTuningOnConnect: false`. Relay commands
 received while the source is down become desired state and are sent on
 reconnect. With `reset`, core sends nothing and returns tuner state and source
 caps to the configured baseline. With either policy, source caps
@@ -3755,7 +3759,16 @@ curl http://localhost:9000/api/scanner
 	},
 	"cpuGuard": { "percent": 41.5, "limitPercent": 90, "source": "os" },
 	"disk": "ok",
-	"folders": { "reattached": 0, "unresolved": 0 },
+	"folders": {
+		"reattached": 0,
+		"unresolved": 1,
+		"unresolvedBy": { "noAlias": 1, "aliasWithoutOwner": 0 }
+	},
+	"stateBackup": {
+		"outcome": "none",
+		"reason": "same-format",
+		"toFormat": "f1-h3-r1"
+	},
 	"jobs": { "active": 2, "total": 5 }
 }
 ```
@@ -3764,8 +3777,17 @@ curl http://localhost:9000/api/scanner
 start did with recording and evidence folders that no discovery owned: `reattached` folders
 were given back to the discovery they were merged into (found from the journal's merge alias
 listings, then from the observations listing their recordings), and `unresolved` folders
-could not be traced and stay on disk, kept by every retention pass. Nothing is moved or
-deleted. One info line at startup carries the same two counts.
+could not be traced and stay on disk, kept by every retention pass. `unresolvedBy` splits
+them: `noAlias`, no merge alias names the folder; `aliasWithoutOwner`, its alias chain ends at
+no live discovery (either way no observation listing its recordings named a single owner).
+Nothing is moved or deleted. One info line at startup carries the same counts.
+
+`stateBackup` (absent from older cores and before the scanner state loaded) is this start's
+pre-migration backup of the scanner state ([SCANNER.md](SCANNER.md), upgrade and rollback):
+`outcome` `taken` with `fromFormat`, `toFormat` and `path` (relative to `scanner.storage.dir`,
+`.backups/pre-<format>.<ms>`); `skipped` with `fromFormat`, `toFormat` and a fixed `reason`
+(`unreadable`, `low-disk`, `disk-unknown`, `too-many-files`, `copy-failed`: one file could not
+be read or copied, and no backup was kept); or `none` with `reason` `same-format` or `fresh`.
 
 `recordingsQuota` is present only while the last retention pass left the recordings quota
 (`storage.maxRecordingsMb`) exceeded after removing every file its rules allow, so everything

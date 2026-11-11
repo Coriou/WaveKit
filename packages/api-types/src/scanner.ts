@@ -1229,6 +1229,38 @@ export interface ScannerRecorderDiscovery {
 	counts: Partial<Record<ScannerRecorderDecision, number>>
 }
 
+/** `ScannerStatus.folders`: the load-time migration of folders without an owner. */
+export interface ScannerFolderMigrationStatus {
+	reattached: number
+	unresolved: number
+	/**
+	 * Why the `unresolved` folders were not traced (they add up to it): `noAlias`, no merge alias
+	 * names the folder; `aliasWithoutOwner`, its alias chain ends at no live discovery. Either way
+	 * no observation listing its recordings named a single owner. Absent on older cores.
+	 */
+	unresolvedBy?: { noAlias: number; aliasWithoutOwner: number } | undefined
+}
+
+/** `ScannerStatus.stateBackup`: the start's pre-migration backup outcome. */
+export interface ScannerStateBackupStatus {
+	outcome: "taken" | "skipped" | "none"
+	reason?:
+		| "unreadable"
+		| "low-disk"
+		| "disk-unknown"
+		| "too-many-files"
+		| "copy-failed"
+		| "same-format"
+		| "fresh"
+		| undefined
+	/** The format label on disk before this start (absent for `none`). */
+	fromFormat?: string | undefined
+	/** This build's format label. */
+	toFormat: string
+	/** `.backups/pre-<from>.<ms>`, relative to the scanner directory (`taken` only). */
+	path?: string | undefined
+}
+
 export interface ScannerStatus {
 	/** The wideband analog recorder's sessions and decisions. Absent on older cores. */
 	recorder?: ScannerRecorderStatus | undefined
@@ -1253,7 +1285,15 @@ export interface ScannerStatus {
 	 * released them (`reattached`), and folders no discovery could be traced to, kept in place
 	 * (`unresolved`). Absent on older cores and before the scanner state loaded.
 	 */
-	folders?: { reattached: number; unresolved: number } | undefined
+	folders?: ScannerFolderMigrationStatus | undefined
+	/**
+	 * This start's pre-migration backup of the scanner state (taken when the format on disk
+	 * differs from this build's): `taken` with its `path` (relative to the scanner directory),
+	 * `skipped` with a fixed `reason` (`unreadable`, `low-disk`, `disk-unknown`,
+	 * `too-many-files`, `copy-failed`), or `none` (`same-format`, `fresh`). Absent before the
+	 * scanner state loaded and on older cores.
+	 */
+	stateBackup?: ScannerStateBackupStatus | undefined
 	/**
 	 * Present while the last retention pass left the recordings quota (`maxRecordingsMb`) exceeded
 	 * after removing every file its rules allow: everything left is protected. Analog recordings

@@ -43,6 +43,7 @@ describe("connect error classes", () => {
 		["ECONNRESET", "reset"],
 		["EPIPE", "reset"],
 		["SOURCE_STALLED", "stalled"],
+		["SOURCE_PEER_CLOSED", "closed"],
 	])("%s is %s", (code, cls) => {
 		expect(connectErrorClass(withCode(code))).toBe(cls)
 	})
@@ -259,6 +260,121 @@ describe("SourceManager connect failure across accepted connections", () => {
 				},
 				{ timeout: 15_000, interval: 5 },
 			)
+		},
+	)
+})
+
+const IQ_CAPS = {
+	kind: "iq" as const,
+	sampleRate: 2_048_000,
+	format: "U8_IQ" as const,
+	exclusive: false,
+}
+
+describe("SourceManager connect failure: peer close and pause", () => {
+	it(
+		"a peer close without an error counts as an attempt of class closed",
+		{ timeout: 20_000 },
+		async () => {
+			const manager = new SourceManager(log)
+			manager.on("error", () => {})
+			vi.spyOn(Math, "random").mockReturnValue(0)
+			const sockets = new Set<net.Socket>()
+			// Accept, then a clean FIN before sending anything.
+			const server = net.createServer(socket => {
+				sockets.add(socket)
+				socket.on("error", () => {})
+				socket.end()
+			})
+			server.listen(0, "127.0.0.1")
+			await once(server, "listening")
+			const port = (server.address() as net.AddressInfo).port
+			cleanup.push(async () => {
+				await manager.disconnectAll()
+				for (const socket of sockets) socket.destroy()
+				await new Promise<void>(resolve => server.close(() => resolve()))
+			})
+			await manager
+				.connect({
+					id: "rtl",
+					type: "rtl_tcp",
+					host: "127.0.0.1",
+					port,
+					loop: false,
+					playbackSpeed: 1,
+					stallTimeoutMs: 0,
+					caps: IQ_CAPS,
+				})
+				.catch(() => undefined)
+			await vi.waitFor(
+				() => {
+					expect(
+						manager.getStatus("rtl")?.connectFailure?.attempts,
+					).toBeGreaterThanOrEqual(2)
+				},
+				{ timeout: 15_000, interval: 20 },
+			)
+			const failure = manager.getStatus("rtl")?.connectFailure
+			expect(failure?.errorClass).toBe("closed")
+			expect(failure?.hint).toBe(
+				`127.0.0.1:${port} ended the connection: the server stopped or dropped this client.`,
+			)
+		},
+	)
+
+	it(
+		"a pause clears the record and its own clean close counts nothing",
+		{ timeout: 20_000 },
+		async () => {
+			const port = await closedPort()
+			const manager = new SourceManager(log)
+			manager.on("error", () => {})
+			cleanup.push(() => manager.disconnectAll())
+			await manager
+				.connect({
+					id: "rtl",
+					type: "rtl_tcp",
+					host: "127.0.0.1",
+					port,
+					loop: false,
+					playbackSpeed: 1,
+					stallTimeoutMs: 0,
+					caps: IQ_CAPS,
+				})
+				.catch(() => undefined)
+			expect(manager.getStatus("rtl")?.connectFailure?.errorClass).toBe(
+				"refused",
+			)
+			await manager.pause("rtl")
+			expect(manager.getStatus("rtl")?.connectFailure).toBeUndefined()
+
+			// A connected feed paused: the deliberate clean close is no failure.
+			const sockets = new Set<net.Socket>()
+			const server = net.createServer(socket => {
+				sockets.add(socket)
+				socket.on("error", () => {})
+				socket.on("end", () => socket.end())
+				// The header, then a first payload.
+				socket.write(
+					Buffer.concat([
+						Buffer.from("RTL0\0\0\0\x05\0\0\0\x1d", "binary"),
+						Buffer.alloc(512, 127),
+					]),
+				)
+			})
+			server.listen(port, "127.0.0.1")
+			await once(server, "listening")
+			cleanup.push(async () => {
+				for (const socket of sockets) socket.destroy()
+				await new Promise<void>(resolve => server.close(() => resolve()))
+			})
+			const payload = once(manager, "payload-started")
+			await manager.resume("rtl")
+			await payload
+			expect(manager.getStatus("rtl")?.connectFailure).toBeUndefined()
+			await manager.pause("rtl")
+			expect(manager.getStatus("rtl")?.connected).toBe(false)
+			expect(manager.getStatus("rtl")?.connectFailure).toBeUndefined()
 		},
 	)
 })
