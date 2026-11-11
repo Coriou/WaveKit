@@ -52,8 +52,12 @@ describe("source rate truth", () => {
 
 	/** Delivers one metrics interval of IQ at `actualHz` and runs the tick. */
 	async function interval(actualHz: number) {
+		await intervalBytes(Math.round((actualHz * 2 * TICK) / 1000))
+	}
+
+	/** Delivers one metrics interval of `bytes` IQ bytes and runs the tick. */
+	async function intervalBytes(bytes: number) {
 		const before = manager.getStatus("iq")!.bytesReceived
-		const bytes = Math.round((actualHz * 2 * TICK) / 1000)
 		sockets[0]!.write(Buffer.alloc(bytes))
 		await vi.waitFor(() =>
 			expect(manager.getStatus("iq")!.bytesReceived).toBe(before + bytes),
@@ -80,6 +84,59 @@ describe("source rate truth", () => {
 		for (let i = 0; i < 6; i++) await interval(DECLARED)
 		expect(manager.getStatus("iq")!.rateMismatch).toBeUndefined()
 		expect(changes).toEqual(["iq", "iq"])
+	}, 20_000)
+
+	it("doubts the rate from the session start when the wrong rate held from connect", async () => {
+		await connect()
+		const ledger = manager.tuningLedger
+		await interval(2_160_000) // not trusted, yet already at the wrong rate
+		expect(ledger.position("iq")!.pos).toBeGreaterThan(0)
+		for (let i = 0; i < 6; i++) await interval(2_160_000)
+		expect(manager.getStatus("iq")!.rateMismatch).toBeDefined()
+		const doubt = ledger.doubts("iq").at(-1)!
+		expect(doubt).toMatchObject({
+			field: "sampleRate",
+			reason: "rate-truth-mismatch",
+		})
+		// No agreeing interval was ever measured: the wrong rate may hold from the start.
+		expect(doubt.pos).toBe(0)
+	}, 20_000)
+
+	it("doubts the rate from the agreeing interval in which the rate changed part-way", async () => {
+		await connect()
+		const ledger = manager.tuningLedger
+		await interval(DECLARED) // not trusted
+		await interval(DECLARED)
+		await interval(DECLARED)
+		// Interval k: 70 % at the declared rate, then 30 % at a faster one. The mean
+		// deviates 0.3 × 5.5 % ≈ 1.6 %, inside the 2 % tolerance, so k still agrees.
+		const startOfK = ledger.position("iq")!.pos
+		const perTick = (hz: number) => (hz * 2 * TICK) / 1000
+		await intervalBytes(
+			Math.round(0.7 * perTick(DECLARED) + 0.3 * perTick(2_160_000)),
+		)
+		expect(manager.getStatus("iq")!.rateMismatch).toBeUndefined()
+		for (let i = 0; i < 6; i++) await interval(2_160_000)
+		expect(manager.getStatus("iq")!.rateMismatch).toBeDefined()
+		const doubt = ledger.doubts("iq").at(-1)!
+		expect(doubt.reason).toBe("rate-truth-mismatch")
+		expect(doubt.pos).toBeLessThanOrEqual(startOfK)
+		expect(doubt.pos).toBeGreaterThan(0)
+	}, 20_000)
+
+	it("doubts the rate from the session start when an invalid interval came after the last agreeing one", async () => {
+		await connect()
+		const ledger = manager.tuningLedger
+		await interval(DECLARED) // not trusted
+		await interval(DECLARED)
+		await interval(DECLARED)
+		// An interval with nothing delivered measures no rate: agreement before it says
+		// nothing about what the receiver ran after it.
+		now += TICK
+		;(manager as unknown as { emitMetrics(id: string): void }).emitMetrics("iq")
+		for (let i = 0; i < 6; i++) await interval(2_160_000)
+		expect(manager.getStatus("iq")!.rateMismatch).toBeDefined()
+		expect(ledger.doubts("iq").at(-1)!.pos).toBe(0)
 	}, 20_000)
 
 	it("does not flag a connected source that sends nothing (e.g. rtlmux without dongle)", async () => {
@@ -120,4 +177,90 @@ describe("source rate truth", () => {
 		}
 		expect(manager.getStatus("iq")!.rateMismatch).toBeUndefined()
 	}, 20_000)
+	it("while a mismatch stands no rate receipt proves the rate; its clear lets one prove again", async () => {
+		await connect()
+		const ledger = manager.tuningLedger
+		const rateFrame = Buffer.from([0x02, 0, 0, 0, 0])
+		rateFrame.writeUInt32BE(DECLARED, 1)
+		const freqFrame = Buffer.from([0x01, 0x05, 0xf5, 0xe1, 0x00])
+		await interval(2_160_000) // not trusted
+		for (let i = 0; i < 6; i++) await interval(2_160_000)
+		expect(manager.getStatus("iq")!.rateMismatch).toBeDefined()
+		expect(ledger.fieldState("iq").sampleRate.hold).toEqual({
+			reason: "rate-truth-mismatch",
+			answered: false,
+			withoutHold: "unverified",
+		})
+		// A re-write of the rate (assert's answer) is receipted, but proves nothing while flagged.
+		manager.writeToSource("iq", Buffer.concat([freqFrame, rateFrame]), {
+			writer: "assert",
+		})
+		await vi.waitFor(() =>
+			expect(ledger.receipts("iq").map(r => r.field)).toContain("sampleRate"),
+		)
+		await interval(2_160_000)
+		const held = ledger.fieldState("iq").sampleRate
+		expect(held).toMatchObject({
+			state: "unverified",
+			reason: "doubt",
+			doubtReason: "rate-truth-mismatch",
+			hold: { answered: true, withoutHold: "proven" },
+		})
+		expect(ledger.trustNow("iq")).toMatchObject({
+			trust: "unverified",
+			doubtReason: "rate-truth-mismatch",
+		})
+		for (let i = 0; i < 6; i++) await interval(DECLARED)
+		expect(manager.getStatus("iq")!.rateMismatch).toBeUndefined()
+		expect(ledger.fieldState("iq").sampleRate.state).toBe("proven")
+		expect(ledger.fieldState("iq").sampleRate.hold).toBeUndefined()
+	}, 30_000)
+	it("a signal-flat clear leaves a standing rate-truth hold in place", async () => {
+		await connect()
+		const ledger = manager.tuningLedger
+		const rateFrame = Buffer.from([0x02, 0, 0, 0, 0])
+		rateFrame.writeUInt32BE(DECLARED, 1)
+		const freqFrame = Buffer.from([0x01, 0x05, 0xf5, 0xe1, 0x00])
+		// One interval of the wrong rate: bytes alternating 127/128 are flat (−48 dBFS), 120/135 not.
+		const wrong = Math.round((2_160_000 * 2 * TICK) / 1000)
+		const flat = () =>
+			sockets[0]!.write(Buffer.alloc(wrong, Buffer.from([127, 128])))
+		const level = () =>
+			sockets[0]!.write(Buffer.alloc(wrong, Buffer.from([120, 135])))
+		async function intervalOf(write: () => void) {
+			const before = manager.getStatus("iq")!.bytesReceived
+			write()
+			await vi.waitFor(() =>
+				expect(manager.getStatus("iq")!.bytesReceived).toBe(before + wrong),
+			)
+			now += TICK
+			;(manager as unknown as { emitMetrics(id: string): void }).emitMetrics(
+				"iq",
+			)
+		}
+		for (let i = 0; i < 7; i++) await intervalOf(level)
+		expect(manager.getStatus("iq")!.rateMismatch).toBeDefined()
+		// Assert answers the mismatch: receipted, proves nothing while it stands.
+		manager.writeToSource("iq", Buffer.concat([freqFrame, rateFrame]), {
+			writer: "assert",
+		})
+		await vi.waitFor(() =>
+			expect(ledger.receipts("iq").map(r => r.field)).toContain("sampleRate"),
+		)
+		for (let i = 0; i < 6; i++) await intervalOf(flat)
+		expect(manager.getStatus("iq")!.signalFlat).toBeDefined()
+		for (let i = 0; i < 6; i++) await intervalOf(level)
+		expect(manager.getStatus("iq")!.signalFlat).toBeUndefined()
+		// Still the wrong rate: the hold stands.
+		expect(manager.getStatus("iq")!.rateMismatch).toBeDefined()
+		expect(ledger.fieldState("iq").sampleRate).toMatchObject({
+			state: "unverified",
+			reason: "doubt",
+			doubtReason: "rate-truth-mismatch",
+		})
+		expect(ledger.trustNow("iq")).toMatchObject({
+			trust: "unverified",
+			doubtReason: "rate-truth-mismatch",
+		})
+	}, 30_000)
 })

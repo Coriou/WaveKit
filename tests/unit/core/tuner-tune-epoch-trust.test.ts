@@ -386,9 +386,10 @@ describe("the spectrum epoch after a tune", { timeout: 30_000 }, () => {
 		await h.transmissionAdmitted()
 	})
 
-	it("a declared centre and rate a tune writes in place become commanded", async () => {
+	it("a declared centre and rate a tune writes in place stay commanded", async () => {
 		const h = await setup()
-		await h.trustBecomes("unverified")
+		// The connect's assert wrote the declared centre and rate: commanded before any tune.
+		await h.trustBecomes("commanded")
 		const res = await h.post("tune", {
 			frequencyHz: START_HZ,
 			sampleRateHz: START_RATE,
@@ -420,10 +421,10 @@ describe("the spectrum epoch after a tune", { timeout: 30_000 }, () => {
 	})
 
 	it("a proven command after an unproven one during a restart leaves a commanded epoch", async () => {
-		// Declared centre and rate: the rate written in place first is unproven (the centre is still
-		// only declared), the centre written next proves both.
+		// Declared centre and rate, asserted on connect; the rate and the centre written in place
+		// again during a restart keep the label commanded.
 		const h = await setup()
-		await h.trustBecomes("unverified")
+		await h.trustBecomes("commanded")
 		const release = h.holdRestart()
 		const restart = h.engine.reconfigure()
 		expect((await h.post("sample-rate", { hz: START_RATE })).statusCode).toBe(
@@ -441,7 +442,8 @@ describe("the spectrum epoch after a tune", { timeout: 30_000 }, () => {
 
 	it("two commands during one restart post in order with the newest label", async () => {
 		const h = await setup()
-		await h.trustBecomes("unverified")
+		// Commanded from the connect's assert of the declared centre and rate.
+		await h.trustBecomes("commanded")
 		const before = h.engine.currentEpoch()
 		const release = h.holdRestart()
 		const restart = h.engine.reconfigure()

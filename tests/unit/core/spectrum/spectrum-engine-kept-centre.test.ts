@@ -250,7 +250,7 @@ describe("kept commands and scanner hops across a restart or a queued boundary",
 		}
 	})
 
-	it("replay behind a boundary still buffered, then a scanner hop: the new stream stays unverified at the hop", async () => {
+	it("a reconnect behind a boundary still buffered, then a scanner hop: no stale centre, the hop commands both fields", async () => {
 		const t = await ready()
 		const held = lease(t)
 		const branch = t.fanout.branches.get("scanner-rtl")!.stream
@@ -271,9 +271,11 @@ describe("kept commands and scanner hops across a restart or a queued boundary",
 			expect(t.streams().at(-1)).toBe("unverified")
 			const posted = t.epochs().slice(before)
 			expect(posted.filter(e => staleCommanded(e, caps))).toEqual([])
-			expect(posted.at(-1)).toMatchObject({
+			// No replay under the lease (assert rule 2): the hop is the last epoch, and it wrote the
+			// rate too (unproven on the new connection), so it is commanded at its own centre.
+			expect(t.epochs().at(-1)).toMatchObject({
 				centreHz: HOP,
-				tuningTrust: "unverified",
+				tuningTrust: "commanded",
 			})
 		} finally {
 			branch.resume()

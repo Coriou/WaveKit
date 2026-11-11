@@ -197,6 +197,24 @@ const lastTuneSchema = {
 	required: ["at", "usable", "applied", "notApplied"],
 } as const
 
+/** TunerState.proof's per-field entry (the tuning ledger's verdict on the live connection). */
+const fieldProofSchema = {
+	type: "object",
+	properties: {
+		state: {
+			type: "string",
+			enum: ["unverified", "settling", "commanded", "relay"],
+		},
+		writer: {
+			type: ["string", "null"],
+			enum: ["operator", "scanner", "assert", "relay", null],
+		},
+		session: { type: ["integer", "null"] },
+		reason: { type: "string" },
+	},
+	required: ["state", "writer", "session"],
+} as const
+
 const tunerStateSchema = {
 	type: "object",
 	properties: {
@@ -248,6 +266,15 @@ const tunerStateSchema = {
 		},
 		restore: tuneRestoreSchema,
 		lastTune: lastTuneSchema,
+		proof: {
+			type: "object",
+			properties: {
+				frequency: fieldProofSchema,
+				sampleRate: fieldProofSchema,
+				assertFights: { type: "integer" },
+			},
+			required: ["frequency", "sampleRate"],
+		},
 	},
 	required: [
 		"sourceId",

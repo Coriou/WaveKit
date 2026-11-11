@@ -125,6 +125,7 @@ import type {
 } from "./core/channelizer/settlement-observer.js"
 import { ScannerLifecycleOwner } from "./core/scanner/channel/consumer-lifecycle.js"
 import { ScannerService } from "./core/scanner/scanner-service.js"
+import { settleLinkOf } from "./core/spectrum/network-settle.js"
 import {
 	createChannelActivityRanker,
 	type ChannelActivityRanker,
@@ -1311,6 +1312,13 @@ async function main(): Promise<void> {
 			signalFlatHoldMs: config.health?.signalFlatHoldMs,
 			// Paused feeds persist in <stateDir>/source-feed.json across restarts.
 			stateDir: config.stateDir,
+			// Tuning-ledger settle: the live settle of the source's link, the value the arbiter
+			// reads (the scanner's current settings once it exists, else the configured ones).
+			tuningSettleMs: sourceId => {
+				const cfg = config.sources.find(c => c.id === sourceId)
+				const sweep = (scanner?.settings() ?? config.scanner).sweep
+				return sweep.settleMs[settleLinkOf(cfg)]
+			},
 		})
 		own(100, async () => {
 			await disposeReceiverAfterApi()
@@ -1409,6 +1417,7 @@ async function main(): Promise<void> {
 		own(80, () => tunerRelay.stop())
 		const tunerController = new TunerController(logger, sourceManager, {
 			reconnectPolicy: config.tuner.reconnectPolicy,
+			writeDeclaredTuningOnConnect: config.tuner.writeDeclaredTuningOnConnect,
 			lostOwnership,
 			receiverIdentity: id =>
 				receiverTracked(id) ? receiverIdentity.provisional(id) : undefined,

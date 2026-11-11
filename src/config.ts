@@ -315,8 +315,20 @@ export const TunerConfigSchema = z.object({
 	 * On rtl_tcp reconnect: "restore" re-sends the last accepted tuner state;
 	 * "reset" sends nothing and resets tuner state/source caps to the configured
 	 * baseline (use when another operator may own the receiver after an outage).
+	 * Under "reset" the centre and rate are never written from the declared
+	 * config/caps values (as if writeDeclaredTuningOnConnect were false), and only
+	 * values accepted on the current connection are written back after a doubt.
 	 */
 	reconnectPolicy: z.enum(["restore", "reset"]).default("restore"),
+	/**
+	 * Every new connection starts unproven: the core writes the centre and rate it holds (the last
+	 * accepted ones, else the declared config/caps values) unless a relay client is attached or a
+	 * scanner lease holds the tuner (its hop is re-sent). False: the declared fallback is never
+	 * written (a field nothing accepted stays unverified until set); accepted values are still
+	 * written. A plain resume of a paused feed and reconnectPolicy "reset" also turn the declared
+	 * fallback off (values accepted since are still written).
+	 */
+	writeDeclaredTuningOnConnect: z.boolean().default(true),
 	/**
 	 * Per-band gain table (src/core/band-gain-schema.ts states the defaults and their
 	 * reasons). Scanner hops, dwells and jobs apply it; an operator retune applies it only

@@ -152,7 +152,63 @@ export interface SpectrumSourceStatus {
 	summaryHz: number | null
 	/** The latest block summary at the default profile. */
 	latestFrame: SpectrumFrameEventData | null
+	/**
+	 * Tuning-ledger shadow: block summaries the ledger labelled like the engine (`agree`), stricter
+	 * (`ledgerStricter`: unverified where the engine trusts), looser (`ledgerLooser`), or with
+	 * another label, centre or rate (`mismatch`). Diagnostics only; absent without a ledger.
+	 */
+	trustShadow?: SpectrumTrustShadow
 	lastError?: string
+}
+
+export interface SpectrumTrustShadow {
+	agree: number
+	ledgerStricter: number
+	ledgerLooser: number
+	mismatch: number
+	/** The last 32 disagreements, oldest first (older ones stay in the counters). */
+	disagreements: SpectrumTrustDisagreement[]
+	/**
+	 * Measured delay from a centre or rate frame's flush to the first block summary whose content
+	 * shows the change (payload bytes, and ms at the engine's rate; lower bounds, with upper-bound
+	 * maxima beside them). p50 and max over the last 64; null before the first. `undetected`: changes not seen (a quiet band, another
+	 * bin grid, a newer frame first, or nothing within 5 s of payload). Diagnostics only.
+	 */
+	retuneDelay?: SpectrumRetuneDelay
+}
+
+export interface SpectrumRetuneDelay {
+	count: number
+	p50Ms: number | null
+	maxMs: number | null
+	p50Bytes: number | null
+	maxBytes: number | null
+	/**
+	 * Upper bounds over the same measurements (flush to the end of the detecting block): the change
+	 * showed no later than this. Optional: absent on cores before 2026-11-11.
+	 */
+	maxMsUpper?: number | null
+	maxBytesUpper?: number | null
+	undetected: number
+}
+
+export interface SpectrumTrustDisagreement {
+	kind: "ledger-stricter" | "ledger-looser" | "mismatch"
+	at: string
+	/** Ledger session and payload-position bounds the block was read at (null: not mapped). */
+	session: number | null
+	posA: number | null
+	posB: number | null
+	engineTrust: "commanded" | "relay" | "unverified"
+	ledgerTrust: "commanded" | "relay" | "unverified"
+	engineCentreHz: number
+	ledgerCentreHz: number | null
+	engineSampleRateHz: number
+	ledgerSampleRateHz: number | null
+	/** Fixed code of the ledger's first failing check (e.g. "settling", "doubt", "before-session"). */
+	reason?: string
+	/** The doubt's fixed reason when `reason` is "doubt" (e.g. "untracked-retune"). */
+	doubtReason?: string
 }
 
 /** `options.spectrum` of a WS `subscribe` that includes "spectrum". Omitted options = the default selection. */

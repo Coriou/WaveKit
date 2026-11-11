@@ -100,6 +100,8 @@ export type ArbiterTuner = Pick<
 			| "noteBandGainApplied"
 			| "gainChoiceCount"
 			| "holdBandGainFor"
+			| "setLeaseView"
+			| "requestAssert"
 		>
 	>
 
@@ -237,6 +239,19 @@ export class TunerArbiter extends EventEmitter {
 	private readonly gainRecoveryRunning = new Set<string>()
 	/** Sources with TEST_MODE 1 sent and no successful TEST_MODE 0 since. */
 	private readonly markerOpen = new Set<string>()
+	/** The job target of each lease's latest hop: what a re-send writes (resendHop). */
+	private readonly hopTargets = new WeakMap<
+		Lease,
+		{
+			centreHz: number
+			gainTenthsDb: number | null
+			sampleRateHz: number | null
+		}
+	>()
+	/** Retunes running per lease (a re-send waits for them: their frames prove the session). */
+	private readonly retuning = new WeakMap<Lease, number>()
+	/** Leases asked for a re-send while a retune ran: the controller re-checks once it ends. */
+	private readonly resendAsked = new WeakSet<Lease>()
 	/**
 	 * Tuner fields actually on the device after the lease's last successful retune.
 	 * A drift from these (or from `lease.verified`) means the next retune writes.
@@ -322,6 +337,15 @@ export class TunerArbiter extends EventEmitter {
 					deps.sources.off("payload-started", this.onPayloadStarted)
 				},
 			)
+			// Assert rule 2: while a lease is held (or handed back) the controller writes no centre or
+			// rate on an unproven session; the holder re-sends its hop instead.
+			deps.tuner.setLeaseView?.call(deps.tuner, {
+				holds: sourceId =>
+					this.leases.has(sourceId) ||
+					this.releasing.has(sourceId) ||
+					this.recoveryRunning.has(sourceId),
+				resend: sourceId => this.resendHop(sourceId),
+			})
 		} catch (error: unknown) {
 			// Parent captured every remover before effects. Cleanup failure cannot replace the
 			// original exception; that parent's retained inventory can attempt the failed remover.
@@ -355,6 +379,7 @@ export class TunerArbiter extends EventEmitter {
 	}
 
 	dispose(): void {
+		this.deps.tuner.setLeaseView?.call(this.deps.tuner, null)
 		let first: unknown
 		let failed = false
 		for (const registration of this.constructorListeners) {
@@ -492,6 +517,58 @@ export class TunerArbiter extends EventEmitter {
 	}
 
 	async retune(
+		lease: Lease,
+		jobTarget: {
+			centreHz: number
+			gainTenthsDb: number | null
+			sampleRateHz: number | null
+		},
+		allowed?: () => boolean,
+	): Promise<PendingEpoch & { skipped?: true }> {
+		// The latest hop's target, for a re-send on an unproven session (resendHop).
+		if (this.leases.get(lease.sourceId) === lease && !this.lost.has(lease))
+			this.hopTargets.set(lease, { ...jobTarget })
+		this.retuning.set(lease, (this.retuning.get(lease) ?? 0) + 1)
+		try {
+			return await this.retuneHop(lease, jobTarget, allowed)
+		} finally {
+			const left = (this.retuning.get(lease) ?? 1) - 1
+			if (left > 0) this.retuning.set(lease, left)
+			else {
+				this.retuning.delete(lease)
+				// A retune that failed with the connection proves nothing: the check runs again.
+				if (this.resendAsked.delete(lease))
+					this.deps.tuner.requestAssert?.call(this.deps.tuner, lease.sourceId)
+			}
+		}
+	}
+
+	/**
+	 * Assert rule 2 (the controller asks when the lease's source has a new session or a doubt and
+	 * nothing proves its centre or rate): the holder re-sends its latest hop, the rate too while
+	 * unproven. Nothing while a retune of the lease is running (its frames prove the session) or
+	 * before the lease's first hop. Never throws.
+	 */
+	private resendHop(sourceId: string): void {
+		const lease = this.leases.get(sourceId)
+		if (!lease || this.lost.has(lease)) return
+		const target = this.hopTargets.get(lease)
+		if (!target) return
+		if ((this.retuning.get(lease) ?? 0) > 0) {
+			this.resendAsked.add(lease)
+			return
+		}
+		// The acceptance is stale: the same centre must write.
+		this.clearVerified(lease)
+		void this.retune(lease, target).catch((err: unknown) => {
+			this.log.warn(
+				{ err, sourceId, jobId: lease.jobId },
+				"Re-sending the lease's hop on an unproven connection failed",
+			)
+		})
+	}
+
+	private async retuneHop(
 		lease: Lease,
 		jobTarget: {
 			centreHz: number
@@ -723,6 +800,8 @@ export class TunerArbiter extends EventEmitter {
 			return await this.releaseHeld(lease, opts)
 		} finally {
 			this.releasing.delete(lease.sourceId)
+			// Assert trigger: an unproven centre or rate goes back to the held value (rule 3).
+			this.deps.tuner.requestAssert?.call(this.deps.tuner, lease.sourceId)
 		}
 	}
 
@@ -1416,6 +1495,7 @@ export class TunerArbiter extends EventEmitter {
 			})
 			.finally(() => {
 				this.recoveryRunning.delete(sourceId)
+				this.deps.tuner.requestAssert?.call(this.deps.tuner, sourceId)
 			})
 		return true
 	}

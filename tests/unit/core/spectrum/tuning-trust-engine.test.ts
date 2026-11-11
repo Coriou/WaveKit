@@ -203,7 +203,8 @@ describe("spectrum engine tuning trust (WG9 req 3.1, 3.2)", () => {
 		expect(t.streams()).toEqual(["commanded"])
 		t.sources.emit("disconnected", "rtl")
 		t.sources.emit("payload-started", "rtl")
-		t.tuner.synchronizeOnConnect("rtl") // caps back to the baseline centre
+		// Caps back to the baseline centre; the reset policy writes no declared value.
+		t.tuner.synchronizeOnConnect("rtl")
 		await settle()
 		expect(t.streams()).toEqual(["commanded", "unverified"])
 		expect(t.epochs().at(-1)).toMatchObject({
@@ -277,7 +278,7 @@ describe("spectrum engine tuning trust (WG9 req 3.1, 3.2)", () => {
 		await r.tuner.setSampleRate("rtl", 2_048_000)
 		await r.tuner.setFrequency("rtl", 446_200_000)
 		await r.engine.start()
-		r.tuner.synchronizeOnConnect("rtl") // baseline rate comes back
+		r.tuner.synchronizeOnConnect("rtl") // baseline rate comes back, not written (reset)
 		await settleRestart()
 		expect(r.streams()).toEqual(["commanded", "unverified"])
 		await r.engine.stop()

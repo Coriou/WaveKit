@@ -258,6 +258,14 @@ export interface UntrackedRetuneEvent {
 	kind: "untracked-retune"
 	epoch: number
 	startSample: number
+	/**
+	 * Start sample of the reference block the alarm compared against (the move lies after it,
+	 * even when the alarm was held pending for blocks). Absent: the engine reaches back the
+	 * pipeline's alarm wait from `startSample`.
+	 */
+	referenceStartSample?: number
+	/** The engine stream `startSample` counts in (absent: unknown, mapped strictest). */
+	stream?: number
 	deltaHz: number | null
 	/** WG10 req 2.9: the alarm's classification (absent: `external-control`). */
 	suspected?: SpectrumWarningSuspect

@@ -59,6 +59,7 @@ import { PROVISIONAL_WINDOW_MS, ProvisionalSpurs } from "./provisional-spurs.js"
 import type { BinRange } from "./provisional-spurs.js"
 import {
 	ALARM_FEATURE_MARGIN_DB,
+	alarmWaitBlocksOf,
 	classifyAlarm,
 	untrackedRetuneAlarm,
 	vanishedFeatures,
@@ -327,6 +328,11 @@ export class SpectrumPipeline {
 	private readonly mergedDb: Float32Array
 	private floorReady = false
 	private prevPersistent: PersistentFeature[] = []
+	/**
+	 * Start sample of the block whose features are `prevPersistent` (the alarm's reference): an
+	 * untracked move lies after it, however many blocks a pending alarm was held.
+	 */
+	private prevPersistentStart = 0
 	private readonly alarmStrength = new Map<string, number>()
 	/** WG10 req 2.9: open and just-closed tracks for the transmission-end classifier. */
 	private readonly trackInfo = new Map<
@@ -521,7 +527,11 @@ export class SpectrumPipeline {
 		const hangBlocks = Math.max(1, Math.round(cfg.trackHangMs / this.blockMs))
 		this.hangSamples = hangBlocks * this.blockSamples
 		// The strong track closes one hang after it vanished; its close is visible a block later.
-		this.alarmWaitBlocks = hangBlocks + 2
+		this.alarmWaitBlocks = alarmWaitBlocksOf(
+			cfg.trackHangMs,
+			this.blockSamples,
+			this.fs,
+		)
 		this.fft = new Fft(this.n)
 		this.floor = new NoiseFloor({
 			fftSize: this.n,
@@ -1655,6 +1665,8 @@ export class SpectrumPipeline {
 						kind: "untracked-retune",
 						epoch: ep.epoch,
 						startSample: blockEnd,
+						referenceStartSample: this.prevPersistentStart,
+						stream: ep.stream,
 						deltaHz: null,
 						suspected,
 						newEpoch: false,
@@ -1663,7 +1675,13 @@ export class SpectrumPipeline {
 					// WG10 R1 M1: a suspected byte slip is only a label. A dense-band retune can look
 					// mirrored, and an automatic one-byte re-align on an aligned stream would swap
 					// I/Q for good: every alarm but signal-change is the frozen untracked epoch.
-					this.startUntrackedEpoch(ep, blockEnd, alarm.deltaHz, suspected)
+					this.startUntrackedEpoch(
+						ep,
+						blockEnd,
+						alarm.deltaHz,
+						suspected,
+						this.prevPersistentStart,
+					)
 					if (sample) this.closeSample()
 					return
 				}
@@ -1733,7 +1751,10 @@ export class SpectrumPipeline {
 			// Qualification follows every valid block, even while classification holds
 			// the old reference scene. A returning feature must earn a fresh window.
 			const currentPersistent = this.persistentFeatures(trackSegs, ep)
-			if (!holdPersistent) this.prevPersistent = currentPersistent
+			if (!holdPersistent) {
+				this.prevPersistent = currentPersistent
+				this.prevPersistentStart = blockStart
+			}
 		}
 		if (learn) {
 			this.tracker.trackBinsMask(this.joined, 2)
@@ -2023,6 +2044,7 @@ export class SpectrumPipeline {
 		startSample: number,
 		deltaHz: number | null,
 		suspected: AlarmSuspect,
+		referenceStartSample: number,
 	): void {
 		const epoch = ++this.epochCounter
 		const info = {
@@ -2049,7 +2071,9 @@ export class SpectrumPipeline {
 		this.out.push({
 			kind: "untracked-retune",
 			epoch,
+			stream: ep.stream,
 			startSample,
+			referenceStartSample,
 			deltaHz,
 			suspected,
 		})

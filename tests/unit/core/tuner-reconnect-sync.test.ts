@@ -94,7 +94,25 @@ describe("TunerController reconnect synchronization", () => {
 		return controller.synchronizeOnConnect("rtl-1")
 	}
 
-	it("writes nothing when only config defaults exist", () => {
+	it("asserts the declared rate and centre when only config defaults exist", () => {
+		// Nothing proves them on the new connection and nothing was accepted: assert writes the
+		// declared values (tuner.writeDeclaredTuningOnConnect, default true).
+		const result = reconnect()
+		expect(result.commands).toEqual(["set-sample-rate", "set-frequency"])
+		expect(transport.frames).toEqual([
+			[0x02, 2_048_000],
+			[0x01, 100_000_000],
+		])
+		expect(controller.getState("rtl-1")?.commandCount).toBe(2)
+	})
+
+	it("writes nothing when only config defaults exist and the declared fallback is off", () => {
+		controller = new TunerController(
+			testLogger,
+			transport as unknown as SourceManager,
+			{ writeDeclaredTuningOnConnect: false },
+		)
+		controller.initializeSource("rtl-1", { ...transport.caps }, "rtl_tcp")
 		const result = reconnect()
 		expect(result.commands).toEqual([])
 		expect(transport.frames).toEqual([])
@@ -134,6 +152,9 @@ describe("TunerController reconnect synchronization", () => {
 		await controller.setGainMode("rtl-1", "agc")
 		reconnect()
 		expect(transport.frames).toEqual([
+			// Assert: the declared rate and centre (none accepted), in the replay's place.
+			[0x02, 2_048_000],
+			[0x01, 100_000_000],
 			[0x04, 250],
 			[0x03, 0],
 		])
@@ -148,6 +169,8 @@ describe("TunerController reconnect synchronization", () => {
 		controller.synchronizeOnConnect("rtl-1") // first payload arrives
 		expect(transport.frames).toEqual([
 			[0x03, 0], // gap command
+			[0x02, 2_048_000], // assert: the declared rate and centre
+			[0x01, 100_000_000],
 			[0x04, 250], // replay, acceptance order: older manual gain first...
 			[0x03, 0], // ...then the newer AGC selection, which wins
 		])
@@ -157,7 +180,11 @@ describe("TunerController reconnect synchronization", () => {
 		await controller.setTunerIfGain("rtl-1", 1, 30)
 		await controller.configure("rtl-1", { tunerIfGain: null })
 		reconnect()
-		expect(transport.frames).toEqual([])
+		// No IF gain frame; only assert's declared rate and centre.
+		expect(transport.frames).toEqual([
+			[0x02, 2_048_000],
+			[0x01, 100_000_000],
+		])
 	})
 
 	it("does not emit caps-changed (no decoder restart) when metadata already matches", async () => {
@@ -184,8 +211,12 @@ describe("TunerController reconnect synchronization", () => {
 		transport.caps.sampleRate = 3_500_000
 		transport.caps.centerFreq = 446_866_968
 		const result = reconnect()
-		expect(result.commands).toEqual([])
-		expect(transport.frames).toEqual([])
+		// Assert writes the declared values, and caps follow them.
+		expect(result.commands).toEqual(["set-sample-rate", "set-frequency"])
+		expect(transport.frames).toEqual([
+			[0x02, 2_048_000],
+			[0x01, 100_000_000],
+		])
 		expect(transport.capsChanges).toEqual([
 			{ sampleRate: 2_048_000, centerFreq: 100_000_000 },
 		])
@@ -257,13 +288,20 @@ describe("TunerController reconnect synchronization", () => {
 					gainDb: 30,
 					agcMode: false,
 				})
-				// The first connection writes the configured gain.
+				// The first connection writes the configured gain, then assert the declared tuning
+				// (none under the reset policy).
 				controller.noteSourceConnected("rtl-1")
 				controller.synchronizeOnConnect("rtl-1")
 				expect(transport.frames).toEqual([
 					[0x03, 1],
 					[0x04, 300],
 					[0x08, 0],
+					...(reconnectPolicy === "restore"
+						? [
+								[0x02, 2_048_000],
+								[0x01, 100_000_000],
+							]
+						: []),
 				])
 				controller.noteFeedPaused("rtl-1")
 				controller.noteSourceConnected("rtl-1")
@@ -291,10 +329,15 @@ describe("TunerController reconnect synchronization", () => {
 				controller.noteSourceConnected("rtl-1")
 				transport.frames.length = 0
 				controller.synchronizeOnConnect("rtl-1")
+				// Without the hold assert writes the declared rate and centre again, after the
+				// configured frames and before the replayed gain; under the reset policy this
+				// dropout after the restore resume writes no declared value (the policy again).
 				expect(transport.frames).toEqual(
 					reconnectPolicy === "restore"
 						? [
 								[0x08, 0],
+								[0x02, 2_048_000],
+								[0x01, 100_000_000],
 								[0x04, 400],
 							]
 						: [
@@ -442,8 +485,13 @@ describe("TunerController reconnect synchronization", () => {
 			await tuneAndPause()
 			resume("plain")
 			controller.noteFeedPaused("rtl-1")
-			expect(resume("restore").commands).toEqual([])
-			expect(controller.getState("rtl-1")!.unknownFields).toContain("frequency")
+			// Nothing accepted is left to restore: assert writes the declared values instead.
+			expect(resume("restore").commands).toEqual([
+				"set-sample-rate",
+				"set-frequency",
+			])
+			expect(transport.frames).not.toContainEqual([0x01, 145_000_000])
+			expect(controller.getState("rtl-1")!.frequency).toBe(100_000_000)
 		})
 
 		it("restore under the reset policy still restores", async () => {
@@ -455,7 +503,15 @@ describe("TunerController reconnect synchronization", () => {
 			controller.initializeSource("rtl-1", { ...transport.caps }, "rtl_tcp")
 			await controller.setFrequency("rtl-1", 145_000_000)
 			controller.noteFeedPaused("rtl-1")
-			expect(resume("restore").commands).toEqual(["set-frequency"])
+			// The declared rate (nothing accepted) and the accepted centre.
+			expect(resume("restore").commands).toEqual([
+				"set-sample-rate",
+				"set-frequency",
+			])
+			expect(transport.frames).toEqual([
+				[0x02, 2_048_000],
+				[0x01, 145_000_000],
+			])
 		})
 	})
 
@@ -522,9 +578,10 @@ describe("TunerController reconnect synchronization", () => {
 			expect(states[0]!.measuredFields).toBeUndefined()
 			controller.synchronizeOnConnect("rtl-1", { resume: "restore" })
 			const state = controller.getState("rtl-1")!
-			// Neither measured nor written on this connection: unverified only.
+			// Not measured: the restore resume's assert wrote the declared rate (nothing accepted).
 			expect(state.measuredFields).toBeUndefined()
-			expect(state.unknownFields).toContain("sampleRate")
+			expect(state.sampleRate).toBe(2_048_000)
+			expect(transport.frames).toContainEqual([0x02, 2_048_000])
 			expect(states.every(s => s.measuredFields === undefined)).toBe(true)
 		})
 
@@ -560,11 +617,8 @@ describe("TunerController reconnect synchronization", () => {
 		controller.applyExternalCommand("rtl-1", 0x01, 1) // out of range: ignored
 		reconnect()
 		expect(controller.getState("rtl-1")?.controlMode).toBe("external")
-		expect(transport.frames).toEqual([
-			[0x02, 1_024_000],
-			[0x01, 433_920_000],
-			[0x0d, 7],
-		])
+		// Centre and rate are the relay client's to prove (assert rule 1): only the rest replays.
+		expect(transport.frames).toEqual([[0x0d, 7]])
 	})
 
 	it("lets a command issued in reaction to the replay supersede it on the wire", async () => {
@@ -578,14 +632,18 @@ describe("TunerController reconnect synchronization", () => {
 		reconnect()
 		await new Promise(resolve => setImmediate(resolve))
 		expect(transport.frames).toEqual([
+			[0x02, 2_048_000],
 			[0x01, 145_000_000],
 			[0x01, 146_000_000],
 		])
 		expect(controller.getState("rtl-1")?.frequency).toBe(146_000_000)
 
-		// The newer command is now the desired state for the next reconnect.
+		// The newer command is now the held value for the next reconnect.
 		reconnect()
-		expect(transport.frames).toEqual([[0x01, 146_000_000]])
+		expect(transport.frames).toEqual([
+			[0x02, 2_048_000],
+			[0x01, 146_000_000],
+		])
 	})
 
 	it("stops on a mid-replay disconnect and replays fully on the next connection", async () => {
@@ -629,7 +687,7 @@ describe("TunerController reconnect synchronization", () => {
 		controller.on("command-sent", (_id, name) => sent.push(name))
 		controller.on("state-changed", (_id, state) => states.push(state))
 		reconnect()
-		expect(sent).toEqual(["set-frequency"])
+		expect(sent).toEqual(["set-sample-rate", "set-frequency"])
 		expect(states).toHaveLength(1)
 		const keys = Object.keys(states[0] as object)
 		expect(keys.some(key => /ack|readback|actual|confirmed/i.test(key))).toBe(
@@ -642,7 +700,12 @@ describe("TunerController reconnect synchronization", () => {
 		controller.removeSource("rtl-1")
 		controller.initializeSource("rtl-1", { ...transport.caps }, "rtl_tcp")
 		reconnect()
-		expect(transport.frames).toEqual([])
+		// Only the declared values of the re-registered source (its caps carry the old centre).
+		expect(transport.frames).toEqual([
+			[0x02, 2_048_000],
+			[0x01, 145_000_000],
+		])
+		expect(controller.restorableTuning("rtl-1")).toBeUndefined()
 	})
 
 	it("ignores unknown sources", () => {
@@ -701,6 +764,7 @@ describe("Pi reboot scenario: SDR++ left caps at 2.16 Msps / 446.866968 MHz", ()
 		controller.on("state-changed", (_id, state) => states.push(state))
 
 		const result = controller.synchronizeOnConnect("rtl-1")
+		// Accepted state is discarded; the reset policy writes no declared value either.
 		expect(result).toEqual({ policy: "reset", commands: [], reset: true })
 		expect(transport.frames).toEqual([])
 		expect(transport.capsChanges).toEqual([
@@ -744,6 +808,7 @@ describe("Pi reboot scenario: SDR++ left caps at 2.16 Msps / 446.866968 MHz", ()
 		controller.initializeSource("rtl-1", { ...transport.caps }, "rtl_tcp")
 		expect(controller.synchronizeOnConnect("rtl-1").reset).toBe(false)
 		expect(transport.capsChanges).toEqual([])
+		// Nothing to discard, and the reset policy writes no declared value.
 		expect(transport.frames).toEqual([])
 	})
 })

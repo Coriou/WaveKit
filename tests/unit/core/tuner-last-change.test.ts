@@ -125,6 +125,8 @@ describe("TunerController lastChange", () => {
 			// Accepted, then a value the controller ignores goes out through the relay.
 			c.applyExternalCommand("rtl-1", 0x01, 145_000_000)
 			c.applyExternalCommand("rtl-1", 0x01, 0xffffffff)
+			// Control back with the core: the relay client no longer holds the centre (assert rule 1).
+			c.setControlMode("rtl-1", "internal")
 			vi.advanceTimersByTime(TUNER_CHANGE_MERGE_MS)
 			c.synchronizeOnConnect("rtl-1")
 			expect(c.getState("rtl-1")?.lastChange).toMatchObject({

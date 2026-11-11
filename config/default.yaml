@@ -303,6 +303,10 @@ tunerRelay:
 # replace this whole section.
 tuner:
   reconnectPolicy: restore
+  # Each connection starts unproven: the core writes its held centre and rate (last accepted,
+  # else the declared caps). false: never write the declared fallback (relay/SDR++ belongs
+  # on the core's tuner relay, which already stops these writes while a client is attached).
+  writeDeclaredTuningOnConnect: true
   bandGain:
     applyToMyTuning: false
     entries:

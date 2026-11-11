@@ -144,6 +144,57 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/gain \
   -H "Content-Type: application/json" -d '{"gain":372}'
 ```
 
+#### Centre and rate on every connection
+
+`rtl_tcp` cannot report where the receiver is tuned, and a receiver that reconnects (a network
+blip, an rtlmux restart, a replugged dongle) may be anywhere. So the core treats every new
+connection as unproven and writes the centre and sample rate it holds as soon as the first
+samples arrive: the last ones you (or a relay client) set, else the declared ones from the
+source's `caps`. Proof is kept per connection: a centre or rate counts as proven only once its
+frame has gone out on this connection and the network settle has passed. GET `/api/tuner` shows
+it per field in `proof` ([API.md](API.md#get-apituner)).
+
+The core writes nothing for those two fields while:
+
+- a client is attached to the core's [tuner relay](#rtl-tcp-relay), or the relay holds control:
+  its own frames prove the tuning (`proof.state: relay`). When it leaves, anything left unproven
+  is written back.
+- a scanner job holds the tuner: the job re-sends its own hop instead, never the configured
+  centre.
+- a paused feed was resumed plainly (the default resume), until a restore resume, for values
+  set before the pause and the declared ones: a centre or rate you set after the resume is
+  written back as usual.
+
+It also writes again after evidence that the receiver moved (an untracked retune, a centre the
+receiver reports differently, a pipeline error, a sustained rate mismatch).
+
+A client such as SDR++ connected **straight to a shared rtlmux** (not through the core's relay)
+is retuned to the core's held values whenever the core's connection starts again. Put SDR++ on
+the core's relay instead, or turn the declared fallback off:
+
+```yaml
+tuner:
+  writeDeclaredTuningOnConnect: true # false: never write the config/caps centre and rate
+```
+
+With `false` a centre or rate nobody set stays unverified until somebody sets it (values you set
+are still written back). The other opt-outs are the plain resume of a paused feed and
+`reconnectPolicy: reset`.
+
+`tuner.reconnectPolicy: reset` is for a receiver another operator may own after an outage. When
+the connection comes back the core forgets the values you set, and it never writes the declared
+centre and rate (as with `writeDeclaredTuningOnConnect: false`): the receiver stays where it is,
+`proof` reading `unverified` with `reason: reset-policy`. Only a centre or rate you set on the
+current connection is written back, after evidence that the receiver moved; a value set on an
+earlier connection, or while the source was down, is not. A restore resume of a paused feed
+still restores, declared values included, for its own connection. Configured gain settings are
+still written to every connection: configure no tuner gain for a core that touches nothing on a
+reconnect.
+
+Each frame written back because of an untracked retune counts in `proof.assertFights` on GET
+`/api/tuner`: a figure that keeps climbing means a client tunes the receiver past the core's relay
+(SDR++ straight on a shared rtlmux) and the core keeps putting its values back.
+
 #### Per-band gain
 
 A gain that suits one band can overload the dongle in another. At 868 MHz a manual 49.6 dB

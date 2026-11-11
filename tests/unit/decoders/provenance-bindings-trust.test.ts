@@ -798,7 +798,10 @@ describe("trust from a real TunerController (WG5 R1)", () => {
 		const { tuner, trust, command } = setupReal("reset")
 		await command()
 		expect(trust()).toBe("commanded")
-		expect(tuner.synchronizeOnConnect(AIS).reset).toBe(true)
+		const result = tuner.synchronizeOnConnect(AIS)
+		expect(result.reset).toBe(true)
+		// The reset policy writes no declared value (another operator may own the receiver).
+		expect(result.commands).toEqual([])
 		expect(trust()).toBe("unverified")
 		await command()
 		expect(trust()).toBe("commanded")
