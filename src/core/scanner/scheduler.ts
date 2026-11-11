@@ -747,6 +747,11 @@ interface Hold {
 	/** Held track; for a `record` hold the recorded track (recordedTrack), "" when none is open. */
 	trackId: string
 	/**
+	 * `record`: the track whose band names its voice hold (voiceBandOf at the keep: the track held
+	 * then, which may differ from `trackId`), "" when none. Its re-checks name voice by it.
+	 */
+	bandId?: string
+	/**
 	 * `record`: no probe and no follow; the hop is kept while the window is being recorded
 	 * (recordingActive), re-checked every RECORD_RECHECK_MS, up to `cap` (keepForRecording).
 	 */
@@ -1782,17 +1787,15 @@ export class SweepScheduler {
 		// A hop kept within L whose recording then voices (a pause at the keep, a late verdict): the
 		// transmission gets its voice hold now, as if it had answered voice at the keep, so under the
 		// same guard: a recording only of frequencies with carrier evidence stays within L.
-		// Named by the band of the track the recording is of now (recordedTrack, as at the keep;
-		// the hold's own track when none is open): a neighbour voiced first in the window is no
-		// voice of this hold, which waits, within L, for its own transmission (holdVoiceOf).
+		// Named by the band of the track held when the hop was kept (Hold.bandId, voiceBandOf), not
+		// by the track the recording reports now: a neighbour voiced first in the window is no voice
+		// of this hold, which waits, within L, for its own transmission (holdVoiceOf).
 		const recorded = this.recordedTrack(hold.trackId)
+		const bandId =
+			v === null ? "" : this.voiceBandOf(v, hold.bandId ?? hold.trackId)
 		const named =
 			v !== null && isVoiceOnAir(active)
-				? this.holdVoiceOf(
-						v,
-						active,
-						recorded === null || recorded === "" ? hold.trackId : recorded,
-					)
+				? this.holdVoiceOf(v, active, bandId === "" ? undefined : bandId)
 				: null
 		if (
 			v !== null &&
@@ -1878,20 +1881,27 @@ export class SweepScheduler {
 		const onAir = isVoiceOnAir(active) && v.voice !== "spent" && !v.voiceBarred
 		const heldId = this.hold?.trackId
 		// The voice hold is for the held track's own transmission (holdVoiceOf): the band of the
-		// track the hold will report (recordedTrack, else the track just held when none is open). A
-		// neighbour voiced first in the window names no voice hold; the hop is kept as for a
-		// recording that is not voice, within L, and a re-check gives the voice hold once the held
-		// track's own transmission voices (recheckRecording).
-		const bandId = this.recordedTrack(heldId)
+		// held track (voiceBandOf), whatever track the hold will report. A neighbour voiced first in
+		// the window names no voice hold; the hop is kept as for a recording that is not voice,
+		// within L, and a re-check gives the voice hold once the held track's own transmission
+		// voices (recheckRecording).
+		const bandId = this.voiceBandOf(v, heldId)
 		const named =
 			onAir && isVoiceOnAir(active)
-				? this.holdVoiceOf(
-						v,
-						active,
-						bandId === null || bandId === "" ? heldId : bandId,
-					)
+				? this.holdVoiceOf(v, active, bandId === "" ? undefined : bandId)
 				: null
 		const voice = named !== null
+		// An unbroken watch is no carrier evidence while voice is on air in the window, named or not:
+		// the held track's own transmission may have no session yet (refused a slot while a
+		// neighbour's overs hold both), and that is no evidence of a carrier (a 28 s ID caught
+		// mid-way, its onset unseen, would be cut at the watch and refused its voice holds after).
+		// So voice on air that names no voice hold ends the hold that way on every exit below too
+		// (the long-hold lock, the cap of what L has left), not only when the hop is kept.
+		const unnamed = onAir && !voice
+		const leave = (): false => {
+			if (unnamed) this.endHold(true, true)
+			return false
+		}
 		// A revisit of the hop whose long hold set the long-hold lock (an 8 s watch, say) holds no
 		// voice either: the others have not had the coarse visit that hold owes them yet.
 		if (
@@ -1899,21 +1909,17 @@ export class SweepScheduler {
 				? this.voiceLocked(v) || (v.revisit && this.lockedOut(v.hopIndex))
 				: this.longHoldLock > 0
 		)
-			return false
+			return leave()
 		const longest = start + this.spec.hold.maxHoldMs
 		const cap = voice
 			? longest
 			: judging
 				? Math.min(longest, now + WIDEBAND_VOICE_JUDGE_MS)
 				: Math.min(longest, start + this.followBudgetMs())
-		if (now >= cap) return false
-		// Charged first, so a hold that just heard a carrier counts, unless voice is on air: an unbroken
-		// watch of a transmission heard speaking is no carrier evidence (a 28 s ID caught mid-way, its
-		// onset unseen, would be cut at the watch). Voice anywhere in the window counts (onAir), named
-		// or not: the held track's own transmission may have no session yet (refused a slot while a
-		// neighbour's overs hold both), and that is no evidence of a carrier. A recording only of
-		// frequencies with carrier evidence is held under the carrier rules only: keeping its hop for
-		// it would hold them on every visit again.
+		if (now >= cap) return leave()
+		// Charged first, so a hold that just heard a carrier counts, unless voice is on air (onAir, as
+		// above). A recording only of frequencies with carrier evidence is held under the carrier
+		// rules only: keeping its hop for it would hold them on every visit again.
 		this.endHold(true, onAir)
 		const trackId = this.recordedTrack(heldId)
 		if (trackId === null) return false
@@ -1934,6 +1940,7 @@ export class SweepScheduler {
 		})
 		this.hold = {
 			trackId,
+			bandId,
 			mode: "record",
 			deadline: Math.min(cap, now + RECORD_RECHECK_MS),
 			cap,
@@ -1944,6 +1951,22 @@ export class SweepScheduler {
 		}
 		this.phase = "hold"
 		return true
+	}
+
+	/**
+	 * Track whose band names a hold's voice hold (holdVoiceOf), "" when there is none: the held
+	 * track `heldId` whenever it is a track of the visit, open or not, carrier evidence or not (its
+	 * frequency is what the hold is for). Only when it is not (no track was held, a keep after a
+	 * probe ended its hold, or the id names no track of this visit) does the hold take the track
+	 * recordedTrack reports, the one the recording moved to; none open (or each with carrier
+	 * evidence), `heldId` itself. Never a neighbour recordedTrack prefers because the held track is
+	 * not followed on air or has carrier evidence: that neighbour's voice is no voice of this hold.
+	 */
+	private voiceBandOf(v: Visit, heldId: string | undefined): string {
+		if (heldId !== undefined && heldId !== "" && v.tracks.has(heldId))
+			return heldId
+		const moved = this.recordedTrack(heldId)
+		return moved === null || moved === "" ? (heldId ?? "") : moved
 	}
 
 	/** Whether the hop's own last voice hold still owes the sweep its coarse visits. */

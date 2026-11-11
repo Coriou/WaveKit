@@ -289,6 +289,88 @@ describe("a hop kept for its recording names no voice hold after a neighbour", (
 	})
 })
 
+/**
+ * A hop kept for its recording when its watch of track "a" (TARGET_HZ) ends, with a voiced
+ * neighbour "b" (NEIGHBOUR_HZ, analog voice, already tried) open in the window. By the keep,
+ * "a" is no longer one recordedTrack would report (`how`: it earned carrier evidence during the
+ * watch, or was reclassed as no analog voice), so the recording is reported on "b"; the voice
+ * hold is still named by "a"'s band (voiceBandOf), never after "b". The recorder answers the
+ * neighbour's voice to 40 s.
+ */
+function keptBesideNeighbour(how: "carrier" | "unclassed") {
+	let clock = 0
+	const s = new SweepScheduler(
+		makeHopPlan([150_000_000, 150_800_000], 409_600),
+		makeNormalisedSpec({
+			dwellMs: 1_150,
+			settleMs: 1_000,
+			revisit: { share: 0, maxIntervalMs: null },
+		}),
+		{
+			blockSamples: 50,
+			sampleRateHz: 1000,
+			now: () => clock,
+			probeStartMs: 300,
+			recordingActive: () =>
+				clock < 40_000 ? voice("n", NEIGHBOUR_HZ) : false,
+		},
+	)
+	const internals = s as unknown as {
+		visit: {
+			voiceId: string | null
+			tracks: Map<string, { tried: boolean }>
+		} | null
+		hold: { trackId: string; mode: string } | null
+		memory: { centreHz: number; evidence: string }[]
+	}
+	const sighting = (
+		trackId: string,
+		centreHz: number,
+		snrDb: number,
+	): TrackSnapshot => ({
+		...makeTrack({ id: trackId, centreHz, startedAt: 0, blocks: 8, snrDb }),
+		trackId,
+		obwHz: OBW_HZ,
+	})
+	const tunes = (a: SchedulerAction[]): boolean =>
+		a.some(x => x.type === "tune")
+	s.start()
+	s.onEpochStarted(0)
+	s.onTrack(sighting("a", TARGET_HZ, 25), false, 0, { followOnAir: true })
+	s.onTrack(sighting("b", NEIGHBOUR_HZ, 15), false, 0, { followOnAir: true })
+	// "b" was held already: no follow of its own in this visit, only the recording's report.
+	internals.visit!.tracks.get("b")!.tried = true
+	const named = new Set<string>()
+	const reported = new Set<string>()
+	let leftAt: number | null = null
+	for (clock = 50; clock <= 70_000 && leftAt === null; clock += 50) {
+		if (clock === 1_150) {
+			expect(internals.hold?.trackId).toBe("a")
+			if (how === "carrier")
+				internals.memory.find(m => m.centreHz === TARGET_HZ)!.evidence =
+					"carrier"
+			else s.onTrack(sighting("a", TARGET_HZ, 25), false, 0)
+		}
+		if (tunes([...s.onBlock(clock), ...s.tick(clock)])) leftAt = clock
+		const id = internals.visit?.voiceId
+		if (id !== null && id !== undefined) named.add(id)
+		if (internals.hold?.mode === "record") reported.add(internals.hold.trackId)
+	}
+	return { leftAt, named, reported }
+}
+
+describe("a hop kept while its held track reads as no voice of its own names no voice hold after the neighbour the recording is reported on", () => {
+	for (const how of ["carrier", "unclassed"] as const)
+		it(`the held track ${how === "carrier" ? "earned carrier evidence" : "was reclassed"}: kept within L on the neighbour's report, never named after it`, () => {
+			const r = keptBesideNeighbour(how)
+			expect([...r.reported]).toEqual(["b"])
+			expect([...r.named]).toEqual([])
+			// Named after the neighbour, the hold would run to its over's end at 40 s.
+			expect(r.leftAt).not.toBeNull()
+			expect(r.leftAt!).toBeLessThanOrEqual(KEPT_AT + L2)
+		})
+})
+
 const MHZ = 1_000_000
 const SETTLE_MS = 1_000
 const BLOCK_MS = 50
