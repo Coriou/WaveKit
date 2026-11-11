@@ -3,9 +3,11 @@
  * voiced session of the window (an older one first), so a neighbouring channel already talking
  * when a follow lands is named before the held track's transmission. The scheduler remembers
  * (Visit.heardVoiceId) only the voiced transmission whose session frequency (VoiceOnAir.targetHz)
- * lies within the held track's band, centre ± obw / 2 plus HELD_VOICE_TOLERANCE_HZ; none there,
- * none is remembered. Pure matching, then the deterministic sweep simulator: a 28 s ID with a
- * neighbour 25 kHz up voiced from before the landing.
+ * lies within the held track's band, centre ± max(obw / 2, HELD_VOICE_FLOOR_HZ) plus
+ * HELD_VOICE_TOLERANCE_HZ (the closest to the centre of several); none there, none is remembered,
+ * and no voice hold is named after another (the keep of a hop for its recording and its re-checks
+ * name it the same way). Pure matching, the scheduler's record hold, then the deterministic sweep
+ * simulator: a 28 s ID with a neighbour 25 kHz up voiced from before the landing.
  */
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
@@ -13,23 +15,31 @@ import {
 	simulateSweep,
 	type SimSignal,
 } from "../../../../src/core/scanner/plan/sweep-sim.js"
+import { WIDEBAND_JOIN_TOLERANCE_HZ } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import {
+	HELD_VOICE_FLOOR_HZ,
 	HELD_VOICE_TOLERANCE_HZ,
 	heldVoiceOf,
 	type RecordingActivity,
+	type SchedulerAction,
+	SweepScheduler,
 	type VoiceOnAir,
 } from "../../../../src/core/scanner/scheduler.js"
+import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
 import {
 	makeHopPlan,
 	makeNormalisedSpec,
 } from "../../../mocks/scanner/job-spec.js"
+import { makeTrack } from "../../../mocks/scanner/observations.js"
 
 const TARGET_HZ = 150_100_000
 const NEIGHBOUR_HZ = TARGET_HZ + 25_000
 const OBW_HZ = 11_000
 const band = { centreHz: TARGET_HZ, obwHz: OBW_HZ }
-/** obw / 2 + tolerance: 5500 + 3000 = 8500 Hz. */
+/** max(obw / 2, floor) + tolerance: max(5500, 2000) + 3000 = 8500 Hz. */
 const REACH_HZ = OBW_HZ / 2 + HELD_VOICE_TOLERANCE_HZ
+/** The oracle's reach, stated apart from the code: max(obw / 2, 2000) + 3000. */
+const reachOf = (obwHz: number): number => Math.max(obwHz / 2, 2_000) + 3_000
 
 const voice = (name: string, hz?: number): VoiceOnAir => ({
 	voice: name,
@@ -45,6 +55,49 @@ describe("heldVoiceOf names the held track's own transmission", () => {
 	it("the tolerance is 8000 − 5000 Hz (channel cutoff less NFM deviation)", () => {
 		expect(HELD_VOICE_TOLERANCE_HZ).toBe(8_000 - 5_000)
 		expect(REACH_HZ).toBe(8_500)
+	})
+
+	it("the floor makes any track's reach the recorder's join tolerance: 2000 + 3000 = 5000 Hz", () => {
+		expect(HELD_VOICE_FLOOR_HZ).toBe(2_000)
+		expect(HELD_VOICE_FLOOR_HZ + HELD_VOICE_TOLERANCE_HZ).toBe(
+			WIDEBAND_JOIN_TOLERANCE_HZ,
+		)
+	})
+
+	it("a narrow track (3 kHz) recorded by a session joined 4 to 5 kHz off: matched at and inside 5000 Hz, not 1 Hz past; never the next 12.5 kHz channel", () => {
+		const narrow = { centreHz: TARGET_HZ, obwHz: 3_000 }
+		// Without the floor its reach would be 1500 + 3000 = 4500 Hz.
+		for (const off of [4_000, 4_500, 4_501, 5_000, -5_000])
+			expect(heldVoiceOf(voice("t", TARGET_HZ + off), narrow)?.voice).toBe("t")
+		expect(heldVoiceOf(voice("t", TARGET_HZ + 5_001), narrow)).toBeNull()
+		expect(heldVoiceOf(voice("t", TARGET_HZ - 5_001), narrow)).toBeNull()
+		expect(heldVoiceOf(voice("n", TARGET_HZ + 12_500), narrow)).toBeNull()
+		// A zero-width reading too.
+		const point = { centreHz: TARGET_HZ, obwHz: 0 }
+		expect(heldVoiceOf(voice("t", TARGET_HZ + 5_000), point)?.voice).toBe("t")
+		expect(heldVoiceOf(voice("t", TARGET_HZ + 5_001), point)).toBeNull()
+	})
+
+	it("a wide merged track (20 kHz) reaching the next channel: the entry closest to its centre, whatever the order", () => {
+		const wide = { centreHz: TARGET_HZ, obwHz: 20_000 }
+		// Reach max(10 000, 2000) + 3000 = 13 000 Hz: the next 12.5 kHz channel lies inside it.
+		expect(reachOf(wide.obwHz)).toBe(13_000)
+		const n = voice("n", TARGET_HZ + 12_500)
+		const t = voice("t", TARGET_HZ + 1_000)
+		expect(heldVoiceOf(listing(n, t), wide)?.voice).toBe("t")
+		expect(heldVoiceOf(listing(t, n), wide)?.voice).toBe("t")
+		// Below the centre too, and the neighbour alone still matches a band that reaches it.
+		const m = voice("m", TARGET_HZ - 12_000)
+		expect(heldVoiceOf(listing(n, m, t), wide)?.voice).toBe("t")
+		expect(heldVoiceOf(n, wide)?.voice).toBe("n")
+		// A tie: the answer's own first, then the list's order.
+		const a = voice("a", TARGET_HZ + 2_000)
+		const b = voice("b", TARGET_HZ - 2_000)
+		expect(heldVoiceOf(listing(a, b), wide)?.voice).toBe("a")
+		expect(heldVoiceOf(listing(b, a), wide)?.voice).toBe("b")
+		expect(heldVoiceOf({ ...n, transmissions: { b, a } }, wide)?.voice).toBe(
+			"b",
+		)
 	})
 
 	it("a neighbour named first and the target listed second: the target", () => {
@@ -100,9 +153,9 @@ describe("heldVoiceOf names the held track's own transmission", () => {
 		expect(heldVoiceOf(odd, band)).toBeNull()
 	})
 
-	// Feature: scanner sweep holds, Property 1: a hold names only a transmission of its own band
-	// Validates: a follow landing while a neighbour talks records the held transmission
-	it("whatever the order of the list, the match lies within the band, and one within it is found", () => {
+	// Feature: scanner sweep holds, Property 1: a hold names only a transmission of its own band, the closest to its centre
+	// Validates: docs/SCANNER.md § Sweep, Recording ("A hold follows the transmission on its own frequency")
+	it("whatever the order of the list, the match lies within the band, and it is the one closest to the centre", () => {
 		fc.assert(
 			fc.property(
 				fc.array(fc.integer({ min: -60_000, max: 60_000 }), {
@@ -114,18 +167,125 @@ describe("heldVoiceOf names the held track's own transmission", () => {
 					const entries = offsets.map((o, i) => voice(`v${i}`, TARGET_HZ + o))
 					const a = listing(...entries)
 					const b = { centreHz: TARGET_HZ, obwHz }
-					const reach = obwHz / 2 + HELD_VOICE_TOLERANCE_HZ
+					const reach = reachOf(obwHz)
 					const got = heldVoiceOf(a, b)
-					const inside = offsets.some(o => Math.abs(o) <= reach)
-					expect(got !== null).toBe(inside)
-					if (got !== null)
-						expect(Math.abs(got.targetHz! - TARGET_HZ)).toBeLessThanOrEqual(
-							reach,
-						)
+					const inside = offsets.filter(o => Math.abs(o) <= reach)
+					expect(got !== null).toBe(inside.length > 0)
+					if (got !== null) {
+						const off = Math.abs(got.targetHz! - TARGET_HZ)
+						expect(off).toBeLessThanOrEqual(reach)
+						expect(off).toBe(Math.min(...inside.map(o => Math.abs(o))))
+					}
 				},
 			),
 			{ numRuns: 200 },
 		)
+	})
+})
+
+/**
+ * A hop kept for its recording at the dwell's end (keepForRecording), its track at TARGET_HZ, while
+ * the recorder answers `recording(clock)`: 2 hops of 1150 ms (L = 19 550 ms), one track "a"
+ * neither probed nor followed, so the keep is the visit's first hold (from 150 ms).
+ */
+function recordHold(recording: (ms: number) => RecordingActivity) {
+	let clock = 0
+	const s = new SweepScheduler(
+		makeHopPlan([150_000_000, 150_800_000], 409_600),
+		makeNormalisedSpec({
+			dwellMs: 1_150,
+			settleMs: 1_000,
+			revisit: { share: 0, maxIntervalMs: null },
+		}),
+		{
+			blockSamples: 50,
+			sampleRateHz: 1000,
+			now: () => clock,
+			probeStartMs: 300,
+			recordingActive: () => recording(clock),
+		},
+	)
+	const internals = s as unknown as {
+		visit: { voice: string; voiceId: string | null } | null
+	}
+	const named = new Set<string>()
+	const note = (): void => {
+		const id = internals.visit?.voiceId
+		if (id !== null && id !== undefined) named.add(id)
+	}
+	const sighting: TrackSnapshot = {
+		...makeTrack({ id: "a", centreHz: TARGET_HZ, startedAt: 0 }),
+		trackId: "a",
+		obwHz: OBW_HZ,
+	}
+	s.start()
+	s.onEpochStarted(0)
+	s.onTrack(sighting, false, 0)
+	const tunes = (a: SchedulerAction[]): boolean =>
+		a.some(x => x.type === "tune")
+	for (let e = 50; e <= 150; e += 50) {
+		clock = e
+		if (tunes(s.onBlock(e))) throw new Error("left at the dwell")
+		note()
+	}
+	return {
+		named,
+		/** Clock of the first tune, ticking every 50 ms up to `until`; null if none. */
+		leftAt(until: number): number | null {
+			for (clock = 200; clock <= until; clock += 50) {
+				const left = tunes(s.tick(clock))
+				note()
+				if (left) return clock
+			}
+			return null
+		},
+	}
+}
+
+/** L on 2 hops (docs/SCANNER.md, Fair holds): 28 000 − 3450 − 5000. */
+const L2 = 19_550
+const KEPT_AT = 150
+
+describe("a hop kept for its recording names no voice hold after a neighbour", () => {
+	const n = voice("n", NEIGHBOUR_HZ)
+
+	it("the ID refused a slot (only the neighbour voiced in the window): kept as a recording that is not voice, left at L, the neighbour never named", () => {
+		// The neighbour talks from before the keep to 40 s: named after it, the hold would run
+		// to 40 s (past L), and end with the neighbour's over.
+		const h = recordHold(ms => (ms < 40_000 ? n : false))
+		expect(h.leftAt(70_000)).toBe(KEPT_AT + L2)
+		expect([...h.named]).toEqual([])
+	})
+
+	it("the ID not voiced yet at the keep: its voice hold starts once it voices, under its own name, and outlasts the neighbour's over", () => {
+		// Neighbour 0 to 8 s; the ID voiced from 3 s to 30 s (listed after the neighbour while both
+		// talk). Named after the neighbour at the keep, the hold was spent at 8 s and cut at L.
+		const id = voice("id", TARGET_HZ)
+		const h = recordHold(ms =>
+			ms < 3_000 ? n : ms < 8_000 ? listing(n, id) : ms < 30_000 ? id : false,
+		)
+		const left = h.leftAt(70_000)
+		expect(left).not.toBeNull()
+		expect(left!).toBeGreaterThan(KEPT_AT + L2)
+		expect(left!).toBeGreaterThanOrEqual(30_000)
+		expect(left!).toBeLessThanOrEqual(30_000 + 250)
+		expect([...h.named]).toEqual(["id"])
+	})
+
+	it("an answer with no frequency names no voice hold either: left at L", () => {
+		const h = recordHold(ms => (ms < 40_000 ? voice("x") : false))
+		expect(h.leftAt(70_000)).toBe(KEPT_AT + L2)
+		expect([...h.named]).toEqual([])
+	})
+
+	it("the ID's own answer at the keep: its voice hold, to its end past L", () => {
+		const h = recordHold(ms =>
+			ms < 30_000 ? listing(n, voice("id", TARGET_HZ + 4_000)) : false,
+		)
+		const left = h.leftAt(70_000)!
+		expect(left).toBeGreaterThanOrEqual(30_000)
+		expect(left).toBeLessThanOrEqual(30_000 + 250)
+		expect([...h.named]).toEqual(["id"])
 	})
 })
 
@@ -210,5 +370,21 @@ describe("a follow landing while a neighbour talks holds the ID, not the neighbo
 				held.some(v => v.leftAtMs > o.from && v.leftAtMs < o.to + 300),
 			).toBe(false)
 		expect(heardMs).toBeGreaterThanOrEqual(26_000)
+	})
+
+	it("no frequency in the answers (targetHz missing): nothing is named, so no voice hold: every visit of the ID's hop is cut at L, never held to the ID's end", () => {
+		// L on 3 hops (docs/SCANNER.md, Fair holds): 28 000 − 4600 − 5000 = 18 400 ms, after the dwell.
+		const L3 = 18_400
+		const named = run(true)
+		const { heardMs, held } = run(false)
+		expect(held.length).toBeGreaterThan(0)
+		for (const v of held)
+			expect(v.leftAtMs - v.tunedAtMs).toBeLessThanOrEqual(spec.dwellMs + L3)
+		expect(
+			held.some(
+				v => v.leftAtMs >= id.endMs && v.tunedAtMs <= id.startMs + 2_000,
+			),
+		).toBe(false)
+		expect(heardMs).toBeLessThan(named.heardMs)
 	})
 })

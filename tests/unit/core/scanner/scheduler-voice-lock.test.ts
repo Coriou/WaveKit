@@ -364,7 +364,7 @@ describe("a recording that voices after the keep, with a known carrier in its wi
 			memory.restUntil = Number.POSITIVE_INFINITY
 		}
 		s.onTrackClosed("a")
-		answer = { voice: "c" }
+		answer = { voice: "c", targetHz: HZ_OTHER }
 		return {
 			leftAt(until: number): number | null {
 				for (clock = 550; clock <= until; clock += 50)

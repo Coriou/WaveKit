@@ -598,7 +598,7 @@ describe("a watch against the voice rule", () => {
 	 * A transmission already on air on the job's first visit (its onset unseen), held to its watch
 	 * cap while the recorder answers `answer`: how long the hop is kept.
 	 */
-	function kept(answer: boolean | { voice: string }): number {
+	function kept(answer: boolean | { voice: string; targetHz: number }): number {
 		const h = { clock: 0, sample: 0 }
 		const s = new SweepScheduler(makeHopPlan([HOP0, HOP1, HOP2]), spec, {
 			blockSamples: B,
@@ -622,7 +622,7 @@ describe("a watch against the voice rule", () => {
 
 	it("voice on air keeps the hop past the 8 s watch, up to maxHoldMs from the start of the holds", () => {
 		const dwellMs = DWELL_BLOCKS * 50
-		expect(kept({ voice: "o1" })).toBe(dwellMs + 60_000)
+		expect(kept({ voice: "o1", targetHz: AT })).toBe(dwellMs + 60_000)
 	})
 
 	it("a recording that is not voice ends at the watch: the run is carrier evidence", () => {

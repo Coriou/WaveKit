@@ -72,7 +72,7 @@ function run(kerchunkFrom: number) {
 		const from = c < kerchunkFrom ? FIRST_FROM : idFrom
 		if (c < from || c >= from + ID_MS || landedAt < from) return false
 		if (c < landedAt + VOICE_ANSWER_MS) return "judging"
-		return { voice: "id", quietMs: 0, recordedHz: HZ }
+		return { voice: "id", quietMs: 0, recordedHz: HZ, targetHz: HZ }
 	}
 	const r = simulateSweep(plan, spec, {
 		settleMs: SETTLE_MS,

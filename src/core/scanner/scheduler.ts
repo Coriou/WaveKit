@@ -270,13 +270,26 @@ export const VOICE_QUIET_PAST_L_MS = 1_000
 export const HELD_VOICE_TOLERANCE_HZ = 3_000
 
 /**
- * The voiced transmission of the held track's band (`centreHz` ± `obwHz` / 2, plus
- * HELD_VOICE_TOLERANCE_HZ) among a voice answer and the transmissions it lists, the answer's own
- * first, then the list's in order; null when none lies there. The recorder names the first voiced
- * session of the window (an older one first), so a neighbour voiced at a follow's landing is named
- * before the held one: a hold names the transmission on its own frequency, never the window's
- * first. Unknown or malformed (a non-finite frequency or band, a negative width, an entry that is
- * not voice): no match, so a neighbour is never adopted for want of a frequency.
+ * Least half-band a held track is matched with (heldVoiceOf), whatever its occupied bandwidth
+ * reads: 2000 Hz. The recorder joins a track to a session whose `targetHz` lies within
+ * WIDEBAND_JOIN_TOLERANCE_HZ (5000 Hz) of the track's centre, so a narrow track (obw under
+ * 4 kHz, e.g. a voice read early or a weak one) may be recorded by a session up to 5000 Hz off it;
+ * 5000 − HELD_VOICE_TOLERANCE_HZ = 2000 Hz makes the reach of any track at least that join
+ * tolerance (2000 + 3000 = 5000 Hz), while a narrow track still names nothing on the next 12.5 kHz
+ * channel (5000 < 12 500).
+ */
+export const HELD_VOICE_FLOOR_HZ = 2_000
+
+/**
+ * The voiced transmission of the held track's band (`centreHz` ± max(`obwHz` / 2,
+ * HELD_VOICE_FLOOR_HZ), plus HELD_VOICE_TOLERANCE_HZ) among a voice answer and the transmissions it
+ * lists; of several there (a wide merged track, 19 kHz or more, reaches the next 12.5 kHz channel),
+ * the one closest to the track's centre (the answer's own first on a tie, then the list's order);
+ * null when none lies there. The recorder names the first voiced session of the window (an older
+ * one first), so a neighbour voiced at a follow's landing is named before the held one: a hold
+ * names the transmission on its own frequency, never the window's first. Unknown or malformed (a
+ * non-finite frequency or band, a negative width, an entry that is not voice): no match, so a
+ * neighbour is never adopted for want of a frequency.
  */
 export function heldVoiceOf(
 	answer: VoiceOnAir,
@@ -288,17 +301,27 @@ export function heldVoiceOf(
 		band.obwHz < 0
 	)
 		return null
-	const reach = band.obwHz / 2 + HELD_VOICE_TOLERANCE_HZ
-	const within = (a: VoiceOnAir): boolean =>
-		typeof a.voice === "string" &&
-		typeof a.targetHz === "number" &&
-		Number.isFinite(a.targetHz) &&
-		Math.abs(a.targetHz - band.centreHz) <= reach
-	if (within(answer)) return answer
+	const reach =
+		Math.max(band.obwHz / 2, HELD_VOICE_FLOOR_HZ) + HELD_VOICE_TOLERANCE_HZ
+	let best: VoiceOnAir | null = null
+	let bestOff = Infinity
+	const consider = (a: VoiceOnAir): void => {
+		if (
+			typeof a.voice !== "string" ||
+			typeof a.targetHz !== "number" ||
+			!Number.isFinite(a.targetHz)
+		)
+			return
+		const off = Math.abs(a.targetHz - band.centreHz)
+		if (off <= reach && off < bestOff) {
+			best = a
+			bestOff = off
+		}
+	}
+	consider(answer)
 	for (const entry of Object.values(answer.transmissions ?? {}))
-		if (typeof entry === "object" && entry !== null && within(entry))
-			return entry
-	return null
+		if (typeof entry === "object" && entry !== null) consider(entry)
+	return best
 }
 
 /** Whether a recording check answered voice on air (RecordingActivity). */
@@ -1759,15 +1782,27 @@ export class SweepScheduler {
 		// A hop kept within L whose recording then voices (a pause at the keep, a late verdict): the
 		// transmission gets its voice hold now, as if it had answered voice at the keep, so under the
 		// same guard: a recording only of frequencies with carrier evidence stays within L.
+		// Named by the band of the track the recording is of now (recordedTrack, as at the keep;
+		// the hold's own track when none is open): a neighbour voiced first in the window is no
+		// voice of this hold, which waits, within L, for its own transmission (holdVoiceOf).
+		const recorded = this.recordedTrack(hold.trackId)
+		const named =
+			v !== null && isVoiceOnAir(active)
+				? this.holdVoiceOf(
+						v,
+						active,
+						recorded === null || recorded === "" ? hold.trackId : recorded,
+					)
+				: null
 		if (
 			v !== null &&
-			isVoiceOnAir(active) &&
+			named !== null &&
 			v.voice === "no" &&
 			!v.voiceBarred &&
 			!this.voiceLocked(v) &&
-			this.recordedTrack(hold.trackId) !== null
+			recorded !== null
 		) {
-			this.startVoiceHold(v, active, now)
+			this.startVoiceHold(v, named, now)
 			hold.cap = this.holdOrigin() + this.spec.hold.maxHoldMs
 			v.recordEndMs = this.spec.hold.maxHoldMs
 		}
@@ -1838,9 +1873,25 @@ export class SweepScheduler {
 		if (active === false) return false
 		const judging = active === "judging"
 		if (judging && (v.voice !== "no" || v.judged || v.voiceBarred)) return false
-		// Voice on air in the current transmission, and the visit's voice hold not spent yet (nor
-		// barred by a follow that heard a squelch close with no session to name it).
-		const voice = isVoiceOnAir(active) && v.voice !== "spent" && !v.voiceBarred
+		// Voice on air in the window, and the visit's voice hold not spent yet (nor barred by a
+		// follow that heard a squelch close with no session to name it).
+		const onAir = isVoiceOnAir(active) && v.voice !== "spent" && !v.voiceBarred
+		const heldId = this.hold?.trackId
+		// The voice hold is for the held track's own transmission (holdVoiceOf): the band of the
+		// track the hold will report (recordedTrack, else the track just held when none is open). A
+		// neighbour voiced first in the window names no voice hold; the hop is kept as for a
+		// recording that is not voice, within L, and a re-check gives the voice hold once the held
+		// track's own transmission voices (recheckRecording).
+		const bandId = this.recordedTrack(heldId)
+		const named =
+			onAir && isVoiceOnAir(active)
+				? this.holdVoiceOf(
+						v,
+						active,
+						bandId === null || bandId === "" ? heldId : bandId,
+					)
+				: null
+		const voice = named !== null
 		// A revisit of the hop whose long hold set the long-hold lock (an 8 s watch, say) holds no
 		// voice either: the others have not had the coarse visit that hold owes them yet.
 		if (
@@ -1856,13 +1907,14 @@ export class SweepScheduler {
 				? Math.min(longest, now + WIDEBAND_VOICE_JUDGE_MS)
 				: Math.min(longest, start + this.followBudgetMs())
 		if (now >= cap) return false
-		const heldId = this.hold?.trackId
 		// Charged first, so a hold that just heard a carrier counts, unless voice is on air: an unbroken
 		// watch of a transmission heard speaking is no carrier evidence (a 28 s ID caught mid-way, its
-		// onset unseen, would be cut at the watch). A recording only of frequencies with carrier evidence
-		// is held under the carrier rules only: keeping its hop for it would hold them on every visit
-		// again.
-		this.endHold(true, voice)
+		// onset unseen, would be cut at the watch). Voice anywhere in the window counts (onAir), named
+		// or not: the held track's own transmission may have no session yet (refused a slot while a
+		// neighbour's overs hold both), and that is no evidence of a carrier. A recording only of
+		// frequencies with carrier evidence is held under the carrier rules only: keeping its hop for
+		// it would hold them on every visit again.
+		this.endHold(true, onAir)
 		const trackId = this.recordedTrack(heldId)
 		if (trackId === null) return false
 		// Closed at `now`, where the hold's own clock starts: the recording check may take time, and
@@ -1870,7 +1922,7 @@ export class SweepScheduler {
 		if (v.holdStartedAt === null) this.enterPhase(v, "hold", now)
 		v.holdStartedAt ??= now
 		v.budgeted = true
-		if (voice) this.startVoiceHold(v, active, now)
+		if (named !== null) this.startVoiceHold(v, named, now)
 		if (judging) v.judged = true
 		// A judging hold's cap is a re-check, not a forced leave: voice answered since the last one
 		// still gets its hold at the cap.
@@ -1897,6 +1949,27 @@ export class SweepScheduler {
 	/** Whether the hop's own last voice hold still owes the sweep its coarse visits. */
 	private voiceLocked(v: Visit): boolean {
 		return (this.hops[v.hopIndex]?.voiceLock.size ?? 0) > 0
+	}
+
+	/**
+	 * The voice answer a hold may start its voice hold for (startVoiceHold, Visit.voiceId): the
+	 * transmission the visit already remembers (its voice hold's, or the one a follow heard: it was
+	 * matched to its band then, and askRecording answers as it sees it), else the voiced
+	 * transmission of the band of track `trackId` (heldVoiceOf), never the window's first voiced
+	 * session; null when none lies there or `trackId` names no track of the visit. A visit that
+	 * knows no track at all (the recording's track never surfaced in it) has no band to tell a
+	 * neighbour by: the answer itself, as the recorder names it.
+	 */
+	private holdVoiceOf(
+		v: Visit,
+		active: VoiceOnAir,
+		trackId: string | undefined,
+	): VoiceOnAir | null {
+		const known = v.voice === "on" ? v.voiceId : v.heardVoiceId
+		if (known !== null) return active.voice === known ? active : null
+		if (v.tracks.size === 0) return active
+		const track = trackId === undefined ? undefined : v.tracks.get(trackId)
+		return track === undefined ? null : heldVoiceOf(active, track)
 	}
 
 	private startVoiceHold(v: Visit, active: VoiceOnAir, now: number): void {

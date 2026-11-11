@@ -139,9 +139,11 @@ const sighting = (id: string, hz: number, blocks = 8): TrackSnapshot => ({
 	trackId: id,
 })
 
-const voiceAnswer = (quietMs = 0): RecordingActivity => ({
+/** A voice answer of a session on `hz` (VoiceOnAir.targetHz: the held track's own, hop 0's). */
+const voiceAnswer = (quietMs = 0, hz = hopHz(0)): RecordingActivity => ({
 	voice: "a",
 	quietMs,
+	targetHz: hz,
 })
 
 /** A voice answer of a session the recorder recorded at `hz` (verified voice history there). */
@@ -149,6 +151,7 @@ const recordedVoice = (hz: number): RecordingActivity => ({
 	voice: "a",
 	quietMs: 0,
 	recordedHz: hz,
+	targetHz: hz,
 })
 
 /** Visit of `hop` with nothing but the settle and its dwell. */
@@ -290,7 +293,7 @@ describe("a voiced landing on a traffic frequency with a follow budget of 0", ()
 
 	it("a voice answer by the floor gets the voice hold, past L and to its end", () => {
 		const { landing } = budgetZeroLanding(into =>
-			into >= 1_400 && into < 25_000 ? voiceAnswer() : false,
+			into >= 1_400 && into < 25_000 ? voiceAnswer(0, hopHz(1)) : false,
 		)
 		const { heldMs } = landing()
 		expect(heldMs).toBeGreaterThanOrEqual(25_000)
@@ -299,7 +302,7 @@ describe("a voiced landing on a traffic frequency with a follow budget of 0", ()
 
 	it("a voice answer past the floor with no session answering by then is too late: it leaves", () => {
 		const { landing } = budgetZeroLanding(into =>
-			into >= 1_800 ? voiceAnswer() : false,
+			into >= 1_800 ? voiceAnswer(0, hopHz(1)) : false,
 		)
 		expect(landing().heldMs).toBeLessThanOrEqual(
 			3 * BLOCK_MS + 1_500 + BLOCK_MS,
@@ -348,7 +351,7 @@ describe("a watch's long-hold lock and a voice on its hop", () => {
 		let watched = false
 		const d = drive(
 			(hop, ms) =>
-				hop === 1 && watched && ms < 120_000 ? voiceAnswer() : false,
+				hop === 1 && watched && ms < 120_000 ? voiceAnswer(0, hopHz(1)) : false,
 			(hop, s, visit) => {
 				if (hop !== 1) return
 				if (visit === 1) {
@@ -685,7 +688,12 @@ describe("a voiced transmission whose squelch closed under the recorder's hang (
 				if (into < first) return recordedVoice(hopHz(0))
 				if (into < first + 2_000) return after
 				if (into < first + 27_000)
-					return { voice: "b", quietMs: 0, recordedHz: hopHz(0) }
+					return {
+						voice: "b",
+						quietMs: 0,
+						recordedHz: hopHz(0),
+						targetHz: hopHz(0),
+					}
 				return false
 			},
 			(hop, s, visit) => {
@@ -820,7 +828,7 @@ describe("a probe of a track just passed, its label still to come", () => {
 	it("waits for the label once, then follows it instead of leaving at the dwell", () => {
 		let label = false
 		const d = drive(
-			hop => (hop === 1 ? (label ? voiceAnswer() : false) : false),
+			hop => (hop === 1 ? (label ? voiceAnswer(0, hopHz(1)) : false) : false),
 			(hop, s, visit) => {
 				if (hop === 1 && visit === 1) {
 					s.onTrack(sighting("t1", hopHz(1)), true, 1_000, {

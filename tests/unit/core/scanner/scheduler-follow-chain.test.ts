@@ -87,17 +87,21 @@ function chain(session: boolean) {
 		const ms = rel()
 		if (visitOf(0) > 2)
 			// A later visit of hop 0: a new epoch, a new session of the reply.
-			return ms < REPLY_END ? { voice: "c", quietMs: 0 } : false
+			return ms < REPLY_END
+				? { voice: "c", quietMs: 0, targetHz: hopHz(0) }
+				: false
 		if (ms < CLOSE_SEEN)
 			return session
 				? ms < 1_500
 					? "judging"
-					: { voice: "a", quietMs: 0 }
+					: { voice: "a", quietMs: 0, targetHz: hopHz(0) }
 				: false
 		if (ms < REPLY_SEEN) return false
 		if (ms < REPLY_VOICED)
 			return session ? { recording: true, voiceEnded: true } : "judging"
-		return ms < REPLY_END ? { voice: "b", quietMs: 0 } : false
+		return ms < REPLY_END
+			? { voice: "b", quietMs: 0, targetHz: hopHz(0) }
+			: false
 	}
 	const s = new SweepScheduler(
 		plan,

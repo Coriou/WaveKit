@@ -40,8 +40,14 @@ const sighting = (id: string, hz = HZ): TrackSnapshot => ({
 	trackId: id,
 })
 const tunes = (a: SchedulerAction[]): boolean => a.some(x => x.type === "tune")
-/** The recorder's answer: voice on air in transmission `id` (VoiceOnAir). */
-const voice = (id = "a"): RecordingActivity => ({ voice: id })
+/**
+ * The recorder's answer: voice on air in transmission `id` (VoiceOnAir), from a session on `hz`
+ * (VoiceOnAir.targetHz: the held track's frequency names its own transmission).
+ */
+const voice = (id = "a", hz = HZ): RecordingActivity => ({
+	voice: id,
+	targetHz: hz,
+})
 const VOICE = voice()
 
 /**
