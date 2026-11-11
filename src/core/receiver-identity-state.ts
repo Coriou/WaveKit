@@ -1,5 +1,5 @@
 /**
- * Learned state per receiver (lane RS), inside the one state directory.
+ * Learned state per receiver, inside the one state directory.
  *
  * A tracked source (rtl_tcp U8_IQ) has, per receiver key, its own namespace for the spectrum
  * engine state and occupancy (`<scanner dir>/engine/receivers/<source>/<key>/`); the pre-band
@@ -12,8 +12,11 @@
  * settled identity the source is pending: the state learned so far is written under the receiver
  * it was learned on, the engine runs fresh in memory, loads return nothing and writes are dropped,
  * so the next receiver's IQ never trains or reads the previous receiver's state.
- * The files from before namespacing are adopted once per source, by the first receiver
- * identified after the upgrade (`<stateDir>/receiver-namespaces.json` records it). Scanner
+ * The state from before namespacing belongs to the first receiver identified after the upgrade
+ * (`<stateDir>/receiver-namespaces.json` records it as `adoptedBy`), per concern: the pre-band
+ * gain is adopted at that identification (the tuner, with or without the scanner); the spectrum
+ * files as soon as the scanner store is writable while that same receiver is bound (`owed`
+ * until then). No other receiver ever adopts them. Scanner
  * discoveries and recordings stay shared. A source the tracker does not follow keeps the
  * un-namespaced files exactly as before.
  */
@@ -59,6 +62,11 @@ const FileSchema = z
 						sourceId: z.string().min(1).max(SOURCE_ID_MAX_LENGTH),
 						adoptedBy: KeySchema.nullable(),
 						keys: z.array(KeySchema).max(RECEIVER_NAMESPACES_MAX_KEYS),
+						/** Concerns of `adoptedBy` not adopted yet; absent: none. */
+						owed: z
+							.array(z.enum(["spectrum", "gain"]))
+							.max(2)
+							.optional(),
 					})
 					.strict(),
 			)
@@ -67,7 +75,10 @@ const FileSchema = z
 	.strict()
 
 /** What the namespaced store needs (ScannerPersistence implements it). */
-export interface ReceiverScopedStore extends SpectrumPersistence {
+export interface ReceiverScopedStore extends Omit<
+	SpectrumPersistence,
+	"generation"
+> {
 	receiverNamespacePath(sourceId: string, receiverKey: string): string
 	writeEngineIn(sourceId: string, key: string, s: EngineState): Promise<void>
 	loadEngineIn(sourceId: string, key: string): Promise<EngineState | null>
@@ -95,8 +106,13 @@ export interface LearnedSpectrum {
 export interface ReceiverBinding {
 	/** The receiver key whose state applies; null: unknown, nothing applies. */
 	key: string | null
-	/** True for the one identification that adopts the files from before namespacing. */
+	/** True for the one identification that adopts the pre-band gain from before namespacing. */
 	adoptLegacy: boolean
+	/**
+	 * With adoptLegacy: the namespace record of the adoption was written, so the record from
+	 * before namespacing is no longer needed (a failed write keeps it for the next start).
+	 */
+	legacyRecorded?: boolean
 }
 
 export interface ReceiverLearnedStateOptions {
@@ -112,9 +128,14 @@ export interface ReceiverLearnedStateOptions {
 	}
 }
 
+type Concern = "spectrum" | "gain"
+
 interface SourceRecord {
+	/** The receiver the state from before namespacing belongs to (null: none identified yet). */
 	adoptedBy: string | null
 	keys: string[]
+	/** Concerns `adoptedBy` has not adopted yet. */
+	owed: Set<Concern>
 }
 
 export interface ReceiverNamespaceView {
@@ -148,7 +169,9 @@ export class ReceiverLearnedState {
 	private spectrum: LearnedSpectrum | null = null
 	private store: ReceiverScopedStore | null = null
 	private writable: () => boolean = () => true
-	private fileChain: Promise<void> = Promise.resolve()
+	private fileChain: Promise<unknown> = Promise.resolve()
+	/** Spectrum adoptions queued by a write or a load, one per source. */
+	private readonly adopting = new Set<string>()
 
 	constructor(private readonly options: ReceiverLearnedStateOptions) {
 		this.log = createComponentLogger(options.logger, "ReceiverLearnedState")
@@ -195,10 +218,21 @@ export class ReceiverLearnedState {
 			return
 		}
 		this.records = new Map(
-			parsed.data.sources.map(r => [
-				r.sourceId,
-				{ adoptedBy: r.adoptedBy, keys: [...r.keys] },
-			]),
+			parsed.data.sources.map(r => {
+				const record: SourceRecord = {
+					adoptedBy: r.adoptedBy,
+					keys: [...r.keys],
+					owed: new Set(r.owed ?? []),
+				}
+				// A record that names receivers but no adopter: the first receiver recorded is the
+				// one the state from before namespacing belongs to, adopted when it is next bound.
+				const first = record.keys[0]
+				if (record.adoptedBy === null && first !== undefined) {
+					record.adoptedBy = first
+					record.owed = new Set(["spectrum", "gain"])
+				}
+				return [r.sourceId, record]
+			}),
 		)
 	}
 
@@ -218,12 +252,15 @@ export class ReceiverLearnedState {
 	): SpectrumPersistence {
 		this.store = store
 		this.writable = writable
+		// A receiver bound before the store existed adopts the files it is owed now (if writable).
+		for (const sourceId of this.bound.keys()) this.kickAdoption(sourceId)
 		return {
-			writeEngine: async (sourceId, s) => {
+			generation: sourceId => this.generation.get(sourceId) ?? 0,
+			writeEngine: async (sourceId, s, generation) => {
 				if (!this.options.tracked(sourceId))
 					return legacy.writeEngine(sourceId, s)
 				// Unknown receiver, pending or a switch in progress: nothing is written under any key.
-				const key = this.writableKey(sourceId)
+				const key = this.writableKey(sourceId, generation)
 				if (key === null) return
 				return store.writeEngineIn(sourceId, key, s)
 			},
@@ -233,10 +270,10 @@ export class ReceiverLearnedState {
 					store.loadEngineIn(sourceId, key),
 				)
 			},
-			writeOccupancy: async (sourceId, s) => {
+			writeOccupancy: async (sourceId, s, generation) => {
 				if (!this.options.tracked(sourceId))
 					return legacy.writeOccupancy(sourceId, s)
-				const key = this.writableKey(sourceId)
+				const key = this.writableKey(sourceId, generation)
 				if (key === null) return
 				return store.writeOccupancyIn(sourceId, key, s)
 			},
@@ -250,17 +287,111 @@ export class ReceiverLearnedState {
 		}
 	}
 
-	/** The key a write goes under now; null: dropped (unknown, pending, switching, gated). */
-	private writableKey(sourceId: string): string | null {
+	/**
+	 * The key a write goes under now; null: dropped (unknown, pending, switching, gated, a binding
+	 * change since the writer captured `generation`, or the spectrum adoption still owed: the
+	 * adopted state replaces what is in memory first).
+	 */
+	private writableKey(sourceId: string, generation?: number): string | null {
 		const key = this.bound.get(sourceId) ?? null
 		if (
 			key === null ||
 			this.pending.has(sourceId) ||
 			this.switching.has(sourceId) ||
-			!this.writable()
+			!this.writable() ||
+			(generation !== undefined &&
+				generation !== (this.generation.get(sourceId) ?? 0))
 		)
 			return null
+		if (this.spectrumOwed(sourceId, key)) {
+			this.kickAdoption(sourceId)
+			return null
+		}
 		return key
+	}
+
+	private spectrumOwed(sourceId: string, key: string): boolean {
+		const record = this.records.get(sourceId)
+		return record?.adoptedBy === key && record.owed.has("spectrum")
+	}
+
+	/**
+	 * Queues the owed spectrum adoption of the bound receiver once the store is writable. Never
+	 * awaited by a load or a write (a switch may be waiting on the very open that reads).
+	 */
+	private kickAdoption(sourceId: string): void {
+		const key = this.bound.get(sourceId) ?? null
+		if (
+			key === null ||
+			!this.store ||
+			!this.writable() ||
+			this.adopting.has(sourceId) ||
+			!this.spectrumOwed(sourceId, key)
+		)
+			return
+		this.adopting.add(sourceId)
+		void this.enqueue(sourceId, () => this.adoptOwed(sourceId)).finally(() =>
+			this.adopting.delete(sourceId),
+		)
+	}
+
+	/** The owed spectrum adoption, while its receiver is still the one bound and settled. */
+	private async adoptOwed(sourceId: string): Promise<void> {
+		const key = this.bound.get(sourceId) ?? null
+		const store = this.store
+		const record = this.records.get(sourceId)
+		if (
+			key === null ||
+			!store ||
+			!record ||
+			this.pending.has(sourceId) ||
+			!this.writable() ||
+			!this.spectrumOwed(sourceId, key)
+		)
+			return
+		this.switching.add(sourceId)
+		try {
+			const moved = await this.adoptSpectrum(sourceId, key, store, record)
+			await this.saveRecords()
+			// Every write or export started before the adoption is of the fresh state: dropped.
+			this.bind(sourceId, key)
+			if (moved && this.spectrum)
+				await this.spectrum.replaceLearnedState(sourceId, {
+					engine: await store.loadEngineIn(sourceId, key).catch(() => null),
+					occupancy: await store
+						.loadOccupancyIn(sourceId, key)
+						.catch(() => null),
+				})
+			const view = this.views.get(sourceId)
+			if (view?.key === key)
+				this.views.set(sourceId, {
+					...view,
+					learnedStateNamespace: store.receiverNamespacePath(sourceId, key),
+					...(moved ? { namespaceState: "adopted" as const } : {}),
+				})
+		} finally {
+			this.switching.delete(sourceId)
+		}
+	}
+
+	/** Copies the spectrum files from before namespacing into `key`; the debt is paid either way. */
+	private async adoptSpectrum(
+		sourceId: string,
+		key: string,
+		store: ReceiverScopedStore,
+		record: SourceRecord,
+	): Promise<boolean> {
+		const moved = await store
+			.adoptLegacyInto(sourceId, key)
+			.catch((err: unknown) => {
+				this.log.warn(
+					{ err, sourceId },
+					"Adopting the learned state from before receiver namespacing failed",
+				)
+				return false
+			})
+		record.owed.delete("spectrum")
+		return moved
 	}
 
 	/**
@@ -277,6 +408,11 @@ export class ReceiverLearnedState {
 				return null
 			const key = this.bound.get(sourceId) ?? null
 			if (key === null) return null
+			// Owed: the adoption hands the adopted state to the engine itself (never awaited here).
+			if (this.spectrumOwed(sourceId, key)) {
+				this.kickAdoption(sourceId)
+				return null
+			}
 			const gen = this.generation.get(sourceId) ?? 0
 			const value = await read(key)
 			if ((this.generation.get(sourceId) ?? 0) === gen) return value
@@ -408,32 +544,37 @@ export class ReceiverLearnedState {
 			if (from !== null && from !== to) await this.exportUnder(sourceId, from)
 			let state: ReceiverNamespaceState = "none"
 			let adoptLegacy = false
+			let legacyRecorded = false
 			if (to !== null) {
 				const record = this.records.get(sourceId) ?? {
 					adoptedBy: null,
 					keys: [],
+					owed: new Set<Concern>(),
 				}
-				if (record.keys.includes(to)) state = "resumed"
-				else if (record.adoptedBy === null && store && this.writable()) {
-					// Only with the store: a core without the scanner leaves the adoption for later.
-					adoptLegacy = true
-					const moved = await store
-						.adoptLegacyInto(sourceId, to)
-						.catch((err: unknown) => {
-							this.log.warn(
-								{ err, sourceId },
-								"Adopting the learned state from before receiver namespacing failed",
-							)
-							return false
-						})
-					state = moved ? "adopted" : "fresh"
+				const known = record.keys.includes(to)
+				// The first receiver identified is the adopter of record for every concern, even when
+				// a concern cannot adopt now: no later receiver ever takes it over.
+				if (record.adoptedBy === null) {
 					record.adoptedBy = to
-				} else state = "fresh"
+					record.owed = new Set(["spectrum", "gain"])
+				}
+				let moved = false
+				if (
+					record.adoptedBy === to &&
+					record.owed.has("spectrum") &&
+					store &&
+					this.writable()
+				)
+					moved = await this.adoptSpectrum(sourceId, to, store, record)
+				// The pre-band gain needs no store: the tuner adopts it at this binding.
+				if (record.adoptedBy === to && record.owed.delete("gain"))
+					adoptLegacy = true
+				state = moved ? "adopted" : known ? "resumed" : "fresh"
 				record.keys = [...record.keys.filter(k => k !== to), to].slice(
 					-RECEIVER_NAMESPACES_MAX_KEYS,
 				)
 				this.records.set(sourceId, record)
-				await this.saveRecords()
+				legacyRecorded = await this.saveRecords()
 			}
 			this.bind(sourceId, to)
 			this.pending.delete(sourceId)
@@ -465,7 +606,12 @@ export class ReceiverLearnedState {
 						: store.receiverNamespacePath(sourceId, to),
 				namespaceState: state,
 			})
-			this.options.onBound?.(sourceId, { key: to, adoptLegacy })
+			this.options.onBound?.(
+				sourceId,
+				adoptLegacy
+					? { key: to, adoptLegacy, legacyRecorded }
+					: { key: to, adoptLegacy },
+			)
 			// Keys are built from validated components only, so they are safe to log.
 			const same = previous?.key === identity.key
 			this.log.info(
@@ -488,9 +634,12 @@ export class ReceiverLearnedState {
 		} finally {
 			this.switching.delete(sourceId)
 		}
+		// Not writable yet (or no store): the owed spectrum adoption runs once it is.
+		this.kickAdoption(sourceId)
 	}
 
-	private saveRecords(): Promise<void> {
+	/** True when the record file was written. */
+	private saveRecords(): Promise<boolean> {
 		const sources = [...this.records]
 			.filter(([id]) => id.length <= SOURCE_ID_MAX_LENGTH)
 			.slice(-RECEIVER_NAMESPACES_MAX_SOURCES)
@@ -498,14 +647,19 @@ export class ReceiverLearnedState {
 				sourceId,
 				adoptedBy: r.adoptedBy,
 				keys: r.keys,
+				...(r.owed.size > 0 ? { owed: [...r.owed].sort() } : {}),
 			}))
 		const text = JSON.stringify({ version: 1, sources }, null, "\t")
 		const run = this.fileChain.then(() =>
-			this.fs.atomicWrite(this.file, text).catch(() => {
-				this.log.warn(
-					"Writing the receiver namespace record failed; kept in memory",
-				)
-			}),
+			this.fs.atomicWrite(this.file, text).then(
+				() => true,
+				() => {
+					this.log.warn(
+						"Writing the receiver namespace record failed; kept in memory",
+					)
+					return false
+				},
+			),
 		)
 		this.fileChain = run
 		return run

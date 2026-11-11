@@ -1,5 +1,5 @@
 /**
- * Candidate endpoints of an rtl_tcp source (lane RS): the primary, then the candidates in order,
+ * Candidate endpoints of an rtl_tcp source: the primary, then the candidates in order,
  * with the usual backoff; the first that delivers a payload wins (a header alone does not); a delivering endpoint is
  * retried SOURCE_CANDIDATE_RETRIES times after a loss before the next one is tried. Loopback only:
  * fake rtl_tcp servers and closed ports this test opened itself (port 0). Real timers.

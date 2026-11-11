@@ -1,10 +1,10 @@
 /**
- * Lane RS: the saved pre-band gain is kept per receiver. Each record of
+ * The saved pre-band gain is kept per receiver. Each record of
  * tuner-band-gain-saved-receivers.json names its receiver; tuner-band-gain-saved.json keeps the
  * format older images read (no receiver keys). A tracked source applies only its current
  * receiver's record, the one from before namespacing (no key) only when the first receiver adopts
- * the legacy state, and nothing while the receiver is unknown. Real controller and settings
- * service over an in-memory file system.
+ * the legacy state (it leaves the legacy file once that adoption is on record), and nothing while
+ * the receiver is unknown. Real controller and settings service over an in-memory file system.
  */
 import { describe, expect, it, vi } from "vitest"
 import pino from "pino"
@@ -19,6 +19,12 @@ import type {
 	SourceCaps,
 	SourceManager,
 } from "../../../src/core/source-manager.js"
+import { ReceiverLearnedState } from "../../../src/core/receiver-identity-state.js"
+import { receiverBoundToTuner } from "../../../src/core/receiver-identity-wiring.js"
+import {
+	resolveReceiverIdentity,
+	type ReceiverIdentity,
+} from "../../../src/core/receiver-identity.js"
 
 const logger = pino({ level: "silent" })
 const UHF = 455_500_000
@@ -248,5 +254,138 @@ describe("pre-band gain per receiver", () => {
 		await controller.setFrequency("rtl", 868_000_000, REST)
 		expect(controller.getState("rtl")?.gain).toBe(100)
 		expect(lines.some(l => l.reason === "receiver not identified")).toBe(true)
+	})
+})
+
+describe("pre-band gain from before namespacing", () => {
+	const legacy = {
+		version: 1,
+		sources: [
+			{ sourceId: "other", saved: saved(50) },
+			{ sourceId: "rtl", saved: saved(150) },
+		],
+	}
+
+	it("leaves the legacy file once the adoption is on record, and stays while it is not", async () => {
+		const recorded = memoryFs(legacy)
+		const a = await setup(recorded.fs)
+		a.controller.noteReceiverBound("rtl", {
+			key: A,
+			adoptLegacy: true,
+			legacyRecorded: true,
+		})
+		await settle()
+		expect(JSON.parse(recorded.files.get(SAVED_PATH) ?? "null")).toEqual({
+			version: 1,
+			sources: [{ sourceId: "other", saved: saved(50) }],
+		})
+		expect(JSON.parse(recorded.files.get(RECEIVERS_PATH) ?? "null")).toEqual({
+			version: 1,
+			sources: [{ sourceId: "rtl", receiverKey: A, saved: saved(150) }],
+		})
+		// Another receiver later, and back: the old record never comes back.
+		a.controller.noteReceiverBound("rtl", { key: B, adoptLegacy: false })
+		a.controller.noteReceiverBound("rtl", { key: A, adoptLegacy: false })
+		await settle()
+		expect(JSON.parse(recorded.files.get(SAVED_PATH) ?? "null")).toEqual({
+			version: 1,
+			sources: [{ sourceId: "other", saved: saved(50) }],
+		})
+
+		const unrecorded = memoryFs(legacy)
+		const b = await setup(unrecorded.fs)
+		b.controller.noteReceiverBound("rtl", {
+			key: A,
+			adoptLegacy: true,
+			legacyRecorded: false,
+		})
+		await settle()
+		const kept = JSON.parse(unrecorded.files.get(SAVED_PATH) ?? "null") as {
+			sources: unknown[]
+		}
+		expect(kept.sources).toHaveLength(2)
+		expect(kept.sources).toEqual(expect.arrayContaining(legacy.sources))
+		await b.controller.setFrequency("rtl", UHF, REST)
+		expect(b.controller.getState("rtl")?.gain).toBe(150)
+	})
+
+	it("scanner off: the first receiver identified adopts it through the production chain; the next never gets it", async () => {
+		const stateDir = "/state"
+		const disk = memoryFs(legacy)
+		const { controller } = await setup(disk.fs)
+		const namespaceFiles = new Map<string, string>()
+		const current = new Map<string, ReceiverIdentity>()
+		const learned = new ReceiverLearnedState({
+			stateDir,
+			logger,
+			tracked: id => id === "rtl",
+			onBound: receiverBoundToTuner(
+				{ current: id => current.get(id) },
+				() => controller,
+			),
+			fs: {
+				readFile: path => {
+					const text = namespaceFiles.get(path)
+					return text === undefined
+						? Promise.reject(
+								Object.assign(new Error("missing"), { code: "ENOENT" }),
+							)
+						: Promise.resolve(Buffer.from(text))
+				},
+				atomicWrite: (path, data) => {
+					namespaceFiles.set(path, data)
+					return Promise.resolve()
+				},
+			},
+		})
+		await learned.load()
+		// No attach(): the scanner (and its store) is off.
+		const idA = resolveReceiverIdentity(
+			{ magic: "RTL0", tunerType: 5, gainCount: 29 },
+			{ receiverId: "a".repeat(32) },
+		)
+		const idB = resolveReceiverIdentity(
+			{ magic: "RTL0", tunerType: 5, gainCount: 29 },
+			{ receiverId: "b".repeat(32) },
+		)
+		expect(idA.key).toBe(A)
+		current.set("rtl", idA)
+		await learned.onIdentity("rtl", idA, undefined)
+		await controller.setFrequency("rtl", UHF, REST)
+		expect(controller.getState("rtl")?.gain).toBe(150)
+		await settle()
+		expect(JSON.parse(disk.files.get(SAVED_PATH) ?? "null")).toEqual({
+			version: 1,
+			sources: [{ sourceId: "other", saved: saved(50) }],
+		})
+
+		// B, in this process and after a restart: never A's gain from before.
+		await learned.onConnection("rtl")
+		current.set("rtl", idB)
+		await learned.onIdentity("rtl", idB, idA)
+		await controller.setGainMode("rtl", "manual", REST)
+		await controller.setGain("rtl", 90, REST)
+		await controller.setFrequency("rtl", UHF, REST)
+		expect(controller.getState("rtl")?.gain).toBe(90)
+
+		const restarted = new ReceiverLearnedState({
+			stateDir,
+			logger,
+			tracked: id => id === "rtl",
+			onBound: (_id, b) => bindings.push(b),
+			fs: {
+				readFile: path => {
+					const text = namespaceFiles.get(path)
+					return text === undefined
+						? Promise.reject(new Error("missing"))
+						: Promise.resolve(Buffer.from(text))
+				},
+				atomicWrite: () => Promise.resolve(),
+			},
+		})
+		const bindings: Array<{ key: string | null; adoptLegacy: boolean }> = []
+		await restarted.load()
+		await restarted.onIdentity("rtl", idB, undefined)
+		expect(bindings.at(-1)).toEqual({ key: B, adoptLegacy: false })
 	})
 })

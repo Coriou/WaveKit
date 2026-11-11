@@ -1,5 +1,5 @@
 /**
- * Lane RS: the production chain from the receiver identity tracker to the learned state, the
+ * The production chain from the receiver identity tracker to the learned state, the
  * tuner controller and the source status (called from src/index.ts, tested on its own).
  *
  * - tracker "connection" (disconnect, new connection) -> learned state pending;

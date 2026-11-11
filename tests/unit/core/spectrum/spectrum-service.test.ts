@@ -1497,7 +1497,7 @@ describe("fatal engine lifecycle (review F5)", () => {
 	})
 })
 
-describe("SpectrumService learned state per receiver (lane RS)", () => {
+describe("SpectrumService learned state per receiver", () => {
 	const learned = (dbfs: number): EngineState => ({
 		version: 1,
 		absoluteFloors: [{ key: "2048000:g:4096", dbfs }],

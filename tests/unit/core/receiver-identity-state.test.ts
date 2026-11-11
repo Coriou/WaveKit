@@ -1,5 +1,5 @@
 /**
- * Learned state per receiver (lane RS) on the real ScannerPersistence in a tmp state directory:
+ * Learned state per receiver on the real ScannerPersistence in a tmp state directory:
  * switching A -> B -> A, an unknown receiver, the one-time adoption of the files from before
  * namespacing, and one INFO line per identity change.
  */
@@ -231,7 +231,11 @@ describe("ReceiverLearnedState: one-time adoption of the files from before names
 		const first = await make()
 		await first.learned.onIdentity("rtl", A, undefined)
 		expect(first.learned.view("rtl")?.namespaceState).toBe("adopted")
-		expect(first.bound.at(-1)).toEqual({ key: A.key, adoptLegacy: true })
+		expect(first.bound.at(-1)).toEqual({
+			key: A.key,
+			adoptLegacy: true,
+			legacyRecorded: true,
+		})
 		expect(first.fake.replaced.at(-1)?.engine?.absoluteFloors[0]?.dbfs).toBe(
 			-88,
 		)
@@ -390,5 +394,229 @@ describe("ReceiverLearnedState: operator visibility", () => {
 		expect(
 			lines.some(l => l.msg?.startsWith("Receiver identified by model only")),
 		).toBe(true)
+	})
+})
+
+describe("ReceiverLearnedState: adoption owed while the store cannot take it", () => {
+	const writeLegacy = async () => {
+		await mkdir(join(scannerDir, "engine", "occupancy"), { recursive: true })
+		await writeFile(
+			join(scannerDir, "engine", "rtl.json"),
+			JSON.stringify(engine(-88)),
+		)
+		await writeFile(
+			join(scannerDir, "engine", "occupancy", "rtl.json"),
+			JSON.stringify(occupancy(12_500)),
+		)
+	}
+	const readRecord = async () =>
+		(
+			JSON.parse(
+				await readFile(join(stateDir, RECEIVER_NAMESPACES_FILE_NAME), "utf8"),
+			) as {
+				sources: Array<{ adoptedBy: string; keys: string[]; owed?: string[] }>
+			}
+		).sources[0]
+
+	it("attach() never called, then called: A adopts the gain at once and its spectrum files later; B never gets A's", async () => {
+		await writeLegacy()
+		const store = new ScannerPersistence({
+			dir: scannerDir,
+			logger: silent,
+			now: Date.now,
+		})
+		const bound: Array<{ key: string | null; adoptLegacy: boolean }> = []
+		const learned = new ReceiverLearnedState({
+			stateDir,
+			logger: silent,
+			tracked: id => id === "rtl",
+			onBound: (_id, b) => bound.push(b),
+		})
+		await learned.load()
+		const fake = fakeSpectrum()
+		learned.setSpectrum(fake.spectrum)
+
+		// The scanner is off: A is the adopter of record; its gain is adopted now.
+		await learned.onIdentity("rtl", A, undefined)
+		expect(bound.at(-1)).toEqual({
+			key: A.key,
+			adoptLegacy: true,
+			legacyRecorded: true,
+		})
+		expect(learned.view("rtl")).toMatchObject({
+			namespaceState: "fresh",
+			learnedStateNamespace: null,
+		})
+		expect(await readRecord()).toEqual({
+			sourceId: "rtl",
+			adoptedBy: A.key,
+			keys: [A.key],
+			owed: ["spectrum"],
+		})
+
+		// B, before and after the store appears: never A's gain, never A's files.
+		await learned.onIdentity("rtl", B, A)
+		expect(bound.at(-1)).toEqual({ key: B.key, adoptLegacy: false })
+		const legacy: SpectrumPersistence = {
+			writeEngine: (id, s) => store.writeEngine(id, s),
+			loadEngine: id => store.loadEngine(id),
+			writeOccupancy: (id, s) => store.writeOccupancy(id, s),
+			loadOccupancy: id => store.loadOccupancy(id),
+		}
+		const persistence = learned.attach(store, legacy, () => true)
+		await learned.idle("rtl")
+		expect(await exists(nsFile(B, "engine.json"))).toBe(false)
+		expect(await persistence.loadEngine("rtl")).toBeNull()
+		await persistence.writeEngine("rtl", engine(-70))
+		expect(
+			JSON.parse(await readFile(nsFile(B, "engine.json"), "utf8")),
+		).toEqual(engine(-70))
+
+		// A again, with the store: the files it is owed, for A only, handed to the engine.
+		await learned.onIdentity("rtl", A, B)
+		await learned.idle("rtl")
+		expect(bound.at(-1)).toEqual({ key: A.key, adoptLegacy: false })
+		expect(learned.view("rtl")?.namespaceState).toBe("adopted")
+		expect(
+			JSON.parse(await readFile(nsFile(A, "engine.json"), "utf8")),
+		).toEqual(engine(-88))
+		expect(fake.now().engine?.absoluteFloors[0]?.dbfs).toBe(-88)
+		expect(
+			JSON.parse(await readFile(nsFile(B, "engine.json"), "utf8")),
+		).toEqual(engine(-70))
+		expect((await readRecord())?.owed).toBeUndefined()
+	})
+
+	it("attach() while the adopter is bound adopts its files then", async () => {
+		await writeLegacy()
+		const store = new ScannerPersistence({
+			dir: scannerDir,
+			logger: silent,
+			now: Date.now,
+		})
+		const learned = new ReceiverLearnedState({
+			stateDir,
+			logger: silent,
+			tracked: id => id === "rtl",
+		})
+		await learned.load()
+		const fake = fakeSpectrum()
+		learned.setSpectrum(fake.spectrum)
+		await learned.onIdentity("rtl", A, undefined)
+		learned.attach(store, store, () => true)
+		await learned.idle("rtl")
+		expect(learned.view("rtl")).toMatchObject({
+			namespaceState: "adopted",
+			learnedStateNamespace: join(
+				"engine",
+				"receivers",
+				pathSegment("rtl"),
+				pathSegment(A.key),
+			),
+		})
+		expect(fake.now().engine?.absoluteFloors[0]?.dbfs).toBe(-88)
+	})
+
+	it("a store not writable yet: writes are dropped, and the first write once it is adopts first", async () => {
+		await writeLegacy()
+		const store = new ScannerPersistence({
+			dir: scannerDir,
+			logger: silent,
+			now: Date.now,
+		})
+		const learned = new ReceiverLearnedState({
+			stateDir,
+			logger: silent,
+			tracked: id => id === "rtl",
+		})
+		await learned.load()
+		let writable = false
+		const persistence = learned.attach(store, store, () => writable)
+		const fake = fakeSpectrum()
+		learned.setSpectrum(fake.spectrum)
+		await learned.onIdentity("rtl", A, undefined)
+		expect(learned.view("rtl")?.namespaceState).toBe("fresh")
+		await persistence.writeEngine("rtl", engine(-1))
+		expect(await exists(nsFile(A, "engine.json"))).toBe(false)
+
+		writable = true
+		// The fresh in-memory state never lands over the adopted files.
+		await persistence.writeEngine("rtl", engine(-1))
+		await learned.idle("rtl")
+		expect(
+			JSON.parse(await readFile(nsFile(A, "engine.json"), "utf8")),
+		).toEqual(engine(-88))
+		expect(learned.view("rtl")?.namespaceState).toBe("adopted")
+		expect(fake.now().engine?.absoluteFloors[0]?.dbfs).toBe(-88)
+		await persistence.writeEngine("rtl", engine(-5))
+		expect(
+			JSON.parse(await readFile(nsFile(A, "engine.json"), "utf8")),
+		).toEqual(engine(-5))
+	})
+
+	it("a record from before this rule (receivers, no adopter) owes everything to its first receiver", async () => {
+		await writeLegacy()
+		await writeFile(
+			join(stateDir, RECEIVER_NAMESPACES_FILE_NAME),
+			JSON.stringify({
+				version: 1,
+				sources: [{ sourceId: "rtl", adoptedBy: null, keys: [A.key] }],
+			}),
+		)
+		const { learned, bound } = await make()
+		await learned.onIdentity("rtl", B, undefined)
+		expect(bound.at(-1)).toEqual({ key: B.key, adoptLegacy: false })
+		expect(learned.view("rtl")?.namespaceState).toBe("fresh")
+		await learned.onIdentity("rtl", A, B)
+		expect(bound.at(-1)).toEqual({
+			key: A.key,
+			adoptLegacy: true,
+			legacyRecorded: true,
+		})
+		expect(learned.view("rtl")?.namespaceState).toBe("adopted")
+	})
+
+	it("a failed record write says so: the tuner keeps the record from before namespacing", async () => {
+		const learned = new ReceiverLearnedState({
+			stateDir,
+			logger: silent,
+			tracked: id => id === "rtl",
+			onBound: (_id, b) => bound.push(b),
+			fs: {
+				readFile: () =>
+					Promise.reject(Object.assign(new Error("x"), { code: "ENOENT" })),
+				atomicWrite: () => Promise.reject(new Error("disk full")),
+			},
+		})
+		const bound: Array<{ key: string | null; adoptLegacy: boolean }> = []
+		await learned.load()
+		await learned.onIdentity("rtl", A, undefined)
+		expect(bound.at(-1)).toEqual({
+			key: A.key,
+			adoptLegacy: true,
+			legacyRecorded: false,
+		})
+	})
+})
+
+describe("ReceiverLearnedState: a write started before a switch", () => {
+	it("is dropped when the binding generation it captured is no longer current", async () => {
+		const { learned, persistence } = await make()
+		await learned.onIdentity("rtl", A, undefined)
+		const before = persistence.generation?.("rtl")
+		expect(before).toBeTypeOf("number")
+		await learned.onIdentity("rtl", B, A)
+		await persistence.writeEngine("rtl", engine(-91), before)
+		await persistence.writeOccupancy("rtl", occupancy(12_500), before)
+		expect(await exists(nsFile(B, "engine.json"))).toBe(false)
+		expect(await exists(nsFile(B, "occupancy.json"))).toBe(false)
+		await persistence.writeEngine(
+			"rtl",
+			engine(-60),
+			persistence.generation?.("rtl"),
+		)
+		expect(
+			JSON.parse(await readFile(nsFile(B, "engine.json"), "utf8")),
+		).toEqual(engine(-60))
 	})
 })

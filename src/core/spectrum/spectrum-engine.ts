@@ -430,7 +430,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private restarting = false
 	private persisted: EngineState | undefined
 	/**
-	 * Lane RS: learned state queued by swapLearnedState for the next host (undefined: fresh).
+	 * Learned state queued by swapLearnedState for the next host (undefined: fresh).
 	 * Applied in createHost, so a restart already in flight picks it up too.
 	 */
 	private learnedSwap: { state: EngineState | undefined } | null = null
@@ -916,7 +916,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	}
 
 	/**
-	 * Lane RS: replaces the learned state (spur map, floors, k, provisional spurs) with another
+	 * Replaces the learned state (spur map, floors, k, provisional spurs) with another
 	 * receiver's, or with nothing (fresh). Resolves the state it replaced (for persisting under
 	 * the previous receiver), or null when there was none. A running pipeline is recreated.
 	 */

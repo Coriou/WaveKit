@@ -1,5 +1,5 @@
 /**
- * `sources[i].candidates` (lane RS): bounded list, bounded printable labels, strict entries, and
+ * `sources[i].candidates`: bounded list, bounded printable labels, strict entries, and
  * environment overrides of existing entries in both the nested and the indexed form.
  */
 import * as fs from "node:fs"

@@ -151,7 +151,7 @@ export interface SdrHostPollerEvents {
 	) => void
 	error: (sourceId: string, error: Error) => void
 	recovered: (sourceId: string) => void
-	/** Lane RS: after each successful, unredirected poll, the validated identity fields. */
+	/** After each successful, unredirected poll, the validated identity fields. */
 	"receiver-identity": (sourceId: string, facts: SdrHostIdentityFacts) => void
 }
 

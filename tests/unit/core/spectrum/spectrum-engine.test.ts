@@ -798,7 +798,7 @@ describe("SpectrumEngine fatal host generations (review F5)", () => {
 	})
 })
 
-describe("SpectrumEngine.swapLearnedState (lane RS)", () => {
+describe("SpectrumEngine.swapLearnedState", () => {
 	const learned = (dbfs: number): EngineState => ({
 		version: 1,
 		absoluteFloors: [{ key: "2048000:g:4096", dbfs }],

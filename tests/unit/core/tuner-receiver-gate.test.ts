@@ -1,5 +1,5 @@
 /**
- * Lane RS: the accepted tuning (centre, rate, gain) is replayed on a reconnect only to the
+ * The accepted tuning (centre, rate, gain) is replayed on a reconnect only to the
  * receiver it was accepted on. Production wiring: a real SourceManager, TunerController,
  * wireTunerControl and ReceiverIdentityTracker against an in-process fake rtl_tcp on an ephemeral
  * loopback port whose header (dongle model) the test switches. Real timers.
@@ -12,7 +12,10 @@ import { TunerController } from "../../../src/core/tuner-controller.js"
 import { wireTunerControl } from "../../../src/core/tuner-wiring.js"
 import type { TunerRelay } from "../../../src/core/tuner-relay.js"
 import { ReceiverIdentityTracker } from "../../../src/core/receiver-identity-tracker.js"
-import type { ReceiverIdentity } from "../../../src/core/receiver-identity.js"
+import {
+	resolveReceiverIdentity,
+	type ReceiverIdentity,
+} from "../../../src/core/receiver-identity.js"
 import { createLogger } from "../../../src/utils/logger.js"
 
 const log = createLogger({ level: "fatal" })
@@ -234,4 +237,133 @@ describe("receiver gate on the reconnect restore", () => {
 			})
 		},
 	)
+})
+
+/** The controller alone, with the receiver identity the test sets, and a recording transport. */
+function direct() {
+	const frames: Array<[number, number]> = []
+	const caps = {
+		kind: "iq" as const,
+		sampleRate: RATE,
+		centerFreq: CENTRE,
+		format: "U8_IQ" as const,
+		exclusive: false,
+	}
+	const transport = {
+		assertTunerCommandActive: () => {},
+		writeToSource: (_id: string, payload: Buffer) => {
+			frames.push([payload.readUInt8(0), payload.readUInt32BE(1)])
+			return true
+		},
+		isRtlTcpSource: () => true,
+		updateSourceCaps: (_id: string, updates: Partial<typeof caps>) =>
+			Object.assign(caps, updates),
+		getCaps: () => ({ ...caps }),
+		setTuningCaps: (
+			_id: string,
+			tuning: { sampleRate: number; centerFreq?: number | undefined },
+		) => Object.assign(caps, tuning),
+	}
+	let current: ReceiverIdentity | undefined
+	const controller = new TunerController(
+		log,
+		transport as unknown as SourceManager,
+		{
+			defaultFrequency: CENTRE,
+			defaultSampleRate: RATE,
+			receiverIdentity: () => current,
+			receiverTracked: () => true,
+		},
+	)
+	controller.on("error", () => {})
+	controller.initializeSource("rtl", { ...caps }, "rtl_tcp")
+	/** A new connection reaching `identity`: the frames its connect sync wrote. */
+	const connect = (
+		identity: ReceiverIdentity,
+		options?: { resume: "plain" | "restore" },
+	) => {
+		current = identity
+		controller.noteSourceConnected("rtl")
+		const from = frames.length
+		controller.synchronizeOnConnect("rtl", options)
+		return frames.slice(from)
+	}
+	return { controller, connect }
+}
+
+const HDR = (tunerType: number, gainCount: number) => ({
+	magic: "RTL0",
+	tunerType,
+	gainCount,
+})
+const ID_A = resolveReceiverIdentity(HDR(5, 29), null)
+const ID_B = resolveReceiverIdentity(HDR(1, 14), null)
+const ID_UNKNOWN = resolveReceiverIdentity(null, null)
+const X_CENTRE = 300_000_000
+
+describe("receiver gate: an unknown interlude", () => {
+	it("A -> unknown -> A: A gets its own tuning back; what was accepted while unknown is not replayed", async () => {
+		const { controller, connect } = direct()
+		connect(ID_A)
+		await controller.setFrequency("rtl", A_CENTRE)
+		connect(ID_UNKNOWN)
+		expect(controller.getState("rtl")?.frequency).toBe(CENTRE)
+		await controller.setFrequency("rtl", X_CENTRE)
+		const onA = connect(ID_A)
+		expect(onA).toContainEqual([SET_FREQUENCY, A_CENTRE])
+		expect(onA).not.toContainEqual([SET_FREQUENCY, X_CENTRE])
+		expect(controller.getState("rtl")?.frequency).toBe(A_CENTRE)
+		expect(controller.receiverTuningRestore("rtl")).toEqual({
+			restored: true,
+			reason: "this receiver's tuning from earlier",
+		})
+	})
+
+	it("A -> unknown -> B: B gets the configured tuning, neither A's nor the unknown one's", async () => {
+		const { controller, connect } = direct()
+		connect(ID_A)
+		await controller.setFrequency("rtl", A_CENTRE)
+		connect(ID_UNKNOWN)
+		await controller.setFrequency("rtl", X_CENTRE)
+		const onB = connect(ID_B)
+		expect(onB.some(([cmd]) => cmd === SET_FREQUENCY)).toBe(false)
+		expect(controller.getState("rtl")?.frequency).toBe(CENTRE)
+		expect(controller.receiverTuningRestore("rtl")).toEqual({
+			restored: false,
+			reason: "another receiver: configured tuning",
+		})
+		// And A later still has its own.
+		expect(connect(ID_A)).toContainEqual([SET_FREQUENCY, A_CENTRE])
+	})
+
+	it("an unknown receiver first, then A: nothing accepted while unknown is replayed to A", async () => {
+		const { controller, connect } = direct()
+		connect(ID_UNKNOWN)
+		await controller.setFrequency("rtl", X_CENTRE)
+		const onA = connect(ID_A)
+		expect(onA).not.toContainEqual([SET_FREQUENCY, X_CENTRE])
+		expect(controller.getState("rtl")?.frequency).toBe(CENTRE)
+	})
+})
+
+describe("receiver gate after a plain resume", () => {
+	it("another receiver keeps the values in doubt (unverified), not the configured baseline", async () => {
+		const { controller, connect } = direct()
+		connect(ID_A)
+		await controller.setFrequency("rtl", A_CENTRE)
+		controller.noteFeedPaused("rtl")
+		connect(ID_A, { resume: "plain" })
+		expect(controller.getState("rtl")?.unknownFields).toContain("frequency")
+		// Accepted after the plain resume: replayed to A, but not B's to have.
+		await controller.setGainMode("rtl", "manual")
+		await controller.setGain("rtl", 280)
+
+		const onB = connect(ID_B)
+		expect(onB).toEqual([])
+		const state = controller.getState("rtl")
+		expect(state).toMatchObject({ frequency: A_CENTRE, gain: 280 })
+		expect(state?.unknownFields).toEqual(
+			expect.arrayContaining(["frequency", "gain", "gainMode"]),
+		)
+	})
 })

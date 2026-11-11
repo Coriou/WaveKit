@@ -162,10 +162,25 @@ export function reduceMaxHold(
  * (Tasks 16, 17a) implements it structurally; the spectrum layer never imports the scanner.
  */
 export interface SpectrumPersistence {
-	writeEngine(sourceId: string, s: EngineState): Promise<void>
+	/**
+	 * `generation`: what `generation(sourceId)` returned when the writer started exporting the
+	 * state; a write whose generation is no longer current is dropped (the state is another
+	 * receiver's). Omitted: written as is.
+	 */
+	writeEngine(
+		sourceId: string,
+		s: EngineState,
+		generation?: number,
+	): Promise<void>
 	loadEngine(sourceId: string): Promise<EngineState | null>
-	writeOccupancy(sourceId: string, s: OccupancyState): Promise<void>
+	writeOccupancy(
+		sourceId: string,
+		s: OccupancyState,
+		generation?: number,
+	): Promise<void>
 	loadOccupancy(sourceId: string): Promise<OccupancyState | null>
+	/** The binding generation of a source's learned state (per-receiver persistence only). */
+	generation?(sourceId: string): number
 }
 
 // on/off come from EventEmitter: picking them from SourceManager/TunerController would return the
@@ -493,17 +508,19 @@ export class SpectrumService extends EventEmitter {
 	/** Engine state of running engines and every occupancy history (maintenance, every 5 min). */
 	async persist(): Promise<void> {
 		for (const [sourceId, entry] of this.entries) {
+			// Captured before the export: a receiver switch meanwhile drops the write.
+			const generation = this.deps.persistence.generation?.(sourceId)
 			const state = await entry.engine.exportState().catch(() => null)
 			if (state)
 				await this.deps.persistence
-					.writeEngine(sourceId, state)
+					.writeEngine(sourceId, state, generation)
 					.catch(() => undefined)
 		}
 		await this.persistOccupancy()
 	}
 
 	/**
-	 * Lane RS: a source's learned state now (the running engine's, and its occupancy history),
+	 * A source's learned state now (the running engine's, and its occupancy history),
 	 * for persisting under the receiver it was learned on. Nulls when there is none.
 	 */
 	async exportLearnedState(sourceId: string): Promise<{
@@ -519,7 +536,7 @@ export class SpectrumService extends EventEmitter {
 	}
 
 	/**
-	 * Lane RS: replaces a source's learned state with another receiver's (null: fresh). A running
+	 * Replaces a source's learned state with another receiver's (null: fresh). A running
 	 * engine recreates its pipeline with it, and so does one still opening (its load may have read
 	 * the binding before this switch): the open is awaited first. An engine opened later loads from
 	 * persistence. The occupancy history is replaced (validated; another bucket size starts fresh).
@@ -910,6 +927,7 @@ export class SpectrumService extends EventEmitter {
 		opts: { reemitStop: boolean },
 	): Promise<void> {
 		let state: EngineState | null = null
+		const generation = this.deps.persistence.generation?.(sourceId)
 		try {
 			state = await entry.engine.stop()
 		} catch (err) {
@@ -920,14 +938,14 @@ export class SpectrumService extends EventEmitter {
 		}
 		if (state)
 			await this.deps.persistence
-				.writeEngine(sourceId, state)
+				.writeEngine(sourceId, state, generation)
 				.catch((err: unknown) =>
 					this.log.warn({ err, sourceId }, "Engine state write failed"),
 				)
 		const history = this.histories.get(sourceId)
 		if (history)
 			await this.deps.persistence
-				.writeOccupancy(sourceId, history.exportState())
+				.writeOccupancy(sourceId, history.exportState(), generation)
 				.catch((err: unknown) =>
 					this.log.warn({ err, sourceId }, "Occupancy write failed"),
 				)

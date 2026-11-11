@@ -1,5 +1,5 @@
 /**
- * Lane RS: the production wiring of src/index.ts (src/core/receiver-identity-wiring.ts): the real
+ * The production wiring of src/index.ts (src/core/receiver-identity-wiring.ts): the real
  * ReceiverIdentityTracker over a source event emitter -> the real ReceiverLearnedState -> the
  * tuner's noteReceiverBound -> the source status `receiver` field.
  */
@@ -109,7 +109,8 @@ describe("receiver identity wiring", () => {
 		await learned.idle("rtl")
 		expect(bound.at(-1)).toEqual({
 			id: "rtl",
-			binding: { key: "model:5:29", adoptLegacy: false },
+			// No scanner store: the gain from before namespacing is adopted all the same.
+			binding: { key: "model:5:29", adoptLegacy: true, legacyRecorded: true },
 			identity: "model:5:29",
 		})
 		expect(status!("rtl")).toEqual({

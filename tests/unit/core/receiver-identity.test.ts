@@ -1,5 +1,5 @@
 /**
- * Receiver identity keys (lane RS): built from validated components only, strongest first, and
+ * Receiver identity keys: built from validated components only, strongest first, and
  * path segments that never leave their namespace directory.
  */
 import { join, relative, sep } from "node:path"
@@ -141,7 +141,7 @@ describe("pathSegment", () => {
 	})
 
 	// Feature: receiver-identity, Property 1: key sanitizing never escapes the namespace dir
-	// Validates: lane RS design 1 (validate every component; encodeURIComponent for paths)
+	// Validates: receiver identity design 1 (validate every component; encodeURIComponent for paths)
 	it("arbitrary sdr-host strings, header values and source ids never leave the namespace dir", () => {
 		const root = join(sep, "state", "scanner", "engine", "receivers")
 		fc.assert(
@@ -207,7 +207,7 @@ describe("pathSegment", () => {
 	})
 
 	// Feature: receiver-identity, Property 2: segments stay apart on a case-insensitive file system
-	// Validates: lane RS design 1 (one namespace per receiver key)
+	// Validates: receiver identity design 1 (one namespace per receiver key)
 	it("two strings that differ only in case get segments that differ case-folded", () => {
 		expect(pathSegment("serial:Realtek:RTL2838:A1").toLowerCase()).not.toBe(
 			pathSegment("serial:realtek:rtl2838:a1").toLowerCase(),

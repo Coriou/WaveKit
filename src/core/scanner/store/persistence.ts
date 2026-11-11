@@ -112,7 +112,7 @@ const ENGINE_DIR = "engine"
 /** A subdirectory, so readEngines (direct `engine/*.json` only) never sees these files. */
 const OCCUPANCY_DIR = join(ENGINE_DIR, "occupancy")
 /**
- * Lane RS: learned state per receiver, `engine/receivers/<source>/<receiver key>/` holding
+ * Learned state per receiver, `engine/receivers/<source>/<receiver key>/` holding
  * `engine.json` and `occupancy.json`. A directory without a `.json` name, so readEngines
  * (direct `engine/*.json` only) never sees it. Both segments come from pathSegment (never `.`,
  * `..` or a separator).
@@ -1454,7 +1454,7 @@ export class ScannerPersistence {
 		return this.readEngineFile(this.engineFile(sourceId))
 	}
 
-	// === Lane RS: learned state per receiver ===
+	// === Learned state per receiver ===
 
 	/** `engine/receivers/<source>/<receiver key>` relative to the scanner state directory. */
 	receiverNamespacePath(sourceId: string, receiverKey: string): string {

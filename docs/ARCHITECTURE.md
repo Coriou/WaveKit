@@ -68,8 +68,10 @@ Manages TCP connections to SDR sources with automatic reconnection.
 - Report why the last connection attempt failed (`connectFailure`: a closed error class and a
   fixed hint, `src/core/source-manager-connect-failure.ts`)
 - Rotate an rtl_tcp U8_IQ source through its configured `candidates` (primary first; an endpoint
-  that never sent a header is left after one failure, a delivering one after
-  `SOURCE_CANDIDATE_RETRIES` losses) and report the endpoint in use (`candidate`)
+  that never delivered a data payload is left after one failure (a header alone does not count;
+  one that sends bytes without an `RTL0` header delivers, with an unknown receiver), a
+  delivering one after `SOURCE_CANDIDATE_RETRIES` losses) and report the endpoint in use
+  (`candidate`)
 
 **Key interfaces**:
 
@@ -124,15 +126,21 @@ spurs, floors or pre-band gain never apply to the Pi receiver.
   pending until the next settle: the state so far is written under the old receiver, the engine
   is swapped to fresh, loads return nothing and writes are dropped. A per-source generation makes
   a load that a switch overtook read again. An unknown receiver gets nothing applied and nothing
-  written. The un-namespaced files from before are copied (not moved) once per source into the
-  first receiver identified (`<stateDir>/receiver-namespaces.json` records it). One INFO line
+  written. The un-namespaced state from before belongs to the first receiver identified
+  (`<stateDir>/receiver-namespaces.json` records it as `adoptedBy`, with what it still `owed`):
+  the pre-band gain is adopted at that binding (no scanner needed), the spectrum files are copied
+  (not moved) once the scanner store is writable while that receiver is bound. No later
+  receiver adopts them. One INFO line
   per change: `Receiver changed: <old> -> <new>; learned state <fresh|resumed|adopted|none>`.
 - `TunerController` keeps the pre-band gain records per receiver key
   (`tuner-band-gain-saved-receivers.json`; `tuner-band-gain-saved.json` keeps the un-keyed
   format older images read) and gates the reconnect restore: accepted tuning (gain included)
   is replayed only to the receiver it was accepted on (a unit owner also matches a header-only
-  identity of the same model until the sdr-host answers). Another receiver gets the configured
-  baseline, and its own earlier tuning comes back if it had one.
+  identity of the same model until the sdr-host answers, so another unit of that model may get
+  the replay; on a candidate endpoint without sdr-host that is never corrected). Another
+  receiver gets the configured baseline (under a plain-resume hold: the values stay, unverified),
+  and its own earlier tuning comes back if it had one. Tuning accepted while the receiver was
+  unknown is dropped at the next identified receiver.
 - Scanner discoveries and recordings stay shared. GET /api/sources shows `receiver` and
   `candidate`.
 

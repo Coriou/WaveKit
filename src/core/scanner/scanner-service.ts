@@ -495,7 +495,7 @@ export interface ScannerServiceDeps {
 	 */
 	readonly lostOwnership?: () => boolean
 	/**
-	 * Lane RS: namespaces learned engine state per receiver (ReceiverLearnedState.attach). Gets
+	 * Namespaces learned engine state per receiver (ReceiverLearnedState.attach). Gets
 	 * the store, the gated persistence used without it, and the same write gate.
 	 */
 	readonly learnedState?: (
@@ -9235,7 +9235,7 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
-	/** Lane RS: the per-receiver wrapper when wired, else the gated persistence as before. */
+	/** The per-receiver wrapper when wired, else the gated persistence as before. */
 	private learnedPersistence(
 		deps: ScannerServiceDeps,
 		gated: SpectrumPersistence,

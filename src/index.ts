@@ -1313,7 +1313,7 @@ async function main(): Promise<void> {
 			await disposeReceiverAfterApi()
 			await sourceManager.disconnectAll()
 		})
-		// Lane RS: receiver identity and per-receiver learned state (rtl_tcp U8_IQ sources).
+		// Receiver identity and per-receiver learned state (rtl_tcp U8_IQ sources).
 		const receiverTracked = (id: string): boolean => {
 			const s = config.sources.find(source => source.id === id)
 			return s?.type === "rtl_tcp" && s.caps.format === "U8_IQ"

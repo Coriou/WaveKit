@@ -111,12 +111,12 @@ export const SOURCE_PAUSE_CLOSE_TIMEOUT_MS = 2000
  */
 export const SOURCE_ENDPOINT_FALLBACK_FAILURES = 3
 /**
- * Lane RS: a source with candidates retries the endpoint that last delivered a valid header this
+ * A source with candidates retries the endpoint that last delivered a data payload this
  * many times after a loss before it moves to the next one. With the 2 s base backoff the three
  * retries wait about 2-4 s, 4-8 s and 8-16 s (equal jitter), plus up to 5 s connect timeout
  * each: 14-43 s, so an rtlmux restart or a short network drop keeps the receiver, while an
- * unplugged one is left within a minute. An endpoint that never delivered a header is left after
- * its first failed attempt.
+ * unplugged one is left within a minute. An endpoint that never delivered a data payload (a
+ * header alone does not count) is left after its first failed attempt.
  */
 export const SOURCE_CANDIDATE_RETRIES = 3
 export const SOURCE_ENDPOINT_FAILURE_WINDOW_MS = 10 * 60_000
@@ -191,9 +191,9 @@ export interface SourceStatus {
 	feed?: SourceFeed | undefined
 	/** The last failed connection attempt; only while a network source is not connected. */
 	connectFailure?: SourceConnectFailure | undefined
-	/** Lane RS: the selected endpoint; only for rtl_tcp sources with `candidates`. */
+	/** The selected endpoint; only for rtl_tcp sources with `candidates`. */
 	candidate?: SourceCandidateStatus | undefined
-	/** Lane RS: the receiver reached and whose learned state applies (setReceiverStatusSource). */
+	/** The receiver reached and whose learned state applies (setReceiverStatusSource). */
 	receiver?: SourceReceiverStatus | undefined
 }
 
@@ -281,7 +281,7 @@ export interface SourceManagerEvents {
 	 */
 	"payload-started": (sourceId: string) => void
 	/**
-	 * Lane RS: the session's rtl_tcp header was read (once per connection, before its first
+	 * The session's rtl_tcp header was read (once per connection, before its first
 	 * payload is forwarded). `info` is the parsed header, or null when it is not one.
 	 */
 	"rtl-tcp-header": (sourceId: string, info: RtlTcpHeaderInfo | null) => void
@@ -389,11 +389,11 @@ interface SourceState {
 	connectPending: boolean
 	/** Failures on the selected endpoint since the last switch (sliding window). */
 	endpointFailures: EndpointFailureWindow
-	/** Lane RS: index into [primary, ...candidates]; always 0 without candidates. */
+	/** Index into [primary, ...candidates]; always 0 without candidates. */
 	candidateIndex: number
-	/** The selected endpoint delivered a valid rtl_tcp header since it was selected. */
+	/** The selected endpoint delivered a data payload since it was selected (a header alone: no). */
 	candidateWon: boolean
-	/** Losses of the selected endpoint since it last delivered a header. */
+	/** Losses of the selected endpoint since it last delivered a data payload. */
 	candidateFailures: number
 	/** Why the selected endpoint is the one (status `selectedBecause`). */
 	candidateReason: string
@@ -547,7 +547,7 @@ export class SourceManager extends EventEmitter {
 	private feedsUnsaved = false
 	/** Generation of the latest write; only its outcome sets `feedsUnsaved`. */
 	private feedSaveGeneration = 0
-	/** Lane RS: the receiver status per source (setReceiverStatusSource). */
+	/** The receiver status per source (setReceiverStatusSource). */
 	private receiverStatusSource:
 		| ((id: string) => SourceReceiverStatus | undefined)
 		| null = null
@@ -2592,7 +2592,7 @@ export class SourceManager extends EventEmitter {
 		}
 	}
 
-	/** Lane RS: supplies `receiver` on getStatus (null removes it). */
+	/** Supplies `receiver` on getStatus (null removes it). */
 	setReceiverStatusSource(
 		source: ((id: string) => SourceReceiverStatus | undefined) | null,
 	): void {
@@ -2856,9 +2856,13 @@ export class SourceManager extends EventEmitter {
 		}
 	}
 
-	// === Candidate endpoints (lane RS) ===
+	// === Candidate endpoints ===
 
-	/** The configured candidates, only for rtl_tcp U8_IQ sources (the header decides a winner). */
+	/**
+	 * The configured candidates, only for rtl_tcp U8_IQ sources. The first data payload decides a
+	 * winner, not the header: an endpoint that sends bytes without an `RTL0` header wins too, with
+	 * an unknown receiver identity.
+	 */
 	private candidatesOf(
 		state: SourceState,
 	): NonNullable<SourceConfig["candidates"]> {

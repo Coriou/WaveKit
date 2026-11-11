@@ -460,7 +460,7 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 				...(status.connectFailure !== undefined
 					? { connectFailure: { ...status.connectFailure } }
 					: {}),
-				// Lane RS: the selected endpoint and the receiver whose learned state applies.
+				// The selected endpoint and the receiver whose learned state applies.
 				...(status.candidate !== undefined
 					? { candidate: { ...status.candidate } }
 					: {}),

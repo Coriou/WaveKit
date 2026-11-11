@@ -1,5 +1,5 @@
 /**
- * Learned state per receiver (lane RS) through the REAL SpectrumService and SpectrumEngine, on the
+ * Learned state per receiver through the REAL SpectrumService and SpectrumEngine, on the
  * real ScannerPersistence in a tmp state directory: the pending window between a reconnect and the
  * next identity (persists and engine opens inside it), and an identity switch while an engine is
  * still opening. Only the pipeline host is a test double (it reports the state it was built from,
@@ -72,6 +72,9 @@ const floorOf = (s: EngineState | undefined | null) =>
 /** A pipeline host that exports the state it was built from, or what it "learned" since. */
 class StateHost implements PipelineHost {
 	learned: EngineState | undefined
+	/** The next export waits for this (then exports what was learned when it was called). */
+	holdExport: Promise<void> | null = null
+	exports = 0
 	constructor(
 		readonly cfg: PipelineConfig,
 		readonly handlers: PipelineHostHandlers,
@@ -82,14 +85,16 @@ class StateHost implements PipelineHost {
 		if (transfer) this.handlers.buffer(transfer)
 	}
 	exportState(): Promise<EngineState> {
-		return Promise.resolve(
-			this.learned ?? {
-				version: 1,
-				absoluteFloors: [],
-				spurs: [],
-				kByRange: [],
-			},
-		)
+		this.exports++
+		const state = this.learned ?? {
+			version: 1,
+			absoluteFloors: [],
+			spurs: [],
+			kByRange: [],
+		}
+		const hold = this.holdExport
+		this.holdExport = null
+		return hold ? hold.then(() => state) : Promise.resolve(state)
 	}
 	close(): Promise<void> {
 		return Promise.resolve()
@@ -367,6 +372,31 @@ describe("Receiver learned state through the real spectrum service", () => {
 		expect(floorOf(t.host().cfg.persistedEngine)).toBe(-91)
 		expect(floorOf(JSON.parse(await readFile(nsFile(B), "utf8")))).toBe(-70)
 		await t.service.release("rtl", "job:y")
+		await t.service.stop()
+	})
+
+	it("a periodic persist whose export straddles a receiver switch writes nothing under the new receiver", async () => {
+		const t = await make()
+		await t.learned.onIdentity("rtl", A, undefined)
+		await t.service.acquire("rtl", "job:a")
+		const onA = t.host()
+		onA.learned = learnedState(-91)
+		const held = gate()
+		onA.holdExport = held.promise
+		const persisting = t.service.persist()
+		await waitFor(() => onA.exports === 1)
+		// The switch completes while the persist still holds A's exported state.
+		void t.learned.onConnection("rtl")
+		await t.learned.onIdentity("rtl", B, A)
+		held.open()
+		await persisting
+		await t.learned.idle("rtl")
+		const bState = await readFile(nsFile(B), "utf8").then(
+			text => JSON.parse(text) as EngineState,
+			() => null,
+		)
+		expect(floorOf(bState)).not.toBe(-91)
+		await t.service.release("rtl", "job:a")
 		await t.service.stop()
 	})
 })

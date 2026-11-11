@@ -1,5 +1,5 @@
 /**
- * Follows each tracked source's connections and says which receiver it reaches (lane RS).
+ * Follows each tracked source's connections and says which receiver it reaches.
  *
  * Per connection: the identity is recomputed from its rtl_tcp header ("rtl-tcp-header"). When the
  * configured sdr-host describes the connected receiver (`sdrHostApplies`: the source is on its

@@ -1,5 +1,5 @@
 /**
- * Receiver identity per connection (lane RS), on production wiring: a real SourceManager against
+ * Receiver identity per connection, on production wiring: a real SourceManager against
  * an in-process fake rtl_tcp on an ephemeral loopback port, and a real SdrHostPoller whose fetch
  * is a fake sdr-host status provider (no request leaves the process).
  */

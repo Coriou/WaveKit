@@ -46,7 +46,7 @@ const FileSchema = z
 
 export const BAND_GAIN_SAVED_FILE_NAME = "tuner-band-gain-saved.json"
 /**
- * Lane RS: the saved gain records kept per receiver (each with `receiverKey`). A file of its own,
+ * The saved gain records kept per receiver (each with `receiverKey`). A file of its own,
  * so BAND_GAIN_SAVED_FILE_NAME keeps the format older images read (their strict schema refuses
  * a `receiverKey`) and an image rolled back keeps its records. Same bounds as the legacy file.
  */
@@ -68,7 +68,7 @@ const SAVED_SOURCE_ID_MAX_LENGTH = 128
 export const BAND_GAIN_SAVED_FILE_MAX_BYTES = 8 * 1024
 
 /**
- * One saved pre-band gain: per source and (lane RS) per receiver key. A record without
+ * One saved pre-band gain: per source and per receiver key. A record without
  * `receiverKey` is from before receiver namespacing; the first receiver identified adopts it.
  */
 export interface SavedOperatorGainRecord {

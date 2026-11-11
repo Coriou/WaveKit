@@ -100,7 +100,7 @@ export const CHANNELS_RESERVED_MESSAGE =
 	'delivery "channels" is reserved for a later receiver-side channelizer (link-burst-resilience 7.1)'
 
 /**
- * Lane RS: at most 8 extra endpoints per source. With the primary that is 9 endpoints; a full
+ * At most 8 extra endpoints per source. With the primary that is 9 endpoints; a full
  * round of first attempts then takes at most 9 x (5 s connect timeout + the 30 s backoff cap)
  * = 315 s, and a typical setup (a Pi and a USB host) lists one or two.
  */
@@ -173,10 +173,11 @@ export const SourceConfigSchema = z.object({
 	/** WG11: configured gain written on connect (rtl_tcp only; absent: nothing is written). */
 	tuner: SourceTunerConfigSchema.optional(),
 	/**
-	 * Lane RS: other rtl_tcp endpoints this source may use (rtl_tcp U8_IQ only; ignored
+	 * Other rtl_tcp endpoints this source may use (rtl_tcp U8_IQ only; ignored
 	 * otherwise). The source tries host/port first, then these in order, with the usual backoff;
-	 * the first that sends a valid rtl_tcp header wins. Only these configured endpoints are
-	 * ever contacted (no discovery).
+	 * the first that delivers a data payload wins (a header alone does not; an endpoint sending
+	 * bytes without a valid `RTL0` header wins with an unknown receiver identity). Only these
+	 * configured endpoints are ever contacted (no discovery).
 	 */
 	candidates: z
 		.array(SourceCandidateSchema)

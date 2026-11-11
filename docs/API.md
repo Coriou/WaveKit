@@ -1102,12 +1102,13 @@ record. While connected the field is not shown.
 **`candidate`** (only `rtl_tcp` `U8_IQ` sources with `candidates` in the config): the endpoint in
 use. `index` (0 is the configured `host`/`port`, 1 onwards the candidates in config order),
 `count` (all endpoints), `label` (the candidate's label, if any), `target` (`host:port`, null when
-the host is not a plain name or address), `selectedBecause`, `delivering` (it sent a valid
-rtl_tcp header since it was selected), `failures` (losses since then) and `retries` (losses after
-which a delivering endpoint is left, 3). `selectedBecause` reads `configured` before any attempt,
-`first reachable`, `previous failed: <class>` once it delivered after a switch (the class is a
-`connectFailure.errorClass` or `lost`, with `(N losses)` when the endpoint left had delivered),
-or `trying: previous failed: <class>` while it is being tried.
+the host is not a plain name or address), `selectedBecause`, `delivering` (it sent a data
+payload since it was selected; a header alone does not count, and an endpoint that sends bytes
+without a valid `RTL0` header delivers with an unknown receiver), `failures` (losses since then)
+and `retries` (losses after which a delivering endpoint is left, 3). `selectedBecause` reads
+`configured` before any attempt, `first reachable`, `previous failed: <class>` once it delivered
+after a switch (the class is a `connectFailure.errorClass` or `lost`, with `(N losses)` when the
+endpoint left had delivered), or `trying: previous failed: <class>` while it is being tried.
 
 **`receiver`** (tracked `rtl_tcp` `U8_IQ` sources, once their first connection identified the
 receiver): which receiver the source reaches and whose learned state applies.
@@ -1150,7 +1151,8 @@ receiver): which receiver the source reaches and whose learned state applies.
 - `restoredTuning`: whether the tuning accepted through the API or the relay was replayed on
   this connection, and why (`same receiver`, `this receiver's tuning from earlier`, `another
 receiver: configured tuning`, `receiver unknown: nothing restored`, ...). It is replayed only to
-  the receiver it was accepted on.
+  the receiver it was accepted on, except that a same-model unit may get it until the sdr-host
+  identity settles (never corrected on a candidate endpoint without sdr-host).
 
 `GET /api/agent/status` carries a compact `receiver` per source: `strength`, `learnedState`
 (the `namespaceState`) and `tuningRestored`.

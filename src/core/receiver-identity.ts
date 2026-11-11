@@ -1,5 +1,5 @@
 /**
- * Receiver identity (lane RS): which physical receiver a source's connection reaches, so learned
+ * Receiver identity: which physical receiver a source's connection reaches, so learned
  * state (spur maps, noise floors, occupancy, the pre-band gain, the accepted tuning) is applied
  * only to the receiver it was learned on. Pure functions; the tracker
  * (receiver-identity-tracker.ts) follows connections and the learned-state manager

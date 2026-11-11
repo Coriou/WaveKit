@@ -218,7 +218,7 @@ export const agentSourceSchema = z
 		/** Why the cost guard holds passive scanning off (GET /api/scanner); absent otherwise. */
 		passive: z.enum(SCANNER_PASSIVE_REASONS).optional(),
 		/**
-		 * Lane RS: GET /api/sources `receiver`, compact: identity strength, what became of the
+		 * GET /api/sources `receiver`, compact: identity strength, what became of the
 		 * learned state, and whether the accepted tuning was restored. Absent before it is known.
 		 */
 		receiver: z

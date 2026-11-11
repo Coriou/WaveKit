@@ -472,14 +472,24 @@ so a USB dongle's spurs or gain are never applied to the Pi receiver, or the oth
 - A receiver seen before gets its own state back. A new one starts fresh. A receiver known only
   by its model shares state with every dongle of that model (the log says so). An unknown
   receiver gets nothing learned and nothing is saved for it.
-- The tuning you set is replayed on a reconnect only to the receiver it was set on, gain
-  included. Another receiver gets the configured tuning.
+- The tuning you set is replayed on a reconnect to the receiver it was set on, gain included.
+  Another receiver gets the configured tuning. A receiver told apart only by its model is the
+  exception: another dongle of the same model may get the replay until the sdr-host names the
+  unit (then it is not replayed again). On a candidate endpoint, which the sdr-host never
+  describes, that is never corrected.
+- After a plain resume (another client tunes the receiver), a switch to another receiver keeps
+  the values shown, marked unverified, instead of the configured tuning.
+- Tuning you set while the receiver was unknown belongs to no receiver: it is not replayed to the
+  next receiver identified, and a receiver coming back gets its own earlier tuning.
 - After a disconnect, nothing learned applies until the next connection's receiver is identified
   (at most 5 s by default): the state so far is saved under the receiver it was learned on, and
   the spectrum engine runs fresh meanwhile, so the next receiver never inherits it.
 - On the first start after the upgrade, the first receiver identified on each source takes over
-  a copy of the state saved before (once). The original files stay, so an older version you go
-  back to still finds them.
+  the state saved before (once), and no other receiver ever does. Its gain from before is taken
+  over at once; the spectrum files are copied as soon as the scanner can write (later, if the
+  scanner is off or still loading, while that same receiver is connected). The original spectrum
+  files stay, so an older version you go back to still finds them; the old gain record leaves
+  `tuner-band-gain-saved.json` once the takeover is on record.
 - Scanner discoveries and recordings are shared by every receiver.
 
 The log shows one line per change, for example
