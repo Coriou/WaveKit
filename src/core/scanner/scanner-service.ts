@@ -640,8 +640,7 @@ function intersectRanges(sets: FreqRange[][]): FreqRange[] {
 	return acc
 }
 
-/** A source's settle link: loopback hosts are local, every other host is the network. */
-export function linkOf(cfg: SourceConfig): "local" | "network" {
+function linkOf(cfg: SourceConfig): "local" | "network" {
 	const host = cfg.host ?? "127.0.0.1"
 	return host === "127.0.0.1" || host === "localhost" || host === "::1"
 		? "local"

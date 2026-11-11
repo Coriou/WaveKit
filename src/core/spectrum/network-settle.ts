@@ -71,3 +71,17 @@ export function settleMs(
 	if (!Number.isFinite(bytes)) return Number.POSITIVE_INFINITY
 	return (bytes * 1000) / (rateHz * frameBytes)
 }
+
+/**
+ * A source's settle link, the same rule as the scanner's (`linkOf` in scanner-service.ts):
+ * loopback hosts are local, every other host (and a missing config) is the network.
+ */
+export function settleLinkOf(
+	cfg: { host?: string | undefined } | undefined,
+): "local" | "network" {
+	if (!cfg) return "network"
+	const host = cfg.host ?? "127.0.0.1"
+	return host === "127.0.0.1" || host === "localhost" || host === "::1"
+		? "local"
+		: "network"
+}

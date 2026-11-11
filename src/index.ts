@@ -124,7 +124,8 @@ import type {
 	ProviderLifetime,
 } from "./core/channelizer/settlement-observer.js"
 import { ScannerLifecycleOwner } from "./core/scanner/channel/consumer-lifecycle.js"
-import { linkOf, ScannerService } from "./core/scanner/scanner-service.js"
+import { ScannerService } from "./core/scanner/scanner-service.js"
+import { settleLinkOf } from "./core/spectrum/network-settle.js"
 import {
 	createChannelActivityRanker,
 	type ChannelActivityRanker,
@@ -1306,7 +1307,7 @@ async function main(): Promise<void> {
 			tuningSettleMs: sourceId => {
 				const cfg = config.sources.find(c => c.id === sourceId)
 				const sweep = (scanner?.settings() ?? config.scanner).sweep
-				return sweep.settleMs[cfg ? linkOf(cfg) : "network"]
+				return sweep.settleMs[settleLinkOf(cfg)]
 			},
 		})
 		own(100, async () => {
