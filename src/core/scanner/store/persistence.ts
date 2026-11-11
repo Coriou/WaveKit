@@ -19,6 +19,7 @@ import {
 	readFile,
 	rename,
 	rm,
+	stat,
 	truncate,
 } from "node:fs/promises"
 import { readJournalFiles } from "./journal-reader.js"
@@ -1535,6 +1536,34 @@ export class ScannerPersistence {
 			}
 			return copied
 		})
+	}
+
+	/**
+	 * Modification times (ms) of a receiver namespace's engine and occupancy files, or of the files
+	 * from before namespacing (`receiverKey` null); null for a file that cannot be stat'ed.
+	 */
+	async learnedFileTimes(
+		sourceId: string,
+		receiverKey: string | null,
+	): Promise<{ engine: number | null; occupancy: number | null }> {
+		const mtime = (file: string) =>
+			stat(file).then(
+				st => st.mtimeMs,
+				() => null,
+			)
+		return receiverKey === null
+			? {
+					engine: await mtime(this.engineFile(sourceId)),
+					occupancy: await mtime(this.occupancyFile(sourceId)),
+				}
+			: {
+					engine: await mtime(
+						this.namespaceFile(sourceId, receiverKey, NS_ENGINE_FILE),
+					),
+					occupancy: await mtime(
+						this.namespaceFile(sourceId, receiverKey, NS_OCCUPANCY_FILE),
+					),
+				}
 	}
 
 	private namespaceFile(

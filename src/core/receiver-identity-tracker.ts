@@ -13,6 +13,14 @@
  * `sdrHostWaitMs` is only a safety net (see RECEIVER_SDR_HOST_WAIT_MS); past it the identity
  * settles with what it has. A later answer only ever upgrades it (model -> unit); a failed or
  * malformed poll, or another unit key, never changes a settled identity within the connection.
+ * A failed result ends the wait at once, except when a unit answer is expected (`sdrHostExpected`:
+ * the configured sdr-host has answered before, or is configured explicitly, or the source's last
+ * settled key is a `unit:` one): a Pi reboot or an sdr-host restart has rtlmux listening before the
+ * sdr-host API, so the first polls of the reconnect fail. Then the connection keeps waiting (the
+ * learned state stays pending, read-only) and asks for another poll every
+ * RECEIVER_SDR_HOST_RETRY_MS (`kickSdrHostPoll(id, true)`: brought forward past any failure
+ * backoff, its failure does not grow the backoff) until an answer or the hard bound; only at the
+ * bound does it settle on the source-scoped model.
  * "identity" fires when the settled key differs from the last one;
  * "settled" fires on every settle (also the same receiver again after a reconnect), and
  * "connection" on every connection boundary (a disconnect or a new connection), so the learned
@@ -38,6 +46,17 @@ export function receiverSdrHostWaitMs(requestTimeoutMs: number): number {
 	return 3 * requestTimeoutMs + 1000
 }
 export const RECEIVER_SDR_HOST_WAIT_MS = receiverSdrHostWaitMs(2000)
+
+/**
+ * The gap between the retry polls of a connection that expects a unit answer after a failed one.
+ * Arithmetic with the default T = 2 s and the 7 s bound (3 x T + 1 s, from the header, about the
+ * connect): a refused poll fails at once, so the attempts start at about 0, 1, 2, ... 6 s; a poll
+ * that times out costs T + 1 s per attempt (attempts at about 0, 3 and 6 s). Either way an
+ * attempt starts at about 6 s, so an sdr-host API up by then is heard before the bound when its
+ * `/api/status` answers within the last second (a LAN answer takes milliseconds). Past the bound
+ * the identity settles on the model, and the first later answer upgrades it (one swap).
+ */
+export const RECEIVER_SDR_HOST_RETRY_MS = 1000
 
 /** One sdr-host poll's outcome (SdrHostPoller "identity-result"). */
 export interface SdrHostResult {
@@ -66,8 +85,19 @@ export interface ReceiverIdentityTrackerOptions {
 	sdrHostApplies: (sourceId: string) => boolean
 	/** Hard bound on the wait for the first sdr-host result after a header (default RECEIVER_SDR_HOST_WAIT_MS). */
 	sdrHostWaitMs?: number
-	/** Asks for an sdr-host poll now (SdrHostPoller.pollNow); called at every connection. */
-	kickSdrHostPoll?: (sourceId: string) => void
+	/**
+	 * Asks for an sdr-host poll now (SdrHostPoller.pollNow); called at every connection, and with
+	 * `retry` true for the retries of a connection that expects a unit answer.
+	 */
+	kickSdrHostPoll?: (sourceId: string, retry?: boolean) => void
+	/**
+	 * True when a unit answer is expected from the source's sdr-host (configured explicitly, or it
+	 * answered before): a failed result then does not end the wait (default: only when the last
+	 * settled key is a `unit:` one).
+	 */
+	sdrHostExpected?: (sourceId: string) => boolean
+	/** The gap between retry polls (default RECEIVER_SDR_HOST_RETRY_MS). */
+	sdrHostRetryMs?: number
 	/** Monotonic clock of the epoch rule (default performance.now, the poller's clock). */
 	now?: () => number
 }
@@ -81,6 +111,8 @@ interface Connection {
 	resulted: boolean
 	settled: ReceiverIdentity | null
 	timer: ReturnType<typeof setTimeout> | null
+	/** The next retry poll of a connection that expects a unit answer. */
+	retryTimer: ReturnType<typeof setTimeout> | null
 	warnedConflict: boolean
 }
 
@@ -95,7 +127,8 @@ export interface ReceiverIdentityEvents {
 		identity: ReceiverIdentity,
 		previous: ReceiverIdentity | undefined,
 	) => void
-	connection: (sourceId: string) => void
+	/** `kind`: "close" for a disconnect, "open" for a new connection. */
+	connection: (sourceId: string, kind: "open" | "close") => void
 }
 
 export class ReceiverIdentityTracker extends EventEmitter {
@@ -105,20 +138,22 @@ export class ReceiverIdentityTracker extends EventEmitter {
 	private readonly last = new Map<string, ReceiverIdentity>()
 	private stopped = false
 	private readonly now: () => number
+	private readonly retryMs: number
 
 	constructor(private readonly options: ReceiverIdentityTrackerOptions) {
 		super()
 		this.log = createComponentLogger(options.logger, "ReceiverIdentity")
 		this.waitMs = options.sdrHostWaitMs ?? RECEIVER_SDR_HOST_WAIT_MS
 		this.now = options.now ?? (() => performance.now())
+		this.retryMs = options.sdrHostRetryMs ?? RECEIVER_SDR_HOST_RETRY_MS
 		options.sources.on("connected", id => {
 			this.onConnected(id)
-			if (!this.stopped) this.emit("connection", id)
+			if (!this.stopped) this.emit("connection", id, "open")
 		})
 		options.sources.on("disconnected", id => {
 			this.clearTimer(id)
 			this.connections.delete(id)
-			if (!this.stopped) this.emit("connection", id)
+			if (!this.stopped) this.emit("connection", id, "close")
 		})
 		options.sources.on("rtl-tcp-header", (id, info) => this.onHeader(id, info))
 		options.sources.on("removed", id => this.clearTimer(id))
@@ -149,6 +184,17 @@ export class ReceiverIdentityTracker extends EventEmitter {
 		const conn = this.connections.get(sourceId)
 		if (!conn || !this.options.sdrHostApplies(sourceId)) return
 		if (result.startedAt < conn.openedAt) return
+		// A unit answer is expected: a failure (an sdr-host API not up yet) asks again soon instead.
+		if (
+			!result.ok &&
+			result.facts === null &&
+			conn.settled === null &&
+			conn.facts === null &&
+			this.expectsUnit(sourceId)
+		) {
+			this.scheduleRetry(sourceId, conn)
+			return
+		}
 		conn.resulted = true
 		// A failure keeps what an earlier answer of this connection said (never a downgrade).
 		if (result.facts !== null) conn.facts = result.facts
@@ -176,6 +222,45 @@ export class ReceiverIdentityTracker extends EventEmitter {
 		for (const id of this.connections.keys()) this.clearTimer(id)
 	}
 
+	private expectsUnit(sourceId: string): boolean {
+		if (this.last.get(sourceId)?.key.startsWith("unit:") === true) return true
+		try {
+			return this.options.sdrHostExpected?.(sourceId) === true
+		} catch {
+			return false
+		}
+	}
+
+	/**
+	 * One retry poll RECEIVER_SDR_HOST_RETRY_MS from now, while the connection is current and not
+	 * settled. Before its header the retries stop after the bound (the header's timer settles).
+	 */
+	private scheduleRetry(sourceId: string, conn: Connection): void {
+		if (conn.retryTimer !== null || this.stopped) return
+		if (!conn.headerSeen && this.now() - conn.openedAt > this.waitMs) {
+			conn.resulted = true
+			return
+		}
+		conn.retryTimer = setTimeout(() => {
+			conn.retryTimer = null
+			if (
+				this.stopped ||
+				this.connections.get(sourceId) !== conn ||
+				conn.settled !== null
+			)
+				return
+			try {
+				this.options.kickSdrHostPoll?.(sourceId, true)
+			} catch (err) {
+				this.log.warn(
+					{ err, sourceId },
+					"Asking the sdr-host for a poll failed",
+				)
+			}
+		}, this.retryMs)
+		conn.retryTimer.unref?.()
+	}
+
 	private combine(sourceId: string, conn: Connection): ReceiverIdentity {
 		return resolveReceiverIdentity(
 			sourceId,
@@ -194,6 +279,7 @@ export class ReceiverIdentityTracker extends EventEmitter {
 			resulted: false,
 			settled: null,
 			timer: null,
+			retryTimer: null,
 			warnedConflict: false,
 		})
 		if (this.stopped || !this.options.sdrHostApplies(sourceId)) return
@@ -243,6 +329,8 @@ export class ReceiverIdentityTracker extends EventEmitter {
 	): void {
 		if (conn.timer) clearTimeout(conn.timer)
 		conn.timer = null
+		if (conn.retryTimer) clearTimeout(conn.retryTimer)
+		conn.retryTimer = null
 		conn.settled = identity
 		const previous = this.last.get(sourceId)
 		this.last.set(sourceId, identity)
@@ -254,6 +342,10 @@ export class ReceiverIdentityTracker extends EventEmitter {
 	private clearTimer(sourceId: string): void {
 		const conn = this.connections.get(sourceId)
 		if (conn?.timer) clearTimeout(conn.timer)
-		if (conn) conn.timer = null
+		if (conn?.retryTimer) clearTimeout(conn.retryTimer)
+		if (conn) {
+			conn.timer = null
+			conn.retryTimer = null
+		}
 	}
 }

@@ -106,6 +106,8 @@ async function setup(opts: {
 	waitMs?: number
 	pollIntervalMs?: number
 	timeoutMs?: number
+	sdrHostExpected?: () => boolean
+	retryMs?: number
 }) {
 	const rtl = await fakeRtlTcp(opts.header ?? (() => header(5, 29)))
 	const manager = new SourceManager(log)
@@ -129,7 +131,9 @@ async function setup(opts: {
 		logger: log,
 		sdrHostApplies: () => poller !== null,
 		sdrHostWaitMs: opts.waitMs ?? 2_000,
-		kickSdrHostPoll: id => poller?.pollNow(id),
+		kickSdrHostPoll: (id, retry) => poller?.pollNow(id, retry),
+		...(opts.sdrHostExpected ? { sdrHostExpected: opts.sdrHostExpected } : {}),
+		...(opts.retryMs !== undefined ? { sdrHostRetryMs: opts.retryMs } : {}),
 	})
 	poller?.on("identity-result", (id, result) =>
 		tracker.noteSdrHostResult(id, result),
@@ -286,9 +290,11 @@ describe("ReceiverIdentityTracker", () => {
 			timeoutMs: 5_000,
 			waitMs: 60_000,
 		})
-		poller?.start()
 		const t0 = Date.now()
+		// Connected first, so the poll started now is this connection's own (a boot poll from
+		// before the connect would be ignored, and the kicked one would wait behind its /api/host).
 		await connect(manager, rtl.port)
+		poller?.start()
 		await waitFor(() => events.length === 1, 4_000)
 		expect(Date.now() - t0).toBeLessThan(4_000)
 		expect(events[0]?.id.key).toBe(`unit:${UNIT}`)
@@ -383,6 +389,89 @@ describe("ReceiverIdentityTracker", () => {
 			prev: WEAK,
 		})
 	}, 15_000)
+})
+
+describe("ReceiverIdentityTracker: a unit answer is expected after a reconnect", () => {
+	it("the sdr-host API is not up yet at the reconnect: failed polls are retried, the unit settles, never the model", async () => {
+		const sdrHost = fakeSdrHost()
+		sdrHost.answer({ unitId: UNIT })
+		const { rtl, manager, poller, tracker, events } = await setup({
+			sdrHost,
+			pollIntervalMs: 60_000,
+			waitMs: 5_000,
+			retryMs: 100,
+		})
+		const settled: string[] = []
+		tracker.on("settled", (_s: string, id: ReceiverIdentity) =>
+			settled.push(id.key),
+		)
+		let opens = 0
+		tracker.on("connection", (_s: string, kind: string) => {
+			if (kind === "open") opens++
+		})
+		poller?.start()
+		await connect(manager, rtl.port)
+		await waitFor(() => settled.length === 1)
+		// A Pi reboot: rtlmux is back before the sdr-host API.
+		sdrHost.fail()
+		const before = sdrHost.statusRequests()
+		rtl.drop()
+		await waitFor(() => opens === 2, 10_000)
+		await new Promise(resolve => setTimeout(resolve, 600))
+		// Still waiting (pending), retried past the poller's 2 s failure backoff.
+		expect(settled).toHaveLength(1)
+		expect(sdrHost.statusRequests() - before).toBeGreaterThanOrEqual(3)
+		expect(tracker.provisional("rtl")?.key).toBe(WEAK)
+		sdrHost.answer({ unitId: UNIT })
+		await waitFor(() => settled.length === 2, 3_000)
+		expect(settled).toEqual([`unit:${UNIT}`, `unit:${UNIT}`])
+		expect(events).toHaveLength(1)
+		// The quick retries did not use up the poller's failure count (one failure counted).
+		expect(poller?.awaitingFirstAnswer("rtl")).toBe(false)
+	}, 15_000)
+
+	it("it never answers: the source-scoped model at the hard bound, not before", async () => {
+		const sdrHost = fakeSdrHost()
+		sdrHost.fail()
+		const { rtl, manager, poller, tracker } = await setup({
+			sdrHost,
+			pollIntervalMs: 60_000,
+			waitMs: 700,
+			retryMs: 100,
+			// Configured explicitly: a unit answer is expected from the first connection on.
+			sdrHostExpected: () => true,
+		})
+		const settled: Array<{ key: string; at: number }> = []
+		const t0 = Date.now()
+		tracker.on("settled", (_s: string, id: ReceiverIdentity) =>
+			settled.push({ key: id.key, at: Date.now() - t0 }),
+		)
+		poller?.start()
+		await connect(manager, rtl.port)
+		await waitFor(() => settled.length === 1, 3_000)
+		expect(settled[0]?.key).toBe(WEAK)
+		expect(settled[0]?.at).toBeGreaterThanOrEqual(650)
+		// The retries stop with the settle.
+		const requests = sdrHost.statusRequests()
+		await new Promise(resolve => setTimeout(resolve, 400))
+		expect(sdrHost.statusRequests()).toBe(requests)
+	}, 15_000)
+
+	it("no unit answer expected (never answered, not configured): a failure still ends the wait at once", async () => {
+		const sdrHost = fakeSdrHost()
+		sdrHost.fail()
+		const { rtl, manager, poller, events } = await setup({
+			sdrHost,
+			waitMs: 60_000,
+			sdrHostExpected: () => false,
+		})
+		poller?.start()
+		const t0 = Date.now()
+		await connect(manager, rtl.port)
+		await waitFor(() => events.length === 1)
+		expect(Date.now() - t0).toBeLessThan(2_000)
+		expect(events[0]?.id.key).toBe(WEAK)
+	})
 })
 
 describe("ReceiverIdentityTracker: the connection epoch rule", () => {

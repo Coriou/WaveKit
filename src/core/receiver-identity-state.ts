@@ -33,7 +33,15 @@
  * Take-over: a stable key bound for the first time on a source that does not adopt the legacy
  * state now (another key adopted it) starts from that source's weak namespace for the same model
  * (`source:<id>|model:<its model>`) when one was learned and no other stable key took it over
- * before (`takenOver`, once per weak key). The weak namespace itself stays as it was.
+ * before (`takenOver`, once per weak key). The weak namespace itself stays as it was. The first
+ * stable key on a source whose weak key learned while no receiver adopted (an sdr-host without
+ * `unitId`, updated later) adopts too, and takes the weak namespace over when the legacy files are
+ * absent or older (the weak engine file's mtime is newer than the legacy one's); else the legacy
+ * files win. Its pre-band gain follows the same choice (`preferTakeOver`).
+ *
+ * A pending window that spans more than one new connection (an unsettled connection to another
+ * receiver, then back) reloads the settled key's saved state even when it is the key bound
+ * before: what the engine learned in memory meanwhile may be another receiver's (one swap).
  *
  * Scanner discoveries and recordings stay shared. A source the tracker does not follow keeps the
  * un-namespaced files exactly as before.
@@ -121,6 +129,15 @@ export interface ReceiverScopedStore extends Omit<
 	): Promise<void>
 	loadOccupancyIn(sourceId: string, key: string): Promise<OccupancyState | null>
 	adoptLegacyInto(sourceId: string, key: string): Promise<boolean>
+	/**
+	 * Modification times (ms) of a namespace's engine and occupancy files, or of the files from
+	 * before namespacing when `key` is null; null for a missing file. Optional: without it the
+	 * legacy files always win the first adoption.
+	 */
+	learnedFileTimes?(
+		sourceId: string,
+		key: string | null,
+	): Promise<{ engine: number | null; occupancy: number | null }>
 }
 
 /** The spectrum side of a switch (SpectrumService). */
@@ -147,6 +164,12 @@ export interface ReceiverBinding {
 	legacyRecorded?: boolean
 	/** A stable key's first binding that takes over this weak key's state (copied, never moved). */
 	takeOverFrom?: string
+	/**
+	 * With adoptLegacy and takeOverFrom: the weak key's state is newer than the one from before
+	 * namespacing and wins (the pre-band gain from the weak key first, the legacy one only when the
+	 * weak key has none).
+	 */
+	preferTakeOver?: boolean
 }
 
 export interface ReceiverLearnedStateOptions {
@@ -232,6 +255,10 @@ export class ReceiverLearnedState {
 	private readonly adopting = new Set<string>()
 	/** The identity of the last settle per source (`recheckAdoption` binds it again). */
 	private readonly settledIdentity = new Map<string, ReceiverIdentity>()
+	/** New connections ("open" boundaries) since the last settle, per source. */
+	private readonly opens = new Map<string, number>()
+	/** Queued `recheckAdoption`s not run yet, per source: the adoption is still awaited. */
+	private readonly rechecks = new Map<string, number>()
 
 	constructor(private readonly options: ReceiverLearnedStateOptions) {
 		this.log = createComponentLogger(options.logger, "ReceiverLearnedState")
@@ -385,8 +412,14 @@ export class ReceiverLearnedState {
 			identity?.key === key &&
 			identity.strength === "model" &&
 			(this.records.get(sourceId)?.adoptedBy ?? null) === null &&
-			this.options.sdrHostAwaited?.(sourceId) === true
+			(this.options.sdrHostAwaited?.(sourceId) === true ||
+				(this.rechecks.get(sourceId) ?? 0) > 0)
 		)
+	}
+
+	/** The last receiver key bound on a source (persisted); undefined before its first. */
+	lastKey(sourceId: string): string | undefined {
+		return this.records.get(sourceId)?.keys.at(-1)
 	}
 
 	private spectrumOwed(sourceId: string, key: string): boolean {
@@ -547,8 +580,10 @@ export class ReceiverLearnedState {
 	 * learned is written; queued, the state learned so far is exported under the receiver it was
 	 * learned on, and stays applied (read-only) until the settle decides.
 	 */
-	onConnection(sourceId: string): Promise<void> {
+	onConnection(sourceId: string, kind?: "open" | "close"): Promise<void> {
 		if (!this.options.tracked(sourceId)) return Promise.resolve()
+		if (kind === "open")
+			this.opens.set(sourceId, (this.opens.get(sourceId) ?? 0) + 1)
 		// Only the first boundary since the last settle exports: after it, what the engine learns
 		// comes from a connection whose receiver is not known yet.
 		const first = !this.pending.has(sourceId)
@@ -584,18 +619,26 @@ export class ReceiverLearnedState {
 	recheckAdoption(sourceId: string): Promise<void> {
 		if (!this.options.tracked(sourceId)) return Promise.resolve()
 		const boundary = this.boundaries.get(sourceId) ?? 0
+		// Until it ran the adoption is still awaited: no write slips into the namespace before it.
+		this.rechecks.set(sourceId, (this.rechecks.get(sourceId) ?? 0) + 1)
 		return this.enqueue(sourceId, async () => {
-			const identity = this.settledIdentity.get(sourceId)
-			if (
-				identity === undefined ||
-				this.pending.has(sourceId) ||
-				(this.boundaries.get(sourceId) ?? 0) !== boundary ||
-				this.bound.get(sourceId) !== identity.key ||
-				(this.records.get(sourceId)?.adoptedBy ?? null) !== null ||
-				!this.mayAdopt(sourceId, identity)
-			)
-				return
-			await this.switchTo(sourceId, identity, identity, boundary, true)
+			try {
+				const identity = this.settledIdentity.get(sourceId)
+				if (
+					identity === undefined ||
+					this.pending.has(sourceId) ||
+					(this.boundaries.get(sourceId) ?? 0) !== boundary ||
+					this.bound.get(sourceId) !== identity.key ||
+					(this.records.get(sourceId)?.adoptedBy ?? null) !== null ||
+					!this.mayAdopt(sourceId, identity)
+				)
+					return
+				await this.switchTo(sourceId, identity, identity, boundary, true)
+			} finally {
+				const left = (this.rechecks.get(sourceId) ?? 1) - 1
+				if (left > 0) this.rechecks.set(sourceId, left)
+				else this.rechecks.delete(sourceId)
+			}
 		})
 	}
 
@@ -724,6 +767,53 @@ export class ReceiverLearnedState {
 		if (byKey.size === 0) this.held.delete(sourceId)
 	}
 
+	/**
+	 * For the first stable key of a source with no adopter yet: the weak key of its model when its
+	 * learned state should win over the legacy files (none of those, or its engine file is newer
+	 * than theirs; a held export is newer than any file), else null. Reads file times only.
+	 */
+	private async weakTakeOverChoice(
+		sourceId: string,
+		identity: ReceiverIdentity,
+	): Promise<string | null> {
+		const read = this.store?.learnedFileTimes?.bind(this.store)
+		const record = this.records.get(sourceId)
+		if (
+			identity.strength !== "unit" ||
+			identity.tunerType === undefined ||
+			identity.gainCount === undefined ||
+			read === undefined ||
+			!record ||
+			record.adoptedBy !== null ||
+			record.keys.includes(identity.key)
+		)
+			return null
+		const weak = sourceModelKey(sourceId, {
+			tunerType: identity.tunerType,
+			gainCount: identity.gainCount,
+		})
+		if (!record.keys.includes(weak) || record.takenOver.has(weak)) return null
+		const times = (key: string | null) =>
+			read(sourceId, key).catch(() => ({
+				engine: null,
+				occupancy: null,
+			}))
+		const held = this.held.get(sourceId)?.has(weak) === true
+		const weakTimes = held ? null : await times(weak)
+		if (
+			!held &&
+			(weakTimes === null ||
+				(weakTimes.engine === null && weakTimes.occupancy === null))
+		)
+			return null
+		const legacy = await times(null)
+		if (legacy.engine === null && legacy.occupancy === null) return weak
+		if (held) return weak
+		return (weakTimes?.engine ?? -Infinity) > (legacy.engine ?? -Infinity)
+			? weak
+			: null
+	}
+
 	/** True when a weak key may adopt the legacy state: only a source without an sdr-host. */
 	private mayAdopt(sourceId: string, identity: ReceiverIdentity): boolean {
 		if (identity.strength === "unit") return true
@@ -746,6 +836,8 @@ export class ReceiverLearnedState {
 		const stale = (this.boundaries.get(sourceId) ?? 0) !== boundary
 		if (stale) return
 		const wasPending = this.pending.has(sourceId)
+		const opens = this.opens.get(sourceId) ?? 0
+		this.opens.delete(sourceId)
 		// Nothing changed (a repeated settle within one connection); a recheck may adopt.
 		if (
 			!recheck &&
@@ -757,6 +849,9 @@ export class ReceiverLearnedState {
 		this.switching.add(sourceId)
 		try {
 			const store = this.store
+			// Read before the export below rewrites the weak namespace's files.
+			const weakChoice =
+				to === null ? null : await this.weakTakeOverChoice(sourceId, identity)
 			// Within one connection (an upgrade) the state so far is the previous key's. After a
 			// boundary it was exported then; what came since is the new connection's.
 			if (!wasPending && from !== null && from !== to)
@@ -766,6 +861,7 @@ export class ReceiverLearnedState {
 			let legacyRecorded = false
 			let moved = false
 			let takeOverFrom: string | null = null
+			let preferTakeOver = false
 			if (to !== null) {
 				const record = this.records.get(sourceId) ?? {
 					adoptedBy: null,
@@ -781,6 +877,19 @@ export class ReceiverLearnedState {
 					record.adoptedBy = to
 					record.owed = new Set(["spectrum", "gain"])
 					changed = true
+					// The first stable key of a source whose weak key learned meanwhile: the weak
+					// state wins when it is newer than the legacy files (or there are none).
+					if (
+						weakChoice !== null &&
+						!known &&
+						!record.takenOver.has(weakChoice) &&
+						record.keys.includes(weakChoice)
+					) {
+						takeOverFrom = weakChoice
+						preferTakeOver = true
+						record.takenOver.set(weakChoice, to)
+						record.owed.delete("spectrum")
+					}
 				}
 				if (
 					record.adoptedBy === to &&
@@ -798,6 +907,7 @@ export class ReceiverLearnedState {
 				}
 				// Take-over: a stable key new on this source that does not adopt the legacy state.
 				if (
+					takeOverFrom === null &&
 					!known &&
 					identity.strength === "unit" &&
 					record.adoptedBy !== to &&
@@ -840,9 +950,11 @@ export class ReceiverLearnedState {
 					if (from !== null || refused) next = { engine: null, occupancy: null }
 				} else if (moved) next = await this.loadNamespace(sourceId, to, store)
 				else if (takeOverFrom !== null) {
-					if (from !== takeOverFrom || refused)
+					if (from !== takeOverFrom || refused || (wasPending && opens > 1))
 						next = await this.loadNamespace(sourceId, takeOverFrom, store)
-				} else if (from !== to || refused)
+				} else if (from !== to || refused || (wasPending && opens > 1))
+					// More than one new connection since the last settle: what the engine learned in
+					// memory meanwhile may be another receiver's; this receiver's saved state applies.
 					next = await this.loadNamespace(sourceId, to, store)
 				if (to !== null) this.held.get(sourceId)?.delete(to)
 				this.refusedLoads.delete(sourceId)
@@ -869,6 +981,7 @@ export class ReceiverLearnedState {
 				? { key: to, adoptLegacy, legacyRecorded }
 				: { key: to, adoptLegacy }
 			if (takeOverFrom !== null) binding.takeOverFrom = takeOverFrom
+			if (preferTakeOver && adoptLegacy) binding.preferTakeOver = true
 			this.options.onBound?.(sourceId, binding)
 			// Keys are built from validated components only, so they are safe to log.
 			const same = previous?.key === identity.key

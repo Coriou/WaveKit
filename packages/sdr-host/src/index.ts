@@ -56,6 +56,11 @@ async function main(): Promise<void> {
 				? "State directory is a tmpfs (lost at every restart): no stable unit id is reported. Mount a disk-backed volume there (docker-compose.yml mounts /var/lib/wavekit/sdr-host at /state)"
 				: "State directory is not a mounted volume: no stable unit id is reported. Mount a volume there (docker-compose.yml mounts /var/lib/wavekit/sdr-host at /state)",
 		)
+	else if (result.reason === "state-anonymous-volume")
+		logger.warn(
+			{ stateDir: config.state.dir },
+			"State directory is an anonymous Docker volume (a new empty one at every docker compose down + up or docker rm + run): no stable unit id is reported. Mount a named volume or a host directory there (docker-compose.yml mounts /var/lib/wavekit/sdr-host at /state)",
+		)
 	else if (result.reason !== null)
 		logger.warn(
 			{ stateDir: config.state.dir, reason: result.reason },

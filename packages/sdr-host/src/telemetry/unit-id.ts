@@ -9,8 +9,13 @@
  * every recreate, so no id is reported; a tmpfs state dir (Linux magic 0x01021994) is lost at
  * every restart, so it reports no id either, in a container or not. A directory fsync after the
  * rename that the filesystem does not support (EINVAL, ENOTSUP, EPERM, EISDIR) is best effort: the
- * id is kept and the error is returned for a log line. Whenever the id would not be stable it is not reported at
- * all (null, with a reason): an id that would change must never be taken for a stable one.
+ * id is kept and the error is returned for a log line. A state dir that is an anonymous Docker
+ * volume (its mount in /proc/self/mountinfo comes from `.../docker/volumes/<64 hex>/_data`) is
+ * replaced by a new empty volume at every `docker compose down` + `up` or `docker rm` + `run`, so
+ * it reports no id either ("state-anonymous-volume"); only a named volume or a host directory
+ * keeps the id. An unreadable mountinfo cannot tell, so the id is kept. Whenever the id would not
+ * be stable it is not reported at all (null, with a reason): an id that would change must never
+ * be taken for a stable one.
  * `receiverId` (one running process) is separate and unchanged.
  */
 import { randomBytes } from "node:crypto"
@@ -38,6 +43,7 @@ const DIR_SYNC_UNSUPPORTED = new Set(["EINVAL", "ENOTSUP", "EPERM", "EISDIR"])
 /** Why no unit id is reported (null while one is). */
 export type UnitIdReason =
 	| "state-not-persistent"
+	| "state-anonymous-volume"
 	| "state-unreadable"
 	| "state-unwritable"
 
@@ -169,6 +175,7 @@ export type StatePersistence =
 	| "mount"
 	| "not-mount"
 	| "tmpfs"
+	| "anonymous-volume"
 	| "not-container"
 	| "unknown"
 
@@ -179,13 +186,58 @@ export interface StatePersistenceProbe {
 	inContainer(): boolean
 	/** The statfs f_type of a path (rejects like fs.statfs). */
 	fsTypeOf(path: string): Promise<number>
+	/** The text of /proc/self/mountinfo (rejects when unreadable); absent: not checked. */
+	mountInfo?(): Promise<string>
 }
+
+/** mountinfo is a few KiB; anything past this is not read. */
+const MOUNTINFO_MAX_BYTES = 1024 * 1024
 
 const nodeProbe: StatePersistenceProbe = {
 	deviceOf: async path => (await stat(path)).dev,
 	inContainer: () =>
 		existsSync("/.dockerenv") || existsSync("/run/.containerenv"),
 	fsTypeOf: async path => (await statfs(path)).type,
+	mountInfo: async () => {
+		const raw = await readFile("/proc/self/mountinfo")
+		return raw.subarray(0, MOUNTINFO_MAX_BYTES).toString("utf8")
+	},
+}
+
+/** An anonymous Docker volume's data directory (its name is 64 lower-case hex). */
+const ANONYMOUS_VOLUME = /\/docker\/volumes\/[0-9a-f]{64}\/_data$/
+
+/** mountinfo escapes space, tab, newline and backslash as octal (`\040`). */
+function unescapeMountField(field: string): string {
+	return field.replace(/\\([0-7]{3})/g, (_m, oct: string) =>
+		String.fromCharCode(parseInt(oct, 8)),
+	)
+}
+
+/**
+ * True when the mount at `dir` (the last one listed: it is on top) has an anonymous Docker volume
+ * as its root or source; false for any other mount or none listed.
+ */
+export function isAnonymousVolumeMount(
+	mountInfo: string,
+	dir: string,
+): boolean {
+	let anonymous = false
+	for (const line of mountInfo.split("\n")) {
+		const dash = line.indexOf(" - ")
+		if (dash < 0) continue
+		const fields = line.slice(0, dash).split(" ")
+		const tail = line.slice(dash + 3).split(" ")
+		const root = fields[3]
+		const mountPoint = fields[4]
+		if (root === undefined || mountPoint === undefined) continue
+		if (unescapeMountField(mountPoint) !== dir) continue
+		const source = tail[1] ?? ""
+		anonymous =
+			ANONYMOUS_VOLUME.test(unescapeMountField(root)) ||
+			ANONYMOUS_VOLUME.test(unescapeMountField(source))
+	}
+	return anonymous
 }
 
 /**
@@ -193,6 +245,8 @@ const nodeProbe: StatePersistenceProbe = {
  * be a mount point (its st_dev differs from its parent's), else it lives in the container layer.
  * A missing dir is not a mount; any other stat failure is "unknown" (the id is kept, with a log).
  * A tmpfs dir ("tmpfs") never persists, in a container or not; a statfs failure skips that check.
+ * A mount from an anonymous Docker volume is "anonymous-volume"; an unreadable mountinfo skips
+ * that check (the mount is kept).
  */
 export async function stateDirPersistence(
 	dir: string,
@@ -210,11 +264,18 @@ export async function stateDirPersistence(
 	} catch (err) {
 		return errorCode(err) === "ENOENT" ? "not-mount" : "unknown"
 	}
+	let mounted: boolean
 	try {
-		return own !== (await probe.deviceOf(parent)) ? "mount" : "not-mount"
+		mounted = own !== (await probe.deviceOf(parent))
 	} catch {
 		return "unknown"
 	}
+	if (!mounted) return "not-mount"
+	if (probe.mountInfo === undefined) return "mount"
+	const info = await probe.mountInfo().catch(() => null)
+	return info !== null && isAnonymousVolumeMount(info, abs)
+		? "anonymous-volume"
+		: "mount"
 }
 
 export interface UnitIdStartup {
@@ -232,6 +293,15 @@ export async function loadUnitIdAtStartup(
 	} = {},
 ): Promise<UnitIdStartup> {
 	const persistence = await stateDirPersistence(dir, deps.probe)
+	if (persistence === "anonymous-volume")
+		return {
+			persistence,
+			result: {
+				unitId: null,
+				source: "unavailable",
+				reason: "state-anonymous-volume",
+			},
+		}
 	if (persistence === "not-mount" || persistence === "tmpfs")
 		return {
 			persistence,

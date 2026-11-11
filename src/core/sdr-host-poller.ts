@@ -202,6 +202,8 @@ interface PollerState {
 	rerun: boolean
 	/** Any poll of this process got an answer. */
 	answered: boolean
+	/** The next poll is a retry (pollNow with `retry`): its failure does not grow the backoff. */
+	retryNext: boolean
 }
 
 // ============================================================================
@@ -240,6 +242,7 @@ export class SdrHostPoller extends EventEmitter {
 				inFlight: false,
 				rerun: false,
 				answered: false,
+				retryNext: false,
 			})
 		}
 	}
@@ -328,10 +331,14 @@ export class SdrHostPoller extends EventEmitter {
 	 * Polls the source's sdr-host now (a new connection wants an answer from after it opened):
 	 * a poll running now is followed by another right after it; a scheduled one (also a failure
 	 * backoff) is brought forward. The failure count is kept, so backoff after it still grows.
+	 * With `retry` (a connection still waiting for a unit answer asks again): a failure of that
+	 * poll does not grow the failure count, so quick retries neither lengthen the backoff nor use
+	 * up the first-answer attempts (SDR_HOST_FIRST_ANSWER_ATTEMPTS).
 	 */
-	pollNow(sourceId: string): void {
+	pollNow(sourceId: string, retry = false): void {
 		const state = this.pollers.get(sourceId)
 		if (!state || !this.isRunning) return
+		if (retry) state.retryNext = true
 		if (state.inFlight) {
 			state.rerun = true
 			return
@@ -368,6 +375,7 @@ export class SdrHostPoller extends EventEmitter {
 			inFlight: false,
 			rerun: false,
 			answered: false,
+			retryNext: false,
 		}
 
 		this.pollers.set(config.sourceId, state)
@@ -420,10 +428,12 @@ export class SdrHostPoller extends EventEmitter {
 		}
 		state.inFlight = true
 		state.rerun = false
+		const retry = state.retryNext
+		state.retryNext = false
 		const startedAt = performance.now()
 		let next: number
 		try {
-			next = await this.pollOnce(sourceId, state, startedAt)
+			next = await this.pollOnce(sourceId, state, startedAt, retry)
 		} finally {
 			state.inFlight = false
 		}
@@ -440,6 +450,7 @@ export class SdrHostPoller extends EventEmitter {
 		sourceId: string,
 		state: PollerState,
 		startedAt: number,
+		retry: boolean,
 	): Promise<number> {
 		try {
 			const { status, endpoints, identity } = await this.fetchStatus(
@@ -472,7 +483,8 @@ export class SdrHostPoller extends EventEmitter {
 			return this.pollIntervalMs
 		} catch (error) {
 			state.linkFacts = null
-			state.consecutiveFailures++
+			// A retry's failure marks the host down (recovery is still reported) but adds no count.
+			if (!retry || state.consecutiveFailures === 0) state.consecutiveFailures++
 
 			const backoffDelay = Math.min(
 				BASE_BACKOFF_MS * Math.pow(2, state.consecutiveFailures - 1),

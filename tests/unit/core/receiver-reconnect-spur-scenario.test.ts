@@ -10,12 +10,14 @@
  * no scanner discovery may appear in the reconnect window (a fresh engine would lose the spur map
  * and report the lines as signals). A variant adds an in-process fake sdr-host (HTTP on an
  * ephemeral loopback port) reporting a fixed unit id, polled by the production SdrHostPoller:
- * each connection kicks a poll (pollNow) whose identity result settles the unit key. No request
- * leaves the process.
+ * each connection kicks a poll (pollNow) whose identity result settles the unit key. A third
+ * variant is a Pi reboot: the sdr-host API answers 503 from the drop until 2 s after the reconnect
+ * (rtlmux listens first); the failed polls are retried and the unit key still settles, with no
+ * swap through the weak key. No request leaves the process.
  */
 import http from "node:http"
 import net from "node:net"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -80,10 +82,21 @@ const RECEIVER_KEY = "source:rtl|model:5:29"
 const UNIT_ID = "0123456789abcdef0123456789abcdef"
 const UNIT_KEY = `unit:${UNIT_ID}`
 
-/** A fake sdr-host status API on an ephemeral loopback port: a fixed unit id, no /api/host. */
+/**
+ * A fake sdr-host status API on an ephemeral loopback port: a fixed unit id, no /api/host; while
+ * `down`, every request answers 503 (the Node API not up yet).
+ */
 async function fakeSdrHost() {
 	let statusRequests = 0
+	let failedRequests = 0
+	let down = false
 	const server = http.createServer((req, res) => {
+		if (down) {
+			if (req.url === "/api/status") failedRequests += 1
+			res.writeHead(503)
+			res.end()
+			return
+		}
 		if (req.url === "/api/status") {
 			statusRequests += 1
 			res.writeHead(200, { "Content-Type": "application/json" })
@@ -103,6 +116,10 @@ async function fakeSdrHost() {
 	return {
 		apiUrl: `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`,
 		statusRequests: () => statusRequests,
+		failedRequests: () => failedRequests,
+		setDown: (value: boolean) => {
+			down = value
+		},
 		close: async () => {
 			server.closeAllConnections()
 			await new Promise<void>(resolve => server.close(() => resolve()))
@@ -166,9 +183,13 @@ afterEach(async () => {
 
 /**
  * The scenario; `withSdrHost`: the source has a configured sdr-host (the fake), so both settles
- * wait for this connection's kicked poll and land on the unit key.
+ * wait for this connection's kicked poll and land on the unit key. `sdrHostLate`: the sdr-host API
+ * is down (503) from the drop until 2 s after the reconnect.
  */
-async function runScenario(withSdrHost: boolean): Promise<void> {
+async function runScenario(
+	withSdrHost: boolean,
+	sdrHostLate = false,
+): Promise<void> {
 	const server = await spurRtlTcp()
 	cleanup.push(() => server.close())
 	const stateDir = await mkdtemp(join(tmpdir(), "wk-spur-scenario-"))
@@ -220,7 +241,12 @@ async function runScenario(withSdrHost: boolean): Promise<void> {
 			poller?.getStatus(id) !== undefined &&
 			(sourceManager.getSelectedCandidate(id)?.index ?? 0) === 0,
 		sdrHostWaitMs: receiverSdrHostWaitMs(2_000),
-		kickSdrHostPoll: id => poller?.pollNow(id),
+		kickSdrHostPoll: (id, retry) => poller?.pollNow(id, retry),
+		sdrHostExpected: (id): boolean =>
+			poller?.getStatus(id) !== undefined &&
+			(source.sdrHost?.apiUrl !== undefined ||
+				poller.hasAnswered(id) ||
+				learned.lastKey(id)?.startsWith("unit:") === true),
 	})
 	poller?.on("identity-result", (id, result) =>
 		tracker.noteSdrHostResult(id, result),
@@ -320,8 +346,16 @@ async function runScenario(withSdrHost: boolean): Promise<void> {
 	expect(buildsBefore).toBeGreaterThan(0)
 
 	// The link drops; the core reconnects to the same receiver.
+	if (sdrHostLate) sdrHost?.setDown(true)
 	server.drop()
 	await waitFor(() => server.accepts() === 2, 20_000)
+	if (sdrHostLate && sdrHost) {
+		// The API comes up 2 s after rtlmux took the connection; until then nothing settles.
+		await new Promise(resolve => setTimeout(resolve, 2_000))
+		expect(settled).toEqual([key])
+		expect(sdrHost.failedRequests()).toBeGreaterThan(1)
+		sdrHost.setDown(false)
+	}
 	await waitFor(() => settled.length === 2, 10_000)
 	expect(settled).toEqual([key, key])
 	// The reconnect asked the sdr-host again (its kicked poll settled the unit key).
@@ -333,6 +367,13 @@ async function runScenario(withSdrHost: boolean): Promise<void> {
 	expect(builds.mock.calls.length).toBe(buildsBefore)
 	expect(learned.view("rtl")?.namespaceState).toBe("resumed")
 	expect(learned.view("rtl")?.key).toBe(key)
+	if (sdrHost) {
+		// Nothing was ever learned under the source-scoped key.
+		const namespaces = await readdir(
+			join(stateDir, "scanner", "engine", "receivers", "rtl"),
+		).catch(() => [])
+		expect(namespaces.some(n => n.includes("model"))).toBe(false)
+	}
 }
 
 describe("scenario: reconnect to the same receiver with spur lines in the IQ", () => {
@@ -342,5 +383,9 @@ describe("scenario: reconnect to the same receiver with spur lines in the IQ", (
 
 	it("with a fake sdr-host: both settles are the unit key, no swap, no pipeline rebuild, no discovery", async () => {
 		await runScenario(true)
+	}, 60_000)
+
+	it("a Pi reboot (the sdr-host API answers 503 until 2 s after the reconnect): the unit key settles, no swap, no pipeline rebuild, no discovery", async () => {
+		await runScenario(true, true)
 	}, 60_000)
 })

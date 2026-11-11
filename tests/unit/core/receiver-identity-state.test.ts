@@ -9,6 +9,7 @@ import {
 	readdir,
 	readFile,
 	rm,
+	utimes,
 	writeFile,
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -361,6 +362,32 @@ describe("ReceiverLearnedState: the pending window of a reconnect", () => {
 		expect(
 			JSON.parse(await readFile(nsFile(A, "engine.json"), "utf8")),
 		).toMatchObject({ absoluteFloors: [{ dbfs: -92 }] })
+	})
+
+	it("an unsettled connection to another receiver in between: the same key settled again reloads its saved state", async () => {
+		const { learned, fake } = await make()
+		await learned.onIdentity("rtl", A, undefined)
+		fake.learn(engine(-60), occupancy(12_500))
+		// A drop, a connection that never settles (another receiver behind the endpoint), a drop.
+		await learned.onConnection("rtl", "close")
+		await learned.onConnection("rtl", "open")
+		fake.learn(engine(-99), occupancy(25_000))
+		await learned.onConnection("rtl", "close")
+		await learned.onConnection("rtl", "open")
+		const swaps = fake.replaced.length
+		await learned.onIdentity("rtl", A, A)
+		// One swap: A's state as exported at the first boundary, not what was learned meanwhile.
+		expect(fake.replaced).toHaveLength(swaps + 1)
+		expect(fake.now().engine).toEqual(engine(-60))
+		expect(fake.now().occupancy).toEqual(occupancy(12_500))
+		expect(learned.view("rtl")?.namespaceState).toBe("resumed")
+		// A plain reconnect after it (one new connection): no swap, the state learned kept.
+		fake.learn(engine(-61), occupancy(12_500))
+		await learned.onConnection("rtl", "close")
+		await learned.onConnection("rtl", "open")
+		await learned.onIdentity("rtl", A, A)
+		expect(fake.replaced).toHaveLength(swaps + 1)
+		expect(fake.now().engine).toEqual(engine(-61))
 	})
 
 	it("an sdr-host restart (new receiverId, same unitId) resumes the same namespace without a swap", async () => {
@@ -760,7 +787,10 @@ describe("ReceiverLearnedState: who adopts the state from before namespacing", (
 		expect(
 			JSON.parse(await readFile(nsFile(WEAK, "engine.json"), "utf8")),
 		).toEqual(engine(-70))
-		// The stable answer (an upgrade within the connection): the legacy state is adopted.
+		// The stable answer (an upgrade within the connection): the legacy files are newer than the
+		// weak namespace's (an older image ran since), so the legacy state is adopted.
+		const future = Date.now() / 1000 + 60
+		await utimes(join(scannerDir, "engine", "rtl.json"), future, future)
 		fake.learn(engine(-70), occupancy(12_500))
 		await learned.onIdentity("rtl", A, WEAK)
 		expect(bound.at(-1)).toMatchObject({ key: A.key, adoptLegacy: true })
@@ -770,6 +800,76 @@ describe("ReceiverLearnedState: who adopts the state from before namespacing", (
 			await readFile(join(stateDir, RECEIVER_NAMESPACES_FILE_NAME), "utf8"),
 		) as { sources: Array<{ adoptedBy: string | null }> }
 		expect(record.sources[0]?.adoptedBy).toBe(A.key)
+	})
+
+	it("the first stable key takes the weak namespace over when it is newer than the legacy files; its gain first", async () => {
+		await writeLegacy()
+		const past = Date.now() / 1000 - 3600
+		await utimes(join(scannerDir, "engine", "rtl.json"), past, past)
+		const { learned, persistence, fake, bound } = await makeWith(() => true)
+		// An sdr-host without unitId: the weak key learns, nobody adopts.
+		await learned.onIdentity("rtl", WEAK, undefined)
+		await persistence.writeEngine(
+			"rtl",
+			engine(-70),
+			persistence.generation?.("rtl"),
+		)
+		fake.learn(engine(-71), occupancy(12_500))
+		const swaps = fake.replaced.length
+		// The sdr-host is updated: the first unit key adopts, and the newer weak state wins.
+		await learned.onIdentity("rtl", A, WEAK)
+		expect(bound.at(-1)).toEqual({
+			key: A.key,
+			adoptLegacy: true,
+			legacyRecorded: true,
+			takeOverFrom: WEAK.key,
+			preferTakeOver: true,
+		})
+		expect(learned.view("rtl")?.namespaceState).toBe("adopted")
+		// Within the connection the engine already runs on the weak state: kept, no swap.
+		expect(fake.replaced).toHaveLength(swaps)
+		expect(fake.now().engine).toEqual(engine(-71))
+		// The legacy files were not copied into A's namespace.
+		expect(await exists(nsFile(A, "engine.json"))).toBe(false)
+		const record = JSON.parse(
+			await readFile(join(stateDir, RECEIVER_NAMESPACES_FILE_NAME), "utf8"),
+		) as {
+			sources: Array<{
+				adoptedBy: string | null
+				owed?: string[]
+				takenOver?: Array<{ from: string; by: string }>
+			}>
+		}
+		expect(record.sources[0]).toMatchObject({
+			adoptedBy: A.key,
+			takenOver: [{ from: WEAK.key, by: A.key }],
+		})
+		expect(record.sources[0]?.owed).toBeUndefined()
+	})
+
+	it("no legacy files: the first stable key takes the weak namespace over (its saved state after an unsettled connection)", async () => {
+		const { learned, persistence, fake, bound } = await makeWith(() => true)
+		await learned.onIdentity("rtl", WEAK, undefined)
+		await persistence.writeEngine(
+			"rtl",
+			engine(-72),
+			persistence.generation?.("rtl"),
+		)
+		// An unsettled connection in between learned something else in memory, then a reconnect.
+		await learned.onConnection("rtl", "close")
+		await learned.onConnection("rtl", "open")
+		fake.learn(engine(-99), occupancy(12_500))
+		await learned.onConnection("rtl", "close")
+		await learned.onConnection("rtl", "open")
+		await learned.onIdentity("rtl", A, WEAK)
+		expect(bound.at(-1)).toMatchObject({
+			key: A.key,
+			takeOverFrom: WEAK.key,
+			preferTakeOver: true,
+		})
+		expect(learned.view("rtl")?.namespaceState).toBe("adopted")
+		// The weak namespace's saved state, not what the unsettled connection learned.
+		expect(fake.now().engine).toEqual(engine(-72))
 	})
 
 	it("without an sdr-host, the source-scoped key adopts", async () => {
@@ -847,6 +947,30 @@ describe("ReceiverLearnedState: who adopts the state from before namespacing", (
 		expect(
 			JSON.parse(await readFile(nsFile(WEAK, "engine.json"), "utf8")),
 		).toEqual(engine(-66))
+	})
+
+	it("a write between the end of the wait and the queued recheck is dropped, so the recheck still adopts", async () => {
+		await writeLegacy()
+		let awaited = true
+		const { learned, persistence, fake } = await makeWith(
+			() => awaited,
+			() => awaited,
+		)
+		await learned.onIdentity("rtl", WEAK, undefined)
+		// The poller gives up (its listener queues the recheck), and a persist comes in at once.
+		awaited = false
+		const recheck = learned.recheckAdoption("rtl")
+		await persistence.writeEngine(
+			"rtl",
+			engine(-70),
+			persistence.generation?.("rtl"),
+		)
+		await recheck
+		expect(learned.view("rtl")?.namespaceState).toBe("adopted")
+		expect(fake.now().engine).toEqual(engine(-88))
+		expect(
+			JSON.parse(await readFile(nsFile(WEAK, "engine.json"), "utf8")),
+		).toEqual(engine(-88))
 	})
 
 	it("a recheck while a connection is pending does nothing (its settle decides)", async () => {

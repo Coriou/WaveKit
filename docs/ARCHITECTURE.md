@@ -118,8 +118,12 @@ spurs, floors or pre-band gain never apply to the Pi receiver.
   connection kicks a poll (`SdrHostPoller.pollNow`) and waits for the first poll result
   (`identity-result`, emitted right after `/api/status`, success or failure) whose request
   started at or after the connection opened; a hard bound (3 request timeouts + 1 s, 7 s by
-  default) is only a safety net. It never downgrades within a connection and is recomputed on
-  each new connection. It emits `connection` on every disconnect and connect, `settled` on every
+  default) is only a safety net. When a unit answer is expected (the sdr-host is configured,
+  answered before, or the source's last receiver was a `unit` key), a failed result does not end
+  the wait: a Pi reboot or sdr-host restart has rtlmux listening before the sdr-host API, so the
+  connection asks again every second (`pollNow(id, true)`, past the failure backoff and without
+  growing it) and settles on the `model` key only at the bound. It never downgrades within a
+  connection and is recomputed on each new connection. It emits `connection` on every disconnect and connect, `settled` on every
   settle and `identity` on a change; `src/core/receiver-identity-wiring.ts` connects it to the
   learned state, the tuner (`noteReceiverBound`) and the source status (`setReceiverStatusSource`).
 - `src/core/receiver-identity-state.ts`: binds each tracked source (rtl_tcp U8_IQ) to its
@@ -138,7 +142,14 @@ spurs, floors or pre-band gain never apply to the Pi receiver.
   sdr-host; the pre-band gain at that binding (no scanner needed), the spectrum files copied (not
   moved) once the scanner store is writable while that receiver is bound. A `unit` key new on a
   source that does not adopt starts from the source's `model` namespace of its model, once per
-  `model` key. One INFO line
+  `model` key. The first `unit` key on a source whose `model` key learned while nobody adopted (an
+  sdr-host without `unitId`, updated later) adopts, and takes that `model` namespace over when the
+  legacy files are missing or older than it (engine file mtime); else the legacy files win. A
+  pending window that spans more than one new connection (an unsettled connection to another
+  receiver, then back) reloads the settled key's saved state instead of keeping what the engine
+  learned in memory meanwhile (one swap). `unit:` names the sdr-host install (its state
+  directory), not the dongle: a dongle swapped on the same sdr-host keeps the namespace, so give
+  the install a new unit id after a swap (docs/SDR-HOST-SETUP.md). One INFO line
   per change: `Receiver changed: <old> -> <new>; learned state <fresh|resumed|adopted|none>`.
 - `TunerController` keeps the pre-band gain records per receiver key
   (`tuner-band-gain-saved-receivers.json`; `tuner-band-gain-saved.json` keeps the un-keyed

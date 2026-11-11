@@ -295,10 +295,14 @@ directory, so in a container `/state` must be a mounted volume.
 `docker-compose.yml` mounts `/var/lib/wavekit/sdr-host` from the host there
 (`WAVEKIT_SDR_HOST_STATE_DIR` to change it), so the ID survives restarts,
 container recreates and image updates. The image also declares `/state` as a
-volume, so a run without a mount gets an anonymous volume: compose keeps it when
-the container is recreated, but `docker compose down -v` or `docker run --rm`
-deletes it and the receiver gets a new ID. A named volume or a host directory is
-required for a stable ID.
+volume, so a run without a mount gets an anonymous volume. Compose keeps it
+across `docker compose up` recreates, but a plain `docker compose down` then
+`up`, `docker rm` then `docker run`, `docker compose down -v` and
+`docker run --rm` all give the container a new empty one, and with it a new ID.
+Only a named volume or a host directory keeps the ID, so sdr-host checks
+`/proc/self/mountinfo`: when `/state` is an anonymous Docker volume it reports
+`unitId: null` with `unitIdReason: "state-anonymous-volume"` and logs a warning
+naming the fix. When the mount table cannot be read, the ID is kept.
 
 When `/state` is not a mount point (the ID would live in the container layer
 and change at every recreate), or is a tmpfs (lost at every restart, in a
@@ -319,6 +323,29 @@ the source plus the tuner model, which every dongle of that model on that
 source shares. To give an install made before `unitId` existed its state
 volume, update its compose file (`make sdr-host-compose-update`) and recreate
 the container; a new image alone does not add the mount.
+
+Update sdr-host with or before the WaveKit core. While an older sdr-host
+answers without `unitId`, the core keys the receiver by source and tuner model
+and learns under that key. When the updated sdr-host first reports a `unitId`,
+that key takes the model key's learned state over if it is newer than the state
+from before namespacing (or there is none); otherwise the older state wins.
+
+`unitId` names the sdr-host install (its state directory), not the dongle.
+Swapping the dongle on the same sdr-host keeps the receiver key, so the new
+dongle starts from the old one's spur map, noise floors and saved gain. After a
+dongle swap, give the install a new ID: delete `unit-id.json` in sdr-host's
+state directory and restart sdr-host. WaveKit then treats it as a new receiver
+and starts fresh. To clear only the spectrum state (spur map, floors,
+occupancy) and keep the saved gain, stop WaveKit, delete the receiver's
+`learnedStateNamespace` directory (shown in the source status) under the scanner
+state directory, and start it again.
+
+When the Pi reboots or sdr-host restarts, rtlmux can accept WaveKit's
+connection before the sdr-host API is up. If that sdr-host has answered before
+(or is configured with `sdrHost.apiUrl`), WaveKit keeps the learned state
+read-only and asks the API again every second until it answers, or until 3
+request timeouts plus 1 s (7 s by default) have passed. Only then does it fall
+back to the source and model key.
 
 `dongle.serial` is the dongle's USB serial string, read from sysfs, when it is
 readable and plain (letters, digits, `.`, `_`, `-`, at most 32). Many dongles

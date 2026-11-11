@@ -2,7 +2,7 @@
  * The production chain from the receiver identity tracker to the learned state, the
  * tuner controller and the source status (called from src/index.ts, tested on its own).
  *
- * - tracker "connection" (disconnect, new connection) -> learned state pending;
+ * - tracker "connection" (disconnect, new connection; with its kind) -> learned state pending;
  * - tracker "settled" -> learned state binds the receiver -> tuner noteReceiverBound (onBound);
  * - the source status `receiver` field reads the learned state's view and the tuner's restore.
  */
@@ -18,7 +18,10 @@ import type {
 
 export interface ReceiverWiringTracker {
 	current(sourceId: string): ReceiverIdentity | undefined
-	on(event: "connection", fn: (sourceId: string) => void): unknown
+	on(
+		event: "connection",
+		fn: (sourceId: string, kind?: "open" | "close") => void,
+	): unknown
 	on(
 		event: "settled",
 		fn: (
@@ -64,8 +67,8 @@ export function wireReceiverTracker(
 	tracker: ReceiverWiringTracker,
 	learned: Pick<ReceiverLearnedState, "onConnection" | "onIdentity">,
 ): void {
-	tracker.on("connection", id => {
-		void learned.onConnection(id)
+	tracker.on("connection", (id, kind) => {
+		void learned.onConnection(id, kind)
 	})
 	tracker.on("settled", (id, identity, previous) => {
 		void learned.onIdentity(id, identity, previous)

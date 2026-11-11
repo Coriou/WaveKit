@@ -3,6 +3,7 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+	isAnonymousVolumeMount,
 	loadOrCreateUnitId,
 	loadUnitIdAtStartup,
 	stateDirPersistence,
@@ -346,4 +347,110 @@ describe("sdr-host state dir persistence", () => {
 			expect(startup.result.unitId).toBe("f".repeat(32))
 		},
 	)
+})
+
+describe("sdr-host anonymous Docker volume detection", () => {
+	const ANON = "a".repeat(64)
+	const line = (root: string, mountPoint: string, source: string) =>
+		`1203 1180 8:2 ${root} ${mountPoint} rw,relatime master:1 - ext4 ${source} rw`
+	const base = [
+		"1180 1100 0:52 / / rw,relatime - overlay overlay rw,lowerdir=/x",
+		"1190 1180 0:55 / /proc rw - proc proc rw",
+	]
+	const probe = (info: string | null): StatePersistenceProbe => ({
+		inContainer: () => true,
+		fsTypeOf: async () => 0xef53,
+		deviceOf: async path => (path === "/state" ? 2 : 1),
+		mountInfo: async () => {
+			if (info === null) throw codeError("EACCES")
+			return info
+		},
+	})
+
+	it("an anonymous volume as the mount's root or source is detected; a named volume or host dir is not", () => {
+		const anonRoot = line(
+			`/var/lib/docker/volumes/${ANON}/_data`,
+			"/state",
+			"/dev/sda2",
+		)
+		expect(
+			isAnonymousVolumeMount([...base, anonRoot].join("\n"), "/state"),
+		).toBe(true)
+		const anonSource = line(
+			"/",
+			"/state",
+			`/home/u/.local/share/docker/volumes/${ANON}/_data`,
+		)
+		expect(
+			isAnonymousVolumeMount([...base, anonSource].join("\n"), "/state"),
+		).toBe(true)
+		const named = line(
+			"/var/lib/docker/volumes/sdr-host-state/_data",
+			"/state",
+			"/dev/sda2",
+		)
+		expect(isAnonymousVolumeMount([...base, named].join("\n"), "/state")).toBe(
+			false,
+		)
+		const host = line("/var/lib/wavekit/sdr-host", "/state", "/dev/sda2")
+		expect(isAnonymousVolumeMount([...base, host].join("\n"), "/state")).toBe(
+			false,
+		)
+		// Another mount point, and an escaped one.
+		expect(
+			isAnonymousVolumeMount([...base, anonRoot].join("\n"), "/data"),
+		).toBe(false)
+		const spaced = line(
+			`/var/lib/docker/volumes/${ANON}/_data`,
+			"/my\\040state",
+			"/dev/sda2",
+		)
+		expect(
+			isAnonymousVolumeMount([...base, spaced].join("\n"), "/my state"),
+		).toBe(true)
+		// The last mount on the point is the one on top.
+		expect(
+			isAnonymousVolumeMount([...base, anonRoot, host].join("\n"), "/state"),
+		).toBe(false)
+	})
+
+	it("reports state-anonymous-volume at startup and writes nothing", async () => {
+		const { fs, calls } = recordingFs()
+		const info = [
+			...base,
+			line(`/var/lib/docker/volumes/${ANON}/_data`, "/state", "/dev/sda2"),
+		].join("\n")
+		const startup = await loadUnitIdAtStartup("/state", {
+			fs,
+			probe: probe(info),
+		})
+		expect(startup).toEqual({
+			persistence: "anonymous-volume",
+			result: {
+				unitId: null,
+				source: "unavailable",
+				reason: "state-anonymous-volume",
+			},
+		})
+		expect(calls).toEqual([])
+	})
+
+	it("an unreadable mountinfo cannot tell: the mount keeps its id", async () => {
+		expect(await stateDirPersistence("/state", probe(null))).toBe("mount")
+		const { fs } = recordingFs()
+		const startup = await loadUnitIdAtStartup("/state", {
+			fs,
+			probe: probe(null),
+			random: () => "e".repeat(32),
+		})
+		expect(startup.result.unitId).toBe("e".repeat(32))
+	})
+
+	it("a host directory mount keeps its id", async () => {
+		const info = [
+			...base,
+			line("/var/lib/wavekit/sdr-host", "/state", "/dev/sda2"),
+		].join("\n")
+		expect(await stateDirPersistence("/state", probe(info))).toBe("mount")
+	})
 })

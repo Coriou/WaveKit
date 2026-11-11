@@ -1333,7 +1333,16 @@ async function main(): Promise<void> {
 			sdrHostWaitMs: receiverSdrHostWaitMs(
 				config.resources.sdrHostPoller.timeoutMs,
 			),
-			kickSdrHostPoll: id => identityPoller?.pollNow(id),
+			kickSdrHostPoll: (id, retry) => identityPoller?.pollNow(id, retry),
+			// A unit answer is expected (a failed poll at a reconnect is retried until the bound, not
+			// settled on the model): the sdr-host is configured, answered before, or the source's last
+			// receiver (persisted) was a unit.
+			sdrHostExpected: (id): boolean =>
+				identityPoller?.getStatus(id) !== undefined &&
+				(config.sources.find(source => source.id === id)?.sdrHost?.apiUrl !==
+					undefined ||
+					identityPoller.hasAnswered(id) ||
+					receiverState.lastKey(id)?.startsWith("unit:") === true),
 		})
 		own(100, () => receiverIdentity.stop())
 		const receiverState = new ReceiverLearnedState({

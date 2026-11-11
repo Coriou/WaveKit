@@ -379,6 +379,33 @@ describe("pre-band gain from before namespacing", () => {
 		expect(controller.getState("rtl")?.gain).toBe(130)
 	})
 
+	it("preferTakeOver: the newer weak key's gain wins over the legacy record; without one the legacy record applies", async () => {
+		const WEAK = "source:rtl|model:5:29"
+		const withWeak = memoryFs(legacy, {
+			version: 1,
+			sources: [{ sourceId: "rtl", receiverKey: WEAK, saved: saved(130) }],
+		})
+		const first = await setup(withWeak.fs)
+		first.controller.noteReceiverBound("rtl", {
+			key: A,
+			adoptLegacy: true,
+			takeOverFrom: WEAK,
+			preferTakeOver: true,
+		})
+		await first.controller.setFrequency("rtl", UHF, REST)
+		expect(first.controller.getState("rtl")?.gain).toBe(130)
+		const noWeak = memoryFs(legacy)
+		const second = await setup(noWeak.fs)
+		second.controller.noteReceiverBound("rtl", {
+			key: A,
+			adoptLegacy: true,
+			takeOverFrom: WEAK,
+			preferTakeOver: true,
+		})
+		await second.controller.setFrequency("rtl", UHF, REST)
+		expect(second.controller.getState("rtl")?.gain).toBe(150)
+	})
+
 	it("scanner off: the first receiver identified adopts it through the production chain; the next never gets it", async () => {
 		const stateDir = "/state"
 		const disk = memoryFs(legacy)
