@@ -1546,10 +1546,16 @@ export class ScannerPersistence {
 		sourceId: string,
 		receiverKey: string | null,
 	): Promise<{ engine: number | null; occupancy: number | null }> {
+		// Only a missing file reads as absent; any other error rejects, so a caller can take the
+		// safe answer (an unreadable legacy file still counts as present).
 		const mtime = (file: string) =>
 			stat(file).then(
 				st => st.mtimeMs,
-				() => null,
+				(err: unknown) => {
+					if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT")
+						return null
+					throw err
+				},
 			)
 		return receiverKey === null
 			? {

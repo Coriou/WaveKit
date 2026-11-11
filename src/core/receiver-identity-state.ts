@@ -804,7 +804,9 @@ export class ReceiverLearnedState {
 				(weakTimes.engine === null && weakTimes.occupancy === null))
 		)
 			return null
-		const legacy = await times(null)
+		// Legacy wins: an unreadable legacy probe counts as present (no take-over).
+		const legacy = await read(sourceId, null).catch(() => null)
+		if (legacy === null) return null
 		return legacy.engine === null && legacy.occupancy === null ? weak : null
 	}
 

@@ -3,6 +3,7 @@
  * switching A -> B -> A, an unknown receiver, the one-time adoption of the files from before
  * namespacing, and one INFO line per identity change.
  */
+import { vi } from "vitest"
 import {
 	mkdtemp,
 	mkdir,
@@ -768,7 +769,7 @@ describe("ReceiverLearnedState: who adopts the state from before namespacing", (
 		const persistence = learned.attach(store, store, () => true)
 		const fake = fakeSpectrum()
 		learned.setSpectrum(fake.spectrum)
-		return { learned, persistence, fake, bound }
+		return { learned, persistence, fake, bound, store }
 	}
 
 	it("with an sdr-host, the header-only key never adopts: it waits for the stable key", async () => {
@@ -787,8 +788,8 @@ describe("ReceiverLearnedState: who adopts the state from before namespacing", (
 		expect(
 			JSON.parse(await readFile(nsFile(WEAK, "engine.json"), "utf8")),
 		).toEqual(engine(-70))
-		// The stable answer (an upgrade within the connection): the legacy files are newer than the
-		// weak namespace's (an older image ran since), so the legacy state is adopted.
+		// The stable answer (an upgrade within the connection): legacy files exist, so the legacy
+		// state is adopted (legacy wins; the newer mtime here does not matter).
 		const future = Date.now() / 1000 + 60
 		await utimes(join(scannerDir, "engine", "rtl.json"), future, future)
 		fake.learn(engine(-70), occupancy(12_500))
@@ -868,6 +869,28 @@ describe("ReceiverLearnedState: who adopts the state from before namespacing", (
 		expect(learned.view("rtl")?.namespaceState).toBe("adopted")
 		// The weak namespace's saved state, not what the unsettled connection learned.
 		expect(fake.now().engine).toEqual(engine(-72))
+	})
+
+	it("legacy wins: an unreadable legacy probe counts as present, so the weak namespace is not taken over", async () => {
+		const { learned, persistence, bound, store } = await makeWith(() => true)
+		await learned.onIdentity("rtl", WEAK, undefined)
+		await persistence.writeEngine(
+			"rtl",
+			engine(-72),
+			persistence.generation?.("rtl"),
+		)
+		const real = store.learnedFileTimes.bind(store)
+		vi.spyOn(store, "learnedFileTimes").mockImplementation(
+			(sourceId: string, key: string | null) =>
+				key === null
+					? Promise.reject(
+							Object.assign(new Error("denied"), { code: "EACCES" }),
+						)
+					: real(sourceId, key),
+		)
+		await learned.onIdentity("rtl", A, WEAK)
+		expect(bound.at(-1)?.key).toBe(A.key)
+		expect(bound.at(-1)).not.toHaveProperty("takeOverFrom")
 	})
 
 	it("without an sdr-host, the source-scoped key adopts", async () => {
