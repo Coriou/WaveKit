@@ -14,6 +14,7 @@ import {
 } from "./supervisor/preflight.js"
 import { createApiServer, startApiServer } from "./api/server.js"
 import { HostCollector } from "./telemetry/host.js"
+import { loadOrCreateUnitId } from "./telemetry/unit-id.js"
 
 async function main(): Promise<void> {
 	// Load configuration
@@ -45,6 +46,15 @@ async function main(): Promise<void> {
 	})
 	hostCollector.start()
 
+	// The stable unit id (kept in the state directory); none when it cannot be persisted.
+	const unit = await loadOrCreateUnitId(config.state.dir)
+	if (unit.unitId === null)
+		logger.warn(
+			{ stateDir: config.state.dir },
+			"State directory not writable: no stable unit id is reported",
+		)
+	else logger.info({ source: unit.source }, "Unit id ready")
+
 	// Create API server
 	const fastify = await createApiServer({
 		config,
@@ -52,6 +62,7 @@ async function main(): Promise<void> {
 		processManager,
 		preflightResult,
 		hostTelemetry: hostCollector,
+		unitId: unit.unitId,
 	})
 
 	// Handle shutdown

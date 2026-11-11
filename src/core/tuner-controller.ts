@@ -761,6 +761,7 @@ export class TunerController extends EventEmitter {
 			key: string | null
 			adoptLegacy: boolean
 			legacyRecorded?: boolean
+			takeOverFrom?: string
 		},
 		identity?: ReceiverIdentity,
 	): void {
@@ -775,17 +776,22 @@ export class TunerController extends EventEmitter {
 			}
 			const byKey = this.gainStash.get(sourceId)
 			if (binding.key !== null && byKey) {
+				// The receiver's own record wins; else the one from before namespacing (adopted once);
+				// else a weak key's this stable key takes over (once).
+				const takeOver = binding.takeOverFrom
 				const own = byKey.has(binding.key)
 					? binding.key
 					: binding.adoptLegacy && byKey.has("")
 						? ""
-						: undefined
+						: takeOver !== undefined && byKey.has(takeOver)
+							? takeOver
+							: undefined
 				if (own !== undefined) {
 					this.operatorGainBeforeBand.set(sourceId, byKey.get(own) ?? null)
-					// The record from before namespacing is now this receiver's (saved under its key
-					// below). It leaves the file only once the adoption itself is on record; until
-					// then a restart must still find it for the same first receiver.
-					if (own !== "" || binding.legacyRecorded === true) byKey.delete(own)
+					// Only the receiver's own record moves (saved under its key below). The record from
+					// before namespacing stays in its file for an image rolled back, and a taken-over
+					// weak key keeps its own: both are copied, never moved.
+					if (own === binding.key) byKey.delete(own)
 				}
 			}
 			this.gainOwner.set(sourceId, binding.key)

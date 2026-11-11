@@ -27,6 +27,8 @@ export interface ApiServerDependencies {
 	uiRoot?: string
 	/** Identifies this sdr-host process on every address; random when omitted. */
 	receiverId?: string
+	/** The persisted unit id (telemetry/unit-id.ts); null or omitted: none is reported. */
+	unitId?: string | null
 }
 
 /**
@@ -66,6 +68,7 @@ export async function createApiServer(
 	fastify.decorate("appLogger", logger)
 	fastify.decorate("hostTelemetry", hostTelemetry)
 	fastify.decorate("receiverId", deps.receiverId ?? createReceiverId())
+	fastify.decorate("unitId", deps.unitId ?? null)
 
 	// Register routes
 	registerHealthRoutes(fastify)
@@ -104,5 +107,6 @@ declare module "fastify" {
 		appLogger: Logger
 		hostTelemetry: HostTelemetrySource
 		receiverId: string
+		unitId: string | null
 	}
 }

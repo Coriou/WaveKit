@@ -4,12 +4,16 @@
  * is a fake sdr-host status provider (no request leaves the process).
  */
 import * as net from "node:net"
-import { once } from "node:events"
+import { EventEmitter, once } from "node:events"
 import pino from "pino"
 import { afterEach, describe, expect, it } from "vitest"
 import { SourceManager } from "../../../src/core/source-manager.js"
 import { SdrHostPoller } from "../../../src/core/sdr-host-poller.js"
-import { ReceiverIdentityTracker } from "../../../src/core/receiver-identity-tracker.js"
+import {
+	RECEIVER_SDR_HOST_WAIT_MS,
+	ReceiverIdentityTracker,
+	receiverSdrHostWaitMs,
+} from "../../../src/core/receiver-identity-tracker.js"
 import type { ReceiverIdentity } from "../../../src/core/receiver-identity.js"
 
 const log = pino({ level: "silent" })
@@ -19,6 +23,9 @@ afterEach(async () => {
 })
 
 const ID = "0123456789abcdef0123456789abcdef"
+const UNIT = "fedcba9876543210fedcba9876543210"
+const UNIT_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+const WEAK = "source:rtl|model:5:29"
 
 function header(tunerType: number, gainCount: number): Buffer {
 	const b = Buffer.alloc(12)
@@ -52,11 +59,23 @@ async function fakeRtlTcp(hdr: () => Buffer) {
 	}
 }
 
-/** A fake sdr-host /api/status answer, switchable per test. */
+/**
+ * A fake sdr-host status provider, switchable per test: `/api/status` answers `answer` (or fails),
+ * `/api/host` answers at once or, with `hangHost`, only when its request is aborted.
+ */
 function fakeSdrHost() {
 	let answer: unknown = null
 	let fail = false
-	const fetchFn = (async () => {
+	let hangHost = false
+	let statusRequests = 0
+	const fetchFn = (async (url: string, init?: { signal?: AbortSignal }) => {
+		if (String(url).endsWith("/api/host") && hangHost)
+			return new Promise((_resolve, reject) =>
+				init?.signal?.addEventListener("abort", () =>
+					reject(new Error("aborted")),
+				),
+			)
+		if (String(url).endsWith("/api/status")) statusRequests++
 		if (fail) throw new Error("unreachable")
 		return {
 			ok: true,
@@ -74,6 +93,10 @@ function fakeSdrHost() {
 		fail: () => {
 			fail = true
 		},
+		hangHost: () => {
+			hangHost = true
+		},
+		statusRequests: () => statusRequests,
 	}
 }
 
@@ -81,6 +104,8 @@ async function setup(opts: {
 	header?: () => Buffer
 	sdrHost?: ReturnType<typeof fakeSdrHost>
 	waitMs?: number
+	pollIntervalMs?: number
+	timeoutMs?: number
 }) {
 	const rtl = await fakeRtlTcp(opts.header ?? (() => header(5, 29)))
 	const manager = new SourceManager(log)
@@ -90,18 +115,24 @@ async function setup(opts: {
 		poller = new SdrHostPoller(
 			log,
 			[{ sourceId: "rtl", apiUrl: "http://sdr-host.invalid" }],
-			{ pollIntervalMs: 40, timeoutMs: 40, fetchFn: opts.sdrHost.fetchFn },
+			{
+				pollIntervalMs: opts.pollIntervalMs ?? 40,
+				timeoutMs: opts.timeoutMs ?? 40,
+				fetchFn: opts.sdrHost.fetchFn,
+			},
 		)
 		poller.on("error", () => {})
 	}
+	// The production wiring (src/index.ts): kick a poll per connection, wait on its result.
 	const tracker = new ReceiverIdentityTracker({
 		sources: manager,
 		logger: log,
 		sdrHostApplies: () => poller !== null,
 		sdrHostWaitMs: opts.waitMs ?? 2_000,
+		kickSdrHostPoll: id => poller?.pollNow(id),
 	})
-	poller?.on("receiver-identity", (id, facts) =>
-		tracker.noteSdrHostFacts(id, facts),
+	poller?.on("identity-result", (id, result) =>
+		tracker.noteSdrHostResult(id, result),
 	)
 	const events: Array<{ id: ReceiverIdentity; prev?: string }> = []
 	tracker.on(
@@ -148,30 +179,122 @@ describe("ReceiverIdentityTracker", () => {
 		await connect(manager, rtl.port)
 		await waitFor(() => events.length === 1)
 		expect(events[0]?.id).toMatchObject({
-			key: "model:5:29",
+			key: WEAK,
 			strength: "model",
 			tunerType: 5,
 		})
-		expect(tracker.provisional("rtl")?.key).toBe("model:5:29")
+		expect(tracker.provisional("rtl")?.key).toBe(WEAK)
 	})
 
-	it("upgrades to the sdr-host's receiverId within the bounded wait: one change, never the model first", async () => {
+	it("settles on the sdr-host's unit id: one change, never the model first", async () => {
 		const sdrHost = fakeSdrHost()
-		sdrHost.answer({ receiverId: ID, dongle: { serial: "00000001" } })
+		sdrHost.answer({
+			unitId: UNIT,
+			receiverId: ID,
+			dongle: { serial: "00000001" },
+		})
 		const { rtl, manager, poller, events } = await setup({ sdrHost })
 		poller?.start()
 		await connect(manager, rtl.port)
 		await waitFor(() => events.length === 1)
 		expect(events[0]?.id).toMatchObject({
-			key: `sdrhost:${ID}`,
+			key: `unit:${UNIT}`,
 			strength: "unit",
 			serial: "00000001",
+			receiverId: ID,
 		})
 		await new Promise(resolve => setTimeout(resolve, 150))
 		expect(events).toHaveLength(1)
 	})
 
-	it("settles on the model when the sdr-host does not answer in time, then upgrades once it does", async () => {
+	it("an sdr-host restart (new receiverId, same unitId) is the same receiver on the next connection", async () => {
+		const sdrHost = fakeSdrHost()
+		sdrHost.answer({ unitId: UNIT, receiverId: ID })
+		const { rtl, manager, poller, tracker, events } = await setup({ sdrHost })
+		const settled: string[] = []
+		tracker.on("settled", (_s: string, id: ReceiverIdentity) =>
+			settled.push(id.key),
+		)
+		poller?.start()
+		await connect(manager, rtl.port)
+		await waitFor(() => settled.length === 1)
+		sdrHost.answer({ unitId: UNIT, receiverId: "1".repeat(32) })
+		rtl.drop()
+		await waitFor(() => settled.length === 2, 10_000)
+		expect(settled).toEqual([`unit:${UNIT}`, `unit:${UNIT}`])
+		expect(tracker.current("rtl")?.receiverId).toBe("1".repeat(32))
+		expect(events).toHaveLength(1)
+	}, 15_000)
+
+	it("a failed sdr-host poll ends the wait at once (event-driven, not the bound): the source-scoped model", async () => {
+		const sdrHost = fakeSdrHost()
+		sdrHost.fail()
+		const { rtl, manager, poller, events } = await setup({
+			sdrHost,
+			// A bound far beyond the test: only the failure result can settle it in time.
+			waitMs: 60_000,
+		})
+		poller?.start()
+		const t0 = Date.now()
+		await connect(manager, rtl.port)
+		await waitFor(() => events.length === 1)
+		expect(Date.now() - t0).toBeLessThan(2_000)
+		expect(events[0]?.id.key).toBe(WEAK)
+	})
+
+	it("an old sdr-host without unitId answers: the source-scoped model, at once", async () => {
+		const sdrHost = fakeSdrHost()
+		sdrHost.answer({ receiverId: ID, dongle: { serial: "00000001" } })
+		const { rtl, manager, poller, events } = await setup({
+			sdrHost,
+			waitMs: 60_000,
+		})
+		poller?.start()
+		await connect(manager, rtl.port)
+		await waitFor(() => events.length === 1)
+		expect(events[0]?.id).toMatchObject({ key: WEAK, receiverId: ID })
+	})
+
+	it("a boot poll answered before the connection is not used: the connection kicks a fresh poll", async () => {
+		const sdrHost = fakeSdrHost()
+		sdrHost.answer({ unitId: UNIT })
+		const { rtl, manager, poller, events } = await setup({
+			sdrHost,
+			// No scheduled poll for a minute: only the kick can answer in time.
+			pollIntervalMs: 60_000,
+			waitMs: 60_000,
+		})
+		poller?.start()
+		await waitFor(() => sdrHost.statusRequests() === 1)
+		await new Promise(resolve => setTimeout(resolve, 20))
+		// Another unit behind the endpoint since the boot poll.
+		sdrHost.answer({ unitId: UNIT_B })
+		await connect(manager, rtl.port)
+		await waitFor(() => events.length === 1)
+		expect(events[0]?.id.key).toBe(`unit:${UNIT_B}`)
+		expect(sdrHost.statusRequests()).toBeGreaterThanOrEqual(2)
+	})
+
+	it("the identity is emitted before the poll's /api/host request ends", async () => {
+		const sdrHost = fakeSdrHost()
+		sdrHost.answer({ unitId: UNIT })
+		sdrHost.hangHost()
+		const { rtl, manager, poller, events } = await setup({
+			sdrHost,
+			pollIntervalMs: 60_000,
+			// /api/host hangs until this timeout aborts it.
+			timeoutMs: 5_000,
+			waitMs: 60_000,
+		})
+		poller?.start()
+		const t0 = Date.now()
+		await connect(manager, rtl.port)
+		await waitFor(() => events.length === 1, 4_000)
+		expect(Date.now() - t0).toBeLessThan(4_000)
+		expect(events[0]?.id.key).toBe(`unit:${UNIT}`)
+	}, 15_000)
+
+	it("settles on the model at the hard bound when no result comes, then upgrades once one does", async () => {
 		const sdrHost = fakeSdrHost()
 		sdrHost.fail()
 		const { rtl, manager, poller, tracker, events } = await setup({
@@ -181,24 +304,25 @@ describe("ReceiverIdentityTracker", () => {
 		poller?.start()
 		await connect(manager, rtl.port)
 		await waitFor(() => events.length === 1)
-		expect(events[0]?.id.key).toBe("model:5:29")
-		sdrHost.answer({ receiverId: ID })
+		expect(events[0]?.id.key).toBe(WEAK)
+		sdrHost.answer({ unitId: UNIT })
 		// The poller backs off 2 s after its first failure, then 4 s.
 		await waitFor(() => events.length === 2, 10_000)
 		expect(events[1]).toMatchObject({
-			id: { key: `sdrhost:${ID}` },
-			prev: "model:5:29",
+			id: { key: `unit:${UNIT}` },
+			prev: WEAK,
 		})
 		// A failed poll later never downgrades the settled identity within the connection.
 		sdrHost.fail()
 		await new Promise(resolve => setTimeout(resolve, 200))
-		expect(tracker.current("rtl")?.key).toBe(`sdrhost:${ID}`)
+		expect(tracker.current("rtl")?.key).toBe(`unit:${UNIT}`)
 		expect(events).toHaveLength(2)
 	}, 15_000)
 
 	it("malformed sdr-host fields are dropped: the identity stays at the model", async () => {
 		const sdrHost = fakeSdrHost()
 		sdrHost.answer({
+			unitId: "../../etc/passwd",
 			receiverId: "../../etc/passwd",
 			dongle: { vendor: "0bda", product: "2838", serial: "x/../../y" },
 		})
@@ -209,7 +333,7 @@ describe("ReceiverIdentityTracker", () => {
 		poller?.start()
 		await connect(manager, rtl.port)
 		await waitFor(() => events.length === 1)
-		expect(events[0]?.id).toMatchObject({ key: "model:5:29" })
+		expect(events[0]?.id).toMatchObject({ key: WEAK })
 		expect(events[0]?.id.serial).toBeUndefined()
 	})
 
@@ -239,7 +363,7 @@ describe("ReceiverIdentityTracker", () => {
 		await waitFor(() => settled.length === 2, 10_000)
 		// connected, disconnected, connected.
 		expect(boundaries).toEqual(["rtl", "rtl", "rtl"])
-		expect(settled).toEqual(["model:5:29", "model:5:29"])
+		expect(settled).toEqual([WEAK, WEAK])
 		// "identity" still fires only on a change.
 		expect(events).toHaveLength(1)
 	}, 15_000)
@@ -255,8 +379,80 @@ describe("ReceiverIdentityTracker", () => {
 		rtl.drop()
 		await waitFor(() => events.length === 2, 10_000)
 		expect(events[1]).toMatchObject({
-			id: { key: "model:1:14" },
-			prev: "model:5:29",
+			id: { key: "source:rtl|model:1:14" },
+			prev: WEAK,
 		})
 	}, 15_000)
+})
+
+describe("ReceiverIdentityTracker: the connection epoch rule", () => {
+	function bare() {
+		const sources = new EventEmitter()
+		let now = 1_000
+		const kicks: string[] = []
+		const tracker = new ReceiverIdentityTracker({
+			sources: sources as never,
+			logger: log,
+			sdrHostApplies: () => true,
+			sdrHostWaitMs: 60_000,
+			kickSdrHostPoll: id => kicks.push(id),
+			now: () => now,
+		})
+		const settled: string[] = []
+		tracker.on("settled", (_s: string, id: ReceiverIdentity) =>
+			settled.push(id.key),
+		)
+		cleanup.push(() => tracker.stop())
+		return {
+			sources,
+			tracker,
+			kicks,
+			settled,
+			at: (t: number) => {
+				now = t
+			},
+		}
+	}
+	const HDR = { magic: "RTL0", tunerType: 5, gainCount: 29 }
+
+	it("a result whose poll started before the connection opened is ignored; one at or after it settles", () => {
+		const { sources, tracker, kicks, settled, at } = bare()
+		at(2_000)
+		sources.emit("connected", "rtl")
+		expect(kicks).toEqual(["rtl"])
+		sources.emit("rtl-tcp-header", "rtl", HDR)
+		// Started 1 ms before the connect, answered after it: another connection's epoch.
+		tracker.noteSdrHostResult("rtl", {
+			startedAt: 1_999,
+			ok: true,
+			facts: { unitId: UNIT },
+		})
+		expect(settled).toEqual([])
+		// Exactly at the connect: this connection's.
+		tracker.noteSdrHostResult("rtl", {
+			startedAt: 2_000,
+			ok: true,
+			facts: { unitId: UNIT_B },
+		})
+		expect(settled).toEqual([`unit:${UNIT_B}`])
+	})
+
+	it("a result before the header waits for it, then settles at the header", () => {
+		const { sources, tracker, settled, at } = bare()
+		at(5_000)
+		sources.emit("connected", "rtl")
+		tracker.noteSdrHostResult("rtl", {
+			startedAt: 5_001,
+			ok: false,
+			facts: null,
+		})
+		expect(settled).toEqual([])
+		sources.emit("rtl-tcp-header", "rtl", HDR)
+		expect(settled).toEqual([WEAK])
+	})
+
+	it("the hard bound is 3 request timeouts plus 1 s", () => {
+		expect(receiverSdrHostWaitMs(2_000)).toBe(7_000)
+		expect(RECEIVER_SDR_HOST_WAIT_MS).toBe(7_000)
+	})
 })

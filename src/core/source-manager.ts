@@ -87,6 +87,14 @@ export const TUNER_COMMAND_TIMEOUT_MS =
 export const TUNER_COMMAND_QUEUE_LIMIT = 16
 // Default stall watchdog for continuous-stream rtl_tcp IQ sessions (0 = off).
 export const SOURCE_STALL_TIMEOUT_MS = 15_000
+/**
+ * A source with candidates leaves an endpoint that accepts but sends no data payload (a header
+ * alone does not count) within this deadline from the TCP connect: 2 x the 5 s connect timeout =
+ * 10 s per attempt, so a silent endpoint costs one deadline plus the backoff before the next one
+ * is tried. A failure of class `silent`. Sources without candidates keep a silent connection (it
+ * is reported stale; there is nothing else to try).
+ */
+export const SOURCE_SILENT_DEADLINE_MS = 2 * SOURCE_CONNECT_TIMEOUT_MS
 // TCP keepalive is defence in depth for a dead peer (Node 21+ on Linux probes
 // every 1 s, 10 probes). It cannot detect a live rtlmux whose upstream dongle /
 // rtl_tcp is gone: that socket stays healthy but silent, hence the watchdog.
@@ -347,6 +355,8 @@ interface SourceAttempt {
 	headerBuffer: Buffer | null
 	headerAt: number | null
 	watchdog: ReturnType<typeof setInterval> | null
+	/** SOURCE_SILENT_DEADLINE_MS timer of a source with candidates; null once cleared. */
+	silentTimer: ReturnType<typeof setTimeout> | null
 }
 
 interface SourceState {
@@ -1583,6 +1593,7 @@ export class SourceManager extends EventEmitter {
 						: null,
 				headerAt: null,
 				watchdog: null,
+				silentTimer: null,
 			}
 			state.attempt = attempt
 			state.socket = socket
@@ -1618,6 +1629,8 @@ export class SourceManager extends EventEmitter {
 				if (timer !== null) clearInterval(timer)
 				if (timer !== null && state.stallTimer === timer)
 					state.stallTimer = null
+				if (attempt.silentTimer !== null) clearTimeout(attempt.silentTimer)
+				attempt.silentTimer = null
 			}
 			const cleanup = () => {
 				stopOwnWatchdog()
@@ -1665,6 +1678,8 @@ export class SourceManager extends EventEmitter {
 					this.logger.info({ sourceId: id, host, port }, "Connected to source")
 					if (!this.isActiveAttempt(state, attempt)) return
 					this.startStallWatchdog(state, socket, onError)
+					if (!this.isActiveAttempt(state, attempt)) return
+					this.startSilentDeadline(state, attempt, onError)
 					if (!this.isActiveAttempt(state, attempt)) return
 					this.emit("connected", id)
 				} finally {
@@ -2043,6 +2058,36 @@ export class SourceManager extends EventEmitter {
 		state.stallTimer = timer
 	}
 
+	/**
+	 * For a source with candidates: fails a connection that delivered no data payload within
+	 * SOURCE_SILENT_DEADLINE_MS of its connect (`SOURCE_SILENT`), so the endpoint rotates.
+	 */
+	private startSilentDeadline(
+		state: SourceState,
+		attempt: SourceAttempt,
+		fail: (err: Error) => void,
+	): void {
+		if (this.candidatesOf(state).length === 0) return
+		const timer = setTimeout(() => {
+			if (attempt.silentTimer !== timer) return
+			attempt.silentTimer = null
+			if (
+				!this.isActiveAttempt(state, attempt) ||
+				attempt.phase !== "connected" ||
+				attempt.lastSampleAt !== null
+			)
+				return
+			fail(
+				new WaveKitError(
+					`No data from source within ${SOURCE_SILENT_DEADLINE_MS}ms of connecting; trying the next endpoint`,
+					"SOURCE_SILENT",
+				),
+			)
+		}, SOURCE_SILENT_DEADLINE_MS)
+		timer.unref?.()
+		attempt.silentTimer = timer
+	}
+
 	private stopStallWatchdog(state: SourceState): void {
 		if (!state.stallTimer) return
 		const timer = state.stallTimer
@@ -2075,7 +2120,8 @@ export class SourceManager extends EventEmitter {
 			errorCode === "ECONNREFUSED" ||
 			errorCode === "ETIMEDOUT" ||
 			errorCode === "ECONNRESET" ||
-			errorCode === "SOURCE_STALLED"
+			errorCode === "SOURCE_STALLED" ||
+			errorCode === "SOURCE_SILENT"
 
 		state.lastError = err.message
 

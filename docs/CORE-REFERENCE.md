@@ -465,13 +465,17 @@ The core learns things about a receiver: its spur map and noise floors, band occ
 you had before a band gain changed it, and the tuning you set. That state is kept per receiver,
 so a USB dongle's spurs or gain are never applied to the Pi receiver, or the other way round.
 
-- Identity comes from the sdr-host's `receiverId` (or its USB vendor, product and serial) when
-  the configured sdr-host describes the connected receiver, otherwise from the rtl_tcp header
-  (tuner model and gain count). WaveKit waits up to one poll interval plus the poll timeout (5 s by
-  default) for the sdr-host after a connection opens.
-- A receiver seen before gets its own state back. A new one starts fresh. A receiver known only
-  by its model shares state with every dongle of that model (the log says so). An unknown
-  receiver gets nothing learned and nothing is saved for it.
+- Identity comes from the sdr-host's stable `unitId` (or the dongle's USB ids and serial, when the
+  serial is not a shared factory default) when the configured sdr-host describes the connected
+  receiver, otherwise from the rtl_tcp header (tuner model and gain count) on that source. The
+  sdr-host keeps its unit id across restarts and image updates (see
+  [SDR-HOST-SETUP.md](SDR-HOST-SETUP.md)); an older sdr-host without one is identified by model.
+  After a connection opens WaveKit asks the sdr-host at once and waits for its answer or failure
+  (at most 7 s by default).
+- A receiver seen before gets its own state back. A new one starts fresh, except that a unit
+  identified for the first time takes over what the source learned under its model (once). A
+  receiver known only by its model shares state with every dongle of that model on that source
+  (the log says so). An unknown receiver gets nothing learned and nothing is saved for it.
 - The tuning you set is replayed on a reconnect to the receiver it was set on, gain included.
   Another receiver gets the configured tuning. A receiver told apart only by its model is the
   exception: another dongle of the same model may get the replay until the sdr-host names the
@@ -481,19 +485,22 @@ so a USB dongle's spurs or gain are never applied to the Pi receiver, or the oth
   the values shown, marked unverified, instead of the configured tuning.
 - Tuning you set while the receiver was unknown belongs to no receiver: it is not replayed to the
   next receiver identified, and a receiver coming back gets its own earlier tuning.
-- After a disconnect, nothing learned applies until the next connection's receiver is identified
-  (at most 5 s by default): the state so far is saved under the receiver it was learned on, and
-  the spectrum engine runs fresh meanwhile, so the next receiver never inherits it.
-- On the first start after the upgrade, the first receiver identified on each source takes over
-  the state saved before (once), and no other receiver ever does. Its gain from before is taken
-  over at once; the spectrum files are copied as soon as the scanner can write (later, if the
-  scanner is off or still loading, while that same receiver is connected). The original spectrum
-  files stay, so an older version you go back to still finds them; the old gain record leaves
-  `tuner-band-gain-saved.json` once the takeover is on record.
+- After a disconnect, nothing learned is saved until the next connection's receiver is
+  identified: the state so far is saved under the receiver it was learned on and stays applied
+  meanwhile. The same receiver coming back keeps it without any change to the spectrum engine;
+  another receiver switches to its own state, so it never inherits the previous one's. State
+  that cannot be saved yet (the scanner still loading) is kept in memory for its receiver.
+- On the first start after the upgrade, the first receiver identified by unit on each source
+  takes over the state saved before (once), and no other receiver ever does; on a source without
+  an sdr-host the model identity takes it. Its gain from before is taken over at once; the
+  spectrum files are copied as soon as the scanner can write (later, if the scanner is off or
+  still loading, while that same receiver is connected). The original files and the old gain
+  record in `tuner-band-gain-saved.json` stay, so an older version you go back to still finds
+  them.
 - Scanner discoveries and recordings are shared by every receiver.
 
 The log shows one line per change, for example
-`Receiver changed: model:5:29 -> sdrhost:<id>; learned state resumed`, and the same receiver
+`Receiver changed: source:rtl|model:5:29 -> unit:<id>; learned state adopted`, and the same receiver
 coming back after a reconnect logs `Receiver reconnected: <key>; learned state resumed`.
 
 ## RTL-SDR Setup

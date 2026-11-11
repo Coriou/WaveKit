@@ -204,7 +204,7 @@ export const sourceCandidateStatusSchema = {
 	],
 } as const
 
-/** How strongly the receiver is identified: a unit (sdr-host id or USB serial), a model, nothing. */
+/** How strongly the receiver is identified: a unit (sdr-host unit id or USB serial), a model, nothing. */
 export type ReceiverIdentityStrength = "unit" | "model" | "unknown"
 
 /**
@@ -216,7 +216,10 @@ export type ReceiverIdentityStrength = "unit" | "model" | "unknown"
 export type ReceiverNamespaceState = "fresh" | "resumed" | "adopted" | "none"
 
 export interface SourceReceiverStatus {
-	/** `sdrhost:<id>`, `serial:<vendor>:<product>:<serial>`, `model:<tunerType>:<gainCount>` or `unknown`. */
+	/**
+	 * `unit:<sdr-host unit id>`, `serial:<vendor>:<product>:<serial>` (strong serials only),
+	 * `source:<source>|model:<tunerType>:<gainCount>` (the header alone) or `unknown`.
+	 */
 	key: string
 	strength: ReceiverIdentityStrength
 	/** rtl_tcp header tuner type. */
@@ -272,7 +275,8 @@ export const sourceReceiverStatusSchema = {
  * (ETIMEDOUT or the core's connect timeout), `unreachable` (EHOSTUNREACH, ENETUNREACH,
  * EHOSTDOWN), `not-found` (ENOTFOUND, EAI_AGAIN), `reset` (ECONNRESET, EPIPE), `closed`
  * (the peer ended the connection without an error), `stalled` (connected but no samples),
- * `other` for anything else.
+ * `silent` (a source with candidates: connected, no data payload within the deadline, so the
+ * next endpoint is tried), `other` for anything else.
  */
 export const SOURCE_CONNECT_ERROR_CLASSES = [
 	"refused",
@@ -282,6 +286,7 @@ export const SOURCE_CONNECT_ERROR_CLASSES = [
 	"reset",
 	"closed",
 	"stalled",
+	"silent",
 	"other",
 ] as const
 export type SourceConnectErrorClass =

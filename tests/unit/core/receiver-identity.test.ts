@@ -18,46 +18,75 @@ import {
 
 const HEADER = { magic: "RTL0", tunerType: 5, gainCount: 29 }
 const ID = "0123456789abcdef0123456789abcdef"
+const UNIT = "fedcba9876543210fedcba9876543210"
 
 describe("resolveReceiverIdentity", () => {
-	it("from the rtl_tcp header only: a model key", () => {
-		expect(resolveReceiverIdentity(HEADER, null)).toEqual({
-			key: "model:5:29",
+	it("from the rtl_tcp header only: a source-scoped model key", () => {
+		expect(resolveReceiverIdentity("rtl", HEADER, null)).toEqual({
+			key: "source:rtl|model:5:29",
 			strength: "model",
 			tunerType: 5,
 			gainCount: 29,
 		})
+		// Two sources never share a weak namespace.
+		expect(resolveReceiverIdentity("other", HEADER, null).key).toBe(
+			"source:other|model:5:29",
+		)
 	})
 
-	it("the sdr-host receiverId wins over the serial and the model", () => {
-		const id = resolveReceiverIdentity(HEADER, {
+	it("a source id that is not plain is hashed into the key, never used as is", () => {
+		const key = resolveReceiverIdentity("a b/../c", HEADER, null).key
+		expect(key).toMatch(/^source:~[0-9a-f]{32}\|model:5:29$/)
+		expect(isReceiverKey(key)).toBe(true)
+		expect(resolveReceiverIdentity("a b/../d", HEADER, null).key).not.toBe(key)
+	})
+
+	it("the sdr-host unitId wins over the serial and the model; the receiverId never keys", () => {
+		const id = resolveReceiverIdentity("rtl", HEADER, {
+			unitId: UNIT,
 			receiverId: ID,
 			vendor: "0bda",
 			product: "2838",
-			serial: "00000001",
+			serial: "SDR4711",
+			serialWeak: false,
 		})
-		expect(id.key).toBe(`sdrhost:${ID}`)
+		expect(id.key).toBe(`unit:${UNIT}`)
 		expect(id.strength).toBe("unit")
-		expect(id.serial).toBe("00000001")
+		expect(id.unitId).toBe(UNIT)
+		expect(id.receiverId).toBe(ID)
+		// An sdr-host without a unitId (an older one): its receiverId alone is no unit.
+		expect(resolveReceiverIdentity("rtl", HEADER, { receiverId: ID })).toEqual(
+			expect.objectContaining({
+				key: "source:rtl|model:5:29",
+				strength: "model",
+			}),
+		)
 	})
 
-	it("vendor, product and serial make a serial key; one missing falls back to the model", () => {
+	it("a strong serial makes a serial key; a weak one or a missing id falls back to the model", () => {
 		expect(
-			resolveReceiverIdentity(HEADER, {
+			resolveReceiverIdentity("rtl", HEADER, {
 				vendor: "0bda",
 				product: "2838",
-				serial: "00000001",
+				serial: "SDR4711",
+				serialWeak: false,
 			}).key,
-		).toBe("serial:0bda:2838:00000001")
-		expect(
-			resolveReceiverIdentity(HEADER, { vendor: "0bda", serial: "1" }).key,
-		).toBe("model:5:29")
+		).toBe("serial:0bda:2838:SDR4711")
+		for (const facts of [
+			{ vendor: "0bda", product: "2838", serial: "00000001" },
+			{ vendor: "0bda", product: "2838", serial: "SDR4711", serialWeak: true },
+			{ vendor: "0bda", serial: "SDR4711" },
+		])
+			expect(resolveReceiverIdentity("rtl", HEADER, facts).key).toBe(
+				"source:rtl|model:5:29",
+			)
 	})
 
 	it("no valid header and no sdr-host: unknown", () => {
-		expect(resolveReceiverIdentity(null, null).key).toBe("unknown")
+		expect(resolveReceiverIdentity("rtl", null, null).key).toBe("unknown")
 		expect(
-			resolveReceiverIdentity({ ...HEADER, magic: "HTTP" }, null).strength,
+			resolveReceiverIdentity("rtl", { ...HEADER, magic: "HTTP" }, null)
+				.strength,
 		).toBe("unknown")
 	})
 
@@ -78,9 +107,10 @@ describe("resolveReceiverIdentity", () => {
 })
 
 describe("parseSdrHostIdentity: malformed fields are dropped, never used", () => {
-	it("keeps only a 32-hex receiverId and USB strings of 1 to 32 safe characters", () => {
+	it("keeps only 32-hex ids and USB strings of 1 to 32 safe characters", () => {
 		expect(
 			parseSdrHostIdentity({
+				unitId: UNIT.toUpperCase(),
 				receiverId: ID.toUpperCase(),
 				dongle: {
 					vendor: "Realtek Semiconductor Corp.",
@@ -91,33 +121,85 @@ describe("parseSdrHostIdentity: malformed fields are dropped, never used", () =>
 		).toEqual({})
 		expect(
 			parseSdrHostIdentity({
+				unitId: UNIT,
 				receiverId: ID,
 				dongle: { vendor: "0bda", product: "2838", serial: "a".repeat(32) },
 			}),
 		).toEqual({
+			unitId: UNIT,
 			receiverId: ID,
 			vendor: "0bda",
 			product: "2838",
 			serial: "a".repeat(32),
+			serialWeak: false,
 		})
 	})
 
+	it("prefers the USB vid/pid over the descriptive vendor and product strings", () => {
+		expect(
+			parseSdrHostIdentity({
+				dongle: {
+					product: "Realtek RTL2838UHIDIR",
+					serial: "SDR4711",
+					serialWeak: false,
+					usb: { vid: "0bda", pid: "2838", bus: 1, device: 4 },
+				},
+			}),
+		).toEqual({
+			vendor: "0bda",
+			product: "2838",
+			serial: "SDR4711",
+			serialWeak: false,
+		})
+	})
+
+	it("a serial is weak when the sdr-host says so or it is a shared default", () => {
+		expect(
+			parseSdrHostIdentity({ dongle: { serial: "SDR4711", serialWeak: true } })
+				.serialWeak,
+		).toBe(true)
+		for (const serial of ["00000001", "0", "00000000", "1"])
+			expect(
+				parseSdrHostIdentity({ dongle: { serial, serialWeak: false } })
+					.serialWeak,
+			).toBe(true)
+		// A malformed flag is ignored: the core's own rule decides.
+		expect(
+			parseSdrHostIdentity({ dongle: { serial: "SDR4711", serialWeak: "no" } })
+				.serialWeak,
+		).toBe(false)
+	})
+
 	it("any non-object body or field type reads as no facts", () => {
-		for (const body of [null, 1, "x", [], { dongle: "x" }, { receiverId: 7 }])
+		for (const body of [
+			null,
+			1,
+			"x",
+			[],
+			{ dongle: "x" },
+			{ receiverId: 7 },
+			{ unitId: 7 },
+		])
 			expect(parseSdrHostIdentity(body)).toEqual({})
 	})
 })
 
 describe("isReceiverKey and strengthOfKey", () => {
 	it("accepts what resolve builds and refuses anything else", () => {
-		expect(isReceiverKey(`sdrhost:${ID}`)).toBe(true)
-		expect(isReceiverKey("serial:0bda:2838:00000001")).toBe(true)
-		expect(isReceiverKey("model:5:29")).toBe(true)
+		expect(isReceiverKey(`unit:${UNIT}`)).toBe(true)
+		expect(isReceiverKey("serial:0bda:2838:SDR4711")).toBe(true)
+		expect(isReceiverKey("source:rtl|model:5:29")).toBe(true)
+		expect(isReceiverKey(`source:~${"a".repeat(32)}|model:5:29`)).toBe(true)
+		// Forms of earlier builds: the process-random sdr-host id and the unscoped model.
+		expect(isReceiverKey(`sdrhost:${ID}`)).toBe(false)
+		expect(isReceiverKey("model:5:29")).toBe(false)
 		expect(isReceiverKey("unknown")).toBe(false)
-		expect(isReceiverKey("model:5:29/..")).toBe(false)
+		expect(isReceiverKey("source:rtl|model:5:29/..")).toBe(false)
+		expect(isReceiverKey("source:a/b|model:5:29")).toBe(false)
 		expect(isReceiverKey(7)).toBe(false)
-		expect(strengthOfKey("model:5:29")).toBe("model")
-		expect(strengthOfKey(`sdrhost:${ID}`)).toBe("unit")
+		expect(strengthOfKey("source:rtl|model:5:29")).toBe("model")
+		expect(strengthOfKey(`unit:${UNIT}`)).toBe("unit")
+		expect(strengthOfKey("serial:0bda:2838:SDR4711")).toBe("unit")
 		expect(strengthOfKey("unknown")).toBe("unknown")
 	})
 })
@@ -127,7 +209,9 @@ describe("pathSegment", () => {
 		expect(pathSegment(".")).toBe("%2E")
 		expect(pathSegment("..")).toBe("%2E%2E")
 		expect(pathSegment("a/b")).toBe("a%2Fb")
-		expect(pathSegment("model:5:29")).toBe("model%3A5%3A29")
+		expect(pathSegment("source:rtl|model:5:29")).toBe(
+			"source%3Artl%7Cmodel%3A5%3A29",
+		)
 	})
 
 	it(`hashes past ${PATH_SEGMENT_MAX_LENGTH} encoded characters, never at it`, () => {
@@ -147,7 +231,7 @@ describe("pathSegment", () => {
 		fc.assert(
 			fc.property(
 				fc.string({ maxLength: 300 }),
-				fc.oneof(fc.string({ maxLength: 64 }), fc.constant(ID)),
+				fc.oneof(fc.string({ maxLength: 64 }), fc.constant(UNIT)),
 				fc.string({ maxLength: 40 }),
 				fc.string({ maxLength: 40 }),
 				fc.string({ maxLength: 40 }),
@@ -163,10 +247,12 @@ describe("pathSegment", () => {
 					gainCount,
 				) => {
 					const facts = parseSdrHostIdentity({
+						unitId: receiverId,
 						receiverId,
 						dongle: { vendor, product, serial },
 					})
 					const identity = resolveReceiverIdentity(
+						sourceId,
 						{ magic: "RTL0", tunerType, gainCount },
 						facts,
 					)

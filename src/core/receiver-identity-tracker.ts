@@ -3,10 +3,16 @@
  *
  * Per connection: the identity is recomputed from its rtl_tcp header ("rtl-tcp-header"). When the
  * configured sdr-host describes the connected receiver (`sdrHostApplies`: the source is on its
- * primary endpoint), the identity waits up to `sdrHostWaitMs` for an sdr-host answer received
- * after the connection opened, then settles with what it has. A later answer only ever upgrades
- * it (model -> unit); a failed or malformed poll, or another unit key, never changes a settled
- * identity within the connection. "identity" fires when the settled key differs from the last one;
+ * primary endpoint), the identity waits for the first sdr-host poll RESULT of this connection
+ * (an answer or a failure; `noteSdrHostResult`), event-driven: the connection kicks a poll
+ * (`kickSdrHostPoll`) and settles as soon as the result is in, with the header seen. Epoch rule:
+ * a result belongs to the connection when its poll's request started at or after the
+ * connection opened (`startedAt >= openedAt`, both Date.now()); an older one (a boot poll that
+ * answered before the connect) is ignored, and the kicked poll answers instead. The hard bound
+ * `sdrHostWaitMs` is only a safety net (see RECEIVER_SDR_HOST_WAIT_MS); past it the identity
+ * settles with what it has. A later answer only ever upgrades it (model -> unit); a failed or
+ * malformed poll, or another unit key, never changes a settled identity within the connection.
+ * "identity" fires when the settled key differs from the last one;
  * "settled" fires on every settle (also the same receiver again after a reconnect), and
  * "connection" on every connection boundary (a disconnect or a new connection), so the learned
  * state can stop applying the previous receiver's before the next identity is known.
@@ -21,10 +27,23 @@ import {
 } from "./receiver-identity.js"
 
 /**
- * Default wait for the sdr-host after a header: one poll interval (3 s) plus the poll's request
- * timeout (2 s), the longest a poll started just before the header can take to answer after it.
+ * Hard bound on the wait for the first sdr-host result of a connection, from its header (a safety
+ * net: the result normally ends the wait). The connection kicks a poll; if one is running then
+ * (at most its `/api/status` request, timeout T, then its `/api/host` request, timeout T) the
+ * kicked one starts right after and its `/api/status` takes at most T more: 3 x T after the
+ * connect, earlier than the header. With the default T = 2 s: 3 x 2000 + 1000 ms slack = 7 s.
  */
-export const RECEIVER_SDR_HOST_WAIT_MS = 3000 + 2000
+export function receiverSdrHostWaitMs(requestTimeoutMs: number): number {
+	return 3 * requestTimeoutMs + 1000
+}
+export const RECEIVER_SDR_HOST_WAIT_MS = receiverSdrHostWaitMs(2000)
+
+/** One sdr-host poll's outcome (SdrHostPoller "identity-result"). */
+export interface SdrHostResult {
+	startedAt: number
+	ok: boolean
+	facts: SdrHostIdentityFacts | null
+}
 
 export interface ReceiverIdentitySources {
 	on(event: "connected", fn: (sourceId: string) => void): unknown
@@ -44,14 +63,21 @@ export interface ReceiverIdentityTrackerOptions {
 	logger: Logger
 	/** True when the source's configured sdr-host describes the receiver it is connected to now. */
 	sdrHostApplies: (sourceId: string) => boolean
-	/** Bounded wait for an sdr-host answer after a header (default RECEIVER_SDR_HOST_WAIT_MS). */
+	/** Hard bound on the wait for the first sdr-host result after a header (default RECEIVER_SDR_HOST_WAIT_MS). */
 	sdrHostWaitMs?: number
+	/** Asks for an sdr-host poll now (SdrHostPoller.pollNow); called at every connection. */
+	kickSdrHostPoll?: (sourceId: string) => void
+	/** Clock of the epoch rule (default Date.now, the poller's clock). */
+	now?: () => number
 }
 
 interface Connection {
+	openedAt: number
 	header: { magic: string; tunerType: number; gainCount: number } | null
 	headerSeen: boolean
 	facts: SdrHostIdentityFacts | null
+	/** A result of this connection's epoch came in (an answer or a failure). */
+	resulted: boolean
 	settled: ReceiverIdentity | null
 	timer: ReturnType<typeof setTimeout> | null
 	warnedConflict: boolean
@@ -77,11 +103,13 @@ export class ReceiverIdentityTracker extends EventEmitter {
 	private readonly connections = new Map<string, Connection>()
 	private readonly last = new Map<string, ReceiverIdentity>()
 	private stopped = false
+	private readonly now: () => number
 
 	constructor(private readonly options: ReceiverIdentityTrackerOptions) {
 		super()
 		this.log = createComponentLogger(options.logger, "ReceiverIdentity")
 		this.waitMs = options.sdrHostWaitMs ?? RECEIVER_SDR_HOST_WAIT_MS
+		this.now = options.now ?? Date.now
 		options.sources.on("connected", id => {
 			this.onConnected(id)
 			if (!this.stopped) this.emit("connection", id)
@@ -111,12 +139,18 @@ export class ReceiverIdentityTracker extends EventEmitter {
 		return conn.settled ?? this.combine(sourceId, conn)
 	}
 
-	/** A validated sdr-host answer for a source (SdrHostPoller "receiver-identity"). */
-	noteSdrHostFacts(sourceId: string, facts: SdrHostIdentityFacts): void {
+	/**
+	 * One sdr-host poll's result for a source (SdrHostPoller "identity-result"). Used only by the
+	 * connection whose epoch it belongs to (its poll started at or after the connection opened).
+	 */
+	noteSdrHostResult(sourceId: string, result: SdrHostResult): void {
 		if (this.stopped) return
 		const conn = this.connections.get(sourceId)
 		if (!conn || !this.options.sdrHostApplies(sourceId)) return
-		conn.facts = facts
+		if (result.startedAt < conn.openedAt) return
+		conn.resulted = true
+		// A failure keeps what an earlier answer of this connection said (never a downgrade).
+		if (result.facts !== null) conn.facts = result.facts
 		if (!conn.headerSeen) return
 		const next = this.combine(sourceId, conn)
 		if (conn.settled === null) {
@@ -143,6 +177,7 @@ export class ReceiverIdentityTracker extends EventEmitter {
 
 	private combine(sourceId: string, conn: Connection): ReceiverIdentity {
 		return resolveReceiverIdentity(
+			sourceId,
 			conn.header,
 			this.options.sdrHostApplies(sourceId) ? conn.facts : null,
 		)
@@ -151,13 +186,21 @@ export class ReceiverIdentityTracker extends EventEmitter {
 	private onConnected(sourceId: string): void {
 		this.clearTimer(sourceId)
 		this.connections.set(sourceId, {
+			openedAt: this.now(),
 			header: null,
 			headerSeen: false,
 			facts: null,
+			resulted: false,
 			settled: null,
 			timer: null,
 			warnedConflict: false,
 		})
+		if (this.stopped || !this.options.sdrHostApplies(sourceId)) return
+		try {
+			this.options.kickSdrHostPoll?.(sourceId)
+		} catch (err) {
+			this.log.warn({ err, sourceId }, "Asking the sdr-host for a poll failed")
+		}
 	}
 
 	private onHeader(
@@ -173,9 +216,9 @@ export class ReceiverIdentityTracker extends EventEmitter {
 		conn.header = info
 		conn.headerSeen = true
 		const now = this.combine(sourceId, conn)
+		// Settled now: no sdr-host for this endpoint, or this connection's result is already in.
 		if (
-			now.strength === "unit" ||
-			now.strength === "unknown" ||
+			conn.resulted ||
 			!this.options.sdrHostApplies(sourceId) ||
 			this.waitMs <= 0
 		) {

@@ -204,7 +204,10 @@ import {
 } from "./decoders/builtin/lora-meshtastic.js"
 import { ContainerMonitor } from "./core/container-monitor.js"
 import { SdrHostPoller, type SdrHostConfig } from "./core/sdr-host-poller.js"
-import { ReceiverIdentityTracker } from "./core/receiver-identity-tracker.js"
+import {
+	ReceiverIdentityTracker,
+	receiverSdrHostWaitMs,
+} from "./core/receiver-identity-tracker.js"
 import { ReceiverLearnedState } from "./core/receiver-identity-state.js"
 import {
 	receiverBoundToTuner,
@@ -1326,15 +1329,24 @@ async function main(): Promise<void> {
 			sdrHostApplies: id =>
 				identityPoller?.getStatus(id) !== undefined &&
 				(sourceManager.getSelectedCandidate(id)?.index ?? 0) === 0,
-			sdrHostWaitMs:
-				config.resources.sdrHostPoller.pollIntervalMs +
+			// Waits for this connection's first poll result; the bound is only a safety net.
+			sdrHostWaitMs: receiverSdrHostWaitMs(
 				config.resources.sdrHostPoller.timeoutMs,
+			),
+			kickSdrHostPoll: id => identityPoller?.pollNow(id),
 		})
 		own(100, () => receiverIdentity.stop())
 		const receiverState = new ReceiverLearnedState({
 			stateDir: config.stateDir,
 			logger,
 			tracked: receiverTracked,
+			// An sdr-host is there: configured explicitly, or auto-detected and it has answered.
+			// Only then does a weak (source-scoped) key wait for a stable one to adopt.
+			sdrHostConfigured: id =>
+				identityPoller?.getStatus(id) !== undefined &&
+				(config.sources.find(source => source.id === id)?.sdrHost?.apiUrl !==
+					undefined ||
+					identityPoller.hasAnswered(id)),
 			// The controller is built below; nothing binds before the first connection.
 			onBound: receiverBoundToTuner(receiverIdentity, () => tunerController),
 		})
@@ -2255,8 +2267,8 @@ async function main(): Promise<void> {
 					timeoutMs: config.resources.sdrHostPoller.timeoutMs,
 				})
 				identityPoller = sdrHostPoller
-				sdrHostPoller.on("receiver-identity", (sourceId, facts) =>
-					receiverIdentity.noteSdrHostFacts(sourceId, facts),
+				sdrHostPoller.on("identity-result", (sourceId, result) =>
+					receiverIdentity.noteSdrHostResult(sourceId, result),
 				)
 				log.info(
 					{

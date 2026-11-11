@@ -288,6 +288,25 @@ host network. `receiverId` is a random ID for the running sdr-host process,
 the same on every address it serves, so a client can confirm that two addresses
 lead to the same receiver. It changes when sdr-host restarts.
 
+`unitId` is the receiver's stable ID: 32 hex characters generated once and kept
+in `unit-id.json` in sdr-host's state directory (`/state` in the container,
+`SDR_HOST_STATE__DIR` to change it). `docker-compose.yml` mounts
+`/var/lib/wavekit/sdr-host` from the host there (`WAVEKIT_SDR_HOST_STATE_DIR`
+to change it), so the ID survives restarts and image updates. A missing or
+damaged file gets a new ID; when the directory is not writable sdr-host reports
+`unitId: null` rather than an ID that would change at the next start. WaveKit
+keys the receiver's learned state (spur map, noise floors, occupancy, saved
+gain) by `unitId`; without it the receiver is known only by its tuner model.
+An install made before `unitId` existed gets the volume with the updated
+compose file (`make sdr-host-compose-update`, or the next image); until then the
+ID lives in the container and changes when the container is recreated.
+
+`dongle.serial` is the dongle's USB serial string, read from sysfs, when it is
+readable and plain (letters, digits, `.`, `_`, `-`, at most 32). Many dongles
+ship with the same factory serial (`00000001`), so `dongle.serialWeak` is
+`true` for such defaults (empty, `0`, all zeros, zeros then `1`); WaveKit never
+tells receivers apart by a weak serial.
+
 Dedicated images also announce the receiver over DNS-SD through the Pi's
 avahi-daemon (`/etc/avahi/services/wavekit-sdr-host.service`). The announcement
 is `_wavekit-sdr._tcp` on port 8080 with TXT `v=1`, `iq=5555` and

@@ -296,9 +296,9 @@ const HDR = (tunerType: number, gainCount: number) => ({
 	tunerType,
 	gainCount,
 })
-const ID_A = resolveReceiverIdentity(HDR(5, 29), null)
-const ID_B = resolveReceiverIdentity(HDR(1, 14), null)
-const ID_UNKNOWN = resolveReceiverIdentity(null, null)
+const ID_A = resolveReceiverIdentity("rtl", HDR(5, 29), null)
+const ID_B = resolveReceiverIdentity("rtl", HDR(1, 14), null)
+const ID_UNKNOWN = resolveReceiverIdentity("rtl", null, null)
 const X_CENTRE = 300_000_000
 
 describe("receiver gate: an unknown interlude", () => {

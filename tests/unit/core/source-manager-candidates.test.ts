@@ -1,8 +1,10 @@
 /**
  * Candidate endpoints of an rtl_tcp source: the primary, then the candidates in order,
  * with the usual backoff; the first that delivers a payload wins (a header alone does not); a delivering endpoint is
- * retried SOURCE_CANDIDATE_RETRIES times after a loss before the next one is tried. Loopback only:
- * fake rtl_tcp servers and closed ports this test opened itself (port 0). Real timers.
+ * retried SOURCE_CANDIDATE_RETRIES times after a loss before the next one is tried; an endpoint
+ * that accepts but sends no payload within SOURCE_SILENT_DEADLINE_MS is left. Loopback only: fake
+ * rtl_tcp servers and closed ports this test opened itself (port 0). The backoff and the
+ * deadlines run on fake timers where the test waits through them (socket I/O stays real).
  */
 import * as net from "node:net"
 import { once } from "node:events"
@@ -11,6 +13,7 @@ import pino from "pino"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	SOURCE_CANDIDATE_RETRIES,
+	SOURCE_SILENT_DEADLINE_MS,
 	SourceManager,
 } from "../../../src/core/source-manager.js"
 import { sourceRoutes } from "../../../src/api/routes/sources.js"
@@ -19,9 +22,36 @@ import type { SourceConfig } from "../../../src/config.js"
 const log = pino({ level: "silent" })
 const cleanup: Array<() => Promise<void> | void> = []
 afterEach(async () => {
+	vi.useRealTimers()
 	vi.restoreAllMocks()
 	for (const close of cleanup.splice(0).reverse()) await close()
 })
+
+/** Fake setTimeout only: the backoff and deadlines; sockets and setImmediate stay real. */
+const fakeTimers = () =>
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+
+/** Real I/O turns between fake-time steps. */
+const ioTurns = async (n = 10) => {
+	for (let i = 0; i < n; i++)
+		await new Promise(resolve => setImmediate(resolve))
+}
+
+/**
+ * Advances fake time in 100 ms steps (real I/O between them) until `check` holds, at most
+ * `fakeMs` of fake time; returns the fake time it took.
+ */
+const advanceUntil = async (check: () => boolean, fakeMs: number) => {
+	let spent = 0
+	await ioTurns()
+	while (!check()) {
+		if (spent >= fakeMs) throw new Error(`not reached in ${fakeMs} fake ms`)
+		await vi.advanceTimersByTimeAsync(100)
+		spent += 100
+		await ioTurns()
+	}
+	return spent
+}
 
 const HEADER = Buffer.from("RTL0\0\0\0\x05\0\0\0\x1d", "binary")
 
@@ -180,41 +210,106 @@ describe("SourceManager candidates", () => {
 		},
 	)
 
-	it(
-		`a delivering endpoint lost is retried ${SOURCE_CANDIDATE_RETRIES} times, then the next one is tried`,
-		{ timeout: 60_000 },
-		async () => {
-			vi.spyOn(Math, "random").mockReturnValue(0)
-			const primary = await fakeRtlTcp()
-			const backup = await fakeRtlTcp()
-			const m = manager()
-			await m.connect(
-				source(primary.port, [{ host: "127.0.0.1", port: backup.port }]),
-			)
-			await waitFor(
-				() => m.getStatus("rtl")?.candidate?.delivering === true,
-				5_000,
-			)
-			await primary.stop()
-			// The loss and the first retries stay on the primary.
-			await waitFor(
-				() => (m.getStatus("rtl")?.candidate?.failures ?? 0) >= 2,
-				15_000,
-			)
-			expect(m.getStatus("rtl")?.candidate?.index).toBe(0)
-			expect(backup.accepts()).toBe(0)
-			// Past the retries (1 loss + 3 refused retries = 4 losses), the backup.
-			await waitFor(() => m.getStatus("rtl")?.candidate?.index === 1, 45_000)
-			await waitFor(
-				() => m.getStatus("rtl")?.candidate?.delivering === true,
-				20_000,
-			)
-			expect(m.getStatus("rtl")?.candidate?.selectedBecause).toBe(
-				`previous failed: refused (${SOURCE_CANDIDATE_RETRIES + 1} losses)`,
-			)
-			expect(backup.accepts()).toBe(1)
-		},
-	)
+	it(`a delivering endpoint lost is retried ${SOURCE_CANDIDATE_RETRIES} times, then the next one is tried`, async () => {
+		vi.spyOn(Math, "random").mockReturnValue(0)
+		const primary = await fakeRtlTcp()
+		const backup = await fakeRtlTcp()
+		const m = manager()
+		await m.connect(
+			source(primary.port, [{ host: "127.0.0.1", port: backup.port }]),
+		)
+		await waitFor(
+			() => m.getStatus("rtl")?.candidate?.delivering === true,
+			5_000,
+		)
+		fakeTimers()
+		await primary.stop()
+		// The loss and the first retries stay on the primary.
+		await advanceUntil(
+			() => (m.getStatus("rtl")?.candidate?.failures ?? 0) >= 2,
+			20_000,
+		)
+		expect(m.getStatus("rtl")?.candidate?.index).toBe(0)
+		expect(backup.accepts()).toBe(0)
+		// Past the retries (1 loss + 3 refused retries = 4 losses), the backup: with Math.random
+		// at 0 the equal-jitter backoff waits 1, 2, 4 and 8 s (15 s), never much more.
+		const spent = await advanceUntil(
+			() => m.getStatus("rtl")?.candidate?.index === 1,
+			60_000,
+		)
+		expect(spent).toBeLessThanOrEqual(30_000)
+		await advanceUntil(
+			() => m.getStatus("rtl")?.candidate?.delivering === true,
+			30_000,
+		)
+		expect(m.getStatus("rtl")?.candidate?.selectedBecause).toBe(
+			`previous failed: refused (${SOURCE_CANDIDATE_RETRIES + 1} losses)`,
+		)
+		expect(backup.accepts()).toBe(1)
+	})
+
+	it(`an endpoint that accepts but sends nothing is left after ${SOURCE_SILENT_DEADLINE_MS} ms as silent`, async () => {
+		vi.spyOn(Math, "random").mockReturnValue(0)
+		// Accepts and holds the connection without a byte.
+		const held = new Set<net.Socket>()
+		const silent = net.createServer(socket => {
+			held.add(socket)
+			socket.on("error", () => {})
+		})
+		silent.listen(0, "127.0.0.1")
+		await once(silent, "listening")
+		cleanup.push(async () => {
+			for (const sock of held) sock.destroy()
+			await new Promise<void>(resolve => silent.close(() => resolve()))
+		})
+		const port = (silent.address() as net.AddressInfo).port
+		const backup = await fakeRtlTcp()
+		const m = manager()
+		fakeTimers()
+		await m.connect(source(port, [{ host: "127.0.0.1", port: backup.port }]))
+		expect(m.getStatus("rtl")?.connected).toBe(true)
+		// Just before the deadline: still on the silent endpoint.
+		await vi.advanceTimersByTimeAsync(SOURCE_SILENT_DEADLINE_MS - 100)
+		await ioTurns()
+		expect(m.getStatus("rtl")?.candidate?.index).toBe(0)
+		expect(backup.accepts()).toBe(0)
+		// At the deadline: failed as silent, rotated to the backup.
+		await advanceUntil(() => m.getStatus("rtl")?.candidate?.index === 1, 200)
+		expect(m.getStatus("rtl")?.candidate?.selectedBecause).toBe(
+			"trying: previous failed: silent",
+		)
+		expect(m.getStatus("rtl")?.connectFailure).toMatchObject({
+			errorClass: "silent",
+			attempts: 1,
+		})
+		await advanceUntil(
+			() => m.getStatus("rtl")?.candidate?.delivering === true,
+			10_000,
+		)
+		expect(backup.accepts()).toBe(1)
+	})
+
+	it("a source without candidates keeps a silent connection (no deadline)", async () => {
+		const held = new Set<net.Socket>()
+		const silent = net.createServer(socket => {
+			held.add(socket)
+			socket.on("error", () => {})
+		})
+		silent.listen(0, "127.0.0.1")
+		await once(silent, "listening")
+		cleanup.push(async () => {
+			for (const sock of held) sock.destroy()
+			await new Promise<void>(resolve => silent.close(() => resolve()))
+		})
+		const port = (silent.address() as net.AddressInfo).port
+		const m = manager()
+		fakeTimers()
+		await m.connect({ ...source(port, []), candidates: undefined })
+		await vi.advanceTimersByTimeAsync(SOURCE_SILENT_DEADLINE_MS * 3)
+		await ioTurns()
+		expect(m.getStatus("rtl")?.connected).toBe(true)
+		expect(m.getStatus("rtl")?.connectFailure).toBeUndefined()
+	})
 
 	it(
 		"an endpoint that sends a header but never a payload is left: the next one is tried",

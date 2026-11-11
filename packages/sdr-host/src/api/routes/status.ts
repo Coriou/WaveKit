@@ -39,6 +39,8 @@ export function registerStatusRoutes(
 			version: SDR_HOST_VERSION,
 			iqDelivery: { modes: ["raw"] },
 			receiverId: fastify.receiverId,
+			// Stable across restarts and image updates (null: not persisted, so none).
+			unitId: fastify.unitId,
 			uptime,
 			dongle: preflightResult.dongle,
 			rtlTcp: {

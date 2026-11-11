@@ -1,15 +1,15 @@
 /**
  * Learned state per receiver through the REAL SpectrumService and SpectrumEngine, on the
  * real ScannerPersistence in a tmp state directory: the pending window between a reconnect and the
- * next identity (persists and engine opens inside it), and an identity switch while an engine is
- * still opening. Only the pipeline host is a test double (it reports the state it was built from,
+ * next identity (persists and engine opens inside it), the same receiver reconnecting (no swap, no
+ * pipeline restart), and an identity switch while an engine is still opening. Only the pipeline host is a test double (it reports the state it was built from,
  * or what the test says it learned since).
  */
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import pino from "pino"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { SourceConfig } from "../../../src/config.js"
 import { ScannerPersistence } from "../../../src/core/scanner/store/persistence.js"
 import {
@@ -51,11 +51,11 @@ afterEach(async () => {
 })
 
 const HEADER = { magic: "RTL0", tunerType: 5, gainCount: 29 }
-const A = resolveReceiverIdentity(HEADER, {
-	receiverId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+const A = resolveReceiverIdentity("rtl", HEADER, {
+	unitId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 })
-const B = resolveReceiverIdentity(HEADER, {
-	receiverId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+const B = resolveReceiverIdentity("rtl", HEADER, {
+	unitId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 })
 
 const learnedState = (dbfs: number): EngineState => ({
@@ -226,7 +226,7 @@ const nsFile = (id: ReceiverIdentity) =>
 	)
 
 describe("Receiver learned state through the real spectrum service", () => {
-	it("a reconnect to another receiver: persists and opens in the pending window never touch A; B never sees A's state", async () => {
+	it("a reconnect to another receiver: persists in the pending window never touch A; B never keeps A's state", async () => {
 		const t = await make()
 		await t.learned.onIdentity("rtl", A, undefined)
 		await t.service.acquire("rtl", "job:a")
@@ -235,39 +235,36 @@ describe("Receiver learned state through the real spectrum service", () => {
 		expect(floorOf(JSON.parse(await readFile(nsFile(A), "utf8")))).toBe(-91)
 
 		// Disconnect, then the next connection: A's state so far is written under A, then pending.
+		const hostsAtBoundary = t.hosts.length
 		const boundary = t.learned.onConnection("rtl")
 		void t.learned.onConnection("rtl")
 		await boundary
 		const aBytes = await readFile(nsFile(A))
-		// The engine continues fresh in memory: nothing of A in the running pipeline.
-		expect(t.host().cfg.persistedEngine).toBeUndefined()
+		// A's state stays applied (read-only): no swap, no new pipeline.
+		expect(t.hosts.length).toBe(hostsAtBoundary)
 
 		// B's IQ trains the engine while the identity is pending: a persist writes nothing.
 		t.host().learned = learnedState(-50)
 		await t.service.persist()
-		// An engine opened in the pending window loads nothing (not A's state).
+		// An engine opened in the pending window reads A's state (read-only); still nothing written.
 		await t.service.release("rtl", "job:a")
 		const hostsBefore = t.hosts.length
 		await t.service.acquire("rtl", "job:b")
 		expect(t.hosts.length).toBe(hostsBefore + 1)
-		expect(t.host().cfg.persistedEngine).toBeUndefined()
+		expect(floorOf(t.host().cfg.persistedEngine)).toBe(-91)
 		expect(await readFile(nsFile(A))).toEqual(aBytes)
 
-		// B settles: fresh, and its own learning goes under B only.
+		// B settles: swapped to B's own (fresh), and its learning goes under B only.
 		await t.learned.onIdentity("rtl", B, A)
 		expect(t.learned.view("rtl")).toMatchObject({
 			key: B.key,
 			namespaceState: "fresh",
 		})
+		expect(t.host().cfg.persistedEngine).toBeUndefined()
 		t.host().learned = learnedState(-60)
 		await t.service.persist()
 		expect(floorOf(JSON.parse(await readFile(nsFile(B), "utf8")))).toBe(-60)
 		expect(await readFile(nsFile(A))).toEqual(aBytes)
-		// No pipeline after the boundary was ever built from A's state.
-		const sinceBoundary = t.hosts.slice(1)
-		expect(
-			sinceBoundary.every(h => floorOf(h.cfg.persistedEngine) !== -91),
-		).toBe(true)
 
 		// Back to A later: A resumes exactly what it had.
 		void t.learned.onConnection("rtl")
@@ -278,16 +275,24 @@ describe("Receiver learned state through the real spectrum service", () => {
 		await t.service.stop()
 	})
 
-	it("the same receiver reconnecting resumes its own state after the pending window", async () => {
+	it("the same receiver reconnecting: no engine swap, no extra pipeline restart, learned state kept", async () => {
 		const t = await make()
 		await t.learned.onIdentity("rtl", A, undefined)
 		await t.service.acquire("rtl", "job:a")
 		t.host().learned = learnedState(-91)
-		await t.learned.onConnection("rtl")
-		expect(t.host().cfg.persistedEngine).toBeUndefined()
+		const replace = vi.spyOn(t.service, "replaceLearnedState")
+		const hostsBefore = t.hosts.length
+		// Disconnect, connect, the same unit settles again (an sdr-host restart: same unit id).
+		void t.learned.onConnection("rtl")
+		void t.learned.onConnection("rtl")
 		await t.learned.onIdentity("rtl", A, A)
+		await t.learned.idle("rtl")
+		expect(replace).not.toHaveBeenCalled()
+		expect(t.hosts.length).toBe(hostsBefore)
 		expect(t.learned.view("rtl")?.namespaceState).toBe("resumed")
-		expect(floorOf(t.host().cfg.persistedEngine)).toBe(-91)
+		expect(
+			floorOf(await t.service.exportLearnedState("rtl").then(s => s.engine)),
+		).toBe(-91)
 		await t.service.release("rtl", "job:a")
 		await t.service.stop()
 	})

@@ -3,8 +3,8 @@
  * tuner-band-gain-saved-receivers.json names its receiver; tuner-band-gain-saved.json keeps the
  * format older images read (no receiver keys). A tracked source applies only its current
  * receiver's record, the one from before namespacing (no key) only when the first receiver adopts
- * the legacy state (it leaves the legacy file once that adoption is on record), and nothing while
- * the receiver is unknown. Real controller and settings service over an in-memory file system.
+ * the legacy state (it stays in the legacy file for an image rolled back; the receiver's own
+ * keyed record wins over it), and nothing while the receiver is unknown. Real controller and settings service over an in-memory file system.
  */
 import { describe, expect, it, vi } from "vitest"
 import pino from "pino"
@@ -31,8 +31,8 @@ const UHF = 455_500_000
 const REST = { origin: "rest" as const }
 const SAVED_PATH = `/state/${BAND_GAIN_SAVED_FILE_NAME}`
 const RECEIVERS_PATH = `/state/${BAND_GAIN_SAVED_RECEIVERS_FILE_NAME}`
-const A = "sdrhost:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-const B = "sdrhost:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+const A = "unit:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+const B = "unit:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 function memoryFs(initial?: unknown, receivers?: unknown) {
 	const files = new Map<string, string>()
@@ -266,47 +266,86 @@ describe("pre-band gain from before namespacing", () => {
 		],
 	}
 
-	it("leaves the legacy file once the adoption is on record, and stays while it is not", async () => {
-		const recorded = memoryFs(legacy)
-		const a = await setup(recorded.fs)
-		a.controller.noteReceiverBound("rtl", {
-			key: A,
-			adoptLegacy: true,
-			legacyRecorded: true,
-		})
-		await settle()
-		expect(JSON.parse(recorded.files.get(SAVED_PATH) ?? "null")).toEqual({
-			version: 1,
-			sources: [{ sourceId: "other", saved: saved(50) }],
-		})
-		expect(JSON.parse(recorded.files.get(RECEIVERS_PATH) ?? "null")).toEqual({
-			version: 1,
-			sources: [{ sourceId: "rtl", receiverKey: A, saved: saved(150) }],
-		})
-		// Another receiver later, and back: the old record never comes back.
-		a.controller.noteReceiverBound("rtl", { key: B, adoptLegacy: false })
-		a.controller.noteReceiverBound("rtl", { key: A, adoptLegacy: false })
-		await settle()
-		expect(JSON.parse(recorded.files.get(SAVED_PATH) ?? "null")).toEqual({
-			version: 1,
-			sources: [{ sourceId: "other", saved: saved(50) }],
-		})
-
-		const unrecorded = memoryFs(legacy)
-		const b = await setup(unrecorded.fs)
-		b.controller.noteReceiverBound("rtl", {
-			key: A,
-			adoptLegacy: true,
-			legacyRecorded: false,
-		})
-		await settle()
-		const kept = JSON.parse(unrecorded.files.get(SAVED_PATH) ?? "null") as {
-			sources: unknown[]
+	it("keeps the legacy record in its file after the adoption (a rollback still reads it)", async () => {
+		for (const legacyRecorded of [true, false]) {
+			const disk = memoryFs(legacy)
+			const a = await setup(disk.fs)
+			a.controller.noteReceiverBound("rtl", {
+				key: A,
+				adoptLegacy: true,
+				legacyRecorded,
+			})
+			await settle()
+			const kept = JSON.parse(disk.files.get(SAVED_PATH) ?? "null") as {
+				sources: unknown[]
+			}
+			expect(kept.sources).toHaveLength(2)
+			expect(kept.sources).toEqual(expect.arrayContaining(legacy.sources))
+			expect(JSON.parse(disk.files.get(RECEIVERS_PATH) ?? "null")).toEqual({
+				version: 1,
+				sources: [{ sourceId: "rtl", receiverKey: A, saved: saved(150) }],
+			})
+			// Another receiver later, and back: the legacy record is still there, A keeps its own.
+			a.controller.noteReceiverBound("rtl", { key: B, adoptLegacy: false })
+			a.controller.noteReceiverBound("rtl", { key: A, adoptLegacy: false })
+			await settle()
+			expect(
+				(
+					JSON.parse(disk.files.get(SAVED_PATH) ?? "null") as {
+						sources: unknown[]
+					}
+				).sources,
+			).toEqual(expect.arrayContaining(legacy.sources))
+			await a.controller.setFrequency("rtl", UHF, REST)
+			expect(a.controller.getState("rtl")?.gain).toBe(150)
 		}
-		expect(kept.sources).toHaveLength(2)
-		expect(kept.sources).toEqual(expect.arrayContaining(legacy.sources))
-		await b.controller.setFrequency("rtl", UHF, REST)
-		expect(b.controller.getState("rtl")?.gain).toBe(150)
+	})
+
+	it("the receiver's keyed record wins over the legacy one at the adoption", async () => {
+		const disk = memoryFs(legacy, {
+			version: 1,
+			sources: [{ sourceId: "rtl", receiverKey: A, saved: saved(120) }],
+		})
+		const { controller } = await setup(disk.fs)
+		controller.noteReceiverBound("rtl", { key: A, adoptLegacy: true })
+		await controller.setFrequency("rtl", UHF, REST)
+		expect(controller.getState("rtl")?.gain).toBe(120)
+		await settle()
+		expect(
+			(
+				JSON.parse(disk.files.get(SAVED_PATH) ?? "null") as {
+					sources: unknown[]
+				}
+			).sources,
+		).toEqual(expect.arrayContaining(legacy.sources))
+	})
+
+	it("a stable key taking over a weak key copies its saved gain; the weak key keeps it", async () => {
+		const WEAK = "source:rtl|model:5:29"
+		const disk = memoryFs(undefined, {
+			version: 1,
+			sources: [{ sourceId: "rtl", receiverKey: WEAK, saved: saved(130) }],
+		})
+		const { controller } = await setup(disk.fs)
+		controller.noteReceiverBound("rtl", {
+			key: A,
+			adoptLegacy: false,
+			takeOverFrom: WEAK,
+		})
+		await settle()
+		const records = (
+			JSON.parse(disk.files.get(RECEIVERS_PATH) ?? "null") as {
+				sources: unknown[]
+			}
+		).sources
+		expect(records).toEqual(
+			expect.arrayContaining([
+				{ sourceId: "rtl", receiverKey: WEAK, saved: saved(130) },
+				{ sourceId: "rtl", receiverKey: A, saved: saved(130) },
+			]),
+		)
+		await controller.setFrequency("rtl", UHF, REST)
+		expect(controller.getState("rtl")?.gain).toBe(130)
 	})
 
 	it("scanner off: the first receiver identified adopts it through the production chain; the next never gets it", async () => {
@@ -341,12 +380,14 @@ describe("pre-band gain from before namespacing", () => {
 		await learned.load()
 		// No attach(): the scanner (and its store) is off.
 		const idA = resolveReceiverIdentity(
+			"rtl",
 			{ magic: "RTL0", tunerType: 5, gainCount: 29 },
-			{ receiverId: "a".repeat(32) },
+			{ unitId: "a".repeat(32) },
 		)
 		const idB = resolveReceiverIdentity(
+			"rtl",
 			{ magic: "RTL0", tunerType: 5, gainCount: 29 },
-			{ receiverId: "b".repeat(32) },
+			{ unitId: "b".repeat(32) },
 		)
 		expect(idA.key).toBe(A)
 		current.set("rtl", idA)
@@ -354,10 +395,13 @@ describe("pre-band gain from before namespacing", () => {
 		await controller.setFrequency("rtl", UHF, REST)
 		expect(controller.getState("rtl")?.gain).toBe(150)
 		await settle()
-		expect(JSON.parse(disk.files.get(SAVED_PATH) ?? "null")).toEqual({
-			version: 1,
-			sources: [{ sourceId: "other", saved: saved(50) }],
-		})
+		expect(
+			(
+				JSON.parse(disk.files.get(SAVED_PATH) ?? "null") as {
+					sources: unknown[]
+				}
+			).sources,
+		).toEqual(expect.arrayContaining(legacy.sources))
 
 		// B, in this process and after a restart: never A's gain from before.
 		await learned.onConnection("rtl")

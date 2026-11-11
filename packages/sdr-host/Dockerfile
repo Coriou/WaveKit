@@ -111,6 +111,8 @@ RUN case "${TARGETARCH}" in \
 
 # Prepare s6-overlay directories
 RUN mkdir -p /run/service && chmod 755 /run/service
+# sdr-host state (unit id); docker-compose.yml mounts a host volume here.
+RUN mkdir -p /state
 
 # Copy binaries
 COPY --from=rtlmux-build /usr/local/bin/rtlmux /usr/local/bin/

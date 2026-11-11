@@ -105,16 +105,22 @@ describe("receiver identity wiring", () => {
 			tunerType: 5,
 			gainCount: 29,
 		})
-		await waitFor(() => bound.some(b => b.binding.key === "model:5:29"))
+		await waitFor(() =>
+			bound.some(b => b.binding.key === "source:rtl|model:5:29"),
+		)
 		await learned.idle("rtl")
 		expect(bound.at(-1)).toEqual({
 			id: "rtl",
 			// No scanner store: the gain from before namespacing is adopted all the same.
-			binding: { key: "model:5:29", adoptLegacy: true, legacyRecorded: true },
-			identity: "model:5:29",
+			binding: {
+				key: "source:rtl|model:5:29",
+				adoptLegacy: true,
+				legacyRecorded: true,
+			},
+			identity: "source:rtl|model:5:29",
 		})
 		expect(status!("rtl")).toEqual({
-			key: "model:5:29",
+			key: "source:rtl|model:5:29",
 			strength: "model",
 			tunerType: 5,
 			candidateLabel: "usb",
@@ -133,12 +139,12 @@ describe("receiver identity wiring", () => {
 			tunerType: 5,
 			gainCount: 29,
 		})
-		await waitFor(() => bound.at(-1)?.binding.key === "model:5:29")
+		await waitFor(() => bound.at(-1)?.binding.key === "source:rtl|model:5:29")
 		await learned.idle("rtl")
 		expect(bound.map(b => b.binding.key)).toEqual([
-			"model:5:29",
+			"source:rtl|model:5:29",
 			null,
-			"model:5:29",
+			"source:rtl|model:5:29",
 		])
 		expect(status!("rtl")?.namespaceState).toBe("resumed")
 		tracker.stop()

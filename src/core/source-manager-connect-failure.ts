@@ -23,6 +23,7 @@ const CODE_CLASSES: ReadonlyMap<string, SourceConnectErrorClass> = new Map([
 	["ECONNRESET", "reset"],
 	["EPIPE", "reset"],
 	["SOURCE_STALLED", "stalled"],
+	["SOURCE_SILENT", "silent"],
 	["SOURCE_PEER_CLOSED", "closed"],
 ])
 
@@ -75,6 +76,8 @@ export function connectHint(
 			return `${at} ended the connection: the server stopped or dropped this client.`
 		case "stalled":
 			return `Connected to ${at} but no samples arrived: is the dongle attached?`
+		case "silent":
+			return `${at} accepted the connection but sent no samples in time: trying the next endpoint.`
 		case "other":
 			return `Could not connect to ${at}.`
 	}

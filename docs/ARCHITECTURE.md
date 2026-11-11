@@ -107,30 +107,38 @@ interface SourceCaps {
 Learned state is kept per physical receiver, inside the one state directory, so a USB dongle's
 spurs, floors or pre-band gain never apply to the Pi receiver.
 
-- `src/core/receiver-identity.ts` (pure): the key `sdrhost:<receiverId>` or
-  `serial:<vendor>:<product>:<serial>` (strength `unit`), `model:<tunerType>:<gainCount>` from
-  the rtl_tcp header (`model`), or `unknown`. Every component is charset- and length-checked
-  first; `pathSegment` turns any string into one collision-free path segment.
+- `src/core/receiver-identity.ts` (pure): the key `unit:<unitId>` (the sdr-host's persisted
+  unit id) or `serial:<vendor>:<product>:<serial>` (non-default serials only; strength `unit`),
+  `source:<source>|model:<tunerType>:<gainCount>` from the rtl_tcp header (`model`), or
+  `unknown`. The sdr-host's per-process `receiverId` never forms a key. Every component is
+  Zod/charset- and length-checked first; `pathSegment` turns any string into one collision-free
+  path segment.
 - `src/core/receiver-identity-tracker.ts`: per connection, the identity from the header,
-  upgraded by a validated sdr-host answer (`SdrHostPoller` `receiver-identity`) while the source
-  is on its primary endpoint. It waits at most one poll interval plus the poll timeout before it
-  settles, never downgrades within a connection, and is recomputed on each new connection. It
-  emits `connection` on every disconnect and connect, `settled` on every settle and `identity`
-  on a change; `src/core/receiver-identity-wiring.ts` connects it to the learned state, the
-  tuner (`noteReceiverBound`) and the source status (`setReceiverStatusSource`).
+  upgraded by a validated sdr-host answer while the source is on its primary endpoint. Each
+  connection kicks a poll (`SdrHostPoller.pollNow`) and waits for the first poll result
+  (`identity-result`, emitted right after `/api/status`, success or failure) whose request
+  started at or after the connection opened; a hard bound (3 request timeouts + 1 s, 7 s by
+  default) is only a safety net. It never downgrades within a connection and is recomputed on
+  each new connection. It emits `connection` on every disconnect and connect, `settled` on every
+  settle and `identity` on a change; `src/core/receiver-identity-wiring.ts` connects it to the
+  learned state, the tuner (`noteReceiverBound`) and the source status (`setReceiverStatusSource`).
 - `src/core/receiver-identity-state.ts`: binds each tracked source (rtl_tcp U8_IQ) to its
   receiver's namespace `engine/receivers/<source>/<key>/` in the scanner state directory for the
   spectrum engine state and occupancy. On a change it saves the running state under the old
   receiver and loads the new one's (`SpectrumService.replaceLearnedState`, which recreates the
   pipeline, and first waits for an engine still opening). A connection boundary makes the source
-  pending until the next settle: the state so far is written under the old receiver, the engine
-  is swapped to fresh, loads return nothing and writes are dropped. A per-source generation makes
-  a load that a switch overtook read again. An unknown receiver gets nothing applied and nothing
-  written. The un-namespaced state from before belongs to the first receiver identified
-  (`<stateDir>/receiver-namespaces.json` records it as `adoptedBy`, with what it still `owed`):
-  the pre-band gain is adopted at that binding (no scanner needed), the spectrum files are copied
-  (not moved) once the scanner store is writable while that receiver is bound. No later
-  receiver adopts them. One INFO line
+  pending until the next settle: the state so far is exported under the bound receiver and stays
+  applied read-only (loads read it, writes are dropped); the same key settling again costs no
+  swap and no pipeline restart. Exports the store cannot take yet are held in memory per receiver
+  (at most 4 per source) and written once it is writable. A per-source generation makes a load
+  that a switch overtook read again, and drops a write whose export straddled a switch. An
+  unknown receiver gets nothing applied and nothing written. The un-namespaced state from before
+  is adopted once (`<stateDir>/receiver-namespaces.json` records `adoptedBy`, what it still
+  `owed`, and `takenOver`): by a `unit` key, or by the `model` key only on a source without an
+  sdr-host; the pre-band gain at that binding (no scanner needed), the spectrum files copied (not
+  moved) once the scanner store is writable while that receiver is bound. A `unit` key new on a
+  source that does not adopt starts from the source's `model` namespace of its model, once per
+  `model` key. One INFO line
   per change: `Receiver changed: <old> -> <new>; learned state <fresh|resumed|adopted|none>`.
 - `TunerController` keeps the pre-band gain records per receiver key
   (`tuner-band-gain-saved-receivers.json`; `tuner-band-gain-saved.json` keeps the un-keyed
