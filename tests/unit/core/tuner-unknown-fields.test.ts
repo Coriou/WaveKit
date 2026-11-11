@@ -178,18 +178,20 @@ describe("TunerState.unknownFields", () => {
 			])
 		})
 
-		it("a reset reconnect asserts the declared fields, which the new connection then proves", async () => {
+		it("a reset reconnect writes no declared field: they are declared-only again and say so", async () => {
 			create({ reconnectPolicy: "reset" })
 			await controller.setFrequency("rtl", 1_090_000_000, { accept: false })
 			const events: unknown[] = []
 			controller.on("state-changed", (_id, state) => events.push(state))
 			const result = controller.synchronizeOnConnect("rtl")
 			expect(result.reset).toBe(false)
-			expect(result.commands).toEqual(["set-sample-rate", "set-frequency"])
+			// The reset policy: another operator may own the receiver, nothing declared is written.
+			expect(result.commands).toEqual([])
 			expect(events).toHaveLength(1)
-			expect(controller.getState("rtl")).not.toHaveProperty(
-				"declaredOnlyFields",
-			)
+			expect(controller.getState("rtl")!.declaredOnlyFields).toEqual([
+				"frequency",
+				"sampleRate",
+			])
 		})
 
 		it("an ignored relay frequency or rate is unknown until the next accepted value", async () => {

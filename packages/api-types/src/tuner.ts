@@ -155,6 +155,12 @@ export interface TunerState {
 export interface TunerTuningProof {
 	frequency: TunerFieldProof
 	sampleRate: TunerFieldProof
+	/**
+	 * Centre or rate frames the core wrote back because an untracked retune (a client tuning the
+	 * receiver past the core's relay) left them unproven, since the core started; absent before the
+	 * first. Climbing steadily: something keeps retuning the receiver and the core keeps fighting it.
+	 */
+	assertFights?: number
 }
 
 /**
@@ -162,7 +168,8 @@ export interface TunerTuningProof {
  * went out and settled), `relay` (a relay client's frame settled), `settling` (a frame went out, or
  * waits to leave, and its settle has not passed) or `unverified` (nothing on this connection
  * proves it; `reason` says why, a fixed code such as `no-receipt`, `untracked-retune`,
- * `rate-truth-mismatch`, `relay-attached`, `scanner-lease`, `plain-resume` or `declared-write-off`).
+ * `rate-truth-mismatch`, `relay-attached`, `scanner-lease`, `plain-resume`, `reset-policy` or
+ * `declared-write-off`).
  */
 export interface TunerFieldProof {
 	state: "unverified" | "settling" | "commanded" | "relay"

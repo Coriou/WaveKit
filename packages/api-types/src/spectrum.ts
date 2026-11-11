@@ -170,8 +170,8 @@ export interface SpectrumTrustShadow {
 	disagreements: SpectrumTrustDisagreement[]
 	/**
 	 * Measured delay from a centre or rate frame's flush to the first block summary whose content
-	 * shows the change (payload bytes, and ms at the engine's rate; lower bounds). p50 and max over
-	 * the last 64; null before the first. `undetected`: changes not seen (a quiet band, another
+	 * shows the change (payload bytes, and ms at the engine's rate; lower bounds, with upper-bound
+	 * maxima beside them). p50 and max over the last 64; null before the first. `undetected`: changes not seen (a quiet band, another
 	 * bin grid, a newer frame first, or nothing within 5 s of payload). Diagnostics only.
 	 */
 	retuneDelay?: SpectrumRetuneDelay
@@ -183,6 +183,12 @@ export interface SpectrumRetuneDelay {
 	maxMs: number | null
 	p50Bytes: number | null
 	maxBytes: number | null
+	/**
+	 * Upper bounds over the same measurements (flush to the end of the detecting block): the change
+	 * showed no later than this. Optional: absent on cores before 2026-11-11.
+	 */
+	maxMsUpper?: number | null
+	maxBytesUpper?: number | null
 	undetected: number
 }
 

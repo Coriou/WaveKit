@@ -352,8 +352,13 @@ describe("SourceManager feed pause / resume", () => {
 		await tuner.setFrequency("rtl", 145_000_000)
 		await tuner.setGainMode("rtl", "manual")
 		await tuner.setGain("rtl", 297)
-		// Assert's declared rate and centre on the first payload, then the four writes above.
-		await waitFor(() => upstream.connections[0]!.frames.length === 6)
+		// Assert's declared rate and centre on the first payload (none under the reset policy),
+		// then the four writes above.
+		await waitFor(
+			() =>
+				upstream.connections[0]!.frames.length ===
+				(reconnectPolicy === "reset" ? 4 : 6),
+		)
 		await manager.pause("rtl")
 		await waitFor(() => upstream.connections[0]!.closed)
 		return { ...ctx, tuner, bytes: () => bytes }

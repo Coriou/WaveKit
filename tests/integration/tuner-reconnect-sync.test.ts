@@ -214,7 +214,7 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 		expect(upstream.connections).toHaveLength(2)
 	}, 20_000)
 
-	it("reset policy asserts only the declared rate after reconnect and returns caps to the configured baseline once", async () => {
+	it("reset policy writes nothing after reconnect and returns caps to the configured baseline once", async () => {
 		vi.spyOn(Math, "random").mockReturnValue(0)
 
 		const upstream = await startFakeRtlTcp()
@@ -260,12 +260,15 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 			() => sourceManager.getStatus("rtl-1")?.activity.state === "streaming",
 		)
 		const first = upstream.connections[0]!
-		// Assert: the declared rate (no centre is declared).
-		await waitFor(() => first.frames.length === 1)
+		// The reset policy writes no declared value (another operator may own the receiver).
 
 		await tuner.setSampleRate("rtl-1", 2_160_000)
 		await tuner.setFrequency("rtl-1", 446_866_968)
-		await waitFor(() => first.frames.length === 3)
+		await waitFor(() => first.frames.length === 2)
+		expect(first.frames).toEqual([
+			[0x02, 2_160_000],
+			[0x01, 446_866_968],
+		])
 		expect(sourceManager.getCaps("rtl-1")?.sampleRate).toBe(2_160_000)
 
 		const capsEvents: SourceCaps[] = []
@@ -276,8 +279,8 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 		// Give any stray replay time to arrive before asserting silence.
 		await new Promise(resolve => setTimeout(resolve, 100))
 
-		// The accepted tuning is discarded; assert writes the declared rate, never the old values.
-		expect(upstream.connections[1]!.frames).toEqual([[0x02, 2_048_000]])
+		// The accepted tuning is discarded, and nothing declared is written either.
+		expect(upstream.connections[1]!.frames).toEqual([])
 		expect(capsEvents).toHaveLength(1)
 		const caps = sourceManager.getCaps("rtl-1")
 		expect(caps?.sampleRate).toBe(2_048_000)

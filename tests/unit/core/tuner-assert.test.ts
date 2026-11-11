@@ -556,6 +556,102 @@ describe("a plain resume of a paused feed", () => {
 		await wait(100)
 		expect(h.framesFrom(from)).toEqual([])
 	}, 30_000)
+
+	it("holds only the declared fallback: a centre the operator sets after the resume is asserted on a dropout (Main gate M1)", async () => {
+		const h = await harness()
+		await h.sessionFlowing(1)
+		await h.controller.setFrequency("rtl", HOP, { origin: "rest" })
+		await until(() => h.proofOf().frequency.state === "commanded")
+		await h.manager.pause("rtl")
+		await h.manager.resume("rtl")
+		await h.sessionFlowing(2)
+		// After the resume the operator sets a centre and a gain.
+		await h.controller.setFrequency("rtl", HOP + 1_000_000, { origin: "rest" })
+		await h.controller.setGain("rtl", 400, { origin: "rest" })
+		await until(() => stampedAt(h.fake, HOP + 1_000_000))
+		const from = h.fake.frames.length
+		h.fake.dropConnections()
+		await h.sessionFlowing(3)
+		await until(() => h.proofOf().frequency.state === "commanded")
+		const frames = h.framesFrom(from)
+		// The operator's centre goes back (by assert); the gain is replayed; the declared rate
+		// (nothing accepted it after the resume) and the pre-pause centre are never written.
+		expect(frames).toContainEqual([SET_FREQUENCY, HOP + 1_000_000])
+		expect(frames).toContainEqual([SET_GAIN, 400])
+		expect(frames.some(([cmd]) => cmd === SET_SAMPLE_RATE)).toBe(false)
+		expect(frames).not.toContainEqual([SET_FREQUENCY, HOP])
+		expect(frames).not.toContainEqual([SET_FREQUENCY, F0])
+		expect(
+			h.sessionReceipts(3).find(r => r.field === "frequency"),
+		).toMatchObject({ value: HOP + 1_000_000, writer: "assert" })
+		// The rate stays unverified under the hold, with the hold's reason.
+		expect(h.proofOf().sampleRate).toMatchObject({
+			state: "unverified",
+			reason: "plain-resume",
+		})
+	}, 30_000)
+})
+
+describe("a fight with a client retuning past the relay (Main gate minor 3)", () => {
+	it("counts each assert frame an untracked-retune doubt caused, never other doubts", async () => {
+		const h = await harness()
+		await h.sessionFlowing(1)
+		await until(() => h.proofOf().frequency.state === "commanded")
+		expect(h.proofOf().assertFights).toBeUndefined()
+		// Another doubt: assert writes, no fight counted.
+		h.ledger.raiseDoubt("rtl", "both", "pipeline-error")
+		await until(() => h.proofOf().frequency.state === "commanded")
+		expect(h.proofOf().assertFights).toBeUndefined()
+		// Two untracked retunes of the centre: two fights, no rate limit.
+		for (const n of [1, 2]) {
+			const from = h.fake.frames.length
+			h.ledger.raiseDoubt("rtl", "frequency", "untracked-retune")
+			await until(() => h.proofOf().frequency.state === "commanded")
+			expect(h.framesFrom(from)).toEqual([[SET_FREQUENCY, F0]])
+			expect(h.proofOf().assertFights).toBe(n)
+		}
+		// GET /api/tuner shows it on the published state.
+		expect(h.controller.getAllStates()[0]?.proof?.assertFights).toBe(2)
+	}, 30_000)
+})
+
+describe("reconnectPolicy reset (another operator may own the receiver)", () => {
+	it("writes no declared value and asserts only what was accepted on the current connection", async () => {
+		const h = await harness({ reconnectPolicy: "reset" })
+		await h.sessionFlowing(1)
+		await wait(200)
+		// No declared write on the first connection: centre and rate stay unverified.
+		expect(
+			h.fake.frames.filter(
+				([cmd]) => cmd === SET_FREQUENCY || cmd === SET_SAMPLE_RATE,
+			),
+		).toEqual([])
+		expect(h.proofOf().frequency).toMatchObject({
+			state: "unverified",
+			reason: "reset-policy",
+		})
+		// A centre accepted on this connection is asserted after a doubt on it.
+		await h.controller.setFrequency("rtl", F1, { origin: "rest" })
+		await until(() => h.proofOf().frequency.state === "commanded")
+		const doubtFrom = h.fake.frames.length
+		h.ledger.raiseDoubt("rtl", "both", "test")
+		await until(() => h.proofOf().frequency.state === "commanded")
+		expect(h.framesFrom(doubtFrom)).toEqual([[SET_FREQUENCY, F1]])
+		// A new connection: the earlier connection's centre is not asserted, nor anything declared.
+		const from = h.fake.frames.length
+		h.fake.dropConnections()
+		await h.sessionFlowing(2)
+		await wait(200)
+		expect(h.framesFrom(from)).toEqual([])
+		expect(h.proofOf().frequency).toMatchObject({
+			state: "unverified",
+			reason: "reset-policy",
+		})
+		expect(h.proofOf().sampleRate).toMatchObject({
+			state: "unverified",
+			reason: "reset-policy",
+		})
+	}, 30_000)
 })
 
 describe("source manager fixes beside assert", () => {

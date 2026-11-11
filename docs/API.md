@@ -1209,7 +1209,10 @@ What a resume writes to the receiver depends on the body:
   sample rate, gain mode, gain and the others), the scanner's queued lease recovery and
   owed gain restore, and a band gain the receiver had before the pause; a sweep waiting in
   `paused(source-down)` continues with its next hop. The held feed's
-  `restoreTuning` shows what it writes.
+  `restoreTuning` shows what it writes. A centre or rate with nothing accepted to write
+  (after a plain resume dropped the pre-pause values, or nothing was ever set) gets the
+  declared one from the source's config or caps, unless
+  `tuner.writeDeclaredTuningOnConnect` is `false`.
 
 **SDR++ through the tuner relay or through rtlmux.** With the
 [tuner relay](#tuner-relay) enabled, SDR++ connected to the relay is seen: its commands
@@ -1798,15 +1801,20 @@ received while the source is down become desired state and are sent on
 reconnect. With `reset`, core discards them and returns tuner state and source
 caps to the configured baseline.
 
-Centre and sample rate follow one rule whatever the policy (**assert**): every new
-connection starts unproven, and as its first payload arrives the core writes the
-values it holds, the last accepted ones (API or relay; never a scanner hop's),
-else the declared baseline (config or caps) unless
-`tuner.writeDeclaredTuningOnConnect` is `false`. It writes nothing for them while a
-tuner relay client is attached or holds control, while a scanner lease holds the
-tuner (the lease holder re-sends its own hop, the rate too), after a plain resume
-of a paused feed (until a restore resume), or once this core lost ownership. It
-writes again when a doubt leaves either field unproven on the live connection (an
+Centre and sample rate follow one rule (**assert**): every new connection starts
+unproven, and as its first payload arrives the core writes the values it holds,
+the last accepted ones (API or relay; never a scanner hop's), else the declared
+baseline (config or caps). The declared fallback is off when
+`tuner.writeDeclaredTuningOnConnect` is `false`, after a plain resume of a paused
+feed (until a restore resume; values accepted after the resume are still written)
+and under `reconnectPolicy: reset` (another operator may own the receiver: values
+accepted on an earlier connection are discarded, so only a value accepted on the
+current connection is written back, after a doubt). A restore resume writes the
+held values, the declared centre and rate included when nothing is accepted, also
+after a plain resume and under `reset`. It writes nothing for them while a tuner
+relay client is attached or holds control, while a scanner lease holds the tuner
+(the lease holder re-sends its own hop, the rate too), or once this core lost
+ownership. It writes again when a doubt leaves either field unproven on the live connection (an
 untracked retune, a host-centre mismatch, a pipeline error, a sustained rate
 mismatch), when a relay client leaves, or when a scanner lease ends. These frames
 report origin `replay`. A write to either field through this API is skipped only
@@ -1825,10 +1833,16 @@ connection's number, per source from 1, null between connections) and, when
 unverified, a fixed `reason`: the doubt's own (`untracked-retune`,
 `host-centre-mismatch`, `pipeline-error`, `rate-truth-mismatch`,
 `unledgered-write`, `write-failed`), why nothing is written (`relay-attached`,
-`external-control`, `scanner-lease`, `plain-resume`, `lost-ownership`,
+`external-control`, `scanner-lease`, `lost-ownership`, or, with nothing accepted to
+write, why the declared fallback is off: `plain-resume`, `reset-policy`,
 `declared-write-off`) or the ledger's (`no-receipt`, `session-ended`,
 `no-writer`, …). `unknownFields`/`declaredOnlyFields` keep saying where a shown
 value comes from; `proof` says whether this connection carries it.
+`proof.assertFights` (absent before the first) counts the centre and rate frames
+the core wrote back because an untracked retune left them unproven, since it
+started, with no rate limit: a figure that keeps climbing means a client retunes
+the receiver past the core's relay (SDR++ straight on a shared rtlmux) and the
+core keeps putting its values back.
 
 `lastChange` says who made the last change and why: `{ actor, reason, at, fields, jobId? }`,
 one per source, in memory, absent until the first change since the core started. Clients cannot
@@ -5585,7 +5599,9 @@ doubt's own code, e.g. `untracked-retune`), and `retuneDelay`: per centre or
 rate frame that changed the value, the payload from its flush to the first block
 summary whose content shows the change (a carrier pattern moved by the expected
 shift, or the spectrum changed by 6 dB on average): `count`, `p50Ms`, `maxMs`,
-`p50Bytes`, `maxBytes` over the last 64 (null before the first; lower bounds) and
+`p50Bytes`, `maxBytes` over the last 64 (null before the first; lower bounds, from
+the detecting block's first byte), `maxMsUpper`, `maxBytesUpper` (upper bounds over
+the same, to the detecting block's end: the change showed no later) and
 `undetected` (a quiet band, another bin grid, a newer frame first, or nothing
 within 5 s of payload). Diagnostics for the network settle; nothing reads it. No
 consumer reads the ledger's label yet; absent without a ledger.

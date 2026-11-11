@@ -141,14 +141,17 @@ describe("proveSampleRateForFrequency (WG10 req 2.8)", () => {
 			false,
 		)
 		expect(t.rateWrites()).toHaveLength(replayed)
-		// A reset reconnect discards the accepted rate, and assert writes the declared one on
-		// the new connection itself: the proof finds it proven and writes nothing more.
+		// A reset reconnect discards the accepted rate and writes no declared one (another
+		// operator may own the receiver): the proof writes once more, then finds it proven.
 		const r = make()
 		;(
 			r.controller as unknown as { config: { reconnectPolicy: string } }
 		).config.reconnectPolicy = "reset"
 		await r.controller.proveSampleRateForFrequency("rtl-1", REST)
 		r.controller.synchronizeOnConnect("rtl-1")
+		expect(await r.controller.proveSampleRateForFrequency("rtl-1", REST)).toBe(
+			true,
+		)
 		expect(await r.controller.proveSampleRateForFrequency("rtl-1", REST)).toBe(
 			false,
 		)

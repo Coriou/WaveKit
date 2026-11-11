@@ -18,6 +18,7 @@ import { blockSamplesOf } from "../../../../src/core/spectrum/retune-settle.js"
 import {
 	CHANGE_DB,
 	RETUNE_DELAY_SAMPLES,
+	RETUNE_TAINT_WINDOWS,
 	RetuneDelayMeter,
 } from "../../../../src/core/spectrum/retune-delay.js"
 import { SpectrumEngine } from "../../../../src/core/spectrum/spectrum-engine.js"
@@ -186,8 +187,97 @@ describe("RetuneDelayMeter", () => {
 			maxMs: 500,
 			p50Bytes: 1000,
 			maxBytes: 1000,
+			// Upper bound: to the detecting block's end (posB 3000).
+			maxMsUpper: 1000,
+			maxBytesUpper: 2000,
 			undetected: 0,
 		})
+	})
+
+	it("reports the upper-bound max from the detecting block's end beside the lower bound", () => {
+		const m = new RetuneDelayMeter()
+		m.onBlock(block(0, flat(-90)))
+		m.onReceipt(
+			{ session: 1, field: "frequency", value: F1, pos: 1000 },
+			F0,
+			2000,
+		)
+		// A long block: its first byte at 1200 (lower bound), its end at 4200 (upper bound).
+		m.onBlock({ ...block(1200, flat(-50)), posB: 4200 })
+		expect(m.status()).toMatchObject({
+			count: 1,
+			maxBytes: 200,
+			maxMs: 100,
+			maxBytesUpper: 3200,
+			maxMsUpper: 1600,
+		})
+	})
+
+	it("merges overlapping marker-bracket windows instead of keeping only the last", () => {
+		const m = new RetuneDelayMeter()
+		m.onBlock(block(0, flat(-90)))
+		// 10 Hz × 2 B: 5 s is 100 B. Bracket 1 taints [1000, 1200), bracket 2 [1150, 1280).
+		m.onTestMode({ session: 1, on: true, pos: 1000 }, 10, 2)
+		m.onTestMode({ session: 1, on: false, pos: 1100 }, 10, 2)
+		m.onTestMode({ session: 1, on: true, pos: 1150 }, 10, 2)
+		m.onTestMode({ session: 1, on: false, pos: 1180 }, 10, 2)
+		// A block of bracket 1's pattern, before bracket 2's start, arriving late: tainted.
+		m.onBlock({ ...block(1000, flat(-30)), posB: 1100 })
+		m.onReceipt(
+			{ session: 1, field: "frequency", value: F1, pos: 1300 },
+			F0,
+			20,
+		)
+		// Had the pattern block been the reference, this clean block would read as the change.
+		m.onBlock({ ...block(1300, flat(-90)), posB: 1400 })
+		expect(m.status()).toMatchObject({ count: 0, undetected: 1 })
+	})
+
+	it("sizes a bracket's window from the rate in effect for it, not the engine's current one", () => {
+		const m = new RetuneDelayMeter()
+		m.onBlock(block(0, flat(-90)))
+		m.onTestMode({ session: 1, on: true, pos: 1000 }, 10, 2)
+		// The hop's own rate frame inside the bracket: 100 Hz × 2 B, 5 s is 1000 B.
+		m.onReceipt(
+			{ session: 1, field: "sampleRate", value: 100, pos: 1000 },
+			10,
+			20,
+		)
+		m.onTestMode({ session: 1, on: false, pos: 1100 }, 10, 2)
+		// Within [1000, 2100) at the bracket's rate (past [1000, 1200) at the engine's).
+		m.onBlock({ ...block(1500, flat(-30)), posB: 1600 })
+		m.onReceipt(
+			{ session: 1, field: "frequency", value: F1, pos: 1700 },
+			F0,
+			200,
+		)
+		m.onBlock({ ...block(1700, flat(-90)), posB: 1800 })
+		expect(m.status()).toMatchObject({ count: 0, undetected: 1 })
+	})
+
+	it(`keeps at most ${RETUNE_TAINT_WINDOWS} disjoint bracket windows, merging the oldest past the bound`, () => {
+		const m = new RetuneDelayMeter()
+		// 10 Hz × 2 B: each window is its bracket plus 100 B; brackets 1000 B apart stay disjoint.
+		const bracket = (at: number) => {
+			m.onTestMode({ session: 1, on: true, pos: at }, 10, 2)
+			m.onTestMode({ session: 1, on: false, pos: at + 10 }, 10, 2)
+		}
+		for (let i = 0; i < RETUNE_TAINT_WINDOWS + 1; i++) bracket(1000 * (i + 1))
+		const windows = (
+			m as unknown as { taints: { from: number; until: number }[] }
+		).taints
+		expect(windows).toHaveLength(RETUNE_TAINT_WINDOWS)
+		// The two oldest merged into one covering both (a superset).
+		expect(windows[0]).toMatchObject({ from: 1000, until: 2110 })
+		// A clean block between the merged windows' brackets is tainted (conservative).
+		m.onBlock({ ...block(1500, flat(-90)), posB: 1600 })
+		m.onReceipt(
+			{ session: 1, field: "frequency", value: F1, pos: 1700 },
+			F0,
+			20,
+		)
+		m.onBlock({ ...block(1700, flat(-50)), posB: 1750 })
+		expect(m.status()).toMatchObject({ count: 0, undetected: 1 })
 	})
 
 	it("matches a small retune by its shift, not by noise", () => {
@@ -242,7 +332,7 @@ describe("RetuneDelayMeter", () => {
 		const m = new RetuneDelayMeter()
 		m.onBlock(block(0, flat(-90)))
 		// Test mode on at 1000: a hop's rate and centre inside the bracket start nothing.
-		m.onTestMode({ session: 1, on: true, pos: 1000 }, 2000)
+		m.onTestMode({ session: 1, on: true, pos: 1000 }, 1000, 2)
 		m.onReceipt(
 			{ session: 1, field: "frequency", value: F1, pos: 1000 },
 			F0,
@@ -250,7 +340,7 @@ describe("RetuneDelayMeter", () => {
 		)
 		// The test pattern differs from the reference: no measurement, no undetected either.
 		m.onBlock(block(1000, flat(-30)))
-		m.onTestMode({ session: 1, on: false, pos: 2000 }, 2000)
+		m.onTestMode({ session: 1, on: false, pos: 2000 }, 1000, 2)
 		m.onBlock(block(2000, flat(-30)))
 		expect(m.status()).toMatchObject({ count: 0, undetected: 0 })
 		// A change soon after the bracket: blocks within RETUNE_DETECT_MAX_MS of payload after
@@ -282,7 +372,7 @@ describe("RetuneDelayMeter", () => {
 			F0,
 			2000,
 		)
-		m.onTestMode({ session: 1, on: true, pos: 1100 }, 2000)
+		m.onTestMode({ session: 1, on: true, pos: 1100 }, 1000, 2)
 		m.onBlock(block(1100, flat(-30)))
 		expect(m.status()).toMatchObject({ count: 0, undetected: 0 })
 	})

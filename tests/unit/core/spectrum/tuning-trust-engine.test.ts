@@ -195,7 +195,7 @@ describe("spectrum engine tuning trust (WG9 req 3.1, 3.2)", () => {
 		await t.engine.stop()
 	})
 
-	it("labels the reset-reconnect caps change commanded: assert writes the declared baseline", async () => {
+	it("labels the reset-reconnect caps change unverified until this core commands again", async () => {
 		const t = setup("reset")
 		await t.tuner.setSampleRate("rtl", RATE)
 		await t.tuner.setFrequency("rtl", 446_200_000)
@@ -203,11 +203,13 @@ describe("spectrum engine tuning trust (WG9 req 3.1, 3.2)", () => {
 		expect(t.streams()).toEqual(["commanded"])
 		t.sources.emit("disconnected", "rtl")
 		t.sources.emit("payload-started", "rtl")
-		t.tuner.synchronizeOnConnect("rtl") // caps back to the baseline centre, asserted
+		// Caps back to the baseline centre; the reset policy writes no declared value.
+		t.tuner.synchronizeOnConnect("rtl")
 		await settle()
+		expect(t.streams()).toEqual(["commanded", "unverified"])
 		expect(t.epochs().at(-1)).toMatchObject({
 			centreHz: BASE_HZ,
-			tuningTrust: "commanded",
+			tuningTrust: "unverified",
 		})
 		await t.tuner.setSampleRate("rtl", RATE)
 		await t.tuner.setFrequency("rtl", 446_250_000)
@@ -276,9 +278,9 @@ describe("spectrum engine tuning trust (WG9 req 3.1, 3.2)", () => {
 		await r.tuner.setSampleRate("rtl", 2_048_000)
 		await r.tuner.setFrequency("rtl", 446_200_000)
 		await r.engine.start()
-		r.tuner.synchronizeOnConnect("rtl") // baseline rate comes back, asserted
+		r.tuner.synchronizeOnConnect("rtl") // baseline rate comes back, not written (reset)
 		await settleRestart()
-		expect(r.streams()).toEqual(["commanded", "commanded"])
+		expect(r.streams()).toEqual(["commanded", "unverified"])
 		await r.engine.stop()
 	})
 

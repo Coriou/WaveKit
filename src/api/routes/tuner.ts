@@ -271,6 +271,7 @@ const tunerStateSchema = {
 			properties: {
 				frequency: fieldProofSchema,
 				sampleRate: fieldProofSchema,
+				assertFights: { type: "integer" },
 			},
 			required: ["frequency", "sampleRate"],
 		},

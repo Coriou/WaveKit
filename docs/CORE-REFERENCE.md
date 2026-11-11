@@ -161,7 +161,9 @@ The core writes nothing for those two fields while:
   is written back.
 - a scanner job holds the tuner: the job re-sends its own hop instead, never the configured
   centre.
-- a paused feed was resumed plainly (the default resume), until a restore resume.
+- a paused feed was resumed plainly (the default resume), until a restore resume, for values
+  set before the pause and the declared ones: a centre or rate you set after the resume is
+  written back as usual.
 
 It also writes again after evidence that the receiver moved (an untracked retune, a centre the
 receiver reports differently, a pipeline error, a sustained rate mismatch).
@@ -176,13 +178,22 @@ tuner:
 ```
 
 With `false` a centre or rate nobody set stays unverified until somebody sets it (values you set
-are still written back). The other opt-out is the plain resume of a paused feed.
+are still written back). The other opt-outs are the plain resume of a paused feed and
+`reconnectPolicy: reset`.
 
-`tuner.reconnectPolicy: reset` forgets the values you set when the connection comes back, so the
-core then writes the declared centre and rate (it no longer leaves the receiver where it was).
-For a core that touches nothing on a reconnect, combine `reconnectPolicy: reset` with
-`writeDeclaredTuningOnConnect: false` (and configure no tuner gain: configured gain settings
-are still written to every connection).
+`tuner.reconnectPolicy: reset` is for a receiver another operator may own after an outage. When
+the connection comes back the core forgets the values you set, and it never writes the declared
+centre and rate (as with `writeDeclaredTuningOnConnect: false`): the receiver stays where it is,
+`proof` reading `unverified` with `reason: reset-policy`. Only a centre or rate you set on the
+current connection is written back, after evidence that the receiver moved; a value set on an
+earlier connection, or while the source was down, is not. A restore resume of a paused feed
+still restores, declared values included, for its own connection. Configured gain settings are
+still written to every connection: configure no tuner gain for a core that touches nothing on a
+reconnect.
+
+Each frame written back because of an untracked retune counts in `proof.assertFights` on GET
+`/api/tuner`: a figure that keeps climbing means a client tunes the receiver past the core's relay
+(SDR++ straight on a shared rtlmux) and the core keeps putting its values back.
 
 #### Per-band gain
 

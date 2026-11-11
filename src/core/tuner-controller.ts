@@ -400,17 +400,22 @@ const GATED_FIELDS: readonly GatedField[] = ["sampleRate", "frequency"]
 
 /**
  * Why assert writes nothing for an unproven field (the API's `proof.reason`): rule 1 (a relay
- * client attached, external control, a plain resume's hold, lost ownership), rule 2 (a scanner
- * lease: its holder re-sends its hop) or rule 3 without a held value (`declared-write-off`:
- * nothing accepted and tuner.writeDeclaredTuningOnConnect false).
+ * client attached, external control, lost ownership), rule 2 (a scanner lease: its holder
+ * re-sends its hop) or rule 3 without a held value, the declared fallback being off: a plain
+ * resume's hold (`plain-resume`), `tuner.reconnectPolicy: reset` (`reset-policy`) or
+ * tuner.writeDeclaredTuningOnConnect false (`declared-write-off`).
  */
 type AssertBlock =
 	| "lost-ownership"
 	| "plain-resume"
+	| "reset-policy"
 	| "relay-attached"
 	| "external-control"
 	| "scanner-lease"
 	| "declared-write-off"
+
+/** The doubt reason of the spectrum engine's untracked-retune alarm (TunerTuningProof.assertFights). */
+const UNTRACKED_RETUNE_DOUBT = "untracked-retune"
 
 /** A scanner lease as the controller sees it (TunerArbiter.setLeaseView). */
 export interface TunerLeaseView {
@@ -1216,6 +1221,18 @@ export class TunerController extends EventEmitter {
 	private acceptedTuning: Map<string, Partial<Record<GatedField, number>>> =
 		new Map()
 	/**
+	 * The ledger session a restore resume opened, per source: under `reconnectPolicy: reset` that
+	 * session follows the restore policy (the operator asked for the tuning back), so its declared
+	 * fallback stands. Any later session is the reset policy's again.
+	 */
+	private restoreResumeSession: Map<string, number> = new Map()
+	/**
+	 * Assert frames written while the field's live doubt was an untracked-retune alarm, per source
+	 * (TunerTuningProof.assertFights): a client bypassing the relay retuning the receiver, and the
+	 * core putting its value back. Counted, never limited.
+	 */
+	private assertFights: Map<string, number> = new Map()
+	/**
 	 * The ledger of a source manager without one (test doubles: every write flushes at once, with
 	 * no settle): one session per connection the controller is told of.
 	 */
@@ -1418,12 +1435,31 @@ export class TunerController extends EventEmitter {
 			: (this.config.defaultSampleRate ?? caps?.sampleRate)
 	}
 
-	/** What assert writes for a field (rule 3): last accepted, else declared (kill switch aside). */
+	/**
+	 * Why the declared fallback of rule 3 is off for the source now, or null: a plain resume's hold
+	 * (until a restore resume; values accepted since are still written), `reconnectPolicy: reset`
+	 * outside a restore resume's session (another operator may own the receiver: only what was
+	 * accepted on the current connection is written, see synchronizeOnConnect), or the kill switch.
+	 */
+	private declaredBlock(sourceId: string): AssertBlock | null {
+		if (this.plainResumeHold.has(sourceId)) return "plain-resume"
+		if (
+			this.config.reconnectPolicy === "reset" &&
+			this.restoreResumeSession.get(sourceId) !==
+				this.ledger().position(sourceId)?.session
+		)
+			return "reset-policy"
+		if (this.config.writeDeclaredTuningOnConnect === false)
+			return "declared-write-off"
+		return null
+	}
+
+	/** What assert writes for a field (rule 3): last accepted, else declared (declaredBlock). */
 	private heldValue(sourceId: string, field: GatedField): number | null {
 		const accepted = this.acceptedTuning.get(sourceId)?.[field]
 		const value =
 			accepted ??
-			(this.config.writeDeclaredTuningOnConnect === false
+			(this.declaredBlock(sourceId) !== null
 				? undefined
 				: this.declaredValue(sourceId, field))
 		if (value === undefined) return null
@@ -1434,10 +1470,13 @@ export class TunerController extends EventEmitter {
 		return valid ? value : null
 	}
 
-	/** Why assert writes nothing for the source now (rules 1 and 2), or null. */
+	/**
+	 * Why assert writes nothing for the source now (rules 1 and 2), or null. A plain resume's hold
+	 * is no block: it turns off only the declared fallback (declaredBlock), so a value accepted
+	 * after the resume is written back on a later connection.
+	 */
 	private assertBlock(sourceId: string, state: TunerState): AssertBlock | null {
 		if (this.config.lostOwnership?.() === true) return "lost-ownership"
-		if (this.plainResumeHold.has(sourceId)) return "plain-resume"
 		if (this.relayAttached?.(sourceId) === true) return "relay-attached"
 		if (state.controlMode === "external") return "external-control"
 		if (this.leaseView?.holds(sourceId) === true) return "scanner-lease"
@@ -1510,9 +1549,20 @@ export class TunerController extends EventEmitter {
 			}
 			// A setter waiting on its own frame of this field is superseded by this one.
 			this.noteFieldWrite(sourceId, field)
+			// A fight with a client retuning the receiver past the relay: counted, never limited.
+			if (fields[field].doubtReason === UNTRACKED_RETUNE_DOUBT)
+				this.assertFights.set(
+					sourceId,
+					(this.assertFights.get(sourceId) ?? 0) + 1,
+				)
 			const shown = state[field]
 			if (field === "frequency") {
-				if (state.frequency !== value) this.appliedBandGain.delete(sourceId)
+				if (state.frequency !== value) {
+					this.appliedBandGain.delete(sourceId)
+					// The asserted centre is the operator's held one: its band gain follows it as
+					// after an operator retune (applyOperatorBandGain, "apply to my tuning" only).
+					this.reapplyBandGain(sourceId, value)
+				}
 				state.frequency = value
 			} else state.sampleRate = value
 			this.clearIgnoredRelayField(sourceId, field)
@@ -1523,6 +1573,26 @@ export class TunerController extends EventEmitter {
 			})
 		}
 		return { written }
+	}
+
+	/**
+	 * After assert moved the centre: the band gain at `hz` under the operator retune's rule, on a
+	 * later microtask (assert writes synchronously, the band gain awaits its saved gain). Failures
+	 * are logged by applyOperatorBandGain; the retune itself already went out.
+	 */
+	private reapplyBandGain(sourceId: string, hz: number): void {
+		if (this.bandGain?.applyToMyTuning() !== true) return
+		queueMicrotask(() => {
+			this.withoutCommand(() => {
+				this.applyOperatorBandGain(sourceId, hz, { origin: "rest" }).catch(
+					(err: unknown) =>
+						this.log.warn(
+							{ sourceId, err: safeErrorFields(err) },
+							"Applying the band gain after an assert failed",
+						),
+				)
+			})
+		})
 	}
 
 	/** The ledger's state of the source's two gated fields (and gain). */
@@ -1574,9 +1644,8 @@ export class TunerController extends EventEmitter {
 				return { state: "settling", writer: fs.writer, session: fs.session }
 			const blocked =
 				block ??
-				(this.heldValue(state.sourceId, field) === null &&
-				this.config.writeDeclaredTuningOnConnect === false
-					? "declared-write-off"
+				(this.heldValue(state.sourceId, field) === null
+					? this.declaredBlock(state.sourceId)
 					: null)
 			return {
 				state: "unverified",
@@ -1585,7 +1654,12 @@ export class TunerController extends EventEmitter {
 				reason: fs.doubtReason ?? blocked ?? fs.reason ?? "unverified",
 			}
 		}
-		return { frequency: one("frequency"), sampleRate: one("sampleRate") }
+		const fights = this.assertFights.get(state.sourceId)
+		return {
+			frequency: one("frequency"),
+			sampleRate: one("sampleRate"),
+			...(fights !== undefined ? { assertFights: fights } : {}),
+		}
 	}
 
 	// === Lifecycle ===
@@ -1663,6 +1737,8 @@ export class TunerController extends EventEmitter {
 		this.pausedAtSeq.delete(sourceId)
 		this.plainResumeHold.delete(sourceId)
 		this.acceptedTuning.delete(sourceId)
+		this.restoreResumeSession.delete(sourceId)
+		this.assertFights.delete(sourceId)
 		this.standInConnections.get(sourceId)?.close()
 		this.standInConnections.delete(sourceId)
 		this.baselineCaps.delete(sourceId)
@@ -2998,9 +3074,12 @@ export class TunerController extends EventEmitter {
 	 * the receiver may be at its own defaults. Policy (config `tuner.reconnectPolicy`):
 	 * - "restore": re-send fields accepted through the API or relay (never config
 	 *   defaults). Frames are written synchronously before any event fires, so a
-	 *   later API/relay command is always written after the batch and wins.
+	 *   later API/relay command is always written after the batch and wins. Centre
+	 *   and rate: assert writes the held value (accepted, else declared).
 	 * - "reset": write nothing; discard accepted state and fall back to the
-	 *   configured baseline, exactly as after a fresh start.
+	 *   configured baseline, exactly as after a fresh start. Centre and rate: no
+	 *   declared write (declaredBlock); assert writes only values accepted on this
+	 *   connection (discarded here, at its start), after a doubt.
 	 * Either way source caps are then reconciled with what the tuner state can
 	 * back, so stale metadata is never kept silently. Success means "written",
 	 * never "applied": rtl_tcp has no acknowledgement or readback.
@@ -3036,6 +3115,10 @@ export class TunerController extends EventEmitter {
 		if (options.resume === "restore") {
 			this.plainResumeHold.delete(sourceId)
 			this.forgetMeasuredRate(sourceId)
+			// This session follows the restore policy whatever tuner.reconnectPolicy says.
+			const session = this.ledger().position(sourceId)?.session
+			if (session !== undefined)
+				this.restoreResumeSession.set(sourceId, session)
 		}
 
 		if (policy === "reset") {
@@ -3068,7 +3151,8 @@ export class TunerController extends EventEmitter {
 			const configured = configDue
 				? this.writeConfiguredTuning(sourceId, state)
 				: undefined
-			// Nothing accepted is left: assert writes the declared centre and rate (kill switch aside).
+			// Nothing accepted is left, and the reset policy turns the declared fallback off
+			// (declaredBlock): assert writes only what is accepted on this connection from now on.
 			const asserted =
 				configured?.error === undefined
 					? this.writeAssertFrames(sourceId, state)

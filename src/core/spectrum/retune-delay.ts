@@ -24,8 +24,11 @@
  * pattern (from the bracket's start to RETUNE_DETECT_MAX_MS of payload past its end) is never a
  * reference nor a detection: a change whose reference would be one counts as `undetected`.
  *
- * Positions are the shadow's lower bounds of a block's first byte, so the delay is a lower bound
- * too (at most the mapping's slack: bytes buffered between the source manager and the engine).
+ * The delay is reported both ways: from the block's first byte at its lower bound (`p50Ms`,
+ * `maxMs`, `p50Bytes`, `maxBytes`: lower bounds, short by at most the mapping's slack, the bytes
+ * buffered between the source manager and the engine) and from the block's end at its upper
+ * bound (`maxMsUpper`, `maxBytesUpper`: the change showed no later than that; a settle covering
+ * it is long enough).
  */
 
 /**
@@ -47,6 +50,14 @@ export const CHANGE_DB = 6
 export const MIN_OVERLAP_BINS = 16
 /** A bin this far above the reference's median is a signal the shift comparison follows. */
 export const SIGNAL_DB = 10
+/**
+ * Disjoint marker-bracket windows kept at once. Two brackets less than RETUNE_DETECT_MAX_MS of
+ * payload apart overlap and merge into one window, so disjoint windows are more than 5 s of
+ * payload apart and a window is dropped once the blocks pass its end: holding 4 means the blocks
+ * lag the flushes by over 15 s. Past the bound the two oldest merge into one covering both
+ * (a superset: more undetected, never a false detection).
+ */
+export const RETUNE_TAINT_WINDOWS = 4
 
 export interface RetuneDelayStatus {
 	/** Measurements made since the engine started. */
@@ -56,6 +67,9 @@ export interface RetuneDelayStatus {
 	maxMs: number | null
 	p50Bytes: number | null
 	maxBytes: number | null
+	/** Upper bounds over the same measurements: from the flush to the detecting block's end. */
+	maxMsUpper: number | null
+	maxBytesUpper: number | null
 	/** Changes whose effect was not seen (see the module comment). */
 	undetected: number
 }
@@ -139,19 +153,33 @@ export class RetuneDelayMeter {
 	/** The last receipted value per field in `lastSession` (the change's "before"). */
 	private lastSession: number | null = null
 	private readonly lastValue = new Map<"frequency" | "sampleRate", number>()
-	private readonly samples: { ms: number; bytes: number }[] = []
+	private readonly samples: {
+		ms: number
+		bytes: number
+		msUpper: number
+		bytesUpper: number
+	}[] = []
 	private count = 0
 	private undetected = 0
 	/** An open marker bracket (test mode on), or null. */
 	private bracket: { session: number; from: number } | null = null
-	/** The span of the last closed bracket whose blocks may still carry the pattern. */
-	private taint: Taint | null = null
+	/**
+	 * Spans of closed brackets whose blocks may still carry the pattern, in position order,
+	 * overlapping ones merged; at most RETUNE_TAINT_WINDOWS.
+	 */
+	private taints: Taint[] = []
 
 	/**
-	 * A flushed test-mode frame. `bytesPerSecond` converts RETUNE_DETECT_MAX_MS to payload past
-	 * the bracket's end (null: the taint lasts the session).
+	 * A flushed test-mode frame. RETUNE_DETECT_MAX_MS becomes payload past the bracket's end at the
+	 * rate in effect for the bracket: the session's last receipted sample rate (a hop's own rate
+	 * frame inside the bracket included), else `fallbackRateHz` (the engine's current rate), times
+	 * `bytesPerSample`. No usable rate: the taint lasts the session.
 	 */
-	onTestMode(frame: DelayTestMode, bytesPerSecond: number | null): void {
+	onTestMode(
+		frame: DelayTestMode,
+		fallbackRateHz: number | null,
+		bytesPerSample: number,
+	): void {
 		this.enterSession(frame.session)
 		if (frame.on) {
 			if (this.bracket) return
@@ -163,13 +191,42 @@ export class RetuneDelayMeter {
 		}
 		const from = this.bracket?.from ?? frame.pos
 		this.bracket = null
+		const rateHz = this.lastValue.get("sampleRate") ?? fallbackRateHz
+		const bytesPerSecond = rateHz !== null ? rateHz * bytesPerSample : null
 		const span =
 			bytesPerSecond !== null &&
 			Number.isFinite(bytesPerSecond) &&
 			bytesPerSecond > 0
 				? (RETUNE_DETECT_MAX_MS / 1000) * bytesPerSecond
 				: Number.POSITIVE_INFINITY
-		this.taint = { session: frame.session, from, until: frame.pos + span }
+		this.addTaint({ session: frame.session, from, until: frame.pos + span })
+	}
+
+	/** Adds a window, merging every one it overlaps (enterSession keeps one session's only). */
+	private addTaint(t: Taint): void {
+		let merged = t
+		const kept: Taint[] = []
+		for (const w of this.taints) {
+			if (w.from <= merged.until && merged.from <= w.until)
+				merged = {
+					session: t.session,
+					from: Math.min(w.from, merged.from),
+					until: Math.max(w.until, merged.until),
+				}
+			else kept.push(w)
+		}
+		kept.push(merged)
+		kept.sort((a, b) => a.from - b.from)
+		while (kept.length > RETUNE_TAINT_WINDOWS) {
+			const a = kept.shift()!
+			const b = kept[0]!
+			kept[0] = {
+				session: a.session,
+				from: Math.min(a.from, b.from),
+				until: Math.max(a.until, b.until),
+			}
+		}
+		this.taints = kept
 	}
 
 	/**
@@ -247,7 +304,9 @@ export class RetuneDelayMeter {
 		if (this.reflects(p, ref, block)) {
 			const bytes = Math.max(0, block.posA - p.pos)
 			const ms = (bytes * 1000) / p.bytesPerSecond
-			this.samples.push({ ms, bytes })
+			const bytesUpper = Math.max(bytes, block.posB - p.pos)
+			const msUpper = (bytesUpper * 1000) / p.bytesPerSecond
+			this.samples.push({ ms, bytes, msUpper, bytesUpper })
 			if (this.samples.length > RETUNE_DELAY_SAMPLES) this.samples.shift()
 			this.count += 1
 			this.pending = null
@@ -260,12 +319,21 @@ export class RetuneDelayMeter {
 	status(): RetuneDelayStatus {
 		const ms = this.samples.map(s => s.ms).sort((a, b) => a - b)
 		const bytes = this.samples.map(s => s.bytes).sort((a, b) => a - b)
+		let maxMsUpper: number | null = null
+		let maxBytesUpper: number | null = null
+		for (const s of this.samples) {
+			if (maxMsUpper === null || s.msUpper > maxMsUpper) maxMsUpper = s.msUpper
+			if (maxBytesUpper === null || s.bytesUpper > maxBytesUpper)
+				maxBytesUpper = s.bytesUpper
+		}
 		return {
 			count: this.count,
 			p50Ms: percentile(ms, 0.5),
 			maxMs: ms.at(-1) ?? null,
 			p50Bytes: percentile(bytes, 0.5),
 			maxBytes: bytes.at(-1) ?? null,
+			maxMsUpper,
+			maxBytesUpper,
 			undetected: this.undetected,
 		}
 	}
@@ -276,19 +344,27 @@ export class RetuneDelayMeter {
 		this.lastSession = session
 		this.lastValue.clear()
 		this.bracket = null
-		this.taint = null
+		this.taints = []
 	}
 
 	private tainted(block: DelayBlock): boolean {
 		const b = this.bracket
 		if (b && b.session === block.session && block.posB > b.from) return true
-		const t = this.taint
-		return (
-			t !== null &&
-			t.session === block.session &&
-			block.posA < t.until &&
-			block.posB > t.from
+		// Blocks come in position order: a window the blocks have passed can taint none later.
+		while (
+			this.taints.length > 0 &&
+			this.taints[0]!.session === block.session &&
+			this.taints[0]!.until <= block.posA
 		)
+			this.taints.shift()
+		for (const t of this.taints)
+			if (
+				t.session === block.session &&
+				block.posA < t.until &&
+				block.posB > t.from
+			)
+				return true
+		return false
 	}
 
 	private miss(): void {

@@ -2229,9 +2229,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const cfg = this.cfg
 		if (r.field === "testMode") {
 			// A scanner marker bracket: its frames and blocks are skipped (retune-delay.ts).
+			// The window's length follows the rate in effect for the bracket (the session's last
+			// receipted rate, the hop's own included), the engine's current one only without one.
 			this.retuneDelay.onTestMode(
 				{ session: r.session, on: r.value !== 0, pos: r.pos },
-				cfg ? cfg.sampleRateHz * this.bps : null,
+				cfg ? cfg.sampleRateHz : null,
+				this.bps,
 			)
 			return
 		}

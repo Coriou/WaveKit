@@ -288,15 +288,20 @@ describe("TunerController reconnect synchronization", () => {
 					gainDb: 30,
 					agcMode: false,
 				})
-				// The first connection writes the configured gain, then assert the declared tuning.
+				// The first connection writes the configured gain, then assert the declared tuning
+				// (none under the reset policy).
 				controller.noteSourceConnected("rtl-1")
 				controller.synchronizeOnConnect("rtl-1")
 				expect(transport.frames).toEqual([
 					[0x03, 1],
 					[0x04, 300],
 					[0x08, 0],
-					[0x02, 2_048_000],
-					[0x01, 100_000_000],
+					...(reconnectPolicy === "restore"
+						? [
+								[0x02, 2_048_000],
+								[0x01, 100_000_000],
+							]
+						: []),
 				])
 				controller.noteFeedPaused("rtl-1")
 				controller.noteSourceConnected("rtl-1")
@@ -325,7 +330,8 @@ describe("TunerController reconnect synchronization", () => {
 				transport.frames.length = 0
 				controller.synchronizeOnConnect("rtl-1")
 				// Without the hold assert writes the declared rate and centre again, after the
-				// configured frames and before the replayed gain.
+				// configured frames and before the replayed gain; under the reset policy this
+				// dropout after the restore resume writes no declared value (the policy again).
 				expect(transport.frames).toEqual(
 					reconnectPolicy === "restore"
 						? [
@@ -338,8 +344,6 @@ describe("TunerController reconnect synchronization", () => {
 								[0x03, 1],
 								[0x04, 300],
 								[0x08, 0],
-								[0x02, 2_048_000],
-								[0x01, 100_000_000],
 							],
 				)
 			},
@@ -760,16 +764,9 @@ describe("Pi reboot scenario: SDR++ left caps at 2.16 Msps / 446.866968 MHz", ()
 		controller.on("state-changed", (_id, state) => states.push(state))
 
 		const result = controller.synchronizeOnConnect("rtl-1")
-		// Accepted state is discarded; assert writes the declared baseline.
-		expect(result).toEqual({
-			policy: "reset",
-			commands: ["set-sample-rate", "set-frequency"],
-			reset: true,
-		})
-		expect(transport.frames).toEqual([
-			[0x02, 2_048_000],
-			[0x01, 446_000_000],
-		])
+		// Accepted state is discarded; the reset policy writes no declared value either.
+		expect(result).toEqual({ policy: "reset", commands: [], reset: true })
+		expect(transport.frames).toEqual([])
 		expect(transport.capsChanges).toEqual([
 			{ sampleRate: 2_048_000, centerFreq: 446_000_000 },
 		])
@@ -811,10 +808,7 @@ describe("Pi reboot scenario: SDR++ left caps at 2.16 Msps / 446.866968 MHz", ()
 		controller.initializeSource("rtl-1", { ...transport.caps }, "rtl_tcp")
 		expect(controller.synchronizeOnConnect("rtl-1").reset).toBe(false)
 		expect(transport.capsChanges).toEqual([])
-		// Nothing to discard; assert writes the declared values.
-		expect(transport.frames).toEqual([
-			[0x02, 2_048_000],
-			[0x01, 100_000_000],
-		])
+		// Nothing to discard, and the reset policy writes no declared value.
+		expect(transport.frames).toEqual([])
 	})
 })

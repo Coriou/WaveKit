@@ -178,10 +178,13 @@ async function setup(
 	await connect()
 	// Assert writes the declared rate and centre to the first session (nothing proves them),
 	// after any configured gain frames: the tests below count the frames without those two.
-	await until(() => frames.some(f => f.cmd === 0x01))
-	for (const cmd of [0x02, 0x01]) {
-		const i = frames.findIndex(f => f.cmd === cmd)
-		if (i >= 0) frames.splice(i, 1)
+	// The reset policy writes no declared value (another operator may own the receiver).
+	if (options.reconnectPolicy !== "reset") {
+		await until(() => frames.some(f => f.cmd === 0x01))
+		for (const cmd of [0x02, 0x01]) {
+			const i = frames.findIndex(f => f.cmd === cmd)
+			if (i >= 0) frames.splice(i, 1)
+		}
 	}
 	const post = (body: unknown) =>
 		app.inject({
@@ -1471,8 +1474,10 @@ describe("a temporary tune", () => {
 		})
 		expect(prior.statusCode).toBe(200)
 		// The centre, the mode and the gain have all arrived (assert proved the rate on connect,
-		// so the rate proof skips).
-		await until(() => h.frames.length === 3)
+		// so the rate proof skips; under the reset policy nothing proved it: the proof is written).
+		await until(
+			() => h.frames.length === (options.reconnectPolicy === "reset" ? 4 : 3),
+		)
 		h.frames.length = 0
 		h.fakeTime()
 		return h
