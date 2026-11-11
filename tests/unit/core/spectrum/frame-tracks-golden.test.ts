@@ -22,12 +22,15 @@ import { makeService } from "./frame-tracks-service-harness.js"
  * old comb fast path had masked (33.3 and 60.5 kHz, the image) are tracks. Only the untracked
  * goldens are still the frozen code's. They were recorded again when unverified receiver lines
  * stopped causing stale discards after a retune: epochs 1 to 3 as before, epoch 1 byte-identical,
- * epochs 2 and 3 now accepted from their first block.
+ * epochs 2 and 3 now accepted from their first block. The rich goldens were recorded again when a
+ * verified mask began to lift only for energy on its own footprint: in epoch 3 (blocks 65 and 68)
+ * a burst two bins past comb tooth 136 no longer lifts the tooth, so the burst's track starts at
+ * its own edge and the floor moves slightly.
  */
 const GOLDEN = {
 	richSummaries: {
 		blocks: 74,
-		sha256: "e56e839f7e4abd7ac5823b9884d662ce8a17ea05f408687322f20f5343b39f95",
+		sha256: "d61416089c199dabb642998ccf76657c1b86bc9db67542c68824784f4fb1f37b",
 	},
 	untrackedSummaries: {
 		blocks: 24,
@@ -35,7 +38,7 @@ const GOLDEN = {
 	},
 	serviceOutput: {
 		frames: 47,
-		sha256: "d9cff7e019c9138168cc07964f50167020693fd193e26b324b23c242f42fc8d1",
+		sha256: "26b9e88539a51c0ed4f36785adf4716a5ea6f011565b8b9b60465b700dc0702c",
 	},
 }
 

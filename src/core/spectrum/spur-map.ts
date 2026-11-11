@@ -17,8 +17,27 @@
  * - Level. A bin counts as a line only while its slot level, Σ power / Σ floor over a 12.5 kHz
  *   slot centred on it (the channel gate's measure), is under SPUR_MAX_LEVEL_DB: the gate's own
  *   pass level, k 3 dB + margin 3 dB = 6 dB. Real receiver lines measured at most +3.5 dB, 2.5 dB
- *   under it; a carrier or a voice the gate would pass is no receiver line, is never learned, and
- *   lifts a mask on its bins while it is on air.
+ *   under it; a carrier or a voice the gate would pass is no receiver line and is never learned.
+ *   A neighbour on air within half a slot makes a line's bins loud too: the line is then neither
+ *   credited nor missed, so it verifies later, never wrongly.
+ * - Lift. A verified mask lifts while the line's own footprint is loud, never for a neighbour:
+ *   its own level (ownQuiet) is the slot level the footprint alone gives, every other bin of a
+ *   12.5 kHz slot centred on it at its floor, 1 + Σ_footprint (power − floor) / Σ_slot floor,
+ *   against the same 6 dB. At 1 kHz bins (13-bin slot) that is a footprint excess of
+ *   (10^0.6 − 1) · 13 ≈ 38.8 bins of floor power: a 1-bin emission of 16 dB over its floor. With
+ *   the neighbours at their floor it equals the slot level, so a line that verified stays masked
+ *   at its own level. The footprint of a SpurMap mask is its run of verified candidate bins,
+ *   which already holds the line's ±1-bin Hann skirt (a promoted range is widened by ±1, a
+ *   learned run is every bin the detector saw on); a provisional or comb line (`masks`) is given
+ *   as its core bins and measured with ±1 bin of skirt.
+ * - Confined. A loud footprint lifts the mask only while that energy is confined to it, a narrow
+ *   carrier sitting on the line (`wider`): when a flank as wide as the footprint just outside it,
+ *   on either side, carries a mean excess per bin of at least the footprint's own less 6 dB
+ *   (× 0.251), the energy belongs to a wider emission (a voice's FM band over the line) or to a
+ *   neighbour, and the mask holds. Such an emission is never hidden by it (the tracker joins its
+ *   pieces across a masked line), and lifting for it made the mask flicker and split or join its
+ *   track. A carrier on the footprint keeps its Hann main lobe there: its flank reads at most
+ *   0.2 of the footprint (−7 dB, a bin-centred tone on the footprint's edge bin).
  * - LO confirmation. A baseband spur stays at its baseband bin when the LO moves; a real emission
  *   moves with RF. An epoch credits its centre to a bin when the bin was a line for ≥ onFraction
  *   of the epoch, and a miss (an epoch of ≥ SPUR_MISS_MIN_MS where the bin was quiet and a line
@@ -139,6 +158,10 @@ export class SpurMap implements LineGate {
 	private readonly sumF: Float64Array
 	/** False after a measurement without a floor: the block is no evidence for the baseband learner. */
 	private levelKnown = true
+	/** Bins of the level slot in the last measurement (13 at 1 kHz). */
+	private slotBins = 1
+	/** False until the first measurement: every level reads 0 (quiet) until then. */
+	private measured = false
 
 	constructor(opts: {
 		fftSize: number
@@ -171,6 +194,7 @@ export class SpurMap implements LineGate {
 		const n = this.fftSize
 		const lv = this.level
 		this.levelKnown = floorDb !== null && binHz > 0
+		this.measured = true
 		if (floorDb === null || !(binHz > 0)) {
 			lv.fill(Number.POSITIVE_INFINITY)
 			return
@@ -184,6 +208,7 @@ export class SpurMap implements LineGate {
 			f[i + 1] = f[i]! + (Number.isFinite(fl) ? Math.exp(fl * DB_TO_LN) : 0)
 		}
 		const w = Math.max(1, Math.round(SPUR_LEVEL_SLOT_HZ / binHz))
+		this.slotBins = w
 		const lo = (w - 1) >> 1
 		const hi = w - lo
 		for (let i = 0; i < n; i++) {
@@ -303,31 +328,126 @@ export class SpurMap implements LineGate {
 	}
 
 	/**
-	 * Sets out[i] = 1 on the key's verified baseband spur bins that are quiet in the last measured
-	 * block (other bins untouched). A bin with protect[i] = 1 stays unmasked; returns how many.
+	 * Sets out[i] = 1 on the key's verified baseband spur bins (other bins untouched): each run of
+	 * them masks whole while its own level in the last measured block is under SPUR_MAX_LEVEL_DB
+	 * (ownQuiet), and lifts whole otherwise. A bin with protect[i] = 1 stays unmasked; returns how many.
 	 */
 	mask(key: string, out: Uint8Array, protect?: Uint8Array): number {
 		const s = this.keys.get(key)
 		if (s === undefined) return 0
+		const n = this.fftSize
 		let suspended = 0
-		for (let i = 0; i < this.fftSize; i++) {
-			if (s.baseband[i] !== 1 || !this.active(s, i)) continue
-			if (protect !== undefined && protect[i] === 1) suspended++
-			else out[i] = 1
+		for (let i = 0; i < n; ) {
+			if (!this.active(s, i)) {
+				i++
+				continue
+			}
+			let j = i
+			while (j < n && this.active(s, j)) j++
+			if (this.holds(i, j))
+				for (let k = i; k < j; k++) {
+					if (protect !== undefined && protect[k] === 1) suspended++
+					else out[k] = 1
+				}
+			i = j
 		}
 		return suspended
 	}
 
-	/** LineGate: the line [startBin, endBin) is verified and every bin of it is quiet now. */
+	/**
+	 * LineGate: the line [startBin, endBin) (core bins) is verified, and its own level with ±1 bin
+	 * of Hann skirt is under SPUR_MAX_LEVEL_DB in the last measured block (ownQuiet).
+	 */
 	masks(key: string, startBin: number, endBin: number): boolean {
 		const s = this.keys.get(key)
 		if (s === undefined || !this.verifiedIn(s, startBin, endBin)) return false
-		return this.quiet(startBin, endBin)
+		return this.holds(startBin - 1, endBin + 1)
+	}
+
+	/**
+	 * A verified mask over the footprint [startBin, endBin) holds in the last measured block: its
+	 * own level is quiet (ownQuiet), or the loud energy on it is no narrow carrier sitting on the
+	 * line but part of a wider emission or a neighbour (wider). An unknown level (no floor yet)
+	 * holds nothing.
+	 */
+	holds(startBin: number, endBin: number): boolean {
+		return (
+			this.ownQuiet(startBin, endBin) ||
+			(this.levelKnown && this.wider(startBin, endBin))
+		)
+	}
+
+	/**
+	 * The loud energy on the footprint [startBin, endBin) spills past it. A flank is as many bins
+	 * as the footprint, one guard bin past it on either side (clipped to the FFT): past a SpurMap
+	 * run's ±1 bin the tracker cannot see, the bins it sees first. Either flank that is loud on its
+	 * own, by both of these, holds the mask:
+	 *
+	 * - against the footprint, a mean excess over the floor per bin, (Σ power − Σ floor) / bins,
+	 *   of at least the footprint's own less SPUR_MAX_LEVEL_DB (× 10^−0.6 ≈ 0.251). A flat
+	 *   emission covering the line (a voice's FM band) reads about 1. A Hann carrier with its peak
+	 *   on the footprint leaves at most far skirt there: bin-centred, nothing (its main lobe is its
+	 *   bin ±1, inside footprint and guard); half a bin off the footprint's edge bin, inward or
+	 *   outward, 0.029 + 0.0006 of its peak power against 0.72 (+ 0.029 on a wider footprint), a
+	 *   ratio of at most 0.04 (−14 dB). A carrier with its peak on a guard bin spills its −6 dB
+	 *   skirt equally on both sides, a ratio of 1: it is a neighbour, and the mask holds;
+	 * - against the floor, its own level (ownQuiet over the flank) at least SPUR_MAX_LEVEL_DB,
+	 *   as much excess as a lift needs: energy that strong past the mask is tracked there, so the
+	 *   emission's track reaches past the masked line (and is never flagged a spur for lying on
+	 *   it), where a faint spill the detector does not see would leave it lying on the line alone.
+	 */
+	wider(startBin: number, endBin: number): boolean {
+		const n = this.fftSize
+		const a = Math.max(0, startBin)
+		const b = Math.min(n, endBin)
+		if (b <= a) return false
+		const w = b - a
+		const own = this.excess(a, b) / w
+		if (!(own > 0)) return false
+		const bound = own / MAX_LEVEL_RATIO
+		const loud = (fa: number, fb: number): boolean =>
+			fb > fa &&
+			this.excess(fa, fb) / (fb - fa) >= bound &&
+			!this.ownQuiet(fa, fb)
+		return (
+			loud(Math.max(0, a - 1 - w), Math.max(0, a - 1)) ||
+			loud(Math.min(n, b + 1), Math.min(n, b + 1 + w))
+		)
+	}
+
+	/** Σ (power − floor) over [a, b) in the last measured block, linear. */
+	private excess(a: number, b: number): number {
+		return this.sumP[b]! - this.sumP[a]! - (this.sumF[b]! - this.sumF[a]!)
+	}
+
+	/**
+	 * The footprint [startBin, endBin) alone stays under SPUR_MAX_LEVEL_DB in the last measured
+	 * block: 1 + Σ_footprint (power − floor) / Σ_slot floor, the slot SPUR_LEVEL_SLOT_HZ wide,
+	 * centred on the footprint and widened to cover it. Power beside the footprint does not count.
+	 * An unknown level (no floor yet) is not quiet; an empty footprint, or one before any
+	 * measurement (every level 0, as `level` starts), is.
+	 */
+	ownQuiet(startBin: number, endBin: number): boolean {
+		const n = this.fftSize
+		const a = Math.max(0, startBin)
+		const b = Math.min(n, endBin)
+		if (b <= a || !this.measured) return true
+		if (!this.levelKnown) return false
+		const f = this.sumF
+		const w = this.slotBins
+		const c = (a + b - 1) >> 1
+		const lo = (w - 1) >> 1
+		const sa = Math.max(0, Math.min(a, c - lo))
+		const sb = Math.min(n, Math.max(b, c + w - lo))
+		const slotFloor = f[sb]! - f[sa]!
+		if (!(slotFloor > 0)) return false
+		return 1 + this.excess(a, b) / slotFloor < MAX_LEVEL_RATIO
 	}
 
 	/**
 	 * Every bin of [startBin, endBin) had a slot level under SPUR_MAX_LEVEL_DB in the last measured
 	 * block (an unknown level, no floor yet, is not quiet). Key-free: the level is the block's own.
+	 * A neighbour within half a slot makes it loud: the stale exemption (pipeline) reads it so.
 	 */
 	quiet(startBin: number, endBin: number): boolean {
 		for (let i = Math.max(0, startBin); i < Math.min(this.fftSize, endBin); i++)
@@ -469,10 +589,10 @@ export class SpurMap implements LineGate {
 		s.imported[i] = 0
 	}
 
-	/** Verified now and quiet in the last measured block. */
+	/** A candidate bin verified now (its level aside: mask lifts loud runs whole). */
 	private active(s: KeyState, i: number): boolean {
 		return (
-			this.level[i]! < MAX_LEVEL_RATIO &&
+			s.baseband[i] === 1 &&
 			this.confirmedNear(s, i) &&
 			s.clockMs - this.seenNear(s, i) < SPUR_TTL_MS
 		)

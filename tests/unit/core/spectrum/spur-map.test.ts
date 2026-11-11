@@ -377,6 +377,164 @@ describe("SpurMap verification", () => {
 		expect(masked(restored)).toEqual([SPUR_BIN])
 	})
 
+	/** A promoted SPUR_BIN ± 1 range, its centre confirmed from two centres 1 MHz apart. */
+	function verifiedSkirtedLine(): SpurMap {
+		const map = newMap()
+		map.promote(KEY, BIN_HZ, [{ startBin: SPUR_BIN - 1, endBin: SPUR_BIN + 2 }])
+		for (let e = 1; e <= 3; e++)
+			lineEpoch(map, e, C + e * 1e6, 2000, { bins: [SPUR_BIN] })
+		return map
+	}
+
+	/** dB over the floor of a bin carrying `excess` floor powers over it. */
+	const db = (excess: number): number => 10 * Math.log10(1 + excess)
+
+	/** Measures one block with `loud` bins that far over the flat floor, the rest at the floor. */
+	function measureWith(map: SpurMap, loud: Record<number, number>): void {
+		const powerDb = new Float32Array(N).fill(FLOOR_DB)
+		for (const [bin, db] of Object.entries(loud))
+			powerDb[Number(bin)] = FLOOR_DB + db
+		map.measure(powerDb, FLOOR, BIN_HZ)
+	}
+
+	it("lifts a verified mask at the footprint's own level of 6 dB, not under it", () => {
+		// 1 + (10^(x/10) − 1) / 13 = 10^0.6 at x = 10·log10(1 + 13 · (10^0.6 − 1)) = 16.0 dB
+		const map = verifiedSkirtedLine()
+		const fp = [SPUR_BIN - 1, SPUR_BIN, SPUR_BIN + 1]
+		measureWith(map, { [SPUR_BIN]: 15.9 })
+		expect(masked(map)).toEqual(fp)
+		expect(map.masks(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(true)
+		measureWith(map, { [SPUR_BIN]: 16.1 })
+		expect(masked(map)).toEqual([]) // the whole run lifts
+		expect(map.masks(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(false)
+		// the excess is summed over the footprint: 13 dB in each of its 3 bins, 3 · 19 = 57 ≥ 38.8
+		measureWith(map, {
+			[SPUR_BIN - 1]: 13,
+			[SPUR_BIN]: 13,
+			[SPUR_BIN + 1]: 13,
+		})
+		expect(masked(map)).toEqual([])
+	})
+
+	it("lifts for a signal on the footprint's skirt bin, never for one a bin past it", () => {
+		const map = verifiedSkirtedLine()
+		measureWith(map, { [SPUR_BIN + 1]: 30 })
+		expect(masked(map)).toEqual([])
+		measureWith(map, { [SPUR_BIN + 2]: 30 }) // inside the 13-bin slot of every footprint bin
+		expect(masked(map)).toEqual([SPUR_BIN - 1, SPUR_BIN, SPUR_BIN + 1])
+		measureWith(map, { [SPUR_BIN - 2]: 30, [SPUR_BIN + 6]: 40 })
+		expect(masked(map)).toEqual([SPUR_BIN - 1, SPUR_BIN, SPUR_BIN + 1])
+	})
+
+	it("measures a provisional line given by its core bins with ±1 bin of skirt", () => {
+		const map = verifiedSkirtedLine()
+		measureWith(map, { [SPUR_BIN + 1]: 30 })
+		expect(map.masks(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(false)
+		measureWith(map, { [SPUR_BIN + 2]: 30 })
+		expect(map.masks(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(true)
+	})
+
+	/** Footprint 3 bins of `fpExcess` floor powers each, a 3-bin flank at `side` of `flankExcess` each. */
+	function spill(
+		side: 1 | -1,
+		fpExcess: number,
+		flankExcess: number,
+	): Record<number, number> {
+		const loud: Record<number, number> = {}
+		for (let b = SPUR_BIN - 1; b <= SPUR_BIN + 1; b++) loud[b] = db(fpExcess)
+		// one guard bin (SPUR_BIN ± 2) past the footprint, then the flank SPUR_BIN ± 3 to ± 5
+		for (let k = 3; k <= 5; k++) loud[SPUR_BIN + side * k] = db(flankExcess)
+		return loud
+	}
+
+	it("keeps the mask while the footprint's loud energy spills past its guard bin at its level less 6 dB", () => {
+		// footprint excess 99 a bin (20 dB): the flank holds the mask from 99 · 10^−0.6 ≈ 24.9 a bin
+		// (its own level 1 + 3 · 24.9 / 13 = 6.7 dB, past the absolute bound too)
+		const fp = [SPUR_BIN - 1, SPUR_BIN, SPUR_BIN + 1]
+		const atBound = 99 * 10 ** (-SPUR_MAX_LEVEL_DB / 10)
+		const map = verifiedSkirtedLine()
+		for (const side of [1, -1] as const) {
+			measureWith(map, spill(side, 99, atBound * 0.97))
+			expect(masked(map), `side ${side} under`).toEqual([])
+			expect(map.masks(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(false)
+			measureWith(map, spill(side, 99, atBound * 1.03))
+			expect(masked(map), `side ${side} at`).toEqual(fp)
+			expect(map.masks(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(true)
+		}
+		// the flank is summed, not read bin by bin: all its excess in one of its bins
+		measureWith(map, {
+			...spill(1, 99, 0),
+			[SPUR_BIN + 4]: db(3 * atBound * 1.03),
+		})
+		expect(masked(map)).toEqual(fp)
+		// the guard bin is no part of the flank, nor is a bin past the flank
+		measureWith(map, {
+			...spill(1, 99, 0),
+			[SPUR_BIN + 2]: 40,
+			[SPUR_BIN + 6]: 40,
+			[SPUR_BIN - 6]: 40,
+		})
+		expect(masked(map)).toEqual([])
+	})
+
+	it("keeps the mask for a spill only while the flank alone reaches the 6 dB slot level", () => {
+		// footprint excess 20 a bin (13.2 dB, 1 + 60 / 13 = 7.5 dB: loud), relative bound 5.0 a bin;
+		// the flank's own level 1 + 3x / 13 reaches 10^0.6 at x = 13 · (10^0.6 − 1) / 3 ≈ 12.9
+		const atBound = (13 * (10 ** (SPUR_MAX_LEVEL_DB / 10) - 1)) / 3
+		const map = verifiedSkirtedLine()
+		measureWith(map, spill(1, 20, atBound * 0.97))
+		expect(masked(map)).toEqual([])
+		measureWith(map, spill(1, 20, atBound * 1.03))
+		expect(masked(map)).toEqual([SPUR_BIN - 1, SPUR_BIN, SPUR_BIN + 1])
+	})
+
+	it("lifts for a narrow carrier on the line and holds for a flat emission across it or a neighbour", () => {
+		const map = verifiedSkirtedLine()
+		const fp = [SPUR_BIN - 1, SPUR_BIN, SPUR_BIN + 1]
+		// Hann tones 40 dB at their peak: half a bin off the footprint's edge bin, inward or outward,
+		// 0.029 + 0.0006 of the peak power in the flank against 0.72 + 0.029 a footprint bin
+		const peak = 10 ** 4
+		const at = (frac: number): number => db(peak * frac)
+		for (const edge of [SPUR_BIN + 0.5, SPUR_BIN + 1.5]) {
+			const loud: Record<number, number> = {}
+			for (let b = SPUR_BIN - 1; b <= SPUR_BIN + 4; b++) {
+				const d = Math.abs(b - edge)
+				loud[b] = at(
+					d === 0.5 ? 0.72 : d === 1.5 ? 0.029 : d === 2.5 ? 0.0006 : 0,
+				)
+			}
+			measureWith(map, loud)
+			expect(masked(map), `tone at ${edge - SPUR_BIN}`).toEqual([])
+		}
+		// bin-centred on the footprint's edge bin: its −6 dB skirt is on the guard bin
+		measureWith(map, {
+			[SPUR_BIN]: at(0.25),
+			[SPUR_BIN + 1]: at(1),
+			[SPUR_BIN + 2]: at(0.25),
+		})
+		expect(masked(map)).toEqual([])
+		// bin-centred on the guard bin: its skirt on the footprint and on the flank alike
+		measureWith(map, {
+			[SPUR_BIN + 1]: at(0.25),
+			[SPUR_BIN + 2]: at(1),
+			[SPUR_BIN + 3]: at(0.25),
+		})
+		expect(masked(map)).toEqual(fp)
+		// 16 bins of 20 dB, the line 5 bins from the band's low edge: the footprint lifts alone
+		const band: Record<number, number> = {}
+		for (let b = SPUR_BIN - 5; b < SPUR_BIN + 11; b++) band[b] = 20
+		measureWith(map, band)
+		expect(masked(map)).toEqual(fp)
+		expect(map.masks(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(true)
+	})
+
+	it("masks nothing while the block has no floor", () => {
+		const map = verifiedSkirtedLine()
+		map.measure(new Float32Array(N).fill(FLOOR_DB), null, BIN_HZ)
+		expect(masked(map)).toEqual([])
+		expect(map.masks(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(false)
+	})
+
 	it("leaves protected bins unmasked and counts them", () => {
 		const map = newMap()
 		map.promote(KEY, BIN_HZ, [{ startBin: SPUR_BIN - 1, endBin: SPUR_BIN + 2 }])
