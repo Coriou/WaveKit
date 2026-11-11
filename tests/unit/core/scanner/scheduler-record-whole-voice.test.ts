@@ -116,7 +116,10 @@ function recorder(
 					c >= s.startMs + VOICED_AFTER_MS &&
 					c < s.endMs,
 			)
-			return k < 0 ? false : { voice: `tx-${k}` }
+			// Named with its session's frequency (VoiceOnAir.targetHz), as the recorder names it.
+			return k < 0
+				? false
+				: { voice: `tx-${k}`, targetHz: signals[k]!.centreHz }
 		}
 	return (c, hop) =>
 		signals.some(
@@ -289,7 +292,7 @@ function repeaterScene(
 				const voiced = g.some(
 					o => c >= o.startMs + VOICED_AFTER_MS && c < o.endMs + VOICE_TAIL_MS,
 				)
-				return voiced ? { voice: `carrier-${k}` } : true
+				return voiced ? { voice: `carrier-${k}`, targetHz: hz } : true
 			}
 			const talk = view === "overs" ? overs : carriers
 			const r = simulateSweep(plan, spec, {

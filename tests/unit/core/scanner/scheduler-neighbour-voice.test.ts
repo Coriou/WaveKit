@@ -53,9 +53,12 @@ const NEIGHBOUR = [3_000, 9_000, 15_000, 21_000].map(from => ({
 	to: ID_FROM + from + 3_000,
 }))
 
+/** The neighbour's channel: 25 kHz up, in the same window. */
+const NEIGHBOUR_HZ = id.centreHz + 25_000
+
 /**
  * The real recorder's answer for the last hop's window: the neighbour's session (opened earlier)
- * first, then the ID's; each voiced from 1.5 s into its transmission until it ends. `list`: the
+ * first, then the ID's, each with its session's frequency (VoiceOnAir.targetHz); each voiced from 1.5 s into its transmission until it ends. `list`: the
  * answer lists the window's voiced transmissions when there are two (the recorder's own rule).
  */
 function recorder(list: boolean, idEndMs = id.endMs) {
@@ -63,10 +66,11 @@ function recorder(list: boolean, idEndMs = id.endMs) {
 		if (hop !== LAST) return false
 		const voiced: VoiceOnAir[] = []
 		NEIGHBOUR.forEach((o, k) => {
-			if (c >= o.from && c < o.to) voiced.push({ voice: `n${k}`, quietMs: 0 })
+			if (c >= o.from && c < o.to)
+				voiced.push({ voice: `n${k}`, quietMs: 0, targetHz: NEIGHBOUR_HZ })
 		})
 		if (c >= id.startMs + VOICED_AFTER_MS && c < idEndMs)
-			voiced.push({ voice: "id", quietMs: 0 })
+			voiced.push({ voice: "id", quietMs: 0, targetHz: id.centreHz })
 		const first = voiced[0]
 		if (first === undefined) return false
 		if (!list || voiced.length < 2) return first

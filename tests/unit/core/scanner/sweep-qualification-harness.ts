@@ -568,6 +568,8 @@ export interface SceneConfig {
 	logger?: Logger
 	/** Called before each chunk with the world's time and the tuned centre (qualificationWorld). */
 	onChunk?: (atMs: number, centreHz: number) => void
+	/** Called once the world is built, before the service starts (a test's own probes). */
+	onWorld?: (w: ReturnType<typeof qualificationWorld>) => void
 }
 
 export interface SceneTarget extends Span {
@@ -652,6 +654,7 @@ export async function runScene(config: SceneConfig): Promise<SceneReport> {
 		...(config.logger ? { logger: config.logger } : {}),
 		...(config.onChunk ? { onChunk: config.onChunk } : {}),
 	})
+	config.onWorld?.(w)
 	try {
 		await w.service.start()
 		const job = await w.service.createJob({

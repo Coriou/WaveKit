@@ -1300,6 +1300,8 @@ export class WidebandAnalogRecorder {
 	 * WIDEBAND_EVICT_MIN_HEARD_FRAMES (WIDEBAND_VOICE_JUDGE_MS from its first audio): its answer is
 	 * still to come, whichever way it goes. A shadow or one of another stream or an older epoch (the
 	 * previous hop's window) answers false, so an unclassed shadow on a carrier costs a visit nothing.
+	 * Every voice answer carries its session's frequency (VoiceOnAir.targetHz), so the scheduler
+	 * names the held track's transmission by frequency, not by this order.
 	 * Of several classed, voiced sessions in the window (two channels), the first voiced one answers
 	 * (a session opened earlier first), and an object answer then also carries every voiced
 	 * transmission still on air in the window, by name (VoiceOnAir.transmissions): the scheduler
@@ -1412,9 +1414,12 @@ export class WidebandAnalogRecorder {
 		s.voiceTx ??= voiced
 		const quiet = Math.max(s.quietGap, s.judgedTo - (s.voiceAt ?? s.judgedTo))
 		s.quietGap = 0
+		// The frequency the session demodulates names its transmission to the hold of a track
+		// (VoiceOnAir.targetHz), whether or not a file of it was admitted.
 		return {
 			voice: s.voiceTx,
 			quietMs: (quiet * 1000) / s.fs,
+			targetHz: s.targetHz,
 			...history,
 		}
 	}

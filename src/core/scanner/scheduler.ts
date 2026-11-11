@@ -196,6 +196,12 @@ export interface VoiceOnAir {
 	 * caps. Absent: a bare voice answer, no history (it cannot lift a carrier's cap).
 	 */
 	readonly recordedHz?: number
+	/**
+	 * Frequency (Hz) the answering session demodulates (its `targetHz`), voiced or not, recorded or
+	 * not: what names a transmission to the hold of a track (heldVoiceOf), never its voice history.
+	 * Absent or not finite: the transmission is of no known frequency, so it names no held track.
+	 */
+	readonly targetHz?: number
 	/** Every voiced transmission still on air in the window, this one among them (Transmissions). */
 	readonly transmissions?: Transmissions
 }
@@ -252,6 +258,48 @@ function answerOf(
  * the re-check after the reply's first voiced window.
  */
 export const VOICE_QUIET_PAST_L_MS = 1_000
+
+/**
+ * How far past its held track's occupied band (centre ± obw / 2) a voiced session's `targetHz` may
+ * sit and still be that track's transmission (heldVoiceOf): 3000 Hz. The session hears ±8 kHz
+ * around `targetHz` (the recorder's CHANNEL_CUTOFF_HZ) and an NFM voice deviates up to ±5 kHz, so a
+ * voice it still hears has its centre within 8000 − 5000 = 3000 Hz of `targetHz`. A 12 kHz voice
+ * track then names sessions within 6000 + 3000 = 9000 Hz of its centre: never one on the next
+ * 12.5 kHz channel, nor one 25 kHz away unless the track reads over 2 × (25 000 − 3000) = 44 kHz.
+ */
+export const HELD_VOICE_TOLERANCE_HZ = 3_000
+
+/**
+ * The voiced transmission of the held track's band (`centreHz` ± `obwHz` / 2, plus
+ * HELD_VOICE_TOLERANCE_HZ) among a voice answer and the transmissions it lists, the answer's own
+ * first, then the list's in order; null when none lies there. The recorder names the first voiced
+ * session of the window (an older one first), so a neighbour voiced at a follow's landing is named
+ * before the held one: a hold names the transmission on its own frequency, never the window's
+ * first. Unknown or malformed (a non-finite frequency or band, a negative width, an entry that is
+ * not voice): no match, so a neighbour is never adopted for want of a frequency.
+ */
+export function heldVoiceOf(
+	answer: VoiceOnAir,
+	band: { readonly centreHz: number; readonly obwHz: number },
+): VoiceOnAir | null {
+	if (
+		!Number.isFinite(band.centreHz) ||
+		!Number.isFinite(band.obwHz) ||
+		band.obwHz < 0
+	)
+		return null
+	const reach = band.obwHz / 2 + HELD_VOICE_TOLERANCE_HZ
+	const within = (a: VoiceOnAir): boolean =>
+		typeof a.voice === "string" &&
+		typeof a.targetHz === "number" &&
+		Number.isFinite(a.targetHz) &&
+		Math.abs(a.targetHz - band.centreHz) <= reach
+	if (within(answer)) return answer
+	for (const entry of Object.values(answer.transmissions ?? {}))
+		if (typeof entry === "object" && entry !== null && within(entry))
+			return entry
+	return null
+}
 
 /** Whether a recording check answered voice on air (RecordingActivity). */
 export function isVoiceOnAir(a: RecordingActivity): a is VoiceOnAir {
@@ -2003,7 +2051,9 @@ export class SweepScheduler {
 
 	/**
 	 * Asks the recorder during an analog hold that is no voice hold (holdsAnalog): the first voiced
-	 * transmission it names is the one the visit heard (Visit.heardVoiceId). True when the hold
+	 * transmission on the held track's own frequency (heldVoiceOf: its band, not the window's first
+	 * voiced session, which may be a neighbour already talking at the landing) is the one the visit
+	 * heard (Visit.heardVoiceId); none there, none is remembered yet. True when the hold
 	 * must end now, the hop owing its coarse sweep: that transmission ended and another is on air
 	 * (the recorder's `voiceEnded`, a reply joined by its hang, or voice named otherwise). Its
 	 * squelch close alone spends the voice hold (askRecording) and leaves the hold to its hang.
@@ -2013,8 +2063,15 @@ export class SweepScheduler {
 		const active = this.askRecording(now)
 		if (this.askEnded) return true
 		if (isVoiceOnAir(active)) {
-			v.heardVoiceId ??= active.voice
-			if (active.voice === v.heardVoiceId)
+			if (v.heardVoiceId === null) {
+				const track =
+					this.hold === null ? undefined : v.tracks.get(this.hold.trackId)
+				const own = track === undefined ? null : heldVoiceOf(active, track)
+				if (own !== null) {
+					v.heardVoiceId = own.voice
+					v.heardVoiceHoldable ||= this.mayHoldVoice(v)
+				}
+			} else if (active.voice === v.heardVoiceId)
 				v.heardVoiceHoldable ||= this.mayHoldVoice(v)
 		}
 		return false
