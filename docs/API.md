@@ -3747,7 +3747,7 @@ line when it clears.
 `analogOperations` is present while incomplete analog recording operation folders that hold no
 recording (crash leftovers) are held in `.analog-operations/.set-aside/`:
 `{ "setAside": 1, "lastReason": "missing-intent" }`. Every inventory scan moves such folders
-there, at start and again before each new recording is admitted. `setAside` counts the folders
+there, at every inventory scan (for example at start and before each new recording is admitted). `setAside` counts the folders
 held now (at most 32 provably empty ones are kept, the oldest deleted past that; a folder that
 cannot be proven empty is kept and counted too), and `lastReason` is `staging-residue`,
 `missing-intent` or `invalid-intent` for the last one moved since the start (absent when none
