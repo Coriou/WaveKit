@@ -48,7 +48,12 @@ function observed(h: Harness, observe: Observe | undefined): Harness {
 	return h
 }
 
-function ookAt(seed: number, n: number, offsetHz: number, ms: number[]): Iq {
+function ookAt(
+	seed: number,
+	n: number,
+	offsetHz: number,
+	ms: readonly number[],
+): Iq {
 	return ookBursts(mulberry32(seed), n, FS, offsetHz, EMISSION_AMP * 4, {
 		bursts: ms.map(startMs => ({ startMs, durationMs: 5 })),
 	})
@@ -59,16 +64,31 @@ function ookAt(seed: number, n: number, offsetHz: number, ms: number[]): Iq {
  * slots missing), present under every centre. 10 dB per bin over the noise puts a line's
  * 12.5 kHz slot level near +3.3 dB ((13 + 1.5 × 10) / 13 with the Hann skirt), under the
  * 6 dB bound, and each tooth is ≥ 7 bins (half a 13-bin slot + its skirt) from every emitter,
- * so its slot stays quiet. Verified at the close of epoch 2 (two credited centres 1 MHz apart),
- * it masks in epoch 3.
+ * so its slot stays quiet. Epochs 1 and 2 credit no centre while they run: a stay is credited when
+ * it closes, which SpurMap sees at the first observed block of the next epoch. So the comb is
+ * verified in epoch 3's first block (epoch 2's centre closes, the second credited centre, 1 MHz
+ * from the first) and masks from epoch 3's second block on.
  */
 export const COMB_BINS = [36, 46, 56, 136, 146, 216] as const
 const COMB_PER_BIN_SNR_DB = 10
-/** Epoch 2 and 3: a stale discard (≤ 1 s, STALE_MAX_MS) of the comb, then 0.6 s accepted. */
-const LATER_EPOCH_S = 1.6
+/**
+ * Epoch 2 and 3: 0.6 s each (12 blocks), all accepted. The harness pushes only the new centre's
+ * IQ after a retune (no buffered old samples), so the stale check must discard nothing: the comb
+ * and the steady tones are receiver-line candidates at the retune, and a segment wholly on one is
+ * no stale evidence.
+ */
+const LATER_EPOCH_S = 0.6
 
 /** A tooth's baseband offset: 0.1 bin off centre, so its Hann skirt is uneven as a real line's. */
-const combHz = (bin: number): number => (bin - N / 2 + 0.1) * BIN_HZ
+export const combHz = (bin: number): number => (bin - N / 2 + 0.1) * BIN_HZ
+/** Epoch 3: OOK bursts on the tooth at bin 146 (ms into the epoch; 50 ms blocks: blocks 3 and 6). */
+export const EPOCH3_TOOTH_BURSTS_MS: readonly number[] = [160, 310]
+
+/** Optional additions to the rich run (the goldens use none). */
+export interface RichExtra {
+	/** Steady tones added to epoch 3 (baseband offset, SNR per bin over the noise). */
+	epoch3Tones?: readonly { hz: number; perBinSnrDb: number }[]
+}
 
 function comb(n: number, at: number): Iq {
 	const hz = COMB_BINS.map(combHz)
@@ -83,13 +103,14 @@ function comb(n: number, at: number): Iq {
 
 /**
  * The rich run: tones, an image pair, bursts, a receiver comb (spur lines) and three epochs.
- * Epoch 2 (1 MHz up) and epoch 3 (2 MHz up) are commanded retunes: their first blocks are
- * stale-discarded while the previous centre's comb tracks sit at the same baseband bins.
+ * Epoch 2 (1 MHz up) and epoch 3 (2 MHz up) are commanded retunes; no block of either is
+ * stale-discarded (LATER_EPOCH_S).
  */
 export function richScenario(
 	seed = 20_261_017,
 	over: Partial<PipelineConfig> = {},
 	observe?: Observe,
+	extra: RichExtra = {},
 ): Scenario {
 	const h = observed(
 		new Harness(
@@ -126,7 +147,7 @@ export function richScenario(
 	const iq2 = gaussianNoise(mulberry32(seed + 1), after, SIGMA)
 	addInto(iq2, comb(after, total))
 	addInto(iq2, tone(after, FS, 33_300, EMISSION_AMP))
-	addInto(iq2, ookAt(seed + 2, after, -45_100, [1_210, 1_400]))
+	addInto(iq2, ookAt(seed + 2, after, -45_100, [210, 400]))
 	h.push(iq2, 8192)
 	// Epoch 3: the comb is verified after the first accepted block and masks from the next, so
 	// its open tracks turn spur tracks; bursts on a tooth while those tracks hang join them.
@@ -134,7 +155,9 @@ export function richScenario(
 	const iq3 = gaussianNoise(mulberry32(seed + 3), after, SIGMA)
 	addInto(iq3, comb(after, total + after))
 	addInto(iq3, tone(after, FS, 62_500, EMISSION_AMP))
-	addInto(iq3, ookAt(seed + 4, after, combHz(146), [1_160, 1_310]))
+	addInto(iq3, ookAt(seed + 4, after, combHz(146), EPOCH3_TOOTH_BURSTS_MS))
+	for (const t of extra.epoch3Tones ?? [])
+		addInto(iq3, tone(after, FS, t.hz, toneAmp(t.perBinSnrDb)))
 	h.push(iq3, 8192)
 	return { harness: h, summaries: h.of("block-summary").map(e => e.summary) }
 }

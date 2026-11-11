@@ -346,6 +346,17 @@ export class SpurMap implements LineGate {
 		return false
 	}
 
+	/**
+	 * Sets out[i] = 1 on every candidate bin of `key` that has not expired (learned, promoted or
+	 * restored), verified or not and whatever its level (other bins untouched).
+	 */
+	candidates(key: string, out: Uint8Array): void {
+		const s = this.keys.get(key)
+		if (s === undefined) return
+		const n = Math.min(this.fftSize, out.length)
+		for (let i = 0; i < n; i++) if (s.baseband[i] === 1) out[i] = 1
+	}
+
 	rfCarriers(): { rfHz: number; widthBins: number }[] {
 		const out = new Map<number, { rfHz: number; widthBins: number }>()
 		for (const s of this.keys.values()) {

@@ -1768,8 +1768,9 @@ export class DiscoveryStore
 
 	/**
 	 * Restored flags whose offset is learned again within their deadline become ordinary flags
-	 * (verified: their read loses `possibleSpur`, so each is published). A restored flag past its deadline is never confirmed (learning it late does not extend it): it
-	 * stays pending so `loFlagStands` fails and the next settle lifts it.
+	 * (verified: their read loses `possibleSpur`, so each is published). A restored flag past its
+	 * deadline is never confirmed (learning it late does not extend it): it stays pending so
+	 * `loFlagStands` fails and the next settle lifts it.
 	 */
 	private loRestoredConfirm(): void {
 		const now = this.now()

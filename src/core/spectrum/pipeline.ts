@@ -225,6 +225,11 @@ interface EpochState {
 	settleMode: SettleMode
 	staleLeft: number
 	staleRef: Uint8Array | null
+	/**
+	 * Bins of the receiver-line candidates alive at the retune (provisional and comb lines,
+	 * SpurMap candidates), ±1 bin of Hann skirt: old track bins there are no stale evidence.
+	 */
+	staleLines: Uint8Array | null
 }
 
 /**
@@ -982,6 +987,9 @@ export class SpectrumPipeline {
 		this.discardBlock()
 		const staleRef =
 			this.ep && p.centreChanged ? Uint8Array.from(this.lastTrackBins) : null
+		const absKey = this.absKey(p.gainKey)
+		const staleLines =
+			staleRef && this.ep ? this.lineCandidates([this.ep.absKey, absKey]) : null
 		this.lastTrackBins.fill(0)
 		const epoch = p.epoch > this.epochCounter ? p.epoch : this.epochCounter + 1
 		this.epochCounter = epoch
@@ -1001,11 +1009,12 @@ export class SpectrumPipeline {
 			stream: this.stream,
 			centreHz: p.centreHz,
 			tuningTrust: p.tuningTrust,
-			absKey: this.absKey(p.gainKey),
+			absKey,
 			settledStart: null,
 			settleMode: p.expectMarker ? "marker" : "timer",
 			staleLeft: staleRef ? this.staleBlocksFor(p) : 0,
 			staleRef,
+			staleLines,
 		}
 		this.startEpochState()
 		this.resolving = p
@@ -1014,6 +1023,29 @@ export class SpectrumPipeline {
 				p.commandSample + p.bufferedSamples + p.settleSamples,
 				"timer",
 			)
+	}
+
+	/**
+	 * Receiver-line candidates of `keys` alive now, verified or not and whatever their level: the
+	 * provisional and comb lines' core bins and SpurMap's candidate bins, each widened by ±1 bin of
+	 * Hann skirt (the footprint withoutLines drops once a line masks). A candidate sits at the same
+	 * baseband bins under every centre, so seeing it again after a retune says nothing about stale
+	 * samples. A real carrier steady long enough to be a provisional line (on ≥ 95 % of the window
+	 * at one centre) is such a candidate too: when it was the only pre-retune track, stale samples
+	 * of it are not caught (a known limit); any other old track still is.
+	 */
+	private lineCandidates(keys: readonly string[]): Uint8Array {
+		const core = new Uint8Array(this.n)
+		for (const key of new Set(keys)) {
+			for (const l of this.provisional.lines(key))
+				core.fill(1, Math.max(0, l.startBin), Math.min(this.n, l.endBin))
+			this.spurs.candidates(key, core)
+		}
+		const out = new Uint8Array(this.n)
+		for (let i = 0; i < this.n; i++)
+			if (core[i] === 1)
+				out.fill(1, Math.max(0, i - 1), Math.min(this.n, i + 2))
+		return out
 	}
 
 	/** WG9 req 3.4: a non-scanner retune caps the stale discard at its own `staleMaxMs`. */
@@ -1058,6 +1090,7 @@ export class SpectrumPipeline {
 			settleMode: "none",
 			staleLeft: 0,
 			staleRef: null,
+			staleLines: null,
 		}
 		this.startEpochState()
 		this.out.push({
@@ -1646,6 +1679,7 @@ export class SpectrumPipeline {
 			}
 			ep.staleLeft = 0
 			ep.staleRef = null
+			ep.staleLines = null
 		}
 
 		if (gap || overload || blanking.excluded) {
@@ -1883,14 +1917,20 @@ export class SpectrumPipeline {
 		return this.mergedDb
 	}
 
-	/** Spec §4.6: a segment at the baseband bins of a pre-epoch track that no known emitter explains. */
+	/**
+	 * Spec §4.6: a segment at the baseband bins of a pre-epoch track that no known emitter explains.
+	 * Bins of a receiver-line candidate alive at the retune (staleLines) are no such evidence: the
+	 * line is under every centre, so an unverified comb or a strong line never discards a block,
+	 * while a segment reaching old track bins off the lines (a real emitter) still does.
+	 */
 	private isStale(segs: Segment[], ep: EpochState): boolean {
 		const ref = ep.staleRef
 		if (!ref) return false
+		const lines = ep.staleLines
 		for (const s of segs) {
 			let overlaps = false
 			for (let i = s.startBin; i < s.endBin && !overlaps; i++)
-				overlaps = ref[i] === 1
+				overlaps = ref[i] === 1 && (lines === null || lines[i] !== 1)
 			if (!overlaps) continue
 			const rf = ep.centreHz + (s.centroidBin - this.n / 2) * this.binHz
 			const explained = this.knownRf.some(
@@ -2093,6 +2133,7 @@ export class SpectrumPipeline {
 			settleMode: "none",
 			staleLeft: 0,
 			staleRef: null,
+			staleLines: null,
 		}
 		this.blockIndex = -1
 		this.noiseEdgeBlock = -1
