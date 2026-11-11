@@ -98,7 +98,9 @@ function chain(session: boolean) {
 				: false
 		if (ms < REPLY_SEEN) return false
 		if (ms < REPLY_VOICED)
-			return session ? { recording: true, voiceEnded: true } : "judging"
+			return session
+				? { recording: true, voiceEnded: true, targetHz: hopHz(0) }
+				: "judging"
 		return ms < REPLY_END
 			? { voice: "b", quietMs: 0, targetHz: hopHz(0) }
 			: false

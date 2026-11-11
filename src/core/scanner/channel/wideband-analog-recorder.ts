@@ -1291,7 +1291,8 @@ export class WidebandAnalogRecorder {
 	 * kept within L only), as true, or as a RecordedSession when it says more: `voiceEnded` when that
 	 * voice lies before the squelch last closed and reopened (Session.reopenAt: the voiced
 	 * transmission ended, the open track is another one; the sweep owes its coarse sweep and is not
-	 * kept); false once no joined track is open (the over's squelch closed: the recorder's `hangMs`
+	 * kept), with the session's `targetHz` so the scheduler ends only a hold of that frequency's
+	 * track (RecordedSession.targetHz); false once no joined track is open (the over's squelch closed: the recorder's `hangMs`
 	 * still joins the next over into the same file, the sweep does not wait for it). Either answer
 	 * names the session's frequency as `recordedHz` (its verified voice history) only once the store
 	 * admitted a file operation of the session (Session.admitted): a voiced session that was never
@@ -1408,7 +1409,9 @@ export class WidebandAnalogRecorder {
 			return {
 				recording: true,
 				...history,
-				...(ended ? { voiceEnded: true as const } : {}),
+				// The session's frequency names whose transmission ended (RecordedSession.targetHz):
+				// a neighbour's turnaround is no end of a hold on another track.
+				...(ended ? { voiceEnded: true as const, targetHz: s.targetHz } : {}),
 			}
 		}
 		s.voiceTx ??= voiced

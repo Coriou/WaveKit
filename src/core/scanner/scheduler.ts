@@ -150,6 +150,13 @@ export interface RecordedSession {
 	 * Absent: the open track is still the voiced transmission's (a pause, the hang after it).
 	 */
 	readonly voiceEnded?: true
+	/**
+	 * Frequency (Hz) the session whose voiced transmission ended demodulates (its `targetHz`), given
+	 * with `voiceEnded`: with no transmission remembered by the visit, only a `voiceEnded` in the held
+	 * track's band (heldBandOffset) ends the hold; a neighbour's turnaround, or one of no known
+	 * frequency (absent or not finite), is no end of it (askRecording).
+	 */
+	readonly targetHz?: number
 	/** Every voiced transmission still on air in the window (VoiceOnAir.transmissions). */
 	readonly transmissions?: Transmissions
 	/**
@@ -295,25 +302,12 @@ export function heldVoiceOf(
 	answer: VoiceOnAir,
 	band: { readonly centreHz: number; readonly obwHz: number },
 ): VoiceOnAir | null {
-	if (
-		!Number.isFinite(band.centreHz) ||
-		!Number.isFinite(band.obwHz) ||
-		band.obwHz < 0
-	)
-		return null
-	const reach =
-		Math.max(band.obwHz / 2, HELD_VOICE_FLOOR_HZ) + HELD_VOICE_TOLERANCE_HZ
 	let best: VoiceOnAir | null = null
 	let bestOff = Infinity
 	const consider = (a: VoiceOnAir): void => {
-		if (
-			typeof a.voice !== "string" ||
-			typeof a.targetHz !== "number" ||
-			!Number.isFinite(a.targetHz)
-		)
-			return
-		const off = Math.abs(a.targetHz - band.centreHz)
-		if (off <= reach && off < bestOff) {
+		if (typeof a.voice !== "string") return
+		const off = heldBandOffset(a.targetHz, band)
+		if (off !== null && off < bestOff) {
 			best = a
 			bestOff = off
 		}
@@ -322,6 +316,32 @@ export function heldVoiceOf(
 	for (const entry of Object.values(answer.transmissions ?? {}))
 		if (typeof entry === "object" && entry !== null) consider(entry)
 	return best
+}
+
+/**
+ * How far (Hz) a session's `targetHz` lies from the held track's centre when it lies in that
+ * track's band (`centreHz` ± max(`obwHz` / 2, HELD_VOICE_FLOOR_HZ), plus HELD_VOICE_TOLERANCE_HZ),
+ * else null: what heldVoiceOf names a transmission by, and what tells a recorder's `voiceEnded`
+ * (RecordedSession.targetHz) of the held track from a neighbour's (askRecording). Unknown or
+ * malformed (a frequency that is absent or not finite, a non-finite band or a negative width): null,
+ * never a match.
+ */
+export function heldBandOffset(
+	hz: number | undefined,
+	band: { readonly centreHz: number; readonly obwHz: number },
+): number | null {
+	if (
+		typeof hz !== "number" ||
+		!Number.isFinite(hz) ||
+		!Number.isFinite(band.centreHz) ||
+		!Number.isFinite(band.obwHz) ||
+		band.obwHz < 0
+	)
+		return null
+	const reach =
+		Math.max(band.obwHz / 2, HELD_VOICE_FLOOR_HZ) + HELD_VOICE_TOLERANCE_HZ
+	const off = Math.abs(hz - band.centreHz)
+	return off <= reach ? off : null
 }
 
 /** Whether a recording check answered voice on air (RecordingActivity). */
@@ -2038,11 +2058,15 @@ export class SweepScheduler {
 		// a voice hold, whether or not one ran, and whatever the frequency's voice history. The hop
 		// is not kept for what follows (a reply, a kerchunk) and owes every hop its coarse visit
 		// (Visit.voice, endVisit): history only lifts the carrier cap on a recording of that
-		// transmission (recordedTrack), never a hold across its turnaround.
+		// transmission (recordedTrack), never a hold across its turnaround. With no transmission
+		// remembered, only a `voiceEnded` of the held band (endsHeldBand): a neighbour's turnaround
+		// (its session the window's only voiced one, the held track's own refused a slot or not
+		// voiced yet) is read as a recording that is not voice, kept within L at most.
 		if (
 			typeof answer === "object" &&
 			!isVoiceOnAir(answer) &&
-			answer.voiceEnded === true
+			answer.voiceEnded === true &&
+			(id !== null || this.endsHeldBand(v, answer.targetHz))
 		) {
 			if (v !== null) this.spendVoice(v)
 			this.askEnded = true
@@ -2073,6 +2097,24 @@ export class SweepScheduler {
 			this.spendVoice(v)
 		else v.voiceAskedAt = now
 		return active
+	}
+
+	/**
+	 * Whether a recorder's `voiceEnded` of a session demodulating `hz` (RecordedSession.targetHz)
+	 * ends the visit's hold when the visit remembers no transmission: `hz` lies in the band of the
+	 * held track (voiceBandOf of the hold's band or track, as holdVoiceOf names voice, so a record
+	 * hold is judged by the band it was kept for). A visit that knows no track (or no visit) has no
+	 * band to tell a neighbour by: the answer as the recorder names it, as before. A held band that
+	 * names no track of the visit, or `hz` absent or not finite: no end. Ignoring is the safe error:
+	 * ending early on a neighbour's turnaround loses the held ID and voice-locks the hop for a full
+	 * coarse sweep, while a turnaround of the held track read as a recording that is not voice keeps
+	 * the hop only within its existing bound (what L has left, or the follow's own cap), never longer.
+	 */
+	private endsHeldBand(v: Visit | null, hz: number | undefined): boolean {
+		if (v === null || v.tracks.size === 0) return true
+		const bandId = this.voiceBandOf(v, this.hold?.bandId ?? this.hold?.trackId)
+		const track = bandId === "" ? undefined : v.tracks.get(bandId)
+		return track !== undefined && heldBandOffset(hz, track) !== null
 	}
 
 	/**

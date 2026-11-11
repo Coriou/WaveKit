@@ -708,6 +708,7 @@ describe("a voiced transmission whose squelch closed under the recorder's hang (
 		recording: true,
 		recordedHz: hopHz(0),
 		voiceEnded: true,
+		targetHz: hopHz(0),
 	}
 
 	it("ends the voice hold at the first re-check that reads it, history or not: the forced sweep follows", () => {
