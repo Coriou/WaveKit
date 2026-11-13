@@ -344,6 +344,29 @@ export function heldBandOffset(
 	return off <= reach ? off : null
 }
 
+/**
+ * Whether two tracks' occupied bands (`centreHz` ± `obwHz` / 2) overlap or touch: the distance
+ * between their centres is at most the sum of their half widths. A 16 kHz voice track whose centre
+ * lies 9.8 kHz from a 7 kHz line's overlaps it (8000 + 3500 = 11 500 Hz ≥ 9800 Hz): the voice
+ * took in the line. Two 11 kHz tracks 12.5 kHz apart (adjacent channels) do not (5500 + 5500 =
+ * 11 000 Hz < 12 500 Hz). Non-finite centres or widths, or a negative width: false.
+ */
+export function bandsOverlap(
+	a: { readonly centreHz: number; readonly obwHz: number },
+	b: { readonly centreHz: number; readonly obwHz: number },
+): boolean {
+	if (
+		!Number.isFinite(a.centreHz) ||
+		!Number.isFinite(a.obwHz) ||
+		!Number.isFinite(b.centreHz) ||
+		!Number.isFinite(b.obwHz) ||
+		a.obwHz < 0 ||
+		b.obwHz < 0
+	)
+		return false
+	return Math.abs(a.centreHz - b.centreHz) <= a.obwHz / 2 + b.obwHz / 2
+}
+
 /** Whether a recording check answered voice on air (RecordingActivity). */
 export function isVoiceOnAir(a: RecordingActivity): a is VoiceOnAir {
 	return typeof a === "object" && "voice" in a
@@ -1842,7 +1865,7 @@ export class SweepScheduler {
 				? this.holdVoiceOf(v, active, bandId === "" ? undefined : bandId)
 				: null
 		if (v !== null && isVoiceOnAir(active))
-			this.commitVoiceTrack(v, bandId, named !== null)
+			this.commitVoiceTrack(v, bandId, active, named !== null)
 		if (
 			v !== null &&
 			named !== null &&
@@ -1975,7 +1998,7 @@ export class SweepScheduler {
 		v.holdStartedAt ??= now
 		v.budgeted = true
 		if (named !== null) this.startVoiceHold(v, named, now)
-		if (isVoiceOnAir(active)) this.commitVoiceTrack(v, bandId, voice)
+		if (isVoiceOnAir(active)) this.commitVoiceTrack(v, bandId, active, voice)
 		if (judging) v.judged = true
 		// A judging hold's cap is a re-check, not a forced leave: voice answered since the last one
 		// still gets its hold at the cap.
@@ -2061,14 +2084,35 @@ export class SweepScheduler {
 	 * that never voices is never committed to, and a later hold of another track names its own
 	 * voice. A closed track only for its own voice (`own`: the answer names voice in its band):
 	 * a neighbour's voice heard after the track closed lies beside no transmission of it, and may
-	 * be a new transmission the visit holds. Never over an existing commitment, nor to a flagged
-	 * track or an id that names no track of the visit.
+	 * be a new transmission the visit holds. Nor for a neighbour's voice that is another open,
+	 * unflagged track's own (heldVoiceOf: in its band) when that track's band overlaps the held
+	 * track's (bandsOverlap): it took in the held track (a voice keyed beside a steady line joins
+	 * the line's track, which reads wider and centred between them, while the line may read on as
+	 * its own track), so the voice is that track's transmission, not a neighbour beside the held
+	 * track's, and the check commits to nothing; a hold of that track commits to it by its own
+	 * voice. A neighbour on another channel (bands apart) still commits to the held track. Never
+	 * over an existing commitment, nor to a flagged track or an id that names no track of the visit.
 	 */
-	private commitVoiceTrack(v: Visit, bandId: string, own: boolean): void {
+	private commitVoiceTrack(
+		v: Visit,
+		bandId: string,
+		active: VoiceOnAir,
+		own: boolean,
+	): void {
 		if (v.voiceTrackId !== null) return
 		const t = v.tracks.get(bandId)
-		if (t !== undefined && !t.flagged && (t.open || own))
-			v.voiceTrackId = bandId
+		if (t === undefined || t.flagged || !(t.open || own)) return
+		if (!own)
+			for (const [id, o] of v.tracks)
+				if (
+					id !== bandId &&
+					o.open &&
+					!o.flagged &&
+					bandsOverlap(o, t) &&
+					heldVoiceOf(active, o) !== null
+				)
+					return
+		v.voiceTrackId = bandId
 	}
 
 	/** Whether the hop's own last voice hold still owes the sweep its coarse visits. */
@@ -2289,7 +2333,7 @@ export class SweepScheduler {
 		if (isVoiceOnAir(active)) {
 			const track = v.tracks.get(bandId)
 			const own = track === undefined ? null : heldVoiceOf(active, track)
-			this.commitVoiceTrack(v, bandId, own !== null)
+			this.commitVoiceTrack(v, bandId, active, own !== null)
 			if (v.heardVoiceId === null) {
 				if (own !== null) {
 					v.heardVoiceId = own.voice
