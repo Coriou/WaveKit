@@ -1,7 +1,9 @@
 /**
  * What the analog recorder (WidebandAnalogRecorder) must never keep as a voice recording: a
- * transmission whose track the classifier reads as a digital class, or whose discovery (or the
- * discovery it was merged into) is decoded as a protocol that is not analog voice. Pure tables
+ * transmission whose own track a verified decode or the channel tier classes as a digital class
+ * (a spectral reading alone never counts: weak or low-deviation NFM voice can read as one for
+ * its whole length), or whose discovery (or the discovery it was merged into) is decoded as a
+ * protocol that is not analog voice. Pure tables
  * and predicates; the recorder decides when they apply (admission and retention only).
  *
  * Both tables are total over their key type, so a class or protocol family added later fails to
@@ -82,31 +84,14 @@ export function notAnalogVoiceProtocol(protocol: unknown): boolean {
 		: false
 }
 
-/**
- * A session classed analog-fm by snapshots only (no class from its own audio) whose snapshots
- * read a digital class more often than analog-fm: the spectrum's analog-fm readings were the
- * exception, the transmission is digital. Counts that are not finite non-negative numbers: false.
- */
-export function digitalOutvotes(
-	digitalReads: number,
-	analogReads: number,
-): boolean {
-	if (
-		!Number.isFinite(digitalReads) ||
-		!Number.isFinite(analogReads) ||
-		digitalReads < 0 ||
-		analogReads < 0
-	)
-		return false
-	return digitalReads > analogReads
-}
-
-/** The discovery reads ownerDecodedProtocol needs (DiscoveryStore). */
+/** The discovery read ownerDecodedProtocol needs (DiscoveryStore.ownerLabel). */
 export interface DecodedProtocolLookup {
-	/** The live discovery whose folder `folderId` is: itself, or the owner of a merge alias. */
-	folderOwner(folderId: string): string | undefined
-	get(
-		id: string,
+	/**
+	 * The published label of the live discovery whose folder `folderId` is (itself, or the owner
+	 * of a merge alias); undefined when there is none. O(1), no copy of the discovery.
+	 */
+	ownerLabel(
+		folderId: string,
 	): { protocol: ScannerProtocol; confidence: ScannerConfidence } | undefined
 }
 
@@ -121,12 +106,10 @@ export function ownerDecodedProtocol(
 ): ScannerProtocol | null {
 	if (typeof discoveryId !== "string" || discoveryId.length === 0) return null
 	try {
-		const owner = store.folderOwner(discoveryId)
-		if (owner === undefined) return null
-		const d = store.get(owner)
-		if (d === undefined || d.confidence !== "decoded") return null
-		return typeof d.protocol === "string" && d.protocol.length > 0
-			? d.protocol
+		const label = store.ownerLabel(discoveryId)
+		if (label === undefined || label.confidence !== "decoded") return null
+		return typeof label.protocol === "string" && label.protocol.length > 0
+			? label.protocol
 			: null
 	} catch {
 		return null

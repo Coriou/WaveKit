@@ -3905,6 +3905,17 @@ export class DiscoveryStore
 	}
 
 	/**
+	 * The published label (the protocol and confidence `get` presents) of `folderId`'s live owner
+	 * (folderOwner): no copy of the discovery, no hint or spur lookup; the proof view is cached.
+	 * Undefined for a folder nobody owns. The analog recorder's per-snapshot check (voice-veto.ts).
+	 */
+	ownerLabel(folderId: string): EvidenceLabel | undefined {
+		const owner = this.folderOwner(folderId)
+		const d = owner === undefined ? undefined : this.discoveries.get(owner)
+		return d === undefined ? undefined : publishedOf(this.discoveryView(d))
+	}
+
+	/**
 	 * The live discovery whose files `folderId`'s folder holds: itself, or the owner of the alias.
 	 * Undefined for a folder nobody owns (an alias released before folders were checked, a
 	 * removal that did not finish).
