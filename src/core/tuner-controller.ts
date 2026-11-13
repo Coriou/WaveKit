@@ -954,9 +954,14 @@ export class TunerController extends EventEmitter {
 	 * whose model matches a header-only identity): replayed as before. Another receiver: the
 	 * tuning is kept aside under its receiver, the state returns to the configured baseline (gain
 	 * included), and that receiver's own earlier tuning, if any, comes back to be replayed.
-	 * Unknown: nothing is replayed. True when the state changed.
+	 * Unknown: nothing is replayed. True when the state changed. `plainResume`: this connection is a
+	 * plain resume (the hold branch: values stay, unverified; no baseline), which writes nothing.
 	 */
-	private gateReceiver(sourceId: string, state: TunerState): boolean {
+	private gateReceiver(
+		sourceId: string,
+		state: TunerState,
+		plainResume = false,
+	): boolean {
 		const cur = this.config.receiverIdentity?.(sourceId)
 		if (!cur) return false
 		this.gatedConnections.add(sourceId)
@@ -1007,7 +1012,7 @@ export class TunerController extends EventEmitter {
 		if (owner) this.stashTuning(sourceId, owner)
 		// After a plain resume (plainResumeHold) the receiver is another client's to tune: the
 		// values stay, unverified with every discarded field, and the baseline is not applied.
-		const hold = this.plainResumeHold.has(sourceId)
+		const hold = plainResume || this.plainResumeHold.has(sourceId)
 		if (hold) this.holdUnverified(sourceId, desired)
 		this.desiredFields.delete(sourceId)
 		// What assert holds goes with it: another or an unknown receiver gets the declared value
@@ -1315,7 +1320,10 @@ export class TunerController extends EventEmitter {
 	 * An operator retune applies the band gain only with "apply to my tuning". A failed
 	 * gain write is logged: the retune itself already succeeded. `live` (assert's re-apply,
 	 * reapplyBandGain) is checked before every gain write, after each await: once false, nothing
-	 * more is written.
+	 * more is written. An early stale return is not rolled back: it may leave half the band gain
+	 * applied (the manual mode written, the gain not) or a pre-band gain saved for it, and from then
+	 * on both belong to whoever owns the tuning now (the new centre's band gain rule, or the lease
+	 * holder's gain restore), which writes over them.
 	 */
 	private async applyOperatorBandGain(
 		sourceId: string,
@@ -3507,8 +3515,15 @@ export class TunerController extends EventEmitter {
 		const configDue = this.configWriteDue.delete(sourceId)
 		if (configDue) this.configProvenFields.delete(sourceId)
 
-		if (options.resume === "plain")
+		if (options.resume === "plain") {
+			// The identity part of the gate runs on a plain resume too (no write, no baseline: the
+			// hold branch): another receiver's accepted tuning is stashed under it and leaves the
+			// held values, and the new receiver owns what is accepted from now on. Otherwise a value
+			// accepted on this receiver would be recorded against the previous one and asserted to
+			// it on its next session ("same receiver").
+			this.gateReceiver(sourceId, state, true)
 			return this.synchronizeOnPlainResume(sourceId, state, pausedAt)
+		}
 		// A restore resume writes the configured frames again (and every later connection).
 		// It measured nothing yet: a rate it does not write stays unverified, not measured.
 		if (options.resume === "restore") {
@@ -4139,20 +4154,6 @@ export class TunerController extends EventEmitter {
 	}
 
 	// === State Accessors ===
-
-	/**
-	 * WG9 req 3.2: true only when the tuning ledger's live session holds a frame of both frequency
-	 * and sample rate that no doubt has undone (settled, settling or waiting to leave), whoever
-	 * wrote it. A caps change with no such frame is `unverified`.
-	 */
-	tuningWrittenOnConnection(sourceId: string): boolean {
-		if (!this.tunerStates.has(sourceId)) return false
-		const fields = this.ledgerFields(sourceId)
-		return GATED_FIELDS.every(field => {
-			const fs = fields[field]
-			return fs.queued !== null || fs.state !== "unverified"
-		})
-	}
 
 	getState(sourceId: string): TunerState | undefined {
 		const state = this.tunerStates.get(sourceId)
@@ -4821,7 +4822,7 @@ export class TunerController extends EventEmitter {
 		// frame of it stands on the live connection (the tuning ledger: proven, settling or
 		// waiting to leave) or it was accepted or written; declared-only when only the declared
 		// baseline backs it; unknown when it is a placeholder. Whether the live connection proves
-		// it is `proof` and tuningWrittenOnConnection (the ledger), not these lists.
+		// it is `proof` (the ledger), not these lists.
 		const state = this.tunerStates.get(sourceId)
 		const live = state ? this.ledger().position(sourceId) !== null : false
 		const fields = state && live ? this.ledgerFields(sourceId) : null

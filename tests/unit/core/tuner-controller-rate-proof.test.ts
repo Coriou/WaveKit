@@ -2,6 +2,7 @@
  * WG10 req 2.8: `proveSampleRateForFrequency` writes the held sample rate once per
  * connection epoch, only in internal control, only when the rate is known and unproven.
  */
+import { tuningHeldOnConnection } from "../../mocks/tuner-ledger-held.js"
 import { describe, expect, it } from "vitest"
 import fc from "fast-check"
 import { createLogger } from "../../../src/utils/logger.js"
@@ -214,7 +215,7 @@ describe("proveSampleRateForFrequency (WG10 req 2.8)", () => {
 		const t = make()
 		await t.controller.setFrequency("rtl-1", 162_000_000, { origin: "scanner" })
 		expect(t.frames.map(f => f[0])).toEqual([SET_FREQUENCY])
-		expect(t.controller.tuningWrittenOnConnection("rtl-1")).toBe(false)
+		expect(tuningHeldOnConnection(t.controller, "rtl-1")).toBe(false)
 	})
 })
 

@@ -134,6 +134,12 @@ export interface TrackSnapshot {
 	flags: TrackFlags
 	tuningTrust: TuningTrust
 	/**
+	 * Set once the engine asked the pipeline to measure this track's frequency again (its label
+	 * turned trusted on a block after the track began): `centreHz` is measured on blocks from
+	 * this sample on only. Absent: measured from `startSample`.
+	 */
+	measuredFromSample?: number
+	/**
 	 * WG12 channel gate (`ChannelGateState` in scanner-redesign-contract.ts). Absent on
 	 * engines without a channel plan.
 	 */
@@ -244,6 +250,8 @@ export type PipelineInput =
 	/** inWindow: true while no sweep lease holds the source; truncated segments then report as `edge` (§ 6.2). */
 	| { kind: "masks"; exclusions: FreqRange[]; cfarRanges: CfarMaskRange[]; burstRanges: FreqRange[]; rasters: MaskRaster[]; obwHz: number[]; inWindow: boolean }
 	| { kind: "spectrum-feed"; enabled: boolean }
+	/** Restart open track `trackId`'s frequency measurement (centroid) from `sample` (SpectrumEngine.trackLabel). */
+	| { kind: "measure-from"; stream: number; epoch: number; trackId: string; sample: number }
 
 export type ObservationEndReason =
 	| "quiet"

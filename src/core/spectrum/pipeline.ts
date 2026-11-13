@@ -737,6 +737,10 @@ export class SpectrumPipeline {
 			case "spectrum-feed":
 				this.feed = input.enabled
 				break
+			case "measure-from":
+				this.tracker.measureFrom(input)
+				this.wideband.measureFrom(input)
+				break
 			case "channel-plan":
 				this.channelPlan = input.plan
 				this.planActive = input.plan !== null

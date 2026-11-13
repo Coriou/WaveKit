@@ -25,11 +25,15 @@ const GOLDEN = {
 	},
 	/**
 	 * Re-recorded for tuning trust step 3 (labels from the tuning ledger): byte-identical to the
-	 * frozen output except the trust of four live frames, the first of epoch 2 (the retune to
-	 * another centre), now `unverified` where the tuner-state rule said `commanded`. Their engine
-	 * block (50 ms at the caps rate) still holds samples from before the retune's receipt, so the
-	 * ledger cannot prove the new centre over them; every other frame stays `commanded`. The
-	 * frozen hash was 65b0e9be20523fd82201f289ec773fff4b06387e426170dd8959d3c50ba1e2e8.
+	 * frozen output except the trust of four live frames, the first four of epoch 2 (the retune to
+	 * another centre), now `unverified` where the tuner-state rule said `commanded`. The engine
+	 * reads a summary's block at its own block length, 50 ms at the caps rate (51 200 samples at
+	 * 1.024 Msps), but the fixture's summaries were recorded at 256 ksps, 12 800 samples apart: each
+	 * block the engine reads back spans the three summaries before it too, so the first four of
+	 * epoch 2 reach before the retune's receipt (written at epoch 2's first sample) and the ledger
+	 * proves the old centre there. Not the lower bound's one-sample margin: the receipt written one
+	 * sample earlier gives the same output. Every other frame stays `commanded`. The frozen hash
+	 * was 65b0e9be20523fd82201f289ec773fff4b06387e426170dd8959d3c50ba1e2e8.
 	 */
 	serviceOutput: {
 		frames: 38,

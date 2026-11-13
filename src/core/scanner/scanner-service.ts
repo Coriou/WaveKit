@@ -4270,6 +4270,9 @@ export class ScannerService extends EventEmitter {
 				now.centreHz === epoch.centreHz &&
 				now.gainKey === epoch.gainKey &&
 				now.tuningTrust === epoch.tuningTrust &&
+				// The tap takes live samples from its start on, never back: it stays inside the
+				// trusted run it began in (a run that broke and resumed starts later: not this one).
+				now.trustedFromSample === epoch.trustedFromSample &&
 				!live.encrypted
 			)
 		}

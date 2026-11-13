@@ -36,6 +36,7 @@ import { DecoderManager } from "../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../src/decoders/registry.js"
 import { createLogger } from "../../../src/utils/logger.js"
 import { startStampedRtlTcp } from "../../mocks/stamped-rtl-tcp.js"
+import { settleMs } from "../../../src/core/spectrum/network-settle.js"
 
 const RATE = 1_024_000
 const F0 = 446_100_000
@@ -44,6 +45,21 @@ const F2 = 447_300_000
 /** The ledger settle: 50 ms at 1.024 Msps U8 (102 400 B) beside a 16 KiB in-flight estimate. */
 const SETTLE_MS = 50
 const IN_FLIGHT = 16 * 1024
+/**
+ * Re-proof after a pipeline error: the pipeline restart budget, plus the ledger settle at this
+ * link (network-settle's one rule), plus 1 s for the assert's write and the next block. The
+ * injected error is a pipeline error event, not a fatal one: the host keeps running and nothing
+ * restarts, so the restart term is 0 here. Settle: max(50 ms, 16 KiB / (1.024 Msps × 2 B) = 8 ms)
+ * = 50 ms, so the bound is 1 050 ms.
+ */
+const PIPELINE_RESTART_BUDGET_MS = 0
+const REPROOF_BOUND_MS =
+	PIPELINE_RESTART_BUDGET_MS +
+	settleMs(RATE, 2, {
+		configuredSettleMs: SETTLE_MS,
+		inFlightBytes: IN_FLIGHT,
+	}) +
+	1000
 
 const logger = createLogger({ level: "fatal" })
 const cleanups: (() => unknown)[] = []
@@ -275,7 +291,10 @@ async function scenario(host: "inline" | "thread"): Promise<void> {
 			.doubts("rtl")
 			.some(d => d.reason === "pipeline-error"),
 	).toBe(true)
-	await until(() => (counts.trustedAt.get(F1) ?? 0) >= marked + 1, 5000)
+	await until(
+		() => (counts.trustedAt.get(F1) ?? 0) >= marked + 1,
+		REPROOF_BOUND_MS,
+	)
 	const reproofMs = Date.now() - errorAt
 
 	// An untracked retune: the receiver moves to F2 without any frame (its host reports the move;
@@ -343,7 +362,7 @@ async function scenario(host: "inline" | "thread"): Promise<void> {
 	expect(counts.foreign).toBe(0)
 	expect(counts.trusted).toBeGreaterThan(10)
 	await scanner.spectrum.release("rtl", "ledger-acceptance")
-	expect(reproofMs).toBeLessThan(5000)
+	expect(reproofMs).toBeLessThan(REPROOF_BOUND_MS)
 	process.stderr.write(
 		`[${host}] engine opened before first payload ${openedBeforePayload}, blocks ${counts.blocks} trusted ${counts.trusted} foreign ${counts.foreign} pipeline-error re-proof ${reproofMs} ms\n`,
 	)

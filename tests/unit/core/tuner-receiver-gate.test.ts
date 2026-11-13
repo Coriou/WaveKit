@@ -160,7 +160,7 @@ async function setup() {
 
 describe("receiver gate on the reconnect restore", () => {
 	it(
-		"A -> B -> A: B gets the configured tuning, A resumes its own tuning and gain",
+		"A -> B -> A: B gets the configured centre only, A resumes its own tuning and gain",
 		{ timeout: 30_000 },
 		async () => {
 			const { controller, flapTo } = await setup()
@@ -319,7 +319,7 @@ describe("receiver gate: an unknown interlude", () => {
 		})
 	})
 
-	it("A -> unknown -> B: B gets the configured tuning, neither A's nor the unknown one's", async () => {
+	it("A -> unknown -> B: B gets the configured centre only, neither A's nor the unknown one's", async () => {
 		const { controller, connect } = direct()
 		connect(ID_A)
 		await controller.setFrequency("rtl", A_CENTRE)
@@ -368,6 +368,29 @@ describe("receiver gate after a plain resume", () => {
 		expect(state?.unknownFields).toEqual(
 			expect.arrayContaining(["frequency", "gain", "gainMode"]),
 		)
+	})
+
+	it("a plain resume onto another receiver: what is accepted there is never asserted to the first one", async () => {
+		const { controller, connect } = direct()
+		connect(ID_A)
+		await controller.setFrequency("rtl", A_CENTRE)
+		controller.noteFeedPaused("rtl")
+		// A plain resume onto B writes nothing, but B owns what is accepted from now on.
+		expect(connect(ID_B, { resume: "plain" })).toEqual([])
+		await controller.setFrequency("rtl", B_CENTRE)
+		// Back on A: A's own centre, never B's.
+		const onA = connect(ID_A)
+		expect(onA).not.toContainEqual([SET_FREQUENCY, B_CENTRE])
+		expect(onA).toContainEqual([SET_FREQUENCY, A_CENTRE])
+		expect(controller.getState("rtl")?.frequency).toBe(A_CENTRE)
+		expect(controller.receiverTuningRestore("rtl")).toEqual({
+			restored: true,
+			reason: "this receiver's tuning from earlier",
+		})
+		// And B, again: its own centre.
+		const onB = connect(ID_B)
+		expect(onB).toContainEqual([SET_FREQUENCY, B_CENTRE])
+		expect(onB).not.toContainEqual([SET_FREQUENCY, A_CENTRE])
 	})
 })
 

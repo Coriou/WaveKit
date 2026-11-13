@@ -50,6 +50,12 @@ export async function startStampedRtlTcp(opts: {
 	intervalMs?: number
 	/** Delay before a read command takes effect (setCommandDelay). */
 	commandDelayMs?: number
+	/**
+	 * Every frequency frame gets a stamp of its own, even at the centre the receiver is on (so the
+	 * bytes from before a same-centre frame took effect are told apart); `centreOf` still names
+	 * its centre. Default: one stamp per centre.
+	 */
+	restampFrequencyFrames?: boolean
 }): Promise<StampedRtlTcp> {
 	const frames: [number, number][] = []
 	const centres: number[] = []
@@ -82,7 +88,10 @@ export async function startStampedRtlTcp(opts: {
 				timers.delete(silent)
 				silent = null
 			}
-			centre = stampOf(centres, value)
+			if (opts.restampFrequencyFrames === true) {
+				centres.push(value)
+				centre = ((centres.length - 1) % 255) + 1
+			} else centre = stampOf(centres, value)
 			reported = value
 		}
 		if (cmd === 0x02) rate = stampOf(rates, value)

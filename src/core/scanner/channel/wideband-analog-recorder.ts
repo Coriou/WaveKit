@@ -543,6 +543,11 @@ export interface WidebandEngineView {
 		centreHz: number
 		sampleRateHz: number
 		tuningTrust: TuningTrust
+		/**
+		 * First sample of the current trusted run (SpectrumEngine.currentEpoch); null while
+		 * unverified. Absent: a view without runs (test doubles), its epoch start bounds it.
+		 */
+		trustedFromSample?: number | null
 	}
 	liveEdge(): number
 	readRing(
@@ -1698,7 +1703,8 @@ export class WidebandAnalogRecorder {
 		if (
 			epoch.stream !== track.stream ||
 			epoch.epoch !== track.epoch ||
-			!usableTrust(epoch.tuningTrust)
+			!usableTrust(epoch.tuningTrust) ||
+			epoch.trustedFromSample === null
 		) {
 			this.decisions.note("refused:tuning", ref)
 			return
@@ -2005,8 +2011,11 @@ export class WidebandAnalogRecorder {
 			holdbackSamples: Math.round(WIDEBAND_HOLDBACK_MS * perMs),
 			maxSegmentSamples: Math.round(WIDEBAND_MAX_FILE_MS * perMs),
 		})
+		// Never back-dated: nothing before the trusted run's start (its pre-roll included) is in
+		// a file labelled with its trust.
 		const floor = Math.max(
 			epoch.startSample ?? 0,
+			epoch.trustedFromSample ?? 0,
 			this.recentEnd(input.sourceId, track),
 		)
 		const ringSeconds = settings.ringSeconds ?? WIDEBAND_DEFAULT_RING_SECONDS

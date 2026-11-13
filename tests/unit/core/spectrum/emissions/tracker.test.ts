@@ -125,6 +125,39 @@ describe("Tracker", () => {
 		expect(c.track.tuningTrust).toBe("commanded")
 	})
 
+	it("measureFrom restarts an open track's centre from a later sample (blocks before it no longer count)", () => {
+		const t = tracker()
+		// Two blocks centred on bin 140.5, then the same emission (overlapping) on bin 144.5.
+		const id = tracksOf(run(t, 0, [[136, 146, -20]]), "track-open")[0]!.trackId
+		run(t, 1, [[136, 146, -20]])
+		// Another epoch's or stream's request, and one not past the start, change nothing.
+		t.measureFrom({ stream: 1, epoch: 2, trackId: id, sample: 2 * BLOCK })
+		t.measureFrom({ stream: 2, epoch: 1, trackId: id, sample: 2 * BLOCK })
+		t.measureFrom({ stream: 1, epoch: 1, trackId: id, sample: 0 })
+		const mixed = t.snapshotOf(id)!
+		expect(mixed.measuredFromSample).toBeUndefined()
+		expect(mixed.centreHz).toBeCloseTo(CENTRE + (140.5 - N / 2) * BIN_HZ, 0)
+		t.measureFrom({ stream: 1, epoch: 1, trackId: id, sample: 2 * BLOCK })
+		run(t, 2, [[140, 150, -20]])
+		const update = tracksOf(run(t, 3, [[140, 150, -20]]), "track-update")
+		const after = update.at(-1) ?? t.snapshotOf(id)!
+		expect(after.trackId).toBe(id)
+		expect(after.measuredFromSample).toBe(2 * BLOCK)
+		// Only the blocks after the request: bin 144.5, not the mean over all four (142.5).
+		expect(after.centreHz).toBeCloseTo(CENTRE + (144.5 - N / 2) * BIN_HZ, 0)
+		// Without the request the centre would mix all four blocks.
+		const plain = tracker()
+		const pid = tracksOf(run(plain, 0, [[136, 146, -20]]), "track-open")[0]!
+			.trackId
+		run(plain, 1, [[136, 146, -20]])
+		run(plain, 2, [[140, 150, -20]])
+		run(plain, 3, [[140, 150, -20]])
+		expect(plain.snapshotOf(pid)!.centreHz).toBeCloseTo(
+			CENTRE + (142.5 - N / 2) * BIN_HZ,
+			0,
+		)
+	})
+
 	it("reports on-bin width below 20 dB SNR", () => {
 		const t = tracker()
 		run(t, 0, [[140, 147, -50]])

@@ -130,6 +130,13 @@ export const PipelineInputSchema = z
 		}),
 		z.object({ kind: z.literal("spectrum-feed"), enabled: z.boolean() }),
 		z.object({
+			kind: z.literal("measure-from"),
+			stream: z.number().int().nonnegative(),
+			epoch: z.number().int().nonnegative(),
+			trackId: z.string().min(1).max(64),
+			sample: z.number().int().nonnegative(),
+		}),
+		z.object({
 			kind: z.literal("channel-plan"),
 			plan: ChannelPlanBodySchema.nullable(),
 		}),

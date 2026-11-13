@@ -103,6 +103,7 @@ function track(
 	epoch: number,
 	startSample: number,
 	lastSample: number,
+	measuredFromSample?: number,
 ): TrackSnapshot {
 	return {
 		trackId: "t1",
@@ -113,6 +114,7 @@ function track(
 		lastSample,
 		centreHz: CENTRE + 25_000,
 		tuningTrust: "commanded",
+		...(measuredFromSample !== undefined ? { measuredFromSample } : {}),
 	} as TrackSnapshot
 }
 
@@ -127,6 +129,7 @@ async function make() {
 	const conn = ledger.connection("rtl")
 	const session = conn.start()!
 	let host: Host | null = null
+	const tuner = new FakeTuner()
 	const engine = new SpectrumEngine({
 		sourceId: "rtl",
 		sources,
@@ -134,7 +137,7 @@ async function make() {
 			getFanout: () => fanout as never,
 			releaseUnused: () => undefined,
 		},
-		tuner: new FakeTuner(),
+		tuner,
 		ledger,
 		settings: () => testSettings(),
 		logger: pino({ level: "silent" }),
@@ -154,9 +157,14 @@ async function make() {
 		payload: Buffer,
 		tag: TuningWriterTag = { writer: "operator" },
 	) => conn.write(payload, tag)(null)
-	const seen: { kind: string; trust: string; ev: PipelineEvent }[] = []
+	const seen: {
+		kind: string
+		trust: string
+		ev: PipelineEvent
+		epoch: EngineEpoch
+	}[] = []
 	engine.on("pipeline", (ev: PipelineEvent, epoch: EngineEpoch) =>
-		seen.push({ kind: ev.kind, trust: epoch.tuningTrust, ev }),
+		seen.push({ kind: ev.kind, trust: epoch.tuningTrust, ev, epoch }),
 	)
 	const events = (evs: PipelineEvent[]) => host!.handlers.events(evs)
 	// The stream's own start: no label (not a tuning event).
@@ -172,6 +180,10 @@ async function make() {
 	return {
 		engine,
 		ledger,
+		conn,
+		sources,
+		fanout,
+		tuner,
 		session,
 		feed,
 		write,
@@ -181,6 +193,25 @@ async function make() {
 		opening,
 		host: () => host!,
 		samples: () => samples,
+	}
+}
+
+/** A scanner hop's pending epoch, as the arbiter posts it (its id from allocateEpoch). */
+function hopPending(engine: SpectrumEngine, centreHz: number): PendingEpoch {
+	const clock = engine.sampleClock()
+	return {
+		epoch: engine.allocateEpoch(),
+		commandSample: clock.commandSample,
+		bufferedSamples: clock.bufferedSamples,
+		settleSamples: 0,
+		expectMarker: false,
+		markerTimeoutSamples: 0,
+		pllSettleSamples: 0,
+		centreHz,
+		sampleRateHz: RATE,
+		gainKey: "na",
+		tuningTrust: "unverified",
+		centreChanged: true,
 	}
 }
 
@@ -225,8 +256,9 @@ describe("SpectrumEngine labels from the tuning ledger", () => {
 		await engine.stop()
 	})
 
-	it("a track on air across a proof boundary is trusted from the first event past it, never back-dated", async () => {
-		const { engine, feed, write, seen, events, block, opening } = await make()
+	it("a track on air across a proof boundary is trusted once its frequency is measured past it, never back-dated", async () => {
+		const { engine, feed, write, seen, events, block, opening, host } =
+			await make()
 		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
 		// The track opens inside the settle window.
 		await feed(block * 2)
@@ -236,23 +268,49 @@ describe("SpectrumEngine labels from the tuning ledger", () => {
 		expect((open.ev as { track: TrackSnapshot }).track.tuningTrust).toBe(
 			"unverified",
 		)
-		// Still on air past the boundary: its newest block is proven.
+		// Still on air past the boundary: its newest block is proven, but its centre was measured
+		// over blocks from before the boundary too. Unverified, and the pipeline is asked to measure
+		// it again from its newest (proven) block.
 		const past = SETTLE_BYTES / 2 + block * 3
 		await feed(past - block * 2)
 		events([{ kind: "track-update", track: track(0, opening, 0, past) }])
 		const update = seen.at(-1)!
-		expect(update.trust).toBe("commanded")
-		expect((update.ev as { track: TrackSnapshot }).track.tuningTrust).toBe(
+		expect(update.trust).toBe("unverified")
+		const asks = () => host().inputs.filter(i => i.kind === "measure-from")
+		expect(asks()).toEqual([
+			{
+				kind: "measure-from",
+				stream: 0,
+				epoch: opening,
+				trackId: "t1",
+				sample: past - block,
+			},
+		])
+		// Asked once until the pipeline answered (a later update before its answer asks nothing).
+		events([{ kind: "track-update", track: track(0, opening, 0, past) }])
+		expect(asks()).toHaveLength(1)
+		// The pipeline measured it from there: trusted.
+		await feed(block)
+		const later = past + block
+		events([
+			{
+				kind: "track-update",
+				track: track(0, opening, 0, later, past - block),
+			},
+		])
+		const measured = seen.at(-1)!
+		expect(measured.trust).toBe("commanded")
+		expect((measured.ev as { track: TrackSnapshot }).track.tuningTrust).toBe(
 			"commanded",
 		)
-		// The open event that went out unverified stays so (labels are never rewritten).
+		// The events that went out unverified stay so (labels are never rewritten).
 		expect((open.ev as { track: TrackSnapshot }).track.tuningTrust).toBe(
 			"unverified",
 		)
 		events([
 			{
 				kind: "track-close",
-				track: track(0, opening, 0, past),
+				track: track(0, opening, 0, later, past - block),
 				endReason: "quiet",
 			},
 		])
@@ -271,6 +329,208 @@ describe("SpectrumEngine labels from the tuning ledger", () => {
 			"unverified",
 			"commanded",
 		])
+		await engine.stop()
+	})
+
+	it("currentEpoch names where its trusted run starts: the first trusted block, reset by an unverified one", async () => {
+		const { engine, ledger, feed, write, events, block, opening, samples } =
+			await make()
+		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+		const receiptPos = ledger.receipts("rtl").at(-1)!.pos
+		const blockAt = (end: number) =>
+			events([{ kind: "block-summary", summary: summary(0, opening, end) }])
+		await feed(block * 2)
+		blockAt(samples())
+		expect(engine.currentEpoch()).toMatchObject({
+			tuningTrust: "unverified",
+			trustedFromSample: null,
+		})
+		await feed(SETTLE_BYTES / 2 + block)
+		const first = samples()
+		blockAt(first)
+		expect(engine.currentEpoch()).toMatchObject({
+			tuningTrust: "commanded",
+			trustedFromSample: first - block,
+		})
+		// The run starts at or past the settle after the receipt (2 bytes per sample, anchored at 0).
+		expect((first - block) * 2).toBeGreaterThanOrEqual(
+			receiptPos + SETTLE_BYTES,
+		)
+		await feed(block * 3)
+		blockAt(samples())
+		expect(engine.currentEpoch().trustedFromSample).toBe(first - block)
+		// A doubt: the next block is unverified and the run is gone.
+		ledger.raiseDoubt("rtl", "both", "untracked-retune")
+		await feed(block)
+		blockAt(samples())
+		expect(engine.currentEpoch()).toMatchObject({
+			tuningTrust: "unverified",
+			trustedFromSample: null,
+		})
+		// Re-proven: a new run, from its own first trusted block (never the old run's start).
+		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]), {
+			writer: "assert",
+		})
+		await feed(SETTLE_BYTES / 2 + block * 2)
+		const again = samples()
+		blockAt(again)
+		expect(engine.currentEpoch()).toMatchObject({
+			tuningTrust: "commanded",
+			trustedFromSample: again - block,
+		})
+		await engine.stop()
+	})
+
+	it("a command behind a queued stream boundary posts its DSP epoch at its receipt in the new stream (replug)", async () => {
+		const {
+			engine,
+			ledger,
+			conn,
+			sources,
+			fanout,
+			tuner,
+			session,
+			feed,
+			write,
+			block,
+			host,
+		} = await make()
+		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+		await feed(SETTLE_BYTES / 2 + block)
+		const branch = fanout.branches.get("scanner-rtl")!.stream
+		// The old session's last bytes are still in the branch when the connection drops.
+		branch.pause()
+		session.pos += 4096
+		fanout.write(Buffer.alloc(4096))
+		sources.emit("disconnected", "rtl")
+		conn.close()
+		// The replug: the receiver is back on its default; the new session's first bytes are its,
+		// then the assert's frame of the held centre is flushed.
+		const nextConn = ledger.connection("rtl")
+		const next = nextConn.start()!
+		sources.emit("session-started", "rtl", next.session)
+		const before = 6000
+		next.pos += before
+		fanout.write(Buffer.alloc(before))
+		const HELD = CENTRE + 200_000
+		sources.caps.set("rtl", { ...sources.caps.get("rtl")!, centerFreq: HELD })
+		nextConn.write(frame(0x01, HELD), { writer: "assert" })(null)
+		expect(ledger.receipts("rtl").at(-1)).toMatchObject({
+			session: next.session,
+			pos: before,
+		})
+		tuner.emit("command-sent", "rtl", "set-frequency", HELD, "replay")
+		await Promise.resolve()
+		await Promise.resolve()
+		next.pos += 8192
+		fanout.write(Buffer.alloc(8192))
+		branch.resume()
+		await settle()
+		const inputs = host().inputs
+		const opened = inputs.findLastIndex(i => i.kind === "new-stream")
+		expect(opened).toBeGreaterThan(-1)
+		const epochs = inputs
+			.slice(opened)
+			.filter(
+				(i): i is Extract<PipelineInput, { kind: "pending-epoch" }> =>
+					i.kind === "pending-epoch",
+			)
+		expect(epochs).toHaveLength(1)
+		const p = epochs[0]!.pending
+		expect(p.centreHz).toBe(HELD)
+		// At the receipt: the new stream's sample of its position (no bytes before it lost).
+		expect(p.commandSample + p.bufferedSamples).toBe(before / 2)
+		await engine.stop()
+	})
+
+	it("a hop submitted during a pipeline restart: the restarted stream's opening names it superseded, once", async () => {
+		const { engine, write, feed, seen, events, block, host } = await make()
+		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+		await feed(SETTLE_BYTES / 2 + block)
+		const restart = engine.reconfigure()
+		// The old host can no longer take it; the new one has not started.
+		const hop = hopPending(engine, HOP)
+		engine.submitEpoch(hop)
+		await restart
+		expect(host().inputs.some(i => i.kind === "pending-epoch")).toBe(false)
+		const reopened = engine.currentEpoch().epoch + 1
+		events([
+			{
+				kind: "epoch-started",
+				epoch: reopened,
+				startSample: 0,
+				settleMode: "none",
+			},
+		])
+		expect(seen.at(-1)).toMatchObject({
+			kind: "epoch-started",
+			trust: "unverified",
+		})
+		expect(seen.at(-1)!.epoch.supersededEpoch).toBe(hop.epoch)
+		// Named once: the next opening names nothing.
+		await engine.reconfigure()
+		events([
+			{
+				kind: "epoch-started",
+				epoch: engine.currentEpoch().epoch + 1,
+				startSample: 0,
+				settleMode: "none",
+			},
+		])
+		expect(seen.at(-1)!.epoch.supersededEpoch).toBeUndefined()
+		await engine.stop()
+	})
+
+	it("a hop the pipeline renumbered (an untracked epoch started first) names the id it was posted as", async () => {
+		const { engine, write, feed, seen, events, block, samples } = await make()
+		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+		await feed(SETTLE_BYTES / 2 + block)
+		const hop = hopPending(engine, HOP)
+		engine.submitEpoch(hop)
+		// The pipeline started an untracked epoch under the hop's id before the hop's post arrived,
+		// so it numbers the hop max(id, last + 1) = id + 1.
+		events([
+			{
+				kind: "untracked-retune",
+				epoch: hop.epoch,
+				startSample: samples(),
+				stream: 0,
+				deltaHz: 30_000,
+			},
+			{
+				kind: "epoch-started",
+				epoch: hop.epoch,
+				startSample: samples(),
+				settleMode: "none",
+			},
+		])
+		expect(seen.at(-1)!.epoch.requestedEpoch).toBeUndefined()
+		events([
+			{
+				kind: "epoch-started",
+				epoch: hop.epoch + 1,
+				startSample: samples(),
+				settleMode: "timer",
+			},
+		])
+		const started = seen.at(-1)!
+		expect(started.kind).toBe("epoch-started")
+		expect(started.epoch.epoch).toBe(hop.epoch + 1)
+		expect(started.epoch.requestedEpoch).toBe(hop.epoch)
+		expect(started.epoch.centreHz).toBe(HOP)
+		// A start under its own id names nothing.
+		const next = hopPending(engine, HOP + 100_000)
+		engine.submitEpoch(next)
+		events([
+			{
+				kind: "epoch-started",
+				epoch: next.epoch,
+				startSample: samples(),
+				settleMode: "timer",
+			},
+		])
+		expect(seen.at(-1)!.epoch.requestedEpoch).toBeUndefined()
+		expect(seen.at(-1)!.epoch.centreHz).toBe(HOP + 100_000)
 		await engine.stop()
 	})
 

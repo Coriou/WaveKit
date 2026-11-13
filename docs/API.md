@@ -1910,7 +1910,13 @@ baseline (config or caps). Accepted values belong to the receiver they were
 accepted on: when the connection reaches another receiver (another dongle behind
 the same endpoint, or a source candidate) the core holds only the declared values
 for it, and an unknown receiver gets no accepted value either; the first
-receiver's values come back when it does. The declared fallback is off when
+receiver's values come back when it does, while it is among the last 9 receivers
+seen on the source (`RECEIVER_TUNING_STASH_MAX`; an older one gets the declared
+values like a new one). Until the sdr-host names the unit, two dongles of the same
+model are told apart by their header only, which they share: a value accepted on
+one may be written to the other in that window, and is set aside as soon as the
+sdr-host names another unit. A plain resume onto another receiver writes nothing
+but still sets the first receiver's values aside. The declared fallback is off when
 `tuner.writeDeclaredTuningOnConnect` is `false`, after a plain resume of a paused
 feed (until a restore resume; values accepted after the resume are still written)
 and under `reconnectPolicy: reset` (another operator may own the receiver: values
@@ -5740,8 +5746,12 @@ shift, or the spectrum changed by 6 dB on average): `count`, `p50Ms`, `maxMs`,
 the detecting block's first byte), `maxMsUpper`, `maxBytesUpper` (upper bounds over
 the same, to the detecting block's end: the change showed no later) and
 `undetected` (a quiet band, another bin grid, a newer frame first, or nothing
-within 5 s of payload). Diagnostics for the network settle; nothing reads it. No
-consumer reads the ledger's label yet; absent without a ledger.
+within 5 s of payload), with `undetectedReasons` (since 2026-11-13; they add up to
+`undetected`): `superseded` (a newer frame first), `unmeasurable` (no payload rate),
+`session` (a reconnect first), `noReference` (no block before the flush to compare
+with), `grid` (another bin grid: nearly every sample-rate change), `bracket` (a
+scanner marker's test pattern) and `timeout` (nothing within 5 s of payload: a quiet
+band). Diagnostics for the network settle; nothing reads it. Absent without a ledger.
 
 Untracked-retune warnings carry two optional fields, absent on
 `host-centre-mismatch`. `suspected`: `iq-byte-slip` (the vanished features reappear

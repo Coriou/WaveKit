@@ -397,6 +397,8 @@ interface OpenTrack {
 	floorDbSum: number
 	centroidNum: number
 	centroidDen: number
+	/** The centroid counts only blocks from this sample on (measureFrom); null: from the start. */
+	measuredFrom: number | null
 	thresholdDb: number
 	spectrum: SpectrumAccumulator
 	env: Float32Array
@@ -639,6 +641,27 @@ export class Tracker {
 			verifiedFromSample: e.verifiedFromSample ?? null,
 		}
 		return events
+	}
+
+	/**
+	 * Restarts an open track's centroid from `sample` (SpectrumEngine.trackLabel: its label turned
+	 * trusted after it began), so its centre comes from blocks the tuning ledger proves. Blocks
+	 * accumulated from now on start past `sample` (the engine asks after it saw a block ending
+	 * there). Ignored for another stream or epoch, a closed track, or a sample not past the
+	 * current measurement's start.
+	 */
+	measureFrom(at: {
+		stream: number
+		epoch: number
+		trackId: string
+		sample: number
+	}): void {
+		if (at.stream !== this.epoch.stream || at.epoch !== this.epoch.epoch) return
+		const t = this.open.find(o => o.id === at.trackId)
+		if (!t || at.sample <= (t.measuredFrom ?? t.startSample)) return
+		t.centroidNum = 0
+		t.centroidDen = 0
+		t.measuredFrom = at.sample
 	}
 
 	/**
@@ -1590,6 +1613,7 @@ export class Tracker {
 			floorDbSum: 0,
 			centroidNum: 0,
 			centroidDen: 0,
+			measuredFrom: null,
 			thresholdDb: b.thresholdDb,
 			spectrum: new SpectrumAccumulator(),
 			env: new Float32Array(ENV_MAX_MS),
@@ -2831,6 +2855,7 @@ export class Tracker {
 				t.epoch.verifiedFromSample,
 			),
 		}
+		if (t.measuredFrom !== null) snap.measuredFromSample = t.measuredFrom
 		if (this.planActive && t.gate !== undefined) {
 			// A gate field like the others; absent without a channel plan.
 			if (t.localSnrBlocks > 0)

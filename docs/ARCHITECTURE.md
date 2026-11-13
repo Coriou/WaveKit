@@ -564,14 +564,18 @@ session, the range starts at least the settle after them (`network-settle.ts`), 
 raised since, and their values are the centre and rate the result was computed at. Everything
 else is `unverified`: a fresh core, a reconnect, a missing ledger.
 
-Readers only: the spectrum engine stamps every block summary, track (by its newest block: a
-track on air when a proof settles is trusted from there, never back-dated) and transient by the
-ledger on its sample range; a scanner hop's samples need the hop's own frequency receipt
+Readers only: the spectrum engine stamps every block summary, track (by the blocks its
+frequency was measured on: a track on air when a proof settles has its centre measured again
+from the first proven block, and is trusted once it comes from proven blocks only, never
+back-dated) and transient by the ledger on its sample range; a scanner hop's samples need the hop's own frequency receipt
 (`TunerArbiter` hands it to the engine), and the arbiter's same-centre skip and rate re-send
 read the ledger too. Engine starts, pipeline restarts and stream openings carry no label;
 pipeline epochs only reset the DSP. Decoder provenance, live-audio evidence and the analog
 transmission frequency read `trustNow` (the live edge). Recorder, discoveries and IQ capture read
-the label on the epoch or track. A client that retunes the receiver behind the core's back is
+the label on the epoch or track; the current epoch also names where its trusted run of blocks
+starts (`trustedFromSample`), and a recording's pre-roll never reaches before it. A command
+whose frame tuned a stream that starts at a queued reconnect boundary gets its DSP epoch once
+that boundary is applied, at its receipt's position in the new stream. A client that retunes the receiver behind the core's back is
 invisible until a detector raises a doubt. A host-centre mismatch also moves the engine's epoch
 to the centre the host reports; the next poll that matches the source's centre again moves it
 back, so the blocks after the core's re-sent tuning can be trusted again.

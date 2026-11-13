@@ -45,6 +45,8 @@ const baseConfig = {
 	},
 	tuner: {
 		reconnectPolicy: "restore",
+		// The tuning assert's declared fallback (default on; the kill switch sets it false).
+		writeDeclaredTuningOnConnect: true,
 		bandGain: {
 			applyToMyTuning: false,
 			entries: [

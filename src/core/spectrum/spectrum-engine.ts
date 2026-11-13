@@ -43,6 +43,7 @@ import type {
 	MaskRaster,
 	SpectrumSettings,
 	SettleMode,
+	TrackSnapshot,
 	TuningTrust,
 	UntrackedRetuneEvent,
 } from "./types.js"
@@ -133,6 +134,13 @@ export interface EngineEpoch {
 	 */
 	tuningTrust: TuningTrust
 	settleMode: SettleMode | null
+	/**
+	 * In `currentEpoch()` only: the first sample of the current trusted run of this epoch (the
+	 * start of the first trusted block summary since its last `unverified` one, or since the label
+	 * last changed), null while `tuningTrust` is `unverified`. Nothing before it is trusted: a
+	 * consumer reading back from the ring (a recording's pre-roll) starts no earlier.
+	 */
+	trustedFromSample?: number | null
 	/**
 	 * On an `epoch-started` event only, never in `currentEpoch()`: the id its poster was given
 	 * (`allocateEpoch`) when the pipeline started it as another (it numbers a post
@@ -323,7 +331,19 @@ interface EpochRecord {
 	centreHz: number
 	sampleRateHz: number
 	hop: number | null
+	/**
+	 * Start sample of this epoch's current trusted run of block summaries (null: its newest block
+	 * read `unverified`, or none yet) and that run's label (`currentEpoch().trustedFromSample`).
+	 */
+	trustedFrom: number | null
+	trustedLabel: TuningTrust
 }
+
+/**
+ * Tracks whose frequency measurement the engine asked the pipeline to restart (measure-from):
+ * the pipeline's track cap (buildPipelineConfig maxTracks 512), so every open track fits.
+ */
+const MEASURE_REQUESTS = 512
 
 function writableBacklog(stream: Readable | undefined): number {
 	const length = (stream as { writableLength?: unknown } | undefined)
@@ -580,6 +600,26 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private readonly hopReceipts = new Map<number, number | null>()
 	/** The label of the current epoch's newest block summary (currentEpoch()). */
 	private liveLabel: TuningTrust = "unverified"
+	/**
+	 * The ledger's label of a track's newest block, per (stream, epoch, lastSample): the tracks of
+	 * one block share it, so one batch of events reads the ledger once per block. Cleared per batch
+	 * and on every ledger change (a later receipt or doubt can change the verdict).
+	 */
+	private newestLabel: {
+		stream: number
+		epoch: number
+		lastSample: number
+		trust: TuningTrust
+	} | null = null
+	/** Track id → the sample its measurement was asked to restart from (MEASURE_REQUESTS). */
+	private readonly measureRequests = new Map<string, number>()
+	/**
+	 * A command's DSP epoch held behind a queued stream boundary (flushExternal): posted once the
+	 * last queued boundary is applied, at its receipt in the new stream.
+	 */
+	private externalAfterBoundary: ExternalCommand | null = null
+	/** The newest centre or rate receipt the engine saw (where a held command's epoch starts). */
+	private lastTuningReceipt: { session: number; pos: number } | null = null
 	/** Block summaries labelled (status `trustShadow.agree`). */
 	private labelledBlocks = 0
 	/**
@@ -734,6 +774,9 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.epochRecords.length = 0
 		this.hopReceipts.clear()
 		this.liveLabel = "unverified"
+		this.newestLabel = null
+		this.measureRequests.clear()
+		this.externalAfterBoundary = null
 		// No label and no settle: an engine start is not a tuning event (the ledger labels it).
 		this.beginStream()
 		const reader = this.deps.hostCentre ?? nullHostCentreReader
@@ -919,9 +962,23 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.starts.splice(0, count)
 	}
 
-	/** The current epoch, labelled by its newest block summary (`unverified` before the first). */
+	/**
+	 * The current epoch, labelled by its newest block summary (`unverified` before the first), with
+	 * the start of its trusted run (`trustedFromSample`).
+	 */
 	currentEpoch(): EngineEpoch {
-		return { ...this.current, tuningTrust: this.liveLabel }
+		const record = this.epochRecord(this.current.stream, this.current.epoch)
+		const from =
+			this.liveLabel === "unverified" ||
+			!record ||
+			record.trustedLabel !== this.liveLabel
+				? null
+				: record.trustedFrom
+		return {
+			...this.current,
+			tuningTrust: this.liveLabel,
+			trustedFromSample: from,
+		}
 	}
 
 	// === Consumers ===
@@ -1166,6 +1223,9 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			if (this.spectrumFeed) this.send({ kind: "spectrum-feed", enabled: true })
 			this.restarting = false
 			this.dropStaleBranchMarks()
+			// A command held behind a boundary the restart discarded tuned what this stream opens at.
+			if (!this.branchQueue.some(mark => mark.kind === "stream"))
+				this.externalAfterBoundary = null
 			// A restart is not a tuning event: the stream opens at the source's centre, labelled by
 			// the ledger's receipts of its samples (a command during the restart is in caps by now).
 			this.externalPending = null
@@ -1301,7 +1361,11 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	private applyMark(mark: BranchMark): void {
 		if (mark.kind === "gap") this.applyGap(mark.droppedBytes)
-		else this.beginStream()
+		else {
+			this.beginStream()
+			if (!this.branchQueue.some(m => m.kind === "stream"))
+				this.postHeldExternal()
+		}
 	}
 
 	/** Bytes the fanout accepted into the branch so far (written minus dropped). */
@@ -1511,6 +1575,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	// === Internals: pipeline events ===
 
 	private onEvents(events: PipelineEvent[]): void {
+		this.newestLabel = null
 		for (const ev of events) {
 			if (ev.kind === "epoch-started") {
 				this.lastEpoch = Math.max(this.lastEpoch, ev.epoch)
@@ -1558,6 +1623,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					centreHz: this.current.centreHz,
 					sampleRateHz: this.current.sampleRateHz,
 					hop: start?.hop === true ? start.key : null,
+					trustedFrom: null,
+					trustedLabel: "unverified",
 				}
 				this.rememberEpoch(record)
 				this.liveLabel = "unverified"
@@ -1627,10 +1694,9 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	/**
 	 * Emits a pipeline event with the ledger's label of the samples it was measured on: a block
-	 * summary its block, a track (open, update, close) its newest block (Q3: a track on air
-	 * across a proof boundary is trusted from the first event past it, never back-dated), a
-	 * transient the blocks around its sample. A track snapshot carries the same label. Other
-	 * events carry the current epoch's label.
+	 * summary its block, a track (open, update, close) the blocks its frequency was measured on
+	 * (trackLabel), a transient the blocks around its sample. A track snapshot carries the same
+	 * label. Other events carry the current epoch's label.
 	 */
 	private emitLabelled(ev: PipelineEvent): void {
 		const epoch = { ...this.current, tuningTrust: this.liveLabel }
@@ -1644,12 +1710,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			case "track-update":
 			case "track-close": {
 				const t = ev.track
-				const record = this.epochRecord(t.stream, t.epoch)
-				const block = this.streamBlockSamples(t.stream)
-				const trust =
-					record === null || block === null
-						? "unverified"
-						: this.stamp(record, t.lastSample - block, t.lastSample)
+				const trust = this.trackLabel(ev)
 				const labelled =
 					t.tuningTrust === trust
 						? ev
@@ -1670,6 +1731,73 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			default:
 				this.emit("pipeline", ev, epoch)
 		}
+	}
+
+	/**
+	 * A track's label: the ledger's over the blocks its frequency was measured on, from its first
+	 * block (or, once the pipeline restarted its measurement, `measuredFromSample`) to its newest.
+	 * Q3: a track on air across a proof boundary is never back-dated: when its newest block is
+	 * trusted but not its whole measurement, the pipeline is asked to measure it again from that
+	 * block (measure-from), and it is trusted once its frequency comes from proven samples only.
+	 */
+	private trackLabel(
+		ev: Extract<
+			PipelineEvent,
+			{ kind: "track-open" | "track-update" | "track-close" }
+		>,
+	): TuningTrust {
+		const t = ev.track
+		const record = this.epochRecord(t.stream, t.epoch)
+		const block = this.streamBlockSamples(t.stream)
+		if (record === null || block === null) return "unverified"
+		const newestFrom = t.lastSample - block
+		const cached = this.newestLabel
+		let newest: TuningTrust
+		if (
+			cached?.stream === t.stream &&
+			cached.epoch === t.epoch &&
+			cached.lastSample === t.lastSample
+		)
+			newest = cached.trust
+		else {
+			newest = this.stamp(record, newestFrom, t.lastSample)
+			this.newestLabel = {
+				stream: t.stream,
+				epoch: t.epoch,
+				lastSample: t.lastSample,
+				trust: newest,
+			}
+		}
+		if (newest === "unverified") return "unverified"
+		const from = Math.max(t.startSample, t.measuredFromSample ?? t.startSample)
+		if (from >= newestFrom) return newest
+		const whole = this.stamp(record, from, t.lastSample)
+		if (whole !== "unverified") return whole
+		if (ev.kind !== "track-close") this.requestMeasure(t, newestFrom, from)
+		return "unverified"
+	}
+
+	/**
+	 * Asks the pipeline to restart track `t`'s frequency measurement from `sample` (a proven block's
+	 * start), once per request: again only after the last one took effect (`from`, the track's
+	 * measurement start now, reached it).
+	 */
+	private requestMeasure(t: TrackSnapshot, sample: number, from: number): void {
+		const asked = this.measureRequests.get(t.trackId)
+		if (asked !== undefined && from < asked) return
+		if (asked !== undefined) this.measureRequests.delete(t.trackId)
+		this.measureRequests.set(t.trackId, sample)
+		if (this.measureRequests.size > MEASURE_REQUESTS)
+			this.measureRequests.delete(
+				this.measureRequests.keys().next().value as string,
+			)
+		this.send({
+			kind: "measure-from",
+			stream: t.stream,
+			epoch: t.epoch,
+			trackId: t.trackId,
+			sample,
+		})
 	}
 
 	// === Internals: epoch triggers (§ 4.6, § 4.7) ===
@@ -1900,7 +2028,15 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const pending = this.externalPending
 		this.externalPending = null
 		if (!pending || !this.running || this.restarting) return
-		if (this.branchQueue.some(mark => mark.kind === "stream")) return
+		if (this.branchQueue.some(mark => mark.kind === "stream")) {
+			// Its frame tuned the stream that starts at the boundary (a receipt on the new session):
+			// its DSP epoch is posted there (postHeldExternal), the newest centre winning.
+			const held: ExternalCommand = this.externalAfterBoundary ?? {}
+			if (pending.centreHz !== undefined) held.centreHz = pending.centreHz
+			else delete held.centreHz
+			this.externalAfterBoundary = held
+			return
+		}
 		const caps = this.deps.sources.getCaps(this.sourceId)
 		if (!caps) return
 		if (caps.sampleRate !== this.cfg?.sampleRateHz) {
@@ -1941,6 +2077,41 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		)
 	}
 
+	/**
+	 * Posts the DSP epoch of a command held behind the stream boundary just applied: from its
+	 * receipt's position in the new stream (an upper bound: never before the frame left), or, when
+	 * the receipt cannot be mapped to this stream, from the bytes buffered upstream now.
+	 */
+	private postHeldExternal(): void {
+		const held = this.externalAfterBoundary
+		this.externalAfterBoundary = null
+		if (!held || !this.running || this.restarting) return
+		const clock = this.sampleClock()
+		const at = this.receiptSample()
+		this.externalPending = {
+			...held,
+			commandSample: clock.commandSample,
+			bufferedSamples:
+				at === null
+					? clock.bufferedSamples
+					: Math.max(0, at - clock.commandSample),
+		}
+		this.flushExternal()
+	}
+
+	/** Upper bound of the current stream's sample at the newest tuning receipt; null: unmapped. */
+	private receiptSample(): number | null {
+		const r = this.lastTuningReceipt
+		const anchor = this.ledgerAnchor
+		const map = this.streamMaps.at(-1)
+		if (!r || !anchor || r.session !== anchor.session) return null
+		if (!map || map.stream !== this.stream || !Number.isFinite(map.oLow0))
+			return null
+		if (this.upstreamLost(anchor)) return null
+		const bytes = anchor.oHigh + r.pos - map.oLow0
+		return Math.max(0, Math.ceil(bytes / map.bps) + map.gaps)
+	}
+
 	// === Tuning-ledger labels ===
 
 	/** Ledger diagnostics; null when the engine has no ledger. */
@@ -1958,8 +2129,13 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	/** A centre or rate frame flushed: the retune-delay measurement starts from it. */
 	private readonly onLedgerChange: LedgerListener = (sourceId, change) => {
-		if (sourceId !== this.sourceId || change.kind !== "receipt") return
+		if (sourceId !== this.sourceId) return
+		// A later receipt or doubt can change a label: nothing cached outlives it.
+		this.newestLabel = null
+		if (change.kind !== "receipt") return
 		const r = change.receipt
+		if (r.field === "frequency" || r.field === "sampleRate")
+			this.lastTuningReceipt = { session: r.session, pos: r.pos }
 		const cfg = this.cfg
 		if (r.field === "testMode") {
 			// A scanner marker bracket: its frames and blocks are skipped (retune-delay.ts).
@@ -2116,6 +2292,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 						hop: record.hop,
 					})
 		this.labelledBlocks += 1
+		if (record !== null) {
+			if (trust === "unverified") record.trustedFrom = null
+			else if (record.trustedFrom === null || record.trustedLabel !== trust)
+				record.trustedFrom = summary.endSample - map.blockSamples
+			record.trustedLabel = trust
+		}
 		this.noteBlockLabel(summary, trust)
 		return trust
 	}

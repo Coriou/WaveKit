@@ -395,6 +395,34 @@ describe("JobRunner own epochs", () => {
 		await runner.idle()
 	})
 
+	it("re-sends its hop once when the restarted stream's opening names it superseded (the engine dropped it unstarted)", async () => {
+		const { runner, arbiter, record } = runnerHarness()
+		await runner.start()
+		await flush()
+		// The hop was posted while the engine restarted its pipeline: it never starts.
+		arbiter.retunes[0]!.resolve(pendingFor(11, HOP0))
+		await flush()
+		runner.onEpochStarted(
+			epochAt(1, HOP0, {
+				stream: 1,
+				startSample: 0,
+				settleMode: "none",
+				tuningTrust: "unverified",
+				supersededEpoch: 11,
+			}),
+		)
+		await flush()
+		// Exactly one re-send (the foreign opening and the superseded name are one cause).
+		expect(arbiter.retunes).toHaveLength(2)
+		expect(arbiter.retunes[1]!.target.centreHz).toBe(HOP0)
+		arbiter.retunes[1]!.resolve(pendingFor(12, HOP0))
+		await flush()
+		runner.onEpochStarted(epochAt(12, HOP0, { stream: 1 }))
+		await flush()
+		expect(record.state).toBe("running")
+		await runner.idle()
+	})
+
 	it("re-sends at most once until an own epoch starts (R1)", async () => {
 		const { runner, arbiter, record } = runnerHarness()
 		await runner.start()

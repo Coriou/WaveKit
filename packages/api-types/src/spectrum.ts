@@ -164,10 +164,16 @@ export interface SpectrumSourceStatus {
 
 export interface SpectrumTrustShadow {
 	agree: number
+	/** @deprecated Always 0 since the ledger's label became the only one (kept for the shape). */
 	ledgerStricter: number
+	/** @deprecated Always 0 since the ledger's label became the only one (kept for the shape). */
 	ledgerLooser: number
+	/** @deprecated Always 0 since the ledger's label became the only one (kept for the shape). */
 	mismatch: number
-	/** The last 32 disagreements, oldest first (older ones stay in the counters). */
+	/**
+	 * @deprecated Always empty since the ledger's label became the only one (kept for the shape).
+	 * Was: the last 32 disagreements, oldest first.
+	 */
 	disagreements: SpectrumTrustDisagreement[]
 	/**
 	 * Measured delay from a centre or rate frame's flush to the first block summary whose content
@@ -191,6 +197,22 @@ export interface SpectrumRetuneDelay {
 	maxMsUpper?: number | null
 	maxBytesUpper?: number | null
 	undetected: number
+	/**
+	 * `undetected` by reason (they add up to it): `superseded` (a newer frame first),
+	 * `unmeasurable` (no payload rate), `session` (a reconnect first), `noReference` (no block
+	 * before the flush), `grid` (another bin grid: nearly every rate change), `bracket` (a scanner
+	 * marker's test pattern), `timeout` (nothing within 5 s of payload: a quiet band). Optional:
+	 * absent on cores before 2026-11-13.
+	 */
+	undetectedReasons?: {
+		superseded: number
+		unmeasurable: number
+		session: number
+		noReference: number
+		grid: number
+		bracket: number
+		timeout: number
+	}
 }
 
 export interface SpectrumTrustDisagreement {

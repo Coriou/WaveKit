@@ -42,8 +42,6 @@ export class ArbiterFakeTuner extends EventEmitter {
 	readonly known = new Map<string, Set<TunerStateField>>()
 	/** WG9: frequency/sampleRate known only from the declared baseline until a write proves them. */
 	readonly declared = new Map<string, Set<TunerStateField>>()
-	/** WG9 req 3.2: tuning fields written on this connection; null = every field counts as written. */
-	connectionWrites: Set<TunerStateField> | null = null
 	failNext: Error | null = null
 	/** Rejects every write while set (a dropped socket). */
 	failAll: Error | null = null
@@ -100,12 +98,6 @@ export class ArbiterFakeTuner extends EventEmitter {
 		}
 	}
 
-	/** True only once both fields were written on this connection (never with nothing recorded). */
-	tuningWrittenOnConnection(_sourceId: string): boolean {
-		const w = this.connectionWrites
-		return w !== null && w.has("frequency") && w.has("sampleRate")
-	}
-
 	setControl(sourceId: string, mode: "internal" | "external"): void {
 		const s = this.states.get(sourceId)!
 		if (s.controlMode === mode) return
@@ -151,7 +143,6 @@ export class ArbiterFakeTuner extends EventEmitter {
 		if (field && accept) {
 			this.known.get(sourceId)?.add(field)
 			this.declared.get(sourceId)?.delete(field)
-			this.connectionWrites?.add(field)
 		}
 		this.emit("command-sent", sourceId, name, value, opts.origin)
 		return Promise.resolve()
