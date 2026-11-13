@@ -7,7 +7,7 @@
  * Exactly one listed client while this connection is up is free: `port-matched` when it names
  * this connection's local port, `sole-client` when it names another port or none.
  *
- * Why one client is enough without the port (Main decision): rtlmux sees the core's address
+ * Why one client is enough without the port (by design): rtlmux sees the core's address
  * after any NAT (a container network, a Docker or OrbStack gateway), which may rewrite the port,
  * so a port match is not something the core can rely on. While this connection is up rtlmux
  * lists it, so a list of exactly one client is this connection, provided the list itself is
@@ -119,4 +119,27 @@ export function receiverClientsVerdict(
 	// Only a list that names every client says who they are; at most one of them is this one.
 	if (reading.ports.length !== reading.clients) return unknown
 	return { free: false, reason: "another-client", readingAt }
+}
+
+/**
+ * Whether the polled sdr-host is the receiver this source's IQ connection reaches. A port match
+ * proved that by itself; a sole client does not (an sdr-host at another address, whose only
+ * client is SDR++, would read as free). True only when the sdr-host's API host is the host the
+ * IQ connection uses (the receiver identity is not used: a unit identity comes from the polled
+ * sdr-host's own answer, so it cannot show that sdr-host is this connection's). Anything else,
+ * including an unparsable URL, is false: the verdict is then clients-unknown.
+ */
+export function sdrHostPairedWithSource(
+	apiUrl: string | undefined,
+	iqHost: string | undefined,
+): boolean {
+	if (apiUrl === undefined || iqHost === undefined) return false
+	let host: string
+	try {
+		host = new URL(apiUrl).hostname
+	} catch {
+		return false
+	}
+	const bare = (h: string) => h.replace(/^\[|\]$/g, "").toLowerCase()
+	return bare(host) === bare(iqHost)
 }

@@ -8,7 +8,7 @@
 // "Receiver paused" with Resume (no tuning written: SDR++ may have retuned the dongle meanwhile) and, when the
 // core knows the pre-pause centre, "Resume at <MHz>" (writes the pre-pause tuning back); a failed resume reads
 // as an alert with Retry (the same kind of resume), and the tuner controls wait.
-import { useEffect, useId, useState, type CSSProperties } from "react"
+import { useEffect, useId, useRef, useState, type CSSProperties } from "react"
 import type { TunerState } from "@wavekit/api-types"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
@@ -317,6 +317,14 @@ function TuningUnprovenNote() {
 	const { data, source } = useReceiver()
 	const readOnly = useReadOnly()
 	const [busy, setBusy] = useState(false)
+	// Take-back resolves after an await: no state update once the note has unmounted.
+	const mounted = useRef(true)
+	useEffect(() => {
+		mounted.current = true
+		return () => {
+			mounted.current = false
+		}
+	}, [])
 	const [refusal, setRefusal] = useState<{ id: string; text: string } | null>(
 		null,
 	)
@@ -329,6 +337,7 @@ function TuningUnprovenNote() {
 		setBusy(true)
 		setRefusal(null)
 		const text = await takeTuningBack(data, id)
+		if (!mounted.current) return
 		setBusy(false)
 		if (text !== null) setRefusal({ id, text })
 	}

@@ -10,6 +10,7 @@ import {
 	receiverClientsListedAfter,
 	receiverClientsMaxAgeMs,
 	receiverClientsVerdict,
+	sdrHostPairedWithSource,
 	SDR_HOST_LIST_FETCH_MS,
 	SDR_HOST_LIST_MAX_AGE_MS,
 } from "../../../src/core/tuning-ledger-receiver-free.js"
@@ -290,5 +291,34 @@ describe("receiverClientsListedAfter", () => {
 			maxListAgeMs: SDR_HOST_LIST_MAX_AGE_MS,
 			fetchMs: SDR_HOST_LIST_FETCH_MS,
 		})
+	})
+})
+
+describe("sdrHostPairedWithSource", () => {
+	it("pairs only an sdr-host on the host the IQ connection uses", () => {
+		expect(
+			sdrHostPairedWithSource(
+				"http://receiver.example:8080",
+				"receiver.example",
+			),
+		).toBe(true)
+		expect(sdrHostPairedWithSource("http://[::1]:8080", "::1")).toBe(true)
+		expect(
+			sdrHostPairedWithSource(
+				"http://RECEIVER.example:8080",
+				"receiver.example",
+			),
+		).toBe(true)
+	})
+
+	it("an sdr-host elsewhere (its only client SDR++ on another receiver) is not paired: hold", () => {
+		expect(
+			sdrHostPairedWithSource("http://other.example:8080", "receiver.example"),
+		).toBe(false)
+		expect(sdrHostPairedWithSource(undefined, "receiver.example")).toBe(false)
+		expect(
+			sdrHostPairedWithSource("http://receiver.example:8080", undefined),
+		).toBe(false)
+		expect(sdrHostPairedWithSource("not a url", "receiver.example")).toBe(false)
 	})
 })

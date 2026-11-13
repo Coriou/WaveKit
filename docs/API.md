@@ -1333,7 +1333,8 @@ What a resume writes to the receiver depends on the body:
   this connection's local port (rtlmux sees the core's address after any NAT, which may rewrite
   the port); `resumeOutcome` says which. Each sdr-host answer must be at most two poll intervals and
   a request timeout old (8 s with the defaults); the client list it carries may be older (below). Anything else
-  leaves the tuning as found: two or more clients on rtlmux, zero clients, no sdr-host (or
+  leaves the tuning as found: two or more clients on rtlmux, zero clients, an sdr-host whose
+  API host is not the host the IQ connection uses, no sdr-host (or
   `resources.sdrHostPoller` off), an answer that fails or is too old, or a relay client. The
   sdr-host serves the client list of its own last rtlmux stats poll, which can be older than the
   answer, so a free answer counts only when the list itself is newer than the connection and the
