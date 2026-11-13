@@ -565,7 +565,7 @@ export const CHECK_STEPS = [
 
 /** Network or registry trouble in a step's output: never the checked code. */
 const NETWORK_SIGNS =
-	/ERR_PNPM_FETCH_|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|\b(?:HTTP|status|code)\W{0,3}5\d\d\b|\(5\d\d\)|\b5\d\d (?:Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out)/i
+	/ERR_PNPM_FETCH_|\bE(?:CONNRESET|TIMEDOUT|AI_AGAIN|NOTFOUND)\b|socket hang up|\b(?:HTTP|status|code)\W{0,3}5\d\d\b|\b5\d\d (?:Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out)/
 /** The output of a setup step that failed for the checked code: a lockfile or manifest error, TS diagnostics. */
 const CODE_SIGNS = /** @type {Record<string, RegExp>} */ ({
 	install:
@@ -579,20 +579,24 @@ const CODE_SIGNS = /** @type {Record<string, RegExp>} */ ({
  * @param {string} step @param {string} output
  */
 export const codeCaused = (step, output) =>
-	!!CODE_SIGNS[step]?.test(output) && !NETWORK_SIGNS.test(output)
+	!!CODE_SIGNS[step]?.test(output) &&
+	// tsc never fetches: identifiers in its diagnostics may look like network errors.
+	(step === "build-shared" || !NETWORK_SIGNS.test(output))
 
 /**
  * The first setup step that did not exit 0 (a missing one counts), or undefined; also undefined
- * when any failed setup step failed for the checked code, since the later ones only follow from it
- * (no node_modules after a lockfile error). `output` reads a step's log: the job script passes the
+ * when that first failed step failed for the checked code (later ones only follow from it). `output` reads a step's log: the job script passes the
  * whole log; without it nothing is code-caused, which only names the step.
  * @param {Record<string, number>} steps
  * @param {(step: string) => string} [output]
  */
 export const setupFailure = (steps, output) => {
 	const failed = SETUP_STEPS.filter(n => n in steps && steps[n] !== 0)
-	if (output && failed.some(n => codeCaused(n, output(n)))) return undefined
-	return failed[0]
+	const first = failed[0]
+	// Only the first failed step decides: a later one may just follow from it (a half-linked
+	// node_modules after a fetch failure makes tsc report missing modules).
+	if (output && first && codeCaused(first, output(first))) return undefined
+	return first
 }
 
 /**

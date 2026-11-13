@@ -635,9 +635,18 @@ describe("exit codes", () => {
 		expect(codeCaused("pip", lockfile)).toBe(false)
 		for (const out of [fetch, timeout, dns, unknown, ""])
 			expect([out, codeCaused("install", out)]).toEqual([out, false])
-		// Network trouble wins over a code sign in the same output.
+		// Network trouble wins over a code sign in an install log.
 		expect(codeCaused("install", `${reset}\n${lockfile}`)).toBe(false)
-		expect(codeCaused("build-shared", `${ts}\n${timeout}`)).toBe(false)
+		// tsc never fetches: names that look like network errors stay code errors.
+		for (const out of [
+			"src/mesh.ts(130,3): error TS2322: type MeshNodeNotFoundResponse",
+			"src/a.ts(1,1): error TS2339: Property nodeNotFound does not exist",
+			"src/b.ts(2,2): error TS2345: z.literal(512) is not assignable",
+			`${ts}\n${timeout}`,
+		])
+			expect([out, codeCaused("build-shared", out)]).toEqual([out, true])
+		// Errno names are matched whole and in pnpm's case only.
+		expect(codeCaused("install", `${lockfile}\nnodeNotFound`)).toBe(true)
 
 		const logs: Record<string, string> = {}
 		const out = (n: string) => logs[n] ?? ""
@@ -661,6 +670,12 @@ describe("exit codes", () => {
 		expect(
 			setupFailure({ install: 0, "build-shared": 1 }, () => "out of memory"),
 		).toBe("build-shared")
+		// Only the first failed step decides: a fetch failure that leaves a half-linked
+		// node_modules stays infra even when the build then reports missing modules.
+		logs["install"] = fetch
+		logs["build-shared"] =
+			"src/index.ts(1,20): error TS2307: Cannot find module 'zod'"
+		expect(setupFailure(steps, out)).toBe("install")
 	})
 
 	it("puts every step of the workflow in exactly one of the setup and check lists", () => {
