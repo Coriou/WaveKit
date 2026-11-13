@@ -16,10 +16,13 @@ import {
 	FakeClock,
 } from "../../../mocks/scanner/arbiter-fakes.js"
 import { testSettings } from "../../../mocks/scanner/engine-fakes.js"
+import { FakeReceiverLedger } from "../../../mocks/fake-receiver-ledger.js"
+import type { TuningLedger } from "../../../../src/core/tuning-ledger.js"
 
 const logger = pino({ level: "silent" })
 
 class Sources extends EventEmitter {
+	tuningLedger?: TuningLedger
 	isRtlTcpSource(id: string): boolean {
 		return id === "rtl"
 	}
@@ -33,6 +36,20 @@ function harness(
 	tuner.addSource("rtl", unknown)
 	const sources = new Sources()
 	const clock = new FakeClock()
+	// The live session holds receipts of the known centre and rate (settle 0: proven at once).
+	const ledger = new FakeReceiverLedger("rtl", {
+		rateHz: 2_048_000,
+		settleMs: 0,
+	})
+	const state = tuner.states.get("rtl")!
+	ledger.start()
+	if (!unknown.includes("sampleRate"))
+		ledger.write("set-sample-rate", state.sampleRate, "operator")
+	if (!unknown.includes("frequency"))
+		ledger.write("set-frequency", state.frequency, "operator")
+	sources.tuningLedger = ledger.ledger
+	tuner.receipts = (_id, command, value, writer, jobId) =>
+		ledger.write(command, value, writer, jobId)
 	const persisted: { sourceId: string; lease: PersistedLease | null }[] = []
 	const deps: ArbiterDeps = {
 		tuner: tuner as never,
@@ -60,7 +77,7 @@ function harness(
 	arbiter.on("lease-lost", (lease: Lease, reason: LeaseLostReason) =>
 		lost.push({ jobId: lease.jobId, reason }),
 	)
-	return { tuner, sources, clock, persisted, arbiter, lost }
+	return { tuner, sources, clock, persisted, arbiter, lost, ledger }
 }
 
 interface RetuneOp {
@@ -306,7 +323,8 @@ describe("TunerArbiter lease discipline", () => {
 			expectMarker: true,
 			centreHz: 446_037_500,
 			gainKey: "m:400",
-			tuningTrust: "commanded",
+			// The posted label is never read: the engine labels the hop's samples from the ledger.
+			tuningTrust: "unverified",
 			settleSamples: Math.round(
 				(testSettings().sweep.settleMs.network * 2_048_000) / 1000,
 			),
@@ -912,14 +930,14 @@ describe("TunerArbiter lease discipline", () => {
 		expect(h.clock.suppressed).toBe(0)
 	})
 
-	describe("WG9 req 3.1: hop epoch trust by the shared rule", () => {
+	describe("the rate a hop writes, by the tuning ledger", () => {
 		const hop = {
 			centreHz: 446_037_500,
 			gainTenthsDb: null,
 			sampleRateHz: null,
 		}
 
-		it("a proven rate: no rate write, frequency only, commanded with markers", async () => {
+		it("a rate the ledger proves: no rate write, frequency only, with markers; the hop keeps its frequency receipt", async () => {
 			const h = harness()
 			const r = h.arbiter.acquire("a", "rtl", 50)
 			if (!r.ok) throw new Error("acquire failed")
@@ -929,15 +947,19 @@ describe("TunerArbiter lease discipline", () => {
 				"set-frequency",
 				"set-test-mode",
 			])
-			expect(pending).toMatchObject({
-				tuningTrust: "commanded",
-				expectMarker: true,
-			})
+			expect(pending).toMatchObject({ expectMarker: true })
+			const receipt = h.ledger.ledger
+				.receipts("rtl")
+				.find(x => x.field === "frequency" && x.value === hop.centreHz)!
+			expect(receipt.writer).toBe("scanner")
+			expect(r.lease.verified?.frequencyReceipt).toBe(receipt.seq)
 		})
 
-		it("a declared-only rate: the hop commands the declared rate first, then stays commanded with markers", async () => {
+		it("a new session without a rate receipt: the hop commands the held rate first; then frequency only", async () => {
 			const h = harness()
-			h.tuner.declared.set("rtl", new Set(["frequency", "sampleRate"]))
+			// A reconnect: the new session holds no receipt (nothing carries across sessions).
+			h.ledger.reconnect()
+			h.ledger.start()
 			const r = h.arbiter.acquire("a", "rtl", 50)
 			if (!r.ok) throw new Error("acquire failed")
 			const first = await h.arbiter.retune(r.lease, hop)
@@ -948,40 +970,46 @@ describe("TunerArbiter lease discipline", () => {
 				["set-test-mode", 0],
 			])
 			expect(first).toMatchObject({
-				tuningTrust: "commanded",
 				expectMarker: true,
 				sampleRateHz: 2_048_000,
 			})
-			// Proven now: the next hop sends the frequency only.
+			// Proven by its receipt now: the next hop sends the frequency only.
 			h.tuner.sent.length = 0
-			const next = await h.arbiter.retune(r.lease, {
-				...hop,
-				centreHz: 447_012_500,
-			})
+			await h.arbiter.retune(r.lease, { ...hop, centreHz: 447_012_500 })
 			expect(h.tuner.sent.map(c => c.name)).toEqual([
 				"set-test-mode",
 				"set-frequency",
 				"set-test-mode",
 			])
-			expect(next.tuningTrust).toBe("commanded")
 		})
 
-		it("a rate not written on this connection is re-sent once; then frequency only", async () => {
+		it("a doubt on the rate re-sends it once; then frequency only", async () => {
 			const h = harness()
-			h.tuner.connectionWrites = new Set()
+			h.ledger.ledger.raiseDoubt("rtl", "sampleRate", "rate-truth-mismatch")
 			const r = h.arbiter.acquire("a", "rtl", 50)
 			if (!r.ok) throw new Error("acquire failed")
-			const first = await h.arbiter.retune(r.lease, hop)
+			await h.arbiter.retune(r.lease, hop)
 			expect(h.tuner.sent.map(c => c.name)).toEqual([
 				"set-sample-rate",
 				"set-test-mode",
 				"set-frequency",
 				"set-test-mode",
 			])
-			expect(first.tuningTrust).toBe("commanded")
 			h.tuner.sent.length = 0
 			await h.arbiter.retune(r.lease, { ...hop, centreHz: 447_012_500 })
 			expect(h.tuner.sent.map(c => c.name)).not.toContain("set-sample-rate")
+		})
+
+		it("without a ledger nothing is proven: every hop writes the rate", async () => {
+			const h = harness()
+			delete h.sources.tuningLedger
+			const r = h.arbiter.acquire("a", "rtl", 50)
+			if (!r.ok) throw new Error("acquire failed")
+			await h.arbiter.retune(r.lease, hop)
+			await h.arbiter.retune(r.lease, { ...hop, centreHz: 447_012_500 })
+			expect(
+				h.tuner.sent.filter(c => c.name === "set-sample-rate"),
+			).toHaveLength(2)
 		})
 
 		it("an unknown rate without a job rate is never written and the hop is unverified", async () => {
@@ -993,21 +1021,14 @@ describe("TunerArbiter lease discipline", () => {
 			expect(pending.tuningTrust).toBe("unverified")
 		})
 
-		it("an unknown or declared-only frequency is commanded by the hop itself", async () => {
-			for (const setup of [
-				(h: ReturnType<typeof harness>) =>
-					h.tuner.declared.set("rtl", new Set(["frequency"])),
-				(h: ReturnType<typeof harness>) =>
-					h.tuner.known.get("rtl")?.delete("frequency"),
-			]) {
-				const h = harness()
-				setup(h)
-				const r = h.arbiter.acquire("a", "rtl", 50)
-				if (!r.ok) throw new Error("acquire failed")
-				const pending = await h.arbiter.retune(r.lease, hop)
-				expect(pending.tuningTrust).toBe("commanded")
-				expect(h.tuner.sent.map(c => c.name)).not.toContain("set-sample-rate")
-			}
+		it("an unknown frequency is commanded by the hop itself, whose receipt the lease keeps", async () => {
+			const h = harness(["frequency"])
+			const r = h.arbiter.acquire("a", "rtl", 50)
+			if (!r.ok) throw new Error("acquire failed")
+			await h.arbiter.retune(r.lease, hop)
+			expect(h.tuner.sent.map(c => c.name)).toContain("set-frequency")
+			expect(h.tuner.sent.map(c => c.name)).not.toContain("set-sample-rate")
+			expect(r.lease.verified?.frequencyReceipt).not.toBeNull()
 		})
 	})
 

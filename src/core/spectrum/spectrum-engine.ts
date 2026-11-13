@@ -19,7 +19,6 @@ import type { BranchTelemetry, FanoutManager } from "../fanout-manager.js"
 import type { SourceFanoutRouter } from "../source-fanout-router.js"
 import type { SourceManager } from "../source-manager.js"
 import type { TunerController } from "../tuner-controller.js"
-import { tuningTrustOf } from "../tuning-trust.js"
 import type {
 	LedgerListener,
 	TrustVerdict,
@@ -51,12 +50,7 @@ import { bytesPerSample } from "./frame-source.js"
 import type { ArtefactMasks } from "./artefacts.js"
 import { IqRing } from "./iq-ring.js"
 import type { WorkerPipelineInput } from "./worker-protocol.js"
-import {
-	blockSamplesOf,
-	frameTrust,
-	mergeTrust,
-	operatorRetuneTiming,
-} from "./retune-settle.js"
+import { blockSamplesOf, operatorRetuneTiming } from "./retune-settle.js"
 import { alarmWaitBlocksOf } from "./retune-alarm.js"
 import {
 	createPipelineHost,
@@ -128,20 +122,27 @@ export interface EngineEpoch {
 	centreHz: number
 	sampleRateHz: number
 	gainKey: string
+	/**
+	 * The tuning ledger's label (the only one): on a data event (block summary, track, transient)
+	 * the label of the samples it was measured on (SpectrumEngine.stamp); in `currentEpoch()` the
+	 * label of the current epoch's newest block summary (`unverified` before its first); on a
+	 * posted epoch's `epoch-started` whether the ledger holds this session's receipts of its centre
+	 * and rate (proven or settling; a scanner hop's own frequency receipt), so its poster knows the
+	 * epoch is its own; `unverified` on a stream opening and an untracked epoch, which are not
+	 * tuning events.
+	 */
 	tuningTrust: TuningTrust
 	settleMode: SettleMode | null
 	/**
 	 * On an `epoch-started` event only, never in `currentEpoch()`: the id its poster was given
-	 * (`allocateEpoch`, or a scanner hop's id when it was held through a restart and re-posted)
-	 * when the pipeline started it as another. The label is still the one posted for it.
+	 * (`allocateEpoch`) when the pipeline started it as another (it numbers a post
+	 * `max(id, last + 1)`, so an untracked epoch it started first moves it).
 	 */
 	requestedEpoch?: number
 	/**
-	 * On an `epoch-started` event only: the id its poster was given (`requestedEpoch`) for a scanner
-	 * hop held through a restart whose rate was not the restarted stream's. Such a hop is re-posted
-	 * `unverified` at the stream's real centre and rate (never on the rate it asked for); this names
-	 * it on its own start, or on the first start after it was dropped unstarted (a newer post
-	 * replaced it), so its poster learns its hop was superseded and re-sends it (no dwell credit).
+	 * On a stream opening's `epoch-started` only: a scanner hop the pipeline restart before this
+	 * stream dropped unstarted (submitted while the pipeline restarted, or still pending in the
+	 * old pipeline). Its poster learns its hop never started and re-sends it (no dwell credit).
 	 */
 	supersededEpoch?: number
 }
@@ -179,6 +180,12 @@ export interface EpochClock {
 	}
 	allocateEpoch(): number
 	submitEpoch(pending: PendingEpoch): void
+	/**
+	 * The frequency receipt (TuningLedger seq) of the scanner hop submitted as `epoch`, or null when
+	 * its frame got none: that epoch's samples are trusted only on a proof by this receipt.
+	 * Optional: a clock without it never trusts a hop's samples.
+	 */
+	noteHopReceipt?(epoch: number, seq: number | null): void
 	suppressExternal(on: boolean): void
 	currentEpoch(): EngineEpoch
 	readonly markerSupported: boolean | null
@@ -210,20 +217,18 @@ export interface SpectrumEngineEvents {
 	warning: (code: EngineWarning["code"], deltaHz: number | null) => void
 }
 
-/** What the engine reads from the tuning ledger (shadow label) and the doubts it raises. */
+/** What the engine reads from the tuning ledger (its labels) and the doubts it raises. */
 export type EngineLedger = Pick<
 	TuningLedger,
-	"trustAt" | "position" | "raiseDoubt"
+	"trustAt" | "position" | "raiseDoubt" | "fieldState"
 > &
 	// Receipts feed the retune-delay measurement; a ledger without it measures nothing.
 	Partial<Pick<TuningLedger, "subscribe">>
 
 /**
- * Tuning-ledger shadow (trust step 1): every block summary is labelled by the ledger beside the
- * engine's own label, and the two are counted. Nothing reads the ledger label yet.
- * `ledgerStricter`: the ledger says `unverified` where the engine trusts; `ledgerLooser`: the
- * ledger trusts where the engine says `unverified`; `mismatch`: both trust, with another label,
- * centre or rate.
+ * Tuning-ledger diagnostics. Since trust step 3 the ledger's label is the engine's only label, so
+ * there is no second label to disagree with: `agree` counts the block summaries labelled, the
+ * disagreement counters stay 0 and `disagreements` empty (kept for the status shape).
  */
 export interface EngineTrustShadow {
 	agree: number
@@ -258,14 +263,6 @@ export interface EngineTrustDisagreement {
 	doubtReason?: string
 }
 
-/**
- * Disagreements kept for status. The step-1 acceptance explains every disagreement of a 30 min
- * run line by line from the status poll (1 s): disagreements come in bursts of one per block
- * summary around a tuning event (integration 100 ms default: 10 per second over a ≤ 1 s settle),
- * so 32 holds a whole burst plus its neighbours between two polls; older ones stay in the counters.
- */
-export const SHADOW_DISAGREEMENTS = 32
-
 /** Where a ledger session's position 0 lies in a branch's offered bytes, as bounds. */
 interface LedgerAnchor {
 	session: number
@@ -275,18 +272,21 @@ interface LedgerAnchor {
 	lost: number | null
 }
 
-/** A shadow read: the ledger's verdict and where it was read (null: not mapped). */
-interface ShadowRead {
+/** A ledger read of a sample range: the verdict and where it was read (null: not mapped). */
+interface LedgerRead {
 	verdict: Pick<
 		TrustVerdict,
 		"trust" | "frequency" | "sampleRate" | "doubtReason"
-	> & { reason?: string }
+	> & {
+		reason?: string
+		receipts?: TrustVerdict["receipts"]
+	}
 	session: number | null
 	posA: number | null
 	posB: number | null
 }
 
-function unmappedRead(reason: string): ShadowRead {
+function unmappedRead(reason: string): LedgerRead {
 	return {
 		verdict: {
 			trust: "unverified",
@@ -298,6 +298,31 @@ function unmappedRead(reason: string): ShadowRead {
 		posA: null,
 		posB: null,
 	}
+}
+
+/**
+ * Started epochs whose centre, rate and hop the labels of late events still read (a thread host
+ * delivers an older epoch's events after a newer one started). An event of an epoch no longer
+ * kept reads `unverified`. 16: the pipeline holds at most one settling epoch and one stream
+ * opening at a time, and a late event trails its epoch by at most the in-flight budget
+ * (MAX_INFLIGHT_BYTES 4 MiB ≈ 0.87 s at 2.4 Msps U8), in which a sweep at the fastest local
+ * settle (300 ms) starts 3 epochs: 16 keeps five times that.
+ */
+const EPOCH_RECORDS = 16
+
+/**
+ * Scanner hops whose frequency receipt is kept (noteHopReceipt): 64, the arbiter's own-epoch
+ * memory (JobRunner keeps its last 64 epoch ids), of which only the newest few still label data.
+ */
+const HOP_RECEIPTS = 64
+
+/** A started epoch as the labels read it. `hop`: a scanner hop's posted id (its receipt key). */
+interface EpochRecord {
+	stream: number
+	epoch: number
+	centreHz: number
+	sampleRateHz: number
+	hop: number | null
 }
 
 function writableBacklog(stream: Readable | undefined): number {
@@ -319,14 +344,11 @@ export interface SpectrumEngineDeps {
 	/** The tuning ledger; absent = `sources.tuningLedger` (the real SourceManager's), else none. */
 	ledger?: EngineLedger | null
 	/**
-	 * WG9 req 3.2: `tuningWrittenOnConnection` is present on the real TunerController
-	 * (SpectrumService passes it through); when present and false, a label the state rule
-	 * would make `commanded`/`relay` is demoted to `unverified`.
+	 * Commands and relay changes post DSP epochs (a centre change resets tracks); gain keys come
+	 * from its state. It never decides a label: labels are the tuning ledger's.
 	 */
 	tuner:
-		| (Pick<TunerController, "getState"> &
-				Partial<Pick<TunerController, "tuningWrittenOnConnection">> &
-				Pick<EventEmitter, "on" | "off">)
+		| (Pick<TunerController, "getState"> & Pick<EventEmitter, "on" | "off">)
 		| null
 	settings: () => SpectrumSettings
 	/** WG8: the resolved, validated bins cap (SpectrumService). Absent = the 2 048 floor. */
@@ -453,9 +475,6 @@ interface Batch {
 interface StreamMark {
 	kind: "stream"
 	atBranchByte: number
-	trust: TuningTrust
-	/** Its place among epoch triggers (`SpectrumEngine.ticket`). */
-	ticket: number
 }
 
 /** Something that happens when the engine's branch byte counter reaches `atBranchByte`. */
@@ -463,54 +482,27 @@ type BranchMark =
 	| { kind: "gap"; atBranchByte: number; droppedBytes: number }
 	| StreamMark
 
-/** An operator, relay or reconnect command's epoch still to be posted (`queueExternal`). */
+/**
+ * An operator, relay or host-centre command's DSP epoch still to be posted (`queueExternal`): a
+ * centre change resets tracks and discards stale blocks. It carries no label.
+ */
 interface ExternalCommand {
-	trust: TuningTrust
-	/** WG9 req 3.3: the centre a set-frequency command wrote (one epoch per retune). */
+	/** The centre a set-frequency command wrote (absent: the source's centre when posted). */
 	centreHz?: number
-	/**
-	 * WG9 req 3.1/3.2: merge the shared state rule into `trust` at flush, after the
-	 * tuner finished the update that fired the event (a relay command updates caps
-	 * before it records the accepted value; reconnect reconciliation before replay events).
-	 */
-	checkState: boolean
-	/** Its place among epoch triggers (`SpectrumEngine.ticket`): the first command it merges. */
-	ticket: number
-	/**
-	 * The ticket of the newest command merged into it (absent: `ticket`). Its label and centre are
-	 * that command's, so it is ordered against a held scanner hop by this one (postCarried).
-	 */
-	newest?: number
-	/**
-	 * Posted from `carried` into a later stream: an explicit centre is only a claim about the
-	 * tuner when the command was written, so it must still agree with caps when posted.
-	 */
-	kept?: boolean
-}
-
-/** A scanner hop submitted while the pipeline restarted, re-posted into the stream that follows. */
-interface HeldHop {
-	pending: PendingEpoch
-	ticket: number
-	/** The id the arbiter returned for it (the re-post takes a new one). */
-	requested: number
 }
 
 /**
  * A pending epoch posted to the host whose start has not arrived yet, in post order. The
  * pipeline numbers it `max(key, last id + 1)` (SpectrumPipeline.onPending), so an untracked
  * epoch the engine had not heard of yet moves it, and the ones after it, to later ids: its
- * start is found by replaying that numbering over the queue, never by its key.
+ * start is found by replaying that numbering over the queue (takeStart), so its poster is told
+ * the id it was given (`requestedEpoch`). Naming only: no label depends on it.
  */
 interface PendingStart {
 	/** The id posted (`PendingEpoch.epoch`). */
 	key: number
-	/** The id its caller was given (`key`, or a held hop's original). */
-	requested: number
-	/** WG9 req 3.4: a non-scanner epoch's first sample past the network settle. */
-	verifiedFrom: number | null
-	/** A held hop re-posted on another rate than its own (EngineEpoch.supersededEpoch). */
-	superseded?: true
+	/** A scanner hop (submitEpoch): its samples need its own frequency receipt. */
+	hop: boolean
 	meta: EngineEpoch
 }
 
@@ -571,47 +563,25 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private externalPending:
 		| (ExternalCommand & { commandSample: number; bufferedSamples: number })
 		| null = null
-	/**
-	 * Orders epoch triggers: each command's epoch, stream boundary and source disconnect takes the
-	 * next value, so a command can tell whether it came after a boundary or a disconnect.
-	 */
-	private ticket = 0
-	/** The ticket of the source's last disconnect (0: none since start). */
-	private disconnectTicket = 0
-	/**
-	 * Commands that came while the pipeline restarted, or after a stream boundary the delivered
-	 * bytes have not reached yet: they belong to a stream that starts later, and are posted into
-	 * it once it has started (beginStream), never dropped. One entry per stream, in ticket order:
-	 * commands for the same stream share an entry, a queued boundary between two keeps them
-	 * apart. A command older than the source's last disconnect tuned a connection that is gone,
-	 * and is dropped.
-	 */
-	private readonly carried: ExternalCommand[] = []
-	/**
-	 * The newest scanner hop submitted during a restart (only the newest: an older hop's epoch
-	 * would end where the next one starts). The old host can no longer take it, and the job's
-	 * own re-send may already be spent on the reconnect that preceded the restart.
-	 */
-	private heldHop: HeldHop | null = null
 	/** Pending epochs posted to the current host whose start has not arrived (PendingStart). */
 	private readonly starts: PendingStart[] = []
-	/** A superseded held hop's requested id dropped unstarted; the next start names it (PendingStart.superseded). */
+	/**
+	 * The newest scanner hop a pipeline restart dropped unstarted (its posted id); the next stream
+	 * opening names it (`supersededEpoch`) so its job re-sends it. Null: none.
+	 */
 	private supersededLost: number | null = null
 	/** The current host's last epoch id, from the events it has delivered (they arrive in order). */
 	private startedThrough = 0
-	/** The label of the untracked epoch the pipeline just announced, until its own start. */
+	/** The untracked epoch the pipeline just announced, until its own start. */
 	private untrackedStart: EngineEpoch | null = null
-	/** A stream whose posted epochs no longer match the host's starts (takeStart): none is named. */
-	private unnamedStream: number | null = null
-	/**
-	 * The current epoch's `PendingStart.verifiedFrom` (null: no unverified window). Events whose
-	 * data starts before it are `unverified` for the whole epoch.
-	 */
-	private currentVerifiedFrom: number | null = null
-	/** The epoch `currentVerifiedFrom` belongs to. */
-	private currentVerifiedEpoch: number | null = null
-	/** Status reads `unverified` until the first data-bound event at or past the current epoch's settle. */
-	private statusWindowOpen = false
+	/** Started epochs, newest last (EPOCH_RECORDS): what late events are labelled against. */
+	private readonly epochRecords: EpochRecord[] = []
+	/** Scanner hop id → its frequency receipt seq, or null when it got none (HOP_RECEIPTS). */
+	private readonly hopReceipts = new Map<number, number | null>()
+	/** The label of the current epoch's newest block summary (currentEpoch()). */
+	private liveLabel: TuningTrust = "unverified"
+	/** Block summaries labelled (status `trustShadow.agree`). */
+	private labelledBlocks = 0
 	/**
 	 * Streams posted to the host whose own `epoch-started` (settleMode "none")
 	 * has not arrived yet, in post order. A thread host can still deliver the
@@ -638,9 +608,9 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private warnSuppressed = 0
 	private centreOverride: number | null = null
 	private hostTimer: NodeJS.Timeout | null = null
-	// Tuning-ledger shadow (trust step 1). Positions are mapped through the branch's offered bytes
+	// Tuning-ledger labels. Positions are mapped through the branch's offered bytes
 	// (`totalBytesWritten`: accepted plus dropped, in source order), always as a lower bound for a
-	// block's first byte and an upper bound for its end, so the ledger can only be stricter.
+	// range's first byte and an upper bound for its end, so a label can only be stricter.
 	/** Where the live ledger session's position 0 lies in offered branch bytes, as bounds. */
 	private ledgerAnchor: LedgerAnchor | null = null
 	/**
@@ -667,20 +637,13 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	}[] = []
 	/**
 	 * Accepted branch bytes up to the byte being handled, also inside a chunk (branchBytes keeps
-	 * the chunk-start value there for its existing readers): the shadow's stream map reads this.
+	 * the chunk-start value there for its existing readers): the stream map reads this.
 	 */
 	private shadowBranchByte = 0
 	/** Ledger position at the last host-centre poll that matched caps (lower bound of a move). */
 	private hostCentreOkAt: { session: number; pos: number } | null = null
 	/** Dropped branch bytes applied as gaps since the branch was created. */
 	private appliedDropBytes = 0
-	private readonly shadow: Omit<EngineTrustShadow, "retuneDelay"> = {
-		agree: 0,
-		ledgerStricter: 0,
-		ledgerLooser: 0,
-		mismatch: 0,
-		disagreements: [],
-	}
 	private readonly retuneDelay = new RetuneDelayMeter()
 	private unsubscribeLedger: (() => void) | null = null
 
@@ -768,10 +731,11 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.supersededLost = null
 		this.untrackedStart = null
 		this.openingStreams.length = 0
-		// A command carried by an earlier run tuned before this branch existed.
-		this.carried.length = 0
-		this.heldHop = null
-		this.beginStream(this.initialTrust())
+		this.epochRecords.length = 0
+		this.hopReceipts.clear()
+		this.liveLabel = "unverified"
+		// No label and no settle: an engine start is not a tuning event (the ledger labels it).
+		this.beginStream()
 		const reader = this.deps.hostCentre ?? nullHostCentreReader
 		if (reader !== nullHostCentreReader) {
 			this.hostTimer = setInterval(
@@ -866,27 +830,29 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		return this.lastEpoch
 	}
 
+	/** A scanner hop (the arbiter): its samples are trusted only on its own frequency receipt. */
 	submitEpoch(pending: PendingEpoch): void {
-		this.postEpoch(pending, pending.epoch)
+		this.postEpoch(pending, true)
 	}
 
-	/**
-	 * `requested`: the id the epoch's caller was given (a held hop's is the arbiter's own).
-	 * `superseded`: a held hop re-posted on the stream's rate instead of its own (takeHeldHop).
-	 */
-	private postEpoch(
-		pending: PendingEpoch,
-		requested: number,
-		superseded = false,
-	): void {
+	noteHopReceipt(epoch: number, seq: number | null): void {
+		if (!Number.isSafeInteger(epoch)) return
+		this.hopReceipts.delete(epoch)
+		this.hopReceipts.set(
+			epoch,
+			typeof seq === "number" && Number.isSafeInteger(seq) ? seq : null,
+		)
+		if (this.hopReceipts.size > HOP_RECEIPTS)
+			this.hopReceipts.delete(this.hopReceipts.keys().next().value as number)
+	}
+
+	/** `hop`: a scanner hop (submitEpoch); else an engine-posted DSP epoch (flushExternal). */
+	private postEpoch(pending: PendingEpoch, hop: boolean): void {
 		if (!this.running || !this.host) return
 		if (this.restarting) {
-			// Only the scanner submits here during a restart (external commands are carried before).
-			this.heldHop = {
-				pending: { ...pending },
-				ticket: ++this.ticket,
-				requested,
-			}
+			// The old host can no longer take it: the restarted stream's opening names it, so its
+			// job re-sends it (no held copy: the ledger, not the engine, keeps what was written).
+			if (hop) this.supersededLost = pending.epoch
 			return
 		}
 		if (pending.sampleRateHz !== this.cfg?.sampleRateHz) {
@@ -894,15 +860,13 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				{ from: this.cfg?.sampleRateHz, to: pending.sampleRateHz },
 				"Sample rate change starts a new stream",
 			)
-			this.restartInBackground(pending.tuningTrust)
+			this.restartInBackground()
 			return
 		}
 		this.flushBatch()
 		this.starts.push({
 			key: pending.epoch,
-			requested,
-			verifiedFrom: pending.verifiedFromSample ?? null,
-			...(superseded ? { superseded: true as const } : {}),
+			hop,
 			meta: {
 				stream: this.stream,
 				epoch: pending.epoch,
@@ -910,7 +874,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				centreHz: pending.centreHz,
 				sampleRateHz: pending.sampleRateHz,
 				gainKey: pending.gainKey,
-				tuningTrust: pending.tuningTrust,
+				tuningTrust: "unverified",
 				settleMode: null,
 			},
 		})
@@ -929,7 +893,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	 * the last id the host delivered the next starts follow the queue in order. Replaying that
 	 * numbering from `startedThrough` names the entry exactly; the ones before it never start.
 	 * Only the current stream's entries can start before its next opening. Null when none
-	 * matches: the queue no longer describes the host, so it is dropped (fail closed).
+	 * matches: the queue no longer describes the host, so it is dropped (its epoch then has no
+	 * poster: not a hop, so a hop's samples are never trusted on another epoch's start).
 	 */
 	private takeStart(epoch: number): PendingStart | null {
 		let id = this.startedThrough
@@ -945,30 +910,18 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			return entry
 		}
 		while (this.starts[i]?.meta.stream === this.current.stream) i += 1
-		if (i > 0) this.unnamedStream = this.current.stream
 		this.dropStarts(i)
 		return null
 	}
 
-	/** Drops the first `count` pending starts, which never start; a superseded hop among them is named on the next start. */
+	/** Drops the first `count` pending starts, which never start. */
 	private dropStarts(count: number): void {
-		for (const entry of this.starts.splice(0, count))
-			if (entry.superseded === true) this.supersededLost = entry.requested
+		this.starts.splice(0, count)
 	}
 
-	/**
-	 * WG9 (tt minor): status agrees with the frames: while a non-scanner retune's unverified
-	 * window is open (no block, track or transient at or past the network settle yet), the
-	 * epoch reads `unverified`.
-	 */
+	/** The current epoch, labelled by its newest block summary (`unverified` before the first). */
 	currentEpoch(): EngineEpoch {
-		if (
-			this.statusWindowOpen &&
-			this.currentVerifiedFrom !== null &&
-			this.currentVerifiedEpoch === this.current.epoch
-		)
-			return { ...this.current, tuningTrust: "unverified" }
-		return { ...this.current }
+		return { ...this.current, tuningTrust: this.liveLabel }
 	}
 
 	// === Consumers ===
@@ -1092,7 +1045,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		// = 2 s, far above a pipeline restart) and restart again until this swap was applied.
 		for (let i = 0; i < 100 && this.learnedSwap === swap; i++) {
 			if (!this.host || !this.running || this.failed) break
-			if (!this.restarting) await this.restartPipeline(this.current.tuningTrust)
+			if (!this.restarting) await this.restartPipeline()
 			else await new Promise(resolve => setTimeout(resolve, 20))
 		}
 		if (this.learnedSwap === swap) {
@@ -1105,7 +1058,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	/** Applies new tuning (fftSize, integration, k) by recreating the pipeline. */
 	async reconfigure(): Promise<void> {
-		await this.restartPipeline(this.current.tuningTrust)
+		await this.restartPipeline()
 	}
 
 	// === Internals: hosts and streams ===
@@ -1171,6 +1124,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			tuningTrust: "unverified",
 			settleMode: null,
 		}
+		this.liveLabel = "unverified"
 		this.log.error({ err }, "Spectrum pipeline unavailable")
 		if (this.listenerCount("error") > 0) this.emit("error", err)
 		this.emit("fatal", err)
@@ -1179,12 +1133,11 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		)
 	}
 
-	private async restartPipeline(trust: TuningTrust): Promise<void> {
+	private async restartPipeline(): Promise<void> {
 		if (this.failed || this.restarting || !this.host) return
 		this.restarting = true
 		this.flushBatch()
 		const old = this.host
-		const since = this.ticket
 		try {
 			this.persisted =
 				(await old.exportState().catch(() => this.persisted)) ?? this.persisted
@@ -1213,26 +1166,18 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			if (this.spectrumFeed) this.send({ kind: "spectrum-feed", enabled: true })
 			this.restarting = false
 			this.dropStaleBranchMarks()
-			// A disconnect during the restart: its boundary was discarded with the old bytes, so the
-			// stream that starts now is a new connection's, which nothing proved yet. The replay
-			// that proves it was carried (flushExternal) and follows as this stream's next epoch.
-			// A command or hop kept for this stream likewise: the bytes still buffered can predate
-			// it, so only its own epoch, after its settle, may carry its label.
-			const kept =
-				this.carried.length > 0 ||
-				this.externalPending !== null ||
-				this.heldHop !== null
-			this.beginStream(
-				this.disconnectTicket > since || kept ? "unverified" : trust,
-			)
+			// A restart is not a tuning event: the stream opens at the source's centre, labelled by
+			// the ledger's receipts of its samples (a command during the restart is in caps by now).
+			this.externalPending = null
+			this.beginStream()
 		} finally {
 			this.restarting = false
 		}
 	}
 
 	/** Restart from an event handler: a failure (e.g. the host cannot be created) becomes "error". */
-	private restartInBackground(trust: TuningTrust): void {
-		this.restartPipeline(trust).catch((err: unknown) => {
+	private restartInBackground(): void {
+		this.restartPipeline().catch((err: unknown) => {
 			const error =
 				err instanceof Error
 					? err
@@ -1241,33 +1186,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		})
 	}
 
-	private initialTrust(): TuningTrust {
-		return this.stateTrust()
-	}
-
-	/**
-	 * WG9 req 3.1/3.2: the shared fail-closed rule on the current tuner state, demoted to
-	 * `unverified` when the tuner reports no frequency and sample-rate write on this connection.
-	 */
-	private stateTrust(): TuningTrust {
-		const tuner = this.deps.tuner
-		if (!tuner) return "unverified"
-		const trust = tuningTrustOf(tuner.getState(this.sourceId))
-		if (trust === "unverified") return trust
-		const written = tuner.tuningWrittenOnConnection
-		if (
-			typeof written === "function" &&
-			written.call(tuner, this.sourceId) !== true
-		)
-			return "unverified"
-		return trust
-	}
-
-	/**
-	 * `boundaryTicket`: the queued boundary this stream starts at; absent for a start or a restart,
-	 * whose commands still pending all came after the stream they replace stopped taking epochs.
-	 */
-	private beginStream(trust: TuningTrust, boundaryTicket?: number): void {
+	/** A new stream (engine start, pipeline restart, reconnect boundary): no label, no settle. */
+	private beginStream(): void {
 		this.flushBatch()
 		const caps = this.deps.sources.getCaps(this.sourceId)
 		const sampleRateHz = this.cfg?.sampleRateHz ?? caps?.sampleRate ?? 0
@@ -1277,14 +1197,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.skipBytes = 0
 		this.mapStream()
 		// The old stream's pending starts stay until this stream's own epoch-started (onEvents).
-		// A command queued before the boundary was the old stream's; one after it is this one's.
-		const pending = this.externalPending
+		// A command still pending tuned the old stream: this one opens at the source's centre.
 		this.externalPending = null
-		if (
-			pending &&
-			(boundaryTicket === undefined || pending.ticket > boundaryTicket)
-		)
-			this.carry(pending)
 		const ringSeconds = Math.max(
 			this.deps.settings().ringSeconds,
 			this.ringSecondsMin,
@@ -1304,7 +1218,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			centreHz: caps?.centerFreq ?? 0,
 			sampleRateHz,
 			gainKey,
-			tuningTrust: trust,
+			tuningTrust: "unverified",
 			settleMode: null,
 		})
 		// Before new-stream: an inline pipeline answers it synchronously (R2).
@@ -1315,169 +1229,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			centreHz: caps?.centerFreq ?? 0,
 			sampleRateHz,
 			gainKey,
-			tuningTrust: trust,
+			tuningTrust: "unverified",
 		})
-		this.postCarried(boundaryTicket)
-	}
-
-	/**
-	 * Posts the carried commands into the stream that just started, in order, each as an epoch
-	 * timed from this stream's clock; one still behind a queued boundary is carried again
-	 * (flushExternal). Each label is the newest command's own, merged with the state rule when it
-	 * is posted (checkState), so a value really unknown then keeps it `unverified`.
-	 */
-	private postCarried(boundaryTicket?: number): void {
-		const hop = this.takeHeldHop(boundaryTicket)
-		if (this.carried.length === 0) return
-		const carried = this.carried.splice(0)
-		for (const command of carried) {
-			if (command.ticket < this.disconnectTicket) continue
-			// A command older than the hop posted just now would end where the hop starts. A merged
-			// entry carries its newest command's state, so that command's ticket orders it: an
-			// operator write after the hop is posted after it, even folded into an older write.
-			if (hop && (command.newest ?? command.ticket) < hop.ticket) continue
-			this.queueExternal(
-				command.trust,
-				command.centreHz,
-				true,
-				command.ticket,
-				true,
-				command.newest,
-			)
-		}
-	}
-
-	/**
-	 * m3: re-posts the scanner hop held during a restart into this stream, before any newer kept
-	 * command, under the scanner's own rules: its label (the hop's state rule), its settle and
-	 * gain, timed from this stream's clock with every buffered byte counted (never earlier than
-	 * the hop's writes), and no marker (its bytes went with the old stream). Its centre is the
-	 * hop's target only while caps holds it: caps follows the frequency write, so a hop whose
-	 * write has not landed, or one another writer moved since, is `unverified` at the caps centre
-	 * (the write landing later gets the suppression-window epoch, checkSuppressedCentre).
-	 * It takes a new epoch id (an id is only ever the next one allocated, so the pipeline numbers
-	 * it as asked or later, never onto another's); the job learns it from `requestedEpoch`.
-	 * A hop whose rate is not this stream's (the source rate changed again before the restart
-	 * completed) is never trusted on the wrong rate nor lost: it starts `unverified` at the
-	 * stream's real centre and rate, settles scaled to that rate, and its start (or, if a newer
-	 * post replaces it first, the start that did) names it in `supersededEpoch`, so the job sees
-	 * its hop superseded, gets no dwell credit and re-sends it (JobRunner).
-	 * Returns the hop posted, or null.
-	 */
-	private takeHeldHop(boundaryTicket?: number): HeldHop | null {
-		const held = this.heldHop
-		if (!held) return null
-		// A hop before the last disconnect, or before this boundary, tuned a stream that is gone.
-		if (
-			held.ticket < this.disconnectTicket ||
-			(boundaryTicket !== undefined && held.ticket < boundaryTicket)
-		) {
-			this.heldHop = null
-			return null
-		}
-		// Behind a boundary still queued: it belongs to the stream that starts there.
-		if (this.boundaryAhead(held.ticket)) return null
-		this.heldHop = null
-		const caps = this.deps.sources.getCaps(this.sourceId)
-		const hop = held.pending
-		const clock = this.sampleClock()
-		const superseded = hop.sampleRateHz !== clock.sampleRateHz
-		const inPlace =
-			!superseded &&
-			caps?.centerFreq === hop.centreHz &&
-			this.centreOverride === null
-		const centreHz = inPlace
-			? hop.centreHz
-			: (this.centreOverride ?? caps?.centerFreq ?? hop.centreHz)
-		const scale = (samples: number) =>
-			superseded && hop.sampleRateHz > 0
-				? Math.round((samples * clock.sampleRateHz) / hop.sampleRateHz)
-				: samples
-		this.postEpoch(
-			{
-				...hop,
-				epoch: this.allocateEpoch(),
-				commandSample: clock.commandSample,
-				bufferedSamples: clock.bufferedSamples,
-				settleSamples: scale(hop.settleSamples),
-				pllSettleSamples: scale(hop.pllSettleSamples),
-				expectMarker: false,
-				markerTimeoutSamples: 0,
-				centreHz,
-				sampleRateHz: clock.sampleRateHz,
-				tuningTrust: inPlace
-					? hop.tuningTrust
-					: mergeTrust(hop.tuningTrust, "unverified"),
-				centreChanged: centreHz !== (caps?.centerFreq ?? 0),
-			},
-			held.requested,
-			superseded,
-		)
-		return held
-	}
-
-	/** Keeps a command that cannot be posted now for the stream it belongs to, which starts later. */
-	private carry(command: ExternalCommand): void {
-		if (command.ticket < this.disconnectTicket) return
-		const held = this.carried[this.carried.length - 1]
-		if (
-			held &&
-			held.ticket >= this.disconnectTicket &&
-			!this.boundaryBetween(
-				Math.min(held.ticket, command.ticket),
-				Math.max(held.ticket, command.ticket),
-			)
-		) {
-			this.supersede(held, command)
-			return
-		}
-		// Entries from before the last disconnect tuned a connection that is gone. Dropping them here
-		// bounds the list by the stream boundaries queued since that disconnect.
-		let kept = 0
-		for (const entry of this.carried)
-			if (entry.ticket >= this.disconnectTicket) this.carried[kept++] = entry
-		this.carried.length = kept
-		this.carried.push({
-			trust: command.trust,
-			...(command.centreHz !== undefined ? { centreHz: command.centreHz } : {}),
-			checkState: command.checkState,
-			ticket: command.ticket,
-			...(command.newest !== undefined ? { newest: command.newest } : {}),
-		})
-	}
-
-	/**
-	 * Folds `command` into `held`, a command for the same stream. The newer one's label and centre
-	 * win: an older command's weaker label described a state the newer one superseded. The state
-	 * rule is always applied when the result is posted (checkState), so an upgrade never survives
-	 * a value still unknown or only declared then, and a host-centre mismatch still demotes it.
-	 */
-	private supersede(held: ExternalCommand, command: ExternalCommand): void {
-		// The newer command's centre wins even when it names none: an older explicit centre may be
-		// one another writer (a relay) has since moved away from, so the posting then reads the
-		// source's own centre. An older command never adds a centre to a newer one.
-		if (command.ticket >= held.ticket) {
-			held.trust = command.trust
-			if (command.centreHz !== undefined) held.centreHz = command.centreHz
-			else delete held.centreHz
-		}
-		held.checkState = true
-		const newest = Math.max(
-			held.newest ?? held.ticket,
-			command.newest ?? command.ticket,
-		)
-		held.ticket = Math.min(held.ticket, command.ticket)
-		if (newest !== held.ticket) held.newest = newest
-		else delete held.newest
-		// Either side kept makes the merge kept: its centre check is never lost by folding.
-		if (command.kept === true) held.kept = true
-	}
-
-	/** True when a stream boundary still queued in the branch took a ticket between `from` and `to`. */
-	private boundaryBetween(from: number, to: number): boolean {
-		return this.branchQueue.some(
-			mark => mark.kind === "stream" && mark.ticket > from && mark.ticket < to,
-		)
 	}
 
 	private send(input: WorkerPipelineInput, transfer?: ArrayBuffer): void {
@@ -1548,7 +1301,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	private applyMark(mark: BranchMark): void {
 		if (mark.kind === "gap") this.applyGap(mark.droppedBytes)
-		else this.beginStream(mark.trust, mark.ticket)
+		else this.beginStream()
 	}
 
 	/** Bytes the fanout accepted into the branch so far (written minus dropped). */
@@ -1561,7 +1314,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	 * bytes still buffered in the branch finish the old stream. An open drop
 	 * episode is split there, so each stream gets only its own dropped bytes.
 	 */
-	private queueStreamBoundary(trust: TuningTrust): void {
+	private queueStreamBoundary(): void {
 		const t = this.fanout?.getBranchTelemetry(this.branchId)
 		const at = this.acceptedBranchBytes(t)
 		if (this.bpMark && t) {
@@ -1575,12 +1328,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			}
 			this.bpMark = { atBranchByte: at, droppedAt: t.droppedBytesTotal }
 		}
-		this.branchQueue.push({
-			kind: "stream",
-			atBranchByte: at,
-			trust,
-			ticket: ++this.ticket,
-		})
+		this.branchQueue.push({ kind: "stream", atBranchByte: at })
 		this.streamStartByte = at
 		this.applyDueMarks()
 	}
@@ -1768,6 +1516,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				this.lastEpoch = Math.max(this.lastEpoch, ev.epoch)
 				let meta: EngineEpoch | null = null
 				let start: PendingStart | null = null
+				let posted = false
 				if (this.untrackedStart?.epoch === ev.epoch) {
 					// The untracked retune announced just before (below), under the pipeline's own id.
 					meta = this.untrackedStart
@@ -1775,13 +1524,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				} else if (ev.settleMode !== "none") {
 					// A posted pending epoch's start, found by the pipeline's numbering, never by key.
 					start = this.takeStart(ev.epoch)
-					// None matches while this stream has posts the host may still start: the engine
-					// cannot name it, so it trusts it with nothing. With none posted it keeps the label.
-					meta =
-						start?.meta ??
-						(this.unnamedStream === this.current.stream
-							? { ...this.current, tuningTrust: "unverified" }
-							: null)
+					meta = start?.meta ?? null
+					posted = true
 				} else {
 					// A stream's own start: each new-stream is answered by exactly one, in order.
 					meta = this.openingStreams.shift() ?? null
@@ -1798,38 +1542,39 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					}
 				}
 				this.startedThrough = ev.epoch
-				// Late old-stream events keep the old stream's labels (thread host).
+				// Late old-stream events keep the old stream's centre (thread host).
 				this.current = {
 					...(meta ?? this.current),
 					stream: meta?.stream ?? this.current.stream,
 					epoch: ev.epoch,
 					startSample: ev.startSample,
 					settleMode: ev.settleMode,
+					tuningTrust: "unverified",
 				}
 				if (ev.settleMode === "marker") this.marker = true
-				this.currentVerifiedFrom = start?.verifiedFrom ?? null
-				this.currentVerifiedEpoch = ev.epoch
-				this.statusWindowOpen = this.currentVerifiedFrom !== null
-				const superseded =
-					start?.superseded === true ? start.requested : this.supersededLost
-				this.supersededLost = null
-				if (start && start.requested !== ev.epoch) {
-					// The caller knows this epoch by the id it was given: say so on its start only
-					// (never in `current`). The label above is still the one posted for it.
-					this.emit("pipeline", ev, {
-						...this.epochFor(ev),
-						requestedEpoch: start.requested,
-						...(superseded !== null ? { supersededEpoch: superseded } : {}),
-					})
-					continue
+				const record: EpochRecord = {
+					stream: this.current.stream,
+					epoch: ev.epoch,
+					centreHz: this.current.centreHz,
+					sampleRateHz: this.current.sampleRateHz,
+					hop: start?.hop === true ? start.key : null,
 				}
-				if (superseded !== null) {
-					this.emit("pipeline", ev, {
-						...this.epochFor(ev),
-						supersededEpoch: superseded,
-					})
-					continue
-				}
+				this.rememberEpoch(record)
+				this.liveLabel = "unverified"
+				// Openings and untracked epochs are not tuning events: no claim.
+				const claim =
+					posted && meta !== null ? this.epochClaim(record) : "unverified"
+				const superseded = ev.settleMode === "none" ? this.supersededLost : null
+				if (superseded !== null) this.supersededLost = null
+				this.emit("pipeline", ev, {
+					...this.current,
+					tuningTrust: claim,
+					...(start && start.key !== ev.epoch
+						? { requestedEpoch: start.key }
+						: {}),
+					...(superseded !== null ? { supersededEpoch: superseded } : {}),
+				})
+				continue
 			} else if (ev.kind === "untracked-retune" && ev.newEpoch === false) {
 				// WG10 req 2.9: a strong transmission ended: no epoch, warn only; not forwarded
 				// (the scanner would re-send its hop for a retune that did not happen).
@@ -1867,58 +1612,63 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					ev.deltaHz,
 					ev.suspected ?? "external-control",
 				)
+				this.emit("pipeline", ev, {
+					...this.current,
+					tuningTrust: "unverified",
+				})
+				continue
 			} else if (ev.kind === "stats") {
 				this.lastStats = ev.stats
 				if (ev.stats.stuckTestMode) this.marker = false
 			}
-			const epoch = this.epochFor(ev)
-			if (ev.kind === "block-summary") this.shadowBlock(ev, epoch)
-			this.emit("pipeline", ev, epoch)
+			this.emitLabelled(ev)
 		}
 	}
 
 	/**
-	 * WG9 req 3.4: an event of the current non-scanner epoch whose data starts before the
-	 * retune's network settle is `unverified`: a block summary by its first sample, a track
-	 * (open, update, close) by its start sample (the pipeline labels the snapshot the same way,
-	 * from `PendingEpoch.verifiedFromSample`), a transient by its sample. Other events and
-	 * other epochs keep the epoch's label.
+	 * Emits a pipeline event with the ledger's label of the samples it was measured on: a block
+	 * summary its block, a track (open, update, close) its newest block (Q3: a track on air
+	 * across a proof boundary is trusted from the first event past it, never back-dated), a
+	 * transient the blocks around its sample. A track snapshot carries the same label. Other
+	 * events carry the current epoch's label.
 	 */
-	private epochFor(ev: PipelineEvent): EngineEpoch {
-		// The raw epoch: non-block events keep the epoch's own label, as before.
-		const epoch = { ...this.current }
-		const from = this.currentVerifiedFrom
-		if (from === null || this.currentVerifiedEpoch !== epoch.epoch) return epoch
-		const start = this.eventStart(ev, epoch.epoch)
-		if (start === null) return epoch
-		// The first block, track or transient whose data starts at or past the settle closes
-		// the window for status (the pipeline emits a block's tracks before its summary).
-		// Each event keeps its own data-start label.
-		if (start >= from) this.statusWindowOpen = false
-		return { ...epoch, tuningTrust: frameTrust(epoch.tuningTrust, start, from) }
-	}
-
-	/** The first sample of a current-epoch event's data, or null (not sample-bound or another epoch). */
-	private eventStart(ev: PipelineEvent, epoch: number): number | null {
+	private emitLabelled(ev: PipelineEvent): void {
+		const epoch = { ...this.current, tuningTrust: this.liveLabel }
 		switch (ev.kind) {
-			case "block-summary":
-				if (ev.summary.epoch !== epoch || !this.cfg) return null
-				return (
-					ev.summary.endSample -
-					blockSamplesOf(
-						this.cfg.integrationMs,
-						this.cfg.sampleRateHz,
-						this.cfg.fftSize,
-					)
-				)
+			case "block-summary": {
+				const trust = this.labelBlock(ev)
+				this.emit("pipeline", ev, { ...epoch, tuningTrust: trust })
+				return
+			}
 			case "track-open":
 			case "track-update":
-			case "track-close":
-				return ev.track.epoch === epoch ? ev.track.startSample : null
-			case "transient":
-				return ev.epoch === epoch ? ev.sample : null
+			case "track-close": {
+				const t = ev.track
+				const record = this.epochRecord(t.stream, t.epoch)
+				const block = this.streamBlockSamples(t.stream)
+				const trust =
+					record === null || block === null
+						? "unverified"
+						: this.stamp(record, t.lastSample - block, t.lastSample)
+				const labelled =
+					t.tuningTrust === trust
+						? ev
+						: { ...ev, track: { ...t, tuningTrust: trust } }
+				this.emit("pipeline", labelled, { ...epoch, tuningTrust: trust })
+				return
+			}
+			case "transient": {
+				const record = this.epochRecord(this.current.stream, ev.epoch)
+				const block = this.streamBlockSamples(this.current.stream)
+				const trust =
+					record === null || block === null
+						? "unverified"
+						: this.stamp(record, ev.sample - block, ev.sample + block)
+				this.emit("pipeline", ev, { ...epoch, tuningTrust: trust })
+				return
+			}
 			default:
-				return null
+				this.emit("pipeline", ev, epoch)
 		}
 	}
 
@@ -1954,8 +1704,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private readonly onDisconnected = (sourceId: string): void => {
 		if (sourceId !== this.sourceId || !this.running) return
 		this.awaitingPayload = true
-		this.disconnectTicket = ++this.ticket
-		this.queueStreamBoundary("unverified")
+		this.queueStreamBoundary()
 	}
 
 	private readonly onPayloadStarted = (sourceId: string): void => {
@@ -1968,7 +1717,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const accepted = this.acceptedBranchBytes(
 			this.fanout?.getBranchTelemetry(this.branchId),
 		)
-		if (accepted > this.streamStartByte) this.queueStreamBoundary("unverified")
+		if (accepted > this.streamStartByte) this.queueStreamBoundary()
 	}
 
 	private readonly onCommandSent = (
@@ -1985,10 +1734,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		)
 			return
 		if (!EPOCH_COMMANDS.has(command)) return
-		const trust =
-			this.stateTrust() === "unverified" ? "unverified" : "commanded"
 		this.queueExternal(
-			trust,
 			command === "set-frequency" && Number.isFinite(value) ? value : undefined,
 		)
 	}
@@ -2002,8 +1748,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const previous = this.lastTunerKey
 		this.lastTunerKey = key
 		if (this.suppressed > 0 || previous === null || previous === key) return
-		if (state.controlMode === "external")
-			this.queueExternal("relay", undefined, true)
+		if (state.controlMode === "external") this.queueExternal()
 	}
 
 	private readonly onCapsChanged = (
@@ -2012,8 +1757,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	): void => {
 		if (sourceId !== this.sourceId || !this.running) return
 		if (caps.sampleRate !== this.cfg?.sampleRateHz) {
-			if (this.suppressed === 0)
-				this.queueExternal("commanded", undefined, true)
+			if (this.suppressed === 0) this.queueExternal()
 			return
 		}
 		if (this.suppressed > 0) return
@@ -2021,7 +1765,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			caps.centerFreq !== undefined &&
 			caps.centerFreq !== this.expectedCentre()
 		) {
-			this.queueExternal("commanded", undefined, true)
+			this.queueExternal()
 		}
 	}
 
@@ -2034,8 +1778,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		if (!this.running || this.restarting) return
 		const caps = this.deps.sources.getCaps(this.sourceId)
 		if (caps?.centerFreq === undefined) return
-		if (caps.centerFreq !== this.expectedCentre())
-			this.queueExternal("commanded", undefined, true)
+		if (caps.centerFreq !== this.expectedCentre()) this.queueExternal()
 	}
 
 	/** The latest centre submitted or queued (current, opening streams, pending epochs, a queued command). */
@@ -2103,9 +1846,13 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const mismatch = Math.abs(reported - caps) > HOST_CENTRE_TOLERANCE_HZ
 		const ledger = this.ledger()
 		if (!mismatch) {
+			const overridden = this.centreOverride !== null
 			this.centreOverride = null
 			// The host matched now: a later move lies past what the core had forwarded by now.
 			this.hostCentreOkAt = ledger?.position(this.sourceId) ?? null
+			// The epoch posted at the host's centre ends: the next one follows caps again (otherwise
+			// every block stays labelled against the reported centre, unverified for good).
+			if (overridden) this.queueExternal()
 			return
 		}
 		if (this.centreOverride === reported) return
@@ -2120,79 +1867,44 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			ok && live && ok.session === live.session ? ok.pos : 0,
 		)
 		this.warn("host-centre-mismatch", reported - caps)
-		this.queueExternal("unverified")
+		this.queueExternal()
 	}
 
-	/** Captures the command position now; posts at its microtask or at the next branch delivery, whichever comes first. */
-	private queueExternal(
-		trust: TuningTrust,
-		centreHz?: number,
-		checkState = false,
-		ticket?: number,
-		kept = false,
-		newest?: number,
-	): void {
+	/**
+	 * Captures the command position now; posts its DSP epoch at its microtask or at the next branch
+	 * delivery, whichever comes first. Commands before the post merge (the newest centre wins).
+	 */
+	private queueExternal(centreHz?: number): void {
 		if (!this.running) return
-		const own = ticket ?? ++this.ticket
 		const held = this.externalPending
 		if (held) {
-			// Never merge across a stream boundary or a disconnect: the held command belongs to the
-			// stream before it and is posted into that stream now, as its microtask would (carried
-			// instead during a restart, and then dropped if a disconnect came since); this one takes
-			// its own entry, ticket and clock, so it can never inherit the old stream's place.
-			if (!this.boundaryBetween(held.ticket, own)) {
-				this.supersede(held, {
-					trust,
-					...(centreHz !== undefined ? { centreHz } : {}),
-					checkState,
-					ticket: own,
-					...(kept ? { kept } : {}),
-					...(newest !== undefined ? { newest } : {}),
-				})
-				return
-			}
-			this.flushExternal()
-			// Flushing can restart the pipeline, which takes this command as a carried one.
-			if (!this.running) return
+			if (centreHz !== undefined) held.centreHz = centreHz
+			else delete held.centreHz
+			return
 		}
 		const clock = this.sampleClock()
 		this.externalPending = {
-			trust,
 			commandSample: clock.commandSample,
 			bufferedSamples: clock.bufferedSamples,
 			...(centreHz !== undefined ? { centreHz } : {}),
-			checkState,
-			ticket: own,
-			...(kept ? { kept } : {}),
-			...(newest !== undefined ? { newest } : {}),
 		}
 		queueMicrotask(() => this.flushExternal())
 	}
 
-	/** True while a stream boundary queued before the command `ticket` is still ahead in the branch. */
-	private boundaryAhead(ticket: number): boolean {
-		return this.branchQueue.some(
-			mark => mark.kind === "stream" && mark.ticket < ticket,
-		)
-	}
-
+	/**
+	 * Posts the queued command's DSP epoch. Not during a restart or with a stream boundary still
+	 * ahead in the branch: the stream that starts there opens at the source's centre, its own
+	 * reset. Its label is the ledger's, so nothing here decides trust.
+	 */
 	private flushExternal(): void {
 		const pending = this.externalPending
 		this.externalPending = null
-		if (!pending || !this.running) return
-		// A restart or a boundary still ahead in the branch: the command's epoch belongs to the
-		// stream that starts next (its clock is not this one's). Dropping it would leave that stream
-		// on the label it started with, `unverified` after a reconnect, until another command.
-		if (this.restarting || this.boundaryAhead(pending.ticket)) {
-			this.carry(pending)
-			return
-		}
-		if (pending.checkState)
-			pending.trust = mergeTrust(pending.trust, this.stateTrust())
+		if (!pending || !this.running || this.restarting) return
+		if (this.branchQueue.some(mark => mark.kind === "stream")) return
 		const caps = this.deps.sources.getCaps(this.sourceId)
 		if (!caps) return
 		if (caps.sampleRate !== this.cfg?.sampleRateHz) {
-			this.restartInBackground(pending.trust)
+			this.restartInBackground()
 			return
 		}
 		const fs = caps.sampleRate
@@ -2204,57 +1916,42 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			sampleRateHz: fs,
 			networkSettleMs: s.sweep.settleMs.network,
 		})
-		// B1: a kept command's explicit centre was the tuner's when it was written; the scanner (its
-		// writes post no external epoch), a relay or a later reconnect may have moved it before
-		// this stream posted it. Caps follows every frequency write, so the label is only kept
-		// when both still name the same centre; otherwise the epoch reads caps, `unverified`.
-		// Fail closed by construction: a stale centre, a caps that lags the command, or a caps
-		// without a centre all disagree, and each demotes rather than trusts either witness.
-		if (
-			pending.kept === true &&
-			pending.centreHz !== undefined &&
-			pending.centreHz !== caps.centerFreq
-		) {
-			pending.trust = mergeTrust(pending.trust, "unverified")
-			delete pending.centreHz
-		}
-		// A host-reported centre that disagrees with ours is never `commanded` or `relay`.
-		if (this.centreOverride !== null)
-			pending.trust = mergeTrust(pending.trust, "unverified")
 		const centreHz =
 			this.centreOverride ??
 			pending.centreHz ??
 			caps.centerFreq ??
 			this.current.centreHz
-		const epoch = this.allocateEpoch()
-		this.submitEpoch({
-			epoch,
-			commandSample: pending.commandSample,
-			bufferedSamples: pending.bufferedSamples,
-			settleSamples: timing.settleSamples,
-			expectMarker: false,
-			markerTimeoutSamples: 0,
-			pllSettleSamples: 0,
-			centreHz,
-			sampleRateHz: fs,
-			gainKey: gainKeyOf(this.deps.tuner?.getState(this.sourceId)),
-			tuningTrust: pending.trust,
-			centreChanged: centreHz !== this.current.centreHz,
-			staleMaxMs: timing.staleMaxMs,
-			...(timing.verifiedFromSample !== null
-				? { verifiedFromSample: timing.verifiedFromSample }
-				: {}),
-		})
+		this.postEpoch(
+			{
+				epoch: this.allocateEpoch(),
+				commandSample: pending.commandSample,
+				bufferedSamples: pending.bufferedSamples,
+				settleSamples: timing.settleSamples,
+				expectMarker: false,
+				markerTimeoutSamples: 0,
+				pllSettleSamples: 0,
+				centreHz,
+				sampleRateHz: fs,
+				gainKey: gainKeyOf(this.deps.tuner?.getState(this.sourceId)),
+				tuningTrust: "unverified",
+				centreChanged: centreHz !== this.current.centreHz,
+				staleMaxMs: timing.staleMaxMs,
+			},
+			false,
+		)
 	}
 
-	// === Tuning-ledger shadow (trust step 1) ===
+	// === Tuning-ledger labels ===
 
-	/** The shadow counters; null when the engine has no ledger. */
+	/** Ledger diagnostics; null when the engine has no ledger. */
 	trustShadow(): EngineTrustShadow | null {
 		if (!this.ledger()) return null
 		return {
-			...this.shadow,
-			disagreements: this.shadow.disagreements.map(d => ({ ...d })),
+			agree: this.labelledBlocks,
+			ledgerStricter: 0,
+			ledgerLooser: 0,
+			mismatch: 0,
+			disagreements: [],
 			retuneDelay: this.retuneDelay.status(),
 		}
 	}
@@ -2379,69 +2076,153 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		if (this.streamMaps.length > SHADOW_STREAM_MAPS) this.streamMaps.shift()
 	}
 
-	private shadowBlock(
+	/**
+	 * The label of a block summary (its block's samples, against the summary's own centre and
+	 * rate and its epoch's hop) and the retune-delay measurement it feeds. The current epoch's
+	 * newest block labels `currentEpoch()`.
+	 */
+	private labelBlock(
 		ev: Extract<PipelineEvent, { kind: "block-summary" }>,
-		epoch: EngineEpoch,
-	): void {
+	): TuningTrust {
+		const summary = ev.summary
+		const map = this.streamMaps.find(m => m.stream === summary.stream)
+		if (map) map.summarised = Math.max(map.summarised, summary.endSample)
 		const ledger = this.ledger()
-		if (!ledger) return
-		const map = this.streamMaps.find(m => m.stream === ev.summary.stream)
-		if (map) map.summarised = Math.max(map.summarised, ev.summary.endSample)
-		let read: ShadowRead
-		try {
-			read = this.ledgerVerdict(ledger, ev)
-		} catch {
-			read = unmappedRead("lookup-failed")
+		if (!ledger || !map || map.blockSamples === null) {
+			this.noteBlockLabel(summary, "unverified")
+			return "unverified"
 		}
+		const record = this.epochRecord(summary.stream, summary.epoch)
+		const read = this.ledgerRange(
+			ledger,
+			summary.stream,
+			summary.endSample - map.blockSamples,
+			summary.endSample,
+		)
 		if (read.session !== null && read.posA !== null && read.posB !== null)
 			this.retuneDelay.onBlock({
 				session: read.session,
 				posA: read.posA,
 				posB: read.posB,
-				bins: ev.summary.bins,
-				binHz: ev.summary.binHz,
+				bins: summary.bins,
+				binHz: summary.binHz,
 			})
-		const verdict = read.verdict
-		const engineTrust = epoch.tuningTrust
-		const ledgerTrust = verdict.trust
-		let kind: EngineTrustDisagreement["kind"] | null = null
-		if (engineTrust !== "unverified" && ledgerTrust === "unverified")
-			kind = "ledger-stricter"
-		else if (engineTrust === "unverified" && ledgerTrust !== "unverified")
-			kind = "ledger-looser"
-		else if (
-			engineTrust !== "unverified" &&
-			(engineTrust !== ledgerTrust ||
-				verdict.frequency !== epoch.centreHz ||
-				verdict.sampleRate !== epoch.sampleRateHz)
+		const trust =
+			record === null
+				? "unverified"
+				: this.labelOf(read, {
+						centreHz: summary.centreHz,
+						sampleRateHz: summary.sampleRateHz,
+						hop: record.hop,
+					})
+		this.labelledBlocks += 1
+		this.noteBlockLabel(summary, trust)
+		return trust
+	}
+
+	private noteBlockLabel(
+		summary: { stream: number; epoch: number },
+		trust: TuningTrust,
+	): void {
+		if (
+			summary.stream === this.current.stream &&
+			summary.epoch === this.current.epoch
 		)
-			kind = "mismatch"
-		if (kind === null) {
-			this.shadow.agree += 1
-			return
+			this.liveLabel = trust
+	}
+
+	/**
+	 * The ledger's label of samples `[start, end)` of `record`'s stream: trusted only when the
+	 * ledger proves both fields over the range, the proven centre and rate are the ones the
+	 * event's frequencies were computed from (`claim`), and a scanner hop's samples are proven by
+	 * its own frequency receipt. Fail closed on every missing map, record or receipt.
+	 */
+	private stamp(record: EpochRecord, start: number, end: number): TuningTrust {
+		const ledger = this.ledger()
+		if (!ledger) return "unverified"
+		return this.labelOf(
+			this.ledgerRange(ledger, record.stream, start, end),
+			record,
+		)
+	}
+
+	private labelOf(
+		read: LedgerRead,
+		claim: Pick<EpochRecord, "centreHz" | "sampleRateHz" | "hop">,
+	): TuningTrust {
+		const v = read.verdict
+		if (v.trust === "unverified") return "unverified"
+		if (v.frequency !== claim.centreHz || v.sampleRate !== claim.sampleRateHz)
+			return "unverified"
+		if (claim.hop !== null) {
+			const seq = this.hopReceipts.get(claim.hop)
+			if (typeof seq !== "number" || v.receipts?.frequency !== seq)
+				return "unverified"
 		}
-		if (kind === "ledger-stricter") this.shadow.ledgerStricter += 1
-		else if (kind === "ledger-looser") this.shadow.ledgerLooser += 1
-		else this.shadow.mismatch += 1
-		const ring = this.shadow.disagreements
-		ring.push({
-			kind,
-			at: this.now(),
-			session: read.session,
-			posA: read.posA,
-			posB: read.posB,
-			engineTrust,
-			ledgerTrust,
-			engineCentreHz: epoch.centreHz,
-			ledgerCentreHz: verdict.frequency,
-			engineSampleRateHz: epoch.sampleRateHz,
-			ledgerSampleRateHz: verdict.sampleRate,
-			...(verdict.reason !== undefined ? { reason: verdict.reason } : {}),
-			...(verdict.doubtReason !== undefined
-				? { doubtReason: verdict.doubtReason }
-				: {}),
-		})
-		if (ring.length > SHADOW_DISAGREEMENTS) ring.shift()
+		return v.trust
+	}
+
+	/**
+	 * A posted epoch's start claim (its `epoch-started` label): the ledger holds this session's
+	 * receipts of the epoch's centre and rate, proven or still settling, with a writer and no doubt
+	 * since; a scanner hop's by its own frequency receipt (or that receipt not noted yet: its frame
+	 * is written right after the post; a hop whose frame got none, or whose receipt is no longer
+	 * the proof, claims nothing). It tells the poster the epoch is its own; its samples are labelled
+	 * one by one (stamp), so nothing before the boundary, and nothing without the hop's own
+	 * receipt, is trusted.
+	 */
+	private epochClaim(record: EpochRecord): TuningTrust {
+		try {
+			const ledger = this.ledger()
+			if (!ledger) return "unverified"
+			const fields = ledger.fieldState(this.sourceId)
+			const held = (f: (typeof fields)["frequency"], value: number): boolean =>
+				(f.state === "proven" || f.state === "settling") &&
+				f.writer !== null &&
+				f.value === value
+			const freq = fields.frequency
+			const rate = fields.sampleRate
+			if (!held(rate, record.sampleRateHz)) return "unverified"
+			if (record.hop !== null) {
+				const seq = this.hopReceipts.get(record.hop)
+				// Not noted yet: the arbiter writes the hop's frame right after posting it, and the
+				// pipeline can start a timer epoch before that write flushes. Its samples are stamped
+				// by that receipt once it exists, never before, so the claim only names the owner.
+				if (seq === undefined) return "commanded"
+				if (
+					seq === null ||
+					freq.receipt !== seq ||
+					!held(freq, record.centreHz)
+				)
+					return "unverified"
+				return rate.writer === "relay" ? "relay" : "commanded"
+			}
+			if (!held(freq, record.centreHz)) return "unverified"
+			return freq.writer === "relay" || rate.writer === "relay"
+				? "relay"
+				: "commanded"
+		} catch {
+			return "unverified"
+		}
+	}
+
+	private rememberEpoch(record: EpochRecord): void {
+		this.epochRecords.push(record)
+		if (this.epochRecords.length > EPOCH_RECORDS) this.epochRecords.shift()
+	}
+
+	/** A started epoch still kept (EPOCH_RECORDS), or null. */
+	private epochRecord(stream: number, epoch: number): EpochRecord | null {
+		for (let i = this.epochRecords.length - 1; i >= 0; i--) {
+			const r = this.epochRecords[i]!
+			if (r.stream === stream && r.epoch === epoch) return r
+		}
+		return null
+	}
+
+	/** Block length (samples) of a kept stream, or null. */
+	private streamBlockSamples(stream: number): number | null {
+		return this.streamMaps.find(m => m.stream === stream)?.blockSamples ?? null
 	}
 
 	/**
@@ -2522,29 +2303,31 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	}
 
 	/**
-	 * The ledger's label of a block summary's samples, mapped through the block's own stream (its
-	 * bytes per sample and block length), fail closed on every missing map. A block whose lower
-	 * bound falls before the session's position 0 may hold the previous session's bytes:
-	 * `before-session`.
+	 * The ledger's verdict on samples `[start, end)` of engine stream `stream`, mapped through that
+	 * stream's own map (its bytes per sample and gaps), fail closed on every missing map: the
+	 * first byte by a lower bound, the end by an upper bound (never past what the source manager
+	 * handed out). A range whose lower bound falls before the session's position 0 may hold the
+	 * previous session's bytes: `before-session`.
 	 */
-	private ledgerVerdict(
+	private ledgerRange(
 		ledger: EngineLedger,
-		ev: Extract<PipelineEvent, { kind: "block-summary" }>,
-	): ShadowRead {
+		stream: number,
+		start: number,
+		end: number,
+	): LedgerRead {
 		const anchor = this.ledgerAnchor
 		if (!anchor) return unmappedRead("no-anchor")
 		if (this.upstreamLost(anchor)) return unmappedRead("upstream-loss")
-		const map = this.streamMaps.find(m => m.stream === ev.summary.stream)
-		if (!map || map.blockSamples === null) return unmappedRead("no-stream-map")
-		const end = ev.summary.endSample
-		const start = end - map.blockSamples
+		if (!Number.isFinite(start) || !Number.isFinite(end))
+			return unmappedRead("bad-range")
+		const map = this.streamMaps.find(m => m.stream === stream)
+		if (!map) return unmappedRead("no-stream-map")
 		// Lower bound of the first byte: each applied gap can round its samples up by one.
 		const posA = map.oLow0 + (start - map.gaps - 1) * map.bps - anchor.oHigh
 		const posB = map.oHigh0 + end * map.bps - anchor.oLow
 		const live = ledger.position(this.sourceId)
 		if (!live || live.session !== anchor.session)
 			return unmappedRead("session-ended")
-		// Never past what the source manager handed out (a valid upper bound too).
 		const upper = Math.min(posB, live.pos)
 		const at = {
 			session: anchor.session,

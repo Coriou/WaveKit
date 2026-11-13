@@ -170,7 +170,6 @@ import {
 	type LiveAudioEvidence,
 } from "./live-audio-evidence.js"
 import type { JobActivityView } from "./scanner-redesign-contract.js"
-import { tuningTrustOf } from "../tuning-trust.js"
 import { JobHits, emptyHitStats } from "./job-hits.js"
 import {
 	IDENTIFY_KEEP_JOBS,
@@ -7520,14 +7519,13 @@ export class ScannerService extends EventEmitter {
 		this.liveAudio = null
 	}
 
-	/** Fail closed: unknown tuner state, an unwritten connection, or a throw. */
+	/** The tuning ledger's label of the live edge; fail closed: no ledger, or a throw. */
 	private liveAudioTrust(sourceId: string): TuningTrust {
 		try {
-			const trust = tuningTrustOf(this.deps.tuner.getState(sourceId))
-			if (trust === "unverified") return trust
-			if (this.deps.tuner.tuningWrittenOnConnection(sourceId) !== true)
-				return "unverified"
-			return trust
+			const ledger = (
+				this.deps.sources as Partial<Pick<SourceManager, "tuningLedger">>
+			).tuningLedger
+			return ledger?.trustNow(sourceId).trust ?? "unverified"
 		} catch {
 			return "unverified"
 		}

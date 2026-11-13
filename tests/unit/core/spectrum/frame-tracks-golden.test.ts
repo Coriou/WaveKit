@@ -7,6 +7,7 @@ import {
 	untrackedScenario,
 } from "./frame-tracks-harness.js"
 import { makeService } from "./frame-tracks-service-harness.js"
+import { FS } from "../../../mocks/scanner/service-fakes.js"
 
 /**
  * WG11 lane TR goldens (req 5.1, 5.6; common brief §5): recorded from the frozen code at
@@ -22,25 +23,55 @@ const GOLDEN = {
 		blocks: 24,
 		sha256: "31b881c9dac2b310dfb23d83cabf7ce0064d04e156feb767c9adf38ba3c738a3",
 	},
+	/**
+	 * Re-recorded for tuning trust step 3 (labels from the tuning ledger): byte-identical to the
+	 * frozen output except the trust of four live frames, the first of epoch 2 (the retune to
+	 * another centre), now `unverified` where the tuner-state rule said `commanded`. Their engine
+	 * block (50 ms at the caps rate) still holds samples from before the retune's receipt, so the
+	 * ledger cannot prove the new centre over them; every other frame stays `commanded`. The
+	 * frozen hash was 65b0e9be20523fd82201f289ec773fff4b06387e426170dd8959d3c50ba1e2e8.
+	 */
 	serviceOutput: {
 		frames: 38,
-		sha256: "65b0e9be20523fd82201f289ec773fff4b06387e426170dd8959d3c50ba1e2e8",
+		sha256: "efffd804d9c3ad0b97398797f996bc00b52a5de7c6612f84dcc4025f2305f9c9",
 	},
 }
 
 /** Feeds summaries through a SpectrumService over a fake host: a default client and a source client with backfill. */
 async function serviceOutput(summaries: readonly BlockSummary[]) {
-	const h = makeService()
+	// The receiver was told the centre and the rate the summaries were measured at (ledger receipts settled before the engine's first byte); each summary's
+	// payload is forwarded before it (the fake host gets no bytes), and a centre change is written
+	// at its epoch's first sample. The fake link has no in-flight delay (settle 0).
+	const h = makeService({
+		proven: { rateHz: summaries[0]!.sampleRateHz, settleMs: 0 },
+	})
+	const ledger = h.receiverLedger!
+	// Payload other consumers took after the proof and before the engine opened: one engine block
+	// (50 ms at the caps rate), so a first block's lower bound still lies after the receipts.
+	ledger.advance(ledger.bps * Math.round((FS * 50) / 1000))
+	const opened = ledger.ledger.position("rtl")!.pos
+	const forward = (endSample: number) => {
+		const need =
+			opened + ledger.bps * endSample - ledger.ledger.position("rtl")!.pos
+		if (need > 0) ledger.advance(need)
+	}
 	await h.service.start()
 	await h.service.acquire("rtl", "job:a")
 	await h.service.subscribe("c-default", undefined)
 	let epoch = 0
+	let prevEnd = 0
 	let subscribed = false
 	for (const [i, s] of summaries.entries()) {
 		if (s.epoch !== epoch) {
+			if (epoch !== 0) {
+				forward(prevEnd)
+				ledger.write("set-frequency", s.centreHz, "operator")
+			}
 			h.host().epoch(s.epoch, epoch === 0)
 			epoch = s.epoch
 		}
+		prevEnd = s.endSample
+		forward(s.endSample)
 		h.host().summary({ ...s, stream: 0 }) // the fake engine reports stream 0
 		h.advance(50)
 		if (i === 30 && !subscribed) {

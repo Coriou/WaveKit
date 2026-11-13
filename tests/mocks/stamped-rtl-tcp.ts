@@ -28,6 +28,15 @@ export interface StampedRtlTcp {
 	setCommandDelay(ms: number): void
 	/** The centre and rate the receiver is on now. */
 	tuning(): { centre: number; rate: number }
+	/**
+	 * An untracked retune: the receiver moves to `hz` without any frame (another client, a host
+	 * restart). Its status (`reportedCentre`, what an sdr-host reports) shows it at once; its
+	 * samples carry the new stamp from `delayMs` later (bytes the receiver had already produced).
+	 * A frequency frame received after the call wins (the receiver executes it after the move).
+	 */
+	retuneSilently(hz: number, delayMs: number): void
+	/** The centre the receiver's host would report now. */
+	reportedCentre(): number
 	/** Connections accepted so far. */
 	connections(): number
 	close(): Promise<void>
@@ -60,9 +69,22 @@ export async function startStampedRtlTcp(opts: {
 	let delayMs = opts.commandDelayMs ?? 0
 	let tunerType = 5
 	let accepted = 0
+	let reported = opts.initialHz
 	const timers = new Set<NodeJS.Timeout>()
+	/** The pending stamp change of an untracked retune (retuneSilently), or null. */
+	let silent: NodeJS.Timeout | null = null
 	const apply = (cmd: number, value: number) => {
-		if (cmd === 0x01) centre = stampOf(centres, value)
+		if (cmd === 0x01) {
+			// The receiver had already moved (only its older bytes still carried the old stamp): a
+			// later frame is executed after that move, so it wins.
+			if (silent) {
+				clearTimeout(silent)
+				timers.delete(silent)
+				silent = null
+			}
+			centre = stampOf(centres, value)
+			reported = value
+		}
 		if (cmd === 0x02) rate = stampOf(rates, value)
 	}
 	const server = net.createServer(socket => {
@@ -131,6 +153,7 @@ export async function startStampedRtlTcp(opts: {
 		restart: ({ keepTuning, tunerType: type }) => {
 			for (const s of sockets) s.destroy()
 			if (!keepTuning) {
+				reported = opts.initialHz
 				centre = stampOf(centres, opts.initialHz)
 				rate = stampOf(rates, opts.initialRate)
 			}
@@ -140,6 +163,21 @@ export async function startStampedRtlTcp(opts: {
 			delayMs = ms
 		},
 		tuning: () => ({ centre: centres[centre - 1]!, rate: rates[rate - 1]! }),
+		retuneSilently: (hz, delayMs) => {
+			reported = hz
+			if (silent) {
+				clearTimeout(silent)
+				timers.delete(silent)
+			}
+			const t = setTimeout(() => {
+				timers.delete(t)
+				silent = null
+				centre = stampOf(centres, hz)
+			}, delayMs)
+			silent = t
+			timers.add(t)
+		},
+		reportedCentre: () => reported,
 		connections: () => accepted,
 		close: async () => {
 			for (const t of timers) clearTimeout(t)

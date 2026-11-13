@@ -552,6 +552,30 @@ FanoutManager → branch scanner-<sourceId> → SpectrumEngine → spectrum-work
    → SpectrumService (spectrum:frame per profile, occupancy) → ScannerService (classify, probes, discoveries) → REST/WS
 ```
 
+### Tuning trust
+
+One owner, `TuningLedger` (`src/core/tuning-ledger.ts`), created and fed by `SourceManager`:
+per source, sessions (one connection from its first payload byte to its close), the payload
+position of each session, a receipt for every tuning frame flushed to the receiver (at the
+position of the flush, with its writer: operator, scanner, assert or relay) and doubts (an
+untracked retune, a host-centre mismatch, a pipeline error, a rate mismatch). A sample range is
+trusted only when the last frequency and sample-rate receipts before it were flushed on the same
+session, the range starts at least the settle after them (`network-settle.ts`), no doubt was
+raised since, and their values are the centre and rate the result was computed at. Everything
+else is `unverified`: a fresh core, a reconnect, a missing ledger.
+
+Readers only: the spectrum engine stamps every block summary, track (by its newest block: a
+track on air when a proof settles is trusted from there, never back-dated) and transient by the
+ledger on its sample range; a scanner hop's samples need the hop's own frequency receipt
+(`TunerArbiter` hands it to the engine), and the arbiter's same-centre skip and rate re-send
+read the ledger too. Engine starts, pipeline restarts and stream openings carry no label;
+pipeline epochs only reset the DSP. Decoder provenance, live-audio evidence and the analog
+transmission frequency read `trustNow` (the live edge). Recorder, discoveries and IQ capture read
+the label on the epoch or track. A client that retunes the receiver behind the core's back is
+invisible until a detector raises a doubt. A host-centre mismatch also moves the engine's epoch
+to the centre the host reports; the next poll that matches the source's centre again moves it
+back, so the blocks after the core's re-sent tuning can be trusted again.
+
 ### Event Flow
 
 ```

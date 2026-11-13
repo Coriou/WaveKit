@@ -6,6 +6,7 @@ import type { TunerControlMode, TunerState } from "@wavekit/api-types"
 import { placementKey } from "./enablement/contract.js"
 import { readExtraArgsOption } from "./option-values.js"
 import type { DecoderBandDeclaration, DecoderStatus } from "./types.js"
+import type { TrustVerdict, TuningLedger } from "../core/tuning-ledger.js"
 
 type ProvenanceDecoderEvent =
 	| "decoder:created"
@@ -80,9 +81,9 @@ type TuningTrust = ActivityDecoderBinding["tuningTrust"]
 /** The tuner fields the rule reads, validated once per tuner event. */
 interface Snapshot {
 	/**
-	 * False when a field is missing, non-finite, unknown or only declared by the config
-	 * baseline, the rate is not positive, or direct sampling is on (the centre then is
-	 * not the R820T tuner's).
+	 * False when a field is missing, non-finite or unknown, the rate is not positive, or
+	 * direct sampling is on (the centre then is not the R820T tuner's). Proof is the
+	 * tuning ledger's (`trustNow`), never these fields.
 	 */
 	usable: boolean
 	/**
@@ -95,7 +96,6 @@ interface Snapshot {
 	reach: number
 	/** Observed sample rate (Hz), finite and positive when `usable`. */
 	sampleRate: number
-	relay: boolean
 }
 
 interface Entry {
@@ -125,28 +125,18 @@ const MARGIN = 0.45
 
 function snapshotOf(state: unknown): Snapshot | undefined {
 	if (typeof state !== "object" || state === null) return undefined
-	const {
-		frequency,
-		sampleRate,
-		controlMode,
-		directSampling,
-		unknownFields,
-		declaredOnlyFields,
-	} = state as Partial<Record<keyof ProvenanceTunerState, unknown>>
+	const { frequency, sampleRate, directSampling, unknownFields } =
+		state as Partial<Record<keyof ProvenanceTunerState, unknown>>
 	if (typeof frequency !== "number" || typeof sampleRate !== "number")
 		return undefined
 	const lists = (value: unknown, field: string): boolean =>
 		value !== undefined && (!Array.isArray(value) || value.includes(field))
 	const frequencyKnown =
 		!lists(unknownFields, "frequency") && Number.isFinite(frequency)
-	const unproven =
-		lists(unknownFields, "sampleRate") ||
-		lists(declaredOnlyFields, "frequency") ||
-		lists(declaredOnlyFields, "sampleRate")
 	return {
 		usable:
 			frequencyKnown &&
-			!unproven &&
+			!lists(unknownFields, "sampleRate") &&
 			directSampling === "off" &&
 			Number.isFinite(sampleRate) &&
 			sampleRate > 0,
@@ -154,7 +144,6 @@ function snapshotOf(state: unknown): Snapshot | undefined {
 		frequency,
 		reach: MARGIN * sampleRate,
 		sampleRate,
-		relay: controlMode === "external",
 	}
 }
 
@@ -166,22 +155,21 @@ function snapshotOf(state: unknown): Snapshot | undefined {
  * `sourceId` reads the default source, resolved at lookup time; an external-input decoder
  * owns its device (sourceId null).
  *
- * WG5 req 6 (supersedes the WG3 "unverified for every decoder" decision): with a tuner
- * source, `tuningTrust` is `commanded` (internal control) or `relay` (external control)
- * when the observed tuner state proves the decoder hears its targets: the source centre
- * still equals the centre captured when the decoder was last created or started, the
- * centre and rate were written by WaveKit or seen from a relay client (a value only
- * declared by the config baseline, or a relay value the controller ignored, proves
- * nothing), the rate is positive, direct sampling is off, and every target lies within
- * 0.45 × rate of the centre. Anything else, including no tuner source, is `unverified`. Snapshots are refreshed on
- * tuner events only (`getState` clones, so it never runs inside a lookup); a removed
- * source drops its snapshot (`source-removed`). A retune that
- * bypasses WaveKit and the relay is not observed.
+ * `tuningTrust` is the tuning ledger's label of the source's live edge (`trustNow`):
+ * `commanded` or `relay` (a relay client's frame) only while the ledger proves the centre
+ * and the rate on the live session, the proven centre is the tuner's and still the one
+ * captured when the decoder was last created or started, direct sampling is off, and
+ * every target lies within 0.45 × the proven rate of the proven centre. Anything else,
+ * including no tuner source, no ledger or a throwing lookup, is `unverified`. Snapshots are
+ * refreshed on tuner events only (`getState` clones, so it never runs inside a lookup); a
+ * removed source drops its snapshot (`source-removed`). A retune that bypasses WaveKit and
+ * the relay is invisible to the ledger until a detector raises a doubt.
  */
 export function createDecoderProvenanceIndex(
 	decoders: ProvenanceDecoderSource,
 	defaultSourceId: () => string | undefined,
 	tuner?: ProvenanceTunerSource,
+	ledger?: Pick<TuningLedger, "trustNow"> | null,
 ): DecoderProvenanceIndex {
 	const entries = new Map<string, Entry>()
 	const snapshots = new Map<string, Snapshot>()
@@ -263,24 +251,49 @@ export function createDecoderProvenanceIndex(
 	const onRemoved = (sourceId: string): void => {
 		snapshots.delete(sourceId)
 	}
-	const trustOf = (entry: Entry, sourceId: string | null): TuningTrust => {
-		if (sourceId === null) return "unverified"
+	/** The ledger's live proof of the snapshot's centre, or null (fail closed). */
+	const proofOf = (
+		sourceId: string | null,
+	): Pick<TrustVerdict, "trust" | "frequency" | "sampleRate"> | null => {
+		if (sourceId === null || !ledger) return null
 		const snapshot = snapshots.get(sourceId)
+		if (!snapshot?.usable) return null
+		try {
+			const verdict = ledger.trustNow(sourceId)
+			if (
+				verdict.trust === "unverified" ||
+				verdict.frequency !== snapshot.frequency ||
+				typeof verdict.sampleRate !== "number" ||
+				!(verdict.sampleRate > 0)
+			)
+				return null
+			return verdict
+		} catch {
+			return null
+		}
+	}
+	const trustOf = (
+		entry: Entry,
+		sourceId: string | null,
+		proof: Pick<TrustVerdict, "trust" | "frequency" | "sampleRate"> | null,
+	): TuningTrust => {
+		if (sourceId === null || proof === null) return "unverified"
 		if (
-			!snapshot?.usable ||
 			entry.targets.length === 0 ||
 			entry.bindSourceId !== sourceId ||
-			entry.bindCentre !== snapshot.frequency
+			entry.bindCentre !== proof.frequency
 		)
 			return "unverified"
+		const centre = proof.frequency!
+		const reach = MARGIN * proof.sampleRate!
 		for (const target of entry.targets)
 			if (
 				!Number.isFinite(target) ||
 				target <= 0 ||
-				Math.abs(target - snapshot.frequency) > snapshot.reach
+				Math.abs(target - centre) > reach
 			)
 				return "unverified"
-		return snapshot.relay ? "relay" : "commanded"
+		return proof.trust
 	}
 	decoders.on("decoder:created", bind)
 	decoders.on("decoder:removed", unbind)
@@ -308,7 +321,8 @@ export function createDecoderProvenanceIndex(
 				entry.configured === undefined
 					? (defaultSourceId() ?? null)
 					: entry.configured
-			const trust = tuner ? trustOf(entry, sourceId) : "unverified"
+			const proof = tuner ? proofOf(sourceId) : null
+			const trust = trustOf(entry, sourceId, proof)
 			// The decoder hears the source capture unless a channel context says otherwise; then the
 			// observed tuner rate is its input rate. The process that holds `-f` is the one whose start
 			// counts: a secondary raw placement's own worker, else the decoder itself, which runs its
@@ -321,9 +335,12 @@ export function createDecoderProvenanceIndex(
 						? (entries.get(placementKey(id, context.sourceId, "raw", null)) ??
 							entry)
 						: undefined
+			// The input rate only while the ledger proves it (and it is still the tuner's).
 			const rate =
 				(context === undefined || context.channelHz === null) &&
-				snap?.usable === true
+				snap?.usable === true &&
+				proof !== null &&
+				proof.sampleRate === snap.sampleRate
 					? snap.sampleRate
 					: undefined
 			// The centre the decoder started on, only while the tuner is still there: rtl_433's `-f` is

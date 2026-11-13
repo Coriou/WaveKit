@@ -53,6 +53,9 @@ describe("ScannerService trust crediting (§ 4.7)", () => {
 			feedTone(h.fanout, 0.1, 0, 0, 40 + i)
 		}
 		expect(h.service.getJob(job.id)?.state).toBe("running")
+		// Samples for the "before" track to be measured on (the ledger proves them).
+		feedTone(h.fanout, 0.3, 0, 0, 99)
+		await tick(5)
 		const engine = h.service.spectrum.engine("rtl")!
 		// What the pipeline delivers around its untracked-retune alarm (Task 10b): the alarm, the
 		// unverified epoch's start, then tracks labelled with that epoch's trust.
@@ -70,7 +73,12 @@ describe("ScannerService trust crediting (§ 4.7)", () => {
 		deliver([
 			{
 				kind: "track-open",
-				track: track("before", CENTRE + 50_000, { epoch }),
+				// Measured on the newest samples the engine holds: the tuning ledger proves them.
+				track: track("before", CENTRE + 50_000, {
+					epoch,
+					startSample: 0,
+					lastSample: engine.liveEdge(),
+				}),
 			},
 		])
 		const retuned = epoch + 10

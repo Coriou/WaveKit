@@ -112,6 +112,7 @@ const { FakeSources: RateSources, iqCaps } =
 const { FakeFanout, FakeSources, testSettings } =
 	await import("../mocks/scanner/engine-fakes.js")
 const { ArbiterFakeTuner } = await import("../mocks/scanner/arbiter-fakes.js")
+const { FakeReceiverLedger } = await import("../mocks/fake-receiver-ledger.js")
 const { feedTones, FS } = await import("../mocks/scanner/service-fakes.js")
 import {
 	fsk4Burst,
@@ -201,13 +202,25 @@ function build() {
 		currentGeneration: () => 1,
 	})
 	manager.setChannelizer(provider as never)
-	// The observed tuner state proves the same source centre/rate used by both paths.
+	// The tuner state names the source centre/rate both paths use; the ledger below proves it.
 	const tuner = new ArbiterFakeTuner()
 	tuner.addSource("rtl")
 	tuner.states.get("rtl")!.sampleRate = FS
 	tuner.states.get("rtl")!.frequency = CENTRE
-	// Production provenance index + Activity ingress, including tuner-backed trust.
-	const provenance = createDecoderProvenanceIndex(manager, () => "rtl", tuner)
+	// Production provenance index + Activity ingress, trust from the tuning ledger.
+	// The receiver's tuning ledger: this session holds a frequency and a rate receipt of that
+	// tuning, positioned before the engine's first byte by more than the settle (no sample counting).
+	const receiverLedger = new FakeReceiverLedger("rtl", {
+		rateHz: FS,
+		settleMs: 1000,
+	})
+	receiverLedger.prove(CENTRE, FS)
+	const provenance = createDecoderProvenanceIndex(
+		manager,
+		() => "rtl",
+		tuner,
+		receiverLedger.ledger,
+	)
 	const envelopes: DecodeEnvelope[] = []
 	const ingress = createActivityIngress({
 		sink: env => envelopes.push(env),
@@ -222,6 +235,8 @@ function build() {
 	const sources = new FakeSources("rtl", { sampleRate: FS, centerFreq: CENTRE })
 	sources.rtlTcp.add("rtl")
 	const fanout = new FakeFanout()
+	sources.tuningLedger = receiverLedger.ledger
+	fanout.ledgerFeed = receiverLedger
 	const settings = testSettings(s => {
 		s.passive.enabled = false
 		s.sweep.markers = false

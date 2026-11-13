@@ -17,12 +17,15 @@ type Op =
 	| RetuneOp
 	/** The same job re-sends its last written target (a parked or re-sent hop). */
 	| { t: "repeat"; job: JobId }
+	/** The engine's label of the current epoch: never decides a skip. */
 	| { t: "trust"; commanded: boolean }
 	| { t: "started"; started: boolean }
+	/** An untracked epoch: the engine doubts both fields. */
 	| { t: "external-epoch" }
 	| { t: "reconnect" }
 	| { t: "distrust" }
-	| { t: "declared-rate" }
+	/** A doubt on the rate (a rate-truth mismatch). */
+	| { t: "rate-doubt" }
 	| { t: "control-mode" }
 	| { t: "release"; job: JobId }
 
@@ -52,7 +55,7 @@ const opArb: fc.Arbitrary<Op> = fc.oneof(
 	fc.record({ t: fc.constant("external-epoch" as const) }),
 	fc.record({ t: fc.constant("reconnect" as const) }),
 	fc.record({ t: fc.constant("distrust" as const) }),
-	fc.record({ t: fc.constant("declared-rate" as const) }),
+	fc.record({ t: fc.constant("rate-doubt" as const) }),
 	fc.record({ t: fc.constant("control-mode" as const) }),
 	fc.record({ t: fc.constant("release" as const), job }),
 )
@@ -61,13 +64,12 @@ interface Accepted {
 	centre: number
 	gain: number | null
 	rate: number | null
-	epoch: number
 }
 
 describe("TunerArbiter same-centre no-op property", () => {
 	// Feature: scanner-redesign, Property 4: Same-centre retune writes nothing
 	// Validates: Requirements 1.2
-	it("writes nothing and keeps the epoch iff holder, target equals the last accepted, epoch verified; else today's writes", async () => {
+	it("writes nothing iff holder, target equals the last accepted, epoch started and the ledger still proves the hop's own receipt; else today's writes", async () => {
 		let skips = 0
 		let written = 0
 		await fc.assert(
@@ -78,6 +80,8 @@ describe("TunerArbiter same-centre no-op property", () => {
 					const leases = new Map<JobId, Lease>()
 					// The model: the last accepted retune of each lease, cleared on any trust break.
 					const accepted = new Map<Lease, Accepted>()
+					// The ledger's live proof is the last written hop's receipts (no doubt, no session since).
+					let ledgerProves = false
 					const lastTarget = new Map<
 						Lease,
 						{ centre: number; gain: number | null; rate: number | null }
@@ -108,17 +112,14 @@ describe("TunerArbiter same-centre no-op property", () => {
 								const held = h.arbiter.holder("rtl") === lease
 								const last = accepted.get(lease)
 								const now = h.clock.currentEpoch()
-								const declared = h.tuner.declared.get("rtl")?.size ?? 0
 								const skip =
 									held &&
 									last !== undefined &&
 									last.centre === op.centre &&
 									last.gain === op.gain &&
 									last.rate === op.rate &&
-									now.epoch === last.epoch &&
-									now.tuningTrust === "commanded" &&
 									now.startSample !== null &&
-									declared === 0
+									ledgerProves
 								lastTarget.set(lease, {
 									centre: op.centre,
 									gain: op.gain,
@@ -155,8 +156,8 @@ describe("TunerArbiter same-centre no-op property", () => {
 										centre: op.centre,
 										gain: op.gain,
 										rate: op.rate,
-										epoch: pending!.epoch,
 									})
+									ledgerProves = true
 								}
 								break
 							}
@@ -167,20 +168,29 @@ describe("TunerArbiter same-centre no-op property", () => {
 								h.clock.startSample = op.started ? 0 : null
 								break
 							case "external-epoch":
-								h.clock.epoch += 1
+								h.clock.external()
+								ledgerProves = false
 								break
 							case "reconnect":
+								h.ledger.reconnect()
 								h.sources.emit("disconnected", "rtl")
+								h.ledger.start()
 								h.sources.emit("payload-started", "rtl")
 								await flush()
 								accepted.clear()
+								ledgerProves = false
 								break
 							case "distrust":
 								h.arbiter.distrust("rtl")
 								accepted.clear()
 								break
-							case "declared-rate":
-								h.tuner.declared.set("rtl", new Set(["sampleRate"]))
+							case "rate-doubt":
+								h.ledger.ledger.raiseDoubt(
+									"rtl",
+									"sampleRate",
+									"rate-truth-mismatch",
+								)
+								ledgerProves = false
 								break
 							case "control-mode":
 								h.tuner.emit("control-mode-changed", "rtl", "internal")
@@ -212,7 +222,7 @@ describe("TunerArbiter same-centre no-op property", () => {
 								gain: 300,
 								rate: 2_048_000,
 							},
-							{ t: "trust", commanded: true },
+							{ t: "trust", commanded: false },
 							{ t: "started", started: true },
 							{ t: "repeat", job: "a" },
 						],

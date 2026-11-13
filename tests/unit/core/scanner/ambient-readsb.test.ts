@@ -439,15 +439,23 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 		decoders.getStatus = id => (id === "readsb" ? { ...status } : undefined)
 		decoders.getDecoder = id => (id === "readsb" ? decoder : undefined)
 		decoders.getAllDecoders = () => [{ id: "readsb" }]
+		// The receiver was told the 1090 MHz centre at 2.4 Msps on this session (receipts past
+		// their settle): the tuning ledger proves it.
+		h.receiverLedger!.prove(ADSB_HZ, 2_400_000)
 		if (mode === "unknown") h.tuner.known.get("rtl")!.delete("frequency")
-		if (mode === "declared")
+		if (mode === "declared") {
+			// Declared only: nothing was written on this session, so the ledger proves nothing.
 			h.tuner.declared.set("rtl", new Set(["frequency", "sampleRate"]))
+			h.receiverLedger!.reconnect()
+			h.receiverLedger!.start()
+		}
 		if (mode === "outside")
 			h.tuner.states.get("rtl")!.frequency = ADSB_HZ + 2_000_000
 		provenance = createDecoderProvenanceIndex(
 			h.decoders as never,
 			() => "rtl",
 			h.tuner,
+			h.receiverLedger!.ledger,
 		)
 		const internals = h.service as unknown as {
 			store: DiscoveryStore
@@ -938,6 +946,9 @@ describe("scanner service: a 1090 MHz signal becomes ADS-B identified", () => {
 			vi.advanceTimersByTime(60_001)
 			expect(r.internals.store.get(anchor.id)?.aircraftCount).toBe(0)
 			await r.h.tuner.setFrequency("rtl", ADSB_HZ, { origin: "rest" })
+			// This rig carries no IQ: the receiver's payload after the write reaches the core past
+			// the ledger's settle, as it would on a live link (the ledger's own settle, no count).
+			r.h.receiverLedger!.advance(r.h.receiverLedger!.settleBytes() + 2)
 			r.send(parseSbsLine(sbsLine("00:01:10.000")))
 			r.send(parseSbsLine(sbsLine("00:01:12.000")), 2000)
 			r.advance(5000)

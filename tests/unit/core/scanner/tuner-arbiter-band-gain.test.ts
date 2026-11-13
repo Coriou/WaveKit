@@ -19,6 +19,8 @@ import {
 	FakeClock,
 } from "../../../mocks/scanner/arbiter-fakes.js"
 import { testSettings } from "../../../mocks/scanner/engine-fakes.js"
+import { attachReceiverLedger } from "../../../mocks/fake-receiver-ledger.js"
+import type { TuningLedger } from "../../../../src/core/tuning-ledger.js"
 
 const logger = pino({ level: "silent" })
 
@@ -33,6 +35,7 @@ const TABLE: BandGainEntry[] = [
 ]
 
 class Sources extends EventEmitter {
+	tuningLedger?: TuningLedger
 	isRtlTcpSource(id: string): boolean {
 		return id === "rtl"
 	}
@@ -59,6 +62,8 @@ function harness(
 			},
 		})
 	const sources = new Sources()
+	// The session holds receipts of the tuner's centre and rate: hops need not write the rate.
+	sources.tuningLedger = attachReceiverLedger(tuner).ledger
 	const clock = new FakeClock()
 	const persisted: (PersistedLease | null)[] = []
 	const deps: ArbiterDeps = {

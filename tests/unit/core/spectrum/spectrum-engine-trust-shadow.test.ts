@@ -1,9 +1,6 @@
 import pino from "pino"
 import { describe, expect, it } from "vitest"
-import {
-	SHADOW_DISAGREEMENTS,
-	SpectrumEngine,
-} from "../../../../src/core/spectrum/spectrum-engine.js"
+import { SpectrumEngine } from "../../../../src/core/spectrum/spectrum-engine.js"
 import type {
 	PipelineHost,
 	PipelineHostHandlers,
@@ -115,7 +112,7 @@ async function make() {
 		samples += n
 		await settle()
 	}
-	// The stream's own start (its labels: caps centre and rate, the tuner's trust).
+	// The stream's own start (caps centre and rate; no label).
 	host!.handlers.events([
 		{
 			kind: "epoch-started",
@@ -158,57 +155,66 @@ async function make() {
 	}
 }
 
-function last(engine: SpectrumEngine) {
-	return engine.trustShadow()!.disagreements.at(-1)
+/** Labels of the block summaries the engine emits, oldest first. */
+function blockLabels(engine: SpectrumEngine): string[] {
+	const labels: string[] = []
+	engine.on(
+		"pipeline",
+		(ev: { kind: string }, epoch: { tuningTrust: string }) => {
+			if (ev.kind === "block-summary") labels.push(epoch.tuningTrust)
+		},
+	)
+	return labels
 }
 
-describe("SpectrumEngine tuning-ledger shadow", () => {
-	it("counts agreement, a stricter ledger (no receipt, a doubt) and a value mismatch, and exposes them", async () => {
+/** Records the ranges the engine asks the ledger about. */
+function spyRanges(ledger: TuningLedger): [number, number][] {
+	const ranges: [number, number][] = []
+	const read = ledger.trustAt.bind(ledger)
+	ledger.trustAt = (sourceId, session, posA, posB) => {
+		ranges.push([posA, posB])
+		return read(sourceId, session, posA, posB)
+	}
+	return ranges
+}
+
+describe("SpectrumEngine tuning-ledger labels", () => {
+	it("labels each block by the ledger alone: no receipt, proven, a doubt, a receipt at another centre", async () => {
 		const { engine, ledger, conn, session, feed, emitBlock, block } =
 			await make()
-		expect(engine.currentEpoch().tuningTrust).toBe("commanded")
-		// No receipt yet: the ledger is stricter than the engine's state rule.
+		const labels = blockLabels(engine)
+		// The stream opening carries no label.
+		expect(engine.currentEpoch().tuningTrust).toBe("unverified")
+		// No receipt yet: unverified.
 		await feed(block * 2)
 		emitBlock()
-		expect(engine.trustShadow()).toMatchObject({
-			agree: 0,
-			ledgerStricter: 1,
-		})
-		expect(last(engine)).toMatchObject({
-			kind: "ledger-stricter",
-			engineTrust: "commanded",
-			ledgerTrust: "unverified",
-			reason: "no-receipt",
-			session: 1,
-			engineCentreHz: CENTRE,
-			ledgerCentreHz: null,
-		})
+		expect(labels.at(-1)).toBe("unverified")
 		conn.write(Buffer.concat([frame(0x01, CENTRE), frame(0x02, RATE)]), {
 			writer: "operator",
 		})(null)
 		await feed(block * 2)
 		emitBlock()
-		expect(engine.trustShadow()).toMatchObject({ agree: 1, ledgerStricter: 1 })
+		expect(labels.at(-1)).toBe("commanded")
+		expect(engine.currentEpoch().tuningTrust).toBe("commanded")
 		// A doubt (here the host-centre path's call, made directly) unproves the next block.
 		ledger.raiseDoubt("rtl", "frequency", "host-centre-mismatch")
 		await feed(block * 2)
 		emitBlock()
-		expect(engine.trustShadow()).toMatchObject({ agree: 1, ledgerStricter: 2 })
-		expect(last(engine)).toMatchObject({
-			reason: "doubt",
-			doubtReason: "host-centre-mismatch",
-		})
-		// A receipt at another centre: the ledger trusts a value the engine's epoch does not name.
+		expect(labels.at(-1)).toBe("unverified")
+		// A receipt at another centre: the ledger proves a centre the block was not computed at.
 		conn.write(frame(0x01, CENTRE + 100_000), { writer: "operator" })(null)
 		await feed(block * 2)
 		emitBlock()
-		expect(engine.trustShadow()).toMatchObject({ mismatch: 1 })
-		expect(last(engine)).toMatchObject({
-			kind: "mismatch",
-			ledgerTrust: "commanded",
-			ledgerCentreHz: CENTRE + 100_000,
+		expect(labels.at(-1)).toBe("unverified")
+		expect(engine.currentEpoch().tuningTrust).toBe("unverified")
+		// Status: blocks labelled, no second label to disagree with.
+		expect(engine.trustShadow()).toMatchObject({
+			agree: 4,
+			ledgerStricter: 0,
+			ledgerLooser: 0,
+			mismatch: 0,
+			disagreements: [],
 		})
-		expect(engine.trustShadow()!.disagreements).toHaveLength(3)
 		expect(session.ended).toBe(false)
 		await engine.stop()
 	})
@@ -241,31 +247,12 @@ describe("SpectrumEngine tuning-ledger shadow", () => {
 		})
 		expect(bare.trustShadow()).toBeNull()
 	})
-	it("keeps the last 32 disagreements, at and past the bound", async () => {
-		const { engine, feed, emitBlock, block } = await make()
-		for (let i = 0; i < SHADOW_DISAGREEMENTS; i++) {
-			await feed(block)
-			emitBlock()
-		}
-		let shadow = engine.trustShadow()!
-		expect(shadow.ledgerStricter).toBe(SHADOW_DISAGREEMENTS)
-		expect(shadow.disagreements).toHaveLength(SHADOW_DISAGREEMENTS)
-		const first = shadow.disagreements[0]!.posA
-		await feed(block)
-		emitBlock()
-		shadow = engine.trustShadow()!
-		expect(shadow.ledgerStricter).toBe(SHADOW_DISAGREEMENTS + 1)
-		expect(shadow.disagreements).toHaveLength(SHADOW_DISAGREEMENTS)
-		// The oldest left; positions grow block by block.
-		expect(shadow.disagreements[0]!.posA).toBeGreaterThan(first!)
-		expect(shadow.disagreements.at(-1)!.posB).toBe(
-			shadow.disagreements.at(-1)!.posA! + (block + 1) * 2,
-		)
-		await engine.stop()
-	})
 
 	it("maps a late block through its own stream's block length after a rate change", async () => {
-		const { engine, sources, feed, emitAt, block, samples } = await make()
+		const { engine, ledger, sources, feed, emitAt, block, samples } =
+			await make()
+		const labels = blockLabels(engine)
+		const ranges = spyRanges(ledger)
 		await feed(block * 4)
 		const oldEnd = samples()
 		// A rate change restarts the pipeline: stream 1 at twice the rate, twice the block.
@@ -280,17 +267,16 @@ describe("SpectrumEngine tuning-ledger shadow", () => {
 		expect(block1).not.toBe(block)
 		// The late block of stream 0 arrives now.
 		emitAt(0, oldEnd)
-		const d = last(engine)!
-		expect(d.reason).toBe("no-receipt")
+		expect(labels.at(-1)).toBe("unverified")
 		// Stream 0's sample 0 is source position 0; its block is `block` samples of 2 bytes.
-		expect(d.posA).toBe((oldEnd - block - 1) * 2)
-		expect(d.posB).toBe(oldEnd * 2)
+		expect(ranges.at(-1)).toEqual([(oldEnd - block - 1) * 2, oldEnd * 2])
 		await engine.stop()
 	})
 
-	it("reads a block reaching before its session's start as before-session", async () => {
+	it("never trusts a block reaching before its session's start, even on the new session's proof", async () => {
 		const { engine, ledger, conn, sources, fanout, feed, emitAt, block } =
 			await make()
+		const labels = blockLabels(engine)
 		await feed(block * 4)
 		conn.close()
 		const next = ledger.connection("rtl")
@@ -299,17 +285,16 @@ describe("SpectrumEngine tuning-ledger shadow", () => {
 		next.write(Buffer.concat([frame(0x01, CENTRE), frame(0x02, RATE)]), {
 			writer: "operator",
 		})(null)
+		const ranges = spyRanges(ledger)
 		// Half a block of the new session after block * 4 samples of the old one.
 		const bytes = Buffer.alloc(block)
 		s2.pos += bytes.length
 		fanout.write(bytes)
 		await settle()
 		emitAt(0, block * 4 + block / 2)
-		expect(last(engine)).toMatchObject({
-			reason: "before-session",
-			session: 2,
-			posA: 0,
-		})
+		expect(labels.at(-1)).toBe("unverified")
+		// Before the session: the ledger is not even asked.
+		expect(ranges).toEqual([])
 		await engine.stop()
 	})
 

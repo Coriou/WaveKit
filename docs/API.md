@@ -5715,29 +5715,24 @@ curl http://localhost:9000/api/spectrum
 `profiles[].key` carries the `:a<n>` suffix for an averaged profile.
 `SpectrumSourceStatus` (`sources[]`): `eligible` and `reason?`
 (`source-not-iq` | `source-removed`), the engine state and consumers, RBW,
-floor, `k` per range, `settleMode`, `tuningTrust` (since 2026-10-17: `unverified` while an
-operator retune's frames are still `unverified`, until the first block at or past
-the network settle), `warnings`
+floor, `k` per range, `settleMode`, `tuningTrust` (the tuning ledger's label of the
+current epoch's newest block summary; `unverified` before its first block), `warnings`
 (`untracked-retune` | `host-centre-mismatch`, with `deltaHz` and `at`), the summary
 budget actually delivered (`summaryBinCount`, `summaryBinHz`, `summaryHz`),
 `latestFrame` (at the default profile), `trustShadow?` and `lastError?`.
 
-`trustShadow` (diagnostics, since 2026-11-11) compares the engine's label of each
-block summary with the tuning ledger's: the core's record of every tuning frame
-flushed to the receiver, at the payload position it was flushed at, per connection.
-The ledger trusts a block only when the last frequency and sample-rate frames
-before it were flushed on the same connection, the block starts at least the
-network settle after them, and no doubt (untracked retune, host-centre mismatch,
-pipeline error, rate mismatch) was raised since. Counters: `agree`,
-`ledgerStricter` (the ledger says `unverified` where the engine trusts),
-`ledgerLooser` (the reverse) and `mismatch` (both trust, with another label,
-centre or rate), plus `disagreements`: the last 32, oldest first, each with
-`kind`, `at`, the ledger `session` and payload positions `posA`/`posB` the block
-was read at (null when it could not be mapped), both labels (`engineTrust`,
-`ledgerTrust`), both centres and rates (`engineCentreHz`, `ledgerCentreHz`,
-`engineSampleRateHz`, `ledgerSampleRateHz`), `reason?` (a fixed code such as
-`settling`, `doubt`, `no-receipt` or `before-session`) and `doubtReason?` (the
-doubt's own code, e.g. `untracked-retune`), and `retuneDelay`: per centre or
+`trustShadow` (diagnostics, since 2026-11-11). Since 2026-11-12 the tuning ledger's
+label is the engine's only label (the core's record of every tuning frame flushed to
+the receiver, at the payload position it was flushed at, per connection: a block is
+trusted only when the last frequency and sample-rate frames before it were flushed
+on the same connection, the block starts at least the settle after them, no doubt
+(untracked retune, host-centre mismatch, pipeline error, rate mismatch) was raised
+since, and they name the block's own centre and rate). `agree` counts the block
+summaries labelled; `ledgerStricter`, `ledgerLooser` and `mismatch` stay 0 and
+`disagreements` empty (kept for the shape; before 2026-11-12 they compared the
+engine's former label with the ledger's, each disagreement with `kind`, `at`,
+`session`, `posA`/`posB`, both labels, centres and rates, `reason?` and
+`doubtReason?`), and `retuneDelay`: per centre or
 rate frame that changed the value, the payload from its flush to the first block
 summary whose content shows the change (a carrier pattern moved by the expected
 shift, or the spectrum changed by 6 dB on average): `count`, `p50Ms`, `maxMs`,
@@ -6751,44 +6746,30 @@ its own device (external input, for example readsb with `rtlTcpHost`) has
 means no frequency.
 
 `tuningTrust` (superseding the 2026-10-16 core's "unverified for every decoder") is
-`commanded` (the source is under WaveKit's internal control) or `relay` (it is
-under external control through the RTL-TCP relay) when the observed tuner state
-proves the decoder hears its targets, and `unverified` otherwise. All of these
-must hold:
+the tuning ledger's label of the source's live edge (since 2026-11-12): `commanded`
+(WaveKit wrote the frames) or `relay` (a relay client's frames through the core's
+RTL-TCP relay) when the ledger proves the decoder hears its targets, and
+`unverified` otherwise. All of these must hold:
 
 - the decoder reads a WaveKit tuner source (not its own device) and has at least
   one target frequency;
-- the source's tuner state has a known, finite frequency and a positive sample
-  rate, and both were proven: written by WaveKit (an API or scanner command or a
-  reconnect replay) or seen in a relay client's accepted command. A value only
-  declared by the configuration baseline (`tuner.defaultFrequency`, the source
-  caps `centerFreq`/`sampleRate`) does not count (it is listed in the tuner
-  state's `declaredOnlyFields`): after a fresh start, a core-only restart while
-  rtlmux replays relay-set values, or a `reconnectPolicy: reset` reconnect, the
-  receiver may be elsewhere, so trust is `unverified` until WaveKit or a relay
-  client sets both again. A relay frequency or rate the controller ignored (out of
-  range, or an RTL rate gap) is forwarded upstream anyway, so it makes the field
-  unknown until the next accepted value;
+- the ledger proves the centre and the sample rate on the live connection: the last
+  frequency and rate frames flushed on it are past the settle with no doubt since
+  (a fresh start, a reconnect, a value only declared by the configuration
+  baseline: `unverified` until WaveKit or a relay client sends both again), and the
+  proven centre is the tuner state's;
 - direct sampling is `off` (in direct sampling the receiver does not use the
-  tuner centre; a relay value above 2 is the Q branch, as in librtlsdr). After a
-  fresh start or a reset reconnect `off` is an unproven placeholder (listed in
-  `unknownFields`) that the rule still accepts: a local rtl_tcp left in direct
-  sampling by an earlier client can read `commanded`. rtlmux drops direct sampling
-  commands, so the Raspberry Pi path is unaffected;
-- the source centre still equals the centre captured when the decoder was last
+  tuner centre; a relay value above 2 is the Q branch, as in librtlsdr);
+- the proven centre still equals the centre captured when the decoder was last
   created or started (a retune makes it `unverified` until the decoder starts
   again, even when the decoder already follows the new centre);
-- every target lies within 0.45 × sample rate of that centre (the usable 90 % of
-  the IQ bandwidth; ±1.08 MHz at 2.4 Msps).
+- every target lies within 0.45 × the proven sample rate of that centre (the usable
+  90 % of the IQ bandwidth; ±1.08 MHz at 2.4 Msps).
 
-Tuner state comes from WaveKit's own tuning commands, relay commands and
-reconnect replay. A reconnect under either policy forgets a centre or rate that
-WaveKit wrote without accepting it (it is not replayed), returning it to the
-baseline. A client that tunes the dongle host directly, bypassing
-WaveKit and the relay, is not observed, so trust can claim a centre the dongle
-no longer has. A removed tuner source drops its state: receptions on it are
-`unverified` until it is added again and reports state. Rows stored before the 2026-10-16 core
-keep `unverified`.
+The input rate is reported only while the ledger proves it. A client that tunes the
+dongle host directly, bypassing WaveKit and the relay, is invisible to the ledger
+until a detector raises a doubt, so trust can claim a centre the dongle no longer
+has. Rows stored before the 2026-10-16 core keep `unverified`.
 
 | Output                                                   | `frequency.hz`                                                                        |
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------- |
@@ -8164,12 +8145,12 @@ shape is unchanged.
 ```
 
 - `frequency`: the tuned centre of the demodulator's source plus `offsetHz`
-  when the transmission opened. `tuningTrust` is `commanded` under WaveKit
-  control and `relay` under external (SDR++) control, with the same strict rule
-  as spectrum frames: both the centre and the sample rate must have been
-  written or relayed on the current connection, else `unverified` (declared-only
-  values, a failed reconnect replay). Null when the source has no tuner state or
-  its centre is an unconfirmed placeholder.
+  when the transmission opened. `tuningTrust` is the tuning ledger's label of the
+  live edge: `commanded` (WaveKit's frames) or `relay` (a relay client's) when the
+  centre and the sample rate flushed on the current connection are past the settle
+  with no doubt since and the proven centre is the tuner's, else `unverified`
+  (declared-only values, a reconnect not yet re-proven). Null when the source has
+  no tuner state or its centre is an unconfirmed placeholder.
 - `endedAt`: for a `squelch` close, the last above-threshold block (in noise mode
   the last quieted block; the close time minus the squelch hang, 250 ms, never
   before `startedAt`); for every other reason, the close time. Since the 2026-10-16 noise

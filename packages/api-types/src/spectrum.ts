@@ -153,9 +153,10 @@ export interface SpectrumSourceStatus {
 	/** The latest block summary at the default profile. */
 	latestFrame: SpectrumFrameEventData | null
 	/**
-	 * Tuning-ledger shadow: block summaries the ledger labelled like the engine (`agree`), stricter
-	 * (`ledgerStricter`: unverified where the engine trusts), looser (`ledgerLooser`), or with
-	 * another label, centre or rate (`mismatch`). Diagnostics only; absent without a ledger.
+	 * Tuning-ledger diagnostics. The ledger's label is the engine's only label: `agree` counts the
+	 * block summaries labelled; `ledgerStricter`, `ledgerLooser` and `mismatch` stay 0 and
+	 * `disagreements` empty (cores before 2026-11-12 compared a second label). Absent without a
+	 * ledger.
 	 */
 	trustShadow?: SpectrumTrustShadow
 	lastError?: string

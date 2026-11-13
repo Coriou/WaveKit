@@ -24,8 +24,10 @@
  * over-estimating `posB` can only make the answer stricter. Gain and every other field are recorded
  * and never gate trust.
  *
- * Readers: the TunerController (assert, the skip rule, the API's per-field proof) and the spectrum
- * engine's shadow counter. Trust labels of consumers do not read it yet.
+ * Readers: the TunerController (assert, the skip rule, the API's per-field proof), the spectrum
+ * engine (every label it emits: `trustAt` on each event's sample range), the TunerArbiter (a hop's
+ * frequency receipt, the same-centre skip, the rate re-send), and decoder provenance, live-audio
+ * evidence and the analog transmission frequency (`trustNow`).
  */
 import type { TuningTrust } from "./spectrum/types.js"
 import { settleBytes, type SettleLink } from "./spectrum/network-settle.js"
