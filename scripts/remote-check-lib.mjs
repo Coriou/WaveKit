@@ -12,6 +12,8 @@ export const MESSAGE_CHARS = 300
 export const SUMMARY_LINES = 30
 export const BIG_FILE_BYTES = 1024 * 1024
 export const BRANCH_RE = /^ci\/[0-9a-f]{12}$/
+/** The private ledgers (calls.tsv, flaky.log), relative to the home directory. */
+export const LEDGER_DIR = ".cache/wavekit-remote"
 
 // ---------------------------------------------------------------- hygiene
 
@@ -57,27 +59,29 @@ const CONTENT_RULES = [
 				})
 				.map(m => m[0]),
 			// The whole address is the token (no zone, no brackets), so a link-local or unique-local
-			// address in the base does not allow a longer one it is a prefix of.
+			// address in the base does not allow a longer one it is a prefix of. A word character
+			// after it (Feed::Item) makes it a path, not an address.
 			...[
 				...text.matchAll(
-					/(?<![\w:])f[cde][0-9a-f]{2}:[0-9a-f]{0,4}:(?:[0-9a-f:]*[0-9a-f])?/gi,
+					/(?<![\w:])f[cde][0-9a-f]{2}:[0-9a-f]{0,4}:(?:[0-9a-f:]*[0-9a-f])?(?!\w)/gi,
 				),
 			].map(m => m[0]),
 		],
 	},
 	{
-		// A bare name (not a path segment like config/x.local) or the host of a URL
-		// (scheme://[user@]a.b.local[:port]/...); /usr/local/bin has no dot before "local".
+		// A bare name (a.b.local, not a path segment like config/x.local) or the host after "//"
+		// (scheme://[user@]a.b.local[:port]/..., //nas.local/share); /usr/local/bin has no dot before
+		// "local". A sentence-final dot ends a name; x.local.json or x.local.example.com is none.
 		label: "LAN host name",
 		find: text => [
 			...[
 				...text.matchAll(
-					/(?<![\w.*/-])[a-z0-9][\w-]*\.(?:local|lan)\b(?![.\w-])/gi,
+					/(?<![\w.*/-])(?:[a-z0-9][\w-]*\.)+(?:local|lan)(?![\w-]|\.[\w-])/gi,
 				),
 			].map(m => m[0]),
 			...[
 				...text.matchAll(
-					/:\/\/(?:[^\s/@]*@)?((?:[a-z0-9][\w-]*\.)+(?:local|lan))(?![.\w-])/gi,
+					/\/\/(?:[^\s/@]*@)?((?:[a-z0-9][\w-]*\.)+(?:local|lan))(?![\w-]|\.[\w-])/gi,
 				),
 			].map(m => m[1] ?? ""),
 		],
@@ -531,6 +535,18 @@ export function durationTable(durations, previous = {}) {
 	return files
 }
 
+/**
+ * A fast-check failure's replay hint: "seed N", else "counterexample X", else "property failed".
+ * @param {string} message
+ */
+const propertyHint = message => {
+	const seed = /\bseed: ?(-?\d+)/.exec(message)?.[1]
+	const ce = /Counterexample: ([^|]*)/.exec(message)?.[1]?.trim()
+	if (seed) return `seed ${seed}`
+	if (ce) return `counterexample ${ce}`
+	return /Property failed after/.test(message) ? "property failed" : ""
+}
+
 /** @param {number} s */
 export const mmss = s =>
 	`${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, "0")}s`
@@ -621,8 +637,15 @@ export function formatSummary(s) {
 		})),
 		...(v?.failed ?? []),
 	])
-	const flaky = s.root.flatMap(v => v?.flaky ?? [])
+	const flaky = s.root
+		.flatMap(v => v?.flaky ?? [])
+		.map(f => {
+			const h = propertyHint(f.message)
+			return h ? { ...f, test: `${f.test}  (${h})` } : f
+		})
 	const tail = [...(s.notes ?? [])]
+	if (flaky.some(f => / \(seed /.test(f.test)))
+		tail.push("property counterexample hidden by rerun: replay with the seed")
 	if (s.code !== 0 && s.url)
 		tail.push(`run ${s.url}${s.runNote ? `  (${s.runNote})` : ""}`)
 	if (s.code === 1) tail.push(`recheck: rm -r .remote-check/${s.tree}`)
@@ -795,6 +818,19 @@ export const quiet = f => {
 export const ok = f => quiet(() => (f(), true)) ?? false
 
 /**
+ * Appends one row to `<home>/<LEDGER_DIR>/calls.tsv`; a write error is ignored.
+ * @param {string} home @param {(string | number)[]} row
+ */
+export const logCall = (home, row) =>
+	quiet(() => {
+		fs.mkdirSync(join(home, LEDGER_DIR), { recursive: true })
+		fs.appendFileSync(
+			join(home, LEDGER_DIR, "calls.tsv"),
+			`${row.join("\t")}\n`,
+		)
+	})
+
+/**
  * Untracked, non-ignored files and their sizes, from lstat (nothing is hashed yet).
  * @param {Git} git @param {string} root
  */
@@ -896,9 +932,10 @@ export function sweep({ git, gh, remote, runs, now, maxAgeMs }) {
 
 /**
  * The verdict of a completed run: exit code and summary from the downloaded verdicts in `dl`.
- * Side files: `<out>/durations.json` (a refreshed table from every green run with all six shards,
- * for a maintainer to copy over the tracked one; the tracked table is only read) and the flaky
- * ledger under `<home>/.cache/wavekit-remote`.
+ * Side files: `<out>/durations.json` (a refreshed table from a green run whose six shards' test
+ * seconds stray more than 20 % from their mean, copied over the tracked one only on request; the
+ * tracked table is only read) and the flaky ledger under `<home>/<LEDGER_DIR>`. `keep`: leave the
+ * run for its logs (INFRA, or a failed non-test step).
  * @param {{
  *   dl: string, expected: string[], notes: string[],
  *   view: { url: string, createdAt: string, updatedAt: string },
@@ -920,7 +957,13 @@ export function verdictOf(r) {
 	const code = /** @type {0 | 1 | 2} */ (
 		exitCode({ verdicts, expected: r.expected })
 	)
-	if (code === 0 && shards.every(Boolean)) {
+	const ts = shards.map(v => v?.testSeconds ?? 0)
+	const mean = ts.reduce((a, b) => a + b, 0) / SHARDS
+	if (
+		code === 0 &&
+		shards.every(Boolean) &&
+		ts.some(t => Math.abs(t - mean) > 0.2 * mean)
+	) {
 		const table =
 			quiet(() =>
 				JSON.parse(
@@ -941,16 +984,28 @@ export function verdictOf(r) {
 	}
 	const flaky = shards.flatMap(v => v?.flaky ?? [])
 	if (flaky.length) {
-		const ledger = join(r.home, ".cache/wavekit-remote")
+		const ledger = join(r.home, LEDGER_DIR)
 		fs.mkdirSync(ledger, { recursive: true })
 		const day = new Date(r.now).toISOString()
 		fs.appendFileSync(
 			join(ledger, "flaky.log"),
 			flaky
-				.map(f => `${day}\t${r.tree12}\t${f.file}\t${f.test}\t${f.message}\n`)
+				.map(
+					f =>
+						`${day}\t${r.tree12}\t${f.file}\t${f.test}\t${propertyHint(f.message)}\t${f.message}\n`,
+				)
 				.join(""),
 		)
 	}
+	// A failed non-test step (lint, typecheck, build, native) keeps its run, for the log, until the sweep.
+	const keep =
+		code === 2 ||
+		(code === 1 &&
+			[...verdicts.values()].some(v =>
+				Object.entries(v.steps ?? {}).some(
+					([n, c]) => c !== 0 && n !== "root-tests",
+				),
+			))
 	const text = formatSummary({
 		code,
 		tree: r.tree12,
@@ -964,10 +1019,10 @@ export function verdictOf(r) {
 			.map(([n, v]) => ({ ...v, name: n.slice(8) })),
 		missing: r.expected.filter(n => !verdicts.has(n)).map(n => n.slice(8)),
 		url: r.view.url,
-		runNote: code === 2 ? "kept for inspection" : "deleted",
+		runNote: keep ? "kept" : "deleted",
 		notes: r.notes,
 	})
-	return { code, text }
+	return { code, text, keep }
 }
 
 /**

@@ -123,6 +123,31 @@ describe("hygiene scan", () => {
 			expect(scanText(text)).toEqual([])
 	})
 
+	it("flags multi-label and sentence-final LAN names, not file names or public hosts", () => {
+		const pi = dot("raspberrypi", "local")
+		for (const text of [
+			`open http${":"}//${pi}.`,
+			`ssh ${pi}.`,
+			`mount ${dot("nas", "home", "lan")} now`,
+			`smb ${"/"}/${dot("nas", "local")}/share`,
+		])
+			expect(scanText(text).map(h => h.label)).toEqual(["LAN host name"])
+		for (const text of [
+			`cp .${dot("env", "local")} ${dot("settings", "local", "json")}`,
+			`see ${dot("foo", "local", "example", "com")}`,
+		])
+			expect(scanText(text)).toEqual([])
+	})
+
+	it("does not take a Rust or C++ path for an IPv6 address", () => {
+		const c = "::"
+		expect(scanText(`feed${c}Parser${c}new()`)).toEqual([])
+		expect(scanText(`let x: Feed${c}Item`)).toEqual([])
+		expect(scanText(`fd00${c}1 and [fe80${c}2]`).map(h => h.label)).toEqual([
+			"private address",
+		])
+	})
+
 	it("flags MAC addresses, allowed when the base holds the same one", () => {
 		const mac = (sep: string, pairs: string[]) => pairs.join(sep)
 		const one = mac(":", ["b8", "27", "eb", "12", "34", "56"])
@@ -781,6 +806,39 @@ describe("summary", () => {
 		])
 	})
 
+	it("prints a flaky property's seed or counterexample and a replay note", () => {
+		const seed =
+			'Property failed after 3 tests | { seed: -71210566, path: "2" } | Counterexample: [1]'
+		const text = formatSummary({
+			...base,
+			code: 0,
+			root: [
+				shard({
+					flaky: [
+						{ file: "tests/p.test.ts", test: "p", message: seed },
+						{
+							file: "tests/q.test.ts",
+							test: "q",
+							message: "Counterexample: [0] | x",
+						},
+						{ file: "tests/r.test.ts", test: "r", message: "timeout" },
+					],
+				}),
+				...Array.from({ length: 5 }, () => shard()),
+			],
+		})
+		expect(text.split("\n").slice(0, 1)).toEqual([
+			"remote-check PASS  tree 3f9a1c2b7d10  base 189327ec  4m31s",
+		])
+		expect(text.split("\n").slice(3)).toEqual([
+			"flaky 3",
+			"  tests/p.test.ts > p  (seed -71210566)",
+			"  tests/q.test.ts > q  (counterexample [0])",
+			"  tests/r.test.ts > r",
+			"property counterexample hidden by rerun: replay with the seed",
+		])
+	})
+
 	it("lists flaky tests and missing verdicts", () => {
 		const root = [
 			shard({
@@ -1165,9 +1223,36 @@ describe("client with fake git and gh", () => {
 		expect(sweeps).toHaveLength(2)
 		expect(sweeps[0]).toBeLessThan(push)
 		expect(sweeps[1]).toBeGreaterThan(push)
-		// A green run with all shards leaves a refreshed table, without a note.
-		expect(fs.existsSync(join(root, ".remote-check/durations.json"))).toBe(true)
+		// Even shard times leave no refreshed table; the summary has no note for it.
+		expect(fs.existsSync(join(root, ".remote-check/durations.json"))).toBe(
+			false,
+		)
 		expect(r.text.split("\n")).toHaveLength(4)
+	})
+
+	it("refreshes the table only when a shard's test time strays over 20 % from the mean", async () => {
+		verdictFor = name =>
+			name === "root (1)"
+				? { ...verdict(name), testSeconds: 200 }
+				: verdict(name)
+		expect((await remoteCheck(deps(), [])).code).toBe(0)
+		expect(fs.existsSync(join(root, ".remote-check/durations.json"))).toBe(true)
+	})
+
+	it("logs every call, a cached one too, to the private usage ledger", async () => {
+		await remoteCheck(deps(), [])
+		w.clock += 5000
+		await remoteCheck(deps(), [])
+		const rows = fs
+			.readFileSync(join(root, ".cache/wavekit-remote/calls.tsv"), "utf8")
+			.trim()
+			.split("\n")
+			.map(l => l.split("\t"))
+		expect(rows.map(r => r.slice(1))).toEqual([
+			[root, "abcdef012345", "0", expect.any(String), "0"],
+			[root, "abcdef012345", "0", "0", "1"],
+		])
+		expect(rows[0]?.[0]).toMatch(/^\d{4}-\d\d-\d\dT/)
 	})
 
 	it("refuses a private address the base holds only inside a longer one", async () => {
@@ -1235,7 +1320,7 @@ describe("client with fake git and gh", () => {
 		const r = await remoteCheck(deps(), [])
 		expect(r.code).toBe(2)
 		expect(r.text).toContain("no verdict: root-3")
-		expect(r.text).toContain("(kept for inspection)")
+		expect(r.text).toMatch(/run https:.*\/7 {2}\(kept\)/)
 		expect(w.runs.map(x => [x.id, x.status, x.attempt])).toEqual([
 			[7, "completed", 2],
 		])
@@ -1251,6 +1336,17 @@ describe("client with fake git and gh", () => {
 		const push = calls.findIndex(c => c.startsWith("git push -q --force"))
 		expect(del).toBeGreaterThanOrEqual(0)
 		expect(del).toBeLessThan(push)
+	})
+
+	it("keeps the run of a failed non-test step and deletes a test failure's", async () => {
+		verdictFor = name =>
+			name === "static"
+				? { ...verdict(name), ok: false, steps: { lint: 1 } }
+				: verdict(name)
+		const r = await remoteCheck(deps(), [])
+		expect(r.code).toBe(1)
+		expect(r.text).toContain("actions/runs/7  (kept)")
+		expect(w.runs.map(x => x.id)).toEqual([7])
 	})
 
 	it("is INFRA at once when gh refuses the rerun", async () => {

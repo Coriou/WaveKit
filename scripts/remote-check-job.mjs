@@ -195,7 +195,7 @@ function main() {
 			}
 		} else steps["root-tests"] = -1
 	}
-	// The end of each failed step's output (step.sh tees it to $RUNNER_TEMP/step-<name>.log).
+	// The end of each failed step's output (step.sh writes it to $RUNNER_TEMP/step-<name>.log).
 	/** @type {Record<string, string[]>} */
 	const tail = {}
 	for (const [name, code] of Object.entries(steps)) {

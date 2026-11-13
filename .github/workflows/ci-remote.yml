@@ -30,13 +30,16 @@ jobs:
           #!/usr/bin/env bash
           # step.sh <name> <command...>: runs the command until the job's step budget ends and records
           # its exit code (124: the budget ran out; 137: the command ignored SIGTERM for 15 s). The
-          # output also goes to $RUNNER_TEMP/step-<name>.log, whose end a failed step's verdict keeps.
+          # output goes to $RUNNER_TEMP/step-<name>.log (no pipe a lingering child could hold open),
+          # printed afterwards; a failed step's verdict keeps its end.
           name="$1"
           shift
+          log="$RUNNER_TEMP/step-$name.log"
           left=$(( $(cat "$RUNNER_TEMP/verdict-start") + VERDICT_STEPS_S - $(date +%s) ))
           if [ "$left" -gt 0 ]; then
-            timeout -k 15s "${left}s" "$@" 2>&1 | tee "$RUNNER_TEMP/step-$name.log"
-            code=${PIPESTATUS[0]}
+            timeout -k 15s "${left}s" "$@" > "$log" 2>&1
+            code=$?
+            cat "$log"
           else
             code=124
           fi

@@ -9,8 +9,8 @@
 // the summary, also written to .remote-check/summary.txt. Docs are not checked here: run
 // scripts/check-docs.mjs locally.
 //
-// Exit: 0 green (flaky tests included), 1 failures, 2 infrastructure (run kept), 3 refused,
-// 4 still running after 9 minutes: call again.
+// Exit: 0 green (flaky tests included), 1 failures (run kept when a non-test step failed),
+// 2 infrastructure (run kept), 3 refused, 4 still running after 9 minutes: call again.
 
 import { execFileSync } from "node:child_process"
 import * as fs from "node:fs"
@@ -64,8 +64,17 @@ export async function remoteCheck(d, argv) {
 	const gh = (/** @type {string[]} */ args) => d.gh([...args, "-R", slug])
 	const out = join(root, ".remote-check")
 	fs.mkdirSync(out, { recursive: true })
-	const finish = (/** @type {string} */ text, /** @type {number} */ code) => {
+	let tree12 = "-"
+	// Every call appends a line to the private usage ledger (outside the repo; never swept).
+	const finish = (
+		/** @type {string} */ text,
+		/** @type {number} */ code,
+		cachedHit = 0,
+	) => {
 		fs.writeFileSync(join(out, "summary.txt"), `${text}\n`)
+		const row = [new Date(d.now()).toISOString(), root, tree12, code]
+		const wall = Math.round((d.now() - t0) / 1000)
+		lib.logCall(d.home, [...row, wall, cachedHit])
 		return { text, code }
 	}
 	const refuse = (/** @type {string} */ why, hits = lib.NO_HITS) =>
@@ -88,7 +97,7 @@ export async function remoteCheck(d, argv) {
 			lib.untrackedRefusals(big, () => true),
 		)
 	const tree = lib.writeTree(git)
-	const tree12 = tree.slice(0, 12)
+	tree12 = tree.slice(0, 12)
 	const cache = join(out, tree12)
 	// A stored result answers only the base it was checked against ("<code>\t<base>").
 	const base = argv[0] ?? `${REMOTE}/main`
@@ -103,7 +112,7 @@ export async function remoteCheck(d, argv) {
 			fs.readFileSync(join(cache, "summary.txt"), "utf8"),
 		)
 		return hit && hitBase === base && text
-			? finish(text.trimEnd(), Number(hit))
+			? finish(text.trimEnd(), Number(hit), 1)
 			: undefined
 	}
 	const hit = cached()
@@ -246,7 +255,7 @@ export async function remoteCheck(d, argv) {
 			return still(`run ${view.url} still running`)
 		await d.sleep(POLL_MS)
 	}
-	const { code, text } = lib.verdictOf({
+	const { code, text, keep } = lib.verdictOf({
 		dl,
 		expected,
 		notes,
@@ -260,14 +269,14 @@ export async function remoteCheck(d, argv) {
 	})
 
 	// Cache (a FAIL too: `rm -r .remote-check/<tree12>` forces a recheck), then delete the branch
-	// and, unless the infrastructure failed, the run. An INFRA run is never reattached: state.json
-	// goes, and the next call deletes it and pushes a new one.
+	// and the run unless it is kept (INFRA or a failed non-test step: the sweep takes it). An INFRA
+	// run is never reattached: state.json goes, and the next call deletes it and pushes a new one.
 	fs.writeFileSync(join(cache, "summary.txt"), `${text}\n`)
 	if (code !== 2) fs.writeFileSync(codeFile, `${code}\t${base}`)
 	fs.rmSync(dl, { recursive: true, force: true })
 	fs.rmSync(stateFile, { force: true })
 	ok(() => git(["push", "-q", REMOTE, "--delete", branch]))
-	if (code !== 2) ok(() => gh(["run", "delete", runId]))
+	if (!keep) ok(() => gh(["run", "delete", runId]))
 	const dirs = fs
 		.readdirSync(out, { withFileTypes: true })
 		.filter(e => e.isDirectory())
@@ -293,6 +302,8 @@ if (
 		const root = lib.quiet(() =>
 			defaultDeps.git(["rev-parse", "--show-toplevel"]).trim(),
 		)
+		const row = [new Date().toISOString(), root ?? "-", "-", 2, "-", 0]
+		lib.logCall(defaultDeps.home, row)
 		if (root)
 			lib.quiet(() => {
 				fs.mkdirSync(join(root, ".remote-check"), { recursive: true })
