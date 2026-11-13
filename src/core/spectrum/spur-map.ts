@@ -663,9 +663,12 @@ export class SpurMap implements LineGate {
 		return t
 	}
 
-	/** Refreshes candidates seen while confirmed; drops those past the TTL. */
+	/**
+	 * Refreshes candidates seen while confirmed; drops those past the TTL. Restored candidates
+	 * age out (expireRestored) after the refresh, so one re-confirmed in the very close that
+	 * reaches its wall-time bound is a line of this run and kept, never dropped once.
+	 */
 	private expire(s: KeyState): void {
-		this.expireRestored(s)
 		for (let i = 0; i < this.fftSize; i++) {
 			if (s.baseband[i] !== 1) continue
 			if (this.confirmedNear(s, i)) {
@@ -681,6 +684,7 @@ export class SpurMap implements LineGate {
 				s.imported[i] = 0
 			}
 		}
+		this.expireRestored(s)
 	}
 
 	/**

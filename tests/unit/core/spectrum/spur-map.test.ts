@@ -710,6 +710,36 @@ describe("SpurMap restored candidates age by wall time", () => {
 		expect(map.exportState().spurs).toEqual([])
 	})
 
+	it("keeps a restored line re-confirmed in the very block that reaches its wall-time bound", () => {
+		let restored = false
+		const map: SpurMap = new SpurMap({
+			fftSize: N,
+			minObservedMs: 600_000,
+			onFraction: 0.95,
+			maxWidthBins: 3,
+			// The wall clock reaches the bound (the import at 0) in the block whose classification
+			// re-confirms the line, and stays a millisecond short of it before: the refresh and the
+			// restored candidates' aging meet in one block.
+			nowMs: (): number => {
+				if (!restored) return 0
+				const s: { confirmed: Uint8Array } | undefined = (
+					map as unknown as {
+						keys: Map<string, { confirmed: Uint8Array }>
+					}
+				).keys.get(KEY)
+				return s?.confirmed[SPUR_BIN] === 1 ? SPUR_TTL_MS : SPUR_TTL_MS - 1
+			},
+		})
+		const st = persisted()
+		map.importState(st)
+		restored = true
+		for (let e = 1; e <= 3; e++)
+			lineEpoch(map, e, C + e * 1e6, 2000, { bins: [SPUR_BIN] })
+		expect(masked(map)).toEqual([SPUR_BIN])
+		expect(map.alive(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(true)
+		expect(map.exportState()).toEqual(st)
+	})
+
 	it("keeps a restored line of a key observed again: it re-confirms and ages on settled time", () => {
 		const clock = { t: 0 }
 		const map = clockedMap(clock)

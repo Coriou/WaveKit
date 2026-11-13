@@ -214,16 +214,53 @@ describe("a first track that never voices does not cut a lone voice beside it", 
 						voiceTrackId: string | null
 						tracks: Map<string, unknown>
 					} | null
-					committedLapsed(v: unknown, t: unknown): boolean
+					committedLapsed(v: unknown, t: unknown, now: number): boolean
 				}
 				const v = x.visit
 				if (v === null || v.voiceTrackId !== "a") return
 				const t = v.tracks.get("a")
+				// The landing is at clock 0, so `rel` is the clock.
 				if (rel === closeAt + LAPSE_MS - 50)
-					seen[LAPSE_MS - 50] = x.committedLapsed(v, t)
-				if (rel === closeAt + LAPSE_MS) seen[LAPSE_MS] = x.committedLapsed(v, t)
+					seen[LAPSE_MS - 50] = x.committedLapsed(v, t, rel)
+				if (rel === closeAt + LAPSE_MS)
+					seen[LAPSE_MS] = x.committedLapsed(v, t, rel)
 			},
 		})
 		expect(seen).toEqual({ [LAPSE_MS - 50]: false, [LAPSE_MS]: true })
+	})
+
+	it("a check is judged at its own clock: asked 1950 ms after the close but run once the clock passed 2000 ms, the commitment is firm", () => {
+		const closeAt = 5_000
+		const seen: boolean[] = []
+		run({
+			aHints: { followOnAir: true },
+			aClosesAt: closeAt,
+			during: (s, rel) => {
+				const x = s as unknown as {
+					now: () => number
+					visit: {
+						voiceTrackId: string | null
+						tracks: Map<string, unknown>
+					} | null
+					committedLapsed(v: unknown, t: unknown, now: number): boolean
+				}
+				const v = x.visit
+				if (v === null || v.voiceTrackId !== "a") return
+				if (rel !== closeAt + LAPSE_MS - 50) return
+				// The scheduler's clock already 500 ms past the bound while the check asked at 1950 ms.
+				const own = x.now
+				x.now = () => closeAt + LAPSE_MS + 500
+				try {
+					const t = v.tracks.get("a")
+					seen.push(
+						x.committedLapsed(v, t, rel),
+						x.committedLapsed(v, t, closeAt + LAPSE_MS + 500),
+					)
+				} finally {
+					x.now = own
+				}
+			},
+		})
+		expect(seen).toEqual([false, true])
 	})
 })
