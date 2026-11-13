@@ -550,3 +550,179 @@ describe("SpurMap verification", () => {
 		])
 	})
 })
+
+/**
+ * One epoch of `ms` in BLOCK_MS blocks with steady emissions at `rfHz` (each on at the bin its RF
+ * reads under `centreHz`, when inside the FFT) and receiver lines at the baseband bins `bins`.
+ */
+function rfEpoch(
+	map: SpurMap,
+	epoch: number,
+	centreHz: number,
+	ms: number,
+	opts: { rfHz?: number[]; bins?: number[] },
+): void {
+	const bins = [...(opts.bins ?? [])]
+	for (const hz of opts.rfHz ?? []) {
+		const b = Math.round((hz - centreHz) / BIN_HZ) + N / 2
+		if (b >= 0 && b < N) bins.push(b)
+	}
+	lineEpoch(map, epoch, centreHz, ms, { bins })
+}
+
+/** A live 2 m sweep step: 775.1 kHz, 775.1 bins at 1 kHz, so f and f + hop share a baseband bin. */
+const HOP_HZ = 775_100
+/** A bin both centres see the other carrier from: 775 ≤ bin ≤ N − 1 − 775, off DC. */
+const LINE_BIN = 900
+/** RF of LINE_BIN under C. */
+const RF_A = C + (LINE_BIN - N / 2) * BIN_HZ
+
+describe("SpurMap RF move veto", () => {
+	// Two weak steady real carriers one hop apart: A under C and B under C + hop both read LINE_BIN.
+	for (const [label, offsetHz, bin] of [
+		["exactly one hop apart", 0, LINE_BIN],
+		[
+			"one hop and 0.4 bin apart (rounds to the same bin)",
+			0.4 * BIN_HZ,
+			LINE_BIN,
+		],
+		["one hop and one bin apart (the ±1 tolerance)", BIN_HZ, LINE_BIN],
+		["one hop and two bins apart (past the tolerance)", 2 * BIN_HZ, LINE_BIN],
+		[
+			"exactly one hop apart, the other carrier outside the second centre",
+			0,
+			SPUR_BIN,
+		],
+	] as const) {
+		it(`never confirms two real carriers ${label}`, () => {
+			const map = newMap()
+			const a = C + (bin - N / 2) * BIN_HZ
+			const rfHz = [a, a + HOP_HZ + offsetHz]
+			map.promote(KEY, BIN_HZ, [{ startBin: bin - 1, endBin: bin + 4 }])
+			for (let e = 1; e <= 6; e++)
+				rfEpoch(map, e, e % 2 === 1 ? C : C + HOP_HZ, 2000, { rfHz })
+			for (let i = bin - 1; i <= bin + 3; i++)
+				expect(map.verified(KEY, i, i + 1)).toBe(false)
+			expect(masked(map)).toEqual([])
+			expect(
+				map.exportState().spurs.filter(s => s.kind === "baseband"),
+			).toEqual([])
+		})
+	}
+
+	it("still confirms a receiver line from the same two centres, real carriers around it", () => {
+		const map = newMap()
+		map.promote(KEY, BIN_HZ, [{ startBin: LINE_BIN, endBin: LINE_BIN + 1 }])
+		// Real carriers nowhere near the line's RF under either centre.
+		const rfHz = [C + 120_000, C + 400_000]
+		for (let e = 1; e <= 3; e++)
+			rfEpoch(map, e, e % 2 === 1 ? C : C + HOP_HZ, 2000, {
+				rfHz,
+				bins: [LINE_BIN],
+			})
+		expect(map.verified(KEY, LINE_BIN, LINE_BIN + 1)).toBe(true)
+		expect(masked(map)).toEqual([LINE_BIN])
+	})
+
+	it("still confirms a receiver comb whose spacing divides the hop: tooth k + 4 sits on tooth k's RF", () => {
+		// 25-bin teeth, a 100 kHz (100-bin) hop: under C + hop the RF tooth k read under C is at
+		// tooth k − 4's bin, a line C credited too, so the same pattern under both centres.
+		const map = newMap()
+		const teeth = Array.from({ length: 7 }, (_, k) => LINE_BIN + (k - 3) * 25)
+		for (const t of teeth)
+			map.promote(KEY, BIN_HZ, [{ startBin: t, endBin: t + 1 }])
+		for (let e = 1; e <= 3; e++)
+			rfEpoch(map, e, e % 2 === 1 ? C : C + 100_000, 2000, { bins: teeth })
+		for (const t of teeth) expect(map.verified(KEY, t, t + 1)).toBe(true)
+		expect(masked(map)).toEqual(teeth)
+	})
+
+	// A receiver line at LINE_BIN under C, C + 18 bins and C + Δ bins; a real carrier at the RF the
+	// line reads under C keys up only under C + Δ, where it sits Δ bins below the line. The veto
+	// bound is maxWidthBins + 2 = 5 bins: at Δ = 4 the line itself could light that RF entry, so C's
+	// credit stands; at Δ = 5 it is an emission that moved with RF, C's credit goes and C + 18 bins
+	// and C + 5 bins are 13 bins apart, under the 18 needed.
+	for (const [delta, confirms] of [
+		[4, true],
+		[5, false],
+	] as const) {
+		it(`vetoes a credit whose RF was seen steady ${delta} bins away: ${confirms ? "kept" : "vetoed"}`, () => {
+			const map = newMap()
+			map.promote(KEY, BIN_HZ, [{ startBin: LINE_BIN, endBin: LINE_BIN + 1 }])
+			const c3 = C + delta * BIN_HZ
+			rfEpoch(map, 1, C, 2000, { bins: [LINE_BIN] })
+			rfEpoch(map, 2, C + SEPARATION_HZ, 2000, { bins: [LINE_BIN] })
+			rfEpoch(map, 3, c3, 2000, { bins: [LINE_BIN], rfHz: [RF_A] })
+			rfEpoch(map, 4, c3, 1000, { bins: [LINE_BIN], rfHz: [RF_A] })
+			expect(map.verified(KEY, LINE_BIN, LINE_BIN + 1)).toBe(confirms)
+			expect(masked(map)).toEqual(confirms ? [LINE_BIN] : [])
+		})
+	}
+})
+
+describe("SpurMap restored candidates age by wall time", () => {
+	/** A state with one confirmed line of `key`, learned by a fresh map. */
+	function persisted(): ReturnType<SpurMap["exportState"]> {
+		const map = newMap()
+		map.promote(KEY, BIN_HZ, [{ startBin: SPUR_BIN, endBin: SPUR_BIN + 1 }])
+		for (let e = 1; e <= 3; e++)
+			lineEpoch(map, e, C + e * 1e6, 2000, { bins: [SPUR_BIN] })
+		const st = map.exportState()
+		expect(st.spurs).toEqual([
+			{ key: KEY, basebandBin: SPUR_BIN, widthBins: 1, kind: "baseband" },
+		])
+		return st
+	}
+
+	function clockedMap(clock: { t: number }): SpurMap {
+		return new SpurMap({
+			fftSize: N,
+			minObservedMs: 600_000,
+			onFraction: 0.95,
+			maxWidthBins: 3,
+			nowMs: () => clock.t,
+		})
+	}
+
+	it("drops a restored candidate of a never-observed key at 10 min of wall time, not a millisecond before", () => {
+		const clock = { t: 1_000_000 }
+		const map = clockedMap(clock)
+		const st = persisted()
+		map.importState(st)
+		clock.t += SPUR_TTL_MS - 1
+		expect(map.alive(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(true)
+		expect(map.exportState()).toEqual(st)
+		clock.t += 1
+		expect(map.alive(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(false)
+		const out = new Uint8Array(N)
+		map.candidates(KEY, out)
+		expect(out.includes(1)).toBe(false)
+		expect(map.exportState().spurs).toEqual([])
+	})
+
+	it("drops an observed key's restored candidate that never re-confirms at the same wall bound", () => {
+		const clock = { t: 0 }
+		const map = clockedMap(clock)
+		map.importState(persisted())
+		lineEpoch(map, 1, C, 2000, { bins: [SPUR_BIN] }) // one centre: unverified
+		clock.t = SPUR_TTL_MS
+		expect(map.alive(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(false)
+		expect(map.exportState().spurs).toEqual([])
+	})
+
+	it("keeps a restored line of a key observed again: it re-confirms and ages on settled time", () => {
+		const clock = { t: 0 }
+		const map = clockedMap(clock)
+		const st = persisted()
+		map.importState(st)
+		for (let e = 1; e <= 3; e++) {
+			clock.t += 2000
+			lineEpoch(map, e, C + e * 1e6, 2000, { bins: [SPUR_BIN] })
+		}
+		expect(masked(map)).toEqual([SPUR_BIN])
+		clock.t += SPUR_TTL_MS
+		expect(map.alive(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(true)
+		expect(masked(map)).toEqual([SPUR_BIN])
+		expect(map.exportState()).toEqual(st)
+	})
+})

@@ -50,9 +50,32 @@
  *   channel plus the line's width and its ±1-bin skirt has left the line's bins entirely. The
  *   miss rule keeps two real emitters at one offset under far-apart hops from confirming it.
  *   Credits are never persisted: after a restart every line is unverified until re-confirmed.
+ * - RF move veto. Two steady real carriers exactly one hop apart land in one baseband bin under
+ *   both centres (a 775.1 kHz hop at 1 kHz bins moves RF by 775.1 bins, so the carrier at
+ *   f + hop sits at the bin the carrier at f held), and no miss comes between them. A credit of
+ *   centre c to bin i therefore counts only while the RF learner never saw the RF that bin i reads
+ *   under c (its entry ±1 bin) steady under a centre whose bin index differs from c's by at least
+ *   maxWidthBins + 2 (5 at 3 bins): there that RF sat at a baseband bin ≥ 5 bins away, so it moves
+ *   with RF, a real emission. The bound is past every bin the line itself can light: another bin of
+ *   a line of maxWidthBins is ≤ maxWidthBins − 1 away, the RF entry is read ±1 bin and counts as on
+ *   ±1 bin (dilation), so the line lights an entry moved by at most maxWidthBins + 1 bins. "Steady"
+ *   is the RF learner's own credit (on for ≥ onFraction of an epoch, the open epoch included). The
+ *   veto is checked at every epoch close and removes only that centre's credit: the rest still
+ *   confirm with MIN_CONFIRM_CENTRES separated centres. A receiver spur's RF is quiet under other
+ *   centres unless another line lands on it: a comb whose spacing divides the hop puts tooth k + m
+ *   under c' on the RF tooth k read under c. That is no move when the bin the RF sat at under c'
+ *   (±1) is itself a line credited by c: the same baseband pattern under both centres. A real pair
+ *   one hop apart is not: under c the carrier at f − hop that would explain it is absent (bins
+ *   i, i + hop lit under c; i − hop, i under c'). A chain of real carriers on the hop's own grid
+ *   reads as a comb from two centres; a centre between them where a link is quiet misses it.
+ *   Without a centre that sees the RF at another bin the veto has no evidence.
  * - Expiry. Time is the key's settled observation time. A candidate expires SPUR_TTL_MS (10 min,
  *   the time the slow path needs to learn a line) after it was flagged or last seen while
- *   confirmed, whichever is later; a confirmed line unseen for SPUR_TTL_MS stops masking.
+ *   confirmed, whichever is later; a confirmed line unseen for SPUR_TTL_MS stops masking. A
+ *   restored candidate also ages by wall time (the injectable `nowMs`, Date.now by default): until
+ *   it is seen while confirmed in this run it expires SPUR_TTL_MS of wall time after importState,
+ *   so one of a gain key never observed again (whose settled clock never advances) leaves within
+ *   10 min instead of persisting forever; once re-confirmed it ages like a learned line.
  *
  * Only confirmed candidates and restored ones not yet expired persist (exportState). Bins a
  * mask may not cover (a confirmed real signal there, `protect`) are left unmasked and counted.
@@ -137,8 +160,10 @@ interface KeyState {
 	bornMs: Float64Array
 	/** Latest clock a candidate bin was seen while confirmed (−∞ never). */
 	keepMs: Float64Array
-	/** 1 = the candidate came from disk and has not expired. */
+	/** 1 = the candidate came from disk, has not expired and was not seen while confirmed since. */
 	imported: Uint8Array
+	/** Wall time (nowMs) of the last importState that flagged a restored candidate here. */
+	importedWallMs: number
 	rf: Map<number, RfEntry>
 	rfConfirmed: Map<
 		number,
@@ -151,6 +176,7 @@ export class SpurMap implements LineGate {
 	private readonly minObservedMs: number
 	private readonly onFraction: number
 	private readonly maxWidthBins: number
+	private readonly nowMs: () => number
 	private readonly keys = new Map<string, KeyState>()
 	private readonly dilated: Uint8Array
 	private readonly qualifies: Uint8Array
@@ -170,7 +196,10 @@ export class SpurMap implements LineGate {
 		minObservedMs: number
 		onFraction: number
 		maxWidthBins: number
+		/** Wall clock (ms) restored candidates age by; Date.now by default, injectable for tests. */
+		nowMs?: () => number
 	}) {
+		this.nowMs = opts.nowMs ?? Date.now
 		this.fftSize = opts.fftSize
 		this.minObservedMs = opts.minObservedMs
 		this.onFraction = opts.onFraction
@@ -467,6 +496,7 @@ export class SpurMap implements LineGate {
 	alive(key: string, startBin: number, endBin: number): boolean {
 		const s = this.keys.get(key)
 		if (s === undefined) return false
+		this.expireRestored(s)
 		for (
 			let i = Math.max(0, startBin - 1);
 			i <= Math.min(this.fftSize - 1, endBin);
@@ -483,6 +513,7 @@ export class SpurMap implements LineGate {
 	candidates(key: string, out: Uint8Array): void {
 		const s = this.keys.get(key)
 		if (s === undefined) return
+		this.expireRestored(s)
 		const n = Math.min(this.fftSize, out.length)
 		for (let i = 0; i < n; i++) if (s.baseband[i] === 1) out[i] = 1
 	}
@@ -502,6 +533,7 @@ export class SpurMap implements LineGate {
 		const keep = (s: KeyState, i: number): boolean =>
 			s.baseband[i] === 1 && (s.imported[i] === 1 || this.confirmedNear(s, i))
 		for (const [key, s] of this.keys) {
+			this.expireRestored(s)
 			for (let i = 0; i < this.fftSize; ) {
 				if (!keep(s, i)) {
 					i++
@@ -526,6 +558,7 @@ export class SpurMap implements LineGate {
 
 	/** Restored baseband lines are candidates with no credits: unverified until re-confirmed. */
 	importState(st: Pick<EngineState, "spurs">): void {
+		const wallMs = this.nowMs()
 		for (const sp of st.spurs) {
 			// key = `${fs}:${gainKey}:${fftSize}`; one SpurMap serves one fftSize
 			const binHz = Number(sp.key.split(":")[0]) / this.fftSize
@@ -540,6 +573,7 @@ export class SpurMap implements LineGate {
 					if (i >= 0) {
 						this.flag(s, i)
 						s.imported[i] = 1
+						s.importedWallMs = wallMs
 					}
 			} else if (sp.rfHz !== undefined) {
 				s.rfConfirmed.set(Math.round(sp.rfHz / binHz), {
@@ -575,6 +609,7 @@ export class SpurMap implements LineGate {
 				bornMs: new Float64Array(n),
 				keepMs: new Float64Array(n).fill(Number.NEGATIVE_INFINITY),
 				imported: new Uint8Array(n),
+				importedWallMs: Number.NEGATIVE_INFINITY,
 				rf: new Map(),
 				rfConfirmed: new Map(),
 			}
@@ -630,11 +665,15 @@ export class SpurMap implements LineGate {
 
 	/** Refreshes candidates seen while confirmed; drops those past the TTL. */
 	private expire(s: KeyState): void {
+		this.expireRestored(s)
 		for (let i = 0; i < this.fftSize; i++) {
 			if (s.baseband[i] !== 1) continue
 			if (this.confirmedNear(s, i)) {
 				const seen = this.seenNear(s, i)
-				if (seen > s.keepMs[i]!) s.keepMs[i] = seen
+				if (seen > s.keepMs[i]!) {
+					s.keepMs[i] = seen
+					s.imported[i] = 0 // seen while confirmed: a line of this run now
+				}
 			}
 			const since = Math.max(s.bornMs[i]!, s.keepMs[i]!)
 			if (s.clockMs - since >= SPUR_TTL_MS) {
@@ -644,32 +683,87 @@ export class SpurMap implements LineGate {
 		}
 	}
 
+	/**
+	 * Drops restored candidates not seen while confirmed since importState once SPUR_TTL_MS of
+	 * wall time has passed since it, at the bound itself (not a millisecond before).
+	 */
+	private expireRestored(s: KeyState): void {
+		if (s.importedWallMs === Number.NEGATIVE_INFINITY) return // nothing restored here
+		if (this.nowMs() - s.importedWallMs < SPUR_TTL_MS) return
+		for (let i = 0; i < this.fftSize; i++) {
+			if (s.imported[i] !== 1) continue
+			s.imported[i] = 0
+			s.baseband[i] = 0
+		}
+		s.importedWallMs = Number.NEGATIVE_INFINITY
+	}
+
+	/**
+	 * The RF bin i reads under centre `centreHz` (its RF entry ±1 bin) was seen steady by the RF
+	 * learner under a centre whose bin index differs by ≥ maxWidthBins + 2, at a baseband bin
+	 * (±1) that was no line credited by `centreHz` itself: a real emission that moved with RF, so
+	 * the credit is no baseband evidence (RF move veto, module doc).
+	 */
+	private movedWithRf(s: KeyState, i: number, centreHz: number): boolean {
+		const n = this.fftSize
+		const tol = this.maxWidthBins + 2
+		const cb = Math.round(centreHz / s.binHz)
+		const rb = cb + i - n / 2
+		const moved = (rfBin: number, c: number): boolean => {
+			const ob = Math.round(c / s.binHz)
+			if (Math.abs(ob - cb) < tol) return false
+			// The bin the RF sat at under c: a line there under centreHz too is a baseband pattern
+			// both centres share (a comb whose spacing divides the hop), not an RF move.
+			const j = rfBin - ob + n / 2
+			for (let k = Math.max(0, j - 1); k <= Math.min(n - 1, j + 1); k++)
+				if (s.centres[k]!.includes(centreHz)) return false
+			return true
+		}
+		for (let d = -1; d <= 1; d++) {
+			const e = s.rf.get(rb + d)
+			if (e === undefined) continue
+			for (const c of e.centres) if (moved(rb + d, c)) return true
+			if (
+				e.epochObservedMs > 0 &&
+				e.epochOnMs >= this.onFraction * e.epochObservedMs &&
+				moved(rb + d, e.epochCentreHz)
+			)
+				return true
+		}
+		return false
+	}
+
+	/** MIN_CONFIRM_CENTRES separated credits of bin i, the RF-moved ones left out. */
+	private confirms(s: KeyState, i: number): boolean {
+		const list = s.centres[i]!
+		if (!separated(list, s.separationHz)) return false
+		const kept = list.filter(c => !this.movedWithRf(s, i, c))
+		return separated(kept, s.separationHz)
+	}
+
 	/** Credits the closing epoch's centre to its line bins; a miss clears a bin's credits. */
 	private closeBasebandEpoch(s: KeyState): void {
 		if (s.epoch === null) return
-		let changed = false
 		for (let i = 0; i < this.fftSize; i++) {
 			const obs = s.epochObservedMs[i]!
 			if (obs <= 0) continue
 			const on = s.epochOnMs[i]!
 			if (on >= this.onFraction * obs) {
-				changed = addCentre(s.centres[i]!, s.centreHz) || changed
+				addCentre(s.centres[i]!, s.centreHz)
 			} else if (
 				obs >= SPUR_MISS_MIN_MS &&
 				on < SPUR_MISS_ON_FRACTION * obs &&
-				s.epochLoudMs[i]! < SPUR_MISS_ON_FRACTION * obs &&
-				s.centres[i]!.length > 0
+				s.epochLoudMs[i]! < SPUR_MISS_ON_FRACTION * obs
 			) {
 				s.centres[i]!.length = 0
-				changed = true
 			}
 		}
 		s.epochOnMs.fill(0)
 		s.epochObservedMs.fill(0)
 		s.epochLoudMs.fill(0)
-		if (!changed) return
+		// Every close, not only on a credit change: the RF learner's evidence (veto) grows too.
 		for (let i = 0; i < this.fftSize; i++)
-			s.confirmed[i] = separated(s.centres[i]!, s.separationHz) ? 1 : 0
+			s.confirmed[i] = this.confirms(s, i) ? 1 : 0
 	}
 
 	private closeRfEpoch(e: RfEntry): void {
