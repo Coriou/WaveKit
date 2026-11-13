@@ -111,6 +111,16 @@ export interface ProbeRequest {
 	replay?: { captureId: string }
 }
 
+/**
+ * The highest priority a scanner job's probe carries: job priority is 0–100 (the route schema and
+ * store/persistence.ts cap it). Anything above is an identify request (IDENTIFY_PROBE_PRIORITY is
+ * MAX_JOB_PROBE_PRIORITY + 1), a user asking now.
+ */
+export const MAX_JOB_PROBE_PRIORITY = 100
+/** An identify probe (a user request): priority above every job's 0–MAX_JOB_PROBE_PRIORITY. */
+export function isIdentifyPriority(priority: number): boolean {
+	return priority > MAX_JOB_PROBE_PRIORITY
+}
 /** WG11 req 6.4: queue-driven replay probes run just below identify and above every job's passive probes. */
 export const REPLAY_PROBE_PRIORITY = 100
 /** Settling time after a replay decoder exited cleanly, so its last output lines still count. */
@@ -824,7 +834,7 @@ export class ProbePool extends EventEmitter {
 				this.enqueue(req)
 				// Under the CPU guard only identify (priority above every job's 0–100, Task 35a) preempts: a stopped
 				// decoder is the CPU the guard is waiting for. pump() retries the queue every service tick.
-				if (pick.deferred !== "cpu" || req.priority > 100)
+				if (pick.deferred !== "cpu" || isIdentifyPriority(req.priority))
 					this.preemptFor(
 						req,
 						pick.deferred === "max-probes" ? this.fullKinds(first, ctx) : null,
@@ -869,9 +879,10 @@ export class ProbePool extends EventEmitter {
 	}
 
 	/**
-	 * Whether a slot is already being freed for this queued request: it is still queued and a probe
-	 * whose slot it could use is tearing down (a probe preempted for it, or the previous run of the
-	 * same job). That teardown ends by itself: a decoder stop has its own kill fallback, and a failed
+	 * Whether a slot may be freed for this queued request: it is still queued and a probe on a
+	 * transport it could use is still stopping (any such probe, not only one preempted for this
+	 * request: another request may take the slot first). That teardown ends by itself: a decoder
+	 * stop has its own kill fallback, and a failed
 	 * cleanup seals the pool, which empties the queue. pump() runs the queue when it ends. A mode
 	 * step keeps its slot, so it frees nothing. False for anything not queued.
 	 */
@@ -948,7 +959,7 @@ export class ProbePool extends EventEmitter {
 		for (const rec of stale) {
 			// Identify (priority above every job's 0–100, Task 35a) re-plans on its own: a re-request would only
 			// spawn a decoder it gives back, and preempt a lower-priority probe for nothing.
-			if (rec.req.priority > 100) continue
+			if (isIdentifyPriority(rec.req.priority)) continue
 			const engine = this.deps.engines(sourceId)
 			if (!engine) continue
 			const halfSpan =
@@ -1210,10 +1221,10 @@ export class ProbePool extends EventEmitter {
 	// Hold `cores` against the same budget probe admission uses. Null when
 	// the pool is destroyed, `cores` is not a finite non-negative number,
 	// `settings()` throws or has a non-finite budget, or the reservation
-	// would exceed `cpuBudgetCores` (also while an identify probe holds the
-	// estimate over it: pickTransport admits identify against engines and
-	// probes only, so new reservations wait for it). Zero returns a no-op
-	// release. Release is idempotent and never drives the counter negative.
+	// would exceed `cpuBudgetCores`. Identify probes do not count here (see
+	// pickTransport): recordings never wait on identify, as identify never
+	// waits on recordings. Zero returns a no-op release. Release is
+	// idempotent and never drives the counter negative.
 	reserveExternal(cores: number): (() => void) | null {
 		if (this.destroyed) return null
 		if (!Number.isFinite(cores) || cores < 0) return null
@@ -1225,7 +1236,8 @@ export class ProbePool extends EventEmitter {
 			return null
 		}
 		if (!Number.isFinite(budget)) return null
-		if (this.estimatedCores() + cores > budget + 1e-9) return null
+		if (this.nonIdentifyCores() + this.externalCores + cores > budget + 1e-9)
+			return null
 		this.externalCores += cores
 		let released = false
 		return () => {
@@ -1243,6 +1255,14 @@ export class ProbePool extends EventEmitter {
 	private ownCores(): number {
 		let cores = this.deps.engineCount() * CPU_COST.engine
 		for (const r of this.records.values()) cores += r.cores
+		return cores
+	}
+
+	/** Engines and every probe but identify's: what a recording's reservation is weighed with. */
+	private nonIdentifyCores(): number {
+		let cores = this.deps.engineCount() * CPU_COST.engine
+		for (const r of this.records.values())
+			if (!isIdentifyPriority(r.req.priority)) cores += r.cores
 		return cores
 	}
 
@@ -1272,20 +1292,26 @@ export class ProbePool extends EventEmitter {
 				reason ??= "max-probes"
 				continue
 			}
-			// Identify (priority above 100, a user request) is not starved by background recordings
-			// and analog trials: its probe counts against engines and probes only. Reservations already
-			// held go on (a recording in progress is never cut); while the estimate is over the budget
-			// reserveExternal refuses new ones, so recordings yield until identify's probes end. The
-			// overshoot is bounded: external reservations each fit the budget when made, so the estimate
-			// stays <= cpuBudgetCores + identify's own probe cores (maxProbes.offset x 0.5 offset).
-			const held =
-				ctx.req.priority > 100 ? this.ownCores() : this.estimatedCores()
+			// Identify (isIdentifyPriority, a user request) and background recordings / analog trials
+			// (reserveExternal) do not wait on each other: identify is weighed against engines and probes
+			// only (E + J + I + new <= B), a reservation against engines, job probes and reservations only
+			// (E + J + X + new <= B), and a job probe against everything (E + J + I + X + new <= B).
+			// Bound: the last two keep E + J + X <= B, the first keeps I <= B, so the full estimate
+			// E + J + I + X <= B + I, and I <= maxProbes.offset x CPU_COST.offsetProbe (0.5 per slot).
+			// (E engines, J job probes, I identify probes, X reservations, B cpuBudgetCores.)
+			const held = isIdentifyPriority(ctx.req.priority)
+				? this.ownCores()
+				: this.estimatedCores()
 			if (held + transport.cores(mode.decoderType) > s.cpuBudgetCores + 1e-9) {
 				reason ??= "budget"
 				continue
 			}
 			const cpu = this.deps.cpu.normalisedPercent
-			if (ctx.req.priority <= 100 && cpu !== null && cpu > s.cpuGuardPercent) {
+			if (
+				!isIdentifyPriority(ctx.req.priority) &&
+				cpu !== null &&
+				cpu > s.cpuGuardPercent
+			) {
 				reason ??= "cpu"
 				continue
 			}
@@ -1362,7 +1388,8 @@ export class ProbePool extends EventEmitter {
 		this.queue.push(req)
 		this.queue.sort(
 			(a, b) =>
-				Number(b.priority > 100) - Number(a.priority > 100) ||
+				Number(isIdentifyPriority(b.priority)) -
+					Number(isIdentifyPriority(a.priority)) ||
 				(this.queuedRounds.get(a) ?? 0) - (this.queuedRounds.get(b) ?? 0) ||
 				b.priority - a.priority ||
 				(this.lastServed.get(this.candidateKey(a)) ?? -Infinity) -
@@ -1418,7 +1445,7 @@ export class ProbePool extends EventEmitter {
 		let victim: ProbeRecord | null = null
 		let reserve = false
 		for (const r of this.records.values()) {
-			if (r.state === "stopping" || r.req.priority > 100) continue
+			if (r.state === "stopping" || isIdentifyPriority(r.req.priority)) continue
 			const runningMs =
 				r.turnStartedAt === null ? 0 : this.now() - r.turnStartedAt
 			const capped =
@@ -1449,7 +1476,8 @@ export class ProbePool extends EventEmitter {
 			if (kinds && !kinds.has(r.transport.kind)) continue
 			if (!victim || r.req.priority < victim.req.priority) {
 				victim = r
-				reserve = req.priority > 100 || (!capped && strongPreemption)
+				reserve =
+					isIdentifyPriority(req.priority) || (!capped && strongPreemption)
 			}
 		}
 		if (victim) {
@@ -1493,7 +1521,8 @@ export class ProbePool extends EventEmitter {
 		if (this.destroyed) return
 		for (const req of [...this.queue].sort(
 			(a, b) =>
-				Number(b.priority > 100) - Number(a.priority > 100) ||
+				Number(isIdentifyPriority(b.priority)) -
+					Number(isIdentifyPriority(a.priority)) ||
 				Number(this.reserved.has(b)) - Number(this.reserved.has(a)),
 		)) {
 			if (this.destroyed) return
@@ -1515,7 +1544,7 @@ export class ProbePool extends EventEmitter {
 				if (
 					pick.deferred === "max-probes" ||
 					pick.deferred === "budget" ||
-					(pick.deferred === "cpu" && req.priority > 100)
+					(pick.deferred === "cpu" && isIdentifyPriority(req.priority))
 				)
 					this.preemptFor(
 						req,

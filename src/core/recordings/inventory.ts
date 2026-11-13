@@ -123,7 +123,11 @@ export interface RecordingInventoryOptions {
 	dsdFmeDirs: () => readonly { decoderId: string; dir: string }[]
 	/** `<scanner storage>/recordings`, or null when there is no scanner. Re-read on every scan. */
 	scannerRecordingsDir: () => string | null
-	/** A discovery's centre frequency in Hz, or null when unknown. */
+	/**
+	 * The centre frequency in Hz of the live discovery owning a recording folder, or null when
+	 * unknown. `discoveryId` is the folder's id: a discovery merged into another keeps its folder,
+	 * so the lookup must resolve merge aliases (ScannerService.recordingFolderDiscovery).
+	 */
 	discoveryCentreHz?: (discoveryId: string) => number | null
 	now?: () => number
 	logger: Logger

@@ -160,7 +160,7 @@ describe("identifyQueueSkipWhy", () => {
 	it("names the real reason a queued run was skipped", () => {
 		expect(identifyQueueSkipWhy("max-probes", false)).toBe("slot-busy")
 		expect(identifyQueueSkipWhy("budget", false)).toBe("cpu-budget")
-		expect(identifyQueueSkipWhy("cpu", false)).toBe("cpu-guard")
+		expect(identifyQueueSkipWhy("cpu", false)).toBe("unknown")
 		expect(identifyQueueSkipWhy(null, false)).toBe("unknown")
 		expect(identifyQueueSkipWhy("max-probes", true)).toBe("slot-still-freeing")
 	})

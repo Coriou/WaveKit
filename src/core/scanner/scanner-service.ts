@@ -84,7 +84,10 @@ import type {
 	ScannerRecordingDeleter,
 } from "../recordings/contract.js"
 import { createScannerRecordingDeleter } from "./recording-delete.js"
-import { holdsKeptWithAliases } from "./recording-aliases.js"
+import {
+	holdsKeptWithAliases,
+	recordingFolderDiscovery,
+} from "./recording-aliases.js"
 import type { SourceCaps } from "../../config.js"
 import type { DecoderConfig } from "../../decoders/types.js"
 import type { DecoderManager } from "../../decoders/manager.js"
@@ -2946,6 +2949,17 @@ export class ScannerService extends EventEmitter {
 
 	getDiscovery(id: string): Discovery | undefined {
 		const d = this.store.get(id)
+		return d ? { ...d, ...this.storeMeta() } : undefined
+	}
+
+	/**
+	 * Requirement 3: the live discovery whose recordings `folderId`'s folder holds, resolved through
+	 * merge aliases (recordingFolderDiscovery), so a recording made under a discovery merged since
+	 * carries its owner's frequency. Undefined for a folder no live discovery owns. The recordings
+	 * inventory's `discoveryCentreHz` reads this, not getDiscovery (which answers live ids only).
+	 */
+	recordingFolderDiscovery(folderId: string): Discovery | undefined {
+		const d = recordingFolderDiscovery(this.store, folderId)
 		return d ? { ...d, ...this.storeMeta() } : undefined
 	}
 

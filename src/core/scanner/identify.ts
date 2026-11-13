@@ -114,6 +114,7 @@ import type { JobEvent } from "./job-state.js"
 import type { KnownProtocolMemory } from "./known-protocol-contract.js"
 import { PROTOCOL_DECODER, probeTransportFor } from "./plan/plan-preview.js"
 import {
+	MAX_JOB_PROBE_PRIORITY,
 	probeModesFor,
 	type ProbeMode,
 	type ProbePool,
@@ -132,8 +133,11 @@ import type {
 } from "./types.js"
 
 export const IDENTIFY_DEFAULT_TIMEOUT_MS = 15_000
-/** Above every job priority (0–100): identify trials preempt passive and job probes at once. */
-export const IDENTIFY_PROBE_PRIORITY = 101
+/**
+ * Above every job priority (0–MAX_JOB_PROBE_PRIORITY): identify trials preempt passive and job probes
+ * at once, and the pool weighs them apart from recordings (isIdentifyPriority).
+ */
+export const IDENTIFY_PROBE_PRIORITY = MAX_JOB_PROBE_PRIORITY + 1
 /** Every run lasts at least the DMR late-entry hold (§ 6.4 row 1): the click may come mid-call. */
 export const IDENTIFY_MIN_HOLD_MS = 1800
 /**
@@ -205,7 +209,7 @@ export const IDENTIFY_MAX_ALIVE_JOBS = 8
 export const IDENTIFY_JOIN_COVERED_FRACTION = 0.9
 /**
  * A run that gets no probe slot within this time is reported `skipped-budget`, unless the pool is
- * already freeing a slot for it (a probe preempted for it still stopping): that run waits for the
+ * possibly freeing a slot for it (a probe on its transport still stopping): that run waits for the
  * slot, since a real decoder may take up to its 5 s graceful stop to exit, up to
  * IDENTIFY_SLOT_FREEING_MAX_MS.
  */
@@ -455,21 +459,17 @@ export function identifyRequestJoins(
 	)
 }
 
-/**
- * What is left of a running job's wait for a new request to compare, or null when there is no wait
- * left to compare: the job has its signal and its trials are bounded by their holds.
- */
 type QueuedDeferral = NonNullable<ReturnType<ProbePool["queuedDeferral"]>>
 /**
  * Why a queued identify run ended `skipped-budget`: `slot-busy`, another job holds the probe slot it
- * needs; `cpu-budget`, the core estimate (probes, engines, recordings and analog trials) leaves no room
- * for it; `cpu-guard`, measured CPU is over the guard; `slot-still-freeing`, a stop freeing its slot ran
- * past IDENTIFY_SLOT_FREEING_MAX_MS; `unknown`, the pool could not say.
+ * needs; `cpu-budget`, engines and probes leave no room for it (recordings and analog trials do not
+ * count against identify); `slot-still-freeing`, a probe on its transport was still stopping past
+ * IDENTIFY_SLOT_FREEING_MAX_MS; `unknown`, the pool could not say. Identify runs above the CPU guard
+ * (isIdentifyPriority), so a `cpu` deferral is never its reason and maps to `unknown`.
  */
 export type IdentifyQueueSkipWhy =
 	| "slot-busy"
 	| "cpu-budget"
-	| "cpu-guard"
 	| "slot-still-freeing"
 	| "unknown"
 
@@ -484,12 +484,15 @@ export function identifyQueueSkipWhy(
 		case "budget":
 			return "cpu-budget"
 		case "cpu":
-			return "cpu-guard"
 		case null:
 			return "unknown"
 	}
 }
 
+/**
+ * What is left of a running job's wait for a new request to compare, or null when there is no wait
+ * left to compare: the job has its signal and its trials are bounded by their holds.
+ */
 export type IdentifyWaitLeft = {
 	ms: number
 	/** Still waiting for a gated transmission (`waitUntilSignal`), so `ms` compares with `waitMs`. */
@@ -4223,8 +4226,8 @@ export class IdentifyRunner implements JobDriver {
 	}
 
 	/**
-	 * A queued run whose slot the pool is already freeing (a probe preempted for it is still tearing
-	 * down) waits for that slot past IDENTIFY_QUEUE_WAIT_MS: the teardown ends by itself, and a real
+	 * A queued run whose slot the pool may be freeing (a probe on its transport is still stopping,
+	 * ProbePool.slotFreeing) waits for that slot past IDENTIFY_QUEUE_WAIT_MS: the teardown ends by itself, and a real
 	 * decoder may take longer than the queue wait to stop. A pool without the query, or one that
 	 * throws, frees nothing (the run is skipped as before).
 	 */

@@ -11,7 +11,9 @@
  * recordings used to skip every dsd-fme trial `skipped-budget` with no probe running and a status
  * `cpuCoresInUse` of 0.08. Now identify (a user request) is admitted when only the recordings'
  * reservations are over (engines + probes + its probe <= budget); recordings already running go on,
- * and new ones yield (their reservation is refused) while it runs.
+ * and new ones are admitted beside it (engines + job probes + reservations + new <= budget: identify's
+ * 0.5 does not count), so neither waits on the other. Seventh recording: 0.08 + 6 x 0.0716 (+ 0.0592)
+ * + 0.0716 = 0.5812 (0.6404) <= 1; the full estimate is then at most budget + identify's 0.5.
  */
 import { describe, expect, it } from "vitest"
 import type { ScannerIdentifyTrial } from "@wavekit/api-types"
@@ -138,7 +140,7 @@ describe("identify dsd-fme trials against background recordings (real wiring)", 
 		for (const t of auto) expect(["running", "no-sync"]).toContain(t.outcome)
 	}, 120_000)
 
-	it("past the bound (6 recordings): the auto run still starts; running recordings keep their cores, new ones yield", async () => {
+	it("past the bound (6 recordings): the auto run still starts; running recordings keep their cores, new ones are still admitted", async () => {
 		const r = await run(6)
 		const auto = r.trials.filter(t => AUTO.includes(t.protocol))
 		expect(auto).toHaveLength(AUTO.length)
@@ -146,8 +148,8 @@ describe("identify dsd-fme trials against background recordings (real wiring)", 
 			expect(t).toMatchObject({ decoder: "dsd-fme", transport: "offset" })
 			expect(["running", "no-sync"]).toContain(t.outcome)
 		}
-		// While the identify probe runs the estimate is over the budget: a new recording is refused.
-		expect(r.newRecordingDuring).toBe(false)
+		// Identify's probe does not count against a recording: a recording starting now is not cut.
+		expect(r.newRecordingDuring).toBe(true)
 	}, 120_000)
 
 	it("budgets.cpuCoresInUse counts the recordings' reservations", async () => {
@@ -161,5 +163,9 @@ describe("identify dsd-fme trials against background recordings (real wiring)", 
 		)
 		// Over the budget while identify runs (the bounded overshoot), never cut below the held six.
 		expect(r.externalDuring).toBeGreaterThanOrEqual(6 * RECORDING_CORES - 1e-9)
+		expect(r.inUseDuring).toBeGreaterThan(BUDGET)
+		expect(r.inUseDuring).toBeLessThanOrEqual(
+			BUDGET + CPU_COST.offsetProbe + 1e-9,
+		)
 	}, 120_000)
 })

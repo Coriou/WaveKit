@@ -3967,9 +3967,11 @@ curl http://localhost:9000/api/scanner
 ```
 
 `budgets.cpuCoresInUse` is the core estimate admission uses: 0.08 per spectrum engine, each
-running probe's cost, and the cores held by analog recordings and analog trials. It can exceed
-`cpuBudgetCores` while an identify probe runs: identify is admitted against engines and probes
-only, recordings already running go on, and new recordings wait until it ends.
+running probe's cost, and the cores held by analog recordings and analog trials. Identify and
+recordings do not wait on each other: an identify probe is admitted against engines and probes
+only, a recording or analog trial against engines, job probes and other recordings only. So the
+estimate can exceed `cpuBudgetCores` while an identify probe runs, by at most identify's own probe
+cores (0.5 per offset slot, `maxProbes.offset` slots).
 
 `folders` (absent from older cores and before the scanner state loaded) counts what the
 start did with recording and evidence folders that no discovery owned: `reattached` folders
@@ -5253,8 +5255,8 @@ trials joins at any time, unless a gated timeout will cut them first. A later re
 its own full wait. If another job holds the probe slot, or the CPU budget (engines and probes;
 recordings and analog trials do not hold identify back) has no room, its runs queue for up to 3 s, then end `skipped-budget`
 (`could-not-test`, `why: "budget"`); the core log names which (`slot-busy`, `cpu-budget`,
-`cpu-guard`). A run whose slot is being freed for it (a probe it preempted is still stopping)
-waits up to 8 s from its request instead, since a decoder can take 5 s to stop. A running job with no
+`slot-still-freeing`). Identify runs above the CPU guard. A run for which a probe on its transport
+is still stopping waits up to 8 s from its request instead, since a decoder can take 5 s to stop. A running job with no
 `protocols` contains a named one only once its plan holds a runnable trial for it. A
 finished job or a finished target never joins, and `target.all` never does. An epoch change preserves an
 established single-target deadline; collected `all` targets may receive a
@@ -6480,8 +6482,11 @@ keys, `limit=10abc` or a malformed cursor answer 400
   is a real date and time; `durationMs` from the RIFF header of a plain PCM
   WAV, else null; `callType`, `talkgroup` and `source` from a dsd-fme name
   (digits only, else null); `frequencyHz` only for a scanner recording whose
-  discovery centre is known. dsd-fme names carry no frequency, so it is null:
-  the frequency is never guessed.
+  discovery centre is known. A recording keeps the folder (and `discoveryId`)
+  of the discovery it was made under; once that discovery is merged into
+  another, even through a chain of merges, `frequencyHz` is the live owner's
+  centre, and null when no live discovery owns the folder. dsd-fme names carry
+  no frequency, so it is null: the frequency is never guessed.
 - Never listed: files modified in the last 10 s (still being written),
   `TEMP_` files, live probe folders (`probe-*`), names that match neither the
   dsd-fme call pattern nor the scanner recording id, symbolic links and
