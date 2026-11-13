@@ -705,6 +705,20 @@ interface Visit {
 	 * landing may hold it.
 	 */
 	heardVoiceHoldable: boolean
+	/**
+	 * The track the visit committed its voice to (voiceBandOf): the first track whose band a hold
+	 * of the visit names voice by, at an analog hold's first recording check (askDuringFollow) or
+	 * at the keep of the hop for its recording (keepForRecording), whichever comes first; null
+	 * until then. Kept while that track, or a reopening on its frequency, is open (committedTrack;
+	 * once none is, its transmission is over and the commitment is dropped), whatever track a
+	 * later hold sits on: a `record` hold's
+	 * re-check probes a neighbour that qualified meanwhile (nextCandidate), and that probe holds
+	 * the neighbour's track, but the hop is still kept for the committed track's transmission. So
+	 * a neighbour voiced while the committed track's transmission is not named yet (its session
+	 * refused a slot, or not voiced yet) is never the visit's transmission, and its end never
+	 * ends the committed track's hold.
+	 */
+	voiceTrackId: string | null
 	/** Clock the recording check was last asked during an analog hold (sampleVoice's pace only). */
 	followAskedAt: number | null
 	/** The recording check answered anything but false during this visit: the recorder has a session. */
@@ -767,8 +781,9 @@ interface Hold {
 	/** Held track; for a `record` hold the recorded track (recordedTrack), "" when none is open. */
 	trackId: string
 	/**
-	 * `record`: the track whose band names its voice hold (voiceBandOf at the keep: the track held
-	 * then, which may differ from `trackId`), "" when none. Its re-checks name voice by it.
+	 * `record`: the track whose band names its voice hold (voiceBandOf at the keep: the track the
+	 * visit committed to, else the track held then, which may differ from `trackId`), "" when
+	 * none. Its re-checks name voice by it.
 	 */
 	bandId?: string
 	/**
@@ -1949,6 +1964,7 @@ export class SweepScheduler {
 		v.holdStartedAt ??= now
 		v.budgeted = true
 		if (named !== null) this.startVoiceHold(v, named, now)
+		if (v.voiceTrackId === null && v.tracks.has(bandId)) v.voiceTrackId = bandId
 		if (judging) v.judged = true
 		// A judging hold's cap is a re-check, not a forced leave: voice answered since the last one
 		// still gets its hold at the cap.
@@ -1974,8 +1990,11 @@ export class SweepScheduler {
 	}
 
 	/**
-	 * Track whose band names a hold's voice hold (holdVoiceOf), "" when there is none: the held
-	 * track `heldId` whenever it is a track of the visit, open or not, carrier evidence or not (its
+	 * Track whose band names a hold's voice hold (holdVoiceOf), "" when there is none: the track
+	 * the visit committed to (Visit.voiceTrackId, committedTrack: while it or a reopening on its
+	 * frequency is open), whatever track the hold sits on now (a neighbour a `record` hold's
+	 * re-check probes); else the held track `heldId`
+	 * whenever it is a track of the visit, open or not, carrier evidence or not (its
 	 * frequency is what the hold is for). Only when it is not (no track was held, a keep after a
 	 * probe ended its hold, or the id names no track of this visit) does the hold take the track
 	 * recordedTrack reports, the one the recording moved to; none open (or each with carrier
@@ -1983,10 +2002,38 @@ export class SweepScheduler {
 	 * not followed on air or has carrier evidence: that neighbour's voice is no voice of this hold.
 	 */
 	private voiceBandOf(v: Visit, heldId: string | undefined): string {
+		const committed = this.committedTrack(v)
+		if (committed !== null) return committed
 		if (heldId !== undefined && heldId !== "" && v.tracks.has(heldId))
 			return heldId
 		const moved = this.recordedTrack(heldId)
 		return moved === null || moved === "" ? (heldId ?? "") : moved
+	}
+
+	/**
+	 * The track the visit committed to (Visit.voiceTrackId) while its transmission may still be on
+	 * air: that track while open; closed, an open track on its frequency (heldBandOffset: a
+	 * max-duration rollover's successor, a reopening), which the commitment moves to; none open
+	 * there, the transmission it was for is over and the commitment is dropped (null), so a hold of
+	 * another track names its own voice again (a new transmission elsewhere in the window, not a
+	 * neighbour of one still on air).
+	 */
+	private committedTrack(v: Visit): string | null {
+		const id = v.voiceTrackId
+		if (id === null) return null
+		const t = v.tracks.get(id)
+		if (t === undefined) {
+			v.voiceTrackId = null
+			return null
+		}
+		if (t.open) return id
+		for (const [other, o] of v.tracks)
+			if (o.open && !o.flagged && heldBandOffset(o.centreHz, t) !== null) {
+				v.voiceTrackId = other
+				return other
+			}
+		v.voiceTrackId = null
+		return null
 	}
 
 	/** Whether the hop's own last voice hold still owes the sweep its coarse visits. */
@@ -2198,12 +2245,15 @@ export class SweepScheduler {
 	 */
 	private askDuringFollow(v: Visit, now: number): boolean {
 		v.followAskedAt = now
+		// Named by the track the visit committed to (Visit.voiceTrackId), else the held track,
+		// which this first check commits to.
+		const bandId = this.voiceBandOf(v, this.hold?.trackId)
+		if (v.voiceTrackId === null && v.tracks.has(bandId)) v.voiceTrackId = bandId
 		const active = this.askRecording(now)
 		if (this.askEnded) return true
 		if (isVoiceOnAir(active)) {
 			if (v.heardVoiceId === null) {
-				const track =
-					this.hold === null ? undefined : v.tracks.get(this.hold.trackId)
+				const track = v.tracks.get(bandId)
 				const own = track === undefined ? null : heldVoiceOf(active, track)
 				if (own !== null) {
 					v.heardVoiceId = own.voice
@@ -2821,6 +2871,7 @@ export class SweepScheduler {
 			voiceAskedAt: null,
 			heardVoiceId: null,
 			heardVoiceHoldable: false,
+			voiceTrackId: null,
 			followAskedAt: null,
 			sessionSeen: false,
 			voiceBarred: false,
