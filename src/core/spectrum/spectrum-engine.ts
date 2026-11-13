@@ -305,19 +305,24 @@ interface LedgerAnchor {
 	/**
 	 * Absorber losses seen since anchored, oldest first, each with `at` and `loss` non-decreasing:
 	 * `loss` bytes lost in all since the anchor when the loss was seen, `at` the branch's offered
-	 * bytes then plus the absorber's held bytes (held bytes precede the loss: the absorber drops a
-	 * chunk's tail, never what it holds). A byte offered at or past `at` follows all `loss` bytes;
-	 * one offered before it follows at least the previous entry's loss and at most this one's
-	 * (lossLow, lossHigh). At most ANCHOR_LOSS_BREAKS: the oldest is merged into the next.
+	 * bytes then plus the absorber's held bytes. A byte offered at or past `at` arrived after the
+	 * read, so it follows all `loss` bytes; one offered before it follows at least the previous
+	 * entry's loss (lossLow). Its upper bound is the newest loss (lossHigh), not this entry's: a
+	 * held byte may still be lost later (a flush drops what the absorber holds, which counts in the
+	 * same lost total), and a byte offered after that flush can sit below an older entry's `at`
+	 * while following every byte lost since. The newest entry alone may have `at` +∞ (the offered
+	 * count unreadable at that read: its loss bounds no byte from below); a later finite read
+	 * replaces it (upstreamLost). At most ANCHOR_LOSS_BREAKS: the oldest is merged into the next.
 	 */
 	losses: { at: number; loss: number }[]
 }
 
 /**
  * Absorber losses an anchor keeps apart (LedgerAnchor.losses). Merging the oldest entry into the
- * next only widens the bounds of the bytes offered before the merged entry's `at` (their lowest
- * loss becomes the one before it, 0 for the first), so the cap bounds memory and never makes a
- * bound wrong; bytes offered after the newest loss keep the tight bound whatever the count. 16
+ * next only lowers the lower bound of the bytes offered before the merged entry's `at` (their
+ * lowest loss becomes the one before it, 0 for the first; the upper bound is the newest loss
+ * whatever the count), so the cap bounds memory and never makes a bound wrong; bytes offered
+ * after the newest loss keep the tight bound whatever the count. 16
  * entries are 16 distinct loss steps seen by reads (one read per labelled block or more): far
  * more than one hop's window holds on a link that loses rarely; a link losing on every block
  * still maps its newest bytes tightly.
@@ -334,9 +339,12 @@ function lossLow(anchor: LedgerAnchor, o: number): number {
 	return lo
 }
 
-/** Bytes possibly lost before offered byte `o` of an anchor (an upper bound; LedgerAnchor.losses). */
-function lossHigh(anchor: LedgerAnchor, o: number): number {
-	for (const b of anchor.losses) if (b.at > o) return b.loss
+/**
+ * Bytes possibly lost before any offered byte of an anchor (an upper bound; LedgerAnchor.losses):
+ * the newest loss in all, for every byte. A byte offered before an entry's `at` may still follow
+ * bytes lost after that entry (held bytes a flush drops), so no older entry bounds it.
+ */
+function lossHigh(anchor: LedgerAnchor): number {
 	return anchor.losses.at(-1)?.loss ?? 0
 }
 
@@ -1114,7 +1122,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			return null
 		if (!(map.bps > 0)) return null
 		const from = map.oLow0 + (fromSample - map.gaps - 1) * map.bps
-		const losses = (anchor.losses.at(-1)?.loss ?? 0) - lossLow(anchor, from)
+		const losses = lossHigh(anchor) - lossLow(anchor, from)
 		const bytes = map.oHigh0 - map.oLow0 + (anchor.oHigh - anchor.oLow) + losses
 		const width = Math.ceil(bytes / map.bps) + map.gaps + HOP_GAP_ALLOWANCE + 1
 		return Number.isSafeInteger(width) && width >= 0 ? width : null
@@ -1143,7 +1151,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const live = ledger.position(this.sourceId)
 		if (!live || live.session !== anchor.session) return
 		const byte = map.oHigh0 + at.sample * map.bps
-		const pos = Math.min(live.pos, byte - anchor.oLow + lossHigh(anchor, byte))
+		const pos = Math.min(live.pos, byte - anchor.oLow + lossHigh(anchor))
 		// The run's start by its lowest position before the mapping's rounding slack (the gaps + 1
 		// samples ledgerRange takes off a range's first byte): this only names the run's bracket. A
 		// source that switches test mode at once starts the run exactly at the on receipt, which the
@@ -1976,7 +1984,14 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					runEnd: null,
 				}
 				this.rememberEpoch(record)
-				if (markerHop !== null) {
+				// A marker start without its run's length cannot name the run's bracket: unmappable, it
+				// lowers nothing (the hop keeps its receipt's settle).
+				if (
+					markerHop !== null &&
+					typeof ev.markerRunSamples === "number" &&
+					Number.isFinite(ev.markerRunSamples) &&
+					ev.markerRunSamples >= 0
+				) {
 					// The marker start (run end + PLL settle), before the slack the hop was posted with;
 					// the run's own start that far plus the run before it (Pipeline.onCounterRun).
 					const sample = Math.max(
@@ -1989,7 +2004,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 						sample,
 						runStart: Math.max(
 							0,
-							sample - (start?.pllSettle ?? 0) - (ev.markerRunSamples ?? 0),
+							sample - (start?.pllSettle ?? 0) - ev.markerRunSamples,
 						),
 					}
 					const seq = this.hopReceipts.get(markerHop)
@@ -2927,31 +2942,42 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	 * Bytes the absorber lost since the anchor: each lost byte puts every later offered byte one
 	 * position further on in the session. The loss is recorded where it was seen
 	 * (LedgerAnchor.losses): a byte offered after the branch's offered bytes plus the absorber's
-	 * held bytes then follows the whole loss, so its bounds shift by it exactly; an older byte's
-	 * span the loss (its lower bound keeps the earlier loss, its upper one takes the new). Lower
-	 * bounds stay lower bounds, so the map stays fail closed, and a hop after a loss proves as
-	 * early as one without, without a reconnect. True (unmappable) only when the counter went
-	 * backwards or disappeared (a router reset: nothing known of the loss).
+	 * held bytes then arrived after the read, so it follows the whole loss; every byte's upper
+	 * bound takes the newest loss (held bytes a flush drops count in it too), an older byte's lower
+	 * bound keeps the earlier loss. Lower bounds stay lower bounds, so the map stays fail closed,
+	 * and a hop after a loss proves as early as one without, without a reconnect. A read that
+	 * cannot place its loss (offered or held bytes unreadable) records it at +∞ for itself alone
+	 * (no byte's lower bound takes it); the next read with readable counters, a new loss or not,
+	 * places it there: every byte offered past that point arrived after both reads. True
+	 * (unmappable) only when the counter went backwards or disappeared (a router reset: nothing
+	 * known of the loss).
 	 */
 	private upstreamLost(anchor: LedgerAnchor): boolean {
 		if (anchor.lost === null) return false
 		const ingest = this.deps.routing.ingestCounters?.(this.sourceId) ?? null
 		const lost = ingest?.lostBytesTotal ?? null
-		if (lost === anchor.lost) return false
+		const newest = anchor.losses.at(-1)
+		const unplaced = newest !== undefined && !Number.isFinite(newest.at)
+		if (lost === anchor.lost && !unplaced) return false
 		if (lost === null || lost < anchor.lost) return true
 		const delta = lost - anchor.lost
-		const prev = anchor.losses.at(-1)
 		const offered = this.fanout?.getBranchTelemetry(
 			this.branchId,
 		)?.totalBytesWritten
-		// Unknown offered bytes: every byte keeps the widened bound (at +∞).
+		const held = ingest?.heldBytes
 		const at =
-			offered === undefined || !Number.isFinite(ingest?.heldBytes)
+			offered === undefined || held === undefined || !Number.isFinite(held)
 				? Number.POSITIVE_INFINITY
-				: offered + Math.max(0, ingest?.heldBytes ?? 0)
+				: offered + Math.max(0, held)
+		// Still unplaceable and nothing new lost: the unplaced entry stands as it is.
+		if (delta === 0 && !Number.isFinite(at)) return false
+		const loss = (newest?.loss ?? 0) + delta
+		// An unplaced entry is never carried forward: its loss is in `loss`, placed (or not) here.
+		if (unplaced) anchor.losses.pop()
+		const prev = anchor.losses.at(-1)
 		anchor.losses.push({
-			at: Math.max(prev?.at ?? at, at),
-			loss: (prev?.loss ?? 0) + delta,
+			at: Number.isFinite(at) ? Math.max(prev?.at ?? at, at) : at,
+			loss,
 		})
 		if (anchor.losses.length > ANCHOR_LOSS_BREAKS) anchor.losses.shift()
 		anchor.lost = lost
@@ -2980,11 +3006,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const map = this.streamMaps.find(m => m.stream === stream)
 		if (!map) return unmappedRead("no-stream-map")
 		// Lower bound of the first byte: each applied gap can round its samples up by one. The loss
-		// before each byte by its own offered byte's segment (lossLow, lossHigh).
+		// before the first byte by its own offered byte's segment (lossLow); the end's by the newest
+		// loss (lossHigh: a flush may drop held bytes that precede it).
 		const byteA = map.oLow0 + (start - gapsBefore(map, start) - 1) * map.bps
 		const byteB = map.oHigh0 + end * map.bps
 		const posA = byteA - anchor.oHigh + lossLow(anchor, byteA)
-		const posB = byteB - anchor.oLow + lossHigh(anchor, byteB)
+		const posB = byteB - anchor.oLow + lossHigh(anchor)
 		const live = ledger.position(this.sourceId)
 		if (!live || live.session !== anchor.session)
 			return unmappedRead("session-ended")

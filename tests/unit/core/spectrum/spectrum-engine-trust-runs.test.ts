@@ -9,7 +9,7 @@
  * only for a source on a non-loopback host, which no test may reach.
  */
 import pino from "pino"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
 	ANCHOR_LOSS_BREAKS,
 	HOP_GAP_ALLOWANCE,
@@ -394,6 +394,49 @@ describe("absorber loss widens the anchor (F1)", () => {
 	})
 })
 
+describe("held bytes a flush drops put every later byte further on (the upper bound)", () => {
+	it("capacity 1000, 1000 held, 200 overflow, then a flush drops the 1000: offered byte 50 reads at or past its true position 1250", async () => {
+		const {
+			engine,
+			ledger,
+			ingest,
+			feed,
+			lose,
+			hold,
+			write,
+			block,
+			blockAt,
+			samples,
+		} = await make()
+		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+		await feed(SETTLE_BYTES / 2 + block * 2)
+		expect(blockAt(samples())).toBe("commanded")
+		const base = ledger.position("rtl")!.pos
+		// The absorber (capacity 1000 bytes) is full and a chunk overflows by 200 bytes.
+		hold(500)
+		lose(200)
+		blockAt(samples())
+		// A rate change flushes the hold: the 1000 held bytes are lost too, never offered.
+		ingest!.lostBytesTotal += ingest!.heldBytes
+		ingest!.heldBytes = 0
+		blockAt(samples())
+		// A new centre written right there; then 50 bytes offered, all after it.
+		write(frame(0x01, HOP))
+		const posB: number[] = []
+		const trustAt = ledger.trustAt.bind(ledger)
+		vi.spyOn(ledger, "trustAt").mockImplementation((...args) => {
+			posB.push(args[3])
+			return trustAt(...args)
+		})
+		await feed(25)
+		expect(ledger.position("rtl")!.pos).toBe(base + 1250)
+		// Read at the old centre, the block holds bytes past the new frame: never trusted.
+		expect(blockAt(samples())).toBe("unverified")
+		expect(posB.at(-1)).toBeGreaterThanOrEqual(base + 1250)
+		await engine.stop()
+	})
+})
+
 describe("a restarted track measurement needs a block behind it (F4)", () => {
 	it("a track closing on the block its restart begins at is unverified; one block measured after it is trusted", async () => {
 		const { engine, feed, write, seen, events, block, opening } = await make()
@@ -503,6 +546,7 @@ describe("a detected scanner marker lowers its hop's boundary (F2)", () => {
 				epoch: pending.epoch,
 				startSample: marker + slack,
 				settleMode: "marker",
+				markerRunSamples: marker - receiptAt,
 			},
 		])
 		// A block starting at the marker itself: its lowest position (one sample of rounding) lies
@@ -519,21 +563,34 @@ describe("a detected scanner marker lowers its hop's boundary (F2)", () => {
 	})
 
 	it("a marker seen before the hop's receipt is noted lowers it once the receipt is noted", async () => {
-		const { engine, ledger, feed, write, events, block, blockAt, samples } =
-			await make()
+		const {
+			engine,
+			ledger,
+			feed,
+			write,
+			events,
+			block,
+			blockAt,
+			samples,
+			host,
+		} = await make()
 		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
 		await feed(SETTLE_BYTES / 2 + block * 2)
 		const pending = hop(engine, write)
+		const receiptAt = samples()
 		await feed(block / 4)
+		const marker = samples()
+		const slack = postedSlack(host().inputs, pending.epoch)
 		events([
 			{
 				kind: "epoch-started",
 				epoch: pending.epoch,
-				startSample: samples(),
+				startSample: marker + slack,
 				settleMode: "marker",
+				markerRunSamples: marker - receiptAt,
 			},
 		])
-		await feed(block + 8)
+		await feed(block + slack)
 		// Not noted yet: the hop's samples need its receipt.
 		expect(blockAt(samples(), pending.epoch, HOP)).toBe("unverified")
 		engine.noteHopReceipt(
@@ -569,6 +626,52 @@ describe("a detected scanner marker lowers its hop's boundary (F2)", () => {
 		expect(engine.trustShadow()!.markerBoundaries).toBe(0)
 		await engine.stop()
 	})
+
+	it.each([true, false])(
+		"a marker start without its run length is unmappable and lowers nothing (receipt noted before: %s)",
+		async notedBefore => {
+			const {
+				engine,
+				ledger,
+				feed,
+				write,
+				events,
+				block,
+				blockAt,
+				samples,
+				host,
+			} = await make()
+			write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+			await feed(SETTLE_BYTES / 2 + block * 2)
+			const pending = hop(engine, write)
+			const note = () =>
+				engine.noteHopReceipt(
+					pending.epoch,
+					ledger.fieldState("rtl").frequency.receipt,
+				)
+			if (notedBefore) note()
+			await feed(block / 4)
+			const marker = samples()
+			const slack = postedSlack(host().inputs, pending.epoch)
+			events([
+				{
+					kind: "epoch-started",
+					epoch: pending.epoch,
+					startSample: marker + slack,
+					settleMode: "marker",
+				},
+			])
+			if (!notedBefore) note()
+			await feed(block + slack)
+			// The block the same hop with its run length proves (above) stays inside the receipt's settle.
+			expect(blockAt(marker + slack + block, pending.epoch, HOP)).toBe(
+				"unverified",
+			)
+			expect(engine.labelReason()).toBe("settling")
+			expect(engine.trustShadow()!.markerBoundaries).toBe(0)
+			await engine.stop()
+		},
+	)
 
 	it("a marker run that began before the hop's test-mode-on receipt lowers nothing (an older hop's marker)", async () => {
 		const {
@@ -858,6 +961,56 @@ describe("an absorber loss delays no later proof (N1)", () => {
 			await feed(floor! + block - samples())
 			expect(blockAt(floor! + block, pending.epoch, HOP)).toBe("commanded")
 			expect(engine.labelReason()).toBeNull()
+			await engine.stop()
+		},
+	)
+
+	it.each([0, 4096])(
+		"a loss read while the offered count is unknown is not carried forward: a later read (%i more bytes lost) maps it, and the next hop's floor is where it would be without it",
+		async more => {
+			const {
+				engine,
+				ledger,
+				ingest,
+				feed,
+				lose,
+				write,
+				events,
+				block,
+				blockAt,
+				samples,
+				host,
+			} = await make()
+			write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+			await feed(SETTLE_BYTES / 2 + block * 2)
+			// The absorber's held count is unreadable for one read: that loss is placed nowhere.
+			lose(LOSS)
+			ingest!.heldBytes = Number.NaN
+			blockAt(samples())
+			ingest!.heldBytes = 0
+			lose(more)
+			await feed(block)
+			expect(blockAt(samples())).toBe("commanded")
+			expect(engine.trustShadow()!.anchorWidenedBytes).toBe(LOSS + more)
+			const pending = timerHop(engine, write)
+			const receiptAt = samples()
+			engine.noteHopReceipt(
+				pending.epoch,
+				ledger.fieldState("rtl").frequency.receipt,
+			)
+			await feed(1)
+			const floor = proofFloor(host().inputs, pending.epoch)
+			expect(floor).toBe(receiptAt + SETTLE_BYTES / 2 + HOP_GAP_ALLOWANCE + 1)
+			events([
+				{
+					kind: "epoch-started",
+					epoch: pending.epoch,
+					startSample: floor!,
+					settleMode: "timer",
+				},
+			])
+			await feed(floor! + block - samples())
+			expect(blockAt(floor! + block, pending.epoch, HOP)).toBe("commanded")
 			await engine.stop()
 		},
 	)
