@@ -69,9 +69,10 @@ const CONTENT_RULES = [
 		],
 	},
 	{
-		// A bare name (a.b.local, not a path segment like config/x.local) or the host after "//"
-		// (scheme://[user@]a.b.local[:port]/..., //nas.local/share); /usr/local/bin has no dot before
-		// "local". A sentence-final dot ends a name; x.local.json or x.local.example.com is none.
+		// A bare multi-label name ending in the mDNS or home suffix (not a path segment), or the host
+		// after "//" in a URL, with or without a scheme or user; /usr/local/bin has no dot before the
+		// suffix. A sentence-final dot ends a name; a further label (a file extension, a public
+		// domain) means it is none.
 		label: "LAN host name",
 		find: text => [
 			...[
