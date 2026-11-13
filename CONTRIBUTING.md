@@ -62,14 +62,17 @@ summary) forces a recheck. It does not check the docs: run `node scripts/check-d
 beside it.
 
 Exit codes: 0 green (a test that failed and then passed on its rerun is listed as flaky, still a
-pass), 1 real failures, 2 infrastructure (the run is kept for an hour for inspection), 3 refused
-(hygiene, base or deny-list), 4 still running (call it again to attach). A job whose runner setup
-failed (Python packages, Corepack, the Rust toolchain) is infrastructure, not a failure: it is
-rerun once, and the same setup step failing again is a failure naming the job and the step. The
-dependency install and the shared build depend on your code, so they fail the check like lint.
-Nothing is rerun once a real failure is known. Two worktrees checking the same tree on the same
-merge base share one run: the second call attaches to it and waits for the first call's rerun.
-Binary files (a NUL byte in the first 8000 bytes, whatever `.gitattributes` says) are refused
+pass), 1 real failures, 2 infrastructure (not stored; the run is deleted and the summary keeps the
+failed step's last lines), 3 refused (hygiene, base or deny-list), 4 still running (call it again
+to attach). A job whose setup failed (Python packages, Corepack, the Rust toolchain, the dependency
+install, the shared build) is infrastructure, not a failure: each call reruns such jobs once, and a
+later call after INFRA starts a fresh run. The install and the shared build fail the check like
+lint when their output shows your code is the cause: a lockfile or `package.json` error, or a
+TypeScript error (`error TS…`); network errors stay infrastructure. Nothing is rerun once a real
+failure is known. Two worktrees checking the same tree on the same merge base share one run: the
+second call attaches to it and waits for the first call's rerun. Binary files (a media, capture or
+archive extension such as `.png`, `.wav`, `.cu8`, `.iq`, `.bin` or `.zip`, or a NUL byte in the
+first 8000 bytes, whatever `.gitattributes` says) are refused
 when the check adds or changes them, under `fixtures/` too; commit them first through a normal
 pull request. A branch with refreshed screenshots (`docs/**/*.png` from `docs:shots`) is refused
 by design: check the code before regenerating the screenshots, or commit them after the check.

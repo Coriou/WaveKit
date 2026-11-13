@@ -51,7 +51,12 @@ export const FILE_OVERHEAD_S: number
 export const DENYLIST_PATH: string
 export const SETUP_STEPS: string[]
 export const CHECK_STEPS: string[]
-export function setupFailure(steps: Record<string, number>): string | undefined
+export function setupFailure(
+	steps: Record<string, number>,
+	output?: (step: string) => string,
+): string | undefined
+export function codeCaused(step: string, output: string): boolean
+export const BINARY_EXT: RegExp
 export function checkKey(tree: string, mb: string): string
 export function parseDenylist(read: () => string | undefined): Denylist
 export function addedLines(patch: string): Map<string, AddedLine[]>
@@ -119,7 +124,7 @@ export function formatSummary(s: {
 	url: string
 	runNote: string
 	notes?: string[]
-	infra?: { name: string; step: string }[]
+	infra?: { name: string; step: string; tail?: string[] }[]
 	key?: string
 }): string
 export function repoSlug(url: string): string

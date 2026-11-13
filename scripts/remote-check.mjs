@@ -6,11 +6,13 @@
 // private deny-list is required), pushes ci/<key> (key: 12 hex of sha1(tree + merge base)), waits
 // for .github/workflows/ci-remote.yml, then deletes the branch and its own run. The merge base must
 // already be on GitHub, so only the scanned diff is ever published. Idempotent by key: a second
-// call prints the stored result offline or attaches to the run of the same tree and merge base.
+// call prints the stored result offline or attaches to the live run of the same tree and merge
+// base. Jobs without a verdict are rerun once per call; an INFRA result is not stored and its run
+// is deleted, so a later call starts a fresh run.
 // stdout is only the summary, also written to .remote-check/summary.txt. Docs are not checked here:
 // run scripts/check-docs.mjs locally.
 //
-// Exit: 0 green (flaky tests included), 1 failures, 2 infrastructure (run kept), 3 refused,
+// Exit: 0 green (flaky tests included), 1 failures, 2 infrastructure (not stored), 3 refused,
 // 4 still running after 9 minutes: call again.
 
 import { execFileSync } from "node:child_process"
@@ -177,12 +179,12 @@ export async function remoteCheck(d, argv) {
 	sweepOld()
 
 	// Attach to this key's run (state.json), else to a run of its branch whose commit is this tree on
-	// this merge base (live, or completed: another call's or a kept INFRA run, its verdict reused);
-	// otherwise push a new one once a slot is free. Runs of other calls are never deleted here: only
-	// this call's own run at the end, and the sweep's runs older than an hour.
+	// this merge base (live, or completed: another call's, its verdict reused but the run left to
+	// that call or the sweep unless it is older than the sweep's hour); otherwise push a new one once
+	// a slot is free. Only the sweep deletes other calls' runs, and only after an hour.
 	const branch = `ci/${key}`
 	const stateFile = join(cache, "state.json")
-	/** @type {{ runId?: string, rerunAttempt?: number, setupBefore?: Record<string, string> }} */
+	/** @type {{ runId?: string, rerunAttempt?: number }} */
 	const state =
 		quiet(() => JSON.parse(fs.readFileSync(stateFile, "utf8"))) ?? {}
 	const save = () => fs.writeFileSync(stateFile, JSON.stringify(state))
@@ -193,17 +195,22 @@ export async function remoteCheck(d, argv) {
 	if (state.runId && !ok(() => gh(["run", "view", `${state.runId}`]))) {
 		delete state.runId
 		delete state.rerunAttempt
-		delete state.setupBefore
 		save()
 	}
 	const ours = (/** @type {{ headSha: string }} */ r) =>
 		quiet(() => git(["log", "-1", "--format=%T %P", r.headSha]).trim()) ===
 		`${tree} ${mb}`
+	// A completed run another call left (it may still be reading it) is not deleted while young.
+	let adopted = false
 	if (!state.runId) {
 		const runs = ciRuns(["--branch", branch]).filter(r => r.headSha && ours(r))
 		const found = runs.find(r => r.status !== "completed") ?? runs[0]
-		if (found) state.runId = String(found.databaseId)
-		else {
+		if (found) {
+			state.runId = String(found.databaseId)
+			adopted =
+				found.status === "completed" &&
+				!(d.now() - Date.parse(found.updatedAt) > SWEEP_AGE_MS)
+		} else {
 			while (ciRuns().filter(r => r.status !== "completed").length >= 2) {
 				if (d.now() + POLL_MS > deadline)
 					return still("two other checks are live, waiting for a slot")
@@ -240,11 +247,11 @@ export async function remoteCheck(d, argv) {
 
 	// Wait; jobs without a verdict or with an infra one (a failed setup step) are rerun once, each by
 	// its job id (`--failed` would not pick a job that concluded success without a usable verdict),
-	// unless a real failure is already known: then nothing is rerun and the check fails. A setup
-	// step failing again on the rerun is a failure. A rerun gh refuses is INFRA at once, unless the
-	// run is live again (another call for this key reran it): then this call waits for that rerun.
-	// A run that vanished was finished by another call for this key: its stored result, else call
-	// again.
+	// unless a real failure is already known: then nothing is rerun and the check fails. Still
+	// without a verdict after the rerun is INFRA. A rerun gh refuses is INFRA at once (the verdicts
+	// read so far are the summary), unless the run is live again (another call for this key reran
+	// it): then this call waits for that rerun. A run that vanished was finished by another call for
+	// this key: its stored result, else call again.
 	const dl = join(cache, "verdicts")
 	/** @type {{ status: string, attempt: number, url: string, createdAt: string, updatedAt: string, jobs: { name: string, databaseId: number, conclusion: string }[] }} */
 	let view
@@ -274,13 +281,6 @@ export async function remoteCheck(d, argv) {
 			if (missing.length === 0 || failed || state.rerunAttempt !== undefined)
 				break
 			state.rerunAttempt = view.attempt
-			/** @type {Record<string, string>} */
-			const setupBefore = {}
-			for (const [n, v] of read) {
-				const step = v?.infra ? lib.setupFailure(v.steps) : undefined
-				if (step) setupBefore[n] = step
-			}
-			state.setupBefore = setupBefore
 			save()
 			// GitHub accepts one rerun request per run at a time: one missing job reruns alone,
 			// several rerun the whole run in one request.
@@ -301,18 +301,15 @@ export async function remoteCheck(d, argv) {
 				return status !== undefined && status !== "completed"
 			}
 			if (!accepted.length && !live()) {
-				fs.rmSync(stateFile, { force: true })
-				return finish(
-					`remote-check INFRA  tree ${tree12}: rerun refused, run ${view.url} kept`,
-					2,
-				)
+				notes.push("rerun refused")
+				break
 			}
 		}
 		if (d.now() + POLL_MS > deadline)
 			return still(`run ${view.url} still running`)
 		await d.sleep(POLL_MS)
 	}
-	const { code, text, keep } = lib.verdictOf({
+	const { code, text } = lib.verdictOf({
 		dl,
 		expected,
 		notes,
@@ -323,18 +320,18 @@ export async function remoteCheck(d, argv) {
 		out: cache,
 		home: d.home,
 		now: d.now(),
-		...(state.setupBefore ? { setupBefore: state.setupBefore } : {}),
+		kept: adopted,
 	})
 
-	// Cache (a FAIL too: `rm -r .remote-check/<key>` forces a recheck), then delete the branch and
-	// this call's run unless it is kept (INFRA: the sweep takes it after an hour). state.json goes;
-	// the next call finds the kept run by its commit and reruns its jobs without a verdict once.
+	// Cache (a FAIL too: `rm -r .remote-check/<key>` forces a recheck; never INFRA), then delete the
+	// branch and the run (INFRA too: the summary keeps the failed steps' last lines as evidence)
+	// unless it was adopted young from another call. state.json goes: the next call starts fresh.
 	fs.writeFileSync(join(cache, "summary.txt"), `${text}\n`)
 	if (code !== 2) fs.writeFileSync(codeFile, `${code}\t${base}`)
 	fs.rmSync(dl, { recursive: true, force: true })
 	fs.rmSync(stateFile, { force: true })
 	ok(() => git(["push", "-q", REMOTE, "--delete", branch]))
-	if (!keep) ok(() => gh(["run", "delete", runId]))
+	if (!adopted) ok(() => gh(["run", "delete", runId]))
 	const dirs = fs
 		.readdirSync(out, { withFileTypes: true })
 		.filter(e => e.isDirectory())

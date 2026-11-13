@@ -540,15 +540,19 @@ export const artifactName = job =>
 
 /**
  * The step names of .github/workflows/ci-remote.yml, in one place. A failed setup step (the
- * runner's tools and toolchains: network and runner trouble, never the checked code) makes the
- * job's verdict `infra`, which the client treats like a missing verdict and reruns once; the same
- * setup step failing again is a failure. The dependency install and the shared build depend on
- * the checked code (lockfile, packages), so they are check steps and decide pass or fail.
+ * runner's tools, the dependency install and the shared build) makes the job's verdict `infra`,
+ * which the client treats like a missing verdict and reruns once; failing again is INFRA too. The
+ * install and the shared build also depend on the checked code: their failure is a check failure
+ * when the step's output shows it (codeCaused), never when it shows network trouble.
  */
-export const SETUP_STEPS = ["pip", "corepack", "rust"]
-export const CHECK_STEPS = [
+export const SETUP_STEPS = [
+	"pip",
+	"corepack",
+	"rust",
 	"install",
 	"build-shared",
+]
+export const CHECK_STEPS = [
 	"lint",
 	"typecheck",
 	"build",
@@ -559,12 +563,37 @@ export const CHECK_STEPS = [
 	"kernels-js",
 ]
 
+/** Network or registry trouble in a step's output: never the checked code. */
+const NETWORK_SIGNS =
+	/ERR_PNPM_FETCH_|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|\b(?:HTTP|status|code)\W{0,3}5\d\d\b|\(5\d\d\)|\b5\d\d (?:Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out)/i
+/** The output of a setup step that failed for the checked code: a lockfile or manifest error, TS diagnostics. */
+const CODE_SIGNS = /** @type {Record<string, RegExp>} */ ({
+	install:
+		/ERR_PNPM_OUTDATED_LOCKFILE|ERR_PNPM_LOCKFILE_\w+|ERR_PNPM_BROKEN_LOCKFILE|ERR_PNPM_JSON_PARSE|package\.json\S*:?[^\n]*(?:Failed to parse|Unexpected token)|(?:Failed to parse|Unexpected token)[^\n]*package\.json/,
+	"build-shared": /\berror TS\d+\b/,
+})
+
 /**
- * The first setup step that did not exit 0 (a missing one counts), or undefined.
- * @param {Record<string, number>} steps
+ * Whether setup step `step` failed for the checked code, judged by its output: a check failure
+ * (red, no rerun, cached) rather than INFRA. Network signs win over code signs.
+ * @param {string} step @param {string} output
  */
-export const setupFailure = steps =>
-	SETUP_STEPS.find(n => n in steps && steps[n] !== 0)
+export const codeCaused = (step, output) =>
+	!!CODE_SIGNS[step]?.test(output) && !NETWORK_SIGNS.test(output)
+
+/**
+ * The first setup step that did not exit 0 (a missing one counts), or undefined; also undefined
+ * when any failed setup step failed for the checked code, since the later ones only follow from it
+ * (no node_modules after a lockfile error). `output` reads a step's log: the job script passes the
+ * whole log; without it nothing is code-caused, which only names the step.
+ * @param {Record<string, number>} steps
+ * @param {(step: string) => string} [output]
+ */
+export const setupFailure = (steps, output) => {
+	const failed = SETUP_STEPS.filter(n => n in steps && steps[n] !== 0)
+	if (output && failed.some(n => codeCaused(n, output(n)))) return undefined
+	return failed[0]
+}
 
 /**
  * Exit code of a check: 1 any real failure, 2 a job without a verdict or with an `infra` one, 0
@@ -629,7 +658,7 @@ const WORD = { 0: "PASS", 1: "FAIL", 2: "INFRA" }
  *   root: ({ ok: boolean, seconds: number, steps: Record<string, number>, tail?: Record<string, string[]>, failed: { file: string, test: string, message: string }[], flaky: { file: string, test: string, message: string }[] } | undefined)[],
  *   others?: { name: string, ok: boolean, seconds: number, steps: Record<string, number>, tail?: Record<string, string[]> }[],
  *   missing: string[], url: string, runNote: string, notes?: string[],
- *   infra?: { name: string, step: string }[], key?: string,
+ *   infra?: { name: string, step: string, tail?: string[] }[], key?: string,
  * }} s
  */
 export function formatSummary(s) {
@@ -697,6 +726,11 @@ export function formatSummary(s) {
 	if (s.missing.length) head.push(`no verdict: ${s.missing.join(", ")}`)
 	if (infra.length)
 		head.push(`infra: ${infra.map(i => `${i.name} ${i.step}`).join(", ")}`)
+	// The failed setup step's last lines are the evidence of an INFRA run, which is deleted.
+	for (const i of infra) {
+		const t = tailOf({ [i.step]: i.tail ?? [] }, i.step)
+		if (t.length) head.push(`  ${i.name} ${i.step}:`, ...t.map(l => `    ${l}`))
+	}
 
 	/** @type {{ file: string, test: string, message: string, detail?: string[] }[]} */
 	const failed = s.root.flatMap((v, i) => [
@@ -776,11 +810,15 @@ export function repoSlug(url) {
 
 /** Git's own binary test: a NUL byte in the first 8000 bytes. */
 export const BINARY_PROBE_BYTES = 8000
+/** Media, capture and archive names: refused as binary whatever their content. */
+export const BINARY_EXT =
+	/\.(?:png|jpe?g|gif|webp|wav|mp3|flac|ogg|cu8|cs8|cs16|cf32|iq|raw|bin|sigmf-data|zip|gz|tgz|xz|7z)$/i
 
 /**
  * Changed files and added lines between two trees, for scanHygiene. Renames count as an add and a
  * delete, so every line of a moved file is scanned. Neither test depends on the tree's
- * .gitattributes: a file is binary when its blob holds a NUL byte in its first 8000 bytes (files
+ * .gitattributes: a file is binary when its name has a BINARY_EXT extension or its blob holds a
+ * NUL byte in its first 8000 bytes (files
  * over 1 MB are refused for their size and not read), and the added lines of every other file are
  * read with `--text`, so a `-diff` or `binary` attribute cannot hide them from the scan.
  * @param {(args: string[]) => string} git returns stdout
@@ -819,8 +857,10 @@ export function collectChanges(git, from, to) {
 			}),
 	)
 	const isBinary = (/** @type {string} */ path) => {
+		if (BINARY_EXT.test(path)) return true
 		const b = blobs.get(path)
 		if (!b || b.type !== "blob" || b.size > BIG_FILE_BYTES) return false
+		// Heuristic, as git's: text never holds NUL, so one in the first 8000 bytes means binary.
 		return git(["cat-file", "-p", b.sha])
 			.slice(0, BINARY_PROBE_BYTES)
 			.includes("\0")
@@ -1046,36 +1086,29 @@ export function sweep({ git, gh, remote, runs, now, maxAgeMs }) {
 /**
  * The verdict of a completed run: exit code and summary from the downloaded verdicts in `dl`.
  * Side files: `<out>/durations.json` (a green run's per-file seconds, in the tracked table's
- * shape) and the flaky ledger under `<home>/<LEDGER_DIR>`. `keep`: leave an INFRA run for its logs.
- * An `infra` verdict (a failed setup step) counts as no verdict and is named with its step, unless
- * `setupBefore` (artifact name to the setup step that failed on the attempt before the rerun) holds
- * the same step for that job: a setup step failing on both attempts is a failure.
+ * shape) and the flaky ledger under `<home>/<LEDGER_DIR>`. An `infra` verdict (a failed setup
+ * step) counts as no verdict and is named with its step and the step's last lines. `kept`: the
+ * run is left for the sweep (another call's), so the summary does not call it deleted.
  * @param {{
  *   dl: string, expected: string[], notes: string[],
  *   view: { url: string, createdAt: string, updatedAt: string },
  *   tree12: string, key?: string, mb: string, out: string, home: string, now: number,
- *   setupBefore?: Record<string, string>,
+ *   kept?: boolean,
  * }} r
  */
 export function verdictOf(r) {
 	/** @type {Map<string, ShardVerdictT>} */
 	const read = new Map()
-	const notes = [...r.notes]
 	for (const name of r.expected) {
 		const v = readVerdict(join(r.dl, name, "verdict.json"))
-		if (!v) continue
-		const step = v.infra ? setupFailure(v.steps) : undefined
-		if (step !== undefined && r.setupBefore?.[name] === step) {
-			read.set(name, { ...v, ok: false, infra: false })
-			notes.push(`setup failed on both attempts: ${name.slice(8)} ${step}`)
-		} else read.set(name, v)
+		if (v) read.set(name, v)
 	}
 	const infra = [...read]
 		.filter(([, v]) => v.infra)
-		.map(([n, v]) => ({
-			name: n.slice(8),
-			step: setupFailure(v.steps) ?? "setup",
-		}))
+		.map(([n, v]) => {
+			const step = setupFailure(v.steps) ?? "setup"
+			return { name: n.slice(8), step, tail: v.tail?.[step] ?? [] }
+		})
 	const verdicts = new Map([...read].filter(([, v]) => !v.infra))
 	const shards = Array.from({ length: SHARDS }, (_, i) =>
 		verdicts.get(`verdict-root-${i + 1}`),
@@ -1105,7 +1138,6 @@ export function verdictOf(r) {
 				.join(""),
 		)
 	}
-	const keep = code === 2
 	const text = formatSummary({
 		code,
 		tree: r.tree12,
@@ -1121,10 +1153,10 @@ export function verdictOf(r) {
 		infra,
 		...(r.key ? { key: r.key } : {}),
 		url: r.view.url,
-		runNote: keep ? "kept" : "deleted",
-		notes,
+		runNote: r.kept ? "kept" : "deleted",
+		notes: r.notes,
 	})
-	return { code, text, keep }
+	return { code, text }
 }
 
 /**

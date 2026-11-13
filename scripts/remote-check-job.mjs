@@ -8,9 +8,11 @@
 //
 // <step...> are the step names expected in $RUNNER_TEMP/verdict-steps; a missing one counts as -1.
 // A failed step's last lines ($RUNNER_TEMP/step-<name>.log, trimmed by tailLines) go in `tail`.
-// A failed setup step (SETUP_STEPS in remote-check-lib.mjs: runner tools, never the checked code)
-// sets `infra`: the client reruns the job once instead of reporting a failure; `ok` speaks for
-// the check steps only.
+// A failed setup step (SETUP_STEPS in remote-check-lib.mjs) sets `infra`: the client reruns the job
+// once instead of reporting a failure. This script is the one place that classifies a failed
+// install or shared build, by its whole log (codeCaused): a lockfile, manifest or TypeScript error
+// is the checked code's and leaves `infra` unset, so `ok: false` is a failure; anything else is
+// INFRA.
 //
 // Time budget of a root job (timeout-minutes 25 = 1500 s), counted from its "Start verdict" step:
 // the setup steps end by 600 s (step.sh, VERDICT_STEPS_S) and this script by VERDICT_END_S =
@@ -205,7 +207,7 @@ function main() {
 	}
 	Object.assign(verdict, {
 		ok: Object.values(steps).every(c => c === 0) && failed.length === 0,
-		infra: setupFailure(steps) !== undefined,
+		infra: setupFailure(steps, n => readOr(`step-${n}.log`)) !== undefined,
 		seconds: Math.round((Date.now() - startedAt) / 1000),
 		steps,
 		failed,

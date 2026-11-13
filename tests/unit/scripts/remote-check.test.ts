@@ -17,9 +17,11 @@ import { remoteCheck, type Deps } from "../../../scripts/remote-check.mjs"
 import {
 	addedLines,
 	artifactName,
+	BINARY_EXT,
 	checkKey,
 	CHECK_STEPS,
 	classifyShard,
+	codeCaused,
 	collectChanges,
 	commitMessage,
 	refusal,
@@ -582,19 +584,83 @@ describe("exit codes", () => {
 			undefined,
 		)
 		expect(setupFailure({ pip: 0, install: 1, "build-shared": 1 })).toBe(
-			undefined,
+			"install",
 		)
 		expect(setupFailure({ pip: 1, install: -1 })).toBe("pip")
 		expect(setupFailure({ corepack: -1, install: -1 })).toBe("corepack")
 		expect(setupFailure({ rust: 124, channelizer: -1 })).toBe("rust")
+		expect(setupFailure({ "build-shared": 2, lint: 1 })).toBe("build-shared")
 		expect(setupFailure({ "root-tests": 1 })).toBe(undefined)
 	})
 
-	it("keeps only runner tool steps in the setup list: the install and the shared build are checks", () => {
-		expect(SETUP_STEPS).toEqual(["pip", "corepack", "rust"])
-		expect(CHECK_STEPS).toEqual(
-			expect.arrayContaining(["install", "build-shared"]),
+	it("keeps the install and the shared build in the setup list", () => {
+		expect(SETUP_STEPS).toEqual([
+			"pip",
+			"corepack",
+			"rust",
+			"install",
+			"build-shared",
+		])
+		expect(CHECK_STEPS).not.toContain("install")
+		expect(CHECK_STEPS).not.toContain("build-shared")
+	})
+
+	it("classifies a failed install or shared build by its output: code errors red, the rest infra", () => {
+		const lockfile = [
+			"Scope: all 9 workspace projects",
+			' ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with "frozen-lockfile" because pnpm-lock.yaml is not up to date with packages/x/package.json',
+		].join("\n")
+		const manifest =
+			" ERR_PNPM_JSON_PARSE  Unexpected token } in JSON at position 40 while parsing '{' in packages/x/package.json"
+		const brokenLock =
+			" ERR_PNPM_LOCKFILE_BREAKING_CHANGE  Lockfile is not compatible"
+		const parse =
+			"Failed to parse packages/x/package.json: Unexpected end of input"
+		const ts =
+			"src/logger.ts(3,7): error TS2322: Type 'string' is not assignable"
+		const fetch =
+			" ERR_PNPM_FETCH_503  GET https://registry.npmjs.org/x: Service Unavailable - 503"
+		const timeout =
+			"request to https://registry.npmjs.org/x failed, reason: ETIMEDOUT"
+		const reset =
+			"WARN  GET https://registry.npmjs.org/y error (ECONNRESET). Will retry"
+		const dns = "getaddrinfo EAI_AGAIN registry.npmjs.org"
+		const unknown = "Killed\nsomething went wrong"
+		for (const out of [lockfile, manifest, brokenLock, parse])
+			expect([out, codeCaused("install", out)]).toEqual([out, true])
+		expect(codeCaused("build-shared", ts)).toBe(true)
+		// A TS error belongs to the build, a lockfile error to the install.
+		expect(codeCaused("install", ts)).toBe(false)
+		expect(codeCaused("build-shared", lockfile)).toBe(false)
+		expect(codeCaused("pip", lockfile)).toBe(false)
+		for (const out of [fetch, timeout, dns, unknown, ""])
+			expect([out, codeCaused("install", out)]).toEqual([out, false])
+		// Network trouble wins over a code sign in the same output.
+		expect(codeCaused("install", `${reset}\n${lockfile}`)).toBe(false)
+		expect(codeCaused("build-shared", `${ts}\n${timeout}`)).toBe(false)
+
+		const logs: Record<string, string> = {}
+		const out = (n: string) => logs[n] ?? ""
+		const steps = { pip: 0, corepack: 0, install: 1, "build-shared": 1 }
+		// Red: the lockfile error is the cause, and the build only failed for want of node_modules.
+		logs["install"] = lockfile
+		logs["build-shared"] = "sh: tsc: not found"
+		expect(setupFailure(steps, out)).toBe(undefined)
+		logs["install"] = manifest
+		expect(setupFailure(steps, out)).toBe(undefined)
+		expect(setupFailure({ install: 0, "build-shared": 2 }, () => ts)).toBe(
+			undefined,
 		)
+		// Infra: network trouble, or an unknown error.
+		logs["install"] = fetch
+		expect(setupFailure(steps, out)).toBe("install")
+		logs["install"] = timeout
+		expect(setupFailure(steps, out)).toBe("install")
+		logs["install"] = unknown
+		expect(setupFailure(steps, out)).toBe("install")
+		expect(
+			setupFailure({ install: 0, "build-shared": 1 }, () => "out of memory"),
+		).toBe("build-shared")
 	})
 
 	it("puts every step of the workflow in exactly one of the setup and check lists", () => {
@@ -866,13 +932,19 @@ describe("summary", () => {
 			root: [shard(), undefined, ...Array.from({ length: 4 }, () => shard())],
 			infra: [
 				{ name: "static", step: "pip" },
-				{ name: "root-2", step: "install" },
+				{
+					name: "root-2",
+					step: "install",
+					tail: ["GET https://registry.npmjs.org/x error (ETIMEDOUT)"],
+				},
 			],
 		})
-		expect(text.split("\n").slice(1, 4)).toEqual([
+		expect(text.split("\n").slice(1, 6)).toEqual([
 			"static INFRA",
 			"root ok INFRA ok ok ok ok  (200 - 200 200 200 200 s)",
 			"infra: static pip, root-2 install",
+			"  root-2 install:",
+			"    GET https://registry.npmjs.org/x error (ETIMEDOUT)",
 		])
 		expect(
 			formatSummary({
@@ -1041,10 +1113,10 @@ describe("git inputs", () => {
 			{ path: "old.ts", status: "D", binary: false, size: 0 },
 		])
 		expect([...r.added]).toEqual([["src/a.ts", [{ line: 2, text: "x" }]]])
-		// Only the small text file is read whole by the line diff, as text.
+		// Only the small text file is read whole by the line diff, as text; the .bin name alone
+		// makes a binary, without reading its blob.
 		expect(calls.filter(c => c[0] === "cat-file").map(c => c[2])).toEqual([
 			"aa",
-			"bb",
 		])
 		const lines = calls.find(c => c.includes("-U0")) ?? []
 		expect(lines.includes("--text")).toBe(true)
@@ -1054,6 +1126,68 @@ describe("git inputs", () => {
 				.filter(c => c.includes("diff"))
 				.every(c => c.includes("--no-renames")),
 		).toBe(true)
+	})
+})
+
+describe("binary extensions", () => {
+	it("refuses media, capture and archive names whatever their content, in any case", () => {
+		const binary = [
+			"a.png",
+			"b.JPG",
+			"c.jpeg",
+			"d.gif",
+			"e.webp",
+			"f.wav",
+			"g.mp3",
+			"h.flac",
+			"i.ogg",
+			"fixtures/j.cu8",
+			"k.CS8",
+			"l.cs16",
+			"m.cf32",
+			"n.iq",
+			"o.raw",
+			"p.bin",
+			"q.sigmf-data",
+			"r.zip",
+			"s.tar.gz",
+			"t.tgz",
+			"u.xz",
+			"v.7z",
+		]
+		const text = [
+			"a.ts",
+			"png.md",
+			"x.bin.md",
+			"y.sigmf-meta",
+			"z.svg",
+			"iq",
+			"gz.json",
+		]
+		for (const p of binary) expect([p, BINARY_EXT.test(p)]).toEqual([p, true])
+		for (const p of text) expect([p, BINARY_EXT.test(p)]).toEqual([p, false])
+		const names = ["capture.CU8", "notes.md"]
+		const git = (args: string[]) => {
+			if (args.includes("--name-status"))
+				return names.map(n => `A\0${n}\0`).join("")
+			if (args[0] === "ls-tree")
+				return names.map((n, i) => `100644 blob s${i} 10\t${n}`).join("\0")
+			// Plain text content: only the name can make the capture binary.
+			if (args[0] === "cat-file") return "text\n"
+			return ""
+		}
+		const r = collectChanges(git, "base", "tree")
+		expect(r.changes.map(c => [c.path, c.binary])).toEqual([
+			["capture.CU8", true],
+			["notes.md", false],
+		])
+		expect(
+			scanHygiene({ ...r, denylist: none }).filter(h =>
+				h.label.startsWith("binary"),
+			),
+		).toEqual([
+			{ file: "capture.CU8", line: 0, label: "binary file added or changed" },
+		])
 	})
 })
 
@@ -1618,26 +1752,26 @@ describe("client with fake git and gh", () => {
 		expect(network()).toEqual([])
 	})
 
-	it("keeps an INFRA run, then reattaches by its commit and reruns its missing job", async () => {
+	it("deletes an INFRA run and its branch, stores nothing, and the next call starts a fresh run", async () => {
 		w.missingFirst = ["root (3)"]
 		const r = await remoteCheck(deps(), [])
 		expect(r.code).toBe(2)
 		expect(r.text).toContain("no verdict: root-3")
-		expect(r.text).toMatch(/run https:.*\/7 {2}\(kept\)/)
+		expect(r.text).toMatch(/run https:.*\/7 {2}\(deleted\)/)
 		expect(calls).toContain("gh run rerun --job 703 -R o/r")
-		expect(w.runs.map(x => [x.id, x.status, x.attempt])).toEqual([
-			[7, "completed", 2],
-		])
-		expect(fs.existsSync(join(root, `.remote-check/${KEY}/state.json`))).toBe(
-			false,
-		)
-		w.rerunHeals = true
+		expect(deleted()).toEqual(["7"])
+		expect(calls).toContain(`git push -q github --delete ${BRANCH}`)
+		expect(w.runs).toEqual([])
+		const cache = join(root, `.remote-check/${KEY}`)
+		expect(fs.existsSync(join(cache, "state.json"))).toBe(false)
+		expect(fs.existsSync(join(cache, "code"))).toBe(false)
+		w.missingFirst = []
 		calls = []
 		const again = await remoteCheck(deps(), [])
 		expect(again.code).toBe(0)
-		expect(w.pushes).toBe(1)
-		expect(calls).toContain("gh run rerun --job 703 -R o/r")
-		expect(deleted()).toEqual(["7"])
+		expect(w.pushes).toBe(2)
+		expect(calls.some(c => c.startsWith("gh run rerun"))).toBe(false)
+		expect(deleted()).toEqual(["8"])
 	})
 
 	it("never deletes another call's young completed run; reuses one of its key, else pushes", async () => {
@@ -1672,8 +1806,34 @@ describe("client with fake git and gh", () => {
 		expect(reused.code).toBe(0)
 		expect(w.pushes).toBe(1)
 		expect(calls).toContain(VIEW.replace(" 7 ", " 6 "))
-		expect(deleted()).toEqual(["6"])
-		expect(w.runs.map(x => x.id)).toEqual([3, 4, 5])
+		// Another call may still be reading it: it stays for that call or the sweep.
+		expect(deleted()).toEqual([])
+		expect(w.runs.map(x => x.id)).toEqual([3, 4, 5, 6])
+	})
+
+	it("never deletes a young completed run of its key that another call left, even on a failure", async () => {
+		commitTrees.set("cafe", `${TREE} ${MB}`)
+		w.runs = [
+			{
+				id: 6,
+				status: "completed",
+				attempt: 1,
+				missing: [],
+				branch: BRANCH,
+				sha: "cafe",
+				createdAt: w.clock - 59 * 60_000,
+			},
+		]
+		verdictFor = name =>
+			name === "static"
+				? { ...verdict(name), ok: false, steps: { lint: 1 } }
+				: verdict(name)
+		const r = await remoteCheck(deps(), [])
+		expect(r.code).toBe(1)
+		expect(w.pushes).toBe(0)
+		expect(r.text).toContain("actions/runs/6  (kept)")
+		expect(deleted()).toEqual([])
+		expect(w.runs.map(x => x.id)).toEqual([6])
 	})
 
 	it("attaches to the pushed run by its commit, not an older run of the branch", async () => {
@@ -1719,23 +1879,35 @@ describe("client with fake git and gh", () => {
 		])
 	})
 
-	it("fails, naming the job and its setup step, when the same setup step fails again", async () => {
+	it("is INFRA, stores nothing and deletes the run, when the same setup step fails again", async () => {
 		verdictFor = name =>
 			name === "root (2)" || name === "static"
-				? infraVerdict(name)
+				? {
+						...infraVerdict(name),
+						tail: { pip: ["ERROR: Could not install packages (ETIMEDOUT)"] },
+					}
 				: verdict(name)
 		const r = await remoteCheck(deps(), [])
-		expect(r.code).toBe(1)
-		expect(r.text).toContain("root ok FAIL ok ok ok ok")
-		expect(r.text).toContain("static FAIL")
-		expect(r.text).toContain("root 2 > step pip")
-		expect(r.text).toContain("setup failed on both attempts: static pip")
-		expect(r.text).toContain("setup failed on both attempts: root-2 pip")
-		expect(r.text).not.toContain("infra:")
+		expect(r.code).toBe(2)
+		expect(r.text).toContain("static INFRA")
+		expect(r.text).toContain("root ok INFRA ok ok ok ok")
+		expect(r.text).toContain("infra: static pip, root-2 pip")
+		// The failed step's last lines stay as the evidence, printed once.
+		expect(r.text).toContain(
+			"  static pip:\n    ERROR: Could not install packages (ETIMEDOUT)",
+		)
+		expect(r.text).not.toContain("FAIL")
+		expect(r.text).not.toContain("both attempts")
+		expect(r.text).toMatch(/run https:.*\/7 {2}\(deleted\)/)
 		expect(calls.filter(c => c.startsWith("gh run rerun"))).toEqual([
 			"gh run rerun 7 -R o/r",
 		])
 		expect(deleted()).toEqual(["7"])
+		const cache = join(root, `.remote-check/${KEY}`)
+		expect(fs.existsSync(join(cache, "code"))).toBe(false)
+		calls = []
+		await remoteCheck(deps(), [])
+		expect(w.pushes).toBe(2)
 	})
 
 	it("is INFRA, naming the job and its setup step, when another setup step fails on the rerun", async () => {
@@ -1754,8 +1926,8 @@ describe("client with fake git and gh", () => {
 		expect(r.text).toContain("infra: root-2 corepack")
 		expect(r.text).toContain("root ok INFRA ok ok ok ok")
 		expect(r.text).not.toContain("FAIL")
-		expect(r.text).toMatch(/run https:.*\/7 {2}\(kept\)/)
-		expect(deleted()).toEqual([])
+		expect(r.text).toMatch(/run https:.*\/7 {2}\(deleted\)/)
+		expect(deleted()).toEqual(["7"])
 	})
 
 	it("fails a code-caused install failure at once, without a rerun", async () => {
@@ -1828,10 +2000,16 @@ describe("client with fake git and gh", () => {
 		w.rerunFails = true
 		const r = await remoteCheck(deps(), [])
 		expect(r.code).toBe(2)
-		expect(r.text).toBe(
-			"remote-check INFRA  tree abcdef012345: rerun refused, run https://github.com/o/r/actions/runs/7 kept",
+		expect(r.text.split("\n")[0]).toMatch(/^remote-check INFRA /)
+		expect(r.text).toContain("no verdict: static")
+		expect(r.text).toContain("rerun refused")
+		expect(r.text).toContain(
+			"run https://github.com/o/r/actions/runs/7  (deleted)",
 		)
 		expect(calls.filter(c => c.startsWith("gh run view"))).toHaveLength(2)
+		expect(deleted()).toEqual(["7"])
+		expect(calls).toContain(`git push -q github --delete ${BRANCH}`)
+		expect(fs.existsSync(join(root, `.remote-check/${KEY}/code`))).toBe(false)
 	})
 
 	it("keeps waiting, not INFRA, when the rerun is refused because another call's rerun is live", async () => {
