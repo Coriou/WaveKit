@@ -2911,7 +2911,7 @@ export class TunerController extends EventEmitter {
 	}
 
 	/**
-	 * WG10 req 2.8: before an operator frequency write, writes the sample rate the core holds
+	 * Before an operator frequency write, writes the sample rate the core holds
 	 * (value unchanged, origin from `opts`, normally `rest`) when the live session does not prove
 	 * it (the skip rule: proven, settling or queued at that value skips), so the trust label can
 	 * become `commanded`. Writes only in internal control and for a held rate (accepted, or the
