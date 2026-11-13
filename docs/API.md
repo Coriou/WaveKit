@@ -1325,23 +1325,35 @@ What a resume writes to the receiver depends on the body:
   (the scanner's own marker) is still sent when a marker may be open.
 - **A plain resume on a free receiver** takes the tuning back as a restore resume would:
   while the sdr-host's rtlmux client list ([`GET /api/resources/sdr-hosts`](#get-apiresourcessdr-hosts))
-  names this core's connection (by its local port) as the only client and no
+  holds exactly one client while this core's connection is up, and no
   [tuner relay](#tuner-relay) client is attached, the core writes its held centre and sample
   rate again (accepted before the pause, else declared; `tuner.writeDeclaredTuningOnConnect`
   `false` still keeps the declared ones off), and a later dropout reconnect writes the
-  configured gain again. The client list is read at every sdr-host poll and must be at most two
-  poll intervals and a request timeout old (8 s with the defaults). Anything else leaves the
-  tuning as found: another client on rtlmux, no sdr-host (or `resources.sdrHostPoller` off), an
-  answer that fails, is too old or does not list this connection (one taken before it, or a
-  NAT that rewrites its port), or a relay client. A free answer counts only when its poll started
-  after the connection and after the last doubt on the centre or rate, so a client that joins and
-  retunes is not fought on an older answer: after an untracked retune the receiver reads as
-  another client's until a newer answer says free. The client is matched by its port alone (rtlmux
-  sees the core's address after any NAT). It is re-read at every poll: a client that
-  joins later puts the hold back, one that leaves gives the tuning back. `resumeOutcome` on
+  configured gain again. That one client is this connection whether or not its port matches
+  this connection's local port (rtlmux sees the core's address after any NAT, which may rewrite
+  the port); `resumeOutcome` says which. Each sdr-host answer must be at most two poll intervals and
+  a request timeout old (8 s with the defaults); the client list it carries may be older (below). Anything else
+  leaves the tuning as found: two or more clients on rtlmux, zero clients, an sdr-host whose
+  API host is not the host the IQ connection uses, no sdr-host (or
+  `resources.sdrHostPoller` off), an answer that fails or is too old, or a relay client. The
+  sdr-host serves the client list of its own last rtlmux stats poll, which can be older than the
+  answer, so a free answer counts only when the list itself is newer than the connection and the
+  last doubt on the centre or rate: the core takes the list as no newer than the poll's start
+  minus the list's age the answer reports (`sampling.stats.ageMs`) minus 3 s for the sdr-host's
+  own stats request (the age is measured on the sdr-host's clock and the 3 s is a fixed bound, so
+  a clock offset between the hosts does not matter), or minus 33 s when the answer reports no age (the sdr-host serves a list until
+  it is 30 s old). With a working sdr-host the take-back comes a few seconds after the
+  connection. A list taken before this connection (which may name only another client, SDR++
+  say) never counts, and a client that joins and retunes is not fought on an older list: after an
+  untracked retune the receiver reads as another client's until a newer answer says free. It is
+  re-read at every poll: a client that joins later puts the hold back, one that leaves gives the
+  tuning back. `resumeOutcome` on
   the tuner state says which: `{ outcome, reason, message }` with `outcome` `restored` or
-  `left-as-found` and `reason` `receiver-free` ("receiver free: tuning restored"),
-  `another-client` ("another client on the receiver: tuning left as found"),
+  `left-as-found` and `reason` `port-matched` ("receiver free (only this connection): tuning
+  restored"; the one client has this connection's port), `sole-client` ("receiver free (one
+  client, port not matched): tuning restored"; its port is another or not listed),
+  `another-client` ("another client on the receiver: tuning left as found"; two or more clients
+  are listed, each with its own entry),
   `clients-unknown` ("receiver clients unknown: tuning left as found"), `relay-attached`, or
   `operator` after [`POST /api/tuner/:sourceId/take-back`](#post-apitunersourceidtake-back);
   present from the plain resume until a restore resume.

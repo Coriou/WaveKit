@@ -163,7 +163,9 @@ The core writes nothing for those two fields while:
   centre.
 - a paused feed was resumed plainly (the default resume), until a restore resume, for values
   set before the pause and the declared ones: a centre or rate you set after the resume is
-  written back as usual.
+  written back as usual. While the sdr-host lists exactly one rtlmux client (the core's own
+  connection, whatever port a NAT gives it) the core takes the tuning back anyway; see
+  `resumeOutcome` in [API.md](API.md#post-apisourcesidpause-and-post-apisourcesidresume).
 
 It also writes again after evidence that the receiver moved (an untracked retune, a centre the
 receiver reports differently, a pipeline error, a sustained rate mismatch).

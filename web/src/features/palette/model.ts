@@ -261,7 +261,10 @@ export interface FeedAction {
 	readonly kind: "feed"
 	readonly op: "pause" | "resume"
 	readonly sourceId: string
-	/** Resume only: write the pre-pause tuning back (a plain resume writes none). */
+	/**
+	 * Resume only: write the pre-pause tuning back. A plain resume takes it back only while WaveKit
+	 * is the receiver's only client (the core's free-receiver rule), else leaves it as found.
+	 */
 	readonly restoreTuning?: boolean
 }
 
@@ -1360,7 +1363,7 @@ export class PaletteModel {
 					? { sub: "The last resume failed · resume again to retry" }
 					: {}),
 				action: { kind: "feed", op: "resume", sourceId: f.sourceId },
-				does: "Reconnects without changing the receiver's tuning · decoders continue",
+				does: "Reconnects · takes the tuning back only when no other client shares the receiver · decoders continue",
 				done: "Receiver resumed",
 			}
 		return {

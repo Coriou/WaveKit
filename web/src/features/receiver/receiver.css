@@ -185,6 +185,14 @@
 		gap: 6px;
 		font-size: var(--wk-fs-sm);
 	}
+	/* the source's tuningUnproven: the core's sentence, with Take the tuning back beside it */
+	.wkf-rx-unproven {
+		align-items: center;
+		gap: 10px;
+	}
+	.wkf-rx-unproven > .wk-btn {
+		flex: none;
+	}
 	.wkf-rx-dismiss {
 		flex: none;
 		display: inline-grid;
